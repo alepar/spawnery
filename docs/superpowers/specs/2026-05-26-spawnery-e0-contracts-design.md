@@ -1,57 +1,69 @@
 # Spawnery E0 — Cross-component APIs & Contracts (Design)
 
 **Bead:** `sp-9zo`
-**Status:** Draft v1 (interview complete; pending user review)
+**Status:** Draft v2 (interview + first review corrections; pending re-review)
 **Date:** 2026-05-26
 **Parent:** [System design](2026-05-26-spawnery-system-design.md)
 
-This epic defines the seams every other epic consumes. It is **design-first**: components
-are built against these contracts. Altitude is "contract spec" — purpose, shape, key fields/
-methods, and the decisions behind them — not full IDL (each component epic refines its own).
+This epic defines the seams every other epic consumes. **Design-first**: components are built
+against these contracts. Altitude = "contract spec" — purpose, shape, key fields/methods, and
+the decisions behind them — not full IDL (each component epic refines its own).
+
+> **Scope note (review v2):** storage details are owned by **E3** (only referenced here, not
+> specified). **Personalization** and **permissions/consent/egress** are **post-MVP** (see
+> `TODO.md`) and are intentionally absent from the MVP contracts below.
 
 ---
 
 ## 1. Service topology & communication
 
-**Modular-monolith control plane + per-host node agent.**
+**One central managed control plane + per-host node agents.**
 
-| Unit | Process | Contains | Deploy |
+| Unit | Cardinality / process | Contains | Where it runs |
 |---|---|---|---|
-| **Control plane (CP)** | one process (modular) | auth, CP index, catalog/registry, scheduler | compose + cloud |
-| **Node agent** | one per host | container orchestration, storage adapters, edge activation, rendezvous relay endpoint | every node |
-| **Central gateway** | one service | managed-key custody, inference routing, metering | **cloud-only** |
+| **Control plane (CP)** | **single, central, Spawnery-managed** | auth, CP index, catalog/registry, scheduler, **rendezvous relay** | Spawnery cloud only |
+| **Node agent** | one per host | container orchestration, storage adapters, node end of the relay tunnel | home machine · cloud-burst nodes · **self-host** |
+| **Central gateway** | one service | managed-key custody, inference routing, metering | Spawnery cloud only |
 | **Spawn** (per session) | container | existing agent (ACP/stdio) + **ACP-bridge** + **model sidecar** | on a node |
 | **Web/mobile client** | client | ACP client UI | — |
 
-**Seams:**
-- **Network:** HTTP/JSON (service↔service, client↔CP), JSON-RPC/ACP (client↔agent),
-  OpenAI-compatible HTTP (agent↔sidecar), HTTP (sidecar↔central gateway).
-- **In-process (inside node agent):** container-orchestration interface, storage-adapter
-  interface.
+**Centralized control, distributed execution.** Self-hosting means running **node agents that
+attach to the central CP**: your hardware runs the spawns, your repos hold the data, your model
+serves inference — the CP only does discovery/auth/scheduling and relays **E2E ciphertext** (it
+never sees content). This amends the open-core line: the *open / self-hostable* surface is the
+**node/runtime side** (node agent, container runtime, sidecar, storage adapters); the **CP is a
+managed service**, and self-host **reads the central open-App catalog** over the network.
 
-**Format conventions:** **JSON Schema** for data contracts (`spawneryapp.yml`, `spawn.yml`,
-permission/egress), **OpenAPI** for service HTTP APIs, **JSON-RPC** for ACP, **OpenAI-compatible
-HTTP** for the sidecar. **Service-to-service auth = signed service tokens.**
+**Seams:**
+- **Service-to-service: gRPC** (CP↔node — the node's persistent outbound stream; CP↔central gateway).
+- **Client↔CP:** HTTP/JSON (OpenAPI); gRPC-web optional.
+- **Client↔agent:** JSON-RPC / **ACP** (over the authenticated WebSocket from the ACP-bridge).
+- **Agent↔sidecar:** OpenAI-compatible HTTP (localhost).
+
+**Format conventions:** **gRPC/protobuf** for s2s · **JSON Schema** for data contracts
+(`spawneryapp.yml`, `spawn.yml`) · **OpenAPI/HTTP+JSON** for client-facing CP APIs · **JSON-RPC**
+for ACP · **OpenAI-compatible HTTP** for the sidecar. **s2s auth = signed service tokens.**
 
 ---
 
-## 2. Identity & addressing (threads through every contract)
+## 2. Identity & addressing
 
-- **App:** human handle **`creator/app`** (1:1 with the definition repo), backed by an
-  immutable internal **UUID** (survives renames/transfers).
-- **App version:** **semver git tag** (`v1.4.0`) resolving to an immutable **commit SHA**.
-  Stored/referenced as **`creator/app@<sha>`**, displayed as `@v1.4.0`. Auto-upgrade tracks
-  the latest reviewed tag's SHA; a pin stores a SHA.
+- **App:** human handle **`creator/app`** (1:1 with the definition repo), backed by an immutable
+  internal **UUID** (survives renames/transfers).
+- **App version:** **semver git tag** (`v1.4.0`) → immutable **commit SHA**. Stored as
+  **`creator/app@<sha>`**, displayed `@v1.4.0`. Auto-upgrade tracks the latest reviewed tag's SHA;
+  a pin stores a SHA.
 - **Spawn / User:** server-generated **UUIDs**.
-- **Data repo:** **provider-scheme URI** — `github:owner/repo`, `gdrive:<fileId>`,
-  `onedrive:<id>`, `icloud:<id>`.
+- **Data repo:** **provider-scheme URI** (`github:owner/repo`, `gdrive:<id>`, …) — owned by **E3**.
 - **Node:** UUID + advertised reachability.
 
 ---
 
 ## 3. `spawneryapp.yml` — App manifest (definition repo root)
 
-JSON-Schema-validated. Baked into the assembled `App@<sha>` image.
+JSON-Schema-validated. **Apps are agent-agnostic** — the agent runtime is chosen at spawn time;
+the manifest declares only *compatibility*. **Skills are imported by the agent through its own
+normal process** (the App ships skill files; the chosen agent loads them natively).
 
 ```yaml
 apiVersion: spawnery/v1
@@ -63,33 +75,26 @@ icon: ./icon.png
 tags: [knowledge, notes]
 visibility: open                   # open | private (private => cloud-only)
 
-agent:                             # the existing agent the runtime drives over ACP
-  ref: <agent-id>
-  version: <semver>
-tools:                             # bundled into the image (no registry in MVP)
-  - <tool-ref>                     # e.g. qmd
+agents:                            # agent-agnostic; chosen at spawn time
+  support: any                     # any | [list of agent ids]
+  exclude: []                      # optionally declared-unsupported agents
+  requiresAcp: [prompt, tools]     # required ACP capabilities
+
+tools:                             # bundled into the assembled image (no registry in MVP)
+  - qmd
 persona: ./persona.md              # system prompt
-skills:                            # instruction files
+skills:                            # instruction files; imported via the agent's normal process
   - ./skills/*.md
 
 model:                             # capability contract; catalog filters compatible models
-  requires: { toolUse: true, minContextTokens: 32000, vision: false, structuredOutput: false }
-  recommendedDefault: <model-id>
-
-storage:
-  required: true                   # false for e.g. zork
-  schema: ./storage-schema.md      # expected /data layout
-  seed: ./seed/                    # scaffold for a fresh spawn
-
-permissions:                       # declared; user consents at spawn
-  storageScope: [read, write]      # within the spawn's data repo
-  egress: [api.github.com, <provider-host>]   # domain allowlist
-
-personalization:                   # the typed "what" the user fills at spawn (JSON-Schema-ish)
-  - { key: displayName, type: string, label: "Your name", required: false }
-  - { key: topics,      type: string[], label: "Focus topics" }
+  requires: { toolUse: true, minContextTokens: 32000, vision: false }
+  recommendedDefault: deepseek-v4-flash
 
 runtime: { baseVersion: ">=1.0" }
+
+# storage:        -> owned by E3 (see TODO/E3 design)
+# personalization -> POST-MVP (TODO.md)
+# permissions     -> POST-MVP (TODO.md)
 ```
 
 ---
@@ -108,73 +113,72 @@ app:
   display: v1.4.0
   versionPolicy: auto              # auto | pinned
   pinnedSha: null
+agent:                             # chosen at spawn (must satisfy manifest agents.*)
+  id: <agent-id>
+  version: <semver>
 model:
   mode: managed                    # managed | byo
   provider: deepseek
   model: deepseek-v4-flash
   baseUrl: null                    # set for byo/self-host; key is NEVER here
-personalization: { displayName: "Alice", topics: ["ml","systems"] }
-storage:
-  binding: github:alice/my-wiki
-  schemaVersion: 1
 conversation: { persisted: true, path: .spawnery/threads/ }
-permissions:                       # snapshot of what the user consented to
-  storageScope: [read, write]
-  egress: [api.github.com, api.deepseek.com]
+storage: { binding: github:alice/my-wiki }   # shape owned by E3; optional (e.g. zork: none)
 createdAt: 2026-05-26T12:00:00Z
+# personalization / permissions -> POST-MVP (TODO.md)
 ```
 
-> **Portability payoff:** a spawn is reconstructable from `spawn.yml` alone — carry the data
-> repo to any Spawnery (self-host or cloud) and re-spawn the identical App.
+> **Portability payoff:** a spawn is reconstructable from `spawn.yml` alone — carry the data repo
+> to any Spawnery node and re-spawn the identical App with the same agent + model choices.
 
 ---
 
-## 5. Control-plane HTTP APIs (OpenAPI)
+## 5. Control-plane APIs
 
-### 5a. CP index API
-Holds `owner → spawns → {data-repo binding, storage provider, status, last-used, node assignment}`.
-- `POST /spawns` — create (writes `spawn.yml` into the new/initialized data repo; records pointer)
+### 5a. CP index API (HTTP/OpenAPI, client-facing)
+Holds `owner → spawns → {data-repo binding, status, last-used, node assignment}`.
+- `POST /spawns` — create (initializes the data repo + writes `spawn.yml`; records pointer)
 - `GET /spawns` / `GET /spawns/{id}` — list / resolve
 - `POST /spawns/{id}/session` — issue a **signed session token** + rendezvous endpoint (§9, §11)
 - `PATCH /spawns/{id}` — status; `DELETE /spawns/{id}` — clean exit (drops pointer; data stays in repo)
 
-### 5b. Catalog/registry API
-- `GET /apps` — browse/search (visibility-scoped: open public; private requires entitlement)
+### 5b. Catalog/registry API (HTTP/OpenAPI)
+- `GET /apps` — browse/search (visibility-scoped; private requires entitlement)
 - `GET /apps/{creator}/{app}` — listing + versions
 - `GET /apps/{creator}/{app}/resolve?ref=v1.4.0` → `{ sha, manifest }`
 - `POST /apps` — publish: **open = instant** (after automated checks); **private = review queue**
-- ratings / flags / takedown endpoints
-- Self-host reads the **open** index read-only.
+- ratings / flags / takedown
+- Self-host attaches to the central CP and reads the **open** index read-only.
 
 ---
 
-## 6. CP ↔ node-agent protocol (node dials out)
+## 6. CP ↔ node-agent protocol (gRPC; node dials out)
 
-Each node opens a **persistent outbound stream** to the CP (gRPC stream / WebSocket JSON-RPC)
-and authenticates with a service token. NAT-agnostic; uniform for home, self-host, and burst nodes.
+Each node opens a **persistent outbound gRPC stream** to the central CP, authenticated with a
+service token. NAT-agnostic; uniform for home, self-host, and burst nodes.
 
 - **node → CP:** `register`, `heartbeat{capacity, health}` (feeds local-first placement + burst
-  trigger), `spawnStatus{spawnId, state}`, **relay data frames** (for the rendezvous, §9).
-- **CP → node:** `startSpawn{imageRef, mounts, modelConfig, consent+egressPolicy, sessionTokenPubkey}`,
-  `stopSpawn{spawnId}`, **relay data frames**.
+  trigger), `spawnStatus{spawnId, state}`, **relay frames** (the node end of the rendezvous, §9).
+- **CP → node:** `startSpawn{imageRef, mounts, modelConfig, sessionTokenPubkey}`,
+  `stopSpawn{spawnId}`, **relay frames**.
 
 ---
 
 ## 7. ACP orchestration contract (client ↔ agent)
 
-Spawnery drives an **existing agent** over **ACP (Agent Client Protocol, JSON-RPC)**. The
-in-container **ACP-bridge** wraps the stdio agent and exposes ACP over an **authenticated
-WebSocket** (TLS terminates in the container; §9).
+Spawnery drives a **spawn-time-chosen** existing agent over **ACP (JSON-RPC)**. The in-container
+**ACP-bridge** wraps the stdio agent and exposes ACP over an **authenticated WebSocket** (TLS
+terminates in the container; §9).
 
-- **Bake vs inject:** the image **is** `App@<sha>` with persona + skills + manifest + bundled
-  tools baked in. **Injected at session start:** personalization config, model config (points
-  the agent at the sidecar), the `/data` mount as `cwd`, the consented permission set, the
-  session token.
-- **ACP surface used:** `initialize` (capability negotiation), `session/new` (cwd=`/data`,
-  injected config), `session/prompt`, `session/update` (streamed output/thoughts/tool-calls),
-  `session/request_permission` (→ the interactive consent layer, §10), `session/cancel`.
+- **Image assembly (agent-agnostic):** the assembled image = **base runtime + the chosen agent +
+  the App's bundled tools**, built per `(App@<sha>, agent)` and cached. The App's persona + skills
+  are placed where the agent expects them so it **imports skills via its normal process**.
+- **Injected at session start:** model config (points the agent at the sidecar), the `/data` mount
+  as `cwd` (storage owned by E3), the session token.
+- **ACP surface used:** `initialize`, `session/new` (cwd=`/data`), `session/prompt`,
+  `session/update` (streamed output/thoughts/tool-calls), `session/cancel`.
+  (`session/request_permission` exists in ACP but its consent/egress *enforcement* is **post-MVP**.)
 - **Agent requirements:** speaks ACP; honors `cwd`; accepts a configurable model endpoint;
-  surfaces tool calls + permission requests.
+  imports skills via its normal mechanism.
 
 ---
 
@@ -182,73 +186,51 @@ WebSocket** (TLS terminates in the container; §9).
 
 ### 8a. Container orchestration (isolation backend — pluggable)
 ```
-start(imageRef, mounts, env/secrets, egressPolicy, limits) -> handle
+start(imageRef, mounts, env/secrets, limits) -> handle
 attach/exec(handle, ...) ; status(handle) ; stop(handle)
 ```
 Backends: Docker/Podman (local) · gVisor-class (self-host/home) · microVM or
 VM-per-App+containers-per-spawn (cloud burst). Chosen per environment (concrete impls deferred).
 
 ### 8b. Storage adapter
-```
-materialize(binding, dataDir) -> working tree at /data
-persist(binding, dataDir, checkpoint)
-capabilities() -> { gitNative | blob, ... }
-```
-- **Adapters:** GitHub (App, per-repo: clone/pull + commit/push) · blob (Drive/OneDrive/iCloud:
-  materialize-from-`git bundle`, persist-as-`git bundle`).
-- **Persist policy:** agent makes **semantic commits**; runtime **persists per completed turn**
-  + **idle/exit autosave**. One-turn loss window.
-- **Conflict:** non-fast-forward detection → last-write-wins + surfaced (no auto-merge in MVP).
+Interface + persistence policy (semantic commits, persist-per-turn, blob `git bundle`, conflict
+handling) are **owned by E3**. Referenced here only as a node-agent in-process seam.
 
 ---
 
 ## 9. Model sidecar + central-gateway protocol
 
-- **Sidecar** exposes an **OpenAI-compatible** HTTP endpoint on localhost to the agent;
-  configured per spawn (provider, model, base URL, key source).
+- **Sidecar** exposes an **OpenAI-compatible** HTTP endpoint on localhost; configured per spawn
+  (provider, model, base URL, key source).
 - **Managed mode:** `sidecar → central gateway` (bearer = CP-issued short-lived token) `→ provider`.
   Gateway custodies managed keys, routes to **local DeepSeek (home)** or **cloud models (burst)**,
-  and emits **metering events** to the CP.
-- **BYO mode:** `sidecar → provider` directly. The **plaintext key is delivered by the client**
-  over the authenticated channel into the sidecar at session start; at rest it is e2e-encrypted
-  with the user's vault passphrase (CP/local stores ciphertext only).
-- **Audit hook:** when the spawn runs on **Spawnery-operated** infra (home or burst), the sidecar
-  logs conversation content to the audit store (abuse-only, disclosed). Self-host → no audit.
+  emits **metering events** to the CP.
+- **BYO mode:** `sidecar → provider` directly; the **plaintext key is delivered by the client**
+  over the authenticated channel at session start; at rest it's e2e-encrypted with the user's vault
+  passphrase (CP/local stores ciphertext only).
+- **Audit hook:** on **Spawnery-operated** infra (home or burst), the sidecar logs conversation
+  content to the audit store (abuse-only, disclosed). Self-host → no audit.
 
 ---
 
-## 10. Permission / consent / egress
-
-- **Declared** in the manifest (`permissions.storageScope`, `permissions.egress`).
-- **Consented** at spawn → snapshot written to `spawn.yml` + CP pointer.
-- **Enforced** two layers:
-  - **Hard boundary (network):** node configures a **per-spawn egress proxy/firewall** from the
-    allowlist; only model-provider + storage + declared tool domains pass; all else blocked
-    regardless of in-container behavior.
-  - **Interactive layer (ACP):** `session/request_permission` surfaces sensitive actions and
-    dynamic escalation to the client for approval.
-- **Upgrade escalation:** a new App version requesting broader scope/egress **breaks
-  auto-upgrade → re-consent** (per system-design §8).
-
----
-
-## 11. Edge-activator session protocol & rendezvous
+## 10. Session protocol & rendezvous
 
 - CP issues a **signed session token** (claims: `spawnId`, `owner`, `node`, `exp`, **bridge cert
   fingerprint**) via `POST /spawns/{id}/session`.
-- **Rendezvous:** CP is always reachable; the node holds an outbound stream (§6). Data path is
-  **LAN-direct when reachable**, else **E2E-encrypted relay** over the node's outbound tunnel —
-  CP pipes **opaque ciphertext** (TLS terminates at the in-container ACP-bridge; the client pins
-  the bridge cert via the token fingerprint). **P2P/hole-punching deferred.** BYO-ingress
-  (Tailscale/Cloudflare Tunnel) bypasses the relay.
-- **Wake-from-zero:** if the target spawn is cold, the CP instructs the node to `startSpawn`,
-  then establishes the path. Web and mobile are identical ACP clients.
+- **Rendezvous lives in the CP.** The CP is always reachable; the node holds an outbound gRPC
+  stream (§6). Data path = **LAN-direct when reachable**, else **E2E-encrypted relay through the
+  CP** over the node's outbound stream — the CP pipes **opaque ciphertext** (TLS terminates at the
+  in-container ACP-bridge; client pins the bridge cert via the token fingerprint). **P2P deferred.**
+  BYO-ingress (Tailscale/Cloudflare Tunnel) bypasses the relay.
+- **Wake-from-zero:** if the target spawn is cold, CP instructs the node to `startSpawn`, then
+  establishes the path. Web + mobile are identical ACP clients.
 
 ---
 
-## 12. Open items deferred out of E0
-P2P/hole-punching transport · third-party plugin/extension registry (MCP) · richer conflict
-merge · multi-version concurrent sessions on one spawn · catalog federation for self-host.
+## 11. Deferred out of E0 (MVP)
+Storage specifics → **E3** · **personalization** → post-MVP (`TODO.md`) · **permissions / consent /
+egress enforcement** → post-MVP (`TODO.md`) · P2P/hole-punching · third-party plugin registry (MCP)
+· richer conflict merge · multi-version concurrent sessions on one spawn.
 
 ---
 
@@ -258,10 +240,15 @@ merge · multi-version concurrent sessions on one spawn · catalog federation fo
 |---|---|---|
 | E0.1 | Service topology | Modular-monolith CP + per-host node agent + cloud-only central gateway |
 | E0.2 | App/version identity | `creator/app` handle (UUID-backed) + semver tag → commit SHA |
-| E0.3 | Contract formats | JSON Schema / OpenAPI / JSON-RPC(ACP) / OpenAI-compatible; signed service tokens |
-| E0.4 | CP↔node control | Node dials out, holds persistent stream; outbound-only |
-| E0.5 | Bake vs inject | Definition baked into `App@sha` image; per-spawn config/model/data/perms/token injected |
+| E0.3 | Contract formats | gRPC (s2s) · JSON Schema (data) · OpenAPI (client) · JSON-RPC (ACP) · OpenAI-compatible (sidecar) |
+| E0.4 | CP↔node control | Node dials out, persistent outbound **gRPC** stream |
+| E0.5 | Bake vs inject | Image = base + chosen agent + bundled tools (per App@sha×agent); skills via agent's native import; model/data/token injected |
 | E0.6 | ACP transport | In-container ACP-bridge over authenticated WebSocket; client = ACP client |
-| E0.7 | Rendezvous | CP rendezvous; LAN-direct else E2E relay; P2P deferred; BYO-ingress bypass |
-| E0.8 | Persistence | Semantic commits + persist per completed turn + idle/exit autosave |
-| E0.9 | Permission/egress | Network-level per-spawn egress proxy (hard) + ACP request_permission (interactive) |
+| E0.7 | Rendezvous | **In the CP**; LAN-direct else E2E relay through CP; P2P deferred; BYO-ingress bypass |
+| E0.8 | Persistence | (Owned by E3) semantic commits + persist per turn + idle/exit autosave |
+| E0.9 | Permission/egress | **Post-MVP** (TODO.md) |
+| E0.10 | CP cardinality | **Single central managed instance**; self-host = node agents attaching to it |
+| E0.11 | Rendezvous relay owner | **CP** |
+| E0.12 | s2s comms | **gRPC** |
+| E0.13 | Agent model | **Agent-agnostic** — chosen at spawn; manifest declares compatibility; skills native-import |
+| E0.14 | Scope trim | Storage → E3; personalization + permissions → post-MVP |

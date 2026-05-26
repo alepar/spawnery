@@ -22,7 +22,7 @@ Two non-negotiable principles:
 
 | | Self-hosted edition | Cloud edition |
 |---|---|---|
-| **Delivery** | `docker compose` on a user's server or Mac | One-click SaaS, zero setup |
+| **Delivery** | `docker compose` node agent(s) on a user's server or Mac, **attached to the central CP** | One-click SaaS, zero setup |
 | **Apps** | Open Apps only | Open **and** private Apps |
 | **Inference** | BYO keys, or call Spawnery's managed central gateway | BYO keys, or managed |
 | **Audit** | None (their box) | Content audited for abuse (disclosed) |
@@ -34,10 +34,15 @@ The **cloud edition** splits into two subparts, invisible to customers:
 - **(B) Cloud burst** — when (A) saturates, the scheduler **auto-provisions cloud nodes**
   for inference *and* spawn containers. Same artifacts run unchanged.
 
-**Open-core constraint (architectural):** the *same components* must run as a single-box
-compose stack **and** as a distributed cloud system. No cloud-only assumptions may be baked
-into the core. Cloud-only services are limited to: managed-inference gateway (billed),
-private-App execution, marketplace payments/rev-share, and the burst orchestrator.
+**Open-core constraint (architectural):** the **control plane is a single, central,
+Spawnery-managed service** (auth, index, catalog, scheduler, rendezvous). The *open /
+self-hostable* surface is the **node/runtime side** — node agent, container runtime, model
+sidecar, storage adapters — which must run identically as a single-box `docker compose` stack
+and on cloud-burst nodes. **Self-hosting = running node agents that attach to the central CP**
+(your hardware/repos/model; the CP relays only E2E ciphertext and never sees content).
+Beyond the CP, cloud-only: managed-inference gateway (billed), private-App execution,
+marketplace payments/rev-share, and the burst orchestrator. See
+[E0 contracts](2026-05-26-spawnery-e0-contracts-design.md) §1.
 
 ---
 
@@ -98,30 +103,28 @@ Clean exit *and* clean re-entry.
 
 ## 4. Hosting topology
 
-- **One control plane + node agents.** The scheduler places spawns **local-first** and
-  **auto-bursts to cloud** when the home machine saturates: it provisions a cloud VM running
-  the same node agent; the identical OCI image runs unchanged.
+- **One central control plane + node agents that dial out to it.** Node agents (home,
+  self-host, burst) hold a persistent **outbound gRPC stream** to the central CP — NAT-agnostic,
+  no inbound reach required. The scheduler places spawns **local-first** and **auto-bursts to
+  cloud** when the home machine saturates: it provisions a cloud VM running the same node agent;
+  the identical OCI image runs unchanged.
 - **Placement is decided at spawn start** (so the sidecar knows whether to audit). Mid-session
   migration is out of scope.
-- **Same components compose locally and scale out in cloud** — the open-core constraint (§1).
+- **Connection = CP rendezvous + E2E relay** (LAN-direct when reachable). See [E0](2026-05-26-spawnery-e0-contracts-design.md) §10.
 
 ```
-                 ┌─────────────────────────────────────────────┐
-   Browser ──────┤ Edge activator (auth, wake-from-zero, TLS    │
-   (ACP, direct) │  pass-through to the specific container)     │
-                 └───────────────┬─────────────────────────────┘
-                                 │ direct client→container (ACP)
-   ┌─────────────┐        ┌──────┴───────────────────────────┐
-   │ Control     │ index/ │  Spawn container (ephemeral)      │
-   │ plane       │ route  │   - existing agent (ACP server)   │
-   │ - auth      ├────────┤   - bundled tools                 │
-   │ - catalog   │        │   - mounts /data (git working     │
-   │ - scheduler │        │     tree via storage adapter)     │
-   │ - CP index  │        │   - model sidecar (localhost)─────┼──▶ DeepSeek (home)
-   └─────────────┘        └───────────────────────────────────┘     / central gateway
-        │  burst                                                      / BYO provider
-        ▼
-   Cloud node agents (provisioned on demand)
+   Browser / mobile (ACP client)
+        │  1) session token + rendezvous (HTTP)      2) ACP over E2E WebSocket
+        ▼                                               (TLS terminates at the bridge)
+   ┌──────────────┐    persistent outbound   ┌───────────────────────────────────┐
+   │ Central CP   │    gRPC + E2E relay       │  Spawn container (ephemeral)       │
+   │ - auth       │◀─────────────────────────│   - ACP-bridge (TLS, authn)        │
+   │ - catalog    │                          │   - existing agent (ACP/stdio)     │
+   │ - scheduler  │──────────────────────────▶│  - bundled tools                  │
+   │ - CP index   │      startSpawn           │   - /data mount (E3)               │
+   │ - rendezvous │                          │   - model sidecar (localhost)──────┼─▶ DeepSeek (home)
+   └──────────────┘                          └───────────────────────────────────┘   / central gw
+   (single, managed)        on a node agent: home / self-host / burst                  / BYO provider
 ```
 
 ---
@@ -216,12 +219,15 @@ Clean exit *and* clean re-entry.
 
 ## 10. Client / connection
 
-- **Direct client→container over ACP**, through a thin **edge activator** that:
-  1. authenticates the signed session token,
-  2. **wakes the scaled-to-zero container**,
-  3. proxies with **TLS pass-through** — plaintext terminates **at the container**, not at a
-     Spawnery relay.
-- On self-host / local this collapses to localhost.
+*(Refined in [E0](2026-05-26-spawnery-e0-contracts-design.md) §10 — CP rendezvous + E2E relay.)*
+
+- **CP is the rendezvous.** Client gets a signed session token from the central CP, which also
+  triggers **wake-from-zero** (`startSpawn` over the node's outbound gRPC stream).
+- **Data path:** **LAN-direct when reachable**, else an **E2E-encrypted relay through the CP**
+  over the node's outbound stream — the CP pipes **opaque ciphertext**; **TLS terminates at the
+  in-container ACP-bridge** (client pins the bridge cert via the token fingerprint).
+- **ACP over an authenticated WebSocket**; web + mobile are identical ACP clients. P2P deferred;
+  BYO-ingress (Tailscale/Cloudflare Tunnel) bypasses the relay.
 
 ---
 
