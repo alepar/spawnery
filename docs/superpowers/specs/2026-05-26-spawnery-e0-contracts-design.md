@@ -230,7 +230,8 @@ handling) are **owned by E3**. Referenced here only as a node-agent in-process s
 ## 11. Deferred out of E0 (MVP)
 Storage specifics → **E3** · **personalization** → post-MVP (`TODO.md`) · **permissions / consent /
 egress enforcement** → post-MVP (`TODO.md`) · P2P/hole-punching · third-party plugin registry (MCP)
-· richer conflict merge · multi-version concurrent sessions on one spawn.
+· richer conflict merge · multi-version concurrent sessions on one spawn · **self-hosted CP**
+(own control plane; loses hosted web-UI access) → post-MVP.
 
 ---
 

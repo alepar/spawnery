@@ -17,3 +17,9 @@ Items deliberately deferred past the MVP. Each should graduate into its own epic
 - Re-consent on App-version permission escalation (ties into auto-upgrade guardrails).
 - Deferred from E0 §9/§10. MVP relies on first-party launch Apps + open-source inspectability
   + audit (on Spawnery-operated infra) instead of enforced per-spawn permissions.
+
+## Self-hosted control plane (own CP)
+- Allow running your own CP instance (not just node agents attaching to the central CP).
+- **Tradeoff:** a self-hosted CP cannot be driven from Spawnery's hosted web UI (the UI points
+  at the central CP); you'd need your own UI or a way to repoint the client.
+- MVP is central-CP only; this is deferred.
