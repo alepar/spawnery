@@ -80,7 +80,7 @@ agents:                            # agent-agnostic; chosen at spawn time
   exclude: []                      # optionally declared-unsupported agents
   requiresAcp: [prompt, tools]     # required ACP capabilities
 
-tools:                             # bundled into the assembled image (no registry in MVP)
+tools:                             # from the per-agent base's common toolset + App-shipped scripts (mounted); no per-App build (E1 §2)
   - qmd
 persona: ./persona.md              # system prompt
 skills:                            # instruction files; imported via the agent's normal process
@@ -169,9 +169,10 @@ Spawnery drives a **spawn-time-chosen** existing agent over **ACP (JSON-RPC)**. 
 **ACP-bridge** wraps the stdio agent and exposes ACP over an **authenticated WebSocket** (TLS
 terminates in the container; §9).
 
-- **Image assembly (agent-agnostic):** the assembled image = **base runtime + the chosen agent +
-  the App's bundled tools**, built per `(App@<sha>, agent)` and cached. The App's persona + skills
-  are placed where the agent expects them so it **imports skills via its normal process**.
+- **Image assembly (agent-agnostic) — see [E1](2026-05-27-spawnery-e1-runtime-core-design.md) §2:**
+  one **base image per agent** (`agent + ACP-bridge + common toolset`). At spawn start the node
+  **mounts** the `App@<sha>` definition (persona + skills + repo-shipped scripts) read-only at
+  `/app`; the agent **imports skills via its native process**. **No per-`(App,agent)` build.**
 - **Injected at session start:** model config (points the agent at the sidecar), the `/data` mount
   as `cwd` (storage owned by E3), the session token.
 - **ACP surface used:** `initialize`, `session/new` (cwd=`/data`), `session/prompt`,
@@ -243,7 +244,7 @@ egress enforcement** → post-MVP (`TODO.md`) · P2P/hole-punching · third-part
 | E0.2 | App/version identity | `creator/app` handle (UUID-backed) + semver tag → commit SHA |
 | E0.3 | Contract formats | gRPC (s2s) · JSON Schema (data) · OpenAPI (client) · JSON-RPC (ACP) · OpenAI-compatible (sidecar) |
 | E0.4 | CP↔node control | Node dials out, persistent outbound **gRPC** stream |
-| E0.5 | Bake vs inject | Image = base + chosen agent + bundled tools (per App@sha×agent); skills via agent's native import; model/data/token injected |
+| E0.5 | Bake vs inject | **Per-agent base image** + mounted App definition (E1 §2); skills via agent's native import; model/data/token injected |
 | E0.6 | ACP transport | In-container ACP-bridge over authenticated WebSocket; client = ACP client |
 | E0.7 | Rendezvous | **In the CP**; LAN-direct else E2E relay through CP; P2P deferred; BYO-ingress bypass |
 | E0.8 | Persistence | (Owned by E3) semantic commits + persist per turn + idle/exit autosave |
