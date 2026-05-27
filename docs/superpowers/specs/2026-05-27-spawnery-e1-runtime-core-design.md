@@ -27,9 +27,9 @@ sidecar on `localhost`):
  └── sidecar container = model gateway (OpenAI-compatible; config injected; BYO key client-delivered)
 ```
 
-- The **ACP-bridge** spawns the agent as a stdio subprocess and exposes ACP over an authenticated
-  WebSocket (TLS terminates here). It lives **in the base image** (must be co-located to speak the
-  agent's stdio).
+- The **ACP-bridge** spawns the agent as a stdio subprocess and exposes ACP to the **node over
+  loopback** (the node terminates the client E2E channel and forwards; E0 §10). It lives **in the
+  base image** (must be co-located to speak the agent's stdio).
 - The **sidecar** is a separate Spawnery container (matches "model gateway is a sidecar container").
 
 ---
@@ -67,10 +67,11 @@ optimization). In-memory agent state never survives idle — continuity is via t
    gateway token, or BYO→awaits client-delivered key).
 5. Start the **base** container; the ACP-bridge launches the agent (stdio), points it at the
    sidecar on `localhost`, and the agent imports skills from `/app`.
-6. Bridge generates a **per-spawn ephemeral TLS cert**; reports its **fingerprint** to the CP over
-   the node stream. CP issues the **session token** embedding the fingerprint.
-7. Client connects via rendezvous (LAN-direct or E2E relay, E0 §10), **pins the bridge cert**, and
-   the ACP session begins → **ACTIVE**.
+6. Client + node establish the **per-session E2E channel** (E0 §10): client fetches the CP-vended
+   **node pubkey** + presents the CP-issued **session token** (authorizes the owner); key agreement
+   (node-static + client-ephemeral) → per-session symmetric key.
+7. ACP traffic + any secrets flow **AEAD-encrypted over that channel, CP-relayed (opaque)**; the
+   **node decrypts and forwards to the in-container agent over loopback** → **ACTIVE**.
 
 **Resume:** a later message on an idle spawn re-runs STARTING; the agent reloads the prior thread
 from `/data` to restore context.

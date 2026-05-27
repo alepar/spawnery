@@ -32,19 +32,18 @@ The model sidecar, the central gateway (managed), the BYO sealed-key path, and i
 
 ---
 
-## 2. BYO key — sealed-to-node, CP-relayed
+## 2. BYO key — over the per-session E2E channel
 
-- Each **node autogenerates a keypair at startup**; enrolls its **public key with the CP** (part
-  of authenticated node enrollment, E1 §6).
-- **CP vends the node's public key to the client.** The client **seals the BYO key to the node
-  pubkey**; the sealed blob is **relayed (opaque) through the CP** to the node; the **node kubelet
-  unseals and injects** the key into the sidecar (BYO mode).
-- Client↔node always via the **CP relay** (handles self-hosted-node NAT).
-- **Guarantee:** the **CP never sees plaintext** (only relays sealed bytes + vends pubkeys).
-  Self-hosted node → nothing leaves your hardware. Spawnery-operated cloud node → the node
-  transiently unseals in memory and content is audited for abuse (disclosed).
-- **Trust:** client trusts the CP-vended node key; a self-hoster can pin their node key
-  out-of-band (out-of-band verification → post-MVP). Generalizes to any client-supplied secret.
+Secrets are **not** sealed per-blob; they ride the **per-session E2E channel** (canonical in
+[E0 §10](2026-05-26-spawnery-e0-contracts-design.md)): node static keypair (pubkey enrolled +
+CP-vended) + client ephemeral key → per-session symmetric key; CP relays opaque ciphertext.
+
+- At session start the client sends the decrypted BYO key as an **AEAD-encrypted control message**
+  over that channel; the **node decrypts and injects** it into the sidecar (BYO mode).
+- **Guarantee:** the **CP never sees plaintext** (relays ciphertext + vends node pubkey).
+  Self-hosted node → nothing leaves your hardware. Spawnery-operated cloud node → the node handles
+  it transiently in memory and content is audited for abuse (disclosed).
+- **Trust:** client trusts the CP-vended node key; a self-hoster can pin out-of-band (post-MVP).
 
 ---
 
