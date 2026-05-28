@@ -92,7 +92,11 @@ model:                             # capability contract; catalog filters compat
 
 runtime: { baseVersion: ">=1.0" }
 
-# storage:        -> owned by E3 (see TODO/E3 design)
+storage:                           # spec'd by E3 (2026-05-28-spawnery-e3-storage-design.md §8)
+  required: true                   # false for storage-less apps (e.g. zork)
+  schema: ./storage-schema.md      # documents the layout under /data
+  seed: ./seed/                    # scaffold dir copied on first materialize
+
 # personalization -> POST-MVP (TODO.md)
 # permissions     -> POST-MVP (TODO.md)
 ```
