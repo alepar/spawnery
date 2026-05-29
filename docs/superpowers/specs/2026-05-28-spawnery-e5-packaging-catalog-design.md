@@ -38,13 +38,16 @@ and the **open vs private** gate (review *content* spec'd in **E8**).
 
 - **No webhook, no `publish` action, no CLI.** Creators just **push semver git tags** to their
   definition repos.
-- **CP polls** at two moments:
-  1. **At `createSpawn`** (and on session resume when version-policy is `auto`): hit the GitHub
-     API to find the **latest semver tag** on the definition repo, resolve to a **commit SHA**,
-     send **that SHA** to the node for checkout. All versioning ambiguity resolved CP-side.
-  2. **Periodic refresh** for registered Apps (catalog freshness for browse views).
+- **CP resolves from a cache, not a live call on the hot path (roast `sp-7fj`):**
+  1. A **periodic refresh** job polls registered Apps' latest semver tag → SHA and stores it
+     (`latestKnownSha` in the catalog index, §3a) with a short TTL.
+  2. **`createSpawn` / auto-resume reads the cached SHA** — it does **not** block on a synchronous
+     GitHub call. On a cache miss it resolves once and caches; if **GitHub is down or
+     rate-limited** (installation limit ~5000/hr, shared with clone/push), fall back to the
+     **last-known-good SHA** so spawns still start. This keeps GitHub latency + outages off the
+     spawn-start path.
 - **Webhook-driven push discovery** (creator installs the Spawnery GitHub App on the
-  definition repo; GitHub pushes events) is **post-MVP**.
+  definition repo; GitHub pushes events) is **post-MVP** and removes polling entirely.
 
 ---
 
@@ -57,6 +60,10 @@ and the **open vs private** gate (review *content* spec'd in **E8**).
 - **Ad-hoc URL spawn (no listing):** any user can paste a **public GitHub URL** at spawn-create;
   CP fetches + validates the manifest on demand and proceeds. Useful for power users / sharing,
   but the App doesn't appear in the catalog and accumulates no metadata.
+  - **Abuse guard (roast `sp-iui`/SSRF):** ad-hoc fetches are **per-user rate-limited**,
+    restricted to validated **`github.com` hosts only** (no arbitrary URLs → no SSRF probe), and
+    the **scanner (E8 §5) must gate the manifest before any ad-hoc spawn executes** — same bar as
+    a registered App, just without listing.
 - **Private Apps require registration**: closed source ⇒ Spawnery's GitHub App must be installed
   on the repo so the CP can access it, AND human review is required before listing/sale (§5).
 

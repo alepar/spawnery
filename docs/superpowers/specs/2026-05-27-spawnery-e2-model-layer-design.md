@@ -97,7 +97,7 @@ premium-model gating · broad provider matrix · embeddings/vector endpoints (sy
 | # | Decision | Choice |
 |---|---|---|
 | E2.1 | Translation/routing | Split: sidecar translates + direct-calls provider for BYO; managed → central gateway (translation + key + metering + routing) |
-| E2.2 | BYO key delivery | Sealed to the **node** pubkey, relayed opaque via CP, node unseals + injects; CP never sees plaintext |
+| E2.2 | BYO key delivery | Delivered as an **AEAD control message over the per-session E2E channel** (E0 §10); node decrypts + injects into the sidecar; CP relays opaque, never sees plaintext. (Supersedes the earlier per-blob "seal-to-node" framing.) |
 | E2.3 | Managed keys (asserted) | Central gateway only; sidecar auths with CP-issued spawn-scoped short-lived token |
 | E2.4 | Local DeepSeek (asserted) | Behind an OpenAI-compatible server; a provider endpoint to the gateway |
 | E2.5 | Routing (asserted) | Managed → local DeepSeek (home) else cloud, per E1 GPU-burst signal |

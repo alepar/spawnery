@@ -107,10 +107,18 @@ Each is a **definition repo** (per E5 §1) targeting the MVP agent. Apps are ope
 - **All four are "files in `/data`" apps** — they differ only in persona, skills, and schema. This
   is the intended proof: the platform expresses a game, a knowledge base, and two coaches with
   **one agent + one storage model + manifest differences only**.
-- **Interaction-pattern risk (flagged):** a coding-style agent is tuned for "do a file task,"
-  not necessarily long conversational/coaching turns. Persona + skills steer it; if the chosen
-  agent resists conversational use, that's a finding for the agent spike (§1) or a prompt-design
-  iteration — surface it in roasting/validation, don't assume it works.
+- **Interaction-pattern risk → explicit pre-launch gate (roast `sp-pgw`):** a coding-style agent is
+  tuned to "do a file task," not long conversational/coaching turns. The habit/goal coach is the
+  *worst* fit (pure tone/relationship) and the one most likely to define the emotional brand; the
+  interview coach is the best fit (it's a structured task). **Acceptance gate:** dogfood the habit
+  coach with real (non-technical) users for ~2 weeks and score "felt like a coach vs. a robot doing
+  file ops." **Be willing to drop the habit coach from launch** rather than ship an uncanny flagship
+  coach. Do not treat persona-steering as assumed-working.
+- **Free-model compatibility gate (roast `sp-iui`/F6):** the demo MVP runs **local DeepSeek only**
+  (no model choice). Each app's `model.requires` **must be satisfiable by the free DeepSeek** — in
+  particular the interview coach's "larger context window" must not silently filter the only
+  available model out, or it's a bait-and-switch. **Verify all four apps run acceptably on the demo
+  DeepSeek before launch.**
 - **Repo hygiene:** each definition repo follows the E5 §1 layout (`spawneryapp.yml`, `persona.md`,
   `skills/`, `seed/`, `icon.png`, `README.md`) + semver tags.
 

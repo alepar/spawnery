@@ -146,7 +146,10 @@ createdAt: 2026-05-26T12:00:00Z
 
 ### 5a. CP index API (HTTP/OpenAPI, client-facing)
 Holds `owner → spawns → {data-repo binding, status, last-used, node assignment}`.
-- `POST /spawns` — create (initializes the data repo + writes `spawn.yml`; records pointer)
+- `POST /spawns` — create. The CP **creates the storage destination** + records the binding, then
+  dispatches `createSpawn` to a placed node which **scaffolds the repo + writes `spawn.yml` +
+  pushes** (the *node* writes `spawn.yml`, per [E3 §4](2026-05-28-spawnery-e3-storage-design.md), not
+  the CP). Returns **async** with status `provisioning` → `ready`; the client polls or subscribes.
 - `GET /spawns` / `GET /spawns/{id}` — list / resolve
 - `POST /spawns/{id}/session` — issue a **signed session token** + rendezvous endpoint (§9, §11)
 - `PATCH /spawns/{id}` — status; `DELETE /spawns/{id}` — clean exit (drops pointer; data stays in repo)
@@ -167,17 +170,26 @@ Each node opens a **persistent outbound gRPC stream** to the central CP, authent
 service token. NAT-agnostic; uniform for home, self-host, and burst nodes.
 
 - **node → CP:** `register`, `heartbeat{capacity, health}` (feeds local-first placement + burst
-  trigger), `spawnStatus{spawnId, state}`, **relay frames** (the node end of the rendezvous, §9).
-- **CP → node:** `startSpawn{imageRef, mounts, modelConfig, sessionTokenPubkey}`,
-  `stopSpawn{spawnId}`, **relay frames**.
+  trigger), `spawnStatus{spawnId, state}`, `refreshStorageToken{spawnId, provider}` (E3 §3),
+  **relay frames** (the node end of the rendezvous, §9).
+- **CP → node — two distinct verbs:**
+  - `createSpawn{appRef@sha, agent, mounts, modelConfig, storageBinding+token}` — **first-time
+    provisioning**: clone empty destination, scaffold from `storage.seed`, write `spawn.yml`, push.
+  - `startSpawn{spawnId, imageRef, mounts, modelConfig}` — **wake an existing spawn**: materialize
+    `/data` + run the pod.
+  - `stopSpawn{spawnId}`, **relay frames**.
+- Session tokens are verified by the node **offline** using the CP signing pubkey distributed at
+  enrollment ([E4 §7](2026-05-28-spawnery-e4-identity-secrets-design.md)) — **not** carried per
+  `startSpawn` (the old `sessionTokenPubkey` field is dropped).
 
 ---
 
 ## 7. ACP orchestration contract (client ↔ agent)
 
 Spawnery drives a **spawn-time-chosen** existing agent over **ACP (JSON-RPC)**. The in-container
-**ACP-bridge** wraps the stdio agent and exposes ACP over an **authenticated WebSocket** (TLS
-terminates in the container; §9).
+**ACP-bridge** wraps the stdio agent and exposes ACP to the **node over loopback**; the **node**
+terminates the per-session E2E channel (§10) and forwards. (The bridge does **not** terminate a
+separate client-facing TLS — superseded by the §10 node-terminates model.)
 
 - **Image assembly (agent-agnostic) — see [E1](2026-05-27-spawnery-e1-runtime-core-design.md) §2:**
   one **base image per agent** (`agent + ACP-bridge + common toolset`). At spawn start the node

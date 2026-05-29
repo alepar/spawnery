@@ -29,8 +29,11 @@ MVP in their absence (first-party launch apps + inspectable source + audit + sca
   **Self-host → no audit. BYO-on-cloud → still audited** (E0 §9 / E2 §4).
 - **What:** **full prompt + response content**, keyed per-spawn, with metadata (spawnId, owner,
   app@sha, model, ts, token counts).
-- **Storage:** dedicated **audit store**, **encrypted at rest**, separate from user data and from
-  the operational DB.
+- **Storage:** dedicated **audit store**, **encrypted at rest** (key in **KMS**, rotated; not the
+  operational DB), separate from user data. **Sizing/ops (roast `sp-iui`):** full-content per turn
+  grows fast — size + budget it, and the purge job must be **monitored/alerted** (a stuck purge is
+  a cost *and* compliance incident). The break-glass **access log is append-only / tamper-evident**.
+  Confirm the **BYO key never lands in audited content** (scrub).
 - **Retention:** **short TTL (~30 days) then auto-purge.** TTL is a config constant.
 - **Access:** **break-glass only** — no routine/automated read of content; admin access is
   itself logged (who/when/why), reviewable. Not used for product features, training, or
@@ -47,6 +50,11 @@ MVP in their absence (first-party launch apps + inspectable source + audit + sca
 - Drives **live enforcement** (§4) and feeds abuse signals (§3).
 - The same classifier model/infra backs the **App-review scanner** (§5) — one safety-judgment
   capability, two entry points.
+- **Don't burn the inference GPU (roast `sp-iui`):** the classifier must **not** run on the same
+  scarce DeepSeek GPU that serves the demo (it would ~double GPU load + add per-turn latency). Run
+  it on **CPU / a small dedicated model**, and make it **async with a fast path** — only the
+  "live block on severe categories" tier (§4) needs to be inline/blocking; everything else scores
+  out-of-band.
 
 ---
 

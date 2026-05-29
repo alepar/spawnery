@@ -43,12 +43,15 @@ The **cloud edition** splits into two subparts, invisible to customers:
 **Open-core constraint (architectural):** the **control plane is a single, central,
 Spawnery-managed service** (auth, index, catalog, scheduler, rendezvous). The *open /
 self-hostable* surface is the **node/runtime side** — node agent, container runtime, model
-sidecar, storage adapters — which must run identically as a single-box `docker compose` stack
-and on cloud-burst nodes. **Self-hosting = running node agents that attach to the central CP**
-(your hardware/repos/model; the CP relays only E2E ciphertext and never sees content).
-Beyond the CP, cloud-only: managed-inference gateway (billed), private-App execution,
-marketplace payments/rev-share, and the burst orchestrator. See
-[E0 contracts](2026-05-26-spawnery-e0-contracts-design.md) §1.
+sidecar, storage adapters — packaged as a `docker compose` stack that runs the same on a
+user's box and on cloud-burst nodes. **Self-hosting = running node agent(s) that attach to the
+central CP** (your hardware/repos/model). Note this is *not* a standalone stack: a self-hosted
+node is **inert without the central CP** (it depends on the CP for enrollment, session tokens,
+app/version resolution, and rendezvous) — running your **own** CP is post-MVP and loses hosted
+web-UI access. The CP relays only E2E ciphertext and never sees *conversation* content; it does
+hold scoped storage tokens to your connected repo (see §5). Beyond the CP, cloud-only:
+managed-inference gateway (billed), private-App execution, marketplace payments/rev-share, and
+the burst orchestrator. See [E0 contracts](2026-05-26-spawnery-e0-contracts-design.md) §1.
 
 ---
 
@@ -74,9 +77,14 @@ marketplace payments/rev-share, and the burst orchestrator. See
 - **Control plane** holds only a **thin index/pointer**: `owner → spawns → repo location +
   storage-provider binding + status/last-used`. Just enough to find and route to a spawn.
 
-**Consequence:** a spawn is fully reconstructable from the data repo alone. A user can carry
-their data repo to *any* Spawnery — self-host or cloud — and **re-spawn the identical App**.
-Clean exit *and* clean re-entry.
+**Consequence (and its limits):** your **content** is fully portable — plain files in your own
+git repo, leave anytime. The **spawn configuration** (`spawn.yml`) is reconstructable, but
+re-spawning is not unconditionally portable: (a) there is currently **one central CP**, so
+"re-spawn elsewhere" means re-spawn within Spawnery's managed control plane (own-CP is post-MVP);
+and (b) `spawn.yml` references a *creator's* definition repo by `creator/app@<sha>` — if that App
+is deleted or delisted, the spawn can't be reconstructed unless the definition was snapshotted.
+So: **content = truly portable; the running spawn = Spawnery-hosted.** (Mitigation — snapshot the
+App definition into the user's repo at spawn time — is post-MVP.)
 
 ---
 
@@ -117,20 +125,29 @@ Clean exit *and* clean re-entry.
 - **Placement is decided at spawn start** (so the sidecar knows whether to audit). Mid-session
   migration is out of scope.
 - **Connection = CP rendezvous + E2E relay** (LAN-direct when reachable). See [E0](2026-05-26-spawnery-e0-contracts-design.md) §10.
+- **Resilience seams (roast `sp-jf7`/`sp-9um`).** The single CP and single home machine are
+  single points of failure. Full design: the **relay is a stateless, horizontally-scaled tier**
+  (separate from control logic) with reconnect-without-re-auth; **CP state is backed up /
+  replicated** (PITR) and provider secrets live in **KMS**; the home machine has **dead-node →
+  cloud failover** (not just overload → burst). **Demo MVP** accepts the singletons behind a
+  **capped/waitlisted beta + status page**, but still requires **CP-state backup** so a box loss
+  isn't unrecoverable. See [Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md) §6.
 
 ```
    Browser / mobile (ACP client)
-        │  1) session token + rendezvous (HTTP)      2) ACP over E2E WebSocket
-        ▼                                               (TLS terminates at the bridge)
+        │  1) session token + rendezvous (HTTP)   2) ACP, E2E-encrypted to the NODE
+        ▼                                            (node decrypts, forwards to agent on loopback)
    ┌──────────────┐    persistent outbound   ┌───────────────────────────────────┐
-   │ Central CP   │    gRPC + E2E relay       │  Spawn container (ephemeral)       │
-   │ - auth       │◀─────────────────────────│   - ACP-bridge (TLS, authn)        │
-   │ - catalog    │                          │   - existing agent (ACP/stdio)     │
-   │ - scheduler  │──────────────────────────▶│  - bundled tools                  │
-   │ - CP index   │      startSpawn           │   - /data mount (E3)               │
-   │ - rendezvous │                          │   - model sidecar (localhost)──────┼─▶ DeepSeek (home)
-   └──────────────┘                          └───────────────────────────────────┘   / central gw
-   (single, managed)        on a node agent: home / self-host / burst                  / BYO provider
+   │ Central CP   │    gRPC + E2E relay       │  Node agent  ── spawn pod (ephemeral)
+   │ - auth       │◀─────────────────────────│   - ACP-bridge (ACP↔agent on loopback)
+   │ - catalog    │   (relays opaque bytes)  │   - existing agent (ACP/stdio)     │
+   │ - scheduler  │──────────────────────────▶   - common toolset + /data mount (E3)
+   │ - CP index   │      startSpawn           │   - model sidecar (localhost)──────┼─▶ DeepSeek (home)
+   │ - rendezvous │                          └───────────────────────────────────┘   / central gw
+   └──────────────┘     node: home / self-host / burst                                / BYO provider
+   (single, managed)
+   NOTE: the per-session E2E channel terminates at the NODE (not the bridge). DEMO MVP uses plain
+   TLS client↔CP (no E2E channel) — everything Spawnery-operated + audited. See demo-mvp-scope.
 ```
 
 ---
@@ -155,6 +172,12 @@ Clean exit *and* clean re-entry.
   non-fast-forward / last-write-wins conflict detection, not real merge.
 - **Conversation history** is **optionally** committed to the data repo so it travels with
   the user (pointer recorded in `spawn.yml`).
+- **Honest custody note (roast `sp-gl2`):** with the one-click GitHub-App grant, the **CP holds
+  the signer and can mint scoped read/write tokens to your connected repo** server-side. "Your
+  data is yours" means *your content lives in your account in open formats you can take and
+  delete* — **not** that Spawnery is technically unable to touch it. A **user-visible
+  storage-access log** (every token mint + push, with reason) is the honesty mechanism; ship it
+  with storage. User-held / E2E-sealed storage creds (so the CP genuinely can't) are post-MVP.
 
 ---
 
@@ -181,10 +204,14 @@ Clean exit *and* clean re-entry.
   encryption. One account type; "creator" is a role. *Deferred:* passkeys + WebAuthn-PRF.
 - **BYO secret delivery (cloud):** the key is encrypted client-side with the vault passphrase;
   the control plane stores **only ciphertext it cannot read** (or it lives in client local
-  storage). On connect, the **client decrypts locally and hands the plaintext key directly to
-  the sidecar** over the direct channel. The CP never holds plaintext. (This is the payoff of
-  direct client→container.)
+  storage). On connect, the **client decrypts locally and sends the key over the per-session E2E
+  channel to the node, which injects it into the sidecar** (the CP relays only opaque bytes; it
+  never holds plaintext). See [E2 §2](2026-05-27-spawnery-e2-model-layer-design.md) /
+  [E0 §10](2026-05-26-spawnery-e0-contracts-design.md). *Honesty caveat:* on **Spawnery-operated
+  cloud** nodes, the node decrypts the BYO key in memory and content is **audited** — so "we never
+  see your key/content" holds for **self-host only**, not the cloud/free path.
 - **Self-host:** secrets are local config; the CP is not in the loop.
+- *Demo MVP:* no BYOK, no vault — see [Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md).
 
 ---
 
@@ -210,9 +237,11 @@ Clean exit *and* clean re-entry.
 
 ## 9. Trust, safety & audit
 
-- **Permission/consent at spawn:** the user sees exactly which storage scope + egress domains
-  the App requests, and consents. The runtime **enforces an egress allowlist** (provider +
-  storage domains only).
+- **Permission/consent at spawn — POST-MVP (roast `sp-ba5`).** The *target* design has the user
+  consent to the App's declared storage scope + egress domains, with the runtime **enforcing an
+  egress allowlist** (owner = E1, at the pod network layer; note the allowlist is per-spawn-dynamic
+  because a BYO `baseUrl` varies). **This consent screen + egress enforcement are NOT in MVP** —
+  E8's audit + scanner are the MVP safety net in their absence. Don't present consent as shipped.
 - **Audit by environment:** **Spawnery operates the box → conversation content is audited for
   abuse** (at the sidecar, disclosed) — this covers the home machine (incl. free tier) **and**
   cloud burst. **User self-hosts → no audit.**
@@ -230,10 +259,14 @@ Clean exit *and* clean re-entry.
 - **CP is the rendezvous.** Client gets a signed session token from the central CP, which also
   triggers **wake-from-zero** (`startSpawn` over the node's outbound gRPC stream).
 - **Data path:** **LAN-direct when reachable**, else an **E2E-encrypted relay through the CP**
-  over the node's outbound stream — the CP pipes **opaque ciphertext**; **TLS terminates at the
-  in-container ACP-bridge** (client pins the bridge cert via the token fingerprint).
-- **ACP over an authenticated WebSocket**; web + mobile are identical ACP clients. P2P deferred;
+  over the node's outbound stream — the CP pipes **opaque ciphertext**. The **per-session E2E
+  channel terminates at the NODE** (node-static + client-ephemeral key agreement; the client pins
+  the CP-vended node key), and the node forwards ACP to the in-container bridge over **loopback**.
+  (The bridge does *not* terminate a separate client-facing TLS — superseded; see
+  [E0 §10](2026-05-26-spawnery-e0-contracts-design.md).)
+- **ACP over the authenticated channel**; web + mobile are identical clients. P2P deferred;
   BYO-ingress (Tailscale/Cloudflare Tunnel) bypasses the relay.
+- *Demo MVP:* no E2E channel — **plain TLS client↔CP**, everything Spawnery-operated + audited.
 
 ---
 
@@ -295,6 +328,14 @@ passkeys + WebAuthn-PRF.
 ---
 
 ## Appendix A — Decision log
+
+> **Supersession note (roast `sp-izq`):** this log records the original brainstorming decisions.
+> Several were refined by the later epic designs and the demo cut — read it with these overrides:
+> **#2/#18** "tools bundled in the image" → **per-agent base image + mounted App definition**
+> (E1 §2); **#10** "direct client→container via edge activator" → **CP rendezvous + per-session
+> E2E relay, terminating at the node** (E0 §10); **#13** "direct-in-container BYO key" → **delivered
+> over the E2E channel; node injects** (E2 §2). And the **demo MVP** ships none of the E2E/BYO/
+> gateway/vault machinery (see [Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)).
 
 | # | Decision | Choice |
 |---|---|---|

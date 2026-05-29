@@ -84,11 +84,20 @@ conflict handling, and the on-repo layout.
 ## 5. Persist mechanics & cadence
 
 - **Cadence:** agent makes **semantic commits** as part of its work (via a `git`-tool in the
-  bundled common toolset); the node **persists per completed agent turn** (push for GitHub,
-  re-bundle + upload for blob), and again on **idle/teardown / explicit close** as a safety net.
-  One-turn data-loss window.
+  bundled common toolset); the node **persists per completed agent turn**, and again on
+  **idle/teardown / explicit close** as a safety net. One-turn data-loss window.
+- **Debounce + background (roast `sp-7fj`):** persistence is **debounced/coalesced** (a short
+  window, or batched across rapid turns) and the push runs **in the background** so it never
+  blocks the next turn; the idle/teardown flush guarantees durability. This bounds GitHub
+  push frequency (rate-limit pressure) without widening the loss window meaningfully.
+- **Blob is NOT full-bundle-per-turn (roast `sp-7fj`):** `git bundle --all` re-uploads the entire
+  history every turn → cost/latency grow linearly with repo size. MVP blob writes an
+  **incremental bundle** (objects since the last persisted ref) and only periodically (or on
+  teardown) consolidates to a full `--all` baseline. Full folder-as-git-remote incremental object
+  transfer stays the post-MVP target. *(For the demo, GitHub-only storage sidesteps this entirely.)*
 - **Token freshness:** the node checks the in-memory token's `exp`; on push failure or
-  near-expiry, calls `refreshStorageToken` and retries.
+  near-expiry, calls `refreshStorageToken` and retries. (Proactive refresh near `exp` + jitter to
+  avoid refresh storms is the post-MVP hardening.)
 
 ---
 
