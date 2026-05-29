@@ -90,9 +90,18 @@ half ("your choice of AI") or self-hosting — those are the headline of the *ne
 - **Per-app permissions + consent + enforcement (REQUIRED — un-deferred)** — the manifest
   `permissions` block (storage scope + egress allowlist) is back; the user **consents at spawn**;
   the egress floor **enforces** it. Open third-party apps cannot run unscoped. (was roast `sp-ba5`)
-- **App-review scanner (REQUIRED — E8 §5)** — the LLM-as-judge over manifest+persona+skills
-  (prompt-injection / exfiltration / jailbreak / scope sanity) gates **every** publish. This is the
-  committed-for-demo ML build item that makes open publishing safe.
+- **App trust tiers (REQUIRED)** — every App@version carries a tier; **runtime restrictions +
+  what the user is told scale with it**, and the **enforced sandbox floor (egress + isolation +
+  consent) applies to ALL tiers** — so a scanner miss is *contained*, not catastrophic:
+  | Tier | How earned | Runtime posture | User-facing |
+  |---|---|---|---|
+  | **Unverified** | published, not (yet) scanned / scan declined | tightest: egress = storage+model only, lower quotas, can't request broad scope | loud "NOT checked — run at your own risk" |
+  | **Scanned** | passed the automated **App-review scanner** (E8 §5 LLM-as-judge) | standard: its **declared** permissions (consent + enforced) | "automatically checked" badge |
+  | **Reviewed** | a **human** reviewed it | eligible for elevated capability + featured placement (and later private/paid) | "human-reviewed" badge |
+  - **Per-version:** tier is for `App@sha`; a new version drops to *scanned* (re-scan) and any
+    **permission escalation drops it out of *reviewed*** until re-reviewed. Seed apps = *reviewed*.
+  - The **scanner is the *scanned* tier mechanism**, not a perfect gate — it no longer single-
+    handedly carries "open publishing is safe"; the tier + floor + informed consent do.
 - **E3 storage — three options:** **managed default** (Spawnery-hosted repo, **web-browsable in-app
   + one-click download/clone**), **BYO-cloud** (Google Drive / iCloud / OneDrive via OAuth, `git
   bundle`), **GitHub** (power-user). Default = managed (zero-setup for non-techs). Default any

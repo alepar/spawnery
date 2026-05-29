@@ -89,11 +89,15 @@ creator/user can appeal; reviewer can reverse.
 
 ---
 
-## 5. App-review content (owed back to E5)
+## 5. App-review content (the `scanned` and `reviewed` tiers)
 
-E5 §5 owns the *queue mechanics*; E8 owns *what is inspected*. **Scanner-first, human-on-flag:**
+E5 §5 owns the *tier mechanics*; E8 owns *what is inspected*. The scanner powers the **`scanned`**
+tier; human review powers the **`reviewed`** tier. **The scanner is one tier, not a perfect gate** —
+the trust-tier system + the enforced sandbox floor (egress + isolation + per-app consent) + tier
+disclosure to the user are what make open publishing safe; the scanner raises the floor, it doesn't
+solely carry it.
 
-- **Automated scanner (gates ALL apps at each new tag):** an **LLM-as-judge** over the manifest +
+- **Automated scanner → promotes a version to `scanned`:** an **LLM-as-judge** over the manifest +
   `persona.md` + `skills/**` checking for:
   - **Prompt-injection / jailbreak framing** (instructions to ignore platform rules, escalate
     privileges, or subvert the agent).

@@ -102,27 +102,35 @@ Carried over from the [system design §8](2026-05-26-spawnery-system-design.md) 
 
 ---
 
-## 5. Publish gating — open vs private
+## 5. Publish gating — trust tiers
 
-- **Open Apps → automated checks only, instant listing on pass.** The CP runs **automated checks**
-  on the fetched manifest at each new tag:
+Publishing assigns a **trust tier** to each `App@sha` (see [Demo MVP Scope §4](2026-05-28-spawnery-demo-mvp-scope.md)):
+**unverified** (published, not scanned / scan declined) → **scanned** (passed the E8 §5 automated
+scanner) → **reviewed** (human-reviewed). The tier is **per-version**, surfaced in the catalog +
+at spawn, and **runtime restrictions scale with it** (the enforced sandbox floor applies to all
+tiers). A new version re-enters at *scanned*; **permission escalation drops *reviewed*** until
+re-reviewed. Tier also feeds discovery/ranking (reviewed > scanned > unverified).
+
+- **Structural checks gate publish at all (below even *unverified*).** The CP runs cheap
+  **automated checks** on the manifest at each new tag:
   - JSON-Schema validation (well-formed; correct types; required fields present).
   - Reference checks (declared `tools` are in the common-toolset catalog; `agents.support` are
     known agents; `model.requires` are valid capabilities).
   - Seed sanity (`storage.seed` path exists in the repo; size cap).
   - Manifest-side trust: no path traversal, no oversized files, no suspicious links.
 
-  Pass → **listed/usable immediately**. Fail → surfaced to the creator via the catalog UI; the
-  bad tag is **excluded from auto-upgrade** until fixed (older passing tags remain valid).
+  Pass → published as **unverified** and spawnable (tightest sandbox + loud warning). Fail →
+  surfaced to the creator; the bad tag can't publish.
 
-- **Private Apps → automated + human review queue.** Same automated checks gate entry to the
-  review queue; **a human reviewer** then gates listing/sale. Review **content** (what's
-  inspected for prompt-injection / abuse / scope sanity) is spec'd in **E8**; E5 owns only the
-  queue mechanics:
-  - Each new tag → review queue entry with `App@sha`, manifest diff vs last-approved.
-  - Reviewer can **approve**, **reject (with notes)**, or **request changes**.
-  - Approved tag → usable for spawning + listing.
-  - SLA target (post-MVP): TBD; MVP review = best-effort by the Spawnery team.
+- **→ scanned:** the **E8 §5 automated scanner** runs (async, off the inference GPU); pass promotes
+  the version to *scanned* (its declared permissions become available, with consent + enforcement).
+  Most open self-serve apps live here. A scanner fail keeps it *unverified* (or unlists, per
+  severity) with reasons to the creator.
+- **→ reviewed:** a **human reviewer** approves (the review queue): `App@sha` + manifest diff vs.
+  last-approved → **approve / reject (notes) / request changes**. Required for elevated capability,
+  featured placement, and (later) private/paid apps. Seed apps ship *reviewed*. MVP human review =
+  best-effort by the Spawnery team; SLA post-MVP.
+- *Private apps* (closed source) always require **reviewed** before listing/sale.
 
 ---
 
