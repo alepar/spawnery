@@ -12,6 +12,13 @@
 The four launch Apps — the proof that the platform's abstractions express real, distinct Apps.
 Each is a **definition repo** (per E5 §1) targeting the MVP agent. Apps are open + first-party.
 
+> **⚠️ Demo-MVP overlay** ([Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)): the **seed
+> lineup is NOT finalized**. The LLM Wiki is **one** candidate, not the flagship — the architecture
+> is the bet, apps are interchangeable demonstrations. **E11 (`sp-4jg`) brainstorms the portfolio +
+> retention hypotheses first and gates this lineup.** The four below are the starting candidates;
+> validate retention/fit (esp. the habit coach, `sp-pgw`) and let E11 + the session-event metrics
+> (`sp-yjw`) decide the seed set. Seed apps ship at the **reviewed** trust tier.
+
 ---
 
 ## 1. The MVP agent (concrete)

@@ -41,6 +41,9 @@ MVP in their absence (first-party launch apps + inspectable source + audit + sca
   analytics.
 - **Disclosure:** stated plainly in ToS + surfaced in the UI when a spawn is placed on
   Spawnery-operated infra ("running on Spawnery cloud — audited for abuse").
+- **Separate from product metrics:** this content pipeline is **abuse-only**. Product/engagement
+  metrics come from a **content-free** session-event stream (hourly Parquet — `sp-yjw`); **user
+  `/data` is never inspected** for analytics. Two pipelines, two purposes, two access paths.
 
 ---
 

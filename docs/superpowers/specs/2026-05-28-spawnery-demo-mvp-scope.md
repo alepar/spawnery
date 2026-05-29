@@ -48,15 +48,19 @@ default, BYO-cloud, GitHub).
 
 ## 2. What the demo MVP *is*
 
-> A **free, one-click, hosted marketplace of personal-AI apps** — seeded with zork / **LLM Wiki**
-> (flagship) / habit-goal coach / system-design interview coach, **open for third-party creators to
-> publish** (auto-reviewed) — running on Spawnery's DeepSeek box, with your content saved to **your
+> A **free, one-click, hosted marketplace of personal-AI apps** — **open for third-party creators to
+> publish** (tiered review) — running on Spawnery's DeepSeek box, with your content saved to **your
 > own storage** (managed default, your cloud, or GitHub), audited for abuse.
 
-It proves the **wedge** (the viral LLM-Wiki pattern has a turnkey hosted home), the **data** half of
-the thesis (content in storage you control), **and now a slice of the marketplace flywheel** (do
-creators publish, do users spawn third-party apps — H3/H4). It does **not** yet deliver the **model**
-half ("your choice of AI") or self-hosting — those are the headline of the *next* phase.
+**The architecture is the product; individual apps are interchangeable demonstrations of it.** The
+LLM Wiki is **one** idea this arch enables, **not the flagship/main bet** — its PKM cold-start-value
+risk makes it a cautionary case, not the thing to stake the demo on. The seed app lineup is **not
+finalized**: a pre-demo idea-exploration epic (**E11 `sp-4jg`**, gates demo completion) brainstorms a
+portfolio of candidate apps with retention hypotheses, and that feeds the seed set.
+
+The demo proves the **data** half of the thesis (content in storage you control) **and a slice of the
+marketplace flywheel** (do creators publish, do users spawn third-party apps — H3/H4). It does **not**
+yet deliver the **model** half ("your choice of AI") or self-hosting — the *next* phase.
 
 ---
 
@@ -149,7 +153,30 @@ One DeepSeek box, no burst relief → small concurrent ceiling + hard SPOF. Ther
 
 ---
 
-## 7. Roast-finding triage under the demo cut
+## 7. Metrics & telemetry — content-free (`sp-yjw`)
+
+**Firm privacy principle:** product/engagement metrics are derived **only** from content-free
+**session-lifecycle events**; **we do NOT inspect user `/data`** (no wiki-page-counts, no reading
+their files) to derive engagement. This keeps the brand honest *and* keeps two pipelines cleanly
+separate:
+
+| Pipeline | Contains | Purpose | Retention / access |
+|---|---|---|---|
+| **Abuse-audit** (E8) | full conversation content | abuse safety | 30-day TTL, break-glass, KMS |
+| **Product metrics** (this) | **metadata events only** | analytics | hourly **Parquet** cold storage, offline analysis |
+
+- **Emitter:** the CP (it owns session lifecycle). **Events:** spawn create / session start / session
+  end — with `{owner, app@sha, trust tier, storage type, node, timestamps}`. **No content.**
+- **Derivable offline:** # users, sessions/user, **W1/W2/W4 return** (did they spawn again?), app
+  popularity, **third-party-vs-seed spawn share**, tier distribution. Enough for the core retention
+  + flywheel signals **without touching user data**.
+- **Consequence for the experiment (`sp-54f`):** activation/retention metrics must be **session-based**
+  (e.g., returned and started a session in W2), **not** content-based (the earlier "≥3 wiki entries"
+  proposal is dropped — it would require inspecting `/data`).
+
+---
+
+## 8. Roast-finding triage under the demo cut
 
 | Finding | Under demo MVP |
 |---|---|
@@ -174,22 +201,28 @@ One DeepSeek box, no burst relief → small concurrent ceiling + hard SPOF. Ther
 | **App-review scanner (E8 §5)** | **REQUIRED in demo** — gates open publishing (committed ML build item). |
 | `sp-nxp` protocol/contract drift | **Done** — E0 §5a/§6 reconciled. |
 | `sp-iui` ops grab-bag | **Demo-relevant** — classifier off the GPU + audit-store sizing + ad-hoc-URL SSRF guard + restricted toolset + verify seed apps run on DeepSeek. |
-| `sp-54f` weak experiment | **Improved, not solved** — open marketplace now tests a slice of H3/H4; still need a success metric + retention hook + representative audience (the wiki's PKM cold-start-value risk persists). |
+| `sp-54f` weak experiment | **Reframed** — the bet is the *architecture across a portfolio of ideas*, not the wiki. E11 (`sp-4jg`) explores ideas + retention hypotheses; metrics are **session-event-based** (`sp-yjw`, no content inspection). Still need pre-committed thresholds + a representative audience. |
+| `sp-yjw` content-free metrics | **In demo** — hourly Parquet session-event cold storage; no `/data` inspection (§7). |
+| `sp-4jg` more app ideas | **Gates demo completion** — brainstorm the seed lineup before locking E7. |
 
 ---
 
-## 8. Demo build order
+## 9. Demo build order
 
+0. **(Parallel, gates the lineup) Idea exploration** — E11 (`sp-4jg`): brainstorm the seed-app
+   portfolio + retention hypotheses; the wiki is one candidate, not assumed. Locks the E7 seed set.
 1. **Vertical slice:** runtime + **managed storage** + one agent + local DeepSeek + minimal web
    client + **zork** (E1 + E3-managed + E2-minimal + E6-minimal + E7/zork) — proves spawn→chat→persist.
+   Add **content-free session-event telemetry** (`sp-yjw`) here so metrics exist from day one.
 2. **Safety floor (before any third-party or public exposure):** egress allowlist + metadata/RFC1918
    block (`sp-rpa`), isolation hardening + resource limits + per-user quotas (`sp-eha`/`sp-ach`),
    restricted toolset.
-3. **LLM Wiki** (the wedge) + the **storage options** (Drive/iCloud + GitHub) + web-browsable/export.
-4. **Open marketplace:** catalog browse/search + **open publish flow** + **App-review scanner**
-   (E8 §5) + **per-app permissions + consent + enforcement** (`sp-ba5`) + flag/takedown.
-5. **Seed apps** (coaches + community), audit pipeline + classifier-off-GPU, capped-beta gating +
-   status page + **CP-state backup** (`sp-jf7`).
+3. **Seed apps** (from E11) + the **storage options** (Drive/iCloud + GitHub) + web-browsable/export.
+4. **Open marketplace:** catalog browse/search + **open publish flow** + **trust tiers**
+   (unverified/scanned/reviewed) + **App-review scanner** (E8 §5) + **per-app permissions + consent +
+   enforcement** (`sp-ba5`) + flag/takedown.
+5. Audit pipeline + classifier-off-GPU, capped-beta gating + status page + **CP-state backup**
+   (`sp-jf7`).
 
 Self-host, BYOK, burst, billing, the per-session E2E channel, and the vault all begin **after** the
 demo — using the full design that already exists in E0–E8. **The demo is now the MVP cloud platform,
