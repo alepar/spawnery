@@ -7,10 +7,12 @@
 [E1](2026-05-27-spawnery-e1-runtime-core-design.md), [E2](2026-05-27-spawnery-e2-model-layer-design.md)
 
 > **⚠️ Demo-MVP overlay** ([Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)): demo onboarding
-> collapses to **OAuth → connect GitHub → spawn** — **no vault prompt, no agent picker, no model
-> picker** (one agent, one model). The **per-session E2E channel (§2/§4)** and **WebCrypto/secret
-> handling (§4)** are **deferred**; demo transport = **plain TLS to the CP** (everything audited).
-> Catalog/chat/spawn-management (§3) stay. (Resolves most of roast `sp-73q`.)
+> default = **OAuth → managed storage → spawn** (no vault prompt, **no model/agent picker** — one
+> model, one agent). Present in demo: a **storage picker** (managed default / Drive·iCloud / GitHub),
+> a **per-spawn consent screen** (declared storage scope + egress — `sp-ba5` un-deferred), **catalog
+> browse/search**, and a **creator publish flow** (open marketplace). The **per-session E2E channel
+> (§2/§4)** + **WebCrypto/secret handling** are **deferred**; demo transport = **plain TLS to the
+> CP** (everything audited).
 
 The browser app: catalog → spawn → chat, acting as the client end of the per-session E2E channel.
 Third piece of the zork vertical slice (with E1 + E2).

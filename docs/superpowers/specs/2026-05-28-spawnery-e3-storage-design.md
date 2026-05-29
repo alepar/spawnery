@@ -6,6 +6,12 @@
 **Depends on:** [E0](2026-05-26-spawnery-e0-contracts-design.md),
 [E1](2026-05-27-spawnery-e1-runtime-core-design.md)
 
+> **⚠️ Demo-MVP overlay** ([Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)): the demo ships
+> **three storage options** — **managed default** (Spawnery-hosted repo, web-browsable in-app +
+> one-click download/clone), **BYO-cloud** (Google Drive/iCloud/OneDrive via `git bundle`), and
+> **GitHub** (power-user). **Managed is the default** (zero-setup for non-techs, `sp-0a2`); spawned
+> repos default **private**. The incremental-blob + debounced-persist notes (§5) are in scope.
+
 Owns the data side of "your data stays yours": the uniform `/data` substrate, the provider-adapter
 interface and implementations, provisioning, credential custody + refresh, persistence cadence,
 conflict handling, and the on-repo layout.

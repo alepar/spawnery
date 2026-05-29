@@ -25,20 +25,37 @@ target for the full build.
 | **Y. Home DeepSeek** | ✅ free default | ✅ **the only inference path** |
 | **Z. Managed 3rd-party** | ✅ premium/burst | ❌ deferred |
 
-**Demo MVP = B + Y only.** One execution environment (the Spawnery home server), one inference
-path (local DeepSeek v4 Flash). Everything is Spawnery-operated and **audited for abuse,
-disclosed**.
+**Demo MVP = B + Y execution/inference**, **plus an open marketplace and multi-option storage.**
+One execution environment (the Spawnery home server), one inference path (local DeepSeek v4 Flash),
+everything Spawnery-operated and **audited for abuse, disclosed** — **but** with a **fully open
+third-party app marketplace** (automated review scanner) and **three storage options** (managed
+default, BYO-cloud, GitHub).
+
+| Cross-cutting axis | Demo MVP |
+|---|---|
+| **Marketplace** | ✅ **fully open third-party publishing + automated App-review scanner** |
+| **Storage** | ✅ **managed default + Drive/iCloud/OneDrive + GitHub** (power-user) |
+
+> **⚠️ SCOPE NOTE (revised 2026-05-28).** Choosing *fully open publishing + the automated scanner*
+> (over the curated/minimal options) **re-introduces the trust machinery the B+Y cut had deferred**.
+> The demo MVP is therefore **the full cloud platform MINUS** {self-host, BYOK, cloud burst, billing,
+> the vault, the per-session E2E channel} — **not** a thin wedge demo. Open third-party code running
+> on other users' data + your box makes the App-review scanner, egress enforcement, isolation
+> hardening, and per-app permission/consent enforcement **mandatory, not deferred** (see §4). This
+> is a deliberate trade: more build, real differentiation, vs. the original "ship cheap/fast."
 
 ---
 
 ## 2. What the demo MVP *is*
 
-> A **free, one-click, hosted** personal-AI app — launch lineup zork / **LLM Wiki** (flagship) /
-> habit-goal coach / system-design interview coach — running on Spawnery's DeepSeek box, with
-> your content saved to **your own GitHub repo**, audited for abuse.
+> A **free, one-click, hosted marketplace of personal-AI apps** — seeded with zork / **LLM Wiki**
+> (flagship) / habit-goal coach / system-design interview coach, **open for third-party creators to
+> publish** (auto-reviewed) — running on Spawnery's DeepSeek box, with your content saved to **your
+> own storage** (managed default, your cloud, or GitHub), audited for abuse.
 
-It proves the **wedge** (the viral LLM-Wiki pattern has a turnkey hosted home) and the **data**
-half of the thesis (your content lives in your GitHub). It does **not** yet deliver the **model**
+It proves the **wedge** (the viral LLM-Wiki pattern has a turnkey hosted home), the **data** half of
+the thesis (content in storage you control), **and now a slice of the marketplace flywheel** (do
+creators publish, do users spawn third-party apps — H3/H4). It does **not** yet deliver the **model**
 half ("your choice of AI") or self-hosting — those are the headline of the *next* phase.
 
 ---
@@ -54,26 +71,44 @@ half ("your choice of AI") or self-hosting — those are the headline of the *ne
 | **Node enrollment user flow + node-key trust anchor** — E4 §6 | **Internal only.** All nodes are Spawnery's own; no user-facing enrollment. The CA/mTLS/pinning story returns with self-host. |
 | **Self-host edition / open-core** — system §1 | **Deferred.** Demo makes no self-host or open-core claim. |
 | **Cloud burst** (E9) / **billing & rev-share** (E10) | **Deferred** (already post-MVP). |
-| **Permissions / consent / egress enforcement** | **Deferred** (already post-MVP; E8 audit is the safety net). |
+
+> **Permissions / consent / egress enforcement, the App-review scanner, and isolation hardening are
+> NO LONGER deferred** — open third-party publishing makes them mandatory. They move to §4.
 
 ---
 
-## 4. What stays in the demo (largely as designed)
+## 4. What stays / is REQUIRED in the demo
 
-- **E1 runtime core** — control plane + node agent + ephemeral cold-start spawn pods. Simplified:
-  isolation can be **plain containers** (no untrusted operator/code → microVM/gVisor deferred);
-  the spawn pod is `base[agent + bridge + common toolset]` + `sidecar→local DeepSeek`.
-- **E3 storage** — git-repo substrate, GitHub adapter (Spawnery GitHub App), `.spawnery/` layout,
-  per-turn semantic-commit persist. (Blob/`git bundle` adapter optional for the demo — GitHub-only
-  is fine.)
-- **E5 packaging & catalog** — manifest, definition repos, poll-model versioning, catalog. Demo
-  apps are first-party/open; the private-app review pipeline can wait.
-- **E6 web client** — catalog → spawn → chat. Onboarding collapses to **OAuth → connect GitHub →
-  spawn** (no vault, no agent/model pickers — one agent, one model).
-- **E7 launch coaches** — all four apps, on the one agent + local DeepSeek.
-- **E8 trust/safety/audit** — audit at the **sidecar** (one managed path → trivial), abuse
-  scanner/classifier, flag/takedown. (Classifier shares the one GPU — see roast `sp-iui`.)
-- **E4 identity** — **OAuth (Google + GitHub) + account model only.**
+- **E1 runtime core** — control plane + node agent + ephemeral cold-start spawn pods, pod =
+  `base[agent + bridge + restricted toolset]` + `sidecar→local DeepSeek`. **Isolation is HARDENED,
+  not plain containers** — third-party apps run untrusted-creator-authored agents on other users'
+  data, so: gVisor-class isolation (or equivalent), **cgroup CPU/mem/disk/pids limits**, per-user
+  concurrency cap. (roast `sp-eha`/`sp-ach`)
+- **Egress allowlist floor (REQUIRED, roast `sp-rpa`)** — per-spawn network policy: only the
+  localhost sidecar + the spawn's storage host + the app's **declared** egress domains; **drop
+  cloud-metadata (169.254.169.254) + RFC1918**. Owner = E1 (pod netns).
+- **Per-app permissions + consent + enforcement (REQUIRED — un-deferred)** — the manifest
+  `permissions` block (storage scope + egress allowlist) is back; the user **consents at spawn**;
+  the egress floor **enforces** it. Open third-party apps cannot run unscoped. (was roast `sp-ba5`)
+- **App-review scanner (REQUIRED — E8 §5)** — the LLM-as-judge over manifest+persona+skills
+  (prompt-injection / exfiltration / jailbreak / scope sanity) gates **every** publish. This is the
+  committed-for-demo ML build item that makes open publishing safe.
+- **E3 storage — three options:** **managed default** (Spawnery-hosted repo, **web-browsable in-app
+  + one-click download/clone**), **BYO-cloud** (Google Drive / iCloud / OneDrive via OAuth, `git
+  bundle`), **GitHub** (power-user). Default = managed (zero-setup for non-techs). Default any
+  spawned/managed repo to **private**. (roast `sp-0a2`/`sp-gl2`)
+- **E5 packaging & catalog — OPEN registry:** manifest, definition repos, poll-model versioning,
+  catalog browse/search, **open third-party publish flow** gated by the automated scanner +
+  flag/takedown. Ad-hoc URL spawn keeps the SSRF guard (`sp-iui`).
+- **E6 web client** — catalog browse → spawn (storage picker + **consent screen**) → chat;
+  **creator publish flow**. Onboarding default path = **OAuth → managed storage → spawn** (no vault,
+  no model picker — one model). Agent picker hidden (one agent).
+- **E8 trust/safety/audit** — audit at the **sidecar** (run the classifier **off the inference
+  GPU**, `sp-iui`); **don't persist severe-flagged content**; flag/takedown for the open registry.
+- **E4 identity** — **OAuth (Google + GitHub) + account model only** (no vault; no BYO secrets).
+- **E7 seed apps** — the four ship as the seed catalog; the marketplace is open for more. (Coaches
+  stay as seeds; validate per `sp-pgw`. The "drop coaches" advice is moot now — an open catalog
+  *wants* a populated seed set.)
 
 **Corrected continuity model (from roast `sp-0ah`):** cold start = a **new session**, *not* a
 replay of the prior conversation thread. Continuity comes from the agent **reading the structured
@@ -84,18 +119,20 @@ coding agent reading a codebase. Idle timeout tuned to the LLM provider's prompt
 
 ## 5. Brand / messaging rules for the demo
 
-- **Lead with:** "free, one-click, your content in your own GitHub, the LLM Wiki you can actually
-  run." Honest, demo-true.
+- **Lead with:** "free, one-click marketplace of personal-AI apps you can spawn and own your data —
+  the LLM Wiki you can actually run, plus a catalog anyone can publish to." Marketplace + data are
+  now both demo-true.
 - **Do NOT claim at demo launch:** "your choice of AI" / "model-agnostic" (it's DeepSeek-only);
   "your data, we see nothing" (everything is audited); "self-host / no lock-in" (deferred).
 - **Disclose plainly:** runs on Spawnery's hardware; conversations audited for abuse (30-day TTL);
-  Spawnery holds a scoped write-token to your connected repo (roast `sp-gl2`).
+  if you connect GitHub, Spawnery holds a scoped write-token to that repo (roast `sp-gl2`) — the
+  managed + BYO-cloud options keep data in your own storage.
 - The full differentiation ("your choice of AI," self-host, true privacy) is the **named next
   phase**, not vaporware — the full design exists.
 
 ---
 
-## 6. Capacity posture (forced by B+Y, no burst)
+## 6. Capacity posture (one box, no burst)
 
 One DeepSeek box, no burst relief → small concurrent ceiling + hard SPOF. Therefore the demo is a
 **capped / waitlisted beta** with an honest status page. Minimum resilience still required:
@@ -114,24 +151,37 @@ One DeepSeek box, no burst relief → small concurrent ceiling + hard SPOF. Ther
 | `sp-jf7` home singleton / DR | **Demo-relevant (partial)** — capped beta + **CP-state backup** required. Failover/HA = full design. |
 | `sp-73q` onboarding gauntlet | **Largely resolved** — no vault/BYOK → OAuth + connect GitHub + spawn. |
 | `sp-0ah` cold start | **Resolved** — accepted; continuity = file reads (§4). |
-| `sp-pgw` coach validation | **Demo-relevant** — apps ship; dogfood the habit coach before launch. |
+| `sp-pgw` coach validation | **Demo-relevant** — coaches ship as seed apps; dogfood the habit coach before launch. |
 | `sp-vf8` vault hardening | **Full-design only** — no vault in demo. |
-| `sp-gl2` storage-token honesty | **Demo-relevant** — disclose CP repo write-token; consider a storage-access log. |
-| `sp-izq` stale-reference sweep | **Folded here** — the E2E/bridge-cert refs are all "full design"; demo uses plain TLS. Reconcile when editing. |
-| `sp-oh1` open-core false claim | **Demo-relevant** — demo claims no self-host/open-core; fix the claim in the full design too. |
-| `sp-7fj` GitHub polling / persist | **Demo-relevant** — storage + catalog ship; cache tag→SHA, debounce persist. |
-| `sp-ba5` consent/egress presented as shipped | **Demo-relevant** — align docs: deferred in demo too. |
-| `sp-nxp` protocol/contract drift | **Partial** — createSpawn/startSpawn + POST /spawns sequencing apply to demo; session-token/node-key parts are full-design. |
-| `sp-iui` ops grab-bag | **Partial** — classifier off the one GPU + audit-store sizing + ad-hoc-URL limits + **verify all 4 apps run acceptably on DeepSeek** apply to demo; burst parts are full. |
+| `sp-gl2` storage-token honesty | **Demo-relevant** — disclose CP repo write-token; managed/Drive options give real ownership; storage-access log. |
+| `sp-izq` stale-reference sweep | **Done** — reconciled to node-terminates / plain-TLS-in-demo. |
+| `sp-oh1` open-core false claim | **Done** — claim corrected; demo makes no self-host claim. |
+| `sp-7fj` GitHub polling / persist | **Demo-relevant** — cache tag→SHA, debounce persist, incremental blob. |
+| **`sp-rpa` egress floor** | **REQUIRED in demo** (was full-design) — open 3rd-party code makes it mandatory. |
+| **`sp-eha` threat-model inversion** | **REQUIRED in demo** — hardened isolation; open creator code is the worst case. |
+| **`sp-ach` resource limits / Sybil** | **REQUIRED in demo** — limits + per-user quotas + concurrency cap. |
+| **`sp-ba5` consent/egress enforcement** | **REQUIRED in demo (un-deferred)** — open 3rd-party apps need declared scope + consent + enforcement. |
+| **`sp-0a2` storage / market** | **Adopted** — managed default + Drive + GitHub; default repos private. |
+| **App-review scanner (E8 §5)** | **REQUIRED in demo** — gates open publishing (committed ML build item). |
+| `sp-nxp` protocol/contract drift | **Done** — E0 §5a/§6 reconciled. |
+| `sp-iui` ops grab-bag | **Demo-relevant** — classifier off the GPU + audit-store sizing + ad-hoc-URL SSRF guard + restricted toolset + verify seed apps run on DeepSeek. |
+| `sp-54f` weak experiment | **Improved, not solved** — open marketplace now tests a slice of H3/H4; still need a success metric + retention hook + representative audience (the wiki's PKM cold-start-value risk persists). |
 
 ---
 
 ## 8. Demo build order
 
-1. **Runtime + storage + one agent + local DeepSeek + minimal web client + zork** — the end-to-end
-   spawn→chat→persist slice (E1 + E3 + E2-minimal + E6-minimal + E7/zork).
-2. **LLM Wiki** (the wedge) on GitHub storage.
-3. **Catalog + the other three apps**, audit/scanner, capped-beta gating + status page + CP backup.
+1. **Vertical slice:** runtime + **managed storage** + one agent + local DeepSeek + minimal web
+   client + **zork** (E1 + E3-managed + E2-minimal + E6-minimal + E7/zork) — proves spawn→chat→persist.
+2. **Safety floor (before any third-party or public exposure):** egress allowlist + metadata/RFC1918
+   block (`sp-rpa`), isolation hardening + resource limits + per-user quotas (`sp-eha`/`sp-ach`),
+   restricted toolset.
+3. **LLM Wiki** (the wedge) + the **storage options** (Drive/iCloud + GitHub) + web-browsable/export.
+4. **Open marketplace:** catalog browse/search + **open publish flow** + **App-review scanner**
+   (E8 §5) + **per-app permissions + consent + enforcement** (`sp-ba5`) + flag/takedown.
+5. **Seed apps** (coaches + community), audit pipeline + classifier-off-GPU, capped-beta gating +
+   status page + **CP-state backup** (`sp-jf7`).
 
-Self-host, BYOK, burst, billing, the E2E channel, and the vault all begin **after** the demo
-validates the wedge — using the full design that already exists in E0–E8.
+Self-host, BYOK, burst, billing, the per-session E2E channel, and the vault all begin **after** the
+demo — using the full design that already exists in E0–E8. **The demo is now the MVP cloud platform,
+not a thin wedge demo** (see §1 scope note).

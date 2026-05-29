@@ -11,6 +11,13 @@ Owns: the **`spawneryapp.yml`** manifest spec, **definition-repo conventions**, 
 resolution + auto-upgrade**, the **publish trigger** (MVP: poll), **registration + catalog**,
 and the **open vs private** gate (review *content* spec'd in **E8**).
 
+> **⚠️ Demo-MVP overlay** ([Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)): the **open
+> third-party marketplace is core to the demo**, not deferred — catalog browse/search + the **open
+> publish flow** gated by the **automated App-review scanner** (E8 §5, a committed demo build item)
+> + flag/takedown. Every open app gets **per-app declared permissions + spawn-time consent +
+> egress enforcement** (`sp-ba5`, un-deferred) and runs on the **restricted toolset + egress floor**.
+> Ad-hoc URL spawn keeps the SSRF guard. Private-app human review can wait; **open** can't.
+
 ---
 
 ## 1. Manifest & definition repo
