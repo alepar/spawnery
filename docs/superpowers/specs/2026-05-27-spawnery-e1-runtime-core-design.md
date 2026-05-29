@@ -6,6 +6,12 @@
 **Depends on:** [E0 contracts](2026-05-26-spawnery-e0-contracts-design.md)
 **Parent:** [System design](2026-05-26-spawnery-system-design.md)
 
+> **⚠️ Demo-MVP overlay** ([Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)): demo = B+Y.
+> Isolation backend = **plain containers** (no untrusted operator/code; gVisor/microVM deferred).
+> **No cloud burst** (§5 burst trigger deferred); placement is trivially "the home server."
+> Cold-start (§3): continuity = **file reads in a fresh session**, *not* prior-thread replay
+> (corrected per roast `sp-0ah`); accept cold-start times (no warm pool).
+
 The spine of the platform and of the zork vertical slice: the node agent, the cold-start spawn
 lifecycle, placement + the burst trigger, the image model, and the isolation-backend abstraction.
 

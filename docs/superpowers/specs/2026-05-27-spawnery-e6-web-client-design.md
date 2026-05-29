@@ -6,6 +6,12 @@
 **Depends on:** [E0](2026-05-26-spawnery-e0-contracts-design.md),
 [E1](2026-05-27-spawnery-e1-runtime-core-design.md), [E2](2026-05-27-spawnery-e2-model-layer-design.md)
 
+> **⚠️ Demo-MVP overlay** ([Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)): demo onboarding
+> collapses to **OAuth → connect GitHub → spawn** — **no vault prompt, no agent picker, no model
+> picker** (one agent, one model). The **per-session E2E channel (§2/§4)** and **WebCrypto/secret
+> handling (§4)** are **deferred**; demo transport = **plain TLS to the CP** (everything audited).
+> Catalog/chat/spawn-management (§3) stay. (Resolves most of roast `sp-73q`.)
+
 The browser app: catalog → spawn → chat, acting as the client end of the per-session E2E channel.
 Third piece of the zork vertical slice (with E1 + E2).
 

@@ -8,6 +8,12 @@
 [E2](2026-05-27-spawnery-e2-model-layer-design.md),
 [E3](2026-05-28-spawnery-e3-storage-design.md)
 
+> **⚠️ Demo-MVP overlay** ([Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)): demo ships
+> **§1 account model + §2 OAuth (Google + GitHub) only.** The **vault** (§3/§4/§5), **recovery
+> codes**, and the **node-enrollment user flow + trust anchor** (§6) are **deferred** — no BYO
+> secrets to protect and no self-host nodes in the demo. (Resolves most of roast `sp-73q`;
+> `sp-vf8` is full-design-only.) The rest remains the full-design target.
+
 Owns: user auth, the account model, the **server-blind vault passphrase** + BYO-secret
 encryption (the root of the BYO trust story), and **node enrollment** (the trust anchor for
 E0 §10 / E2 §2 / E1 §6).

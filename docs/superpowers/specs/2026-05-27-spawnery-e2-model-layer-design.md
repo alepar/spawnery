@@ -6,6 +6,12 @@
 **Depends on:** [E0 contracts](2026-05-26-spawnery-e0-contracts-design.md),
 [E1 runtime core](2026-05-27-spawnery-e1-runtime-core-design.md)
 
+> **⚠️ Demo-MVP overlay** ([Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)): demo = Y only.
+> The whole layer reduces to **sidecar → local DeepSeek** (OpenAI-compatible). **No BYOK** (§2),
+> **no central gateway / managed keys / metering** (§3/§4) — all deferred to the full design with
+> BYOK + burst. The sidecar is also the **audit point** (single managed path → trivial; resolves
+> roast `sp-dcj` for the demo).
+
 The model sidecar, the central gateway (managed), the BYO sealed-key path, and inference routing.
 
 > Cross-epic: GPU-burst routing *trigger* → **E1 §5**; node enrollment/identity → **E1 §6**;

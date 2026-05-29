@@ -6,6 +6,12 @@
 architecture and tags each decision **MVP-now** or **deferred**. The LLM Wiki is App #1,
 not a throwaway — the abstractions are designed so it is a genuine instance of the platform.
 
+> **⚠️ Demo-MVP overlay:** This doc is the **full target architecture**. The first ship is a
+> deliberately reduced **demo MVP** (execution = Spawnery home server only; inference = local
+> DeepSeek only; no BYOK, no self-host, no burst, no vault, no E2E channel — everything audited).
+> See **[Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)** for what actually ships first vs.
+> what this doc targets. Where the two differ on *what ships first*, the scope doc wins.
+
 ---
 
 ## 1. Thesis & product shape

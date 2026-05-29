@@ -5,6 +5,12 @@
 **Date:** 2026-05-26
 **Parent:** [System design](2026-05-26-spawnery-system-design.md)
 
+> **⚠️ Demo-MVP overlay** ([Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)): the demo ships
+> **B+Y only** (home server + local DeepSeek). The **per-session E2E channel (§10)** and
+> **node-enrollment trust anchor** are **deferred** — demo transport is **plain TLS client↔CP**,
+> CP→node internal, all Spawnery-operated + audited. The managed-key/BYO paths (§9) reduce to
+> sidecar→local DeepSeek. The contracts below remain the full-design target.
+
 This epic defines the seams every other epic consumes. **Design-first**: components are built
 against these contracts. Altitude = "contract spec" — purpose, shape, key fields/methods, and
 the decisions behind them — not full IDL (each component epic refines its own).

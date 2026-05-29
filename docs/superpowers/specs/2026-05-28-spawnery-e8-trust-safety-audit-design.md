@@ -8,6 +8,12 @@
 [E2](2026-05-27-spawnery-e2-model-layer-design.md),
 [E5](2026-05-28-spawnery-e5-packaging-catalog-design.md)
 
+> **⚠️ Demo-MVP overlay** ([Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md)): demo = B+Y, so
+> **all spawns are Spawnery-operated and audited** (no self-host exemption to special-case, no BYO
+> path). Audit lives at the **sidecar** (single managed path). Watch: the classifier shares the
+> **one DeepSeek GPU** (roast `sp-iui`) — run it off the inference GPU. The full design's
+> self-host-exempt logic returns with self-host.
+
 Owns: the **abuse-audit pipeline**, the **App-review content** (owed back to E5), **free-tier
 abuse signals**, and the **enforcement/takedown loop**. The governing rule: **Spawnery operates
 the box → audited for abuse (disclosed); user self-hosts → not audited** (E0 §9). Permissions /
