@@ -100,6 +100,41 @@ client sends `StopSpawn`.
 > The `.env`, `bin/`, and `.spawns/` paths are git-ignored. **Never commit the
 > OpenRouter key.**
 
+## Web client (demo)
+
+A React+TypeScript single-page app (`web/`) drives a spawn straight from the
+browser: it calls `CreateSpawn` over Connect-JSON (`fetch`), opens a WebSocket to
+the spawnlet's `GET /ws/session` endpoint (which reuses the same transparent byte
+relay as the ConnectRPC `Session` stream), and speaks ACP itself — `initialize`,
+`session/new`, `session/prompt` — streaming `session/update`s into a chat UI
+(agent bubbles, tool-call chips, collapsible thoughts, a permission modal). Vite
+dev-proxies both paths to the spawnlet, so it's one origin (no CORS).
+
+Run it (two terminals, **from the repo root** so the relative `appPath` resolves):
+
+```bash
+# 1. Spawnlet — repo root, with the OpenRouter key + Goose images.
+go build -o bin/spawnlet ./cmd/spawnlet
+set -a; . ./.env; set +a          # OPENROUTER_API_KEY (never commit it)
+AGENT_IMAGE=spawnery/goose:dev SIDECAR_IMAGE=spawnery/sidecar:dev \
+  DATA_ROOT=$(pwd)/.spawns bin/spawnlet
+
+# 2. Web dev server (separate terminal).
+cd web && npm install && npm run dev
+# open the printed URL — http://localhost:5173
+```
+
+In the browser the status banner goes **starting… → ready**. Type
+**"What is the secret word?"** and you'll see a 🔧 **tool-call chip** (the agent
+reading `data/README.md`), optionally a collapsible **thinking** block, then the
+agent bubble **"QUOKKA-4417"**. Closing the tab calls `StopSpawn`, tearing down
+the agent + sidecar containers.
+
+The browser's exact transport and flow are covered automatically by
+`TestWSEndToEndGooseSecret` (`//go:build e2e`, in `internal/spawnlet/`), which
+drives the real Goose agent through `/ws/session` and asserts the recited secret.
+The manual browser click-through above is the final human verification step.
+
 ### How Goose is configured (deploy/agent)
 
 The Goose base image installs a pinned, static (musl) Goose release and launches
