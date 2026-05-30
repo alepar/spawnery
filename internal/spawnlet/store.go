@@ -1,0 +1,27 @@
+package spawnlet
+
+import "sync"
+
+type Spawn struct {
+	ID        string
+	SidecarID string
+	AgentID   string
+	DataDir   string
+	Status    string
+}
+
+type Store struct {
+	mu sync.Mutex
+	m  map[string]*Spawn
+}
+
+func NewStore() *Store { return &Store{m: map[string]*Spawn{}} }
+
+func (s *Store) Put(sp *Spawn) { s.mu.Lock(); s.m[sp.ID] = sp; s.mu.Unlock() }
+func (s *Store) Get(id string) (*Spawn, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sp, ok := s.m[id]
+	return sp, ok
+}
+func (s *Store) Delete(id string) { s.mu.Lock(); delete(s.m, id); s.mu.Unlock() }
