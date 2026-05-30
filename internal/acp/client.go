@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 )
 
@@ -37,6 +38,9 @@ func (c *Client) call(method string, params any) (Message, error) {
 			return Message{}, err
 		}
 		if m.ID != nil && *m.ID == id {
+			if m.Error != nil {
+				return Message{}, fmt.Errorf("acp %s error %d: %s", method, m.Error.Code, m.Error.Message)
+			}
 			return m, nil
 		}
 		// ignore notifications (no id) during simple calls
@@ -81,6 +85,9 @@ func (c *Client) Prompt(text string, onChunk func(string)) error {
 			continue
 		}
 		if m.ID != nil && *m.ID == id {
+			if m.Error != nil {
+				return fmt.Errorf("acp session/prompt error %d: %s", m.Error.Code, m.Error.Message)
+			}
 			return nil
 		}
 	}
