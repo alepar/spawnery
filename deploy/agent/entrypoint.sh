@@ -16,11 +16,4 @@ export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-unused-sidecar-injects-real-key}"
 # Disable Goose's interactive keyring/secret prompts; values come from env.
 export GOOSE_DISABLE_KEYRING="${GOOSE_DISABLE_KEYRING:-1}"
 
-# Wire the app's instructions (from the ro /app mount) into Goose's working dir
-# so the harness picks them up. cwd is /data (the rw mount). Goose reads project
-# instructions from AGENTS.md in cwd (with .goosehints as a fallback name).
-if [ -f /app/AGENTS.md ]; then
-  cp /app/AGENTS.md /data/AGENTS.md || true
-fi
-
 exec goose acp

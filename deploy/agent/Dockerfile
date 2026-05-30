@@ -9,8 +9,9 @@
 #        OPENAI_HOST=http://127.0.0.1:8080    (the sidecar; host only, no path)
 #        OPENAI_BASE_PATH=v1/chat/completions (default; sidecar forwards /v1/* )
 #        OPENAI_API_KEY=<dummy>               (sidecar injects the real key)
-#   3. cwd=/data is set by the client via ACP session/new {"cwd":"/data"};
-#      WORKDIR /data is the container default working dir.
+#   3. cwd=/app is set by the client via ACP session/new {"cwd":"/app"};
+#      WORKDIR /app is the container default working dir. Goose reads /app/AGENTS.md
+#      in place; data mounts live rw at /app/<path>.
 #
 # We install a pinned, statically-linked (musl) Goose release so the image can
 # stay slim and has no runtime glibc dependency.
@@ -34,5 +35,5 @@ RUN apt-get update \
 COPY --from=fetch /usr/local/bin/goose /usr/local/bin/goose
 COPY deploy/agent/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-WORKDIR /data
+WORKDIR /app
 ENTRYPOINT ["/entrypoint.sh"]

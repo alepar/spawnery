@@ -26,9 +26,9 @@ import (
 )
 
 // TestEndToEndGooseSecret exercises the whole Goose harness end to end: the
-// agent reads an instruction file (AGENTS.md, wired in by the entrypoint),
-// uses its file-read tool against the mounted /data to find an unguessable
-// secret word seeded into README.md, and recites it back. A pass proves file
+// agent reads /app/AGENTS.md in place (cwd=/app), uses its file-read tool
+// against the scratch mount at /app/data to find an unguessable secret word
+// seeded into README.md, and recites it back. A pass proves file
 // mounts + tool-use + instructions + live inference + the byte relay all work
 // together. It requires Docker and a live OPENROUTER_API_KEY; if either is
 // missing it FAILS loudly (no skips) so a broken env is detected.
@@ -100,7 +100,7 @@ func TestEndToEndGooseSecret(t *testing.T) {
 	if err := c.Initialize(); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	if err := c.NewSession("/data"); err != nil {
+	if err := c.NewSession("/app"); err != nil {
 		t.Fatalf("session: %v", err)
 	}
 	var got strings.Builder

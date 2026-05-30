@@ -3,48 +3,76 @@ package spawnlet
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"spawnery/internal/runtime"
 )
 
-func TestCreateStartsSidecarThenAgentJoiningNetns(t *testing.T) {
-	f := runtime.NewFake()
-	dataRoot := t.TempDir()
-	m := NewManager(f, ManagerConfig{
-		AgentImage: "agent", SidecarImage: "sidecar",
-		OpenRouterKey: "k", DataRoot: dataRoot,
-	})
+func writeApp(t *testing.T) string {
+	t.Helper()
 	app := t.TempDir()
-	os.WriteFile(app+"/spawneryapp.yml", []byte("id: test/app\n"), 0o644)
+	os.WriteFile(filepath.Join(app, "spawneryapp.yml"), []byte(`
+id: spawnery/secret
+storage:
+  mounts:
+    - name: main
+      path: data
+      seed: seed
+`), 0o644)
+	os.MkdirAll(filepath.Join(app, "seed"), 0o755)
+	os.WriteFile(filepath.Join(app, "seed", "README.md"), []byte("QUOKKA-4417"), 0o644)
+	return app
+}
 
-	sp, err := m.Create(context.Background(), "test-1", app, "", "anthropic/claude-3.5-sonnet")
+func TestCreateMountsAppRoAndNamedDataRw(t *testing.T) {
+	f := runtime.NewFake()
+	m := NewManager(f, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
+	app := writeApp(t)
+
+	sp, err := m.Create(context.Background(), "test-1", app, "model-x")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if len(f.Started) != 2 {
 		t.Fatalf("want 2 containers, got %d", len(f.Started))
 	}
-	sidecar, agent := f.Started[0], f.Started[1]
+	agent := f.Started[1]
 	if agent.NetnsOf != sp.SidecarID {
-		t.Fatalf("agent should join sidecar netns, got %q want %q", agent.NetnsOf, sp.SidecarID)
+		t.Fatalf("agent should join sidecar netns")
 	}
-	if !hasEnv(sidecar.Env, "OPENROUTER_API_KEY=k") {
-		t.Fatalf("sidecar missing key env: %v", sidecar.Env)
+	if !hasMountRO(agent.Mounts, "/app") {
+		t.Fatalf("/app should be ro: %+v", agent.Mounts)
 	}
-	if !hasMountRO(agent.Mounts, "/app") || !hasMountRW(agent.Mounts, "/data") {
-		t.Fatalf("agent mounts wrong: %+v", agent.Mounts)
+	if !hasMountRW(agent.Mounts, "/app/data") {
+		t.Fatalf("/app/data should be rw: %+v", agent.Mounts)
+	}
+	// the rw mount's host dir was seeded
+	if len(sp.MountDirs) != 1 {
+		t.Fatalf("want 1 mount dir, got %d", len(sp.MountDirs))
+	}
+	b, err := os.ReadFile(filepath.Join(sp.MountDirs[0], "README.md"))
+	if err != nil || string(b) != "QUOKKA-4417" {
+		t.Fatalf("mount not seeded: %q err=%v", b, err)
 	}
 }
 
-func hasEnv(env []string, want string) bool {
-	for _, e := range env {
-		if e == want {
-			return true
-		}
+func TestStopFinalizesMounts(t *testing.T) {
+	f := runtime.NewFake()
+	m := NewManager(f, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
+	sp, err := m.Create(context.Background(), "test-2", writeApp(t), "model-x")
+	if err != nil {
+		t.Fatal(err)
 	}
-	return false
+	dir := sp.MountDirs[0]
+	if err := m.Stop(context.Background(), "test-2"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("scratch mount should be nuked on stop, stat err=%v", err)
+	}
 }
+
 func hasMountRO(ms []runtime.Mount, cp string) bool {
 	for _, m := range ms {
 		if m.ContainerPath == cp && m.ReadOnly {

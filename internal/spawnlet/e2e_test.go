@@ -88,7 +88,7 @@ func TestEndToEndStub(t *testing.T) {
 	if err := c.Initialize(); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	if err := c.NewSession("/data"); err != nil {
+	if err := c.NewSession("/app"); err != nil {
 		t.Fatalf("session: %v", err)
 	}
 	var got strings.Builder

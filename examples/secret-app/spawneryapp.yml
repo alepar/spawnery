@@ -4,5 +4,9 @@ id: spawnery/secret
 title: Secret
 agents: { support: any, requiresAcp: [prompt] }
 model: { recommendedDefault: anthropic/claude-3.5-sonnet }
-storage: { required: true, seed: ./seed }
+storage:
+  mounts:
+    - name: main
+      path: data
+      seed: seed
 visibility: open

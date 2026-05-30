@@ -3,10 +3,11 @@ package spawnlet
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 
+	"spawnery/internal/manifest"
 	"spawnery/internal/runtime"
+	"spawnery/internal/storage"
 )
 
 type ManagerConfig struct {
@@ -15,29 +16,46 @@ type ManagerConfig struct {
 }
 
 type Manager struct {
-	rt    runtime.ContainerRuntime
-	cfg   ManagerConfig
-	store *Store
+	rt      runtime.ContainerRuntime
+	cfg     ManagerConfig
+	store   *Store
+	backend storage.Backend
 }
 
 func NewManager(rt runtime.ContainerRuntime, cfg ManagerConfig) *Manager {
 	if cfg.SidecarPort == 0 {
 		cfg.SidecarPort = 8080
 	}
-	return &Manager{rt: rt, cfg: cfg, store: NewStore()}
+	return &Manager{rt: rt, cfg: cfg, store: NewStore(), backend: storage.NewScratch(cfg.DataRoot)}
 }
 
 func (m *Manager) Store() *Store { return m.store }
 
-func (m *Manager) Create(ctx context.Context, id, appPath, dataPath, model string) (*Spawn, error) {
-	dataDir := dataPath
-	if dataDir == "" {
-		dataDir = filepath.Join(m.cfg.DataRoot, id, "data")
+func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn, error) {
+	mf, err := manifest.Parse(appPath)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: %w", err)
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("data dir: %w", err)
+
+	// /app is read-only; each declared mount is a rw overlay at /app/<path>,
+	// backed (slice: scratch) by a host dir seeded from /app/<seed>.
+	mounts := []runtime.Mount{{HostPath: appPath, ContainerPath: "/app", ReadOnly: true}}
+	var mountDirs []string
+	finalizeAll := func() {
+		for _, d := range mountDirs {
+			_ = m.backend.Finalize(ctx, d)
+		}
 	}
-	copySeed(appPath, dataDir) // best-effort scaffold
+	for _, mt := range mf.Storage.Mounts {
+		seedDir := filepath.Join(appPath, mt.Seed)
+		hostDir, err := m.backend.Prepare(ctx, id, mt.Name, seedDir)
+		if err != nil {
+			finalizeAll()
+			return nil, fmt.Errorf("prepare mount %q: %w", mt.Name, err)
+		}
+		mountDirs = append(mountDirs, hostDir)
+		mounts = append(mounts, runtime.Mount{HostPath: hostDir, ContainerPath: "/app/" + mt.Path})
+	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", m.cfg.SidecarPort)
 	sidecarID, err := m.rt.StartContainer(ctx, runtime.ContainerSpec{
@@ -48,6 +66,7 @@ func (m *Manager) Create(ctx context.Context, id, appPath, dataPath, model strin
 		},
 	})
 	if err != nil {
+		finalizeAll()
 		return nil, fmt.Errorf("sidecar: %w", err)
 	}
 
@@ -58,18 +77,16 @@ func (m *Manager) Create(ctx context.Context, id, appPath, dataPath, model strin
 			"OPENAI_BASE_URL=http://" + addr + "/v1",
 			"SPAWN_MODEL=" + model,
 		},
-		Mounts: []runtime.Mount{
-			{HostPath: appPath, ContainerPath: "/app", ReadOnly: true},
-			{HostPath: dataDir, ContainerPath: "/data"},
-		},
+		Mounts:      mounts,
 		AttachStdio: true,
 	})
 	if err != nil {
-		_ = m.rt.StopContainer(ctx, sidecarID) // rollback
+		_ = m.rt.StopContainer(ctx, sidecarID)
+		finalizeAll()
 		return nil, fmt.Errorf("agent: %w", err)
 	}
 
-	sp := &Spawn{ID: id, SidecarID: sidecarID, AgentID: agentID, DataDir: dataDir, Status: "ready"}
+	sp := &Spawn{ID: id, SidecarID: sidecarID, AgentID: agentID, MountDirs: mountDirs, Status: "ready"}
 	m.store.Put(sp)
 	return sp, nil
 }
@@ -81,23 +98,9 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	}
 	_ = m.rt.StopContainer(ctx, sp.AgentID)
 	_ = m.rt.StopContainer(ctx, sp.SidecarID)
+	for _, d := range sp.MountDirs {
+		_ = m.backend.Finalize(ctx, d)
+	}
 	m.store.Delete(id)
 	return nil
-}
-
-func copySeed(appPath, dataDir string) {
-	seed := filepath.Join(appPath, "seed")
-	entries, err := os.ReadDir(seed)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(seed, e.Name()))
-		if err == nil {
-			_ = os.WriteFile(filepath.Join(dataDir, e.Name()), b, 0o644)
-		}
-	}
 }
