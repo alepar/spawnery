@@ -16,7 +16,7 @@ func TestStubPromptEchoes(t *testing.T) {
 	acp.WriteMessage(in, acp.Message{ID: ip(2), Method: "session/new",
 		Params: json.RawMessage(`{"cwd":"/data"}`)})
 	acp.WriteMessage(in, acp.Message{ID: ip(3), Method: "session/prompt",
-		Params: json.RawMessage(`{"text":"hello"}`)})
+		Params: json.RawMessage(`{"sessionId":"stub-1","prompt":[{"type":"text","text":"hello"}]}`)})
 
 	out := &bytes.Buffer{}
 	if err := Run(io.NopCloser(in), out); err != nil && err != io.EOF {
