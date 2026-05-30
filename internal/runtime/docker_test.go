@@ -1,27 +1,28 @@
+//go:build e2e
+
 package runtime
 
 import (
 	"bufio"
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
+// requireDocker fails the test loudly when Docker is unavailable. Under the e2e
+// build tag we never skip: a broken Docker environment must surface as a test
+// failure, not a silent pass.
 func requireDocker(t *testing.T) {
 	t.Helper()
-	if os.Getenv("SKIP_DOCKER") != "" {
-		t.Skip("SKIP_DOCKER set")
-	}
 	r, err := NewDocker()
 	if err != nil {
-		t.Skipf("docker unavailable: %v", err)
+		t.Fatalf("docker unavailable: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := r.Ping(ctx); err != nil {
-		t.Skipf("docker not pingable: %v", err)
+		t.Fatalf("docker not pingable: %v", err)
 	}
 }
 

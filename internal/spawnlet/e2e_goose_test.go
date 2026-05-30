@@ -9,7 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +25,19 @@ import (
 	"spawnery/internal/spawnlet"
 )
 
-func TestEndToEndStub(t *testing.T) {
+// TestEndToEndGooseSecret exercises the whole Goose harness end to end: the
+// agent reads an instruction file (AGENTS.md, wired in by the entrypoint),
+// uses its file-read tool against the mounted /data to find an unguessable
+// secret word seeded into README.md, and recites it back. A pass proves file
+// mounts + tool-use + instructions + live inference + the byte relay all work
+// together. It requires Docker and a live OPENROUTER_API_KEY; if either is
+// missing it FAILS loudly (no skips) so a broken env is detected.
+func TestEndToEndGooseSecret(t *testing.T) {
+	key := os.Getenv("OPENROUTER_API_KEY")
+	if key == "" {
+		t.Fatal("OPENROUTER_API_KEY is required for the Goose e2e test")
+	}
+
 	rt, err := runtime.NewDocker()
 	if err != nil {
 		t.Fatalf("docker unavailable: %v", err)
@@ -35,9 +47,9 @@ func TestEndToEndStub(t *testing.T) {
 	}
 
 	mgr := spawnlet.NewManager(rt, spawnlet.ManagerConfig{
-		AgentImage:    "spawnery/stubagent:dev",
+		AgentImage:    "spawnery/goose:dev",
 		SidecarImage:  "spawnery/sidecar:dev",
-		OpenRouterKey: "unused",
+		OpenRouterKey: key,
 		DataRoot:      t.TempDir(),
 	})
 	mux := http.NewServeMux()
@@ -46,8 +58,8 @@ func TestEndToEndStub(t *testing.T) {
 	srv.Start()
 	defer srv.Close()
 
-	// CRITICAL: srv.Client() is HTTP/1.1 only and cannot handle gRPC bidi streams.
-	// Build an h2c client (cleartext HTTP/2) pointing at srv.URL instead.
+	// srv.Client() is HTTP/1.1 only; build an h2c (cleartext HTTP/2) client so
+	// the gRPC bidi Session stream works.
 	hc := &http.Client{
 		Transport: &http2.Transport{
 			AllowHTTP: true,
@@ -58,12 +70,12 @@ func TestEndToEndStub(t *testing.T) {
 	}
 
 	cl := spawnv1connect.NewSpawnServiceClient(hc, srv.URL, connect.WithGRPC())
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	cs, err := cl.CreateSpawn(ctx, connect.NewRequest(&spawnv1.CreateSpawnRequest{
 		AppPath: mustAbs(t, "../../examples/secret-app"),
-		Model:   "x",
+		Model:   "openai/gpt-oss-120b:free",
 	}))
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -92,38 +104,12 @@ func TestEndToEndStub(t *testing.T) {
 		t.Fatalf("session: %v", err)
 	}
 	var got strings.Builder
-	if err := c.Prompt("hello", func(s string) { got.WriteString(s) }); err != nil {
+	if err := c.Prompt("What is the secret word?", func(s string) { got.WriteString(s) }); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if !strings.Contains(got.String(), "ECHO: hello") {
-		t.Fatalf("got %q", got.String())
+	reply := got.String()
+	t.Logf("agent reply: %q", reply)
+	if !strings.Contains(reply, "QUOKKA-4417") {
+		t.Fatalf("agent did not recite the secret; got %q", reply)
 	}
-}
-
-// mustAbs resolves rel relative to this file's directory and returns an absolute path.
-func mustAbs(t *testing.T, rel string) string {
-	t.Helper()
-	// __file__ is internal/spawnlet, so ../../examples/secret-app is correct
-	abs, err := filepath.Abs(filepath.Join(".", rel))
-	if err != nil {
-		t.Fatalf("mustAbs(%q): %v", rel, err)
-	}
-	return abs
-}
-
-// writerTo returns an io.Writer that sends each Write as a Frame on the stream.
-type streamWriter struct {
-	stream  *connect.BidiStreamForClient[spawnv1.Frame, spawnv1.Frame]
-	spawnID string
-}
-
-func writerTo(stream *connect.BidiStreamForClient[spawnv1.Frame, spawnv1.Frame], id string) io.Writer {
-	return &streamWriter{stream: stream, spawnID: id}
-}
-
-func (w *streamWriter) Write(b []byte) (int, error) {
-	if err := w.stream.Send(&spawnv1.Frame{SpawnId: w.spawnID, Data: b}); err != nil {
-		return 0, err
-	}
-	return len(b), nil
 }

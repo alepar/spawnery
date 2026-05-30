@@ -22,7 +22,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", "http://127.0.0.1:9090", "spawnlet address")
-	appPath := flag.String("app", "examples/hello-app", "app definition dir")
+	appPath := flag.String("app", "examples/secret-app", "app definition dir")
 	model := flag.String("model", "anthropic/claude-3.5-sonnet", "OpenRouter model")
 	flag.Parse()
 

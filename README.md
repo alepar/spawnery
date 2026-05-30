@@ -60,7 +60,7 @@ go build -o bin/spawnctl ./cmd/spawnctl
 AGENT_IMAGE=spawnery/stubagent:dev SIDECAR_IMAGE=spawnery/sidecar:dev \
   DATA_ROOT=$(pwd)/.spawns OPENROUTER_API_KEY=unused bin/spawnlet &
 
-printf 'hello\n' | bin/spawnctl -app "$(pwd)/examples/hello-app" -model x
+printf 'hello\n' | bin/spawnctl -app "$(pwd)/examples/secret-app" -model x
 # => ECHO: hello
 ```
 
@@ -85,10 +85,11 @@ AGENT_IMAGE=spawnery/goose:dev SIDECAR_IMAGE=spawnery/sidecar:dev \
   DATA_ROOT=$(pwd)/.spawns bin/spawnlet &
 
 # Pick a free, tool-capable OpenRouter chat model. The -app path must be ABSOLUTE
-# (it is bind-mounted read-only into the agent at /app).
-printf 'What is the capital of France? Answer in one short sentence.\n' \
-  | bin/spawnctl -app "$(pwd)/examples/hello-app" -model "openai/gpt-oss-120b:free"
-# => Paris is the capital of France.
+# (it is bind-mounted read-only into the agent at /app). secret-app ships an
+# AGENTS.md telling the agent to read the secret from its /data/README.md.
+printf 'What is the secret word?\n' \
+  | bin/spawnctl -app "$(pwd)/examples/secret-app" -model "openai/gpt-oss-120b:free"
+# => QUOKKA-4417   (the agent read AGENTS.md, used its file tool on /data/README.md, and recited it)
 ```
 
 A real model-generated reply streams back through the spawnlet. Each spawn's
