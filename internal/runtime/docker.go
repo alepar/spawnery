@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"io"
+	"log"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
@@ -46,10 +47,15 @@ func (d *Docker) StartContainer(ctx context.Context, s ContainerSpec) (string, e
 		return "", err
 	}
 	if err := d.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
+		_ = d.cli.ContainerRemove(context.WithoutCancel(ctx), created.ID, container.RemoveOptions{Force: true})
 		return "", err
 	}
 	return created.ID, nil
 }
+
+type logWriter struct{ prefix string }
+
+func (l logWriter) Write(p []byte) (int, error) { log.Printf("%s%s", l.prefix, p); return len(p), nil }
 
 func bind(m Mount) string {
 	b := m.HostPath + ":" + m.ContainerPath
@@ -69,18 +75,23 @@ func (d *Docker) Attach(ctx context.Context, id string) (*AttachedStream, error)
 	// Demux multiplexed stdout into a pipe (non-TTY attach is framed).
 	pr, pw := io.Pipe()
 	go func() {
-		_, err := stdcopy.StdCopy(pw, io.Discard, hijack.Reader)
+		_, err := stdcopy.StdCopy(pw, logWriter{prefix: "[agent-stderr] "}, hijack.Reader)
 		pw.CloseWithError(err)
 	}()
 	return &AttachedStream{
 		Stdin:  hijack.Conn,
 		Stdout: pr,
-		Close:  func() error { hijack.Close(); return nil },
+		Close:  func() error { hijack.Close(); pr.CloseWithError(io.ErrClosedPipe); return nil },
 	}, nil
 }
 
 func (d *Docker) StopContainer(ctx context.Context, id string) error {
+	ctx = context.WithoutCancel(ctx)
 	to := 0
 	_ = d.cli.ContainerStop(ctx, id, container.StopOptions{Timeout: &to})
-	return d.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+	err := d.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+	if err != nil && client.IsErrNotFound(err) {
+		return nil
+	}
+	return err
 }

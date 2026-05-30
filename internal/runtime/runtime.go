@@ -23,6 +23,7 @@ type ContainerSpec struct {
 
 // AttachedStream is the agent's bidirectional stdio (demuxed stdout).
 type AttachedStream struct {
+	// Stdin: do not Close independently — closing it tears down the whole attach; use Close() for teardown.
 	Stdin  io.WriteCloser
 	Stdout io.Reader
 	Close  func() error
