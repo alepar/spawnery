@@ -1,4 +1,5 @@
 import { defineConfig } from "vite";
+import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
@@ -11,5 +12,8 @@ export default defineConfig({
   },
   test: {
     passWithNoTests: true,
+    // e2e/ holds Playwright specs (own runner via `npm run test:e2e`); keep them
+    // out of the hermetic Vitest unit run.
+    exclude: [...configDefaults.exclude, "e2e/**"],
   },
 });
