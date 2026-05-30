@@ -12,7 +12,15 @@
 > **GitHub** (power-user). **Managed is the default** (zero-setup for non-techs, `sp-0a2`); spawned
 > repos default **private**. The incremental-blob + debounced-persist notes (§5) are in scope.
 
-Owns the data side of "your data stays yours": the uniform `/data` substrate, the provider-adapter
+> **⚠️ Amended by [Per-Mount Data Backends](2026-05-29-data-mounts-design.md):** the single rw
+> `/data` substrate is replaced by **N named data mounts inside `/app`** (`/app/<path>`, cwd=`/app`),
+> each seeded from an app seed dir and bound (by name, in `spawn.yml`) to a **per-mount
+> `StorageBackend`** (`Prepare`/`Finalize`). The GitHub/blob adapters below become *backend
+> implementations* of that interface, applied per-mount; seed-when-empty-else-materialize still
+> holds for persistent backends. Read the new design doc as authoritative for the mount/backend
+> shape; the materialize/persist/credential/conflict mechanics here still apply per backend.
+
+Owns the data side of "your data stays yours": the per-mount data substrate, the storage-backend
 interface and implementations, provisioning, credential custody + refresh, persistence cadence,
 conflict handling, and the on-repo layout.
 

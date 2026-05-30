@@ -7,6 +7,14 @@
 [E0 contracts](2026-05-26-spawnery-e0-contracts-design.md) +
 [E2 model layer](2026-05-27-spawnery-e2-model-layer-design.md), reduced to a single-box slice.
 
+> **⚠️ Amended by [Per-Mount Data Backends](2026-05-29-data-mounts-design.md):** the mount model
+> changed after this slice shipped. **cwd is now `/app`** (not `/data`); data lives in **named rw
+> mounts inside `/app`** (`/app/<path>`); the slice implements only the **`scratch`** backend
+> (seed-then-nuke) behind a `StorageBackend` seam; the `/data` mount, the `copySeed`-to-`/data`, and
+> the entrypoint `AGENTS.md` copy are **removed** (Goose reads `/app/AGENTS.md` in place). `Stop` now
+> finalizes mounts (scratch nukes). See the data-mounts design for the authoritative mount/teardown
+> shape; §5/§7/§8 below describe the pre-amendment slice.
+
 ---
 
 ## 1. Goal & boundary

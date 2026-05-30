@@ -154,9 +154,14 @@ App definition into the user's repo at spawn time — is post-MVP.)
 
 ## 5. Data & storage
 
-- **Universal substrate = a git repo of files.** Each App defines its own schema inside
-  `/data`; the container always sees one **uniform git-working-tree mount**. History,
-  diffing, and "clone it anywhere" come free.
+> **⚠️ Amended by [Per-Mount Data Backends](2026-05-29-data-mounts-design.md):** the substrate is a
+> **set of named data mounts inside `/app`** (`/app/<path>`, cwd=`/app`), each independently seeded
+> and **independently backed** (scratch / git / blob / managed) — not a single `/data` repo. Bindings
+> are per-mount, by name, in `spawn.yml`. The git-repo-of-files description below applies *per
+> persistent mount*.
+
+- **Universal substrate = a git repo of files** (per persistent mount). Each App declares named data
+  folders inside `/app`; each is a working tree. History, diffing, and "clone it anywhere" come free.
   - *Deferred:* a high-write / large-binary App would need a DB-backed storage provider; the
     abstraction allows adding one. Not built now.
 - **Provider adapters** do two things: *materialize* the repo into `/data` at session start,

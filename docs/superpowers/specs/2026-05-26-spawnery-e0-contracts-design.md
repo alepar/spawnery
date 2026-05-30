@@ -98,10 +98,12 @@ model:                             # capability contract; catalog filters compat
 
 runtime: { baseVersion: ">=1.0" }
 
-storage:                           # spec'd by E3 (2026-05-28-spawnery-e3-storage-design.md §8)
-  required: true                   # false for storage-less apps (e.g. zork)
-  schema: ./storage-schema.md      # documents the layout under /data
-  seed: ./seed/                    # scaffold dir copied on first materialize
+storage:                           # NAMED per-mount model — see 2026-05-29-data-mounts-design.md
+  mounts:                          # the app declares named data folders inside /app (cwd)
+    - name: main                   # stable key; spawn.yml binds a backend BY NAME
+      path: data                   # -> /app/data (rw overlay)
+      seed: seed                   # -> /app/seed (ro); seeds a fresh mount
+  # (replaces the old single required/schema/seed block; storage-less apps: mounts: [])
 
 # personalization -> POST-MVP (TODO.md)
 # permissions     -> POST-MVP (TODO.md)
