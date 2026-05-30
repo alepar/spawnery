@@ -21,14 +21,22 @@ export class Conn {
   }
 
   private onData(data: any) {
+    // stream:true keeps a multi-byte UTF-8 char that's split across frames intact.
     const text =
-      typeof data === "string" ? data : this.dec.decode(new Uint8Array(data as ArrayBuffer));
+      typeof data === "string"
+        ? data
+        : this.dec.decode(new Uint8Array(data as ArrayBuffer), { stream: true });
     this.buf += text;
     let i: number;
     while ((i = this.buf.indexOf("\n")) >= 0) {
       const line = this.buf.slice(0, i);
       this.buf = this.buf.slice(i + 1);
-      if (line.trim()) this.onMessage(JSON.parse(line) as Message);
+      if (!line.trim()) continue;
+      try {
+        this.onMessage(JSON.parse(line) as Message);
+      } catch (e) {
+        console.error("acp: bad frame", e, line);
+      }
     }
   }
 
