@@ -6,7 +6,7 @@ type Spawn struct {
 	ID        string
 	SidecarID string
 	AgentID   string
-	DataDir   string
+	MountDirs []string // host dirs backing this spawn's mounts (for Finalize)
 	Status    string
 }
 

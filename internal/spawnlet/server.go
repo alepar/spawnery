@@ -28,7 +28,7 @@ func newID() string {
 
 func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[spawnv1.CreateSpawnRequest]) (*connect.Response[spawnv1.CreateSpawnResponse], error) {
 	id := newID()
-	if _, err := s.m.Create(ctx, id, req.Msg.AppPath, req.Msg.DataPath, req.Msg.Model); err != nil {
+	if _, err := s.m.Create(ctx, id, req.Msg.AppPath, req.Msg.Model); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&spawnv1.CreateSpawnResponse{SpawnId: id}), nil
