@@ -71,7 +71,7 @@ func main() {
 	if err := c.Initialize(); err != nil {
 		log.Fatal(err)
 	}
-	if err := c.NewSession("/data"); err != nil {
+	if err := c.NewSession("/app"); err != nil {
 		log.Fatal(err)
 	}
 

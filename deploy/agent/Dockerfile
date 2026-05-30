@@ -34,5 +34,5 @@ RUN apt-get update \
 COPY --from=fetch /usr/local/bin/goose /usr/local/bin/goose
 COPY deploy/agent/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-WORKDIR /data
+WORKDIR /app
 ENTRYPOINT ["/entrypoint.sh"]
