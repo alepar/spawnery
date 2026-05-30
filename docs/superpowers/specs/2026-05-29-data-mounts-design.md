@@ -31,7 +31,13 @@ seeded and independently backed (e.g. one folder backed by GitHub, another scrat
 - Each declared mount is a **read-write bind-mount overlaid at `/app/<path>`** (e.g. `/app/data`).
   Docker nested binds make these rw islands on the otherwise-ro `/app`. **The agent writes only into
   its mounts; the app definition stays immutable.** (Goose's own scratch/state goes to `$HOME`, not
-  cwd, so a read-only cwd is fine — verify empirically as we did for `AGENTS.md`.)
+  cwd, so a read-only cwd is fine — **verified: Goose v1.36 runs fine with a read-only `/app` cwd**.)
+  - **Mountpoint must pre-exist in the ro `/app` source (runc constraint, `sp-f4v`):** runc cannot
+    create the nested mount destination `/app/<path>` inside an already-read-only `/app`, so the
+    `<path>` dir must exist in the bind source. **Slice convention:** the app ships the (empty) mount
+    dir (e.g. `examples/secret-app/data/.gitkeep`). **Full design:** when `/app` is assembled per-spawn
+    from `App@sha`, assembly creates the mountpoints — or the node `mkdir`s them in the (host-writable)
+    app dir before the ro bind. Tracked as a follow-up.
 - **The only copy operation is seeding** a fresh mount from its seed dir.
 
 > Note: a mount's seed dir (e.g. `/app/seed`) remains visible read-only in `/app` alongside the
