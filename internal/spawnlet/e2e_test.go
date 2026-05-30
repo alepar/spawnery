@@ -62,7 +62,7 @@ func TestEndToEndStub(t *testing.T) {
 	defer cancel()
 
 	cs, err := cl.CreateSpawn(ctx, connect.NewRequest(&spawnv1.CreateSpawnRequest{
-		AppPath: mustAbs(t, "../../examples/hello-app"),
+		AppPath: mustAbs(t, "../../examples/secret-app"),
 		Model:   "x",
 	}))
 	if err != nil {
@@ -103,7 +103,7 @@ func TestEndToEndStub(t *testing.T) {
 // mustAbs resolves rel relative to this file's directory and returns an absolute path.
 func mustAbs(t *testing.T, rel string) string {
 	t.Helper()
-	// __file__ is internal/spawnlet, so ../../examples/hello-app is correct
+	// __file__ is internal/spawnlet, so ../../examples/secret-app is correct
 	abs, err := filepath.Abs(filepath.Join(".", rel))
 	if err != nil {
 		t.Fatalf("mustAbs(%q): %v", rel, err)
