@@ -32,6 +32,9 @@ func NewManager(rt runtime.ContainerRuntime, cfg ManagerConfig) *Manager {
 func (m *Manager) Store() *Store { return m.store }
 
 func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn, error) {
+	if abs, err := filepath.Abs(appPath); err == nil {
+		appPath = abs
+	}
 	mf, err := manifest.Parse(appPath)
 	if err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)

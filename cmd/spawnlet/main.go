@@ -24,8 +24,10 @@ func main() {
 		OpenRouterKey: os.Getenv("OPENROUTER_API_KEY"),
 		DataRoot:      env("DATA_ROOT", "/var/lib/spawnlet/spawns"),
 	})
+	srv := spawnlet.NewServer(mgr)
 	mux := http.NewServeMux()
-	mux.Handle(spawnv1connect.NewSpawnServiceHandler(spawnlet.NewServer(mgr)))
+	mux.Handle(spawnv1connect.NewSpawnServiceHandler(srv))
+	mux.HandleFunc("/ws/session", srv.HandleWS)
 
 	addr := env("SPAWNLET_ADDR", "127.0.0.1:9090")
 	log.Printf("spawnlet listening on %s", addr)
