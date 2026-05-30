@@ -50,11 +50,14 @@ export function App() {
   }, []);
 
   const add = (it: Item) => setItems((xs) => [...xs, it]);
-  const appendAgent = (t: string) =>
+  // Streamed chunks arrive one-per-frame; coalesce consecutive chunks of the
+  // same kind into a single block (so a streamed thought/message renders as one
+  // bubble, not one per word). A different-kind item between runs closes the block.
+  const appendChunk = (kind: "agent" | "thought") => (t: string) =>
     setItems((xs) => {
       const last = xs[xs.length - 1];
-      if (last && last.kind === "agent") return [...xs.slice(0, -1), { kind: "agent", text: last.text + t }];
-      return [...xs, { kind: "agent", text: t }];
+      if (last && last.kind === kind) return [...xs.slice(0, -1), { kind, text: last.text + t }];
+      return [...xs, { kind, text: t }];
     });
 
   const onSend = async (text: string) => {
@@ -63,8 +66,8 @@ export function App() {
     setBusy(true);
     try {
       await clientRef.current.prompt(text, {
-        onText: appendAgent,
-        onThought: (t) => add({ kind: "thought", text: t }),
+        onText: appendChunk("agent"),
+        onThought: appendChunk("thought"),
         onToolCall: (tc) => add({ kind: "tool", title: tc.title, status: tc.status }),
         onToolUpdate: (tc) => add({ kind: "tool", title: "tool", status: tc.status }),
         requestPermission: (req) =>
