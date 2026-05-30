@@ -3,3 +3,15 @@
 .dolt/
 *.db
 .beads-credential-key
+
+/bin/
+/.spawns/
+# stray root-level build outputs (use /bin/ instead)
+/spawnlet
+/spawnctl
+/sidecar
+/stubagent
+*.test
+*.out
+.env
+.env.*
