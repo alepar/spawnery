@@ -135,6 +135,26 @@ The browser's exact transport and flow are covered automatically by
 drives the real Goose agent through `/ws/session` and asserts the recited secret.
 The manual browser click-through above is the final human verification step.
 
+### Browser e2e
+
+A Playwright test (`web/e2e/chat.spec.ts`) drives the same flow in a real headless
+Chromium against the **stub agent** (deterministic, no API key): it loads the app,
+waits for the status banner to reach **ready**, sends `say <token>`, and asserts the
+agent bubble echoes `ECHO: say <token>`.
+
+Requirements: Docker (the test starts a real spawnlet that runs the
+`spawnery/stubagent:dev` + `spawnery/sidecar:dev` images — build them with
+`make images` if missing) and a one-time Chromium install.
+
+```bash
+cd web
+npx playwright install chromium   # one-time
+npm run test:e2e
+```
+
+Playwright's `globalSetup` builds `bin/spawnlet`, launches it with the stub image on
+:9090, and proxies through Vite; `globalTeardown` stops the spawnlet.
+
 ### How Goose is configured (deploy/agent)
 
 The Goose base image installs a pinned, static (musl) Goose release and launches
