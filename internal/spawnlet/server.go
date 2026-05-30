@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 
 	"connectrpc.com/connect"
 	spawnv1 "spawnery/gen/spawn/v1"
@@ -48,7 +49,7 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[spawnv1
 	}
 	sp, ok := s.m.Store().Get(first.SpawnId)
 	if !ok {
-		return connect.NewError(connect.CodeNotFound, nil)
+		return connect.NewError(connect.CodeNotFound, fmt.Errorf("spawn not found: %s", first.SpawnId))
 	}
 	att, err := s.rt.Attach(ctx, sp.AgentID)
 	if err != nil {
