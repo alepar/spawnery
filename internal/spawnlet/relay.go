@@ -24,13 +24,15 @@ func Relay(ctx context.Context, ep StreamEndpoint, io_ AgentIO) {
 	go func() {
 		for {
 			b, err := ep.Recv()
-			if err != nil || len(b) == 0 {
+			if err != nil {
 				done <- struct{}{}
 				return
 			}
-			if _, werr := io_.Stdin.Write(b); werr != nil {
-				done <- struct{}{}
-				return
+			if len(b) > 0 {
+				if _, werr := io_.Stdin.Write(b); werr != nil {
+					done <- struct{}{}
+					return
+				}
 			}
 		}
 	}()
