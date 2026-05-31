@@ -57,6 +57,11 @@ the burst orchestrator. See [E0 contracts](2026-05-26-spawnery-e0-contracts-desi
 
 ## 2. Domain model
 
+> **⚠️ Lifecycle made explicit by [Spawn Lifecycle](2026-05-31-spawn-lifecycle-design.md):** the
+> **Spawn** below is a durable, resumable instance with an explicit **active ↔ suspended** state
+> machine (create · attach/detach · suspend · resume · delete). That spec is **authoritative for
+> the spawn state machine**; the "instance binding …" description here is the data it carries.
+
 - **App ("coach")** — a *definition repo* containing **`spawneryapp.yml`** (manifest) plus
   persona, skills/instructions, and the declared bundled toolset. Visibility is **open**
   (public, inspectable, runs anywhere incl. self-host) or **private** (closed, cloud-only).
@@ -89,6 +94,14 @@ App definition into the user's repo at spawn time — is post-MVP.)
 ---
 
 ## 3. Runtime & execution
+
+> **⚠️ "Ephemeral, scale-to-zero" is the spawn lifecycle —
+> [Spawn Lifecycle](2026-05-31-spawn-lifecycle-design.md) is authoritative:** "woken per session,
+> torn down on idle" = **resume / suspend**. That spec defines the state machine
+> (`starting·active·suspending·suspended·error·deleted`), two-stage per-node idle timeouts,
+> **data-only** suspend/resume via a `git` WIP ref (uncommitted work preserved), single-session
+> takeover, and crash→`suspended` reconciliation. **Requires a persistent storage backend (E3)** —
+> `resume` is meaningless on `Scratch`.
 
 - **No custom agent loop, no plugin registry (MVP).** A spawn runs an **existing agent** with
   its tools **bundled into the OCI image**. Spawnery drives the agent over **ACP — the Agent
