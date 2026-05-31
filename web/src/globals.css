@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+/* dark is class-based so React controls it (not just OS preference) */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Layer 1 — primitives (shadcn init adds the semantic tokens in Task 3) */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
