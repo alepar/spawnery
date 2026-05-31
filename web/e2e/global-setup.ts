@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, ChildProcess } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -7,12 +7,13 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, "..", ".."); // web/e2e -> repo root
-const PID_FILE = path.join(os.tmpdir(), "spawnery-e2e-spawnlet.pid");
+const CP_PID = path.join(os.tmpdir(), "spawnery-e2e-cp.pid");
+const NODE_PID = path.join(os.tmpdir(), "spawnery-e2e-node.pid");
 
-function run(cmd: string, args: string[], cwd: string): Promise<void> {
+function build(out: string, pkg: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { cwd, stdio: "inherit" });
-    p.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} exited ${code}`))));
+    const p = spawn("go", ["build", "-o", path.join(REPO, "bin", out), pkg], { cwd: REPO, stdio: "inherit" });
+    p.on("exit", (c) => (c === 0 ? resolve() : reject(new Error(`go build ${pkg} exited ${c}`))));
     p.on("error", reject);
   });
 }
@@ -25,7 +26,7 @@ function waitForPort(host: string, port: number, timeoutMs: number): Promise<voi
       s.once("connect", () => { s.destroy(); resolve(); });
       s.once("error", () => {
         s.destroy();
-        if (Date.now() > deadline) reject(new Error(`spawnlet did not open ${host}:${port} in ${timeoutMs}ms`));
+        if (Date.now() > deadline) reject(new Error(`nothing listening on ${host}:${port} in ${timeoutMs}ms`));
         else setTimeout(tick, 250);
       });
     };
@@ -34,24 +35,36 @@ function waitForPort(host: string, port: number, timeoutMs: number): Promise<voi
 }
 
 export default async function globalSetup() {
-  // 1. build the spawnlet binary
-  await run("go", ["build", "-o", path.join(REPO, "bin", "spawnlet"), "./cmd/spawnlet"], REPO);
+  await build("cp", "./cmd/cp");
+  await build("spawnlet", "./cmd/spawnlet");
 
-  // 2. start it with the STUB agent image (deterministic; no key needed)
-  const child = spawn(path.join(REPO, "bin", "spawnlet"), [], {
-    cwd: REPO, // so the hardcoded relative examples/secret-app resolves
+  const cp = spawn(path.join(REPO, "bin", "cp"), [], {
+    cwd: REPO,
     env: {
       ...process.env,
+      CP_LISTEN: "127.0.0.1:8080",
+      CP_DEV_TOKENS: "dev-token=alice",
+      CP_TELEMETRY: path.join(os.tmpdir(), "spawnery-e2e-events.jsonl"),
+    },
+    stdio: "inherit",
+  });
+  writeFileSync(CP_PID, String(cp.pid));
+  await waitForPort("127.0.0.1", 8080, 15_000);
+
+  const node: ChildProcess = spawn(path.join(REPO, "bin", "spawnlet"), [], {
+    cwd: REPO, // so the relative examples/secret-app app_ref resolves
+    env: {
+      ...process.env,
+      CP_ADDR: "http://127.0.0.1:8080",
+      NODE_ID: "node-1",
       AGENT_IMAGE: "spawnery/stubagent:dev",
       SIDECAR_IMAGE: "spawnery/sidecar:dev",
       OPENROUTER_API_KEY: "unused",
       DATA_ROOT: path.join(REPO, ".spawns"),
-      SPAWNLET_ADDR: "127.0.0.1:9090",
     },
     stdio: "inherit",
   });
-  writeFileSync(PID_FILE, String(child.pid));
-
-  // 3. wait until it's listening, else FAIL the run (no silent skip)
-  await waitForPort("127.0.0.1", 9090, 15_000);
+  writeFileSync(NODE_PID, String(node.pid));
+  // give the node a moment to dial + register with the CP
+  await new Promise((r) => setTimeout(r, 1500));
 }

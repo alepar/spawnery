@@ -2,6 +2,7 @@ set dotenv-load := true              # auto-load .env (OPENROUTER_API_KEY) if pr
 
 repo      := justfile_directory()
 addr      := "127.0.0.1:9090"
+addr_cp   := "127.0.0.1:8080"
 free      := "openai/gpt-oss-120b:free"
 data_root := repo / ".spawns"
 
@@ -16,6 +17,19 @@ spawnlet agent="goose": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "goose" } }}:dev; \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev \
     DATA_ROOT={{data_root}} SPAWNLET_ADDR={{addr}} \
+    OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
+    {{repo}}/bin/spawnlet
+
+# control plane (foreground)
+cp:
+    @make bin/cp
+    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/cp
+
+# spawnlet attached to the CP (goose by default; `just node stub` for the echo agent)
+node agent="goose": (_images agent)
+    @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "goose" } }}:dev; \
+    AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
+    CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
     {{repo}}/bin/spawnlet
 

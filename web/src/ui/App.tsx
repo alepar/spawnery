@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { createSpawn, stopSpawn } from "../api/spawnlet";
+import { createSpawn, stopSpawn, DEV_TOKEN } from "../api/spawnlet";
 import { Client } from "../acp/client";
 import { ChatLog, type Item } from "./ChatLog";
 import { PromptInput } from "./PromptInput";
 import { PermissionModal } from "./PermissionModal";
 import "./app.css";
 
-const APP_PATH = "examples/secret-app";
+const APP_ID = "secret-app";
 const MODEL = "openai/gpt-oss-120b:free";
 
 export function App() {
@@ -22,14 +22,14 @@ export function App() {
     let alive = true;
     (async () => {
       try {
-        const id = await createSpawn(APP_PATH, MODEL);
+        const id = await createSpawn(APP_ID, MODEL);
         if (!alive) { stopSpawn(id); return; }
         spawnRef.current = id;
         const ws = new WebSocket(`ws://${location.host}/ws/session`);
         ws.binaryType = "arraybuffer";
         wsRef.current = ws;
         ws.onopen = async () => {
-          ws.send(JSON.stringify({ spawnId: id }));
+          ws.send(JSON.stringify({ spawnId: id, token: DEV_TOKEN }));
           const c = new Client(ws as any);
           clientRef.current = c;
           await c.initialize();

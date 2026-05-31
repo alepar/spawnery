@@ -69,11 +69,18 @@ docker build -t spawnery/goose:dev     -f deploy/agent/Dockerfile     .   # Goos
 ### Dev stack
 
 ```bash
-just dev          # spawnlet (goose) + web UI in mprocs panes, one Ctrl-C
+just dev          # CP + an attached node (goose) + web UI in mprocs panes, one Ctrl-C
 # or run them separately:
-just spawnlet     # goose (real LLM);  `just spawnlet stub` for the deterministic echo
+just cp           # control plane on :8080 (dev token `dev-token` -> owner alice)
+just node         # spawnlet attached to the CP; `just node stub` for the deterministic echo
 just web          # vite --host on :5173
 ```
+
+`just dev` now runs **CP + an attached node + web**: the browser talks to the CP
+with a dev token (`Authorization: Bearer dev-token`), the CP routes to the node,
+and the node relays ACP to the agent container. For CP-less direct dev the
+original path still works: `just spawnlet` (standalone) + `just spawnctl`
+(no `-cp`) talk straight to the spawnlet.
 
 ### Drive it from the CLI
 
