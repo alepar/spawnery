@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { createSpawn, stopSpawn, DEV_TOKEN } from "../api/spawnlet";
-import { Client } from "../acp/client";
-import { ChatLog, type Item } from "./ChatLog";
-import { PromptInput } from "./PromptInput";
-import { PermissionModal } from "./PermissionModal";
-import "./app.css";
+import { toast } from "sonner";
+import { createSpawn, stopSpawn, DEV_TOKEN } from "./api/spawnlet";
+import { Client } from "./acp/client";
+import { AppShell } from "./shell/AppShell";
+import { initialTheme, setTheme } from "./lib/theme";
+import type { Item } from "./views/chat/types";
 
 const APP_ID = "secret-app";
 const MODEL = "openai/gpt-oss-120b:free";
@@ -17,6 +17,9 @@ export function App() {
   const clientRef = useRef<Client | null>(null);
   const spawnRef = useRef<string>("");
   const wsRef = useRef<WebSocket | null>(null);
+  const idRef = useRef(0);
+
+  useEffect(() => { setTheme(initialTheme()); }, []);
 
   useEffect(() => {
     let alive = true;
@@ -36,10 +39,10 @@ export function App() {
           await c.newSession("/app");
           if (alive) { setStatus("ready"); setBusy(false); }
         };
-        ws.onerror = () => alive && setStatus("connection error");
+        ws.onerror = () => { if (alive) { setStatus("connection error"); toast.error("Connection error"); } };
         ws.onclose = () => alive && setStatus("session ended");
       } catch (e: any) {
-        if (alive) setStatus("error: " + e.message);
+        if (alive) { setStatus("error: " + e.message); toast.error("Spawn failed: " + e.message); }
       }
     })();
     return () => {
@@ -49,15 +52,18 @@ export function App() {
     };
   }, []);
 
-  const add = (it: Item) => setItems((xs) => [...xs, it]);
-  // Streamed chunks arrive one-per-frame; coalesce consecutive chunks of the
-  // same kind into a single block (so a streamed thought/message renders as one
-  // bubble, not one per word). A different-kind item between runs closes the block.
+  type ItemInput = Item extends infer T ? (T extends { id: number } ? Omit<T, "id"> : never) : never;
+  const add = (it: ItemInput) =>
+    setItems((xs) => [...xs, { ...it, id: idRef.current++ } as Item]);
+
+  // Streamed chunks arrive one-per-frame; coalesce consecutive chunks of the same kind
+  // into a single block (so a streamed thought/message renders as one bubble). The id is
+  // kept stable across appends so the virtualized row memoizes correctly.
   const appendChunk = (kind: "agent" | "thought") => (t: string) =>
     setItems((xs) => {
       const last = xs[xs.length - 1];
-      if (last && last.kind === kind) return [...xs.slice(0, -1), { kind, text: last.text + t }];
-      return [...xs, { kind, text: t }];
+      if (last && last.kind === kind) return [...xs.slice(0, -1), { ...last, text: last.text + t }];
+      return [...xs, { id: idRef.current++, kind, text: t } as Item];
     });
 
   const onSend = async (text: string) => {
@@ -79,12 +85,5 @@ export function App() {
     }
   };
 
-  return (
-    <div className="app">
-      <header>Spawnery — secret-app <span className="status">{status}</span></header>
-      <ChatLog items={items} />
-      <PromptInput disabled={busy} onSend={onSend} />
-      {perm && <PermissionModal title={perm.title} onResolve={perm.resolve} />}
-    </div>
-  );
+  return <AppShell status={status} items={items} busy={busy} onSend={onSend} perm={perm} />;
 }
