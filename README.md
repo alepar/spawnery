@@ -109,17 +109,18 @@ torn down when the client sends `StopSpawn`.
 ## Web client (demo)
 
 A React+TypeScript single-page app (`web/`) drives a spawn straight from the
-browser: it calls `CreateSpawn` over Connect-JSON (`fetch`), opens a WebSocket to
-the spawnlet's `GET /ws/session` endpoint (which reuses the same transparent byte
-relay as the ConnectRPC `Session` stream), and speaks ACP itself — `initialize`,
-`session/new`, `session/prompt` — streaming `session/update`s into a chat UI
-(agent bubbles, tool-call chips, collapsible thoughts, a permission modal). Vite
-dev-proxies both paths to the spawnlet, so it's one origin (no CORS).
+browser: it calls `CreateSpawn` over Connect-JSON (`fetch`, with a dev bearer
+token), opens a WebSocket to the **CP**'s `GET /ws/session` endpoint (which
+relays through the same transparent byte path down to the node and agent), and
+speaks ACP itself — `initialize`, `session/new`, `session/prompt` — streaming
+`session/update`s into a chat UI (agent bubbles, tool-call chips, collapsible
+thoughts, a permission modal). Vite dev-proxies both paths to the CP (`:8080`),
+so it's one origin (no CORS).
 
 Run the whole stack with one command from the repo root:
 
 ```bash
-just dev          # spawnlet (goose) + vite in mprocs panes — open http://localhost:5173
+just dev          # CP + attached node (goose) + vite in mprocs panes — open http://localhost:5173
 ```
 
 In the browser the status banner goes **starting... → ready**. Type
@@ -148,8 +149,9 @@ Requirements: Docker (the test starts a real spawnlet that runs the
 just test-web-e2e
 ```
 
-Playwright's `globalSetup` builds `bin/spawnlet`, launches it with the stub image on
-:9090, and proxies through Vite; `globalTeardown` stops the spawnlet.
+Playwright's `globalSetup` builds `bin/cp` + `bin/spawnlet`, starts the CP on
+:8080 and an attached node with the stub image, and proxies through Vite;
+`globalTeardown` stops both.
 
 ### How Goose is configured (deploy/agent)
 
