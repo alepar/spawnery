@@ -31,71 +31,59 @@ unavailable.
 
 ## Running the slice
 
-The slice runs end-to-end two ways: with the deterministic **stub agent** (no
-network, no LLM) and with real **Goose + OpenRouter**.
-
-### 1. Build the images
+One-time setup (installs tooling the `just` recipes use — `mprocs`, the Playwright
+browser, web deps):
 
 ```bash
-docker build -t spawnery/sidecar:dev   -f deploy/sidecar/Dockerfile   .
-docker build -t spawnery/stubagent:dev -f deploy/stubagent/Dockerfile .
-docker build -t spawnery/goose:dev     -f deploy/agent/Dockerfile     .   # Goose v1.36.0
+just setup        # or: cargo install mprocs && (cd web && npm install)
 ```
 
-### 2. Stub end-to-end (deterministic, no network)
-
-The stub agent echoes the prompt back as a real ACP `agent_message_chunk`. This
-path is exercised by the containerized test:
-
-```bash
-go test ./internal/spawnlet/ -run TestEndToEndStub -v
-```
-
-Or drive it manually by pointing the spawnlet's `AGENT_IMAGE` at the stub:
-
-```bash
-go build -o bin/spawnlet ./cmd/spawnlet
-go build -o bin/spawnctl ./cmd/spawnctl
-
-AGENT_IMAGE=spawnery/stubagent:dev SIDECAR_IMAGE=spawnery/sidecar:dev \
-  DATA_ROOT=$(pwd)/.spawns OPENROUTER_API_KEY=unused bin/spawnlet &
-
-printf 'hello\n' | bin/spawnctl -app "$(pwd)/examples/secret-app" -model x
-# => ECHO: hello
-```
-
-### 3. Live Goose + OpenRouter round-trip
-
-Put your OpenRouter key in a git-ignored `.env` file at the repo root:
+Put your OpenRouter key in a git-ignored `.env` at the repo root for the live path:
 
 ```
 OPENROUTER_API_KEY=sk-or-...
 ```
 
-Then:
+### Build the images
+
+The `just` recipes build images automatically when needed. To build them manually:
 
 ```bash
-go build -o bin/spawnlet ./cmd/spawnlet
-go build -o bin/spawnctl ./cmd/spawnctl
-
-# Source the key from .env (never commit it).
-set -a; . ./.env; set +a
-
-AGENT_IMAGE=spawnery/goose:dev SIDECAR_IMAGE=spawnery/sidecar:dev \
-  DATA_ROOT=$(pwd)/.spawns bin/spawnlet &
-
-# Pick a free, tool-capable OpenRouter chat model. The -app path must be ABSOLUTE
-# (it is bind-mounted read-only into the agent at /app). secret-app ships an
-# AGENTS.md telling the agent to read the secret from its /data/README.md.
-printf 'What is the secret word?\n' \
-  | bin/spawnctl -app "$(pwd)/examples/secret-app" -model "openai/gpt-oss-120b:free"
-# => QUOKKA-4417   (the agent read AGENTS.md, used its file tool on /data/README.md, and recited it)
+make images   # sidecar + stubagent + goose — or build selectively:
+docker build -t spawnery/sidecar:dev   -f deploy/sidecar/Dockerfile   .
+docker build -t spawnery/stubagent:dev -f deploy/stubagent/Dockerfile .
+docker build -t spawnery/goose:dev     -f deploy/agent/Dockerfile     .   # Goose v1.36.0
 ```
 
-A real model-generated reply streams back through the spawnlet. Each spawn's
-`/data` directory is created under `DATA_ROOT/<spawn-id>/data` (seeded from the
-app's `seed/` dir); both the agent and sidecar containers are torn down when the
-client sends `StopSpawn`.
+### Dev stack
+
+```bash
+just dev          # spawnlet (goose) + web UI in mprocs panes, one Ctrl-C
+# or run them separately:
+just spawnlet     # goose (real LLM);  `just spawnlet stub` for the deterministic echo
+just web          # vite --host on :5173
+```
+
+### Drive it from the CLI
+
+```bash
+just spawnctl 'What is the secret word?'      # against the running spawnlet, free model
+```
+
+### Tests
+
+```bash
+just test          # Go unit (hermetic)
+just test-web      # web unit (vitest)
+just test-e2e      # Go e2e (Docker pods + live OpenRouter; needs the key)
+just test-web-e2e  # browser e2e (Playwright vs stub)
+```
+
+Leaked per-spawn containers (`sp-8hf`): `just reap`.
+
+Each spawn's `/data` directory is created under `DATA_ROOT/<spawn-id>/data`
+(seeded from the app's `seed/` dir); both the agent and sidecar containers are
+torn down when the client sends `StopSpawn`.
 
 > The `.env`, `bin/`, and `.spawns/` paths are git-ignored. **Never commit the
 > OpenRouter key.**
@@ -110,22 +98,14 @@ relay as the ConnectRPC `Session` stream), and speaks ACP itself — `initialize
 (agent bubbles, tool-call chips, collapsible thoughts, a permission modal). Vite
 dev-proxies both paths to the spawnlet, so it's one origin (no CORS).
 
-Run it (two terminals, **from the repo root** so the relative `appPath` resolves):
+Run the whole stack with one command from the repo root:
 
 ```bash
-# 1. Spawnlet — repo root, with the OpenRouter key + Goose images.
-go build -o bin/spawnlet ./cmd/spawnlet
-set -a; . ./.env; set +a          # OPENROUTER_API_KEY (never commit it)
-AGENT_IMAGE=spawnery/goose:dev SIDECAR_IMAGE=spawnery/sidecar:dev \
-  DATA_ROOT=$(pwd)/.spawns bin/spawnlet
-
-# 2. Web dev server (separate terminal).
-cd web && npm install && npm run dev
-# open the printed URL — http://localhost:5173
+just dev          # spawnlet (goose) + vite in mprocs panes — open http://localhost:5173
 ```
 
-In the browser the status banner goes **starting… → ready**. Type
-**"What is the secret word?"** and you'll see a 🔧 **tool-call chip** (the agent
+In the browser the status banner goes **starting... → ready**. Type
+**"What is the secret word?"** and you'll see a tool-call chip (the agent
 reading `data/README.md`), optionally a collapsible **thinking** block, then the
 agent bubble **"QUOKKA-4417"**. Closing the tab calls `StopSpawn`, tearing down
 the agent + sidecar containers.
@@ -144,12 +124,10 @@ agent bubble echoes `ECHO: say <token>`.
 
 Requirements: Docker (the test starts a real spawnlet that runs the
 `spawnery/stubagent:dev` + `spawnery/sidecar:dev` images — build them with
-`make images` if missing) and a one-time Chromium install.
+`make images` if missing) and a one-time Chromium install (included in `just setup`).
 
 ```bash
-cd web
-npx playwright install chromium   # one-time
-npm run test:e2e
+just test-web-e2e
 ```
 
 Playwright's `globalSetup` builds `bin/spawnlet`, launches it with the stub image on
