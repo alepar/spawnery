@@ -17,6 +17,7 @@ export default defineConfig({
   test: {
     passWithNoTests: true,
     environment: "jsdom",
+    setupFiles: ["./src/test/setup.ts"],
     // e2e/ holds Playwright specs (own runner via `npm run test:e2e`); keep them
     // out of the hermetic Vitest unit run.
     exclude: [...configDefaults.exclude, "e2e/**"],
