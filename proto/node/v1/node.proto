@@ -1,0 +1,37 @@
+syntax = "proto3";
+package node.v1;
+option go_package = "spawnery/gen/node/v1;nodev1";
+
+service NodeService {
+  // Node dials the CP and holds this stream open. Node sends NodeMessage; CP sends CPMessage.
+  rpc Attach(stream NodeMessage) returns (stream CPMessage);
+}
+
+enum SpawnPhase { SPAWN_PHASE_UNSPECIFIED = 0; STARTING = 1; ACTIVE = 2; STOPPING = 3; STOPPED = 4; ERROR = 5; }
+
+message NodeMessage {
+  oneof msg {
+    Register    register  = 1;
+    Heartbeat   heartbeat = 2;
+    SpawnStatus status    = 3;
+    Frame       frame     = 4;   // agent -> client bytes
+  }
+}
+message CPMessage {
+  oneof msg {
+    StartSpawn   start = 1;
+    StopSpawn    stop  = 2;
+    SessionOpen  open  = 3;
+    SessionClose close = 4;
+    Frame        frame = 5;      // client -> agent bytes
+  }
+}
+
+message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string agent_images = 3; }
+message Heartbeat   { uint32 active_spawns = 1; uint32 free_slots = 2; uint32 cpu_pct = 3; uint32 gpu_pct = 4; }
+message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; }
+message StartSpawn  { string spawn_id = 1; string app_ref = 2; string data_ref = 3; string model = 4; }
+message StopSpawn   { string spawn_id = 1; }
+message SessionOpen  { string spawn_id = 1; }
+message SessionClose { string spawn_id = 1; }
+message Frame       { string spawn_id = 1; bytes data = 2; }

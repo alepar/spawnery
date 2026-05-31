@@ -1,0 +1,15 @@
+syntax = "proto3";
+package cp.v1;
+option go_package = "spawnery/gen/cp/v1;cpv1";
+
+service SpawnService {
+  rpc CreateSpawn(CreateSpawnRequest) returns (CreateSpawnResponse);
+  rpc Session(stream Frame) returns (stream Frame);
+  rpc StopSpawn(StopSpawnRequest) returns (StopSpawnResponse);
+}
+
+message CreateSpawnRequest { string app_id = 1; string model = 2; }
+message CreateSpawnResponse { string spawn_id = 1; }
+message Frame { string spawn_id = 1; bytes data = 2; }
+message StopSpawnRequest { string spawn_id = 1; }
+message StopSpawnResponse {}
