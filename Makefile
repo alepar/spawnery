@@ -1,21 +1,24 @@
-.PHONY: gen build test test-unit test-e2e images
-gen:
-	buf generate
-build:
-	go build ./...
-test: test-unit
+# Artifacts only — incremental builds. Actions live in the Justfile.
+GO_SRCS := $(shell find . -name '*.go' -not -path './web/*')
 
-# Unit suite: fast, hermetic, no Docker and no network.
-test-unit:
-	go test ./... -count=1
+.PHONY: build images gen clean
 
-# Build the three container images the e2e suite drives.
-images:
-	docker build -t spawnery/stubagent:dev -f deploy/stubagent/Dockerfile .
-	docker build -t spawnery/sidecar:dev   -f deploy/sidecar/Dockerfile .
-	docker build -t spawnery/goose:dev     -f deploy/agent/Dockerfile .
+build: bin/spawnlet bin/spawnctl          # the host-run binaries
 
-# End-to-end suite: builds the images then runs the //go:build e2e tests
-# (real Docker pods + a live OpenRouter round-trip). Requires OPENROUTER_API_KEY.
-test-e2e: images
-	go test -tags e2e ./... -count=1 -v
+bin/%: $(GO_SRCS) | bin
+	go build -o $@ ./cmd/$*
+
+# Proto codegen — stamp keyed on .proto sources + buf config.
+gen: .make/gen
+.make/gen: $(shell find proto -name '*.proto') buf.gen.yaml buf.yaml | .make
+	buf generate && touch $@
+
+# Image stamps — rebuild an image only when its build context changes.
+images: .make/img-sidecar .make/img-stubagent .make/img-goose
+.make/img-sidecar:   deploy/sidecar/Dockerfile   $(GO_SRCS) | .make ; docker build -t spawnery/sidecar:dev   -f $< . && touch $@
+.make/img-stubagent: deploy/stubagent/Dockerfile $(GO_SRCS) | .make ; docker build -t spawnery/stubagent:dev -f $< . && touch $@
+.make/img-goose:     deploy/agent/Dockerfile               | .make ; docker build -t spawnery/goose:dev     -f $< . && touch $@
+
+bin:    ; @mkdir -p bin
+.make:  ; @mkdir -p .make
+clean:  ; rm -rf bin .make
