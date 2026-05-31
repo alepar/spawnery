@@ -6,6 +6,7 @@ require (
 	connectrpc.com/connect v1.20.0
 	github.com/coder/websocket v1.8.12
 	github.com/docker/docker v28.5.2+incompatible
+	github.com/google/uuid v1.6.0
 	golang.org/x/net v0.55.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
