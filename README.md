@@ -18,6 +18,17 @@ spawnctl ──ConnectRPC(bidi)──▶ spawnlet ──stdio relay──▶ age
                                           sidecar (shared netns, :8080) ──▶ OpenRouter
 ```
 
+## Quick start
+
+```bash
+just setup        # one-time: mprocs, Playwright browser, web deps
+just dev          # spawnlet (goose) + web UI in mprocs panes, one Ctrl-C
+```
+
+Then open the web UI (`vite` prints the URL) and chat with the agent. Needs Docker
+and an OpenRouter key in a git-ignored `.env` (see [Running the slice](#running-the-slice)).
+Run `just` with no args to list all recipes.
+
 ## Build & Test
 
 ```bash
