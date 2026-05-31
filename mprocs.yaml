@@ -1,0 +1,3 @@
+procs:
+  spawnlet: { shell: "just spawnlet" }   # goose by default
+  web:      { shell: "just web" }
