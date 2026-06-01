@@ -36,6 +36,9 @@ A **spawn** = a two-container pod (sidecar + agent) sharing one network namespac
   - the spawnlet process running with **`CAP_NET_ADMIN`** (in practice: root, or a capability grant),
     because it enters each pod's network namespace to install firewall rules.
   - Without these, a cloud node **fails closed** — spawns will not start (by design).
+- The spawnlet needs **`CAP_SYS_ADMIN`** (root) to `setns` into each pod's network namespace for the
+  ACP socket bridge — on cloud nodes this is already required by the egress floor; on an unprivileged
+  self-hosted dev node it is now required even with the floor disabled.
 - The agent/sidecar **images** (`AGENT_IMAGE`, `SIDECAR_IMAGE`) must be present/pullable on the host.
 - A writable `DATA_ROOT` for per-spawn mount dirs.
 
