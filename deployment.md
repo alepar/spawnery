@@ -60,6 +60,7 @@ A **spawn** = a two-container pod (sidecar + agent) sharing one network namespac
 |---|---|---|
 | `CP_ADDR` | _(unset)_ | when set (e.g. `http://cp-host:8080`), the node runs **CP-attached** (dials the CP, no inbound listener). Unset → standalone mode (dev). |
 | `NODE_ID` | `node-1` | node identity in the CP. |
+| `NODE_OWNER` | _(empty)_ | the owner-id of a `self-hosted` node's operator. Empty for cloud. **Unverified app versions run only on a self-hosted node whose `NODE_OWNER` == the app's author** (dev-iteration unblock). |
 | `NODE_CLASS` | `cloud` | **`cloud`** = Spawnery-operated → egress floor **always enforced, non-disableable**. **`self-hosted`** = the operator's box → floor honored but disableable via `EGRESS_ENFORCE`. Default `cloud` = an unconfigured node is restricted. |
 | `EGRESS_ENFORCE` | `true` | only honored on `self-hosted` nodes (cloud always enforces). `false` on self-hosted runs spawns **unrestricted** (logged loudly). |
 | `EGRESS_ALLOW_CIDRS` | _(empty)_ | comma-separated CIDRs `ACCEPT`ed before the block-floor drops — for operators whose model upstream / DNS resolver is on a LAN (RFC1918). |

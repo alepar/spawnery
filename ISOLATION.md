@@ -119,5 +119,8 @@ No single layer is load-bearing alone — a scanner miss is contained by the flo
 - Restricted agent toolset (`sp-eha`, post-MVP) if review/audit proves insufficient.
 - Disk quotas (with managed storage, E3).
 - IPv6 egress rules (metadata is IPv4 today; `sp-rpa` follow-up).
-- Scheduler routing by node class (e.g. unverified apps → enforcing cloud nodes only).
+- ~~Scheduler routing by node class~~ — **done (`sp-t5p`)**: unverified app versions run only on a
+  self-hosted node owned by the author (`registry.PickFor` placement; CreateSpawn gates by tier).
+  Remaining: a web UI version-selector so an author can spawn a specific unverified version (today
+  the Detail "Spawn" sends no version → latest reviewed).
 - Host-level verification of the egress + cgroup floors on the node host.
