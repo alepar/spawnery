@@ -1,7 +1,7 @@
 # Spawnery — Control-Plane State / DAO Layer (Design)
 
 **Bead:** `sp-pc4`
-**Status:** Draft **v3** (post 2nd adversarial roast — consistency protocol; pending review)
+**Status:** Draft **v5** (3rd roast — container-lifetime windows fixed; pending review)
 **Date:** 2026-05-31
 **Supersedes:** the preliminary schema in
 [State/DAO Research Brief](2026-05-31-state-dao-layer-research-brief.md).
@@ -11,6 +11,20 @@ on every message + node inventory on Register/Heartbeat**).
 **Hands off to:** `sp-gd9` (node-side per-mount suspend/resume + generation/inventory + idle), **E3**
 (persistent backend), **E5** (manifest/catalog).
 
+> **v5 changelog (3rd roast — the container split created zero/one/two-live-row windows):**
+> `unreachable` **keeps** the live container (so Wait→adopt works; reconciliation gains an
+> `unreachable`→adopt arm); start-new-episode txs **end-old-then-insert-new** (the partial unique
+> never fires in correct operation — a violation is a loud backstop bug, not `ErrConflict`); CP
+> fencing is "**look up live container; absent ⇒ drop; gen-mismatch ⇒ drop**" and the scheduler
+> rendezvous is keyed by `(spawn_id, gen)`; `MarkDeleted` **ends the live container** in-tx; multi-CP
+> is out of scope (the lock is single-process); episode-history retention named (E8); the per-slice
+> "mounts stored-but-inert until sp-mqj" honesty + the e2e-needs-sp-mqj sequencing are stated.
+>
+> **v4 changelog:** the **running container is its own entity** (`spawn_containers`); `generation` +
+> `node_id` moved off `spawns` onto it; spawn:container = **1-to-0..1** enforced by a **partial unique
+> index** (DB-level single-live invariant; relax for future automerge 1-to-many); transitions update
+> spawn + container atomically; reconciliation diffs node inventory against **live container rows**.
+>
 > **v3 changelog:** added `spawns.generation` + the `unreachable` status; transitions are
 > **claim-in-DB-then-act under a per-spawn lock**; the CP runs **inventory reconciliation** on node
 > (re)connect (adopt / stop-orphan / mark-unreachable) instead of blind flips; added the
@@ -90,8 +104,6 @@ CREATE TABLE spawns (
   model        TEXT NOT NULL,
   status       TEXT NOT NULL CHECK (status IN
                ('starting','active','suspending','suspended','unreachable','error','deleted')),
-  generation   INTEGER NOT NULL DEFAULT 0,    -- bumped per starting episode; fencing token
-  node_id      TEXT,                          -- current episode's node; NULL when not active
   recovered    INTEGER NOT NULL DEFAULT 0,    -- pg: boolean; set on recreate-from-unclean (NOT clean CP restart)
   created_at   INTEGER NOT NULL,
   last_used_at INTEGER NOT NULL,
@@ -100,7 +112,25 @@ CREATE TABLE spawns (
 );
 CREATE INDEX idx_spawns_owner  ON spawns(owner_id, last_used_at DESC);
 CREATE INDEX idx_spawns_status ON spawns(status);
-CREATE INDEX idx_spawns_node   ON spawns(node_id);
+
+-- the RUNNING-CONTAINER (episode) entity, separate from the durable spawn.
+-- spawn:container = 1-to-0..1 (at most one LIVE container per spawn), enforced by the partial
+-- UNIQUE below. generation + node_id live HERE, not on the durable spawn. The node inventory
+-- reconciles against the LIVE rows here. Future: data-backend automerge makes this 1-to-many
+-- (relax/drop the partial unique). Ended rows are kept = the episode history (audit foundation).
+CREATE TABLE spawn_containers (
+  spawn_id   TEXT    NOT NULL REFERENCES spawns(id),
+  generation INTEGER NOT NULL,                  -- episode number; the fencing token
+  node_id    TEXT    NOT NULL,                  -- where this episode runs
+  phase      TEXT    NOT NULL CHECK (phase IN ('starting','active','suspending','stopped','lost')),
+  started_at INTEGER NOT NULL,
+  ended_at   INTEGER,                           -- NULL while LIVE
+  PRIMARY KEY (spawn_id, generation)
+);
+-- HARD INVARIANT (DB-enforced, not app-asserted): ≤1 live container per spawn. Partial unique
+-- indexes work on both SQLite and Postgres. A second live insert fails → the 0..1 is guaranteed.
+CREATE UNIQUE INDEX uniq_live_container ON spawn_containers(spawn_id) WHERE ended_at IS NULL;
+CREATE INDEX idx_live_by_node ON spawn_containers(node_id) WHERE ended_at IS NULL; -- inventory diff
 
 CREATE TABLE spawn_mounts (
   spawn_id       TEXT NOT NULL REFERENCES spawns(id),
@@ -111,10 +141,20 @@ CREATE TABLE spawn_mounts (
 );
 ```
 
-**Notes:** `app_ref` survives version **delisting** (catalog hide) but **not git-ref deletion** —
-if the App's definition tag is deleted, resume's node-side clone fails regardless (system design §2;
-mitigated only by post-MVP App-snapshot). `persist_marker` is per-mount and written **as each mount
-finishes** so crash recovery can distinguish "none done" from "all done, signal lost" (lifecycle
+**Notes:** the **running container is a first-class entity** (`spawn_containers`) — the durable
+`spawns` row carries no `generation`/`node_id`; those identify an *episode* and live on the container
+row. The CP's reconciliation diffs node inventory against the **live** container rows. The partial
+unique index makes "≤1 live container per spawn" a **DB invariant**, so a concurrency bug can't
+produce two live containers even if the app logic slips. **Live-container lookup** is the literal
+`WHERE spawn_id=? AND ended_at IS NULL` (rides `uniq_live_container` on both engines; a test asserts
+the plan uses it); `ListByOwner` is `spawns LEFT JOIN spawn_containers … ON sc.spawn_id=s.id AND
+sc.ended_at IS NULL`. **Episode-history retention:** ended rows accumulate per suspend/resume/recreate
+cycle — unbounded; a retention/age-out policy is **named here, deferred to E8 (audit)**, so list/diff
+queries don't degrade with history. `app_ref` survives version **delisting** (catalog hide) but **not
+git-ref deletion** — resume/recreate against a deleted creator ref fails the node-side clone → spawn
+`error` surfaced as **"this app version was removed"** (not a silent provision failure); mitigated
+only by post-MVP App-snapshot (system design §2). `persist_marker` is per-mount, written **as each
+mount finishes**, so crash recovery distinguishes "none done" from "all done, signal lost" (lifecycle
 §6.6).
 
 ---
@@ -127,55 +167,78 @@ Bun tags on domain types; repos over `bun.IDB`. **All transitions are status+gen
 
 ```go
 type Status string // starting|active|suspending|suspended|unreachable|error|deleted
+type Phase  string // starting|active|suspending|stopped|lost  (container episode)
 
-type Spawn struct {
+type Spawn struct {                       // the durable entity (no generation/node_id)
     ID, OwnerID, AppID, AppVersion, AppRef, Model string
     Pinned, Recovered bool
     Status     Status
-    Generation int64
-    NodeID     string
     CreatedAt, LastUsedAt int64
     SuspendedAt, DeletedAt *int64
 }
+type Container struct {                    // the running episode; spawn:container = 1-to-0..1
+    SpawnID    string
+    Generation int64
+    NodeID     string
+    Phase      Phase
+    StartedAt  int64
+    EndedAt    *int64                       // nil while LIVE
+}
 type Mount     struct { Name, BackendURI, PersistMarker string }
 type MountDecl struct { AppID, Version, Name string; Required bool }
-type RunningSpawn struct { ID string; Generation int64; Phase string } // from node inventory
+type RunningSpawn struct { SpawnID string; Generation int64; Phase Phase } // node inventory item
 
 type SpawnRepo interface {
-    Create(ctx, s Spawn, mounts []Mount) error      // status=starting, generation=1; validates version + mount names
-    Get(ctx, id string) (Spawn, error)              // NOT-FOUND on deleted for lifecycle ops
+    Create(ctx, s Spawn, mounts []Mount) error  // tx: spawn(starting) + container(gen 1, starting); validates version + mounts
+    Get(ctx, id string) (Spawn, error)           // NOT-FOUND on deleted for lifecycle ops
+    LiveContainer(ctx, id string) (Container, bool, error)
     GetMounts(ctx, id string) ([]Mount, error)
     ListByOwner(ctx, ownerID string) ([]Spawn, error)
 
-    // claim-then-act: ClaimStarting bumps generation, returns the new gen (ErrConflict if rowcount≠1)
+    // claim-then-act (tx, in THIS order): (1) UPDATE spawns->starting WHERE status IN(from) — rowcount=0
+    // => ErrConflict; (2) END any live container (ended_at=now, phase=lost); (3) INSERT new live
+    // container gen = COALESCE(MAX(generation),0)+1 (never reused; (spawn_id,generation) PK enforces).
+    // A uniq_live_container violation here is a LOUD BUG (the backstop fired), NOT ErrConflict.
     ClaimStarting(ctx, id string, from []Status) (newGen int64, err error)
-    SetActive(ctx, id, nodeID string, gen int64) error      // WHERE status='starting' AND generation=gen
-    SetSuspending(ctx, id string, gen int64) error          // WHERE status='active'   AND generation=gen
-    SetMountMarker(ctx, id, mount, marker string) error     // incremental, per mount
-    SetSuspended(ctx, id string, gen int64) error           // WHERE status='suspending' AND generation=gen
-    SetError(ctx, id string) error
-    MarkUnreachable(ctx, ids []string) (int, error)         // node deemed failed
+    SetActive(ctx, id string, gen int64) error      // tx: spawn->active + container.phase=active   (guard status='starting' & gen live)
+    SetSuspending(ctx, id string, gen int64) error  // tx: spawn->suspending + container.phase=suspending
+    SetMountMarker(ctx, id, mount, marker string) error // incremental per mount
+    SetSuspended(ctx, id string, gen int64) error   // tx: spawn->suspended + container.ended_at=now, phase=stopped
+    SetError(ctx, id string) error                  // tx: spawn->error + end live container(phase=lost) if any
+    EndContainer(ctx, id string, gen int64, p Phase) error // end a specific episode (orphan stop / recreate supersede)
+    MarkUnreachable(ctx, ids []string) (int, error) // spawn->unreachable; live container row KEPT (fate unknown — adopt arm needs it)
     MarkRecovered(ctx, id string) error
     Touch(ctx, id string, ts int64) error
-    MarkDeleted(ctx, id string, ts int64) error             // WHERE status IN('active','suspended','unreachable','error')
+    MarkDeleted(ctx, id string, ts int64) error     // tx: guard status IN('active','suspended','unreachable','error'); ALSO end any live container(phase=lost)
 
-    // reconciliation inputs
-    ActiveByNode(ctx, nodeID string) ([]Spawn, error)       // CP diffs vs node inventory
-    Adopt(ctx, id, nodeID string, gen int64) error          // confirm a still-running episode
+    LiveContainersByNode(ctx, nodeID string) ([]Container, error) // reconciliation diff target
+    Adopt(ctx, id, nodeID string, gen int64) error  // confirm a still-running episode (no restart)
 }
 ```
 `OwnerRepo`/`AppRepo` as v2 (apps + versions + `DeclaredMounts` + `UpsertVersion(v, mounts)`).
-`Store.WithTx` composes repos. The **per-spawn lock** is a CP-layer keyed mutex (not the DB) — the DB
-guard prevents illegal *state* transitions; the lock prevents two handlers interleaving their *node
-commands* for one spawn.
+Every transition is a **`WithTx`** that updates `spawns` **and** `spawn_containers` together (no
+drift between the durable status and the episode phase). The **`uniq_live_container` index is the
+hard guard** for single-live; the per-spawn lock (CP layer) additionally serializes the
+`{claim → node command → await}` so two handlers can't interleave node commands for one spawn.
 
 ---
 
 ## 5. Transactions & per-spawn lock
 
-`Store.WithTx` (Bun `RunInTx`) makes `Create` (spawn + mounts) and `UpsertVersion` (version + decls)
-atomic. Orthogonally, the CP holds a **per-spawn-id lock** around every mutating op so that the
-claim-guard and the node command can't be split by a competing handler (lifecycle §6.3).
+`Store.WithTx` (Bun `RunInTx`) makes every transition atomic across **`spawns` + `spawn_containers`**
+(status and episode phase never drift), and makes `Create` (spawn + container + mounts) and
+`UpsertVersion` (version + decls) atomic. **Ordering rule (mandatory):** any tx that starts a new
+episode (`ClaimStarting`, recreate) **ends the prior live container first, then inserts the new live
+row** — otherwise the two rows momentarily collide on `uniq_live_container` and the tx aborts. So in
+correct operation the uniq index **never fires**; if it does, that is a **loud backstop bug**, not a
+user-facing conflict (conflict is the status-guard returning rowcount=0).
+
+Orthogonally, the CP holds a **per-spawn-id lock** around every mutating op so the claim-guard and
+the node command can't be split by a competing handler (lifecycle §6.3). **Multi-CP is out of scope
+for `sp-pc4`:** decide-then-act ordering relies on a single CP process holding that lock. The DB's
+`uniq_live_container` invariant guarantees ≤1 live container even across processes, but it does **not**
+order *node commands* across CPs — multi-CP needs a DB-advisory-lock / per-spawn leader or a
+node-side command sequencer (deferred to `sp-jf7`).
 
 ---
 
@@ -193,11 +256,18 @@ internal/cp/lock/spawnlock.go        # per-spawn-id keyed mutex (CP layer)
 ## 7. CP-side lifecycle + consistency (integration)
 
 The store replaces `apps.Resolver` and the router's `owner` authority; **both `Session` (gRPC) and
-the WebSocket `HandleWS`** read ownership from the DB. `Router.Owner()` is removed; the route is a
-**projection of `active` rows** (rebuilt on adopt/resume, torn on suspend/delete). **Scheduler split:**
-`mint()` + `provision(id, gen, appRef, model, mounts) (nodeID, err)`; `CreateSpawn` mints,
-`Resume`/`Recreate` reuse the id. **The node binds the CP-sent `mounts`**, validating names against
-its manifest at the ref (mismatch → `error`).
+the WebSocket `HandleWS`** read ownership from the DB. `Router.Owner()` is removed; the live route is
+a **projection keyed on `spawns.status = 'active'`** (rebuilt on adopt/resume, torn on
+suspend/delete) — **not** on container-liveness: an `unreachable` spawn keeps a live container row but
+has **no route** (relaying to a dead node would be wrong). **Scheduler split:** `mint()` +
+`provision(id, gen, appRef, model, mounts) (nodeID, err)`; `CreateSpawn` mints, `Resume`/`Recreate`
+reuse the id. **The node binds the CP-sent `mounts`**, validating names against its manifest at the
+ref (mismatch → `error`).
+
+> **Slice honesty (M1):** in the `sp-pc4`-only slice (before `sp-mqj` adds the `StartSpawn` mount
+> field and `sp-gd9` makes the node consume it), `spawn_mounts.backend_uri` is **recorded but inert**
+> — the node still binds its own manifest parse. The storage-picker is wired end-to-end only with
+> `sp-mqj` + `sp-gd9`.
 
 **Decide-then-act ordering** (every op, under the per-spawn lock):
 
@@ -213,16 +283,25 @@ its manifest at the ref (mismatch → `error`).
 | **node stream close** | start a grace window; **do not flip status**. |
 | **CP boot** | wait for inventories within a grace window, then reconcile; `suspending`→marker-probe. |
 
-**Inventory reconciliation** (on every node (re)connect, diff `RunningSpawn[]` vs `ActiveByNode`):
-- gen matches a DB-`active` row → **`Adopt`** (rebind route, no restart).
-- node runs a spawn the DB says `suspended`/`deleted`/`error`/older-gen → **`Stop(id, gen)`** (orphan).
-- DB-`active`/`starting` not in the node's inventory (and unclaimed elsewhere) after grace →
-  **`MarkUnreachable`** (user-driven recovery).
+**Inventory reconciliation** (on every node (re)connect, diff the node's `RunningSpawn[]` vs
+`LiveContainersByNode`):
+- node item `(spawn_id, gen)` matches a **live container** row → **`Adopt`**: rebind route if the
+  spawn is `active`; **if the spawn is `unreachable`, flip it back to `active`** (the Wait→adopt path)
+  and rebind. No restart.
+- node runs `(spawn_id, gen)` with **no matching live container** (suspended/deleted/error, or a
+  superseded gen after recreate) → **`Stop(spawn_id, gen)`** (orphan).
+- a **live container** the node does **not** report after grace → **`MarkUnreachable`** the spawn and
+  **keep the live container row** (`phase` unchanged — fate unknown). The row is ended **only** when
+  the user acks Recreate (the new episode supersedes it) or the node returns running a superseded gen.
+  Keeping it live is what lets a returning node re-`Adopt` (don't end-on-unreachable — that would make
+  the returning container look like an orphan to Stop).
 
-**Generation fencing at the CP:** every node→CP `SpawnStatus` carries a generation; the handler
-**drops it if `gen ≠ row.generation`** (kills stale ACTIVE/SUSPENDED from a superseded episode). A
-guard rowcount≠1 is treated as a **superseded no-op** (and any markers the dropped report carried are
-scheduled for GC).
+**Generation fencing at the CP:** for every node→CP `SpawnStatus`, **look up the live container**
+(`LiveContainer(id)`): **none → drop** (no live episode to confirm); **`report.gen ≠ live.gen` → drop**
+(stale report from a superseded episode); else apply. A guard rowcount≠1 is a **superseded no-op**
+(markers the dropped report carried are scheduled for GC). The scheduler's start/await **rendezvous is
+keyed by `(spawn_id, generation)`** (not `spawn_id` alone), and `OnStatus` applies the same gen-drop
+**before** signalling — so a stale gen-G ACTIVE can't satisfy a gen-G+1 (recreate) waiter.
 
 **`spawn.yml` vs the DB cache:** the DB cache (`app_ref`, `app_version`, `model`, mounts) is
 **authoritative-in-practice for routing/provisioning until E5** (the CP can't read `spawn.yml` yet);
@@ -231,10 +310,11 @@ auto-upgrade mutates the cache; `spawn.yml` reconciliation is E5.
 **Seeding (id mismatch fixed):** the canonical app id is the **manifest `id`** (`spawnery/secret`),
 **not** the resolver key (`secret-app`). `Open` seeds `apps(id='spawnery/secret')` + its version +
 declared mounts, and `cmd/cp/main.go`'s resolver key is corrected to match (one-line change) so E5
-registration (which reads the manifest `id`) won't orphan spawn FKs. Owners are seeded **from the
-`CP_DEV_TOKENS` map** (every token's owner → a row), so `auth` always resolves to a real owner.
-Owner rows are **not GC'd** when a token is removed (orphaned spawns are inert, not auto-deleted —
-documented).
+registration (which reads the manifest `id`) won't orphan spawn FKs. **Seeds are passed in, not
+ambient:** `Open(ctx, Config{…, SeedOwners []string, SeedApps []AppSeed})` receives the already-parsed
+token→owner map + app config from `main` (it does not re-read the env — `parseTokens` lives in
+`main`). Every token's owner is seeded → a row, so `auth` always resolves to a real owner. Owner rows
+are **not GC'd** when a token is removed (orphaned spawns are inert, not auto-deleted — documented).
 
 ---
 
@@ -253,10 +333,15 @@ documented).
   non-`starting` or wrong-gen row fails; `ClaimStarting` from a wrong status → ErrConflict); the
   deleted-filter; version-existence validation; `MarkDeleted` state set.
 - **Consistency tests (the headline):** (a) **two concurrent Resumes** → exactly one `ClaimStarting`
-  wins, one `provision`; (b) **stale-generation `SpawnStatus` dropped**; (c) **adopt** on reconnect
-  with matching gen (no new episode); (d) **orphan Stop** when node runs a non-active/older-gen
-  spawn; (e) **unreachable → Recreate** bumps gen and the old gen is fenced; (f) Suspend-vs-Delete
-  can't interleave. These run against the `:memory:` store with a fake node driver.
+  wins (status-guard rowcount), one `provision`; (b) **stale-gen `SpawnStatus` dropped** (incl. the
+  no-live-container case → drop); (c) **adopt** on reconnect with matching gen (no new episode);
+  (d) **orphan Stop** when node runs a no-live-container/superseded gen; (e) **unreachable → Recreate**
+  bumps gen and the old gen is fenced; (f) **unreachable → Wait → node returns → adopt** flips back to
+  `active` (the live row was kept); (g) Suspend-vs-Delete can't interleave; (h) the
+  **`uniq_live_container` backstop** — a forced 2nd live insert raises a violation classified by
+  **constraint name** (`isLiveContainerViolation`, portable across modernc `SQLITE_CONSTRAINT_UNIQUE`
+  + pgx `23505`), surfaced as a loud bug, not `ErrConflict`. Run against the `:memory:` store with a
+  fake node driver (the existing `runNode` split + `fakeSender` test seam supports this).
 - **Schema-drift snapshot:** `goose.Up`, assert each table's columns **and types** match the Bun
   structs per dialect (catches `bool`↔`INTEGER`↔`boolean`).
 - **CP handler tests:** real `:memory:` store; ownership rejection on **both** gRPC + WS;
@@ -267,9 +352,11 @@ documented).
   round-trip**. **CI honesty:** this needs a Postgres service in CI (a `.github/workflows` job or a
   `just` recipe with a container) — **there is none today**; this test is **deferred until that CI
   exists** and is marked/skipped-loud (build tag), not silently green.
-- **Build-tagged e2e:** `create→list→suspend→resume→recreate→delete` through the stub agent;
-  **honest scope:** under `Scratch` this asserts **CP-index + reconciliation bookkeeping**, not data
-  survival (gated on E3 + `sp-gd9`).
+- **Build-tagged e2e:** the suspend/resume/recreate **verbs don't exist until `sp-mqj`** defines the
+  RPCs, so the `sp-pc4`-only e2e is **`create → list → delete` + reconciliation-via-fake-node** (adopt
+  / orphan-stop / unreachable). The full `create→suspend→resume→recreate→delete` e2e lands **after
+  `sp-mqj`**, and even then — under `Scratch` — asserts **CP-index + reconciliation bookkeeping**, not
+  data survival (gated on E3 + `sp-gd9`).
 
 ---
 
@@ -290,8 +377,9 @@ documented).
 ## 11. Success criteria
 
 1. `go test ./...` (hermetic) green: repos, guard rejections, deleted-filter, version validation,
-   schema-drift (columns **and** types), the **consistency tests** (two-resume, stale-gen drop,
-   adopt, orphan-stop, unreachable→recreate-fences-old) — on `:memory:`, no Docker/cgo.
+   schema-drift (columns **and** types), the **live-container uniqueness invariant** (a 2nd live
+   container insert fails), and the **consistency tests** (two-resume, stale-gen drop, adopt,
+   orphan-stop, unreachable→recreate-fences-old) — on `:memory:`, no Docker/cgo.
 2. The CP uses the store for create/ownership(gRPC+WS)/list/suspend/resume/recreate/delete +
    **inventory reconciliation**; the in-memory `apps`/owner maps are gone; cleanup uses Destroy.
 3. A transient node stream-drop **adopts** on reconnect (no second container); a real failure →

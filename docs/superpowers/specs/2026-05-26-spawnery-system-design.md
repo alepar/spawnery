@@ -98,10 +98,13 @@ App definition into the user's repo at spawn time — is post-MVP.)
 > **⚠️ "Ephemeral, scale-to-zero" is the spawn lifecycle —
 > [Spawn Lifecycle](2026-05-31-spawn-lifecycle-design.md) is authoritative:** "woken per session,
 > torn down on idle" = **resume / suspend**. That spec defines the state machine
-> (`starting·active·suspending·suspended·error·deleted`), two-stage per-node idle timeouts,
-> **data-only** suspend/resume via a `git` WIP ref (uncommitted work preserved), single-session
-> takeover, and crash→`suspended` reconciliation. **Requires a persistent storage backend (E3)** —
-> `resume` is meaningless on `Scratch`.
+> (`starting·active·suspending·suspended·unreachable·error·deleted`), two-stage per-node idle
+> timeouts, **data-only** **per-mount** suspend/resume (uncommitted work preserved via a `git` WIP
+> branch), single-session takeover, a **DB↔container consistency protocol** (episode generation
+> fencing + reconnect reconciliation against node inventory), and **node-failure → `unreachable` with
+> USER-DRIVEN recovery** (Recreate/Wait; adopt-if-it-returns) — **not** auto-suspend. The running
+> container is a first-class entity (`spawn_containers`, ≤1 live per spawn, DB-enforced). **Requires a
+> persistent storage backend (E3)** — `resume` is meaningless on `Scratch`.
 
 - **No custom agent loop, no plugin registry (MVP).** A spawn runs an **existing agent** with
   its tools **bundled into the OCI image**. Spawnery drives the agent over **ACP — the Agent

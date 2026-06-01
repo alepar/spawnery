@@ -147,6 +147,14 @@ not only crash recovery. (`secret-app` is all-scratch today, so every idle-suspe
 and ownership**; the **node's Register/Heartbeat inventory is ground truth for which containers
 actually exist**. Consistency is maintained by five mechanisms.
 
+**The running container is a first-class entity** (DAO `spawn_containers`), separate from the durable
+spawn: `generation` + `node_id` identify an *episode* and live on the container row, not the spawn.
+**spawn:container = 1-to-0..1**, enforced by a **DB partial-unique index** (`uniq_live_container`) —
+so "single active container per spawn" is an invariant the database guarantees, not just app logic
+(this is the enforcement the roast demanded). Reconciliation (§6.2) diffs node inventory against the
+**live** container rows. (Future: data-backend automerge could make this 1-to-many — relax the
+partial unique then.)
+
 ### 6.1 Episode generation (fencing)
 `spawns.generation` (monotonic, bumped on every `starting` episode — create/resume/recreate). The
 generation is threaded through **every** CP→node command (`StartSpawn`/`StopSpawn`/`Suspend`/
@@ -160,10 +168,13 @@ generation is threaded through **every** CP→node command (`StartSpawn`/`StopSp
 ### 6.2 Reconnect reconciliation against node inventory
 `Register` and `Heartbeat` carry `repeated RunningSpawn{spawn_id, generation, phase}`. On every
 (re)connect the CP **diffs the node's inventory against the DB** and acts:
-- DB `active`, node lists it, **gen matches** → **adopt** (rebind the route; no restart).
-- DB `suspended`/`deleted`/`error`/older-gen, node still runs it → **`Stop(id, gen)`** the orphan.
-- DB `active`/`starting`, node does **not** list it (and no other node claims it) → it's genuinely
-  gone → **`unreachable`** (§6.5).
+- node lists `(id, gen)` matching a **live container** → **adopt** (rebind the route; no restart). If
+  the spawn was `unreachable`, **flip it back to `active`** — this is the Wait→adopt path, and it
+  works only because `unreachable` **keeps the live container row** (does not end it).
+- node runs `(id, gen)` with **no matching live container** (suspended/deleted/error, or a superseded
+  gen after recreate) → **`Stop(id, gen)`** the orphan.
+- a **live container** the node does **not** list (and no other node claims) after grace →
+  **`unreachable`** (§6.5); **keep the live container row** (fate unknown — ended only on recreate).
 A **stream close alone does NOT flip status** — it starts a grace window; only failure-to-reappear
 (or a confirming inventory) changes state. This kills the blip→suspend→two-writer bug.
 
