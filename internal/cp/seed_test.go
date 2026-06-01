@@ -7,6 +7,30 @@ import (
 	"spawnery/internal/cp/store"
 )
 
+func TestSeedWritesCatalogMetadata(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+	apps := []AppSeed{{
+		ID: "spawnery/wiki", Ref: "examples/wiki", Version: "1.0.0",
+		DisplayName: "Wiki & Research Companion", Summary: "capture, connect, recall",
+		Tags: []string{"notes", "research"}, Mounts: []string{"main"},
+	}}
+	if err := Seed(ctx, st, map[string]string{"t": "alice"}, apps); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Apps().Get(ctx, "spawnery/wiki")
+	if err != nil || got.DisplayName != "Wiki & Research Companion" || got.Summary != "capture, connect, recall" {
+		t.Fatalf("app = %+v err=%v", got, err)
+	}
+	if got.Tags != "notes,research" || got.Visibility != "public" || !got.Listed {
+		t.Fatalf("catalog meta = %+v", got)
+	}
+	v, err := st.Apps().LatestReviewed(ctx, "spawnery/wiki")
+	if err != nil || v.Tier != store.TierReviewed {
+		t.Fatalf("version = %+v err=%v (want reviewed)", v, err)
+	}
+}
+
 func TestSeed(t *testing.T) {
 	st := store.NewTestStore(t)
 	ctx := context.Background()

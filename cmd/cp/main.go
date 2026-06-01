@@ -37,7 +37,21 @@ func main() {
 		log.Fatalf("store open: %v", err)
 	}
 	defer st.Close()
-	seedApps := []cp.AppSeed{{ID: "secret-app", Ref: "examples/secret-app", Version: "1.0.0", Mounts: []string{"main"}}}
+	// TODO(sp-7hl): real definition repos per app — all four reuse examples/secret-app until then.
+	seedApps := []cp.AppSeed{
+		{ID: "spawnery/wiki", Ref: "examples/secret-app", Version: "1.0.0",
+			DisplayName: "Wiki & Research Companion", Summary: "Capture articles, links, and notes; it extracts, connects, and recalls.",
+			Tags: []string{"notes", "research", "second-brain"}, Mounts: []string{"main"}},
+		{ID: "spawnery/language", Ref: "examples/secret-app", Version: "1.0.0",
+			DisplayName: "Language-Learning Partner", Summary: "Tracks your vocab and mistakes; drills, converses, and adapts.",
+			Tags: []string{"language", "tutor", "practice"}, Mounts: []string{"main"}},
+		{ID: "spawnery/interview", Ref: "examples/secret-app", Version: "1.0.0",
+			DisplayName: "Interview Coach (System Design)", Summary: "Mock interviews with structured, scored feedback over time.",
+			Tags: []string{"interview", "coaching", "system-design"}, Mounts: []string{"main"}},
+		{ID: "spawnery/zork", Ref: "examples/secret-app", Version: "1.0.0",
+			DisplayName: "Zork", Summary: "The classic adventure — vertical-slice smoke test and toy.",
+			Tags: []string{"game", "demo", "smoke-test"}, Mounts: []string{"main"}},
+	}
 	if err := cp.Seed(ctx, st, tokens, seedApps); err != nil {
 		log.Fatalf("store seed: %v", err)
 	}
