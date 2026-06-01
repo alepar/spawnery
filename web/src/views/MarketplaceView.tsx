@@ -3,6 +3,8 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Browse } from "./market/Browse";
 import { Detail } from "./market/Detail";
+import { MyApps } from "./market/MyApps";
+import { Publish } from "./market/Publish";
 
 type Tab = "browse" | "detail" | "mine" | "publish";
 
@@ -44,9 +46,9 @@ export function MarketplaceView({ onSpawn }: { onSpawn?: (appId: string) => void
         <Detail id={selectedId} onBack={() => setTab("browse")} onSpawn={onSpawn} />
       )}
 
-      {(tab === "mine" || tab === "publish") && (
-        <p className="p-6 text-sm text-muted-foreground">Coming soon.</p>
-      )}
+      {tab === "mine" && <MyApps />}
+
+      {tab === "publish" && <Publish onPublished={() => setTab("mine")} />}
     </div>
   );
 }
