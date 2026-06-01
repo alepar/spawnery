@@ -16,6 +16,7 @@ type Node struct {
 	Max    uint32
 	Free   uint32
 	Images []string
+	Class  string
 }
 
 type Registry struct {

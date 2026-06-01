@@ -65,6 +65,7 @@ func (s *Server) Attach(ctx context.Context, stream *connect.BidiStream[nodev1.N
 // runNode is the receive loop, split out so it is unit-testable without gRPC.
 func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv func() (*nodev1.NodeMessage, error)) error {
 	var nodeID string
+	var nodeClass string
 	defer func() {
 		if nodeID != "" {
 			s.reg.Remove(nodeID)
@@ -85,7 +86,11 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 		switch m := msg.Msg.(type) {
 		case *nodev1.NodeMessage_Register:
 			nodeID = m.Register.NodeId
-			s.reg.Add(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages})
+			nodeClass = m.Register.NodeClass
+			if nodeClass == "" {
+				nodeClass = "cloud" // safe default: an unidentified node is assumed restricted
+			}
+			s.reg.Add(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass})
 		case *nodev1.NodeMessage_Heartbeat:
 			s.reg.Heartbeat(nodeID, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
 		case *nodev1.NodeMessage_Status:
@@ -95,7 +100,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 				if sp, err := s.st.Spawns().Get(ctx, m.Status.SpawnId); err == nil {
 					owner = sp.OwnerID
 				}
-				_ = s.tel.Emit(telemetry.Event{Kind: "spawn_create", Owner: owner, NodeID: nodeID, SpawnID: m.Status.SpawnId, Tier: "reviewed", Storage: "managed", Timestamp: time.Now().UTC()})
+				_ = s.tel.Emit(telemetry.Event{Kind: "spawn_create", Owner: owner, NodeID: nodeID, NodeClass: nodeClass, SpawnID: m.Status.SpawnId, Tier: "reviewed", Storage: "managed", Timestamp: time.Now().UTC()})
 			}
 		case *nodev1.NodeMessage_Frame:
 			s.rt.FromNode(m.Frame.SpawnId, m.Frame.Data) // opaque bytes; never inspected/logged
