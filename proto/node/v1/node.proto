@@ -38,7 +38,7 @@ message MountMarker  { string name = 1; string marker = 2; }
 // One entry of a node's running-container inventory (node -> CP on Register/Heartbeat).
 message RunningSpawn { string spawn_id = 1; uint64 generation = 2; SpawnPhase phase = 3; }
 
-message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string agent_images = 3; repeated RunningSpawn running = 4; string node_class = 5; }
+message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string agent_images = 3; repeated RunningSpawn running = 4; string node_class = 5; string node_owner = 6; }
 message Heartbeat   { uint32 active_spawns = 1; uint32 free_slots = 2; uint32 cpu_pct = 3; uint32 gpu_pct = 4; repeated RunningSpawn running = 5; }
 message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; uint64 generation = 4; }
 message StartSpawn  { string spawn_id = 1; string app_ref = 2; string data_ref = 3; string model = 4; uint64 generation = 5; repeated MountBinding mounts = 6; }
