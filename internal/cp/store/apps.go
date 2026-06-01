@@ -124,6 +124,28 @@ func (r *appRepo) Catalog(ctx context.Context, f CatalogFilter) ([]CatalogEntry,
 	return out, nil
 }
 
+func (r *appRepo) ListByCreator(ctx context.Context, creatorID string) ([]CatalogEntry, error) {
+	var apps []App
+	if err := r.db.NewSelect().Model(&apps).
+		Where("creator_id = ?", creatorID).Order("display_name ASC").Scan(ctx); err != nil {
+		return nil, err
+	}
+	out := make([]CatalogEntry, 0, len(apps))
+	for _, a := range apps {
+		var v AppVersion
+		err := r.db.NewSelect().Model(&v).
+			Where("app_id = ?", a.ID).Order("created_at DESC").Limit(1).Scan(ctx)
+		e := CatalogEntry{App: a}
+		if err == nil {
+			e.LatestVersion, e.LatestTier = v.Version, v.Tier
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
 func tierRank(t Tier) int {
 	switch t {
 	case TierReviewed:
