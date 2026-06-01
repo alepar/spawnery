@@ -77,16 +77,32 @@ applied from the host, not inside the container).
 returns its ID, before the agent `StartContainer`. So the netns is firewalled before the (untrusted)
 agent ever runs.
 
+## 3a. Node class (cloud vs self-hosted) — user decision 2026-06-01
+
+A node has a **class**: `cloud` (Spawnery-operated) or `self-hosted` (the user's own box).
+
+- **Cloud** → the egress floor is **always enforced and cannot be disabled** (Spawnery runs
+  strangers' apps on shared infra — non-negotiable).
+- **Self-hosted** → the operator's **choice**: the floor defaults on but can be turned off
+  (it's their machine, their data, their risk).
+
+Effective enforcement = `class == "cloud" || EgressEnforce`. So `EgressEnforce` (default true) is
+only *honored as a disable* on self-hosted nodes; on cloud nodes the floor is forced regardless.
+**The demo's "Spawnery home server" is `cloud`-class**, so the demo always enforces; the
+self-hosted-unrestricted path is forward-looking (self-host is post-MVP in the demo cut). Default
+`NodeClass` is **`cloud`** (an unconfigured node is restricted — safe default).
+
 ## 4. Fail-closed
 
-If inspect/nsenter/iptables fails (missing tool, no privilege, error), `Create` must:
+When enforcement is effective (per §3a) and inspect/nsenter/iptables fails (missing tool, no
+privilege, error), `Create` must:
 1. log loudly (`egress floor failed for spawn <id>: <err>`),
 2. stop the already-started sidecar,
 3. return an error (spawn does not start).
 
-A node-level config flag `EgressEnforce` (default **true**) exists ONLY so a developer on a platform
-without iptables can explicitly opt out for local non-security testing; when false, log a loud
-`WARNING: egress floor DISABLED` on every spawn. Default true = fail-closed.
+When enforcement is NOT effective (self-hosted with `EgressEnforce=false`), log a loud
+`WARNING: egress floor DISABLED (self-hosted)` on every spawn and proceed unrestricted. A cloud node
+can never reach this state.
 
 ## 5. Components / files
 
@@ -124,7 +140,8 @@ without iptables can explicitly opt out for local non-security testing; when fal
 |---|---|---|
 | R.1 | Policy model | Default-allow **block-floor**: DROP metadata (169.254/16) + RFC1918; ACCEPT lo + EgressAllowCIDRs; default ACCEPT (public ok) |
 | R.2 | Mechanism | Host `nsenter -t <sidecar pid> -n -- iptables`; applied after sidecar start, before agent start |
-| R.3 | Failure | **Fail-closed** — abort spawn + stop sidecar; `EgressEnforce=false` is an explicit, loud dev opt-out |
+| R.3 | Failure | **Fail-closed** — abort spawn + stop sidecar when enforcement is effective |
+| R.9 | Node class | `cloud` (always enforce, non-disableable) vs `self-hosted` (honors `EgressEnforce`, default on, disableable). Effective = `class=="cloud" \|\| EgressEnforce`. Default class `cloud`. Demo = cloud. |
 | R.4 | Model upstream | Public OpenRouter → no RFC1918 carve-out; `EgressAllowCIDRs` knob for LAN-model operators |
 | R.5 | App-declared domains | **Out** — block-floor is static; allow-list/manifest plumbing is a later slice |
 | R.6 | Manifest/CP/proto | **No changes** (floor is static, node-only) |

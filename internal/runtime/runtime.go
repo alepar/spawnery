@@ -34,6 +34,7 @@ type ContainerRuntime interface {
 	StartContainer(ctx context.Context, s ContainerSpec) (id string, err error)
 	Attach(ctx context.Context, id string) (*AttachedStream, error)
 	StopContainer(ctx context.Context, id string) error
+	ContainerPID(ctx context.Context, id string) (int, error)
 }
 
 // FakeRuntime records calls for unit tests.
@@ -61,3 +62,4 @@ func (f *FakeRuntime) StopContainer(_ context.Context, id string) error {
 	f.Stopped[id] = true
 	return nil
 }
+func (f *FakeRuntime) ContainerPID(_ context.Context, id string) (int, error) { return 4242, nil }

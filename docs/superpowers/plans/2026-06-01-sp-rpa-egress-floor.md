@@ -206,16 +206,30 @@ func TestCreateFailClosedWhenFirewallFails(t *testing.T) {
 	}
 }
 
-func TestCreateSkipsFirewallWhenDisabled(t *testing.T) {
+func TestCreateSkipsFirewallSelfHostedDisabled(t *testing.T) {
 	rt := runtime.NewFake()
-	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), EgressEnforce: false})
+	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), NodeClass: "self-hosted", EgressEnforce: false})
 	fa := &failApplier{}
 	m.fw = fa
 	if _, err := m.Create(context.Background(), "spawn2", "../../examples/secret-app", "model"); err != nil {
-		t.Fatalf("Create with enforce=false should succeed: %v", err)
+		t.Fatalf("Create self-hosted+enforce=false should succeed: %v", err)
 	}
 	if fa.called {
-		t.Fatal("firewall must NOT be applied when EgressEnforce=false")
+		t.Fatal("firewall must NOT be applied on self-hosted with EgressEnforce=false")
+	}
+}
+
+func TestCreateCloudForcesEnforce(t *testing.T) {
+	rt := runtime.NewFake()
+	// cloud class with EgressEnforce=false: the floor must STILL be applied (cloud is non-disableable).
+	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), NodeClass: "cloud", EgressEnforce: false})
+	fa := &failApplier{}
+	m.fw = fa
+	if _, err := m.Create(context.Background(), "spawn3", "../../examples/secret-app", "model"); err == nil {
+		t.Fatal("cloud node must fail-closed (firewall forced) even with EgressEnforce=false")
+	}
+	if !fa.called {
+		t.Fatal("cloud node must apply the firewall regardless of EgressEnforce")
 	}
 }
 ```
@@ -242,12 +256,20 @@ func (d *Docker) ContainerPID(ctx context.Context, id string) (int, error) {
 Add `"fmt"` to docker.go imports if not present.
 
 - [ ] **Step 5: Wire into `manager.go`:**
-  - Add to `ManagerConfig`: `EgressEnforce bool` and `EgressAllowCIDRs []string`.
+  - Add to `ManagerConfig`: `NodeClass string` (`"cloud"` | `"self-hosted"`), `EgressEnforce bool`, `EgressAllowCIDRs []string`.
   - Add to `Manager` struct: `fw firewall.Applier`.
   - In `NewManager`, set `fw: firewall.NsenterApplier{}` (default real applier). Add import `"spawnery/internal/spawnlet/firewall"`.
+  - Add a helper method:
+```go
+// egressEnforced reports whether the egress floor must be applied: cloud nodes always enforce
+// (non-disableable); self-hosted honors the operator's EgressEnforce choice.
+func (m *Manager) egressEnforced() bool {
+	return m.cfg.NodeClass == "cloud" || m.cfg.EgressEnforce
+}
+```
   - In `Create`, AFTER the sidecar `StartContainer` succeeds (the `sidecarID` block) and BEFORE the agent `StartContainer`, insert:
 ```go
-	if m.cfg.EgressEnforce {
+	if m.egressEnforced() {
 		pid, err := m.rt.ContainerPID(ctx, sidecarID)
 		if err == nil {
 			err = m.fw.Apply(ctx, pid, firewall.Rules(m.cfg.EgressAllowCIDRs))
@@ -260,11 +282,13 @@ Add `"fmt"` to docker.go imports if not present.
 	}
 ```
 
-- [ ] **Step 6: Wire `cmd/spawnlet/main.go`** — read env into the config (default enforce TRUE):
+- [ ] **Step 6: Wire `cmd/spawnlet/main.go`** — read env into the config (node class default `cloud`, enforce default TRUE):
 ```go
+		NodeClass:        env("NODE_CLASS", "cloud"),
 		EgressEnforce:    getenvBool("EGRESS_ENFORCE", true),
 		EgressAllowCIDRs: splitCSV(os.Getenv("EGRESS_ALLOW_CIDRS")),
 ```
+(`env(k, def)` already exists in `cmd/spawnlet/main.go`.)
 Add small helpers if not present:
 ```go
 func getenvBool(k string, def bool) bool {
@@ -395,4 +419,5 @@ Then **superpowers:finishing-a-development-branch** (Option 1: merge to master l
 ## Self-Review Notes
 - **Spec coverage:** §2 rules → T1; §3 mechanism (ContainerPID + nsenter) → T1/T2; §4 fail-closed → T2; §5 files → all; §6 testing (unit + fail-closed + tagged e2e) → T1/T2/T3. Out-of-scope (manifest/CP/proto, consent, IPv6, allow-list) absent. ✓
 - **Types:** `firewall.Rule{Args}`, `Rules([]string) []Rule`, `Applier.Apply(ctx,pid,[]Rule)`, `NsenterApplier`, `Manager.fw`, `ManagerConfig.EgressEnforce/EgressAllowCIDRs`, `runtime.ContainerPID` consistent across tasks. ✓
-- **Library default note:** `ManagerConfig.EgressEnforce` zero-value is `false` (keeps existing FakeRuntime tests untouched); the PRODUCTION default-true lives in `cmd/spawnlet` (`getenvBool("EGRESS_ENFORCE", true)`). Documented tradeoff: fail-closed holds for the real entrypoint; a library caller must opt in.
+- **Library default note:** zero-value `ManagerConfig` has `NodeClass=""` (not `"cloud"`) + `EgressEnforce=false` → `egressEnforced()` is false → existing FakeRuntime tests skip the firewall untouched. The PRODUCTION defaults live in `cmd/spawnlet`: `NodeClass` defaults `"cloud"` (always enforce) and `EgressEnforce` defaults `true`. So a real node is fail-closed by default; a library caller must opt in via `NodeClass:"cloud"` or `EgressEnforce:true`.
+- **Node class (R.9):** `egressEnforced() = NodeClass=="cloud" || EgressEnforce`. Cloud forces the floor (non-disableable); self-hosted honors `EgressEnforce`. Tested by `TestCreateCloudForcesEnforce` (cloud + enforce=false → still applied) and `TestCreateSkipsFirewallSelfHostedDisabled`.

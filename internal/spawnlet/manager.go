@@ -7,12 +7,17 @@ import (
 
 	"spawnery/internal/manifest"
 	"spawnery/internal/runtime"
+	"spawnery/internal/spawnlet/firewall"
 	"spawnery/internal/storage"
 )
 
 type ManagerConfig struct {
 	AgentImage, SidecarImage, OpenRouterKey, DataRoot string
 	SidecarPort                                       int // default 8080
+
+	NodeClass        string // "cloud" (always enforces) or "self-hosted" (honors EgressEnforce)
+	EgressEnforce    bool   // self-hosted opt-out switch; ignored on cloud
+	EgressAllowCIDRs []string
 }
 
 type Manager struct {
@@ -20,13 +25,20 @@ type Manager struct {
 	cfg     ManagerConfig
 	store   *Store
 	backend storage.Backend
+	fw      firewall.Applier
 }
 
 func NewManager(rt runtime.ContainerRuntime, cfg ManagerConfig) *Manager {
 	if cfg.SidecarPort == 0 {
 		cfg.SidecarPort = 8080
 	}
-	return &Manager{rt: rt, cfg: cfg, store: NewStore(), backend: storage.NewScratch(cfg.DataRoot)}
+	return &Manager{rt: rt, cfg: cfg, store: NewStore(), backend: storage.NewScratch(cfg.DataRoot), fw: firewall.NsenterApplier{}}
+}
+
+// egressEnforced reports whether the egress floor must be applied: cloud nodes always enforce
+// (non-disableable); self-hosted honors the operator's EgressEnforce choice.
+func (m *Manager) egressEnforced() bool {
+	return m.cfg.NodeClass == "cloud" || m.cfg.EgressEnforce
 }
 
 func (m *Manager) Store() *Store { return m.store }
@@ -73,6 +85,18 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 	if err != nil {
 		finalizeAll()
 		return nil, fmt.Errorf("sidecar: %w", err)
+	}
+
+	if m.egressEnforced() {
+		pid, ferr := m.rt.ContainerPID(ctx, sidecarID)
+		if ferr == nil {
+			ferr = m.fw.Apply(ctx, pid, firewall.Rules(m.cfg.EgressAllowCIDRs))
+		}
+		if ferr != nil {
+			_ = m.rt.StopContainer(ctx, sidecarID)
+			finalizeAll()
+			return nil, fmt.Errorf("egress floor (fail-closed): %w", ferr)
+		}
 	}
 
 	agentID, err := m.rt.StartContainer(ctx, runtime.ContainerSpec{
