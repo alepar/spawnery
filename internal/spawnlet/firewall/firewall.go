@@ -1,6 +1,8 @@
-// Package firewall builds + applies the per-pod egress block-floor (sp-rpa): drop cloud-metadata
-// and RFC1918 from a spawn pod's network namespace, allowing public egress otherwise. Static rules
-// (same every spawn); applied from the host into the sidecar container's netns via nsenter.
+// Package firewall builds + applies the per-pod egress block-floor (sp-rpa, sp-ff2): drop
+// cloud-metadata and RFC1918 for a spawn pod, allowing public egress otherwise. Rules are applied on
+// the HOST's DOCKER-USER chain, matched by the pod's bridge source IP. This works under both runc AND
+// gVisor/runsc — applying iptables inside the spawn's container netns is a no-op under runsc, whose
+// netstack bypasses host netfilter. DOCKER-USER persists across containers, so rules carry a Remove.
 package firewall
 
 import (
@@ -12,44 +14,60 @@ import (
 // Rule is one iptables invocation's arguments (everything after "iptables").
 type Rule struct{ Args []string }
 
-// Rules returns the OUTPUT-chain block-floor. allowCIDRs are ACCEPTed before the drops (for an
-// operator whose model upstream / DNS resolver is on a LAN). Order matters: ACCEPTs precede DROPs.
-func Rules(allowCIDRs []string) []Rule {
-	rules := []Rule{
-		{Args: []string{"-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"}},
-	}
+// Rules returns the per-pod egress block-floor for the given pod bridge IP, as DOCKER-USER chain
+// arg-lists (everything after "iptables"). Matched by source IP so multiple pods coexist in the
+// shared chain. Final applied order (top-to-bottom): DNS + allowCIDRs ACCEPT, then metadata + RFC1918
+// DROP. No loopback rule — agent<->sidecar (127.0.0.1) is never forwarded. Applied on the HOST
+// (works under runc AND gVisor/runsc, where in-netns iptables is a no-op).
+func Rules(ip string, allowCIDRs []string) []Rule {
+	var rules []Rule
+	add := func(args ...string) { rules = append(rules, Rule{Args: append([]string{"-s", ip}, args...)}) }
+	add("-p", "udp", "--dport", "53", "-j", "ACCEPT")
+	add("-p", "tcp", "--dport", "53", "-j", "ACCEPT")
 	for _, c := range allowCIDRs {
-		rules = append(rules, Rule{Args: []string{"-A", "OUTPUT", "-d", c, "-j", "ACCEPT"}})
+		add("-d", c, "-j", "ACCEPT")
 	}
-	// allow DNS to any resolver (resolvers are often on RFC1918, e.g. a LAN/home-server or cloud
-	// internal DNS); without this the RFC1918 drops below break name resolution — and the sidecar
-	// must resolve its model upstream (e.g. api.openrouter.ai). Standard egress-floor DNS carve-out.
-	rules = append(rules,
-		Rule{Args: []string{"-A", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT"}},
-		Rule{Args: []string{"-A", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT"}},
-	)
 	for _, c := range []string{"169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
-		rules = append(rules, Rule{Args: []string{"-A", "OUTPUT", "-d", c, "-j", "DROP"}})
+		add("-d", c, "-j", "DROP")
 	}
 	return rules
 }
 
-// Applier applies firewall rules to the netns of the process with the given pid.
+const chain = "DOCKER-USER"
+
+// Applier installs/removes egress-floor rules on the host's DOCKER-USER chain.
 type Applier interface {
-	Apply(ctx context.Context, pid int, rules []Rule) error
+	Apply(ctx context.Context, rules []Rule) error
+	Remove(ctx context.Context, rules []Rule) error
 }
 
-// NsenterApplier runs the host's iptables inside the target pid's network namespace via nsenter.
-// Requires nsenter + iptables on the host and CAP_NET_ADMIN/root for this process.
-type NsenterApplier struct{}
+// HostFloorApplier runs the host's iptables against DOCKER-USER. Requires iptables + root
+// (CAP_NET_ADMIN). Inserts in REVERSE with -I so the final order matches Rules().
+type HostFloorApplier struct{}
 
-func (NsenterApplier) Apply(ctx context.Context, pid int, rules []Rule) error {
-	for _, r := range rules {
-		args := append([]string{"-t", fmt.Sprint(pid), "-n", "--", "iptables"}, r.Args...)
-		out, err := exec.CommandContext(ctx, "nsenter", args...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("nsenter iptables %v: %w (%s)", r.Args, err, out)
+func (HostFloorApplier) Apply(ctx context.Context, rules []Rule) error {
+	for i := len(rules) - 1; i >= 0; i-- {
+		if err := run(ctx, append([]string{"-I", chain}, rules[i].Args...)); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func (HostFloorApplier) Remove(ctx context.Context, rules []Rule) error {
+	var firstErr error
+	for _, r := range rules {
+		if err := run(ctx, append([]string{"-D", chain}, r.Args...)); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func run(ctx context.Context, args []string) error {
+	out, err := exec.CommandContext(ctx, "iptables", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("iptables %v: %w (%s)", args, err, out)
 	}
 	return nil
 }

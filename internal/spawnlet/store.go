@@ -7,6 +7,7 @@ type Spawn struct {
 	SidecarID string
 	AgentID   string
 	MountDirs []string // host dirs backing this spawn's mounts (for Finalize)
+	FloorIP   string   // pod bridge IP the egress floor was applied for (for Remove on Stop)
 	Status    string
 }
 

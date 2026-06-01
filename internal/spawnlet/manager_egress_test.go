@@ -9,23 +9,35 @@ import (
 	"spawnery/internal/spawnlet/firewall"
 )
 
-type failApplier struct{ called bool }
+type fakeApplier struct {
+	applied   bool
+	removed   bool
+	failApply bool
+}
 
-func (f *failApplier) Apply(ctx context.Context, pid int, rules []firewall.Rule) error {
-	f.called = true
-	return errors.New("boom")
+func (f *fakeApplier) Apply(ctx context.Context, rules []firewall.Rule) error {
+	f.applied = true
+	if f.failApply {
+		return errors.New("boom")
+	}
+	return nil
+}
+
+func (f *fakeApplier) Remove(ctx context.Context, rules []firewall.Rule) error {
+	f.removed = true
+	return nil
 }
 
 func TestCreateFailClosedWhenFirewallFails(t *testing.T) {
 	rt := runtime.NewFake()
 	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), EgressEnforce: true})
-	fa := &failApplier{}
+	fa := &fakeApplier{failApply: true}
 	m.fw = fa
 	_, err := m.Create(context.Background(), "spawn1", "../../examples/secret-app", "model")
 	if err == nil {
 		t.Fatal("Create must fail-closed when the firewall can't be applied")
 	}
-	if !fa.called {
+	if !fa.applied {
 		t.Fatal("firewall applier was not called")
 	}
 	if !rt.Stopped["fake-1"] {
@@ -39,12 +51,12 @@ func TestCreateFailClosedWhenFirewallFails(t *testing.T) {
 func TestCreateSkipsFirewallSelfHostedDisabled(t *testing.T) {
 	rt := runtime.NewFake()
 	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), NodeClass: "self-hosted", EgressEnforce: false})
-	fa := &failApplier{}
+	fa := &fakeApplier{}
 	m.fw = fa
 	if _, err := m.Create(context.Background(), "spawn2", "../../examples/secret-app", "model"); err != nil {
 		t.Fatalf("Create self-hosted+enforce=false should succeed: %v", err)
 	}
-	if fa.called {
+	if fa.applied {
 		t.Fatal("firewall must NOT be applied on self-hosted with EgressEnforce=false")
 	}
 }
@@ -52,12 +64,32 @@ func TestCreateSkipsFirewallSelfHostedDisabled(t *testing.T) {
 func TestCreateCloudForcesEnforce(t *testing.T) {
 	rt := runtime.NewFake()
 	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), NodeClass: "cloud", EgressEnforce: false})
-	fa := &failApplier{}
+	fa := &fakeApplier{failApply: true}
 	m.fw = fa
 	if _, err := m.Create(context.Background(), "spawn3", "../../examples/secret-app", "model"); err == nil {
 		t.Fatal("cloud node must fail-closed (firewall forced) even with EgressEnforce=false")
 	}
-	if !fa.called {
+	if !fa.applied {
 		t.Fatal("cloud node must apply the firewall regardless of EgressEnforce")
+	}
+}
+
+func TestStopRemovesFloor(t *testing.T) {
+	rt := runtime.NewFake()
+	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), EgressEnforce: true})
+	fa := &fakeApplier{}
+	m.fw = fa
+	sp, err := m.Create(context.Background(), "spawn4", "../../examples/secret-app", "model")
+	if err != nil {
+		t.Fatalf("Create should succeed: %v", err)
+	}
+	if !fa.applied {
+		t.Fatal("firewall floor must be applied on Create")
+	}
+	if err := m.Stop(context.Background(), sp.ID); err != nil {
+		t.Fatalf("Stop should succeed: %v", err)
+	}
+	if !fa.removed {
+		t.Fatal("egress floor must be removed on Stop")
 	}
 }

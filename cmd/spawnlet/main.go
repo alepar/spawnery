@@ -38,7 +38,12 @@ func main() {
 		CPULimit:         getenvFloat("CPU_LIMIT", 1.0),
 		PidsLimit:        getenvInt64("PIDS_LIMIT", 256),
 		ContainerRuntime: os.Getenv("CONTAINER_RUNTIME"),
+		HardenRootfs:     getenvBool("HARDEN_ROOTFS", false),
 	})
+	ctx := context.Background()
+	if err := mgr.PreflightRuntime(ctx); err != nil {
+		log.Fatalf("container runtime preflight failed: %v", err)
+	}
 	if cpURL := os.Getenv("CP_ADDR"); cpURL != "" {
 		// CP-attached mode: dial the CP, no inbound listener.
 		cfg := node.Config{
@@ -50,7 +55,7 @@ func main() {
 			NodeOwner:  env("NODE_OWNER", ""),
 		}
 		log.Printf("spawnlet attaching to CP at %s as %s", cpURL, cfg.NodeID)
-		log.Fatal(node.Run(context.Background(), mgr, h2cClient(), cfg))
+		log.Fatal(node.Run(ctx, mgr, h2cClient(), cfg))
 	}
 
 	// Standalone mode (unchanged): inbound spawn.v1 server + /ws.

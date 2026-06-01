@@ -24,6 +24,24 @@ func TestBuildHostConfigLimits(t *testing.T) {
 	}
 }
 
+func TestBuildHostConfigHardening(t *testing.T) {
+	h := buildHostConfig(ContainerSpec{DropAllCaps: true, ReadonlyRootfs: true})
+	if len(h.CapDrop) != 1 || h.CapDrop[0] != "ALL" {
+		t.Fatalf("CapDrop = %v (want [ALL])", h.CapDrop)
+	}
+	if !h.ReadonlyRootfs {
+		t.Fatal("ReadonlyRootfs should be true")
+	}
+	if _, ok := h.Tmpfs["/tmp"]; !ok {
+		t.Fatalf("expected /tmp tmpfs, got %v", h.Tmpfs)
+	}
+	// zero values -> nothing set
+	h2 := buildHostConfig(ContainerSpec{})
+	if len(h2.CapDrop) != 0 || h2.ReadonlyRootfs || h2.Tmpfs != nil {
+		t.Fatalf("zero spec must not set hardening: capdrop=%v ro=%v tmpfs=%v", h2.CapDrop, h2.ReadonlyRootfs, h2.Tmpfs)
+	}
+}
+
 func TestBuildHostConfigZeroValuesOmitted(t *testing.T) {
 	h := buildHostConfig(ContainerSpec{NetnsOf: "sidecar123"})
 	if h.Resources.Memory != 0 || h.Resources.NanoCPUs != 0 || h.Resources.PidsLimit != nil {

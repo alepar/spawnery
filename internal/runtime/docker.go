@@ -73,6 +73,16 @@ func buildHostConfig(s ContainerSpec) *container.HostConfig {
 	if s.Runtime != "" {
 		host.Runtime = s.Runtime
 	}
+	if s.DropAllCaps {
+		host.CapDrop = []string{"ALL"}
+	}
+	if s.ReadonlyRootfs {
+		host.ReadonlyRootfs = true
+		if host.Tmpfs == nil {
+			host.Tmpfs = map[string]string{}
+		}
+		host.Tmpfs["/tmp"] = ""
+	}
 	return host
 }
 
@@ -113,6 +123,21 @@ func (d *Docker) ContainerPID(ctx context.Context, id string) (int, error) {
 		return 0, fmt.Errorf("container %s has no pid (not running)", id)
 	}
 	return j.State.Pid, nil
+}
+
+func (d *Docker) ContainerIP(ctx context.Context, id string) (string, error) {
+	j, err := d.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	ip := ""
+	if j.NetworkSettings != nil {
+		ip = j.NetworkSettings.DefaultNetworkSettings.IPAddress
+	}
+	if ip == "" {
+		return "", fmt.Errorf("container %s has no bridge IP", id)
+	}
+	return ip, nil
 }
 
 func (d *Docker) StopContainer(ctx context.Context, id string) error {

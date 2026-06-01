@@ -3,6 +3,7 @@ package spawnlet
 import (
 	"context"
 	"fmt"
+	"log"
 	"path/filepath"
 
 	"spawnery/internal/manifest"
@@ -23,6 +24,7 @@ type ManagerConfig struct {
 	CPULimit         float64 // CPU cores; default 1.0
 	PidsLimit        int64   // max pids per container; default 256
 	ContainerRuntime string  // OCI runtime name; "" = Docker default
+	HardenRootfs     bool    // if true, run agent with read-only rootfs + /tmp tmpfs
 }
 
 type Manager struct {
@@ -46,7 +48,7 @@ func NewManager(rt runtime.ContainerRuntime, cfg ManagerConfig) *Manager {
 	if cfg.PidsLimit == 0 {
 		cfg.PidsLimit = 256
 	}
-	return &Manager{rt: rt, cfg: cfg, store: NewStore(), backend: storage.NewScratch(cfg.DataRoot), fw: firewall.NsenterApplier{}}
+	return &Manager{rt: rt, cfg: cfg, store: NewStore(), backend: storage.NewScratch(cfg.DataRoot), fw: firewall.HostFloorApplier{}}
 }
 
 // egressEnforced reports whether the egress floor must be applied: cloud nodes always enforce
@@ -110,10 +112,12 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		return nil, fmt.Errorf("sidecar: %w", err)
 	}
 
+	var floorIP string
 	if m.egressEnforced() {
-		pid, ferr := m.rt.ContainerPID(ctx, sidecarID)
+		ip, ferr := m.rt.ContainerIP(ctx, sidecarID)
 		if ferr == nil {
-			ferr = m.fw.Apply(ctx, pid, firewall.Rules(m.cfg.EgressAllowCIDRs))
+			floorIP = ip
+			ferr = m.fw.Apply(ctx, firewall.Rules(ip, m.cfg.EgressAllowCIDRs))
 		}
 		if ferr != nil {
 			_ = m.rt.StopContainer(ctx, sidecarID)
@@ -129,12 +133,14 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 			"OPENAI_BASE_URL=http://" + addr + "/v1",
 			"SPAWN_MODEL=" + model,
 		},
-		Mounts:      mounts,
-		AttachStdio: true,
-		MemoryBytes: mem,
-		NanoCPUs:    cpus,
-		PidsLimit:   pids,
-		Runtime:     rtName,
+		Mounts:         mounts,
+		AttachStdio:    true,
+		MemoryBytes:    mem,
+		NanoCPUs:       cpus,
+		PidsLimit:      pids,
+		Runtime:        rtName,
+		DropAllCaps:    true,
+		ReadonlyRootfs: m.cfg.HardenRootfs,
 	})
 	if err != nil {
 		_ = m.rt.StopContainer(ctx, sidecarID)
@@ -142,9 +148,28 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		return nil, fmt.Errorf("agent: %w", err)
 	}
 
-	sp := &Spawn{ID: id, SidecarID: sidecarID, AgentID: agentID, MountDirs: mountDirs, Status: "ready"}
+	sp := &Spawn{ID: id, SidecarID: sidecarID, AgentID: agentID, MountDirs: mountDirs, FloorIP: floorIP, Status: "ready"}
 	m.store.Put(sp)
 	return sp, nil
+}
+
+// PreflightRuntime validates a configured non-default container runtime (e.g. runsc) at startup by
+// running a throwaway smoke container under it. Returns an error if the runtime can't run a container
+// — callers should fail hard rather than discover this at first CreateSpawn.
+func (m *Manager) PreflightRuntime(ctx context.Context) error {
+	if m.cfg.ContainerRuntime == "" {
+		return nil
+	}
+	id, err := m.rt.StartContainer(ctx, runtime.ContainerSpec{
+		Image:   m.cfg.AgentImage,
+		Cmd:     []string{"true"},
+		Runtime: m.cfg.ContainerRuntime,
+	})
+	if err != nil {
+		return fmt.Errorf("runtime %q preflight: %w", m.cfg.ContainerRuntime, err)
+	}
+	_ = m.rt.StopContainer(context.WithoutCancel(ctx), id)
+	return nil
 }
 
 func (m *Manager) Stop(ctx context.Context, id string) error {
@@ -154,6 +179,11 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	}
 	_ = m.rt.StopContainer(ctx, sp.AgentID)
 	_ = m.rt.StopContainer(ctx, sp.SidecarID)
+	if sp.FloorIP != "" {
+		if err := m.fw.Remove(ctx, firewall.Rules(sp.FloorIP, m.cfg.EgressAllowCIDRs)); err != nil {
+			log.Printf("egress floor cleanup for %s (ip %s): %v", id, sp.FloorIP, err)
+		}
+	}
 	for _, d := range sp.MountDirs {
 		_ = m.backend.Finalize(ctx, d)
 	}
