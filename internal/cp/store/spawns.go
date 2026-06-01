@@ -248,8 +248,12 @@ func (r *spawnRepo) MarkDeleted(ctx context.Context, id string, ts int64) error 
 }
 
 func (r *spawnRepo) EndContainer(ctx context.Context, id string, gen int64, p Phase) error {
-	_, err := r.db.NewUpdate().Model((*Container)(nil)).
-		Set("ended_at = last_used_at").Set("phase = ?", p).
+	ts, err := r.lastUsedTS(ctx, id)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.NewUpdate().Model((*Container)(nil)).
+		Set("ended_at = ?", ts).Set("phase = ?", p).
 		Where("spawn_id = ? AND generation = ? AND ended_at IS NULL", id, gen).Exec(ctx)
 	return err
 }
@@ -287,3 +291,27 @@ func (r *spawnRepo) guardContainerGen(ctx context.Context, id string, gen int64)
 	}
 	return nil
 }
+
+func (r *spawnRepo) LiveContainersByNode(ctx context.Context, nodeID string) ([]Container, error) {
+	var out []Container
+	err := r.db.NewSelect().Model(&out).
+		Where("node_id = ? AND ended_at IS NULL", nodeID).Scan(ctx)
+	return out, err
+}
+
+// Adopt binds the current live container of a spawn to a node (rebind on reconnect; no restart).
+func (r *spawnRepo) Adopt(ctx context.Context, id, nodeID string, gen int64) error {
+	res, err := r.db.NewUpdate().Model((*Container)(nil)).
+		Set("node_id = ?", nodeID).
+		Where("spawn_id = ? AND generation = ? AND ended_at IS NULL", id, gen).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+// Compile-time check that *spawnRepo fully implements SpawnRepo.
+var _ SpawnRepo = (*spawnRepo)(nil)
