@@ -36,3 +36,21 @@ func TestCreatorStickyAndManifestRoundTrip(t *testing.T) {
 		t.Fatalf("mounts = %+v err=%v", mounts, err)
 	}
 }
+
+func TestSetListed(t *testing.T) {
+	st := NewTestStore(t)
+	ctx := context.Background()
+	if err := st.Apps().Upsert(ctx, App{ID: "c/a", DisplayName: "A", Visibility: "public", Listed: true, CreatorID: "alice", CreatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Apps().SetListed(ctx, "c/a", false); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.Apps().Get(ctx, "c/a")
+	if got.Listed {
+		t.Fatal("expected unlisted")
+	}
+	if err := st.Apps().SetListed(ctx, "missing", true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound for missing app, got %v", err)
+	}
+}

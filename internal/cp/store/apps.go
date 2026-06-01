@@ -137,6 +137,17 @@ func tierRank(t Tier) int {
 	}
 }
 
+func (r *appRepo) SetListed(ctx context.Context, appID string, listed bool) error {
+	res, err := r.db.NewUpdate().Model((*App)(nil)).Set("listed = ?", listed).Where("id = ?", appID).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (r *appRepo) AppDetail(ctx context.Context, id string) (App, []AppVersion, error) {
 	var a App
 	err := r.db.NewSelect().Model(&a).Where("id = ? AND listed = ?", id, true).Scan(ctx)

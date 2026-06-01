@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/internal/cp/auth"
@@ -82,5 +84,14 @@ func (s *Server) GetApp(ctx context.Context, req *connect.Request[cpv1.GetAppReq
 			summary.LatestVersion, summary.LatestTier = v.Version, tierToProto(v.Tier)
 		}
 	}
-	return connect.NewResponse(&cpv1.GetAppResponse{App: summary, Versions: vout}), nil
+	resp := &cpv1.GetAppResponse{App: summary, Versions: vout}
+	if len(versions) > 0 && versions[0].Manifest != "" {
+		var m cpv1.AppManifest
+		if err := protojson.Unmarshal([]byte(versions[0].Manifest), &m); err != nil {
+			log.Printf("GetApp %s: manifest parse: %v", req.Msg.Id, err) // non-fatal
+		} else {
+			resp.Manifest = &m
+		}
+	}
+	return connect.NewResponse(resp), nil
 }

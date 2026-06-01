@@ -8,6 +8,7 @@ service SpawnService {
   rpc ListApps(ListAppsRequest) returns (ListAppsResponse);
   rpc GetApp(GetAppRequest) returns (GetAppResponse);
   rpc RegisterAppVersion(RegisterAppVersionRequest) returns (RegisterAppVersionResponse);
+  rpc SetAppListing(SetAppListingRequest) returns (SetAppListingResponse);
   rpc Session(stream Frame) returns (stream Frame);
   rpc SuspendSpawn(SuspendSpawnRequest) returns (SuspendSpawnResponse);
   rpc ResumeSpawn(ResumeSpawnRequest) returns (ResumeSpawnResponse);
@@ -93,6 +94,7 @@ message GetAppRequest  { string id = 1; }
 message GetAppResponse {
   AppSummary app = 1;                      // app metadata + latest tier
   repeated AppVersionSummary versions = 2; // newest first
+  AppManifest manifest = 3;
 }
 
 // AppManifest is the structured app-version manifest — the registration source of truth
@@ -135,3 +137,6 @@ message RegisterAppVersionResponse {
   string version = 2;
   TrustTier tier = 3;
 }
+
+message SetAppListingRequest  { string app_id = 1; bool listed = 2; }
+message SetAppListingResponse {}
