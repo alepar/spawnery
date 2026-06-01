@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 
@@ -83,6 +84,17 @@ func (d *Docker) Attach(ctx context.Context, id string) (*AttachedStream, error)
 		Stdout: pr,
 		Close:  func() error { hijack.Close(); pr.CloseWithError(io.ErrClosedPipe); return nil },
 	}, nil
+}
+
+func (d *Docker) ContainerPID(ctx context.Context, id string) (int, error) {
+	j, err := d.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	if j.State == nil || j.State.Pid == 0 {
+		return 0, fmt.Errorf("container %s has no pid (not running)", id)
+	}
+	return j.State.Pid, nil
 }
 
 func (d *Docker) StopContainer(ctx context.Context, id string) error {

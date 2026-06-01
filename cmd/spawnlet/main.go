@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -27,6 +28,10 @@ func main() {
 		SidecarImage:  env("SIDECAR_IMAGE", "spawnery/sidecar:dev"),
 		OpenRouterKey: os.Getenv("OPENROUTER_API_KEY"),
 		DataRoot:      env("DATA_ROOT", "/var/lib/spawnlet/spawns"),
+
+		NodeClass:        env("NODE_CLASS", "cloud"),
+		EgressEnforce:    getenvBool("EGRESS_ENFORCE", true),
+		EgressAllowCIDRs: splitCSV(os.Getenv("EGRESS_ALLOW_CIDRS")),
 	})
 	if cpURL := os.Getenv("CP_ADDR"); cpURL != "" {
 		// CP-attached mode: dial the CP, no inbound listener.
@@ -65,4 +70,19 @@ func env(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func getenvBool(k string, def bool) bool {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	return v == "1" || v == "true" || v == "TRUE"
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }
