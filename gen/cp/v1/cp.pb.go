@@ -347,6 +347,7 @@ func (x *SpawnSummary) GetLastUsedAt() int64 {
 	return 0
 }
 
+// Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
 type ListSpawnsRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache

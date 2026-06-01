@@ -7,8 +7,9 @@ service NodeService {
   rpc Attach(stream NodeMessage) returns (stream CPMessage);
 }
 
-// SUSPENDED (6) added; existing values unchanged (keeps wire + Go switch sites stable).
-enum SpawnPhase { SPAWN_PHASE_UNSPECIFIED = 0; STARTING = 1; ACTIVE = 2; STOPPING = 3; STOPPED = 4; ERROR = 5; SUSPENDED = 6; }
+// Node-reported runtime phase of a spawn's container. STOPPING/STOPPED = destroy path;
+// SUSPENDING/SUSPENDED = suspend path. Values 0-6 are wire-stable; SUSPENDING (7) added for the suspend path.
+enum SpawnPhase { SPAWN_PHASE_UNSPECIFIED = 0; STARTING = 1; ACTIVE = 2; STOPPING = 3; STOPPED = 4; ERROR = 5; SUSPENDED = 6; SUSPENDING = 7; }
 
 message NodeMessage {
   oneof msg {

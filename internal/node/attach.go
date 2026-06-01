@@ -106,6 +106,9 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		a.closeSession(m.Close.SpawnId)
 	case *nodev1.CPMessage_Frame:
 		a.feed(m.Frame.SpawnId, m.Frame.Data)
+	default:
+		// TODO(sp-gd9): handle *nodev1.CPMessage_Suspend (persist mounts + tear down, then emit
+		// NodeMessage_SuspendComplete with per-mount markers). Inert until the suspend path lands.
 	}
 }
 
