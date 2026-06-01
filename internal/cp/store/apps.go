@@ -33,6 +33,15 @@ func (r *appRepo) Get(ctx context.Context, id string) (App, error) {
 	return a, err
 }
 
+func (r *appRepo) Creator(ctx context.Context, appID string) (string, error) {
+	var a App
+	err := r.db.NewSelect().Model(&a).Column("creator_id").Where("id = ?", appID).Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return a.CreatorID, err
+}
+
 func (r *appRepo) List(ctx context.Context) ([]App, error) {
 	var out []App
 	err := r.db.NewSelect().Model(&out).Order("id ASC").Scan(ctx)
@@ -42,14 +51,14 @@ func (r *appRepo) List(ctx context.Context) ([]App, error) {
 func (r *appRepo) UpsertVersion(ctx context.Context, v AppVersion, mounts []MountDecl) error {
 	if _, err := r.db.NewInsert().Model(&v).
 		On("CONFLICT (app_id, version) DO UPDATE").
-		Set("ref = EXCLUDED.ref").Set("tier = EXCLUDED.tier").
+		Set("ref = EXCLUDED.ref").Set("tier = EXCLUDED.tier").Set("manifest = EXCLUDED.manifest").
 		Exec(ctx); err != nil {
 		return err
 	}
 	for i := range mounts {
 		if _, err := r.db.NewInsert().Model(&mounts[i]).
 			On("CONFLICT (app_id, version, name) DO UPDATE").
-			Set("required = EXCLUDED.required").
+			Set("required = EXCLUDED.required").Set("path = EXCLUDED.path").Set("seed = EXCLUDED.seed").
 			Exec(ctx); err != nil {
 			return err
 		}
