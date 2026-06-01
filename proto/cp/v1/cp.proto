@@ -9,6 +9,7 @@ service SpawnService {
   rpc GetApp(GetAppRequest) returns (GetAppResponse);
   rpc RegisterAppVersion(RegisterAppVersionRequest) returns (RegisterAppVersionResponse);
   rpc SetAppListing(SetAppListingRequest) returns (SetAppListingResponse);
+  rpc ListMyApps(ListMyAppsRequest) returns (ListMyAppsResponse);
   rpc Session(stream Frame) returns (stream Frame);
   rpc SuspendSpawn(SuspendSpawnRequest) returns (SuspendSpawnResponse);
   rpc ResumeSpawn(ResumeSpawnRequest) returns (ResumeSpawnResponse);
@@ -78,6 +79,7 @@ message AppSummary {
   repeated string tags  = 4;
   string latest_version = 5; // newest version; "" if none
   TrustTier latest_tier = 6;
+  bool listed = 7;
 }
 
 message AppVersionSummary {
@@ -140,3 +142,6 @@ message RegisterAppVersionResponse {
 
 message SetAppListingRequest  { string app_id = 1; bool listed = 2; }
 message SetAppListingResponse {}
+
+message ListMyAppsRequest  {}
+message ListMyAppsResponse { repeated AppSummary apps = 1; }
