@@ -21,6 +21,13 @@ func Rules(allowCIDRs []string) []Rule {
 	for _, c := range allowCIDRs {
 		rules = append(rules, Rule{Args: []string{"-A", "OUTPUT", "-d", c, "-j", "ACCEPT"}})
 	}
+	// allow DNS to any resolver (resolvers are often on RFC1918, e.g. a LAN/home-server or cloud
+	// internal DNS); without this the RFC1918 drops below break name resolution — and the sidecar
+	// must resolve its model upstream (e.g. api.openrouter.ai). Standard egress-floor DNS carve-out.
+	rules = append(rules,
+		Rule{Args: []string{"-A", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT"}},
+		Rule{Args: []string{"-A", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT"}},
+	)
 	for _, c := range []string{"169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
 		rules = append(rules, Rule{Args: []string{"-A", "OUTPUT", "-d", c, "-j", "DROP"}})
 	}

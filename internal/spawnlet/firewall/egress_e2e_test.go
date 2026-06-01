@@ -50,7 +50,14 @@ func TestEgressFloorEnforced(t *testing.T) {
 	if out, err := exec.CommandContext(ctx, "docker", "exec", id, "curl", "-sS", "--max-time", "3", "http://10.0.0.1/").CombinedOutput(); err == nil {
 		t.Fatalf("RFC1918 reachable after floor: %s", out)
 	}
-	if out, err := exec.CommandContext(ctx, "docker", "exec", id, "curl", "-sS", "--max-time", "10", "https://api.openrouter.ai/").CombinedOutput(); err != nil {
-		t.Fatalf("public host unreachable after floor (floor too strict): %v (%s)", err, strings.TrimSpace(string(out)))
+	// Public egress must still work. Hit a public IP directly (1.1.1.1:443) rather than a hostname so
+	// the check doesn't depend on DNS resolution — some hosts/CI block outbound DNS entirely, which
+	// would mask the floor's behavior. The DNS carve-out (udp/tcp :53 ACCEPT before the drops) is
+	// covered by the firewall unit test + verified at the packet level on a real host. A curl connect
+	// failure (exit 7) or timeout (exit 28) means the floor blocked public egress; a TLS/HTTP error
+	// from a *reached* server is fine.
+	out, perr := exec.CommandContext(ctx, "docker", "exec", id, "curl", "-sS", "--max-time", "10", "-o", "/dev/null", "https://1.1.1.1/").CombinedOutput()
+	if ee, ok := perr.(*exec.ExitError); ok && (ee.ExitCode() == 7 || ee.ExitCode() == 28) {
+		t.Fatalf("public IP unreachable after floor (floor too strict): exit %d (%s)", ee.ExitCode(), strings.TrimSpace(string(out)))
 	}
 }

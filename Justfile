@@ -65,6 +65,13 @@ test-e2e:
 test-web-e2e:
     cd web && npm run test:e2e
 
+# egress-floor enforcement e2e — REAL iptables on a privileged host (needs Docker + iptables + root).
+# Compiles as the current user (warm cache), runs the binary as root with iptables/nsenter/docker on PATH.
+test-egress:
+    docker pull -q curlimages/curl:latest
+    go test -tags egress_e2e -c -o /tmp/egress.test ./internal/spawnlet/firewall/
+    sudo env "PATH=/sbin:/usr/sbin:/usr/bin:/bin:$(dirname $(command -v nsenter)):$(dirname $(command -v docker))" /tmp/egress.test -test.run TestEgressFloorEnforced -test.v -test.count=1
+
 # --- housekeeping --------------------------------------------------------
 
 # install dev tooling not in the repo (mprocs, playwright browser, web deps)

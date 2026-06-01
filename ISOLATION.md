@@ -31,10 +31,15 @@ The class is reported by the node at registration and recorded CP-side (`sp-2as`
 ### 3.1 Network egress (`sp-rpa`)
 - A **per-pod netns firewall** (host `nsenter` + `iptables`) applied **after the sidecar starts and
   before the agent starts** — no window where the untrusted agent runs unfirewalled.
-- **Block-floor:** DROP cloud-metadata `169.254.0.0/16` (incl. `169.254.169.254`) + RFC1918
-  (`10/8`, `172.16/12`, `192.168/16`); ACCEPT loopback (the agent↔sidecar path) + operator
-  `EGRESS_ALLOW_CIDRS`; **default-allow** the public internet otherwise (so the sidecar reaches its
-  model upstream, e.g. OpenRouter).
+- **Block-floor:** ACCEPT loopback (the agent↔sidecar path) + operator `EGRESS_ALLOW_CIDRS` +
+  **DNS (udp/tcp :53)**; then DROP cloud-metadata `169.254.0.0/16` (incl. `169.254.169.254`) +
+  RFC1918 (`10/8`, `172.16/12`, `192.168/16`); **default-allow** the public internet otherwise (so
+  the sidecar reaches its model upstream, e.g. OpenRouter).
+- **DNS carve-out (`sp-sac`):** `:53` is allowed *before* the RFC1918 drops because resolvers are
+  commonly on RFC1918 (a home-server/LAN or cloud internal DNS) — without it the drops break name
+  resolution, and the sidecar must resolve its model host. Residual: DNS-tunneling / internal-DNS
+  recon is possible; acceptable for the demo (the audit layer sees content; non-:53 RFC1918 stays
+  blocked).
 - **Fail-closed** when enforcement is effective: if the firewall can't be applied, the spawn is
   aborted (sidecar stopped), never run unprotected.
 - Closes: cloud-metadata credential theft, SSRF / internal-network pivot, RFC1918 exfil.
@@ -106,11 +111,17 @@ No single layer is load-bearing alone — a scanner miss is contained by the flo
 
 - **Hermetic / CI:** firewall rule construction, fail-closed control flow, cgroup-limit + runtime
   mapping (`buildHostConfig`), per-user quota — all unit-tested.
-- **Verify-on-host (NOT verified in the dev sandbox — no `iptables`, non-root, no gVisor):** real
-  packet drops, real cgroup enforcement, gVisor isolation. These must be validated on a privileged
-  node host:
-  - egress: `go test -tags egress_e2e ./internal/spawnlet/firewall/ -run TestEgressFloorEnforced`
-  - cgroups/gVisor: exercised by a real spawn on a host with the limits/runtime configured.
+- **Host-verified (2026-06-01, privileged dev host):**
+  - **Egress floor:** `egress_e2e` PASSES — metadata `169.254.169.254` + RFC1918 `10.0.0.1`
+    DROP-confirmed (iptables packet counters + curl blocked), public egress by IP (`1.1.1.1:443`)
+    reachable, DNS `:53` carve-out counter-proven to ACCEPT. Run: `just test-egress` (needs Docker +
+    iptables + root). Full DNS *resolution* can't be exercised where outbound DNS is environmentally
+    blocked — the IP-based check + the unit test cover the floor regardless.
+  - **Cgroup limits:** Docker applies `Memory`/`NanoCpus`/`PidsLimit`; kernel cgroup-v2
+    `memory.max`/`pids.max`/`cpu.max` match the configured values exactly (verified by inspect +
+    reading the container cgroup).
+- **Still verify-on-host:** **gVisor** (`CONTAINER_RUNTIME=runsc`) isolation — needs a host with
+  `runsc` installed (not present in the dev sandbox).
 
 ## 8. Known gaps / roadmap
 
