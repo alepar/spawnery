@@ -20,6 +20,7 @@ import (
 	spawnv1 "spawnery/gen/spawn/v1"
 	"spawnery/gen/spawn/v1/spawnv1connect"
 	"spawnery/internal/acp"
+	"spawnery/internal/manifest"
 )
 
 func main() {
@@ -29,14 +30,65 @@ func main() {
 	cpAddr := flag.String("cp", "", "control-plane address (http://127.0.0.1:8080); overrides -addr")
 	appID := flag.String("app-id", "secret-app", "app id (CP mode)")
 	token := flag.String("token", "dev-token", "dev auth token (CP mode)")
+	register := flag.Bool("register", false, "register the -app manifest with the CP and exit (CP mode)")
+	version := flag.String("version", "1.0.0", "app version to register (with -register)")
+	ref := flag.String("ref", "", "immutable app ref creator/app@sha (with -register)")
 	flag.Parse()
 
 	ctx := context.Background()
+	if *register {
+		if *cpAddr == "" {
+			log.Fatal("-register requires -cp")
+		}
+		runRegister(ctx, *cpAddr, *appPath, *version, *ref, *token)
+		return
+	}
 	if *cpAddr != "" {
 		runCP(ctx, *cpAddr, *appID, *model, *token)
 		return
 	}
 	runStandalone(ctx, *addr, *appPath, *model)
+}
+
+// manifestToProto parses an app's spawneryapp.yml and maps it to the cp.v1
+// AppManifest proto used by RegisterAppVersion.
+func manifestToProto(appDir string) (*cpv1.AppManifest, error) {
+	m, err := manifest.Parse(appDir)
+	if err != nil {
+		return nil, err
+	}
+	mounts := make([]*cpv1.ManifestMount, len(m.Storage.Mounts))
+	for i, mt := range m.Storage.Mounts {
+		mounts[i] = &cpv1.ManifestMount{Name: mt.Name, Path: mt.Path, Seed: mt.Seed}
+	}
+	return &cpv1.AppManifest{
+		ApiVersion: m.APIVersion, Id: m.ID, Title: m.Title, Description: m.Description,
+		Tags: m.Tags, Visibility: m.Visibility,
+		Agents: &cpv1.ManifestAgents{Support: m.Agents.Support, Exclude: m.Agents.Exclude, RequiresAcp: m.Agents.RequiresAcp},
+		Tools:  m.Tools, Persona: m.Persona, Skills: m.Skills,
+		Model: &cpv1.ManifestModel{
+			ToolUse: m.Model.Requires.ToolUse, MinContextTokens: m.Model.Requires.MinContextTokens,
+			Vision: m.Model.Requires.Vision, RecommendedDefault: m.Model.RecommendedDefault,
+		},
+		RuntimeBaseVersion: m.Runtime.BaseVersion,
+		Mounts:             mounts,
+	}, nil
+}
+
+// runRegister is the reference CI client: it maps the local manifest to the
+// AppManifest proto and calls RegisterAppVersion on the control plane.
+func runRegister(ctx context.Context, cpAddr, appDir, version, ref, token string) {
+	pm, err := manifestToProto(appDir)
+	if err != nil {
+		log.Fatalf("manifest: %v", err)
+	}
+	client := cpv1connect.NewSpawnServiceClient(h2cClient(), cpAddr,
+		connect.WithGRPC(), connect.WithInterceptors(cpBearer(token)))
+	resp, err := client.RegisterAppVersion(ctx, connect.NewRequest(&cpv1.RegisterAppVersionRequest{Manifest: pm, Version: version, Ref: ref}))
+	if err != nil {
+		log.Fatalf("register: %v", err)
+	}
+	fmt.Printf("registered %s@%s tier=%s\n", resp.Msg.AppId, resp.Msg.Version, resp.Msg.Tier)
 }
 
 // runStandalone drives a spawnlet directly via the spawn.v1 service (CP-less).

@@ -32,6 +32,22 @@ storage:
 	}
 }
 
+func TestParseFullSchema(t *testing.T) {
+	m, err := Parse("../../examples/secret-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.APIVersion != "spawnery/v1" || m.ID != "spawnery/secret" || m.Title != "Secret" {
+		t.Fatalf("manifest = %+v", m)
+	}
+	if len(m.Storage.Mounts) != 1 || m.Storage.Mounts[0].Name != "main" || m.Storage.Mounts[0].Path != "data" {
+		t.Fatalf("mounts = %+v", m.Storage.Mounts)
+	}
+	if m.Visibility != "open" {
+		t.Fatalf("visibility = %q", m.Visibility)
+	}
+}
+
 func TestParseNoStorage(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "spawneryapp.yml"), []byte("id: spawnery/zork\n"), 0o644)

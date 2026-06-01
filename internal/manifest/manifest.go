@@ -20,8 +20,37 @@ type Storage struct {
 	Mounts []Mount `yaml:"mounts"`
 }
 
+type Agents struct {
+	Support     []string `yaml:"support"`
+	Exclude     []string `yaml:"exclude"`
+	RequiresAcp []string `yaml:"requiresAcp"`
+}
+
+type Model struct {
+	Requires struct {
+		ToolUse          bool  `yaml:"toolUse"`
+		MinContextTokens int64 `yaml:"minContextTokens"`
+		Vision           bool  `yaml:"vision"`
+	} `yaml:"requires"`
+	RecommendedDefault string `yaml:"recommendedDefault"`
+}
+
 type Manifest struct {
-	ID      string  `yaml:"id"`
+	APIVersion  string   `yaml:"apiVersion"`
+	Kind        string   `yaml:"kind"`
+	ID          string   `yaml:"id"`
+	Title       string   `yaml:"title"`
+	Description string   `yaml:"description"`
+	Tags        []string `yaml:"tags"`
+	Visibility  string   `yaml:"visibility"`
+	Agents      Agents   `yaml:"agents"`
+	Tools       []string `yaml:"tools"`
+	Persona     string   `yaml:"persona"`
+	Skills      []string `yaml:"skills"`
+	Model       Model    `yaml:"model"`
+	Runtime     struct {
+		BaseVersion string `yaml:"baseVersion"`
+	} `yaml:"runtime"`
 	Storage Storage `yaml:"storage"`
 }
 
