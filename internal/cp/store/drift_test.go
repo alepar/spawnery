@@ -41,3 +41,41 @@ func TestSchemaDriftSqlite(t *testing.T) {
 	check("spawn_containers", "spawn_id", "generation", "node_id", "phase", "started_at", "ended_at")
 	check("spawn_mounts", "spawn_id", "name", "backend_uri", "persist_marker")
 }
+
+func TestSchemaDriftSqliteTypes(t *testing.T) {
+	st := NewTestStore(t)
+	bs := st.(*bunStore)
+	ctx := context.Background()
+
+	colType := func(table, col string) string {
+		var rows []struct {
+			Name string `bun:"name"`
+			Type string `bun:"type"`
+		}
+		if err := bs.db.NewRaw("SELECT name, type FROM pragma_table_info(?)", table).Scan(ctx, &rows); err != nil {
+			t.Fatalf("pragma %s: %v", table, err)
+		}
+		for _, r := range rows {
+			if r.Name == col {
+				return r.Type
+			}
+		}
+		t.Fatalf("table %s has no column %s", table, col)
+		return ""
+	}
+	// booleans are INTEGER, timestamps INTEGER, status/ids TEXT in the sqlite tree
+	want := map[[2]string]string{
+		{"spawns", "status"}:                "TEXT",
+		{"spawns", "pinned"}:                "INTEGER",
+		{"spawns", "recovered"}:             "INTEGER",
+		{"spawns", "created_at"}:            "INTEGER",
+		{"app_versions", "reviewed"}:        "INTEGER",
+		{"spawn_containers", "generation"}:  "INTEGER",
+		{"spawn_containers", "ended_at"}:    "INTEGER",
+	}
+	for k, exp := range want {
+		if got := colType(k[0], k[1]); got != exp {
+			t.Fatalf("%s.%s type = %q, want %q", k[0], k[1], got, exp)
+		}
+	}
+}
