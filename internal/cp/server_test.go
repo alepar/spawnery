@@ -41,6 +41,10 @@ func (c *capSender) firstStart() *nodev1.StartSpawn {
 }
 
 func newTestServer(t *testing.T) (*Server, *registry.Registry, *router.Router) {
+	return newTestServerSink(t, telemetry.NopSink{})
+}
+
+func newTestServerSink(t *testing.T, sink telemetry.Sink) (*Server, *registry.Registry, *router.Router) {
 	reg := registry.New()
 	rt := router.New()
 	sc := scheduler.New(reg, rt, time.Second)
@@ -49,7 +53,7 @@ func newTestServer(t *testing.T) (*Server, *registry.Registry, *router.Router) {
 		[]AppSeed{{ID: "secret-app", Ref: "examples/secret-app", Version: "1.0.0", Mounts: []string{"main"}}}); err != nil {
 		t.Fatal(err)
 	}
-	s := NewServer(reg, rt, sc, st, telemetry.NopSink{})
+	s := NewServer(reg, rt, sc, st, sink)
 	return s, reg, rt
 }
 

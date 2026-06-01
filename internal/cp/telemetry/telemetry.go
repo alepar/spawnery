@@ -16,6 +16,7 @@ type Event struct {
 	Tier      string    `json:"tier"`
 	Storage   string    `json:"storage"`
 	NodeID    string    `json:"node_id"`
+	NodeClass string    `json:"node_class"`
 	SpawnID   string    `json:"spawn_id"`
 	Timestamp time.Time `json:"ts"`
 }
