@@ -1,6 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-export function MarketplaceView() {
+export function MarketplaceView(_props: { onSpawn?: (appId: string) => void } = {}) {
   return (
     <div className="grid grid-cols-2 gap-4 p-6 md:grid-cols-3" data-testid="marketplace">
       {[1, 2, 3].map((i) => (

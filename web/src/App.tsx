@@ -18,38 +18,46 @@ export function App() {
   const spawnRef = useRef<string>("");
   const wsRef = useRef<WebSocket | null>(null);
   const idRef = useRef(0);
+  const genRef = useRef(0);
 
   useEffect(() => { setTheme(initialTheme()); }, []);
 
+  const spawnApp = async (appId: string, model: string) => {
+    const gen = ++genRef.current;
+    wsRef.current?.close();
+    if (spawnRef.current) stopSpawn(spawnRef.current);
+    spawnRef.current = "";
+    setItems([]);
+    setBusy(true);
+    setStatus("starting…");
+    try {
+      const id = await createSpawn(appId, model);
+      if (genRef.current !== gen) { stopSpawn(id); return; }
+      spawnRef.current = id;
+      const ws = new WebSocket(`ws://${location.host}/ws/session`);
+      ws.binaryType = "arraybuffer";
+      wsRef.current = ws;
+      ws.onopen = async () => {
+        ws.send(JSON.stringify({ spawnId: id, token: DEV_TOKEN }));
+        const c = new Client(ws as any);
+        clientRef.current = c;
+        await c.initialize();
+        await c.newSession("/app");
+        if (genRef.current !== gen) return;
+        setStatus("ready"); setBusy(false);
+      };
+      ws.onerror = () => { if (genRef.current !== gen) return; setStatus("connection error"); toast.error("Connection error"); };
+      ws.onclose = () => { if (genRef.current !== gen) return; setStatus("session ended"); };
+    } catch (e: any) {
+      if (genRef.current !== gen) return;
+      setStatus("error: " + e.message); toast.error("Spawn failed: " + e.message);
+    }
+  };
+
   useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const id = await createSpawn(APP_ID, MODEL);
-        if (!alive) { stopSpawn(id); return; }
-        spawnRef.current = id;
-        const ws = new WebSocket(`ws://${location.host}/ws/session`);
-        ws.binaryType = "arraybuffer";
-        wsRef.current = ws;
-        ws.onopen = async () => {
-          ws.send(JSON.stringify({ spawnId: id, token: DEV_TOKEN }));
-          const c = new Client(ws as any);
-          clientRef.current = c;
-          await c.initialize();
-          await c.newSession("/app");
-          if (alive) { setStatus("ready"); setBusy(false); }
-        };
-        ws.onerror = () => { if (alive) { setStatus("connection error"); toast.error("Connection error"); } };
-        ws.onclose = () => alive && setStatus("session ended");
-      } catch (e: any) {
-        if (alive) { setStatus("error: " + e.message); toast.error("Spawn failed: " + e.message); }
-      }
-    })();
-    return () => {
-      alive = false;
-      wsRef.current?.close();
-      if (spawnRef.current) stopSpawn(spawnRef.current);
-    };
+    spawnApp(APP_ID, MODEL);
+    return () => { wsRef.current?.close(); if (spawnRef.current) stopSpawn(spawnRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   type ItemInput = Item extends infer T ? (T extends { id: number } ? Omit<T, "id"> : never) : never;
@@ -85,5 +93,5 @@ export function App() {
     }
   };
 
-  return <AppShell status={status} items={items} busy={busy} onSend={onSend} perm={perm} />;
+  return <AppShell status={status} items={items} busy={busy} onSend={onSend} perm={perm} onSpawnApp={(appId) => spawnApp(appId, MODEL)} />;
 }

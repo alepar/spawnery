@@ -6,14 +6,16 @@ import { MarketplaceView } from "@/views/MarketplaceView";
 import { SettingsView } from "@/views/SettingsView";
 import type { Item } from "@/views/chat/types";
 
-export function AppShell({ status, items, busy, onSend, perm }: {
+export function AppShell({ status, items, busy, onSend, perm, onSpawnApp }: {
   status: string;
   items: Item[];
   busy: boolean;
   onSend: (t: string) => void;
   perm: { title: string; resolve: (b: boolean) => void } | null;
+  onSpawnApp: (appId: string) => void;
 }) {
   const [view, setView] = useState<View>("chat");
+  const onSpawn = (appId: string) => { onSpawnApp(appId); setView("chat"); };
   return (
     <div className="flex h-screen bg-background text-foreground">
       <Sidebar view={view} onSelect={setView} />
@@ -24,7 +26,7 @@ export function AppShell({ status, items, busy, onSend, perm }: {
         </header>
         <main className="flex-1 overflow-hidden">
           {view === "chat" && <ChatView items={items} busy={busy} onSend={onSend} perm={perm} />}
-          {view === "market" && <MarketplaceView />}
+          {view === "market" && <MarketplaceView onSpawn={onSpawn} />}
           {view === "settings" && <SettingsView />}
         </main>
       </div>
