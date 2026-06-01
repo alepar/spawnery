@@ -150,6 +150,25 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 	return sp, nil
 }
 
+// PreflightRuntime validates a configured non-default container runtime (e.g. runsc) at startup by
+// running a throwaway smoke container under it. Returns an error if the runtime can't run a container
+// — callers should fail hard rather than discover this at first CreateSpawn.
+func (m *Manager) PreflightRuntime(ctx context.Context) error {
+	if m.cfg.ContainerRuntime == "" {
+		return nil
+	}
+	id, err := m.rt.StartContainer(ctx, runtime.ContainerSpec{
+		Image:   m.cfg.AgentImage,
+		Cmd:     []string{"true"},
+		Runtime: m.cfg.ContainerRuntime,
+	})
+	if err != nil {
+		return fmt.Errorf("runtime %q preflight: %w", m.cfg.ContainerRuntime, err)
+	}
+	_ = m.rt.StopContainer(context.WithoutCancel(ctx), id)
+	return nil
+}
+
 func (m *Manager) Stop(ctx context.Context, id string) error {
 	sp, ok := m.store.Get(id)
 	if !ok {
