@@ -5,6 +5,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
 )
 
@@ -63,4 +64,18 @@ func TestNodeContractFields(t *testing.T) {
 	if gotSC.Generation != 7 || len(gotSC.Markers) != 1 || gotSC.Markers[0].Marker != "spawnery-suspend/sp1/7" {
 		t.Fatalf("SuspendComplete round-trip lost fields: %+v", &gotSC)
 	}
+}
+
+func TestCPContractSurface(t *testing.T) {
+	// per-mount backend choices now ride the CreateSpawn request
+	_ = &cpv1.CreateSpawnRequest{AppId: "a", Model: "m",
+		Mounts: []*cpv1.MountBinding{{Name: "main", BackendUri: "managed:repo"}}}
+	// new lifecycle RPC request/response messages exist
+	_ = &cpv1.ListSpawnsRequest{}
+	_ = &cpv1.ListSpawnsResponse{Spawns: []*cpv1.SpawnSummary{
+		{SpawnId: "sp1", Status: cpv1.SpawnStatus_SPAWN_STATUS_SUSPENDED}}}
+	_ = &cpv1.SuspendSpawnRequest{SpawnId: "sp1"}
+	_ = &cpv1.ResumeSpawnRequest{SpawnId: "sp1"}
+	_ = &cpv1.RecreateSpawnRequest{SpawnId: "sp1"}
+	_ = &cpv1.DeleteSpawnRequest{SpawnId: "sp1", DestroyData: true}
 }

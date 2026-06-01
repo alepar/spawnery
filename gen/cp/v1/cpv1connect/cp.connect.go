@@ -36,24 +36,48 @@ const (
 	// SpawnServiceCreateSpawnProcedure is the fully-qualified name of the SpawnService's CreateSpawn
 	// RPC.
 	SpawnServiceCreateSpawnProcedure = "/cp.v1.SpawnService/CreateSpawn"
+	// SpawnServiceListSpawnsProcedure is the fully-qualified name of the SpawnService's ListSpawns RPC.
+	SpawnServiceListSpawnsProcedure = "/cp.v1.SpawnService/ListSpawns"
 	// SpawnServiceSessionProcedure is the fully-qualified name of the SpawnService's Session RPC.
 	SpawnServiceSessionProcedure = "/cp.v1.SpawnService/Session"
+	// SpawnServiceSuspendSpawnProcedure is the fully-qualified name of the SpawnService's SuspendSpawn
+	// RPC.
+	SpawnServiceSuspendSpawnProcedure = "/cp.v1.SpawnService/SuspendSpawn"
+	// SpawnServiceResumeSpawnProcedure is the fully-qualified name of the SpawnService's ResumeSpawn
+	// RPC.
+	SpawnServiceResumeSpawnProcedure = "/cp.v1.SpawnService/ResumeSpawn"
+	// SpawnServiceRecreateSpawnProcedure is the fully-qualified name of the SpawnService's
+	// RecreateSpawn RPC.
+	SpawnServiceRecreateSpawnProcedure = "/cp.v1.SpawnService/RecreateSpawn"
+	// SpawnServiceDeleteSpawnProcedure is the fully-qualified name of the SpawnService's DeleteSpawn
+	// RPC.
+	SpawnServiceDeleteSpawnProcedure = "/cp.v1.SpawnService/DeleteSpawn"
 	// SpawnServiceStopSpawnProcedure is the fully-qualified name of the SpawnService's StopSpawn RPC.
 	SpawnServiceStopSpawnProcedure = "/cp.v1.SpawnService/StopSpawn"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
 var (
-	spawnServiceServiceDescriptor           = v1.File_cp_v1_cp_proto.Services().ByName("SpawnService")
-	spawnServiceCreateSpawnMethodDescriptor = spawnServiceServiceDescriptor.Methods().ByName("CreateSpawn")
-	spawnServiceSessionMethodDescriptor     = spawnServiceServiceDescriptor.Methods().ByName("Session")
-	spawnServiceStopSpawnMethodDescriptor   = spawnServiceServiceDescriptor.Methods().ByName("StopSpawn")
+	spawnServiceServiceDescriptor             = v1.File_cp_v1_cp_proto.Services().ByName("SpawnService")
+	spawnServiceCreateSpawnMethodDescriptor   = spawnServiceServiceDescriptor.Methods().ByName("CreateSpawn")
+	spawnServiceListSpawnsMethodDescriptor    = spawnServiceServiceDescriptor.Methods().ByName("ListSpawns")
+	spawnServiceSessionMethodDescriptor       = spawnServiceServiceDescriptor.Methods().ByName("Session")
+	spawnServiceSuspendSpawnMethodDescriptor  = spawnServiceServiceDescriptor.Methods().ByName("SuspendSpawn")
+	spawnServiceResumeSpawnMethodDescriptor   = spawnServiceServiceDescriptor.Methods().ByName("ResumeSpawn")
+	spawnServiceRecreateSpawnMethodDescriptor = spawnServiceServiceDescriptor.Methods().ByName("RecreateSpawn")
+	spawnServiceDeleteSpawnMethodDescriptor   = spawnServiceServiceDescriptor.Methods().ByName("DeleteSpawn")
+	spawnServiceStopSpawnMethodDescriptor     = spawnServiceServiceDescriptor.Methods().ByName("StopSpawn")
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
 type SpawnServiceClient interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
+	ListSpawns(context.Context, *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error)
 	Session(context.Context) *connect.BidiStreamForClient[v1.Frame, v1.Frame]
+	SuspendSpawn(context.Context, *connect.Request[v1.SuspendSpawnRequest]) (*connect.Response[v1.SuspendSpawnResponse], error)
+	ResumeSpawn(context.Context, *connect.Request[v1.ResumeSpawnRequest]) (*connect.Response[v1.ResumeSpawnResponse], error)
+	RecreateSpawn(context.Context, *connect.Request[v1.RecreateSpawnRequest]) (*connect.Response[v1.RecreateSpawnResponse], error)
+	DeleteSpawn(context.Context, *connect.Request[v1.DeleteSpawnRequest]) (*connect.Response[v1.DeleteSpawnResponse], error)
 	StopSpawn(context.Context, *connect.Request[v1.StopSpawnRequest]) (*connect.Response[v1.StopSpawnResponse], error)
 }
 
@@ -73,10 +97,40 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceCreateSpawnMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		listSpawns: connect.NewClient[v1.ListSpawnsRequest, v1.ListSpawnsResponse](
+			httpClient,
+			baseURL+SpawnServiceListSpawnsProcedure,
+			connect.WithSchema(spawnServiceListSpawnsMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 		session: connect.NewClient[v1.Frame, v1.Frame](
 			httpClient,
 			baseURL+SpawnServiceSessionProcedure,
 			connect.WithSchema(spawnServiceSessionMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		suspendSpawn: connect.NewClient[v1.SuspendSpawnRequest, v1.SuspendSpawnResponse](
+			httpClient,
+			baseURL+SpawnServiceSuspendSpawnProcedure,
+			connect.WithSchema(spawnServiceSuspendSpawnMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		resumeSpawn: connect.NewClient[v1.ResumeSpawnRequest, v1.ResumeSpawnResponse](
+			httpClient,
+			baseURL+SpawnServiceResumeSpawnProcedure,
+			connect.WithSchema(spawnServiceResumeSpawnMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		recreateSpawn: connect.NewClient[v1.RecreateSpawnRequest, v1.RecreateSpawnResponse](
+			httpClient,
+			baseURL+SpawnServiceRecreateSpawnProcedure,
+			connect.WithSchema(spawnServiceRecreateSpawnMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		deleteSpawn: connect.NewClient[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse](
+			httpClient,
+			baseURL+SpawnServiceDeleteSpawnProcedure,
+			connect.WithSchema(spawnServiceDeleteSpawnMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
 		stopSpawn: connect.NewClient[v1.StopSpawnRequest, v1.StopSpawnResponse](
@@ -90,9 +144,14 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 
 // spawnServiceClient implements SpawnServiceClient.
 type spawnServiceClient struct {
-	createSpawn *connect.Client[v1.CreateSpawnRequest, v1.CreateSpawnResponse]
-	session     *connect.Client[v1.Frame, v1.Frame]
-	stopSpawn   *connect.Client[v1.StopSpawnRequest, v1.StopSpawnResponse]
+	createSpawn   *connect.Client[v1.CreateSpawnRequest, v1.CreateSpawnResponse]
+	listSpawns    *connect.Client[v1.ListSpawnsRequest, v1.ListSpawnsResponse]
+	session       *connect.Client[v1.Frame, v1.Frame]
+	suspendSpawn  *connect.Client[v1.SuspendSpawnRequest, v1.SuspendSpawnResponse]
+	resumeSpawn   *connect.Client[v1.ResumeSpawnRequest, v1.ResumeSpawnResponse]
+	recreateSpawn *connect.Client[v1.RecreateSpawnRequest, v1.RecreateSpawnResponse]
+	deleteSpawn   *connect.Client[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse]
+	stopSpawn     *connect.Client[v1.StopSpawnRequest, v1.StopSpawnResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -100,9 +159,34 @@ func (c *spawnServiceClient) CreateSpawn(ctx context.Context, req *connect.Reque
 	return c.createSpawn.CallUnary(ctx, req)
 }
 
+// ListSpawns calls cp.v1.SpawnService.ListSpawns.
+func (c *spawnServiceClient) ListSpawns(ctx context.Context, req *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error) {
+	return c.listSpawns.CallUnary(ctx, req)
+}
+
 // Session calls cp.v1.SpawnService.Session.
 func (c *spawnServiceClient) Session(ctx context.Context) *connect.BidiStreamForClient[v1.Frame, v1.Frame] {
 	return c.session.CallBidiStream(ctx)
+}
+
+// SuspendSpawn calls cp.v1.SpawnService.SuspendSpawn.
+func (c *spawnServiceClient) SuspendSpawn(ctx context.Context, req *connect.Request[v1.SuspendSpawnRequest]) (*connect.Response[v1.SuspendSpawnResponse], error) {
+	return c.suspendSpawn.CallUnary(ctx, req)
+}
+
+// ResumeSpawn calls cp.v1.SpawnService.ResumeSpawn.
+func (c *spawnServiceClient) ResumeSpawn(ctx context.Context, req *connect.Request[v1.ResumeSpawnRequest]) (*connect.Response[v1.ResumeSpawnResponse], error) {
+	return c.resumeSpawn.CallUnary(ctx, req)
+}
+
+// RecreateSpawn calls cp.v1.SpawnService.RecreateSpawn.
+func (c *spawnServiceClient) RecreateSpawn(ctx context.Context, req *connect.Request[v1.RecreateSpawnRequest]) (*connect.Response[v1.RecreateSpawnResponse], error) {
+	return c.recreateSpawn.CallUnary(ctx, req)
+}
+
+// DeleteSpawn calls cp.v1.SpawnService.DeleteSpawn.
+func (c *spawnServiceClient) DeleteSpawn(ctx context.Context, req *connect.Request[v1.DeleteSpawnRequest]) (*connect.Response[v1.DeleteSpawnResponse], error) {
+	return c.deleteSpawn.CallUnary(ctx, req)
 }
 
 // StopSpawn calls cp.v1.SpawnService.StopSpawn.
@@ -113,7 +197,12 @@ func (c *spawnServiceClient) StopSpawn(ctx context.Context, req *connect.Request
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
+	ListSpawns(context.Context, *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error)
 	Session(context.Context, *connect.BidiStream[v1.Frame, v1.Frame]) error
+	SuspendSpawn(context.Context, *connect.Request[v1.SuspendSpawnRequest]) (*connect.Response[v1.SuspendSpawnResponse], error)
+	ResumeSpawn(context.Context, *connect.Request[v1.ResumeSpawnRequest]) (*connect.Response[v1.ResumeSpawnResponse], error)
+	RecreateSpawn(context.Context, *connect.Request[v1.RecreateSpawnRequest]) (*connect.Response[v1.RecreateSpawnResponse], error)
+	DeleteSpawn(context.Context, *connect.Request[v1.DeleteSpawnRequest]) (*connect.Response[v1.DeleteSpawnResponse], error)
 	StopSpawn(context.Context, *connect.Request[v1.StopSpawnRequest]) (*connect.Response[v1.StopSpawnResponse], error)
 }
 
@@ -129,10 +218,40 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceCreateSpawnMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceListSpawnsHandler := connect.NewUnaryHandler(
+		SpawnServiceListSpawnsProcedure,
+		svc.ListSpawns,
+		connect.WithSchema(spawnServiceListSpawnsMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	spawnServiceSessionHandler := connect.NewBidiStreamHandler(
 		SpawnServiceSessionProcedure,
 		svc.Session,
 		connect.WithSchema(spawnServiceSessionMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceSuspendSpawnHandler := connect.NewUnaryHandler(
+		SpawnServiceSuspendSpawnProcedure,
+		svc.SuspendSpawn,
+		connect.WithSchema(spawnServiceSuspendSpawnMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceResumeSpawnHandler := connect.NewUnaryHandler(
+		SpawnServiceResumeSpawnProcedure,
+		svc.ResumeSpawn,
+		connect.WithSchema(spawnServiceResumeSpawnMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceRecreateSpawnHandler := connect.NewUnaryHandler(
+		SpawnServiceRecreateSpawnProcedure,
+		svc.RecreateSpawn,
+		connect.WithSchema(spawnServiceRecreateSpawnMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceDeleteSpawnHandler := connect.NewUnaryHandler(
+		SpawnServiceDeleteSpawnProcedure,
+		svc.DeleteSpawn,
+		connect.WithSchema(spawnServiceDeleteSpawnMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceStopSpawnHandler := connect.NewUnaryHandler(
@@ -145,8 +264,18 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
 			spawnServiceCreateSpawnHandler.ServeHTTP(w, r)
+		case SpawnServiceListSpawnsProcedure:
+			spawnServiceListSpawnsHandler.ServeHTTP(w, r)
 		case SpawnServiceSessionProcedure:
 			spawnServiceSessionHandler.ServeHTTP(w, r)
+		case SpawnServiceSuspendSpawnProcedure:
+			spawnServiceSuspendSpawnHandler.ServeHTTP(w, r)
+		case SpawnServiceResumeSpawnProcedure:
+			spawnServiceResumeSpawnHandler.ServeHTTP(w, r)
+		case SpawnServiceRecreateSpawnProcedure:
+			spawnServiceRecreateSpawnHandler.ServeHTTP(w, r)
+		case SpawnServiceDeleteSpawnProcedure:
+			spawnServiceDeleteSpawnHandler.ServeHTTP(w, r)
 		case SpawnServiceStopSpawnProcedure:
 			spawnServiceStopSpawnHandler.ServeHTTP(w, r)
 		default:
@@ -162,8 +291,28 @@ func (UnimplementedSpawnServiceHandler) CreateSpawn(context.Context, *connect.Re
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.CreateSpawn is not implemented"))
 }
 
+func (UnimplementedSpawnServiceHandler) ListSpawns(context.Context, *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListSpawns is not implemented"))
+}
+
 func (UnimplementedSpawnServiceHandler) Session(context.Context, *connect.BidiStream[v1.Frame, v1.Frame]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.Session is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) SuspendSpawn(context.Context, *connect.Request[v1.SuspendSpawnRequest]) (*connect.Response[v1.SuspendSpawnResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.SuspendSpawn is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ResumeSpawn(context.Context, *connect.Request[v1.ResumeSpawnRequest]) (*connect.Response[v1.ResumeSpawnResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ResumeSpawn is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) RecreateSpawn(context.Context, *connect.Request[v1.RecreateSpawnRequest]) (*connect.Response[v1.RecreateSpawnResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RecreateSpawn is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) DeleteSpawn(context.Context, *connect.Request[v1.DeleteSpawnRequest]) (*connect.Response[v1.DeleteSpawnResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DeleteSpawn is not implemented"))
 }
 
 func (UnimplementedSpawnServiceHandler) StopSpawn(context.Context, *connect.Request[v1.StopSpawnRequest]) (*connect.Response[v1.StopSpawnResponse], error) {

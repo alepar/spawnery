@@ -12,6 +12,7 @@ import (
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/gen/cp/v1/cpv1connect"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/apps"
 	"spawnery/internal/cp/auth"
@@ -22,12 +23,17 @@ import (
 )
 
 type Server struct {
+	cpv1connect.UnimplementedSpawnServiceHandler // new RPCs default to CodeUnimplemented until sp-pc4
 	reg   *registry.Registry
 	rt    *router.Router
 	sched *scheduler.Scheduler
 	apps  *apps.Resolver
 	tel   telemetry.Sink
 }
+
+// Server must satisfy the (now larger) connect handler interface; the 5 new lifecycle RPCs are
+// served by the embedded Unimplemented handler until sp-pc4 overrides them.
+var _ cpv1connect.SpawnServiceHandler = (*Server)(nil)
 
 func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Scheduler, ar *apps.Resolver, tel telemetry.Sink) *Server {
 	return &Server{reg: reg, rt: rt, sched: sched, apps: ar, tel: tel}
