@@ -33,6 +33,8 @@ type Server struct {
 	st    store.Store
 	tel   telemetry.Sink
 	locks *lock.Keyed
+
+	maxSpawnsPerOwner int
 }
 
 // Server must satisfy the (now larger) connect handler interface; the 5 new lifecycle RPCs are
@@ -110,10 +112,31 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 
 // --- client side: cp.v1 SpawnService --------------------------------------
 
+// SetMaxSpawnsPerOwner sets the per-owner concurrent-spawn cap (0 = unlimited).
+func (s *Server) SetMaxSpawnsPerOwner(n int) { s.maxSpawnsPerOwner = n }
+
+// checkSpawnQuota returns ResourceExhausted if the owner is at/over the per-owner spawn cap.
+func (s *Server) checkSpawnQuota(ctx context.Context, owner string) error {
+	if s.maxSpawnsPerOwner <= 0 {
+		return nil
+	}
+	existing, err := s.st.Spawns().ListByOwner(ctx, owner)
+	if err != nil {
+		return connect.NewError(connect.CodeInternal, err)
+	}
+	if len(existing) >= s.maxSpawnsPerOwner {
+		return connect.NewError(connect.CodeResourceExhausted, fmt.Errorf("spawn limit reached (%d)", s.maxSpawnsPerOwner))
+	}
+	return nil
+}
+
 func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.CreateSpawnRequest]) (*connect.Response[cpv1.CreateSpawnResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	if err := s.checkSpawnQuota(ctx, owner); err != nil {
+		return nil, err
 	}
 	appID := req.Msg.AppId
 	var err error
