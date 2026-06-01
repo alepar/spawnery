@@ -112,6 +112,14 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		return nil, fmt.Errorf("sidecar: %w", err)
 	}
 
+	sidecarPID, perr := m.rt.ContainerPID(ctx, sidecarID)
+	if perr != nil {
+		_ = m.rt.StopContainer(ctx, sidecarID)
+		finalizeAll()
+		return nil, fmt.Errorf("sidecar pid: %w", perr)
+	}
+	netnsPath := fmt.Sprintf("/proc/%d/ns/net", sidecarPID)
+
 	var floorIP string
 	if m.egressEnforced() {
 		ip, ferr := m.rt.ContainerIP(ctx, sidecarID)
@@ -148,7 +156,7 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		return nil, fmt.Errorf("agent: %w", err)
 	}
 
-	sp := &Spawn{ID: id, SidecarID: sidecarID, AgentID: agentID, MountDirs: mountDirs, FloorIP: floorIP, Status: "ready"}
+	sp := &Spawn{ID: id, SidecarID: sidecarID, AgentID: agentID, MountDirs: mountDirs, FloorIP: floorIP, NetnsPath: netnsPath, Status: "ready"}
 	m.store.Put(sp)
 	return sp, nil
 }
