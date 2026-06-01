@@ -31,6 +31,32 @@ func TestRulesBlockFloor(t *testing.T) {
 	}
 }
 
+func TestRulesAllowDNSBeforeDrops(t *testing.T) {
+	rules := Rules(nil)
+	joined := make([]string, len(rules))
+	for i, r := range rules {
+		joined[i] = strings.Join(r.Args, " ")
+	}
+	udp, tcp, firstDrop := -1, -1, -1
+	for i, j := range joined {
+		if strings.Contains(j, "-p udp --dport 53 -j ACCEPT") && udp == -1 {
+			udp = i
+		}
+		if strings.Contains(j, "-p tcp --dport 53 -j ACCEPT") && tcp == -1 {
+			tcp = i
+		}
+		if strings.Contains(j, "-j DROP") && firstDrop == -1 {
+			firstDrop = i
+		}
+	}
+	if udp == -1 || tcp == -1 {
+		t.Fatalf("missing DNS ACCEPT rules (udp=%d tcp=%d):\n%s", udp, tcp, strings.Join(joined, "\n"))
+	}
+	if udp > firstDrop || tcp > firstDrop {
+		t.Fatalf("DNS ACCEPT (udp=%d tcp=%d) must precede first DROP (%d)", udp, tcp, firstDrop)
+	}
+}
+
 func TestRulesAllowCIDRsBeforeDrops(t *testing.T) {
 	rules := Rules([]string{"192.168.50.0/24"})
 	acceptIdx, dropIdx := -1, -1
