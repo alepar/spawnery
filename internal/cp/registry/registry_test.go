@@ -31,3 +31,23 @@ func TestAddHeartbeatPickEvict(t *testing.T) {
 		t.Fatal("n2 should be gone")
 	}
 }
+
+func TestPickFor(t *testing.T) {
+	r := New()
+	r.Add(&Node{ID: "cloud1", Free: 5, Class: "cloud"})
+	r.Add(&Node{ID: "selfA", Free: 1, Class: "self-hosted", Owner: "alice"})
+	r.Add(&Node{ID: "selfB", Free: 9, Class: "self-hosted", Owner: "bob"})
+
+	if n := r.PickFor(Placement{}); n == nil || n.ID != "selfB" {
+		t.Fatalf("unconstrained should pick max-free selfB, got %v", n)
+	}
+	if n := r.PickFor(Placement{Class: "self-hosted", Owner: "alice"}); n == nil || n.ID != "selfA" {
+		t.Fatalf("class+owner filter should pick selfA, got %v", n)
+	}
+	if n := r.PickFor(Placement{Class: "self-hosted", Owner: "carol"}); n != nil {
+		t.Fatalf("no node owned by carol -> nil, got %v", n)
+	}
+	if n := r.PickFor(Placement{Class: "cloud"}); n == nil || n.ID != "cloud1" {
+		t.Fatalf("class filter should pick cloud1, got %v", n)
+	}
+}

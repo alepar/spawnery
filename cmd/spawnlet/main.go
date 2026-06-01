@@ -47,6 +47,7 @@ func main() {
 			MaxSpawns:  4,
 			AgentImage: env("AGENT_IMAGE", "spawnery/stubagent:dev"),
 			NodeClass:  env("NODE_CLASS", "cloud"),
+			NodeOwner:  env("NODE_OWNER", ""),
 		}
 		log.Printf("spawnlet attaching to CP at %s as %s", cpURL, cfg.NodeID)
 		log.Fatal(node.Run(context.Background(), mgr, h2cClient(), cfg))
