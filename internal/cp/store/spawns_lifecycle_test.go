@@ -21,7 +21,7 @@ func TestHappyLifecycle(t *testing.T) {
 	ctx := context.Background()
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp1"), nil) })
 
-	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", "n", 1) })
 	if s, _ := st.Spawns().Get(ctx, "sp1"); s.Status != Active {
 		t.Fatalf("status=%v want active", s.Status)
 	}
@@ -53,9 +53,9 @@ func TestGuardedTransitionsReject(t *testing.T) {
 	seedAppAndOwner(t, st)
 	ctx := context.Background()
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp1"), nil) })
-	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", "n", 1) })
 
-	err := st.WithTx(ctx, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", 1) })
+	err := st.WithTx(ctx, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", "n", 1) })
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("SetActive on active: want ErrConflict, got %v", err)
 	}
@@ -107,7 +107,7 @@ func TestSetSuspendedRejectsStaleGen(t *testing.T) {
 	seedAppAndOwner(t, st)
 	ctx := context.Background()
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp1"), nil) })
-	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", "n", 1) })
 	inTx(t, st, func(tx Store) error { return tx.Spawns().SetSuspending(ctx, "sp1", 1) })
 	// a stale gen (2) does not match the live container (gen 1) -> ErrConflict, no suspend
 	err := st.WithTx(ctx, func(tx Store) error { return tx.Spawns().SetSuspended(ctx, "sp1", 2) })
@@ -126,7 +126,7 @@ func TestSpawnGetFiltersDeleted(t *testing.T) {
 	seedAppAndOwner(t, st)
 	ctx := context.Background()
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp4"), nil) })
-	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp4", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp4", "n", 1) })
 	if err := st.WithTx(ctx, func(tx Store) error { return tx.Spawns().MarkDeleted(ctx, "sp4", 99) }); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestMarkUnreachableKeepsLiveContainerAndFilters(t *testing.T) {
 	seedAppAndOwner(t, st)
 	ctx := context.Background()
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp1"), nil) })
-	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", "n", 1) })
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Adopt(ctx, "sp1", "nodeA", 1) })
 
 	n, err := st.Spawns().MarkUnreachable(ctx, []string{"sp1"})
@@ -167,7 +167,7 @@ func TestMarkUnreachableKeepsLiveContainerAndFilters(t *testing.T) {
 	}
 	// a suspended spawn is NOT eligible for unreachable (filter is status IN starting,active)
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp2"), nil) })
-	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp2", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp2", "n", 1) })
 	inTx(t, st, func(tx Store) error { return tx.Spawns().SetSuspending(ctx, "sp2", 1) })
 	inTx(t, st, func(tx Store) error { return tx.Spawns().SetSuspended(ctx, "sp2", 1) })
 	if n3, _ := st.Spawns().MarkUnreachable(ctx, []string{"sp2"}); n3 != 0 {
@@ -183,7 +183,7 @@ func TestRecreateFromUnreachableFencesOldGen(t *testing.T) {
 	seedAppAndOwner(t, st)
 	ctx := context.Background()
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp1"), nil) })
-	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", "n", 1) })
 	if _, err := st.Spawns().MarkUnreachable(ctx, []string{"sp1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +202,23 @@ func TestRecreateFromUnreachableFencesOldGen(t *testing.T) {
 	}
 	if s, _ := st.Spawns().Get(ctx, "sp1"); s.Status != Starting {
 		t.Fatalf("status=%v want starting", s.Status)
+	}
+}
+
+func TestSetActiveRecordsNodeID(t *testing.T) {
+	st := NewTestStore(t)
+	seedAppAndOwner(t, st)
+	ctx := context.Background()
+	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp1"), nil) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", "nodeA", 1) })
+
+	c, ok, err := st.Spawns().LiveContainer(ctx, "sp1")
+	if err != nil || !ok || c.NodeID != "nodeA" {
+		t.Fatalf("SetActive must record node_id: c=%+v ok=%v err=%v", c, ok, err)
+	}
+	live, _ := st.Spawns().LiveContainersByNode(ctx, "nodeA")
+	if len(live) != 1 || live[0].SpawnID != "sp1" {
+		t.Fatalf("LiveContainersByNode(nodeA)=%+v want [sp1]", live)
 	}
 }
 

@@ -162,13 +162,22 @@ func (r *spawnRepo) ClaimStarting(ctx context.Context, id string, from []Status)
 	return newGen, nil
 }
 
-func (r *spawnRepo) SetActive(ctx context.Context, id string, gen int64) error {
+func (r *spawnRepo) SetActive(ctx context.Context, id, nodeID string, gen int64) error {
 	if err := r.guardStatus(ctx, id, []Status{Starting}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
 		return q.Set("status = ?", Active)
 	}); err != nil {
 		return err
 	}
-	return r.setContainerPhase(ctx, id, gen, PhaseActive)
+	res, err := r.db.NewUpdate().Model((*Container)(nil)).
+		Set("phase = ?", PhaseActive).Set("node_id = ?", nodeID).
+		Where("spawn_id = ? AND generation = ? AND ended_at IS NULL", id, gen).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func (r *spawnRepo) SetSuspending(ctx context.Context, id string, gen int64) error {
