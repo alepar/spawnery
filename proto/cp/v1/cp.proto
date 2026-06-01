@@ -5,6 +5,8 @@ option go_package = "spawnery/gen/cp/v1;cpv1";
 service SpawnService {
   rpc CreateSpawn(CreateSpawnRequest) returns (CreateSpawnResponse);
   rpc ListSpawns(ListSpawnsRequest) returns (ListSpawnsResponse);
+  rpc ListApps(ListAppsRequest) returns (ListAppsResponse);
+  rpc GetApp(GetAppRequest) returns (GetAppResponse);
   rpc Session(stream Frame) returns (stream Frame);
   rpc SuspendSpawn(SuspendSpawnRequest) returns (SuspendSpawnResponse);
   rpc ResumeSpawn(ResumeSpawnRequest) returns (ResumeSpawnResponse);
@@ -58,3 +60,36 @@ message Frame { string spawn_id = 1; bytes data = 2; }
 
 message StopSpawnRequest  { string spawn_id = 1; }
 message StopSpawnResponse {}
+
+// Marketplace trust tier of an App version (E5 §5). Runtime restrictions scale with it.
+enum TrustTier {
+  TRUST_TIER_UNSPECIFIED = 0;
+  TRUST_TIER_UNVERIFIED  = 1; // published, structural checks only / scan declined
+  TRUST_TIER_SCANNED     = 2; // passed the automated scanner (E8 §5)
+  TRUST_TIER_REVIEWED    = 3; // human-reviewed
+}
+
+message AppSummary {
+  string id             = 1; // creator/app handle
+  string display_name   = 2;
+  string summary        = 3;
+  repeated string tags  = 4;
+  string latest_version = 5; // newest version; "" if none
+  TrustTier latest_tier = 6;
+}
+
+message AppVersionSummary {
+  string version    = 1;
+  string ref        = 2;
+  TrustTier tier    = 3;
+  int64 created_at  = 4;
+}
+
+message ListAppsRequest  { string query = 1; } // empty = browse all
+message ListAppsResponse { repeated AppSummary apps = 1; }
+
+message GetAppRequest  { string id = 1; }
+message GetAppResponse {
+  AppSummary app = 1;                      // app metadata + latest tier
+  repeated AppVersionSummary versions = 2; // newest first
+}
