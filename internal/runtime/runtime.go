@@ -22,7 +22,9 @@ type ContainerSpec struct {
 	MemoryBytes int64  // 0 = unlimited
 	NanoCPUs    int64  // 0 = unlimited; 1 CPU = 1_000_000_000
 	PidsLimit   int64  // 0 = unlimited
-	Runtime     string // "" = Docker default; e.g. "runsc"
+	Runtime        string // "" = Docker default; e.g. "runsc"
+	DropAllCaps    bool
+	ReadonlyRootfs bool
 }
 
 // AttachedStream is the agent's bidirectional stdio (demuxed stdout).

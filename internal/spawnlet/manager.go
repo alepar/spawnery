@@ -24,6 +24,7 @@ type ManagerConfig struct {
 	CPULimit         float64 // CPU cores; default 1.0
 	PidsLimit        int64   // max pids per container; default 256
 	ContainerRuntime string  // OCI runtime name; "" = Docker default
+	HardenRootfs     bool    // if true, run agent with read-only rootfs + /tmp tmpfs
 }
 
 type Manager struct {
@@ -132,12 +133,14 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 			"OPENAI_BASE_URL=http://" + addr + "/v1",
 			"SPAWN_MODEL=" + model,
 		},
-		Mounts:      mounts,
-		AttachStdio: true,
-		MemoryBytes: mem,
-		NanoCPUs:    cpus,
-		PidsLimit:   pids,
-		Runtime:     rtName,
+		Mounts:         mounts,
+		AttachStdio:    true,
+		MemoryBytes:    mem,
+		NanoCPUs:       cpus,
+		PidsLimit:      pids,
+		Runtime:        rtName,
+		DropAllCaps:    true,
+		ReadonlyRootfs: m.cfg.HardenRootfs,
 	})
 	if err != nil {
 		_ = m.rt.StopContainer(ctx, sidecarID)

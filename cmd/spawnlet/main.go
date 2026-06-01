@@ -38,6 +38,7 @@ func main() {
 		CPULimit:         getenvFloat("CPU_LIMIT", 1.0),
 		PidsLimit:        getenvInt64("PIDS_LIMIT", 256),
 		ContainerRuntime: os.Getenv("CONTAINER_RUNTIME"),
+		HardenRootfs:     getenvBool("HARDEN_ROOTFS", false),
 	})
 	ctx := context.Background()
 	if err := mgr.PreflightRuntime(ctx); err != nil {

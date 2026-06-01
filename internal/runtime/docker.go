@@ -73,6 +73,16 @@ func buildHostConfig(s ContainerSpec) *container.HostConfig {
 	if s.Runtime != "" {
 		host.Runtime = s.Runtime
 	}
+	if s.DropAllCaps {
+		host.CapDrop = []string{"ALL"}
+	}
+	if s.ReadonlyRootfs {
+		host.ReadonlyRootfs = true
+		if host.Tmpfs == nil {
+			host.Tmpfs = map[string]string{}
+		}
+		host.Tmpfs["/tmp"] = ""
+	}
 	return host
 }
 
