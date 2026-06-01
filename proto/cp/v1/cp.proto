@@ -32,7 +32,7 @@ enum SpawnStatus {
 // declared mounts CP-side).
 message MountBinding { string name = 1; string backend_uri = 2; }
 
-message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; }
+message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; string version = 4; bool pin = 5; }
 message CreateSpawnResponse { string spawn_id = 1; }
 
 message SpawnSummary {

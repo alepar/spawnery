@@ -111,9 +111,21 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
 	}
 	appID := req.Msg.AppId
-	ver, err := s.st.Apps().LatestReviewed(ctx, appID)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown app: %s", appID))
+	var err error
+	var ver store.AppVersion
+	if v := req.Msg.Version; v != "" {
+		ver, err = s.st.Apps().GetVersion(ctx, appID, v)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown app version: %s@%s", appID, v))
+		}
+		if ver.Tier != store.TierReviewed {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("version %s@%s is tier %q, not spawnable", appID, v, ver.Tier))
+		}
+	} else {
+		ver, err = s.st.Apps().LatestReviewed(ctx, appID)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown app: %s", appID))
+		}
 	}
 	decls, err := s.st.Apps().DeclaredMounts(ctx, appID, ver.Version)
 	if err != nil {
@@ -134,7 +146,7 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 
 	now := time.Now().Unix()
 	sp := store.Spawn{
-		ID: spawnID, OwnerID: owner, AppID: appID, AppVersion: ver.Version, AppRef: ver.Ref,
+		ID: spawnID, OwnerID: owner, AppID: appID, AppVersion: ver.Version, AppRef: ver.Ref, Pinned: req.Msg.Pin,
 		Model: req.Msg.Model, Status: store.Starting, CreatedAt: now, LastUsedAt: now,
 	}
 	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, mounts) }); err != nil {
