@@ -4,12 +4,57 @@ option go_package = "spawnery/gen/cp/v1;cpv1";
 
 service SpawnService {
   rpc CreateSpawn(CreateSpawnRequest) returns (CreateSpawnResponse);
+  rpc ListSpawns(ListSpawnsRequest) returns (ListSpawnsResponse);
   rpc Session(stream Frame) returns (stream Frame);
-  rpc StopSpawn(StopSpawnRequest) returns (StopSpawnResponse);
+  rpc SuspendSpawn(SuspendSpawnRequest) returns (SuspendSpawnResponse);
+  rpc ResumeSpawn(ResumeSpawnRequest) returns (ResumeSpawnResponse);
+  rpc RecreateSpawn(RecreateSpawnRequest) returns (RecreateSpawnResponse);
+  rpc DeleteSpawn(DeleteSpawnRequest) returns (DeleteSpawnResponse);
+  rpc StopSpawn(StopSpawnRequest) returns (StopSpawnResponse);   // legacy cleanup path; kept (used by spawnctl + e2e)
 }
 
-message CreateSpawnRequest { string app_id = 1; string model = 2; }
+// The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
+enum SpawnStatus {
+  SPAWN_STATUS_UNSPECIFIED = 0;
+  SPAWN_STATUS_STARTING    = 1;
+  SPAWN_STATUS_ACTIVE      = 2;
+  SPAWN_STATUS_SUSPENDING  = 3;
+  SPAWN_STATUS_SUSPENDED   = 4;
+  SPAWN_STATUS_UNREACHABLE = 5;
+  SPAWN_STATUS_ERROR       = 6;
+  SPAWN_STATUS_DELETED     = 7;
+}
+
+// Per-mount backend choice the user picks at spawn time (validated against the app version's
+// declared mounts CP-side).
+message MountBinding { string name = 1; string backend_uri = 2; }
+
+message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; }
 message CreateSpawnResponse { string spawn_id = 1; }
+
+message SpawnSummary {
+  string spawn_id     = 1;
+  string app_id       = 2;
+  string app_version  = 3;
+  string model        = 4;
+  SpawnStatus status  = 5;
+  int64  created_at   = 6;
+  int64  last_used_at = 7;
+}
+// Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
+message ListSpawnsRequest  {}
+message ListSpawnsResponse { repeated SpawnSummary spawns = 1; }
+
+message SuspendSpawnRequest   { string spawn_id = 1; }
+message SuspendSpawnResponse  {}
+message ResumeSpawnRequest    { string spawn_id = 1; }
+message ResumeSpawnResponse   {}
+message RecreateSpawnRequest  { string spawn_id = 1; }
+message RecreateSpawnResponse {}
+message DeleteSpawnRequest    { string spawn_id = 1; bool destroy_data = 2; }
+message DeleteSpawnResponse   {}
+
 message Frame { string spawn_id = 1; bytes data = 2; }
-message StopSpawnRequest { string spawn_id = 1; }
+
+message StopSpawnRequest  { string spawn_id = 1; }
 message StopSpawnResponse {}

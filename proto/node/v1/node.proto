@@ -7,31 +7,45 @@ service NodeService {
   rpc Attach(stream NodeMessage) returns (stream CPMessage);
 }
 
-enum SpawnPhase { SPAWN_PHASE_UNSPECIFIED = 0; STARTING = 1; ACTIVE = 2; STOPPING = 3; STOPPED = 4; ERROR = 5; }
+// Node-reported runtime phase of a spawn's container. STOPPING/STOPPED = destroy path;
+// SUSPENDING/SUSPENDED = suspend path. Values 0-6 are wire-stable; SUSPENDING (7) added for the suspend path.
+enum SpawnPhase { SPAWN_PHASE_UNSPECIFIED = 0; STARTING = 1; ACTIVE = 2; STOPPING = 3; STOPPED = 4; ERROR = 5; SUSPENDED = 6; SUSPENDING = 7; }
 
 message NodeMessage {
   oneof msg {
-    Register    register  = 1;
-    Heartbeat   heartbeat = 2;
-    SpawnStatus status    = 3;
-    Frame       frame     = 4;   // agent -> client bytes
+    Register        register         = 1;
+    Heartbeat       heartbeat        = 2;
+    SpawnStatus     status           = 3;
+    Frame           frame            = 4;   // agent -> client bytes
+    SuspendComplete suspend_complete = 5;   // node -> CP: per-mount suspend markers
   }
 }
 message CPMessage {
   oneof msg {
-    StartSpawn   start = 1;
-    StopSpawn    stop  = 2;
-    SessionOpen  open  = 3;
-    SessionClose close = 4;
-    Frame        frame = 5;      // client -> agent bytes
+    StartSpawn   start   = 1;
+    StopSpawn    stop    = 2;
+    SessionOpen  open    = 3;
+    SessionClose close   = 4;
+    Frame        frame   = 5;             // client -> agent bytes
+    Suspend      suspend = 6;             // CP -> node: persist + tear down
   }
 }
 
-message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string agent_images = 3; }
-message Heartbeat   { uint32 active_spawns = 1; uint32 free_slots = 2; uint32 cpu_pct = 3; uint32 gpu_pct = 4; }
-message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; }
-message StartSpawn  { string spawn_id = 1; string app_ref = 2; string data_ref = 3; string model = 4; }
-message StopSpawn   { string spawn_id = 1; }
-message SessionOpen  { string spawn_id = 1; }
-message SessionClose { string spawn_id = 1; }
+// Per-mount backend binding chosen at create/resume (CP -> node).
+message MountBinding { string name = 1; string backend_uri = 2; }
+// Per-mount suspend marker reported back after a clean suspend (node -> CP).
+message MountMarker  { string name = 1; string marker = 2; }
+// One entry of a node's running-container inventory (node -> CP on Register/Heartbeat).
+message RunningSpawn { string spawn_id = 1; uint64 generation = 2; SpawnPhase phase = 3; }
+
+message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string agent_images = 3; repeated RunningSpawn running = 4; }
+message Heartbeat   { uint32 active_spawns = 1; uint32 free_slots = 2; uint32 cpu_pct = 3; uint32 gpu_pct = 4; repeated RunningSpawn running = 5; }
+message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; uint64 generation = 4; }
+message StartSpawn  { string spawn_id = 1; string app_ref = 2; string data_ref = 3; string model = 4; uint64 generation = 5; repeated MountBinding mounts = 6; }
+message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }
+message Suspend     { string spawn_id = 1; uint64 generation = 2; }
+message SuspendComplete { string spawn_id = 1; uint64 generation = 2; repeated MountMarker markers = 3; }
+message SessionOpen  { string spawn_id = 1; uint64 generation = 2; }
+message SessionClose { string spawn_id = 1; uint64 generation = 2; }
+// Frame carries no generation: data frames are correlated to an episode by spawn_id at the session layer.
 message Frame       { string spawn_id = 1; bytes data = 2; }

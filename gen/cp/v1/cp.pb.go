@@ -20,19 +20,142 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
+type SpawnStatus int32
+
+const (
+	SpawnStatus_SPAWN_STATUS_UNSPECIFIED SpawnStatus = 0
+	SpawnStatus_SPAWN_STATUS_STARTING    SpawnStatus = 1
+	SpawnStatus_SPAWN_STATUS_ACTIVE      SpawnStatus = 2
+	SpawnStatus_SPAWN_STATUS_SUSPENDING  SpawnStatus = 3
+	SpawnStatus_SPAWN_STATUS_SUSPENDED   SpawnStatus = 4
+	SpawnStatus_SPAWN_STATUS_UNREACHABLE SpawnStatus = 5
+	SpawnStatus_SPAWN_STATUS_ERROR       SpawnStatus = 6
+	SpawnStatus_SPAWN_STATUS_DELETED     SpawnStatus = 7
+)
+
+// Enum value maps for SpawnStatus.
+var (
+	SpawnStatus_name = map[int32]string{
+		0: "SPAWN_STATUS_UNSPECIFIED",
+		1: "SPAWN_STATUS_STARTING",
+		2: "SPAWN_STATUS_ACTIVE",
+		3: "SPAWN_STATUS_SUSPENDING",
+		4: "SPAWN_STATUS_SUSPENDED",
+		5: "SPAWN_STATUS_UNREACHABLE",
+		6: "SPAWN_STATUS_ERROR",
+		7: "SPAWN_STATUS_DELETED",
+	}
+	SpawnStatus_value = map[string]int32{
+		"SPAWN_STATUS_UNSPECIFIED": 0,
+		"SPAWN_STATUS_STARTING":    1,
+		"SPAWN_STATUS_ACTIVE":      2,
+		"SPAWN_STATUS_SUSPENDING":  3,
+		"SPAWN_STATUS_SUSPENDED":   4,
+		"SPAWN_STATUS_UNREACHABLE": 5,
+		"SPAWN_STATUS_ERROR":       6,
+		"SPAWN_STATUS_DELETED":     7,
+	}
+)
+
+func (x SpawnStatus) Enum() *SpawnStatus {
+	p := new(SpawnStatus)
+	*p = x
+	return p
+}
+
+func (x SpawnStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SpawnStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_cp_v1_cp_proto_enumTypes[0].Descriptor()
+}
+
+func (SpawnStatus) Type() protoreflect.EnumType {
+	return &file_cp_v1_cp_proto_enumTypes[0]
+}
+
+func (x SpawnStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SpawnStatus.Descriptor instead.
+func (SpawnStatus) EnumDescriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{0}
+}
+
+// Per-mount backend choice the user picks at spawn time (validated against the app version's
+// declared mounts CP-side).
+type MountBinding struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Name       string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	BackendUri string `protobuf:"bytes,2,opt,name=backend_uri,json=backendUri,proto3" json:"backend_uri,omitempty"`
+}
+
+func (x *MountBinding) Reset() {
+	*x = MountBinding{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[0]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *MountBinding) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MountBinding) ProtoMessage() {}
+
+func (x *MountBinding) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[0]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MountBinding.ProtoReflect.Descriptor instead.
+func (*MountBinding) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *MountBinding) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *MountBinding) GetBackendUri() string {
+	if x != nil {
+		return x.BackendUri
+	}
+	return ""
+}
+
 type CreateSpawnRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	AppId string `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
-	Model string `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
+	AppId  string          `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	Model  string          `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
+	Mounts []*MountBinding `protobuf:"bytes,3,rep,name=mounts,proto3" json:"mounts,omitempty"`
 }
 
 func (x *CreateSpawnRequest) Reset() {
 	*x = CreateSpawnRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_cp_v1_cp_proto_msgTypes[0]
+		mi := &file_cp_v1_cp_proto_msgTypes[1]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -45,7 +168,7 @@ func (x *CreateSpawnRequest) String() string {
 func (*CreateSpawnRequest) ProtoMessage() {}
 
 func (x *CreateSpawnRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cp_v1_cp_proto_msgTypes[0]
+	mi := &file_cp_v1_cp_proto_msgTypes[1]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -58,7 +181,7 @@ func (x *CreateSpawnRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSpawnRequest.ProtoReflect.Descriptor instead.
 func (*CreateSpawnRequest) Descriptor() ([]byte, []int) {
-	return file_cp_v1_cp_proto_rawDescGZIP(), []int{0}
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CreateSpawnRequest) GetAppId() string {
@@ -75,6 +198,13 @@ func (x *CreateSpawnRequest) GetModel() string {
 	return ""
 }
 
+func (x *CreateSpawnRequest) GetMounts() []*MountBinding {
+	if x != nil {
+		return x.Mounts
+	}
+	return nil
+}
+
 type CreateSpawnResponse struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -86,7 +216,7 @@ type CreateSpawnResponse struct {
 func (x *CreateSpawnResponse) Reset() {
 	*x = CreateSpawnResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_cp_v1_cp_proto_msgTypes[1]
+		mi := &file_cp_v1_cp_proto_msgTypes[2]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -99,7 +229,7 @@ func (x *CreateSpawnResponse) String() string {
 func (*CreateSpawnResponse) ProtoMessage() {}
 
 func (x *CreateSpawnResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cp_v1_cp_proto_msgTypes[1]
+	mi := &file_cp_v1_cp_proto_msgTypes[2]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -112,7 +242,7 @@ func (x *CreateSpawnResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSpawnResponse.ProtoReflect.Descriptor instead.
 func (*CreateSpawnResponse) Descriptor() ([]byte, []int) {
-	return file_cp_v1_cp_proto_rawDescGZIP(), []int{1}
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *CreateSpawnResponse) GetSpawnId() string {
@@ -120,6 +250,535 @@ func (x *CreateSpawnResponse) GetSpawnId() string {
 		return x.SpawnId
 	}
 	return ""
+}
+
+type SpawnSummary struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	SpawnId    string      `protobuf:"bytes,1,opt,name=spawn_id,json=spawnId,proto3" json:"spawn_id,omitempty"`
+	AppId      string      `protobuf:"bytes,2,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	AppVersion string      `protobuf:"bytes,3,opt,name=app_version,json=appVersion,proto3" json:"app_version,omitempty"`
+	Model      string      `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
+	Status     SpawnStatus `protobuf:"varint,5,opt,name=status,proto3,enum=cp.v1.SpawnStatus" json:"status,omitempty"`
+	CreatedAt  int64       `protobuf:"varint,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	LastUsedAt int64       `protobuf:"varint,7,opt,name=last_used_at,json=lastUsedAt,proto3" json:"last_used_at,omitempty"`
+}
+
+func (x *SpawnSummary) Reset() {
+	*x = SpawnSummary{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[3]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *SpawnSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SpawnSummary) ProtoMessage() {}
+
+func (x *SpawnSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[3]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SpawnSummary.ProtoReflect.Descriptor instead.
+func (*SpawnSummary) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SpawnSummary) GetSpawnId() string {
+	if x != nil {
+		return x.SpawnId
+	}
+	return ""
+}
+
+func (x *SpawnSummary) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *SpawnSummary) GetAppVersion() string {
+	if x != nil {
+		return x.AppVersion
+	}
+	return ""
+}
+
+func (x *SpawnSummary) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *SpawnSummary) GetStatus() SpawnStatus {
+	if x != nil {
+		return x.Status
+	}
+	return SpawnStatus_SPAWN_STATUS_UNSPECIFIED
+}
+
+func (x *SpawnSummary) GetCreatedAt() int64 {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return 0
+}
+
+func (x *SpawnSummary) GetLastUsedAt() int64 {
+	if x != nil {
+		return x.LastUsedAt
+	}
+	return 0
+}
+
+// Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
+type ListSpawnsRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+}
+
+func (x *ListSpawnsRequest) Reset() {
+	*x = ListSpawnsRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[4]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ListSpawnsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSpawnsRequest) ProtoMessage() {}
+
+func (x *ListSpawnsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[4]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSpawnsRequest.ProtoReflect.Descriptor instead.
+func (*ListSpawnsRequest) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{4}
+}
+
+type ListSpawnsResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Spawns []*SpawnSummary `protobuf:"bytes,1,rep,name=spawns,proto3" json:"spawns,omitempty"`
+}
+
+func (x *ListSpawnsResponse) Reset() {
+	*x = ListSpawnsResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[5]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ListSpawnsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSpawnsResponse) ProtoMessage() {}
+
+func (x *ListSpawnsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[5]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSpawnsResponse.ProtoReflect.Descriptor instead.
+func (*ListSpawnsResponse) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ListSpawnsResponse) GetSpawns() []*SpawnSummary {
+	if x != nil {
+		return x.Spawns
+	}
+	return nil
+}
+
+type SuspendSpawnRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	SpawnId string `protobuf:"bytes,1,opt,name=spawn_id,json=spawnId,proto3" json:"spawn_id,omitempty"`
+}
+
+func (x *SuspendSpawnRequest) Reset() {
+	*x = SuspendSpawnRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[6]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *SuspendSpawnRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SuspendSpawnRequest) ProtoMessage() {}
+
+func (x *SuspendSpawnRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[6]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SuspendSpawnRequest.ProtoReflect.Descriptor instead.
+func (*SuspendSpawnRequest) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *SuspendSpawnRequest) GetSpawnId() string {
+	if x != nil {
+		return x.SpawnId
+	}
+	return ""
+}
+
+type SuspendSpawnResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+}
+
+func (x *SuspendSpawnResponse) Reset() {
+	*x = SuspendSpawnResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[7]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *SuspendSpawnResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SuspendSpawnResponse) ProtoMessage() {}
+
+func (x *SuspendSpawnResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[7]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SuspendSpawnResponse.ProtoReflect.Descriptor instead.
+func (*SuspendSpawnResponse) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{7}
+}
+
+type ResumeSpawnRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	SpawnId string `protobuf:"bytes,1,opt,name=spawn_id,json=spawnId,proto3" json:"spawn_id,omitempty"`
+}
+
+func (x *ResumeSpawnRequest) Reset() {
+	*x = ResumeSpawnRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[8]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ResumeSpawnRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResumeSpawnRequest) ProtoMessage() {}
+
+func (x *ResumeSpawnRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[8]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResumeSpawnRequest.ProtoReflect.Descriptor instead.
+func (*ResumeSpawnRequest) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ResumeSpawnRequest) GetSpawnId() string {
+	if x != nil {
+		return x.SpawnId
+	}
+	return ""
+}
+
+type ResumeSpawnResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+}
+
+func (x *ResumeSpawnResponse) Reset() {
+	*x = ResumeSpawnResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[9]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ResumeSpawnResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResumeSpawnResponse) ProtoMessage() {}
+
+func (x *ResumeSpawnResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[9]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResumeSpawnResponse.ProtoReflect.Descriptor instead.
+func (*ResumeSpawnResponse) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{9}
+}
+
+type RecreateSpawnRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	SpawnId string `protobuf:"bytes,1,opt,name=spawn_id,json=spawnId,proto3" json:"spawn_id,omitempty"`
+}
+
+func (x *RecreateSpawnRequest) Reset() {
+	*x = RecreateSpawnRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[10]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *RecreateSpawnRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecreateSpawnRequest) ProtoMessage() {}
+
+func (x *RecreateSpawnRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[10]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecreateSpawnRequest.ProtoReflect.Descriptor instead.
+func (*RecreateSpawnRequest) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RecreateSpawnRequest) GetSpawnId() string {
+	if x != nil {
+		return x.SpawnId
+	}
+	return ""
+}
+
+type RecreateSpawnResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+}
+
+func (x *RecreateSpawnResponse) Reset() {
+	*x = RecreateSpawnResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[11]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *RecreateSpawnResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecreateSpawnResponse) ProtoMessage() {}
+
+func (x *RecreateSpawnResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[11]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecreateSpawnResponse.ProtoReflect.Descriptor instead.
+func (*RecreateSpawnResponse) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{11}
+}
+
+type DeleteSpawnRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	SpawnId     string `protobuf:"bytes,1,opt,name=spawn_id,json=spawnId,proto3" json:"spawn_id,omitempty"`
+	DestroyData bool   `protobuf:"varint,2,opt,name=destroy_data,json=destroyData,proto3" json:"destroy_data,omitempty"`
+}
+
+func (x *DeleteSpawnRequest) Reset() {
+	*x = DeleteSpawnRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[12]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *DeleteSpawnRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteSpawnRequest) ProtoMessage() {}
+
+func (x *DeleteSpawnRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[12]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteSpawnRequest.ProtoReflect.Descriptor instead.
+func (*DeleteSpawnRequest) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *DeleteSpawnRequest) GetSpawnId() string {
+	if x != nil {
+		return x.SpawnId
+	}
+	return ""
+}
+
+func (x *DeleteSpawnRequest) GetDestroyData() bool {
+	if x != nil {
+		return x.DestroyData
+	}
+	return false
+}
+
+type DeleteSpawnResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+}
+
+func (x *DeleteSpawnResponse) Reset() {
+	*x = DeleteSpawnResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cp_v1_cp_proto_msgTypes[13]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *DeleteSpawnResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteSpawnResponse) ProtoMessage() {}
+
+func (x *DeleteSpawnResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cp_v1_cp_proto_msgTypes[13]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteSpawnResponse.ProtoReflect.Descriptor instead.
+func (*DeleteSpawnResponse) Descriptor() ([]byte, []int) {
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{13}
 }
 
 type Frame struct {
@@ -134,7 +793,7 @@ type Frame struct {
 func (x *Frame) Reset() {
 	*x = Frame{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_cp_v1_cp_proto_msgTypes[2]
+		mi := &file_cp_v1_cp_proto_msgTypes[14]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -147,7 +806,7 @@ func (x *Frame) String() string {
 func (*Frame) ProtoMessage() {}
 
 func (x *Frame) ProtoReflect() protoreflect.Message {
-	mi := &file_cp_v1_cp_proto_msgTypes[2]
+	mi := &file_cp_v1_cp_proto_msgTypes[14]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -160,7 +819,7 @@ func (x *Frame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Frame.ProtoReflect.Descriptor instead.
 func (*Frame) Descriptor() ([]byte, []int) {
-	return file_cp_v1_cp_proto_rawDescGZIP(), []int{2}
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Frame) GetSpawnId() string {
@@ -188,7 +847,7 @@ type StopSpawnRequest struct {
 func (x *StopSpawnRequest) Reset() {
 	*x = StopSpawnRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_cp_v1_cp_proto_msgTypes[3]
+		mi := &file_cp_v1_cp_proto_msgTypes[15]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -201,7 +860,7 @@ func (x *StopSpawnRequest) String() string {
 func (*StopSpawnRequest) ProtoMessage() {}
 
 func (x *StopSpawnRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cp_v1_cp_proto_msgTypes[3]
+	mi := &file_cp_v1_cp_proto_msgTypes[15]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -214,7 +873,7 @@ func (x *StopSpawnRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopSpawnRequest.ProtoReflect.Descriptor instead.
 func (*StopSpawnRequest) Descriptor() ([]byte, []int) {
-	return file_cp_v1_cp_proto_rawDescGZIP(), []int{3}
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *StopSpawnRequest) GetSpawnId() string {
@@ -233,7 +892,7 @@ type StopSpawnResponse struct {
 func (x *StopSpawnResponse) Reset() {
 	*x = StopSpawnResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_cp_v1_cp_proto_msgTypes[4]
+		mi := &file_cp_v1_cp_proto_msgTypes[16]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -246,7 +905,7 @@ func (x *StopSpawnResponse) String() string {
 func (*StopSpawnResponse) ProtoMessage() {}
 
 func (x *StopSpawnResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cp_v1_cp_proto_msgTypes[4]
+	mi := &file_cp_v1_cp_proto_msgTypes[16]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -259,43 +918,128 @@ func (x *StopSpawnResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopSpawnResponse.ProtoReflect.Descriptor instead.
 func (*StopSpawnResponse) Descriptor() ([]byte, []int) {
-	return file_cp_v1_cp_proto_rawDescGZIP(), []int{4}
+	return file_cp_v1_cp_proto_rawDescGZIP(), []int{16}
 }
 
 var File_cp_v1_cp_proto protoreflect.FileDescriptor
 
 var file_cp_v1_cp_proto_rawDesc = []byte{
 	0x0a, 0x0e, 0x63, 0x70, 0x2f, 0x76, 0x31, 0x2f, 0x63, 0x70, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f,
-	0x12, 0x05, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x22, 0x41, 0x0a, 0x12, 0x43, 0x72, 0x65, 0x61, 0x74,
-	0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x15, 0x0a,
-	0x06, 0x61, 0x70, 0x70, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x61,
-	0x70, 0x70, 0x49, 0x64, 0x12, 0x14, 0x0a, 0x05, 0x6d, 0x6f, 0x64, 0x65, 0x6c, 0x18, 0x02, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x05, 0x6d, 0x6f, 0x64, 0x65, 0x6c, 0x22, 0x30, 0x0a, 0x13, 0x43, 0x72,
-	0x65, 0x61, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73,
-	0x65, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x07, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x49, 0x64, 0x22, 0x36, 0x0a, 0x05,
-	0x46, 0x72, 0x61, 0x6d, 0x65, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x5f, 0x69,
-	0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x49, 0x64,
-	0x12, 0x12, 0x0a, 0x04, 0x64, 0x61, 0x74, 0x61, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x04,
-	0x64, 0x61, 0x74, 0x61, 0x22, 0x2d, 0x0a, 0x10, 0x53, 0x74, 0x6f, 0x70, 0x53, 0x70, 0x61, 0x77,
-	0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x70, 0x61, 0x77,
-	0x6e, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x73, 0x70, 0x61, 0x77,
-	0x6e, 0x49, 0x64, 0x22, 0x13, 0x0a, 0x11, 0x53, 0x74, 0x6f, 0x70, 0x53, 0x70, 0x61, 0x77, 0x6e,
-	0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x32, 0xbf, 0x01, 0x0a, 0x0c, 0x53, 0x70, 0x61,
-	0x77, 0x6e, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x12, 0x44, 0x0a, 0x0b, 0x43, 0x72, 0x65,
-	0x61, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x12, 0x19, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31,
-	0x2e, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x71, 0x75,
-	0x65, 0x73, 0x74, 0x1a, 0x1a, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x43, 0x72, 0x65, 0x61,
-	0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12,
-	0x29, 0x0a, 0x07, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x0c, 0x2e, 0x63, 0x70, 0x2e,
-	0x76, 0x31, 0x2e, 0x46, 0x72, 0x61, 0x6d, 0x65, 0x1a, 0x0c, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31,
-	0x2e, 0x46, 0x72, 0x61, 0x6d, 0x65, 0x28, 0x01, 0x30, 0x01, 0x12, 0x3e, 0x0a, 0x09, 0x53, 0x74,
-	0x6f, 0x70, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x12, 0x17, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e,
-	0x53, 0x74, 0x6f, 0x70, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
-	0x1a, 0x18, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x6f, 0x70, 0x53, 0x70, 0x61,
-	0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x42, 0x19, 0x5a, 0x17, 0x73, 0x70,
-	0x61, 0x77, 0x6e, 0x65, 0x72, 0x79, 0x2f, 0x67, 0x65, 0x6e, 0x2f, 0x63, 0x70, 0x2f, 0x76, 0x31,
-	0x3b, 0x63, 0x70, 0x76, 0x31, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+	0x12, 0x05, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x22, 0x43, 0x0a, 0x0c, 0x4d, 0x6f, 0x75, 0x6e, 0x74,
+	0x42, 0x69, 0x6e, 0x64, 0x69, 0x6e, 0x67, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18,
+	0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x1f, 0x0a, 0x0b, 0x62,
+	0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x5f, 0x75, 0x72, 0x69, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09,
+	0x52, 0x0a, 0x62, 0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x55, 0x72, 0x69, 0x22, 0x6e, 0x0a, 0x12,
+	0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65,
+	0x73, 0x74, 0x12, 0x15, 0x0a, 0x06, 0x61, 0x70, 0x70, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01,
+	0x28, 0x09, 0x52, 0x05, 0x61, 0x70, 0x70, 0x49, 0x64, 0x12, 0x14, 0x0a, 0x05, 0x6d, 0x6f, 0x64,
+	0x65, 0x6c, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x6d, 0x6f, 0x64, 0x65, 0x6c, 0x12,
+	0x2b, 0x0a, 0x06, 0x6d, 0x6f, 0x75, 0x6e, 0x74, 0x73, 0x18, 0x03, 0x20, 0x03, 0x28, 0x0b, 0x32,
+	0x13, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x4d, 0x6f, 0x75, 0x6e, 0x74, 0x42, 0x69, 0x6e,
+	0x64, 0x69, 0x6e, 0x67, 0x52, 0x06, 0x6d, 0x6f, 0x75, 0x6e, 0x74, 0x73, 0x22, 0x30, 0x0a, 0x13,
+	0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f,
+	0x6e, 0x73, 0x65, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x5f, 0x69, 0x64, 0x18,
+	0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x49, 0x64, 0x22, 0xe4,
+	0x01, 0x0a, 0x0c, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x53, 0x75, 0x6d, 0x6d, 0x61, 0x72, 0x79, 0x12,
+	0x19, 0x0a, 0x08, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28,
+	0x09, 0x52, 0x07, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x49, 0x64, 0x12, 0x15, 0x0a, 0x06, 0x61, 0x70,
+	0x70, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x61, 0x70, 0x70, 0x49,
+	0x64, 0x12, 0x1f, 0x0a, 0x0b, 0x61, 0x70, 0x70, 0x5f, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e,
+	0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0a, 0x61, 0x70, 0x70, 0x56, 0x65, 0x72, 0x73, 0x69,
+	0x6f, 0x6e, 0x12, 0x14, 0x0a, 0x05, 0x6d, 0x6f, 0x64, 0x65, 0x6c, 0x18, 0x04, 0x20, 0x01, 0x28,
+	0x09, 0x52, 0x05, 0x6d, 0x6f, 0x64, 0x65, 0x6c, 0x12, 0x2a, 0x0a, 0x06, 0x73, 0x74, 0x61, 0x74,
+	0x75, 0x73, 0x18, 0x05, 0x20, 0x01, 0x28, 0x0e, 0x32, 0x12, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31,
+	0x2e, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x53, 0x74, 0x61, 0x74, 0x75, 0x73, 0x52, 0x06, 0x73, 0x74,
+	0x61, 0x74, 0x75, 0x73, 0x12, 0x1d, 0x0a, 0x0a, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65, 0x64, 0x5f,
+	0x61, 0x74, 0x18, 0x06, 0x20, 0x01, 0x28, 0x03, 0x52, 0x09, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65,
+	0x64, 0x41, 0x74, 0x12, 0x20, 0x0a, 0x0c, 0x6c, 0x61, 0x73, 0x74, 0x5f, 0x75, 0x73, 0x65, 0x64,
+	0x5f, 0x61, 0x74, 0x18, 0x07, 0x20, 0x01, 0x28, 0x03, 0x52, 0x0a, 0x6c, 0x61, 0x73, 0x74, 0x55,
+	0x73, 0x65, 0x64, 0x41, 0x74, 0x22, 0x13, 0x0a, 0x11, 0x4c, 0x69, 0x73, 0x74, 0x53, 0x70, 0x61,
+	0x77, 0x6e, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x22, 0x41, 0x0a, 0x12, 0x4c, 0x69,
+	0x73, 0x74, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65,
+	0x12, 0x2b, 0x0a, 0x06, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b,
+	0x32, 0x13, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x53, 0x75,
+	0x6d, 0x6d, 0x61, 0x72, 0x79, 0x52, 0x06, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x73, 0x22, 0x30, 0x0a,
+	0x13, 0x53, 0x75, 0x73, 0x70, 0x65, 0x6e, 0x64, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x71,
+	0x75, 0x65, 0x73, 0x74, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x5f, 0x69, 0x64,
+	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x49, 0x64, 0x22,
+	0x16, 0x0a, 0x14, 0x53, 0x75, 0x73, 0x70, 0x65, 0x6e, 0x64, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x2f, 0x0a, 0x12, 0x52, 0x65, 0x73, 0x75, 0x6d,
+	0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x19, 0x0a,
+	0x08, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x07, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x49, 0x64, 0x22, 0x15, 0x0a, 0x13, 0x52, 0x65, 0x73, 0x75,
+	0x6d, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22,
+	0x31, 0x0a, 0x14, 0x52, 0x65, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e,
+	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x70, 0x61, 0x77, 0x6e,
+	0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x73, 0x70, 0x61, 0x77, 0x6e,
+	0x49, 0x64, 0x22, 0x17, 0x0a, 0x15, 0x52, 0x65, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65, 0x53, 0x70,
+	0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x52, 0x0a, 0x12, 0x44,
+	0x65, 0x6c, 0x65, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73,
+	0x74, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x07, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x49, 0x64, 0x12, 0x21, 0x0a, 0x0c,
+	0x64, 0x65, 0x73, 0x74, 0x72, 0x6f, 0x79, 0x5f, 0x64, 0x61, 0x74, 0x61, 0x18, 0x02, 0x20, 0x01,
+	0x28, 0x08, 0x52, 0x0b, 0x64, 0x65, 0x73, 0x74, 0x72, 0x6f, 0x79, 0x44, 0x61, 0x74, 0x61, 0x22,
+	0x15, 0x0a, 0x13, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65,
+	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x36, 0x0a, 0x05, 0x46, 0x72, 0x61, 0x6d, 0x65, 0x12,
+	0x19, 0x0a, 0x08, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28,
+	0x09, 0x52, 0x07, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x49, 0x64, 0x12, 0x12, 0x0a, 0x04, 0x64, 0x61,
+	0x74, 0x61, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x04, 0x64, 0x61, 0x74, 0x61, 0x22, 0x2d,
+	0x0a, 0x10, 0x53, 0x74, 0x6f, 0x70, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65,
+	0x73, 0x74, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x5f, 0x69, 0x64, 0x18, 0x01,
+	0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x49, 0x64, 0x22, 0x13, 0x0a,
+	0x11, 0x53, 0x74, 0x6f, 0x70, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e,
+	0x73, 0x65, 0x2a, 0xe8, 0x01, 0x0a, 0x0b, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x53, 0x74, 0x61, 0x74,
+	0x75, 0x73, 0x12, 0x1c, 0x0a, 0x18, 0x53, 0x50, 0x41, 0x57, 0x4e, 0x5f, 0x53, 0x54, 0x41, 0x54,
+	0x55, 0x53, 0x5f, 0x55, 0x4e, 0x53, 0x50, 0x45, 0x43, 0x49, 0x46, 0x49, 0x45, 0x44, 0x10, 0x00,
+	0x12, 0x19, 0x0a, 0x15, 0x53, 0x50, 0x41, 0x57, 0x4e, 0x5f, 0x53, 0x54, 0x41, 0x54, 0x55, 0x53,
+	0x5f, 0x53, 0x54, 0x41, 0x52, 0x54, 0x49, 0x4e, 0x47, 0x10, 0x01, 0x12, 0x17, 0x0a, 0x13, 0x53,
+	0x50, 0x41, 0x57, 0x4e, 0x5f, 0x53, 0x54, 0x41, 0x54, 0x55, 0x53, 0x5f, 0x41, 0x43, 0x54, 0x49,
+	0x56, 0x45, 0x10, 0x02, 0x12, 0x1b, 0x0a, 0x17, 0x53, 0x50, 0x41, 0x57, 0x4e, 0x5f, 0x53, 0x54,
+	0x41, 0x54, 0x55, 0x53, 0x5f, 0x53, 0x55, 0x53, 0x50, 0x45, 0x4e, 0x44, 0x49, 0x4e, 0x47, 0x10,
+	0x03, 0x12, 0x1a, 0x0a, 0x16, 0x53, 0x50, 0x41, 0x57, 0x4e, 0x5f, 0x53, 0x54, 0x41, 0x54, 0x55,
+	0x53, 0x5f, 0x53, 0x55, 0x53, 0x50, 0x45, 0x4e, 0x44, 0x45, 0x44, 0x10, 0x04, 0x12, 0x1c, 0x0a,
+	0x18, 0x53, 0x50, 0x41, 0x57, 0x4e, 0x5f, 0x53, 0x54, 0x41, 0x54, 0x55, 0x53, 0x5f, 0x55, 0x4e,
+	0x52, 0x45, 0x41, 0x43, 0x48, 0x41, 0x42, 0x4c, 0x45, 0x10, 0x05, 0x12, 0x16, 0x0a, 0x12, 0x53,
+	0x50, 0x41, 0x57, 0x4e, 0x5f, 0x53, 0x54, 0x41, 0x54, 0x55, 0x53, 0x5f, 0x45, 0x52, 0x52, 0x4f,
+	0x52, 0x10, 0x06, 0x12, 0x18, 0x0a, 0x14, 0x53, 0x50, 0x41, 0x57, 0x4e, 0x5f, 0x53, 0x54, 0x41,
+	0x54, 0x55, 0x53, 0x5f, 0x44, 0x45, 0x4c, 0x45, 0x54, 0x45, 0x44, 0x10, 0x07, 0x32, 0xa3, 0x04,
+	0x0a, 0x0c, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x12, 0x44,
+	0x0a, 0x0b, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x12, 0x19, 0x2e,
+	0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77,
+	0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1a, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31,
+	0x2e, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70,
+	0x6f, 0x6e, 0x73, 0x65, 0x12, 0x41, 0x0a, 0x0a, 0x4c, 0x69, 0x73, 0x74, 0x53, 0x70, 0x61, 0x77,
+	0x6e, 0x73, 0x12, 0x18, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x4c, 0x69, 0x73, 0x74, 0x53,
+	0x70, 0x61, 0x77, 0x6e, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x19, 0x2e, 0x63,
+	0x70, 0x2e, 0x76, 0x31, 0x2e, 0x4c, 0x69, 0x73, 0x74, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x73, 0x52,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x29, 0x0a, 0x07, 0x53, 0x65, 0x73, 0x73, 0x69,
+	0x6f, 0x6e, 0x12, 0x0c, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x46, 0x72, 0x61, 0x6d, 0x65,
+	0x1a, 0x0c, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x46, 0x72, 0x61, 0x6d, 0x65, 0x28, 0x01,
+	0x30, 0x01, 0x12, 0x47, 0x0a, 0x0c, 0x53, 0x75, 0x73, 0x70, 0x65, 0x6e, 0x64, 0x53, 0x70, 0x61,
+	0x77, 0x6e, 0x12, 0x1a, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x75, 0x73, 0x70, 0x65,
+	0x6e, 0x64, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1b,
+	0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x75, 0x73, 0x70, 0x65, 0x6e, 0x64, 0x53, 0x70,
+	0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x44, 0x0a, 0x0b, 0x52,
+	0x65, 0x73, 0x75, 0x6d, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x12, 0x19, 0x2e, 0x63, 0x70, 0x2e,
+	0x76, 0x31, 0x2e, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1a, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65,
+	0x73, 0x75, 0x6d, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73,
+	0x65, 0x12, 0x4a, 0x0a, 0x0d, 0x52, 0x65, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65, 0x53, 0x70, 0x61,
+	0x77, 0x6e, 0x12, 0x1b, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x63, 0x72, 0x65,
+	0x61, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a,
+	0x1c, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65,
+	0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x44, 0x0a,
+	0x0b, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x12, 0x19, 0x2e, 0x63,
+	0x70, 0x2e, 0x76, 0x31, 0x2e, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e,
+	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1a, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e,
+	0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f,
+	0x6e, 0x73, 0x65, 0x12, 0x3e, 0x0a, 0x09, 0x53, 0x74, 0x6f, 0x70, 0x53, 0x70, 0x61, 0x77, 0x6e,
+	0x12, 0x17, 0x2e, 0x63, 0x70, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x6f, 0x70, 0x53, 0x70, 0x61,
+	0x77, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x18, 0x2e, 0x63, 0x70, 0x2e, 0x76,
+	0x31, 0x2e, 0x53, 0x74, 0x6f, 0x70, 0x53, 0x70, 0x61, 0x77, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f,
+	0x6e, 0x73, 0x65, 0x42, 0x19, 0x5a, 0x17, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x65, 0x72, 0x79, 0x2f,
+	0x67, 0x65, 0x6e, 0x2f, 0x63, 0x70, 0x2f, 0x76, 0x31, 0x3b, 0x63, 0x70, 0x76, 0x31, 0x62, 0x06,
+	0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
 }
 
 var (
@@ -310,26 +1054,53 @@ func file_cp_v1_cp_proto_rawDescGZIP() []byte {
 	return file_cp_v1_cp_proto_rawDescData
 }
 
-var file_cp_v1_cp_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_cp_v1_cp_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_cp_v1_cp_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_cp_v1_cp_proto_goTypes = []any{
-	(*CreateSpawnRequest)(nil),  // 0: cp.v1.CreateSpawnRequest
-	(*CreateSpawnResponse)(nil), // 1: cp.v1.CreateSpawnResponse
-	(*Frame)(nil),               // 2: cp.v1.Frame
-	(*StopSpawnRequest)(nil),    // 3: cp.v1.StopSpawnRequest
-	(*StopSpawnResponse)(nil),   // 4: cp.v1.StopSpawnResponse
+	(SpawnStatus)(0),              // 0: cp.v1.SpawnStatus
+	(*MountBinding)(nil),          // 1: cp.v1.MountBinding
+	(*CreateSpawnRequest)(nil),    // 2: cp.v1.CreateSpawnRequest
+	(*CreateSpawnResponse)(nil),   // 3: cp.v1.CreateSpawnResponse
+	(*SpawnSummary)(nil),          // 4: cp.v1.SpawnSummary
+	(*ListSpawnsRequest)(nil),     // 5: cp.v1.ListSpawnsRequest
+	(*ListSpawnsResponse)(nil),    // 6: cp.v1.ListSpawnsResponse
+	(*SuspendSpawnRequest)(nil),   // 7: cp.v1.SuspendSpawnRequest
+	(*SuspendSpawnResponse)(nil),  // 8: cp.v1.SuspendSpawnResponse
+	(*ResumeSpawnRequest)(nil),    // 9: cp.v1.ResumeSpawnRequest
+	(*ResumeSpawnResponse)(nil),   // 10: cp.v1.ResumeSpawnResponse
+	(*RecreateSpawnRequest)(nil),  // 11: cp.v1.RecreateSpawnRequest
+	(*RecreateSpawnResponse)(nil), // 12: cp.v1.RecreateSpawnResponse
+	(*DeleteSpawnRequest)(nil),    // 13: cp.v1.DeleteSpawnRequest
+	(*DeleteSpawnResponse)(nil),   // 14: cp.v1.DeleteSpawnResponse
+	(*Frame)(nil),                 // 15: cp.v1.Frame
+	(*StopSpawnRequest)(nil),      // 16: cp.v1.StopSpawnRequest
+	(*StopSpawnResponse)(nil),     // 17: cp.v1.StopSpawnResponse
 }
 var file_cp_v1_cp_proto_depIdxs = []int32{
-	0, // 0: cp.v1.SpawnService.CreateSpawn:input_type -> cp.v1.CreateSpawnRequest
-	2, // 1: cp.v1.SpawnService.Session:input_type -> cp.v1.Frame
-	3, // 2: cp.v1.SpawnService.StopSpawn:input_type -> cp.v1.StopSpawnRequest
-	1, // 3: cp.v1.SpawnService.CreateSpawn:output_type -> cp.v1.CreateSpawnResponse
-	2, // 4: cp.v1.SpawnService.Session:output_type -> cp.v1.Frame
-	4, // 5: cp.v1.SpawnService.StopSpawn:output_type -> cp.v1.StopSpawnResponse
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	1,  // 0: cp.v1.CreateSpawnRequest.mounts:type_name -> cp.v1.MountBinding
+	0,  // 1: cp.v1.SpawnSummary.status:type_name -> cp.v1.SpawnStatus
+	4,  // 2: cp.v1.ListSpawnsResponse.spawns:type_name -> cp.v1.SpawnSummary
+	2,  // 3: cp.v1.SpawnService.CreateSpawn:input_type -> cp.v1.CreateSpawnRequest
+	5,  // 4: cp.v1.SpawnService.ListSpawns:input_type -> cp.v1.ListSpawnsRequest
+	15, // 5: cp.v1.SpawnService.Session:input_type -> cp.v1.Frame
+	7,  // 6: cp.v1.SpawnService.SuspendSpawn:input_type -> cp.v1.SuspendSpawnRequest
+	9,  // 7: cp.v1.SpawnService.ResumeSpawn:input_type -> cp.v1.ResumeSpawnRequest
+	11, // 8: cp.v1.SpawnService.RecreateSpawn:input_type -> cp.v1.RecreateSpawnRequest
+	13, // 9: cp.v1.SpawnService.DeleteSpawn:input_type -> cp.v1.DeleteSpawnRequest
+	16, // 10: cp.v1.SpawnService.StopSpawn:input_type -> cp.v1.StopSpawnRequest
+	3,  // 11: cp.v1.SpawnService.CreateSpawn:output_type -> cp.v1.CreateSpawnResponse
+	6,  // 12: cp.v1.SpawnService.ListSpawns:output_type -> cp.v1.ListSpawnsResponse
+	15, // 13: cp.v1.SpawnService.Session:output_type -> cp.v1.Frame
+	8,  // 14: cp.v1.SpawnService.SuspendSpawn:output_type -> cp.v1.SuspendSpawnResponse
+	10, // 15: cp.v1.SpawnService.ResumeSpawn:output_type -> cp.v1.ResumeSpawnResponse
+	12, // 16: cp.v1.SpawnService.RecreateSpawn:output_type -> cp.v1.RecreateSpawnResponse
+	14, // 17: cp.v1.SpawnService.DeleteSpawn:output_type -> cp.v1.DeleteSpawnResponse
+	17, // 18: cp.v1.SpawnService.StopSpawn:output_type -> cp.v1.StopSpawnResponse
+	11, // [11:19] is the sub-list for method output_type
+	3,  // [3:11] is the sub-list for method input_type
+	3,  // [3:3] is the sub-list for extension type_name
+	3,  // [3:3] is the sub-list for extension extendee
+	0,  // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_cp_v1_cp_proto_init() }
@@ -339,7 +1110,7 @@ func file_cp_v1_cp_proto_init() {
 	}
 	if !protoimpl.UnsafeEnabled {
 		file_cp_v1_cp_proto_msgTypes[0].Exporter = func(v any, i int) any {
-			switch v := v.(*CreateSpawnRequest); i {
+			switch v := v.(*MountBinding); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -351,7 +1122,7 @@ func file_cp_v1_cp_proto_init() {
 			}
 		}
 		file_cp_v1_cp_proto_msgTypes[1].Exporter = func(v any, i int) any {
-			switch v := v.(*CreateSpawnResponse); i {
+			switch v := v.(*CreateSpawnRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -363,7 +1134,7 @@ func file_cp_v1_cp_proto_init() {
 			}
 		}
 		file_cp_v1_cp_proto_msgTypes[2].Exporter = func(v any, i int) any {
-			switch v := v.(*Frame); i {
+			switch v := v.(*CreateSpawnResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -375,7 +1146,7 @@ func file_cp_v1_cp_proto_init() {
 			}
 		}
 		file_cp_v1_cp_proto_msgTypes[3].Exporter = func(v any, i int) any {
-			switch v := v.(*StopSpawnRequest); i {
+			switch v := v.(*SpawnSummary); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -387,6 +1158,150 @@ func file_cp_v1_cp_proto_init() {
 			}
 		}
 		file_cp_v1_cp_proto_msgTypes[4].Exporter = func(v any, i int) any {
+			switch v := v.(*ListSpawnsRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[5].Exporter = func(v any, i int) any {
+			switch v := v.(*ListSpawnsResponse); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[6].Exporter = func(v any, i int) any {
+			switch v := v.(*SuspendSpawnRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[7].Exporter = func(v any, i int) any {
+			switch v := v.(*SuspendSpawnResponse); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[8].Exporter = func(v any, i int) any {
+			switch v := v.(*ResumeSpawnRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[9].Exporter = func(v any, i int) any {
+			switch v := v.(*ResumeSpawnResponse); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[10].Exporter = func(v any, i int) any {
+			switch v := v.(*RecreateSpawnRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[11].Exporter = func(v any, i int) any {
+			switch v := v.(*RecreateSpawnResponse); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[12].Exporter = func(v any, i int) any {
+			switch v := v.(*DeleteSpawnRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[13].Exporter = func(v any, i int) any {
+			switch v := v.(*DeleteSpawnResponse); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[14].Exporter = func(v any, i int) any {
+			switch v := v.(*Frame); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[15].Exporter = func(v any, i int) any {
+			switch v := v.(*StopSpawnRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_cp_v1_cp_proto_msgTypes[16].Exporter = func(v any, i int) any {
 			switch v := v.(*StopSpawnResponse); i {
 			case 0:
 				return &v.state
@@ -404,13 +1319,14 @@ func file_cp_v1_cp_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_cp_v1_cp_proto_rawDesc,
-			NumEnums:      0,
-			NumMessages:   5,
+			NumEnums:      1,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_cp_v1_cp_proto_goTypes,
 		DependencyIndexes: file_cp_v1_cp_proto_depIdxs,
+		EnumInfos:         file_cp_v1_cp_proto_enumTypes,
 		MessageInfos:      file_cp_v1_cp_proto_msgTypes,
 	}.Build()
 	File_cp_v1_cp_proto = out.File
