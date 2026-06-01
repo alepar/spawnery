@@ -49,6 +49,7 @@ type AppRepo interface {
 	DeclaredMounts(ctx context.Context, appID, version string) ([]MountDecl, error)
 	Catalog(ctx context.Context, f CatalogFilter) ([]CatalogEntry, error)
 	AppDetail(ctx context.Context, id string) (App, []AppVersion, error)
+	SetListed(ctx context.Context, appID string, listed bool) error
 }
 
 type SpawnRepo interface {
