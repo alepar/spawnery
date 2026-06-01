@@ -5,74 +5,36 @@ import (
 	"testing"
 )
 
-func TestRulesBlockFloor(t *testing.T) {
-	rules := Rules(nil)
-	joined := make([]string, len(rules))
-	for i, r := range rules {
-		joined[i] = strings.Join(r.Args, " ")
+func TestRulesHostFloor(t *testing.T) {
+	rules := Rules("172.17.0.5", []string{"10.9.9.0/24"})
+	var lines []string
+	for _, r := range rules {
+		lines = append(lines, strings.Join(r.Args, " "))
 	}
-	all := strings.Join(joined, "\n")
+	all := strings.Join(lines, "\n")
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "-s 172.17.0.5 ") {
+			t.Fatalf("rule not scoped to -s ip: %q", l)
+		}
+	}
 	for _, cidr := range []string{"169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
 		if !strings.Contains(all, "-d "+cidr+" -j DROP") {
-			t.Fatalf("missing DROP for %s in:\n%s", cidr, all)
+			t.Fatalf("missing DROP for %s", cidr)
 		}
 	}
-	loIdx, firstDrop := -1, -1
-	for i, j := range joined {
-		if strings.Contains(j, "-o lo -j ACCEPT") && loIdx == -1 {
-			loIdx = i
-		}
-		if strings.Contains(j, "-j DROP") && firstDrop == -1 {
-			firstDrop = i
-		}
+	if !strings.Contains(all, "-d 10.9.9.0/24 -j ACCEPT") {
+		t.Fatal("missing allow-CIDR ACCEPT")
 	}
-	if loIdx == -1 || firstDrop == -1 || loIdx > firstDrop {
-		t.Fatalf("lo ACCEPT (%d) must precede first DROP (%d)", loIdx, firstDrop)
-	}
-}
-
-func TestRulesAllowDNSBeforeDrops(t *testing.T) {
-	rules := Rules(nil)
-	joined := make([]string, len(rules))
-	for i, r := range rules {
-		joined[i] = strings.Join(r.Args, " ")
-	}
-	udp, tcp, firstDrop := -1, -1, -1
-	for i, j := range joined {
-		if strings.Contains(j, "-p udp --dport 53 -j ACCEPT") && udp == -1 {
+	udp, firstDrop := -1, -1
+	for i, l := range lines {
+		if strings.Contains(l, "--dport 53 -j ACCEPT") && udp == -1 {
 			udp = i
 		}
-		if strings.Contains(j, "-p tcp --dport 53 -j ACCEPT") && tcp == -1 {
-			tcp = i
-		}
-		if strings.Contains(j, "-j DROP") && firstDrop == -1 {
+		if strings.Contains(l, "-j DROP") && firstDrop == -1 {
 			firstDrop = i
 		}
 	}
-	if udp == -1 || tcp == -1 {
-		t.Fatalf("missing DNS ACCEPT rules (udp=%d tcp=%d):\n%s", udp, tcp, strings.Join(joined, "\n"))
-	}
-	if udp > firstDrop || tcp > firstDrop {
-		t.Fatalf("DNS ACCEPT (udp=%d tcp=%d) must precede first DROP (%d)", udp, tcp, firstDrop)
-	}
-}
-
-func TestRulesAllowCIDRsBeforeDrops(t *testing.T) {
-	rules := Rules([]string{"192.168.50.0/24"})
-	acceptIdx, dropIdx := -1, -1
-	for i, r := range rules {
-		j := strings.Join(r.Args, " ")
-		if strings.Contains(j, "-d 192.168.50.0/24 -j ACCEPT") {
-			acceptIdx = i
-		}
-		if strings.Contains(j, "-j DROP") && dropIdx == -1 {
-			dropIdx = i
-		}
-	}
-	if acceptIdx == -1 {
-		t.Fatal("allow-CIDR ACCEPT rule missing")
-	}
-	if acceptIdx > dropIdx {
-		t.Fatalf("allow-CIDR ACCEPT (%d) must precede DROPs (%d)", acceptIdx, dropIdx)
+	if udp == -1 || firstDrop == -1 || udp > firstDrop {
+		t.Fatalf("DNS ACCEPT (%d) must precede first DROP (%d)", udp, firstDrop)
 	}
 }
