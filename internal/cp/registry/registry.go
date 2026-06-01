@@ -17,6 +17,7 @@ type Node struct {
 	Free   uint32
 	Images []string
 	Class  string
+	Owner  string
 }
 
 type Registry struct {

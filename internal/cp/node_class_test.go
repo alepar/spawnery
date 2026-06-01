@@ -72,6 +72,24 @@ func TestRegisterRecordsNodeClass(t *testing.T) {
 	close(in)
 }
 
+func TestRegisterRecordsNodeOwner(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	in := make(chan *nodev1.NodeMessage, 4)
+	go s.runNode(context.Background(), &capSender{}, recvFromChan(in))
+	in <- &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{Register: &nodev1.Register{NodeId: "n1", MaxSpawns: 1, NodeClass: "self-hosted", NodeOwner: "alice"}}}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if n, ok := reg.Get("n1"); ok && n.Owner == "alice" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("node owner not recorded")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(in)
+}
+
 func TestSpawnCreateTelemetryCarriesNodeClass(t *testing.T) {
 	cap := &captureSink{}
 	s, reg, _ := newTestServerSink(t, cap)

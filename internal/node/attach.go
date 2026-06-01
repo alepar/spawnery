@@ -22,6 +22,7 @@ type Config struct {
 	MaxSpawns  uint32
 	AgentImage string
 	NodeClass  string
+	NodeOwner  string
 }
 
 // session tracks a live relay so SessionClose can cancel it.
@@ -51,7 +52,7 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	a.stream = client.Attach(ctx)
 
 	if err := a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{Register: &nodev1.Register{
-		NodeId: cfg.NodeID, MaxSpawns: cfg.MaxSpawns, AgentImages: []string{cfg.AgentImage}, NodeClass: cfg.NodeClass,
+		NodeId: cfg.NodeID, MaxSpawns: cfg.MaxSpawns, AgentImages: []string{cfg.AgentImage}, NodeClass: cfg.NodeClass, NodeOwner: cfg.NodeOwner,
 	}}}); err != nil {
 		return err
 	}

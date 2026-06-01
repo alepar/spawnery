@@ -92,7 +92,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			if nodeClass == "" {
 				nodeClass = "cloud" // safe default: an unidentified node is assumed restricted
 			}
-			s.reg.Add(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass})
+			s.reg.Add(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: m.Register.NodeOwner})
 		case *nodev1.NodeMessage_Heartbeat:
 			s.reg.Heartbeat(nodeID, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
 		case *nodev1.NodeMessage_Status:
