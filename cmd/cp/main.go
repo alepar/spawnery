@@ -41,6 +41,11 @@ func main() {
 	if err := cp.Seed(ctx, st, tokens, seedApps); err != nil {
 		log.Fatalf("store seed: %v", err)
 	}
+	if n, err := st.Spawns().MarkBootUnreachable(ctx); err != nil {
+		log.Fatalf("boot reconcile: %v", err)
+	} else if n > 0 {
+		log.Printf("boot reconcile: marked %d orphaned spawn(s) unreachable", n)
+	}
 
 	var tel telemetry.Sink = telemetry.NopSink{}
 	if p := env("CP_TELEMETRY", "telemetry/events.jsonl"); p != "" {
