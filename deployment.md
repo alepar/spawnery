@@ -72,16 +72,24 @@ A **spawn** = a two-container pod (sidecar + agent) sharing one network namespac
 | `MEM_LIMIT_MB` | `1024` | per-spawn memory cap (cgroup) on both pod containers. |
 | `CPU_LIMIT` | `1.0` | per-spawn CPU cap (cores; cgroup NanoCPUs). |
 | `PIDS_LIMIT` | `256` | per-spawn pids cap (cgroup, fork-bomb guard). |
-| `CONTAINER_RUNTIME` | _(empty)_ | OCI runtime, e.g. `runsc` (gVisor) for stronger isolation. Empty = Docker default. **gVisor must be installed on the host** (not assumed); opt-in, not fail-closed. |
+| `CONTAINER_RUNTIME` | _(empty)_ | OCI runtime, e.g. `runsc` (gVisor) for stronger isolation. Empty = Docker default. **gVisor must be installed on the host** (not assumed); opt-in, not fail-closed. **When set, the spawnlet runs a startup preflight (smoke container under the runtime) and exits hard if it fails.** |
+| `HARDEN_ROOTFS` | `false` | agent read-only rootfs + `/tmp` tmpfs (default off pending per-agent-image validation). |
+
+Daemon-level (not env): set Docker `"userns-remap"` in `/etc/docker/daemon.json` to remap in-sandbox
+root to an unprivileged host UID. The agent container always runs `--cap-drop=ALL`.
 
 ## 5. The egress floor (cloud nodes) — prereqs & verification
 
-Cloud nodes enforce a per-pod network floor (bead `sp-rpa`): from the pod's netns, **drop**
-cloud-metadata `169.254.0.0/16` + RFC1918 (`10/8`, `172.16/12`, `192.168/16`); allow loopback +
-`EGRESS_ALLOW_CIDRS`; public egress otherwise (so the sidecar reaches `SIDECAR_UPSTREAM`). Applied
-**after the sidecar starts, before the agent starts**, **fail-closed**.
+Cloud nodes enforce a per-pod network floor (`sp-rpa`/`sp-ff2`) on the **host `DOCKER-USER` chain,
+matched by the pod's bridge source IP**: ACCEPT DNS (`:53`) + `EGRESS_ALLOW_CIDRS`, then **drop**
+cloud-metadata `169.254.0.0/16` + RFC1918 (`10/8`,`172.16/12`,`192.168/16`); public egress otherwise
+(so the sidecar reaches `SIDECAR_UPSTREAM`). Applied **after the sidecar, before the agent**,
+**fail-closed**, removed on spawn stop. **Host-side, not in-netns** — the in-netns floor is a no-op
+under gVisor/runsc (netstack bypasses host netfilter); the `DOCKER-USER` rules enforce under both
+runc and runsc (host-verified).
 
-**Host requirements:** `iptables`, `nsenter`, and `CAP_NET_ADMIN`/root for the spawnlet process.
+**Host requirements:** `iptables` + `CAP_NET_ADMIN`/root for the spawnlet process (no `nsenter`
+needed any more — rules go on the host chain).
 
 **Verification (must run on a privileged host — NOT in the dev sandbox):**
 ```bash

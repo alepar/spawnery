@@ -28,13 +28,19 @@ The class is reported by the node at registration and recorded CP-side (`sp-2as`
 
 ## 3. What the floor enforces
 
-### 3.1 Network egress (`sp-rpa`)
-- A **per-pod netns firewall** (host `nsenter` + `iptables`) applied **after the sidecar starts and
-  before the agent starts** — no window where the untrusted agent runs unfirewalled.
-- **Block-floor:** ACCEPT loopback (the agent↔sidecar path) + operator `EGRESS_ALLOW_CIDRS` +
-  **DNS (udp/tcp :53)**; then DROP cloud-metadata `169.254.0.0/16` (incl. `169.254.169.254`) +
-  RFC1918 (`10/8`, `172.16/12`, `192.168/16`); **default-allow** the public internet otherwise (so
-  the sidecar reaches its model upstream, e.g. OpenRouter).
+### 3.1 Network egress (`sp-rpa`, `sp-ff2`)
+- Applied on the **host `DOCKER-USER` chain, matched by the pod's bridge source IP** (the sidecar
+  owns the netns/IP; the agent shares it), **after the sidecar starts and before the agent starts** —
+  no unfirewalled window. Removed on spawn stop (`DOCKER-USER` persists across containers).
+- **Why host-side, not in-netns (`sp-ff2`, host-proven):** the original `nsenter`-in-netns floor is a
+  **no-op under gVisor/runsc** — netstack does TCP/IP in user space + emits raw frames on the veth,
+  so host-kernel netfilter inside the container netns never sees the workload's traffic (0-pkt
+  counters; RFC1918 reachable). Host `DOCKER-USER` rules see the veth egress and enforce under
+  **both runc and runsc** (verified: metadata + RFC1918 dropped, public reachable).
+- **Block-floor (per-pod, `-s <podIP>`):** ACCEPT **DNS (udp/tcp :53)** + operator
+  `EGRESS_ALLOW_CIDRS`; then DROP cloud-metadata `169.254.0.0/16` + RFC1918 (`10/8`,`172.16/12`,
+  `192.168/16`); **default-allow** the public internet otherwise (so the sidecar reaches its model
+  upstream, e.g. OpenRouter). (No loopback rule — agent↔sidecar `127.0.0.1` is never forwarded.)
 - **DNS carve-out (`sp-sac`):** `:53` is allowed *before* the RFC1918 drops because resolvers are
   commonly on RFC1918 (a home-server/LAN or cloud internal DNS) — without it the drops break name
   resolution, and the sidecar must resolve its model host. Residual: DNS-tunneling / internal-DNS
@@ -55,12 +61,21 @@ Per spawn, on **both** pod containers (sidecar + agent), via Docker `HostConfig.
 CP rejects `CreateSpawn` with `ResourceExhausted` once an owner holds `>= CP_MAX_SPAWNS_PER_OWNER`
 (default 5) non-deleted spawns. `0` = unlimited. Prevents one user spawning unboundedly.
 
-### 3.4 Container isolation
+### 3.4 Container isolation (`sp-s9u`)
 - **Baseline:** Docker namespaces (pid/mount/uts/ipc) + the shared netns within a pod (agent joins
   the sidecar's netns so it reaches the sidecar on loopback only).
-- **Optional hardening:** `CONTAINER_RUNTIME=runsc` runs the pod under **gVisor** (syscall
-  interception) for stronger kernel isolation. **Opt-in, not fail-closed** — gVisor must be installed
-  on the host; an absent runtime would break every spawn, so we don't force it.
+- **Capabilities:** the agent container runs with **`--cap-drop=ALL`** (always; shell work needs none).
+- **Read-only rootfs:** `HARDEN_ROOTFS=true` runs the agent with a **read-only rootfs + `/tmp` tmpfs**
+  (writes go to the rw `/app/<data>` mounts). Gated/default-off pending per-agent-image validation
+  (host-verified that ro-rootfs blocks rootfs writes under runsc).
+- **User namespaces:** Docker `userns-remap` is a **daemon-level** setting (`/etc/docker/daemon.json`
+  `"userns-remap": "default"`), not a per-container knob — recommended ops config so in-sandbox root
+  maps to an unprivileged host UID.
+- **Optional gVisor:** `CONTAINER_RUNTIME=runsc` runs the pod under **gVisor** for kernel-attack-
+  surface reduction. **Opt-in, not fail-closed** — gVisor must be installed; an absent runtime would
+  break every spawn. When set, the spawnlet runs a **startup preflight** (smoke container under the
+  runtime) and **exits hard** if it fails — so a misconfigured runsc is caught at boot, not at first
+  spawn. (Adopting runsc requires the host-side egress floor in §3.1 — proven necessary.)
 
 ## 4. Configurables (all knobs)
 
@@ -71,10 +86,14 @@ CP rejects `CreateSpawn` with `ResourceExhausted` once an owner holds `>= CP_MAX
 | `NODE_CLASS` | `cloud` | `cloud` = always enforce floor (non-disableable); `self-hosted` = operator's choice. |
 | `EGRESS_ENFORCE` | `true` | honored only on self-hosted (cloud forces on). `false` → unrestricted egress (loud warning). |
 | `EGRESS_ALLOW_CIDRS` | _(empty)_ | extra CIDRs ACCEPTed before the drops (e.g. a LAN model upstream / DNS resolver). |
-| `CONTAINER_RUNTIME` | _(empty)_ | OCI runtime, e.g. `runsc` (gVisor). Empty = Docker default. |
+| `CONTAINER_RUNTIME` | _(empty)_ | OCI runtime, e.g. `runsc` (gVisor). Empty = Docker default. When set, validated by a **startup preflight** — spawnlet exits hard if it can't run a smoke container. |
 | `MEM_LIMIT_MB` | `1024` | per-spawn memory cap. |
 | `CPU_LIMIT` | `1.0` | per-spawn CPU cap (cores). |
 | `PIDS_LIMIT` | `256` | per-spawn pids cap. |
+| `HARDEN_ROOTFS` | `false` | agent read-only rootfs + `/tmp` tmpfs (default off pending per-image validation). |
+
+Daemon-level (not env): set Docker `"userns-remap"` in `/etc/docker/daemon.json` to remap in-sandbox
+root to an unprivileged host UID.
 
 **Control plane:**
 
@@ -118,10 +137,15 @@ No single layer is load-bearing alone — a scanner miss is contained by the flo
     iptables + root). Full DNS *resolution* can't be exercised where outbound DNS is environmentally
     blocked — the IP-based check + the unit test cover the floor regardless.
   - **Cgroup limits:** Docker applies `Memory`/`NanoCpus`/`PidsLimit`; kernel cgroup-v2
-    `memory.max`/`pids.max`/`cpu.max` match the configured values exactly (verified by inspect +
-    reading the container cgroup).
-- **Still verify-on-host:** **gVisor** (`CONTAINER_RUNTIME=runsc`) isolation — needs a host with
-  `runsc` installed (not present in the dev sandbox).
+    `memory.max`/`pids.max`/`cpu.max` match the configured values exactly.
+  - **gVisor + the host floor (`runsc` installed, `release-20260525.0`):** the **in-netns floor is a
+    proven no-op under runsc** (0-pkt counters, RFC1918 reachable); the **host `DOCKER-USER` floor
+    enforces under runsc** (metadata + RFC1918 dropped, public reachable) — the shipped
+    `HostFloorApplier` `egress_e2e` PASSES as root. Hardening verified under runsc: `--cap-drop=ALL`,
+    `--read-only` blocks rootfs writes (`/tmp` tmpfs writable), and a `true` smoke (the preflight) runs.
+- **Still verify-on-host:** a **full real spawn** (goose agent + sidecar) under `runsc` end-to-end
+  (image-compat sweep, per the gVisor research) — the primitives are verified; the composed pod is
+  not yet. Production gVisor at fleet scale (Phase 2 rollout) and microVMs (Phase 3) remain ahead.
 
 ## 8. Known gaps / roadmap
 
