@@ -97,3 +97,193 @@ func (r *spawnRepo) ListByOwner(ctx context.Context, ownerID string) ([]Spawn, e
 		Order("last_used_at DESC").Scan(ctx)
 	return out, err
 }
+
+// guardStatus runs a status-guarded UPDATE on spawns; rowcount=0 -> ErrConflict.
+// The set closure must add ONLY .Set(...) clauses; the id + status WHERE is owned by guardStatus.
+func (r *spawnRepo) guardStatus(ctx context.Context, id string, from []Status, set func(*bun.UpdateQuery) *bun.UpdateQuery) error {
+	q := r.db.NewUpdate().Model((*Spawn)(nil)).Where("id = ?", id).Where("status IN (?)", bun.In(from))
+	res, err := set(q).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+// endLiveContainer ends the spawn's current live container (if any). Idempotent.
+func (r *spawnRepo) endLiveContainer(ctx context.Context, id string, p Phase, ts int64) error {
+	_, err := r.db.NewUpdate().Model((*Container)(nil)).
+		Set("ended_at = ?", ts).Set("phase = ?", p).
+		Where("spawn_id = ? AND ended_at IS NULL", id).Exec(ctx)
+	return err
+}
+
+func (r *spawnRepo) maxGen(ctx context.Context, id string) (int64, error) {
+	var hi sql.NullInt64
+	err := r.db.NewSelect().Model((*Container)(nil)).
+		ColumnExpr("MAX(generation)").Where("spawn_id = ?", id).Scan(ctx, &hi)
+	return hi.Int64, err
+}
+
+// lastUsedTS reads the spawn's last_used_at — the store's episode-bookkeeping clock (the store does
+// not read the wall clock; the CP passes real timestamps via Touch at higher-level call sites).
+func (r *spawnRepo) lastUsedTS(ctx context.Context, id string) (int64, error) {
+	var ts int64
+	err := r.db.NewSelect().Model((*Spawn)(nil)).ColumnExpr("last_used_at").Where("id = ?", id).Scan(ctx, &ts)
+	return ts, err
+}
+
+// ClaimStarting (caller wraps in WithTx): (1) guard spawn->starting WHERE status IN(from);
+// (2) end the old live container; (3) insert a NEW live container at gen=max+1.
+func (r *spawnRepo) ClaimStarting(ctx context.Context, id string, from []Status) (int64, error) {
+	if err := r.guardStatus(ctx, id, from, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		return q.Set("status = ?", Starting)
+	}); err != nil {
+		return 0, err
+	}
+	ts, err := r.lastUsedTS(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	if err := r.endLiveContainer(ctx, id, PhaseLost, ts); err != nil {
+		return 0, err
+	}
+	hi, err := r.maxGen(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	newGen := hi + 1
+	c := Container{SpawnID: id, Generation: newGen, NodeID: "", Phase: PhaseStarting, StartedAt: ts}
+	if _, err := r.db.NewInsert().Model(&c).Exec(ctx); err != nil {
+		return 0, err // a uniq_live_container violation here is a backstop bug, surfaced loudly
+	}
+	return newGen, nil
+}
+
+func (r *spawnRepo) SetActive(ctx context.Context, id string, gen int64) error {
+	if err := r.guardStatus(ctx, id, []Status{Starting}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		return q.Set("status = ?", Active)
+	}); err != nil {
+		return err
+	}
+	return r.setContainerPhase(ctx, id, gen, PhaseActive)
+}
+
+func (r *spawnRepo) SetSuspending(ctx context.Context, id string, gen int64) error {
+	if err := r.guardContainerGen(ctx, id, gen); err != nil {
+		return err
+	}
+	if err := r.guardStatus(ctx, id, []Status{Active}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		return q.Set("status = ?", Suspending)
+	}); err != nil {
+		return err
+	}
+	return r.setContainerPhase(ctx, id, gen, PhaseSuspending)
+}
+
+func (r *spawnRepo) SetSuspended(ctx context.Context, id string, gen int64) error {
+	if err := r.guardContainerGen(ctx, id, gen); err != nil {
+		return err
+	}
+	if err := r.guardStatus(ctx, id, []Status{Suspending}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		return q.Set("status = ?", Suspended).Set("suspended_at = last_used_at")
+	}); err != nil {
+		return err
+	}
+	ts, err := r.lastUsedTS(ctx, id)
+	if err != nil {
+		return err
+	}
+	return r.endLiveContainer(ctx, id, PhaseStopped, ts)
+}
+
+func (r *spawnRepo) SetError(ctx context.Context, id string) error {
+	if err := r.guardStatus(ctx, id, []Status{Starting, Active, Suspending, Unreachable}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		return q.Set("status = ?", Errored)
+	}); err != nil {
+		return err
+	}
+	ts, err := r.lastUsedTS(ctx, id)
+	if err != nil {
+		return err
+	}
+	return r.endLiveContainer(ctx, id, PhaseLost, ts)
+}
+
+func (r *spawnRepo) MarkUnreachable(ctx context.Context, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("status = ?", Unreachable).
+		Where("id IN (?)", bun.In(ids)).Where("status IN (?)", bun.In([]Status{Starting, Active})).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	// count = spawns newly transitioned to unreachable (already-unreachable/suspended/etc. ids are excluded), not total-now-unreachable.
+	return int(n), nil // live container row is intentionally KEPT (adopt arm needs it)
+}
+
+func (r *spawnRepo) MarkRecovered(ctx context.Context, id string) error {
+	_, err := r.db.NewUpdate().Model((*Spawn)(nil)).Set("recovered = ?", true).Where("id = ?", id).Exec(ctx)
+	return err
+}
+
+func (r *spawnRepo) Touch(ctx context.Context, id string, ts int64) error {
+	_, err := r.db.NewUpdate().Model((*Spawn)(nil)).Set("last_used_at = ?", ts).Where("id = ?", id).Exec(ctx)
+	return err
+}
+
+func (r *spawnRepo) MarkDeleted(ctx context.Context, id string, ts int64) error {
+	if err := r.guardStatus(ctx, id, []Status{Active, Suspended, Unreachable, Errored}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		return q.Set("status = ?", Deleted).Set("deleted_at = ?", ts)
+	}); err != nil {
+		return err
+	}
+	return r.endLiveContainer(ctx, id, PhaseLost, ts)
+}
+
+func (r *spawnRepo) EndContainer(ctx context.Context, id string, gen int64, p Phase) error {
+	_, err := r.db.NewUpdate().Model((*Container)(nil)).
+		Set("ended_at = last_used_at").Set("phase = ?", p).
+		Where("spawn_id = ? AND generation = ? AND ended_at IS NULL", id, gen).Exec(ctx)
+	return err
+}
+
+func (r *spawnRepo) SetMountMarker(ctx context.Context, id, mount, marker string) error {
+	_, err := r.db.NewUpdate().Model((*Mount)(nil)).
+		Set("persist_marker = ?", marker).
+		Where("spawn_id = ? AND name = ?", id, mount).Exec(ctx)
+	return err
+}
+
+// setContainerPhase updates the (id, gen) live container's phase; rowcount=0 -> ErrConflict (stale gen).
+func (r *spawnRepo) setContainerPhase(ctx context.Context, id string, gen int64, p Phase) error {
+	res, err := r.db.NewUpdate().Model((*Container)(nil)).
+		Set("phase = ?", p).
+		Where("spawn_id = ? AND generation = ? AND ended_at IS NULL", id, gen).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+// guardContainerGen verifies (id, gen) is the current live container; else ErrConflict.
+func (r *spawnRepo) guardContainerGen(ctx context.Context, id string, gen int64) error {
+	n, err := r.db.NewSelect().Model((*Container)(nil)).
+		Where("spawn_id = ? AND generation = ? AND ended_at IS NULL", id, gen).Count(ctx)
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrConflict
+	}
+	return nil
+}
