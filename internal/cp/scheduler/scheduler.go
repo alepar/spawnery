@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/google/uuid"
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/registry"
@@ -42,14 +41,13 @@ func (s *Scheduler) OnStatus(spawnID string, phase nodev1.SpawnPhase) {
 	}
 }
 
-// Create picks a node, starts the spawn, and waits for ACTIVE. Returns the
-// CP-assigned spawn_id and the chosen node id.
-func (s *Scheduler) Create(ctx context.Context, owner, appID, appRef, model string) (string, string, error) {
+// Provision picks a node, sends StartSpawn for the (already-minted) spawn id, waits for ACTIVE,
+// and binds the route. Returns the chosen node id. The caller owns id-minting + persistence.
+func (s *Scheduler) Provision(ctx context.Context, id, appRef, model string) (string, error) {
 	n := s.reg.Pick()
 	if n == nil {
-		return "", "", connect.NewError(connect.CodeResourceExhausted, errors.New("no node with capacity"))
+		return "", connect.NewError(connect.CodeResourceExhausted, errors.New("no node with capacity"))
 	}
-	id := uuid.NewString()
 	ch := make(chan nodev1.SpawnPhase, 1)
 	s.mu.Lock()
 	s.pending[id] = ch
@@ -59,19 +57,18 @@ func (s *Scheduler) Create(ctx context.Context, owner, appID, appRef, model stri
 	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Start{Start: &nodev1.StartSpawn{
 		SpawnId: id, AppRef: appRef, Model: model,
 	}}}); err != nil {
-		return "", "", connect.NewError(connect.CodeUnavailable, err)
+		return "", connect.NewError(connect.CodeUnavailable, err)
 	}
-
 	select {
 	case ph := <-ch:
 		if ph != nodev1.SpawnPhase_ACTIVE {
-			return "", "", connect.NewError(connect.CodeInternal, errors.New("spawn failed to start"))
+			return "", connect.NewError(connect.CodeInternal, errors.New("spawn failed to start"))
 		}
-		s.rt.Bind(id, n.ID, owner, n.Sender)
-		return id, n.ID, nil
+		s.rt.Bind(id, n.ID, n.Sender)
+		return n.ID, nil
 	case <-time.After(s.timeout):
-		return "", "", connect.NewError(connect.CodeDeadlineExceeded, errors.New("spawn start timed out"))
+		return "", connect.NewError(connect.CodeDeadlineExceeded, errors.New("spawn start timed out"))
 	case <-ctx.Done():
-		return "", "", ctx.Err()
+		return "", ctx.Err()
 	}
 }

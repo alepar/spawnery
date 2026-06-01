@@ -25,9 +25,9 @@ import (
 	"spawnery/gen/node/v1/nodev1connect"
 	"spawnery/internal/acp"
 	"spawnery/internal/cp"
-	"spawnery/internal/cp/apps"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
+	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/scheduler"
 	"spawnery/internal/cp/telemetry"
@@ -66,7 +66,16 @@ func TestCPEndToEndStub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := cp.NewServer(reg, rtr, sched, apps.New(map[string]string{"secret-app": appRef}), tel)
+	st, err := store.Open(context.Background(), store.Config{Driver: "sqlite", DSN: "file:cpe2e?mode=memory&cache=shared&_pragma=foreign_keys(1)"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := cp.Seed(context.Background(), st, map[string]string{"dev-token": "alice"},
+		[]cp.AppSeed{{ID: "secret-app", Ref: appRef, Version: "1.0.0", Mounts: []string{"main"}}}); err != nil {
+		t.Fatal(err)
+	}
+	srv := cp.NewServer(reg, rtr, sched, st, tel)
 
 	mux := http.NewServeMux()
 	mux.Handle(nodev1connect.NewNodeServiceHandler(srv))

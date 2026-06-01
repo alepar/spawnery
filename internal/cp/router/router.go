@@ -15,7 +15,6 @@ type ClientSender interface{ Send([]byte) error }
 
 type route struct {
 	nodeID string
-	owner  string
 	node   registry.NodeSender
 	client ClientSender
 	done   chan struct{} // closed when the route is dropped (stop or node evict)
@@ -28,21 +27,11 @@ type Router struct {
 
 func New() *Router { return &Router{m: map[string]*route{}} }
 
-// Bind records which node hosts a spawn and its owner (after StartSpawn ACTIVE).
-func (r *Router) Bind(spawnID, nodeID, owner string, node registry.NodeSender) {
+// Bind records which node hosts a spawn (after StartSpawn ACTIVE).
+func (r *Router) Bind(spawnID, nodeID string, node registry.NodeSender) {
 	r.mu.Lock()
-	r.m[spawnID] = &route{nodeID: nodeID, owner: owner, node: node, done: make(chan struct{})}
+	r.m[spawnID] = &route{nodeID: nodeID, node: node, done: make(chan struct{})}
 	r.mu.Unlock()
-}
-
-func (r *Router) Owner(spawnID string) (string, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	rt, ok := r.m[spawnID]
-	if !ok {
-		return "", false
-	}
-	return rt.owner, true
 }
 
 // AttachClient binds a live client stream and tells the node to open the relay.

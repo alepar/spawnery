@@ -14,14 +14,10 @@ type fakeClient struct{ got [][]byte }
 
 func (f *fakeClient) Send(b []byte) error { f.got = append(f.got, append([]byte(nil), b...)); return nil }
 
-func TestRouteBothWaysAndOwnership(t *testing.T) {
+func TestRouteBothWays(t *testing.T) {
 	r := New()
 	node := &fakeNode{}
-	r.Bind("sp1", "n1", "alice", node)
-
-	if o, _ := r.Owner("sp1"); o != "alice" {
-		t.Fatalf("owner: %q", o)
-	}
+	r.Bind("sp1", "n1", node)
 
 	cl := &fakeClient{}
 	done, err := r.AttachClient("sp1", cl)

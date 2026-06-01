@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -14,11 +15,11 @@ import (
 	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/gen/node/v1/nodev1connect"
 	"spawnery/internal/cp"
-	"spawnery/internal/cp/apps"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/scheduler"
+	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 )
 
@@ -26,10 +27,25 @@ func main() {
 	reg := registry.New()
 	rt := router.New()
 	sched := scheduler.New(reg, rt, 60*time.Second)
-	appMap := apps.New(map[string]string{
-		"secret-app": "examples/secret-app",
-	})
-	authn := auth.New(parseTokens(env("CP_DEV_TOKENS", "dev-token=dev")))
+
+	ctx := context.Background()
+	tokens := parseTokens(env("CP_DEV_TOKENS", "dev-token=dev"))
+	authn := auth.New(tokens)
+
+	st, err := store.Open(ctx, store.Config{Driver: "sqlite", DSN: env("CP_STORE_DSN", "file:cp.db?_pragma=busy_timeout(5000)")})
+	if err != nil {
+		log.Fatalf("store open: %v", err)
+	}
+	defer st.Close()
+	seedApps := []cp.AppSeed{{ID: "secret-app", Ref: "examples/secret-app", Version: "1.0.0", Mounts: []string{"main"}}}
+	if err := cp.Seed(ctx, st, tokens, seedApps); err != nil {
+		log.Fatalf("store seed: %v", err)
+	}
+	if n, err := st.Spawns().MarkBootUnreachable(ctx); err != nil {
+		log.Fatalf("boot reconcile: %v", err)
+	} else if n > 0 {
+		log.Printf("boot reconcile: marked %d orphaned spawn(s) unreachable", n)
+	}
 
 	var tel telemetry.Sink = telemetry.NopSink{}
 	if p := env("CP_TELEMETRY", "telemetry/events.jsonl"); p != "" {
@@ -43,7 +59,7 @@ func main() {
 		}
 	}
 
-	srv := cp.NewServer(reg, rt, sched, appMap, tel)
+	srv := cp.NewServer(reg, rt, sched, st, tel)
 
 	mux := http.NewServeMux()
 	mux.Handle(nodev1connect.NewNodeServiceHandler(srv)) // node side: no auth (internal nodes)

@@ -41,8 +41,8 @@ func (s *Server) HandleWS(authn *auth.Auth) http.HandlerFunc {
 			conn.Close(websocket.StatusPolicyViolation, "unauthenticated")
 			return
 		}
-		rtOwner, ok := s.rt.Owner(bind.SpawnID)
-		if !ok || rtOwner != owner {
+		sp, err := s.st.Spawns().Get(ctx, bind.SpawnID)
+		if err != nil || sp.OwnerID != owner {
 			conn.Close(websocket.StatusPolicyViolation, "unknown or foreign spawn")
 			return
 		}

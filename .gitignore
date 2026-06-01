@@ -2,6 +2,7 @@
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
+cp.db*
 .beads-credential-key
 
 /bin/

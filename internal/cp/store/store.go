@@ -50,6 +50,7 @@ type SpawnRepo interface {
 	SetError(ctx context.Context, id string) error
 	EndContainer(ctx context.Context, id string, gen int64, p Phase) error
 	MarkUnreachable(ctx context.Context, ids []string) (int, error)
+	MarkBootUnreachable(ctx context.Context) (int, error)
 	MarkRecovered(ctx context.Context, id string) error
 	Touch(ctx context.Context, id string, ts int64) error
 	MarkDeleted(ctx context.Context, id string, ts int64) error
