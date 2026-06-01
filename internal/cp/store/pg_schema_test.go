@@ -29,16 +29,16 @@ func TestPostgresSchemaSoundness(t *testing.T) {
 	defer st.Close()
 	ctx := context.Background()
 
-	if err := st.Apps().Upsert(ctx, App{ID: "a", CreatedAt: 1}); err != nil {
+	if err := st.Apps().Upsert(ctx, App{ID: "a", Visibility: "public", Listed: true, CreatedAt: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Apps().UpsertVersion(ctx,
-		AppVersion{AppID: "a", Version: "1", Ref: "r", Reviewed: true, CreatedAt: 2}, nil); err != nil {
+		AppVersion{AppID: "a", Version: "1", Ref: "r", Tier: TierReviewed, CreatedAt: 2}, nil); err != nil {
 		t.Fatal(err)
 	}
 	v, err := st.Apps().GetVersion(ctx, "a", "1")
-	if err != nil || v.Reviewed != true {
-		t.Fatalf("bool round-trip: v=%+v err=%v", v, err)
+	if err != nil || v.Tier != TierReviewed {
+		t.Fatalf("tier round-trip: v=%+v err=%v", v, err)
 	}
 	if err := st.Owners().Upsert(ctx, Owner{ID: "o", Email: "e1", CreatedAt: 1}); err != nil {
 		t.Fatal(err)

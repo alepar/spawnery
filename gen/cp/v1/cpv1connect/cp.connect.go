@@ -38,6 +38,10 @@ const (
 	SpawnServiceCreateSpawnProcedure = "/cp.v1.SpawnService/CreateSpawn"
 	// SpawnServiceListSpawnsProcedure is the fully-qualified name of the SpawnService's ListSpawns RPC.
 	SpawnServiceListSpawnsProcedure = "/cp.v1.SpawnService/ListSpawns"
+	// SpawnServiceListAppsProcedure is the fully-qualified name of the SpawnService's ListApps RPC.
+	SpawnServiceListAppsProcedure = "/cp.v1.SpawnService/ListApps"
+	// SpawnServiceGetAppProcedure is the fully-qualified name of the SpawnService's GetApp RPC.
+	SpawnServiceGetAppProcedure = "/cp.v1.SpawnService/GetApp"
 	// SpawnServiceSessionProcedure is the fully-qualified name of the SpawnService's Session RPC.
 	SpawnServiceSessionProcedure = "/cp.v1.SpawnService/Session"
 	// SpawnServiceSuspendSpawnProcedure is the fully-qualified name of the SpawnService's SuspendSpawn
@@ -61,6 +65,8 @@ var (
 	spawnServiceServiceDescriptor             = v1.File_cp_v1_cp_proto.Services().ByName("SpawnService")
 	spawnServiceCreateSpawnMethodDescriptor   = spawnServiceServiceDescriptor.Methods().ByName("CreateSpawn")
 	spawnServiceListSpawnsMethodDescriptor    = spawnServiceServiceDescriptor.Methods().ByName("ListSpawns")
+	spawnServiceListAppsMethodDescriptor      = spawnServiceServiceDescriptor.Methods().ByName("ListApps")
+	spawnServiceGetAppMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("GetApp")
 	spawnServiceSessionMethodDescriptor       = spawnServiceServiceDescriptor.Methods().ByName("Session")
 	spawnServiceSuspendSpawnMethodDescriptor  = spawnServiceServiceDescriptor.Methods().ByName("SuspendSpawn")
 	spawnServiceResumeSpawnMethodDescriptor   = spawnServiceServiceDescriptor.Methods().ByName("ResumeSpawn")
@@ -73,6 +79,8 @@ var (
 type SpawnServiceClient interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
 	ListSpawns(context.Context, *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error)
+	ListApps(context.Context, *connect.Request[v1.ListAppsRequest]) (*connect.Response[v1.ListAppsResponse], error)
+	GetApp(context.Context, *connect.Request[v1.GetAppRequest]) (*connect.Response[v1.GetAppResponse], error)
 	Session(context.Context) *connect.BidiStreamForClient[v1.Frame, v1.Frame]
 	SuspendSpawn(context.Context, *connect.Request[v1.SuspendSpawnRequest]) (*connect.Response[v1.SuspendSpawnResponse], error)
 	ResumeSpawn(context.Context, *connect.Request[v1.ResumeSpawnRequest]) (*connect.Response[v1.ResumeSpawnResponse], error)
@@ -101,6 +109,18 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			httpClient,
 			baseURL+SpawnServiceListSpawnsProcedure,
 			connect.WithSchema(spawnServiceListSpawnsMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		listApps: connect.NewClient[v1.ListAppsRequest, v1.ListAppsResponse](
+			httpClient,
+			baseURL+SpawnServiceListAppsProcedure,
+			connect.WithSchema(spawnServiceListAppsMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		getApp: connect.NewClient[v1.GetAppRequest, v1.GetAppResponse](
+			httpClient,
+			baseURL+SpawnServiceGetAppProcedure,
+			connect.WithSchema(spawnServiceGetAppMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
 		session: connect.NewClient[v1.Frame, v1.Frame](
@@ -146,6 +166,8 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 type spawnServiceClient struct {
 	createSpawn   *connect.Client[v1.CreateSpawnRequest, v1.CreateSpawnResponse]
 	listSpawns    *connect.Client[v1.ListSpawnsRequest, v1.ListSpawnsResponse]
+	listApps      *connect.Client[v1.ListAppsRequest, v1.ListAppsResponse]
+	getApp        *connect.Client[v1.GetAppRequest, v1.GetAppResponse]
 	session       *connect.Client[v1.Frame, v1.Frame]
 	suspendSpawn  *connect.Client[v1.SuspendSpawnRequest, v1.SuspendSpawnResponse]
 	resumeSpawn   *connect.Client[v1.ResumeSpawnRequest, v1.ResumeSpawnResponse]
@@ -162,6 +184,16 @@ func (c *spawnServiceClient) CreateSpawn(ctx context.Context, req *connect.Reque
 // ListSpawns calls cp.v1.SpawnService.ListSpawns.
 func (c *spawnServiceClient) ListSpawns(ctx context.Context, req *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error) {
 	return c.listSpawns.CallUnary(ctx, req)
+}
+
+// ListApps calls cp.v1.SpawnService.ListApps.
+func (c *spawnServiceClient) ListApps(ctx context.Context, req *connect.Request[v1.ListAppsRequest]) (*connect.Response[v1.ListAppsResponse], error) {
+	return c.listApps.CallUnary(ctx, req)
+}
+
+// GetApp calls cp.v1.SpawnService.GetApp.
+func (c *spawnServiceClient) GetApp(ctx context.Context, req *connect.Request[v1.GetAppRequest]) (*connect.Response[v1.GetAppResponse], error) {
+	return c.getApp.CallUnary(ctx, req)
 }
 
 // Session calls cp.v1.SpawnService.Session.
@@ -198,6 +230,8 @@ func (c *spawnServiceClient) StopSpawn(ctx context.Context, req *connect.Request
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
 	ListSpawns(context.Context, *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error)
+	ListApps(context.Context, *connect.Request[v1.ListAppsRequest]) (*connect.Response[v1.ListAppsResponse], error)
+	GetApp(context.Context, *connect.Request[v1.GetAppRequest]) (*connect.Response[v1.GetAppResponse], error)
 	Session(context.Context, *connect.BidiStream[v1.Frame, v1.Frame]) error
 	SuspendSpawn(context.Context, *connect.Request[v1.SuspendSpawnRequest]) (*connect.Response[v1.SuspendSpawnResponse], error)
 	ResumeSpawn(context.Context, *connect.Request[v1.ResumeSpawnRequest]) (*connect.Response[v1.ResumeSpawnResponse], error)
@@ -222,6 +256,18 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		SpawnServiceListSpawnsProcedure,
 		svc.ListSpawns,
 		connect.WithSchema(spawnServiceListSpawnsMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceListAppsHandler := connect.NewUnaryHandler(
+		SpawnServiceListAppsProcedure,
+		svc.ListApps,
+		connect.WithSchema(spawnServiceListAppsMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceGetAppHandler := connect.NewUnaryHandler(
+		SpawnServiceGetAppProcedure,
+		svc.GetApp,
+		connect.WithSchema(spawnServiceGetAppMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceSessionHandler := connect.NewBidiStreamHandler(
@@ -266,6 +312,10 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceCreateSpawnHandler.ServeHTTP(w, r)
 		case SpawnServiceListSpawnsProcedure:
 			spawnServiceListSpawnsHandler.ServeHTTP(w, r)
+		case SpawnServiceListAppsProcedure:
+			spawnServiceListAppsHandler.ServeHTTP(w, r)
+		case SpawnServiceGetAppProcedure:
+			spawnServiceGetAppHandler.ServeHTTP(w, r)
 		case SpawnServiceSessionProcedure:
 			spawnServiceSessionHandler.ServeHTTP(w, r)
 		case SpawnServiceSuspendSpawnProcedure:
@@ -293,6 +343,14 @@ func (UnimplementedSpawnServiceHandler) CreateSpawn(context.Context, *connect.Re
 
 func (UnimplementedSpawnServiceHandler) ListSpawns(context.Context, *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListSpawns is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ListApps(context.Context, *connect.Request[v1.ListAppsRequest]) (*connect.Response[v1.ListAppsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListApps is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetApp(context.Context, *connect.Request[v1.GetAppRequest]) (*connect.Response[v1.GetAppResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetApp is not implemented"))
 }
 
 func (UnimplementedSpawnServiceHandler) Session(context.Context, *connect.BidiStream[v1.Frame, v1.Frame]) error {

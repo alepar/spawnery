@@ -29,10 +29,21 @@ type Owner struct {
 	CreatedAt     int64  `bun:"created_at,notnull"`
 }
 
+type Tier string // marketplace trust tier (E5 §5)
+const (
+	TierUnverified Tier = "unverified"
+	TierScanned    Tier = "scanned"
+	TierReviewed   Tier = "reviewed"
+)
+
 type App struct {
 	bun.BaseModel `bun:"table:apps,alias:a"`
 	ID            string `bun:"id,pk"`
 	DisplayName   string `bun:"display_name"`
+	Summary       string `bun:"summary,notnull"`
+	Tags          string `bun:"tags,notnull"`
+	Visibility    string `bun:"visibility,notnull"`
+	Listed        bool   `bun:"listed,notnull"`
 	CreatedAt     int64  `bun:"created_at,notnull"`
 }
 
@@ -41,7 +52,7 @@ type AppVersion struct {
 	AppID         string `bun:"app_id,pk"`
 	Version       string `bun:"version,pk"`
 	Ref           string `bun:"ref,notnull"`
-	Reviewed      bool   `bun:"reviewed,notnull"`
+	Tier          Tier   `bun:"tier,notnull"`
 	CreatedAt     int64  `bun:"created_at,notnull"`
 }
 

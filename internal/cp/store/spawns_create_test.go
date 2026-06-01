@@ -12,11 +12,11 @@ func seedAppAndOwner(t *testing.T, st Store) {
 	if err := st.Owners().Upsert(ctx, Owner{ID: "alice", CreatedAt: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Apps().Upsert(ctx, App{ID: "spawnery/secret", CreatedAt: 1}); err != nil {
+	if err := st.Apps().Upsert(ctx, App{ID: "spawnery/secret", Visibility: "public", Listed: true, CreatedAt: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Apps().UpsertVersion(ctx,
-		AppVersion{AppID: "spawnery/secret", Version: "1.0.0", Ref: "ref1", Reviewed: true, CreatedAt: 1},
+		AppVersion{AppID: "spawnery/secret", Version: "1.0.0", Ref: "ref1", Tier: TierReviewed, CreatedAt: 1},
 		[]MountDecl{{AppID: "spawnery/secret", Version: "1.0.0", Name: "main", Required: true}}); err != nil {
 		t.Fatal(err)
 	}
