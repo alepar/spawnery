@@ -6,10 +6,10 @@ import (
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
-	"spawnery/internal/cp/apps"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/scheduler"
+	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 )
 
@@ -17,16 +17,21 @@ type capSender struct{ sent []*nodev1.CPMessage }
 
 func (c *capSender) Send(m *nodev1.CPMessage) error { c.sent = append(c.sent, m); return nil }
 
-func newTestServer() (*Server, *registry.Registry, *router.Router) {
+func newTestServer(t *testing.T) (*Server, *registry.Registry, *router.Router) {
 	reg := registry.New()
 	rt := router.New()
 	sc := scheduler.New(reg, rt, time.Second)
-	s := NewServer(reg, rt, sc, apps.New(map[string]string{"secret-app": "examples/secret-app"}), telemetry.NopSink{})
+	st := store.NewTestStore(t)
+	if err := Seed(context.Background(), st, map[string]string{"dev-token": "alice"},
+		[]AppSeed{{ID: "secret-app", Ref: "examples/secret-app", Version: "1.0.0", Mounts: []string{"main"}}}); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(reg, rt, sc, st, telemetry.NopSink{})
 	return s, reg, rt
 }
 
 func TestRunNodeRegistersAndRoutesFrames(t *testing.T) {
-	s, reg, rt := newTestServer()
+	s, reg, rt := newTestServer(t)
 	in := make(chan *nodev1.NodeMessage, 8)
 	recv := func() (*nodev1.NodeMessage, error) {
 		m, ok := <-in
@@ -50,7 +55,7 @@ func TestRunNodeRegistersAndRoutesFrames(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	rt.Bind("sp1", "n1", "alice", sender)
+	rt.Bind("sp1", "n1", sender)
 	if _, err := rt.AttachClient("sp1", cl); err != nil {
 		t.Fatal(err)
 	}
