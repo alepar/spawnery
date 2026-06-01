@@ -17,7 +17,7 @@ gen: .make/gen
 images: .make/img-sidecar .make/img-stubagent .make/img-goose
 .make/img-sidecar:   deploy/sidecar/Dockerfile   $(GO_SRCS) | .make ; docker build -t spawnery/sidecar:dev   -f $< . && touch $@
 .make/img-stubagent: deploy/stubagent/Dockerfile $(GO_SRCS) | .make ; docker build -t spawnery/stubagent:dev -f $< . && touch $@
-.make/img-goose:     deploy/agent/Dockerfile               | .make ; docker build -t spawnery/goose:dev     -f $< . && touch $@
+.make/img-goose:     deploy/agent/Dockerfile     $(GO_SRCS) | .make ; docker build -t spawnery/goose:dev     -f $< . && touch $@
 
 bin:    ; @mkdir -p bin
 .make:  ; @mkdir -p .make

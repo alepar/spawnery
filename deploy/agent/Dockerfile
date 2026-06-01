@@ -28,11 +28,17 @@ RUN curl -fsSL \
  && chmod +x /usr/local/bin/goose \
  && rm /tmp/goose.tar.gz
 
+FROM golang:1.25 AS gobuild
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -o /acpadapter ./deploy/agent/acpadapter
+
 FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=fetch /usr/local/bin/goose /usr/local/bin/goose
+COPY --from=gobuild /acpadapter /usr/local/bin/acpadapter
 COPY deploy/agent/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 WORKDIR /app
