@@ -2,10 +2,14 @@ package cp
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
+	connect "connectrpc.com/connect"
 	nodev1 "spawnery/gen/node/v1"
+	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/scheduler"
@@ -13,9 +17,28 @@ import (
 	"spawnery/internal/cp/telemetry"
 )
 
-type capSender struct{ sent []*nodev1.CPMessage }
+type capSender struct {
+	mu   sync.Mutex
+	sent []*nodev1.CPMessage
+}
 
-func (c *capSender) Send(m *nodev1.CPMessage) error { c.sent = append(c.sent, m); return nil }
+func (c *capSender) Send(m *nodev1.CPMessage) error {
+	c.mu.Lock()
+	c.sent = append(c.sent, m)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *capSender) firstStart() *nodev1.StartSpawn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range c.sent {
+		if st := m.GetStart(); st != nil {
+			return st
+		}
+	}
+	return nil
+}
 
 func newTestServer(t *testing.T) (*Server, *registry.Registry, *router.Router) {
 	reg := registry.New()
@@ -62,18 +85,73 @@ func TestRunNodeRegistersAndRoutesFrames(t *testing.T) {
 	in <- &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{SpawnId: "sp1", Data: []byte("hi")}}}
 
 	deadline = time.Now().Add(time.Second)
-	for len(cl.got) == 0 {
+	for cl.count() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("node frame never reached client")
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if string(cl.got[0]) != "hi" {
-		t.Fatalf("got %q", cl.got[0])
+	if string(cl.first()) != "hi" {
+		t.Fatalf("got %q", cl.first())
 	}
 	close(in)
 }
 
-type capClient struct{ got [][]byte }
+type capClient struct {
+	mu  sync.Mutex
+	got [][]byte
+}
 
-func (c *capClient) Send(b []byte) error { c.got = append(c.got, append([]byte(nil), b...)); return nil }
+func (c *capClient) Send(b []byte) error {
+	c.mu.Lock()
+	c.got = append(c.got, append([]byte(nil), b...))
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *capClient) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.got)
+}
+
+func (c *capClient) first() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.got) == 0 {
+		return nil
+	}
+	return c.got[0]
+}
+
+func TestCreateSpawnPersistsNodeID(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+
+	sender := &capSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: sender, Max: 1, Free: 1})
+	go func() {
+		for {
+			if st := sender.firstStart(); st != nil {
+				s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ACTIVE)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := resp.Msg.SpawnId
+
+	live, err := s.st.Spawns().LiveContainersByNode(ctx, "n1")
+	if err != nil || len(live) != 1 || live[0].SpawnID != id {
+		t.Fatalf("LiveContainersByNode(n1)=%+v err=%v want [%s]", live, err, id)
+	}
+	got, _ := s.st.Spawns().Get(ctx, id)
+	if got.Status != store.Active {
+		t.Fatalf("status=%v want active", got.Status)
+	}
+}

@@ -43,7 +43,7 @@ type SpawnRepo interface {
 	ListByOwner(ctx context.Context, ownerID string) ([]Spawn, error)
 
 	ClaimStarting(ctx context.Context, id string, from []Status) (newGen int64, err error)
-	SetActive(ctx context.Context, id string, gen int64) error
+	SetActive(ctx context.Context, id, nodeID string, gen int64) error
 	SetSuspending(ctx context.Context, id string, gen int64) error
 	SetMountMarker(ctx context.Context, id, mount, marker string) error
 	SetSuspended(ctx context.Context, id string, gen int64) error

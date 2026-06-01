@@ -11,9 +11,9 @@ func TestMarkBootUnreachable(t *testing.T) {
 	ctx := context.Background()
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("a"), nil) }) // starting
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("b"), nil) })
-	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "b", 1) }) // active
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "b", "n", 1) }) // active
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("c"), nil) })
-	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "c", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "c", "n", 1) })
 	inTx(t, st, func(tx Store) error { return tx.Spawns().SetSuspending(ctx, "c", 1) })
 	inTx(t, st, func(tx Store) error { return tx.Spawns().SetSuspended(ctx, "c", 1) }) // suspended
 

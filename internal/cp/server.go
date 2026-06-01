@@ -6,6 +6,7 @@ package cp
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -139,11 +140,21 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, mounts) }); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	if _, err := s.sched.Provision(ctx, spawnID, ver.Ref, req.Msg.Model); err != nil {
-		_ = s.st.Spawns().SetError(ctx, spawnID)
+	nodeID, err := s.sched.Provision(ctx, spawnID, ver.Ref, req.Msg.Model)
+	if err != nil {
+		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+			log.Printf("CreateSpawn %s: SetError after provision failure also failed: %v", spawnID, serr)
+		}
 		return nil, err
 	}
-	if err := s.st.Spawns().SetActive(ctx, spawnID, 1); err != nil {
+	if err := s.st.Spawns().SetActive(ctx, spawnID, nodeID, 1); err != nil {
+		// Orphan-window compensation: the node container is live + the route is bound, but we
+		// couldn't record active — tear it down so we don't leak a container/route.
+		s.rt.StopOnNode(spawnID)
+		s.rt.Drop(spawnID)
+		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+			log.Printf("CreateSpawn %s: SetError after SetActive failure also failed: %v", spawnID, serr)
+		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&cpv1.CreateSpawnResponse{SpawnId: spawnID}), nil

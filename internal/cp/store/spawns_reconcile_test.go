@@ -10,7 +10,7 @@ func TestReconcileQueries(t *testing.T) {
 	seedAppAndOwner(t, st)
 	ctx := context.Background()
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp1"), nil) })
-	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", "n", 1) })
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Adopt(ctx, "sp1", "nodeA", 1) })
 
 	live, err := st.Spawns().LiveContainersByNode(ctx, "nodeA")
