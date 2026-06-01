@@ -51,6 +51,7 @@ A **spawn** = a two-container pod (sidecar + agent) sharing one network namespac
 | `CP_STORE_DSN` | `file:cp.db?_pragma=busy_timeout(5000)` | sqlite (modernc, pure-Go). For Postgres, open with the `postgres` driver + a `pgx` DSN (the store supports both dialect trees; the CP entrypoint currently hardcodes `Driver: "sqlite"` — wiring a `CP_STORE_DRIVER` is a prod TODO). Migrations (goose) auto-apply on open. |
 | `CP_DEV_TOKENS` | `dev-token=dev` | `token=owner` pairs, comma-separated. **Demo-only stub auth** — replaced by E4 OAuth (`sp-7h6`) in prod. |
 | `CP_TELEMETRY` | `telemetry/events.jsonl` | content-free event log path; empty disables. |
+| `CP_MAX_SPAWNS_PER_OWNER` | `5` | per-user concurrent-spawn cap; `CreateSpawn` → `ResourceExhausted` at/over it. `0` = unlimited. |
 
 ## 4. Node (spawnlet) configuration — env
 
@@ -66,6 +67,10 @@ A **spawn** = a two-container pod (sidecar + agent) sharing one network namespac
 | `OPENROUTER_API_KEY` | _(unset)_ | passed to the sidecar; **secret — never commit** (see §7). |
 | `DATA_ROOT` | `/var/lib/spawnlet/spawns` | per-spawn mount host dirs (Scratch backend today). |
 | `SPAWNLET_ADDR` | `127.0.0.1:9090` | standalone-mode listen addr (ignored in CP-attached mode). |
+| `MEM_LIMIT_MB` | `1024` | per-spawn memory cap (cgroup) on both pod containers. |
+| `CPU_LIMIT` | `1.0` | per-spawn CPU cap (cores; cgroup NanoCPUs). |
+| `PIDS_LIMIT` | `256` | per-spawn pids cap (cgroup, fork-bomb guard). |
+| `CONTAINER_RUNTIME` | _(empty)_ | OCI runtime, e.g. `runsc` (gVisor) for stronger isolation. Empty = Docker default. **gVisor must be installed on the host** (not assumed); opt-in, not fail-closed. |
 
 ## 5. The egress floor (cloud nodes) — prereqs & verification
 
@@ -122,7 +127,9 @@ These are **demo gaps**, not prod-ready — track in beads:
 - **HA:** CP is a single point of failure / relay bandwidth cliff (`sp-9um`).
 - **Storage:** Scratch backend only; managed GitHub/blob storage is E3 (`sp-u53`).
 - **Postgres driver wiring:** the CP entrypoint hardcodes the sqlite driver (the store supports pg).
-- **Isolation/quotas:** plain Docker containers; gVisor-class isolation (`sp-eha`) + cgroup quotas
-  (`sp-ach`) are pending — the egress floor is the first security-floor piece, not the whole floor.
+- **Isolation/quotas:** per-spawn cgroup limits (mem/cpu/pids) + per-user concurrency cap shipped
+  (`sp-ach`); gVisor isolation is available via `CONTAINER_RUNTIME=runsc` but **opt-in and unverified
+  in CI** (needs gVisor on the host). Real cgroup/gVisor enforcement, like the egress floor, must be
+  validated on a privileged node host. The restricted-agent-toolset piece of `sp-eha` is still pending.
 - **Node-class propagation:** the node knows its class; propagating it to the CP for routing/UX is
   in progress.
