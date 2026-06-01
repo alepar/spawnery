@@ -46,6 +46,10 @@ Applied once to the **sidecar container's** netns (the agent shares it). Default
 iptables -A OUTPUT -o lo -j ACCEPT
 # operator escape hatch for a LAN model upstream (EgressAllowCIDRs), inserted BEFORE drops
 iptables -A OUTPUT -d <cidr> -j ACCEPT        # for each configured CIDR (default: none)
+# DNS carve-out (sp-sac) — resolvers are commonly RFC1918; without this the drops below break name
+# resolution (and the sidecar must resolve its model host). Allowed BEFORE the drops.
+iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 # the floor
 iptables -A OUTPUT -d 169.254.0.0/16 -j DROP  # link-local incl. 169.254.169.254 cloud metadata
 iptables -A OUTPUT -d 10.0.0.0/8     -j DROP  # RFC1918
