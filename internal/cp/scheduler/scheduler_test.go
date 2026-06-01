@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,9 +11,26 @@ import (
 	"spawnery/internal/cp/router"
 )
 
-type fakeSender struct{ sent []*nodev1.CPMessage }
+type fakeSender struct {
+	mu   sync.Mutex
+	sent []*nodev1.CPMessage
+}
 
-func (f *fakeSender) Send(m *nodev1.CPMessage) error { f.sent = append(f.sent, m); return nil }
+func (f *fakeSender) Send(m *nodev1.CPMessage) error {
+	f.mu.Lock()
+	f.sent = append(f.sent, m)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeSender) first() *nodev1.CPMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sent) == 0 {
+		return nil
+	}
+	return f.sent[0]
+}
 
 func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 	reg := registry.New()
@@ -24,9 +42,8 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 
 	go func() {
 		for {
-			if len(send.sent) > 0 {
-				id := send.sent[0].GetStart().GetSpawnId()
-				s.OnStatus(id, nodev1.SpawnPhase_ACTIVE)
+			if m := send.first(); m != nil {
+				s.OnStatus(m.GetStart().GetSpawnId(), nodev1.SpawnPhase_ACTIVE)
 				return
 			}
 			time.Sleep(time.Millisecond)
@@ -40,7 +57,7 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 	if nodeID != "n1" {
 		t.Fatalf("provision node=%q", nodeID)
 	}
-	got := send.sent[0].GetStart()
+	got := send.first().GetStart()
 	if got.GetSpawnId() != "sp-test" || got.GetAppRef() != "examples/secret-app" || got.GetModel() != "m" {
 		t.Fatalf("StartSpawn payload wrong: %+v", got)
 	}
