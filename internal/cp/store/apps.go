@@ -14,6 +14,10 @@ func (r *appRepo) Upsert(ctx context.Context, a App) error {
 	_, err := r.db.NewInsert().Model(&a).
 		On("CONFLICT (id) DO UPDATE").
 		Set("display_name = EXCLUDED.display_name").
+		Set("summary = EXCLUDED.summary").
+		Set("tags = EXCLUDED.tags").
+		Set("visibility = EXCLUDED.visibility").
+		Set("listed = EXCLUDED.listed").
 		Exec(ctx)
 	return err
 }
@@ -36,7 +40,7 @@ func (r *appRepo) List(ctx context.Context) ([]App, error) {
 func (r *appRepo) UpsertVersion(ctx context.Context, v AppVersion, mounts []MountDecl) error {
 	if _, err := r.db.NewInsert().Model(&v).
 		On("CONFLICT (app_id, version) DO UPDATE").
-		Set("ref = EXCLUDED.ref").Set("reviewed = EXCLUDED.reviewed").
+		Set("ref = EXCLUDED.ref").Set("tier = EXCLUDED.tier").
 		Exec(ctx); err != nil {
 		return err
 	}
@@ -63,7 +67,7 @@ func (r *appRepo) GetVersion(ctx context.Context, appID, version string) (AppVer
 func (r *appRepo) LatestReviewed(ctx context.Context, appID string) (AppVersion, error) {
 	var v AppVersion
 	err := r.db.NewSelect().Model(&v).
-		Where("app_id = ? AND reviewed = ?", appID, true).
+		Where("app_id = ? AND tier = ?", appID, TierReviewed).
 		Order("created_at DESC").Limit(1).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AppVersion{}, ErrNotFound

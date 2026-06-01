@@ -27,16 +27,16 @@ func TestOwnerUpsertGet(t *testing.T) {
 func TestAppVersionsAndDeclaredMounts(t *testing.T) {
 	st := NewTestStore(t)
 	ctx := context.Background()
-	if err := st.Apps().Upsert(ctx, App{ID: "spawnery/secret", DisplayName: "Secret", CreatedAt: 1}); err != nil {
+	if err := st.Apps().Upsert(ctx, App{ID: "spawnery/secret", DisplayName: "Secret", Visibility: "public", Listed: true, CreatedAt: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Apps().UpsertVersion(ctx,
-		AppVersion{AppID: "spawnery/secret", Version: "1.0.0", Ref: "ref1", Reviewed: true, CreatedAt: 10},
+		AppVersion{AppID: "spawnery/secret", Version: "1.0.0", Ref: "ref1", Tier: TierReviewed, CreatedAt: 10},
 		[]MountDecl{{AppID: "spawnery/secret", Version: "1.0.0", Name: "main", Required: true}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Apps().UpsertVersion(ctx,
-		AppVersion{AppID: "spawnery/secret", Version: "1.1.0", Ref: "ref2", Reviewed: false, CreatedAt: 20}, nil); err != nil {
+		AppVersion{AppID: "spawnery/secret", Version: "1.1.0", Ref: "ref2", Tier: TierUnverified, CreatedAt: 20}, nil); err != nil {
 		t.Fatal(err)
 	}
 	lr, err := st.Apps().LatestReviewed(ctx, "spawnery/secret")
@@ -47,7 +47,7 @@ func TestAppVersionsAndDeclaredMounts(t *testing.T) {
 	if err != nil || len(mounts) != 1 || mounts[0].Name != "main" {
 		t.Fatalf("mounts=%+v err=%v", mounts, err)
 	}
-	if err := st.Apps().Upsert(ctx, App{ID: "noreview", CreatedAt: 1}); err != nil {
+	if err := st.Apps().Upsert(ctx, App{ID: "noreview", Visibility: "public", Listed: true, CreatedAt: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Apps().LatestReviewed(ctx, "noreview"); !errors.Is(err, ErrNotFound) {

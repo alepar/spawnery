@@ -34,8 +34,8 @@ func TestSchemaDriftSqlite(t *testing.T) {
 		}
 	}
 	check("owners", "id", "email", "created_at")
-	check("apps", "id", "display_name", "created_at")
-	check("app_versions", "app_id", "version", "ref", "reviewed", "created_at")
+	check("apps", "id", "display_name", "summary", "tags", "visibility", "listed", "created_at")
+	check("app_versions", "app_id", "version", "ref", "tier", "created_at")
 	check("app_version_mounts", "app_id", "version", "name", "required")
 	check("spawns", "id", "owner_id", "app_id", "app_version", "app_ref", "pinned", "model", "status", "recovered", "created_at", "last_used_at", "suspended_at", "deleted_at")
 	check("spawn_containers", "spawn_id", "generation", "node_id", "phase", "started_at", "ended_at")
@@ -69,7 +69,7 @@ func TestSchemaDriftSqliteTypes(t *testing.T) {
 		{"spawns", "pinned"}:                "INTEGER",
 		{"spawns", "recovered"}:             "INTEGER",
 		{"spawns", "created_at"}:            "INTEGER",
-		{"app_versions", "reviewed"}:        "INTEGER",
+		{"app_versions", "tier"}:            "TEXT",
 		{"spawn_containers", "generation"}:  "INTEGER",
 		{"spawn_containers", "ended_at"}:    "INTEGER",
 	}

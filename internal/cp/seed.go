@@ -31,7 +31,7 @@ func Seed(ctx context.Context, st store.Store, tokens map[string]string, apps []
 		}
 	}
 	for _, a := range apps {
-		if err := st.Apps().Upsert(ctx, store.App{ID: a.ID, DisplayName: a.ID, CreatedAt: now}); err != nil {
+		if err := st.Apps().Upsert(ctx, store.App{ID: a.ID, DisplayName: a.ID, Visibility: "public", Listed: true, CreatedAt: now}); err != nil {
 			return err
 		}
 		decls := make([]store.MountDecl, len(a.Mounts))
@@ -39,7 +39,7 @@ func Seed(ctx context.Context, st store.Store, tokens map[string]string, apps []
 			decls[i] = store.MountDecl{AppID: a.ID, Version: a.Version, Name: name, Required: true}
 		}
 		if err := st.Apps().UpsertVersion(ctx,
-			store.AppVersion{AppID: a.ID, Version: a.Version, Ref: a.Ref, Reviewed: true, CreatedAt: now},
+			store.AppVersion{AppID: a.ID, Version: a.Version, Ref: a.Ref, Tier: store.TierReviewed, CreatedAt: now},
 			decls); err != nil {
 			return err
 		}
