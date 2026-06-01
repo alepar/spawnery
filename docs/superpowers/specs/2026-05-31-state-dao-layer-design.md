@@ -1,332 +1,303 @@
 # Spawnery — Control-Plane State / DAO Layer (Design)
 
 **Bead:** `sp-pc4`
-**Status:** Draft **v2** (post adversarial roast; pending user review)
+**Status:** Draft **v3** (post 2nd adversarial roast — consistency protocol; pending review)
 **Date:** 2026-05-31
 **Supersedes:** the preliminary schema in
 [State/DAO Research Brief](2026-05-31-state-dao-layer-research-brief.md).
-**Depends on:** [Spawn Lifecycle](2026-05-31-spawn-lifecycle-design.md) (status machine + per-mount
-markers), [System Design](2026-05-26-spawnery-system-design.md) §2/§8, and **a hard contracts
-predecessor** `sp-mqj` (§10).
-**Hands off to:** `sp-gd9` (node-side per-mount suspend/resume + idle timer + web UI), **E3**
-(persistent backend; lossless suspend/resume gates on it), **E5** (manifest/catalog).
+**Depends on:** [Spawn Lifecycle](2026-05-31-spawn-lifecycle-design.md) (status machine + the
+consistency protocol §6) and the contracts predecessor **`sp-mqj`** (now incl. **episode generation
+on every message + node inventory on Register/Heartbeat**).
+**Hands off to:** `sp-gd9` (node-side per-mount suspend/resume + generation/inventory + idle), **E3**
+(persistent backend), **E5** (manifest/catalog).
 
-> **v2 changelog (what the roast changed):** mounts are **declared on the app version** at
-> registration (CP never parses a manifest at spawn time) and **chosen in the CreateSpawn request**;
-> `scheduler.Create` is **split** so a pre-minted/existing id can be (re)provisioned; the
-> **WebSocket** entry point is in scope alongside gRPC; **all state transitions are status-guarded**;
-> `Get` **filters deleted** for lifecycle ops; **seed owners from the token map**; the **DB cache is
-> declared authoritative-until-E5**; Postgres ships as a **schema-soundness test**, not a CI stack;
-> a **schema-drift snapshot test** guards Bun-tags-vs-goose-DDL; and the e2e claims are **reworded
-> honestly** (bookkeeping under scratch; lossless gates on E3).
+> **v3 changelog:** added `spawns.generation` + the `unreachable` status; transitions are
+> **claim-in-DB-then-act under a per-spawn lock**; the CP runs **inventory reconciliation** on node
+> (re)connect (adopt / stop-orphan / mark-unreachable) instead of blind flips; added the
+> **`RecreateSpawn`** (user-driven recovery) path; the **node binds CP-sent mounts**; **boolean
+> columns get an explicit per-dialect type**; the Postgres test honesty + the `secret-app`/manifest-id
+> mismatch are resolved.
 
 ---
 
 ## 1. Goal & scope
 
 Replace the CP's ephemeral in-memory maps with a durable, transactional **state layer**, and on it
-implement the **entire CP-side spawn lifecycle**. Today the CP has *no durable record of a spawn*;
-ownership/routing live only in `router.Router`'s in-memory `route`. This layer makes the `spawns`
-table the **CP index** (system design §2) and the source of truth for ownership and lifecycle.
+implement the **entire CP-side spawn lifecycle + the DB↔container consistency protocol**
+([lifecycle §6](2026-05-31-spawn-lifecycle-design.md)). The `spawns` table is the **CP index** and
+the source of truth for **intent + ownership**; the node's Register/Heartbeat **inventory** is ground
+truth for what containers actually run; the CP reconciles them.
 
-**In scope (`sp-pc4`):** the `store` package (schema, migrations, interfaces, Bun impl, hermetic
-tests); the full **CP-side state machine** (status-guarded transitions, boot + node-evict
-reconciliation, idempotent seeding); the lifecycle **RPCs** (`CreateSpawn` rewired, `ListSpawns`,
-`SuspendSpawn`, `ResumeSpawn`, `DeleteSpawn`, `Session`/WS ownership + auto-resume); the
-**CP→node plumbing** (the `Suspend` message, `StartSpawn` mounts, the `SUSPENDED` phase handling).
+**In scope (`sp-pc4`):** the `store` package; the CP-side **state machine** (status-guarded,
+per-spawn-locked, claim-then-act); **inventory reconciliation** (adopt/stop/unreachable);
+**generation fencing** at the CP (drop stale `SpawnStatus`; bump per episode); the lifecycle **RPCs**
+(`CreateSpawn`, `ListSpawns`, `SuspendSpawn`, `ResumeSpawn`, **`RecreateSpawn`**, `DeleteSpawn`,
+`Session`/WS ownership + auto-resume); the CP→node plumbing usage.
 
-**Out of scope (→ `sp-gd9` / E1 / E3):** node-side **per-mount** persist/restore (writes the
-per-mount markers), the idle timer, the web UI, and a persistent storage backend. **Honesty note:**
-until those land, the node's suspend/resume is a **stub teardown** on `storage.Scratch` — the CP
-state machine is real and testable, but **data does not survive a suspend**. Lossless suspend/resume
-gates on E3 + `sp-gd9` (lifecycle §8).
+**Out of scope (→ `sp-gd9`/E1/E3):** node-side per-mount persist/restore + the **server-side backend
+write-fence**, inventory *reporting*, the idle timer, the web UI, the persistent backend. **Honesty
+note:** until those land, suspend/resume is a stub teardown on `Scratch` — the CP state machine +
+reconciliation are real and testable, but **data does not survive a suspend**; lossless gates on E3.
 
-**Stays in-memory:** `registry.Registry`, `router.Router` (live relay), `scheduler` signals, the
-node's `spawnlet.Store`.
+**Stays in-memory:** `registry.Registry`, `router.Router` (live relay; a **projection of `active`
+rows**), `scheduler`, the node's `spawnlet.Store`. **New in-memory:** a per-spawn-id lock table.
 
 ---
 
-## 2. Stack (from the research brief)
+## 2. Stack
 
-**Bun** over **modernc.org/sqlite** (pure-Go, cgo-free, driver name **`"sqlite"`** — *not* mattn's
-`"sqlite3"`) and **PostgreSQL/pgx** (server); **goose** migrations (`//go:embed`, two dialect
-trees); **SQLite `:memory:`** hermetic tests; repos over **`bun.IDB`** with `Store.WithTx`. Opaque
-**TEXT** ids (spawns: **uuidv7** via `uuid.NewV7()`, available in google/uuid ≥ v1.6.0 — bump from
-the current `uuid.NewString()`/v4), **INTEGER unix-seconds** timestamps, status **TEXT + CHECK**.
+**Bun** over **modernc.org/sqlite** (driver name **`"sqlite"`**) + **PostgreSQL/pgx**; **goose**
+migrations (two dialect trees); **`:memory:`** hermetic tests; repos over `bun.IDB` with
+`Store.WithTx`. Opaque **TEXT** ids (spawns: **uuidv7** via `uuid.NewV7()`, google/uuid ≥ v1.6.0),
+**INTEGER unix-seconds** timestamps. **Booleans:** Go `bool` fields mapped to **`INTEGER` (0/1) in
+SQLite** and **`boolean` in Postgres** — explicit per-dialect DDL; the drift test asserts column
+*type* per dialect (not just name), so `bool`↔`INTEGER`↔`boolean` can't silently diverge.
 
 ---
 
 ## 3. Schema
 
-SQLite DDL shown; Postgres is the same shape (`text`/`bigint`); only the goose trees differ.
+SQLite DDL shown; the Postgres tree differs in `text`/`bigint`/`boolean` types only.
 
 ```sql
-CREATE TABLE owners (
-  id TEXT PRIMARY KEY, email TEXT, created_at INTEGER NOT NULL
-);
+CREATE TABLE owners ( id TEXT PRIMARY KEY, email TEXT, created_at INTEGER NOT NULL );
+CREATE TABLE apps   ( id TEXT PRIMARY KEY, display_name TEXT, created_at INTEGER NOT NULL );
 
-CREATE TABLE apps (
-  id TEXT PRIMARY KEY, display_name TEXT, created_at INTEGER NOT NULL
-);
-
--- immutable, content-addressed versions (git tags); "ref" lives here
 CREATE TABLE app_versions (
   app_id TEXT NOT NULL REFERENCES apps(id),
   version TEXT NOT NULL, ref TEXT NOT NULL,
-  reviewed INTEGER NOT NULL DEFAULT 0,
+  reviewed INTEGER NOT NULL DEFAULT 0,        -- pg: boolean
   created_at INTEGER NOT NULL,
   PRIMARY KEY (app_id, version)
 );
 CREATE INDEX idx_app_versions_reviewed ON app_versions(app_id, reviewed, created_at DESC);
 
--- declared mounts per version — extracted from the manifest ONCE at version registration,
--- so the CP never parses a manifest at spawn time (roast D1)
+-- declared mounts per version — extracted from the manifest ONCE at registration
 CREATE TABLE app_version_mounts (
-  app_id TEXT NOT NULL, version TEXT NOT NULL,
-  name TEXT NOT NULL,                  -- declared mount name (path under /app)
-  required INTEGER NOT NULL DEFAULT 1, -- whether the user must bind it
+  app_id TEXT NOT NULL, version TEXT NOT NULL, name TEXT NOT NULL,
+  required INTEGER NOT NULL DEFAULT 1,        -- pg: boolean
   PRIMARY KEY (app_id, version, name),
   FOREIGN KEY (app_id, version) REFERENCES app_versions(app_id, version)
 );
 
--- the CP index: durable lifecycle record + thin resume-critical config pointer
 CREATE TABLE spawns (
-  id           TEXT PRIMARY KEY,        -- uuidv7, stable across the lifecycle
+  id           TEXT PRIMARY KEY,              -- uuidv7
   owner_id     TEXT NOT NULL REFERENCES owners(id),
-  app_id       TEXT NOT NULL REFERENCES apps(id),   -- FK to apps only (see note)
-  app_version  TEXT NOT NULL,           -- pinned snapshot; validated to exist at create (repo-level)
-  app_ref      TEXT NOT NULL,           -- denormalized content ref; survives version delisting
-  pinned       INTEGER NOT NULL DEFAULT 0,
+  app_id       TEXT NOT NULL REFERENCES apps(id),
+  app_version  TEXT NOT NULL,                 -- pinned snapshot; (app_id,version) repo-validated at create
+  app_ref      TEXT NOT NULL,                 -- denormalized; survives version delisting (NOT git-ref deletion)
+  pinned       INTEGER NOT NULL DEFAULT 0,    -- pg: boolean
   model        TEXT NOT NULL,
-  status       TEXT NOT NULL
-               CHECK (status IN ('starting','active','suspending','suspended','error','deleted')),
-  node_id      TEXT,                     -- current active episode; NULL when suspended
-  recovered    INTEGER NOT NULL DEFAULT 0, -- set when reconciled from an unclean shutdown (lifecycle §6)
+  status       TEXT NOT NULL CHECK (status IN
+               ('starting','active','suspending','suspended','unreachable','error','deleted')),
+  generation   INTEGER NOT NULL DEFAULT 0,    -- bumped per starting episode; fencing token
+  node_id      TEXT,                          -- current episode's node; NULL when not active
+  recovered    INTEGER NOT NULL DEFAULT 0,    -- pg: boolean; set on recreate-from-unclean (NOT clean CP restart)
   created_at   INTEGER NOT NULL,
   last_used_at INTEGER NOT NULL,
   suspended_at INTEGER,
   deleted_at   INTEGER
 );
 CREATE INDEX idx_spawns_owner  ON spawns(owner_id, last_used_at DESC);
-CREATE INDEX idx_spawns_status ON spawns(status);   -- reconciliation scans
+CREATE INDEX idx_spawns_status ON spawns(status);
 CREATE INDEX idx_spawns_node   ON spawns(node_id);
 
--- per-spawn mount choices (the user's backend pick per declared mount) + per-mount persist marker
 CREATE TABLE spawn_mounts (
   spawn_id       TEXT NOT NULL REFERENCES spawns(id),
-  name           TEXT NOT NULL,         -- must match an app_version_mounts.name (repo-validated)
-  backend_uri    TEXT NOT NULL,         -- managed:<repo> | github:owner/repo | gdrive:<id> | scratch
-  persist_marker TEXT,                  -- per-mount suspend state (WIP branch / bundle marker); sp-gd9 writes
+  name           TEXT NOT NULL,               -- must ∈ app_version_mounts (repo-validated)
+  backend_uri    TEXT NOT NULL,
+  persist_marker TEXT,                         -- per-mount suspend state; written INCREMENTALLY per mount
   PRIMARY KEY (spawn_id, name)
 );
 ```
 
-**Design notes**
-- `spawns.app_id` FKs `apps` only; `app_version`/`app_ref` are a **denormalized pinned snapshot** so a
-  spawn survives version delisting (system design §8). The FK can't enforce version existence, so the
-  **repo validates `(app_id, app_version) ∈ app_versions` at create** (and a test asserts it).
-- **Per-mount persist markers** live on `spawn_mounts.persist_marker` — there is **no single
-  `suspend_ref`** (the roast killed the single-repo assumption).
-- **Soft-delete** (`status='deleted'` + `deleted_at`); **every lifecycle `Get`/lookup filters
-  deleted** (§4) — not just `ListByOwner`.
-- `app_version_mounts` is populated at **version registration** (E5; seeded for the demo). The full
-  manifest stays authoritative in `spawneryapp.yml`; only mount *names* are cached.
+**Notes:** `app_ref` survives version **delisting** (catalog hide) but **not git-ref deletion** —
+if the App's definition tag is deleted, resume's node-side clone fails regardless (system design §2;
+mitigated only by post-MVP App-snapshot). `persist_marker` is per-mount and written **as each mount
+finishes** so crash recovery can distinguish "none done" from "all done, signal lost" (lifecycle
+§6.6).
 
 ---
 
-## 4. Domain types & interfaces (`internal/cp/store/store.go`)
+## 4. Domain types & interfaces
 
-Bun tags on the domain types. Repos run on `bun.IDB`. **Transitions are status-guarded** — each
-`Set*` issues `UPDATE … WHERE id=? AND status IN(<valid-from>)` and returns an error if rowcount≠1,
-so illegal transitions can't silently succeed (roast D16).
+Bun tags on domain types; repos over `bun.IDB`. **All transitions are status+generation-guarded**
+(`UPDATE … WHERE id=? AND status IN(<from>) [AND generation=?]`, assert rowcount=1) and run under a
+**per-spawn lock** held by the CP layer across `{claim → node command → await}`.
 
 ```go
-type Status string // starting|active|suspending|suspended|error|deleted
+type Status string // starting|active|suspending|suspended|unreachable|error|deleted
 
-type Owner       struct { ID, Email string; CreatedAt int64 }
-type App         struct { ID, DisplayName string; CreatedAt int64 }
-type AppVersion  struct { AppID, Version, Ref string; Reviewed bool; CreatedAt int64 }
-type MountDecl   struct { AppID, Version, Name string; Required bool }
-type Mount       struct { Name, BackendURI string; PersistMarker string }
 type Spawn struct {
     ID, OwnerID, AppID, AppVersion, AppRef, Model string
     Pinned, Recovered bool
     Status     Status
+    Generation int64
     NodeID     string
     CreatedAt, LastUsedAt int64
     SuspendedAt, DeletedAt *int64
 }
+type Mount     struct { Name, BackendURI, PersistMarker string }
+type MountDecl struct { AppID, Version, Name string; Required bool }
+type RunningSpawn struct { ID string; Generation int64; Phase string } // from node inventory
 
-type OwnerRepo interface {
-    Get(ctx, id string) (Owner, error)
-    Upsert(ctx, o Owner) error
-}
-type AppRepo interface {
-    Get(ctx, id string) (App, error)
-    List(ctx) ([]App, error)
-    Upsert(ctx, a App) error
-    UpsertVersion(ctx, v AppVersion, mounts []MountDecl) error // version + declared mounts together
-    GetVersion(ctx, appID, version string) (AppVersion, error)
-    LatestReviewed(ctx, appID string) (AppVersion, error)
-    DeclaredMounts(ctx, appID, version string) ([]MountDecl, error) // for the CreateSpawn surface
-}
 type SpawnRepo interface {
-    Create(ctx, s Spawn, mounts []Mount) error // status=starting; validates version + mount names
-    Get(ctx, id string) (Spawn, error)         // NOT-FOUND on deleted for lifecycle ops
+    Create(ctx, s Spawn, mounts []Mount) error      // status=starting, generation=1; validates version + mount names
+    Get(ctx, id string) (Spawn, error)              // NOT-FOUND on deleted for lifecycle ops
     GetMounts(ctx, id string) ([]Mount, error)
-    ListByOwner(ctx, ownerID string) ([]Spawn, error) // excludes deleted
+    ListByOwner(ctx, ownerID string) ([]Spawn, error)
 
-    SetActive(ctx, id, nodeID string) error    // WHERE status='starting'
-    SetSuspending(ctx, id string) error        // WHERE status='active'
-    SetSuspended(ctx, id string, markers map[string]string) error // WHERE status='suspending'
+    // claim-then-act: ClaimStarting bumps generation, returns the new gen (ErrConflict if rowcount≠1)
+    ClaimStarting(ctx, id string, from []Status) (newGen int64, err error)
+    SetActive(ctx, id, nodeID string, gen int64) error      // WHERE status='starting' AND generation=gen
+    SetSuspending(ctx, id string, gen int64) error          // WHERE status='active'   AND generation=gen
+    SetMountMarker(ctx, id, mount, marker string) error     // incremental, per mount
+    SetSuspended(ctx, id string, gen int64) error           // WHERE status='suspending' AND generation=gen
     SetError(ctx, id string) error
+    MarkUnreachable(ctx, ids []string) (int, error)         // node deemed failed
+    MarkRecovered(ctx, id string) error
     Touch(ctx, id string, ts int64) error
-    MarkDeleted(ctx, id string, ts int64) error // WHERE status != 'deleted'
+    MarkDeleted(ctx, id string, ts int64) error             // WHERE status IN('active','suspended','unreachable','error')
 
-    ReconcileOrphans(ctx) (int, error)          // {starting,active}->suspended(recovered); {suspending}->error
-    ReconcileNode(ctx, nodeID string) (int, error) // that node's {starting,active}->suspended
-}
-type Store interface {
-    Owners() OwnerRepo; Apps() AppRepo; Spawns() SpawnRepo
-    WithTx(ctx, fn func(Store) error) error
-    Close() error
+    // reconciliation inputs
+    ActiveByNode(ctx, nodeID string) ([]Spawn, error)       // CP diffs vs node inventory
+    Adopt(ctx, id, nodeID string, gen int64) error          // confirm a still-running episode
 }
 ```
-
-Repos never open their own tx; `Store.WithTx` composes them (so `Create`'s spawn-row + N
-mount-rows insert atomically when the caller wraps in `WithTx`).
+`OwnerRepo`/`AppRepo` as v2 (apps + versions + `DeclaredMounts` + `UpsertVersion(v, mounts)`).
+`Store.WithTx` composes repos. The **per-spawn lock** is a CP-layer keyed mutex (not the DB) — the DB
+guard prevents illegal *state* transitions; the lock prevents two handlers interleaving their *node
+commands* for one spawn.
 
 ---
 
-## 5. Transaction boundary
+## 5. Transactions & per-spawn lock
 
-```go
-func (s *Store) WithTx(ctx, fn func(store.Store) error) error {
-    return s.db.RunInTx(ctx, nil, func(ctx, tx bun.Tx) error { return fn(&Store{db: tx}) })
-}
-```
-Real uses now: `CreateSpawn` (spawn + mounts), `UpsertVersion` (version + declared mounts). Future:
-spawn write + audit event.
+`Store.WithTx` (Bun `RunInTx`) makes `Create` (spawn + mounts) and `UpsertVersion` (version + decls)
+atomic. Orthogonally, the CP holds a **per-spawn-id lock** around every mutating op so that the
+claim-guard and the node command can't be split by a competing handler (lifecycle §6.3).
 
 ---
 
 ## 6. Package layout
 
 ```
-internal/cp/store/
-  store.go            # domain types + interfaces (§4)
-  open.go             # Open(ctx,Config)->Store: driver+dialect, goose.Up, ReconcileOrphans, seed
-  bunstore/{bunstore,owners,apps,spawns}.go   # impl over bun.IDB
-  bunstore/testing.go # NewTestStore(t) -> :memory: + goose.Up
-  bunstore/schema_test.go  # drift guard: goose.Up then assert table columns == struct fields
-  migrations/sqlite/0001_init.sql
-  migrations/pg/0001_init.sql
+internal/cp/store/{store.go, open.go}
+internal/cp/store/bunstore/{bunstore,owners,apps,spawns,testing,schema_test}.go
+internal/cp/store/migrations/{sqlite,pg}/0001_init.sql
+internal/cp/lock/spawnlock.go        # per-spawn-id keyed mutex (CP layer)
 ```
 
 ---
 
-## 7. CP-side lifecycle (integration)
+## 7. CP-side lifecycle + consistency (integration)
 
-The store replaces `apps.Resolver` and the router's `owner` authority. `Server` gains `st
-store.Store`, drops `*apps.Resolver`; `router.Bind` drops `owner`; `Router.Owner()` is removed —
-**and both client entry points are migrated: gRPC `Session` (`server.go`) AND the WebSocket
-`HandleWS` (`ws.go`)** (roast D5). New CP→node plumbing: a `Suspend` message, `StartSpawn` carrying
-the chosen mounts, and a `SUSPENDED` phase the node can report.
+The store replaces `apps.Resolver` and the router's `owner` authority; **both `Session` (gRPC) and
+the WebSocket `HandleWS`** read ownership from the DB. `Router.Owner()` is removed; the route is a
+**projection of `active` rows** (rebuilt on adopt/resume, torn on suspend/delete). **Scheduler split:**
+`mint()` + `provision(id, gen, appRef, model, mounts) (nodeID, err)`; `CreateSpawn` mints,
+`Resume`/`Recreate` reuse the id. **The node binds the CP-sent `mounts`**, validating names against
+its manifest at the ref (mismatch → `error`).
 
-**Scheduler refactor (roast D3/D4):** split `scheduler.Create` (which today mints its own id) into
-`mint()` + `provision(id, appRef, model, mounts) (nodeID, error)`. `CreateSpawn` mints the id;
-`ResumeSpawn` reuses the existing id — both call `provision`.
-
-**Ordering (roast D6):** `CreateSpawn` commits the `starting` row **before** `provision`; on the
-ACTIVE signal the server calls `SetActive(id,nodeID)` (status-guarded `WHERE status='starting'`);
-telemetry reads owner from the committed row, not the race-prone `route`. If `provision`
-times out/errs → `SetError`.
+**Decide-then-act ordering** (every op, under the per-spawn lock):
 
 | RPC / event | Behavior |
 |---|---|
-| **`CreateSpawn`** (request now carries per-mount `{name, backend_uri}`) | `LatestReviewed(appID)`; validate chosen mount names ⊆ `DeclaredMounts`; mint **uuidv7**; `WithTx{ Spawns().Create(starting, mounts) }`; `provision(id, app_ref, model, mounts)`; ACTIVE→`SetActive`, err→`SetError`. |
-| **`ListSpawns`** | `Spawns().ListByOwner(owner)`. |
-| **`SuspendSpawn`** | `Get` (reject deleted); `SetSuspending`; send node `Suspend`; on `SUSPENDED` report → `SetSuspended(id, markers)` + `router.Drop`. |
-| **`ResumeSpawn`** | `Get` (require `suspended`); `GetMounts`; `provision(id, app_ref, model, mounts)`; `SetActive`. |
-| **`DeleteSpawn`** (Destroy) | `Get` (reject deleted/`suspending`); if active, node `Stop` + `router.Drop`; `MarkDeleted`. Data backend preserved. |
-| **`Session` / WS attach** | ownership via `Get` (reject deleted); if `suspended`, **auto-resume** then attach; **takeover** closes the prior client; `Touch(id, now)`. |
-| **node evict** (`DropNode`) | `ReconcileNode(nodeID)` → those spawns `suspended`. |
-| **CP boot** (`Open`) | `ReconcileOrphans()` (after migrations, before serving). |
+| **`CreateSpawn`** (req carries per-mount `{name, backend_uri}`) | `LatestReviewed`; validate mount names ⊆ `DeclaredMounts`; mint uuidv7; `WithTx{ Create(starting, gen 1, mounts) }`; `provision(id, 1, …)`; ACTIVE→`SetActive(id,node,1)`, err→`SetError`. |
+| **`ResumeSpawn`** / auto-on-attach | `ClaimStarting(id, from=[suspended])` → newGen (ErrConflict if not suspended); `provision(id, newGen, …)`; `SetActive(id,node,newGen)`. |
+| **`RecreateSpawn`** (user-acked) | `ClaimStarting(id, from=[unreachable,error])` → newGen; `provision` from last checkpoint; `SetActive`; `MarkRecovered`. Old generation is fenced (backend CAS) and `Stop`ped on its node's return (reconciliation). |
+| **`SuspendSpawn`** | `SetSuspending(id, gen)`; send node `Suspend(id,gen)`; node persists each mount → `SetMountMarker` incrementally → suspend-complete → `SetSuspended(id, gen)` + tear route. |
+| **`DeleteSpawn`** | `MarkDeleted` (guarded) **first**, then best-effort node `Stop` + route drop. Rejected while `suspending`. |
+| **`Session`/WS attach** | DB ownership (reject deleted); `suspended`→auto-resume; `unreachable`→present Recreate/Wait (no auto-resume); takeover closes prior client; `Touch`. |
+| **node Register/Heartbeat inventory** | **reconcile** (below). |
+| **node stream close** | start a grace window; **do not flip status**. |
+| **CP boot** | wait for inventories within a grace window, then reconcile; `suspending`→marker-probe. |
 
-**`spawn.yml` vs the DB cache (roast D14):** the DB cache (`app_ref`, `app_version`, `model`,
-mounts) is **authoritative-in-practice for routing/provisioning until E5** gives the CP the ability
-to read `spawn.yml`. The auto-upgrade hook (if `pinned=0`, bump to `LatestReviewed`) mutates the DB
-cache; `spawn.yml` reconciliation is explicitly E5. This inverts the system-design "spawn.yml
-authoritative" claim *for now*, by necessity, and is stated so.
+**Inventory reconciliation** (on every node (re)connect, diff `RunningSpawn[]` vs `ActiveByNode`):
+- gen matches a DB-`active` row → **`Adopt`** (rebind route, no restart).
+- node runs a spawn the DB says `suspended`/`deleted`/`error`/older-gen → **`Stop(id, gen)`** (orphan).
+- DB-`active`/`starting` not in the node's inventory (and unclaimed elsewhere) after grace →
+  **`MarkUnreachable`** (user-driven recovery).
 
-**Seeding (roast D12/D13):** `Open` idempotently `Upsert`s, from `cmd/cp/main.go`'s config: an owner
-**for every `CP_DEV_TOKENS` entry** (so `auth`'s token→owner always resolves to a real row — today's
-config is `dev-token=dev`, so seed owner `dev`), plus the demo app(s) + version(s) + declared mounts
-(today's app is `secret-app`→ref — the seed must match the actual config, not an aspirational
-`zork`). E4/E5 replace the seed; no schema change.
+**Generation fencing at the CP:** every node→CP `SpawnStatus` carries a generation; the handler
+**drops it if `gen ≠ row.generation`** (kills stale ACTIVE/SUSPENDED from a superseded episode). A
+guard rowcount≠1 is treated as a **superseded no-op** (and any markers the dropped report carried are
+scheduled for GC).
+
+**`spawn.yml` vs the DB cache:** the DB cache (`app_ref`, `app_version`, `model`, mounts) is
+**authoritative-in-practice for routing/provisioning until E5** (the CP can't read `spawn.yml` yet);
+auto-upgrade mutates the cache; `spawn.yml` reconciliation is E5.
+
+**Seeding (id mismatch fixed):** the canonical app id is the **manifest `id`** (`spawnery/secret`),
+**not** the resolver key (`secret-app`). `Open` seeds `apps(id='spawnery/secret')` + its version +
+declared mounts, and `cmd/cp/main.go`'s resolver key is corrected to match (one-line change) so E5
+registration (which reads the manifest `id`) won't orphan spawn FKs. Owners are seeded **from the
+`CP_DEV_TOKENS` map** (every token's owner → a row), so `auth` always resolves to a real owner.
+Owner rows are **not GC'd** when a token is removed (orphaned spawns are inert, not auto-deleted —
+documented).
 
 ---
 
 ## 8. Migrations & config
 
-- **goose** with `//go:embed migrations/<dialect>/*.sql`; `Open` runs `goose.Up` then reconciles
-  then seeds.
-- **Config (env):** `CP_DB_DRIVER=sqlite|postgres`, `CP_DB_DSN`. **SQLite** DSN carries pragmas
-  (`file:cp.db?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)`); **Postgres** DSN carries **none
-  of those** (WAL/foreign_keys pragmas are SQLite-only). `Open(ctx, Config)` wires the modernc
-  driver (`"sqlite"`) + `sqlitedialect`, or pgx + `pgdialect`.
-- Forward-only; staging carries data across versions. `atlas migrate lint` on the pg tree is a later
-  CI nicety.
+- **goose** + `//go:embed` per dialect; `Open` = `goose.Up` → (await inventories) reconcile → seed.
+- **Config:** `CP_DB_DRIVER`, `CP_DB_DSN`. SQLite carries pragmas
+  (`?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)`); **Postgres carries none** (WAL/foreign_keys
+  are SQLite-only). `Open` wires modernc `"sqlite"`+`sqlitedialect` or pgx+`pgdialect`.
 
 ---
 
 ## 9. Testing
 
-- **Hermetic unit (`:memory:`):** `NewTestStore(t)` opens
-  `file:<test>?mode=memory&cache=shared&_pragma=foreign_keys(1)` (no WAL in `:memory:`), `goose.Up`,
-  clean `Store`. Covers every repo method, **status-guarded transition rejections** (e.g. `SetActive`
-  on a `suspended` row fails), the deleted-filter, version-existence validation, and reconciliation.
-  No Docker/cgo; `t.Parallel()`-safe.
-- **Schema-drift snapshot test:** `goose.Up` on `:memory:`, then assert each table's columns match the
-  Bun struct fields (Bun doesn't generate the DDL — goose does — so nothing else reconciles them).
-- **CP handler tests:** real `:memory:` store replaces the in-memory maps; assert transitions,
-  ownership rejection (both gRPC + WS), list output, reconciliation.
-- **Postgres schema-soundness test (Decision 3):** a dedicated build-tagged test (CI provides a
-  Postgres service container, **not** the app stack) that runs `goose.Up` on Postgres and does a
-  **write-then-read-back per table** to prove the pg DDL tree is sound and the dialect round-trips.
-  This keeps the second tree honest without running the whole CP on Postgres.
-- **Build-tagged e2e (`//go:build e2e`, fail-loud, never skip):** drives `create→list→suspend→
-  resume→delete` through the stub agent. **Honest scope:** under `Scratch` + stub teardown this
-  asserts **CP-index state-machine bookkeeping** (status flips, ownership, reconciliation,
-  per-transition guards) — **not** data survival. Lossless suspend/resume is verified once E3's
-  persistent backend + `sp-gd9` land.
+- **Hermetic unit (`:memory:`):** every repo method; **guard rejections** (e.g. `SetActive` on a
+  non-`starting` or wrong-gen row fails; `ClaimStarting` from a wrong status → ErrConflict); the
+  deleted-filter; version-existence validation; `MarkDeleted` state set.
+- **Consistency tests (the headline):** (a) **two concurrent Resumes** → exactly one `ClaimStarting`
+  wins, one `provision`; (b) **stale-generation `SpawnStatus` dropped**; (c) **adopt** on reconnect
+  with matching gen (no new episode); (d) **orphan Stop** when node runs a non-active/older-gen
+  spawn; (e) **unreachable → Recreate** bumps gen and the old gen is fenced; (f) Suspend-vs-Delete
+  can't interleave. These run against the `:memory:` store with a fake node driver.
+- **Schema-drift snapshot:** `goose.Up`, assert each table's columns **and types** match the Bun
+  structs per dialect (catches `bool`↔`INTEGER`↔`boolean`).
+- **CP handler tests:** real `:memory:` store; ownership rejection on **both** gRPC + WS;
+  reconciliation; per-spawn-lock serialization.
+- **Postgres schema-soundness test:** a build-tagged test that runs `goose.Up` on Postgres and
+  asserts the dialect deltas that actually bite — **the status CHECK rejects a bad value, an upsert
+  second-write updates, a `bool` field round-trips true/false, INTEGER-vs-bigint timestamps
+  round-trip**. **CI honesty:** this needs a Postgres service in CI (a `.github/workflows` job or a
+  `just` recipe with a container) — **there is none today**; this test is **deferred until that CI
+  exists** and is marked/skipped-loud (build tag), not silently green.
+- **Build-tagged e2e:** `create→list→suspend→resume→recreate→delete` through the stub agent;
+  **honest scope:** under `Scratch` this asserts **CP-index + reconciliation bookkeeping**, not data
+  survival (gated on E3 + `sp-gd9`).
 
 ---
 
 ## 10. Scope boundary & dependencies
 
-- **`sp-mqj` (contracts) is a hard predecessor:** `cp.v1` lifecycle RPCs; `node.v1` `Suspend`
-  message; `StartSpawn` repeated mount field; a `SUSPENDED` `SpawnPhase` + a node→CP suspend-complete
-  signal. `sp-pc4` cannot land without it.
-- **`sp-gd9`** consumes this store: node-side **per-mount** persist (writes `spawn_mounts.persist_marker`)
-  + restore, the idle timer, the takeover fence, the web UI.
-- **E3** supplies the persistent backend → lossless suspend/resume (lifecycle §8 gates the demo
-  lifecycle on it).
-- **E5** supplies real version registration (populating `app_version_mounts` from manifests) +
-  `spawn.yml` reconciliation; the schema is ready for it.
+- **`sp-mqj` (hard predecessor):** `cp.v1` RPCs incl. `RecreateSpawn`; `node.v1` `Suspend` message;
+  **`generation` on `StartSpawn`/`StopSpawn`/`Suspend`/`SessionOpen`/`SessionClose` + `SpawnStatus`**;
+  `StartSpawn` repeated mount field; `SUSPENDED` phase + suspend-complete signal w/ per-mount markers;
+  **`RunningSpawn` inventory on `Register`/`Heartbeat`**.
+- **`sp-gd9`:** node-side per-mount persist/restore + **server-side backend write-fence** by
+  generation, inventory reporting, binds CP-sent mounts, idle timer, takeover fence, web UI (incl.
+  the `unreachable`/Recreate control + scratch-reset/recovered notices).
+- **E3:** persistent backend → lossless suspend/resume (the suspend path reuses E3 **incremental**
+  push/bundle). **E5:** version registration populating `app_version_mounts` + `spawn.yml` reconcile.
 
 ---
 
 ## 11. Success criteria
 
-1. `go test ./...` (hermetic) green: repos, **status-guarded transitions**, deleted-filter,
-   version-existence validation, reconciliation, schema-drift snapshot — on `:memory:`, no Docker/cgo.
-2. The CP uses the store for create/ownership(**gRPC + WS**)/list/suspend/resume/delete +
-   boot/evict reconciliation; the in-memory `apps`/owner-authority maps are gone; cleanup uses
-   **Destroy**, not Suspend.
-3. The Postgres schema-soundness test migrates + round-trips every table on a CI Postgres.
-4. A CP restart reconciles orphans to `suspended` (marked `recovered`) and `suspending` to `error`.
-5. App versioning: a spawn pins `app_version`/`app_ref`; create validates the version exists;
-   delisting a version doesn't break existing spawns.
-6. The build-tagged e2e asserts CP-index transitions through create→suspend→resume→delete
-   (**data-loss expected under scratch**; lossless gates on E3 + `sp-gd9`).
+1. `go test ./...` (hermetic) green: repos, guard rejections, deleted-filter, version validation,
+   schema-drift (columns **and** types), the **consistency tests** (two-resume, stale-gen drop,
+   adopt, orphan-stop, unreachable→recreate-fences-old) — on `:memory:`, no Docker/cgo.
+2. The CP uses the store for create/ownership(gRPC+WS)/list/suspend/resume/recreate/delete +
+   **inventory reconciliation**; the in-memory `apps`/owner maps are gone; cleanup uses Destroy.
+3. A transient node stream-drop **adopts** on reconnect (no second container); a real failure →
+   `unreachable` → user **Recreate** fences the old container.
+4. CP restart reconciles via node inventory (adopt / `unreachable` / marker-probed `suspending`), not
+   blind flips; `recovered` is set only on recreate-from-unclean, not a clean restart.
+5. App versioning: create validates the version exists; delisting (not ref-deletion) doesn't break
+   resume.
+6. The Postgres schema-soundness test (when CI exists) round-trips CHECK/upsert/bool/timestamps.
