@@ -3,6 +3,7 @@ package spawnlet
 import (
 	"context"
 	"fmt"
+	"log"
 	"path/filepath"
 
 	"spawnery/internal/manifest"
@@ -46,7 +47,7 @@ func NewManager(rt runtime.ContainerRuntime, cfg ManagerConfig) *Manager {
 	if cfg.PidsLimit == 0 {
 		cfg.PidsLimit = 256
 	}
-	return &Manager{rt: rt, cfg: cfg, store: NewStore(), backend: storage.NewScratch(cfg.DataRoot), fw: firewall.NsenterApplier{}}
+	return &Manager{rt: rt, cfg: cfg, store: NewStore(), backend: storage.NewScratch(cfg.DataRoot), fw: firewall.HostFloorApplier{}}
 }
 
 // egressEnforced reports whether the egress floor must be applied: cloud nodes always enforce
@@ -110,10 +111,12 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		return nil, fmt.Errorf("sidecar: %w", err)
 	}
 
+	var floorIP string
 	if m.egressEnforced() {
-		pid, ferr := m.rt.ContainerPID(ctx, sidecarID)
+		ip, ferr := m.rt.ContainerIP(ctx, sidecarID)
 		if ferr == nil {
-			ferr = m.fw.Apply(ctx, pid, firewall.Rules(m.cfg.EgressAllowCIDRs))
+			floorIP = ip
+			ferr = m.fw.Apply(ctx, firewall.Rules(ip, m.cfg.EgressAllowCIDRs))
 		}
 		if ferr != nil {
 			_ = m.rt.StopContainer(ctx, sidecarID)
@@ -142,7 +145,7 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		return nil, fmt.Errorf("agent: %w", err)
 	}
 
-	sp := &Spawn{ID: id, SidecarID: sidecarID, AgentID: agentID, MountDirs: mountDirs, Status: "ready"}
+	sp := &Spawn{ID: id, SidecarID: sidecarID, AgentID: agentID, MountDirs: mountDirs, FloorIP: floorIP, Status: "ready"}
 	m.store.Put(sp)
 	return sp, nil
 }
@@ -154,6 +157,11 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	}
 	_ = m.rt.StopContainer(ctx, sp.AgentID)
 	_ = m.rt.StopContainer(ctx, sp.SidecarID)
+	if sp.FloorIP != "" {
+		if err := m.fw.Remove(ctx, firewall.Rules(sp.FloorIP, m.cfg.EgressAllowCIDRs)); err != nil {
+			log.Printf("egress floor cleanup for %s (ip %s): %v", id, sp.FloorIP, err)
+		}
+	}
 	for _, d := range sp.MountDirs {
 		_ = m.backend.Finalize(ctx, d)
 	}

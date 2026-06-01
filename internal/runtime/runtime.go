@@ -39,6 +39,7 @@ type ContainerRuntime interface {
 	Attach(ctx context.Context, id string) (*AttachedStream, error)
 	StopContainer(ctx context.Context, id string) error
 	ContainerPID(ctx context.Context, id string) (int, error)
+	ContainerIP(ctx context.Context, id string) (string, error)
 }
 
 // FakeRuntime records calls for unit tests.
@@ -67,3 +68,6 @@ func (f *FakeRuntime) StopContainer(_ context.Context, id string) error {
 	return nil
 }
 func (f *FakeRuntime) ContainerPID(_ context.Context, id string) (int, error) { return 4242, nil }
+func (f *FakeRuntime) ContainerIP(_ context.Context, id string) (string, error) {
+	return "172.17.0.99", nil
+}

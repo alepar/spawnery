@@ -115,6 +115,21 @@ func (d *Docker) ContainerPID(ctx context.Context, id string) (int, error) {
 	return j.State.Pid, nil
 }
 
+func (d *Docker) ContainerIP(ctx context.Context, id string) (string, error) {
+	j, err := d.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	ip := ""
+	if j.NetworkSettings != nil {
+		ip = j.NetworkSettings.DefaultNetworkSettings.IPAddress
+	}
+	if ip == "" {
+		return "", fmt.Errorf("container %s has no bridge IP", id)
+	}
+	return ip, nil
+}
+
 func (d *Docker) StopContainer(ctx context.Context, id string) error {
 	ctx = context.WithoutCancel(ctx)
 	to := 0
