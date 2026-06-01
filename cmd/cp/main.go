@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -24,6 +25,23 @@ import (
 	"spawnery/internal/cp/telemetry"
 )
 
+const sqliteDefaultDSN = "file:cp.db?_pragma=busy_timeout(5000)"
+
+func storeConfigFromEnv(get func(string) string) (store.Config, error) {
+	driver := get("CP_STORE_DRIVER")
+	if driver == "" {
+		driver = "sqlite"
+	}
+	dsn := get("CP_STORE_DSN")
+	if dsn == "" {
+		dsn = sqliteDefaultDSN
+	}
+	if driver == "postgres" && (dsn == "" || dsn == sqliteDefaultDSN) {
+		return store.Config{}, fmt.Errorf("CP_STORE_DRIVER=postgres requires CP_STORE_DSN (a postgres DSN)")
+	}
+	return store.Config{Driver: driver, DSN: dsn}, nil
+}
+
 func main() {
 	reg := registry.New()
 	rt := router.New()
@@ -33,7 +51,11 @@ func main() {
 	tokens := parseTokens(env("CP_DEV_TOKENS", "dev-token=dev"))
 	authn := auth.New(tokens)
 
-	st, err := store.Open(ctx, store.Config{Driver: "sqlite", DSN: env("CP_STORE_DSN", "file:cp.db?_pragma=busy_timeout(5000)")})
+	storeCfg, err := storeConfigFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatalf("store config: %v", err)
+	}
+	st, err := store.Open(ctx, storeCfg)
 	if err != nil {
 		log.Fatalf("store open: %v", err)
 	}
