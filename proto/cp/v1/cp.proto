@@ -7,6 +7,7 @@ service SpawnService {
   rpc ListSpawns(ListSpawnsRequest) returns (ListSpawnsResponse);
   rpc ListApps(ListAppsRequest) returns (ListAppsResponse);
   rpc GetApp(GetAppRequest) returns (GetAppResponse);
+  rpc RegisterAppVersion(RegisterAppVersionRequest) returns (RegisterAppVersionResponse);
   rpc Session(stream Frame) returns (stream Frame);
   rpc SuspendSpawn(SuspendSpawnRequest) returns (SuspendSpawnResponse);
   rpc ResumeSpawn(ResumeSpawnRequest) returns (ResumeSpawnResponse);
@@ -92,4 +93,45 @@ message GetAppRequest  { string id = 1; }
 message GetAppResponse {
   AppSummary app = 1;                      // app metadata + latest tier
   repeated AppVersionSummary versions = 2; // newest first
+}
+
+// AppManifest is the structured app-version manifest — the registration source of truth
+// (mirrors spawneryapp.yml, E0 §3). CI maps YAML -> this and calls RegisterAppVersion.
+message AppManifest {
+  string api_version          = 1;  // "spawnery/v1"
+  string id                   = 2;  // "creator/app"
+  string title                = 3;
+  string description          = 4;
+  repeated string tags        = 5;
+  string visibility           = 6;  // "open" | "private"
+  ManifestAgents agents       = 7;
+  repeated string tools       = 8;
+  string persona              = 9;
+  repeated string skills      = 10;
+  ManifestModel model         = 11;
+  string runtime_base_version = 12;
+  repeated ManifestMount mounts = 13;
+}
+message ManifestAgents {
+  repeated string support      = 1;
+  repeated string exclude      = 2;
+  repeated string requires_acp = 3;
+}
+message ManifestModel {
+  bool tool_use              = 1;
+  int64 min_context_tokens   = 2;
+  bool vision                = 3;
+  string recommended_default = 4;
+}
+message ManifestMount { string name = 1; string path = 2; string seed = 3; }
+
+message RegisterAppVersionRequest {
+  AppManifest manifest = 1;
+  string version       = 2;
+  string ref           = 3;
+}
+message RegisterAppVersionResponse {
+  string app_id  = 1;
+  string version = 2;
+  TrustTier tier = 3;
 }

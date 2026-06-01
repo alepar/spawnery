@@ -2,7 +2,7 @@ apiVersion: spawnery/v1
 kind: App
 id: spawnery/secret
 title: Secret
-agents: { support: any, requiresAcp: [prompt] }
+agents: { support: [any], requiresAcp: [prompt] }
 model: { recommendedDefault: anthropic/claude-3.5-sonnet }
 storage:
   mounts:

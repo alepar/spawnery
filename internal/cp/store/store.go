@@ -40,6 +40,7 @@ type CatalogFilter struct {
 
 type AppRepo interface {
 	Get(ctx context.Context, id string) (App, error)
+	Creator(ctx context.Context, appID string) (string, error)
 	List(ctx context.Context) ([]App, error)
 	Upsert(ctx context.Context, a App) error
 	UpsertVersion(ctx context.Context, v AppVersion, mounts []MountDecl) error

@@ -42,6 +42,9 @@ const (
 	SpawnServiceListAppsProcedure = "/cp.v1.SpawnService/ListApps"
 	// SpawnServiceGetAppProcedure is the fully-qualified name of the SpawnService's GetApp RPC.
 	SpawnServiceGetAppProcedure = "/cp.v1.SpawnService/GetApp"
+	// SpawnServiceRegisterAppVersionProcedure is the fully-qualified name of the SpawnService's
+	// RegisterAppVersion RPC.
+	SpawnServiceRegisterAppVersionProcedure = "/cp.v1.SpawnService/RegisterAppVersion"
 	// SpawnServiceSessionProcedure is the fully-qualified name of the SpawnService's Session RPC.
 	SpawnServiceSessionProcedure = "/cp.v1.SpawnService/Session"
 	// SpawnServiceSuspendSpawnProcedure is the fully-qualified name of the SpawnService's SuspendSpawn
@@ -62,17 +65,18 @@ const (
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
 var (
-	spawnServiceServiceDescriptor             = v1.File_cp_v1_cp_proto.Services().ByName("SpawnService")
-	spawnServiceCreateSpawnMethodDescriptor   = spawnServiceServiceDescriptor.Methods().ByName("CreateSpawn")
-	spawnServiceListSpawnsMethodDescriptor    = spawnServiceServiceDescriptor.Methods().ByName("ListSpawns")
-	spawnServiceListAppsMethodDescriptor      = spawnServiceServiceDescriptor.Methods().ByName("ListApps")
-	spawnServiceGetAppMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("GetApp")
-	spawnServiceSessionMethodDescriptor       = spawnServiceServiceDescriptor.Methods().ByName("Session")
-	spawnServiceSuspendSpawnMethodDescriptor  = spawnServiceServiceDescriptor.Methods().ByName("SuspendSpawn")
-	spawnServiceResumeSpawnMethodDescriptor   = spawnServiceServiceDescriptor.Methods().ByName("ResumeSpawn")
-	spawnServiceRecreateSpawnMethodDescriptor = spawnServiceServiceDescriptor.Methods().ByName("RecreateSpawn")
-	spawnServiceDeleteSpawnMethodDescriptor   = spawnServiceServiceDescriptor.Methods().ByName("DeleteSpawn")
-	spawnServiceStopSpawnMethodDescriptor     = spawnServiceServiceDescriptor.Methods().ByName("StopSpawn")
+	spawnServiceServiceDescriptor                  = v1.File_cp_v1_cp_proto.Services().ByName("SpawnService")
+	spawnServiceCreateSpawnMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("CreateSpawn")
+	spawnServiceListSpawnsMethodDescriptor         = spawnServiceServiceDescriptor.Methods().ByName("ListSpawns")
+	spawnServiceListAppsMethodDescriptor           = spawnServiceServiceDescriptor.Methods().ByName("ListApps")
+	spawnServiceGetAppMethodDescriptor             = spawnServiceServiceDescriptor.Methods().ByName("GetApp")
+	spawnServiceRegisterAppVersionMethodDescriptor = spawnServiceServiceDescriptor.Methods().ByName("RegisterAppVersion")
+	spawnServiceSessionMethodDescriptor            = spawnServiceServiceDescriptor.Methods().ByName("Session")
+	spawnServiceSuspendSpawnMethodDescriptor       = spawnServiceServiceDescriptor.Methods().ByName("SuspendSpawn")
+	spawnServiceResumeSpawnMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("ResumeSpawn")
+	spawnServiceRecreateSpawnMethodDescriptor      = spawnServiceServiceDescriptor.Methods().ByName("RecreateSpawn")
+	spawnServiceDeleteSpawnMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("DeleteSpawn")
+	spawnServiceStopSpawnMethodDescriptor          = spawnServiceServiceDescriptor.Methods().ByName("StopSpawn")
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -81,6 +85,7 @@ type SpawnServiceClient interface {
 	ListSpawns(context.Context, *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error)
 	ListApps(context.Context, *connect.Request[v1.ListAppsRequest]) (*connect.Response[v1.ListAppsResponse], error)
 	GetApp(context.Context, *connect.Request[v1.GetAppRequest]) (*connect.Response[v1.GetAppResponse], error)
+	RegisterAppVersion(context.Context, *connect.Request[v1.RegisterAppVersionRequest]) (*connect.Response[v1.RegisterAppVersionResponse], error)
 	Session(context.Context) *connect.BidiStreamForClient[v1.Frame, v1.Frame]
 	SuspendSpawn(context.Context, *connect.Request[v1.SuspendSpawnRequest]) (*connect.Response[v1.SuspendSpawnResponse], error)
 	ResumeSpawn(context.Context, *connect.Request[v1.ResumeSpawnRequest]) (*connect.Response[v1.ResumeSpawnResponse], error)
@@ -121,6 +126,12 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			httpClient,
 			baseURL+SpawnServiceGetAppProcedure,
 			connect.WithSchema(spawnServiceGetAppMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		registerAppVersion: connect.NewClient[v1.RegisterAppVersionRequest, v1.RegisterAppVersionResponse](
+			httpClient,
+			baseURL+SpawnServiceRegisterAppVersionProcedure,
+			connect.WithSchema(spawnServiceRegisterAppVersionMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
 		session: connect.NewClient[v1.Frame, v1.Frame](
@@ -164,16 +175,17 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 
 // spawnServiceClient implements SpawnServiceClient.
 type spawnServiceClient struct {
-	createSpawn   *connect.Client[v1.CreateSpawnRequest, v1.CreateSpawnResponse]
-	listSpawns    *connect.Client[v1.ListSpawnsRequest, v1.ListSpawnsResponse]
-	listApps      *connect.Client[v1.ListAppsRequest, v1.ListAppsResponse]
-	getApp        *connect.Client[v1.GetAppRequest, v1.GetAppResponse]
-	session       *connect.Client[v1.Frame, v1.Frame]
-	suspendSpawn  *connect.Client[v1.SuspendSpawnRequest, v1.SuspendSpawnResponse]
-	resumeSpawn   *connect.Client[v1.ResumeSpawnRequest, v1.ResumeSpawnResponse]
-	recreateSpawn *connect.Client[v1.RecreateSpawnRequest, v1.RecreateSpawnResponse]
-	deleteSpawn   *connect.Client[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse]
-	stopSpawn     *connect.Client[v1.StopSpawnRequest, v1.StopSpawnResponse]
+	createSpawn        *connect.Client[v1.CreateSpawnRequest, v1.CreateSpawnResponse]
+	listSpawns         *connect.Client[v1.ListSpawnsRequest, v1.ListSpawnsResponse]
+	listApps           *connect.Client[v1.ListAppsRequest, v1.ListAppsResponse]
+	getApp             *connect.Client[v1.GetAppRequest, v1.GetAppResponse]
+	registerAppVersion *connect.Client[v1.RegisterAppVersionRequest, v1.RegisterAppVersionResponse]
+	session            *connect.Client[v1.Frame, v1.Frame]
+	suspendSpawn       *connect.Client[v1.SuspendSpawnRequest, v1.SuspendSpawnResponse]
+	resumeSpawn        *connect.Client[v1.ResumeSpawnRequest, v1.ResumeSpawnResponse]
+	recreateSpawn      *connect.Client[v1.RecreateSpawnRequest, v1.RecreateSpawnResponse]
+	deleteSpawn        *connect.Client[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse]
+	stopSpawn          *connect.Client[v1.StopSpawnRequest, v1.StopSpawnResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -194,6 +206,11 @@ func (c *spawnServiceClient) ListApps(ctx context.Context, req *connect.Request[
 // GetApp calls cp.v1.SpawnService.GetApp.
 func (c *spawnServiceClient) GetApp(ctx context.Context, req *connect.Request[v1.GetAppRequest]) (*connect.Response[v1.GetAppResponse], error) {
 	return c.getApp.CallUnary(ctx, req)
+}
+
+// RegisterAppVersion calls cp.v1.SpawnService.RegisterAppVersion.
+func (c *spawnServiceClient) RegisterAppVersion(ctx context.Context, req *connect.Request[v1.RegisterAppVersionRequest]) (*connect.Response[v1.RegisterAppVersionResponse], error) {
+	return c.registerAppVersion.CallUnary(ctx, req)
 }
 
 // Session calls cp.v1.SpawnService.Session.
@@ -232,6 +249,7 @@ type SpawnServiceHandler interface {
 	ListSpawns(context.Context, *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error)
 	ListApps(context.Context, *connect.Request[v1.ListAppsRequest]) (*connect.Response[v1.ListAppsResponse], error)
 	GetApp(context.Context, *connect.Request[v1.GetAppRequest]) (*connect.Response[v1.GetAppResponse], error)
+	RegisterAppVersion(context.Context, *connect.Request[v1.RegisterAppVersionRequest]) (*connect.Response[v1.RegisterAppVersionResponse], error)
 	Session(context.Context, *connect.BidiStream[v1.Frame, v1.Frame]) error
 	SuspendSpawn(context.Context, *connect.Request[v1.SuspendSpawnRequest]) (*connect.Response[v1.SuspendSpawnResponse], error)
 	ResumeSpawn(context.Context, *connect.Request[v1.ResumeSpawnRequest]) (*connect.Response[v1.ResumeSpawnResponse], error)
@@ -268,6 +286,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		SpawnServiceGetAppProcedure,
 		svc.GetApp,
 		connect.WithSchema(spawnServiceGetAppMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceRegisterAppVersionHandler := connect.NewUnaryHandler(
+		SpawnServiceRegisterAppVersionProcedure,
+		svc.RegisterAppVersion,
+		connect.WithSchema(spawnServiceRegisterAppVersionMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceSessionHandler := connect.NewBidiStreamHandler(
@@ -316,6 +340,8 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceListAppsHandler.ServeHTTP(w, r)
 		case SpawnServiceGetAppProcedure:
 			spawnServiceGetAppHandler.ServeHTTP(w, r)
+		case SpawnServiceRegisterAppVersionProcedure:
+			spawnServiceRegisterAppVersionHandler.ServeHTTP(w, r)
 		case SpawnServiceSessionProcedure:
 			spawnServiceSessionHandler.ServeHTTP(w, r)
 		case SpawnServiceSuspendSpawnProcedure:
@@ -351,6 +377,10 @@ func (UnimplementedSpawnServiceHandler) ListApps(context.Context, *connect.Reque
 
 func (UnimplementedSpawnServiceHandler) GetApp(context.Context, *connect.Request[v1.GetAppRequest]) (*connect.Response[v1.GetAppResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetApp is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) RegisterAppVersion(context.Context, *connect.Request[v1.RegisterAppVersionRequest]) (*connect.Response[v1.RegisterAppVersionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RegisterAppVersion is not implemented"))
 }
 
 func (UnimplementedSpawnServiceHandler) Session(context.Context, *connect.BidiStream[v1.Frame, v1.Frame]) error {

@@ -41,7 +41,7 @@ func Seed(ctx context.Context, st store.Store, tokens map[string]string, apps []
 		}
 		if err := st.Apps().Upsert(ctx, store.App{
 			ID: a.ID, DisplayName: display, Summary: a.Summary,
-			Tags: strings.Join(a.Tags, ","), Visibility: "public", Listed: true, CreatedAt: now,
+			Tags: strings.Join(a.Tags, ","), Visibility: "public", Listed: true, CreatorID: "spawnery", CreatedAt: now,
 		}); err != nil {
 			return err
 		}

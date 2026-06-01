@@ -44,6 +44,7 @@ type App struct {
 	Tags          string `bun:"tags,notnull"`
 	Visibility    string `bun:"visibility,notnull"`
 	Listed        bool   `bun:"listed,notnull"`
+	CreatorID     string `bun:"creator_id,notnull"`
 	CreatedAt     int64  `bun:"created_at,notnull"`
 }
 
@@ -53,6 +54,7 @@ type AppVersion struct {
 	Version       string `bun:"version,pk"`
 	Ref           string `bun:"ref,notnull"`
 	Tier          Tier   `bun:"tier,notnull"`
+	Manifest      string `bun:"manifest,notnull"`
 	CreatedAt     int64  `bun:"created_at,notnull"`
 }
 
@@ -61,6 +63,8 @@ type MountDecl struct {
 	AppID         string `bun:"app_id,pk"`
 	Version       string `bun:"version,pk"`
 	Name          string `bun:"name,pk"`
+	Path          string `bun:"path,notnull"`
+	Seed          string `bun:"seed,notnull"`
 	Required      bool   `bun:"required,notnull"`
 }
 
