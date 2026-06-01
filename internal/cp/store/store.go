@@ -48,6 +48,7 @@ type AppRepo interface {
 	LatestReviewed(ctx context.Context, appID string) (AppVersion, error)
 	DeclaredMounts(ctx context.Context, appID, version string) ([]MountDecl, error)
 	Catalog(ctx context.Context, f CatalogFilter) ([]CatalogEntry, error)
+	ListByCreator(ctx context.Context, creatorID string) ([]CatalogEntry, error)
 	AppDetail(ctx context.Context, id string) (App, []AppVersion, error)
 	SetListed(ctx context.Context, appID string, listed bool) error
 }

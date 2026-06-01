@@ -54,12 +54,35 @@ func (s *Server) ListApps(ctx context.Context, req *connect.Request[cpv1.ListApp
 	}
 	out := make([]*cpv1.AppSummary, len(entries))
 	for i, e := range entries {
-		out[i] = &cpv1.AppSummary{
-			Id: e.App.ID, DisplayName: e.App.DisplayName, Summary: e.App.Summary,
-			Tags: splitTags(e.App.Tags), LatestVersion: e.LatestVersion, LatestTier: tierToProto(e.LatestTier),
-		}
+		out[i] = catalogEntryToSummary(e)
 	}
 	return connect.NewResponse(&cpv1.ListAppsResponse{Apps: out}), nil
+}
+
+// catalogEntryToSummary maps a store CatalogEntry to the wire AppSummary.
+func catalogEntryToSummary(e store.CatalogEntry) *cpv1.AppSummary {
+	return &cpv1.AppSummary{
+		Id: e.App.ID, DisplayName: e.App.DisplayName, Summary: e.App.Summary,
+		Tags: splitTags(e.App.Tags), LatestVersion: e.LatestVersion, LatestTier: tierToProto(e.LatestTier),
+		Listed: e.App.Listed,
+	}
+}
+
+// ListMyApps returns the authenticated owner's apps (including unlisted/taken-down) for management.
+func (s *Server) ListMyApps(ctx context.Context, _ *connect.Request[cpv1.ListMyAppsRequest]) (*connect.Response[cpv1.ListMyAppsResponse], error) {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	entries, err := s.st.Apps().ListByCreator(ctx, owner)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	out := make([]*cpv1.AppSummary, len(entries))
+	for i, e := range entries {
+		out[i] = catalogEntryToSummary(e)
+	}
+	return connect.NewResponse(&cpv1.ListMyAppsResponse{Apps: out}), nil
 }
 
 // GetApp returns one catalog app's metadata + its versions (newest first).
@@ -76,6 +99,7 @@ func (s *Server) GetApp(ctx context.Context, req *connect.Request[cpv1.GetAppReq
 	}
 	summary := &cpv1.AppSummary{
 		Id: app.ID, DisplayName: app.DisplayName, Summary: app.Summary, Tags: splitTags(app.Tags),
+		Listed: app.Listed,
 	}
 	vout := make([]*cpv1.AppVersionSummary, len(versions))
 	for i, v := range versions {
