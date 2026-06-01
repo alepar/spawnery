@@ -33,6 +33,19 @@ func toSummaryStatus(s store.Status) cpv1.SpawnStatus {
 	}
 }
 
+// DeleteSpawn tears down any running container and soft-deletes the spawn. It reuses the same
+// teardown path as StopSpawn (today they're identical; in Part 3b StopSpawn becomes suspend while
+// DeleteSpawn stays a destroy). destroy_data is accepted but INERT for scratch backends — there is
+// no persistent data to destroy; real backend-destroy lands with E3.
+func (s *Server) DeleteSpawn(ctx context.Context, req *connect.Request[cpv1.DeleteSpawnRequest]) (*connect.Response[cpv1.DeleteSpawnResponse], error) {
+	owner, _ := auth.OwnerFromContext(ctx)
+	if err := s.stop(ctx, owner, req.Msg.SpawnId); err != nil {
+		return nil, err
+	}
+	_ = req.Msg.DestroyData // inert until E3 persistent backends; see doc comment.
+	return connect.NewResponse(&cpv1.DeleteSpawnResponse{}), nil
+}
+
 // ListSpawns returns the authenticated owner's non-deleted spawns (the durable ledger).
 func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpawnsRequest]) (*connect.Response[cpv1.ListSpawnsResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)

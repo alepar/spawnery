@@ -239,7 +239,7 @@ func (r *spawnRepo) Touch(ctx context.Context, id string, ts int64) error {
 }
 
 func (r *spawnRepo) MarkDeleted(ctx context.Context, id string, ts int64) error {
-	if err := r.guardStatus(ctx, id, []Status{Active, Suspended, Unreachable, Errored}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+	if err := r.guardStatus(ctx, id, []Status{Starting, Active, Suspended, Unreachable, Errored}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
 		return q.Set("status = ?", Deleted).Set("deleted_at = ?", ts)
 	}); err != nil {
 		return err
