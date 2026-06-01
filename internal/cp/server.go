@@ -146,9 +146,6 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown app version: %s@%s", appID, v))
 		}
-		if ver.Tier != store.TierReviewed {
-			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("version %s@%s is tier %q, not spawnable", appID, v, ver.Tier))
-		}
 	} else {
 		ver, err = s.st.Apps().LatestReviewed(ctx, appID)
 		if err != nil {
@@ -162,6 +159,18 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	mounts := make([]store.Mount, len(decls))
 	for i, d := range decls {
 		mounts[i] = store.Mount{Name: d.Name, BackendURI: "scratch"}
+	}
+	placement := registry.Placement{}
+	if ver.Tier != store.TierReviewed && ver.Tier != store.TierScanned {
+		// unverified (or unknown tier): author-self-host rule.
+		creator, cerr := s.st.Apps().Creator(ctx, appID)
+		if cerr != nil {
+			return nil, connect.NewError(connect.CodeInternal, cerr)
+		}
+		if creator != owner {
+			return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("only the author can run an unverified version of %s", appID))
+		}
+		placement = registry.Placement{Class: "self-hosted", Owner: owner}
 	}
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -180,7 +189,7 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, mounts) }); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	nodeID, err := s.sched.Provision(ctx, spawnID, ver.Ref, req.Msg.Model, registry.Placement{})
+	nodeID, err := s.sched.Provision(ctx, spawnID, ver.Ref, req.Msg.Model, placement)
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
 			log.Printf("CreateSpawn %s: SetError after provision failure also failed: %v", spawnID, serr)

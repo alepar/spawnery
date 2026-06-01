@@ -79,7 +79,7 @@ func TestCreateSpawnVersionErrors(t *testing.T) {
 	if _, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m", Version: "9.9.9"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("unknown version: want InvalidArgument, got %v", err)
 	}
-	if _, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m", Version: "3.0.0-rc1"})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
-		t.Fatalf("unverified version: want FailedPrecondition, got %v", err)
+	if _, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m", Version: "3.0.0-rc1"})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("unverified version from non-creator: want PermissionDenied, got %v", err)
 	}
 }
