@@ -29,11 +29,9 @@ func (s *bunStore) WithTx(ctx context.Context, fn func(tx Store) error) error {
 	})
 }
 
-// Owners, Apps, Spawns — method bodies (non-nil impls) land in Tasks 4-7.
-func (s *bunStore) Owners() OwnerRepo { return nil }
-func (s *bunStore) Apps() AppRepo     { return nil }
-func (s *bunStore) Spawns() SpawnRepo { return nil }
+// Owners and Apps — implemented in Task 4. Spawns — implemented in Task 5.
+func (s *bunStore) Owners() OwnerRepo { return &ownerRepo{db: s.db} }
+func (s *bunStore) Apps() AppRepo     { return &appRepo{db: s.db} }
+func (s *bunStore) Spawns() SpawnRepo { return nil } // implemented in Task 5
 
-type ownerRepo struct{ db bun.IDB }
-type appRepo struct{ db bun.IDB }
 type spawnRepo struct{ db bun.IDB }
