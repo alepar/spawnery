@@ -36,13 +36,7 @@ func (d *Docker) StartContainer(ctx context.Context, s ContainerSpec) (string, e
 		AttachStdin: s.AttachStdio,
 		Tty:         false,
 	}
-	host := &container.HostConfig{}
-	if s.NetnsOf != "" {
-		host.NetworkMode = container.NetworkMode("container:" + s.NetnsOf)
-	}
-	for _, m := range s.Mounts {
-		host.Binds = append(host.Binds, bind(m))
-	}
+	host := buildHostConfig(s)
 	created, err := d.cli.ContainerCreate(ctx, cfg, host, nil, nil, "")
 	if err != nil {
 		return "", err
@@ -57,6 +51,30 @@ func (d *Docker) StartContainer(ctx context.Context, s ContainerSpec) (string, e
 type logWriter struct{ prefix string }
 
 func (l logWriter) Write(p []byte) (int, error) { log.Printf("%s%s", l.prefix, p); return len(p), nil }
+
+func buildHostConfig(s ContainerSpec) *container.HostConfig {
+	host := &container.HostConfig{}
+	if s.NetnsOf != "" {
+		host.NetworkMode = container.NetworkMode("container:" + s.NetnsOf)
+	}
+	for _, m := range s.Mounts {
+		host.Binds = append(host.Binds, bind(m))
+	}
+	if s.MemoryBytes > 0 {
+		host.Resources.Memory = s.MemoryBytes
+	}
+	if s.NanoCPUs > 0 {
+		host.Resources.NanoCPUs = s.NanoCPUs
+	}
+	if s.PidsLimit > 0 {
+		p := s.PidsLimit
+		host.Resources.PidsLimit = &p
+	}
+	if s.Runtime != "" {
+		host.Runtime = s.Runtime
+	}
+	return host
+}
 
 func bind(m Mount) string {
 	b := m.HostPath + ":" + m.ContainerPath

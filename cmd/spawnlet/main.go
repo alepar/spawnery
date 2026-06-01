@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"golang.org/x/net/http2"
@@ -32,6 +33,11 @@ func main() {
 		NodeClass:        env("NODE_CLASS", "cloud"),
 		EgressEnforce:    getenvBool("EGRESS_ENFORCE", true),
 		EgressAllowCIDRs: splitCSV(os.Getenv("EGRESS_ALLOW_CIDRS")),
+
+		MemLimitMB:       getenvInt64("MEM_LIMIT_MB", 1024),
+		CPULimit:         getenvFloat("CPU_LIMIT", 1.0),
+		PidsLimit:        getenvInt64("PIDS_LIMIT", 256),
+		ContainerRuntime: os.Getenv("CONTAINER_RUNTIME"),
 	})
 	if cpURL := os.Getenv("CP_ADDR"); cpURL != "" {
 		// CP-attached mode: dial the CP, no inbound listener.
@@ -86,4 +92,22 @@ func splitCSV(s string) []string {
 		return nil
 	}
 	return strings.Split(s, ",")
+}
+
+func getenvInt64(k string, def int64) int64 {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func getenvFloat(k string, def float64) float64 {
+	if v := os.Getenv(k); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
 }

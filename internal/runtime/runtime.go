@@ -19,6 +19,10 @@ type ContainerSpec struct {
 	Mounts      []Mount
 	NetnsOf     string // if set, join this container's network namespace
 	AttachStdio bool   // attach stdin+stdout (for the agent)
+	MemoryBytes int64  // 0 = unlimited
+	NanoCPUs    int64  // 0 = unlimited; 1 CPU = 1_000_000_000
+	PidsLimit   int64  // 0 = unlimited
+	Runtime     string // "" = Docker default; e.g. "runsc"
 }
 
 // AttachedStream is the agent's bidirectional stdio (demuxed stdout).
