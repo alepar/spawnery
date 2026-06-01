@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
+	"strings"
 
 	"github.com/uptrace/bun"
 )
@@ -81,4 +83,64 @@ func (r *appRepo) DeclaredMounts(ctx context.Context, appID, version string) ([]
 		Where("app_id = ? AND version = ?", appID, version).
 		Order("name ASC").Scan(ctx)
 	return out, err
+}
+
+func (r *appRepo) Catalog(ctx context.Context, f CatalogFilter) ([]CatalogEntry, error) {
+	var apps []App
+	q := r.db.NewSelect().Model(&apps).
+		Where("listed = ?", true).Where("visibility = ?", "public")
+	if f.Query != "" {
+		like := "%" + strings.ToLower(f.Query) + "%"
+		q = q.Where("(LOWER(display_name) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(tags) LIKE ?)", like, like, like)
+	}
+	if err := q.Order("display_name ASC").Scan(ctx); err != nil {
+		return nil, err
+	}
+	out := make([]CatalogEntry, 0, len(apps))
+	for _, a := range apps {
+		var v AppVersion
+		err := r.db.NewSelect().Model(&v).
+			Where("app_id = ?", a.ID).Order("created_at DESC").Limit(1).Scan(ctx)
+		e := CatalogEntry{App: a}
+		if err == nil {
+			e.LatestVersion, e.LatestTier = v.Version, v.Tier
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return tierRank(out[i].LatestTier) > tierRank(out[j].LatestTier)
+	})
+	return out, nil
+}
+
+func tierRank(t Tier) int {
+	switch t {
+	case TierReviewed:
+		return 3
+	case TierScanned:
+		return 2
+	case TierUnverified:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (r *appRepo) AppDetail(ctx context.Context, id string) (App, []AppVersion, error) {
+	var a App
+	err := r.db.NewSelect().Model(&a).Where("id = ? AND listed = ?", id, true).Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return App{}, nil, ErrNotFound
+	}
+	if err != nil {
+		return App{}, nil, err
+	}
+	var versions []AppVersion
+	if err := r.db.NewSelect().Model(&versions).
+		Where("app_id = ?", id).Order("created_at DESC").Scan(ctx); err != nil {
+		return App{}, nil, err
+	}
+	return a, versions, nil
 }

@@ -25,6 +25,19 @@ type OwnerRepo interface {
 	Upsert(ctx context.Context, o Owner) error
 }
 
+// CatalogEntry is one browse row: an app plus its newest version's tier/version.
+type CatalogEntry struct {
+	App           App
+	LatestVersion string
+	LatestTier    Tier
+}
+
+// CatalogFilter narrows a catalog browse. Query is a case-insensitive substring over
+// display_name + summary + tags; empty Query browses all listed+public apps.
+type CatalogFilter struct {
+	Query string
+}
+
 type AppRepo interface {
 	Get(ctx context.Context, id string) (App, error)
 	List(ctx context.Context) ([]App, error)
@@ -33,6 +46,8 @@ type AppRepo interface {
 	GetVersion(ctx context.Context, appID, version string) (AppVersion, error)
 	LatestReviewed(ctx context.Context, appID string) (AppVersion, error)
 	DeclaredMounts(ctx context.Context, appID, version string) ([]MountDecl, error)
+	Catalog(ctx context.Context, f CatalogFilter) ([]CatalogEntry, error)
+	AppDetail(ctx context.Context, id string) (App, []AppVersion, error)
 }
 
 type SpawnRepo interface {
