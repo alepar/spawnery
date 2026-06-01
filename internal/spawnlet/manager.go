@@ -18,6 +18,11 @@ type ManagerConfig struct {
 	NodeClass        string // "cloud" (always enforces) or "self-hosted" (honors EgressEnforce)
 	EgressEnforce    bool   // self-hosted opt-out switch; ignored on cloud
 	EgressAllowCIDRs []string
+
+	MemLimitMB       int64   // memory limit in MiB; default 1024
+	CPULimit         float64 // CPU cores; default 1.0
+	PidsLimit        int64   // max pids per container; default 256
+	ContainerRuntime string  // OCI runtime name; "" = Docker default
 }
 
 type Manager struct {
@@ -31,6 +36,15 @@ type Manager struct {
 func NewManager(rt runtime.ContainerRuntime, cfg ManagerConfig) *Manager {
 	if cfg.SidecarPort == 0 {
 		cfg.SidecarPort = 8080
+	}
+	if cfg.MemLimitMB == 0 {
+		cfg.MemLimitMB = 1024
+	}
+	if cfg.CPULimit == 0 {
+		cfg.CPULimit = 1.0
+	}
+	if cfg.PidsLimit == 0 {
+		cfg.PidsLimit = 256
 	}
 	return &Manager{rt: rt, cfg: cfg, store: NewStore(), backend: storage.NewScratch(cfg.DataRoot), fw: firewall.NsenterApplier{}}
 }
@@ -74,6 +88,11 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		mounts = append(mounts, runtime.Mount{HostPath: hostDir, ContainerPath: "/app/" + mt.Path})
 	}
 
+	mem := m.cfg.MemLimitMB << 20
+	cpus := int64(m.cfg.CPULimit * 1e9)
+	pids := m.cfg.PidsLimit
+	rtName := m.cfg.ContainerRuntime
+
 	addr := fmt.Sprintf("127.0.0.1:%d", m.cfg.SidecarPort)
 	sidecarID, err := m.rt.StartContainer(ctx, runtime.ContainerSpec{
 		Image: m.cfg.SidecarImage,
@@ -81,6 +100,10 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 			"OPENROUTER_API_KEY=" + m.cfg.OpenRouterKey,
 			"SIDECAR_ADDR=" + addr,
 		},
+		MemoryBytes: mem,
+		NanoCPUs:    cpus,
+		PidsLimit:   pids,
+		Runtime:     rtName,
 	})
 	if err != nil {
 		finalizeAll()
@@ -108,6 +131,10 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		},
 		Mounts:      mounts,
 		AttachStdio: true,
+		MemoryBytes: mem,
+		NanoCPUs:    cpus,
+		PidsLimit:   pids,
+		Runtime:     rtName,
 	})
 	if err != nil {
 		_ = m.rt.StopContainer(ctx, sidecarID)
