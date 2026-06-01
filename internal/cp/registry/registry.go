@@ -44,13 +44,25 @@ func (r *Registry) Heartbeat(id string, active, free uint32) {
 	}
 }
 
-// Pick returns the node with the most free slots (>0), or nil if none.
-func (r *Registry) Pick() *Node {
+// Placement constrains node selection. An empty field is unconstrained.
+type Placement struct {
+	Class string
+	Owner string
+}
+
+// PickFor returns the node with the most free capacity that satisfies the placement, or nil.
+func (r *Registry) PickFor(p Placement) *Node {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var best *Node
 	for _, n := range r.m {
 		if n.Free == 0 {
+			continue
+		}
+		if p.Class != "" && n.Class != p.Class {
+			continue
+		}
+		if p.Owner != "" && n.Owner != p.Owner {
 			continue
 		}
 		if best == nil || n.Free > best.Free {
@@ -59,3 +71,6 @@ func (r *Registry) Pick() *Node {
 	}
 	return best
 }
+
+// Pick returns the node with the most free slots (>0), or nil if none.
+func (r *Registry) Pick() *Node { return r.PickFor(Placement{}) }

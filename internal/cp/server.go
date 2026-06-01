@@ -180,7 +180,7 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, mounts) }); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	nodeID, err := s.sched.Provision(ctx, spawnID, ver.Ref, req.Msg.Model)
+	nodeID, err := s.sched.Provision(ctx, spawnID, ver.Ref, req.Msg.Model, registry.Placement{})
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
 			log.Printf("CreateSpawn %s: SetError after provision failure also failed: %v", spawnID, serr)
