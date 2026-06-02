@@ -134,6 +134,61 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 	return connect.NewResponse(&cpv1.SuspendSpawnResponse{}), nil
 }
 
+// ResumeSpawn provisions a FRESH container for a suspended spawn (non-lossless — a brand-new
+// container, no prior in-container state). suspended -> starting (new generation) -> active. Reuses
+// the same scheduler.Provision + SetActive path as CreateSpawn, with the same orphan-window
+// compensation on failure.
+func (s *Server) ResumeSpawn(ctx context.Context, req *connect.Request[cpv1.ResumeSpawnRequest]) (*connect.Response[cpv1.ResumeSpawnResponse], error) {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	unlock := s.locks.Lock(req.Msg.SpawnId)
+	defer unlock()
+	sp, err := s.st.Spawns().Get(ctx, req.Msg.SpawnId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+	}
+	if sp.OwnerID != owner {
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+	if sp.Status != store.Suspended {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn is not suspended"))
+	}
+	ver, err := s.st.Apps().GetVersion(ctx, sp.AppID, sp.AppVersion)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	placement, err := s.placementFor(ctx, owner, sp.AppID, ver)
+	if err != nil {
+		return nil, err
+	}
+	var gen int64
+	if err := s.st.WithTx(ctx, func(tx store.Store) error {
+		g, e := tx.Spawns().ClaimStarting(ctx, req.Msg.SpawnId, []store.Status{store.Suspended})
+		gen = g
+		return e
+	}); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, placement)
+	if err != nil {
+		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			log.Printf("ResumeSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
+		}
+		return nil, err
+	}
+	if err := s.st.Spawns().SetActive(ctx, req.Msg.SpawnId, nodeID, gen); err != nil {
+		s.rt.StopOnNode(req.Msg.SpawnId)
+		s.rt.Drop(req.Msg.SpawnId)
+		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			log.Printf("ResumeSpawn %s: SetError after SetActive failure also failed: %v", req.Msg.SpawnId, serr)
+		}
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&cpv1.ResumeSpawnResponse{}), nil
+}
+
 // ListSpawns returns the authenticated owner's non-deleted spawns (the durable ledger).
 func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpawnsRequest]) (*connect.Response[cpv1.ListSpawnsResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)

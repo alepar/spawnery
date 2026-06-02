@@ -161,17 +161,9 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	for i, d := range decls {
 		mounts[i] = store.Mount{Name: d.Name, BackendURI: "scratch"}
 	}
-	placement := registry.Placement{}
-	if ver.Tier != store.TierReviewed && ver.Tier != store.TierScanned {
-		// unverified (or unknown tier): author-self-host rule.
-		creator, cerr := s.st.Apps().Creator(ctx, appID)
-		if cerr != nil {
-			return nil, connect.NewError(connect.CodeInternal, cerr)
-		}
-		if creator != owner {
-			return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("only the author can run an unverified version of %s", appID))
-		}
-		placement = registry.Placement{Class: "self-hosted", Owner: owner}
+	placement, err := s.placementFor(ctx, owner, appID, ver)
+	if err != nil {
+		return nil, err
 	}
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -227,6 +219,23 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&cpv1.CreateSpawnResponse{SpawnId: spawnID}), nil
+}
+
+// placementFor computes node placement for a spawn of the given app version. Reviewed/scanned
+// versions run anywhere; unverified/unknown versions are author-self-host only (PermissionDenied for
+// a non-creator caller). Shared by CreateSpawn and ResumeSpawn.
+func (s *Server) placementFor(ctx context.Context, owner, appID string, ver store.AppVersion) (registry.Placement, error) {
+	if ver.Tier == store.TierReviewed || ver.Tier == store.TierScanned {
+		return registry.Placement{}, nil
+	}
+	creator, err := s.st.Apps().Creator(ctx, appID)
+	if err != nil {
+		return registry.Placement{}, connect.NewError(connect.CodeInternal, err)
+	}
+	if creator != owner {
+		return registry.Placement{}, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("only the author can run an unverified version of %s", appID))
+	}
+	return registry.Placement{Class: "self-hosted", Owner: owner}, nil
 }
 
 func (s *Server) StopSpawn(ctx context.Context, req *connect.Request[cpv1.StopSpawnRequest]) (*connect.Response[cpv1.StopSpawnResponse], error) {

@@ -167,7 +167,9 @@ func startAcker(t *testing.T, s *Server, reg *registry.Registry) func() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		seen := map[string]bool{}
+		// acked tracks how many StartSpawn messages we have already acked per spawn id, so that a
+		// second Provision call for the same spawn id (e.g. ResumeSpawn) is also acked.
+		acked := map[string]int{}
 		for {
 			select {
 			case <-stop:
@@ -176,10 +178,16 @@ func startAcker(t *testing.T, s *Server, reg *registry.Registry) func() {
 			}
 			var ids []string
 			sender.mu.Lock()
+			counts := map[string]int{}
 			for _, m := range sender.sent {
-				if st := m.GetStart(); st != nil && !seen[st.GetSpawnId()] {
-					seen[st.GetSpawnId()] = true
-					ids = append(ids, st.GetSpawnId())
+				if st := m.GetStart(); st != nil {
+					counts[st.GetSpawnId()]++
+				}
+			}
+			for id, total := range counts {
+				for acked[id] < total {
+					acked[id]++
+					ids = append(ids, id)
 				}
 			}
 			sender.mu.Unlock()
@@ -234,6 +242,55 @@ func TestSuspendSpawn(t *testing.T) {
 
 	// unauthenticated -> Unauthenticated
 	if _, err := s.SuspendSpawn(context.Background(), connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Fatalf("no owner: want Unauthenticated, got %v", err)
+	}
+}
+
+func TestResumeSpawn(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+
+	// resume of an ACTIVE spawn -> FailedPrecondition
+	if _, err := s.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("resume active: want FailedPrecondition, got %v", err)
+	}
+
+	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("SuspendSpawn: %v", err)
+	}
+	if _, err := s.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("ResumeSpawn: %v", err)
+	}
+	sp, _ := s.st.Spawns().Get(ctx, id)
+	if sp.Status != store.Active {
+		t.Fatalf("status=%v want active after resume", sp.Status)
+	}
+	c, ok, _ := s.st.Spawns().LiveContainer(ctx, id)
+	if !ok || c.Generation != 2 {
+		t.Fatalf("resume must start a new-generation container: ok=%v c=%+v want gen 2", ok, c)
+	}
+
+	// foreign owner -> PermissionDenied
+	bob := auth.WithOwner(context.Background(), "bob")
+	if _, err := s.ResumeSpawn(bob, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("foreign resume: want PermissionDenied, got %v", err)
+	}
+
+	// unknown -> NotFound
+	if _, err := s.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: "nope"})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("unknown resume: want NotFound, got %v", err)
+	}
+
+	// unauthenticated -> Unauthenticated
+	if _, err := s.ResumeSpawn(context.Background(), connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id})); connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Fatalf("no owner: want Unauthenticated, got %v", err)
 	}
 }
