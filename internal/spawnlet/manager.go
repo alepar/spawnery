@@ -28,7 +28,7 @@ type ManagerConfig struct {
 }
 
 type Manager struct {
-	rt      runtime.ContainerRuntime
+	pod     runtime.PodBackend
 	cfg     ManagerConfig
 	store   *Store
 	backend storage.Backend
@@ -48,7 +48,13 @@ func NewManager(rt runtime.ContainerRuntime, cfg ManagerConfig) *Manager {
 	if cfg.PidsLimit == 0 {
 		cfg.PidsLimit = 256
 	}
-	return &Manager{rt: rt, cfg: cfg, store: NewStore(), backend: storage.NewScratch(cfg.DataRoot), fw: firewall.HostFloorApplier{}}
+	return &Manager{
+		pod:     runtime.NewDockerPodBackend(rt, cfg.ContainerRuntime, cfg.AgentImage),
+		cfg:     cfg,
+		store:   NewStore(),
+		backend: storage.NewScratch(cfg.DataRoot),
+		fw:      firewall.HostFloorApplier{},
+	}
 }
 
 // egressEnforced reports whether the egress floor must be applied: cloud nodes always enforce
@@ -58,8 +64,6 @@ func (m *Manager) egressEnforced() bool {
 }
 
 func (m *Manager) Store() *Store { return m.store }
-
-func (m *Manager) Runtime() runtime.ContainerRuntime { return m.rt }
 
 func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn, error) {
 	if abs, err := filepath.Abs(appPath); err == nil {
@@ -90,94 +94,67 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		mounts = append(mounts, runtime.Mount{HostPath: hostDir, ContainerPath: "/app/" + mt.Path})
 	}
 
-	mem := m.cfg.MemLimitMB << 20
-	cpus := int64(m.cfg.CPULimit * 1e9)
-	pids := m.cfg.PidsLimit
-	rtName := m.cfg.ContainerRuntime
-
+	res := runtime.Resources{
+		MemoryBytes: m.cfg.MemLimitMB << 20,
+		NanoCPUs:    int64(m.cfg.CPULimit * 1e9),
+		PidsLimit:   m.cfg.PidsLimit,
+	}
 	addr := fmt.Sprintf("127.0.0.1:%d", m.cfg.SidecarPort)
-	sidecarID, err := m.rt.StartContainer(ctx, runtime.ContainerSpec{
-		Image: m.cfg.SidecarImage,
-		Env: []string{
+
+	// Phase 1: sandbox + sidecar (the trusted, key-holding container).
+	h, err := m.pod.StartPod(ctx, runtime.PodSpec{
+		ID:           id,
+		SidecarImage: m.cfg.SidecarImage,
+		SidecarEnv: []string{
 			"OPENROUTER_API_KEY=" + m.cfg.OpenRouterKey,
 			"SIDECAR_ADDR=" + addr,
 		},
-		MemoryBytes: mem,
-		NanoCPUs:    cpus,
-		PidsLimit:   pids,
-		Runtime:     rtName,
+		Resources: res,
+		Runtime:   m.cfg.ContainerRuntime,
 	})
 	if err != nil {
 		finalizeAll()
-		return nil, fmt.Errorf("sidecar: %w", err)
+		return nil, err
 	}
 
-	sidecarPID, perr := m.rt.ContainerPID(ctx, sidecarID)
-	if perr != nil {
-		_ = m.rt.StopContainer(ctx, sidecarID)
-		finalizeAll()
-		return nil, fmt.Errorf("sidecar pid: %w", perr)
-	}
-	netnsPath := fmt.Sprintf("/proc/%d/ns/net", sidecarPID)
-
+	// Egress floor: applied after the pod IP exists, before the untrusted agent starts (fail-closed).
 	var floorIP string
 	if m.egressEnforced() {
-		ip, ferr := m.rt.ContainerIP(ctx, sidecarID)
-		if ferr == nil {
-			floorIP = ip
-			ferr = m.fw.Apply(ctx, firewall.Rules(ip, m.cfg.EgressAllowCIDRs))
-		}
-		if ferr != nil {
-			_ = m.rt.StopContainer(ctx, sidecarID)
+		if ferr := m.fw.Apply(ctx, firewall.Rules(h.PodIP, m.cfg.EgressAllowCIDRs)); ferr != nil {
+			_ = m.pod.Stop(ctx, h)
 			finalizeAll()
 			return nil, fmt.Errorf("egress floor (fail-closed): %w", ferr)
 		}
+		floorIP = h.PodIP
 	}
 
-	agentID, err := m.rt.StartContainer(ctx, runtime.ContainerSpec{
-		Image:   m.cfg.AgentImage,
-		NetnsOf: sidecarID,
+	// Phase 2: the untrusted agent, into the existing pod.
+	if err := m.pod.StartAgent(ctx, h, runtime.AgentSpec{
+		Image: m.cfg.AgentImage,
 		Env: []string{
 			"OPENAI_BASE_URL=http://" + addr + "/v1",
 			"SPAWN_MODEL=" + model,
 		},
 		Mounts:         mounts,
-		AttachStdio:    true,
-		MemoryBytes:    mem,
-		NanoCPUs:       cpus,
-		PidsLimit:      pids,
-		Runtime:        rtName,
+		Resources:      res,
+		Runtime:        m.cfg.ContainerRuntime,
 		DropAllCaps:    true,
 		ReadonlyRootfs: m.cfg.HardenRootfs,
-	})
-	if err != nil {
-		_ = m.rt.StopContainer(ctx, sidecarID)
+	}); err != nil {
+		_ = m.pod.Stop(ctx, h)
 		finalizeAll()
-		return nil, fmt.Errorf("agent: %w", err)
+		return nil, err
 	}
 
-	sp := &Spawn{ID: id, SidecarID: sidecarID, AgentID: agentID, MountDirs: mountDirs, FloorIP: floorIP, NetnsPath: netnsPath, Status: "ready"}
+	sp := &Spawn{ID: id, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, NetnsPath: h.NetnsPath, Status: "ready"}
 	m.store.Put(sp)
 	return sp, nil
 }
 
-// PreflightRuntime validates a configured non-default container runtime (e.g. runsc) at startup by
-// running a throwaway smoke container under it. Returns an error if the runtime can't run a container
-// — callers should fail hard rather than discover this at first CreateSpawn.
+// PreflightRuntime validates a configured non-default container runtime at startup (delegates to the
+// backend's smoke check). Callers should fail hard rather than discover a broken runtime at first spawn.
 func (m *Manager) PreflightRuntime(ctx context.Context) error {
-	if m.cfg.ContainerRuntime == "" {
-		return nil
-	}
-	id, err := m.rt.StartContainer(ctx, runtime.ContainerSpec{
-		Image:   m.cfg.AgentImage,
-		Cmd:     []string{"true"},
-		Runtime: m.cfg.ContainerRuntime,
-	})
-	if err != nil {
-		return fmt.Errorf("runtime %q preflight: %w", m.cfg.ContainerRuntime, err)
-	}
-	_ = m.rt.StopContainer(context.WithoutCancel(ctx), id)
-	return nil
+	return m.pod.Preflight(ctx)
 }
 
 func (m *Manager) Stop(ctx context.Context, id string) error {
@@ -185,8 +162,7 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
-	_ = m.rt.StopContainer(ctx, sp.AgentID)
-	_ = m.rt.StopContainer(ctx, sp.SidecarID)
+	_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: sp.SidecarID, AgentID: sp.AgentID})
 	if sp.FloorIP != "" {
 		if err := m.fw.Remove(ctx, firewall.Rules(sp.FloorIP, m.cfg.EgressAllowCIDRs)); err != nil {
 			log.Printf("egress floor cleanup for %s (ip %s): %v", id, sp.FloorIP, err)
