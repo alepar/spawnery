@@ -3,6 +3,8 @@ package cri
 import (
 	"context"
 	"testing"
+
+	"spawnery/internal/runtime"
 )
 
 func TestPingAndPreflight(t *testing.T) {
@@ -20,5 +22,73 @@ func TestPingAndPreflight(t *testing.T) {
 	f.setNetworkReady(false)
 	if err := b.Preflight(ctx); err == nil {
 		t.Fatal("Preflight must fail when NetworkReady is false")
+	}
+}
+
+func TestStartPodSandboxSidecarAndHandle(t *testing.T) {
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+
+	h, err := b.StartPod(ctx, runtime.PodSpec{
+		ID:           "spawn-7",
+		SidecarImage: "spawnery/sidecar:dev",
+		SidecarEnv:   []string{"OPENROUTER_API_KEY=k", "SIDECAR_ADDR=127.0.0.1:8080"},
+		Resources:    runtime.Resources{MemoryBytes: 512 << 20, NanoCPUs: 2_000_000_000, PidsLimit: 128},
+		Runtime:      "runsc",
+	})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	if h.SandboxID != "sandbox-1" {
+		t.Fatalf("SandboxID = %q", h.SandboxID)
+	}
+	if h.PodIP != "10.244.0.7" {
+		t.Fatalf("PodIP = %q", h.PodIP)
+	}
+	if h.NetnsPath != "/proc/4242/ns/net" {
+		t.Fatalf("NetnsPath = %q", h.NetnsPath)
+	}
+	if h.SidecarID != "ctr-1" {
+		t.Fatalf("SidecarID = %q", h.SidecarID)
+	}
+	if h.AgentID != "" {
+		t.Fatalf("AgentID must be empty after StartPod, got %q", h.AgentID)
+	}
+	if len(f.created) != 1 || f.createdNames[0] != "sidecar" || f.createSandbox[0] != "sandbox-1" {
+		t.Fatalf("sidecar create wrong: names=%v sandbox=%v", f.createdNames, f.createSandbox)
+	}
+	if len(f.started) != 1 || f.started[0] != "ctr-1" {
+		t.Fatalf("started = %v", f.started)
+	}
+	if len(f.pulled) != 1 || f.pulled[0] != "spawnery/sidecar:dev" {
+		t.Fatalf("pulled = %v", f.pulled)
+	}
+	sc := f.created[0]
+	if sc.Linux.Resources.MemoryLimitInBytes != 512<<20 {
+		t.Fatalf("mem = %d", sc.Linux.Resources.MemoryLimitInBytes)
+	}
+	if sc.Linux.Resources.CpuPeriod != 100000 || sc.Linux.Resources.CpuQuota != 200000 {
+		t.Fatalf("cpu period/quota = %d/%d", sc.Linux.Resources.CpuPeriod, sc.Linux.Resources.CpuQuota)
+	}
+	if sc.Linux.Resources.Unified["pids.max"] != "128" {
+		t.Fatalf("pids.max = %q", sc.Linux.Resources.Unified["pids.max"])
+	}
+}
+
+func TestStartPodCleansUpSandboxOnFailure(t *testing.T) {
+	c, f := newFakeCRI(t)
+	f.failCreate = true // sidecar CreateContainer fails -> StartPod must tear down the sandbox
+	b := NewCRIPodBackend(c, "runsc")
+
+	_, err := b.StartPod(context.Background(), runtime.PodSpec{ID: "spawn-9", SidecarImage: "s"})
+	if err == nil {
+		t.Fatal("StartPod must fail when CreateContainer fails")
+	}
+	if len(f.stopSandbox) != 1 || f.stopSandbox[0] != "sandbox-1" {
+		t.Fatalf("sandbox must be stopped on failure; stopSandbox=%v", f.stopSandbox)
+	}
+	if len(f.removeSandbox) != 1 || f.removeSandbox[0] != "sandbox-1" {
+		t.Fatalf("sandbox must be removed on failure; removeSandbox=%v", f.removeSandbox)
 	}
 }
