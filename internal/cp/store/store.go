@@ -59,6 +59,7 @@ type SpawnRepo interface {
 	LiveContainer(ctx context.Context, id string) (Container, bool, error)
 	GetMounts(ctx context.Context, id string) ([]Mount, error)
 	ListByOwner(ctx context.Context, ownerID string) ([]Spawn, error)
+	Rename(ctx context.Context, id, name string) error // ErrNotFound on missing OR deleted
 
 	ClaimStarting(ctx context.Context, id string, from []Status) (newGen int64, err error)
 	SetActive(ctx context.Context, id, nodeID string, gen int64) error

@@ -98,6 +98,21 @@ func (r *spawnRepo) ListByOwner(ctx context.Context, ownerID string) ([]Spawn, e
 	return out, err
 }
 
+// Rename sets the spawn's display name. ErrNotFound if the spawn is missing or deleted.
+// No uniqueness is enforced — duplicate names are allowed (the spawn id is the real key).
+func (r *spawnRepo) Rename(ctx context.Context, id, name string) error {
+	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("name = ?", name).
+		Where("id = ?", id).Where("status <> ?", Deleted).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // guardStatus runs a status-guarded UPDATE on spawns; rowcount=0 -> ErrConflict.
 // The set closure must add ONLY .Set(...) clauses; the id + status WHERE is owned by guardStatus.
 func (r *spawnRepo) guardStatus(ctx context.Context, id string, from []Status, set func(*bun.UpdateQuery) *bun.UpdateQuery) error {
