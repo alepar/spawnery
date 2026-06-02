@@ -28,7 +28,7 @@ RUN curl -fsSL \
  && chmod +x /usr/local/bin/goose \
  && rm /tmp/goose.tar.gz
 
-FROM golang:1.25 AS gobuild
+FROM golang:1.26 AS gobuild
 WORKDIR /src
 COPY . .
 RUN CGO_ENABLED=0 go build -o /acpadapter ./deploy/agent/acpadapter
