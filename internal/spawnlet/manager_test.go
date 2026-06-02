@@ -73,6 +73,18 @@ func TestStopFinalizesMounts(t *testing.T) {
 	}
 }
 
+func TestCreateRecordsNetnsPath(t *testing.T) {
+	f := runtime.NewFake() // FakeRuntime.ContainerPID returns 4242
+	m := NewManager(f, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
+	sp, err := m.Create(context.Background(), "n-1", writeApp(t), "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp.NetnsPath != "/proc/4242/ns/net" {
+		t.Fatalf("NetnsPath = %q, want /proc/4242/ns/net", sp.NetnsPath)
+	}
+}
+
 func hasMountRO(ms []runtime.Mount, cp string) bool {
 	for _, m := range ms {
 		if m.ContainerPath == cp && m.ReadOnly {

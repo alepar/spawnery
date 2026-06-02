@@ -15,6 +15,11 @@ func TestWSRelayEchoesViaFake(t *testing.T) {
 	f := runtime.NewFake()
 	m := NewManager(f, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
 	srv := NewServer(m)
+	// Override the prod default (AttachACP needs root/setns) with the fake's
+	// in-process echo stream so this test stays hermetic.
+	srv.attach = func(ctx context.Context, sp *Spawn) (*runtime.AttachedStream, error) {
+		return f.Attach(ctx, sp.AgentID)
+	}
 	sp, err := m.Create(context.Background(), "ws-1", writeApp(t), "x") // writeApp from manager_test.go
 	if err != nil {
 		t.Fatal(err)

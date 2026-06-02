@@ -8,6 +8,7 @@ type Spawn struct {
 	AgentID   string
 	MountDirs []string // host dirs backing this spawn's mounts (for Finalize)
 	FloorIP   string   // pod bridge IP the egress floor was applied for (for Remove on Stop)
+	NetnsPath string   // /proc/<sidecar-pid>/ns/net — the pod netns, for AttachACP
 	Status    string
 }
 

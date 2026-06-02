@@ -64,6 +64,11 @@ CP rejects `CreateSpawn` with `ResourceExhausted` once an owner holds `>= CP_MAX
 ### 3.4 Container isolation (`sp-s9u`)
 - **Baseline:** Docker namespaces (pid/mount/uts/ipc) + the shared netns within a pod (agent joins
   the sidecar's netns so it reaches the sidecar on loopback only).
+- **ACP transport (UDS):** the agent's ACP stream rides an in-pod **abstract Unix socket**
+  (`@spawnlet-acp`), bridged to `goose acp`'s stdio by a small in-container adapter. The node reaches
+  it by entering the pod's network namespace (`setns`) and dialing the socket — so the spawnlet
+  process needs **`CAP_SYS_ADMIN`** (in practice: root, already required for the egress floor on cloud
+  nodes). This replaces the Docker stdio-attach and is identical across the Docker and CRI backends.
 - **Capabilities:** the agent container runs with **`--cap-drop=ALL`** (always; shell work needs none).
 - **Read-only rootfs:** `HARDEN_ROOTFS=true` runs the agent with a **read-only rootfs + `/tmp` tmpfs**
   (writes go to the rw `/app/<data>` mounts). Gated/default-off pending per-agent-image validation

@@ -14,11 +14,18 @@ import (
 
 type Server struct {
 	spawnv1connect.UnimplementedSpawnServiceHandler
-	m  *Manager
-	rt runtime.ContainerRuntime
+	m      *Manager
+	attach func(ctx context.Context, sp *Spawn) (*runtime.AttachedStream, error)
 }
 
-func NewServer(m *Manager) *Server { return &Server{m: m, rt: m.rt} }
+func NewServer(m *Manager) *Server {
+	return &Server{
+		m: m,
+		attach: func(ctx context.Context, sp *Spawn) (*runtime.AttachedStream, error) {
+			return runtime.AttachACP(ctx, sp.NetnsPath)
+		},
+	}
+}
 
 func newID() string {
 	b := make([]byte, 6)
@@ -51,7 +58,7 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[spawnv1
 	if !ok {
 		return connect.NewError(connect.CodeNotFound, fmt.Errorf("spawn not found: %s", first.SpawnId))
 	}
-	att, err := s.rt.Attach(ctx, sp.AgentID)
+	att, err := s.attach(ctx, sp)
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}

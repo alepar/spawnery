@@ -16,4 +16,4 @@ export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-unused-sidecar-injects-real-key}"
 # Disable Goose's interactive keyring/secret prompts; values come from env.
 export GOOSE_DISABLE_KEYRING="${GOOSE_DISABLE_KEYRING:-1}"
 
-exec goose acp
+exec /usr/local/bin/acpadapter goose acp
