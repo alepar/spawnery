@@ -195,6 +195,8 @@ func (x *MountBinding) GetBackendUri() string {
 	return ""
 }
 
+// name (optional): human-readable spawn label; empty => the server assigns a default
+// (the app's display name, with a " 2"/" 3" counter suffix on collision).
 type CreateSpawnRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -341,7 +343,7 @@ type SpawnSummary struct {
 	Status     SpawnStatus `protobuf:"varint,5,opt,name=status,proto3,enum=cp.v1.SpawnStatus" json:"status,omitempty"`
 	CreatedAt  int64       `protobuf:"varint,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	LastUsedAt int64       `protobuf:"varint,7,opt,name=last_used_at,json=lastUsedAt,proto3" json:"last_used_at,omitempty"`
-	Name       string      `protobuf:"bytes,8,opt,name=name,proto3" json:"name,omitempty"`
+	Name       string      `protobuf:"bytes,8,opt,name=name,proto3" json:"name,omitempty"` // human-readable spawn label (server-assigned default if not set by the client)
 }
 
 func (x *SpawnSummary) Reset() {

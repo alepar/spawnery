@@ -35,6 +35,8 @@ enum SpawnStatus {
 // declared mounts CP-side).
 message MountBinding { string name = 1; string backend_uri = 2; }
 
+// name (optional): human-readable spawn label; empty => the server assigns a default
+// (the app's display name, with a " 2"/" 3" counter suffix on collision).
 message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; string version = 4; bool pin = 5; string name = 6; }
 message CreateSpawnResponse { string spawn_id = 1; }
 
@@ -46,7 +48,7 @@ message SpawnSummary {
   SpawnStatus status  = 5;
   int64  created_at   = 6;
   int64  last_used_at = 7;
-  string name         = 8;
+  string name         = 8; // human-readable spawn label (server-assigned default if not set by the client)
 }
 // Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
 message ListSpawnsRequest  {}
