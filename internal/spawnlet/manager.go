@@ -78,6 +78,17 @@ func (m *Manager) egressEnforced() bool {
 
 func (m *Manager) Store() *Store { return m.store }
 
+// Attach returns the agent's ACP stdio for a spawn, dispatching to the backend's transport (Docker
+// stdio attach for the Docker lane, the in-pod UDS for the CRI lane).
+func (m *Manager) Attach(ctx context.Context, sp *Spawn) (*runtime.AttachedStream, error) {
+	return m.pod.Attach(ctx, &runtime.PodHandle{
+		AgentID:   sp.AgentID,
+		NetnsPath: sp.NetnsPath,
+		SidecarID: sp.SidecarID,
+		SandboxID: sp.SandboxID,
+	})
+}
+
 func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn, error) {
 	if abs, err := filepath.Abs(appPath); err == nil {
 		appPath = abs
