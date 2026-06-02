@@ -236,4 +236,9 @@ func (b *CRIPodBackend) Stop(ctx context.Context, h *runtime.PodHandle) error {
 	return nil
 }
 
+// Attach returns the agent's ACP stdio via the in-pod UDS (setns into the pod netns). Linux + cloud.
+func (b *CRIPodBackend) Attach(ctx context.Context, h *runtime.PodHandle) (*runtime.AttachedStream, error) {
+	return runtime.AttachACP(ctx, h.NetnsPath)
+}
+
 var _ runtime.PodBackend = (*CRIPodBackend)(nil)

@@ -91,6 +91,12 @@ func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec Ag
 	return nil
 }
 
+// Attach returns the agent's stdio via Docker's attach API — works on Mac (Docker Desktop) and Linux
+// (incl. rootless Docker/Podman) without root, since it rides the Docker API, not setns.
+func (d *DockerPodBackend) Attach(ctx context.Context, h *PodHandle) (*AttachedStream, error) {
+	return d.rt.Attach(ctx, h.AgentID)
+}
+
 // Stop tears down the agent then the sidecar. Empty ids (e.g. agent not yet started on the
 // fail-closed floor path) are skipped.
 func (d *DockerPodBackend) Stop(ctx context.Context, h *PodHandle) error {

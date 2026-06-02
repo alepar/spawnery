@@ -138,6 +138,36 @@ func TestDockerPodBackendStartPodCleansUpSidecarOnFailure(t *testing.T) {
 	})
 }
 
+func TestDockerPodBackendAttachUsesRuntimeAttach(t *testing.T) {
+	f := NewFake()
+	b := NewDockerPodBackend(f, "", "smoke")
+	att, err := b.Attach(context.Background(), &PodHandle{AgentID: "fake-1"})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if att == nil || att.Stdin == nil || att.Stdout == nil {
+		t.Fatalf("Attach returned an incomplete stream: %+v", att)
+	}
+	// The fake's stream is a synchronous io.Pipe (Write blocks until Read), so write concurrently —
+	// matching how the relay actually drives it (separate stdin->stdout goroutines).
+	werr := make(chan error, 1)
+	go func() {
+		_, err := att.Stdin.Write([]byte("ping"))
+		werr <- err
+	}()
+	buf := make([]byte, 4)
+	if _, err := att.Stdout.Read(buf); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if string(buf) != "ping" {
+		t.Fatalf("echo = %q", buf)
+	}
+	if err := <-werr; err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = att.Close()
+}
+
 func TestDockerPodBackendPreflight(t *testing.T) {
 	ctx := context.Background()
 	if err := NewDockerPodBackend(NewFake(), "", "smoke").Preflight(ctx); err != nil {
