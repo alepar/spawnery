@@ -72,6 +72,7 @@ type Spawn struct {
 	bun.BaseModel `bun:"table:spawns,alias:s"`
 	ID            string `bun:"id,pk"`
 	OwnerID       string `bun:"owner_id,notnull"`
+	Name          string `bun:"name,notnull"`
 	AppID         string `bun:"app_id,notnull"`
 	AppVersion    string `bun:"app_version,notnull"`
 	AppRef        string `bun:"app_ref,notnull"`
