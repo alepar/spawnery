@@ -2,6 +2,7 @@ package spawnlet
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"spawnery/internal/runtime"
@@ -22,6 +23,10 @@ func (f *fakePodBackend) StartAgent(_ context.Context, h *runtime.PodHandle, _ r
 func (f *fakePodBackend) Stop(_ context.Context, h *runtime.PodHandle) error {
 	f.stopped = h
 	return nil
+}
+func (f *fakePodBackend) Attach(_ context.Context, _ *runtime.PodHandle) (*runtime.AttachedStream, error) {
+	pr, pw := io.Pipe()
+	return &runtime.AttachedStream{Stdin: pw, Stdout: pr, Close: pw.Close}, nil
 }
 
 func TestManagerThreadsSandboxID(t *testing.T) {

@@ -209,7 +209,7 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 	agentID, err := b.createAndStart(ctx, h.SandboxID, sandboxCfg, &runtimeapi.ContainerConfig{
 		Metadata: &runtimeapi.ContainerMetadata{Name: "agent"},
 		Image:    &runtimeapi.ImageSpec{Image: spec.Image},
-		Envs:     toKeyValues(spec.Env),
+		Envs:     toKeyValues(append([]string{"ACP_ADAPTER=1"}, spec.Env...)),
 		Mounts:   toCRIMounts(spec.Mounts),
 		Linux:    linuxContainer(spec.Resources, spec.DropAllCaps, spec.ReadonlyRootfs),
 	})
@@ -234,6 +234,11 @@ func (b *CRIPodBackend) Stop(ctx context.Context, h *runtime.PodHandle) error {
 		b.removeSandbox(ctx, h.SandboxID)
 	}
 	return nil
+}
+
+// Attach returns the agent's ACP stdio via the in-pod UDS (setns into the pod netns). Linux + cloud.
+func (b *CRIPodBackend) Attach(ctx context.Context, h *runtime.PodHandle) (*runtime.AttachedStream, error) {
+	return runtime.AttachACP(ctx, h.NetnsPath)
 }
 
 var _ runtime.PodBackend = (*CRIPodBackend)(nil)

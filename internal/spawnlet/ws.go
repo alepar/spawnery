@@ -37,7 +37,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		conn.Close(websocket.StatusPolicyViolation, "unknown spawn")
 		return
 	}
-	att, err := s.attach(ctx, sp)
+	att, err := s.m.Attach(ctx, sp)
 	if err != nil {
 		conn.Close(websocket.StatusInternalError, "attach failed")
 		return

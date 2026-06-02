@@ -13,7 +13,6 @@ import (
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/gen/node/v1/nodev1connect"
-	"spawnery/internal/runtime"
 	"spawnery/internal/spawnlet"
 )
 
@@ -147,7 +146,7 @@ func (a *attacher) openSession(ctx context.Context, spawnID string) {
 	if !ok {
 		return
 	}
-	att, err := runtime.AttachACP(ctx, sp.NetnsPath)
+	att, err := a.mgr.Attach(ctx, sp)
 	if err != nil {
 		return
 	}

@@ -128,6 +128,15 @@ func TestStartAgentAndStopLifecycle(t *testing.T) {
 	if len(ag.Mounts) != 1 || ag.Mounts[0].HostPath != "/h" || ag.Mounts[0].ContainerPath != "/app" || !ag.Mounts[0].Readonly {
 		t.Fatalf("agent mount wrong: %+v", ag.Mounts)
 	}
+	var hasAdapter bool
+	for _, kv := range ag.Envs {
+		if kv.Key == "ACP_ADAPTER" && kv.Value == "1" {
+			hasAdapter = true
+		}
+	}
+	if !hasAdapter {
+		t.Fatalf("CRI agent must set ACP_ADAPTER=1; envs=%+v", ag.Envs)
+	}
 
 	if err := b.Stop(ctx, h); err != nil {
 		t.Fatalf("Stop: %v", err)

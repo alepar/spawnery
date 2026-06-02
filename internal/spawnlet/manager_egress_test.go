@@ -93,3 +93,23 @@ func TestStopRemovesFloor(t *testing.T) {
 		t.Fatal("egress floor must be removed on Stop")
 	}
 }
+
+type emptyIPRuntime struct{ *runtime.FakeRuntime }
+
+func (emptyIPRuntime) ContainerIP(context.Context, string) (string, error) { return "", nil }
+
+func TestCreateEmptyIPFailsClosedWhenEnforced(t *testing.T) {
+	rt := emptyIPRuntime{runtime.NewFake()}
+	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), EgressEnforce: true})
+	if _, err := m.Create(context.Background(), "sp1", "../../examples/secret-app", "model"); err == nil {
+		t.Fatal("enforcing spawn with no pod IP must fail closed")
+	}
+}
+
+func TestCreateEmptyIPSucceedsWhenNotEnforced(t *testing.T) {
+	rt := emptyIPRuntime{runtime.NewFake()}
+	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), NodeClass: "self-hosted", EgressEnforce: false})
+	if _, err := m.Create(context.Background(), "sp2", "../../examples/secret-app", "model"); err != nil {
+		t.Fatalf("non-enforcing spawn with no pod IP should succeed: %v", err)
+	}
+}

@@ -49,4 +49,7 @@ type PodBackend interface {
 	StartPod(ctx context.Context, spec PodSpec) (*PodHandle, error)
 	StartAgent(ctx context.Context, h *PodHandle, spec AgentSpec) error
 	Stop(ctx context.Context, h *PodHandle) error
+	// Attach returns the agent's ACP stdio stream. Docker backend = Docker stdio attach (no root);
+	// CRI backend = the in-pod UDS via AttachACP (Linux + CAP_SYS_ADMIN).
+	Attach(ctx context.Context, h *PodHandle) (*AttachedStream, error)
 }

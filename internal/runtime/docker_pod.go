@@ -52,19 +52,17 @@ func (d *DockerPodBackend) StartPod(ctx context.Context, spec PodSpec) (*PodHand
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: %w", err)
 	}
-	pid, err := d.rt.ContainerPID(ctx, sidecarID)
-	if err != nil {
-		_ = d.rt.StopContainer(context.WithoutCancel(ctx), sidecarID)
-		return nil, fmt.Errorf("sidecar pid: %w", err)
-	}
-	ip, err := d.rt.ContainerIP(ctx, sidecarID)
-	if err != nil {
-		_ = d.rt.StopContainer(context.WithoutCancel(ctx), sidecarID)
-		return nil, fmt.Errorf("sidecar ip: %w", err)
+	// Best-effort: rootless Podman (slirp4netns/pasta) has no bridge IP, and the Docker lane attaches
+	// via the Docker API (not setns), so a missing IP/PID is not fatal here. The Manager fail-closes
+	// later only if the egress floor is enforced and there's no IP to scope it.
+	ip, _ := d.rt.ContainerIP(ctx, sidecarID)
+	var netnsPath string
+	if pid, perr := d.rt.ContainerPID(ctx, sidecarID); perr == nil {
+		netnsPath = fmt.Sprintf("/proc/%d/ns/net", pid)
 	}
 	return &PodHandle{
 		PodIP:     ip,
-		NetnsPath: fmt.Sprintf("/proc/%d/ns/net", pid),
+		NetnsPath: netnsPath,
 		SidecarID: sidecarID,
 	}, nil
 }
@@ -89,6 +87,12 @@ func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec Ag
 	}
 	h.AgentID = agentID
 	return nil
+}
+
+// Attach returns the agent's stdio via Docker's attach API — works on Mac (Docker Desktop) and Linux
+// (incl. rootless Docker/Podman) without root, since it rides the Docker API, not setns.
+func (d *DockerPodBackend) Attach(ctx context.Context, h *PodHandle) (*AttachedStream, error) {
+	return d.rt.Attach(ctx, h.AgentID)
 }
 
 // Stop tears down the agent then the sidecar. Empty ids (e.g. agent not yet started on the

@@ -114,28 +114,61 @@ func (r errOnIP) ContainerIP(ctx context.Context, id string) (string, error) {
 	return "", errors.New("no ip")
 }
 
-func TestDockerPodBackendStartPodCleansUpSidecarOnFailure(t *testing.T) {
+func TestDockerPodBackendStartPodToleratesMissingIPAndPID(t *testing.T) {
 	ctx := context.Background()
-	t.Run("pid failure", func(t *testing.T) {
+	t.Run("missing ip", func(t *testing.T) {
 		f := NewFake()
-		_, err := NewDockerPodBackend(errOnPID{f}, "", "smoke").StartPod(ctx, PodSpec{SidecarImage: "s"})
-		if err == nil {
-			t.Fatal("expected error when ContainerPID fails")
+		h, err := NewDockerPodBackend(errOnIP{f}, "", "smoke").StartPod(ctx, PodSpec{SidecarImage: "s"})
+		if err != nil {
+			t.Fatalf("StartPod must tolerate a missing IP, got %v", err)
 		}
-		if !f.Stopped["fake-1"] {
-			t.Fatalf("sidecar must be stopped on pid failure; stopped=%v", f.Stopped)
+		if h.PodIP != "" {
+			t.Fatalf("PodIP = %q, want empty", h.PodIP)
+		}
+		if f.Stopped["fake-1"] {
+			t.Fatal("sidecar must NOT be stopped when the IP is merely unavailable")
 		}
 	})
-	t.Run("ip failure", func(t *testing.T) {
+	t.Run("missing pid", func(t *testing.T) {
 		f := NewFake()
-		_, err := NewDockerPodBackend(errOnIP{f}, "", "smoke").StartPod(ctx, PodSpec{SidecarImage: "s"})
-		if err == nil {
-			t.Fatal("expected error when ContainerIP fails")
+		h, err := NewDockerPodBackend(errOnPID{f}, "", "smoke").StartPod(ctx, PodSpec{SidecarImage: "s"})
+		if err != nil {
+			t.Fatalf("StartPod must tolerate a missing PID, got %v", err)
 		}
-		if !f.Stopped["fake-1"] {
-			t.Fatalf("sidecar must be stopped on ip failure; stopped=%v", f.Stopped)
+		if h.NetnsPath != "" {
+			t.Fatalf("NetnsPath = %q, want empty", h.NetnsPath)
 		}
 	})
+}
+
+func TestDockerPodBackendAttachUsesRuntimeAttach(t *testing.T) {
+	f := NewFake()
+	b := NewDockerPodBackend(f, "", "smoke")
+	att, err := b.Attach(context.Background(), &PodHandle{AgentID: "fake-1"})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if att == nil || att.Stdin == nil || att.Stdout == nil {
+		t.Fatalf("Attach returned an incomplete stream: %+v", att)
+	}
+	// The fake's stream is a synchronous io.Pipe (Write blocks until Read), so write concurrently —
+	// matching how the relay actually drives it (separate stdin->stdout goroutines).
+	werr := make(chan error, 1)
+	go func() {
+		_, err := att.Stdin.Write([]byte("ping"))
+		werr <- err
+	}()
+	buf := make([]byte, 4)
+	if _, err := att.Stdout.Read(buf); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if string(buf) != "ping" {
+		t.Fatalf("echo = %q", buf)
+	}
+	if err := <-werr; err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = att.Close()
 }
 
 func TestDockerPodBackendPreflight(t *testing.T) {
