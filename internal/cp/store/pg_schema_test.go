@@ -49,6 +49,15 @@ func TestPostgresSchemaSoundness(t *testing.T) {
 	if o, _ := st.Owners().Get(ctx, "o"); o.Email != "e2" {
 		t.Fatalf("upsert did not update: %+v", o)
 	}
+	if err := st.Spawns().Create(ctx, Spawn{
+		ID: "sp-name", OwnerID: "o", Name: "Wiki", AppID: "a", AppVersion: "1", AppRef: "r",
+		Model: "m", Status: Starting, CreatedAt: 1, LastUsedAt: 1,
+	}, nil); err != nil {
+		t.Fatalf("create spawn with name: %v", err)
+	}
+	if got, err := st.Spawns().Get(ctx, "sp-name"); err != nil || got.Name != "Wiki" {
+		t.Fatalf("pg name round-trip: got=%q err=%v want %q", got.Name, err, "Wiki")
+	}
 	bs := st.(*bunStore)
 	if _, err := bs.db.NewRaw(
 		"INSERT INTO spawns (id, owner_id, app_id, app_version, app_ref, pinned, model, status, recovered, created_at, last_used_at) " +
