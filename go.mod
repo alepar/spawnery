@@ -1,6 +1,6 @@
 module spawnery
 
-go 1.25.7
+go 1.26.0
 
 require (
 	connectrpc.com/connect v1.20.0
@@ -15,9 +15,9 @@ require (
 	golang.org/x/net v0.55.0
 	golang.org/x/sys v0.45.0
 	google.golang.org/grpc v1.81.1
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/cri-api v0.32.1
+	k8s.io/cri-api v0.36.1
 	modernc.org/sqlite v1.51.0
 )
 
@@ -34,7 +34,6 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
