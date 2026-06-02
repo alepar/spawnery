@@ -155,6 +155,10 @@ func (s *Server) ResumeSpawn(ctx context.Context, req *connect.Request[cpv1.Resu
 	if sp.Status != store.Suspended {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn is not suspended"))
 	}
+	// Placement is re-evaluated against the version's CURRENT tier at resume time (a fresh container
+	// is being allocated). If the version was reviewed at create time but has since been downgraded to
+	// unverified, placementFor will block a non-author resume — intentional: routing policy must hold
+	// for every new container, not only the first.
 	ver, err := s.st.Apps().GetVersion(ctx, sp.AppID, sp.AppVersion)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
