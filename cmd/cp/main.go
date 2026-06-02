@@ -74,6 +74,9 @@ func main() {
 		{ID: "spawnery/zork", Ref: "examples/secret-app", Version: "1.0.0",
 			DisplayName: "Zork", Summary: "The classic adventure — vertical-slice smoke test and toy.",
 			Tags: []string{"game", "demo", "smoke-test"}, Mounts: []string{"main"}},
+		{ID: "spawnery/secret-app", Ref: "examples/secret-app", Version: "1.0.0",
+			DisplayName: "Secret App", Summary: "Vertical-slice smoke test — ask it for the secret word.",
+			Tags: []string{"demo", "smoke-test"}, Mounts: []string{"main"}},
 	}
 	if err := cp.Seed(ctx, st, tokens, seedApps); err != nil {
 		log.Fatalf("store seed: %v", err)

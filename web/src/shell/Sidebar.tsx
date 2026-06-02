@@ -3,12 +3,11 @@ import { Button } from "@/components/ui/button";
 export type View = "chat" | "market" | "settings";
 
 const NAV: { id: View; label: string }[] = [
-  { id: "chat", label: "Chat" },
   { id: "market", label: "Marketplace" },
   { id: "settings", label: "Settings" },
 ];
 
-export function Sidebar({ view, onSelect }: { view: View; onSelect: (v: View) => void }) {
+export function Sidebar({ view, onSelect, activeSpawn }: { view: View; onSelect: (v: View) => void; activeSpawn?: { label: string } | null }) {
   return (
     <nav data-testid="sidebar" className="flex w-52 flex-col gap-1 border-r border-border bg-card p-3">
       <div className="px-2 pb-3 text-sm font-semibold">Spawnery</div>
@@ -24,7 +23,18 @@ export function Sidebar({ view, onSelect }: { view: View; onSelect: (v: View) =>
         </Button>
       ))}
       <div className="mt-4 px-2 text-xs text-muted-foreground">Spawns</div>
-      <div className="px-2 text-xs text-muted-foreground/70">— none yet —</div>
+      {activeSpawn ? (
+        <Button
+          data-testid="nav-spawn"
+          variant={view === "chat" ? "secondary" : "ghost"}
+          className="justify-start"
+          onClick={() => onSelect("chat")}
+        >
+          {activeSpawn.label}
+        </Button>
+      ) : (
+        <div className="px-2 text-xs text-muted-foreground/70">— none yet —</div>
+      )}
     </nav>
   );
 }
