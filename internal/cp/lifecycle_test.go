@@ -231,4 +231,9 @@ func TestSuspendSpawn(t *testing.T) {
 	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: "nope"})); connect.CodeOf(err) != connect.CodeNotFound {
 		t.Fatalf("unknown suspend: want NotFound, got %v", err)
 	}
+
+	// unauthenticated -> Unauthenticated
+	if _, err := s.SuspendSpawn(context.Background(), connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Fatalf("no owner: want Unauthenticated, got %v", err)
+	}
 }

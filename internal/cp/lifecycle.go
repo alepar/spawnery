@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -121,6 +122,12 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 	s.rt.StopOnNode(req.Msg.SpawnId)
 	s.rt.Drop(req.Msg.SpawnId)
 	if err := s.st.Spawns().SetSuspended(ctx, req.Msg.SpawnId, gen); err != nil {
+		// The container was already torn down above; we couldn't record 'suspended'. Compensate to a
+		// terminal 'error' state — MarkBootUnreachable doesn't sweep 'suspending', so the spawn would
+		// otherwise be stranded. Mirrors CreateSpawn's SetError-on-failure path.
+		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			log.Printf("SuspendSpawn %s: SetError after SetSuspended failure also failed: %v", req.Msg.SpawnId, serr)
+		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: req.Msg.SpawnId, Timestamp: time.Now().UTC()})
