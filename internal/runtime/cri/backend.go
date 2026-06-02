@@ -194,3 +194,46 @@ func linuxContainer(res runtime.Resources, dropCaps, roRootfs bool) *runtimeapi.
 	}
 	return lc
 }
+
+// StartAgent starts the (untrusted) agent container in the existing pod sandbox.
+func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, spec runtime.AgentSpec) error {
+	b.mu.Lock()
+	sandboxCfg := b.sandboxCfgs[h.SandboxID]
+	b.mu.Unlock()
+	if sandboxCfg == nil {
+		return fmt.Errorf("unknown sandbox %s", h.SandboxID)
+	}
+	if err := b.pullImage(ctx, spec.Image); err != nil {
+		return err
+	}
+	agentID, err := b.createAndStart(ctx, h.SandboxID, sandboxCfg, &runtimeapi.ContainerConfig{
+		Metadata: &runtimeapi.ContainerMetadata{Name: "agent"},
+		Image:    &runtimeapi.ImageSpec{Image: spec.Image},
+		Envs:     toKeyValues(spec.Env),
+		Mounts:   toCRIMounts(spec.Mounts),
+		Linux:    linuxContainer(spec.Resources, spec.DropAllCaps, spec.ReadonlyRootfs),
+	})
+	if err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	h.AgentID = agentID
+	return nil
+}
+
+// Stop tears down the agent + sidecar, then stops and removes the pod sandbox. Best-effort; empty
+// ids are skipped (e.g. agent never started on the fail-closed floor path).
+func (b *CRIPodBackend) Stop(ctx context.Context, h *runtime.PodHandle) error {
+	ctx = context.WithoutCancel(ctx)
+	if h.AgentID != "" {
+		_, _ = b.c.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{ContainerId: h.AgentID})
+	}
+	if h.SidecarID != "" {
+		_, _ = b.c.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{ContainerId: h.SidecarID})
+	}
+	if h.SandboxID != "" {
+		b.removeSandbox(ctx, h.SandboxID)
+	}
+	return nil
+}
+
+var _ runtime.PodBackend = (*CRIPodBackend)(nil)

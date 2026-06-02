@@ -111,6 +111,13 @@ func (f *fakeCRI) StartContainer(_ context.Context, req *runtimeapi.StartContain
 	return &runtimeapi.StartContainerResponse{}, nil
 }
 
+func (f *fakeCRI) StopContainer(_ context.Context, req *runtimeapi.StopContainerRequest) (*runtimeapi.StopContainerResponse, error) {
+	f.mu.Lock()
+	f.stopped = append(f.stopped, req.ContainerId)
+	f.mu.Unlock()
+	return &runtimeapi.StopContainerResponse{}, nil
+}
+
 func (f *fakeCRI) ImageStatus(_ context.Context, req *runtimeapi.ImageStatusRequest) (*runtimeapi.ImageStatusResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

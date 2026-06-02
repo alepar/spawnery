@@ -92,3 +92,59 @@ func TestStartPodCleansUpSandboxOnFailure(t *testing.T) {
 		t.Fatalf("sandbox must be removed on failure; removeSandbox=%v", f.removeSandbox)
 	}
 }
+
+func TestStartAgentAndStopLifecycle(t *testing.T) {
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+
+	h, err := b.StartPod(ctx, runtime.PodSpec{ID: "spawn-7", SidecarImage: "sidecar:dev", Resources: runtime.Resources{MemoryBytes: 1 << 20}})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+
+	err = b.StartAgent(ctx, h, runtime.AgentSpec{
+		Image:          "goose:dev",
+		Env:            []string{"SPAWN_MODEL=m"},
+		Mounts:         []runtime.Mount{{HostPath: "/h", ContainerPath: "/app", ReadOnly: true}},
+		Resources:      runtime.Resources{MemoryBytes: 1 << 20},
+		DropAllCaps:    true,
+		ReadonlyRootfs: true,
+	})
+	if err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+	if h.AgentID != "ctr-2" {
+		t.Fatalf("AgentID = %q", h.AgentID)
+	}
+	if len(f.created) != 2 || f.createdNames[1] != "agent" || f.createSandbox[1] != "sandbox-1" {
+		t.Fatalf("agent create wrong: names=%v", f.createdNames)
+	}
+	ag := f.created[1]
+	if ag.Linux.SecurityContext == nil || len(ag.Linux.SecurityContext.Capabilities.DropCapabilities) != 1 ||
+		ag.Linux.SecurityContext.Capabilities.DropCapabilities[0] != "ALL" || !ag.Linux.SecurityContext.ReadonlyRootfs {
+		t.Fatalf("agent hardening wrong: %+v", ag.Linux.SecurityContext)
+	}
+	if len(ag.Mounts) != 1 || ag.Mounts[0].HostPath != "/h" || ag.Mounts[0].ContainerPath != "/app" || !ag.Mounts[0].Readonly {
+		t.Fatalf("agent mount wrong: %+v", ag.Mounts)
+	}
+
+	if err := b.Stop(ctx, h); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if len(f.stopped) != 2 || f.stopped[0] != "ctr-2" || f.stopped[1] != "ctr-1" {
+		t.Fatalf("stopped order = %v", f.stopped)
+	}
+	if len(f.stopSandbox) != 1 || f.stopSandbox[0] != "sandbox-1" || len(f.removeSandbox) != 1 || f.removeSandbox[0] != "sandbox-1" {
+		t.Fatalf("sandbox teardown wrong: stop=%v remove=%v", f.stopSandbox, f.removeSandbox)
+	}
+}
+
+func TestStartAgentUnknownSandbox(t *testing.T) {
+	c, _ := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	err := b.StartAgent(context.Background(), &runtime.PodHandle{SandboxID: "nope"}, runtime.AgentSpec{Image: "x"})
+	if err == nil {
+		t.Fatal("StartAgent must error for an unknown sandbox")
+	}
+}
