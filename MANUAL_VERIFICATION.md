@@ -217,6 +217,58 @@ IP so it's robust where outbound DNS is restricted.
 
 ---
 
+## N. runsc one-sandbox pod end-to-end (`sp-ghx`, closes `sp-vaw`) 🔒
+
+**Summary.** With `CONTAINER_RUNTIME=runsc`, the node runs the spawn pod as a single containerd CRI
+sandbox (handler `runsc`) holding the sidecar + agent containers — so the agent reaches the sidecar
+on `127.0.0.1:8080` (which a per-container gVisor pod cannot do, the `sp-vaw` blocker) — with the
+egress floor on the `SPAWNLET-EGRESS` chain. Everything below the wire-up is hermetically tested; this
+checklist is the **real-host** validation that closes `sp-vaw`. Needs a privileged host with
+containerd + runsc + CNI (see `deployment.md` §5 for the containerd `config.toml` handler + CNI
+conflist prerequisites).
+
+**Host prep (one-time):**
+```bash
+# 1. runsc + shim on PATH; runsc CRI handler registered in /etc/containerd/config.toml:
+#      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+#        runtime_type = "io.containerd.runsc.v1"
+#    then: sudo systemctl restart containerd
+# 2. CNI reference plugins in /opt/cni/bin + a bridge/firewall/portmap conflist in /etc/cni/net.d
+# 3. images into containerd's k8s.io namespace (separate from Docker's moby):
+make images   # builds spawnery/sidecar:dev + spawnery/goose:dev (Docker)
+for img in spawnery/sidecar:dev spawnery/goose:dev; do \
+  docker save "$img" | sudo ctr -n k8s.io images import - ; done
+```
+
+**Run the runsc spawn (standalone node + spawnctl):**
+```bash
+make bin/spawnlet bin/spawnctl
+sudo env "PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin" \
+  CONTAINER_RUNTIME=runsc AGENT_IMAGE=spawnery/goose:dev SIDECAR_IMAGE=spawnery/sidecar:dev \
+  OPENROUTER_API_KEY="$OPENROUTER_API_KEY" DATA_ROOT=/tmp/spawns \
+  bin/spawnlet &                                  # standalone mode (no CP_ADDR)
+printf 'What is the secret word?\n' | \
+  bin/spawnctl -addr http://127.0.0.1:9090 -app examples/secret-app -model free
+```
+
+**Verify:**
+- [ ] 🔒 The node logs a successful **runsc preflight** (CRI runtime + network ready) at startup; it
+      exits hard if containerd/runsc/CNI is misconfigured (not at first spawn).
+- [ ] 🔒 The spawn reaches **ACTIVE** and `spawnctl` gets a real model reply (e.g. "The secret word is
+      …") — i.e. the agent reached the sidecar on `127.0.0.1:8080` **under runsc** (the `sp-vaw` fix).
+- [ ] 🔒 `sudo crictl pods` / `crictl ps` show one pod sandbox (handler `runsc`) with two containers
+      (sidecar + agent); `sudo iptables -S SPAWNLET-EGRESS` shows the per-pod `-s <podIP>` floor rules
+      and `sudo iptables -S FORWARD | head -1` shows the `-j SPAWNLET-EGRESS` jump at position 1.
+- [ ] 🔒 Inside the agent container, `curl --max-time 3 http://169.254.169.254/` and an RFC1918 host
+      are **blocked** while public egress works — the floor enforces under the CRI pod (mirror of
+      `just test-cni-egress`, but on the real runsc pod).
+- [ ] 🔒 After `spawnctl`/stop, the pod sandbox is removed (`crictl pods` clean) and the per-pod
+      `SPAWNLET-EGRESS` rules are gone (`iptables -S SPAWNLET-EGRESS` back to just the chain).
+
+Once these pass on a host, **close `sp-vaw`** (the empirical gVisor-pod fix is confirmed).
+
+---
+
 ## Notes / not-yet-verifiable here
 - **gVisor** (`CONTAINER_RUNTIME=runsc`) — needs `runsc` on the host (absent in the dev sandbox).
 - **Full DNS resolution end-to-end** — this dev sandbox blocks outbound DNS regardless of the floor; verify on a host with working DNS.

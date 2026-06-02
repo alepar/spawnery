@@ -76,6 +76,8 @@ A **spawn** = a two-container pod (sidecar + agent) sharing one network namespac
 | `CPU_LIMIT` | `1.0` | per-spawn CPU cap (cores; cgroup NanoCPUs). |
 | `PIDS_LIMIT` | `256` | per-spawn pids cap (cgroup, fork-bomb guard). |
 | `CONTAINER_RUNTIME` | _(empty)_ | OCI runtime, e.g. `runsc` (gVisor) for stronger isolation. Empty = Docker default. **gVisor must be installed on the host** (not assumed); opt-in, not fail-closed. **When set, the spawnlet runs a startup preflight (smoke container under the runtime) and exits hard if it fails.** |
+| `CRI_ENDPOINT` | `unix:///run/containerd/containerd.sock` | only used when `CONTAINER_RUNTIME=runsc`: the containerd CRI socket the node dials. |
+| `CRI_RUNTIME_HANDLER` | `runsc` | only used when `CONTAINER_RUNTIME=runsc`: the containerd runtime handler name registered in `config.toml`. |
 | `HARDEN_ROOTFS` | `false` | agent read-only rootfs + `/tmp` tmpfs (default off pending per-agent-image validation). |
 
 Daemon-level (not env): set Docker `"userns-remap"` in `/etc/docker/daemon.json` to remap in-sandbox
