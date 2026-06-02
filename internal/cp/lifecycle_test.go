@@ -2,6 +2,7 @@ package cp
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -108,6 +109,16 @@ func TestRenameSpawn(t *testing.T) {
 	if _, err := s.RenameSpawn(ctx, connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "sp2", Name: "Renamed"})); err != nil {
 		t.Fatalf("duplicate rename must be allowed, got %v", err)
 	}
+	resp2, _ := s.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+	var got2 string
+	for _, sm := range resp2.Msg.Spawns {
+		if sm.SpawnId == "sp2" {
+			got2 = sm.Name
+		}
+	}
+	if got2 != "Renamed" {
+		t.Fatalf("sp2 name=%q want %q (duplicate allowed + persisted)", got2, "Renamed")
+	}
 
 	// empty name -> InvalidArgument
 	if _, err := s.RenameSpawn(ctx, connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "sp1", Name: "   "})); connect.CodeOf(err) != connect.CodeInvalidArgument {
@@ -115,12 +126,13 @@ func TestRenameSpawn(t *testing.T) {
 	}
 
 	// too long (>80 runes) -> InvalidArgument
-	long := ""
-	for i := 0; i < 81; i++ {
-		long += "x"
-	}
+	long := strings.Repeat("x", 81)
 	if _, err := s.RenameSpawn(ctx, connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "sp1", Name: long})); connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("long name: want InvalidArgument, got %v", err)
+	}
+	// exactly 80 runes -> allowed (boundary)
+	if _, err := s.RenameSpawn(ctx, connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "sp1", Name: strings.Repeat("x", 80)})); err != nil {
+		t.Fatalf("80-rune name: want success, got %v", err)
 	}
 
 	// foreign owner -> PermissionDenied

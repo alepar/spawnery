@@ -2,6 +2,7 @@ package cp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,6 +12,10 @@ import (
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/store"
 )
+
+// maxSpawnNameRunes caps a spawn display name (rune count). Shared by RenameSpawn (and any future
+// name validation).
+const maxSpawnNameRunes = 80
 
 // toSummaryStatus maps the store's durable status to the cp.v1 wire enum.
 func toSummaryStatus(s store.Status) cpv1.SpawnStatus {
@@ -58,9 +63,11 @@ func (s *Server) RenameSpawn(ctx context.Context, req *connect.Request[cpv1.Rena
 	if name == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("name must not be empty"))
 	}
-	if len([]rune(name)) > 80 {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("name too long (max 80)"))
+	if len([]rune(name)) > maxSpawnNameRunes {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("name too long (max %d)", maxSpawnNameRunes))
 	}
+	unlock := s.locks.Lock(req.Msg.SpawnId)
+	defer unlock()
 	sp, err := s.st.Spawns().Get(ctx, req.Msg.SpawnId)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
@@ -69,6 +76,9 @@ func (s *Server) RenameSpawn(ctx context.Context, req *connect.Request[cpv1.Rena
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
 	}
 	if err := s.st.Spawns().Rename(ctx, req.Msg.SpawnId, name); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&cpv1.RenameSpawnResponse{}), nil
