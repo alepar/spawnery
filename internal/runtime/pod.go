@@ -37,6 +37,7 @@ type PodHandle struct {
 	NetnsPath string
 	SidecarID string // Docker backend: the sidecar container id (netns owner)
 	AgentID   string // Docker backend: the agent container id (set by StartAgent)
+	SandboxID string // CRI backend: the pod sandbox id (Docker backend leaves empty)
 }
 
 // PodBackend runs a spawn pod: a sidecar + an agent sharing one network namespace, with the model
