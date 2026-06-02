@@ -61,6 +61,9 @@ const (
 	// SpawnServiceRecreateSpawnProcedure is the fully-qualified name of the SpawnService's
 	// RecreateSpawn RPC.
 	SpawnServiceRecreateSpawnProcedure = "/cp.v1.SpawnService/RecreateSpawn"
+	// SpawnServiceRenameSpawnProcedure is the fully-qualified name of the SpawnService's RenameSpawn
+	// RPC.
+	SpawnServiceRenameSpawnProcedure = "/cp.v1.SpawnService/RenameSpawn"
 	// SpawnServiceDeleteSpawnProcedure is the fully-qualified name of the SpawnService's DeleteSpawn
 	// RPC.
 	SpawnServiceDeleteSpawnProcedure = "/cp.v1.SpawnService/DeleteSpawn"
@@ -82,6 +85,7 @@ var (
 	spawnServiceSuspendSpawnMethodDescriptor       = spawnServiceServiceDescriptor.Methods().ByName("SuspendSpawn")
 	spawnServiceResumeSpawnMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("ResumeSpawn")
 	spawnServiceRecreateSpawnMethodDescriptor      = spawnServiceServiceDescriptor.Methods().ByName("RecreateSpawn")
+	spawnServiceRenameSpawnMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("RenameSpawn")
 	spawnServiceDeleteSpawnMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("DeleteSpawn")
 	spawnServiceStopSpawnMethodDescriptor          = spawnServiceServiceDescriptor.Methods().ByName("StopSpawn")
 )
@@ -99,6 +103,7 @@ type SpawnServiceClient interface {
 	SuspendSpawn(context.Context, *connect.Request[v1.SuspendSpawnRequest]) (*connect.Response[v1.SuspendSpawnResponse], error)
 	ResumeSpawn(context.Context, *connect.Request[v1.ResumeSpawnRequest]) (*connect.Response[v1.ResumeSpawnResponse], error)
 	RecreateSpawn(context.Context, *connect.Request[v1.RecreateSpawnRequest]) (*connect.Response[v1.RecreateSpawnResponse], error)
+	RenameSpawn(context.Context, *connect.Request[v1.RenameSpawnRequest]) (*connect.Response[v1.RenameSpawnResponse], error)
 	DeleteSpawn(context.Context, *connect.Request[v1.DeleteSpawnRequest]) (*connect.Response[v1.DeleteSpawnResponse], error)
 	StopSpawn(context.Context, *connect.Request[v1.StopSpawnRequest]) (*connect.Response[v1.StopSpawnResponse], error)
 }
@@ -179,6 +184,12 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceRecreateSpawnMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		renameSpawn: connect.NewClient[v1.RenameSpawnRequest, v1.RenameSpawnResponse](
+			httpClient,
+			baseURL+SpawnServiceRenameSpawnProcedure,
+			connect.WithSchema(spawnServiceRenameSpawnMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 		deleteSpawn: connect.NewClient[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse](
 			httpClient,
 			baseURL+SpawnServiceDeleteSpawnProcedure,
@@ -207,6 +218,7 @@ type spawnServiceClient struct {
 	suspendSpawn       *connect.Client[v1.SuspendSpawnRequest, v1.SuspendSpawnResponse]
 	resumeSpawn        *connect.Client[v1.ResumeSpawnRequest, v1.ResumeSpawnResponse]
 	recreateSpawn      *connect.Client[v1.RecreateSpawnRequest, v1.RecreateSpawnResponse]
+	renameSpawn        *connect.Client[v1.RenameSpawnRequest, v1.RenameSpawnResponse]
 	deleteSpawn        *connect.Client[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse]
 	stopSpawn          *connect.Client[v1.StopSpawnRequest, v1.StopSpawnResponse]
 }
@@ -266,6 +278,11 @@ func (c *spawnServiceClient) RecreateSpawn(ctx context.Context, req *connect.Req
 	return c.recreateSpawn.CallUnary(ctx, req)
 }
 
+// RenameSpawn calls cp.v1.SpawnService.RenameSpawn.
+func (c *spawnServiceClient) RenameSpawn(ctx context.Context, req *connect.Request[v1.RenameSpawnRequest]) (*connect.Response[v1.RenameSpawnResponse], error) {
+	return c.renameSpawn.CallUnary(ctx, req)
+}
+
 // DeleteSpawn calls cp.v1.SpawnService.DeleteSpawn.
 func (c *spawnServiceClient) DeleteSpawn(ctx context.Context, req *connect.Request[v1.DeleteSpawnRequest]) (*connect.Response[v1.DeleteSpawnResponse], error) {
 	return c.deleteSpawn.CallUnary(ctx, req)
@@ -289,6 +306,7 @@ type SpawnServiceHandler interface {
 	SuspendSpawn(context.Context, *connect.Request[v1.SuspendSpawnRequest]) (*connect.Response[v1.SuspendSpawnResponse], error)
 	ResumeSpawn(context.Context, *connect.Request[v1.ResumeSpawnRequest]) (*connect.Response[v1.ResumeSpawnResponse], error)
 	RecreateSpawn(context.Context, *connect.Request[v1.RecreateSpawnRequest]) (*connect.Response[v1.RecreateSpawnResponse], error)
+	RenameSpawn(context.Context, *connect.Request[v1.RenameSpawnRequest]) (*connect.Response[v1.RenameSpawnResponse], error)
 	DeleteSpawn(context.Context, *connect.Request[v1.DeleteSpawnRequest]) (*connect.Response[v1.DeleteSpawnResponse], error)
 	StopSpawn(context.Context, *connect.Request[v1.StopSpawnRequest]) (*connect.Response[v1.StopSpawnResponse], error)
 }
@@ -365,6 +383,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceRecreateSpawnMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceRenameSpawnHandler := connect.NewUnaryHandler(
+		SpawnServiceRenameSpawnProcedure,
+		svc.RenameSpawn,
+		connect.WithSchema(spawnServiceRenameSpawnMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	spawnServiceDeleteSpawnHandler := connect.NewUnaryHandler(
 		SpawnServiceDeleteSpawnProcedure,
 		svc.DeleteSpawn,
@@ -401,6 +425,8 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceResumeSpawnHandler.ServeHTTP(w, r)
 		case SpawnServiceRecreateSpawnProcedure:
 			spawnServiceRecreateSpawnHandler.ServeHTTP(w, r)
+		case SpawnServiceRenameSpawnProcedure:
+			spawnServiceRenameSpawnHandler.ServeHTTP(w, r)
 		case SpawnServiceDeleteSpawnProcedure:
 			spawnServiceDeleteSpawnHandler.ServeHTTP(w, r)
 		case SpawnServiceStopSpawnProcedure:
@@ -456,6 +482,10 @@ func (UnimplementedSpawnServiceHandler) ResumeSpawn(context.Context, *connect.Re
 
 func (UnimplementedSpawnServiceHandler) RecreateSpawn(context.Context, *connect.Request[v1.RecreateSpawnRequest]) (*connect.Response[v1.RecreateSpawnResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RecreateSpawn is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) RenameSpawn(context.Context, *connect.Request[v1.RenameSpawnRequest]) (*connect.Response[v1.RenameSpawnResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RenameSpawn is not implemented"))
 }
 
 func (UnimplementedSpawnServiceHandler) DeleteSpawn(context.Context, *connect.Request[v1.DeleteSpawnRequest]) (*connect.Response[v1.DeleteSpawnResponse], error) {
