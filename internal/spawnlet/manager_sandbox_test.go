@@ -19,7 +19,10 @@ func (f *fakePodBackend) StartAgent(_ context.Context, h *runtime.PodHandle, _ r
 	h.AgentID = "ag"
 	return nil
 }
-func (f *fakePodBackend) Stop(_ context.Context, h *runtime.PodHandle) error { f.stopped = h; return nil }
+func (f *fakePodBackend) Stop(_ context.Context, h *runtime.PodHandle) error {
+	f.stopped = h
+	return nil
+}
 
 func TestManagerThreadsSandboxID(t *testing.T) {
 	m := NewManager(runtime.NewFake(), ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
