@@ -114,9 +114,9 @@ New repo methods (extend the existing guarded-transition pattern; reuse the
 
 ### Slice 1 tests (hermetic, `:memory:` + `-race`)
 
-- store: name autogen picks the next free suffix; `UNIQUE(owner_id,name)` rejects a
-  duplicate non-deleted name; `Rename` updates + `ErrNotFound`; suspend/resume
-  transitions are status+generation guarded; deleted rows free their name for reuse.
+- store: the `name` column round-trips and the store allows duplicate names (no
+  uniqueness constraint — dedup is app-side); `Rename` updates + `ErrNotFound` on
+  missing/deleted; suspend/resume transitions are status+generation guarded.
 - CP: `RenameSpawn` owner guard + length cap + duplicate-allowed; `CreateSpawn`
   autogen + collision suffix; `SuspendSpawn` reaches `suspended` and tears down;
   `ResumeSpawn` reaches `active` with a bumped generation and re-provisions; resume
