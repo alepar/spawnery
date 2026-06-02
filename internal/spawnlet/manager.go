@@ -144,6 +144,11 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 	// Egress floor: applied after the pod IP exists, before the untrusted agent starts (fail-closed).
 	var floorIP string
 	if m.egressEnforced() {
+		if h.PodIP == "" {
+			_ = m.pod.Stop(ctx, h)
+			finalizeAll()
+			return nil, fmt.Errorf("egress floor (fail-closed): no pod IP to scope the floor")
+		}
 		if ferr := m.fw.Apply(ctx, firewall.Rules(h.PodIP, m.cfg.EgressAllowCIDRs)); ferr != nil {
 			_ = m.pod.Stop(ctx, h)
 			finalizeAll()

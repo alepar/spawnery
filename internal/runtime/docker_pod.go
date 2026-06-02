@@ -52,19 +52,17 @@ func (d *DockerPodBackend) StartPod(ctx context.Context, spec PodSpec) (*PodHand
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: %w", err)
 	}
-	pid, err := d.rt.ContainerPID(ctx, sidecarID)
-	if err != nil {
-		_ = d.rt.StopContainer(context.WithoutCancel(ctx), sidecarID)
-		return nil, fmt.Errorf("sidecar pid: %w", err)
-	}
-	ip, err := d.rt.ContainerIP(ctx, sidecarID)
-	if err != nil {
-		_ = d.rt.StopContainer(context.WithoutCancel(ctx), sidecarID)
-		return nil, fmt.Errorf("sidecar ip: %w", err)
+	// Best-effort: rootless Podman (slirp4netns/pasta) has no bridge IP, and the Docker lane attaches
+	// via the Docker API (not setns), so a missing IP/PID is not fatal here. The Manager fail-closes
+	// later only if the egress floor is enforced and there's no IP to scope it.
+	ip, _ := d.rt.ContainerIP(ctx, sidecarID)
+	var netnsPath string
+	if pid, perr := d.rt.ContainerPID(ctx, sidecarID); perr == nil {
+		netnsPath = fmt.Sprintf("/proc/%d/ns/net", pid)
 	}
 	return &PodHandle{
 		PodIP:     ip,
-		NetnsPath: fmt.Sprintf("/proc/%d/ns/net", pid),
+		NetnsPath: netnsPath,
 		SidecarID: sidecarID,
 	}, nil
 }

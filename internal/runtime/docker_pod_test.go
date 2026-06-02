@@ -114,26 +114,29 @@ func (r errOnIP) ContainerIP(ctx context.Context, id string) (string, error) {
 	return "", errors.New("no ip")
 }
 
-func TestDockerPodBackendStartPodCleansUpSidecarOnFailure(t *testing.T) {
+func TestDockerPodBackendStartPodToleratesMissingIPAndPID(t *testing.T) {
 	ctx := context.Background()
-	t.Run("pid failure", func(t *testing.T) {
+	t.Run("missing ip", func(t *testing.T) {
 		f := NewFake()
-		_, err := NewDockerPodBackend(errOnPID{f}, "", "smoke").StartPod(ctx, PodSpec{SidecarImage: "s"})
-		if err == nil {
-			t.Fatal("expected error when ContainerPID fails")
+		h, err := NewDockerPodBackend(errOnIP{f}, "", "smoke").StartPod(ctx, PodSpec{SidecarImage: "s"})
+		if err != nil {
+			t.Fatalf("StartPod must tolerate a missing IP, got %v", err)
 		}
-		if !f.Stopped["fake-1"] {
-			t.Fatalf("sidecar must be stopped on pid failure; stopped=%v", f.Stopped)
+		if h.PodIP != "" {
+			t.Fatalf("PodIP = %q, want empty", h.PodIP)
+		}
+		if f.Stopped["fake-1"] {
+			t.Fatal("sidecar must NOT be stopped when the IP is merely unavailable")
 		}
 	})
-	t.Run("ip failure", func(t *testing.T) {
+	t.Run("missing pid", func(t *testing.T) {
 		f := NewFake()
-		_, err := NewDockerPodBackend(errOnIP{f}, "", "smoke").StartPod(ctx, PodSpec{SidecarImage: "s"})
-		if err == nil {
-			t.Fatal("expected error when ContainerIP fails")
+		h, err := NewDockerPodBackend(errOnPID{f}, "", "smoke").StartPod(ctx, PodSpec{SidecarImage: "s"})
+		if err != nil {
+			t.Fatalf("StartPod must tolerate a missing PID, got %v", err)
 		}
-		if !f.Stopped["fake-1"] {
-			t.Fatalf("sidecar must be stopped on ip failure; stopped=%v", f.Stopped)
+		if h.NetnsPath != "" {
+			t.Fatalf("NetnsPath = %q, want empty", h.NetnsPath)
 		}
 	})
 }
