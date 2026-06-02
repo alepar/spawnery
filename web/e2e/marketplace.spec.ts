@@ -3,17 +3,8 @@ import { test, expect } from "@playwright/test";
 test("marketplace browse→detail→spawn flow", async ({ page }) => {
   await page.goto("/");
 
-  // Wait for initial app to be ready (absorbs container cold start, same as chat.spec).
-  await expect(page.getByTestId("status")).toHaveText("ready", { timeout: 40_000 });
-
-  // Navigate to the marketplace via sidebar.
-  await page.getByTestId("nav-market").click();
-
-  // Browse tab should be active by default; wait for at least one app card to appear.
-  // global-setup seeds the CP with the reviewed catalog (spawnery/wiki etc.).
-  // We target the app-card- prefix without pinning the exact id so the test
-  // stays green if seeding order changes; then we navigate into spawnery/wiki
-  // specifically, which is the first card the CP returns.
+  // Marketplace is the default view now (no auto-spawn). Browse is the default tab; global-setup
+  // seeds the reviewed catalog (spawnery/wiki etc.). Wait for a seeded card to appear.
   const wikiCard = page.getByTestId("app-card-spawnery/wiki");
   await expect(wikiCard).toBeVisible({ timeout: 20_000 });
 
@@ -33,10 +24,9 @@ test("marketplace browse→detail→spawn flow", async ({ page }) => {
 
 test("marketplace browse tab shows app grid and detail back-button returns to browse", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByTestId("status")).toHaveText("ready", { timeout: 40_000 });
 
-  await page.getByTestId("nav-market").click();
-  await expect(page.getByTestId("marketplace")).toBeVisible();
+  // Marketplace is the default view now (no auto-spawn).
+  await expect(page.getByTestId("marketplace")).toBeVisible({ timeout: 20_000 });
 
   // The browse tab is active by default; verify the tab button exists.
   await expect(page.getByTestId("market-tab-browse")).toBeVisible();

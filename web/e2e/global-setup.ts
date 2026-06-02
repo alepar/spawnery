@@ -61,6 +61,10 @@ export default async function globalSetup() {
       SIDECAR_IMAGE: "spawnery/sidecar:dev",
       OPENROUTER_API_KEY: "unused",
       DATA_ROOT: path.join(REPO, ".spawns"),
+      // Root-free e2e: self-hosted + floor off (the egress floor is the only piece that needs root;
+      // the ACP relay uses the Docker API). Matches the rootless self-hosted lane (sp-11p).
+      NODE_CLASS: "self-hosted",
+      EGRESS_ENFORCE: "false",
     },
     stdio: "inherit",
   });
