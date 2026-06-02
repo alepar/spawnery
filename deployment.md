@@ -36,9 +36,10 @@ A **spawn** = a two-container pod (sidecar + agent) sharing one network namespac
   - the spawnlet process running with **`CAP_NET_ADMIN`** (in practice: root, or a capability grant),
     because it enters each pod's network namespace to install firewall rules.
   - Without these, a cloud node **fails closed** — spawns will not start (by design).
-- The spawnlet needs **`CAP_SYS_ADMIN`** (root) to `setns` into each pod's network namespace for the
-  ACP socket bridge — on cloud nodes this is already required by the egress floor; on an unprivileged
-  self-hosted dev node it is now required even with the floor disabled.
+- The ACP relay transport is **per backend**: the **Docker/runc** lane attaches over the Docker API
+  (no `setns`, no root — works on macOS Docker Desktop + Linux incl. rootless Docker/Podman); the
+  **CRI/runsc** lane uses an in-pod socket reached via `setns`, needing **`CAP_SYS_ADMIN`** — but
+  that's the cloud node, already root for the egress floor. So **only cloud (CRI) nodes need root**.
 - The agent/sidecar **images** (`AGENT_IMAGE`, `SIDECAR_IMAGE`) must be present/pullable on the host.
 - A writable `DATA_ROOT` for per-spawn mount dirs.
 
@@ -82,6 +83,30 @@ A **spawn** = a two-container pod (sidecar + agent) sharing one network namespac
 
 Daemon-level (not env): set Docker `"userns-remap"` in `/etc/docker/daemon.json` to remap in-sandbox
 root to an unprivileged host UID. The agent container always runs `--cap-drop=ALL`.
+
+### Rootless self-hosted nodes (no root)
+
+A **self-hosted Docker/runc node runs without root** — the only thing that needed root was the egress
+floor (iptables), which self-hosted disables. Config:
+
+```bash
+NODE_CLASS=self-hosted
+EGRESS_ENFORCE=false      # the floor is the only root-needing piece; opt out (it can't run on macOS anyway)
+# CONTAINER_RUNTIME unset → Docker/runc lane (the ACP relay uses the Docker API, no setns/root)
+```
+
+Docker access flavors (all with an unprivileged spawnlet process):
+- **Docker group / Docker Desktop (macOS):** the spawnlet talks to the daemon over the Docker socket.
+- **Rootless Docker:** point `DOCKER_HOST` at the rootless socket — no privileged daemon, no docker group.
+- **Rootless Podman:** Podman exposes a Docker-compatible socket; point the node at it —
+  `DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock` (run `podman system service` first). No
+  new backend; Podman *is* the Docker backend over a different socket. Caveats: rootless networking
+  (slirp4netns/pasta) gives the container **no bridge IP** (the node tolerates this — the floor is off
+  anyway, and agent↔sidecar loopback is unaffected); rootless cgroup limits need cgroup-v2 + systemd
+  delegation; `ContainerAttach` over Podman's compat API should be verified on the host.
+
+The **CRI/runsc cloud lane still needs root** (Linux), but only for the egress floor — that's the
+multi-tenant enforcing node where root is expected.
 
 ## 5. The egress floor (cloud nodes) — prereqs & verification
 
