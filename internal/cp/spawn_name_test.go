@@ -1,6 +1,47 @@
 package cp
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"connectrpc.com/connect"
+
+	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/internal/cp/auth"
+)
+
+func TestCreateSpawnAutogeneratesNameWithCollisionCounter(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	sp1 := createActive(t, s, reg, &cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"})
+	if sp1.Name != "secret-app" {
+		t.Fatalf("first spawn name=%q want %q", sp1.Name, "secret-app")
+	}
+	sp2 := createActive(t, s, reg, &cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"})
+	if sp2.Name != "secret-app 2" {
+		t.Fatalf("second spawn name=%q want %q", sp2.Name, "secret-app 2")
+	}
+}
+
+func TestCreateSpawnUsesExplicitName(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	sp := createActive(t, s, reg, &cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m", Name: "  My Spawn  "})
+	if sp.Name != "My Spawn" {
+		t.Fatalf("explicit name=%q want %q (trimmed)", sp.Name, "My Spawn")
+	}
+}
+
+func TestListSpawnsReturnsName(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	createActive(t, s, reg, &cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"})
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Spawns) != 1 || resp.Msg.Spawns[0].Name != "secret-app" {
+		t.Fatalf("ListSpawns name not populated: %+v", resp.Msg.Spawns)
+	}
+}
 
 func TestNextSpawnName(t *testing.T) {
 	cases := []struct {

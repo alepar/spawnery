@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -181,9 +182,26 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	unlock := s.locks.Lock(spawnID)
 	defer unlock()
 
+	name := strings.TrimSpace(req.Msg.Name)
+	if name == "" {
+		base := appID
+		if app, aerr := s.st.Apps().Get(ctx, appID); aerr == nil && app.DisplayName != "" {
+			base = app.DisplayName
+		}
+		existing, lerr := s.st.Spawns().ListByOwner(ctx, owner)
+		if lerr != nil {
+			return nil, connect.NewError(connect.CodeInternal, lerr)
+		}
+		taken := make(map[string]bool, len(existing))
+		for _, e := range existing {
+			taken[e.Name] = true
+		}
+		name = nextSpawnName(base, taken)
+	}
+
 	now := time.Now().Unix()
 	sp := store.Spawn{
-		ID: spawnID, OwnerID: owner, AppID: appID, AppVersion: ver.Version, AppRef: ver.Ref, Pinned: req.Msg.Pin,
+		ID: spawnID, OwnerID: owner, Name: name, AppID: appID, AppVersion: ver.Version, AppRef: ver.Ref, Pinned: req.Msg.Pin,
 		Model: req.Msg.Model, Status: store.Starting, CreatedAt: now, LastUsedAt: now,
 	}
 	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, mounts) }); err != nil {
