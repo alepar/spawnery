@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -16,15 +17,13 @@ import (
 	"spawnery/gen/spawn/v1/spawnv1connect"
 	"spawnery/internal/node"
 	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/cri"
 	"spawnery/internal/spawnlet"
+	"spawnery/internal/spawnlet/firewall"
 )
 
 func main() {
-	rt, err := runtime.NewDocker()
-	if err != nil {
-		log.Fatalf("docker: %v", err)
-	}
-	mgr := spawnlet.NewManager(rt, spawnlet.ManagerConfig{
+	cfg := spawnlet.ManagerConfig{
 		AgentImage:    env("AGENT_IMAGE", "spawnery/stubagent:dev"),
 		SidecarImage:  env("SIDECAR_IMAGE", "spawnery/sidecar:dev"),
 		OpenRouterKey: os.Getenv("OPENROUTER_API_KEY"),
@@ -39,7 +38,11 @@ func main() {
 		PidsLimit:        getenvInt64("PIDS_LIMIT", 256),
 		ContainerRuntime: os.Getenv("CONTAINER_RUNTIME"),
 		HardenRootfs:     getenvBool("HARDEN_ROOTFS", false),
-	})
+	}
+	mgr, err := buildManager(cfg)
+	if err != nil {
+		log.Fatalf("manager init: %v", err)
+	}
 	ctx := context.Background()
 	if err := mgr.PreflightRuntime(ctx); err != nil {
 		log.Fatalf("container runtime preflight failed: %v", err)
@@ -66,6 +69,25 @@ func main() {
 	addr := env("SPAWNLET_ADDR", "127.0.0.1:9090")
 	log.Printf("spawnlet listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{})))
+}
+
+// buildManager selects the pod backend + egress floor by CONTAINER_RUNTIME: runsc -> a containerd
+// CRI pod backend + the SPAWNLET-EGRESS floor; anything else -> the Docker backend + DOCKER-USER.
+func buildManager(cfg spawnlet.ManagerConfig) (*spawnlet.Manager, error) {
+	if cfg.ContainerRuntime == "runsc" {
+		endpoint := env("CRI_ENDPOINT", "unix:///run/containerd/containerd.sock")
+		client, err := cri.Dial(endpoint)
+		if err != nil {
+			return nil, err
+		}
+		backend := cri.NewCRIPodBackend(client, env("CRI_RUNTIME_HANDLER", "runsc"))
+		return spawnlet.NewManagerWithBackend(backend, firewall.NewCNIFloorApplier(), cfg), nil
+	}
+	rt, err := runtime.NewDocker()
+	if err != nil {
+		return nil, fmt.Errorf("docker: %w", err)
+	}
+	return spawnlet.NewManager(rt, cfg), nil
 }
 
 // h2cClient mirrors cmd/spawnctl's: cleartext HTTP/2 for the CP dial.

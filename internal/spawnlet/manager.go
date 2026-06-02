@@ -35,7 +35,20 @@ type Manager struct {
 	fw      firewall.Applier
 }
 
+// NewManager builds a Manager on the Docker/runc path: the Docker pod backend + the DOCKER-USER
+// egress floor. (cmd/spawnlet uses NewManagerWithBackend for the runsc/CRI path.)
 func NewManager(rt runtime.ContainerRuntime, cfg ManagerConfig) *Manager {
+	return NewManagerWithBackend(
+		runtime.NewDockerPodBackend(rt, cfg.ContainerRuntime, cfg.AgentImage),
+		firewall.HostFloorApplier{},
+		cfg,
+	)
+}
+
+// NewManagerWithBackend builds a Manager around an explicit pod backend + egress-floor applier,
+// applying config defaults. Used to select the runc (Docker + DOCKER-USER) vs runsc (CRI +
+// SPAWNLET-EGRESS) stacks by CONTAINER_RUNTIME.
+func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg ManagerConfig) *Manager {
 	if cfg.SidecarPort == 0 {
 		cfg.SidecarPort = 8080
 	}
@@ -49,11 +62,11 @@ func NewManager(rt runtime.ContainerRuntime, cfg ManagerConfig) *Manager {
 		cfg.PidsLimit = 256
 	}
 	return &Manager{
-		pod:     runtime.NewDockerPodBackend(rt, cfg.ContainerRuntime, cfg.AgentImage),
+		pod:     pod,
 		cfg:     cfg,
 		store:   NewStore(),
 		backend: storage.NewScratch(cfg.DataRoot),
-		fw:      firewall.HostFloorApplier{},
+		fw:      fw,
 	}
 }
 
