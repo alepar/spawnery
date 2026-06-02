@@ -16,4 +16,10 @@ export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-unused-sidecar-injects-real-key}"
 # Disable Goose's interactive keyring/secret prompts; values come from env.
 export GOOSE_DISABLE_KEYRING="${GOOSE_DISABLE_KEYRING:-1}"
 
-exec /usr/local/bin/acpadapter goose acp
+# Docker lane: goose is PID 1 (the node attaches via the Docker API). CRI lane sets ACP_ADAPTER=1 so
+# goose runs behind the in-pod UDS adapter.
+if [ -n "$ACP_ADAPTER" ]; then
+  exec /usr/local/bin/acpadapter goose acp
+else
+  exec goose acp
+fi

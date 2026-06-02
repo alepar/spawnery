@@ -209,7 +209,7 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 	agentID, err := b.createAndStart(ctx, h.SandboxID, sandboxCfg, &runtimeapi.ContainerConfig{
 		Metadata: &runtimeapi.ContainerMetadata{Name: "agent"},
 		Image:    &runtimeapi.ImageSpec{Image: spec.Image},
-		Envs:     toKeyValues(spec.Env),
+		Envs:     toKeyValues(append([]string{"ACP_ADAPTER=1"}, spec.Env...)),
 		Mounts:   toCRIMounts(spec.Mounts),
 		Linux:    linuxContainer(spec.Resources, spec.DropAllCaps, spec.ReadonlyRootfs),
 	})
