@@ -146,7 +146,7 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		return nil, err
 	}
 
-	sp := &Spawn{ID: id, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, NetnsPath: h.NetnsPath, Status: "ready"}
+	sp := &Spawn{ID: id, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready"}
 	m.store.Put(sp)
 	return sp, nil
 }
@@ -162,7 +162,7 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
-	_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: sp.SidecarID, AgentID: sp.AgentID})
+	_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: sp.SidecarID, AgentID: sp.AgentID, SandboxID: sp.SandboxID})
 	if sp.FloorIP != "" {
 		if err := m.fw.Remove(ctx, firewall.Rules(sp.FloorIP, m.cfg.EgressAllowCIDRs)); err != nil {
 			log.Printf("egress floor cleanup for %s (ip %s): %v", id, sp.FloorIP, err)
