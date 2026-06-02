@@ -6,14 +6,14 @@ import { AppShell } from "./shell/AppShell";
 import { initialTheme, setTheme } from "./lib/theme";
 import type { Item } from "./views/chat/types";
 
-const APP_ID = "secret-app";
 const MODEL = "openai/gpt-oss-120b:free";
 
 export function App() {
-  const [status, setStatus] = useState("starting…");
+  const [status, setStatus] = useState("");
   const [items, setItems] = useState<Item[]>([]);
-  const [busy, setBusy] = useState(true);
+  const [busy, setBusy] = useState(false);
   const [perm, setPerm] = useState<{ title: string; resolve: (b: boolean) => void } | null>(null);
+  const [activeApp, setActiveApp] = useState<string | null>(null);
   const clientRef = useRef<Client | null>(null);
   const spawnRef = useRef<string>("");
   const wsRef = useRef<WebSocket | null>(null);
@@ -24,6 +24,7 @@ export function App() {
 
   const spawnApp = async (appId: string, model: string) => {
     const gen = ++genRef.current;
+    setActiveApp(appId);
     wsRef.current?.close();
     if (spawnRef.current) stopSpawn(spawnRef.current);
     spawnRef.current = "";
@@ -54,11 +55,7 @@ export function App() {
     }
   };
 
-  useEffect(() => {
-    spawnApp(APP_ID, MODEL);
-    return () => { wsRef.current?.close(); if (spawnRef.current) stopSpawn(spawnRef.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => () => { wsRef.current?.close(); if (spawnRef.current) stopSpawn(spawnRef.current); }, []);
 
   type ItemInput = Item extends infer T ? (T extends { id: number } ? Omit<T, "id"> : never) : never;
   const add = (it: ItemInput) =>
@@ -93,5 +90,5 @@ export function App() {
     }
   };
 
-  return <AppShell status={status} items={items} busy={busy} onSend={onSend} perm={perm} onSpawnApp={(appId) => spawnApp(appId, MODEL)} />;
+  return <AppShell status={status} items={items} busy={busy} onSend={onSend} perm={perm} onSpawnApp={(appId) => spawnApp(appId, MODEL)} activeSpawn={activeApp ? { label: activeApp } : null} />;
 }

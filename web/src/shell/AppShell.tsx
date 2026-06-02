@@ -6,19 +6,20 @@ import { MarketplaceView } from "@/views/MarketplaceView";
 import { SettingsView } from "@/views/SettingsView";
 import type { Item } from "@/views/chat/types";
 
-export function AppShell({ status, items, busy, onSend, perm, onSpawnApp }: {
+export function AppShell({ status, items, busy, onSend, perm, onSpawnApp, activeSpawn }: {
   status: string;
   items: Item[];
   busy: boolean;
   onSend: (t: string) => void;
   perm: { title: string; resolve: (b: boolean) => void } | null;
   onSpawnApp: (appId: string) => void;
+  activeSpawn?: { label: string } | null;
 }) {
-  const [view, setView] = useState<View>("chat");
+  const [view, setView] = useState<View>("market");
   const onSpawn = (appId: string) => { onSpawnApp(appId); setView("chat"); };
   return (
     <div className="flex h-screen bg-background text-foreground">
-      <Sidebar view={view} onSelect={setView} />
+      <Sidebar view={view} onSelect={setView} activeSpawn={activeSpawn} />
       <div className="flex flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-border px-4 py-2">
           <span className="text-sm font-medium">{view === "market" ? "Marketplace" : view === "settings" ? "Settings" : "Chat"}</span>
