@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/store"
+	"spawnery/internal/cp/telemetry"
 )
 
 // maxSpawnNameRunes caps a spawn display name (rune count). Shared by RenameSpawn (and any future
@@ -82,6 +84,47 @@ func (s *Server) RenameSpawn(ctx context.Context, req *connect.Request[cpv1.Rena
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&cpv1.RenameSpawnResponse{}), nil
+}
+
+// SuspendSpawn tears down the running container but keeps the spawn row in 'suspended' status
+// (resumable). Non-lossless: in-container working state and agent memory are NOT preserved (lossless
+// suspend is gated on E3). active -> suspending -> (node teardown) -> suspended.
+func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.SuspendSpawnRequest]) (*connect.Response[cpv1.SuspendSpawnResponse], error) {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	unlock := s.locks.Lock(req.Msg.SpawnId)
+	defer unlock()
+	sp, err := s.st.Spawns().Get(ctx, req.Msg.SpawnId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+	}
+	if sp.OwnerID != owner {
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+	if sp.Status != store.Active {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn is not active"))
+	}
+	c, hasLive, err := s.st.Spawns().LiveContainer(ctx, req.Msg.SpawnId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	if !hasLive {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("no live container"))
+	}
+	gen := c.Generation
+	if err := s.st.Spawns().SetSuspending(ctx, req.Msg.SpawnId, gen); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	// Tear down the container on the node + drop the route, then finalize suspended.
+	s.rt.StopOnNode(req.Msg.SpawnId)
+	s.rt.Drop(req.Msg.SpawnId)
+	if err := s.st.Spawns().SetSuspended(ctx, req.Msg.SpawnId, gen); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: req.Msg.SpawnId, Timestamp: time.Now().UTC()})
+	return connect.NewResponse(&cpv1.SuspendSpawnResponse{}), nil
 }
 
 // ListSpawns returns the authenticated owner's non-deleted spawns (the durable ledger).

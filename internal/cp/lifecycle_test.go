@@ -3,12 +3,16 @@ package cp
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
+	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
+	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/store"
 )
 
@@ -149,5 +153,82 @@ func TestRenameSpawn(t *testing.T) {
 	// unauthenticated -> Unauthenticated
 	if _, err := s.RenameSpawn(context.Background(), connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "sp1", Name: "x"})); connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Fatalf("no owner: want Unauthenticated, got %v", err)
+	}
+}
+
+// startAcker registers node "n1" and spins a goroutine that acks every StartSpawn it sees as
+// ACTIVE, so multiple Provision calls (create AND resume) all complete. Returns a stop func.
+func startAcker(t *testing.T, s *Server, reg *registry.Registry) func() {
+	t.Helper()
+	sender := &capSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: sender, Max: 10, Free: 10})
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		seen := map[string]bool{}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			var ids []string
+			sender.mu.Lock()
+			for _, m := range sender.sent {
+				if st := m.GetStart(); st != nil && !seen[st.GetSpawnId()] {
+					seen[st.GetSpawnId()] = true
+					ids = append(ids, st.GetSpawnId())
+				}
+			}
+			sender.mu.Unlock()
+			for _, id := range ids {
+				s.sched.OnStatus(id, nodev1.SpawnPhase_ACTIVE)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	return func() { close(stop); wg.Wait() }
+}
+
+func TestSuspendSpawn(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+
+	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("SuspendSpawn: %v", err)
+	}
+	sp, _ := s.st.Spawns().Get(ctx, id)
+	if sp.Status != store.Suspended {
+		t.Fatalf("status=%v want suspended", sp.Status)
+	}
+	if _, ok, _ := s.st.Spawns().LiveContainer(ctx, id); ok {
+		t.Fatal("suspended spawn must have no live container")
+	}
+
+	// suspend a non-active spawn -> FailedPrecondition (a fresh makeSpawn is status=starting)
+	makeSpawn(t, s, "starting1", "alice")
+	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: "starting1"})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("suspend non-active: want FailedPrecondition, got %v", err)
+	}
+
+	// foreign owner -> PermissionDenied
+	bob := auth.WithOwner(context.Background(), "bob")
+	if _, err := s.SuspendSpawn(bob, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("foreign suspend: want PermissionDenied, got %v", err)
+	}
+
+	// unknown -> NotFound
+	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: "nope"})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("unknown suspend: want NotFound, got %v", err)
 	}
 }
