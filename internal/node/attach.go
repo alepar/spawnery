@@ -42,28 +42,65 @@ type attacher struct {
 	stream *connect.BidiStreamForClient[nodev1.NodeMessage, nodev1.CPMessage]
 }
 
+// Run keeps the node connected to the CP: it (re)dials and serves one connection at a time, backing
+// off on failure, until ctx is cancelled. It does NOT exit when the CP is down or drops — the node
+// waits for the CP at startup and reconnects after a disconnect (re-registering each time; the CP
+// reconciles a returning node). The Manager + its running spawns persist across reconnects.
 func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config) error {
+	const minBackoff, maxBackoff = time.Second, 30 * time.Second
+	backoff := minBackoff
+	for {
+		start := time.Now()
+		err := runOnce(ctx, mgr, httpc, cfg)
+		if ctx.Err() != nil {
+			return ctx.Err() // clean shutdown
+		}
+		if time.Since(start) > maxBackoff {
+			backoff = minBackoff // the connection was healthy for a while; reset
+		}
+		log.Printf("node: CP connection ended (%v); reconnecting in %s", err, backoff)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+// runOnce serves a single CP connection: dial + Register + heartbeat + receive loop. It returns when
+// the connection ends (stream error) or ctx is cancelled. Everything connection-scoped (heartbeat,
+// relay sessions) is tied to connCtx so it stops cleanly when the connection ends.
+func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config) error {
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
 		sessions: map[string]*session{},
 		inboxes:  map[string]chan []byte{},
 	}
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
-	a.stream = client.Attach(ctx)
+	a.stream = client.Attach(connCtx)
 
 	if err := a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{Register: &nodev1.Register{
 		NodeId: cfg.NodeID, MaxSpawns: cfg.MaxSpawns, AgentImages: []string{cfg.AgentImage}, NodeClass: cfg.NodeClass, NodeOwner: cfg.NodeOwner,
 	}}}); err != nil {
 		return err
 	}
-	go a.heartbeatLoop(ctx)
+	go a.heartbeatLoop(connCtx)
 
 	for {
 		msg, err := a.stream.Receive()
 		if err != nil {
 			return err
 		}
-		a.handle(ctx, msg)
+		a.handle(connCtx, msg)
 	}
 }
 
