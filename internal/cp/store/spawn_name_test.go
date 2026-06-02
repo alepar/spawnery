@@ -43,7 +43,11 @@ func TestSpawnRename(t *testing.T) {
 	if err := st.Spawns().Rename(ctx, "sp1", "after"); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
-	if got, _ := st.Spawns().Get(ctx, "sp1"); got.Name != "after" {
+	got, err := st.Spawns().Get(ctx, "sp1")
+	if err != nil {
+		t.Fatalf("Get after Rename: %v", err)
+	}
+	if got.Name != "after" {
 		t.Fatalf("after rename name=%q want %q", got.Name, "after")
 	}
 

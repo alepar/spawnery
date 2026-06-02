@@ -98,8 +98,10 @@ func (r *spawnRepo) ListByOwner(ctx context.Context, ownerID string) ([]Spawn, e
 	return out, err
 }
 
-// Rename sets the spawn's display name. ErrNotFound if the spawn is missing or deleted.
-// No uniqueness is enforced — duplicate names are allowed (the spawn id is the real key).
+// Rename sets the spawn's display name. ErrNotFound if the spawn is missing or deleted
+// (unlike Touch/MarkRecovered, rename is rejected for deleted spawns — the object is gone
+// from the caller's view). No uniqueness is enforced — duplicate names are allowed (the
+// spawn id is the real key).
 func (r *spawnRepo) Rename(ctx context.Context, id, name string) error {
 	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
 		Set("name = ?", name).
