@@ -37,6 +37,13 @@ The class is reported by the node at registration and recorded CP-side (`sp-2as`
   so host-kernel netfilter inside the container netns never sees the workload's traffic (0-pkt
   counters; RFC1918 reachable). Host `DOCKER-USER` rules see the veth egress and enforce under
   **both runc and runsc** (verified: metadata + RFC1918 dropped, public reachable).
+- **Floor chain differs by backend:** the Docker/runc path applies the floor on **`DOCKER-USER`**
+  (provided by Docker). The CRI/runsc path applies the *same* per-pod `Rules()` on a spawnlet-owned
+  **`SPAWNLET-EGRESS`** chain, jumped from `FORWARD` position 1 (in front of CNI's `CNI-FORWARD`),
+  because `DOCKER-USER` is Docker-specific and not in a CNI-bridge pod's forwarding path. The
+  spawnlet creates the chain + jump (idempotently) and re-asserts them (CNI may rebuild `FORWARD` on
+  a containerd restart). Pod IP comes from the CRI `PodSandboxStatus.Network.Ip`. (Backend selection
+  by `CONTAINER_RUNTIME` lands with the runsc wire-up.)
 - **Block-floor (per-pod, `-s <podIP>`):** ACCEPT **DNS (udp/tcp :53)** + operator
   `EGRESS_ALLOW_CIDRS`; then DROP cloud-metadata `169.254.0.0/16` + RFC1918 (`10/8`,`172.16/12`,
   `192.168/16`); **default-allow** the public internet otherwise (so the sidecar reaches its model

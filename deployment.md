@@ -94,6 +94,26 @@ runc and runsc (host-verified).
 **Host requirements:** `iptables` + `CAP_NET_ADMIN`/root for the spawnlet process (no `nsenter`
 needed any more — rules go on the host chain).
 
+**CRI/runsc pods — additional host prerequisites (the `CONTAINER_RUNTIME=runsc` path):**
+
+- **containerd** with the CRI plugin, plus the **`runsc` runtime handler** registered. In
+  `/etc/containerd/config.toml`:
+  ```toml
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+    runtime_type = "io.containerd.runsc.v1"
+  ```
+  then restart containerd. (`containerd-shim-runsc-v1` + `runsc` must be on `PATH`.)
+- **CNI** for pod-sandbox networking: the reference plugins (`bridge`, `host-local`, `loopback`,
+  `firewall`, `portmap`) in `/opt/cni/bin/`, and a conflist at `/etc/cni/net.d/` (e.g. a `bridge` +
+  `firewall` + `portmap` chain). Without CNI, `RunPodSandbox` fails.
+- **The egress floor uses `SPAWNLET-EGRESS`** (not `DOCKER-USER`) for these pods — a spawnlet-owned
+  `filter` chain jumped from `FORWARD` position 1. Same `iptables` + root requirement; verify with
+  `just test-cni-egress` (Docker + iptables + root). The actual goose+sidecar runsc pod end-to-end is
+  validated in the runsc wire-up slice.
+- **Images** for the runsc path live in containerd's **`k8s.io`** namespace (separate from Docker's
+  `moby`). Pull there (the node pulls via the CRI `ImageService`); bridge a locally-built image with
+  `docker save <img> | ctr -n k8s.io images import -`.
+
 **Verification (must run on a privileged host — NOT in the dev sandbox):**
 ```bash
 go test -tags egress_e2e ./internal/spawnlet/firewall/ -run TestEgressFloorEnforced
