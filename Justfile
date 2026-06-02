@@ -25,11 +25,12 @@ cp:
     @make bin/cp
     CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/cp
 
-# spawnlet attached to the CP (goose by default; `just node stub` for the echo agent)
+# spawnlet attached to the CP — root-free dev node (self-hosted + egress floor off). `just node stub` = echo agent.
 node agent="goose": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "goose" } }}:dev; \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
+    NODE_CLASS=self-hosted EGRESS_ENFORCE=false \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
     {{repo}}/bin/spawnlet
 
