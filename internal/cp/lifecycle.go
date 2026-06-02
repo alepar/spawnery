@@ -3,6 +3,7 @@ package cp
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"connectrpc.com/connect"
 
@@ -44,6 +45,33 @@ func (s *Server) DeleteSpawn(ctx context.Context, req *connect.Request[cpv1.Dele
 	}
 	_ = req.Msg.DestroyData // inert until E3 persistent backends; see doc comment.
 	return connect.NewResponse(&cpv1.DeleteSpawnResponse{}), nil
+}
+
+// RenameSpawn sets a spawn's display name (owner-guarded). Duplicate names are allowed — the
+// spawn id is the real key; the name is a display label.
+func (s *Server) RenameSpawn(ctx context.Context, req *connect.Request[cpv1.RenameSpawnRequest]) (*connect.Response[cpv1.RenameSpawnResponse], error) {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	name := strings.TrimSpace(req.Msg.Name)
+	if name == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("name must not be empty"))
+	}
+	if len([]rune(name)) > 80 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("name too long (max 80)"))
+	}
+	sp, err := s.st.Spawns().Get(ctx, req.Msg.SpawnId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+	}
+	if sp.OwnerID != owner {
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+	if err := s.st.Spawns().Rename(ctx, req.Msg.SpawnId, name); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&cpv1.RenameSpawnResponse{}), nil
 }
 
 // ListSpawns returns the authenticated owner's non-deleted spawns (the durable ledger).

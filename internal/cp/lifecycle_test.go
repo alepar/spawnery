@@ -82,3 +82,60 @@ func TestDeleteSpawn(t *testing.T) {
 		t.Fatalf("after delete, list=%+v want only sp2", resp.Msg.Spawns)
 	}
 }
+
+func TestRenameSpawn(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	makeSpawn(t, s, "sp1", "alice")
+	makeSpawn(t, s, "sp2", "alice")
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	// happy: rename sp1
+	if _, err := s.RenameSpawn(ctx, connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "sp1", Name: "  Renamed  "})); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := s.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+	var got string
+	for _, sm := range resp.Msg.Spawns {
+		if sm.SpawnId == "sp1" {
+			got = sm.Name
+		}
+	}
+	if got != "Renamed" {
+		t.Fatalf("sp1 name=%q want %q (trimmed)", got, "Renamed")
+	}
+
+	// duplicate names are allowed
+	if _, err := s.RenameSpawn(ctx, connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "sp2", Name: "Renamed"})); err != nil {
+		t.Fatalf("duplicate rename must be allowed, got %v", err)
+	}
+
+	// empty name -> InvalidArgument
+	if _, err := s.RenameSpawn(ctx, connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "sp1", Name: "   "})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("empty name: want InvalidArgument, got %v", err)
+	}
+
+	// too long (>80 runes) -> InvalidArgument
+	long := ""
+	for i := 0; i < 81; i++ {
+		long += "x"
+	}
+	if _, err := s.RenameSpawn(ctx, connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "sp1", Name: long})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("long name: want InvalidArgument, got %v", err)
+	}
+
+	// foreign owner -> PermissionDenied
+	bob := auth.WithOwner(context.Background(), "bob")
+	if _, err := s.RenameSpawn(bob, connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "sp1", Name: "x"})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("foreign rename: want PermissionDenied, got %v", err)
+	}
+
+	// unknown -> NotFound
+	if _, err := s.RenameSpawn(ctx, connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "nope", Name: "x"})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("unknown rename: want NotFound, got %v", err)
+	}
+
+	// unauthenticated -> Unauthenticated
+	if _, err := s.RenameSpawn(context.Background(), connect.NewRequest(&cpv1.RenameSpawnRequest{SpawnId: "sp1", Name: "x"})); connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Fatalf("no owner: want Unauthenticated, got %v", err)
+	}
+}
