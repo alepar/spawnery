@@ -182,6 +182,8 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	unlock := s.locks.Lock(spawnID)
 	defer unlock()
 
+	// Name is best-effort dedup: the lock above is keyed by spawn id (not owner), so concurrent
+	// creates for one owner may still produce duplicate names — harmless, since the spawn id is the key.
 	name := strings.TrimSpace(req.Msg.Name)
 	if name == "" {
 		base := appID
