@@ -55,7 +55,8 @@ func main() {
 			MaxSpawns:  4,
 			AgentImage: env("AGENT_IMAGE", "spawnery/stubagent:dev"),
 			NodeClass:  env("NODE_CLASS", "cloud"),
-			NodeOwner:  env("NODE_OWNER", ""),
+			NodeOwner:    env("NODE_OWNER", ""),
+			InPodAdapter: os.Getenv("CONTAINER_RUNTIME") == "runsc",
 		}
 		log.Printf("spawnlet attaching to CP at %s as %s", cpURL, cfg.NodeID)
 		log.Fatal(node.Run(ctx, mgr, h2cClient(), cfg))

@@ -23,6 +23,7 @@ type Config struct {
 	AgentImage string
 	NodeClass  string
 	NodeOwner  string
+	InPodAdapter bool // CRI lane: the in-pod adapter records/replays history; the node must NOT (no double-replay). Docker lane = false -> node records.
 }
 
 // session tracks a live relay so SessionClose can cancel it.
@@ -32,6 +33,7 @@ type attacher struct {
 	cfg   Config
 	mgr   *spawnlet.Manager
 	httpc connect.HTTPClient
+	recorders *recorderRegistry // nil in the CRI lane (adapter handles history)
 
 	mu       sync.Mutex
 	sessions map[string]*session    // spawn_id -> relay cancel
@@ -49,9 +51,13 @@ type attacher struct {
 func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config) error {
 	const minBackoff, maxBackoff = time.Second, 30 * time.Second
 	backoff := minBackoff
+	var recorders *recorderRegistry
+	if !cfg.InPodAdapter {
+		recorders = newRecorderRegistry() // Docker lane: the node records the transcript
+	}
 	for {
 		start := time.Now()
-		err := runOnce(ctx, mgr, httpc, cfg)
+		err := runOnce(ctx, mgr, httpc, cfg, recorders)
 		if ctx.Err() != nil {
 			return ctx.Err() // clean shutdown
 		}
@@ -76,12 +82,12 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 // runOnce serves a single CP connection: dial + Register + heartbeat + receive loop. It returns when
 // the connection ends (stream error) or ctx is cancelled. Everything connection-scoped (heartbeat,
 // relay sessions) is tied to connCtx so it stops cleanly when the connection ends.
-func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config) error {
+func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, recorders *recorderRegistry) error {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	a := &attacher{
-		cfg: cfg, mgr: mgr, httpc: httpc,
+		cfg: cfg, mgr: mgr, httpc: httpc, recorders: recorders,
 		sessions: map[string]*session{},
 		inboxes:  map[string]chan []byte{},
 	}
@@ -168,6 +174,9 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 	a.closeSession(spawnID)
 	_ = a.mgr.Stop(ctx, spawnID)
+	if a.recorders != nil {
+		a.recorders.remove(spawnID)
+	}
 	a.mu.Lock()
 	if a.active > 0 {
 		a.active--
@@ -207,6 +216,16 @@ func (a *attacher) openSession(ctx context.Context, spawnID string) {
 		Send: func(b []byte) error {
 			return a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{SpawnId: spawnID, Data: append([]byte(nil), b...)}}})
 		},
+	}
+	// Docker lane: the node records the transcript and replays it to each (re)connecting client (the
+	// in-pod adapter does this only in the CRI lane). Replay BEFORE the relay starts so the client
+	// gets its history ahead of live bytes (a.send is serialized, so order holds).
+	if a.recorders != nil {
+		rec := a.recorders.getOrCreate(spawnID)
+		if f := rec.HistoryFrame(); f != nil {
+			_ = ep.Send(f)
+		}
+		ep = recordingEndpoint(ep, rec)
 	}
 	go func() {
 		defer att.Close()
