@@ -15,6 +15,13 @@ export interface HistoryItem {
   text?: string;
   title?: string;
   status?: string;
+  pending?: boolean; // queued prompt not yet forwarded to the agent
+}
+
+// spawn/turn notification: per-spawn agent turn-state.
+export interface SpawnTurn {
+  state: "busy" | "idle";
+  queued: number;
 }
 
 // session/update notification: { sessionId, update: { sessionUpdate, ... } }

@@ -81,6 +81,27 @@ describe("Client", () => {
     expect(got.length).toBe(3);
     expect(got[0]).toEqual({ role: "user", text: "hi" });
   });
+
+  it("routes spawn/turn notifications to onTurn", () => {
+    const ws = new FakeWS();
+    const c = new Client(ws);
+    const seen: Array<{ state: string; queued: number }> = [];
+    c.onTurn = (t) => seen.push(t);
+    ws.inject({ method: "spawn/turn", params: { state: "busy", queued: 2 } });
+    expect(seen).toEqual([{ state: "busy", queued: 2 }]);
+  });
+
+  it("fires onTurn from a spawn/history frame's turn field", () => {
+    const ws = new FakeWS();
+    const c = new Client(ws);
+    const seen: Array<{ state: string; queued: number }> = [];
+    c.onTurn = (t) => seen.push(t);
+    ws.inject({
+      method: "spawn/history",
+      params: { items: [{ role: "user", text: "hi" }], turn: { state: "busy", queued: 1 } },
+    });
+    expect(seen).toEqual([{ state: "busy", queued: 1 }]);
+  });
 });
 
 describe("historyToItems", () => {
