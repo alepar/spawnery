@@ -107,7 +107,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 				_ = s.tel.Emit(telemetry.Event{Kind: "spawn_create", Owner: owner, NodeID: nodeID, NodeClass: nodeClass, SpawnID: m.Status.SpawnId, Tier: "reviewed", Storage: "managed", Timestamp: time.Now().UTC()})
 			}
 		case *nodev1.NodeMessage_Frame:
-			s.rt.FromNode(m.Frame.SpawnId, m.Frame.Data) // opaque bytes; never inspected/logged
+			s.rt.FromNode(m.Frame.SpawnId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected
 		}
 	}
 }
@@ -297,19 +297,20 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
 	}
 
+	clientID := uuid.Must(uuid.NewV7()).String()
 	cs := &clientStream{stream: stream, spawnID: spawnID}
-	done, err := s.rt.AttachClient(spawnID, cs)
+	done, err := s.rt.AttachClient(spawnID, clientID, cs, 0)
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_start", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	defer func() {
-		s.rt.DetachClient(spawnID)
+		s.rt.DetachClient(spawnID, clientID)
 		_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	}()
 
 	if len(first.Data) > 0 {
-		_ = s.rt.FromClient(spawnID, first.Data)
+		_ = s.rt.FromClient(spawnID, clientID, first.Data)
 	}
 	recvErr := make(chan error, 1)
 	go func() {
@@ -319,7 +320,7 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 				recvErr <- err
 				return
 			}
-			if ferr := s.rt.FromClient(spawnID, f.Data); ferr != nil {
+			if ferr := s.rt.FromClient(spawnID, clientID, f.Data); ferr != nil {
 				recvErr <- ferr
 				return
 			}

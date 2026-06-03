@@ -83,10 +83,10 @@ func TestRunNodeRegistersAndRoutesFrames(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	rt.Bind("sp1", "n1", sender)
-	if _, err := rt.AttachClient("sp1", cl); err != nil {
+	if _, err := rt.AttachClient("sp1", "c1", cl, 0); err != nil {
 		t.Fatal(err)
 	}
-	in <- &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{SpawnId: "sp1", Data: []byte("hi")}}}
+	in <- &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{SpawnId: "sp1", ClientId: "c1", Data: []byte("hi")}}}
 
 	deadline = time.Now().Add(time.Second)
 	for cl.count() == 0 {

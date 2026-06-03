@@ -14,10 +14,10 @@ import (
 type ClientSender interface{ Send([]byte) error }
 
 type route struct {
-	nodeID string
-	node   registry.NodeSender
-	client ClientSender
-	done   chan struct{} // closed when the route is dropped (stop or node evict)
+	nodeID  string
+	node    registry.NodeSender
+	clients map[string]ClientSender
+	done    chan struct{} // closed when the route is dropped (stop or node evict)
 }
 
 type Router struct {
@@ -30,57 +30,54 @@ func New() *Router { return &Router{m: map[string]*route{}} }
 // Bind records which node hosts a spawn (after StartSpawn ACTIVE).
 func (r *Router) Bind(spawnID, nodeID string, node registry.NodeSender) {
 	r.mu.Lock()
-	r.m[spawnID] = &route{nodeID: nodeID, node: node, done: make(chan struct{})}
+	r.m[spawnID] = &route{nodeID: nodeID, node: node, clients: map[string]ClientSender{}, done: make(chan struct{})}
 	r.mu.Unlock()
 }
 
-// AttachClient binds a live client stream and tells the node to open the relay.
-// The returned channel closes if the route is dropped while attached.
-func (r *Router) AttachClient(spawnID string, c ClientSender) (<-chan struct{}, error) {
+// AttachClient registers a client by id and tells the node to open the relay for it (carrying cursor).
+func (r *Router) AttachClient(spawnID, clientID string, c ClientSender, cursor int64) (<-chan struct{}, error) {
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	if !ok {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("unknown spawn: %s", spawnID)
 	}
-	rt.client = c
-	node := rt.node
-	done := rt.done
+	rt.clients[clientID] = c
+	node, done := rt.node, rt.done
 	r.mu.Unlock()
-	return done, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{SpawnId: spawnID}}})
+	return done, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{SpawnId: spawnID, ClientId: clientID, Cursor: cursor}}})
 }
 
-// DetachClient clears the client and tells the node to detach (pod stays).
-func (r *Router) DetachClient(spawnID string) {
+// DetachClient removes a client and tells the node to close its relay (pod stays).
+func (r *Router) DetachClient(spawnID, clientID string) {
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	if ok {
-		rt.client = nil
+		delete(rt.clients, clientID)
 	}
 	r.mu.Unlock()
 	if ok {
-		_ = rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Close{Close: &nodev1.SessionClose{SpawnId: spawnID}}})
+		_ = rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Close{Close: &nodev1.SessionClose{SpawnId: spawnID, ClientId: clientID}}})
 	}
 }
 
 // FromClient forwards client->agent bytes to the hosting node.
-func (r *Router) FromClient(spawnID string, data []byte) error {
+func (r *Router) FromClient(spawnID, clientID string, data []byte) error {
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	r.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown spawn: %s", spawnID)
 	}
-	return rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Frame{Frame: &nodev1.Frame{SpawnId: spawnID, Data: data}}})
+	return rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Frame{Frame: &nodev1.Frame{SpawnId: spawnID, ClientId: clientID, Data: data}}})
 }
 
-// FromNode forwards agent->client bytes to the attached client (if any).
-func (r *Router) FromNode(spawnID string, data []byte) {
+// FromNode forwards an agent->client frame to the addressed client (if still attached).
+func (r *Router) FromNode(spawnID, clientID string, data []byte) {
 	r.mu.Lock()
-	rt, ok := r.m[spawnID]
 	var c ClientSender
-	if ok {
-		c = rt.client
+	if rt, ok := r.m[spawnID]; ok {
+		c = rt.clients[clientID]
 	}
 	r.mu.Unlock()
 	if c != nil {
