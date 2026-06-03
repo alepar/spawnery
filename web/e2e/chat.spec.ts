@@ -19,7 +19,7 @@ test("chat echoes through the real browser", async ({ page }) => {
   await spawnSecretApp(page);
   const token = "ping-" + Math.random().toString(36).slice(2, 8);
   await page.getByTestId("prompt-input").fill("say " + token);
-  await page.getByTestId("prompt-send").click();
+  await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="user"]')).toContainText(token);
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say " + token, { timeout: 30_000 });
 });

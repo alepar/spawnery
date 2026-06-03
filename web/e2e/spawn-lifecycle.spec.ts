@@ -84,13 +84,13 @@ test("switching between two spawns restores each transcript", async ({ page }) =
   await gotoApp(page);
   await spawnFromMarket(page); // instance 1 active
   await page.getByTestId("prompt-input").fill("say one");
-  await page.getByTestId("prompt-send").click();
+  await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
 
   await spawnFromMarket(page); // instance 2 active (no reload) — spawnApp must save instance 1's buffer
   await expect(page.locator('[data-role="agent"]')).toHaveCount(0);
   await page.getByTestId("prompt-input").fill("say two");
-  await page.getByTestId("prompt-send").click();
+  await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say two", { timeout: 30_000 });
 
   // switch back to instance 1 → its prior transcript is restored from the client buffer.
@@ -103,7 +103,7 @@ test("conversation history survives a browser reload (node replay)", async ({ pa
   await gotoApp(page);
   await spawnFromMarket(page);
   await page.getByTestId("prompt-input").fill("say one");
-  await page.getByTestId("prompt-send").click();
+  await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
 
   // Reload wipes the client-side transcript buffer; the node must replay the transcript.
@@ -122,7 +122,7 @@ test("suspending a non-active spawn clears its cached transcript", async ({ page
   await gotoApp(page);
   await spawnFromMarket(page); // instance 1 active
   await page.getByTestId("prompt-input").fill("say one");
-  await page.getByTestId("prompt-send").click();
+  await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
 
   await spawnFromMarket(page); // instance 2 active (no reload) — instance 1 is now non-active, buffer saved
@@ -148,7 +148,7 @@ test("suspending the active spawn clears its on-screen transcript", async ({ pag
   await gotoApp(page);
   await spawnFromMarket(page);
   await page.getByTestId("prompt-input").fill("say one");
-  await page.getByTestId("prompt-send").click();
+  await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
 
   // Suspend the currently-active spawn from the sidebar kebab.
@@ -170,7 +170,7 @@ test("a reconnected spawn still serves new prompts (repeated initialize tolerate
   await gotoApp(page);
   await spawnFromMarket(page);
   await page.getByTestId("prompt-input").fill("say one");
-  await page.getByTestId("prompt-send").click();
+  await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
 
   // Reload + reopen -> fresh ACP handshake against the same still-running agent. Reaching "connected"
@@ -183,7 +183,7 @@ test("a reconnected spawn still serves new prompts (repeated initialize tolerate
   // A NEW turn on the reconnected session must work end-to-end. Scope to the new bubble: by now the
   // replayed "ECHO: say one" is also on screen, so a bare [data-role="agent"] match is non-unique.
   await page.getByTestId("prompt-input").fill("say two");
-  await page.getByTestId("prompt-send").click();
+  await page.getByTestId("prompt-input").press("Enter");
   await expect(
     page.locator('[data-role="agent"]').filter({ hasText: "ECHO: say two" }),
   ).toBeVisible({ timeout: 30_000 });
