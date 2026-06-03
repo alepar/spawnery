@@ -1,6 +1,7 @@
 package node
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -114,4 +115,50 @@ func TestClientAtBaseResumesWithoutReset(t *testing.T) {
 	fs := a.frames()
 	if fs[0].Kind == "reset" { t.Fatalf("unexpected reset at cursor==base: %+v", fs) }
 	if fs[0].Seq != 2 || fs[1].Seq != 3 { t.Fatalf("want seq 2,3, got %v", a.seqs()) }
+}
+
+func TestConcurrentAppendAndAttachRace(t *testing.T) {
+	p := newTestPump()
+	const appenders, perAppender = 3, 1000
+	var wg sync.WaitGroup
+	wg.Add(appenders)
+	for w := 0; w < appenders; w++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perAppender; i++ { p.appendFrames([]Frame{{Kind: "agent", Text: "x"}}) }
+		}()
+	}
+	// clients attaching concurrently with the append storm
+	for i := 0; i < 5; i++ {
+		c := &capSender{}
+		p.attachClient(fmt.Sprintf("c%d", i), 0, c.send)
+	}
+	wg.Wait()
+	total := int64(appenders * perAppender)
+	// a client attached AFTER the storm must drain to the final seq.
+	late := &capSender{}
+	p.attachClient("late", 0, late.send)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		fr := late.frames()
+		if n := len(fr); n > 0 && fr[n-1].Seq == total { break }
+		if time.Now().After(deadline) {
+			var last int64
+			if fr := late.frames(); len(fr) > 0 { last = fr[len(fr)-1].Seq }
+			t.Fatalf("late client reached seq %d, want %d", last, total)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A cursor ahead of the pump's seq (e.g. pump restarted) is treated as out-of-range -> reset.
+func TestFutureCursorResets(t *testing.T) {
+	p := newTestPump()
+	p.appendFrames([]Frame{{Kind: "agent", Text: "x"}}) // seq 1
+	a := &capSender{}
+	p.attachClient("a", 100, a.send) // cursor 100 > seq 1 -> reset{fromSeq:0} then seq 1
+	a.waitLen(t, 2)
+	fs := a.frames()
+	if fs[0].Kind != "reset" || fs[0].FromSeq != 0 { t.Fatalf("want reset{0} first, got %+v", fs[0]) }
+	if fs[1].Seq != 1 { t.Fatalf("want seq 1 after reset, got %v", a.seqs()) }
 }

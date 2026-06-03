@@ -29,7 +29,7 @@ type Pump struct {
 	seq     int64   // last assigned seq
 	maxLog  int
 	clients map[string]*client
-	stopped bool
+	stopped bool // set by stop() in Task 4 (agent teardown); unused in the fan-out core
 }
 
 func newPump(stdin io.Writer, stdout io.Reader) *Pump {
@@ -95,9 +95,11 @@ func (p *Pump) clientLoop(c *client) {
 		}
 		for {
 			p.mu.Lock()
-			// If the client's cursor is below base, it missed trimmed frames -> reset to base.
+			// If the client's cursor is outside the retained window [base, seq] -- it missed trimmed
+			// frames (cursor < base) OR it is ahead of us (cursor > seq, e.g. the pump restarted and
+			// seq reset to 0 while the client kept an old cursor) -- reset it to base and replay.
 			var reset *Frame
-			if c.cursor < p.base {
+			if c.cursor < p.base || c.cursor > p.seq {
 				r := Frame{Kind: "reset", FromSeq: p.base}
 				reset = &r
 				c.cursor = p.base
