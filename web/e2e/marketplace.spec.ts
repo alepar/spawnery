@@ -19,7 +19,7 @@ test("marketplace browse→detail→spawn flow", async ({ page }) => {
   await page.getByTestId("spawn-btn").click();
 
   // Auto-wait: status must reach "ready" again (new spawnlet session).
-  await expect(page.getByTestId("status")).toHaveText("ready", { timeout: 40_000 });
+  await expect(page.getByTestId("status")).toContainText("connected", { timeout: 40_000 });
 
   // Confirm the chat input is available (user can immediately talk to the app).
   await expect(page.getByTestId("prompt-input")).toBeVisible();

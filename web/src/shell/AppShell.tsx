@@ -1,14 +1,16 @@
 import { useState } from "react";
 import { Toaster } from "@/components/ui/sonner";
 import { Sidebar, type View, type SpawnActions } from "./Sidebar";
+import { ConnStatus } from "./ConnStatus";
+import type { ConnState } from "./useConnStatus";
 import { ChatView } from "@/views/ChatView";
 import { MarketplaceView } from "@/views/MarketplaceView";
 import { SettingsView } from "@/views/SettingsView";
 import type { Item } from "@/views/chat/types";
 import type { SpawnView } from "@/api/spawnlet";
 
-export function AppShell({ status, items, busy, onSend, perm, onSpawnApp, spawns = [], activeId, actions }: {
-  status: string;
+export function AppShell({ conn, items, busy, onSend, perm, onSpawnApp, spawns = [], activeId, actions }: {
+  conn: ConnState | null;
   items: Item[];
   busy: boolean;
   onSend: (t: string) => void;
@@ -35,7 +37,7 @@ export function AppShell({ status, items, busy, onSend, perm, onSpawnApp, spawns
           <span className="text-sm font-medium">
             {view === "market" ? "Marketplace" : view === "settings" ? "Settings" : activeName || "Chat"}
           </span>
-          <span data-testid="status" className="text-xs text-muted-foreground">{status}</span>
+          <ConnStatus conn={conn} />
         </header>
         <main className="flex-1 overflow-hidden">
           {view === "chat" && <ChatView items={items} busy={busy} onSend={onSend} perm={perm} />}

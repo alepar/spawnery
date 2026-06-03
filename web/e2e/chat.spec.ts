@@ -12,7 +12,7 @@ async function spawnSecretApp(page: Page) {
   await card.click();
   await expect(page.getByTestId("spawn-btn")).toBeVisible({ timeout: 10_000 });
   await page.getByTestId("spawn-btn").click();
-  await expect(page.getByTestId("status")).toHaveText("ready", { timeout: 40_000 });
+  await expect(page.getByTestId("status")).toContainText("connected", { timeout: 40_000 });
 }
 
 test("chat echoes through the real browser", async ({ page }) => {
@@ -34,5 +34,5 @@ test("settings theme toggle flips dark mode without dropping the session", async
   // return to the spawn by clicking its row (exact display name "Secret App").
   await page.locator('[data-testid^="spawn-row-"]').filter({ has: page.getByText("Secret App", { exact: true }) }).first()
     .locator('[data-testid^="spawn-select-"]').click();
-  await expect(page.getByTestId("status")).toHaveText("ready", { timeout: 20_000 });
+  await expect(page.getByTestId("status")).toContainText("connected", { timeout: 20_000 });
 });

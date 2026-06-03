@@ -5,7 +5,7 @@ import { AppShell } from "./AppShell";
 import type { SpawnView } from "@/api/spawnlet";
 
 const baseProps = {
-  status: "ready",
+  conn: "connected" as const,
   items: [],
   busy: false,
   onSend: () => {},

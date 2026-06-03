@@ -6,13 +6,14 @@ import {
 } from "./api/spawnlet";
 import { Client, historyToItems } from "./acp/client";
 import { AppShell } from "./shell/AppShell";
+import { useConnStatus } from "./shell/useConnStatus";
 import { initialTheme, setTheme } from "./lib/theme";
 import type { Item } from "./views/chat/types";
 
 const MODEL = "openai/gpt-oss-120b:free";
 
 export function App() {
-  const [status, setStatus] = useState("");
+  const { conn, connecting, connected, errored, closed, reset } = useConnStatus();
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [perm, setPerm] = useState<{ title: string; resolve: (b: boolean) => void } | null>(null);
@@ -47,7 +48,7 @@ export function App() {
         genRef.current++;
         wsRef.current?.close();
         wsRef.current = null; clientRef.current = null;
-        setActiveId(null); setItems([]); setStatus("");
+        setActiveId(null); setItems([]); reset();
       }
     } catch { /* transient; keep the last list */ }
   };
@@ -66,12 +67,13 @@ export function App() {
     wsRef.current?.close();
     wsRef.current = null;
     clientRef.current = null;
+    reset();
   };
 
   const openSession = (spawnId: string) => {
     const gen = ++genRef.current;
     wsRef.current?.close();
-    setBusy(true); setStatus("starting…");
+    setBusy(true); connecting();
     const ws = new WebSocket(`ws://${location.host}/ws/session`);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
@@ -92,18 +94,18 @@ export function App() {
         await c.newSession("/app");
       } catch (e: any) {
         if (genRef.current !== gen) return;
-        setStatus("error: " + e.message); setBusy(false);
+        errored(); setBusy(false);
         return;
       }
       if (genRef.current !== gen) return;
-      setStatus("ready"); setBusy(false);
+      connected(); setBusy(false);
     };
-    ws.onerror = () => { if (genRef.current !== gen) return; setStatus("connection error"); toast.error("Connection error"); };
-    ws.onclose = () => { if (genRef.current !== gen) return; setStatus("session ended"); };
+    ws.onerror = () => { if (genRef.current !== gen) return; errored(); toast.error("Connection error"); };
+    ws.onclose = () => { if (genRef.current !== gen) return; closed(); };
   };
 
   const spawnApp = async (appId: string) => {
-    setBusy(true); setStatus("starting…");
+    setBusy(true); connecting();
     try {
       const id = await createSpawn(appId, MODEL);
       const prevId = activeIdRef.current;
@@ -119,7 +121,7 @@ export function App() {
       await refreshSpawns();
       openSession(id);
     } catch (e: any) {
-      setStatus("error: " + e.message); setBusy(false);
+      errored(); setBusy(false);
       toast.error("Spawn failed: " + e.message);
     }
   };
@@ -141,7 +143,6 @@ export function App() {
     });
     const sp = spawnsRef.current.find((s) => s.spawnId === id);
     if (sp?.status === "active") openSession(id);
-    else setStatus(sp?.status ?? "");
   };
 
   const onRename = async (id: string, name: string) => {
@@ -152,7 +153,7 @@ export function App() {
   const onSuspend = async (id: string) => {
     try {
       await suspendSpawn(id);
-      if (activeIdRef.current === id) { closeSession(); setStatus("suspended"); }
+      if (activeIdRef.current === id) { closeSession(); }
     } catch (e: any) { toast.error("Suspend failed: " + e.message); }
     refreshSpawns();
   };
@@ -168,7 +169,7 @@ export function App() {
   const onStop = async (id: string) => {
     try { await deleteSpawn(id); } catch (e: any) { toast.error("Stop failed: " + e.message); }
     buffersRef.current.delete(id);
-    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setStatus(""); }
+    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); }
     refreshSpawns();
   };
 
@@ -201,7 +202,7 @@ export function App() {
 
   return (
     <AppShell
-      status={status}
+      conn={conn}
       items={items}
       busy={busy}
       onSend={onSend}
