@@ -161,7 +161,7 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.status(st.SpawnId, nodev1.SpawnPhase_STARTING, "")
 	if _, err := a.mgr.Create(ctx, st.SpawnId, st.AppRef, st.Model); err != nil {
-		log.Printf("startSpawn %s: %v", st.SpawnId, err)
+		logErr("startSpawn "+st.SpawnId, err)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
 		return
 	}
@@ -173,7 +173,9 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 
 func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 	a.closeSession(spawnID)
-	_ = a.mgr.Stop(ctx, spawnID)
+	if err := a.mgr.Stop(ctx, spawnID); err != nil {
+		logErr("stopSpawn "+spawnID, err)
+	}
 	if a.recorders != nil {
 		a.recorders.remove(spawnID)
 	}
@@ -191,10 +193,12 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 func (a *attacher) openSession(ctx context.Context, spawnID string) {
 	sp, ok := a.mgr.Store().Get(spawnID)
 	if !ok {
+		log.Printf("warn: openSession: unknown spawn %s (not in store)", spawnID)
 		return
 	}
 	att, err := a.mgr.Attach(ctx, sp)
 	if err != nil {
+		logErr("openSession attach "+spawnID, err)
 		return
 	}
 	rctx, cancel := context.WithCancel(ctx)

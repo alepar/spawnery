@@ -2,9 +2,13 @@
 package sidecar
 
 import (
+	"bytes"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 )
 
 // NewHandler proxies requests to upstream, injecting the bearer key.
@@ -20,6 +24,33 @@ func NewHandler(upstream, key string) http.Handler {
 		r.Host = target.Host
 		r.Header.Set("Authorization", "Bearer "+key)
 		r.Header.Del("X-Api-Key")
+	}
+	// Surface upstream (OpenRouter) ERROR responses in the sidecar logs — e.g. a 503
+	// "Provider returned error" from the model provider. 2xx (incl. streaming chat completions) is
+	// left untouched; only >=400 bodies are buffered (they are small JSON) and restored for the agent.
+	rp.ModifyResponse = func(resp *http.Response) error {
+		if resp.StatusCode < 400 || resp.Body == nil {
+			return nil
+		}
+		b, rerr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if rerr != nil {
+			log.Printf("warn: sidecar: upstream %s %s -> %d (body read error: %v)", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, rerr)
+			resp.Body = io.NopCloser(bytes.NewReader(nil))
+			return nil
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(b)) // restore the full body for the agent
+		snippet := strings.TrimSpace(string(b))
+		if len(snippet) > 512 {
+			snippet = snippet[:512] + "…"
+		}
+		log.Printf("warn: sidecar: upstream %s %s -> %d: %s", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, snippet)
+		return nil
+	}
+	// Log (and 502) when upstream is unreachable (DNS/connection failure) rather than a non-2xx body.
+	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Printf("warn: sidecar: upstream request %s %s failed: %v", r.Method, r.URL.Path, err)
+		w.WriteHeader(http.StatusBadGateway)
 	}
 	return rp
 }
