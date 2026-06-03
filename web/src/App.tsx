@@ -119,12 +119,19 @@ export function App() {
 
   const selectSpawn = (id: string) => {
     if (id === activeIdRef.current) return;
-    if (activeIdRef.current) buffersRef.current.set(activeIdRef.current, itemsRef.current);
+    const prevId = activeIdRef.current;
     closeSession();
     setActiveId(id);
     activeIdRef.current = id;
     const buf = buffersRef.current.get(id) ?? [];
-    setItems(buf);
+    // Atomically stash the OUTGOING spawn's last-committed transcript and load the incoming one.
+    // Using the functional updater (vs itemsRef, which lags by one render) avoids losing a chunk if
+    // the user switches mid-stream. Writing a ref inside the updater is idempotent under StrictMode's
+    // double-invoke (same value both times), so it's safe here.
+    setItems((current) => {
+      if (prevId) buffersRef.current.set(prevId, current);
+      return buf;
+    });
     const sp = spawnsRef.current.find((s) => s.spawnId === id);
     if (sp?.status === "active") openSession(id);
     else setStatus(sp?.status ?? "");
@@ -145,6 +152,8 @@ export function App() {
   const onResume = async (id: string) => {
     try {
       await resumeSpawn(id);
+      // openSession even though the ledger may still read 'suspending' — the backend transitions the
+      // spawn to active synchronously before it accepts the ws, so the handshake succeeds.
       if (activeIdRef.current === id) openSession(id);
     } catch (e: any) { toast.error("Resume failed: " + e.message); }
     refreshSpawns();
