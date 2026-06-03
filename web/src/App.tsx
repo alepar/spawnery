@@ -7,6 +7,7 @@ import {
 import { Client, historyToItems } from "./acp/client";
 import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
+import { ReconnectingSocket } from "./shell/reconnectingSocket";
 import { nextConnAction } from "./shell/connPolicy";
 import { initialTheme, setTheme } from "./lib/theme";
 import type { Item, TurnState } from "./views/chat/types";
@@ -15,7 +16,7 @@ import { reconcilePending, MAX_QUEUED } from "./lib/turn";
 const MODEL = "deepseek/deepseek-v4-flash";
 
 export function App() {
-  const { conn, connecting, connected, errored, closed, reset, waiting } = useConnStatus();
+  const { conn, connecting, connected, errored, closed, reset, waiting, reconnecting } = useConnStatus();
   const [items, setItems] = useState<Item[]>([]);
   const [turn, setTurn] = useState<TurnState>({ state: "idle", queued: 0 });
   const [perm, setPerm] = useState<{ title: string; resolve: (b: boolean) => void } | null>(null);
@@ -23,7 +24,7 @@ export function App() {
   const [activeId, setActiveId] = useState<string | null>(null);
 
   const clientRef = useRef<Client | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
+  const wsRef = useRef<ReconnectingSocket | null>(null);
   const idRef = useRef(0);
   const genRef = useRef(0);
   const buffersRef = useRef<Map<string, Item[]>>(new Map());
@@ -56,42 +57,49 @@ export function App() {
     const gen = ++genRef.current;
     wsRef.current?.close();
     connecting();
-    const ws = new WebSocket(`ws://${location.host}/ws/session`);
-    ws.binaryType = "arraybuffer";
-    wsRef.current = ws;
-    ws.onopen = async () => {
-      ws.send(JSON.stringify({ spawnId, token: DEV_TOKEN }));
-      const c = new Client(ws as any);
-      clientRef.current = c;
-      // spawn/history replay: the node relay (Docker lane) or the in-pod adapter (CRI lane) sends it on
-      // (re)connect, so the transcript is restored even after a browser reload wipes the in-memory buffer.
-      c.onHistory = (h) => {
+    // partysocket fires onOpen on EVERY (re)connection: re-send the bind frame (the CP's HandleWS
+    // expects it first on each new underlying socket) and re-run the ACP handshake. A fresh Client
+    // per open gives a clean Conn buffer + cleared pending, so a truncated frame from a dropped
+    // socket can't corrupt the new stream; the node replays spawn/history -> the transcript restores.
+    const sock = new ReconnectingSocket(`ws://${location.host}/ws/session`, {
+      onOpen: async () => {
         if (genRef.current !== gen) return;
-        const its = historyToItems(h).map(withId);
-        buffersRef.current.set(spawnId, its);
-        if (activeIdRef.current === spawnId) setItems(its);
-      };
-      c.onTurn = (t) => {
-        if (genRef.current !== gen) return;
-        turnsRef.current.set(spawnId, t);
-        if (activeIdRef.current === spawnId) {
-          setTurn(t);
-          setItems((cur) => reconcilePending(cur, t.queued));
+        sock.send(JSON.stringify({ spawnId, token: DEV_TOKEN }));
+        const c = new Client(sock);
+        clientRef.current = c;
+        // spawn/history replay: the node relay (Docker lane) or the in-pod adapter (CRI lane) sends it on
+        // (re)connect, so the transcript is restored even after a browser reload wipes the in-memory buffer.
+        c.onHistory = (h) => {
+          if (genRef.current !== gen) return;
+          const its = historyToItems(h).map(withId);
+          buffersRef.current.set(spawnId, its);
+          if (activeIdRef.current === spawnId) setItems(its);
+        };
+        c.onTurn = (t) => {
+          if (genRef.current !== gen) return;
+          turnsRef.current.set(spawnId, t);
+          if (activeIdRef.current === spawnId) {
+            setTurn(t);
+            setItems((cur) => reconcilePending(cur, t.queued));
+          }
+        };
+        try {
+          await c.initialize();
+          await c.newSession("/app");
+        } catch {
+          if (genRef.current !== gen) return;
+          reconnecting(); // handshake failed -> the socket keeps retrying
+          return;
         }
-      };
-      try {
-        await c.initialize();
-        await c.newSession("/app");
-      } catch (e: any) {
         if (genRef.current !== gen) return;
-        errored();
-        return;
-      }
-      if (genRef.current !== gen) return;
-      connected();
-    };
-    ws.onerror = () => { if (genRef.current !== gen) return; errored(); toast.error("Connection error"); };
-    ws.onclose = () => { if (genRef.current !== gen) return; closed(); };
+        connected();
+      },
+      onDown: () => {
+        if (genRef.current !== gen) return;
+        reconnecting(); // dropped/failed attempt -> yellow, then red after grace; partysocket retries
+      },
+    });
+    wsRef.current = sock;
   };
 
   // refreshSpawns fetches the ledger, reconciles the active spawn's header/WS off its status (via the
