@@ -79,7 +79,8 @@ export function App() {
       ws.send(JSON.stringify({ spawnId, token: DEV_TOKEN }));
       const c = new Client(ws as any);
       clientRef.current = c;
-      // CRI-lane adapter replays the transcript here; Docker lane never fires this (buffer is used).
+      // spawn/history replay: the node relay (Docker lane) or the in-pod adapter (CRI lane) sends it on
+      // (re)connect, so the transcript is restored even after a browser reload wipes the in-memory buffer.
       c.onHistory = (h) => {
         if (genRef.current !== gen) return;
         const its = historyToItems(h).map(withId);
