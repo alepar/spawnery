@@ -71,6 +71,13 @@ describe("ReconnectingSocket", () => {
     rs.close();
     expect(fake.closed).toBe(true);
   });
+
+  it("forwards binaryType get/set to the socket", () => {
+    const { rs, fake } = setup();
+    rs.binaryType = "arraybuffer";
+    expect(fake.binaryType).toBe("arraybuffer");
+    expect(rs.binaryType).toBe("arraybuffer");
+  });
 });
 
 describe("partysocket structural guard", () => {
