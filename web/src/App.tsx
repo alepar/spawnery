@@ -9,14 +9,15 @@ import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
 import { nextConnAction } from "./shell/connPolicy";
 import { initialTheme, setTheme } from "./lib/theme";
-import type { Item } from "./views/chat/types";
+import type { Item, TurnState } from "./views/chat/types";
+import { reconcilePending, MAX_QUEUED } from "./lib/turn";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
 export function App() {
   const { conn, connecting, connected, errored, closed, reset, waiting } = useConnStatus();
   const [items, setItems] = useState<Item[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [turn, setTurn] = useState<TurnState>({ state: "idle", queued: 0 });
   const [perm, setPerm] = useState<{ title: string; resolve: (b: boolean) => void } | null>(null);
   const [spawns, setSpawns] = useState<SpawnView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -26,6 +27,7 @@ export function App() {
   const idRef = useRef(0);
   const genRef = useRef(0);
   const buffersRef = useRef<Map<string, Item[]>>(new Map());
+  const turnsRef = useRef<Map<string, TurnState>>(new Map());
   // refs mirroring state so async callbacks (poll, ws onopen, onHistory) don't read stale closures.
   const activeIdRef = useRef<string | null>(null);
   const spawnsRef = useRef<SpawnView[]>([]);
@@ -69,6 +71,14 @@ export function App() {
         buffersRef.current.set(spawnId, its);
         if (activeIdRef.current === spawnId) setItems(its);
       };
+      c.onTurn = (t) => {
+        if (genRef.current !== gen) return;
+        turnsRef.current.set(spawnId, t);
+        if (activeIdRef.current === spawnId) {
+          setTurn(t);
+          setItems((cur) => reconcilePending(cur, t.queued));
+        }
+      };
       try {
         await c.initialize();
         await c.newSession("/app");
@@ -98,6 +108,8 @@ export function App() {
         case "drop":
           closeSession();
           setActiveId(null); activeIdRef.current = null; setItems([]);
+          setTurn({ state: "idle", queued: 0 });
+          turnsRef.current.delete(aid);
           break;
         case "open":
           openSession(aid); // just became active -> connect (green)
@@ -144,6 +156,7 @@ export function App() {
         if (prevId && prevId !== id) buffersRef.current.set(prevId, current);
         return [];
       });
+      setTurn({ state: "idle", queued: 0 });
       waiting(); // grey-pulse until the node signals active; the poll then opens the ws
       await refreshSpawns(); // sidebar shows the new spawn yellow immediately
     } catch (e: any) {
@@ -163,6 +176,7 @@ export function App() {
       if (prevId) buffersRef.current.set(prevId, current);
       return buf;
     });
+    setTurn(turnsRef.current.get(id) ?? { state: "idle", queued: 0 });
     const sp = spawnsRef.current.find((s) => s.spawnId === id);
     if (sp?.status === "active") openSession(id);
     else if (sp?.status === "starting") waiting();
@@ -180,7 +194,12 @@ export function App() {
       await suspendSpawn(id);
       buffersRef.current.delete(id); // resumed spawns start fresh — drop the stale cached transcript
       // keep the spawn selected (unlike onStop) — the user stays on its now-empty suspended view.
-      if (activeIdRef.current === id) { closeSession(); setItems([]); }
+      if (activeIdRef.current === id) {
+        closeSession();
+        setItems([]);
+        setTurn({ state: "idle", queued: 0 });
+        turnsRef.current.delete(id);
+      }
     } catch (e: any) { toast.error("Suspend failed: " + e.message); }
     refreshSpawns();
   };
@@ -194,7 +213,8 @@ export function App() {
   const onStop = async (id: string) => {
     try { await deleteSpawn(id); } catch (e: any) { toast.error("Stop failed: " + e.message); }
     buffersRef.current.delete(id);
-    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); }
+    turnsRef.current.delete(id);
+    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setTurn({ state: "idle", queued: 0 }); }
     refreshSpawns();
   };
 
@@ -206,30 +226,32 @@ export function App() {
       return [...xs, withId({ kind, text: t })];
     });
 
-  const onSend = async (text: string) => {
-    if (!clientRef.current) return;
-    add({ kind: "user", text });
-    setBusy(true);
-    try {
-      await clientRef.current.prompt(text, {
-        onText: appendChunk("agent"),
-        onThought: appendChunk("thought"),
-        onToolCall: (tc) => add({ kind: "tool", title: tc.title, status: tc.status }),
-        onToolUpdate: (tc) => add({ kind: "tool", title: "tool", status: tc.status }),
-        requestPermission: (req) =>
-          new Promise<boolean>((resolve) =>
-            setPerm({ title: req?.options?.[0]?.name ?? "an action", resolve: (b) => { setPerm(null); resolve(b); } })),
-      });
-    } finally {
-      setBusy(false);
-    }
+  const onSend = (text: string) => {
+    const c = clientRef.current;
+    if (!c) return;
+    // Optimistic: if the agent is already working (or prompts are queued), this one will queue too —
+    // render it pending. The broker's spawn/turn reconciles the exact pending set as the queue drains.
+    const willQueue = turn.state === "busy" || turn.queued > 0;
+    add({ kind: "user", text, pending: willQueue });
+    // Fire-and-forget: turn-state drives the UI, not this promise. It may resolve much later (queued)
+    // or never (disconnect/switch) — that's fine, we no longer gate on it.
+    c.prompt(text, {
+      onText: appendChunk("agent"),
+      onThought: appendChunk("thought"),
+      onToolCall: (tc) => add({ kind: "tool", title: tc.title, status: tc.status }),
+      onToolUpdate: (tc) => add({ kind: "tool", title: "tool", status: tc.status }),
+      requestPermission: (req) =>
+        new Promise<boolean>((resolve) =>
+          setPerm({ title: req?.options?.[0]?.name ?? "an action", resolve: (b) => { setPerm(null); resolve(b); } })),
+    }).catch(() => {});
   };
 
   return (
     <AppShell
       conn={conn}
       items={items}
-      busy={busy || conn !== "connected"}
+      turn={turn}
+      canSend={conn === "connected" && turn.queued < MAX_QUEUED}
       onSend={onSend}
       perm={perm}
       onSpawnApp={spawnApp}

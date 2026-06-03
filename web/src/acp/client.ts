@@ -1,5 +1,5 @@
 import { Conn, type WebSocketLike } from "./conn";
-import type { Message, SessionUpdate, HistoryItem } from "./types";
+import type { Message, SessionUpdate, HistoryItem, SpawnTurn } from "./types";
 import type { Item } from "../views/chat/types";
 
 export interface PromptHandlers {
@@ -20,6 +20,9 @@ export class Client {
   // Replayed transcript from the in-container adapter on (re)connect. Settable by the caller;
   // fires independently of any in-flight prompt (handled directly in route()).
   onHistory?: (items: HistoryItem[]) => void;
+  // Per-spawn turn-state from the broker. Fires on spawn/turn notifications and on the turn field of
+  // a spawn/history replay. Independent of any in-flight prompt promise.
+  onTurn?: (t: SpawnTurn) => void;
 
   constructor(ws: WebSocketLike) {
     this.conn = new Conn(ws, (m) => this.route(m));
@@ -41,6 +44,11 @@ export class Client {
   private route(m: Message) {
     if (m.method === "spawn/history") {
       this.onHistory?.((m.params?.items as HistoryItem[]) ?? []);
+      if (m.params?.turn) this.onTurn?.(m.params.turn);
+      return;
+    }
+    if (m.method === "spawn/turn") {
+      if (m.params) this.onTurn?.(m.params);
       return;
     }
     if (m.method === "session/update") {
@@ -121,7 +129,7 @@ export function historyToItems(items: HistoryItem[]): ItemInput[] {
   return items.map((h): ItemInput => {
     switch (h.role) {
       case "user":
-        return { kind: "user", text: h.text ?? "" };
+        return { kind: "user", text: h.text ?? "", pending: h.pending };
       case "thought":
         return { kind: "thought", text: h.text ?? "" };
       case "tool":

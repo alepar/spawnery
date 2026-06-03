@@ -2,6 +2,8 @@ package node
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"sync"
 
 	"spawnery/internal/spawnlet"
@@ -59,25 +61,67 @@ func (l *lineBuffer) feed(p []byte, emit func([]byte)) {
 	}
 }
 
-// recordingEndpoint wraps a StreamEndpoint to TEE its bytes into rec without altering the forwarded
-// stream: Recv (client->agent) -> ObserveClientLine; Send (agent->client) -> ObserveAgentLine. Each
-// direction has its own lineBuffer touched by a single goroutine (Relay runs Recv and Send in
-// separate goroutines), and the recorder is internally mutex-guarded.
-func recordingEndpoint(ep spawnlet.StreamEndpoint, rec *transcript.Recorder) spawnlet.StreamEndpoint {
+// brokerEndpoint wraps a StreamEndpoint with the transcript broker. The client->agent direction is
+// gated: an internal reader pulls client bytes, splits ndjson lines, and asks the broker what to
+// forward (idle prompts pass; prompts while busy are held + queued). All agent-bound bytes — both
+// forwarded client prompts and drained queued prompts — flow through agentCh, so Recv (the relay's
+// single client->agent goroutine) remains the sole writer to agent stdin. spawn/turn frames are sent
+// to the client via ep.Send. Every channel op selects on ctx.Done() (the relay's context) so no
+// goroutine leaks if the session tears down while the agent isn't draining its stdin. agentCh is
+// never closed.
+func brokerEndpoint(ctx context.Context, ep spawnlet.StreamEndpoint, rec *transcript.Recorder) spawnlet.StreamEndpoint {
+	agentCh := make(chan []byte, 64)
 	var clientLB, agentLB lineBuffer
-	return spawnlet.StreamEndpoint{
-		Recv: func() ([]byte, error) {
+	go func() {
+		for {
 			b, err := ep.Recv()
 			if len(b) > 0 {
-				clientLB.feed(b, rec.ObserveClientLine)
+				clientLB.feed(b, func(line []byte) {
+					fwd, turn := rec.OnClientLine(line)
+					for _, f := range fwd {
+						select {
+						case agentCh <- f:
+						case <-ctx.Done():
+							return
+						}
+					}
+					if turn != nil {
+						_ = ep.Send(turn)
+					}
+				})
 			}
-			return b, err
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return spawnlet.StreamEndpoint{
+		Recv: func() ([]byte, error) {
+			select {
+			case b := <-agentCh:
+				return b, nil
+			case <-ctx.Done():
+				return nil, io.EOF
+			}
 		},
 		Send: func(b []byte) error {
 			if len(b) > 0 {
-				agentLB.feed(b, rec.ObserveAgentLine)
+				agentLB.feed(b, func(line []byte) {
+					drain, turn := rec.OnAgentLine(line)
+					for _, d := range drain {
+						select {
+						case agentCh <- d:
+						case <-ctx.Done():
+							return
+						}
+					}
+					if turn != nil {
+						_ = ep.Send(turn)
+					}
+				})
 			}
 			return ep.Send(b)
 		},
 	}
 }
+

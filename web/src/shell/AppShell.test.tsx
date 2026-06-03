@@ -7,7 +7,8 @@ import type { SpawnView } from "@/api/spawnlet";
 const baseProps = {
   conn: "connected" as const,
   items: [],
-  busy: false,
+  turn: { state: "idle" as const, queued: 0 },
+  canSend: true,
   onSend: () => {},
   perm: null,
   onSpawnApp: vi.fn(),

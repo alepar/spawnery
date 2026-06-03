@@ -53,15 +53,21 @@ func (h *connHub) attach(c net.Conn, history []byte) net.Conn {
 	return prev
 }
 
-// pump is the single persistent reader of the agent's stdout. It reads ndjson lines, records any
-// session/update into rec, and forwards each line byte-for-byte to the current client. Non-JSON or
-// non-ACP lines are forwarded unchanged and simply not recorded.
-func pump(fromAgent io.Reader, hub *connHub, rec *transcript.Recorder) {
+// pump is the single persistent reader of the agent's stdout. It records each ndjson line, forwards
+// it byte-for-byte to the current client, and — when a line is the in-flight prompt's turn-end
+// response — drains the next queued prompt to the agent (via agentCh) and pushes a spawn/turn frame.
+func pump(fromAgent io.Reader, hub *connHub, rec *transcript.Recorder, agentCh chan<- []byte) {
 	br := bufio.NewReaderSize(fromAgent, 64*1024)
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
-			rec.ObserveAgentLine(line)
+			drain, turn := rec.OnAgentLine(line)
+			for _, d := range drain {
+				agentCh <- d
+			}
+			if turn != nil {
+				hub.write(turn)
+			}
 			hub.write(line)
 		}
 		if err != nil {
@@ -70,20 +76,20 @@ func pump(fromAgent io.Reader, hub *connHub, rec *transcript.Recorder) {
 	}
 }
 
-// recordingCopy forwards the client's stdin to the agent line-by-line (byte-for-byte), recording any
-// session/prompt into rec. Returns on the client's write-side EOF (full close OR CloseWrite). A
-// partial final line (no trailing newline at disconnect) is forwarded as-is — callers are expected to
-// send complete ndjson lines.
-// observeClient is called BEFORE writing to the agent so the user item is recorded before any
-// agent reply can race into the transcript.
-func recordingCopy(toAgent io.Writer, conn io.Reader, rec *transcript.Recorder) {
+// recordingCopy reads the client's stdin line-by-line and asks the broker what to forward: idle
+// prompts and non-prompt lines go to the agent (via agentCh); prompts received while busy are held
+// and queued. spawn/turn frames are written back to the client. Returns on the client's write EOF.
+func recordingCopy(conn io.Reader, rec *transcript.Recorder, agentCh chan<- []byte, hub *connHub) {
 	br := bufio.NewReaderSize(conn, 64*1024)
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
-			rec.ObserveClientLine(line)
-			if _, werr := toAgent.Write(line); werr != nil {
-				return
+			fwd, turn := rec.OnClientLine(line)
+			for _, f := range fwd {
+				agentCh <- f
+			}
+			if turn != nil {
+				hub.write(turn)
 			}
 		}
 		if err != nil {
@@ -99,10 +105,18 @@ func recordingCopy(toAgent io.Writer, conn io.Reader, rec *transcript.Recorder) 
 func serve(ln net.Listener, toAgent io.Writer, fromAgent io.Reader) error {
 	hub := &connHub{}
 	rec := transcript.New()
-	// pump is intentionally not joined: it runs until fromAgent hits EOF (the agent exits),
-	// independent of serve returning. A future caller that embeds serve in a larger process must not
-	// assume serve returning means this goroutine is gone.
-	go pump(fromAgent, hub, rec)
+	agentCh := make(chan []byte, 64)
+	// Single writer to agent stdin (forwarded client prompts + drained queued prompts). If
+	// toAgent.Write fails the agent stdin is dead: the goroutine retires and producers block on a
+	// full agentCh — acceptable because the adapter process exits when the agent subprocess exits.
+	go func() {
+		for line := range agentCh {
+			if _, err := toAgent.Write(line); err != nil {
+				return
+			}
+		}
+	}()
+	go pump(fromAgent, hub, rec, agentCh)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -111,6 +125,6 @@ func serve(ln net.Listener, toAgent io.Writer, fromAgent io.Reader) error {
 		if prev := hub.attach(conn, rec.HistoryFrame()); prev != nil {
 			_ = prev.Close()
 		}
-		recordingCopy(toAgent, conn, rec)
+		recordingCopy(conn, rec, agentCh, hub)
 	}
 }
