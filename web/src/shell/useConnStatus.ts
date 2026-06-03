@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export type ConnState = "waiting" | "connecting" | "slow" | "connected" | "error";
+export type ConnState =
+  | "waiting" | "connecting" | "reconnecting" | "slow" | "connected" | "error" | "disconnected";
 
 // useConnStatus is the WS connection-status state machine for the chat-header indicator. `conn` is
 // null when there is no live socket (the indicator is hidden). connecting() arms a `slowMs` timer
-// that flips connecting -> slow if the socket is still connecting when it fires.
-export function useConnStatus(slowMs = 5000) {
+// that flips connecting -> slow if still connecting when it fires. reconnecting() arms a `graceMs`
+// timer that flips reconnecting -> disconnected (red) if the socket hasn't recovered by then (the
+// socket keeps retrying regardless).
+export function useConnStatus(slowMs = 5000, graceMs = 12000) {
   const [conn, setConn] = useState<ConnState | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -24,6 +27,15 @@ export function useConnStatus(slowMs = 5000) {
     }, slowMs);
   }, [clearTimer, slowMs]);
 
+  // The socket dropped and is retrying: yellow "reconnecting", then red "disconnected" after grace.
+  const reconnecting = useCallback(() => {
+    clearTimer();
+    setConn("reconnecting");
+    timer.current = setTimeout(() => {
+      setConn((c) => (c === "reconnecting" ? "disconnected" : c));
+    }, graceMs);
+  }, [clearTimer, graceMs]);
+
   // The selected spawn is still starting (no socket yet) — grey-pulse "waiting" until it goes active.
   const waiting = useCallback(() => { clearTimer(); setConn("waiting"); }, [clearTimer]);
   const connected = useCallback(() => { clearTimer(); setConn("connected"); }, [clearTimer]);
@@ -35,5 +47,5 @@ export function useConnStatus(slowMs = 5000) {
 
   useEffect(() => clearTimer, [clearTimer]); // clear the timer on unmount
 
-  return { conn, connecting, connected, errored, closed, reset, waiting };
+  return { conn, connecting, connected, errored, closed, reset, waiting, reconnecting };
 }

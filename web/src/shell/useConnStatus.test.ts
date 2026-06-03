@@ -54,3 +54,24 @@ describe("useConnStatus", () => {
     expect(result.current.conn).toBe("waiting");
   });
 });
+
+describe("useConnStatus reconnecting", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("reconnecting -> disconnected after the grace window", () => {
+    const { result } = renderHook(() => useConnStatus(5000, 12000));
+    act(() => result.current.reconnecting());
+    expect(result.current.conn).toBe("reconnecting");
+    act(() => vi.advanceTimersByTime(12000));
+    expect(result.current.conn).toBe("disconnected");
+  });
+
+  it("connected() during the grace window cancels the -> disconnected transition", () => {
+    const { result } = renderHook(() => useConnStatus(5000, 12000));
+    act(() => result.current.reconnecting());
+    act(() => result.current.connected());
+    act(() => vi.advanceTimersByTime(12000));
+    expect(result.current.conn).toBe("connected");
+  });
+});

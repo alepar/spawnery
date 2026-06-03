@@ -4,16 +4,20 @@ import type { ConnState } from "./useConnStatus";
 const DOT: Record<ConnState, string> = {
   waiting: "bg-zinc-400 animate-pulse",
   connecting: "bg-zinc-400 animate-pulse",
+  reconnecting: "bg-yellow-400 animate-pulse",
   slow: "bg-amber-500 animate-pulse",
   connected: "bg-green-500",
   error: "bg-red-500",
+  disconnected: "bg-red-500",
 };
 const LABEL: Record<ConnState, string> = {
   waiting: "waiting",
   connecting: "connecting…",
+  reconnecting: "reconnecting…",
   slow: "connecting…",
   connected: "connected",
   error: "error",
+  disconnected: "disconnected",
 };
 
 // ConnStatus renders the chat-header WS connection light + label. It renders nothing when there is
