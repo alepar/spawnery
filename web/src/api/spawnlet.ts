@@ -1,9 +1,58 @@
 import { unary } from "./connect";
 export { DEV_TOKEN } from "./connect";
 
+export type SpawnStatus =
+  | "starting" | "active" | "suspending" | "suspended" | "unreachable" | "error" | "unknown";
+
+export interface SpawnView {
+  spawnId: string;
+  name: string;
+  appId: string;
+  status: SpawnStatus;
+}
+
+// statusFromProto maps the Connect-JSON enum NAME (e.g. "SPAWN_STATUS_ACTIVE") to a short status.
+export function statusFromProto(s: string | undefined): SpawnStatus {
+  switch (s) {
+    case "SPAWN_STATUS_STARTING": return "starting";
+    case "SPAWN_STATUS_ACTIVE": return "active";
+    case "SPAWN_STATUS_SUSPENDING": return "suspending";
+    case "SPAWN_STATUS_SUSPENDED": return "suspended";
+    case "SPAWN_STATUS_UNREACHABLE": return "unreachable";
+    case "SPAWN_STATUS_ERROR": return "error";
+    default: return "unknown";
+  }
+}
+
 export async function createSpawn(appId: string, model: string): Promise<string> {
   const r = await unary<{ spawnId: string }>("CreateSpawn", { appId, model });
   return r.spawnId;
+}
+
+export async function listSpawns(): Promise<SpawnView[]> {
+  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string }> }>(
+    "ListSpawns", {},
+  );
+  return (r.spawns ?? []).map((s) => ({
+    spawnId: s.spawnId,
+    name: s.name ?? "",
+    appId: s.appId ?? "",
+    status: statusFromProto(s.status),
+  }));
+}
+
+export async function renameSpawn(spawnId: string, name: string): Promise<void> {
+  await unary<Record<string, never>>("RenameSpawn", { spawnId, name });
+}
+export async function suspendSpawn(spawnId: string): Promise<void> {
+  await unary<Record<string, never>>("SuspendSpawn", { spawnId });
+}
+export async function resumeSpawn(spawnId: string): Promise<void> {
+  await unary<Record<string, never>>("ResumeSpawn", { spawnId });
+}
+// UI "Stop" = DeleteSpawn (soft-delete; drops from the list). Legacy stopSpawn kept for non-UI callers.
+export async function deleteSpawn(spawnId: string): Promise<void> {
+  await unary<Record<string, never>>("DeleteSpawn", { spawnId });
 }
 export async function stopSpawn(spawnId: string): Promise<void> {
   await unary<Record<string, never>>("StopSpawn", { spawnId });
