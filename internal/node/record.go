@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"io"
 	"sync"
 
 	"spawnery/internal/spawnlet"
@@ -56,6 +57,62 @@ func (l *lineBuffer) feed(p []byte, emit func([]byte)) {
 		// Reslice retains the backing array until the next append-realloc. For ACP ndjson (short
 		// messages bounded by the relay's read-buffer size) this is fine.
 		l.buf = l.buf[i+1:]
+	}
+}
+
+// brokerEndpoint wraps a StreamEndpoint with the transcript broker. The client->agent direction is
+// gated: an internal reader pulls client bytes, splits ndjson lines, and asks the broker what to
+// forward (idle prompts pass; prompts while busy are held + queued). All agent-bound bytes — both
+// forwarded client prompts and drained queued prompts — flow through agentCh, so Recv (the relay's
+// single client->agent goroutine) remains the sole writer to agent stdin. spawn/turn frames are sent
+// to the client via ep.Send. agentCh is buffered and never closed; Recv unblocks via done on client EOF.
+func brokerEndpoint(ep spawnlet.StreamEndpoint, rec *transcript.Recorder) spawnlet.StreamEndpoint {
+	agentCh := make(chan []byte, 64)
+	done := make(chan struct{})
+	var clientLB, agentLB lineBuffer
+	go func() {
+		for {
+			b, err := ep.Recv()
+			if len(b) > 0 {
+				clientLB.feed(b, func(line []byte) {
+					fwd, turn := rec.OnClientLine(line)
+					for _, f := range fwd {
+						agentCh <- f
+					}
+					if turn != nil {
+						_ = ep.Send(turn)
+					}
+				})
+			}
+			if err != nil {
+				close(done)
+				return
+			}
+		}
+	}()
+	return spawnlet.StreamEndpoint{
+		Recv: func() ([]byte, error) {
+			select {
+			case b := <-agentCh:
+				return b, nil
+			case <-done:
+				return nil, io.EOF
+			}
+		},
+		Send: func(b []byte) error {
+			if len(b) > 0 {
+				agentLB.feed(b, func(line []byte) {
+					drain, turn := rec.OnAgentLine(line)
+					for _, d := range drain {
+						agentCh <- d
+					}
+					if turn != nil {
+						_ = ep.Send(turn)
+					}
+				})
+			}
+			return ep.Send(b)
+		},
 	}
 }
 
