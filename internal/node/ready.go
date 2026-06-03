@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"spawnery/internal/acp"
+	"spawnery/internal/runtime"
+	"spawnery/internal/spawnlet"
 )
 
 // probeInitID is the JSON-RPC id used by the readiness probe's initialize. It lives only on the
@@ -53,4 +55,37 @@ func awaitInitialize(ctx context.Context, stdin io.Writer, stdout io.Reader, tim
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// readyProbeTimeout bounds how long startSpawn waits for the agent to answer an ACP initialize
+// before declaring the spawn failed. Kept well under the CP scheduler's 60s Provision wait
+// (cmd/cp/main.go) so the node reports ERROR (with a useful detail) rather than the scheduler
+// timing out. goose boots to ACP-ready in ~5s; 30s is generous headroom for a slow node.
+const readyProbeTimeout = 30 * time.Second
+
+// probeReady blocks until the spawn's agent answers an ACP initialize, or the timeout elapses. It
+// opens its OWN attach (retrying while the attach itself fails — e.g. the CRI in-pod adapter is still
+// starting), sends one initialize, and waits for the matching response. The attach is closed before
+// returning; detaching does not disturb the long-lived agent (the relay attaches/detaches per client
+// session the same way).
+func (a *attacher) probeReady(ctx context.Context, sp *spawnlet.Spawn, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var att *runtime.AttachedStream
+	for {
+		var err error
+		att, err = a.mgr.Attach(ctx, sp)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("attach agent: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond): // CRI: adapter UDS not listening yet
+		}
+	}
+	defer att.Close()
+	return awaitInitialize(ctx, att.Stdin, att.Stdout, time.Until(deadline))
 }

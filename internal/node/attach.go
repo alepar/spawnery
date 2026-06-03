@@ -160,8 +160,19 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 
 func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.status(st.SpawnId, nodev1.SpawnPhase_STARTING, "")
-	if _, err := a.mgr.Create(ctx, st.SpawnId, st.AppRef, st.Model); err != nil {
+	sp, err := a.mgr.Create(ctx, st.SpawnId, st.AppRef, st.Model)
+	if err != nil {
 		logErr("startSpawn "+st.SpawnId, err)
+		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
+		return
+	}
+	// Readiness gate: don't report ACTIVE until the agent answers an ACP initialize, so the CP
+	// ledger's 'active' (green in the UI) means "ready to chat", not just "container launched".
+	if err := a.probeReady(ctx, sp, readyProbeTimeout); err != nil {
+		logErr("startSpawn "+st.SpawnId+": agent not ready", err)
+		if serr := a.mgr.Stop(ctx, st.SpawnId); serr != nil { // tear down the half-started spawn
+			logErr("startSpawn "+st.SpawnId+": stop after not-ready", serr)
+		}
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
 		return
 	}
