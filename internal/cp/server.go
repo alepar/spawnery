@@ -221,6 +221,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model stri
 	}
 	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, placement)
 	if err != nil {
+		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
 			log.Printf("provisionSpawn %s: SetError after provision failure also failed: %v", spawnID, serr)
 		}
