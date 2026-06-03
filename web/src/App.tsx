@@ -7,13 +7,14 @@ import {
 import { Client, historyToItems } from "./acp/client";
 import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
+import { nextConnAction } from "./shell/connPolicy";
 import { initialTheme, setTheme } from "./lib/theme";
 import type { Item } from "./views/chat/types";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
 export function App() {
-  const { conn, connecting, connected, errored, closed, reset } = useConnStatus();
+  const { conn, connecting, connected, errored, closed, reset, waiting } = useConnStatus();
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [perm, setPerm] = useState<{ title: string; resolve: (b: boolean) => void } | null>(null);
@@ -29,51 +30,32 @@ export function App() {
   const activeIdRef = useRef<string | null>(null);
   const itemsRef = useRef<Item[]>([]);
   const spawnsRef = useRef<SpawnView[]>([]);
+  const connRef = useRef(conn);
 
   useEffect(() => { setTheme(initialTheme()); }, []);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
   useEffect(() => { itemsRef.current = items; }, [items]);
   useEffect(() => { spawnsRef.current = spawns; }, [spawns]);
+  useEffect(() => { connRef.current = conn; }, [conn]);
 
   // Distributive Omit so each Item variant keeps its own fields (plain Omit<union,"id"> collapses them).
   type ItemInput = Item extends infer T ? (T extends { id: number } ? Omit<T, "id"> : never) : never;
   const withId = (it: ItemInput): Item => ({ ...it, id: idRef.current++ } as Item);
 
-  const refreshSpawns = async () => {
-    try {
-      const list = await listSpawns();
-      setSpawns(list);
-      if (activeIdRef.current && !list.some((s) => s.spawnId === activeIdRef.current)) {
-        // active spawn disappeared from the ledger (stopped) — tear the live session down.
-        genRef.current++;
-        wsRef.current?.close();
-        wsRef.current = null; clientRef.current = null;
-        setActiveId(null); setItems([]); reset();
-      }
-    } catch { /* transient; keep the last list */ }
-  };
-
-  useEffect(() => {
-    refreshSpawns();
-    const t = setInterval(refreshSpawns, 3000);
-    return () => clearInterval(t);
-  }, []);
-
-  // On unmount just close the live ws — spawns persist on the node.
-  useEffect(() => () => { wsRef.current?.close(); }, []);
-
-  const closeSession = () => {
+  // teardown closes the live ws but leaves the header state to the caller (the error case must show
+  // red, not the null that closeSession's reset() would set).
+  const teardown = () => {
     genRef.current++;
     wsRef.current?.close();
     wsRef.current = null;
     clientRef.current = null;
-    reset();
   };
+  const closeSession = () => { teardown(); reset(); };
 
   const openSession = (spawnId: string) => {
     const gen = ++genRef.current;
     wsRef.current?.close();
-    setBusy(true); connecting();
+    connecting();
     const ws = new WebSocket(`ws://${location.host}/ws/session`);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
@@ -94,35 +76,80 @@ export function App() {
         await c.newSession("/app");
       } catch (e: any) {
         if (genRef.current !== gen) return;
-        errored(); setBusy(false);
+        errored();
         return;
       }
       if (genRef.current !== gen) return;
-      connected(); setBusy(false);
+      connected();
     };
     ws.onerror = () => { if (genRef.current !== gen) return; errored(); toast.error("Connection error"); };
     ws.onclose = () => { if (genRef.current !== gen) return; closed(); };
   };
 
+  // refreshSpawns fetches the ledger, reconciles the active spawn's header/WS off its status (via the
+  // pure nextConnAction policy), and returns the fetched list (so the poll can pick its cadence).
+  const refreshSpawns = async (): Promise<SpawnView[]> => {
+    let list: SpawnView[];
+    try { list = await listSpawns(); }
+    catch { return spawnsRef.current; }
+    setSpawns(list);
+    const aid = activeIdRef.current;
+    if (aid) {
+      const active = list.find((s) => s.spawnId === aid);
+      switch (nextConnAction(active?.status, !!wsRef.current, connRef.current)) {
+        case "drop":
+          closeSession();
+          setActiveId(null); activeIdRef.current = null; setItems([]);
+          break;
+        case "open":
+          openSession(aid); // just became active -> connect (green)
+          break;
+        case "error":
+          teardown(); errored(); // failed to start -> red, stays in the sidebar
+          break;
+        case "waiting":
+          waiting(); // still starting -> grey pulse
+          break;
+        case "none":
+          break;
+      }
+    }
+    return list;
+  };
+
+  // Poll the ledger: 1s while any spawn is 'starting' (snappy green/connect), else 3s.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    let stopped = false;
+    const tick = async () => {
+      const list = await refreshSpawns();
+      if (stopped) return;
+      const fast = list.some((s) => s.status === "starting");
+      timer = setTimeout(tick, fast ? 1000 : 3000);
+    };
+    tick();
+    return () => { stopped = true; clearTimeout(timer); };
+  }, []);
+
+  // On unmount just close the live ws — spawns persist on the node.
+  useEffect(() => () => { wsRef.current?.close(); }, []);
+
   const spawnApp = async (appId: string) => {
-    // Show "connecting" immediately on click; openSession re-arms the 5s slow-timer for the WS phase.
-    setBusy(true); connecting();
     try {
-      const id = await createSpawn(appId, MODEL);
+      const id = await createSpawn(appId, MODEL); // async CP: returns immediately, status 'starting'
       const prevId = activeIdRef.current;
+      teardown(); // close any current live session before switching to the new (starting) spawn
       buffersRef.current.set(id, []);
       setActiveId(id);
-      activeIdRef.current = id; // make active immediately for the onHistory guard
-      // Stash the OUTGOING spawn's transcript before clearing for the new one (mirrors selectSpawn),
-      // so spawning a 2nd instance while the 1st had messages doesn't lose the 1st's transcript.
+      activeIdRef.current = id;
       setItems((current) => {
         if (prevId && prevId !== id) buffersRef.current.set(prevId, current);
         return [];
       });
-      await refreshSpawns();
-      openSession(id);
+      waiting(); // grey-pulse until the node signals active; the poll then opens the ws
+      await refreshSpawns(); // sidebar shows the new spawn yellow immediately
     } catch (e: any) {
-      errored(); setBusy(false);
+      errored();
       toast.error("Spawn failed: " + e.message);
     }
   };
@@ -134,16 +161,15 @@ export function App() {
     setActiveId(id);
     activeIdRef.current = id;
     const buf = buffersRef.current.get(id) ?? [];
-    // Atomically stash the OUTGOING spawn's last-committed transcript and load the incoming one.
-    // Using the functional updater (vs itemsRef, which lags by one render) avoids losing a chunk if
-    // the user switches mid-stream. Writing a ref inside the updater is idempotent under StrictMode's
-    // double-invoke (same value both times), so it's safe here.
     setItems((current) => {
       if (prevId) buffersRef.current.set(prevId, current);
       return buf;
     });
     const sp = spawnsRef.current.find((s) => s.spawnId === id);
     if (sp?.status === "active") openSession(id);
+    else if (sp?.status === "starting") waiting();
+    else if (sp?.status === "error") errored();
+    // suspended / unknown -> hidden (closeSession already reset())
   };
 
   const onRename = async (id: string, name: string) => {
@@ -161,8 +187,6 @@ export function App() {
   const onResume = async (id: string) => {
     try {
       await resumeSpawn(id);
-      // openSession even though the ledger may still read 'suspending' — the backend transitions the
-      // spawn to active synchronously before it accepts the ws, so the handshake succeeds.
       if (activeIdRef.current === id) openSession(id);
     } catch (e: any) { toast.error("Resume failed: " + e.message); }
     refreshSpawns();
@@ -205,7 +229,7 @@ export function App() {
     <AppShell
       conn={conn}
       items={items}
-      busy={busy}
+      busy={busy || conn !== "connected"}
       onSend={onSend}
       perm={perm}
       onSpawnApp={spawnApp}
