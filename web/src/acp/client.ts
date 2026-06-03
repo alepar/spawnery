@@ -90,6 +90,12 @@ export class Client {
   // NOTE: confirm the exact session/request_permission response shape against the ACP spec
   // during the live Goose run; the secret-word demo may not trigger a permission request at all.
 
+  // NOTE: our spawn model is non-standard for ACP — one long-lived agent process serves MANY client
+  // sessions over its lifetime, so we send `initialize` (+ `session/new`) AGAIN on every reconnect
+  // (switching back to a spawn, page reload, and the node readiness probe). ACP normally expects one
+  // `initialize` per agent process. We rely on the agent tolerating a repeated `initialize` (it's a
+  // stateless capability handshake; verified against goose). Making this spec-compliant — the node
+  // owning a single session and filtering redundant initialize/session-new on reconnect — is sp-r7t.
   async initialize(): Promise<void> {
     await this.call("initialize", { protocolVersion: 1, clientCapabilities: {} });
   }
