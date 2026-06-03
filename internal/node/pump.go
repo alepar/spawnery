@@ -32,6 +32,9 @@ type client struct {
 }
 
 // frameSender delivers one encoded frame line to a client; returns an error if the client is gone.
+// It MUST be safe for concurrent use: the pump calls it both from a client's clientLoop goroutine and
+// directly (the perm_request broadcast / attach re-send). The integration's sender is a non-blocking
+// channel write; tests use a mutex-guarded capture.
 type frameSender func(line []byte) error
 
 // Pump is the long-lived per-spawn relay: it owns the goose stdio, an append-only frame log, and a
@@ -110,6 +113,9 @@ func (p *Pump) attachClient(clientID string, cursor int64, send frameSender) {
 	}
 	c := &client{cursor: cursor, send: send, notify: make(chan struct{}, 1), done: make(chan struct{})}
 	p.clients[clientID] = c
+	// Snapshot still-pending perm requests to re-send to this client. The snapshot may include a perm
+	// resolved concurrently (we send after unlock) -> the late client briefly shows an already-answered
+	// prompt; its later response no-ops in resolvePermission. Acceptable for an interactive prompt.
 	var perms [][]byte
 	for reqID := range p.pending {
 		perms = append(perms, encodeFrame(Frame{Kind: "perm_request", ReqID: reqID, Title: "permission requested"}))
@@ -211,6 +217,10 @@ func (p *Pump) stop() {
 		close(c.done)
 	}
 	p.clients = map[string]*client{}
+	for _, pp := range p.pending {
+		pp.timer.Stop()
+	}
+	p.pending = map[string]*pendingPerm{}
 	p.mu.Unlock()
 }
 
