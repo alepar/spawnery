@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"sync"
@@ -102,7 +103,9 @@ func TestBrokerEndpointQueuesAndDrains(t *testing.T) {
 			return nil
 		},
 	}
-	be := brokerEndpoint(ep, rec)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	be := brokerEndpoint(ctx, ep, rec)
 
 	in <- []byte(`{"id":1,"method":"session/prompt","params":{"prompt":[{"text":"a"}]}}` + "\n")
 	in <- []byte(`{"id":2,"method":"session/prompt","params":{"prompt":[{"text":"b"}]}}` + "\n")

@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"sync"
 
@@ -65,10 +66,11 @@ func (l *lineBuffer) feed(p []byte, emit func([]byte)) {
 // forward (idle prompts pass; prompts while busy are held + queued). All agent-bound bytes — both
 // forwarded client prompts and drained queued prompts — flow through agentCh, so Recv (the relay's
 // single client->agent goroutine) remains the sole writer to agent stdin. spawn/turn frames are sent
-// to the client via ep.Send. agentCh is buffered and never closed; Recv unblocks via done on client EOF.
-func brokerEndpoint(ep spawnlet.StreamEndpoint, rec *transcript.Recorder) spawnlet.StreamEndpoint {
+// to the client via ep.Send. Every channel op selects on ctx.Done() (the relay's context) so no
+// goroutine leaks if the session tears down while the agent isn't draining its stdin. agentCh is
+// never closed.
+func brokerEndpoint(ctx context.Context, ep spawnlet.StreamEndpoint, rec *transcript.Recorder) spawnlet.StreamEndpoint {
 	agentCh := make(chan []byte, 64)
-	done := make(chan struct{})
 	var clientLB, agentLB lineBuffer
 	go func() {
 		for {
@@ -77,7 +79,11 @@ func brokerEndpoint(ep spawnlet.StreamEndpoint, rec *transcript.Recorder) spawnl
 				clientLB.feed(b, func(line []byte) {
 					fwd, turn := rec.OnClientLine(line)
 					for _, f := range fwd {
-						agentCh <- f
+						select {
+						case agentCh <- f:
+						case <-ctx.Done():
+							return
+						}
 					}
 					if turn != nil {
 						_ = ep.Send(turn)
@@ -85,7 +91,6 @@ func brokerEndpoint(ep spawnlet.StreamEndpoint, rec *transcript.Recorder) spawnl
 				})
 			}
 			if err != nil {
-				close(done)
 				return
 			}
 		}
@@ -95,7 +100,7 @@ func brokerEndpoint(ep spawnlet.StreamEndpoint, rec *transcript.Recorder) spawnl
 			select {
 			case b := <-agentCh:
 				return b, nil
-			case <-done:
+			case <-ctx.Done():
 				return nil, io.EOF
 			}
 		},
@@ -104,7 +109,11 @@ func brokerEndpoint(ep spawnlet.StreamEndpoint, rec *transcript.Recorder) spawnl
 				agentLB.feed(b, func(line []byte) {
 					drain, turn := rec.OnAgentLine(line)
 					for _, d := range drain {
-						agentCh <- d
+						select {
+						case agentCh <- d:
+						case <-ctx.Done():
+							return
+						}
 					}
 					if turn != nil {
 						_ = ep.Send(turn)

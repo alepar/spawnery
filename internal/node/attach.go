@@ -244,7 +244,7 @@ func (a *attacher) openSession(ctx context.Context, spawnID string) {
 				log.Printf("node: replay history for %s: %v", spawnID, err)
 			}
 		}
-		ep = brokerEndpoint(ep, rec)
+		ep = brokerEndpoint(rctx, ep, rec)
 	}
 	go func() {
 		defer att.Close()
