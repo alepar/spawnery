@@ -2,43 +2,32 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 import { AppShell } from "./AppShell";
+import type { SpawnView } from "@/api/spawnlet";
+
+const baseProps = {
+  status: "ready",
+  items: [],
+  busy: false,
+  onSend: () => {},
+  perm: null,
+  onSpawnApp: vi.fn(),
+};
+const spawns: SpawnView[] = [{ spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active" }];
+const actions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onStop: vi.fn() };
 
 describe("AppShell", () => {
-  it("renders the marketplace view by default and switches via nav", async () => {
-    const onSpawnApp = vi.fn();
-    render(
-      <AppShell
-        status="ready"
-        items={[]}
-        busy={false}
-        onSend={() => {}}
-        perm={null}
-        onSpawnApp={onSpawnApp}
-      />,
-    );
-    // Default view: marketplace is shown, chat prompt not mounted.
+  it("renders the marketplace by default; chat not mounted", async () => {
+    render(<AppShell {...baseProps} />);
     expect(screen.getByTestId("marketplace")).toBeTruthy();
     expect(screen.queryByTestId("prompt-input")).toBeNull();
-
-    // Click the Settings nav button (Sidebar uses data-testid="nav-settings").
     await userEvent.click(screen.getByTestId("nav-settings"));
     expect(screen.queryByTestId("marketplace")).toBeNull();
   });
 
-  it("opens the chat view from the active spawn item in the sidebar", async () => {
-    const onSpawnApp = vi.fn();
-    render(
-      <AppShell
-        status="ready"
-        items={[]}
-        busy={false}
-        onSend={() => {}}
-        perm={null}
-        onSpawnApp={onSpawnApp}
-        activeSpawn={{ label: "spawnery/secret-app" }}
-      />,
-    );
-    await userEvent.click(screen.getByTestId("nav-spawn"));
+  it("selecting a spawn navigates to chat and calls onSelectSpawn", async () => {
+    render(<AppShell {...baseProps} spawns={spawns} activeId="a" actions={actions} />);
+    await userEvent.click(screen.getByTestId("spawn-select-a"));
+    expect(actions.onSelectSpawn).toHaveBeenCalledWith("a");
     expect(screen.getByTestId("prompt-input")).toBeTruthy();
   });
 });

@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { createSpawn, stopSpawn, DEV_TOKEN } from "./api/spawnlet";
-import { Client } from "./acp/client";
+import {
+  createSpawn, listSpawns, renameSpawn, suspendSpawn, resumeSpawn, deleteSpawn,
+  DEV_TOKEN, type SpawnView,
+} from "./api/spawnlet";
+import { Client, historyToItems } from "./acp/client";
 import { AppShell } from "./shell/AppShell";
 import { initialTheme, setTheme } from "./lib/theme";
 import type { Item } from "./views/chat/types";
@@ -13,62 +16,152 @@ export function App() {
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [perm, setPerm] = useState<{ title: string; resolve: (b: boolean) => void } | null>(null);
-  const [activeApp, setActiveApp] = useState<string | null>(null);
+  const [spawns, setSpawns] = useState<SpawnView[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+
   const clientRef = useRef<Client | null>(null);
-  const spawnRef = useRef<string>("");
   const wsRef = useRef<WebSocket | null>(null);
   const idRef = useRef(0);
   const genRef = useRef(0);
+  const buffersRef = useRef<Map<string, Item[]>>(new Map());
+  // refs mirroring state so async callbacks (poll, ws onopen, onHistory) don't read stale closures.
+  const activeIdRef = useRef<string | null>(null);
+  const itemsRef = useRef<Item[]>([]);
+  const spawnsRef = useRef<SpawnView[]>([]);
 
   useEffect(() => { setTheme(initialTheme()); }, []);
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+  useEffect(() => { itemsRef.current = items; }, [items]);
+  useEffect(() => { spawnsRef.current = spawns; }, [spawns]);
 
-  const spawnApp = async (appId: string, model: string) => {
-    const gen = ++genRef.current;
-    setActiveApp(appId);
-    wsRef.current?.close();
-    if (spawnRef.current) stopSpawn(spawnRef.current);
-    spawnRef.current = "";
-    setItems([]);
-    setBusy(true);
-    setStatus("starting…");
+  // Distributive Omit so each Item variant keeps its own fields (plain Omit<union,"id"> collapses them).
+  type ItemInput = Item extends infer T ? (T extends { id: number } ? Omit<T, "id"> : never) : never;
+  const withId = (it: ItemInput): Item => ({ ...it, id: idRef.current++ } as Item);
+
+  const refreshSpawns = async () => {
     try {
-      const id = await createSpawn(appId, model);
-      if (genRef.current !== gen) { stopSpawn(id); return; }
-      spawnRef.current = id;
-      const ws = new WebSocket(`ws://${location.host}/ws/session`);
-      ws.binaryType = "arraybuffer";
-      wsRef.current = ws;
-      ws.onopen = async () => {
-        ws.send(JSON.stringify({ spawnId: id, token: DEV_TOKEN }));
-        const c = new Client(ws as any);
-        clientRef.current = c;
+      const list = await listSpawns();
+      setSpawns(list);
+      if (activeIdRef.current && !list.some((s) => s.spawnId === activeIdRef.current)) {
+        // active spawn disappeared from the ledger (stopped) — tear the live session down.
+        genRef.current++;
+        wsRef.current?.close();
+        wsRef.current = null; clientRef.current = null;
+        setActiveId(null); setItems([]); setStatus("");
+      }
+    } catch { /* transient; keep the last list */ }
+  };
+
+  useEffect(() => {
+    refreshSpawns();
+    const t = setInterval(refreshSpawns, 3000);
+    return () => clearInterval(t);
+  }, []);
+
+  // On unmount just close the live ws — spawns persist on the node.
+  useEffect(() => () => { wsRef.current?.close(); }, []);
+
+  const closeSession = () => {
+    genRef.current++;
+    wsRef.current?.close();
+    wsRef.current = null;
+    clientRef.current = null;
+  };
+
+  const openSession = (spawnId: string) => {
+    const gen = ++genRef.current;
+    wsRef.current?.close();
+    setBusy(true); setStatus("starting…");
+    const ws = new WebSocket(`ws://${location.host}/ws/session`);
+    ws.binaryType = "arraybuffer";
+    wsRef.current = ws;
+    ws.onopen = async () => {
+      ws.send(JSON.stringify({ spawnId, token: DEV_TOKEN }));
+      const c = new Client(ws as any);
+      clientRef.current = c;
+      // CRI-lane adapter replays the transcript here; Docker lane never fires this (buffer is used).
+      c.onHistory = (h) => {
+        if (genRef.current !== gen) return;
+        const its = historyToItems(h).map(withId);
+        buffersRef.current.set(spawnId, its);
+        if (activeIdRef.current === spawnId) setItems(its);
+      };
+      try {
         await c.initialize();
         await c.newSession("/app");
+      } catch (e: any) {
         if (genRef.current !== gen) return;
-        setStatus("ready"); setBusy(false);
-      };
-      ws.onerror = () => { if (genRef.current !== gen) return; setStatus("connection error"); toast.error("Connection error"); };
-      ws.onclose = () => { if (genRef.current !== gen) return; setStatus("session ended"); };
-    } catch (e: any) {
+        setStatus("error: " + e.message); setBusy(false);
+        return;
+      }
       if (genRef.current !== gen) return;
-      setStatus("error: " + e.message); toast.error("Spawn failed: " + e.message);
+      setStatus("ready"); setBusy(false);
+    };
+    ws.onerror = () => { if (genRef.current !== gen) return; setStatus("connection error"); toast.error("Connection error"); };
+    ws.onclose = () => { if (genRef.current !== gen) return; setStatus("session ended"); };
+  };
+
+  const spawnApp = async (appId: string) => {
+    setBusy(true); setStatus("starting…");
+    try {
+      const id = await createSpawn(appId, MODEL);
+      buffersRef.current.set(id, []);
+      setItems([]);
+      setActiveId(id);
+      activeIdRef.current = id; // make active immediately for the onHistory guard
+      await refreshSpawns();
+      openSession(id);
+    } catch (e: any) {
+      setStatus("error: " + e.message); setBusy(false);
+      toast.error("Spawn failed: " + e.message);
     }
   };
 
-  useEffect(() => () => { wsRef.current?.close(); if (spawnRef.current) stopSpawn(spawnRef.current); }, []);
+  const selectSpawn = (id: string) => {
+    if (id === activeIdRef.current) return;
+    if (activeIdRef.current) buffersRef.current.set(activeIdRef.current, itemsRef.current);
+    closeSession();
+    setActiveId(id);
+    activeIdRef.current = id;
+    const buf = buffersRef.current.get(id) ?? [];
+    setItems(buf);
+    const sp = spawnsRef.current.find((s) => s.spawnId === id);
+    if (sp?.status === "active") openSession(id);
+    else setStatus(sp?.status ?? "");
+  };
 
-  type ItemInput = Item extends infer T ? (T extends { id: number } ? Omit<T, "id"> : never) : never;
-  const add = (it: ItemInput) =>
-    setItems((xs) => [...xs, { ...it, id: idRef.current++ } as Item]);
+  const onRename = async (id: string, name: string) => {
+    setSpawns((xs) => xs.map((s) => (s.spawnId === id ? { ...s, name } : s))); // optimistic
+    try { await renameSpawn(id, name); } catch (e: any) { toast.error("Rename failed: " + e.message); }
+    refreshSpawns();
+  };
+  const onSuspend = async (id: string) => {
+    try {
+      await suspendSpawn(id);
+      if (activeIdRef.current === id) { closeSession(); setStatus("suspended"); }
+    } catch (e: any) { toast.error("Suspend failed: " + e.message); }
+    refreshSpawns();
+  };
+  const onResume = async (id: string) => {
+    try {
+      await resumeSpawn(id);
+      if (activeIdRef.current === id) openSession(id);
+    } catch (e: any) { toast.error("Resume failed: " + e.message); }
+    refreshSpawns();
+  };
+  const onStop = async (id: string) => {
+    try { await deleteSpawn(id); } catch (e: any) { toast.error("Stop failed: " + e.message); }
+    buffersRef.current.delete(id);
+    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setStatus(""); }
+    refreshSpawns();
+  };
 
-  // Streamed chunks arrive one-per-frame; coalesce consecutive chunks of the same kind
-  // into a single block (so a streamed thought/message renders as one bubble). The id is
-  // kept stable across appends so the virtualized row memoizes correctly.
+  const add = (it: ItemInput) => setItems((xs) => [...xs, withId(it)]);
   const appendChunk = (kind: "agent" | "thought") => (t: string) =>
     setItems((xs) => {
       const last = xs[xs.length - 1];
-      if (last && last.kind === kind) return [...xs.slice(0, -1), { ...last, text: last.text + t }];
-      return [...xs, { id: idRef.current++, kind, text: t } as Item];
+      if (last && last.kind === kind) return [...xs.slice(0, -1), { ...last, text: (last as { text: string }).text + t }];
+      return [...xs, withId({ kind, text: t })];
     });
 
   const onSend = async (text: string) => {
@@ -90,5 +183,17 @@ export function App() {
     }
   };
 
-  return <AppShell status={status} items={items} busy={busy} onSend={onSend} perm={perm} onSpawnApp={(appId) => spawnApp(appId, MODEL)} activeSpawn={activeApp ? { label: activeApp } : null} />;
+  return (
+    <AppShell
+      status={status}
+      items={items}
+      busy={busy}
+      onSend={onSend}
+      perm={perm}
+      onSpawnApp={spawnApp}
+      spawns={spawns}
+      activeId={activeId}
+      actions={{ onSelectSpawn: selectSpawn, onRename, onSuspend, onResume, onStop }}
+    />
+  );
 }
