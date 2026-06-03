@@ -106,7 +106,9 @@ func serve(ln net.Listener, toAgent io.Writer, fromAgent io.Reader) error {
 	hub := &connHub{}
 	rec := transcript.New()
 	agentCh := make(chan []byte, 64)
-	// Single writer to agent stdin: forwarded client prompts AND drained queued prompts.
+	// Single writer to agent stdin (forwarded client prompts + drained queued prompts). If
+	// toAgent.Write fails the agent stdin is dead: the goroutine retires and producers block on a
+	// full agentCh — acceptable because the adapter process exits when the agent subprocess exits.
 	go func() {
 		for line := range agentCh {
 			if _, err := toAgent.Write(line); err != nil {

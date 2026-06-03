@@ -193,7 +193,9 @@ func TestAdapterHoldsSecondPromptUntilTurnEnds(t *testing.T) {
 	agentIn, agentInW := io.Pipe()
 	go func() {
 		for line := range agentCh {
-			agentInW.Write(line)
+			if _, err := agentInW.Write(line); err != nil {
+				return
+			}
 		}
 	}()
 	agentReader := bufio.NewReader(agentIn)
