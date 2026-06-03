@@ -49,7 +49,7 @@ type Pump struct {
 	seq     int64   // last assigned seq
 	maxLog  int
 	clients map[string]*client
-	stopped bool // set by stop() in Task 4 (agent teardown); unused in the fan-out core
+	stopped bool // guards stop() against double-teardown
 
 	sessionID        string
 	toAgent          chan []byte               // ndjson lines for the writer (sole stdin writer)

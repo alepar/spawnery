@@ -348,6 +348,62 @@ func TestPermissionResentOnAttachWhilePending(t *testing.T) {
 	waitKind(t, b, "perm_request")
 }
 
+// A turn started with NO clients attached must still complete and land in the log; a client that
+// attaches afterward replays the whole turn. (The pump drives the agent regardless of clients.)
+func TestTurnCompletesWithNoClientsThenReplays(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGoose(gooseInR, gooseOutW)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	defer p.stop()
+	// No clients attached. fromClient processes the prompt + logs frames regardless.
+	p.fromClient("ghost", encodeFrame(Frame{Kind: "prompt", Text: "hi"}))
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.mu.Lock()
+		n := len(p.log)
+		idle := false
+		for _, f := range p.log { if f.Kind == "turn" && f.State == "idle" { idle = true } }
+		p.mu.Unlock()
+		if idle && n >= 4 { break } // user, turn busy, agent ECHO, turn idle
+		if time.Now().After(deadline) { t.Fatal("turn did not complete into the log with zero clients") }
+		time.Sleep(5 * time.Millisecond)
+	}
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	a.waitLen(t, 4) // late client replays the whole turn from the log
+}
+
+// Two clients fan out; after detaching one, the remaining client still gets new turns.
+func TestMultiClientDetachOneStillServesTurns(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGoose(gooseInR, gooseOutW)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	defer p.stop()
+	a, b := &capSender{}, &capSender{}
+	p.attachClient("a", 0, a.send)
+	p.attachClient("b", 0, b.send)
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "one"}))
+	// both clients see the first turn's agent frame
+	agentCount := func(c *capSender) int { n := 0; for _, f := range c.frames() { if f.Kind == "agent" { n++ } }; return n }
+	waitAgents := func(c *capSender, want int) {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if agentCount(c) >= want { return }
+			if time.Now().After(deadline) { t.Fatalf("want %d agent frames, got %d", want, agentCount(c)) }
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitAgents(a, 1); waitAgents(b, 1)
+	p.detachClient("a")
+	p.fromClient("b", encodeFrame(Frame{Kind: "prompt", Text: "two"}))
+	waitAgents(b, 2) // b gets the second turn
+	if agentCount(a) != 1 { t.Fatalf("detached client a should not get new frames, got %d", agentCount(a)) }
+}
+
 func TestPermissionTimeoutDenies(t *testing.T) {
 	gooseInR, gooseInW := io.Pipe()
 	gooseOutR, gooseOutW := io.Pipe()
