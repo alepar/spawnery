@@ -1,42 +1,38 @@
 import { test, expect, type Page } from "@playwright/test";
+import { clearSpawns } from "./helpers";
 
-// No auto-spawn anymore: the app opens on the Marketplace (default view). To get a live chat session
-// we spawn a seeded app — "Secret App" (spawnery/secret-app), run by the stub agent which echoes
-// "ECHO: <prompt>". The spawned app then lives under the sidebar "Spawns" section (nav-spawn).
-async function spawnFromMarketplace(page: Page, cardId = "app-card-spawnery/secret-app") {
+test.beforeEach(async ({ request }) => { await clearSpawns(request); });
+
+// Spawn the seeded "Secret App" from the Marketplace; it lands in the sidebar Spawns list and the
+// chat opens. The stub agent echoes "ECHO: <prompt>".
+async function spawnSecretApp(page: Page) {
   await page.goto("/");
-  const card = page.getByTestId(cardId);
+  const card = page.getByTestId("app-card-spawnery/secret-app");
   await expect(card).toBeVisible({ timeout: 20_000 });
   await card.click();
   await expect(page.getByTestId("spawn-btn")).toBeVisible({ timeout: 10_000 });
   await page.getByTestId("spawn-btn").click();
-  // ACP handshake; generous timeout absorbs the container cold start.
   await expect(page.getByTestId("status")).toHaveText("ready", { timeout: 40_000 });
 }
 
 test("chat echoes through the real browser", async ({ page }) => {
-  await spawnFromMarketplace(page);
-
+  await spawnSecretApp(page);
   const token = "ping-" + Math.random().toString(36).slice(2, 8);
   await page.getByTestId("prompt-input").fill("say " + token);
   await page.getByTestId("prompt-send").click();
-
-  // user echo bubble + the stub's "ECHO: <prompt>" agent bubble.
   await expect(page.locator('[data-role="user"]')).toContainText(token);
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say " + token, { timeout: 30_000 });
 });
 
-test("sidebar switches views and theme toggle flips dark mode without dropping the session", async ({ page }) => {
-  await spawnFromMarketplace(page);
-
+test("settings theme toggle flips dark mode without dropping the session", async ({ page }) => {
+  await spawnSecretApp(page);
   const html = page.locator("html");
   const wasDark = await html.evaluate((el) => el.classList.contains("dark"));
-
   await page.getByTestId("nav-settings").click();
   await page.getByTestId("theme-toggle").click();
   await expect.poll(() => html.evaluate((el) => el.classList.contains("dark"))).toBe(!wasDark);
-
-  // returning to the active spawn (the sidebar "Spawns" item) shows the still-live session.
-  await page.getByTestId("nav-spawn").click();
-  await expect(page.getByTestId("status")).toHaveText("ready");
+  // return to the spawn by clicking its row (exact display name "Secret App").
+  await page.locator('[data-testid^="spawn-row-"]').filter({ has: page.getByText("Secret App", { exact: true }) }).first()
+    .locator('[data-testid^="spawn-select-"]').click();
+  await expect(page.getByTestId("status")).toHaveText("ready", { timeout: 20_000 });
 });

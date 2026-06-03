@@ -1,4 +1,7 @@
 import { test, expect } from "@playwright/test";
+import { clearSpawns } from "./helpers";
+
+test.beforeEach(async ({ request }) => { await clearSpawns(request); });
 
 test("marketplace browse→detail→spawn flow", async ({ page }) => {
   await page.goto("/");
