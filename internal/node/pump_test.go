@@ -266,3 +266,105 @@ func TestStartCancelledByContext(t *testing.T) {
 		t.Fatal("want error from cancelled ctx")
 	}
 }
+
+// scriptGoosePerm: for each session/prompt it asks permission (request id 99) instead of finishing,
+// and only emits the prompt's end_turn result after it receives the pump's permission response (id 99).
+func scriptGoosePerm(in io.Reader, out io.Writer) {
+	rd := acp.NewReader(in)
+	var promptID *int
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil { return }
+		switch {
+		case m.Method == "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case m.Method == "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
+		case m.Method == "session/prompt":
+			promptID = m.ID
+			pid := 99
+			acp.WriteMessage(out, acp.Message{ID: &pid, Method: "session/request_permission", Params: []byte(`{"options":[{"optionId":"allow","kind":"allow"},{"optionId":"reject","kind":"reject"}]}`)})
+		case m.ID != nil && *m.ID == 99 && m.Result != nil:
+			if promptID != nil {
+				acp.WriteMessage(out, acp.Message{ID: promptID, Result: []byte(`{"stopReason":"end_turn"}`)})
+				promptID = nil
+			}
+		}
+	}
+}
+
+func startPermPump(t *testing.T) *Pump {
+	t.Helper()
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGoosePerm(gooseInR, gooseOutW)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	return p
+}
+
+func waitKind(t *testing.T, c *capSender, kind string) Frame {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		for _, f := range c.frames() { if f.Kind == kind { return f } }
+		if time.Now().After(deadline) { t.Fatalf("no %q frame; got %v", kind, c.frames()) }
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestPermissionBroadcastFirstWins(t *testing.T) {
+	p := startPermPump(t); defer p.stop()
+	a, b := &capSender{}, &capSender{}
+	p.attachClient("a", 0, a.send)
+	p.attachClient("b", 0, b.send)
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "need-perm"}))
+	pa := waitKind(t, a, "perm_request")
+	waitKind(t, b, "perm_request")
+	if pa.Seq != 0 { t.Fatalf("perm_request must be transient (seq 0), got %d", pa.Seq) }
+	// b answers first; a's later answer is a no-op.
+	p.fromClient("b", encodeFrame(Frame{Kind: "perm_response", ReqID: pa.ReqID, Allow: true}))
+	p.fromClient("a", encodeFrame(Frame{Kind: "perm_response", ReqID: pa.ReqID, Allow: false}))
+	// turn completes -> both clients see an idle turn frame.
+	waitTurnIdle := func(c *capSender) {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			for _, f := range c.frames() { if f.Kind == "turn" && f.State == "idle" { return } }
+			if time.Now().After(deadline) { t.Fatalf("no idle turn; got %v", c.frames()) }
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitTurnIdle(a); waitTurnIdle(b)
+}
+
+func TestPermissionResentOnAttachWhilePending(t *testing.T) {
+	p := startPermPump(t); defer p.stop()
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "need-perm"}))
+	waitKind(t, a, "perm_request") // a got it
+	b := &capSender{}
+	p.attachClient("b", 0, b.send) // late client must also get the still-pending perm_request
+	waitKind(t, b, "perm_request")
+}
+
+func TestPermissionTimeoutDenies(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGoosePerm(gooseInR, gooseOutW)
+	p := newPump(gooseInW, gooseOutR)
+	p.permTimeout = 50 * time.Millisecond
+	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	defer p.stop()
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "need-perm"}))
+	waitKind(t, a, "perm_request")
+	// nobody answers -> auto-deny after 50ms -> goose finishes the turn -> idle turn frame.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		for _, f := range a.frames() { if f.Kind == "turn" && f.State == "idle" { return } }
+		if time.Now().After(deadline) { t.Fatalf("timeout-deny did not complete the turn; got %v", a.frames()) }
+		time.Sleep(5 * time.Millisecond)
+	}
+}

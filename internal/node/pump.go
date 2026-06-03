@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +16,13 @@ import (
 
 const defaultMaxLog = 2000 // cap the per-spawn frame log; oldest trimmed (a lagging client gets reset)
 const maxQueued = 50
+const defaultPermTimeout = 2 * time.Minute
+
+type pendingPerm struct {
+	agentID int             // the goose request id to respond to
+	options json.RawMessage // raw options array, to pick allow/deny optionId
+	timer   *time.Timer
+}
 
 type client struct {
 	cursor int64 // last seq this client has been sent
@@ -48,16 +57,21 @@ type Pump struct {
 	busy             bool
 	queue            []string // queued prompt texts, FIFO
 	inflightPromptID int      // goose request id of the in-flight session/prompt (0 = none)
+
+	pending     map[string]*pendingPerm
+	permTimeout time.Duration
 }
 
 func newPump(stdin io.Writer, stdout io.Reader) *Pump {
 	return &Pump{
 		stdin: stdin, stdout: stdout, maxLog: defaultMaxLog,
-		clients:    map[string]*client{},
-		toAgent:    make(chan []byte, 64),
-		writerDone: make(chan struct{}),
-		readerDone: make(chan struct{}),
-		waiters:    map[int]chan acp.Message{},
+		clients:     map[string]*client{},
+		toAgent:     make(chan []byte, 64),
+		writerDone:  make(chan struct{}),
+		readerDone:  make(chan struct{}),
+		waiters:     map[int]chan acp.Message{},
+		pending:     map[string]*pendingPerm{},
+		permTimeout: defaultPermTimeout,
 	}
 }
 
@@ -96,7 +110,14 @@ func (p *Pump) attachClient(clientID string, cursor int64, send frameSender) {
 	}
 	c := &client{cursor: cursor, send: send, notify: make(chan struct{}, 1), done: make(chan struct{})}
 	p.clients[clientID] = c
+	var perms [][]byte
+	for reqID := range p.pending {
+		perms = append(perms, encodeFrame(Frame{Kind: "perm_request", ReqID: reqID, Title: "permission requested"}))
+	}
 	p.mu.Unlock()
+	for _, line := range perms {
+		_ = send(line) // re-send still-pending perm requests to the newly attached client
+	}
 	wake(c) // initial catch-up
 	go p.clientLoop(c)
 }
@@ -289,7 +310,8 @@ func (p *Pump) onAgentNotification(m acp.Message) {
 		if f, ok := updateToFrame(m.Params); ok {
 			p.appendFrames([]Frame{f})
 		}
-		// session/request_permission is handled in Task 4.
+	case "session/request_permission":
+		p.onPermissionRequest(m)
 	}
 }
 
@@ -373,7 +395,8 @@ func (p *Pump) fromClient(clientID string, line []byte) {
 			return
 		}
 		p.mu.Unlock() // over cap -> drop (the web also gates on MAX_QUEUED)
-		// perm_response is handled in Task 4.
+	case "perm_response":
+		p.resolvePermission(f.ReqID, f.Allow)
 	}
 }
 
@@ -383,4 +406,80 @@ func promptParams(sessionID, text string) json.RawMessage {
 		"prompt":    []any{map[string]string{"type": "text", "text": text}},
 	})
 	return b
+}
+
+// onPermissionRequest records a goose permission request, broadcasts a transient perm_request to all
+// attached clients (NOT logged), and arms a timeout that auto-denies.
+func (p *Pump) onPermissionRequest(m acp.Message) {
+	if m.ID == nil {
+		return
+	}
+	reqID := strconv.Itoa(*m.ID)
+	var pr struct {
+		Options json.RawMessage `json:"options"`
+	}
+	_ = json.Unmarshal(m.Params, &pr)
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return
+	}
+	pp := &pendingPerm{agentID: *m.ID, options: pr.Options}
+	pp.timer = time.AfterFunc(p.permTimeout, func() { p.resolvePermission(reqID, false) })
+	p.pending[reqID] = pp
+	clients := make([]frameSender, 0, len(p.clients))
+	for _, c := range p.clients {
+		clients = append(clients, c.send)
+	}
+	p.mu.Unlock()
+	line := encodeFrame(Frame{Kind: "perm_request", ReqID: reqID, Title: "permission requested"})
+	for _, send := range clients {
+		_ = send(line)
+	}
+}
+
+// resolvePermission answers a pending permission (first answer wins; later/duplicate are no-ops) by
+// forwarding the chosen option to goose. Called by perm_response and by the auto-deny timer.
+func (p *Pump) resolvePermission(reqID string, allow bool) {
+	p.mu.Lock()
+	pp := p.pending[reqID]
+	if pp == nil {
+		p.mu.Unlock()
+		return // already resolved
+	}
+	delete(p.pending, reqID)
+	pp.timer.Stop()
+	agentID := pp.agentID
+	optID := pickPermOption(pp.options, allow)
+	p.mu.Unlock()
+	idv := agentID
+	resp, _ := json.Marshal(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optID}})
+	var buf bytes.Buffer
+	_ = acp.WriteMessage(&buf, acp.Message{ID: &idv, Result: resp})
+	p.sendLine(buf.Bytes())
+}
+
+// pickPermOption chooses an allow-ish (or reject-ish) optionId from the goose options, falling back to
+// the first option. Mirrors web/src/acp/client.ts handlePermission.
+func pickPermOption(options json.RawMessage, allow bool) string {
+	var opts []struct {
+		OptionID string `json:"optionId"`
+		Kind     string `json:"kind"`
+	}
+	_ = json.Unmarshal(options, &opts)
+	want := []string{"reject", "deny"}
+	if allow {
+		want = []string{"allow"}
+	}
+	for _, o := range opts {
+		for _, w := range want {
+			if strings.Contains(o.Kind, w) {
+				return o.OptionID
+			}
+		}
+	}
+	if len(opts) > 0 {
+		return opts[0].OptionID
+	}
+	return ""
 }
