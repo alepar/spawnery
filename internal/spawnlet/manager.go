@@ -191,6 +191,9 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
+	// Teardown must complete even if the caller's ctx is already cancelled (e.g. the CP connection
+	// dropped mid-startup and the readiness probe failed): detach so firewall + mount cleanup run.
+	ctx = context.WithoutCancel(ctx)
 	_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: sp.SidecarID, AgentID: sp.AgentID, SandboxID: sp.SandboxID})
 	if sp.FloorIP != "" {
 		if err := m.fw.Remove(ctx, firewall.Rules(sp.FloorIP, m.cfg.EgressAllowCIDRs)); err != nil {

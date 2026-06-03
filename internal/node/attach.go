@@ -173,6 +173,8 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		if serr := a.mgr.Stop(ctx, st.SpawnId); serr != nil { // tear down the half-started spawn
 			logErr("startSpawn "+st.SpawnId+": stop after not-ready", serr)
 		}
+		// status may no-op if the probe failed because the CP connection dropped; the CP reconciles
+		// a returning node on reconnect. mgr.Stop above still tears the spawn down locally.
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
 		return
 	}
