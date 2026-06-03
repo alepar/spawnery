@@ -202,24 +202,37 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, mounts) }); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	nodeID, err := s.sched.Provision(ctx, spawnID, ver.Ref, req.Msg.Model, placement)
+	// Provision asynchronously: return the spawn in 'starting' immediately; the background goroutine
+	// drives it to active/error on the node's signal, so the UI can show a 'starting' period. The
+	// request ctx is done once we return, so the goroutine uses a detached ctx.
+	go s.provisionSpawn(context.WithoutCancel(ctx), spawnID, ver.Ref, req.Msg.Model, placement)
+	return connect.NewResponse(&cpv1.CreateSpawnResponse{SpawnId: spawnID}), nil
+}
+
+// provisionSpawn runs the async provision for a spawn that CreateSpawn left in 'starting'. It takes
+// the per-spawn lock (serializing a Stop/Suspend during starting AFTER it) and bails if the spawn was
+// already stopped in the lock gap; then Provision -> SetActive, or SetError on failure, with the same
+// teardown compensation as the old inline path on a post-provision SetActive failure.
+func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model string, placement registry.Placement) {
+	unlock := s.locks.Lock(spawnID)
+	defer unlock()
+	if sp, err := s.st.Spawns().Get(ctx, spawnID); err != nil || sp.Status != store.Starting {
+		return // stopped/deleted in the lock gap, or already advanced
+	}
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, placement)
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-			log.Printf("CreateSpawn %s: SetError after provision failure also failed: %v", spawnID, serr)
+			log.Printf("provisionSpawn %s: SetError after provision failure also failed: %v", spawnID, serr)
 		}
-		return nil, err
+		return
 	}
 	if err := s.st.Spawns().SetActive(ctx, spawnID, nodeID, 1); err != nil {
-		// Orphan-window compensation: the node container is live + the route is bound, but we
-		// couldn't record active — tear it down so we don't leak a container/route.
 		s.rt.StopOnNode(spawnID)
 		s.rt.Drop(spawnID)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-			log.Printf("CreateSpawn %s: SetError after SetActive failure also failed: %v", spawnID, serr)
+			log.Printf("provisionSpawn %s: SetError after SetActive failure also failed: %v", spawnID, serr)
 		}
-		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	return connect.NewResponse(&cpv1.CreateSpawnResponse{SpawnId: spawnID}), nil
 }
 
 // placementFor computes node placement for a spawn of the given app version. Reviewed/scanned

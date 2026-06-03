@@ -149,6 +149,7 @@ func TestCreateSpawnPersistsNodeID(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := resp.Msg.SpawnId
+	waitActive(t, s, id) // async CreateSpawn — wait for background provision to complete
 
 	live, err := s.st.Spawns().LiveContainersByNode(ctx, "n1")
 	if err != nil || len(live) != 1 || live[0].SpawnID != id {

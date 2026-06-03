@@ -211,6 +211,7 @@ func TestSuspendSpawn(t *testing.T) {
 		t.Fatalf("CreateSpawn: %v", err)
 	}
 	id := resp.Msg.SpawnId
+	waitActive(t, s, id) // async CreateSpawn — wait for active before suspending/resuming
 
 	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); err != nil {
 		t.Fatalf("SuspendSpawn: %v", err)
@@ -246,6 +247,87 @@ func TestSuspendSpawn(t *testing.T) {
 	}
 }
 
+// waitActive polls the store until the spawn reaches active (CreateSpawn is async now). Fails on
+// timeout or if the spawn errors first.
+func waitActive(t *testing.T, s *Server, id string) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sp, err := s.st.Spawns().Get(ctx, id)
+		if err == nil && sp.Status == store.Active {
+			return
+		}
+		if err == nil && sp.Status == store.Errored {
+			t.Fatalf("spawn %s errored while waiting for active", id)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("spawn %s not active within 3s", id)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func TestCreateSpawnIsAsyncReturnsStarting(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	sender := &capSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: sender, Max: 1, Free: 1}) // present but we don't ack yet
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	sp, err := s.st.Spawns().Get(ctx, resp.Msg.SpawnId)
+	if err != nil || sp.Status != store.Starting {
+		t.Fatalf("status=%v err=%v want starting (async create)", sp.Status, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for sender.firstStart() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("no StartSpawn was sent")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	s.sched.OnStatus(resp.Msg.SpawnId, nodev1.SpawnPhase_ACTIVE)
+	waitActive(t, s, resp.Msg.SpawnId)
+}
+
+func TestCreateSpawnProvisionFailureSetsError(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	sender := &capSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: sender, Max: 1, Free: 1})
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if st := sender.firstStart(); st != nil {
+				s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ERROR)
+				return
+			}
+			if time.Now().After(deadline) {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sp, _ := s.st.Spawns().Get(ctx, resp.Msg.SpawnId)
+		if sp.Status == store.Errored {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("spawn %s not errored after provision failure (status=%v)", resp.Msg.SpawnId, sp.Status)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 func TestResumeSpawn(t *testing.T) {
 	s, reg, _ := newTestServer(t)
 	stop := startAcker(t, s, reg)
@@ -257,6 +339,7 @@ func TestResumeSpawn(t *testing.T) {
 		t.Fatalf("CreateSpawn: %v", err)
 	}
 	id := resp.Msg.SpawnId
+	waitActive(t, s, id) // async CreateSpawn — wait for active before suspending/resuming
 
 	// resume of an ACTIVE spawn -> FailedPrecondition
 	if _, err := s.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id})); connect.CodeOf(err) != connect.CodeFailedPrecondition {

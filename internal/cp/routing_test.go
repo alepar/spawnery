@@ -42,6 +42,7 @@ func createActiveOn(t *testing.T, s *Server, reg *registry.Registry, caller, app
 	if err != nil {
 		return store.Spawn{}, err
 	}
+	waitActive(t, s, resp.Msg.SpawnId) // CreateSpawn is async; wait for the background provision
 	sp, gerr := s.st.Spawns().Get(context.Background(), resp.Msg.SpawnId)
 	if gerr != nil {
 		t.Fatal(gerr)
@@ -70,8 +71,25 @@ func TestUnverifiedRejectedForNonCreator(t *testing.T) {
 func TestUnverifiedRejectedWithoutSelfHostedNode(t *testing.T) {
 	s, reg, _ := newTestServer(t)
 	seedUnverified(t, s, "alice", "alice/dev")
-	_, err := createActiveOn(t, s, reg, "alice", "alice/dev", "0.1.0", "cloud", "")
-	if connect.CodeOf(err) != connect.CodeResourceExhausted {
-		t.Fatalf("unverified w/o self-hosted node want ResourceExhausted, got %v", err)
+	// Register only a cloud node; unverified app requires self-hosted node.
+	// CreateSpawn is async: it returns the spawn in 'starting', then provision fails (ResourceExhausted
+	// from the scheduler) in the background and SetError is called, leaving the spawn Errored.
+	sender := &capSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: sender, Max: 1, Free: 1, Class: "cloud", Owner: ""})
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "alice/dev", Model: "m", Version: "0.1.0"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sp, _ := s.st.Spawns().Get(ctx, resp.Msg.SpawnId)
+		if sp.Status == store.Errored {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unverified spawn w/o self-hosted node not errored within 3s (status=%v)", sp.Status)
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }

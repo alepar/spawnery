@@ -47,6 +47,7 @@ func createActive(t *testing.T, s *Server, reg *registry.Registry, req *cpv1.Cre
 	if err != nil {
 		t.Fatalf("CreateSpawn: %v", err)
 	}
+	waitActive(t, s, resp.Msg.SpawnId) // CreateSpawn is async; wait for the background provision
 	sp, err := s.st.Spawns().Get(ctx, resp.Msg.SpawnId)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
