@@ -4,7 +4,8 @@ import {
   createSpawn, listSpawns, renameSpawn, suspendSpawn, resumeSpawn, deleteSpawn,
   DEV_TOKEN, type SpawnView,
 } from "./api/spawnlet";
-import { Client, historyToItems } from "./acp/client";
+import { Conn } from "./acp/conn";
+import { encodePrompt, encodePermResponse, decodeFrame, type Frame } from "./acp/frames";
 import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
 import { ReconnectingSocket } from "./shell/reconnectingSocket";
@@ -15,6 +16,8 @@ import { reconcilePending, MAX_QUEUED } from "./lib/turn";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
+const CLIENT_ID = crypto.randomUUID();
+
 export function App() {
   const { conn, connecting, connected, errored, reset, waiting, reconnecting } = useConnStatus();
   const [items, setItems] = useState<Item[]>([]);
@@ -23,8 +26,8 @@ export function App() {
   const [spawns, setSpawns] = useState<SpawnView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
 
-  const clientRef = useRef<Client | null>(null);
   const wsRef = useRef<ReconnectingSocket | null>(null);
+  const lastSeqRef = useRef(0);
   const idRef = useRef(0);
   const genRef = useRef(0);
   const buffersRef = useRef<Map<string, Item[]>>(new Map());
@@ -49,54 +52,70 @@ export function App() {
     genRef.current++;
     wsRef.current?.close();
     wsRef.current = null;
-    clientRef.current = null;
   };
   const closeSession = () => { teardown(); reset(); };
+
+  const add = (it: ItemInput) => setItems((xs) => [...xs, withId(it)]);
+  const appendChunk = (kind: "agent" | "thought") => (t: string) =>
+    setItems((xs) => {
+      const last = xs[xs.length - 1];
+      if (last && last.kind === kind) return [...xs.slice(0, -1), { ...last, text: (last as { text: string }).text + t }];
+      return [...xs, withId({ kind, text: t })];
+    });
+
+  const applyFrame = (f: Frame, spawnId: string) => {
+    if (f.seq) lastSeqRef.current = f.seq; // advance the resume cursor on logged frames
+    switch (f.kind) {
+      case "reset":
+        setItems([]);
+        buffersRef.current.set(spawnId, []);
+        lastSeqRef.current = f.fromSeq ?? 0;
+        break;
+      case "user":
+        add({ kind: "user", text: f.text ?? "" });
+        break;
+      case "agent":
+        appendChunk("agent")(f.text ?? "");
+        break;
+      case "thought":
+        appendChunk("thought")(f.text ?? "");
+        break;
+      case "tool":
+        add({ kind: "tool", title: f.title ?? "tool", status: f.status });
+        break;
+      case "turn": {
+        const t: TurnState = { state: f.state ?? "idle", queued: f.queued ?? 0 };
+        setTurn(t);
+        turnsRef.current.set(spawnId, t);
+        setItems((cur) => reconcilePending(cur, t.queued));
+        break;
+      }
+      case "perm_request":
+        setPerm({
+          title: f.title ?? "an action",
+          resolve: (allow) => { setPerm(null); wsRef.current?.send(encodePermResponse(f.reqId ?? "", allow)); },
+        });
+        break;
+    }
+  };
 
   const openSession = (spawnId: string) => {
     const gen = ++genRef.current;
     wsRef.current?.close();
     connecting();
-    // partysocket fires onOpen on EVERY (re)connection: re-send the bind frame (the CP's HandleWS
-    // expects it first on each new underlying socket) and re-run the ACP handshake. A fresh Client
-    // per open gives a clean Conn buffer + cleared pending, so a truncated frame from a dropped
-    // socket can't corrupt the new stream; the node replays spawn/history -> the transcript restores.
     const sock = new ReconnectingSocket(`ws://${location.host}/ws/session`, {
-      onOpen: async () => {
+      onOpen: () => {
         if (genRef.current !== gen) return;
-        sock.send(JSON.stringify({ spawnId, token: DEV_TOKEN }));
-        const c = new Client(sock);
-        clientRef.current = c;
-        // spawn/history replay: the node relay (Docker lane) or the in-pod adapter (CRI lane) sends it on
-        // (re)connect, so the transcript is restored even after a browser reload wipes the in-memory buffer.
-        c.onHistory = (h) => {
-          if (genRef.current !== gen) return;
-          const its = historyToItems(h).map(withId);
-          buffersRef.current.set(spawnId, its);
-          if (activeIdRef.current === spawnId) setItems(its);
-        };
-        c.onTurn = (t) => {
-          if (genRef.current !== gen) return;
-          turnsRef.current.set(spawnId, t);
-          if (activeIdRef.current === spawnId) {
-            setTurn(t);
-            setItems((cur) => reconcilePending(cur, t.queued));
-          }
-        };
-        try {
-          await c.initialize();
-          await c.newSession("/app");
-        } catch {
-          if (genRef.current !== gen) return;
-          reconnecting(); // handshake failed -> the socket keeps retrying
-          return;
-        }
-        if (genRef.current !== gen) return;
+        // Fresh frame receiver per (re)connect (clean ndjson buffer); set it up BEFORE the bind so the
+        // node's replay can't arrive before onmessage is wired. The node resumes from our cursor:
+        // a partysocket reconnect keeps lastSeq (resume); a fresh open / spawn-switch has lastSeq 0.
+        new Conn(sock, (m) => { if (genRef.current === gen) applyFrame(m as unknown as Frame, spawnId); });
+        sock.send(JSON.stringify({ spawnId, clientId: CLIENT_ID, token: DEV_TOKEN, cursor: lastSeqRef.current }));
         connected();
       },
       onDown: () => {
         if (genRef.current !== gen) return;
-        reconnecting(); // dropped/failed attempt -> yellow, then red after grace; partysocket retries
+        reconnecting();
       },
     });
     wsRef.current = sock;
@@ -155,6 +174,7 @@ export function App() {
   const spawnApp = async (appId: string) => {
     try {
       const id = await createSpawn(appId, MODEL); // async CP: returns immediately, status 'starting'
+      lastSeqRef.current = 0;
       const prevId = activeIdRef.current;
       teardown(); // close any current live session before switching to the new (starting) spawn
       buffersRef.current.set(id, []);
@@ -175,6 +195,7 @@ export function App() {
 
   const selectSpawn = (id: string) => {
     if (id === activeIdRef.current) return;
+    lastSeqRef.current = 0;
     const prevId = activeIdRef.current;
     closeSession();
     setActiveId(id);
@@ -214,6 +235,7 @@ export function App() {
   const onResume = async (id: string) => {
     try {
       await resumeSpawn(id);
+      lastSeqRef.current = 0;
       if (activeIdRef.current === id) openSession(id);
     } catch (e: any) { toast.error("Resume failed: " + e.message); }
     refreshSpawns();
@@ -226,32 +248,8 @@ export function App() {
     refreshSpawns();
   };
 
-  const add = (it: ItemInput) => setItems((xs) => [...xs, withId(it)]);
-  const appendChunk = (kind: "agent" | "thought") => (t: string) =>
-    setItems((xs) => {
-      const last = xs[xs.length - 1];
-      if (last && last.kind === kind) return [...xs.slice(0, -1), { ...last, text: (last as { text: string }).text + t }];
-      return [...xs, withId({ kind, text: t })];
-    });
-
   const onSend = (text: string) => {
-    const c = clientRef.current;
-    if (!c) return;
-    // Optimistic: if the agent is already working (or prompts are queued), this one will queue too —
-    // render it pending. The broker's spawn/turn reconciles the exact pending set as the queue drains.
-    const willQueue = turn.state === "busy" || turn.queued > 0;
-    add({ kind: "user", text, pending: willQueue });
-    // Fire-and-forget: turn-state drives the UI, not this promise. It may resolve much later (queued)
-    // or never (disconnect/switch) — that's fine, we no longer gate on it.
-    c.prompt(text, {
-      onText: appendChunk("agent"),
-      onThought: appendChunk("thought"),
-      onToolCall: (tc) => add({ kind: "tool", title: tc.title, status: tc.status }),
-      onToolUpdate: (tc) => add({ kind: "tool", title: "tool", status: tc.status }),
-      requestPermission: (req) =>
-        new Promise<boolean>((resolve) =>
-          setPerm({ title: req?.options?.[0]?.name ?? "an action", resolve: (b) => { setPerm(null); resolve(b); } })),
-    }).catch(() => {});
+    wsRef.current?.send(encodePrompt(text));
   };
 
   return (
