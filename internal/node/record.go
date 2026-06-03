@@ -125,25 +125,3 @@ func brokerEndpoint(ctx context.Context, ep spawnlet.StreamEndpoint, rec *transc
 	}
 }
 
-// recordingEndpoint wraps a StreamEndpoint to TEE its bytes into rec without altering the forwarded
-// stream: Recv (client->agent) -> ObserveClientLine; Send (agent->client) -> ObserveAgentLine. Each
-// direction has its own lineBuffer touched by a single goroutine (Relay runs Recv and Send in
-// separate goroutines), and the recorder is internally mutex-guarded.
-func recordingEndpoint(ep spawnlet.StreamEndpoint, rec *transcript.Recorder) spawnlet.StreamEndpoint {
-	var clientLB, agentLB lineBuffer
-	return spawnlet.StreamEndpoint{
-		Recv: func() ([]byte, error) {
-			b, err := ep.Recv()
-			if len(b) > 0 {
-				clientLB.feed(b, rec.ObserveClientLine)
-			}
-			return b, err
-		},
-		Send: func(b []byte) error {
-			if len(b) > 0 {
-				agentLB.feed(b, rec.ObserveAgentLine)
-			}
-			return ep.Send(b)
-		},
-	}
-}
