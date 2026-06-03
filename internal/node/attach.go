@@ -17,12 +17,12 @@ import (
 )
 
 type Config struct {
-	NodeID     string
-	CPURL      string // e.g. http://127.0.0.1:8080
-	MaxSpawns  uint32
-	AgentImage string
-	NodeClass  string
-	NodeOwner  string
+	NodeID       string
+	CPURL        string // e.g. http://127.0.0.1:8080
+	MaxSpawns    uint32
+	AgentImage   string
+	NodeClass    string
+	NodeOwner    string
 	InPodAdapter bool // CRI lane: the in-pod adapter records/replays history; the node must NOT (no double-replay). Docker lane = false -> node records.
 }
 
@@ -30,9 +30,9 @@ type Config struct {
 type session struct{ cancel context.CancelFunc }
 
 type attacher struct {
-	cfg   Config
-	mgr   *spawnlet.Manager
-	httpc connect.HTTPClient
+	cfg       Config
+	mgr       *spawnlet.Manager
+	httpc     connect.HTTPClient
 	recorders *recorderRegistry // nil in the CRI lane (adapter handles history)
 
 	mu       sync.Mutex
@@ -223,7 +223,9 @@ func (a *attacher) openSession(ctx context.Context, spawnID string) {
 	if a.recorders != nil {
 		rec := a.recorders.getOrCreate(spawnID)
 		if f := rec.HistoryFrame(); f != nil {
-			_ = ep.Send(f)
+			if err := ep.Send(f); err != nil {
+				log.Printf("node: replay history for %s: %v", spawnID, err)
+			}
 		}
 		ep = recordingEndpoint(ep, rec)
 	}

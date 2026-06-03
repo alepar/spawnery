@@ -11,6 +11,9 @@ import (
 // recorderRegistry holds one long-lived transcript.Recorder per spawn. It outlives client
 // reconnects (a browser reload reuses the recorder) and CP reconnects (it is created in node.Run,
 // not in the per-connection attacher). Entries are removed only when the spawn is stopped.
+//
+// TODO: on a node crash where Stop is never received, the entry leaks (bounded by MaxSpawns). A
+// post-demo cleanup could prune entries whose spawnID is no longer in mgr.Store() on CP reconnect.
 type recorderRegistry struct {
 	mu  sync.Mutex
 	rec map[string]*transcript.Recorder
@@ -50,6 +53,8 @@ func (l *lineBuffer) feed(p []byte, emit func([]byte)) {
 		}
 		line := append([]byte(nil), l.buf[:i+1]...)
 		emit(line)
+		// Reslice retains the backing array until the next append-realloc. For ACP ndjson (short
+		// messages bounded by the relay's read-buffer size) this is fine.
 		l.buf = l.buf[i+1:]
 	}
 }
