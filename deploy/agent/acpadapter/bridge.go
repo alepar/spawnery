@@ -69,7 +69,9 @@ func pump(fromAgent io.Reader, hub *connHub, rec *recorder) {
 }
 
 // recordingCopy forwards the client's stdin to the agent line-by-line (byte-for-byte), recording any
-// session/prompt into rec. Returns on the client's write-side EOF (full close OR CloseWrite).
+// session/prompt into rec. Returns on the client's write-side EOF (full close OR CloseWrite). A
+// partial final line (no trailing newline at disconnect) is forwarded as-is — callers are expected to
+// send complete ndjson lines.
 // observeClient is called BEFORE writing to the agent so the user item is recorded before any
 // agent reply can race into the transcript.
 func recordingCopy(toAgent io.Writer, conn io.Reader, rec *recorder) {
@@ -95,6 +97,9 @@ func recordingCopy(toAgent io.Writer, conn io.Reader, rec *recorder) {
 func serve(ln net.Listener, toAgent io.Writer, fromAgent io.Reader) error {
 	hub := &connHub{}
 	rec := newRecorder()
+	// pump is intentionally not joined: it runs until fromAgent hits EOF (the agent exits),
+	// independent of serve returning. A future caller that embeds serve in a larger process must not
+	// assume serve returning means this goroutine is gone.
 	go pump(fromAgent, hub, rec)
 	for {
 		conn, err := ln.Accept()
