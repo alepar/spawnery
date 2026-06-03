@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"spawnery/internal/transcript"
 )
 
 // fakeAgent returns (toAgent, fromAgent) wired as an echo: bytes written to
@@ -132,7 +134,7 @@ func TestServeReplaysHistoryOnReconnect(t *testing.T) {
 	var m struct {
 		Method string `json:"method"`
 		Params struct {
-			Items []item `json:"items"`
+			Items []transcript.Item `json:"items"`
 		} `json:"params"`
 	}
 	if err := json.Unmarshal([]byte(line), &m); err != nil {

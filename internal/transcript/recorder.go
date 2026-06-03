@@ -1,4 +1,7 @@
-package main
+// Package transcript records an ACP ndjson conversation (session/prompt + session/update) into a
+// coalesced transcript and serializes it as a spawn/history JSON-RPC notification for replay to a
+// (re)connecting client. Used by the in-pod acpadapter (CRI lane) and the node relay (Docker lane).
+package transcript
 
 import (
 	"encoding/json"
@@ -6,32 +9,30 @@ import (
 	"sync"
 )
 
-// maxHistoryItems caps the in-memory transcript. Past the cap the oldest items are dropped and a
-// single leading "truncated" marker is kept. On-demand pagination for long histories is a post-demo
-// epic (sp-suc).
-const maxHistoryItems = 500
+// MaxItems caps the in-memory transcript. Past the cap the oldest items are dropped and a single
+// leading "truncated" marker is kept. On-demand pagination for long histories is a separate epic.
+const MaxItems = 500
 
-// item is one transcript entry. It marshals directly into the spawn/history frame. Roles:
+// Item is one transcript entry. It marshals directly into the spawn/history frame. Roles:
 // user | agent | thought | tool | system (system = the truncation marker).
-type item struct {
+type Item struct {
 	Role   string `json:"role"`
 	Text   string `json:"text,omitempty"`
 	Title  string `json:"title,omitempty"`
 	Status string `json:"status,omitempty"`
 }
 
-// recorder accumulates a coalesced transcript from the ACP traffic flowing through the adapter.
-// All methods are safe for concurrent use (the agent-side pump and the client-side copy both call in).
-type recorder struct {
+// Recorder accumulates a coalesced transcript. All methods are safe for concurrent use.
+type Recorder struct {
 	mu      sync.Mutex
-	items   []item
+	items   []Item
 	toolIdx map[string]int // toolCallId -> index in items, for tool_call_update
 }
 
-func newRecorder() *recorder { return &recorder{toolIdx: map[string]int{}} }
+func New() *Recorder { return &Recorder{toolIdx: map[string]int{}} }
 
-// observeClient records a client->agent line if it is a session/prompt (one user item per prompt).
-func (r *recorder) observeClient(line []byte) {
+// ObserveClientLine records a client->agent ndjson line if it is a session/prompt (one user item).
+func (r *Recorder) ObserveClientLine(line []byte) {
 	var m struct {
 		Method string `json:"method"`
 		Params struct {
@@ -49,11 +50,11 @@ func (r *recorder) observeClient(line []byte) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.push(item{Role: "user", Text: sb.String()})
+	r.push(Item{Role: "user", Text: sb.String()})
 }
 
-// observeAgent records an agent->client line if it is a session/update notification.
-func (r *recorder) observeAgent(line []byte) {
+// ObserveAgentLine records an agent->client ndjson line if it is a session/update notification.
+func (r *Recorder) ObserveAgentLine(line []byte) {
 	var m struct {
 		Method string `json:"method"`
 		Params struct {
@@ -80,7 +81,7 @@ func (r *recorder) observeAgent(line []byte) {
 	case "agent_thought_chunk":
 		r.appendChunk("thought", u.Content.Text)
 	case "tool_call":
-		r.push(item{Role: "tool", Title: u.Title, Status: u.Status})
+		r.push(Item{Role: "tool", Title: u.Title, Status: u.Status})
 		if u.ToolCallID != "" {
 			r.toolIdx[u.ToolCallID] = len(r.items) - 1
 		}
@@ -91,9 +92,8 @@ func (r *recorder) observeAgent(line []byte) {
 	}
 }
 
-// appendChunk coalesces consecutive same-role chunks into one item (mirrors the web client's
-// appendChunk). Caller holds r.mu.
-func (r *recorder) appendChunk(role, text string) {
+// appendChunk coalesces consecutive same-role chunks into one item. Caller holds r.mu.
+func (r *Recorder) appendChunk(role, text string) {
 	if text == "" {
 		return
 	}
@@ -101,33 +101,30 @@ func (r *recorder) appendChunk(role, text string) {
 		r.items[n-1].Text += text
 		return
 	}
-	r.push(item{Role: role, Text: text})
+	r.push(Item{Role: role, Text: text})
 }
 
 // push appends an item and enforces the cap. Caller holds r.mu.
-func (r *recorder) push(it item) {
+func (r *Recorder) push(it Item) {
 	r.items = append(r.items, it)
-	if len(r.items) <= maxHistoryItems {
+	if len(r.items) <= MaxItems {
 		return
 	}
-	// Drop oldest, keep a single leading truncation marker. tool index positions are invalidated by
-	// the slice, so reset it (a tool_call_update for a pre-truncation tool simply won't apply — an
-	// acceptable edge at 500+ items; pagination is the post-demo epic).
-	over := len(r.items) - maxHistoryItems
-	trimmed := append([]item{{Role: "system", Text: "earlier history truncated"}}, r.items[over+1:]...)
+	over := len(r.items) - MaxItems
+	trimmed := append([]Item{{Role: "system", Text: "earlier history truncated"}}, r.items[over+1:]...)
 	r.items = trimmed
 	r.toolIdx = map[string]int{}
 }
 
-// historyFrame returns a newline-terminated spawn/history JSON-RPC notification snapshotting the
+// HistoryFrame returns a newline-terminated spawn/history JSON-RPC notification snapshotting the
 // current transcript, or nil if the transcript is empty (nothing to replay).
-func (r *recorder) historyFrame() []byte {
+func (r *Recorder) HistoryFrame() []byte {
 	r.mu.Lock()
 	if len(r.items) == 0 {
 		r.mu.Unlock()
 		return nil
 	}
-	snap := make([]item, len(r.items))
+	snap := make([]Item, len(r.items))
 	copy(snap, r.items)
 	r.mu.Unlock()
 
@@ -135,7 +132,7 @@ func (r *recorder) historyFrame() []byte {
 		Jsonrpc string `json:"jsonrpc"`
 		Method  string `json:"method"`
 		Params  struct {
-			Items []item `json:"items"`
+			Items []Item `json:"items"`
 		} `json:"params"`
 	}
 	env.Jsonrpc = "2.0"

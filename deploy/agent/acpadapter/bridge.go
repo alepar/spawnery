@@ -5,6 +5,8 @@ import (
 	"io"
 	"net"
 	"sync"
+
+	"spawnery/internal/transcript"
 )
 
 // connHub holds the currently-attached client connection (at most one) and serializes all writes to
@@ -54,12 +56,12 @@ func (h *connHub) attach(c net.Conn, history []byte) net.Conn {
 // pump is the single persistent reader of the agent's stdout. It reads ndjson lines, records any
 // session/update into rec, and forwards each line byte-for-byte to the current client. Non-JSON or
 // non-ACP lines are forwarded unchanged and simply not recorded.
-func pump(fromAgent io.Reader, hub *connHub, rec *recorder) {
+func pump(fromAgent io.Reader, hub *connHub, rec *transcript.Recorder) {
 	br := bufio.NewReaderSize(fromAgent, 64*1024)
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
-			rec.observeAgent(line)
+			rec.ObserveAgentLine(line)
 			hub.write(line)
 		}
 		if err != nil {
@@ -74,12 +76,12 @@ func pump(fromAgent io.Reader, hub *connHub, rec *recorder) {
 // send complete ndjson lines.
 // observeClient is called BEFORE writing to the agent so the user item is recorded before any
 // agent reply can race into the transcript.
-func recordingCopy(toAgent io.Writer, conn io.Reader, rec *recorder) {
+func recordingCopy(toAgent io.Writer, conn io.Reader, rec *transcript.Recorder) {
 	br := bufio.NewReaderSize(conn, 64*1024)
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
-			rec.observeClient(line)
+			rec.ObserveClientLine(line)
 			if _, werr := toAgent.Write(line); werr != nil {
 				return
 			}
@@ -96,7 +98,7 @@ func recordingCopy(toAgent io.Writer, conn io.Reader, rec *recorder) {
 // It returns only when the listener is closed.
 func serve(ln net.Listener, toAgent io.Writer, fromAgent io.Reader) error {
 	hub := &connHub{}
-	rec := newRecorder()
+	rec := transcript.New()
 	// pump is intentionally not joined: it runs until fromAgent hits EOF (the agent exits),
 	// independent of serve returning. A future caller that embeds serve in a larger process must not
 	// assume serve returning means this goroutine is gone.
@@ -106,7 +108,7 @@ func serve(ln net.Listener, toAgent io.Writer, fromAgent io.Reader) error {
 		if err != nil {
 			return err
 		}
-		if prev := hub.attach(conn, rec.historyFrame()); prev != nil {
+		if prev := hub.attach(conn, rec.HistoryFrame()); prev != nil {
 			_ = prev.Close()
 		}
 		recordingCopy(toAgent, conn, rec)

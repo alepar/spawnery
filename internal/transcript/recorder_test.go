@@ -1,4 +1,4 @@
-package main
+package transcript
 
 import (
 	"encoding/json"
@@ -6,8 +6,7 @@ import (
 	"testing"
 )
 
-// parse the spawn/history frame the recorder emits back into items for assertions.
-func decodeFrame(t *testing.T, frame []byte) []item {
+func decodeFrame(t *testing.T, frame []byte) []Item {
 	t.Helper()
 	if len(frame) == 0 {
 		t.Fatal("expected a non-empty history frame")
@@ -19,7 +18,7 @@ func decodeFrame(t *testing.T, frame []byte) []item {
 		Jsonrpc string `json:"jsonrpc"`
 		Method  string `json:"method"`
 		Params  struct {
-			Items []item `json:"items"`
+			Items []Item `json:"items"`
 		} `json:"params"`
 	}
 	if err := json.Unmarshal(frame, &m); err != nil {
@@ -39,16 +38,16 @@ func agentChunk(kind, text string) []byte {
 }
 
 func TestRecorderCoalescesTranscript(t *testing.T) {
-	r := newRecorder()
-	r.observeClient(clientPrompt("hello"))
-	r.observeAgent(agentChunk("agent_message_chunk", "He"))
-	r.observeAgent(agentChunk("agent_message_chunk", "llo!")) // coalesces with previous agent item
-	r.observeAgent(agentChunk("agent_thought_chunk", "hmm"))
-	r.observeAgent([]byte(`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"t1","title":"search","status":"pending"}}}` + "\n"))
-	r.observeAgent([]byte(`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed"}}}` + "\n"))
+	r := New()
+	r.ObserveClientLine(clientPrompt("hello"))
+	r.ObserveAgentLine(agentChunk("agent_message_chunk", "He"))
+	r.ObserveAgentLine(agentChunk("agent_message_chunk", "llo!"))
+	r.ObserveAgentLine(agentChunk("agent_thought_chunk", "hmm"))
+	r.ObserveAgentLine([]byte(`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"t1","title":"search","status":"pending"}}}` + "\n"))
+	r.ObserveAgentLine([]byte(`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed"}}}` + "\n"))
 
-	items := decodeFrame(t, r.historyFrame())
-	want := []item{
+	items := decodeFrame(t, r.HistoryFrame())
+	want := []Item{
 		{Role: "user", Text: "hello"},
 		{Role: "agent", Text: "Hello!"},
 		{Role: "thought", Text: "hmm"},
@@ -65,26 +64,26 @@ func TestRecorderCoalescesTranscript(t *testing.T) {
 }
 
 func TestRecorderIgnoresNonAcpAndEmptyIsNilFrame(t *testing.T) {
-	r := newRecorder()
-	if f := r.historyFrame(); f != nil {
+	r := New()
+	if f := r.HistoryFrame(); f != nil {
 		t.Fatalf("empty recorder must yield a nil frame, got %q", string(f))
 	}
-	r.observeClient([]byte("not json\n"))                           // ignored
-	r.observeAgent([]byte("hello\n"))                               // ignored (non-json)
-	r.observeAgent([]byte(`{"method":"initialize","id":1}` + "\n")) // ignored (not session/update)
-	if f := r.historyFrame(); f != nil {
+	r.ObserveClientLine([]byte("not json\n"))
+	r.ObserveAgentLine([]byte("hello\n"))
+	r.ObserveAgentLine([]byte(`{"method":"initialize","id":1}` + "\n"))
+	if f := r.HistoryFrame(); f != nil {
 		t.Fatalf("recorder must stay empty for non-transcript traffic, got %q", string(f))
 	}
 }
 
 func TestRecorderCapsAndMarksTruncation(t *testing.T) {
-	r := newRecorder()
-	for i := 0; i < maxHistoryItems+50; i++ {
-		r.observeClient(clientPrompt("p")) // each prompt is its own user item (distinct turns)
+	r := New()
+	for i := 0; i < MaxItems+50; i++ {
+		r.ObserveClientLine(clientPrompt("p"))
 	}
-	items := decodeFrame(t, r.historyFrame())
-	if len(items) != maxHistoryItems {
-		t.Fatalf("len=%d want capped at %d", len(items), maxHistoryItems)
+	items := decodeFrame(t, r.HistoryFrame())
+	if len(items) != MaxItems {
+		t.Fatalf("len=%d want capped at %d", len(items), MaxItems)
 	}
 	if items[0].Role != "system" || !strings.Contains(items[0].Text, "truncated") {
 		t.Fatalf("first item must be the truncation marker, got %+v", items[0])
