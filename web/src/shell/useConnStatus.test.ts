@@ -74,4 +74,13 @@ describe("useConnStatus reconnecting", () => {
     act(() => vi.advanceTimersByTime(12000));
     expect(result.current.conn).toBe("connected");
   });
+
+  it("reconnecting() while connecting cancels the -> slow transition", () => {
+    const { result } = renderHook(() => useConnStatus(5000, 12000));
+    act(() => result.current.connecting());
+    act(() => result.current.reconnecting());
+    expect(result.current.conn).toBe("reconnecting");
+    act(() => vi.advanceTimersByTime(5000));
+    expect(result.current.conn).toBe("reconnecting"); // the slow timer was cleared
+  });
 });
