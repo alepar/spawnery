@@ -105,6 +105,15 @@ describe("Client", () => {
 });
 
 describe("historyToItems", () => {
+  it("preserves the pending flag on queued user items", () => {
+    const out = historyToItems([
+      { role: "user", text: "sent" },
+      { role: "user", text: "queued", pending: true },
+    ]);
+    expect(out[0]).toEqual({ kind: "user", text: "sent" });
+    expect(out[1]).toEqual({ kind: "user", text: "queued", pending: true });
+  });
+
   it("maps adapter history items to chat items (system marker -> agent)", () => {
     const out = historyToItems([
       { role: "user", text: "hi" },

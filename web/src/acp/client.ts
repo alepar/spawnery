@@ -129,7 +129,7 @@ export function historyToItems(items: HistoryItem[]): ItemInput[] {
   return items.map((h): ItemInput => {
     switch (h.role) {
       case "user":
-        return { kind: "user", text: h.text ?? "" };
+        return { kind: "user", text: h.text ?? "", pending: h.pending };
       case "thought":
         return { kind: "thought", text: h.text ?? "" };
       case "tool":
