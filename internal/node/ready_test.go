@@ -55,3 +55,14 @@ func TestAwaitInitialize_StreamClosed(t *testing.T) {
 		t.Fatal("want read error on EOF, got nil")
 	}
 }
+
+func TestAwaitInitialize_IgnoresIDWithoutResultOrError(t *testing.T) {
+	// A request that happens to reuse id 1 (no result/error) is NOT our answer — keep reading.
+	stdout := strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"fs/read"}` + "\n" +
+			`{"jsonrpc":"2.0","id":1,"result":{}}` + "\n")
+	var stdin strings.Builder
+	if err := awaitInitialize(context.Background(), &stdin, stdout, time.Second); err != nil {
+		t.Fatalf("want nil, got %v", err)
+	}
+}
