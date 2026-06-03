@@ -166,7 +166,7 @@ export function App() {
     const sp = spawnsRef.current.find((s) => s.spawnId === id);
     if (sp?.status === "active") openSession(id);
     else if (sp?.status === "starting") waiting();
-    else if (sp?.status === "error") errored();
+    else if (sp?.status === "error" || sp?.status === "unreachable") errored();
     // suspended / unknown -> hidden (closeSession already reset())
   };
 

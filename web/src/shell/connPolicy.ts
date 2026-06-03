@@ -8,13 +8,14 @@ export type ConnAction = "open" | "error" | "waiting" | "drop" | "none";
 // desired state is already reflected, so the poll doesn't reopen the ws or re-set the same state.
 //   - status undefined (vanished from the ledger)            -> "drop"  (tear down + clear)
 //   - active & no ws                                         -> "open"  (connect the ws)
-//   - error  & not already showing error                     -> "error" (red)
+//   - error/unreachable & not already showing error          -> "error" (red — a dead spawn)
 //   - starting & not already waiting                         -> "waiting" (grey pulse)
-//   - anything else (suspended/suspending/unreachable/...)   -> "none"
+//   - anything else (suspended/suspending)                   -> "none"
 export function nextConnAction(status: SpawnStatus | undefined, hasWs: boolean, conn: ConnState | null): ConnAction {
   if (status === undefined) return "drop";
   if (status === "active") return hasWs ? "none" : "open";
-  if (status === "error") return conn === "error" ? "none" : "error";
+  // unreachable (node gone) is a dead spawn too — show red, not a stuck "waiting".
+  if (status === "error" || status === "unreachable") return conn === "error" ? "none" : "error";
   if (status === "starting") return conn === "waiting" ? "none" : "waiting";
   return "none";
 }

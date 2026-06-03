@@ -13,12 +13,17 @@ describe("nextConnAction", () => {
     expect(nextConnAction("error", true, "connected")).toBe("error");
     expect(nextConnAction("error", false, "error")).toBe("none");
   });
+  it("unreachable (dead spawn) -> error like a failed spawn", () => {
+    expect(nextConnAction("unreachable", true, "connected")).toBe("error");
+    expect(nextConnAction("unreachable", false, "error")).toBe("none");
+  });
   it("starting -> waiting once, then none", () => {
     expect(nextConnAction("starting", false, null)).toBe("waiting");
     expect(nextConnAction("starting", false, "waiting")).toBe("none");
   });
-  it("suspended/unknown -> none", () => {
+  it("suspended/suspending/unknown -> none", () => {
     expect(nextConnAction("suspended", false, null)).toBe("none");
-    expect(nextConnAction("unreachable", false, null)).toBe("none");
+    expect(nextConnAction("suspending", false, null)).toBe("none");
+    expect(nextConnAction("unknown", false, null)).toBe("none");
   });
 });
