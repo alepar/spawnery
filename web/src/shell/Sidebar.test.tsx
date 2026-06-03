@@ -7,6 +7,7 @@ import type { SpawnView } from "@/api/spawnlet";
 const spawns: SpawnView[] = [
   { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active" },
   { spawnId: "b", name: "Zork 2", appId: "spawnery/zork", status: "suspended" },
+  { spawnId: "c", name: "Starting One", appId: "spawnery/wiki", status: "starting" },
 ];
 const noopActions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onStop: vi.fn() };
 
@@ -57,6 +58,13 @@ describe("Sidebar", () => {
     expect(actions.onStop).not.toHaveBeenCalled(); // first click = arm confirm
     await userEvent.click(screen.getByTestId("spawn-stop-confirm-a"));
     expect(actions.onStop).toHaveBeenCalledWith("a");
+  });
+
+  it("renders a yellow pulsing dot for a starting spawn", () => {
+    render(<Sidebar view="chat" onSelect={vi.fn()} spawns={spawns} activeId="a" actions={noopActions} />);
+    const dot = screen.getByTestId("spawn-dot-c");
+    expect(dot.getAttribute("data-status")).toBe("starting");
+    expect(dot.className).toContain("bg-yellow-400");
   });
 
   it("double-click name → inline edit → Enter renames", async () => {

@@ -2,12 +2,14 @@ import type { ConnState } from "./useConnStatus";
 
 // Both transitional states pulse; terminal states are static.
 const DOT: Record<ConnState, string> = {
+  waiting: "bg-zinc-400 animate-pulse",
   connecting: "bg-zinc-400 animate-pulse",
   slow: "bg-amber-500 animate-pulse",
   connected: "bg-green-500",
   error: "bg-red-500",
 };
 const LABEL: Record<ConnState, string> = {
+  waiting: "waiting",
   connecting: "connecting…",
   slow: "connecting…",
   connected: "connected",

@@ -44,4 +44,13 @@ describe("useConnStatus", () => {
     act(() => result.current.closed());
     expect(result.current.conn).toBe(null);
   });
+
+  it("waiting sets the waiting state and clears any slow timer", () => {
+    const { result } = renderHook(() => useConnStatus(5000));
+    act(() => result.current.connecting());
+    act(() => result.current.waiting());
+    expect(result.current.conn).toBe("waiting");
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(result.current.conn).toBe("waiting");
+  });
 });

@@ -23,7 +23,7 @@ const DOT: Record<SpawnStatus, string> = {
   active: "bg-green-500",
   suspended: "bg-zinc-400",
   suspending: "bg-amber-500 animate-pulse",
-  starting: "bg-amber-500 animate-pulse",
+  starting: "bg-yellow-400 animate-pulse",
   unreachable: "bg-red-500",
   error: "bg-red-500",
   unknown: "bg-zinc-400",

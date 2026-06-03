@@ -9,6 +9,7 @@ describe("ConnStatus", () => {
   });
 
   it.each([
+    ["waiting", "waiting", "bg-zinc-400"],
     ["connecting", "connecting…", "bg-zinc-400"],
     ["slow", "connecting…", "bg-amber-500"],
     ["connected", "connected", "bg-green-500"],
