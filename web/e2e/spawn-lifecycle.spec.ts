@@ -98,3 +98,22 @@ test("switching between two spawns restores each transcript", async ({ page }) =
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 20_000 });
   await expect(page.locator('[data-role="user"]')).toContainText("one");
 });
+
+test("conversation history survives a browser reload (node replay)", async ({ page }) => {
+  await gotoApp(page);
+  await spawnFromMarket(page);
+  await page.getByTestId("prompt-input").fill("say one");
+  await page.getByTestId("prompt-send").click();
+  await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
+
+  // Reload wipes the client-side transcript buffer; the node must replay the transcript.
+  await page.reload();
+  await expect(page.getByTestId("marketplace")).toBeVisible({ timeout: 20_000 });
+
+  // Re-open the spawn from the sidebar (its name defaults to the app display name "Secret App").
+  await rowByName(page, "Secret App").locator('[data-testid^="spawn-select-"]').click();
+
+  // The node replays spawn/history on reconnect -> the prior transcript is restored.
+  await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
+  await expect(page.locator('[data-role="user"]')).toContainText("one");
+});
