@@ -105,10 +105,16 @@ export function App() {
     setBusy(true); setStatus("starting…");
     try {
       const id = await createSpawn(appId, MODEL);
+      const prevId = activeIdRef.current;
       buffersRef.current.set(id, []);
-      setItems([]);
       setActiveId(id);
       activeIdRef.current = id; // make active immediately for the onHistory guard
+      // Stash the OUTGOING spawn's transcript before clearing for the new one (mirrors selectSpawn),
+      // so spawning a 2nd instance while the 1st had messages doesn't lose the 1st's transcript.
+      setItems((current) => {
+        if (prevId && prevId !== id) buffersRef.current.set(prevId, current);
+        return [];
+      });
       await refreshSpawns();
       openSession(id);
     } catch (e: any) {

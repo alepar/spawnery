@@ -82,29 +82,18 @@ test("stop removes the spawn from the list", async ({ page }) => {
 
 test("switching between two spawns restores each transcript", async ({ page }) => {
   await gotoApp(page);
-  // Create both instances first (spawnApp clears the item buffer; we must switch via selectSpawn to
-  // save/restore transcripts — selectSpawn uses the functional updater that persists the buffer).
-  await spawnFromMarket(page); // instance 1
-  await spawnFromMarket(page); // instance 2 now active; instance 1 buffer = []
-
-  // Explicitly switch to instance 1 via the sidebar row (selectSpawn saves instance 2's empty buf,
-  // reconnects instance 1's ws, starts fresh transcript for instance 1).
-  await rowByName(page, "Secret App").locator('[data-testid^="spawn-select-"]').click();
-  await expect(page.getByTestId("status")).toHaveText("ready", { timeout: 30_000 });
-
+  await spawnFromMarket(page); // instance 1 active
   await page.getByTestId("prompt-input").fill("say one");
   await page.getByTestId("prompt-send").click();
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
 
-  // Switch to instance 2 via row click — selectSpawn saves instance 1's transcript to its buffer.
-  await rowByName(page, "Secret App 2").locator('[data-testid^="spawn-select-"]').click();
-  await expect(page.getByTestId("status")).toHaveText("ready", { timeout: 30_000 });
+  await spawnFromMarket(page); // instance 2 active (no reload) — spawnApp must save instance 1's buffer
   await expect(page.locator('[data-role="agent"]')).toHaveCount(0);
   await page.getByTestId("prompt-input").fill("say two");
   await page.getByTestId("prompt-send").click();
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say two", { timeout: 30_000 });
 
-  // Switch back to instance 1 — selectSpawn restores the saved transcript from the client buffer.
+  // switch back to instance 1 → its prior transcript is restored from the client buffer.
   await rowByName(page, "Secret App").locator('[data-testid^="spawn-select-"]').click();
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 20_000 });
   await expect(page.locator('[data-role="user"]')).toContainText("one");
