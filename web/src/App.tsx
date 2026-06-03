@@ -9,7 +9,7 @@ import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
 import { nextConnAction } from "./shell/connPolicy";
 import { initialTheme, setTheme } from "./lib/theme";
-import type { Item } from "./views/chat/types";
+import type { Item, TurnState } from "./views/chat/types";
 import { reconcilePending, MAX_QUEUED } from "./lib/turn";
 
 const MODEL = "deepseek/deepseek-v4-flash";
@@ -17,7 +17,7 @@ const MODEL = "deepseek/deepseek-v4-flash";
 export function App() {
   const { conn, connecting, connected, errored, closed, reset, waiting } = useConnStatus();
   const [items, setItems] = useState<Item[]>([]);
-  const [turn, setTurn] = useState<{ state: "busy" | "idle"; queued: number }>({ state: "idle", queued: 0 });
+  const [turn, setTurn] = useState<TurnState>({ state: "idle", queued: 0 });
   const [perm, setPerm] = useState<{ title: string; resolve: (b: boolean) => void } | null>(null);
   const [spawns, setSpawns] = useState<SpawnView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -27,7 +27,7 @@ export function App() {
   const idRef = useRef(0);
   const genRef = useRef(0);
   const buffersRef = useRef<Map<string, Item[]>>(new Map());
-  const turnsRef = useRef<Map<string, { state: "busy" | "idle"; queued: number }>>(new Map());
+  const turnsRef = useRef<Map<string, TurnState>>(new Map());
   // refs mirroring state so async callbacks (poll, ws onopen, onHistory) don't read stale closures.
   const activeIdRef = useRef<string | null>(null);
   const spawnsRef = useRef<SpawnView[]>([]);
@@ -108,6 +108,8 @@ export function App() {
         case "drop":
           closeSession();
           setActiveId(null); activeIdRef.current = null; setItems([]);
+          setTurn({ state: "idle", queued: 0 });
+          turnsRef.current.delete(aid);
           break;
         case "open":
           openSession(aid); // just became active -> connect (green)
@@ -192,7 +194,12 @@ export function App() {
       await suspendSpawn(id);
       buffersRef.current.delete(id); // resumed spawns start fresh — drop the stale cached transcript
       // keep the spawn selected (unlike onStop) — the user stays on its now-empty suspended view.
-      if (activeIdRef.current === id) { closeSession(); setItems([]); }
+      if (activeIdRef.current === id) {
+        closeSession();
+        setItems([]);
+        setTurn({ state: "idle", queued: 0 });
+        turnsRef.current.delete(id);
+      }
     } catch (e: any) { toast.error("Suspend failed: " + e.message); }
     refreshSpawns();
   };
@@ -206,7 +213,8 @@ export function App() {
   const onStop = async (id: string) => {
     try { await deleteSpawn(id); } catch (e: any) { toast.error("Stop failed: " + e.message); }
     buffersRef.current.delete(id);
-    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setTurn({ state: "idle", queued: 0 }); turnsRef.current.delete(id); }
+    turnsRef.current.delete(id);
+    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setTurn({ state: "idle", queued: 0 }); }
     refreshSpawns();
   };
 
@@ -227,7 +235,7 @@ export function App() {
     add({ kind: "user", text, pending: willQueue });
     // Fire-and-forget: turn-state drives the UI, not this promise. It may resolve much later (queued)
     // or never (disconnect/switch) — that's fine, we no longer gate on it.
-    void c.prompt(text, {
+    c.prompt(text, {
       onText: appendChunk("agent"),
       onThought: appendChunk("thought"),
       onToolCall: (tc) => add({ kind: "tool", title: tc.title, status: tc.status }),
