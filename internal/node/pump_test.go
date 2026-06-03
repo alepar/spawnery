@@ -1,7 +1,10 @@
 package node
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"spawnery/internal/acp"
 	"sync"
 	"testing"
 	"time"
@@ -161,4 +164,79 @@ func TestFutureCursorResets(t *testing.T) {
 	fs := a.frames()
 	if fs[0].Kind != "reset" || fs[0].FromSeq != 0 { t.Fatalf("want reset{0} first, got %+v", fs[0]) }
 	if fs[1].Seq != 1 { t.Fatalf("want seq 1 after reset, got %v", a.seqs()) }
+}
+
+// scriptGoose is a fake agent over pipes: answers initialize + session/new, and for each
+// session/prompt streams one agent_message_chunk then a result (turn-end).
+func scriptGoose(in io.Reader, out io.Writer) {
+	rd := acp.NewReader(in)
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil { return }
+		switch m.Method {
+		case "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
+		case "session/prompt":
+			acp.WriteMessage(out, acp.Message{Method: "session/update", Params: []byte(`{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ECHO"}}}`)})
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"stopReason":"end_turn"}`)})
+		}
+	}
+}
+
+func TestPromptStreamsAgentFrameAndTurn(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()  // pump.stdin -> gooseInW; goose reads gooseInR
+	gooseOutR, gooseOutW := io.Pipe() // goose writes gooseOutW; pump reads gooseOutR
+	go scriptGoose(gooseInR, gooseOutW)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer p.stop()
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "hi"}))
+	a.waitLen(t, 4) // user, turn(busy), agent "ECHO", turn(idle)
+	kinds := map[string]int{}
+	var sawBusy, sawIdle bool
+	for _, f := range a.frames() {
+		kinds[f.Kind]++
+		if f.Kind == "turn" && f.State == "busy" { sawBusy = true }
+		if f.Kind == "turn" && f.State == "idle" { sawIdle = true }
+	}
+	if kinds["user"] == 0 || kinds["agent"] == 0 { t.Fatalf("missing user/agent frames: %v", kinds) }
+	if !sawBusy || !sawIdle { t.Fatalf("want busy and idle turn frames: %v", a.frames()) }
+}
+
+func TestStartTimesOutIfAgentSilent(t *testing.T) {
+	gooseOutR, _ := io.Pipe() // stdout that never produces -> initialize never answered
+	p := newPump(io.Discard, gooseOutR)
+	if err := p.start(context.Background(), 50*time.Millisecond); err == nil {
+		t.Fatal("want timeout error")
+	}
+}
+
+// A prompt sent while a turn is in flight is queued (a user frame is still logged) and drained on
+// turn-end.
+func TestQueuedPromptDrainsOnTurnEnd(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGoose(gooseInR, gooseOutW)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	defer p.stop()
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "one"}))
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "two"})) // may queue if "one" still busy
+	// Eventually two user frames (one, two) and two agent ECHO frames appear.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		users, agents := 0, 0
+		for _, f := range a.frames() { if f.Kind == "user" { users++ }; if f.Kind == "agent" { agents++ } }
+		if users >= 2 && agents >= 2 { break }
+		if time.Now().After(deadline) { t.Fatalf("want 2 user + 2 agent frames, got %v", a.frames()) }
+		time.Sleep(5 * time.Millisecond)
+	}
 }
