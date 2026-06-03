@@ -14,6 +14,8 @@ describe("ConnStatus", () => {
     ["slow", "connecting…", "bg-amber-500"],
     ["connected", "connected", "bg-green-500"],
     ["error", "error", "bg-red-500"],
+    ["reconnecting", "reconnecting…", "bg-yellow-400"],
+    ["disconnected", "disconnected", "bg-red-500"],
   ] as const)("renders %s with its label + dot color", (state, label, dotClass) => {
     render(<ConnStatus conn={state} />);
     const el = screen.getByTestId("status");
