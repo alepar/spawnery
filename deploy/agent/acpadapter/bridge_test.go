@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +106,9 @@ func TestServeReplaysHistoryOnReconnect(t *testing.T) {
 	go serve(ln, toAgent, fromAgent)
 
 	// First client: send a session/prompt; the scripted agent replies with an agent chunk.
+	// With turn-broker wiring, c1 also receives a spawn/turn frame before the agent reply.
+	// Drain all lines from c1 until the agent session/update arrives, ensuring pump has
+	// recorded the agent item before we reconnect.
 	c1, err := net.Dial("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -113,10 +117,16 @@ func TestServeReplaysHistoryOnReconnect(t *testing.T) {
 	if _, err := io.WriteString(c1, prompt); err != nil {
 		t.Fatal(err)
 	}
-	// drain the agent's reply on c1 so the recorder has observed it before we reconnect.
 	_ = c1.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := bufio.NewReader(c1).ReadString('\n'); err != nil {
-		t.Fatalf("c1 read agent reply: %v", err)
+	c1Reader := bufio.NewReader(c1)
+	for {
+		got, err := c1Reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("c1 read agent reply: %v", err)
+		}
+		if strings.Contains(got, "session/update") {
+			break
+		}
 	}
 	_ = c1.Close()
 
@@ -174,4 +184,40 @@ func scriptedAgent() (io.Writer, io.Reader) {
 		}
 	}()
 	return inW, outR
+}
+
+func TestAdapterHoldsSecondPromptUntilTurnEnds(t *testing.T) {
+	rec := transcript.New()
+	agentCh := make(chan []byte, 8)
+
+	agentIn, agentInW := io.Pipe()
+	go func() {
+		for line := range agentCh {
+			agentInW.Write(line)
+		}
+	}()
+	agentReader := bufio.NewReader(agentIn)
+	readLine := func() string {
+		l, _ := agentReader.ReadString('\n')
+		return l
+	}
+
+	clientR, clientW := io.Pipe()
+	go func() {
+		clientW.Write([]byte(`{"id":1,"method":"session/prompt","params":{"prompt":[{"text":"a"}]}}` + "\n"))
+		clientW.Write([]byte(`{"id":2,"method":"session/prompt","params":{"prompt":[{"text":"b"}]}}` + "\n"))
+	}()
+	hub := &connHub{}
+	go recordingCopy(clientR, rec, agentCh, hub)
+
+	if got := readLine(); !strings.Contains(got, `"text":"a"`) {
+		t.Fatalf("first agent line = %q, want prompt a", got)
+	}
+
+	agentOut, agentOutW := io.Pipe()
+	go pump(agentOut, hub, rec, agentCh)
+	agentOutW.Write([]byte(`{"id":1,"result":{"stopReason":"end_turn"}}` + "\n"))
+	if got := readLine(); !strings.Contains(got, `"text":"b"`) {
+		t.Fatalf("second agent line = %q, want drained prompt b", got)
+	}
 }
