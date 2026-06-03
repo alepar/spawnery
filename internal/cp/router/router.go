@@ -52,11 +52,13 @@ func (r *Router) AttachClient(spawnID, clientID string, c ClientSender, cursor i
 func (r *Router) DetachClient(spawnID, clientID string) {
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
+	var wasPresent bool
 	if ok {
+		_, wasPresent = rt.clients[clientID]
 		delete(rt.clients, clientID)
 	}
 	r.mu.Unlock()
-	if ok {
+	if wasPresent {
 		_ = rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Close{Close: &nodev1.SessionClose{SpawnId: spawnID, ClientId: clientID}}})
 	}
 }

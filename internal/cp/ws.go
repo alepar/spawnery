@@ -49,6 +49,10 @@ func (s *Server) HandleWS(authn *auth.Auth) http.HandlerFunc {
 			return
 		}
 
+		if bind.ClientID == "" {
+			conn.Close(websocket.StatusUnsupportedData, "clientId required")
+			return
+		}
 		cs := wsClient{conn: conn, ctx: ctx}
 		done, err := s.rt.AttachClient(bind.SpawnID, bind.ClientID, cs, bind.Cursor)
 		if err != nil {

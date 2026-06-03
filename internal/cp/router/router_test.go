@@ -30,6 +30,17 @@ func (n *mcNode) opens() (out []*nodev1.SessionOpen) {
 	return
 }
 
+func (n *mcNode) closes() (c int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, m := range n.sent {
+		if m.GetClose() != nil {
+			c++
+		}
+	}
+	return
+}
+
 type mcClient struct {
 	mu  sync.Mutex
 	got [][]byte
@@ -76,6 +87,9 @@ func TestMultiClientFanoutAndPerClientRouting(t *testing.T) {
 	}
 	r.DetachClient("sp1", "ca")
 	r.DetachClient("sp1", "ca") // stale detach: no-op
+	if node.closes() != 1 {
+		t.Fatalf("stale detach should send exactly 1 Close, got %d", node.closes())
+	}
 	r.FromNode("sp1", "ca", []byte("dropped"))
 	r.FromNode("sp1", "cb", []byte("still"))
 	if a.count() != 1 {

@@ -299,6 +299,7 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 
 	clientID := uuid.Must(uuid.NewV7()).String()
 	cs := &clientStream{stream: stream, spawnID: spawnID}
+	// cursor 0: the cp.v1 Session-RPC transport has no resume cursor (only the WS bind does).
 	done, err := s.rt.AttachClient(spawnID, clientID, cs, 0)
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
