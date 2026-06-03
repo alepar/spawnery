@@ -94,6 +94,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 				nodeClass = "cloud" // safe default: an unidentified node is assumed restricted
 			}
 			s.reg.Add(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: m.Register.NodeOwner})
+			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, m.Register.NodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
 		case *nodev1.NodeMessage_Heartbeat:
 			s.reg.Heartbeat(nodeID, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
 		case *nodev1.NodeMessage_Status:

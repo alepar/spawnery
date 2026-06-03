@@ -93,6 +93,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 	}}}); err != nil {
 		return err
 	}
+	log.Printf("node: connected to CP at %s (id=%s class=%s)", cfg.CPURL, cfg.NodeID, cfg.NodeClass)
 	go a.heartbeatLoop(connCtx)
 
 	for {
