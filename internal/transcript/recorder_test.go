@@ -111,12 +111,11 @@ func decodeHistory(t *testing.T, frame []byte) ([]Item, string, int) {
 
 // promptID builds a session/prompt request line carrying a JSON-RPC id.
 func promptID(id int, text string) []byte {
-	return []byte(`{"id":` + itoa(id) + `,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"` + text + `"}]}}` + "\n")
+	return []byte(`{"id":` + strconv.Itoa(id) + `,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"` + text + `"}]}}` + "\n")
 }
 func response(id int, stopReason string) []byte {
-	return []byte(`{"id":` + itoa(id) + `,"result":{"stopReason":"` + stopReason + `"}}` + "\n")
+	return []byte(`{"id":` + strconv.Itoa(id) + `,"result":{"stopReason":"` + stopReason + `"}}` + "\n")
 }
-func itoa(i int) string { return strconv.Itoa(i) }
 
 func decodeTurnFrame(t *testing.T, frame []byte) (string, int) {
 	t.Helper()
@@ -207,5 +206,17 @@ func TestBrokerCancelledResponseEndsTurn(t *testing.T) {
 	_, turn := r.OnAgentLine(response(3, "cancelled"))
 	if st, _ := decodeTurnFrame(t, turn); st != "idle" {
 		t.Fatalf("cancelled stopReason must end the turn, got %s", st)
+	}
+}
+
+func TestBrokerNonResponseAgentLineKeepsTurn(t *testing.T) {
+	r := New()
+	r.OnClientLine(promptID(1, "x"))
+	drain, turn := r.OnAgentLine([]byte(`{"id":1,"method":"initialize","result":{}}` + "\n"))
+	if len(drain) != 0 || turn != nil {
+		t.Fatalf("a method-bearing agent line must not end the turn (drain=%d, turn=%v)", len(drain), turn != nil)
+	}
+	if _, state, _ := decodeHistory(t, r.HistoryFrame()); state != "busy" {
+		t.Fatalf("turn must remain busy, got %s", state)
 	}
 }

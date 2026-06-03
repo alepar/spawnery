@@ -70,7 +70,7 @@ func promptText(line []byte) (text string, id *int, ok bool) {
 }
 
 // ObserveClientLine records a client->agent ndjson line if it is a session/prompt (one user item).
-// Pure record: no turn-state side effects.
+// Pure record: no turn-state side effects. Do not mix Observe*/On* on the same Recorder.
 func (r *Recorder) ObserveClientLine(line []byte) {
 	text, _, ok := promptText(line)
 	if !ok {
@@ -84,7 +84,7 @@ func (r *Recorder) ObserveClientLine(line []byte) {
 // OnClientLine records and GATES a client->agent ndjson line. It returns the line(s) to forward to
 // the agent now (a non-prompt line passes through; an idle prompt is forwarded and starts a turn; a
 // prompt received while busy is held, recorded as a pending user item, and queued) and an optional
-// spawn/turn notification to send to the client.
+// spawn/turn notification to send to the client. Do not mix Observe*/On* on the same Recorder.
 func (r *Recorder) OnClientLine(line []byte) (forward [][]byte, turn []byte) {
 	text, id, isPrompt := promptText(line)
 	if !isPrompt {
@@ -136,7 +136,7 @@ func (r *Recorder) observeUpdateLocked(u agentUpdate) {
 }
 
 // ObserveAgentLine records an agent->client ndjson line if it is a session/update notification.
-// Pure record: no turn-state side effects.
+// Pure record: no turn-state side effects. Do not mix Observe*/On* on the same Recorder.
 func (r *Recorder) ObserveAgentLine(line []byte) {
 	var m struct {
 		Method string `json:"method"`
@@ -154,7 +154,7 @@ func (r *Recorder) ObserveAgentLine(line []byte) {
 
 // OnAgentLine records an agent->client ndjson line AND detects turn-end. It returns prompt line(s)
 // to forward to the agent now (a drained queued prompt, if the turn just ended) and an optional
-// spawn/turn notification for the client.
+// spawn/turn notification for the client. Do not mix Observe*/On* on the same Recorder.
 func (r *Recorder) OnAgentLine(line []byte) (drain [][]byte, turn []byte) {
 	var m struct {
 		Method string          `json:"method"`
@@ -175,6 +175,8 @@ func (r *Recorder) OnAgentLine(line []byte) (drain [][]byte, turn []byte) {
 		return nil, nil
 	}
 	isResponse := m.Method == "" && (len(m.Result) > 0 || m.Error != nil)
+	// inflight==nil (a prompt sent without a JSON-RPC id) falls back to "any agent response ends the turn";
+	// this assumes the agent does not multiplex other id-bearing requests on this lane.
 	matchesInflight := r.inflight == nil || (m.ID != nil && *m.ID == *r.inflight)
 	if r.busy && isResponse && matchesInflight {
 		return r.endTurnLocked()
