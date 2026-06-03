@@ -1,5 +1,6 @@
 import { Conn, type WebSocketLike } from "./conn";
-import type { Message, SessionUpdate } from "./types";
+import type { Message, SessionUpdate, HistoryItem } from "./types";
+import type { Item } from "../views/chat/types";
 
 export interface PromptHandlers {
   onText?: (t: string) => void;
@@ -16,6 +17,9 @@ export class Client {
   private sessionId = "";
   private pending = new Map<number, (m: Message) => void>();
   private handlers: PromptHandlers = {};
+  // Replayed transcript from the in-container adapter on (re)connect. Settable by the caller;
+  // fires independently of any in-flight prompt (handled directly in route()).
+  onHistory?: (items: HistoryItem[]) => void;
 
   constructor(ws: WebSocketLike) {
     this.conn = new Conn(ws, (m) => this.route(m));
@@ -35,6 +39,10 @@ export class Client {
   }
 
   private route(m: Message) {
+    if (m.method === "spawn/history") {
+      this.onHistory?.((m.params?.items as HistoryItem[]) ?? []);
+      return;
+    }
     if (m.method === "session/update") {
       this.dispatchUpdate(m.params as SessionUpdate);
       return;
@@ -95,4 +103,23 @@ export class Client {
     this.handlers = handlers;
     await this.call("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text }] });
   }
+}
+
+// historyToItems maps replayed adapter history items to chat Items (without ids — the caller assigns
+// stable ids). The adapter's "system" marker (e.g. the truncation notice) renders as a plain agent line.
+export function historyToItems(items: HistoryItem[]): Omit<Item, "id">[] {
+  return items.map((h): Omit<Item, "id"> => {
+    switch (h.role) {
+      case "user":
+        return { kind: "user", text: h.text ?? "" };
+      case "thought":
+        return { kind: "thought", text: h.text ?? "" };
+      case "tool":
+        return { kind: "tool", title: h.title ?? "tool", status: h.status };
+      case "agent":
+      case "system":
+      default:
+        return { kind: "agent", text: h.text ?? "" };
+    }
+  });
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Client } from "./client";
+import { Client, historyToItems } from "./client";
 import type { WebSocketLike } from "./conn";
 
 // A fake WS that lets the test capture sent messages and inject incoming ones.
@@ -61,5 +61,43 @@ describe("Client", () => {
     expect(resp.result.outcome.outcome).toBe("selected");
     ws.inject({ id: promptId, result: { stopReason: "end_turn" } });
     await pr;
+  });
+
+  it("delivers a spawn/history frame to onHistory", () => {
+    const ws = new FakeWS();
+    const c = new Client(ws);
+    const got: any[] = [];
+    c.onHistory = (items) => got.push(...items);
+    ws.inject({
+      method: "spawn/history",
+      params: {
+        items: [
+          { role: "user", text: "hi" },
+          { role: "agent", text: "Hello!" },
+          { role: "tool", title: "search", status: "completed" },
+        ],
+      },
+    });
+    expect(got.length).toBe(3);
+    expect(got[0]).toEqual({ role: "user", text: "hi" });
+  });
+});
+
+describe("historyToItems", () => {
+  it("maps adapter history items to chat items (system marker -> agent)", () => {
+    const out = historyToItems([
+      { role: "user", text: "hi" },
+      { role: "agent", text: "Hello!" },
+      { role: "thought", text: "hmm" },
+      { role: "tool", title: "search", status: "completed" },
+      { role: "system", text: "earlier history truncated" },
+    ]);
+    expect(out).toEqual([
+      { kind: "user", text: "hi" },
+      { kind: "agent", text: "Hello!" },
+      { kind: "thought", text: "hmm" },
+      { kind: "tool", title: "search", status: "completed" },
+      { kind: "agent", text: "earlier history truncated" },
+    ]);
   });
 });

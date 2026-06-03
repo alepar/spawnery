@@ -9,6 +9,14 @@ export interface Message {
   error?: RpcError;
 }
 
+// spawn/history replay item (mirrors the in-container acpadapter's transcript item).
+export interface HistoryItem {
+  role: "user" | "agent" | "thought" | "tool" | "system";
+  text?: string;
+  title?: string;
+  status?: string;
+}
+
 // session/update notification: { sessionId, update: { sessionUpdate, ... } }
 export interface SessionUpdate {
   sessionId: string;
