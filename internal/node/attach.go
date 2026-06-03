@@ -171,8 +171,20 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	}
 	p := newPump(att.Stdin, att.Stdout)
 	p.closeFn = att.Close
-	p.exitFn = func() { // goose died after going active -> surface ERROR so the client isn't stranded
+	p.exitFn = func() { // goose died after going active -> ERROR + reclaim (so capacity accounting stays honest)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, "agent exited")
+		a.mu.Lock()
+		mine := a.pumps[st.SpawnId] == p // only clean up if we're still the registered pump (not replaced/stopped)
+		if mine {
+			delete(a.pumps, st.SpawnId)
+			if a.active > 0 {
+				a.active--
+			}
+		}
+		a.mu.Unlock()
+		if mine {
+			_ = a.mgr.Stop(context.WithoutCancel(ctx), st.SpawnId) // reclaim the crashed container
+		}
 	}
 	a.mu.Lock()
 	a.pumps[st.SpawnId] = p
