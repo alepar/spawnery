@@ -105,6 +105,7 @@ export function App() {
   };
 
   const spawnApp = async (appId: string) => {
+    // Show "connecting" immediately on click; openSession re-arms the 5s slow-timer for the WS phase.
     setBusy(true); connecting();
     try {
       const id = await createSpawn(appId, MODEL);
