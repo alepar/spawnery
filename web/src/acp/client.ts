@@ -105,10 +105,14 @@ export class Client {
   }
 }
 
+// Distributive Omit so each Item variant keeps its own fields (plain Omit<union,"id"> collapses them
+// to just { kind }). Mirrors App.tsx's ItemInput. The caller assigns the numeric id.
+type ItemInput = Item extends infer T ? (T extends { id: number } ? Omit<T, "id"> : never) : never;
+
 // historyToItems maps replayed adapter history items to chat Items (without ids — the caller assigns
 // stable ids). The adapter's "system" marker (e.g. the truncation notice) renders as a plain agent line.
-export function historyToItems(items: HistoryItem[]): Omit<Item, "id">[] {
-  return items.map((h): Omit<Item, "id"> => {
+export function historyToItems(items: HistoryItem[]): ItemInput[] {
+  return items.map((h): ItemInput => {
     switch (h.role) {
       case "user":
         return { kind: "user", text: h.text ?? "" };
