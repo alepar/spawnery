@@ -1,0 +1,42 @@
+import { vi } from "vitest";
+
+// Mock react-virtuoso so rows and Footer render in jsdom (Virtuoso virtualizes by measuring
+// container height which is 0 in jsdom, so no rows/footer would render without this mock).
+vi.mock("react-virtuoso", () => ({
+  Virtuoso: ({ data, itemContent, components, context }: any) => (
+    <div>
+      {data.map((item: any, i: number) => (
+        <div key={item.id}>{itemContent(i, item)}</div>
+      ))}
+      {components?.Footer ? <components.Footer context={context} /> : null}
+    </div>
+  ),
+}));
+
+import { render, screen } from "@testing-library/react";
+import { describe, it, expect } from "vitest";
+import { MessageList } from "./MessageList";
+import type { Item } from "./types";
+
+const items: Item[] = [
+  { id: 1, kind: "user", text: "sent" },
+  { id: 2, kind: "user", text: "waiting", pending: true },
+];
+
+describe("MessageList", () => {
+  it("shows the working footer with queued count when working", () => {
+    render(<MessageList items={items} working={true} queued={2} />);
+    expect(screen.getByTestId("working-indicator")).toHaveTextContent("working…");
+    expect(screen.getByTestId("working-indicator")).toHaveTextContent("2 queued");
+  });
+
+  it("hides the working footer when idle", () => {
+    render(<MessageList items={items} working={false} queued={0} />);
+    expect(screen.queryByTestId("working-indicator")).toBeNull();
+  });
+
+  it("tags pending user bubbles as queued", () => {
+    render(<MessageList items={items} working={true} queued={1} />);
+    expect(screen.getByTestId("queued-tag")).toBeInTheDocument();
+  });
+});
