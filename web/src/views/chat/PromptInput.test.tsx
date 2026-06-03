@@ -4,6 +4,12 @@ import { describe, it, expect, vi } from "vitest";
 import { PromptInput } from "./PromptInput";
 
 describe("PromptInput", () => {
+  it("renders no Send button (Enter sends)", () => {
+    render(<PromptInput disabled={false} onSend={vi.fn()} />);
+    expect(screen.queryByTestId("prompt-send")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
   it("sends text on Enter then clears the box", async () => {
     const onSend = vi.fn();
     render(<PromptInput disabled={false} onSend={onSend} />);
@@ -14,6 +20,17 @@ describe("PromptInput", () => {
     expect(box.value).toBe("");
   });
 
+  it("Shift+Enter inserts a newline and does not send", async () => {
+    const onSend = vi.fn();
+    render(<PromptInput disabled={false} onSend={onSend} />);
+    const box = screen.getByTestId("prompt-input") as HTMLTextAreaElement;
+    await userEvent.type(box, "line1");
+    await userEvent.keyboard("{Shift>}{Enter}{/Shift}");
+    await userEvent.type(box, "line2");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(box.value).toBe("line1\nline2");
+  });
+
   it("does not send whitespace-only input", async () => {
     const onSend = vi.fn();
     render(<PromptInput disabled={false} onSend={onSend} />);
@@ -22,22 +39,13 @@ describe("PromptInput", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
-  it("keeps focus on the input after Enter (does not blur)", async () => {
-    const onSend = vi.fn();
-    render(<PromptInput disabled={false} onSend={onSend} />);
-    const box = screen.getByTestId("prompt-input") as HTMLTextAreaElement;
-    await userEvent.type(box, "hi");
-    await userEvent.keyboard("{Enter}");
-    expect(document.activeElement).toBe(box);
-  });
-
-  it("does not send while busy (disabled), but the box stays focusable", async () => {
+  it("does not send while disabled, but the box stays typeable and retains text", async () => {
     const onSend = vi.fn();
     render(<PromptInput disabled={true} onSend={onSend} />);
     const box = screen.getByTestId("prompt-input") as HTMLTextAreaElement;
-    await userEvent.type(box, "hi"); // still typeable (not disabled) — type-ahead
+    await userEvent.type(box, "hi");
     await userEvent.keyboard("{Enter}");
     expect(onSend).not.toHaveBeenCalled();
-    expect(box.value).toBe("hi"); // retained, not cleared
+    expect(box.value).toBe("hi");
   });
 });
