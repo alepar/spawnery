@@ -126,6 +126,19 @@ What survives that verification — Spawnery's actual seam:
 
 **Treat AgentCore as the reference architecture to differentiate against, not ignore.** The MVP harness itself is parity-grade; the moat is the §6 ladder (public trust signal for untrusted third-party personal-AI apps), which AgentCore deliberately doesn't serve.
 
+### Versus configuration-only consumer stores (GPT Store, HuggingChat Assistants)
+
+AgentCore is the *infra-layer* comp; the *consumer-marketplace* comp is the GPT Store — and a Spawnery App is the **same shape** (configuration over a shared runtime), which is exactly why the contrast is sharp. Four structural axes where the configuration-only model can't follow (hypotheses pending verification in [`sp-anj`]):
+
+| Axis | GPT Store / config-only store | Spawnery | Apps it unlocks |
+|---|---|---|---|
+| **Take-home artifact** | No durable user-owned, portable store; creator "knowledge" files are read-only to the user (Code Interpreter emits only ephemeral one-off downloads). | **Owned, versioned, portable data repo** the App accumulates; export/clone anytime. | LLM Wiki / second-brain (impossible on GPT Store). |
+| **Execution** | Prompt + creator knowledge + Actions (calls to a server *the creator hosts elsewhere*) + OpenAI's *own* ephemeral Code-Interpreter sandbox running the model's python — no creator container. | **Untrusted creator code in a hardened OCI container + bundled toolset, driven over ACP.** | Zork game-master, stateful tools (impossible as creator-controlled code on GPT Store). |
+| **Authoring** | Bespoke **GPT-Builder UI** (form + conversational builder); can't build-as-repo with your own agent tooling and publish. *(Assistants API is programmatic but a separate product from the Store path.)* | **Repo-built Apps** (`spawneryapp.yml` + persona/skills) — build with Claude Code or whatever you use, publish the artifact. | Real dev workflow; inspectable open Apps. |
+| **Quality/eval** | Manual live-preview chat only; **no automated scenario testing / scoring** in the creator studio. | **Eval harness (`sp-dkz`)** — scenario + mock-human + judge over the ACP transcript. | "Test Your App" → (later) public trust signal. |
+
+Each axis maps 1:1 to a Spawnery primitive — **data repo / hardened container + ACP / repo-built apps / eval harness** — so this is a four-axis differentiation frame, not the single "quality + discovery" point. It also feeds the demo-MVP §5 messaging rules. The cautionary half stands: GPT Store proves that *config-only is trivial to make and trivially undifferentiated* → store rot (≈95% abandonment); the four axes are why Spawnery Apps aren't reducible to "a prompt + some files."
+
 ---
 
 ## 8. Testing & validation approach
