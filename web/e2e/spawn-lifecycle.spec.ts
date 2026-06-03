@@ -117,3 +117,31 @@ test("conversation history survives a browser reload (node replay)", async ({ pa
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
   await expect(page.locator('[data-role="user"]')).toContainText("one");
 });
+
+// Enforces our non-standard ACP model: ONE long-lived agent process serves MANY client sessions, so
+// reconnecting (reload + reopen) re-sends `initialize` + `session/new` to an already-initialized agent.
+// The agent must tolerate the repeated handshake AND still serve a fresh turn. Verified against goose
+// (the handshake re-answers cleanly); this guards the property for the stub + relay and for any future
+// agent added to the e2e lane. Making it spec-compliant (node owns one session) is sp-r7t.
+test("a reconnected spawn still serves new prompts (repeated initialize tolerated)", async ({ page }) => {
+  await gotoApp(page);
+  await spawnFromMarket(page);
+  await page.getByTestId("prompt-input").fill("say one");
+  await page.getByTestId("prompt-send").click();
+  await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
+
+  // Reload + reopen -> fresh ACP handshake against the same still-running agent. Reaching "connected"
+  // proves the repeated `initialize`/`session/new` did NOT error.
+  await page.reload();
+  await expect(page.getByTestId("marketplace")).toBeVisible({ timeout: 20_000 });
+  await rowByName(page, "Secret App").locator('[data-testid^="spawn-select-"]').click();
+  await expect(page.getByTestId("status")).toContainText("connected", { timeout: 40_000 });
+
+  // A NEW turn on the reconnected session must work end-to-end. Scope to the new bubble: by now the
+  // replayed "ECHO: say one" is also on screen, so a bare [data-role="agent"] match is non-unique.
+  await page.getByTestId("prompt-input").fill("say two");
+  await page.getByTestId("prompt-send").click();
+  await expect(
+    page.locator('[data-role="agent"]').filter({ hasText: "ECHO: say two" }),
+  ).toBeVisible({ timeout: 30_000 });
+});
