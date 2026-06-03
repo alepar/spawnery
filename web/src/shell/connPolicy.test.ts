@@ -26,4 +26,12 @@ describe("nextConnAction", () => {
     expect(nextConnAction("suspending", false, null)).toBe("none");
     expect(nextConnAction("unknown", false, null)).toBe("none");
   });
+  it("active + live ws stays none regardless of reconnecting/disconnected conn", () => {
+    expect(nextConnAction("active", true, "reconnecting")).toBe("none");
+    expect(nextConnAction("active", true, "disconnected")).toBe("none");
+  });
+  it("a dead node mid-reconnect is torn down by the poll (error), not left spinning", () => {
+    expect(nextConnAction("unreachable", true, "disconnected")).toBe("error");
+    expect(nextConnAction("error", true, "reconnecting")).toBe("error");
+  });
 });

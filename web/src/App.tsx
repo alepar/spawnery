@@ -16,7 +16,7 @@ import { reconcilePending, MAX_QUEUED } from "./lib/turn";
 const MODEL = "deepseek/deepseek-v4-flash";
 
 export function App() {
-  const { conn, connecting, connected, errored, closed, reset, waiting, reconnecting } = useConnStatus();
+  const { conn, connecting, connected, errored, reset, waiting, reconnecting } = useConnStatus();
   const [items, setItems] = useState<Item[]>([]);
   const [turn, setTurn] = useState<TurnState>({ state: "idle", queued: 0 });
   const [perm, setPerm] = useState<{ title: string; resolve: (b: boolean) => void } | null>(null);
