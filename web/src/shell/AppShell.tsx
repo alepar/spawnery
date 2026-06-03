@@ -6,13 +6,14 @@ import type { ConnState } from "./useConnStatus";
 import { ChatView } from "@/views/ChatView";
 import { MarketplaceView } from "@/views/MarketplaceView";
 import { SettingsView } from "@/views/SettingsView";
-import type { Item } from "@/views/chat/types";
+import type { Item, TurnState } from "@/views/chat/types";
 import type { SpawnView } from "@/api/spawnlet";
 
-export function AppShell({ conn, items, busy, onSend, perm, onSpawnApp, spawns = [], activeId, actions }: {
+export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp, spawns = [], activeId, actions }: {
   conn: ConnState | null;
   items: Item[];
-  busy: boolean;
+  turn: TurnState;
+  canSend: boolean;
   onSend: (t: string) => void;
   perm: { title: string; resolve: (b: boolean) => void } | null;
   onSpawnApp: (appId: string) => void;
@@ -40,7 +41,7 @@ export function AppShell({ conn, items, busy, onSend, perm, onSpawnApp, spawns =
           <ConnStatus conn={conn} />
         </header>
         <main className="flex-1 overflow-hidden">
-          {view === "chat" && <ChatView items={items} busy={busy} onSend={onSend} perm={perm} />}
+          {view === "chat" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} />}
           {view === "market" && <MarketplaceView onSpawn={onSpawn} />}
           {view === "settings" && <SettingsView />}
         </main>
