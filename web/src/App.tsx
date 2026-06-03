@@ -178,7 +178,9 @@ export function App() {
   const onSuspend = async (id: string) => {
     try {
       await suspendSpawn(id);
-      if (activeIdRef.current === id) { closeSession(); }
+      buffersRef.current.delete(id); // resumed spawns start fresh — drop the stale cached transcript
+      // keep the spawn selected (unlike onStop) — the user stays on its now-empty suspended view.
+      if (activeIdRef.current === id) { closeSession(); setItems([]); }
     } catch (e: any) { toast.error("Suspend failed: " + e.message); }
     refreshSpawns();
   };

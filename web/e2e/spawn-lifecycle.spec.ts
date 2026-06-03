@@ -118,6 +118,49 @@ test("conversation history survives a browser reload (node replay)", async ({ pa
   await expect(page.locator('[data-role="user"]')).toContainText("one");
 });
 
+test("suspending a non-active spawn clears its cached transcript", async ({ page }) => {
+  await gotoApp(page);
+  await spawnFromMarket(page); // instance 1 active
+  await page.getByTestId("prompt-input").fill("say one");
+  await page.getByTestId("prompt-send").click();
+  await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
+
+  await spawnFromMarket(page); // instance 2 active (no reload) — instance 1 is now non-active, buffer saved
+  await expect(page.locator('[data-role="agent"]')).toHaveCount(0);
+
+  // Suspend instance 1 (NOT the active spawn) from its sidebar kebab.
+  const r1 = rowByName(page, "Secret App");
+  await r1.locator('[data-testid^="spawn-kebab-"]').click();
+  await r1.locator('[data-testid^="spawn-suspend-"]').click();
+  await expect.poll(
+    async () => r1.locator('[data-testid^="spawn-dot-"]').getAttribute("data-status"),
+    { timeout: 20_000 },
+  ).toBe("suspended");
+
+  // Re-select the suspended instance 1: its cached transcript was cleared on suspend, and a suspended
+  // spawn does not reconnect, so the chat shows nothing.
+  await r1.locator('[data-testid^="spawn-select-"]').click();
+  await expect(page.locator('[data-role="agent"]')).toHaveCount(0, { timeout: 20_000 });
+  await expect(page.locator('[data-role="user"]')).toHaveCount(0, { timeout: 20_000 });
+});
+
+test("suspending the active spawn clears its on-screen transcript", async ({ page }) => {
+  await gotoApp(page);
+  await spawnFromMarket(page);
+  await page.getByTestId("prompt-input").fill("say one");
+  await page.getByTestId("prompt-send").click();
+  await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
+
+  // Suspend the currently-active spawn from the sidebar kebab.
+  const r = rowByName(page, "Secret App");
+  await r.locator('[data-testid^="spawn-kebab-"]').click();
+  await r.locator('[data-testid^="spawn-suspend-"]').click();
+
+  // A resumed spawn starts fresh, so the stale transcript is wiped immediately.
+  await expect(page.locator('[data-role="agent"]')).toHaveCount(0, { timeout: 20_000 });
+  await expect(page.locator('[data-role="user"]')).toHaveCount(0, { timeout: 20_000 });
+});
+
 // Enforces our non-standard ACP model: ONE long-lived agent process serves MANY client sessions, so
 // reconnecting (reload + reopen) re-sends `initialize` + `session/new` to an already-initialized agent.
 // The agent must tolerate the repeated handshake AND still serve a fresh turn. Verified against goose
