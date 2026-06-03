@@ -240,3 +240,29 @@ func TestQueuedPromptDrainsOnTurnEnd(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+func TestStopUnblocksReadLoop(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGoose(gooseInR, gooseOutW)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	p.stop()
+	select {
+	case <-p.readerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("readLoop did not exit after stop()")
+	}
+	p.stop() // idempotent, must not panic
+}
+
+func TestStartCancelledByContext(t *testing.T) {
+	gooseOutR, _ := io.Pipe() // never answers
+	p := newPump(io.Discard, gooseOutR)
+	defer p.stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.start(ctx, 10*time.Second); err == nil { // long timeout; ctx cancel must abort fast
+		t.Fatal("want error from cancelled ctx")
+	}
+}

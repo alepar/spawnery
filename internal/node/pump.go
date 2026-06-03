@@ -40,13 +40,14 @@ type Pump struct {
 	stopped bool // set by stop() in Task 4 (agent teardown); unused in the fan-out core
 
 	sessionID        string
-	toAgent          chan []byte          // ndjson lines for the writer (sole stdin writer)
+	toAgent          chan []byte               // ndjson lines for the writer (sole stdin writer)
 	writerDone       chan struct{}
+	readerDone       chan struct{}
 	waiters          map[int]chan acp.Message // one-shot result waiters (handshake/our requests)
 	nextID           int
 	busy             bool
-	queue            []string             // queued prompt texts, FIFO
-	inflightPromptID int                  // goose request id of the in-flight session/prompt (0 = none)
+	queue            []string // queued prompt texts, FIFO
+	inflightPromptID int      // goose request id of the in-flight session/prompt (0 = none)
 }
 
 func newPump(stdin io.Writer, stdout io.Reader) *Pump {
@@ -55,6 +56,7 @@ func newPump(stdin io.Writer, stdout io.Reader) *Pump {
 		clients:    map[string]*client{},
 		toAgent:    make(chan []byte, 64),
 		writerDone: make(chan struct{}),
+		readerDone: make(chan struct{}),
 		waiters:    map[int]chan acp.Message{},
 	}
 }
@@ -154,17 +156,19 @@ func (p *Pump) clientLoop(c *client) {
 func (p *Pump) start(ctx context.Context, readyTimeout time.Duration) error {
 	go p.writeLoop()
 	go p.readLoop()
-	if _, err := p.call(acp.Message{Method: "initialize", Params: json.RawMessage(`{"protocolVersion":1,"clientCapabilities":{}}`)}, readyTimeout); err != nil {
+	if _, err := p.call(ctx, acp.Message{Method: "initialize", Params: json.RawMessage(`{"protocolVersion":1,"clientCapabilities":{}}`)}, readyTimeout); err != nil {
 		return fmt.Errorf("agent not ready: %w", err)
 	}
-	res, err := p.call(acp.Message{Method: "session/new", Params: json.RawMessage(`{"cwd":"/app","mcpServers":[]}`)}, readyTimeout)
+	res, err := p.call(ctx, acp.Message{Method: "session/new", Params: json.RawMessage(`{"cwd":"/app","mcpServers":[]}`)}, readyTimeout)
 	if err != nil {
 		return fmt.Errorf("session/new: %w", err)
 	}
 	var r struct {
 		SessionID string `json:"sessionId"`
 	}
-	_ = json.Unmarshal(res, &r)
+	if uerr := json.Unmarshal(res, &r); uerr != nil || r.SessionID == "" {
+		return fmt.Errorf("session/new: bad result %q (err %v)", string(res), uerr)
+	}
 	p.mu.Lock()
 	p.sessionID = r.SessionID
 	p.mu.Unlock()
@@ -179,6 +183,9 @@ func (p *Pump) stop() {
 	}
 	p.stopped = true
 	close(p.writerDone)
+	if c, ok := p.stdout.(io.Closer); ok {
+		_ = c.Close() // unblock readLoop's blocking Read; the integration passes a closeable stdout
+	}
 	for _, c := range p.clients {
 		close(c.done)
 	}
@@ -208,7 +215,7 @@ func (p *Pump) sendLine(line []byte) {
 
 // call sends an ACP request (assigning a JSON-RPC id) and waits for the matching result. The waiter is
 // registered BEFORE sending so a fast agent reply can't be missed.
-func (p *Pump) call(m acp.Message, timeout time.Duration) (json.RawMessage, error) {
+func (p *Pump) call(ctx context.Context, m acp.Message, timeout time.Duration) (json.RawMessage, error) {
 	p.mu.Lock()
 	p.nextID++
 	id := p.nextID
@@ -227,6 +234,8 @@ func (p *Pump) call(m acp.Message, timeout time.Duration) (json.RawMessage, erro
 			return nil, fmt.Errorf("rpc %d: %s", rm.Error.Code, rm.Error.Message)
 		}
 		return rm.Result, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case <-time.After(timeout):
 		return nil, fmt.Errorf("timeout after %s", timeout)
 	case <-p.writerDone:
@@ -249,6 +258,7 @@ func (p *Pump) sendPrompt(sessionID, text string) {
 }
 
 func (p *Pump) readLoop() {
+	defer close(p.readerDone)
 	rd := acp.NewReader(p.stdout)
 	for {
 		m, err := rd.ReadMessage()
