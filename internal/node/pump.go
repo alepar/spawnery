@@ -95,22 +95,16 @@ func (p *Pump) clientLoop(c *client) {
 		}
 		for {
 			p.mu.Lock()
-			// If the client's cursor is > 0 and at or below base, it missed trimmed frames -> reset.
-			// cursor == base means the last frame the client saw was trimmed (base is the seq of the
-			// last trimmed frame), so the next frame the client needs (cursor+1) no longer exists.
-			// cursor == 0 means "new client starting from scratch" — no reset, just replay from log[0].
+			// If the client's cursor is below base, it missed trimmed frames -> reset to base.
 			var reset *Frame
-			if c.cursor > 0 && c.cursor <= p.base {
+			if c.cursor < p.base {
 				r := Frame{Kind: "reset", FromSeq: p.base}
 				reset = &r
 				c.cursor = p.base
 			}
 			var batch []Frame
 			if c.cursor < p.seq {
-				from := c.cursor - p.base // index of first unseen frame (>= 0 after reset or clamp)
-				if from < 0 {
-					from = 0 // new client (cursor=0) joining after trim; replay from log start
-				}
+				from := c.cursor - p.base // index of first unseen frame
 				batch = append(batch, p.log[from:]...)
 				c.cursor = p.seq
 			}

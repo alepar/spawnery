@@ -93,13 +93,25 @@ func TestReconnectOverlapNoLeak(t *testing.T) {
 
 func TestTrimResetsLaggingClient(t *testing.T) {
 	p := newTestPump()
-	p.maxLog = 2 // small cap for the test
+	p.maxLog = 2
+	for i := 0; i < 5; i++ { p.appendFrames([]Frame{{Kind: "agent", Text: "x"}}) } // seq 1..5; trims to base=3, log=[seq4,seq5]
 	a := &capSender{}
-	p.appendFrames([]Frame{{Kind: "agent", Text: "1"}}) // seq 1
-	p.appendFrames([]Frame{{Kind: "agent", Text: "2"}}) // seq 2
-	p.appendFrames([]Frame{{Kind: "agent", Text: "3"}}) // seq 3 -> trims seq 1, base=1
-	// a resumes from seq 1, which is below base(1) -> gets a reset{fromSeq:1} then frames 2,3.
-	p.attachClient("a", 1, a.send)
+	p.attachClient("a", 1, a.send) // cursor 1 < base 3 -> reset{fromSeq:3} then seq 4,5
 	a.waitLen(t, 3)
-	if a.frames()[0].Kind != "reset" || a.frames()[0].FromSeq != 1 { t.Fatalf("want reset{1} first, got %+v", a.frames()[0]) }
+	fs := a.frames()
+	if fs[0].Kind != "reset" || fs[0].FromSeq != 3 { t.Fatalf("want reset{3} first, got %+v", fs[0]) }
+	if fs[1].Seq != 4 || fs[2].Seq != 5 { t.Fatalf("want seq 4,5 after reset, got %v", a.seqs()) }
+}
+
+// A client whose cursor is exactly at base did NOT miss anything: resume cleanly, no reset.
+func TestClientAtBaseResumesWithoutReset(t *testing.T) {
+	p := newTestPump()
+	p.maxLog = 2
+	for i := 0; i < 3; i++ { p.appendFrames([]Frame{{Kind: "agent", Text: "x"}}) } // seq 1..3; base=1, log=[seq2,seq3]
+	a := &capSender{}
+	p.attachClient("a", 1, a.send) // cursor 1 == base 1 -> NO reset, just seq 2,3
+	a.waitLen(t, 2)
+	fs := a.frames()
+	if fs[0].Kind == "reset" { t.Fatalf("unexpected reset at cursor==base: %+v", fs) }
+	if fs[0].Seq != 2 || fs[1].Seq != 3 { t.Fatalf("want seq 2,3, got %v", a.seqs()) }
 }
