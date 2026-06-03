@@ -9,6 +9,10 @@ export default defineConfig({
   timeout: 60_000,
   fullyParallel: false,
   workers: 1,
+  // Headless Chromium running alongside Docker container churn (the per-test spawn create/teardown
+  // flaps host veth interfaces) occasionally aborts a page.goto with net::ERR_NETWORK_CHANGED. That's
+  // an environment flake, not an app bug — retry it so the suite is deterministic.
+  retries: 2,
   use: {
     baseURL: "http://localhost:5173",
     headless: true,

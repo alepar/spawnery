@@ -28,13 +28,11 @@ export function App() {
   const buffersRef = useRef<Map<string, Item[]>>(new Map());
   // refs mirroring state so async callbacks (poll, ws onopen, onHistory) don't read stale closures.
   const activeIdRef = useRef<string | null>(null);
-  const itemsRef = useRef<Item[]>([]);
   const spawnsRef = useRef<SpawnView[]>([]);
   const connRef = useRef(conn);
 
   useEffect(() => { setTheme(initialTheme()); }, []);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
-  useEffect(() => { itemsRef.current = items; }, [items]);
   useEffect(() => { spawnsRef.current = spawns; }, [spawns]);
   useEffect(() => { connRef.current = conn; }, [conn]);
 
