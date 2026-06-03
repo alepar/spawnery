@@ -424,3 +424,39 @@ func TestPermissionTimeoutDenies(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+func TestStopCallsCloseFnAndExitFnNotOnStop(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGoose(gooseInR, gooseOutW)
+	var closed, exited int
+	p := newPump(gooseInW, gooseOutR)
+	p.closeFn = func() error { closed++; return gooseOutR.Close() } // close stdout so readLoop unblocks
+	p.exitFn = func() { exited++ }
+	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	p.stop()
+	select {
+	case <-p.readerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("readLoop did not exit")
+	}
+	if closed != 1 { t.Fatalf("closeFn called %d times, want 1", closed) }
+	if exited != 0 { t.Fatalf("exitFn must NOT fire on intentional stop, got %d", exited) }
+}
+
+func TestExitFnFiresOnAgentDeath(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGoose(gooseInR, gooseOutW)
+	exited := make(chan struct{}, 1)
+	p := newPump(gooseInW, gooseOutR)
+	p.exitFn = func() { exited <- struct{}{} }
+	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	defer p.stop()
+	gooseOutW.Close() // agent "dies": stdout EOFs -> readLoop exits -> exitFn fires (not stopped)
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("exitFn did not fire on agent death")
+	}
+}

@@ -63,6 +63,9 @@ type Pump struct {
 
 	pending     map[string]*pendingPerm
 	permTimeout time.Duration
+
+	closeFn func() error // agent-attach teardown (set by the integration); preferred over the stdout cast
+	exitFn  func()       // called when readLoop exits on AGENT DEATH (not on intentional stop)
 }
 
 func newPump(stdin io.Writer, stdout io.Reader) *Pump {
@@ -210,8 +213,10 @@ func (p *Pump) stop() {
 	}
 	p.stopped = true
 	close(p.writerDone)
-	if c, ok := p.stdout.(io.Closer); ok {
-		_ = c.Close() // unblock readLoop's blocking Read; the integration passes a closeable stdout
+	if p.closeFn != nil {
+		_ = p.closeFn()
+	} else if c, ok := p.stdout.(io.Closer); ok {
+		_ = c.Close()
 	}
 	for _, c := range p.clients {
 		close(c.done)
@@ -289,7 +294,16 @@ func (p *Pump) sendPrompt(sessionID, text string) {
 }
 
 func (p *Pump) readLoop() {
-	defer close(p.readerDone)
+	defer func() {
+		close(p.readerDone)
+		p.mu.Lock()
+		stopped := p.stopped
+		fn := p.exitFn
+		p.mu.Unlock()
+		if !stopped && fn != nil {
+			fn()
+		}
+	}()
 	rd := acp.NewReader(p.stdout)
 	for {
 		m, err := rd.ReadMessage()
