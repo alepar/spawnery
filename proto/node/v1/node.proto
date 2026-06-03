@@ -45,7 +45,7 @@ message StartSpawn  { string spawn_id = 1; string app_ref = 2; string data_ref =
 message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }
 message Suspend     { string spawn_id = 1; uint64 generation = 2; }
 message SuspendComplete { string spawn_id = 1; uint64 generation = 2; repeated MountMarker markers = 3; }
-message SessionOpen  { string spawn_id = 1; uint64 generation = 2; }
-message SessionClose { string spawn_id = 1; uint64 generation = 2; }
+message SessionOpen  { string spawn_id = 1; uint64 generation = 2; string client_id = 3; int64 cursor = 4; }
+message SessionClose { string spawn_id = 1; uint64 generation = 2; string client_id = 3; }
 // Frame carries no generation: data frames are correlated to an episode by spawn_id at the session layer.
-message Frame       { string spawn_id = 1; bytes data = 2; }
+message Frame        { string spawn_id = 1; bytes data = 2; string client_id = 3; }
