@@ -10,7 +10,7 @@ import { useConnStatus } from "./shell/useConnStatus";
 import { initialTheme, setTheme } from "./lib/theme";
 import type { Item } from "./views/chat/types";
 
-const MODEL = "openai/gpt-oss-120b:free";
+const MODEL = "deepseek/deepseek-v4-flash";
 
 export function App() {
   const { conn, connecting, connected, errored, closed, reset } = useConnStatus();
