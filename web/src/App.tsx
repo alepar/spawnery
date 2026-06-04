@@ -16,7 +16,15 @@ import { reconcilePending, MAX_QUEUED } from "./lib/turn";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
-const CLIENT_ID = crypto.randomUUID();
+// A per-tab client id. crypto.randomUUID() only exists in a secure context (HTTPS or localhost), so
+// it's undefined on plain-HTTP LAN access (e.g. http://192.168.x.x:5173) — fall back so the app mounts.
+function makeClientId(): string {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  } catch { /* non-secure context */ }
+  return `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+const CLIENT_ID = makeClientId();
 
 export function App() {
   const { conn, connecting, connected, errored, reset, waiting, reconnecting } = useConnStatus();
