@@ -185,20 +185,27 @@ export function App() {
   useEffect(() => () => { wsRef.current?.close(); }, []);
 
   const spawnApp = async (appId: string) => {
+    // Switch the UI to the pending state SYNCHRONOUSLY, before the createSpawn round-trip: tear down
+    // the previous spawn's live socket, stash + clear its transcript, and show "waiting". Otherwise
+    // the old spawn stays "connected" on its live socket during the await, and a prompt sent in that
+    // window goes to the OLD spawn (its echo is then dropped when the switch completes). Detach
+    // activeId for the duration so the poll can't reopen the previous spawn before the new id is set.
+    const prevId = activeIdRef.current;
+    lastSeqRef.current = 0;
+    teardown();
+    setActiveId(null);
+    activeIdRef.current = null;
+    setItems((current) => {
+      if (prevId) buffersRef.current.set(prevId, current);
+      return [];
+    });
+    setTurn({ state: "idle", queued: 0 });
+    waiting(); // grey-pulse until the node signals active; the poll then opens the ws
     try {
       const id = await createSpawn(appId, MODEL); // async CP: returns immediately, status 'starting'
-      lastSeqRef.current = 0;
-      const prevId = activeIdRef.current;
-      teardown(); // close any current live session before switching to the new (starting) spawn
       buffersRef.current.set(id, []);
       setActiveId(id);
       activeIdRef.current = id;
-      setItems((current) => {
-        if (prevId && prevId !== id) buffersRef.current.set(prevId, current);
-        return [];
-      });
-      setTurn({ state: "idle", queued: 0 });
-      waiting(); // grey-pulse until the node signals active; the poll then opens the ws
       await refreshSpawns(); // sidebar shows the new spawn yellow immediately
     } catch (e: any) {
       errored();
