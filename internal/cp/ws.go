@@ -22,7 +22,7 @@ func (s *Server) HandleWS(authn *auth.Auth) http.HandlerFunc {
 		}
 		conn.SetReadLimit(16 * 1024 * 1024)
 		ctx := r.Context()
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 
 		_, first, err := conn.Read(ctx)
 		if err != nil {

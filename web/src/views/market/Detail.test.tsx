@@ -8,7 +8,7 @@ vi.mock("@/api/catalog", () => ({
     versions: [{ version: "1.0.0", tier: "TRUST_TIER_REVIEWED", createdAt: "100" }],
     manifest: { id: "spawnery/wiki", title: "Wiki", description: "a wiki", tools: ["qmd"], model: { recommendedDefault: "deepseek" }, mounts: [{ name: "main", path: "data" }] },
   }),
-  tierLabel: (t?: string) => ({ label: "reviewed", variant: "default" as const }),
+  tierLabel: (_t?: string) => ({ label: "reviewed", variant: "default" as const }),
 }));
 
 import { Detail } from "./Detail";

@@ -135,7 +135,7 @@ func runStandalone(ctx context.Context, addr, appPath, model string) {
 
 	driveACP(pr, sendW)
 
-	stream.CloseRequest()
+	_ = stream.CloseRequest()
 	_, _ = client.StopSpawn(ctx, connect.NewRequest(&spawnv1.StopSpawnRequest{SpawnId: id}))
 }
 
@@ -179,7 +179,7 @@ func runCP(ctx context.Context, addr, appID, model, token string) {
 
 	driveACP(pr, sendW)
 
-	stream.CloseRequest()
+	_ = stream.CloseRequest()
 	_, _ = client.StopSpawn(ctx, connect.NewRequest(&cpv1.StopSpawnRequest{SpawnId: id}))
 }
 
