@@ -5,7 +5,7 @@ import {
   DEV_TOKEN, type SpawnView,
 } from "./api/spawnlet";
 import { Conn } from "./acp/conn";
-import { encodePrompt, encodePermResponse, decodeFrame, type Frame } from "./acp/frames";
+import { encodePrompt, encodePermResponse, type Frame } from "./acp/frames";
 import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
 import { ReconnectingSocket } from "./shell/reconnectingSocket";
@@ -91,6 +91,8 @@ export function App() {
         break;
       }
       case "perm_request":
+        // resolve uses the CURRENT socket at click time: if the user switched spawns first, the
+        // perm_response targets the new socket and the node no-ops the unknown reqId (harmless).
         setPerm({
           title: f.title ?? "an action",
           resolve: (allow) => { setPerm(null); wsRef.current?.send(encodePermResponse(f.reqId ?? "", allow)); },
@@ -200,13 +202,16 @@ export function App() {
     closeSession();
     setActiveId(id);
     activeIdRef.current = id;
-    const buf = buffersRef.current.get(id) ?? [];
+    const sp = spawnsRef.current.find((s) => s.spawnId === id);
+    // An active spawn full-replays from the node (cursor=0), so start EMPTY — seeding from the cached
+    // buffer would stack the replay on top of it and double the transcript. The buffer is the view only
+    // for non-active spawns (suspended/starting/etc., which don't reconnect+replay).
+    const buf = sp?.status === "active" ? [] : (buffersRef.current.get(id) ?? []);
     setItems((current) => {
       if (prevId) buffersRef.current.set(prevId, current);
       return buf;
     });
     setTurn(turnsRef.current.get(id) ?? { state: "idle", queued: 0 });
-    const sp = spawnsRef.current.find((s) => s.spawnId === id);
     if (sp?.status === "active") openSession(id);
     else if (sp?.status === "starting") waiting();
     else if (sp?.status === "error" || sp?.status === "unreachable") errored();
