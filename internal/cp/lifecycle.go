@@ -47,7 +47,10 @@ func toSummaryStatus(s store.Status) cpv1.SpawnStatus {
 // DeleteSpawn stays a destroy). destroy_data is accepted but INERT for scratch backends — there is
 // no persistent data to destroy; real backend-destroy lands with E3.
 func (s *Server) DeleteSpawn(ctx context.Context, req *connect.Request[cpv1.DeleteSpawnRequest]) (*connect.Response[cpv1.DeleteSpawnResponse], error) {
-	owner, _ := auth.OwnerFromContext(ctx)
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
 	if err := s.stop(ctx, owner, req.Msg.SpawnId); err != nil {
 		return nil, err
 	}

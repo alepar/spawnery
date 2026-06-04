@@ -254,7 +254,10 @@ func (s *Server) placementFor(ctx context.Context, owner, appID string, ver stor
 }
 
 func (s *Server) StopSpawn(ctx context.Context, req *connect.Request[cpv1.StopSpawnRequest]) (*connect.Response[cpv1.StopSpawnResponse], error) {
-	owner, _ := auth.OwnerFromContext(ctx)
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
 	if err := s.stop(ctx, owner, req.Msg.SpawnId); err != nil {
 		return nil, err
 	}
