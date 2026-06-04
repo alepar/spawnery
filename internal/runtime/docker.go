@@ -132,7 +132,23 @@ func (d *Docker) ContainerIP(ctx context.Context, id string) (string, error) {
 	}
 	ip := ""
 	if j.NetworkSettings != nil {
+		// Docker <=28 exposes the bridge IP on the legacy top-level field; Docker 29+ drops it and
+		// only reports per-network endpoints, so fall back to the Networks map (prefer the default
+		// "bridge" network, then any attached network with an IP).
 		ip = j.NetworkSettings.DefaultNetworkSettings.IPAddress
+		if ip == "" {
+			if ep := j.NetworkSettings.Networks["bridge"]; ep != nil {
+				ip = ep.IPAddress
+			}
+		}
+		if ip == "" {
+			for _, ep := range j.NetworkSettings.Networks {
+				if ep != nil && ep.IPAddress != "" {
+					ip = ep.IPAddress
+					break
+				}
+			}
+		}
 	}
 	if ip == "" {
 		return "", fmt.Errorf("container %s has no bridge IP", id)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
@@ -154,7 +156,14 @@ func runCP(ctx context.Context, addr, appID, model, token string) {
 	id := cs.Msg.SpawnId
 	fmt.Println("spawn:", id)
 
+	// CreateSpawn is async: the CP binds the spawn to its node only once the node reports ACTIVE.
+	// Wait for that before attaching, else the session races provisioning and gets "unknown spawn".
+	waitActiveCP(ctx, client, id)
+
 	stream := client.Session(ctx)
+	if err := stream.Send(&cpv1.Frame{SpawnId: id}); err != nil { // bind frame (carries the spawn id)
+		log.Fatalf("bind: %v", err)
+	}
 
 	pr, pw := io.Pipe()
 	go func() {
@@ -177,10 +186,85 @@ func runCP(ctx context.Context, addr, appID, model, token string) {
 		return len(b), nil
 	})
 
-	driveACP(pr, sendW)
+	// The CP relays the frame protocol (not raw ACP): the node's pump does the ACP handshake and
+	// exposes {"kind":"prompt"} in / user|agent|turn frames out. Drive it like the web client.
+	driveFrames(pr, sendW)
 
 	_ = stream.CloseRequest()
 	_, _ = client.StopSpawn(ctx, connect.NewRequest(&cpv1.StopSpawnRequest{SpawnId: id}))
+}
+
+// waitActiveCP polls ListSpawns until the spawn is ACTIVE (router-bound), failing fast on a terminal
+// status. CreateSpawn returns in 'starting' and provisions asynchronously on the node.
+func waitActiveCP(ctx context.Context, client cpv1connect.SpawnServiceClient, id string) {
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		ls, err := client.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+		if err != nil {
+			log.Fatalf("listSpawns: %v", err)
+		}
+		for _, sp := range ls.Msg.Spawns {
+			if sp.SpawnId != id {
+				continue
+			}
+			switch sp.Status {
+			case cpv1.SpawnStatus_SPAWN_STATUS_ACTIVE:
+				return
+			case cpv1.SpawnStatus_SPAWN_STATUS_ERROR, cpv1.SpawnStatus_SPAWN_STATUS_DELETED,
+				cpv1.SpawnStatus_SPAWN_STATUS_UNREACHABLE:
+				log.Fatalf("spawn %s reached terminal status %v before active", id, sp.Status)
+			}
+		}
+		if time.Now().After(deadline) {
+			log.Fatalf("spawn %s did not reach ACTIVE within 60s", id)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// driveFrames is the CP-lane interactive loop over the frame protocol: it sends each stdin line as a
+// {"kind":"prompt"} frame and prints agent frames until the turn goes idle, then reads the next line.
+func driveFrames(pr io.Reader, sendW io.Writer) {
+	fmt.Println("ready. type prompts:")
+	turnIdle := make(chan struct{}, 1)
+	go func() {
+		sc := bufio.NewScanner(pr)
+		sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+		for sc.Scan() {
+			var f struct {
+				Kind  string `json:"kind"`
+				Text  string `json:"text"`
+				State string `json:"state"`
+			}
+			if json.Unmarshal(sc.Bytes(), &f) != nil {
+				continue
+			}
+			switch f.Kind {
+			case "agent":
+				fmt.Print(f.Text)
+			case "turn":
+				if f.State == "idle" {
+					fmt.Println()
+					select {
+					case turnIdle <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}
+	}()
+	in := bufio.NewScanner(os.Stdin)
+	for in.Scan() {
+		line := in.Text()
+		if line == "" {
+			continue
+		}
+		b, _ := json.Marshal(map[string]string{"kind": "prompt", "text": line})
+		if _, err := sendW.Write(append(b, '\n')); err != nil {
+			log.Fatal(err)
+		}
+		<-turnIdle
+	}
 }
 
 // driveACP runs the ACP client over the given agent->client reader and

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,11 +14,22 @@ import (
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
+// acpPort is the TCP port the agent's acpadapter listens on (on the pod IP) for the CRI/runsc lane.
+// The node dials podIP:acpPort because gVisor isolates the in-sandbox abstract-UDS namespace from the
+// host (so the runc-lane setns+UDS attach cannot work under runsc).
+const acpPort = 7000
+
 // CRIPodBackend runs a spawn pod as one CRI sandbox (handler=runsc) with two containers
 // (sidecar + agent) sharing the pod network namespace. Implements runtime.PodBackend.
 type CRIPodBackend struct {
 	c              *Client
 	runtimeHandler string // e.g. "runsc"
+
+	// DNSServers, if set, become the pod sandbox's resolv.conf nameservers. Without a kubelet the CRI
+	// pod otherwise inherits the host's /etc/resolv.conf, which on a systemd-resolved host is the
+	// 127.0.0.53 stub — unreachable from inside the pod, so the sidecar can't resolve the model
+	// upstream. The egress floor's :53 carve-out allows reaching an RFC1918 resolver here.
+	DNSServers []string
 
 	mu          sync.Mutex
 	sandboxCfgs map[string]*runtimeapi.PodSandboxConfig // sandboxID -> config (CreateContainer needs it)
@@ -54,6 +66,9 @@ func (b *CRIPodBackend) StartPod(ctx context.Context, spec runtime.PodSpec) (*ru
 	sandboxCfg := &runtimeapi.PodSandboxConfig{
 		Metadata: &runtimeapi.PodSandboxMetadata{Name: spec.ID, Uid: spec.ID, Namespace: "spawnery"},
 		Linux:    &runtimeapi.LinuxPodSandboxConfig{},
+	}
+	if len(b.DNSServers) > 0 {
+		sandboxCfg.DnsConfig = &runtimeapi.DNSConfig{Servers: b.DNSServers}
 	}
 	sb, err := b.c.runtime.RunPodSandbox(ctx, &runtimeapi.RunPodSandboxRequest{Config: sandboxCfg, RuntimeHandler: b.runtimeHandler})
 	if err != nil {
@@ -209,7 +224,7 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 	agentID, err := b.createAndStart(ctx, h.SandboxID, sandboxCfg, &runtimeapi.ContainerConfig{
 		Metadata: &runtimeapi.ContainerMetadata{Name: "agent"},
 		Image:    &runtimeapi.ImageSpec{Image: spec.Image},
-		Envs:     toKeyValues(append([]string{"ACP_ADAPTER=1"}, spec.Env...)),
+		Envs:     toKeyValues(append([]string{"ACP_ADAPTER=1", fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", acpPort)}, spec.Env...)),
 		Mounts:   toCRIMounts(spec.Mounts),
 		Linux:    linuxContainer(spec.Resources, spec.DropAllCaps, spec.ReadonlyRootfs),
 	})
@@ -236,9 +251,15 @@ func (b *CRIPodBackend) Stop(ctx context.Context, h *runtime.PodHandle) error {
 	return nil
 }
 
-// Attach returns the agent's ACP stdio via the in-pod UDS (setns into the pod netns). Linux + cloud.
+// Attach returns the agent's ACP stdio over TCP on the pod IP. Under gVisor/runsc the in-sandbox
+// abstract-UDS namespace is isolated from the host, so the runc-lane setns+UDS attach cannot reach
+// the adapter; the adapter listens on tcp://0.0.0.0:acpPort and the node dials the pod IP (reachable
+// via the CNI bridge; other pods are blocked by the SPAWNLET-EGRESS floor's RFC1918 drop).
 func (b *CRIPodBackend) Attach(ctx context.Context, h *runtime.PodHandle) (*runtime.AttachedStream, error) {
-	return runtime.AttachACP(ctx, h.NetnsPath)
+	if h.PodIP == "" {
+		return nil, fmt.Errorf("cri attach: pod has no IP")
+	}
+	return runtime.AttachTCP(ctx, net.JoinHostPort(h.PodIP, strconv.Itoa(acpPort)))
 }
 
 var _ runtime.PodBackend = (*CRIPodBackend)(nil)

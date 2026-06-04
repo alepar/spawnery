@@ -157,10 +157,17 @@ make bin/spawnlet bin/spawnctl
 sudo env "PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin" \
   CONTAINER_RUNTIME=runsc AGENT_IMAGE=spawnery/goose:dev SIDECAR_IMAGE=spawnery/sidecar:dev \
   OPENROUTER_API_KEY="$OPENROUTER_API_KEY" DATA_ROOT=/tmp/spawns \
+  POD_DNS=<a-real-resolver> SPAWNLET_ADDR=127.0.0.1:9091 \
   bin/spawnlet &
 printf 'What is the secret word?\n' | \
-  bin/spawnctl -addr http://127.0.0.1:9090 -app examples/secret-app -model free
+  bin/spawnctl -addr http://127.0.0.1:9091 -app examples/secret-app -model openai/gpt-oss-120b:free
 ```
+> **`POD_DNS`** is required on a **systemd-resolved** host: the CRI pod otherwise inherits the
+> `127.0.0.53` stub resolver (unreachable inside the pod) and the sidecar can't resolve the model
+> upstream (goose replies with a `502`). Set it to a real resolver — the floor's `:53` carve-out
+> reaches even an RFC1918 one. Under runsc the node reaches the agent over **TCP on the pod IP**
+> (`:7000`), not the runc-lane abstract UDS (gVisor isolates it from the host). `-model free` is not an
+> alias; pass the full model id. Port `9090` is often taken (e.g. cockpit) — `9091` here.
 
 **Expected — node log (stderr):** preflight is *silent on success* and proceeds to listen; it only
 speaks up to die. A healthy boot looks like:

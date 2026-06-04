@@ -40,7 +40,9 @@ func TestEgressFloorEnforced(t *testing.T) {
 
 	// Get the container's bridge IP. The runtime's ContainerIP helper arrives in Task 2; shell out to
 	// docker inspect here to keep this test self-contained.
-	ipOut, err := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.NetworkSettings.IPAddress}}", id).CombinedOutput()
+	// Docker 29+ drops the legacy top-level NetworkSettings.IPAddress; read the per-network
+	// endpoint IP (the container is on a single bridge network here).
+	ipOut, err := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", id).CombinedOutput()
 	if err != nil {
 		t.Fatalf("inspect ip: %v (%s)", err, ipOut)
 	}

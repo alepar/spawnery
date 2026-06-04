@@ -81,6 +81,16 @@ func buildManager(cfg spawnlet.ManagerConfig) (*spawnlet.Manager, error) {
 			return nil, err
 		}
 		backend := cri.NewCRIPodBackend(client, env("CRI_RUNTIME_HANDLER", "runsc"))
+		// POD_DNS (comma-separated) overrides the pod resolv.conf. Needed on hosts where /etc/resolv.conf
+		// is the systemd-resolved 127.0.0.53 stub (unreachable from inside the pod); without a kubelet
+		// the node must supply pod DNS itself.
+		if v := os.Getenv("POD_DNS"); v != "" {
+			for _, s := range strings.Split(v, ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					backend.DNSServers = append(backend.DNSServers, s)
+				}
+			}
+		}
 		return spawnlet.NewManagerWithBackend(backend, firewall.NewCNIFloorApplier(), cfg), nil
 	}
 	rt, err := runtime.NewDocker()

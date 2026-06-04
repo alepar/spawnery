@@ -129,13 +129,20 @@ func TestStartAgentAndStopLifecycle(t *testing.T) {
 		t.Fatalf("agent mount wrong: %+v", ag.Mounts)
 	}
 	var hasAdapter bool
+	var acpListen string
 	for _, kv := range ag.Envs {
 		if kv.Key == "ACP_ADAPTER" && kv.Value == "1" {
 			hasAdapter = true
 		}
+		if kv.Key == "ACP_LISTEN" {
+			acpListen = kv.Value
+		}
 	}
 	if !hasAdapter {
 		t.Fatalf("CRI agent must set ACP_ADAPTER=1; envs=%+v", ag.Envs)
+	}
+	if acpListen != "tcp://0.0.0.0:7000" {
+		t.Fatalf("CRI agent must listen for ACP over TCP (gVisor isolates the abstract UDS); ACP_LISTEN=%q", acpListen)
 	}
 
 	if err := b.Stop(ctx, h); err != nil {
@@ -155,5 +162,13 @@ func TestStartAgentUnknownSandbox(t *testing.T) {
 	err := b.StartAgent(context.Background(), &runtime.PodHandle{SandboxID: "nope"}, runtime.AgentSpec{Image: "x"})
 	if err == nil {
 		t.Fatal("StartAgent must error for an unknown sandbox")
+	}
+}
+
+func TestAttachRequiresPodIP(t *testing.T) {
+	c, _ := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	if _, err := b.Attach(context.Background(), &runtime.PodHandle{}); err == nil {
+		t.Fatal("Attach must error when the pod has no IP")
 	}
 }

@@ -3,6 +3,7 @@
 package cp_test
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -23,7 +24,6 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/gen/node/v1/nodev1connect"
-	"spawnery/internal/acp"
 	"spawnery/internal/cp"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
@@ -119,6 +119,11 @@ func TestCPEndToEndStub(t *testing.T) {
 	id := cs.Msg.SpawnId
 	defer cl.StopSpawn(context.Background(), connect.NewRequest(&cpv1.StopSpawnRequest{SpawnId: id}))
 
+	// CreateSpawn is async (returns in 'starting'); the CP only binds the spawn to its node once the
+	// node reports ACTIVE. Mirror the real client, which gates on the spawn's status going active
+	// before opening a session — otherwise the attach races provisioning and gets "unknown spawn".
+	waitActive(ctx, t, cl, id)
+
 	stream := cl.Session(ctx)
 	if err := stream.Send(&cpv1.Frame{SpawnId: id}); err != nil { // bind frame
 		t.Fatal(err)
@@ -134,16 +139,39 @@ func TestCPEndToEndStub(t *testing.T) {
 			pw.Write(f.Data)
 		}
 	}()
-	c := acp.NewClient(pr, frameWriter{stream: stream, id: id})
-	if err := c.Initialize(); err != nil {
-		t.Fatalf("init: %v", err)
+
+	// The CP pump speaks the frame protocol, not raw ACP: the node already performed the ACP
+	// initialize + session/new, so a client just sends {"kind":"prompt"} frames and receives
+	// user/agent/turn frames back (cursor-0 replay). Drive it the way the web client does.
+	sendFrame := func(f map[string]any) {
+		b, _ := json.Marshal(f)
+		if err := stream.Send(&cpv1.Frame{SpawnId: id, Data: append(b, '\n')}); err != nil {
+			t.Fatalf("send frame: %v", err)
+		}
 	}
-	if err := c.NewSession("/app"); err != nil {
-		t.Fatalf("session: %v", err)
-	}
+	sendFrame(map[string]any{"kind": "prompt", "text": "say hi"})
+
 	var got strings.Builder
-	if err := c.Prompt("say hi", func(s string) { got.WriteString(s) }); err != nil {
-		t.Fatalf("prompt: %v", err)
+	sc := bufio.NewScanner(pr)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		var fr struct {
+			Kind  string `json:"kind"`
+			Text  string `json:"text"`
+			State string `json:"state"`
+		}
+		if json.Unmarshal(sc.Bytes(), &fr) != nil {
+			continue
+		}
+		if fr.Kind == "agent" {
+			got.WriteString(fr.Text)
+		}
+		if fr.Kind == "turn" && fr.State == "idle" {
+			break // turn complete
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("read frames: %v", err)
 	}
 	if !strings.Contains(got.String(), "ECHO: say hi") {
 		t.Fatalf("want ECHO, got %q", got.String())
@@ -152,6 +180,35 @@ func TestCPEndToEndStub(t *testing.T) {
 	stream.CloseRequest()
 	time.Sleep(500 * time.Millisecond) // let session_end + StopSpawn flush
 	assertTelemetry(t, telPath, id)
+}
+
+// waitActive polls ListSpawns until the spawn reaches ACTIVE (router-bound), failing fast on a
+// terminal status or after 30s. CreateSpawn returns in 'starting' and provisions asynchronously.
+func waitActive(ctx context.Context, t *testing.T, cl cpv1connect.SpawnServiceClient, id string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ls, err := cl.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+		if err != nil {
+			t.Fatalf("listSpawns: %v", err)
+		}
+		for _, sp := range ls.Msg.Spawns {
+			if sp.SpawnId != id {
+				continue
+			}
+			switch sp.Status {
+			case cpv1.SpawnStatus_SPAWN_STATUS_ACTIVE:
+				return
+			case cpv1.SpawnStatus_SPAWN_STATUS_ERROR, cpv1.SpawnStatus_SPAWN_STATUS_DELETED,
+				cpv1.SpawnStatus_SPAWN_STATUS_UNREACHABLE:
+				t.Fatalf("spawn %s reached terminal status %v before active", id, sp.Status)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("spawn %s did not reach ACTIVE within 30s", id)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func assertTelemetry(t *testing.T, path, spawnID string) {
@@ -209,17 +266,4 @@ func (b bearerIntc) WrapStreamingClient(next connect.StreamingClientFunc) connec
 }
 func (b bearerIntc) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
 	return next
-}
-
-// frameWriter adapts the cp.v1 Session stream to io.Writer for acp.Client.
-type frameWriter struct {
-	stream *connect.BidiStreamForClient[cpv1.Frame, cpv1.Frame]
-	id     string
-}
-
-func (w frameWriter) Write(b []byte) (int, error) {
-	if err := w.stream.Send(&cpv1.Frame{SpawnId: w.id, Data: b}); err != nil {
-		return 0, err
-	}
-	return len(b), nil
 }

@@ -82,6 +82,7 @@ func (m *Manager) Store() *Store { return m.store }
 // stdio attach for the Docker lane, the in-pod UDS for the CRI lane).
 func (m *Manager) Attach(ctx context.Context, sp *Spawn) (*runtime.AttachedStream, error) {
 	return m.pod.Attach(ctx, &runtime.PodHandle{
+		PodIP:     sp.PodIP,
 		AgentID:   sp.AgentID,
 		NetnsPath: sp.NetnsPath,
 		SidecarID: sp.SidecarID,
@@ -175,7 +176,7 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		return nil, err
 	}
 
-	sp := &Spawn{ID: id, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready"}
+	sp := &Spawn{ID: id, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready"}
 	m.store.Put(sp)
 	return sp, nil
 }

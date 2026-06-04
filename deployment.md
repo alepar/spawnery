@@ -140,6 +140,16 @@ needed any more — rules go on the host chain).
 - **Images** for the runsc path live in containerd's **`k8s.io`** namespace (separate from Docker's
   `moby`). Pull there (the node pulls via the CRI `ImageService`); bridge a locally-built image with
   `docker save <img> | ctr -n k8s.io images import -`.
+- **ACP transport is TCP on the pod IP** under runsc, not the runc-lane abstract UDS. gVisor isolates
+  the in-sandbox abstract-socket namespace from the host, so the node cannot reach the adapter via
+  `setns`; instead the agent's `acpadapter` listens on `tcp://0.0.0.0:7000` (set via `ACP_LISTEN`) and
+  the node dials `podIP:7000` over the CNI bridge. Other pods can't reach it — the `SPAWNLET-EGRESS`
+  floor drops pod→RFC1918 (which includes the pod subnet). Pick a **CNI pod subnet that doesn't
+  collide** with an existing bridge (e.g. avoid Podman's default `10.88.0.0/16`).
+- **Pod DNS** (`POD_DNS`, comma-separated): with no kubelet the CRI pod inherits the host
+  `/etc/resolv.conf`, which on a **systemd-resolved** host is the `127.0.0.53` stub — unreachable from
+  inside the pod, so the sidecar can't resolve the model upstream (goose returns a sidecar `502`). Set
+  `POD_DNS` to a real resolver (the floor's `:53` carve-out reaches it even on an RFC1918 resolver).
 
 **Verification (must run on a privileged host — NOT in the dev sandbox):**
 ```bash
