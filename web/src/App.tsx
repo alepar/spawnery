@@ -176,6 +176,9 @@ export function App() {
     };
     tick();
     return () => { stopped = true; clearTimeout(timer); };
+    // refreshSpawns reads refs (activeIdRef/spawnsRef/connRef), not state, so it's safe to run this
+    // poll once on mount; including it would re-create the timer every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // On unmount just close the live ws — spawns persist on the node.

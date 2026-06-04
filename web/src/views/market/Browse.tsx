@@ -25,7 +25,6 @@ export function Browse({ onOpen }: { onOpen: (id: string) => void }) {
 
   useEffect(() => {
     void search("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (

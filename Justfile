@@ -79,6 +79,21 @@ test-cni-egress:
     go test -tags cni_egress_e2e -c -o /tmp/cni-egress.test ./internal/spawnlet/firewall/
     sudo env "PATH=/sbin:/usr/sbin:/usr/bin:/bin:$(dirname $(command -v docker))" /tmp/cni-egress.test -test.run TestCNIEgressFloorEnforced -test.v -test.count=1
 
+# --- lint (correctness-focused: bugs, not formatting/style) --------------
+
+# run all linters
+lint: lint-go lint-web
+
+# backend: golangci-lint (.golangci.yml). The binary MUST be built with go >= go.mod's version (1.26),
+# else it refuses to run. Install once:
+#   GOTOOLCHAIN=go1.26.0 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.8.0
+lint-go:
+    GOTOOLCHAIN=go1.26.0 "$(go env GOPATH)/bin/golangci-lint" run ./...
+
+# frontend: eslint + tsc (no emit)
+lint-web:
+    cd web && npx eslint . && npx tsc --noEmit
+
 # --- housekeeping --------------------------------------------------------
 
 # install dev tooling not in the repo (mprocs, playwright browser, web deps)
