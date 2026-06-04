@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strconv"
 
 	"spawnery/internal/manifest"
 	"spawnery/internal/runtime"
@@ -16,6 +17,7 @@ type ManagerConfig struct {
 	AgentImage, SidecarImage, OpenRouterKey, DataRoot string
 	SidecarPort                                       int // default 8080
 
+	NodeID           string // this node's id (stamped on container labels for reconcile); "" standalone
 	NodeClass        string // "cloud" (always enforces) or "self-hosted" (honors EgressEnforce)
 	EgressEnforce    bool   // self-hosted opt-out switch; ignored on cloud
 	EgressAllowCIDRs []string
@@ -90,13 +92,53 @@ func (m *Manager) Attach(ctx context.Context, sp *Spawn) (*runtime.AttachedStrea
 	})
 }
 
-func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn, error) {
+// RunningInventory returns the spawns this node currently manages (id + generation), for the CP
+// reconcile carried on Register/Heartbeat.
+func (m *Manager) RunningInventory() []runtime.ManagedPod {
+	sps := m.store.List()
+	out := make([]runtime.ManagedPod, 0, len(sps))
+	for _, sp := range sps {
+		out = append(out, runtime.ManagedPod{SpawnID: sp.ID, Generation: sp.Generation, NodeID: m.cfg.NodeID})
+	}
+	return out
+}
+
+// ReapOrphans tears down every spawnery-managed pod the runtime still has that this Manager is NOT
+// tracking — leftovers from a previous node process (the in-mem store is empty after a restart). Call
+// it at startup so a crashed/restarted node doesn't leak pods.
+func (m *Manager) ReapOrphans(ctx context.Context) error {
+	managed, err := m.pod.ListManaged(ctx)
+	if err != nil {
+		return err
+	}
+	for _, mp := range managed {
+		if _, live := m.store.Get(mp.SpawnID); live {
+			continue // still ours
+		}
+		log.Printf("reaping orphaned pod spawn=%s gen=%d (not in store; node restart)", mp.SpawnID, mp.Generation)
+		_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: mp.SidecarID, AgentID: mp.AgentID, SandboxID: mp.SandboxID})
+	}
+	return nil
+}
+
+func (m *Manager) Create(ctx context.Context, id, appPath, model string, generation uint64) (*Spawn, error) {
 	if abs, err := filepath.Abs(appPath); err == nil {
 		appPath = abs
 	}
 	mf, err := manifest.Parse(appPath)
 	if err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
+	}
+
+	// Labels identify this pod so a restarted node (or the CP) can reconcile it against the ledger and
+	// reap orphans / fence stale generations. Applied to the sandbox + both containers.
+	labels := map[string]string{
+		runtime.LabelManaged:    "true",
+		runtime.LabelSpawnID:    id,
+		runtime.LabelGeneration: strconv.FormatUint(generation, 10),
+	}
+	if m.cfg.NodeID != "" {
+		labels[runtime.LabelNodeID] = m.cfg.NodeID
 	}
 
 	// /app is read-only; each declared mount is a rw overlay at /app/<path>,
@@ -136,6 +178,7 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		},
 		Resources: res,
 		Runtime:   m.cfg.ContainerRuntime,
+		Labels:    labels,
 	})
 	if err != nil {
 		finalizeAll()
@@ -170,13 +213,14 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string) (*Spawn
 		Runtime:        m.cfg.ContainerRuntime,
 		DropAllCaps:    true,
 		ReadonlyRootfs: m.cfg.HardenRootfs,
+		Labels:         labels,
 	}); err != nil {
 		_ = m.pod.Stop(ctx, h)
 		finalizeAll()
 		return nil, err
 	}
 
-	sp := &Spawn{ID: id, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready"}
+	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready"}
 	m.store.Put(sp)
 	return sp, nil
 }

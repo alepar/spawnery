@@ -26,10 +26,12 @@ type fakeCRI struct {
 	networkReady bool
 
 	// canned StartPod responses.
-	sandboxID  string
-	podIP      string
-	infoPid    int  // -> Info["info"] {"pid":...}
-	failCreate bool // inject a CreateContainer failure (exercises the cleanup path)
+	sandboxID     string
+	podIP         string
+	infoPid       int               // -> Info["info"] {"pid":...}
+	failCreate    bool              // inject a CreateContainer failure (exercises the cleanup path)
+	sandboxLabels map[string]string // labels from the last RunPodSandbox (for ListPodSandbox)
+	removed       bool              // sandbox removed (ListPodSandbox returns empty)
 
 	// image presence: images already pulled (ImageStatus returns non-nil).
 	present map[string]bool
@@ -64,7 +66,28 @@ func (f *fakeCRI) nextContainerID() string {
 }
 
 func (f *fakeCRI) RunPodSandbox(_ context.Context, req *runtimeapi.RunPodSandboxRequest) (*runtimeapi.RunPodSandboxResponse, error) {
+	f.mu.Lock()
+	f.sandboxLabels = req.GetConfig().GetLabels()
+	f.removed = false
+	f.mu.Unlock()
 	return &runtimeapi.RunPodSandboxResponse{PodSandboxId: f.sandboxID}, nil
+}
+
+// ListPodSandbox returns the (single) sandbox if present and matching the label selector.
+func (f *fakeCRI) ListPodSandbox(_ context.Context, req *runtimeapi.ListPodSandboxRequest) (*runtimeapi.ListPodSandboxResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.removed || f.sandboxLabels == nil {
+		return &runtimeapi.ListPodSandboxResponse{}, nil
+	}
+	for k, v := range req.GetFilter().GetLabelSelector() {
+		if f.sandboxLabels[k] != v {
+			return &runtimeapi.ListPodSandboxResponse{}, nil
+		}
+	}
+	return &runtimeapi.ListPodSandboxResponse{Items: []*runtimeapi.PodSandbox{
+		{Id: f.sandboxID, Labels: f.sandboxLabels},
+	}}, nil
 }
 
 func (f *fakeCRI) StopPodSandbox(_ context.Context, req *runtimeapi.StopPodSandboxRequest) (*runtimeapi.StopPodSandboxResponse, error) {
@@ -77,6 +100,7 @@ func (f *fakeCRI) StopPodSandbox(_ context.Context, req *runtimeapi.StopPodSandb
 func (f *fakeCRI) RemovePodSandbox(_ context.Context, req *runtimeapi.RemovePodSandboxRequest) (*runtimeapi.RemovePodSandboxResponse, error) {
 	f.mu.Lock()
 	f.removeSandbox = append(f.removeSandbox, req.PodSandboxId)
+	f.removed = true
 	f.mu.Unlock()
 	return &runtimeapi.RemovePodSandboxResponse{}, nil
 }

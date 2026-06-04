@@ -28,13 +28,14 @@ func (f *fakePodBackend) Attach(_ context.Context, _ *runtime.PodHandle) (*runti
 	pr, pw := io.Pipe()
 	return &runtime.AttachedStream{Stdin: pw, Stdout: pr, Close: pw.Close}, nil
 }
+func (f *fakePodBackend) ListManaged(_ context.Context) ([]runtime.ManagedPod, error) { return nil, nil }
 
 func TestManagerThreadsSandboxID(t *testing.T) {
 	m := NewManager(runtime.NewFake(), ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
 	fb := &fakePodBackend{}
 	m.pod = fb // white-box: replace the Docker backend with the fake
 
-	sp, err := m.Create(context.Background(), "spx", "../../examples/secret-app", "model")
+	sp, err := m.Create(context.Background(), "spx", "../../examples/secret-app", "model", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -172,3 +172,38 @@ func TestAttachRequiresPodIP(t *testing.T) {
 		t.Fatal("Attach must error when the pod has no IP")
 	}
 }
+
+func TestStartPodLabelsAndListManaged(t *testing.T) {
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+	labels := map[string]string{
+		runtime.LabelManaged: "true", runtime.LabelSpawnID: "spawn-7",
+		runtime.LabelGeneration: "3", runtime.LabelNodeID: "node-2",
+	}
+	h, err := b.StartPod(ctx, runtime.PodSpec{ID: "spawn-7", SidecarImage: "s", Labels: labels})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	if f.sandboxLabels[runtime.LabelSpawnID] != "spawn-7" || f.sandboxLabels[runtime.LabelGeneration] != "3" {
+		t.Fatalf("sandbox labels = %v", f.sandboxLabels)
+	}
+	if f.created[0].Labels[runtime.LabelManaged] != "true" {
+		t.Fatalf("sidecar container labels = %v", f.created[0].Labels)
+	}
+
+	mps, err := b.ListManaged(ctx)
+	if err != nil {
+		t.Fatalf("ListManaged: %v", err)
+	}
+	if len(mps) != 1 || mps[0].SpawnID != "spawn-7" || mps[0].Generation != 3 || mps[0].SandboxID != "sandbox-1" {
+		t.Fatalf("ListManaged = %+v", mps)
+	}
+
+	if err := b.Stop(ctx, h); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if mps, _ := b.ListManaged(ctx); len(mps) != 0 {
+		t.Fatalf("ListManaged after Stop = %+v", mps)
+	}
+}

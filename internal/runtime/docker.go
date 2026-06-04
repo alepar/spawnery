@@ -7,6 +7,7 @@ import (
 	"log"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 )
@@ -31,6 +32,7 @@ func (d *Docker) StartContainer(ctx context.Context, s ContainerSpec) (string, e
 		Image:       s.Image,
 		Cmd:         s.Cmd,
 		Env:         s.Env,
+		Labels:      s.Labels,
 		OpenStdin:   s.AttachStdio,
 		StdinOnce:   false,
 		AttachStdin: s.AttachStdio,
@@ -154,6 +156,21 @@ func (d *Docker) ContainerIP(ctx context.Context, id string) (string, error) {
 		return "", fmt.Errorf("container %s has no bridge IP", id)
 	}
 	return ip, nil
+}
+
+func (d *Docker) ListByLabel(ctx context.Context, key, value string) ([]ContainerSummary, error) {
+	cs, err := d.cli.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: filters.NewArgs(filters.Arg("label", key+"="+value)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ContainerSummary, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, ContainerSummary{ID: c.ID, Labels: c.Labels})
+	}
+	return out, nil
 }
 
 func (d *Docker) StopContainer(ctx context.Context, id string) error {

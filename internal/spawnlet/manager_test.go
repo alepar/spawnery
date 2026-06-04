@@ -30,7 +30,7 @@ func TestCreateMountsAppRoAndNamedDataRw(t *testing.T) {
 	m := NewManager(f, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
 	app := writeApp(t)
 
-	sp, err := m.Create(context.Background(), "test-1", app, "model-x")
+	sp, err := m.Create(context.Background(), "test-1", app, "model-x", 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestCreateMountsAppRoAndNamedDataRw(t *testing.T) {
 func TestStopFinalizesMounts(t *testing.T) {
 	f := runtime.NewFake()
 	m := NewManager(f, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
-	sp, err := m.Create(context.Background(), "test-2", writeApp(t), "model-x")
+	sp, err := m.Create(context.Background(), "test-2", writeApp(t), "model-x", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestStopFinalizesMounts(t *testing.T) {
 func TestCreateRecordsNetnsPath(t *testing.T) {
 	f := runtime.NewFake() // FakeRuntime.ContainerPID returns 4242
 	m := NewManager(f, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
-	sp, err := m.Create(context.Background(), "n-1", writeApp(t), "x")
+	sp, err := m.Create(context.Background(), "n-1", writeApp(t), "x", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

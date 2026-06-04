@@ -3,7 +3,19 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strconv"
 )
+
+// withRole returns a copy of base with the spawnery.role label set (so a Docker pod's sidecar +
+// agent are distinguishable when reconciling). nil base => a labels map with just the role.
+func withRole(base map[string]string, role string) map[string]string {
+	out := make(map[string]string, len(base)+1)
+	for k, v := range base {
+		out[k] = v
+	}
+	out[LabelRole] = role
+	return out
+}
 
 // DockerPodBackend implements PodBackend over the per-container ContainerRuntime (Docker): the
 // sidecar owns the pod network namespace and the agent joins it via NetnsOf. This is the runc path.
@@ -48,6 +60,7 @@ func (d *DockerPodBackend) StartPod(ctx context.Context, spec PodSpec) (*PodHand
 		NanoCPUs:    spec.Resources.NanoCPUs,
 		PidsLimit:   spec.Resources.PidsLimit,
 		Runtime:     spec.Runtime,
+		Labels:      withRole(spec.Labels, "sidecar"),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: %w", err)
@@ -81,6 +94,7 @@ func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec Ag
 		Runtime:        spec.Runtime,
 		DropAllCaps:    spec.DropAllCaps,
 		ReadonlyRootfs: spec.ReadonlyRootfs,
+		Labels:         withRole(spec.Labels, "agent"),
 	})
 	if err != nil {
 		return fmt.Errorf("agent: %w", err)
@@ -93,6 +107,38 @@ func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec Ag
 // (incl. rootless Docker/Podman) without root, since it rides the Docker API, not setns.
 func (d *DockerPodBackend) Attach(ctx context.Context, h *PodHandle) (*AttachedStream, error) {
 	return d.rt.Attach(ctx, h.AgentID)
+}
+
+// ListManaged groups all spawnery-managed containers by spawn id into ManagedPods (sidecar + agent
+// by role label), reading the generation/node-id off the labels.
+func (d *DockerPodBackend) ListManaged(ctx context.Context) ([]ManagedPod, error) {
+	cs, err := d.rt.ListByLabel(ctx, LabelManaged, "true")
+	if err != nil {
+		return nil, err
+	}
+	pods := map[string]*ManagedPod{}
+	for _, c := range cs {
+		sid := c.Labels[LabelSpawnID]
+		if sid == "" {
+			continue
+		}
+		p := pods[sid]
+		if p == nil {
+			gen, _ := strconv.ParseUint(c.Labels[LabelGeneration], 10, 64)
+			p = &ManagedPod{SpawnID: sid, Generation: gen, NodeID: c.Labels[LabelNodeID]}
+			pods[sid] = p
+		}
+		if c.Labels[LabelRole] == "agent" {
+			p.AgentID = c.ID
+		} else {
+			p.SidecarID = c.ID
+		}
+	}
+	out := make([]ManagedPod, 0, len(pods))
+	for _, p := range pods {
+		out = append(out, *p)
+	}
+	return out, nil
 }
 
 // Stop tears down the agent then the sidecar. Empty ids (e.g. agent not yet started on the

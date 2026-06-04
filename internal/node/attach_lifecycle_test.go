@@ -101,6 +101,9 @@ func (f *scriptedPodBackend) Attach(context.Context, *runtime.PodHandle) (*runti
 	go func() { f.script(inR, outW); _ = outW.Close() }()
 	return &runtime.AttachedStream{Stdin: inW, Stdout: outR, Close: func() error { _ = inW.Close(); _ = outW.Close(); return nil }}, nil
 }
+func (f *scriptedPodBackend) ListManaged(context.Context) ([]runtime.ManagedPod, error) {
+	return nil, nil
+}
 func (f *scriptedPodBackend) wasStopped() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

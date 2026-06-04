@@ -29,6 +29,7 @@ func main() {
 		OpenRouterKey: os.Getenv("OPENROUTER_API_KEY"),
 		DataRoot:      env("DATA_ROOT", "/var/lib/spawnlet/spawns"),
 
+		NodeID:           env("NODE_ID", "node-1"),
 		NodeClass:        env("NODE_CLASS", "cloud"),
 		EgressEnforce:    getenvBool("EGRESS_ENFORCE", true),
 		EgressAllowCIDRs: splitCSV(os.Getenv("EGRESS_ALLOW_CIDRS")),

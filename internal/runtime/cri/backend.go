@@ -66,6 +66,7 @@ func (b *CRIPodBackend) StartPod(ctx context.Context, spec runtime.PodSpec) (*ru
 	sandboxCfg := &runtimeapi.PodSandboxConfig{
 		Metadata: &runtimeapi.PodSandboxMetadata{Name: spec.ID, Uid: spec.ID, Namespace: "spawnery"},
 		Linux:    &runtimeapi.LinuxPodSandboxConfig{},
+		Labels:   spec.Labels, // spawnery.managed/spawn-id/generation/node-id — drives ListManaged + reconcile
 	}
 	if len(b.DNSServers) > 0 {
 		sandboxCfg.DnsConfig = &runtimeapi.DNSConfig{Servers: b.DNSServers}
@@ -85,6 +86,7 @@ func (b *CRIPodBackend) StartPod(ctx context.Context, spec runtime.PodSpec) (*ru
 		Metadata: &runtimeapi.ContainerMetadata{Name: "sidecar"},
 		Image:    &runtimeapi.ImageSpec{Image: spec.SidecarImage},
 		Envs:     toKeyValues(spec.SidecarEnv),
+		Labels:   spec.Labels,
 		Linux:    linuxContainer(spec.Resources, false, false),
 	})
 	if err != nil {
@@ -226,6 +228,7 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 		Image:    &runtimeapi.ImageSpec{Image: spec.Image},
 		Envs:     toKeyValues(append([]string{"ACP_ADAPTER=1", fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", acpPort)}, spec.Env...)),
 		Mounts:   toCRIMounts(spec.Mounts),
+		Labels:   spec.Labels,
 		Linux:    linuxContainer(spec.Resources, spec.DropAllCaps, spec.ReadonlyRootfs),
 	})
 	if err != nil {
@@ -260,6 +263,28 @@ func (b *CRIPodBackend) Attach(ctx context.Context, h *runtime.PodHandle) (*runt
 		return nil, fmt.Errorf("cri attach: pod has no IP")
 	}
 	return runtime.AttachTCP(ctx, net.JoinHostPort(h.PodIP, strconv.Itoa(acpPort)))
+}
+
+// ListManaged returns every spawnery-managed pod sandbox (by label), so the Manager can reap
+// orphans and reconcile. Reaping a CRI pod is RemovePodSandbox(SandboxID) (removes its containers).
+func (b *CRIPodBackend) ListManaged(ctx context.Context) ([]runtime.ManagedPod, error) {
+	resp, err := b.c.runtime.ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{
+		Filter: &runtimeapi.PodSandboxFilter{LabelSelector: map[string]string{runtime.LabelManaged: "true"}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]runtime.ManagedPod, 0, len(resp.GetItems()))
+	for _, sb := range resp.GetItems() {
+		l := sb.GetLabels()
+		sid := l[runtime.LabelSpawnID]
+		if sid == "" {
+			continue
+		}
+		gen, _ := strconv.ParseUint(l[runtime.LabelGeneration], 10, 64)
+		out = append(out, runtime.ManagedPod{SpawnID: sid, Generation: gen, NodeID: l[runtime.LabelNodeID], SandboxID: sb.GetId()})
+	}
+	return out, nil
 }
 
 var _ runtime.PodBackend = (*CRIPodBackend)(nil)

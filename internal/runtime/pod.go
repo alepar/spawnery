@@ -2,6 +2,16 @@ package runtime
 
 import "context"
 
+// Container/sandbox label keys identifying spawnery-managed pods so a restarted node (or the CP) can
+// reconcile a running pod against the authoritative ledger and reap orphans/stale generations.
+const (
+	LabelManaged    = "spawnery.managed"    // "true" on every spawnery-created container/sandbox
+	LabelSpawnID    = "spawnery.spawn-id"   // the spawn id
+	LabelGeneration = "spawnery.generation" // the spawn's generation (decimal uint64), for fencing
+	LabelNodeID     = "spawnery.node-id"    // the node that created it
+	LabelRole       = "spawnery.role"       // "sidecar" | "agent" (Docker lane: groups the pod's containers)
+)
+
 // Resources are the per-container cgroup limits applied to both pod containers.
 type Resources struct {
 	MemoryBytes int64
@@ -15,7 +25,8 @@ type PodSpec struct {
 	SidecarImage string
 	SidecarEnv   []string
 	Resources    Resources
-	Runtime      string // OCI runtime; "" = default, e.g. "runsc"
+	Runtime      string            // OCI runtime; "" = default, e.g. "runsc"
+	Labels       map[string]string // applied to the sandbox + sidecar (managed/spawn-id/generation/node-id)
 }
 
 // AgentSpec describes the agent container (started by StartAgent into the existing pod).
@@ -27,6 +38,18 @@ type AgentSpec struct {
 	Runtime        string
 	DropAllCaps    bool
 	ReadonlyRootfs bool
+	Labels         map[string]string // applied to the agent container
+}
+
+// ManagedPod is one spawnery-managed pod the backend currently sees running (from its labels), used
+// for orphan reconciliation. SpawnID/Generation come from the labels; the *ID fields drive teardown.
+type ManagedPod struct {
+	SpawnID    string
+	Generation uint64
+	NodeID     string
+	SidecarID  string // Docker backend
+	AgentID    string // Docker backend
+	SandboxID  string // CRI backend
 }
 
 // PodHandle identifies a running pod. PodIP (for the egress floor) and NetnsPath (for the ACP
@@ -52,4 +75,7 @@ type PodBackend interface {
 	// Attach returns the agent's ACP stdio stream. Docker backend = Docker stdio attach (no root);
 	// CRI backend = the in-pod UDS via AttachACP (Linux + CAP_SYS_ADMIN).
 	Attach(ctx context.Context, h *PodHandle) (*AttachedStream, error)
+	// ListManaged returns every spawnery-managed pod the backend currently sees (from its labels), so
+	// the Manager can reap orphans on startup and report a running inventory to the CP.
+	ListManaged(ctx context.Context) ([]ManagedPod, error)
 }

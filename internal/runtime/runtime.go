@@ -25,6 +25,13 @@ type ContainerSpec struct {
 	Runtime        string // "" = Docker default; e.g. "runsc"
 	DropAllCaps    bool
 	ReadonlyRootfs bool
+	Labels         map[string]string // container labels (spawnery.managed/spawn-id/generation/node-id/role)
+}
+
+// ContainerSummary is the minimal view ListByLabel returns: the container id + its labels.
+type ContainerSummary struct {
+	ID     string
+	Labels map[string]string
 }
 
 // AttachedStream is the agent's bidirectional stdio (demuxed stdout).
@@ -42,16 +49,19 @@ type ContainerRuntime interface {
 	StopContainer(ctx context.Context, id string) error
 	ContainerPID(ctx context.Context, id string) (int, error)
 	ContainerIP(ctx context.Context, id string) (string, error)
+	// ListByLabel returns all containers (any state) carrying label key=value, with their labels.
+	ListByLabel(ctx context.Context, key, value string) ([]ContainerSummary, error)
 }
 
 // FakeRuntime records calls for unit tests.
 type FakeRuntime struct {
 	Started []ContainerSpec
 	Stopped map[string]bool
+	byID    map[string]ContainerSpec // id -> spec (for ListByLabel)
 	n       int
 }
 
-func NewFake() *FakeRuntime { return &FakeRuntime{Stopped: map[string]bool{}} }
+func NewFake() *FakeRuntime { return &FakeRuntime{Stopped: map[string]bool{}, byID: map[string]ContainerSpec{}} }
 
 func (f *FakeRuntime) Ping(_ context.Context) error { return nil }
 
@@ -59,6 +69,7 @@ func (f *FakeRuntime) StartContainer(_ context.Context, s ContainerSpec) (string
 	f.n++
 	id := fmt.Sprintf("fake-%d", f.n)
 	f.Started = append(f.Started, s)
+	f.byID[id] = s
 	return id, nil
 }
 func (f *FakeRuntime) Attach(_ context.Context, id string) (*AttachedStream, error) {
@@ -72,4 +83,16 @@ func (f *FakeRuntime) StopContainer(_ context.Context, id string) error {
 func (f *FakeRuntime) ContainerPID(_ context.Context, id string) (int, error) { return 4242, nil }
 func (f *FakeRuntime) ContainerIP(_ context.Context, id string) (string, error) {
 	return "172.17.0.99", nil
+}
+func (f *FakeRuntime) ListByLabel(_ context.Context, key, value string) ([]ContainerSummary, error) {
+	var out []ContainerSummary
+	for id, s := range f.byID {
+		if f.Stopped[id] {
+			continue
+		}
+		if s.Labels[key] == value {
+			out = append(out, ContainerSummary{ID: id, Labels: s.Labels})
+		}
+	}
+	return out, nil
 }

@@ -57,6 +57,11 @@ type attacher struct {
 // waits for the CP at startup and reconnects after a disconnect (re-registering each time; the CP
 // reconciles a returning node). The Manager + its running spawns persist across reconnects.
 func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config) error {
+	// Reap pods leaked by a previous node process before serving — the in-mem store is empty at
+	// startup, so every spawnery-managed pod the runtime still has is an orphan.
+	if err := mgr.ReapOrphans(ctx); err != nil {
+		log.Printf("node: reap orphans at startup: %v", err)
+	}
 	const minBackoff, maxBackoff = time.Second, 30 * time.Second
 	backoff := minBackoff
 	for {
@@ -99,6 +104,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 
 	if err := a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{Register: &nodev1.Register{
 		NodeId: cfg.NodeID, MaxSpawns: cfg.MaxSpawns, AgentImages: []string{cfg.AgentImage}, NodeClass: cfg.NodeClass, NodeOwner: cfg.NodeOwner,
+		Running: a.runningSpawns(), // inventory so the CP can reconcile a returning node
 	}}}); err != nil {
 		return err
 	}
@@ -112,6 +118,17 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		}
 		a.handle(connCtx, msg)
 	}
+}
+
+// runningSpawns maps the Manager's live inventory to proto RunningSpawn (all ACTIVE — the Manager
+// only holds running spawns), for the CP reconcile carried on Register/Heartbeat.
+func (a *attacher) runningSpawns() []*nodev1.RunningSpawn {
+	inv := a.mgr.RunningInventory()
+	out := make([]*nodev1.RunningSpawn, 0, len(inv))
+	for _, mp := range inv {
+		out = append(out, &nodev1.RunningSpawn{SpawnId: mp.SpawnID, Generation: mp.Generation, Phase: nodev1.SpawnPhase_ACTIVE})
+	}
+	return out
 }
 
 func (a *attacher) send(m *nodev1.NodeMessage) error {
@@ -133,7 +150,7 @@ func (a *attacher) heartbeatLoop(ctx context.Context) {
 			a.mu.Unlock()
 			free := a.cfg.MaxSpawns - active
 			_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Heartbeat{Heartbeat: &nodev1.Heartbeat{
-				ActiveSpawns: active, FreeSlots: free,
+				ActiveSpawns: active, FreeSlots: free, Running: a.runningSpawns(),
 			}}})
 		}
 	}
@@ -163,7 +180,7 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 
 func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.status(st.SpawnId, nodev1.SpawnPhase_STARTING, "")
-	sp, err := a.mgr.Create(ctx, st.SpawnId, st.AppRef, st.Model)
+	sp, err := a.mgr.Create(ctx, st.SpawnId, st.AppRef, st.Model, st.Generation)
 	if err != nil {
 		logErr("startSpawn "+st.SpawnId, err)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
