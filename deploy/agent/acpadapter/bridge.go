@@ -27,7 +27,10 @@ func (h *connHub) write(line []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.cur != nil {
-		_, _ = h.cur.Write(line) // a dead conn's Write returns fast; detach() swaps cur to nil
+		// A dead conn's Write returns fast (detach() then swaps cur to nil). An alive-but-not-reading
+		// node makes this Write block while holding h.mu — the same bounded head-of-line stall that
+		// attach() documents; the slow node, not the adapter, is the bottleneck.
+		_, _ = h.cur.Write(line)
 		return
 	}
 	b := append([]byte(nil), line...)
