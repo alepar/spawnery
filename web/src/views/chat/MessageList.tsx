@@ -53,6 +53,13 @@ export function MessageList({ items, working = false, queued = 0 }: { items: Ite
       className="flex-1"
       data={items}
       followOutput="smooth"
+      // Keep the latest visible as messages stream in. A streaming agent reply grows the LAST item
+      // rather than appending a new one, and the growth nudges the scroll past the default 4px
+      // "at bottom" gate — which stops followOutput. A generous threshold keeps it pinned while
+      // streaming; if the user scrolls up to read history, they leave the threshold and it stops
+      // (so we don't yank them back). Start at the bottom on (re)mount so replayed history opens latest.
+      atBottomThreshold={160}
+      initialTopMostItemIndex={Math.max(0, items.length - 1)}
       context={{ working, queued }}
       components={{ Footer: WorkingFooter }}
       computeItemKey={(_, item) => item.id}
