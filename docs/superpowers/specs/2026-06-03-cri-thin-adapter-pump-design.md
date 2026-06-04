@@ -56,6 +56,17 @@ The one piece with logic. A single mutex guards `cur net.Conn` plus a bounded by
 A single mutex serializes the live-vs-buffer decision against the attach swap+flush, so byte order is
 preserved with no interleaving.
 
+**Lock tradeoff (must be commented in the code).** `attach` flushes the whole gap buffer to the new
+conn *while holding the lock*. This is what guarantees strict ordering: any concurrent `write` is
+forced either before the flush (appended to the ring → flushed) or after it (live to `cur`, strictly
+behind the flushed bytes) — no live line slips in front of the buffer and nothing interleaves. The
+cost is head-of-line blocking: while the flush runs, the stdout pump cannot take the lock, so it stops
+draining goose stdout; a slow reattaching node therefore briefly stalls the agent's stdout. We accept
+this because the flush is bounded (≤ `maxBufBytes`) and goes to a local abstract UDS only on
+reconnect — tiny and rare. The off-lock alternative (snapshot under lock, write outside it, queue
+concurrent writes behind a flushing flag) removes the stall at a real complexity cost not worth it
+here. A comment at `connHub.attach` must state this trade.
+
 ### stdout pump (deploy/agent/acpadapter/bridge.go)
 
 Single persistent reader of goose stdout. Reads line-by-line (`bufio.ReadBytes('\n')`, 64 KiB buffer)
