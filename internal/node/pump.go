@@ -21,6 +21,7 @@ const defaultPermTimeout = 2 * time.Minute
 type pendingPerm struct {
 	agentID int             // the goose request id to respond to
 	options json.RawMessage // raw options array, to pick allow/deny optionId
+	title   string          // human-readable tool title from goose (for the perm_request frame + re-send)
 	timer   *time.Timer
 }
 
@@ -120,8 +121,8 @@ func (p *Pump) attachClient(clientID string, cursor int64, send frameSender) {
 	// resolved concurrently (we send after unlock) -> the late client briefly shows an already-answered
 	// prompt; its later response no-ops in resolvePermission. Acceptable for an interactive prompt.
 	var perms [][]byte
-	for reqID := range p.pending {
-		perms = append(perms, encodeFrame(Frame{Kind: "perm_request", ReqID: reqID, Title: "permission requested"}))
+	for reqID, pp := range p.pending {
+		perms = append(perms, encodeFrame(Frame{Kind: "perm_request", ReqID: reqID, Title: pp.title}))
 	}
 	p.mu.Unlock()
 	for _, line := range perms {
@@ -440,15 +441,22 @@ func (p *Pump) onPermissionRequest(m acp.Message) {
 	}
 	reqID := strconv.Itoa(*m.ID)
 	var pr struct {
-		Options json.RawMessage `json:"options"`
+		Options  json.RawMessage `json:"options"`
+		ToolCall struct {
+			Title string `json:"title"`
+		} `json:"toolCall"`
 	}
 	_ = json.Unmarshal(m.Params, &pr)
+	title := pr.ToolCall.Title
+	if title == "" {
+		title = "permission requested" // goose omitted a tool title; fall back to a generic label
+	}
 	p.mu.Lock()
 	if p.stopped {
 		p.mu.Unlock()
 		return
 	}
-	pp := &pendingPerm{agentID: *m.ID, options: pr.Options}
+	pp := &pendingPerm{agentID: *m.ID, options: pr.Options, title: title}
 	pp.timer = time.AfterFunc(p.permTimeout, func() { p.resolvePermission(reqID, false) })
 	p.pending[reqID] = pp
 	clients := make([]frameSender, 0, len(p.clients))
@@ -456,7 +464,7 @@ func (p *Pump) onPermissionRequest(m acp.Message) {
 		clients = append(clients, c.send)
 	}
 	p.mu.Unlock()
-	line := encodeFrame(Frame{Kind: "perm_request", ReqID: reqID, Title: "permission requested"})
+	line := encodeFrame(Frame{Kind: "perm_request", ReqID: reqID, Title: title})
 	for _, send := range clients {
 		_ = send(line)
 	}

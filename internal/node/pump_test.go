@@ -348,6 +348,55 @@ func TestPermissionResentOnAttachWhilePending(t *testing.T) {
 	waitKind(t, b, "perm_request")
 }
 
+// scriptGoosePermTitled asks permission with a human-readable toolCall.title (no end_turn here; the
+// test only inspects the perm_request frame).
+func scriptGoosePermTitled(in io.Reader, out io.Writer) {
+	rd := acp.NewReader(in)
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil {
+			return
+		}
+		switch {
+		case m.Method == "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case m.Method == "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
+		case m.Method == "session/prompt":
+			pid := 99
+			acp.WriteMessage(out, acp.Message{ID: &pid, Method: "session/request_permission",
+				Params: []byte(`{"toolCall":{"title":"Run shell: rm -rf /tmp/x"},"options":[{"optionId":"allow","kind":"allow"},{"optionId":"reject","kind":"reject"}]}`)})
+		}
+	}
+}
+
+// The pump must surface goose's real toolCall.title on the perm_request frame — on the broadcast AND
+// on the re-send to a late-attaching client — not a generic placeholder.
+func TestPermissionTitleFromToolCall(t *testing.T) {
+	const want = "Run shell: rm -rf /tmp/x"
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGoosePermTitled(gooseInR, gooseOutW)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop()
+
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "do-it"}))
+	if pa := waitKind(t, a, "perm_request"); pa.Title != want {
+		t.Fatalf("broadcast perm_request title = %q, want %q", pa.Title, want)
+	}
+	// A late client must get the SAME real title on re-send.
+	b := &capSender{}
+	p.attachClient("b", 0, b.send)
+	if pb := waitKind(t, b, "perm_request"); pb.Title != want {
+		t.Fatalf("re-sent perm_request title = %q, want %q", pb.Title, want)
+	}
+}
+
 // A turn started with NO clients attached must still complete and land in the log; a client that
 // attaches afterward replays the whole turn. (The pump drives the agent regardless of clients.)
 func TestTurnCompletesWithNoClientsThenReplays(t *testing.T) {
