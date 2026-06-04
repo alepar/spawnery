@@ -19,3 +19,6 @@ cp.db*
 /.make/
 /cp
 /telemetry/
+
+# Syncthing conflict artifacts in the externally-synced .beads dir (not source of truth)
+.beads/*.sync-conflict-*
