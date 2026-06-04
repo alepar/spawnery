@@ -2,14 +2,22 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/acp"
 	"spawnery/internal/runtime"
 	"spawnery/internal/spawnlet"
+	"spawnery/internal/spawnlet/firewall"
 )
+
+// --- test doubles ----------------------------------------------------------
 
 // fakeCPStream captures the NodeMessages the attacher sends (so a test can assert status phases) and
 // serves EOF on Receive (the attacher's receive loop is not exercised here).
@@ -40,20 +48,152 @@ func (f *fakeCPStream) phasesFor(spawnID string) []nodev1.SpawnPhase {
 	return out
 }
 
+func hasPhase(phases []nodev1.SpawnPhase, want nodev1.SpawnPhase) bool {
+	for _, p := range phases {
+		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
+func lastPhase(phases []nodev1.SpawnPhase) nodev1.SpawnPhase {
+	if len(phases) == 0 {
+		return nodev1.SpawnPhase_SPAWN_PHASE_UNSPECIFIED
+	}
+	return phases[len(phases)-1]
+}
+
+// noopApplier is a firewall.Applier that records nothing — egress isn't enforced in these tests
+// (NodeClass unset + EgressEnforce false), so Create never calls it, but Manager needs a non-nil one.
+type noopApplier struct{}
+
+func (noopApplier) Apply(context.Context, []firewall.Rule) error  { return nil }
+func (noopApplier) Remove(context.Context, []firewall.Rule) error { return nil }
+
+// scriptedPodBackend is a PodBackend whose Attach wires the agent's stdio to a scripted goose. The
+// script runs in a goroutine; when it returns, the agent's stdout is closed (modelling the agent
+// process exiting), which the pump observes as EOF.
+type scriptedPodBackend struct {
+	script  func(io.Reader, io.Writer)
+	mu      sync.Mutex
+	stopped bool
+}
+
+func (f *scriptedPodBackend) Ping(context.Context) error      { return nil }
+func (f *scriptedPodBackend) Preflight(context.Context) error { return nil }
+func (f *scriptedPodBackend) StartPod(context.Context, runtime.PodSpec) (*runtime.PodHandle, error) {
+	return &runtime.PodHandle{PodIP: "10.0.0.5", NetnsPath: "/proc/7/ns/net", SidecarID: "sc", SandboxID: "sb"}, nil
+}
+func (f *scriptedPodBackend) StartAgent(_ context.Context, h *runtime.PodHandle, _ runtime.AgentSpec) error {
+	h.AgentID = "ag"
+	return nil
+}
+func (f *scriptedPodBackend) Stop(context.Context, *runtime.PodHandle) error {
+	f.mu.Lock()
+	f.stopped = true
+	f.mu.Unlock()
+	return nil
+}
+func (f *scriptedPodBackend) Attach(context.Context, *runtime.PodHandle) (*runtime.AttachedStream, error) {
+	inR, inW := io.Pipe()   // pump writes -> inW; goose reads inR
+	outR, outW := io.Pipe() // goose writes outW; pump reads outR
+	go func() { f.script(inR, outW); _ = outW.Close() }()
+	return &runtime.AttachedStream{Stdin: inW, Stdout: outR, Close: func() error { _ = inW.Close(); _ = outW.Close(); return nil }}, nil
+}
+func (f *scriptedPodBackend) wasStopped() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stopped
+}
+
+// attachFailPodBackend creates the pod fine but fails Attach — exercising startSpawn's attach-error path.
+type attachFailPodBackend struct{ scriptedPodBackend }
+
+func (f *attachFailPodBackend) Attach(context.Context, *runtime.PodHandle) (*runtime.AttachedStream, error) {
+	return nil, fmt.Errorf("attach boom")
+}
+
+// scriptGooseDieOnPrompt answers initialize + session/new, then exits after the first prompt's
+// end_turn — modelling an agent that dies after going active.
+func scriptGooseDieOnPrompt(in io.Reader, out io.Writer) {
+	rd := acp.NewReader(in)
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil {
+			return
+		}
+		switch m.Method {
+		case "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
+		case "session/prompt":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"stopReason":"end_turn"}`)})
+			return // die after one turn
+		}
+	}
+}
+
+func writeNodeApp(t *testing.T) string {
+	t.Helper()
+	app := t.TempDir()
+	if err := os.WriteFile(filepath.Join(app, "spawneryapp.yml"), []byte(`
+id: spawnery/secret
+storage:
+  mounts:
+    - name: main
+      path: data
+      seed: seed
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(app, "seed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+func newGooseManager(t *testing.T, be runtime.PodBackend) *spawnlet.Manager {
+	t.Helper()
+	return spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+}
+
+func newAttacher(mgr *spawnlet.Manager, fs cpStream) *attacher {
+	return &attacher{cfg: Config{MaxSpawns: 2}, mgr: mgr, stream: fs, pumps: map[string]*Pump{}}
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// --- tests -----------------------------------------------------------------
+
 // startSpawn must report STARTING then ERROR when the spawn cannot be created (here: a bogus app ref
 // that fails manifest parsing), and must NOT register a pump or consume a capacity slot.
 func TestStartSpawnCreateFailureReportsErrorNoLeak(t *testing.T) {
 	mgr := spawnlet.NewManager(runtime.NewFake(), spawnlet.ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
 	fs := &fakeCPStream{}
-	a := &attacher{cfg: Config{MaxSpawns: 2}, mgr: mgr, stream: fs, pumps: map[string]*Pump{}}
+	a := newAttacher(mgr, fs)
 
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{SpawnId: "sp1", AppRef: "/no/such/app", Model: "m"})
 
 	phases := fs.phasesFor("sp1")
-	if len(phases) < 2 || phases[0] != nodev1.SpawnPhase_STARTING || phases[len(phases)-1] != nodev1.SpawnPhase_ERROR {
+	if len(phases) < 2 || phases[0] != nodev1.SpawnPhase_STARTING || lastPhase(phases) != nodev1.SpawnPhase_ERROR {
 		t.Fatalf("phases = %v, want STARTING...ERROR", phases)
 	}
-
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if len(a.pumps) != 0 {
@@ -62,4 +202,106 @@ func TestStartSpawnCreateFailureReportsErrorNoLeak(t *testing.T) {
 	if a.active != 0 {
 		t.Fatalf("active count should be 0 after a create failure, got %d", a.active)
 	}
+}
+
+// The happy path: Create + Attach + pump handshake succeed, so startSpawn reports ACTIVE, registers
+// the pump, and consumes one capacity slot.
+func TestStartSpawnSuccessReportsActive(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	a := newAttacher(newGooseManager(t, be), &fakeCPStream{})
+	a.startSpawn(context.Background(), &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
+	defer a.stopSpawn(context.Background(), "sp1")
+
+	if got := lastPhase(a.stream.(*fakeCPStream).phasesFor("sp1")); got != nodev1.SpawnPhase_ACTIVE {
+		t.Fatalf("final phase = %v, want ACTIVE", got)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pumps["sp1"] == nil {
+		t.Fatal("pump not registered after success")
+	}
+	if a.active != 1 {
+		t.Fatalf("active = %d, want 1", a.active)
+	}
+}
+
+// After a spawn goes active, the agent dying must self-clean: report ERROR, drop the pump, release
+// the capacity slot, and reclaim the container (mgr.Stop). Guards the sp-bjd capacity-leak fix.
+func TestStartSpawnAgentDeathSelfCleans(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGooseDieOnPrompt}
+	fs := &fakeCPStream{}
+	a := newAttacher(newGooseManager(t, be), fs)
+	a.startSpawn(context.Background(), &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
+
+	if got := lastPhase(fs.phasesFor("sp1")); got != nodev1.SpawnPhase_ACTIVE {
+		t.Fatalf("final phase before death = %v, want ACTIVE", got)
+	}
+	// A prompt makes the scripted goose answer one turn then exit -> exitFn must ERROR + reclaim.
+	a.fromClient("sp1", "ghost", encodeFrame(Frame{Kind: "prompt", Text: "go"}))
+
+	waitFor(t, "exitFn reclaim", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return len(a.pumps) == 0 && a.active == 0
+	})
+	if !hasPhase(fs.phasesFor("sp1"), nodev1.SpawnPhase_ERROR) {
+		t.Fatalf("phases = %v, want an ERROR after agent death", fs.phasesFor("sp1"))
+	}
+	if !be.wasStopped() {
+		t.Fatal("exitFn must mgr.Stop the dead spawn to reclaim the container")
+	}
+}
+
+// A failure in mgr.Attach (after Create succeeded) must report ERROR, leave no pump/capacity, and
+// tear down the just-created pod (mgr.Stop).
+func TestStartSpawnAttachFailureReportsErrorAndStops(t *testing.T) {
+	be := &attachFailPodBackend{}
+	fs := &fakeCPStream{}
+	a := newAttacher(newGooseManager(t, be), fs)
+	a.startSpawn(context.Background(), &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
+
+	if got := lastPhase(fs.phasesFor("sp1")); got != nodev1.SpawnPhase_ERROR {
+		t.Fatalf("final phase = %v, want ERROR on attach failure", got)
+	}
+	a.mu.Lock()
+	n, act := len(a.pumps), a.active
+	a.mu.Unlock()
+	if n != 0 || act != 0 {
+		t.Fatalf("pumps=%d active=%d, want 0/0 after attach failure", n, act)
+	}
+	if !be.wasStopped() {
+		t.Fatal("attach failure must mgr.Stop the partially-created spawn")
+	}
+}
+
+// handle() routes Open/Frame/Close to the spawn's pump: Open attaches a client, a prompt Frame is
+// forwarded to the agent (logged frames appear), and Close detaches the client.
+func TestHandleRoutesOpenFrameClose(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	a := newAttacher(newGooseManager(t, be), &fakeCPStream{})
+	ctx := context.Background()
+	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
+	defer a.stopSpawn(ctx, "sp1")
+	p := a.pumps["sp1"]
+
+	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{SpawnId: "sp1", ClientId: "c1", Cursor: 0}}})
+	waitFor(t, "client attach", func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.clients) == 1
+	})
+
+	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_Frame{Frame: &nodev1.Frame{SpawnId: "sp1", ClientId: "c1", Data: encodeFrame(Frame{Kind: "prompt", Text: "hi"})}}})
+	waitFor(t, "prompt logged", func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.log) > 0 // the prompt produced user/agent/turn frames in the pump log
+	})
+
+	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_Close{Close: &nodev1.SessionClose{SpawnId: "sp1", ClientId: "c1"}}})
+	waitFor(t, "client detach", func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.clients) == 0
+	})
 }
