@@ -138,6 +138,24 @@ func TestSpawnGetFiltersDeleted(t *testing.T) {
 	}
 }
 
+// A spawn can be deleted while still 'starting' (killed before it ever went active): MarkDeleted must
+// soft-delete it and end its (gen-1) live container, same as deleting an active spawn.
+func TestMarkDeletedFromStarting(t *testing.T) {
+	st := NewTestStore(t)
+	seedAppAndOwner(t, st)
+	ctx := context.Background()
+	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp5"), nil) }) // starting, never active
+	if err := st.WithTx(ctx, func(tx Store) error { return tx.Spawns().MarkDeleted(ctx, "sp5", 99) }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Spawns().Get(ctx, "sp5"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted-from-starting spawn must be ErrNotFound on Get, got %v", err)
+	}
+	if _, ok, _ := st.Spawns().LiveContainer(ctx, "sp5"); ok {
+		t.Fatal("MarkDeleted from starting must end the live container")
+	}
+}
+
 func TestMarkUnreachableKeepsLiveContainerAndFilters(t *testing.T) {
 	st := NewTestStore(t)
 	seedAppAndOwner(t, st)

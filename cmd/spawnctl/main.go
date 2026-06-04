@@ -28,7 +28,7 @@ func main() {
 	appPath := flag.String("app", "examples/secret-app", "app definition dir")
 	model := flag.String("model", "anthropic/claude-3.5-sonnet", "OpenRouter model")
 	cpAddr := flag.String("cp", "", "control-plane address (http://127.0.0.1:8080); overrides -addr")
-	appID := flag.String("app-id", "secret-app", "app id (CP mode)")
+	appID := flag.String("app-id", "spawnery/secret-app", "app id (CP mode)")
 	token := flag.String("token", "dev-token", "dev auth token (CP mode)")
 	register := flag.Bool("register", false, "register the -app manifest with the CP and exit (CP mode)")
 	version := flag.String("version", "1.0.0", "app version to register (with -register)")
