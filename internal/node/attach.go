@@ -16,20 +16,20 @@ import (
 	"spawnery/internal/spawnlet"
 )
 
-// readyProbeTimeout bounds how long startSpawn waits for the agent to answer an ACP initialize
-// before declaring the spawn failed. Kept well under the CP scheduler's 60s Provision wait
-// (cmd/cp/main.go) so the node reports ERROR (with a useful detail) rather than the scheduler
-// timing out. goose boots to ACP-ready in ~5s; 30s is generous headroom for a slow node.
-const readyProbeTimeout = 30 * time.Second
+// readyTimeout bounds how long startSpawn waits for the agent to answer pump.start's ACP initialize
+// handshake before declaring the spawn failed (the standalone readiness probe is folded into that
+// handshake). Kept well under the CP scheduler's 60s Provision wait (cmd/cp/main.go) so the node
+// reports ERROR (with a useful detail) rather than the scheduler timing out. goose boots to ACP-ready
+// in ~5s; 30s is generous headroom for a slow node.
+const readyTimeout = 30 * time.Second
 
 type Config struct {
-	NodeID       string
-	CPURL        string // e.g. http://127.0.0.1:8080
-	MaxSpawns    uint32
-	AgentImage   string
-	NodeClass    string
-	NodeOwner    string
-	InPodAdapter bool // CRI lane flag; currently unused by the node (was: the in-pod adapter records/replays history). Docker lane = false.
+	NodeID     string
+	CPURL      string // e.g. http://127.0.0.1:8080
+	MaxSpawns  uint32
+	AgentImage string
+	NodeClass  string
+	NodeOwner  string
 }
 
 type attacher struct {
@@ -189,7 +189,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.mu.Lock()
 	a.pumps[st.SpawnId] = p
 	a.mu.Unlock()
-	if err := p.start(ctx, readyProbeTimeout); err != nil {
+	if err := p.start(ctx, readyTimeout); err != nil {
 		logErr("startSpawn "+st.SpawnId+": agent not ready", err)
 		p.stop()
 		a.mu.Lock()

@@ -50,13 +50,12 @@ func main() {
 	if cpURL := os.Getenv("CP_ADDR"); cpURL != "" {
 		// CP-attached mode: dial the CP, no inbound listener.
 		cfg := node.Config{
-			NodeID:       env("NODE_ID", "node-1"),
-			CPURL:        cpURL,
-			MaxSpawns:    4,
-			AgentImage:   env("AGENT_IMAGE", "spawnery/stubagent:dev"),
-			NodeClass:    env("NODE_CLASS", "cloud"),
-			NodeOwner:    env("NODE_OWNER", ""),
-			InPodAdapter: os.Getenv("CONTAINER_RUNTIME") == "runsc",
+			NodeID:     env("NODE_ID", "node-1"),
+			CPURL:      cpURL,
+			MaxSpawns:  4,
+			AgentImage: env("AGENT_IMAGE", "spawnery/stubagent:dev"),
+			NodeClass:  env("NODE_CLASS", "cloud"),
+			NodeOwner:  env("NODE_OWNER", ""),
 		}
 		log.Printf("spawnlet attaching to CP at %s as %s", cpURL, cfg.NodeID)
 		log.Fatal(node.Run(ctx, mgr, h2cClient(), cfg))
