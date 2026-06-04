@@ -54,6 +54,19 @@ cd web && npm ci && npm test && npx tsc --noEmit && cd ..   # 77 vitest + typech
 just lint                              # golangci-lint (0 issues) + eslint + tsc
 ```
 
+**Expected:**
+```text
+# go test ./...            -> every line "ok  spawnery/…  0.0Xs" (or "[no test files]"), no FAIL
+ok  	spawnery/internal/cp	0.18s
+ok  	spawnery/internal/node	1.02s
+...
+# web: "Test Files  20 passed (20)" / "Tests  77 passed (77)"; tsc prints nothing (exit 0)
+# just lint:
+GOTOOLCHAIN=go1.26.0 ".../bin/golangci-lint" run ./...
+0 issues.
+cd web && npx eslint . && npx tsc --noEmit      # no output from either => clean
+```
+
 - [ ] ✅ `go test ./...` — all packages `ok`.
 - [ ] ✅ `go test ./... -race` — green, no data races.
 - [ ] ✅ web: vitest green, `tsc --noEmit` clean.
@@ -74,6 +87,12 @@ go test -tags acp_e2e -c -o /tmp/acp.test ./internal/runtime/
 sudo env "PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin" \
   /tmp/acp.test -test.run TestAttachACPRoundtrip -test.v -test.count=1
 ```
+**Expected:**
+```text
+--- PASS: TestAttachACPRoundtrip (0.0Xs)
+PASS
+ok  	spawnery/internal/runtime	0.0Xs
+```
 - [ ] 🔒 `TestAttachACPRoundtrip` PASS — `AttachACP` enters a pod netns via setns and round-trips the
       abstract `@spawnlet-acp` socket. (This is the in-pod transport both lanes use.)
 
@@ -81,6 +100,9 @@ sudo env "PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin" \
 ```bash
 just test-egress      # builds tagged egress_e2e, runs as root with iptables/nsenter/docker on PATH
 ```
+**Expected:** `--- PASS: TestEgressFloorEnforced` then `PASS` / `ok`. A FAIL here prints the iptables
+counters it checked (e.g. the metadata-DROP counter stayed 0) — that's a real floor break, not a flake.
+
 - [ ] 🔒 `TestEgressFloorEnforced` PASS — metadata `169.254/16` + RFC1918 dropped (iptables counters +
       `curl` blocked), public-by-IP reachable, DNS `:53` allowed. (Mirrors `MANUAL_VERIFICATION.md` §H/§M.)
 
@@ -88,6 +110,8 @@ just test-egress      # builds tagged egress_e2e, runs as root with iptables/nse
 ```bash
 just test-cni-egress  # builds tagged cni_egress_e2e, real Docker container proxy for the chain
 ```
+**Expected:** `--- PASS: TestCNIEgressFloorEnforced` / `PASS` / `ok`.
+
 - [ ] 🔒 `TestCNIEgressFloorEnforced` PASS — the `SPAWNLET-EGRESS` chain (jumped from `FORWARD` pos 1)
       enforces the same per-pod block-floor the runsc pod will use.
 
@@ -95,6 +119,14 @@ just test-cni-egress  # builds tagged cni_egress_e2e, real Docker container prox
 ```bash
 export OPENROUTER_API_KEY=...          # real key; these call a model
 just test-e2e                          # make images + go test -tags e2e ./... -count=1 -v
+```
+**Expected:**
+```text
+--- PASS: TestEndToEndGooseSecret (…s)      # real goose pod boots + answers
+--- PASS: TestWSEndToEndGooseSecret (…s)    # same over the WS relay
+--- PASS: TestCPEndToEndStub (…s)           # CP↔node↔stub round-trip
+ok  	spawnery/internal/cp	…
+ok  	spawnery/internal/spawnlet	…
 ```
 - [ ] 🔒🤖 `TestEndToEndGooseSecret`, `TestWSEndToEndGooseSecret`, `TestCPEndToEndStub` PASS — a real
       goose agent + sidecar pod boots, ACP-inits, answers a prompt (the runc baseline that the runsc
@@ -130,19 +162,80 @@ printf 'What is the secret word?\n' | \
   bin/spawnctl -addr http://127.0.0.1:9090 -app examples/secret-app -model free
 ```
 
+**Expected — node log (stderr):** preflight is *silent on success* and proceeds to listen; it only
+speaks up to die. A healthy boot looks like:
+```text
+spawnlet listening on 127.0.0.1:9090
+```
+A misconfigured runtime fails *here*, at startup, not at first spawn:
+```text
+container runtime preflight failed: <runsc/containerd/CNI error>   # process exits non-zero
+```
+**Expected — `spawnctl` (stdout):**
+```text
+spawn: <spawn-id>
+ready. type prompts:
+The secret word is "<word from the app's data>".   # streamed agent reply (exact text is model-dependent)
+```
+
 **Verify (the `sp-vaw` close criteria):**
 - [ ] 🟢🔒 Node logs a successful **runsc preflight** at startup (CRI runtime + network ready); it
       `log.Fatal`s if containerd/runsc/CNI is misconfigured — *at startup*, not at first spawn.
 - [ ] 🟢🔒🤖 The spawn reaches **ACTIVE** and `spawnctl` gets a real model reply — i.e. **the agent
       reached the sidecar on `127.0.0.1:8080` under runsc** (the single-sandbox fix for `sp-vaw`).
-- [ ] 🟢🔒 `sudo crictl pods` / `sudo crictl ps` show **one** pod sandbox (handler `runsc`) holding
-      **two** containers (sidecar + agent).
-- [ ] 🟢🔒 `sudo iptables -S SPAWNLET-EGRESS` shows per-pod `-s <podIP>` floor rules; `sudo iptables -S
-      FORWARD | head -1` shows the `-j SPAWNLET-EGRESS` jump at position 1.
-- [ ] 🟢🔒 Inside the agent: `curl --max-time 3 http://169.254.169.254/` and an RFC1918 host are
-      **blocked**, public egress works (the floor enforces on the real runsc pod).
+- [ ] 🟢🔒 `sudo crictl pods` / `sudo crictl ps` show **one** pod sandbox (handler `runsc`, namespace
+      `spawnery`) holding **two** containers (sidecar + agent).
+
+  **Expected:**
+  ```text
+  $ sudo crictl pods
+  POD ID         CREATED         STATE   NAME          NAMESPACE   ATTEMPT   RUNTIME
+  a1b2c3d4e5f6   12 seconds ago  Ready   <spawn-id>    spawnery    0         runsc
+  $ sudo crictl ps
+  CONTAINER      IMAGE                  STATE     NAME      ATTEMPT   POD ID
+  f00...         spawnery/sidecar:dev   Running   sidecar   0         a1b2c3d4e5f6
+  e11...         spawnery/goose:dev     Running   agent     0         a1b2c3d4e5f6
+  ```
+
+- [ ] 🟢🔒 `sudo iptables -S SPAWNLET-EGRESS` shows the per-pod `-s <podIP>` floor (DNS ACCEPT, then
+      metadata/RFC1918 DROPs), and the chain is jumped from `FORWARD` ahead of CNI's own rules.
+
+  **Expected** (pod IP e.g. `10.88.0.7`; iptables normalises a single host to `/32`):
+  ```text
+  $ sudo iptables -S SPAWNLET-EGRESS
+  -N SPAWNLET-EGRESS
+  -A SPAWNLET-EGRESS -s 10.88.0.7/32 -p udp -m udp --dport 53 -j ACCEPT
+  -A SPAWNLET-EGRESS -s 10.88.0.7/32 -p tcp -m tcp --dport 53 -j ACCEPT
+  -A SPAWNLET-EGRESS -s 10.88.0.7/32 -d 169.254.0.0/16 -j DROP
+  -A SPAWNLET-EGRESS -s 10.88.0.7/32 -d 10.0.0.0/8 -j DROP
+  -A SPAWNLET-EGRESS -s 10.88.0.7/32 -d 172.16.0.0/12 -j DROP
+  -A SPAWNLET-EGRESS -s 10.88.0.7/32 -d 192.168.0.0/16 -j DROP
+
+  # the jump is the FIRST -A rule in FORWARD (line 1 of `-S` is the policy, not a rule):
+  $ sudo iptables -S FORWARD | grep -n SPAWNLET-EGRESS
+  2:-A FORWARD -j SPAWNLET-EGRESS
+  ```
+
+- [ ] 🟢🔒 Inside the agent (`sudo crictl exec <agent-container-id> …`): metadata + an RFC1918 host are
+      **blocked**, public egress works.
+
+  **Expected:**
+  ```text
+  $ sudo crictl exec <agent-id> sh -c 'curl -s --max-time 3 http://169.254.169.254/; echo exit=$?'
+  exit=28                               # 28 = curl timeout -> DROP working (metadata blocked)
+  $ sudo crictl exec <agent-id> sh -c 'curl -s --max-time 3 -o /dev/null -w "%{http_code}\n" https://1.1.1.1/'
+  200                                   # public-by-IP reachable (or a TLS handshake, not a timeout)
+  ```
+
 - [ ] 🟢🔒 After stop, the pod sandbox is gone (`crictl pods` clean) **and** the per-pod
-      `SPAWNLET-EGRESS` rules are removed (chain back to empty).
+      `SPAWNLET-EGRESS` rules are removed — the chain persists but is empty:
+
+  **Expected (after teardown):**
+  ```text
+  $ sudo crictl pods            # no Ready spawnery sandbox
+  $ sudo iptables -S SPAWNLET-EGRESS
+  -N SPAWNLET-EGRESS            # chain stays; the -s <podIP> rules are gone
+  ```
 - [ ] 🟢🔒 Run the spawn create→teardown **N times** (≥5) — no leaked sandboxes, netns, images, or
       iptables rules accumulate (`crictl pods`, `ip netns`, `crictl images`, `iptables -S`).
 
@@ -165,6 +258,14 @@ sudo env "PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin" \
 # terminal 3 — web
 just web      # open the printed URL
 ```
+**Expected — node log** (preflight silent on success → attaches → registers):
+```text
+spawnlet attaching to CP at http://127.0.0.1:8080 as node-1
+node: connected to CP at http://127.0.0.1:8080 (id=node-1 class=cloud)
+```
+**Expected — web:** the sidebar dot goes **yellow** (starting) → **green** (active); the chat input
+enables and a prompt streams a reply token-by-token. (A red dot = the spawn errored; check the node log.)
+
 - [ ] 🟢🔒🌐🤖 Spawn an app from the web Marketplace → status goes yellow (starting) → green (active),
       a prompt streams a real reply — the full CP→node(runsc)→pump→ACP path.
 - [ ] 🟢🌐 Open the **same** spawn in a second browser tab → both see the live transcript and stream
