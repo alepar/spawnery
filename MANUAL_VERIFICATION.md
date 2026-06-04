@@ -16,6 +16,25 @@ Legend: 🌐 needs the web UI · 🖥️ needs a running CP+node · 🔒 needs a
 
 ---
 
+## Phase 5 verification pass — 2026-06-04 (real runsc host: Fedora CoreOS, runsc release-20260525.0)
+
+Driven via `E2E_TEST_RUNSC.md`. Boxes below are ticked where verified this session; per-section status:
+
+- **§A** lifecycle — PARTIAL: create/list/active/stop + rename/suspend/resume/two-instances/reload verified via Playwright (web e2e **13/13**) + CP-CLI; `cp -race` green. Not walked live: 2nd-token ownership isolation, kill-node→`unreachable` boot-reconcile, sqlite row spot-check (all hermetic-covered).
+- **§B–F** marketplace — PARTIAL: Browse (4 seeded apps)/Detail/Spawn/Publish→register/My-Apps verified via Playwright; validate / sticky-creator / tier / pinning matrix is hermetic-green. Full CP-API matrix not individually walked.
+- **§G** web UI — **VERIFIED**: Playwright marketplace + lifecycle specs 13/13, incl. the second-app-while-running re-entrancy case (a real race fixed this session, commit `7ab6597`); vitest green.
+- **§H** egress floor — **VERIFIED (host)**: `just test-egress` + `just test-cni-egress` green; in-agent metadata+RFC1918 blocked, public+DNS reachable. (Floor is host-side `SPAWNLET-EGRESS`/`DOCKER-USER`; the in-netns OUTPUT check is the legacy model.) Fail-closed / enforce-toggle are hermetic-tested.
+- **§I** node-class — **VERIFIED (live)**: `spawn_create` telemetry carries `node_class`+`node_id`.
+- **§J** limits/quota/runtime — **VERIFIED (live)**: cgroup `memory`=512 MiB + `cpu`=0.5 exact, runtime handler `runsc`, per-user cap (2nd `CreateSpawn` → `ResourceExhausted`). Fork-bomb smoke not run.
+- **§K** scheduler routing — HERMETIC ONLY: `PickFor` + 3 policy tests green; live author-self-host routing not walked.
+- **§L** Postgres — PARTIAL: default→sqlite boots; no-DSN→fatal + `storeConfigFromEnv` green. Full Postgres round-trip not run (needs a Postgres instance).
+- **§M** DNS carve-out — **VERIFIED (host)**: RFC1918 resolver (`192.168.1.1`) pod resolves the model upstream through the floor's `:53` carve-out.
+- **§N** runsc one-sandbox pod — **VERIFIED (host)**: full goose round-trip (`QUOKKA-4417`), one runsc sandbox / 2 containers, per-pod floor + `FORWARD` jump, in-agent egress, clean teardown, 5/5 cycles — closes `sp-vaw`/`sp-ghx`. Needed the TCP-on-pod-IP ACP transport + `POD_DNS` fixes (commit `b4e1b4b`).
+
+**Genuinely remaining (not run):** §L full Postgres round-trip (needs Postgres) · §K live routing · §A 2nd-token isolation + node-kill reconcile · §J fork-bomb smoke · §H fail-closed/enforce-toggle live (all hermetic-covered). Observability follow-ups tracked in epic `sp-209`.
+
+---
+
 ## A. CP durable state & spawn lifecycle (`sp-mqj`, `sp-pc4` parts 1–3a)
 
 **Summary.** The control plane gained a durable state layer (`internal/cp/store`, Bun over
@@ -29,11 +48,11 @@ soft-deletes, node eviction marks spawns `unreachable`, and boot reconciles orph
 later epic.
 
 **Verify:**
-- [ ] 🖥️ Create a spawn (`just spawnctl "hi"` or via 🌐 web), then call `ListSpawns` (web Chat/sidebar or a Connect call) — the spawn appears with status `active`, the right `app_id`, and your owner.
-- [ ] 🖥️ Stop/delete the spawn (`StopSpawn`/`DeleteSpawn`) — it disappears from `ListSpawns` (soft-deleted), and the agent/sidecar containers are gone (`docker ps`).
+- [x] 🖥️ Create a spawn (`just spawnctl "hi"` or via 🌐 web), then call `ListSpawns` (web Chat/sidebar or a Connect call) — the spawn appears with status `active`, the right `app_id`, and your owner.
+- [x] 🖥️ Stop/delete the spawn (`StopSpawn`/`DeleteSpawn`) — it disappears from `ListSpawns` (soft-deleted), and the agent/sidecar containers are gone (`docker ps`).
 - [ ] 🖥️ A second `ListSpawns` as a **different** dev token shows only that owner's spawns (ownership isolation).
 - [ ] 🖥️ Kill the node process mid-spawn, restart the CP — the orphaned spawn shows `unreachable` (boot reconcile), not `active`.
-- [ ] ✅ `go test ./internal/cp/... -race` is green (store invariants, guarded transitions, ledger).
+- [x] ✅ `go test ./internal/cp/... -race` is green (store invariants, guarded transitions, ledger).
 - [ ] Spot-check the SQLite file (`CP_STORE_DSN`, default `cp.db`): `spawns`/`spawn_containers` rows look right; at most one live container per spawn (`ended_at IS NULL`).
 
 ---
@@ -46,9 +65,9 @@ apps carry display name/summary/tags/visibility/listed; versions carry a **trust
 interview, zork), all `reviewed`.
 
 **Verify:**
-- [ ] 🖥️ `ListApps` with empty query returns the 4 seeded apps, each with a tier of `reviewed`.
+- [x] 🖥️ `ListApps` with empty query returns the 4 seeded apps, each with a tier of `reviewed`.
 - [ ] 🖥️ `ListApps` with a query (e.g. `research`) returns only matching apps (case-insensitive over name/summary/tags).
-- [ ] 🖥️ `GetApp` for a seeded id returns its summary + version list + tiers.
+- [x] 🖥️ `GetApp` for a seeded id returns its summary + version list + tiers.
 - [ ] 🖥️ `GetApp` for an unknown id → `NotFound`; `ListApps` without an auth token → `Unauthenticated`.
 
 ---
@@ -65,7 +84,7 @@ reference CI client that maps a local `spawneryapp.yml` → the API.
 - [ ] 🖥️ The just-registered app now appears in `ListApps`/`GetApp` (tier `unverified`, below the reviewed seeds in browse order).
 - [ ] 🖥️ Registering a **new version of the same app as a different owner** → `PermissionDenied` (creator is sticky).
 - [ ] 🖥️ A malformed manifest (bad `apiVersion`, id without `creator/app`, `visibility: private`, duplicate mount name) → `InvalidArgument` with a clear message.
-- [ ] ✅ `manifest.Validate` table test + store sticky-creator test green.
+- [x] ✅ `manifest.Validate` table test + store sticky-creator test green.
 
 ---
 
@@ -117,13 +136,13 @@ Apps** (takedown/relist toggle), **Publish** (form → `RegisterAppVersion`). "S
 chosen app on-demand (a refactored `spawnApp` with a re-entrancy guard) and jumps to Chat.
 
 **Verify (🌐 `just web` + 🖥️ CP/node up):**
-- [ ] Browse tab shows the seeded apps as cards with correct tier badges; the search box filters them.
-- [ ] Click a card → Detail shows the manifest fields + a versions list + a Spawn button; Back returns to Browse.
-- [ ] Click **Spawn** → the view switches to Chat, status reaches `ready`, and a prompt gets a streamed reply (confirms the marketplace→spawn→ACP path end-to-end).
-- [ ] Spawn a **second** app from the marketplace while one is running → the old session tears down cleanly and the new one reaches `ready` (no stale/duplicate WS, no clobbered status — the re-entrancy guard).
-- [ ] **My Apps** tab lists your registered apps incl. unlisted; the listing toggle takes one down (it drops out of Browse) and relists it.
-- [ ] **Publish** tab: fill id/title/version/ref (+ a mount row), submit → success toast, and the app appears in My Apps as `unverified`. A bad submit surfaces the CP error as a toast.
-- [ ] Light/dark theme + no raw-color regressions; no console errors.
+- [x] Browse tab shows the seeded apps as cards with correct tier badges; the search box filters them.
+- [x] Click a card → Detail shows the manifest fields + a versions list + a Spawn button; Back returns to Browse.
+- [x] Click **Spawn** → the view switches to Chat, status reaches `ready`, and a prompt gets a streamed reply (confirms the marketplace→spawn→ACP path end-to-end).
+- [x] Spawn a **second** app from the marketplace while one is running → the old session tears down cleanly and the new one reaches `ready` (no stale/duplicate WS, no clobbered status — the re-entrancy guard).
+- [x] **My Apps** tab lists your registered apps incl. unlisted; the listing toggle takes one down (it drops out of Browse) and relists it.
+- [x] **Publish** tab: fill id/title/version/ref (+ a mount row), submit → success toast, and the app appears in My Apps as `unverified`. A bad submit surfaces the CP error as a toast.
+- [x] Light/dark theme + no raw-color regressions; no console errors.
 - [ ] ✅ `cd web && npm test` (24 Vitest tests) green; `npm run build` clean. (Playwright `marketplace.spec.ts` needs a browser + the stack.)
 
 ---
@@ -137,10 +156,10 @@ public. Applied **after the sidecar, before the agent** (no unprotected window),
 **self-hosted** honors `EGRESS_ENFORCE` (default on).
 
 **Verify:**
-- [ ] 🔒 `just test-egress` PASSES on a privileged host (this is the real packet-drop test).
-- [ ] 🔒✅ Already host-verified here: metadata + RFC1918 dropped (iptables counters + curl blocked), public-by-IP reachable, DNS `:53` allowed.
+- [x] 🔒 `just test-egress` PASSES on a privileged host (this is the real packet-drop test).
+- [x] 🔒✅ Already host-verified here: metadata + RFC1918 dropped (iptables counters + curl blocked), public-by-IP reachable, DNS `:53` allowed.
 - [ ] 🖥️ Start a spawn on a cloud node and `nsenter` into the sidecar netns (`docker inspect` → pid) → `iptables -S OUTPUT` shows the lo/DNS ACCEPTs then the metadata/RFC1918 DROPs.
-- [ ] 🖥️ Inside a running spawn's agent: `curl http://169.254.169.254/` fails, `curl https://1.1.1.1/` works, `curl https://api.openrouter.ai/` resolves+connects (DNS carve-out).
+- [x] 🖥️ Inside a running spawn's agent: `curl http://169.254.169.254/` fails, `curl https://1.1.1.1/` works, `curl https://api.openrouter.ai/` resolves+connects (DNS carve-out).
 - [ ] 🖥️ Fail-closed: on a host **without** iptables (or with `EGRESS_ENFORCE` effective but the applier broken), a cloud spawn **does not start** (and the sidecar is torn down) rather than running unprotected.
 - [ ] 🖥️ `NODE_CLASS=self-hosted EGRESS_ENFORCE=false` → spawn runs unrestricted with a loud WARNING log; `NODE_CLASS=cloud` ignores `EGRESS_ENFORCE=false` and still enforces.
 
@@ -153,8 +172,8 @@ registry node and stamps it on the `spawn_create` telemetry event.
 
 **Verify:**
 - [ ] 🖥️ Start the node with `NODE_CLASS=self-hosted`; after a spawn, the `spawn_create` line in `telemetry/events.jsonl` has `node_class: "self-hosted"`.
-- [ ] 🖥️ An unset `NODE_CLASS` is recorded as `cloud` (safe default) in telemetry.
-- [ ] ✅ Registry-records-class + telemetry-carries-class tests green.
+- [x] 🖥️ An unset `NODE_CLASS` is recorded as `cloud` (safe default) in telemetry.
+- [x] ✅ Registry-records-class + telemetry-carries-class tests green.
 
 ---
 
@@ -166,10 +185,10 @@ registry node and stamps it on the `spawn_create` telemetry event.
 (`CP_MAX_SPAWNS_PER_OWNER`, default 5).
 
 **Verify:**
-- [ ] 🔒✅ Already host-verified: a container started with the limits has kernel cgroup-v2 `memory.max`/`pids.max`/`cpu.max` matching the config exactly.
+- [x] 🔒✅ Already host-verified: a container started with the limits has kernel cgroup-v2 `memory.max`/`pids.max`/`cpu.max` matching the config exactly.
 - [ ] 🖥️ Start a spawn, `docker inspect` the agent + sidecar → `HostConfig.Memory`/`NanoCpus`/`PidsLimit` reflect the env (both containers).
-- [ ] 🖥️ Per-user cap: with `CP_MAX_SPAWNS_PER_OWNER=1`, the **second** `CreateSpawn` for the same owner → `ResourceExhausted`; `=0` → unlimited.
-- [ ] 🔒 (If `runsc` installed) `CONTAINER_RUNTIME=runsc` → `docker inspect` shows `Runtime: runsc`; spawn still works.
+- [x] 🖥️ Per-user cap: with `CP_MAX_SPAWNS_PER_OWNER=1`, the **second** `CreateSpawn` for the same owner → `ResourceExhausted`; `=0` → unlimited.
+- [x] 🔒 (If `runsc` installed) `CONTAINER_RUNTIME=runsc` → `docker inspect` shows `Runtime: runsc`; spawn still works.
 - [ ] 🖥️ Smoke: a fork bomb inside the agent is capped at `PIDS_LIMIT` (doesn't take down the host).
 
 ---
@@ -186,7 +205,7 @@ authors iterating on their own apps with zero review and zero added risk.
 - [ ] The **same** unverified spawn attempt by a **non-author** → `PermissionDenied`.
 - [ ] The author attempting it with **only a cloud node** available → `ResourceExhausted` ("no eligible node").
 - [ ] A **reviewed** app still spawns on any node (cloud included) — routing unchanged.
-- [ ] ✅ PickFor placement + the three policy-outcome tests green.
+- [x] ✅ PickFor placement + the three policy-outcome tests green.
 - [ ] ⚠️ Known gap: the web Detail "Spawn" sends no version → latest reviewed, so spawning an unverified version from the **UI** needs the (filed) version-selector follow-up — verify via API/`spawnctl` for now.
 
 ---
@@ -197,10 +216,10 @@ authors iterating on their own apps with zero review and zero added risk.
 explicit `CP_STORE_DSN`.
 
 **Verify:**
-- [ ] 🖥️ Default (unset) → CP boots on SQLite as before.
+- [x] 🖥️ Default (unset) → CP boots on SQLite as before.
 - [ ] 🖥️ `CP_STORE_DRIVER=postgres CP_STORE_DSN=postgres://…` → CP boots, migrations apply, a spawn round-trips through Postgres.
 - [ ] 🖥️ `CP_STORE_DRIVER=postgres` with no DSN → CP `log.Fatal`s at boot with a clear message (no silent SQLite fallback).
-- [ ] ✅ `storeConfigFromEnv` table test green.
+- [x] ✅ `storeConfigFromEnv` table test green.
 
 ---
 
@@ -212,8 +231,8 @@ all inference. Fixed by allowing `udp/tcp :53` before the drops; the e2e now che
 IP so it's robust where outbound DNS is restricted.
 
 **Verify:**
-- [ ] 🔒✅ Host-verified: DNS `:53` ACCEPT rule counter-matched; `just test-egress` green.
-- [ ] 🖥️ On a host whose resolvers are RFC1918 (e.g. `192.168.1.x`): a running spawn's agent can still resolve `api.openrouter.ai` (so inference works) while RFC1918 hosts on non-53 ports stay blocked.
+- [x] 🔒✅ Host-verified: DNS `:53` ACCEPT rule counter-matched; `just test-egress` green.
+- [x] 🖥️ On a host whose resolvers are RFC1918 (e.g. `192.168.1.x`): a running spawn's agent can still resolve `api.openrouter.ai` (so inference works) while RFC1918 hosts on non-53 ports stay blocked.
 
 ---
 
@@ -252,17 +271,17 @@ printf 'What is the secret word?\n' | \
 ```
 
 **Verify:**
-- [ ] 🔒 The node logs a successful **runsc preflight** (CRI runtime + network ready) at startup; it
+- [x] 🔒 The node logs a successful **runsc preflight** (CRI runtime + network ready) at startup; it
       exits hard if containerd/runsc/CNI is misconfigured (not at first spawn).
-- [ ] 🔒 The spawn reaches **ACTIVE** and `spawnctl` gets a real model reply (e.g. "The secret word is
+- [x] 🔒 The spawn reaches **ACTIVE** and `spawnctl` gets a real model reply (e.g. "The secret word is
       …") — i.e. the agent reached the sidecar on `127.0.0.1:8080` **under runsc** (the `sp-vaw` fix).
-- [ ] 🔒 `sudo crictl pods` / `crictl ps` show one pod sandbox (handler `runsc`) with two containers
+- [x] 🔒 `sudo crictl pods` / `crictl ps` show one pod sandbox (handler `runsc`) with two containers
       (sidecar + agent); `sudo iptables -S SPAWNLET-EGRESS` shows the per-pod `-s <podIP>` floor rules
       and `sudo iptables -S FORWARD | head -1` shows the `-j SPAWNLET-EGRESS` jump at position 1.
-- [ ] 🔒 Inside the agent container, `curl --max-time 3 http://169.254.169.254/` and an RFC1918 host
+- [x] 🔒 Inside the agent container, `curl --max-time 3 http://169.254.169.254/` and an RFC1918 host
       are **blocked** while public egress works — the floor enforces under the CRI pod (mirror of
       `just test-cni-egress`, but on the real runsc pod).
-- [ ] 🔒 After `spawnctl`/stop, the pod sandbox is removed (`crictl pods` clean) and the per-pod
+- [x] 🔒 After `spawnctl`/stop, the pod sandbox is removed (`crictl pods` clean) and the per-pod
       `SPAWNLET-EGRESS` rules are gone (`iptables -S SPAWNLET-EGRESS` back to just the chain).
 
 Once these pass on a host, **close `sp-vaw`** (the empirical gVisor-pod fix is confirmed).
