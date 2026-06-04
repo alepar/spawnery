@@ -377,3 +377,72 @@ func TestResumeSpawn(t *testing.T) {
 		t.Fatalf("no owner: want Unauthenticated, got %v", err)
 	}
 }
+
+func TestRecreateSpawn(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id)
+
+	// recreate of an ACTIVE spawn -> FailedPrecondition (only unreachable/errored may recreate).
+	if _, err := s.RecreateSpawn(ctx, connect.NewRequest(&cpv1.RecreateSpawnRequest{SpawnId: id})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("recreate active: want FailedPrecondition, got %v", err)
+	}
+
+	// Simulate node loss -> unreachable, then recreate -> active at a fresh generation.
+	if _, err := s.st.Spawns().MarkUnreachable(ctx, []string{id}); err != nil {
+		t.Fatalf("MarkUnreachable: %v", err)
+	}
+	if _, err := s.RecreateSpawn(ctx, connect.NewRequest(&cpv1.RecreateSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("RecreateSpawn: %v", err)
+	}
+	sp, _ := s.st.Spawns().Get(ctx, id)
+	if sp.Status != store.Active {
+		t.Fatalf("status=%v want active after recreate", sp.Status)
+	}
+	c, ok, _ := s.st.Spawns().LiveContainer(ctx, id)
+	if !ok || c.Generation != 2 {
+		t.Fatalf("recreate must start a new-generation container: ok=%v c=%+v want gen 2", ok, c)
+	}
+
+	bob := auth.WithOwner(context.Background(), "bob")
+	if _, err := s.RecreateSpawn(bob, connect.NewRequest(&cpv1.RecreateSpawnRequest{SpawnId: id})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("foreign recreate: want PermissionDenied, got %v", err)
+	}
+	if _, err := s.RecreateSpawn(ctx, connect.NewRequest(&cpv1.RecreateSpawnRequest{SpawnId: "nope"})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("unknown recreate: want NotFound, got %v", err)
+	}
+}
+
+func TestReconcileInventory(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id) // bound to node "n1" by the acker
+
+	// The node still reports the spawn -> it stays active.
+	s.reconcileInventory(ctx, "n1", []*nodev1.RunningSpawn{{SpawnId: id, Generation: 1}})
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Active {
+		t.Fatalf("reported spawn must stay active, got %v", sp.Status)
+	}
+
+	// The node no longer reports it (restart / pod died) -> unreachable.
+	s.reconcileInventory(ctx, "n1", nil)
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Unreachable {
+		t.Fatalf("unreported active spawn must be marked unreachable, got %v", sp.Status)
+	}
+}

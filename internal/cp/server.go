@@ -95,8 +95,10 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			}
 			s.reg.Add(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: m.Register.NodeOwner})
 			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, m.Register.NodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
+			s.reconcileInventory(ctx, nodeID, m.Register.Running) // a returning node reports what it still runs
 		case *nodev1.NodeMessage_Heartbeat:
 			s.reg.Heartbeat(nodeID, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
+			s.reconcileInventory(ctx, nodeID, m.Heartbeat.Running)
 		case *nodev1.NodeMessage_Status:
 			s.sched.OnStatus(m.Status.SpawnId, m.Status.Phase)
 			if m.Status.Phase == nodev1.SpawnPhase_ACTIVE {
@@ -109,6 +111,39 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 		case *nodev1.NodeMessage_Frame:
 			s.rt.FromNode(m.Frame.SpawnId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected
 		}
+	}
+}
+
+// reconcileInventory marks any ACTIVE spawn the CP believes runs on nodeID but the node is NOT
+// reporting in its running inventory (e.g. it restarted and lost the pod, or the pod died) as
+// unreachable, dropping its route. Starting spawns are skipped (may not be in the inventory yet).
+// User-driven recovery (RecreateSpawn) takes it from there. Builds on the node's RunningSpawn report.
+func (s *Server) reconcileInventory(ctx context.Context, nodeID string, running []*nodev1.RunningSpawn) {
+	if nodeID == "" {
+		return
+	}
+	reported := make(map[string]bool, len(running))
+	for _, rs := range running {
+		reported[rs.GetSpawnId()] = true
+	}
+	live, err := s.st.Spawns().LiveContainersByNode(ctx, nodeID)
+	if err != nil {
+		return
+	}
+	var lost []string
+	for _, c := range live {
+		if c.Phase == store.PhaseActive && !reported[c.SpawnID] {
+			lost = append(lost, c.SpawnID)
+		}
+	}
+	if len(lost) == 0 {
+		return
+	}
+	for _, id := range lost {
+		s.rt.Drop(id)
+	}
+	if n, err := s.st.Spawns().MarkUnreachable(ctx, lost); err == nil && n > 0 {
+		log.Printf("node %s inventory: %d active spawn(s) not reported -> unreachable", nodeID, n)
 	}
 }
 
