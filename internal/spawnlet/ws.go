@@ -19,7 +19,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetReadLimit(16 * 1024 * 1024)
 	ctx := r.Context()
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 
 	_, first, err := conn.Read(ctx)
 	if err != nil {
@@ -42,7 +42,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		conn.Close(websocket.StatusInternalError, "attach failed")
 		return
 	}
-	defer att.Close()
+	defer func() { _ = att.Close() }()
 
 	ep := StreamEndpoint{
 		Recv: func() ([]byte, error) {

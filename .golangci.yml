@@ -1,0 +1,36 @@
+# golangci-lint v2 config. Correctness-focused: bugs, dead code, leaks — NOT formatting, naming,
+# style, or deprecation churn. Formatters (gofmt/goimports) are intentionally left out; `go fmt`
+# stays advisory.
+version: "2"
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused (the correctness core).
+  default: standard
+  enable:
+    - bodyclose # unclosed HTTP/response bodies (leaks) — relevant for the ConnectRPC/WS code
+    - nilerr    # returning nil when a non-nil err is in scope (a real bug pattern)
+  settings:
+    staticcheck:
+      # Keep SA (bugs) + S (simplifications). Drop ST (style/naming/case), QF (quickfix nits), and
+      # SA1019 (third-party-API deprecation churn — tracked separately, not the bug-focus here).
+      checks:
+        - all
+        - -ST1*
+        - -QF*
+        - -SA1019
+    errcheck:
+      # Unchecked Close/CloseNow/CloseRequest on cleanup paths and writes to the agent stub are
+      # intentional fire-and-forget; checking them adds no correctness. errcheck still flags every
+      # other unchecked error.
+      exclude-functions:
+        - spawnery/internal/acp.WriteMessage
+  exclusions:
+    generated: lax # skip protoc/buf-generated files (gen/**)
+    presets:
+      - std-error-handling # idiomatic unchecked Close/Flush/Fprint on std types
+    rules:
+      # Tests are fire-and-forget by nature (pipes, fixtures); don't nag about unchecked errors there.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - bodyclose

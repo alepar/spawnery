@@ -53,7 +53,7 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[spawnv1
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
-	defer att.Close()
+	defer func() { _ = att.Close() }()
 
 	ep := StreamEndpoint{
 		Recv: func() ([]byte, error) {
