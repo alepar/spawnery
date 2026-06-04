@@ -32,6 +32,13 @@ type Config struct {
 	NodeOwner  string
 }
 
+// cpStream is the subset of the Connect bidi stream the attacher uses. *connect.BidiStreamForClient
+// satisfies it; tests inject a fake to capture sent NodeMessages and drive received CPMessages.
+type cpStream interface {
+	Send(*nodev1.NodeMessage) error
+	Receive() (*nodev1.CPMessage, error)
+}
+
 type attacher struct {
 	cfg   Config
 	mgr   *spawnlet.Manager
@@ -42,7 +49,7 @@ type attacher struct {
 	active uint32
 
 	sendMu sync.Mutex
-	stream *connect.BidiStreamForClient[nodev1.NodeMessage, nodev1.CPMessage]
+	stream cpStream
 }
 
 // Run keeps the node connected to the CP: it (re)dials and serves one connection at a time, backing
