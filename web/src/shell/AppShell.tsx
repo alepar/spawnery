@@ -41,7 +41,7 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
           <ConnStatus conn={conn} />
         </header>
         <main className="flex-1 overflow-hidden">
-          {view === "chat" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} />}
+          {view === "chat" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} focusKey={activeId} />}
           {view === "market" && <MarketplaceView onSpawn={onSpawn} />}
           {view === "settings" && <SettingsView />}
         </main>
