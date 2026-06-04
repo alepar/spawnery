@@ -2,15 +2,11 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"io"
 	"net"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
-
-	"spawnery/internal/transcript"
 )
 
 // fakeAgent returns (toAgent, fromAgent) wired as an echo: bytes written to
@@ -42,6 +38,8 @@ func dialAndRoundtrip(t *testing.T, path, line string) {
 	}
 }
 
+// The adapter bridges raw bytes both ways and keeps the agent alive across a reconnect, so a NEW
+// client reaches the SAME persistent agent.
 func TestServeBridgesAndPersistsAcrossReconnect(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "acp.sock")
 	ln, err := net.Listen("unix", sock)
@@ -53,19 +51,20 @@ func TestServeBridgesAndPersistsAcrossReconnect(t *testing.T) {
 	toAgent, fromAgent := fakeAgent()
 	go serve(ln, toAgent, fromAgent)
 
-	// First client.
 	dialAndRoundtrip(t, sock, "hello\n")
-	// Reconnect: a NEW client must reach the SAME persistent agent.
 	dialAndRoundtrip(t, sock, "world\n")
 }
 
-func TestServeClientHalfCloseStopsStdinNotStdout(t *testing.T) {
+// The thin adapter must NOT parse ACP or inject broker frames (spawn/turn, spawn/history). A
+// session/prompt sent through is echoed back verbatim with nothing prepended or appended.
+func TestServeDoesNotInjectBrokerFrames(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "acp.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
+
 	toAgent, fromAgent := fakeAgent()
 	go serve(ln, toAgent, fromAgent)
 
@@ -74,152 +73,92 @@ func TestServeClientHalfCloseStopsStdinNotStdout(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if _, err := io.WriteString(c, "ping\n"); err != nil {
-		t.Fatal(err)
-	}
-	// Half-close the write side; the echo of "ping\n" must still arrive.
-	if err := c.(*net.UnixConn).CloseWrite(); err != nil {
+	prompt := `{"method":"session/prompt","params":{"sessionId":"s1","prompt":[{"type":"text","text":"hi"}]}}` + "\n"
+	if _, err := io.WriteString(c, prompt); err != nil {
 		t.Fatal(err)
 	}
 	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
-	got, err := bufio.NewReader(c).ReadString('\n')
+	r := bufio.NewReader(c)
+	got, err := r.ReadString('\n')
 	if err != nil {
-		t.Fatalf("read after half-close: %v", err)
+		t.Fatalf("read: %v", err)
 	}
-	if got != "ping\n" {
-		t.Fatalf("got %q want %q", got, "ping\n")
+	if got != prompt {
+		t.Fatalf("first line got %q want the echoed prompt verbatim (no broker frame)", got)
+	}
+	// No second line should arrive — a broker would have injected a spawn/turn frame.
+	_ = c.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if extra, err := r.ReadString('\n'); err == nil {
+		t.Fatalf("unexpected extra frame after the echo: %q", extra)
 	}
 }
 
-// A reconnecting client must receive a spawn/history frame replaying the transcript that flowed
-// through the adapter while a PRIOR client was attached. Uses a scripted agent that emits a valid
-// ACP session/update for each input line, so traffic in both directions is recordable.
-func TestServeReplaysHistoryOnReconnect(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "acp.sock")
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
+// Goose output produced while no node is attached is buffered and flushed, IN ORDER, to the next
+// connection — and live output after attach follows strictly behind the flushed buffer.
+func TestConnHubBuffersWhileDetachedAndFlushesOnAttach(t *testing.T) {
+	h := &connHub{}
+	h.write([]byte("a\n")) // no conn attached -> buffered
+	h.write([]byte("b\n"))
 
-	toAgent, fromAgent := scriptedAgent()
-	go serve(ln, toAgent, fromAgent)
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
 
-	// First client: send a session/prompt; the scripted agent replies with an agent chunk.
-	// With turn-broker wiring, c1 also receives a spawn/turn frame before the agent reply.
-	// Drain all lines from c1 until the agent session/update arrives, ensuring pump has
-	// recorded the agent item before we reconnect.
-	c1, err := net.Dial("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	prompt := `{"method":"session/prompt","params":{"sessionId":"s1","prompt":[{"type":"text","text":"hi"}]}}` + "\n"
-	if _, err := io.WriteString(c1, prompt); err != nil {
-		t.Fatal(err)
-	}
-	_ = c1.SetReadDeadline(time.Now().Add(2 * time.Second))
-	c1Reader := bufio.NewReader(c1)
-	for {
-		got, err := c1Reader.ReadString('\n')
+	done := make(chan struct{})
+	go func() {
+		h.attach(server) // flushes "a\n","b\n" to server (blocks until read; net.Pipe is synchronous)
+		h.write([]byte("c\n"))
+		close(done)
+	}()
+
+	r := bufio.NewReader(client)
+	for _, want := range []string{"a\n", "b\n", "c\n"} {
+		_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+		got, err := r.ReadString('\n')
 		if err != nil {
-			t.Fatalf("c1 read agent reply: %v", err)
+			t.Fatalf("read: %v", err)
 		}
-		if strings.Contains(got, "session/update") {
-			break
-		}
-	}
-	_ = c1.Close()
-
-	// Reconnect: the FIRST bytes the new client receives must be the spawn/history frame.
-	c2, err := net.Dial("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c2.Close()
-	_ = c2.SetReadDeadline(time.Now().Add(2 * time.Second))
-	line, err := bufio.NewReader(c2).ReadString('\n')
-	if err != nil {
-		t.Fatalf("c2 read history: %v", err)
-	}
-	var m struct {
-		Method string `json:"method"`
-		Params struct {
-			Items []transcript.Item `json:"items"`
-		} `json:"params"`
-	}
-	if err := json.Unmarshal([]byte(line), &m); err != nil {
-		t.Fatalf("history frame not json: %v\n%s", err, line)
-	}
-	if m.Method != "spawn/history" {
-		t.Fatalf("first frame method=%q want spawn/history", m.Method)
-	}
-	if len(m.Params.Items) < 2 || m.Params.Items[0].Role != "user" || m.Params.Items[0].Text != "hi" {
-		t.Fatalf("history items wrong: %+v", m.Params.Items)
-	}
-	hasAgent := false
-	for _, it := range m.Params.Items {
-		if it.Role == "agent" {
-			hasAgent = true
+		if got != want {
+			t.Fatalf("got %q want %q (order must be buffered-then-live)", got, want)
 		}
 	}
-	if !hasAgent {
-		t.Fatalf("history must include the agent reply, got %+v", m.Params.Items)
-	}
+	<-done
 }
 
-// scriptedAgent echoes each newline-delimited input line back as an agent_message_chunk session/update
-// line, so traffic in both directions is valid ACP for the recorder. Lives for the whole test.
-func scriptedAgent() (io.Writer, io.Reader) {
-	inR, inW := io.Pipe()
-	outR, outW := io.Pipe()
-	go func() {
-		br := bufio.NewReader(inR)
-		for {
-			_, err := br.ReadString('\n')
-			if err != nil {
-				_ = outW.Close()
-				return
-			}
-			_, _ = io.WriteString(outW, `{"method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ack"}}}}`+"\n")
+// Past the byte cap the gap buffer evicts OLDEST WHOLE LINES, never delivering a torn line.
+func TestConnHubEvictsOldestWholeLinesPastCap(t *testing.T) {
+	h := &connHub{}
+	mkLine := func(c byte) []byte {
+		b := make([]byte, 100*1024) // 102400 bytes; 12 of these = 1,228,800 > maxBufBytes (1,048,576)
+		for i := range b {
+			b[i] = c
 		}
-	}()
-	return inW, outR
-}
-
-func TestAdapterHoldsSecondPromptUntilTurnEnds(t *testing.T) {
-	rec := transcript.New()
-	agentCh := make(chan []byte, 8)
-
-	agentIn, agentInW := io.Pipe()
-	go func() {
-		for line := range agentCh {
-			if _, err := agentInW.Write(line); err != nil {
-				return
-			}
-		}
-	}()
-	agentReader := bufio.NewReader(agentIn)
-	readLine := func() string {
-		l, _ := agentReader.ReadString('\n')
-		return l
+		b[len(b)-1] = '\n'
+		return b
+	}
+	for i := 0; i < 12; i++ {
+		h.write(mkLine(byte('A' + i)))
 	}
 
-	clientR, clientW := io.Pipe()
-	go func() {
-		clientW.Write([]byte(`{"id":1,"method":"session/prompt","params":{"prompt":[{"text":"a"}]}}` + "\n"))
-		clientW.Write([]byte(`{"id":2,"method":"session/prompt","params":{"prompt":[{"text":"b"}]}}` + "\n"))
-	}()
-	hub := &connHub{}
-	go recordingCopy(clientR, rec, agentCh, hub)
+	h.mu.Lock()
+	n, count := h.n, len(h.buf)
+	first := h.buf[0][0]
+	bufCopy := append([][]byte(nil), h.buf...)
+	h.mu.Unlock()
 
-	if got := readLine(); !strings.Contains(got, `"text":"a"`) {
-		t.Fatalf("first agent line = %q, want prompt a", got)
+	if n > maxBufBytes {
+		t.Fatalf("buffer holds %d bytes, exceeds cap %d", n, maxBufBytes)
 	}
-
-	agentOut, agentOutW := io.Pipe()
-	go pump(agentOut, hub, rec, agentCh)
-	agentOutW.Write([]byte(`{"id":1,"result":{"stopReason":"end_turn"}}` + "\n"))
-	if got := readLine(); !strings.Contains(got, `"text":"b"`) {
-		t.Fatalf("second agent line = %q, want drained prompt b", got)
+	// 1,228,800 -> evict A -> 1,126,400 (still > cap) -> evict B -> 1,024,000 (<= cap). 10 lines, first 'C'.
+	if count != 10 {
+		t.Fatalf("want 10 buffered lines after eviction, got %d", count)
+	}
+	if first != 'C' {
+		t.Fatalf("oldest KEPT line should start with 'C' (A,B evicted), got %q", first)
+	}
+	for i, b := range bufCopy {
+		if len(b) == 0 || b[len(b)-1] != '\n' {
+			t.Fatalf("buffered line %d is torn (no trailing newline)", i)
+		}
 	}
 }

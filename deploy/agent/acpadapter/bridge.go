@@ -5,69 +5,90 @@ import (
 	"io"
 	"net"
 	"sync"
-
-	"spawnery/internal/transcript"
 )
 
-// connHub holds the currently-attached client connection (at most one) and serializes all writes to
-// it so multi-byte frames (agent output lines AND the replayed history frame) never interleave.
+// maxBufBytes bounds the in-pod gap buffer. Goose stdout produced while no node is attached is held
+// here and flushed to the next connection. Past the cap the OLDEST WHOLE LINES are evicted, so a
+// wedged or absent node can never OOM the pod and a partial/torn JSON line is never delivered.
+const maxBufBytes = 1 << 20 // 1 MiB
+
+// connHub holds the at-most-one attached node connection plus a bounded buffer of goose stdout lines
+// produced while nothing is attached. A single mutex serializes the live-vs-buffer decision in
+// write() against the swap+flush in attach(), so byte order is preserved with no interleaving.
 type connHub struct {
-	mu      sync.Mutex // guards cur
-	cur     net.Conn
-	writeMu sync.Mutex // serializes writes to cur; never held while waiting on mu
+	mu  sync.Mutex
+	cur net.Conn
+	buf [][]byte // whole ndjson lines held while cur == nil, FIFO
+	n   int      // total bytes currently in buf
 }
 
-// write sends p to the current client (if any) as one atomic write. Output produced while no client
-// is attached is dropped (attach/detach semantics).
-func (h *connHub) write(p []byte) {
+// write sends one ndjson line to the attached node connection, or buffers it if none is attached.
+func (h *connHub) write(line []byte) {
 	h.mu.Lock()
-	c := h.cur
-	h.mu.Unlock()
-	if c == nil {
+	defer h.mu.Unlock()
+	if h.cur != nil {
+		// A dead conn's Write returns fast (detach() then swaps cur to nil). An alive-but-not-reading
+		// node makes this Write block while holding h.mu — the same bounded head-of-line stall that
+		// attach() documents; the slow node, not the adapter, is the bottleneck.
+		_, _ = h.cur.Write(line)
 		return
 	}
-	h.writeMu.Lock()
-	_, _ = c.Write(p) // a dead conn's Write returns fast
-	h.writeMu.Unlock()
+	b := append([]byte(nil), line...)
+	h.buf = append(h.buf, b)
+	h.n += len(b)
+	for h.n > maxBufBytes && len(h.buf) > 1 { // evict oldest whole lines; never drop the only line
+		h.n -= len(h.buf[0])
+		h.buf = h.buf[1:]
+	}
 }
 
-// attach makes c the current connection and, holding writeMu so no pump write can slip in front,
-// writes the history frame to it FIRST. Returns the displaced connection (if any) for the caller to
-// close. A superseded conn is closed only on a new attach, never on stdin EOF (half-close).
+// attach makes c the current connection and flushes the gap buffer to it FIRST, in order, then
+// clears it. Returns the displaced connection (if any) for the caller to close.
 //
-// Lock order: attach takes writeMu THEN mu (briefly). write takes mu, releases it, THEN takes
-// writeMu — so no goroutine holds mu while waiting on writeMu, and there is no deadlock cycle.
-func (h *connHub) attach(c net.Conn, history []byte) net.Conn {
-	h.writeMu.Lock()
-	defer h.writeMu.Unlock()
+// LOCK TRADEOFF: the flush runs while holding h.mu. That is deliberate. Holding the lock across
+// "set cur; flush buf; clear buf" guarantees strict ordering — any concurrent write() is forced
+// either before the flush (it appended to buf, so it gets flushed) or after it (cur != nil, so it
+// goes live, strictly behind the flushed bytes). No live line slips in front of the buffer and
+// nothing interleaves. The cost is head-of-line blocking: while the flush runs, write() cannot take
+// the lock, so the stdout pump stops draining goose and a slow reattaching node briefly stalls the
+// agent's stdout. We accept that because the flush is bounded (<= maxBufBytes) and goes to a local
+// abstract UDS only on reconnect — tiny and rare. The off-lock alternative (snapshot under lock,
+// write outside it, queue concurrent writes behind a flushing flag) removes the stall at a
+// complexity cost not worth it here.
+func (h *connHub) attach(c net.Conn) net.Conn {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	prev := h.cur
 	h.cur = c
-	h.mu.Unlock()
-	if len(history) > 0 && c != nil {
-		_, _ = c.Write(history)
+	for _, line := range h.buf {
+		_, _ = c.Write(line)
 	}
+	h.buf = nil
+	h.n = 0
 	if prev == c {
 		return nil
 	}
 	return prev
 }
 
-// pump is the single persistent reader of the agent's stdout. It records each ndjson line, forwards
-// it byte-for-byte to the current client, and — when a line is the in-flight prompt's turn-end
-// response — drains the next queued prompt to the agent (via agentCh) and pushes a spawn/turn frame.
-func pump(fromAgent io.Reader, hub *connHub, rec *transcript.Recorder, agentCh chan<- []byte) {
+// detach clears the current connection if it is still c (so subsequent stdout buffers) and closes c.
+func (h *connHub) detach(c net.Conn) {
+	h.mu.Lock()
+	if h.cur == c {
+		h.cur = nil
+	}
+	h.mu.Unlock()
+	_ = c.Close()
+}
+
+// pump is the single persistent reader of the agent's stdout. It forwards each ndjson line to the
+// attached node connection (or the gap buffer). It does NOT parse or record — the node pump owns all
+// brokering, history, and fan-out.
+func pump(fromAgent io.Reader, hub *connHub) {
 	br := bufio.NewReaderSize(fromAgent, 64*1024)
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
-			drain, turn := rec.OnAgentLine(line)
-			for _, d := range drain {
-				agentCh <- d
-			}
-			if turn != nil {
-				hub.write(turn)
-			}
 			hub.write(line)
 		}
 		if err != nil {
@@ -76,55 +97,22 @@ func pump(fromAgent io.Reader, hub *connHub, rec *transcript.Recorder, agentCh c
 	}
 }
 
-// recordingCopy reads the client's stdin line-by-line and asks the broker what to forward: idle
-// prompts and non-prompt lines go to the agent (via agentCh); prompts received while busy are held
-// and queued. spawn/turn frames are written back to the client. Returns on the client's write EOF.
-func recordingCopy(conn io.Reader, rec *transcript.Recorder, agentCh chan<- []byte, hub *connHub) {
-	br := bufio.NewReaderSize(conn, 64*1024)
-	for {
-		line, err := br.ReadBytes('\n')
-		if len(line) > 0 {
-			fwd, turn := rec.OnClientLine(line)
-			for _, f := range fwd {
-				agentCh <- f
-			}
-			if turn != nil {
-				hub.write(turn)
-			}
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
-// serve accepts one client at a time and bridges it to the long-lived agent stdio, recording the
-// transcript and replaying it (spawn/history) to each newly-attached client. The agent persists
-// across client disconnects, so a reconnecting client resumes the same session and gets its history.
-// It returns only when the listener is closed.
+// serve accepts one node connection at a time and bridges it to the long-lived agent stdio: goose
+// stdout flows to the connection (pump), the connection flows to goose stdin (io.Copy). The agent
+// persists across connection drops; output produced during a gap is buffered and flushed on the next
+// attach. It returns only when the listener is closed.
 func serve(ln net.Listener, toAgent io.Writer, fromAgent io.Reader) error {
 	hub := &connHub{}
-	rec := transcript.New()
-	agentCh := make(chan []byte, 64)
-	// Single writer to agent stdin (forwarded client prompts + drained queued prompts). If
-	// toAgent.Write fails the agent stdin is dead: the goroutine retires and producers block on a
-	// full agentCh — acceptable because the adapter process exits when the agent subprocess exits.
-	go func() {
-		for line := range agentCh {
-			if _, err := toAgent.Write(line); err != nil {
-				return
-			}
-		}
-	}()
-	go pump(fromAgent, hub, rec, agentCh)
+	go pump(fromAgent, hub)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return err
 		}
-		if prev := hub.attach(conn, rec.HistoryFrame()); prev != nil {
+		if prev := hub.attach(conn); prev != nil {
 			_ = prev.Close()
 		}
-		recordingCopy(conn, rec, agentCh, hub)
+		_, _ = io.Copy(toAgent, conn) // node -> goose stdin; returns when the node closes its conn
+		hub.detach(conn)
 	}
 }
