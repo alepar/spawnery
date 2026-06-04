@@ -113,7 +113,8 @@ test("conversation history survives a browser reload (node replay)", async ({ pa
   // Re-open the spawn from the sidebar (its name defaults to the app display name "Secret App").
   await rowByName(page, "Secret App").locator('[data-testid^="spawn-select-"]').click();
 
-  // The node replays spawn/history on reconnect -> the prior transcript is restored.
+  // On reconnect the pump replays its frame log from cursor 0 (a reset frame then the logged
+  // frames) -> the prior transcript is restored.
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
   await expect(page.locator('[data-role="user"]')).toContainText("one");
 });

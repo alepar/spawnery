@@ -119,7 +119,7 @@ export function App() {
         // Fresh frame receiver per (re)connect (clean ndjson buffer); set it up BEFORE the bind so the
         // node's replay can't arrive before onmessage is wired. The node resumes from our cursor:
         // a partysocket reconnect keeps lastSeq (resume); a fresh open / spawn-switch has lastSeq 0.
-        new Conn(sock, (m) => { if (genRef.current === gen) applyFrame(m as unknown as Frame, spawnId); });
+        new Conn(sock, (m) => { if (genRef.current === gen) applyFrame(m as Frame, spawnId); });
         sock.send(JSON.stringify({ spawnId, clientId: CLIENT_ID, token: DEV_TOKEN, cursor: lastSeqRef.current }));
         connected();
       },

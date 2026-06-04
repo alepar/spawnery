@@ -1,21 +1,17 @@
-import type { Message } from "./types";
-
 // WebSocketLike is the subset of WebSocket we use (so tests can fake it).
 export interface WebSocketLike {
   binaryType: string;
   onmessage: ((ev: { data: any }) => void) | null;
-  send(data: Uint8Array): void;
 }
 
-// Conn frames ACP JSON-RPC messages over a WebSocket as newline-delimited JSON.
-// Incoming binary/text chunks are buffered and split on "\n"; outgoing messages
-// are json+"\n" sent as one binary frame each.
+// Conn is a receive-only reader: it splits the WebSocket's binary/text stream into newline-delimited
+// JSON frames and hands each parsed object to onFrame. Sending is done by the caller over the raw
+// socket (encodePrompt / encodePermResponse in frames.ts) — Conn never writes.
 export class Conn {
   private buf = "";
   private dec = new TextDecoder();
-  private enc = new TextEncoder();
 
-  constructor(private ws: WebSocketLike, private onMessage: (m: Message) => void) {
+  constructor(ws: WebSocketLike, private onFrame: (m: unknown) => void) {
     ws.binaryType = "arraybuffer";
     ws.onmessage = (ev) => this.onData(ev.data);
   }
@@ -33,15 +29,10 @@ export class Conn {
       this.buf = this.buf.slice(i + 1);
       if (!line.trim()) continue;
       try {
-        this.onMessage(JSON.parse(line) as Message);
+        this.onFrame(JSON.parse(line));
       } catch (e) {
         console.error("acp: bad frame", e, line);
       }
     }
-  }
-
-  send(m: Message) {
-    const obj = { jsonrpc: "2.0", ...m };
-    this.ws.send(this.enc.encode(JSON.stringify(obj) + "\n"));
   }
 }
