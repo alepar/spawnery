@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -12,66 +12,75 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+
+	"github.com/urfave/cli/v3"
 )
 
-// terminalFlags are shared by attach/exec/shell: -addr is the node terminal endpoint (mosh data
+// terminalFlags are shared by attach/exec/shell: -addr is the node terminal endpoint (the mosh data
 // plane goes straight there); -cp/-token are used only to list+pick a spawn when -spawn is omitted.
-type terminalFlags struct {
-	addr  *string
-	spawn *string
-	cp    *string
-	token *string
-}
-
-func bindTerminalFlags(fs *flag.FlagSet) terminalFlags {
-	return terminalFlags{
-		addr:  fs.String("addr", "http://127.0.0.1:9092", "node terminal endpoint"),
-		spawn: fs.String("spawn", "", "spawn id (omit to pick interactively)"),
-		cp:    fs.String("cp", "http://127.0.0.1:8080", "control-plane address (for listing/picking spawns)"),
-		token: fs.String("token", "dev-token", "dev auth token (CP)"),
+func terminalFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{Name: "addr", Value: "http://127.0.0.1:9092", Usage: "node terminal endpoint"},
+		&cli.StringFlag{Name: "spawn", Usage: "spawn id (omit to pick interactively)"},
+		&cli.StringFlag{Name: "cp", Value: "http://127.0.0.1:8080", Usage: "control-plane (for listing/picking spawns)"},
+		&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP)"},
 	}
 }
 
 // resolveSpawn returns the chosen spawn id: the -spawn flag if set, else an interactive pick.
-func (t terminalFlags) resolveSpawn() string {
-	if *t.spawn != "" {
-		return *t.spawn
+func resolveSpawn(c *cli.Command) string {
+	if s := c.String("spawn"); s != "" {
+		return s
 	}
-	id := chooseSpawn(*t.cp, *t.token)
+	id := chooseSpawn(c.String("cp"), c.String("token"))
 	if id == "" {
 		log.Fatal("no spawn selected")
 	}
 	return id
 }
 
-func runAttach(args []string) {
-	fs := flag.NewFlagSet("attach", flag.ExitOnError)
-	tf := bindTerminalFlags(fs)
-	_ = fs.Parse(args)
-	attachToSpawn(*tf.addr, tf.resolveSpawn(), nil) // nil cmd => opencode TUI
-}
-
-func runExec(args []string) {
-	fs := flag.NewFlagSet("exec", flag.ExitOnError)
-	tf := bindTerminalFlags(fs)
-	// -it is accepted for docker-like familiarity; the mosh path is always an interactive TTY.
-	_ = fs.Bool("it", false, "interactive tty (accepted for familiarity; always on)")
-	_ = fs.Bool("i", false, "interactive (accepted; always on)")
-	_ = fs.Bool("t", false, "tty (accepted; always on)")
-	_ = fs.Parse(args)
-	cmd := fs.Args() // everything after the flags (supports `-- /bin/bash -lc ...`)
-	if len(cmd) == 0 {
-		log.Fatal("usage: spawnctl exec [-it] [-spawn <id>] -- <command> [args...]")
+func attachCmd() *cli.Command {
+	return &cli.Command{
+		Name:  "attach",
+		Usage: "attach the opencode TUI to a running spawn (via mosh)",
+		Flags: terminalFlags(),
+		Action: func(_ context.Context, c *cli.Command) error {
+			attachToSpawn(c.String("addr"), resolveSpawn(c), nil) // nil cmd => opencode TUI
+			return nil
+		},
 	}
-	attachToSpawn(*tf.addr, tf.resolveSpawn(), cmd)
 }
 
-func runShell(args []string) {
-	fs := flag.NewFlagSet("shell", flag.ExitOnError)
-	tf := bindTerminalFlags(fs)
-	_ = fs.Parse(args)
-	// A login-ish bash, falling back to sh if bash is absent in the image.
-	attachToSpawn(*tf.addr, tf.resolveSpawn(), []string{"/bin/sh", "-c", "exec bash -l 2>/dev/null || exec sh"})
+func execCmd() *cli.Command {
+	return &cli.Command{
+		Name:      "exec",
+		Usage:     "run a command in the spawn's container over a terminal",
+		ArgsUsage: "[-it] -- <command> [args...]",
+		Flags: append(terminalFlags(),
+			// -it accepted for docker-like familiarity; the mosh path is always an interactive TTY.
+			&cli.BoolFlag{Name: "it", Aliases: []string{"i", "t"}, Usage: "interactive tty (accepted; always on)"}),
+		Action: func(_ context.Context, c *cli.Command) error {
+			cmd := c.Args().Slice()
+			if len(cmd) == 0 {
+				return cli.Exit("usage: spawnctl exec [-it] [-spawn <id>] -- <command> [args...]", 2)
+			}
+			attachToSpawn(c.String("addr"), resolveSpawn(c), cmd)
+			return nil
+		},
+	}
+}
+
+func shellCmd() *cli.Command {
+	return &cli.Command{
+		Name:  "shell",
+		Usage: "open a shell in the spawn's container (= exec bash)",
+		Flags: terminalFlags(),
+		Action: func(_ context.Context, c *cli.Command) error {
+			// A login bash, falling back to sh if bash is absent in the image.
+			attachToSpawn(c.String("addr"), resolveSpawn(c), []string{"/bin/sh", "-c", "exec bash -l 2>/dev/null || exec sh"})
+			return nil
+		},
+	}
 }
 
 // attachToSpawn asks the node to start a mosh-backed terminal session running cmd (nil => opencode

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -13,6 +12,7 @@ import (
 	"text/tabwriter"
 
 	"connectrpc.com/connect"
+	"github.com/urfave/cli/v3"
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 )
@@ -39,24 +39,30 @@ func spawnName(s *cpv1.SpawnSummary) string {
 	return "-"
 }
 
-// runList prints the caller's spawns as a table (id, status, name, app).
-func runList(args []string) {
-	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	cp := fs.String("cp", "http://127.0.0.1:8080", "control-plane address")
-	token := fs.String("token", "dev-token", "dev auth token (CP)")
-	_ = fs.Parse(args)
-
-	sums := listSpawns(*cp, *token)
-	if len(sums) == 0 {
-		fmt.Fprintln(os.Stderr, "no spawns")
-		return
+// listCmd lists the caller's spawns as a table (id, status, name, app).
+func listCmd() *cli.Command {
+	return &cli.Command{
+		Name:    "list",
+		Aliases: []string{"ls"},
+		Usage:   "list your spawns (id, status, name, app)",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "cp", Value: "http://127.0.0.1:8080", Usage: "control-plane address"},
+			&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP)"},
+		},
+		Action: func(_ context.Context, c *cli.Command) error {
+			sums := listSpawns(c.String("cp"), c.String("token"))
+			if len(sums) == 0 {
+				fmt.Fprintln(os.Stderr, "no spawns")
+				return nil
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+			fmt.Fprintln(w, "SPAWN ID\tSTATUS\tNAME\tAPP")
+			for _, s := range sums {
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.GetSpawnId(), spawnStatus(s), spawnName(s), s.GetAppId())
+			}
+			return w.Flush()
+		},
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "SPAWN ID\tSTATUS\tNAME\tAPP")
-	for _, s := range sums {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.GetSpawnId(), spawnStatus(s), spawnName(s), s.GetAppId())
-	}
-	_ = w.Flush()
 }
 
 // chooseSpawn lists the caller's spawns and lets them pick one (fzf if present, else a numbered
