@@ -110,6 +110,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 	}
 	log.Printf("node: connected to CP at %s (id=%s class=%s)", cfg.CPURL, cfg.NodeID, cfg.NodeClass)
 	go a.heartbeatLoop(connCtx)
+	go a.idleReapLoop(connCtx)
 
 	for {
 		msg, err := a.stream.Receive()
@@ -156,6 +157,56 @@ func (a *attacher) heartbeatLoop(ctx context.Context) {
 	}
 }
 
+// Two-stage idle budgets (sp-8hf item 3): a detached spawn (no clients) is reaped sooner than an
+// attached one. NOTE: this is a LOSSY teardown (reports STOPPED) — the lossless suspend-on-idle path is
+// sp-gd9, gated on E3 persistent storage.
+const (
+	idleDetachedTimeout = 15 * time.Minute
+	idleAttachedTimeout = 60 * time.Minute
+	idleReapInterval    = time.Minute
+)
+
+// idleReapLoop periodically reaps spawns idle past their stage budget, until ctx is cancelled.
+func (a *attacher) idleReapLoop(ctx context.Context) {
+	t := time.NewTicker(idleReapInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			a.reapIdle(ctx, time.Now(), idleDetachedTimeout, idleAttachedTimeout)
+		}
+	}
+}
+
+// reapIdle tears down every spawn whose last relay activity is older than its stage budget (detached
+// vs attached), measured from now. Candidates are snapshotted under the lock, then stopped outside it
+// (stopSpawn takes the lock itself).
+func (a *attacher) reapIdle(ctx context.Context, now time.Time, detachedTimeout, attachedTimeout time.Duration) {
+	a.mu.Lock()
+	type cand struct {
+		id string
+		p  *Pump
+	}
+	cands := make([]cand, 0, len(a.pumps))
+	for id, p := range a.pumps {
+		cands = append(cands, cand{id, p})
+	}
+	a.mu.Unlock()
+
+	for _, c := range cands {
+		budget := detachedTimeout
+		if c.p.attached() {
+			budget = attachedTimeout
+		}
+		if now.Sub(c.p.lastActive()) >= budget {
+			log.Printf("idle-reaping spawn=%s (idle past %s, attached=%v)", c.id, budget, c.p.attached())
+			a.stopSpawn(ctx, c.id)
+		}
+	}
+}
+
 func (a *attacher) status(spawnID string, ph nodev1.SpawnPhase, detail string) {
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{SpawnId: spawnID, Phase: ph, Detail: detail}}})
 }
@@ -165,6 +216,9 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 	case *nodev1.CPMessage_Start:
 		go a.startSpawn(ctx, m.Start)
 	case *nodev1.CPMessage_Stop:
+		if a.staleGen(m.Stop.SpawnId, m.Stop.Generation) {
+			return
+		}
 		a.stopSpawn(ctx, m.Stop.SpawnId)
 	case *nodev1.CPMessage_Open:
 		a.attachClient(m.Open.SpawnId, m.Open.ClientId, m.Open.Cursor)
@@ -176,6 +230,21 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		// TODO(sp-gd9): handle *nodev1.CPMessage_Suspend (persist mounts + tear down, then emit
 		// NodeMessage_SuspendComplete with per-mount markers). Inert until the suspend path lands.
 	}
+}
+
+// staleGen reports whether a control message carrying generation gen targets a superseded container
+// and must be ignored: the spawn is still tracked with a HIGHER generation (it was recreated since the
+// message was sent). gen 0 (standalone / unset) is never fenced.
+func (a *attacher) staleGen(spawnID string, gen uint64) bool {
+	if gen == 0 {
+		return false
+	}
+	live, ok := a.mgr.SpawnGeneration(spawnID)
+	if ok && gen < live {
+		log.Printf("fencing stale message for spawn=%s gen=%d (live gen=%d)", spawnID, gen, live)
+		return true
+	}
+	return false
 }
 
 func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {

@@ -8,8 +8,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -44,7 +47,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("manager init: %v", err)
 	}
-	ctx := context.Background()
+	// SIGTERM/SIGINT cancels ctx; the node's serve loop returns and we gracefully reap our pods
+	// (graceful teardown on shutdown complements reap-on-startup — see sp-8hf).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if err := mgr.PreflightRuntime(ctx); err != nil {
 		log.Fatalf("container runtime preflight failed: %v", err)
 	}
@@ -59,7 +65,12 @@ func main() {
 			NodeOwner:  env("NODE_OWNER", ""),
 		}
 		log.Printf("spawnlet attaching to CP at %s as %s", cpURL, cfg.NodeID)
-		log.Fatal(node.Run(ctx, mgr, h2cClient(), cfg))
+		err := node.Run(ctx, mgr, h2cClient(), cfg) // returns when ctx is cancelled (signal) or on fatal error
+		gracefulStopAll(mgr)
+		if err != nil && ctx.Err() == nil {
+			log.Fatalf("node: %v", err)
+		}
+		return
 	}
 
 	// Standalone mode (unchanged): inbound spawn.v1 server + /ws.
@@ -70,6 +81,16 @@ func main() {
 	addr := env("SPAWNLET_ADDR", "127.0.0.1:9090")
 	log.Printf("spawnlet listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{})))
+}
+
+// gracefulStopAll tears down every spawn this node still runs, on a fresh (signal-independent) context
+// with a bounded deadline so a slow runtime can't hang shutdown forever.
+func gracefulStopAll(mgr *spawnlet.Manager) {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if n := mgr.StopAll(shutdownCtx); n > 0 {
+		log.Printf("graceful shutdown: stopped %d running spawn(s)", n)
+	}
 }
 
 // buildManager selects the pod backend + egress floor by CONTAINER_RUNTIME: runsc -> a containerd

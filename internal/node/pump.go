@@ -65,6 +65,8 @@ type Pump struct {
 	pending     map[string]*pendingPerm
 	permTimeout time.Duration
 
+	lastActivity time.Time // last relay frame in EITHER direction; the idle reaper's clock
+
 	closeFn func() error // agent-attach teardown (set by the integration); preferred over the stdout cast
 	exitFn  func()       // called when readLoop exits on AGENT DEATH (not on intentional stop)
 }
@@ -72,14 +74,37 @@ type Pump struct {
 func newPump(stdin io.Writer, stdout io.Reader) *Pump {
 	return &Pump{
 		stdin: stdin, stdout: stdout, maxLog: defaultMaxLog,
-		clients:     map[string]*client{},
-		toAgent:     make(chan []byte, 64),
-		writerDone:  make(chan struct{}),
-		readerDone:  make(chan struct{}),
-		waiters:     map[int]chan acp.Message{},
-		pending:     map[string]*pendingPerm{},
-		permTimeout: defaultPermTimeout,
+		clients:      map[string]*client{},
+		toAgent:      make(chan []byte, 64),
+		writerDone:   make(chan struct{}),
+		readerDone:   make(chan struct{}),
+		waiters:      map[int]chan acp.Message{},
+		pending:      map[string]*pendingPerm{},
+		permTimeout:  defaultPermTimeout,
+		lastActivity: time.Now(), // start the idle clock at creation, not the zero time
 	}
+}
+
+// lastActive reports the time of the most recent relay frame in either direction.
+func (p *Pump) lastActive() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastActivity
+}
+
+// attached reports whether any client is currently subscribed (the two-stage idle reaper gives
+// attached spawns a longer budget than detached ones).
+func (p *Pump) attached() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.clients) > 0
+}
+
+// markActive refreshes the idle clock. Callers must NOT already hold mu.
+func (p *Pump) markActive() {
+	p.mu.Lock()
+	p.lastActivity = time.Now()
+	p.mu.Unlock()
 }
 
 // appendFrames assigns seqs, appends to the log (trimming the oldest past maxLog), and wakes clients.
@@ -88,6 +113,7 @@ func (p *Pump) appendFrames(fs []Frame) {
 		return
 	}
 	p.mu.Lock()
+	p.lastActivity = time.Now() // agent->client relay = activity
 	for i := range fs {
 		p.seq++
 		fs[i].Seq = p.seq
@@ -401,6 +427,7 @@ func (p *Pump) fromClient(clientID string, line []byte) {
 	if err != nil {
 		return
 	}
+	p.markActive() // client->pump relay = activity
 	switch f.Kind {
 	case "prompt":
 		p.mu.Lock()

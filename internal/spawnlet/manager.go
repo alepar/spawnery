@@ -92,6 +92,16 @@ func (m *Manager) Attach(ctx context.Context, sp *Spawn) (*runtime.AttachedStrea
 	})
 }
 
+// SpawnGeneration returns the generation of a live spawn (and whether it is tracked), so callers can
+// fence stale-generation control messages against the container actually running.
+func (m *Manager) SpawnGeneration(id string) (uint64, bool) {
+	sp, ok := m.store.Get(id)
+	if !ok {
+		return 0, false
+	}
+	return sp.Generation, true
+}
+
 // RunningInventory returns the spawns this node currently manages (id + generation), for the CP
 // reconcile carried on Register/Heartbeat.
 func (m *Manager) RunningInventory() []runtime.ManagedPod {
@@ -119,6 +129,19 @@ func (m *Manager) ReapOrphans(ctx context.Context) error {
 		_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: mp.SidecarID, AgentID: mp.AgentID, SandboxID: mp.SandboxID})
 	}
 	return nil
+}
+
+// StopAll tears down every spawn this Manager tracks, for graceful node shutdown — a SIGTERM'd node
+// reaps its own pods instead of leaving orphans for the next process's reap-on-startup. Returns the
+// number of spawns it stopped.
+func (m *Manager) StopAll(ctx context.Context) int {
+	sps := m.store.List()
+	for _, sp := range sps {
+		if err := m.Stop(ctx, sp.ID); err != nil {
+			log.Printf("stopAll: stop %s: %v", sp.ID, err)
+		}
+	}
+	return len(sps)
 }
 
 func (m *Manager) Create(ctx context.Context, id, appPath, model string, generation uint64) (*Spawn, error) {
