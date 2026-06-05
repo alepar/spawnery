@@ -18,7 +18,10 @@ cp.db*
 .env.*
 /.make/
 /cp
+/authsvc
+/spawnery-ca
 /telemetry/
+/.dev-ca/   # local dev CA material (private keys) — never commit
 
 # Syncthing conflict artifacts in the externally-synced .beads dir (not source of truth)
 .beads/*.sync-conflict-*

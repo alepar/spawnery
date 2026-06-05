@@ -1,11 +1,13 @@
 set dotenv-load := true              # auto-load .env (OPENROUTER_API_KEY) if present
 
-repo      := justfile_directory()
-addr      := "127.0.0.1:9090"
-addr_cp   := "127.0.0.1:8080"
-addr_as   := "127.0.0.1:8090"
-free      := "openai/gpt-oss-120b:free"
-data_root := repo / ".spawns"
+repo         := justfile_directory()
+addr         := "127.0.0.1:9090"
+addr_cp      := "127.0.0.1:8080"
+addr_cp_node := "127.0.0.1:8081"   # CP mTLS node listener (enforced mode)
+addr_as      := "127.0.0.1:8090"
+free         := "openai/gpt-oss-120b:free"
+data_root    := repo / ".spawns"
+devca        := repo / ".dev-ca"
 
 # list recipes
 default:
@@ -52,6 +54,48 @@ web:
 # both, in mprocs panes (one Ctrl-C)
 dev:
     mprocs
+
+# --- enforced node-auth dev stack (mTLS node<->CP) -----------------------
+
+# generate a LOCAL dev CA: root, self-hosted intermediate, CP node-listener server cert, and a
+# pre-provisioned node identity (node-1/alice) into .dev-ca/. NOT for production.
+gen-dev-ca:
+    @make bin/spawnery-ca
+    {{repo}}/bin/spawnery-ca dev {{devca}}
+
+# control plane with enforced node auth: mTLS node listener on a second port; clients still use :8080.
+cp-enforced:
+    @make bin/cp
+    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \
+    CP_NODE_ROOT_CA={{devca}}/root.pem \
+    CP_NODE_TLS_CERT={{devca}}/cp-server.pem CP_NODE_TLS_KEY={{devca}}/cp-server-key.pem \
+    {{repo}}/bin/cp
+
+# auth service loaded with the persistent dev CA (issues real certs; mints enrollment + session tokens).
+authsvc-enforced:
+    @make bin/authsvc
+    AS_LISTEN={{addr_as}} \
+    AS_ROOT_CA_PEM={{devca}}/root.pem \
+    AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
+    AS_INTERMEDIATE_KEY_PEM={{devca}}/self-hosted-intermediate-key.pem \
+    {{repo}}/bin/authsvc
+
+# node with enforced auth: pre-provisioned identity from .dev-ca/node, mTLS to the CP node listener.
+node-enforced agent="agent": (_images agent)
+    @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
+    AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
+    CP_ADDR=http://{{addr_cp}} NODE_AUTH_MODE=enforced \
+    CP_NODE_ADDR=https://{{addr_cp_node}} NODE_ID=node-1 NODE_ID_DIR={{devca}}/node \
+    NODE_CLASS=self-hosted EGRESS_ENFORCE=false \
+    NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
+    OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
+    {{repo}}/bin/spawnlet
+
+# enforced dev stack in mprocs (generates .dev-ca first if missing). Real mTLS between node and CP.
+dev-enforced:
+    @test -f {{devca}}/root.pem || just gen-dev-ca
+    mprocs --config {{repo}}/mprocs-enforced.yaml
 
 # one-shot spawnctl against the running spawnlet
 spawnctl prompt="What is the secret word?" model=free:
