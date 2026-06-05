@@ -12,9 +12,9 @@ default:
 
 # --- run the dev stack ---------------------------------------------------
 
-# spawnlet, foreground. agent = goose (default) | stub
-spawnlet agent="goose": (_images agent)
-    @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "goose" } }}:dev; \
+# spawnlet, foreground. agent = agent (opencode, default) | stub
+spawnlet agent="agent": (_images agent)
+    @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev \
     DATA_ROOT={{data_root}} SPAWNLET_ADDR={{addr}} \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
@@ -26,17 +26,18 @@ cp:
     CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/cp
 
 # spawnlet attached to the CP — root-free dev node (self-hosted + egress floor off). `just node stub` = echo agent.
-node agent="goose": (_images agent)
-    @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "goose" } }}:dev; \
+node agent="agent": (_images agent)
+    @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
     NODE_CLASS=self-hosted EGRESS_ENFORCE=false \
+    NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
     {{repo}}/bin/spawnlet
 
 # build only the artifacts the chosen agent needs
-_images agent="goose":
-    make bin/spawnlet .make/img-sidecar .make/img-{{ if agent == "stub" { "stubagent" } else { "goose" } }}
+_images agent="agent":
+    make bin/spawnlet .make/img-sidecar .make/img-{{ if agent == "stub" { "stubagent" } else { "agent" } }}
 
 # web UI (vite, LAN-accessible)
 web:
@@ -103,4 +104,4 @@ setup:
 
 # reap containers the dev stack leaked (sp-8hf)
 reap:
-    -docker rm -f $(docker ps -aq --filter ancestor=spawnery/goose:dev --filter ancestor=spawnery/stubagent:dev --filter ancestor=spawnery/sidecar:dev) 2>/dev/null
+    -docker rm -f $(docker ps -aq --filter ancestor=spawnery/agent:dev --filter ancestor=spawnery/stubagent:dev --filter ancestor=spawnery/sidecar:dev) 2>/dev/null

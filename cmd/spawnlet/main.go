@@ -65,6 +65,20 @@ func main() {
 			NodeClass:  env("NODE_CLASS", "cloud"),
 			NodeOwner:  env("NODE_OWNER", ""),
 		}
+		// Terminal control plane (around CP for now): a small inbound listener so `spawnctl tmux`
+		// can ask this node to start a mosh-backed terminal session for a spawn. The mosh UDP data
+		// plane goes straight to this node. (CP-routed terminal control is sp-wsu.2.)
+		if taddr := env("NODE_TERMINAL_ADDR", "127.0.0.1:9092"); taddr != "" {
+			tsrv := spawnlet.NewServer(mgr)
+			tmux := http.NewServeMux()
+			tmux.HandleFunc("/terminal", tsrv.HandleTerminal)
+			go func() {
+				log.Printf("spawnlet terminal endpoint on %s (spawnctl tmux -addr http://%s)", taddr, taddr)
+				if err := http.ListenAndServe(taddr, tmux); err != nil {
+					log.Printf("terminal listener: %v", err)
+				}
+			}()
+		}
 		log.Printf("spawnlet attaching to CP at %s as %s", cpURL, cfg.NodeID)
 		err := node.Run(ctx, mgr, h2cClient(), cfg) // returns when ctx is cancelled (signal) or on fatal error
 		gracefulStopAll(mgr)
