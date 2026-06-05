@@ -19,6 +19,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/lock"
+	"spawnery/internal/cp/nodeauth"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/scheduler"
@@ -28,12 +29,12 @@ import (
 
 type Server struct {
 	cpv1connect.UnimplementedSpawnServiceHandler // new RPCs default to CodeUnimplemented until sp-pc4
-	reg   *registry.Registry
-	rt    *router.Router
-	sched *scheduler.Scheduler
-	st    store.Store
-	tel   telemetry.Sink
-	locks *lock.Keyed
+	reg                                          *registry.Registry
+	rt                                           *router.Router
+	sched                                        *scheduler.Scheduler
+	st                                           store.Store
+	tel                                          telemetry.Sink
+	locks                                        *lock.Keyed
 
 	maxSpawnsPerOwner int
 }
@@ -90,11 +91,20 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 		case *nodev1.NodeMessage_Register:
 			nodeID = m.Register.NodeId
 			nodeClass = m.Register.NodeClass
+			nodeOwner := m.Register.NodeOwner
+			// enforced mode: the verified mTLS identity is authoritative; the self-asserted Register
+			// fields are ignored. insecure mode (no identity on ctx) falls back to them (dev/test).
+			if id, ok := nodeauth.IdentityFromContext(ctx); ok {
+				if m.Register.NodeId != "" && m.Register.NodeId != id.NodeID {
+					log.Printf("node %s: self-asserted node_id %q != verified identity; using verified", id.NodeID, m.Register.NodeId)
+				}
+				nodeID, nodeClass, nodeOwner = id.NodeID, id.Class, id.AccountID
+			}
 			if nodeClass == "" {
 				nodeClass = "cloud" // safe default: an unidentified node is assumed restricted
 			}
-			s.reg.Add(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: m.Register.NodeOwner})
-			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, m.Register.NodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
+			s.reg.Add(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: nodeOwner})
+			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, nodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
 			s.reconcileInventory(ctx, nodeID, m.Register.Running) // a returning node reports what it still runs
 		case *nodev1.NodeMessage_Heartbeat:
 			s.reg.Heartbeat(nodeID, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)

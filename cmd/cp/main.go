@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net/http"
@@ -18,11 +19,13 @@ import (
 	"spawnery/gen/node/v1/nodev1connect"
 	"spawnery/internal/cp"
 	"spawnery/internal/cp/auth"
+	"spawnery/internal/cp/nodeauth"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/scheduler"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
+	"spawnery/internal/pki"
 )
 
 const sqliteDefaultDSN = "file:cp.db?_pragma=busy_timeout(5000)"
@@ -103,13 +106,66 @@ func main() {
 	srv.SetMaxSpawnsPerOwner(envInt("CP_MAX_SPAWNS_PER_OWNER", 5))
 
 	mux := http.NewServeMux()
-	mux.Handle(nodev1connect.NewNodeServiceHandler(srv)) // node side: no auth (internal nodes)
 	mux.Handle(cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(authn.Interceptor())))
 	mux.HandleFunc("/ws/session", srv.HandleWS(authn))
 
+	// Node-auth mode (sp-ova). insecure (dev/test default): nodes share the main h2c listener with no
+	// auth — identity falls back to the self-asserted Register fields. enforced: nodes connect over mTLS
+	// on a dedicated listener and their identity is the verified client cert (see internal/cp/nodeauth).
+	mode := nodeauth.Mode(env("NODE_AUTH_MODE", string(nodeauth.ModeInsecure)))
+	nodePath, nodeHandler := nodev1connect.NewNodeServiceHandler(srv)
+	if mode == nodeauth.ModeEnforced {
+		go func() {
+			if err := serveNodeTLS(env("CP_NODE_LISTEN", "127.0.0.1:8081"), nodePath, nodeHandler); err != nil {
+				log.Fatalf("cp: node mTLS listener: %v", err)
+			}
+		}()
+	} else {
+		mux.Handle(nodePath, nodeHandler)
+	}
+
 	addr := env("CP_LISTEN", "127.0.0.1:8080")
-	log.Printf("cp listening on %s", addr)
+	log.Printf("cp listening on %s (node-auth mode=%s)", addr, mode)
 	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{})))
+}
+
+// serveNodeTLS runs the NodeService over mTLS on its own listener. Nodes MUST present a client cert,
+// which nodeauth.Middleware verifies against the pinned Root CA (enforcing name constraints) and turns
+// into the node identity. TLS verification is RequireAnyClientCert so the middleware is the single
+// verification point (chain + name constraints + SAN identity, all via internal/pki).
+func serveNodeTLS(addr, nodePath string, nodeHandler http.Handler) error {
+	rootPEM, err := os.ReadFile(env("CP_NODE_ROOT_CA", "/etc/spawnery/cp/node-root-ca.pem"))
+	if err != nil {
+		return fmt.Errorf("read pinned root CA: %w", err)
+	}
+	root, err := pki.ParseCertPEM(rootPEM)
+	if err != nil {
+		return fmt.Errorf("parse pinned root CA: %w", err)
+	}
+	serverCert, err := tls.LoadX509KeyPair(
+		env("CP_NODE_TLS_CERT", "/etc/spawnery/cp/server.pem"),
+		env("CP_NODE_TLS_KEY", "/etc/spawnery/cp/server-key.pem"),
+	)
+	if err != nil {
+		return fmt.Errorf("load CP server cert: %w", err)
+	}
+	nodeMux := http.NewServeMux()
+	nodeMux.Handle(nodePath, nodeHandler)
+	server := &http.Server{
+		Addr:    addr,
+		Handler: nodeauth.Middleware(nodeauth.ModeEnforced, root, nodeMux),
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{serverCert},
+			ClientAuth:   tls.RequireAnyClientCert, // present required; verified in the middleware
+			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"h2", "http/1.1"},
+		},
+	}
+	if err := http2.ConfigureServer(server, &http2.Server{}); err != nil {
+		return fmt.Errorf("configure http2: %w", err)
+	}
+	log.Printf("cp: node mTLS listener on %s", addr)
+	return server.ListenAndServeTLS("", "")
 }
 
 func parseTokens(s string) map[string]string {
