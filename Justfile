@@ -3,6 +3,7 @@ set dotenv-load := true              # auto-load .env (OPENROUTER_API_KEY) if pr
 repo      := justfile_directory()
 addr      := "127.0.0.1:9090"
 addr_cp   := "127.0.0.1:8080"
+addr_as   := "127.0.0.1:8090"
 free      := "openai/gpt-oss-120b:free"
 data_root := repo / ".spawns"
 
@@ -24,6 +25,11 @@ spawnlet agent="agent": (_images agent)
 cp:
     @make bin/cp
     CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/cp
+
+# auth service (foreground; dev = ephemeral in-memory CA, not for production)
+authsvc:
+    @make bin/authsvc
+    AS_DEV=1 AS_LISTEN={{addr_as}} {{repo}}/bin/authsvc
 
 # spawnlet attached to the CP — root-free dev node (self-hosted + egress floor off). `just node stub` = echo agent.
 node agent="agent": (_images agent)

@@ -14,16 +14,13 @@ import (
 	"time"
 
 	"spawnery/internal/authsvc"
+	"spawnery/internal/pki"
 )
 
 func main() {
-	root := mustRead("AS_ROOT_CA_PEM", "/etc/spawnery/as/root-ca.pem")
-	interCert := mustRead("AS_INTERMEDIATE_CERT_PEM", "/etc/spawnery/as/self-hosted-intermediate.pem")
-	interKey := mustRead("AS_INTERMEDIATE_KEY_PEM", "/etc/spawnery/as/self-hosted-intermediate-key.pem")
-
-	svc, err := authsvc.Load(root, interCert, interKey)
+	svc, err := buildService()
 	if err != nil {
-		log.Fatalf("authsvc: load CA material: %v", err)
+		log.Fatalf("authsvc: %v", err)
 	}
 
 	addr := env("AS_LISTEN", "127.0.0.1:8090")
@@ -42,6 +39,29 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("authsvc: %v", err)
 	}
+}
+
+// buildService loads the AS's CA material. AS_DEV=1 bootstraps an ephemeral in-memory CA (for `just
+// dev` / local testing — NOT production); otherwise it loads the persisted Root + self-hosted
+// intermediate (cert + key) from disk.
+func buildService() (*authsvc.Service, error) {
+	if os.Getenv("AS_DEV") == "1" {
+		root, err := pki.NewRootCA("Spawnery Dev Root")
+		if err != nil {
+			return nil, err
+		}
+		inter, err := root.NewIntermediate(pki.ClassSelfHosted)
+		if err != nil {
+			return nil, err
+		}
+		log.Printf("authsvc: DEV MODE — ephemeral in-memory CA (do NOT use in production)")
+		return authsvc.New(root.Cert, inter), nil
+	}
+	return authsvc.Load(
+		mustRead("AS_ROOT_CA_PEM", "/etc/spawnery/as/root-ca.pem"),
+		mustRead("AS_INTERMEDIATE_CERT_PEM", "/etc/spawnery/as/self-hosted-intermediate.pem"),
+		mustRead("AS_INTERMEDIATE_KEY_PEM", "/etc/spawnery/as/self-hosted-intermediate-key.pem"),
+	)
 }
 
 func mustRead(envKey, def string) []byte {

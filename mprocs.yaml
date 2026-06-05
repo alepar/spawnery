@@ -1,4 +1,5 @@
 procs:
-  cp:   { shell: "just cp" }
-  node: { shell: "just node" }
-  web:  { shell: "just web" }
+  authsvc: { shell: "just authsvc" }
+  cp:      { shell: "just cp" }
+  node:    { shell: "just node" }
+  web:     { shell: "just web" }
