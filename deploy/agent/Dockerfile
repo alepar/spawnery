@@ -1,32 +1,25 @@
-# Goose ACP agent base image for the spawnlet slice.
+# opencode agent image for the spawnery slice.
 #
-# Goose specifics (resolved against block/goose v1.36.0 + agentclientprotocol.com):
-#   1. ACP launch invocation: `goose acp` — runs Goose as an ACP agent over
-#      stdio (JSON-RPC 2.0, newline-delimited), the mode editors like Zed use.
-#   2. OpenAI-compatible provider with a custom base URL is configured via env:
-#        GOOSE_PROVIDER=openai
-#        GOOSE_MODEL=<model>                  (from $SPAWN_MODEL)
-#        OPENAI_HOST=http://127.0.0.1:8080    (the sidecar; host only, no path)
-#        OPENAI_BASE_PATH=v1/chat/completions (default; sidecar forwards /v1/* )
-#        OPENAI_API_KEY=<dummy>               (sidecar injects the real key)
-#   3. cwd=/app is set by the client via ACP session/new {"cwd":"/app"};
-#      WORKDIR /app is the container default working dir. Goose reads /app/AGENTS.md
-#      in place; data mounts live rw at /app/<path>.
+# Runs `opencode serve` (headless HTTP+SSE) plus the in-pod acpadapter, which
+# presents canonical ACP to the node and normalizes opencode's API. The TUI
+# (Phase 2) attaches in-pod via `opencode attach` inside tmux. opencode reaches
+# the model provider through the sidecar's OpenAI-compatible endpoint
+# (127.0.0.1:8080), which injects the real OpenRouter key.
 #
-# We install a pinned, statically-linked (musl) Goose release so the image can
-# stay slim and has no runtime glibc dependency.
+# Pinned opencode version — see docs/superpowers/notes/opencode-api-pinned.md.
 FROM debian:bookworm-slim AS fetch
-ARG GOOSE_VERSION=v1.36.0
-ARG GOOSE_ASSET=goose-x86_64-unknown-linux-musl.tar.gz
+ARG OPENCODE_VERSION=v1.15.13
+ARG OPENCODE_ASSET=opencode-linux-x64.tar.gz
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL \
-      "https://github.com/block/goose/releases/download/${GOOSE_VERSION}/${GOOSE_ASSET}" \
-      -o /tmp/goose.tar.gz \
- && tar -xzf /tmp/goose.tar.gz -C /usr/local/bin \
- && chmod +x /usr/local/bin/goose \
- && rm /tmp/goose.tar.gz
+      "https://github.com/anomalyco/opencode/releases/download/${OPENCODE_VERSION}/${OPENCODE_ASSET}" \
+      -o /tmp/opencode.tar.gz \
+ && mkdir -p /tmp/oc \
+ && tar -xzf /tmp/opencode.tar.gz -C /tmp/oc \
+ && install -m 0755 "$(find /tmp/oc -type f -name opencode | head -1)" /usr/local/bin/opencode \
+ && /usr/local/bin/opencode --version
 
 FROM golang:1.26 AS gobuild
 WORKDIR /src
@@ -35,11 +28,12 @@ RUN CGO_ENABLED=0 go build -o /acpadapter ./deploy/agent/acpadapter
 
 FROM debian:bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get install -y --no-install-recommends ca-certificates tmux tini \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=fetch /usr/local/bin/goose /usr/local/bin/goose
+COPY --from=fetch /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=gobuild /acpadapter /usr/local/bin/acpadapter
 COPY deploy/agent/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 WORKDIR /app
-ENTRYPOINT ["/entrypoint.sh"]
+# tini reaps the opencode serve child; entrypoint launches serve + adapter.
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]

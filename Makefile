@@ -14,10 +14,11 @@ gen: .make/gen
 	buf generate && touch $@
 
 # Image stamps — rebuild an image only when its build context changes.
-images: .make/img-sidecar .make/img-stubagent .make/img-goose
+images: .make/img-sidecar .make/img-stubagent .make/img-agent
 .make/img-sidecar:   deploy/sidecar/Dockerfile   $(GO_SRCS) | .make ; docker build -t spawnery/sidecar:dev   -f $< . && touch $@
 .make/img-stubagent: deploy/stubagent/Dockerfile $(GO_SRCS) | .make ; docker build -t spawnery/stubagent:dev -f $< . && touch $@
-.make/img-goose:     deploy/agent/Dockerfile     $(GO_SRCS) | .make ; docker build -t spawnery/goose:dev     -f $< . && touch $@
+# The agent image now ships opencode + tmux (replacing goose). Tag stays generic.
+.make/img-agent:     deploy/agent/Dockerfile     $(GO_SRCS) | .make ; docker build -t spawnery/agent:dev     -f $< . && touch $@
 
 bin:    ; @mkdir -p bin
 .make:  ; @mkdir -p .make
