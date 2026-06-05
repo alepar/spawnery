@@ -17,7 +17,7 @@ import (
 // acpPort is the TCP port the agent's acpadapter listens on (on the pod IP) for the CRI/runsc lane.
 // The node dials podIP:acpPort because gVisor isolates the in-sandbox abstract-UDS namespace from the
 // host (so the runc-lane setns+UDS attach cannot work under runsc).
-const acpPort = 7000
+const acpPort = runtime.ACPPort // single source of truth
 
 // CRIPodBackend runs a spawn pod as one CRI sandbox (handler=runsc) with two containers
 // (sidecar + agent) sharing the pod network namespace. Implements runtime.PodBackend.

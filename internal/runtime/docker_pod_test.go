@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 )
 
@@ -141,23 +142,38 @@ func TestDockerPodBackendStartPodToleratesMissingIPAndPID(t *testing.T) {
 	})
 }
 
-func TestDockerPodBackendAttachUsesRuntimeAttach(t *testing.T) {
-	f := NewFake()
-	b := NewDockerPodBackend(f, "", "smoke")
-	att, err := b.Attach(context.Background(), &PodHandle{AgentID: "fake-1"})
+func TestDockerPodBackendAttachDialsTCP(t *testing.T) {
+	// A loopback listener stands in for the in-pod acpadapter; the backend dials podIP:port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	// Echo server: read 4 bytes, write them back.
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer c.Close()
+		buf := make([]byte, 4)
+		if _, rerr := c.Read(buf); rerr == nil {
+			_, _ = c.Write(buf)
+		}
+	}()
+
+	b := NewDockerPodBackend(NewFake(), "", "smoke")
+	b.acpPort = port // white-box: override the fixed ACPPort for the test
+	att, err := b.Attach(context.Background(), &PodHandle{AgentID: "ag", PodIP: "127.0.0.1"})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
-	if att == nil || att.Stdin == nil || att.Stdout == nil {
-		t.Fatalf("Attach returned an incomplete stream: %+v", att)
+	defer att.Close()
+	if _, err := att.Stdin.Write([]byte("ping")); err != nil {
+		t.Fatalf("write: %v", err)
 	}
-	// The fake's stream is a synchronous io.Pipe (Write blocks until Read), so write concurrently —
-	// matching how the relay actually drives it (separate stdin->stdout goroutines).
-	werr := make(chan error, 1)
-	go func() {
-		_, err := att.Stdin.Write([]byte("ping"))
-		werr <- err
-	}()
 	buf := make([]byte, 4)
 	if _, err := att.Stdout.Read(buf); err != nil {
 		t.Fatalf("read echo: %v", err)
@@ -165,10 +181,13 @@ func TestDockerPodBackendAttachUsesRuntimeAttach(t *testing.T) {
 	if string(buf) != "ping" {
 		t.Fatalf("echo = %q", buf)
 	}
-	if err := <-werr; err != nil {
-		t.Fatalf("write: %v", err)
+}
+
+func TestDockerPodBackendAttachRequiresIP(t *testing.T) {
+	b := NewDockerPodBackend(NewFake(), "", "smoke")
+	if _, err := b.Attach(context.Background(), &PodHandle{AgentID: "ag"}); err == nil {
+		t.Fatal("Attach must fail when the pod has no IP")
 	}
-	_ = att.Close()
 }
 
 func TestDockerPodBackendPreflight(t *testing.T) {

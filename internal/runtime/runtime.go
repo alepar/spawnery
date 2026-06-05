@@ -7,6 +7,13 @@ import (
 	"io"
 )
 
+// ACPPort is the TCP port the in-pod acpadapter listens on for the node's ACP
+// connection. Both lanes use TCP: the runc/shared-netns lane dials the pod bridge
+// IP, the runsc/CRI lane dials the pod IP via the CNI bridge. (gVisor isolates the
+// in-sandbox abstract-UDS namespace, and the opencode adapter has no stdio ACP
+// channel, so stdio attach is gone.)
+const ACPPort = 7000
+
 type Mount struct {
 	HostPath, ContainerPath string
 	ReadOnly                bool

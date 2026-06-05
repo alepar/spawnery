@@ -14,6 +14,9 @@ import (
 func TestWSRelayEchoesViaFake(t *testing.T) {
 	f := runtime.NewFake()
 	m := NewManager(f, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
+	// White-box: replace the real Docker backend (now TCP-dialing) with a fake whose Attach returns
+	// an io.Pipe echo stream, so this test exercises the relay logic independent of the transport.
+	m.pod = &fakePodBackend{}
 	srv := NewServer(m)
 	sp, err := m.Create(context.Background(), "ws-1", writeApp(t), "x", 0) // writeApp from manager_test.go
 	if err != nil {

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 )
 
@@ -23,6 +24,15 @@ type DockerPodBackend struct {
 	rt          ContainerRuntime
 	runtimeName string // OCI runtime smoke-tested by Preflight ("" = default, skip)
 	smokeImage  string // image for the preflight smoke container
+	acpPort     int    // 0 => ACPPort; overridable in tests
+}
+
+// port returns the ACP TCP port the adapter listens on (ACPPort unless overridden).
+func (d *DockerPodBackend) port() int {
+	if d.acpPort != 0 {
+		return d.acpPort
+	}
+	return ACPPort
 }
 
 // NewDockerPodBackend wraps a ContainerRuntime. runtimeName + smokeImage drive Preflight.
@@ -83,11 +93,12 @@ func (d *DockerPodBackend) StartPod(ctx context.Context, spec PodSpec) (*PodHand
 // StartAgent starts the agent container in the sidecar's netns and records its id on the handle.
 func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec AgentSpec) error {
 	agentID, err := d.rt.StartContainer(ctx, ContainerSpec{
-		Image:          spec.Image,
-		NetnsOf:        h.SidecarID,
-		Env:            spec.Env,
+		Image:   spec.Image,
+		NetnsOf: h.SidecarID,
+		// The adapter listens on TCP for the node (both lanes now); no stdio ACP channel.
+		Env:            append([]string{fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", d.port())}, spec.Env...),
 		Mounts:         spec.Mounts,
-		AttachStdio:    true,
+		AttachStdio:    false,
 		MemoryBytes:    spec.Resources.MemoryBytes,
 		NanoCPUs:       spec.Resources.NanoCPUs,
 		PidsLimit:      spec.Resources.PidsLimit,
@@ -103,10 +114,18 @@ func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec Ag
 	return nil
 }
 
-// Attach returns the agent's stdio via Docker's attach API — works on Mac (Docker Desktop) and Linux
-// (incl. rootless Docker/Podman) without root, since it rides the Docker API, not setns.
+// Attach dials the agent's ACP adapter over TCP on the pod IP. The agent shares the sidecar's netns,
+// so the sidecar/pod bridge IP reaches the adapter's port. Unified with the CRI lane; the old
+// Docker-API stdio hijack is gone because the opencode adapter has no stdio ACP channel.
+//
+// NOTE: requires the pod to have a bridge IP. Rootful Docker and the CRI/CNI lane provide one;
+// rootless Podman with slirp4netns/pasta may not, in which case the node cannot reach the adapter
+// without published-port plumbing (a follow-up if rootless-without-bridge must be supported).
 func (d *DockerPodBackend) Attach(ctx context.Context, h *PodHandle) (*AttachedStream, error) {
-	return d.rt.Attach(ctx, h.AgentID)
+	if h.PodIP == "" {
+		return nil, fmt.Errorf("docker attach: pod has no IP (rootless-without-bridge is unsupported for TCP ACP)")
+	}
+	return AttachTCP(ctx, net.JoinHostPort(h.PodIP, strconv.Itoa(d.port())))
 }
 
 // ListManaged groups all spawnery-managed containers by spawn id into ManagedPods (sidecar + agent
