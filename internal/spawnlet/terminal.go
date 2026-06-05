@@ -1,0 +1,104 @@
+package spawnlet
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"regexp"
+	"strconv"
+)
+
+// Terminal attach: spawnctl tmux <spawn> -> CP -> node. The node starts a mosh-server whose child
+// execs into the spawn's agent container and runs a persistent tmux session hosting the opencode
+// TUI, attached to the in-pod opencode server. The TUI and the web UI then share one
+// server-authoritative session (see sp-wsu). mosh's UDP data plane goes straight to the node.
+
+const (
+	defaultAttachURL   = "http://127.0.0.1:4096"
+	defaultTmuxSession = "opencode"
+)
+
+// TerminalSession is the mosh connect info handed back (via CP) to spawnctl.
+type TerminalSession struct {
+	Host string // node address spawnctl's mosh-client dials
+	Port int    // mosh UDP port
+	Key  string // mosh AES key (MOSH_KEY)
+}
+
+// TerminalConfig configures the terminal launcher per lane/node.
+type TerminalConfig struct {
+	ExecPrefix  []string // runtime exec invocation, e.g. ["docker","exec","-it"] or ["crictl","exec","-it"]
+	AttachURL   string   // opencode server URL inside the container (default 127.0.0.1:4096)
+	Session     string   // tmux session name (default "opencode")
+	OcSessionID string   // the spawn's opencode session id (so the TUI lands on the shared session)
+	AdvertiseIP string   // node IP mosh advertises to the client; "" => mosh auto-detects
+}
+
+// attachCommand is the in-container command: a persistent tmux session running the opencode TUI.
+// `tmux new-session -A` ATTACHES to the tmux session if it already exists (reattach), else creates
+// it — this is what makes a second `spawnctl tmux` reattach rather than spawn a duplicate.
+//
+// The TUI MUST be pointed at the spawn's shared opencode session, or `opencode attach` opens a fresh
+// empty one (verified on 1.15.13). We pass `-s <ocSessionID>` when the node knows it (it does — the
+// pump records it from session/new); otherwise `-c` (continue the last session), which is correct
+// under the one-session-per-spawn invariant.
+func attachCommand(url, tmuxSession, ocSessionID string) []string {
+	if url == "" {
+		url = defaultAttachURL
+	}
+	if tmuxSession == "" {
+		tmuxSession = defaultTmuxSession
+	}
+	attach := []string{"opencode", "attach", url}
+	if ocSessionID != "" {
+		attach = append(attach, "-s", ocSessionID)
+	} else {
+		attach = append(attach, "-c")
+	}
+	return append([]string{"tmux", "new-session", "-A", "-s", tmuxSession}, attach...)
+}
+
+// execArgv prefixes the in-container command with the runtime's exec invocation + container id.
+func execArgv(execPrefix []string, containerID string, inner []string) []string {
+	argv := make([]string, 0, len(execPrefix)+1+len(inner))
+	argv = append(argv, execPrefix...)
+	argv = append(argv, containerID)
+	return append(argv, inner...)
+}
+
+var moshConnectRE = regexp.MustCompile(`MOSH CONNECT (\d+) (\S+)`)
+
+// parseMoshConnect extracts the port + key from mosh-server's "MOSH CONNECT <port> <key>" line.
+func parseMoshConnect(out string) (port int, key string, err error) {
+	m := moshConnectRE.FindStringSubmatch(out)
+	if m == nil {
+		return 0, "", fmt.Errorf("no MOSH CONNECT line in mosh-server output: %q", out)
+	}
+	port, _ = strconv.Atoi(m[1])
+	return port, m[2], nil
+}
+
+// moshServerArgs builds the mosh-server argv for the given child command.
+func moshServerArgs(advertiseIP string, child []string) []string {
+	args := []string{"new"}
+	if advertiseIP != "" {
+		args = append(args, "-i", advertiseIP)
+	}
+	args = append(args, "--")
+	return append(args, child...)
+}
+
+// StartTerminal launches a mosh-server bound to a tmux+opencode-attach session execed into the
+// spawn's container, and returns the mosh connect info for spawnctl.
+func StartTerminal(ctx context.Context, containerID string, cfg TerminalConfig) (TerminalSession, error) {
+	child := execArgv(cfg.ExecPrefix, containerID, attachCommand(cfg.AttachURL, cfg.Session, cfg.OcSessionID))
+	out, err := exec.CommandContext(ctx, "mosh-server", moshServerArgs(cfg.AdvertiseIP, child)...).Output()
+	if err != nil {
+		return TerminalSession{}, fmt.Errorf("mosh-server: %w", err)
+	}
+	port, key, perr := parseMoshConnect(string(out))
+	if perr != nil {
+		return TerminalSession{}, perr
+	}
+	return TerminalSession{Host: cfg.AdvertiseIP, Port: port, Key: key}, nil
+}
