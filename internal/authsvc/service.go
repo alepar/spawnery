@@ -6,6 +6,8 @@
 package authsvc
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/x509"
 	"sync"
 	"time"
@@ -28,6 +30,8 @@ type Service struct {
 	now       func() time.Time
 	enrollTTL time.Duration
 
+	sessionKey ed25519.PrivateKey // signs AS session tokens (sp-3ca); CP never holds it
+
 	mu     sync.Mutex
 	tokens map[string]enrollToken // pending one-time enrollment tokens
 }
@@ -47,6 +51,9 @@ func WithClock(now func() time.Time) Option { return func(s *Service) { s.now = 
 // WithEnrollTokenTTL overrides the enrollment-token lifetime.
 func WithEnrollTokenTTL(d time.Duration) Option { return func(s *Service) { s.enrollTTL = d } }
 
+// WithSessionKey sets the session-signing key (production loads a persisted key; default generates one).
+func WithSessionKey(k ed25519.PrivateKey) Option { return func(s *Service) { s.sessionKey = k } }
+
 // New builds a Service from an in-memory root cert + self-hosted intermediate CA.
 func New(root *x509.Certificate, selfHostedIntermediate *pki.CA, opts ...Option) *Service {
 	s := &Service{
@@ -58,6 +65,9 @@ func New(root *x509.Certificate, selfHostedIntermediate *pki.CA, opts ...Option)
 	}
 	for _, o := range opts {
 		o(s)
+	}
+	if s.sessionKey == nil {
+		_, s.sessionKey, _ = ed25519.GenerateKey(rand.Reader)
 	}
 	return s
 }
