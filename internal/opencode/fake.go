@@ -1,0 +1,210 @@
+package opencode
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+)
+
+// Fake is an in-process opencode server emulating the pinned 1.15.13 endpoints
+// the adapter uses. It is the opencode analogue of internal/stubagent and is
+// shared by the opencode and ocadapter tests.
+type Fake struct {
+	*httptest.Server
+
+	mu       sync.Mutex
+	dir      string
+	sessions []Session
+	nextSess int
+	subs     map[chan string]struct{}
+
+	perms  []PermResponse // recorded permission answers
+	aborts []string       // session IDs aborted
+}
+
+// PermResponse records a permission answer the adapter POSTed.
+type PermResponse struct {
+	SessionID    string
+	PermissionID string
+	Response     string
+}
+
+// NewFake starts a fake opencode server rooting created sessions at dir
+// (default "/app"). Call Close when done.
+func NewFake(dir string) *Fake {
+	if dir == "" {
+		dir = "/app"
+	}
+	f := &Fake{dir: dir, subs: map[chan string]struct{}{}}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/global/health", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"healthy": true, "version": "fake"})
+	})
+
+	mux.HandleFunc("/session", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if r.Method == http.MethodPost {
+			f.nextSess++
+			s := Session{ID: fmt.Sprintf("ses_fake%d", f.nextSess), Directory: f.dir, Title: "t"}
+			f.sessions = append(f.sessions, s)
+			_ = json.NewEncoder(w).Encode(s)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(f.sessions)
+	})
+
+	// /event SSE: register a subscriber channel; stream until the request ends.
+	mux.HandleFunc("/event", func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "no flush", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		ch := make(chan string, 64)
+		f.mu.Lock()
+		f.subs[ch] = struct{}{}
+		f.mu.Unlock()
+		defer func() {
+			f.mu.Lock()
+			delete(f.subs, ch)
+			f.mu.Unlock()
+		}()
+		// initial connected event
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"server.connected","properties":{}}`)
+		flusher.Flush()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case msg := <-ch:
+				fmt.Fprintf(w, "data: %s\n\n", msg)
+				flusher.Flush()
+			}
+		}
+	})
+
+	// prompt_async: 204, then asynchronously emit a scripted streaming sequence.
+	mux.HandleFunc("/session/", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case hasSuffix(r.URL.Path, "/prompt_async") && r.Method == http.MethodPost:
+			sid := pathSeg(r.URL.Path, 1)
+			w.WriteHeader(http.StatusNoContent)
+			go f.scriptPrompt(sid)
+		case hasSuffix(r.URL.Path, "/abort") && r.Method == http.MethodPost:
+			f.mu.Lock()
+			f.aborts = append(f.aborts, pathSeg(r.URL.Path, 1))
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		case contains(r.URL.Path, "/permissions/") && r.Method == http.MethodPost:
+			var body struct {
+				Response string `json:"response"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.mu.Lock()
+			f.perms = append(f.perms, PermResponse{
+				SessionID:    pathSeg(r.URL.Path, 1),
+				PermissionID: lastSeg(r.URL.Path),
+				Response:     body.Response,
+			})
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		case hasSuffix(r.URL.Path, "/message") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode([]any{}) // backfill: empty
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+
+	f.Server = httptest.NewServer(mux)
+	return f
+}
+
+// Emit broadcasts one event (type + raw properties JSON) to all /event subscribers.
+func (f *Fake) Emit(eventType, propsJSON string) {
+	msg := fmt.Sprintf(`{"type":%q,"properties":%s}`, eventType, propsJSON)
+	f.mu.Lock()
+	for ch := range f.subs {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+	f.mu.Unlock()
+}
+
+// scriptPrompt emits a text part snapshot, a streamed delta, then idle.
+func (f *Fake) scriptPrompt(sid string) {
+	f.Emit("message.part.updated", fmt.Sprintf(`{"sessionID":%q,"part":{"id":"prt_1","type":"text","text":""},"time":1}`, sid))
+	f.Emit("message.part.delta", fmt.Sprintf(`{"sessionID":%q,"messageID":"msg_1","partID":"prt_1","field":"text","delta":"hi"}`, sid))
+	f.Emit("session.idle", fmt.Sprintf(`{"sessionID":%q}`, sid))
+}
+
+// EmitPermissionAsked emits a permission.asked event for a session.
+func (f *Fake) EmitPermissionAsked(sid, permID string) {
+	f.Emit("permission.asked", fmt.Sprintf(`{"id":%q,"sessionID":%q,"permission":"bash","patterns":[],"metadata":{},"always":[],"tool":{"messageID":"msg_1","callID":"c1"}}`, permID, sid))
+}
+
+// PermResponses returns the recorded permission answers.
+func (f *Fake) PermResponses() []PermResponse {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]PermResponse(nil), f.perms...)
+}
+
+// Aborts returns the session IDs that were aborted.
+func (f *Fake) Aborts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.aborts...)
+}
+
+// --- tiny path helpers (avoid pulling in a router) --------------------------
+
+func hasSuffix(s, suf string) bool { return len(s) >= len(suf) && s[len(s)-len(suf):] == suf }
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+// pathSeg returns the nth path segment (0-based) of a /a/b/c path.
+func pathSeg(path string, n int) string {
+	segs := splitNonEmpty(path)
+	if n < len(segs) {
+		return segs[n]
+	}
+	return ""
+}
+func lastSeg(path string) string {
+	segs := splitNonEmpty(path)
+	if len(segs) == 0 {
+		return ""
+	}
+	return segs[len(segs)-1]
+}
+func splitNonEmpty(path string) []string {
+	var out []string
+	cur := ""
+	for _, r := range path {
+		if r == '/' {
+			if cur != "" {
+				out = append(out, cur)
+				cur = ""
+			}
+			continue
+		}
+		cur += string(r)
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
+}
