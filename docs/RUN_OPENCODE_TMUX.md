@@ -62,6 +62,44 @@ Now: a prompt you type in **Terminal B** appears in the **Terminal C** TUI, and 
 the **C** TUI appears in **B** — one shared, server-authoritative opencode session. Detach with the
 usual tmux/mosh keys; re-running the `tmux` command reattaches (tmux `new-session -A`).
 
+## Option 2 — the full dev stack (CP + node + web UI) + `spawnctl tmux`
+
+This is the `just dev` flow (docker/runc lane). **No `runsc` dev recipe exists** — runsc is a
+separate CRI/containerd setup (see `E2E_TEST_RUNSC.md`); use the docker lane below.
+
+On this box **docker needs sudo**, so the node runs under sudo (CP + web are root-free):
+
+```bash
+# Terminal A — control plane (root-free)
+just cp                       # -> 127.0.0.1:8080
+
+# Terminal B — node attached to the CP (needs sudo here for the docker socket + docker exec)
+set -a; . ./.env; set +a
+sudo env OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
+  AGENT_IMAGE=spawnery/agent:dev SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT=$PWD/.spawns \
+  CP_ADDR=http://127.0.0.1:8080 NODE_ID=node-1 NODE_CLASS=self-hosted EGRESS_ENFORCE=false \
+  NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
+  bin/spawnlet
+#   -> "terminal endpoint on 127.0.0.1:9092" + "node connected to CP"
+#   (if your user can use docker without sudo, `just node` works directly, as does `just dev`.)
+
+# Terminal C — web UI
+just web                      # -> open the printed URL (vite, ~http://localhost:5173)
+```
+
+In the browser: create a spawn, send prompts — it runs on opencode (validated: CP→node→opencode
+reaches "ready" and streams). Note the spawn id (shown in the web UI / CP).
+
+```bash
+# Terminal D — attach the opencode TUI over mosh (terminal control goes direct to the node :9092)
+bin/spawnctl tmux -spawn <SPAWN_ID> -addr http://127.0.0.1:9092
+```
+Typing in the browser and in the TUI both drive the one shared opencode session.
+
+Validated this session (Option 2): CP + node (opencode image) register; a CP-created spawn reaches
+"ready"; `POST :9092/terminal` returns `{host,port,key}` and launches mosh-server. The final
+`mosh-client` render needs your TTY (Terminal D).
+
 ## How it works (what each piece does)
 - The agent image runs `opencode serve` (127.0.0.1:4096) + `acpadapter`. The adapter speaks canonical
   ACP to the node and translates to opencode's HTTP/SSE (so the node/CP/web are agent-neutral).
