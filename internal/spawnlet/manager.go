@@ -27,6 +27,7 @@ type ManagerConfig struct {
 	PidsLimit        int64   // max pids per container; default 256
 	ContainerRuntime string  // OCI runtime name; "" = Docker default
 	HardenRootfs     bool    // if true, run agent with read-only rootfs + /tmp tmpfs
+	AdvertiseIP      string  // node IP mosh advertises to spawnctl for terminal attach ("" => auto)
 }
 
 type Manager struct {

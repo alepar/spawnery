@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"connectrpc.com/connect"
 	spawnv1 "spawnery/gen/spawn/v1"
@@ -17,6 +19,26 @@ type Server struct {
 }
 
 func NewServer(m *Manager) *Server { return &Server{m: m} }
+
+// HandleTerminal starts a mosh-backed terminal session for a spawn and returns the connect info
+// {host, port, key} as JSON. spawnctl tmux POSTs here (standalone: directly; the mosh UDP data
+// plane then goes straight to this node). Reattaches if the tmux session already exists.
+//
+//	POST /terminal?spawn=<id>  ->  {"host":"...","port":60001,"key":"..."}
+func (s *Server) HandleTerminal(w http.ResponseWriter, r *http.Request) {
+	spawnID := r.URL.Query().Get("spawn")
+	if spawnID == "" {
+		http.Error(w, "missing ?spawn=<id>", http.StatusBadRequest)
+		return
+	}
+	ts, err := s.m.StartTerminal(r.Context(), spawnID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(ts)
+}
 
 func newID() string {
 	b := make([]byte, 6)

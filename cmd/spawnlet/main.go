@@ -42,6 +42,7 @@ func main() {
 		PidsLimit:        getenvInt64("PIDS_LIMIT", 256),
 		ContainerRuntime: os.Getenv("CONTAINER_RUNTIME"),
 		HardenRootfs:     getenvBool("HARDEN_ROOTFS", false),
+		AdvertiseIP:      env("NODE_ADVERTISE_IP", "127.0.0.1"),
 	}
 	mgr, err := buildManager(cfg)
 	if err != nil {
@@ -78,6 +79,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle(spawnv1connect.NewSpawnServiceHandler(srv))
 	mux.HandleFunc("/ws/session", srv.HandleWS)
+	mux.HandleFunc("/terminal", srv.HandleTerminal)
 	addr := env("SPAWNLET_ADDR", "127.0.0.1:9090")
 	log.Printf("spawnlet listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{})))

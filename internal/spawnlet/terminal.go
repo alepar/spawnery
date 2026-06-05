@@ -88,6 +88,31 @@ func moshServerArgs(advertiseIP string, child []string) []string {
 	return append(args, child...)
 }
 
+// ExecPrefixFor returns the runtime exec invocation for a lane. runsc/CRI uses crictl; the Docker
+// (runc) lane uses the docker CLI. -it gives the in-container process a TTY (tmux needs one; mosh
+// supplies the outer PTY).
+func ExecPrefixFor(runtimeKind string) []string {
+	if runtimeKind == "runsc" {
+		return []string{"crictl", "exec", "-it"}
+	}
+	return []string{"docker", "exec", "-it"}
+}
+
+// StartTerminal (Manager method) looks up the spawn and launches a terminal session for it.
+func (m *Manager) StartTerminal(ctx context.Context, spawnID string) (TerminalSession, error) {
+	sp, ok := m.store.Get(spawnID)
+	if !ok {
+		return TerminalSession{}, fmt.Errorf("spawn not found: %s", spawnID)
+	}
+	if sp.AgentID == "" {
+		return TerminalSession{}, fmt.Errorf("spawn %s has no agent container", spawnID)
+	}
+	return StartTerminal(ctx, sp.AgentID, TerminalConfig{
+		ExecPrefix:  ExecPrefixFor(m.cfg.ContainerRuntime),
+		AdvertiseIP: m.cfg.AdvertiseIP,
+	})
+}
+
 // StartTerminal launches a mosh-server bound to a tmux+opencode-attach session execed into the
 // spawn's container, and returns the mosh connect info for spawnctl.
 func StartTerminal(ctx context.Context, containerID string, cfg TerminalConfig) (TerminalSession, error) {

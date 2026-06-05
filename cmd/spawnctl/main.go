@@ -26,6 +26,13 @@ import (
 )
 
 func main() {
+	// `spawnctl tmux -spawn <id>` attaches an interactive terminal (the opencode TUI in tmux)
+	// to a running spawn via mosh. Intercept before flag.Parse so the subcommand name isn't parsed.
+	if len(os.Args) > 1 && os.Args[1] == "tmux" {
+		runTmux(os.Args[2:])
+		return
+	}
+
 	addr := flag.String("addr", "http://127.0.0.1:9090", "spawnlet address")
 	appPath := flag.String("app", "examples/secret-app", "app definition dir")
 	model := flag.String("model", "anthropic/claude-3.5-sonnet", "OpenRouter model")
