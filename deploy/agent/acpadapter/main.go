@@ -4,58 +4,51 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"strings"
+
+	"spawnery/internal/ocadapter"
+	"spawnery/internal/opencode"
 )
 
-// acpadapter starts the agent given by its args (e.g. `goose acp`), listens for
-// the node, and bridges the current client connection to the agent's stdio.
-// Exits when the agent exits.
+// acpadapter presents a canonical-ACP agent to the spawnery node, backed by an
+// in-pod `opencode serve` instance. opencode is launched separately by the
+// container entrypoint; this process only listens for the node and translates.
 //
-// Transport (lowest precedence first):
-//   - default: abstract Unix socket @spawnlet-acp (the runc/shared-netns lane).
-//   - $ACP_SOCKET: an explicit Unix socket path/name (overrides the default).
-//   - $ACP_LISTEN: "tcp://host:port" or "unix:<path>" — wins over the above. The
-//     runsc/CRI lane sets tcp:// because gVisor isolates the in-sandbox abstract
-//     socket namespace from the host, so the node cannot reach a UDS via setns;
-//     it dials the pod IP instead.
+// Environment:
+//   - ACP_LISTEN: "tcp://host:port" (preferred, both lanes) or "unix:<path>".
+//     Defaults to a unix abstract socket @spawnlet-acp for back-compat.
+//   - OPENCODE_BASE_URL: the in-pod opencode server (default http://127.0.0.1:4096).
+//   - OPENCODE_DIR: the spawn working dir used to scope session discovery (default /app).
+//   - SPAWN_MODEL: "providerID/modelID" forwarded on prompts (optional).
+//
+// It serves one node connection at a time (the node holds a single long-lived
+// connection per spawn); on disconnect it loops to accept the next.
 func main() {
 	log.SetPrefix("acpadapter: ")
 	log.SetFlags(0)
-	if len(os.Args) < 2 {
-		log.Fatal("usage: acpadapter <agent-cmd> [args...]")
-	}
-	network, addr := listenSpec()
 
-	agent := exec.Command(os.Args[1], os.Args[2:]...)
-	agent.Stderr = os.Stderr
-	toAgent, err := agent.StdinPipe()
-	if err != nil {
-		log.Fatalf("agent stdin: %v", err)
-	}
-	fromAgent, err := agent.StdoutPipe()
-	if err != nil {
-		log.Fatalf("agent stdout: %v", err)
-	}
-	if err := agent.Start(); err != nil {
-		log.Fatalf("start agent: %v", err)
-	}
+	network, addr := listenSpec()
+	baseURL := envOr("OPENCODE_BASE_URL", "http://127.0.0.1:4096")
+	dir := envOr("OPENCODE_DIR", "/app")
+	model := os.Getenv("SPAWN_MODEL")
 
 	ln, err := net.Listen(network, addr)
 	if err != nil {
 		log.Fatalf("listen %s %s: %v", network, addr, err)
 	}
+	log.Printf("listening on %s %s, opencode at %s", network, addr, baseURL)
 
-	// The spawn is over when the agent exits.
-	go func() {
-		werr := agent.Wait()
-		log.Printf("agent exited: %v", werr)
-		_ = ln.Close()
-		os.Exit(0)
-	}()
-
-	if err := serve(ln, toAgent, fromAgent); err != nil {
-		log.Printf("serve ended: %v", err)
+	oc := opencode.New(baseURL)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			log.Fatalf("accept: %v", err)
+		}
+		a := ocadapter.New(oc, dir, model)
+		if serr := a.Serve(conn, conn); serr != nil {
+			log.Printf("connection ended: %v", serr)
+		}
+		_ = conn.Close()
 	}
 }
 
@@ -78,4 +71,11 @@ func listenSpec() (network, addr string) {
 		sock = "@spawnlet-acp" // leading @ = Linux abstract namespace
 	}
 	return "unix", sock
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

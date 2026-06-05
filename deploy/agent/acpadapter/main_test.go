@@ -2,65 +2,30 @@ package main
 
 import (
 	"bufio"
-	"io"
 	"net"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"spawnery/internal/opencode"
 )
 
-func TestAdapterBinaryBridgesToStubAgent(t *testing.T) {
+// TestAdapterBinarySpeaksACPOverOpencode builds the adapter, points it at an
+// in-process fake opencode server, connects as the node would, and verifies the
+// ACP initialize handshake returns a protocolVersion.
+func TestAdapterBinarySpeaksACPOverOpencode(t *testing.T) {
+	fake := opencode.NewFake("/app")
+	defer fake.Close()
+
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "acpadapter")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
-	sock := filepath.Join(dir, "acp.sock")
 
-	cmd := exec.Command(bin, "cat")
-	cmd.Env = append(cmd.Environ(), "ACP_SOCKET="+sock)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start adapter: %v", err)
-	}
-	defer cmd.Process.Kill()
-
-	// Wait for the socket to appear.
-	var c net.Conn
-	for i := 0; i < 100; i++ {
-		var err error
-		if c, err = net.Dial("unix", sock); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if c == nil {
-		t.Fatal("adapter never bound the socket")
-	}
-	defer c.Close()
-
-	if _, err := io.WriteString(c, "echo-me\n"); err != nil {
-		t.Fatal(err)
-	}
-	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
-	got, err := bufio.NewReader(c).ReadString('\n')
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if got != "echo-me\n" {
-		t.Fatalf("got %q want %q", got, "echo-me\n")
-	}
-}
-
-// TestAdapterBinaryBridgesOverTCP covers the CRI/runsc transport: ACP_LISTEN=tcp://... makes the
-// adapter listen on TCP (the node dials the pod IP because gVisor isolates the abstract UDS).
-func TestAdapterBinaryBridgesOverTCP(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "acpadapter")
-	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
-	// Pick a free port, then hand it to the adapter.
+	// Pick a free TCP port for the adapter to listen on.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -68,8 +33,12 @@ func TestAdapterBinaryBridgesOverTCP(t *testing.T) {
 	addr := l.Addr().String()
 	_ = l.Close()
 
-	cmd := exec.Command(bin, "cat")
-	cmd.Env = append(cmd.Environ(), "ACP_LISTEN=tcp://"+addr)
+	cmd := exec.Command(bin)
+	cmd.Env = append(cmd.Environ(),
+		"ACP_LISTEN=tcp://"+addr,
+		"OPENCODE_BASE_URL="+fake.URL,
+		"OPENCODE_DIR=/app",
+	)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start adapter: %v", err)
 	}
@@ -87,15 +56,15 @@ func TestAdapterBinaryBridgesOverTCP(t *testing.T) {
 	}
 	defer c.Close()
 
-	if _, err := io.WriteString(c, "echo-me\n"); err != nil {
+	if _, err := c.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n")); err != nil {
 		t.Fatal(err)
 	}
-	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
-	got, err := bufio.NewReader(c).ReadString('\n')
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	line, err := bufio.NewReader(c).ReadString('\n')
 	if err != nil {
-		t.Fatalf("read: %v", err)
+		t.Fatalf("read initialize response: %v", err)
 	}
-	if got != "echo-me\n" {
-		t.Fatalf("got %q want %q", got, "echo-me\n")
+	if !strings.Contains(line, `"id":1`) || !strings.Contains(line, "protocolVersion") {
+		t.Fatalf("unexpected initialize response: %s", line)
 	}
 }
