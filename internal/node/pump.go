@@ -19,9 +19,9 @@ const maxQueued = 50
 const defaultPermTimeout = 2 * time.Minute
 
 type pendingPerm struct {
-	agentID int             // the goose request id to respond to
+	agentID int             // the agent request id to respond to
 	options json.RawMessage // raw options array, to pick allow/deny optionId
-	title   string          // human-readable tool title from goose (for the perm_request frame + re-send)
+	title   string          // human-readable tool title from agent (for the perm_request frame + re-send)
 	timer   *time.Timer
 }
 
@@ -38,7 +38,7 @@ type client struct {
 // channel write; tests use a mutex-guarded capture.
 type frameSender func(line []byte) error
 
-// Pump is the long-lived per-spawn relay: it owns the goose stdio, an append-only frame log, and a
+// Pump is the long-lived per-spawn relay: it owns the agent stdio, an append-only frame log, and a
 // set of client subscribers. Built across Tasks 2-4. All mutable fields behind mu.
 type Pump struct {
 	stdin  io.Writer
@@ -60,7 +60,7 @@ type Pump struct {
 	nextID           int
 	busy             bool
 	queue            []string // queued prompt texts, FIFO
-	inflightPromptID int      // goose request id of the in-flight session/prompt (0 = none)
+	inflightPromptID int      // agent request id of the in-flight session/prompt (0 = none)
 
 	pending     map[string]*pendingPerm
 	permTimeout time.Duration
@@ -366,7 +366,7 @@ func (p *Pump) onAgentNotification(m acp.Message) {
 	}
 }
 
-// updateToFrame translates a goose session/update params object into one conversation Frame.
+// updateToFrame translates a agent session/update params object into one conversation Frame.
 func updateToFrame(params json.RawMessage) (Frame, bool) {
 	var u struct {
 		Update struct {
@@ -460,7 +460,7 @@ func promptParams(sessionID, text string) json.RawMessage {
 	return b
 }
 
-// onPermissionRequest records a goose permission request, broadcasts a transient perm_request to all
+// onPermissionRequest records a agent permission request, broadcasts a transient perm_request to all
 // attached clients (NOT logged), and arms a timeout that auto-denies.
 func (p *Pump) onPermissionRequest(m acp.Message) {
 	if m.ID == nil {
@@ -476,7 +476,7 @@ func (p *Pump) onPermissionRequest(m acp.Message) {
 	_ = json.Unmarshal(m.Params, &pr)
 	title := pr.ToolCall.Title
 	if title == "" {
-		title = "permission requested" // goose omitted a tool title; fall back to a generic label
+		title = "permission requested" // agent omitted a tool title; fall back to a generic label
 	}
 	p.mu.Lock()
 	if p.stopped {
@@ -498,7 +498,7 @@ func (p *Pump) onPermissionRequest(m acp.Message) {
 }
 
 // resolvePermission answers a pending permission (first answer wins; later/duplicate are no-ops) by
-// forwarding the chosen option to goose. Called by perm_response and by the auto-deny timer.
+// forwarding the chosen option to agent. Called by perm_response and by the auto-deny timer.
 func (p *Pump) resolvePermission(reqID string, allow bool) {
 	p.mu.Lock()
 	pp := p.pending[reqID]
@@ -518,7 +518,7 @@ func (p *Pump) resolvePermission(reqID string, allow bool) {
 	p.sendLine(buf.Bytes())
 }
 
-// pickPermOption chooses an allow-ish (or reject-ish) optionId from the goose options, falling back to
+// pickPermOption chooses an allow-ish (or reject-ish) optionId from the agent options, falling back to
 // the first option. Mirrors web/src/acp/client.ts handlePermission.
 func pickPermOption(options json.RawMessage, allow bool) string {
 	var opts []struct {
