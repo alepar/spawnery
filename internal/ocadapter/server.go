@@ -34,6 +34,9 @@ type Adapter struct {
 	mu          sync.Mutex
 	sessionID   string
 	partKind    map[string]string // opencode partID -> ACP update kind
+	msgRole     map[string]string // opencode messageID -> "user"|"assistant"
+	sentUser    map[string]bool   // opencode user partID already echoed to the web (once each)
+	recentSelf  []string          // prompt texts WE submitted (web path) — skip echoing those back
 	inflightID  int               // node's session/prompt id awaiting turn-end
 	hasInflight bool
 	nextReqID   int
@@ -49,6 +52,8 @@ func New(oc *opencode.Client, dir, model string) *Adapter {
 	return &Adapter{
 		oc: oc, dir: dir, model: model,
 		partKind:  map[string]string{},
+		msgRole:   map[string]string{},
+		sentUser:  map[string]bool{},
 		permByReq: map[int]string{},
 	}
 }
@@ -145,6 +150,12 @@ func (a *Adapter) handlePrompt(srv *acp.Server, m acp.Message) {
 	a.inflightID = *m.ID
 	a.hasInflight = true
 	sid := a.sessionID
+	// Remember our own (web-originated) prompt text so we don't echo it back as a TUI message —
+	// the node already locally-echoes web prompts. Bounded ring.
+	a.recentSelf = append(a.recentSelf, text)
+	if len(a.recentSelf) > 16 {
+		a.recentSelf = a.recentSelf[len(a.recentSelf)-16:]
+	}
 	a.mu.Unlock()
 	if err := a.oc.PromptAsync(sid, text, a.model); err != nil {
 		a.mu.Lock()
@@ -217,6 +228,13 @@ func (a *Adapter) pumpLoop(ctx context.Context, srv *acp.Server) {
 // onEvent translates one opencode event into ACP traffic to the node.
 func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 	switch e.Type {
+	case "message.updated":
+		mu, err := ParseMessageUpdated(e.Properties)
+		if err == nil && mu.Info.ID != "" {
+			a.mu.Lock()
+			a.msgRole[mu.Info.ID] = mu.Info.Role
+			a.mu.Unlock()
+		}
 	case "message.part.updated":
 		pu, err := ParsePartUpdated(e.Properties)
 		if err != nil {
@@ -226,6 +244,11 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 			a.mu.Lock()
 			a.partKind[pu.Part.ID] = kind
 			a.mu.Unlock()
+		}
+		// Echo a USER message typed in the TUI to the web (as user_message_chunk), unless it's our
+		// own web-submitted prompt (the node already echoed that) — deduped by text.
+		if pu.Part.Type == "text" && pu.Part.Text != "" {
+			a.maybeEchoUser(srv, pu)
 		}
 	case "message.part.delta":
 		d, err := ParsePartDelta(e.Properties)
@@ -263,6 +286,33 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 			_ = srv.Respond(id, map[string]any{"stopReason": "end_turn"})
 		}
 	}
+}
+
+// maybeEchoUser forwards a user-role text part (typed in the TUI) to the web as user_message_chunk,
+// once per part, skipping our own web-submitted prompts (deduped by text against recentSelf).
+func (a *Adapter) maybeEchoUser(srv *acp.Server, pu PartUpdated) {
+	a.mu.Lock()
+	if a.msgRole[pu.Part.MessageID] != "user" { // not a user message (or role not yet known) — skip
+		a.mu.Unlock()
+		return
+	}
+	if a.sentUser[pu.Part.ID] { // already echoed this part
+		a.mu.Unlock()
+		return
+	}
+	// If this matches a prompt we submitted (web path), consume it and DON'T echo (node already did).
+	for i, t := range a.recentSelf {
+		if t == pu.Part.Text {
+			a.recentSelf = append(a.recentSelf[:i], a.recentSelf[i+1:]...)
+			a.sentUser[pu.Part.ID] = true
+			a.mu.Unlock()
+			return
+		}
+	}
+	a.sentUser[pu.Part.ID] = true
+	sid := pu.SessionID
+	a.mu.Unlock()
+	_ = srv.Notify("session/update", ACPUserUpdate(sid, pu.Part.Text))
 }
 
 // extractPromptText concatenates the text content blocks of an ACP session/prompt.

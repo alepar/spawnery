@@ -144,6 +144,13 @@ func (f *Fake) scriptPrompt(sid string) {
 	f.Emit("session.idle", fmt.Sprintf(`{"sessionID":%q}`, sid))
 }
 
+// EmitUserMessage emits the events opencode produces for a user message: message.updated (role)
+// then message.part.updated (the text part). Used to simulate a prompt typed in the in-pod TUI.
+func (f *Fake) EmitUserMessage(sid, msgID, partID, text string) {
+	f.Emit("message.updated", fmt.Sprintf(`{"sessionID":%q,"info":{"id":%q,"role":"user"}}`, sid, msgID))
+	f.Emit("message.part.updated", fmt.Sprintf(`{"sessionID":%q,"part":{"id":%q,"messageID":%q,"type":"text","text":%q}}`, sid, partID, msgID, text))
+}
+
 // EmitPermissionAsked emits a permission.asked event for a session.
 func (f *Fake) EmitPermissionAsked(sid, permID string) {
 	f.Emit("permission.asked", fmt.Sprintf(`{"id":%q,"sessionID":%q,"permission":"bash","patterns":[],"metadata":{},"always":[],"tool":{"messageID":"msg_1","callID":"c1"}}`, permID, sid))

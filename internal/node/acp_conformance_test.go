@@ -17,6 +17,11 @@ func TestUpdateToFrame_CanonicalACP(t *testing.T) {
 		want   Frame
 	}{
 		{
+			name:   "user_message_chunk",
+			params: `{"sessionId":"ses_1","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"from another client"}}}`,
+			want:   Frame{Kind: "user", Text: "from another client"},
+		},
+		{
 			name:   "agent_message_chunk",
 			params: `{"sessionId":"ses_1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}`,
 			want:   Frame{Kind: "agent", Text: "hello"},

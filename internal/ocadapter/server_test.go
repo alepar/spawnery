@@ -153,6 +153,19 @@ func TestAdapterPermissionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAdapterEchoesTUIUserMessage(t *testing.T) {
+	h := newHarness(t)
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	time.Sleep(150 * time.Millisecond) // let the pump subscribe
+
+	// A user message typed in the TUI (not submitted by us) must be echoed to the web.
+	h.fake.EmitUserMessage("ses_fake1", "msg_t", "prt_t", "hello from the TUI")
+	h.await(t, func(_ acp.Message, line string) bool {
+		return strings.Contains(line, "user_message_chunk") && strings.Contains(line, "hello from the TUI")
+	})
+}
+
 func TestAdapterCancelAborts(t *testing.T) {
 	h := newHarness(t)
 	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)

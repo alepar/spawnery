@@ -13,10 +13,39 @@ import "encoding/json"
 type PartUpdated struct {
 	SessionID string `json:"sessionID"`
 	Part      struct {
-		ID   string `json:"id"`
-		Type string `json:"type"` // "text" | "reasoning" | "tool" | ...
-		Text string `json:"text"`
+		ID        string `json:"id"`
+		MessageID string `json:"messageID"`
+		Type      string `json:"type"` // "text" | "reasoning" | "tool" | ...
+		Text      string `json:"text"`
 	} `json:"part"`
+}
+
+// MessageUpdated is the payload of a message.updated event; we use it to learn each message's role
+// (user vs assistant) so user-role text parts can be echoed to the web as user_message_chunk.
+type MessageUpdated struct {
+	SessionID string `json:"sessionID"`
+	Info      struct {
+		ID   string `json:"id"`
+		Role string `json:"role"` // "user" | "assistant"
+	} `json:"info"`
+}
+
+// ParseMessageUpdated decodes a message.updated properties payload.
+func ParseMessageUpdated(raw json.RawMessage) (MessageUpdated, error) {
+	var m MessageUpdated
+	err := json.Unmarshal(raw, &m)
+	return m, err
+}
+
+// ACPUserUpdate builds a session/update echoing a user's message text (typed in the TUI) to the web.
+func ACPUserUpdate(sessionID, text string) ACPUpdateParams {
+	return ACPUpdateParams{
+		SessionID: sessionID,
+		Update: ACPUpdate{
+			SessionUpdate: "user_message_chunk",
+			Content:       ACPContent{Type: "text", Text: text},
+		},
+	}
 }
 
 // PartDelta is the payload of a message.part.delta event (streaming increment).

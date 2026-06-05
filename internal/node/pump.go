@@ -383,6 +383,10 @@ func updateToFrame(params json.RawMessage) (Frame, bool) {
 		return Frame{}, false
 	}
 	switch u.Update.SessionUpdate {
+	case "user_message_chunk":
+		// A user message from ANOTHER client (e.g. the in-container TUI), echoed so the web shows it.
+		// The node's own web-submitted prompts are echoed locally in fromClient, not here.
+		return Frame{Kind: "user", Text: u.Update.Content.Text}, true
 	case "agent_message_chunk":
 		return Frame{Kind: "agent", Text: u.Update.Content.Text}, true
 	case "agent_thought_chunk":
