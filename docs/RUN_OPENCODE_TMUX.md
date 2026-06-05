@@ -100,6 +100,36 @@ Validated this session (Option 2): CP + node (opencode image) register; a CP-cre
 "ready"; `POST :9092/terminal` returns `{host,port,key}` and launches mosh-server. The final
 `mosh-client` render needs your TTY (Terminal D).
 
+## Option 3 — run it from a (root) distrobox: `dev-spawnery`
+
+Verified 2026-06-05: Option 2 runs unchanged inside a **debian:stable root distrobox** using
+**docker-out-of-docker** (the host docker socket mounted in). The sidecar/agent containers are
+created as **siblings on the host docker** (visible to host `docker ps`) — which is what makes
+mounts (shared HOME, same paths) and pod-IP dialing (shared host netns) just work.
+
+Already created on this box:
+```bash
+distrobox create --root --yes --nvidia --name dev-spawnery --image debian:stable \
+  --additional-flags "--volume /var/run/docker.sock:/var/run/docker.sock"
+distrobox enter --root dev-spawnery
+```
+Tooling installed inside: `docker.io` (CLI) + `mosh`. For the web UI also: `sudo apt-get install -y nodejs npm`.
+
+Key facts about this distrobox:
+- Inside you are user **alepar (uid 1001) with passwordless sudo** — `--root` makes it a
+  *rootful-podman* container, NOT a root login. The docker socket is `root:docker`, so **docker
+  still needs `sudo` inside** (exactly like the host). So run the node with `sudo env … bin/spawnlet`.
+- Shared HOME means the static Go binaries (`bin/*`) and the go1.26 SDK (`~/sdk/go1.26.0`) are
+  available — no Debian Go/toolchain needed.
+- Shared host netns means `:5173`/`:9092` land on the host edge (the opened firewall ports apply),
+  and the node can reach the docker bridge (`172.17.0.0/16`).
+
+Then run the **Option 2** commands inside the distrobox (no change). Smoke-tested end-to-end:
+CP + node register, a CP-created spawn reached "ready" on opencode, and `POST :9092/terminal`
+returned `{host,port,key}`. A reusable smoke script is at `~/smoke-spawnery.sh`.
+
+Do **not** create the box with `--unshare-netns` (breaks pod-IP reachability + host ports).
+
 ## How it works (what each piece does)
 - The agent image runs `opencode serve` (127.0.0.1:4096) + `acpadapter`. The adapter speaks canonical
   ACP to the node and translates to opencode's HTTP/SSE (so the node/CP/web are agent-neutral).
