@@ -26,11 +26,27 @@ import (
 )
 
 func main() {
-	// `spawnctl tmux -spawn <id>` attaches an interactive terminal (the opencode TUI in tmux)
-	// to a running spawn via mosh. Intercept before flag.Parse so the subcommand name isn't parsed.
-	if len(os.Args) > 1 && os.Args[1] == "tmux" {
-		runTmux(os.Args[2:])
-		return
+	// Subcommands (intercepted before flag.Parse so their own flags aren't parsed here):
+	//   attach  - attach the opencode TUI to a running spawn (via mosh)
+	//   exec    - run a command in the spawn's container over a terminal (e.g. exec -it -- /bin/bash)
+	//   shell   - shorthand for `exec -it -- /bin/bash`
+	//   list    - list the caller's spawns (id, status, name, app)
+	// When -spawn is omitted, attach/exec/shell let you pick one interactively (fzf or a menu).
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "attach", "tmux": // tmux kept as a back-compat alias
+			runAttach(os.Args[2:])
+			return
+		case "exec":
+			runExec(os.Args[2:])
+			return
+		case "shell":
+			runShell(os.Args[2:])
+			return
+		case "list", "ls":
+			runList(os.Args[2:])
+			return
+		}
 	}
 
 	addr := flag.String("addr", "http://127.0.0.1:9090", "spawnlet address")

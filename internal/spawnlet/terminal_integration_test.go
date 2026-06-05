@@ -19,7 +19,7 @@ func TestStartTerminal_RealMoshServer(t *testing.T) {
 
 	// ExecPrefix=["/bin/echo"] => child is `/bin/echo <id> tmux new-session ...`: mosh-server prints
 	// MOSH CONNECT then runs it. We only assert the connect info is produced.
-	ts, err := StartTerminal(ctx, "container-x", TerminalConfig{
+	ts, err := StartTerminal(ctx, "container-x", nil, TerminalConfig{
 		ExecPrefix:  []string{"/bin/echo"},
 		AdvertiseIP: "127.0.0.1",
 	})

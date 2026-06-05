@@ -74,17 +74,20 @@ func moshServerArgs(advertiseIP string, child []string) []string {
 }
 
 // ExecPrefixFor returns the runtime exec invocation for a lane. runsc/CRI uses crictl; the Docker
-// (runc) lane uses the docker CLI. -it gives the in-container process a TTY (tmux needs one; mosh
-// supplies the outer PTY).
+// (runc) lane uses the docker CLI. -it gives the in-container process a TTY (tmux/shell need one;
+// mosh supplies the outer PTY). TERM is forwarded so full-screen programs (the opencode TUI, a
+// shell's editor) render correctly.
 func ExecPrefixFor(runtimeKind string) []string {
 	if runtimeKind == "runsc" {
 		return []string{"crictl", "exec", "-it"}
 	}
-	return []string{"docker", "exec", "-it"}
+	return []string{"docker", "exec", "-it", "-e", "TERM=xterm-256color"}
 }
 
-// StartTerminal (Manager method) looks up the spawn and launches a terminal session for it.
-func (m *Manager) StartTerminal(ctx context.Context, spawnID string) (TerminalSession, error) {
+// StartTerminal (Manager method) looks up the spawn and launches a terminal session for it. cmd is
+// the in-container command (nil/empty => the opencode TUI launcher; a command => raw exec, e.g.
+// /bin/bash). Raw exec is an un-audited mutation path (bypasses the sidecar) — owner-only.
+func (m *Manager) StartTerminal(ctx context.Context, spawnID string, cmd []string) (TerminalSession, error) {
 	sp, ok := m.store.Get(spawnID)
 	if !ok {
 		return TerminalSession{}, fmt.Errorf("spawn not found: %s", spawnID)
@@ -92,16 +95,21 @@ func (m *Manager) StartTerminal(ctx context.Context, spawnID string) (TerminalSe
 	if sp.AgentID == "" {
 		return TerminalSession{}, fmt.Errorf("spawn %s has no agent container", spawnID)
 	}
-	return StartTerminal(ctx, sp.AgentID, TerminalConfig{
+	return StartTerminal(ctx, sp.AgentID, cmd, TerminalConfig{
 		ExecPrefix:  ExecPrefixFor(m.cfg.ContainerRuntime),
 		AdvertiseIP: m.cfg.AdvertiseIP,
 	})
 }
 
-// StartTerminal launches a mosh-server bound to a tmux+opencode-attach session execed into the
-// spawn's container, and returns the mosh connect info for spawnctl.
-func StartTerminal(ctx context.Context, containerID string, cfg TerminalConfig) (TerminalSession, error) {
-	child := execArgv(cfg.ExecPrefix, containerID, attachCommand())
+// StartTerminal launches a mosh-server bound to an in-container command execed into the spawn's
+// container, and returns the mosh connect info for spawnctl. cmd nil/empty => the opencode TUI
+// launcher (spawn-tui); otherwise the given command (raw exec).
+func StartTerminal(ctx context.Context, containerID string, cmd []string, cfg TerminalConfig) (TerminalSession, error) {
+	inner := cmd
+	if len(inner) == 0 {
+		inner = attachCommand()
+	}
+	child := execArgv(cfg.ExecPrefix, containerID, inner)
 	out, err := exec.CommandContext(ctx, "mosh-server", moshServerArgs(cfg.AdvertiseIP, child)...).Output()
 	if err != nil {
 		return TerminalSession{}, fmt.Errorf("mosh-server: %w", err)
