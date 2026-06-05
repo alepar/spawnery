@@ -44,13 +44,21 @@ func (r *Registry) Heartbeat(id string, active, free uint32) {
 	}
 }
 
-// Placement constrains node selection. An empty field is unconstrained.
+// Placement carries the spawn's owner. Node eligibility is the TENANCY rule (sp-cf0): a cloud node is
+// multi-tenant (accepts any owner); a self-hosted node is single-tenant (only its bound owner's spawns).
 type Placement struct {
-	Class string
 	Owner string
 }
 
-// PickFor returns the node with the most free capacity that satisfies the placement, or nil.
+// eligibleForOwner reports whether a node may run a spawn owned by owner, per the tenancy rule.
+func eligibleForOwner(n *Node, owner string) bool {
+	if n.Class == "self-hosted" {
+		return n.Owner == owner // single-tenant: only its own owner
+	}
+	return true // cloud (and the unset default) is multi-tenant
+}
+
+// PickFor returns the eligible node with the most free capacity for the placement, or nil.
 func (r *Registry) PickFor(p Placement) *Node {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -59,10 +67,7 @@ func (r *Registry) PickFor(p Placement) *Node {
 		if n.Free == 0 {
 			continue
 		}
-		if p.Class != "" && n.Class != p.Class {
-			continue
-		}
-		if p.Owner != "" && n.Owner != p.Owner {
+		if !eligibleForOwner(n, p.Owner) {
 			continue
 		}
 		if best == nil || n.Free > best.Free {

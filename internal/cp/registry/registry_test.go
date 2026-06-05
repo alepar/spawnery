@@ -32,22 +32,30 @@ func TestAddHeartbeatPickEvict(t *testing.T) {
 	}
 }
 
-func TestPickFor(t *testing.T) {
+// Tenancy: a cloud node is multi-tenant (any owner); a self-hosted node is single-tenant (only its own
+// owner's spawns). A spawn for owner O is eligible on any cloud node OR O's own self-hosted node, never
+// another owner's self-hosted node.
+func TestPickForTenancy(t *testing.T) {
 	r := New()
 	r.Add(&Node{ID: "cloud1", Free: 5, Class: "cloud"})
 	r.Add(&Node{ID: "selfA", Free: 1, Class: "self-hosted", Owner: "alice"})
 	r.Add(&Node{ID: "selfB", Free: 9, Class: "self-hosted", Owner: "bob"})
 
-	if n := r.PickFor(Placement{}); n == nil || n.ID != "selfB" {
-		t.Fatalf("unconstrained should pick max-free selfB, got %v", n)
+	// bob: eligible on cloud1 + his own selfB; selfB has the most free -> selfB.
+	if n := r.PickFor(Placement{Owner: "bob"}); n == nil || n.ID != "selfB" {
+		t.Fatalf("bob should pick his own selfB (most free eligible), got %v", n)
 	}
-	if n := r.PickFor(Placement{Class: "self-hosted", Owner: "alice"}); n == nil || n.ID != "selfA" {
-		t.Fatalf("class+owner filter should pick selfA, got %v", n)
+	// alice: bob's selfB (most free overall) is NOT eligible -> cloud1 (most free eligible).
+	if n := r.PickFor(Placement{Owner: "alice"}); n == nil || n.ID != "cloud1" {
+		t.Fatalf("alice must never get bob's self-hosted node; expect cloud1, got %v", n)
 	}
-	if n := r.PickFor(Placement{Class: "self-hosted", Owner: "carol"}); n != nil {
-		t.Fatalf("no node owned by carol -> nil, got %v", n)
+	// with cloud full, alice falls back to HER OWN selfA, never bob's selfB.
+	r.Heartbeat("cloud1", 5, 0)
+	if n := r.PickFor(Placement{Owner: "alice"}); n == nil || n.ID != "selfA" {
+		t.Fatalf("alice with cloud full should pick her own selfA, got %v", n)
 	}
-	if n := r.PickFor(Placement{Class: "cloud"}); n == nil || n.ID != "cloud1" {
-		t.Fatalf("class filter should pick cloud1, got %v", n)
+	// carol owns no self-hosted node; with cloud full there is nothing eligible.
+	if n := r.PickFor(Placement{Owner: "carol"}); n != nil {
+		t.Fatalf("carol -> nil when only other owners' self-hosted nodes remain, got %v", n)
 	}
 }

@@ -281,21 +281,22 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model stri
 	}
 }
 
-// placementFor computes node placement for a spawn of the given app version. Reviewed/scanned
-// versions run anywhere; unverified/unknown versions are author-self-host only (PermissionDenied for
-// a non-creator caller). Shared by CreateSpawn and ResumeSpawn.
+// placementFor computes node placement for a spawn of the given app version. Apps run anywhere
+// regardless of review status — the only node distinction is TENANCY (cloud=multi-tenant,
+// self-hosted=owner-only), enforced by registry.PickFor on the spawn owner. The review tier only gates
+// app-spawn AUTHORIZATION: an unverified/unknown version may be run only by its author (PermissionDenied
+// otherwise). Shared by CreateSpawn and ResumeSpawn.
 func (s *Server) placementFor(ctx context.Context, owner, appID string, ver store.AppVersion) (registry.Placement, error) {
-	if ver.Tier == store.TierReviewed || ver.Tier == store.TierScanned {
-		return registry.Placement{}, nil
+	if ver.Tier != store.TierReviewed && ver.Tier != store.TierScanned {
+		creator, err := s.st.Apps().Creator(ctx, appID)
+		if err != nil {
+			return registry.Placement{}, connect.NewError(connect.CodeInternal, err)
+		}
+		if creator != owner {
+			return registry.Placement{}, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("only the author can run an unverified version of %s", appID))
+		}
 	}
-	creator, err := s.st.Apps().Creator(ctx, appID)
-	if err != nil {
-		return registry.Placement{}, connect.NewError(connect.CodeInternal, err)
-	}
-	if creator != owner {
-		return registry.Placement{}, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("only the author can run an unverified version of %s", appID))
-	}
-	return registry.Placement{Class: "self-hosted", Owner: owner}, nil
+	return registry.Placement{Owner: owner}, nil
 }
 
 func (s *Server) StopSpawn(ctx context.Context, req *connect.Request[cpv1.StopSpawnRequest]) (*connect.Response[cpv1.StopSpawnResponse], error) {
