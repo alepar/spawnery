@@ -85,7 +85,7 @@ func (a *Adapter) handleInitialize(srv *acp.Server, m acp.Message) {
 	// opencode serve can be slow to bind on first run (one-time SQLite migration), so poll health
 	// rather than failing the handshake immediately. Bounded so we still error well within the node's
 	// readyTimeout if opencode never comes up.
-	if err := a.waitHealthy(25 * time.Second); err != nil {
+	if err := a.waitHealthy(90 * time.Second); err != nil {
 		_ = srv.RespondError(*m.ID, -32000, "opencode not ready: "+err.Error())
 		return
 	}

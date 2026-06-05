@@ -34,6 +34,11 @@ COPY --from=fetch /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=gobuild /acpadapter /usr/local/bin/acpadapter
 COPY deploy/agent/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+# Pre-run the one-time SQLite migration + models.json fetch at build time (network available here),
+# so a fresh container is ready in seconds instead of doing a multi-minute first-run migration.
+RUN sh -c 'opencode serve --port 4096 --hostname 127.0.0.1 >/tmp/m.log 2>&1 & P=$!; \
+      for i in $(seq 1 120); do grep -q "server listening" /tmp/m.log && break; sleep 1; done; \
+      kill "$P" 2>/dev/null || true; sleep 1; tail -3 /tmp/m.log'
 WORKDIR /app
 # tini reaps the opencode serve child; entrypoint launches serve + adapter.
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]

@@ -16,13 +16,18 @@ import (
 
 // Client talks to one opencode server over HTTP + SSE.
 type Client struct {
-	base string
-	hc   *http.Client
+	base     string
+	hc       *http.Client
+	healthHC *http.Client // short timeout so readiness polling stays responsive
 }
 
 // New returns a client for the server at baseURL (e.g. http://127.0.0.1:4096).
 func New(baseURL string) *Client {
-	return &Client{base: strings.TrimRight(baseURL, "/"), hc: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{
+		base:     strings.TrimRight(baseURL, "/"),
+		hc:       &http.Client{Timeout: 30 * time.Second},
+		healthHC: &http.Client{Timeout: 3 * time.Second},
+	}
 }
 
 // Session is the subset of an opencode session object we use.
@@ -34,7 +39,7 @@ type Session struct {
 
 // Health returns nil if the server reports healthy.
 func (c *Client) Health() error {
-	resp, err := c.hc.Get(c.base + "/global/health")
+	resp, err := c.healthHC.Get(c.base + "/global/health")
 	if err != nil {
 		return err
 	}
