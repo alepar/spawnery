@@ -17,6 +17,7 @@ mkdir -p /etc/opencode
 cat > /etc/opencode/opencode.json <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
+  "model": "spawnery/${MODEL_ID}",
   "provider": {
     "spawnery": {
       "npm": "@ai-sdk/openai-compatible",

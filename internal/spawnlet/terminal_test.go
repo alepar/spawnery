@@ -5,23 +5,19 @@ import (
 	"testing"
 )
 
-func TestAttachCommandWithSession(t *testing.T) {
-	got := attachCommand("", "", "ses_abc")
-	want := []string{"tmux", "new-session", "-A", "-s", "opencode", "opencode", "attach", "http://127.0.0.1:4096", "-s", "ses_abc"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("attachCommand:\n got %v\n want %v", got, want)
-	}
-	// tmux -A is what makes a second attach reattach instead of duplicating.
-	if got[2] != "-A" {
-		t.Fatalf("expected tmux -A (attach-or-create), got %q", got[2])
+func TestAttachCommandRunsLauncher(t *testing.T) {
+	// The in-container command is the baked launcher, which owns TERM + `opencode attach -s <id>`.
+	got := attachCommand()
+	if !reflect.DeepEqual(got, []string{"spawn-tui"}) {
+		t.Fatalf("attachCommand = %v, want [spawn-tui]", got)
 	}
 }
 
-func TestAttachCommandFallsBackToContinue(t *testing.T) {
-	got := attachCommand("http://x:1", "sess", "")
-	want := []string{"tmux", "new-session", "-A", "-s", "sess", "opencode", "attach", "http://x:1", "-c"}
+func TestExecArgvWrapsLauncher(t *testing.T) {
+	got := execArgv([]string{"docker", "exec", "-it"}, "agent123", attachCommand())
+	want := []string{"docker", "exec", "-it", "agent123", "spawn-tui"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("attachCommand (no oc session):\n got %v\n want %v", got, want)
+		t.Fatalf("execArgv = %v, want %v", got, want)
 	}
 }
 

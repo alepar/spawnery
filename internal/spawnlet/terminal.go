@@ -34,28 +34,13 @@ type TerminalConfig struct {
 	AdvertiseIP string   // node IP mosh advertises to the client; "" => mosh auto-detects
 }
 
-// attachCommand is the in-container command: a persistent tmux session running the opencode TUI.
-// `tmux new-session -A` ATTACHES to the tmux session if it already exists (reattach), else creates
-// it — this is what makes a second `spawnctl tmux` reattach rather than spawn a duplicate.
-//
-// The TUI MUST be pointed at the spawn's shared opencode session, or `opencode attach` opens a fresh
-// empty one (verified on 1.15.13). We pass `-s <ocSessionID>` when the node knows it (it does — the
-// pump records it from session/new); otherwise `-c` (continue the last session), which is correct
-// under the one-session-per-spawn invariant.
-func attachCommand(url, tmuxSession, ocSessionID string) []string {
-	if url == "" {
-		url = defaultAttachURL
-	}
-	if tmuxSession == "" {
-		tmuxSession = defaultTmuxSession
-	}
-	attach := []string{"opencode", "attach", url}
-	if ocSessionID != "" {
-		attach = append(attach, "-s", ocSessionID)
-	} else {
-		attach = append(attach, "-c")
-	}
-	return append([]string{"tmux", "new-session", "-A", "-s", tmuxSession}, attach...)
+// attachCommand is the in-container command: the baked `spawn-tui` launcher (deploy/agent/spawn-tui.sh).
+// It sets TERM (else the full-screen TUI half-renders over the mosh PTY) and pins
+// `opencode attach -s <id>` to the spawn's shared opencode session (the adapter writes that id to a
+// file; `opencode attach -c` does NOT reliably select it). `tmux new-session -A` reattaches if the
+// session already exists.
+func attachCommand() []string {
+	return []string{"spawn-tui"}
 }
 
 // execArgv prefixes the in-container command with the runtime's exec invocation + container id.
@@ -116,7 +101,7 @@ func (m *Manager) StartTerminal(ctx context.Context, spawnID string) (TerminalSe
 // StartTerminal launches a mosh-server bound to a tmux+opencode-attach session execed into the
 // spawn's container, and returns the mosh connect info for spawnctl.
 func StartTerminal(ctx context.Context, containerID string, cfg TerminalConfig) (TerminalSession, error) {
-	child := execArgv(cfg.ExecPrefix, containerID, attachCommand(cfg.AttachURL, cfg.Session, cfg.OcSessionID))
+	child := execArgv(cfg.ExecPrefix, containerID, attachCommand())
 	out, err := exec.CommandContext(ctx, "mosh-server", moshServerArgs(cfg.AdvertiseIP, child)...).Output()
 	if err != nil {
 		return TerminalSession{}, fmt.Errorf("mosh-server: %w", err)

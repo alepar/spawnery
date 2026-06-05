@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,16 @@ import (
 	"spawnery/internal/acp"
 	"spawnery/internal/opencode"
 )
+
+// sessionFile is where the adapter records the spawn's opencode session id so the in-container TUI
+// launcher (spawn-tui) can pin `opencode attach -s <id>` to the same shared session. Overridable for
+// tests via SPAWNERY_SESSION_FILE.
+func sessionFilePath() string {
+	if p := os.Getenv("SPAWNERY_SESSION_FILE"); p != "" {
+		return p
+	}
+	return "/tmp/spawnery-opencode-session"
+}
 
 // Adapter presents a canonical-ACP agent to the node, backed by an opencode
 // server. One Adapter serves one node connection; the spawn maps to a single
@@ -94,9 +105,7 @@ func (a *Adapter) handleInitialize(srv *acp.Server, m acp.Message) {
 		_ = srv.RespondError(*m.ID, -32000, err.Error())
 		return
 	}
-	a.mu.Lock()
-	a.sessionID = sid
-	a.mu.Unlock()
+	a.setSession(sid)
 	_ = srv.Respond(*m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{}})
 }
 
@@ -113,11 +122,18 @@ func (a *Adapter) handleNewSession(srv *acp.Server, m acp.Message) {
 			_ = srv.RespondError(*m.ID, -32000, err.Error())
 			return
 		}
-		a.mu.Lock()
-		a.sessionID = sid
-		a.mu.Unlock()
+		a.setSession(sid)
 	}
 	_ = srv.Respond(*m.ID, map[string]any{"sessionId": sid})
+}
+
+// setSession records the opencode session id in memory and to the session file (for spawn-tui).
+func (a *Adapter) setSession(sid string) {
+	a.mu.Lock()
+	a.sessionID = sid
+	a.mu.Unlock()
+	// Best-effort: the in-container TUI launcher reads this to pin `opencode attach -s <id>`.
+	_ = os.WriteFile(sessionFilePath(), []byte(sid), 0o644)
 }
 
 func (a *Adapter) handlePrompt(srv *acp.Server, m acp.Message) {
