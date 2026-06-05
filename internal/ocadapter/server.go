@@ -82,7 +82,10 @@ func (a *Adapter) handleInitialize(srv *acp.Server, m acp.Message) {
 	if m.ID == nil {
 		return
 	}
-	if err := a.oc.Health(); err != nil {
+	// opencode serve can be slow to bind on first run (one-time SQLite migration), so poll health
+	// rather than failing the handshake immediately. Bounded so we still error well within the node's
+	// readyTimeout if opencode never comes up.
+	if err := a.waitHealthy(25 * time.Second); err != nil {
 		_ = srv.RespondError(*m.ID, -32000, "opencode not ready: "+err.Error())
 		return
 	}
@@ -154,6 +157,21 @@ func (a *Adapter) handlePermResponse(reqID int, result json.RawMessage) {
 	}
 	_ = json.Unmarshal(result, &res)
 	_ = a.oc.RespondPermission(sid, permID, ACPOptionIDToOpencodeResponse(res.Outcome.OptionID))
+}
+
+// waitHealthy polls opencode /global/health until it succeeds or timeout elapses.
+func (a *Adapter) waitHealthy(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var err error
+	for {
+		if err = a.oc.Health(); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // pumpLoop subscribes to opencode /event and reconnects with backoff.
