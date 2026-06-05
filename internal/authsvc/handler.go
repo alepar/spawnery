@@ -16,5 +16,6 @@ func (s *Service) Handler() http.Handler {
 		w.Header().Set("Content-Type", "application/x-pem-file")
 		_, _ = w.Write(s.RootCAPEM())
 	})
+	mux.HandleFunc("POST /enroll", s.enrollHandler)
 	return mux
 }
