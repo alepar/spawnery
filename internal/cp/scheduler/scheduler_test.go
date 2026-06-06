@@ -50,7 +50,7 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 		}
 	}()
 
-	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", registry.Placement{})
+	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", "", "", registry.Placement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,37 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 
 func TestProvisionNoCapacity(t *testing.T) {
 	s := New(registry.New(), router.New(), time.Second)
-	if _, err := s.Provision(context.Background(), "sp-x", "ref", "m", "", "", registry.Placement{}); err == nil {
+	if _, err := s.Provision(context.Background(), "sp-x", "ref", "m", "", "", "", "", registry.Placement{}); err == nil {
 		t.Fatal("expected ResourceExhausted when no node")
+	}
+}
+
+func TestProvisionThreadsSelection(t *testing.T) {
+	reg := registry.New()
+	rt := router.New()
+	s := New(reg, rt, 2*time.Second)
+
+	send := &fakeSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: send, Max: 1, Free: 1, Images: []string{"img:1"}})
+
+	go func() {
+		for {
+			if m := send.first(); m != nil {
+				s.OnStatus(m.GetStart().GetSpawnId(), nodev1.SpawnPhase_ACTIVE)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	_, err := s.Provision(context.Background(), "sp-sel", "ref", "m", "nm", "app", "goose-acp", "acp",
+		registry.Placement{Image: "img:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := send.first().GetStart()
+	if got.GetImage() != "img:1" || got.GetRunnableId() != "goose-acp" || got.GetMode() != "acp" {
+		t.Fatalf("StartSpawn selection not threaded: image=%q runnable=%q mode=%q",
+			got.GetImage(), got.GetRunnableId(), got.GetMode())
 	}
 }

@@ -2,6 +2,7 @@
 package registry
 
 import (
+	"slices"
 	"sync"
 	"time"
 
@@ -115,6 +116,7 @@ func (r *Registry) Heartbeat(id string, token uint64, active, free uint32) {
 type Placement struct {
 	Class string
 	Owner string
+	Image string // if set, the node must advertise this image
 }
 
 // PickFor returns the node with the most free capacity that satisfies the placement, or nil.
@@ -130,6 +132,9 @@ func (r *Registry) PickFor(p Placement) *Node {
 			continue
 		}
 		if p.Owner != "" && n.Owner != p.Owner {
+			continue
+		}
+		if p.Image != "" && !slices.Contains(n.Images, p.Image) {
 			continue
 		}
 		if best == nil || n.Free > best.Free {
