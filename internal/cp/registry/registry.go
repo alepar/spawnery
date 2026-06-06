@@ -115,6 +115,7 @@ func (r *Registry) Heartbeat(id string, token uint64, active, free uint32) {
 type Placement struct {
 	Class string
 	Owner string
+	Image string // if set, the node must advertise this image
 }
 
 // PickFor returns the node with the most free capacity that satisfies the placement, or nil.
@@ -132,6 +133,9 @@ func (r *Registry) PickFor(p Placement) *Node {
 		if p.Owner != "" && n.Owner != p.Owner {
 			continue
 		}
+		if p.Image != "" && !hasImage(n.Images, p.Image) {
+			continue
+		}
 		if best == nil || n.Free > best.Free {
 			best = n
 		}
@@ -141,3 +145,12 @@ func (r *Registry) PickFor(p Placement) *Node {
 
 // Pick returns the node with the most free slots (>0), or nil if none.
 func (r *Registry) Pick() *Node { return r.PickFor(Placement{}) }
+
+func hasImage(images []string, img string) bool {
+	for _, i := range images {
+		if i == img {
+			return true
+		}
+	}
+	return false
+}

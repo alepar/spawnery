@@ -110,3 +110,22 @@ func TestPickFor(t *testing.T) {
 		t.Fatalf("class filter should pick cloud1, got %v", n)
 	}
 }
+
+func TestPickForImage(t *testing.T) {
+	r := New()
+	r.Add(&Node{ID: "a", Max: 1, Free: 1, Images: []string{"img:goose"}})
+	r.Add(&Node{ID: "b", Max: 1, Free: 1, Images: []string{"img:opencode"}})
+
+	if n := r.PickFor(Placement{Image: "img:goose"}); n == nil || n.ID != "a" {
+		t.Fatalf("want node a for img:goose, got %v", n)
+	}
+	if n := r.PickFor(Placement{Image: "img:opencode"}); n == nil || n.ID != "b" {
+		t.Fatalf("want node b for img:opencode, got %v", n)
+	}
+	if n := r.PickFor(Placement{Image: "img:missing"}); n != nil {
+		t.Fatalf("want nil for an image no node has, got %v", n)
+	}
+	if n := r.PickFor(Placement{}); n == nil {
+		t.Fatalf("empty placement should still pick a node")
+	}
+}
