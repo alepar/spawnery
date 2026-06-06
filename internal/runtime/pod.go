@@ -32,6 +32,7 @@ type PodSpec struct {
 // AgentSpec describes the agent container (started by StartAgent into the existing pod).
 type AgentSpec struct {
 	Image          string
+	Cmd            []string // overrides the image's default command (the runnable's launch argv); nil = image default
 	Env            []string
 	Mounts         []Mount
 	Resources      Resources
