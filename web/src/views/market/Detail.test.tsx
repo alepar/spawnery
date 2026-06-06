@@ -11,6 +11,15 @@ vi.mock("@/api/catalog", () => ({
   tierLabel: (_t?: string) => ({ label: "reviewed", variant: "default" as const }),
 }));
 
+vi.mock("@/api/spawnlet", () => ({
+  listAgentImages: vi.fn().mockResolvedValue([
+    { image: "img:1", runnables: [
+      { id: "goose-acp", label: "Goose · rich web", mode: "acp" },
+      { id: "goose-tui", label: "Goose · terminal", mode: "tmux" },
+    ] },
+  ]),
+}));
+
 import { Detail } from "./Detail";
 
 describe("Detail", () => {
@@ -21,6 +30,15 @@ describe("Detail", () => {
     expect(screen.getByText("a wiki")).toBeInTheDocument();
     expect(screen.getByText("1.0.0")).toBeInTheDocument();
     await userEvent.click(screen.getByTestId("spawn-btn"));
-    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki");
+    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-acp");
+  });
+
+  it("shows the agent selector and spawns with the chosen runnable", async () => {
+    const onSpawn = vi.fn();
+    render(<Detail id="spawnery/wiki" onBack={() => {}} onSpawn={onSpawn} />);
+    await waitFor(() => screen.getByTestId("runnable-select"));
+    await userEvent.selectOptions(screen.getByTestId("runnable-select"), "goose-tui");
+    await userEvent.click(screen.getByTestId("spawn-btn"));
+    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-tui");
   });
 });

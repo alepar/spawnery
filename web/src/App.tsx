@@ -184,7 +184,7 @@ export function App() {
   // On unmount just close the live ws — spawns persist on the node.
   useEffect(() => () => { wsRef.current?.close(); }, []);
 
-  const spawnApp = async (appId: string) => {
+  const spawnApp = async (appId: string, image = "", runnableId = "") => {
     // Switch the UI to the pending state SYNCHRONOUSLY, before the createSpawn round-trip: tear down
     // the previous spawn's live socket, stash + clear its transcript, and show "waiting". Otherwise
     // the old spawn stays "connected" on its live socket during the await, and a prompt sent in that
@@ -202,7 +202,7 @@ export function App() {
     setTurn({ state: "idle", queued: 0 });
     waiting(); // grey-pulse until the node signals active; the poll then opens the ws
     try {
-      const id = await createSpawn(appId, MODEL); // async CP: returns immediately, status 'starting'
+      const id = await createSpawn(appId, MODEL, image, runnableId); // async CP: returns immediately, status 'starting'
       buffersRef.current.set(id, []);
       setActiveId(id);
       activeIdRef.current = id;

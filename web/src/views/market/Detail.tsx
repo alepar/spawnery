@@ -9,6 +9,7 @@ import {
   type AppVersionSummary,
   type AppManifest,
 } from "@/api/catalog";
+import { listAgentImages, type AgentImageView } from "@/api/spawnlet";
 
 export function Detail({
   id,
@@ -17,13 +18,26 @@ export function Detail({
 }: {
   id: string;
   onBack: () => void;
-  onSpawn?: (appId: string) => void;
+  onSpawn?: (appId: string, image?: string, runnableId?: string) => void;
 }) {
   const [app, setApp] = useState<AppSummary | null>(null);
   const [versions, setVersions] = useState<AppVersionSummary[]>([]);
   const [manifest, setManifest] = useState<AppManifest | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [images, setImages] = useState<AgentImageView[]>([]);
+  const [imageIdx, setImageIdx] = useState(0);
+  const [runnableId, setRunnableId] = useState("");
+
+  useEffect(() => {
+    listAgentImages().then((imgs) => {
+      const withRunnables = imgs.filter((i) => i.runnables.length > 0);
+      setImages(withRunnables);
+      if (withRunnables.length > 0) setRunnableId(withRunnables[0].runnables[0].id);
+    }).catch(() => {});
+  }, []);
+
+  const selImage = images[imageIdx];
 
   useEffect(() => {
     let cancelled = false;
@@ -57,9 +71,37 @@ export function Detail({
         <Button variant="outline" size="sm" data-testid="detail-back" onClick={onBack}>
           ← Back
         </Button>
-        <Button data-testid="spawn-btn" onClick={() => onSpawn?.(id)}>
-          Spawn
-        </Button>
+        <div className="flex items-center gap-2">
+          {images.length > 0 && (
+            <div className="flex gap-2" data-testid="agent-selector">
+              <select
+                data-testid="image-select"
+                value={imageIdx}
+                onChange={(e) => {
+                  const idx = Number(e.target.value);
+                  setImageIdx(idx);
+                  setRunnableId(images[idx].runnables[0]?.id ?? "");
+                }}
+              >
+                {images.map((i, idx) => (
+                  <option key={i.image} value={idx}>{i.image}</option>
+                ))}
+              </select>
+              <select
+                data-testid="runnable-select"
+                value={runnableId}
+                onChange={(e) => setRunnableId(e.target.value)}
+              >
+                {selImage?.runnables.map((r) => (
+                  <option key={r.id} value={r.id}>{r.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <Button data-testid="spawn-btn" onClick={() => onSpawn?.(id, selImage?.image ?? "", runnableId)}>
+            Spawn
+          </Button>
+        </div>
       </div>
 
       {loading && <p className="text-sm text-muted-foreground">Loading…</p>}
