@@ -159,7 +159,8 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID st
 }
 
 // CreateWithSelection is Create plus an explicit agent selection (image + runnable launch argv +
-// mode). tmux mode is rejected here (launchable in Phase 2).
+// mode). tmux mode is rejected here (launchable in Phase 2) as defense-in-depth — the CP already
+// rejects it in cp/server.go CreateSpawn, but the manager is a reusable entry point.
 func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, sel AgentSelection) (*Spawn, error) {
 	if sel.Mode == string(agentcaps.ModeTmux) {
 		return nil, fmt.Errorf("runnable %q uses tmux mode, not supported on this node yet", sel.RunnableID)

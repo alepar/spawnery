@@ -31,8 +31,13 @@ type PodSpec struct {
 
 // AgentSpec describes the agent container (started by StartAgent into the existing pod).
 type AgentSpec struct {
-	Image          string
-	Cmd            []string // overrides the image's default command (the runnable's launch argv); nil = image default
+	Image string
+	// Cmd is the runnable's full launch argv; nil = image default. NOTE the two backends differ:
+	// Docker maps it to container Config.Cmd (overrides the image CMD, KEEPS its ENTRYPOINT), while
+	// CRI maps it to Command (overrides the ENTRYPOINT). For images that respect a full-argv launch
+	// (no opinionated entrypoint, or an exec-form passthrough) both behave the same; an image with a
+	// hardcoded entrypoint must be made argv-aware for non-default runnables to actually launch.
+	Cmd            []string
 	Env            []string
 	Mounts         []Mount
 	Resources      Resources
