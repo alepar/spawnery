@@ -76,6 +76,7 @@ export function Detail({
             <div className="flex gap-2" data-testid="agent-selector">
               <select
                 data-testid="image-select"
+                aria-label="Agent image"
                 value={imageIdx}
                 onChange={(e) => {
                   const idx = Number(e.target.value);
@@ -89,6 +90,7 @@ export function Detail({
               </select>
               <select
                 data-testid="runnable-select"
+                aria-label="Runnable"
                 value={runnableId}
                 onChange={(e) => setRunnableId(e.target.value)}
               >
