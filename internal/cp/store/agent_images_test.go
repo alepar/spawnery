@@ -103,3 +103,23 @@ func TestAgentImageUpsertPreservesCreatedAt(t *testing.T) {
 		t.Fatalf("created_at should be preserved on conflict, got %d", img.CreatedAt)
 	}
 }
+
+func TestAgentImageUpsertEmptyBinaries(t *testing.T) {
+	st := NewTestStore(t)
+	ctx := context.Background()
+	// An image with zero binaries is valid: the image row exists, with no binary rows.
+	inTx(t, st, func(tx Store) error {
+		return tx.AgentImages().Upsert(ctx, AgentImage{Image: "img:1", CreatedAt: 1}, nil)
+	})
+
+	if _, err := st.AgentImages().Get(ctx, "img:1"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	bins, err := st.AgentImages().Binaries(ctx, "img:1")
+	if err != nil {
+		t.Fatalf("Binaries: %v", err)
+	}
+	if len(bins) != 0 {
+		t.Fatalf("want no binaries, got %v", bins)
+	}
+}

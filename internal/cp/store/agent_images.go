@@ -12,6 +12,8 @@ type agentImageRepo struct{ db bun.IDB }
 
 var _ AgentImageRepo = (*agentImageRepo)(nil)
 
+// Upsert is multi-statement (image row + full binary-set replace); the caller MUST
+// wrap it in Store.WithTx for atomicity (same contract as spawnRepo.Create).
 func (r *agentImageRepo) Upsert(ctx context.Context, img AgentImage, binaries []string) error {
 	// Keep created_at on conflict (DO NOTHING), then replace the binary set.
 	if _, err := r.db.NewInsert().Model(&img).
