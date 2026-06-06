@@ -7,7 +7,7 @@
 # (127.0.0.1:8080), which injects the real OpenRouter key.
 #
 # Pinned opencode version — see docs/superpowers/notes/opencode-api-pinned.md.
-FROM debian:bookworm-slim AS fetch
+FROM debian:stable AS fetch
 ARG OPENCODE_VERSION=v1.15.13
 ARG OPENCODE_ASSET=opencode-linux-x64.tar.gz
 RUN apt-get update \
@@ -26,10 +26,11 @@ WORKDIR /src
 COPY . .
 RUN CGO_ENABLED=0 go build -o /acpadapter ./deploy/agent/acpadapter
 
-FROM debian:bookworm-slim
+FROM debian:stable
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates tmux tini \
       procps less iproute2 curl \
+      neovim htop btop dnsutils jq \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=fetch /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=gobuild /acpadapter /usr/local/bin/acpadapter
