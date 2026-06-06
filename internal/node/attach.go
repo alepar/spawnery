@@ -24,12 +24,13 @@ import (
 const readyTimeout = 30 * time.Second
 
 type Config struct {
-	NodeID     string
-	CPURL      string // e.g. http://127.0.0.1:8080
-	MaxSpawns  uint32
-	AgentImage string
-	NodeClass  string
-	NodeOwner  string
+	NodeID        string
+	CPURL         string // e.g. http://127.0.0.1:8080
+	MaxSpawns     uint32
+	AgentImage    string
+	AgentBinaries []string // binaries this node's image ships (registry keys: goose, opencode, ...)
+	NodeClass     string
+	NodeOwner     string
 }
 
 // cpStream is the subset of the Connect bidi stream the attacher uses. *connect.BidiStreamForClient
@@ -88,6 +89,16 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	}
 }
 
+// registerMessage builds the node's Register announcement. Extracted for testability and so the
+// node advertises the binaries its image ships (the CP upserts these into the agent-image catalog).
+func registerMessage(cfg Config, running []*nodev1.RunningSpawn) *nodev1.Register {
+	return &nodev1.Register{
+		NodeId: cfg.NodeID, MaxSpawns: cfg.MaxSpawns, AgentImages: []string{cfg.AgentImage},
+		NodeClass: cfg.NodeClass, NodeOwner: cfg.NodeOwner, Binaries: cfg.AgentBinaries,
+		Running: running,
+	}
+}
+
 // runOnce serves a single CP connection: dial + Register + heartbeat + receive loop. It returns when
 // the connection ends (stream error) or ctx is cancelled. Everything connection-scoped (heartbeat,
 // pump sessions) is tied to connCtx so it stops cleanly when the connection ends.
@@ -102,10 +113,9 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)
 
-	if err := a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{Register: &nodev1.Register{
-		NodeId: cfg.NodeID, MaxSpawns: cfg.MaxSpawns, AgentImages: []string{cfg.AgentImage}, NodeClass: cfg.NodeClass, NodeOwner: cfg.NodeOwner,
-		Running: a.runningSpawns(), // inventory so the CP can reconcile a returning node
-	}}}); err != nil {
+	if err := a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{
+		Register: registerMessage(cfg, a.runningSpawns()),
+	}}); err != nil {
 		return err
 	}
 	log.Printf("node: connected to CP at %s (id=%s class=%s)", cfg.CPURL, cfg.NodeID, cfg.NodeClass)
