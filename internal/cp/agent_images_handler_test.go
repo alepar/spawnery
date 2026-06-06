@@ -14,7 +14,7 @@ func TestListAgentImages(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	ctx := auth.WithOwner(context.Background(), "alice")
 	s.upsertAgentCatalog(context.Background(), []string{"img:2"}, []string{"claude-code"})
-	s.upsertAgentCatalog(context.Background(), []string{"img:1"}, []string{"goose", "opencode"})
+	s.upsertAgentCatalog(context.Background(), []string{"img:1"}, []string{"goose"})
 
 	resp, err := s.ListAgentImages(ctx, connect.NewRequest(&cpv1.ListAgentImagesRequest{}))
 	if err != nil {
@@ -25,12 +25,26 @@ func TestListAgentImages(t *testing.T) {
 		t.Fatalf("want 2 images, got %d", len(imgs))
 	}
 	// List is sorted by image asc.
-	if imgs[0].Image != "img:1" || len(imgs[0].Binaries) != 2 ||
-		imgs[0].Binaries[0] != "goose" || imgs[0].Binaries[1] != "opencode" {
+	if imgs[0].Image != "img:1" || len(imgs[0].Binaries) != 1 || imgs[0].Binaries[0] != "goose" {
 		t.Fatalf("img[0] = %+v", imgs[0])
 	}
 	if imgs[1].Image != "img:2" || len(imgs[1].Binaries) != 1 || imgs[1].Binaries[0] != "claude-code" {
 		t.Fatalf("img[1] = %+v", imgs[1])
+	}
+	// img:1 has binary "goose" → runnables goose-acp (acp) + goose-tui (tmux), with labels.
+	got := imgs[0]
+	if got.Image != "img:1" {
+		t.Fatalf("img[0].Image = %q", got.Image)
+	}
+	byID := map[string]*cpv1.RunnableInfo{}
+	for _, r := range got.Runnables {
+		byID[r.Id] = r
+	}
+	if byID["goose-acp"] == nil || byID["goose-acp"].Mode != "acp" || byID["goose-acp"].Label == "" {
+		t.Fatalf("goose-acp runnable missing/wrong: %+v", got.Runnables)
+	}
+	if byID["goose-tui"] == nil || byID["goose-tui"].Mode != "tmux" {
+		t.Fatalf("goose-tui runnable missing/wrong: %+v", got.Runnables)
 	}
 }
 

@@ -16,13 +16,13 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
   canSend: boolean;
   onSend: (t: string) => void;
   perm: { title: string; resolve: (b: boolean) => void } | null;
-  onSpawnApp: (appId: string) => void;
+  onSpawnApp: (appId: string, image?: string, runnableId?: string) => void;
   spawns?: SpawnView[];
   activeId?: string | null;
   actions?: SpawnActions;
 }) {
   const [view, setView] = useState<View>("market");
-  const onSpawn = (appId: string) => { onSpawnApp(appId); setView("chat"); };
+  const onSpawn = (appId: string, image?: string, runnableId?: string) => { onSpawnApp(appId, image, runnableId); setView("chat"); };
   // Selecting or resuming a spawn also navigates to its chat.
   const wrapped: SpawnActions | undefined = actions && {
     ...actions,

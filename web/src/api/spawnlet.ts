@@ -24,8 +24,8 @@ export function statusFromProto(s: string | undefined): SpawnStatus {
   }
 }
 
-export async function createSpawn(appId: string, model: string): Promise<string> {
-  const r = await unary<{ spawnId: string }>("CreateSpawn", { appId, model });
+export async function createSpawn(appId: string, model: string, image = "", runnableId = ""): Promise<string> {
+  const r = await unary<{ spawnId: string }>("CreateSpawn", { appId, model, image, runnableId });
   return r.spawnId;
 }
 
@@ -58,12 +58,22 @@ export async function stopSpawn(spawnId: string): Promise<void> {
   await unary<Record<string, never>>("StopSpawn", { spawnId });
 }
 
+export interface RunnableView {
+  id: string;
+  label: string;
+  mode: string;
+}
 export interface AgentImageView {
   image: string;
-  binaries: string[];
+  runnables: RunnableView[];
 }
 
 export async function listAgentImages(): Promise<AgentImageView[]> {
-  const r = await unary<{ images?: Array<{ image?: string; binaries?: string[] }> }>("ListAgentImages", {});
-  return (r.images ?? []).map((i) => ({ image: i.image ?? "", binaries: i.binaries ?? [] }));
+  const r = await unary<{ images?: Array<{ image?: string; runnables?: Array<{ id?: string; label?: string; mode?: string }> }> }>(
+    "ListAgentImages", {},
+  );
+  return (r.images ?? []).map((i) => ({
+    image: i.image ?? "",
+    runnables: (i.runnables ?? []).map((x) => ({ id: x.id ?? "", label: x.label ?? "", mode: x.mode ?? "" })),
+  }));
 }

@@ -8,7 +8,7 @@ import { Publish } from "./market/Publish";
 
 type Tab = "browse" | "detail" | "mine" | "publish";
 
-export function MarketplaceView({ onSpawn }: { onSpawn?: (appId: string) => void } = {}) {
+export function MarketplaceView({ onSpawn }: { onSpawn?: (appId: string, image?: string, runnableId?: string) => void } = {}) {
   const [tab, setTab] = useState<Tab>("browse");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 

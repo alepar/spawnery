@@ -7,6 +7,7 @@ import (
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/internal/agentcaps"
 	"spawnery/internal/cp/auth"
 )
 
@@ -26,7 +27,14 @@ func (s *Server) ListAgentImages(ctx context.Context, _ *connect.Request[cpv1.Li
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal, err)
 		}
-		out = append(out, &cpv1.AgentImageInfo{Image: img.Image, CreatedAt: img.CreatedAt, Binaries: bins})
+		var runnables []*cpv1.RunnableInfo
+		for _, b := range bins {
+			rs, _ := agentcaps.Runnables(b)
+			for _, r := range rs {
+				runnables = append(runnables, &cpv1.RunnableInfo{Id: r.ID, Label: r.Label, Mode: string(r.Mode)})
+			}
+		}
+		out = append(out, &cpv1.AgentImageInfo{Image: img.Image, CreatedAt: img.CreatedAt, Binaries: bins, Runnables: runnables})
 	}
 	return connect.NewResponse(&cpv1.ListAgentImagesResponse{Images: out}), nil
 }
