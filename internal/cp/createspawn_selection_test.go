@@ -54,6 +54,18 @@ func TestCreateSpawnRejectsUnknownRunnable(t *testing.T) {
 	}
 }
 
+func TestCreateSpawnRequiresImageWithRunnable(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	_, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId: "secret-app", Model: "m", RunnableId: "goose-acp", // no image
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("want CodeInvalidArgument when runnable set without image, got %v", connect.CodeOf(err))
+	}
+}
+
 func TestCreateSpawnRequiresRunnableWithImage(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	seedCatalogGoose(t, s, "img:1")

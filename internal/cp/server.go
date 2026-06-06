@@ -180,6 +180,16 @@ func (s *Server) upsertAgentCatalog(ctx context.Context, images, binaries []stri
 	}
 }
 
+// lookupRunnable finds the first runnable matching id across an image's binaries.
+func lookupRunnable(bins []string, id string) (agentcaps.Runnable, bool) {
+	for _, b := range bins {
+		if r, ok := agentcaps.Lookup(b, id); ok {
+			return r, true
+		}
+	}
+	return agentcaps.Runnable{}, false
+}
+
 // --- client side: cp.v1 SpawnService --------------------------------------
 
 // SetMaxSpawnsPerOwner sets the per-owner concurrent-spawn cap (0 = unlimited).
@@ -225,6 +235,9 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	// Resolve the optional agent selection: validate the runnable is offered by the chosen
 	// image's binaries, resolve the run mode, and reject modes we can't launch yet.
 	var selImage, selRunnable, selMode string
+	if req.Msg.Image == "" && req.Msg.RunnableId != "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("image is required when runnable_id is set"))
+	}
 	if req.Msg.Image != "" {
 		selImage = req.Msg.Image
 		if req.Msg.RunnableId == "" {
@@ -237,13 +250,7 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 		if len(bins) == 0 {
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown or empty agent image: %s", selImage))
 		}
-		run, found := agentcaps.Runnable{}, false
-		for _, b := range bins {
-			if r, ok := agentcaps.Lookup(b, req.Msg.RunnableId); ok {
-				run, found = r, true
-				break
-			}
-		}
+		run, found := lookupRunnable(bins, req.Msg.RunnableId)
 		if !found {
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("runnable %q is not offered by image %s", req.Msg.RunnableId, selImage))
 		}
