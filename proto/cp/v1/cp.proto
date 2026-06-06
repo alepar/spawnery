@@ -101,9 +101,10 @@ message AppVersionSummary {
 message ListAppsRequest  { string query = 1; } // empty = browse all
 message ListAppsResponse { repeated AppSummary apps = 1; }
 
-// One registered agent image and the binaries it ships. The web client expands binaries
-// into selectable runnables via the shared agentcaps registry.
-message AgentImageInfo { string image = 1; int64 created_at = 2; repeated string binaries = 3; }
+// One runnable derived from an image's binaries via the shared agentcaps registry.
+message RunnableInfo { string id = 1; string label = 2; string mode = 3; }
+// One registered agent image and the binaries it ships, with derived runnables.
+message AgentImageInfo { string image = 1; int64 created_at = 2; repeated string binaries = 3; repeated RunnableInfo runnables = 4; }
 message ListAgentImagesRequest  {}
 message ListAgentImagesResponse { repeated AgentImageInfo images = 1; }
 
