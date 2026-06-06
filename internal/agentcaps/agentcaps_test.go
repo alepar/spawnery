@@ -1,0 +1,59 @@
+package agentcaps
+
+import "testing"
+
+func TestRunnablesKnownBinary(t *testing.T) {
+	rs, ok := Runnables("goose")
+	if !ok {
+		t.Fatalf("goose should be a known binary")
+	}
+	if len(rs) != 2 {
+		t.Fatalf("want 2 goose runnables, got %d", len(rs))
+	}
+	byID := map[string]Runnable{}
+	for _, r := range rs {
+		byID[r.ID] = r
+	}
+	if byID["goose-acp"].Mode != ModeACP {
+		t.Fatalf("goose-acp mode = %q, want %q", byID["goose-acp"].Mode, ModeACP)
+	}
+	if byID["goose-tui"].Mode != ModeTmux {
+		t.Fatalf("goose-tui mode = %q, want %q", byID["goose-tui"].Mode, ModeTmux)
+	}
+}
+
+func TestRunnablesUnknownBinary(t *testing.T) {
+	if _, ok := Runnables("does-not-exist"); ok {
+		t.Fatalf("unknown binary should not be known")
+	}
+}
+
+func TestLookup(t *testing.T) {
+	r, ok := Lookup("goose", "goose-tui")
+	if !ok {
+		t.Fatalf("goose/goose-tui should resolve")
+	}
+	if r.Mode != ModeTmux || r.Relay != RelayRawPTY {
+		t.Fatalf("goose-tui = mode %q relay %q, want %q / %q", r.Mode, r.Relay, ModeTmux, RelayRawPTY)
+	}
+	if len(r.Launch) == 0 {
+		t.Fatalf("tmux runnable goose-tui must have a Launch argv")
+	}
+	if _, ok := Lookup("goose", "nope"); ok {
+		t.Fatalf("unknown runnable id should not resolve")
+	}
+	if _, ok := Lookup("nope", "goose-tui"); ok {
+		t.Fatalf("unknown binary should not resolve")
+	}
+}
+
+func TestKnown(t *testing.T) {
+	for _, b := range []string{"goose", "opencode", "claude-code"} {
+		if !Known(b) {
+			t.Fatalf("%q should be known", b)
+		}
+	}
+	if Known("aider") {
+		t.Fatalf("aider is not seeded yet; should not be known")
+	}
+}
