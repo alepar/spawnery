@@ -78,10 +78,20 @@ type SpawnRepo interface {
 	Adopt(ctx context.Context, id, nodeID string, gen int64) error
 }
 
+type AgentImageRepo interface {
+	// Upsert inserts (or keeps, on conflict) the image row and replaces its binary set.
+	// Caller supplies img.CreatedAt; existing created_at is preserved on conflict.
+	Upsert(ctx context.Context, img AgentImage, binaries []string) error
+	Get(ctx context.Context, image string) (AgentImage, error) // ErrNotFound on missing
+	Binaries(ctx context.Context, image string) ([]string, error)
+	List(ctx context.Context) ([]AgentImage, error)
+}
+
 type Store interface {
 	Owners() OwnerRepo
 	Apps() AppRepo
 	Spawns() SpawnRepo
+	AgentImages() AgentImageRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error

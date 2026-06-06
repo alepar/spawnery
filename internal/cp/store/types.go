@@ -104,3 +104,15 @@ type Mount struct {
 	BackendURI    string `bun:"backend_uri,notnull"`
 	PersistMarker string `bun:"persist_marker"`
 }
+
+type AgentImage struct {
+	bun.BaseModel `bun:"table:agent_images,alias:ai"`
+	Image         string `bun:"image,pk"`
+	CreatedAt     int64  `bun:"created_at,notnull"`
+}
+
+type AgentImageBinary struct {
+	bun.BaseModel `bun:"table:agent_image_binaries,alias:aib"`
+	Image         string `bun:"image,pk"`
+	Binary        string `bun:"binary_name,pk"`
+}
