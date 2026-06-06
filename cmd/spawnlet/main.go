@@ -69,12 +69,21 @@ func main() {
 		// can ask this node to start a mosh-backed terminal session for a spawn. The mosh UDP data
 		// plane goes straight to this node. (CP-routed terminal control is sp-wsu.2.)
 		if taddr := env("NODE_TERMINAL_ADDR", "127.0.0.1:9092"); taddr != "" {
+			// Bind synchronously and FAIL FAST: a port-in-use here almost always means another
+			// spawnlet is already running. Two nodes with the same NODE_ID corrupt the CP's routing
+			// (it keys nodes by id) and flip spawns to UNREACHABLE — so refuse to start a duplicate.
+			ln, err := net.Listen("tcp", taddr)
+			if err != nil {
+				log.Fatalf("terminal port %s is already in use — another spawnlet is likely running; "+
+					"stop it first (e.g. `pkill -f bin/spawnlet`) so this node doesn't duplicate id %q "+
+					"and corrupt CP routing: %v", taddr, cfg.NodeID, err)
+			}
 			tsrv := spawnlet.NewServer(mgr)
 			tmux := http.NewServeMux()
 			tmux.HandleFunc("/terminal", tsrv.HandleTerminal)
+			log.Printf("spawnlet terminal endpoint on %s (spawnctl attach -addr http://%s)", taddr, taddr)
 			go func() {
-				log.Printf("spawnlet terminal endpoint on %s (spawnctl tmux -addr http://%s)", taddr, taddr)
-				if err := http.ListenAndServe(taddr, tmux); err != nil {
+				if err := http.Serve(ln, tmux); err != nil {
 					log.Printf("terminal listener: %v", err)
 				}
 			}()
