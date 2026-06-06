@@ -31,6 +31,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates tmux tini \
       procps less iproute2 curl \
       neovim htop btop dnsutils jq \
+      git openssh-client ripgrep fd-find unzip xz-utils build-essential cmake just \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=fetch /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=gobuild /acpadapter /usr/local/bin/acpadapter
