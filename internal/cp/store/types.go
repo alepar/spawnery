@@ -78,6 +78,9 @@ type Spawn struct {
 	AppRef        string `bun:"app_ref,notnull"`
 	Pinned        bool   `bun:"pinned,notnull"`
 	Model         string `bun:"model,notnull"`
+	Image         string `bun:"image,notnull"`
+	RunnableID    string `bun:"runnable_id,notnull"`
+	Mode          string `bun:"mode,notnull"`
 	Status        Status `bun:"status,notnull"`
 	Recovered     bool   `bun:"recovered,notnull"`
 	CreatedAt     int64  `bun:"created_at,notnull"`
