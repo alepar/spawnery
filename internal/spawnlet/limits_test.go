@@ -13,7 +13,7 @@ func TestCreateAppliesResourceLimits(t *testing.T) {
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 		MemLimitMB: 512, CPULimit: 2.0, PidsLimit: 128, ContainerRuntime: "runsc",
 	})
-	if _, err := m.Create(context.Background(), "sp1", "../../examples/secret-app", "model", 0); err != nil {
+	if _, err := m.Create(context.Background(), "sp1", "../../examples/secret-app", "model", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	if len(rt.Started) != 2 {
@@ -38,7 +38,7 @@ func TestCreateAppliesResourceLimits(t *testing.T) {
 func TestNewManagerLimitDefaults(t *testing.T) {
 	rt := runtime.NewFake()
 	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
-	if _, err := m.Create(context.Background(), "sp1", "../../examples/secret-app", "model", 0); err != nil {
+	if _, err := m.Create(context.Background(), "sp1", "../../examples/secret-app", "model", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	s := rt.Started[0]

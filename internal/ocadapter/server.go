@@ -30,6 +30,7 @@ type Adapter struct {
 	oc    *opencode.Client
 	dir   string // the spawn working dir; scopes session discovery
 	model string // "providerID/modelID" passed to prompts (optional)
+	title string // opencode session title for newly-created sessions (spawn name + app)
 
 	mu          sync.Mutex
 	sessionID   string
@@ -43,14 +44,17 @@ type Adapter struct {
 	permByReq   map[int]string // our request id -> opencode permissionID
 }
 
-// New builds an adapter for the opencode client, scoping sessions to dir and
-// tagging prompts with model (may be empty).
-func New(oc *opencode.Client, dir, model string) *Adapter {
+// New builds an adapter for the opencode client, scoping sessions to dir, tagging prompts with model
+// (may be empty), and titling newly-created sessions with title (defaults to "spawnery" if empty).
+func New(oc *opencode.Client, dir, model, title string) *Adapter {
 	if dir == "" {
 		dir = "/app"
 	}
+	if title == "" {
+		title = "spawnery"
+	}
 	return &Adapter{
-		oc: oc, dir: dir, model: model,
+		oc: oc, dir: dir, model: model, title: title,
 		partKind:  map[string]string{},
 		msgRole:   map[string]string{},
 		sentUser:  map[string]bool{},
@@ -105,7 +109,7 @@ func (a *Adapter) handleInitialize(srv *acp.Server, m acp.Message) {
 		_ = srv.RespondError(*m.ID, -32000, "opencode not ready: "+err.Error())
 		return
 	}
-	sid, err := a.oc.DiscoverOrCreateSession(a.dir, "spawnery")
+	sid, err := a.oc.DiscoverOrCreateSession(a.dir, a.title)
 	if err != nil {
 		_ = srv.RespondError(*m.ID, -32000, err.Error())
 		return
@@ -123,7 +127,7 @@ func (a *Adapter) handleNewSession(srv *acp.Server, m acp.Message) {
 	a.mu.Unlock()
 	if sid == "" {
 		var err error
-		if sid, err = a.oc.DiscoverOrCreateSession(a.dir, "spawnery"); err != nil {
+		if sid, err = a.oc.DiscoverOrCreateSession(a.dir, a.title); err != nil {
 			_ = srv.RespondError(*m.ID, -32000, err.Error())
 			return
 		}

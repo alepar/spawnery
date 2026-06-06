@@ -145,7 +145,7 @@ func (m *Manager) StopAll(ctx context.Context) int {
 	return len(sps)
 }
 
-func (m *Manager) Create(ctx context.Context, id, appPath, model string, generation uint64) (*Spawn, error) {
+func (m *Manager) Create(ctx context.Context, id, appPath, model, name string, generation uint64) (*Spawn, error) {
 	if abs, err := filepath.Abs(appPath); err == nil {
 		appPath = abs
 	}
@@ -153,6 +153,10 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string, generat
 	if err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
+	// The opencode session title shown in the TUI/web: the spawn's friendly name, with the app's
+	// title appended in brackets (session titles are single-line, so no newline). Either part may be
+	// empty (e.g. standalone has no spawn name); the adapter falls back to a default if both are.
+	sessionTitle := sessionTitle(name, mf.Title)
 
 	// Labels identify this pod so a restarted node (or the CP) can reconcile it against the ledger and
 	// reap orphans / fence stale generations. Applied to the sandbox + both containers.
@@ -231,6 +235,7 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string, generat
 		Env: []string{
 			"OPENAI_BASE_URL=http://" + addr + "/v1",
 			"SPAWN_MODEL=" + model,
+			"SPAWN_SESSION_TITLE=" + sessionTitle,
 		},
 		Mounts:         mounts,
 		Resources:      res,

@@ -18,7 +18,7 @@ func TestWSRelayEchoesViaFake(t *testing.T) {
 	// an io.Pipe echo stream, so this test exercises the relay logic independent of the transport.
 	m.pod = &fakePodBackend{}
 	srv := NewServer(m)
-	sp, err := m.Create(context.Background(), "ws-1", writeApp(t), "x", 0) // writeApp from manager_test.go
+	sp, err := m.Create(context.Background(), "ws-1", writeApp(t), "x", "", 0) // writeApp from manager_test.go
 	if err != nil {
 		t.Fatal(err)
 	}

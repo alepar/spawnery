@@ -35,7 +35,7 @@ func TestManagerThreadsSandboxID(t *testing.T) {
 	fb := &fakePodBackend{}
 	m.pod = fb // white-box: replace the Docker backend with the fake
 
-	sp, err := m.Create(context.Background(), "spx", "../../examples/secret-app", "model", 0)
+	sp, err := m.Create(context.Background(), "spx", "../../examples/secret-app", "model", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

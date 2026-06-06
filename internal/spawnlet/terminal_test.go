@@ -5,6 +5,21 @@ import (
 	"testing"
 )
 
+func TestSessionTitle(t *testing.T) {
+	cases := []struct{ name, app, want string }{
+		{"Secret App 2", "Secret", "Secret App 2 (Secret)"},
+		{"Secret App 2", "", "Secret App 2"},
+		{"", "Secret", "Secret"},
+		{"", "", ""},
+		{"  Trimmed  ", "  App  ", "Trimmed (App)"},
+	}
+	for _, c := range cases {
+		if got := sessionTitle(c.name, c.app); got != c.want {
+			t.Errorf("sessionTitle(%q,%q)=%q want %q", c.name, c.app, got, c.want)
+		}
+	}
+}
+
 func TestAttachCommandRunsLauncher(t *testing.T) {
 	// The in-container command is the baked launcher, which owns TERM + `opencode attach -s <id>`.
 	got := attachCommand()

@@ -6,7 +6,23 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 )
+
+// sessionTitle builds the opencode session title shown in the TUI/web: "<spawn name> (<app title>)",
+// omitting whichever part is empty. Returns "" only when both are empty (the adapter then falls back
+// to a default). Bracket form because opencode session titles are single-line.
+func sessionTitle(name, appTitle string) string {
+	name, appTitle = strings.TrimSpace(name), strings.TrimSpace(appTitle)
+	switch {
+	case name != "" && appTitle != "":
+		return name + " (" + appTitle + ")"
+	case name != "":
+		return name
+	default:
+		return appTitle
+	}
+}
 
 // Terminal attach: spawnctl tmux <spawn> -> CP -> node. The node starts a mosh-server whose child
 // execs into the spawn's agent container and runs a persistent tmux session hosting the opencode

@@ -15,7 +15,7 @@ func TestCreateLabelsInventoryAndReap(t *testing.T) {
 	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), NodeID: "node-9"})
 	ctx := context.Background()
 
-	sp, err := m.Create(ctx, "spawn-A", "../../examples/secret-app", "model", 7)
+	sp, err := m.Create(ctx, "spawn-A", "../../examples/secret-app", "model", "", 7)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

@@ -28,7 +28,7 @@ func newHarness(t *testing.T) *harness {
 
 	adapterR, nodeW := io.Pipe() // node -> adapter
 	nodeR, adapterW := io.Pipe() // adapter -> node
-	a := New(opencode.New(fake.URL), "/app", "")
+	a := New(opencode.New(fake.URL), "/app", "", "")
 	go func() { _ = a.Serve(adapterR, adapterW) }()
 
 	// Cleanups run LIFO: this (registered after fake.Close) runs FIRST, closing

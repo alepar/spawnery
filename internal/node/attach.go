@@ -249,7 +249,7 @@ func (a *attacher) staleGen(spawnID string, gen uint64) bool {
 
 func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.status(st.SpawnId, nodev1.SpawnPhase_STARTING, "")
-	sp, err := a.mgr.Create(ctx, st.SpawnId, st.AppRef, st.Model, st.Generation)
+	sp, err := a.mgr.Create(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.Generation)
 	if err != nil {
 		logErr("startSpawn "+st.SpawnId, err)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
