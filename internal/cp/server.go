@@ -17,6 +17,7 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/agentcaps"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/lock"
 	"spawnery/internal/cp/registry"
@@ -221,6 +222,37 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown app: %s", appID))
 		}
 	}
+	// Resolve the optional agent selection: validate the runnable is offered by the chosen
+	// image's binaries, resolve the run mode, and reject modes we can't launch yet.
+	var selImage, selRunnable, selMode string
+	if req.Msg.Image != "" {
+		selImage = req.Msg.Image
+		if req.Msg.RunnableId == "" {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("runnable_id is required when image is set"))
+		}
+		bins, berr := s.st.AgentImages().Binaries(ctx, selImage)
+		if berr != nil {
+			return nil, connect.NewError(connect.CodeInternal, berr)
+		}
+		if len(bins) == 0 {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown or empty agent image: %s", selImage))
+		}
+		run, found := agentcaps.Runnable{}, false
+		for _, b := range bins {
+			if r, ok := agentcaps.Lookup(b, req.Msg.RunnableId); ok {
+				run, found = r, true
+				break
+			}
+		}
+		if !found {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("runnable %q is not offered by image %s", req.Msg.RunnableId, selImage))
+		}
+		if run.Mode == agentcaps.ModeTmux {
+			return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("runnable %q uses tmux mode, which is not supported yet (Phase 2)", run.ID))
+		}
+		selRunnable = run.ID
+		selMode = string(run.Mode)
+	}
 	decls, err := s.st.Apps().DeclaredMounts(ctx, appID, ver.Version)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -264,7 +296,8 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	now := time.Now().Unix()
 	sp := store.Spawn{
 		ID: spawnID, OwnerID: owner, Name: name, AppID: appID, AppVersion: ver.Version, AppRef: ver.Ref, Pinned: req.Msg.Pin,
-		Model: req.Msg.Model, Status: store.Starting, CreatedAt: now, LastUsedAt: now,
+		Model: req.Msg.Model, Image: selImage, RunnableID: selRunnable, Mode: selMode,
+		Status: store.Starting, CreatedAt: now, LastUsedAt: now,
 	}
 	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, mounts) }); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
