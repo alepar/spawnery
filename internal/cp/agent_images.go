@@ -12,7 +12,7 @@ import (
 
 // ListAgentImages returns the registered agent images and the binaries each ships. The web client
 // expands binaries into selectable runnables via the shared agentcaps registry.
-func (s *Server) ListAgentImages(ctx context.Context, req *connect.Request[cpv1.ListAgentImagesRequest]) (*connect.Response[cpv1.ListAgentImagesResponse], error) {
+func (s *Server) ListAgentImages(ctx context.Context, _ *connect.Request[cpv1.ListAgentImagesRequest]) (*connect.Response[cpv1.ListAgentImagesResponse], error) {
 	if _, ok := auth.OwnerFromContext(ctx); !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
 	}
