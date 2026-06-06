@@ -2,6 +2,7 @@
 package registry
 
 import (
+	"slices"
 	"sync"
 	"time"
 
@@ -133,7 +134,7 @@ func (r *Registry) PickFor(p Placement) *Node {
 		if p.Owner != "" && n.Owner != p.Owner {
 			continue
 		}
-		if p.Image != "" && !hasImage(n.Images, p.Image) {
+		if p.Image != "" && !slices.Contains(n.Images, p.Image) {
 			continue
 		}
 		if best == nil || n.Free > best.Free {
@@ -145,12 +146,3 @@ func (r *Registry) PickFor(p Placement) *Node {
 
 // Pick returns the node with the most free slots (>0), or nil if none.
 func (r *Registry) Pick() *Node { return r.PickFor(Placement{}) }
-
-func hasImage(images []string, img string) bool {
-	for _, i := range images {
-		if i == img {
-			return true
-		}
-	}
-	return false
-}

@@ -3,6 +3,7 @@ package cp
 import (
 	"context"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -27,6 +28,7 @@ func TestCreateSpawnImageAwarePlacement(t *testing.T) {
 				s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ACTIVE)
 				return
 			}
+			time.Sleep(time.Millisecond)
 		}
 	}()
 
