@@ -78,3 +78,16 @@ func Known(binary string) bool {
 	_, ok := registry[binary]
 	return ok
 }
+
+// FindRunnable resolves a runnable by its id across all binaries. Runnable ids are globally
+// unique (see TestRunnableIDsGloballyUnique), so the first match is unambiguous.
+func FindRunnable(id string) (Runnable, bool) {
+	for _, rs := range registry {
+		for _, r := range rs {
+			if r.ID == id {
+				return r, true
+			}
+		}
+	}
+	return Runnable{}, false
+}

@@ -58,6 +58,33 @@ func TestKnown(t *testing.T) {
 	}
 }
 
+func TestFindRunnable(t *testing.T) {
+	r, ok := FindRunnable("goose-tui")
+	if !ok || r.Mode != ModeTmux {
+		t.Fatalf("FindRunnable(goose-tui) = %+v ok=%v", r, ok)
+	}
+	r, ok = FindRunnable("opencode-served")
+	if !ok || r.Mode != ModeServed || len(r.Launch) == 0 {
+		t.Fatalf("FindRunnable(opencode-served) = %+v ok=%v", r, ok)
+	}
+	if _, ok := FindRunnable("does-not-exist"); ok {
+		t.Fatalf("unknown id should not resolve")
+	}
+}
+
+// FindRunnable relies on runnable IDs being globally unique across binaries.
+func TestRunnableIDsGloballyUnique(t *testing.T) {
+	seen := map[string]string{}
+	for binary, rs := range registry {
+		for _, r := range rs {
+			if other, dup := seen[r.ID]; dup {
+				t.Fatalf("runnable id %q is in both %q and %q", r.ID, other, binary)
+			}
+			seen[r.ID] = binary
+		}
+	}
+}
+
 func TestRegistryInvariants(t *testing.T) {
 	validMode := map[Mode]bool{ModeACP: true, ModeTmux: true, ModeServed: true}
 	validRelay := map[Relay]bool{RelayPump: true, RelayOcadapter: true, RelayRawPTY: true}

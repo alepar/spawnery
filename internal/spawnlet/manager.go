@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"spawnery/internal/agentcaps"
 	"spawnery/internal/manifest"
 	"spawnery/internal/runtime"
 	"spawnery/internal/spawnlet/firewall"
@@ -145,7 +146,38 @@ func (m *Manager) StopAll(ctx context.Context) int {
 	return len(sps)
 }
 
+// AgentSelection is the per-spawn agent choice resolved by the CP. A zero value means "no selection"
+// (use the node's configured image + the image's default command), preserving legacy behavior.
+type AgentSelection struct {
+	Image      string
+	RunnableID string
+	Mode       string
+}
+
 func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID string, generation uint64) (*Spawn, error) {
+	return m.CreateWithSelection(ctx, id, appPath, model, name, appID, generation, AgentSelection{})
+}
+
+// CreateWithSelection is Create plus an explicit agent selection (image + runnable launch argv +
+// mode). tmux mode is rejected here (launchable in Phase 2) as defense-in-depth — the CP already
+// rejects it in cp/server.go CreateSpawn, but the manager is a reusable entry point.
+func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, sel AgentSelection) (*Spawn, error) {
+	if sel.Mode == string(agentcaps.ModeTmux) {
+		return nil, fmt.Errorf("runnable %q uses tmux mode, not supported on this node yet", sel.RunnableID)
+	}
+	agentImage := m.cfg.AgentImage
+	if sel.Image != "" {
+		agentImage = sel.Image
+	}
+	var agentCmd []string
+	if sel.RunnableID != "" {
+		r, ok := agentcaps.FindRunnable(sel.RunnableID)
+		if !ok {
+			return nil, fmt.Errorf("unknown runnable %q", sel.RunnableID)
+		}
+		agentCmd = r.Launch
+	}
+
 	if abs, err := filepath.Abs(appPath); err == nil {
 		appPath = abs
 	}
@@ -236,7 +268,8 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID st
 
 	// Phase 2: the untrusted agent, into the existing pod.
 	if err := m.pod.StartAgent(ctx, h, runtime.AgentSpec{
-		Image: m.cfg.AgentImage,
+		Image: agentImage,
+		Cmd:   agentCmd,
 		Env: []string{
 			"OPENAI_BASE_URL=http://" + addr + "/v1",
 			"SPAWN_MODEL=" + model,
