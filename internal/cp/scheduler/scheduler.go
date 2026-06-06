@@ -43,7 +43,7 @@ func (s *Scheduler) OnStatus(spawnID string, phase nodev1.SpawnPhase) {
 
 // Provision picks a node, sends StartSpawn for the (already-minted) spawn id, waits for ACTIVE,
 // and binds the route. Returns the chosen node id. The caller owns id-minting + persistence.
-func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name string, placement registry.Placement) (string, error) {
+func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID string, placement registry.Placement) (string, error) {
 	n := s.reg.PickFor(placement)
 	if n == nil {
 		return "", connect.NewError(connect.CodeResourceExhausted, errors.New("no eligible node with capacity"))
@@ -55,7 +55,7 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name strin
 	defer func() { s.mu.Lock(); delete(s.pending, id); s.mu.Unlock() }()
 
 	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Start{Start: &nodev1.StartSpawn{
-		SpawnId: id, AppRef: appRef, Model: model, Name: name,
+		SpawnId: id, AppRef: appRef, Model: model, Name: name, AppId: appID,
 	}}}); err != nil {
 		return "", connect.NewError(connect.CodeUnavailable, err)
 	}

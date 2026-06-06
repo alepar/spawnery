@@ -178,7 +178,7 @@ func (s *Server) ResumeSpawn(ctx context.Context, req *connect.Request[cpv1.Resu
 	}); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, placement)
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, placement)
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("ResumeSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
@@ -237,7 +237,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	}); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, placement)
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, placement)
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
