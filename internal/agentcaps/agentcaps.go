@@ -50,10 +50,16 @@ var registry = map[string][]Runnable{
 	},
 }
 
-// Runnables returns the runnables for a known binary. ok is false for an unknown binary.
-func Runnables(binary string) (rs []Runnable, ok bool) {
-	rs, ok = registry[binary]
-	return rs, ok
+// Runnables returns the runnables for a known binary. ok is false for an unknown
+// binary. The returned slice is a copy, so callers cannot mutate the registry by
+// reassigning elements; the inner Launch/Resume slices are shared, so treat them as
+// read-only.
+func Runnables(binary string) ([]Runnable, bool) {
+	src, ok := registry[binary]
+	if !ok {
+		return nil, false
+	}
+	return append([]Runnable(nil), src...), true
 }
 
 // Lookup resolves a specific (binary, runnableID) pair.
