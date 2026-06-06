@@ -37,12 +37,6 @@ const (
 	NodeServiceAttachProcedure = "/node.v1.NodeService/Attach"
 )
 
-// These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
-var (
-	nodeServiceServiceDescriptor      = v1.File_node_v1_node_proto.Services().ByName("NodeService")
-	nodeServiceAttachMethodDescriptor = nodeServiceServiceDescriptor.Methods().ByName("Attach")
-)
-
 // NodeServiceClient is a client for the node.v1.NodeService service.
 type NodeServiceClient interface {
 	// Node dials the CP and holds this stream open. Node sends NodeMessage; CP sends CPMessage.
@@ -58,11 +52,12 @@ type NodeServiceClient interface {
 // http://api.acme.com or https://acme.com/grpc).
 func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) NodeServiceClient {
 	baseURL = strings.TrimRight(baseURL, "/")
+	nodeServiceMethods := v1.File_node_v1_node_proto.Services().ByName("NodeService").Methods()
 	return &nodeServiceClient{
 		attach: connect.NewClient[v1.NodeMessage, v1.CPMessage](
 			httpClient,
 			baseURL+NodeServiceAttachProcedure,
-			connect.WithSchema(nodeServiceAttachMethodDescriptor),
+			connect.WithSchema(nodeServiceMethods.ByName("Attach")),
 			connect.WithClientOptions(opts...),
 		),
 	}
@@ -90,10 +85,11 @@ type NodeServiceHandler interface {
 // By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
 // and JSON codecs. They also support gzip compression.
 func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	nodeServiceMethods := v1.File_node_v1_node_proto.Services().ByName("NodeService").Methods()
 	nodeServiceAttachHandler := connect.NewBidiStreamHandler(
 		NodeServiceAttachProcedure,
 		svc.Attach,
-		connect.WithSchema(nodeServiceAttachMethodDescriptor),
+		connect.WithSchema(nodeServiceMethods.ByName("Attach")),
 		connect.WithHandlerOptions(opts...),
 	)
 	return "/node.v1.NodeService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

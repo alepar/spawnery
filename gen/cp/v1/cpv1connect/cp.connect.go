@@ -40,6 +40,9 @@ const (
 	SpawnServiceListSpawnsProcedure = "/cp.v1.SpawnService/ListSpawns"
 	// SpawnServiceListAppsProcedure is the fully-qualified name of the SpawnService's ListApps RPC.
 	SpawnServiceListAppsProcedure = "/cp.v1.SpawnService/ListApps"
+	// SpawnServiceListAgentImagesProcedure is the fully-qualified name of the SpawnService's
+	// ListAgentImages RPC.
+	SpawnServiceListAgentImagesProcedure = "/cp.v1.SpawnService/ListAgentImages"
 	// SpawnServiceGetAppProcedure is the fully-qualified name of the SpawnService's GetApp RPC.
 	SpawnServiceGetAppProcedure = "/cp.v1.SpawnService/GetApp"
 	// SpawnServiceRegisterAppVersionProcedure is the fully-qualified name of the SpawnService's
@@ -71,30 +74,12 @@ const (
 	SpawnServiceStopSpawnProcedure = "/cp.v1.SpawnService/StopSpawn"
 )
 
-// These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
-var (
-	spawnServiceServiceDescriptor                  = v1.File_cp_v1_cp_proto.Services().ByName("SpawnService")
-	spawnServiceCreateSpawnMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("CreateSpawn")
-	spawnServiceListSpawnsMethodDescriptor         = spawnServiceServiceDescriptor.Methods().ByName("ListSpawns")
-	spawnServiceListAppsMethodDescriptor           = spawnServiceServiceDescriptor.Methods().ByName("ListApps")
-	spawnServiceGetAppMethodDescriptor             = spawnServiceServiceDescriptor.Methods().ByName("GetApp")
-	spawnServiceRegisterAppVersionMethodDescriptor = spawnServiceServiceDescriptor.Methods().ByName("RegisterAppVersion")
-	spawnServiceSetAppListingMethodDescriptor      = spawnServiceServiceDescriptor.Methods().ByName("SetAppListing")
-	spawnServiceListMyAppsMethodDescriptor         = spawnServiceServiceDescriptor.Methods().ByName("ListMyApps")
-	spawnServiceSessionMethodDescriptor            = spawnServiceServiceDescriptor.Methods().ByName("Session")
-	spawnServiceSuspendSpawnMethodDescriptor       = spawnServiceServiceDescriptor.Methods().ByName("SuspendSpawn")
-	spawnServiceResumeSpawnMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("ResumeSpawn")
-	spawnServiceRecreateSpawnMethodDescriptor      = spawnServiceServiceDescriptor.Methods().ByName("RecreateSpawn")
-	spawnServiceRenameSpawnMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("RenameSpawn")
-	spawnServiceDeleteSpawnMethodDescriptor        = spawnServiceServiceDescriptor.Methods().ByName("DeleteSpawn")
-	spawnServiceStopSpawnMethodDescriptor          = spawnServiceServiceDescriptor.Methods().ByName("StopSpawn")
-)
-
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
 type SpawnServiceClient interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
 	ListSpawns(context.Context, *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error)
 	ListApps(context.Context, *connect.Request[v1.ListAppsRequest]) (*connect.Response[v1.ListAppsResponse], error)
+	ListAgentImages(context.Context, *connect.Request[v1.ListAgentImagesRequest]) (*connect.Response[v1.ListAgentImagesResponse], error)
 	GetApp(context.Context, *connect.Request[v1.GetAppRequest]) (*connect.Response[v1.GetAppResponse], error)
 	RegisterAppVersion(context.Context, *connect.Request[v1.RegisterAppVersionRequest]) (*connect.Response[v1.RegisterAppVersionResponse], error)
 	SetAppListing(context.Context, *connect.Request[v1.SetAppListingRequest]) (*connect.Response[v1.SetAppListingResponse], error)
@@ -117,89 +102,96 @@ type SpawnServiceClient interface {
 // http://api.acme.com or https://acme.com/grpc).
 func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) SpawnServiceClient {
 	baseURL = strings.TrimRight(baseURL, "/")
+	spawnServiceMethods := v1.File_cp_v1_cp_proto.Services().ByName("SpawnService").Methods()
 	return &spawnServiceClient{
 		createSpawn: connect.NewClient[v1.CreateSpawnRequest, v1.CreateSpawnResponse](
 			httpClient,
 			baseURL+SpawnServiceCreateSpawnProcedure,
-			connect.WithSchema(spawnServiceCreateSpawnMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("CreateSpawn")),
 			connect.WithClientOptions(opts...),
 		),
 		listSpawns: connect.NewClient[v1.ListSpawnsRequest, v1.ListSpawnsResponse](
 			httpClient,
 			baseURL+SpawnServiceListSpawnsProcedure,
-			connect.WithSchema(spawnServiceListSpawnsMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("ListSpawns")),
 			connect.WithClientOptions(opts...),
 		),
 		listApps: connect.NewClient[v1.ListAppsRequest, v1.ListAppsResponse](
 			httpClient,
 			baseURL+SpawnServiceListAppsProcedure,
-			connect.WithSchema(spawnServiceListAppsMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("ListApps")),
+			connect.WithClientOptions(opts...),
+		),
+		listAgentImages: connect.NewClient[v1.ListAgentImagesRequest, v1.ListAgentImagesResponse](
+			httpClient,
+			baseURL+SpawnServiceListAgentImagesProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ListAgentImages")),
 			connect.WithClientOptions(opts...),
 		),
 		getApp: connect.NewClient[v1.GetAppRequest, v1.GetAppResponse](
 			httpClient,
 			baseURL+SpawnServiceGetAppProcedure,
-			connect.WithSchema(spawnServiceGetAppMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("GetApp")),
 			connect.WithClientOptions(opts...),
 		),
 		registerAppVersion: connect.NewClient[v1.RegisterAppVersionRequest, v1.RegisterAppVersionResponse](
 			httpClient,
 			baseURL+SpawnServiceRegisterAppVersionProcedure,
-			connect.WithSchema(spawnServiceRegisterAppVersionMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("RegisterAppVersion")),
 			connect.WithClientOptions(opts...),
 		),
 		setAppListing: connect.NewClient[v1.SetAppListingRequest, v1.SetAppListingResponse](
 			httpClient,
 			baseURL+SpawnServiceSetAppListingProcedure,
-			connect.WithSchema(spawnServiceSetAppListingMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("SetAppListing")),
 			connect.WithClientOptions(opts...),
 		),
 		listMyApps: connect.NewClient[v1.ListMyAppsRequest, v1.ListMyAppsResponse](
 			httpClient,
 			baseURL+SpawnServiceListMyAppsProcedure,
-			connect.WithSchema(spawnServiceListMyAppsMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("ListMyApps")),
 			connect.WithClientOptions(opts...),
 		),
 		session: connect.NewClient[v1.Frame, v1.Frame](
 			httpClient,
 			baseURL+SpawnServiceSessionProcedure,
-			connect.WithSchema(spawnServiceSessionMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("Session")),
 			connect.WithClientOptions(opts...),
 		),
 		suspendSpawn: connect.NewClient[v1.SuspendSpawnRequest, v1.SuspendSpawnResponse](
 			httpClient,
 			baseURL+SpawnServiceSuspendSpawnProcedure,
-			connect.WithSchema(spawnServiceSuspendSpawnMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("SuspendSpawn")),
 			connect.WithClientOptions(opts...),
 		),
 		resumeSpawn: connect.NewClient[v1.ResumeSpawnRequest, v1.ResumeSpawnResponse](
 			httpClient,
 			baseURL+SpawnServiceResumeSpawnProcedure,
-			connect.WithSchema(spawnServiceResumeSpawnMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("ResumeSpawn")),
 			connect.WithClientOptions(opts...),
 		),
 		recreateSpawn: connect.NewClient[v1.RecreateSpawnRequest, v1.RecreateSpawnResponse](
 			httpClient,
 			baseURL+SpawnServiceRecreateSpawnProcedure,
-			connect.WithSchema(spawnServiceRecreateSpawnMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("RecreateSpawn")),
 			connect.WithClientOptions(opts...),
 		),
 		renameSpawn: connect.NewClient[v1.RenameSpawnRequest, v1.RenameSpawnResponse](
 			httpClient,
 			baseURL+SpawnServiceRenameSpawnProcedure,
-			connect.WithSchema(spawnServiceRenameSpawnMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("RenameSpawn")),
 			connect.WithClientOptions(opts...),
 		),
 		deleteSpawn: connect.NewClient[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse](
 			httpClient,
 			baseURL+SpawnServiceDeleteSpawnProcedure,
-			connect.WithSchema(spawnServiceDeleteSpawnMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("DeleteSpawn")),
 			connect.WithClientOptions(opts...),
 		),
 		stopSpawn: connect.NewClient[v1.StopSpawnRequest, v1.StopSpawnResponse](
 			httpClient,
 			baseURL+SpawnServiceStopSpawnProcedure,
-			connect.WithSchema(spawnServiceStopSpawnMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("StopSpawn")),
 			connect.WithClientOptions(opts...),
 		),
 	}
@@ -210,6 +202,7 @@ type spawnServiceClient struct {
 	createSpawn        *connect.Client[v1.CreateSpawnRequest, v1.CreateSpawnResponse]
 	listSpawns         *connect.Client[v1.ListSpawnsRequest, v1.ListSpawnsResponse]
 	listApps           *connect.Client[v1.ListAppsRequest, v1.ListAppsResponse]
+	listAgentImages    *connect.Client[v1.ListAgentImagesRequest, v1.ListAgentImagesResponse]
 	getApp             *connect.Client[v1.GetAppRequest, v1.GetAppResponse]
 	registerAppVersion *connect.Client[v1.RegisterAppVersionRequest, v1.RegisterAppVersionResponse]
 	setAppListing      *connect.Client[v1.SetAppListingRequest, v1.SetAppListingResponse]
@@ -236,6 +229,11 @@ func (c *spawnServiceClient) ListSpawns(ctx context.Context, req *connect.Reques
 // ListApps calls cp.v1.SpawnService.ListApps.
 func (c *spawnServiceClient) ListApps(ctx context.Context, req *connect.Request[v1.ListAppsRequest]) (*connect.Response[v1.ListAppsResponse], error) {
 	return c.listApps.CallUnary(ctx, req)
+}
+
+// ListAgentImages calls cp.v1.SpawnService.ListAgentImages.
+func (c *spawnServiceClient) ListAgentImages(ctx context.Context, req *connect.Request[v1.ListAgentImagesRequest]) (*connect.Response[v1.ListAgentImagesResponse], error) {
+	return c.listAgentImages.CallUnary(ctx, req)
 }
 
 // GetApp calls cp.v1.SpawnService.GetApp.
@@ -298,6 +296,7 @@ type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
 	ListSpawns(context.Context, *connect.Request[v1.ListSpawnsRequest]) (*connect.Response[v1.ListSpawnsResponse], error)
 	ListApps(context.Context, *connect.Request[v1.ListAppsRequest]) (*connect.Response[v1.ListAppsResponse], error)
+	ListAgentImages(context.Context, *connect.Request[v1.ListAgentImagesRequest]) (*connect.Response[v1.ListAgentImagesResponse], error)
 	GetApp(context.Context, *connect.Request[v1.GetAppRequest]) (*connect.Response[v1.GetAppResponse], error)
 	RegisterAppVersion(context.Context, *connect.Request[v1.RegisterAppVersionRequest]) (*connect.Response[v1.RegisterAppVersionResponse], error)
 	SetAppListing(context.Context, *connect.Request[v1.SetAppListingRequest]) (*connect.Response[v1.SetAppListingResponse], error)
@@ -317,88 +316,95 @@ type SpawnServiceHandler interface {
 // By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
 // and JSON codecs. They also support gzip compression.
 func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	spawnServiceMethods := v1.File_cp_v1_cp_proto.Services().ByName("SpawnService").Methods()
 	spawnServiceCreateSpawnHandler := connect.NewUnaryHandler(
 		SpawnServiceCreateSpawnProcedure,
 		svc.CreateSpawn,
-		connect.WithSchema(spawnServiceCreateSpawnMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("CreateSpawn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceListSpawnsHandler := connect.NewUnaryHandler(
 		SpawnServiceListSpawnsProcedure,
 		svc.ListSpawns,
-		connect.WithSchema(spawnServiceListSpawnsMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("ListSpawns")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceListAppsHandler := connect.NewUnaryHandler(
 		SpawnServiceListAppsProcedure,
 		svc.ListApps,
-		connect.WithSchema(spawnServiceListAppsMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("ListApps")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceListAgentImagesHandler := connect.NewUnaryHandler(
+		SpawnServiceListAgentImagesProcedure,
+		svc.ListAgentImages,
+		connect.WithSchema(spawnServiceMethods.ByName("ListAgentImages")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceGetAppHandler := connect.NewUnaryHandler(
 		SpawnServiceGetAppProcedure,
 		svc.GetApp,
-		connect.WithSchema(spawnServiceGetAppMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("GetApp")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceRegisterAppVersionHandler := connect.NewUnaryHandler(
 		SpawnServiceRegisterAppVersionProcedure,
 		svc.RegisterAppVersion,
-		connect.WithSchema(spawnServiceRegisterAppVersionMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("RegisterAppVersion")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceSetAppListingHandler := connect.NewUnaryHandler(
 		SpawnServiceSetAppListingProcedure,
 		svc.SetAppListing,
-		connect.WithSchema(spawnServiceSetAppListingMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("SetAppListing")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceListMyAppsHandler := connect.NewUnaryHandler(
 		SpawnServiceListMyAppsProcedure,
 		svc.ListMyApps,
-		connect.WithSchema(spawnServiceListMyAppsMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("ListMyApps")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceSessionHandler := connect.NewBidiStreamHandler(
 		SpawnServiceSessionProcedure,
 		svc.Session,
-		connect.WithSchema(spawnServiceSessionMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("Session")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceSuspendSpawnHandler := connect.NewUnaryHandler(
 		SpawnServiceSuspendSpawnProcedure,
 		svc.SuspendSpawn,
-		connect.WithSchema(spawnServiceSuspendSpawnMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("SuspendSpawn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceResumeSpawnHandler := connect.NewUnaryHandler(
 		SpawnServiceResumeSpawnProcedure,
 		svc.ResumeSpawn,
-		connect.WithSchema(spawnServiceResumeSpawnMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("ResumeSpawn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceRecreateSpawnHandler := connect.NewUnaryHandler(
 		SpawnServiceRecreateSpawnProcedure,
 		svc.RecreateSpawn,
-		connect.WithSchema(spawnServiceRecreateSpawnMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("RecreateSpawn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceRenameSpawnHandler := connect.NewUnaryHandler(
 		SpawnServiceRenameSpawnProcedure,
 		svc.RenameSpawn,
-		connect.WithSchema(spawnServiceRenameSpawnMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("RenameSpawn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceDeleteSpawnHandler := connect.NewUnaryHandler(
 		SpawnServiceDeleteSpawnProcedure,
 		svc.DeleteSpawn,
-		connect.WithSchema(spawnServiceDeleteSpawnMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("DeleteSpawn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceStopSpawnHandler := connect.NewUnaryHandler(
 		SpawnServiceStopSpawnProcedure,
 		svc.StopSpawn,
-		connect.WithSchema(spawnServiceStopSpawnMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("StopSpawn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -409,6 +415,8 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceListSpawnsHandler.ServeHTTP(w, r)
 		case SpawnServiceListAppsProcedure:
 			spawnServiceListAppsHandler.ServeHTTP(w, r)
+		case SpawnServiceListAgentImagesProcedure:
+			spawnServiceListAgentImagesHandler.ServeHTTP(w, r)
 		case SpawnServiceGetAppProcedure:
 			spawnServiceGetAppHandler.ServeHTTP(w, r)
 		case SpawnServiceRegisterAppVersionProcedure:
@@ -450,6 +458,10 @@ func (UnimplementedSpawnServiceHandler) ListSpawns(context.Context, *connect.Req
 
 func (UnimplementedSpawnServiceHandler) ListApps(context.Context, *connect.Request[v1.ListAppsRequest]) (*connect.Response[v1.ListAppsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListApps is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ListAgentImages(context.Context, *connect.Request[v1.ListAgentImagesRequest]) (*connect.Response[v1.ListAgentImagesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListAgentImages is not implemented"))
 }
 
 func (UnimplementedSpawnServiceHandler) GetApp(context.Context, *connect.Request[v1.GetAppRequest]) (*connect.Response[v1.GetAppResponse], error) {
