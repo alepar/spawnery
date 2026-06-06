@@ -58,12 +58,13 @@ func main() {
 	if cpURL := os.Getenv("CP_ADDR"); cpURL != "" {
 		// CP-attached mode: dial the CP, no inbound listener.
 		cfg := node.Config{
-			NodeID:     env("NODE_ID", "node-1"),
-			CPURL:      cpURL,
-			MaxSpawns:  4,
-			AgentImage: env("AGENT_IMAGE", "spawnery/stubagent:dev"),
-			NodeClass:  env("NODE_CLASS", "cloud"),
-			NodeOwner:  env("NODE_OWNER", ""),
+			NodeID:        env("NODE_ID", "node-1"),
+			CPURL:         cpURL,
+			MaxSpawns:     4,
+			AgentImage:    env("AGENT_IMAGE", "spawnery/stubagent:dev"),
+			AgentBinaries: splitCSV(os.Getenv("AGENT_BINARIES")),
+			NodeClass:     env("NODE_CLASS", "cloud"),
+			NodeOwner:     env("NODE_OWNER", ""),
 		}
 		// Terminal control plane (around CP for now): a small inbound listener so `spawnctl tmux`
 		// can ask this node to start a mosh-backed terminal session for a spawn. The mosh UDP data

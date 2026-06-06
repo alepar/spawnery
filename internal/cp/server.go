@@ -109,6 +109,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			token = tok
 			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, m.Register.NodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
 			s.reconcileInventory(ctx, nodeID, m.Register.Running) // a returning node reports what it still runs
+			s.upsertAgentCatalog(ctx, m.Register.AgentImages, m.Register.Binaries)
 		case *nodev1.NodeMessage_Heartbeat:
 			s.reg.Heartbeat(nodeID, token, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
 			s.reconcileInventory(ctx, nodeID, m.Heartbeat.Running)
@@ -157,6 +158,24 @@ func (s *Server) reconcileInventory(ctx context.Context, nodeID string, running 
 	}
 	if n, err := s.st.Spawns().MarkUnreachable(ctx, lost); err == nil && n > 0 {
 		log.Printf("node %s inventory: %d active spawn(s) not reported -> unreachable", nodeID, n)
+	}
+}
+
+// upsertAgentCatalog records each advertised image and the binaries it ships so the durable catalog
+// (ListAgentImages + runnable validation) reflects what connected nodes can run. Idempotent across
+// reconnects: created_at is preserved and the binary set is replaced. Errors are logged, not fatal —
+// a catalog write must never break node registration.
+func (s *Server) upsertAgentCatalog(ctx context.Context, images, binaries []string) {
+	now := time.Now().Unix()
+	for _, img := range images {
+		if img == "" {
+			continue
+		}
+		if err := s.st.WithTx(ctx, func(tx store.Store) error {
+			return tx.AgentImages().Upsert(ctx, store.AgentImage{Image: img, CreatedAt: now}, binaries)
+		}); err != nil {
+			log.Printf("register: upsert agent image %q: %v", img, err)
+		}
 	}
 }
 
