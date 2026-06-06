@@ -57,3 +57,36 @@ func TestKnown(t *testing.T) {
 		t.Fatalf("aider is not seeded yet; should not be known")
 	}
 }
+
+func TestRegistryInvariants(t *testing.T) {
+	validMode := map[Mode]bool{ModeACP: true, ModeTmux: true, ModeServed: true}
+	validRelay := map[Relay]bool{RelayPump: true, RelayOcadapter: true, RelayRawPTY: true}
+
+	for binary, rs := range registry {
+		if binary == "" {
+			t.Fatalf("registry has an empty binary key")
+		}
+		seen := map[string]bool{}
+		for _, r := range rs {
+			if r.ID == "" {
+				t.Fatalf("%s: runnable with empty ID", binary)
+			}
+			if seen[r.ID] {
+				t.Fatalf("%s: duplicate runnable ID %q", binary, r.ID)
+			}
+			seen[r.ID] = true
+			if r.Label == "" {
+				t.Fatalf("%s/%s: empty Label", binary, r.ID)
+			}
+			if !validMode[r.Mode] {
+				t.Fatalf("%s/%s: invalid Mode %q", binary, r.ID, r.Mode)
+			}
+			if !validRelay[r.Relay] {
+				t.Fatalf("%s/%s: invalid Relay %q", binary, r.ID, r.Relay)
+			}
+			if r.Mode == ModeTmux && len(r.Launch) == 0 {
+				t.Fatalf("%s/%s: tmux runnable must have a Launch argv", binary, r.ID)
+			}
+		}
+	}
+}
