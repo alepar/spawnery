@@ -90,10 +90,18 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 	if code := do(expired); code != http.StatusUnauthorized {
 		t.Fatalf("expired cert must be 401: code=%d", code)
 	}
-	// 5) wrong root -> rejected.
+	// 5) wrong root, identical shape (valid SAN + class) -> rejected: trust is the key, not the name.
 	wrong, _ := otherInter.IssueNode("n", "a", pki.ClassSelfHosted, hour)
 	if code := do(wrong); code != http.StatusUnauthorized {
 		t.Fatalf("cert from a foreign root must be 401: code=%d", code)
+	}
+	// 5b) attacker SMUGGLES its own root+intermediate into the presented chain, hoping the server trusts
+	// it. Client-supplied certs only ever populate the intermediates pool; the roots pool stays pinned ->
+	// still no path to the pinned root -> rejected.
+	smuggle, _ := otherInter.IssueNode("n", "a", pki.ClassSelfHosted, hour)
+	smuggle.Chain = append(smuggle.Chain, otherRoot.Cert) // present our own root as part of the chain
+	if code := do(smuggle); code != http.StatusUnauthorized {
+		t.Fatalf("a self-supplied root in the chain must not be trusted: code=%d", code)
 	}
 	// 6) no client cert -> rejected at the TLS layer.
 	if code := do(nil); code != -1 {
