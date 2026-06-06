@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { listSpawns, renameSpawn, statusFromProto } from "./spawnlet";
+import { listSpawns, listAgentImages, renameSpawn, statusFromProto } from "./spawnlet";
 
 function mockFetch(json: unknown) {
   const calls: { url: string; body: any }[] = [];
@@ -50,5 +50,26 @@ describe("renameSpawn", () => {
     await renameSpawn("a", "New Name");
     expect(calls[0].url).toContain("/cp.v1.SpawnService/RenameSpawn");
     expect(calls[0].body).toEqual({ spawnId: "a", name: "New Name" });
+  });
+});
+
+describe("listAgentImages", () => {
+  it("POSTs ListAgentImages and maps the response", async () => {
+    const calls = mockFetch({
+      images: [
+        { image: "img:1", binaries: ["goose", "opencode"] },
+        { image: "img:2", binaries: ["claude-code"] },
+      ],
+    });
+    const out = await listAgentImages();
+    expect(calls[0].url).toContain("/cp.v1.SpawnService/ListAgentImages");
+    expect(out).toEqual([
+      { image: "img:1", binaries: ["goose", "opencode"] },
+      { image: "img:2", binaries: ["claude-code"] },
+    ]);
+  });
+  it("tolerates a missing images array", async () => {
+    mockFetch({});
+    expect(await listAgentImages()).toEqual([]);
   });
 });

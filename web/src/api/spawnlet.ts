@@ -57,3 +57,13 @@ export async function deleteSpawn(spawnId: string): Promise<void> {
 export async function stopSpawn(spawnId: string): Promise<void> {
   await unary<Record<string, never>>("StopSpawn", { spawnId });
 }
+
+export interface AgentImageView {
+  image: string;
+  binaries: string[];
+}
+
+export async function listAgentImages(): Promise<AgentImageView[]> {
+  const r = await unary<{ images?: Array<{ image?: string; binaries?: string[] }> }>("ListAgentImages", {});
+  return (r.images ?? []).map((i) => ({ image: i.image ?? "", binaries: i.binaries ?? [] }));
+}
