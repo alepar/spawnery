@@ -327,7 +327,8 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model stri
 	if err != nil || sp.Status != store.Starting {
 		return // stopped/deleted in the lock gap, or already advanced
 	}
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, placement)
+	placement.Image = sp.Image
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, placement)
 	if err != nil {
 		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
