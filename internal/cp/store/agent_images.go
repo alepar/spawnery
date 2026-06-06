@@ -55,5 +55,7 @@ func (r *agentImageRepo) Binaries(ctx context.Context, image string) ([]string, 
 }
 
 func (r *agentImageRepo) List(ctx context.Context) ([]AgentImage, error) {
-	return nil, nil
+	var out []AgentImage
+	err := r.db.NewSelect().Model(&out).Order("image ASC").Scan(ctx)
+	return out, err
 }

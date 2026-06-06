@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -53,5 +54,52 @@ func TestAgentImageUpsertReplacesBinaries(t *testing.T) {
 	}
 	if len(bins) != 1 || bins[0] != "claude-code" {
 		t.Fatalf("want only claude-code, got %v", bins)
+	}
+}
+
+func TestAgentImageList(t *testing.T) {
+	st := NewTestStore(t)
+	ctx := context.Background()
+	inTx(t, st, func(tx Store) error {
+		if err := tx.AgentImages().Upsert(ctx, AgentImage{Image: "b:1", CreatedAt: 1}, []string{"goose"}); err != nil {
+			return err
+		}
+		return tx.AgentImages().Upsert(ctx, AgentImage{Image: "a:1", CreatedAt: 1}, []string{"claude-code"})
+	})
+
+	imgs, err := st.AgentImages().List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	// List returns images sorted ascending by image.
+	if len(imgs) != 2 || imgs[0].Image != "a:1" || imgs[1].Image != "b:1" {
+		t.Fatalf("imgs = %+v", imgs)
+	}
+}
+
+func TestAgentImageGetNotFound(t *testing.T) {
+	st := NewTestStore(t)
+	_, err := st.AgentImages().Get(context.Background(), "missing:1")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestAgentImageUpsertPreservesCreatedAt(t *testing.T) {
+	st := NewTestStore(t)
+	ctx := context.Background()
+	inTx(t, st, func(tx Store) error {
+		return tx.AgentImages().Upsert(ctx, AgentImage{Image: "img:1", CreatedAt: 1}, []string{"goose"})
+	})
+	inTx(t, st, func(tx Store) error {
+		return tx.AgentImages().Upsert(ctx, AgentImage{Image: "img:1", CreatedAt: 999}, []string{"goose"})
+	})
+
+	img, err := st.AgentImages().Get(ctx, "img:1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if img.CreatedAt != 1 {
+		t.Fatalf("created_at should be preserved on conflict, got %d", img.CreatedAt)
 	}
 }
