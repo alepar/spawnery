@@ -69,22 +69,29 @@ func (s *Server) Attach(ctx context.Context, stream *connect.BidiStream[nodev1.N
 func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv func() (*nodev1.NodeMessage, error)) error {
 	var nodeID string
 	var nodeClass string
+	var token uint64 // this connection's registry token (0 until accepted); guards teardown
 	defer func() {
-		if nodeID != "" {
-			s.reg.Remove(nodeID)
-			dropped := s.rt.DropNode(nodeID)
-			if len(dropped) > 0 {
-				_, _ = s.st.Spawns().MarkUnreachable(context.Background(), dropped)
-			}
-			for _, id := range dropped {
-				_ = s.tel.Emit(telemetry.Event{Kind: "session_end", NodeID: nodeID, SpawnID: id, Timestamp: time.Now().UTC()})
-			}
+		// Only tear down routes if THIS connection is still the registered owner. A rejected
+		// duplicate (token 0) or a displaced old stream must not drop the live node's routes.
+		if nodeID == "" || !s.reg.RemoveIfCurrent(nodeID, token) {
+			return
+		}
+		dropped := s.rt.DropNode(nodeID)
+		if len(dropped) > 0 {
+			_, _ = s.st.Spawns().MarkUnreachable(context.Background(), dropped)
+		}
+		for _, id := range dropped {
+			_ = s.tel.Emit(telemetry.Event{Kind: "session_end", NodeID: nodeID, SpawnID: id, Timestamp: time.Now().UTC()})
 		}
 	}()
 	for {
 		msg, err := recv()
 		if err != nil {
 			return nil // stream closed
+		}
+		// If a newer connection has taken over this node id (we were displaced), stop serving.
+		if token != 0 && !s.reg.IsCurrent(nodeID, token) {
+			return nil
 		}
 		switch m := msg.Msg.(type) {
 		case *nodev1.NodeMessage_Register:
@@ -93,11 +100,17 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			if nodeClass == "" {
 				nodeClass = "cloud" // safe default: an unidentified node is assumed restricted
 			}
-			s.reg.Add(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: m.Register.NodeOwner})
+			tok, accepted := s.reg.Register(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: m.Register.NodeOwner})
+			if !accepted {
+				// A live node already holds this id: reject the duplicate rather than corrupt routing.
+				log.Printf("rejecting registration for node id=%s: another node with that id is still alive", nodeID)
+				return connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("node id %q is already registered and alive", nodeID))
+			}
+			token = tok
 			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, m.Register.NodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
 			s.reconcileInventory(ctx, nodeID, m.Register.Running) // a returning node reports what it still runs
 		case *nodev1.NodeMessage_Heartbeat:
-			s.reg.Heartbeat(nodeID, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
+			s.reg.Heartbeat(nodeID, token, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
 			s.reconcileInventory(ctx, nodeID, m.Heartbeat.Running)
 		case *nodev1.NodeMessage_Status:
 			s.sched.OnStatus(m.Status.SpawnId, m.Status.Phase)

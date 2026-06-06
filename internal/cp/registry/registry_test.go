@@ -2,6 +2,7 @@ package registry
 
 import (
 	"testing"
+	"time"
 
 	nodev1 "spawnery/gen/node/v1"
 )
@@ -22,13 +23,71 @@ func TestAddHeartbeatPickEvict(t *testing.T) {
 	if n := r.Pick(); n == nil || n.ID != "n2" {
 		t.Fatalf("pick: %+v", n)
 	}
-	r.Heartbeat("n2", 4, 0) // active=4 free=0 -> now nobody has capacity
+	n2, _ := r.Get("n2")
+	r.Heartbeat("n2", n2.token, 4, 0) // active=4 free=0 -> now nobody has capacity
 	if r.Pick() != nil {
 		t.Fatal("no capacity -> pick nil")
 	}
 	r.Remove("n2")
 	if _, ok := r.Get("n2"); ok {
 		t.Fatal("n2 should be gone")
+	}
+}
+
+func TestRegisterRejectsLiveButDisplacesDead(t *testing.T) {
+	r := New()
+	now := time.Unix(1000, 0)
+	r.now = func() time.Time { return now }
+
+	t1, ok := r.Register(&Node{ID: "n1", Sender: &fakeSender{}, Free: 1})
+	if !ok || t1 == 0 {
+		t.Fatalf("first register should be accepted (t1=%d ok=%v)", t1, ok)
+	}
+	// Still alive -> a duplicate registration is REJECTED.
+	if _, ok := r.Register(&Node{ID: "n1", Sender: &fakeSender{}}); ok {
+		t.Fatal("duplicate of a live node must be rejected")
+	}
+	// Go past the live window with no heartbeat -> dead -> the new connection DISPLACES it.
+	now = now.Add(r.liveWindow + time.Second)
+	t2, ok := r.Register(&Node{ID: "n1", Sender: &fakeSender{}, Free: 1})
+	if !ok || t2 == t1 {
+		t.Fatalf("dead node should be displaced with a new token (t1=%d t2=%d ok=%v)", t1, t2, ok)
+	}
+	// Epoch guard: the displaced old token is no longer current and must not tear down the new owner.
+	if r.IsCurrent("n1", t1) || !r.IsCurrent("n1", t2) {
+		t.Fatal("only the new token should be current")
+	}
+	if r.RemoveIfCurrent("n1", t1) {
+		t.Fatal("old token must not remove the new owner")
+	}
+	if !r.RemoveIfCurrent("n1", t2) {
+		t.Fatal("current token should remove")
+	}
+	if _, ok := r.Get("n1"); ok {
+		t.Fatal("n1 should be gone after the current owner removes it")
+	}
+}
+
+func TestHeartbeatRefreshesLivenessAndIgnoresStaleToken(t *testing.T) {
+	r := New()
+	now := time.Unix(2000, 0)
+	r.now = func() time.Time { return now }
+	t1, _ := r.Register(&Node{ID: "n1", Free: 1})
+
+	r.Heartbeat("n1", 999, 0, 9) // wrong token -> ignored (no free/liveness update)
+	if n, _ := r.Get("n1"); n.Free != 1 {
+		t.Fatalf("stale-token heartbeat must be ignored, free=%d", n.Free)
+	}
+	// A correct-token heartbeat near the window edge refreshes liveness, so the node stays alive and a
+	// duplicate is still rejected afterwards.
+	now = now.Add(r.liveWindow - time.Second)
+	r.Heartbeat("n1", t1, 0, 3)
+	if n, _ := r.Get("n1"); n.Free != 3 {
+		t.Fatalf("heartbeat should set free=3, got %d", n.Free)
+	}
+	now = now.Add(2 * time.Second) // would be dead from the first register, but the heartbeat refreshed it
+	if _, ok := r.Register(&Node{ID: "n1"}); ok {
+		t.Fatal("recently-heartbeated node is alive -> duplicate must be rejected")
 	}
 }
 
