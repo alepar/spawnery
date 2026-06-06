@@ -55,6 +55,41 @@ func TestSpawnCreateAndReads(t *testing.T) {
 	}
 }
 
+func TestSpawnPersistsAgentSelection(t *testing.T) {
+	st := NewTestStore(t)
+	seedAppAndOwner(t, st)
+	ctx := context.Background()
+
+	sp := newSpawn("sp-sel")
+	sp.Image = "ghcr.io/acme/goose:1"
+	sp.RunnableID = "goose-acp"
+	sp.Mode = "acp"
+	inTx(t, st, func(tx Store) error {
+		return tx.Spawns().Create(ctx, sp, []Mount{{Name: "main", BackendURI: "scratch"}})
+	})
+
+	got, err := st.Spawns().Get(ctx, "sp-sel")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Image != "ghcr.io/acme/goose:1" || got.RunnableID != "goose-acp" || got.Mode != "acp" {
+		t.Fatalf("agent selection not persisted: %+v", got)
+	}
+
+	// Defaults backfill to "" when unset (existing newSpawn path).
+	plain := newSpawn("sp-plain")
+	inTx(t, st, func(tx Store) error {
+		return tx.Spawns().Create(ctx, plain, []Mount{{Name: "main", BackendURI: "scratch"}})
+	})
+	gp, err := st.Spawns().Get(ctx, "sp-plain")
+	if err != nil {
+		t.Fatalf("Get plain: %v", err)
+	}
+	if gp.Image != "" || gp.RunnableID != "" || gp.Mode != "" {
+		t.Fatalf("unset selection should be empty strings: %+v", gp)
+	}
+}
+
 func TestSpawnCreateRejectsUnknownVersionAndMount(t *testing.T) {
 	st := NewTestStore(t)
 	seedAppAndOwner(t, st)
