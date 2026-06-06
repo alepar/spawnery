@@ -6,6 +6,7 @@ service SpawnService {
   rpc CreateSpawn(CreateSpawnRequest) returns (CreateSpawnResponse);
   rpc ListSpawns(ListSpawnsRequest) returns (ListSpawnsResponse);
   rpc ListApps(ListAppsRequest) returns (ListAppsResponse);
+  rpc ListAgentImages(ListAgentImagesRequest) returns (ListAgentImagesResponse);
   rpc GetApp(GetAppRequest) returns (GetAppResponse);
   rpc RegisterAppVersion(RegisterAppVersionRequest) returns (RegisterAppVersionResponse);
   rpc SetAppListing(SetAppListingRequest) returns (SetAppListingResponse);
@@ -37,7 +38,9 @@ message MountBinding { string name = 1; string backend_uri = 2; }
 
 // name (optional): human-readable spawn label; empty => the server assigns a default
 // (the app's display name, with a " 2"/" 3" counter suffix on collision).
-message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; string version = 4; bool pin = 5; string name = 6; }
+// image + runnable_id (optional today) select the agent container image (FQDN) and the
+// runnable within it (e.g. "goose-acp"); the CP resolves the run mode from the runnable.
+message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; string version = 4; bool pin = 5; string name = 6; string image = 7; string runnable_id = 8; }
 message CreateSpawnResponse { string spawn_id = 1; }
 
 message SpawnSummary {
@@ -97,6 +100,12 @@ message AppVersionSummary {
 
 message ListAppsRequest  { string query = 1; } // empty = browse all
 message ListAppsResponse { repeated AppSummary apps = 1; }
+
+// One registered agent image and the binaries it ships. The web client expands binaries
+// into selectable runnables via the shared agentcaps registry.
+message AgentImageInfo { string image = 1; int64 created_at = 2; repeated string binaries = 3; }
+message ListAgentImagesRequest  {}
+message ListAgentImagesResponse { repeated AgentImageInfo images = 1; }
 
 message GetAppRequest  { string id = 1; }
 message GetAppResponse {
