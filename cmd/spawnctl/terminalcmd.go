@@ -76,8 +76,12 @@ func shellCmd() *cli.Command {
 		Usage: "open a shell in the spawn's container (= exec bash)",
 		Flags: terminalFlags(),
 		Action: func(_ context.Context, c *cli.Command) error {
-			// A login bash, falling back to sh if bash is absent in the image.
-			attachToSpawn(c.String("addr"), resolveSpawn(c), []string{"/bin/sh", "-c", "exec bash -l 2>/dev/null || exec sh"})
+			// Interactive login bash, falling back to sh if bash is absent. NOTE: do NOT redirect the
+			// exec'd shell's stderr — bash is only interactive when BOTH stdin and stderr are TTYs, so
+			// `2>/dev/null` would make it non-interactive (no PS1/echo) and swallow errors. The redirect
+			// here is only on `command -v` (its probe output), not on the shell we exec.
+			attachToSpawn(c.String("addr"), resolveSpawn(c),
+				[]string{"/bin/sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash -il || exec sh -i"})
 			return nil
 		},
 	}
