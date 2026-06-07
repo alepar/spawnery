@@ -334,14 +334,14 @@ func (rc *rawClient) callRaw(t *testing.T, method string, params json.RawMessage
 	t.Helper()
 	rc.nid++
 	id := rc.nid
-	rc.send(acp.Message{ID: &id, Method: method, Params: params})
+	rc.send(acp.Message{ID: acp.IntID(id), Method: method, Params: params})
 	_ = rc.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	for {
 		m, err := rc.rd.ReadMessage()
 		if err != nil {
 			t.Fatalf("callRaw %s read: %v", method, err)
 		}
-		if m.ID != nil && *m.ID == id && (m.Result != nil || m.Error != nil) {
+		if n, ok := m.ID.AsInt(); ok && n == id && (m.Result != nil || m.Error != nil) {
 			return
 		}
 	}
@@ -361,7 +361,7 @@ func rawPrompt(t *testing.T, rc *rawClient, text string) int {
 		"sessionId": "ignored",
 		"prompt":    []any{map[string]string{"type": "text", "text": text}},
 	})
-	rc.send(acp.Message{ID: &id, Method: "session/prompt", Params: p})
+	rc.send(acp.Message{ID: acp.IntID(id), Method: "session/prompt", Params: p})
 	return id
 }
 
@@ -403,7 +403,7 @@ func rawCollectTurn(t *testing.T, rc *rawClient, reqID int, timeout time.Duratio
 			updates = append(updates, txt)
 			continue
 		}
-		if m.ID != nil && *m.ID == reqID && (m.Result != nil || m.Error != nil) {
+		if n, ok := m.ID.AsInt(); ok && n == reqID && (m.Result != nil || m.Error != nil) {
 			return text.String(), updates
 		}
 	}

@@ -71,7 +71,11 @@ case "${1:-}" in
     export CLAUDE_CODE_DISABLE_TERMINAL_TITLE="${CLAUDE_CODE_DISABLE_TERMINAL_TITLE:-1}"
     exec spawn-tmux claude ;;
   nori*|nori)
-    echo "nori not wired yet (ACP-TUI client; see sp-9xr.12)" >&2; exit 1 ;;
+    # nori is NOT launched by the dispatcher. It is execed directly by the acp-mode
+    # TERMINAL ATTACH path (spawnlet terminalInnerCmd -> `nori -a spawnery ...`),
+    # which dials acpmux via the baked acpdial agent to join the shared goose
+    # session (sp-9xr.12.2). The agent pod itself runs goose-acp/acpmux, not nori.
+    echo "nori is launched by the terminal attach, not the dispatcher (sp-9xr.12.2)" >&2; exit 1 ;;
   *)
     echo "unknown runnable: $1" >&2; exit 1 ;;
 esac

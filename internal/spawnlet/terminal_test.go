@@ -79,8 +79,15 @@ func TestTerminalInnerCmd(t *testing.T) {
 		got[0] != "tmux" || got[1] != "attach" || got[2] != "-t" || got[3] != "spawn" {
 		t.Fatalf("tmux inner cmd = %v, want [tmux attach -t spawn]", got)
 	}
+	// acp spawn → launch nori with the baked "spawnery" custom agent (-> acpdial -> acpmux),
+	// joining the shared goose session as the web (sp-9xr.12.2).
+	wantACP := []string{"nori", "-a", "spawnery",
+		"--skip-welcome", "--skip-trust-directory", "--dangerously-bypass-approvals-and-sandbox"}
+	if got := terminalInnerCmd(&Spawn{Mode: "acp"}); !reflect.DeepEqual(got, wantACP) {
+		t.Fatalf("acp inner cmd = %v, want %v", got, wantACP)
+	}
 	// served/opencode (and legacy "") → the opencode TUI launcher
-	for _, mode := range []string{"served", "acp", ""} {
+	for _, mode := range []string{"served", ""} {
 		if got := terminalInnerCmd(&Spawn{Mode: mode}); len(got) != 1 || got[0] != "spawn-tui" {
 			t.Fatalf("mode %q inner cmd = %v, want [spawn-tui]", mode, got)
 		}

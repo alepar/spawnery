@@ -66,8 +66,25 @@ func terminalInnerCmd(sp *Spawn) []string {
 	if sp.Mode == "tmux" {
 		return []string{"tmux", "attach", "-t", "spawn"}
 	}
+	if sp.Mode == "acp" {
+		// acp-mode: launch nori (the Rust ACP TUI) using the baked "spawnery" custom
+		// agent, whose local command is acpdial (dials acpmux on 127.0.0.1:7000) —
+		// so the terminal joins the SAME shared goose session as the web ChatView
+		// (sp-9xr.12.2). nori runs in an already-sandboxed container, so we bypass
+		// nori's own sandbox/approval prompts; --skip-welcome/--skip-trust-directory
+		// keep the one-shot attach non-interactive. The mosh PTY + `docker exec -it`
+		// give nori the terminal it needs.
+		return []string{"nori", "-a", "spawnery",
+			"--skip-welcome", "--skip-trust-directory", "--dangerously-bypass-approvals-and-sandbox"}
+	}
 	return attachCommand()
 }
+
+// TerminalInnerCmd returns the in-container terminal-attach command for a spawn
+// run mode (the same mapping StartTerminal uses). Exported so the e2e can drive
+// the EXACT production argv (e.g. the acp-mode nori launch) rather than
+// duplicating it.
+func TerminalInnerCmd(mode string) []string { return terminalInnerCmd(&Spawn{Mode: mode}) }
 
 // execArgv prefixes the in-container command with the runtime's exec invocation + container id.
 func execArgv(execPrefix []string, containerID string, inner []string) []string {
