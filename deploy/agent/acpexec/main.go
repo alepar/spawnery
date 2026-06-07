@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"log"
 	"net"
 	"os"
@@ -13,8 +14,8 @@ import (
 // stdio, but the spawnery node attaches ACP over a socket (ACP_LISTEN, dialed by
 // the node's Pump). acpexec listens on ACP_LISTEN, accepts the node's single
 // long-lived connection, runs the given agent argv with its stdin/stdout wired
-// directly to that connection, and relays bytes raw. On node disconnect it kills
-// the child and loops to accept the next connection (a fresh agent process per
+// to that connection, and relays bytes raw. On node disconnect it kills the
+// child and loops to accept the next connection (a fresh agent process per
 // connection — non-lossless, consistent with the rest of the system).
 //
 // Usage: acpexec <agent> [args...]   e.g.  acpexec goose acp
@@ -56,22 +57,47 @@ func serve(ln net.Listener, argv []string) error {
 		if err != nil {
 			return err
 		}
+		// runChild owns conn and closes it before returning; the extra Close here
+		// is a harmless idempotent safety net (error ignored).
 		runChild(conn, argv)
 		_ = conn.Close()
 	}
 }
 
-// runChild starts the agent with its stdin/stdout wired directly to conn and
-// blocks until the child exits. Because cmd.Stdin == conn, the child sees stdin
-// EOF when the node closes the connection and (for well-behaved agents) exits;
-// the deferred Kill is the safety net for a child that ignores stdin EOF. It
-// always Waits the child so there are no zombies (the .6 zombie lesson).
+// runChild starts the agent and relays bytes between conn and the child's
+// stdin/stdout with explicit copy goroutines, blocking until the child exits.
+//
+// We deliberately use cmd.StdinPipe/StdoutPipe + io.Copy rather than wiring
+// cmd.Stdin/cmd.Stdout = conn directly. Because conn is a net.Conn (not an
+// *os.File), os/exec would spawn internal copy goroutines AND make cmd.Wait()
+// block until they finish. If the child exits before the node closes conn (goose
+// crash / OOM / auth error / panic) while the node's Pump holds its long-lived
+// conn open and idle, that internal node->child copy stays blocked on
+// conn.Read() forever, so cmd.Wait() never returns, runChild never returns, the
+// deferred Kill never fires, and the accept loop is wedged — the bridge can
+// never accept the node's reconnect (the .16 review deadlock).
+//
+// With pipes, cmd.Wait() does NOT wait on our copy goroutines, so it returns the
+// instant the child exits. We then Close conn to unblock the node->child copy
+// reading from it. cmd.Wait always runs so there are no zombies (the .6 zombie
+// lesson), and the conn.Close + EOF on the pipes ensure no goroutine leaks
+// across connections.
 func runChild(conn net.Conn, argv []string) {
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdin = conn
-	cmd.Stdout = conn
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		log.Printf("stdin pipe for %v: %v", argv, err)
+		return
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("stdout pipe for %v: %v", argv, err)
+		_ = stdin.Close()
+		return
+	}
 
 	if err := cmd.Start(); err != nil {
 		log.Printf("start agent %v: %v", argv, err)
@@ -81,11 +107,26 @@ func runChild(conn net.Conn, argv []string) {
 	// on the next accept. Kill is a no-op (error ignored) if it already exited.
 	defer func() { _ = cmd.Process.Kill() }()
 
-	// Wait for the child to exit. When the node closes conn, the child's stdin
-	// hits EOF and it exits; Wait returns and we tear down + loop.
+	// node -> child: closing stdin propagates EOF so a well-behaved agent exits
+	// when the node disconnects.
+	go func() {
+		_, _ = io.Copy(stdin, conn)
+		_ = stdin.Close()
+	}()
+	// child -> node.
+	go func() {
+		_, _ = io.Copy(conn, stdout)
+	}()
+
+	// Wait returns the instant the child exits (pipes mean it does not block on
+	// our copy goroutines).
 	if err := cmd.Wait(); err != nil {
 		log.Printf("agent %v exited: %v", argv, err)
 	}
+	// Unblock the node->child copy goroutine still reading from conn (the child
+	// may have exited before the node closed its end). This also unblocks the
+	// child->node copy via stdout EOF from the closed pipe.
+	_ = conn.Close()
 }
 
 // listenSpec resolves the (network, address) the bridge listens on from the
