@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -43,7 +44,7 @@ func TestUpdateToFrame_CanonicalACP(t *testing.T) {
 			if !ok {
 				t.Fatalf("updateToFrame returned ok=false for canonical %s", tc.name)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("frame mismatch:\n got  %+v\n want %+v", got, tc.want)
 			}
 		})

@@ -1,6 +1,7 @@
 package node
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -26,8 +27,8 @@ func TestFrameRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: decode: %v", c.Kind, err)
 		}
-		if got != c {
-			t.Fatalf("%s: round-trip mismatch: %+v != %+v", c.Kind, got, c)
+		if !reflect.DeepEqual(got, c) {
+			t.Fatalf("%s: round-trip mismatch:\n got  %+v\n want %+v", c.Kind, got, c)
 		}
 	}
 }
