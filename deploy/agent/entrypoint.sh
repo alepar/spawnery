@@ -39,7 +39,25 @@ case "${1:-}" in
   goose-acp)
     echo "goose-acp not wired yet (needs stdio-ACP->TCP bridge; see sp-9xr.16)" >&2; exit 1 ;;
   claude-tui)
-    echo "claude-tui not wired yet (needs Anthropic<->OpenAI converter; see sp-9xr.15)" >&2; exit 1 ;;
+    export TERM="${TERM:-xterm-256color}"
+    # Claude Code speaks the Anthropic Messages API; the sidecar's /v1/messages converter
+    # translates it to OpenAI Chat Completions against OpenRouter (and injects the real key).
+    # The node sets OPENAI_BASE_URL=http://<sidecar>:8080/v1 — strip the trailing /v1 for
+    # ANTHROPIC_BASE_URL (Claude Code appends /v1/messages itself).
+    SIDECAR_OAI="${OPENAI_BASE_URL:-http://127.0.0.1:8080/v1}"
+    export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-${SIDECAR_OAI%/v1}}"
+    export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-sk-unused-sidecar-injects-real-key}"
+    # SPAWN_MODEL is an OpenRouter id (e.g. openai/gpt-4o-mini); expose it as Claude Code's
+    # custom model option so it is offered/selected in the TUI.
+    export ANTHROPIC_CUSTOM_MODEL_OPTION="${SPAWN_MODEL:-openai/gpt-4o-mini}"
+    export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Spawnery"
+    export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-${SPAWN_MODEL:-openai/gpt-4o-mini}}"
+    export ENABLE_TOOL_SEARCH="${ENABLE_TOOL_SEARCH:-true}"
+    export DISABLE_AUTOUPDATER="${DISABLE_AUTOUPDATER:-1}"
+    export DISABLE_TELEMETRY="${DISABLE_TELEMETRY:-1}"
+    export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+    export CLAUDE_CODE_DISABLE_TERMINAL_TITLE="${CLAUDE_CODE_DISABLE_TERMINAL_TITLE:-1}"
+    exec spawn-tmux claude ;;
   nori*|nori)
     echo "nori not wired yet (ACP-TUI client; see sp-9xr.12)" >&2; exit 1 ;;
   *)

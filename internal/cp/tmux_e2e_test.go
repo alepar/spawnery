@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,7 +115,7 @@ func setupTmuxStack(t *testing.T) (cl cpv1connect.SpawnServiceClient, ctx contex
 		CPURL:         cpSrv.URL,
 		MaxSpawns:     2,
 		AgentImage:    "spawnery/agent:dev",
-		AgentBinaries: []string{"opencode", "goose"},
+		AgentBinaries: []string{"opencode", "goose", "claude-code"},
 	})
 
 	// Wait for node to register.
@@ -204,6 +205,13 @@ func assertTerminalBytes(t *testing.T, ctx context.Context, cl cpv1connect.Spawn
 		t.Logf("received %d terminal bytes from tmux relay (first 200: %q)", len(data), truncate(data, 200))
 		if len(data) == 0 {
 			t.Fatal("received 0 bytes from tmux relay; expected terminal output")
+		}
+		// The agent container must actually be alive rendering a TUI — not crashed. If the
+		// runnable's process exited, `docker exec ... tmux attach` fails and the relay forwards
+		// the daemon error ("container <id> is not running"). That is NOT a rendered TUI, so it
+		// must fail the test rather than pass on the error string.
+		if strings.Contains(string(data), "is not running") || strings.Contains(string(data), "Error response from daemon") {
+			t.Fatalf("agent container is not running (TUI crashed): %q", truncate(data, 200))
 		}
 		// Resilient assertion: either an ANSI escape sequence or any non-empty output.
 		hasAnsi := false
@@ -414,4 +422,48 @@ func TestCPGooseTuiEndToEnd(t *testing.T) {
 	// Assert raw terminal bytes arrive from the goose TUI via the tmux relay.
 	assertTerminalBytes(t, ctx, cl, id)
 	t.Log("goose-tui terminal bytes confirmed via dispatcher (DONE)")
+}
+
+// TestCPClaudeTuiEndToEnd drives the claude-tui path through the dispatcher:
+// - CP + node run in-process with a real Docker backend
+// - node uses spawnery/agent:dev (claude-code + tmux) and advertises "claude-code"
+// - CreateSpawn selects claude-tui (tmux mode)
+// - the image dispatcher sets ANTHROPIC_BASE_URL=<sidecar> (strip /v1), a dummy
+//   ANTHROPIC_API_KEY, ANTHROPIC_CUSTOM_MODEL_OPTION=$SPAWN_MODEL and runs `claude` in tmux.
+//   Claude Code reaches the model through the in-pod sidecar's /v1/messages converter, which
+//   translates Anthropic Messages -> OpenAI Chat Completions against OpenRouter.
+// - After ACTIVE, a client opens a Session and asserts >0 raw terminal bytes arrive (claude's
+//   TUI renders), proving the converter wiring is reachable end-to-end.
+//
+// Requires Docker + spawnery/agent:dev + spawnery/sidecar:dev + OPENROUTER_API_KEY in env
+// (or .env at repo root). FAILS loudly (no skips) when the environment is broken.
+func TestCPClaudeTuiEndToEnd(t *testing.T) {
+	cl, ctx, appID := setupTmuxStack(t)
+
+	// Create a claude-tui spawn via the dispatcher.
+	cs, err := cl.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId:      appID,
+		Model:      "openai/gpt-4o-mini",
+		Image:      "spawnery/agent:dev",
+		RunnableId: "claude-tui",
+	}))
+	if err != nil {
+		t.Fatalf("CreateSpawn claude-tui: %v", err)
+	}
+	id := cs.Msg.SpawnId
+	t.Logf("claude-tui spawn created: %s", id)
+	t.Cleanup(func() {
+		stopCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+		defer c()
+		_, _ = cl.StopSpawn(stopCtx, connect.NewRequest(&cpv1.StopSpawnRequest{SpawnId: id}))
+		time.Sleep(2 * time.Second)
+	})
+
+	// Wait for ACTIVE — claude-code + tmux startup can take up to 60s.
+	waitActiveTmux(ctx, t, cl, id)
+	t.Log("claude-tui spawn is ACTIVE, opening Session")
+
+	// Assert raw terminal bytes arrive from the claude TUI via the tmux relay.
+	assertTerminalBytes(t, ctx, cl, id)
+	t.Log("claude-tui terminal bytes confirmed via dispatcher (DONE)")
 }

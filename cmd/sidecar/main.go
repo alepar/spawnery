@@ -16,7 +16,13 @@ func main() {
 		log.Fatal("OPENROUTER_API_KEY required")
 	}
 	log.Printf("sidecar listening on %s -> %s", addr, upstream)
-	log.Fatal(http.ListenAndServe(addr, sidecar.NewHandler(upstream, key)))
+
+	// /v1/messages is the Anthropic Messages API converter (Claude Code); everything else is
+	// the transparent OpenAI passthrough (opencode/goose).
+	mux := http.NewServeMux()
+	mux.Handle("/v1/messages", sidecar.NewMessagesHandler(upstream, key))
+	mux.Handle("/", sidecar.NewHandler(upstream, key))
+	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
 func getenv(k, def string) string {

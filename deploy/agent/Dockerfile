@@ -72,6 +72,11 @@ RUN set -eux; \
 RUN sh -c 'opencode serve --port 4096 --hostname 127.0.0.1 >/tmp/m.log 2>&1 & P=$!; \
       for i in $(seq 1 120); do grep -q "server listening" /tmp/m.log && break; sleep 1; done; \
       kill "$P" 2>/dev/null || true; sleep 1; tail -3 /tmp/m.log'
+# The opencode prewarm above leaves /tmp owned non-root with restrictive perms. The agent runs
+# with --cap-drop ALL (no CAP_DAC_OVERRIDE), so root is subject to actual dir permissions: tmux
+# (claude-tui/opencode-tui/goose-tui) must be able to create /tmp/tmux-<uid>. Restore the standard
+# world-writable sticky /tmp so every tmux-wrapped runnable can start.
+RUN chmod 1777 /tmp
 WORKDIR /app
 # tini reaps the opencode serve child; entrypoint launches serve + adapter.
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
