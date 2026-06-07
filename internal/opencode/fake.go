@@ -20,9 +20,17 @@ type Fake struct {
 	nextSess int
 	subs     map[chan string]struct{}
 
-	perms      []PermResponse // recorded permission answers
-	aborts     []string       // session IDs aborted
-	pendingErr string         // if set, emitted as a session.error before idle by the next scriptPrompt
+	perms       []PermResponse // recorded permission answers
+	aborts      []string       // session IDs aborted
+	pendingErr  string         // if set, emitted as a session.error before idle by the next scriptPrompt
+	pendingStep []stepScript   // step-finish parts emitted before idle by the next scriptPrompt (cat D)
+}
+
+// stepScript is one scripted step-finish part (per-turn token usage + cost) to emit before idle.
+type stepScript struct {
+	partID string
+	cost   float64
+	tokens string // raw tokens JSON object literal
 }
 
 // PermResponse records a permission answer the adapter POSTed.
@@ -145,7 +153,15 @@ func (f *Fake) scriptPrompt(sid string) {
 	f.mu.Lock()
 	pe := f.pendingErr
 	f.pendingErr = ""
+	steps := f.pendingStep
+	f.pendingStep = nil
 	f.mu.Unlock()
+	// Per-turn step-finish parts (token usage + cost) ride before idle so the adapter accumulates them.
+	for _, s := range steps {
+		f.Emit("message.part.updated", fmt.Sprintf(
+			`{"sessionID":%q,"part":{"id":%q,"messageID":"msg_1","type":"step-finish","cost":%v,"tokens":%s}}`,
+			sid, s.partID, s.cost, s.tokens))
+	}
 	if pe != "" {
 		f.Emit("session.error", fmt.Sprintf(`{"sessionID":%q,"error":%s}`, sid, pe))
 	}
@@ -157,6 +173,16 @@ func (f *Fake) scriptPrompt(sid string) {
 func (f *Fake) ScriptTurnError(errJSON string) {
 	f.mu.Lock()
 	f.pendingErr = errJSON
+	f.mu.Unlock()
+}
+
+// ScriptStepFinish queues a step-finish part (per-step token usage + cost) to be emitted by the NEXT
+// prompt's turn just before idle, so the adapter accumulates per-turn usage (cat D). Call it more than
+// once to script a multi-step turn. tokensJSON is a raw token object literal, e.g.
+// `{"input":10,"output":5,"reasoning":2,"cache":{"read":3,"write":0}}`.
+func (f *Fake) ScriptStepFinish(partID string, cost float64, tokensJSON string) {
+	f.mu.Lock()
+	f.pendingStep = append(f.pendingStep, stepScript{partID: partID, cost: cost, tokens: tokensJSON})
 	f.mu.Unlock()
 }
 

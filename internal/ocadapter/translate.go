@@ -24,7 +24,23 @@ type PartUpdated struct {
 		CallID string    `json:"callID"` // opencode tool-call id -> ACP toolCallId
 		Tool   string    `json:"tool"`   // tool name (e.g. "bash", "read")
 		State  ToolState `json:"state"`  // the tool-call state machine snapshot
+		// step-finish part fields (type=="step-finish"): per-step token usage + cost (cat D, sp-ufz.10).
+		Cost   float64    `json:"cost"`
+		Tokens TokenUsage `json:"tokens"`
 	} `json:"part"`
+}
+
+// TokenUsage is opencode's per-step token breakdown on a step-finish part (cat D). cache splits into
+// read/write (we fold both into ACP `cached`); reasoning is the thinking-token count. Pinned against
+// opencode 1.15.13 /doc (StepFinishPart.tokens schema).
+type TokenUsage struct {
+	Input     int `json:"input"`
+	Output    int `json:"output"`
+	Reasoning int `json:"reasoning"`
+	Cache     struct {
+		Read  int `json:"read"`
+		Write int `json:"write"`
+	} `json:"cache"`
 }
 
 // ToolState is the (union) `state` of an opencode ToolPart. opencode emits one of
@@ -111,6 +127,84 @@ func StopReasonForError(e *OpencodeError) (stop string, errInfo *ACPError) {
 		}
 		return "end_turn", &ACPError{Message: msg}
 	}
+}
+
+// --- per-turn token usage + cost (cat D, sp-ufz.10) -------------------------
+// opencode emits a `step-finish` message part per LLM step; an assistant turn may run several. Each part
+// carries that step's token usage + cost (priced via models.dev). We accumulate them across the turn and
+// attach the total as `usage` on the session/prompt response (PromptResponse.usage) at turn end. UNSTABLE
+// in ACP — guarded by presence: an agent (e.g. goose) that emits no step-finish parts -> no usage field.
+
+// ACPUsage is the per-turn token breakdown carried on the session/prompt response (PromptResponse.usage).
+// It mirrors the node-side Usage so the pump drops it straight onto the turn Frame. omitempty everywhere
+// so an absent/zero field is omitted and Cost is a pointer (absent unless the turn was actually priced).
+type ACPUsage struct {
+	Input   int      `json:"input,omitempty"`
+	Output  int      `json:"output,omitempty"`
+	Cached  int      `json:"cached,omitempty"`
+	Thought int      `json:"thought,omitempty"`
+	Total   int      `json:"total,omitempty"`
+	Cost    *float64 `json:"cost,omitempty"`
+}
+
+// UsageAccumulator sums per-step opencode token usage + cost across one assistant turn. Steps are keyed
+// by partID so a re-sent message.part.updated snapshot of the same step overwrites rather than
+// double-counts. Use a fresh accumulator per prompt (reset at turn start).
+type UsageAccumulator struct {
+	steps map[string]stepContribution
+}
+
+// stepContribution is one step-finish part's contribution to the turn total.
+type stepContribution struct {
+	input, output, cached, thought int
+	cost                           float64
+}
+
+// NewUsageAccumulator returns an empty per-turn usage accumulator.
+func NewUsageAccumulator() *UsageAccumulator {
+	return &UsageAccumulator{steps: map[string]stepContribution{}}
+}
+
+// AddStep records a step-finish part's usage (keyed by part id; a repeat snapshot overwrites). A part
+// that is not a step-finish, or carries no id, is ignored — so callers can hand it every part safely.
+func (u *UsageAccumulator) AddStep(pu PartUpdated) {
+	if pu.Part.Type != "step-finish" || pu.Part.ID == "" {
+		return
+	}
+	t := pu.Part.Tokens
+	u.steps[pu.Part.ID] = stepContribution{
+		input:   t.Input,
+		output:  t.Output,
+		cached:  t.Cache.Read + t.Cache.Write,
+		thought: t.Reasoning,
+		cost:    pu.Part.Cost,
+	}
+}
+
+// Usage returns the accumulated per-turn usage, or nil when nothing meaningful was reported (no
+// step-finish parts, or only all-zero/unpriced ones). Returning nil keeps the `usage` field absent so a
+// non-reporting agent never renders a zero-token badge or a misleading $0.00 (UNSTABLE/guarded).
+func (u *UsageAccumulator) Usage() *ACPUsage {
+	var acc ACPUsage
+	var cost float64
+	for _, s := range u.steps {
+		acc.Input += s.input
+		acc.Output += s.output
+		acc.Cached += s.cached
+		acc.Thought += s.thought
+		cost += s.cost
+	}
+	// Carry cost only when the turn was actually priced (>0); a zero cost is indistinguishable from
+	// "unpriced" and would render a misleading $0.00.
+	if cost > 0 {
+		c := cost
+		acc.Cost = &c
+	}
+	acc.Total = acc.Input + acc.Output
+	if acc.Input == 0 && acc.Output == 0 && acc.Cached == 0 && acc.Thought == 0 && acc.Cost == nil {
+		return nil // an empty/all-zero turn carries no usage
+	}
+	return &acc
 }
 
 // ParseMessageUpdated decodes a message.updated properties payload.

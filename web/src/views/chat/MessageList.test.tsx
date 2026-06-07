@@ -55,4 +55,25 @@ describe("MessageList", () => {
     expect(screen.getByTestId("working-indicator")).toBeInTheDocument();
     expect(screen.queryByTestId("turn-ended-indicator")).toBeNull();
   });
+
+  it("shows a usage badge when idle with a usage label (cat D)", () => {
+    render(<MessageList items={items} working={false} usageLabel="12.3k tokens · $0.04" />);
+    expect(screen.getByTestId("turn-usage-badge")).toHaveTextContent("12.3k tokens · $0.04");
+  });
+
+  it("shows no usage badge when usage is absent (graceful absence)", () => {
+    render(<MessageList items={items} working={false} usageLabel={null} />);
+    expect(screen.queryByTestId("turn-usage-badge")).toBeNull();
+  });
+
+  it("renders both the ended indicator and the usage badge together", () => {
+    render(<MessageList items={items} working={false} endLabel="cancelled" usageLabel="500 tokens" />);
+    expect(screen.getByTestId("turn-ended-indicator")).toHaveTextContent("cancelled");
+    expect(screen.getByTestId("turn-usage-badge")).toHaveTextContent("500 tokens");
+  });
+
+  it("hides the usage badge while busy", () => {
+    render(<MessageList items={items} working={true} usageLabel="500 tokens" />);
+    expect(screen.queryByTestId("turn-usage-badge")).toBeNull();
+  });
 });

@@ -284,3 +284,58 @@ func TestAdapterPromptCancelledStopReason(t *testing.T) {
 		t.Fatalf("cancelled must not carry an error object, got %s", res)
 	}
 }
+
+// A turn whose opencode steps report token usage + cost must attach a `usage` object to the
+// session/prompt response (PromptResponse.usage), accumulated across all step-finish parts (cat D).
+func TestAdapterPromptCarriesUsage(t *testing.T) {
+	h := newHarness(t)
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	h.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/app"}}`)
+	h.await(t, idIs(2))
+
+	// Two LLM steps in the turn -> the usage object sums their tokens + cost.
+	h.fake.ScriptStepFinish("step_1", 0.01, `{"input":100,"output":50,"reasoning":10,"cache":{"read":20,"write":0}}`)
+	h.fake.ScriptStepFinish("step_2", 0.03, `{"input":200,"output":80,"reasoning":0,"cache":{"read":0,"write":0}}`)
+	h.send(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"ses_fake1","prompt":[{"type":"text","text":"hi"}]}}`)
+	m := h.await(t, idIs(3))
+	res := string(m.Result)
+	if !strings.Contains(res, `"stopReason":"end_turn"`) {
+		t.Fatalf("expected end_turn, got %s", res)
+	}
+	var r struct {
+		Usage *ACPUsage `json:"usage"`
+	}
+	if err := json.Unmarshal(m.Result, &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Usage == nil {
+		t.Fatalf("expected a usage object on the prompt response, got %s", res)
+	}
+	if r.Usage.Input != 300 || r.Usage.Output != 130 || r.Usage.Total != 430 {
+		t.Fatalf("usage tokens = %+v, want input 300 / output 130 / total 430", r.Usage)
+	}
+	if r.Usage.Cached != 20 || r.Usage.Thought != 10 {
+		t.Fatalf("usage cached/thought = %d/%d, want 20/10", r.Usage.Cached, r.Usage.Thought)
+	}
+	if r.Usage.Cost == nil || *r.Usage.Cost < 0.0399 || *r.Usage.Cost > 0.0401 {
+		t.Fatalf("usage cost = %v, want ~0.04", r.Usage.Cost)
+	}
+}
+
+// A turn with NO step-finish parts (e.g. an agent that reports no usage) must omit the usage field, so a
+// plain end_turn response is byte-stable with the pre-cat-D shape.
+func TestAdapterPromptOmitsUsageWhenAbsent(t *testing.T) {
+	h := newHarness(t)
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	h.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/app"}}`)
+	h.await(t, idIs(2))
+
+	h.send(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"ses_fake1","prompt":[{"type":"text","text":"hi"}]}}`)
+	m := h.await(t, idIs(3))
+	res := string(m.Result)
+	if strings.Contains(res, "usage") {
+		t.Fatalf("a turn with no step-finish parts must omit usage, got %s", res)
+	}
+}

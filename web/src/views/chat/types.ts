@@ -1,4 +1,4 @@
-import type { ContentBlock, Diff, ErrorInfo, PermOption, PlanEntry } from "@/acp/frames";
+import type { ContentBlock, Diff, ErrorInfo, PermOption, PlanEntry, Usage } from "@/acp/frames";
 
 export type Item =
   | { id: number; kind: "user"; text: string; pending?: boolean }
@@ -20,8 +20,9 @@ export type Item =
   | { id: number; kind: "plan"; entries: PlanEntry[] };
 
 // TurnState mirrors the `turn` Frame. reason/error are populated when a turn ends for a non-normal
-// reason (cat G); a normal end_turn leaves them undefined so the UI shows nothing new.
-export type TurnState = { state: "busy" | "idle"; queued: number; reason?: string; error?: ErrorInfo };
+// reason (cat G); usage carries the per-turn token/cost breakdown when the agent reports it (cat D,
+// UNSTABLE — absent for agents like goose). A normal, usage-less end_turn leaves them all undefined.
+export type TurnState = { state: "busy" | "idle"; queued: number; reason?: string; error?: ErrorInfo; usage?: Usage };
 
 // PermPrompt is an active permission request shown in the modal. options are the agent's real kinded
 // choices (cat H); resolve sends the picked optionId ("" = dismissed -> the node auto-denies).

@@ -366,3 +366,98 @@ func TestParseSessionError(t *testing.T) {
 		t.Fatalf("bad parse: %+v", se)
 	}
 }
+
+// stepPart builds a PartUpdated carrying a step-finish part for accumulator tests.
+func stepPart(id string, cost float64, in, out, reasoning, cacheRead, cacheWrite int) PartUpdated {
+	var pu PartUpdated
+	pu.SessionID = "ses_1"
+	pu.Part.ID = id
+	pu.Part.Type = "step-finish"
+	pu.Part.Cost = cost
+	pu.Part.Tokens.Input = in
+	pu.Part.Tokens.Output = out
+	pu.Part.Tokens.Reasoning = reasoning
+	pu.Part.Tokens.Cache.Read = cacheRead
+	pu.Part.Tokens.Cache.Write = cacheWrite
+	return pu
+}
+
+func TestUsageAccumulatorEmpty(t *testing.T) {
+	// No step-finish parts -> nil (a non-reporting agent must not produce a usage object).
+	if u := NewUsageAccumulator().Usage(); u != nil {
+		t.Fatalf("empty accumulator should yield nil usage, got %+v", u)
+	}
+}
+
+func TestUsageAccumulatorIgnoresNonStepParts(t *testing.T) {
+	acc := NewUsageAccumulator()
+	var tool PartUpdated
+	tool.Part.ID = "p"
+	tool.Part.Type = "tool"
+	acc.AddStep(tool)                           // wrong type -> ignored
+	acc.AddStep(stepPart("", 1, 5, 5, 0, 0, 0)) // no id -> ignored
+	if u := acc.Usage(); u != nil {
+		t.Fatalf("non-step / id-less parts must not accumulate, got %+v", u)
+	}
+}
+
+func TestUsageAccumulatorSumsMultipleSteps(t *testing.T) {
+	acc := NewUsageAccumulator()
+	acc.AddStep(stepPart("s1", 0.01, 100, 50, 10, 20, 5))
+	acc.AddStep(stepPart("s2", 0.03, 200, 80, 4, 0, 0))
+	u := acc.Usage()
+	if u == nil {
+		t.Fatal("want usage, got nil")
+	}
+	if u.Input != 300 || u.Output != 130 {
+		t.Fatalf("input/output = %d/%d, want 300/130", u.Input, u.Output)
+	}
+	if u.Cached != 25 { // cache read+write across both steps: (20+5)+(0+0)
+		t.Fatalf("cached = %d, want 25", u.Cached)
+	}
+	if u.Thought != 14 { // reasoning: 10+4
+		t.Fatalf("thought = %d, want 14", u.Thought)
+	}
+	if u.Total != 430 { // input+output
+		t.Fatalf("total = %d, want 430", u.Total)
+	}
+	if u.Cost == nil || *u.Cost < 0.0399 || *u.Cost > 0.0401 { // 0.01+0.03
+		t.Fatalf("cost = %v, want ~0.04", u.Cost)
+	}
+}
+
+func TestUsageAccumulatorDedupesBySamePartID(t *testing.T) {
+	// A re-sent snapshot of the same step must overwrite, not double-count.
+	acc := NewUsageAccumulator()
+	acc.AddStep(stepPart("s1", 0.01, 100, 50, 0, 0, 0))
+	acc.AddStep(stepPart("s1", 0.02, 120, 60, 0, 0, 0)) // newer snapshot of the SAME part
+	u := acc.Usage()
+	if u == nil || u.Input != 120 || u.Output != 60 {
+		t.Fatalf("dedupe failed: %+v", u)
+	}
+	if u.Cost == nil || *u.Cost < 0.0199 || *u.Cost > 0.0201 {
+		t.Fatalf("cost = %v, want ~0.02 (latest snapshot)", u.Cost)
+	}
+}
+
+func TestUsageAccumulatorAllZeroIsNil(t *testing.T) {
+	// A step-finish that reports all-zero tokens and no cost carries no information -> nil (no zero badge).
+	acc := NewUsageAccumulator()
+	acc.AddStep(stepPart("s1", 0, 0, 0, 0, 0, 0))
+	if u := acc.Usage(); u != nil {
+		t.Fatalf("all-zero step should yield nil usage, got %+v", u)
+	}
+}
+
+func TestUsageAccumulatorTokensWithoutCostOmitsCost(t *testing.T) {
+	// Tokens but no price (cost 0) -> usage present, Cost pointer nil (no misleading $0.00).
+	acc := NewUsageAccumulator()
+	acc.AddStep(stepPart("s1", 0, 100, 50, 0, 0, 0))
+	u := acc.Usage()
+	if u == nil || u.Total != 150 {
+		t.Fatalf("want usage with total 150, got %+v", u)
+	}
+	if u.Cost != nil {
+		t.Fatalf("cost should be nil when unpriced, got %v", *u.Cost)
+	}
+}

@@ -41,7 +41,8 @@ type Adapter struct {
 	recentSelf  []string          // prompt texts WE submitted (web path) — skip echoing those back
 	inflightID  int               // node's session/prompt id awaiting turn-end
 	hasInflight bool
-	turnErr     *OpencodeError // terminal error seen during the in-flight turn (session.error / msg error)
+	turnErr     *OpencodeError    // terminal error seen during the in-flight turn (session.error / msg error)
+	usage       *UsageAccumulator // per-turn token usage + cost accumulated from step-finish parts (cat D)
 	nextReqID   int
 	permByReq   map[int]string // our request id -> opencode permissionID
 }
@@ -62,6 +63,7 @@ func New(oc *opencode.Client, dir, model, title string) *Adapter {
 		sentUser:  map[string]bool{},
 		sentTool:  map[string]bool{},
 		permByReq: map[int]string{},
+		usage:     NewUsageAccumulator(),
 	}
 }
 
@@ -160,7 +162,8 @@ func (a *Adapter) handlePrompt(srv *acp.Server, m acp.Message) {
 	a.mu.Lock()
 	a.inflightID = id
 	a.hasInflight = true
-	a.turnErr = nil // fresh turn: clear any error carried over from the previous one
+	a.turnErr = nil                 // fresh turn: clear any error carried over from the previous one
+	a.usage = NewUsageAccumulator() // fresh turn: reset per-turn token usage + cost (cat D)
 	sid := a.sessionID
 	// Remember our own (web-originated) prompt text so we don't echo it back as a TUI message —
 	// the node already locally-echoes web prompts. Bounded ring.
@@ -265,6 +268,16 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 		if err != nil {
 			return
 		}
+		// step-finish parts: accumulate per-step token usage + cost for the in-flight turn (cat D). They
+		// carry no display content, so consume and return.
+		if pu.Part.Type == "step-finish" {
+			a.mu.Lock()
+			if a.usage != nil {
+				a.usage.AddStep(pu)
+			}
+			a.mu.Unlock()
+			return
+		}
 		// Tool parts: emit ACP tool_call (creation, once per callID) + tool_call_update(s) carrying
 		// the tool's content/result and rawInput/rawOutput (cats A/I).
 		if pu.Part.Type == "tool" {
@@ -322,6 +335,10 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 		a.hasInflight = false
 		te := a.turnErr
 		a.turnErr = nil
+		var usage *ACPUsage
+		if a.usage != nil {
+			usage = a.usage.Usage() // per-turn token usage + cost accumulated from step-finish parts (cat D)
+		}
 		a.mu.Unlock()
 		if has {
 			// Map opencode's real stop semantics (incl. any NamedError) to an honest ACP stopReason +
@@ -330,6 +347,9 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 			resp := map[string]any{"stopReason": stop}
 			if ei != nil {
 				resp["error"] = ei
+			}
+			if usage != nil {
+				resp["usage"] = usage // UNSTABLE/guarded: present only when the turn reported usage
 			}
 			_ = srv.Respond(id, resp)
 		}

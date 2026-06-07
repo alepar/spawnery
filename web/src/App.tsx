@@ -103,7 +103,7 @@ export function App() {
         setItems((xs) => upsertPlanItems(xs, f.plan ?? [], () => idRef.current++));
         break;
       case "turn": {
-        const t: TurnState = { state: f.state ?? "idle", queued: f.queued ?? 0, reason: f.reason, error: f.error };
+        const t: TurnState = { state: f.state ?? "idle", queued: f.queued ?? 0, reason: f.reason, error: f.error, usage: f.usage };
         setTurn(t);
         turnsRef.current.set(spawnId, t);
         setItems((cur) => reconcilePending(cur, t.queued));

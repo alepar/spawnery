@@ -53,7 +53,7 @@ type Pump struct {
 	stopped bool // guards stop() against double-teardown
 
 	sessionID        string
-	toAgent          chan []byte               // ndjson lines for the writer (sole stdin writer)
+	toAgent          chan []byte // ndjson lines for the writer (sole stdin writer)
 	writerDone       chan struct{}
 	readerDone       chan struct{}
 	waiters          map[int]chan acp.Message // one-shot result waiters (handshake/our requests)
@@ -483,10 +483,11 @@ func toolPayload(content, rawIn, rawOut json.RawMessage) *ToolPayload {
 }
 
 // handleTurnEnd clears busy on a turn-end and drains one queued prompt (if any) as the next turn. The
-// session/prompt result carries the ACP StopReason and (for opencode) a structured error; these ride
-// the emitted idle turn Frame as Reason/Error so the client can show an honest turn-ending indicator.
+// session/prompt result carries the ACP StopReason, an optional structured error, and (UNSTABLE, opencode
+// only) a per-turn token-usage breakdown; these ride the emitted idle turn Frame as Reason/Error/Usage so
+// the client can show an honest turn-ending indicator and a usage badge.
 func (p *Pump) handleTurnEnd(result json.RawMessage) {
-	reason, errInfo := parseStopResult(result)
+	reason, errInfo, usage := parseStopResult(result)
 	p.mu.Lock()
 	p.busy = false
 	p.inflightPromptID = 0
@@ -508,15 +509,16 @@ func (p *Pump) handleTurnEnd(result json.RawMessage) {
 		p.sendPrompt(sid, drainText)
 		return
 	}
-	// Reason/Error are omitempty: a normal end_turn with no error serializes byte-identically to before.
-	p.appendFrames([]Frame{{Kind: "turn", State: "idle", Queued: 0, Reason: turnReason(reason), Error: errInfo}})
+	// Reason/Error/Usage are omitempty: a normal end_turn with no error/usage serializes byte-identically to before.
+	p.appendFrames([]Frame{{Kind: "turn", State: "idle", Queued: 0, Reason: turnReason(reason), Error: errInfo, Usage: usage}})
 }
 
-// parseStopResult extracts the ACP StopReason and an optional structured error from a session/prompt
-// result. Best-effort: a missing/garbled result (e.g. a goose agent that omits stopReason) yields "".
-func parseStopResult(result json.RawMessage) (string, *ErrorInfo) {
+// parseStopResult extracts the ACP StopReason, an optional structured error, and (UNSTABLE) an optional
+// per-turn token-usage breakdown from a session/prompt result. Best-effort: a missing/garbled result
+// (e.g. a goose agent that omits stopReason/usage) yields "" / nil so absent fields stay nil.
+func parseStopResult(result json.RawMessage) (string, *ErrorInfo, *Usage) {
 	if len(result) == 0 {
-		return "", nil
+		return "", nil, nil
 	}
 	var r struct {
 		StopReason string `json:"stopReason"`
@@ -524,15 +526,28 @@ func parseStopResult(result json.RawMessage) (string, *ErrorInfo) {
 			Code    int    `json:"code"`
 			Message string `json:"message"`
 		} `json:"error"`
+		Usage *Usage `json:"usage"`
 	}
 	if json.Unmarshal(result, &r) != nil {
-		return "", nil
+		return "", nil, nil
 	}
 	var ei *ErrorInfo
 	if r.Error != nil && (r.Error.Code != 0 || r.Error.Message != "") {
 		ei = &ErrorInfo{Code: r.Error.Code, Message: r.Error.Message}
 	}
-	return r.StopReason, ei
+	return r.StopReason, ei, parseUsage(r.Usage)
+}
+
+// parseUsage normalizes a decoded usage object: an all-zero, cost-less usage (or a nil one) collapses to
+// nil so an agent reporting empty usage never lands a zero-token badge on the turn Frame (UNSTABLE/guarded).
+func parseUsage(u *Usage) *Usage {
+	if u == nil {
+		return nil
+	}
+	if u.Input == 0 && u.Output == 0 && u.Cached == 0 && u.Thought == 0 && u.Total == 0 && u.Cost == nil {
+		return nil
+	}
+	return u
 }
 
 // turnReason collapses a normal end_turn (or an absent reason) to "" so the idle turn Frame stays
