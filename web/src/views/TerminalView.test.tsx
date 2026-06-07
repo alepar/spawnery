@@ -135,6 +135,20 @@ describe("TerminalView", () => {
     expect(new TextDecoder().decode(writtenData[0] as Uint8Array)).toBe("hello\r\n");
   });
 
+  it("reports socket state via onConn: connecting on mount, connected on open, reconnecting on down", () => {
+    const onConn = vi.fn();
+    render(<TerminalView spawnId="sp1" onConn={onConn} />);
+    expect(fakeSocketInstance).not.toBeNull();
+    // onConn("connecting") fires synchronously when the socket is created (before open).
+    expect(onConn).toHaveBeenCalledWith("connecting");
+    onConn.mockClear();
+    fakeSocketInstance!.opts.onOpen();
+    expect(onConn).toHaveBeenCalledWith("connected");
+    onConn.mockClear();
+    fakeSocketInstance!.opts.onDown();
+    expect(onConn).toHaveBeenCalledWith("reconnecting");
+  });
+
   it("observes a wedge via console.warn when the backlog threshold is exceeded and xterm stalls", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     // Use a tiny threshold (10 bytes) so a small burst triggers a wedge.

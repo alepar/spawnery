@@ -150,6 +150,7 @@ export function App() {
           break;
         case "open":
           if (active?.mode !== "tmux") openSession(aid); // just became active -> connect (green); tmux spawns self-manage via TerminalView
+          else connecting(); // tmux: show pending until TerminalView's socket reports connected (onTermConn)
           break;
         case "error":
           teardown(); errored(); // failed to start -> red, stays in the sidebar
@@ -231,6 +232,7 @@ export function App() {
     });
     setTurn(turnsRef.current.get(id) ?? { state: "idle", queued: 0 });
     if (sp?.status === "active" && sp.mode !== "tmux") openSession(id);
+    else if (sp?.status === "active" && sp.mode === "tmux") connecting(); // tmux: TerminalView's socket drives the dot from here
     else if (sp?.status === "starting") waiting();
     else if (sp?.status === "error" || sp?.status === "unreachable") errored();
     // suspended / unknown -> hidden (closeSession already reset())
@@ -276,6 +278,13 @@ export function App() {
     wsRef.current?.send(encodePrompt(text));
   };
 
+  // tmux spawns have no App-managed ACP socket; their TerminalView drives the header dot.
+  const onTermConn = (s: "connecting" | "connected" | "reconnecting") => {
+    if (s === "connected") connected();
+    else if (s === "reconnecting") reconnecting();
+    else connecting();
+  };
+
   return (
     <AppShell
       conn={conn}
@@ -288,6 +297,7 @@ export function App() {
       spawns={spawns}
       activeId={activeId}
       actions={{ onSelectSpawn: selectSpawn, onRename, onSuspend, onResume, onStop }}
+      onTermConn={onTermConn}
     />
   );
 }

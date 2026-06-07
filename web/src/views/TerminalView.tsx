@@ -12,8 +12,19 @@ const CLIENT_ID = (typeof crypto !== "undefined" && crypto.randomUUID)
   ? crypto.randomUUID()
   : `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024 }: { spawnId: string; backlogThreshold?: number }) {
+export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024, onConn }: {
+  spawnId: string;
+  backlogThreshold?: number;
+  // Reports the terminal's own socket state up to the chat-header ConnStatus dot. tmux spawns
+  // self-manage this socket (App.tsx gates openSession off for them), so without this the dot
+  // would stay on the App's null/waiting state (sp-9xr.18).
+  onConn?: (s: "connecting" | "connected" | "reconnecting") => void;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
+  // Keep the latest onConn in a ref so the socket callbacks don't pin a stale closure (the effect
+  // is keyed on spawnId only, to avoid tearing down/reopening the socket when the parent re-renders).
+  const onConnRef = useRef(onConn);
+  onConnRef.current = onConn;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -27,13 +38,15 @@ export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024 }: { 
 
     const backlog = new BacklogTracker(backlogThreshold);
 
+    onConnRef.current?.("connecting");
     const sock = new ReconnectingSocket(`ws://${location.host}/ws/session`, {
       onOpen: () => {
         sock.send(JSON.stringify({ spawnId, clientId: CLIENT_ID, token: DEV_TOKEN, cursor: 0 }));
         fit.fit();
         sock.send(encodeResize(term.cols, term.rows));
+        onConnRef.current?.("connected");
       },
-      onDown: () => {},
+      onDown: () => { onConnRef.current?.("reconnecting"); },
       onMessage: (data: ArrayBuffer | string) => {
         const bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
         const n = bytes.length;

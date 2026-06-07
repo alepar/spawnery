@@ -10,7 +10,7 @@ import { SettingsView } from "@/views/SettingsView";
 import type { Item, TurnState } from "@/views/chat/types";
 import type { SpawnView } from "@/api/spawnlet";
 
-export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp, spawns = [], activeId, actions }: {
+export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp, spawns = [], activeId, actions, onTermConn }: {
   conn: ConnState | null;
   items: Item[];
   turn: TurnState;
@@ -21,6 +21,8 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
   spawns?: SpawnView[];
   activeId?: string | null;
   actions?: SpawnActions;
+  // tmux spawns' TerminalView reports its socket state here -> the chat-header ConnStatus dot.
+  onTermConn?: (s: "connecting" | "connected" | "reconnecting") => void;
 }) {
   const [view, setView] = useState<View>("market");
   const onSpawn = (appId: string, image?: string, runnableId?: string) => { onSpawnApp(appId, image, runnableId); setView("chat"); };
@@ -48,7 +50,7 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
               until the first listSpawns refresh, so it briefly shows ChatView — harmless because
               App.tsx only opens the ACP session once status flips to "active" (same refresh that
               carries the mode), so no stray ACP session opens for a tmux spawn. */}
-          {view === "chat" && activeMode === "tmux" && activeId && <TerminalView spawnId={activeId} />}
+          {view === "chat" && activeMode === "tmux" && activeId && <TerminalView spawnId={activeId} onConn={onTermConn} />}
           {view === "chat" && activeMode !== "tmux" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} focusKey={activeId} />}
           {view === "market" && <MarketplaceView onSpawn={onSpawn} />}
           {view === "settings" && <SettingsView />}
