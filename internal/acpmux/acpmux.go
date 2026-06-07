@@ -35,12 +35,21 @@ const defaultMaxLog = 2000 // cap the replay log; oldest trimmed (a lagging late
 const maxQueued = 50
 const defaultPermTimeout = 2 * time.Minute
 
-// logItem is one buffered upstream session/update notification (raw JSON) with
-// its monotonically assigned sequence number. A late-joining client replays
-// every item with seq > its cursor.
+// logItem is one buffered outbound frame (raw JSON) with its monotonically
+// assigned sequence number. A late-joining client replays every item with
+// seq > its cursor whose target matches.
+//
+// target is the destination client id, or "" for a broadcast item. Broadcast
+// items (session/update notifications) go to every client; targeted items (a
+// turn-end prompt result) go only to the prompting client. Routing ALL outbound
+// frames through this single ordered log — emitted by the per-client replay
+// goroutine — guarantees a client sees its turn-end result strictly AFTER the
+// turn's session/update chunks (the result is appended later, so it gets a
+// higher seq), eliminating the cross-goroutine write race.
 type logItem struct {
-	seq int64
-	raw []byte
+	seq    int64
+	raw    []byte
+	target string // "" = broadcast to all clients; otherwise a specific client id
 }
 
 // pendingPerm tracks one in-flight upstream permission request that has been
@@ -64,6 +73,7 @@ type queuedPrompt struct {
 // dsClient is one connected downstream ACP client.
 type dsClient struct {
 	id         string
+	conn       net.Conn      // the underlying connection (closed on Stop / detach)
 	w          io.Writer     // the conn; writes serialized via wmu
 	wmu        *sync.Mutex   // serialize writes to this conn (replay goroutine + read loop)
 	cursor     int64         // last replay-log seq sent to this client
@@ -94,11 +104,12 @@ type Mux struct {
 	waiters    map[int]chan acp.Message // one-shot result waiters (our upstream requests: handshake)
 	nextID     int                      // upstream JSON-RPC id allocator
 
-	busy             bool
-	queue            []queuedPrompt
-	inflightPromptID int    // upstream request id of the in-flight session/prompt (0 = none)
-	inflightClient   string // client whose prompt is in flight ("" = none/internal)
-	inflightReq      int    // that client's session/prompt request id to answer at turn-end
+	busy              bool
+	queue             []queuedPrompt
+	inflightPromptID  int    // upstream request id of the in-flight session/prompt (0 = none)
+	inflightClient    string // client whose prompt is in flight ("" = none/internal)
+	inflightReq       int    // that client's session/prompt request id to answer at turn-end
+	inflightHasClient bool   // true if there is a downstream client to answer at turn-end
 
 	pending     map[string]*pendingPerm // keyed by upstream request id (string)
 	permTimeout time.Duration
@@ -173,7 +184,14 @@ func (m *Mux) Stop() {
 		_ = c.Close()
 	}
 	for _, c := range m.clients {
-		close(c.done)
+		close(c.done) // stop the per-client replay goroutine
+		if c.conn != nil {
+			// Also close the conn so the per-client READ loop (blocked in
+			// ReadMessage) unblocks and its goroutine exits — otherwise Stop leaks a
+			// read goroutine per client. net.Conn.Close is idempotent; the
+			// handleClient defer's own Close is a harmless no-op after this.
+			_ = c.conn.Close()
+		}
 	}
 	m.clients = map[string]*dsClient{}
 	for _, pp := range m.pending {
@@ -239,13 +257,14 @@ func (m *Mux) call(ctx context.Context, msg acp.Message, timeout time.Duration) 
 // request id so acpmux can answer that client at turn-end. The id is set under
 // the lock before enqueueing so a fast turn-end result can't race past it.
 // Ported from pump.sendPrompt.
-func (m *Mux) sendPrompt(sessionID, text, clientID string, clientReq int) {
+func (m *Mux) sendPrompt(sessionID, text, clientID string, clientReq int, hasClient bool) {
 	m.mu.Lock()
 	m.nextID++
 	id := m.nextID
 	m.inflightPromptID = id
 	m.inflightClient = clientID
 	m.inflightReq = clientReq
+	m.inflightHasClient = hasClient
 	m.mu.Unlock()
 	idv := id
 	var buf bytes.Buffer
@@ -276,7 +295,10 @@ func (m *Mux) readLoop() {
 				continue
 			}
 			if inflight {
-				m.handleTurnEnd() // session/prompt result = turn-end
+				// An upstream Error response to our in-flight prompt is a FAILED
+				// turn — forward the failure downstream rather than masking it as a
+				// clean end_turn.
+				m.handleTurnEnd(msg.Error != nil)
 			}
 			continue
 		}
@@ -305,14 +327,24 @@ func (m *Mux) onUpstreamNotification(msg acp.Message) {
 // session/prompt request (exact correlation), and drains one queued prompt (if
 // any) as the next turn. Ported from pump.handleTurnEnd, plus the per-client
 // reply that pump didn't need (pump's downstream is Frame, not ACP requests).
-func (m *Mux) handleTurnEnd() {
+//
+// The turn-end result is NOT written directly to the client conn. Instead it is
+// APPENDED to the ordered replay log targeted at the prompting client, so it is
+// emitted by that client's replay goroutine strictly AFTER the turn's buffered
+// session/update chunks (which were appended earlier and thus have lower seqs).
+// This is the only thing that guarantees the client doesn't see "turn complete"
+// before the turn's last chunk. failed reports whether the upstream prompt
+// returned an Error (turn failed) rather than a clean result.
+func (m *Mux) handleTurnEnd(failed bool) {
 	m.mu.Lock()
 	endedClient := m.inflightClient
 	endedReq := m.inflightReq
+	endedHasClient := m.inflightHasClient
 	m.busy = false
 	m.inflightPromptID = 0
 	m.inflightClient = ""
 	m.inflightReq = 0
+	m.inflightHasClient = false
 
 	var next queuedPrompt
 	var drained bool
@@ -323,16 +355,22 @@ func (m *Mux) handleTurnEnd() {
 		m.busy = true
 	}
 	sid := m.sessionID
-	c := m.clients[endedClient]
+	_, clientExists := m.clients[endedClient]
 	m.mu.Unlock()
 
-	// Answer the just-ended prompt's originating client (turn complete).
-	if c != nil && endedReq != 0 {
-		m.respondToClient(c, endedReq, json.RawMessage(`{"stopReason":"end_turn"}`))
+	// Answer the just-ended prompt's originating client (turn complete or failed),
+	// ordered after that turn's chunks via the per-client log.
+	if endedHasClient && clientExists {
+		result := json.RawMessage(`{"stopReason":"end_turn"}`)
+		if failed {
+			// Upstream prompt failed: don't mask it as a clean end_turn.
+			result = json.RawMessage(`{"stopReason":"refusal"}`)
+		}
+		m.appendResultFor(endedClient, endedReq, result)
 	}
 
 	if drained {
-		m.sendPrompt(sid, next.text, next.clientID, next.clientReq)
+		m.sendPrompt(sid, next.text, next.clientID, next.clientReq, true)
 	}
 }
 
@@ -360,6 +398,7 @@ func (m *Mux) handleClient(conn net.Conn) {
 	id := "c" + strconv.Itoa(m.clientSeq)
 	c := &dsClient{
 		id:     id,
+		conn:   conn,
 		w:      conn,
 		wmu:    &sync.Mutex{},
 		cursor: m.base, // start at the current trimmed-base; replay begins after session/new
@@ -438,7 +477,7 @@ func (m *Mux) fromClientPrompt(c *dsClient, clientReq int, text string) {
 	if !m.busy {
 		m.busy = true
 		m.mu.Unlock()
-		m.sendPrompt(sid, text, c.id, clientReq)
+		m.sendPrompt(sid, text, c.id, clientReq, true)
 		return
 	}
 	if len(m.queue) < maxQueued {
@@ -447,18 +486,40 @@ func (m *Mux) fromClientPrompt(c *dsClient, clientReq int, text string) {
 		return
 	}
 	m.mu.Unlock() // over cap -> drop
-	m.respondToClient(c, clientReq, json.RawMessage(`{"stopReason":"refusal"}`))
+	// Route the refusal through the per-client log too, so the replay goroutine
+	// remains the SOLE writer of session/prompt result frames to a client conn.
+	m.appendResultFor(c.id, clientReq, json.RawMessage(`{"stopReason":"refusal"}`))
 }
 
 // ---- replay log + fanout ----------------------------------------------------
 
-// appendUpdate assigns a seq, appends the raw notification to the replay log
-// (trimming the oldest past maxLog), and wakes all clients to catch up. Ported
-// from pump.appendFrames.
+// appendUpdate appends a broadcast session/update notification to the replay
+// log (target "" = every client). Ported from pump.appendFrames.
 func (m *Mux) appendUpdate(raw []byte) {
+	m.appendItem("", raw)
+}
+
+// appendResultFor appends a JSON-RPC result for the given downstream request id
+// to the replay log, TARGETED at one client. Routed through the ordered log so
+// it is emitted after any earlier (lower-seq) items for that client — in
+// particular the session/update chunks of the turn it completes.
+func (m *Mux) appendResultFor(clientID string, reqID int, result json.RawMessage) {
+	idv := reqID
+	var buf bytes.Buffer
+	if acp.WriteMessage(&buf, acp.Message{ID: &idv, Result: result}) != nil {
+		return
+	}
+	m.appendItem(clientID, buf.Bytes())
+}
+
+// appendItem assigns a seq, appends the raw frame to the replay log (trimming
+// the oldest past maxLog), and wakes all clients to catch up. target "" means
+// broadcast; otherwise the item is delivered only to the named client (other
+// clients skip it but still advance their cursor past it).
+func (m *Mux) appendItem(target string, raw []byte) {
 	m.mu.Lock()
 	m.seq++
-	m.log = append(m.log, logItem{seq: m.seq, raw: append([]byte(nil), raw...)})
+	m.log = append(m.log, logItem{seq: m.seq, raw: append([]byte(nil), raw...), target: target})
 	if over := len(m.log) - m.maxLog; over > 0 {
 		m.base += int64(over)
 		m.log = append(m.log[:0], m.log[over:]...)
@@ -501,7 +562,13 @@ func (m *Mux) clientReplayLoop(c *dsClient) {
 			if c.cursor < m.seq {
 				from := c.cursor - m.base // index of first unseen item
 				for _, it := range m.log[from:] {
-					batch = append(batch, it.raw)
+					// Broadcast items go to everyone; targeted items only to their
+					// target. Non-matching items are skipped but the cursor still
+					// advances past them (set to m.seq below), so they are never
+					// re-examined — preserving strict per-client total ordering.
+					if it.target == "" || it.target == c.id {
+						batch = append(batch, it.raw)
+					}
 				}
 				c.cursor = m.seq
 			}
@@ -556,6 +623,17 @@ func (m *Mux) onPermissionRequest(msg acp.Message) {
 
 	// Forward the upstream request verbatim downstream, preserving the same id so
 	// each client's response carries it (the first answer wins in resolve).
+	//
+	// NOTE (v1 cosmetic limitation): permission requests are broadcast OUT-OF-BAND
+	// here, NOT through the ordered per-client replay log used for session/update
+	// chunks and turn-end results. They are deliberately kept out of the log
+	// because perms must NOT be replayed to late joiners as stale prompts (only
+	// still-pending perms are re-sent on attach, by the pump). The cost is that a
+	// session/request_permission may, in rare interleavings, reach a client
+	// slightly before the session/update (tool_call) that motivated it — a purely
+	// cosmetic display-ordering quirk, not a correctness issue (the perm id and
+	// first-wins resolution are unaffected). Promoting perms into the ordered log
+	// without re-introducing stale-perm replay is deferred.
 	var buf bytes.Buffer
 	_ = acp.WriteMessage(&buf, acp.Message{ID: msg.ID, Method: "session/request_permission", Params: msg.Params})
 	line := buf.Bytes()
