@@ -58,13 +58,15 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     claude --version
 
-# toad (Batrachian) — Python TUI/ACP agent, via uv-managed Python 3.14
-ENV UV_INSTALL_DIR=/usr/local/bin
+# nori CLI (Tilework) — Rust ACP TUI client (spawnctl attach to acp-mode spawns; wiring in sp-9xr.12)
+# tarball layout: ./nori/nori — extract to /tmp then install to /usr/local/bin
 RUN set -eux; \
-    curl -fsSL https://astral.sh/uv/install.sh | sh; \
-    uv tool install batrachian-toad --python 3.14; \
-    ln -sf /root/.local/bin/toad /usr/local/bin/toad; \
-    /usr/local/bin/toad --version
+    curl -fsSL -o /tmp/nori.tar.gz \
+      "https://github.com/tilework-tech/nori-cli/releases/download/nori-v0.22.0/nori-0.22.0-linux-x86_64.tar.gz"; \
+    tar -xzf /tmp/nori.tar.gz -C /tmp; \
+    install -m 0755 /tmp/nori/nori /usr/local/bin/nori; \
+    rm -rf /tmp/nori.tar.gz /tmp/nori; \
+    nori --version
 # Pre-run the one-time SQLite migration + models.json fetch at build time (network available here),
 # so a fresh container is ready in seconds instead of doing a multi-minute first-run migration.
 RUN sh -c 'opencode serve --port 4096 --hostname 127.0.0.1 >/tmp/m.log 2>&1 & P=$!; \

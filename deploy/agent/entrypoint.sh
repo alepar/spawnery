@@ -40,8 +40,8 @@ case "${1:-}" in
     echo "goose-acp not wired yet (needs stdio-ACP->TCP bridge; see sp-9xr.16)" >&2; exit 1 ;;
   claude-tui)
     echo "claude-tui not wired yet (needs Anthropic<->OpenAI converter; see sp-9xr.15)" >&2; exit 1 ;;
-  toad-*|toad)
-    echo "toad not wired yet (ACP-TUI client; see sp-9xr.12)" >&2; exit 1 ;;
+  nori*|nori)
+    echo "nori not wired yet (ACP-TUI client; see sp-9xr.12)" >&2; exit 1 ;;
   *)
     echo "unknown runnable: $1" >&2; exit 1 ;;
 esac
