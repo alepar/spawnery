@@ -17,6 +17,7 @@ let capturedWriteCallbacks: (() => void)[] = [];
 const mockTerminal = {
   loadAddon: vi.fn(),
   open: vi.fn(),
+  focus: vi.fn(),
   write: vi.fn((d: string | Uint8Array, cb?: () => void) => { writtenData.push(d); if (cb) capturedWriteCallbacks.push(cb); }),
   onData: vi.fn((cb: (d: string) => void) => { capturedOnData = cb; return { dispose: vi.fn() }; }),
   onResize: vi.fn(() => ({ dispose: vi.fn() })),
@@ -74,6 +75,7 @@ beforeEach(() => {
   mockTerminal.onResize.mockClear();
   mockTerminal.loadAddon.mockClear();
   mockTerminal.dispose.mockClear();
+  mockTerminal.focus.mockClear();
   mockFitAddon.fit.mockClear();
 });
 
@@ -81,6 +83,14 @@ describe("TerminalView", () => {
   it("renders a div with data-testid=terminal-view", () => {
     const { getByTestId } = render(<TerminalView spawnId="sp1" />);
     expect(getByTestId("terminal-view")).toBeTruthy();
+  });
+
+  it("focuses the terminal on mount and on spawn switch (so keystrokes go straight into the TUI)", () => {
+    const { rerender } = render(<TerminalView spawnId="sp1" />);
+    expect(mockTerminal.focus).toHaveBeenCalledTimes(1);
+    // Switching spawns re-runs the spawnId-keyed effect (new Terminal) and refocuses.
+    rerender(<TerminalView spawnId="sp2" />);
+    expect(mockTerminal.focus).toHaveBeenCalledTimes(2);
   });
 
   it("sends a JSON bind with spawnId on socket open", () => {

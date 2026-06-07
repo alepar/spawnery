@@ -35,6 +35,10 @@ export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024, onCo
     term.loadAddon(fit);
     term.open(host);
     fit.fit();
+    // Focus the terminal as soon as the spawn is (re)selected — the effect is keyed on spawnId, so
+    // this runs on mount and on every spawn switch — so keystrokes go straight into the TUI, matching
+    // how a web-native spawn auto-focuses its chat input on selection.
+    term.focus();
 
     const backlog = new BacklogTracker(backlogThreshold);
 
