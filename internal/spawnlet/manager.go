@@ -82,6 +82,17 @@ func (m *Manager) egressEnforced() bool {
 
 func (m *Manager) Store() *Store { return m.store }
 
+// ExecPrefix returns the runtime exec invocation (docker/crictl exec -it ...) for execing into a
+// spawn's agent container — used by the node's tmux raw-PTY relay.
+func (m *Manager) ExecPrefix() []string { return ExecPrefixFor(m.cfg.ContainerRuntime) }
+
+// TmuxAttachArgv returns the full argv to `docker/crictl exec -it <containerID> tmux attach -t
+// <session>` — used by the node's per-client tmux raw-PTY relay to construct the exec command.
+// Keeps execArgv unexported.
+func (m *Manager) TmuxAttachArgv(containerID, session string) []string {
+	return execArgv(ExecPrefixFor(m.cfg.ContainerRuntime), containerID, []string{"tmux", "attach", "-t", session})
+}
+
 // Attach returns the agent's ACP stdio for a spawn, dispatching to the backend's transport (Docker
 // stdio attach for the Docker lane, the in-pod UDS for the CRI lane).
 func (m *Manager) Attach(ctx context.Context, sp *Spawn) (*runtime.AttachedStream, error) {

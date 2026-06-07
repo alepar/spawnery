@@ -165,7 +165,7 @@ func newGooseManager(t *testing.T, be runtime.PodBackend) *spawnlet.Manager {
 }
 
 func newAttacher(mgr *spawnlet.Manager, fs cpStream) *attacher {
-	return &attacher{cfg: Config{MaxSpawns: 2}, mgr: mgr, stream: fs, pumps: map[string]*Pump{}}
+	return &attacher{cfg: Config{MaxSpawns: 2}, mgr: mgr, stream: fs, pumps: map[string]*Pump{}, tmuxRelays: map[string]*tmuxRelay{}}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
