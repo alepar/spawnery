@@ -12,11 +12,12 @@ globalThis.ResizeObserver = class {
 // Captures onData/onResize callbacks and write calls without a real DOM/canvas.
 let capturedOnData: ((d: string) => void) | null = null;
 let writtenData: (string | Uint8Array)[] = [];
+let capturedWriteCallbacks: (() => void)[] = [];
 
 const mockTerminal = {
   loadAddon: vi.fn(),
   open: vi.fn(),
-  write: vi.fn((d: string | Uint8Array) => { writtenData.push(d); }),
+  write: vi.fn((d: string | Uint8Array, cb?: () => void) => { writtenData.push(d); if (cb) capturedWriteCallbacks.push(cb); }),
   onData: vi.fn((cb: (d: string) => void) => { capturedOnData = cb; return { dispose: vi.fn() }; }),
   onResize: vi.fn(() => ({ dispose: vi.fn() })),
   cols: 80,
@@ -65,6 +66,7 @@ import { TerminalView } from "./TerminalView";
 beforeEach(() => {
   capturedOnData = null;
   writtenData = [];
+  capturedWriteCallbacks = [];
   fakeSocketInstance = null;
   mockTerminal.write.mockClear();
   mockTerminal.open.mockClear();
@@ -124,9 +126,26 @@ describe("TerminalView", () => {
     expect(new TextDecoder().decode(frame.slice(1))).toBe("x");
   });
 
-  it("writes received string data to the terminal", () => {
+  it("writes received string data to the terminal as Uint8Array bytes", () => {
     render(<TerminalView spawnId="sp1" />);
     fakeSocketInstance!.opts.onMessage!("hello\r\n");
-    expect(writtenData[0]).toBe("hello\r\n");
+    // TextEncoder in jsdom runs in a different realm so instanceof Uint8Array is unreliable;
+    // ArrayBuffer.isView works across realms and confirms the value is a typed array view.
+    expect(ArrayBuffer.isView(writtenData[0])).toBe(true);
+    expect(new TextDecoder().decode(writtenData[0] as Uint8Array)).toBe("hello\r\n");
+  });
+
+  it("observes a wedge via console.warn when the backlog threshold is exceeded and xterm stalls", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Use a tiny threshold (10 bytes) so a small burst triggers a wedge.
+    // The mock term.write captures callbacks but never invokes them, simulating a stalled xterm.
+    render(<TerminalView spawnId="sp-wedge" backlogThreshold={10} />);
+    expect(fakeSocketInstance).not.toBeNull();
+    // Send two 6-byte messages; after the second the outstanding backlog is 12 > 10 → wedge.
+    fakeSocketInstance!.opts.onMessage!(new Uint8Array(6).buffer);
+    fakeSocketInstance!.opts.onMessage!(new Uint8Array(6).buffer);
+    expect(warnSpy).toHaveBeenCalledOnce();
+    expect(warnSpy.mock.calls[0][0]).toMatch(/terminal backlog wedge/);
+    warnSpy.mockRestore();
   });
 });

@@ -87,6 +87,12 @@ func (r *tmuxRelay) attach(ctx context.Context, clientID string) error {
 			n, err := ptmx.Read(buf)
 			if n > 0 {
 				r.markActive() // PTY output = activity
+				// r.send is synchronous and blocks when the downstream consumer is slow (gRPC stream
+				// flow control → WebSocket write → browser). That back-pressure propagates here: a
+				// slow browser stalls this read loop, which in turn stalls the PTY read, pausing the
+				// agent. No node-side buffering or credit scheme is therefore needed. The only place
+				// an unbounded buffer could form is xterm.js's internal write queue in the browser;
+				// that is observed by the BacklogTracker wedge metric (sp-9xr.11).
 				_ = r.send(clientID, append([]byte(nil), buf[:n]...))
 			}
 			if err != nil {
