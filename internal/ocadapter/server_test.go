@@ -188,6 +188,22 @@ func TestAdapterEmitsToolCallAndUpdate(t *testing.T) {
 	})
 }
 
+func TestAdapterEmitsDiffForEditTool(t *testing.T) {
+	h := newHarness(t)
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	time.Sleep(150 * time.Millisecond) // let the pump subscribe
+
+	// A completed edit tool: the tool_call_update must carry a diff block built from the input args.
+	h.fake.EmitToolPart("ses_fake1", "call_e", "edit", "completed",
+		`{"filePath":"a.go","oldString":"foo","newString":"bar"}`, "")
+	h.await(t, func(_ acp.Message, line string) bool {
+		return strings.Contains(line, "tool_call_update") && strings.Contains(line, `"type":"diff"`) &&
+			strings.Contains(line, `"path":"a.go"`) && strings.Contains(line, `"oldText":"foo"`) &&
+			strings.Contains(line, `"newText":"bar"`)
+	})
+}
+
 func TestAdapterCancelAborts(t *testing.T) {
 	h := newHarness(t)
 	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)

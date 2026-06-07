@@ -59,6 +59,28 @@ func TestUpdateToFrame(t *testing.T) {
 			ok: true,
 		},
 		{
+			name: "tool_call_update with a diff block -> Tool.Diff",
+			params: `{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"completed",` +
+				`"content":[{"type":"diff","path":"a.go","oldText":"foo","newText":"bar"}],` +
+				`"rawInput":{"filePath":"a.go"}}}`,
+			want: Frame{Kind: "tool", ToolID: "c1", Status: "completed", Tool: &ToolPayload{
+				Diff:     &Diff{Path: "a.go", OldText: "foo", NewText: "bar"},
+				RawInput: json.RawMessage(`{"filePath":"a.go"}`),
+			}},
+			ok: true,
+		},
+		{
+			name: "tool_call_update with both a text block and a diff block",
+			params: `{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"completed",` +
+				`"content":[{"type":"content","content":{"type":"text","text":"edited"}},` +
+				`{"type":"diff","path":"a.go","oldText":"foo","newText":"bar"}]}}`,
+			want: Frame{Kind: "tool", ToolID: "c1", Status: "completed", Tool: &ToolPayload{
+				Content: []ContentBlock{{Type: "text", Text: "edited"}},
+				Diff:    &Diff{Path: "a.go", OldText: "foo", NewText: "bar"},
+			}},
+			ok: true,
+		},
+		{
 			name:   "tool_call_update status only (no payload -> Tool nil)",
 			params: `{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"in_progress"}}`,
 			want:   Frame{Kind: "tool", ToolID: "c1", Status: "in_progress"},

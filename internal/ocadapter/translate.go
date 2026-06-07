@@ -144,10 +144,18 @@ type ACPToolUpdate struct {
 	RawOutput     json.RawMessage  `json:"rawOutput,omitempty"`
 }
 
-// ACPToolContent is one ToolCallContent block: {"type":"content","content":{"type":"text","text":...}}.
+// ACPToolContent is one ToolCallContent block. It is a small union keyed on Type:
+//   - "content": a text/result block carried under Content ({"type":"content","content":{"type":"text",...}}).
+//   - "diff":    a file-edit block ({"type":"diff","path","oldText","newText"}) (cat B).
+//
+// Content is a pointer so a diff block omits it, and the diff fields are omitempty so a content block
+// omits them — each block serializes to exactly its variant's shape.
 type ACPToolContent struct {
-	Type    string     `json:"type"` // "content" (diff/resource variants are later tasks)
-	Content ACPContent `json:"content"`
+	Type    string      `json:"type"`              // "content" | "diff"
+	Content *ACPContent `json:"content,omitempty"` // type=="content"
+	Path    string      `json:"path,omitempty"`    // type=="diff": the edited file path
+	OldText string      `json:"oldText,omitempty"` // type=="diff": pre-edit text ("" for a new file)
+	NewText string      `json:"newText,omitempty"` // type=="diff": post-edit text
 }
 
 // ToolPartUpdates translates one opencode ToolPart snapshot into the ACP session/update(s) to emit.
@@ -170,7 +178,7 @@ func ToolPartUpdates(pu PartUpdated, first bool) []ACPToolUpdateParams {
 		out = append(out, ACPToolCall(sid, callID, title, ToolKind(pu.Part.Tool)))
 	}
 	if st.Status != "" && st.Status != "pending" {
-		out = append(out, ACPToolCallUpdate(sid, callID, st))
+		out = append(out, ACPToolCallUpdate(sid, callID, pu.Part.Tool, st))
 	}
 	return out
 }
@@ -189,15 +197,19 @@ func ACPToolCall(sessionID, toolCallID, title, kind string) ACPToolUpdateParams 
 	}
 }
 
-// ACPToolCallUpdate builds a tool_call_update reflecting a running/completed/error ToolState.
-func ACPToolCallUpdate(sessionID, toolCallID string, st ToolState) ACPToolUpdateParams {
+// ACPToolCallUpdate builds a tool_call_update reflecting a running/completed/error ToolState. tool is
+// the opencode tool name, used to recognize file-modifying tools and attach a diff content block (cat B).
+func ACPToolCallUpdate(sessionID, toolCallID, tool string, st ToolState) ACPToolUpdateParams {
 	u := ACPToolUpdate{
 		SessionUpdate: "tool_call_update",
 		ToolCallID:    toolCallID,
 		Status:        ToolStatusToACP(st.Status),
 	}
 	if text := toolResultText(st); text != "" {
-		u.Content = []ACPToolContent{{Type: "content", Content: ACPContent{Type: "text", Text: text}}}
+		u.Content = append(u.Content, ACPToolContent{Type: "content", Content: &ACPContent{Type: "text", Text: text}})
+	}
+	if d := toolDiffBlock(tool, st); d != nil {
+		u.Content = append(u.Content, *d)
 	}
 	if len(st.Input) > 0 {
 		u.RawInput = st.Input
@@ -206,6 +218,33 @@ func ACPToolCallUpdate(sessionID, toolCallID string, st ToolState) ACPToolUpdate
 		u.RawOutput = raw
 	}
 	return ACPToolUpdateParams{SessionID: sessionID, Update: u}
+}
+
+// toolDiffBlock returns an ACP diff content block for a file-modifying (edit/write/patch) tool,
+// extracted faithfully from the tool's input args — opencode's edit input carries filePath +
+// oldString/newString and write carries filePath + content. Returns nil for non-edit tools or when no
+// file path is present (best-effort: it never fabricates old/new text).
+func toolDiffBlock(tool string, st ToolState) *ACPToolContent {
+	if ToolKind(tool) != "edit" {
+		return nil
+	}
+	var in struct {
+		FilePath  string `json:"filePath"`
+		OldString string `json:"oldString"`
+		NewString string `json:"newString"`
+		Content   string `json:"content"` // write tool: full file body
+	}
+	if len(st.Input) > 0 {
+		_ = json.Unmarshal(st.Input, &in)
+	}
+	if in.FilePath == "" {
+		return nil
+	}
+	newText := in.NewString
+	if newText == "" {
+		newText = in.Content // write overwrites with the whole content; oldString is empty
+	}
+	return &ACPToolContent{Type: "diff", Path: in.FilePath, OldText: in.OldString, NewText: newText}
 }
 
 // toolResultText is the human-readable result text for a content block (output, or the error message).

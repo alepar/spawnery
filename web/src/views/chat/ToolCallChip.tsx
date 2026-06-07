@@ -1,7 +1,47 @@
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import type { ContentBlock } from "@/acp/frames";
+import type { ContentBlock, Diff } from "@/acp/frames";
+
+// DiffView renders a file edit as a simple line-based removed/added view: the old text as "-" lines
+// followed by the new text as "+" lines. A whole-block replace is shown honestly (no LCS minimization),
+// which matches opencode's edit semantics (a targeted oldString -> newString swap).
+function DiffView({ diff }: { diff: Diff }) {
+  const removed = diff.oldText ? diff.oldText.split("\n") : [];
+  const added = diff.newText ? diff.newText.split("\n") : [];
+  return (
+    <div data-testid="tool-diff">
+      {diff.path ? (
+        <div
+          data-testid="tool-diff-path"
+          className="mb-0.5 uppercase tracking-wide text-[10px] text-muted-foreground"
+        >
+          {diff.path}
+        </div>
+      ) : null}
+      <pre className="overflow-x-auto whitespace-pre rounded bg-background/60 p-1">
+        {removed.map((line, i) => (
+          <div
+            key={`r${i}`}
+            data-testid="diff-removed"
+            className="text-red-600 dark:text-red-400"
+          >
+            - {line}
+          </div>
+        ))}
+        {added.map((line, i) => (
+          <div
+            key={`a${i}`}
+            data-testid="diff-added"
+            className="text-green-700 dark:text-green-400"
+          >
+            + {line}
+          </div>
+        ))}
+      </pre>
+    </div>
+  );
+}
 
 // stringifyRaw renders a parsed-JSON raw value for the "raw" view (objects pretty-printed; a plain
 // string left as-is so a string output isn't shown with surrounding quotes).
@@ -19,12 +59,14 @@ export function ToolCallChip({
   title,
   status,
   content,
+  diff,
   rawInput,
   rawOutput,
 }: {
   title: string;
   status?: string;
   content?: ContentBlock[];
+  diff?: Diff;
   rawInput?: unknown;
   rawOutput?: unknown;
 }) {
@@ -33,9 +75,10 @@ export function ToolCallChip({
     .map((b) => b.text ?? "")
     .filter(Boolean)
     .join("\n");
+  const hasDiff = !!diff && !!(diff.path || diff.oldText || diff.newText);
   const rawIn = stringifyRaw(rawInput);
   const rawOut = stringifyRaw(rawOutput);
-  const hasDetail = resultText !== "" || rawIn !== "" || rawOut !== "";
+  const hasDetail = resultText !== "" || hasDiff || rawIn !== "" || rawOut !== "";
 
   const chip = (
     <Badge variant="secondary" className="font-mono text-xs">
@@ -71,6 +114,7 @@ export function ToolCallChip({
               {resultText}
             </pre>
           )}
+          {hasDiff && diff ? <DiffView diff={diff} /> : null}
           {rawIn !== "" && (
             <div>
               <div className="mb-0.5 uppercase tracking-wide text-[10px] text-muted-foreground">raw input</div>

@@ -15,6 +15,7 @@ export function upsertTool(items: Item[], f: ToolFrame, makeId: () => number): I
     title: f.title,
     status: f.status,
     content: f.tool?.content,
+    diff: f.tool?.diff,
     rawInput: f.tool?.rawInput,
     rawOutput: f.tool?.rawOutput,
   };
@@ -25,6 +26,7 @@ export function upsertTool(items: Item[], f: ToolFrame, makeId: () => number): I
       title: patch.title ?? prev.title,
       status: patch.status ?? prev.status,
       content: patch.content ?? prev.content,
+      diff: patch.diff ?? prev.diff,
       rawInput: patch.rawInput ?? prev.rawInput,
       rawOutput: patch.rawOutput ?? prev.rawOutput,
     };

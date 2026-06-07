@@ -1,4 +1,4 @@
-import type { ContentBlock } from "@/acp/frames";
+import type { ContentBlock, Diff } from "@/acp/frames";
 
 export type Item =
   | { id: number; kind: "user"; text: string; pending?: boolean }
@@ -10,6 +10,7 @@ export type Item =
       title: string;
       status?: string;
       content?: ContentBlock[];
+      diff?: Diff;
       rawInput?: unknown;
       rawOutput?: unknown;
     }

@@ -421,26 +421,40 @@ func textContent(raw json.RawMessage) string {
 // raw I/O. Returns nil when there is nothing to carry, so existing title+status-only frames stay lean.
 func toolPayload(content, rawIn, rawOut json.RawMessage) *ToolPayload {
 	var blocks []ContentBlock
+	var diff *Diff
 	if len(content) > 0 {
 		var arr []struct {
-			Type    string `json:"type"` // "content"
+			Type    string `json:"type"` // "content" | "diff"
 			Content struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"content"`
+			Path    string `json:"path"` // type=="diff"
+			OldText string `json:"oldText"`
+			NewText string `json:"newText"`
 		}
 		if json.Unmarshal(content, &arr) == nil { // object shape (text chunk) fails -> no blocks
 			for _, e := range arr {
-				if e.Content.Type == "text" && e.Content.Text != "" {
-					blocks = append(blocks, ContentBlock{Type: "text", Text: e.Content.Text})
+				switch e.Type {
+				case "diff":
+					if e.Path != "" || e.OldText != "" || e.NewText != "" {
+						diff = &Diff{Path: e.Path, OldText: e.OldText, NewText: e.NewText}
+					}
+				default:
+					if e.Content.Type == "text" && e.Content.Text != "" {
+						blocks = append(blocks, ContentBlock{Type: "text", Text: e.Content.Text})
+					}
 				}
 			}
 		}
 	}
-	if len(blocks) == 0 && len(rawIn) == 0 && len(rawOut) == 0 {
+	if len(blocks) == 0 && diff == nil && len(rawIn) == 0 && len(rawOut) == 0 {
 		return nil
 	}
 	tp := &ToolPayload{Content: blocks}
+	if diff != nil {
+		tp.Diff = diff
+	}
 	if len(rawIn) > 0 {
 		tp.RawInput = rawIn
 	}

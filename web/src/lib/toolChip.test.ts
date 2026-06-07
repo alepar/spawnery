@@ -71,6 +71,22 @@ describe("upsertTool", () => {
     expect(chip.rawInput).toEqual({ cmd: "ls" }); // preserved
   });
 
+  it("merges a diff payload into the chip and preserves it on a later status-only update", () => {
+    let items = upsertTool([], tool({ toolId: "t1", title: "edit", status: "pending" }), minter());
+    items = upsertTool(
+      items,
+      tool({ toolId: "t1", status: "completed", tool: { diff: { path: "a.go", oldText: "foo", newText: "bar" } } }),
+      minter(99),
+    );
+    let chip = items[0] as ToolItem;
+    expect(chip.diff).toEqual({ path: "a.go", oldText: "foo", newText: "bar" });
+
+    // A later status-only update must not wipe the diff.
+    items = upsertTool(items, tool({ toolId: "t1", status: "completed" }), minter(99));
+    chip = items[0] as ToolItem;
+    expect(chip.diff).toEqual({ path: "a.go", oldText: "foo", newText: "bar" });
+  });
+
   it("produces two separate items for two different toolIds", () => {
     const id = minter();
     let items = upsertTool([], tool({ toolId: "t1", title: "bash" }), id);

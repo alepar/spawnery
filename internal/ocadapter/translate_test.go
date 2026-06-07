@@ -154,6 +154,71 @@ func TestToolPartUpdates(t *testing.T) {
 		}
 	})
 
+	t.Run("edit tool emits a diff content block from oldString/newString", func(t *testing.T) {
+		ups := ToolPartUpdates(part("c6", "edit", "completed", `{"filePath":"a.go","oldString":"foo","newString":"bar"}`, "", "", "Edit a.go"), true)
+		if len(ups) != 2 {
+			t.Fatalf("want 2 updates, got %d: %+v", len(ups), ups)
+		}
+		if ups[0].Update.Kind != "edit" {
+			t.Fatalf("creation kind = %q want edit", ups[0].Update.Kind)
+		}
+		u := ups[1].Update
+		var diff *ACPToolContent
+		for i := range u.Content {
+			if u.Content[i].Type == "diff" {
+				diff = &u.Content[i]
+			}
+		}
+		if diff == nil {
+			t.Fatalf("no diff block in %+v", u.Content)
+		}
+		if diff.Path != "a.go" || diff.OldText != "foo" || diff.NewText != "bar" {
+			t.Fatalf("bad diff block: %+v", diff)
+		}
+	})
+
+	t.Run("write tool emits a diff block with empty oldText and full content as newText", func(t *testing.T) {
+		ups := ToolPartUpdates(part("c7", "write", "completed", `{"filePath":"new.go","content":"package x"}`, "", "", ""), false)
+		if len(ups) != 1 {
+			t.Fatalf("want 1 update, got %d", len(ups))
+		}
+		var diff *ACPToolContent
+		for i := range ups[0].Update.Content {
+			if ups[0].Update.Content[i].Type == "diff" {
+				diff = &ups[0].Update.Content[i]
+			}
+		}
+		if diff == nil || diff.Path != "new.go" || diff.OldText != "" || diff.NewText != "package x" {
+			t.Fatalf("bad write diff block: %+v", diff)
+		}
+	})
+
+	t.Run("non-edit tool emits no diff block", func(t *testing.T) {
+		ups := ToolPartUpdates(part("c8", "bash", "completed", `{"command":"ls","filePath":"x"}`, "out", "", ""), false)
+		for _, c := range ups[0].Update.Content {
+			if c.Type == "diff" {
+				t.Fatalf("bash should not emit a diff block: %+v", ups[0].Update.Content)
+			}
+		}
+	})
+
+	t.Run("edit with no filePath yields no diff block", func(t *testing.T) {
+		if d := toolDiffBlock("edit", ToolState{Input: json.RawMessage(`{"oldString":"a","newString":"b"}`)}); d != nil {
+			t.Fatalf("want nil diff without filePath, got %+v", d)
+		}
+	})
+
+	t.Run("diff block serializes to canonical ACP JSON", func(t *testing.T) {
+		ups := ToolPartUpdates(part("c9", "edit", "completed", `{"filePath":"a.go","oldString":"foo","newString":"bar"}`, "", "", ""), false)
+		b, _ := json.Marshal(ups[0])
+		s := string(b)
+		for _, want := range []string{`"type":"diff"`, `"path":"a.go"`, `"oldText":"foo"`, `"newText":"bar"`} {
+			if !contains(s, want) {
+				t.Fatalf("missing %q in %s", want, s)
+			}
+		}
+	})
+
 	t.Run("creation update serializes to canonical ACP JSON", func(t *testing.T) {
 		b, _ := json.Marshal(ToolPartUpdates(part("c5", "bash", "completed", `{"command":"ls"}`, "ok", "", ""), true)[1])
 		s := string(b)

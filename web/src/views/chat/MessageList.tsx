@@ -13,6 +13,7 @@ const Row = memo(function Row({ item }: { item: Item }) {
         title={item.title}
         status={item.status}
         content={item.content}
+        diff={item.diff}
         rawInput={item.rawInput}
         rawOutput={item.rawOutput}
       />
