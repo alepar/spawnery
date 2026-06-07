@@ -114,7 +114,7 @@ func setupTmuxStack(t *testing.T) (cl cpv1connect.SpawnServiceClient, ctx contex
 		CPURL:         cpSrv.URL,
 		MaxSpawns:     2,
 		AgentImage:    "spawnery/agent:dev",
-		AgentBinaries: []string{"opencode"},
+		AgentBinaries: []string{"opencode", "goose"},
 	})
 
 	// Wait for node to register.
@@ -373,4 +373,45 @@ func truncate(b []byte, n int) []byte {
 		return b
 	}
 	return b[:n]
+}
+
+// TestCPGooseTuiEndToEnd drives the goose-tui path through the dispatcher:
+// - CP + node run in-process with a real Docker backend
+// - node uses spawnery/agent:dev (goose + tmux) and advertises "goose" binary
+// - CreateSpawn selects goose-tui (tmux mode)
+// - the image dispatcher sets GOOSE_PROVIDER=openai, GOOSE_MODEL=$SPAWN_MODEL,
+//   OPENAI_BASE_URL (sidecar), GOOSE_TELEMETRY_OFF=1 and runs goose session in tmux
+// - After ACTIVE, a client opens a Session and asserts >0 raw terminal bytes arrive
+//
+// Requires Docker + spawnery/agent:dev + OPENROUTER_API_KEY in env (or .env at repo root).
+// FAILS loudly (no skips) when the environment is broken.
+func TestCPGooseTuiEndToEnd(t *testing.T) {
+	cl, ctx, appID := setupTmuxStack(t)
+
+	// Create a goose-tui spawn via the dispatcher.
+	cs, err := cl.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId:      appID,
+		Model:      "openai/gpt-4o-mini",
+		Image:      "spawnery/agent:dev",
+		RunnableId: "goose-tui",
+	}))
+	if err != nil {
+		t.Fatalf("CreateSpawn goose-tui: %v", err)
+	}
+	id := cs.Msg.SpawnId
+	t.Logf("goose-tui spawn created: %s", id)
+	t.Cleanup(func() {
+		stopCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+		defer c()
+		_, _ = cl.StopSpawn(stopCtx, connect.NewRequest(&cpv1.StopSpawnRequest{SpawnId: id}))
+		time.Sleep(2 * time.Second)
+	})
+
+	// Wait for ACTIVE — goose + tmux startup can take up to 60s.
+	waitActiveTmux(ctx, t, cl, id)
+	t.Log("goose-tui spawn is ACTIVE, opening Session")
+
+	// Assert raw terminal bytes arrive from the goose TUI via the tmux relay.
+	assertTerminalBytes(t, ctx, cl, id)
+	t.Log("goose-tui terminal bytes confirmed via dispatcher (DONE)")
 }
