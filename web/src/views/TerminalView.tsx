@@ -5,13 +5,14 @@ import "@xterm/xterm/css/xterm.css";
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
 import { DEV_TOKEN } from "@/api/spawnlet";
 import { encodeInput, encodeResize } from "@/term/wire";
+import { BacklogTracker } from "@/term/backlog";
 
 // Per-component client id — TerminalView self-manages its socket (not the App.tsx ACP session).
 const CLIENT_ID = (typeof crypto !== "undefined" && crypto.randomUUID)
   ? crypto.randomUUID()
   : `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-export function TerminalView({ spawnId }: { spawnId: string }) {
+export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024 }: { spawnId: string; backlogThreshold?: number }) {
   const hostRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -24,6 +25,8 @@ export function TerminalView({ spawnId }: { spawnId: string }) {
     term.open(host);
     fit.fit();
 
+    const backlog = new BacklogTracker(backlogThreshold);
+
     const sock = new ReconnectingSocket(`ws://${location.host}/ws/session`, {
       onOpen: () => {
         sock.send(JSON.stringify({ spawnId, clientId: CLIENT_ID, token: DEV_TOKEN, cursor: 0 }));
@@ -32,7 +35,14 @@ export function TerminalView({ spawnId }: { spawnId: string }) {
       },
       onDown: () => {},
       onMessage: (data: ArrayBuffer | string) => {
-        term.write(typeof data === "string" ? data : new Uint8Array(data));
+        const bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
+        const n = bytes.length;
+        const before = backlog.wedges;
+        backlog.onWrite(n);
+        term.write(bytes, () => backlog.onAck(n));
+        if (backlog.wedges > before) {
+          console.warn(`terminal backlog wedge: spawn=${spawnId} outstanding=${backlog.outstanding}B wedges=${backlog.wedges}`);
+        }
       },
     });
 
