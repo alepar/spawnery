@@ -142,6 +142,21 @@ func (a *Adapter) handleNewSession(srv *acp.Server, m acp.Message) {
 		a.setSession(sid)
 	}
 	_ = srv.Respond(id, map[string]any{"sessionId": sid})
+	// opencode exposes its slash commands synchronously (GET /command), not via an event, so emit the
+	// ACP available_commands_update once here — right after the session is ready (cat E). It rides the
+	// node's frame seq-log, so a reconnecting web client replays it and still sees the command set.
+	go a.emitAvailableCommands(srv, sid)
+}
+
+// emitAvailableCommands fetches opencode's advertised slash commands and forwards them to the node as a
+// single ACP available_commands_update. A fetch error or an empty list emits nothing — a non-advertising
+// agent simply yields no `/`-menu (graceful absence).
+func (a *Adapter) emitAvailableCommands(srv *acp.Server, sid string) {
+	cmds, err := a.oc.ListCommands()
+	if err != nil || len(cmds) == 0 {
+		return
+	}
+	_ = srv.Notify("session/update", CommandsToACP(sid, cmds))
 }
 
 // setSession records the opencode session id in memory and to the session file (for spawn-tui).

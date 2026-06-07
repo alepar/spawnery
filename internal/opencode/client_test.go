@@ -85,6 +85,34 @@ func TestEventsStreamsPromptSequence(t *testing.T) {
 	}
 }
 
+func TestListCommands(t *testing.T) {
+	f := NewFake("/app")
+	defer f.Close()
+	c := New(f.URL)
+
+	// Empty by default -> an agent with no commands returns an empty list (graceful absence).
+	cmds, err := c.ListCommands()
+	if err != nil {
+		t.Fatalf("list commands: %v", err)
+	}
+	if len(cmds) != 0 {
+		t.Fatalf("expected no commands by default, got %+v", cmds)
+	}
+
+	f.SetCommands([]Command{
+		{Name: "init", Description: "guided setup", Hints: []string{"$ARGUMENTS"}, Source: "command"},
+		{Name: "review", Description: "review changes", Source: "command"},
+	})
+	cmds, err = c.ListCommands()
+	if err != nil {
+		t.Fatalf("list commands: %v", err)
+	}
+	if len(cmds) != 2 || cmds[0].Name != "init" || cmds[0].Description != "guided setup" ||
+		len(cmds[0].Hints) != 1 || cmds[0].Hints[0] != "$ARGUMENTS" || cmds[1].Name != "review" {
+		t.Fatalf("bad command list: %+v", cmds)
+	}
+}
+
 func TestAbortRecorded(t *testing.T) {
 	f := NewFake("/app")
 	defer f.Close()

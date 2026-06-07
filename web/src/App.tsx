@@ -5,7 +5,7 @@ import {
   DEV_TOKEN, type SpawnView,
 } from "./api/spawnlet";
 import { Conn } from "./acp/conn";
-import { encodePrompt, encodePermResponse, type Frame } from "./acp/frames";
+import { encodePrompt, encodePermResponse, type Frame, type Command } from "./acp/frames";
 import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
 import { ReconnectingSocket } from "./shell/reconnectingSocket";
@@ -33,6 +33,7 @@ export function App() {
   const [items, setItems] = useState<Item[]>([]);
   const [turn, setTurn] = useState<TurnState>({ state: "idle", queued: 0 });
   const [perm, setPerm] = useState<PermPrompt | null>(null);
+  const [commands, setCommands] = useState<Command[]>([]); // advertised slash commands for the active spawn (cat E)
   const [spawns, setSpawns] = useState<SpawnView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
 
@@ -42,6 +43,7 @@ export function App() {
   const genRef = useRef(0);
   const buffersRef = useRef<Map<string, Item[]>>(new Map());
   const turnsRef = useRef<Map<string, TurnState>>(new Map());
+  const commandsRef = useRef<Map<string, Command[]>>(new Map()); // per-spawn command set (cat E)
   // refs mirroring state so async callbacks (poll, ws onopen, onHistory) don't read stale closures.
   const activeIdRef = useRef<string | null>(null);
   const spawnsRef = useRef<SpawnView[]>([]);
@@ -102,6 +104,15 @@ export function App() {
         // item's entries (see lib/plan.ts). No plan ever -> no plan item -> nothing renders.
         setItems((xs) => upsertPlanItems(xs, f.plan ?? [], () => idRef.current++));
         break;
+      case "commands": {
+        // Replace-in-place: the frame carries the WHOLE current command set. Stash it per-spawn (so a
+        // later spawn-switch restores it) and surface it to the active prompt box's `/`-menu. No
+        // commands frame ever (e.g. goose) -> the set stays [] -> the menu is inert (cat E).
+        const cmds = f.cmds ?? [];
+        commandsRef.current.set(spawnId, cmds);
+        setCommands(cmds);
+        break;
+      }
       case "turn": {
         const t: TurnState = { state: f.state ?? "idle", queued: f.queued ?? 0, reason: f.reason, error: f.error, usage: f.usage };
         setTurn(t);
@@ -159,7 +170,9 @@ export function App() {
           closeSession();
           setActiveId(null); activeIdRef.current = null; setItems([]);
           setTurn({ state: "idle", queued: 0 });
+          setCommands([]);
           turnsRef.current.delete(aid);
+          commandsRef.current.delete(aid);
           break;
         case "open":
           if (active?.mode !== "tmux") openSession(aid); // just became active -> connect (green); tmux spawns self-manage via TerminalView
@@ -214,6 +227,7 @@ export function App() {
       return [];
     });
     setTurn({ state: "idle", queued: 0 });
+    setCommands([]); // new spawn: its command set arrives via the next `commands` frame
     waiting(); // grey-pulse until the node signals active; the poll then opens the ws
     try {
       const id = await createSpawn(appId, MODEL, image, runnableId); // async CP: returns immediately, status 'starting'
@@ -244,6 +258,9 @@ export function App() {
       return buf;
     });
     setTurn(turnsRef.current.get(id) ?? { state: "idle", queued: 0 });
+    // An active spawn replays from cursor 0, so its `commands` frame re-arrives; seed from the cache
+    // meanwhile (and it's the only source for a non-active, non-replaying spawn).
+    setCommands(commandsRef.current.get(id) ?? []);
     if (sp?.status === "active" && sp.mode !== "tmux") openSession(id);
     else if (sp?.status === "active" && sp.mode === "tmux") connecting(); // tmux: TerminalView's socket drives the dot from here
     else if (sp?.status === "starting") waiting();
@@ -260,11 +277,13 @@ export function App() {
     try {
       await suspendSpawn(id);
       buffersRef.current.delete(id); // resumed spawns start fresh — drop the stale cached transcript
+      commandsRef.current.delete(id);
       // keep the spawn selected (unlike onStop) — the user stays on its now-empty suspended view.
       if (activeIdRef.current === id) {
         closeSession();
         setItems([]);
         setTurn({ state: "idle", queued: 0 });
+        setCommands([]);
         turnsRef.current.delete(id);
       }
     } catch (e: any) { toast.error("Suspend failed: " + e.message); }
@@ -283,7 +302,8 @@ export function App() {
     try { await deleteSpawn(id); } catch (e: any) { toast.error("Stop failed: " + e.message); }
     buffersRef.current.delete(id);
     turnsRef.current.delete(id);
-    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setTurn({ state: "idle", queued: 0 }); }
+    commandsRef.current.delete(id);
+    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setTurn({ state: "idle", queued: 0 }); setCommands([]); }
     refreshSpawns();
   };
 
@@ -306,6 +326,7 @@ export function App() {
       canSend={conn === "connected" && turn.queued < MAX_QUEUED}
       onSend={onSend}
       perm={perm}
+      commands={commands}
       onSpawnApp={spawnApp}
       spawns={spawns}
       activeId={activeId}

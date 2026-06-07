@@ -24,6 +24,7 @@ type Fake struct {
 	aborts      []string       // session IDs aborted
 	pendingErr  string         // if set, emitted as a session.error before idle by the next scriptPrompt
 	pendingStep []stepScript   // step-finish parts emitted before idle by the next scriptPrompt (cat D)
+	commands    []Command      // advertised slash commands returned by GET /command (cat E)
 }
 
 // stepScript is one scripted step-finish part (per-turn token usage + cost) to emit before idle.
@@ -64,6 +65,14 @@ func NewFake(dir string) *Fake {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(f.sessions)
+	})
+
+	// /command: the advertised slash-command list (cat E). Empty by default; SetCommands seeds it.
+	mux.HandleFunc("/command", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		cmds := append([]Command(nil), f.commands...)
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(cmds)
 	})
 
 	// /event SSE: register a subscriber channel; stream until the request ends.
@@ -216,6 +225,13 @@ func (f *Fake) EmitTodoUpdated(sid, todosJSON string) {
 // EmitPermissionAsked emits a permission.asked event for a session.
 func (f *Fake) EmitPermissionAsked(sid, permID string) {
 	f.Emit("permission.asked", fmt.Sprintf(`{"id":%q,"sessionID":%q,"permission":"bash","patterns":[],"metadata":{},"always":[],"tool":{"messageID":"msg_1","callID":"c1"}}`, permID, sid))
+}
+
+// SetCommands seeds the slash-command list returned by GET /command (cat E).
+func (f *Fake) SetCommands(cmds []Command) {
+	f.mu.Lock()
+	f.commands = cmds
+	f.mu.Unlock()
 }
 
 // PermResponses returns the recorded permission answers.

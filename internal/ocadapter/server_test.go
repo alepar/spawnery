@@ -222,6 +222,47 @@ func TestAdapterEmitsPlanFromTodoUpdated(t *testing.T) {
 	})
 }
 
+// After session/new the adapter must emit an ACP available_commands_update carrying opencode's
+// advertised slash commands, so the web can build a `/`-autocomplete menu (cat E).
+func TestAdapterEmitsAvailableCommands(t *testing.T) {
+	h := newHarness(t)
+	h.fake.SetCommands([]opencode.Command{
+		{Name: "init", Description: "guided setup", Hints: []string{"$ARGUMENTS"}, Source: "command"},
+		{Name: "review", Description: "review changes", Source: "command"},
+	})
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	h.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/app"}}`)
+	h.await(t, idIs(2))
+
+	h.await(t, func(m acp.Message, line string) bool {
+		return m.Method == "session/update" &&
+			strings.Contains(line, `"sessionUpdate":"available_commands_update"`) &&
+			strings.Contains(line, `"name":"init"`) && strings.Contains(line, `"hint":"$ARGUMENTS"`) &&
+			strings.Contains(line, `"name":"review"`)
+	})
+}
+
+// An agent advertising NO commands must emit no available_commands_update (graceful absence): a prompt
+// turn still completes normally and never produces a commands notification.
+func TestAdapterOmitsCommandsWhenNone(t *testing.T) {
+	h := newHarness(t)
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	h.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/app"}}`)
+	h.await(t, idIs(2))
+	h.send(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"ses_fake1","prompt":[{"type":"text","text":"hi"}]}}`)
+	// The turn-end response arrives; no available_commands_update should have been sent before it.
+	m := h.await(t, func(m acp.Message, line string) bool {
+		if strings.Contains(line, "available_commands_update") {
+			t.Fatalf("no commands advertised -> no available_commands_update, got %s", line)
+		}
+		id, ok := m.ID.AsInt()
+		return ok && id == 3
+	})
+	_ = m
+}
+
 func TestAdapterCancelAborts(t *testing.T) {
 	h := newHarness(t)
 	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)

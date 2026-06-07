@@ -104,8 +104,25 @@ func TestUpdateToFrame(t *testing.T) {
 			ok:     true,
 		},
 		{
+			name: "available_commands_update -> Frame.Cmds (name/description/input hint)",
+			params: `{"update":{"sessionUpdate":"available_commands_update","availableCommands":[` +
+				`{"name":"init","description":"guided setup","input":{"hint":"$ARGUMENTS"}},` +
+				`{"name":"review","description":"review changes"}]}}`,
+			want: Frame{Kind: "commands", Cmds: []Command{
+				{Name: "init", Description: "guided setup", InputHint: "$ARGUMENTS"},
+				{Name: "review", Description: "review changes"},
+			}},
+			ok: true,
+		},
+		{
+			name:   "empty available_commands_update -> Frame.Cmds nil (clears the prior set)",
+			params: `{"update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}`,
+			want:   Frame{Kind: "commands"},
+			ok:     true,
+		},
+		{
 			name:   "unknown update kind dropped",
-			params: `{"update":{"sessionUpdate":"available_commands_update"}}`,
+			params: `{"update":{"sessionUpdate":"session_info_update"}}`,
 			want:   Frame{},
 			ok:     false,
 		},

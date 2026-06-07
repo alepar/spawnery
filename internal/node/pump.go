@@ -377,7 +377,8 @@ func updateToFrame(params json.RawMessage) (Frame, bool) {
 			Status        string          `json:"status"`
 			RawInput      json.RawMessage `json:"rawInput"`
 			RawOutput     json.RawMessage `json:"rawOutput"`
-			Entries       json.RawMessage `json:"entries"` // plan (cat C): the FULL current plan list
+			Entries       json.RawMessage `json:"entries"`           // plan (cat C): the FULL current plan list
+			Commands      json.RawMessage `json:"availableCommands"` // commands (cat E): the FULL current command set
 		} `json:"update"`
 	}
 	if json.Unmarshal(params, &u) != nil {
@@ -405,8 +406,47 @@ func updateToFrame(params json.RawMessage) (Frame, bool) {
 		// The agent's full current plan/todo list (cat C). Replace-in-place is the client's job: each
 		// `plan` update carries the WHOLE list, so the web swaps its prior plan for this one.
 		return Frame{Kind: "plan", Plan: planEntries(up.Entries)}, true
+	case "available_commands_update":
+		// The agent's advertised slash commands (cat E). Replace-in-place: the update carries the WHOLE
+		// command set. This frame is logged in the seq-log (not transient), so a reconnecting client
+		// replays it and still sees the `/`-menu without the agent having to re-advertise.
+		return Frame{Kind: "commands", Cmds: commandList(up.Commands)}, true
 	}
 	return Frame{}, false
+}
+
+// commandList decodes an ACP available_commands_update's `availableCommands` array into Frame commands.
+// A missing/garbled array (or one whose entries all lack a name) yields a nil slice (the client clears
+// its prior command set / renders no `/`-menu). Each command's free-form input hint rides `input.hint`.
+func commandList(raw json.RawMessage) []Command {
+	if len(raw) == 0 {
+		return nil
+	}
+	var arr []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Input       *struct {
+			Hint string `json:"hint"`
+		} `json:"input"`
+	}
+	if json.Unmarshal(raw, &arr) != nil || len(arr) == 0 {
+		return nil
+	}
+	out := make([]Command, 0, len(arr))
+	for _, c := range arr {
+		if c.Name == "" {
+			continue // a nameless command is not invokable
+		}
+		cmd := Command{Name: c.Name, Description: c.Description}
+		if c.Input != nil {
+			cmd.InputHint = c.Input.Hint
+		}
+		out = append(out, cmd)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // planEntries decodes an ACP plan update's `entries` array into Frame plan entries. A missing/garbled

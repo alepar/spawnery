@@ -3,6 +3,8 @@ package ocadapter
 import (
 	"encoding/json"
 	"testing"
+
+	"spawnery/internal/opencode"
 )
 
 func TestParsePartUpdatedAndKind(t *testing.T) {
@@ -73,6 +75,35 @@ func TestPermissionOptionsAndMapping(t *testing.T) {
 		ACPOptionIDToOpencodeResponse("allow_always") != "always" ||
 		ACPOptionIDToOpencodeResponse("reject_once") != "reject" {
 		t.Fatal("optionId -> opencode response mapping wrong")
+	}
+}
+
+func TestCommandsToACP(t *testing.T) {
+	p := CommandsToACP("ses_1", []opencode.Command{
+		{Name: "init", Description: "guided setup", Hints: []string{"$ARGUMENTS"}, Source: "command"},
+		{Name: "review", Description: "review changes", Source: "command"},
+		{Name: "", Description: "nameless dropped"}, // a nameless command is not invokable -> dropped
+	})
+	if p.SessionID != "ses_1" || p.Update.SessionUpdate != "available_commands_update" {
+		t.Fatalf("bad params envelope: %+v", p)
+	}
+	if len(p.Update.AvailableCommands) != 2 {
+		t.Fatalf("nameless command should be dropped, got %+v", p.Update.AvailableCommands)
+	}
+	c0 := p.Update.AvailableCommands[0]
+	if c0.Name != "init" || c0.Description != "guided setup" || c0.Input == nil || c0.Input.Hint != "$ARGUMENTS" {
+		t.Fatalf("bad first command: %+v (input %+v)", c0, c0.Input)
+	}
+	c1 := p.Update.AvailableCommands[1]
+	if c1.Name != "review" || c1.Input != nil {
+		t.Fatalf("a command with no hints must omit input: %+v", c1)
+	}
+	// The marshalled shape must carry availableCommands[].name and the nested input.hint.
+	b, _ := json.Marshal(p)
+	s := string(b)
+	if !contains(s, `"sessionUpdate":"available_commands_update"`) || !contains(s, `"name":"init"`) ||
+		!contains(s, `"hint":"$ARGUMENTS"`) {
+		t.Fatalf("bad available_commands_update json: %s", s)
 	}
 }
 

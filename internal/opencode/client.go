@@ -111,6 +111,34 @@ func (c *Client) DiscoverOrCreateSession(dir, title string) (string, error) {
 	return s.ID, nil
 }
 
+// Command is the subset of an opencode command object we use (GET /command, opencode 1.15.13). A
+// command is a reusable slash-command/skill/MCP prompt: name + description, an optional template, and
+// argument `hints` (e.g. ["$ARGUMENTS"]) surfaced as the ACP input hint. source is command|mcp|skill.
+type Command struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Hints       []string `json:"hints"`
+	Source      string   `json:"source"`
+}
+
+// ListCommands returns the slash commands the server advertises (GET /command). Used to surface
+// opencode's command set to the web as an ACP available_commands_update right after session start.
+func (c *Client) ListCommands() ([]Command, error) {
+	resp, err := c.hc.Get(c.base + "/command")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("list commands: %s", resp.Status)
+	}
+	var cmds []Command
+	if err := json.NewDecoder(resp.Body).Decode(&cmds); err != nil {
+		return nil, err
+	}
+	return cmds, nil
+}
+
 // PromptAsync sends a text prompt without waiting; results arrive via SSE.
 // model is "providerID/modelID"; if empty, opencode uses its configured default.
 func (c *Client) PromptAsync(sessionID, text, model string) error {

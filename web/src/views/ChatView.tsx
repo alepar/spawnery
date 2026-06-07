@@ -2,15 +2,17 @@ import { MessageList } from "./chat/MessageList";
 import { PromptInput } from "./chat/PromptInput";
 import { PermissionModal } from "./chat/PermissionModal";
 import type { Item, TurnState, PermPrompt } from "./chat/types";
+import type { Command } from "@/acp/frames";
 import { turnEndLabel, usageBadge } from "@/lib/turn";
 
-export function ChatView({ items, turn, canSend, onSend, perm, focusKey }: {
+export function ChatView({ items, turn, canSend, onSend, perm, focusKey, commands }: {
   items: Item[];
   turn: TurnState;
   canSend: boolean;
   onSend: (t: string) => void;
   perm: PermPrompt | null;
   focusKey?: string | null;
+  commands?: Command[];
 }) {
   return (
     <div className="flex h-full flex-col">
@@ -21,7 +23,7 @@ export function ChatView({ items, turn, canSend, onSend, perm, focusKey }: {
         endLabel={turn.state === "idle" ? turnEndLabel(turn) : null}
         usageLabel={turn.state === "idle" ? usageBadge(turn.usage) : null}
       />
-      <PromptInput disabled={!canSend} onSend={onSend} focusKey={focusKey} />
+      <PromptInput disabled={!canSend} onSend={onSend} focusKey={focusKey} commands={commands} />
       {perm && <PermissionModal title={perm.title} options={perm.options} onResolve={perm.resolve} />}
     </div>
   );

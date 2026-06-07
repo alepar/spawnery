@@ -6,6 +6,8 @@ package ocadapter
 import (
 	"encoding/json"
 	"strings"
+
+	"spawnery/internal/opencode"
 )
 
 // --- opencode event payloads (verified against opencode 1.15.13 /doc) -------
@@ -314,6 +316,58 @@ func todoPriorityToACP(priority string) string {
 		return priority
 	default:
 		return "medium"
+	}
+}
+
+// --- slash commands (cat E, sp-ufz.11) --------------------------------------
+// opencode advertises its reusable slash commands (built-in commands, skills, MCP prompts) via
+// GET /command. We map the whole list to ONE ACP `available_commands_update` session/update, emitted
+// once right after session start, so the web can offer a `/`-autocomplete menu. Each command carries a
+// name, an optional description, and an optional input hint (opencode's `hints`, e.g. ["$ARGUMENTS"]).
+
+// ACPCommandsParams is the params of an `available_commands_update` session/update notification.
+type ACPCommandsParams struct {
+	SessionID string            `json:"sessionId"`
+	Update    ACPCommandsUpdate `json:"update"`
+}
+
+// ACPCommandsUpdate is the `update` body of an available_commands_update. availableCommands is the FULL
+// current command set; the client replaces its prior set in place (it never appends).
+type ACPCommandsUpdate struct {
+	SessionUpdate     string                `json:"sessionUpdate"` // always "available_commands_update"
+	AvailableCommands []ACPAvailableCommand `json:"availableCommands"`
+}
+
+// ACPAvailableCommand is one advertised slash command (ACP AvailableCommand shape).
+type ACPAvailableCommand struct {
+	Name        string                    `json:"name"`
+	Description string                    `json:"description,omitempty"`
+	Input       *ACPAvailableCommandInput `json:"input,omitempty"`
+}
+
+// ACPAvailableCommandInput carries the command's free-form argument hint (ACP unstructured input).
+type ACPAvailableCommandInput struct {
+	Hint string `json:"hint,omitempty"`
+}
+
+// CommandsToACP normalizes opencode's command list into the ACP `available_commands_update` to emit.
+// The whole set rides one notification (replace-in-place). Commands with no name are dropped (a nameless
+// command is not invokable); the input hint is opencode's `hints` joined with a space (absent -> no input).
+func CommandsToACP(sessionID string, cmds []opencode.Command) ACPCommandsParams {
+	out := make([]ACPAvailableCommand, 0, len(cmds))
+	for _, c := range cmds {
+		if c.Name == "" {
+			continue
+		}
+		ac := ACPAvailableCommand{Name: c.Name, Description: c.Description}
+		if hint := strings.TrimSpace(strings.Join(c.Hints, " ")); hint != "" {
+			ac.Input = &ACPAvailableCommandInput{Hint: hint}
+		}
+		out = append(out, ac)
+	}
+	return ACPCommandsParams{
+		SessionID: sessionID,
+		Update:    ACPCommandsUpdate{SessionUpdate: "available_commands_update", AvailableCommands: out},
 	}
 }
 
