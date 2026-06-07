@@ -37,15 +37,18 @@ case "${1:-}" in
     exec spawn-tmux goose session
     ;;
   goose-acp)
-    # goose speaks ACP over stdio (goose acp); the node attaches ACP over TCP (ACP_LISTEN).
-    # acpexec bridges: listen on ACP_LISTEN, accept the node's connection, run `goose acp`
-    # wired to it. Same OpenAI-sidecar provider config as goose-tui (model via the sidecar).
+    # goose speaks ACP over stdio (goose acp); clients attach ACP over TCP (ACP_LISTEN).
+    # acpmux multiplexes: it spawns ONE `goose acp` (single shared session), listens on
+    # ACP_LISTEN, and fans N downstream ACP clients onto that one goose conversation —
+    # the web (via the node pump) and an in-container nori (via acpdial, sp-9xr.12.2) share
+    # one session, with history replay to late joiners, serialized prompts, and broadcast
+    # permissions. Same OpenAI-sidecar provider config as goose-tui (model via the sidecar).
     export GOOSE_PROVIDER="${GOOSE_PROVIDER:-openai}"
     export GOOSE_MODEL="${GOOSE_MODEL:-${SPAWN_MODEL:-openai/gpt-4o-mini}}"
     export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-unused-sidecar-injects-real-key}"
     export GOOSE_TELEMETRY_OFF="${GOOSE_TELEMETRY_OFF:-1}"
     # OPENAI_BASE_URL already set by the node to the sidecar endpoint.
-    exec /usr/local/bin/acpexec goose acp
+    exec /usr/local/bin/acpmux goose acp
     ;;
   claude-tui)
     export TERM="${TERM:-xterm-256color}"
