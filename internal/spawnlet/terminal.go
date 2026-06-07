@@ -118,9 +118,13 @@ func moshServerArgs(advertiseIP string, child []string) []string {
 
 // ExecPrefixFor returns the runtime exec invocation for a lane. runsc/CRI uses crictl; the Docker
 // (runc) lane uses the docker CLI. -it gives the in-container process a TTY (tmux/shell need one;
-// mosh supplies the outer PTY). TERM + LANG/LC_ALL are forwarded so full-screen programs (the
-// opencode TUI, a shell's editor) render correctly and box/line-drawing glyphs are UTF-8 (─│●),
-// not ACS q/x or the ASCII _ fallback (sp-9xr.18).
+// mosh supplies the outer PTY). TERM + LANG/LC_ALL are INJECTED with fixed values — we force the
+// in-container locale to C.UTF-8 rather than forwarding the client's LANG/LC_ALL on purpose: the
+// agent image ships only C.UTF-8 (no `locales` package), so a forwarded en_US.UTF-8 etc. would fail
+// to resolve and glibc would fall back to POSIX, reintroducing the broken glyphs. Only the UTF-8
+// charset matters for rendering, which C.UTF-8 provides — full-screen programs (the opencode TUI, a
+// shell's editor) then draw box/line-drawing glyphs as UTF-8 (─│●), not ACS q/x or the ASCII _
+// fallback (sp-9xr.18). (mosh separately requires the CLIENT's local locale to be UTF-8.)
 //
 // crictl's `exec` has no env-injection flag (`-e` there means --ignore-errors), so the runsc lane
 // relies on the image ENV (LANG/LC_ALL=C.UTF-8 baked in the Dockerfile) for the UTF-8 locale.
