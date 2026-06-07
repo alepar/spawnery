@@ -5,18 +5,23 @@ test.beforeEach(async ({ request }) => { await clearSpawns(request); });
 
 async function gotoApp(page: Page) {
   await page.goto("/");
-  await expect(page.getByTestId("marketplace")).toBeVisible({ timeout: 20_000 });
+  await expect(page).toHaveURL(/\/templates$/);
+  await expect(page.getByTestId("templates")).toBeVisible({ timeout: 20_000 });
 }
 
-// Spawn the seeded Secret App from the Marketplace WITHOUT reloading the page (preserves the
-// client-side transcript buffer across instances). Call gotoApp first.
-async function spawnFromMarket(page: Page) {
-  await page.getByTestId("nav-market").click();
+// Spawn the seeded Secret App from the Templates view WITHOUT reloading the page (preserves the
+// client-side transcript buffer across instances). Call gotoApp first. After spawning, the shell is
+// on the new spawn's chat (/spawn/<id>).
+async function spawnFromTemplates(page: Page) {
+  await page.getByTestId("nav-templates").click();
+  await expect(page).toHaveURL(/\/templates$/);
   const card = page.getByTestId("app-card-spawnery/secret-app");
   await expect(card).toBeVisible({ timeout: 20_000 });
   await card.click();
+  await expect(page).toHaveURL(/\/templates\/spawnery%2Fsecret-app$/);
   await expect(page.getByTestId("spawn-btn")).toBeVisible({ timeout: 10_000 });
   await page.getByTestId("spawn-btn").click();
+  await expect(page).toHaveURL(/\/spawn\/[^/]+$/);
   await expect(page.getByTestId("status")).toContainText("connected", { timeout: 40_000 });
 }
 
@@ -27,8 +32,8 @@ function rowByName(page: Page, name: string) {
 
 test("two instances of the same app coexist with distinct names + active dots", async ({ page }) => {
   await gotoApp(page);
-  await spawnFromMarket(page);
-  await spawnFromMarket(page);
+  await spawnFromTemplates(page);
+  await spawnFromTemplates(page);
   await expect(rowByName(page, "Secret App 2")).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('[data-testid^="spawn-row-"]')).toHaveCount(2);
   await expect.poll(
@@ -39,7 +44,7 @@ test("two instances of the same app coexist with distinct names + active dots", 
 
 test("rename a spawn from the sidebar", async ({ page }) => {
   await gotoApp(page);
-  await spawnFromMarket(page);
+  await spawnFromTemplates(page);
   const r = rowByName(page, "Secret App");
   await r.locator('[data-testid^="spawn-kebab-"]').click();
   await r.locator('[data-testid^="spawn-rename-"]').click();
@@ -53,7 +58,7 @@ test("rename a spawn from the sidebar", async ({ page }) => {
 
 test("suspend then resume a spawn", async ({ page }) => {
   await gotoApp(page);
-  await spawnFromMarket(page);
+  await spawnFromTemplates(page);
   const r = rowByName(page, "Secret App");
   await r.locator('[data-testid^="spawn-kebab-"]').click();
   await r.locator('[data-testid^="spawn-suspend-"]').click();
@@ -71,7 +76,7 @@ test("suspend then resume a spawn", async ({ page }) => {
 
 test("stop removes the spawn from the list", async ({ page }) => {
   await gotoApp(page);
-  await spawnFromMarket(page);
+  await spawnFromTemplates(page);
   await expect(page.locator('[data-testid^="spawn-row-"]')).toHaveCount(1);
   const r = rowByName(page, "Secret App");
   await r.locator('[data-testid^="spawn-kebab-"]').click();
@@ -82,12 +87,12 @@ test("stop removes the spawn from the list", async ({ page }) => {
 
 test("switching between two spawns restores each transcript", async ({ page }) => {
   await gotoApp(page);
-  await spawnFromMarket(page); // instance 1 active
+  await spawnFromTemplates(page); // instance 1 active
   await page.getByTestId("prompt-input").fill("say one");
   await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
 
-  await spawnFromMarket(page); // instance 2 active (no reload) — spawnApp must save instance 1's buffer
+  await spawnFromTemplates(page); // instance 2 active (no reload) — spawnApp must save instance 1's buffer
   await expect(page.locator('[data-role="agent"]')).toHaveCount(0);
   await page.getByTestId("prompt-input").fill("say two");
   await page.getByTestId("prompt-input").press("Enter");
@@ -101,32 +106,74 @@ test("switching between two spawns restores each transcript", async ({ page }) =
 
 test("conversation history survives a browser reload (node replay)", async ({ page }) => {
   await gotoApp(page);
-  await spawnFromMarket(page);
+  await spawnFromTemplates(page);
   await page.getByTestId("prompt-input").fill("say one");
   await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
 
-  // Reload wipes the client-side transcript buffer; the node must replay the transcript.
-  await page.reload();
-  await expect(page.getByTestId("marketplace")).toBeVisible({ timeout: 20_000 });
+  // The shell is on the spawn's chat after spawning; capture its deep-link URL.
+  await expect(page).toHaveURL(/\/spawn\/[^/]+$/);
+  const spawnUrl = page.url();
 
-  // Re-open the spawn from the sidebar (its name defaults to the app display name "Secret App").
-  await rowByName(page, "Secret App").locator('[data-testid^="spawn-select-"]').click();
+  // Reload wipes the client-side transcript buffer; the URL is the source of truth, so the same
+  // /spawn/<id> view must re-bind on refresh and the node replays the transcript — no manual reopen.
+  await page.reload();
+  await expect(page).toHaveURL(spawnUrl);
 
   // On reconnect the pump replays its frame log from cursor 0 (a reset frame then the logged
   // frames) -> the prior transcript is restored.
+  await expect(page.getByTestId("status")).toContainText("connected", { timeout: 40_000 });
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
   await expect(page.locator('[data-role="user"]')).toContainText("one");
 });
 
+// Deep-link stability: a /spawn/<id> URL must cold-load straight onto that spawn's chat view (the
+// right pane re-binds from the URL alone), proving refresh/bookmark/deep-link works.
+test("deep-linking a /spawn/<id> URL cold-loads onto that spawn", async ({ page }) => {
+  await gotoApp(page);
+  await spawnFromTemplates(page);
+
+  // Capture the spawn's URL + title, then navigate there fresh (a cold page.goto, not a reload).
+  await expect(page).toHaveURL(/\/spawn\/[^/]+$/);
+  const spawnUrl = page.url();
+  await expect(page).toHaveTitle("Spawnery — Secret App");
+
+  await page.goto(spawnUrl);
+  await expect(page).toHaveURL(spawnUrl);
+  // The right pane re-binds from the URL: status reconnects and the chat input renders.
+  await expect(page.getByTestId("status")).toContainText("connected", { timeout: 40_000 });
+  await expect(page.getByTestId("prompt-input")).toBeVisible();
+  // Title resolves back to the spawn's name once the spawns poll lands.
+  await expect(page).toHaveTitle("Spawnery — Secret App");
+});
+
+// Browser Back/Forward across the Templates -> spawn boundary.
+test("browser back/forward moves between Templates and a spawn", async ({ page }) => {
+  await gotoApp(page);
+  await spawnFromTemplates(page); // now on /spawn/<id>
+  await expect(page).toHaveURL(/\/spawn\/[^/]+$/);
+  const spawnUrl = page.url();
+
+  // Back: the spawn flow pushed templates -> app-detail -> spawn, so one goBack lands on the app
+  // Detail (the page right before the spawn was created).
+  await page.goBack();
+  await expect(page).toHaveURL(/\/templates\/spawnery%2Fsecret-app$/);
+  await expect(page.getByTestId("spawn-btn")).toBeVisible({ timeout: 10_000 });
+
+  // Forward: advance back onto the spawn's chat, which re-binds and reconnects.
+  await page.goForward();
+  await expect(page).toHaveURL(spawnUrl);
+  await expect(page.getByTestId("status")).toContainText("connected", { timeout: 40_000 });
+});
+
 test("suspending a non-active spawn clears its cached transcript", async ({ page }) => {
   await gotoApp(page);
-  await spawnFromMarket(page); // instance 1 active
+  await spawnFromTemplates(page); // instance 1 active
   await page.getByTestId("prompt-input").fill("say one");
   await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
 
-  await spawnFromMarket(page); // instance 2 active (no reload) — instance 1 is now non-active, buffer saved
+  await spawnFromTemplates(page); // instance 2 active (no reload) — instance 1 is now non-active, buffer saved
   await expect(page.locator('[data-role="agent"]')).toHaveCount(0);
 
   // Suspend instance 1 (NOT the active spawn) from its sidebar kebab.
@@ -147,7 +194,7 @@ test("suspending a non-active spawn clears its cached transcript", async ({ page
 
 test("suspending the active spawn clears its on-screen transcript", async ({ page }) => {
   await gotoApp(page);
-  await spawnFromMarket(page);
+  await spawnFromTemplates(page);
   await page.getByTestId("prompt-input").fill("say one");
   await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
@@ -169,16 +216,18 @@ test("suspending the active spawn clears its on-screen transcript", async ({ pag
 // agent added to the e2e lane. Making it spec-compliant (node owns one session) is sp-r7t.
 test("a reconnected spawn still serves new prompts (repeated initialize tolerated)", async ({ page }) => {
   await gotoApp(page);
-  await spawnFromMarket(page);
+  await spawnFromTemplates(page);
   await page.getByTestId("prompt-input").fill("say one");
   await page.getByTestId("prompt-input").press("Enter");
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
 
-  // Reload + reopen -> fresh ACP handshake against the same still-running agent. Reaching "connected"
-  // proves the repeated `initialize`/`session/new` did NOT error.
+  // Reload on the spawn's URL -> fresh ACP handshake against the same still-running agent. The URL is
+  // authoritative, so the spawn re-binds from it (no manual reopen). Reaching "connected" proves the
+  // repeated `initialize`/`session/new` did NOT error.
+  const spawnUrl = page.url();
+  await expect(page).toHaveURL(/\/spawn\/[^/]+$/);
   await page.reload();
-  await expect(page.getByTestId("marketplace")).toBeVisible({ timeout: 20_000 });
-  await rowByName(page, "Secret App").locator('[data-testid^="spawn-select-"]').click();
+  await expect(page).toHaveURL(spawnUrl);
   await expect(page.getByTestId("status")).toContainText("connected", { timeout: 40_000 });
 
   // A NEW turn on the reconnected session must work end-to-end. Scope to the new bubble: by now the

@@ -113,4 +113,25 @@ describe("App URL-authoritative nav", () => {
     renderAt("/spawn/ghost");
     await waitFor(() => expect(document.title).toBe("Spawnery — ghost"));
   });
+
+  // Browser back/forward drives wouter's location store from OUTSIDE React (a popstate). A single
+  // mounted App must react to that external location change: re-render the right section AND re-derive
+  // the title. memoryLocation.navigate() emits exactly that out-of-band store update.
+  it("reacts to an external location change (back/forward popstate) — title + binding follow the URL", async () => {
+    const mem = memoryLocation({ path: "/settings", record: true });
+    renderWith(mem.hook);
+    await waitFor(() => expect(document.title).toBe("Spawnery — Settings"));
+    // No spawn bound on /settings.
+    expect(sockets.some((s) => s.url.includes("/ws/session"))).toBe(false);
+
+    // Simulate forward to the active spawn (out-of-band, like the browser advancing history).
+    mem.navigate("/spawn/s1");
+    await waitFor(() => expect(document.title).toBe("Spawnery — My Spawn"));
+    // The reconciliation effect re-binds s1 and opens its session ws.
+    await waitFor(() => expect(sockets.some((s) => s.url.includes("/ws/session"))).toBe(true));
+
+    // Simulate back to settings again: the title re-derives off the section.
+    mem.navigate("/settings");
+    await waitFor(() => expect(document.title).toBe("Spawnery — Settings"));
+  });
 });
