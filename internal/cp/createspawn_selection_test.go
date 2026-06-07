@@ -16,16 +16,23 @@ func seedCatalogGoose(t *testing.T, s *Server, image string) {
 	s.upsertAgentCatalog(context.Background(), []string{image}, []string{"goose"})
 }
 
-func TestCreateSpawnRejectsTmuxMode(t *testing.T) {
+func TestCreateSpawnAcceptsTmux(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	seedCatalogGoose(t, s, "img:1")
 	ctx := auth.WithOwner(context.Background(), "alice")
 
-	_, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
 		AppId: "secret-app", Model: "m", Image: "img:1", RunnableId: "goose-tui",
 	}))
-	if connect.CodeOf(err) != connect.CodeUnimplemented {
-		t.Fatalf("want CodeUnimplemented for tmux mode, got %v (err=%v)", connect.CodeOf(err), err)
+	if err != nil {
+		t.Fatalf("tmux create should be accepted now, got: %v", err)
+	}
+	got, err := s.st.Spawns().Get(context.Background(), resp.Msg.SpawnId)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Mode != "tmux" || got.RunnableID != "goose-tui" {
+		t.Fatalf("tmux selection not persisted: mode=%q runnable=%q", got.Mode, got.RunnableID)
 	}
 }
 

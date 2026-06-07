@@ -254,9 +254,6 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 		if !found {
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("runnable %q is not offered by image %s", req.Msg.RunnableId, selImage))
 		}
-		if run.Mode == agentcaps.ModeTmux {
-			return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("runnable %q uses tmux mode, which is not supported yet (Phase 2)", run.ID))
-		}
 		selRunnable = run.ID
 		selMode = string(run.Mode)
 	}
