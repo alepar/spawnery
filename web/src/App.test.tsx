@@ -1,4 +1,4 @@
-import { render, waitFor } from "@testing-library/react";
+import { render, waitFor, act } from "@testing-library/react";
 import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -29,6 +29,16 @@ vi.mock("./shell/reconnectingSocket", () => ({
     constructor(url: string) { this.url = url; sockets.push({ url }); }
     close() {}
     send() {}
+  },
+}));
+
+// TerminalView pulls in xterm (canvas/DOM) — mock it. Capture its onConn so a test can drive the
+// terminal's reported socket state; for tmux spawns the header dot is owned by TerminalView, not the poll.
+const term = vi.hoisted(() => ({ onConn: undefined as undefined | ((s: "connecting" | "connected" | "reconnecting") => void) }));
+vi.mock("./views/TerminalView", () => ({
+  TerminalView: ({ onConn }: { onConn?: (s: "connecting" | "connected" | "reconnecting") => void }) => {
+    term.onConn = onConn;
+    return null;
   },
 }));
 
@@ -112,6 +122,26 @@ describe("App URL-authoritative nav", () => {
     listSpawnsMock.mockResolvedValue([]);
     renderAt("/spawn/ghost");
     await waitFor(() => expect(document.title).toBe("Spawnery — ghost"));
+  });
+
+  // Regression (dot reset bug): an ACTIVE tmux spawn has NO App-managed ACP ws (TerminalView owns the
+  // socket), so nextConnAction returns "open" every poll tick. The poll must NOT re-assert connecting()
+  // for tmux — TerminalView reported "connected", and otherwise the dot flips back to grey a few
+  // seconds later even though the terminal is fine.
+  it("does not reset the conn dot to connecting on poll for an active tmux spawn", async () => {
+    vi.useFakeTimers();
+    try {
+      listSpawnsMock.mockResolvedValue([{ ...ACTIVE_SPAWN, mode: "tmux" }]);
+      renderAt("/spawn/s1");
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // mount effects + first poll
+      act(() => term.onConn?.("connected")); // TerminalView reports its socket connected -> green
+      const dot = () => document.querySelector('[data-testid="status"]')?.getAttribute("data-status");
+      expect(dot()).toBe("connected");
+      await act(async () => { await vi.advanceTimersByTimeAsync(3500); }); // a later poll tick fires + resolves
+      expect(dot()).toBe("connected"); // stays green (before the fix it was flipped to "connecting")
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // Browser back/forward drives wouter's location store from OUTSIDE React (a popstate). A single

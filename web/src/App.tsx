@@ -166,8 +166,13 @@ export function App() {
           turnsRef.current.delete(aid);
           break;
         case "open":
-          if (active?.mode !== "tmux") openSession(aid); // just became active -> connect (green); tmux spawns self-manage via TerminalView
-          else connecting(); // tmux: show pending until TerminalView's socket reports connected (onTermConn)
+          // Only non-tmux spawns open an App-managed ACP ws here. tmux spawns self-manage BOTH their
+          // socket and their header dot via TerminalView (onTermConn). App opens no ws for them, so
+          // hasWs is always false and "open" fires every poll tick — re-asserting connecting() here
+          // would clobber TerminalView's "connected" dot a few seconds after it goes green. Leave the
+          // dot to TerminalView (it reports connecting on mount, connected on open, reconnecting on
+          // down, and remounts when you navigate back).
+          if (active?.mode !== "tmux") openSession(aid); // just became active -> connect (green)
           break;
         case "error":
           teardown(); errored(); // failed to start -> red, stays in the sidebar
