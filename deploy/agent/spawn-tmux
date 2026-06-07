@@ -4,7 +4,7 @@
 set -e
 SESSION="${SPAWN_TMUX_SESSION:-spawn}"
 export TERM="${TERM:-xterm-256color}"
-tmux new-session -d -s "$SESSION" -- "$@"
+tmux -u new-session -d -s "$SESSION" -- "$@"
 # Keep PID 1 alive while the tmux session exists (clients attach via `tmux attach -t spawn`). When the
 # agent exits, its window closes, the session ends, and this loop returns so PID 1 exits and the node
 # reaps the pod. (`tmux wait-for` was wrong here — nothing ever signals its channel, so it blocks

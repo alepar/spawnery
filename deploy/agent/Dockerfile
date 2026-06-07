@@ -30,6 +30,9 @@ RUN CGO_ENABLED=0 go build -o /acpmux ./deploy/agent/acpmux
 RUN CGO_ENABLED=0 go build -o /acpdial ./deploy/agent/acpdial
 
 FROM debian:stable
+# UTF-8 locale so tmux + claude render box/line-drawing glyphs (─│●) instead of ACS q/x or the
+# ASCII fallback _. C.UTF-8 (a.k.a. C.utf8) is built into glibc — no `locales` package needed.
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates tmux tini \
       procps less iproute2 curl \
@@ -63,6 +66,11 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends claude-code; \
     rm -rf /var/lib/apt/lists/*; \
     claude --version
+# Supply the dummy Anthropic key via an apiKeyHelper instead of ANTHROPIC_API_KEY, so Claude Code
+# does NOT print "Detected a custom API key in your environment" at startup. The sidecar injects the
+# real OpenRouter key on the wire regardless (sp-9xr.18).
+RUN mkdir -p /root/.claude
+COPY deploy/agent/claude-settings.json /root/.claude/settings.json
 
 # nori CLI (Tilework) — Rust ACP TUI client (spawnctl attach to acp-mode spawns; wiring in sp-9xr.12)
 # tarball layout: ./nori/nori — extract to /tmp then install to /usr/local/bin

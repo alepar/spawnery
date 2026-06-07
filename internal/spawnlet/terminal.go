@@ -118,13 +118,20 @@ func moshServerArgs(advertiseIP string, child []string) []string {
 
 // ExecPrefixFor returns the runtime exec invocation for a lane. runsc/CRI uses crictl; the Docker
 // (runc) lane uses the docker CLI. -it gives the in-container process a TTY (tmux/shell need one;
-// mosh supplies the outer PTY). TERM is forwarded so full-screen programs (the opencode TUI, a
-// shell's editor) render correctly.
+// mosh supplies the outer PTY). TERM + LANG/LC_ALL are forwarded so full-screen programs (the
+// opencode TUI, a shell's editor) render correctly and box/line-drawing glyphs are UTF-8 (─│●),
+// not ACS q/x or the ASCII _ fallback (sp-9xr.18).
+//
+// crictl's `exec` has no env-injection flag (`-e` there means --ignore-errors), so the runsc lane
+// relies on the image ENV (LANG/LC_ALL=C.UTF-8 baked in the Dockerfile) for the UTF-8 locale.
 func ExecPrefixFor(runtimeKind string) []string {
 	if runtimeKind == "runsc" {
 		return []string{"crictl", "exec", "-it"}
 	}
-	return []string{"docker", "exec", "-it", "-e", "TERM=xterm-256color"}
+	return []string{"docker", "exec", "-it",
+		"-e", "TERM=xterm-256color",
+		"-e", "LANG=C.UTF-8",
+		"-e", "LC_ALL=C.UTF-8"}
 }
 
 // StartTerminal (Manager method) looks up the spawn and launches a terminal session for it. cmd is
