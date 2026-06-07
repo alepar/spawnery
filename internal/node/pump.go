@@ -286,8 +286,7 @@ func (p *Pump) call(ctx context.Context, m acp.Message, timeout time.Duration) (
 	p.waiters[id] = ch
 	p.mu.Unlock()
 	defer func() { p.mu.Lock(); delete(p.waiters, id); p.mu.Unlock() }()
-	idv := id
-	m.ID = &idv
+	m.ID = acp.IntID(id)
 	var buf bytes.Buffer
 	_ = acp.WriteMessage(&buf, m)
 	p.sendLine(buf.Bytes())
@@ -314,9 +313,8 @@ func (p *Pump) sendPrompt(sessionID, text string) {
 	id := p.nextID
 	p.inflightPromptID = id
 	p.mu.Unlock()
-	idv := id
 	var buf bytes.Buffer
-	_ = acp.WriteMessage(&buf, acp.Message{ID: &idv, Method: "session/prompt", Params: promptParams(sessionID, text)})
+	_ = acp.WriteMessage(&buf, acp.Message{ID: acp.IntID(id), Method: "session/prompt", Params: promptParams(sessionID, text)})
 	p.sendLine(buf.Bytes())
 }
 
@@ -337,10 +335,10 @@ func (p *Pump) readLoop() {
 		if err != nil {
 			return // agent EOF/crash
 		}
-		if m.ID != nil && (m.Result != nil || m.Error != nil) {
+		if idn, idok := m.ID.AsInt(); idok && (m.Result != nil || m.Error != nil) {
 			p.mu.Lock()
-			ch, isWaiter := p.waiters[*m.ID]
-			inflight := p.inflightPromptID != 0 && *m.ID == p.inflightPromptID
+			ch, isWaiter := p.waiters[idn]
+			inflight := p.inflightPromptID != 0 && idn == p.inflightPromptID
 			p.mu.Unlock()
 			if isWaiter {
 				ch <- m // handshake/our request result; not conversation
@@ -467,10 +465,11 @@ func promptParams(sessionID, text string) json.RawMessage {
 // onPermissionRequest records a agent permission request, broadcasts a transient perm_request to all
 // attached clients (NOT logged), and arms a timeout that auto-denies.
 func (p *Pump) onPermissionRequest(m acp.Message) {
-	if m.ID == nil {
-		return
+	agentID, ok := m.ID.AsInt()
+	if !ok {
+		return // agent permission request ids are integers
 	}
-	reqID := strconv.Itoa(*m.ID)
+	reqID := strconv.Itoa(agentID)
 	var pr struct {
 		Options  json.RawMessage `json:"options"`
 		ToolCall struct {
@@ -487,7 +486,7 @@ func (p *Pump) onPermissionRequest(m acp.Message) {
 		p.mu.Unlock()
 		return
 	}
-	pp := &pendingPerm{agentID: *m.ID, options: pr.Options, title: title}
+	pp := &pendingPerm{agentID: agentID, options: pr.Options, title: title}
 	pp.timer = time.AfterFunc(p.permTimeout, func() { p.resolvePermission(reqID, false) })
 	p.pending[reqID] = pp
 	clients := make([]frameSender, 0, len(p.clients))
@@ -515,10 +514,9 @@ func (p *Pump) resolvePermission(reqID string, allow bool) {
 	agentID := pp.agentID
 	optID := pickPermOption(pp.options, allow)
 	p.mu.Unlock()
-	idv := agentID
 	resp, _ := json.Marshal(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optID}})
 	var buf bytes.Buffer
-	_ = acp.WriteMessage(&buf, acp.Message{ID: &idv, Result: resp})
+	_ = acp.WriteMessage(&buf, acp.Message{ID: acp.IntID(agentID), Result: resp})
 	p.sendLine(buf.Bytes())
 }
 

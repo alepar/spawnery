@@ -16,10 +16,11 @@ func TestServerReadsRequestAndWritesResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if msg.Method != "initialize" || msg.ID == nil || *msg.ID != 1 {
+	id, ok := msg.ID.AsInt()
+	if msg.Method != "initialize" || !ok || id != 1 {
 		t.Fatalf("unexpected msg: %+v", msg)
 	}
-	if err := s.Respond(*msg.ID, map[string]any{"protocolVersion": 1}); err != nil {
+	if err := s.Respond(id, map[string]any{"protocolVersion": 1}); err != nil {
 		t.Fatalf("respond: %v", err)
 	}
 	line, _ := bufio.NewReader(&out).ReadString('\n')

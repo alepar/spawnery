@@ -66,7 +66,7 @@ type pendingPerm struct {
 // client's session/prompt request EXACTLY when ITS turn ends.
 type queuedPrompt struct {
 	clientID  string
-	clientReq int
+	clientReq *acp.RawID // the originating client's session/prompt id (string or int), echoed back verbatim at turn-end
 	text      string
 }
 
@@ -106,10 +106,10 @@ type Mux struct {
 
 	busy              bool
 	queue             []queuedPrompt
-	inflightPromptID  int    // upstream request id of the in-flight session/prompt (0 = none)
-	inflightClient    string // client whose prompt is in flight ("" = none/internal)
-	inflightReq       int    // that client's session/prompt request id to answer at turn-end
-	inflightHasClient bool   // true if there is a downstream client to answer at turn-end
+	inflightPromptID  int        // upstream request id of the in-flight session/prompt (0 = none)
+	inflightClient    string     // client whose prompt is in flight ("" = none/internal)
+	inflightReq       *acp.RawID // that client's session/prompt request id (verbatim) to answer at turn-end
+	inflightHasClient bool       // true if there is a downstream client to answer at turn-end
 
 	pending     map[string]*pendingPerm // keyed by upstream request id (string)
 	permTimeout time.Duration
@@ -232,8 +232,7 @@ func (m *Mux) call(ctx context.Context, msg acp.Message, timeout time.Duration) 
 	m.waiters[id] = ch
 	m.mu.Unlock()
 	defer func() { m.mu.Lock(); delete(m.waiters, id); m.mu.Unlock() }()
-	idv := id
-	msg.ID = &idv
+	msg.ID = acp.IntID(id)
 	var buf bytes.Buffer
 	_ = acp.WriteMessage(&buf, msg)
 	m.sendLine(buf.Bytes())
@@ -257,7 +256,7 @@ func (m *Mux) call(ctx context.Context, msg acp.Message, timeout time.Duration) 
 // request id so acpmux can answer that client at turn-end. The id is set under
 // the lock before enqueueing so a fast turn-end result can't race past it.
 // Ported from pump.sendPrompt.
-func (m *Mux) sendPrompt(sessionID, text, clientID string, clientReq int, hasClient bool) {
+func (m *Mux) sendPrompt(sessionID, text, clientID string, clientReq *acp.RawID, hasClient bool) {
 	m.mu.Lock()
 	m.nextID++
 	id := m.nextID
@@ -266,9 +265,8 @@ func (m *Mux) sendPrompt(sessionID, text, clientID string, clientReq int, hasCli
 	m.inflightReq = clientReq
 	m.inflightHasClient = hasClient
 	m.mu.Unlock()
-	idv := id
 	var buf bytes.Buffer
-	_ = acp.WriteMessage(&buf, acp.Message{ID: &idv, Method: "session/prompt", Params: promptParams(sessionID, text)})
+	_ = acp.WriteMessage(&buf, acp.Message{ID: acp.IntID(id), Method: "session/prompt", Params: promptParams(sessionID, text)})
 	m.sendLine(buf.Bytes())
 }
 
@@ -284,11 +282,13 @@ func (m *Mux) readLoop() {
 		if err != nil {
 			return // upstream EOF/crash
 		}
-		// A response to one of OUR upstream requests (handshake / prompt).
-		if msg.ID != nil && (msg.Result != nil || msg.Error != nil) {
+		// A response to one of OUR upstream requests (handshake / prompt). Our
+		// upstream ids are always integers (we allocate them), so a string id
+		// here is unexpected and AsInt's ok=false safely skips it.
+		if idn, idok := msg.ID.AsInt(); idok && (msg.Result != nil || msg.Error != nil) {
 			m.mu.Lock()
-			ch, isWaiter := m.waiters[*msg.ID]
-			inflight := m.inflightPromptID != 0 && *msg.ID == m.inflightPromptID
+			ch, isWaiter := m.waiters[idn]
+			inflight := m.inflightPromptID != 0 && idn == m.inflightPromptID
 			m.mu.Unlock()
 			if isWaiter {
 				ch <- msg // handshake/our request result; not conversation
@@ -343,7 +343,7 @@ func (m *Mux) handleTurnEnd(failed bool) {
 	m.busy = false
 	m.inflightPromptID = 0
 	m.inflightClient = ""
-	m.inflightReq = 0
+	m.inflightReq = nil
 	m.inflightHasClient = false
 
 	var next queuedPrompt
@@ -432,9 +432,10 @@ func (m *Mux) handleClient(conn net.Conn) {
 
 func (m *Mux) onClientMessage(c *dsClient, msg acp.Message) {
 	// Responses from a client to acpmux's forwarded permission request carry an
-	// id + a result, no method.
-	if msg.ID != nil && msg.Method == "" && (msg.Result != nil || msg.Error != nil) {
-		m.onClientPermResponse(*msg.ID, msg.Result)
+	// id + a result, no method. The perm id is one we minted (an integer); a
+	// non-integer id here is not a perm response, so AsInt's ok=false skips it.
+	if idn, idok := msg.ID.AsInt(); idok && msg.Method == "" && (msg.Result != nil || msg.Error != nil) {
+		m.onClientPermResponse(idn, msg.Result)
 		return
 	}
 	switch msg.Method {
@@ -446,7 +447,7 @@ func (m *Mux) onClientMessage(c *dsClient, msg acp.Message) {
 			init = json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{}}`)
 		}
 		if msg.ID != nil {
-			m.respondToClient(c, *msg.ID, init)
+			m.respondToClient(c, msg.ID, init)
 		}
 	case "session/new", "session/load":
 		m.mu.Lock()
@@ -455,12 +456,12 @@ func (m *Mux) onClientMessage(c *dsClient, msg acp.Message) {
 		m.mu.Unlock()
 		if msg.ID != nil {
 			res, _ := json.Marshal(map[string]string{"sessionId": sid})
-			m.respondToClient(c, *msg.ID, res)
+			m.respondToClient(c, msg.ID, res)
 		}
 		wake(c) // trigger replay of buffered history to this (possibly late-joining) client
 	case "session/prompt":
 		if msg.ID != nil {
-			m.fromClientPrompt(c, *msg.ID, promptText(msg.Params))
+			m.fromClientPrompt(c, msg.ID, promptText(msg.Params))
 		}
 	case "session/cancel":
 		// best-effort: v1 no-op (single-session, serialized; cancel not modeled).
@@ -471,7 +472,7 @@ func (m *Mux) onClientMessage(c *dsClient, msg acp.Message) {
 // serializer onto the single upstream session. One in-flight session/prompt at
 // a time; the rest queue (FIFO) and drain on turn-end. Ported from
 // pump.fromClient's "prompt" case, with per-client request-id tracking.
-func (m *Mux) fromClientPrompt(c *dsClient, clientReq int, text string) {
+func (m *Mux) fromClientPrompt(c *dsClient, clientReq *acp.RawID, text string) {
 	m.mu.Lock()
 	sid := m.sessionID
 	if !m.busy {
@@ -503,10 +504,9 @@ func (m *Mux) appendUpdate(raw []byte) {
 // to the replay log, TARGETED at one client. Routed through the ordered log so
 // it is emitted after any earlier (lower-seq) items for that client — in
 // particular the session/update chunks of the turn it completes.
-func (m *Mux) appendResultFor(clientID string, reqID int, result json.RawMessage) {
-	idv := reqID
+func (m *Mux) appendResultFor(clientID string, reqID *acp.RawID, result json.RawMessage) {
 	var buf bytes.Buffer
-	if acp.WriteMessage(&buf, acp.Message{ID: &idv, Result: result}) != nil {
+	if acp.WriteMessage(&buf, acp.Message{ID: reqID, Result: result}) != nil {
 		return
 	}
 	m.appendItem(clientID, buf.Bytes())
@@ -592,10 +592,11 @@ func (m *Mux) clientReplayLoop(c *dsClient) {
 // upstream request id as the downstream id so client responses correlate), and
 // arms a timeout that auto-denies. Ported from pump.onPermissionRequest.
 func (m *Mux) onPermissionRequest(msg acp.Message) {
-	if msg.ID == nil {
-		return
+	upID, ok := msg.ID.AsInt()
+	if !ok {
+		return // upstream (goose) permission ids are integers; ignore anything else
 	}
-	reqID := strconv.Itoa(*msg.ID)
+	reqID := strconv.Itoa(upID)
 	var pr struct {
 		Options  json.RawMessage `json:"options"`
 		ToolCall struct {
@@ -612,7 +613,7 @@ func (m *Mux) onPermissionRequest(msg acp.Message) {
 		m.mu.Unlock()
 		return
 	}
-	pp := &pendingPerm{upstreamID: *msg.ID, options: pr.Options, title: title}
+	pp := &pendingPerm{upstreamID: upID, options: pr.Options, title: title}
 	pp.timer = time.AfterFunc(m.permTimeout, func() { m.resolvePermission(reqID, false) })
 	m.pending[reqID] = pp
 	clients := make([]*dsClient, 0, len(m.clients))
@@ -668,20 +669,20 @@ func (m *Mux) resolvePermission(reqID string, allow bool) {
 	optID := pickPermOption(pp.options, allow)
 	m.mu.Unlock()
 
-	idv := upstreamID
 	resp, _ := json.Marshal(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optID}})
 	var buf bytes.Buffer
-	_ = acp.WriteMessage(&buf, acp.Message{ID: &idv, Result: resp})
+	_ = acp.WriteMessage(&buf, acp.Message{ID: acp.IntID(upstreamID), Result: resp})
 	m.sendLine(buf.Bytes())
 }
 
 // ---- small helpers ----------------------------------------------------------
 
-// respondToClient writes a JSON-RPC result for the given downstream request id.
-func (m *Mux) respondToClient(c *dsClient, id int, result json.RawMessage) {
-	idv := id
+// respondToClient writes a JSON-RPC result echoing the client's request id
+// VERBATIM (string or integer), so clients like nori that use string UUID ids
+// can correlate the response.
+func (m *Mux) respondToClient(c *dsClient, id *acp.RawID, result json.RawMessage) {
 	var buf bytes.Buffer
-	_ = acp.WriteMessage(&buf, acp.Message{ID: &idv, Result: result})
+	_ = acp.WriteMessage(&buf, acp.Message{ID: id, Result: result})
 	_ = m.writeRaw(c, buf.Bytes())
 }
 

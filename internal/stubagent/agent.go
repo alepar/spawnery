@@ -62,6 +62,6 @@ func promptText(params json.RawMessage) string {
 	return out
 }
 
-func reply(w io.Writer, id *int, result json.RawMessage) {
+func reply(w io.Writer, id *acp.RawID, result json.RawMessage) {
 	acp.WriteMessage(w, acp.Message{ID: id, Result: result})
 }

@@ -109,7 +109,7 @@ func (f *fakeAgent) emitPermission(id int) {
 			{"optionId": "reject-once", "kind": "reject_once"},
 		},
 	})
-	f.write(acp.Message{ID: &id, Method: "session/request_permission", Params: params})
+	f.write(acp.Message{ID: acp.IntID(id), Method: "session/request_permission", Params: params})
 }
 
 // ---- downstream test client -------------------------------------------------
@@ -136,10 +136,10 @@ func (tc *testClient) call(t *testing.T, method string, params json.RawMessage) 
 	t.Helper()
 	tc.nid++
 	id := tc.nid
-	tc.send(acp.Message{ID: &id, Method: method, Params: params})
+	tc.send(acp.Message{ID: acp.IntID(id), Method: method, Params: params})
 	for {
 		m := tc.read(t)
-		if m.ID != nil && *m.ID == id && (m.Result != nil || m.Error != nil) {
+		if n, ok := m.ID.AsInt(); ok && n == id && (m.Result != nil || m.Error != nil) {
 			return m
 		}
 	}
@@ -153,7 +153,7 @@ func (tc *testClient) sendPrompt(t *testing.T, text string) int {
 		"sessionId": "S1",
 		"prompt":    []any{map[string]string{"type": "text", "text": text}},
 	})
-	tc.send(acp.Message{ID: &id, Method: "session/prompt", Params: p})
+	tc.send(acp.Message{ID: acp.IntID(id), Method: "session/prompt", Params: p})
 	return id
 }
 
@@ -286,7 +286,7 @@ func TestFanout(t *testing.T) {
 	// A (the prompter) must also receive its session/prompt result (turn end).
 	for {
 		m := a.read(t)
-		if m.ID != nil && *m.ID == reqID && m.Result != nil {
+		if n, ok := m.ID.AsInt(); ok && n == reqID && m.Result != nil {
 			break
 		}
 	}
@@ -307,7 +307,7 @@ func TestLateJoinReplay(t *testing.T) {
 	// Drain A's turn-end so the turn is fully complete before B joins.
 	for {
 		m := a.read(t)
-		if m.ID != nil && *m.ID == reqID && m.Result != nil {
+		if n, ok := m.ID.AsInt(); ok && n == reqID && m.Result != nil {
 			break
 		}
 	}
@@ -393,20 +393,21 @@ func TestPermissionBroadcastFirstWins(t *testing.T) {
 	// Both clients must receive a session/request_permission with id permID.
 	permA := awaitPermRequest(t, a, permID)
 	permB := awaitPermRequest(t, b, permID)
-	if permA.ID == nil || *permA.ID != permID || permB.ID == nil || *permB.ID != permID {
-		t.Fatalf("perm request ids: A=%v B=%v want %d", permA.ID, permB.ID, permID)
+	if na, oka := permA.ID.AsInt(); !oka || na != permID {
+		t.Fatalf("perm request id A=%v want %d", permA.ID, permID)
+	}
+	if nb, okb := permB.ID.AsInt(); !okb || nb != permID {
+		t.Fatalf("perm request id B=%v want %d", permB.ID, permID)
 	}
 
 	// A answers allow first.
-	idv := permID
 	allowResp, _ := json.Marshal(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": "allow-once"}})
-	a.send(acp.Message{ID: &idv, Result: allowResp})
+	a.send(acp.Message{ID: acp.IntID(permID), Result: allowResp})
 
 	// B answers later (deny) — must no-op.
 	time.Sleep(150 * time.Millisecond)
-	idv2 := permID
 	denyResp, _ := json.Marshal(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": "reject-once"}})
-	b.send(acp.Message{ID: &idv2, Result: denyResp})
+	b.send(acp.Message{ID: acp.IntID(permID), Result: denyResp})
 
 	// Wait for the agent to record exactly one perm reply, and verify it's the allow.
 	deadline := time.Now().Add(3 * time.Second)
@@ -460,7 +461,7 @@ func awaitResult(t *testing.T, tc *testClient, reqID int) {
 	t.Helper()
 	for {
 		m := tc.read(t)
-		if m.ID != nil && *m.ID == reqID && m.Result != nil {
+		if n, ok := m.ID.AsInt(); ok && n == reqID && m.Result != nil {
 			return
 		}
 	}

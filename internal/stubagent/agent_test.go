@@ -28,4 +28,4 @@ func TestStubPromptEchoes(t *testing.T) {
 	}
 }
 
-func ip(i int) *int { return &i }
+func ip(i int) *acp.RawID { return acp.IntID(i) }

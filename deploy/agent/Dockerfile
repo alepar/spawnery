@@ -73,6 +73,10 @@ RUN set -eux; \
     install -m 0755 /tmp/nori/nori /usr/local/bin/nori; \
     rm -rf /tmp/nori.tar.gz /tmp/nori; \
     nori --version
+# Bake nori's config so `nori -a spawnery` (the acp-mode terminal attach) launches
+# the acpdial shim -> acpmux on 127.0.0.1:7000 = the shared goose session (sp-9xr.12.2).
+RUN mkdir -p /root/.nori/cli
+COPY deploy/agent/nori-config.toml /root/.nori/cli/config.toml
 # Pre-run the one-time SQLite migration + models.json fetch at build time (network available here),
 # so a fresh container is ready in seconds instead of doing a multi-minute first-run migration.
 RUN sh -c 'opencode serve --port 4096 --hostname 127.0.0.1 >/tmp/m.log 2>&1 & P=$!; \

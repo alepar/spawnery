@@ -83,7 +83,7 @@ func (h *harness) await(t *testing.T, pred func(acp.Message, string) bool) acp.M
 }
 
 func idIs(n int) func(acp.Message, string) bool {
-	return func(m acp.Message, _ string) bool { return m.ID != nil && *m.ID == n }
+	return func(m acp.Message, _ string) bool { id, ok := m.ID.AsInt(); return ok && id == n }
 }
 
 func TestAdapterInitializeAndSession(t *testing.T) {
@@ -135,7 +135,7 @@ func TestAdapterPermissionRoundTrip(t *testing.T) {
 			t.Fatalf("missing option kind %q in %s", k, line)
 		}
 	}
-	h.send(`{"jsonrpc":"2.0","id":` + itoa(*req.ID) + `,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}}`)
+	h.send(`{"jsonrpc":"2.0","id":` + string(*req.ID) + `,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}}`)
 
 	deadline := time.After(2 * time.Second)
 	for {
@@ -186,4 +186,3 @@ func TestAdapterCancelAborts(t *testing.T) {
 }
 
 func mustLine(m acp.Message) string { b, _ := json.Marshal(m); return string(b) }
-func itoa(i int) string             { b, _ := json.Marshal(i); return string(b) }

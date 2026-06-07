@@ -77,9 +77,10 @@ func (a *Adapter) Serve(r io.Reader, w io.Writer) error {
 			return err
 		}
 		// A message with an id and no method is a response to one of OUR
-		// server-initiated requests (session/request_permission).
-		if m.Method == "" && m.ID != nil {
-			a.handlePermResponse(*m.ID, m.Result)
+		// server-initiated requests (session/request_permission). The node pump
+		// (our only client) uses integer ids.
+		if idn, idok := m.ID.AsInt(); m.Method == "" && idok {
+			a.handlePermResponse(idn, m.Result)
 			continue
 		}
 		switch m.Method {
@@ -99,27 +100,29 @@ func (a *Adapter) Serve(r io.Reader, w io.Writer) error {
 }
 
 func (a *Adapter) handleInitialize(srv *acp.Server, m acp.Message) {
-	if m.ID == nil {
+	id, ok := m.ID.AsInt()
+	if !ok {
 		return
 	}
 	// opencode serve can be slow to bind on first run (one-time SQLite migration), so poll health
 	// rather than failing the handshake immediately. Bounded so we still error well within the node's
 	// readyTimeout if opencode never comes up.
 	if err := a.waitHealthy(90 * time.Second); err != nil {
-		_ = srv.RespondError(*m.ID, -32000, "opencode not ready: "+err.Error())
+		_ = srv.RespondError(id, -32000, "opencode not ready: "+err.Error())
 		return
 	}
 	sid, err := a.oc.DiscoverOrCreateSession(a.dir, a.title)
 	if err != nil {
-		_ = srv.RespondError(*m.ID, -32000, err.Error())
+		_ = srv.RespondError(id, -32000, err.Error())
 		return
 	}
 	a.setSession(sid)
-	_ = srv.Respond(*m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{}})
+	_ = srv.Respond(id, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{}})
 }
 
 func (a *Adapter) handleNewSession(srv *acp.Server, m acp.Message) {
-	if m.ID == nil {
+	id, ok := m.ID.AsInt()
+	if !ok {
 		return
 	}
 	a.mu.Lock()
@@ -128,12 +131,12 @@ func (a *Adapter) handleNewSession(srv *acp.Server, m acp.Message) {
 	if sid == "" {
 		var err error
 		if sid, err = a.oc.DiscoverOrCreateSession(a.dir, a.title); err != nil {
-			_ = srv.RespondError(*m.ID, -32000, err.Error())
+			_ = srv.RespondError(id, -32000, err.Error())
 			return
 		}
 		a.setSession(sid)
 	}
-	_ = srv.Respond(*m.ID, map[string]any{"sessionId": sid})
+	_ = srv.Respond(id, map[string]any{"sessionId": sid})
 }
 
 // setSession records the opencode session id in memory and to the session file (for spawn-tui).
@@ -146,12 +149,13 @@ func (a *Adapter) setSession(sid string) {
 }
 
 func (a *Adapter) handlePrompt(srv *acp.Server, m acp.Message) {
-	if m.ID == nil {
+	id, ok := m.ID.AsInt()
+	if !ok {
 		return
 	}
 	text := extractPromptText(m.Params)
 	a.mu.Lock()
-	a.inflightID = *m.ID
+	a.inflightID = id
 	a.hasInflight = true
 	sid := a.sessionID
 	// Remember our own (web-originated) prompt text so we don't echo it back as a TUI message —
@@ -165,7 +169,7 @@ func (a *Adapter) handlePrompt(srv *acp.Server, m acp.Message) {
 		a.mu.Lock()
 		a.hasInflight = false
 		a.mu.Unlock()
-		_ = srv.RespondError(*m.ID, -32000, err.Error())
+		_ = srv.RespondError(id, -32000, err.Error())
 		return
 	}
 	// The turn-end response (which the node reads as turn-end) is sent when the

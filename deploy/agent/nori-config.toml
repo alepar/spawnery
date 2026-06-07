@@ -1,0 +1,24 @@
+# nori CLI config — baked into the agent image at /root/.nori/cli/config.toml.
+#
+# Defines the custom "spawnery" ACP agent that `spawnctl attach` selects for
+# acp-mode spawns (terminalInnerCmd -> `nori -a spawnery ...`). nori cannot dial
+# an external ACP server; it spawns its agent as a CHILD over stdio. So the
+# spawnery agent's local command is `acpdial`, a tiny stdio<->TCP shim that dials
+# acpmux on 127.0.0.1:7000 inside the agent container. nori thinks it spawned an
+# agent; it's really now a SECOND ACP client of acpmux -> the SAME shared goose
+# session the web ChatView is on (sp-9xr.12.2).
+#
+# Schema discovered against nori 0.22.0 (github.com/tilework-tech/nori-cli):
+# a custom ACP agent is an `[[agents]]` array entry requiring BOTH `name` and
+# `slug` (using `display_name` instead of `name` makes the entry deserialize to
+# nothing and the agent is silently NOT registered), plus a
+# `[agents.distribution.local]` table with `command` + `args` (a local-command
+# distribution speaking ACP over stdin/stdout). Verified live: `nori -a spawnery`
+# spawns the command and sends it the ACP `initialize` JSON-RPC on stdin.
+[[agents]]
+name = "Spawnery"
+slug = "spawnery"
+
+[agents.distribution.local]
+command = "/usr/local/bin/acpdial"
+args = []

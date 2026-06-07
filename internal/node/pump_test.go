@@ -271,7 +271,7 @@ func TestStartCancelledByContext(t *testing.T) {
 // and only emits the prompt's end_turn result after it receives the pump's permission response (id 99).
 func scriptGoosePerm(in io.Reader, out io.Writer) {
 	rd := acp.NewReader(in)
-	var promptID *int
+	var promptID *acp.RawID
 	for {
 		m, err := rd.ReadMessage()
 		if err != nil { return }
@@ -282,9 +282,8 @@ func scriptGoosePerm(in io.Reader, out io.Writer) {
 			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
 		case m.Method == "session/prompt":
 			promptID = m.ID
-			pid := 99
-			acp.WriteMessage(out, acp.Message{ID: &pid, Method: "session/request_permission", Params: []byte(`{"options":[{"optionId":"allow","kind":"allow"},{"optionId":"reject","kind":"reject"}]}`)})
-		case m.ID != nil && *m.ID == 99 && m.Result != nil:
+			acp.WriteMessage(out, acp.Message{ID: acp.IntID(99), Method: "session/request_permission", Params: []byte(`{"options":[{"optionId":"allow","kind":"allow"},{"optionId":"reject","kind":"reject"}]}`)})
+		case idIs99(m) && m.Result != nil:
 			if promptID != nil {
 				acp.WriteMessage(out, acp.Message{ID: promptID, Result: []byte(`{"stopReason":"end_turn"}`)})
 				promptID = nil
@@ -363,12 +362,15 @@ func scriptGoosePermTitled(in io.Reader, out io.Writer) {
 		case m.Method == "session/new":
 			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
 		case m.Method == "session/prompt":
-			pid := 99
-			acp.WriteMessage(out, acp.Message{ID: &pid, Method: "session/request_permission",
+			acp.WriteMessage(out, acp.Message{ID: acp.IntID(99), Method: "session/request_permission",
 				Params: []byte(`{"toolCall":{"title":"Run shell: rm -rf /tmp/x"},"options":[{"optionId":"allow","kind":"allow"},{"optionId":"reject","kind":"reject"}]}`)})
 		}
 	}
 }
+
+// idIs99 reports whether m's JSON-RPC id is the integer 99 (the fake agent's
+// permission-request id), using the RawID int helper.
+func idIs99(m acp.Message) bool { n, ok := m.ID.AsInt(); return ok && n == 99 }
 
 // The pump must surface goose's real toolCall.title on the perm_request frame — on the broadcast AND
 // on the re-send to a late-attaching client — not a generic placeholder.
