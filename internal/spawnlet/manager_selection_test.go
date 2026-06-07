@@ -15,7 +15,7 @@ func newSelManager(t *testing.T) (*Manager, *fakePodBackend) {
 	return m, fb
 }
 
-func TestCreateWithSelectionAcpUsesImageNoCmd(t *testing.T) {
+func TestCreateWithSelectionAcpUsesRunnableID(t *testing.T) {
 	m, fb := newSelManager(t)
 	_, err := m.CreateWithSelection(context.Background(), "sp-sel", "../../examples/secret-app", "model", "", "", 0,
 		AgentSelection{Image: "selected:img", RunnableID: "goose-acp", Mode: "acp"})
@@ -25,8 +25,10 @@ func TestCreateWithSelectionAcpUsesImageNoCmd(t *testing.T) {
 	if fb.agentSpec.Image != "selected:img" {
 		t.Fatalf("agent image = %q, want selected:img", fb.agentSpec.Image)
 	}
-	if fb.agentSpec.Cmd != nil {
-		t.Fatalf("acp mode should NOT override Cmd (entrypoint runs the adapter), got %v", fb.agentSpec.Cmd)
+	// Any runnable selection (including acp/served) now yields Cmd=[runnableID]; the image's
+	// dispatcher entrypoint resolves the actual launch (sp-9xr.13b).
+	if len(fb.agentSpec.Cmd) != 1 || fb.agentSpec.Cmd[0] != "goose-acp" {
+		t.Fatalf("acp selection should yield Cmd=[\"goose-acp\"], got %v", fb.agentSpec.Cmd)
 	}
 }
 
@@ -44,15 +46,25 @@ func TestCreateLegacyUsesConfiguredImageNoCmd(t *testing.T) {
 	}
 }
 
-func TestCreateWithSelectionTmuxWrapsInTmux(t *testing.T) {
+func TestCreateWithSelectionTmuxPassesRunnableID(t *testing.T) {
 	m, fb := newSelManager(t)
 	_, err := m.CreateWithSelection(context.Background(), "sp-tmux", "../../examples/secret-app", "model", "", "", 0,
 		AgentSelection{Image: "selected:img", RunnableID: "opencode-tui", Mode: "tmux"})
 	if err != nil {
-		t.Fatalf("tmux mode should now launch, got error: %v", err)
+		t.Fatalf("tmux mode should launch, got error: %v", err)
 	}
 	cmd := fb.agentSpec.Cmd
-	if len(cmd) < 2 || cmd[0] != "spawn-tmux" || cmd[1] != "opencode" {
-		t.Fatalf("tmux launch cmd = %v, want [spawn-tmux opencode]", cmd)
+	// The dispatcher (image entrypoint) now owns tmux-wrapping; node just passes the runnable id.
+	if len(cmd) != 1 || cmd[0] != "opencode-tui" {
+		t.Fatalf("tmux launch cmd = %v, want [\"opencode-tui\"]", cmd)
+	}
+}
+
+func TestCreateWithSelectionUnknownRunnableErrors(t *testing.T) {
+	m, _ := newSelManager(t)
+	_, err := m.CreateWithSelection(context.Background(), "sp-bad", "../../examples/secret-app", "model", "", "", 0,
+		AgentSelection{Image: "selected:img", RunnableID: "does-not-exist", Mode: "tmux"})
+	if err == nil {
+		t.Fatal("unknown runnable should return error")
 	}
 }

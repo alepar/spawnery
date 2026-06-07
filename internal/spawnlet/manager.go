@@ -169,10 +169,10 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID st
 	return m.CreateWithSelection(ctx, id, appPath, model, name, appID, generation, AgentSelection{})
 }
 
-// CreateWithSelection is Create plus an explicit agent selection (image + runnable launch argv +
-// mode). For tmux-mode runnables it overrides the container command with the spawn-tmux wrapper
-// (runs the TUI inside a detached tmux session); for acp/served it leaves Cmd nil so the image's
-// ENTRYPOINT runs its serve+adapter wiring.
+// CreateWithSelection is Create plus an explicit agent selection (image + runnable id + mode).
+// For any selected runnable the container command is set to [sel.RunnableID]; the image's
+// dispatcher entrypoint (entrypoint.sh) resolves the actual launch (serve+adapter, tmux-wrapped
+// TUI, etc.) — the node just names the runnable. No selection leaves Cmd nil (image default).
 func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, sel AgentSelection) (*Spawn, error) {
 	agentImage := m.cfg.AgentImage
 	if sel.Image != "" {
@@ -180,17 +180,12 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	}
 	var agentCmd []string
 	if sel.RunnableID != "" {
-		r, ok := agentcaps.FindRunnable(sel.RunnableID)
-		if !ok {
+		if _, ok := agentcaps.FindRunnable(sel.RunnableID); !ok {
 			return nil, fmt.Errorf("unknown runnable %q", sel.RunnableID)
 		}
-		if r.Mode == agentcaps.ModeTmux {
-			// tmux mode: run the TUI inside a detached tmux session (spawn-tmux keeps PID 1 alive).
-			agentCmd = append([]string{"spawn-tmux"}, r.Launch...)
-		}
-		// acp/served: leave agentCmd nil — the image's ENTRYPOINT sets up the ACP adapter / serve
-		// path. Their Launch argv is NOT a full container command, so overriding Cmd would skip the
-		// adapter and break the node's ACP relay (this is the sp-9xr.3.8 fix).
+		// The image's dispatcher entrypoint owns the actual launch (serve+adapter / tmux-wrapped TUI);
+		// the node just names the runnable. (Replaces the old spawn-tmux + agentcaps.Launch prepend.)
+		agentCmd = []string{sel.RunnableID}
 	}
 
 	if abs, err := filepath.Abs(appPath); err == nil {
