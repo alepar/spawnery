@@ -9,6 +9,37 @@
 # catalog. The adapter then prompts opencode with model "spawnery/<SPAWN_MODEL>".
 set -e
 
+# setup_opencode_provider generates the opencode config that routes opencode (TUI or served) through
+# the sidecar's OpenAI-compatible endpoint (custom "spawnery" provider -> SIDECAR_BASE, which injects
+# the real OpenRouter key) and selects the spawn's model as "spawnery/<MODEL_ID>". Both the served
+# path AND opencode-tui must call this — otherwise the TUI falls back to opencode's built-in provider
+# (opencode zen) and bypasses the sidecar (sp-9xr.18). Exports OPENCODE_CONFIG and SPAWN_MODEL.
+setup_opencode_provider() {
+  SIDECAR_BASE="${SIDECAR_BASE:-http://127.0.0.1:8080/v1}"
+  MODEL_ID="${SPAWN_MODEL:-openai/gpt-4o-mini}"
+
+  # Generate the opencode config (custom OpenAI-compatible provider via the sidecar).
+  mkdir -p /etc/opencode
+  cat > /etc/opencode/opencode.json <<EOF
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "model": "spawnery/${MODEL_ID}",
+  "provider": {
+    "spawnery": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Spawnery Sidecar",
+      "options": { "baseURL": "${SIDECAR_BASE}", "apiKey": "sk-unused-sidecar-injects-real-key" },
+      "models": { "${MODEL_ID}": { "name": "${MODEL_ID}" } }
+    }
+  }
+}
+EOF
+  export OPENCODE_CONFIG=/etc/opencode/opencode.json
+
+  # The adapter forwards this as opencode's "providerID/modelID".
+  export SPAWN_MODEL="spawnery/${MODEL_ID}"
+}
+
 # Dispatcher: the node passes the runnable id as $1; the image owns how each runnable launches.
 # Empty (legacy) or opencode-served -> the default opencode serve + adapter path below.
 case "${1:-}" in
@@ -17,6 +48,11 @@ case "${1:-}" in
     ;;
   opencode-tui)
     export TERM="${TERM:-xterm-256color}"
+    setup_opencode_provider   # same sidecar provider + model as opencode-served (was bypassed -> hit opencode zen)
+    # NOTE: opencode TUI has no equivalent of the acpadapter's session-title API (SPAWN_SESSION_TITLE):
+    # the served path titles the session via the adapter, which the bare TUI lacks. opencode --help /
+    # config expose no session-name/title flag, so TUI session-naming is auto-generated. The
+    # load-bearing fix is the sidecar routing above; naming is best-effort and has no TUI hook (sp-9xr.18).
     exec spawn-tmux opencode
     ;;
   goose-tui)
@@ -58,7 +94,9 @@ case "${1:-}" in
     # ANTHROPIC_BASE_URL (Claude Code appends /v1/messages itself).
     SIDECAR_OAI="${OPENAI_BASE_URL:-http://127.0.0.1:8080/v1}"
     export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-${SIDECAR_OAI%/v1}}"
-    export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-sk-unused-sidecar-injects-real-key}"
+    # The dummy key is supplied via the baked apiKeyHelper (/root/.claude/settings.json), NOT an env
+    # var: setting ANTHROPIC_API_KEY triggers Claude Code's "Detected a custom API key in your
+    # environment" warning at startup. The sidecar injects the real OpenRouter key regardless (sp-9xr.18).
     # SPAWN_MODEL is an OpenRouter id (e.g. openai/gpt-4o-mini); expose it as Claude Code's
     # custom model option so it is offered/selected in the TUI.
     export ANTHROPIC_CUSTOM_MODEL_OPTION="${SPAWN_MODEL:-openai/gpt-4o-mini}"
@@ -81,29 +119,8 @@ case "${1:-}" in
 esac
 
 # --- default opencode serve + adapter (runnable "" / opencode-served) ---
-SIDECAR_BASE="${SIDECAR_BASE:-http://127.0.0.1:8080/v1}"
-MODEL_ID="${SPAWN_MODEL:-openai/gpt-4o-mini}"
-
-# Generate the opencode config (custom OpenAI-compatible provider via the sidecar).
-mkdir -p /etc/opencode
-cat > /etc/opencode/opencode.json <<EOF
-{
-  "\$schema": "https://opencode.ai/config.json",
-  "model": "spawnery/${MODEL_ID}",
-  "provider": {
-    "spawnery": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Spawnery Sidecar",
-      "options": { "baseURL": "${SIDECAR_BASE}", "apiKey": "sk-unused-sidecar-injects-real-key" },
-      "models": { "${MODEL_ID}": { "name": "${MODEL_ID}" } }
-    }
-  }
-}
-EOF
-export OPENCODE_CONFIG=/etc/opencode/opencode.json
-
-# The adapter forwards this as opencode's "providerID/modelID".
-export SPAWN_MODEL="spawnery/${MODEL_ID}"
+# Same sidecar provider config as opencode-tui (factored above).
+setup_opencode_provider
 
 # opencode listens on loopback; both clients (the adapter and the in-pod TUI) are
 # in-pod, so 127.0.0.1 is sufficient (no 0.0.0.0/password needed).
