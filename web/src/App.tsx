@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocation } from "wouter";
 import { toast } from "sonner";
 import {
   createSpawn, listSpawns, renameSpawn, suspendSpawn, resumeSpawn, deleteSpawn,
@@ -13,8 +14,22 @@ import { nextConnAction } from "./shell/connPolicy";
 import { initialTheme, setTheme } from "./lib/theme";
 import type { Item, TurnState } from "./views/chat/types";
 import { reconcilePending, MAX_QUEUED } from "./lib/turn";
+import { useNav } from "./nav/useNav";
+import type { Nav } from "./nav/nav";
 
 const MODEL = "deepseek/deepseek-v4-flash";
+
+// Map a nav section to the document.title label (spawn/app resolve their dynamic name separately).
+function sectionLabel(section: Nav["section"]): string {
+  switch (section) {
+    case "templates": return "Templates";
+    case "my-apps":   return "My Apps";
+    case "publish":   return "Publish";
+    case "settings":  return "Settings";
+    case "app":       return ""; // caller substitutes appId
+    case "spawn":     return ""; // caller substitutes the spawn name
+  }
+}
 
 // A per-tab client id. crypto.randomUUID() only exists in a secure context (HTTPS or localhost), so
 // it's undefined on plain-HTTP LAN access (e.g. http://192.168.x.x:5173) — fall back so the app mounts.
@@ -27,6 +42,8 @@ function makeClientId(): string {
 const CLIENT_ID = makeClientId();
 
 export function App() {
+  const [nav, navigate] = useNav();
+  const [path] = useLocation(); // raw pathname, for the one-time "/" -> "/templates" normalize
   const { conn, connecting, connected, errored, reset, waiting, reconnecting } = useConnStatus();
   const [items, setItems] = useState<Item[]>([]);
   const [turn, setTurn] = useState<TurnState>({ state: "idle", queued: 0 });
@@ -207,6 +224,7 @@ export function App() {
       buffersRef.current.set(id, []);
       setActiveId(id);
       activeIdRef.current = id;
+      navigate({ section: "spawn", spawnId: id }); // URL follows; the effect's bindSpawn(id) early-returns (already bound)
       await refreshSpawns(); // sidebar shows the new spawn yellow immediately
     } catch (e: any) {
       errored();
@@ -214,7 +232,10 @@ export function App() {
     }
   };
 
-  const selectSpawn = (id: string) => {
+  // bindSpawn binds a spawn to the live ws. It is driven by nav (the reconciliation effect) and by
+  // imperative actions that already know the new id (spawnApp/onResume). It NEVER navigates or sets a
+  // view — the URL is authoritative; this only reconciles the socket. Self-guards when already bound.
+  const bindSpawn = (id: string) => {
     if (id === activeIdRef.current) return;
     lastSeqRef.current = 0;
     const prevId = activeIdRef.current;
@@ -237,6 +258,36 @@ export function App() {
     else if (sp?.status === "error" || sp?.status === "unreachable") errored();
     // suspended / unknown -> hidden (closeSession already reset())
   };
+
+  // Reconciliation: the URL is authoritative for which spawn is bound. When nav points at a spawn,
+  // bind it (bindSpawn self-guards when already bound). Leaving the spawn section does NOT tear down
+  // the ws — the bound spawn stays live in the background (matches today: switching to Templates keeps
+  // its socket open), so returning is instant.
+  useEffect(() => {
+    if (nav.section === "spawn" && nav.spawnId) bindSpawn(nav.spawnId);
+    // bindSpawn reads refs (activeIdRef/spawnsRef), not state — mirror the poll effect's pattern.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nav]);
+
+  // Normalize "/" -> "/templates" once on mount (replace, so it isn't a back-button trap).
+  useEffect(() => {
+    if (path === "/") navigate({ section: "templates" }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep document.title in sync with the current section (and the active spawn's name, when shown).
+  useEffect(() => {
+    let label: string;
+    if (nav.section === "app") {
+      label = nav.appId; // placeholder; sp-jpn.4 upgrades this to the real app title
+    } else if (nav.section === "spawn") {
+      const sp = spawns.find((s) => s.spawnId === nav.spawnId);
+      label = sp?.name || sp?.appId || nav.spawnId;
+    } else {
+      label = sectionLabel(nav.section);
+    }
+    document.title = `Spawnery — ${label}`;
+  }, [nav, spawns]);
 
   const onRename = async (id: string, name: string) => {
     setSpawns((xs) => xs.map((s) => (s.spawnId === id ? { ...s, name } : s))); // optimistic
@@ -263,6 +314,9 @@ export function App() {
       lastSeqRef.current = 0;
       const sp = spawnsRef.current.find((s) => s.spawnId === id);
       if (activeIdRef.current === id && sp?.mode !== "tmux") openSession(id);
+      // URL follows the resumed spawn. If it wasn't already bound, the nav change drives bindSpawn;
+      // its status may still be "starting", so the poll opens the ws — that's fine.
+      navigate({ section: "spawn", spawnId: id });
     } catch (e: any) { toast.error("Resume failed: " + e.message); }
     refreshSpawns();
   };
@@ -270,7 +324,11 @@ export function App() {
     try { await deleteSpawn(id); } catch (e: any) { toast.error("Stop failed: " + e.message); }
     buffersRef.current.delete(id);
     turnsRef.current.delete(id);
-    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setTurn({ state: "idle", queued: 0 }); }
+    if (activeIdRef.current === id) {
+      closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setTurn({ state: "idle", queued: 0 });
+      navigate({ section: "templates" }); // the active spawn is gone — leave its URL
+    }
+    // stopping a non-active spawn does not navigate (the user stays where they are)
     refreshSpawns();
   };
 
@@ -296,8 +354,10 @@ export function App() {
       onSpawnApp={spawnApp}
       spawns={spawns}
       activeId={activeId}
-      actions={{ onSelectSpawn: selectSpawn, onRename, onSuspend, onResume, onStop }}
+      actions={{ onSelectSpawn: (id) => navigate({ section: "spawn", spawnId: id }), onRename, onSuspend, onResume, onStop }}
       onTermConn={onTermConn}
+      nav={nav}
+      navigate={navigate}
     />
   );
 }

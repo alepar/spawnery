@@ -9,6 +9,7 @@ import { TemplatesView } from "@/views/TemplatesView";
 import { SettingsView } from "@/views/SettingsView";
 import type { Item, TurnState } from "@/views/chat/types";
 import type { SpawnView } from "@/api/spawnlet";
+import type { Nav } from "@/nav/nav";
 
 export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp, spawns = [], activeId, actions, onTermConn }: {
   conn: ConnState | null;
@@ -23,6 +24,10 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
   actions?: SpawnActions;
   // tmux spawns' TerminalView reports its socket state here -> the chat-header ConnStatus dot.
   onTermConn?: (s: "connecting" | "connected" | "reconnecting") => void;
+  // URL-authoritative nav, threaded from App. Not consumed yet (sp-jpn.4 wires rendering to it);
+  // accepted now so the URL + socket-binding work in App can pass the nav down without a type break.
+  nav?: Nav;
+  navigate?: (nav: Nav, opts?: { replace?: boolean }) => void;
 }) {
   const [view, setView] = useState<View>("templates");
   const onSpawn = (appId: string, image?: string, runnableId?: string) => { onSpawnApp(appId, image, runnableId); setView("chat"); };
