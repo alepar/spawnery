@@ -16,6 +16,7 @@ default:
 spawnlet agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev \
+    AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code" } }}" \
     DATA_ROOT={{data_root}} SPAWNLET_ADDR={{addr}} \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
     {{repo}}/bin/spawnlet
@@ -29,6 +30,7 @@ cp:
 node agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
+    AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
     NODE_CLASS=self-hosted EGRESS_ENFORCE=false \
     NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
