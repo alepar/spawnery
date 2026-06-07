@@ -400,14 +400,15 @@ func ACPSessionUpdate(sessionID, kind, text string) ACPUpdateParams {
 	}
 }
 
-// PermissionToACPOptions returns the canonical four ACP permission options the
-// node's pickPermOption selects from (it matches on Kind containing allow/reject).
+// PermissionToACPOptions returns the ACP permission options that faithfully mirror opencode's real
+// permission model. opencode answers a permission with once|always|reject (RespondPermission) — it has
+// a persistent ALLOW (`always`) but NO persistent reject, so we offer three honestly-kinded options
+// rather than a fabricated reject_always that would collapse to the same `reject` as reject_once.
 func PermissionToACPOptions() []ACPOption {
 	return []ACPOption{
 		{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
 		{OptionID: "allow_always", Name: "Allow always", Kind: "allow_always"},
-		{OptionID: "reject_once", Name: "Reject once", Kind: "reject_once"},
-		{OptionID: "reject_always", Name: "Reject always", Kind: "reject_always"},
+		{OptionID: "reject_once", Name: "Reject", Kind: "reject_once"},
 	}
 }
 

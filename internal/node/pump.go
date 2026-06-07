@@ -19,9 +19,9 @@ const maxQueued = 50
 const defaultPermTimeout = 2 * time.Minute
 
 type pendingPerm struct {
-	agentID int             // the agent request id to respond to
-	options json.RawMessage // raw options array, to pick allow/deny optionId
-	title   string          // human-readable tool title from agent (for the perm_request frame + re-send)
+	agentID int          // the agent request id to respond to
+	options []PermOption // the agent's permission options (optionId/name/kind), carried to the client
+	title   string       // human-readable tool title from agent (for the perm_request frame + re-send)
 	timer   *time.Timer
 }
 
@@ -148,7 +148,7 @@ func (p *Pump) attachClient(clientID string, cursor int64, send frameSender) {
 	// prompt; its later response no-ops in resolvePermission. Acceptable for an interactive prompt.
 	var perms [][]byte
 	for reqID, pp := range p.pending {
-		perms = append(perms, encodeFrame(Frame{Kind: "perm_request", ReqID: reqID, Title: pp.title}))
+		perms = append(perms, encodeFrame(Frame{Kind: "perm_request", ReqID: reqID, Title: pp.title, Options: pp.options}))
 	}
 	p.mu.Unlock()
 	for _, line := range perms {
@@ -553,7 +553,7 @@ func (p *Pump) fromClient(clientID string, line []byte) {
 		}
 		p.mu.Unlock() // over cap -> drop (the web also gates on MAX_QUEUED)
 	case "perm_response":
-		p.resolvePermission(f.ReqID, f.Allow)
+		p.resolvePermission(f.ReqID, f.OptionID)
 	}
 }
 
@@ -574,7 +574,7 @@ func (p *Pump) onPermissionRequest(m acp.Message) {
 	}
 	reqID := strconv.Itoa(agentID)
 	var pr struct {
-		Options  json.RawMessage `json:"options"`
+		Options  []PermOption `json:"options"`
 		ToolCall struct {
 			Title string `json:"title"`
 		} `json:"toolCall"`
@@ -590,22 +590,26 @@ func (p *Pump) onPermissionRequest(m acp.Message) {
 		return
 	}
 	pp := &pendingPerm{agentID: agentID, options: pr.Options, title: title}
-	pp.timer = time.AfterFunc(p.permTimeout, func() { p.resolvePermission(reqID, false) })
+	// An unanswered prompt auto-denies: forward a reject-ish option (empty optionId selects one).
+	pp.timer = time.AfterFunc(p.permTimeout, func() { p.resolvePermission(reqID, "") })
 	p.pending[reqID] = pp
 	clients := make([]frameSender, 0, len(p.clients))
 	for _, c := range p.clients {
 		clients = append(clients, c.send)
 	}
 	p.mu.Unlock()
-	line := encodeFrame(Frame{Kind: "perm_request", ReqID: reqID, Title: title})
+	// Carry the agent's real option list (optionId/name/kind) to the client so it can render N kinded
+	// buttons; the client's chosen optionId is forwarded back verbatim in resolvePermission.
+	line := encodeFrame(Frame{Kind: "perm_request", ReqID: reqID, Title: title, Options: pr.Options})
 	for _, send := range clients {
 		_ = send(line)
 	}
 }
 
 // resolvePermission answers a pending permission (first answer wins; later/duplicate are no-ops) by
-// forwarding the chosen option to agent. Called by perm_response and by the auto-deny timer.
-func (p *Pump) resolvePermission(reqID string, allow bool) {
+// forwarding the chosen optionId to the agent. Called by perm_response (with the client's selected
+// optionId) and by the auto-deny timer (with "" — which selects a reject-ish option).
+func (p *Pump) resolvePermission(reqID string, optionID string) {
 	p.mu.Lock()
 	pp := p.pending[reqID]
 	if pp == nil {
@@ -615,31 +619,22 @@ func (p *Pump) resolvePermission(reqID string, allow bool) {
 	delete(p.pending, reqID)
 	pp.timer.Stop()
 	agentID := pp.agentID
-	optID := pickPermOption(pp.options, allow)
+	if optionID == "" {
+		optionID = rejectOptionID(pp.options) // auto-deny / dismissed: pick a reject-ish option
+	}
 	p.mu.Unlock()
-	resp, _ := json.Marshal(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optID}})
+	resp, _ := json.Marshal(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optionID}})
 	var buf bytes.Buffer
 	_ = acp.WriteMessage(&buf, acp.Message{ID: acp.IntID(agentID), Result: resp})
 	p.sendLine(buf.Bytes())
 }
 
-// pickPermOption chooses an allow-ish (or reject-ish) optionId from the agent options, falling back to
-// the first option. Mirrors web/src/acp/client.ts handlePermission.
-func pickPermOption(options json.RawMessage, allow bool) string {
-	var opts []struct {
-		OptionID string `json:"optionId"`
-		Kind     string `json:"kind"`
-	}
-	_ = json.Unmarshal(options, &opts)
-	want := []string{"reject", "deny"}
-	if allow {
-		want = []string{"allow"}
-	}
+// rejectOptionID picks a reject-ish optionId from the agent options for the auto-deny / dismissed path,
+// falling back to the first option (then "" if there are none).
+func rejectOptionID(opts []PermOption) string {
 	for _, o := range opts {
-		for _, w := range want {
-			if strings.Contains(o.Kind, w) {
-				return o.OptionID
-			}
+		if strings.Contains(o.Kind, "reject") || strings.Contains(o.Kind, "deny") {
+			return o.OptionID
 		}
 	}
 	if len(opts) > 0 {

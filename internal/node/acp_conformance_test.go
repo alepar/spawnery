@@ -51,19 +51,22 @@ func TestUpdateToFrame_CanonicalACP(t *testing.T) {
 	}
 }
 
-func TestPickPermOption_CanonicalACPKinds(t *testing.T) {
-	// The four canonical ACP PermissionOption kinds, as the opencode adapter emits.
-	opts := json.RawMessage(`[
-		{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},
-		{"optionId":"allow_always","name":"Allow always","kind":"allow_always"},
-		{"optionId":"reject_once","name":"Reject once","kind":"reject_once"},
-		{"optionId":"reject_always","name":"Reject always","kind":"reject_always"}
-	]`)
-
-	if got := pickPermOption(opts, true); got != "allow_once" && got != "allow_always" {
-		t.Fatalf("allow should pick an allow_* option, got %q", got)
+func TestRejectOptionID_CanonicalACPKinds(t *testing.T) {
+	// The canonical ACP PermissionOption kinds, as the opencode adapter emits. The node forwards the
+	// client's chosen optionId verbatim; rejectOptionID only chooses the auto-deny / dismissed fallback.
+	opts := []PermOption{
+		{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
+		{OptionID: "allow_always", Name: "Allow always", Kind: "allow_always"},
+		{OptionID: "reject_once", Name: "Reject", Kind: "reject_once"},
 	}
-	if got := pickPermOption(opts, false); got != "reject_once" && got != "reject_always" {
-		t.Fatalf("deny should pick a reject_* option, got %q", got)
+	if got := rejectOptionID(opts); got != "reject_once" {
+		t.Fatalf("auto-deny should pick the reject option, got %q", got)
+	}
+	// No reject-ish option -> fall back to the first; empty set -> "".
+	if got := rejectOptionID([]PermOption{{OptionID: "ok", Kind: "allow"}}); got != "ok" {
+		t.Fatalf("fallback should be the first option, got %q", got)
+	}
+	if got := rejectOptionID(nil); got != "" {
+		t.Fatalf("empty options should yield \"\", got %q", got)
 	}
 }

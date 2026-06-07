@@ -1,7 +1,7 @@
 import { MessageList } from "./chat/MessageList";
 import { PromptInput } from "./chat/PromptInput";
 import { PermissionModal } from "./chat/PermissionModal";
-import type { Item, TurnState } from "./chat/types";
+import type { Item, TurnState, PermPrompt } from "./chat/types";
 import { turnEndLabel } from "@/lib/turn";
 
 export function ChatView({ items, turn, canSend, onSend, perm, focusKey }: {
@@ -9,7 +9,7 @@ export function ChatView({ items, turn, canSend, onSend, perm, focusKey }: {
   turn: TurnState;
   canSend: boolean;
   onSend: (t: string) => void;
-  perm: { title: string; resolve: (b: boolean) => void } | null;
+  perm: PermPrompt | null;
   focusKey?: string | null;
 }) {
   return (
@@ -21,7 +21,7 @@ export function ChatView({ items, turn, canSend, onSend, perm, focusKey }: {
         endLabel={turn.state === "idle" ? turnEndLabel(turn) : null}
       />
       <PromptInput disabled={!canSend} onSend={onSend} focusKey={focusKey} />
-      {perm && <PermissionModal title={perm.title} onResolve={perm.resolve} />}
+      {perm && <PermissionModal title={perm.title} options={perm.options} onResolve={perm.resolve} />}
     </div>
   );
 }

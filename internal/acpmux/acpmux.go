@@ -614,7 +614,8 @@ func (m *Mux) onPermissionRequest(msg acp.Message) {
 		return
 	}
 	pp := &pendingPerm{upstreamID: upID, options: pr.Options, title: title}
-	pp.timer = time.AfterFunc(m.permTimeout, func() { m.resolvePermission(reqID, false) })
+	// Unanswered -> auto-deny: "" selects a reject-ish option from the upstream set.
+	pp.timer = time.AfterFunc(m.permTimeout, func() { m.resolvePermission(reqID, "") })
 	m.pending[reqID] = pp
 	clients := make([]*dsClient, 0, len(m.clients))
 	for _, c := range m.clients {
@@ -643,20 +644,21 @@ func (m *Mux) onPermissionRequest(msg acp.Message) {
 	}
 }
 
-// onClientPermResponse routes a downstream client's permission answer (the
-// option selected) to resolvePermission. The downstream id equals the upstream
-// id (see onPermissionRequest). First answer wins.
+// onClientPermResponse routes a downstream client's permission answer to
+// resolvePermission, forwarding the EXACT optionId the client selected upstream
+// (no binary allow/deny collapse — a client's allow_always stays allow_always).
+// The downstream id equals the upstream id (see onPermissionRequest). First
+// answer wins; a cancelled/unknown outcome maps to an auto-deny ("").
 func (m *Mux) onClientPermResponse(id int, result json.RawMessage) {
 	reqID := strconv.Itoa(id)
-	allow := outcomeAllows(result)
-	m.resolvePermission(reqID, allow)
+	m.resolvePermission(reqID, selectedOptionID(result))
 }
 
 // resolvePermission answers a pending upstream permission (first answer wins;
-// later/duplicate are no-ops) by forwarding a chosen option upstream. Called by
-// a client response and by the auto-deny timer. Ported from
-// pump.resolvePermission.
-func (m *Mux) resolvePermission(reqID string, allow bool) {
+// later/duplicate are no-ops) by forwarding the chosen optionId upstream. Called
+// by a client response (with the selected optionId) and by the auto-deny timer
+// (with "" — which selects a reject-ish upstream option).
+func (m *Mux) resolvePermission(reqID string, optID string) {
 	m.mu.Lock()
 	pp := m.pending[reqID]
 	if pp == nil {
@@ -666,7 +668,9 @@ func (m *Mux) resolvePermission(reqID string, allow bool) {
 	delete(m.pending, reqID)
 	pp.timer.Stop()
 	upstreamID := pp.upstreamID
-	optID := pickPermOption(pp.options, allow)
+	if optID == "" {
+		optID = rejectOptionID(pp.options) // auto-deny / cancelled: pick a reject-ish option
+	}
 	m.mu.Unlock()
 
 	resp, _ := json.Marshal(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optID}})
@@ -724,47 +728,33 @@ func promptText(params json.RawMessage) string {
 	return out
 }
 
-// outcomeAllows inspects a downstream permission response result to decide
-// whether the client allowed the action. ACP responses carry
-// {"outcome":{"outcome":"selected","optionId":...}} or {"outcome":{"outcome":"cancelled"}}.
-// We treat a selected option whose id doesn't look like a reject as allow.
-func outcomeAllows(result json.RawMessage) bool {
+// selectedOptionID extracts the optionId a downstream client selected. ACP responses carry
+// {"outcome":{"outcome":"selected","optionId":...}} or {"outcome":{"outcome":"cancelled"}}; a
+// cancelled/unknown outcome yields "" (the caller treats "" as an auto-deny).
+func selectedOptionID(result json.RawMessage) string {
 	var r struct {
 		Outcome struct {
 			Outcome  string `json:"outcome"`
 			OptionID string `json:"optionId"`
 		} `json:"outcome"`
 	}
-	if json.Unmarshal(result, &r) != nil {
-		return false
+	if json.Unmarshal(result, &r) != nil || r.Outcome.Outcome != "selected" {
+		return ""
 	}
-	if r.Outcome.Outcome != "selected" {
-		return false // cancelled / unknown -> deny
-	}
-	low := strings.ToLower(r.Outcome.OptionID)
-	if strings.Contains(low, "reject") || strings.Contains(low, "deny") {
-		return false
-	}
-	return true
+	return r.Outcome.OptionID
 }
 
-// pickPermOption chooses an allow-ish (or reject-ish) optionId from the upstream
-// options, falling back to the first option. Ported from pump.pickPermOption.
-func pickPermOption(options json.RawMessage, allow bool) string {
+// rejectOptionID picks a reject-ish optionId from the upstream options for the auto-deny / cancelled
+// path, falling back to the first option (then "" if there are none).
+func rejectOptionID(options json.RawMessage) string {
 	var opts []struct {
 		OptionID string `json:"optionId"`
 		Kind     string `json:"kind"`
 	}
 	_ = json.Unmarshal(options, &opts)
-	want := []string{"reject", "deny"}
-	if allow {
-		want = []string{"allow"}
-	}
 	for _, o := range opts {
-		for _, w := range want {
-			if strings.Contains(o.Kind, w) {
-				return o.OptionID
-			}
+		if strings.Contains(o.Kind, "reject") || strings.Contains(o.Kind, "deny") {
+			return o.OptionID
 		}
 	}
 	if len(opts) > 0 {

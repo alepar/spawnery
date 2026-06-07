@@ -19,7 +19,6 @@ func TestFrameRoundTrip(t *testing.T) {
 		{Kind: "perm_request", ReqID: "p1", Title: "allow fs?"},
 		{Kind: "reset", FromSeq: 10},
 		{Kind: "prompt", Text: "do it"},
-		{Kind: "perm_response", ReqID: "p1", Allow: true},
 		// new typed payloads
 		{Seq: 6, Kind: "tool", ToolID: "t2", Tool: &ToolPayload{
 			Content:   []ContentBlock{{Type: "text", Text: "out"}},
@@ -67,7 +66,7 @@ func TestFrameByteStable_ExistingKinds(t *testing.T) {
 		{Frame{Kind: "perm_request", ReqID: "p1", Title: "allow?"}, `{"kind":"perm_request","title":"allow?","reqId":"p1"}`},
 		{Frame{Kind: "reset", FromSeq: 10}, `{"kind":"reset","fromSeq":10}`},
 		{Frame{Kind: "prompt", Text: "go"}, `{"kind":"prompt","text":"go"}`},
-		{Frame{Kind: "perm_response", ReqID: "p1", Allow: true}, `{"kind":"perm_response","reqId":"p1","allow":true}`},
+		{Frame{Kind: "perm_response", ReqID: "p1", OptionID: "allow_once"}, `{"kind":"perm_response","reqId":"p1","optionId":"allow_once"}`},
 	}
 	for _, tc := range cases {
 		got := strings.TrimRight(string(encodeFrame(tc.f)), "\n")

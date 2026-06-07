@@ -321,9 +321,13 @@ func TestPermissionBroadcastFirstWins(t *testing.T) {
 	pa := waitKind(t, a, "perm_request")
 	waitKind(t, b, "perm_request")
 	if pa.Seq != 0 { t.Fatalf("perm_request must be transient (seq 0), got %d", pa.Seq) }
-	// b answers first; a's later answer is a no-op.
-	p.fromClient("b", encodeFrame(Frame{Kind: "perm_response", ReqID: pa.ReqID, Allow: true}))
-	p.fromClient("a", encodeFrame(Frame{Kind: "perm_response", ReqID: pa.ReqID, Allow: false}))
+	// The agent's real options ride the perm_request frame (un-flattened), so the client can choose by id.
+	if len(pa.Options) != 2 || pa.Options[0].OptionID != "allow" || pa.Options[1].OptionID != "reject" {
+		t.Fatalf("perm_request must carry the agent options, got %+v", pa.Options)
+	}
+	// b answers first (selects allow); a's later answer is a no-op.
+	p.fromClient("b", encodeFrame(Frame{Kind: "perm_response", ReqID: pa.ReqID, OptionID: "allow"}))
+	p.fromClient("a", encodeFrame(Frame{Kind: "perm_response", ReqID: pa.ReqID, OptionID: "reject"}))
 	// turn completes -> both clients see an idle turn frame.
 	waitTurnIdle := func(c *capSender) {
 		deadline := time.Now().Add(2 * time.Second)

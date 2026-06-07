@@ -21,7 +21,6 @@ type Frame struct {
 	State   string `json:"state,omitempty"`   // turn: busy|idle
 	Queued  int    `json:"queued,omitempty"`  // turn
 	ReqID   string `json:"reqId,omitempty"`   // perm_request / perm_response
-	Allow   bool   `json:"allow,omitempty"`   // perm_response (DEPRECATED: removed in sp-ufz.8 once OptionID lands)
 	FromSeq int64  `json:"fromSeq,omitempty"` // reset
 
 	// new optional payloads — appended after existing fields so existing kinds are wire-identical

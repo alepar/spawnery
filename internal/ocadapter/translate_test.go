@@ -54,12 +54,20 @@ func TestPermissionOptionsAndMapping(t *testing.T) {
 	opts := PermissionToACPOptions()
 	kinds := map[string]bool{}
 	for _, o := range opts {
+		if o.OptionID == "" || o.Name == "" || o.Kind == "" {
+			t.Fatalf("option missing optionId/name/kind: %+v", o)
+		}
 		kinds[o.Kind] = true
 	}
-	for _, want := range []string{"allow_once", "allow_always", "reject_once", "reject_always"} {
+	// opencode's real model is once|always|reject — a persistent ALLOW but NO persistent reject — so the
+	// adapter offers exactly these three honestly-kinded options (no fabricated reject_always).
+	for _, want := range []string{"allow_once", "allow_always", "reject_once"} {
 		if !kinds[want] {
 			t.Fatalf("missing ACP option kind %q", want)
 		}
+	}
+	if kinds["reject_always"] {
+		t.Fatal("reject_always must NOT be offered: opencode has no persistent reject (it would collapse to reject)")
 	}
 	if ACPOptionIDToOpencodeResponse("allow_once") != "once" ||
 		ACPOptionIDToOpencodeResponse("allow_always") != "always" ||

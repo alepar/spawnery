@@ -1,4 +1,4 @@
-import type { ContentBlock, Diff, ErrorInfo } from "@/acp/frames";
+import type { ContentBlock, Diff, ErrorInfo, PermOption } from "@/acp/frames";
 
 export type Item =
   | { id: number; kind: "user"; text: string; pending?: boolean }
@@ -19,3 +19,7 @@ export type Item =
 // TurnState mirrors the `turn` Frame. reason/error are populated when a turn ends for a non-normal
 // reason (cat G); a normal end_turn leaves them undefined so the UI shows nothing new.
 export type TurnState = { state: "busy" | "idle"; queued: number; reason?: string; error?: ErrorInfo };
+
+// PermPrompt is an active permission request shown in the modal. options are the agent's real kinded
+// choices (cat H); resolve sends the picked optionId ("" = dismissed -> the node auto-denies).
+export type PermPrompt = { title: string; options: PermOption[]; resolve: (optionId: string) => void };

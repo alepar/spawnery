@@ -11,7 +11,7 @@ import { useConnStatus } from "./shell/useConnStatus";
 import { ReconnectingSocket } from "./shell/reconnectingSocket";
 import { nextConnAction } from "./shell/connPolicy";
 import { initialTheme, setTheme } from "./lib/theme";
-import type { Item, TurnState } from "./views/chat/types";
+import type { Item, TurnState, PermPrompt } from "./views/chat/types";
 import { reconcilePending, MAX_QUEUED } from "./lib/turn";
 import { upsertTool as upsertToolItems } from "./lib/toolChip";
 
@@ -31,7 +31,7 @@ export function App() {
   const { conn, connecting, connected, errored, reset, waiting, reconnecting } = useConnStatus();
   const [items, setItems] = useState<Item[]>([]);
   const [turn, setTurn] = useState<TurnState>({ state: "idle", queued: 0 });
-  const [perm, setPerm] = useState<{ title: string; resolve: (b: boolean) => void } | null>(null);
+  const [perm, setPerm] = useState<PermPrompt | null>(null);
   const [spawns, setSpawns] = useState<SpawnView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
 
@@ -106,9 +106,11 @@ export function App() {
       case "perm_request":
         // resolve uses the CURRENT socket at click time: if the user switched spawns first, the
         // perm_response targets the new socket and the node no-ops the unknown reqId (harmless).
+        // optionId is the agent option the user picked (cat H); "" (dismiss) lets the node auto-deny.
         setPerm({
           title: f.title ?? "an action",
-          resolve: (allow) => { setPerm(null); wsRef.current?.send(encodePermResponse(f.reqId ?? "", allow)); },
+          options: f.options ?? [],
+          resolve: (optionId) => { setPerm(null); wsRef.current?.send(encodePermResponse(f.reqId ?? "", optionId)); },
         });
         break;
     }

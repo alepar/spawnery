@@ -130,7 +130,7 @@ func TestAdapterPermissionRoundTrip(t *testing.T) {
 		t.Fatal("permission request must have an id")
 	}
 	line := mustLine(req)
-	for _, k := range []string{"allow_once", "allow_always", "reject_once", "reject_always"} {
+	for _, k := range []string{"allow_once", "allow_always", "reject_once"} {
 		if !strings.Contains(line, k) {
 			t.Fatalf("missing option kind %q in %s", k, line)
 		}

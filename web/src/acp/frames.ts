@@ -29,14 +29,16 @@ export type Frame =
   | (FrameBase & { kind: "perm_request"; reqId?: string; title?: string; options?: PermOption[] })
   | (FrameBase & { kind: "reset"; fromSeq?: number })
   | (FrameBase & { kind: "prompt"; text?: string })
-  | (FrameBase & { kind: "perm_response"; reqId?: string; allow?: boolean; optionId?: string })
+  | (FrameBase & { kind: "perm_response"; reqId?: string; optionId?: string })
   | (FrameBase & { kind: "cancel" })
   | (FrameBase & { kind: "set_mode"; modeId?: string });
 
 const enc = new TextEncoder();
 export function encodePrompt(text: string): Uint8Array { return enc.encode(JSON.stringify({ kind: "prompt", text }) + "\n"); }
-export function encodePermResponse(reqId: string, allow: boolean): Uint8Array {
-  return enc.encode(JSON.stringify({ kind: "perm_response", reqId, allow }) + "\n");
+// optionId is the agent option the user picked (e.g. "allow_once"); "" means dismissed -> the node
+// auto-denies (selects a reject-ish option). Replaces the old binary allow boolean (sp-ufz.8).
+export function encodePermResponse(reqId: string, optionId: string): Uint8Array {
+  return enc.encode(JSON.stringify({ kind: "perm_response", reqId, optionId }) + "\n");
 }
 // cancel / set_mode encoders mirror the existing upward frames. pump-side wiring lands in sp-ufz.12/.13.
 export function encodeCancel(): Uint8Array { return enc.encode(JSON.stringify({ kind: "cancel" }) + "\n"); }

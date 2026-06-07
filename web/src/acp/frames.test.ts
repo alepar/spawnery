@@ -4,7 +4,7 @@ import { encodePrompt, encodePermResponse, encodeCancel, encodeSetMode, decodeFr
 describe("frames codec", () => {
   it("keeps existing encoders byte-stable", () => {
     expect(new TextDecoder().decode(encodePrompt("hi"))).toBe(`{"kind":"prompt","text":"hi"}\n`);
-    expect(new TextDecoder().decode(encodePermResponse("p1", true))).toBe(`{"kind":"perm_response","reqId":"p1","allow":true}\n`);
+    expect(new TextDecoder().decode(encodePermResponse("p1", "allow_once"))).toBe(`{"kind":"perm_response","reqId":"p1","optionId":"allow_once"}\n`);
   });
   it("encodes cancel and set_mode control frames", () => {
     expect(new TextDecoder().decode(encodeCancel())).toBe(`{"kind":"cancel"}\n`);

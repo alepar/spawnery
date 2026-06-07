@@ -7,7 +7,7 @@ import { ChatView } from "@/views/ChatView";
 import { TerminalView } from "@/views/TerminalView";
 import { MarketplaceView } from "@/views/MarketplaceView";
 import { SettingsView } from "@/views/SettingsView";
-import type { Item, TurnState } from "@/views/chat/types";
+import type { Item, TurnState, PermPrompt } from "@/views/chat/types";
 import type { SpawnView } from "@/api/spawnlet";
 
 export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp, spawns = [], activeId, actions, onTermConn }: {
@@ -16,7 +16,7 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
   turn: TurnState;
   canSend: boolean;
   onSend: (t: string) => void;
-  perm: { title: string; resolve: (b: boolean) => void } | null;
+  perm: PermPrompt | null;
   onSpawnApp: (appId: string, image?: string, runnableId?: string) => void;
   spawns?: SpawnView[];
   activeId?: string | null;
