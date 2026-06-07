@@ -39,6 +39,32 @@ COPY deploy/agent/entrypoint.sh /entrypoint.sh
 COPY deploy/agent/spawn-tui.sh /usr/local/bin/spawn-tui
 COPY deploy/agent/spawn-tmux /usr/local/bin/spawn-tmux
 RUN chmod +x /entrypoint.sh /usr/local/bin/spawn-tui /usr/local/bin/spawn-tmux
+
+# goose CLI (Block) — TUI/ACP agent
+RUN set -eux; \
+    curl -fsSL -o /tmp/goose.tar.bz2 \
+      "https://github.com/block/goose/releases/download/stable/goose-x86_64-unknown-linux-gnu.tar.bz2"; \
+    tar -xjf /tmp/goose.tar.bz2 -C /usr/local/bin; \
+    rm /tmp/goose.tar.bz2; \
+    /usr/local/bin/goose --version
+
+# claude-code (Anthropic) — native binary via the Debian apt repo
+RUN set -eux; \
+    install -d -m 0755 /etc/apt/keyrings; \
+    curl -fsSL https://downloads.claude.ai/keys/claude-code.asc -o /etc/apt/keyrings/claude-code.asc; \
+    echo "deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/stable stable main" > /etc/apt/sources.list.d/claude-code.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends claude-code; \
+    rm -rf /var/lib/apt/lists/*; \
+    claude --version
+
+# toad (Batrachian) — Python TUI/ACP agent, via uv-managed Python 3.14
+ENV UV_INSTALL_DIR=/usr/local/bin
+RUN set -eux; \
+    curl -fsSL https://astral.sh/uv/install.sh | sh; \
+    uv tool install batrachian-toad --python 3.14; \
+    ln -sf /root/.local/bin/toad /usr/local/bin/toad; \
+    /usr/local/bin/toad --version
 # Pre-run the one-time SQLite migration + models.json fetch at build time (network available here),
 # so a fresh container is ready in seconds instead of doing a multi-minute first-run migration.
 RUN sh -c 'opencode serve --port 4096 --hostname 127.0.0.1 >/tmp/m.log 2>&1 & P=$!; \
