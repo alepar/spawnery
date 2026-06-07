@@ -13,6 +13,7 @@ import (
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/gen/node/v1/nodev1connect"
+	"spawnery/internal/agentcaps"
 	"spawnery/internal/spawnlet"
 )
 
@@ -45,9 +46,10 @@ type attacher struct {
 	mgr   *spawnlet.Manager
 	httpc connect.HTTPClient
 
-	mu     sync.Mutex
-	pumps  map[string]*Pump
-	active uint32
+	mu         sync.Mutex
+	pumps      map[string]*Pump
+	tmuxRelays map[string]*tmuxRelay
+	active     uint32
 
 	sendMu sync.Mutex
 	stream cpStream
@@ -108,7 +110,8 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
-		pumps: map[string]*Pump{},
+		pumps:      map[string]*Pump{},
+		tmuxRelays: map[string]*tmuxRelay{},
 	}
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)
@@ -266,6 +269,21 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
 		return
 	}
+	// tmux-mode spawns: register a raw-PTY relay per client (no ACP handshake, no Pump).
+	// Goes ACTIVE immediately after the relay is registered.
+	if st.Mode == string(agentcaps.ModeTmux) {
+		relay := newTmuxRelay(a.mgr.TmuxAttachArgv(sp.AgentID, "spawn"), func(clientID string, data []byte) error {
+			return a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{
+				SpawnId: st.SpawnId, ClientId: clientID, Data: data,
+			}}})
+		})
+		a.mu.Lock()
+		a.tmuxRelays[st.SpawnId] = relay
+		a.active++
+		a.mu.Unlock()
+		a.status(st.SpawnId, nodev1.SpawnPhase_ACTIVE, "")
+		return
+	}
 	att, err := a.mgr.Attach(ctx, sp)
 	if err != nil {
 		logErr("startSpawn attach "+st.SpawnId, err)
@@ -313,9 +331,14 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 	a.mu.Lock()
 	p := a.pumps[spawnID]
 	delete(a.pumps, spawnID)
+	relay := a.tmuxRelays[spawnID]
+	delete(a.tmuxRelays, spawnID)
 	a.mu.Unlock()
 	if p != nil {
 		p.stop()
+	}
+	if relay != nil {
+		relay.stop()
 	}
 	if err := a.mgr.Stop(ctx, spawnID); err != nil {
 		logErr("stopSpawn "+spawnID, err)
@@ -330,8 +353,15 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 
 func (a *attacher) attachClient(spawnID, clientID string, cursor int64) {
 	a.mu.Lock()
+	relay := a.tmuxRelays[spawnID]
 	p := a.pumps[spawnID]
 	a.mu.Unlock()
+	if relay != nil {
+		if err := relay.attach(context.Background(), clientID); err != nil {
+			log.Printf("tmux attach %s/%s: %v", spawnID, clientID, err)
+		}
+		return
+	}
 	if p == nil {
 		log.Printf("warn: attachClient: no pump for spawn %s", spawnID)
 		return
@@ -346,8 +376,13 @@ func (a *attacher) attachClient(spawnID, clientID string, cursor int64) {
 
 func (a *attacher) detachClient(spawnID, clientID string) {
 	a.mu.Lock()
+	relay := a.tmuxRelays[spawnID]
 	p := a.pumps[spawnID]
 	a.mu.Unlock()
+	if relay != nil {
+		relay.detach(clientID)
+		return
+	}
 	if p != nil {
 		p.detachClient(clientID)
 	}
@@ -355,8 +390,13 @@ func (a *attacher) detachClient(spawnID, clientID string) {
 
 func (a *attacher) fromClient(spawnID, clientID string, data []byte) {
 	a.mu.Lock()
+	relay := a.tmuxRelays[spawnID]
 	p := a.pumps[spawnID]
 	a.mu.Unlock()
+	if relay != nil {
+		relay.fromClient(clientID, data)
+		return
+	}
 	if p != nil {
 		p.fromClient(clientID, data)
 	}

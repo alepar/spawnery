@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	connectrpc.com/connect v1.20.0
 	github.com/coder/websocket v1.8.14
+	github.com/creack/pty v1.1.24
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
