@@ -34,9 +34,18 @@ describe("listSpawns", () => {
     const out = await listSpawns();
     expect(calls[0].url).toContain("/cp.v1.SpawnService/ListSpawns");
     expect(out).toEqual([
-      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active" },
-      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended" },
+      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "" },
+      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", mode: "" },
     ]);
+  });
+  it("maps mode from the response", async () => {
+    mockFetch({
+      spawns: [
+        { spawnId: "c", name: "TUI", appId: "spawnery/goose", status: "SPAWN_STATUS_ACTIVE", mode: "tmux" },
+      ],
+    });
+    const out = await listSpawns();
+    expect(out[0].mode).toBe("tmux");
   });
   it("tolerates a missing spawns array", async () => {
     mockFetch({});

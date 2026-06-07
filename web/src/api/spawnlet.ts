@@ -9,6 +9,7 @@ export interface SpawnView {
   name: string;
   appId: string;
   status: SpawnStatus;
+  mode: string;
 }
 
 // statusFromProto maps the Connect-JSON enum NAME (e.g. "SPAWN_STATUS_ACTIVE") to a short status.
@@ -30,7 +31,7 @@ export async function createSpawn(appId: string, model: string, image = "", runn
 }
 
 export async function listSpawns(): Promise<SpawnView[]> {
-  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string }> }>(
+  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; mode?: string }> }>(
     "ListSpawns", {},
   );
   return (r.spawns ?? []).map((s) => ({
@@ -38,6 +39,7 @@ export async function listSpawns(): Promise<SpawnView[]> {
     name: s.name ?? "",
     appId: s.appId ?? "",
     status: statusFromProto(s.status),
+    mode: s.mode ?? "",
   }));
 }
 
