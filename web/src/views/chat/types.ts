@@ -1,4 +1,4 @@
-import type { ContentBlock, Diff, ErrorInfo, PermOption } from "@/acp/frames";
+import type { ContentBlock, Diff, ErrorInfo, PermOption, PlanEntry } from "@/acp/frames";
 
 export type Item =
   | { id: number; kind: "user"; text: string; pending?: boolean }
@@ -14,7 +14,10 @@ export type Item =
       rawInput?: unknown;
       rawOutput?: unknown;
     }
-  | { id: number; kind: "thought"; text: string };
+  | { id: number; kind: "thought"; text: string }
+  // The agent's plan/todo checklist (cat C). Replace-in-place: one plan item, swapped wholesale by
+  // each plan frame (see lib/plan.ts). entries advance pending -> in_progress -> completed.
+  | { id: number; kind: "plan"; entries: PlanEntry[] };
 
 // TurnState mirrors the `turn` Frame. reason/error are populated when a turn ends for a non-normal
 // reason (cat G); a normal end_turn leaves them undefined so the UI shows nothing new.

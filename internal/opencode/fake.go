@@ -180,6 +180,13 @@ func (f *Fake) EmitToolPart(sid, callID, tool, status, input, output string) {
 		sid, callID, tool, state))
 }
 
+// EmitTodoUpdated emits a todo.updated event carrying the FULL current todo list for a session.
+// todosJSON is a raw JSON array literal of opencode todos (e.g.
+// `[{"id":"1","content":"do x","status":"pending","priority":"high"}]`).
+func (f *Fake) EmitTodoUpdated(sid, todosJSON string) {
+	f.Emit("todo.updated", fmt.Sprintf(`{"sessionID":%q,"todos":%s}`, sid, todosJSON))
+}
+
 // EmitPermissionAsked emits a permission.asked event for a session.
 func (f *Fake) EmitPermissionAsked(sid, permID string) {
 	f.Emit("permission.asked", fmt.Sprintf(`{"id":%q,"sessionID":%q,"permission":"bash","patterns":[],"metadata":{},"always":[],"tool":{"messageID":"msg_1","callID":"c1"}}`, permID, sid))

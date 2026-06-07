@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import type { Item } from "./types";
 import { ToolCallChip } from "./ToolCallChip";
 import { Thoughts } from "./Thoughts";
+import { PlanChecklist } from "./PlanChecklist";
 
 const Row = memo(function Row({ item }: { item: Item }) {
   if (item.kind === "tool")
@@ -19,6 +20,7 @@ const Row = memo(function Row({ item }: { item: Item }) {
       />
     );
   if (item.kind === "thought") return <Thoughts text={item.text} />;
+  if (item.kind === "plan") return <PlanChecklist entries={item.entries} />;
 
   const isUser = item.kind === "user";
   const pending = isUser && item.pending;

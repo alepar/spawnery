@@ -377,6 +377,7 @@ func updateToFrame(params json.RawMessage) (Frame, bool) {
 			Status        string          `json:"status"`
 			RawInput      json.RawMessage `json:"rawInput"`
 			RawOutput     json.RawMessage `json:"rawOutput"`
+			Entries       json.RawMessage `json:"entries"` // plan (cat C): the FULL current plan list
 		} `json:"update"`
 	}
 	if json.Unmarshal(params, &u) != nil {
@@ -400,8 +401,25 @@ func updateToFrame(params json.RawMessage) (Frame, bool) {
 		f := Frame{Kind: "tool", ToolID: up.ToolCallID, Status: up.Status}
 		f.Tool = toolPayload(up.Content, up.RawInput, up.RawOutput)
 		return f, true
+	case "plan":
+		// The agent's full current plan/todo list (cat C). Replace-in-place is the client's job: each
+		// `plan` update carries the WHOLE list, so the web swaps its prior plan for this one.
+		return Frame{Kind: "plan", Plan: planEntries(up.Entries)}, true
 	}
 	return Frame{}, false
+}
+
+// planEntries decodes an ACP plan update's `entries` array into Frame plan entries. A missing/garbled
+// array yields a nil slice (an empty plan -> the client renders nothing / clears its prior plan).
+func planEntries(raw json.RawMessage) []PlanEntry {
+	if len(raw) == 0 {
+		return nil
+	}
+	var entries []PlanEntry
+	if json.Unmarshal(raw, &entries) != nil || len(entries) == 0 {
+		return nil // normalize an empty/garbled array to nil so a cleared plan is byte-stable
+	}
+	return entries
 }
 
 // textContent extracts the `text` field of a single content OBJECT (text/thought/user chunks).

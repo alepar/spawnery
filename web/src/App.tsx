@@ -14,6 +14,7 @@ import { initialTheme, setTheme } from "./lib/theme";
 import type { Item, TurnState, PermPrompt } from "./views/chat/types";
 import { reconcilePending, MAX_QUEUED } from "./lib/turn";
 import { upsertTool as upsertToolItems } from "./lib/toolChip";
+import { upsertPlan as upsertPlanItems } from "./lib/plan";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
@@ -95,6 +96,11 @@ export function App() {
         break;
       case "tool":
         upsertTool(f);
+        break;
+      case "plan":
+        // Replace-in-place: each plan frame carries the WHOLE current plan, so swap the single plan
+        // item's entries (see lib/plan.ts). No plan ever -> no plan item -> nothing renders.
+        setItems((xs) => upsertPlanItems(xs, f.plan ?? [], () => idRef.current++));
         break;
       case "turn": {
         const t: TurnState = { state: f.state ?? "idle", queued: f.queued ?? 0, reason: f.reason, error: f.error };

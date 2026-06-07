@@ -204,6 +204,24 @@ func TestAdapterEmitsDiffForEditTool(t *testing.T) {
 	})
 }
 
+func TestAdapterEmitsPlanFromTodoUpdated(t *testing.T) {
+	h := newHarness(t)
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	time.Sleep(150 * time.Millisecond) // let the pump subscribe to /event
+
+	// An opencode todo.updated event must be forwarded to the node as one ACP `plan` session/update
+	// carrying the full entry list (content + mapped status/priority).
+	h.fake.EmitTodoUpdated("ses_fake1", `[`+
+		`{"id":"1","content":"design the api","status":"completed","priority":"high"},`+
+		`{"id":"2","content":"write the code","status":"in_progress","priority":"medium"}]`)
+	h.await(t, func(_ acp.Message, line string) bool {
+		return strings.Contains(line, `"sessionUpdate":"plan"`) &&
+			strings.Contains(line, "design the api") && strings.Contains(line, `"status":"completed"`) &&
+			strings.Contains(line, "write the code") && strings.Contains(line, `"status":"in_progress"`)
+	})
+}
+
 func TestAdapterCancelAborts(t *testing.T) {
 	h := newHarness(t)
 	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)

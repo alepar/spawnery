@@ -87,6 +87,23 @@ func TestUpdateToFrame(t *testing.T) {
 			ok:     true,
 		},
 		{
+			name: "plan update -> Frame.Plan (full list, replace-in-place is the client's job)",
+			params: `{"update":{"sessionUpdate":"plan","entries":[` +
+				`{"content":"design","priority":"high","status":"completed"},` +
+				`{"content":"build","priority":"medium","status":"in_progress"}]}}`,
+			want: Frame{Kind: "plan", Plan: []PlanEntry{
+				{Content: "design", Priority: "high", Status: "completed"},
+				{Content: "build", Priority: "medium", Status: "in_progress"},
+			}},
+			ok: true,
+		},
+		{
+			name:   "empty plan update -> Frame.Plan nil (clears the prior plan)",
+			params: `{"update":{"sessionUpdate":"plan","entries":[]}}`,
+			want:   Frame{Kind: "plan"},
+			ok:     true,
+		},
+		{
 			name:   "unknown update kind dropped",
 			params: `{"update":{"sessionUpdate":"available_commands_update"}}`,
 			want:   Frame{},

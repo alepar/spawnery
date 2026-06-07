@@ -131,6 +131,98 @@ func ACPUserUpdate(sessionID, text string) ACPUpdateParams {
 	}
 }
 
+// --- agent plan / todos (cat C) ---------------------------------------------
+// opencode surfaces the agent's evolving todo list as a `todo.updated` event whose properties carry
+// the full todo list for the session (replace-in-place: each event is the complete current list, not a
+// delta). Each todo has content + a status (pending|in_progress|completed|cancelled) and a priority
+// (high|medium|low). We normalize the whole list to one ACP `plan` session/update.
+
+// TodoUpdated is the payload of a todo.updated event: the session id plus the FULL current todo list.
+type TodoUpdated struct {
+	SessionID string `json:"sessionID"`
+	Todos     []Todo `json:"todos"`
+}
+
+// Todo is one opencode todo entry.
+type Todo struct {
+	ID       string `json:"id"`
+	Content  string `json:"content"`
+	Status   string `json:"status"`   // pending | in_progress | completed | cancelled
+	Priority string `json:"priority"` // high | medium | low
+}
+
+// ParseTodoUpdated decodes a todo.updated properties payload.
+func ParseTodoUpdated(raw json.RawMessage) (TodoUpdated, error) {
+	var t TodoUpdated
+	err := json.Unmarshal(raw, &t)
+	return t, err
+}
+
+// ACPPlanParams is the params of a `plan` session/update notification (cat C).
+type ACPPlanParams struct {
+	SessionID string        `json:"sessionId"`
+	Update    ACPPlanUpdate `json:"update"`
+}
+
+// ACPPlanUpdate is the `update` body of a plan session/update. entries is the FULL current plan; the
+// client replaces its prior plan in place (latest supersedes), it never appends.
+type ACPPlanUpdate struct {
+	SessionUpdate string         `json:"sessionUpdate"` // always "plan"
+	Entries       []ACPPlanEntry `json:"entries"`
+}
+
+// ACPPlanEntry is one plan/todo item (ACP plan entry shape).
+type ACPPlanEntry struct {
+	Content  string `json:"content"`
+	Priority string `json:"priority"` // high | medium | low
+	Status   string `json:"status"`   // pending | in_progress | completed
+}
+
+// TodoUpdateToACP normalizes an opencode todo list into the ACP `plan` session/update to emit. The
+// whole list rides one notification (replace-in-place). Empty/garbled entries are dropped (no content).
+func TodoUpdateToACP(tu TodoUpdated) ACPPlanParams {
+	entries := make([]ACPPlanEntry, 0, len(tu.Todos))
+	for _, td := range tu.Todos {
+		if td.Content == "" {
+			continue // a plan item with no text carries no information
+		}
+		entries = append(entries, ACPPlanEntry{
+			Content:  td.Content,
+			Priority: todoPriorityToACP(td.Priority),
+			Status:   todoStatusToACP(td.Status),
+		})
+	}
+	return ACPPlanParams{
+		SessionID: tu.SessionID,
+		Update:    ACPPlanUpdate{SessionUpdate: "plan", Entries: entries},
+	}
+}
+
+// todoStatusToACP maps an opencode todo status to an ACP plan-entry status. opencode's `cancelled`
+// has no ACP equivalent; it collapses to `completed` (the item is no longer outstanding). Unknown/empty
+// defaults to `pending`.
+func todoStatusToACP(status string) string {
+	switch status {
+	case "in_progress":
+		return "in_progress"
+	case "completed", "cancelled":
+		return "completed"
+	default:
+		return "pending"
+	}
+}
+
+// todoPriorityToACP maps an opencode todo priority to an ACP priority, defaulting empty/unknown to
+// `medium` so the ACP entry always carries a valid priority.
+func todoPriorityToACP(priority string) string {
+	switch priority {
+	case "high", "low", "medium":
+		return priority
+	default:
+		return "medium"
+	}
+}
+
 // PartDelta is the payload of a message.part.delta event (streaming increment).
 // It carries no part type, so the consumer maps PartID -> type via a prior
 // PartUpdated.

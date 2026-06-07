@@ -289,6 +289,74 @@ func TestStopReasonForError(t *testing.T) {
 	}
 }
 
+func TestTodoUpdateToACP(t *testing.T) {
+	t.Run("maps the full todo list to a plan update preserving order and mapping status/priority", func(t *testing.T) {
+		tu, err := ParseTodoUpdated(json.RawMessage(`{"sessionID":"ses_1","todos":[` +
+			`{"id":"1","content":"design","status":"completed","priority":"high"},` +
+			`{"id":"2","content":"build","status":"in_progress","priority":"medium"},` +
+			`{"id":"3","content":"test","status":"pending","priority":"low"}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := TodoUpdateToACP(tu)
+		if p.SessionID != "ses_1" || p.Update.SessionUpdate != "plan" {
+			t.Fatalf("bad plan params: %+v", p)
+		}
+		if len(p.Update.Entries) != 3 {
+			t.Fatalf("want 3 entries, got %d: %+v", len(p.Update.Entries), p.Update.Entries)
+		}
+		want := []ACPPlanEntry{
+			{Content: "design", Priority: "high", Status: "completed"},
+			{Content: "build", Priority: "medium", Status: "in_progress"},
+			{Content: "test", Priority: "low", Status: "pending"},
+		}
+		for i, w := range want {
+			if p.Update.Entries[i] != w {
+				t.Fatalf("entry %d = %+v want %+v", i, p.Update.Entries[i], w)
+			}
+		}
+	})
+
+	t.Run("cancelled collapses to completed; empty priority defaults to medium; unknown status to pending", func(t *testing.T) {
+		tu := TodoUpdated{SessionID: "s", Todos: []Todo{
+			{Content: "a", Status: "cancelled"},
+			{Content: "b", Status: "weird", Priority: "urgent"},
+		}}
+		p := TodoUpdateToACP(tu)
+		if p.Update.Entries[0] != (ACPPlanEntry{Content: "a", Priority: "medium", Status: "completed"}) {
+			t.Fatalf("cancelled mapping wrong: %+v", p.Update.Entries[0])
+		}
+		if p.Update.Entries[1] != (ACPPlanEntry{Content: "b", Priority: "medium", Status: "pending"}) {
+			t.Fatalf("unknown mapping wrong: %+v", p.Update.Entries[1])
+		}
+	})
+
+	t.Run("drops entries with empty content", func(t *testing.T) {
+		p := TodoUpdateToACP(TodoUpdated{Todos: []Todo{{Content: ""}, {Content: "real"}}})
+		if len(p.Update.Entries) != 1 || p.Update.Entries[0].Content != "real" {
+			t.Fatalf("empty-content entries not dropped: %+v", p.Update.Entries)
+		}
+	})
+
+	t.Run("serializes to canonical ACP plan JSON", func(t *testing.T) {
+		p := TodoUpdateToACP(TodoUpdated{SessionID: "ses_1", Todos: []Todo{{Content: "do x", Status: "pending", Priority: "high"}}})
+		b, _ := json.Marshal(p)
+		s := string(b)
+		for _, want := range []string{`"sessionUpdate":"plan"`, `"entries":[`, `"content":"do x"`, `"priority":"high"`, `"status":"pending"`} {
+			if !contains(s, want) {
+				t.Fatalf("missing %q in %s", want, s)
+			}
+		}
+	})
+
+	t.Run("empty todo list yields a plan update with an empty entries array (clears the plan)", func(t *testing.T) {
+		p := TodoUpdateToACP(TodoUpdated{SessionID: "ses_1"})
+		if p.Update.SessionUpdate != "plan" || len(p.Update.Entries) != 0 {
+			t.Fatalf("empty list should produce an empty plan: %+v", p)
+		}
+	})
+}
+
 func TestParseSessionError(t *testing.T) {
 	se, err := ParseSessionError(json.RawMessage(`{"sessionID":"ses_1","error":{"name":"ProviderAuthError","data":{"providerID":"anthropic","message":"bad key"}}}`))
 	if err != nil {

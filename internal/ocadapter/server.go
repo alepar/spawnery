@@ -293,6 +293,14 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 			kind = "agent_message_chunk"
 		}
 		_ = srv.Notify("session/update", ACPSessionUpdate(d.SessionID, kind, d.Delta))
+	case "todo.updated":
+		// The agent's evolving plan/todo list. opencode re-sends the FULL list each time; we forward it
+		// as one ACP `plan` session/update and the client replaces its prior plan in place (cat C).
+		tu, err := ParseTodoUpdated(e.Properties)
+		if err != nil {
+			return
+		}
+		_ = srv.Notify("session/update", TodoUpdateToACP(tu))
 	case "permission.asked":
 		pa, err := ParsePermissionAsked(e.Properties)
 		if err != nil {
