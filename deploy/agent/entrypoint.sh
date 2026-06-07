@@ -37,7 +37,16 @@ case "${1:-}" in
     exec spawn-tmux goose session
     ;;
   goose-acp)
-    echo "goose-acp not wired yet (needs stdio-ACP->TCP bridge; see sp-9xr.16)" >&2; exit 1 ;;
+    # goose speaks ACP over stdio (goose acp); the node attaches ACP over TCP (ACP_LISTEN).
+    # acpexec bridges: listen on ACP_LISTEN, accept the node's connection, run `goose acp`
+    # wired to it. Same OpenAI-sidecar provider config as goose-tui (model via the sidecar).
+    export GOOSE_PROVIDER="${GOOSE_PROVIDER:-openai}"
+    export GOOSE_MODEL="${GOOSE_MODEL:-${SPAWN_MODEL:-openai/gpt-4o-mini}}"
+    export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-unused-sidecar-injects-real-key}"
+    export GOOSE_TELEMETRY_OFF="${GOOSE_TELEMETRY_OFF:-1}"
+    # OPENAI_BASE_URL already set by the node to the sidecar endpoint.
+    exec /usr/local/bin/acpexec goose acp
+    ;;
   claude-tui)
     export TERM="${TERM:-xterm-256color}"
     # Claude Code speaks the Anthropic Messages API; the sidecar's /v1/messages converter
