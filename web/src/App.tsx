@@ -296,6 +296,7 @@ export function App() {
       buffersRef.current.delete(id); // resumed spawns start fresh — drop the stale cached transcript
       commandsRef.current.delete(id);
       modesRef.current.delete(id);
+      turnsRef.current.delete(id); // drop cached turn state too, matching the sibling refs
       // keep the spawn selected (unlike onStop) — the user stays on its now-empty suspended view.
       if (activeIdRef.current === id) {
         closeSession();
@@ -303,7 +304,6 @@ export function App() {
         setTurn({ state: "idle", queued: 0 });
         setCommands([]);
         setMode(null);
-        turnsRef.current.delete(id);
       }
     } catch (e: any) { toast.error("Suspend failed: " + e.message); }
     refreshSpawns();
