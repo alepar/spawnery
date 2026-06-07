@@ -5,9 +5,9 @@ import { Sidebar } from "./Sidebar";
 import type { SpawnView } from "@/api/spawnlet";
 
 const spawns: SpawnView[] = [
-  { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active" },
-  { spawnId: "b", name: "Zork 2", appId: "spawnery/zork", status: "suspended" },
-  { spawnId: "c", name: "Starting One", appId: "spawnery/wiki", status: "starting" },
+  { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "" },
+  { spawnId: "b", name: "Zork 2", appId: "spawnery/zork", status: "suspended", mode: "" },
+  { spawnId: "c", name: "Starting One", appId: "spawnery/wiki", status: "starting", mode: "" },
 ];
 const noopActions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onStop: vi.fn() };
 

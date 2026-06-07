@@ -4,6 +4,7 @@ import { Sidebar, type View, type SpawnActions } from "./Sidebar";
 import { ConnStatus } from "./ConnStatus";
 import type { ConnState } from "./useConnStatus";
 import { ChatView } from "@/views/ChatView";
+import { TerminalView } from "@/views/TerminalView";
 import { MarketplaceView } from "@/views/MarketplaceView";
 import { SettingsView } from "@/views/SettingsView";
 import type { Item, TurnState } from "@/views/chat/types";
@@ -29,7 +30,9 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
     onSelectSpawn: (id) => { actions.onSelectSpawn(id); setView("chat"); },
     onResume: (id) => { actions.onResume(id); setView("chat"); },
   };
-  const activeName = spawns.find((s) => s.spawnId === activeId)?.name;
+  const activeSpawn = spawns.find((s) => s.spawnId === activeId);
+  const activeName = activeSpawn?.name;
+  const activeMode = activeSpawn?.mode;
   return (
     <div className="flex h-screen bg-background text-foreground">
       <Sidebar view={view} onSelect={setView} spawns={spawns} activeId={activeId} actions={wrapped} />
@@ -41,7 +44,8 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
           <ConnStatus conn={conn} />
         </header>
         <main className="flex-1 overflow-hidden">
-          {view === "chat" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} focusKey={activeId} />}
+          {view === "chat" && activeMode === "tmux" && activeId && <TerminalView spawnId={activeId} />}
+          {view === "chat" && activeMode !== "tmux" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} focusKey={activeId} />}
           {view === "market" && <MarketplaceView onSpawn={onSpawn} />}
           {view === "settings" && <SettingsView />}
         </main>

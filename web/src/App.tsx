@@ -149,7 +149,7 @@ export function App() {
           turnsRef.current.delete(aid);
           break;
         case "open":
-          openSession(aid); // just became active -> connect (green)
+          if (active?.mode !== "tmux") openSession(aid); // just became active -> connect (green); tmux spawns self-manage via TerminalView
           break;
         case "error":
           teardown(); errored(); // failed to start -> red, stays in the sidebar
@@ -230,7 +230,7 @@ export function App() {
       return buf;
     });
     setTurn(turnsRef.current.get(id) ?? { state: "idle", queued: 0 });
-    if (sp?.status === "active") openSession(id);
+    if (sp?.status === "active" && sp.mode !== "tmux") openSession(id);
     else if (sp?.status === "starting") waiting();
     else if (sp?.status === "error" || sp?.status === "unreachable") errored();
     // suspended / unknown -> hidden (closeSession already reset())
@@ -259,7 +259,8 @@ export function App() {
     try {
       await resumeSpawn(id);
       lastSeqRef.current = 0;
-      if (activeIdRef.current === id) openSession(id);
+      const sp = spawnsRef.current.find((s) => s.spawnId === id);
+      if (activeIdRef.current === id && sp?.mode !== "tmux") openSession(id);
     } catch (e: any) { toast.error("Resume failed: " + e.message); }
     refreshSpawns();
   };
