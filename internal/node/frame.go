@@ -108,7 +108,15 @@ type ModePayload struct {
 }
 
 func encodeFrame(f Frame) []byte {
-	b, _ := json.Marshal(f)
+	b, err := json.Marshal(f)
+	if err != nil {
+		// A malformed raw payload (e.g. invalid Tool.RawInput/RawOutput) makes Marshal fail and
+		// return nil bytes. Returning append(nil, '\n') would emit a bare newline / empty frame and
+		// silently corrupt the ndjson stream. Surface the failure via the package logger and emit
+		// nothing instead (callers send a nil slice, i.e. no bytes, rather than a broken frame).
+		logErr("encodeFrame kind="+f.Kind, err)
+		return nil
+	}
 	return append(b, '\n')
 }
 

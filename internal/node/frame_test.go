@@ -77,6 +77,23 @@ func TestFrameByteStable_ExistingKinds(t *testing.T) {
 	}
 }
 
+// TestEncodeFrameMarshalErrorEmitsNothing covers the marshal-error path: a Frame whose
+// Tool.RawInput is invalid JSON makes json.Marshal fail. encodeFrame must NOT emit a corrupt
+// frame or a bare newline — it surfaces the error (via the package logger) and returns nil bytes.
+func TestEncodeFrameMarshalErrorEmitsNothing(t *testing.T) {
+	f := Frame{Seq: 1, Kind: "tool", ToolID: "t1", Tool: &ToolPayload{
+		RawInput: json.RawMessage("{invalid"),
+	}}
+	// Sanity: this Frame really does fail to marshal.
+	if _, err := json.Marshal(f); err == nil {
+		t.Fatal("precondition: expected json.Marshal to fail on invalid RawInput")
+	}
+	got := encodeFrame(f)
+	if got != nil {
+		t.Fatalf("want nil (no frame emitted) on marshal error, got %q", string(got))
+	}
+}
+
 func TestDecodeRejectsGarbage(t *testing.T) {
 	if _, err := decodeFrame([]byte("not json\n")); err == nil {
 		t.Fatal("want error on garbage")
