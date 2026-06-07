@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { SpawnView, SpawnStatus } from "@/api/spawnlet";
 
-export type View = "chat" | "market" | "settings";
+export type View = "chat" | "templates" | "settings";
 
 // SpawnActions is the callback bag App passes down for spawn lifecycle controls.
 export interface SpawnActions {
@@ -14,7 +14,7 @@ export interface SpawnActions {
 }
 
 const NAV: { id: View; label: string }[] = [
-  { id: "market", label: "Marketplace" },
+  { id: "templates", label: "Templates" },
   { id: "settings", label: "Settings" },
 ];
 

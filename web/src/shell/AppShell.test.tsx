@@ -17,12 +17,12 @@ const spawns: SpawnView[] = [{ spawnId: "a", name: "Wiki", appId: "spawnery/wiki
 const actions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onStop: vi.fn() };
 
 describe("AppShell", () => {
-  it("renders the marketplace by default; chat not mounted", async () => {
+  it("renders the templates by default; chat not mounted", async () => {
     render(<AppShell {...baseProps} />);
-    expect(screen.getByTestId("marketplace")).toBeTruthy();
+    expect(screen.getByTestId("templates")).toBeTruthy();
     expect(screen.queryByTestId("prompt-input")).toBeNull();
     await userEvent.click(screen.getByTestId("nav-settings"));
-    expect(screen.queryByTestId("marketplace")).toBeNull();
+    expect(screen.queryByTestId("templates")).toBeNull();
   });
 
   it("selecting a spawn navigates to chat and calls onSelectSpawn", async () => {

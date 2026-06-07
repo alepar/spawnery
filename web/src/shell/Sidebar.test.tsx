@@ -12,15 +12,15 @@ const spawns: SpawnView[] = [
 const noopActions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onStop: vi.fn() };
 
 describe("Sidebar", () => {
-  it("renders nav (market+settings, no chat tab)", () => {
-    render(<Sidebar view="market" onSelect={vi.fn()} />);
-    expect(screen.getByTestId("nav-market")).toBeTruthy();
+  it("renders nav (templates+settings, no chat tab)", () => {
+    render(<Sidebar view="templates" onSelect={vi.fn()} />);
+    expect(screen.getByTestId("nav-templates")).toBeTruthy();
     expect(screen.getByTestId("nav-settings")).toBeTruthy();
     expect(screen.queryByTestId("nav-chat")).toBeNull();
   });
 
   it("shows the empty placeholder with no spawns", () => {
-    render(<Sidebar view="market" onSelect={vi.fn()} spawns={[]} />);
+    render(<Sidebar view="templates" onSelect={vi.fn()} spawns={[]} />);
     expect(screen.getByText("— none yet —")).toBeTruthy();
   });
 

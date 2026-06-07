@@ -5,7 +5,7 @@ import { ConnStatus } from "./ConnStatus";
 import type { ConnState } from "./useConnStatus";
 import { ChatView } from "@/views/ChatView";
 import { TerminalView } from "@/views/TerminalView";
-import { MarketplaceView } from "@/views/MarketplaceView";
+import { TemplatesView } from "@/views/TemplatesView";
 import { SettingsView } from "@/views/SettingsView";
 import type { Item, TurnState } from "@/views/chat/types";
 import type { SpawnView } from "@/api/spawnlet";
@@ -24,7 +24,7 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
   // tmux spawns' TerminalView reports its socket state here -> the chat-header ConnStatus dot.
   onTermConn?: (s: "connecting" | "connected" | "reconnecting") => void;
 }) {
-  const [view, setView] = useState<View>("market");
+  const [view, setView] = useState<View>("templates");
   const onSpawn = (appId: string, image?: string, runnableId?: string) => { onSpawnApp(appId, image, runnableId); setView("chat"); };
   // Selecting or resuming a spawn also navigates to its chat.
   const wrapped: SpawnActions | undefined = actions && {
@@ -41,7 +41,7 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
       <div className="flex flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-border px-4 py-2">
           <span className="text-sm font-medium">
-            {view === "market" ? "Marketplace" : view === "settings" ? "Settings" : activeName || "Chat"}
+            {view === "templates" ? "Templates" : view === "settings" ? "Settings" : activeName || "Chat"}
           </span>
           <ConnStatus conn={conn} />
         </header>
@@ -52,7 +52,7 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
               carries the mode), so no stray ACP session opens for a tmux spawn. */}
           {view === "chat" && activeMode === "tmux" && activeId && <TerminalView spawnId={activeId} onConn={onTermConn} />}
           {view === "chat" && activeMode !== "tmux" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} focusKey={activeId} />}
-          {view === "market" && <MarketplaceView onSpawn={onSpawn} />}
+          {view === "templates" && <TemplatesView onSpawn={onSpawn} />}
           {view === "settings" && <SettingsView />}
         </main>
       </div>
