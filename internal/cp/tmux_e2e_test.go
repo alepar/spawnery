@@ -30,15 +30,13 @@ import (
 	"spawnery/internal/spawnlet"
 )
 
-// TestCPTmuxEndToEnd drives the full CP→node→real-container→tmux-relay path:
-// - CP + node run in-process with a real Docker backend
-// - node uses spawnery/agent:dev (opencode + tmux)
-// - CreateSpawn selects opencode-tui (tmux mode)
-// - After ACTIVE, a client opens a Session and asserts >0 raw terminal bytes arrive
-//
-// Requires Docker + spawnery/agent:dev + OPENROUTER_API_KEY in env (or .env at repo root).
-// FAILS loudly (no skips) when the environment is broken.
-func TestCPTmuxEndToEnd(t *testing.T) {
+// setupTmuxStack starts CP+node in-process with a real Docker backend (spawnery/agent:dev).
+// Returns the SpawnService client, a context with 150s timeout, and the seeded app id.
+// All teardown is registered via t.Cleanup (LIFO order). The caller must NOT cancel the
+// context itself — cleanup handles it.
+func setupTmuxStack(t *testing.T) (cl cpv1connect.SpawnServiceClient, ctx context.Context, appID string) {
+	t.Helper()
+
 	// Load OpenRouter key — try env first, then repo-root .env.
 	key := os.Getenv("OPENROUTER_API_KEY")
 	if key == "" {
@@ -79,26 +77,25 @@ func TestCPTmuxEndToEnd(t *testing.T) {
 	}
 	st, err := store.Open(context.Background(), store.Config{
 		Driver: "sqlite",
-		DSN:    "file:cptmuxe2e?mode=memory&cache=shared&_pragma=foreign_keys(1)",
+		DSN:    "file:cptmuxe2e_" + t.Name() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	appID = "secret-app"
 	if err := cp.Seed(context.Background(), st, map[string]string{"dev-token": "alice"},
-		[]cp.AppSeed{{ID: "secret-app", Ref: appRef, Version: "1.0.0", Mounts: []string{"main"}}}); err != nil {
+		[]cp.AppSeed{{ID: appID, Ref: appRef, Version: "1.0.0", Mounts: []string{"main"}}}); err != nil {
 		t.Fatal(err)
 	}
 	srv := cp.NewServer(reg, rtr, sched, st, tel)
-	// NOTE: the catalog is seeded automatically when the node registers — the CP's runNode handler
-	// calls upsertAgentCatalog with the node's AgentImages + AgentBinaries on registration.
 
 	mux := http.NewServeMux()
 	mux.Handle(nodev1connect.NewNodeServiceHandler(srv))
 	mux.Handle(cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(authn.Interceptor())))
 	cpSrv := httptest.NewUnstartedServer(h2c.NewHandler(mux, &http2.Server{}))
 	cpSrv.Start()
-	// Cleanup order (t.Cleanup is LIFO): StopSpawn+sleep → stopNode → cpSrv.Close → st.Close → tel.Close
-	// Register in reverse: tel first (runs last), then st, then cpSrv, then stopNode, then StopSpawn (registered below, runs first).
+
+	// Cleanup order (t.Cleanup is LIFO): tel.Close runs last (registered first here).
 	t.Cleanup(func() { _ = tel.Close() })
 	t.Cleanup(func() { _ = st.Close() })
 	t.Cleanup(cpSrv.Close)
@@ -111,7 +108,7 @@ func TestCPTmuxEndToEnd(t *testing.T) {
 		DataRoot:      t.TempDir(),
 	})
 	nodeCtx, stopNode := context.WithCancel(context.Background())
-	t.Cleanup(stopNode) // registered second → runs second-to-last (after StopSpawn, before cpSrv.Close)
+	t.Cleanup(stopNode)
 	go node.Run(nodeCtx, mgr, h2cClient(), node.Config{
 		NodeID:        "n-tmux",
 		CPURL:         cpSrv.URL,
@@ -134,13 +131,22 @@ func TestCPTmuxEndToEnd(t *testing.T) {
 	t.Log("node registered")
 
 	// --- client ---
-	cl := cpv1connect.NewSpawnServiceClient(h2cClient(), cpSrv.URL, connect.WithGRPC(),
+	cl = cpv1connect.NewSpawnServiceClient(h2cClient(), cpSrv.URL, connect.WithGRPC(),
 		connect.WithInterceptors(bearer("dev-token")))
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
-	defer cancel()
 
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(context.Background(), 150*time.Second)
+	t.Cleanup(cancel)
+
+	return cl, ctx, appID
+}
+
+// createTmuxSpawn creates an opencode-tui tmux spawn and registers a StopSpawn cleanup.
+// Returns the new spawn id.
+func createTmuxSpawn(t *testing.T, ctx context.Context, cl cpv1connect.SpawnServiceClient, appID string) string {
+	t.Helper()
 	cs, err := cl.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
-		AppId:      "secret-app",
+		AppId:      appID,
 		Model:      "openai/gpt-4o-mini",
 		Image:      "spawnery/agent:dev",
 		RunnableId: "opencode-tui",
@@ -157,12 +163,13 @@ func TestCPTmuxEndToEnd(t *testing.T) {
 		_, _ = cl.StopSpawn(stopCtx, connect.NewRequest(&cpv1.StopSpawnRequest{SpawnId: id}))
 		time.Sleep(2 * time.Second) // allow the node to receive Stop + destroy containers
 	})
+	return id
+}
 
-	// Wait for ACTIVE — container boot + tmux startup can take 30-60s.
-	waitActiveTmux(ctx, t, cl, id)
-	t.Log("spawn is ACTIVE, opening Session")
-
-	// Open a Session and read raw terminal bytes from the tmux relay.
+// assertTerminalBytes opens a Session, reads raw terminal bytes from the tmux relay,
+// and asserts >0 bytes arrive within 30s.
+func assertTerminalBytes(t *testing.T, ctx context.Context, cl cpv1connect.SpawnServiceClient, id string) {
+	t.Helper()
 	stream := cl.Session(ctx)
 	if err := stream.Send(&cpv1.Frame{SpawnId: id}); err != nil {
 		t.Fatalf("Session bind frame: %v", err)
@@ -215,6 +222,100 @@ func TestCPTmuxEndToEnd(t *testing.T) {
 
 	stream.CloseRequest()
 	time.Sleep(200 * time.Millisecond) // let session_end flush
+}
+
+// waitStatus polls ListSpawns until the spawn reaches want status, failing on terminal statuses
+// or after the given timeout.
+func waitStatus(ctx context.Context, t *testing.T, cl cpv1connect.SpawnServiceClient, id string, want cpv1.SpawnStatus, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		ls, err := cl.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+		if err != nil {
+			t.Fatalf("listSpawns: %v", err)
+		}
+		for _, sp := range ls.Msg.Spawns {
+			if sp.SpawnId != id {
+				continue
+			}
+			if sp.Status == want {
+				t.Logf("spawn %s reached status %v", id, want)
+				return
+			}
+			// Fail fast on unexpected terminal states (unless we're explicitly waiting for one of them).
+			switch sp.Status {
+			case cpv1.SpawnStatus_SPAWN_STATUS_ERROR, cpv1.SpawnStatus_SPAWN_STATUS_DELETED:
+				if want != sp.Status {
+					t.Fatalf("spawn %s reached terminal status %v while waiting for %v", id, sp.Status, want)
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("spawn %s did not reach status %v within %v", id, want, timeout)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestCPTmuxEndToEnd drives the full CP→node→real-container→tmux-relay path:
+// - CP + node run in-process with a real Docker backend
+// - node uses spawnery/agent:dev (opencode + tmux)
+// - CreateSpawn selects opencode-tui (tmux mode)
+// - After ACTIVE, a client opens a Session and asserts >0 raw terminal bytes arrive
+//
+// Requires Docker + spawnery/agent:dev + OPENROUTER_API_KEY in env (or .env at repo root).
+// FAILS loudly (no skips) when the environment is broken.
+func TestCPTmuxEndToEnd(t *testing.T) {
+	cl, ctx, appID := setupTmuxStack(t)
+
+	id := createTmuxSpawn(t, ctx, cl, appID)
+
+	// Wait for ACTIVE — container boot + tmux startup can take 30-60s.
+	waitActiveTmux(ctx, t, cl, id)
+	t.Log("spawn is ACTIVE, opening Session")
+
+	assertTerminalBytes(t, ctx, cl, id)
+}
+
+// TestCPTmuxSuspendResume proves that a tmux spawn survives a suspend→resume cycle:
+// - suspend tears down the relay + container (non-lossless)
+// - resume re-provisions a fresh tmux container
+// - terminal works again after resume
+//
+// Lossless conversation continuity (resume-argv) is E3-gated and tracked separately.
+func TestCPTmuxSuspendResume(t *testing.T) {
+	cl, ctx, appID := setupTmuxStack(t)
+
+	id := createTmuxSpawn(t, ctx, cl, appID)
+
+	// Wait for ACTIVE — container boot + tmux startup can take 30-60s.
+	waitActiveTmux(ctx, t, cl, id)
+	t.Log("spawn is ACTIVE")
+
+	// Verify terminal works before suspend.
+	assertTerminalBytes(t, ctx, cl, id)
+	t.Log("terminal bytes confirmed before suspend")
+
+	// Suspend → must reach SUSPENDED (container + relay torn down).
+	if _, err := cl.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("SuspendSpawn: %v", err)
+	}
+	t.Log("SuspendSpawn called, waiting for SUSPENDED status")
+	waitStatus(ctx, t, cl, id, cpv1.SpawnStatus_SPAWN_STATUS_SUSPENDED, 30*time.Second)
+	t.Log("spawn is SUSPENDED")
+
+	// Resume → fresh tmux container, back to ACTIVE, terminal works again (non-lossless).
+	if _, err := cl.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("ResumeSpawn: %v", err)
+	}
+	t.Log("ResumeSpawn called, waiting for ACTIVE status")
+	// Resume re-provisions a fresh container — allow up to 60s for boot.
+	waitActiveTmux(ctx, t, cl, id)
+	t.Log("spawn is ACTIVE again after resume")
+
+	// A NEW client Session after resume must still get terminal output.
+	assertTerminalBytes(t, ctx, cl, id)
+	t.Log("tmux suspend→resume verified (non-lossless: fresh container, terminal works again)")
 }
 
 // waitActiveTmux polls ListSpawns until the spawn reaches ACTIVE, with a 60s timeout for container boot.
