@@ -302,7 +302,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		return nil, err
 	}
 
-	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready"}
+	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready", Mode: sel.Mode}
 	m.store.Put(sp)
 	return sp, nil
 }

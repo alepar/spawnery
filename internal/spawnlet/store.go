@@ -13,6 +13,7 @@ type Spawn struct {
 	NetnsPath string   // /proc/<sidecar-pid>/ns/net — the pod netns, for the runc-lane AttachACP
 	SandboxID string   // CRI backend: the pod sandbox id (for teardown); empty for Docker
 	Status    string
+	Mode      string // run mode (acp|tmux|served|""); selects the terminal-attach inner command
 }
 
 type Store struct {
