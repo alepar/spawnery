@@ -1,0 +1,695 @@
+// Package acpmux is an in-container single-session ACP multiplexer. It is the
+// SINGLE ACP client of an upstream agent (e.g. `goose acp` — spawned by the
+// thin main, one shared session S, eager initialize + session/new at startup)
+// AND a canonical-ACP SERVER that multiplexes N downstream ACP clients onto S.
+//
+// Downstream clients speak canonical ACP, so the node's existing pump
+// (internal/node/pump.go — itself an ACP client) and a trivial acpdial shim
+// both connect transparently. acpmux replays buffered conversation history to
+// late joiners, fans every upstream session/update to all clients, serializes
+// prompts across clients onto the one upstream session, and broadcasts each
+// upstream permission request (first downstream response wins).
+//
+// The upstream/serialization/permission/replay-log mechanics are ported from
+// internal/node/pump.go. The DIFFERENCE: pump's downstream wire is the node
+// Frame protocol; acpmux's downstream wire is canonical ACP, and the replay log
+// stores raw upstream session/update notification bytes (not Frames).
+package acpmux
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"spawnery/internal/acp"
+)
+
+const defaultMaxLog = 2000 // cap the replay log; oldest trimmed (a lagging late-joiner loses the trimmed prefix)
+const maxQueued = 50
+const defaultPermTimeout = 2 * time.Minute
+
+// logItem is one buffered upstream session/update notification (raw JSON) with
+// its monotonically assigned sequence number. A late-joining client replays
+// every item with seq > its cursor.
+type logItem struct {
+	seq int64
+	raw []byte
+}
+
+// pendingPerm tracks one in-flight upstream permission request that has been
+// broadcast to all downstream clients; the first client response wins.
+type pendingPerm struct {
+	upstreamID int             // the upstream agent request id to respond to
+	options    json.RawMessage // raw options array, to pick allow/deny optionId
+	title      string          // human-readable tool title (re-sent to late joiners)
+	timer      *time.Timer
+}
+
+// queuedPrompt is one downstream prompt awaiting its turn on the single upstream
+// session. The (clientID, clientReq) pair lets acpmux answer the originating
+// client's session/prompt request EXACTLY when ITS turn ends.
+type queuedPrompt struct {
+	clientID  string
+	clientReq int
+	text      string
+}
+
+// dsClient is one connected downstream ACP client.
+type dsClient struct {
+	id         string
+	w          io.Writer     // the conn; writes serialized via wmu
+	wmu        *sync.Mutex   // serialize writes to this conn (replay goroutine + read loop)
+	cursor     int64         // last replay-log seq sent to this client
+	notify     chan struct{} // buffered(1): "catch up on the replay log"
+	done       chan struct{} // closed on conn close
+	hasSession bool          // true once the client has session/new'd (gate replay)
+}
+
+// Mux owns the upstream agent connection (single ACP client) and the set of
+// downstream ACP clients. All mutable fields are guarded by mu.
+type Mux struct {
+	stdin  io.Writer // upstream agent stdin (sole writer is writeLoop)
+	stdout io.Reader // upstream agent stdout
+
+	mu      sync.Mutex
+	log     []logItem // log[i].seq == base+1+i (contiguous)
+	base    int64     // seq of the last trimmed item (0 = nothing trimmed)
+	seq     int64     // last assigned seq
+	maxLog  int
+	clients map[string]*dsClient
+	stopped bool
+
+	sessionID  string                   // S: the shared upstream session id
+	initResult json.RawMessage          // cached upstream initialize result (returned to downstream)
+	toAgent    chan []byte              // ndjson lines for writeLoop (sole upstream stdin writer)
+	writerDone chan struct{}
+	readerDone chan struct{}
+	waiters    map[int]chan acp.Message // one-shot result waiters (our upstream requests: handshake)
+	nextID     int                      // upstream JSON-RPC id allocator
+
+	busy             bool
+	queue            []queuedPrompt
+	inflightPromptID int    // upstream request id of the in-flight session/prompt (0 = none)
+	inflightClient   string // client whose prompt is in flight ("" = none/internal)
+	inflightReq      int    // that client's session/prompt request id to answer at turn-end
+
+	pending     map[string]*pendingPerm // keyed by upstream request id (string)
+	permTimeout time.Duration
+
+	clientSeq int // downstream client id allocator
+}
+
+// New constructs a Mux over the upstream agent's stdin/stdout pipes.
+func New(stdin io.Writer, stdout io.Reader) *Mux {
+	return &Mux{
+		stdin: stdin, stdout: stdout, maxLog: defaultMaxLog,
+		clients:     map[string]*dsClient{},
+		toAgent:     make(chan []byte, 64),
+		writerDone:  make(chan struct{}),
+		readerDone:  make(chan struct{}),
+		waiters:     map[int]chan acp.Message{},
+		pending:     map[string]*pendingPerm{},
+		permTimeout: defaultPermTimeout,
+	}
+}
+
+// SessionID returns the shared upstream session id (valid after Start).
+func (m *Mux) SessionID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sessionID
+}
+
+// ---- upstream lifecycle -----------------------------------------------------
+
+// Start launches the upstream read/write loops, performs the eager ACP
+// handshake (initialize + session/new), caches the initialize result, and
+// records the shared session id S. Returns once S is ready.
+func (m *Mux) Start(ctx context.Context, readyTimeout time.Duration) error {
+	go m.writeLoop()
+	go m.readLoop()
+
+	init, err := m.call(ctx, acp.Message{Method: "initialize", Params: json.RawMessage(`{"protocolVersion":1,"clientCapabilities":{}}`)}, readyTimeout)
+	if err != nil {
+		return fmt.Errorf("upstream not ready: %w", err)
+	}
+	m.mu.Lock()
+	m.initResult = append([]byte(nil), init...)
+	m.mu.Unlock()
+
+	res, err := m.call(ctx, acp.Message{Method: "session/new", Params: json.RawMessage(`{"cwd":"/app","mcpServers":[]}`)}, readyTimeout)
+	if err != nil {
+		return fmt.Errorf("session/new: %w", err)
+	}
+	var r struct {
+		SessionID string `json:"sessionId"`
+	}
+	if uerr := json.Unmarshal(res, &r); uerr != nil || r.SessionID == "" {
+		return fmt.Errorf("session/new: bad result %q (err %v)", string(res), uerr)
+	}
+	m.mu.Lock()
+	m.sessionID = r.SessionID
+	m.mu.Unlock()
+	return nil
+}
+
+// Stop tears down the upstream loops and detaches all clients. Idempotent.
+func (m *Mux) Stop() {
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return
+	}
+	m.stopped = true
+	close(m.writerDone)
+	if c, ok := m.stdout.(io.Closer); ok {
+		_ = c.Close()
+	}
+	for _, c := range m.clients {
+		close(c.done)
+	}
+	m.clients = map[string]*dsClient{}
+	for _, pp := range m.pending {
+		pp.timer.Stop()
+	}
+	m.pending = map[string]*pendingPerm{}
+	m.mu.Unlock()
+}
+
+func (m *Mux) writeLoop() {
+	for {
+		select {
+		case line := <-m.toAgent:
+			if _, err := m.stdin.Write(line); err != nil {
+				return
+			}
+		case <-m.writerDone:
+			return
+		}
+	}
+}
+
+func (m *Mux) sendLine(line []byte) {
+	select {
+	case m.toAgent <- line:
+	case <-m.writerDone:
+	}
+}
+
+// call sends an upstream ACP request (assigning an id) and waits for the
+// matching result. The waiter is registered BEFORE sending so a fast reply
+// can't be missed. Ported from pump.call.
+func (m *Mux) call(ctx context.Context, msg acp.Message, timeout time.Duration) (json.RawMessage, error) {
+	m.mu.Lock()
+	m.nextID++
+	id := m.nextID
+	ch := make(chan acp.Message, 1)
+	m.waiters[id] = ch
+	m.mu.Unlock()
+	defer func() { m.mu.Lock(); delete(m.waiters, id); m.mu.Unlock() }()
+	idv := id
+	msg.ID = &idv
+	var buf bytes.Buffer
+	_ = acp.WriteMessage(&buf, msg)
+	m.sendLine(buf.Bytes())
+	select {
+	case rm := <-ch:
+		if rm.Error != nil {
+			return nil, fmt.Errorf("rpc %d: %s", rm.Error.Code, rm.Error.Message)
+		}
+		return rm.Result, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout after %s", timeout)
+	case <-m.writerDone:
+		return nil, fmt.Errorf("mux stopped")
+	}
+}
+
+// sendPrompt fires a session/prompt at the upstream agent (no waiter) and
+// records it as the in-flight turn, along with the originating client and its
+// request id so acpmux can answer that client at turn-end. The id is set under
+// the lock before enqueueing so a fast turn-end result can't race past it.
+// Ported from pump.sendPrompt.
+func (m *Mux) sendPrompt(sessionID, text, clientID string, clientReq int) {
+	m.mu.Lock()
+	m.nextID++
+	id := m.nextID
+	m.inflightPromptID = id
+	m.inflightClient = clientID
+	m.inflightReq = clientReq
+	m.mu.Unlock()
+	idv := id
+	var buf bytes.Buffer
+	_ = acp.WriteMessage(&buf, acp.Message{ID: &idv, Method: "session/prompt", Params: promptParams(sessionID, text)})
+	m.sendLine(buf.Bytes())
+}
+
+// readLoop dispatches upstream messages: results to handshake waiters or, for
+// the in-flight prompt id, to handleTurnEnd; notifications to fanout; upstream
+// server-initiated permission requests to onPermissionRequest. Mirrors
+// pump.readLoop, minus the Frame translation.
+func (m *Mux) readLoop() {
+	defer close(m.readerDone)
+	rd := acp.NewReader(m.stdout)
+	for {
+		msg, err := rd.ReadMessage()
+		if err != nil {
+			return // upstream EOF/crash
+		}
+		// A response to one of OUR upstream requests (handshake / prompt).
+		if msg.ID != nil && (msg.Result != nil || msg.Error != nil) {
+			m.mu.Lock()
+			ch, isWaiter := m.waiters[*msg.ID]
+			inflight := m.inflightPromptID != 0 && *msg.ID == m.inflightPromptID
+			m.mu.Unlock()
+			if isWaiter {
+				ch <- msg // handshake/our request result; not conversation
+				continue
+			}
+			if inflight {
+				m.handleTurnEnd() // session/prompt result = turn-end
+			}
+			continue
+		}
+		// A server-initiated request (has id + method): only permission requests.
+		if msg.ID != nil && msg.Method == "session/request_permission" {
+			m.onPermissionRequest(msg)
+			continue
+		}
+		// A notification (no id).
+		m.onUpstreamNotification(msg)
+	}
+}
+
+func (m *Mux) onUpstreamNotification(msg acp.Message) {
+	switch msg.Method {
+	case "session/update":
+		// Re-serialize so what we fan out is exactly the canonical notification.
+		var buf bytes.Buffer
+		if acp.WriteMessage(&buf, acp.Message{Method: "session/update", Params: msg.Params}) == nil {
+			m.appendUpdate(buf.Bytes())
+		}
+	}
+}
+
+// handleTurnEnd clears busy on a turn-end, answers the in-flight client's
+// session/prompt request (exact correlation), and drains one queued prompt (if
+// any) as the next turn. Ported from pump.handleTurnEnd, plus the per-client
+// reply that pump didn't need (pump's downstream is Frame, not ACP requests).
+func (m *Mux) handleTurnEnd() {
+	m.mu.Lock()
+	endedClient := m.inflightClient
+	endedReq := m.inflightReq
+	m.busy = false
+	m.inflightPromptID = 0
+	m.inflightClient = ""
+	m.inflightReq = 0
+
+	var next queuedPrompt
+	var drained bool
+	if len(m.queue) > 0 {
+		next = m.queue[0]
+		m.queue = m.queue[1:]
+		drained = true
+		m.busy = true
+	}
+	sid := m.sessionID
+	c := m.clients[endedClient]
+	m.mu.Unlock()
+
+	// Answer the just-ended prompt's originating client (turn complete).
+	if c != nil && endedReq != 0 {
+		m.respondToClient(c, endedReq, json.RawMessage(`{"stopReason":"end_turn"}`))
+	}
+
+	if drained {
+		m.sendPrompt(sid, next.text, next.clientID, next.clientReq)
+	}
+}
+
+// ---- downstream ACP server --------------------------------------------------
+
+// Serve accepts downstream ACP client connections and handles each concurrently.
+// It returns only on a fatal accept error. The upstream agent is NOT torn down
+// when a client disconnects (other clients / late reconnects continue).
+func (m *Mux) Serve(ln net.Listener) error {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return err
+		}
+		go m.handleClient(conn)
+	}
+}
+
+// handleClient registers a downstream client, runs its replay/stream goroutine,
+// and reads canonical ACP messages from the conn until close. Every per-client
+// goroutine exits on conn close — no leaks across connect/disconnect cycles.
+func (m *Mux) handleClient(conn net.Conn) {
+	m.mu.Lock()
+	m.clientSeq++
+	id := "c" + strconv.Itoa(m.clientSeq)
+	c := &dsClient{
+		id:     id,
+		w:      conn,
+		wmu:    &sync.Mutex{},
+		cursor: m.base, // start at the current trimmed-base; replay begins after session/new
+		notify: make(chan struct{}, 1),
+		done:   make(chan struct{}),
+	}
+	m.clients[id] = c
+	m.mu.Unlock()
+
+	go m.clientReplayLoop(c)
+
+	defer func() {
+		m.mu.Lock()
+		if cur := m.clients[id]; cur == c {
+			delete(m.clients, id)
+			close(c.done)
+		}
+		m.mu.Unlock()
+		_ = conn.Close()
+	}()
+
+	rd := acp.NewReader(conn)
+	for {
+		msg, err := rd.ReadMessage()
+		if err != nil {
+			return // client disconnected
+		}
+		m.onClientMessage(c, msg)
+	}
+}
+
+func (m *Mux) onClientMessage(c *dsClient, msg acp.Message) {
+	// Responses from a client to acpmux's forwarded permission request carry an
+	// id + a result, no method.
+	if msg.ID != nil && msg.Method == "" && (msg.Result != nil || msg.Error != nil) {
+		m.onClientPermResponse(*msg.ID, msg.Result)
+		return
+	}
+	switch msg.Method {
+	case "initialize":
+		m.mu.Lock()
+		init := m.initResult
+		m.mu.Unlock()
+		if init == nil {
+			init = json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{}}`)
+		}
+		if msg.ID != nil {
+			m.respondToClient(c, *msg.ID, init)
+		}
+	case "session/new", "session/load":
+		m.mu.Lock()
+		sid := m.sessionID
+		c.hasSession = true
+		m.mu.Unlock()
+		if msg.ID != nil {
+			res, _ := json.Marshal(map[string]string{"sessionId": sid})
+			m.respondToClient(c, *msg.ID, res)
+		}
+		wake(c) // trigger replay of buffered history to this (possibly late-joining) client
+	case "session/prompt":
+		if msg.ID != nil {
+			m.fromClientPrompt(c, *msg.ID, promptText(msg.Params))
+		}
+	case "session/cancel":
+		// best-effort: v1 no-op (single-session, serialized; cancel not modeled).
+	}
+}
+
+// fromClientPrompt runs a downstream prompt through the shared busy/queue
+// serializer onto the single upstream session. One in-flight session/prompt at
+// a time; the rest queue (FIFO) and drain on turn-end. Ported from
+// pump.fromClient's "prompt" case, with per-client request-id tracking.
+func (m *Mux) fromClientPrompt(c *dsClient, clientReq int, text string) {
+	m.mu.Lock()
+	sid := m.sessionID
+	if !m.busy {
+		m.busy = true
+		m.mu.Unlock()
+		m.sendPrompt(sid, text, c.id, clientReq)
+		return
+	}
+	if len(m.queue) < maxQueued {
+		m.queue = append(m.queue, queuedPrompt{clientID: c.id, clientReq: clientReq, text: text})
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock() // over cap -> drop
+	m.respondToClient(c, clientReq, json.RawMessage(`{"stopReason":"refusal"}`))
+}
+
+// ---- replay log + fanout ----------------------------------------------------
+
+// appendUpdate assigns a seq, appends the raw notification to the replay log
+// (trimming the oldest past maxLog), and wakes all clients to catch up. Ported
+// from pump.appendFrames.
+func (m *Mux) appendUpdate(raw []byte) {
+	m.mu.Lock()
+	m.seq++
+	m.log = append(m.log, logItem{seq: m.seq, raw: append([]byte(nil), raw...)})
+	if over := len(m.log) - m.maxLog; over > 0 {
+		m.base += int64(over)
+		m.log = append(m.log[:0], m.log[over:]...)
+	}
+	for _, c := range m.clients {
+		wake(c)
+	}
+	m.mu.Unlock()
+}
+
+func wake(c *dsClient) {
+	select {
+	case c.notify <- struct{}{}:
+	default:
+	}
+}
+
+// clientReplayLoop ships replay-log items > c.cursor whenever woken, until done.
+// Only clients that have established a session receive replay (so a client that
+// hasn't session/new'd yet doesn't get notifications for a session it doesn't
+// know about). Ported from pump.clientLoop, minus the reset frame (ACP has no
+// such frame; a lagging late-joiner simply loses the trimmed prefix).
+func (m *Mux) clientReplayLoop(c *dsClient) {
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-c.notify:
+		}
+		for {
+			m.mu.Lock()
+			if !c.hasSession {
+				m.mu.Unlock()
+				break
+			}
+			if c.cursor < m.base {
+				c.cursor = m.base // missed trimmed items; skip them
+			}
+			var batch [][]byte
+			if c.cursor < m.seq {
+				from := c.cursor - m.base // index of first unseen item
+				for _, it := range m.log[from:] {
+					batch = append(batch, it.raw)
+				}
+				c.cursor = m.seq
+			}
+			m.mu.Unlock()
+			if len(batch) == 0 {
+				break
+			}
+			for _, raw := range batch {
+				if m.writeRaw(c, raw) != nil {
+					return
+				}
+			}
+		}
+	}
+}
+
+// ---- permissions (broadcast + first-wins) -----------------------------------
+
+// onPermissionRequest records an upstream permission request, broadcasts a
+// canonical session/request_permission to every connected client (using the
+// upstream request id as the downstream id so client responses correlate), and
+// arms a timeout that auto-denies. Ported from pump.onPermissionRequest.
+func (m *Mux) onPermissionRequest(msg acp.Message) {
+	if msg.ID == nil {
+		return
+	}
+	reqID := strconv.Itoa(*msg.ID)
+	var pr struct {
+		Options  json.RawMessage `json:"options"`
+		ToolCall struct {
+			Title string `json:"title"`
+		} `json:"toolCall"`
+	}
+	_ = json.Unmarshal(msg.Params, &pr)
+	title := pr.ToolCall.Title
+	if title == "" {
+		title = "permission requested"
+	}
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return
+	}
+	pp := &pendingPerm{upstreamID: *msg.ID, options: pr.Options, title: title}
+	pp.timer = time.AfterFunc(m.permTimeout, func() { m.resolvePermission(reqID, false) })
+	m.pending[reqID] = pp
+	clients := make([]*dsClient, 0, len(m.clients))
+	for _, c := range m.clients {
+		clients = append(clients, c)
+	}
+	m.mu.Unlock()
+
+	// Forward the upstream request verbatim downstream, preserving the same id so
+	// each client's response carries it (the first answer wins in resolve).
+	var buf bytes.Buffer
+	_ = acp.WriteMessage(&buf, acp.Message{ID: msg.ID, Method: "session/request_permission", Params: msg.Params})
+	line := buf.Bytes()
+	for _, c := range clients {
+		_ = m.writeRaw(c, line)
+	}
+}
+
+// onClientPermResponse routes a downstream client's permission answer (the
+// option selected) to resolvePermission. The downstream id equals the upstream
+// id (see onPermissionRequest). First answer wins.
+func (m *Mux) onClientPermResponse(id int, result json.RawMessage) {
+	reqID := strconv.Itoa(id)
+	allow := outcomeAllows(result)
+	m.resolvePermission(reqID, allow)
+}
+
+// resolvePermission answers a pending upstream permission (first answer wins;
+// later/duplicate are no-ops) by forwarding a chosen option upstream. Called by
+// a client response and by the auto-deny timer. Ported from
+// pump.resolvePermission.
+func (m *Mux) resolvePermission(reqID string, allow bool) {
+	m.mu.Lock()
+	pp := m.pending[reqID]
+	if pp == nil {
+		m.mu.Unlock()
+		return // already resolved
+	}
+	delete(m.pending, reqID)
+	pp.timer.Stop()
+	upstreamID := pp.upstreamID
+	optID := pickPermOption(pp.options, allow)
+	m.mu.Unlock()
+
+	idv := upstreamID
+	resp, _ := json.Marshal(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optID}})
+	var buf bytes.Buffer
+	_ = acp.WriteMessage(&buf, acp.Message{ID: &idv, Result: resp})
+	m.sendLine(buf.Bytes())
+}
+
+// ---- small helpers ----------------------------------------------------------
+
+// respondToClient writes a JSON-RPC result for the given downstream request id.
+func (m *Mux) respondToClient(c *dsClient, id int, result json.RawMessage) {
+	idv := id
+	var buf bytes.Buffer
+	_ = acp.WriteMessage(&buf, acp.Message{ID: &idv, Result: result})
+	_ = m.writeRaw(c, buf.Bytes())
+}
+
+// writeRaw writes one already-encoded ndjson line to a client, serializing
+// writes per-connection (the replay goroutine and the read loop both write).
+func (m *Mux) writeRaw(c *dsClient, line []byte) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	_, err := c.w.Write(line)
+	return err
+}
+
+func promptParams(sessionID, text string) json.RawMessage {
+	b, _ := json.Marshal(map[string]any{
+		"sessionId": sessionID,
+		"prompt":    []any{map[string]string{"type": "text", "text": text}},
+	})
+	return b
+}
+
+// promptText extracts the concatenated text content blocks from a downstream
+// session/prompt params object.
+func promptText(params json.RawMessage) string {
+	var p struct {
+		Prompt []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"prompt"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return ""
+	}
+	var out string
+	for _, b := range p.Prompt {
+		if b.Type == "text" {
+			out += b.Text
+		}
+	}
+	return out
+}
+
+// outcomeAllows inspects a downstream permission response result to decide
+// whether the client allowed the action. ACP responses carry
+// {"outcome":{"outcome":"selected","optionId":...}} or {"outcome":{"outcome":"cancelled"}}.
+// We treat a selected option whose id doesn't look like a reject as allow.
+func outcomeAllows(result json.RawMessage) bool {
+	var r struct {
+		Outcome struct {
+			Outcome  string `json:"outcome"`
+			OptionID string `json:"optionId"`
+		} `json:"outcome"`
+	}
+	if json.Unmarshal(result, &r) != nil {
+		return false
+	}
+	if r.Outcome.Outcome != "selected" {
+		return false // cancelled / unknown -> deny
+	}
+	low := strings.ToLower(r.Outcome.OptionID)
+	if strings.Contains(low, "reject") || strings.Contains(low, "deny") {
+		return false
+	}
+	return true
+}
+
+// pickPermOption chooses an allow-ish (or reject-ish) optionId from the upstream
+// options, falling back to the first option. Ported from pump.pickPermOption.
+func pickPermOption(options json.RawMessage, allow bool) string {
+	var opts []struct {
+		OptionID string `json:"optionId"`
+		Kind     string `json:"kind"`
+	}
+	_ = json.Unmarshal(options, &opts)
+	want := []string{"reject", "deny"}
+	if allow {
+		want = []string{"allow"}
+	}
+	for _, o := range opts {
+		for _, w := range want {
+			if strings.Contains(o.Kind, w) {
+				return o.OptionID
+			}
+		}
+	}
+	if len(opts) > 0 {
+		return opts[0].OptionID
+	}
+	return ""
+}
