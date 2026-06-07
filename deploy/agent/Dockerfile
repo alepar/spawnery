@@ -27,6 +27,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /acpadapter ./deploy/agent/acpadapter
 RUN CGO_ENABLED=0 go build -o /acpexec ./deploy/agent/acpexec
 RUN CGO_ENABLED=0 go build -o /acpmux ./deploy/agent/acpmux
+RUN CGO_ENABLED=0 go build -o /acpdial ./deploy/agent/acpdial
 
 FROM debian:stable
 RUN apt-get update \
@@ -39,6 +40,7 @@ COPY --from=fetch /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=gobuild /acpadapter /usr/local/bin/acpadapter
 COPY --from=gobuild /acpexec /usr/local/bin/acpexec
 COPY --from=gobuild /acpmux /usr/local/bin/acpmux
+COPY --from=gobuild /acpdial /usr/local/bin/acpdial
 COPY deploy/agent/entrypoint.sh /entrypoint.sh
 COPY deploy/agent/spawn-tui.sh /usr/local/bin/spawn-tui
 COPY deploy/agent/spawn-tmux /usr/local/bin/spawn-tmux
