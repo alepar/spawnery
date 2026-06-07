@@ -97,7 +97,7 @@ export function App() {
         upsertTool(f);
         break;
       case "turn": {
-        const t: TurnState = { state: f.state ?? "idle", queued: f.queued ?? 0 };
+        const t: TurnState = { state: f.state ?? "idle", queued: f.queued ?? 0, reason: f.reason, error: f.error };
         setTurn(t);
         turnsRef.current.set(spawnId, t);
         setItems((cur) => reconcilePending(cur, t.queued));

@@ -238,3 +238,55 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+func TestStopReasonForError(t *testing.T) {
+	mk := func(name, msg string) *OpencodeError {
+		e := &OpencodeError{Name: name}
+		e.Data.Message = msg
+		return e
+	}
+	cases := []struct {
+		name     string
+		err      *OpencodeError
+		wantStop string
+		wantErr  bool   // expect a structured error object
+		wantMsg  string // when wantErr, the message (substring) expected
+	}{
+		{"nil -> clean end_turn", nil, "end_turn", false, ""},
+		{"empty name -> end_turn", &OpencodeError{}, "end_turn", false, ""},
+		{"aborted -> cancelled, no error", mk("MessageAbortedError", ""), "cancelled", false, ""},
+		{"output length -> max_tokens, no error", mk("MessageOutputLengthError", ""), "max_tokens", false, ""},
+		{"context overflow -> max_tokens + error", mk("ContextOverflowError", ""), "max_tokens", true, "context"},
+		{"refusal -> refusal + error", mk("RefusalError", "I won't"), "refusal", true, "I won't"},
+		{"auth -> end_turn + error message", mk("ProviderAuthError", "missing api key"), "end_turn", true, "missing api key"},
+		{"unknown w/o message -> end_turn + error named", mk("UnknownError", ""), "end_turn", true, "UnknownError"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stop, ei := StopReasonForError(c.err)
+			if stop != c.wantStop {
+				t.Fatalf("stop = %q, want %q", stop, c.wantStop)
+			}
+			if c.wantErr {
+				if ei == nil {
+					t.Fatalf("want structured error, got nil")
+				}
+				if c.wantMsg != "" && !contains(ei.Message, c.wantMsg) {
+					t.Fatalf("error message %q missing %q", ei.Message, c.wantMsg)
+				}
+			} else if ei != nil {
+				t.Fatalf("want no error, got %+v", ei)
+			}
+		})
+	}
+}
+
+func TestParseSessionError(t *testing.T) {
+	se, err := ParseSessionError(json.RawMessage(`{"sessionID":"ses_1","error":{"name":"ProviderAuthError","data":{"providerID":"anthropic","message":"bad key"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if se.Error == nil || se.Error.Name != "ProviderAuthError" || se.Error.Data.Message != "bad key" {
+		t.Fatalf("bad parse: %+v", se)
+	}
+}

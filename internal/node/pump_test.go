@@ -511,3 +511,103 @@ func TestExitFnFiresOnAgentDeath(t *testing.T) {
 		t.Fatal("exitFn did not fire on agent death")
 	}
 }
+
+func TestParseStopResult(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		wantStop string
+		wantErr  *ErrorInfo
+	}{
+		{"empty -> nothing", ``, "", nil},
+		{"plain end_turn", `{"stopReason":"end_turn"}`, "end_turn", nil},
+		{"max_tokens, no error", `{"stopReason":"max_tokens"}`, "max_tokens", nil},
+		{"error with message", `{"stopReason":"end_turn","error":{"message":"bad key"}}`, "end_turn", &ErrorInfo{Message: "bad key"}},
+		{"empty error object ignored", `{"stopReason":"end_turn","error":{}}`, "end_turn", nil},
+		{"garbage", `not json`, "", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stop, ei := parseStopResult([]byte(c.in))
+			if stop != c.wantStop {
+				t.Fatalf("stop = %q, want %q", stop, c.wantStop)
+			}
+			if (ei == nil) != (c.wantErr == nil) || (ei != nil && *ei != *c.wantErr) {
+				t.Fatalf("err = %+v, want %+v", ei, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestTurnReasonCollapsesNormal(t *testing.T) {
+	for _, s := range []string{"", "end_turn"} {
+		if got := turnReason(s); got != "" {
+			t.Fatalf("turnReason(%q) = %q, want \"\"", s, got)
+		}
+	}
+	for _, s := range []string{"max_tokens", "refusal", "cancelled", "max_turn_requests"} {
+		if got := turnReason(s); got != s {
+			t.Fatalf("turnReason(%q) = %q, want unchanged", s, got)
+		}
+	}
+}
+
+// A normal end_turn idle frame must serialize byte-identically to before cat G (no reason/error keys).
+func TestIdleTurnFrameByteStable(t *testing.T) {
+	f := Frame{Kind: "turn", State: "idle", Queued: 0, Reason: turnReason("end_turn")}
+	want := `{"kind":"turn","state":"idle"}` + "\n"
+	if got := string(encodeFrame(f)); got != want {
+		t.Fatalf("encoded = %q, want %q", got, want)
+	}
+}
+
+// scriptGooseStop is a fake agent that ends each turn with the given session/prompt result JSON.
+func scriptGooseStop(in io.Reader, out io.Writer, result string) {
+	rd := acp.NewReader(in)
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil {
+			return
+		}
+		switch m.Method {
+		case "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
+		case "session/prompt":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(result)})
+		}
+	}
+}
+
+// A turn that ends with a non-normal stopReason + structured error must surface them on the idle Frame.
+func TestTurnEndCarriesReasonAndError(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGooseStop(gooseInR, gooseOutW, `{"stopReason":"max_tokens","error":{"message":"output cap hit"}}`)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop()
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "hi"}))
+	a.waitLen(t, 3) // user, turn(busy), turn(idle)
+	var idle *Frame
+	for _, f := range a.frames() {
+		if f.Kind == "turn" && f.State == "idle" {
+			ff := f
+			idle = &ff
+		}
+	}
+	if idle == nil {
+		t.Fatalf("no idle turn frame: %v", a.frames())
+	}
+	if idle.Reason != "max_tokens" {
+		t.Fatalf("idle.Reason = %q, want max_tokens", idle.Reason)
+	}
+	if idle.Error == nil || idle.Error.Message != "output cap hit" {
+		t.Fatalf("idle.Error = %+v, want message 'output cap hit'", idle.Error)
+	}
+}

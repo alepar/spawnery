@@ -39,4 +39,20 @@ describe("MessageList", () => {
     render(<MessageList items={items} working={true} queued={1} />);
     expect(screen.getByTestId("queued-tag")).toBeInTheDocument();
   });
+
+  it("shows a turn-ended indicator when idle with a non-normal end label", () => {
+    render(<MessageList items={items} working={false} endLabel="cancelled" />);
+    expect(screen.getByTestId("turn-ended-indicator")).toHaveTextContent("cancelled");
+  });
+
+  it("shows no turn-ended indicator on a normal idle (null label)", () => {
+    render(<MessageList items={items} working={false} endLabel={null} />);
+    expect(screen.queryByTestId("turn-ended-indicator")).toBeNull();
+  });
+
+  it("prefers the working indicator over the ended one while busy", () => {
+    render(<MessageList items={items} working={true} endLabel="cancelled" />);
+    expect(screen.getByTestId("working-indicator")).toBeInTheDocument();
+    expect(screen.queryByTestId("turn-ended-indicator")).toBeNull();
+  });
 });

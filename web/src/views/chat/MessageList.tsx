@@ -38,13 +38,24 @@ const Row = memo(function Row({ item }: { item: Item }) {
   );
 });
 
-type ListContext = { working: boolean; queued: number };
+type ListContext = { working: boolean; queued: number; endLabel?: string | null };
 
 // WorkingFooter renders the transcript-footer typing indicator (pulsing dots + "working…[· N queued]")
-// while the agent is mid-turn. It is the list Footer so it sits at the end of the conversation and
-// scrolls with followOutput.
+// while the agent is mid-turn. When the turn has instead ended for a non-normal reason (cat G), it
+// renders an honest turn-ending indicator (e.g. "stopped: max tokens" / "cancelled" / an error)
+// instead of silently going idle. A normal end_turn shows nothing. It is the list Footer so it sits at
+// the end of the conversation and scrolls with followOutput.
 function WorkingFooter({ context }: { context?: ListContext }) {
-  if (!context?.working) return null;
+  if (!context?.working) {
+    if (context?.endLabel) {
+      return (
+        <div data-testid="turn-ended-indicator" className="mx-auto flex max-w-[70ch] items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
+          {context.endLabel}
+        </div>
+      );
+    }
+    return null;
+  }
   return (
     <div data-testid="working-indicator" className="mx-auto flex max-w-[70ch] items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
       <span className="flex gap-1">
@@ -57,7 +68,7 @@ function WorkingFooter({ context }: { context?: ListContext }) {
   );
 }
 
-export function MessageList({ items, working = false, queued = 0 }: { items: Item[]; working?: boolean; queued?: number }) {
+export function MessageList({ items, working = false, queued = 0, endLabel = null }: { items: Item[]; working?: boolean; queued?: number; endLabel?: string | null }) {
   return (
     <Virtuoso
       className="flex-1"
@@ -70,7 +81,7 @@ export function MessageList({ items, working = false, queued = 0 }: { items: Ite
       // (so we don't yank them back). Start at the bottom on (re)mount so replayed history opens latest.
       atBottomThreshold={160}
       initialTopMostItemIndex={Math.max(0, items.length - 1)}
-      context={{ working, queued }}
+      context={{ working, queued, endLabel }}
       components={{ Footer: WorkingFooter }}
       computeItemKey={(_, item) => item.id}
       itemContent={(_, item) => <Row item={item} />}

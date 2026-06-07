@@ -3,7 +3,10 @@
 // the spawnery node (which speaks spec-ACP) needs no opencode-specific logic.
 package ocadapter
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // --- opencode event payloads (verified against opencode 1.15.13 /doc) -------
 // Every SSE event is {"type":"<name>","properties":{<payload>}}. These structs
@@ -36,13 +39,78 @@ type ToolState struct {
 }
 
 // MessageUpdated is the payload of a message.updated event; we use it to learn each message's role
-// (user vs assistant) so user-role text parts can be echoed to the web as user_message_chunk.
+// (user vs assistant) so user-role text parts can be echoed to the web as user_message_chunk, and to
+// pick up an assistant message's terminal error (the same NamedError union as session.error) for cat G.
 type MessageUpdated struct {
 	SessionID string `json:"sessionID"`
 	Info      struct {
-		ID   string `json:"id"`
-		Role string `json:"role"` // "user" | "assistant"
+		ID    string         `json:"id"`
+		Role  string         `json:"role"` // "user" | "assistant"
+		Error *OpencodeError `json:"error"`
 	} `json:"info"`
+}
+
+// OpencodeError models one opencode NamedError (the discriminated union surfaced on a session.error
+// event and on an assistant message's `error` field). opencode's known variants include
+// ProviderAuthError, MessageOutputLengthError, MessageAbortedError, and UnknownError; Data carries an
+// optional human message. We match on Name leniently (substring) so adjacent/renamed variants still map.
+type OpencodeError struct {
+	Name string `json:"name"`
+	Data struct {
+		Message    string `json:"message"`
+		ProviderID string `json:"providerID"`
+	} `json:"data"`
+}
+
+// SessionError is the payload of a session.error event: an optional sessionID and the NamedError.
+type SessionError struct {
+	SessionID string         `json:"sessionID"`
+	Error     *OpencodeError `json:"error"`
+}
+
+// ParseSessionError decodes a session.error properties payload.
+func ParseSessionError(raw json.RawMessage) (SessionError, error) {
+	var s SessionError
+	err := json.Unmarshal(raw, &s)
+	return s, err
+}
+
+// ACPError is the structured turn error carried (alongside stopReason) on the session/prompt response.
+// It mirrors the node-side ErrorInfo so the pump can drop it straight onto the turn Frame (cat G).
+type ACPError struct {
+	Code    int    `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// StopReasonForError maps an opencode NamedError to an ACP stop reason plus an optional structured
+// error. Cancellation and an output-length cap are honest stop reasons (`cancelled` / `max_tokens`)
+// that carry NO error object; auth/context/structured/unknown failures keep a best-fit stop reason but
+// ALSO surface a structured error (message) so the client can show what actually went wrong. A nil
+// error (the common case) is a clean `end_turn`.
+func StopReasonForError(e *OpencodeError) (stop string, errInfo *ACPError) {
+	if e == nil || e.Name == "" {
+		return "end_turn", nil
+	}
+	n := strings.ToLower(e.Name)
+	msg := e.Data.Message
+	switch {
+	case strings.Contains(n, "abort") || strings.Contains(n, "cancel"):
+		return "cancelled", nil // a deliberate interrupt is not an error
+	case strings.Contains(n, "outputlength") || strings.Contains(n, "output_length"):
+		return "max_tokens", nil // hit the model's output cap — reason says it all
+	case strings.Contains(n, "context") || strings.Contains(n, "overflow"):
+		if msg == "" {
+			msg = "context window exceeded"
+		}
+		return "max_tokens", &ACPError{Message: msg}
+	case strings.Contains(n, "refus"):
+		return "refusal", &ACPError{Message: msg}
+	default: // auth, structured-output, unknown, ... — no clean stop reason; report honestly as an error
+		if msg == "" {
+			msg = e.Name
+		}
+		return "end_turn", &ACPError{Message: msg}
+	}
 }
 
 // ParseMessageUpdated decodes a message.updated properties payload.

@@ -41,6 +41,7 @@ type Adapter struct {
 	recentSelf  []string          // prompt texts WE submitted (web path) — skip echoing those back
 	inflightID  int               // node's session/prompt id awaiting turn-end
 	hasInflight bool
+	turnErr     *OpencodeError // terminal error seen during the in-flight turn (session.error / msg error)
 	nextReqID   int
 	permByReq   map[int]string // our request id -> opencode permissionID
 }
@@ -159,6 +160,7 @@ func (a *Adapter) handlePrompt(srv *acp.Server, m acp.Message) {
 	a.mu.Lock()
 	a.inflightID = id
 	a.hasInflight = true
+	a.turnErr = nil // fresh turn: clear any error carried over from the previous one
 	sid := a.sessionID
 	// Remember our own (web-originated) prompt text so we don't echo it back as a TUI message —
 	// the node already locally-echoes web prompts. Bounded ring.
@@ -243,6 +245,19 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 		if err == nil && mu.Info.ID != "" {
 			a.mu.Lock()
 			a.msgRole[mu.Info.ID] = mu.Info.Role
+			// An assistant message can carry a terminal NamedError; record it for the turn-end stopReason.
+			if mu.Info.Error != nil && mu.Info.Error.Name != "" {
+				a.turnErr = mu.Info.Error
+			}
+			a.mu.Unlock()
+		}
+	case "session.error":
+		// A session-level NamedError (auth/output-length/aborted/...). Remember it; it shapes the
+		// stopReason + structured error sent when this turn ends (session.idle). (cat G)
+		se, err := ParseSessionError(e.Properties)
+		if err == nil && se.Error != nil && se.Error.Name != "" {
+			a.mu.Lock()
+			a.turnErr = se.Error
 			a.mu.Unlock()
 		}
 	case "message.part.updated":
@@ -297,9 +312,18 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 		id := a.inflightID
 		has := a.hasInflight
 		a.hasInflight = false
+		te := a.turnErr
+		a.turnErr = nil
 		a.mu.Unlock()
 		if has {
-			_ = srv.Respond(id, map[string]any{"stopReason": "end_turn"})
+			// Map opencode's real stop semantics (incl. any NamedError) to an honest ACP stopReason +
+			// optional structured error, instead of always collapsing to end_turn. (cat G)
+			stop, ei := StopReasonForError(te)
+			resp := map[string]any{"stopReason": stop}
+			if ei != nil {
+				resp["error"] = ei
+			}
+			_ = srv.Respond(id, resp)
 		}
 	}
 }

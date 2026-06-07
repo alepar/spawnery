@@ -20,8 +20,9 @@ type Fake struct {
 	nextSess int
 	subs     map[chan string]struct{}
 
-	perms  []PermResponse // recorded permission answers
-	aborts []string       // session IDs aborted
+	perms      []PermResponse // recorded permission answers
+	aborts     []string       // session IDs aborted
+	pendingErr string         // if set, emitted as a session.error before idle by the next scriptPrompt
 }
 
 // PermResponse records a permission answer the adapter POSTed.
@@ -137,11 +138,26 @@ func (f *Fake) Emit(eventType, propsJSON string) {
 	f.mu.Unlock()
 }
 
-// scriptPrompt emits a text part snapshot, a streamed delta, then idle.
+// scriptPrompt emits a text part snapshot, a streamed delta, an optional scripted session.error, then idle.
 func (f *Fake) scriptPrompt(sid string) {
 	f.Emit("message.part.updated", fmt.Sprintf(`{"sessionID":%q,"part":{"id":"prt_1","type":"text","text":""},"time":1}`, sid))
 	f.Emit("message.part.delta", fmt.Sprintf(`{"sessionID":%q,"messageID":"msg_1","partID":"prt_1","field":"text","delta":"hi"}`, sid))
+	f.mu.Lock()
+	pe := f.pendingErr
+	f.pendingErr = ""
+	f.mu.Unlock()
+	if pe != "" {
+		f.Emit("session.error", fmt.Sprintf(`{"sessionID":%q,"error":%s}`, sid, pe))
+	}
 	f.Emit("session.idle", fmt.Sprintf(`{"sessionID":%q}`, sid))
+}
+
+// ScriptTurnError makes the NEXT prompt's turn emit the given NamedError (raw JSON, e.g.
+// `{"name":"MessageAbortedError","data":{}}`) as a session.error just before idle.
+func (f *Fake) ScriptTurnError(errJSON string) {
+	f.mu.Lock()
+	f.pendingErr = errJSON
+	f.mu.Unlock()
 }
 
 // EmitUserMessage emits the events opencode produces for a user message: message.updated (role)

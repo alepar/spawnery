@@ -224,3 +224,45 @@ func TestAdapterCancelAborts(t *testing.T) {
 }
 
 func mustLine(m acp.Message) string { b, _ := json.Marshal(m); return string(b) }
+
+// A turn that opencode ends with a NamedError must produce an honest stopReason (not end_turn) and a
+// structured error on the session/prompt response (cat G).
+func TestAdapterPromptStopReasonOnError(t *testing.T) {
+	h := newHarness(t)
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	h.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/app"}}`)
+	h.await(t, idIs(2))
+
+	// Auth error -> end_turn stopReason BUT a structured error carrying the message.
+	h.fake.ScriptTurnError(`{"name":"ProviderAuthError","data":{"providerID":"anthropic","message":"missing api key"}}`)
+	h.send(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"ses_fake1","prompt":[{"type":"text","text":"hi"}]}}`)
+	m := h.await(t, idIs(3))
+	res := string(m.Result)
+	if !strings.Contains(res, `"stopReason":"end_turn"`) || !strings.Contains(res, "missing api key") {
+		t.Fatalf("expected end_turn + error message, got %s", res)
+	}
+	if !strings.Contains(res, `"error"`) {
+		t.Fatalf("expected a structured error object, got %s", res)
+	}
+}
+
+// An aborted turn maps to the `cancelled` stopReason and carries NO error object.
+func TestAdapterPromptCancelledStopReason(t *testing.T) {
+	h := newHarness(t)
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	h.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/app"}}`)
+	h.await(t, idIs(2))
+
+	h.fake.ScriptTurnError(`{"name":"MessageAbortedError","data":{}}`)
+	h.send(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"ses_fake1","prompt":[{"type":"text","text":"go"}]}}`)
+	m := h.await(t, idIs(3))
+	res := string(m.Result)
+	if !strings.Contains(res, `"stopReason":"cancelled"`) {
+		t.Fatalf("expected cancelled stopReason, got %s", res)
+	}
+	if strings.Contains(res, `"error"`) {
+		t.Fatalf("cancelled must not carry an error object, got %s", res)
+	}
+}

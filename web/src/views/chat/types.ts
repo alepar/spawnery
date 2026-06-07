@@ -1,4 +1,4 @@
-import type { ContentBlock, Diff } from "@/acp/frames";
+import type { ContentBlock, Diff, ErrorInfo } from "@/acp/frames";
 
 export type Item =
   | { id: number; kind: "user"; text: string; pending?: boolean }
@@ -16,4 +16,6 @@ export type Item =
     }
   | { id: number; kind: "thought"; text: string };
 
-export type TurnState = { state: "busy" | "idle"; queued: number };
+// TurnState mirrors the `turn` Frame. reason/error are populated when a turn ends for a non-normal
+// reason (cat G); a normal end_turn leaves them undefined so the UI shows nothing new.
+export type TurnState = { state: "busy" | "idle"; queued: number; reason?: string; error?: ErrorInfo };

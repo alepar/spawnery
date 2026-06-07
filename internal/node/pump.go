@@ -345,7 +345,7 @@ func (p *Pump) readLoop() {
 				continue
 			}
 			if inflight {
-				p.handleTurnEnd() // session/prompt result = turn-end
+				p.handleTurnEnd(m.Result) // session/prompt result = turn-end (carries stopReason + error)
 			}
 			continue
 		}
@@ -464,8 +464,11 @@ func toolPayload(content, rawIn, rawOut json.RawMessage) *ToolPayload {
 	return tp
 }
 
-// handleTurnEnd clears busy on a turn-end and drains one queued prompt (if any) as the next turn.
-func (p *Pump) handleTurnEnd() {
+// handleTurnEnd clears busy on a turn-end and drains one queued prompt (if any) as the next turn. The
+// session/prompt result carries the ACP StopReason and (for opencode) a structured error; these ride
+// the emitted idle turn Frame as Reason/Error so the client can show an honest turn-ending indicator.
+func (p *Pump) handleTurnEnd(result json.RawMessage) {
+	reason, errInfo := parseStopResult(result)
 	p.mu.Lock()
 	p.busy = false
 	p.inflightPromptID = 0
@@ -487,7 +490,40 @@ func (p *Pump) handleTurnEnd() {
 		p.sendPrompt(sid, drainText)
 		return
 	}
-	p.appendFrames([]Frame{{Kind: "turn", State: "idle", Queued: 0}})
+	// Reason/Error are omitempty: a normal end_turn with no error serializes byte-identically to before.
+	p.appendFrames([]Frame{{Kind: "turn", State: "idle", Queued: 0, Reason: turnReason(reason), Error: errInfo}})
+}
+
+// parseStopResult extracts the ACP StopReason and an optional structured error from a session/prompt
+// result. Best-effort: a missing/garbled result (e.g. a goose agent that omits stopReason) yields "".
+func parseStopResult(result json.RawMessage) (string, *ErrorInfo) {
+	if len(result) == 0 {
+		return "", nil
+	}
+	var r struct {
+		StopReason string `json:"stopReason"`
+		Error      *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(result, &r) != nil {
+		return "", nil
+	}
+	var ei *ErrorInfo
+	if r.Error != nil && (r.Error.Code != 0 || r.Error.Message != "") {
+		ei = &ErrorInfo{Code: r.Error.Code, Message: r.Error.Message}
+	}
+	return r.StopReason, ei
+}
+
+// turnReason collapses a normal end_turn (or an absent reason) to "" so the idle turn Frame stays
+// byte-stable; any non-normal reason (max_tokens|max_turn_requests|refusal|cancelled) is carried through.
+func turnReason(stop string) string {
+	if stop == "" || stop == "end_turn" {
+		return ""
+	}
+	return stop
 }
 
 // fromClient handles a client->pump frame.
