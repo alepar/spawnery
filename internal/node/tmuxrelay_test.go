@@ -10,6 +10,70 @@ import (
 	"time"
 )
 
+// TestTmuxRelayActivityTracking verifies that attached()/lastActive()/markActive() behave correctly:
+// a fresh relay starts with recent activity and no clients; markActive refreshes the clock; attached()
+// reflects clients. Also verifies that reapIdle stops an idle relay (no clients, old lastActivity).
+func TestTmuxRelayActivityTracking(t *testing.T) {
+	relay := newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
+
+	// A new relay starts with recent activity (not the zero time).
+	if time.Since(relay.lastActive()) > time.Second {
+		t.Fatal("new relay should start with recent activity")
+	}
+
+	// attached() returns false with no clients.
+	if relay.attached() {
+		t.Fatal("no clients -> not attached")
+	}
+
+	// markActive refreshes the clock.
+	old := time.Now().Add(-time.Hour)
+	relay.mu.Lock()
+	relay.lastActivity = old
+	relay.mu.Unlock()
+	relay.markActive()
+	if !relay.lastActive().After(old) {
+		t.Fatal("markActive must refresh lastActivity")
+	}
+}
+
+// TestReapIdleIncludesTmuxRelays verifies that reapIdle stops an idle tmux relay (no clients, old
+// lastActivity) while leaving a recently-active one alive.
+func TestReapIdleIncludesTmuxRelays(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	a := newAttacher(newGooseManager(t, be), &fakeCPStream{})
+	ctx := context.Background()
+
+	// Register two tmux relays directly (no real container needed for the reap logic).
+	idleRelay := newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
+	activeRelay := newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
+
+	a.mu.Lock()
+	a.tmuxRelays["idle-tmux"] = idleRelay
+	a.tmuxRelays["active-tmux"] = activeRelay
+	a.active += 2
+	a.mu.Unlock()
+
+	now := time.Now()
+	// Back-date the idle relay far into the past.
+	idleRelay.mu.Lock()
+	idleRelay.lastActivity = now.Add(-10 * time.Minute)
+	idleRelay.mu.Unlock()
+	// The active relay is recent (just created).
+
+	// Detached budget 5m (idle relay is 10m old -> reap), attached budget 30m.
+	a.reapIdle(ctx, now, 5*time.Minute, 30*time.Minute)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.tmuxRelays["idle-tmux"] != nil {
+		t.Fatal("idle tmux relay past its budget must be reaped")
+	}
+	if a.tmuxRelays["active-tmux"] == nil {
+		t.Fatal("recently-active tmux relay must survive reaping")
+	}
+}
+
 func TestParseClientFrame(t *testing.T) {
 	// input opcode
 	kind, data, cols, rows := parseClientFrame([]byte{tmuxOpInput, 'h', 'i'})

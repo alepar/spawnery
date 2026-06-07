@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 )
@@ -43,8 +44,9 @@ type tmuxRelay struct {
 	execArgv []string // full argv to attach: <execprefix> <container> tmux attach -t spawn
 	send     func(clientID string, data []byte) error
 
-	mu      sync.Mutex
-	clients map[string]*tmuxClient
+	mu           sync.Mutex
+	clients      map[string]*tmuxClient
+	lastActivity time.Time // last relay frame in either direction; the idle reaper's clock
 }
 
 type tmuxClient struct {
@@ -53,8 +55,17 @@ type tmuxClient struct {
 }
 
 func newTmuxRelay(attachArgv []string, send func(clientID string, data []byte) error) *tmuxRelay {
-	return &tmuxRelay{execArgv: attachArgv, send: send, clients: map[string]*tmuxClient{}}
+	return &tmuxRelay{execArgv: attachArgv, send: send, clients: map[string]*tmuxClient{}, lastActivity: time.Now()}
 }
+
+// markActive refreshes the idle clock. Callers must NOT already hold mu.
+func (r *tmuxRelay) markActive() { r.mu.Lock(); r.lastActivity = time.Now(); r.mu.Unlock() }
+
+// lastActive reports the time of the most recent relay frame in either direction.
+func (r *tmuxRelay) lastActive() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.lastActivity }
+
+// attached reports whether any client is currently attached.
+func (r *tmuxRelay) attached() bool { r.mu.Lock(); defer r.mu.Unlock(); return len(r.clients) > 0 }
 
 // attach starts a `tmux attach` PTY for clientID and pumps its output back via send.
 func (r *tmuxRelay) attach(ctx context.Context, clientID string) error {
@@ -66,6 +77,7 @@ func (r *tmuxRelay) attach(ctx context.Context, clientID string) error {
 	r.mu.Lock()
 	r.clients[clientID] = &tmuxClient{ptmx: ptmx, cmd: cmd}
 	r.mu.Unlock()
+	r.markActive() // attach = activity
 	go func() {
 		// Reap the `docker exec` child once the read loop ends (EOF or external detach/stop closed
 		// the PTY), so killed execs don't accumulate as zombies over many attach/detach cycles.
@@ -74,6 +86,7 @@ func (r *tmuxRelay) attach(ctx context.Context, clientID string) error {
 		for {
 			n, err := ptmx.Read(buf)
 			if n > 0 {
+				r.markActive() // PTY output = activity
 				_ = r.send(clientID, append([]byte(nil), buf[:n]...))
 			}
 			if err != nil {
@@ -92,6 +105,7 @@ func (r *tmuxRelay) fromClient(clientID string, b []byte) {
 	if c == nil {
 		return
 	}
+	r.markActive() // client input = activity
 	kind, data, cols, rows := parseClientFrame(b)
 	switch kind {
 	case tmuxOpResize:

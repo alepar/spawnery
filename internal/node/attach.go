@@ -195,16 +195,24 @@ func (a *attacher) idleReapLoop(ctx context.Context) {
 
 // reapIdle tears down every spawn whose last relay activity is older than its stage budget (detached
 // vs attached), measured from now. Candidates are snapshotted under the lock, then stopped outside it
-// (stopSpawn takes the lock itself).
+// (stopSpawn takes the lock itself). Both ACP pumps and tmux relays are reaped.
 func (a *attacher) reapIdle(ctx context.Context, now time.Time, detachedTimeout, attachedTimeout time.Duration) {
 	a.mu.Lock()
 	type cand struct {
 		id string
 		p  *Pump
 	}
+	type relayCand struct {
+		id string
+		r  *tmuxRelay
+	}
 	cands := make([]cand, 0, len(a.pumps))
 	for id, p := range a.pumps {
 		cands = append(cands, cand{id, p})
+	}
+	relayCands := make([]relayCand, 0, len(a.tmuxRelays))
+	for id, r := range a.tmuxRelays {
+		relayCands = append(relayCands, relayCand{id, r})
 	}
 	a.mu.Unlock()
 
@@ -215,6 +223,16 @@ func (a *attacher) reapIdle(ctx context.Context, now time.Time, detachedTimeout,
 		}
 		if now.Sub(c.p.lastActive()) >= budget {
 			log.Printf("idle-reaping spawn=%s (idle past %s, attached=%v)", c.id, budget, c.p.attached())
+			a.stopSpawn(ctx, c.id)
+		}
+	}
+	for _, c := range relayCands {
+		budget := detachedTimeout
+		if c.r.attached() {
+			budget = attachedTimeout
+		}
+		if now.Sub(c.r.lastActive()) >= budget {
+			log.Printf("idle-reaping tmux spawn=%s (idle past %s, attached=%v)", c.id, budget, c.r.attached())
 			a.stopSpawn(ctx, c.id)
 		}
 	}
