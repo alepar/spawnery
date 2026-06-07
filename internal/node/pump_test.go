@@ -955,6 +955,54 @@ func TestSetModeFrameForwardedUpstream(t *testing.T) {
 	}
 }
 
+// scriptGooseCancel records each session/cancel notification's params on a channel, and asserts it is a
+// NOTIFICATION (no id). (UP direction, cat J.)
+func scriptGooseCancel(in io.Reader, out io.Writer, got chan<- string, hadID chan<- bool) {
+	rd := acp.NewReader(in)
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil {
+			return
+		}
+		switch m.Method {
+		case "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
+		case "session/cancel":
+			hadID <- m.ID != nil
+			got <- string(m.Params)
+		}
+	}
+}
+
+// A client's upward cancel frame must be forwarded to the agent as a session/cancel NOTIFICATION (no id)
+// carrying the session id (cat J, UP direction).
+func TestCancelFrameForwardedUpstream(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	got := make(chan string, 1)
+	hadID := make(chan bool, 1)
+	go scriptGooseCancel(gooseInR, gooseOutW, got, hadID)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop()
+	p.fromClient("a", encodeFrame(Frame{Kind: "cancel"}))
+	select {
+	case params := <-got:
+		if !contains(params, `"sessionId":"s1"`) {
+			t.Fatalf("cancel upstream params = %s", params)
+		}
+		if <-hadID {
+			t.Fatal("session/cancel must be a notification (no id)")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel was not forwarded upstream")
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

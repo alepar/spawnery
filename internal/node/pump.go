@@ -661,7 +661,26 @@ func (p *Pump) fromClient(clientID string, line []byte) {
 		// Upward control frame (cat F): switch the session mode. v1 shared-attach: any client may set the
 		// mode (no arbitration). The agent's resulting current_mode_update fans back out to all clients.
 		p.sendSetMode(f.ModeID)
+	case "cancel":
+		// Upward control frame (cat J): interrupt the in-flight turn. v1 shared-attach: any client may
+		// cancel the active shared turn (no arbitration). The agent then ends the turn with StopReason
+		// `cancelled` (decoded by cat G), which fans back out to all clients as the turn-ended indicator.
+		p.sendCancel()
 	}
+}
+
+// sendCancel forwards a client's turn interrupt to the agent as an ACP session/cancel NOTIFICATION
+// (cat J). Unlike set_mode/prompt it carries no id and no waiter — session/cancel is a one-way
+// notification per ACP. The agent interrupts the in-flight turn, which then ends with StopReason
+// `cancelled`. Cancelling with no turn in flight is harmless (the agent ignores it).
+func (p *Pump) sendCancel() {
+	p.mu.Lock()
+	sid := p.sessionID
+	p.mu.Unlock()
+	params, _ := json.Marshal(map[string]any{"sessionId": sid})
+	var buf bytes.Buffer
+	_ = acp.WriteMessage(&buf, acp.Message{Method: "session/cancel", Params: params})
+	p.sendLine(buf.Bytes())
 }
 
 // sendSetMode forwards a client's mode switch to the agent as an ACP session/set_mode request (cat F).

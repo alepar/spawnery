@@ -481,8 +481,29 @@ func (m *Mux) onClientMessage(c *dsClient, msg acp.Message) {
 		// to every client via onUpstreamNotification, so all selectors follow the switch.
 		m.forwardSetMode(msg.Params)
 	case "session/cancel":
-		// best-effort: v1 no-op (single-session, serialized; cancel not modeled).
+		// Forward a downstream turn interrupt to the shared upstream session (cat J, sp-ufz.13). v1
+		// shared-attach: any client may cancel the active shared turn (no arbitration). The upstream
+		// turn ends with StopReason `cancelled`, whose session/prompt result + turn frame fan out to
+		// every client via the existing result/notification fanout.
+		m.forwardCancel()
 	}
+}
+
+// forwardCancel relays a downstream session/cancel to the shared upstream session (cat J), making the
+// former v1 no-op real. session/cancel is a NOTIFICATION (no id / no waiter): it interrupts the active
+// shared turn, which ends with StopReason `cancelled`. Per shared-attach v1, any client may cancel the
+// active shared turn (no arbitration). Queued prompts are NOT flushed — cancel interrupts the in-flight
+// turn only; the serializer drains the next queued prompt on turn-end as usual.
+func (m *Mux) forwardCancel() {
+	m.mu.Lock()
+	sid := m.sessionID
+	m.mu.Unlock()
+	params, _ := json.Marshal(map[string]any{"sessionId": sid})
+	var buf bytes.Buffer
+	if acp.WriteMessage(&buf, acp.Message{Method: "session/cancel", Params: params}) != nil {
+		return
+	}
+	m.sendLine(buf.Bytes())
 }
 
 // fromClientPrompt runs a downstream prompt through the shared busy/queue

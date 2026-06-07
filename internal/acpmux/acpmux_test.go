@@ -28,6 +28,7 @@ type fakeAgent struct {
 	maxInflt  int32 // high-water mark
 	permReplies [][]byte // permission responses received from acpmux (should be exactly 1)
 	setModes  []string // modeId of each session/set_mode received from acpmux (cat F)
+	cancels   []string // sessionId of each session/cancel notification received from acpmux (cat J)
 
 	// modesJSON, when non-empty, is the SessionModeState advertised on the session/new result (cat F).
 	modesJSON string
@@ -84,6 +85,15 @@ func (f *fakeAgent) run() {
 				"update":    map[string]any{"sessionUpdate": "current_mode_update", "currentModeId": p.ModeID},
 			})
 			f.write(acp.Message{Method: "session/update", Params: upd})
+		case msg.Method == "session/cancel":
+			// A turn interrupt forwarded from any downstream client (cat J). It is a notification (no id).
+			var p struct {
+				SessionID string `json:"sessionId"`
+			}
+			_ = json.Unmarshal(msg.Params, &p)
+			f.mu.Lock()
+			f.cancels = append(f.cancels, p.SessionID)
+			f.mu.Unlock()
 		case msg.Method == "session/prompt":
 			go f.handlePrompt(msg)
 		case msg.ID != nil && msg.Method == "" && msg.Result != nil:
@@ -538,6 +548,42 @@ func (f *fakeAgent) setModeIDs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.setModes...)
+}
+
+func (f *fakeAgent) cancelSessionIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cancels...)
+}
+
+// A downstream session/cancel from ANY client must forward upstream to interrupt the shared turn
+// (cat J, sp-ufz.13) — the former v1 no-op is now real. v1 shared-attach: any client may cancel (no
+// arbitration). The forwarded message is a notification carrying the shared session id.
+func TestCancelForwardsUpstream(t *testing.T) {
+	addr, fa, teardown := startMux(t)
+	defer teardown()
+	a, b := dial(t, addr), dial(t, addr)
+	defer a.close()
+	defer b.close()
+	a.handshake(t)
+	b.handshake(t)
+
+	// Client B cancels the shared session's active turn.
+	b.send(acp.Message{Method: "session/cancel", Params: json.RawMessage(`{"sessionId":"S1"}`)})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if cs := fa.cancelSessionIDs(); len(cs) == 1 {
+			if cs[0] != "S1" {
+				t.Fatalf("upstream cancel sessionId = %q, want S1", cs[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("upstream never received the session/cancel")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // The downstream session/new response must re-advertise the upstream's session modes so each client

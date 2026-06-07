@@ -11,7 +11,7 @@ import type { Item, TurnState, PermPrompt } from "@/views/chat/types";
 import type { Command, ModePayload } from "@/acp/frames";
 import type { SpawnView } from "@/api/spawnlet";
 
-export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp, spawns = [], activeId, actions, onTermConn, commands, mode, onSetMode }: {
+export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp, spawns = [], activeId, actions, onTermConn, commands, mode, onSetMode, onCancel }: {
   conn: ConnState | null;
   items: Item[];
   turn: TurnState;
@@ -27,6 +27,7 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
   commands?: Command[];
   mode?: ModePayload | null; // session modes for the active spawn (cat F)
   onSetMode?: (modeId: string) => void;
+  onCancel?: () => void; // interrupt the in-flight turn (cat J)
 }) {
   const [view, setView] = useState<View>("market");
   const onSpawn = (appId: string, image?: string, runnableId?: string) => { onSpawnApp(appId, image, runnableId); setView("chat"); };
@@ -55,7 +56,7 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
               App.tsx only opens the ACP session once status flips to "active" (same refresh that
               carries the mode), so no stray ACP session opens for a tmux spawn. */}
           {view === "chat" && activeMode === "tmux" && activeId && <TerminalView spawnId={activeId} onConn={onTermConn} />}
-          {view === "chat" && activeMode !== "tmux" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} focusKey={activeId} commands={commands} mode={mode} onSetMode={onSetMode} />}
+          {view === "chat" && activeMode !== "tmux" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} focusKey={activeId} commands={commands} mode={mode} onSetMode={onSetMode} onCancel={onCancel} />}
           {view === "market" && <MarketplaceView onSpawn={onSpawn} />}
           {view === "settings" && <SettingsView />}
         </main>

@@ -5,7 +5,7 @@ import {
   DEV_TOKEN, type SpawnView,
 } from "./api/spawnlet";
 import { Conn } from "./acp/conn";
-import { encodePrompt, encodePermResponse, encodeSetMode, type Frame, type Command, type ModePayload } from "./acp/frames";
+import { encodePrompt, encodePermResponse, encodeSetMode, encodeCancel, type Frame, type Command, type ModePayload } from "./acp/frames";
 import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
 import { ReconnectingSocket } from "./shell/reconnectingSocket";
@@ -337,6 +337,13 @@ export function App() {
     wsRef.current?.send(encodeSetMode(modeId));
   };
 
+  // onCancel sends the upward cancel control frame (cat J): interrupt the in-flight turn. The agent then
+  // ends the turn with the `cancelled` reason (cat G), which arrives as a turn=idle frame — no optimistic
+  // local state change. Shown only while a turn is busy.
+  const onCancel = () => {
+    wsRef.current?.send(encodeCancel());
+  };
+
   // tmux spawns have no App-managed ACP socket; their TerminalView drives the header dot.
   const onTermConn = (s: "connecting" | "connected" | "reconnecting") => {
     if (s === "connected") connected();
@@ -355,6 +362,7 @@ export function App() {
       commands={commands}
       mode={mode}
       onSetMode={onSetMode}
+      onCancel={onCancel}
       onSpawnApp={spawnApp}
       spawns={spawns}
       activeId={activeId}
