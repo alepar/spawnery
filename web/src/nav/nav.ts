@@ -19,8 +19,9 @@ export function pathToNav(raw: string): Nav {
 
   switch (parts[0]) {
     case undefined:                 // "/"
+      return TEMPLATES;
     case "templates":
-      if (parts.length === 1 || parts.length === 0) return TEMPLATES;
+      if (parts.length === 1) return TEMPLATES;
       if (parts.length === 2) return { section: "app", appId: decodeURIComponent(parts[1]) };
       return TEMPLATES; // unexpected depth -> fallback
     case "my-apps":   return { section: "my-apps" };

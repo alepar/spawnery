@@ -41,6 +41,8 @@ describe("navToPath", () => {
     expect(navToPath({ section: "spawn", spawnId: "sp/abc" })).toBe("/spawn/sp%2Fabc"));
 });
 
+// Asymmetry is intentional: we verify pathToNav(navToPath(nav)) === nav only.
+// The inverse navToPath(pathToNav(path)) is NOT identity (e.g. "/" normalizes to "/templates").
 describe("round-trip: pathToNav(navToPath(nav)) === nav", () => {
   const cases: Nav[] = [
     { section: "templates" },
