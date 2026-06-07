@@ -371,6 +371,100 @@ func CommandsToACP(sessionID string, cmds []opencode.Command) ACPCommandsParams 
 	}
 }
 
+// --- session modes (cat F, sp-ufz.12) ---------------------------------------
+// opencode's "Build"/"Plan" are PRIMARY agents (GET /agent); selecting one is how a session switches
+// mode. We map the user-selectable primary agents (mode=="primary" && !hidden) to ACP session modes —
+// id is the opencode agent name (e.g. "build"), name a display label — advertise them + a current mode
+// on the session/new result, and switch opencode's active agent on an incoming session/set_mode by
+// passing the chosen agent name to prompt_async. The internal helpers (compaction/summary/title) carry
+// hidden:true and are filtered out. An agent that exposes no selectable primary agents -> no modes.
+
+// ACPSessionMode is one selectable session mode (ACP SessionMode shape: id + display name).
+type ACPSessionMode struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// ACPSessionModeState is the modes block advertised on the session/new result (ACP SessionModeState):
+// the current mode id plus the full set of available modes.
+type ACPSessionModeState struct {
+	CurrentModeID  string           `json:"currentModeId"`
+	AvailableModes []ACPSessionMode `json:"availableModes"`
+}
+
+// defaultModeID is opencode's default primary agent. Used as the initial current mode when present.
+const defaultModeID = "build"
+
+// AvailableModesFromAgents maps opencode's advertised agents to the ACP session modes the user can
+// select: the primary, non-hidden agents (Build/Plan), in advertised order. The id is the opencode
+// agent name; the name is a humanized display label. Returns nil when no selectable agent exists.
+func AvailableModesFromAgents(agents []opencode.Agent) []ACPSessionMode {
+	out := make([]ACPSessionMode, 0, len(agents))
+	for _, ag := range agents {
+		if ag.Mode != "primary" || ag.Hidden || ag.Name == "" {
+			continue
+		}
+		out = append(out, ACPSessionMode{ID: ag.Name, Name: modeDisplayName(ag.Name)})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// DefaultModeID picks the initial current mode from the available modes: opencode's default agent
+// ("build") when present, else the first available mode. Returns "" when there are no modes.
+func DefaultModeID(modes []ACPSessionMode) string {
+	for _, m := range modes {
+		if m.ID == defaultModeID {
+			return m.ID
+		}
+	}
+	if len(modes) > 0 {
+		return modes[0].ID
+	}
+	return ""
+}
+
+// modeDisplayName humanizes an opencode agent name into a mode label ("build" -> "Build").
+func modeDisplayName(name string) string {
+	if name == "" {
+		return name
+	}
+	return strings.ToUpper(name[:1]) + name[1:]
+}
+
+// IsValidMode reports whether modeID is one of the available modes (a client may only set an advertised
+// mode; an unknown mode id is ignored).
+func IsValidMode(modeID string, modes []ACPSessionMode) bool {
+	for _, m := range modes {
+		if m.ID == modeID {
+			return true
+		}
+	}
+	return false
+}
+
+// ACPModeUpdateParams is the params of a current_mode_update session/update notification (cat F).
+type ACPModeUpdateParams struct {
+	SessionID string        `json:"sessionId"`
+	Update    ACPModeUpdate `json:"update"`
+}
+
+// ACPModeUpdate is the `update` body of a current_mode_update: the now-active mode id.
+type ACPModeUpdate struct {
+	SessionUpdate string `json:"sessionUpdate"` // always "current_mode_update"
+	CurrentModeID string `json:"currentModeId"`
+}
+
+// CurrentModeUpdate builds a current_mode_update session/update announcing the now-active mode.
+func CurrentModeUpdate(sessionID, modeID string) ACPModeUpdateParams {
+	return ACPModeUpdateParams{
+		SessionID: sessionID,
+		Update:    ACPModeUpdate{SessionUpdate: "current_mode_update", CurrentModeID: modeID},
+	}
+}
+
 // PartDelta is the payload of a message.part.delta event (streaming increment).
 // It carries no part type, so the consumer maps PartID -> type via a prior
 // PartUpdated.

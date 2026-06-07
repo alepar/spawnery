@@ -380,3 +380,119 @@ func TestAdapterPromptOmitsUsageWhenAbsent(t *testing.T) {
 		t.Fatalf("a turn with no step-finish parts must omit usage, got %s", res)
 	}
 }
+
+// After session/new the adapter must advertise opencode's selectable primary agents as ACP session
+// modes (currentModeId + availableModes), so the web can render a mode selector (cat F).
+func TestAdapterAdvertisesModes(t *testing.T) {
+	h := newHarness(t)
+	h.fake.SetAgents([]opencode.Agent{
+		{Name: "build", Description: "The default agent.", Mode: "primary"},
+		{Name: "plan", Description: "Plan mode.", Mode: "primary"},
+		{Name: "title", Mode: "primary", Hidden: true},
+		{Name: "general", Mode: "subagent"},
+	})
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	h.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/app"}}`)
+	m := h.await(t, idIs(2))
+	res := string(m.Result)
+	for _, want := range []string{`"currentModeId":"build"`, `"availableModes"`, `"id":"build"`, `"name":"Build"`, `"id":"plan"`, `"name":"Plan"`} {
+		if !strings.Contains(res, want) {
+			t.Fatalf("session/new result missing %q: %s", want, res)
+		}
+	}
+	if strings.Contains(res, "title") || strings.Contains(res, "general") {
+		t.Fatalf("hidden/subagent agents must not be advertised as modes: %s", res)
+	}
+}
+
+// An agent exposing no selectable primary agents must omit the modes block (graceful absence): the
+// session/new result is the plain {sessionId} shape.
+func TestAdapterOmitsModesWhenNone(t *testing.T) {
+	h := newHarness(t)
+	// No agents seeded -> GET /agent returns [] -> no modes.
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	h.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/app"}}`)
+	m := h.await(t, idIs(2))
+	res := string(m.Result)
+	if strings.Contains(res, "modes") || strings.Contains(res, "availableModes") {
+		t.Fatalf("no selectable agents -> no modes block, got %s", res)
+	}
+}
+
+// An incoming session/set_mode must switch opencode's active agent (passed on the next prompt_async)
+// and emit a current_mode_update so all clients follow the switch (cat F).
+func TestAdapterSetModeSwitchesAgentAndEmitsUpdate(t *testing.T) {
+	h := newHarness(t)
+	h.fake.SetAgents([]opencode.Agent{
+		{Name: "build", Mode: "primary"},
+		{Name: "plan", Mode: "primary"},
+	})
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	h.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/app"}}`)
+	h.await(t, idIs(2))
+
+	// Switch to plan mode.
+	h.send(`{"jsonrpc":"2.0","id":3,"method":"session/set_mode","params":{"sessionId":"ses_fake1","modeId":"plan"}}`)
+	// The set_mode response is an empty object...
+	h.await(t, idIs(3))
+	// ...and a current_mode_update announces the switch.
+	h.await(t, func(m acp.Message, line string) bool {
+		return m.Method == "session/update" &&
+			strings.Contains(line, `"sessionUpdate":"current_mode_update"`) &&
+			strings.Contains(line, `"currentModeId":"plan"`)
+	})
+
+	// The next prompt must carry agent="plan".
+	h.send(`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"ses_fake1","prompt":[{"type":"text","text":"go"}]}}`)
+	h.await(t, idIs(4))
+	deadline := time.After(2 * time.Second)
+	for {
+		if pa := h.fake.PromptAgents(); len(pa) == 1 {
+			if pa[0] != "plan" {
+				t.Fatalf("prompt agent = %q, want plan", pa[0])
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("prompt_async never recorded the switched agent")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// An unknown mode id must be rejected (error response) and must NOT change the active agent.
+func TestAdapterSetModeRejectsUnknown(t *testing.T) {
+	h := newHarness(t)
+	h.fake.SetAgents([]opencode.Agent{{Name: "build", Mode: "primary"}, {Name: "plan", Mode: "primary"}})
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	h.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/app"}}`)
+	h.await(t, idIs(2))
+
+	h.send(`{"jsonrpc":"2.0","id":3,"method":"session/set_mode","params":{"sessionId":"ses_fake1","modeId":"bogus"}}`)
+	m := h.await(t, idIs(3))
+	if m.Error == nil {
+		t.Fatalf("unknown mode should return an error, got result %s", string(m.Result))
+	}
+	// The active agent stays the default (build): a subsequent prompt carries agent="build".
+	h.send(`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"ses_fake1","prompt":[{"type":"text","text":"go"}]}}`)
+	h.await(t, idIs(4))
+	deadline := time.After(2 * time.Second)
+	for {
+		if pa := h.fake.PromptAgents(); len(pa) == 1 {
+			if pa[0] != "build" {
+				t.Fatalf("after a rejected set_mode the agent should stay build, got %q", pa[0])
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("prompt_async never recorded")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}

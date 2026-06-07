@@ -20,11 +20,13 @@ type Fake struct {
 	nextSess int
 	subs     map[chan string]struct{}
 
-	perms       []PermResponse // recorded permission answers
-	aborts      []string       // session IDs aborted
-	pendingErr  string         // if set, emitted as a session.error before idle by the next scriptPrompt
-	pendingStep []stepScript   // step-finish parts emitted before idle by the next scriptPrompt (cat D)
-	commands    []Command      // advertised slash commands returned by GET /command (cat E)
+	perms        []PermResponse // recorded permission answers
+	aborts       []string       // session IDs aborted
+	pendingErr   string         // if set, emitted as a session.error before idle by the next scriptPrompt
+	pendingStep  []stepScript   // step-finish parts emitted before idle by the next scriptPrompt (cat D)
+	commands     []Command      // advertised slash commands returned by GET /command (cat E)
+	agents       []Agent        // advertised agents returned by GET /agent (cat F)
+	promptAgents []string       // the `agent` field of each prompt_async (cat F)
 }
 
 // stepScript is one scripted step-finish part (per-turn token usage + cost) to emit before idle.
@@ -75,6 +77,14 @@ func NewFake(dir string) *Fake {
 		_ = json.NewEncoder(w).Encode(cmds)
 	})
 
+	// /agent: the advertised agent list (cat F). Empty by default; SetAgents seeds it.
+	mux.HandleFunc("/agent", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		agents := append([]Agent(nil), f.agents...)
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(agents)
+	})
+
 	// /event SSE: register a subscriber channel; stream until the request ends.
 	mux.HandleFunc("/event", func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
@@ -111,6 +121,13 @@ func NewFake(dir string) *Fake {
 		switch {
 		case hasSuffix(r.URL.Path, "/prompt_async") && r.Method == http.MethodPost:
 			sid := pathSeg(r.URL.Path, 1)
+			var body struct {
+				Agent string `json:"agent"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.mu.Lock()
+			f.promptAgents = append(f.promptAgents, body.Agent)
+			f.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 			go f.scriptPrompt(sid)
 		case hasSuffix(r.URL.Path, "/abort") && r.Method == http.MethodPost:
@@ -232,6 +249,20 @@ func (f *Fake) SetCommands(cmds []Command) {
 	f.mu.Lock()
 	f.commands = cmds
 	f.mu.Unlock()
+}
+
+// SetAgents seeds the agent list returned by GET /agent (cat F).
+func (f *Fake) SetAgents(agents []Agent) {
+	f.mu.Lock()
+	f.agents = agents
+	f.mu.Unlock()
+}
+
+// PromptAgents returns the `agent` field recorded for each prompt_async (cat F).
+func (f *Fake) PromptAgents() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.promptAgents...)
 }
 
 // PermResponses returns the recorded permission answers.

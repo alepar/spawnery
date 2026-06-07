@@ -139,11 +139,44 @@ func (c *Client) ListCommands() ([]Command, error) {
 	return cmds, nil
 }
 
+// Agent is the subset of an opencode agent object we use (GET /agent, opencode 1.15.13). opencode's
+// "Build"/"Plan" are PRIMARY agents — selecting one is how a session switches mode. We surface the
+// user-selectable primary agents (mode=="primary" && !hidden) to the node as ACP session modes; the
+// internal helper agents (compaction/summary/title) carry hidden:true and are filtered out.
+type Agent struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Mode        string `json:"mode"`   // primary | subagent | all
+	Hidden      bool   `json:"hidden"` // internal helper agents (compaction/summary/title) set this
+}
+
+// ListAgents returns the agents the server advertises (GET /agent). Used to surface opencode's
+// selectable primary agents to the web as ACP session modes (cat F).
+func (c *Client) ListAgents() ([]Agent, error) {
+	resp, err := c.hc.Get(c.base + "/agent")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("list agents: %s", resp.Status)
+	}
+	var agents []Agent
+	if err := json.NewDecoder(resp.Body).Decode(&agents); err != nil {
+		return nil, err
+	}
+	return agents, nil
+}
+
 // PromptAsync sends a text prompt without waiting; results arrive via SSE.
-// model is "providerID/modelID"; if empty, opencode uses its configured default.
-func (c *Client) PromptAsync(sessionID, text, model string) error {
+// model is "providerID/modelID"; if empty, opencode uses its configured default. agent selects the
+// opencode primary agent (mode, e.g. "build"|"plan"); if empty, opencode uses its default agent.
+func (c *Client) PromptAsync(sessionID, text, model, agent string) error {
 	parts := []map[string]any{{"type": "text", "text": text}}
 	payload := map[string]any{"parts": parts}
+	if agent != "" {
+		payload["agent"] = agent
+	}
 	if providerID, modelID, ok := splitModel(model); ok {
 		payload["model"] = map[string]any{"providerID": providerID, "modelID": modelID}
 	}

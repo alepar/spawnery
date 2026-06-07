@@ -45,6 +45,9 @@ type Adapter struct {
 	usage       *UsageAccumulator // per-turn token usage + cost accumulated from step-finish parts (cat D)
 	nextReqID   int
 	permByReq   map[int]string // our request id -> opencode permissionID
+
+	availModes  []ACPSessionMode // selectable session modes = opencode primary agents (cat F)
+	currentMode string           // the active mode/agent passed to prompt_async ("" = opencode default)
 }
 
 // New builds an adapter for the opencode client, scoping sessions to dir, tagging prompts with model
@@ -100,6 +103,8 @@ func (a *Adapter) Serve(r io.Reader, w io.Writer) error {
 			sid := a.sessionID
 			a.mu.Unlock()
 			_ = a.oc.Abort(sid)
+		case "session/set_mode":
+			a.handleSetMode(srv, m)
 		}
 	}
 }
@@ -141,7 +146,19 @@ func (a *Adapter) handleNewSession(srv *acp.Server, m acp.Message) {
 		}
 		a.setSession(sid)
 	}
-	_ = srv.Respond(id, map[string]any{"sessionId": sid})
+	// Advertise opencode's selectable primary agents (Build/Plan) as ACP session modes on the
+	// session/new result + record the current mode (cat F). No selectable agent -> no `modes` field
+	// (graceful absence: the web shows no mode selector).
+	resp := map[string]any{"sessionId": sid}
+	if modes := a.discoverModes(); len(modes) > 0 {
+		current := DefaultModeID(modes)
+		a.mu.Lock()
+		a.availModes = modes
+		a.currentMode = current
+		a.mu.Unlock()
+		resp["modes"] = ACPSessionModeState{CurrentModeID: current, AvailableModes: modes}
+	}
+	_ = srv.Respond(id, resp)
 	// opencode exposes its slash commands synchronously (GET /command), not via an event, so emit the
 	// ACP available_commands_update once here — right after the session is ready (cat E). It rides the
 	// node's frame seq-log, so a reconnecting web client replays it and still sees the command set.
@@ -157,6 +174,46 @@ func (a *Adapter) emitAvailableCommands(srv *acp.Server, sid string) {
 		return
 	}
 	_ = srv.Notify("session/update", CommandsToACP(sid, cmds))
+}
+
+// discoverModes fetches opencode's advertised agents and maps the selectable primary ones to ACP
+// session modes (cat F). A fetch error or no selectable agent yields nil (graceful absence).
+func (a *Adapter) discoverModes() []ACPSessionMode {
+	agents, err := a.oc.ListAgents()
+	if err != nil {
+		return nil
+	}
+	return AvailableModesFromAgents(agents)
+}
+
+// handleSetMode switches the session's active mode/agent on an incoming session/set_mode (cat F). The
+// modeId must be one of the advertised modes; the new mode is passed as opencode's `agent` on the next
+// prompt_async, and a current_mode_update is emitted so every client follows the switch. Unknown modes
+// are rejected. v1 shared-attach: any client may set the mode (no arbitration).
+func (a *Adapter) handleSetMode(srv *acp.Server, m acp.Message) {
+	var p struct {
+		ModeID string `json:"modeId"`
+	}
+	_ = json.Unmarshal(m.Params, &p)
+	a.mu.Lock()
+	sid := a.sessionID
+	valid := IsValidMode(p.ModeID, a.availModes)
+	if valid {
+		a.currentMode = p.ModeID
+	}
+	a.mu.Unlock()
+	id, hasID := m.ID.AsInt()
+	if !valid {
+		if hasID {
+			_ = srv.RespondError(id, -32602, "unknown mode: "+p.ModeID)
+		}
+		return
+	}
+	if hasID {
+		_ = srv.Respond(id, map[string]any{}) // ACP SetSessionModeResponse is an empty object
+	}
+	// Announce the switch so all attached clients' selectors follow the now-active mode.
+	_ = srv.Notify("session/update", CurrentModeUpdate(sid, p.ModeID))
 }
 
 // setSession records the opencode session id in memory and to the session file (for spawn-tui).
@@ -180,6 +237,7 @@ func (a *Adapter) handlePrompt(srv *acp.Server, m acp.Message) {
 	a.turnErr = nil                 // fresh turn: clear any error carried over from the previous one
 	a.usage = NewUsageAccumulator() // fresh turn: reset per-turn token usage + cost (cat D)
 	sid := a.sessionID
+	agent := a.currentMode // the active mode = opencode agent ("" = opencode default) (cat F)
 	// Remember our own (web-originated) prompt text so we don't echo it back as a TUI message —
 	// the node already locally-echoes web prompts. Bounded ring.
 	a.recentSelf = append(a.recentSelf, text)
@@ -187,7 +245,7 @@ func (a *Adapter) handlePrompt(srv *acp.Server, m acp.Message) {
 		a.recentSelf = a.recentSelf[len(a.recentSelf)-16:]
 	}
 	a.mu.Unlock()
-	if err := a.oc.PromptAsync(sid, text, a.model); err != nil {
+	if err := a.oc.PromptAsync(sid, text, a.model, agent); err != nil {
 		a.mu.Lock()
 		a.hasInflight = false
 		a.mu.Unlock()

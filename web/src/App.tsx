@@ -5,7 +5,7 @@ import {
   DEV_TOKEN, type SpawnView,
 } from "./api/spawnlet";
 import { Conn } from "./acp/conn";
-import { encodePrompt, encodePermResponse, type Frame, type Command } from "./acp/frames";
+import { encodePrompt, encodePermResponse, encodeSetMode, type Frame, type Command, type ModePayload } from "./acp/frames";
 import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
 import { ReconnectingSocket } from "./shell/reconnectingSocket";
@@ -15,6 +15,7 @@ import type { Item, TurnState, PermPrompt } from "./views/chat/types";
 import { reconcilePending, MAX_QUEUED } from "./lib/turn";
 import { upsertTool as upsertToolItems } from "./lib/toolChip";
 import { upsertPlan as upsertPlanItems } from "./lib/plan";
+import { mergeMode } from "./lib/mode";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
@@ -34,6 +35,7 @@ export function App() {
   const [turn, setTurn] = useState<TurnState>({ state: "idle", queued: 0 });
   const [perm, setPerm] = useState<PermPrompt | null>(null);
   const [commands, setCommands] = useState<Command[]>([]); // advertised slash commands for the active spawn (cat E)
+  const [mode, setMode] = useState<ModePayload | null>(null); // session modes for the active spawn (cat F)
   const [spawns, setSpawns] = useState<SpawnView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
 
@@ -44,6 +46,7 @@ export function App() {
   const buffersRef = useRef<Map<string, Item[]>>(new Map());
   const turnsRef = useRef<Map<string, TurnState>>(new Map());
   const commandsRef = useRef<Map<string, Command[]>>(new Map()); // per-spawn command set (cat E)
+  const modesRef = useRef<Map<string, ModePayload | null>>(new Map()); // per-spawn session-mode state (cat F)
   // refs mirroring state so async callbacks (poll, ws onopen, onHistory) don't read stale closures.
   const activeIdRef = useRef<string | null>(null);
   const spawnsRef = useRef<SpawnView[]>([]);
@@ -113,6 +116,16 @@ export function App() {
         setCommands(cmds);
         break;
       }
+      case "mode": {
+        // The agent advertised its modes (on session/new -> current + available) or switched the active
+        // mode (current_mode_update -> current only). mergeMode keeps the prior available set when the
+        // frame omits it, so the selector follows the agent's current mode. Stash per-spawn (restored on
+        // spawn-switch). No mode frame ever (e.g. goose) -> mode stays null -> no selector (cat F).
+        const merged = mergeMode(modesRef.current.get(spawnId) ?? null, f.mode);
+        modesRef.current.set(spawnId, merged);
+        setMode(merged);
+        break;
+      }
       case "turn": {
         const t: TurnState = { state: f.state ?? "idle", queued: f.queued ?? 0, reason: f.reason, error: f.error, usage: f.usage };
         setTurn(t);
@@ -171,8 +184,10 @@ export function App() {
           setActiveId(null); activeIdRef.current = null; setItems([]);
           setTurn({ state: "idle", queued: 0 });
           setCommands([]);
+          setMode(null);
           turnsRef.current.delete(aid);
           commandsRef.current.delete(aid);
+          modesRef.current.delete(aid);
           break;
         case "open":
           if (active?.mode !== "tmux") openSession(aid); // just became active -> connect (green); tmux spawns self-manage via TerminalView
@@ -228,6 +243,7 @@ export function App() {
     });
     setTurn({ state: "idle", queued: 0 });
     setCommands([]); // new spawn: its command set arrives via the next `commands` frame
+    setMode(null); // new spawn: its modes arrive via the next `mode` frame (cat F)
     waiting(); // grey-pulse until the node signals active; the poll then opens the ws
     try {
       const id = await createSpawn(appId, MODEL, image, runnableId); // async CP: returns immediately, status 'starting'
@@ -261,6 +277,7 @@ export function App() {
     // An active spawn replays from cursor 0, so its `commands` frame re-arrives; seed from the cache
     // meanwhile (and it's the only source for a non-active, non-replaying spawn).
     setCommands(commandsRef.current.get(id) ?? []);
+    setMode(modesRef.current.get(id) ?? null); // restore the spawn's mode state (re-arrives on replay for active)
     if (sp?.status === "active" && sp.mode !== "tmux") openSession(id);
     else if (sp?.status === "active" && sp.mode === "tmux") connecting(); // tmux: TerminalView's socket drives the dot from here
     else if (sp?.status === "starting") waiting();
@@ -278,12 +295,14 @@ export function App() {
       await suspendSpawn(id);
       buffersRef.current.delete(id); // resumed spawns start fresh — drop the stale cached transcript
       commandsRef.current.delete(id);
+      modesRef.current.delete(id);
       // keep the spawn selected (unlike onStop) — the user stays on its now-empty suspended view.
       if (activeIdRef.current === id) {
         closeSession();
         setItems([]);
         setTurn({ state: "idle", queued: 0 });
         setCommands([]);
+        setMode(null);
         turnsRef.current.delete(id);
       }
     } catch (e: any) { toast.error("Suspend failed: " + e.message); }
@@ -303,12 +322,19 @@ export function App() {
     buffersRef.current.delete(id);
     turnsRef.current.delete(id);
     commandsRef.current.delete(id);
-    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setTurn({ state: "idle", queued: 0 }); setCommands([]); }
+    modesRef.current.delete(id);
+    if (activeIdRef.current === id) { closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setTurn({ state: "idle", queued: 0 }); setCommands([]); setMode(null); }
     refreshSpawns();
   };
 
   const onSend = (text: string) => {
     wsRef.current?.send(encodePrompt(text));
+  };
+
+  // onSetMode sends the upward set_mode control frame (cat F). The selector then follows the agent's
+  // current_mode_update rather than optimistically updating, so a rejected switch leaves it unchanged.
+  const onSetMode = (modeId: string) => {
+    wsRef.current?.send(encodeSetMode(modeId));
   };
 
   // tmux spawns have no App-managed ACP socket; their TerminalView drives the header dot.
@@ -327,6 +353,8 @@ export function App() {
       onSend={onSend}
       perm={perm}
       commands={commands}
+      mode={mode}
+      onSetMode={onSetMode}
       onSpawnApp={spawnApp}
       spawns={spawns}
       activeId={activeId}

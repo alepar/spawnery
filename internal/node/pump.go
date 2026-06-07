@@ -229,7 +229,31 @@ func (p *Pump) start(ctx context.Context, readyTimeout time.Duration) error {
 	p.mu.Lock()
 	p.sessionID = r.SessionID
 	p.mu.Unlock()
+	// The agent may advertise selectable session modes on the session/new result (cat F). Log a `mode`
+	// frame so attached + reconnecting clients can render a mode selector (replayed from the seq-log).
+	if f, ok := modeFrameFromNewSession(res); ok {
+		p.appendFrames([]Frame{f})
+	}
 	return nil
+}
+
+// modeFrameFromNewSession decodes the ACP session/new result's optional `modes` block (SessionModeState)
+// into a `mode` Frame carrying the current + available modes (cat F). Absent/empty modes -> ok=false
+// (an agent like goose that advertises no modes yields no mode frame -> no selector).
+func modeFrameFromNewSession(result json.RawMessage) (Frame, bool) {
+	var r struct {
+		Modes *struct {
+			CurrentModeID  string `json:"currentModeId"`
+			AvailableModes []Mode `json:"availableModes"`
+		} `json:"modes"`
+	}
+	if json.Unmarshal(result, &r) != nil || r.Modes == nil || len(r.Modes.AvailableModes) == 0 {
+		return Frame{}, false
+	}
+	return Frame{Kind: "mode", Mode: &ModePayload{
+		Current:   r.Modes.CurrentModeID,
+		Available: r.Modes.AvailableModes,
+	}}, true
 }
 
 func (p *Pump) stop() {
@@ -379,6 +403,7 @@ func updateToFrame(params json.RawMessage) (Frame, bool) {
 			RawOutput     json.RawMessage `json:"rawOutput"`
 			Entries       json.RawMessage `json:"entries"`           // plan (cat C): the FULL current plan list
 			Commands      json.RawMessage `json:"availableCommands"` // commands (cat E): the FULL current command set
+			CurrentModeID string          `json:"currentModeId"`     // mode (cat F): the now-active mode id
 		} `json:"update"`
 	}
 	if json.Unmarshal(params, &u) != nil {
@@ -411,6 +436,11 @@ func updateToFrame(params json.RawMessage) (Frame, bool) {
 		// command set. This frame is logged in the seq-log (not transient), so a reconnecting client
 		// replays it and still sees the `/`-menu without the agent having to re-advertise.
 		return Frame{Kind: "commands", Cmds: commandList(up.Commands)}, true
+	case "current_mode_update":
+		// The agent switched the active mode (cat F). Carry only Current; the client keeps the prior
+		// Available set (advertised once on session/new) and just follows the new current. This frame is
+		// logged so a reconnecting client replays the latest mode.
+		return Frame{Kind: "mode", Mode: &ModePayload{Current: up.CurrentModeID}}, true
 	}
 	return Frame{}, false
 }
@@ -627,7 +657,26 @@ func (p *Pump) fromClient(clientID string, line []byte) {
 		p.mu.Unlock() // over cap -> drop (the web also gates on MAX_QUEUED)
 	case "perm_response":
 		p.resolvePermission(f.ReqID, f.OptionID)
+	case "set_mode":
+		// Upward control frame (cat F): switch the session mode. v1 shared-attach: any client may set the
+		// mode (no arbitration). The agent's resulting current_mode_update fans back out to all clients.
+		p.sendSetMode(f.ModeID)
 	}
+}
+
+// sendSetMode forwards a client's mode switch to the agent as an ACP session/set_mode request (cat F).
+// Fire-and-forget: the request carries a fresh id (so the agent can reply) but no waiter — the switch is
+// confirmed to clients by the agent's current_mode_update notification, not the set_mode result.
+func (p *Pump) sendSetMode(modeID string) {
+	p.mu.Lock()
+	p.nextID++
+	id := p.nextID
+	sid := p.sessionID
+	p.mu.Unlock()
+	params, _ := json.Marshal(map[string]any{"sessionId": sid, "modeId": modeID})
+	var buf bytes.Buffer
+	_ = acp.WriteMessage(&buf, acp.Message{ID: acp.IntID(id), Method: "session/set_mode", Params: params})
+	p.sendLine(buf.Bytes())
 }
 
 func promptParams(sessionID, text string) json.RawMessage {

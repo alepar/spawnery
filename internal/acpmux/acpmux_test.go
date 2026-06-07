@@ -27,6 +27,10 @@ type fakeAgent struct {
 	inflight  int32 // number of prompts acpmux currently has in flight upstream
 	maxInflt  int32 // high-water mark
 	permReplies [][]byte // permission responses received from acpmux (should be exactly 1)
+	setModes  []string // modeId of each session/set_mode received from acpmux (cat F)
+
+	// modesJSON, when non-empty, is the SessionModeState advertised on the session/new result (cat F).
+	modesJSON string
 
 	// gate, when non-nil, blocks each prompt's turn until released, so the test
 	// can verify only one prompt is in flight at a time.
@@ -55,7 +59,31 @@ func (f *fakeAgent) run() {
 		case msg.Method == "initialize":
 			f.write(acp.Message{ID: msg.ID, Result: json.RawMessage(`{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}`)})
 		case msg.Method == "session/new":
-			f.write(acp.Message{ID: msg.ID, Result: json.RawMessage(`{"sessionId":"S1"}`)})
+			res := `{"sessionId":"S1"}`
+			f.mu.Lock()
+			mj := f.modesJSON
+			f.mu.Unlock()
+			if mj != "" {
+				res = `{"sessionId":"S1","modes":` + mj + `}`
+			}
+			f.write(acp.Message{ID: msg.ID, Result: json.RawMessage(res)})
+		case msg.Method == "session/set_mode":
+			// Record the switch and announce it via a current_mode_update notification (fans out downstream).
+			var p struct {
+				ModeID string `json:"modeId"`
+			}
+			_ = json.Unmarshal(msg.Params, &p)
+			f.mu.Lock()
+			f.setModes = append(f.setModes, p.ModeID)
+			f.mu.Unlock()
+			if msg.ID != nil {
+				f.write(acp.Message{ID: msg.ID, Result: json.RawMessage(`{}`)})
+			}
+			upd, _ := json.Marshal(map[string]any{
+				"sessionId": "S1",
+				"update":    map[string]any{"sessionUpdate": "current_mode_update", "currentModeId": p.ModeID},
+			})
+			f.write(acp.Message{Method: "session/update", Params: upd})
 		case msg.Method == "session/prompt":
 			go f.handlePrompt(msg)
 		case msg.ID != nil && msg.Method == "" && msg.Result != nil:
@@ -475,4 +503,121 @@ func awaitPermRequest(t *testing.T, tc *testClient, permID int) acp.Message {
 			return m
 		}
 	}
+}
+
+// startMuxWithModes is startMux with the upstream advertising the given SessionModeState JSON on
+// session/new (cat F). Set before Start so the cached modes are populated.
+func startMuxWithModes(t *testing.T, modesJSON string) (addr string, fa *fakeAgent, teardown func()) {
+	t.Helper()
+	muxStdinR, muxStdinW := io.Pipe()
+	agentOutR, agentOutW := io.Pipe()
+	m := New(muxStdinW, agentOutR)
+	fa = newFakeAgent(agentOutW, muxStdinR)
+	fa.modesJSON = modesJSON
+	go fa.run()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.Start(ctx, 3*time.Second); err != nil {
+		t.Fatalf("mux start: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = m.Serve(ln) }()
+	teardown = func() {
+		_ = ln.Close()
+		m.Stop()
+		_ = muxStdinW.Close()
+		_ = agentOutW.Close()
+	}
+	return ln.Addr().String(), fa, teardown
+}
+
+func (f *fakeAgent) setModeIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.setModes...)
+}
+
+// The downstream session/new response must re-advertise the upstream's session modes so each client
+// can render a mode selector for the shared session (cat F).
+func TestSessionNewReAdvertisesModes(t *testing.T) {
+	addr, _, teardown := startMuxWithModes(t, `{"currentModeId":"build","availableModes":[{"id":"build","name":"Build"},{"id":"plan","name":"Plan"}]}`)
+	defer teardown()
+	tc := dial(t, addr)
+	defer tc.close()
+	tc.call(t, "initialize", json.RawMessage(`{"protocolVersion":1,"clientCapabilities":{}}`))
+	res := tc.call(t, "session/new", json.RawMessage(`{"cwd":"/app","mcpServers":[]}`))
+	s := string(res.Result)
+	for _, want := range []string{`"currentModeId":"build"`, `"availableModes"`, `"id":"build"`, `"id":"plan"`} {
+		if !contains(s, want) {
+			t.Fatalf("session/new result missing %q: %s", want, s)
+		}
+	}
+}
+
+// An upstream with no modes must yield a plain {sessionId} downstream session/new (graceful absence).
+func TestSessionNewOmitsModesWhenUpstreamHasNone(t *testing.T) {
+	addr, _, teardown := startMux(t)
+	defer teardown()
+	tc := dial(t, addr)
+	defer tc.close()
+	tc.call(t, "initialize", json.RawMessage(`{"protocolVersion":1,"clientCapabilities":{}}`))
+	res := tc.call(t, "session/new", json.RawMessage(`{"cwd":"/app","mcpServers":[]}`))
+	if contains(string(res.Result), "modes") {
+		t.Fatalf("no upstream modes -> no modes block, got %s", string(res.Result))
+	}
+}
+
+// A downstream session/set_mode from ANY client must forward upstream (v1: no arbitration), and the
+// resulting current_mode_update must fan out to ALL connected clients (cat F).
+func TestSetModeForwardsUpstreamAndFansOut(t *testing.T) {
+	addr, fa, teardown := startMuxWithModes(t, `{"currentModeId":"build","availableModes":[{"id":"build","name":"Build"},{"id":"plan","name":"Plan"}]}`)
+	defer teardown()
+	a, b := dial(t, addr), dial(t, addr)
+	defer a.close()
+	defer b.close()
+	a.handshake(t)
+	b.handshake(t)
+
+	// Client A switches the shared session's mode.
+	a.send(acp.Message{ID: acp.IntID(500), Method: "session/set_mode", Params: json.RawMessage(`{"sessionId":"S1","modeId":"plan"}`)})
+
+	// Upstream received the switch.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if ms := fa.setModeIDs(); len(ms) == 1 {
+			if ms[0] != "plan" {
+				t.Fatalf("upstream set_mode = %q, want plan", ms[0])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("upstream never received the set_mode")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// BOTH clients see the current_mode_update fan-out.
+	awaitCurrentMode := func(tc *testClient) {
+		for {
+			m := tc.read(t)
+			if m.Method == "session/update" && contains(string(m.Params), `"current_mode_update"`) &&
+				contains(string(m.Params), `"currentModeId":"plan"`) {
+				return
+			}
+		}
+	}
+	awaitCurrentMode(a)
+	awaitCurrentMode(b)
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }

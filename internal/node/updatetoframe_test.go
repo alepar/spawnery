@@ -121,6 +121,12 @@ func TestUpdateToFrame(t *testing.T) {
 			ok:     true,
 		},
 		{
+			name:   "current_mode_update -> Frame.Mode (current only; client keeps prior available)",
+			params: `{"update":{"sessionUpdate":"current_mode_update","currentModeId":"plan"}}`,
+			want:   Frame{Kind: "mode", Mode: &ModePayload{Current: "plan"}},
+			ok:     true,
+		},
+		{
 			name:   "unknown update kind dropped",
 			params: `{"update":{"sessionUpdate":"session_info_update"}}`,
 			want:   Frame{},

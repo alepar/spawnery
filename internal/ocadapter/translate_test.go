@@ -492,3 +492,72 @@ func TestUsageAccumulatorTokensWithoutCostOmitsCost(t *testing.T) {
 		t.Fatalf("cost should be nil when unpriced, got %v", *u.Cost)
 	}
 }
+
+// --- session modes (cat F) --------------------------------------------------
+
+func TestAvailableModesFromAgents(t *testing.T) {
+	// Only the user-selectable primary, non-hidden agents become modes (Build/Plan); subagents and
+	// hidden helpers (compaction/summary/title) are filtered out. Order is preserved; id = agent name.
+	agents := []opencode.Agent{
+		{Name: "build", Description: "The default agent.", Mode: "primary"},
+		{Name: "compaction", Mode: "primary", Hidden: true},
+		{Name: "explore", Mode: "subagent"},
+		{Name: "plan", Description: "Plan mode.", Mode: "primary"},
+		{Name: "title", Mode: "primary", Hidden: true},
+	}
+	modes := AvailableModesFromAgents(agents)
+	if len(modes) != 2 {
+		t.Fatalf("want 2 selectable modes, got %d: %+v", len(modes), modes)
+	}
+	if modes[0].ID != "build" || modes[0].Name != "Build" {
+		t.Fatalf("mode[0] = %+v, want build/Build", modes[0])
+	}
+	if modes[1].ID != "plan" || modes[1].Name != "Plan" {
+		t.Fatalf("mode[1] = %+v, want plan/Plan", modes[1])
+	}
+}
+
+func TestAvailableModesEmptyWhenNoPrimary(t *testing.T) {
+	// An agent exposing only subagents / hidden helpers yields no modes (graceful absence).
+	modes := AvailableModesFromAgents([]opencode.Agent{
+		{Name: "general", Mode: "subagent"},
+		{Name: "title", Mode: "primary", Hidden: true},
+	})
+	if modes != nil {
+		t.Fatalf("want nil modes, got %+v", modes)
+	}
+}
+
+func TestDefaultModeID(t *testing.T) {
+	// "build" wins when present; else the first available mode; else "".
+	modes := []ACPSessionMode{{ID: "plan", Name: "Plan"}, {ID: "build", Name: "Build"}}
+	if got := DefaultModeID(modes); got != "build" {
+		t.Fatalf("want build, got %q", got)
+	}
+	if got := DefaultModeID([]ACPSessionMode{{ID: "plan", Name: "Plan"}}); got != "plan" {
+		t.Fatalf("want first (plan), got %q", got)
+	}
+	if got := DefaultModeID(nil); got != "" {
+		t.Fatalf("want empty for no modes, got %q", got)
+	}
+}
+
+func TestIsValidMode(t *testing.T) {
+	modes := []ACPSessionMode{{ID: "build"}, {ID: "plan"}}
+	if !IsValidMode("plan", modes) {
+		t.Fatal("plan should be valid")
+	}
+	if IsValidMode("bogus", modes) {
+		t.Fatal("bogus should be invalid")
+	}
+}
+
+func TestCurrentModeUpdate(t *testing.T) {
+	p := CurrentModeUpdate("ses_1", "plan")
+	b, _ := json.Marshal(p)
+	s := string(b)
+	if !contains(s, `"sessionUpdate":"current_mode_update"`) || !contains(s, `"currentModeId":"plan"`) ||
+		!contains(s, `"sessionId":"ses_1"`) {
+		t.Fatalf("bad current_mode_update json: %s", s)
+	}
+}

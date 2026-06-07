@@ -67,7 +67,7 @@ func TestEventsStreamsPromptSequence(t *testing.T) {
 
 	// wait for the subscriber to register, then trigger a prompt.
 	time.Sleep(100 * time.Millisecond)
-	if err := c.PromptAsync("ses_fake1", "hello", ""); err != nil {
+	if err := c.PromptAsync("ses_fake1", "hello", "", ""); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 
@@ -110,6 +110,47 @@ func TestListCommands(t *testing.T) {
 	if len(cmds) != 2 || cmds[0].Name != "init" || cmds[0].Description != "guided setup" ||
 		len(cmds[0].Hints) != 1 || cmds[0].Hints[0] != "$ARGUMENTS" || cmds[1].Name != "review" {
 		t.Fatalf("bad command list: %+v", cmds)
+	}
+}
+
+func TestListAgents(t *testing.T) {
+	f := NewFake("/app")
+	defer f.Close()
+	c := New(f.URL)
+
+	// Empty by default -> an agent with no advertised agents returns an empty list (graceful absence).
+	agents, err := c.ListAgents()
+	if err != nil {
+		t.Fatalf("list agents: %v", err)
+	}
+	if len(agents) != 0 {
+		t.Fatalf("expected no agents by default, got %+v", agents)
+	}
+
+	f.SetAgents([]Agent{
+		{Name: "build", Description: "The default agent.", Mode: "primary"},
+		{Name: "plan", Description: "Plan mode.", Mode: "primary"},
+		{Name: "title", Mode: "primary", Hidden: true},
+		{Name: "general", Mode: "subagent"},
+	})
+	agents, err = c.ListAgents()
+	if err != nil {
+		t.Fatalf("list agents: %v", err)
+	}
+	if len(agents) != 4 || agents[0].Name != "build" || agents[0].Mode != "primary" ||
+		!agents[2].Hidden || agents[3].Mode != "subagent" {
+		t.Fatalf("bad agent list: %+v", agents)
+	}
+}
+
+func TestPromptAsyncCarriesAgent(t *testing.T) {
+	f := NewFake("/app")
+	defer f.Close()
+	if err := New(f.URL).PromptAsync("ses_fake1", "hi", "", "plan"); err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	if got := f.PromptAgents(); len(got) != 1 || got[0] != "plan" {
+		t.Fatalf("prompt agent not recorded: %+v", got)
 	}
 }
 

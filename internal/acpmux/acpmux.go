@@ -98,6 +98,7 @@ type Mux struct {
 
 	sessionID  string                   // S: the shared upstream session id
 	initResult json.RawMessage          // cached upstream initialize result (returned to downstream)
+	newModes   json.RawMessage          // cached upstream session/new `modes` block (advertised downstream, cat F)
 	toAgent    chan []byte              // ndjson lines for writeLoop (sole upstream stdin writer)
 	writerDone chan struct{}
 	readerDone chan struct{}
@@ -160,13 +161,19 @@ func (m *Mux) Start(ctx context.Context, readyTimeout time.Duration) error {
 		return fmt.Errorf("session/new: %w", err)
 	}
 	var r struct {
-		SessionID string `json:"sessionId"`
+		SessionID string          `json:"sessionId"`
+		Modes     json.RawMessage `json:"modes"`
 	}
 	if uerr := json.Unmarshal(res, &r); uerr != nil || r.SessionID == "" {
 		return fmt.Errorf("session/new: bad result %q (err %v)", string(res), uerr)
 	}
 	m.mu.Lock()
 	m.sessionID = r.SessionID
+	// Cache the upstream's advertised session modes (if any) so every downstream session/new response
+	// re-advertises them (cat F). goose advertises none -> nil -> no modes downstream (graceful absence).
+	if len(r.Modes) > 0 {
+		m.newModes = append([]byte(nil), r.Modes...)
+	}
 	m.mu.Unlock()
 	return nil
 }
@@ -452,10 +459,15 @@ func (m *Mux) onClientMessage(c *dsClient, msg acp.Message) {
 	case "session/new", "session/load":
 		m.mu.Lock()
 		sid := m.sessionID
+		modes := m.newModes
 		c.hasSession = true
 		m.mu.Unlock()
 		if msg.ID != nil {
-			res, _ := json.Marshal(map[string]string{"sessionId": sid})
+			out := map[string]any{"sessionId": sid}
+			if len(modes) > 0 {
+				out["modes"] = json.RawMessage(modes) // re-advertise upstream session modes (cat F)
+			}
+			res, _ := json.Marshal(out)
 			m.respondToClient(c, msg.ID, res)
 		}
 		wake(c) // trigger replay of buffered history to this (possibly late-joining) client
@@ -463,6 +475,11 @@ func (m *Mux) onClientMessage(c *dsClient, msg acp.Message) {
 		if msg.ID != nil {
 			m.fromClientPrompt(c, msg.ID, promptText(msg.Params))
 		}
+	case "session/set_mode":
+		// Forward a downstream mode switch to the shared upstream session (cat F). v1 shared-attach: any
+		// client may set the mode (no arbitration). The upstream current_mode_update notification fans out
+		// to every client via onUpstreamNotification, so all selectors follow the switch.
+		m.forwardSetMode(msg.Params)
 	case "session/cancel":
 		// best-effort: v1 no-op (single-session, serialized; cancel not modeled).
 	}
@@ -490,6 +507,30 @@ func (m *Mux) fromClientPrompt(c *dsClient, clientReq *acp.RawID, text string) {
 	// Route the refusal through the per-client log too, so the replay goroutine
 	// remains the SOLE writer of session/prompt result frames to a client conn.
 	m.appendResultFor(c.id, clientReq, json.RawMessage(`{"stopReason":"refusal"}`))
+}
+
+// forwardSetMode relays a downstream session/set_mode to the shared upstream session (cat F). The modeId
+// from the client's params is re-sent against the shared session id with a freshly minted upstream id.
+// Fire-and-forget: the upstream result is ignored (a non-waiter, non-inflight id readLoop simply skips);
+// the switch is confirmed to all clients by the upstream current_mode_update that fans out afterwards.
+func (m *Mux) forwardSetMode(params json.RawMessage) {
+	var p struct {
+		ModeID string `json:"modeId"`
+	}
+	if json.Unmarshal(params, &p) != nil || p.ModeID == "" {
+		return
+	}
+	m.mu.Lock()
+	m.nextID++
+	id := m.nextID
+	sid := m.sessionID
+	m.mu.Unlock()
+	out, _ := json.Marshal(map[string]any{"sessionId": sid, "modeId": p.ModeID})
+	var buf bytes.Buffer
+	if acp.WriteMessage(&buf, acp.Message{ID: acp.IntID(id), Method: "session/set_mode", Params: out}) != nil {
+		return
+	}
+	m.sendLine(buf.Bytes())
 }
 
 // ---- replay log + fanout ----------------------------------------------------

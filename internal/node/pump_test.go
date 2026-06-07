@@ -851,3 +851,115 @@ func TestTurnEndReasonErrorUsageCoexist(t *testing.T) {
 		t.Fatalf("idle.Usage = %+v, want total 15", idle.Usage)
 	}
 }
+
+// modeFrameFromNewSession must decode the ACP session/new `modes` block into a mode Frame, and yield
+// ok=false when modes are absent/empty (graceful absence — no selector for an agent without modes).
+func TestModeFrameFromNewSession(t *testing.T) {
+	f, ok := modeFrameFromNewSession([]byte(`{"sessionId":"s1","modes":{"currentModeId":"build","availableModes":[{"id":"build","name":"Build"},{"id":"plan","name":"Plan"}]}}`))
+	if !ok {
+		t.Fatal("want ok for a result carrying modes")
+	}
+	if f.Kind != "mode" || f.Mode == nil || f.Mode.Current != "build" || len(f.Mode.Available) != 2 ||
+		f.Mode.Available[0].ID != "build" || f.Mode.Available[1].Name != "Plan" {
+		t.Fatalf("bad mode frame: %+v / %+v", f, f.Mode)
+	}
+	if _, ok := modeFrameFromNewSession([]byte(`{"sessionId":"s1"}`)); ok {
+		t.Fatal("no modes -> ok must be false")
+	}
+	if _, ok := modeFrameFromNewSession([]byte(`{"sessionId":"s1","modes":{"currentModeId":"build","availableModes":[]}}`)); ok {
+		t.Fatal("empty availableModes -> ok must be false")
+	}
+}
+
+// scriptGooseModes advertises session modes on session/new so the pump logs a `mode` frame at start.
+func scriptGooseModes(in io.Reader, out io.Writer) {
+	rd := acp.NewReader(in)
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil {
+			return
+		}
+		switch m.Method {
+		case "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1","modes":{"currentModeId":"build","availableModes":[{"id":"build","name":"Build"},{"id":"plan","name":"Plan"}]}}`)})
+		}
+	}
+}
+
+// At start the pump must log a `mode` frame from the agent's advertised modes, so an attaching client
+// replays it and renders the selector (cat F, DOWN advertisement).
+func TestStartLogsAdvertisedModeFrame(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGooseModes(gooseInR, gooseOutW)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop()
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	mf := waitKind(t, a, "mode")
+	if mf.Mode == nil || mf.Mode.Current != "build" || len(mf.Mode.Available) != 2 {
+		t.Fatalf("replayed mode frame = %+v / %+v", mf, mf.Mode)
+	}
+	if mf.Seq == 0 {
+		t.Fatalf("the advertised mode frame must be logged (seq>0), got seq %d", mf.Seq)
+	}
+}
+
+// scriptGooseSetMode records each session/set_mode request's params on a channel (UP direction).
+func scriptGooseSetMode(in io.Reader, out io.Writer, got chan<- string) {
+	rd := acp.NewReader(in)
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil {
+			return
+		}
+		switch m.Method {
+		case "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
+		case "session/set_mode":
+			got <- string(m.Params)
+			if m.ID != nil {
+				acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{}`)})
+			}
+		}
+	}
+}
+
+// A client's upward set_mode frame must be forwarded to the agent as a session/set_mode request carrying
+// the session id + modeId (cat F, UP direction).
+func TestSetModeFrameForwardedUpstream(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	got := make(chan string, 1)
+	go scriptGooseSetMode(gooseInR, gooseOutW, got)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop()
+	p.fromClient("a", encodeFrame(Frame{Kind: "set_mode", ModeID: "plan"}))
+	select {
+	case params := <-got:
+		if !contains(params, `"sessionId":"s1"`) || !contains(params, `"modeId":"plan"`) {
+			t.Fatalf("set_mode upstream params = %s", params)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("set_mode was not forwarded upstream")
+	}
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
