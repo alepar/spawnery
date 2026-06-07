@@ -1,8 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { SpawnView, SpawnStatus } from "@/api/spawnlet";
-
-export type View = "chat" | "templates" | "settings";
+import type { Nav } from "@/nav/nav";
 
 // SpawnActions is the callback bag App passes down for spawn lifecycle controls.
 export interface SpawnActions {
@@ -13,9 +12,11 @@ export interface SpawnActions {
   onStop: (spawnId: string) => void;
 }
 
-const NAV: { id: View; label: string }[] = [
-  { id: "templates", label: "Templates" },
-  { id: "settings", label: "Settings" },
+// The two top-nav buttons map to a target Nav. "Templates" stays highlighted across the whole
+// Templates surface (browse/app-detail/my-apps/publish); "Settings" only for the settings section.
+const NAV: { id: string; label: string; target: Nav; sections: Nav["section"][] }[] = [
+  { id: "templates", label: "Templates", target: { section: "templates" }, sections: ["templates", "app", "my-apps", "publish"] },
+  { id: "settings", label: "Settings", target: { section: "settings" }, sections: ["settings"] },
 ];
 
 // dot color per ledger status: green=online, grey=suspended, red=failed, amber(pulse)=transitional.
@@ -29,11 +30,10 @@ const DOT: Record<SpawnStatus, string> = {
   unknown: "bg-zinc-400",
 };
 
-export function Sidebar({ view, onSelect, spawns = [], activeId, actions }: {
-  view: View;
-  onSelect: (v: View) => void;
+export function Sidebar({ nav, navigate, spawns = [], actions }: {
+  nav: Nav;
+  navigate: (nav: Nav) => void;
   spawns?: SpawnView[];
-  activeId?: string | null;
   actions?: SpawnActions;
 }) {
   return (
@@ -43,9 +43,9 @@ export function Sidebar({ view, onSelect, spawns = [], activeId, actions }: {
         <Button
           key={n.id}
           data-testid={`nav-${n.id}`}
-          variant={view === n.id ? "secondary" : "ghost"}
+          variant={n.sections.includes(nav.section) ? "secondary" : "ghost"}
           className="justify-start"
-          onClick={() => onSelect(n.id)}
+          onClick={() => navigate(n.target)}
         >
           {n.label}
         </Button>
@@ -55,7 +55,7 @@ export function Sidebar({ view, onSelect, spawns = [], activeId, actions }: {
         <div className="px-2 text-xs text-muted-foreground/70">— none yet —</div>
       ) : (
         spawns.map((s) => (
-          <SpawnRow key={s.spawnId} spawn={s} active={view === "chat" && s.spawnId === activeId} actions={actions} />
+          <SpawnRow key={s.spawnId} spawn={s} active={nav.section === "spawn" && s.spawnId === nav.spawnId} actions={actions} />
         ))
       )}
     </nav>

@@ -1,6 +1,5 @@
-import { useState } from "react";
 import { Toaster } from "@/components/ui/sonner";
-import { Sidebar, type View, type SpawnActions } from "./Sidebar";
+import { Sidebar, type SpawnActions } from "./Sidebar";
 import { ConnStatus } from "./ConnStatus";
 import type { ConnState } from "./useConnStatus";
 import { ChatView } from "@/views/ChatView";
@@ -11,7 +10,16 @@ import type { Item, TurnState } from "@/views/chat/types";
 import type { SpawnView } from "@/api/spawnlet";
 import type { Nav } from "@/nav/nav";
 
-export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp, spawns = [], activeId, actions, onTermConn }: {
+// The top-level pane is derived from nav (the URL is authoritative). spawn -> chat; settings ->
+// settings; the whole Templates surface (templates/app/my-apps/publish) -> templates.
+type TopView = "chat" | "templates" | "settings";
+function topView(section: Nav["section"]): TopView {
+  if (section === "spawn") return "chat";
+  if (section === "settings") return "settings";
+  return "templates";
+}
+
+export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp, spawns = [], activeId, actions, onTermConn, nav, navigate }: {
   conn: ConnState | null;
   items: Item[];
   turn: TurnState;
@@ -24,30 +32,22 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
   actions?: SpawnActions;
   // tmux spawns' TerminalView reports its socket state here -> the chat-header ConnStatus dot.
   onTermConn?: (s: "connecting" | "connected" | "reconnecting") => void;
-  // URL-authoritative nav, threaded from App. Not consumed yet (sp-jpn.4 wires rendering to it);
-  // accepted now so the URL + socket-binding work in App can pass the nav down without a type break.
-  nav?: Nav;
-  navigate?: (nav: Nav, opts?: { replace?: boolean }) => void;
+  // URL-authoritative nav, threaded from App: the rendered pane/tab and every click are derived from
+  // and routed through it. App's handlers (onSpawnApp, actions.onSelectSpawn/onResume) already navigate.
+  nav: Nav;
+  navigate: (nav: Nav, opts?: { replace?: boolean }) => void;
 }) {
-  const [view, setView] = useState<View>("templates");
-  const onSpawn = (appId: string, image?: string, runnableId?: string) => { onSpawnApp(appId, image, runnableId); setView("chat"); };
-  // Selecting or resuming a spawn also navigates to its chat.
-  const wrapped: SpawnActions | undefined = actions && {
-    ...actions,
-    onSelectSpawn: (id) => { actions.onSelectSpawn(id); setView("chat"); },
-    onResume: (id) => { actions.onResume(id); setView("chat"); },
-  };
+  const view = topView(nav.section);
   const activeSpawn = spawns.find((s) => s.spawnId === activeId);
   const activeName = activeSpawn?.name;
   const activeMode = activeSpawn?.mode;
+  const headerLabel = view === "templates" ? "Templates" : view === "settings" ? "Settings" : activeName || "Chat";
   return (
     <div className="flex h-screen bg-background text-foreground">
-      <Sidebar view={view} onSelect={setView} spawns={spawns} activeId={activeId} actions={wrapped} />
+      <Sidebar nav={nav} navigate={navigate} spawns={spawns} actions={actions} />
       <div className="flex flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-border px-4 py-2">
-          <span className="text-sm font-medium">
-            {view === "templates" ? "Templates" : view === "settings" ? "Settings" : activeName || "Chat"}
-          </span>
+          <span className="text-sm font-medium">{headerLabel}</span>
           <ConnStatus conn={conn} />
         </header>
         <main className="flex-1 overflow-hidden">
@@ -57,7 +57,7 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
               carries the mode), so no stray ACP session opens for a tmux spawn. */}
           {view === "chat" && activeMode === "tmux" && activeId && <TerminalView spawnId={activeId} onConn={onTermConn} />}
           {view === "chat" && activeMode !== "tmux" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} focusKey={activeId} />}
-          {view === "templates" && <TemplatesView onSpawn={onSpawn} />}
+          {view === "templates" && <TemplatesView nav={nav} navigate={navigate} onSpawn={onSpawnApp} />}
           {view === "settings" && <SettingsView />}
         </main>
       </div>

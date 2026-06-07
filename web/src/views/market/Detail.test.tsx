@@ -41,4 +41,9 @@ describe("Detail", () => {
     await userEvent.click(screen.getByTestId("spawn-btn"));
     expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-tui");
   });
+
+  it("sets document.title to the app's human title once loaded", async () => {
+    render(<Detail id="spawnery/wiki" onBack={() => {}} onSpawn={vi.fn()} />);
+    await waitFor(() => expect(document.title).toBe("Spawnery — Wiki"));
+  });
 });

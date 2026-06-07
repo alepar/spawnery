@@ -65,6 +65,13 @@ export function Detail({
   const title = app?.displayName ?? manifest?.title ?? id;
   const tl = tierLabel(app?.latestTier);
 
+  // Detail owns the document.title for the app section: once the app loads we upgrade App.tsx's
+  // `Spawnery — <appId>` placeholder to the real human title. App's title effect deliberately skips
+  // the "app" section so its 3s spawn poll can't clobber this.
+  useEffect(() => {
+    document.title = `Spawnery — ${title}`;
+  }, [title]);
+
   return (
     <div className="flex flex-col gap-4 p-6">
       <div className="flex items-center justify-between gap-2">

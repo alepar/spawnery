@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
 import type { SpawnView } from "@/api/spawnlet";
+import type { Nav } from "@/nav/nav";
 
 const spawns: SpawnView[] = [
   { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "" },
@@ -10,38 +11,77 @@ const spawns: SpawnView[] = [
   { spawnId: "c", name: "Starting One", appId: "spawnery/wiki", status: "starting", mode: "" },
 ];
 const noopActions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onStop: vi.fn() };
+const templatesNav: Nav = { section: "templates" };
+const spawnNav = (id: string): Nav => ({ section: "spawn", spawnId: id });
 
 describe("Sidebar", () => {
   it("renders nav (templates+settings, no chat tab)", () => {
-    render(<Sidebar view="templates" onSelect={vi.fn()} />);
+    render(<Sidebar nav={templatesNav} navigate={vi.fn()} />);
     expect(screen.getByTestId("nav-templates")).toBeTruthy();
     expect(screen.getByTestId("nav-settings")).toBeTruthy();
     expect(screen.queryByTestId("nav-chat")).toBeNull();
   });
 
+  it("clicking nav buttons navigates to the right section", async () => {
+    const navigate = vi.fn();
+    render(<Sidebar nav={templatesNav} navigate={navigate} />);
+    await userEvent.click(screen.getByTestId("nav-settings"));
+    expect(navigate).toHaveBeenCalledWith({ section: "settings" });
+    await userEvent.click(screen.getByTestId("nav-templates"));
+    expect(navigate).toHaveBeenCalledWith({ section: "templates" });
+  });
+
+  it("Templates button is active across templates/app/my-apps/publish sections", () => {
+    const sections: Nav[] = [
+      { section: "templates" },
+      { section: "app", appId: "spawnery/wiki" },
+      { section: "my-apps" },
+      { section: "publish" },
+    ];
+    for (const nav of sections) {
+      const { unmount } = render(<Sidebar nav={nav} navigate={vi.fn()} />);
+      // the active button renders the "secondary" Button variant, the inactive one "ghost".
+      expect(screen.getByTestId("nav-templates").getAttribute("data-variant")).toBe("secondary");
+      expect(screen.getByTestId("nav-settings").getAttribute("data-variant")).toBe("ghost");
+      unmount();
+    }
+  });
+
+  it("Settings button is active only for the settings section", () => {
+    render(<Sidebar nav={{ section: "settings" }} navigate={vi.fn()} />);
+    expect(screen.getByTestId("nav-templates").getAttribute("data-variant")).toBe("ghost");
+    expect(screen.getByTestId("nav-settings").getAttribute("data-variant")).toBe("secondary");
+  });
+
   it("shows the empty placeholder with no spawns", () => {
-    render(<Sidebar view="templates" onSelect={vi.fn()} spawns={[]} />);
+    render(<Sidebar nav={templatesNav} navigate={vi.fn()} spawns={[]} />);
     expect(screen.getByText("— none yet —")).toBeTruthy();
   });
 
   it("lists spawns with name headline, app-id subline, and a status dot", () => {
-    render(<Sidebar view="chat" onSelect={vi.fn()} spawns={spawns} activeId="a" actions={noopActions} />);
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={noopActions} />);
     expect(screen.getByTestId("spawn-name-a").textContent).toContain("Wiki");
     expect(screen.getByTestId("spawn-row-a").textContent).toContain("spawnery/wiki");
     expect(screen.getByTestId("spawn-dot-a").getAttribute("data-status")).toBe("active");
     expect(screen.getByTestId("spawn-dot-b").getAttribute("data-status")).toBe("suspended");
   });
 
+  it("highlights the spawn row matching nav.spawnId", () => {
+    render(<Sidebar nav={spawnNav("b")} navigate={vi.fn()} spawns={spawns} actions={noopActions} />);
+    expect(screen.getByTestId("spawn-row-b").className).toContain("bg-secondary");
+    expect(screen.getByTestId("spawn-row-a").className).not.toContain("bg-secondary");
+  });
+
   it("selects a spawn on row click", async () => {
     const actions = { ...noopActions, onSelectSpawn: vi.fn() };
-    render(<Sidebar view="chat" onSelect={vi.fn()} spawns={spawns} activeId="a" actions={actions} />);
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);
     await userEvent.click(screen.getByTestId("spawn-select-b"));
     expect(actions.onSelectSpawn).toHaveBeenCalledWith("b");
   });
 
   it("kebab → Suspend for an active spawn, Resume for a suspended spawn", async () => {
     const actions = { ...noopActions, onSuspend: vi.fn(), onResume: vi.fn() };
-    render(<Sidebar view="chat" onSelect={vi.fn()} spawns={spawns} activeId="a" actions={actions} />);
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);
     await userEvent.click(screen.getByTestId("spawn-kebab-a"));
     await userEvent.click(screen.getByTestId("spawn-suspend-a"));
     expect(actions.onSuspend).toHaveBeenCalledWith("a");
@@ -52,7 +92,7 @@ describe("Sidebar", () => {
 
   it("kebab → Stop asks for confirm, then calls onStop", async () => {
     const actions = { ...noopActions, onStop: vi.fn() };
-    render(<Sidebar view="chat" onSelect={vi.fn()} spawns={spawns} activeId="a" actions={actions} />);
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);
     await userEvent.click(screen.getByTestId("spawn-kebab-a"));
     await userEvent.click(screen.getByTestId("spawn-stop-a"));
     expect(actions.onStop).not.toHaveBeenCalled(); // first click = arm confirm
@@ -61,7 +101,7 @@ describe("Sidebar", () => {
   });
 
   it("renders a yellow pulsing dot for a starting spawn", () => {
-    render(<Sidebar view="chat" onSelect={vi.fn()} spawns={spawns} activeId="a" actions={noopActions} />);
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={noopActions} />);
     const dot = screen.getByTestId("spawn-dot-c");
     expect(dot.getAttribute("data-status")).toBe("starting");
     expect(dot.className).toContain("bg-yellow-400");
@@ -69,7 +109,7 @@ describe("Sidebar", () => {
 
   it("double-click name → inline edit → Enter renames", async () => {
     const actions = { ...noopActions, onRename: vi.fn() };
-    render(<Sidebar view="chat" onSelect={vi.fn()} spawns={spawns} activeId="a" actions={actions} />);
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);
     await userEvent.dblClick(screen.getByTestId("spawn-name-a"));
     const input = screen.getByTestId("spawn-name-input-a");
     await userEvent.clear(input);

@@ -276,11 +276,13 @@ export function App() {
   }, []);
 
   // Keep document.title in sync with the current section (and the active spawn's name, when shown).
+  // The "app" section is owned by Detail (it sets the real human title once the app fetch resolves):
+  // this effect re-runs on every 3s spawns poll, so handling "app" here would clobber Detail's title
+  // back to the bare appId every tick — skip it entirely and let Detail own that page's title.
   useEffect(() => {
+    if (nav.section === "app") return;
     let label: string;
-    if (nav.section === "app") {
-      label = nav.appId; // placeholder; sp-jpn.4 upgrades this to the real app title
-    } else if (nav.section === "spawn") {
+    if (nav.section === "spawn") {
       const sp = spawns.find((s) => s.spawnId === nav.spawnId);
       label = sp?.name || sp?.appId || nav.spawnId;
     } else {

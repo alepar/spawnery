@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 import { AppShell } from "./AppShell";
 import type { SpawnView } from "@/api/spawnlet";
+import type { Nav } from "@/nav/nav";
 
 const baseProps = {
   conn: "connected" as const,
@@ -17,18 +18,29 @@ const spawns: SpawnView[] = [{ spawnId: "a", name: "Wiki", appId: "spawnery/wiki
 const actions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onStop: vi.fn() };
 
 describe("AppShell", () => {
-  it("renders the templates by default; chat not mounted", async () => {
-    render(<AppShell {...baseProps} />);
+  it("renders templates for the templates section; chat not mounted", () => {
+    render(<AppShell {...baseProps} nav={{ section: "templates" }} navigate={vi.fn()} />);
     expect(screen.getByTestId("templates")).toBeTruthy();
     expect(screen.queryByTestId("prompt-input")).toBeNull();
-    await userEvent.click(screen.getByTestId("nav-settings"));
+  });
+
+  it("renders the settings pane for the settings section", () => {
+    render(<AppShell {...baseProps} nav={{ section: "settings" }} navigate={vi.fn()} />);
     expect(screen.queryByTestId("templates")).toBeNull();
   });
 
-  it("selecting a spawn navigates to chat and calls onSelectSpawn", async () => {
-    render(<AppShell {...baseProps} spawns={spawns} activeId="a" actions={actions} />);
+  it("renders chat for a spawn section and selecting a spawn calls onSelectSpawn", async () => {
+    const nav: Nav = { section: "spawn", spawnId: "a" };
+    render(<AppShell {...baseProps} nav={nav} navigate={vi.fn()} spawns={spawns} activeId="a" actions={actions} />);
+    expect(screen.getByTestId("prompt-input")).toBeTruthy();
     await userEvent.click(screen.getByTestId("spawn-select-a"));
     expect(actions.onSelectSpawn).toHaveBeenCalledWith("a");
-    expect(screen.getByTestId("prompt-input")).toBeTruthy();
+  });
+
+  it("clicking nav-settings navigates to the settings section", async () => {
+    const navigate = vi.fn();
+    render(<AppShell {...baseProps} nav={{ section: "templates" }} navigate={navigate} />);
+    await userEvent.click(screen.getByTestId("nav-settings"));
+    expect(navigate).toHaveBeenCalledWith({ section: "settings" });
   });
 });
