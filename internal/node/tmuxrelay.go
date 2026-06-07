@@ -67,6 +67,9 @@ func (r *tmuxRelay) attach(ctx context.Context, clientID string) error {
 	r.clients[clientID] = &tmuxClient{ptmx: ptmx, cmd: cmd}
 	r.mu.Unlock()
 	go func() {
+		// Reap the `docker exec` child once the read loop ends (EOF or external detach/stop closed
+		// the PTY), so killed execs don't accumulate as zombies over many attach/detach cycles.
+		defer func() { _ = cmd.Wait() }()
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := ptmx.Read(buf)

@@ -46,10 +46,10 @@ type attacher struct {
 	mgr   *spawnlet.Manager
 	httpc connect.HTTPClient
 
-	mu          sync.Mutex
-	pumps       map[string]*Pump
-	tmuxRelays  map[string]*tmuxRelay
-	active      uint32
+	mu         sync.Mutex
+	pumps      map[string]*Pump
+	tmuxRelays map[string]*tmuxRelay
+	active     uint32
 
 	sendMu sync.Mutex
 	stream cpStream
