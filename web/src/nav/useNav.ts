@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { useLocation } from "wouter";
 import { pathToNav, navToPath, type Nav } from "./nav";
 
@@ -9,7 +9,9 @@ import { pathToNav, navToPath, type Nav } from "./nav";
  */
 export function useNav(): [Nav, (nav: Nav, opts?: { replace?: boolean }) => void] {
   const [location, setLocation] = useLocation();
-  const nav = pathToNav(location);
+  // Memoize on `location` so the Nav identity is stable between renders that don't change the URL —
+  // consumers' effects keyed on `nav` then fire only on real navigation, not on every poll/keystroke.
+  const nav = useMemo(() => pathToNav(location), [location]);
   // wouter's setLocation is already stable; memoize setNav for referential stability
   // so callers can safely put it in a dependency array without triggering extra renders.
   const setNav = useCallback(
