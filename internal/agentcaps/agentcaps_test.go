@@ -85,6 +85,19 @@ func TestRunnableIDsGloballyUnique(t *testing.T) {
 	}
 }
 
+func TestOpencodeTuiRunnable(t *testing.T) {
+	r, ok := Lookup("opencode", "opencode-tui")
+	if !ok {
+		t.Fatalf("opencode/opencode-tui should resolve")
+	}
+	if r.Mode != ModeTmux || r.Relay != RelayRawPTY {
+		t.Fatalf("opencode-tui = mode %q relay %q", r.Mode, r.Relay)
+	}
+	if len(r.Launch) == 0 {
+		t.Fatalf("opencode-tui needs a Launch argv")
+	}
+}
+
 func TestRegistryInvariants(t *testing.T) {
 	validMode := map[Mode]bool{ModeACP: true, ModeTmux: true, ModeServed: true}
 	validRelay := map[Relay]bool{RelayPump: true, RelayOcadapter: true, RelayRawPTY: true}

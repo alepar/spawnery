@@ -15,7 +15,7 @@ func newSelManager(t *testing.T) (*Manager, *fakePodBackend) {
 	return m, fb
 }
 
-func TestCreateWithSelectionUsesImageAndCmd(t *testing.T) {
+func TestCreateWithSelectionAcpUsesImageNoCmd(t *testing.T) {
 	m, fb := newSelManager(t)
 	_, err := m.CreateWithSelection(context.Background(), "sp-sel", "../../examples/secret-app", "model", "", "", 0,
 		AgentSelection{Image: "selected:img", RunnableID: "goose-acp", Mode: "acp"})
@@ -25,8 +25,8 @@ func TestCreateWithSelectionUsesImageAndCmd(t *testing.T) {
 	if fb.agentSpec.Image != "selected:img" {
 		t.Fatalf("agent image = %q, want selected:img", fb.agentSpec.Image)
 	}
-	if len(fb.agentSpec.Cmd) != 2 || fb.agentSpec.Cmd[0] != "goose" || fb.agentSpec.Cmd[1] != "acp" {
-		t.Fatalf("agent cmd = %v, want [goose acp]", fb.agentSpec.Cmd)
+	if fb.agentSpec.Cmd != nil {
+		t.Fatalf("acp mode should NOT override Cmd (entrypoint runs the adapter), got %v", fb.agentSpec.Cmd)
 	}
 }
 
@@ -44,11 +44,15 @@ func TestCreateLegacyUsesConfiguredImageNoCmd(t *testing.T) {
 	}
 }
 
-func TestCreateWithSelectionRejectsTmux(t *testing.T) {
-	m, _ := newSelManager(t)
+func TestCreateWithSelectionTmuxWrapsInTmux(t *testing.T) {
+	m, fb := newSelManager(t)
 	_, err := m.CreateWithSelection(context.Background(), "sp-tmux", "../../examples/secret-app", "model", "", "", 0,
-		AgentSelection{Image: "selected:img", RunnableID: "goose-tui", Mode: "tmux"})
-	if err == nil {
-		t.Fatal("expected error for tmux mode at node")
+		AgentSelection{Image: "selected:img", RunnableID: "opencode-tui", Mode: "tmux"})
+	if err != nil {
+		t.Fatalf("tmux mode should now launch, got error: %v", err)
+	}
+	cmd := fb.agentSpec.Cmd
+	if len(cmd) < 2 || cmd[0] != "spawn-tmux" || cmd[1] != "opencode" {
+		t.Fatalf("tmux launch cmd = %v, want [spawn-tmux opencode]", cmd)
 	}
 }

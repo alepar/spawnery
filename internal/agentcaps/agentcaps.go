@@ -44,6 +44,7 @@ var registry = map[string][]Runnable{
 	},
 	"opencode": {
 		{ID: "opencode-served", Mode: ModeServed, Launch: []string{"opencode", "serve", "--port", "4096", "--hostname", "127.0.0.1"}, Relay: RelayOcadapter, Label: "opencode"},
+		{ID: "opencode-tui", Mode: ModeTmux, Launch: []string{"opencode"}, Relay: RelayRawPTY, Label: "opencode · terminal"},
 	},
 	"claude-code": {
 		{ID: "claude-tui", Mode: ModeTmux, Launch: []string{"claude"}, Relay: RelayRawPTY, Label: "Claude Code · terminal"},

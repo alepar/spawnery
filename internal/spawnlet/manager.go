@@ -159,12 +159,10 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID st
 }
 
 // CreateWithSelection is Create plus an explicit agent selection (image + runnable launch argv +
-// mode). tmux mode is rejected here (launchable in Phase 2) as defense-in-depth — the CP already
-// rejects it in cp/server.go CreateSpawn, but the manager is a reusable entry point.
+// mode). For tmux-mode runnables it overrides the container command with the spawn-tmux wrapper
+// (runs the TUI inside a detached tmux session); for acp/served it leaves Cmd nil so the image's
+// ENTRYPOINT runs its serve+adapter wiring.
 func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, sel AgentSelection) (*Spawn, error) {
-	if sel.Mode == string(agentcaps.ModeTmux) {
-		return nil, fmt.Errorf("runnable %q uses tmux mode, not supported on this node yet", sel.RunnableID)
-	}
 	agentImage := m.cfg.AgentImage
 	if sel.Image != "" {
 		agentImage = sel.Image
@@ -175,7 +173,13 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		if !ok {
 			return nil, fmt.Errorf("unknown runnable %q", sel.RunnableID)
 		}
-		agentCmd = r.Launch
+		if r.Mode == agentcaps.ModeTmux {
+			// tmux mode: run the TUI inside a detached tmux session (spawn-tmux keeps PID 1 alive).
+			agentCmd = append([]string{"spawn-tmux"}, r.Launch...)
+		}
+		// acp/served: leave agentCmd nil — the image's ENTRYPOINT sets up the ACP adapter / serve
+		// path. Their Launch argv is NOT a full container command, so overriding Cmd would skip the
+		// adapter and break the node's ACP relay (this is the sp-9xr.3.8 fix).
 	}
 
 	if abs, err := filepath.Abs(appPath); err == nil {
