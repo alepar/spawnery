@@ -103,9 +103,10 @@ func TestTmuxRelayLiveAttach(t *testing.T) {
 		t.Skip("docker not in PATH")
 	}
 
-	// Launch the agent container with the spawn-tmux wrapper (mirrors what .5 does).
+	// Launch the agent container via the dispatcher entrypoint (the runnable id; the image owns the
+	// spawn-tmux wrapping — sp-9xr.13b).
 	out, err := exec.Command("docker", "run", "-d", "--entrypoint", "/usr/bin/tini",
-		"spawnery/agent:dev", "--", "/entrypoint.sh", "/usr/local/bin/spawn-tmux", "opencode").Output()
+		"spawnery/agent:dev", "--", "/entrypoint.sh", "opencode-tui").Output()
 	if err != nil {
 		t.Fatalf("docker run: %v", err)
 	}

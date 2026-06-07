@@ -28,19 +28,19 @@ const (
 type Runnable struct {
 	ID     string   // unique within its binary, e.g. "goose-tui"
 	Mode   Mode     // acp | tmux | served
-	Launch []string // argv to start the agent; executed by the node only for tmux mode in v1
+	Launch []string // reference-only: canonical argv to start the agent; the image's dispatcher entrypoint owns actual launch (sp-9xr.13b). Retained for self-documentation and invariant checks (tmux runnables must declare one).
 	Resume []string // argv to resume a conversation; nil = none wired yet (see sp-9xr.10)
 	Relay  Relay    // which relay carries this runnable's bytes
 	Label  string   // human-readable, shown in the runnable dropdown
 }
 
 // registry is the single source of truth: binary name -> its runnables.
-// Exact acp/served Launch argvs and all Resume argvs are validated when each runnable
-// is wired end-to-end (sp-9xr.5 / sp-9xr.8 / sp-9xr.10); v1 only execs tmux-mode Launch.
+// Launch argvs are reference-only documentation (the image dispatcher owns actual launch,
+// sp-9xr.13b); Resume argvs are validated when each resume path is wired (sp-9xr.10).
 var registry = map[string][]Runnable{
 	"goose": {
 		{ID: "goose-acp", Mode: ModeACP, Launch: []string{"goose", "acp"}, Relay: RelayPump, Label: "Goose · rich web"},
-		{ID: "goose-tui", Mode: ModeTmux, Launch: []string{"goose"}, Relay: RelayRawPTY, Label: "Goose · terminal"},
+		{ID: "goose-tui", Mode: ModeTmux, Launch: []string{"goose", "session"}, Relay: RelayRawPTY, Label: "Goose · terminal"},
 	},
 	"opencode": {
 		{ID: "opencode-served", Mode: ModeServed, Launch: []string{"opencode", "serve", "--port", "4096", "--hostname", "127.0.0.1"}, Relay: RelayOcadapter, Label: "opencode"},
