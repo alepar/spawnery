@@ -166,6 +166,28 @@ func TestAdapterEchoesTUIUserMessage(t *testing.T) {
 	})
 }
 
+func TestAdapterEmitsToolCallAndUpdate(t *testing.T) {
+	h := newHarness(t)
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	h.await(t, idIs(1))
+	time.Sleep(150 * time.Millisecond) // let the pump subscribe
+
+	// First snapshot: pending -> a tool_call creation.
+	h.fake.EmitToolPart("ses_fake1", "call_1", "bash", "pending", `{"command":"ls"}`, "")
+	h.await(t, func(_ acp.Message, line string) bool {
+		return strings.Contains(line, `"tool_call"`) && strings.Contains(line, "call_1") &&
+			strings.Contains(line, `"execute"`) && strings.Contains(line, `"pending"`)
+	})
+
+	// Completed snapshot: a tool_call_update with content + rawInput/rawOutput.
+	h.fake.EmitToolPart("ses_fake1", "call_1", "bash", "completed", `{"command":"ls"}`, "file1 file2")
+	h.await(t, func(_ acp.Message, line string) bool {
+		return strings.Contains(line, "tool_call_update") && strings.Contains(line, `"completed"`) &&
+			strings.Contains(line, "file1 file2") && strings.Contains(line, `"rawInput":{"command":"ls"}`) &&
+			strings.Contains(line, `"rawOutput":"file1 file2"`)
+	})
+}
+
 func TestAdapterCancelAborts(t *testing.T) {
 	h := newHarness(t)
 	h.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)

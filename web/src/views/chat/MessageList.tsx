@@ -7,7 +7,16 @@ import { ToolCallChip } from "./ToolCallChip";
 import { Thoughts } from "./Thoughts";
 
 const Row = memo(function Row({ item }: { item: Item }) {
-  if (item.kind === "tool") return <ToolCallChip title={item.title} status={item.status} />;
+  if (item.kind === "tool")
+    return (
+      <ToolCallChip
+        title={item.title}
+        status={item.status}
+        content={item.content}
+        rawInput={item.rawInput}
+        rawOutput={item.rawOutput}
+      />
+    );
   if (item.kind === "thought") return <Thoughts text={item.text} />;
 
   const isUser = item.kind === "user";

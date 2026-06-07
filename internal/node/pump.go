@@ -365,36 +365,89 @@ func (p *Pump) onAgentNotification(m acp.Message) {
 }
 
 // updateToFrame translates a agent session/update params object into one conversation Frame.
+// Content is decoded raw because text chunks carry a single content OBJECT while tool calls carry a
+// content ARRAY of ToolCallContent blocks — the two shapes share the `content` JSON key.
 func updateToFrame(params json.RawMessage) (Frame, bool) {
 	var u struct {
 		Update struct {
-			SessionUpdate string `json:"sessionUpdate"`
-			Content       struct {
-				Text string `json:"text"`
-			} `json:"content"`
-			ToolCallID string `json:"toolCallId"`
-			Title      string `json:"title"`
-			Status     string `json:"status"`
+			SessionUpdate string          `json:"sessionUpdate"`
+			Content       json.RawMessage `json:"content"`
+			ToolCallID    string          `json:"toolCallId"`
+			Title         string          `json:"title"`
+			Status        string          `json:"status"`
+			RawInput      json.RawMessage `json:"rawInput"`
+			RawOutput     json.RawMessage `json:"rawOutput"`
 		} `json:"update"`
 	}
 	if json.Unmarshal(params, &u) != nil {
 		return Frame{}, false
 	}
-	switch u.Update.SessionUpdate {
+	up := u.Update
+	switch up.SessionUpdate {
 	case "user_message_chunk":
 		// A user message from ANOTHER client (e.g. the in-container TUI), echoed so the web shows it.
 		// The node's own web-submitted prompts are echoed locally in fromClient, not here.
-		return Frame{Kind: "user", Text: u.Update.Content.Text}, true
+		return Frame{Kind: "user", Text: textContent(up.Content)}, true
 	case "agent_message_chunk":
-		return Frame{Kind: "agent", Text: u.Update.Content.Text}, true
+		return Frame{Kind: "agent", Text: textContent(up.Content)}, true
 	case "agent_thought_chunk":
-		return Frame{Kind: "thought", Text: u.Update.Content.Text}, true
+		return Frame{Kind: "thought", Text: textContent(up.Content)}, true
 	case "tool_call":
-		return Frame{Kind: "tool", ToolID: u.Update.ToolCallID, Title: u.Update.Title, Status: u.Update.Status}, true
+		f := Frame{Kind: "tool", ToolID: up.ToolCallID, Title: up.Title, Status: up.Status}
+		f.Tool = toolPayload(up.Content, up.RawInput, up.RawOutput)
+		return f, true
 	case "tool_call_update":
-		return Frame{Kind: "tool", ToolID: u.Update.ToolCallID, Status: u.Update.Status}, true
+		f := Frame{Kind: "tool", ToolID: up.ToolCallID, Status: up.Status}
+		f.Tool = toolPayload(up.Content, up.RawInput, up.RawOutput)
+		return f, true
 	}
 	return Frame{}, false
+}
+
+// textContent extracts the `text` field of a single content OBJECT (text/thought/user chunks).
+// Returns "" if content is absent or an array (a tool-call content shape) rather than an object.
+func textContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var c struct {
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(raw, &c) // array/other shapes fail silently -> ""
+	return c.Text
+}
+
+// toolPayload builds a *ToolPayload from an ACP tool-call's content ARRAY (ToolCallContent blocks) and
+// raw I/O. Returns nil when there is nothing to carry, so existing title+status-only frames stay lean.
+func toolPayload(content, rawIn, rawOut json.RawMessage) *ToolPayload {
+	var blocks []ContentBlock
+	if len(content) > 0 {
+		var arr []struct {
+			Type    string `json:"type"` // "content"
+			Content struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(content, &arr) == nil { // object shape (text chunk) fails -> no blocks
+			for _, e := range arr {
+				if e.Content.Type == "text" && e.Content.Text != "" {
+					blocks = append(blocks, ContentBlock{Type: "text", Text: e.Content.Text})
+				}
+			}
+		}
+	}
+	if len(blocks) == 0 && len(rawIn) == 0 && len(rawOut) == 0 {
+		return nil
+	}
+	tp := &ToolPayload{Content: blocks}
+	if len(rawIn) > 0 {
+		tp.RawInput = rawIn
+	}
+	if len(rawOut) > 0 {
+		tp.RawOutput = rawOut
+	}
+	return tp
 }
 
 // handleTurnEnd clears busy on a turn-end and drains one queued prompt (if any) as the next turn.

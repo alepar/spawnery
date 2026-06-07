@@ -37,6 +37,7 @@ type Adapter struct {
 	partKind    map[string]string // opencode partID -> ACP update kind
 	msgRole     map[string]string // opencode messageID -> "user"|"assistant"
 	sentUser    map[string]bool   // opencode user partID already echoed to the web (once each)
+	sentTool    map[string]bool   // opencode tool callID already emitted as a tool_call creation
 	recentSelf  []string          // prompt texts WE submitted (web path) — skip echoing those back
 	inflightID  int               // node's session/prompt id awaiting turn-end
 	hasInflight bool
@@ -58,6 +59,7 @@ func New(oc *opencode.Client, dir, model, title string) *Adapter {
 		partKind:  map[string]string{},
 		msgRole:   map[string]string{},
 		sentUser:  map[string]bool{},
+		sentTool:  map[string]bool{},
 		permByReq: map[int]string{},
 	}
 }
@@ -248,6 +250,12 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 		if err != nil {
 			return
 		}
+		// Tool parts: emit ACP tool_call (creation, once per callID) + tool_call_update(s) carrying
+		// the tool's content/result and rawInput/rawOutput (cats A/I).
+		if pu.Part.Type == "tool" {
+			a.emitToolPart(srv, pu)
+			return
+		}
 		if kind, ok := PartTypeToACPKind(pu.Part.Type); ok {
 			a.mu.Lock()
 			a.partKind[pu.Part.ID] = kind
@@ -293,6 +301,22 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 		if has {
 			_ = srv.Respond(id, map[string]any{"stopReason": "end_turn"})
 		}
+	}
+}
+
+// emitToolPart translates an opencode ToolPart snapshot into the ACP tool_call/tool_call_update
+// notifications, sending a creation update once per callID and progress/result updates thereafter.
+func (a *Adapter) emitToolPart(srv *acp.Server, pu PartUpdated) {
+	callID := pu.Part.CallID
+	if callID == "" {
+		return
+	}
+	a.mu.Lock()
+	first := !a.sentTool[callID]
+	a.sentTool[callID] = true
+	a.mu.Unlock()
+	for _, up := range ToolPartUpdates(pu, first) {
+		_ = srv.Notify("session/update", up)
 	}
 }
 

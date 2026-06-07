@@ -64,6 +64,33 @@ export function App() {
   const closeSession = () => { teardown(); reset(); };
 
   const add = (it: ItemInput) => setItems((xs) => [...xs, withId(it)]);
+  // upsertTool reconciles tool_call / tool_call_update frames into a single chip keyed by toolId: the
+  // creation adds the chip; later updates merge status/content/raw in place (so one tool = one chip).
+  const upsertTool = (f: Extract<Frame, { kind: "tool" }>) =>
+    setItems((xs) => {
+      const idx = f.toolId ? xs.findIndex((it) => it.kind === "tool" && it.toolId === f.toolId) : -1;
+      const patch = {
+        toolId: f.toolId,
+        title: f.title,
+        status: f.status,
+        content: f.tool?.content,
+        rawInput: f.tool?.rawInput,
+        rawOutput: f.tool?.rawOutput,
+      };
+      if (idx >= 0) {
+        const prev = xs[idx] as Extract<Item, { kind: "tool" }>;
+        const merged: Item = {
+          ...prev,
+          title: patch.title ?? prev.title,
+          status: patch.status ?? prev.status,
+          content: patch.content ?? prev.content,
+          rawInput: patch.rawInput ?? prev.rawInput,
+          rawOutput: patch.rawOutput ?? prev.rawOutput,
+        };
+        return [...xs.slice(0, idx), merged, ...xs.slice(idx + 1)];
+      }
+      return [...xs, withId({ ...patch, kind: "tool", title: patch.title ?? "tool" })];
+    });
   const appendChunk = (kind: "agent" | "thought") => (t: string) =>
     setItems((xs) => {
       const last = xs[xs.length - 1];
@@ -89,7 +116,7 @@ export function App() {
         appendChunk("thought")(f.text ?? "");
         break;
       case "tool":
-        add({ kind: "tool", title: f.title ?? "tool", status: f.status });
+        upsertTool(f);
         break;
       case "turn": {
         const t: TurnState = { state: f.state ?? "idle", queued: f.queued ?? 0 };

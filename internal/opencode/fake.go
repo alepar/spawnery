@@ -151,6 +151,19 @@ func (f *Fake) EmitUserMessage(sid, msgID, partID, text string) {
 	f.Emit("message.part.updated", fmt.Sprintf(`{"sessionID":%q,"part":{"id":%q,"messageID":%q,"type":"text","text":%q}}`, sid, partID, msgID, text))
 }
 
+// EmitToolPart emits a message.part.updated carrying a ToolPart in the given state. input/output are
+// raw fragments (input is a JSON object literal, output a plain string); output is omitted unless set.
+func (f *Fake) EmitToolPart(sid, callID, tool, status, input, output string) {
+	state := fmt.Sprintf(`{"status":%q,"input":%s`, status, input)
+	if output != "" {
+		state += fmt.Sprintf(`,"output":%q`, output)
+	}
+	state += "}"
+	f.Emit("message.part.updated", fmt.Sprintf(
+		`{"sessionID":%q,"part":{"id":"prt_tool","messageID":"msg_1","type":"tool","callID":%q,"tool":%q,"state":%s}}`,
+		sid, callID, tool, state))
+}
+
 // EmitPermissionAsked emits a permission.asked event for a session.
 func (f *Fake) EmitPermissionAsked(sid, permID string) {
 	f.Emit("permission.asked", fmt.Sprintf(`{"id":%q,"sessionID":%q,"permission":"bash","patterns":[],"metadata":{},"always":[],"tool":{"messageID":"msg_1","callID":"c1"}}`, permID, sid))
