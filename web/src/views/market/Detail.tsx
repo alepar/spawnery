@@ -65,9 +65,9 @@ export function Detail({
   const title = app?.displayName ?? manifest?.title ?? id;
   const tl = tierLabel(app?.latestTier);
 
-  // Detail owns the document.title for the app section: once the app loads we upgrade App.tsx's
-  // `Spawnery — <appId>` placeholder to the real human title. App's title effect deliberately skips
-  // the "app" section so its 3s spawn poll can't clobber this.
+  // Detail is the sole writer of document.title for the app section: it sets the bare id until the
+  // fetch resolves, then the real human title. App's title effect deliberately skips the "app"
+  // section (so its 3s spawn poll can't clobber this); on leaving the section App retakes the title.
   useEffect(() => {
     document.title = `Spawnery — ${title}`;
   }, [title]);
