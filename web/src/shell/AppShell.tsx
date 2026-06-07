@@ -44,6 +44,10 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
           <ConnStatus conn={conn} />
         </header>
         <main className="flex-1 overflow-hidden">
+          {/* TerminalView for tmux spawns, else ChatView. A freshly-created tmux spawn has mode=""
+              until the first listSpawns refresh, so it briefly shows ChatView — harmless because
+              App.tsx only opens the ACP session once status flips to "active" (same refresh that
+              carries the mode), so no stray ACP session opens for a tmux spawn. */}
           {view === "chat" && activeMode === "tmux" && activeId && <TerminalView spawnId={activeId} />}
           {view === "chat" && activeMode !== "tmux" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} focusKey={activeId} />}
           {view === "market" && <MarketplaceView onSpawn={onSpawn} />}
