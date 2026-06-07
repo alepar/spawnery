@@ -38,6 +38,11 @@ export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024, onCo
 
     const backlog = new BacklogTracker(backlogThreshold);
 
+    // Intentional teardown (unmount / spawn switch) closes the socket, which fires onDown. That
+    // async "reconnecting" would land AFTER selectSpawn already set the next spawn's dot and clobber
+    // it (onConn isn't spawn-scoped). Guard the down callback so an intentional close stays silent.
+    let closing = false;
+
     onConnRef.current?.("connecting");
     const sock = new ReconnectingSocket(`ws://${location.host}/ws/session`, {
       onOpen: () => {
@@ -46,7 +51,7 @@ export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024, onCo
         sock.send(encodeResize(term.cols, term.rows));
         onConnRef.current?.("connected");
       },
-      onDown: () => { onConnRef.current?.("reconnecting"); },
+      onDown: () => { if (!closing) onConnRef.current?.("reconnecting"); },
       onMessage: (data: ArrayBuffer | string) => {
         const bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
         const n = bytes.length;
@@ -68,6 +73,7 @@ export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024, onCo
     ro.observe(host);
 
     return () => {
+      closing = true; // intentional teardown -> suppress the close-driven onDown "reconnecting"
       ro.disconnect();
       onData.dispose();
       onResize.dispose();
