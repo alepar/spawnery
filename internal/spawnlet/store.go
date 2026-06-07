@@ -7,12 +7,13 @@ type Spawn struct {
 	Generation uint64 // CP-assigned generation (0 standalone); labels the pod for reconcile/fencing
 	SidecarID  string
 	AgentID    string
-	MountDirs []string // host dirs backing this spawn's mounts (for Finalize)
-	FloorIP   string   // pod bridge IP the egress floor was applied for (for Remove on Stop)
-	PodIP     string   // pod bridge IP (for the CRI/runsc TCP ACP attach to podIP:acpPort)
-	NetnsPath string   // /proc/<sidecar-pid>/ns/net — the pod netns, for the runc-lane AttachACP
-	SandboxID string   // CRI backend: the pod sandbox id (for teardown); empty for Docker
-	Status    string
+	MountDirs  []string // host dirs backing this spawn's mounts (for Finalize)
+	FloorIP    string   // pod bridge IP the egress floor was applied for (for Remove on Stop)
+	PodIP      string   // pod bridge IP (for the CRI/runsc TCP ACP attach to podIP:acpPort)
+	NetnsPath  string   // /proc/<sidecar-pid>/ns/net — the pod netns, for the runc-lane AttachACP
+	SandboxID  string   // CRI backend: the pod sandbox id (for teardown); empty for Docker
+	Status     string
+	Mode       string // run mode (acp|tmux|served|""); selects the terminal-attach inner command
 }
 
 type Store struct {

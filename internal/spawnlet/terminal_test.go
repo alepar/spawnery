@@ -72,3 +72,17 @@ func TestMoshServerArgs(t *testing.T) {
 		t.Fatalf("moshServerArgs no ip: %v", without)
 	}
 }
+
+func TestTerminalInnerCmd(t *testing.T) {
+	// tmux spawn → attach to the in-container tmux session
+	if got := terminalInnerCmd(&Spawn{Mode: "tmux"}); len(got) != 4 ||
+		got[0] != "tmux" || got[1] != "attach" || got[2] != "-t" || got[3] != "spawn" {
+		t.Fatalf("tmux inner cmd = %v, want [tmux attach -t spawn]", got)
+	}
+	// served/opencode (and legacy "") → the opencode TUI launcher
+	for _, mode := range []string{"served", "acp", ""} {
+		if got := terminalInnerCmd(&Spawn{Mode: mode}); len(got) != 1 || got[0] != "spawn-tui" {
+			t.Fatalf("mode %q inner cmd = %v, want [spawn-tui]", mode, got)
+		}
+	}
+}

@@ -59,6 +59,16 @@ func attachCommand() []string {
 	return []string{"spawn-tui"}
 }
 
+// terminalInnerCmd is the in-container command a default terminal attach runs for a spawn: tmux-mode
+// spawns attach to the in-container tmux session (created by spawn-tmux); all others get the opencode
+// TUI launcher.
+func terminalInnerCmd(sp *Spawn) []string {
+	if sp.Mode == "tmux" {
+		return []string{"tmux", "attach", "-t", "spawn"}
+	}
+	return attachCommand()
+}
+
 // execArgv prefixes the in-container command with the runtime's exec invocation + container id.
 func execArgv(execPrefix []string, containerID string, inner []string) []string {
 	argv := make([]string, 0, len(execPrefix)+1+len(inner))
@@ -101,8 +111,9 @@ func ExecPrefixFor(runtimeKind string) []string {
 }
 
 // StartTerminal (Manager method) looks up the spawn and launches a terminal session for it. cmd is
-// the in-container command (nil/empty => the opencode TUI launcher; a command => raw exec, e.g.
-// /bin/bash). Raw exec is an un-audited mutation path (bypasses the sidecar) — owner-only.
+// the in-container command (nil/empty => mode-aware default: tmux spawns get `tmux attach -t spawn`,
+// others get the opencode TUI launcher; a command => raw exec, e.g. /bin/bash). Raw exec is an
+// un-audited mutation path (bypasses the sidecar) — owner-only.
 func (m *Manager) StartTerminal(ctx context.Context, spawnID string, cmd []string) (TerminalSession, error) {
 	sp, ok := m.store.Get(spawnID)
 	if !ok {
@@ -110,6 +121,9 @@ func (m *Manager) StartTerminal(ctx context.Context, spawnID string, cmd []strin
 	}
 	if sp.AgentID == "" {
 		return TerminalSession{}, fmt.Errorf("spawn %s has no agent container", spawnID)
+	}
+	if len(cmd) == 0 {
+		cmd = terminalInnerCmd(sp)
 	}
 	return StartTerminal(ctx, sp.AgentID, cmd, TerminalConfig{
 		ExecPrefix:  ExecPrefixFor(m.cfg.ContainerRuntime),
