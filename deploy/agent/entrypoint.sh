@@ -9,6 +9,13 @@
 # model "spawnery/<SPAWN_MODEL>".
 set -e
 
+# Argv-aware: if the node passes an explicit command (e.g. the tmux launcher for tmux-mode
+# runnables), run it INSTEAD of the default opencode-serve + adapter path. This makes a
+# container-command override actually take effect under the tini ENTRYPOINT.
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+
 SIDECAR_BASE="${SIDECAR_BASE:-http://127.0.0.1:8080/v1}"
 MODEL_ID="${SPAWN_MODEL:-openai/gpt-4o-mini}"
 

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Launch the agent TUI inside a detached tmux session named "spawn", then block so the container
+# (PID 1) stays alive while clients attach via `tmux attach -t spawn`. Args are the agent argv.
+set -e
+SESSION="${SPAWN_TMUX_SESSION:-spawn}"
+export TERM="${TERM:-xterm-256color}"
+tmux new-session -d -s "$SESSION" -- "$@"
+# Keep PID 1 alive for the life of the tmux session; exit when the server (and thus the session) ends.
+exec tmux wait-for "spawnery-tmux-${SESSION}" 2>/dev/null || exec tail -f /dev/null
