@@ -45,6 +45,7 @@ type attacher struct {
 	cfg   Config
 	mgr   *spawnlet.Manager
 	httpc connect.HTTPClient
+	sx    sessionExec // container-exec boundary for additional-session launch/reap (sp-npxq.3)
 
 	mu         sync.Mutex
 	pumps      map[sessionKey]*Pump
@@ -111,6 +112,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
+		sx:         &realSessionExec{mgr: mgr},
 		pumps:      map[sessionKey]*Pump{},
 		tmuxRelays: map[sessionKey]*tmuxRelay{},
 		sessions:   map[string]*sessionRegistry{},
@@ -199,8 +201,8 @@ func (a *attacher) idleReapLoop(ctx context.Context) {
 // vs attached), measured from now. Candidates are snapshotted under the lock, then stopped outside it
 // (stopSpawn takes the lock itself). Both ACP pumps and tmux relays are reaped.
 func (a *attacher) reapIdle(ctx context.Context, now time.Time, detachedTimeout, attachedTimeout time.Duration) {
-	// TODO(sp-npxq.3): per-session idle budgets — today only session #0 exists per spawn, so
-	// reaping a key's spawn is equivalent to reaping the spawn.
+	// Session #0 keys gate whole-spawn idle reaping; additional sessions are reaped only on explicit
+	// close (sp-npxq.3, plan decision 8) — an idle session-N pump/relay must NOT stopSpawn the container.
 	a.mu.Lock()
 	type cand struct {
 		key sessionKey
@@ -216,6 +218,9 @@ func (a *attacher) reapIdle(ctx context.Context, now time.Time, detachedTimeout,
 	}
 	relayCands := make([]relayCand, 0, len(a.tmuxRelays))
 	for k, r := range a.tmuxRelays {
+		if k.sessionID != SessionZeroID {
+			continue
+		}
 		relayCands = append(relayCands, relayCand{k, r})
 	}
 	a.mu.Unlock()
@@ -249,6 +254,18 @@ func (a *attacher) status(spawnID string, ph nodev1.SpawnPhase, detail string) {
 // zeroKey is the map key for a spawn's session #0 (the primary).
 func zeroKey(spawnID string) sessionKey {
 	return sessionKey{spawnID: spawnID, sessionID: SessionZeroID}
+}
+
+// moshTmuxName / acpTmuxName are the deterministic tmux session names for an additional session, so
+// reaping needs no extra registry field. Session #0 keeps its legacy name "spawn" (see startSpawn).
+func moshTmuxName(sessionID string) string { return "spawn-" + sessionID }
+func acpTmuxName(sessionID string) string  { return "acp-" + sessionID }
+
+// sessionStatus reports a single session's lifecycle state to the CP (alongside the roster).
+func (a *attacher) sessionStatus(spawnID, sessionID string, st nodev1.SessionState, detail string) {
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SessionStatus{SessionStatus: &nodev1.SessionStatus{
+		SpawnId: spawnID, SessionId: sessionID, State: st, Detail: detail,
+	}}})
 }
 
 // sid defaults an empty wire session id to session #0 (backward compat with single-session CPs).
