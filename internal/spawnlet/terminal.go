@@ -29,11 +29,6 @@ func sessionTitle(name, appTitle string) string {
 // TUI, attached to the in-pod opencode server. The TUI and the web UI then share one
 // server-authoritative session (see sp-wsu). mosh's UDP data plane goes straight to the node.
 
-const (
-	defaultAttachURL   = "http://127.0.0.1:4096"
-	defaultTmuxSession = "opencode"
-)
-
 // TerminalSession is the mosh connect info handed back (via CP) to spawnctl.
 type TerminalSession struct {
 	Host string // node address spawnctl's mosh-client dials
