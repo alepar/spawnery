@@ -12,6 +12,14 @@ import (
 // SessionZeroID is the well-known id of a spawn's primary (pinned) session — the existing agent.
 const SessionZeroID = "0"
 
+// acpPoolLo/acpPoolHi bound the per-spawn additional-session ACP port pool: the highest 100-port
+// block BELOW the 32768 Linux ephemeral boundary, so in-container listeners can't collide with
+// kernel-assigned ephemeral source ports (spec §4). Session #0 keeps port 7000 (outside the pool).
+const (
+	acpPoolLo = 32668
+	acpPoolHi = 32767
+)
+
 // sessionKey routes pumps/relays by (spawn, session). Session #0 uses SessionZeroID.
 type sessionKey struct{ spawnID, sessionID string }
 
@@ -30,11 +38,12 @@ type sessionRegistry struct {
 	mu       sync.Mutex
 	spawnID  string
 	sessions map[string]*sessionEntry
-	nextID   int // monotonic allocator for non-zero session ids
+	nextID   int          // monotonic allocator for non-zero session ids
+	ports    map[int]bool // acp pool ports currently allocated to this spawn's sessions
 }
 
 func newSessionRegistry(spawnID string) *sessionRegistry {
-	return &sessionRegistry{spawnID: spawnID, sessions: map[string]*sessionEntry{}, nextID: 1}
+	return &sessionRegistry{spawnID: spawnID, sessions: map[string]*sessionEntry{}, nextID: 1, ports: map[int]bool{}}
 }
 
 // allocID returns the next free non-zero session id (does not reserve it; register does).
@@ -67,6 +76,40 @@ func (r *sessionRegistry) remove(id string) bool {
 		return false
 	}
 	delete(r.sessions, id)
+	return true
+}
+
+// allocPort reserves the lowest-free port in [acpPoolLo, acpPoolHi] for an acp session; ok=false when
+// the pool is exhausted (caller rejects CreateSession). Reservation is atomic under the registry lock.
+func (r *sessionRegistry) allocPort() (int, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for p := acpPoolLo; p <= acpPoolHi; p++ {
+		if !r.ports[p] {
+			r.ports[p] = true
+			return p, true
+		}
+	}
+	return 0, false
+}
+
+// freePort releases a previously allocated acp pool port (on session close or failed launch).
+func (r *sessionRegistry) freePort(p int) {
+	r.mu.Lock()
+	delete(r.ports, p)
+	r.mu.Unlock()
+}
+
+// setState transitions a session's state under the lock (so snapshot never races a field write);
+// returns false if the id is gone (e.g. closed mid-launch).
+func (r *sessionRegistry) setState(id string, st nodev1.SessionState) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.sessions[id]
+	if !ok {
+		return false
+	}
+	e.state = st
 	return true
 }
 
