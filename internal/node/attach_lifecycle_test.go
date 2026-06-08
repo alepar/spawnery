@@ -345,11 +345,13 @@ func TestStartSpawnRegistersSessionZeroAndEmitsRoster(t *testing.T) {
 	}
 }
 
-// CreateSession registers a new STARTING session and re-emits the roster; CloseSession reaps a
-// non-pinned session but is a no-op for the pinned session #0 (sp-npxq.1). No launch yet (sp-npxq.3).
+// CreateSession registers a new session and launches it (via the fake exec boundary, so it reaches
+// ACTIVE); CloseSession reaps a non-pinned session but is a no-op for the pinned session #0 (sp-npxq.1
+// roster behavior, with the sp-npxq.3 real launch/reap wired through a fakeSessionExec).
 func TestCreateAndCloseSessionUpdateRoster(t *testing.T) {
 	a := &attacher{
 		cfg:        Config{NodeID: "n1", MaxSpawns: 2},
+		sx:         &fakeSessionExec{},
 		pumps:      map[sessionKey]*Pump{},
 		tmuxRelays: map[sessionKey]*tmuxRelay{},
 		sessions:   map[string]*sessionRegistry{"s1": newSessionRegistry("s1")},
@@ -363,20 +365,23 @@ func TestCreateAndCloseSessionUpdateRoster(t *testing.T) {
 		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_MOSH, Runnable: "shell",
 	}}})
 
-	r := fs.lastRoster()
-	if r == nil || len(r.Sessions) != 2 {
-		t.Fatalf("after CreateSession want roster of 2, got %+v", r)
-	}
-	// the new (non-zero) session is STARTING (launch happens in sp-npxq.3).
+	// the new (non-zero) session launches to ACTIVE via the fake (sp-npxq.3); roster has 2 sessions.
 	var newID string
-	for _, s := range r.Sessions {
-		if s.SessionId != SessionZeroID {
-			newID = s.SessionId
-			if s.State != nodev1.SessionState_SESSION_STATE_STARTING || s.Runnable != "shell" {
-				t.Fatalf("new session not STARTING/shell: %+v", s)
+	waitFor(t, "new session ACTIVE", func() bool {
+		r := fs.lastRoster()
+		if r == nil || len(r.Sessions) != 2 {
+			return false
+		}
+		for _, s := range r.Sessions {
+			if s.SessionId != SessionZeroID {
+				if s.State == nodev1.SessionState_SESSION_STATE_ACTIVE && s.Runnable == "shell" {
+					newID = s.SessionId
+					return true
+				}
 			}
 		}
-	}
+		return false
+	})
 
 	// closing the pinned session #0 is rejected: roster unchanged.
 	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_CloseSession{CloseSession: &nodev1.CloseSession{SpawnId: "s1", SessionId: SessionZeroID}}})

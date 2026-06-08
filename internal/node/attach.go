@@ -216,6 +216,9 @@ func (a *attacher) reapIdle(ctx context.Context, now time.Time, detachedTimeout,
 	}
 	cands := make([]cand, 0, len(a.pumps))
 	for k, p := range a.pumps {
+		if k.sessionID != SessionZeroID {
+			continue // additional sessions are reaped by explicit close / stopSpawn, not idle (decision 8)
+		}
 		cands = append(cands, cand{k, p})
 	}
 	relayCands := make([]relayCand, 0, len(a.tmuxRelays))
