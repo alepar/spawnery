@@ -161,6 +161,37 @@ case "$RUNNABLE" in
                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_DISABLE_TERMINAL_TITLE \
                -- claude
     ;;
+  codex-tui)
+    export TERM="${TERM:-xterm-256color}"
+    # Codex speaks the OpenAI Responses API; OpenRouter serves a compatible /v1/responses endpoint
+    # via the sidecar passthrough (sidecar injects the real OpenRouter key). base_url is the
+    # sidecar's OpenAI root (OPENAI_BASE_URL, set by the node). The model is per-spawn (SPAWN_MODEL)
+    # and switchable in Codex's own /model picker. The pod (gVisor) is the sandbox, so
+    # sandbox_mode="danger-full-access" disables Codex's own Landlock/seccomp. approval_policy="never"
+    # auto-approves all actions (non-interactive pod). disable_response_storage=true is Codex's ZDR
+    # mechanism: it sets store=false on Responses calls and does NOT chain via previous_response_id,
+    # sending full context each turn — required because OpenRouter's Responses Beta is stateless
+    # (no server-side response storage / previous_response_id chaining).
+    SIDECAR_OAI="${OPENAI_BASE_URL:-http://127.0.0.1:8080/v1}"
+    MODEL_ID="${SPAWN_MODEL:-openai/gpt-4o-mini}"
+    export CODEX_HOME="${CODEX_HOME:-/root/.codex}"
+    export CODEX_SPAWNERY_KEY="${CODEX_SPAWNERY_KEY:-sk-unused-sidecar-injects-real-key}"
+    mkdir -p "$CODEX_HOME"
+    cat > "$CODEX_HOME/config.toml" <<EOF
+model = "${MODEL_ID}"
+model_provider = "spawnery"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+disable_response_storage = true
+
+[model_providers.spawnery]
+name = "Spawnery Sidecar"
+base_url = "${SIDECAR_OAI}"  # /v1 suffix kept: Codex appends /responses → effective URL is <base>/v1/responses
+env_key = "CODEX_SPAWNERY_KEY"
+wire_api = "responses"
+EOF
+    start_tmux TERM CODEX_HOME CODEX_SPAWNERY_KEY -- codex
+    ;;
   shell)
     # Built-in synthetic runnable: a plain login-ish bash shell, transparent-tmux wrapped so it
     # shares the same multi-client mirroring + scrollback persistence as the agent TUIs (sp-npxq §3).
