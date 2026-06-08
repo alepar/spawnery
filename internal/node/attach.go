@@ -541,7 +541,7 @@ func (a *attacher) createSession(ctx context.Context, m *nodev1.CreateSession) {
 	e := &sessionEntry{id: id, transport: m.Transport, runnable: m.Runnable, state: nodev1.SessionState_SESSION_STATE_STARTING}
 
 	if m.Transport == nodev1.SessionTransport_SESSION_TRANSPORT_ACP {
-		port, ok := reg.allocPort()
+		port, ok := reg.allocPort(id)
 		if !ok {
 			log.Printf("rejecting acp session for %s: port pool exhausted", m.SpawnId)
 			a.sessionStatus(m.SpawnId, "", nodev1.SessionState_SESSION_STATE_ERROR, "acp port pool exhausted")
@@ -644,7 +644,7 @@ func (a *attacher) launchACPSession(ctx context.Context, spawnID string, reg *se
 		a.mu.Unlock()
 		p.stop()
 		_ = a.sx.KillTmux(ctx, spawnID, tmuxName)
-		reg.freePort(port)
+		reg.freePort(port, e.id) // ownership-checked: no-op if CloseSession already freed/realloced it
 		return
 	}
 	a.pumps[sessionKey{spawnID, e.id}] = p
@@ -660,7 +660,7 @@ func (a *attacher) failSession(spawnID string, reg *sessionRegistry, e *sessionE
 	logErr("launchSession "+spawnID+"/"+e.id, fmt.Errorf("%s", detail))
 	if e.transport == nodev1.SessionTransport_SESSION_TRANSPORT_ACP {
 		if p, err := strconv.Atoi(e.endpoint); err == nil {
-			reg.freePort(p)
+			reg.freePort(p, e.id)
 		}
 	}
 	reg.remove(e.id)
@@ -703,7 +703,7 @@ func (a *attacher) closeSession(ctx context.Context, m *nodev1.CloseSession) {
 		}
 		_ = a.sx.KillTmux(ctx, m.SpawnId, acpTmuxName(m.SessionId))
 		if port, err := strconv.Atoi(e.endpoint); err == nil {
-			reg.freePort(port)
+			reg.freePort(port, m.SessionId)
 		}
 	default: // mosh
 		if relay != nil {

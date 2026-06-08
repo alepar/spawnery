@@ -25,6 +25,13 @@ type fakeSessionExec struct {
 	launchMoshErr error
 	launchACPErr  error
 	dialErr       error
+
+	// dialGate, when non-nil, parks the FIRST DialACP call (closing dialReached when it arrives) until
+	// dialGate is closed — a deterministic seam to interleave a CloseSession + a new CreateSession
+	// against an in-flight acp launch that is mid-handshake. Later dials are not gated.
+	dialGate    chan struct{}
+	dialReached chan struct{}
+	gateOnce    sync.Once
 }
 
 func (f *fakeSessionExec) LaunchMosh(_ context.Context, _, _, tmuxName string) error {
@@ -46,6 +53,14 @@ func (f *fakeSessionExec) LaunchACP(_ context.Context, _, _, tmuxName string, po
 	return f.launchACPErr
 }
 func (f *fakeSessionExec) DialACP(_ context.Context, _ string, _ int) (*runtime.AttachedStream, error) {
+	if f.dialGate != nil {
+		first := false
+		f.gateOnce.Do(func() { first = true })
+		if first {
+			close(f.dialReached)
+			<-f.dialGate
+		}
+	}
 	if f.dialErr != nil {
 		return nil, f.dialErr
 	}
@@ -173,7 +188,7 @@ func TestCreateSessionACPRejectedWhenPoolExhausted(t *testing.T) {
 	// drain the pool.
 	reg := a.sessions["s1"]
 	for {
-		if _, ok := reg.allocPort(); !ok {
+		if _, ok := reg.allocPort("drain"); !ok {
 			break
 		}
 	}

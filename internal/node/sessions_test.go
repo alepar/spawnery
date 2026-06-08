@@ -9,28 +9,28 @@ import (
 func TestPortAllocatorLowestFreeAndExhaustion(t *testing.T) {
 	r := newSessionRegistry("s1")
 
-	p1, ok := r.allocPort()
+	p1, ok := r.allocPort("a")
 	if !ok || p1 != acpPoolLo {
 		t.Fatalf("first allocPort = %d ok=%v, want %d", p1, ok, acpPoolLo)
 	}
-	p2, _ := r.allocPort()
+	p2, _ := r.allocPort("b")
 	if p2 != acpPoolLo+1 {
 		t.Fatalf("second allocPort = %d, want %d", p2, acpPoolLo+1)
 	}
 	// freeing p1 makes it the lowest-free again.
-	r.freePort(p1)
-	p3, _ := r.allocPort()
+	r.freePort(p1, "a")
+	p3, _ := r.allocPort("c")
 	if p3 != acpPoolLo {
 		t.Fatalf("after free, allocPort = %d, want %d (lowest-free)", p3, acpPoolLo)
 	}
 
 	// exhaust the pool: 100 ports total; we currently hold p2 + p3, so 98 remain.
 	for i := 0; i < 98; i++ {
-		if _, ok := r.allocPort(); !ok {
+		if _, ok := r.allocPort("x"); !ok {
 			t.Fatalf("unexpected exhaustion at %d", i)
 		}
 	}
-	if _, ok := r.allocPort(); ok {
+	if _, ok := r.allocPort("x"); ok {
 		t.Fatal("allocPort must report exhaustion (ok=false) when the pool is full")
 	}
 }

@@ -38,12 +38,18 @@ type sessionRegistry struct {
 	mu       sync.Mutex
 	spawnID  string
 	sessions map[string]*sessionEntry
-	nextID   int          // monotonic allocator for non-zero session ids
-	ports    map[int]bool // acp pool ports currently allocated to this spawn's sessions
+	nextID   int            // monotonic allocator for non-zero session ids
+	ports    map[int]string // acp pool port -> owning session id (the only session allowed to free it)
+
+	// onFreePort, when non-nil, is invoked after every freePort call (after the lock is released). It is
+	// a TEST-ONLY observation seam (nil in production, so production behavior is unchanged) that lets a
+	// close-during-launch race test deterministically wait for the in-flight launch goroutine's undo
+	// freePort to complete before asserting on the port map.
+	onFreePort func()
 }
 
 func newSessionRegistry(spawnID string) *sessionRegistry {
-	return &sessionRegistry{spawnID: spawnID, sessions: map[string]*sessionEntry{}, nextID: 1, ports: map[int]bool{}}
+	return &sessionRegistry{spawnID: spawnID, sessions: map[string]*sessionEntry{}, nextID: 1, ports: map[int]string{}}
 }
 
 // allocID returns the next free non-zero session id (does not reserve it; register does).
@@ -79,25 +85,35 @@ func (r *sessionRegistry) remove(id string) bool {
 	return true
 }
 
-// allocPort reserves the lowest-free port in [acpPoolLo, acpPoolHi] for an acp session; ok=false when
-// the pool is exhausted (caller rejects CreateSession). Reservation is atomic under the registry lock.
-func (r *sessionRegistry) allocPort() (int, bool) {
+// allocPort reserves the lowest-free port in [acpPoolLo, acpPoolHi] for owner (the acp session id);
+// ok=false when the pool is exhausted (caller rejects CreateSession). Reservation is atomic under the
+// registry lock. The owner is recorded so only that session may later free the port (see freePort).
+func (r *sessionRegistry) allocPort(owner string) (int, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for p := acpPoolLo; p <= acpPoolHi; p++ {
-		if !r.ports[p] {
-			r.ports[p] = true
+		if _, taken := r.ports[p]; !taken {
+			r.ports[p] = owner
 			return p, true
 		}
 	}
 	return 0, false
 }
 
-// freePort releases a previously allocated acp pool port (on session close or failed launch).
-func (r *sessionRegistry) freePort(p int) {
+// freePort releases acp pool port p, but ONLY if it is still owned by owner — making the free
+// ownership-safe and idempotent. This prevents a double-free across a realloc: when a CloseSession and
+// the in-flight launch goroutine's mid-launch undo both try to free the same port, the first free wins
+// and the second is a no-op; and if the port was reallocated to a DIFFERENT session in between, a stale
+// owner's free cannot steal the new owner's reservation.
+func (r *sessionRegistry) freePort(p int, owner string) {
 	r.mu.Lock()
-	delete(r.ports, p)
+	if r.ports[p] == owner {
+		delete(r.ports, p)
+	}
 	r.mu.Unlock()
+	if r.onFreePort != nil {
+		r.onFreePort()
+	}
 }
 
 // setState transitions a session's state under the lock (so snapshot never races a field write);
