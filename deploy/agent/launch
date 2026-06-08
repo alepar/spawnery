@@ -54,14 +54,32 @@ EOF
   export SPAWN_MODEL="spawnery/${MODEL_ID}"
 }
 
-# start_tmux <inner-argv...> — create a detached transparent-tmux session named $TMUX_SESSION
-# running the runnable, passing the runnable's env explicitly via -e (so an exec session that
-# joins session #0's already-running tmux server still gets the exact env). Then, if
-# --keepalive, block PID 1 while the session lives (this is what spawn-tmux used to do).
-# Per-runnable env vars are exported by the caller and forwarded below via TMUX_ENV.
+# start_tmux NAME... -- <inner-argv...> — create a detached transparent-tmux session named
+# $TMUX_SESSION running the runnable, forwarding the named env vars explicitly via -e (so an
+# exec session that joins session #0's already-running tmux server still gets the exact env).
+# Then, if --keepalive, block PID 1 while the session lives (this is what spawn-tmux used to do).
+#
+# The leading NAMEs (terminated by a literal `--`) are read from the current environment and
+# translated into `-e NAME=VALUE` flags; everything after `--` is the inner command. Values are
+# kept inside quoted positional parameters and never undergo unquoted word-splitting, so values
+# containing whitespace or glob characters are forwarded intact.
 start_tmux() {
-  # shellcheck disable=SC2086  # TMUX_ENV is intentionally word-split into -e KEY=VAL flags
-  tmux -u new-session -d -s "$TMUX_SESSION" $TMUX_ENV -- "$@"
+  _argc=$#
+  _i=0
+  _in_cmd=0
+  while [ "$_i" -lt "$_argc" ]; do
+    _arg="$1"; shift; _i=$((_i + 1))
+    if [ "$_in_cmd" = 0 ] && [ "$_arg" = "--" ]; then
+      _in_cmd=1
+      set -- "$@" --
+    elif [ "$_in_cmd" = 0 ]; then
+      eval "_v=\${$_arg}"
+      set -- "$@" -e "$_arg=$_v"
+    else
+      set -- "$@" "$_arg"
+    fi
+  done
+  tmux -u new-session -d -s "$TMUX_SESSION" "$@"
   if [ "$KEEPALIVE" = 1 ]; then
     # Keep PID 1 alive while the tmux session exists (clients attach via `tmux attach -t
     # <name>`). When the agent exits, its window closes, the session ends (detach-on-destroy),
@@ -70,16 +88,6 @@ start_tmux() {
       sleep 1
     done
   fi
-}
-
-# tmux_env adds "-e KEY=VAL" for each NAME passed, reading the value from the current env.
-# Accumulates into TMUX_ENV (consumed by start_tmux).
-TMUX_ENV=""
-tmux_env() {
-  for _n in "$@"; do
-    eval "_v=\${$_n}"
-    TMUX_ENV="$TMUX_ENV -e $_n=$_v"
-  done
 }
 
 case "$RUNNABLE" in
@@ -109,8 +117,7 @@ case "$RUNNABLE" in
     # opencode TUI has no session-title hook (SPAWN_SESSION_TITLE) — naming is best-effort;
     # the load-bearing fix is the sidecar routing above (sp-9xr.18). The inner command is
     # spawn-tui, now wrapped in transparent tmux so all clients mirror one TUI process.
-    tmux_env TERM OPENCODE_CONFIG SPAWN_MODEL OPENCODE_BASE_URL SPAWNERY_SESSION_FILE
-    start_tmux spawn-tui
+    start_tmux TERM OPENCODE_CONFIG SPAWN_MODEL OPENCODE_BASE_URL SPAWNERY_SESSION_FILE -- spawn-tui
     ;;
   goose-tui)
     export TERM="${TERM:-xterm-256color}"
@@ -120,8 +127,7 @@ case "$RUNNABLE" in
     export GOOSE_TELEMETRY_OFF="${GOOSE_TELEMETRY_OFF:-1}"
     # OPENAI_BASE_URL is set by the node to the sidecar endpoint; goose's openai provider reads
     # it directly. Use "goose session" (bare "goose" opens the configure wizard).
-    tmux_env TERM GOOSE_PROVIDER GOOSE_MODEL OPENAI_API_KEY GOOSE_TELEMETRY_OFF OPENAI_BASE_URL
-    start_tmux goose session
+    start_tmux TERM GOOSE_PROVIDER GOOSE_MODEL OPENAI_API_KEY GOOSE_TELEMETRY_OFF OPENAI_BASE_URL -- goose session
     ;;
   claude-tui)
     export TERM="${TERM:-xterm-256color}"
@@ -139,17 +145,16 @@ case "$RUNNABLE" in
     export DISABLE_TELEMETRY="${DISABLE_TELEMETRY:-1}"
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
     export CLAUDE_CODE_DISABLE_TERMINAL_TITLE="${CLAUDE_CODE_DISABLE_TERMINAL_TITLE:-1}"
-    tmux_env TERM ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_MODEL_OPTION ANTHROPIC_CUSTOM_MODEL_OPTION_NAME \
-             ANTHROPIC_MODEL ENABLE_TOOL_SEARCH DISABLE_AUTOUPDATER DISABLE_TELEMETRY \
-             CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_DISABLE_TERMINAL_TITLE
-    start_tmux claude
+    start_tmux TERM ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_MODEL_OPTION ANTHROPIC_CUSTOM_MODEL_OPTION_NAME \
+               ANTHROPIC_MODEL ENABLE_TOOL_SEARCH DISABLE_AUTOUPDATER DISABLE_TELEMETRY \
+               CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_DISABLE_TERMINAL_TITLE \
+               -- claude
     ;;
   shell)
     # Built-in synthetic runnable: a plain login-ish bash shell, transparent-tmux wrapped so it
     # shares the same multi-client mirroring + scrollback persistence as the agent TUIs (sp-npxq §3).
     export TERM="${TERM:-xterm-256color}"
-    tmux_env TERM
-    start_tmux bash
+    start_tmux TERM -- bash
     ;;
   nori*|nori)
     echo "nori is launched by the terminal attach, not the launcher (sp-9xr.12.2)" >&2; exit 1 ;;

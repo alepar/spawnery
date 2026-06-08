@@ -14,6 +14,16 @@
 export TERM="${TERM:-xterm-256color}"
 URL="${OPENCODE_BASE_URL:-http://127.0.0.1:4096}"
 SESSION_FILE="${SPAWNERY_SESSION_FILE:-/tmp/spawnery-opencode-session}"
+
+# Fail loud, not silent: opencode attach requires an already-running in-pod opencode
+# server. If opencode-tui is selected as a primary session there may be no `opencode serve`
+# behind $URL; attach would then fail, the tmux window would exit, and the pod would be
+# silently reaped. Probe reachability first and emit a clear diagnostic before exiting.
+if ! curl -fsS --max-time 2 "$URL" >/dev/null 2>&1; then
+  echo "spawn-tui: no opencode server reachable at $URL — opencode-tui requires a served opencode backend (run opencode serve)" >&2
+  exit 1
+fi
+
 S="$(cat "$SESSION_FILE" 2>/dev/null || true)"
 if [ -n "$S" ]; then
   exec opencode attach "$URL" -s "$S"

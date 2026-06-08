@@ -70,7 +70,7 @@ callable by **both** the entrypoint (session #0) and the node via `docker exec` 
 an exec-launched session gets byte-identical config:
 
 ```
-launcher --runnable <id> [--acp-port <N>] [--tmux-session <NAME>]
+launcher --runnable <id> [--acp-port <N>] [--tmux-session <NAME>] [--keepalive]
 ```
 
 It owns the per-runnable env/wiring that lives in the entrypoint today: opencode sidecar
