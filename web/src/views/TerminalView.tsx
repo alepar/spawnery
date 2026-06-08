@@ -12,8 +12,10 @@ const CLIENT_ID = (typeof crypto !== "undefined" && crypto.randomUUID)
   ? crypto.randomUUID()
   : `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024, onConn }: {
+export function TerminalView({ spawnId, sessionId = "0", active = true, backlogThreshold = 8 * 1024 * 1024, onConn }: {
   spawnId: string;
+  sessionId?: string;
+  active?: boolean; // keep-alive: panel is mounted but CSS-hidden when inactive; refit on re-show.
   backlogThreshold?: number;
   // Reports the terminal's own socket state up to the chat-header ConnStatus dot. tmux spawns
   // self-manage this socket (App.tsx gates openSession off for them), so without this the dot
@@ -21,6 +23,8 @@ export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024, onCo
   onConn?: (s: "connecting" | "connected" | "reconnecting") => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const termRef = useRef<Terminal | null>(null);
   // Keep the latest onConn in a ref so the socket callbacks don't pin a stale closure (the effect
   // is keyed on spawnId only, to avoid tearing down/reopening the socket when the parent re-renders).
   const onConnRef = useRef(onConn);
@@ -34,7 +38,12 @@ export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024, onCo
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
-    fit.fit();
+    fitRef.current = fit;
+    termRef.current = term;
+    // xterm's FitAddon reads 0x0 under display:none -> throws / Infinity resize loop. Only ever fit
+    // while the host is actually visible (offsetParent is null when display:none).
+    const safeFit = () => { if (host.offsetParent !== null) { try { fit.fit(); } catch { /* hidden race */ } } };
+    safeFit();
     // Focus the terminal as soon as the spawn is (re)selected — the effect is keyed on spawnId, so
     // this runs on mount and on every spawn switch — so keystrokes go straight into the TUI, matching
     // how a web-native spawn auto-focuses its chat input on selection.
@@ -50,8 +59,8 @@ export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024, onCo
     onConnRef.current?.("connecting");
     const sock = new ReconnectingSocket(`ws://${location.host}/ws/session`, {
       onOpen: () => {
-        sock.send(JSON.stringify({ spawnId, clientId: CLIENT_ID, token: DEV_TOKEN, cursor: 0 }));
-        fit.fit();
+        sock.send(JSON.stringify({ spawnId, sessionId, clientId: CLIENT_ID, token: DEV_TOKEN, cursor: 0 }));
+        safeFit();
         sock.send(encodeResize(term.cols, term.rows));
         onConnRef.current?.("connected");
       },
@@ -73,7 +82,7 @@ export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024, onCo
 
     const onData = term.onData((d) => sock.send(encodeInput(d)));
     const onResize = term.onResize(({ cols, rows }) => sock.send(encodeResize(cols, rows)));
-    const ro = new ResizeObserver(() => fit.fit());
+    const ro = new ResizeObserver(() => safeFit());
     ro.observe(host);
 
     return () => {
@@ -83,8 +92,23 @@ export function TerminalView({ spawnId, backlogThreshold = 8 * 1024 * 1024, onCo
       onResize.dispose();
       sock.close();
       term.dispose();
+      fitRef.current = null;
+      termRef.current = null;
     };
-  }, [spawnId]);
+  }, [spawnId, sessionId]);
+
+  // Keep-alive: when an inactive (display:none) panel becomes active again, the host regained layout
+  // — refit to the new size and refocus. Never fit while hidden (handled by safeFit, but the guard
+  // here also avoids a wasted rAF). rAF lets the browser apply `display:block` before measuring.
+  useEffect(() => {
+    if (!active) return;
+    const id = requestAnimationFrame(() => {
+      const host = hostRef.current;
+      if (host && host.offsetParent !== null) { try { fitRef.current?.fit(); } catch { /* race */ } }
+      termRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [active]);
 
   return <div data-testid="terminal-view" ref={hostRef} className="h-full w-full" />;
 }

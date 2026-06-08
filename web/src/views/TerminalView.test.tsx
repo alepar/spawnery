@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // jsdom doesn't implement ResizeObserver — stub it so TerminalView can mount.
@@ -157,6 +157,37 @@ describe("TerminalView", () => {
     onConn.mockClear();
     fakeSocketInstance!.opts.onDown();
     expect(onConn).toHaveBeenCalledWith("reconnecting");
+  });
+
+  it("includes sessionId in the bind frame", () => {
+    render(<TerminalView spawnId="s1" sessionId="2" />);
+    expect(fakeSocketInstance).not.toBeNull();
+    fakeSocketInstance!.opts.onOpen();
+    const bindMsg = fakeSocketInstance!.sent[0] as string;
+    const bind = JSON.parse(bindMsg);
+    expect(bind.sessionId).toBe("2");
+    expect(bind.spawnId).toBe("s1");
+  });
+
+  it("refits when a hidden panel becomes active (and not while hidden)", async () => {
+    // jsdom doesn't do layout, so offsetParent is always null — fake it to "visible" so the
+    // visibility-guarded fit() runs. The guard is what blocks fit() while display:none.
+    const { rerender, getByTestId } = render(<TerminalView spawnId="s1" sessionId="2" active={false} />);
+    const host = getByTestId("terminal-view");
+    // Inactive: offsetParent stays null (hidden) -> no fit on mount.
+    const before = mockFitAddon.fit.mock.calls.length;
+    Object.defineProperty(host, "offsetParent", { get: () => document.body, configurable: true });
+    rerender(<TerminalView spawnId="s1" sessionId="2" active={true} />);
+    await waitFor(() => expect(mockFitAddon.fit.mock.calls.length).toBeGreaterThan(before));
+  });
+
+  it("never fits while hidden (offsetParent null) on re-activation", async () => {
+    const { rerender } = render(<TerminalView spawnId="s1" sessionId="2" active={false} />);
+    const before = mockFitAddon.fit.mock.calls.length;
+    // offsetParent remains null (jsdom default == hidden); activating must NOT fit.
+    rerender(<TerminalView spawnId="s1" sessionId="2" active={true} />);
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    expect(mockFitAddon.fit.mock.calls.length).toBe(before);
   });
 
   it("observes a wedge via console.warn when the backlog threshold is exceeded and xterm stalls", () => {
