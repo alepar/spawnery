@@ -661,7 +661,10 @@ func (a *attacher) failSession(spawnID string, reg *sessionRegistry, e *sessionE
 	a.sessionStatus(spawnID, e.id, nodev1.SessionState_SESSION_STATE_ERROR, detail)
 }
 
-// closeSession reaps one session and emits the updated roster. Session #0 is pinned (no-op).
+// closeSession reaps exactly one session, leaving the container (and other sessions) running. acp:
+// stop its Pump, kill its tmux wrapper, free its pool port. mosh: tear down its relay, kill its tmux
+// session. Session #0 is pinned (no-op). A transient client disconnect does NOT route here, so reap is
+// only on an explicit CloseSession (spec §4/§6).
 func (a *attacher) closeSession(ctx context.Context, m *nodev1.CloseSession) {
 	a.mu.Lock()
 	reg := a.sessions[m.SpawnId]
@@ -669,16 +672,40 @@ func (a *attacher) closeSession(ctx context.Context, m *nodev1.CloseSession) {
 	if reg == nil {
 		return
 	}
-	if e, ok := reg.get(m.SessionId); ok && e.pinned {
+	e, ok := reg.get(m.SessionId)
+	if !ok {
+		return
+	}
+	if e.pinned {
 		log.Printf("ignoring CloseSession for pinned session %s/%s", m.SpawnId, m.SessionId)
 		return
 	}
-	// TODO(sp-npxq.3): tear down the session's Pump/port or tmux session before removing the entry.
-	if reg.remove(m.SessionId) {
-		a.mu.Lock()
-		delete(a.pumps, sessionKey{m.SpawnId, m.SessionId})
-		delete(a.tmuxRelays, sessionKey{m.SpawnId, m.SessionId})
-		a.mu.Unlock()
-		a.emitRoster(m.SpawnId)
+	reg.setState(m.SessionId, nodev1.SessionState_SESSION_STATE_CLOSING)
+
+	a.mu.Lock()
+	p := a.pumps[sessionKey{m.SpawnId, m.SessionId}]
+	relay := a.tmuxRelays[sessionKey{m.SpawnId, m.SessionId}]
+	delete(a.pumps, sessionKey{m.SpawnId, m.SessionId})
+	delete(a.tmuxRelays, sessionKey{m.SpawnId, m.SessionId})
+	a.mu.Unlock()
+
+	switch e.transport {
+	case nodev1.SessionTransport_SESSION_TRANSPORT_ACP:
+		if p != nil {
+			p.stop()
+		}
+		_ = a.sx.KillTmux(ctx, m.SpawnId, acpTmuxName(m.SessionId))
+		if port, err := strconv.Atoi(e.endpoint); err == nil {
+			reg.freePort(port)
+		}
+	default: // mosh
+		if relay != nil {
+			relay.stop()
+		}
+		_ = a.sx.KillTmux(ctx, m.SpawnId, e.endpoint) // endpoint == mosh tmux name
 	}
+
+	reg.remove(m.SessionId)
+	a.emitRoster(m.SpawnId)
+	a.sessionStatus(m.SpawnId, m.SessionId, nodev1.SessionState_SESSION_STATE_CLOSED, "")
 }

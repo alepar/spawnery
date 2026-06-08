@@ -224,6 +224,91 @@ func TestCreateSessionOpencodeTuiRequiresServedOpencode(t *testing.T) {
 	})
 }
 
+// Closing a mosh session kills its tmux session, tears down its relay, and removes it from the roster;
+// session #0 is untouched.
+func TestCloseSessionMoshReapsOnlyThatSession(t *testing.T) {
+	sx := &fakeSessionExec{}
+	fs := &fakeCPStream{}
+	a := newSessionAttacher("s1", sx, fs)
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_MOSH, Runnable: "shell",
+	}}})
+	waitFor(t, "mosh active", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		_, ok := a.tmuxRelays[sessionKey{"s1", "1"}]
+		return ok
+	})
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CloseSession{CloseSession: &nodev1.CloseSession{
+		SpawnId: "s1", SessionId: "1",
+	}}})
+
+	if got := fs.lastRoster(); got == nil || len(got.Sessions) != 1 || got.Sessions[0].SessionId != SessionZeroID {
+		t.Fatalf("after close want roster of just session #0, got %+v", got)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.tmuxRelays[sessionKey{"s1", "1"}]; ok {
+		t.Fatal("mosh relay not torn down on close")
+	}
+	sx.mu.Lock()
+	defer sx.mu.Unlock()
+	if len(sx.killed) != 1 || sx.killed[0] != "spawn-1" {
+		t.Fatalf("close must kill tmux session spawn-1, killed=%v", sx.killed)
+	}
+}
+
+// Closing an acp session stops its Pump, kills its tmux wrapper, and FREES its port (so the next acp
+// session reuses the lowest port).
+func TestCloseSessionACPFreesPort(t *testing.T) {
+	sx := &fakeSessionExec{}
+	fs := &fakeCPStream{}
+	a := newSessionAttacher("s1", sx, fs)
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_ACP, Runnable: "goose-acp",
+	}}})
+	waitFor(t, "acp active", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		_, ok := a.pumps[sessionKey{"s1", "1"}]
+		return ok
+	})
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CloseSession{CloseSession: &nodev1.CloseSession{
+		SpawnId: "s1", SessionId: "1",
+	}}})
+	waitFor(t, "acp pump gone", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		_, ok := a.pumps[sessionKey{"s1", "1"}]
+		return !ok
+	})
+	sx.mu.Lock()
+	if len(sx.killed) != 1 || sx.killed[0] != "acp-1" {
+		sx.mu.Unlock()
+		t.Fatalf("close must kill tmux wrapper acp-1, killed=%v", sx.killed)
+	}
+	sx.mu.Unlock()
+
+	// the freed port is reused by the next acp session (lowest-free).
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_ACP, Runnable: "goose-acp",
+	}}})
+	waitFor(t, "second acp active", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		_, ok := a.pumps[sessionKey{"s1", "2"}]
+		return ok
+	})
+	sx.mu.Lock()
+	defer sx.mu.Unlock()
+	last := sx.acpLaunched[len(sx.acpLaunched)-1]
+	if last.port != acpPoolLo {
+		t.Fatalf("freed port not reused: second acp launched on port %d, want %d", last.port, acpPoolLo)
+	}
+}
+
 // lastSessionStatus returns the most recent SessionStatus the attacher sent (nil if none).
 func lastSessionStatus(f *fakeCPStream) *nodev1.SessionStatus {
 	f.mu.Lock()
