@@ -34,7 +34,7 @@ FROM debian:stable
 # ASCII fallback _. C.UTF-8 (a.k.a. C.utf8) is built into glibc — no `locales` package needed.
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates tmux tini \
+ && apt-get install -y --no-install-recommends ca-certificates tmux tini ncurses-term \
       procps less iproute2 curl \
       neovim htop btop dnsutils jq \
       git openssh-client ripgrep fd-find unzip xz-utils build-essential cmake just \
@@ -45,9 +45,10 @@ COPY --from=gobuild /acpexec /usr/local/bin/acpexec
 COPY --from=gobuild /acpmux /usr/local/bin/acpmux
 COPY --from=gobuild /acpdial /usr/local/bin/acpdial
 COPY deploy/agent/entrypoint.sh /entrypoint.sh
+COPY deploy/agent/launch /usr/local/bin/launcher
 COPY deploy/agent/spawn-tui.sh /usr/local/bin/spawn-tui
-COPY deploy/agent/spawn-tmux /usr/local/bin/spawn-tmux
-RUN chmod +x /entrypoint.sh /usr/local/bin/spawn-tui /usr/local/bin/spawn-tmux
+COPY deploy/agent/tmux.conf /etc/tmux.conf
+RUN chmod +x /entrypoint.sh /usr/local/bin/launcher /usr/local/bin/spawn-tui
 
 # goose CLI (Block) — TUI/ACP agent
 RUN set -eux; \
