@@ -93,18 +93,56 @@ Others that may prompt: `scp`/`ssh` (`-o BatchMode=yes`), `apt-get` (`-y`), `bre
 
 ## Build & Test
 
-_Add your build and test commands here_
+Go 1.26 monorepo (host binaries in `cmd/`) + a Vite/React SPA in `web/`. Recipes live in the
+`Justfile` (`just --list`); `make` builds binaries, images, and generated code.
 
 ```bash
-# Example:
-# npm install
-# npm test
+make build          # bin/spawnlet + bin/spawnctl   (also: make bin/cp)
+make gen            # regenerate protobuf/Connect code (buf) — after proto/ changes
+make images         # build sidecar/stubagent/agent container images
+
+just dev            # full stack (CP + spawnlet + web) in mprocs (one Ctrl-C)
+just cp             # control plane only (127.0.0.1:8080)
+just node           # spawnlet attached to the CP (root-free, egress floor off)
+just web            # web UI (vite, LAN-accessible)
+
+just test           # go test ./... -count=1   (hermetic unit tests)
+just test-web       # vitest
+just test-e2e       # builds images, then go test -tags e2e ./...
+just lint           # golangci-lint (go) + eslint/tsc (web)
+just setup          # one-time: mprocs, web deps, playwright chromium
 ```
+
+`.env` with `OPENROUTER_API_KEY` is auto-loaded by Just; container images need Docker/Podman.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Spawnery runs sandboxed coding-agent **spawns** on local/cloud nodes, driven over ACP.
+
+- **Control plane** (`cmd/cp`, `internal/cp`) — spawn lifecycle, scheduler/placement, app
+  catalog/marketplace, auth; relays ACP between clients and nodes. Store in `internal/cp/store`.
+- **Node / spawnlet** (`cmd/spawnlet`, `internal/spawnlet`, `internal/runtime`) — runs spawns as
+  pods via pluggable `PodBackend`s (Docker/runc + CRI lanes), applies the per-pod egress floor,
+  mediates storage.
+- **Spawn = a 2-container pod**: a **sidecar** (`cmd/sidecar`, `internal/sidecar` — OpenAI-compatible
+  inference proxy holding the model key; Anthropic↔OpenAI translation) + an **agent** container
+  sharing the sidecar's netns.
+- **spawnctl** (`cmd/spawnctl`) — driver/attach CLI (create/attach/exec/shell/list).
+- **Storage** (`internal/storage`) — per-mount `Backend` (`Prepare`/`Finalize`); only `Scratch`
+  (ephemeral) is implemented today.
+- **web/** — React/Vite SPA (Connect-JSON over the CP).
+- **proto/ + gen/** — buf-generated protobuf + Connect RPC: the cross-component contract.
+
+Design docs + per-slice plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- **Design-first per slice:** brainstorm/spec → plan → implement → review. Specs/plans in
+  `docs/superpowers/`. Track ALL work in beads (prefix `sp`; see the Beads sections above).
+- **`git commit --no-verify`** is the project norm — the beads pre-commit hook exports
+  `issues.jsonl`; verify your `bd close`/`update`s survived after any branch op.
+- **Unit tests are hermetic** — in-memory store, no network/keys; run with `-race`. End-to-end
+  tests are **build-tagged** (`e2e`, `egress_e2e`, `cni_egress_e2e`) and need images/root.
+- **Regenerate after proto changes** (`make gen`); never hand-edit `gen/`.
+- **Toolchain pinned to go 1.26**; golangci-lint must be built with go ≥1.26 (`just lint-go` sets
+  `GOTOOLCHAIN`).
