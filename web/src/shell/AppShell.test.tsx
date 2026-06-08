@@ -5,13 +5,14 @@ import { AppShell } from "./AppShell";
 import type { SpawnView } from "@/api/spawnlet";
 import type { Nav } from "@/nav/nav";
 
+// SpawnTabs pulls in xterm + live sockets + the ListSessions poll — stub it to an inert marker that
+// records the spawnId it was mounted with (its behavior is covered by SpawnTabs.test.tsx).
+vi.mock("@/sessions/SpawnTabs", () => ({
+  SpawnTabs: ({ spawnId }: { spawnId: string }) => <div data-testid="spawn-tabs">tabs-{spawnId}</div>,
+}));
+
 const baseProps = {
-  conn: "connected" as const,
-  items: [],
-  turn: { state: "idle" as const, queued: 0 },
-  canSend: true,
-  onSend: () => {},
-  perm: null,
+  headerConn: "connected" as const,
   onSpawnApp: vi.fn(),
 };
 const spawns: SpawnView[] = [{ spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "" }];
@@ -21,7 +22,7 @@ describe("AppShell", () => {
   it("renders templates for the templates section; chat not mounted", () => {
     render(<AppShell {...baseProps} nav={{ section: "templates" }} navigate={vi.fn()} />);
     expect(screen.getByTestId("templates")).toBeTruthy();
-    expect(screen.queryByTestId("prompt-input")).toBeNull();
+    expect(screen.queryByTestId("spawn-tabs")).toBeNull();
   });
 
   it("renders the settings pane for the settings section", () => {
@@ -29,10 +30,10 @@ describe("AppShell", () => {
     expect(screen.queryByTestId("templates")).toBeNull();
   });
 
-  it("renders chat for a spawn section and selecting a spawn calls onSelectSpawn", async () => {
+  it("renders the spawn tabs for a spawn section and selecting a spawn calls onSelectSpawn", async () => {
     const nav: Nav = { section: "spawn", spawnId: "a" };
     render(<AppShell {...baseProps} nav={nav} navigate={vi.fn()} spawns={spawns} activeId="a" actions={actions} />);
-    expect(screen.getByTestId("prompt-input")).toBeTruthy();
+    expect(screen.getByTestId("spawn-tabs")).toHaveTextContent("tabs-a");
     await userEvent.click(screen.getByTestId("spawn-select-a"));
     expect(actions.onSelectSpawn).toHaveBeenCalledWith("a");
   });
