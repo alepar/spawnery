@@ -73,6 +73,16 @@ RUN set -eux; \
 RUN mkdir -p /root/.claude
 COPY deploy/agent/claude-settings.json /root/.claude/settings.json
 
+# codex CLI (OpenAI) — Rust TUI/headless agent (codex-tui launcher case)
+ARG CODEX_VERSION=rust-v0.137.0
+RUN set -eux; \
+    curl -fsSL -o /tmp/codex.tar.gz \
+      "https://github.com/openai/codex/releases/download/${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz"; \
+    tar -xzf /tmp/codex.tar.gz -C /tmp; \
+    install -m 0755 /tmp/codex-x86_64-unknown-linux-musl /usr/local/bin/codex; \
+    rm /tmp/codex.tar.gz /tmp/codex-x86_64-unknown-linux-musl; \
+    codex --version
+
 # nori CLI (Tilework) — Rust ACP TUI client (spawnctl attach to acp-mode spawns; wiring in sp-9xr.12)
 # tarball layout: ./nori/nori — extract to /tmp then install to /usr/local/bin
 RUN set -eux; \
