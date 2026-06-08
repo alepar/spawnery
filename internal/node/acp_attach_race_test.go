@@ -42,9 +42,6 @@ func TestAttachBeforePumpReadyBindsWhenPumpReadies(t *testing.T) {
 	}
 	fs := &fakeCPStream{}
 	a := newSessionAttacher("s1", sx, fs)
-	if a.pending == nil {
-		a.pending = map[sessionKey][]pendingClient{}
-	}
 	key := sessionKey{"s1", "1"}
 
 	// 1) Session 1 (acp): reserves a pool port and parks inside DialACP — the entry is live (STARTING) but
@@ -102,9 +99,6 @@ func TestAttachUnknownSessionDoesNotPend(t *testing.T) {
 	sx := &fakeSessionExec{}
 	fs := &fakeCPStream{}
 	a := newSessionAttacher("s1", sx, fs)
-	if a.pending == nil {
-		a.pending = map[sessionKey][]pendingClient{}
-	}
 
 	a.attachClient("s1", "99", "web-X", 0) // session 99 was never created
 

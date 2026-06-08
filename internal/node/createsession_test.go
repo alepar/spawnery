@@ -113,6 +113,7 @@ func newSessionAttacher(spawnID string, sx sessionExec, fs cpStream) *attacher {
 		pumps:      map[sessionKey]*Pump{},
 		tmuxRelays: map[sessionKey]*tmuxRelay{},
 		sessions:   map[string]*sessionRegistry{spawnID: reg},
+		pending:    map[sessionKey][]pendingClient{},
 	}
 }
 

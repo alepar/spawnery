@@ -723,7 +723,14 @@ func (a *attacher) launchACPSession(ctx context.Context, spawnID string, reg *se
 // the updated roster + an ERROR SessionStatus.
 func (a *attacher) failSession(spawnID string, reg *sessionRegistry, e *sessionEntry, detail string) {
 	logErr("launchSession "+spawnID+"/"+e.id, fmt.Errorf("%s", detail))
+	// Remove the registry entry and drain pended attaches in ONE a.mu section, so the "stop pending"
+	// signal (reg.get -> !ok for a concurrent attachClient) is observable atomically with the drain.
+	// Otherwise a racing attachClient could reg.get -> ok and pend AFTER the drain, stranding the entry.
+	// Lock order a.mu -> reg.mu matches attachClient and the launch good-path (no inversion); reg.remove
+	// only touches reg.mu and never calls back into the attacher. freePort stays OUTSIDE a.mu (its
+	// ownership-checked free is idempotent, and its test-only onFreePort hook must not run under a.mu).
 	a.mu.Lock()
+	reg.remove(e.id)
 	a.takePending(sessionKey{spawnID, e.id}) // launch failed: drop any pended attaches (their WS will error)
 	a.mu.Unlock()
 	if e.transport == nodev1.SessionTransport_SESSION_TRANSPORT_ACP {
@@ -731,7 +738,6 @@ func (a *attacher) failSession(spawnID string, reg *sessionRegistry, e *sessionE
 			reg.freePort(p, e.id)
 		}
 	}
-	reg.remove(e.id)
 	a.emitRoster(spawnID)
 	a.sessionStatus(spawnID, e.id, nodev1.SessionState_SESSION_STATE_ERROR, detail)
 }
@@ -756,22 +762,26 @@ func (a *attacher) closeSession(ctx context.Context, m *nodev1.CloseSession) {
 		return
 	}
 
-	// Publish the liveness change FIRST — remove the registry entry BEFORE the a.mu pump/relay teardown
-	// (and before the slow KillTmux exec). This closes the close-races-launch window: an async
+	// Remove the registry entry FIRST — before the pump/relay teardown — but inside the SAME a.mu section
+	// as that teardown (and drain any pended attaches for the key), so the remove is atomic with the
+	// teardown and matches failSession's discipline. This closes the close-races-launch window: an async
 	// launchSession re-checks reg liveness under a.mu before registering its pump, so with
 	// remove-before-teardown every interleaving has exactly ONE owner tearing the pump down — never an
-	// orphan. If the launch re-check runs AFTER this remove it sees !live and undoes its OWN pump (this
-	// teardown then reads a.pumps[key] == nil); if it ran BEFORE, its pump-register a.mu section strictly
-	// precedes this teardown's a.mu section (the remove happens-before this teardown's a.mu lock), so this
-	// teardown reads the registered pump and stops it. The two sides can't both stop the same pump.
+	// orphan. Both sides now serialize on a.mu: if the launch's register section runs first it registers
+	// the pump and this teardown reads + stops it; if this section runs first the launch's re-check sees
+	// !live and undoes its OWN pump (this teardown read a.pumps[key] == nil). The two sides can't both
+	// stop the same pump. reg.remove only touches reg.mu and never calls back into the attacher; lock
+	// order a.mu -> reg.mu matches attachClient and the launch good-path (no inversion). The slow KillTmux
+	// exec stays OUTSIDE a.mu (in the switch below).
 	// (CLOSING was previously set here but never emitted before CLOSED, so it was unobservable — dropped.)
-	reg.remove(m.SessionId)
-
+	k := sessionKey{m.SpawnId, m.SessionId}
 	a.mu.Lock()
-	p := a.pumps[sessionKey{m.SpawnId, m.SessionId}]
-	relay := a.tmuxRelays[sessionKey{m.SpawnId, m.SessionId}]
-	delete(a.pumps, sessionKey{m.SpawnId, m.SessionId})
-	delete(a.tmuxRelays, sessionKey{m.SpawnId, m.SessionId})
+	reg.remove(m.SessionId)
+	a.takePending(k) // a STARTING session being closed: drop any pended attaches (their WS will error)
+	p := a.pumps[k]
+	relay := a.tmuxRelays[k]
+	delete(a.pumps, k)
+	delete(a.tmuxRelays, k)
 	a.mu.Unlock()
 
 	switch e.transport {
