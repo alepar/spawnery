@@ -44,6 +44,7 @@ func (r *spawnRepo) Create(ctx context.Context, s Spawn, mounts []Mount) error {
 	}
 
 	s.Status = Starting
+	s.ModelApplied = true // a fresh pod is started with spawns.model, so it is applied from birth
 	if _, err := r.db.NewInsert().Model(&s).Exec(ctx); err != nil {
 		return err
 	}
@@ -113,6 +114,53 @@ func (r *spawnRepo) Rename(ctx context.Context, id, name string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SetModel writes the new model and marks it unapplied (model_applied=false), clearing any prior
+// failure detail — all in one UPDATE (atomic). The CP SetSpawnModel handler calls this. Like Rename,
+// it refuses deleted spawns and returns ErrNotFound when no row is updated.
+func (r *spawnRepo) SetModel(ctx context.Context, id, model string) error {
+	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("model = ?", model).
+		Set("model_applied = ?", false).
+		Set("model_apply_detail = ?", "").
+		Where("id = ?", id).Where("status <> ?", Deleted).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MarkModelApplied marks the running pod's model as matching spawns.model and clears the failure
+// detail. Idempotent (no rowcount guard — mirrors Touch/MarkRecovered); the reconciler calls it on a
+// successful push and for the suspended/no-live-pod arm.
+func (r *spawnRepo) MarkModelApplied(ctx context.Context, id string) error {
+	_, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("model_applied = ?", true).
+		Set("model_apply_detail = ?", "").
+		Where("id = ?", id).Exec(ctx)
+	return err
+}
+
+// MarkModelApplyFailed leaves model_applied=false and records the last failure reason. Idempotent;
+// the reconciler calls it when it gives up after the bounded retry window.
+func (r *spawnRepo) MarkModelApplyFailed(ctx context.Context, id, detail string) error {
+	_, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("model_apply_detail = ?", detail).
+		Where("id = ?", id).Exec(ctx)
+	return err
+}
+
+// ListUnappliedModel returns non-deleted spawns whose effective model has not yet been applied to a
+// running pod (model_applied=false) — the reconciler's scan input.
+func (r *spawnRepo) ListUnappliedModel(ctx context.Context) ([]Spawn, error) {
+	var out []Spawn
+	err := r.db.NewSelect().Model(&out).
+		Where("model_applied = ?", false).Where("status <> ?", Deleted).Scan(ctx)
+	return out, err
 }
 
 // guardStatus runs a status-guarded UPDATE on spawns; rowcount=0 -> ErrConflict.

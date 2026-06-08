@@ -59,7 +59,11 @@ type SpawnRepo interface {
 	LiveContainer(ctx context.Context, id string) (Container, bool, error)
 	GetMounts(ctx context.Context, id string) ([]Mount, error)
 	ListByOwner(ctx context.Context, ownerID string) ([]Spawn, error)
-	Rename(ctx context.Context, id, name string) error // ErrNotFound on missing OR deleted
+	Rename(ctx context.Context, id, name string) error    // ErrNotFound on missing OR deleted
+	SetModel(ctx context.Context, id, model string) error // ErrNotFound on missing OR deleted
+	MarkModelApplied(ctx context.Context, id string) error
+	MarkModelApplyFailed(ctx context.Context, id, detail string) error
+	ListUnappliedModel(ctx context.Context) ([]Spawn, error)
 
 	ClaimStarting(ctx context.Context, id string, from []Status) (newGen int64, err error)
 	SetActive(ctx context.Context, id, nodeID string, gen int64) error
