@@ -4,9 +4,13 @@
 package node
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
@@ -25,6 +29,17 @@ import (
 // reports ERROR (with a useful detail) rather than the scheduler timing out. goose boots to ACP-ready
 // in ~5s; 30s is generous headroom for a slow node.
 const readyTimeout = 30 * time.Second
+
+// controlPostTimeout bounds the node's POST to the per-pod sidecar control endpoint. The sidecar is
+// reachable at the pod bridge IP (a short hop), so a few seconds is generous; bounding it keeps a wedged
+// sidecar from stalling the SetModel handler.
+const controlPostTimeout = 5 * time.Second
+
+// httpDoer is the minimal HTTP surface the SetModel handler needs (satisfied by *http.Client). It is a
+// seam so tests can stub the sidecar control endpoint without real network.
+type httpDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
 
 type Config struct {
 	NodeID        string
@@ -48,6 +63,8 @@ type attacher struct {
 	mgr   *spawnlet.Manager
 	httpc connect.HTTPClient
 	sx    sessionExec // container-exec boundary for additional-session launch/reap (sp-npxq.3)
+
+	ctrlHTTP httpDoer // POSTs SetModel to the per-pod sidecar control endpoint (injectable for tests)
 
 	mu         sync.Mutex
 	pumps      map[sessionKey]*Pump
@@ -123,6 +140,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
+		ctrlHTTP:   &http.Client{Timeout: controlPostTimeout},
 		sx:         &realSessionExec{mgr: mgr},
 		pumps:      map[sessionKey]*Pump{},
 		tmuxRelays: map[sessionKey]*tmuxRelay{},
@@ -329,6 +347,11 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			return
 		}
 		a.closeSession(ctx, m.CloseSession)
+	case *nodev1.CPMessage_SetModel:
+		if a.staleGen(m.SetModel.SpawnId, m.SetModel.Generation) {
+			return // stale generation: a newer pod exists; the CP reconciler re-pushes. Drop (matches Stop/CreateSession).
+		}
+		a.setModel(ctx, m.SetModel)
 	default:
 		// TODO(sp-gd9): handle *nodev1.CPMessage_Suspend (persist mounts + tear down, then emit
 		// NodeMessage_SuspendComplete with per-mount markers). Inert until the suspend path lands.
@@ -476,6 +499,54 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 	}
 	a.mu.Unlock()
 	a.status(spawnID, nodev1.SpawnPhase_STOPPED, "")
+}
+
+// setModel applies a CP SetModel to the running pod by POSTing the new model to the per-pod sidecar
+// control endpoint (bearer-token authed). It always replies SetModelResult on the Attach stream, echoing
+// the request_id so the CP can correlate the ack. Generation fencing is done by the caller (handle).
+func (a *attacher) setModel(ctx context.Context, sm *nodev1.SetModel) {
+	reply := func(ok bool, detail string) {
+		_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SetModelResult{SetModelResult: &nodev1.SetModelResult{
+			SpawnId: sm.SpawnId, Ok: ok, Detail: detail, RequestId: sm.RequestId,
+		}}})
+	}
+
+	sp, ok := a.mgr.Store().Get(sm.SpawnId)
+	if !ok {
+		reply(false, "unknown spawn")
+		return
+	}
+	if sp.ControlURL == "" {
+		reply(false, "no sidecar control endpoint (pod has no IP)")
+		return
+	}
+
+	body, err := json.Marshal(struct {
+		Model string `json:"model"`
+	}{Model: sm.Model})
+	if err != nil {
+		reply(false, "marshal control body: "+err.Error())
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sp.ControlURL, bytes.NewReader(body))
+	if err != nil {
+		reply(false, "build control request: "+err.Error())
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sp.ControlToken)
+
+	resp, err := a.ctrlHTTP.Do(req)
+	if err != nil {
+		reply(false, "sidecar control POST: "+err.Error())
+		return
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		reply(false, fmt.Sprintf("sidecar control returned %d", resp.StatusCode))
+		return
+	}
+	reply(true, "")
 }
 
 // frameSenderFor builds the per-client send closure that relays a pump frame line to the CP. Shared by
