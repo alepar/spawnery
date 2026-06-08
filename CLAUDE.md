@@ -139,6 +139,12 @@ Design docs + per-slice plans live in `docs/superpowers/specs/` and `docs/superp
 
 - **Design-first per slice:** brainstorm/spec → plan → implement → review. Specs/plans in
   `docs/superpowers/`. Track ALL work in beads (prefix `sp`; see the Beads sections above).
+- **Consult prior designs before designing.** Before writing a spec for a similar or adjacent
+  feature, scan [`docs/superpowers/specs/INDEX.md`](docs/superpowers/specs/INDEX.md) and read the
+  related docs — most cross-cutting decisions (and their rationale) are already made there. Build
+  on them; don't silently re-litigate.
+- **Maintain the spec index.** When you add a new design spec to `docs/superpowers/specs/`, add a
+  one-line entry to `docs/superpowers/specs/INDEX.md` in the same commit (right section, one line).
 - **`git commit --no-verify`** is the project norm — the beads pre-commit hook exports
   `issues.jsonl`; verify your `bd close`/`update`s survived after any branch op.
 - **Unit tests are hermetic** — in-memory store, no network/keys; run with `-race`. End-to-end
