@@ -14,6 +14,13 @@ type Spawn struct {
 	SandboxID  string   // CRI backend: the pod sandbox id (for teardown); empty for Docker
 	Status     string
 	Mode       string // run mode (acp|tmux|served|""); selects the terminal-attach inner command
+
+	// ControlToken is the per-pod bearer secret the sidecar's control endpoint requires
+	// (passed to the sidecar as SIDECAR_CONTROL_TOKEN). The node's SetModel handler sends it.
+	ControlToken string
+	// ControlURL is the node-reachable sidecar control endpoint,
+	// "http://<PodIP>:<controlPort>/control/model". Empty if the pod has no IP.
+	ControlURL string
 }
 
 type Store struct {

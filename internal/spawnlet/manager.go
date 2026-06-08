@@ -2,6 +2,8 @@ package spawnlet
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net"
@@ -285,6 +287,14 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		PidsLimit:   m.cfg.PidsLimit,
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", m.cfg.SidecarPort)
+	// Per-pod control plane: a random bearer token gates the sidecar's /control/model endpoint,
+	// which the node POSTs to in order to switch the live model (runtime model switch, sp-bp9w).
+	// SIDECAR_CONTROL_ADDR binds 0.0.0.0 (not loopback) because the pod IP is unknown until StartPod
+	// returns, and the node reaches the sidecar over the pod bridge IP; the bearer token (not the
+	// bind scope) is the access control, and the agent container cannot read the sidecar's env.
+	controlToken := newControlToken()
+	controlPort := m.cfg.SidecarPort + 1
+	controlAddr := fmt.Sprintf("0.0.0.0:%d", controlPort)
 
 	// Phase 1: sandbox + sidecar (the trusted, key-holding container).
 	h, err := m.pod.StartPod(ctx, runtime.PodSpec{
@@ -293,6 +303,8 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		SidecarEnv: []string{
 			"OPENROUTER_API_KEY=" + m.cfg.OpenRouterKey,
 			"SIDECAR_ADDR=" + addr,
+			"SIDECAR_CONTROL_TOKEN=" + controlToken,
+			"SIDECAR_CONTROL_ADDR=" + controlAddr,
 		},
 		Resources: res,
 		Runtime:   m.cfg.ContainerRuntime,
@@ -340,7 +352,13 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		return nil, err
 	}
 
-	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready", Mode: sel.Mode}
+	// Node-reachable control endpoint (pod IP + control port). Empty PodIP => unreachable URL;
+	// the reconciler/node handler treats that as "no live control plane".
+	controlURL := ""
+	if h.PodIP != "" {
+		controlURL = "http://" + net.JoinHostPort(h.PodIP, strconv.Itoa(controlPort)) + "/control/model"
+	}
+	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL}
 	m.store.Put(sp)
 	return sp, nil
 }
@@ -370,4 +388,12 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	}
 	m.store.Delete(id)
 	return nil
+}
+
+// newControlToken returns a 256-bit random hex string used as the sidecar control-endpoint
+// bearer token (one per pod). Mirrors the crypto/rand+hex pattern in server.go's newID.
+func newControlToken() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

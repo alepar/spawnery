@@ -12,11 +12,13 @@ import (
 type fakePodBackend struct {
 	stopped   *runtime.PodHandle
 	agentSpec runtime.AgentSpec // captured by StartAgent
+	podSpec   runtime.PodSpec   // captured by StartPod
 }
 
 func (f *fakePodBackend) Ping(context.Context) error      { return nil }
 func (f *fakePodBackend) Preflight(context.Context) error { return nil }
-func (f *fakePodBackend) StartPod(_ context.Context, _ runtime.PodSpec) (*runtime.PodHandle, error) {
+func (f *fakePodBackend) StartPod(_ context.Context, spec runtime.PodSpec) (*runtime.PodHandle, error) {
+	f.podSpec = spec
 	return &runtime.PodHandle{PodIP: "10.0.0.5", NetnsPath: "/proc/7/ns/net", SidecarID: "sc", SandboxID: "sandbox-x"}, nil
 }
 func (f *fakePodBackend) StartAgent(_ context.Context, h *runtime.PodHandle, spec runtime.AgentSpec) error {
