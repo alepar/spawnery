@@ -101,6 +101,7 @@ func main() {
 
 	srv := cp.NewServer(reg, rt, sched, st, tel)
 	srv.SetMaxSpawnsPerOwner(envInt("CP_MAX_SPAWNS_PER_OWNER", 5))
+	srv.StartReconciler(ctx) // background loop: drive model_applied=false spawns to convergence (sp-bp9w.7)
 
 	mux := http.NewServeMux()
 	mux.Handle(nodev1connect.NewNodeServiceHandler(srv)) // node side: no auth (internal nodes)

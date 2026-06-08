@@ -349,12 +349,18 @@ func TestResumeSpawn(t *testing.T) {
 	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); err != nil {
 		t.Fatalf("SuspendSpawn: %v", err)
 	}
+	if err := s.st.Spawns().SetModel(ctx, id, "m2"); err != nil { // model_applied=false while suspended
+		t.Fatalf("SetModel: %v", err)
+	}
 	if _, err := s.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id})); err != nil {
 		t.Fatalf("ResumeSpawn: %v", err)
 	}
 	sp, _ := s.st.Spawns().Get(ctx, id)
 	if sp.Status != store.Active {
 		t.Fatalf("status=%v want active after resume", sp.Status)
+	}
+	if !sp.ModelApplied {
+		t.Fatalf("after resume: model_applied=false, want true (fresh pod runs spawns.model)")
 	}
 	c, ok, _ := s.st.Spawns().LiveContainer(ctx, id)
 	if !ok || c.Generation != 2 {
@@ -400,12 +406,18 @@ func TestRecreateSpawn(t *testing.T) {
 	if _, err := s.st.Spawns().MarkUnreachable(ctx, []string{id}); err != nil {
 		t.Fatalf("MarkUnreachable: %v", err)
 	}
+	if err := s.st.Spawns().SetModel(ctx, id, "m2"); err != nil { // model_applied=false while unreachable
+		t.Fatalf("SetModel: %v", err)
+	}
 	if _, err := s.RecreateSpawn(ctx, connect.NewRequest(&cpv1.RecreateSpawnRequest{SpawnId: id})); err != nil {
 		t.Fatalf("RecreateSpawn: %v", err)
 	}
 	sp, _ := s.st.Spawns().Get(ctx, id)
 	if sp.Status != store.Active {
 		t.Fatalf("status=%v want active after recreate", sp.Status)
+	}
+	if !sp.ModelApplied {
+		t.Fatalf("after recreate: model_applied=false, want true (fresh pod runs spawns.model)")
 	}
 	c, ok, _ := s.st.Spawns().LiveContainer(ctx, id)
 	if !ok || c.Generation != 2 {

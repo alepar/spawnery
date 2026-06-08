@@ -27,20 +27,38 @@ import (
 	"spawnery/internal/cp/telemetry"
 )
 
+// reconcileAttempt tracks, for one spawn, when the reconciler first started trying to apply the
+// CURRENT model. Keyed by spawn id; the model string lets a fresh SetSpawnModel reset the clock.
+type reconcileAttempt struct {
+	model string
+	first time.Time
+}
+
 type Server struct {
 	cpv1connect.UnimplementedSpawnServiceHandler // new RPCs default to CodeUnimplemented until sp-pc4
-	reg   *registry.Registry
-	rt    *router.Router
-	sched *scheduler.Scheduler
-	st    store.Store
-	tel   telemetry.Sink
-	locks *lock.Keyed
+	reg                                          *registry.Registry
+	rt                                           *router.Router
+	sched                                        *scheduler.Scheduler
+	st                                           store.Store
+	tel                                          telemetry.Sink
+	locks                                        *lock.Keyed
 
 	models          *modelWaiters // correlates inline SetSpawnModel pushes with node SetModelResult acks
 	setModelTimeout time.Duration // bound for the inline SetModel push; overridable in tests
 
+	// Reconciler: a background loop drives model_applied=false spawns to convergence (sp-bp9w.7).
+	reconcileInterval time.Duration               // tick period; overridable in tests
+	reconcileGiveUp   time.Duration               // per-spawn bounded retry window before giving up
+	now               func() time.Time            // clock, injectable in tests
+	giveUp            map[string]reconcileAttempt // spawn id -> first-attempt time for current model; reconciler-goroutine-only (no lock)
+
 	maxSpawnsPerOwner int
 }
+
+const (
+	defaultReconcileInterval = 5 * time.Second // reconciler tick period
+	defaultReconcileGiveUp   = 2 * time.Minute // bounded per-spawn retry window
+)
 
 // Server must satisfy the (now larger) connect handler interface; the 5 new lifecycle RPCs are
 // served by the embedded Unimplemented handler until sp-pc4 overrides them.
@@ -48,7 +66,9 @@ var _ cpv1connect.SpawnServiceHandler = (*Server)(nil)
 
 func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Scheduler, st store.Store, tel telemetry.Sink) *Server {
 	return &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
-		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout}
+		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
+		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
+		now: time.Now, giveUp: map[string]reconcileAttempt{}}
 }
 
 // --- node side: NodeService/Attach ----------------------------------------
@@ -349,6 +369,12 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model stri
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
 			log.Printf("provisionSpawn %s: SetError after SetActive failure also failed: %v", spawnID, serr)
 		}
+		return
+	}
+	// Fresh pod started with spawns.model -> the running model matches the record. Converge the flag
+	// (store.Create already sets it true for new spawns; idempotent here).
+	if merr := s.st.Spawns().MarkModelApplied(ctx, spawnID); merr != nil {
+		log.Printf("provisionSpawn %s: MarkModelApplied after provision: %v", spawnID, merr)
 	}
 }
 

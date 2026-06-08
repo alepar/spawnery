@@ -194,6 +194,10 @@ func (s *Server) ResumeSpawn(ctx context.Context, req *connect.Request[cpv1.Resu
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
+	// Fresh container started with spawns.model -> mark applied (resolves any pending/given-up switch).
+	if merr := s.st.Spawns().MarkModelApplied(context.WithoutCancel(ctx), req.Msg.SpawnId); merr != nil {
+		log.Printf("ResumeSpawn %s: MarkModelApplied after resume: %v", req.Msg.SpawnId, merr)
+	}
 	return connect.NewResponse(&cpv1.ResumeSpawnResponse{}), nil
 }
 
@@ -253,6 +257,10 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 			log.Printf("RecreateSpawn %s: SetError after SetActive failure also failed: %v", req.Msg.SpawnId, serr)
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	// Fresh container started with spawns.model -> mark applied (resolves any pending/given-up switch).
+	if merr := s.st.Spawns().MarkModelApplied(context.WithoutCancel(ctx), req.Msg.SpawnId); merr != nil {
+		log.Printf("RecreateSpawn %s: MarkModelApplied after recreate: %v", req.Msg.SpawnId, merr)
 	}
 	return connect.NewResponse(&cpv1.RecreateSpawnResponse{}), nil
 }
