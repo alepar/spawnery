@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { toast } from "sonner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ConnStatus } from "@/shell/ConnStatus";
@@ -20,7 +20,6 @@ export function SpawnTabs({ spawnId }: { spawnId: string }) {
   const reconcileRoster = useSessionStore((s) => s.reconcileRoster);
   const setActive = useSessionStore((s) => s.setActive);
   const setConn = useSessionStore((s) => s.setConn);
-  const knownIds = useRef<Set<string>>(new Set());
 
   // Bind the store to this spawn (resets tabs/sockets when spawnId changes).
   useEffect(() => { bindSpawn(spawnId); }, [spawnId, bindSpawn]);
@@ -33,7 +32,6 @@ export function SpawnTabs({ spawnId }: { spawnId: string }) {
     catch { return useSessionStore.getState().sessions; }
     if (useSessionStore.getState().spawnId !== spawnId) return metas; // stale (spawn switched mid-flight)
     reconcileRoster(metas);
-    knownIds.current = new Set(metas.map((m) => m.sessionId));
     return metas;
   };
 
