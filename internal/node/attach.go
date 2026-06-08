@@ -247,7 +247,9 @@ func (a *attacher) status(spawnID string, ph nodev1.SpawnPhase, detail string) {
 }
 
 // zeroKey is the map key for a spawn's session #0 (the primary).
-func zeroKey(spawnID string) sessionKey { return sessionKey{spawnID: spawnID, sessionID: SessionZeroID} }
+func zeroKey(spawnID string) sessionKey {
+	return sessionKey{spawnID: spawnID, sessionID: SessionZeroID}
+}
 
 // sid defaults an empty wire session id to session #0 (backward compat with single-session CPs).
 func sid(s string) string {

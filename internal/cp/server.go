@@ -124,7 +124,11 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 				_ = s.tel.Emit(telemetry.Event{Kind: "spawn_create", Owner: owner, NodeID: nodeID, NodeClass: nodeClass, SpawnID: m.Status.SpawnId, Tier: "reviewed", Storage: "managed", Timestamp: time.Now().UTC()})
 			}
 		case *nodev1.NodeMessage_Frame:
-			s.rt.FromNode(m.Frame.SpawnId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected
+			s.rt.FromNode(m.Frame.SpawnId, m.Frame.SessionId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected
+		case *nodev1.NodeMessage_Roster:
+			s.rt.UpdateRoster(m.Roster.SpawnId, m.Roster.Sessions) // node-authoritative session set; CP mirrors
+		case *nodev1.NodeMessage_SessionStatus:
+			s.rt.ApplySessionStatus(m.SessionStatus.SpawnId, m.SessionStatus.SessionId, m.SessionStatus.State)
 		}
 	}
 }
@@ -391,6 +395,88 @@ func (s *Server) stop(ctx context.Context, owner, spawnID string) error {
 	return nil
 }
 
+// --- client-facing session RPCs (answered from CP's mirrored roster) ------
+
+// node and cp SessionTransport enums share ordinals by construction (see the protos), so the cast is total.
+func toNodeTransport(t cpv1.SessionTransport) nodev1.SessionTransport {
+	return nodev1.SessionTransport(t)
+}
+func toCPTransport(t nodev1.SessionTransport) cpv1.SessionTransport { return cpv1.SessionTransport(t) }
+
+func sessionStateString(st nodev1.SessionState) string {
+	switch st {
+	case nodev1.SessionState_SESSION_STATE_STARTING:
+		return "starting"
+	case nodev1.SessionState_SESSION_STATE_ACTIVE:
+		return "active"
+	case nodev1.SessionState_SESSION_STATE_CLOSING:
+		return "closing"
+	case nodev1.SessionState_SESSION_STATE_CLOSED:
+		return "closed"
+	case nodev1.SessionState_SESSION_STATE_ERROR:
+		return "error"
+	default:
+		return "unspecified"
+	}
+}
+
+// ownSpawn loads a spawn and verifies the caller owns it (shared by the session RPCs).
+func (s *Server) ownSpawn(ctx context.Context, spawnID string) error {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	sp, err := s.st.Spawns().Get(ctx, spawnID)
+	if err != nil {
+		return connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+	}
+	if sp.OwnerID != owner {
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+	return nil
+}
+
+// ListSessions returns the CP's mirrored roster for a spawn (no node round-trip).
+func (s *Server) ListSessions(ctx context.Context, req *connect.Request[cpv1.ListSessionsRequest]) (*connect.Response[cpv1.ListSessionsResponse], error) {
+	if err := s.ownSpawn(ctx, req.Msg.SpawnId); err != nil {
+		return nil, err
+	}
+	mirror := s.rt.ListSessions(req.Msg.SpawnId)
+	out := make([]*cpv1.SessionDescriptor, 0, len(mirror))
+	for _, si := range mirror {
+		out = append(out, &cpv1.SessionDescriptor{
+			SessionId: si.SessionId, Transport: toCPTransport(si.Transport), Runnable: si.Runnable,
+			Status: sessionStateString(si.State), Pinned: si.Pinned,
+		})
+	}
+	return connect.NewResponse(&cpv1.ListSessionsResponse{Sessions: out}), nil
+}
+
+// CreateSession asks the hosting node to launch an additional session (node allocates the id).
+func (s *Server) CreateSession(ctx context.Context, req *connect.Request[cpv1.CreateSessionRequest]) (*connect.Response[cpv1.CreateSessionResponse], error) {
+	if err := s.ownSpawn(ctx, req.Msg.SpawnId); err != nil {
+		return nil, err
+	}
+	if err := s.rt.CreateSession(req.Msg.SpawnId, toNodeTransport(req.Msg.Transport), req.Msg.Runnable); err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	return connect.NewResponse(&cpv1.CreateSessionResponse{}), nil
+}
+
+// CloseSession asks the hosting node to reap one session. Session "0" is pinned (reject; stop the spawn).
+func (s *Server) CloseSession(ctx context.Context, req *connect.Request[cpv1.CloseSessionRequest]) (*connect.Response[cpv1.CloseSessionResponse], error) {
+	if err := s.ownSpawn(ctx, req.Msg.SpawnId); err != nil {
+		return nil, err
+	}
+	if req.Msg.SessionId == "0" { // node.SessionZeroID, inlined (wire-stable) to avoid an import cycle
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session #0 is pinned; stop the spawn instead"))
+	}
+	if err := s.rt.CloseSession(req.Msg.SpawnId, req.Msg.SessionId); err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	return connect.NewResponse(&cpv1.CloseSessionResponse{}), nil
+}
+
 func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Frame, cpv1.Frame]) error {
 	first, err := stream.Receive()
 	if err != nil {
@@ -409,18 +495,19 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	clientID := uuid.Must(uuid.NewV7()).String()
 	cs := &clientStream{stream: stream, spawnID: spawnID}
 	// cursor 0: the cp.v1 Session-RPC transport has no resume cursor (only the WS bind does).
-	done, err := s.rt.AttachClient(spawnID, clientID, cs, 0)
+	// session "0": this transport has no per-session selector yet (web uses the WS bind for that).
+	done, err := s.rt.AttachClient(spawnID, "0", clientID, cs, 0)
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_start", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	defer func() {
-		s.rt.DetachClient(spawnID, clientID)
+		s.rt.DetachClient(spawnID, "0", clientID)
 		_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	}()
 
 	if len(first.Data) > 0 {
-		_ = s.rt.FromClient(spawnID, clientID, first.Data)
+		_ = s.rt.FromClient(spawnID, "0", clientID, first.Data)
 	}
 	recvErr := make(chan error, 1)
 	go func() {
@@ -430,7 +517,7 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 				recvErr <- err
 				return
 			}
-			if ferr := s.rt.FromClient(spawnID, clientID, f.Data); ferr != nil {
+			if ferr := s.rt.FromClient(spawnID, "0", clientID, f.Data); ferr != nil {
 				recvErr <- ferr
 				return
 			}
