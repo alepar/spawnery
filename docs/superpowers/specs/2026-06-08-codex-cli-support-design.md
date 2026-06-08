@@ -16,11 +16,13 @@ menu).
 - `internal/agentcaps/agentcaps.go` is the shared registry mapping an agent
   binary → its runnables. `claude-code` ships one runnable, `claude-tui`
   (`ModeTmux`, `RelayRawPTY`).
-- `deploy/agent/entrypoint.sh` is the image dispatcher: the node passes the
-  runnable id as `$1` and a per-runnable `case` wires env/config and execs the
-  agent under `spawn-tmux`. The `claude-tui` case points Claude Code at the
-  sidecar (`ANTHROPIC_BASE_URL`) and exposes `SPAWN_MODEL` as a custom model
-  option selectable in the TUI.
+- `deploy/agent/launch` (baked as `/usr/local/bin/launcher`) is the single
+  source of truth for per-runnable env + launch wiring: a `case "$RUNNABLE"`
+  that exports env and execs the agent via the `start_tmux` helper. As of
+  sp-npxq.2, `deploy/agent/entrypoint.sh` is a thin shim that just runs
+  `exec launcher --runnable "${1:-}" …`. The `claude-tui` case points Claude
+  Code at the sidecar (`ANTHROPIC_BASE_URL`) and exposes `SPAWN_MODEL` as a
+  custom model option selectable in the TUI.
 - The sidecar (`internal/sidecar`, `cmd/sidecar/main.go`) is the single egress
   chokepoint. `mux.Handle("/v1/messages", …)` is an Anthropic→ChatCompletions
   translator for Claude Code; `mux.Handle("/", …)` is a **transparent reverse
@@ -71,11 +73,12 @@ Add a `"codex"` binary with one runnable, mirroring `claude-code`:
 This makes `Known("codex")` true and auto-expands to a selectable runnable in the
 web `runnable-select` dropdown via `ListAgentImages` — no web changes.
 
-### 2. Dispatcher — `deploy/agent/entrypoint.sh`
+### 2. Dispatcher — `deploy/agent/launch`
 
-Add a `codex-tui)` case (sibling of `claude-tui)`). Because the model is
-per-spawn, generate `~/.codex/config.toml` at runtime (like
-`setup_opencode_provider` does for opencode):
+Add a `codex-tui)` case (sibling of `claude-tui)`) in the launcher's
+`case "$RUNNABLE"`. Because the model is per-spawn, generate
+`$CODEX_HOME/config.toml` at runtime (like `setup_opencode_provider` does for
+opencode), then `start_tmux … -- codex`:
 
 ```toml
 model = "<SPAWN_MODEL>"
@@ -92,15 +95,20 @@ wire_api = "responses"
 ```
 
 Then `export CODEX_SPAWNERY_KEY=sk-unused-sidecar-injects-real-key` (the sidecar
-injects the real key) and `exec spawn-tmux codex`. The model is selectable inside
-Codex's own `/model` picker — any OpenRouter id passes through the sidecar — which
-satisfies "switchable models, like Claude Code."
+injects the real key) and `start_tmux TERM CODEX_HOME CODEX_SPAWNERY_KEY -- codex`.
+The model is selectable inside Codex's own `/model` picker — any OpenRouter id
+passes through the sidecar — which satisfies "switchable models, like Claude
+Code."
 
 Notes:
-- Use `CODEX_HOME` if needed to pin the config location to a writable path;
-  default is `~/.codex`.
+- Set `CODEX_HOME` to a writable path (default `~/.codex` = `/root/.codex`) and
+  forward it (plus `CODEX_SPAWNERY_KEY`) through `start_tmux`'s env list so the
+  tmux-launched codex process inherits them.
 - Mirror the env-with-default idiom used by the other cases
   (`export TERM="${TERM:-xterm-256color}"`).
+- Verify the exact config keys/values against the official Codex config
+  reference (`approval_policy`, `sandbox_mode`, `disable_response_storage`,
+  `wire_api`) — these are load-bearing.
 
 ### 3. Dockerfile — `deploy/agent/Dockerfile`
 
@@ -110,12 +118,12 @@ mirroring the goose/nori/opencode tarball approach. This avoids adding Node.js t
 the image (Codex is also distributed via `npm @openai/codex`, but the image has
 no Node).
 
-### 4. Node binary advertisement — deploy config
+### 4. Node binary advertisement — `Justfile`
 
-Add `codex` to the node's `AGENT_BINARIES` CSV (deploy env) so the node Registers
-it and the CP catalog advertises it (`upsertAgentCatalog`). This is a deploy-env
-change, not code. The exact deploy manifests live under `deploy/`; update wherever
-`AGENT_BINARIES` is set for the agent node.
+Add `codex` to the node's `AGENT_BINARIES` CSV so the node Registers it and the
+CP catalog advertises it (`upsertAgentCatalog`). `AGENT_BINARIES` is set in the
+`Justfile` (currently `"opencode,goose,claude-code"` at two `dev`/`node` recipe
+sites) — add `codex` to both. This is a config change, not code.
 
 ### 5. Tests — `internal/agentcaps/agentcaps_test.go`
 
