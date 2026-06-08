@@ -90,7 +90,9 @@ message CreateSession { string spawn_id = 1; uint64 generation = 2; SessionTrans
 message CloseSession  { string spawn_id = 1; uint64 generation = 2; string session_id = 3; }
 // CP -> node: switch the effective model of the running pod (forwarded to the sidecar override).
 // Generation-fenced like StopSpawn/Suspend: the node ignores a SetModel whose generation
-// doesn't match the pod it currently holds.
-message SetModel       { string spawn_id = 1; uint64 generation = 2; string model = 3; }
+// doesn't match the pod it currently holds. request_id correlates this push with its result.
+message SetModel       { string spawn_id = 1; uint64 generation = 2; string model = 3; string request_id = 4; }
 // node -> CP: result of applying a SetModel. ok=false carries a human reason in detail.
-message SetModelResult { string spawn_id = 1; bool ok = 2; string detail = 3; }
+// request_id: the node echoes request_id from the SetModel it handled, so the CP can route the
+// result to the exact push that is waiting (a stale ack with no live waiter is dropped).
+message SetModelResult { string spawn_id = 1; bool ok = 2; string detail = 3; string request_id = 4; }
