@@ -586,6 +586,9 @@ func (a *attacher) launchSession(ctx context.Context, spawnID string, e *session
 		}
 		argv, err := a.sx.MoshAttachArgv(spawnID, e.endpoint)
 		if err != nil {
+			// LaunchMosh already created the spawn-<id> tmux; tear it down so a failed attach doesn't
+			// leave an orphaned tmux session (endpoint == mosh tmux name).
+			_ = a.sx.KillTmux(ctx, spawnID, e.endpoint)
 			a.failSession(spawnID, reg, e, "attach argv: "+err.Error())
 			return
 		}
@@ -687,7 +690,17 @@ func (a *attacher) closeSession(ctx context.Context, m *nodev1.CloseSession) {
 		log.Printf("ignoring CloseSession for pinned session %s/%s", m.SpawnId, m.SessionId)
 		return
 	}
-	reg.setState(m.SessionId, nodev1.SessionState_SESSION_STATE_CLOSING)
+
+	// Publish the liveness change FIRST — remove the registry entry BEFORE the a.mu pump/relay teardown
+	// (and before the slow KillTmux exec). This closes the close-races-launch window: an async
+	// launchSession re-checks reg liveness under a.mu before registering its pump, so with
+	// remove-before-teardown every interleaving has exactly ONE owner tearing the pump down — never an
+	// orphan. If the launch re-check runs AFTER this remove it sees !live and undoes its OWN pump (this
+	// teardown then reads a.pumps[key] == nil); if it ran BEFORE, its pump-register a.mu section strictly
+	// precedes this teardown's a.mu section (the remove happens-before this teardown's a.mu lock), so this
+	// teardown reads the registered pump and stops it. The two sides can't both stop the same pump.
+	// (CLOSING was previously set here but never emitted before CLOSED, so it was unobservable — dropped.)
+	reg.remove(m.SessionId)
 
 	a.mu.Lock()
 	p := a.pumps[sessionKey{m.SpawnId, m.SessionId}]
@@ -712,7 +725,6 @@ func (a *attacher) closeSession(ctx context.Context, m *nodev1.CloseSession) {
 		_ = a.sx.KillTmux(ctx, m.SpawnId, e.endpoint) // endpoint == mosh tmux name
 	}
 
-	reg.remove(m.SessionId)
 	a.emitRoster(m.SpawnId)
 	a.sessionStatus(m.SpawnId, m.SessionId, nodev1.SessionState_SESSION_STATE_CLOSED, "")
 }

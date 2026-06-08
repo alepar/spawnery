@@ -22,6 +22,7 @@ type fakeSessionExec struct {
 	}
 	killed        []string // tmux names killed
 	dials         int
+	acpClosed     int // count of AttachedStream.Close calls on acp dials (acp pump teardown / conn release)
 	launchMoshErr error
 	launchACPErr  error
 	dialErr       error
@@ -32,6 +33,14 @@ type fakeSessionExec struct {
 	dialGate    chan struct{}
 	dialReached chan struct{}
 	gateOnce    sync.Once
+
+	// killGate, when non-nil, parks the FIRST KillTmux call (closing killReached when it arrives) until
+	// killGate is closed — a deterministic seam to hold closeSession INSIDE its teardown window (after
+	// the a.mu pump/relay teardown) so a parked launch can be released to race the close. Later kills are
+	// not gated.
+	killGate    chan struct{}
+	killReached chan struct{}
+	killOnce    sync.Once
 }
 
 func (f *fakeSessionExec) LaunchMosh(_ context.Context, _, _, tmuxName string) error {
@@ -70,9 +79,24 @@ func (f *fakeSessionExec) DialACP(_ context.Context, _ string, _ int) (*runtime.
 	inR, inW := io.Pipe()   // pump writes -> inW; goose reads inR
 	outR, outW := io.Pipe() // goose writes outW; pump reads outR
 	go func() { scriptGoose(inR, outW); _ = outW.Close() }()
-	return &runtime.AttachedStream{Stdin: inW, Stdout: outR, Close: func() error { _ = inW.Close(); _ = outW.Close(); return nil }}, nil
+	return &runtime.AttachedStream{Stdin: inW, Stdout: outR, Close: func() error {
+		f.mu.Lock()
+		f.acpClosed++
+		f.mu.Unlock()
+		_ = inW.Close()
+		_ = outW.Close()
+		return nil
+	}}, nil
 }
 func (f *fakeSessionExec) KillTmux(_ context.Context, _, tmuxName string) error {
+	if f.killGate != nil {
+		first := false
+		f.killOnce.Do(func() { first = true })
+		if first {
+			close(f.killReached)
+			<-f.killGate
+		}
+	}
 	f.mu.Lock()
 	f.killed = append(f.killed, tmuxName)
 	f.mu.Unlock()

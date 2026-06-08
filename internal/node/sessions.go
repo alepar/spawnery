@@ -116,6 +116,14 @@ func (r *sessionRegistry) freePort(p int, owner string) {
 	}
 }
 
+// portOwner returns the session id that currently owns acp pool port p ("" if free). A locked accessor
+// so tests can assert on pool ownership without racing the registry's internal ports map.
+func (r *sessionRegistry) portOwner(p int) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ports[p]
+}
+
 // setState transitions a session's state under the lock (so snapshot never races a field write);
 // returns false if the id is gone (e.g. closed mid-launch).
 func (r *sessionRegistry) setState(id string, st nodev1.SessionState) bool {
