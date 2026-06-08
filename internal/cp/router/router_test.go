@@ -126,7 +126,10 @@ func (f *fakeNode) Send(m *nodev1.CPMessage) error { f.sent = append(f.sent, m);
 
 type fakeClient struct{ got [][]byte }
 
-func (f *fakeClient) Send(b []byte) error { f.got = append(f.got, append([]byte(nil), b...)); return nil }
+func (f *fakeClient) Send(b []byte) error {
+	f.got = append(f.got, append([]byte(nil), b...))
+	return nil
+}
 
 func TestRouteBothWays(t *testing.T) {
 	r := New()
@@ -183,7 +186,7 @@ func TestRouterRosterMirror(t *testing.T) {
 	r := New()
 	n := &mcNode{}
 	r.Bind("s1", "node-1", n)
-	r.UpdateRoster("s1", sessionInfos("0", "1"))
+	r.UpdateRoster("s1", "node-1", sessionInfos("0", "1"))
 	got := r.ListSessions("s1")
 	if len(got) != 2 || got[0].SessionId != "0" {
 		t.Fatalf("ListSessions = %+v, want [0 1]", got)
@@ -198,13 +201,45 @@ func TestRouterRosterBeforeBindIsAppliedAtBind(t *testing.T) {
 	r := New()
 	n := &mcNode{}
 	// roster arrives before Bind (race: node emits at ACTIVE; CP Bind runs slightly later)
-	r.UpdateRoster("s1", sessionInfos("0"))
+	r.UpdateRoster("s1", "node-1", sessionInfos("0"))
 	if got := r.ListSessions("s1"); got != nil {
 		t.Fatalf("unbound spawn must report no sessions, got %+v", got)
 	}
 	r.Bind("s1", "node-1", n)
 	if got := r.ListSessions("s1"); len(got) != 1 || got[0].SessionId != "0" {
 		t.Fatalf("pending roster not applied at Bind: %+v", got)
+	}
+}
+
+func TestListSessionsSnapshotIsNotMutatedByApplySessionStatus(t *testing.T) {
+	r := New()
+	n := &mcNode{}
+	r.Bind("s1", "node-1", n)
+	r.UpdateRoster("s1", "node-1", sessionInfos("0"))
+	snap := r.ListSessions("s1")
+	if len(snap) != 1 || snap[0].State != nodev1.SessionState_SESSION_STATE_ACTIVE {
+		t.Fatalf("unexpected snapshot %+v", snap)
+	}
+	// A subsequent in-place status mutation under the lock must NOT touch the already-returned snapshot.
+	r.ApplySessionStatus("s1", "0", nodev1.SessionState_SESSION_STATE_CLOSED)
+	if snap[0].State != nodev1.SessionState_SESSION_STATE_ACTIVE {
+		t.Fatalf("returned snapshot was mutated by ApplySessionStatus: %+v", snap[0])
+	}
+	if r.ListSessions("s1")[0].State != nodev1.SessionState_SESSION_STATE_CLOSED {
+		t.Fatalf("mirror should reflect the new state on a fresh read")
+	}
+}
+
+func TestDropNodePurgesPendingRosterForNeverBoundSpawn(t *testing.T) {
+	r := New()
+	// Roster stashed for a spawn that never binds before its node drops.
+	r.UpdateRoster("s1", "node-1", sessionInfos("0"))
+	r.DropNode("node-1")
+	r.mu.Lock()
+	_, leaked := r.pending["s1"]
+	r.mu.Unlock()
+	if leaked {
+		t.Fatal("DropNode leaked a pending roster for a spawn that never bound")
 	}
 }
 

@@ -501,6 +501,10 @@ func (a *attacher) createSession(ctx context.Context, m *nodev1.CreateSession) {
 		log.Printf("warn: CreateSession for unknown spawn %s", m.SpawnId)
 		return
 	}
+	// allocID does NOT reserve the id; register (below) does. This is safe only because CreateSession is
+	// processed synchronously on the single Attach receive goroutine (handle), so no concurrent
+	// createSession can hand out the same id between allocID and register. sp-npxq.3 must keep the launch
+	// on this goroutine, or switch to a reserve-on-alloc scheme, when it makes the launch async.
 	id := reg.allocID()
 	reg.register(&sessionEntry{
 		id: id, transport: m.Transport, runnable: m.Runnable,

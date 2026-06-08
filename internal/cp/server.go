@@ -126,7 +126,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 		case *nodev1.NodeMessage_Frame:
 			s.rt.FromNode(m.Frame.SpawnId, m.Frame.SessionId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected
 		case *nodev1.NodeMessage_Roster:
-			s.rt.UpdateRoster(m.Roster.SpawnId, m.Roster.Sessions) // node-authoritative session set; CP mirrors
+			s.rt.UpdateRoster(m.Roster.SpawnId, nodeID, m.Roster.Sessions) // node-authoritative session set; CP mirrors
 		case *nodev1.NodeMessage_SessionStatus:
 			s.rt.ApplySessionStatus(m.SessionStatus.SpawnId, m.SessionStatus.SessionId, m.SessionStatus.State)
 		}
@@ -457,6 +457,12 @@ func (s *Server) CreateSession(ctx context.Context, req *connect.Request[cpv1.Cr
 	if err := s.ownSpawn(ctx, req.Msg.SpawnId); err != nil {
 		return nil, err
 	}
+	if req.Msg.Transport == cpv1.SessionTransport_SESSION_TRANSPORT_UNSPECIFIED {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("transport is required"))
+	}
+	if req.Msg.Runnable == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("runnable is required"))
+	}
 	if err := s.rt.CreateSession(req.Msg.SpawnId, toNodeTransport(req.Msg.Transport), req.Msg.Runnable); err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
@@ -468,10 +474,15 @@ func (s *Server) CloseSession(ctx context.Context, req *connect.Request[cpv1.Clo
 	if err := s.ownSpawn(ctx, req.Msg.SpawnId); err != nil {
 		return nil, err
 	}
-	if req.Msg.SessionId == "0" { // node.SessionZeroID, inlined (wire-stable) to avoid an import cycle
+	// Default empty -> "0" so a missing session_id is rejected as pinned rather than silently succeeding.
+	sessionID := req.Msg.SessionId
+	if sessionID == "" {
+		sessionID = "0" // node.SessionZeroID, inlined (wire-stable) to avoid an import cycle
+	}
+	if sessionID == "0" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session #0 is pinned; stop the spawn instead"))
 	}
-	if err := s.rt.CloseSession(req.Msg.SpawnId, req.Msg.SessionId); err != nil {
+	if err := s.rt.CloseSession(req.Msg.SpawnId, sessionID); err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
 	return connect.NewResponse(&cpv1.CloseSessionResponse{}), nil

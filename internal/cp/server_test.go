@@ -7,8 +7,8 @@ import (
 	"time"
 
 	connect "connectrpc.com/connect"
-	nodev1 "spawnery/gen/node/v1"
 	cpv1 "spawnery/gen/cp/v1"
+	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
@@ -201,7 +201,7 @@ func TestListSessionsRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt.Bind("s1", "node-1", &capSender{})
-	rt.UpdateRoster("s1", []*nodev1.SessionInfo{
+	rt.UpdateRoster("s1", "node-1", []*nodev1.SessionInfo{
 		{SessionId: "0", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_ACP, Runnable: "goose-acp", State: nodev1.SessionState_SESSION_STATE_ACTIVE, Pinned: true},
 	})
 	resp, err := s.ListSessions(ctx, connect.NewRequest(&cpv1.ListSessionsRequest{SpawnId: "s1"}))
@@ -216,4 +216,36 @@ func TestListSessionsRPC(t *testing.T) {
 	if _, err := s.ListSessions(other, connect.NewRequest(&cpv1.ListSessionsRequest{SpawnId: "s1"})); err == nil {
 		t.Fatalf("ListSessions must reject a non-owner")
 	}
+}
+
+// CreateSession rejects an unspecified transport or empty runnable, and CloseSession rejects an empty
+// (defaulted-to-#0) or explicit #0 session id, all without round-tripping to the node.
+func TestSessionRPCInputValidation(t *testing.T) {
+	s, _, rt := newTestServer(t)
+	ctx := auth.WithOwner(context.Background(), "alice")
+	now := time.Now().Unix()
+	sp := store.Spawn{
+		ID: "s1", OwnerID: "alice", Name: "n", AppID: "secret-app", AppVersion: "1.0.0",
+		AppRef: "examples/secret-app", Model: "m", CreatedAt: now, LastUsedAt: now,
+	}
+	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, nil) }); err != nil {
+		t.Fatal(err)
+	}
+	rt.Bind("s1", "node-1", &capSender{})
+
+	mustInvalid := func(name string, err error) {
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("%s: want InvalidArgument, got %v", name, err)
+		}
+	}
+	_, err := s.CreateSession(ctx, connect.NewRequest(&cpv1.CreateSessionRequest{
+		SpawnId: "s1", Transport: cpv1.SessionTransport_SESSION_TRANSPORT_UNSPECIFIED, Runnable: "shell"}))
+	mustInvalid("CreateSession unspecified transport", err)
+	_, err = s.CreateSession(ctx, connect.NewRequest(&cpv1.CreateSessionRequest{
+		SpawnId: "s1", Transport: cpv1.SessionTransport_SESSION_TRANSPORT_MOSH, Runnable: ""}))
+	mustInvalid("CreateSession empty runnable", err)
+	_, err = s.CloseSession(ctx, connect.NewRequest(&cpv1.CloseSessionRequest{SpawnId: "s1", SessionId: ""}))
+	mustInvalid("CloseSession empty (defaults to #0)", err)
+	_, err = s.CloseSession(ctx, connect.NewRequest(&cpv1.CloseSessionRequest{SpawnId: "s1", SessionId: "0"}))
+	mustInvalid("CloseSession #0", err)
 }

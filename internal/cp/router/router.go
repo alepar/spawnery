@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sync"
 
+	"google.golang.org/protobuf/proto"
+
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/registry"
 )
@@ -21,14 +23,21 @@ type route struct {
 	done     chan struct{}         // closed when the route is dropped (stop or node evict)
 }
 
+// pendingRoster is a roster stashed before its spawn's Bind ran. The nodeID is retained so DropNode
+// can purge stashes for a node that drops before the spawn ever binds.
+type pendingRoster struct {
+	nodeID   string
+	sessions []*nodev1.SessionInfo
+}
+
 type Router struct {
 	mu      sync.Mutex
-	m       map[string]*route                // spawn_id -> route
-	pending map[string][]*nodev1.SessionInfo // rosters that arrived before Bind (node-emits-then-Bind race)
+	m       map[string]*route         // spawn_id -> route
+	pending map[string]*pendingRoster // rosters that arrived before Bind (node-emits-then-Bind race)
 }
 
 func New() *Router {
-	return &Router{m: map[string]*route{}, pending: map[string][]*nodev1.SessionInfo{}}
+	return &Router{m: map[string]*route{}, pending: map[string]*pendingRoster{}}
 }
 
 // Bind records which node hosts a spawn (after StartSpawn ACTIVE). Any roster the node emitted before
@@ -37,7 +46,7 @@ func (r *Router) Bind(spawnID, nodeID string, node registry.NodeSender) {
 	r.mu.Lock()
 	rt := &route{nodeID: nodeID, node: node, clients: map[string]ClientSender{}, done: make(chan struct{})}
 	if p, ok := r.pending[spawnID]; ok {
-		rt.sessions = p
+		rt.sessions = p.sessions
 		delete(r.pending, spawnID)
 	}
 	r.m[spawnID] = rt
@@ -99,15 +108,16 @@ func (r *Router) FromNode(spawnID, sessionID, clientID string, data []byte) {
 }
 
 // UpdateRoster replaces the mirrored session set for a spawn. If the route is not bound yet (the node
-// emitted the roster before the scheduler's Bind ran), stash it and apply it at Bind.
-func (r *Router) UpdateRoster(spawnID string, sessions []*nodev1.SessionInfo) {
+// emitted the roster before the scheduler's Bind ran), stash it (tagged with nodeID so DropNode can
+// purge it) and apply it at Bind.
+func (r *Router) UpdateRoster(spawnID, nodeID string, sessions []*nodev1.SessionInfo) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if rt, ok := r.m[spawnID]; ok {
 		rt.sessions = sessions
 		return
 	}
-	r.pending[spawnID] = sessions
+	r.pending[spawnID] = &pendingRoster{nodeID: nodeID, sessions: sessions}
 }
 
 // ApplySessionStatus updates a single mirrored session's state (membership unchanged).
@@ -127,10 +137,15 @@ func (r *Router) sessionsLocked(spawnID string) []*nodev1.SessionInfo {
 	if rt, ok := r.m[spawnID]; ok {
 		return rt.sessions
 	}
-	return r.pending[spawnID]
+	if p, ok := r.pending[spawnID]; ok {
+		return p.sessions
+	}
+	return nil
 }
 
 // ListSessions returns a snapshot of the mirrored roster for the client-facing RPC (nil if unbound).
+// Each element is a CLONE: the stored *SessionInfo pointers are mutated in place by ApplySessionStatus
+// under the lock, so the RPC must read from copies it owns rather than the shared roster entries.
 func (r *Router) ListSessions(spawnID string) []*nodev1.SessionInfo {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -139,7 +154,9 @@ func (r *Router) ListSessions(spawnID string) []*nodev1.SessionInfo {
 		return nil
 	}
 	out := make([]*nodev1.SessionInfo, len(rt.sessions))
-	copy(out, rt.sessions)
+	for i, si := range rt.sessions {
+		out[i] = proto.Clone(si).(*nodev1.SessionInfo)
+	}
 	return out
 }
 
@@ -191,6 +208,12 @@ func (r *Router) DropNode(nodeID string) []string {
 			delete(r.m, id)
 			delete(r.pending, id)
 			dropped = append(dropped, id)
+		}
+	}
+	// Purge rosters stashed for spawns that never bound before this node dropped (otherwise they leak).
+	for id, p := range r.pending {
+		if p.nodeID == nodeID {
+			delete(r.pending, id)
 		}
 	}
 	return dropped
