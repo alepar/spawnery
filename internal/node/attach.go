@@ -5,7 +5,9 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -508,8 +510,10 @@ func (a *attacher) fromClient(spawnID, sessionID, clientID string, data []byte) 
 	}
 }
 
-// createSession registers a placeholder session and emits the updated roster. The actual launch
-// (docker exec launcher / Nth Pump / tmux relay) is TODO(sp-npxq.3); for now the session sits STARTING.
+// createSession reserves a session id (and, for acp, a pool port) synchronously on the receive
+// goroutine, emits a STARTING roster, then launches the session asynchronously (so a slow docker exec
+// + ACP handshake never blocks the control channel). Reservation-before-async keeps id/port unique
+// without a separate lock (plan decision 5).
 func (a *attacher) createSession(ctx context.Context, m *nodev1.CreateSession) {
 	a.mu.Lock()
 	reg := a.sessions[m.SpawnId]
@@ -518,19 +522,143 @@ func (a *attacher) createSession(ctx context.Context, m *nodev1.CreateSession) {
 		log.Printf("warn: CreateSession for unknown spawn %s", m.SpawnId)
 		return
 	}
-	// allocID does NOT reserve the id; register (below) does. This is safe only because CreateSession is
-	// processed synchronously on the single Attach receive goroutine (handle), so no concurrent
-	// createSession can hand out the same id between allocID and register. sp-npxq.3 must keep the launch
-	// on this goroutine, or switch to a reserve-on-alloc scheme, when it makes the launch async.
+
+	// opencode-tui attaches to a served opencode; reject if the spawn has none (plan decision 9, CONFIRM).
+	if m.Runnable == "opencode-tui" && !hasServedOpencode(reg) {
+		log.Printf("rejecting opencode-tui session for %s: no served opencode in spawn", m.SpawnId)
+		a.sessionStatus(m.SpawnId, "", nodev1.SessionState_SESSION_STATE_ERROR, "opencode-tui needs a served opencode session")
+		return
+	}
+
 	id := reg.allocID()
-	reg.register(&sessionEntry{
-		id: id, transport: m.Transport, runnable: m.Runnable,
-		state: nodev1.SessionState_SESSION_STATE_STARTING,
-	})
-	// TODO(sp-npxq.3): dispatch by transport — mosh: docker exec launcher --tmux-session <id> + attach
-	// a PTY relay; acp: allocate a pool port (32668-32767), docker exec launcher --acp-port, open an
-	// Nth Pump; then flip the entry to ACTIVE and SessionStatus/emitRoster.
+	e := &sessionEntry{id: id, transport: m.Transport, runnable: m.Runnable, state: nodev1.SessionState_SESSION_STATE_STARTING}
+
+	if m.Transport == nodev1.SessionTransport_SESSION_TRANSPORT_ACP {
+		port, ok := reg.allocPort()
+		if !ok {
+			log.Printf("rejecting acp session for %s: port pool exhausted", m.SpawnId)
+			a.sessionStatus(m.SpawnId, "", nodev1.SessionState_SESSION_STATE_ERROR, "acp port pool exhausted")
+			return
+		}
+		e.endpoint = strconv.Itoa(port)
+	} else {
+		e.endpoint = moshTmuxName(id)
+	}
+	reg.register(e)
 	a.emitRoster(m.SpawnId)
+	go a.launchSession(ctx, m.SpawnId, e)
+}
+
+// hasServedOpencode reports whether the spawn already runs an opencode-served session (the backend an
+// additional opencode-tui session attaches to). See plan decision 9.
+func hasServedOpencode(reg *sessionRegistry) bool {
+	for _, s := range reg.snapshot() {
+		if s.Runnable == "opencode-served" {
+			return true
+		}
+	}
+	return false
+}
+
+// launchSession performs the async launch of a reserved session and flips it ACTIVE, or reaps the
+// reservation on failure. Runs on its own goroutine; re-checks the entry to cope with a CloseSession
+// racing in mid-launch.
+func (a *attacher) launchSession(ctx context.Context, spawnID string, e *sessionEntry) {
+	a.mu.Lock()
+	reg := a.sessions[spawnID]
+	a.mu.Unlock()
+	if reg == nil {
+		return // spawn stopped under us
+	}
+
+	switch e.transport {
+	case nodev1.SessionTransport_SESSION_TRANSPORT_MOSH:
+		if err := a.sx.LaunchMosh(ctx, spawnID, e.runnable, e.endpoint); err != nil {
+			a.failSession(spawnID, reg, e, "launch tmux: "+err.Error())
+			return
+		}
+		argv, err := a.sx.MoshAttachArgv(spawnID, e.endpoint)
+		if err != nil {
+			a.failSession(spawnID, reg, e, "attach argv: "+err.Error())
+			return
+		}
+		sessID := e.id
+		relay := newTmuxRelay(argv, func(clientID string, data []byte) error {
+			return a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{
+				SpawnId: spawnID, SessionId: sessID, ClientId: clientID, Data: data,
+			}}})
+		})
+		a.mu.Lock()
+		_, live := reg.get(e.id)
+		if !live { // closed mid-launch: undo
+			a.mu.Unlock()
+			relay.stop()
+			_ = a.sx.KillTmux(ctx, spawnID, e.endpoint)
+			return
+		}
+		a.tmuxRelays[sessionKey{spawnID, e.id}] = relay
+		a.mu.Unlock()
+		reg.setState(e.id, nodev1.SessionState_SESSION_STATE_ACTIVE)
+		a.emitRoster(spawnID)
+		a.sessionStatus(spawnID, e.id, nodev1.SessionState_SESSION_STATE_ACTIVE, "")
+
+	case nodev1.SessionTransport_SESSION_TRANSPORT_ACP:
+		a.launchACPSession(ctx, spawnID, reg, e)
+	}
+}
+
+// launchACPSession launches an additional acp session: start the tmux-wrapped acp launcher on the
+// reserved port, dial it, run an Nth Pump, then flip ACTIVE. The session-N Pump has NO exitFn (server
+// death does not reclaim the container — reap is on explicit close only, plan decision 7).
+func (a *attacher) launchACPSession(ctx context.Context, spawnID string, reg *sessionRegistry, e *sessionEntry) {
+	port, _ := strconv.Atoi(e.endpoint)
+	tmuxName := acpTmuxName(e.id)
+	if err := a.sx.LaunchACP(ctx, spawnID, e.runnable, tmuxName, port); err != nil {
+		a.failSession(spawnID, reg, e, "launch acp: "+err.Error())
+		return
+	}
+	att, err := a.sx.DialACP(ctx, spawnID, port)
+	if err != nil {
+		_ = a.sx.KillTmux(ctx, spawnID, tmuxName)
+		a.failSession(spawnID, reg, e, "dial acp: "+err.Error())
+		return
+	}
+	p := newPump(att.Stdin, att.Stdout)
+	p.closeFn = att.Close
+	if err := p.start(ctx, readyTimeout); err != nil {
+		p.stop()
+		_ = a.sx.KillTmux(ctx, spawnID, tmuxName)
+		a.failSession(spawnID, reg, e, "acp not ready: "+err.Error())
+		return
+	}
+	a.mu.Lock()
+	_, live := reg.get(e.id)
+	if !live { // closed mid-launch: undo
+		a.mu.Unlock()
+		p.stop()
+		_ = a.sx.KillTmux(ctx, spawnID, tmuxName)
+		reg.freePort(port)
+		return
+	}
+	a.pumps[sessionKey{spawnID, e.id}] = p
+	a.mu.Unlock()
+	reg.setState(e.id, nodev1.SessionState_SESSION_STATE_ACTIVE)
+	a.emitRoster(spawnID)
+	a.sessionStatus(spawnID, e.id, nodev1.SessionState_SESSION_STATE_ACTIVE, "")
+}
+
+// failSession reaps a session that failed to launch: free its acp port (if any), drop the entry, emit
+// the updated roster + an ERROR SessionStatus.
+func (a *attacher) failSession(spawnID string, reg *sessionRegistry, e *sessionEntry, detail string) {
+	logErr("launchSession "+spawnID+"/"+e.id, fmt.Errorf("%s", detail))
+	if e.transport == nodev1.SessionTransport_SESSION_TRANSPORT_ACP {
+		if p, err := strconv.Atoi(e.endpoint); err == nil {
+			reg.freePort(p)
+		}
+	}
+	reg.remove(e.id)
+	a.emitRoster(spawnID)
+	a.sessionStatus(spawnID, e.id, nodev1.SessionState_SESSION_STATE_ERROR, detail)
 }
 
 // closeSession reaps one session and emits the updated roster. Session #0 is pinned (no-op).
