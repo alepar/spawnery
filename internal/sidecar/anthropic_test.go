@@ -3,6 +3,9 @@ package sidecar
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -366,4 +369,64 @@ func extractPartialJSON(t *testing.T, sse string) string {
 		}
 	}
 	return sb.String()
+}
+
+// --- Model override on the Anthropic path ---
+
+func TestMessagesHandlerOverrideSubstitutes(t *testing.T) {
+	var upModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var obj map[string]any
+		_ = json.Unmarshal(b, &obj)
+		if m, ok := obj["model"].(string); ok {
+			upModel = m
+		}
+		// minimal non-streaming OpenAI completion
+		io.WriteString(w, `{"id":"x","model":"override/model","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	ov := &Override{}
+	ov.Set("override/model")
+	srv := httptest.NewServer(NewMessagesHandler(upstream.URL, "k", ov))
+	defer srv.Close()
+
+	body := `{"model":"agent/model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post(srv.URL+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if upModel != "override/model" {
+		t.Fatalf("upstream model = %q, want override/model", upModel)
+	}
+}
+
+func TestMessagesHandlerOverrideUnsetKeepsAgentModel(t *testing.T) {
+	var upModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var obj map[string]any
+		_ = json.Unmarshal(b, &obj)
+		upModel, _ = obj["model"].(string)
+		io.WriteString(w, `{"id":"x","model":"agent/model","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{}}`)
+	}))
+	defer upstream.Close()
+
+	srv := httptest.NewServer(NewMessagesHandler(upstream.URL, "k", &Override{}))
+	defer srv.Close()
+
+	body := `{"model":"agent/model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post(srv.URL+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if upModel != "agent/model" {
+		t.Fatalf("upstream model = %q, want agent/model (passthrough)", upModel)
+	}
 }

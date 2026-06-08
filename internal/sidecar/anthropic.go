@@ -640,7 +640,7 @@ func randID() string {
 
 // NewMessagesHandler returns an http.Handler for POST /v1/messages that translates the
 // Anthropic Messages API to OpenAI Chat Completions against upstream, injecting the bearer key.
-func NewMessagesHandler(upstream, key string) http.Handler {
+func NewMessagesHandler(upstream, key string, ov *Override) http.Handler {
 	upstream = strings.TrimRight(upstream, "/")
 	client := &http.Client{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -658,6 +658,17 @@ func NewMessagesHandler(upstream, key string) http.Handler {
 			log.Printf("warn: sidecar: /v1/messages translate request: %v", err)
 			writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "translate request: "+err.Error())
 			return
+		}
+
+		// Force the override model (raw OpenRouter id) before forwarding. The converted
+		// OpenAI body copies the agent's model verbatim, so patching it here is equivalent
+		// to substituting before the Anthropic->OpenAI conversion.
+		if m := ov.Get(); m != "" {
+			if patched, perr := patchModelJSON(oaiBody, m); perr == nil {
+				oaiBody = patched
+			} else {
+				log.Printf("warn: sidecar: /v1/messages model override skipped: %v", perr)
+			}
 		}
 
 		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,

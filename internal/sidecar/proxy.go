@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
-// NewHandler proxies requests to upstream, injecting the bearer key.
-func NewHandler(upstream, key string) http.Handler {
+// NewHandler proxies requests to upstream, injecting the bearer key. When ov holds a
+// model override, the top-level "model" of each request body is rewritten to it; when
+// unset the request body is forwarded byte-identical (zero overhead).
+func NewHandler(upstream, key string, ov *Override) http.Handler {
 	target, err := url.Parse(upstream)
 	if err != nil {
 		panic(err)
@@ -52,5 +55,36 @@ func NewHandler(upstream, key string) http.Handler {
 		log.Printf("warn: sidecar: upstream request %s %s failed: %v", r.Method, r.URL.Path, err)
 		w.WriteHeader(http.StatusBadGateway)
 	}
-	return rp
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if m := ov.Get(); m != "" {
+			rewriteRequestModel(r, m)
+		}
+		rp.ServeHTTP(w, r)
+	})
+}
+
+// rewriteRequestModel buffers r's JSON body, replaces the top-level "model" with model,
+// and fixes ContentLength/Content-Length. Request bodies are complete JSON (only responses
+// stream), so buffering is safe. On any error (no body / non-JSON) the original body is
+// left intact so the request still forwards unchanged.
+func rewriteRequestModel(r *http.Request, model string) {
+	if r.Body == nil {
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	_ = r.Body.Close()
+	if err != nil {
+		log.Printf("warn: sidecar: read request body for model override: %v", err)
+		return
+	}
+	patched, err := patchModelJSON(body, model)
+	if err != nil {
+		// Not a JSON object (e.g. GET with empty body): forward the original bytes.
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(patched))
+	r.ContentLength = int64(len(patched))
+	r.Header.Set("Content-Length", strconv.Itoa(len(patched)))
 }
