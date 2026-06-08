@@ -54,7 +54,7 @@ used as the basis for generating xterm-compatible palettes (see `scripts/schemes
 schemes retain their original authors. Hex color palettes are reproduced as data; scheme names
 are preserved as-is.
 
-### Schemes vendored (30 total)
+### Schemes vendored (31 total)
 
 | Scheme |
 |---|
@@ -82,6 +82,7 @@ are preserved as-is.
 | Seti |
 | Snazzy |
 | Spacedust |
+| Srcery |
 | TokyoNight Storm |
 | TokyoNight |
 | Tomorrow Night Bright |
