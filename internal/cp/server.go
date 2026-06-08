@@ -36,6 +36,9 @@ type Server struct {
 	tel   telemetry.Sink
 	locks *lock.Keyed
 
+	models          *modelWaiters // correlates inline SetSpawnModel pushes with node SetModelResult acks
+	setModelTimeout time.Duration // bound for the inline SetModel push; overridable in tests
+
 	maxSpawnsPerOwner int
 }
 
@@ -44,7 +47,8 @@ type Server struct {
 var _ cpv1connect.SpawnServiceHandler = (*Server)(nil)
 
 func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Scheduler, st store.Store, tel telemetry.Sink) *Server {
-	return &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New()}
+	return &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
+		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout}
 }
 
 // --- node side: NodeService/Attach ----------------------------------------
@@ -129,6 +133,8 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			s.rt.UpdateRoster(m.Roster.SpawnId, nodeID, m.Roster.Sessions) // node-authoritative session set; CP mirrors
 		case *nodev1.NodeMessage_SessionStatus:
 			s.rt.ApplySessionStatus(m.SessionStatus.SpawnId, m.SessionStatus.SessionId, m.SessionStatus.State)
+		case *nodev1.NodeMessage_SetModelResult:
+			s.models.deliver(m.SetModelResult)
 		}
 	}
 }
