@@ -72,6 +72,15 @@ const (
 	SpawnServiceDeleteSpawnProcedure = "/cp.v1.SpawnService/DeleteSpawn"
 	// SpawnServiceStopSpawnProcedure is the fully-qualified name of the SpawnService's StopSpawn RPC.
 	SpawnServiceStopSpawnProcedure = "/cp.v1.SpawnService/StopSpawn"
+	// SpawnServiceListSessionsProcedure is the fully-qualified name of the SpawnService's ListSessions
+	// RPC.
+	SpawnServiceListSessionsProcedure = "/cp.v1.SpawnService/ListSessions"
+	// SpawnServiceCreateSessionProcedure is the fully-qualified name of the SpawnService's
+	// CreateSession RPC.
+	SpawnServiceCreateSessionProcedure = "/cp.v1.SpawnService/CreateSession"
+	// SpawnServiceCloseSessionProcedure is the fully-qualified name of the SpawnService's CloseSession
+	// RPC.
+	SpawnServiceCloseSessionProcedure = "/cp.v1.SpawnService/CloseSession"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -91,6 +100,9 @@ type SpawnServiceClient interface {
 	RenameSpawn(context.Context, *connect.Request[v1.RenameSpawnRequest]) (*connect.Response[v1.RenameSpawnResponse], error)
 	DeleteSpawn(context.Context, *connect.Request[v1.DeleteSpawnRequest]) (*connect.Response[v1.DeleteSpawnResponse], error)
 	StopSpawn(context.Context, *connect.Request[v1.StopSpawnRequest]) (*connect.Response[v1.StopSpawnResponse], error)
+	ListSessions(context.Context, *connect.Request[v1.ListSessionsRequest]) (*connect.Response[v1.ListSessionsResponse], error)
+	CreateSession(context.Context, *connect.Request[v1.CreateSessionRequest]) (*connect.Response[v1.CreateSessionResponse], error)
+	CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -194,6 +206,24 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("StopSpawn")),
 			connect.WithClientOptions(opts...),
 		),
+		listSessions: connect.NewClient[v1.ListSessionsRequest, v1.ListSessionsResponse](
+			httpClient,
+			baseURL+SpawnServiceListSessionsProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ListSessions")),
+			connect.WithClientOptions(opts...),
+		),
+		createSession: connect.NewClient[v1.CreateSessionRequest, v1.CreateSessionResponse](
+			httpClient,
+			baseURL+SpawnServiceCreateSessionProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("CreateSession")),
+			connect.WithClientOptions(opts...),
+		),
+		closeSession: connect.NewClient[v1.CloseSessionRequest, v1.CloseSessionResponse](
+			httpClient,
+			baseURL+SpawnServiceCloseSessionProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("CloseSession")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -214,6 +244,9 @@ type spawnServiceClient struct {
 	renameSpawn        *connect.Client[v1.RenameSpawnRequest, v1.RenameSpawnResponse]
 	deleteSpawn        *connect.Client[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse]
 	stopSpawn          *connect.Client[v1.StopSpawnRequest, v1.StopSpawnResponse]
+	listSessions       *connect.Client[v1.ListSessionsRequest, v1.ListSessionsResponse]
+	createSession      *connect.Client[v1.CreateSessionRequest, v1.CreateSessionResponse]
+	closeSession       *connect.Client[v1.CloseSessionRequest, v1.CloseSessionResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -291,6 +324,21 @@ func (c *spawnServiceClient) StopSpawn(ctx context.Context, req *connect.Request
 	return c.stopSpawn.CallUnary(ctx, req)
 }
 
+// ListSessions calls cp.v1.SpawnService.ListSessions.
+func (c *spawnServiceClient) ListSessions(ctx context.Context, req *connect.Request[v1.ListSessionsRequest]) (*connect.Response[v1.ListSessionsResponse], error) {
+	return c.listSessions.CallUnary(ctx, req)
+}
+
+// CreateSession calls cp.v1.SpawnService.CreateSession.
+func (c *spawnServiceClient) CreateSession(ctx context.Context, req *connect.Request[v1.CreateSessionRequest]) (*connect.Response[v1.CreateSessionResponse], error) {
+	return c.createSession.CallUnary(ctx, req)
+}
+
+// CloseSession calls cp.v1.SpawnService.CloseSession.
+func (c *spawnServiceClient) CloseSession(ctx context.Context, req *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error) {
+	return c.closeSession.CallUnary(ctx, req)
+}
+
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -308,6 +356,9 @@ type SpawnServiceHandler interface {
 	RenameSpawn(context.Context, *connect.Request[v1.RenameSpawnRequest]) (*connect.Response[v1.RenameSpawnResponse], error)
 	DeleteSpawn(context.Context, *connect.Request[v1.DeleteSpawnRequest]) (*connect.Response[v1.DeleteSpawnResponse], error)
 	StopSpawn(context.Context, *connect.Request[v1.StopSpawnRequest]) (*connect.Response[v1.StopSpawnResponse], error)
+	ListSessions(context.Context, *connect.Request[v1.ListSessionsRequest]) (*connect.Response[v1.ListSessionsResponse], error)
+	CreateSession(context.Context, *connect.Request[v1.CreateSessionRequest]) (*connect.Response[v1.CreateSessionResponse], error)
+	CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -407,6 +458,24 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("StopSpawn")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceListSessionsHandler := connect.NewUnaryHandler(
+		SpawnServiceListSessionsProcedure,
+		svc.ListSessions,
+		connect.WithSchema(spawnServiceMethods.ByName("ListSessions")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceCreateSessionHandler := connect.NewUnaryHandler(
+		SpawnServiceCreateSessionProcedure,
+		svc.CreateSession,
+		connect.WithSchema(spawnServiceMethods.ByName("CreateSession")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceCloseSessionHandler := connect.NewUnaryHandler(
+		SpawnServiceCloseSessionProcedure,
+		svc.CloseSession,
+		connect.WithSchema(spawnServiceMethods.ByName("CloseSession")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
@@ -439,6 +508,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceDeleteSpawnHandler.ServeHTTP(w, r)
 		case SpawnServiceStopSpawnProcedure:
 			spawnServiceStopSpawnHandler.ServeHTTP(w, r)
+		case SpawnServiceListSessionsProcedure:
+			spawnServiceListSessionsHandler.ServeHTTP(w, r)
+		case SpawnServiceCreateSessionProcedure:
+			spawnServiceCreateSessionHandler.ServeHTTP(w, r)
+		case SpawnServiceCloseSessionProcedure:
+			spawnServiceCloseSessionHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -506,4 +581,16 @@ func (UnimplementedSpawnServiceHandler) DeleteSpawn(context.Context, *connect.Re
 
 func (UnimplementedSpawnServiceHandler) StopSpawn(context.Context, *connect.Request[v1.StopSpawnRequest]) (*connect.Response[v1.StopSpawnResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.StopSpawn is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ListSessions(context.Context, *connect.Request[v1.ListSessionsRequest]) (*connect.Response[v1.ListSessionsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListSessions is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) CreateSession(context.Context, *connect.Request[v1.CreateSessionRequest]) (*connect.Response[v1.CreateSessionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.CreateSession is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.CloseSession is not implemented"))
 }

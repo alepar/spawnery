@@ -18,6 +18,9 @@ service SpawnService {
   rpc RenameSpawn(RenameSpawnRequest) returns (RenameSpawnResponse);
   rpc DeleteSpawn(DeleteSpawnRequest) returns (DeleteSpawnResponse);
   rpc StopSpawn(StopSpawnRequest) returns (StopSpawnResponse);   // legacy cleanup path; kept (used by spawnctl + e2e)
+  rpc ListSessions(ListSessionsRequest)   returns (ListSessionsResponse);
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc CloseSession(CloseSessionRequest)   returns (CloseSessionResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -70,6 +73,29 @@ message DeleteSpawnRequest    { string spawn_id = 1; bool destroy_data = 2; }
 message DeleteSpawnResponse   {}
 
 message Frame { string spawn_id = 1; bytes data = 2; }
+
+// Client-facing transport (mirrors node.v1.SessionTransport ordinals).
+enum SessionTransport {
+  SESSION_TRANSPORT_UNSPECIFIED = 0;
+  SESSION_TRANSPORT_ACP         = 1;
+  SESSION_TRANSPORT_MOSH        = 2;
+}
+// One session in a spawn, as surfaced to clients (CP's mirrored roster).
+message SessionDescriptor {
+  string session_id          = 1;
+  SessionTransport transport = 2;
+  string runnable            = 3;
+  string status              = 4;  // "starting" | "active" | "closing" | "closed" | "error"
+  bool pinned                = 5;
+}
+message ListSessionsRequest  { string spawn_id = 1; }
+message ListSessionsResponse { repeated SessionDescriptor sessions = 1; }
+// transport + runnable come from the runnable's catalog metadata (web picks; sp-npxq.4).
+message CreateSessionRequest  { string spawn_id = 1; SessionTransport transport = 2; string runnable = 3; }
+// Empty: the node allocates the id; the client learns it from a subsequent ListSessions/roster (sp-npxq.4 correlation).
+message CreateSessionResponse {}
+message CloseSessionRequest   { string spawn_id = 1; string session_id = 2; }
+message CloseSessionResponse  {}
 
 message StopSpawnRequest  { string spawn_id = 1; }
 message StopSpawnResponse {}
