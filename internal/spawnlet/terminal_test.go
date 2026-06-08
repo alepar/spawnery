@@ -2,8 +2,29 @@ package spawnlet
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
+
+func TestExecPrefixNonInteractiveForDropsTTY(t *testing.T) {
+	got := ExecPrefixNonInteractiveFor("")
+	for _, a := range got {
+		if a == "-it" || a == "-i" || a == "-t" {
+			t.Fatalf("non-interactive prefix must not allocate a TTY, got %v", got)
+		}
+	}
+	if got[0] != "docker" || got[1] != "exec" {
+		t.Fatalf("docker lane prefix = %v, want docker exec ...", got)
+	}
+	// still injects the C.UTF-8 locale (parity with ExecPrefixFor, minus -it).
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "LANG=C.UTF-8") || !strings.Contains(joined, "LC_ALL=C.UTF-8") {
+		t.Fatalf("prefix must inject C.UTF-8 locale, got %v", got)
+	}
+	if r := ExecPrefixNonInteractiveFor("runsc"); r[0] != "crictl" || r[1] != "exec" {
+		t.Fatalf("runsc lane = %v, want crictl exec", r)
+	}
+}
 
 func TestSessionTitle(t *testing.T) {
 	cases := []struct{ name, app, want string }{

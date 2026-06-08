@@ -138,6 +138,22 @@ func ExecPrefixFor(runtimeKind string) []string {
 		"-e", "LC_ALL=C.UTF-8"}
 }
 
+// ExecPrefixNonInteractiveFor is ExecPrefixFor without a TTY: used by the node to run one-shot,
+// non-interactive `exec`s in a spawn's container — creating a detached tmux session via the launcher,
+// wrapping an acp server in a detached tmux session, and `tmux kill-session` reaps (sp-npxq.3). None
+// need a PTY (exec.Command allocates none), so `-it` is dropped; the C.UTF-8 locale injection is kept
+// for parity with ExecPrefixFor (the docker lane). crictl's exec has no env-injection flag, so the
+// runsc lane relies on the image ENV, exactly as the interactive prefix documents.
+func ExecPrefixNonInteractiveFor(runtimeKind string) []string {
+	if runtimeKind == "runsc" {
+		return []string{"crictl", "exec"}
+	}
+	return []string{"docker", "exec",
+		"-e", "TERM=xterm-256color",
+		"-e", "LANG=C.UTF-8",
+		"-e", "LC_ALL=C.UTF-8"}
+}
+
 // StartTerminal (Manager method) looks up the spawn and launches a terminal session for it. cmd is
 // the in-container command (nil/empty => mode-aware default: tmux spawns get `tmux attach -t spawn`,
 // others get the opencode TUI launcher; a command => raw exec, e.g. /bin/bash). Raw exec is an
