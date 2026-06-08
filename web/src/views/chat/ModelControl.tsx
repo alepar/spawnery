@@ -15,6 +15,7 @@ export function ModelControl({ spawnId, model, modelApplied }: {
 }) {
   const [draft, setDraft] = useState(model);
   const [optimistic, setOptimistic] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const lastModel = useRef(model);
 
   // Re-sync the input only when the RECORD's model actually changes (our submit landed, or another
@@ -32,13 +33,16 @@ export function ModelControl({ spawnId, model, modelApplied }: {
 
   const submit = async () => {
     const next = draft.trim();
-    if (!next || next === model) return;
+    if (busy || !next || next === model) return;
     setOptimistic(next);
+    setBusy(true);
     try {
       await setSpawnModel(spawnId, next);
     } catch (e: any) {
       setOptimistic(null);
       toast.error("Set model failed: " + e.message);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -52,13 +56,15 @@ export function ModelControl({ spawnId, model, modelApplied }: {
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
         placeholder="openrouter/model-id"
-        className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground"
+        disabled={busy}
+        className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground disabled:opacity-50"
       />
       <button
         type="button"
         aria-label="Set model"
         onClick={submit}
-        className="rounded border border-border px-2 py-1 text-xs hover:text-foreground"
+        disabled={busy}
+        className="rounded border border-border px-2 py-1 text-xs hover:text-foreground disabled:opacity-50"
       >
         Set
       </button>
