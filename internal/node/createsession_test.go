@@ -163,3 +163,75 @@ func TestCreateSessionACPLaunchesPumpOnPoolPort(t *testing.T) {
 		t.Fatalf("acp endpoint = %q, want port %d", e.endpoint, acpPoolLo)
 	}
 }
+
+// When the acp pool is exhausted, CreateSession{acp} is rejected: no entry registered, an ERROR
+// SessionStatus is emitted, and no launch happens.
+func TestCreateSessionACPRejectedWhenPoolExhausted(t *testing.T) {
+	sx := &fakeSessionExec{}
+	fs := &fakeCPStream{}
+	a := newSessionAttacher("s1", sx, fs)
+	// drain the pool.
+	reg := a.sessions["s1"]
+	for {
+		if _, ok := reg.allocPort(); !ok {
+			break
+		}
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_ACP, Runnable: "goose-acp",
+	}}})
+
+	if st := lastSessionStatus(fs); st == nil || st.State != nodev1.SessionState_SESSION_STATE_ERROR {
+		t.Fatalf("want an ERROR SessionStatus on exhaustion, got %+v", st)
+	}
+	if len(reg.snapshot()) != 1 { // only session #0
+		t.Fatalf("exhausted CreateSession must not register a session, roster=%d", len(reg.snapshot()))
+	}
+	sx.mu.Lock()
+	defer sx.mu.Unlock()
+	if len(sx.acpLaunched) != 0 {
+		t.Fatal("no acp launch should happen when the pool is exhausted")
+	}
+}
+
+// opencode-tui is rejected when the spawn has no served opencode (plan decision 9, CONFIRM). With one
+// present it is accepted.
+func TestCreateSessionOpencodeTuiRequiresServedOpencode(t *testing.T) {
+	sx := &fakeSessionExec{}
+	fs := &fakeCPStream{}
+	a := newSessionAttacher("s1", sx, fs) // session #0 runnable = goose-acp (no served opencode)
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_MOSH, Runnable: "opencode-tui",
+	}}})
+	if st := lastSessionStatus(fs); st == nil || st.State != nodev1.SessionState_SESSION_STATE_ERROR {
+		t.Fatalf("opencode-tui without served opencode must be rejected, got %+v", st)
+	}
+	if len(a.sessions["s1"].snapshot()) != 1 {
+		t.Fatal("rejected opencode-tui must not register a session")
+	}
+
+	// add a served-opencode session, then opencode-tui is accepted (launches a mosh tmux session).
+	a.sessions["s1"].register(&sessionEntry{id: "9", runnable: "opencode-served", state: nodev1.SessionState_SESSION_STATE_ACTIVE})
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_MOSH, Runnable: "opencode-tui",
+	}}})
+	waitFor(t, "opencode-tui launched", func() bool {
+		sx.mu.Lock()
+		defer sx.mu.Unlock()
+		return len(sx.moshLaunched) == 1
+	})
+}
+
+// lastSessionStatus returns the most recent SessionStatus the attacher sent (nil if none).
+func lastSessionStatus(f *fakeCPStream) *nodev1.SessionStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.sent) - 1; i >= 0; i-- {
+		if s := f.sent[i].GetSessionStatus(); s != nil {
+			return s
+		}
+	}
+	return nil
+}
