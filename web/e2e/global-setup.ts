@@ -12,7 +12,9 @@ const NODE_PID = path.join(os.tmpdir(), "spawnery-e2e-node.pid");
 
 function build(out: string, pkg: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const p = spawn("go", ["build", "-o", path.join(REPO, "bin", out), pkg], { cwd: REPO, stdio: "inherit" });
+    // e2e_fixtures gates in the stub TEST FIXTURE runnable (agentcaps stub-acp); RELEASE
+    // binaries build without this tag and exclude it (sp-npxq.5).
+    const p = spawn("go", ["build", "-tags", "e2e_fixtures", "-o", path.join(REPO, "bin", out), pkg], { cwd: REPO, stdio: "inherit" });
     p.on("exit", (c) => (c === 0 ? resolve() : reject(new Error(`go build ${pkg} exited ${c}`))));
     p.on("error", reject);
   });

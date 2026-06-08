@@ -130,13 +130,3 @@ func TestRegistryInvariants(t *testing.T) {
 		}
 	}
 }
-
-func TestStubAcpRunnableRegistered(t *testing.T) {
-	rs, ok := Runnables("stub")
-	if !ok || len(rs) != 1 {
-		t.Fatalf("Runnables(\"stub\") = %v, %v; want one runnable", rs, ok)
-	}
-	if rs[0].ID != "stub-acp" || rs[0].Mode != ModeACP || rs[0].Relay != RelayPump {
-		t.Fatalf("stub runnable = %+v; want id=stub-acp mode=acp relay=pump", rs[0])
-	}
-}

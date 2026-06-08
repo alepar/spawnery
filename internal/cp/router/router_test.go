@@ -298,3 +298,21 @@ func TestPerSessionClientRouting(t *testing.T) {
 		t.Fatalf("session #0 must survive session #1 detach, got %d", s0.count())
 	}
 }
+
+// TestFromNodeEmptySessionRoutesToZero proves ck() normalizes an EMPTY sessionID to "0":
+// a client attached under "0" must receive frames addressed with "" (and vice-versa), so the
+// CP's default-session ("") and explicit-session ("0") spellings are the same routing key.
+func TestFromNodeEmptySessionRoutesToZero(t *testing.T) {
+	r := New()
+	node := &mcNode{}
+	r.Bind("sp1", "node-1", node)
+	c := &mcClient{}
+	if _, err := r.AttachClient("sp1", "0", "shared", c, 0); err != nil {
+		t.Fatal(err)
+	}
+	// FromNode with an EMPTY sessionID must reach the "0" client.
+	r.FromNode("sp1", "", "shared", []byte("for-0"))
+	if c.count() != 1 {
+		t.Fatalf("empty sessionID must route to the \"0\" client (ck normalizes \"\"->\"0\"), got %d", c.count())
+	}
+}
