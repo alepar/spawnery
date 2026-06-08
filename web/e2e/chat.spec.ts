@@ -15,7 +15,7 @@ async function spawnSecretApp(page: Page) {
   await expect(page.getByTestId("spawn-btn")).toBeVisible({ timeout: 10_000 });
   await page.getByTestId("spawn-btn").click();
   await expect(page).toHaveURL(/\/spawn\/[^/]+$/);
-  await expect(page.getByTestId("status")).toContainText("connected", { timeout: 40_000 });
+  await expect(page.getByRole("banner").getByTestId("status")).toContainText("connected", { timeout: 40_000 });
 }
 
 test("chat echoes through the real browser", async ({ page }) => {
@@ -44,5 +44,5 @@ test("settings theme toggle flips dark mode without dropping the session", async
     .locator('[data-testid^="spawn-select-"]').click();
   await expect(page).toHaveURL(spawnUrl);
   await expect(page).toHaveTitle("Spawnery — Secret App");
-  await expect(page.getByTestId("status")).toContainText("connected", { timeout: 20_000 });
+  await expect(page.getByRole("banner").getByTestId("status")).toContainText("connected", { timeout: 20_000 });
 });
