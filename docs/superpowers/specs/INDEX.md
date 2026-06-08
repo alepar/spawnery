@@ -79,6 +79,7 @@ were already made in one of these docs.
 - [URL History (sp-jpn)](2026-06-07-sp-jpn-url-history-design.md) — URL + `document.title` reflect the current view (add routing).
 - [Multi-Session Tabs (sp-npxq)](2026-06-08-sp-npxq-multi-session-tabs-design.md) — multiple sessions per spawn via a spawn-view tab bar.
 - [Terminal Appearance Settings](2026-06-08-terminal-appearance-settings-design.md) — xterm.js themes + fonts for the web terminal.
+- [Sidebar Lifecycle Action](2026-06-08-sidebar-lifecycle-action-follows-status-design.md) — kebab menu action follows actual spawn status (wires RecreateSpawn for unreachable/error).
 
 ## Dev infrastructure & vertical slices
 - [Spawnlet Slice](2026-05-29-spawnlet-slice-design.md) — the first end-to-end node (spawnlet) vertical slice.
