@@ -18,6 +18,14 @@ function build(out: string, pkg: string): Promise<void> {
   });
 }
 
+function dockerBuild(tag: string, dockerfile: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const p = spawn("docker", ["build", "-f", dockerfile, "-t", tag, "."], { cwd: REPO, stdio: "inherit" });
+    p.on("exit", (c) => (c === 0 ? resolve() : reject(new Error(`docker build ${tag} exited ${c}`))));
+    p.on("error", reject);
+  });
+}
+
 function waitForPort(host: string, port: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
@@ -37,6 +45,9 @@ function waitForPort(host: string, port: number, timeoutMs: number): Promise<voi
 export default async function globalSetup() {
   await build("cp", "./cmd/cp");
   await build("spawnlet", "./cmd/spawnlet");
+  // Build the fattened stub fixture (bash+tmux+launcher+acpmux+stubagent) so the node can exec
+  // additional sessions into the agent container — credential-free (sp-npxq.5).
+  await dockerBuild("spawnery/stubagent:dev", "deploy/stubagent/Dockerfile");
 
   const cp = spawn(path.join(REPO, "bin", "cp"), [], {
     cwd: REPO,
@@ -58,6 +69,9 @@ export default async function globalSetup() {
       CP_ADDR: "http://127.0.0.1:8080",
       NODE_ID: "node-1",
       AGENT_IMAGE: "spawnery/stubagent:dev",
+      // Advertise the stub binary so ListAgentImages -> the spawn picks stub-acp as the primary
+      // (session #0) and the tab "+" menu offers a 2nd stub-acp ACP session (sp-npxq.5).
+      AGENT_BINARIES: "stub",
       SIDECAR_IMAGE: "spawnery/sidecar:dev",
       OPENROUTER_API_KEY: "unused",
       DATA_ROOT: path.join(REPO, ".spawns"),
