@@ -50,6 +50,46 @@ bd close <id>         # Complete work
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
 
+## Beads Sync — Dolt remote (this repo)
+
+Configured 2026-06-08 to the **canonical Dolt-remote sync**: `sync.remote` points at the
+GitHub `origin` and issue history lives under `refs/dolt/data` (a git ref, separate from
+`refs/heads/*` where the code lives). The Dolt DB (`.beads/embeddeddolt`) is the source of
+truth; `.beads/issues.jsonl` is a passive, regenerable export — **not** the wire protocol.
+
+- **After any `bd` change:** `bd dolt push` — publishes issue history to the remote.
+- **Get others' issue changes:** `bd dolt pull`.
+- **Fresh clone / new git worktree / missing DB:** `bd bootstrap` — a plain `git clone` does
+  NOT include the Dolt DB; bootstrap clones it from `refs/dolt/data`.
+- **Session close:** the MANDATORY WORKFLOW's `git push` must be followed by `bd dolt push`.
+  Both must succeed — issue changes are not durable until `bd dolt push` lands.
+
+Now that the Dolt remote is configured, the `post-merge`/`post-checkout` hooks no longer import
+`issues.jsonl` into Dolt — so a branch op can no longer silently revert a `bd close`/`update`
+via a stale JSONL. `issues.jsonl` is safe to discard/regenerate (`bd export`). Do NOT use routine
+`bd import` as a sync mechanism; use `bd dolt pull`. See
+https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for anti-patterns.
+
+**Perms warning:** if bd warns `.beads` is `0777`, that's bd creating dirs under `umask 000`
+(hook-launched, not your interactive shell). `chmod 700 .beads` clears it; the durable fix is
+running bd under `umask 077`.
+
+## Non-Interactive Shell Commands
+
+**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation
+prompts. `cp`/`mv`/`rm` may be aliased to `-i` on some systems, which hangs the agent waiting
+for y/n input.
+
+```bash
+cp -f source dest           # NOT: cp source dest
+mv -f source dest           # NOT: mv source dest
+rm -f file                  # NOT: rm file
+rm -rf directory            # NOT: rm -r directory
+cp -rf source dest          # NOT: cp -r source dest
+```
+
+Others that may prompt: `scp`/`ssh` (`-o BatchMode=yes`), `apt-get` (`-y`), `brew`
+(`HOMEBREW_NO_AUTO_UPDATE=1`).
 
 ## Build & Test
 
