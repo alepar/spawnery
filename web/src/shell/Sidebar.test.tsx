@@ -6,9 +6,9 @@ import type { SpawnView } from "@/api/spawnlet";
 import type { Nav } from "@/nav/nav";
 
 const spawns: SpawnView[] = [
-  { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "" },
-  { spawnId: "b", name: "Zork 2", appId: "spawnery/zork", status: "suspended", mode: "" },
-  { spawnId: "c", name: "Starting One", appId: "spawnery/wiki", status: "starting", mode: "" },
+  { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true },
+  { spawnId: "b", name: "Zork 2", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true },
+  { spawnId: "c", name: "Starting One", appId: "spawnery/wiki", status: "starting", mode: "", model: "", modelApplied: true },
 ];
 const noopActions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onStop: vi.fn() };
 const templatesNav: Nav = { section: "templates" };

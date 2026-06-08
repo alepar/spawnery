@@ -14,7 +14,7 @@ function makeClientId(): string {
 }
 const CLIENT_ID = makeClientId();
 
-export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
+export function AcpSessionPanel({ spawnId, sessionId, active, ready, model, modelApplied }: {
   spawnId: string;
   sessionId: string;
   active: boolean;
@@ -22,6 +22,8 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
   // sessions launch their Pump async (status "starting" first); binding before then attaches to a
   // not-yet-ready session ("send into the void", false "connected" dot). Gate the socket on this.
   ready: boolean;
+  model?: string;
+  modelApplied?: boolean;
 }) {
   const rt = useSessionStore((s) => s.acp[sessionId]);
   const conn = useSessionStore((s) => s.conn[sessionId] ?? null);
@@ -79,6 +81,9 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
       onSend={onSend}
       perm={perm}
       focusKey={active ? sessionId : null}
+      spawnId={spawnId}
+      model={model}
+      modelApplied={modelApplied}
     />
   );
 }

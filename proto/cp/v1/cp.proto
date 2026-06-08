@@ -57,6 +57,7 @@ message SpawnSummary {
   int64  last_used_at = 7;
   string name         = 8; // human-readable spawn label (server-assigned default if not set by the client)
   string mode         = 9; // run mode: "acp" | "tmux" | "" (default "acp")
+  bool   model_applied = 10; // running pod's effective model == spawns.model (false => pending switch)
 }
 // Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
 message ListSpawnsRequest  {}

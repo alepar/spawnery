@@ -14,7 +14,7 @@ vi.mock("@/sessions/SpawnTabs", () => ({
 const baseProps = {
   onSpawnApp: vi.fn(),
 };
-const spawns: SpawnView[] = [{ spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "" }];
+const spawns: SpawnView[] = [{ spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true }];
 const actions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onStop: vi.fn() };
 
 describe("AppShell", () => {

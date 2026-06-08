@@ -2,12 +2,13 @@ import { MessageList } from "./chat/MessageList";
 import { PromptInput } from "./chat/PromptInput";
 import { PermissionModal } from "./chat/PermissionModal";
 import { ModeSelector } from "./chat/ModeSelector";
+import { ModelControl } from "./chat/ModelControl";
 import { StopButton } from "./chat/StopButton";
 import type { Item, TurnState, PermPrompt } from "./chat/types";
 import type { Command, ModePayload } from "@/acp/frames";
 import { turnEndLabel, usageBadge } from "@/lib/turn";
 
-export function ChatView({ items, turn, canSend, onSend, perm, focusKey, commands, mode, onSetMode, onCancel }: {
+export function ChatView({ items, turn, canSend, onSend, perm, focusKey, commands, mode, onSetMode, onCancel, spawnId, model, modelApplied }: {
   items: Item[];
   turn: TurnState;
   canSend: boolean;
@@ -18,9 +19,13 @@ export function ChatView({ items, turn, canSend, onSend, perm, focusKey, command
   mode?: ModePayload | null;
   onSetMode?: (modeId: string) => void;
   onCancel?: () => void;
+  spawnId?: string;
+  model?: string;
+  modelApplied?: boolean;
 }) {
   return (
     <div className="flex h-full flex-col">
+      {spawnId && <ModelControl spawnId={spawnId} model={model ?? ""} modelApplied={modelApplied ?? true} />}
       <MessageList
         items={items}
         working={turn.state === "busy"}

@@ -40,7 +40,7 @@ export function AppShell({ onSpawnApp, spawns = [], activeId, actions, nav, navi
               remounts it) and is hidden when off the spawn view, preserving background keep-alive. */}
           {activeId && (
             <div className="h-full" style={{ display: view === "chat" ? "block" : "none" }}>
-              <SpawnTabs key={activeId} spawnId={activeId} />
+              <SpawnTabs key={activeId} spawnId={activeId} spawn={activeSpawn} />
             </div>
           )}
           {view === "templates" && <TemplatesView nav={nav} navigate={navigate} onSpawn={onSpawnApp} />}

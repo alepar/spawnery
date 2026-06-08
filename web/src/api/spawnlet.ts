@@ -10,6 +10,8 @@ export interface SpawnView {
   appId: string;
   status: SpawnStatus;
   mode: string;
+  model: string;
+  modelApplied: boolean;
 }
 
 // statusFromProto maps the Connect-JSON enum NAME (e.g. "SPAWN_STATUS_ACTIVE") to a short status.
@@ -31,7 +33,7 @@ export async function createSpawn(appId: string, model: string, image = "", runn
 }
 
 export async function listSpawns(): Promise<SpawnView[]> {
-  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; mode?: string }> }>(
+  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; mode?: string; model?: string; modelApplied?: boolean }> }>(
     "ListSpawns", {},
   );
   return (r.spawns ?? []).map((s) => ({
@@ -40,7 +42,15 @@ export async function listSpawns(): Promise<SpawnView[]> {
     appId: s.appId ?? "",
     status: statusFromProto(s.status),
     mode: s.mode ?? "",
+    model: s.model ?? "",
+    modelApplied: s.modelApplied ?? true,
   }));
+}
+
+// SetSpawnModel changes the model an already-running spawn uses (persist + best-effort live push).
+// applied=false => saved but the live pod hasn't switched yet (UI shows a "pending" badge).
+export async function setSpawnModel(spawnId: string, model: string): Promise<{ model: string; applied: boolean }> {
+  return unary<{ model: string; applied: boolean }>("SetSpawnModel", { spawnId, model });
 }
 
 export async function renameSpawn(spawnId: string, name: string): Promise<void> {
