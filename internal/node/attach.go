@@ -351,7 +351,11 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		if a.staleGen(m.SetModel.SpawnId, m.SetModel.Generation) {
 			return // stale generation: a newer pod exists; the CP reconciler re-pushes. Drop (matches Stop/CreateSession).
 		}
-		a.setModel(ctx, m.SetModel)
+		// Async like startSpawn/launchSession: a slow/wedged sidecar POST (up to controlPostTimeout) must
+		// not block the single per-connection Receive loop and stall all other inbound CPMessages. The
+		// generation fence above stays SYNCHRONOUS (reads the live gen here). The reply goes via a.send,
+		// which is sendMu-guarded — safe from this goroutine (matches the other async-dispatch handlers).
+		go a.setModel(ctx, m.SetModel)
 	default:
 		// TODO(sp-gd9): handle *nodev1.CPMessage_Suspend (persist mounts + tear down, then emit
 		// NodeMessage_SuspendComplete with per-mount markers). Inert until the suspend path lands.
@@ -541,7 +545,7 @@ func (a *attacher) setModel(ctx context.Context, sm *nodev1.SetModel) {
 		reply(false, "sidecar control POST: "+err.Error())
 		return
 	}
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10)); _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		reply(false, fmt.Sprintf("sidecar control returned %d", resp.StatusCode))
 		return

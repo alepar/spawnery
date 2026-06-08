@@ -74,6 +74,11 @@ func TestSetModelPostsAndAcks(t *testing.T) {
 		SpawnId: "sp1", Generation: 5, Model: "anthropic/claude-x", RequestId: "req-1",
 	}}})
 
+	// handle dispatches setModel on its own goroutine (avoids head-of-line blocking the Receive loop),
+	// so wait for the reply to land before asserting. The reply is sent only after the POST completes,
+	// so observing it means doer.gotReq/gotBody are fully populated (synchronized via the fake stream's mu).
+	waitFor(t, "SetModelResult reply", func() bool { return lastSetModelResult(fs) != nil })
+
 	if doer.calls != 1 {
 		t.Fatalf("POST calls = %d, want 1", doer.calls)
 	}
@@ -85,6 +90,9 @@ func TestSetModelPostsAndAcks(t *testing.T) {
 	}
 	if got := doer.gotReq.Header.Get("Authorization"); got != "Bearer tok-abc" {
 		t.Fatalf("authorization = %q, want %q", got, "Bearer tok-abc")
+	}
+	if got := doer.gotReq.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content-type = %q, want %q", got, "application/json")
 	}
 	var body struct {
 		Model string `json:"model"`
@@ -116,6 +124,7 @@ func TestSetModelNon200Fails(t *testing.T) {
 		SpawnId: "sp1", Generation: 1, Model: "m", RequestId: "req-2",
 	}}})
 
+	waitFor(t, "SetModelResult reply", func() bool { return lastSetModelResult(fs) != nil })
 	res := lastSetModelResult(fs)
 	if res == nil || res.Ok {
 		t.Fatalf("result = %+v, want ok=false", res)
@@ -161,6 +170,7 @@ func TestSetModelUnknownSpawnFails(t *testing.T) {
 		SpawnId: "ghost", Generation: 0, Model: "m", RequestId: "req-4",
 	}}})
 
+	waitFor(t, "SetModelResult reply", func() bool { return lastSetModelResult(fs) != nil })
 	if doer.calls != 0 {
 		t.Fatalf("unknown spawn must not POST, got %d calls", doer.calls)
 	}
@@ -186,6 +196,7 @@ func TestSetModelEmptyControlURLFails(t *testing.T) {
 		SpawnId: "sp1", Generation: 1, Model: "m", RequestId: "req-5",
 	}}})
 
+	waitFor(t, "SetModelResult reply", func() bool { return lastSetModelResult(fs) != nil })
 	if doer.calls != 0 {
 		t.Fatalf("empty ControlURL must not POST, got %d calls", doer.calls)
 	}
@@ -210,6 +221,7 @@ func TestSetModelTransportErrorFails(t *testing.T) {
 		SpawnId: "sp1", Generation: 1, Model: "m", RequestId: "req-6",
 	}}})
 
+	waitFor(t, "SetModelResult reply", func() bool { return lastSetModelResult(fs) != nil })
 	res := lastSetModelResult(fs)
 	if res == nil || res.Ok {
 		t.Fatalf("result = %+v, want ok=false", res)
