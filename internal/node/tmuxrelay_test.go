@@ -49,8 +49,8 @@ func TestReapIdleIncludesTmuxRelays(t *testing.T) {
 	activeRelay := newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
 
 	a.mu.Lock()
-	a.tmuxRelays["idle-tmux"] = idleRelay
-	a.tmuxRelays["active-tmux"] = activeRelay
+	a.tmuxRelays[zeroKey("idle-tmux")] = idleRelay
+	a.tmuxRelays[zeroKey("active-tmux")] = activeRelay
 	a.active += 2
 	a.mu.Unlock()
 
@@ -66,10 +66,10 @@ func TestReapIdleIncludesTmuxRelays(t *testing.T) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.tmuxRelays["idle-tmux"] != nil {
+	if a.tmuxRelays[zeroKey("idle-tmux")] != nil {
 		t.Fatal("idle tmux relay past its budget must be reaped")
 	}
-	if a.tmuxRelays["active-tmux"] == nil {
+	if a.tmuxRelays[zeroKey("active-tmux")] == nil {
 		t.Fatal("recently-active tmux relay must survive reaping")
 	}
 }

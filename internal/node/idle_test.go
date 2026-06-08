@@ -58,11 +58,11 @@ func TestReapIdleTwoStage(t *testing.T) {
 
 	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "idle", AppRef: writeNodeApp(t), Model: "m"})
 	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "kept", AppRef: writeNodeApp(t), Model: "m"})
-	a.attachClient("kept", "c1", 0) // "kept" has a live client -> the longer idle budget
+	a.attachClient("kept", SessionZeroID, "c1", 0) // "kept" has a live client -> the longer idle budget
 
 	now := time.Now()
 	for _, id := range []string{"idle", "kept"} {
-		p := a.pumps[id]
+		p := a.pumps[zeroKey(id)]
 		p.mu.Lock()
 		p.lastActivity = now.Add(-10 * time.Minute)
 		p.mu.Unlock()
@@ -73,10 +73,10 @@ func TestReapIdleTwoStage(t *testing.T) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.pumps["idle"] != nil {
+	if a.pumps[zeroKey("idle")] != nil {
 		t.Fatal("detached spawn idle past its budget must be reaped")
 	}
-	if a.pumps["kept"] == nil {
+	if a.pumps[zeroKey("kept")] == nil {
 		t.Fatal("attached spawn within its longer budget must survive")
 	}
 }

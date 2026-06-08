@@ -47,8 +47,9 @@ type attacher struct {
 	httpc connect.HTTPClient
 
 	mu         sync.Mutex
-	pumps      map[string]*Pump
-	tmuxRelays map[string]*tmuxRelay
+	pumps      map[sessionKey]*Pump
+	tmuxRelays map[sessionKey]*tmuxRelay
+	sessions   map[string]*sessionRegistry // spawn_id -> live session set (roster source of truth)
 	active     uint32
 
 	sendMu sync.Mutex
@@ -110,8 +111,9 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
-		pumps:      map[string]*Pump{},
-		tmuxRelays: map[string]*tmuxRelay{},
+		pumps:      map[sessionKey]*Pump{},
+		tmuxRelays: map[sessionKey]*tmuxRelay{},
+		sessions:   map[string]*sessionRegistry{},
 	}
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)
@@ -197,22 +199,24 @@ func (a *attacher) idleReapLoop(ctx context.Context) {
 // vs attached), measured from now. Candidates are snapshotted under the lock, then stopped outside it
 // (stopSpawn takes the lock itself). Both ACP pumps and tmux relays are reaped.
 func (a *attacher) reapIdle(ctx context.Context, now time.Time, detachedTimeout, attachedTimeout time.Duration) {
+	// TODO(sp-npxq.3): per-session idle budgets — today only session #0 exists per spawn, so
+	// reaping a key's spawn is equivalent to reaping the spawn.
 	a.mu.Lock()
 	type cand struct {
-		id string
-		p  *Pump
+		key sessionKey
+		p   *Pump
 	}
 	type relayCand struct {
-		id string
-		r  *tmuxRelay
+		key sessionKey
+		r   *tmuxRelay
 	}
 	cands := make([]cand, 0, len(a.pumps))
-	for id, p := range a.pumps {
-		cands = append(cands, cand{id, p})
+	for k, p := range a.pumps {
+		cands = append(cands, cand{k, p})
 	}
 	relayCands := make([]relayCand, 0, len(a.tmuxRelays))
-	for id, r := range a.tmuxRelays {
-		relayCands = append(relayCands, relayCand{id, r})
+	for k, r := range a.tmuxRelays {
+		relayCands = append(relayCands, relayCand{k, r})
 	}
 	a.mu.Unlock()
 
@@ -222,8 +226,8 @@ func (a *attacher) reapIdle(ctx context.Context, now time.Time, detachedTimeout,
 			budget = attachedTimeout
 		}
 		if now.Sub(c.p.lastActive()) >= budget {
-			log.Printf("idle-reaping spawn=%s (idle past %s, attached=%v)", c.id, budget, c.p.attached())
-			a.stopSpawn(ctx, c.id)
+			log.Printf("idle-reaping spawn=%s (idle past %s, attached=%v)", c.key.spawnID, budget, c.p.attached())
+			a.stopSpawn(ctx, c.key.spawnID)
 		}
 	}
 	for _, c := range relayCands {
@@ -232,14 +236,38 @@ func (a *attacher) reapIdle(ctx context.Context, now time.Time, detachedTimeout,
 			budget = attachedTimeout
 		}
 		if now.Sub(c.r.lastActive()) >= budget {
-			log.Printf("idle-reaping tmux spawn=%s (idle past %s, attached=%v)", c.id, budget, c.r.attached())
-			a.stopSpawn(ctx, c.id)
+			log.Printf("idle-reaping tmux spawn=%s (idle past %s, attached=%v)", c.key.spawnID, budget, c.r.attached())
+			a.stopSpawn(ctx, c.key.spawnID)
 		}
 	}
 }
 
 func (a *attacher) status(spawnID string, ph nodev1.SpawnPhase, detail string) {
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{SpawnId: spawnID, Phase: ph, Detail: detail}}})
+}
+
+// zeroKey is the map key for a spawn's session #0 (the primary).
+func zeroKey(spawnID string) sessionKey { return sessionKey{spawnID: spawnID, sessionID: SessionZeroID} }
+
+// sid defaults an empty wire session id to session #0 (backward compat with single-session CPs).
+func sid(s string) string {
+	if s == "" {
+		return SessionZeroID
+	}
+	return s
+}
+
+// emitRoster sends spawnID's current session set to the CP. Call after any registry membership change.
+func (a *attacher) emitRoster(spawnID string) {
+	a.mu.Lock()
+	reg := a.sessions[spawnID]
+	a.mu.Unlock()
+	if reg == nil {
+		return
+	}
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Roster{Roster: &nodev1.SessionRoster{
+		SpawnId: spawnID, Sessions: reg.snapshot(),
+	}}})
 }
 
 func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
@@ -252,11 +280,21 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		}
 		a.stopSpawn(ctx, m.Stop.SpawnId)
 	case *nodev1.CPMessage_Open:
-		a.attachClient(m.Open.SpawnId, m.Open.ClientId, m.Open.Cursor)
+		a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor)
 	case *nodev1.CPMessage_Close:
-		a.detachClient(m.Close.SpawnId, m.Close.ClientId)
+		a.detachClient(m.Close.SpawnId, sid(m.Close.SessionId), m.Close.ClientId)
 	case *nodev1.CPMessage_Frame:
-		a.fromClient(m.Frame.SpawnId, m.Frame.ClientId, m.Frame.Data)
+		a.fromClient(m.Frame.SpawnId, sid(m.Frame.SessionId), m.Frame.ClientId, m.Frame.Data)
+	case *nodev1.CPMessage_CreateSession:
+		if a.staleGen(m.CreateSession.SpawnId, m.CreateSession.Generation) {
+			return
+		}
+		a.createSession(ctx, m.CreateSession)
+	case *nodev1.CPMessage_CloseSession:
+		if a.staleGen(m.CloseSession.SpawnId, m.CloseSession.Generation) {
+			return
+		}
+		a.closeSession(ctx, m.CloseSession)
 	default:
 		// TODO(sp-gd9): handle *nodev1.CPMessage_Suspend (persist mounts + tear down, then emit
 		// NodeMessage_SuspendComplete with per-mount markers). Inert until the suspend path lands.
@@ -292,13 +330,20 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	if st.Mode == string(agentcaps.ModeTmux) {
 		relay := newTmuxRelay(a.mgr.TmuxAttachArgv(sp.AgentID, "spawn"), func(clientID string, data []byte) error {
 			return a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{
-				SpawnId: st.SpawnId, ClientId: clientID, Data: data,
+				SpawnId: st.SpawnId, SessionId: SessionZeroID, ClientId: clientID, Data: data,
 			}}})
 		})
 		a.mu.Lock()
-		a.tmuxRelays[st.SpawnId] = relay
+		a.tmuxRelays[zeroKey(st.SpawnId)] = relay
+		reg := newSessionRegistry(st.SpawnId)
+		reg.register(&sessionEntry{
+			id: SessionZeroID, transport: transportForMode(st.Mode), runnable: st.RunnableId,
+			state: nodev1.SessionState_SESSION_STATE_ACTIVE, endpoint: "spawn", pinned: true,
+		})
+		a.sessions[st.SpawnId] = reg
 		a.active++
 		a.mu.Unlock()
+		a.emitRoster(st.SpawnId)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ACTIVE, "")
 		return
 	}
@@ -314,9 +359,10 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	p.exitFn = func() { // goose died after going active -> ERROR + reclaim (so capacity accounting stays honest)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, "agent exited")
 		a.mu.Lock()
-		mine := a.pumps[st.SpawnId] == p // only clean up if we're still the registered pump (not replaced/stopped)
+		mine := a.pumps[zeroKey(st.SpawnId)] == p // only clean up if we're still the registered pump (not replaced/stopped)
 		if mine {
-			delete(a.pumps, st.SpawnId)
+			delete(a.pumps, zeroKey(st.SpawnId))
+			delete(a.sessions, st.SpawnId)
 			if a.active > 0 {
 				a.active--
 			}
@@ -327,41 +373,61 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		}
 	}
 	a.mu.Lock()
-	a.pumps[st.SpawnId] = p
+	a.pumps[zeroKey(st.SpawnId)] = p
 	a.mu.Unlock()
 	if err := p.start(ctx, readyTimeout); err != nil {
 		logErr("startSpawn "+st.SpawnId+": agent not ready", err)
 		p.stop()
 		a.mu.Lock()
-		delete(a.pumps, st.SpawnId)
+		delete(a.pumps, zeroKey(st.SpawnId))
 		a.mu.Unlock()
 		_ = a.mgr.Stop(ctx, st.SpawnId)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
 		return
 	}
 	a.mu.Lock()
+	reg := newSessionRegistry(st.SpawnId)
+	reg.register(&sessionEntry{
+		id: SessionZeroID, transport: transportForMode(st.Mode), runnable: st.RunnableId,
+		state: nodev1.SessionState_SESSION_STATE_ACTIVE, endpoint: "7000", pinned: true,
+	})
+	a.sessions[st.SpawnId] = reg
 	a.active++
 	a.mu.Unlock()
+	a.emitRoster(st.SpawnId)
 	a.status(st.SpawnId, nodev1.SpawnPhase_ACTIVE, "")
 }
 
 func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
+	// Reap every session of the spawn (sp-npxq.3 adds sessions 1..N; today only #0 exists).
 	a.mu.Lock()
-	p := a.pumps[spawnID]
-	delete(a.pumps, spawnID)
-	relay := a.tmuxRelays[spawnID]
-	delete(a.tmuxRelays, spawnID)
+	var ps []*Pump
+	for k, p := range a.pumps {
+		if k.spawnID == spawnID {
+			ps = append(ps, p)
+			delete(a.pumps, k)
+		}
+	}
+	var relays []*tmuxRelay
+	for k, r := range a.tmuxRelays {
+		if k.spawnID == spawnID {
+			relays = append(relays, r)
+			delete(a.tmuxRelays, k)
+		}
+	}
+	delete(a.sessions, spawnID)
 	a.mu.Unlock()
-	if p != nil {
+	for _, p := range ps {
 		p.stop()
 	}
-	if relay != nil {
-		relay.stop()
+	for _, r := range relays {
+		r.stop()
 	}
 	if err := a.mgr.Stop(ctx, spawnID); err != nil {
 		logErr("stopSpawn "+spawnID, err)
 	}
 	a.mu.Lock()
+	// TODO(sp-npxq.3): account per-session capacity (one slot per spawn today, one primary session).
 	if a.active > 0 {
 		a.active--
 	}
@@ -369,33 +435,35 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 	a.status(spawnID, nodev1.SpawnPhase_STOPPED, "")
 }
 
-func (a *attacher) attachClient(spawnID, clientID string, cursor int64) {
+func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int64) {
+	k := sessionKey{spawnID, sessionID}
 	a.mu.Lock()
-	relay := a.tmuxRelays[spawnID]
-	p := a.pumps[spawnID]
+	relay := a.tmuxRelays[k]
+	p := a.pumps[k]
 	a.mu.Unlock()
 	if relay != nil {
 		if err := relay.attach(context.Background(), clientID); err != nil {
-			log.Printf("tmux attach %s/%s: %v", spawnID, clientID, err)
+			log.Printf("tmux attach %s/%s/%s: %v", spawnID, sessionID, clientID, err)
 		}
 		return
 	}
 	if p == nil {
-		log.Printf("warn: attachClient: no pump for spawn %s", spawnID)
+		log.Printf("warn: attachClient: no pump for %s/%s", spawnID, sessionID)
 		return
 	}
 	send := func(line []byte) error {
 		return a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{
-			SpawnId: spawnID, ClientId: clientID, Data: append([]byte(nil), line...),
+			SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Data: append([]byte(nil), line...),
 		}}})
 	}
 	p.attachClient(clientID, cursor, send)
 }
 
-func (a *attacher) detachClient(spawnID, clientID string) {
+func (a *attacher) detachClient(spawnID, sessionID, clientID string) {
+	k := sessionKey{spawnID, sessionID}
 	a.mu.Lock()
-	relay := a.tmuxRelays[spawnID]
-	p := a.pumps[spawnID]
+	relay := a.tmuxRelays[k]
+	p := a.pumps[k]
 	a.mu.Unlock()
 	if relay != nil {
 		relay.detach(clientID)
@@ -406,10 +474,11 @@ func (a *attacher) detachClient(spawnID, clientID string) {
 	}
 }
 
-func (a *attacher) fromClient(spawnID, clientID string, data []byte) {
+func (a *attacher) fromClient(spawnID, sessionID, clientID string, data []byte) {
+	k := sessionKey{spawnID, sessionID}
 	a.mu.Lock()
-	relay := a.tmuxRelays[spawnID]
-	p := a.pumps[spawnID]
+	relay := a.tmuxRelays[k]
+	p := a.pumps[k]
 	a.mu.Unlock()
 	if relay != nil {
 		relay.fromClient(clientID, data)
@@ -417,5 +486,48 @@ func (a *attacher) fromClient(spawnID, clientID string, data []byte) {
 	}
 	if p != nil {
 		p.fromClient(clientID, data)
+	}
+}
+
+// createSession registers a placeholder session and emits the updated roster. The actual launch
+// (docker exec launcher / Nth Pump / tmux relay) is TODO(sp-npxq.3); for now the session sits STARTING.
+func (a *attacher) createSession(ctx context.Context, m *nodev1.CreateSession) {
+	a.mu.Lock()
+	reg := a.sessions[m.SpawnId]
+	a.mu.Unlock()
+	if reg == nil {
+		log.Printf("warn: CreateSession for unknown spawn %s", m.SpawnId)
+		return
+	}
+	id := reg.allocID()
+	reg.register(&sessionEntry{
+		id: id, transport: m.Transport, runnable: m.Runnable,
+		state: nodev1.SessionState_SESSION_STATE_STARTING,
+	})
+	// TODO(sp-npxq.3): dispatch by transport — mosh: docker exec launcher --tmux-session <id> + attach
+	// a PTY relay; acp: allocate a pool port (32668-32767), docker exec launcher --acp-port, open an
+	// Nth Pump; then flip the entry to ACTIVE and SessionStatus/emitRoster.
+	a.emitRoster(m.SpawnId)
+}
+
+// closeSession reaps one session and emits the updated roster. Session #0 is pinned (no-op).
+func (a *attacher) closeSession(ctx context.Context, m *nodev1.CloseSession) {
+	a.mu.Lock()
+	reg := a.sessions[m.SpawnId]
+	a.mu.Unlock()
+	if reg == nil {
+		return
+	}
+	if e, ok := reg.get(m.SessionId); ok && e.pinned {
+		log.Printf("ignoring CloseSession for pinned session %s/%s", m.SpawnId, m.SessionId)
+		return
+	}
+	// TODO(sp-npxq.3): tear down the session's Pump/port or tmux session before removing the entry.
+	if reg.remove(m.SessionId) {
+		a.mu.Lock()
+		delete(a.pumps, sessionKey{m.SpawnId, m.SessionId})
+		delete(a.tmuxRelays, sessionKey{m.SpawnId, m.SessionId})
+		a.mu.Unlock()
+		a.emitRoster(m.SpawnId)
 	}
 }
