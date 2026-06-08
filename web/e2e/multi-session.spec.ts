@@ -7,6 +7,29 @@ test.beforeEach(async ({ request }) => { await clearSpawns(request); });
 // the same data-testid="status", so scope to role=banner to keep the selector unambiguous.
 const bannerStatus = (page: Page) => page.getByRole("banner").getByTestId("status");
 
+// Activate a terminal session, run an (idempotent) command, and wait for `expectText` to appear in the
+// pane. Readiness signal: the tab's own ConnStatus light goes "connected" when TerminalView's ws->PTY
+// bridge is up. A freshly-activated xterm can fit while the panel is still 0-sized, leaving the pane
+// blank until a real resize, so each retry nudges the viewport (forcing the active TerminalView's
+// ResizeObserver to refit + re-send cols/rows -> tmux repaints) and re-types the command. The command
+// must be safe to run repeatedly. xterm renders to canvas; visible text lives in the accessibility
+// buffer (which toContainText reads), so never poll innerText.
+async function runInTerminal(page: Page, sessionId: string, cmd: string, expectText: string) {
+  await page.getByTestId(`tab-${sessionId}`).click();
+  const term = page.getByTestId(`panel-${sessionId}`);
+  await expect(term).toBeVisible();
+  await expect(page.getByTestId(`tab-${sessionId}`).getByTestId("status")).toHaveAttribute("data-status", "connected", { timeout: 30_000 });
+  await expect(async () => {
+    const vp = page.viewportSize() ?? { width: 1280, height: 720 };
+    await page.setViewportSize({ width: vp.width, height: vp.height - 40 });
+    await page.setViewportSize(vp);
+    await term.click();
+    await page.keyboard.type(cmd + "\n");
+    await expect(term).toContainText(expectText, { timeout: 4_000 });
+  }).toPass({ timeout: 45_000 });
+  return term;
+}
+
 // Spawn the seeded "Secret App". With AGENT_BINARIES=stub (global-setup) its primary (session #0) is
 // the credential-free stub-acp echo agent, and the "+" menu offers a 2nd stub-acp ACP session + shell.
 async function spawnSecretApp(page: Page): Promise<string> {
@@ -46,15 +69,20 @@ test("multi-session: shell + 2nd acp Pump concurrent in one container; shared fs
   expect(roster1.filter((s) => s.runnable === "stub-acp").length).toBe(2);
   expect(roster1.filter((s) => s.runnable === "shell").length).toBe(1);
 
+  // PRIMARY #0 ANSWERS CONCURRENTLY with the 2nd Pump (no cross-session interference). Each kept-alive
+  // ACP panel renders its own ChatView, so scope to panel-0. (This catches the sp-npxq.5 router bug
+  // where a shared clientId let the 2nd session clobber #0's sender — fixed in cp/router.)
+  await page.getByTestId("tab-0").click();
+  const primaryPanel = page.getByTestId("panel-0");
+  await primaryPanel.getByTestId("prompt-input").fill("say early");
+  await primaryPanel.getByTestId("prompt-input").press("Enter");
+  await expect(primaryPanel.locator('[data-role="user"]')).toContainText("say early");
+  await expect(primaryPanel.locator('[data-role="agent"]')).toContainText("ECHO: say early", { timeout: 30_000 });
+
   // PER-SURFACE LIVENESS — the shell echoes a token AND writes it to a shared file:
   const shellId = roster1.find((s) => s.runnable === "shell")!.sessionId;
-  await page.getByTestId(`tab-${shellId}`).click();
-  const term = page.getByTestId(`panel-${shellId}`);
-  await expect(term).toBeVisible();
   const token = "fs-" + Math.random().toString(36).slice(2, 8);
-  await term.click();
-  await page.keyboard.type(`echo ${token} > /tmp/shared && cat /tmp/shared\n`);
-  await expect(term).toContainText(token, { timeout: 20_000 });
+  await runInTerminal(page, shellId, `echo ${token} > /tmp/shared && cat /tmp/shared`, token);
 
   // SHARED FS across tabs — open a 2nd shell tab and read /tmp/shared; it sees the token the FIRST
   // shell wrote. This is the load-bearing "same container" proof (the 2nd shell is a different tmux
@@ -66,18 +94,7 @@ test("multi-session: shell + 2nd acp Pump concurrent in one container; shared fs
     { timeout: 30_000 }).toBe(2);
   const shell2Id = (await listSessions(request, spawnId))
     .filter((s) => s.runnable === "shell").map((s) => s.sessionId).find((id) => id !== shellId)!;
-  await page.getByTestId(`tab-${shell2Id}`).click();
-  const term2 = page.getByTestId(`panel-${shell2Id}`);
-  await expect(term2).toBeVisible();
-  await term2.click();
-  await page.keyboard.type("cat /tmp/shared\n");
-  await expect(term2).toContainText(token, { timeout: 20_000 });   // shared container fs
-
-  // PRIMARY acp (#0) still answers concurrently — no cross-session interference:
-  await page.getByTestId("tab-0").click();
-  await page.getByTestId("prompt-input").fill("say hi");
-  await page.getByTestId("prompt-input").press("Enter");
-  await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say hi", { timeout: 30_000 });
+  await runInTerminal(page, shell2Id, "cat /tmp/shared", token);   // shared container fs
 
   // CLOSE REAPS ONLY THAT SESSION: close the FIRST shell; the other three survive (its port/tmux are
   // freed without tearing down the container or the sibling sessions/pumps).
