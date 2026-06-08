@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 
@@ -91,6 +93,47 @@ func (m *Manager) ExecPrefix() []string { return ExecPrefixFor(m.cfg.ContainerRu
 // Keeps execArgv unexported.
 func (m *Manager) TmuxAttachArgv(containerID, session string) []string {
 	return execArgv(ExecPrefixFor(m.cfg.ContainerRuntime), containerID, []string{"tmux", "attach", "-t", session})
+}
+
+// TmuxAttachArgvFor resolves spawnID's agent container and returns the argv to `exec -it <container>
+// tmux attach -t <session>` — the per-(spawn,session) mosh relay attach for an additional session
+// (sp-npxq.3). Like TmuxAttachArgv but spawn-id keyed (the node holds the spawn id, not the Spawn).
+func (m *Manager) TmuxAttachArgvFor(spawnID, session string) ([]string, error) {
+	sp, ok := m.store.Get(spawnID)
+	if !ok || sp.AgentID == "" {
+		return nil, fmt.Errorf("spawn %s has no agent container", spawnID)
+	}
+	return m.TmuxAttachArgv(sp.AgentID, session), nil
+}
+
+// ExecRun runs inner non-interactively in spawnID's agent container, to completion (sp-npxq.3). Used
+// to create/reap additional sessions: launcher tmux-create (mosh), tmux-wrapped acp launcher, and
+// `tmux kill-session`. All return promptly (tmux new-session -d / kill-session exit immediately; the
+// mosh launcher exits after detaching its tmux session).
+func (m *Manager) ExecRun(ctx context.Context, spawnID string, inner []string) error {
+	sp, ok := m.store.Get(spawnID)
+	if !ok || sp.AgentID == "" {
+		return fmt.Errorf("spawn %s has no agent container", spawnID)
+	}
+	argv := execArgv(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime), sp.AgentID, inner)
+	out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("exec %v: %w (%s)", inner, err, out)
+	}
+	return nil
+}
+
+// AttachACPPort dials an additional acp session's in-pod ACP endpoint at podIP:port (sp-npxq.3),
+// parallel to Attach's session-#0 podIP:7000 dial. The node opens an Nth Pump over the returned stream.
+func (m *Manager) AttachACPPort(ctx context.Context, spawnID string, port int) (*runtime.AttachedStream, error) {
+	sp, ok := m.store.Get(spawnID)
+	if !ok {
+		return nil, fmt.Errorf("spawn not found: %s", spawnID)
+	}
+	if sp.PodIP == "" {
+		return nil, fmt.Errorf("spawn %s has no pod IP (rootless-without-bridge unsupported for TCP ACP)", spawnID)
+	}
+	return runtime.AttachTCP(ctx, net.JoinHostPort(sp.PodIP, strconv.Itoa(port)))
 }
 
 // Attach returns the agent's ACP stdio for a spawn, dispatching to the backend's transport (Docker
