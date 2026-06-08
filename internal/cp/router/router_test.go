@@ -64,10 +64,10 @@ func TestMultiClientFanoutAndPerClientRouting(t *testing.T) {
 	node := &mcNode{}
 	r.Bind("sp1", "node-1", node)
 	a, b := &mcClient{}, &mcClient{}
-	if _, err := r.AttachClient("sp1", "ca", a, 0); err != nil {
+	if _, err := r.AttachClient("sp1", "0", "ca", a, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.AttachClient("sp1", "cb", b, 7); err != nil {
+	if _, err := r.AttachClient("sp1", "0", "cb", b, 7); err != nil {
 		t.Fatal(err)
 	}
 	opens := node.opens()
@@ -80,18 +80,18 @@ func TestMultiClientFanoutAndPerClientRouting(t *testing.T) {
 	if opens[1].ClientId != "cb" || opens[1].Cursor != 7 {
 		t.Fatalf("open1 %+v", opens[1])
 	}
-	r.FromNode("sp1", "ca", []byte("for-a"))
-	r.FromNode("sp1", "cb", []byte("for-b"))
+	r.FromNode("sp1", "0", "ca", []byte("for-a"))
+	r.FromNode("sp1", "0", "cb", []byte("for-b"))
 	if a.count() != 1 || b.count() != 1 {
 		t.Fatalf("routing: a=%d b=%d", a.count(), b.count())
 	}
-	r.DetachClient("sp1", "ca")
-	r.DetachClient("sp1", "ca") // stale detach: no-op
+	r.DetachClient("sp1", "0", "ca")
+	r.DetachClient("sp1", "0", "ca") // stale detach: no-op
 	if node.closes() != 1 {
 		t.Fatalf("stale detach should send exactly 1 Close, got %d", node.closes())
 	}
-	r.FromNode("sp1", "ca", []byte("dropped"))
-	r.FromNode("sp1", "cb", []byte("still"))
+	r.FromNode("sp1", "0", "ca", []byte("dropped"))
+	r.FromNode("sp1", "0", "cb", []byte("still"))
 	if a.count() != 1 {
 		t.Fatalf("ca should get nothing after detach, got %d", a.count())
 	}
@@ -105,8 +105,8 @@ func TestFromClientTagsClientID(t *testing.T) {
 	node := &mcNode{}
 	r.Bind("sp1", "node-1", node)
 	a := &mcClient{}
-	r.AttachClient("sp1", "ca", a, 0)
-	if err := r.FromClient("sp1", "ca", []byte("hi")); err != nil {
+	r.AttachClient("sp1", "0", "ca", a, 0)
+	if err := r.FromClient("sp1", "0", "ca", []byte("hi")); err != nil {
 		t.Fatal(err)
 	}
 	var fr *nodev1.Frame
@@ -134,7 +134,7 @@ func TestRouteBothWays(t *testing.T) {
 	r.Bind("sp1", "n1", node)
 
 	cl := &fakeClient{}
-	done, err := r.AttachClient("sp1", "c1", cl, 0)
+	done, err := r.AttachClient("sp1", "0", "c1", cl, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestRouteBothWays(t *testing.T) {
 		t.Fatalf("expected SessionOpen, got %+v", node.sent)
 	}
 
-	if err := r.FromClient("sp1", "c1", []byte("hello")); err != nil {
+	if err := r.FromClient("sp1", "0", "c1", []byte("hello")); err != nil {
 		t.Fatal(err)
 	}
 	last := node.sent[len(node.sent)-1]
@@ -150,7 +150,7 @@ func TestRouteBothWays(t *testing.T) {
 		t.Fatalf("client->node frame wrong: %+v", last)
 	}
 
-	r.FromNode("sp1", "c1", []byte("world"))
+	r.FromNode("sp1", "0", "c1", []byte("world"))
 	if len(cl.got) != 1 || string(cl.got[0]) != "world" {
 		t.Fatalf("node->client: %v", cl.got)
 	}
@@ -165,8 +165,69 @@ func TestRouteBothWays(t *testing.T) {
 
 func TestUnknownSpawnRoutingIsSafe(t *testing.T) {
 	r := New()
-	if err := r.FromClient("ghost", "c1", []byte("x")); err == nil {
+	if err := r.FromClient("ghost", "0", "c1", []byte("x")); err == nil {
 		t.Fatal("FromClient on unknown spawn should error")
 	}
-	r.FromNode("ghost", "c1", []byte("x")) // must not panic with no client/route
+	r.FromNode("ghost", "0", "c1", []byte("x")) // must not panic with no client/route
+}
+
+func sessionInfos(ids ...string) []*nodev1.SessionInfo {
+	out := make([]*nodev1.SessionInfo, len(ids))
+	for i, id := range ids {
+		out[i] = &nodev1.SessionInfo{SessionId: id, State: nodev1.SessionState_SESSION_STATE_ACTIVE}
+	}
+	return out
+}
+
+func TestRouterRosterMirror(t *testing.T) {
+	r := New()
+	n := &mcNode{}
+	r.Bind("s1", "node-1", n)
+	r.UpdateRoster("s1", sessionInfos("0", "1"))
+	got := r.ListSessions("s1")
+	if len(got) != 2 || got[0].SessionId != "0" {
+		t.Fatalf("ListSessions = %+v, want [0 1]", got)
+	}
+	r.ApplySessionStatus("s1", "1", nodev1.SessionState_SESSION_STATE_CLOSED)
+	if r.ListSessions("s1")[1].State != nodev1.SessionState_SESSION_STATE_CLOSED {
+		t.Fatalf("ApplySessionStatus did not update the mirror")
+	}
+}
+
+func TestRouterRosterBeforeBindIsAppliedAtBind(t *testing.T) {
+	r := New()
+	n := &mcNode{}
+	// roster arrives before Bind (race: node emits at ACTIVE; CP Bind runs slightly later)
+	r.UpdateRoster("s1", sessionInfos("0"))
+	if got := r.ListSessions("s1"); got != nil {
+		t.Fatalf("unbound spawn must report no sessions, got %+v", got)
+	}
+	r.Bind("s1", "node-1", n)
+	if got := r.ListSessions("s1"); len(got) != 1 || got[0].SessionId != "0" {
+		t.Fatalf("pending roster not applied at Bind: %+v", got)
+	}
+}
+
+func TestRouterCreateCloseSessionSendToNode(t *testing.T) {
+	r := New()
+	n := &mcNode{}
+	r.Bind("s1", "node-1", n)
+	if err := r.CreateSession("s1", nodev1.SessionTransport_SESSION_TRANSPORT_MOSH, "shell"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.CloseSession("s1", "1"); err != nil {
+		t.Fatal(err)
+	}
+	var creates, closes int
+	for _, m := range n.sent {
+		if m.GetCreateSession() != nil {
+			creates++
+		}
+		if m.GetCloseSession() != nil {
+			closes++
+		}
+	}
+	if creates != 1 || closes != 1 {
+		t.Fatalf("want 1 CreateSession + 1 CloseSession to the node, got creates=%d closes=%d", creates, closes)
+	}
 }

@@ -14,28 +14,38 @@ import (
 type ClientSender interface{ Send([]byte) error }
 
 type route struct {
-	nodeID  string
-	node    registry.NodeSender
-	clients map[string]ClientSender
-	done    chan struct{} // closed when the route is dropped (stop or node evict)
+	nodeID   string
+	node     registry.NodeSender
+	clients  map[string]ClientSender
+	sessions []*nodev1.SessionInfo // mirrored roster (node-authoritative)
+	done     chan struct{}         // closed when the route is dropped (stop or node evict)
 }
 
 type Router struct {
-	mu sync.Mutex
-	m  map[string]*route // spawn_id -> route
+	mu      sync.Mutex
+	m       map[string]*route                // spawn_id -> route
+	pending map[string][]*nodev1.SessionInfo // rosters that arrived before Bind (node-emits-then-Bind race)
 }
 
-func New() *Router { return &Router{m: map[string]*route{}} }
+func New() *Router {
+	return &Router{m: map[string]*route{}, pending: map[string][]*nodev1.SessionInfo{}}
+}
 
-// Bind records which node hosts a spawn (after StartSpawn ACTIVE).
+// Bind records which node hosts a spawn (after StartSpawn ACTIVE). Any roster the node emitted before
+// Bind ran is drained into the new route so ListSessions reflects it immediately.
 func (r *Router) Bind(spawnID, nodeID string, node registry.NodeSender) {
 	r.mu.Lock()
-	r.m[spawnID] = &route{nodeID: nodeID, node: node, clients: map[string]ClientSender{}, done: make(chan struct{})}
+	rt := &route{nodeID: nodeID, node: node, clients: map[string]ClientSender{}, done: make(chan struct{})}
+	if p, ok := r.pending[spawnID]; ok {
+		rt.sessions = p
+		delete(r.pending, spawnID)
+	}
+	r.m[spawnID] = rt
 	r.mu.Unlock()
 }
 
 // AttachClient registers a client by id and tells the node to open the relay for it (carrying cursor).
-func (r *Router) AttachClient(spawnID, clientID string, c ClientSender, cursor int64) (<-chan struct{}, error) {
+func (r *Router) AttachClient(spawnID, sessionID, clientID string, c ClientSender, cursor int64) (<-chan struct{}, error) {
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	if !ok {
@@ -45,11 +55,11 @@ func (r *Router) AttachClient(spawnID, clientID string, c ClientSender, cursor i
 	rt.clients[clientID] = c
 	node, done := rt.node, rt.done
 	r.mu.Unlock()
-	return done, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{SpawnId: spawnID, ClientId: clientID, Cursor: cursor}}})
+	return done, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Cursor: cursor}}})
 }
 
 // DetachClient removes a client and tells the node to close its relay (pod stays).
-func (r *Router) DetachClient(spawnID, clientID string) {
+func (r *Router) DetachClient(spawnID, sessionID, clientID string) {
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	var wasPresent bool
@@ -59,23 +69,24 @@ func (r *Router) DetachClient(spawnID, clientID string) {
 	}
 	r.mu.Unlock()
 	if wasPresent {
-		_ = rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Close{Close: &nodev1.SessionClose{SpawnId: spawnID, ClientId: clientID}}})
+		_ = rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Close{Close: &nodev1.SessionClose{SpawnId: spawnID, SessionId: sessionID, ClientId: clientID}}})
 	}
 }
 
 // FromClient forwards client->agent bytes to the hosting node.
-func (r *Router) FromClient(spawnID, clientID string, data []byte) error {
+func (r *Router) FromClient(spawnID, sessionID, clientID string, data []byte) error {
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	r.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown spawn: %s", spawnID)
 	}
-	return rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Frame{Frame: &nodev1.Frame{SpawnId: spawnID, ClientId: clientID, Data: data}}})
+	return rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Frame{Frame: &nodev1.Frame{SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Data: data}}})
 }
 
-// FromNode forwards an agent->client frame to the addressed client (if still attached).
-func (r *Router) FromNode(spawnID, clientID string, data []byte) {
+// FromNode forwards an agent->client frame to the addressed client (if still attached). The session id
+// is carried for symmetry; today the client is addressed by clientID (multi-session fan-out is sp-npxq.4).
+func (r *Router) FromNode(spawnID, sessionID, clientID string, data []byte) {
 	r.mu.Lock()
 	var c ClientSender
 	if rt, ok := r.m[spawnID]; ok {
@@ -87,6 +98,77 @@ func (r *Router) FromNode(spawnID, clientID string, data []byte) {
 	}
 }
 
+// UpdateRoster replaces the mirrored session set for a spawn. If the route is not bound yet (the node
+// emitted the roster before the scheduler's Bind ran), stash it and apply it at Bind.
+func (r *Router) UpdateRoster(spawnID string, sessions []*nodev1.SessionInfo) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if rt, ok := r.m[spawnID]; ok {
+		rt.sessions = sessions
+		return
+	}
+	r.pending[spawnID] = sessions
+}
+
+// ApplySessionStatus updates a single mirrored session's state (membership unchanged).
+func (r *Router) ApplySessionStatus(spawnID, sessionID string, state nodev1.SessionState) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessionsLocked(spawnID) {
+		if s.SessionId == sessionID {
+			s.State = state
+			return
+		}
+	}
+}
+
+// sessionsLocked returns the live or pending session slice for spawnID (caller holds mu).
+func (r *Router) sessionsLocked(spawnID string) []*nodev1.SessionInfo {
+	if rt, ok := r.m[spawnID]; ok {
+		return rt.sessions
+	}
+	return r.pending[spawnID]
+}
+
+// ListSessions returns a snapshot of the mirrored roster for the client-facing RPC (nil if unbound).
+func (r *Router) ListSessions(spawnID string) []*nodev1.SessionInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rt, ok := r.m[spawnID]
+	if !ok {
+		return nil
+	}
+	out := make([]*nodev1.SessionInfo, len(rt.sessions))
+	copy(out, rt.sessions)
+	return out
+}
+
+// CreateSession asks the hosting node to launch an additional session.
+func (r *Router) CreateSession(spawnID string, transport nodev1.SessionTransport, runnable string) error {
+	r.mu.Lock()
+	rt, ok := r.m[spawnID]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("unknown spawn: %s", spawnID)
+	}
+	return rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: spawnID, Transport: transport, Runnable: runnable,
+	}}})
+}
+
+// CloseSession asks the hosting node to reap one session.
+func (r *Router) CloseSession(spawnID, sessionID string) error {
+	r.mu.Lock()
+	rt, ok := r.m[spawnID]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("unknown spawn: %s", spawnID)
+	}
+	return rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_CloseSession{CloseSession: &nodev1.CloseSession{
+		SpawnId: spawnID, SessionId: sessionID,
+	}}})
+}
+
 // Drop removes a single spawn's route (on StopSpawn) and unblocks any client.
 func (r *Router) Drop(spawnID string) {
 	r.mu.Lock()
@@ -94,6 +176,7 @@ func (r *Router) Drop(spawnID string) {
 		close(rt.done)
 		delete(r.m, spawnID)
 	}
+	delete(r.pending, spawnID)
 	r.mu.Unlock()
 }
 
@@ -106,6 +189,7 @@ func (r *Router) DropNode(nodeID string) []string {
 		if rt.nodeID == nodeID {
 			close(rt.done)
 			delete(r.m, id)
+			delete(r.pending, id)
 			dropped = append(dropped, id)
 		}
 	}
