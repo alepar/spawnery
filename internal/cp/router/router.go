@@ -30,6 +30,16 @@ type route struct {
 // clientKey identifies one attached client within a spawn: the (session, client) pair.
 type clientKey struct{ sessionID, clientID string }
 
+// ck builds a clientKey, normalizing an empty sessionID to "0". The ws bind defaults empty -> "0"
+// (single-session clients), and the node may emit session-#0 frames with an empty session_id (legacy
+// single-session path), so "" and "0" must address the same client.
+func ck(sessionID, clientID string) clientKey {
+	if sessionID == "" {
+		sessionID = "0"
+	}
+	return clientKey{sessionID, clientID}
+}
+
 // pendingRoster is a roster stashed before its spawn's Bind ran. The nodeID is retained so DropNode
 // can purge stashes for a node that drops before the spawn ever binds.
 type pendingRoster struct {
@@ -68,7 +78,7 @@ func (r *Router) AttachClient(spawnID, sessionID, clientID string, c ClientSende
 		r.mu.Unlock()
 		return nil, fmt.Errorf("unknown spawn: %s", spawnID)
 	}
-	rt.clients[clientKey{sessionID, clientID}] = c
+	rt.clients[ck(sessionID, clientID)] = c
 	node, done := rt.node, rt.done
 	r.mu.Unlock()
 	return done, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Cursor: cursor}}})
@@ -80,8 +90,8 @@ func (r *Router) DetachClient(spawnID, sessionID, clientID string) {
 	rt, ok := r.m[spawnID]
 	var wasPresent bool
 	if ok {
-		_, wasPresent = rt.clients[clientKey{sessionID, clientID}]
-		delete(rt.clients, clientKey{sessionID, clientID})
+		_, wasPresent = rt.clients[ck(sessionID, clientID)]
+		delete(rt.clients, ck(sessionID, clientID))
 	}
 	r.mu.Unlock()
 	if wasPresent {
@@ -106,7 +116,7 @@ func (r *Router) FromNode(spawnID, sessionID, clientID string, data []byte) {
 	r.mu.Lock()
 	var c ClientSender
 	if rt, ok := r.m[spawnID]; ok {
-		c = rt.clients[clientKey{sessionID, clientID}]
+		c = rt.clients[ck(sessionID, clientID)]
 	}
 	r.mu.Unlock()
 	if c != nil {
