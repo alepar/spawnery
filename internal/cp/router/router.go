@@ -16,12 +16,19 @@ import (
 type ClientSender interface{ Send([]byte) error }
 
 type route struct {
-	nodeID   string
-	node     registry.NodeSender
-	clients  map[string]ClientSender
+	nodeID string
+	node   registry.NodeSender
+	// clients is keyed by (sessionID, clientID): a spawn hosts multiple concurrent sessions whose
+	// browser panels may share a clientID (the web uses a module-level CLIENT_ID per panel type), so
+	// addressing by clientID alone would let a 2nd session's attach clobber the 1st's sender and
+	// misroute agent->client frames (sp-npxq.5). The proto carries session_id on every frame.
+	clients  map[clientKey]ClientSender
 	sessions []*nodev1.SessionInfo // mirrored roster (node-authoritative)
 	done     chan struct{}         // closed when the route is dropped (stop or node evict)
 }
+
+// clientKey identifies one attached client within a spawn: the (session, client) pair.
+type clientKey struct{ sessionID, clientID string }
 
 // pendingRoster is a roster stashed before its spawn's Bind ran. The nodeID is retained so DropNode
 // can purge stashes for a node that drops before the spawn ever binds.
@@ -44,7 +51,7 @@ func New() *Router {
 // Bind ran is drained into the new route so ListSessions reflects it immediately.
 func (r *Router) Bind(spawnID, nodeID string, node registry.NodeSender) {
 	r.mu.Lock()
-	rt := &route{nodeID: nodeID, node: node, clients: map[string]ClientSender{}, done: make(chan struct{})}
+	rt := &route{nodeID: nodeID, node: node, clients: map[clientKey]ClientSender{}, done: make(chan struct{})}
 	if p, ok := r.pending[spawnID]; ok {
 		rt.sessions = p.sessions
 		delete(r.pending, spawnID)
@@ -61,7 +68,7 @@ func (r *Router) AttachClient(spawnID, sessionID, clientID string, c ClientSende
 		r.mu.Unlock()
 		return nil, fmt.Errorf("unknown spawn: %s", spawnID)
 	}
-	rt.clients[clientID] = c
+	rt.clients[clientKey{sessionID, clientID}] = c
 	node, done := rt.node, rt.done
 	r.mu.Unlock()
 	return done, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Cursor: cursor}}})
@@ -73,8 +80,8 @@ func (r *Router) DetachClient(spawnID, sessionID, clientID string) {
 	rt, ok := r.m[spawnID]
 	var wasPresent bool
 	if ok {
-		_, wasPresent = rt.clients[clientID]
-		delete(rt.clients, clientID)
+		_, wasPresent = rt.clients[clientKey{sessionID, clientID}]
+		delete(rt.clients, clientKey{sessionID, clientID})
 	}
 	r.mu.Unlock()
 	if wasPresent {
@@ -93,13 +100,13 @@ func (r *Router) FromClient(spawnID, sessionID, clientID string, data []byte) er
 	return rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Frame{Frame: &nodev1.Frame{SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Data: data}}})
 }
 
-// FromNode forwards an agent->client frame to the addressed client (if still attached). The session id
-// is carried for symmetry; today the client is addressed by clientID (multi-session fan-out is sp-npxq.4).
+// FromNode forwards an agent->client frame to the addressed client (if still attached), keyed by
+// (sessionID, clientID) so concurrent sessions sharing a clientID each get their own frames (sp-npxq.5).
 func (r *Router) FromNode(spawnID, sessionID, clientID string, data []byte) {
 	r.mu.Lock()
 	var c ClientSender
 	if rt, ok := r.m[spawnID]; ok {
-		c = rt.clients[clientID]
+		c = rt.clients[clientKey{sessionID, clientID}]
 	}
 	r.mu.Unlock()
 	if c != nil {

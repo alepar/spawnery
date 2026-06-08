@@ -266,3 +266,35 @@ func TestRouterCreateCloseSessionSendToNode(t *testing.T) {
 		t.Fatalf("want 1 CreateSession + 1 CloseSession to the node, got creates=%d closes=%d", creates, closes)
 	}
 }
+
+// TestPerSessionClientRouting reproduces the multi-session collision (sp-npxq.5): two ACP sessions of
+// one spawn whose browser panels share a clientId (the web AcpSessionPanel/TerminalView use a
+// module-level CLIENT_ID). The router must key senders by (sessionID, clientID) so session #0's agent
+// replies don't get misrouted to the 2nd session's socket. With clientID-only keying, the 2nd attach
+// overwrote the first and FromNode for session "0" delivered to session "1"'s client.
+func TestPerSessionClientRouting(t *testing.T) {
+	r := New()
+	node := &mcNode{}
+	r.Bind("sp1", "node-1", node)
+	s0, s1 := &mcClient{}, &mcClient{}
+	if _, err := r.AttachClient("sp1", "0", "shared", s0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.AttachClient("sp1", "1", "shared", s1, 0); err != nil {
+		t.Fatal(err)
+	}
+	r.FromNode("sp1", "0", "shared", []byte("for-0"))
+	r.FromNode("sp1", "1", "shared", []byte("for-1"))
+	if s0.count() != 1 {
+		t.Fatalf("session #0 client must receive its own frame, got %d (misrouted by shared clientID)", s0.count())
+	}
+	if s1.count() != 1 {
+		t.Fatalf("session #1 client must receive its own frame, got %d", s1.count())
+	}
+	// Detaching session #1 must not drop session #0's same-clientID sender.
+	r.DetachClient("sp1", "1", "shared")
+	r.FromNode("sp1", "0", "shared", []byte("still-0"))
+	if s0.count() != 2 {
+		t.Fatalf("session #0 must survive session #1 detach, got %d", s0.count())
+	}
+}
