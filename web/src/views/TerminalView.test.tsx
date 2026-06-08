@@ -1,11 +1,17 @@
-import { render } from "@testing-library/react";
+import { render, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { useEffect } from "react";
 
 // jsdom doesn't implement ResizeObserver — stub it so TerminalView can mount.
 globalThis.ResizeObserver = class {
   observe() {}
   unobserve() {}
   disconnect() {}
+};
+
+// TerminalView's live-update effect calls document.fonts.load — stub it in jsdom.
+(document as unknown as { fonts: { load: ReturnType<typeof vi.fn> } }).fonts = {
+  load: vi.fn().mockResolvedValue([]),
 };
 
 // ─── Fake xterm Terminal ─────────────────────────────────────────────────────
@@ -18,6 +24,8 @@ const mockTerminal = {
   loadAddon: vi.fn(),
   open: vi.fn(),
   focus: vi.fn(),
+  refresh: vi.fn(),
+  options: {} as { theme?: unknown; fontFamily?: string; fontSize?: number },
   write: vi.fn((d: string | Uint8Array, cb?: () => void) => { writtenData.push(d); if (cb) capturedWriteCallbacks.push(cb); }),
   onData: vi.fn((cb: (d: string) => void) => { capturedOnData = cb; return { dispose: vi.fn() }; }),
   onResize: vi.fn(() => ({ dispose: vi.fn() })),
@@ -62,7 +70,22 @@ vi.mock("@/shell/reconnectingSocket", () => ({
 }));
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
+import { Terminal } from "@xterm/xterm";
 import { TerminalView } from "./TerminalView";
+import {
+  TermSettingsProvider,
+  useTermSettings,
+  DEFAULT_TERM_SETTINGS,
+  resolveActiveTheme,
+} from "@/term/settings";
+import { fontById } from "@/term/fonts";
+
+const TerminalMock = Terminal as unknown as ReturnType<typeof vi.fn>;
+
+// Renders TerminalView inside the settings provider (required by useTermSettings).
+function renderWithSettings(ui: React.ReactElement) {
+  return render(<TermSettingsProvider>{ui}</TermSettingsProvider>);
+}
 
 beforeEach(() => {
   capturedOnData = null;
@@ -76,25 +99,30 @@ beforeEach(() => {
   mockTerminal.loadAddon.mockClear();
   mockTerminal.dispose.mockClear();
   mockTerminal.focus.mockClear();
+  mockTerminal.refresh.mockClear();
+  mockTerminal.options = {};
   mockFitAddon.fit.mockClear();
+  TerminalMock.mockClear();
+  localStorage.clear();
+  document.documentElement.classList.remove("dark");
 });
 
 describe("TerminalView", () => {
   it("renders a div with data-testid=terminal-view", () => {
-    const { getByTestId } = render(<TerminalView spawnId="sp1" />);
+    const { getByTestId } = renderWithSettings(<TerminalView spawnId="sp1" />);
     expect(getByTestId("terminal-view")).toBeTruthy();
   });
 
   it("focuses the terminal on mount and on spawn switch (so keystrokes go straight into the TUI)", () => {
-    const { rerender } = render(<TerminalView spawnId="sp1" />);
+    const { rerender } = renderWithSettings(<TerminalView spawnId="sp1" />);
     expect(mockTerminal.focus).toHaveBeenCalledTimes(1);
     // Switching spawns re-runs the spawnId-keyed effect (new Terminal) and refocuses.
-    rerender(<TerminalView spawnId="sp2" />);
+    rerender(<TermSettingsProvider><TerminalView spawnId="sp2" /></TermSettingsProvider>);
     expect(mockTerminal.focus).toHaveBeenCalledTimes(2);
   });
 
   it("sends a JSON bind with spawnId on socket open", () => {
-    render(<TerminalView spawnId="sp1" />);
+    renderWithSettings(<TerminalView spawnId="sp1" />);
     expect(fakeSocketInstance).not.toBeNull();
     // Trigger the onOpen callback
     fakeSocketInstance!.opts.onOpen();
@@ -108,7 +136,7 @@ describe("TerminalView", () => {
   });
 
   it("writes received ArrayBuffer bytes to the terminal", () => {
-    render(<TerminalView spawnId="sp1" />);
+    renderWithSettings(<TerminalView spawnId="sp1" />);
     expect(fakeSocketInstance).not.toBeNull();
     // Simulate receiving binary data from server
     const data = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
@@ -119,7 +147,7 @@ describe("TerminalView", () => {
   });
 
   it("sends a 0x00-prefixed input frame when terminal onData fires", () => {
-    render(<TerminalView spawnId="sp1" />);
+    renderWithSettings(<TerminalView spawnId="sp1" />);
     expect(fakeSocketInstance).not.toBeNull();
     expect(capturedOnData).not.toBeNull();
     // Trigger onOpen so the socket is ready
@@ -137,7 +165,7 @@ describe("TerminalView", () => {
   });
 
   it("writes received string data to the terminal as Uint8Array bytes", () => {
-    render(<TerminalView spawnId="sp1" />);
+    renderWithSettings(<TerminalView spawnId="sp1" />);
     fakeSocketInstance!.opts.onMessage!("hello\r\n");
     // TextEncoder in jsdom runs in a different realm so instanceof Uint8Array is unreliable;
     // ArrayBuffer.isView works across realms and confirms the value is a typed array view.
@@ -147,7 +175,7 @@ describe("TerminalView", () => {
 
   it("reports socket state via onConn: connecting on mount, connected on open, reconnecting on down", () => {
     const onConn = vi.fn();
-    render(<TerminalView spawnId="sp1" onConn={onConn} />);
+    renderWithSettings(<TerminalView spawnId="sp1" onConn={onConn} />);
     expect(fakeSocketInstance).not.toBeNull();
     // onConn("connecting") fires synchronously when the socket is created (before open).
     expect(onConn).toHaveBeenCalledWith("connecting");
@@ -163,7 +191,7 @@ describe("TerminalView", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     // Use a tiny threshold (10 bytes) so a small burst triggers a wedge.
     // The mock term.write captures callbacks but never invokes them, simulating a stalled xterm.
-    render(<TerminalView spawnId="sp-wedge" backlogThreshold={10} />);
+    renderWithSettings(<TerminalView spawnId="sp-wedge" backlogThreshold={10} />);
     expect(fakeSocketInstance).not.toBeNull();
     // Send two 6-byte messages; after the second the outstanding backlog is 12 > 10 → wedge.
     fakeSocketInstance!.opts.onMessage!(new Uint8Array(6).buffer);
@@ -171,5 +199,50 @@ describe("TerminalView", () => {
     expect(warnSpy).toHaveBeenCalledOnce();
     expect(warnSpy.mock.calls[0][0]).toMatch(/terminal backlog wedge/);
     warnSpy.mockRestore();
+  });
+
+  // ─── Appearance settings ───────────────────────────────────────────────────
+  it("applies the default appearance settings to the terminal on mount", () => {
+    renderWithSettings(<TerminalView spawnId="sp1" />);
+    // theme/font/size come from DEFAULT_TERM_SETTINGS (app is light by default here).
+    expect(mockTerminal.options.fontSize).toBe(DEFAULT_TERM_SETTINGS.fontSize);
+    expect(mockTerminal.options.fontFamily).toBe(fontById(DEFAULT_TERM_SETTINGS.fontFamily).stack);
+    expect(mockTerminal.options.theme).toEqual(resolveActiveTheme(DEFAULT_TERM_SETTINGS, false));
+  });
+
+  it("updates the SAME terminal in place when settings change (no recreate) and re-sends a resize", async () => {
+    // Harness exposing the provider's update() so a test can drive a settings change.
+    let triggerUpdate: () => void = () => {};
+    function Harness() {
+      const { update } = useTermSettings();
+      useEffect(() => {
+        triggerUpdate = () => update({ fontFamily: "fira-code", fontSize: 18 });
+      }, [update]);
+      return <TerminalView spawnId="sp1" />;
+    }
+    render(<TermSettingsProvider><Harness /></TermSettingsProvider>);
+
+    // Terminal constructed exactly once on mount.
+    expect(TerminalMock).toHaveBeenCalledTimes(1);
+    fakeSocketInstance!.opts.onOpen();
+    const sentBefore = fakeSocketInstance!.sent.length;
+
+    await act(async () => {
+      triggerUpdate();
+      // Let the [settings,appDark] effect's document.fonts.load promise resolve.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // No recreate: the constructor was not called again — same instance mutated.
+    expect(TerminalMock).toHaveBeenCalledTimes(1);
+    expect(mockTerminal.options.fontFamily).toBe(fontById("fira-code").stack);
+    expect(mockTerminal.options.fontSize).toBe(18);
+    expect(mockTerminal.refresh).toHaveBeenCalled();
+
+    // A resize frame was re-sent so the PTY follows the new cell metrics.
+    const after = fakeSocketInstance!.sent.slice(sentBefore);
+    const resizeFrames = after.filter((f) => f instanceof Uint8Array);
+    expect(resizeFrames.length).toBeGreaterThanOrEqual(1);
   });
 });
