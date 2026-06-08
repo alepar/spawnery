@@ -97,7 +97,7 @@ Go 1.26 monorepo (host binaries in `cmd/`) + a Vite/React SPA in `web/`. Recipes
 `Justfile` (`just --list`); `make` builds binaries, images, and generated code.
 
 ```bash
-make build          # bin/spawnlet + bin/spawnctl   (also: make bin/cp)
+make build          # bin/spawnlet + bin/spawnctl   (also: make bin/spawnery_cp)
 make gen            # regenerate protobuf/Connect code (buf) — after proto/ changes
 make images         # build sidecar/stubagent/agent container images
 
@@ -119,7 +119,7 @@ just setup          # one-time: mprocs, web deps, playwright chromium
 
 Spawnery runs sandboxed coding-agent **spawns** on local/cloud nodes, driven over ACP.
 
-- **Control plane** (`cmd/cp`, `internal/cp`) — spawn lifecycle, scheduler/placement, app
+- **Control plane** (`cmd/spawnery_cp`, `internal/cp`) — spawn lifecycle, scheduler/placement, app
   catalog/marketplace, auth; relays ACP between clients and nodes. Store in `internal/cp/store`.
 - **Node / spawnlet** (`cmd/spawnlet`, `internal/spawnlet`, `internal/runtime`) — runs spawns as
   pods via pluggable `PodBackend`s (Docker/runc + CRI lanes), applies the per-pod egress floor,

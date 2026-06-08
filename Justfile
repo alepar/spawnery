@@ -23,8 +23,8 @@ spawnlet agent="agent": (_images agent)
 
 # control plane (foreground)
 cp:
-    @make bin/cp
-    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/cp
+    @make bin/spawnery_cp
+    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/spawnery_cp
 
 # spawnlet attached to the CP — root-free dev node (self-hosted + egress floor off). `just node stub` = echo agent.
 node agent="agent": (_images agent)

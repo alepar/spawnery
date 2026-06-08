@@ -21,7 +21,7 @@ import (
 
 // readyTimeout bounds how long startSpawn waits for the agent to answer pump.start's ACP initialize
 // handshake before declaring the spawn failed (the standalone readiness probe is folded into that
-// handshake). Kept well under the CP scheduler's 60s Provision wait (cmd/cp/main.go) so the node
+// handshake). Kept well under the CP scheduler's 60s Provision wait (cmd/spawnery_cp/main.go) so the node
 // reports ERROR (with a useful detail) rather than the scheduler timing out. goose boots to ACP-ready
 // in ~5s; 30s is generous headroom for a slow node.
 const readyTimeout = 30 * time.Second

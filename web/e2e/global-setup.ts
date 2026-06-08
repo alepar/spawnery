@@ -45,13 +45,13 @@ function waitForPort(host: string, port: number, timeoutMs: number): Promise<voi
 }
 
 export default async function globalSetup() {
-  await build("cp", "./cmd/cp");
+  await build("spawnery_cp", "./cmd/spawnery_cp");
   await build("spawnlet", "./cmd/spawnlet");
   // Build the fattened stub fixture (bash+tmux+launcher+acpmux+stubagent) so the node can exec
   // additional sessions into the agent container — credential-free (sp-npxq.5).
   await dockerBuild("spawnery/stubagent:dev", "deploy/stubagent/Dockerfile");
 
-  const cp = spawn(path.join(REPO, "bin", "cp"), [], {
+  const cp = spawn(path.join(REPO, "bin", "spawnery_cp"), [], {
     cwd: REPO,
     env: {
       ...process.env,
