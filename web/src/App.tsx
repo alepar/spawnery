@@ -6,16 +6,19 @@ import {
   DEV_TOKEN, type SpawnView,
 } from "./api/spawnlet";
 import { Conn } from "./acp/conn";
-import { encodePrompt, encodePermResponse, type Frame } from "./acp/frames";
+import { encodePrompt, encodePermResponse, encodeSetMode, encodeCancel, type Frame, type Command, type ModePayload } from "./acp/frames";
 import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
 import { ReconnectingSocket } from "./shell/reconnectingSocket";
 import { nextConnAction } from "./shell/connPolicy";
 import { initialTheme, setTheme } from "./lib/theme";
-import type { Item, TurnState } from "./views/chat/types";
+import type { Item, TurnState, PermPrompt } from "./views/chat/types";
 import { reconcilePending, MAX_QUEUED } from "./lib/turn";
 import { useNav } from "./nav/useNav";
 import type { Nav } from "./nav/nav";
+import { upsertTool as upsertToolItems } from "./lib/toolChip";
+import { upsertPlan as upsertPlanItems } from "./lib/plan";
+import { mergeMode } from "./lib/mode";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
@@ -47,7 +50,9 @@ export function App() {
   const { conn, connecting, connected, errored, reset, waiting, reconnecting } = useConnStatus();
   const [items, setItems] = useState<Item[]>([]);
   const [turn, setTurn] = useState<TurnState>({ state: "idle", queued: 0 });
-  const [perm, setPerm] = useState<{ title: string; resolve: (b: boolean) => void } | null>(null);
+  const [perm, setPerm] = useState<PermPrompt | null>(null);
+  const [commands, setCommands] = useState<Command[]>([]); // advertised slash commands for the active spawn (cat E)
+  const [mode, setMode] = useState<ModePayload | null>(null); // session modes for the active spawn (cat F)
   const [spawns, setSpawns] = useState<SpawnView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
 
@@ -57,6 +62,8 @@ export function App() {
   const genRef = useRef(0);
   const buffersRef = useRef<Map<string, Item[]>>(new Map());
   const turnsRef = useRef<Map<string, TurnState>>(new Map());
+  const commandsRef = useRef<Map<string, Command[]>>(new Map()); // per-spawn command set (cat E)
+  const modesRef = useRef<Map<string, ModePayload | null>>(new Map()); // per-spawn session-mode state (cat F)
   // refs mirroring state so async callbacks (poll, ws onopen, onHistory) don't read stale closures.
   const activeIdRef = useRef<string | null>(null);
   const spawnsRef = useRef<SpawnView[]>([]);
@@ -81,6 +88,10 @@ export function App() {
   const closeSession = () => { teardown(); reset(); };
 
   const add = (it: ItemInput) => setItems((xs) => [...xs, withId(it)]);
+  // upsertTool reconciles tool_call / tool_call_update frames into a single chip keyed by toolId: the
+  // creation adds the chip; later updates merge status/content/raw in place (so one tool = one chip).
+  const upsertTool = (f: Extract<Frame, { kind: "tool" }>) =>
+    setItems((xs) => upsertToolItems(xs, f, () => idRef.current++));
   const appendChunk = (kind: "agent" | "thought") => (t: string) =>
     setItems((xs) => {
       const last = xs[xs.length - 1];
@@ -106,10 +117,34 @@ export function App() {
         appendChunk("thought")(f.text ?? "");
         break;
       case "tool":
-        add({ kind: "tool", title: f.title ?? "tool", status: f.status });
+        upsertTool(f);
         break;
+      case "plan":
+        // Replace-in-place: each plan frame carries the WHOLE current plan, so swap the single plan
+        // item's entries (see lib/plan.ts). No plan ever -> no plan item -> nothing renders.
+        setItems((xs) => upsertPlanItems(xs, f.plan ?? [], () => idRef.current++));
+        break;
+      case "commands": {
+        // Replace-in-place: the frame carries the WHOLE current command set. Stash it per-spawn (so a
+        // later spawn-switch restores it) and surface it to the active prompt box's `/`-menu. No
+        // commands frame ever (e.g. goose) -> the set stays [] -> the menu is inert (cat E).
+        const cmds = f.cmds ?? [];
+        commandsRef.current.set(spawnId, cmds);
+        setCommands(cmds);
+        break;
+      }
+      case "mode": {
+        // The agent advertised its modes (on session/new -> current + available) or switched the active
+        // mode (current_mode_update -> current only). mergeMode keeps the prior available set when the
+        // frame omits it, so the selector follows the agent's current mode. Stash per-spawn (restored on
+        // spawn-switch). No mode frame ever (e.g. goose) -> mode stays null -> no selector (cat F).
+        const merged = mergeMode(modesRef.current.get(spawnId) ?? null, f.mode);
+        modesRef.current.set(spawnId, merged);
+        setMode(merged);
+        break;
+      }
       case "turn": {
-        const t: TurnState = { state: f.state ?? "idle", queued: f.queued ?? 0 };
+        const t: TurnState = { state: f.state ?? "idle", queued: f.queued ?? 0, reason: f.reason, error: f.error, usage: f.usage };
         setTurn(t);
         turnsRef.current.set(spawnId, t);
         setItems((cur) => reconcilePending(cur, t.queued));
@@ -118,9 +153,11 @@ export function App() {
       case "perm_request":
         // resolve uses the CURRENT socket at click time: if the user switched spawns first, the
         // perm_response targets the new socket and the node no-ops the unknown reqId (harmless).
+        // optionId is the agent option the user picked (cat H); "" (dismiss) lets the node auto-deny.
         setPerm({
           title: f.title ?? "an action",
-          resolve: (allow) => { setPerm(null); wsRef.current?.send(encodePermResponse(f.reqId ?? "", allow)); },
+          options: f.options ?? [],
+          resolve: (optionId) => { setPerm(null); wsRef.current?.send(encodePermResponse(f.reqId ?? "", optionId)); },
         });
         break;
     }
@@ -163,7 +200,11 @@ export function App() {
           closeSession();
           setActiveId(null); activeIdRef.current = null; setItems([]);
           setTurn({ state: "idle", queued: 0 });
+          setCommands([]);
+          setMode(null);
           turnsRef.current.delete(aid);
+          commandsRef.current.delete(aid);
+          modesRef.current.delete(aid);
           break;
         case "open":
           // Only non-tmux spawns open an App-managed ACP ws here. tmux spawns self-manage BOTH their
@@ -223,6 +264,8 @@ export function App() {
       return [];
     });
     setTurn({ state: "idle", queued: 0 });
+    setCommands([]); // new spawn: its command set arrives via the next `commands` frame
+    setMode(null); // new spawn: its modes arrive via the next `mode` frame (cat F)
     waiting(); // grey-pulse until the node signals active; the poll then opens the ws
     try {
       const id = await createSpawn(appId, MODEL, image, runnableId); // async CP: returns immediately, status 'starting'
@@ -257,6 +300,10 @@ export function App() {
       return buf;
     });
     setTurn(turnsRef.current.get(id) ?? { state: "idle", queued: 0 });
+    // An active spawn replays from cursor 0, so its `commands` frame re-arrives; seed from the cache
+    // meanwhile (and it's the only source for a non-active, non-replaying spawn).
+    setCommands(commandsRef.current.get(id) ?? []);
+    setMode(modesRef.current.get(id) ?? null); // restore the spawn's mode state (re-arrives on replay for active)
     if (sp?.status === "active" && sp.mode !== "tmux") openSession(id);
     else if (sp?.status === "active" && sp.mode === "tmux") connecting(); // tmux: TerminalView's socket drives the dot from here
     else if (sp?.status === "starting") waiting();
@@ -305,12 +352,16 @@ export function App() {
     try {
       await suspendSpawn(id);
       buffersRef.current.delete(id); // resumed spawns start fresh — drop the stale cached transcript
+      commandsRef.current.delete(id);
+      modesRef.current.delete(id);
+      turnsRef.current.delete(id); // drop cached turn state too, matching the sibling refs
       // keep the spawn selected (unlike onStop) — the user stays on its now-empty suspended view.
       if (activeIdRef.current === id) {
         closeSession();
         setItems([]);
         setTurn({ state: "idle", queued: 0 });
-        turnsRef.current.delete(id);
+        setCommands([]);
+        setMode(null);
       }
     } catch (e: any) { toast.error("Suspend failed: " + e.message); }
     refreshSpawns();
@@ -331,8 +382,10 @@ export function App() {
     try { await deleteSpawn(id); } catch (e: any) { toast.error("Stop failed: " + e.message); }
     buffersRef.current.delete(id);
     turnsRef.current.delete(id);
+    commandsRef.current.delete(id);
+    modesRef.current.delete(id);
     if (activeIdRef.current === id) {
-      closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setTurn({ state: "idle", queued: 0 });
+      closeSession(); setActiveId(null); activeIdRef.current = null; setItems([]); setTurn({ state: "idle", queued: 0 }); setCommands([]); setMode(null);
       navigate({ section: "templates" }); // the active spawn is gone — leave its URL
     }
     // stopping a non-active spawn does not navigate (the user stays where they are)
@@ -341,6 +394,19 @@ export function App() {
 
   const onSend = (text: string) => {
     wsRef.current?.send(encodePrompt(text));
+  };
+
+  // onSetMode sends the upward set_mode control frame (cat F). The selector then follows the agent's
+  // current_mode_update rather than optimistically updating, so a rejected switch leaves it unchanged.
+  const onSetMode = (modeId: string) => {
+    wsRef.current?.send(encodeSetMode(modeId));
+  };
+
+  // onCancel sends the upward cancel control frame (cat J): interrupt the in-flight turn. The agent then
+  // ends the turn with the `cancelled` reason (cat G), which arrives as a turn=idle frame — no optimistic
+  // local state change. Shown only while a turn is busy.
+  const onCancel = () => {
+    wsRef.current?.send(encodeCancel());
   };
 
   // tmux spawns have no App-managed ACP socket; their TerminalView drives the header dot.
@@ -358,6 +424,10 @@ export function App() {
       canSend={conn === "connected" && turn.queued < MAX_QUEUED}
       onSend={onSend}
       perm={perm}
+      commands={commands}
+      mode={mode}
+      onSetMode={onSetMode}
+      onCancel={onCancel}
       onSpawnApp={spawnApp}
       spawns={spawns}
       activeId={activeId}

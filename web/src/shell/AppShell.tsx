@@ -6,7 +6,8 @@ import { ChatView } from "@/views/ChatView";
 import { TerminalView } from "@/views/TerminalView";
 import { TemplatesView } from "@/views/TemplatesView";
 import { SettingsView } from "@/views/SettingsView";
-import type { Item, TurnState } from "@/views/chat/types";
+import type { Item, TurnState, PermPrompt } from "@/views/chat/types";
+import type { Command, ModePayload } from "@/acp/frames";
 import type { SpawnView } from "@/api/spawnlet";
 import type { Nav } from "@/nav/nav";
 
@@ -19,13 +20,13 @@ function topView(section: Nav["section"]): TopView {
   return "templates";
 }
 
-export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp, spawns = [], activeId, actions, onTermConn, nav, navigate }: {
+export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp, spawns = [], activeId, actions, onTermConn, nav, navigate, commands, mode, onSetMode, onCancel }: {
   conn: ConnState | null;
   items: Item[];
   turn: TurnState;
   canSend: boolean;
   onSend: (t: string) => void;
-  perm: { title: string; resolve: (b: boolean) => void } | null;
+  perm: PermPrompt | null;
   onSpawnApp: (appId: string, image?: string, runnableId?: string) => void;
   spawns?: SpawnView[];
   activeId?: string | null;
@@ -36,6 +37,10 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
   // and routed through it. App's handlers (onSpawnApp, actions.onSelectSpawn/onResume) already navigate.
   nav: Nav;
   navigate: (nav: Nav, opts?: { replace?: boolean }) => void;
+  commands?: Command[];
+  mode?: ModePayload | null; // session modes for the active spawn (cat F)
+  onSetMode?: (modeId: string) => void;
+  onCancel?: () => void; // interrupt the in-flight turn (cat J)
 }) {
   const view = topView(nav.section);
   const activeSpawn = spawns.find((s) => s.spawnId === activeId);
@@ -56,7 +61,7 @@ export function AppShell({ conn, items, turn, canSend, onSend, perm, onSpawnApp,
               App.tsx only opens the ACP session once status flips to "active" (same refresh that
               carries the mode), so no stray ACP session opens for a tmux spawn. */}
           {view === "chat" && activeMode === "tmux" && activeId && <TerminalView spawnId={activeId} onConn={onTermConn} />}
-          {view === "chat" && activeMode !== "tmux" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} focusKey={activeId} />}
+          {view === "chat" && activeMode !== "tmux" && <ChatView items={items} turn={turn} canSend={canSend} onSend={onSend} perm={perm} focusKey={activeId} commands={commands} mode={mode} onSetMode={onSetMode} onCancel={onCancel} />}
           {view === "templates" && <TemplatesView nav={nav} navigate={navigate} onSpawn={onSpawnApp} />}
           {view === "settings" && <SettingsView />}
         </main>

@@ -5,10 +5,22 @@ import { cn } from "@/lib/utils";
 import type { Item } from "./types";
 import { ToolCallChip } from "./ToolCallChip";
 import { Thoughts } from "./Thoughts";
+import { PlanChecklist } from "./PlanChecklist";
 
 const Row = memo(function Row({ item }: { item: Item }) {
-  if (item.kind === "tool") return <ToolCallChip title={item.title} status={item.status} />;
+  if (item.kind === "tool")
+    return (
+      <ToolCallChip
+        title={item.title}
+        status={item.status}
+        content={item.content}
+        diff={item.diff}
+        rawInput={item.rawInput}
+        rawOutput={item.rawOutput}
+      />
+    );
   if (item.kind === "thought") return <Thoughts text={item.text} />;
+  if (item.kind === "plan") return <PlanChecklist entries={item.entries} />;
 
   const isUser = item.kind === "user";
   const pending = isUser && item.pending;
@@ -28,13 +40,27 @@ const Row = memo(function Row({ item }: { item: Item }) {
   );
 });
 
-type ListContext = { working: boolean; queued: number };
+type ListContext = { working: boolean; queued: number; endLabel?: string | null; usageLabel?: string | null };
 
 // WorkingFooter renders the transcript-footer typing indicator (pulsing dots + "working…[· N queued]")
-// while the agent is mid-turn. It is the list Footer so it sits at the end of the conversation and
-// scrolls with followOutput.
+// while the agent is mid-turn. When the turn has instead ended for a non-normal reason (cat G), it
+// renders an honest turn-ending indicator (e.g. "stopped: max tokens" / "cancelled" / an error)
+// instead of silently going idle, plus a per-turn token/cost usage badge when the agent reported usage
+// (cat D, guarded — absent agents show no badge). A normal usage-less end_turn shows nothing. It is the
+// list Footer so it sits at the end of the conversation and scrolls with followOutput.
 function WorkingFooter({ context }: { context?: ListContext }) {
-  if (!context?.working) return null;
+  if (!context?.working) {
+    const { endLabel, usageLabel } = context ?? {};
+    if (endLabel || usageLabel) {
+      return (
+        <div className="mx-auto flex max-w-[70ch] items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
+          {endLabel && <span data-testid="turn-ended-indicator">{endLabel}</span>}
+          {usageLabel && <span data-testid="turn-usage-badge">{usageLabel}</span>}
+        </div>
+      );
+    }
+    return null;
+  }
   return (
     <div data-testid="working-indicator" className="mx-auto flex max-w-[70ch] items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
       <span className="flex gap-1">
@@ -47,7 +73,7 @@ function WorkingFooter({ context }: { context?: ListContext }) {
   );
 }
 
-export function MessageList({ items, working = false, queued = 0 }: { items: Item[]; working?: boolean; queued?: number }) {
+export function MessageList({ items, working = false, queued = 0, endLabel = null, usageLabel = null }: { items: Item[]; working?: boolean; queued?: number; endLabel?: string | null; usageLabel?: string | null }) {
   return (
     <Virtuoso
       className="flex-1"
@@ -60,7 +86,7 @@ export function MessageList({ items, working = false, queued = 0 }: { items: Ite
       // (so we don't yank them back). Start at the bottom on (re)mount so replayed history opens latest.
       atBottomThreshold={160}
       initialTopMostItemIndex={Math.max(0, items.length - 1)}
-      context={{ working, queued }}
+      context={{ working, queued, endLabel, usageLabel }}
       components={{ Footer: WorkingFooter }}
       computeItemKey={(_, item) => item.id}
       itemContent={(_, item) => <Row item={item} />}

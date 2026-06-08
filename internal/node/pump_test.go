@@ -15,31 +15,46 @@ type capSender struct {
 	mu  sync.Mutex
 	got []Frame
 }
+
 func (c *capSender) send(line []byte) error {
 	f, _ := decodeFrame(line)
-	c.mu.Lock(); c.got = append(c.got, f); c.mu.Unlock()
+	c.mu.Lock()
+	c.got = append(c.got, f)
+	c.mu.Unlock()
 	return nil
 }
 func (c *capSender) seqs() []int64 {
-	c.mu.Lock(); defer c.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	out := make([]int64, len(c.got))
-	for i, f := range c.got { out[i] = f.Seq }
+	for i, f := range c.got {
+		out[i] = f.Seq
+	}
 	return out
 }
+
 // frames returns a race-safe snapshot (tests must NOT iterate c.got directly — the client goroutine
 // writes to it concurrently).
 func (c *capSender) frames() []Frame {
-	c.mu.Lock(); defer c.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return append([]Frame(nil), c.got...)
 }
+
 // waitLen polls until the client has received n frames, or fails after 2s.
 func (c *capSender) waitLen(t *testing.T, n int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		c.mu.Lock(); l := len(c.got); c.mu.Unlock()
-		if l >= n { return }
-		if time.Now().After(deadline) { t.Fatalf("timeout: got %d frames, want %d", l, n) }
+		c.mu.Lock()
+		l := len(c.got)
+		c.mu.Unlock()
+		if l >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout: got %d frames, want %d", l, n)
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 }
@@ -53,8 +68,11 @@ func TestFanoutTwoClientsReceiveInOrder(t *testing.T) {
 	p.attachClient("a", 0, a.send)
 	p.attachClient("b", 0, b.send)
 	p.appendFrames([]Frame{{Kind: "agent", Text: "x"}, {Kind: "agent", Text: "y"}})
-	a.waitLen(t, 2); b.waitLen(t, 2)
-	if got := a.seqs(); got[0] != 1 || got[1] != 2 { t.Fatalf("a seqs %v", got) }
+	a.waitLen(t, 2)
+	b.waitLen(t, 2)
+	if got := a.seqs(); got[0] != 1 || got[1] != 2 {
+		t.Fatalf("a seqs %v", got)
+	}
 }
 
 func TestLateClientCatchesUpFromCursor(t *testing.T) {
@@ -67,8 +85,11 @@ func TestLateClientCatchesUpFromCursor(t *testing.T) {
 	b, c := &capSender{}, &capSender{}
 	p.attachClient("b", 0, b.send)
 	p.attachClient("c", 1, c.send)
-	b.waitLen(t, 2); c.waitLen(t, 1)
-	if got := c.seqs(); got[0] != 2 { t.Fatalf("c resume seqs %v, want [2]", got) }
+	b.waitLen(t, 2)
+	c.waitLen(t, 1)
+	if got := c.seqs(); got[0] != 2 {
+		t.Fatalf("c resume seqs %v, want [2]", got)
+	}
 }
 
 func TestDetachOneDoesNotDisturbOthers(t *testing.T) {
@@ -89,7 +110,8 @@ func TestReconnectOverlapNoLeak(t *testing.T) {
 	p.attachClient("a", 0, a.send)
 	p.attachClient("a2", 0, a2.send) // "reconnect" as a fresh id
 	p.appendFrames([]Frame{{Kind: "agent", Text: "1"}})
-	a.waitLen(t, 1); a2.waitLen(t, 1)
+	a.waitLen(t, 1)
+	a2.waitLen(t, 1)
 	p.detachClient("a") // stale detach of the old id
 	p.appendFrames([]Frame{{Kind: "agent", Text: "2"}})
 	a2.waitLen(t, 2) // a2 still live
@@ -98,26 +120,38 @@ func TestReconnectOverlapNoLeak(t *testing.T) {
 func TestTrimResetsLaggingClient(t *testing.T) {
 	p := newTestPump()
 	p.maxLog = 2
-	for i := 0; i < 5; i++ { p.appendFrames([]Frame{{Kind: "agent", Text: "x"}}) } // seq 1..5; trims to base=3, log=[seq4,seq5]
+	for i := 0; i < 5; i++ {
+		p.appendFrames([]Frame{{Kind: "agent", Text: "x"}})
+	} // seq 1..5; trims to base=3, log=[seq4,seq5]
 	a := &capSender{}
 	p.attachClient("a", 1, a.send) // cursor 1 < base 3 -> reset{fromSeq:3} then seq 4,5
 	a.waitLen(t, 3)
 	fs := a.frames()
-	if fs[0].Kind != "reset" || fs[0].FromSeq != 3 { t.Fatalf("want reset{3} first, got %+v", fs[0]) }
-	if fs[1].Seq != 4 || fs[2].Seq != 5 { t.Fatalf("want seq 4,5 after reset, got %v", a.seqs()) }
+	if fs[0].Kind != "reset" || fs[0].FromSeq != 3 {
+		t.Fatalf("want reset{3} first, got %+v", fs[0])
+	}
+	if fs[1].Seq != 4 || fs[2].Seq != 5 {
+		t.Fatalf("want seq 4,5 after reset, got %v", a.seqs())
+	}
 }
 
 // A client whose cursor is exactly at base did NOT miss anything: resume cleanly, no reset.
 func TestClientAtBaseResumesWithoutReset(t *testing.T) {
 	p := newTestPump()
 	p.maxLog = 2
-	for i := 0; i < 3; i++ { p.appendFrames([]Frame{{Kind: "agent", Text: "x"}}) } // seq 1..3; base=1, log=[seq2,seq3]
+	for i := 0; i < 3; i++ {
+		p.appendFrames([]Frame{{Kind: "agent", Text: "x"}})
+	} // seq 1..3; base=1, log=[seq2,seq3]
 	a := &capSender{}
 	p.attachClient("a", 1, a.send) // cursor 1 == base 1 -> NO reset, just seq 2,3
 	a.waitLen(t, 2)
 	fs := a.frames()
-	if fs[0].Kind == "reset" { t.Fatalf("unexpected reset at cursor==base: %+v", fs) }
-	if fs[0].Seq != 2 || fs[1].Seq != 3 { t.Fatalf("want seq 2,3, got %v", a.seqs()) }
+	if fs[0].Kind == "reset" {
+		t.Fatalf("unexpected reset at cursor==base: %+v", fs)
+	}
+	if fs[0].Seq != 2 || fs[1].Seq != 3 {
+		t.Fatalf("want seq 2,3, got %v", a.seqs())
+	}
 }
 
 func TestConcurrentAppendAndAttachRace(t *testing.T) {
@@ -128,7 +162,9 @@ func TestConcurrentAppendAndAttachRace(t *testing.T) {
 	for w := 0; w < appenders; w++ {
 		go func() {
 			defer wg.Done()
-			for i := 0; i < perAppender; i++ { p.appendFrames([]Frame{{Kind: "agent", Text: "x"}}) }
+			for i := 0; i < perAppender; i++ {
+				p.appendFrames([]Frame{{Kind: "agent", Text: "x"}})
+			}
 		}()
 	}
 	// clients attaching concurrently with the append storm
@@ -144,10 +180,14 @@ func TestConcurrentAppendAndAttachRace(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		fr := late.frames()
-		if n := len(fr); n > 0 && fr[n-1].Seq == total { break }
+		if n := len(fr); n > 0 && fr[n-1].Seq == total {
+			break
+		}
 		if time.Now().After(deadline) {
 			var last int64
-			if fr := late.frames(); len(fr) > 0 { last = fr[len(fr)-1].Seq }
+			if fr := late.frames(); len(fr) > 0 {
+				last = fr[len(fr)-1].Seq
+			}
 			t.Fatalf("late client reached seq %d, want %d", last, total)
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -162,8 +202,12 @@ func TestFutureCursorResets(t *testing.T) {
 	p.attachClient("a", 100, a.send) // cursor 100 > seq 1 -> reset{fromSeq:0} then seq 1
 	a.waitLen(t, 2)
 	fs := a.frames()
-	if fs[0].Kind != "reset" || fs[0].FromSeq != 0 { t.Fatalf("want reset{0} first, got %+v", fs[0]) }
-	if fs[1].Seq != 1 { t.Fatalf("want seq 1 after reset, got %v", a.seqs()) }
+	if fs[0].Kind != "reset" || fs[0].FromSeq != 0 {
+		t.Fatalf("want reset{0} first, got %+v", fs[0])
+	}
+	if fs[1].Seq != 1 {
+		t.Fatalf("want seq 1 after reset, got %v", a.seqs())
+	}
 }
 
 // scriptGoose is a fake agent over pipes: answers initialize + session/new, and for each
@@ -172,7 +216,9 @@ func scriptGoose(in io.Reader, out io.Writer) {
 	rd := acp.NewReader(in)
 	for {
 		m, err := rd.ReadMessage()
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 		switch m.Method {
 		case "initialize":
 			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
@@ -186,7 +232,7 @@ func scriptGoose(in io.Reader, out io.Writer) {
 }
 
 func TestPromptStreamsAgentFrameAndTurn(t *testing.T) {
-	gooseInR, gooseInW := io.Pipe()  // pump.stdin -> gooseInW; goose reads gooseInR
+	gooseInR, gooseInW := io.Pipe()   // pump.stdin -> gooseInW; goose reads gooseInR
 	gooseOutR, gooseOutW := io.Pipe() // goose writes gooseOutW; pump reads gooseOutR
 	go scriptGoose(gooseInR, gooseOutW)
 	p := newPump(gooseInW, gooseOutR)
@@ -202,11 +248,19 @@ func TestPromptStreamsAgentFrameAndTurn(t *testing.T) {
 	var sawBusy, sawIdle bool
 	for _, f := range a.frames() {
 		kinds[f.Kind]++
-		if f.Kind == "turn" && f.State == "busy" { sawBusy = true }
-		if f.Kind == "turn" && f.State == "idle" { sawIdle = true }
+		if f.Kind == "turn" && f.State == "busy" {
+			sawBusy = true
+		}
+		if f.Kind == "turn" && f.State == "idle" {
+			sawIdle = true
+		}
 	}
-	if kinds["user"] == 0 || kinds["agent"] == 0 { t.Fatalf("missing user/agent frames: %v", kinds) }
-	if !sawBusy || !sawIdle { t.Fatalf("want busy and idle turn frames: %v", a.frames()) }
+	if kinds["user"] == 0 || kinds["agent"] == 0 {
+		t.Fatalf("missing user/agent frames: %v", kinds)
+	}
+	if !sawBusy || !sawIdle {
+		t.Fatalf("want busy and idle turn frames: %v", a.frames())
+	}
 }
 
 func TestStartTimesOutIfAgentSilent(t *testing.T) {
@@ -224,7 +278,9 @@ func TestQueuedPromptDrainsOnTurnEnd(t *testing.T) {
 	gooseOutR, gooseOutW := io.Pipe()
 	go scriptGoose(gooseInR, gooseOutW)
 	p := newPump(gooseInW, gooseOutR)
-	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	defer p.stop()
 	a := &capSender{}
 	p.attachClient("a", 0, a.send)
@@ -234,9 +290,20 @@ func TestQueuedPromptDrainsOnTurnEnd(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		users, agents := 0, 0
-		for _, f := range a.frames() { if f.Kind == "user" { users++ }; if f.Kind == "agent" { agents++ } }
-		if users >= 2 && agents >= 2 { break }
-		if time.Now().After(deadline) { t.Fatalf("want 2 user + 2 agent frames, got %v", a.frames()) }
+		for _, f := range a.frames() {
+			if f.Kind == "user" {
+				users++
+			}
+			if f.Kind == "agent" {
+				agents++
+			}
+		}
+		if users >= 2 && agents >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("want 2 user + 2 agent frames, got %v", a.frames())
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 }
@@ -246,7 +313,9 @@ func TestStopUnblocksReadLoop(t *testing.T) {
 	gooseOutR, gooseOutW := io.Pipe()
 	go scriptGoose(gooseInR, gooseOutW)
 	p := newPump(gooseInW, gooseOutR)
-	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	p.stop()
 	select {
 	case <-p.readerDone:
@@ -274,7 +343,9 @@ func scriptGoosePerm(in io.Reader, out io.Writer) {
 	var promptID *acp.RawID
 	for {
 		m, err := rd.ReadMessage()
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 		switch {
 		case m.Method == "initialize":
 			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
@@ -298,7 +369,9 @@ func startPermPump(t *testing.T) *Pump {
 	gooseOutR, gooseOutW := io.Pipe()
 	go scriptGoosePerm(gooseInR, gooseOutW)
 	p := newPump(gooseInW, gooseOutR)
-	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	return p
 }
 
@@ -306,38 +379,59 @@ func waitKind(t *testing.T, c *capSender, kind string) Frame {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		for _, f := range c.frames() { if f.Kind == kind { return f } }
-		if time.Now().After(deadline) { t.Fatalf("no %q frame; got %v", kind, c.frames()) }
+		for _, f := range c.frames() {
+			if f.Kind == kind {
+				return f
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q frame; got %v", kind, c.frames())
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 }
 
 func TestPermissionBroadcastFirstWins(t *testing.T) {
-	p := startPermPump(t); defer p.stop()
+	p := startPermPump(t)
+	defer p.stop()
 	a, b := &capSender{}, &capSender{}
 	p.attachClient("a", 0, a.send)
 	p.attachClient("b", 0, b.send)
 	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "need-perm"}))
 	pa := waitKind(t, a, "perm_request")
 	waitKind(t, b, "perm_request")
-	if pa.Seq != 0 { t.Fatalf("perm_request must be transient (seq 0), got %d", pa.Seq) }
-	// b answers first; a's later answer is a no-op.
-	p.fromClient("b", encodeFrame(Frame{Kind: "perm_response", ReqID: pa.ReqID, Allow: true}))
-	p.fromClient("a", encodeFrame(Frame{Kind: "perm_response", ReqID: pa.ReqID, Allow: false}))
+	if pa.Seq != 0 {
+		t.Fatalf("perm_request must be transient (seq 0), got %d", pa.Seq)
+	}
+	// The agent's real options ride the perm_request frame (un-flattened), so the client can choose by id.
+	if len(pa.Options) != 2 || pa.Options[0].OptionID != "allow" || pa.Options[1].OptionID != "reject" {
+		t.Fatalf("perm_request must carry the agent options, got %+v", pa.Options)
+	}
+	// b answers first (selects allow); a's later answer is a no-op.
+	p.fromClient("b", encodeFrame(Frame{Kind: "perm_response", ReqID: pa.ReqID, OptionID: "allow"}))
+	p.fromClient("a", encodeFrame(Frame{Kind: "perm_response", ReqID: pa.ReqID, OptionID: "reject"}))
 	// turn completes -> both clients see an idle turn frame.
 	waitTurnIdle := func(c *capSender) {
 		deadline := time.Now().Add(2 * time.Second)
 		for {
-			for _, f := range c.frames() { if f.Kind == "turn" && f.State == "idle" { return } }
-			if time.Now().After(deadline) { t.Fatalf("no idle turn; got %v", c.frames()) }
+			for _, f := range c.frames() {
+				if f.Kind == "turn" && f.State == "idle" {
+					return
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("no idle turn; got %v", c.frames())
+			}
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
-	waitTurnIdle(a); waitTurnIdle(b)
+	waitTurnIdle(a)
+	waitTurnIdle(b)
 }
 
 func TestPermissionResentOnAttachWhilePending(t *testing.T) {
-	p := startPermPump(t); defer p.stop()
+	p := startPermPump(t)
+	defer p.stop()
 	a := &capSender{}
 	p.attachClient("a", 0, a.send)
 	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "need-perm"}))
@@ -406,7 +500,9 @@ func TestTurnCompletesWithNoClientsThenReplays(t *testing.T) {
 	gooseOutR, gooseOutW := io.Pipe()
 	go scriptGoose(gooseInR, gooseOutW)
 	p := newPump(gooseInW, gooseOutR)
-	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	defer p.stop()
 	// No clients attached. fromClient processes the prompt + logs frames regardless.
 	p.fromClient("ghost", encodeFrame(Frame{Kind: "prompt", Text: "hi"}))
@@ -415,10 +511,18 @@ func TestTurnCompletesWithNoClientsThenReplays(t *testing.T) {
 		p.mu.Lock()
 		n := len(p.log)
 		idle := false
-		for _, f := range p.log { if f.Kind == "turn" && f.State == "idle" { idle = true } }
+		for _, f := range p.log {
+			if f.Kind == "turn" && f.State == "idle" {
+				idle = true
+			}
+		}
 		p.mu.Unlock()
-		if idle && n >= 4 { break } // user, turn busy, agent ECHO, turn idle
-		if time.Now().After(deadline) { t.Fatal("turn did not complete into the log with zero clients") }
+		if idle && n >= 4 {
+			break
+		} // user, turn busy, agent ECHO, turn idle
+		if time.Now().After(deadline) {
+			t.Fatal("turn did not complete into the log with zero clients")
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	a := &capSender{}
@@ -432,27 +536,44 @@ func TestMultiClientDetachOneStillServesTurns(t *testing.T) {
 	gooseOutR, gooseOutW := io.Pipe()
 	go scriptGoose(gooseInR, gooseOutW)
 	p := newPump(gooseInW, gooseOutR)
-	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	defer p.stop()
 	a, b := &capSender{}, &capSender{}
 	p.attachClient("a", 0, a.send)
 	p.attachClient("b", 0, b.send)
 	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "one"}))
 	// both clients see the first turn's agent frame
-	agentCount := func(c *capSender) int { n := 0; for _, f := range c.frames() { if f.Kind == "agent" { n++ } }; return n }
+	agentCount := func(c *capSender) int {
+		n := 0
+		for _, f := range c.frames() {
+			if f.Kind == "agent" {
+				n++
+			}
+		}
+		return n
+	}
 	waitAgents := func(c *capSender, want int) {
 		deadline := time.Now().Add(2 * time.Second)
 		for {
-			if agentCount(c) >= want { return }
-			if time.Now().After(deadline) { t.Fatalf("want %d agent frames, got %d", want, agentCount(c)) }
+			if agentCount(c) >= want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("want %d agent frames, got %d", want, agentCount(c))
+			}
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
-	waitAgents(a, 1); waitAgents(b, 1)
+	waitAgents(a, 1)
+	waitAgents(b, 1)
 	p.detachClient("a")
 	p.fromClient("b", encodeFrame(Frame{Kind: "prompt", Text: "two"}))
 	waitAgents(b, 2) // b gets the second turn
-	if agentCount(a) != 1 { t.Fatalf("detached client a should not get new frames, got %d", agentCount(a)) }
+	if agentCount(a) != 1 {
+		t.Fatalf("detached client a should not get new frames, got %d", agentCount(a))
+	}
 }
 
 func TestPermissionTimeoutDenies(t *testing.T) {
@@ -461,7 +582,9 @@ func TestPermissionTimeoutDenies(t *testing.T) {
 	go scriptGoosePerm(gooseInR, gooseOutW)
 	p := newPump(gooseInW, gooseOutR)
 	p.permTimeout = 50 * time.Millisecond
-	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	defer p.stop()
 	a := &capSender{}
 	p.attachClient("a", 0, a.send)
@@ -470,8 +593,14 @@ func TestPermissionTimeoutDenies(t *testing.T) {
 	// nobody answers -> auto-deny after 50ms -> goose finishes the turn -> idle turn frame.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		for _, f := range a.frames() { if f.Kind == "turn" && f.State == "idle" { return } }
-		if time.Now().After(deadline) { t.Fatalf("timeout-deny did not complete the turn; got %v", a.frames()) }
+		for _, f := range a.frames() {
+			if f.Kind == "turn" && f.State == "idle" {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout-deny did not complete the turn; got %v", a.frames())
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 }
@@ -484,15 +613,21 @@ func TestStopCallsCloseFnAndExitFnNotOnStop(t *testing.T) {
 	p := newPump(gooseInW, gooseOutR)
 	p.closeFn = func() error { closed++; return gooseOutR.Close() } // close stdout so readLoop unblocks
 	p.exitFn = func() { exited++ }
-	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	p.stop()
 	select {
 	case <-p.readerDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("readLoop did not exit")
 	}
-	if closed != 1 { t.Fatalf("closeFn called %d times, want 1", closed) }
-	if exited != 0 { t.Fatalf("exitFn must NOT fire on intentional stop, got %d", exited) }
+	if closed != 1 {
+		t.Fatalf("closeFn called %d times, want 1", closed)
+	}
+	if exited != 0 {
+		t.Fatalf("exitFn must NOT fire on intentional stop, got %d", exited)
+	}
 }
 
 func TestExitFnFiresOnAgentDeath(t *testing.T) {
@@ -502,7 +637,9 @@ func TestExitFnFiresOnAgentDeath(t *testing.T) {
 	exited := make(chan struct{}, 1)
 	p := newPump(gooseInW, gooseOutR)
 	p.exitFn = func() { exited <- struct{}{} }
-	if err := p.start(context.Background(), 2*time.Second); err != nil { t.Fatal(err) }
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	defer p.stop()
 	gooseOutW.Close() // agent "dies": stdout EOFs -> readLoop exits -> exitFn fires (not stopped)
 	select {
@@ -510,4 +647,367 @@ func TestExitFnFiresOnAgentDeath(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("exitFn did not fire on agent death")
 	}
+}
+
+func TestParseStopResult(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		wantStop string
+		wantErr  *ErrorInfo
+	}{
+		{"empty -> nothing", ``, "", nil},
+		{"plain end_turn", `{"stopReason":"end_turn"}`, "end_turn", nil},
+		{"max_tokens, no error", `{"stopReason":"max_tokens"}`, "max_tokens", nil},
+		{"error with message", `{"stopReason":"end_turn","error":{"message":"bad key"}}`, "end_turn", &ErrorInfo{Message: "bad key"}},
+		{"empty error object ignored", `{"stopReason":"end_turn","error":{}}`, "end_turn", nil},
+		{"garbage", `not json`, "", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stop, ei, _ := parseStopResult([]byte(c.in))
+			if stop != c.wantStop {
+				t.Fatalf("stop = %q, want %q", stop, c.wantStop)
+			}
+			if (ei == nil) != (c.wantErr == nil) || (ei != nil && *ei != *c.wantErr) {
+				t.Fatalf("err = %+v, want %+v", ei, c.wantErr)
+			}
+		})
+	}
+}
+
+// parseStopResult must surface a per-turn usage breakdown when present, collapse an empty one to nil, and
+// leave reason/error untouched (cat D rides the same result as cat G, sp-ufz.7).
+func TestParseStopResultUsage(t *testing.T) {
+	t.Run("usage present", func(t *testing.T) {
+		_, _, u := parseStopResult([]byte(`{"stopReason":"end_turn","usage":{"input":100,"output":50,"total":150,"cost":0.04}}`))
+		if u == nil {
+			t.Fatal("want usage, got nil")
+		}
+		if u.Input != 100 || u.Output != 50 || u.Total != 150 {
+			t.Fatalf("usage tokens = %+v", u)
+		}
+		if u.Cost == nil || *u.Cost != 0.04 {
+			t.Fatalf("usage cost = %v, want 0.04", u.Cost)
+		}
+	})
+	t.Run("absent usage -> nil", func(t *testing.T) {
+		if _, _, u := parseStopResult([]byte(`{"stopReason":"end_turn"}`)); u != nil {
+			t.Fatalf("want nil usage, got %+v", u)
+		}
+	})
+	t.Run("empty usage object -> nil (no zero badge)", func(t *testing.T) {
+		if _, _, u := parseStopResult([]byte(`{"stopReason":"end_turn","usage":{}}`)); u != nil {
+			t.Fatalf("want nil usage for empty object, got %+v", u)
+		}
+	})
+	t.Run("reason + error + usage coexist on one result", func(t *testing.T) {
+		stop, ei, u := parseStopResult([]byte(`{"stopReason":"max_tokens","error":{"message":"cap hit"},"usage":{"input":10,"output":5,"total":15}}`))
+		if stop != "max_tokens" {
+			t.Fatalf("stop = %q, want max_tokens", stop)
+		}
+		if ei == nil || ei.Message != "cap hit" {
+			t.Fatalf("error = %+v, want 'cap hit'", ei)
+		}
+		if u == nil || u.Total != 15 {
+			t.Fatalf("usage = %+v, want total 15", u)
+		}
+	})
+}
+
+func TestTurnReasonCollapsesNormal(t *testing.T) {
+	for _, s := range []string{"", "end_turn"} {
+		if got := turnReason(s); got != "" {
+			t.Fatalf("turnReason(%q) = %q, want \"\"", s, got)
+		}
+	}
+	for _, s := range []string{"max_tokens", "refusal", "cancelled", "max_turn_requests"} {
+		if got := turnReason(s); got != s {
+			t.Fatalf("turnReason(%q) = %q, want unchanged", s, got)
+		}
+	}
+}
+
+// A normal end_turn idle frame must serialize byte-identically to before cat G (no reason/error keys).
+func TestIdleTurnFrameByteStable(t *testing.T) {
+	f := Frame{Kind: "turn", State: "idle", Queued: 0, Reason: turnReason("end_turn")}
+	want := `{"kind":"turn","state":"idle"}` + "\n"
+	if got := string(encodeFrame(f)); got != want {
+		t.Fatalf("encoded = %q, want %q", got, want)
+	}
+}
+
+// scriptGooseStop is a fake agent that ends each turn with the given session/prompt result JSON.
+func scriptGooseStop(in io.Reader, out io.Writer, result string) {
+	rd := acp.NewReader(in)
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil {
+			return
+		}
+		switch m.Method {
+		case "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
+		case "session/prompt":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(result)})
+		}
+	}
+}
+
+// A turn that ends with a non-normal stopReason + structured error must surface them on the idle Frame.
+func TestTurnEndCarriesReasonAndError(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGooseStop(gooseInR, gooseOutW, `{"stopReason":"max_tokens","error":{"message":"output cap hit"}}`)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop()
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "hi"}))
+	a.waitLen(t, 3) // user, turn(busy), turn(idle)
+	var idle *Frame
+	for _, f := range a.frames() {
+		if f.Kind == "turn" && f.State == "idle" {
+			ff := f
+			idle = &ff
+		}
+	}
+	if idle == nil {
+		t.Fatalf("no idle turn frame: %v", a.frames())
+	}
+	if idle.Reason != "max_tokens" {
+		t.Fatalf("idle.Reason = %q, want max_tokens", idle.Reason)
+	}
+	if idle.Error == nil || idle.Error.Message != "output cap hit" {
+		t.Fatalf("idle.Error = %+v, want message 'output cap hit'", idle.Error)
+	}
+}
+
+// firstIdleTurn drives one prompt against a fake goose returning `result` and returns the idle turn Frame.
+func firstIdleTurn(t *testing.T, result string) Frame {
+	t.Helper()
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGooseStop(gooseInR, gooseOutW, result)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.stop)
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "hi"}))
+	a.waitLen(t, 3) // user, turn(busy), turn(idle)
+	for _, f := range a.frames() {
+		if f.Kind == "turn" && f.State == "idle" {
+			return f
+		}
+	}
+	t.Fatalf("no idle turn frame: %v", a.frames())
+	return Frame{}
+}
+
+// A turn whose result carries a usage breakdown must surface it on the idle Frame (cat D, sp-ufz.10).
+func TestTurnEndCarriesUsage(t *testing.T) {
+	idle := firstIdleTurn(t, `{"stopReason":"end_turn","usage":{"input":100,"output":50,"total":150,"cost":0.04}}`)
+	if idle.Usage == nil {
+		t.Fatalf("idle turn carried no usage: %+v", idle)
+	}
+	if idle.Usage.Input != 100 || idle.Usage.Output != 50 || idle.Usage.Total != 150 {
+		t.Fatalf("idle.Usage tokens = %+v", idle.Usage)
+	}
+	if idle.Usage.Cost == nil || *idle.Usage.Cost != 0.04 {
+		t.Fatalf("idle.Usage.Cost = %v, want 0.04", idle.Usage.Cost)
+	}
+	// reason/error must NOT regress: a plain end_turn carries neither.
+	if idle.Reason != "" || idle.Error != nil {
+		t.Fatalf("plain end_turn must not carry reason/error, got reason=%q error=%+v", idle.Reason, idle.Error)
+	}
+}
+
+// A turn with no usage must leave Usage nil so a normal end_turn stays byte-stable (graceful absence).
+func TestTurnEndOmitsAbsentUsage(t *testing.T) {
+	idle := firstIdleTurn(t, `{"stopReason":"end_turn"}`)
+	if idle.Usage != nil {
+		t.Fatalf("absent usage must leave Usage nil, got %+v", idle.Usage)
+	}
+}
+
+// Reason, Error, and Usage must coexist on a single turn-end Frame without clobbering one another.
+func TestTurnEndReasonErrorUsageCoexist(t *testing.T) {
+	idle := firstIdleTurn(t, `{"stopReason":"max_tokens","error":{"message":"cap hit"},"usage":{"input":10,"output":5,"total":15,"cost":0.001}}`)
+	if idle.Reason != "max_tokens" {
+		t.Fatalf("idle.Reason = %q, want max_tokens", idle.Reason)
+	}
+	if idle.Error == nil || idle.Error.Message != "cap hit" {
+		t.Fatalf("idle.Error = %+v, want 'cap hit'", idle.Error)
+	}
+	if idle.Usage == nil || idle.Usage.Total != 15 {
+		t.Fatalf("idle.Usage = %+v, want total 15", idle.Usage)
+	}
+}
+
+// modeFrameFromNewSession must decode the ACP session/new `modes` block into a mode Frame, and yield
+// ok=false when modes are absent/empty (graceful absence — no selector for an agent without modes).
+func TestModeFrameFromNewSession(t *testing.T) {
+	f, ok := modeFrameFromNewSession([]byte(`{"sessionId":"s1","modes":{"currentModeId":"build","availableModes":[{"id":"build","name":"Build"},{"id":"plan","name":"Plan"}]}}`))
+	if !ok {
+		t.Fatal("want ok for a result carrying modes")
+	}
+	if f.Kind != "mode" || f.Mode == nil || f.Mode.Current != "build" || len(f.Mode.Available) != 2 ||
+		f.Mode.Available[0].ID != "build" || f.Mode.Available[1].Name != "Plan" {
+		t.Fatalf("bad mode frame: %+v / %+v", f, f.Mode)
+	}
+	if _, ok := modeFrameFromNewSession([]byte(`{"sessionId":"s1"}`)); ok {
+		t.Fatal("no modes -> ok must be false")
+	}
+	if _, ok := modeFrameFromNewSession([]byte(`{"sessionId":"s1","modes":{"currentModeId":"build","availableModes":[]}}`)); ok {
+		t.Fatal("empty availableModes -> ok must be false")
+	}
+}
+
+// scriptGooseModes advertises session modes on session/new so the pump logs a `mode` frame at start.
+func scriptGooseModes(in io.Reader, out io.Writer) {
+	rd := acp.NewReader(in)
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil {
+			return
+		}
+		switch m.Method {
+		case "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1","modes":{"currentModeId":"build","availableModes":[{"id":"build","name":"Build"},{"id":"plan","name":"Plan"}]}}`)})
+		}
+	}
+}
+
+// At start the pump must log a `mode` frame from the agent's advertised modes, so an attaching client
+// replays it and renders the selector (cat F, DOWN advertisement).
+func TestStartLogsAdvertisedModeFrame(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGooseModes(gooseInR, gooseOutW)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop()
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	mf := waitKind(t, a, "mode")
+	if mf.Mode == nil || mf.Mode.Current != "build" || len(mf.Mode.Available) != 2 {
+		t.Fatalf("replayed mode frame = %+v / %+v", mf, mf.Mode)
+	}
+	if mf.Seq == 0 {
+		t.Fatalf("the advertised mode frame must be logged (seq>0), got seq %d", mf.Seq)
+	}
+}
+
+// scriptGooseSetMode records each session/set_mode request's params on a channel (UP direction).
+func scriptGooseSetMode(in io.Reader, out io.Writer, got chan<- string) {
+	rd := acp.NewReader(in)
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil {
+			return
+		}
+		switch m.Method {
+		case "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
+		case "session/set_mode":
+			got <- string(m.Params)
+			if m.ID != nil {
+				acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{}`)})
+			}
+		}
+	}
+}
+
+// A client's upward set_mode frame must be forwarded to the agent as a session/set_mode request carrying
+// the session id + modeId (cat F, UP direction).
+func TestSetModeFrameForwardedUpstream(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	got := make(chan string, 1)
+	go scriptGooseSetMode(gooseInR, gooseOutW, got)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop()
+	p.fromClient("a", encodeFrame(Frame{Kind: "set_mode", ModeID: "plan"}))
+	select {
+	case params := <-got:
+		if !contains(params, `"sessionId":"s1"`) || !contains(params, `"modeId":"plan"`) {
+			t.Fatalf("set_mode upstream params = %s", params)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("set_mode was not forwarded upstream")
+	}
+}
+
+// scriptGooseCancel records each session/cancel notification's params on a channel, and asserts it is a
+// NOTIFICATION (no id). (UP direction, cat J.)
+func scriptGooseCancel(in io.Reader, out io.Writer, got chan<- string, hadID chan<- bool) {
+	rd := acp.NewReader(in)
+	for {
+		m, err := rd.ReadMessage()
+		if err != nil {
+			return
+		}
+		switch m.Method {
+		case "initialize":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"protocolVersion":1}`)})
+		case "session/new":
+			acp.WriteMessage(out, acp.Message{ID: m.ID, Result: []byte(`{"sessionId":"s1"}`)})
+		case "session/cancel":
+			hadID <- m.ID != nil
+			got <- string(m.Params)
+		}
+	}
+}
+
+// A client's upward cancel frame must be forwarded to the agent as a session/cancel NOTIFICATION (no id)
+// carrying the session id (cat J, UP direction).
+func TestCancelFrameForwardedUpstream(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	got := make(chan string, 1)
+	hadID := make(chan bool, 1)
+	go scriptGooseCancel(gooseInR, gooseOutW, got, hadID)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop()
+	p.fromClient("a", encodeFrame(Frame{Kind: "cancel"}))
+	select {
+	case params := <-got:
+		if !contains(params, `"sessionId":"s1"`) {
+			t.Fatalf("cancel upstream params = %s", params)
+		}
+		if <-hadID {
+			t.Fatal("session/cancel must be a notification (no id)")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel was not forwarded upstream")
+	}
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
