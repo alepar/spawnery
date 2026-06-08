@@ -16,11 +16,14 @@ describe("ConnStatus", () => {
     ["error", "error", "bg-red-500"],
     ["reconnecting", "reconnecting…", "bg-yellow-400"],
     ["disconnected", "disconnected", "bg-red-500"],
-  ] as const)("renders %s with its label + dot color", (state, label, dotClass) => {
+  ] as const)("renders %s as a bare dot with the label in title/aria-label + dot color", (state, label, dotClass) => {
     render(<ConnStatus conn={state} />);
     const el = screen.getByTestId("status");
     expect(el.getAttribute("data-status")).toBe(state);
-    expect(el.textContent).toContain(label);
+    // The label is exposed via title/aria-label (hover tooltip), not as inline text.
+    expect(el.getAttribute("title")).toBe(label);
+    expect(el.getAttribute("aria-label")).toBe(label);
+    expect(el.textContent).toBe("");
     expect(el.querySelector("span")?.className).toContain(dotClass);
   });
 });

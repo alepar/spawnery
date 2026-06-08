@@ -22,7 +22,7 @@ async function spawnFromTemplates(page: Page) {
   await expect(page.getByTestId("spawn-btn")).toBeVisible({ timeout: 10_000 });
   await page.getByTestId("spawn-btn").click();
   await expect(page).toHaveURL(/\/spawn\/[^/]+$/);
-  await expect(page.getByRole("banner").getByTestId("status")).toContainText("connected", { timeout: 40_000 });
+  await expect(page.getByTestId("tab-0").getByTestId("status")).toHaveAttribute("data-status", "connected", { timeout: 40_000 });
 }
 
 // the spawn-row whose name span has EXACTLY `name` (avoids the "secret-app" ⊂ "secret-app 2" trap).
@@ -122,7 +122,7 @@ test("conversation history survives a browser reload (node replay)", async ({ pa
 
   // On reconnect the pump replays its frame log from cursor 0 (a reset frame then the logged
   // frames) -> the prior transcript is restored.
-  await expect(page.getByRole("banner").getByTestId("status")).toContainText("connected", { timeout: 40_000 });
+  await expect(page.getByTestId("tab-0").getByTestId("status")).toHaveAttribute("data-status", "connected", { timeout: 40_000 });
   await expect(page.locator('[data-role="agent"]')).toContainText("ECHO: say one", { timeout: 30_000 });
   await expect(page.locator('[data-role="user"]')).toContainText("one");
 });
@@ -141,7 +141,7 @@ test("deep-linking a /spawn/<id> URL cold-loads onto that spawn", async ({ page 
   await page.goto(spawnUrl);
   await expect(page).toHaveURL(spawnUrl);
   // The right pane re-binds from the URL: status reconnects and the chat input renders.
-  await expect(page.getByRole("banner").getByTestId("status")).toContainText("connected", { timeout: 40_000 });
+  await expect(page.getByTestId("tab-0").getByTestId("status")).toHaveAttribute("data-status", "connected", { timeout: 40_000 });
   await expect(page.getByTestId("prompt-input")).toBeVisible();
   // Title resolves back to the spawn's name once the spawns poll lands.
   await expect(page).toHaveTitle("Spawnery — Secret App");
@@ -163,7 +163,7 @@ test("browser back/forward moves between Templates and a spawn", async ({ page }
   // Forward: advance back onto the spawn's chat, which re-binds and reconnects.
   await page.goForward();
   await expect(page).toHaveURL(spawnUrl);
-  await expect(page.getByRole("banner").getByTestId("status")).toContainText("connected", { timeout: 40_000 });
+  await expect(page.getByTestId("tab-0").getByTestId("status")).toHaveAttribute("data-status", "connected", { timeout: 40_000 });
 });
 
 test("suspending a non-active spawn clears its cached transcript", async ({ page }) => {
@@ -228,7 +228,7 @@ test("a reconnected spawn still serves new prompts (repeated initialize tolerate
   await expect(page).toHaveURL(/\/spawn\/[^/]+$/);
   await page.reload();
   await expect(page).toHaveURL(spawnUrl);
-  await expect(page.getByRole("banner").getByTestId("status")).toContainText("connected", { timeout: 40_000 });
+  await expect(page.getByTestId("tab-0").getByTestId("status")).toHaveAttribute("data-status", "connected", { timeout: 40_000 });
 
   // A NEW turn on the reconnected session must work end-to-end. Scope to the new bubble: by now the
   // replayed "ECHO: say one" is also on screen, so a bare [data-role="agent"] match is non-unique.

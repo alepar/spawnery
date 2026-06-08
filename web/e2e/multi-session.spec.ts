@@ -3,9 +3,9 @@ import { clearSpawns, listSessions } from "./helpers";
 
 test.beforeEach(async ({ request }) => { await clearSpawns(request); });
 
-// The banner (header) ConnStatus is the canonical spawn-connection light. Per-tab ConnStatus reuses
-// the same data-testid="status", so scope to role=banner to keep the selector unambiguous.
-const bannerStatus = (page: Page) => page.getByRole("banner").getByTestId("status");
+// The primary tab's ConnStatus dot is the canonical "spawn is live" light (the old header banner dot
+// was removed). The dot is text-free now, so assert via data-status, scoped to the primary tab.
+const primaryTabStatus = (page: Page) => page.getByTestId("tab-0").getByTestId("status");
 
 // Activate a terminal session, run an (idempotent) command, and wait for `expectText` to appear in the
 // pane. Readiness signal: the tab's own ConnStatus light goes "connected" when TerminalView's ws->PTY
@@ -41,7 +41,7 @@ async function spawnSecretApp(page: Page): Promise<string> {
   await expect(page.getByTestId("spawn-btn")).toBeVisible({ timeout: 10_000 });
   await page.getByTestId("spawn-btn").click();
   await expect(page).toHaveURL(/\/spawn\/[^/]+$/);
-  await expect(bannerStatus(page)).toContainText("connected", { timeout: 40_000 });
+  await expect(primaryTabStatus(page)).toHaveAttribute("data-status", "connected", { timeout: 40_000 });
   return page.url().split("/spawn/")[1];
 }
 
@@ -108,7 +108,7 @@ test("multi-session: shell + 2nd acp Pump concurrent in one container; shared fs
   expect(survivors.filter((s) => s.runnable === "stub-acp").length).toBe(2);
   expect(survivors.filter((s) => s.runnable === "shell").length).toBe(1);
   await page.getByTestId("tab-0").click();
-  await expect(bannerStatus(page)).toContainText("connected");
+  await expect(primaryTabStatus(page)).toHaveAttribute("data-status", "connected");
 });
 
 // LANE B (NOT runnable here — needs a real agent image with the launcher, AGENT_BINARIES of real

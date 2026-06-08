@@ -7,7 +7,6 @@ import {
 } from "./api/spawnlet";
 import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
-import { useSessionStore } from "./sessions/store";
 import { initialTheme, setTheme } from "./lib/theme";
 import { useNav } from "./nav/useNav";
 import type { Nav } from "./nav/nav";
@@ -29,21 +28,17 @@ function sectionLabel(section: Nav["section"]): string {
 export function App() {
   const [nav, navigate] = useNav();
   const [path] = useLocation(); // raw pathname, for the one-time "/" -> "/templates" normalize
-  // useConnStatus now only feeds the spawn-LIFECYCLE fallback for the header dot (waiting while a
-  // spawn is starting, error if it failed). Live per-session conn is owned by the session store and
-  // supersedes this fallback once a session panel reports its socket.
-  const { conn, errored, reset, waiting } = useConnStatus();
+  // useConnStatus tracks the spawn-LIFECYCLE hint (waiting while a spawn is starting, error if it
+  // failed). It no longer drives a header dot — per-session connection state is shown by each tab's
+  // own ConnStatus dot, and spawn-lifecycle status is shown by the Sidebar spawn dots. We keep the
+  // setters for their side effects on the lifecycle reconciliation effects below.
+  const { errored, reset, waiting } = useConnStatus();
   const [spawns, setSpawns] = useState<SpawnView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
 
   // refs mirroring state so async callbacks (poll) don't read stale closures.
   const activeIdRef = useRef<string | null>(null);
   const spawnsRef = useRef<SpawnView[]>([]);
-
-  // The header dot is fed by the active SESSION's conn (from the store), falling back to the
-  // spawn-lifecycle hint when no session has reported yet (starting/error).
-  const sessionConn = useSessionStore((s) => (s.activeId ? (s.conn[s.activeId] ?? null) : null));
-  const headerConn = nav.section === "spawn" ? (sessionConn ?? conn) : null;
 
   useEffect(() => { setTheme(initialTheme()); }, []);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
@@ -181,7 +176,6 @@ export function App() {
 
   return (
     <AppShell
-      headerConn={headerConn}
       onSpawnApp={spawnApp}
       spawns={spawns}
       activeId={activeId}

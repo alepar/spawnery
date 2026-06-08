@@ -12,7 +12,6 @@ vi.mock("@/sessions/SpawnTabs", () => ({
 }));
 
 const baseProps = {
-  headerConn: "connected" as const,
   onSpawnApp: vi.fn(),
 };
 const spawns: SpawnView[] = [{ spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "" }];

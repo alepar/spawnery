@@ -1,7 +1,5 @@
 import { Toaster } from "@/components/ui/sonner";
 import { Sidebar, type SpawnActions } from "./Sidebar";
-import { ConnStatus } from "./ConnStatus";
-import type { ConnState } from "./useConnStatus";
 import { SpawnTabs } from "@/sessions/SpawnTabs";
 import { TemplatesView } from "@/views/TemplatesView";
 import { SettingsView } from "@/views/SettingsView";
@@ -17,8 +15,7 @@ function topView(section: Nav["section"]): TopView {
   return "templates";
 }
 
-export function AppShell({ headerConn, onSpawnApp, spawns = [], activeId, actions, nav, navigate }: {
-  headerConn: ConnState | null;
+export function AppShell({ onSpawnApp, spawns = [], activeId, actions, nav, navigate }: {
   onSpawnApp: (appId: string, image?: string, runnableId?: string) => void;
   spawns?: SpawnView[];
   activeId?: string | null;
@@ -37,7 +34,6 @@ export function AppShell({ headerConn, onSpawnApp, spawns = [], activeId, action
       <div className="flex flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-border px-4 py-2">
           <span className="text-sm font-medium">{headerLabel}</span>
-          <ConnStatus conn={headerConn} />
         </header>
         <main className="flex-1 overflow-hidden">
           {/* SpawnTabs stays mounted whenever a spawn is active (keyed on spawnId, so a spawn switch
