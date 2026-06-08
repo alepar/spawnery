@@ -40,6 +40,9 @@ export function AcpSessionPanel({ spawnId, sessionId, active }: {
     });
     sockRef.current = sock;
     return () => {
+      // Intentionally bump the LIVE gen so any in-flight reconnect callback self-invalidates — we
+      // want the current ref value at teardown time, not a captured snapshot.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
       genRef.current++;
       sock.close();
       sockRef.current = null;
