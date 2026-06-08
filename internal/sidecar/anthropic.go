@@ -488,9 +488,6 @@ func streamOpenAIToAnthropic(w io.Writer, r io.Reader) error {
 			log.Printf("warn: sidecar: skip malformed openai stream chunk: %v", err)
 			continue
 		}
-		if chunk.Model != "" {
-			model = chunk.Model
-		}
 		if chunk.Usage != nil {
 			usageIn = chunk.Usage.PromptTokens
 			usageOut = chunk.Usage.CompletionTokens

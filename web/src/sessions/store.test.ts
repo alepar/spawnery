@@ -25,9 +25,14 @@ describe("reduceFrame (pure)", () => {
     expect(rt.turn).toEqual({ state: "busy", queued: 2 });
     expect(rt.lastSeq).toBe(5);
   });
-  it("captures a perm_request as {title,reqId}", () => {
+  it("captures a perm_request as {title,reqId,options}", () => {
     const rt = reduceFrame(emptyRt, { kind: "perm_request", title: "delete?", reqId: "r1" } as Frame);
-    expect(rt.perm).toEqual({ title: "delete?", reqId: "r1" });
+    expect(rt.perm).toEqual({ title: "delete?", reqId: "r1", options: [] });
+  });
+  it("captures the agent's kinded perm options (cat H)", () => {
+    const options = [{ optionId: "allow", name: "Allow", kind: "allow_once" }];
+    const rt = reduceFrame(emptyRt, { kind: "perm_request", title: "delete?", reqId: "r1", options } as Frame);
+    expect(rt.perm).toEqual({ title: "delete?", reqId: "r1", options });
   });
   it("reset clears items and resets the cursor to fromSeq", () => {
     let rt = reduceFrame(emptyRt, { kind: "user", text: "x" } as Frame);
@@ -80,7 +85,7 @@ describe("session store", () => {
     expect(useSessionStore.getState().acp["1"].items).toEqual([{ id: 0, kind: "user", text: "yo" }]);
     expect(useSessionStore.getState().acp["0"].items).toEqual([]);
     s.applyFrame("1", { kind: "perm_request", title: "t", reqId: "r" } as Frame);
-    expect(useSessionStore.getState().acp["1"].perm).toEqual({ title: "t", reqId: "r" });
+    expect(useSessionStore.getState().acp["1"].perm).toEqual({ title: "t", reqId: "r", options: [] });
     s.clearPerm("1");
     expect(useSessionStore.getState().acp["1"].perm).toBeNull();
   });

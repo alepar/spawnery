@@ -39,4 +39,41 @@ describe("MessageList", () => {
     render(<MessageList items={items} working={true} queued={1} />);
     expect(screen.getByTestId("queued-tag")).toBeInTheDocument();
   });
+
+  it("shows a turn-ended indicator when idle with a non-normal end label", () => {
+    render(<MessageList items={items} working={false} endLabel="cancelled" />);
+    expect(screen.getByTestId("turn-ended-indicator")).toHaveTextContent("cancelled");
+  });
+
+  it("shows no turn-ended indicator on a normal idle (null label)", () => {
+    render(<MessageList items={items} working={false} endLabel={null} />);
+    expect(screen.queryByTestId("turn-ended-indicator")).toBeNull();
+  });
+
+  it("prefers the working indicator over the ended one while busy", () => {
+    render(<MessageList items={items} working={true} endLabel="cancelled" />);
+    expect(screen.getByTestId("working-indicator")).toBeInTheDocument();
+    expect(screen.queryByTestId("turn-ended-indicator")).toBeNull();
+  });
+
+  it("shows a usage badge when idle with a usage label (cat D)", () => {
+    render(<MessageList items={items} working={false} usageLabel="12.3k tokens · $0.04" />);
+    expect(screen.getByTestId("turn-usage-badge")).toHaveTextContent("12.3k tokens · $0.04");
+  });
+
+  it("shows no usage badge when usage is absent (graceful absence)", () => {
+    render(<MessageList items={items} working={false} usageLabel={null} />);
+    expect(screen.queryByTestId("turn-usage-badge")).toBeNull();
+  });
+
+  it("renders both the ended indicator and the usage badge together", () => {
+    render(<MessageList items={items} working={false} endLabel="cancelled" usageLabel="500 tokens" />);
+    expect(screen.getByTestId("turn-ended-indicator")).toHaveTextContent("cancelled");
+    expect(screen.getByTestId("turn-usage-badge")).toHaveTextContent("500 tokens");
+  });
+
+  it("hides the usage badge while busy", () => {
+    render(<MessageList items={items} working={true} usageLabel="500 tokens" />);
+    expect(screen.queryByTestId("turn-usage-badge")).toBeNull();
+  });
 });

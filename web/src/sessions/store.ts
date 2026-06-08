@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { Item, TurnState } from "@/views/chat/types";
-import type { Frame } from "@/acp/frames";
+import type { Frame, PermOption } from "@/acp/frames";
 import type { Transport } from "@/api/sessions";
 import type { ConnState } from "@/shell/useConnStatus";
 import { reconcilePending } from "@/lib/turn";
@@ -19,7 +19,8 @@ export interface SessionMeta {
 export interface AcpRuntime {
   items: Item[];
   turn: TurnState;
-  perm: { title: string; reqId: string } | null;
+  // options are the agent's kinded permission choices (cat H); reqId targets the perm_response.
+  perm: { title: string; reqId: string; options: PermOption[] } | null;
   nextId: number;
   lastSeq: number; // resume cursor for reconnects
 }
@@ -47,7 +48,7 @@ export function reduceFrame(rt: AcpRuntime, f: Frame): AcpRuntime {
     case "thought": appendChunk("thought", f.text ?? ""); break;
     case "tool": items = [...items, withId({ kind: "tool", title: f.title ?? "tool", status: f.status } as ItemInput)]; break;
     case "turn": turn = { state: f.state ?? "idle", queued: f.queued ?? 0 }; items = reconcilePending(items, turn.queued); break;
-    case "perm_request": perm = { title: f.title ?? "an action", reqId: f.reqId ?? "" }; break;
+    case "perm_request": perm = { title: f.title ?? "an action", reqId: f.reqId ?? "", options: f.options ?? [] }; break;
   }
   return { items, turn, perm, nextId, lastSeq };
 }

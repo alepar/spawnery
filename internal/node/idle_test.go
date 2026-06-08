@@ -63,7 +63,7 @@ func TestPumpTracksActivityAndAttached(t *testing.T) {
 	p.mu.Lock()
 	p.lastActivity = old
 	p.mu.Unlock()
-	p.fromClient("c1", encodeFrame(Frame{Kind: "perm_response", ReqID: "nope", Allow: false}))
+	p.fromClient("c1", encodeFrame(Frame{Kind: "perm_response", ReqID: "nope", OptionID: "reject"}))
 	if !p.lastActive().After(old) {
 		t.Fatal("fromClient (client->pump) must refresh activity")
 	}

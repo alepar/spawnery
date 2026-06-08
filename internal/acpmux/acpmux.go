@@ -98,6 +98,7 @@ type Mux struct {
 
 	sessionID  string                   // S: the shared upstream session id
 	initResult json.RawMessage          // cached upstream initialize result (returned to downstream)
+	newModes   json.RawMessage          // cached upstream session/new `modes` block (advertised downstream, cat F)
 	toAgent    chan []byte              // ndjson lines for writeLoop (sole upstream stdin writer)
 	writerDone chan struct{}
 	readerDone chan struct{}
@@ -160,13 +161,19 @@ func (m *Mux) Start(ctx context.Context, readyTimeout time.Duration) error {
 		return fmt.Errorf("session/new: %w", err)
 	}
 	var r struct {
-		SessionID string `json:"sessionId"`
+		SessionID string          `json:"sessionId"`
+		Modes     json.RawMessage `json:"modes"`
 	}
 	if uerr := json.Unmarshal(res, &r); uerr != nil || r.SessionID == "" {
 		return fmt.Errorf("session/new: bad result %q (err %v)", string(res), uerr)
 	}
 	m.mu.Lock()
 	m.sessionID = r.SessionID
+	// Cache the upstream's advertised session modes (if any) so every downstream session/new response
+	// re-advertises them (cat F). goose advertises none -> nil -> no modes downstream (graceful absence).
+	if len(r.Modes) > 0 {
+		m.newModes = append([]byte(nil), r.Modes...)
+	}
 	m.mu.Unlock()
 	return nil
 }
@@ -452,10 +459,15 @@ func (m *Mux) onClientMessage(c *dsClient, msg acp.Message) {
 	case "session/new", "session/load":
 		m.mu.Lock()
 		sid := m.sessionID
+		modes := m.newModes
 		c.hasSession = true
 		m.mu.Unlock()
 		if msg.ID != nil {
-			res, _ := json.Marshal(map[string]string{"sessionId": sid})
+			out := map[string]any{"sessionId": sid}
+			if len(modes) > 0 {
+				out["modes"] = json.RawMessage(modes) // re-advertise upstream session modes (cat F)
+			}
+			res, _ := json.Marshal(out)
 			m.respondToClient(c, msg.ID, res)
 		}
 		wake(c) // trigger replay of buffered history to this (possibly late-joining) client
@@ -463,9 +475,35 @@ func (m *Mux) onClientMessage(c *dsClient, msg acp.Message) {
 		if msg.ID != nil {
 			m.fromClientPrompt(c, msg.ID, promptText(msg.Params))
 		}
+	case "session/set_mode":
+		// Forward a downstream mode switch to the shared upstream session (cat F). v1 shared-attach: any
+		// client may set the mode (no arbitration). The upstream current_mode_update notification fans out
+		// to every client via onUpstreamNotification, so all selectors follow the switch.
+		m.forwardSetMode(msg.Params)
 	case "session/cancel":
-		// best-effort: v1 no-op (single-session, serialized; cancel not modeled).
+		// Forward a downstream turn interrupt to the shared upstream session (cat J, sp-ufz.13). v1
+		// shared-attach: any client may cancel the active shared turn (no arbitration). The upstream
+		// turn ends with StopReason `cancelled`, whose session/prompt result + turn frame fan out to
+		// every client via the existing result/notification fanout.
+		m.forwardCancel()
 	}
+}
+
+// forwardCancel relays a downstream session/cancel to the shared upstream session (cat J), making the
+// former v1 no-op real. session/cancel is a NOTIFICATION (no id / no waiter): it interrupts the active
+// shared turn, which ends with StopReason `cancelled`. Per shared-attach v1, any client may cancel the
+// active shared turn (no arbitration). Queued prompts are NOT flushed — cancel interrupts the in-flight
+// turn only; the serializer drains the next queued prompt on turn-end as usual.
+func (m *Mux) forwardCancel() {
+	m.mu.Lock()
+	sid := m.sessionID
+	m.mu.Unlock()
+	params, _ := json.Marshal(map[string]any{"sessionId": sid})
+	var buf bytes.Buffer
+	if acp.WriteMessage(&buf, acp.Message{Method: "session/cancel", Params: params}) != nil {
+		return
+	}
+	m.sendLine(buf.Bytes())
 }
 
 // fromClientPrompt runs a downstream prompt through the shared busy/queue
@@ -490,6 +528,30 @@ func (m *Mux) fromClientPrompt(c *dsClient, clientReq *acp.RawID, text string) {
 	// Route the refusal through the per-client log too, so the replay goroutine
 	// remains the SOLE writer of session/prompt result frames to a client conn.
 	m.appendResultFor(c.id, clientReq, json.RawMessage(`{"stopReason":"refusal"}`))
+}
+
+// forwardSetMode relays a downstream session/set_mode to the shared upstream session (cat F). The modeId
+// from the client's params is re-sent against the shared session id with a freshly minted upstream id.
+// Fire-and-forget: the upstream result is ignored (a non-waiter, non-inflight id readLoop simply skips);
+// the switch is confirmed to all clients by the upstream current_mode_update that fans out afterwards.
+func (m *Mux) forwardSetMode(params json.RawMessage) {
+	var p struct {
+		ModeID string `json:"modeId"`
+	}
+	if json.Unmarshal(params, &p) != nil || p.ModeID == "" {
+		return
+	}
+	m.mu.Lock()
+	m.nextID++
+	id := m.nextID
+	sid := m.sessionID
+	m.mu.Unlock()
+	out, _ := json.Marshal(map[string]any{"sessionId": sid, "modeId": p.ModeID})
+	var buf bytes.Buffer
+	if acp.WriteMessage(&buf, acp.Message{ID: acp.IntID(id), Method: "session/set_mode", Params: out}) != nil {
+		return
+	}
+	m.sendLine(buf.Bytes())
 }
 
 // ---- replay log + fanout ----------------------------------------------------
@@ -614,7 +676,8 @@ func (m *Mux) onPermissionRequest(msg acp.Message) {
 		return
 	}
 	pp := &pendingPerm{upstreamID: upID, options: pr.Options, title: title}
-	pp.timer = time.AfterFunc(m.permTimeout, func() { m.resolvePermission(reqID, false) })
+	// Unanswered -> auto-deny: "" selects a reject-ish option from the upstream set.
+	pp.timer = time.AfterFunc(m.permTimeout, func() { m.resolvePermission(reqID, "") })
 	m.pending[reqID] = pp
 	clients := make([]*dsClient, 0, len(m.clients))
 	for _, c := range m.clients {
@@ -643,20 +706,21 @@ func (m *Mux) onPermissionRequest(msg acp.Message) {
 	}
 }
 
-// onClientPermResponse routes a downstream client's permission answer (the
-// option selected) to resolvePermission. The downstream id equals the upstream
-// id (see onPermissionRequest). First answer wins.
+// onClientPermResponse routes a downstream client's permission answer to
+// resolvePermission, forwarding the EXACT optionId the client selected upstream
+// (no binary allow/deny collapse — a client's allow_always stays allow_always).
+// The downstream id equals the upstream id (see onPermissionRequest). First
+// answer wins; a cancelled/unknown outcome maps to an auto-deny ("").
 func (m *Mux) onClientPermResponse(id int, result json.RawMessage) {
 	reqID := strconv.Itoa(id)
-	allow := outcomeAllows(result)
-	m.resolvePermission(reqID, allow)
+	m.resolvePermission(reqID, selectedOptionID(result))
 }
 
 // resolvePermission answers a pending upstream permission (first answer wins;
-// later/duplicate are no-ops) by forwarding a chosen option upstream. Called by
-// a client response and by the auto-deny timer. Ported from
-// pump.resolvePermission.
-func (m *Mux) resolvePermission(reqID string, allow bool) {
+// later/duplicate are no-ops) by forwarding the chosen optionId upstream. Called
+// by a client response (with the selected optionId) and by the auto-deny timer
+// (with "" — which selects a reject-ish upstream option).
+func (m *Mux) resolvePermission(reqID string, optID string) {
 	m.mu.Lock()
 	pp := m.pending[reqID]
 	if pp == nil {
@@ -666,7 +730,9 @@ func (m *Mux) resolvePermission(reqID string, allow bool) {
 	delete(m.pending, reqID)
 	pp.timer.Stop()
 	upstreamID := pp.upstreamID
-	optID := pickPermOption(pp.options, allow)
+	if optID == "" {
+		optID = rejectOptionID(pp.options) // auto-deny / cancelled: pick a reject-ish option
+	}
 	m.mu.Unlock()
 
 	resp, _ := json.Marshal(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optID}})
@@ -724,47 +790,33 @@ func promptText(params json.RawMessage) string {
 	return out
 }
 
-// outcomeAllows inspects a downstream permission response result to decide
-// whether the client allowed the action. ACP responses carry
-// {"outcome":{"outcome":"selected","optionId":...}} or {"outcome":{"outcome":"cancelled"}}.
-// We treat a selected option whose id doesn't look like a reject as allow.
-func outcomeAllows(result json.RawMessage) bool {
+// selectedOptionID extracts the optionId a downstream client selected. ACP responses carry
+// {"outcome":{"outcome":"selected","optionId":...}} or {"outcome":{"outcome":"cancelled"}}; a
+// cancelled/unknown outcome yields "" (the caller treats "" as an auto-deny).
+func selectedOptionID(result json.RawMessage) string {
 	var r struct {
 		Outcome struct {
 			Outcome  string `json:"outcome"`
 			OptionID string `json:"optionId"`
 		} `json:"outcome"`
 	}
-	if json.Unmarshal(result, &r) != nil {
-		return false
+	if json.Unmarshal(result, &r) != nil || r.Outcome.Outcome != "selected" {
+		return ""
 	}
-	if r.Outcome.Outcome != "selected" {
-		return false // cancelled / unknown -> deny
-	}
-	low := strings.ToLower(r.Outcome.OptionID)
-	if strings.Contains(low, "reject") || strings.Contains(low, "deny") {
-		return false
-	}
-	return true
+	return r.Outcome.OptionID
 }
 
-// pickPermOption chooses an allow-ish (or reject-ish) optionId from the upstream
-// options, falling back to the first option. Ported from pump.pickPermOption.
-func pickPermOption(options json.RawMessage, allow bool) string {
+// rejectOptionID picks a reject-ish optionId from the upstream options for the auto-deny / cancelled
+// path, falling back to the first option (then "" if there are none).
+func rejectOptionID(options json.RawMessage) string {
 	var opts []struct {
 		OptionID string `json:"optionId"`
 		Kind     string `json:"kind"`
 	}
 	_ = json.Unmarshal(options, &opts)
-	want := []string{"reject", "deny"}
-	if allow {
-		want = []string{"allow"}
-	}
 	for _, o := range opts {
-		for _, w := range want {
-			if strings.Contains(o.Kind, w) {
-				return o.OptionID
-			}
+		if strings.Contains(o.Kind, "reject") || strings.Contains(o.Kind, "deny") {
+			return o.OptionID
 		}
 	}
 	if len(opts) > 0 {

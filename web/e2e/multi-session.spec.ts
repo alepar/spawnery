@@ -115,7 +115,7 @@ test("multi-session: shell + 2nd acp Pump concurrent in one container; shared fs
 // runnables, a real OPENROUTER_API_KEY, and the sidecar). Visible-but-skipped so the coverage gap is
 // explicit. Run in the user's env with SPAWNERY_LIVE_AGENTS=1.
 test.describe("Lane B (real model / real sidecar — user's env only)", () => {
-  test.skip(({}, _testInfo) => !process.env.SPAWNERY_LIVE_AGENTS, "needs real agent image + OPENROUTER_API_KEY + sidecar");
+  test.skip(() => !process.env.SPAWNERY_LIVE_AGENTS, "needs real agent image + OPENROUTER_API_KEY + sidecar");
 
   test("a 2nd session of a DIFFERENT real runnable answers via a model", async ({ page }) => {
     // Requires AGENT_IMAGE=spawnery-agent:* (launcher present), AGENT_BINARIES=goose,opencode,claude-code,

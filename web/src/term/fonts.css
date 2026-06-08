@@ -1,0 +1,26 @@
+/*
+ * @font-face for vendored fonts not available on @fontsource.
+ *
+ * Hack (https://github.com/source-foundry/Hack) — unmodified upstream woff2
+ * (regular + bold) vendored under web/public/fonts/hack/, served by Vite at
+ * /fonts/hack/. License: MIT + Bitstream Vera (see public/fonts/hack/LICENSE.md).
+ *
+ * @fontsource families inject their own @font-face via their side-effect CSS
+ * imports in fonts.ts, so they do NOT need rules here.
+ */
+
+@font-face {
+  font-family: "Hack";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/hack/hack-regular.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Hack";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/hack/hack-bold.woff2") format("woff2");
+}

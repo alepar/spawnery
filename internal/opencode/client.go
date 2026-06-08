@@ -111,11 +111,72 @@ func (c *Client) DiscoverOrCreateSession(dir, title string) (string, error) {
 	return s.ID, nil
 }
 
+// Command is the subset of an opencode command object we use (GET /command, opencode 1.15.13). A
+// command is a reusable slash-command/skill/MCP prompt: name + description, an optional template, and
+// argument `hints` (e.g. ["$ARGUMENTS"]) surfaced as the ACP input hint. source is command|mcp|skill.
+type Command struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Hints       []string `json:"hints"`
+	Source      string   `json:"source"`
+}
+
+// ListCommands returns the slash commands the server advertises (GET /command). Used to surface
+// opencode's command set to the web as an ACP available_commands_update right after session start.
+func (c *Client) ListCommands() ([]Command, error) {
+	resp, err := c.hc.Get(c.base + "/command")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("list commands: %s", resp.Status)
+	}
+	var cmds []Command
+	if err := json.NewDecoder(resp.Body).Decode(&cmds); err != nil {
+		return nil, err
+	}
+	return cmds, nil
+}
+
+// Agent is the subset of an opencode agent object we use (GET /agent, opencode 1.15.13). opencode's
+// "Build"/"Plan" are PRIMARY agents — selecting one is how a session switches mode. We surface the
+// user-selectable primary agents (mode=="primary" && !hidden) to the node as ACP session modes; the
+// internal helper agents (compaction/summary/title) carry hidden:true and are filtered out.
+type Agent struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Mode        string `json:"mode"`   // primary | subagent | all
+	Hidden      bool   `json:"hidden"` // internal helper agents (compaction/summary/title) set this
+}
+
+// ListAgents returns the agents the server advertises (GET /agent). Used to surface opencode's
+// selectable primary agents to the web as ACP session modes (cat F).
+func (c *Client) ListAgents() ([]Agent, error) {
+	resp, err := c.hc.Get(c.base + "/agent")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("list agents: %s", resp.Status)
+	}
+	var agents []Agent
+	if err := json.NewDecoder(resp.Body).Decode(&agents); err != nil {
+		return nil, err
+	}
+	return agents, nil
+}
+
 // PromptAsync sends a text prompt without waiting; results arrive via SSE.
-// model is "providerID/modelID"; if empty, opencode uses its configured default.
-func (c *Client) PromptAsync(sessionID, text, model string) error {
+// model is "providerID/modelID"; if empty, opencode uses its configured default. agent selects the
+// opencode primary agent (mode, e.g. "build"|"plan"); if empty, opencode uses its default agent.
+func (c *Client) PromptAsync(sessionID, text, model, agent string) error {
 	parts := []map[string]any{{"type": "text", "text": text}}
 	payload := map[string]any{"parts": parts}
+	if agent != "" {
+		payload["agent"] = agent
+	}
 	if providerID, modelID, ok := splitModel(model); ok {
 		payload["model"] = map[string]any{"providerID": providerID, "modelID": modelID}
 	}

@@ -37,11 +37,17 @@ type Adapter struct {
 	partKind    map[string]string // opencode partID -> ACP update kind
 	msgRole     map[string]string // opencode messageID -> "user"|"assistant"
 	sentUser    map[string]bool   // opencode user partID already echoed to the web (once each)
+	sentTool    map[string]bool   // opencode tool callID already emitted as a tool_call creation
 	recentSelf  []string          // prompt texts WE submitted (web path) — skip echoing those back
 	inflightID  int               // node's session/prompt id awaiting turn-end
 	hasInflight bool
+	turnErr     *OpencodeError    // terminal error seen during the in-flight turn (session.error / msg error)
+	usage       *UsageAccumulator // per-turn token usage + cost accumulated from step-finish parts (cat D)
 	nextReqID   int
 	permByReq   map[int]string // our request id -> opencode permissionID
+
+	availModes  []ACPSessionMode // selectable session modes = opencode primary agents (cat F)
+	currentMode string           // the active mode/agent passed to prompt_async ("" = opencode default)
 }
 
 // New builds an adapter for the opencode client, scoping sessions to dir, tagging prompts with model
@@ -58,7 +64,9 @@ func New(oc *opencode.Client, dir, model, title string) *Adapter {
 		partKind:  map[string]string{},
 		msgRole:   map[string]string{},
 		sentUser:  map[string]bool{},
+		sentTool:  map[string]bool{},
 		permByReq: map[int]string{},
+		usage:     NewUsageAccumulator(),
 	}
 }
 
@@ -95,6 +103,8 @@ func (a *Adapter) Serve(r io.Reader, w io.Writer) error {
 			sid := a.sessionID
 			a.mu.Unlock()
 			_ = a.oc.Abort(sid)
+		case "session/set_mode":
+			a.handleSetMode(srv, m)
 		}
 	}
 }
@@ -136,7 +146,74 @@ func (a *Adapter) handleNewSession(srv *acp.Server, m acp.Message) {
 		}
 		a.setSession(sid)
 	}
-	_ = srv.Respond(id, map[string]any{"sessionId": sid})
+	// Advertise opencode's selectable primary agents (Build/Plan) as ACP session modes on the
+	// session/new result + record the current mode (cat F). No selectable agent -> no `modes` field
+	// (graceful absence: the web shows no mode selector).
+	resp := map[string]any{"sessionId": sid}
+	if modes := a.discoverModes(); len(modes) > 0 {
+		current := DefaultModeID(modes)
+		a.mu.Lock()
+		a.availModes = modes
+		a.currentMode = current
+		a.mu.Unlock()
+		resp["modes"] = ACPSessionModeState{CurrentModeID: current, AvailableModes: modes}
+	}
+	_ = srv.Respond(id, resp)
+	// opencode exposes its slash commands synchronously (GET /command), not via an event, so emit the
+	// ACP available_commands_update once here — right after the session is ready (cat E). It rides the
+	// node's frame seq-log, so a reconnecting web client replays it and still sees the command set.
+	go a.emitAvailableCommands(srv, sid)
+}
+
+// emitAvailableCommands fetches opencode's advertised slash commands and forwards them to the node as a
+// single ACP available_commands_update. A fetch error or an empty list emits nothing — a non-advertising
+// agent simply yields no `/`-menu (graceful absence).
+func (a *Adapter) emitAvailableCommands(srv *acp.Server, sid string) {
+	cmds, err := a.oc.ListCommands()
+	if err != nil || len(cmds) == 0 {
+		return
+	}
+	_ = srv.Notify("session/update", CommandsToACP(sid, cmds))
+}
+
+// discoverModes fetches opencode's advertised agents and maps the selectable primary ones to ACP
+// session modes (cat F). A fetch error or no selectable agent yields nil (graceful absence).
+func (a *Adapter) discoverModes() []ACPSessionMode {
+	agents, err := a.oc.ListAgents()
+	if err != nil {
+		return nil
+	}
+	return AvailableModesFromAgents(agents)
+}
+
+// handleSetMode switches the session's active mode/agent on an incoming session/set_mode (cat F). The
+// modeId must be one of the advertised modes; the new mode is passed as opencode's `agent` on the next
+// prompt_async, and a current_mode_update is emitted so every client follows the switch. Unknown modes
+// are rejected. v1 shared-attach: any client may set the mode (no arbitration).
+func (a *Adapter) handleSetMode(srv *acp.Server, m acp.Message) {
+	var p struct {
+		ModeID string `json:"modeId"`
+	}
+	_ = json.Unmarshal(m.Params, &p)
+	a.mu.Lock()
+	sid := a.sessionID
+	valid := IsValidMode(p.ModeID, a.availModes)
+	if valid {
+		a.currentMode = p.ModeID
+	}
+	a.mu.Unlock()
+	id, hasID := m.ID.AsInt()
+	if !valid {
+		if hasID {
+			_ = srv.RespondError(id, -32602, "unknown mode: "+p.ModeID)
+		}
+		return
+	}
+	if hasID {
+		_ = srv.Respond(id, map[string]any{}) // ACP SetSessionModeResponse is an empty object
+	}
+	// Announce the switch so all attached clients' selectors follow the now-active mode.
+	_ = srv.Notify("session/update", CurrentModeUpdate(sid, p.ModeID))
 }
 
 // setSession records the opencode session id in memory and to the session file (for spawn-tui).
@@ -157,7 +234,10 @@ func (a *Adapter) handlePrompt(srv *acp.Server, m acp.Message) {
 	a.mu.Lock()
 	a.inflightID = id
 	a.hasInflight = true
+	a.turnErr = nil                 // fresh turn: clear any error carried over from the previous one
+	a.usage = NewUsageAccumulator() // fresh turn: reset per-turn token usage + cost (cat D)
 	sid := a.sessionID
+	agent := a.currentMode // the active mode = opencode agent ("" = opencode default) (cat F)
 	// Remember our own (web-originated) prompt text so we don't echo it back as a TUI message —
 	// the node already locally-echoes web prompts. Bounded ring.
 	a.recentSelf = append(a.recentSelf, text)
@@ -165,7 +245,7 @@ func (a *Adapter) handlePrompt(srv *acp.Server, m acp.Message) {
 		a.recentSelf = a.recentSelf[len(a.recentSelf)-16:]
 	}
 	a.mu.Unlock()
-	if err := a.oc.PromptAsync(sid, text, a.model); err != nil {
+	if err := a.oc.PromptAsync(sid, text, a.model, agent); err != nil {
 		a.mu.Lock()
 		a.hasInflight = false
 		a.mu.Unlock()
@@ -241,11 +321,40 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 		if err == nil && mu.Info.ID != "" {
 			a.mu.Lock()
 			a.msgRole[mu.Info.ID] = mu.Info.Role
+			// An assistant message can carry a terminal NamedError; record it for the turn-end stopReason.
+			if mu.Info.Error != nil && mu.Info.Error.Name != "" {
+				a.turnErr = mu.Info.Error
+			}
+			a.mu.Unlock()
+		}
+	case "session.error":
+		// A session-level NamedError (auth/output-length/aborted/...). Remember it; it shapes the
+		// stopReason + structured error sent when this turn ends (session.idle). (cat G)
+		se, err := ParseSessionError(e.Properties)
+		if err == nil && se.Error != nil && se.Error.Name != "" {
+			a.mu.Lock()
+			a.turnErr = se.Error
 			a.mu.Unlock()
 		}
 	case "message.part.updated":
 		pu, err := ParsePartUpdated(e.Properties)
 		if err != nil {
+			return
+		}
+		// step-finish parts: accumulate per-step token usage + cost for the in-flight turn (cat D). They
+		// carry no display content, so consume and return.
+		if pu.Part.Type == "step-finish" {
+			a.mu.Lock()
+			if a.usage != nil {
+				a.usage.AddStep(pu)
+			}
+			a.mu.Unlock()
+			return
+		}
+		// Tool parts: emit ACP tool_call (creation, once per callID) + tool_call_update(s) carrying
+		// the tool's content/result and rawInput/rawOutput (cats A/I).
+		if pu.Part.Type == "tool" {
+			a.emitToolPart(srv, pu)
 			return
 		}
 		if kind, ok := PartTypeToACPKind(pu.Part.Type); ok {
@@ -270,6 +379,14 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 			kind = "agent_message_chunk"
 		}
 		_ = srv.Notify("session/update", ACPSessionUpdate(d.SessionID, kind, d.Delta))
+	case "todo.updated":
+		// The agent's evolving plan/todo list. opencode re-sends the FULL list each time; we forward it
+		// as one ACP `plan` session/update and the client replaces its prior plan in place (cat C).
+		tu, err := ParseTodoUpdated(e.Properties)
+		if err != nil {
+			return
+		}
+		_ = srv.Notify("session/update", TodoUpdateToACP(tu))
 	case "permission.asked":
 		pa, err := ParsePermissionAsked(e.Properties)
 		if err != nil {
@@ -289,10 +406,42 @@ func (a *Adapter) onEvent(srv *acp.Server, e opencode.RawEvent) {
 		id := a.inflightID
 		has := a.hasInflight
 		a.hasInflight = false
+		te := a.turnErr
+		a.turnErr = nil
+		var usage *ACPUsage
+		if a.usage != nil {
+			usage = a.usage.Usage() // per-turn token usage + cost accumulated from step-finish parts (cat D)
+		}
 		a.mu.Unlock()
 		if has {
-			_ = srv.Respond(id, map[string]any{"stopReason": "end_turn"})
+			// Map opencode's real stop semantics (incl. any NamedError) to an honest ACP stopReason +
+			// optional structured error, instead of always collapsing to end_turn. (cat G)
+			stop, ei := StopReasonForError(te)
+			resp := map[string]any{"stopReason": stop}
+			if ei != nil {
+				resp["error"] = ei
+			}
+			if usage != nil {
+				resp["usage"] = usage // UNSTABLE/guarded: present only when the turn reported usage
+			}
+			_ = srv.Respond(id, resp)
 		}
+	}
+}
+
+// emitToolPart translates an opencode ToolPart snapshot into the ACP tool_call/tool_call_update
+// notifications, sending a creation update once per callID and progress/result updates thereafter.
+func (a *Adapter) emitToolPart(srv *acp.Server, pu PartUpdated) {
+	callID := pu.Part.CallID
+	if callID == "" {
+		return
+	}
+	a.mu.Lock()
+	first := !a.sentTool[callID]
+	a.sentTool[callID] = true
+	a.mu.Unlock()
+	for _, up := range ToolPartUpdates(pu, first) {
+		_ = srv.Notify("session/update", up)
 	}
 }
 

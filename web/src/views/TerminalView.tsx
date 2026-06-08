@@ -6,11 +6,23 @@ import { ReconnectingSocket } from "@/shell/reconnectingSocket";
 import { DEV_TOKEN } from "@/api/spawnlet";
 import { encodeInput, encodeResize } from "@/term/wire";
 import { BacklogTracker } from "@/term/backlog";
+import { useTermSettings, applyToTerminal } from "@/term/settings";
+import { fontById } from "@/term/fonts";
 
 // Per-component client id — TerminalView self-manages its socket (not the App.tsx ACP session).
 const CLIENT_ID = (typeof crypto !== "undefined" && crypto.randomUUID)
   ? crypto.randomUUID()
   : `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+/**
+ * Derive the primary font family (for `document.fonts.load`) from a fonts.ts stack:
+ * the first quoted family (e.g. `"Fira Code"` -> `Fira Code`). The system stack has
+ * no quoted custom face — return null so callers skip the load.
+ */
+function primaryFamily(stack: string): string | null {
+  const m = stack.match(/"([^"]+)"/);
+  return m ? m[1] : null;
+}
 
 export function TerminalView({ spawnId, sessionId = "0", active = true, backlogThreshold = 8 * 1024 * 1024, onConn }: {
   spawnId: string;
@@ -23,23 +35,43 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
   onConn?: (s: "connecting" | "connected" | "reconnecting") => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const fitRef = useRef<FitAddon | null>(null);
-  const termRef = useRef<Terminal | null>(null);
   // Keep the latest onConn in a ref so the socket callbacks don't pin a stale closure (the effect
   // is keyed on spawnId only, to avoid tearing down/reopening the socket when the parent re-renders).
   const onConnRef = useRef(onConn);
   onConnRef.current = onConn;
 
+  // Appearance settings. The spawnId-keyed socket effect must NOT re-run on settings changes
+  // (that would tear down the socket + scrollback), so it reads the latest values via refs —
+  // same pattern as onConnRef. A separate [settings, appDark] effect applies live changes.
+  const { settings, appDark } = useTermSettings();
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const appDarkRef = useRef(appDark);
+  appDarkRef.current = appDark;
+
+  // Shared live instances, created by the spawnId effect and consumed by the live-update effect
+  // and the keep-alive refit effect.
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const sockRef = useRef<ReconnectingSocket | null>(null);
+  // The live-update effect skips its first run: the spawnId effect already applied the initial
+  // settings and handles the initial fit/resize on socket open, so the first [settings,appDark]
+  // run would only re-do that (and fire a redundant resize before the socket opens).
+  const liveInitRef = useRef(false);
+
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
 
-    const term = new Terminal({ convertEol: false, fontFamily: "monospace", cursorBlink: true });
+    const term = new Terminal({ convertEol: false, cursorBlink: true });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
-    fitRef.current = fit;
+    // Apply the chosen appearance from the start (theme/font/size) before the first fit, so cols/rows
+    // are measured against the real font metrics. Read via refs since this effect is keyed on spawnId.
+    applyToTerminal(term, settingsRef.current, appDarkRef.current);
     termRef.current = term;
+    fitRef.current = fit;
     // xterm's FitAddon reads 0x0 under display:none -> throws / Infinity resize loop. Only ever fit
     // while the host is actually visible (offsetParent is null when display:none).
     const safeFit = () => { if (host.offsetParent !== null) { try { fit.fit(); } catch { /* hidden race */ } } };
@@ -79,6 +111,7 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
 
     // Set binary type so received messages arrive as ArrayBuffer
     sock.binaryType = "arraybuffer";
+    sockRef.current = sock;
 
     const onData = term.onData((d) => sock.send(encodeInput(d)));
     const onResize = term.onResize(({ cols, rows }) => sock.send(encodeResize(cols, rows)));
@@ -92,8 +125,9 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
       onResize.dispose();
       sock.close();
       term.dispose();
-      fitRef.current = null;
       termRef.current = null;
+      fitRef.current = null;
+      sockRef.current = null;
     };
   }, [spawnId, sessionId]);
 
@@ -109,6 +143,39 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     });
     return () => cancelAnimationFrame(id);
   }, [active]);
+
+  // Live appearance updates: apply theme/font/size to the EXISTING terminal (no teardown, so
+  // scrollback is preserved). Font/size changes alter cell metrics → re-fit and re-send the resize
+  // so the PTY follows. Keyed on [settings, appDark] only; reaches the live instances via refs.
+  useEffect(() => {
+    // Skip the initial run (covered by the spawnId effect's construct + onOpen sizing).
+    if (!liveInitRef.current) { liveInitRef.current = true; return; }
+
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return; // socket effect hasn't created the terminal yet
+
+    let cancelled = false;
+    applyToTerminal(term, settings, appDark);
+
+    const finishLayout = () => {
+      if (cancelled || termRef.current !== term) return; // unmounted / spawn switched mid-await
+      fit.fit();
+      term.refresh(0, term.rows - 1);
+      sockRef.current?.send(encodeResize(term.cols, term.rows));
+    };
+
+    const family = primaryFamily(fontById(settings.fontFamily).stack);
+    if (family) {
+      // Ensure the new face/size is loaded before measuring cell metrics.
+      void document.fonts.load(`${settings.fontSize}px "${family}"`).then(finishLayout, finishLayout);
+    } else {
+      // System stack: no custom face to load — lay out synchronously.
+      finishLayout();
+    }
+
+    return () => { cancelled = true; };
+  }, [settings, appDark]);
 
   return <div data-testid="terminal-view" ref={hostRef} className="h-full w-full" />;
 }

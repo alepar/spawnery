@@ -53,9 +53,10 @@ export function AcpSessionPanel({ spawnId, sessionId, active }: {
   const turn = rt?.turn ?? { state: "idle" as const, queued: 0 };
   const canSend = conn === "connected" && turn.queued < MAX_QUEUED;
   const onSend = (text: string) => sockRef.current?.send(encodePrompt(text));
+  // resolve sends the picked optionId (cat H); "" (dismiss) lets the node auto-deny.
   const perm = rt?.perm
-    ? { title: rt.perm.title, resolve: (allow: boolean) => {
-        sockRef.current?.send(encodePermResponse(rt.perm!.reqId, allow));
+    ? { title: rt.perm.title, options: rt.perm.options, resolve: (optionId: string) => {
+        sockRef.current?.send(encodePermResponse(rt.perm!.reqId, optionId));
         useSessionStore.getState().clearPerm(sessionId);
       } }
     : null;
