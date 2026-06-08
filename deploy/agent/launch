@@ -186,7 +186,7 @@ disable_response_storage = true
 
 [model_providers.spawnery]
 name = "Spawnery Sidecar"
-base_url = "${SIDECAR_OAI}"  # /v1 suffix kept: Codex appends /responses → effective URL is <base>/v1/responses
+base_url = "${SIDECAR_OAI}"  # /v1 suffix kept: Codex appends /responses -> effective URL is <base>/v1/responses
 env_key = "CODEX_SPAWNERY_KEY"
 wire_api = "responses"
 EOF
