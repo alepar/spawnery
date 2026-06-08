@@ -16,6 +16,7 @@ service SpawnService {
   rpc ResumeSpawn(ResumeSpawnRequest) returns (ResumeSpawnResponse);
   rpc RecreateSpawn(RecreateSpawnRequest) returns (RecreateSpawnResponse);
   rpc RenameSpawn(RenameSpawnRequest) returns (RenameSpawnResponse);
+  rpc SetSpawnModel(SetSpawnModelRequest) returns (SetSpawnModelResponse);
   rpc DeleteSpawn(DeleteSpawnRequest) returns (DeleteSpawnResponse);
   rpc StopSpawn(StopSpawnRequest) returns (StopSpawnResponse);   // legacy cleanup path; kept (used by spawnctl + e2e)
   rpc ListSessions(ListSessionsRequest)   returns (ListSessionsResponse);
@@ -69,6 +70,10 @@ message RecreateSpawnRequest  { string spawn_id = 1; }
 message RecreateSpawnResponse {}
 message RenameSpawnRequest    { string spawn_id = 1; string name = 2; }
 message RenameSpawnResponse   {}
+// Change the model an already-running spawn uses (persist + best-effort live push).
+// applied = the live pod's effective model now matches `model` (false => saved but pending).
+message SetSpawnModelRequest  { string spawn_id = 1; string model = 2; }
+message SetSpawnModelResponse { string model = 1; bool applied = 2; }
 message DeleteSpawnRequest    { string spawn_id = 1; bool destroy_data = 2; }
 message DeleteSpawnResponse   {}
 

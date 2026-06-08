@@ -20,6 +20,7 @@ message NodeMessage {
     SuspendComplete suspend_complete = 5;   // node -> CP: per-mount suspend markers
     SessionRoster   roster           = 6;   // node -> CP: full live session set for a spawn
     SessionStatus   session_status   = 7;   // node -> CP: single-session state delta
+    SetModelResult  set_model_result = 8;   // node -> CP: ack/result of a SetModel push
   }
 }
 message CPMessage {
@@ -32,6 +33,7 @@ message CPMessage {
     Suspend      suspend = 6;             // CP -> node: persist + tear down
     CreateSession create_session = 7;     // CP -> node: launch an additional session (impl: sp-npxq.3)
     CloseSession  close_session  = 8;     // CP -> node: reap one session
+    SetModel      set_model      = 9;      // CP -> node: switch the running pod's effective model (generation-fenced)
   }
 }
 
@@ -86,3 +88,9 @@ message SessionStatus { string spawn_id = 1; string session_id = 2; SessionState
 message CreateSession { string spawn_id = 1; uint64 generation = 2; SessionTransport transport = 3; string runnable = 4; }
 // CP -> node: reap one session (by id). Reaping session #0 is rejected node-side (it is pinned).
 message CloseSession  { string spawn_id = 1; uint64 generation = 2; string session_id = 3; }
+// CP -> node: switch the effective model of the running pod (forwarded to the sidecar override).
+// Generation-fenced like StopSpawn/Suspend: the node ignores a SetModel whose generation
+// doesn't match the pod it currently holds.
+message SetModel       { string spawn_id = 1; uint64 generation = 2; string model = 3; }
+// node -> CP: result of applying a SetModel. ok=false carries a human reason in detail.
+message SetModelResult { string spawn_id = 1; bool ok = 2; string detail = 3; }
