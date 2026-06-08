@@ -69,6 +69,21 @@ test("multi-session: shell + 2nd acp Pump concurrent in one container; shared fs
   expect(roster1.filter((s) => s.runnable === "stub-acp").length).toBe(2);
   expect(roster1.filter((s) => s.runnable === "shell").length).toBe(1);
 
+  // THE 2ND ACP SESSION IS ACTUALLY USABLE LIVE — covers the attach-race that let the bug ship: the
+  // panel must not bind while the Pump is still STARTING, then must chat once it's ready. Focus its
+  // tab, wait for ITS dot to read "connected" (the web now only shows that once the gated socket is
+  // truly open — status==active), then prompt and assert the stub's ECHO reply in THAT panel. No reload.
+  const acp2Id = roster1.filter((s) => s.runnable === "stub-acp").map((s) => s.sessionId)
+    .find((id) => id !== "0")!;
+  await page.getByTestId(`tab-${acp2Id}`).click();
+  await expect(page.getByTestId(`tab-${acp2Id}`).getByTestId("status"))
+    .toHaveAttribute("data-status", "connected", { timeout: 40_000 });
+  const acp2Panel = page.getByTestId(`panel-${acp2Id}`);
+  await acp2Panel.getByTestId("prompt-input").fill("say second");
+  await acp2Panel.getByTestId("prompt-input").press("Enter");
+  await expect(acp2Panel.locator('[data-role="user"]')).toContainText("say second");
+  await expect(acp2Panel.locator('[data-role="agent"]')).toContainText("ECHO: say second", { timeout: 30_000 });
+
   // PRIMARY #0 ANSWERS CONCURRENTLY with the 2nd Pump (no cross-session interference). Each kept-alive
   // ACP panel renders its own ChatView, so scope to panel-0. (This catches the sp-npxq.5 router bug
   // where a shared clientId let the 2nd session clobber #0's sender — fixed in cp/router.)

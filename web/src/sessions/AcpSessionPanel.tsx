@@ -14,10 +14,14 @@ function makeClientId(): string {
 }
 const CLIENT_ID = makeClientId();
 
-export function AcpSessionPanel({ spawnId, sessionId, active }: {
+export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
   spawnId: string;
   sessionId: string;
   active: boolean;
+  // ready: the roster status is "active" — the node's Pump is registered+ready. Additional acp
+  // sessions launch their Pump async (status "starting" first); binding before then attaches to a
+  // not-yet-ready session ("send into the void", false "connected" dot). Gate the socket on this.
+  ready: boolean;
 }) {
   const rt = useSessionStore((s) => s.acp[sessionId]);
   const conn = useSessionStore((s) => s.conn[sessionId] ?? null);
@@ -25,6 +29,12 @@ export function AcpSessionPanel({ spawnId, sessionId, active }: {
   const genRef = useRef(0);
 
   useEffect(() => {
+    // Not ready yet: don't open the socket. Show an honest grey-pulse "waiting" dot and bail; the
+    // effect re-runs (keyed on `ready`) and opens the socket the instant the session flips ready.
+    if (!ready) {
+      useSessionStore.getState().setConn(sessionId, "waiting");
+      return;
+    }
     const gen = ++genRef.current;
     useSessionStore.getState().setConn(sessionId, "connecting");
     const sock = new ReconnectingSocket(`ws://${location.host}/ws/session`, {
@@ -48,7 +58,7 @@ export function AcpSessionPanel({ spawnId, sessionId, active }: {
       sockRef.current = null;
       useSessionStore.getState().setConn(sessionId, null);
     };
-  }, [spawnId, sessionId]);
+  }, [spawnId, sessionId, ready]);
 
   const turn = rt?.turn ?? { state: "idle" as const, queued: 0 };
   const canSend = conn === "connected" && turn.queued < MAX_QUEUED;

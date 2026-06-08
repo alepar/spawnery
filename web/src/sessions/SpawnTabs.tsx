@@ -105,7 +105,7 @@ export function SpawnTabs({ spawnId }: { spawnId: string }) {
               style={{ display: isActive ? "block" : "none" }}
             >
               {s.transport === "acp"
-                ? <AcpSessionPanel spawnId={spawnId} sessionId={s.sessionId} active={isActive} />
+                ? <AcpSessionPanel spawnId={spawnId} sessionId={s.sessionId} active={isActive} ready={s.status === "active"} />
                 : <TerminalView spawnId={spawnId} sessionId={s.sessionId} active={isActive} onConn={(st) => setConn(s.sessionId, st)} />}
             </div>
           );
