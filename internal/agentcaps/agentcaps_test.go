@@ -48,7 +48,7 @@ func TestLookup(t *testing.T) {
 }
 
 func TestKnown(t *testing.T) {
-	for _, b := range []string{"goose", "opencode", "claude-code"} {
+	for _, b := range []string{"goose", "opencode", "claude-code", "codex"} {
 		if !Known(b) {
 			t.Fatalf("%q should be known", b)
 		}
@@ -95,6 +95,19 @@ func TestOpencodeTuiRunnable(t *testing.T) {
 	}
 	if len(r.Launch) == 0 {
 		t.Fatalf("opencode-tui needs a Launch argv")
+	}
+}
+
+func TestCodexTuiRunnable(t *testing.T) {
+	r, ok := Lookup("codex", "codex-tui")
+	if !ok {
+		t.Fatalf("codex/codex-tui should resolve")
+	}
+	if r.Mode != ModeTmux || r.Relay != RelayRawPTY {
+		t.Fatalf("codex-tui = mode %q relay %q", r.Mode, r.Relay)
+	}
+	if len(r.Launch) == 0 {
+		t.Fatalf("codex-tui needs a Launch argv")
 	}
 }
 

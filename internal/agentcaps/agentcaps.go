@@ -49,6 +49,9 @@ var registry = map[string][]Runnable{
 	"claude-code": {
 		{ID: "claude-tui", Mode: ModeTmux, Launch: []string{"claude"}, Relay: RelayRawPTY, Label: "Claude Code · terminal"},
 	},
+	"codex": {
+		{ID: "codex-tui", Mode: ModeTmux, Launch: []string{"codex"}, Relay: RelayRawPTY, Label: "Codex · terminal"},
+	},
 	// NOTE: the "stub" TEST FIXTURE binary (cmd/stubagent) is registered only under the
 	// e2e_fixtures build tag — see agentcaps_e2e.go. RELEASE binaries exclude it.
 }
