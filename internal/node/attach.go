@@ -52,11 +52,20 @@ type attacher struct {
 	mu         sync.Mutex
 	pumps      map[sessionKey]*Pump
 	tmuxRelays map[sessionKey]*tmuxRelay
-	sessions   map[string]*sessionRegistry // spawn_id -> live session set (roster source of truth)
+	sessions   map[string]*sessionRegistry    // spawn_id -> live session set (roster source of truth)
+	pending    map[sessionKey][]pendingClient // attaches that arrived before the pump/relay existed (session STARTING)
 	active     uint32
 
 	sendMu sync.Mutex
 	stream cpStream
+}
+
+// pendingClient is a client attach that arrived before its session's pump/relay was registered (the
+// session was still STARTING — an async launchSession is mid-flight). It is queued under attacher.pending
+// and bound when the resource readies (mirrors the CP pending-at-Bind precedent).
+type pendingClient struct {
+	clientID string
+	cursor   int64
 }
 
 // Run keeps the node connected to the CP: it (re)dials and serves one connection at a time, backing
@@ -118,6 +127,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		pumps:      map[sessionKey]*Pump{},
 		tmuxRelays: map[sessionKey]*tmuxRelay{},
 		sessions:   map[string]*sessionRegistry{},
+		pending:    map[sessionKey][]pendingClient{},
 	}
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)
@@ -442,6 +452,11 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 			delete(a.tmuxRelays, k)
 		}
 	}
+	for k := range a.pending {
+		if k.spawnID == spawnID {
+			delete(a.pending, k) // spawn gone: drop any pended attaches (their WS will error)
+		}
+	}
 	delete(a.sessions, spawnID)
 	a.mu.Unlock()
 	for _, p := range ps {
@@ -463,11 +478,42 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 	a.status(spawnID, nodev1.SpawnPhase_STOPPED, "")
 }
 
+// frameSenderFor builds the per-client send closure that relays a pump frame line to the CP. Shared by
+// attachClient and the pending-attach drain so a client bound late (after its pump readied) gets an
+// identical sender.
+func (a *attacher) frameSenderFor(spawnID, sessionID, clientID string) frameSender {
+	return func(line []byte) error {
+		return a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{
+			SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Data: append([]byte(nil), line...),
+		}}})
+	}
+}
+
 func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int64) {
 	k := sessionKey{spawnID, sessionID}
 	a.mu.Lock()
 	relay := a.tmuxRelays[k]
 	p := a.pumps[k]
+	if relay == nil && p == nil {
+		// Neither resource is registered yet. If the session EXISTS in the registry it is still STARTING (an
+		// async launchSession is mid-flight): PEND this attach so it binds when the pump/relay readies
+		// (launchACPSession / the mosh branch drain pending under a.mu right after registering). Dropping it
+		// here is the multi-session attach-race bug. A genuinely unknown session (not in the registry) is NOT
+		// pended — that would queue forever; keep the existing warn/drop.
+		if reg := a.sessions[spawnID]; reg != nil {
+			if _, ok := reg.get(sessionID); ok {
+				if a.pending == nil {
+					a.pending = map[sessionKey][]pendingClient{}
+				}
+				a.pending[k] = append(a.pending[k], pendingClient{clientID: clientID, cursor: cursor})
+				a.mu.Unlock()
+				return
+			}
+		}
+		a.mu.Unlock()
+		log.Printf("warn: attachClient: no pump for %s/%s", spawnID, sessionID)
+		return
+	}
 	a.mu.Unlock()
 	if relay != nil {
 		if err := relay.attach(context.Background(), clientID); err != nil {
@@ -475,16 +521,35 @@ func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int6
 		}
 		return
 	}
-	if p == nil {
-		log.Printf("warn: attachClient: no pump for %s/%s", spawnID, sessionID)
+	p.attachClient(clientID, cursor, a.frameSenderFor(spawnID, sessionID, clientID))
+}
+
+// takePending removes and returns the queued attaches for key k. Caller MUST hold a.mu. Callers bind the
+// returned attaches AFTER releasing a.mu (never call p.attachClient/relay.attach under a.mu).
+func (a *attacher) takePending(k sessionKey) []pendingClient {
+	pend := a.pending[k]
+	delete(a.pending, k)
+	return pend
+}
+
+// removePending drops any queued attach for clientID under key k (a client that disconnected before its
+// resource readied must not be bound to a now-phantom pump/relay). Caller MUST hold a.mu.
+func (a *attacher) removePending(k sessionKey, clientID string) {
+	pend := a.pending[k]
+	if len(pend) == 0 {
 		return
 	}
-	send := func(line []byte) error {
-		return a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{
-			SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Data: append([]byte(nil), line...),
-		}}})
+	out := pend[:0]
+	for _, pc := range pend {
+		if pc.clientID != clientID {
+			out = append(out, pc)
+		}
 	}
-	p.attachClient(clientID, cursor, send)
+	if len(out) == 0 {
+		delete(a.pending, k)
+		return
+	}
+	a.pending[k] = out
 }
 
 func (a *attacher) detachClient(spawnID, sessionID, clientID string) {
@@ -492,6 +557,7 @@ func (a *attacher) detachClient(spawnID, sessionID, clientID string) {
 	a.mu.Lock()
 	relay := a.tmuxRelays[k]
 	p := a.pumps[k]
+	a.removePending(k, clientID) // a client that detaches while still STARTING must not be bound at ready
 	a.mu.Unlock()
 	if relay != nil {
 		relay.detach(clientID)
@@ -580,16 +646,24 @@ func (a *attacher) launchSession(ctx context.Context, spawnID string, e *session
 				SpawnId: spawnID, SessionId: sessID, ClientId: clientID, Data: data,
 			}}})
 		})
+		k := sessionKey{spawnID, e.id}
 		a.mu.Lock()
 		_, live := reg.get(e.id)
 		if !live { // closed mid-launch: undo
+			a.takePending(k) // session closed: drop any pended attaches (their WS will error)
 			a.mu.Unlock()
 			relay.stop()
 			_ = a.sx.KillTmux(ctx, spawnID, e.endpoint)
 			return
 		}
-		a.tmuxRelays[sessionKey{spawnID, e.id}] = relay
+		a.tmuxRelays[k] = relay
+		pend := a.takePending(k) // bind attaches that arrived while this session was STARTING (after unlock)
 		a.mu.Unlock()
+		for _, pc := range pend {
+			if err := relay.attach(context.Background(), pc.clientID); err != nil {
+				log.Printf("tmux attach %s/%s/%s: %v", spawnID, e.id, pc.clientID, err)
+			}
+		}
 		reg.setState(e.id, nodev1.SessionState_SESSION_STATE_ACTIVE)
 		a.emitRoster(spawnID)
 		a.sessionStatus(spawnID, e.id, nodev1.SessionState_SESSION_STATE_ACTIVE, "")
@@ -623,17 +697,23 @@ func (a *attacher) launchACPSession(ctx context.Context, spawnID string, reg *se
 		a.failSession(spawnID, reg, e, "acp not ready: "+err.Error())
 		return
 	}
+	k := sessionKey{spawnID, e.id}
 	a.mu.Lock()
 	_, live := reg.get(e.id)
 	if !live { // closed mid-launch: undo
+		a.takePending(k) // session closed: drop any pended attaches (their WS will error)
 		a.mu.Unlock()
 		p.stop()
 		_ = a.sx.KillTmux(ctx, spawnID, tmuxName)
 		reg.freePort(port, e.id) // ownership-checked: no-op if CloseSession already freed/realloced it
 		return
 	}
-	a.pumps[sessionKey{spawnID, e.id}] = p
+	a.pumps[k] = p
+	pend := a.takePending(k) // bind attaches that arrived while this session was STARTING (after unlock)
 	a.mu.Unlock()
+	for _, pc := range pend {
+		p.attachClient(pc.clientID, pc.cursor, a.frameSenderFor(spawnID, e.id, pc.clientID))
+	}
 	reg.setState(e.id, nodev1.SessionState_SESSION_STATE_ACTIVE)
 	a.emitRoster(spawnID)
 	a.sessionStatus(spawnID, e.id, nodev1.SessionState_SESSION_STATE_ACTIVE, "")
@@ -643,6 +723,9 @@ func (a *attacher) launchACPSession(ctx context.Context, spawnID string, reg *se
 // the updated roster + an ERROR SessionStatus.
 func (a *attacher) failSession(spawnID string, reg *sessionRegistry, e *sessionEntry, detail string) {
 	logErr("launchSession "+spawnID+"/"+e.id, fmt.Errorf("%s", detail))
+	a.mu.Lock()
+	a.takePending(sessionKey{spawnID, e.id}) // launch failed: drop any pended attaches (their WS will error)
+	a.mu.Unlock()
 	if e.transport == nodev1.SessionTransport_SESSION_TRANSPORT_ACP {
 		if p, err := strconv.Atoi(e.endpoint); err == nil {
 			reg.freePort(p, e.id)
