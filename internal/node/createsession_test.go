@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"io"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -118,5 +119,47 @@ func TestCreateSessionMoshLaunchesTmuxAndRelay(t *testing.T) {
 	e, _ := a.sessions["s1"].get("1")
 	if e.endpoint != "spawn-1" {
 		t.Fatalf("mosh endpoint = %q, want tmux name spawn-1", e.endpoint)
+	}
+}
+
+// CreateSession{acp} allocates the lowest pool port, launches the tmux-wrapped acp launcher, dials a
+// new Pump that completes the ACP handshake, and flips the session ACTIVE with endpoint = port.
+func TestCreateSessionACPLaunchesPumpOnPoolPort(t *testing.T) {
+	sx := &fakeSessionExec{}
+	fs := &fakeCPStream{}
+	a := newSessionAttacher("s1", sx, fs)
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_ACP, Runnable: "goose-acp",
+	}}})
+
+	waitFor(t, "acp session ACTIVE", func() bool {
+		r := fs.lastRoster()
+		if r == nil {
+			return false
+		}
+		for _, s := range r.Sessions {
+			if s.SessionId == "1" && s.State == nodev1.SessionState_SESSION_STATE_ACTIVE {
+				return true
+			}
+		}
+		return false
+	})
+
+	sx.mu.Lock()
+	if len(sx.acpLaunched) != 1 || sx.acpLaunched[0].port != acpPoolLo || sx.acpLaunched[0].name != "acp-1" {
+		sx.mu.Unlock()
+		t.Fatalf("acp launch = %+v, want one at port %d name acp-1", sx.acpLaunched, acpPoolLo)
+	}
+	sx.mu.Unlock()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pumps[sessionKey{"s1", "1"}] == nil {
+		t.Fatal("acp session must register a Pump keyed by (spawn,session)")
+	}
+	e, _ := a.sessions["s1"].get("1")
+	if e.endpoint != strconv.Itoa(acpPoolLo) {
+		t.Fatalf("acp endpoint = %q, want port %d", e.endpoint, acpPoolLo)
 	}
 }
