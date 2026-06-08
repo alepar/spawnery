@@ -423,7 +423,10 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 }
 
 func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
-	// Reap every session of the spawn (sp-npxq.3 adds sessions 1..N; today only #0 exists).
+	// Reap every session of the spawn: session #0 plus any additional sessions 1..N (sp-npxq.3). The
+	// container itself is torn down by mgr.Stop below, so additional acp tmux wrappers + their pool
+	// ports die with it (the whole registry — including its ports map — is dropped here); no per-session
+	// KillTmux is needed.
 	a.mu.Lock()
 	var ps []*Pump
 	for k, p := range a.pumps {
@@ -451,7 +454,8 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 		logErr("stopSpawn "+spawnID, err)
 	}
 	a.mu.Lock()
-	// TODO(sp-npxq.3): account per-session capacity (one slot per spawn today, one primary session).
+	// Capacity is one slot per SPAWN, not per session: additional sessions never incremented a.active
+	// (plan decision 7), so stopSpawn releases exactly the spawn's single slot.
 	if a.active > 0 {
 		a.active--
 	}
