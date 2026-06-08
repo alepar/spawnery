@@ -234,25 +234,14 @@ func TestCreateSessionACPRejectedWhenPoolExhausted(t *testing.T) {
 	}
 }
 
-// opencode-tui is rejected when the spawn has no served opencode (plan decision 9, CONFIRM). With one
-// present it is accepted.
-func TestCreateSessionOpencodeTuiRequiresServedOpencode(t *testing.T) {
+// opencode-tui is freely creatable as an additional mosh session WITHOUT a served-opencode sibling
+// (sp-npxq: every image runnable is selectable; the launcher attaches to a served backend if present,
+// else runs standalone). The old "requires served opencode" gate is gone.
+func TestCreateSessionOpencodeTuiNeedsNoServedSibling(t *testing.T) {
 	sx := &fakeSessionExec{}
 	fs := &fakeCPStream{}
 	a := newSessionAttacher("s1", sx, fs) // session #0 runnable = goose-acp (no served opencode)
 
-	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
-		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_MOSH, Runnable: "opencode-tui",
-	}}})
-	if st := lastSessionStatus(fs); st == nil || st.State != nodev1.SessionState_SESSION_STATE_ERROR {
-		t.Fatalf("opencode-tui without served opencode must be rejected, got %+v", st)
-	}
-	if len(a.sessions["s1"].snapshot()) != 1 {
-		t.Fatal("rejected opencode-tui must not register a session")
-	}
-
-	// add a served-opencode session, then opencode-tui is accepted (launches a mosh tmux session).
-	a.sessions["s1"].register(&sessionEntry{id: "9", runnable: "opencode-served", state: nodev1.SessionState_SESSION_STATE_ACTIVE})
 	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
 		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_MOSH, Runnable: "opencode-tui",
 	}}})
@@ -261,6 +250,9 @@ func TestCreateSessionOpencodeTuiRequiresServedOpencode(t *testing.T) {
 		defer sx.mu.Unlock()
 		return len(sx.moshLaunched) == 1
 	})
+	if st := lastSessionStatus(fs); st != nil && st.State == nodev1.SessionState_SESSION_STATE_ERROR {
+		t.Fatalf("opencode-tui must not be rejected without a served sibling, got ERROR: %+v", st)
+	}
 }
 
 // Closing a mosh session kills its tmux session, tears down its relay, and removes it from the roster;

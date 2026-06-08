@@ -530,13 +530,6 @@ func (a *attacher) createSession(ctx context.Context, m *nodev1.CreateSession) {
 		return
 	}
 
-	// opencode-tui attaches to a served opencode; reject if the spawn has none (plan decision 9, CONFIRM).
-	if m.Runnable == "opencode-tui" && !hasServedOpencode(reg) {
-		log.Printf("rejecting opencode-tui session for %s: no served opencode in spawn", m.SpawnId)
-		a.sessionStatus(m.SpawnId, "", nodev1.SessionState_SESSION_STATE_ERROR, "opencode-tui needs a served opencode session")
-		return
-	}
-
 	id := reg.allocID()
 	e := &sessionEntry{id: id, transport: m.Transport, runnable: m.Runnable, state: nodev1.SessionState_SESSION_STATE_STARTING}
 
@@ -554,17 +547,6 @@ func (a *attacher) createSession(ctx context.Context, m *nodev1.CreateSession) {
 	reg.register(e)
 	a.emitRoster(m.SpawnId)
 	go a.launchSession(ctx, m.SpawnId, e)
-}
-
-// hasServedOpencode reports whether the spawn already runs an opencode-served session (the backend an
-// additional opencode-tui session attaches to). See plan decision 9.
-func hasServedOpencode(reg *sessionRegistry) bool {
-	for _, s := range reg.snapshot() {
-		if s.Runnable == "opencode-served" {
-			return true
-		}
-	}
-	return false
 }
 
 // launchSession performs the async launch of a reserved session and flips it ACTIVE, or reaps the

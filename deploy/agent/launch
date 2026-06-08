@@ -114,10 +114,21 @@ case "$RUNNABLE" in
   opencode-tui)
     export TERM="${TERM:-xterm-256color}"
     setup_opencode_provider   # same sidecar provider + model as opencode-served
-    # opencode TUI has no session-title hook (SPAWN_SESSION_TITLE) — naming is best-effort;
-    # the load-bearing fix is the sidecar routing above (sp-9xr.18). The inner command is
-    # spawn-tui, now wrapped in transparent tmux so all clients mirror one TUI process.
-    start_tmux TERM OPENCODE_CONFIG SPAWN_MODEL OPENCODE_BASE_URL SPAWNERY_SESSION_FILE -- spawn-tui
+    # opencode-tui is role-agnostic (sp-npxq): the PRIMARY (#0) session is whatever runnable was
+    # chosen at spawn creation, and every image runnable is freely selectable as an additional
+    # session too. So probe the served opencode backend at the URL the launcher derives:
+    #   - reachable  → ADDITIONAL-session case: attach/mirror it via spawn-tui (no extra server).
+    #   - unreachable → PRIMARY/standalone case: run bare `opencode`, which embeds its own server
+    #     (self-contained; no port conflict since nothing else is listening).
+    # opencode TUI has no session-title hook (SPAWN_SESSION_TITLE) — naming is best-effort; the
+    # load-bearing fix is the sidecar routing above (sp-9xr.18). Either inner command is wrapped in
+    # transparent tmux so all clients mirror one TUI process.
+    export OPENCODE_BASE_URL="${OPENCODE_BASE_URL:-http://127.0.0.1:4096}"
+    if curl -fsS --max-time 2 "$OPENCODE_BASE_URL" >/dev/null 2>&1; then
+      start_tmux TERM OPENCODE_CONFIG SPAWN_MODEL OPENCODE_BASE_URL SPAWNERY_SESSION_FILE -- spawn-tui
+    else
+      start_tmux TERM OPENCODE_CONFIG SPAWN_MODEL -- opencode
+    fi
     ;;
   goose-tui)
     export TERM="${TERM:-xterm-256color}"

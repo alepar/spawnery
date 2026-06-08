@@ -78,6 +78,14 @@ It owns the per-runnable env/wiring that lives in the entrypoint today: opencode
 `apiKeyHelper` + `ANTHROPIC_BASE_URL`, `acpmux` vs `acpexec` selection for acp runnables, and tmux
 wrapping for mosh runnables. Builds on sp-9xr.18's `setup_opencode_provider` factoring.
 
+**Every image runnable is freely selectable as primary (#0) or additional** — the primary session
+is simply whatever runnable was chosen at spawn creation. `opencode-tui` is therefore role-agnostic:
+after `setup_opencode_provider` the launcher probes the served opencode URL and branches — if a
+served backend is reachable it **attaches/mirrors** it (`spawn-tui`, the additional-session case);
+if not it runs **bare standalone `opencode`**, which embeds its own server (the primary case). No
+port conflict either way (attach when a backend exists, self-host when it doesn't), so there is no
+"requires a served opencode sibling" gate.
+
 ## 3 — Transparent tmux for all `mosh` sessions (sp-npxq.2/.3)
 
 **Every `mosh`-transport session runs inside tmux — no exemptions, opencode included.** A single
