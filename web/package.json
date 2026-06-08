@@ -26,7 +26,8 @@
     "streamdown": "^2.5.0",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.0",
-    "wouter": "^3.10.0"
+    "wouter": "^3.10.0",
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
