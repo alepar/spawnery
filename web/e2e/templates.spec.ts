@@ -25,7 +25,7 @@ test("templates browse→detail→spawn flow", async ({ page }) => {
   await expect(page).toHaveURL(/\/spawn\/[^/]+$/);
 
   // Auto-wait: status must reach "connected" (new spawnlet session).
-  await expect(page.getByTestId("status")).toContainText("connected", { timeout: 40_000 });
+  await expect(page.getByRole("banner").getByTestId("status")).toContainText("connected", { timeout: 40_000 });
 
   // Confirm the chat input is available (user can immediately talk to the app).
   await expect(page.getByTestId("prompt-input")).toBeVisible();
