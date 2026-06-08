@@ -167,6 +167,13 @@ case "$RUNNABLE" in
     export TERM="${TERM:-xterm-256color}"
     start_tmux TERM -- bash
     ;;
+  stub-acp)
+    # Deterministic ACP test double (cmd/stubagent) for the multi-session e2e (sp-npxq.5). acpmux
+    # fans N ACP clients onto one stdio stubagent, bound to ACP_LISTEN — same shape as goose-acp,
+    # but with NO model/sidecar/keys (the stub just echoes "ECHO: <prompt>"). Credential-free.
+    export ACP_LISTEN="tcp://0.0.0.0:${ACP_PORT}"
+    exec /usr/local/bin/acpmux /usr/local/bin/stubagent
+    ;;
   nori*|nori)
     echo "nori is launched by the terminal attach, not the launcher (sp-9xr.12.2)" >&2; exit 1 ;;
   *)
