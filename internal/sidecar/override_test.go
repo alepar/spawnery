@@ -52,6 +52,14 @@ func TestPatchModelJSON(t *testing.T) {
 	if _, err := patchModelJSON([]byte("not json"), "x"); err == nil {
 		t.Fatalf("expected error on non-JSON body")
 	}
+
+	// A JSON null unmarshals into a nil map; patchModelJSON must report an error
+	// rather than panicking on "assignment to entry in nil map".
+	for _, body := range []string{"null", "  null\n", "[]", "[1,2]"} {
+		if _, err := patchModelJSON([]byte(body), "x"); err == nil {
+			t.Fatalf("expected error on non-object body %q", body)
+		}
+	}
 }
 
 func TestControlPostSetsOverride(t *testing.T) {

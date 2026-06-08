@@ -3,6 +3,7 @@ package sidecar
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -42,6 +43,11 @@ func patchModelJSON(body []byte, model string) ([]byte, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return nil, err
+	}
+	if obj == nil {
+		// body was a JSON null (or otherwise not an object); a nil map cannot be
+		// assigned to. Treat as non-object so the caller forwards the original bytes.
+		return nil, fmt.Errorf("body is not a JSON object")
 	}
 	mb, err := json.Marshal(model)
 	if err != nil {

@@ -57,7 +57,13 @@ func NewHandler(upstream, key string, ov *Override) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if m := ov.Get(); m != "" {
-			rewriteRequestModel(r, m)
+			if err := rewriteRequestModel(r, m); err != nil {
+				// The body was already consumed/closed; forwarding now would send a
+				// truncated request upstream. Fail the request instead.
+				log.Printf("warn: sidecar: read request body for model override: %v", err)
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
 		}
 		rp.ServeHTTP(w, r)
 	})
@@ -65,26 +71,28 @@ func NewHandler(upstream, key string, ov *Override) http.Handler {
 
 // rewriteRequestModel buffers r's JSON body, replaces the top-level "model" with model,
 // and fixes ContentLength/Content-Length. Request bodies are complete JSON (only responses
-// stream), so buffering is safe. On any error (no body / non-JSON) the original body is
-// left intact so the request still forwards unchanged.
-func rewriteRequestModel(r *http.Request, model string) {
+// stream), so buffering is safe. If the body is not a JSON object (e.g. GET with empty body)
+// the original bytes are left intact so the request still forwards unchanged. It returns a
+// non-nil error only when the body could not be read — at which point the body has been
+// consumed and the caller must NOT forward the request.
+func rewriteRequestModel(r *http.Request, model string) error {
 	if r.Body == nil {
-		return
+		return nil
 	}
 	body, err := io.ReadAll(r.Body)
 	_ = r.Body.Close()
 	if err != nil {
-		log.Printf("warn: sidecar: read request body for model override: %v", err)
-		return
+		return err
 	}
 	patched, err := patchModelJSON(body, model)
 	if err != nil {
 		// Not a JSON object (e.g. GET with empty body): forward the original bytes.
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
-		return
+		return nil
 	}
 	r.Body = io.NopCloser(bytes.NewReader(patched))
 	r.ContentLength = int64(len(patched))
 	r.Header.Set("Content-Length", strconv.Itoa(len(patched)))
+	return nil
 }
