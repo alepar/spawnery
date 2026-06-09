@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import type { SpawnView, SpawnStatus } from "@/api/spawnlet";
+import { spawnLifecycleAction, type SpawnView, type SpawnStatus } from "@/api/spawnlet";
 import type { Nav } from "@/nav/nav";
 
 // SpawnActions is the callback bag App passes down for spawn lifecycle controls.
@@ -9,6 +9,7 @@ export interface SpawnActions {
   onRename: (spawnId: string, name: string) => void;
   onSuspend: (spawnId: string) => void;
   onResume: (spawnId: string) => void;
+  onRecreate: (spawnId: string) => void;
   onStop: (spawnId: string) => void;
 }
 
@@ -67,6 +68,16 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
   const [confirmStop, setConfirmStop] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(spawn.name);
+
+  // The single lifecycle menu item follows the actual status (suspend/resume/recreate), so the menu
+  // never offers an action the CP would reject; transitional/unknown states render a disabled item.
+  const lifecycle = spawnLifecycleAction(spawn.status);
+  const dispatchLifecycle = () => {
+    setMenu(false);
+    if (lifecycle.kind === "suspend") actions?.onSuspend(spawn.spawnId);
+    else if (lifecycle.kind === "resume") actions?.onResume(spawn.spawnId);
+    else if (lifecycle.kind === "recreate") actions?.onRecreate(spawn.spawnId);
+  };
 
   const startEdit = () => { setMenu(false); setDraft(spawn.name); setEditing(true); };
   const commit = () => {
@@ -135,13 +146,13 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
           <button data-testid={`spawn-rename-${spawn.spawnId}`} className="rounded px-2 py-1 text-left text-sm hover:bg-accent" onClick={startEdit}>
             Rename
           </button>
-          {spawn.status === "suspended" ? (
-            <button data-testid={`spawn-resume-${spawn.spawnId}`} className="rounded px-2 py-1 text-left text-sm hover:bg-accent" onClick={() => { setMenu(false); actions?.onResume(spawn.spawnId); }}>
-              Resume
+          {lifecycle.kind === "pending" ? (
+            <button data-testid={`spawn-pending-${spawn.spawnId}`} disabled className="rounded px-2 py-1 text-left text-sm text-muted-foreground/50 cursor-default">
+              {lifecycle.label}
             </button>
           ) : (
-            <button data-testid={`spawn-suspend-${spawn.spawnId}`} className="rounded px-2 py-1 text-left text-sm hover:bg-accent" onClick={() => { setMenu(false); actions?.onSuspend(spawn.spawnId); }}>
-              Suspend
+            <button data-testid={`spawn-${lifecycle.kind}-${spawn.spawnId}`} className="rounded px-2 py-1 text-left text-sm hover:bg-accent" onClick={dispatchLifecycle}>
+              {lifecycle.label}
             </button>
           )}
           {confirmStop ? (

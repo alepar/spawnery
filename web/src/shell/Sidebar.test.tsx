@@ -9,8 +9,11 @@ const spawns: SpawnView[] = [
   { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true },
   { spawnId: "b", name: "Zork 2", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true },
   { spawnId: "c", name: "Starting One", appId: "spawnery/wiki", status: "starting", mode: "", model: "", modelApplied: true },
+  { spawnId: "d", name: "Reaped", appId: "spawnery/wiki", status: "unreachable", mode: "", model: "", modelApplied: true },
+  { spawnId: "e", name: "Broken", appId: "spawnery/wiki", status: "error", mode: "", model: "", modelApplied: true },
+  { spawnId: "f", name: "Winding Down", appId: "spawnery/wiki", status: "suspending", mode: "", model: "", modelApplied: true },
 ];
-const noopActions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onStop: vi.fn() };
+const noopActions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onRecreate: vi.fn(), onStop: vi.fn() };
 const templatesNav: Nav = { section: "templates" };
 const spawnNav = (id: string): Nav => ({ section: "spawn", spawnId: id });
 
@@ -88,6 +91,52 @@ describe("Sidebar", () => {
     await userEvent.click(screen.getByTestId("spawn-kebab-b"));
     await userEvent.click(screen.getByTestId("spawn-resume-b"));
     expect(actions.onResume).toHaveBeenCalledWith("b");
+  });
+
+  it("kebab → Recreate for an unreachable spawn calls onRecreate", async () => {
+    const actions = { ...noopActions, onRecreate: vi.fn() };
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);
+    await userEvent.click(screen.getByTestId("spawn-kebab-d"));
+    const item = screen.getByTestId("spawn-recreate-d");
+    expect(item.textContent).toBe("Recreate");
+    await userEvent.click(item);
+    expect(actions.onRecreate).toHaveBeenCalledWith("d");
+  });
+
+  it("kebab → Recreate for an error spawn calls onRecreate", async () => {
+    const actions = { ...noopActions, onRecreate: vi.fn() };
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);
+    await userEvent.click(screen.getByTestId("spawn-kebab-e"));
+    const item = screen.getByTestId("spawn-recreate-e");
+    expect(item.textContent).toBe("Recreate");
+    await userEvent.click(item);
+    expect(actions.onRecreate).toHaveBeenCalledWith("e");
+  });
+
+  it("kebab → disabled pending item for a starting spawn; clicking dispatches nothing", async () => {
+    const actions = { ...noopActions, onSuspend: vi.fn(), onResume: vi.fn(), onRecreate: vi.fn() };
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);
+    await userEvent.click(screen.getByTestId("spawn-kebab-c"));
+    const item = screen.getByTestId("spawn-pending-c");
+    expect(item.textContent).toBe("Starting…");
+    expect((item as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(item);
+    expect(actions.onSuspend).not.toHaveBeenCalled();
+    expect(actions.onResume).not.toHaveBeenCalled();
+    expect(actions.onRecreate).not.toHaveBeenCalled();
+  });
+
+  it("kebab → disabled pending item for a suspending spawn; clicking dispatches nothing", async () => {
+    const actions = { ...noopActions, onSuspend: vi.fn(), onResume: vi.fn(), onRecreate: vi.fn() };
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);
+    await userEvent.click(screen.getByTestId("spawn-kebab-f"));
+    const item = screen.getByTestId("spawn-pending-f");
+    expect(item.textContent).toBe("Suspending…");
+    expect((item as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(item);
+    expect(actions.onSuspend).not.toHaveBeenCalled();
+    expect(actions.onResume).not.toHaveBeenCalled();
+    expect(actions.onRecreate).not.toHaveBeenCalled();
   });
 
   it("kebab → Stop asks for confirm, then calls onStop", async () => {
