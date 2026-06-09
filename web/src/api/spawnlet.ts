@@ -27,6 +27,26 @@ export function statusFromProto(s: string | undefined): SpawnStatus {
   }
 }
 
+// spawnLifecycleAction maps a status to the single lifecycle menu action the CP will accept.
+// "pending" renders disabled (transitional or unknown) so no click can hit a CP precondition failure.
+export type SpawnLifecycleAction =
+  | { kind: "suspend"; label: string }
+  | { kind: "resume"; label: string }
+  | { kind: "recreate"; label: string }
+  | { kind: "pending"; label: string };
+
+export function spawnLifecycleAction(status: SpawnStatus): SpawnLifecycleAction {
+  switch (status) {
+    case "active": return { kind: "suspend", label: "Suspend" };
+    case "suspended": return { kind: "resume", label: "Resume" };
+    case "unreachable":
+    case "error": return { kind: "recreate", label: "Recreate" };
+    case "starting": return { kind: "pending", label: "Starting…" };
+    case "suspending": return { kind: "pending", label: "Suspending…" };
+    default: return { kind: "pending", label: "Unavailable" }; // unknown
+  }
+}
+
 export async function createSpawn(appId: string, model: string, image = "", runnableId = ""): Promise<string> {
   const r = await unary<{ spawnId: string }>("CreateSpawn", { appId, model, image, runnableId });
   return r.spawnId;
@@ -61,6 +81,10 @@ export async function suspendSpawn(spawnId: string): Promise<void> {
 }
 export async function resumeSpawn(spawnId: string): Promise<void> {
   await unary<Record<string, never>>("ResumeSpawn", { spawnId });
+}
+// recreateSpawn re-provisions a fresh container; the recovery path for unreachable/error spawns.
+export async function recreateSpawn(spawnId: string): Promise<void> {
+  await unary<Record<string, never>>("RecreateSpawn", { spawnId });
 }
 // UI "Stop" = DeleteSpawn (soft-delete; drops from the list). Legacy stopSpawn kept for non-UI callers.
 export async function deleteSpawn(spawnId: string): Promise<void> {

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { listSpawns, listAgentImages, createSpawn, renameSpawn, statusFromProto, setSpawnModel } from "./spawnlet";
+import { listSpawns, listAgentImages, createSpawn, renameSpawn, statusFromProto, setSpawnModel, spawnLifecycleAction, recreateSpawn } from "./spawnlet";
+import type { SpawnStatus, SpawnLifecycleAction } from "./spawnlet";
 
 function mockFetch(json: unknown) {
   const calls: { url: string; body: any }[] = [];
@@ -66,6 +67,32 @@ describe("listSpawns", () => {
   it("tolerates a missing spawns array", async () => {
     mockFetch({});
     expect(await listSpawns()).toEqual([]);
+  });
+});
+
+describe("spawnLifecycleAction", () => {
+  it("maps every status to the lifecycle action the CP will accept", () => {
+    const cases: Array<[SpawnStatus, SpawnLifecycleAction]> = [
+      ["active", { kind: "suspend", label: "Suspend" }],
+      ["suspended", { kind: "resume", label: "Resume" }],
+      ["unreachable", { kind: "recreate", label: "Recreate" }],
+      ["error", { kind: "recreate", label: "Recreate" }],
+      ["starting", { kind: "pending", label: "Starting…" }],
+      ["suspending", { kind: "pending", label: "Suspending…" }],
+      ["unknown", { kind: "pending", label: "Unavailable" }],
+    ];
+    for (const [status, want] of cases) {
+      expect(spawnLifecycleAction(status), status).toEqual(want);
+    }
+  });
+});
+
+describe("recreateSpawn", () => {
+  it("POSTs RecreateSpawn with spawnId", async () => {
+    const calls = mockFetch({});
+    await recreateSpawn("a");
+    expect(calls[0].url).toContain("/cp.v1.SpawnService/RecreateSpawn");
+    expect(calls[0].body).toEqual({ spawnId: "a" });
   });
 });
 
