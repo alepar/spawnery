@@ -302,6 +302,19 @@ func (r *spawnRepo) MarkUnreachable(ctx context.Context, ids []string) (int, err
 	return int(n), nil // live container row is intentionally KEPT (adopt arm needs it)
 }
 
+// MarkReachable flips unreachable->active — the adopt arm's "node came back" path. Gen-fenced:
+// the flip applies only while (id, gen) is still the live container (a recreate fences it out via
+// ErrConflict). ONLY unreachable spawns flip; any other status -> ErrConflict, spawn untouched.
+// The live container row is left as-is (Adopt owns the node_id rebind).
+func (r *spawnRepo) MarkReachable(ctx context.Context, id string, gen int64) error {
+	if err := r.guardContainerGen(ctx, id, gen); err != nil {
+		return err
+	}
+	return r.guardStatus(ctx, id, []Status{Unreachable}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		return q.Set("status = ?", Active)
+	})
+}
+
 func (r *spawnRepo) MarkRecovered(ctx context.Context, id string) error {
 	_, err := r.db.NewUpdate().Model((*Spawn)(nil)).Set("recovered = ?", true).Where("id = ?", id).Exec(ctx)
 	return err

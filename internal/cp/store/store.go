@@ -74,6 +74,7 @@ type SpawnRepo interface {
 	EndContainer(ctx context.Context, id string, gen int64, p Phase) error
 	MarkUnreachable(ctx context.Context, ids []string) (int, error)
 	MarkBootUnreachable(ctx context.Context) (int, error)
+	MarkReachable(ctx context.Context, id string, gen int64) error // unreachable->active only, gen-fenced
 	MarkRecovered(ctx context.Context, id string) error
 	Touch(ctx context.Context, id string, ts int64) error
 	MarkDeleted(ctx context.Context, id string, ts int64) error
