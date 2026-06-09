@@ -77,6 +77,22 @@ describe("session store", () => {
     expect(st.activeId).toBe("0");
   });
 
+  // Recreate cycle (spec 2026-06-08 sidebar-lifecycle §3 amendment): RecreateSpawn drops the
+  // spawn's session mirror, so the roster poll sees an empty list (stale runtimes wiped); the
+  // recreated container then re-registers session ids, which must start with FRESH runtimes —
+  // the dead container's transcript must not survive even when the session id is reused.
+  it("recreate cycle: empty roster wipes stale runtimes; repopulated roster starts fresh", () => {
+    const s = useSessionStore.getState();
+    s.bindSpawn("s1");
+    s.reconcileRoster([meta("0")]);
+    s.applyFrame("0", { kind: "agent", text: "from the dead container" } as Frame);
+    expect(useSessionStore.getState().acp["0"].items).toHaveLength(1);
+    s.reconcileRoster([]); // mirror dropped with the route -> ListSessions returns empty
+    expect(useSessionStore.getState().acp["0"]).toBeUndefined();
+    s.reconcileRoster([meta("0")]); // recreated container registers session 0 again
+    expect(useSessionStore.getState().acp["0"].items).toEqual([]);
+  });
+
   it("applyFrame routes to the right session and clearPerm clears it", () => {
     const s = useSessionStore.getState();
     s.bindSpawn("s1");

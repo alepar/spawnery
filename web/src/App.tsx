@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { toast } from "sonner";
 import {
-  createSpawn, listSpawns, renameSpawn, suspendSpawn, resumeSpawn, deleteSpawn,
+  createSpawn, listSpawns, renameSpawn, suspendSpawn, resumeSpawn, recreateSpawn, deleteSpawn,
   type SpawnView,
 } from "./api/spawnlet";
 import { AppShell } from "./shell/AppShell";
@@ -164,6 +164,16 @@ export function App() {
     } catch (e: any) { toast.error("Resume failed: " + e.message); }
     refreshSpawns();
   };
+  const onRecreate = async (id: string) => {
+    try {
+      await recreateSpawn(id);
+      // URL follows the recreated spawn (a no-op if it's already selected — no rebind needed: the
+      // recreate drops the spawn's session mirror, so SpawnTabs' ListSessions roster poll wipes the
+      // stale runtimes and repopulates fresh transcripts on its own).
+      navigate({ section: "spawn", spawnId: id });
+    } catch (e: any) { toast.error("Recreate failed: " + e.message); }
+    refreshSpawns();
+  };
   const onStop = async (id: string) => {
     try { await deleteSpawn(id); } catch (e: any) { toast.error("Stop failed: " + e.message); }
     if (activeIdRef.current === id) {
@@ -179,7 +189,7 @@ export function App() {
       onSpawnApp={spawnApp}
       spawns={spawns}
       activeId={activeId}
-      actions={{ onSelectSpawn: (id) => navigate({ section: "spawn", spawnId: id }), onRename, onSuspend, onResume, onStop }}
+      actions={{ onSelectSpawn: (id) => navigate({ section: "spawn", spawnId: id }), onRename, onSuspend, onResume, onRecreate, onStop }}
       nav={nav}
       navigate={navigate}
     />

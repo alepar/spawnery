@@ -15,7 +15,7 @@ const baseProps = {
   onSpawnApp: vi.fn(),
 };
 const spawns: SpawnView[] = [{ spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true }];
-const actions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onStop: vi.fn() };
+const actions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onRecreate: vi.fn(), onStop: vi.fn() };
 
 describe("AppShell", () => {
   it("renders templates for the templates section; chat not mounted", () => {

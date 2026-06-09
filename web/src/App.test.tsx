@@ -1,13 +1,16 @@
-import { render, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { SpawnView } from "./api/spawnlet";
 import type { SessionDescriptor } from "./api/sessions";
+import type { Frame } from "./acp/frames";
 
 // --- Mocks ---------------------------------------------------------------
 // The api is fully mocked so no network happens; listSpawns drives the poll + sidebar.
 const listSpawnsMock = vi.fn(async (): Promise<SpawnView[]> => []);
+const recreateSpawnMock = vi.fn(async (_id: string) => {});
 vi.mock("./api/spawnlet", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api/spawnlet")>();
   return {
@@ -17,6 +20,7 @@ vi.mock("./api/spawnlet", async (importOriginal) => {
     renameSpawn: vi.fn(async () => {}),
     suspendSpawn: vi.fn(async () => {}),
     resumeSpawn: vi.fn(async () => {}),
+    recreateSpawn: (id: string) => recreateSpawnMock(id),
     deleteSpawn: vi.fn(async () => {}),
     listAgentImages: vi.fn(async () => []),
   };
@@ -63,6 +67,7 @@ beforeEach(() => {
   acpPanels.length = 0;
   termPanels.length = 0;
   useSessionStore.getState().bindSpawn("__reset__");
+  recreateSpawnMock.mockClear();
   listSpawnsMock.mockReset();
   listSpawnsMock.mockResolvedValue([ACTIVE_SPAWN]);
   listSessionsMock.mockReset();
@@ -137,6 +142,42 @@ describe("App URL-authoritative nav", () => {
     await waitFor(() => expect(termPanels.some((p) => p.spawnId === "s1")).toBe(true));
     expect(acpPanels.some((p) => p.spawnId === "s1")).toBe(false);
   });
+
+  // The sidebar's Recreate item (unreachable/error spawns) calls the RecreateSpawn RPC and lands the
+  // user on the recovering spawn's view.
+  it("kebab → Recreate calls recreateSpawn and navigates to the spawn", async () => {
+    listSpawnsMock.mockResolvedValue([{ ...ACTIVE_SPAWN, status: "unreachable" }]);
+    renderAt("/settings");
+    await waitFor(() => expect(screen.getByTestId("spawn-kebab-s1")).toBeTruthy());
+    await userEvent.click(screen.getByTestId("spawn-kebab-s1"));
+    await userEvent.click(screen.getByTestId("spawn-recreate-s1"));
+    expect(recreateSpawnMock).toHaveBeenCalledWith("s1");
+    // navigate({section:"spawn", spawnId:"s1"}) — the title re-derives off the spawn's name.
+    await waitFor(() => expect(document.title).toBe("Spawnery — My Spawn"));
+  });
+
+  // §5 regression (spec 2026-06-08 sidebar-lifecycle, corrected §3 amendment): recreating the
+  // CURRENTLY-SELECTED spawn must not leave the dead container's transcript around. No explicit
+  // rebind happens (navigate-to-same is a no-op); the clear is structural — recreate drops the
+  // spawn's session mirror, so ListSessions returns empty and SpawnTabs' roster poll
+  // (reconcileRoster) wipes the stale runtime. This guards that poll mechanism.
+  it("recreating the selected spawn drops the dead transcript via the roster poll", async () => {
+    listSpawnsMock.mockResolvedValue([{ ...ACTIVE_SPAWN, status: "unreachable" }]);
+    renderAt("/spawn/s1");
+    // Session 0 registers and a (now-dead) transcript exists in the store.
+    await waitFor(() => expect(acpPanels.some((p) => p.spawnId === "s1")).toBe(true));
+    useSessionStore.getState().applyFrame("0", { kind: "agent", text: "from the dead container" } as Frame);
+    expect(useSessionStore.getState().acp["0"].items).toHaveLength(1);
+
+    // Recreate: the RPC drops the session mirror with the spawn's route -> ListSessions is empty.
+    listSessionsMock.mockResolvedValue([]);
+    await userEvent.click(screen.getByTestId("spawn-kebab-s1"));
+    await userEvent.click(screen.getByTestId("spawn-recreate-s1"));
+    expect(recreateSpawnMock).toHaveBeenCalledWith("s1");
+
+    // The 3s roster poll reconciles the empty roster and wipes the stale runtime.
+    await waitFor(() => expect(useSessionStore.getState().acp["0"]).toBeUndefined(), { timeout: 5000 });
+  }, 10000);
 
   // Browser back/forward drives wouter's location store from OUTSIDE React (a popstate). A single
   // mounted App must react to that external location change: re-render the right section AND re-derive
