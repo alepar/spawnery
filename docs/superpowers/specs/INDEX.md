@@ -45,6 +45,7 @@ were already made in one of these docs.
 - [State/DAO Research Brief](2026-05-31-state-dao-layer-research-brief.md) — requirements for moving CP state off in-memory maps.
 - [CP State / DAO Layer](2026-05-31-state-dao-layer-design.md) — persistent control-plane state/DAO design.
 - [CP Store Driver (sp-ylw)](2026-06-01-cp-store-driver-sp-ylw.md) — store driver selection (sqlite modernc vs postgres pgx; goose migrations).
+- [Inventory Reconcile Adopt (sp-537t)](2026-06-09-inventory-reconcile-adopt-design.md) — gap-closing impl of DAO §6.2: adopt/flip-back + orphan-stop arms.
 
 ## Marketplace (E5/E6 slices)
 - [E5 Slice 1 — Catalog Read Surface](2026-06-01-e5-catalog-read-surface-slice1.md) — the read side of the catalog (browse/search), pure-CP.
