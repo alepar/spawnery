@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-08
 **Mode:** One-shot (Mode B)
-**Status:** Proposed
+**Status:** Approved 2026-06-09 (amended: §3 post-recreate session rebind) — epic sp-ephq
 
 ## Problem description
 
@@ -117,6 +117,14 @@ const onRecreate = async (id: string) => {
 };
 ```
 
+**Amendment (2026-06-09):** after a successful `recreateSpawn`, the handler must also force a
+session rebind for that spawn (call `bindSpawn(id)` / reset the session store for it). The user is
+typically already navigated to the unreachable spawn when they click Recreate, so
+`navigate({section:"spawn", spawnId:id})` is a no-op nav change and the nav effect will *not*
+re-fire `bindSpawn` — without an explicit rebind, the dead container's stale transcript stays on
+screen. (Same family of issue as epic sp-skp4, but handled locally here because recreate always
+means a fresh container.)
+
 Pass `onRecreate` in the `actions={{…}}` bag. Test fixtures that construct an actions object
 (`Sidebar.test.tsx`'s `noopActions`, and any actions bag in `App.test.tsx`/`AppShell.test.tsx`)
 gain an `onRecreate: vi.fn()` to satisfy the widened interface. **Considered:** making `onRecreate`
@@ -141,6 +149,8 @@ and `spawn-resume-` test-ids and adds `spawn-recreate-` / `spawn-pending-` for f
 - `web/src/shell/Sidebar.test.tsx`: extend the kebab test — an `unreachable` spawn (and an `error`
   spawn) shows "Recreate" and calls `onRecreate(id)`; a `suspending`/`starting` spawn shows a
   *disabled* `spawn-pending-…` item that dispatches nothing. Add `onRecreate` to `noopActions`.
+- `App.test.tsx` (or equivalent): recreating the *currently selected* spawn resets/rebinds its
+  session state (per the §3 amendment) — the stale transcript does not survive the recreate.
 
 No new Go/e2e tests: `RecreateSpawn`'s server behavior is already covered in
 `internal/cp/lifecycle_test.go`; this change adds no CP logic.
