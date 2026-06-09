@@ -660,9 +660,10 @@ func NewMessagesHandler(upstream, key string, ov *Override) http.Handler {
 			return
 		}
 
-		// Force the override model (raw OpenRouter id) before forwarding. The converted
-		// OpenAI body copies the agent's model verbatim, so patching it here is equivalent
-		// to substituting before the Anthropic->OpenAI conversion.
+		// Force the override model (raw OpenRouter id): patch the already-converted
+		// OpenAI body before forwarding. The conversion copies the agent's model
+		// verbatim, so patching after it is functionally the same as substituting
+		// the model in the Anthropic request first.
 		if m := ov.Get(); m != "" {
 			if patched, perr := patchModelJSON(oaiBody, m); perr == nil {
 				oaiBody = patched
