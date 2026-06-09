@@ -52,6 +52,16 @@ design. Three arms, run on `Register` and on every `Heartbeat` (both already cal
   `(spawn_id, gen)` rebinds `node_id` — that is `Adopt`'s documented contract ("rebind on
   reconnect"). No special casing.
 
+### Interplay with the boot sweep (§6.6 grace window)
+
+The adopt arm makes `MarkBootUnreachable`'s blind CP-restart sweep self-healing: boot marks
+`starting`/`active`/`suspending` unreachable → nodes reconnect with inventories → the adopt arm
+flips survivors back to `active`. This delivers §6.6's "wait for node inventories within a grace
+window" semantics without a literal grace timer, at the cosmetic cost of a brief red-dot blip in
+the UI between CP boot and node reconnect (accepted). The remaining §6.6 piece — probing
+`persist_marker`s for `suspending` spawns — is E3-gated and tracked as sp-f0jw (blocked on
+sp-u53.1).
+
 ## Testing
 
 - Store: `unreachable→active` flip method honors the gen fence and only flips `unreachable`
