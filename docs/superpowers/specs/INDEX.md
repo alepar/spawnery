@@ -61,6 +61,7 @@ were already made in one of these docs.
 - [Visible "Starting" Lifecycle](2026-06-02-spawn-starting-lifecycle-design.md) — non-blocking provision + surfaced "starting" status.
 - [Suspend Clears Message History](2026-06-03-suspend-clears-message-history-design.md) — drop a suspended spawn's in-UI message history.
 - [Turn-State + Prompt Queueing](2026-06-03-chat-turn-state-and-queueing-design.md) — per-spawn turn state + server-side prompt queueing.
+- [Runtime Model Switching](2026-06-08-runtime-model-switch-design.md) — change a running spawn's model seamlessly (sidecar override; no restart, no context loss) via web + spawnctl.
 
 ## ACP transport, pump & transcripts
 - [Node-Relay Transcript Replay](2026-06-02-node-relay-transcript-replay-design.md) — record + replay transcripts at the node relay.
@@ -71,6 +72,7 @@ were already made in one of these docs.
 ## Agents & terminal
 - [opencode Swap + Terminal](2026-06-05-opencode-swap-and-terminal-design.md) — swap goose→opencode; ACP as canonical protocol with concurrent TUI + web.
 - [Tmux Terminal Mode](2026-06-06-tmux-terminal-mode-design.md) — tmux terminal mode + agent-container capability taxonomy.
+- [Codex CLI Support](2026-06-08-codex-cli-support-design.md) — OpenAI Codex CLI as a selectable agent (tmux mode), model wired via the sidecar like claude-code.
 
 ## Web UI surface
 - [UI Framework Adoption](2026-05-30-web-ui-framework-adoption-design.md) — adopt React 19 + Tailwind v4 + shadcn/ui (Radix).
