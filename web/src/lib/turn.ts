@@ -43,8 +43,8 @@ export function turnEndLabel(turn: { reason?: string; error?: ErrorInfo }): stri
   }
 }
 
-// Mirror of internal/transcript.MaxQueued. The input box stops sending once this many prompts are
-// queued; the broker also drops over-cap as defence in depth.
+// Mirror of internal/node/pump.go's maxQueued. The input box stops sending once this many prompts
+// are queued; the pump also drops over-cap as defence in depth.
 export const MAX_QUEUED = 50;
 
 // reconcilePending returns items with pending flags adjusted so that exactly `queued` of the most

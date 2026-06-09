@@ -4,6 +4,13 @@
 **Epic:** E6 Web client (`sp-95v`)
 **Status:** Design approved, ready for implementation plan
 
+> **Status (2026-06-09): implemented** — `sp-b2b7` closed as shipped. The architecture evolved
+> during the pump rewrite: the session broker lives in **`internal/node/pump.go`** (busy/queue/turn
+> frames), not a promoted `internal/transcript` recorder — `internal/transcript` was **deleted**.
+> Web side: `web/src/sessions/store.ts` + `PromptInput`. One deliberate delta from this design:
+> over-cap prompts are **silently dropped server-side** (the web client gates at `MAX_QUEUED`
+> before sending).
+
 ## Problem
 
 The chat input's "ready to send" state is **global and fragile**.
