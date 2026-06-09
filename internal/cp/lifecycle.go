@@ -265,6 +265,11 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	if merr := s.st.Spawns().MarkModelApplied(context.WithoutCancel(ctx), req.Msg.SpawnId); merr != nil {
 		log.Printf("RecreateSpawn %s: MarkModelApplied after recreate: %v", req.Msg.SpawnId, merr)
 	}
+	// Record that this spawn went through a user-driven recovery. Best-effort bookkeeping — the
+	// recreate itself already succeeded, so log-don't-fail (mirrors MarkModelApplied above).
+	if rerr := s.st.Spawns().MarkRecovered(context.WithoutCancel(ctx), req.Msg.SpawnId); rerr != nil {
+		log.Printf("RecreateSpawn %s: MarkRecovered after recreate: %v", req.Msg.SpawnId, rerr)
+	}
 	return connect.NewResponse(&cpv1.RecreateSpawnResponse{}), nil
 }
 

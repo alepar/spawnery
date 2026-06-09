@@ -426,6 +426,9 @@ func TestRecreateSpawn(t *testing.T) {
 	if !sp.ModelApplied {
 		t.Fatalf("after recreate: model_applied=false, want true (fresh pod runs spawns.model)")
 	}
+	if !sp.Recovered {
+		t.Fatalf("after recreate: recovered=false, want true (user-driven recovery marks the spawn)")
+	}
 	c, ok, _ := s.st.Spawns().LiveContainer(ctx, id)
 	if !ok || c.Generation != 2 {
 		t.Fatalf("recreate must start a new-generation container: ok=%v c=%+v want gen 2", ok, c)
