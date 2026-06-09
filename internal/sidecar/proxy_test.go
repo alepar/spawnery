@@ -125,6 +125,54 @@ func TestProxyOverrideSetRewritesModel(t *testing.T) {
 	}
 }
 
+// Override set on a Codex-style /v1/responses request: the catch-all proxy rewrites the
+// top-level model exactly as it does for /v1/chat/completions — Responses API fields
+// (input/instructions) are preserved and the path forwards unchanged.
+func TestProxyOverrideAppliesToResponsesAPI(t *testing.T) {
+	var got []byte
+	var gotPath string
+	var gotCL int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		gotPath = r.URL.Path
+		gotCL = r.ContentLength
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	ov := &Override{}
+	ov.Set("override/model")
+	srv := httptest.NewServer(NewHandler(upstream.URL, "k", ov))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"agent/model","instructions":"be terse","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if gotPath != "/v1/responses" {
+		t.Fatalf("path = %q, want /v1/responses", gotPath)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(got, &obj); err != nil {
+		t.Fatalf("upstream body not JSON: %v (%s)", err, got)
+	}
+	if obj["model"] != "override/model" {
+		t.Fatalf("model = %v, want override/model", obj["model"])
+	}
+	if obj["instructions"] != "be terse" {
+		t.Fatalf("instructions field not preserved: %s", got)
+	}
+	if _, ok := obj["input"]; !ok {
+		t.Fatalf("input field dropped: %s", got)
+	}
+	if gotCL != int64(len(got)) {
+		t.Fatalf("Content-Length %d != body len %d", gotCL, len(got))
+	}
+}
+
 // A streaming response still flows back after a rewritten request.
 func TestProxyStreamingPassthroughAfterRewrite(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
