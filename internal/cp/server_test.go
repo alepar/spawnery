@@ -40,6 +40,19 @@ func (c *capSender) firstStart() *nodev1.StartSpawn {
 	return nil
 }
 
+// stops returns every StopSpawn this sender has been asked to deliver (reconcile orphan arm).
+func (c *capSender) stops() []*nodev1.StopSpawn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []*nodev1.StopSpawn
+	for _, m := range c.sent {
+		if st := m.GetStop(); st != nil {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
 func newTestServer(t *testing.T) (*Server, *registry.Registry, *router.Router) {
 	return newTestServerSink(t, telemetry.NopSink{})
 }

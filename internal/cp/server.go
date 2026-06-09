@@ -133,11 +133,11 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			}
 			token = tok
 			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, m.Register.NodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
-			s.reconcileInventory(ctx, nodeID, m.Register.Running) // a returning node reports what it still runs
+			s.reconcileInventory(ctx, nodeID, sender, m.Register.Running) // a returning node reports what it still runs
 			s.upsertAgentCatalog(ctx, m.Register.AgentImages, m.Register.Binaries)
 		case *nodev1.NodeMessage_Heartbeat:
 			s.reg.Heartbeat(nodeID, token, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
-			s.reconcileInventory(ctx, nodeID, m.Heartbeat.Running)
+			s.reconcileInventory(ctx, nodeID, sender, m.Heartbeat.Running)
 		case *nodev1.NodeMessage_Status:
 			s.sched.OnStatus(m.Status.SpawnId, m.Status.Phase)
 			if m.Status.Phase == nodev1.SpawnPhase_ACTIVE {
@@ -159,17 +159,25 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 	}
 }
 
-// reconcileInventory marks any ACTIVE spawn the CP believes runs on nodeID but the node is NOT
-// reporting in its running inventory (e.g. it restarted and lost the pod, or the pod died) as
-// unreachable, dropping its route. Starting spawns are skipped (may not be in the inventory yet).
-// User-driven recovery (RecreateSpawn) takes it from there. Builds on the node's RunningSpawn report.
-func (s *Server) reconcileInventory(ctx context.Context, nodeID string, running []*nodev1.RunningSpawn) {
+// reconcileInventory diffs the node's reported running inventory against the store (state/DAO
+// design §6.2) in three idempotent arms, run on Register and on every Heartbeat:
+//
+//  1. adopt: a reported (spawn_id, gen) matching the spawn's live container row is (re)bound to the
+//     reporting node — see adoptOrStop. Steady state is a cheap no-op (one point read).
+//  2. orphan: a reported (spawn_id, gen) with NO matching live row (suspended/deleted/errored spawn,
+//     or a superseded generation after recreate) -> StopSpawn(spawn_id, gen) to the reporting node.
+//  3. unreachable: an ACTIVE live row on this node the node does NOT report (it restarted and lost
+//     the pod, or the pod died) -> drop the route, mark the spawn unreachable. The live row is KEPT
+//     so a later report can re-adopt it. Starting spawns are skipped (may not be in the inventory
+//     yet). User-driven recovery (RecreateSpawn) also remains available.
+func (s *Server) reconcileInventory(ctx context.Context, nodeID string, sender registry.NodeSender, running []*nodev1.RunningSpawn) {
 	if nodeID == "" {
 		return
 	}
 	reported := make(map[string]bool, len(running))
 	for _, rs := range running {
 		reported[rs.GetSpawnId()] = true
+		s.adoptOrStop(ctx, nodeID, sender, rs)
 	}
 	live, err := s.st.Spawns().LiveContainersByNode(ctx, nodeID)
 	if err != nil {
@@ -189,6 +197,48 @@ func (s *Server) reconcileInventory(ctx context.Context, nodeID string, running 
 	}
 	if n, err := s.st.Spawns().MarkUnreachable(ctx, lost); err == nil && n > 0 {
 		log.Printf("node %s inventory: %d active spawn(s) not reported -> unreachable", nodeID, n)
+	}
+}
+
+// adoptOrStop handles ONE reported running spawn: the adopt + orphan arms of reconcileInventory.
+// Idempotent per heartbeat: when the live row already points at this node and the route is bound,
+// it is a single point read and a map lookup — no writes.
+func (s *Server) adoptOrStop(ctx context.Context, nodeID string, sender registry.NodeSender, rs *nodev1.RunningSpawn) {
+	id, gen := rs.GetSpawnId(), int64(rs.GetGeneration())
+	c, ok, err := s.st.Spawns().LiveContainer(ctx, id)
+	if err != nil {
+		return // transient store error; the next heartbeat retries
+	}
+	matched := ok && c.Generation == gen
+	if matched && c.NodeID != nodeID {
+		// The live row is bound elsewhere (node came back under a new id, or the CP recorded a
+		// since-stale binding): rebind it to the reporter — Adopt's documented contract. ErrConflict
+		// means the gen was fenced out concurrently (recreate/stop won the race), so the reported
+		// pod is an orphan after all.
+		if aerr := s.st.Spawns().Adopt(ctx, id, nodeID, gen); aerr != nil {
+			matched = false
+		} else {
+			log.Printf("node %s inventory: adopted spawn %s gen %d", nodeID, id, gen)
+		}
+	}
+	if !matched {
+		// Orphaned pod: suspended/deleted/errored spawn, or a superseded generation. Tell the
+		// reporting node to destroy it — a direct send, since an orphan has no route. The node-side
+		// gen fence guarantees this can only kill the stale pod, never a current episode.
+		_ = sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Stop{Stop: &nodev1.StopSpawn{SpawnId: id, Generation: rs.GetGeneration()}}})
+		return
+	}
+	if s.rt.Bound(id) {
+		return // steady state: route bound + row already adopted -> per-heartbeat no-op
+	}
+	s.rt.Bind(id, nodeID, sender)
+	// Wait->adopt: a spawn marked unreachable (boot sweep or node loss) turned out to be alive.
+	// Flip it back to active; ErrConflict is a benign race (a concurrent recreate/stop moved the
+	// spawn first) and any other status is none of the adopt arm's business.
+	if sp, gerr := s.st.Spawns().Get(ctx, id); gerr == nil && sp.Status == store.Unreachable {
+		if rerr := s.st.Spawns().MarkReachable(ctx, id, gen); rerr == nil {
+			log.Printf("node %s inventory: spawn %s reachable again -> active", nodeID, id)
+		}
 	}
 }
 

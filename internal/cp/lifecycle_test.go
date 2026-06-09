@@ -434,7 +434,7 @@ func TestRecreateSpawn(t *testing.T) {
 }
 
 func TestReconcileInventory(t *testing.T) {
-	s, reg, _ := newTestServer(t)
+	s, reg, rt := newTestServer(t)
 	stop := startAcker(t, s, reg)
 	defer stop()
 	ctx := auth.WithOwner(context.Background(), "alice")
@@ -446,15 +446,181 @@ func TestReconcileInventory(t *testing.T) {
 	id := resp.Msg.SpawnId
 	waitActive(t, s, id) // bound to node "n1" by the acker
 
-	// The node still reports the spawn -> it stays active.
-	s.reconcileInventory(ctx, "n1", []*nodev1.RunningSpawn{{SpawnId: id, Generation: 1}})
+	// The node still reports the spawn -> it stays active, and no Stop is sent.
+	sender := &capSender{}
+	s.reconcileInventory(ctx, "n1", sender, []*nodev1.RunningSpawn{{SpawnId: id, Generation: 1}})
 	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Active {
 		t.Fatalf("reported spawn must stay active, got %v", sp.Status)
 	}
+	if got := sender.stops(); len(got) != 0 {
+		t.Fatalf("reported live spawn must not get a Stop, got %v", got)
+	}
 
-	// The node no longer reports it (restart / pod died) -> unreachable.
-	s.reconcileInventory(ctx, "n1", nil)
+	// The node no longer reports it (restart / pod died) -> unreachable, route dropped.
+	s.reconcileInventory(ctx, "n1", sender, nil)
 	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Unreachable {
 		t.Fatalf("unreported active spawn must be marked unreachable, got %v", sp.Status)
+	}
+	if rt.Bound(id) {
+		t.Fatal("unreachable spawn must have its route dropped")
+	}
+}
+
+// A returning node's inventory re-adopts an unreachable spawn: status flips back to active, the
+// route is rebound, the live row keeps its generation, and NO Stop is sent. Idempotent across the
+// per-heartbeat repeat.
+func TestReconcileInventoryAdopt(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id)
+
+	// Simulate node loss (or a CP-restart boot sweep): route dropped, spawn unreachable, live row kept.
+	rt.Drop(id)
+	if _, err := s.st.Spawns().MarkUnreachable(ctx, []string{id}); err != nil {
+		t.Fatalf("MarkUnreachable: %v", err)
+	}
+
+	sender := &capSender{}
+	for i := 0; i < 2; i++ { // twice: re-adopt, then the steady-state heartbeat no-op
+		s.reconcileInventory(ctx, "n1", sender, []*nodev1.RunningSpawn{{SpawnId: id, Generation: 1}})
+		if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Active {
+			t.Fatalf("pass %d: adopted spawn must be active, got %v", i, sp.Status)
+		}
+		if !rt.Bound(id) {
+			t.Fatalf("pass %d: adopted spawn must have its route rebound", i)
+		}
+		if got := sender.stops(); len(got) != 0 {
+			t.Fatalf("pass %d: adopted spawn must not get a Stop, got %v", i, got)
+		}
+	}
+	if c, ok, _ := s.st.Spawns().LiveContainer(ctx, id); !ok || c.Generation != 1 || c.NodeID != "n1" {
+		t.Fatalf("live row after adopt: ok=%v c=%+v want gen 1 on n1", ok, c)
+	}
+}
+
+// A node coming back under a DIFFERENT id (or a binding the CP recorded stale) still adopts: the
+// live row's node_id is rebound to the reporter.
+func TestReconcileInventoryAdoptRebindsNodeID(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id) // live row bound to n1
+
+	rt.Drop(id)
+	if _, err := s.st.Spawns().MarkUnreachable(ctx, []string{id}); err != nil {
+		t.Fatalf("MarkUnreachable: %v", err)
+	}
+
+	sender := &capSender{}
+	s.reconcileInventory(ctx, "n2", sender, []*nodev1.RunningSpawn{{SpawnId: id, Generation: 1}})
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Active {
+		t.Fatalf("adopted spawn must be active, got %v", sp.Status)
+	}
+	c, ok, _ := s.st.Spawns().LiveContainer(ctx, id)
+	if !ok || c.NodeID != "n2" {
+		t.Fatalf("live row must be rebound to the reporter: ok=%v c=%+v want node n2", ok, c)
+	}
+	if !rt.Bound(id) {
+		t.Fatal("adopted spawn must have its route bound")
+	}
+	if got := sender.stops(); len(got) != 0 {
+		t.Fatalf("adopted spawn must not get a Stop, got %v", got)
+	}
+}
+
+// A superseded-generation report (stale pod from before a recreate) is an orphan: the reporting
+// node gets StopSpawn with the OLD generation; the current episode is untouched.
+func TestReconcileInventoryOrphanSupersededGen(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id)
+
+	// Recreate to generation 2 (the gen-1 pod is now stale).
+	if _, err := s.st.Spawns().MarkUnreachable(ctx, []string{id}); err != nil {
+		t.Fatalf("MarkUnreachable: %v", err)
+	}
+	if _, err := s.RecreateSpawn(ctx, connect.NewRequest(&cpv1.RecreateSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("RecreateSpawn: %v", err)
+	}
+
+	sender := &capSender{}
+	s.reconcileInventory(ctx, "n2", sender, []*nodev1.RunningSpawn{{SpawnId: id, Generation: 1}})
+	stops := sender.stops()
+	if len(stops) != 1 || stops[0].GetSpawnId() != id || stops[0].GetGeneration() != 1 {
+		t.Fatalf("superseded gen must get StopSpawn(id, 1) at the reporter, got %v", stops)
+	}
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Active {
+		t.Fatalf("current episode must be untouched, got %v", sp.Status)
+	}
+	if c, ok, _ := s.st.Spawns().LiveContainer(ctx, id); !ok || c.Generation != 2 {
+		t.Fatalf("live row must stay at gen 2: ok=%v c=%+v", ok, c)
+	}
+}
+
+// Suspended and deleted spawns reported running are orphans -> StopSpawn to the reporting node.
+func TestReconcileInventoryOrphanSuspendedAndDeleted(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	mk := func() string {
+		t.Helper()
+		resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+		if err != nil {
+			t.Fatalf("CreateSpawn: %v", err)
+		}
+		waitActive(t, s, resp.Msg.SpawnId)
+		return resp.Msg.SpawnId
+	}
+	suspended, deleted := mk(), mk()
+	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: suspended})); err != nil {
+		t.Fatalf("SuspendSpawn: %v", err)
+	}
+	if _, err := s.StopSpawn(ctx, connect.NewRequest(&cpv1.StopSpawnRequest{SpawnId: deleted})); err != nil {
+		t.Fatalf("StopSpawn: %v", err)
+	}
+
+	sender := &capSender{}
+	s.reconcileInventory(ctx, "n1", sender, []*nodev1.RunningSpawn{
+		{SpawnId: suspended, Generation: 1},
+		{SpawnId: deleted, Generation: 1},
+	})
+	stops := sender.stops()
+	if len(stops) != 2 {
+		t.Fatalf("want 2 StopSpawns (suspended + deleted), got %v", stops)
+	}
+	got := map[string]uint64{}
+	for _, st := range stops {
+		got[st.GetSpawnId()] = st.GetGeneration()
+	}
+	if got[suspended] != 1 || got[deleted] != 1 {
+		t.Fatalf("StopSpawns must target both orphans at gen 1, got %v", got)
+	}
+	if sp, _ := s.st.Spawns().Get(ctx, suspended); sp.Status != store.Suspended {
+		t.Fatalf("suspended spawn must stay suspended, got %v", sp.Status)
 	}
 }

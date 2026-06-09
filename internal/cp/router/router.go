@@ -70,6 +70,15 @@ func (r *Router) Bind(spawnID, nodeID string, node registry.NodeSender) {
 	r.mu.Unlock()
 }
 
+// Bound reports whether spawnID currently has a route. The inventory adopt arm uses it to bind
+// only once (steady-state heartbeats are a no-op) and never clobber a live route's clients.
+func (r *Router) Bound(spawnID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.m[spawnID]
+	return ok
+}
+
 // AttachClient registers a client by id and tells the node to open the relay for it (carrying cursor).
 func (r *Router) AttachClient(spawnID, sessionID, clientID string, c ClientSender, cursor int64) (<-chan struct{}, error) {
 	r.mu.Lock()

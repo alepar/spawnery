@@ -126,8 +126,11 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 	s.rt.Drop(req.Msg.SpawnId)
 	if err := s.st.Spawns().SetSuspended(ctx, req.Msg.SpawnId, gen); err != nil {
 		// The container was already torn down above; we couldn't record 'suspended'. Compensate to a
-		// terminal 'error' state — MarkBootUnreachable doesn't sweep 'suspending', so the spawn would
-		// otherwise be stranded. Mirrors CreateSpawn's SetError-on-failure path.
+		// terminal 'error' state: nothing drives 'suspending' forward while the CP stays up — the pod
+		// is gone, so the node never reports it again and inventory reconciliation skips non-active
+		// live rows; only a CP restart's MarkBootUnreachable sweep (which does include 'suspending'
+		// since sp-1ni) would eventually catch it, as unreachable. SetError gives the user an
+		// immediately recreate-able spawn instead. Mirrors CreateSpawn's SetError-on-failure path.
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("SuspendSpawn %s: SetError after SetSuspended failure also failed: %v", req.Msg.SpawnId, serr)
 		}
