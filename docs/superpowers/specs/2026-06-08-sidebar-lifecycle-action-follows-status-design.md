@@ -117,13 +117,14 @@ const onRecreate = async (id: string) => {
 };
 ```
 
-**Amendment (2026-06-09):** after a successful `recreateSpawn`, the handler must also force a
-session rebind for that spawn (call `bindSpawn(id)` / reset the session store for it). The user is
-typically already navigated to the unreachable spawn when they click Recreate, so
-`navigate({section:"spawn", spawnId:id})` is a no-op nav change and the nav effect will *not*
-re-fire `bindSpawn` — without an explicit rebind, the dead container's stale transcript stays on
-screen. (Same family of issue as epic sp-skp4, but handled locally here because recreate always
-means a fresh container.)
+**Amendment (2026-06-09, corrected same day):** no extra rebind code is needed after
+`recreateSpawn`. Initial concern — navigate-to-same-spawn is a no-op so `bindSpawn` won't re-fire
+— turned out to be covered structurally: the spawn's session mirror is dropped with its route
+(`router.Drop`), so `ListSessions` returns empty and `SpawnTabs`' 3s roster poll
+(`reconcileRoster`) wipes the stale runtimes; recreate then repopulates the roster with fresh
+session ids → fresh transcripts. Keep only a **regression test** asserting the dead container's
+transcript does not survive a recreate of the currently-selected spawn (guards the roster-poll
+mechanism against future store/poll refactors).
 
 Pass `onRecreate` in the `actions={{…}}` bag. Test fixtures that construct an actions object
 (`Sidebar.test.tsx`'s `noopActions`, and any actions bag in `App.test.tsx`/`AppShell.test.tsx`)
@@ -149,8 +150,9 @@ and `spawn-resume-` test-ids and adds `spawn-recreate-` / `spawn-pending-` for f
 - `web/src/shell/Sidebar.test.tsx`: extend the kebab test — an `unreachable` spawn (and an `error`
   spawn) shows "Recreate" and calls `onRecreate(id)`; a `suspending`/`starting` spawn shows a
   *disabled* `spawn-pending-…` item that dispatches nothing. Add `onRecreate` to `noopActions`.
-- `App.test.tsx` (or equivalent): recreating the *currently selected* spawn resets/rebinds its
-  session state (per the §3 amendment) — the stale transcript does not survive the recreate.
+- `App.test.tsx` (or equivalent): recreating the *currently selected* spawn does not leave the
+  dead container's transcript on screen (per the §3 amendment: the roster poll handles the clear;
+  this test guards that mechanism, no new implementation expected).
 
 No new Go/e2e tests: `RecreateSpawn`'s server behavior is already covered in
 `internal/cp/lifecycle_test.go`; this change adds no CP logic.
