@@ -1,7 +1,11 @@
 package cp
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -13,7 +17,10 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
+	"spawnery/internal/cp/router"
+	"spawnery/internal/cp/scheduler"
 	"spawnery/internal/cp/store"
+	"spawnery/internal/cp/telemetry"
 )
 
 // makeSpawn inserts a spawn row (status=starting) directly via the store (no node flow needed).
@@ -622,5 +629,136 @@ func TestReconcileInventoryOrphanSuspendedAndDeleted(t *testing.T) {
 	}
 	if sp, _ := s.st.Spawns().Get(ctx, suspended); sp.Status != store.Suspended {
 		t.Fatalf("suspended spawn must stay suspended, got %v", sp.Status)
+	}
+}
+
+// --- non-conflict store-error paths of adoptOrStop -------------------------
+
+// faultySpawns wraps a SpawnRepo to inject non-conflict failures (DB I/O) into the inventory arms.
+type faultySpawns struct {
+	store.SpawnRepo
+	adoptErr error
+	reachErr error
+}
+
+func (f *faultySpawns) Adopt(ctx context.Context, id, nodeID string, gen int64) error {
+	if f.adoptErr != nil {
+		return f.adoptErr
+	}
+	return f.SpawnRepo.Adopt(ctx, id, nodeID, gen)
+}
+
+func (f *faultySpawns) MarkReachable(ctx context.Context, id string, gen int64) error {
+	if f.reachErr != nil {
+		return f.reachErr
+	}
+	return f.SpawnRepo.MarkReachable(ctx, id, gen)
+}
+
+type faultyStore struct {
+	store.Store
+	spawns *faultySpawns
+}
+
+func (f *faultyStore) Spawns() store.SpawnRepo { return f.spawns }
+
+// newFaultyServer is newTestServer with Adopt/MarkReachable failure injection (set at construction;
+// nothing else calls those methods, so the fields need no locking).
+func newFaultyServer(t *testing.T, adoptErr, reachErr error) (*Server, *registry.Registry, *router.Router) {
+	t.Helper()
+	reg := registry.New()
+	rt := router.New()
+	sc := scheduler.New(reg, rt, time.Second)
+	st := store.NewTestStore(t)
+	if err := Seed(context.Background(), st, map[string]string{"dev-token": "alice"},
+		[]AppSeed{{ID: "secret-app", Ref: "examples/secret-app", Version: "1.0.0", Mounts: []string{"main"}}}); err != nil {
+		t.Fatal(err)
+	}
+	fst := &faultyStore{Store: st, spawns: &faultySpawns{SpawnRepo: st.Spawns(), adoptErr: adoptErr, reachErr: reachErr}}
+	s := NewServer(reg, rt, sc, fst, telemetry.NopSink{})
+	return s, reg, rt
+}
+
+// A non-conflict Adopt failure (DB I/O) says nothing about orphanhood: the reported pod must NOT
+// get a Stop — the error is logged and the next heartbeat retries the adopt.
+func TestReconcileInventoryAdoptStoreErrorDoesNotStop(t *testing.T) {
+	s, reg, rt := newFaultyServer(t, errors.New("db down"), nil)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id) // live row bound to n1
+
+	rt.Drop(id)
+	if _, err := s.st.Spawns().MarkUnreachable(ctx, []string{id}); err != nil {
+		t.Fatalf("MarkUnreachable: %v", err)
+	}
+
+	// Report from n2 -> the rebind path hits the failing Adopt.
+	sender := &capSender{}
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	s.reconcileInventory(ctx, "n2", sender, []*nodev1.RunningSpawn{{SpawnId: id, Generation: 1}})
+	log.SetOutput(os.Stderr)
+
+	if got := sender.stops(); len(got) != 0 {
+		t.Fatalf("Adopt store error must not stop the reported pod, got %v", got)
+	}
+	if rt.Bound(id) {
+		t.Fatal("Adopt store error must not bind the route")
+	}
+	if c, ok, _ := s.st.Spawns().LiveContainer(ctx, id); !ok || c.NodeID != "n1" {
+		t.Fatalf("live row must be untouched: ok=%v c=%+v want node n1", ok, c)
+	}
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Unreachable {
+		t.Fatalf("spawn must stay unreachable, got %v", sp.Status)
+	}
+	if !strings.Contains(logs.String(), "Adopt spawn "+id) {
+		t.Fatalf("Adopt store error must be logged, got %q", logs.String())
+	}
+}
+
+// A non-conflict MarkReachable failure (DB I/O) is logged; behavior is otherwise unchanged
+// (route rebound, no Stop, the unreachable->active flip simply did not land).
+func TestReconcileInventoryMarkReachableStoreErrorLogged(t *testing.T) {
+	s, reg, rt := newFaultyServer(t, nil, errors.New("db down"))
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id)
+
+	rt.Drop(id)
+	if _, err := s.st.Spawns().MarkUnreachable(ctx, []string{id}); err != nil {
+		t.Fatalf("MarkUnreachable: %v", err)
+	}
+
+	sender := &capSender{}
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	s.reconcileInventory(ctx, "n1", sender, []*nodev1.RunningSpawn{{SpawnId: id, Generation: 1}})
+	log.SetOutput(os.Stderr)
+
+	if got := sender.stops(); len(got) != 0 {
+		t.Fatalf("MarkReachable store error must not stop the reported pod, got %v", got)
+	}
+	if !rt.Bound(id) {
+		t.Fatal("route must still be rebound on MarkReachable store error")
+	}
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Unreachable {
+		t.Fatalf("failed flip must leave the spawn unreachable, got %v", sp.Status)
+	}
+	if !strings.Contains(logs.String(), "MarkReachable spawn "+id) {
+		t.Fatalf("MarkReachable store error must be logged, got %q", logs.String())
 	}
 }

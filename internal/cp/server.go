@@ -5,6 +5,7 @@ package cp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -163,7 +164,8 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 // design §6.2) in three idempotent arms, run on Register and on every Heartbeat:
 //
 //  1. adopt: a reported (spawn_id, gen) matching the spawn's live container row is (re)bound to the
-//     reporting node — see adoptOrStop. Steady state is a cheap no-op (one point read).
+//     reporting node — see adoptOrStop. Steady state is a cheap no-op (one DB point read plus one
+//     route-map lookup).
 //  2. orphan: a reported (spawn_id, gen) with NO matching live row (suspended/deleted/errored spawn,
 //     or a superseded generation after recreate) -> StopSpawn(spawn_id, gen) to the reporting node.
 //  3. unreachable: an ACTIVE live row on this node the node does NOT report (it restarted and lost
@@ -214,10 +216,16 @@ func (s *Server) adoptOrStop(ctx context.Context, nodeID string, sender registry
 		// The live row is bound elsewhere (node came back under a new id, or the CP recorded a
 		// since-stale binding): rebind it to the reporter — Adopt's documented contract. ErrConflict
 		// means the gen was fenced out concurrently (recreate/stop won the race), so the reported
-		// pod is an orphan after all.
-		if aerr := s.st.Spawns().Adopt(ctx, id, nodeID, gen); aerr != nil {
+		// pod is an orphan after all. Any OTHER error (DB I/O) says nothing about orphanhood:
+		// stopping a healthy pod over a transient store error would be harmful, so log and let the
+		// next heartbeat retry.
+		switch aerr := s.st.Spawns().Adopt(ctx, id, nodeID, gen); {
+		case errors.Is(aerr, store.ErrConflict):
 			matched = false
-		} else {
+		case aerr != nil:
+			log.Printf("node %s inventory: Adopt spawn %s gen %d: %v", nodeID, id, gen, aerr)
+			return
+		default:
 			log.Printf("node %s inventory: adopted spawn %s gen %d", nodeID, id, gen)
 		}
 	}
@@ -234,10 +242,14 @@ func (s *Server) adoptOrStop(ctx context.Context, nodeID string, sender registry
 	s.rt.Bind(id, nodeID, sender)
 	// Wait->adopt: a spawn marked unreachable (boot sweep or node loss) turned out to be alive.
 	// Flip it back to active; ErrConflict is a benign race (a concurrent recreate/stop moved the
-	// spawn first) and any other status is none of the adopt arm's business.
+	// spawn first) and any other status is none of the adopt arm's business. A non-conflict error
+	// (DB I/O) must not vanish — log it (behavior otherwise unchanged).
 	if sp, gerr := s.st.Spawns().Get(ctx, id); gerr == nil && sp.Status == store.Unreachable {
-		if rerr := s.st.Spawns().MarkReachable(ctx, id, gen); rerr == nil {
+		switch rerr := s.st.Spawns().MarkReachable(ctx, id, gen); {
+		case rerr == nil:
 			log.Printf("node %s inventory: spawn %s reachable again -> active", nodeID, id)
+		case !errors.Is(rerr, store.ErrConflict):
+			log.Printf("node %s inventory: MarkReachable spawn %s gen %d: %v", nodeID, id, gen, rerr)
 		}
 	}
 }
