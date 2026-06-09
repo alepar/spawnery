@@ -65,6 +65,7 @@ were already made in one of these docs.
 - [Node-Relay Transcript Replay](2026-06-02-node-relay-transcript-replay-design.md) — record + replay transcripts at the node relay.
 - [Per-Spawn Pump + Multi-Client](2026-06-03-spawn-pump-multiclient-design.md) — long-lived per-spawn pump fanning out to multiple clients.
 - [ACP Enrichment (sp-ufz)](2026-06-07-acp-enrichment-design.md) — decode/render more of what agents emit over ACP.
+- [ACP Enrichment Store Restoration (sp-x8y4)](2026-06-09-acp-enrichment-store-restoration-design.md) — restore the enrichment cases the tabs-migration reducer dropped; wire panel controls.
 
 ## Agents & terminal
 - [opencode Swap + Terminal](2026-06-05-opencode-swap-and-terminal-design.md) — swap goose→opencode; ACP as canonical protocol with concurrent TUI + web.
