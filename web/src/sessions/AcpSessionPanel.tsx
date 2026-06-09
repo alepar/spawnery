@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Conn } from "@/acp/conn";
-import { encodePrompt, encodePermResponse, type Frame } from "@/acp/frames";
+import { encodePrompt, encodePermResponse, encodeSetMode, encodeCancel, type Frame } from "@/acp/frames";
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
 import { DEV_TOKEN } from "@/api/spawnlet";
 import { ChatView } from "@/views/ChatView";
@@ -65,6 +65,8 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready, model, mode
   const turn = rt?.turn ?? { state: "idle" as const, queued: 0 };
   const canSend = conn === "connected" && turn.queued < MAX_QUEUED;
   const onSend = (text: string) => sockRef.current?.send(encodePrompt(text));
+  const onSetMode = (modeId: string) => sockRef.current?.send(encodeSetMode(modeId));
+  const onCancel = () => sockRef.current?.send(encodeCancel());
   // resolve sends the picked optionId (cat H); "" (dismiss) lets the node auto-deny.
   const perm = rt?.perm
     ? { title: rt.perm.title, options: rt.perm.options, resolve: (optionId: string) => {
@@ -80,6 +82,10 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready, model, mode
       canSend={canSend}
       onSend={onSend}
       perm={perm}
+      commands={rt?.commands ?? []}
+      mode={rt?.mode ?? null}
+      onSetMode={onSetMode}
+      onCancel={onCancel}
       focusKey={active ? sessionId : null}
       spawnId={spawnId}
       model={model}

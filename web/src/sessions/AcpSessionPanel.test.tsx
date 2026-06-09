@@ -1,4 +1,4 @@
-import { render, act } from "@testing-library/react";
+import { render, act, fireEvent, screen } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ─── Fake ReconnectingSocket ──────────────────────────────────────────────────
@@ -68,5 +68,59 @@ describe("AcpSessionPanel — gate the socket on session readiness", () => {
     render(<AcpSessionPanel spawnId="s1" sessionId="0" active ready={true} />);
     expect(socketCtorCount).toBe(1);
     expect(fakeSocketInstance).not.toBeNull();
+  });
+});
+
+// ─── Chat controls + enrichment data (sp-x8y4.2) ─────────────────────────────
+// The panel must feed the store's commands/mode into ChatView and wire the upward
+// cancel / set_mode control frames through the live socket, mirroring onSend.
+const dec = new TextDecoder();
+function lastSentFrame(): { kind: string; modeId?: string } {
+  const raw = fakeSocketInstance!.sent.at(-1);
+  return JSON.parse(dec.decode(raw as Uint8Array));
+}
+
+function mountConnected(sessionId: string) {
+  const view = render(<AcpSessionPanel spawnId="s1" sessionId={sessionId} active ready={true} />);
+  act(() => { fakeSocketInstance!.opts.onOpen(); });
+  return view;
+}
+
+describe("AcpSessionPanel — chat controls + enrichment data", () => {
+  it("StopButton click sends a cancel frame over the socket", () => {
+    mountConnected("0");
+    // Busy turn -> StopButton renders.
+    act(() => { useSessionStore.getState().applyFrame("0", { kind: "turn", state: "busy", queued: 0 }); });
+    fireEvent.click(screen.getByTestId("stop-button"));
+    expect(lastSentFrame()).toEqual({ kind: "cancel" });
+  });
+
+  it("ModeSelector change sends set_mode with the chosen id", () => {
+    mountConnected("0");
+    act(() => {
+      useSessionStore.getState().applyFrame("0", {
+        kind: "mode",
+        mode: { current: "default", available: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] },
+      });
+    });
+    // mode from the store reached ChatView: the selector renders with the agent's modes.
+    const selector = screen.getByTestId("mode-selector");
+    expect(selector).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Session mode"), { target: { value: "plan" } });
+    expect(lastSentFrame()).toEqual({ kind: "set_mode", modeId: "plan" });
+  });
+
+  it("commands from the store reach ChatView (slash menu lists them)", () => {
+    mountConnected("0");
+    act(() => {
+      useSessionStore.getState().applyFrame("0", {
+        kind: "commands",
+        cmds: [{ name: "compact", description: "Compact the context" }],
+      });
+    });
+    // Typing `/` opens the command menu only when commands reached PromptInput via ChatView.
+    fireEvent.change(screen.getByTestId("prompt-input"), { target: { value: "/" } });
+    expect(screen.getByTestId("command-menu")).toBeTruthy();
+    expect(screen.getByTestId("command-option").textContent).toContain("/compact");
   });
 });
