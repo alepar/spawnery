@@ -5,7 +5,9 @@ import type { Frame } from "@/acp/frames";
 const meta = (id: string, over: Partial<SessionMeta> = {}): SessionMeta => ({
   sessionId: id, transport: "acp", runnable: "goose-acp", label: "goose-acp", status: "active", pinned: id === "0", ...over,
 });
-const emptyRt: AcpRuntime = { items: [], turn: { state: "idle", queued: 0 }, perm: null, nextId: 0, lastSeq: 0 };
+const emptyRt: AcpRuntime = {
+  items: [], turn: { state: "idle", queued: 0 }, perm: null, mode: null, commands: [], nextId: 0, lastSeq: 0,
+};
 
 beforeEach(() => useSessionStore.getState().bindSpawn("__reset__"));
 
@@ -39,6 +41,98 @@ describe("reduceFrame (pure)", () => {
     rt = reduceFrame(rt, { kind: "reset", fromSeq: 3 } as Frame);
     expect(rt.items).toEqual([]);
     expect(rt.lastSeq).toBe(3);
+  });
+
+  // --- ACP enrichment cases restored by sp-x8y4 (semantics from the pre-tabs App.applyFrame) ---
+
+  it("plan: replace-in-place — one plan item, later frames swap entries keeping id/position", () => {
+    let rt = reduceFrame(emptyRt, { kind: "user", text: "go" } as Frame);
+    rt = reduceFrame(rt, { kind: "plan", plan: [{ content: "step 1", status: "pending" }] } as Frame);
+    rt = reduceFrame(rt, { kind: "agent", text: "working" } as Frame);
+    rt = reduceFrame(rt, {
+      kind: "plan",
+      plan: [{ content: "step 1", status: "completed" }, { content: "step 2", status: "in_progress" }],
+    } as Frame);
+    const plans = rt.items.filter((it) => it.kind === "plan");
+    expect(plans).toHaveLength(1); // never stacks
+    expect(rt.items[1]).toEqual({
+      id: 1, // same id + position as the first plan frame's item
+      kind: "plan",
+      entries: [{ content: "step 1", status: "completed" }, { content: "step 2", status: "in_progress" }],
+    });
+  });
+
+  it("plan: empty frame before any plan is a no-op (graceful absence)", () => {
+    const rt = reduceFrame(emptyRt, { kind: "plan", plan: [] } as Frame);
+    expect(rt.items).toEqual([]);
+  });
+
+  it("commands: wholesale replace; a frame without cmds clears the set", () => {
+    let rt = reduceFrame(emptyRt, { kind: "commands", cmds: [{ name: "init" }, { name: "compact" }] } as Frame);
+    expect(rt.commands).toEqual([{ name: "init" }, { name: "compact" }]);
+    rt = reduceFrame(rt, { kind: "commands", cmds: [{ name: "web" }] } as Frame);
+    expect(rt.commands).toEqual([{ name: "web" }]); // replaced, not merged
+    rt = reduceFrame(rt, { kind: "commands" } as Frame);
+    expect(rt.commands).toEqual([]);
+  });
+
+  it("mode: adopts the session/new advertisement (current + available)", () => {
+    const payload = { current: "build", available: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] };
+    const rt = reduceFrame(emptyRt, { kind: "mode", mode: payload } as Frame);
+    expect(rt.mode).toEqual(payload);
+  });
+
+  it("mode: a current-only update keeps the prior available set (mergeMode semantics)", () => {
+    const available = [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }];
+    let rt = reduceFrame(emptyRt, { kind: "mode", mode: { current: "build", available } } as Frame);
+    rt = reduceFrame(rt, { kind: "mode", mode: { current: "plan" } } as Frame);
+    expect(rt.mode).toEqual({ current: "plan", available });
+  });
+
+  it("turn: idle carries reason/error/usage into TurnState", () => {
+    const usage = { input: 10, output: 20, total: 30, cost: 0.01 };
+    const error = { code: 429, message: "rate limited" };
+    const rt = reduceFrame(emptyRt, { kind: "turn", state: "idle", queued: 0, reason: "max_tokens", error, usage } as Frame);
+    expect(rt.turn).toEqual({ state: "idle", queued: 0, reason: "max_tokens", error, usage });
+  });
+
+  it("turn: a busy frame clears prior reason/error/usage", () => {
+    let rt = reduceFrame(emptyRt, {
+      kind: "turn", state: "idle", queued: 0, reason: "cancelled", usage: { total: 5 },
+    } as Frame);
+    rt = reduceFrame(rt, { kind: "turn", state: "busy", queued: 1 } as Frame);
+    expect(rt.turn).toEqual({ state: "busy", queued: 1 });
+    expect(rt.turn.reason).toBeUndefined();
+    expect(rt.turn.error).toBeUndefined();
+    expect(rt.turn.usage).toBeUndefined();
+  });
+
+  it("tool: frames with the same toolId upsert one chip, merging status/content/diff/raw payloads", () => {
+    let rt = reduceFrame(emptyRt, {
+      kind: "tool", toolId: "t1", title: "write file", status: "in_progress", tool: { rawInput: { path: "a.txt" } },
+    } as Frame);
+    rt = reduceFrame(rt, {
+      kind: "tool", toolId: "t1", status: "completed",
+      tool: { content: [{ type: "text", text: "done" }], diff: { path: "a.txt", newText: "x" }, rawOutput: { ok: true } },
+    } as Frame);
+    expect(rt.items).toEqual([{
+      id: 0,
+      kind: "tool",
+      toolId: "t1",
+      title: "write file", // status-only update keeps prior title
+      status: "completed",
+      content: [{ type: "text", text: "done" }],
+      diff: { path: "a.txt", newText: "x" },
+      rawInput: { path: "a.txt" },
+      rawOutput: { ok: true },
+    }]);
+  });
+
+  it("tool: frames without a toolId keep append behavior (one chip each)", () => {
+    let rt = reduceFrame(emptyRt, { kind: "tool", title: "shell", status: "in_progress" } as Frame);
+    rt = reduceFrame(rt, { kind: "tool", title: "shell", status: "completed" } as Frame);
+    expect(rt.items).toHaveLength(2);
+    expect(rt.items.map((it) => it.id)).toEqual([0, 1]);
   });
 });
 
