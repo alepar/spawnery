@@ -26,6 +26,7 @@ import (
 	"spawnery/internal/runtime/cri"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/spawnlet/firewall"
+	"spawnery/internal/storage/journal"
 )
 
 func main() {
@@ -50,6 +51,9 @@ func main() {
 	mgr, err := buildManager(cfg)
 	if err != nil {
 		log.Fatalf("manager init: %v", err)
+	}
+	if err := configureJournal(mgr, cfg.DataRoot); err != nil {
+		log.Fatalf("journal init: %v", err)
 	}
 	// SIGTERM/SIGINT cancels ctx; the node's serve loop returns and we gracefully reap our pods
 	// (graceful teardown on shutdown complements reap-on-startup — see sp-8hf).
@@ -131,6 +135,63 @@ func gracefulStopAll(mgr *spawnlet.Manager) {
 
 // buildManager selects the pod backend + egress floor by CONTAINER_RUNTIME: runsc -> a containerd
 // CRI pod backend + the SPAWNLET-EGRESS floor; anything else -> the Docker backend + DOCKER-USER.
+// configureJournal wires the transient-tier node-local journaler onto the
+// manager when JOURNAL_BACKEND is set (filesystem|s3). It is OFF by default:
+// with the env unset, journaling is disabled and every mount stays scratch-only
+// (the guarded seam in the manager leaves existing behavior unchanged). Custody
+// is node-local — the repo password is generated + sealed under a node key on
+// this box; the CP never holds it (transient-tier §4).
+func configureJournal(m *spawnlet.Manager, dataRoot string) error {
+	kind := journal.BackendKind(os.Getenv("JOURNAL_BACKEND"))
+	if kind == "" {
+		return nil // journaling disabled (default)
+	}
+	root := env("JOURNAL_ROOT", filepath.Join(dataRoot, "journal"))
+
+	var bcfg journal.BackendConfig
+	switch kind {
+	case journal.BackendFilesystem:
+		bcfg = journal.BackendConfig{Kind: kind, FilesystemRoot: env("JOURNAL_FS_ROOT", filepath.Join(root, "blobs"))}
+	case journal.BackendS3:
+		bcfg = journal.BackendConfig{Kind: kind, S3: journal.S3Config{
+			Endpoint:        os.Getenv("JOURNAL_S3_ENDPOINT"),
+			Bucket:          os.Getenv("JOURNAL_S3_BUCKET"),
+			AccessKeyID:     os.Getenv("JOURNAL_S3_ACCESS_KEY"),
+			SecretAccessKey: os.Getenv("JOURNAL_S3_SECRET_KEY"),
+			Region:          env("JOURNAL_S3_REGION", "garage"),
+			Prefix:          os.Getenv("JOURNAL_S3_PREFIX"),
+			DisableTLS:      getenvBool("JOURNAL_S3_DISABLE_TLS", false),
+		}}
+	default:
+		return fmt.Errorf("unknown JOURNAL_BACKEND %q (want filesystem|s3)", kind)
+	}
+	backend, err := journal.NewBackend(bcfg)
+	if err != nil {
+		return err
+	}
+
+	keyfile := env("JOURNAL_NODE_KEY", filepath.Join(root, "node.key"))
+	if err := journal.GenerateNodeKeyfile(keyfile); err != nil {
+		return fmt.Errorf("node key: %w", err)
+	}
+	custody, err := journal.NewNodeLocalCustody(keyfile, filepath.Join(root, "sealed"))
+	if err != nil {
+		return err
+	}
+
+	jm, err := journal.NewManager(journal.Config{
+		RepoRoot: filepath.Join(root, "repos"),
+		Backend:  backend,
+		Custody:  custody,
+	})
+	if err != nil {
+		return err
+	}
+	m.SetJournal(jm, filepath.Join(root, "state"))
+	log.Printf("journal: node-local journaler enabled (backend=%s, root=%s)", kind, root)
+	return nil
+}
+
 func buildManager(cfg spawnlet.ManagerConfig) (*spawnlet.Manager, error) {
 	if cfg.ContainerRuntime == "runsc" {
 		endpoint := env("CRI_ENDPOINT", "unix:///run/containerd/containerd.sock")
