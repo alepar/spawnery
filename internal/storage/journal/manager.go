@@ -30,6 +30,8 @@ type Config struct {
 	// Zero values default to k=2, min=1s.
 	DebounceK   float64
 	DebounceMin time.Duration
+	// Telemetry receives per-snapshot telemetry (design §5). Optional; nil = off.
+	Telemetry Telemetry
 }
 
 // Manager is the node-daemon journaler service (design §1b): one per spawnlet,
@@ -177,14 +179,28 @@ func (m *Manager) mountState(s *spawnState, spawnID string, gen uint64, mt Mount
 		}
 		start := m.clock.Now()
 		id, err := s.repo.snapshotMount(ctx, mt.Name, mt.HostDir, gen)
-		deb.RecordScan(m.clock.Now().Sub(start))
+		dur := m.clock.Now().Sub(start)
+		deb.RecordScan(dur)
 		deb.MarkFired(m.clock.Now())
+		m.emit(spawnID, mt.Name, gen, SnapshotContinuous, dur, id, err)
 		return id, err
 	}
 	q = newSerialQueue(context.Background(), action)
 	s.queues[mt.Name] = q
 	s.debs[mt.Name] = deb
 	return q, deb
+}
+
+// emit forwards a snapshot telemetry event when a sink is configured. A
+// debounce-skip (empty id, nil err) is suppressed — it is not a real snapshot.
+func (m *Manager) emit(spawnID, mount string, gen uint64, kind SnapshotKind, scan time.Duration, id ManifestID, err error) {
+	if m.cfg.Telemetry == nil {
+		return
+	}
+	if id == "" && err == nil {
+		return
+	}
+	m.cfg.Telemetry.SnapshotDone(spawnID, mount, gen, kind, scan, id, err)
 }
 
 // RequestSnapshot implements JournalManager.
@@ -223,7 +239,10 @@ func (m *Manager) FinalSnapshot(ctx context.Context, spawnID string, gen uint64,
 		q, _ := m.mountState(s, spawnID, gen, mt)
 		// The final snapshot bypasses the debounce (it must always run).
 		final := func(ctx context.Context) (ManifestID, error) {
-			return s.repo.snapshotMount(ctx, mt.Name, mt.HostDir, gen)
+			start := m.clock.Now()
+			id, err := s.repo.snapshotMount(ctx, mt.Name, mt.HostDir, gen)
+			m.emit(spawnID, mt.Name, gen, SnapshotFinal, m.clock.Now().Sub(start), id, err)
+			return id, err
 		}
 		id, err := q.Suspend(ctx, final)
 		if err != nil {
@@ -259,6 +278,20 @@ func (m *Manager) QuickMaintenance(ctx context.Context, spawnID string) error {
 		return err
 	}
 	return s.repo.quickMaintenance(ctx)
+}
+
+// FullMaintenance runs full (deleting) maintenance on the spawn's repo (design §2
+// roast M5). It is intentionally OFF the JournalManager interface: full
+// maintenance is CP-commanded only (a CP→node command run after the spawn is
+// suspended), never on the node's own cadence, so only the node's command handler
+// — holding a concrete *Manager — invokes it. (The CP→node command wiring is a
+// sp-u53.5.2 follow-up; this is the node-side primitive it calls.)
+func (m *Manager) FullMaintenance(ctx context.Context, spawnID string) error {
+	s, err := m.state(ctx, spawnID)
+	if err != nil {
+		return err
+	}
+	return s.repo.fullMaintenance(ctx)
 }
 
 // Close implements JournalManager: release the spawn's repo handle + scheduler

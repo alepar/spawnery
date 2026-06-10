@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"spawnery/internal/storage/journal"
 )
@@ -18,13 +19,19 @@ type fakeJournal struct {
 	mu          sync.Mutex
 	finalID     journal.ManifestID
 	restoreSeen map[string]journal.ManifestID // mountName -> manifest id Restore was called with
+	requested   chan journal.Mount            // each RequestSnapshot pushes the mount (drops if full)
 }
 
 func newFakeJournal(id journal.ManifestID) *fakeJournal {
-	return &fakeJournal{finalID: id, restoreSeen: map[string]journal.ManifestID{}}
+	return &fakeJournal{finalID: id, restoreSeen: map[string]journal.ManifestID{}, requested: make(chan journal.Mount, 256)}
 }
 
-func (f *fakeJournal) RequestSnapshot(context.Context, string, uint64, journal.Mount) {}
+func (f *fakeJournal) RequestSnapshot(_ context.Context, _ string, _ uint64, mt journal.Mount) {
+	select {
+	case f.requested <- mt:
+	default:
+	}
+}
 
 func (f *fakeJournal) FinalSnapshot(_ context.Context, _ string, _ uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
 	out := map[string]journal.ManifestID{}
@@ -146,5 +153,47 @@ func TestScratchOnlySpawnLeavesNoJournalState(t *testing.T) {
 	}
 	if len(fj.restoreSeen) != 0 {
 		t.Fatalf("scratch-only spawn must not restore, got %v", fj.restoreSeen)
+	}
+	// And no continuous watcher fired (scratch-only spawns get none).
+	select {
+	case mt := <-fj.requested:
+		t.Fatalf("scratch-only spawn must not request snapshots, got %v", mt)
+	default:
+	}
+}
+
+// The continuous watcher (sp-u53.5.2) started on Create drives RequestSnapshot
+// when the journaled mount's host dir changes — the headline phase-② wiring.
+func TestWatcherDrivesRequestSnapshotOnWrite(t *testing.T) {
+	ctx := context.Background()
+	app := writeJournalApp(t)
+	fj := newFakeJournal("manifest-x")
+	m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+	m.SetJournal(fj, t.TempDir())
+
+	sp, err := m.Create(ctx, "spw", app, "model", "", "", 0)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer func() { _ = m.Stop(ctx, sp.ID) }()
+
+	if len(sp.JournalMounts) != 1 {
+		t.Fatalf("expected 1 journaled mount, got %d", len(sp.JournalMounts))
+	}
+	hostDir := sp.JournalMounts[0].HostDir
+
+	// Write into the watched mount dir; the watcher must drive a RequestSnapshot.
+	if err := os.WriteFile(filepath.Join(hostDir, "change.txt"), []byte("EDIT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case mt := <-fj.requested:
+		if mt.Name != "main" {
+			t.Fatalf("RequestSnapshot for mount %q, want main", mt.Name)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not drive RequestSnapshot after a write into the journaled mount")
 	}
 }

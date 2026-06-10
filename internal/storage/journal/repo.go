@@ -256,6 +256,27 @@ func (r *spawnRepo) quickMaintenance(ctx context.Context) error {
 		})
 }
 
+// fullMaintenance runs full (deleting) maintenance pinned to Kopia SafetyFull
+// (24h blob min-age) — design §2 roast M5. Unlike quickMaintenance this DELETES
+// unreferenced blobs, so it is CP-commanded only and must run AFTER the spawn is
+// marked suspended (no live container row) so a still-writing prior generation
+// can't have a blob GC'd out from under it. SafetyFull's 24h min-age is the
+// belt-and-suspenders margin on top of that ordering.
+func (r *spawnRepo) fullMaintenance(ctx context.Context) error {
+	dr, ok := r.rep.(repo.DirectRepository)
+	if !ok {
+		return fmt.Errorf("journal: repo is not a DirectRepository; cannot run maintenance")
+	}
+	return repo.DirectWriteSession(ctx, dr, repo.WriteSessionOptions{Purpose: "full-maintenance"},
+		func(ctx context.Context, dw repo.DirectRepositoryWriter) error {
+			// force=true: the journaler is the sole owner of this per-spawn repo.
+			if err := snapshotmaintenance.Run(ctx, dw, maintenance.ModeFull, true, maintenance.SafetyFull); err != nil {
+				return fmt.Errorf("journal: full maintenance: %w", err)
+			}
+			return nil
+		})
+}
+
 func (r *spawnRepo) close(ctx context.Context) error {
 	if r.rep == nil {
 		return nil

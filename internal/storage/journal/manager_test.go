@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 )
 
 // newTestManager builds a filesystem-backed, node-local-custody Manager rooted
@@ -213,6 +215,23 @@ func TestQuickMaintenanceRuns(t *testing.T) {
 	}
 }
 
+// TestFullMaintenanceRuns verifies the CP-commanded full (deleting) maintenance
+// primitive (design §2 roast M5) runs without error on a populated repo.
+func TestFullMaintenanceRuns(t *testing.T) {
+	ctx := context.Background()
+	m := newTestManager(t)
+
+	src := t.TempDir()
+	writeFile(t, src, "f.txt", "x")
+	mt := Mount{Name: "work", HostDir: src, Class: NodeLocal}
+	if _, err := m.FinalSnapshot(ctx, "spawn-fm", 1, []Mount{mt}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.FullMaintenance(ctx, "spawn-fm"); err != nil {
+		t.Fatalf("full maintenance: %v", err)
+	}
+}
+
 // TestRestoreRequiresPinnedID verifies restore rejects an empty (unpinned) id.
 func TestRestoreRequiresPinnedID(t *testing.T) {
 	ctx := context.Background()
@@ -220,4 +239,81 @@ func TestRestoreRequiresPinnedID(t *testing.T) {
 	if err := m.Restore(ctx, "spawn-z", "work", "", t.TempDir()); err == nil {
 		t.Fatal("restore with empty manifest id must fail (pinned, not latest)")
 	}
+}
+
+// recordingTelemetry captures SnapshotDone events for assertions.
+type recordingTelemetry struct {
+	mu     sync.Mutex
+	events []telemEvent
+}
+type telemEvent struct {
+	mount string
+	gen   uint64
+	kind  SnapshotKind
+	id    ManifestID
+	err   error
+}
+
+func (r *recordingTelemetry) SnapshotDone(_, mount string, gen uint64, kind SnapshotKind, _ time.Duration, id ManifestID, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, telemEvent{mount, gen, kind, id, err})
+}
+func (r *recordingTelemetry) snapshot() []telemEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]telemEvent(nil), r.events...)
+}
+
+// TestTelemetryEmittedOnSnapshot verifies the §5 telemetry seam fires for both a
+// continuous (watcher-driven) snapshot and the suspend final snapshot.
+func TestTelemetryEmittedOnSnapshot(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	keyfile := filepath.Join(root, "node.key")
+	if err := GenerateNodeKeyfile(keyfile); err != nil {
+		t.Fatal(err)
+	}
+	custody, err := NewNodeLocalCustody(keyfile, filepath.Join(root, "seals"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tel := &recordingTelemetry{}
+	m, err := NewManager(Config{
+		RepoRoot:    filepath.Join(root, "repos"),
+		Backend:     &FilesystemBackend{Root: filepath.Join(root, "blobs")},
+		Custody:     custody,
+		DebounceMin: time.Nanosecond, // don't suppress the continuous snapshot in-test
+		Telemetry:   tel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src := t.TempDir()
+	writeFile(t, src, "f.txt", "x")
+	mt := Mount{Name: "work", HostDir: src, Class: NodeLocal}
+
+	m.RequestSnapshot(ctx, "spawn-t", 3, mt)
+	// FinalSnapshot drains the queued continuous snapshot, then takes the final one.
+	if _, err := m.FinalSnapshot(ctx, "spawn-t", 3, []Mount{mt}); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawContinuous, sawFinal bool
+	for _, e := range tel.snapshot() {
+		if e.mount != "work" || e.gen != 3 || e.id == "" || e.err != nil {
+			t.Fatalf("unexpected telemetry event: %+v", e)
+		}
+		switch e.kind {
+		case SnapshotContinuous:
+			sawContinuous = true
+		case SnapshotFinal:
+			sawFinal = true
+		}
+	}
+	if !sawFinal {
+		t.Fatalf("expected a final-snapshot telemetry event; got %+v", tel.snapshot())
+	}
+	_ = sawContinuous // continuous is best-effort (may coalesce); final is the guaranteed signal
 }

@@ -8,9 +8,11 @@ require (
 	github.com/coder/websocket v1.8.14
 	github.com/creack/pty v1.1.24
 	github.com/docker/docker v28.5.2+incompatible
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/kopia/kopia v0.23.0
+	github.com/minio/minio-go/v7 v7.1.0
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/uptrace/bun v1.2.18
@@ -62,7 +64,6 @@ require (
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
-	github.com/minio/minio-go/v7 v7.1.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/sys/atomicwriter v0.1.0 // indirect
 	github.com/moby/term v0.5.2 // indirect
