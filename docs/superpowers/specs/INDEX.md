@@ -37,6 +37,7 @@ were already made in one of these docs.
 - [Node-Class Propagation (sp-2as)](2026-06-01-node-class-propagation-sp-2as.md) — propagate node class (cloud|self-hosted) to the CP.
 - [Scheduler Routing (sp-t5p)](2026-06-01-scheduler-routing-sp-t5p.md) — placement by node class + author-self-host rule for unverified apps.
 - [Node Auth & Unified Identity](2026-06-05-node-auth-unified-identity-design.md) — node authentication, auth service, unified identity/tenancy model.
+- [Owner-Sealed Secrets Research Brief](2026-06-10-owner-sealed-secrets-research-brief.md) — deep-research prompt for E2E user secrets (CP ciphertext-only, plaintext only at verified nodes) + key-agreement groundwork atop sp-ova.
 - [CRI Thin Byte-Bridge Adapter (sp-j5b)](2026-06-03-cri-thin-adapter-pump-design.md) — collapse the in-pod adapter to a byte-bridge; the node pump owns ACP work.
 - [Node Readiness Probe](2026-06-03-node-readiness-probe-design.md) — "green = actually ready" (not just `mgr.Create` returned).
 
