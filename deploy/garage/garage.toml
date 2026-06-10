@@ -1,0 +1,35 @@
+# Single-node dev Garage for Spawnery's transient-tier Kopia journal store.
+# Design: docs/superpowers/specs/2026-06-10-transient-tier-kopia-journal-design.md (§1, T.6).
+#
+# DEV ONLY. The rpc_secret and admin_token below are fixed, well-known dev values so
+# `just garage` + the garage_e2e test work out of the box. NEVER reuse them in production —
+# regenerate with `openssl rand -hex 32` (rpc_secret) / `openssl rand -hex 24` (admin_token).
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+
+# Single node, no redundancy — dev only.
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+# Well-known DEV secret (32 bytes hex). Do not use in production.
+rpc_secret = "7642aaf5cbe9ae49eec221853099829d9e05f82f8e1dff2b36f5e4a7b1d63e3c"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+# Path-style addressing is used by the Kopia S3Backend; this root_domain is only for
+# virtual-host-style requests and is unused by the journaler.
+root_domain = ".s3.garage.localhost"
+
+[s3_web]
+bind_addr = "[::]:3902"
+root_domain = ".web.garage.localhost"
+index = "index.html"
+
+[admin]
+api_bind_addr = "[::]:3903"
+# Well-known DEV admin token. Bootstrap + the garage_e2e test authenticate with this.
+admin_token = "e8a6bb74d9331b884614a992c640234faa408f543fd31ec9"

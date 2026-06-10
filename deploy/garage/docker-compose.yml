@@ -1,0 +1,19 @@
+# Single-node dev Garage for Spawnery's transient-tier Kopia journal store.
+# Bring up with `just garage` (which also applies the cluster layout); tear down with
+# `just garage-down`. See README.md in this directory.
+services:
+  garage:
+    image: dxflrs/garage:v1.0.1
+    container_name: spawnery-garage
+    restart: unless-stopped
+    # network_mode host keeps S3 (3900) and admin (3903) on 127.0.0.1 for the dev stack
+    # and the garage_e2e test, matching the addresses other `just` recipes bind to.
+    network_mode: host
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+
+volumes:
+  garage-meta:
+  garage-data:
