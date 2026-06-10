@@ -59,7 +59,11 @@ type SpawnRepo interface {
 	LiveContainer(ctx context.Context, id string) (Container, bool, error)
 	GetMounts(ctx context.Context, id string) ([]Mount, error)
 	ListByOwner(ctx context.Context, ownerID string) ([]Spawn, error)
-	Rename(ctx context.Context, id, name string) error // ErrNotFound on missing OR deleted
+	Rename(ctx context.Context, id, name string) error    // ErrNotFound on missing OR deleted
+	SetModel(ctx context.Context, id, model string) error // ErrNotFound on missing OR deleted
+	MarkModelApplied(ctx context.Context, id string) error
+	MarkModelApplyFailed(ctx context.Context, id, detail string) error
+	ListUnappliedModel(ctx context.Context) ([]Spawn, error)
 
 	ClaimStarting(ctx context.Context, id string, from []Status) (newGen int64, err error)
 	SetActive(ctx context.Context, id, nodeID string, gen int64) error
@@ -70,6 +74,7 @@ type SpawnRepo interface {
 	EndContainer(ctx context.Context, id string, gen int64, p Phase) error
 	MarkUnreachable(ctx context.Context, ids []string) (int, error)
 	MarkBootUnreachable(ctx context.Context) (int, error)
+	MarkReachable(ctx context.Context, id string, gen int64) error // unreachable->active only, gen-fenced
 	MarkRecovered(ctx context.Context, id string) error
 	Touch(ctx context.Context, id string, ts int64) error
 	MarkDeleted(ctx context.Context, id string, ts int64) error
@@ -78,10 +83,20 @@ type SpawnRepo interface {
 	Adopt(ctx context.Context, id, nodeID string, gen int64) error
 }
 
+type AgentImageRepo interface {
+	// Upsert inserts (or keeps, on conflict) the image row and replaces its binary set.
+	// Caller supplies img.CreatedAt; existing created_at is preserved on conflict.
+	Upsert(ctx context.Context, img AgentImage, binaries []string) error
+	Get(ctx context.Context, image string) (AgentImage, error) // ErrNotFound on missing
+	Binaries(ctx context.Context, image string) ([]string, error)
+	List(ctx context.Context) ([]AgentImage, error)
+}
+
 type Store interface {
 	Owners() OwnerRepo
 	Apps() AppRepo
 	Spawns() SpawnRepo
+	AgentImages() AgentImageRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error

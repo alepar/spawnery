@@ -1,8 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import type { SpawnView, SpawnStatus } from "@/api/spawnlet";
-
-export type View = "chat" | "market" | "settings";
+import { spawnLifecycleAction, type SpawnView, type SpawnStatus } from "@/api/spawnlet";
+import type { Nav } from "@/nav/nav";
 
 // SpawnActions is the callback bag App passes down for spawn lifecycle controls.
 export interface SpawnActions {
@@ -10,12 +9,15 @@ export interface SpawnActions {
   onRename: (spawnId: string, name: string) => void;
   onSuspend: (spawnId: string) => void;
   onResume: (spawnId: string) => void;
+  onRecreate: (spawnId: string) => void;
   onStop: (spawnId: string) => void;
 }
 
-const NAV: { id: View; label: string }[] = [
-  { id: "market", label: "Marketplace" },
-  { id: "settings", label: "Settings" },
+// The two top-nav buttons map to a target Nav. "Templates" stays highlighted across the whole
+// Templates surface (browse/app-detail/my-apps/publish); "Settings" only for the settings section.
+const NAV: { id: string; label: string; target: Nav; sections: Nav["section"][] }[] = [
+  { id: "templates", label: "Templates", target: { section: "templates" }, sections: ["templates", "app", "my-apps", "publish"] },
+  { id: "settings", label: "Settings", target: { section: "settings" }, sections: ["settings"] },
 ];
 
 // dot color per ledger status: green=online, grey=suspended, red=failed, amber(pulse)=transitional.
@@ -29,11 +31,10 @@ const DOT: Record<SpawnStatus, string> = {
   unknown: "bg-zinc-400",
 };
 
-export function Sidebar({ view, onSelect, spawns = [], activeId, actions }: {
-  view: View;
-  onSelect: (v: View) => void;
+export function Sidebar({ nav, navigate, spawns = [], actions }: {
+  nav: Nav;
+  navigate: (nav: Nav) => void;
   spawns?: SpawnView[];
-  activeId?: string | null;
   actions?: SpawnActions;
 }) {
   return (
@@ -43,9 +44,9 @@ export function Sidebar({ view, onSelect, spawns = [], activeId, actions }: {
         <Button
           key={n.id}
           data-testid={`nav-${n.id}`}
-          variant={view === n.id ? "secondary" : "ghost"}
+          variant={n.sections.includes(nav.section) ? "secondary" : "ghost"}
           className="justify-start"
-          onClick={() => onSelect(n.id)}
+          onClick={() => navigate(n.target)}
         >
           {n.label}
         </Button>
@@ -55,7 +56,7 @@ export function Sidebar({ view, onSelect, spawns = [], activeId, actions }: {
         <div className="px-2 text-xs text-muted-foreground/70">— none yet —</div>
       ) : (
         spawns.map((s) => (
-          <SpawnRow key={s.spawnId} spawn={s} active={view === "chat" && s.spawnId === activeId} actions={actions} />
+          <SpawnRow key={s.spawnId} spawn={s} active={nav.section === "spawn" && s.spawnId === nav.spawnId} actions={actions} />
         ))
       )}
     </nav>
@@ -67,6 +68,16 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
   const [confirmStop, setConfirmStop] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(spawn.name);
+
+  // The single lifecycle menu item follows the actual status (suspend/resume/recreate), so the menu
+  // never offers an action the CP would reject; transitional/unknown states render a disabled item.
+  const lifecycle = spawnLifecycleAction(spawn.status);
+  const dispatchLifecycle = () => {
+    setMenu(false);
+    if (lifecycle.kind === "suspend") actions?.onSuspend(spawn.spawnId);
+    else if (lifecycle.kind === "resume") actions?.onResume(spawn.spawnId);
+    else if (lifecycle.kind === "recreate") actions?.onRecreate(spawn.spawnId);
+  };
 
   const startEdit = () => { setMenu(false); setDraft(spawn.name); setEditing(true); };
   const commit = () => {
@@ -135,13 +146,13 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
           <button data-testid={`spawn-rename-${spawn.spawnId}`} className="rounded px-2 py-1 text-left text-sm hover:bg-accent" onClick={startEdit}>
             Rename
           </button>
-          {spawn.status === "suspended" ? (
-            <button data-testid={`spawn-resume-${spawn.spawnId}`} className="rounded px-2 py-1 text-left text-sm hover:bg-accent" onClick={() => { setMenu(false); actions?.onResume(spawn.spawnId); }}>
-              Resume
+          {lifecycle.kind === "pending" ? (
+            <button data-testid={`spawn-pending-${spawn.spawnId}`} disabled className="rounded px-2 py-1 text-left text-sm text-muted-foreground/50 cursor-default">
+              {lifecycle.label}
             </button>
           ) : (
-            <button data-testid={`spawn-suspend-${spawn.spawnId}`} className="rounded px-2 py-1 text-left text-sm hover:bg-accent" onClick={() => { setMenu(false); actions?.onSuspend(spawn.spawnId); }}>
-              Suspend
+            <button data-testid={`spawn-${lifecycle.kind}-${spawn.spawnId}`} className="rounded px-2 py-1 text-left text-sm hover:bg-accent" onClick={dispatchLifecycle}>
+              {lifecycle.label}
             </button>
           )}
           {confirmStop ? (

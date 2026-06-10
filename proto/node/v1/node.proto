@@ -18,6 +18,9 @@ message NodeMessage {
     SpawnStatus     status           = 3;
     Frame           frame            = 4;   // agent -> client bytes
     SuspendComplete suspend_complete = 5;   // node -> CP: per-mount suspend markers
+    SessionRoster   roster           = 6;   // node -> CP: full live session set for a spawn
+    SessionStatus   session_status   = 7;   // node -> CP: single-session state delta
+    SetModelResult  set_model_result = 8;   // node -> CP: ack/result of a SetModel push
   }
 }
 message CPMessage {
@@ -28,6 +31,9 @@ message CPMessage {
     SessionClose close   = 4;
     Frame        frame   = 5;             // client -> agent bytes
     Suspend      suspend = 6;             // CP -> node: persist + tear down
+    CreateSession create_session = 7;     // CP -> node: launch an additional session (impl: sp-npxq.3)
+    CloseSession  close_session  = 8;     // CP -> node: reap one session
+    SetModel      set_model      = 9;      // CP -> node: switch the running pod's effective model (generation-fenced)
   }
 }
 
@@ -38,14 +44,55 @@ message MountMarker  { string name = 1; string marker = 2; }
 // One entry of a node's running-container inventory (node -> CP on Register/Heartbeat).
 message RunningSpawn { string spawn_id = 1; uint64 generation = 2; SpawnPhase phase = 3; }
 
-message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string agent_images = 3; repeated RunningSpawn running = 4; string node_class = 5; string node_owner = 6; }
+message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string agent_images = 3; repeated RunningSpawn running = 4; string node_class = 5; string node_owner = 6; repeated string binaries = 7; }
 message Heartbeat   { uint32 active_spawns = 1; uint32 free_slots = 2; uint32 cpu_pct = 3; uint32 gpu_pct = 4; repeated RunningSpawn running = 5; }
 message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; uint64 generation = 4; }
-message StartSpawn  { string spawn_id = 1; string app_ref = 2; string data_ref = 3; string model = 4; uint64 generation = 5; repeated MountBinding mounts = 6; }
+message StartSpawn  { string spawn_id = 1; string app_ref = 2; string data_ref = 3; string model = 4; uint64 generation = 5; repeated MountBinding mounts = 6; string name = 7; string app_id = 8; string image = 9; string runnable_id = 10; string mode = 11; }
 message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }
 message Suspend     { string spawn_id = 1; uint64 generation = 2; }
 message SuspendComplete { string spawn_id = 1; uint64 generation = 2; repeated MountMarker markers = 3; }
-message SessionOpen  { string spawn_id = 1; uint64 generation = 2; string client_id = 3; int64 cursor = 4; }
-message SessionClose { string spawn_id = 1; uint64 generation = 2; string client_id = 3; }
+message SessionOpen  { string spawn_id = 1; uint64 generation = 2; string client_id = 3; int64 cursor = 4; string session_id = 5; }
+message SessionClose { string spawn_id = 1; uint64 generation = 2; string client_id = 3; string session_id = 4; }
 // Frame carries no generation: data frames are correlated to an episode by spawn_id at the session layer.
-message Frame        { string spawn_id = 1; bytes data = 2; string client_id = 3; }
+message Frame        { string spawn_id = 1; bytes data = 2; string client_id = 3; string session_id = 4; }
+
+// Transport decides relay + surface for a session (orthogonal to which runnable runs).
+enum SessionTransport {
+  SESSION_TRANSPORT_UNSPECIFIED = 0;
+  SESSION_TRANSPORT_ACP         = 1;  // node ACP Pump -> web ChatView
+  SESSION_TRANSPORT_MOSH        = 2;  // node mosh/tmux PTY relay -> web TerminalView
+}
+// Per-session lifecycle state the node owns and reports.
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_STARTING    = 1;
+  SESSION_STATE_ACTIVE      = 2;
+  SESSION_STATE_CLOSING     = 3;
+  SESSION_STATE_CLOSED      = 4;
+  SESSION_STATE_ERROR       = 5;
+}
+// One session within a spawn. endpoint is an opaque per-transport handle (acp port / tmux session name).
+message SessionInfo {
+  string session_id          = 1;
+  SessionTransport transport = 2;
+  string runnable            = 3;
+  SessionState state         = 4;
+  string endpoint            = 5;
+  bool pinned                = 6;   // session #0 is pinned: not closeable
+}
+// node -> CP: the full live session set for a spawn (sent on any membership change).
+message SessionRoster { string spawn_id = 1; uint64 generation = 2; repeated SessionInfo sessions = 3; }
+// node -> CP: a single session's state changed (membership unchanged).
+message SessionStatus { string spawn_id = 1; string session_id = 2; SessionState state = 3; string detail = 4; }
+// CP -> node: launch an additional session. The node allocates the session_id and reports it via SessionRoster.
+message CreateSession { string spawn_id = 1; uint64 generation = 2; SessionTransport transport = 3; string runnable = 4; }
+// CP -> node: reap one session (by id). Reaping session #0 is rejected node-side (it is pinned).
+message CloseSession  { string spawn_id = 1; uint64 generation = 2; string session_id = 3; }
+// CP -> node: switch the effective model of the running pod (forwarded to the sidecar override).
+// Generation-fenced like StopSpawn/Suspend: the node ignores a SetModel whose generation
+// doesn't match the pod it currently holds. request_id correlates this push with its result.
+message SetModel       { string spawn_id = 1; uint64 generation = 2; string model = 3; string request_id = 4; }
+// node -> CP: result of applying a SetModel. ok=false carries a human reason in detail.
+// request_id: the node echoes request_id from the SetModel it handled, so the CP can route the
+// result to the exact push that is waiting (a stale ack with no live waiter is dropped).
+message SetModelResult { string spawn_id = 1; bool ok = 2; string detail = 3; string request_id = 4; }

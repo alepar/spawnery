@@ -12,7 +12,7 @@ func TestNewManagerWithBackendInjectsBackendAndFloor(t *testing.T) {
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), EgressEnforce: true,
 	})
 
-	sp, err := m.Create(context.Background(), "spz", writeApp(t), "model", 0)
+	sp, err := m.Create(context.Background(), "spz", writeApp(t), "model", "", "", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

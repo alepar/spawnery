@@ -27,6 +27,7 @@ const defaultMake: MakeSocket = (url, options) =>
 export interface ReconnectingOpts {
   onOpen: () => void;       // fires on EVERY (re)connection — caller re-runs the ACP handshake
   onDown: () => void;       // fires on every failed attempt / drop
+  onMessage?: (data: ArrayBuffer | string) => void;  // optional raw message handler (bypasses Conn/NDJSON)
   makeSocket?: MakeSocket;  // injected in tests
 }
 
@@ -46,7 +47,10 @@ export class ReconnectingSocket implements WebSocketLike {
       maxReconnectionDelay: 50,
       maxRetries: Infinity,
     });
-    this.ps.addEventListener("message", (ev) => this.onmessage?.(ev));
+    this.ps.addEventListener("message", (ev) => {
+      this.onmessage?.(ev);
+      opts.onMessage?.(ev.data);
+    });
     this.ps.addEventListener("open", () => {
       this.step = 0;
       this.ps._options.connectionTimeout = SCHEDULE[0]; // success resets the chain

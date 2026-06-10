@@ -50,21 +50,105 @@ bd close <id>         # Complete work
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
 
+## Beads Sync — Dolt remote (this repo)
+
+Configured 2026-06-08 to the **canonical Dolt-remote sync**: `sync.remote` points at the
+GitHub `origin` and issue history lives under `refs/dolt/data` (a git ref, separate from
+`refs/heads/*` where the code lives). The Dolt DB (`.beads/embeddeddolt`) is the source of
+truth; `.beads/issues.jsonl` is a passive, regenerable export — **not** the wire protocol.
+
+- **After any `bd` change:** `bd dolt push` — publishes issue history to the remote.
+- **Get others' issue changes:** `bd dolt pull`.
+- **Fresh clone / new git worktree / missing DB:** `bd bootstrap` — a plain `git clone` does
+  NOT include the Dolt DB; bootstrap clones it from `refs/dolt/data`.
+- **Session close:** the MANDATORY WORKFLOW's `git push` must be followed by `bd dolt push`.
+  Both must succeed — issue changes are not durable until `bd dolt push` lands.
+
+Now that the Dolt remote is configured, the `post-merge`/`post-checkout` hooks no longer import
+`issues.jsonl` into Dolt — so a branch op can no longer silently revert a `bd close`/`update`
+via a stale JSONL. `issues.jsonl` is safe to discard/regenerate (`bd export`). Do NOT use routine
+`bd import` as a sync mechanism; use `bd dolt pull`. See
+https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for anti-patterns.
+
+**Perms warning:** if bd warns `.beads` is `0777`, that's bd creating dirs under `umask 000`
+(hook-launched, not your interactive shell). `chmod 700 .beads` clears it; the durable fix is
+running bd under `umask 077`.
+
+## Non-Interactive Shell Commands
+
+**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation
+prompts. `cp`/`mv`/`rm` may be aliased to `-i` on some systems, which hangs the agent waiting
+for y/n input.
+
+```bash
+cp -f source dest           # NOT: cp source dest
+mv -f source dest           # NOT: mv source dest
+rm -f file                  # NOT: rm file
+rm -rf directory            # NOT: rm -r directory
+cp -rf source dest          # NOT: cp -r source dest
+```
+
+Others that may prompt: `scp`/`ssh` (`-o BatchMode=yes`), `apt-get` (`-y`), `brew`
+(`HOMEBREW_NO_AUTO_UPDATE=1`).
 
 ## Build & Test
 
-_Add your build and test commands here_
+Go 1.26 monorepo (host binaries in `cmd/`) + a Vite/React SPA in `web/`. Recipes live in the
+`Justfile` (`just --list`); `make` builds binaries, images, and generated code.
 
 ```bash
-# Example:
-# npm install
-# npm test
+make build          # bin/spawnlet + bin/spawnctl   (also: make bin/spawnery_cp)
+make gen            # regenerate protobuf/Connect code (buf) — after proto/ changes
+make images         # build sidecar/stubagent/agent container images
+
+just dev            # full stack (CP + spawnlet + web) in mprocs (one Ctrl-C)
+just cp             # control plane only (127.0.0.1:8080)
+just node           # spawnlet attached to the CP (root-free, egress floor off)
+just web            # web UI (vite, LAN-accessible)
+
+just test           # go test ./... -count=1   (hermetic unit tests)
+just test-web       # vitest
+just test-e2e       # builds images, then go test -tags e2e ./...
+just lint           # golangci-lint (go) + eslint/tsc (web)
+just setup          # one-time: mprocs, web deps, playwright chromium
 ```
+
+`.env` with `OPENROUTER_API_KEY` is auto-loaded by Just; container images need Docker/Podman.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Spawnery runs sandboxed coding-agent **spawns** on local/cloud nodes, driven over ACP.
+
+- **Control plane** (`cmd/spawnery_cp`, `internal/cp`) — spawn lifecycle, scheduler/placement, app
+  catalog/marketplace, auth; relays ACP between clients and nodes. Store in `internal/cp/store`.
+- **Node / spawnlet** (`cmd/spawnlet`, `internal/spawnlet`, `internal/runtime`) — runs spawns as
+  pods via pluggable `PodBackend`s (Docker/runc + CRI lanes), applies the per-pod egress floor,
+  mediates storage.
+- **Spawn = a 2-container pod**: a **sidecar** (`cmd/sidecar`, `internal/sidecar` — OpenAI-compatible
+  inference proxy holding the model key; Anthropic↔OpenAI translation) + an **agent** container
+  sharing the sidecar's netns.
+- **spawnctl** (`cmd/spawnctl`) — driver/attach CLI (create/attach/exec/shell/list).
+- **Storage** (`internal/storage`) — per-mount `Backend` (`Prepare`/`Finalize`); only `Scratch`
+  (ephemeral) is implemented today.
+- **web/** — React/Vite SPA (Connect-JSON over the CP).
+- **proto/ + gen/** — buf-generated protobuf + Connect RPC: the cross-component contract.
+
+Design docs + per-slice plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- **Design-first per slice:** brainstorm/spec → plan → implement → review. Specs/plans in
+  `docs/superpowers/`. Track ALL work in beads (prefix `sp`; see the Beads sections above).
+- **Consult prior designs before designing.** Before writing a spec for a similar or adjacent
+  feature, scan [`docs/superpowers/specs/INDEX.md`](docs/superpowers/specs/INDEX.md) and read the
+  related docs — most cross-cutting decisions (and their rationale) are already made there. Build
+  on them; don't silently re-litigate.
+- **Maintain the spec index.** When you add a new design spec to `docs/superpowers/specs/`, add a
+  one-line entry to `docs/superpowers/specs/INDEX.md` in the same commit (right section, one line).
+- **`git commit --no-verify`** is the project norm — the beads pre-commit hook exports
+  `issues.jsonl`; verify your `bd close`/`update`s survived after any branch op.
+- **Unit tests are hermetic** — in-memory store, no network/keys; run with `-race`. End-to-end
+  tests are **build-tagged** (`e2e`, `egress_e2e`, `cni_egress_e2e`) and need images/root.
+- **Regenerate after proto changes** (`make gen`); never hand-edit `gen/`.
+- **Toolchain pinned to go 1.26**; golangci-lint must be built with go ≥1.26 (`just lint-go` sets
+  `GOTOOLCHAIN`).

@@ -4,6 +4,15 @@
 **Status:** Approved, ready for implementation plan
 **Scope:** Small UI fix in `web/src/App.tsx`
 
+> **Status (2026-06-09): superseded by architecture** — `sp-skp4` closed. The `buffersRef` /
+> App-state mechanism this doc patches was removed in the tabs migration. Clearing now happens
+> **structurally**: `SuspendSpawn` → `router.Drop` drops the spawn's session mirror → `ListSessions`
+> returns empty → `SpawnTabs`'s roster poll calls `reconcileRoster([])`, which wipes the cached
+> runtimes (≤3s, one poll interval) — covering backend-initiated suspends too, which this design's
+> UI-event approach could not. Regression coverage: `web/src/sessions/store.test.ts` — "recreate
+> cycle: empty roster wipes stale runtimes; repopulated roster starts fresh" asserts the
+> empty-roster wipe + fresh-runtime semantics.
+
 ## Problem
 
 When a spawn is suspended, its message history lingers in React state:

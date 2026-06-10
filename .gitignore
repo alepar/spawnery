@@ -25,3 +25,6 @@ cp.db*
 
 # Syncthing conflict artifacts in the externally-synced .beads dir (not source of truth)
 .beads/*.sync-conflict-*
+
+# Local git worktrees (linked checkouts; not part of the tracked tree)
+.claude/worktrees/

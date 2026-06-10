@@ -16,7 +16,7 @@ func TestStopFencesStaleGeneration(t *testing.T) {
 	ctx := context.Background()
 
 	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m", Generation: 5})
-	if a.pumps["sp1"] == nil {
+	if a.pumps[zeroKey("sp1")] == nil {
 		t.Fatal("spawn not started")
 	}
 
@@ -26,7 +26,7 @@ func TestStopFencesStaleGeneration(t *testing.T) {
 		t.Fatal("stale-generation Stop must not tear down the live spawn")
 	}
 	a.mu.Lock()
-	survived := a.pumps["sp1"] != nil
+	survived := a.pumps[zeroKey("sp1")] != nil
 	a.mu.Unlock()
 	if !survived {
 		t.Fatal("pump must survive a stale-generation Stop")

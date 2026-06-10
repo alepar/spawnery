@@ -31,6 +31,7 @@ func main() {
 	baseURL := envOr("OPENCODE_BASE_URL", "http://127.0.0.1:4096")
 	dir := envOr("OPENCODE_DIR", "/app")
 	model := os.Getenv("SPAWN_MODEL")
+	title := os.Getenv("SPAWN_SESSION_TITLE") // opencode session title (spawn name + app); "" => default
 
 	ln, err := net.Listen(network, addr)
 	if err != nil {
@@ -44,7 +45,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("accept: %v", err)
 		}
-		a := ocadapter.New(oc, dir, model)
+		a := ocadapter.New(oc, dir, model, title)
 		if serr := a.Serve(conn, conn); serr != nil {
 			log.Printf("connection ended: %v", serr)
 		}

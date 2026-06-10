@@ -8,6 +8,9 @@
 - **Does NOT require [`sp-0tw`]** ("Native spawn-to-spawn comms framework", post-MVP). The harness is a **first-party, operator-run orchestrator** that drives spawns over the **existing ACP client (`internal/acp`, spawnctl-style)** — it is *not* an in-marketplace "app-spawns-app" primitive, so it sidesteps `sp-0tw`'s spawn-creation security crux.
 - **Judge reuses [`sp-ydz`]** (E8 trust/safety): the App-review **LLM-as-judge** scanner, extended to grade a **transcript against a rubric** (one safety-judgment capability, a second entry point).
 
+> **Status (2026-06-09):** not scheduled — no active tracking issue. Blocked on the judge's
+> prerequisite: the E8 app-review scanner (tracked as `sp-5a9`) is not built yet.
+
 **Research backing:** two independent deep-research passes (`~/Documents/AgentOrchestration_Research_20260603/` and the parallel `~/spawnery-eval-vs-competitors.md`) converged on this as the lowest-hanging, highest-value orchestration taste. Competitive verification of LangSmith / Braintrust / AWS Bedrock AgentCore is folded into §7.
 
 ---

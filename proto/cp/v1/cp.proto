@@ -6,6 +6,7 @@ service SpawnService {
   rpc CreateSpawn(CreateSpawnRequest) returns (CreateSpawnResponse);
   rpc ListSpawns(ListSpawnsRequest) returns (ListSpawnsResponse);
   rpc ListApps(ListAppsRequest) returns (ListAppsResponse);
+  rpc ListAgentImages(ListAgentImagesRequest) returns (ListAgentImagesResponse);
   rpc GetApp(GetAppRequest) returns (GetAppResponse);
   rpc RegisterAppVersion(RegisterAppVersionRequest) returns (RegisterAppVersionResponse);
   rpc SetAppListing(SetAppListingRequest) returns (SetAppListingResponse);
@@ -15,8 +16,12 @@ service SpawnService {
   rpc ResumeSpawn(ResumeSpawnRequest) returns (ResumeSpawnResponse);
   rpc RecreateSpawn(RecreateSpawnRequest) returns (RecreateSpawnResponse);
   rpc RenameSpawn(RenameSpawnRequest) returns (RenameSpawnResponse);
+  rpc SetSpawnModel(SetSpawnModelRequest) returns (SetSpawnModelResponse);
   rpc DeleteSpawn(DeleteSpawnRequest) returns (DeleteSpawnResponse);
   rpc StopSpawn(StopSpawnRequest) returns (StopSpawnResponse);   // legacy cleanup path; kept (used by spawnctl + e2e)
+  rpc ListSessions(ListSessionsRequest)   returns (ListSessionsResponse);
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc CloseSession(CloseSessionRequest)   returns (CloseSessionResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -37,7 +42,9 @@ message MountBinding { string name = 1; string backend_uri = 2; }
 
 // name (optional): human-readable spawn label; empty => the server assigns a default
 // (the app's display name, with a " 2"/" 3" counter suffix on collision).
-message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; string version = 4; bool pin = 5; string name = 6; }
+// image + runnable_id (optional today) select the agent container image (FQDN) and the
+// runnable within it (e.g. "goose-acp"); the CP resolves the run mode from the runnable.
+message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; string version = 4; bool pin = 5; string name = 6; string image = 7; string runnable_id = 8; }
 message CreateSpawnResponse { string spawn_id = 1; }
 
 message SpawnSummary {
@@ -49,6 +56,8 @@ message SpawnSummary {
   int64  created_at   = 6;
   int64  last_used_at = 7;
   string name         = 8; // human-readable spawn label (server-assigned default if not set by the client)
+  string mode         = 9; // run mode: "acp" | "tmux" | "" (default "acp")
+  bool   model_applied = 10; // running pod's effective model == spawns.model (false => pending switch)
 }
 // Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
 message ListSpawnsRequest  {}
@@ -62,10 +71,37 @@ message RecreateSpawnRequest  { string spawn_id = 1; }
 message RecreateSpawnResponse {}
 message RenameSpawnRequest    { string spawn_id = 1; string name = 2; }
 message RenameSpawnResponse   {}
+// Change the model an already-running spawn uses (persist + best-effort live push).
+// applied = the live pod's effective model now matches `model` (false => saved but pending).
+message SetSpawnModelRequest  { string spawn_id = 1; string model = 2; }
+message SetSpawnModelResponse { string model = 1; bool applied = 2; }
 message DeleteSpawnRequest    { string spawn_id = 1; bool destroy_data = 2; }
 message DeleteSpawnResponse   {}
 
 message Frame { string spawn_id = 1; bytes data = 2; }
+
+// Client-facing transport (mirrors node.v1.SessionTransport ordinals).
+enum SessionTransport {
+  SESSION_TRANSPORT_UNSPECIFIED = 0;
+  SESSION_TRANSPORT_ACP         = 1;
+  SESSION_TRANSPORT_MOSH        = 2;
+}
+// One session in a spawn, as surfaced to clients (CP's mirrored roster).
+message SessionDescriptor {
+  string session_id          = 1;
+  SessionTransport transport = 2;
+  string runnable            = 3;
+  string status              = 4;  // "starting" | "active" | "closing" | "closed" | "error"
+  bool pinned                = 5;
+}
+message ListSessionsRequest  { string spawn_id = 1; }
+message ListSessionsResponse { repeated SessionDescriptor sessions = 1; }
+// transport + runnable come from the runnable's catalog metadata (web picks; sp-npxq.4).
+message CreateSessionRequest  { string spawn_id = 1; SessionTransport transport = 2; string runnable = 3; }
+// Empty: the node allocates the id; the client learns it from a subsequent ListSessions/roster (sp-npxq.4 correlation).
+message CreateSessionResponse {}
+message CloseSessionRequest   { string spawn_id = 1; string session_id = 2; }
+message CloseSessionResponse  {}
 
 message StopSpawnRequest  { string spawn_id = 1; }
 message StopSpawnResponse {}
@@ -97,6 +133,13 @@ message AppVersionSummary {
 
 message ListAppsRequest  { string query = 1; } // empty = browse all
 message ListAppsResponse { repeated AppSummary apps = 1; }
+
+// One runnable derived from an image's binaries via the shared agentcaps registry.
+message RunnableInfo { string id = 1; string label = 2; string mode = 3; }
+// One registered agent image and the binaries it ships, with derived runnables.
+message AgentImageInfo { string image = 1; int64 created_at = 2; repeated string binaries = 3; repeated RunnableInfo runnables = 4; }
+message ListAgentImagesRequest  {}
+message ListAgentImagesResponse { repeated AgentImageInfo images = 1; }
 
 message GetAppRequest  { string id = 1; }
 message GetAppResponse {

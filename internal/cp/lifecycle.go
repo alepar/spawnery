@@ -126,8 +126,11 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 	s.rt.Drop(req.Msg.SpawnId)
 	if err := s.st.Spawns().SetSuspended(ctx, req.Msg.SpawnId, gen); err != nil {
 		// The container was already torn down above; we couldn't record 'suspended'. Compensate to a
-		// terminal 'error' state — MarkBootUnreachable doesn't sweep 'suspending', so the spawn would
-		// otherwise be stranded. Mirrors CreateSpawn's SetError-on-failure path.
+		// terminal 'error' state: nothing drives 'suspending' forward while the CP stays up — the pod
+		// is gone, so the node never reports it again and inventory reconciliation skips non-active
+		// live rows; only a CP restart's MarkBootUnreachable sweep (which does include 'suspending'
+		// since sp-1ni) would eventually catch it, as unreachable. SetError gives the user an
+		// immediately recreate-able spawn instead. Mirrors CreateSpawn's SetError-on-failure path.
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("SuspendSpawn %s: SetError after SetSuspended failure also failed: %v", req.Msg.SpawnId, serr)
 		}
@@ -178,7 +181,8 @@ func (s *Server) ResumeSpawn(ctx context.Context, req *connect.Request[cpv1.Resu
 	}); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, placement)
+	placement.Image = sp.Image
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement)
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("ResumeSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
@@ -192,6 +196,10 @@ func (s *Server) ResumeSpawn(ctx context.Context, req *connect.Request[cpv1.Resu
 			log.Printf("ResumeSpawn %s: SetError after SetActive failure also failed: %v", req.Msg.SpawnId, serr)
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	// Fresh container started with spawns.model -> mark applied (resolves any pending/given-up switch).
+	if merr := s.st.Spawns().MarkModelApplied(context.WithoutCancel(ctx), req.Msg.SpawnId); merr != nil {
+		log.Printf("ResumeSpawn %s: MarkModelApplied after resume: %v", req.Msg.SpawnId, merr)
 	}
 	return connect.NewResponse(&cpv1.ResumeSpawnResponse{}), nil
 }
@@ -237,7 +245,8 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	}); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, placement)
+	placement.Image = sp.Image
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement)
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
@@ -251,6 +260,15 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 			log.Printf("RecreateSpawn %s: SetError after SetActive failure also failed: %v", req.Msg.SpawnId, serr)
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	// Fresh container started with spawns.model -> mark applied (resolves any pending/given-up switch).
+	if merr := s.st.Spawns().MarkModelApplied(context.WithoutCancel(ctx), req.Msg.SpawnId); merr != nil {
+		log.Printf("RecreateSpawn %s: MarkModelApplied after recreate: %v", req.Msg.SpawnId, merr)
+	}
+	// Record that this spawn went through a user-driven recovery. Best-effort bookkeeping — the
+	// recreate itself already succeeded, so log-don't-fail (mirrors MarkModelApplied above).
+	if rerr := s.st.Spawns().MarkRecovered(context.WithoutCancel(ctx), req.Msg.SpawnId); rerr != nil {
+		log.Printf("RecreateSpawn %s: MarkRecovered after recreate: %v", req.Msg.SpawnId, rerr)
 	}
 	return connect.NewResponse(&cpv1.RecreateSpawnResponse{}), nil
 }
@@ -270,7 +288,7 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 		out[i] = &cpv1.SpawnSummary{
 			SpawnId: sp.ID, AppId: sp.AppID, AppVersion: sp.AppVersion, Model: sp.Model,
 			Status: toSummaryStatus(sp.Status), CreatedAt: sp.CreatedAt, LastUsedAt: sp.LastUsedAt,
-			Name: sp.Name,
+			Name: sp.Name, Mode: sp.Mode, ModelApplied: sp.ModelApplied,
 		}
 	}
 	return connect.NewResponse(&cpv1.ListSpawnsResponse{Spawns: out}), nil

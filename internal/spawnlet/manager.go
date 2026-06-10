@@ -2,11 +2,16 @@ package spawnlet
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 
+	"spawnery/internal/agentcaps"
 	"spawnery/internal/manifest"
 	"spawnery/internal/runtime"
 	"spawnery/internal/spawnlet/firewall"
@@ -81,6 +86,58 @@ func (m *Manager) egressEnforced() bool {
 
 func (m *Manager) Store() *Store { return m.store }
 
+// ExecPrefix returns the runtime exec invocation (docker/crictl exec -it ...) for execing into a
+// spawn's agent container — used by the node's tmux raw-PTY relay.
+func (m *Manager) ExecPrefix() []string { return ExecPrefixFor(m.cfg.ContainerRuntime) }
+
+// TmuxAttachArgv returns the full argv to `docker/crictl exec -it <containerID> tmux attach -t
+// <session>` — used by the node's per-client tmux raw-PTY relay to construct the exec command.
+// Keeps execArgv unexported.
+func (m *Manager) TmuxAttachArgv(containerID, session string) []string {
+	return execArgv(ExecPrefixFor(m.cfg.ContainerRuntime), containerID, []string{"tmux", "attach", "-t", session})
+}
+
+// TmuxAttachArgvFor resolves spawnID's agent container and returns the argv to `exec -it <container>
+// tmux attach -t <session>` — the per-(spawn,session) mosh relay attach for an additional session
+// (sp-npxq.3). Like TmuxAttachArgv but spawn-id keyed (the node holds the spawn id, not the Spawn).
+func (m *Manager) TmuxAttachArgvFor(spawnID, session string) ([]string, error) {
+	sp, ok := m.store.Get(spawnID)
+	if !ok || sp.AgentID == "" {
+		return nil, fmt.Errorf("spawn %s has no agent container", spawnID)
+	}
+	return m.TmuxAttachArgv(sp.AgentID, session), nil
+}
+
+// ExecRun runs inner non-interactively in spawnID's agent container, to completion (sp-npxq.3). Used
+// to create/reap additional sessions: launcher tmux-create (mosh), tmux-wrapped acp launcher, and
+// `tmux kill-session`. All return promptly (tmux new-session -d / kill-session exit immediately; the
+// mosh launcher exits after detaching its tmux session).
+func (m *Manager) ExecRun(ctx context.Context, spawnID string, inner []string) error {
+	sp, ok := m.store.Get(spawnID)
+	if !ok || sp.AgentID == "" {
+		return fmt.Errorf("spawn %s has no agent container", spawnID)
+	}
+	argv := execArgv(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime), sp.AgentID, inner)
+	out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("exec %v: %w (%s)", inner, err, out)
+	}
+	return nil
+}
+
+// AttachACPPort dials an additional acp session's in-pod ACP endpoint at podIP:port (sp-npxq.3),
+// parallel to Attach's session-#0 podIP:7000 dial. The node opens an Nth Pump over the returned stream.
+func (m *Manager) AttachACPPort(ctx context.Context, spawnID string, port int) (*runtime.AttachedStream, error) {
+	sp, ok := m.store.Get(spawnID)
+	if !ok {
+		return nil, fmt.Errorf("spawn not found: %s", spawnID)
+	}
+	if sp.PodIP == "" {
+		return nil, fmt.Errorf("spawn %s has no pod IP (rootless-without-bridge unsupported for TCP ACP)", spawnID)
+	}
+	return runtime.AttachTCP(ctx, net.JoinHostPort(sp.PodIP, strconv.Itoa(port)))
+}
+
 // Attach returns the agent's ACP stdio for a spawn, dispatching to the backend's transport (Docker
 // stdio attach for the Docker lane, the in-pod UDS for the CRI lane).
 func (m *Manager) Attach(ctx context.Context, sp *Spawn) (*runtime.AttachedStream, error) {
@@ -145,7 +202,37 @@ func (m *Manager) StopAll(ctx context.Context) int {
 	return len(sps)
 }
 
-func (m *Manager) Create(ctx context.Context, id, appPath, model string, generation uint64) (*Spawn, error) {
+// AgentSelection is the per-spawn agent choice resolved by the CP. A zero value means "no selection"
+// (use the node's configured image + the image's default command), preserving legacy behavior.
+type AgentSelection struct {
+	Image      string
+	RunnableID string
+	Mode       string
+}
+
+func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID string, generation uint64) (*Spawn, error) {
+	return m.CreateWithSelection(ctx, id, appPath, model, name, appID, generation, AgentSelection{})
+}
+
+// CreateWithSelection is Create plus an explicit agent selection (image + runnable id + mode).
+// For any selected runnable the container command is set to [sel.RunnableID]; the image's
+// dispatcher entrypoint (entrypoint.sh) resolves the actual launch (serve+adapter, tmux-wrapped
+// TUI, etc.) — the node just names the runnable. No selection leaves Cmd nil (image default).
+func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, sel AgentSelection) (*Spawn, error) {
+	agentImage := m.cfg.AgentImage
+	if sel.Image != "" {
+		agentImage = sel.Image
+	}
+	var agentCmd []string
+	if sel.RunnableID != "" {
+		if _, ok := agentcaps.FindRunnable(sel.RunnableID); !ok {
+			return nil, fmt.Errorf("unknown runnable %q", sel.RunnableID)
+		}
+		// The image's dispatcher entrypoint owns the actual launch (serve+adapter / tmux-wrapped TUI);
+		// the node just names the runnable. (Replaces the old spawn-tmux + agentcaps.Launch prepend.)
+		agentCmd = []string{sel.RunnableID}
+	}
+
 	if abs, err := filepath.Abs(appPath); err == nil {
 		appPath = abs
 	}
@@ -153,6 +240,15 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string, generat
 	if err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
+	// The opencode session title shown in the TUI/web: the spawn's friendly name, with the app id
+	// appended in brackets (session titles are single-line, so no newline). Prefer the CP-assigned
+	// app id; fall back to the manifest id for the standalone lane (no CP). Either part may be empty;
+	// the adapter falls back to a default if both are.
+	app := appID
+	if app == "" {
+		app = mf.ID
+	}
+	sessionTitle := sessionTitle(name, app)
 
 	// Labels identify this pod so a restarted node (or the CP) can reconcile it against the ledger and
 	// reap orphans / fence stale generations. Applied to the sandbox + both containers.
@@ -191,6 +287,14 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string, generat
 		PidsLimit:   m.cfg.PidsLimit,
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", m.cfg.SidecarPort)
+	// Per-pod control plane: a random bearer token gates the sidecar's /control/model endpoint,
+	// which the node POSTs to in order to switch the live model (runtime model switch, sp-bp9w).
+	// SIDECAR_CONTROL_ADDR binds 0.0.0.0 (not loopback) because the pod IP is unknown until StartPod
+	// returns, and the node reaches the sidecar over the pod bridge IP; the bearer token (not the
+	// bind scope) is the access control, and the agent container cannot read the sidecar's env.
+	controlToken := newControlToken()
+	controlPort := m.cfg.SidecarPort + 1
+	controlAddr := fmt.Sprintf("0.0.0.0:%d", controlPort)
 
 	// Phase 1: sandbox + sidecar (the trusted, key-holding container).
 	h, err := m.pod.StartPod(ctx, runtime.PodSpec{
@@ -199,6 +303,8 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string, generat
 		SidecarEnv: []string{
 			"OPENROUTER_API_KEY=" + m.cfg.OpenRouterKey,
 			"SIDECAR_ADDR=" + addr,
+			"SIDECAR_CONTROL_TOKEN=" + controlToken,
+			"SIDECAR_CONTROL_ADDR=" + controlAddr,
 		},
 		Resources: res,
 		Runtime:   m.cfg.ContainerRuntime,
@@ -227,10 +333,12 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string, generat
 
 	// Phase 2: the untrusted agent, into the existing pod.
 	if err := m.pod.StartAgent(ctx, h, runtime.AgentSpec{
-		Image: m.cfg.AgentImage,
+		Image: agentImage,
+		Cmd:   agentCmd,
 		Env: []string{
 			"OPENAI_BASE_URL=http://" + addr + "/v1",
 			"SPAWN_MODEL=" + model,
+			"SPAWN_SESSION_TITLE=" + sessionTitle,
 		},
 		Mounts:         mounts,
 		Resources:      res,
@@ -244,7 +352,13 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model string, generat
 		return nil, err
 	}
 
-	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready"}
+	// Node-reachable control endpoint (pod IP + control port). Empty PodIP => unreachable URL;
+	// the reconciler/node handler treats that as "no live control plane".
+	controlURL := ""
+	if h.PodIP != "" {
+		controlURL = "http://" + net.JoinHostPort(h.PodIP, strconv.Itoa(controlPort)) + "/control/model"
+	}
+	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL}
 	m.store.Put(sp)
 	return sp, nil
 }
@@ -274,4 +388,12 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	}
 	m.store.Delete(id)
 	return nil
+}
+
+// newControlToken returns a 256-bit random hex string used as the sidecar control-endpoint
+// bearer token (one per pod). Mirrors the crypto/rand+hex pattern in server.go's newID.
+func newControlToken() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

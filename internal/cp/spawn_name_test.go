@@ -66,3 +66,30 @@ func TestNextSpawnName(t *testing.T) {
 		}
 	}
 }
+
+func TestListSpawnsReturnsModelApplied(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	sp := createActive(t, s, reg, &cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"})
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	// A fresh active spawn is applied from birth.
+	resp, err := s.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Spawns) != 1 || !resp.Msg.Spawns[0].ModelApplied || resp.Msg.Spawns[0].Model != "m" {
+		t.Fatalf("want model=m applied=true, got %+v", resp.Msg.Spawns)
+	}
+
+	// SetModel marks it unapplied; ListSpawns must surface that.
+	if err := s.st.Spawns().SetModel(ctx, sp.ID, "m2"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err = s.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Msg.Spawns[0].ModelApplied || resp.Msg.Spawns[0].Model != "m2" {
+		t.Fatalf("want model=m2 applied=false, got %+v", resp.Msg.Spawns[0])
+	}
+}

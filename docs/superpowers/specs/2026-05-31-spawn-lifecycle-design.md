@@ -110,6 +110,15 @@ does long background work is suspended at `T_detached` mid-turn (acceptable for 
 
 ## 5. Suspend / resume mechanics — per-mount, data-only
 
+> **Status note (2026-06-09, sp-a7fs):** the node-side suspend protocol below
+> (`CPMessage_Suspend` → quiesce + per-mount persist → `NodeMessage_SuspendComplete` with
+> markers) is **deliberately not implemented while storage is Scratch-only** — there is nothing
+> to persist, so markers would always be empty and a torn agent write is harmless (the scratch
+> volume is discarded on resume regardless). Today's CP suspend is a synchronous hard teardown
+> (`StopOnNode` + `Drop` + `SetSuspended`, lifecycle.go), which is correct-by-design under §5's
+> scratch row. The proto messages stay reserved; node-side handling lands with the first
+> persistent mount backend (sp-u53.1 GitHub). Tracked: sp-a7fs (blocked on sp-u53.1, sp-gd9).
+
 Resume restores **data**, not conversation (fresh ACP session; continuity is backlog §10). Data is
 **per mount** (N independently-backed mounts; no single repo). Suspend persists **each mount through
 its own E3 backend**; the spawn is `suspended` only if **every persistent mount** persisted (any

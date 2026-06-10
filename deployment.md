@@ -9,7 +9,7 @@
 
 | Component | Binary / image | Runs where | Role |
 |---|---|---|---|
-| **Control plane (CP)** | `bin/cp` | one host (the SPOF today — see `sp-9um`) | client↔node relay, auth, scheduling, durable store (apps/spawns) |
+| **Control plane (CP)** | `bin/spawnery_cp` | one host (the SPOF today — see `sp-9um`) | client↔node relay, auth, scheduling, durable store (apps/spawns) |
 | **Node (spawnlet)** | `bin/spawnlet` | each execution host | drives Docker pods, attaches the egress floor, relays ACP |
 | **Sidecar** | `spawnery/sidecar:dev` image | per-spawn container | OpenAI-compatible inference proxy (holds the model key) |
 | **Agent** | `spawnery/goose:dev` (or `stubagent`) image | per-spawn container | the app's agent; joins the sidecar's netns |
@@ -25,7 +25,7 @@ A **spawn** = a two-container pod (sidecar + agent) sharing one network namespac
 - **Codegen tools** on `PATH` (only needed to regenerate protobuf, i.e. `make gen`): pinned
   `buf@v1.45.0`, `protoc-gen-go@v1.34.2`, `protoc-gen-connect-go@v1.16.2`. They live at
   `$(go env GOPATH)/bin` — `export PATH="$PATH:$(go env GOPATH)/bin"`.
-- Build: `make build` (→ `bin/spawnlet`, `bin/spawnctl`; `make bin/cp` for the CP) and
+- Build: `make build` (→ `bin/spawnlet`, `bin/spawnctl`; `make bin/spawnery_cp` for the CP) and
   `make images` (→ `spawnery/sidecar:dev`, `spawnery/stubagent:dev`, `spawnery/goose:dev`).
 
 ### 2.2 Node (spawnlet) host
@@ -184,7 +184,7 @@ just node               # spawnlet attached to the CP (NODE_ID=node-1, goose age
 just web                # web UI (vite)
 # or: just dev          # all panes in mprocs
 ```
-Prod (sketch — per-host): build + push images; run `bin/cp` with `CP_STORE_DSN`/`CP_LISTEN`/real
+Prod (sketch — per-host): build + push images; run `bin/spawnery_cp` with `CP_STORE_DSN`/`CP_LISTEN`/real
 auth; on each node host run `bin/spawnlet` with `CP_ADDR`, `NODE_CLASS=cloud`, the egress toolchain
 (§5), and `OPENROUTER_API_KEY` from a secret store.
 

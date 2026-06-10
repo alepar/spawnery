@@ -42,14 +42,6 @@ const (
 	SpawnServiceStopSpawnProcedure = "/spawn.v1.SpawnService/StopSpawn"
 )
 
-// These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
-var (
-	spawnServiceServiceDescriptor           = v1.File_spawn_v1_spawn_proto.Services().ByName("SpawnService")
-	spawnServiceCreateSpawnMethodDescriptor = spawnServiceServiceDescriptor.Methods().ByName("CreateSpawn")
-	spawnServiceSessionMethodDescriptor     = spawnServiceServiceDescriptor.Methods().ByName("Session")
-	spawnServiceStopSpawnMethodDescriptor   = spawnServiceServiceDescriptor.Methods().ByName("StopSpawn")
-)
-
 // SpawnServiceClient is a client for the spawn.v1.SpawnService service.
 type SpawnServiceClient interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -66,23 +58,24 @@ type SpawnServiceClient interface {
 // http://api.acme.com or https://acme.com/grpc).
 func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) SpawnServiceClient {
 	baseURL = strings.TrimRight(baseURL, "/")
+	spawnServiceMethods := v1.File_spawn_v1_spawn_proto.Services().ByName("SpawnService").Methods()
 	return &spawnServiceClient{
 		createSpawn: connect.NewClient[v1.CreateSpawnRequest, v1.CreateSpawnResponse](
 			httpClient,
 			baseURL+SpawnServiceCreateSpawnProcedure,
-			connect.WithSchema(spawnServiceCreateSpawnMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("CreateSpawn")),
 			connect.WithClientOptions(opts...),
 		),
 		session: connect.NewClient[v1.Frame, v1.Frame](
 			httpClient,
 			baseURL+SpawnServiceSessionProcedure,
-			connect.WithSchema(spawnServiceSessionMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("Session")),
 			connect.WithClientOptions(opts...),
 		),
 		stopSpawn: connect.NewClient[v1.StopSpawnRequest, v1.StopSpawnResponse](
 			httpClient,
 			baseURL+SpawnServiceStopSpawnProcedure,
-			connect.WithSchema(spawnServiceStopSpawnMethodDescriptor),
+			connect.WithSchema(spawnServiceMethods.ByName("StopSpawn")),
 			connect.WithClientOptions(opts...),
 		),
 	}
@@ -123,22 +116,23 @@ type SpawnServiceHandler interface {
 // By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
 // and JSON codecs. They also support gzip compression.
 func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	spawnServiceMethods := v1.File_spawn_v1_spawn_proto.Services().ByName("SpawnService").Methods()
 	spawnServiceCreateSpawnHandler := connect.NewUnaryHandler(
 		SpawnServiceCreateSpawnProcedure,
 		svc.CreateSpawn,
-		connect.WithSchema(spawnServiceCreateSpawnMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("CreateSpawn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceSessionHandler := connect.NewBidiStreamHandler(
 		SpawnServiceSessionProcedure,
 		svc.Session,
-		connect.WithSchema(spawnServiceSessionMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("Session")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceStopSpawnHandler := connect.NewUnaryHandler(
 		SpawnServiceStopSpawnProcedure,
 		svc.StopSpawn,
-		connect.WithSchema(spawnServiceStopSpawnMethodDescriptor),
+		connect.WithSchema(spawnServiceMethods.ByName("StopSpawn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	return "/spawn.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -29,10 +29,11 @@ func (s *Server) HandleWS(authn *auth.Auth) http.HandlerFunc {
 			return
 		}
 		var bind struct {
-			SpawnID  string `json:"spawnId"`
-			Token    string `json:"token"`
-			ClientID string `json:"clientId"`
-			Cursor   int64  `json:"cursor"`
+			SpawnID   string `json:"spawnId"`
+			Token     string `json:"token"`
+			ClientID  string `json:"clientId"`
+			SessionID string `json:"sessionId"` // empty => session #0
+			Cursor    int64  `json:"cursor"`
 		}
 		if err := json.Unmarshal(first, &bind); err != nil {
 			conn.Close(websocket.StatusUnsupportedData, "bad bind frame")
@@ -53,15 +54,19 @@ func (s *Server) HandleWS(authn *auth.Auth) http.HandlerFunc {
 			conn.Close(websocket.StatusUnsupportedData, "clientId required")
 			return
 		}
+		sessionID := bind.SessionID
+		if sessionID == "" {
+			sessionID = "0" // default to session #0 (backward compat with single-session clients)
+		}
 		cs := wsClient{conn: conn, ctx: ctx}
-		done, err := s.rt.AttachClient(bind.SpawnID, bind.ClientID, cs, bind.Cursor)
+		done, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, cs, bind.Cursor)
 		if err != nil {
 			conn.Close(websocket.StatusInternalError, "attach failed")
 			return
 		}
 		_ = s.tel.Emit(telemetry.Event{Kind: "session_start", Owner: owner, SpawnID: bind.SpawnID, Timestamp: time.Now().UTC()})
 		defer func() {
-			s.rt.DetachClient(bind.SpawnID, bind.ClientID)
+			s.rt.DetachClient(bind.SpawnID, sessionID, bind.ClientID)
 			_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: bind.SpawnID, Timestamp: time.Now().UTC()})
 		}()
 
@@ -73,7 +78,7 @@ func (s *Server) HandleWS(authn *auth.Auth) http.HandlerFunc {
 					recvErr <- struct{}{}
 					return
 				}
-				if ferr := s.rt.FromClient(bind.SpawnID, bind.ClientID, b); ferr != nil {
+				if ferr := s.rt.FromClient(bind.SpawnID, sessionID, bind.ClientID, b); ferr != nil {
 					recvErr <- struct{}{}
 					return
 				}

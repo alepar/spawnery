@@ -34,7 +34,7 @@ func (c *Client) call(method string, params any) (Message, error) {
 		b, _ := json.Marshal(params)
 		raw = b
 	}
-	if err := WriteMessage(c.w, Message{ID: &id, Method: method, Params: raw}); err != nil {
+	if err := WriteMessage(c.w, Message{ID: IntID(id), Method: method, Params: raw}); err != nil {
 		return Message{}, err
 	}
 	for {
@@ -42,7 +42,7 @@ func (c *Client) call(method string, params any) (Message, error) {
 		if err != nil {
 			return Message{}, err
 		}
-		if m.ID != nil && *m.ID == id {
+		if n, ok := m.ID.AsInt(); ok && n == id {
 			if m.Error != nil {
 				return Message{}, fmt.Errorf("acp %s error %d: %s", method, m.Error.Code, m.Error.Message)
 			}
@@ -114,7 +114,7 @@ func (c *Client) Prompt(text string, onChunk func(string)) error {
 		Prompt:    []contentBlock{{Type: "text", Text: text}},
 	}
 	if err := WriteMessage(c.w, Message{
-		ID:     &id,
+		ID:     IntID(id),
 		Method: "session/prompt",
 		Params: mustJSON(params),
 	}); err != nil {
@@ -134,7 +134,7 @@ func (c *Client) Prompt(text string, onChunk func(string)) error {
 			}
 			continue
 		}
-		if m.ID != nil && *m.ID == id {
+		if n, ok := m.ID.AsInt(); ok && n == id {
 			if m.Error != nil {
 				return fmt.Errorf("acp session/prompt error %d: %s", m.Error.Code, m.Error.Message)
 			}

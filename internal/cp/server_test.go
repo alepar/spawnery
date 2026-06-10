@@ -7,8 +7,8 @@ import (
 	"time"
 
 	connect "connectrpc.com/connect"
-	nodev1 "spawnery/gen/node/v1"
 	cpv1 "spawnery/gen/cp/v1"
+	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
@@ -38,6 +38,32 @@ func (c *capSender) firstStart() *nodev1.StartSpawn {
 		}
 	}
 	return nil
+}
+
+// starts returns every StartSpawn this sender has been asked to deliver, in send order.
+func (c *capSender) starts() []*nodev1.StartSpawn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []*nodev1.StartSpawn
+	for _, m := range c.sent {
+		if st := m.GetStart(); st != nil {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
+// stops returns every StopSpawn this sender has been asked to deliver (reconcile orphan arm).
+func (c *capSender) stops() []*nodev1.StopSpawn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []*nodev1.StopSpawn
+	for _, m := range c.sent {
+		if st := m.GetStop(); st != nil {
+			out = append(out, st)
+		}
+	}
+	return out
 }
 
 func newTestServer(t *testing.T) (*Server, *registry.Registry, *router.Router) {
@@ -83,7 +109,7 @@ func TestRunNodeRegistersAndRoutesFrames(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	rt.Bind("sp1", "n1", sender)
-	if _, err := rt.AttachClient("sp1", "c1", cl, 0); err != nil {
+	if _, err := rt.AttachClient("sp1", "0", "c1", cl, 0); err != nil {
 		t.Fatal(err)
 	}
 	in <- &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{SpawnId: "sp1", ClientId: "c1", Data: []byte("hi")}}}
@@ -159,4 +185,93 @@ func TestCreateSpawnPersistsNodeID(t *testing.T) {
 	if got.Status != store.Active {
 		t.Fatalf("status=%v want active", got.Status)
 	}
+}
+
+// A node-reported SessionRoster is mirrored into the CP router so ListSessions can serve it.
+// (recvFromChan adapter lives in node_class_test.go.) runNode is kept alive in a goroutine: letting it
+// return would run its deferred DropNode and tear down the route under test.
+func TestRunNodeMirrorsRoster(t *testing.T) {
+	s, _, rt := newTestServer(t)
+	sender := &capSender{}
+	rt.Bind("s1", "node-1", sender)
+	in := make(chan *nodev1.NodeMessage, 2)
+	go s.runNode(context.Background(), sender, recvFromChan(in))
+	in <- &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{Register: &nodev1.Register{NodeId: "node-1"}}}
+	in <- &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Roster{Roster: &nodev1.SessionRoster{
+		SpawnId: "s1", Sessions: []*nodev1.SessionInfo{{SessionId: "0", State: nodev1.SessionState_SESSION_STATE_ACTIVE, Pinned: true}},
+	}}}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if got := rt.ListSessions("s1"); len(got) == 1 && got[0].Pinned {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("roster never mirrored: %+v", rt.ListSessions("s1"))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(in)
+}
+
+// The client-facing ListSessions RPC reads the CP's mirrored roster (owner-checked) and maps node
+// session state to the client status string.
+func TestListSessionsRPC(t *testing.T) {
+	s, _, rt := newTestServer(t)
+	ctx := auth.WithOwner(context.Background(), "alice")
+	now := time.Now().Unix()
+	sp := store.Spawn{
+		ID: "s1", OwnerID: "alice", Name: "n", AppID: "secret-app", AppVersion: "1.0.0",
+		AppRef: "examples/secret-app", Model: "m", CreatedAt: now, LastUsedAt: now,
+	}
+	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, nil) }); err != nil {
+		t.Fatal(err)
+	}
+	rt.Bind("s1", "node-1", &capSender{})
+	rt.UpdateRoster("s1", "node-1", []*nodev1.SessionInfo{
+		{SessionId: "0", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_ACP, Runnable: "goose-acp", State: nodev1.SessionState_SESSION_STATE_ACTIVE, Pinned: true},
+	})
+	resp, err := s.ListSessions(ctx, connect.NewRequest(&cpv1.ListSessionsRequest{SpawnId: "s1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.Sessions) != 1 || resp.Msg.Sessions[0].Status != "active" || !resp.Msg.Sessions[0].Pinned {
+		t.Fatalf("ListSessions RPC wrong: %+v", resp.Msg.Sessions)
+	}
+	// A foreign caller is denied.
+	other := auth.WithOwner(context.Background(), "mallory")
+	if _, err := s.ListSessions(other, connect.NewRequest(&cpv1.ListSessionsRequest{SpawnId: "s1"})); err == nil {
+		t.Fatalf("ListSessions must reject a non-owner")
+	}
+}
+
+// CreateSession rejects an unspecified transport or empty runnable, and CloseSession rejects an empty
+// (defaulted-to-#0) or explicit #0 session id, all without round-tripping to the node.
+func TestSessionRPCInputValidation(t *testing.T) {
+	s, _, rt := newTestServer(t)
+	ctx := auth.WithOwner(context.Background(), "alice")
+	now := time.Now().Unix()
+	sp := store.Spawn{
+		ID: "s1", OwnerID: "alice", Name: "n", AppID: "secret-app", AppVersion: "1.0.0",
+		AppRef: "examples/secret-app", Model: "m", CreatedAt: now, LastUsedAt: now,
+	}
+	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, nil) }); err != nil {
+		t.Fatal(err)
+	}
+	rt.Bind("s1", "node-1", &capSender{})
+
+	mustInvalid := func(name string, err error) {
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("%s: want InvalidArgument, got %v", name, err)
+		}
+	}
+	_, err := s.CreateSession(ctx, connect.NewRequest(&cpv1.CreateSessionRequest{
+		SpawnId: "s1", Transport: cpv1.SessionTransport_SESSION_TRANSPORT_UNSPECIFIED, Runnable: "shell"}))
+	mustInvalid("CreateSession unspecified transport", err)
+	_, err = s.CreateSession(ctx, connect.NewRequest(&cpv1.CreateSessionRequest{
+		SpawnId: "s1", Transport: cpv1.SessionTransport_SESSION_TRANSPORT_MOSH, Runnable: ""}))
+	mustInvalid("CreateSession empty runnable", err)
+	_, err = s.CloseSession(ctx, connect.NewRequest(&cpv1.CloseSessionRequest{SpawnId: "s1", SessionId: ""}))
+	mustInvalid("CloseSession empty (defaults to #0)", err)
+	_, err = s.CloseSession(ctx, connect.NewRequest(&cpv1.CloseSessionRequest{SpawnId: "s1", SessionId: "0"}))
+	mustInvalid("CloseSession #0", err)
 }

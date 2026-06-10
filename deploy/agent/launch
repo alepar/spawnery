@@ -1,0 +1,212 @@
+#!/bin/sh
+# Reusable in-image launcher. Owns ALL per-runnable env + launch wiring, so session #0
+# (the entrypoint) and additional sessions (the node via `docker exec`, sp-npxq.3) get
+# byte-identical config. acp/served runnables exec a foreground server (PID 1 = server);
+# mosh runnables get a detached transparent-tmux session (one tmux session per
+# (spawn,session)), and --keepalive (session #0 only) blocks PID 1 until that session ends.
+#
+#   launcher --runnable <id> [--acp-port <N>] [--tmux-session <NAME>] [--keepalive]
+#
+# Defaults: --acp-port 7000, --tmux-session spawn, keepalive off. Defaults match what the
+# node sets for session #0 today (ACP_LISTEN=:7000, tmux session "spawn"), so session #0 is
+# unchanged. See sp-npxq spec §2/§3/§4.
+set -e
+
+RUNNABLE=""
+ACP_PORT=7000
+TMUX_SESSION=spawn
+KEEPALIVE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --runnable)     RUNNABLE="$2"; shift 2 ;;
+    --acp-port)     ACP_PORT="$2"; shift 2 ;;
+    --tmux-session) TMUX_SESSION="$2"; shift 2 ;;
+    --keepalive)    KEEPALIVE=1; shift ;;
+    *) echo "launcher: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+# setup_opencode_provider generates the opencode config that routes opencode (TUI or served)
+# through the sidecar's OpenAI-compatible endpoint (custom "spawnery" provider -> SIDECAR_BASE,
+# which injects the real OpenRouter key) and selects the spawn's model as "spawnery/<MODEL_ID>".
+# Both the served path AND opencode-tui must call this — otherwise the TUI falls back to
+# opencode's built-in provider (opencode zen) and bypasses the sidecar (sp-9xr.18). Exports
+# OPENCODE_CONFIG and SPAWN_MODEL.
+setup_opencode_provider() {
+  SIDECAR_BASE="${SIDECAR_BASE:-http://127.0.0.1:8080/v1}"
+  MODEL_ID="${SPAWN_MODEL:-openai/gpt-4o-mini}"
+  mkdir -p /etc/opencode
+  cat > /etc/opencode/opencode.json <<EOF
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "model": "spawnery/${MODEL_ID}",
+  "provider": {
+    "spawnery": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Spawnery Sidecar",
+      "options": { "baseURL": "${SIDECAR_BASE}", "apiKey": "sk-unused-sidecar-injects-real-key" },
+      "models": { "${MODEL_ID}": { "name": "${MODEL_ID}" } }
+    }
+  }
+}
+EOF
+  export OPENCODE_CONFIG=/etc/opencode/opencode.json
+  export SPAWN_MODEL="spawnery/${MODEL_ID}"
+}
+
+# start_tmux NAME... -- <inner-argv...> — create a detached transparent-tmux session named
+# $TMUX_SESSION running the runnable, forwarding the named env vars explicitly via -e (so an
+# exec session that joins session #0's already-running tmux server still gets the exact env).
+# Then, if --keepalive, block PID 1 while the session lives (this is what spawn-tmux used to do).
+#
+# The leading NAMEs (terminated by a literal `--`) are read from the current environment and
+# translated into `-e NAME=VALUE` flags; everything after `--` is the inner command. Values are
+# kept inside quoted positional parameters and never undergo unquoted word-splitting, so values
+# containing whitespace or glob characters are forwarded intact.
+start_tmux() {
+  _argc=$#
+  _i=0
+  _in_cmd=0
+  while [ "$_i" -lt "$_argc" ]; do
+    _arg="$1"; shift; _i=$((_i + 1))
+    if [ "$_in_cmd" = 0 ] && [ "$_arg" = "--" ]; then
+      _in_cmd=1
+      set -- "$@" --
+    elif [ "$_in_cmd" = 0 ]; then
+      eval "_v=\${$_arg}"
+      set -- "$@" -e "$_arg=$_v"
+    else
+      set -- "$@" "$_arg"
+    fi
+  done
+  tmux -u new-session -d -s "$TMUX_SESSION" "$@"
+  if [ "$KEEPALIVE" = 1 ]; then
+    # Keep PID 1 alive while the tmux session exists (clients attach via `tmux attach -t
+    # <name>`). When the agent exits, its window closes, the session ends (detach-on-destroy),
+    # and this loop returns so PID 1 exits and the node reaps the pod.
+    while tmux has-session -t "$TMUX_SESSION" 2>/dev/null; do
+      sleep 1
+    done
+  fi
+}
+
+case "$RUNNABLE" in
+  ""|opencode-served)
+    # Default opencode serve + adapter. Same sidecar provider config as opencode-tui.
+    export ACP_LISTEN="tcp://0.0.0.0:${ACP_PORT}"
+    setup_opencode_provider
+    # opencode listens on loopback; both clients (the adapter and the in-pod TUI) are in-pod.
+    opencode serve --port 4096 --hostname 127.0.0.1 &
+    export OPENCODE_BASE_URL="${OPENCODE_BASE_URL:-http://127.0.0.1:4096}"
+    exec /usr/local/bin/acpadapter
+    ;;
+  goose-acp)
+    # goose speaks ACP over stdio; acpmux fans N ACP clients onto ONE shared `goose acp`
+    # (web via the node pump + in-container nori via acpdial). Same OpenAI-sidecar provider
+    # config as goose-tui (model via the sidecar).
+    export ACP_LISTEN="tcp://0.0.0.0:${ACP_PORT}"
+    export GOOSE_PROVIDER="${GOOSE_PROVIDER:-openai}"
+    export GOOSE_MODEL="${GOOSE_MODEL:-${SPAWN_MODEL:-openai/gpt-4o-mini}}"
+    export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-unused-sidecar-injects-real-key}"
+    export GOOSE_TELEMETRY_OFF="${GOOSE_TELEMETRY_OFF:-1}"
+    exec /usr/local/bin/acpmux goose acp
+    ;;
+  opencode-tui)
+    export TERM="${TERM:-xterm-256color}"
+    setup_opencode_provider   # same sidecar provider + model as opencode-served
+    # opencode-tui is role-agnostic (sp-npxq): the PRIMARY (#0) session is whatever runnable was
+    # chosen at spawn creation, and every image runnable is freely selectable as an additional
+    # session too. So probe the served opencode backend at the URL the launcher derives:
+    #   - reachable  → ADDITIONAL-session case: attach/mirror it via spawn-tui (no extra server).
+    #   - unreachable → PRIMARY/standalone case: run bare `opencode`, which embeds its own server
+    #     (self-contained; no port conflict since nothing else is listening).
+    # opencode TUI has no session-title hook (SPAWN_SESSION_TITLE) — naming is best-effort; the
+    # load-bearing fix is the sidecar routing above (sp-9xr.18). Either inner command is wrapped in
+    # transparent tmux so all clients mirror one TUI process.
+    export OPENCODE_BASE_URL="${OPENCODE_BASE_URL:-http://127.0.0.1:4096}"
+    if curl -fsS --max-time 2 "$OPENCODE_BASE_URL" >/dev/null 2>&1; then
+      start_tmux TERM OPENCODE_CONFIG SPAWN_MODEL OPENCODE_BASE_URL SPAWNERY_SESSION_FILE -- spawn-tui
+    else
+      start_tmux TERM OPENCODE_CONFIG SPAWN_MODEL -- opencode
+    fi
+    ;;
+  goose-tui)
+    export TERM="${TERM:-xterm-256color}"
+    export GOOSE_PROVIDER="${GOOSE_PROVIDER:-openai}"
+    export GOOSE_MODEL="${GOOSE_MODEL:-${SPAWN_MODEL:-openai/gpt-4o-mini}}"
+    export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-unused-sidecar-injects-real-key}"
+    export GOOSE_TELEMETRY_OFF="${GOOSE_TELEMETRY_OFF:-1}"
+    # OPENAI_BASE_URL is set by the node to the sidecar endpoint; goose's openai provider reads
+    # it directly. Use "goose session" (bare "goose" opens the configure wizard).
+    start_tmux TERM GOOSE_PROVIDER GOOSE_MODEL OPENAI_API_KEY GOOSE_TELEMETRY_OFF OPENAI_BASE_URL -- goose session
+    ;;
+  claude-tui)
+    export TERM="${TERM:-xterm-256color}"
+    # Claude Code speaks the Anthropic Messages API; the sidecar's /v1/messages converter
+    # translates to OpenAI Chat Completions against OpenRouter. Strip trailing /v1 for
+    # ANTHROPIC_BASE_URL (Claude Code appends /v1/messages itself). The dummy key is supplied
+    # via the baked apiKeyHelper (/root/.claude/settings.json), NOT an env var (sp-9xr.18).
+    SIDECAR_OAI="${OPENAI_BASE_URL:-http://127.0.0.1:8080/v1}"
+    export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-${SIDECAR_OAI%/v1}}"
+    export ANTHROPIC_CUSTOM_MODEL_OPTION="${SPAWN_MODEL:-openai/gpt-4o-mini}"
+    export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Spawnery"
+    export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-${SPAWN_MODEL:-openai/gpt-4o-mini}}"
+    export ENABLE_TOOL_SEARCH="${ENABLE_TOOL_SEARCH:-true}"
+    export DISABLE_AUTOUPDATER="${DISABLE_AUTOUPDATER:-1}"
+    export DISABLE_TELEMETRY="${DISABLE_TELEMETRY:-1}"
+    export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+    export CLAUDE_CODE_DISABLE_TERMINAL_TITLE="${CLAUDE_CODE_DISABLE_TERMINAL_TITLE:-1}"
+    start_tmux TERM ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_MODEL_OPTION ANTHROPIC_CUSTOM_MODEL_OPTION_NAME \
+               ANTHROPIC_MODEL ENABLE_TOOL_SEARCH DISABLE_AUTOUPDATER DISABLE_TELEMETRY \
+               CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_DISABLE_TERMINAL_TITLE \
+               -- claude
+    ;;
+  codex-tui)
+    export TERM="${TERM:-xterm-256color}"
+    # Codex speaks the OpenAI Responses API; OpenRouter serves a compatible /v1/responses endpoint
+    # via the sidecar passthrough (sidecar injects the real OpenRouter key). base_url is the
+    # sidecar's OpenAI root (OPENAI_BASE_URL, set by the node). The model is per-spawn (SPAWN_MODEL)
+    # and switchable in Codex's own /model picker. The pod (gVisor) is the sandbox, so
+    # sandbox_mode="danger-full-access" disables Codex's own Landlock/seccomp. approval_policy="never"
+    # auto-approves all actions (non-interactive pod). disable_response_storage=true is Codex's ZDR
+    # mechanism: it sets store=false on Responses calls and does NOT chain via previous_response_id,
+    # sending full context each turn — required because OpenRouter's Responses Beta is stateless
+    # (no server-side response storage / previous_response_id chaining).
+    SIDECAR_OAI="${OPENAI_BASE_URL:-http://127.0.0.1:8080/v1}"
+    MODEL_ID="${SPAWN_MODEL:-openai/gpt-4o-mini}"
+    export CODEX_HOME="${CODEX_HOME:-/root/.codex}"
+    export CODEX_SPAWNERY_KEY="${CODEX_SPAWNERY_KEY:-sk-unused-sidecar-injects-real-key}"
+    mkdir -p "$CODEX_HOME"
+    cat > "$CODEX_HOME/config.toml" <<EOF
+model = "${MODEL_ID}"
+model_provider = "spawnery"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+disable_response_storage = true
+
+[model_providers.spawnery]
+name = "Spawnery Sidecar"
+base_url = "${SIDECAR_OAI}"  # /v1 suffix kept: Codex appends /responses -> effective URL is <base>/v1/responses
+env_key = "CODEX_SPAWNERY_KEY"
+wire_api = "responses"
+EOF
+    start_tmux TERM CODEX_HOME CODEX_SPAWNERY_KEY -- codex
+    ;;
+  shell)
+    # Built-in synthetic runnable: a plain login-ish bash shell, transparent-tmux wrapped so it
+    # shares the same multi-client mirroring + scrollback persistence as the agent TUIs (sp-npxq §3).
+    export TERM="${TERM:-xterm-256color}"
+    start_tmux TERM -- bash
+    ;;
+  stub-acp)
+    # Deterministic ACP test double (cmd/stubagent) for the multi-session e2e (sp-npxq.5). acpmux
+    # fans N ACP clients onto one stdio stubagent, bound to ACP_LISTEN — same shape as goose-acp,
+    # but with NO model/sidecar/keys (the stub just echoes "ECHO: <prompt>"). Credential-free.
+    export ACP_LISTEN="tcp://0.0.0.0:${ACP_PORT}"
+    exec /usr/local/bin/acpmux /usr/local/bin/stubagent
+    ;;
+  nori*|nori)
+    echo "nori is launched by the terminal attach, not the launcher (sp-9xr.12.2)" >&2; exit 1 ;;
+  *)
+    echo "launcher: unknown runnable: $RUNNABLE" >&2; exit 1 ;;
+esac

@@ -40,12 +40,12 @@ func (s *Server) Respond(id int, result any) error {
 	if err != nil {
 		return err
 	}
-	return s.write(Message{ID: &id, Result: b})
+	return s.write(Message{ID: IntID(id), Result: b})
 }
 
 // RespondError writes a JSON-RPC error response for the given request id.
 func (s *Server) RespondError(id, code int, message string) error {
-	return s.write(Message{ID: &id, Error: &RPCError{Code: code, Message: message}})
+	return s.write(Message{ID: IntID(id), Error: &RPCError{Code: code, Message: message}})
 }
 
 // Notify writes a notification (no id), e.g. session/update.
@@ -65,5 +65,5 @@ func (s *Server) Request(id int, method string, params any) error {
 	if err != nil {
 		return err
 	}
-	return s.write(Message{ID: &id, Method: method, Params: b})
+	return s.write(Message{ID: IntID(id), Method: method, Params: b})
 }

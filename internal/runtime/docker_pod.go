@@ -94,6 +94,7 @@ func (d *DockerPodBackend) StartPod(ctx context.Context, spec PodSpec) (*PodHand
 func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec AgentSpec) error {
 	agentID, err := d.rt.StartContainer(ctx, ContainerSpec{
 		Image:   spec.Image,
+		Cmd:     spec.Cmd,
 		NetnsOf: h.SidecarID,
 		// The adapter listens on TCP for the node (both lanes now); no stdio ACP channel.
 		Env:            append([]string{fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", d.port())}, spec.Env...),

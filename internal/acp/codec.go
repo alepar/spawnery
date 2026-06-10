@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"strconv"
+	"strings"
 )
 
 type RPCError struct {
@@ -14,9 +16,49 @@ type RPCError struct {
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
+// RawID is a JSON-RPC 2.0 request id. The spec allows the id to be a string OR a
+// number (or null), and clients pick either: our own Client/Server and the node
+// pump use integers, but nori (the Rust ACP TUI, sp-9xr.12.2) uses string UUIDs.
+// Storing the id as raw JSON lets acpmux echo a client's id back VERBATIM
+// regardless of type, while the integer helpers below keep all our
+// integer-keyed bookkeeping (waiters, in-flight prompt ids) working unchanged.
+type RawID json.RawMessage
+
+// IntID builds a RawID from an integer id (our outbound requests/responses).
+func IntID(n int) *RawID {
+	r := RawID(strconv.Itoa(n))
+	return &r
+}
+
+// AsInt parses the id as an integer, reporting ok=false for string/null ids.
+// Used by the integer-keyed upstream bookkeeping (handshake waiters, in-flight
+// prompt correlation) — those ids are always ours, hence always integers.
+func (r *RawID) AsInt() (int, bool) {
+	if r == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(*r)))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func (r RawID) MarshalJSON() ([]byte, error) {
+	if len(r) == 0 {
+		return []byte("null"), nil
+	}
+	return []byte(r), nil
+}
+
+func (r *RawID) UnmarshalJSON(b []byte) error {
+	*r = append((*r)[:0], b...)
+	return nil
+}
+
 type Message struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      *int            `json:"id,omitempty"`
+	ID      *RawID          `json:"id,omitempty"`
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`

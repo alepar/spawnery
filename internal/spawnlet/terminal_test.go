@@ -2,26 +2,58 @@ package spawnlet
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
-func TestAttachCommandWithSession(t *testing.T) {
-	got := attachCommand("", "", "ses_abc")
-	want := []string{"tmux", "new-session", "-A", "-s", "opencode", "opencode", "attach", "http://127.0.0.1:4096", "-s", "ses_abc"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("attachCommand:\n got %v\n want %v", got, want)
+func TestExecPrefixNonInteractiveForDropsTTY(t *testing.T) {
+	got := ExecPrefixNonInteractiveFor("")
+	for _, a := range got {
+		if a == "-it" || a == "-i" || a == "-t" {
+			t.Fatalf("non-interactive prefix must not allocate a TTY, got %v", got)
+		}
 	}
-	// tmux -A is what makes a second attach reattach instead of duplicating.
-	if got[2] != "-A" {
-		t.Fatalf("expected tmux -A (attach-or-create), got %q", got[2])
+	if got[0] != "docker" || got[1] != "exec" {
+		t.Fatalf("docker lane prefix = %v, want docker exec ...", got)
+	}
+	// still injects the C.UTF-8 locale (parity with ExecPrefixFor, minus -it).
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "LANG=C.UTF-8") || !strings.Contains(joined, "LC_ALL=C.UTF-8") {
+		t.Fatalf("prefix must inject C.UTF-8 locale, got %v", got)
+	}
+	if r := ExecPrefixNonInteractiveFor("runsc"); r[0] != "crictl" || r[1] != "exec" {
+		t.Fatalf("runsc lane = %v, want crictl exec", r)
 	}
 }
 
-func TestAttachCommandFallsBackToContinue(t *testing.T) {
-	got := attachCommand("http://x:1", "sess", "")
-	want := []string{"tmux", "new-session", "-A", "-s", "sess", "opencode", "attach", "http://x:1", "-c"}
+func TestSessionTitle(t *testing.T) {
+	cases := []struct{ name, app, want string }{
+		{"Secret App 2", "Secret", "Secret App 2 (Secret)"},
+		{"Secret App 2", "", "Secret App 2"},
+		{"", "Secret", "Secret"},
+		{"", "", ""},
+		{"  Trimmed  ", "  App  ", "Trimmed (App)"},
+	}
+	for _, c := range cases {
+		if got := sessionTitle(c.name, c.app); got != c.want {
+			t.Errorf("sessionTitle(%q,%q)=%q want %q", c.name, c.app, got, c.want)
+		}
+	}
+}
+
+func TestAttachCommandRunsLauncher(t *testing.T) {
+	// The in-container command is the baked launcher, which owns TERM + `opencode attach -s <id>`.
+	got := attachCommand()
+	if !reflect.DeepEqual(got, []string{"spawn-tui"}) {
+		t.Fatalf("attachCommand = %v, want [spawn-tui]", got)
+	}
+}
+
+func TestExecArgvWrapsLauncher(t *testing.T) {
+	got := execArgv([]string{"docker", "exec", "-it"}, "agent123", attachCommand())
+	want := []string{"docker", "exec", "-it", "agent123", "spawn-tui"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("attachCommand (no oc session):\n got %v\n want %v", got, want)
+		t.Fatalf("execArgv = %v, want %v", got, want)
 	}
 }
 
@@ -59,5 +91,26 @@ func TestMoshServerArgs(t *testing.T) {
 	without := moshServerArgs("", []string{"x"})
 	if !reflect.DeepEqual(without, []string{"new", "--", "x"}) {
 		t.Fatalf("moshServerArgs no ip: %v", without)
+	}
+}
+
+func TestTerminalInnerCmd(t *testing.T) {
+	// tmux spawn → attach to the in-container tmux session
+	if got := terminalInnerCmd(&Spawn{Mode: "tmux"}); len(got) != 4 ||
+		got[0] != "tmux" || got[1] != "attach" || got[2] != "-t" || got[3] != "spawn" {
+		t.Fatalf("tmux inner cmd = %v, want [tmux attach -t spawn]", got)
+	}
+	// acp spawn → launch nori with the baked "spawnery" custom agent (-> acpdial -> acpmux),
+	// joining the shared goose session as the web (sp-9xr.12.2).
+	wantACP := []string{"nori", "-a", "spawnery",
+		"--skip-welcome", "--skip-trust-directory", "--dangerously-bypass-approvals-and-sandbox"}
+	if got := terminalInnerCmd(&Spawn{Mode: "acp"}); !reflect.DeepEqual(got, wantACP) {
+		t.Fatalf("acp inner cmd = %v, want %v", got, wantACP)
+	}
+	// served/opencode (and legacy "") → the opencode TUI launcher
+	for _, mode := range []string{"served", ""} {
+		if got := terminalInnerCmd(&Spawn{Mode: mode}); len(got) != 1 || got[0] != "spawn-tui" {
+			t.Fatalf("mode %q inner cmd = %v, want [spawn-tui]", mode, got)
+		}
 	}
 }

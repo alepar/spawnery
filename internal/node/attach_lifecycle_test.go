@@ -48,6 +48,18 @@ func (f *fakeCPStream) phasesFor(spawnID string) []nodev1.SpawnPhase {
 	return out
 }
 
+// lastRoster returns the most recent SessionRoster the attacher sent to the CP (nil if none).
+func (f *fakeCPStream) lastRoster() *nodev1.SessionRoster {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.sent) - 1; i >= 0; i-- {
+		if r := f.sent[i].GetRoster(); r != nil {
+			return r
+		}
+	}
+	return nil
+}
+
 func hasPhase(phases []nodev1.SpawnPhase, want nodev1.SpawnPhase) bool {
 	for _, p := range phases {
 		if p == want {
@@ -165,7 +177,7 @@ func newGooseManager(t *testing.T, be runtime.PodBackend) *spawnlet.Manager {
 }
 
 func newAttacher(mgr *spawnlet.Manager, fs cpStream) *attacher {
-	return &attacher{cfg: Config{MaxSpawns: 2}, mgr: mgr, stream: fs, pumps: map[string]*Pump{}}
+	return &attacher{cfg: Config{MaxSpawns: 2}, mgr: mgr, stream: fs, ctrlHTTP: stubDoerOK(), pumps: map[sessionKey]*Pump{}, tmuxRelays: map[sessionKey]*tmuxRelay{}, sessions: map[string]*sessionRegistry{}}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -220,7 +232,7 @@ func TestStartSpawnSuccessReportsActive(t *testing.T) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.pumps["sp1"] == nil {
+	if a.pumps[zeroKey("sp1")] == nil {
 		t.Fatal("pump not registered after success")
 	}
 	if a.active != 1 {
@@ -240,7 +252,7 @@ func TestStartSpawnAgentDeathSelfCleans(t *testing.T) {
 		t.Fatalf("final phase before death = %v, want ACTIVE", got)
 	}
 	// A prompt makes the scripted goose answer one turn then exit -> exitFn must ERROR + reclaim.
-	a.fromClient("sp1", "ghost", encodeFrame(Frame{Kind: "prompt", Text: "go"}))
+	a.fromClient("sp1", SessionZeroID, "ghost", encodeFrame(Frame{Kind: "prompt", Text: "go"}))
 
 	waitFor(t, "exitFn reclaim", func() bool {
 		a.mu.Lock()
@@ -285,7 +297,7 @@ func TestHandleRoutesOpenFrameClose(t *testing.T) {
 	ctx := context.Background()
 	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
 	defer a.stopSpawn(ctx, "sp1")
-	p := a.pumps["sp1"]
+	p := a.pumps[zeroKey("sp1")]
 
 	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{SpawnId: "sp1", ClientId: "c1", Cursor: 0}}})
 	waitFor(t, "client attach", func() bool {
@@ -307,4 +319,79 @@ func TestHandleRoutesOpenFrameClose(t *testing.T) {
 		defer p.mu.Unlock()
 		return len(p.clients) == 0
 	})
+}
+
+// A started spawn auto-registers a pinned session #0 in its registry and emits a SessionRoster to the
+// CP carrying that one session (sp-npxq.1).
+func TestStartSpawnRegistersSessionZeroAndEmitsRoster(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	fs := &fakeCPStream{}
+	a := newAttacher(newGooseManager(t, be), fs)
+	ctx := context.Background()
+	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "s1", AppRef: writeNodeApp(t), Model: "m", RunnableId: "goose-acp"})
+	defer a.stopSpawn(ctx, "s1")
+
+	reg := a.sessions["s1"]
+	if reg == nil {
+		t.Fatalf("no session registry for s1")
+	}
+	z, ok := reg.get(SessionZeroID)
+	if !ok || !z.pinned || z.transport != nodev1.SessionTransport_SESSION_TRANSPORT_ACP {
+		t.Fatalf("session #0 not registered/pinned/acp: %+v ok=%v", z, ok)
+	}
+	got := fs.lastRoster()
+	if got == nil || len(got.Sessions) != 1 || got.Sessions[0].SessionId != SessionZeroID {
+		t.Fatalf("roster not emitted with session #0: %+v", got)
+	}
+}
+
+// CreateSession registers a new session and launches it (via the fake exec boundary, so it reaches
+// ACTIVE); CloseSession reaps a non-pinned session but is a no-op for the pinned session #0 (sp-npxq.1
+// roster behavior, with the sp-npxq.3 real launch/reap wired through a fakeSessionExec).
+func TestCreateAndCloseSessionUpdateRoster(t *testing.T) {
+	a := &attacher{
+		cfg:        Config{NodeID: "n1", MaxSpawns: 2},
+		sx:         &fakeSessionExec{},
+		pumps:      map[sessionKey]*Pump{},
+		tmuxRelays: map[sessionKey]*tmuxRelay{},
+		sessions:   map[string]*sessionRegistry{"s1": newSessionRegistry("s1")},
+	}
+	a.sessions["s1"].register(&sessionEntry{id: SessionZeroID, state: nodev1.SessionState_SESSION_STATE_ACTIVE, pinned: true})
+	fs := &fakeCPStream{}
+	a.stream = fs
+	ctx := context.Background()
+
+	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_MOSH, Runnable: "shell",
+	}}})
+
+	// the new (non-zero) session launches to ACTIVE via the fake (sp-npxq.3); roster has 2 sessions.
+	var newID string
+	waitFor(t, "new session ACTIVE", func() bool {
+		r := fs.lastRoster()
+		if r == nil || len(r.Sessions) != 2 {
+			return false
+		}
+		for _, s := range r.Sessions {
+			if s.SessionId != SessionZeroID {
+				if s.State == nodev1.SessionState_SESSION_STATE_ACTIVE && s.Runnable == "shell" {
+					newID = s.SessionId
+					return true
+				}
+			}
+		}
+		return false
+	})
+
+	// closing the pinned session #0 is rejected: roster unchanged.
+	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_CloseSession{CloseSession: &nodev1.CloseSession{SpawnId: "s1", SessionId: SessionZeroID}}})
+	if len(fs.lastRoster().Sessions) != 2 {
+		t.Fatalf("closing pinned #0 must be a no-op")
+	}
+
+	// closing the new session reaps it: roster back to 1.
+	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_CloseSession{CloseSession: &nodev1.CloseSession{SpawnId: "s1", SessionId: newID}}})
+	if len(fs.lastRoster().Sessions) != 1 {
+		t.Fatalf("after CloseSession want roster of 1, got %+v", fs.lastRoster())
+	}
 }

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/urfave/cli/v3"
 	"golang.org/x/net/http2"
 
 	cpv1 "spawnery/gen/cp/v1"
@@ -26,37 +26,45 @@ import (
 )
 
 func main() {
-	// `spawnctl tmux -spawn <id>` attaches an interactive terminal (the opencode TUI in tmux)
-	// to a running spawn via mosh. Intercept before flag.Parse so the subcommand name isn't parsed.
-	if len(os.Args) > 1 && os.Args[1] == "tmux" {
-		runTmux(os.Args[2:])
-		return
+	cmd := &cli.Command{
+		Name:  "spawnctl",
+		Usage: "drive and attach to spawnery spawns",
+		// Root flags + Action preserve the original CLI: create a spawn and drive it (standalone via
+		// -addr, or through the CP via -cp), or register an app manifest with -register.
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "addr", Value: "http://127.0.0.1:9090", Usage: "spawnlet address (standalone)"},
+			&cli.StringFlag{Name: "app", Value: "examples/secret-app", Usage: "app definition dir"},
+			&cli.StringFlag{Name: "model", Value: "anthropic/claude-3.5-sonnet", Usage: "OpenRouter model"},
+			&cli.StringFlag{Name: "cp", Usage: "control-plane address (http://127.0.0.1:8080); overrides -addr"},
+			&cli.StringFlag{Name: "app-id", Value: "spawnery/secret-app", Usage: "app id (CP mode)"},
+			&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP mode)"},
+			&cli.BoolFlag{Name: "register", Usage: "register the -app manifest with the CP and exit"},
+			&cli.StringFlag{Name: "version", Value: "1.0.0", Usage: "app version to register (with -register)"},
+			&cli.StringFlag{Name: "ref", Usage: "immutable app ref creator/app@sha (with -register)"},
+		},
+		Action:   rootAction,
+		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), setModelCmd()},
 	}
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
+		log.Fatal(err)
+	}
+}
 
-	addr := flag.String("addr", "http://127.0.0.1:9090", "spawnlet address")
-	appPath := flag.String("app", "examples/secret-app", "app definition dir")
-	model := flag.String("model", "anthropic/claude-3.5-sonnet", "OpenRouter model")
-	cpAddr := flag.String("cp", "", "control-plane address (http://127.0.0.1:8080); overrides -addr")
-	appID := flag.String("app-id", "spawnery/secret-app", "app id (CP mode)")
-	token := flag.String("token", "dev-token", "dev auth token (CP mode)")
-	register := flag.Bool("register", false, "register the -app manifest with the CP and exit (CP mode)")
-	version := flag.String("version", "1.0.0", "app version to register (with -register)")
-	ref := flag.String("ref", "", "immutable app ref creator/app@sha (with -register)")
-	flag.Parse()
-
-	ctx := context.Background()
-	if *register {
-		if *cpAddr == "" {
-			log.Fatal("-register requires -cp")
+// rootAction is the default (no-subcommand) behavior: register, CP-create, or standalone-create.
+func rootAction(ctx context.Context, c *cli.Command) error {
+	if c.Bool("register") {
+		if c.String("cp") == "" {
+			return cli.Exit("-register requires -cp", 2)
 		}
-		runRegister(ctx, *cpAddr, *appPath, *version, *ref, *token)
-		return
+		runRegister(ctx, c.String("cp"), c.String("app"), c.String("version"), c.String("ref"), c.String("token"))
+		return nil
 	}
-	if *cpAddr != "" {
-		runCP(ctx, *cpAddr, *appID, *model, *token)
-		return
+	if c.String("cp") != "" {
+		runCP(ctx, c.String("cp"), c.String("app-id"), c.String("model"), c.String("token"))
+		return nil
 	}
-	runStandalone(ctx, *addr, *appPath, *model)
+	runStandalone(ctx, c.String("addr"), c.String("app"), c.String("model"))
+	return nil
 }
 
 // manifestToProto parses an app's spawneryapp.yml and maps it to the cp.v1

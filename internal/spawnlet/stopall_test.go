@@ -15,7 +15,7 @@ func TestStopAllTearsDownEverySpawn(t *testing.T) {
 	ctx := context.Background()
 
 	for _, id := range []string{"sp-a", "sp-b"} {
-		if _, err := m.Create(ctx, id, "../../examples/secret-app", "model", 0); err != nil {
+		if _, err := m.Create(ctx, id, "../../examples/secret-app", "model", "", "", 0); err != nil {
 			t.Fatalf("Create %s: %v", id, err)
 		}
 	}

@@ -9,14 +9,20 @@ import (
 )
 
 // fakePodBackend records Stop's handle and returns a sandbox-bearing handle from StartPod.
-type fakePodBackend struct{ stopped *runtime.PodHandle }
+type fakePodBackend struct {
+	stopped   *runtime.PodHandle
+	agentSpec runtime.AgentSpec // captured by StartAgent
+	podSpec   runtime.PodSpec   // captured by StartPod
+}
 
 func (f *fakePodBackend) Ping(context.Context) error      { return nil }
 func (f *fakePodBackend) Preflight(context.Context) error { return nil }
-func (f *fakePodBackend) StartPod(_ context.Context, _ runtime.PodSpec) (*runtime.PodHandle, error) {
+func (f *fakePodBackend) StartPod(_ context.Context, spec runtime.PodSpec) (*runtime.PodHandle, error) {
+	f.podSpec = spec
 	return &runtime.PodHandle{PodIP: "10.0.0.5", NetnsPath: "/proc/7/ns/net", SidecarID: "sc", SandboxID: "sandbox-x"}, nil
 }
-func (f *fakePodBackend) StartAgent(_ context.Context, h *runtime.PodHandle, _ runtime.AgentSpec) error {
+func (f *fakePodBackend) StartAgent(_ context.Context, h *runtime.PodHandle, spec runtime.AgentSpec) error {
+	f.agentSpec = spec
 	h.AgentID = "ag"
 	return nil
 }
@@ -35,7 +41,7 @@ func TestManagerThreadsSandboxID(t *testing.T) {
 	fb := &fakePodBackend{}
 	m.pod = fb // white-box: replace the Docker backend with the fake
 
-	sp, err := m.Create(context.Background(), "spx", "../../examples/secret-app", "model", 0)
+	sp, err := m.Create(context.Background(), "spx", "../../examples/secret-app", "model", "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

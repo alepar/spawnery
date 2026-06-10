@@ -79,3 +79,31 @@ func TestCPContractSurface(t *testing.T) {
 	_ = &cpv1.RecreateSpawnRequest{SpawnId: "sp1"}
 	_ = &cpv1.DeleteSpawnRequest{SpawnId: "sp1", DestroyData: true}
 }
+
+func TestAgentSelectionContract(t *testing.T) {
+	// CreateSpawn carries the agent selection
+	_ = &cpv1.CreateSpawnRequest{AppId: "a", Model: "m", Image: "ghcr.io/acme/goose:1", RunnableId: "goose-acp"}
+	// ListAgentImages request/response surface
+	_ = &cpv1.ListAgentImagesRequest{}
+	_ = &cpv1.ListAgentImagesResponse{Images: []*cpv1.AgentImageInfo{
+		{Image: "ghcr.io/acme/goose:1", CreatedAt: 5, Binaries: []string{"goose"}}}}
+	// Register advertises the image's binaries
+	_ = &nodev1.Register{NodeId: "n1", AgentImages: []string{"img:1"}, Binaries: []string{"goose", "opencode"}}
+
+	// round-trip StartSpawn proves the new image/runnable/mode fields encode on the wire
+	start := &nodev1.StartSpawn{
+		SpawnId: "sp1", AppRef: "ref", Model: "m", Generation: 1,
+		Image: "ghcr.io/acme/goose:1", RunnableId: "goose-acp", Mode: "acp",
+	}
+	b, err := proto.Marshal(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got nodev1.StartSpawn
+	if err := proto.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Image != "ghcr.io/acme/goose:1" || got.RunnableId != "goose-acp" || got.Mode != "acp" {
+		t.Fatalf("StartSpawn agent selection lost on round-trip: %+v", &got)
+	}
+}

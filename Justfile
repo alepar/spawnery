@@ -19,14 +19,15 @@ default:
 spawnlet agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev \
+    AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex" } }}" \
     DATA_ROOT={{data_root}} SPAWNLET_ADDR={{addr}} \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
     {{repo}}/bin/spawnlet
 
 # control plane (foreground)
 cp:
-    @make bin/cp
-    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/cp
+    @make bin/spawnery_cp
+    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/spawnery_cp
 
 # auth service (foreground; dev = ephemeral in-memory CA, not for production)
 authsvc:
@@ -37,6 +38,7 @@ authsvc:
 node agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
+    AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
     NODE_CLASS=self-hosted EGRESS_ENFORCE=false \
     NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \

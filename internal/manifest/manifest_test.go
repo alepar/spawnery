@@ -37,7 +37,7 @@ func TestParseFullSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.APIVersion != "spawnery/v1" || m.ID != "spawnery/secret" || m.Title != "Secret" {
+	if m.APIVersion != "spawnery/v1" || m.ID != "spawnery/secret-app" || m.Title != "Secret App" {
 		t.Fatalf("manifest = %+v", m)
 	}
 	if len(m.Storage.Mounts) != 1 || m.Storage.Mounts[0].Name != "main" || m.Storage.Mounts[0].Path != "data" {

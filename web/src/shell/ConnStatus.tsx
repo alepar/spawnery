@@ -20,14 +20,20 @@ const LABEL: Record<ConnState, string> = {
   disconnected: "disconnected",
 };
 
-// ConnStatus renders the chat-header WS connection light + label. It renders nothing when there is
-// no live socket (conn === null).
+// ConnStatus renders a per-session WS connection light as a bare dot; the state label (connecting/
+// connected/…) is exposed via the native `title` hover tooltip (and `aria-label`) rather than inline
+// text, so a tab heading shows only the dot + tab name. Renders nothing when there is no live socket.
 export function ConnStatus({ conn }: { conn: ConnState | null }) {
   if (!conn) return null;
   return (
-    <span data-testid="status" data-status={conn} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+    <span
+      data-testid="status"
+      data-status={conn}
+      title={LABEL[conn]}
+      aria-label={LABEL[conn]}
+      className="inline-flex items-center"
+    >
       <span className={`inline-block h-2 w-2 rounded-full ${DOT[conn]}`} />
-      {LABEL[conn]}
     </span>
   );
 }

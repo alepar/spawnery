@@ -21,17 +21,25 @@ type Server struct {
 func NewServer(m *Manager) *Server { return &Server{m: m} }
 
 // HandleTerminal starts a mosh-backed terminal session for a spawn and returns the connect info
-// {host, port, key} as JSON. spawnctl tmux POSTs here (standalone: directly; the mosh UDP data
-// plane then goes straight to this node). Reattaches if the tmux session already exists.
+// {host, port, key} as JSON. spawnctl attach/exec/shell POST here; the mosh UDP data plane then
+// goes straight to this node. An optional JSON body {"cmd":[...]} selects the in-container command:
+// empty => the opencode TUI; e.g. ["/bin/bash"] => a raw shell (un-audited; owner-only).
 //
-//	POST /terminal?spawn=<id>  ->  {"host":"...","port":60001,"key":"..."}
+//	POST /terminal?spawn=<id>            -> opencode TUI
+//	POST /terminal?spawn=<id>  {"cmd":["/bin/bash"]} -> raw shell
 func (s *Server) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 	spawnID := r.URL.Query().Get("spawn")
 	if spawnID == "" {
 		http.Error(w, "missing ?spawn=<id>", http.StatusBadRequest)
 		return
 	}
-	ts, err := s.m.StartTerminal(r.Context(), spawnID)
+	var body struct {
+		Cmd []string `json:"cmd"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body) // empty/absent body is fine (cmd nil)
+	}
+	ts, err := s.m.StartTerminal(r.Context(), spawnID, body.Cmd)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -48,7 +56,7 @@ func newID() string {
 
 func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[spawnv1.CreateSpawnRequest]) (*connect.Response[spawnv1.CreateSpawnResponse], error) {
 	id := newID()
-	if _, err := s.m.Create(ctx, id, req.Msg.AppPath, req.Msg.Model, 0); err != nil { // standalone: no generation
+	if _, err := s.m.Create(ctx, id, req.Msg.AppPath, req.Msg.Model, "", "", 0); err != nil { // standalone: no CP name/generation
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&spawnv1.CreateSpawnResponse{SpawnId: id}), nil

@@ -28,7 +28,7 @@ func TestMigrationsCreateAllTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	sort.Strings(names)
-	want := []string{"app_version_mounts", "app_versions", "apps", "owners", "spawn_containers", "spawn_mounts", "spawns"}
+	want := []string{"agent_image_binaries", "agent_images", "app_version_mounts", "app_versions", "apps", "owners", "spawn_containers", "spawn_mounts", "spawns"}
 	if len(names) != len(want) {
 		t.Fatalf("tables = %v, want %v", names, want)
 	}

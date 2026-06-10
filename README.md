@@ -149,7 +149,7 @@ Requirements: Docker (the test starts a real spawnlet that runs the
 just test-web-e2e
 ```
 
-Playwright's `globalSetup` builds `bin/cp` + `bin/spawnlet`, starts the CP on
+Playwright's `globalSetup` builds `bin/spawnery_cp` + `bin/spawnlet`, starts the CP on
 :8080 and an attached node with the stub image, and proxies through Vite;
 `globalTeardown` stops both.
 

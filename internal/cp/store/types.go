@@ -69,21 +69,26 @@ type MountDecl struct {
 }
 
 type Spawn struct {
-	bun.BaseModel `bun:"table:spawns,alias:s"`
-	ID            string `bun:"id,pk"`
-	OwnerID       string `bun:"owner_id,notnull"`
-	Name          string `bun:"name,notnull"`
-	AppID         string `bun:"app_id,notnull"`
-	AppVersion    string `bun:"app_version,notnull"`
-	AppRef        string `bun:"app_ref,notnull"`
-	Pinned        bool   `bun:"pinned,notnull"`
-	Model         string `bun:"model,notnull"`
-	Status        Status `bun:"status,notnull"`
-	Recovered     bool   `bun:"recovered,notnull"`
-	CreatedAt     int64  `bun:"created_at,notnull"`
-	LastUsedAt    int64  `bun:"last_used_at,notnull"`
-	SuspendedAt   *int64 `bun:"suspended_at"`
-	DeletedAt     *int64 `bun:"deleted_at"`
+	bun.BaseModel    `bun:"table:spawns,alias:s"`
+	ID               string `bun:"id,pk"`
+	OwnerID          string `bun:"owner_id,notnull"`
+	Name             string `bun:"name,notnull"`
+	AppID            string `bun:"app_id,notnull"`
+	AppVersion       string `bun:"app_version,notnull"`
+	AppRef           string `bun:"app_ref,notnull"`
+	Pinned           bool   `bun:"pinned,notnull"`
+	Model            string `bun:"model,notnull"`
+	Image            string `bun:"image,notnull"`
+	RunnableID       string `bun:"runnable_id,notnull"`
+	Mode             string `bun:"mode,notnull"`
+	Status           Status `bun:"status,notnull"`
+	Recovered        bool   `bun:"recovered,notnull"`
+	ModelApplied     bool   `bun:"model_applied,notnull"`
+	ModelApplyDetail string `bun:"model_apply_detail,notnull"`
+	CreatedAt        int64  `bun:"created_at,notnull"`
+	LastUsedAt       int64  `bun:"last_used_at,notnull"`
+	SuspendedAt      *int64 `bun:"suspended_at"`
+	DeletedAt        *int64 `bun:"deleted_at"`
 }
 
 // Container is the running episode. spawn:container = 1-to-0..1 (uniq_live_container on ended_at IS NULL).
@@ -103,4 +108,16 @@ type Mount struct {
 	Name          string `bun:"name,pk"`
 	BackendURI    string `bun:"backend_uri,notnull"`
 	PersistMarker string `bun:"persist_marker"`
+}
+
+type AgentImage struct {
+	bun.BaseModel `bun:"table:agent_images,alias:ai"`
+	Image         string `bun:"image,pk"`
+	CreatedAt     int64  `bun:"created_at,notnull"`
+}
+
+type AgentImageBinary struct {
+	bun.BaseModel `bun:"table:agent_image_binaries,alias:aib"`
+	Image         string `bun:"image,pk"`
+	Binary        string `bun:"binary_name,pk"`
 }

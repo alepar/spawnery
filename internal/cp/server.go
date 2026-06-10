@@ -5,6 +5,7 @@ package cp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/agentcaps"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/lock"
 	"spawnery/internal/cp/nodeauth"
@@ -27,6 +29,13 @@ import (
 	"spawnery/internal/cp/telemetry"
 )
 
+// reconcileAttempt tracks, for one spawn, when the reconciler first started trying to apply the
+// CURRENT model. Keyed by spawn id; the model string lets a fresh SetSpawnModel reset the clock.
+type reconcileAttempt struct {
+	model string
+	first time.Time
+}
+
 type Server struct {
 	cpv1connect.UnimplementedSpawnServiceHandler // new RPCs default to CodeUnimplemented until sp-pc4
 	reg                                          *registry.Registry
@@ -36,15 +45,32 @@ type Server struct {
 	tel                                          telemetry.Sink
 	locks                                        *lock.Keyed
 
+	models          *modelWaiters // correlates inline SetSpawnModel pushes with node SetModelResult acks
+	setModelTimeout time.Duration // bound for the inline SetModel push; overridable in tests
+
+	// Reconciler: a background loop drives model_applied=false spawns to convergence (sp-bp9w.7).
+	reconcileInterval time.Duration               // tick period; overridable in tests
+	reconcileGiveUp   time.Duration               // per-spawn bounded retry window before giving up
+	now               func() time.Time            // clock, injectable in tests
+	giveUp            map[string]reconcileAttempt // spawn id -> first-attempt time for current model; reconciler-goroutine-only (no lock)
+
 	maxSpawnsPerOwner int
 }
+
+const (
+	defaultReconcileInterval = 5 * time.Second // reconciler tick period
+	defaultReconcileGiveUp   = 2 * time.Minute // bounded per-spawn retry window
+)
 
 // Server must satisfy the (now larger) connect handler interface; the 5 new lifecycle RPCs are
 // served by the embedded Unimplemented handler until sp-pc4 overrides them.
 var _ cpv1connect.SpawnServiceHandler = (*Server)(nil)
 
 func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Scheduler, st store.Store, tel telemetry.Sink) *Server {
-	return &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New()}
+	return &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
+		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
+		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
+		now: time.Now, giveUp: map[string]reconcileAttempt{}}
 }
 
 // --- node side: NodeService/Attach ----------------------------------------
@@ -70,22 +96,29 @@ func (s *Server) Attach(ctx context.Context, stream *connect.BidiStream[nodev1.N
 func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv func() (*nodev1.NodeMessage, error)) error {
 	var nodeID string
 	var nodeClass string
+	var token uint64 // this connection's registry token (0 until accepted); guards teardown
 	defer func() {
-		if nodeID != "" {
-			s.reg.Remove(nodeID)
-			dropped := s.rt.DropNode(nodeID)
-			if len(dropped) > 0 {
-				_, _ = s.st.Spawns().MarkUnreachable(context.Background(), dropped)
-			}
-			for _, id := range dropped {
-				_ = s.tel.Emit(telemetry.Event{Kind: "session_end", NodeID: nodeID, SpawnID: id, Timestamp: time.Now().UTC()})
-			}
+		// Only tear down routes if THIS connection is still the registered owner. A rejected
+		// duplicate (token 0) or a displaced old stream must not drop the live node's routes.
+		if nodeID == "" || !s.reg.RemoveIfCurrent(nodeID, token) {
+			return
+		}
+		dropped := s.rt.DropNode(nodeID)
+		if len(dropped) > 0 {
+			_, _ = s.st.Spawns().MarkUnreachable(context.Background(), dropped)
+		}
+		for _, id := range dropped {
+			_ = s.tel.Emit(telemetry.Event{Kind: "session_end", NodeID: nodeID, SpawnID: id, Timestamp: time.Now().UTC()})
 		}
 	}()
 	for {
 		msg, err := recv()
 		if err != nil {
 			return nil // stream closed
+		}
+		// If a newer connection has taken over this node id (we were displaced), stop serving.
+		if token != 0 && !s.reg.IsCurrent(nodeID, token) {
+			return nil
 		}
 		switch m := msg.Msg.(type) {
 		case *nodev1.NodeMessage_Register:
@@ -103,12 +136,22 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			if nodeClass == "" {
 				nodeClass = "cloud" // safe default: an unidentified node is assumed restricted
 			}
-			s.reg.Add(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: nodeOwner})
+			// Master's token-based Register (duplicate rejection) fed with sp-ova's VERIFIED
+			// identity values (nodeClass/nodeOwner from mTLS in enforced mode), not the
+			// self-asserted Register fields — using m.Register.NodeOwner here would defeat sp-ova.
+			tok, accepted := s.reg.Register(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: nodeOwner})
+			if !accepted {
+				// A live node already holds this id: reject the duplicate rather than corrupt routing.
+				log.Printf("rejecting registration for node id=%s: another node with that id is still alive", nodeID)
+				return connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("node id %q is already registered and alive", nodeID))
+			}
+			token = tok
 			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, nodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
-			s.reconcileInventory(ctx, nodeID, m.Register.Running) // a returning node reports what it still runs
+			s.reconcileInventory(ctx, nodeID, sender, m.Register.Running) // a returning node reports what it still runs
+			s.upsertAgentCatalog(ctx, m.Register.AgentImages, m.Register.Binaries)
 		case *nodev1.NodeMessage_Heartbeat:
-			s.reg.Heartbeat(nodeID, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
-			s.reconcileInventory(ctx, nodeID, m.Heartbeat.Running)
+			s.reg.Heartbeat(nodeID, token, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
+			s.reconcileInventory(ctx, nodeID, sender, m.Heartbeat.Running)
 		case *nodev1.NodeMessage_Status:
 			s.sched.OnStatus(m.Status.SpawnId, m.Status.Phase)
 			if m.Status.Phase == nodev1.SpawnPhase_ACTIVE {
@@ -119,22 +162,37 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 				_ = s.tel.Emit(telemetry.Event{Kind: "spawn_create", Owner: owner, NodeID: nodeID, NodeClass: nodeClass, SpawnID: m.Status.SpawnId, Tier: "reviewed", Storage: "managed", Timestamp: time.Now().UTC()})
 			}
 		case *nodev1.NodeMessage_Frame:
-			s.rt.FromNode(m.Frame.SpawnId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected
+			s.rt.FromNode(m.Frame.SpawnId, m.Frame.SessionId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected
+		case *nodev1.NodeMessage_Roster:
+			s.rt.UpdateRoster(m.Roster.SpawnId, nodeID, m.Roster.Sessions) // node-authoritative session set; CP mirrors
+		case *nodev1.NodeMessage_SessionStatus:
+			s.rt.ApplySessionStatus(m.SessionStatus.SpawnId, m.SessionStatus.SessionId, m.SessionStatus.State)
+		case *nodev1.NodeMessage_SetModelResult:
+			s.models.deliver(m.SetModelResult)
 		}
 	}
 }
 
-// reconcileInventory marks any ACTIVE spawn the CP believes runs on nodeID but the node is NOT
-// reporting in its running inventory (e.g. it restarted and lost the pod, or the pod died) as
-// unreachable, dropping its route. Starting spawns are skipped (may not be in the inventory yet).
-// User-driven recovery (RecreateSpawn) takes it from there. Builds on the node's RunningSpawn report.
-func (s *Server) reconcileInventory(ctx context.Context, nodeID string, running []*nodev1.RunningSpawn) {
+// reconcileInventory diffs the node's reported running inventory against the store (state/DAO
+// design §6.2) in three idempotent arms, run on Register and on every Heartbeat:
+//
+//  1. adopt: a reported (spawn_id, gen) matching the spawn's live container row is (re)bound to the
+//     reporting node — see adoptOrStop. Steady state is a cheap no-op (one DB point read plus one
+//     route-map lookup).
+//  2. orphan: a reported (spawn_id, gen) with NO matching live row (suspended/deleted/errored spawn,
+//     or a superseded generation after recreate) -> StopSpawn(spawn_id, gen) to the reporting node.
+//  3. unreachable: an ACTIVE live row on this node the node does NOT report (it restarted and lost
+//     the pod, or the pod died) -> drop the route, mark the spawn unreachable. The live row is KEPT
+//     so a later report can re-adopt it. Starting spawns are skipped (may not be in the inventory
+//     yet). User-driven recovery (RecreateSpawn) also remains available.
+func (s *Server) reconcileInventory(ctx context.Context, nodeID string, sender registry.NodeSender, running []*nodev1.RunningSpawn) {
 	if nodeID == "" {
 		return
 	}
 	reported := make(map[string]bool, len(running))
 	for _, rs := range running {
 		reported[rs.GetSpawnId()] = true
+		s.adoptOrStop(ctx, nodeID, sender, rs)
 	}
 	live, err := s.st.Spawns().LiveContainersByNode(ctx, nodeID)
 	if err != nil {
@@ -155,6 +213,86 @@ func (s *Server) reconcileInventory(ctx context.Context, nodeID string, running 
 	if n, err := s.st.Spawns().MarkUnreachable(ctx, lost); err == nil && n > 0 {
 		log.Printf("node %s inventory: %d active spawn(s) not reported -> unreachable", nodeID, n)
 	}
+}
+
+// adoptOrStop handles ONE reported running spawn: the adopt + orphan arms of reconcileInventory.
+// Idempotent per heartbeat: when the live row already points at this node and the route is bound,
+// it is a single point read and a map lookup — no writes.
+func (s *Server) adoptOrStop(ctx context.Context, nodeID string, sender registry.NodeSender, rs *nodev1.RunningSpawn) {
+	id, gen := rs.GetSpawnId(), int64(rs.GetGeneration())
+	c, ok, err := s.st.Spawns().LiveContainer(ctx, id)
+	if err != nil {
+		return // transient store error; the next heartbeat retries
+	}
+	matched := ok && c.Generation == gen
+	if matched && c.NodeID != nodeID {
+		// The live row is bound elsewhere (node came back under a new id, or the CP recorded a
+		// since-stale binding): rebind it to the reporter — Adopt's documented contract. ErrConflict
+		// means the gen was fenced out concurrently (recreate/stop won the race), so the reported
+		// pod is an orphan after all. Any OTHER error (DB I/O) says nothing about orphanhood:
+		// stopping a healthy pod over a transient store error would be harmful, so log and let the
+		// next heartbeat retry.
+		switch aerr := s.st.Spawns().Adopt(ctx, id, nodeID, gen); {
+		case errors.Is(aerr, store.ErrConflict):
+			matched = false
+		case aerr != nil:
+			log.Printf("node %s inventory: Adopt spawn %s gen %d: %v", nodeID, id, gen, aerr)
+			return
+		default:
+			log.Printf("node %s inventory: adopted spawn %s gen %d", nodeID, id, gen)
+		}
+	}
+	if !matched {
+		// Orphaned pod: suspended/deleted/errored spawn, or a superseded generation. Tell the
+		// reporting node to destroy it — a direct send, since an orphan has no route. The node-side
+		// gen fence guarantees this can only kill the stale pod, never a current episode.
+		_ = sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Stop{Stop: &nodev1.StopSpawn{SpawnId: id, Generation: rs.GetGeneration()}}})
+		return
+	}
+	if s.rt.Bound(id) {
+		return // steady state: route bound + row already adopted -> per-heartbeat no-op
+	}
+	s.rt.Bind(id, nodeID, sender)
+	// Wait->adopt: a spawn marked unreachable (boot sweep or node loss) turned out to be alive.
+	// Flip it back to active; ErrConflict is a benign race (a concurrent recreate/stop moved the
+	// spawn first) and any other status is none of the adopt arm's business. A non-conflict error
+	// (DB I/O) must not vanish — log it (behavior otherwise unchanged).
+	if sp, gerr := s.st.Spawns().Get(ctx, id); gerr == nil && sp.Status == store.Unreachable {
+		switch rerr := s.st.Spawns().MarkReachable(ctx, id, gen); {
+		case rerr == nil:
+			log.Printf("node %s inventory: spawn %s reachable again -> active", nodeID, id)
+		case !errors.Is(rerr, store.ErrConflict):
+			log.Printf("node %s inventory: MarkReachable spawn %s gen %d: %v", nodeID, id, gen, rerr)
+		}
+	}
+}
+
+// upsertAgentCatalog records each advertised image and the binaries it ships so the durable catalog
+// (ListAgentImages + runnable validation) reflects what connected nodes can run. Idempotent across
+// reconnects: created_at is preserved and the binary set is replaced. Errors are logged, not fatal —
+// a catalog write must never break node registration.
+func (s *Server) upsertAgentCatalog(ctx context.Context, images, binaries []string) {
+	now := time.Now().Unix()
+	for _, img := range images {
+		if img == "" {
+			continue
+		}
+		if err := s.st.WithTx(ctx, func(tx store.Store) error {
+			return tx.AgentImages().Upsert(ctx, store.AgentImage{Image: img, CreatedAt: now}, binaries)
+		}); err != nil {
+			log.Printf("register: upsert agent image %q: %v", img, err)
+		}
+	}
+}
+
+// lookupRunnable finds the first runnable matching id across an image's binaries.
+func lookupRunnable(bins []string, id string) (agentcaps.Runnable, bool) {
+	for _, b := range bins {
+		if r, ok := agentcaps.Lookup(b, id); ok {
+			return r, true
+		}
+	}
+	return agentcaps.Runnable{}, false
 }
 
 // --- client side: cp.v1 SpawnService --------------------------------------
@@ -199,6 +337,31 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown app: %s", appID))
 		}
 	}
+	// Resolve the optional agent selection: validate the runnable is offered by the chosen
+	// image's binaries, resolve the run mode, and reject modes we can't launch yet.
+	var selImage, selRunnable, selMode string
+	if req.Msg.Image == "" && req.Msg.RunnableId != "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("image is required when runnable_id is set"))
+	}
+	if req.Msg.Image != "" {
+		selImage = req.Msg.Image
+		if req.Msg.RunnableId == "" {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("runnable_id is required when image is set"))
+		}
+		bins, berr := s.st.AgentImages().Binaries(ctx, selImage)
+		if berr != nil {
+			return nil, connect.NewError(connect.CodeInternal, berr)
+		}
+		if len(bins) == 0 {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown or empty agent image: %s", selImage))
+		}
+		run, found := lookupRunnable(bins, req.Msg.RunnableId)
+		if !found {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("runnable %q is not offered by image %s", req.Msg.RunnableId, selImage))
+		}
+		selRunnable = run.ID
+		selMode = string(run.Mode)
+	}
 	decls, err := s.st.Apps().DeclaredMounts(ctx, appID, ver.Version)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -242,7 +405,8 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	now := time.Now().Unix()
 	sp := store.Spawn{
 		ID: spawnID, OwnerID: owner, Name: name, AppID: appID, AppVersion: ver.Version, AppRef: ver.Ref, Pinned: req.Msg.Pin,
-		Model: req.Msg.Model, Status: store.Starting, CreatedAt: now, LastUsedAt: now,
+		Model: req.Msg.Model, Image: selImage, RunnableID: selRunnable, Mode: selMode,
+		Status: store.Starting, CreatedAt: now, LastUsedAt: now,
 	}
 	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, mounts) }); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -261,10 +425,13 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model string, placement registry.Placement) {
 	unlock := s.locks.Lock(spawnID)
 	defer unlock()
-	if sp, err := s.st.Spawns().Get(ctx, spawnID); err != nil || sp.Status != store.Starting {
+	sp, err := s.st.Spawns().Get(ctx, spawnID)
+	if err != nil || sp.Status != store.Starting {
 		return // stopped/deleted in the lock gap, or already advanced
 	}
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, placement)
+	placement.Image = sp.Image
+	// Gen 1: store.Create inserted the live container row at generation 1 (SetActive below matches).
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement)
 	if err != nil {
 		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
@@ -278,6 +445,12 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model stri
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
 			log.Printf("provisionSpawn %s: SetError after SetActive failure also failed: %v", spawnID, serr)
 		}
+		return
+	}
+	// Fresh pod started with spawns.model -> the running model matches the record. Converge the flag
+	// (store.Create already sets it true for new spawns; idempotent here).
+	if merr := s.st.Spawns().MarkModelApplied(ctx, spawnID); merr != nil {
+		log.Printf("provisionSpawn %s: MarkModelApplied after provision: %v", spawnID, merr)
 	}
 }
 
@@ -331,6 +504,99 @@ func (s *Server) stop(ctx context.Context, owner, spawnID string) error {
 	return nil
 }
 
+// --- client-facing session RPCs (answered from CP's mirrored roster) ------
+
+// node and cp SessionTransport enums share ordinals by construction (see the protos), so the cast is total.
+func toNodeTransport(t cpv1.SessionTransport) nodev1.SessionTransport {
+	return nodev1.SessionTransport(t)
+}
+func toCPTransport(t nodev1.SessionTransport) cpv1.SessionTransport { return cpv1.SessionTransport(t) }
+
+func sessionStateString(st nodev1.SessionState) string {
+	switch st {
+	case nodev1.SessionState_SESSION_STATE_STARTING:
+		return "starting"
+	case nodev1.SessionState_SESSION_STATE_ACTIVE:
+		return "active"
+	case nodev1.SessionState_SESSION_STATE_CLOSING:
+		return "closing"
+	case nodev1.SessionState_SESSION_STATE_CLOSED:
+		return "closed"
+	case nodev1.SessionState_SESSION_STATE_ERROR:
+		return "error"
+	default:
+		return "unspecified"
+	}
+}
+
+// ownSpawn loads a spawn and verifies the caller owns it (shared by the session RPCs).
+func (s *Server) ownSpawn(ctx context.Context, spawnID string) error {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	sp, err := s.st.Spawns().Get(ctx, spawnID)
+	if err != nil {
+		return connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+	}
+	if sp.OwnerID != owner {
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+	return nil
+}
+
+// ListSessions returns the CP's mirrored roster for a spawn (no node round-trip).
+func (s *Server) ListSessions(ctx context.Context, req *connect.Request[cpv1.ListSessionsRequest]) (*connect.Response[cpv1.ListSessionsResponse], error) {
+	if err := s.ownSpawn(ctx, req.Msg.SpawnId); err != nil {
+		return nil, err
+	}
+	mirror := s.rt.ListSessions(req.Msg.SpawnId)
+	out := make([]*cpv1.SessionDescriptor, 0, len(mirror))
+	for _, si := range mirror {
+		out = append(out, &cpv1.SessionDescriptor{
+			SessionId: si.SessionId, Transport: toCPTransport(si.Transport), Runnable: si.Runnable,
+			Status: sessionStateString(si.State), Pinned: si.Pinned,
+		})
+	}
+	return connect.NewResponse(&cpv1.ListSessionsResponse{Sessions: out}), nil
+}
+
+// CreateSession asks the hosting node to launch an additional session (node allocates the id).
+func (s *Server) CreateSession(ctx context.Context, req *connect.Request[cpv1.CreateSessionRequest]) (*connect.Response[cpv1.CreateSessionResponse], error) {
+	if err := s.ownSpawn(ctx, req.Msg.SpawnId); err != nil {
+		return nil, err
+	}
+	if req.Msg.Transport == cpv1.SessionTransport_SESSION_TRANSPORT_UNSPECIFIED {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("transport is required"))
+	}
+	if req.Msg.Runnable == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("runnable is required"))
+	}
+	if err := s.rt.CreateSession(req.Msg.SpawnId, toNodeTransport(req.Msg.Transport), req.Msg.Runnable); err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	return connect.NewResponse(&cpv1.CreateSessionResponse{}), nil
+}
+
+// CloseSession asks the hosting node to reap one session. Session "0" is pinned (reject; stop the spawn).
+func (s *Server) CloseSession(ctx context.Context, req *connect.Request[cpv1.CloseSessionRequest]) (*connect.Response[cpv1.CloseSessionResponse], error) {
+	if err := s.ownSpawn(ctx, req.Msg.SpawnId); err != nil {
+		return nil, err
+	}
+	// Default empty -> "0" so a missing session_id is rejected as pinned rather than silently succeeding.
+	sessionID := req.Msg.SessionId
+	if sessionID == "" {
+		sessionID = "0" // node.SessionZeroID, inlined (wire-stable) to avoid an import cycle
+	}
+	if sessionID == "0" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session #0 is pinned; stop the spawn instead"))
+	}
+	if err := s.rt.CloseSession(req.Msg.SpawnId, sessionID); err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	return connect.NewResponse(&cpv1.CloseSessionResponse{}), nil
+}
+
 func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Frame, cpv1.Frame]) error {
 	first, err := stream.Receive()
 	if err != nil {
@@ -349,18 +615,19 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	clientID := uuid.Must(uuid.NewV7()).String()
 	cs := &clientStream{stream: stream, spawnID: spawnID}
 	// cursor 0: the cp.v1 Session-RPC transport has no resume cursor (only the WS bind does).
-	done, err := s.rt.AttachClient(spawnID, clientID, cs, 0)
+	// session "0": this transport has no per-session selector yet (web uses the WS bind for that).
+	done, err := s.rt.AttachClient(spawnID, "0", clientID, cs, 0)
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_start", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	defer func() {
-		s.rt.DetachClient(spawnID, clientID)
+		s.rt.DetachClient(spawnID, "0", clientID)
 		_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	}()
 
 	if len(first.Data) > 0 {
-		_ = s.rt.FromClient(spawnID, clientID, first.Data)
+		_ = s.rt.FromClient(spawnID, "0", clientID, first.Data)
 	}
 	recvErr := make(chan error, 1)
 	go func() {
@@ -370,7 +637,7 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 				recvErr <- err
 				return
 			}
-			if ferr := s.rt.FromClient(spawnID, clientID, f.Data); ferr != nil {
+			if ferr := s.rt.FromClient(spawnID, "0", clientID, f.Data); ferr != nil {
 				recvErr <- ferr
 				return
 			}
