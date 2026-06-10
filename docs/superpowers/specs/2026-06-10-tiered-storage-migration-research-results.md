@@ -148,9 +148,11 @@ Morph were not covered by surviving claims.
 
 ---
 
-## Coverage gaps — what the parallel cloud run must answer
+## Coverage gaps — filled by the parallel cloud run
 
-No claims survived verification in these brief sections; the recommendation is weakest here:
+> **Resolved 2026-06-10:** the [cloud-run report](2026-06-10-tiered-storage-migration-research-results-cloud.md)
+> covered every gap below. See **Merged synthesis** at the end of this doc for the combined
+> conclusions. Original gap list kept for the record:
 
 1. **Chunking-format quantification:** restic/kopia/casync content-defined chunking at
    seconds-level snapshot frequency to S3 — upload amplification vs git incremental thin bundles
@@ -175,3 +177,81 @@ with unanimous 3-0 verification. Notable: macFUSE wiki, FUSE-T README, Mutagen d
 Apple FSEvents guide, Gitpod/Codespaces/E2B docs + issues, Kleppmann on fencing, OSDI'14
 crash-consistency (Pillai et al.) — the latter two fetched but their claims didn't survive to
 verification (gap #5).
+
+---
+
+## Merged synthesis (in-session + cloud runs, 2026-06-10)
+
+The two runs **agree on every overlapping conclusion** (macOS interposition rejected; plain dir +
+watcher + mandatory rescan; git thin bundles for the first stage; prior art is snapshot-at-stop;
+Spawnery's continuous journal is genuinely differentiated). The cloud run resolves the gaps:
+
+1. **Journal substrate: embed Kopia's repo engine** (Apache-2.0, Go library — `repo`/`snapshot`
+   packages, production-proven embedded in Velero). CDC chunking (buzhash, ~4 MiB avg) into
+   ~20 MiB immutable pack blobs + index blobs: crash-consistent by construction, idempotent
+   re-upload (content-addressed), **client-side encryption by default** (store sees only
+   ciphertext — fits the privacy posture and the sp-zdd E2E direction), zstd before encryption.
+   restic = subprocess fallback (BSD-2, library use unsupported). librclone for bulk
+   transport/restore only.
+2. **Store: Garage** (single Rust binary, ~512 MB RAM, zero deps, S3 core; AGPL-3.0 — fine
+   self-hosted/unmodified, re-check if distribution model changes). SeaweedFS = scale-up option.
+   **MinIO disqualified:** community repo archived read-only 2026-04-25; last community release
+   2025-10-15. Garage lacks object-lock/versioning/lifecycle — acceptable because the CAS engine
+   owns immutability + GC; verify the engine needs no bucket versioning.
+3. **Linux capture (cloud nodes): fanotify** (whole-mount, no per-dir descriptor blowup; needs
+   ~5.1+/5.9+ for `FAN_REPORT_FID`/`DFID_NAME` — verify kernel baseline) or **overlayfs upper-dir
+   harvesting** when the mount is overlay-backed (the upperdir *is* the delta). btrfs/ZFS
+   snapshot+send as the heavyweight alternative. Rootless linux-local: inotify with raised
+   `max_user_watches`.
+4. **Consistency theory lands where expected:** single-writer + generation fencing collapses the
+   problem to crash-consistent, at-least-once, idempotent segment upload + a fencing token
+   (Kafka producer-epoch / HDFS lease-fencing precedent). Declare honestly: per-file atomic
+   (capture on close/rename, never mid-write), cross-file best-effort, git index rebuildable on
+   resume. IDE+agent co-writing one local dir is OS-level last-writer-wins, not replica conflict
+   — no locking needed for journal correctness.
+5. **Gitignored artifacts policy:** exclude large regenerable trees from the seconds-level
+   journal (capture a manifest of them); journal them at suspend/teardown only, per-mount
+   configurable — otherwise `node_modules` churn dominates upload amplification.
+6. **Cross-platform fidelity is the likeliest source of subtle migration bugs:** APFS
+   case-insensitivity vs Linux, uid/permission mapping (rootless mac vs root linux), symlinks,
+   xattrs, line endings — the journal format must normalize or faithfully record these.
+7. **Prior-art additions:** Codespaces had a real 2025-05 incident losing uncommitted work;
+   DevPod's SSH-attach local/remote symmetry is the closest precedent to our local↔cloud story
+   but moves no data; Modal/Morph/Fly are all VM-snapshot-level. Nothing adoptable wholesale.
+
+### Follow-up analyses (this session)
+
+- **Mutagen as-the-whole-tier (sync all spawns to one remote location): rejected.** Mechanically
+  feasible (`one-way-replica` mode exists, watcher scaling proven), but Mutagen doesn't speak S3
+  — the "single remote location" becomes a Spawnery-operated POSIX box holding plaintext working
+  trees, reachable over SSH. Consequences: (a) **isolation becomes homegrown multi-tenant POSIX**
+  (per-spawn unix users / rrsync jails) vs solved S3 scoped-credential prefixes — disqualifying
+  for multi-tenant cloud; (b) **no fencing** — a zombie node's session keeps mirroring in-place
+  and destructively after recreate (exactly the two-writer corruption lifecycle §6.1 fences);
+  (c) **mirror ≠ journal** — no point-in-time manifests, deletions propagate instantly, torn
+  cross-file states undetectable; (d) stateful unreplicated central box + one agent process per
+  session = ops inversion vs Garage. Mutagen's watching strategy remains the design blueprint.
+- **Duplicacy (Kopia's architectural sibling): rejected.** Same species (CDC + CAS + client-side
+  encryption), elegant lock-free dedup — but (a) **license:** source-available, commercial use
+  $50/computer/year, not OSS — a hard disqualifier for embedding/redistribution; (b) CLI-only,
+  no library seam; (c) its differentiator (lock-free *shared-storage cross-client* dedup) is
+  worthless under our repo-per-mount isolation, and its chunk-per-object layout (every chunk an
+  S3 object) is hostile to seconds-cadence snapshots vs Kopia's pack blobs. **Keep the idea:**
+  two-step fossil collection (rename-to-fossil → confirm unreferenced → delete) is a good
+  pattern for journal GC racing at-least-once uploads.
+- **Kopia↔Spawnery mapping decided in principle:** journal segment = Kopia snapshot manifest;
+  **repo-per-mount** with per-spawn repo passwords + CP-minted scoped S3 credentials (forfeits
+  cross-spawn dedup for tenant isolation); resume = restore latest manifest + rebuild git index.
+  **Open design question: generation fencing with opaque ciphertext blobs** — the store can't
+  inspect segments, so fencing must ride on per-generation credentials (revocation-latency
+  window) or a thin CP-side write proxy. To be settled in the design spec.
+
+### Design-spec inputs (net)
+
+Capture: FSEvents+rescan (mac) / fanotify-or-overlayfs (cloud linux) / inotify (rootless linux)
+behind one journal format. Substrate: embedded Kopia, repo-per-mount, client-side encrypted.
+Sink: Garage. Stage 0 = per-turn WIP-commit + incremental thin bundle piggybacking the existing
+suspend persist; Stage 1 = watcher + Kopia continuous journal; Stage 2 = kernel-side capture
+only if telemetry demands (FSKit re-eval in 12–18 months; macFUSE 5.3.0's zero-copy FSKit
+channel API signals the gap is closing). Instrument from day one: journal lag, rescan duration,
+dropped-event frequency, upload amplification, resume materialization time, fencing rejections.
