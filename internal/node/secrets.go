@@ -6,6 +6,7 @@ import (
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/secrets/journalkey"
 	"spawnery/internal/secrets/seal"
 )
 
@@ -100,6 +101,24 @@ func (a *attacher) handleSecretDelivery(sd *nodev1.SecretDelivery) {
 			log.Printf("secret-delivery %s/%s: unseal failed: %v", sd.SpawnId, sec.SecretId, err)
 			continue
 		}
+
+		// Journal-key deliveries (transient-tier §4, sp-u53.5.4) carry the per-spawn
+		// Kopia repo password, NOT a tmpfs secret: route the plaintext into the
+		// journaler's owner-sealed custody so a cross-node resume can open the repo
+		// before journal.Restore. secret_id namespaces these (journalkey.Prefix).
+		if journalkey.IsJournalKey(sec.SecretId) {
+			derr := a.mgr.DeliverJournalKey(sd.SpawnId, sd.Generation, string(pt))
+			for i := range pt {
+				pt[i] = 0
+			}
+			if derr != nil {
+				log.Printf("secret-delivery %s/%s: journal key inject failed: %v", sd.SpawnId, sec.SecretId, derr)
+				continue
+			}
+			log.Printf("secret-delivery %s: injected journal key %q (gen %d)", sd.SpawnId, sec.SecretId, sd.Generation)
+			continue
+		}
+
 		path, werr := a.mgr.InjectSecret(sd.SpawnId, sec.TargetPath, pt)
 		// Zero the plaintext copy we hold once written (defense-in-depth, §6 — not a hard guarantee under
 		// Go's GC, but cheap and removes the obvious lingering buffer).

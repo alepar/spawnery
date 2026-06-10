@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"spawnery/internal/agentcaps"
 	"spawnery/internal/manifest"
@@ -19,6 +20,13 @@ import (
 	"spawnery/internal/storage"
 	"spawnery/internal/storage/journal"
 )
+
+// journalKeyDeliveryTimeout bounds how long an owner-sealed resume waits for the
+// owner to deliver the repo password before falling back to the seeded dir
+// (design §5 M8 — a defined, non-hang state). The interactive owner ceremony is
+// expected to complete in seconds; the migrate slice (sp-u53.5.3) drives the
+// full back-to-suspended timeout state machine.
+const journalKeyDeliveryTimeout = 30 * time.Second
 
 type ManagerConfig struct {
 	AgentImage, SidecarImage, OpenRouterKey, DataRoot string
@@ -57,9 +65,25 @@ type Manager struct {
 	// journalState durably pins per-mount manifest ids on suspend so a same-node
 	// resume restores node-local journaled mounts without any CP protocol.
 	journalState *journalStateStore
+	// journalKeys is the owner-sealed journal-key receiver (sp-u53.5.4): the node's
+	// SecretDelivery handler routes a delivered repo password here so a cross-node
+	// resume can open the Kopia repo. Set by SetJournal when the journaler also
+	// implements JournalKeyReceiver (it does for *journal.Manager with an
+	// OwnerSealed custody configured); nil otherwise (node-local-only journaling).
+	journalKeys JournalKeyReceiver
 	// secrets injects owner-sealed secret plaintext into each spawn's tmpfs secrets dir (design §6).
 	// Always set (NewManagerWithBackend defaults SecretsRoot); the node calls InjectSecret after unseal.
 	secrets SecretInjector
+}
+
+// JournalKeyReceiver injects an owner-delivered Kopia repo password into the
+// journaler's owner-sealed custody and lets the resume path wait for it before
+// restore (transient-tier §4). *journal.Manager satisfies it; the spawnlet holds
+// only this narrow seam so the broad JournalManager interface stays unchanged.
+type JournalKeyReceiver interface {
+	DeliverKey(spawnID string, gen uint64, password string) error
+	WaitDelivered(ctx context.Context, spawnID string) error
+	MarkOwnerSealed(spawnID string)
 }
 
 // SetJournal installs the transient-tier journaler (design §1b) plus the
@@ -70,6 +94,25 @@ type Manager struct {
 func (m *Manager) SetJournal(j journal.JournalManager, stateDir string) {
 	m.journal = j
 	m.journalState = &journalStateStore{dir: stateDir}
+	// Capture the owner-sealed journal-key receiver if this journaler provides one
+	// (a *journal.Manager with an OwnerSealed custody). Used by the node's
+	// SecretDelivery handler and the cross-node resume restore wait.
+	if r, ok := j.(JournalKeyReceiver); ok {
+		m.journalKeys = r
+	}
+}
+
+// DeliverJournalKey injects an owner-delivered Kopia repo password for spawnID at
+// generation gen into the journaler's owner-sealed custody. The node's
+// SecretDelivery handler calls this for a journal-key secret (journalkey.Prefix)
+// after OpenDelivered. It does NOT require the spawn to be live in the store: on a
+// cross-node resume the key arrives BEFORE the pod (and thus before the journal
+// restore that consumes it). Errors if no owner-sealed journaler is configured.
+func (m *Manager) DeliverJournalKey(spawnID string, gen uint64, password string) error {
+	if m.journalKeys == nil {
+		return fmt.Errorf("journal key delivery: no owner-sealed journaler configured")
+	}
+	return m.journalKeys.DeliverKey(spawnID, gen, password)
 }
 
 // NewManager builds a Manager on the Docker/runc path: the Docker pod backend + the DOCKER-USER
@@ -338,6 +381,12 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		jm := journal.Mount{Name: mt.Name, HostDir: hostDir, Class: class}
 		if m.journal != nil && jm.Class.Journaled() {
 			journalMounts = append(journalMounts, jm)
+			// Owner-sealed mounts route the repo password to the owner-sealed
+			// custody (delivered, not node-locally minted): mark the spawn so the
+			// journaler never forks the repo under a fresh node-local key.
+			if jm.Class == journal.OwnerSealed && m.journalKeys != nil {
+				m.journalKeys.MarkOwnerSealed(id)
+			}
 			// Same-node resume: restore the pinned manifest recorded at the last
 			// suspend into hostDir before bind (over the freshly seeded scratch
 			// dir). Non-fatal: a restore failure falls back to the seeded dir and
@@ -346,6 +395,23 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			// remains TODO(phase②) and rides the StartSpawn protocol.)
 			if haveJournalRecord {
 				if pin, ok := jrec.Manifests[mt.Name]; ok {
+					// Owner-sealed resume: the repo password is custodied by the owner,
+					// not this node — wait (bounded) for it to be delivered over the
+					// secret-delivery path before opening the repo for Restore (design
+					// §4/§5). A timeout falls back to the seeded dir (a defined, non-hang
+					// state); the full back-to-suspended timeout state machine rides the
+					// migrate slice (sp-u53.5.3).
+					if jm.Class == journal.OwnerSealed && m.journalKeys != nil {
+						wctx, cancel := context.WithTimeout(ctx, journalKeyDeliveryTimeout)
+						if werr := m.journalKeys.WaitDelivered(wctx, id); werr != nil {
+							log.Printf("journal restore for %s mount %s: owner-sealed key not delivered: %v", id, mt.Name, werr)
+							cancel()
+							mountDirs = append(mountDirs, hostDir)
+							mounts = append(mounts, runtime.Mount{HostPath: hostDir, ContainerPath: "/app/" + mt.Path})
+							continue
+						}
+						cancel()
+					}
 					if rerr := m.journal.Restore(ctx, id, mt.Name, pin, hostDir); rerr != nil {
 						log.Printf("journal restore for %s mount %s (manifest %s): %v", id, mt.Name, pin, rerr)
 					} else {
