@@ -37,9 +37,11 @@ type Service struct {
 }
 
 type enrollToken struct {
-	accountID string
-	exp       time.Time
-	used      bool
+	accountID   string
+	class       string // class to sign (only self-hosted; the AS has no cloud intermediate)
+	fingerprint string // SPKI fingerprint the redeeming CSR key must match; "" = legacy unbound
+	exp         time.Time
+	used        bool
 }
 
 // Option configures a Service.

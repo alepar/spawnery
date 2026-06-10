@@ -3,6 +3,7 @@ package authsvc
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,7 +39,9 @@ func (s *Service) enrollHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	certPEM, chainPEM, err := s.Enroll(req.Token, csrDER, req.NodeID)
 	if err != nil {
-		if errors.Is(err, ErrBadEnrollToken) {
+		// Token validity AND fingerprint-binding failures both collapse to 401 — the redeemer learns
+		// only "rejected", never which check failed.
+		if errors.Is(err, ErrBadEnrollToken) || errors.Is(err, ErrTokenFingerprintMismatch) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -57,10 +60,26 @@ type EnrollResult struct {
 	KeyPEM   []byte
 }
 
-// RunEnroll performs node-side enrollment against an AS: it generates a keypair + CSR locally (the key
-// never leaves), redeems the token at asURL/enroll, and returns the issued cert/chain plus the key.
+// RunEnroll performs node-side enrollment against an AS, generating a FRESH keypair + CSR locally (the
+// key never leaves), redeeming the token at asURL/enroll, and returning the issued cert/chain plus the
+// key. Because the key is generated here, RunEnroll only works with LEGACY UNBOUND tokens — a
+// fingerprint-bound token must be redeemed with the SAME key whose fingerprint was pinned at issuance, so
+// the node must generate that key first (and announce its fingerprint) then call RunEnrollWithKey.
 func RunEnroll(ctx context.Context, asURL, token, nodeID string) (*EnrollResult, error) {
-	csrDER, key, err := pki.NewNodeCSR()
+	key, err := pki.NewNodeKey()
+	if err != nil {
+		return nil, err
+	}
+	return RunEnrollWithKey(ctx, asURL, token, nodeID, key)
+}
+
+// RunEnrollWithKey redeems an enrollment token using a PRE-EXISTING node key — the fingerprint-bound
+// flow. The node generates and persists its key, announces pki.PublicKeyFingerprint(key.Public()) to the
+// owner (who mints a token bound to it via IssueBoundEnrollmentToken over the pinned AS connection), then
+// redeems here with that exact key so the AS's CSR-fingerprint check passes. The private key never
+// leaves the node; only the CSR (proving possession) is sent.
+func RunEnrollWithKey(ctx context.Context, asURL, token, nodeID string, key *ecdsa.PrivateKey) (*EnrollResult, error) {
+	csrDER, err := pki.NodeCSRForKey(key)
 	if err != nil {
 		return nil, err
 	}
