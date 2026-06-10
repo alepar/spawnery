@@ -21,6 +21,7 @@ import (
 	"spawnery/internal/agentcaps"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/lock"
+	"spawnery/internal/cp/nodeauth"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/scheduler"
@@ -123,17 +124,29 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 		case *nodev1.NodeMessage_Register:
 			nodeID = m.Register.NodeId
 			nodeClass = m.Register.NodeClass
+			nodeOwner := m.Register.NodeOwner
+			// enforced mode: the verified mTLS identity is authoritative; the self-asserted Register
+			// fields are ignored. insecure mode (no identity on ctx) falls back to them (dev/test).
+			if id, ok := nodeauth.IdentityFromContext(ctx); ok {
+				if m.Register.NodeId != "" && m.Register.NodeId != id.NodeID {
+					log.Printf("node %s: self-asserted node_id %q != verified identity; using verified", id.NodeID, m.Register.NodeId)
+				}
+				nodeID, nodeClass, nodeOwner = id.NodeID, id.Class, id.AccountID
+			}
 			if nodeClass == "" {
 				nodeClass = "cloud" // safe default: an unidentified node is assumed restricted
 			}
-			tok, accepted := s.reg.Register(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: m.Register.NodeOwner})
+			// Master's token-based Register (duplicate rejection) fed with sp-ova's VERIFIED
+			// identity values (nodeClass/nodeOwner from mTLS in enforced mode), not the
+			// self-asserted Register fields — using m.Register.NodeOwner here would defeat sp-ova.
+			tok, accepted := s.reg.Register(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: nodeOwner})
 			if !accepted {
 				// A live node already holds this id: reject the duplicate rather than corrupt routing.
 				log.Printf("rejecting registration for node id=%s: another node with that id is still alive", nodeID)
 				return connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("node id %q is already registered and alive", nodeID))
 			}
 			token = tok
-			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, m.Register.NodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
+			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, nodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
 			s.reconcileInventory(ctx, nodeID, sender, m.Register.Running) // a returning node reports what it still runs
 			s.upsertAgentCatalog(ctx, m.Register.AgentImages, m.Register.Binaries)
 		case *nodev1.NodeMessage_Heartbeat:
@@ -441,21 +454,22 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model stri
 	}
 }
 
-// placementFor computes node placement for a spawn of the given app version. Reviewed/scanned
-// versions run anywhere; unverified/unknown versions are author-self-host only (PermissionDenied for
-// a non-creator caller). Shared by CreateSpawn and ResumeSpawn.
+// placementFor computes node placement for a spawn of the given app version. Apps run anywhere
+// regardless of review status — the only node distinction is TENANCY (cloud=multi-tenant,
+// self-hosted=owner-only), enforced by registry.PickFor on the spawn owner. The review tier only gates
+// app-spawn AUTHORIZATION: an unverified/unknown version may be run only by its author (PermissionDenied
+// otherwise). Shared by CreateSpawn and ResumeSpawn.
 func (s *Server) placementFor(ctx context.Context, owner, appID string, ver store.AppVersion) (registry.Placement, error) {
-	if ver.Tier == store.TierReviewed || ver.Tier == store.TierScanned {
-		return registry.Placement{}, nil
+	if ver.Tier != store.TierReviewed && ver.Tier != store.TierScanned {
+		creator, err := s.st.Apps().Creator(ctx, appID)
+		if err != nil {
+			return registry.Placement{}, connect.NewError(connect.CodeInternal, err)
+		}
+		if creator != owner {
+			return registry.Placement{}, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("only the author can run an unverified version of %s", appID))
+		}
 	}
-	creator, err := s.st.Apps().Creator(ctx, appID)
-	if err != nil {
-		return registry.Placement{}, connect.NewError(connect.CodeInternal, err)
-	}
-	if creator != owner {
-		return registry.Placement{}, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("only the author can run an unverified version of %s", appID))
-	}
-	return registry.Placement{Class: "self-hosted", Owner: owner}, nil
+	return registry.Placement{Owner: owner}, nil
 }
 
 func (s *Server) StopSpawn(ctx context.Context, req *connect.Request[cpv1.StopSpawnRequest]) (*connect.Response[cpv1.StopSpawnResponse], error) {

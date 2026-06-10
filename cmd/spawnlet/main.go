@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -18,7 +19,9 @@ import (
 	"golang.org/x/net/http2/h2c"
 
 	"spawnery/gen/spawn/v1/spawnv1connect"
+	"spawnery/internal/authsvc"
 	"spawnery/internal/node"
+	"spawnery/internal/node/nodeid"
 	"spawnery/internal/runtime"
 	"spawnery/internal/runtime/cri"
 	"spawnery/internal/spawnlet"
@@ -89,8 +92,15 @@ func main() {
 				}
 			}()
 		}
-		log.Printf("spawnlet attaching to CP at %s as %s", cpURL, cfg.NodeID)
-		err := node.Run(ctx, mgr, h2cClient(), cfg) // returns when ctx is cancelled (signal) or on fatal error
+		// Node-auth mode (sp-ova). insecure: h2c to CP_ADDR. enforced: mTLS to the CP node listener
+		// presenting the enrolled cert (loaded from disk, or enrolled on first boot via the AS).
+		httpc, dialURL, err := nodeCPClient(cpURL, cfg.NodeID)
+		if err != nil {
+			log.Fatalf("node: identity/transport setup: %v", err)
+		}
+		cfg.CPURL = dialURL
+		log.Printf("spawnlet attaching to CP at %s as %s", cfg.CPURL, cfg.NodeID)
+		err = node.Run(ctx, mgr, httpc, cfg) // returns when ctx is cancelled (signal) or on fatal error
 		gracefulStopAll(mgr)
 		if err != nil && ctx.Err() == nil {
 			log.Fatalf("node: %v", err)
@@ -149,6 +159,41 @@ func buildManager(cfg spawnlet.ManagerConfig) (*spawnlet.Manager, error) {
 }
 
 // h2cClient mirrors cmd/spawnctl's: cleartext HTTP/2 for the CP dial.
+// nodeCPClient selects the node->CP transport by NODE_AUTH_MODE. insecure (default): the h2c client to
+// CP_ADDR. enforced: load the node's mTLS identity from NODE_ID_DIR (or enroll once via AS_URL +
+// ENROLL_TOKEN, pinning NODE_ROOT_CA), and return an mTLS client targeting CP_NODE_ADDR.
+func nodeCPClient(insecureURL, nodeID string) (*http.Client, string, error) {
+	if env("NODE_AUTH_MODE", "insecure") != "enforced" {
+		return h2cClient(), insecureURL, nil
+	}
+	dir := env("NODE_ID_DIR", "/var/lib/spawnlet/identity")
+	id, err := nodeid.Load(dir)
+	if err != nil {
+		asURL, token := os.Getenv("AS_URL"), os.Getenv("ENROLL_TOKEN")
+		if asURL == "" || token == "" {
+			return nil, "", fmt.Errorf("enforced mode: no identity in %s and AS_URL/ENROLL_TOKEN unset: %w", dir, err)
+		}
+		rootPEM, rerr := os.ReadFile(env("NODE_ROOT_CA", filepath.Join(dir, "root.pem")))
+		if rerr != nil {
+			return nil, "", fmt.Errorf("enforced mode: pinned NODE_ROOT_CA required for enrollment: %w", rerr)
+		}
+		res, eerr := authsvc.RunEnroll(context.Background(), asURL, token, nodeID)
+		if eerr != nil {
+			return nil, "", fmt.Errorf("enroll: %w", eerr)
+		}
+		id = nodeid.Identity{CertPEM: res.CertPEM, ChainPEM: res.ChainPEM, KeyPEM: res.KeyPEM, RootPEM: rootPEM}
+		if serr := nodeid.Save(dir, id); serr != nil {
+			return nil, "", fmt.Errorf("persist identity: %w", serr)
+		}
+		log.Printf("spawnlet enrolled with AS %s; identity stored in %s", asURL, dir)
+	}
+	client, err := id.MTLSClient()
+	if err != nil {
+		return nil, "", err
+	}
+	return client, env("CP_NODE_ADDR", "https://127.0.0.1:8081"), nil
+}
+
 func h2cClient() *http.Client {
 	return &http.Client{Transport: &http2.Transport{
 		AllowHTTP: true,

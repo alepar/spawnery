@@ -1,0 +1,5 @@
+procs:
+  authsvc: { shell: "just authsvc-enforced" }
+  cp:      { shell: "just cp-enforced" }
+  node:    { shell: "just node-enforced" }
+  web:     { shell: "just web" }

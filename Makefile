@@ -3,7 +3,7 @@ GO_SRCS := $(shell find . -name '*.go' -not -path './web/*')
 
 .PHONY: build images gen clean
 
-build: bin/spawnlet bin/spawnctl          # the host-run binaries
+build: bin/spawnlet bin/spawnctl bin/authsvc bin/spawnery-ca   # the host-run binaries
 
 bin/%: $(GO_SRCS) | bin
 	go build -o $@ ./cmd/$*
