@@ -163,27 +163,39 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 	id := req.Msg.SpawnId
 	unlock := s.locks.Lock(id)
 	defer unlock()
+	if err := s.suspendLocked(ctx, owner, id); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&cpv1.SuspendSpawnResponse{}), nil
+}
+
+// suspendLocked is the marker-protocol suspend core (the per-spawn lock is the CALLER's
+// responsibility — held by SuspendSpawn and, re-used unchanged, by MigrateSpawn). It owns the
+// decide-in-DB → SuspendOnNode → await markers → finalize 'suspended' sequence and returns a connect
+// error on any failure, leaving the spawn in a DEFINED state ('suspended' on success, 'error' on
+// persist-await failure — exactly the sp-a7fs contract).
+func (s *Server) suspendLocked(ctx context.Context, owner, id string) error {
 	sp, err := s.st.Spawns().Get(ctx, id)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+		return connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
 	}
 	if sp.OwnerID != owner {
-		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
 	}
 	if sp.Status != store.Active {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn is not active"))
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn is not active"))
 	}
 	c, hasLive, err := s.st.Spawns().LiveContainer(ctx, id)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return connect.NewError(connect.CodeInternal, err)
 	}
 	if !hasLive {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("no live container"))
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("no live container"))
 	}
 	gen := c.Generation
 	// Decide-in-DB FIRST (generation-fenced): a recreate/stop racing in concurrently fences this out.
 	if err := s.st.Spawns().SetSuspending(ctx, id, gen); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return connect.NewError(connect.CodeInternal, err)
 	}
 
 	// Register the marker waiter BEFORE asking the node to suspend, so a fast SuspendComplete is never
@@ -211,9 +223,9 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 			// The pod is already torn down but we couldn't record 'suspended'. Compensate to a terminal
 			// 'error' (immediately recreate-able), mirroring CreateSpawn's SetError-on-failure path.
 			if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
-				log.Printf("SuspendSpawn %s: SetError after SetSuspended failure also failed: %v", id, serr)
+				log.Printf("suspendLocked %s: SetError after SetSuspended failure also failed: %v", id, serr)
 			}
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return connect.NewError(connect.CodeInternal, err)
 		}
 	case <-wait.Done():
 		// Persist did not complete in time (slow/wedged/unreachable node). Per design §5 ("persist
@@ -222,12 +234,12 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 		// later heartbeat's inventory orphan arm tells the node to destroy any pod that did tear down.
 		s.rt.Drop(id)
 		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
-			log.Printf("SuspendSpawn %s: SetError after suspend await timeout also failed: %v", id, serr)
+			log.Printf("suspendLocked %s: SetError after suspend await timeout also failed: %v", id, serr)
 		}
-		return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node suspend"))
+		return connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node suspend"))
 	}
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: id, Timestamp: time.Now().UTC()})
-	return connect.NewResponse(&cpv1.SuspendSpawnResponse{}), nil
+	return nil
 }
 
 // ResumeSpawn provisions a FRESH container for a suspended spawn (non-lossless — a brand-new
@@ -241,15 +253,36 @@ func (s *Server) ResumeSpawn(ctx context.Context, req *connect.Request[cpv1.Resu
 	}
 	unlock := s.locks.Lock(req.Msg.SpawnId)
 	defer unlock()
-	sp, err := s.st.Spawns().Get(ctx, req.Msg.SpawnId)
+	// A plain resume re-places anywhere the policy allows (no override) and, on failure, lands in
+	// 'error' (sp-a7fs contract). MigrateSpawn reuses resumeLocked with an override + revert-on-fail.
+	if _, err := s.resumeLocked(ctx, owner, req.Msg.SpawnId, placementOverride{}, false); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&cpv1.ResumeSpawnResponse{}), nil
+}
+
+// placementOverride forces a resume's target (sp-u53.5.3): NodeID pins one node, Class restricts to a
+// node class (e.g. "cloud"). A zero value = no override (the plain ResumeSpawn placement).
+type placementOverride struct {
+	NodeID string
+	Class  string
+}
+
+// resumeLocked is the shared resume core (the per-spawn lock is the CALLER's responsibility). It
+// claims 'starting' (bumping the generation), provisions onto a placement — optionally forced by ov —
+// and finalizes 'active'. On provision/activation failure it leaves a DEFINED state: revertOnFail=true
+// (migration) rolls back to 'suspended' with the target artifacts cleaned; false (plain resume) goes
+// to 'error'. Returns the node the spawn resumed on.
+func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placementOverride, revertOnFail bool) (string, error) {
+	sp, err := s.st.Spawns().Get(ctx, id)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+		return "", connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
 	}
 	if sp.OwnerID != owner {
-		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+		return "", connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
 	}
 	if sp.Status != store.Suspended {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn is not suspended"))
+		return "", connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn is not suspended"))
 	}
 	// Placement is re-evaluated against the version's CURRENT tier at resume time (a fresh container
 	// is being allocated). If the version was reviewed at create time but has since been downgraded to
@@ -257,41 +290,127 @@ func (s *Server) ResumeSpawn(ctx context.Context, req *connect.Request[cpv1.Resu
 	// for every new container, not only the first.
 	ver, err := s.st.Apps().GetVersion(ctx, sp.AppID, sp.AppVersion)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return "", connect.NewError(connect.CodeInternal, err)
 	}
 	placement, err := s.placementFor(ctx, owner, sp.AppID, ver)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
+	placement.Image = sp.Image
+	placement.TargetNodeID = ov.NodeID // migration override (zero = unrestricted)
+	placement.RequireClass = ov.Class
 	var gen int64
 	if err := s.st.WithTx(ctx, func(tx store.Store) error {
-		g, e := tx.Spawns().ClaimStarting(ctx, req.Msg.SpawnId, []store.Status{store.Suspended})
+		g, e := tx.Spawns().ClaimStarting(ctx, id, []store.Status{store.Suspended})
 		gen = g
 		return e
 	}); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return "", connect.NewError(connect.CodeInternal, err)
 	}
-	placement.Image = sp.Image
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement)
+	nodeID, err := s.sched.Provision(ctx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement)
 	if err != nil {
-		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
-			log.Printf("ResumeSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
-		}
-		return nil, err
+		s.failResume(ctx, id, gen, revertOnFail, "provision")
+		return "", err
 	}
-	if err := s.st.Spawns().SetActive(ctx, req.Msg.SpawnId, nodeID, gen); err != nil {
-		s.rt.StopOnNode(req.Msg.SpawnId)
-		s.rt.Drop(req.Msg.SpawnId)
-		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
-			log.Printf("ResumeSpawn %s: SetError after SetActive failure also failed: %v", req.Msg.SpawnId, serr)
-		}
-		return nil, connect.NewError(connect.CodeInternal, err)
+	if err := s.st.Spawns().SetActive(ctx, id, nodeID, gen); err != nil {
+		s.rt.StopOnNode(id)
+		s.rt.Drop(id)
+		s.failResume(ctx, id, gen, revertOnFail, "SetActive")
+		return "", connect.NewError(connect.CodeInternal, err)
 	}
 	// Fresh container started with spawns.model -> mark applied (resolves any pending/given-up switch).
-	if merr := s.st.Spawns().MarkModelApplied(context.WithoutCancel(ctx), req.Msg.SpawnId); merr != nil {
-		log.Printf("ResumeSpawn %s: MarkModelApplied after resume: %v", req.Msg.SpawnId, merr)
+	if merr := s.st.Spawns().MarkModelApplied(context.WithoutCancel(ctx), id); merr != nil {
+		log.Printf("resumeLocked %s: MarkModelApplied after resume: %v", id, merr)
 	}
-	return connect.NewResponse(&cpv1.ResumeSpawnResponse{}), nil
+	return nodeID, nil
+}
+
+// failResume puts a failed resume into a DEFINED state. For a migration (revert=true) it rolls the
+// starting episode BACK to 'suspended' and cleans the target artifacts (StopOnNode is a no-op when no
+// route was bound; ending the container row arms the inventory orphan sweep to destroy any pod that
+// did come up on the target) — design §5 "move failed — your data is safe, resume here". For a plain
+// resume (revert=false) it goes to terminal 'error', the sp-a7fs contract. Uses a detached store ctx
+// so the cleanup outcome survives a client disconnect.
+func (s *Server) failResume(ctx context.Context, id string, gen int64, revert bool, stage string) {
+	storeCtx := context.WithoutCancel(ctx)
+	if !revert {
+		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+			log.Printf("resumeLocked %s: SetError after %s failure also failed: %v", id, stage, serr)
+		}
+		return
+	}
+	s.rt.StopOnNode(id)
+	s.rt.Drop(id)
+	if rerr := s.st.Spawns().RevertSuspended(storeCtx, id, gen); rerr != nil {
+		// Couldn't roll back to suspended — fall back to 'error' so the spawn is never stranded in
+		// 'starting' (still a defined, recreate-able state; never a half-migrated hang).
+		log.Printf("MigrateSpawn %s: RevertSuspended after %s failure failed: %v; falling back to error", id, stage, rerr)
+		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+			log.Printf("MigrateSpawn %s: SetError fallback also failed: %v", id, serr)
+		}
+	}
+}
+
+// MigrateSpawn does data-only local<->cloud migration (sp-u53.5.3, design §5): under the per-spawn
+// lock it claim-guarded SUSPENDS the spawn on its source node (reusing suspendLocked → the per-mount
+// journal markers persist) then RESUMES it with a placement override onto the target. The owner client
+// re-delivers the owner-sealed journal key to the target (GetJournalKeyCiphertext → reseal →
+// DeliverSecrets) around this call, so the journaled mounts restore on the target. On any resume
+// failure the spawn lands in a DEFINED state (back to 'suspended', target artifacts cleaned), never a
+// half-migrated hang. Migration is NOT a new state — it rides the existing lifecycle machine.
+func (s *Server) MigrateSpawn(ctx context.Context, req *connect.Request[cpv1.MigrateSpawnRequest]) (*connect.Response[cpv1.MigrateSpawnResponse], error) {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	id := req.Msg.SpawnId
+	targetNode := strings.TrimSpace(req.Msg.TargetNodeId)
+	targetClass := strings.TrimSpace(req.Msg.TargetClass)
+	if targetNode == "" && targetClass == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("a migration target (node id or class) is required"))
+	}
+	if targetNode != "" && targetClass != "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("specify a target node id OR a class, not both"))
+	}
+
+	unlock := s.locks.Lock(id)
+	defer unlock()
+	sp, err := s.st.Spawns().Get(ctx, id)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+	}
+	if sp.OwnerID != owner {
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+	// Pre-validate a specific-node target's tenancy BEFORE suspending, so a foreign self-hosted target
+	// is rejected with the spawn left untouched (never suspended-then-unplaceable). A class target is
+	// validated at placement time (any cloud node is multi-tenant; no-capacity -> revert to suspended).
+	if targetNode != "" {
+		exists, eligible := s.reg.TargetEligible(targetNode, owner)
+		if !exists {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("target node %q is not connected", targetNode))
+		}
+		if !eligible {
+			return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("target node %q belongs to another owner", targetNode))
+		}
+	}
+	// Suspend the source if still active (markers persist). An already-suspended spawn skips straight
+	// to the placement-overridden resume.
+	switch sp.Status {
+	case store.Active:
+		if err := s.suspendLocked(ctx, owner, id); err != nil {
+			return nil, err
+		}
+	case store.Suspended:
+		// already down — resume elsewhere.
+	default:
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn must be active or suspended to migrate"))
+	}
+	nodeID, err := s.resumeLocked(ctx, owner, id, placementOverride{NodeID: targetNode, Class: targetClass}, true)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&cpv1.MigrateSpawnResponse{NodeId: nodeID}), nil
 }
 
 // RecreateSpawn provisions a FRESH container for a spawn that lost its node (unreachable) or errored

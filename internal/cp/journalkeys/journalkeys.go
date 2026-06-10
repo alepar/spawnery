@@ -138,3 +138,54 @@ func (r StaticRegistry) Devices(_ context.Context, ownerID string) ([]seal.X2551
 	}
 	return devs, nil
 }
+
+// MemDeviceRegistry is the wired (sp-u53.5.3) default OwnerDeviceRegistry: a
+// concurrency-safe, owner-populated in-memory device set. It REPLACES
+// UnwiredRegistry as the CP default — the migrate slice could not leave the seam
+// failing closed for every owner. A full server-side device-set log (verified
+// against the owner root, mutated via a CP-relayed enrollment RPC) is the durable
+// successor; until then the owner populates this set with its enrolled device
+// pubkeys (the same X25519 halves spawnctl holds locally), and the CP custodies
+// only the PUBLIC halves — sealing needs no private key, so this leaks nothing.
+//
+// Like StaticRegistry it FAILS CLOSED for an unknown/empty owner (never seals to
+// an empty recipient set), so an un-enrolled owner is rejected rather than
+// silently sealing a journal key to nobody.
+type MemDeviceRegistry struct {
+	mu sync.Mutex
+	m  map[string][]seal.X25519PubKey
+}
+
+// NewMemDeviceRegistry builds an empty, populatable device registry.
+func NewMemDeviceRegistry() *MemDeviceRegistry {
+	return &MemDeviceRegistry{m: map[string][]seal.X25519PubKey{}}
+}
+
+var _ OwnerDeviceRegistry = (*MemDeviceRegistry)(nil)
+
+// Enroll (re)sets ownerID's enrolled device pubkeys, replacing any prior set.
+// The bytes are copied so a later caller mutation cannot corrupt the registry.
+func (r *MemDeviceRegistry) Enroll(ownerID string, devices ...seal.X25519PubKey) {
+	cp := make([]seal.X25519PubKey, len(devices))
+	for i, d := range devices {
+		cp[i] = append(seal.X25519PubKey(nil), d...)
+	}
+	r.mu.Lock()
+	r.m[ownerID] = cp
+	r.mu.Unlock()
+}
+
+// Devices implements OwnerDeviceRegistry, failing closed for an unknown/empty owner.
+func (r *MemDeviceRegistry) Devices(_ context.Context, ownerID string) ([]seal.X25519PubKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	devs, ok := r.m[ownerID]
+	if !ok || len(devs) == 0 {
+		return nil, ErrRegistryNotWired
+	}
+	out := make([]seal.X25519PubKey, len(devs))
+	for i, d := range devs {
+		out[i] = append(seal.X25519PubKey(nil), d...)
+	}
+	return out, nil
+}

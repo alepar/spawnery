@@ -273,6 +273,26 @@ func (r *spawnRepo) SetSuspended(ctx context.Context, id string, gen int64) erro
 	return r.endLiveContainer(ctx, id, PhaseStopped, ts)
 }
 
+// RevertSuspended rolls a starting episode back to suspended (migration defined-failure path). It is
+// gen-fenced on the (failed) target container and ends that row, so the spawn returns to exactly the
+// suspended state it held before the migrate attempt — the prior suspend's per-mount markers remain
+// the recoverable state, and the user can resume on the source. starting -> suspended.
+func (r *spawnRepo) RevertSuspended(ctx context.Context, id string, gen int64) error {
+	if err := r.guardContainerGen(ctx, id, gen); err != nil {
+		return err
+	}
+	if err := r.guardStatus(ctx, id, []Status{Starting}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		return q.Set("status = ?", Suspended).Set("suspended_at = last_used_at")
+	}); err != nil {
+		return err
+	}
+	ts, err := r.lastUsedTS(ctx, id)
+	if err != nil {
+		return err
+	}
+	return r.endLiveContainer(ctx, id, PhaseStopped, ts)
+}
+
 func (r *spawnRepo) SetError(ctx context.Context, id string) error {
 	if err := r.guardStatus(ctx, id, []Status{Starting, Active, Suspending, Unreachable}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
 		return q.Set("status = ?", Errored)

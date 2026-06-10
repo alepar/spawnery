@@ -90,6 +90,15 @@ const (
 	// SpawnServiceDeliverSecretsProcedure is the fully-qualified name of the SpawnService's
 	// DeliverSecrets RPC.
 	SpawnServiceDeliverSecretsProcedure = "/cp.v1.SpawnService/DeliverSecrets"
+	// SpawnServiceMigrateSpawnProcedure is the fully-qualified name of the SpawnService's MigrateSpawn
+	// RPC.
+	SpawnServiceMigrateSpawnProcedure = "/cp.v1.SpawnService/MigrateSpawn"
+	// SpawnServiceGetJournalKeyCiphertextProcedure is the fully-qualified name of the SpawnService's
+	// GetJournalKeyCiphertext RPC.
+	SpawnServiceGetJournalKeyCiphertextProcedure = "/cp.v1.SpawnService/GetJournalKeyCiphertext"
+	// SpawnServicePutJournalKeyCiphertextProcedure is the fully-qualified name of the SpawnService's
+	// PutJournalKeyCiphertext RPC.
+	SpawnServicePutJournalKeyCiphertextProcedure = "/cp.v1.SpawnService/PutJournalKeyCiphertext"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -117,6 +126,15 @@ type SpawnServiceClient interface {
 	// key material, seals locally, and hands the ciphertext back for the CP to relay (ciphertext-only).
 	GetSpawnNodeKey(context.Context, *connect.Request[v1.GetSpawnNodeKeyRequest]) (*connect.Response[v1.GetSpawnNodeKeyResponse], error)
 	DeliverSecrets(context.Context, *connect.Request[v1.DeliverSecretsRequest]) (*connect.Response[v1.DeliverSecretsResponse], error)
+	// Data-only local<->cloud migration (sp-u53.5.3): claim-guarded suspend on the source node ->
+	// resume with a placement override on the target. The owner client re-delivers the owner-sealed
+	// journal key to the target via DeliverSecrets so the journaled mounts restore there.
+	MigrateSpawn(context.Context, *connect.Request[v1.MigrateSpawnRequest]) (*connect.Response[v1.MigrateSpawnResponse], error)
+	// Owner-sealed journal-key ciphertext custody (sp-u53.5.4 deferred to this slice): the owner client
+	// fetches the at-rest owner-sealed ciphertext to unseal+reseal on a migration, and (on the
+	// node-local -> owner-sealed upgrade) stores it. Owner-only; the CP holds ONLY ciphertext.
+	GetJournalKeyCiphertext(context.Context, *connect.Request[v1.GetJournalKeyCiphertextRequest]) (*connect.Response[v1.GetJournalKeyCiphertextResponse], error)
+	PutJournalKeyCiphertext(context.Context, *connect.Request[v1.PutJournalKeyCiphertextRequest]) (*connect.Response[v1.PutJournalKeyCiphertextResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -256,32 +274,53 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("DeliverSecrets")),
 			connect.WithClientOptions(opts...),
 		),
+		migrateSpawn: connect.NewClient[v1.MigrateSpawnRequest, v1.MigrateSpawnResponse](
+			httpClient,
+			baseURL+SpawnServiceMigrateSpawnProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("MigrateSpawn")),
+			connect.WithClientOptions(opts...),
+		),
+		getJournalKeyCiphertext: connect.NewClient[v1.GetJournalKeyCiphertextRequest, v1.GetJournalKeyCiphertextResponse](
+			httpClient,
+			baseURL+SpawnServiceGetJournalKeyCiphertextProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("GetJournalKeyCiphertext")),
+			connect.WithClientOptions(opts...),
+		),
+		putJournalKeyCiphertext: connect.NewClient[v1.PutJournalKeyCiphertextRequest, v1.PutJournalKeyCiphertextResponse](
+			httpClient,
+			baseURL+SpawnServicePutJournalKeyCiphertextProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("PutJournalKeyCiphertext")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // spawnServiceClient implements SpawnServiceClient.
 type spawnServiceClient struct {
-	createSpawn        *connect.Client[v1.CreateSpawnRequest, v1.CreateSpawnResponse]
-	listSpawns         *connect.Client[v1.ListSpawnsRequest, v1.ListSpawnsResponse]
-	listApps           *connect.Client[v1.ListAppsRequest, v1.ListAppsResponse]
-	listAgentImages    *connect.Client[v1.ListAgentImagesRequest, v1.ListAgentImagesResponse]
-	getApp             *connect.Client[v1.GetAppRequest, v1.GetAppResponse]
-	registerAppVersion *connect.Client[v1.RegisterAppVersionRequest, v1.RegisterAppVersionResponse]
-	setAppListing      *connect.Client[v1.SetAppListingRequest, v1.SetAppListingResponse]
-	listMyApps         *connect.Client[v1.ListMyAppsRequest, v1.ListMyAppsResponse]
-	session            *connect.Client[v1.Frame, v1.Frame]
-	suspendSpawn       *connect.Client[v1.SuspendSpawnRequest, v1.SuspendSpawnResponse]
-	resumeSpawn        *connect.Client[v1.ResumeSpawnRequest, v1.ResumeSpawnResponse]
-	recreateSpawn      *connect.Client[v1.RecreateSpawnRequest, v1.RecreateSpawnResponse]
-	renameSpawn        *connect.Client[v1.RenameSpawnRequest, v1.RenameSpawnResponse]
-	setSpawnModel      *connect.Client[v1.SetSpawnModelRequest, v1.SetSpawnModelResponse]
-	deleteSpawn        *connect.Client[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse]
-	stopSpawn          *connect.Client[v1.StopSpawnRequest, v1.StopSpawnResponse]
-	listSessions       *connect.Client[v1.ListSessionsRequest, v1.ListSessionsResponse]
-	createSession      *connect.Client[v1.CreateSessionRequest, v1.CreateSessionResponse]
-	closeSession       *connect.Client[v1.CloseSessionRequest, v1.CloseSessionResponse]
-	getSpawnNodeKey    *connect.Client[v1.GetSpawnNodeKeyRequest, v1.GetSpawnNodeKeyResponse]
-	deliverSecrets     *connect.Client[v1.DeliverSecretsRequest, v1.DeliverSecretsResponse]
+	createSpawn             *connect.Client[v1.CreateSpawnRequest, v1.CreateSpawnResponse]
+	listSpawns              *connect.Client[v1.ListSpawnsRequest, v1.ListSpawnsResponse]
+	listApps                *connect.Client[v1.ListAppsRequest, v1.ListAppsResponse]
+	listAgentImages         *connect.Client[v1.ListAgentImagesRequest, v1.ListAgentImagesResponse]
+	getApp                  *connect.Client[v1.GetAppRequest, v1.GetAppResponse]
+	registerAppVersion      *connect.Client[v1.RegisterAppVersionRequest, v1.RegisterAppVersionResponse]
+	setAppListing           *connect.Client[v1.SetAppListingRequest, v1.SetAppListingResponse]
+	listMyApps              *connect.Client[v1.ListMyAppsRequest, v1.ListMyAppsResponse]
+	session                 *connect.Client[v1.Frame, v1.Frame]
+	suspendSpawn            *connect.Client[v1.SuspendSpawnRequest, v1.SuspendSpawnResponse]
+	resumeSpawn             *connect.Client[v1.ResumeSpawnRequest, v1.ResumeSpawnResponse]
+	recreateSpawn           *connect.Client[v1.RecreateSpawnRequest, v1.RecreateSpawnResponse]
+	renameSpawn             *connect.Client[v1.RenameSpawnRequest, v1.RenameSpawnResponse]
+	setSpawnModel           *connect.Client[v1.SetSpawnModelRequest, v1.SetSpawnModelResponse]
+	deleteSpawn             *connect.Client[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse]
+	stopSpawn               *connect.Client[v1.StopSpawnRequest, v1.StopSpawnResponse]
+	listSessions            *connect.Client[v1.ListSessionsRequest, v1.ListSessionsResponse]
+	createSession           *connect.Client[v1.CreateSessionRequest, v1.CreateSessionResponse]
+	closeSession            *connect.Client[v1.CloseSessionRequest, v1.CloseSessionResponse]
+	getSpawnNodeKey         *connect.Client[v1.GetSpawnNodeKeyRequest, v1.GetSpawnNodeKeyResponse]
+	deliverSecrets          *connect.Client[v1.DeliverSecretsRequest, v1.DeliverSecretsResponse]
+	migrateSpawn            *connect.Client[v1.MigrateSpawnRequest, v1.MigrateSpawnResponse]
+	getJournalKeyCiphertext *connect.Client[v1.GetJournalKeyCiphertextRequest, v1.GetJournalKeyCiphertextResponse]
+	putJournalKeyCiphertext *connect.Client[v1.PutJournalKeyCiphertextRequest, v1.PutJournalKeyCiphertextResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -389,6 +428,21 @@ func (c *spawnServiceClient) DeliverSecrets(ctx context.Context, req *connect.Re
 	return c.deliverSecrets.CallUnary(ctx, req)
 }
 
+// MigrateSpawn calls cp.v1.SpawnService.MigrateSpawn.
+func (c *spawnServiceClient) MigrateSpawn(ctx context.Context, req *connect.Request[v1.MigrateSpawnRequest]) (*connect.Response[v1.MigrateSpawnResponse], error) {
+	return c.migrateSpawn.CallUnary(ctx, req)
+}
+
+// GetJournalKeyCiphertext calls cp.v1.SpawnService.GetJournalKeyCiphertext.
+func (c *spawnServiceClient) GetJournalKeyCiphertext(ctx context.Context, req *connect.Request[v1.GetJournalKeyCiphertextRequest]) (*connect.Response[v1.GetJournalKeyCiphertextResponse], error) {
+	return c.getJournalKeyCiphertext.CallUnary(ctx, req)
+}
+
+// PutJournalKeyCiphertext calls cp.v1.SpawnService.PutJournalKeyCiphertext.
+func (c *spawnServiceClient) PutJournalKeyCiphertext(ctx context.Context, req *connect.Request[v1.PutJournalKeyCiphertextRequest]) (*connect.Response[v1.PutJournalKeyCiphertextResponse], error) {
+	return c.putJournalKeyCiphertext.CallUnary(ctx, req)
+}
+
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -414,6 +468,15 @@ type SpawnServiceHandler interface {
 	// key material, seals locally, and hands the ciphertext back for the CP to relay (ciphertext-only).
 	GetSpawnNodeKey(context.Context, *connect.Request[v1.GetSpawnNodeKeyRequest]) (*connect.Response[v1.GetSpawnNodeKeyResponse], error)
 	DeliverSecrets(context.Context, *connect.Request[v1.DeliverSecretsRequest]) (*connect.Response[v1.DeliverSecretsResponse], error)
+	// Data-only local<->cloud migration (sp-u53.5.3): claim-guarded suspend on the source node ->
+	// resume with a placement override on the target. The owner client re-delivers the owner-sealed
+	// journal key to the target via DeliverSecrets so the journaled mounts restore there.
+	MigrateSpawn(context.Context, *connect.Request[v1.MigrateSpawnRequest]) (*connect.Response[v1.MigrateSpawnResponse], error)
+	// Owner-sealed journal-key ciphertext custody (sp-u53.5.4 deferred to this slice): the owner client
+	// fetches the at-rest owner-sealed ciphertext to unseal+reseal on a migration, and (on the
+	// node-local -> owner-sealed upgrade) stores it. Owner-only; the CP holds ONLY ciphertext.
+	GetJournalKeyCiphertext(context.Context, *connect.Request[v1.GetJournalKeyCiphertextRequest]) (*connect.Response[v1.GetJournalKeyCiphertextResponse], error)
+	PutJournalKeyCiphertext(context.Context, *connect.Request[v1.PutJournalKeyCiphertextRequest]) (*connect.Response[v1.PutJournalKeyCiphertextResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -549,6 +612,24 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("DeliverSecrets")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceMigrateSpawnHandler := connect.NewUnaryHandler(
+		SpawnServiceMigrateSpawnProcedure,
+		svc.MigrateSpawn,
+		connect.WithSchema(spawnServiceMethods.ByName("MigrateSpawn")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceGetJournalKeyCiphertextHandler := connect.NewUnaryHandler(
+		SpawnServiceGetJournalKeyCiphertextProcedure,
+		svc.GetJournalKeyCiphertext,
+		connect.WithSchema(spawnServiceMethods.ByName("GetJournalKeyCiphertext")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServicePutJournalKeyCiphertextHandler := connect.NewUnaryHandler(
+		SpawnServicePutJournalKeyCiphertextProcedure,
+		svc.PutJournalKeyCiphertext,
+		connect.WithSchema(spawnServiceMethods.ByName("PutJournalKeyCiphertext")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
@@ -593,6 +674,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceGetSpawnNodeKeyHandler.ServeHTTP(w, r)
 		case SpawnServiceDeliverSecretsProcedure:
 			spawnServiceDeliverSecretsHandler.ServeHTTP(w, r)
+		case SpawnServiceMigrateSpawnProcedure:
+			spawnServiceMigrateSpawnHandler.ServeHTTP(w, r)
+		case SpawnServiceGetJournalKeyCiphertextProcedure:
+			spawnServiceGetJournalKeyCiphertextHandler.ServeHTTP(w, r)
+		case SpawnServicePutJournalKeyCiphertextProcedure:
+			spawnServicePutJournalKeyCiphertextHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -684,4 +771,16 @@ func (UnimplementedSpawnServiceHandler) GetSpawnNodeKey(context.Context, *connec
 
 func (UnimplementedSpawnServiceHandler) DeliverSecrets(context.Context, *connect.Request[v1.DeliverSecretsRequest]) (*connect.Response[v1.DeliverSecretsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DeliverSecrets is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) MigrateSpawn(context.Context, *connect.Request[v1.MigrateSpawnRequest]) (*connect.Response[v1.MigrateSpawnResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.MigrateSpawn is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetJournalKeyCiphertext(context.Context, *connect.Request[v1.GetJournalKeyCiphertextRequest]) (*connect.Response[v1.GetJournalKeyCiphertextResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetJournalKeyCiphertext is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) PutJournalKeyCiphertext(context.Context, *connect.Request[v1.PutJournalKeyCiphertextRequest]) (*connect.Response[v1.PutJournalKeyCiphertextResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.PutJournalKeyCiphertext is not implemented"))
 }

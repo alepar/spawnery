@@ -20,6 +20,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/agentcaps"
 	"spawnery/internal/cp/auth"
+	"spawnery/internal/cp/journalkeys"
 	"spawnery/internal/cp/lock"
 	"spawnery/internal/cp/nodeauth"
 	"spawnery/internal/cp/registry"
@@ -62,6 +63,13 @@ type Server struct {
 	// nodeKeys caches each node's published HPKE sub-key + relayed cert chain (sp-2ckv.4), refreshed on
 	// Register/Heartbeat. GetSpawnNodeKey serves it to owner clients; the CP relays — never unseals.
 	nodeKeys *nodeKeyCache
+
+	// journalKeys custodies owner-sealed journal-password CIPHERTEXT per (spawn, mount) — opaque to the
+	// CP. Get/PutJournalKeyCiphertext serve/store it; MigrateSpawn relies on the owner client fetching
+	// it to reseal to the target node. ownerDevices resolves an owner's enrolled device pubkeys (the
+	// recipient set), wired to a populatable MemDeviceRegistry — not the fail-closed UnwiredRegistry.
+	journalKeys  journalkeys.Store
+	ownerDevices journalkeys.OwnerDeviceRegistry
 }
 
 const (
@@ -78,7 +86,8 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout,
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
-		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache()}
+		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
+		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry()}
 }
 
 // --- node side: NodeService/Attach ----------------------------------------
