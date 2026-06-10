@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -164,7 +165,9 @@ func TestRenameSpawn(t *testing.T) {
 }
 
 // startAcker registers node "n1" and spins a goroutine that acks every StartSpawn it sees as
-// ACTIVE, so multiple Provision calls (create AND resume) all complete. Returns a stop func.
+// ACTIVE, so multiple Provision calls (create AND resume) all complete. It also replies
+// SuspendComplete (no markers) to every Suspend it sees, so the new marker-protocol SuspendSpawn
+// (sp-a7fs) completes. Returns a stop func.
 func startAcker(t *testing.T, s *Server, reg *registry.Registry) func() {
 	t.Helper()
 	sender := &capSender{}
@@ -177,6 +180,7 @@ func startAcker(t *testing.T, s *Server, reg *registry.Registry) func() {
 		// acked tracks how many StartSpawn messages we have already acked per spawn id, so that a
 		// second Provision call for the same spawn id (e.g. ResumeSpawn) is also acked.
 		acked := map[string]int{}
+		suspended := map[string]bool{} // spawn:gen already SuspendComplete'd (deliver each once)
 		for {
 			select {
 			case <-stop:
@@ -184,11 +188,19 @@ func startAcker(t *testing.T, s *Server, reg *registry.Registry) func() {
 			default:
 			}
 			var ids []string
+			var done []*nodev1.SuspendComplete
 			sender.mu.Lock()
 			counts := map[string]int{}
 			for _, m := range sender.sent {
 				if st := m.GetStart(); st != nil {
 					counts[st.GetSpawnId()]++
+				}
+				if sp := m.GetSuspend(); sp != nil {
+					key := sp.GetSpawnId() + ":" + strconv.FormatUint(sp.GetGeneration(), 10)
+					if !suspended[key] {
+						suspended[key] = true
+						done = append(done, &nodev1.SuspendComplete{SpawnId: sp.GetSpawnId(), Generation: sp.GetGeneration()})
+					}
 				}
 			}
 			for id, total := range counts {
@@ -200,6 +212,9 @@ func startAcker(t *testing.T, s *Server, reg *registry.Registry) func() {
 			sender.mu.Unlock()
 			for _, id := range ids {
 				s.sched.OnStatus(id, nodev1.SpawnPhase_ACTIVE)
+			}
+			for _, sc := range done {
+				s.suspends.deliver(sc)
 			}
 			time.Sleep(time.Millisecond)
 		}

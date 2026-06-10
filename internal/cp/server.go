@@ -48,6 +48,9 @@ type Server struct {
 	models          *modelWaiters // correlates inline SetSpawnModel pushes with node SetModelResult acks
 	setModelTimeout time.Duration // bound for the inline SetModel push; overridable in tests
 
+	suspends       *suspendWaiters // correlates a SuspendSpawn with the node's SuspendComplete (markers)
+	suspendTimeout time.Duration   // bound for awaiting SuspendComplete; overridable in tests
+
 	// Reconciler: a background loop drives model_applied=false spawns to convergence (sp-bp9w.7).
 	reconcileInterval time.Duration               // tick period; overridable in tests
 	reconcileGiveUp   time.Duration               // per-spawn bounded retry window before giving up
@@ -69,6 +72,7 @@ var _ cpv1connect.SpawnServiceHandler = (*Server)(nil)
 func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Scheduler, st store.Store, tel telemetry.Sink) *Server {
 	return &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
 		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
+		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout,
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}}
 }
@@ -169,6 +173,12 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			s.rt.ApplySessionStatus(m.SessionStatus.SpawnId, m.SessionStatus.SessionId, m.SessionStatus.State)
 		case *nodev1.NodeMessage_SetModelResult:
 			s.models.deliver(m.SetModelResult)
+		case *nodev1.NodeMessage_SuspendComplete:
+			// Route to the SuspendSpawn awaiting this spawn's persist markers. deliver drops a
+			// stale-episode reply (generation != the awaiting episode's) — mirrors the generation fence
+			// the node applies to the inbound Suspend. A reply with no live waiter (timed-out suspend) is
+			// likewise dropped, never blocking this Receive loop.
+			s.suspends.deliver(m.SuspendComplete)
 		}
 	}
 }

@@ -6,15 +6,74 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
+	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 )
+
+// defaultSuspendTimeout bounds how long SuspendSpawn waits for the hosting node's SuspendComplete
+// after asking it to persist+tear down. A real journal final snapshot can take a while, so this is
+// generous; on expiry the spawn is moved to 'error' (design §5: "persist failure → error").
+const defaultSuspendTimeout = 30 * time.Second
+
+// suspendWaiters correlates a SuspendSpawn with the async SuspendComplete the hosting node sends back
+// on its Attach stream, carrying the per-mount persist markers. Keyed by spawn_id: the per-spawn lock
+// SuspendSpawn holds serializes suspends, so at most one waiter per spawn is ever live. The waiter
+// records the episode generation it expects; deliver drops a SuspendComplete whose generation differs
+// (a stale-episode reply from a superseded pod), mirroring the node-side generation fence.
+type suspendWaiters struct {
+	mu sync.Mutex
+	m  map[string]suspendWaiter
+}
+
+type suspendWaiter struct {
+	gen uint64
+	ch  chan *nodev1.SuspendComplete
+}
+
+func newSuspendWaiters() *suspendWaiters {
+	return &suspendWaiters{m: map[string]suspendWaiter{}}
+}
+
+// register installs a buffered (cap 1) waiter for (spawnID, gen) and returns its channel. Call BEFORE
+// sending Suspend so a fast SuspendComplete is never missed.
+func (w *suspendWaiters) register(spawnID string, gen uint64) chan *nodev1.SuspendComplete {
+	ch := make(chan *nodev1.SuspendComplete, 1)
+	w.mu.Lock()
+	w.m[spawnID] = suspendWaiter{gen: gen, ch: ch}
+	w.mu.Unlock()
+	return ch
+}
+
+func (w *suspendWaiters) unregister(spawnID string) {
+	w.mu.Lock()
+	delete(w.m, spawnID)
+	w.mu.Unlock()
+}
+
+// deliver routes an inbound SuspendComplete to its waiter (if any), matched by spawn_id AND
+// generation. Non-blocking: a reply with no live waiter, or one whose generation != the awaiting
+// episode's (a stale-episode reply from a superseded pod), is dropped rather than blocking the node
+// receive loop or being misattributed to a later suspend.
+func (w *suspendWaiters) deliver(sc *nodev1.SuspendComplete) {
+	w.mu.Lock()
+	wt, ok := w.m[sc.GetSpawnId()]
+	w.mu.Unlock()
+	if !ok || wt.gen != sc.GetGeneration() {
+		return
+	}
+	select {
+	case wt.ch <- sc:
+	default:
+	}
+}
 
 // maxSpawnNameRunes caps a spawn display name (rune count). Shared by RenameSpawn (and any future
 // name validation).
@@ -90,17 +149,21 @@ func (s *Server) RenameSpawn(ctx context.Context, req *connect.Request[cpv1.Rena
 	return connect.NewResponse(&cpv1.RenameSpawnResponse{}), nil
 }
 
-// SuspendSpawn tears down the running container but keeps the spawn row in 'suspended' status
-// (resumable). Non-lossless: in-container working state and agent memory are NOT preserved (lossless
-// suspend is gated on E3). active -> suspending -> (node teardown) -> suspended.
+// SuspendSpawn persists the spawn's mounts on the hosting node and tears the container down, keeping
+// the spawn row 'suspended' (resumable) with the per-mount persist markers recorded. Marker-protocol
+// flow (sp-a7fs): decide-in-DB (SetSuspending, generation-fenced) → ask the node to persist+tear down
+// (SuspendOnNode) → await SuspendComplete with a bounded timeout → record the markers + finalize
+// 'suspended'. On timeout/await-failure the spawn is moved to 'error' (design §5: "persist failure →
+// error"). active -> suspending -> (node persist + teardown) -> suspended.
 func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.SuspendSpawnRequest]) (*connect.Response[cpv1.SuspendSpawnResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
 	}
-	unlock := s.locks.Lock(req.Msg.SpawnId)
+	id := req.Msg.SpawnId
+	unlock := s.locks.Lock(id)
 	defer unlock()
-	sp, err := s.st.Spawns().Get(ctx, req.Msg.SpawnId)
+	sp, err := s.st.Spawns().Get(ctx, id)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
 	}
@@ -110,7 +173,7 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 	if sp.Status != store.Active {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn is not active"))
 	}
-	c, hasLive, err := s.st.Spawns().LiveContainer(ctx, req.Msg.SpawnId)
+	c, hasLive, err := s.st.Spawns().LiveContainer(ctx, id)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -118,25 +181,52 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("no live container"))
 	}
 	gen := c.Generation
-	if err := s.st.Spawns().SetSuspending(ctx, req.Msg.SpawnId, gen); err != nil {
+	// Decide-in-DB FIRST (generation-fenced): a recreate/stop racing in concurrently fences this out.
+	if err := s.st.Spawns().SetSuspending(ctx, id, gen); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	// Tear down the container on the node + drop the route, then finalize suspended.
-	s.rt.StopOnNode(req.Msg.SpawnId)
-	s.rt.Drop(req.Msg.SpawnId)
-	if err := s.st.Spawns().SetSuspended(ctx, req.Msg.SpawnId, gen); err != nil {
-		// The container was already torn down above; we couldn't record 'suspended'. Compensate to a
-		// terminal 'error' state: nothing drives 'suspending' forward while the CP stays up — the pod
-		// is gone, so the node never reports it again and inventory reconciliation skips non-active
-		// live rows; only a CP restart's MarkBootUnreachable sweep (which does include 'suspending'
-		// since sp-1ni) would eventually catch it, as unreachable. SetError gives the user an
-		// immediately recreate-able spawn instead. Mirrors CreateSpawn's SetError-on-failure path.
-		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
-			log.Printf("SuspendSpawn %s: SetError after SetSuspended failure also failed: %v", req.Msg.SpawnId, serr)
+
+	// Register the marker waiter BEFORE asking the node to suspend, so a fast SuspendComplete is never
+	// missed. The node persists each mount, tears the pod down, and replies with the per-mount markers.
+	ch := s.suspends.register(id, uint64(gen))
+	defer s.suspends.unregister(id)
+	s.rt.SuspendOnNode(id, uint64(gen))
+
+	wait, cancel := context.WithTimeout(ctx, s.suspendTimeout)
+	defer cancel()
+	// Post-decision store writes use a detached ctx so the suspend outcome survives a client disconnect.
+	storeCtx := context.WithoutCancel(ctx)
+	select {
+	case sc := <-ch:
+		// Record the per-mount persist markers (design §5: markers recorded incrementally) before
+		// finalizing. A marker write failure is logged, not fatal — losing a marker degrades a later
+		// resume to the seeded scratch dir, which is strictly better than failing the whole suspend.
+		for _, mk := range sc.GetMarkers() {
+			if merr := s.st.Spawns().SetMountMarker(storeCtx, id, mk.GetName(), mk.GetMarker()); merr != nil {
+				log.Printf("SuspendSpawn %s: SetMountMarker(%s): %v", id, mk.GetName(), merr)
+			}
 		}
-		return nil, connect.NewError(connect.CodeInternal, err)
+		s.rt.Drop(id)
+		if err := s.st.Spawns().SetSuspended(storeCtx, id, gen); err != nil {
+			// The pod is already torn down but we couldn't record 'suspended'. Compensate to a terminal
+			// 'error' (immediately recreate-able), mirroring CreateSpawn's SetError-on-failure path.
+			if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+				log.Printf("SuspendSpawn %s: SetError after SetSuspended failure also failed: %v", id, serr)
+			}
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+	case <-wait.Done():
+		// Persist did not complete in time (slow/wedged/unreachable node). Per design §5 ("persist
+		// failure → error"), move the spawn to a terminal 'error' rather than leaving it stuck in
+		// 'suspending'. Drop the route + best-effort fence: SetError ends the live container row, so a
+		// later heartbeat's inventory orphan arm tells the node to destroy any pod that did tear down.
+		s.rt.Drop(id)
+		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+			log.Printf("SuspendSpawn %s: SetError after suspend await timeout also failed: %v", id, serr)
+		}
+		return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node suspend"))
 	}
-	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: req.Msg.SpawnId, Timestamp: time.Now().UTC()})
+	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: id, Timestamp: time.Now().UTC()})
 	return connect.NewResponse(&cpv1.SuspendSpawnResponse{}), nil
 }
 

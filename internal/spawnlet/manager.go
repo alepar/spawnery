@@ -438,6 +438,31 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
+	m.teardown(ctx, sp)
+	return nil
+}
+
+// Suspend tears the spawn's pod down exactly like Stop, but RETURNS the per-mount persist markers
+// (mount name -> pinned manifest id) produced by the journal final snapshot, so the CP can record
+// them against the suspended spawn (sp-a7fs). The map is empty for scratch-only spawns (or when no
+// journaler is installed). Like Stop, teardown completes even if the caller's ctx is already
+// cancelled. The CP-side per-spawn lock + generation fence (the node drops a stale Suspend before
+// calling here) guarantee at most one in-flight suspend/stop per spawn.
+func (m *Manager) Suspend(ctx context.Context, id string) (map[string]string, error) {
+	sp, ok := m.store.Get(id)
+	if !ok {
+		return nil, fmt.Errorf("unknown spawn %s", id)
+	}
+	return m.teardown(ctx, sp), nil
+}
+
+// teardown is the shared Stop/Suspend body: stop the pod, remove the egress floor, run the journal
+// suspend barrier (final snapshot + node-local pin save), finalize the scratch dirs, and drop the
+// spawn from the in-mem store. It returns the per-mount persist markers from the final snapshot
+// (empty when journaling is off / the spawn has no journaled mounts) so Suspend can hand them to the
+// CP; Stop discards them.
+func (m *Manager) teardown(ctx context.Context, sp *Spawn) map[string]string {
+	id := sp.ID
 	// Teardown must complete even if the caller's ctx is already cancelled (e.g. the CP connection
 	// dropped mid-startup and the readiness probe failed): detach so firewall + mount cleanup run.
 	ctx = context.WithoutCancel(ctx)
@@ -453,19 +478,21 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	// scratch backend nukes the host dirs below. Guarded: only runs when a
 	// journaler is installed and this spawn actually has journaled mounts —
 	// scratch-only spawns skip it entirely.
+	markers := map[string]string{}
 	if m.journal != nil && len(sp.JournalMounts) > 0 {
 		ids, err := m.journal.FinalSnapshot(ctx, id, sp.Generation, sp.JournalMounts)
 		if err != nil {
-			// Non-fatal: teardown must still complete. The CP marker/generation
-			// handling (TODO(phase②)) decides suspended(journal-stale) vs error.
+			// Non-fatal: teardown must still complete. With no markers, the CP records an empty
+			// marker set (a same-node resume falls back to the seeded scratch dir).
 			log.Printf("journal final snapshot for %s: %v", id, err)
 		} else {
 			// Node-local: persist the pinned manifest ids durably on this node so
 			// the next same-node resume (Create) restores from them — no CP
-			// protocol required (transient-tier §4). (Owner-sealed cross-node
-			// migration ALSO threads these to the CP as the per-mount persist
-			// markers + plaintext sentinel, design §3 M6 — TODO(phase②).)
+			// protocol required (transient-tier §4). The same ids are returned to
+			// the caller as the per-mount persist markers the CP records on suspend
+			// (CP↔node suspend-marker protocol, design §3 M6, sp-a7fs).
 			for mount, mid := range ids {
+				markers[mount] = string(mid)
 				log.Printf("journal: spawn=%s gen=%d mount=%s final manifest=%s", id, sp.Generation, mount, mid)
 			}
 			if m.journalState != nil {
@@ -484,7 +511,7 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 		_ = m.backend.Finalize(ctx, d)
 	}
 	m.store.Delete(id)
-	return nil
+	return markers
 }
 
 // newControlToken returns a 256-bit random hex string used as the sidecar control-endpoint
