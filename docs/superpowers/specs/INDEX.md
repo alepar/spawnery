@@ -47,6 +47,7 @@ were already made in one of these docs.
 - [CP Store Driver (sp-ylw)](2026-06-01-cp-store-driver-sp-ylw.md) — store driver selection (sqlite modernc vs postgres pgx; goose migrations).
 - [Inventory Reconcile Adopt (sp-537t)](2026-06-09-inventory-reconcile-adopt-design.md) — gap-closing impl of DAO §6.2: adopt/flip-back + orphan-stop arms.
 - [Tiered Storage & Migration Research Brief](2026-06-10-tiered-storage-migration-research-brief.md) — deep-research prompt for the transient journaled tier + local↔cloud data-plane spawn migration.
+- [Tiered Storage & Migration Research (Results)](2026-06-10-tiered-storage-migration-research-results.md) — verified findings: watcher+rescan over macOS FUSE, git thin-bundle journal, prior art is snapshot-at-stop; coverage gaps listed for the parallel cloud run.
 
 ## Marketplace (E5/E6 slices)
 - [E5 Slice 1 — Catalog Read Surface](2026-06-01-e5-catalog-read-surface-slice1.md) — the read side of the catalog (browse/search), pure-CP.
