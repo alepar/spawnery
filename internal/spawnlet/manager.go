@@ -47,12 +47,20 @@ type Manager struct {
 	// SetJournal. The seam is exercised only for mounts whose durability class is
 	// node-local/owner-sealed (design §1a); ephemeral mounts never touch it.
 	journal journal.JournalManager
+	// journalState durably pins per-mount manifest ids on suspend so a same-node
+	// resume restores node-local journaled mounts without any CP protocol.
+	journalState *journalStateStore
 }
 
-// SetJournal installs the transient-tier journaler (design §1b). Optional: when
-// unset, every mount behaves as scratch-only (Ephemeral) and the journal seams
-// in Create/Stop are no-ops.
-func (m *Manager) SetJournal(j journal.JournalManager) { m.journal = j }
+// SetJournal installs the transient-tier journaler (design §1b) plus the
+// node-local state dir where per-spawn pinned manifest ids are recorded on
+// suspend (so a same-node resume can restore with no CP protocol). Optional:
+// when unset, every mount behaves as scratch-only (Ephemeral) and the journal
+// seams in Create/Stop are no-ops.
+func (m *Manager) SetJournal(j journal.JournalManager, stateDir string) {
+	m.journal = j
+	m.journalState = &journalStateStore{dir: stateDir}
+}
 
 // NewManager builds a Manager on the Docker/runc path: the Docker pod backend + the DOCKER-USER
 // egress floor. (cmd/spawnlet uses NewManagerWithBackend for the runsc/CRI path.)
@@ -277,6 +285,21 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	mounts := []runtime.Mount{{HostPath: appPath, ContainerPath: "/app", ReadOnly: true}}
 	var mountDirs []string
 	var journalMounts []journal.Mount
+
+	// Same-node resume (design §3, roast C1): if this spawn id has a durable
+	// node-local journal record, this Create is a resume — restore each mount's
+	// PINNED manifest into its (freshly seeded) host dir before bind. Absent
+	// record = fresh create; mounts fall back to the seeded scratch dir.
+	var jrec journalRecord
+	var haveJournalRecord bool
+	if m.journal != nil && m.journalState != nil {
+		if rec, ok, lerr := m.journalState.Load(id); lerr != nil {
+			log.Printf("journal state load for %s: %v", id, lerr)
+		} else {
+			jrec, haveJournalRecord = rec, ok
+		}
+	}
+
 	finalizeAll := func() {
 		for _, d := range mountDirs {
 			_ = m.backend.Finalize(ctx, d)
@@ -301,13 +324,21 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		jm := journal.Mount{Name: mt.Name, HostDir: hostDir, Class: class}
 		if m.journal != nil && jm.Class.Journaled() {
 			journalMounts = append(journalMounts, jm)
-			// Same-node resume seam (design §3, roast C1): restore the PINNED
-			// manifest into hostDir before bind. The pin is CP-threaded —
-			// TODO(phase②): wire the per-mount restore manifest id (from the
-			// persist marker / recreate cutoff) through the CP StartSpawn
-			// protocol and call m.journal.Restore(ctx, id, mt.Name, pin, hostDir)
-			// here. Until then there is no pin source, so this is a no-op and
-			// resume falls back to the seeded scratch dir.
+			// Same-node resume: restore the pinned manifest recorded at the last
+			// suspend into hostDir before bind (over the freshly seeded scratch
+			// dir). Non-fatal: a restore failure falls back to the seeded dir and
+			// surfaces the scratch-reset reality rather than aborting the spawn.
+			// (The owner-sealed cross-node / migration pin is CP-threaded — that
+			// remains TODO(phase②) and rides the StartSpawn protocol.)
+			if haveJournalRecord {
+				if pin, ok := jrec.Manifests[mt.Name]; ok {
+					if rerr := m.journal.Restore(ctx, id, mt.Name, pin, hostDir); rerr != nil {
+						log.Printf("journal restore for %s mount %s (manifest %s): %v", id, mt.Name, pin, rerr)
+					} else {
+						log.Printf("journal: spawn=%s mount=%s restored from manifest=%s", id, mt.Name, pin)
+					}
+				}
+			}
 		}
 
 		mountDirs = append(mountDirs, hostDir)
@@ -429,12 +460,19 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 			// handling (TODO(phase②)) decides suspended(journal-stale) vs error.
 			log.Printf("journal final snapshot for %s: %v", id, err)
 		} else {
-			// TODO(phase②): thread these pinned manifest ids back to the CP as
-			// the per-mount persist markers (+ plaintext sentinel, design §3 M6)
-			// via the suspend/persist RPC; the CP records them on the container
-			// row for the next clean resume's pinned restore.
+			// Node-local: persist the pinned manifest ids durably on this node so
+			// the next same-node resume (Create) restores from them — no CP
+			// protocol required (transient-tier §4). (Owner-sealed cross-node
+			// migration ALSO threads these to the CP as the per-mount persist
+			// markers + plaintext sentinel, design §3 M6 — TODO(phase②).)
 			for mount, mid := range ids {
 				log.Printf("journal: spawn=%s gen=%d mount=%s final manifest=%s", id, sp.Generation, mount, mid)
+			}
+			if m.journalState != nil {
+				rec := journalRecord{Generation: sp.Generation, Manifests: ids}
+				if serr := m.journalState.Save(id, rec); serr != nil {
+					log.Printf("journal state save for %s: %v", id, serr)
+				}
 			}
 		}
 		if err := m.journal.Close(ctx, id); err != nil {
