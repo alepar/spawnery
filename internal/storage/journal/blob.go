@@ -44,17 +44,11 @@ func (f *FilesystemBackend) Open(ctx context.Context, spawnID string, create boo
 	return st, nil
 }
 
-// TODO(phase②): S3Backend — a Garage/S3 BlobBackend using
-// github.com/kopia/kopia/repo/blob/s3. Bucket-per-spawn + per-generation access
-// key (design §3 roast M1), lazy bucket mint on first snapshot (design §6). It
-// implements the same BlobBackend.Open(ctx, spawnID, create) contract, so the
-// snapshot/restore/maintenance code in repo.go is unchanged. Sketch:
+// S3Backend (blob_s3.go) is the Garage/S3 BlobBackend, selectable via NewBackend
+// alongside FilesystemBackend. It implements this same Open(ctx, spawnID, create)
+// contract, so the snapshot/restore/maintenance code in repo.go is unchanged.
 //
-//	func (b *S3Backend) Open(ctx context.Context, spawnID string, create bool) (blob.Storage, error) {
-//	    return s3.New(ctx, &s3.Options{
-//	        Endpoint:        b.Endpoint,
-//	        BucketName:      b.bucketFor(spawnID),
-//	        AccessKeyID:     b.keyFor(spawnID),     // per-generation key
-//	        SecretAccessKey: b.secretFor(spawnID),
-//	    }, false)
-//	}
+// TODO(phase②): bucket-per-spawn + per-generation access-key mint/revoke (design
+// §3 roast M1) and lazy bucket mint on first snapshot (design §6). Phase ① shares
+// one bucket and isolates spawns by object prefix; the per-spawn bucket/key mint
+// layers on top of S3Backend without touching repo.go.

@@ -147,6 +147,24 @@ lint-go:
 lint-web:
     cd web && npx eslint . && npx tsc --noEmit
 
+# --- garage (transient-tier journal object store) ------------------------
+
+# bring up a single-node dev Garage + apply cluster layout + mint a dev bucket/key (sp-u53.5; deploy/garage)
+garage:
+    docker compose -f {{repo}}/deploy/garage/docker-compose.yml up -d
+    {{repo}}/deploy/garage/bootstrap.sh
+
+# tear down the dev Garage AND drop its data volumes
+garage-down:
+    docker compose -f {{repo}}/deploy/garage/docker-compose.yml down -v
+
+# live S3 round-trip against a running `just garage` (build-tagged garage_e2e; needs Docker)
+test-garage:
+    GARAGE_S3_ENDPOINT=127.0.0.1:3900 \
+    GARAGE_ADMIN_ENDPOINT=http://127.0.0.1:3903 \
+    GARAGE_ADMIN_TOKEN="$(grep -E '^admin_token' {{repo}}/deploy/garage/garage.toml | cut -d'\"' -f2)" \
+    go test -tags garage_e2e -run TestS3BackendRoundTripGarage -v -count=1 {{repo}}/internal/storage/journal/
+
 # --- housekeeping --------------------------------------------------------
 
 # install dev tooling not in the repo (mprocs, playwright browser, web deps)
