@@ -16,6 +16,7 @@ import (
 	"spawnery/internal/runtime"
 	"spawnery/internal/spawnlet/firewall"
 	"spawnery/internal/storage"
+	"spawnery/internal/storage/journal"
 )
 
 type ManagerConfig struct {
@@ -41,7 +42,17 @@ type Manager struct {
 	store   *Store
 	backend storage.Backend
 	fw      firewall.Applier
+	// journal is the transient-tier journaler (node-local Kopia). nil disables
+	// journaling entirely — scratch-only behavior is unchanged. Set via
+	// SetJournal. The seam is exercised only for mounts whose durability class is
+	// node-local/owner-sealed (design §1a); ephemeral mounts never touch it.
+	journal journal.JournalManager
 }
+
+// SetJournal installs the transient-tier journaler (design §1b). Optional: when
+// unset, every mount behaves as scratch-only (Ephemeral) and the journal seams
+// in Create/Stop are no-ops.
+func (m *Manager) SetJournal(j journal.JournalManager) { m.journal = j }
 
 // NewManager builds a Manager on the Docker/runc path: the Docker pod backend + the DOCKER-USER
 // egress floor. (cmd/spawnlet uses NewManagerWithBackend for the runsc/CRI path.)
@@ -265,6 +276,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	// backed (slice: scratch) by a host dir seeded from /app/<seed>.
 	mounts := []runtime.Mount{{HostPath: appPath, ContainerPath: "/app", ReadOnly: true}}
 	var mountDirs []string
+	var journalMounts []journal.Mount
 	finalizeAll := func() {
 		for _, d := range mountDirs {
 			_ = m.backend.Finalize(ctx, d)
@@ -277,6 +289,27 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			finalizeAll()
 			return nil, fmt.Errorf("prepare mount %q: %w", mt.Name, err)
 		}
+
+		// Transient-tier seam (design §1a/§3). Journaling only engages for mounts
+		// that opt into a journaled durability class; ephemeral mounts (the
+		// default) leave the scratch path entirely untouched.
+		class, derr := journal.ParseDurability(mt.Durability)
+		if derr != nil {
+			finalizeAll()
+			return nil, fmt.Errorf("mount %q durability: %w", mt.Name, derr)
+		}
+		jm := journal.Mount{Name: mt.Name, HostDir: hostDir, Class: class}
+		if m.journal != nil && jm.Class.Journaled() {
+			journalMounts = append(journalMounts, jm)
+			// Same-node resume seam (design §3, roast C1): restore the PINNED
+			// manifest into hostDir before bind. The pin is CP-threaded —
+			// TODO(phase②): wire the per-mount restore manifest id (from the
+			// persist marker / recreate cutoff) through the CP StartSpawn
+			// protocol and call m.journal.Restore(ctx, id, mt.Name, pin, hostDir)
+			// here. Until then there is no pin source, so this is a no-op and
+			// resume falls back to the seeded scratch dir.
+		}
+
 		mountDirs = append(mountDirs, hostDir)
 		mounts = append(mounts, runtime.Mount{HostPath: hostDir, ContainerPath: "/app/" + mt.Path})
 	}
@@ -358,7 +391,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	if h.PodIP != "" {
 		controlURL = "http://" + net.JoinHostPort(h.PodIP, strconv.Itoa(controlPort)) + "/control/model"
 	}
-	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL}
+	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, JournalMounts: journalMounts, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL}
 	m.store.Put(sp)
 	return sp, nil
 }
@@ -383,6 +416,32 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 			log.Printf("egress floor cleanup for %s (ip %s): %v", id, sp.FloorIP, err)
 		}
 	}
+
+	// Suspend seam (design §2, roast M17): the pod is stopped (tree quiescent),
+	// so drain pending snapshots and take the final per-mount snapshot BEFORE the
+	// scratch backend nukes the host dirs below. Guarded: only runs when a
+	// journaler is installed and this spawn actually has journaled mounts —
+	// scratch-only spawns skip it entirely.
+	if m.journal != nil && len(sp.JournalMounts) > 0 {
+		ids, err := m.journal.FinalSnapshot(ctx, id, sp.Generation, sp.JournalMounts)
+		if err != nil {
+			// Non-fatal: teardown must still complete. The CP marker/generation
+			// handling (TODO(phase②)) decides suspended(journal-stale) vs error.
+			log.Printf("journal final snapshot for %s: %v", id, err)
+		} else {
+			// TODO(phase②): thread these pinned manifest ids back to the CP as
+			// the per-mount persist markers (+ plaintext sentinel, design §3 M6)
+			// via the suspend/persist RPC; the CP records them on the container
+			// row for the next clean resume's pinned restore.
+			for mount, mid := range ids {
+				log.Printf("journal: spawn=%s gen=%d mount=%s final manifest=%s", id, sp.Generation, mount, mid)
+			}
+		}
+		if err := m.journal.Close(ctx, id); err != nil {
+			log.Printf("journal close for %s: %v", id, err)
+		}
+	}
+
 	for _, d := range sp.MountDirs {
 		_ = m.backend.Finalize(ctx, d)
 	}
