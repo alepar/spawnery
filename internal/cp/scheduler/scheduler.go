@@ -43,7 +43,10 @@ func (s *Scheduler) OnStatus(spawnID string, phase nodev1.SpawnPhase) {
 
 // Provision picks a node, sends StartSpawn for the (already-minted) spawn id, waits for ACTIVE,
 // and binds the route. Returns the chosen node id. The caller owns id-minting + persistence.
-func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, placement registry.Placement) (string, error) {
+// gen is the live container row's generation: the node labels + heartbeat-reports its pod with it,
+// and the inventory reconciler matches that report against the row — an omitted gen (0) would make
+// the orphan arm Stop the pod the CP itself just started (sp-gzvo).
+func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement) (string, error) {
 	n := s.reg.PickFor(placement)
 	if n == nil {
 		return "", connect.NewError(connect.CodeResourceExhausted, errors.New("no eligible node with capacity"))
@@ -56,7 +59,7 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 
 	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Start{Start: &nodev1.StartSpawn{
 		SpawnId: id, AppRef: appRef, Model: model, Name: name, AppId: appID,
-		Image: placement.Image, RunnableId: runnable, Mode: mode,
+		Image: placement.Image, RunnableId: runnable, Mode: mode, Generation: gen,
 	}}}); err != nil {
 		return "", connect.NewError(connect.CodeUnavailable, err)
 	}

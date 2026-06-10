@@ -40,6 +40,19 @@ func (c *capSender) firstStart() *nodev1.StartSpawn {
 	return nil
 }
 
+// starts returns every StartSpawn this sender has been asked to deliver, in send order.
+func (c *capSender) starts() []*nodev1.StartSpawn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []*nodev1.StartSpawn
+	for _, m := range c.sent {
+		if st := m.GetStart(); st != nil {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
 // stops returns every StopSpawn this sender has been asked to deliver (reconcile orphan arm).
 func (c *capSender) stops() []*nodev1.StopSpawn {
 	c.mu.Lock()

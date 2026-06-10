@@ -443,6 +443,88 @@ func TestRecreateSpawn(t *testing.T) {
 	}
 }
 
+// Regression (sp-gzvo): StartSpawn must carry the live container row's generation. The node labels
+// and heartbeat-reports its pod with EXACTLY that generation; if StartSpawn omits it (gen 0) while
+// the live row is gen>=1, the inventory orphan arm mismatches and Stops the pod the CP itself just
+// started — killing every fresh spawn mid-handshake ("agent not ready: pump stopped").
+func TestStartSpawnGenerationFeedsReconcile(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id)
+
+	n, ok := reg.Get("n1")
+	if !ok {
+		t.Fatal("node n1 not registered")
+	}
+	sender := n.Sender.(*capSender)
+	starts := sender.starts()
+	if len(starts) != 1 {
+		t.Fatalf("want 1 StartSpawn, got %d", len(starts))
+	}
+	if got := starts[0].GetGeneration(); got != 1 {
+		t.Fatalf("CreateSpawn StartSpawn generation=%d want 1 (the live container row's gen)", got)
+	}
+	// The node reports back exactly what StartSpawn told it: reconcile must adopt, never Stop.
+	s.reconcileInventory(ctx, "n1", sender, []*nodev1.RunningSpawn{{SpawnId: id, Generation: starts[0].GetGeneration()}})
+	if got := sender.stops(); len(got) != 0 {
+		t.Fatalf("reconcile Stopped the pod the CP just started: %v", got)
+	}
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Active {
+		t.Fatalf("spawn must stay active across reconcile, got %v", sp.Status)
+	}
+
+	// Recreate mints gen 2 — the second StartSpawn must carry it, and its report must survive too.
+	if _, err := s.st.Spawns().MarkUnreachable(ctx, []string{id}); err != nil {
+		t.Fatalf("MarkUnreachable: %v", err)
+	}
+	if _, err := s.RecreateSpawn(ctx, connect.NewRequest(&cpv1.RecreateSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("RecreateSpawn: %v", err)
+	}
+	starts = sender.starts()
+	if len(starts) != 2 {
+		t.Fatalf("want 2 StartSpawns after recreate, got %d", len(starts))
+	}
+	if got := starts[1].GetGeneration(); got != 2 {
+		t.Fatalf("RecreateSpawn StartSpawn generation=%d want 2", got)
+	}
+	// RecreateSpawn itself sends one eager-teardown Stop for the OLD container (rt.StopOnNode) —
+	// expected. Only Stops ADDED by the reconcile below would be the orphan-arm regression.
+	preStops := len(sender.stops())
+	s.reconcileInventory(ctx, "n1", sender, []*nodev1.RunningSpawn{{SpawnId: id, Generation: starts[1].GetGeneration()}})
+	if got := sender.stops(); len(got) != preStops {
+		t.Fatalf("reconcile Stopped the recreated pod: %v", got[preStops:])
+	}
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Active {
+		t.Fatalf("recreated spawn must stay active across reconcile, got %v", sp.Status)
+	}
+}
+
+// A node may heartbeat-report a pod while its spawn is still STARTING on the CP (the start window:
+// container created, ACP handshake in flight). A matching-generation report must neither Stop the
+// pod nor disturb the row — the adopt arm pre-binds node_id and the provision flow finishes normally.
+func TestReconcileInventoryStartingPodNotStopped(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	makeSpawn(t, s, "sp1", "alice") // status=starting, live container row gen 1, node_id ""
+	ctx := context.Background()
+
+	sender := &capSender{}
+	s.reconcileInventory(ctx, "n1", sender, []*nodev1.RunningSpawn{{SpawnId: "sp1", Generation: 1}})
+	if got := sender.stops(); len(got) != 0 {
+		t.Fatalf("starting pod with matching gen must not be Stopped, got %v", got)
+	}
+	if sp, _ := s.st.Spawns().Get(ctx, "sp1"); sp.Status != store.Starting {
+		t.Fatalf("spawn must remain starting, got %v", sp.Status)
+	}
+}
+
 func TestReconcileInventory(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	stop := startAcker(t, s, reg)

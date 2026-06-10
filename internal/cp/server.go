@@ -417,7 +417,8 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model stri
 		return // stopped/deleted in the lock gap, or already advanced
 	}
 	placement.Image = sp.Image
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, placement)
+	// Gen 1: store.Create inserted the live container row at generation 1 (SetActive below matches).
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement)
 	if err != nil {
 		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {

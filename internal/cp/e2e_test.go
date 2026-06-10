@@ -149,32 +149,58 @@ func TestCPEndToEndStub(t *testing.T) {
 			t.Fatalf("send frame: %v", err)
 		}
 	}
-	sendFrame(map[string]any{"kind": "prompt", "text": "say hi"})
-
-	var got strings.Builder
 	sc := bufio.NewScanner(pr)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for sc.Scan() {
-		var fr struct {
-			Kind  string `json:"kind"`
-			Text  string `json:"text"`
-			State string `json:"state"`
+	// promptEcho drives one prompt->echo turn over the shared stream/scanner, returning the
+	// concatenated agent text of the turn.
+	promptEcho := func(text string) string {
+		sendFrame(map[string]any{"kind": "prompt", "text": text})
+		var got strings.Builder
+		for sc.Scan() {
+			var fr struct {
+				Kind  string `json:"kind"`
+				Text  string `json:"text"`
+				State string `json:"state"`
+			}
+			if json.Unmarshal(sc.Bytes(), &fr) != nil {
+				continue
+			}
+			if fr.Kind == "agent" {
+				got.WriteString(fr.Text)
+			}
+			if fr.Kind == "turn" && fr.State == "idle" {
+				break // turn complete
+			}
 		}
-		if json.Unmarshal(sc.Bytes(), &fr) != nil {
-			continue
+		if err := sc.Err(); err != nil {
+			t.Fatalf("read frames: %v", err)
 		}
-		if fr.Kind == "agent" {
-			got.WriteString(fr.Text)
-		}
-		if fr.Kind == "turn" && fr.State == "idle" {
-			break // turn complete
-		}
+		return got.String()
 	}
-	if err := sc.Err(); err != nil {
-		t.Fatalf("read frames: %v", err)
+	if got := promptEcho("say hi"); !strings.Contains(got, "ECHO: say hi") {
+		t.Fatalf("want ECHO, got %q", got)
 	}
-	if !strings.Contains(got.String(), "ECHO: say hi") {
-		t.Fatalf("want ECHO, got %q", got.String())
+
+	// Regression (sp-gzvo): the spawn must SURVIVE heartbeat inventory reconciliation. The node
+	// heartbeats every 5s; a generation mismatch between the live container row and the node's
+	// report makes the orphan arm Stop the pod the CP itself just started. Sit through more than
+	// one full heartbeat cycle, assert the spawn stays ACTIVE, then prove the pod is still live
+	// end-to-end with a second echo turn.
+	stillActive := time.Now().Add(7 * time.Second)
+	for time.Now().Before(stillActive) {
+		ls, err := cl.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+		if err != nil {
+			t.Fatalf("listSpawns: %v", err)
+		}
+		for _, sp := range ls.Msg.Spawns {
+			if sp.SpawnId == id && sp.Status != cpv1.SpawnStatus_SPAWN_STATUS_ACTIVE {
+				t.Fatalf("spawn left ACTIVE during heartbeat reconcile window: %v", sp.Status)
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if got := promptEcho("still there"); !strings.Contains(got, "ECHO: still there") {
+		t.Fatalf("pod dead after heartbeat reconcile window: want ECHO, got %q", got)
 	}
 
 	stream.CloseRequest()

@@ -50,7 +50,7 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 		}
 	}()
 
-	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", "", "", registry.Placement{})
+	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", "", "", 3, registry.Placement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,11 +61,14 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 	if got.GetSpawnId() != "sp-test" || got.GetAppRef() != "examples/secret-app" || got.GetModel() != "m" {
 		t.Fatalf("StartSpawn payload wrong: %+v", got)
 	}
+	if got.GetGeneration() != 3 {
+		t.Fatalf("StartSpawn generation=%d want 3 (the node labels + reports its pod with it)", got.GetGeneration())
+	}
 }
 
 func TestProvisionNoCapacity(t *testing.T) {
 	s := New(registry.New(), router.New(), time.Second)
-	if _, err := s.Provision(context.Background(), "sp-x", "ref", "m", "", "", "", "", registry.Placement{}); err == nil {
+	if _, err := s.Provision(context.Background(), "sp-x", "ref", "m", "", "", "", "", 1, registry.Placement{}); err == nil {
 		t.Fatal("expected ResourceExhausted when no node")
 	}
 }
@@ -89,7 +92,7 @@ func TestProvisionThreadsSelection(t *testing.T) {
 	}()
 
 	_, err := s.Provision(context.Background(), "sp-sel", "ref", "m", "nm", "app", "goose-acp", "acp",
-		registry.Placement{Image: "img:1"})
+		1, registry.Placement{Image: "img:1"})
 	if err != nil {
 		t.Fatal(err)
 	}
