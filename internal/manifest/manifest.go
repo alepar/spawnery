@@ -14,6 +14,11 @@ type Mount struct {
 	Name string `yaml:"name"`
 	Path string `yaml:"path"` // relative to /app
 	Seed string `yaml:"seed"` // relative to /app
+	// Durability is the per-mount durability class (transient-tier journal,
+	// design §1a): "ephemeral" (default, unset), "node-local", or "owner-sealed".
+	// Empty/ephemeral preserves today's scratch contract — the journaler is a
+	// no-op until a mount opts in. See internal/storage/journal.ParseDurability.
+	Durability string `yaml:"durability"`
 }
 
 type Storage struct {
