@@ -91,11 +91,14 @@ Each mount declares a **durability class** (`durability:` in the manifest, user-
   as **seconds-to-a-minute on a quiescent tree; degrades to scan-time during high churn** (the
   revisit trigger below watches for this).
 - **Gitignored artifacts: included by default**, per-mount excludes configurable. Dedup absorbs
-  the bulk; including `node_modules` makes migration open-IDE-and-run instant. *Interim note: while
-  a spawn is `node-local`, journaling secret-shaped files is no worse than the node already
-  holding them (node sees plaintext; store sees ciphertext); for `owner-sealed`-on-cloud, a
-  default-exclude secrets glob (`.env*`, `*credentials*`, `id_*`, `*.pem`) applies unless
-  overridden `[roast M16]`.*
+  the bulk; including `node_modules` makes migration open-IDE-and-run instant.
+- **Secret tmpfs mounts are excluded from the journal `[session decision]`:** secrets are
+  injected as files on per-path tmpfs mounts by the vault-sidecar
+  ([owner-sealed-secrets §6](2026-06-10-owner-sealed-secrets-design.md)); the journaler **skips
+  those mount paths by mount** (distinct mounts, no content scan). Rationale is redundancy +
+  rotation-hygiene, not plaintext-safety (Kopia caches are encrypted) — secrets are re-delivered
+  fresh each episode, so journaling them would only leave rotated-away values lingering encrypted
+  in old snapshots.
 - **Maintenance split by safety class `[roast M5]`:**
   - **Quick (index-compacting) maintenance runs on a regular cadence** (node-local on Kopia
     defaults, or CP-commanded hourly via heartbeat). It **never deletes a blob without another

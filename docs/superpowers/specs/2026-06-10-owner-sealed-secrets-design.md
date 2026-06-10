@@ -170,13 +170,35 @@ denial of service — matching the threat model.
 
 ## 6. Plaintext hygiene — never-persist is the invariant
 
-- **Delivery channel is NOT env `[roast M10]`.** PodSpec env vars are persisted to disk by the
-  runtime (Docker: `/var/lib/docker/containers/<id>/config.v2.json` — empirically reproduced;
-  containerd: its metadata DB), so the existing `SidecarEnv` path (manager.go:304 →
-  docker_pod.go / cri/backend.go) **would write plaintext to disk on every spawn**. Instead the
-  sidecar/agent fetches its secret at startup over a **pod-local socket / exec-stdin handshake**
-  from the spawnlet (or an **unlinked-after-read tmpfs** file, with a swap caveat noted) — never
-  via env.
+- **Delivery = vault-sidecar → tmpfs files at declared paths `[roast M10]`.** Secrets are
+  injected as **files on a shared tmpfs volume**, mounted into the agent container at the
+  consuming tool's declared path(s) (`~/.config/gh/hosts.yml`, `~/.aws/credentials`, `.netrc`,
+  SSH keys, `.env`, …) — the K8s secret-volume / Vault-agent injector pattern. The **sidecar**
+  (which already shares the pod namespaces) unseals the CP-relayed ciphertext (node sub-key for
+  owner-sealed; node key for node-trusted) and writes plaintext into the tmpfs; the agent reads
+  it, and re-reads work (the file persists for the episode — `gh` and friends re-read freely).
+  Tools that take a path-valued env var get the **path**, never the secret
+  (`AWS_SHARED_CREDENTIALS_FILE=…`).
+  - **NOT env `[roast M10]`:** PodSpec env vars are persisted to disk by the runtime (Docker
+    `config.v2.json`; containerd metadata DB) and inherited by every child process (visible via
+    their `/proc/<pid>/environ`), so the existing `SidecarEnv` path (manager.go:304 →
+    docker_pod.go / cri/backend.go) **must not carry secrets**.
+  - **NOT overlayfs:** an overlay over the project tree was considered and rejected — overlay
+    forces writes to the upper layer (copy-up), which either diverts the agent's journaled edits
+    into an ephemeral tmpfs or copies secret content into the journaled mount; and it doesn't
+    exist on macOS nodes. Per-path tmpfs mounts achieve the same "secret appears in place"
+    without either failure.
+  - **tmpfs, not the data mount:** secret files live on tmpfs (memory-backed), so plaintext
+    never lands on the node's durable disk (the data-mount host dir is durable disk). Residual:
+    tmpfs can swap under pressure (documented).
+- **Excluded from the journal `[session decision]`:** the journaler **skips the secret tmpfs
+  mount paths by mount** (they are distinct mounts — no content scan needed). Not for
+  plaintext-safety (Kopia's content + metadata caches are **encrypted** at rest; only the
+  location index / own-writes / blob-list are unencrypted and hold no file content or names, and
+  content IDs are keyed HMACs so no guess-confirmation) — but because **secrets are re-delivered
+  fresh every episode** by the sidecar, so journaling them is redundant and would leave
+  rotated-away secrets lingering (encrypted) in old snapshots. Secrets thus live only in
+  memory/tmpfs + their authoritative sealed store.
 - In-memory handling uses memguard-class **off-heap** allocation + zeroize-on-suspend as
   **defense-in-depth, not a guarantee** (Go's GC copies/moves heap objects; mlock-on-heap is
   near-theater; plaintext also transits the heap inside HPKE `Open`). Not a hard boundary.
