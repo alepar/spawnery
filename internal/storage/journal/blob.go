@@ -48,7 +48,10 @@ func (f *FilesystemBackend) Open(ctx context.Context, spawnID string, create boo
 // alongside FilesystemBackend. It implements this same Open(ctx, spawnID, create)
 // contract, so the snapshot/restore/maintenance code in repo.go is unchanged.
 //
-// TODO(phase②): bucket-per-spawn + per-generation access-key mint/revoke (design
-// §3 roast M1) and lazy bucket mint on first snapshot (design §6). Phase ① shares
-// one bucket and isolates spawns by object prefix; the per-spawn bucket/key mint
-// layers on top of S3Backend without touching repo.go.
+// The bucket-per-spawn + per-generation access-key mint/revoke fence (design §3
+// roast M1) + lazy bucket mint (design §6) is implemented by GenerationKeyManager
+// (genkey.go) over GarageAdmin (garage_admin.go): its BackendFor(spawnID, gen)
+// mints a fresh per-generation key on the spawn's bucket and returns an S3Backend
+// bound to it. Threading that minted backend through the live StartSpawn protocol
+// (CP→node) is the remaining wiring (sp-u53.5.2 follow-up); the mint/revoke fence
+// itself is proven by the garage_e2e (TestGenerationKeyFenceGarage).

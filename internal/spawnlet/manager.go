@@ -36,7 +36,7 @@ type ManagerConfig struct {
 	// into it (0600). Default DataRoot/secrets. Production should point this at a tmpfs (memory-backed)
 	// so plaintext never touches durable disk.
 	SecretsRoot string
-	SidecarPort                                       int // default 8080
+	SidecarPort int // default 8080
 
 	NodeID           string // this node's id (stamped on container labels for reconcile); "" standalone
 	NodeClass        string // "cloud" (always enforces) or "self-hosted" (honors EgressEnforce)
@@ -513,9 +513,46 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	if h.PodIP != "" {
 		controlURL = "http://" + net.JoinHostPort(h.PodIP, strconv.Itoa(controlPort)) + "/control/model"
 	}
-	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, JournalMounts: journalMounts, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL}
+	// Continuous journaling (design §2, sp-u53.5.2): start a per-mount file watcher
+	// driving RequestSnapshot for the spawn's lifetime. The journal's adaptive
+	// debounce + serial queue coalesce the events, and a periodic fallback inside
+	// the watcher catches dropped events. Guarded: only journaled mounts get a
+	// watcher, so scratch-only spawns are untouched. The pod is already up, so the
+	// host dirs exist and any resume restore has landed.
+	watchers := m.startJournalWatchers(id, generation, journalMounts)
+
+	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, JournalMounts: journalMounts, journalWatchers: watchers, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL}
 	m.store.Put(sp)
 	return sp, nil
+}
+
+// startJournalWatchers starts one continuous file watcher per journaled mount,
+// each driving RequestSnapshot(spawnID, gen, mount) on changes (design §2). A
+// watcher that fails to construct (e.g. the inotify instance limit) is skipped
+// with a log line — the final suspend snapshot and the per-mount periodic
+// fallback still bound the loss window. Returns the started watchers for teardown.
+func (m *Manager) startJournalWatchers(id string, gen uint64, mounts []journal.Mount) []*journal.Watcher {
+	if m.journal == nil || len(mounts) == 0 {
+		return nil
+	}
+	var watchers []*journal.Watcher
+	for _, mt := range mounts {
+		mt := mt // capture per-iteration for the trigger closure
+		trigger := func() {
+			// Async + best-effort: RequestSnapshot returns immediately (the queue
+			// runs the snapshot in the background); context.Background keeps the
+			// snapshot independent of any request ctx.
+			m.journal.RequestSnapshot(context.Background(), id, gen, mt)
+		}
+		w, err := journal.NewWatcher(mt.HostDir, journal.DefaultWatchInterval, trigger)
+		if err != nil {
+			log.Printf("journal watcher for %s mount %s: %v (final-snapshot + periodic fallback still apply)", id, mt.Name, err)
+			continue
+		}
+		w.Start(context.Background())
+		watchers = append(watchers, w)
+	}
+	return watchers
 }
 
 // PreflightRuntime validates a configured non-default container runtime at startup (delegates to the
@@ -557,6 +594,12 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn) map[string]string {
 	// Teardown must complete even if the caller's ctx is already cancelled (e.g. the CP connection
 	// dropped mid-startup and the readiness probe failed): detach so firewall + mount cleanup run.
 	ctx = context.WithoutCancel(ctx)
+	// Stop the continuous journal watchers FIRST so no background RequestSnapshot
+	// races the suspend barrier below (the serial queue would drop a post-suspend
+	// request anyway, but stopping here also reclaims the watcher goroutines).
+	for _, w := range sp.journalWatchers {
+		w.Stop()
+	}
 	_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: sp.SidecarID, AgentID: sp.AgentID, SandboxID: sp.SandboxID})
 	if sp.FloorIP != "" {
 		if err := m.fw.Remove(ctx, firewall.Rules(sp.FloorIP, m.cfg.EgressAllowCIDRs)); err != nil {

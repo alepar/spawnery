@@ -4,22 +4,28 @@
 //
 // Design: docs/superpowers/specs/2026-06-10-transient-tier-kopia-journal-design.md
 //
-// This package is the node-local phase ① slice (sp-u53.5.1): it embeds Kopia
-// (github.com/kopia/kopia) as a library over a pluggable blob backend
-// (filesystem for hermetic tests; an S3/Garage backend slots in later — see
-// blob.go), with node-held key custody (custody.go), a per-mount serialized
-// snapshot queue + suspend barrier (queue.go), and an adaptive debounce
-// scheduler (debounce.go).
+// This package began as the node-local phase ① slice (sp-u53.5.1): it embeds
+// Kopia (github.com/kopia/kopia) as a library over a pluggable blob backend
+// (filesystem for hermetic tests; an S3/Garage backend — see blob.go), with
+// node-held key custody (custody.go), a per-mount serialized snapshot queue +
+// suspend barrier (queue.go), and an adaptive debounce scheduler (debounce.go).
 //
-// Out of scope for this slice (left as TODO(phase②) seams): CP-protocol
-// generation/marker threading, per-generation Garage key mint/revoke, the
-// plaintext durability sentinel, CP-commanded full maintenance, and the
-// owner-sealed password delivery sub-protocol.
+// Phase ② (sp-u53.5.2) adds: the continuous file Watcher driving RequestSnapshot
+// (watcher.go), the per-generation Garage access-key mint/revoke fence
+// (genkey.go + garage_admin.go, design §3 roast M1), and the §5 telemetry seam
+// (Telemetry, emitted on the snapshot path).
+//
+// Still scoped to follow-ups: threading the per-generation minted backend through
+// the live StartSpawn protocol, CP-commanded full (deleting) maintenance (M5),
+// the prune happens-before anchor (M7), Garage degraded modes (M13), the
+// plaintext durability sentinel, and the owner-sealed password delivery
+// sub-protocol.
 package journal
 
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // DurabilityClass is a mount's per-mount durability promise (design §1a). It
@@ -106,6 +112,28 @@ type PasswordProvider interface {
 	PasswordFor(spawnID string) (string, error)
 	// Forget drops the sealed password for spawnID (spawn delete / migrate-away).
 	Forget(spawnID string) error
+}
+
+// SnapshotKind distinguishes the trigger behind a snapshot, for telemetry.
+type SnapshotKind string
+
+const (
+	// SnapshotContinuous is a watcher/periodic-driven snapshot during a live spawn.
+	SnapshotContinuous SnapshotKind = "continuous"
+	// SnapshotFinal is the suspend-barrier final snapshot.
+	SnapshotFinal SnapshotKind = "final"
+)
+
+// Telemetry receives journal telemetry (design §5: journal lag, scan duration).
+// All methods must be cheap and non-blocking; the journaler calls them on the
+// snapshot path. nil disables telemetry (the default). Upload amplification +
+// per-repo index-blob count need repo introspection and are a follow-up
+// (sp-u53.5.2 telemetry expansion).
+type Telemetry interface {
+	// SnapshotDone reports a finished snapshot attempt: scan is the measured scan
+	// /upload duration (the lag/debounce-floor input), id the resulting manifest
+	// (empty on a debounce-skip), and err any failure (best-effort, non-fatal).
+	SnapshotDone(spawnID, mount string, gen uint64, kind SnapshotKind, scan time.Duration, id ManifestID, err error)
 }
 
 // JournalManager is the seam the spawnlet wires to (manager.go). All methods
