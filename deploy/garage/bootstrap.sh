@@ -11,7 +11,9 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPOSE=(docker compose -f "$DIR/docker-compose.yml")
+# The garage CLI runs inside the running container (brought up by `just garage` via
+# plain `docker run` — no compose dependency).
+GARAGE_CONTAINER="${GARAGE_CONTAINER:-spawnery-garage}"
 
 # Admin endpoint + token (must match garage.toml).
 ADMIN_ENDPOINT="${GARAGE_ADMIN_ENDPOINT:-http://127.0.0.1:3903}"
@@ -19,7 +21,7 @@ ADMIN_TOKEN="${GARAGE_ADMIN_TOKEN:-$(grep -E '^admin_token' "$DIR/garage.toml" |
 S3_ENDPOINT="${GARAGE_S3_ENDPOINT:-127.0.0.1:3900}"
 DEV_BUCKET="${GARAGE_DEV_BUCKET:-spawnery-journal}"
 
-garage() { "${COMPOSE[@]}" exec -T garage /garage "$@"; }
+garage() { docker exec "$GARAGE_CONTAINER" /garage "$@"; }
 
 echo ">> waiting for garage daemon..."
 for _ in $(seq 1 60); do
