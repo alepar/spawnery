@@ -11,9 +11,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# The garage CLI runs inside the running container (brought up by `just garage` via
-# plain `docker run` — no compose dependency).
-GARAGE_CONTAINER="${GARAGE_CONTAINER:-spawnery-garage}"
+COMPOSE=(docker compose -f "$DIR/docker-compose.yml")
 
 # Admin endpoint + token (must match garage.toml).
 ADMIN_ENDPOINT="${GARAGE_ADMIN_ENDPOINT:-http://127.0.0.1:3903}"
@@ -21,7 +19,7 @@ ADMIN_TOKEN="${GARAGE_ADMIN_TOKEN:-$(grep -E '^admin_token' "$DIR/garage.toml" |
 S3_ENDPOINT="${GARAGE_S3_ENDPOINT:-127.0.0.1:3900}"
 DEV_BUCKET="${GARAGE_DEV_BUCKET:-spawnery-journal}"
 
-garage() { docker exec "$GARAGE_CONTAINER" /garage "$@"; }
+garage() { "${COMPOSE[@]}" exec -T garage /garage "$@"; }
 
 echo ">> waiting for garage daemon..."
 for _ in $(seq 1 60); do
@@ -33,15 +31,17 @@ garage status >/dev/null 2>&1 || { echo "garage did not come up"; exit 1; }
 NODE_ID="$(garage node id -q | cut -d'@' -f1)"
 echo ">> node id: $NODE_ID"
 
-if garage layout show 2>/dev/null | grep -q "$NODE_ID"; then
+# `layout show` truncates the node id to its short (16-hex) form, so match THAT — comparing the
+# full id never hit and re-assigned every run.
+SHORT_ID="${NODE_ID:0:16}"
+if garage layout show 2>/dev/null | grep -q "$SHORT_ID"; then
   echo ">> cluster layout already applied"
 else
   echo ">> assigning + applying single-node layout"
   garage layout assign -z dc1 -c 1G "$NODE_ID"
-  # Garage prints the exact `layout apply --version N` to run; use it verbatim.
-  APPLY_ARGS="$(garage layout show | grep -oE 'apply --version [0-9]+' | head -1)"
-  # shellcheck disable=SC2086
-  garage layout $APPLY_ARGS
+  # Apply staged version = current + 1 (parsed from "Current cluster layout version: N").
+  CUR="$(garage layout show 2>/dev/null | grep -oE 'version: [0-9]+' | grep -oE '[0-9]+' | tail -1)"
+  garage layout apply --version "$(( ${CUR:-0} + 1 ))"
 fi
 
 # --- mint a default dev bucket + access key via the admin API ---
@@ -50,14 +50,21 @@ admin() {
 }
 
 echo ">> ensuring dev bucket '${DEV_BUCKET}' + access key"
-KEY_JSON="$(admin -X POST "${ADMIN_ENDPOINT}/v1/key" -d "{\"name\":\"${DEV_BUCKET}-key\"}")"
-ACCESS_KEY_ID="$(printf '%s' "$KEY_JSON" | grep -oE '"accessKeyId":"[^"]+"' | cut -d'"' -f4)"
-SECRET_KEY="$(printf '%s' "$KEY_JSON" | grep -oE '"secretAccessKey":"[^"]+"' | cut -d'"' -f4)"
+# The admin API can 503 briefly right after a layout apply (propagation); retry the first call.
+for _ in $(seq 1 15); do
+  if KEY_JSON="$(admin -X POST "${ADMIN_ENDPOINT}/v1/key" -d "{\"name\":\"${DEV_BUCKET}-key\"}" 2>/dev/null)"; then break; fi
+  sleep 1
+done
+[ -n "${KEY_JSON:-}" ] || { echo "admin key API not ready"; exit 1; }
+# Garage pretty-prints the admin JSON ("key": "value" — note the space after the colon), so the
+# field patterns tolerate optional whitespace.
+ACCESS_KEY_ID="$(printf '%s' "$KEY_JSON" | grep -oE '"accessKeyId": *"[^"]+"' | head -1 | cut -d'"' -f4)"
+SECRET_KEY="$(printf '%s' "$KEY_JSON" | grep -oE '"secretAccessKey": *"[^"]+"' | head -1 | cut -d'"' -f4)"
 
 # Create the bucket (ignore "alias already exists"); fetch its id either way.
 admin -X POST "${ADMIN_ENDPOINT}/v1/bucket" -d "{\"globalAlias\":\"${DEV_BUCKET}\"}" >/dev/null 2>&1 || true
 BUCKET_JSON="$(admin "${ADMIN_ENDPOINT}/v1/bucket?globalAlias=${DEV_BUCKET}")"
-BUCKET_ID="$(printf '%s' "$BUCKET_JSON" | grep -oE '"id":"[^"]+"' | head -1 | cut -d'"' -f4)"
+BUCKET_ID="$(printf '%s' "$BUCKET_JSON" | grep -oE '"id": *"[^"]+"' | head -1 | cut -d'"' -f4)"
 
 admin -X POST "${ADMIN_ENDPOINT}/v1/bucket/allow" \
   -d "{\"bucketId\":\"${BUCKET_ID}\",\"accessKeyId\":\"${ACCESS_KEY_ID}\",\"permissions\":{\"read\":true,\"write\":true,\"owner\":true}}" >/dev/null

@@ -150,20 +150,13 @@ lint-web:
 # --- garage (transient-tier journal object store) ------------------------
 
 # bring up a single-node dev Garage + apply cluster layout + mint a dev bucket/key (sp-u53.5; deploy/garage)
-# Uses plain `docker run` (no compose dependency); host networking keeps S3 :3900 / admin :3903 on 127.0.0.1.
 garage:
-    docker rm -f spawnery-garage 2>/dev/null || true
-    docker run -d --name spawnery-garage --restart unless-stopped --network host \
-      -v {{repo}}/deploy/garage/garage.toml:/etc/garage.toml:ro \
-      -v spawnery-garage-meta:/var/lib/garage/meta \
-      -v spawnery-garage-data:/var/lib/garage/data \
-      dxflrs/garage:v1.0.1
+    docker compose -f {{repo}}/deploy/garage/docker-compose.yml up -d
     {{repo}}/deploy/garage/bootstrap.sh
 
 # tear down the dev Garage AND drop its data volumes
 garage-down:
-    docker rm -f spawnery-garage 2>/dev/null || true
-    docker volume rm -f spawnery-garage-meta spawnery-garage-data 2>/dev/null || true
+    docker compose -f {{repo}}/deploy/garage/docker-compose.yml down -v
 
 # live S3 round-trip against a running `just garage` (build-tagged garage_e2e; needs Docker)
 test-garage:
