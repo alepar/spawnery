@@ -22,6 +22,7 @@ import (
 	"spawnery/internal/authsvc"
 	"spawnery/internal/node"
 	"spawnery/internal/node/nodeid"
+	"spawnery/internal/pki"
 	"spawnery/internal/runtime"
 	"spawnery/internal/runtime/cri"
 	"spawnery/internal/spawnlet"
@@ -223,6 +224,12 @@ func buildManager(cfg spawnlet.ManagerConfig) (*spawnlet.Manager, error) {
 // nodeCPClient selects the node->CP transport by NODE_AUTH_MODE. insecure (default): the h2c client to
 // CP_ADDR. enforced: load the node's mTLS identity from NODE_ID_DIR (or enroll once via AS_URL +
 // ENROLL_TOKEN, pinning NODE_ROOT_CA), and return an mTLS client targeting CP_NODE_ADDR.
+//
+// Enrollment uses a fingerprint-bound token (owner-sealed-secrets design §5): the node generates and
+// persists its keypair FIRST, then logs the key's SPKI fingerprint. The operator gives that fingerprint
+// to the account owner, who mints a token bound to it (IssueBoundEnrollmentToken) over the pinned AS
+// connection and hands it back as ENROLL_TOKEN. The node redeems with the SAME key, so a token a
+// compromised CP observed cannot be redeemed with a substituted key.
 func nodeCPClient(insecureURL, nodeID string) (*http.Client, string, error) {
 	if env("NODE_AUTH_MODE", "insecure") != "enforced" {
 		return h2cClient(), insecureURL, nil
@@ -230,15 +237,26 @@ func nodeCPClient(insecureURL, nodeID string) (*http.Client, string, error) {
 	dir := env("NODE_ID_DIR", "/var/lib/spawnlet/identity")
 	id, err := nodeid.Load(dir)
 	if err != nil {
+		// Generate/persist the node key up front so its fingerprint is stable across runs.
+		key, kerr := nodeid.LoadOrGenerateKey(dir)
+		if kerr != nil {
+			return nil, "", fmt.Errorf("enforced mode: prepare node key: %w", kerr)
+		}
+		fp, ferr := pki.PublicKeyFingerprint(key.Public())
+		if ferr != nil {
+			return nil, "", fmt.Errorf("enforced mode: node key fingerprint: %w", ferr)
+		}
 		asURL, token := os.Getenv("AS_URL"), os.Getenv("ENROLL_TOKEN")
 		if asURL == "" || token == "" {
+			log.Printf("spawnlet node public-key fingerprint: %s", fp)
+			log.Printf("spawnlet: mint a fingerprint-bound enrollment token for the above fingerprint, then set AS_URL + ENROLL_TOKEN")
 			return nil, "", fmt.Errorf("enforced mode: no identity in %s and AS_URL/ENROLL_TOKEN unset: %w", dir, err)
 		}
 		rootPEM, rerr := os.ReadFile(env("NODE_ROOT_CA", filepath.Join(dir, "root.pem")))
 		if rerr != nil {
 			return nil, "", fmt.Errorf("enforced mode: pinned NODE_ROOT_CA required for enrollment: %w", rerr)
 		}
-		res, eerr := authsvc.RunEnroll(context.Background(), asURL, token, nodeID)
+		res, eerr := authsvc.RunEnrollWithKey(context.Background(), asURL, token, nodeID, key)
 		if eerr != nil {
 			return nil, "", fmt.Errorf("enroll: %w", eerr)
 		}
@@ -246,7 +264,7 @@ func nodeCPClient(insecureURL, nodeID string) (*http.Client, string, error) {
 		if serr := nodeid.Save(dir, id); serr != nil {
 			return nil, "", fmt.Errorf("persist identity: %w", serr)
 		}
-		log.Printf("spawnlet enrolled with AS %s; identity stored in %s", asURL, dir)
+		log.Printf("spawnlet enrolled with AS %s (fingerprint %s); identity stored in %s", asURL, fp, dir)
 	}
 	client, err := id.MTLSClient()
 	if err != nil {
