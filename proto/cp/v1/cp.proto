@@ -22,6 +22,10 @@ service SpawnService {
   rpc ListSessions(ListSessionsRequest)   returns (ListSessionsResponse);
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
   rpc CloseSession(CloseSessionRequest)   returns (CloseSessionResponse);
+  // Owner-sealed secret delivery (sp-2ckv.4): the owner client fetches the hosting node's verified
+  // key material, seals locally, and hands the ciphertext back for the CP to relay (ciphertext-only).
+  rpc GetSpawnNodeKey(GetSpawnNodeKeyRequest) returns (GetSpawnNodeKeyResponse);
+  rpc DeliverSecrets(DeliverSecretsRequest)   returns (DeliverSecretsResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -194,3 +198,24 @@ message SetAppListingResponse {}
 
 message ListMyAppsRequest  {}
 message ListMyAppsResponse { repeated AppSummary apps = 1; }
+
+// --- Owner-sealed secret delivery (sp-2ckv.4) -------------------------------
+
+// One owner-sealed secret: the agent-side target path the unsealed plaintext lands at (RELATIVE to the
+// per-spawn secrets tmpfs mount), the HPKE ciphertext sealed by the owner client to the node's verified
+// sub-key (JSON-encoded seal.NodeSealed — the CP never unseals it), and an opaque secret id for logs.
+message SealedSecret { string target_path = 1; bytes sealed = 2; string secret_id = 3; }
+
+// GetSpawnNodeKey returns the hosting node's relayed key material so the owner client can verify the
+// node (pinned roots + SAN + revocation + sub-key signature) and seal to it. generation is the spawn's
+// live episode generation — the owner binds it into the in-flight AAD so a ciphertext is useless against
+// any other episode. node_cert_chain is the node's leaf+chain PEM (captured from the node's mTLS to the
+// CP; empty in insecure/dev mode, where verification is relaxed). signed_subkey is the JSON SignedSubKey.
+message GetSpawnNodeKeyRequest  { string spawn_id = 1; }
+message GetSpawnNodeKeyResponse { bytes node_cert_chain = 1; bytes signed_subkey = 2; uint64 generation = 3; }
+
+// DeliverSecrets hands the CP owner-sealed ciphertext to relay to the spawn's live node (ciphertext-only;
+// the CP stores nothing in plaintext and never unseals). The CP stamps the live generation and forwards
+// a SecretDelivery on the node's Attach stream.
+message DeliverSecretsRequest  { string spawn_id = 1; repeated SealedSecret secrets = 2; }
+message DeliverSecretsResponse {}

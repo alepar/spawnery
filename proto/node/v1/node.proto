@@ -34,8 +34,19 @@ message CPMessage {
     CreateSession create_session = 7;     // CP -> node: launch an additional session (impl: sp-npxq.3)
     CloseSession  close_session  = 8;     // CP -> node: reap one session
     SetModel      set_model      = 9;      // CP -> node: switch the running pod's effective model (generation-fenced)
+    SecretDelivery secret_delivery = 10;   // CP -> node: relay owner-sealed secret ciphertext (sp-2ckv.4)
   }
 }
+
+// One owner-sealed secret in a SecretDelivery: the agent-side target path the unsealed plaintext is
+// written to (RELATIVE to the per-spawn secrets tmpfs mount), the HPKE ciphertext sealed to the node's
+// sub-key (JSON-encoded seal.NodeSealed — opaque to the CP), and an opaque secret id for logs/dedup.
+message SealedSecret { string target_path = 1; bytes sealed = 2; string secret_id = 3; }
+// CP -> node: deliver owner-sealed secret ciphertext for a spawn (sp-2ckv.4). generation fences the
+// delivery against a superseded pod (node-side staleGen drop) AND binds the in-flight HPKE AAD, so a
+// ciphertext sealed for one episode cannot open against another. The CP relays bytes only — it never
+// unseals (ciphertext-only relay; the node holds the sub-key private half and unseals).
+message SecretDelivery { string spawn_id = 1; uint64 generation = 2; repeated SealedSecret secrets = 3; }
 
 // Per-mount backend binding chosen at create/resume (CP -> node).
 message MountBinding { string name = 1; string backend_uri = 2; }
@@ -44,8 +55,13 @@ message MountMarker  { string name = 1; string marker = 2; }
 // One entry of a node's running-container inventory (node -> CP on Register/Heartbeat).
 message RunningSpawn { string spawn_id = 1; uint64 generation = 2; SpawnPhase phase = 3; }
 
-message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string agent_images = 3; repeated RunningSpawn running = 4; string node_class = 5; string node_owner = 6; repeated string binaries = 7; }
-message Heartbeat   { uint32 active_spawns = 1; uint32 free_slots = 2; uint32 cpu_pct = 3; uint32 gpu_pct = 4; repeated RunningSpawn running = 5; }
+// signed_subkey (field 8): the node's current SignedSubKey (JSON-encoded subkey.SignedSubKey) — its
+// cert-signed HPKE encryption sub-key, published so the CP can relay it to owner clients for sealing
+// (sp-2ckv.4 §1). Empty when the node has no signing identity (insecure/dev mode publishes no sub-key).
+message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string agent_images = 3; repeated RunningSpawn running = 4; string node_class = 5; string node_owner = 6; repeated string binaries = 7; bytes signed_subkey = 8; }
+// signed_subkey (field 6): re-published on rotation (the node rotates at half-life) so the CP's cached
+// sub-key stays fresh without a dedicated message. Empty on heartbeats that carry no rotation.
+message Heartbeat   { uint32 active_spawns = 1; uint32 free_slots = 2; uint32 cpu_pct = 3; uint32 gpu_pct = 4; repeated RunningSpawn running = 5; bytes signed_subkey = 6; }
 message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; uint64 generation = 4; }
 message StartSpawn  { string spawn_id = 1; string app_ref = 2; string data_ref = 3; string model = 4; uint64 generation = 5; repeated MountBinding mounts = 6; string name = 7; string app_id = 8; string image = 9; string runnable_id = 10; string mode = 11; }
 message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }

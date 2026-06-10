@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -21,6 +22,12 @@ import (
 
 type ManagerConfig struct {
 	AgentImage, SidecarImage, OpenRouterKey, DataRoot string
+
+	// SecretsRoot is the per-node root for owner-sealed secret tmpfs dirs (design §6). Each spawn gets
+	// a subdir here, bind-mounted into the agent at SecretsMountPath; the node writes unsealed plaintext
+	// into it (0600). Default DataRoot/secrets. Production should point this at a tmpfs (memory-backed)
+	// so plaintext never touches durable disk.
+	SecretsRoot string
 	SidecarPort                                       int // default 8080
 
 	NodeID           string // this node's id (stamped on container labels for reconcile); "" standalone
@@ -50,6 +57,9 @@ type Manager struct {
 	// journalState durably pins per-mount manifest ids on suspend so a same-node
 	// resume restores node-local journaled mounts without any CP protocol.
 	journalState *journalStateStore
+	// secrets injects owner-sealed secret plaintext into each spawn's tmpfs secrets dir (design §6).
+	// Always set (NewManagerWithBackend defaults SecretsRoot); the node calls InjectSecret after unseal.
+	secrets SecretInjector
 }
 
 // SetJournal installs the transient-tier journaler (design §1b) plus the
@@ -88,12 +98,16 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 	if cfg.PidsLimit == 0 {
 		cfg.PidsLimit = 256
 	}
+	if cfg.SecretsRoot == "" {
+		cfg.SecretsRoot = filepath.Join(cfg.DataRoot, "secrets")
+	}
 	return &Manager{
 		pod:     pod,
 		cfg:     cfg,
 		store:   NewStore(),
 		backend: storage.NewScratch(cfg.DataRoot),
 		fw:      fw,
+		secrets: SecretInjector{Root: cfg.SecretsRoot},
 	}
 }
 
@@ -345,6 +359,17 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		mounts = append(mounts, runtime.Mount{HostPath: hostDir, ContainerPath: "/app/" + mt.Path})
 	}
 
+	// Owner-sealed secrets tmpfs (design §6): a per-spawn dir under SecretsRoot, bind-mounted into the
+	// agent at SecretsMountPath. The node writes unsealed plaintext here on SecretDelivery; the agent
+	// reads its credentials in place. Created empty at start (secrets arrive over the delivery protocol,
+	// not at spawn time) and removed on teardown. SecretsRoot should be a tmpfs in production.
+	secretsDir := m.secrets.DirFor(id)
+	if err := os.MkdirAll(secretsDir, 0o700); err != nil {
+		finalizeAll()
+		return nil, fmt.Errorf("prepare secrets dir: %w", err)
+	}
+	mounts = append(mounts, runtime.Mount{HostPath: secretsDir, ContainerPath: SecretsMountPath})
+
 	res := runtime.Resources{
 		MemoryBytes: m.cfg.MemLimitMB << 20,
 		NanoCPUs:    int64(m.cfg.CPULimit * 1e9),
@@ -510,8 +535,23 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn) map[string]string {
 	for _, d := range sp.MountDirs {
 		_ = m.backend.Finalize(ctx, d)
 	}
+	// Owner-sealed secret plaintext must not outlive the episode (design §6 never-persist): drop the
+	// per-spawn secrets dir. Best-effort — a leftover dir is reseeded empty on the next Create.
+	if serr := m.secrets.Remove(id); serr != nil {
+		log.Printf("secrets dir cleanup for %s: %v", id, serr)
+	}
 	m.store.Delete(id)
 	return markers
+}
+
+// InjectSecret writes one unsealed secret's plaintext into spawnID's tmpfs secrets dir at target
+// (design §6). The node calls this after OpenDelivered; the agent reads the file in place. Returns the
+// host path written (for logging). Plaintext is the caller's responsibility to obtain via the sub-key.
+func (m *Manager) InjectSecret(spawnID, target string, plaintext []byte) (string, error) {
+	if _, ok := m.store.Get(spawnID); !ok {
+		return "", fmt.Errorf("unknown spawn %s", spawnID)
+	}
+	return m.secrets.Write(spawnID, target, plaintext)
 }
 
 // newControlToken returns a 256-bit random hex string used as the sidecar control-endpoint

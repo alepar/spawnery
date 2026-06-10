@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"time"
@@ -35,7 +36,11 @@ func Middleware(mode Mode, root *x509.Certificate, next http.Handler) http.Handl
 				http.Error(w, "node authentication required", http.StatusUnauthorized)
 				return
 			}
-			r = r.WithContext(WithIdentity(r.Context(), id))
+			ctx := WithIdentity(r.Context(), id)
+			// Stash the peer's leaf+intermediate chain as PEM so the CP can relay it (untrusted) to owner
+			// clients via GetSpawnNodeKey — they re-verify it against pinned roots (sp-2ckv.4 §3).
+			ctx = WithCertChain(ctx, certChainPEM(r.TLS))
+			r = r.WithContext(ctx)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -53,6 +58,7 @@ func DeriveIdentity(state *tls.ConnectionState, root *x509.Certificate, now time
 }
 
 type ctxKey struct{}
+type certChainKey struct{}
 
 // WithIdentity stashes a verified node identity on the context (set by the CP's node-auth middleware,
 // read by the Attach handler).
@@ -64,4 +70,28 @@ func WithIdentity(ctx context.Context, id pki.Identity) context.Context {
 func IdentityFromContext(ctx context.Context) (pki.Identity, bool) {
 	id, ok := ctx.Value(ctxKey{}).(pki.Identity)
 	return id, ok
+}
+
+// WithCertChain stashes the node's verified leaf+chain PEM on the context (enforced mode only).
+func WithCertChain(ctx context.Context, pem []byte) context.Context {
+	return context.WithValue(ctx, certChainKey{}, pem)
+}
+
+// CertChainFromContext returns the node's leaf+chain PEM if the connection was mTLS-authenticated
+// (enforced mode). Empty in insecure/dev mode — the owner client then seals with relaxed verification.
+func CertChainFromContext(ctx context.Context) ([]byte, bool) {
+	b, ok := ctx.Value(certChainKey{}).([]byte)
+	return b, ok && len(b) > 0
+}
+
+// certChainPEM encodes the TLS peer's leaf + intermediate certificates as concatenated PEM.
+func certChainPEM(state *tls.ConnectionState) []byte {
+	if state == nil {
+		return nil
+	}
+	var out []byte
+	for _, c := range state.PeerCertificates {
+		out = append(out, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})...)
+	}
+	return out
 }
