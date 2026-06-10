@@ -70,6 +70,10 @@ type SpawnRepo interface {
 	SetSuspending(ctx context.Context, id string, gen int64) error
 	SetMountMarker(ctx context.Context, id, mount, marker string) error
 	SetSuspended(ctx context.Context, id string, gen int64) error
+	// RevertSuspended is the migration "defined failure" transition (sp-u53.5.3): a starting episode
+	// whose resume-on-target failed rolls BACK to suspended (gen-fenced), ending the target container
+	// row so the prior suspend's markers stay the recoverable state. starting -> suspended.
+	RevertSuspended(ctx context.Context, id string, gen int64) error
 	SetError(ctx context.Context, id string) error
 	EndContainer(ctx context.Context, id string, gen int64, p Phase) error
 	MarkUnreachable(ctx context.Context, ids []string) (int, error)

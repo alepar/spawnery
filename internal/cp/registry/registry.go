@@ -114,9 +114,17 @@ func (r *Registry) Heartbeat(id string, token uint64, active, free uint32) {
 
 // Placement carries the spawn's owner. Node eligibility is the TENANCY rule (sp-cf0): a cloud node is
 // multi-tenant (accepts any owner); a self-hosted node is single-tenant (only its bound owner's spawns).
+//
+// TargetNodeID and RequireClass are the MIGRATION placement override (sp-u53.5.3): when TargetNodeID
+// is set, ONLY that exact node is eligible; when RequireClass is set (e.g. "cloud"), only nodes of
+// that class are. Both ride ON TOP of the tenancy + image filters — a forced self-hosted target still
+// has to be owner-bound — so the override can never escape tenancy.
 type Placement struct {
 	Owner string
 	Image string // if set, the node must advertise this image
+
+	TargetNodeID string // if set, only the node with this exact id is eligible
+	RequireClass string // if set, only nodes whose Class matches are eligible
 }
 
 // eligibleForOwner reports whether a node may run a spawn owned by owner, per the tenancy rule.
@@ -142,6 +150,12 @@ func (r *Registry) PickFor(p Placement) *Node {
 		if p.Image != "" && !slices.Contains(n.Images, p.Image) {
 			continue
 		}
+		if p.TargetNodeID != "" && n.ID != p.TargetNodeID {
+			continue // migration override: forced to a specific node
+		}
+		if p.RequireClass != "" && n.Class != p.RequireClass {
+			continue // migration override: forced to a node class (e.g. cloud)
+		}
 		if best == nil || n.Free > best.Free {
 			best = n
 		}
@@ -151,3 +165,17 @@ func (r *Registry) PickFor(p Placement) *Node {
 
 // Pick returns the node with the most free slots (>0), or nil if none.
 func (r *Registry) Pick() *Node { return r.PickFor(Placement{}) }
+
+// TargetEligible reports, for a forced migration target, whether the named node exists AND is
+// tenancy-eligible for owner (a self-hosted node is owner-bound; a cloud node is multi-tenant). It is
+// the up-front tenancy gate so MigrateSpawn rejects a foreign self-hosted target BEFORE suspending the
+// source — leaving the spawn untouched rather than suspended-then-unplaceable.
+func (r *Registry) TargetEligible(nodeID, owner string) (exists, eligible bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n, ok := r.m[nodeID]
+	if !ok {
+		return false, false
+	}
+	return true, eligibleForOwner(n, owner)
+}

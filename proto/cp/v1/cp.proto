@@ -26,6 +26,15 @@ service SpawnService {
   // key material, seals locally, and hands the ciphertext back for the CP to relay (ciphertext-only).
   rpc GetSpawnNodeKey(GetSpawnNodeKeyRequest) returns (GetSpawnNodeKeyResponse);
   rpc DeliverSecrets(DeliverSecretsRequest)   returns (DeliverSecretsResponse);
+  // Data-only local<->cloud migration (sp-u53.5.3): claim-guarded suspend on the source node ->
+  // resume with a placement override on the target. The owner client re-delivers the owner-sealed
+  // journal key to the target via DeliverSecrets so the journaled mounts restore there.
+  rpc MigrateSpawn(MigrateSpawnRequest) returns (MigrateSpawnResponse);
+  // Owner-sealed journal-key ciphertext custody (sp-u53.5.4 deferred to this slice): the owner client
+  // fetches the at-rest owner-sealed ciphertext to unseal+reseal on a migration, and (on the
+  // node-local -> owner-sealed upgrade) stores it. Owner-only; the CP holds ONLY ciphertext.
+  rpc GetJournalKeyCiphertext(GetJournalKeyCiphertextRequest) returns (GetJournalKeyCiphertextResponse);
+  rpc PutJournalKeyCiphertext(PutJournalKeyCiphertextRequest) returns (PutJournalKeyCiphertextResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -219,3 +228,19 @@ message GetSpawnNodeKeyResponse { bytes node_cert_chain = 1; bytes signed_subkey
 // a SecretDelivery on the node's Attach stream.
 message DeliverSecretsRequest  { string spawn_id = 1; repeated SealedSecret secrets = 2; }
 message DeliverSecretsResponse {}
+
+// MigrateSpawn picks the resume target either by exact node id (target_node_id) or, when that is
+// empty, by node CLASS (target_class, e.g. "cloud"). Tenancy still applies: a self-hosted target
+// must belong to the spawn owner. node_id in the response is the node the spawn resumed on.
+message MigrateSpawnRequest  { string spawn_id = 1; string target_node_id = 2; string target_class = 3; }
+message MigrateSpawnResponse { string node_id = 1; }
+
+// JournalKeyCiphertext is one mount's owner-sealed journal-password ciphertext (a JSON-encoded
+// seal.Envelope, opaque to the CP). mount is the originating mount label (journalkey.SecretID
+// namespace); ciphertext is the at-rest owner-sealed bytes.
+message JournalKeyCiphertext { string mount = 1; bytes ciphertext = 2; }
+
+message GetJournalKeyCiphertextRequest  { string spawn_id = 1; }
+message GetJournalKeyCiphertextResponse { repeated JournalKeyCiphertext entries = 1; }
+message PutJournalKeyCiphertextRequest  { string spawn_id = 1; repeated JournalKeyCiphertext entries = 2; }
+message PutJournalKeyCiphertextResponse {}
