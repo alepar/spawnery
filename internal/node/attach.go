@@ -356,9 +356,14 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		// generation fence above stays SYNCHRONOUS (reads the live gen here). The reply goes via a.send,
 		// which is sendMu-guarded — safe from this goroutine (matches the other async-dispatch handlers).
 		go a.setModel(ctx, m.SetModel)
+	case *nodev1.CPMessage_Suspend:
+		if a.staleGen(m.Suspend.SpawnId, m.Suspend.Generation) {
+			return // stale generation: a newer pod exists; drop (matches Stop/SetModel). Keep the fence SYNCHRONOUS.
+		}
+		// Async like setModel/startSpawn: the suspend persists mounts (a journal final snapshot can
+		// block) + tears the pod down, so it must not stall the single per-connection Receive loop.
+		go a.suspendSpawn(ctx, m.Suspend)
 	default:
-		// TODO(sp-gd9): handle *nodev1.CPMessage_Suspend (persist mounts + tear down, then emit
-		// NodeMessage_SuspendComplete with per-mount markers). Inert until the suspend path lands.
 	}
 }
 
@@ -459,12 +464,14 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.status(st.SpawnId, nodev1.SpawnPhase_ACTIVE, "")
 }
 
-func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
-	// Reap every session of the spawn: session #0 plus any additional sessions 1..N (sp-npxq.3). The
-	// container itself is torn down by mgr.Stop below, so additional acp tmux wrappers + their pool
-	// ports die with it (the whole registry — including its ports map — is dropped here); no per-session
-	// KillTmux is needed.
+// reapSessions removes every session of spawnID — session #0 plus any additional sessions 1..N
+// (sp-npxq.3) — from the attacher's registries under the lock, and returns the pumps + tmux relays
+// to stop OUTSIDE the lock. The container itself is torn down by mgr.Stop/Suspend, so additional acp
+// tmux wrappers + their pool ports die with it (the whole registry — including its ports map — is
+// dropped here); no per-session KillTmux is needed. Shared by stopSpawn and suspendSpawn.
+func (a *attacher) reapSessions(spawnID string) ([]*Pump, []*tmuxRelay) {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	var ps []*Pump
 	for k, p := range a.pumps {
 		if k.spawnID == spawnID {
@@ -485,7 +492,22 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 		}
 	}
 	delete(a.sessions, spawnID)
+	return ps, relays
+}
+
+// releaseSlot frees the spawn's single capacity slot. Capacity is one slot per SPAWN, not per
+// session: additional sessions never incremented a.active (plan decision 7), so this releases exactly
+// the spawn's single slot. Shared by stopSpawn and suspendSpawn.
+func (a *attacher) releaseSlot() {
+	a.mu.Lock()
+	if a.active > 0 {
+		a.active--
+	}
 	a.mu.Unlock()
+}
+
+func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
+	ps, relays := a.reapSessions(spawnID)
 	for _, p := range ps {
 		p.stop()
 	}
@@ -495,14 +517,39 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 	if err := a.mgr.Stop(ctx, spawnID); err != nil {
 		logErr("stopSpawn "+spawnID, err)
 	}
-	a.mu.Lock()
-	// Capacity is one slot per SPAWN, not per session: additional sessions never incremented a.active
-	// (plan decision 7), so stopSpawn releases exactly the spawn's single slot.
-	if a.active > 0 {
-		a.active--
-	}
-	a.mu.Unlock()
+	a.releaseSlot()
 	a.status(spawnID, nodev1.SpawnPhase_STOPPED, "")
+}
+
+// suspendSpawn persists the spawn's mounts and tears the pod down, then reports the per-mount persist
+// markers to the CP (NodeMessage_SuspendComplete, carrying the request's generation so the CP can
+// fence a stale episode) and goes SUSPENDED. Mirrors stopSpawn's session reap + slot release, but
+// uses Manager.Suspend (which RETURNS the markers from the journal final snapshot) in place of Stop.
+// Generation fencing is done by the caller (handle). Runs on its own goroutine.
+func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
+	spawnID := m.SpawnId
+	ps, relays := a.reapSessions(spawnID)
+	for _, p := range ps {
+		p.stop()
+	}
+	for _, r := range relays {
+		r.stop()
+	}
+	markers, err := a.mgr.Suspend(ctx, spawnID)
+	if err != nil {
+		logErr("suspendSpawn "+spawnID, err)
+		a.status(spawnID, nodev1.SpawnPhase_ERROR, err.Error())
+		return
+	}
+	a.releaseSlot()
+	mm := make([]*nodev1.MountMarker, 0, len(markers))
+	for name, marker := range markers {
+		mm = append(mm, &nodev1.MountMarker{Name: name, Marker: marker})
+	}
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SuspendComplete{SuspendComplete: &nodev1.SuspendComplete{
+		SpawnId: spawnID, Generation: m.Generation, Markers: mm,
+	}}})
+	a.status(spawnID, nodev1.SpawnPhase_SUSPENDED, "")
 }
 
 // setModel applies a CP SetModel to the running pod by POSTing the new model to the per-pod sidecar
