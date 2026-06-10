@@ -76,8 +76,14 @@ Coverage and shape:
   triggers it, only on the current generation's node. (This replaces lifecycle §6.1's
   "backend fences server-side compare-and-set" for the journal: fencing is reader-side
   manifest selection + maintenance discipline.)
-- **Store isolation:** per-spawn Garage credentials (key per spawn, prefix-scoped), minted by
-  the CP, revoked on spawn **delete** (not per-generation — generations share the repo).
+- **Store isolation:** **bucket-per-spawn + per-spawn Garage access key** granted rw on that
+  bucket only (Garage's permission model is per-access-key-per-bucket — no IAM/prefix policies),
+  minted by the CP via the Garage admin API at create, revoked on spawn **delete** (not
+  per-generation — generations share the repo). Cross-spawn access is impossible at the store;
+  confidentiality is additionally covered by Kopia's client-side encryption (manifests/indexes
+  included). Keys live only in the node daemon — spawn containers never hold them. Residual
+  (accepted): within its own bucket the key holder can delete (Garage has no object-lock);
+  blast radius = that one spawn, durability floor = the git persistent tier.
 - **Declared replay guarantee:** per-file atomic (debounce quiesces; scan sees complete files),
   cross-file best-effort, git index self-heals (and travels in the snapshot anyway).
 - **Persist markers (sp-a7fs):** `spawn_mounts.persist_marker` = the suspend snapshot's
