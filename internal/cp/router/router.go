@@ -267,3 +267,19 @@ func (r *Router) SuspendOnNode(spawnID string, generation uint64) {
 		_ = rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Suspend{Suspend: &nodev1.Suspend{SpawnId: spawnID, Generation: generation}}})
 	}
 }
+
+// DeliverSecrets relays owner-sealed secret ciphertext to the spawn's hosting node (sp-2ckv.4). The CP
+// is a transparent ciphertext relay — it never inspects or unseals `secrets`. generation stamps the
+// SecretDelivery so the node-side staleGen fence drops a delivery for a superseded pod, and it binds the
+// in-flight AAD. Returns an error if the spawn has no live route (the owner retries after a resume).
+func (r *Router) DeliverSecrets(spawnID string, generation uint64, secrets []*nodev1.SealedSecret) error {
+	r.mu.Lock()
+	rt, ok := r.m[spawnID]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("unknown spawn: %s", spawnID)
+	}
+	return rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_SecretDelivery{SecretDelivery: &nodev1.SecretDelivery{
+		SpawnId: spawnID, Generation: generation, Secrets: secrets,
+	}}})
+}

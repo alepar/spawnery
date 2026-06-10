@@ -58,6 +58,10 @@ type Server struct {
 	giveUp            map[string]reconcileAttempt // spawn id -> first-attempt time for current model; reconciler-goroutine-only (no lock)
 
 	maxSpawnsPerOwner int
+
+	// nodeKeys caches each node's published HPKE sub-key + relayed cert chain (sp-2ckv.4), refreshed on
+	// Register/Heartbeat. GetSpawnNodeKey serves it to owner clients; the CP relays — never unseals.
+	nodeKeys *nodeKeyCache
 }
 
 const (
@@ -74,7 +78,7 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout,
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
-		now: time.Now, giveUp: map[string]reconcileAttempt{}}
+		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache()}
 }
 
 // --- node side: NodeService/Attach ----------------------------------------
@@ -151,10 +155,18 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			}
 			token = tok
 			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, nodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
+			// Cache the node's published sub-key + relayed cert chain (sp-2ckv.4). The chain is the
+			// mTLS-verified peer chain (empty in insecure mode); the sub-key is the node's published JSON.
+			certChain, _ := nodeauth.CertChainFromContext(ctx)
+			s.nodeKeys.put(nodeID, m.Register.SignedSubkey, certChain)
 			s.reconcileInventory(ctx, nodeID, sender, m.Register.Running) // a returning node reports what it still runs
 			s.upsertAgentCatalog(ctx, m.Register.AgentImages, m.Register.Binaries)
 		case *nodev1.NodeMessage_Heartbeat:
 			s.reg.Heartbeat(nodeID, token, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
+			if len(m.Heartbeat.SignedSubkey) > 0 {
+				certChain, _ := nodeauth.CertChainFromContext(ctx)
+				s.nodeKeys.put(nodeID, m.Heartbeat.SignedSubkey, certChain) // sub-key rotated -> refresh cache
+			}
 			s.reconcileInventory(ctx, nodeID, sender, m.Heartbeat.Running)
 		case *nodev1.NodeMessage_Status:
 			s.sched.OnStatus(m.Status.SpawnId, m.Status.Phase)

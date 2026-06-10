@@ -84,6 +84,12 @@ const (
 	// SpawnServiceCloseSessionProcedure is the fully-qualified name of the SpawnService's CloseSession
 	// RPC.
 	SpawnServiceCloseSessionProcedure = "/cp.v1.SpawnService/CloseSession"
+	// SpawnServiceGetSpawnNodeKeyProcedure is the fully-qualified name of the SpawnService's
+	// GetSpawnNodeKey RPC.
+	SpawnServiceGetSpawnNodeKeyProcedure = "/cp.v1.SpawnService/GetSpawnNodeKey"
+	// SpawnServiceDeliverSecretsProcedure is the fully-qualified name of the SpawnService's
+	// DeliverSecrets RPC.
+	SpawnServiceDeliverSecretsProcedure = "/cp.v1.SpawnService/DeliverSecrets"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -107,6 +113,10 @@ type SpawnServiceClient interface {
 	ListSessions(context.Context, *connect.Request[v1.ListSessionsRequest]) (*connect.Response[v1.ListSessionsResponse], error)
 	CreateSession(context.Context, *connect.Request[v1.CreateSessionRequest]) (*connect.Response[v1.CreateSessionResponse], error)
 	CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error)
+	// Owner-sealed secret delivery (sp-2ckv.4): the owner client fetches the hosting node's verified
+	// key material, seals locally, and hands the ciphertext back for the CP to relay (ciphertext-only).
+	GetSpawnNodeKey(context.Context, *connect.Request[v1.GetSpawnNodeKeyRequest]) (*connect.Response[v1.GetSpawnNodeKeyResponse], error)
+	DeliverSecrets(context.Context, *connect.Request[v1.DeliverSecretsRequest]) (*connect.Response[v1.DeliverSecretsResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -234,6 +244,18 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("CloseSession")),
 			connect.WithClientOptions(opts...),
 		),
+		getSpawnNodeKey: connect.NewClient[v1.GetSpawnNodeKeyRequest, v1.GetSpawnNodeKeyResponse](
+			httpClient,
+			baseURL+SpawnServiceGetSpawnNodeKeyProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("GetSpawnNodeKey")),
+			connect.WithClientOptions(opts...),
+		),
+		deliverSecrets: connect.NewClient[v1.DeliverSecretsRequest, v1.DeliverSecretsResponse](
+			httpClient,
+			baseURL+SpawnServiceDeliverSecretsProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("DeliverSecrets")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -258,6 +280,8 @@ type spawnServiceClient struct {
 	listSessions       *connect.Client[v1.ListSessionsRequest, v1.ListSessionsResponse]
 	createSession      *connect.Client[v1.CreateSessionRequest, v1.CreateSessionResponse]
 	closeSession       *connect.Client[v1.CloseSessionRequest, v1.CloseSessionResponse]
+	getSpawnNodeKey    *connect.Client[v1.GetSpawnNodeKeyRequest, v1.GetSpawnNodeKeyResponse]
+	deliverSecrets     *connect.Client[v1.DeliverSecretsRequest, v1.DeliverSecretsResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -355,6 +379,16 @@ func (c *spawnServiceClient) CloseSession(ctx context.Context, req *connect.Requ
 	return c.closeSession.CallUnary(ctx, req)
 }
 
+// GetSpawnNodeKey calls cp.v1.SpawnService.GetSpawnNodeKey.
+func (c *spawnServiceClient) GetSpawnNodeKey(ctx context.Context, req *connect.Request[v1.GetSpawnNodeKeyRequest]) (*connect.Response[v1.GetSpawnNodeKeyResponse], error) {
+	return c.getSpawnNodeKey.CallUnary(ctx, req)
+}
+
+// DeliverSecrets calls cp.v1.SpawnService.DeliverSecrets.
+func (c *spawnServiceClient) DeliverSecrets(ctx context.Context, req *connect.Request[v1.DeliverSecretsRequest]) (*connect.Response[v1.DeliverSecretsResponse], error) {
+	return c.deliverSecrets.CallUnary(ctx, req)
+}
+
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -376,6 +410,10 @@ type SpawnServiceHandler interface {
 	ListSessions(context.Context, *connect.Request[v1.ListSessionsRequest]) (*connect.Response[v1.ListSessionsResponse], error)
 	CreateSession(context.Context, *connect.Request[v1.CreateSessionRequest]) (*connect.Response[v1.CreateSessionResponse], error)
 	CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error)
+	// Owner-sealed secret delivery (sp-2ckv.4): the owner client fetches the hosting node's verified
+	// key material, seals locally, and hands the ciphertext back for the CP to relay (ciphertext-only).
+	GetSpawnNodeKey(context.Context, *connect.Request[v1.GetSpawnNodeKeyRequest]) (*connect.Response[v1.GetSpawnNodeKeyResponse], error)
+	DeliverSecrets(context.Context, *connect.Request[v1.DeliverSecretsRequest]) (*connect.Response[v1.DeliverSecretsResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -499,6 +537,18 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("CloseSession")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceGetSpawnNodeKeyHandler := connect.NewUnaryHandler(
+		SpawnServiceGetSpawnNodeKeyProcedure,
+		svc.GetSpawnNodeKey,
+		connect.WithSchema(spawnServiceMethods.ByName("GetSpawnNodeKey")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceDeliverSecretsHandler := connect.NewUnaryHandler(
+		SpawnServiceDeliverSecretsProcedure,
+		svc.DeliverSecrets,
+		connect.WithSchema(spawnServiceMethods.ByName("DeliverSecrets")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
@@ -539,6 +589,10 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceCreateSessionHandler.ServeHTTP(w, r)
 		case SpawnServiceCloseSessionProcedure:
 			spawnServiceCloseSessionHandler.ServeHTTP(w, r)
+		case SpawnServiceGetSpawnNodeKeyProcedure:
+			spawnServiceGetSpawnNodeKeyHandler.ServeHTTP(w, r)
+		case SpawnServiceDeliverSecretsProcedure:
+			spawnServiceDeliverSecretsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -622,4 +676,12 @@ func (UnimplementedSpawnServiceHandler) CreateSession(context.Context, *connect.
 
 func (UnimplementedSpawnServiceHandler) CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.CloseSession is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetSpawnNodeKey(context.Context, *connect.Request[v1.GetSpawnNodeKeyRequest]) (*connect.Response[v1.GetSpawnNodeKeyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetSpawnNodeKey is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) DeliverSecrets(context.Context, *connect.Request[v1.DeliverSecretsRequest]) (*connect.Response[v1.DeliverSecretsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DeliverSecrets is not implemented"))
 }

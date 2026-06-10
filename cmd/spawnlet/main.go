@@ -22,7 +22,9 @@ import (
 	"spawnery/internal/authsvc"
 	"spawnery/internal/node"
 	"spawnery/internal/node/nodeid"
+	"spawnery/internal/pki"
 	"spawnery/internal/runtime"
+	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/runtime/cri"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/spawnlet/firewall"
@@ -103,6 +105,12 @@ func main() {
 			log.Fatalf("node: identity/transport setup: %v", err)
 		}
 		cfg.CPURL = dialURL
+		// Owner-sealed secrets (sp-2ckv.4): in enforced mode build the HPKE sub-key holder signed by the
+		// node's cert key, so the node can publish a sub-key and unseal delivered secrets. Best-effort:
+		// insecure mode (no cert) and a key-parse failure both leave SubKeys nil (no sub-key published).
+		if sk := nodeSubKeys(cfg.NodeID); sk != nil {
+			cfg.SubKeys = sk
+		}
 		log.Printf("spawnlet attaching to CP at %s as %s", cfg.CPURL, cfg.NodeID)
 		err = node.Run(ctx, mgr, httpc, cfg) // returns when ctx is cancelled (signal) or on fatal error
 		gracefulStopAll(mgr)
@@ -253,6 +261,29 @@ func nodeCPClient(insecureURL, nodeID string) (*http.Client, string, error) {
 		return nil, "", err
 	}
 	return client, env("CP_NODE_ADDR", "https://127.0.0.1:8081"), nil
+}
+
+// nodeSubKeys builds the node's HPKE sub-key holder from its enrolled cert key (sp-2ckv.4 §1), so the
+// node can publish a cert-signed sub-key and unseal owner-delivered secrets. Returns nil in insecure
+// mode (no identity) or if the on-disk key cannot be loaded/parsed — the node then publishes no sub-key
+// and rejects SecretDelivery. The sub-key is signed by the SAME key as the node leaf cert (the RFC 9345
+// delegated-credential pattern), so a sealing client verifies it chains to the pinned roots.
+func nodeSubKeys(nodeID string) *subkey.Node {
+	if env("NODE_AUTH_MODE", "insecure") != "enforced" {
+		return nil
+	}
+	dir := env("NODE_ID_DIR", "/var/lib/spawnlet/identity")
+	id, err := nodeid.Load(dir)
+	if err != nil {
+		log.Printf("subkey: no identity in %s, publishing no HPKE sub-key: %v", dir, err)
+		return nil
+	}
+	key, err := pki.ParseKeyPEM(id.KeyPEM)
+	if err != nil {
+		log.Printf("subkey: parse node key, publishing no HPKE sub-key: %v", err)
+		return nil
+	}
+	return subkey.NewNode(key, nodeID, 0)
 }
 
 func h2cClient() *http.Client {

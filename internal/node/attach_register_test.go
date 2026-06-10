@@ -7,7 +7,7 @@ func TestRegisterMessageIncludesBinaries(t *testing.T) {
 		NodeID: "n1", MaxSpawns: 2, AgentImage: "ghcr.io/acme/goose:1",
 		AgentBinaries: []string{"goose", "opencode"}, NodeClass: "byo", NodeOwner: "alice",
 	}
-	r := registerMessage(cfg, nil)
+	r := registerMessage(cfg, nil, nil)
 	if r.NodeId != "n1" || len(r.AgentImages) != 1 || r.AgentImages[0] != "ghcr.io/acme/goose:1" {
 		t.Fatalf("register basics wrong: %+v", r)
 	}
@@ -16,5 +16,14 @@ func TestRegisterMessageIncludesBinaries(t *testing.T) {
 	}
 	if len(r.Binaries) != 2 || r.Binaries[0] != "goose" || r.Binaries[1] != "opencode" {
 		t.Fatalf("binaries not threaded: %v", r.Binaries)
+	}
+	if r.SignedSubkey != nil {
+		t.Fatalf("no sub-key provided -> SignedSubkey must be nil, got %v", r.SignedSubkey)
+	}
+
+	// A sub-key passed in is threaded onto Register (the owner-sealed-secrets publish, sp-2ckv.4).
+	r2 := registerMessage(cfg, nil, []byte(`{"sub":"key"}`))
+	if string(r2.SignedSubkey) != `{"sub":"key"}` {
+		t.Fatalf("sub-key not threaded onto Register: %q", r2.SignedSubkey)
 	}
 }

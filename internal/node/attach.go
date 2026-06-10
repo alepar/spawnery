@@ -20,6 +20,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/gen/node/v1/nodev1connect"
 	"spawnery/internal/agentcaps"
+	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
 )
 
@@ -49,6 +50,13 @@ type Config struct {
 	AgentBinaries []string // binaries this node's image ships (registry keys: goose, opencode, ...)
 	NodeClass     string
 	NodeOwner     string
+
+	// SubKeys is the node's HPKE sub-key holder (owner-sealed-secrets §1): it generates/re-signs sub-keys
+	// with the node cert key, publishes the current SignedSubKey on Register/Heartbeat, and unseals
+	// delivered ciphertext via OpenDelivered. nil in insecure/dev mode (no signing identity) — then the
+	// node publishes no sub-key and rejects SecretDelivery. Shared across reconnects (it retains private
+	// halves), so it lives in Config (one holder per node process), not per-connection.
+	SubKeys *subkey.Node
 }
 
 // cpStream is the subset of the Connect bidi stream the attacher uses. *connect.BidiStreamForClient
@@ -75,6 +83,12 @@ type attacher struct {
 
 	sendMu sync.Mutex
 	stream cpStream
+
+	// subkeysMu guards cfg.SubKeys + lastSubKeyID: Rotate/Current (publish, from the heartbeat loop +
+	// Register) and OpenDelivered (from the receive loop) race otherwise — subkey.Node is not internally
+	// synchronized.
+	subkeysMu    sync.Mutex
+	lastSubKeyID string // KeyID of the most recently published sub-key (heartbeat re-publishes only on change)
 }
 
 // pendingClient is a client attach that arrived before its session's pump/relay was registered (the
@@ -123,11 +137,11 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 
 // registerMessage builds the node's Register announcement. Extracted for testability and so the
 // node advertises the binaries its image ships (the CP upserts these into the agent-image catalog).
-func registerMessage(cfg Config, running []*nodev1.RunningSpawn) *nodev1.Register {
+func registerMessage(cfg Config, running []*nodev1.RunningSpawn, signedSubKey []byte) *nodev1.Register {
 	return &nodev1.Register{
 		NodeId: cfg.NodeID, MaxSpawns: cfg.MaxSpawns, AgentImages: []string{cfg.AgentImage},
 		NodeClass: cfg.NodeClass, NodeOwner: cfg.NodeOwner, Binaries: cfg.AgentBinaries,
-		Running: running,
+		Running: running, SignedSubkey: signedSubKey,
 	}
 }
 
@@ -151,7 +165,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 	a.stream = client.Attach(connCtx)
 
 	if err := a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{
-		Register: registerMessage(cfg, a.runningSpawns()),
+		Register: registerMessage(cfg, a.runningSpawns(), a.publishSubKey(time.Now())),
 	}}); err != nil {
 		return err
 	}
@@ -199,6 +213,7 @@ func (a *attacher) heartbeatLoop(ctx context.Context) {
 			free := a.cfg.MaxSpawns - active
 			_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Heartbeat{Heartbeat: &nodev1.Heartbeat{
 				ActiveSpawns: active, FreeSlots: free, Running: a.runningSpawns(),
+				SignedSubkey: a.rotatedSubKey(time.Now()), // re-publish only when the sub-key just rotated
 			}}})
 		}
 	}
@@ -363,6 +378,13 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		// Async like setModel/startSpawn: the suspend persists mounts (a journal final snapshot can
 		// block) + tears the pod down, so it must not stall the single per-connection Receive loop.
 		go a.suspendSpawn(ctx, m.Suspend)
+	case *nodev1.CPMessage_SecretDelivery:
+		if a.staleGen(m.SecretDelivery.SpawnId, m.SecretDelivery.Generation) {
+			return // stale generation: a newer pod exists; the owner re-seals to the current episode. Drop.
+		}
+		// Async: unsealing + writing the tmpfs files must not stall the single per-connection Receive loop.
+		// The generation fence above stays SYNCHRONOUS (reads the live gen here), matching Stop/Suspend.
+		go a.handleSecretDelivery(m.SecretDelivery)
 	default:
 	}
 }
