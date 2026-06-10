@@ -116,11 +116,11 @@ in WebCrypto — use AES-GCM on web). RFC 9180 is IRTF Informational but widely 
 
 ---
 
-## Coverage gaps — what the parallel cloud run must answer
+## Coverage gaps — filled by the parallel cloud run
 
-No claims survived verification in these brief sections (sources were fetched for several —
-Vault response-wrapping docs, KMS grants, RFC 8410, RFC 9345, memory-security-in-Go — but their
-claims didn't survive to verification):
+> **Resolved 2026-06-10:** the [cloud-run report](2026-06-10-owner-sealed-secrets-research-results-cloud.md)
+> covered every gap below (and added a recommended node-enrollment flow). See **Merged
+> synthesis** at the end of this doc. Original gap list kept for the record:
 
 1. **The identity-binding core question:** node HPKE pubkey ↔ existing X.509/mTLS signing
    identity — signed sub-key statement vs RFC 8410 X25519-in-X.509 vs TLS delegated-credential
@@ -148,3 +148,75 @@ describe *intended* design, not audited behavior. Fetched-but-unverified: Vault
 response-wrapping docs, AWS KMS grants + EncryptionContext, RFC 8410, RFC 9345 (delegated
 credentials), Matrix MSC1756, age spec (C2SP), hpke-js, Igalia Secure-Curves survey,
 spacetime.dev Go memory security — all good leads for the gap sections.
+
+---
+
+## Merged synthesis (in-session + cloud runs, 2026-06-10)
+
+The runs **agree on every overlapping conclusion** (ciphertext-only CP proven; HPKE+AAD; Tailnet
+Lock as the trust template; 1Password re-wrap; PRF real-but-gated; KDF client-side with pinned
+params). The cloud run resolves all gaps and sharpens three things:
+
+1. **Identity binding (the core question): cert-signed HPKE sub-key.** The node generates an
+   X25519 HPKE keypair and publishes the pubkey in a small, expiring structure **signed by its
+   mTLS cert key** — the RFC 9345 delegated-credential / Signal signed-prekey pattern. Client
+   verifies cert chain + SAN against pinned roots → verifies sub-key signature → seals to the
+   sub-key. No PKI change, no AS involvement, rotation = re-sign (keep validity short,
+   hours–days; revocation latency = sub-key validity). Rejected: RFC 8410 second-cert (couples
+   to AS issuance) and CSR-time dual-key (couples encryption rotation to re-enrollment).
+2. **Owner custody recommendation (refines the in-session lean): per-device keypairs are the
+   root of trust, not PRF.** (c) per-device non-extractable X25519 keypairs (WebCrypto
+   CryptoKey in IndexedDB; `crypto/ecdh` in Go), secrets sealed multi-recipient to all enrolled
+   devices; device-add = QR/link re-seal from an enrolled device (Signal/Tailnet-Lock style);
+   recovery = BIP-39 code as an always-enrolled "virtual device". (b) Argon2id passphrase as
+   fallback (client-side, params pinned in signed client code — the Bitwarden
+   server-influenced-KDF criticism is the cautionary tale). (a) **PRF demoted to Tier-2
+   convenience unlock**: cross-device PRF works only within one passkey sync fabric, Firefox
+   has no PRF, Windows Hello PRF (KB5077181, 2026-02) is device-bound, and lose-credential =
+   lose-data. Never PRF-only.
+3. **Node enrollment hardening (cloud-run addition):** enrollment tokens scoped to
+   `(accountId, class, node-pubkey-fingerprint, expiry, single-use)`, issued by the AS to the
+   owner's client over a direct pinned connection, redeemed node→AS directly with the CSR —
+   fingerprint binding makes a CP-observed token unredeemable with a substituted key (ACME
+   external-account-binding / Vault response-wrapping properties). Extends sp-ova §3.1 (which
+   had account-scoped single-use tokens but not fingerprint binding). CP's residual power: DoS
+   only.
+
+Other resolved gaps:
+- **Sealing formats:** HPKE for the node leg (native AAD → bind
+  `(spawnId, generation, nodeId, notAfter)`; reject replay/cross-context). age
+  (`filippo.io/age`) is the low-risk Go default for the owner-at-rest multi-recipient envelope
+  (age has **no AAD** natively — fine at rest, wrong for the node leg). libsodium sealed boxes:
+  anonymous-sender only. **COSE-HPKE/JOSE-HPKE are still drafts (-25/-15) — do not build on.**
+  FIPS note: X25519 is non-approved under Go's `fips140=only` — P-256 DHKEM if strict-FIPS
+  nodes ever matter.
+- **WebCrypto reality:** X25519 available across engines **today**; Ed25519 only since Chrome
+  137 (2025-05) — rely broadly ~2027. No native HPKE (noble polyfill or libsodium WASM).
+  **Non-extractable CryptoKeys are a real browser-enforced boundary WASM can't replicate** —
+  XSS can *use* the key while the page is open but can't exfiltrate it; keep device private
+  keys in WebCrypto, use WASM only for envelope ops with ephemeral keys.
+- **Go memory hygiene: best-effort, not a guarantee.** GC copies/moves objects, so
+  mlock-on-heap is near-theater; memguard helps only via off-heap mmap allocations. **The
+  enforceable invariant is never-persist** — test with canary secrets grepped from memory
+  dumps + all written files after episode end; zeroize on suspend.
+- **Headless delegation seams (survey only, design later):** most plausible v1.5 =
+  Vault-style "owner pre-seals + single-use TTL interception-detectable token"; biscuits fit
+  authorization-not-key-delivery; KMS-grant analogue pulls the AS into escrow (defer); 2-of-2
+  CP+AS Shamir split is the only defensible escrow shape (threshold-HPKE itself is
+  research-grade). V1 must leave: signed sub-keys (enables pre-seal-to-future-node), AAD
+  context scoping, and a wrappable owner data key (envelope structure).
+- **Remaining prior art:** Signal SVR / iCloud Keychain escrow = enclave-rate-limited recovery
+  — adopt only if server-assisted recovery is ever wanted; sops `updatekeys` = the
+  re-seal-on-recipient-change operation; Vault cubbyhole is not E2E by itself.
+
+### Design-spec inputs (net)
+
+Owner side: per-device X25519 keypairs (root) + BIP-39 virtual device + Argon2id fallback; PRF
+Tier-2 later. Node side: cert-signed expiring HPKE sub-key over the existing sp-ova identity;
+fingerprint-bound enrollment tokens. Wire: secrets stored CP-side as multi-recipient envelopes
+to device keys; delivery = owner client verifies (pinned roots → SAN → sub-key sig), unseals,
+re-seals via HPKE with `(spawnId, generation, nodeId, notAfter)` AAD; node holds plaintext
+memory-only (memguard as defense-in-depth, never-persist as the tested invariant). Staged: ①
+foundations (sub-key + sealing + device keys) → ② multi-device + recovery → ③ PRF convenience
+→ ④ headless via pre-seal tokens. The dual sealing target (device keys at rest, node sub-keys
+in flight) is the one structural addition over standard designs.

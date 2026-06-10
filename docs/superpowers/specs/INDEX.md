@@ -38,7 +38,8 @@ were already made in one of these docs.
 - [Scheduler Routing (sp-t5p)](2026-06-01-scheduler-routing-sp-t5p.md) — placement by node class + author-self-host rule for unverified apps.
 - [Node Auth & Unified Identity](2026-06-05-node-auth-unified-identity-design.md) — node authentication, auth service, unified identity/tenancy model.
 - [Owner-Sealed Secrets Research Brief](2026-06-10-owner-sealed-secrets-research-brief.md) — deep-research prompt for E2E user secrets (CP ciphertext-only, plaintext only at verified nodes) + key-agreement groundwork atop sp-ova.
-- [Owner-Sealed Secrets Research (Results)](2026-06-10-owner-sealed-secrets-research-results.md) — verified findings: HPKE+AAD sealing, PRF-passkey custody (with mandatory fallback), Tailnet-Lock trust pattern, 1Password re-wrap; gaps listed for the parallel cloud run.
+- [Owner-Sealed Secrets Research (Results + Merged Synthesis)](2026-06-10-owner-sealed-secrets-research-results.md) — verified findings + merged conclusions of both runs: per-device-keypair custody (PRF Tier-2), cert-signed HPKE sub-keys, HPKE+AAD node leg, fingerprint-bound enrollment, never-persist invariant.
+- [Owner-Sealed Secrets Research (Cloud Run)](2026-06-10-owner-sealed-secrets-research-results-cloud.md) — parallel cloud-session report, imported verbatim; fills the in-session gaps (identity binding, headless-delegation survey, format comparison, WebCrypto/Go realities) + recommended enrollment flow.
 - [CRI Thin Byte-Bridge Adapter (sp-j5b)](2026-06-03-cri-thin-adapter-pump-design.md) — collapse the in-pod adapter to a byte-bridge; the node pump owns ACP work.
 - [Node Readiness Probe](2026-06-03-node-readiness-probe-design.md) — "green = actually ready" (not just `mgr.Create` returned).
 
