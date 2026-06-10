@@ -15,8 +15,14 @@ type Config struct {
 	// Backend opens the blob storage for each spawn's repo (filesystem here;
 	// Garage/S3 later). Required.
 	Backend BlobBackend
-	// Custody custodies per-spawn repo passwords (node-local here). Required.
+	// Custody custodies per-spawn repo passwords (node-local default). Required.
 	Custody PasswordProvider
+	// OwnerSealed is the owner-sealed receiving custody (design §4), holding
+	// passwords DELIVERED to this node for cross-node resume / migration. Optional:
+	// when set, a spawn for which a key has been delivered is routed here instead
+	// of Custody (see passwordFor). When nil, only node-local custody is available
+	// and DeliverKey/WaitDelivered error.
+	OwnerSealed *OwnerSealedCustody
 	// Clock is the time source for the adaptive debounce; nil uses the system
 	// clock.
 	Clock Clock
@@ -33,8 +39,9 @@ type Manager struct {
 	cfg   Config
 	clock Clock
 
-	mu     sync.Mutex
-	spawns map[string]*spawnState
+	mu          sync.Mutex
+	spawns      map[string]*spawnState
+	ownerSealed map[string]bool // spawnID -> routed to owner-sealed custody
 }
 
 // spawnState is the live per-spawn journaler state.
@@ -59,10 +66,77 @@ func NewManager(cfg Config) (*Manager, error) {
 	if clock == nil {
 		clock = systemClock{}
 	}
-	return &Manager{cfg: cfg, clock: clock, spawns: map[string]*spawnState{}}, nil
+	return &Manager{cfg: cfg, clock: clock, spawns: map[string]*spawnState{}, ownerSealed: map[string]bool{}}, nil
 }
 
 var _ JournalManager = (*Manager)(nil)
+
+// passwordFor resolves the per-spawn repo password, routing an owner-sealed spawn
+// to its DELIVERED key (cross-node resume / migration target) and otherwise to
+// the node-local default custody (origin / same-node). The presence of a
+// delivered key is the routing signal: the §4 "node-local -> owner-sealed =
+// same password" model means the ORIGIN node mints + journals under node-local
+// custody, while a resume TARGET receives the same password by delivery and is
+// routed here. A node that is supposed to be owner-sealed but has not yet
+// received its key surfaces ErrNotDelivered, so the repo is never opened with a
+// freshly-minted (wrong) password.
+//
+// Precondition: the caller holds m.mu (passwordFor is only invoked from state(),
+// which locks it). It therefore reads m.ownerSealed WITHOUT re-locking — the
+// mutex is not reentrant.
+func (m *Manager) passwordFor(spawnID string) (string, error) {
+	if m.cfg.OwnerSealed != nil {
+		if _, ok := m.cfg.OwnerSealed.Delivered(spawnID); ok {
+			return m.cfg.OwnerSealed.PasswordFor(spawnID)
+		}
+		// Marked owner-sealed but the key has NOT arrived yet: surface
+		// ErrNotDelivered rather than minting a fresh node-local password (which
+		// would fork the shared repo under a wrong key). A delivered key flips the
+		// branch above.
+		if m.ownerSealed[spawnID] {
+			return "", ErrNotDelivered
+		}
+	}
+	return m.cfg.Custody.PasswordFor(spawnID)
+}
+
+// MarkOwnerSealed records that spawnID's repo password is owner-sealed (custodied
+// by the owner, delivered to this node), so passwordFor routes it to the
+// OwnerSealed custody and never to a node-local mint. The spawnlet marks a spawn
+// when resuming an owner-sealed mount cross-node; DeliverKey marks it implicitly.
+// No-op when no owner-sealed custody is configured.
+func (m *Manager) MarkOwnerSealed(spawnID string) {
+	if m.cfg.OwnerSealed == nil {
+		return
+	}
+	m.mu.Lock()
+	m.ownerSealed[spawnID] = true
+	m.mu.Unlock()
+}
+
+// DeliverKey injects an owner-delivered repo password for spawnID at generation
+// gen into the owner-sealed custody. The node's SecretDelivery handler calls this
+// for a journal-key secret (secret_id prefix journalkey.Prefix) after it has
+// OpenDelivered the ciphertext. Errors if no owner-sealed custody is configured.
+// Generation-fenced via OwnerSealedCustody.Deliver.
+func (m *Manager) DeliverKey(spawnID string, gen uint64, password string) error {
+	if m.cfg.OwnerSealed == nil {
+		return fmt.Errorf("journal: no owner-sealed custody configured")
+	}
+	m.MarkOwnerSealed(spawnID)
+	return m.cfg.OwnerSealed.Deliver(spawnID, gen, password)
+}
+
+// WaitDelivered blocks until an owner-sealed key has been delivered for spawnID
+// or ctx is done — the "wait for the delivered key before Restore" hook on the
+// cross-node resume path (design §4/§5). Errors if no owner-sealed custody is
+// configured.
+func (m *Manager) WaitDelivered(ctx context.Context, spawnID string) error {
+	if m.cfg.OwnerSealed == nil {
+		return fmt.Errorf("journal: no owner-sealed custody configured")
+	}
+	return m.cfg.OwnerSealed.WaitDelivered(ctx, spawnID)
+}
 
 // state returns the live state for spawnID, opening its repo on first use.
 func (m *Manager) state(ctx context.Context, spawnID string) (*spawnState, error) {
@@ -71,7 +145,7 @@ func (m *Manager) state(ctx context.Context, spawnID string) (*spawnState, error
 	if s, ok := m.spawns[spawnID]; ok {
 		return s, nil
 	}
-	pw, err := m.cfg.Custody.PasswordFor(spawnID)
+	pw, err := m.passwordFor(spawnID)
 	if err != nil {
 		return nil, err
 	}

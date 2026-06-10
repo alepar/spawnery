@@ -187,16 +187,22 @@ func configureJournal(m *spawnlet.Manager, dataRoot string) error {
 		return err
 	}
 
+	// Owner-sealed receiving custody (transient-tier §4, sp-u53.5.4): holds repo
+	// passwords DELIVERED to this node for a cross-node resume / migration. Empty
+	// at rest — every key arrives over the secret-delivery path and lives only in
+	// memory for the episode.
+	ownerSealed := journal.NewOwnerSealedCustody()
 	jm, err := journal.NewManager(journal.Config{
-		RepoRoot: filepath.Join(root, "repos"),
-		Backend:  backend,
-		Custody:  custody,
+		RepoRoot:    filepath.Join(root, "repos"),
+		Backend:     backend,
+		Custody:     custody,
+		OwnerSealed: ownerSealed,
 	})
 	if err != nil {
 		return err
 	}
 	m.SetJournal(jm, filepath.Join(root, "state"))
-	log.Printf("journal: node-local journaler enabled (backend=%s, root=%s)", kind, root)
+	log.Printf("journal: journaler enabled (backend=%s, root=%s; node-local + owner-sealed custody)", kind, root)
 	return nil
 }
 

@@ -12,9 +12,11 @@ import (
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/secrets/journalkey"
 	"spawnery/internal/secrets/seal"
 	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
+	"spawnery/internal/storage/journal"
 )
 
 // testSignKey generates a P-256 signing key for a node sub-key holder (the node cert key type).
@@ -153,6 +155,63 @@ func TestSecretDeliveryNoHolderDropped(t *testing.T) {
 	a := newAttacher(mgr, &fakeCPStream{}) // no SubKeys
 	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: "sp1", Generation: 1, Secrets: []*nodev1.SealedSecret{{TargetPath: "x", Sealed: []byte("{}"), SecretId: "s"}}})
 	// No panic, no file.
+}
+
+// A journal-key delivery (secret_id prefix journalkey.Prefix) carries the per-spawn Kopia repo password,
+// not a tmpfs secret: it must be routed into the journaler's owner-sealed custody (so a cross-node resume
+// can open the repo) and NOT written to the secrets tmpfs. This is the node-side leg of sp-u53.5.4.
+func TestSecretDeliveryRoutesJournalKeyToCustody(t *testing.T) {
+	const nodeID, spawnID, gen = "node-1", "sp1", uint64(7)
+	a, holder, secretsRoot := secretTestRig(t, nodeID, spawnID, gen)
+
+	// Wire an owner-sealed journaler into the manager and keep a handle to the custody.
+	jroot := t.TempDir()
+	keyfile := filepath.Join(jroot, "node.key")
+	if err := journal.GenerateNodeKeyfile(keyfile); err != nil {
+		t.Fatal(err)
+	}
+	nl, err := journal.NewNodeLocalCustody(keyfile, filepath.Join(jroot, "seals"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	osc := journal.NewOwnerSealedCustody()
+	jm, err := journal.NewManager(journal.Config{
+		RepoRoot:    filepath.Join(jroot, "repos"),
+		Backend:     &journal.FilesystemBackend{Root: filepath.Join(jroot, "blobs")},
+		Custody:     nl,
+		OwnerSealed: osc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.mgr.SetJournal(jm, filepath.Join(jroot, "state"))
+
+	const repoPW = "kopia-repo-pw-delivered-cross-node"
+	sec := sealSecret(t, holder, spawnID, gen, "", journalkey.SecretID("work"), []byte(repoPW))
+	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{sec}})
+
+	got, err := osc.PasswordFor(spawnID)
+	if err != nil || got != repoPW {
+		t.Fatalf("journal key not delivered to custody: got %q, err %v", got, err)
+	}
+	if g, ok := osc.Delivered(spawnID); !ok || g != gen {
+		t.Fatalf("delivered generation = (%d, %v), want (%d, true)", g, ok, gen)
+	}
+	// It must NOT have been written to the secrets tmpfs.
+	entries, _ := os.ReadDir(filepath.Join(secretsRoot, spawnID))
+	if len(entries) != 0 {
+		t.Fatalf("journal key must not be written to tmpfs; found %d entries", len(entries))
+	}
+}
+
+// A journal-key delivery for a node with NO owner-sealed journaler configured is dropped (logged), not
+// panicked — and obviously lands nowhere.
+func TestSecretDeliveryJournalKeyNoJournalerDropped(t *testing.T) {
+	const nodeID, spawnID, gen = "node-1", "sp1", uint64(3)
+	a, holder, _ := secretTestRig(t, nodeID, spawnID, gen) // rig manager has no journaler
+	sec := sealSecret(t, holder, spawnID, gen, "", journalkey.SecretID("work"), []byte("pw"))
+	// Must not panic.
+	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{sec}})
 }
 
 // publishSubKey returns the current SignedSubKey JSON (rotating if needed); rotatedSubKey returns bytes
