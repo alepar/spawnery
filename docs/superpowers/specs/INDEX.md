@@ -41,6 +41,7 @@ were already made in one of these docs.
 - [Owner-Sealed Secrets Research (Results + Merged Synthesis)](2026-06-10-owner-sealed-secrets-research-results.md) — verified findings + merged conclusions of both runs: per-device-keypair custody (PRF Tier-2), cert-signed HPKE sub-keys, HPKE+AAD node leg, fingerprint-bound enrollment, never-persist invariant.
 - [Owner-Sealed Secrets Research (Cloud Run)](2026-06-10-owner-sealed-secrets-research-results-cloud.md) — parallel cloud-session report, imported verbatim; fills the in-session gaps (identity binding, headless-delegation survey, format comparison, WebCrypto/Go realities) + recommended enrollment flow.
 - [Owner-Sealed Secrets Design](2026-06-10-owner-sealed-secrets-design.md) — E2E secret custody/delivery: per-device X25519 keys + BIP-39 recovery, HPKE-everywhere envelopes, cert-signed node HPKE sub-keys, AAD context binding, fingerprint-bound enrollment; CP ciphertext-only (closes sp-gtm for secrets).
+- [Storage + Secrets Adversarial Review](2026-06-10-storage-secrets-adversarial-review.md) — 23 panel-confirmed roast findings against both specs (2 critical: restore-pin C1, SPA-delivery C2) with per-section amendments + pre-impl spike/benchmark gates.
 - [CRI Thin Byte-Bridge Adapter (sp-j5b)](2026-06-03-cri-thin-adapter-pump-design.md) — collapse the in-pod adapter to a byte-bridge; the node pump owns ACP work.
 - [Node Readiness Probe](2026-06-03-node-readiness-probe-design.md) — "green = actually ready" (not just `mgr.Create` returned).
 
