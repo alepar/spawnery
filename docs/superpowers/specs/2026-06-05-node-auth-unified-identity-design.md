@@ -281,7 +281,7 @@ Staging/prod CA creation is a **next phase, blocked on staging/prod existing** (
 | Self-hosted node claims `class=cloud` | Trusted → gets others' spawns + secrets | Class from name-constrained provenance; **cloud unforgeable online** |
 | Node claims `owner=victim` | Trusted → gets victim's spawns | `accountId` from verified cert; enrollment token is owner-authenticated at the AS |
 | **CP fully compromised** | Total: reroutes workloads, MITMs relay, forges sessions | Cannot forge node identity (no CA key) or sessions (AS-signed); client-detectable (§7) — *given* E2E relay + independent client delivery |
-| **AS fully compromised** | n/a | Can forge *self-hosted* certs for any account; **cannot forge cloud** (offline intermediate). Cloud/multi-tenant confidentiality survives. |
+| **AS fully compromised** | n/a | Can forge *self-hosted* certs for any account; **cannot forge cloud** (offline intermediate). Cloud/multi-tenant confidentiality survives. *Device-set registry (amendment 2026-06-11, web-epic roast WM6): the AS **cannot forge** device-set entries (member-signed hash chain) but **can withhold or serve a stale prefix** — omission defeats revocation for clients re-sealing against the stale view. Mitigations: chain-head hash bound into every seal's AAD; fresh-head check before full-corpus re-seals; per-client monotonic head pin (regression = hard fail); enrollment-delivered owner-root anchor (never TOFU from the AS).* |
 | Enrollment token theft | n/a | Single-use, short, account-scoped, owner-authenticated |
 | Stolen leaf key replay | n/a | mTLS channel-binds identity; cert revocation is an AS/CA action |
 | Transport MITM on node↔CP | Total (plaintext) | `enforced` mode = mTLS |
