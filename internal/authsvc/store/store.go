@@ -74,12 +74,29 @@ type RevocationRepo interface {
 	Since(ctx context.Context, seq int64) ([]RevocationEvent, error)
 }
 
+// DeviceSetRepo is the AS-side device-set registry.  The AS stores entries and
+// their chain hashes verbatim; it performs pure head comparison for the CAS
+// gate and never validates member signatures (WM1: AS stores, never authors).
+type DeviceSetRepo interface {
+	// Head returns the stored head hash and version for accountID.  found=false
+	// means the account has no entries yet (genesis is the next expected entry).
+	Head(ctx context.Context, accountID string) (headHash []byte, version uint64, found bool, err error)
+	// Append CAS-appends one entry in a transaction.  It rejects (ErrConflict)
+	// if the stored head doesn't match prevHash or if version ≠ storedVersion+1.
+	// For genesis (version==1, prevHash==nil) it rejects if any entry already exists.
+	Append(ctx context.Context, accountID string, version uint64, prevHash, headHash, entryBytes []byte, now int64) error
+	// FetchAll returns the json.Marshal(StoredEntry) bytes for all entries of
+	// accountID in ascending version order.
+	FetchAll(ctx context.Context, accountID string) ([][]byte, error)
+}
+
 type Store interface {
 	Users() UserRepo
 	RefreshSessions() RefreshSessionRepo
 	OAuthStates() OAuthStateRepo
 	DeviceGrants() DeviceGrantRepo
 	Revocations() RevocationRepo
+	DeviceSets() DeviceSetRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error

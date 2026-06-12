@@ -36,6 +36,14 @@ func (s *Service) Handler() http.Handler {
 		_, _ = w.Write([]byte(base64.RawURLEncoding.EncodeToString(s.SessionPubKey())))
 	})
 
+	if s.deviceSet != nil {
+		ds := s.deviceSet
+		mux.HandleFunc("POST /devices/append", ds.corsBearerSimple(ds.serveAppend))
+		mux.HandleFunc("GET /devices", ds.corsBearerSimple(ds.serveList))
+		mux.HandleFunc("OPTIONS /devices/append", ds.corsBearerSimple(func(w http.ResponseWriter, r *http.Request) {}))
+		mux.HandleFunc("OPTIONS /devices", ds.corsBearerSimple(func(w http.ResponseWriter, r *http.Request) {}))
+	}
+
 	if s.idp != nil {
 		idp := s.idp
 		// OAuth flow.
