@@ -139,7 +139,15 @@ function ProgressView({ step }: { step: string }) {
 // ── Durability banner ─────────────────────────────────────────────────────────
 
 function DurabilityBanner({ durability }: { durability: string | null }) {
-  if (!durability || durability === "ephemeral") return null;
+  if (!durability) return null;
+  if (durability === "ephemeral") {
+    return (
+      <p data-testid="durability-banner-ephemeral" className="text-sm text-amber-600 rounded-md bg-amber-50 px-3 py-2">
+        This spawn uses ephemeral storage. Its data does not travel — only the process
+        will be migrated; any in-container data will be lost on the source node.
+      </p>
+    );
+  }
   if (durability === "owner-sealed") {
     return (
       <p data-testid="durability-banner-owner-sealed" className="text-sm text-muted-foreground rounded-md bg-muted/40 px-3 py-2">
