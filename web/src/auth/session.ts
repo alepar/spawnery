@@ -29,9 +29,11 @@ export const RTH_STORAGE_KEY = "spawnery-rth";
 function _saveRth(rth: string): void {
   try { localStorage.setItem(RTH_STORAGE_KEY, rth); } catch { /* private-browsing fallback */ }
 }
-function _loadRth(): string {
+export function loadRth(): string {
   try { return localStorage.getItem(RTH_STORAGE_KEY) ?? ""; } catch { return ""; }
 }
+/** @internal alias for use within this module */
+const _loadRth = loadRth;
 function _clearRth(): void {
   try { localStorage.removeItem(RTH_STORAGE_KEY); } catch { /* ignore */ }
 }
@@ -113,7 +115,9 @@ async function _doProactiveRefresh(): Promise<void> {
     }
     const spki = await exportSpkiDer(kp.publicKey);
     const spkiHash = await sessionKeyHash(spki);
-    const rthB64 = session.refreshTokenHash;
+    // Always read from localStorage so we sign PoP over the latest rotated value,
+    // not a stale in-memory snapshot from before another tab rotated the cookie (AM5).
+    const rthB64 = _loadRth();
     const rth = rthB64.length > 0 ? _base64urlToBytes(rthB64) : new Uint8Array(32);
 
     const result = await refreshAccessToken({

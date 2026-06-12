@@ -2,7 +2,7 @@
  * Tests for OAuth authorize + callback handling.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { buildAuthorizeUrl, parseCallback, StateStorage, HistoryFacade } from "./oauth";
 
 // ── Test doubles ──────────────────────────────────────────────────────────────

@@ -73,21 +73,12 @@ describe("buildIntentBodyBytes — golden vectors", () => {
 
   it("sign + verify against golden SPKI (P1363 path)", async () => {
     const raw = fs.readFileSync(VECTORS_PATH, "utf8");
-    const v = JSON.parse(raw) as { body_bytes_hex: string; spki_der_hex: string };
+    const v = JSON.parse(raw) as { body_bytes_hex: string };
 
-    const spkiDer = hexToBytes(v.spki_der_hex);
     const bodyBytes = hexToBytes(v.body_bytes_hex);
 
-    // Import the golden public key for verification
-    const pub = await crypto.subtle.importKey(
-      "spki",
-      spkiDer as unknown as Uint8Array<ArrayBuffer>,
-      { name: "ECDSA", namedCurve: "P-256" },
-      true,
-      ["verify"],
-    );
-
     // Generate a fresh key to sign (we can't import the private key without the scalar)
+    // (signature is verified against kp.publicKey — the golden private key is not importable)
     const store = new MemoryKeyStore();
     const kp = await getOrCreateSessionKey(store);
     const localSpki = await exportSpkiDer(kp.publicKey);

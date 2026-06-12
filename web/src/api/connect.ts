@@ -1,6 +1,6 @@
 // Calls the CP's ConnectRPC unary methods via plain fetch (Connect JSON, camelCase fields).
 import { cpHttpUrl } from "@/config/endpoints";
-import { getAccessToken, authEnabled, DEV_TOKEN as SESSION_DEV_TOKEN, useSessionStore } from "@/auth/session";
+import { getAccessToken, authEnabled, DEV_TOKEN as SESSION_DEV_TOKEN, useSessionStore, loadRth } from "@/auth/session";
 import { refreshAccessToken } from "@/auth/refresh";
 import { loadSessionKey, exportSpkiDer, sessionKeyHash } from "@/auth/keypair";
 
@@ -66,7 +66,9 @@ async function _tryRefresh(): Promise<boolean> {
     }
     const spki = await exportSpkiDer(kp.publicKey);
     const spkiHash = await sessionKeyHash(spki);
-    const rthB64 = session.refreshTokenHash;
+    // Always read from localStorage so PoP is signed over the latest rotated value,
+    // not a stale in-memory snapshot from before another tab rotated the cookie (AM5).
+    const rthB64 = loadRth();
     const rth = rthB64 ? _b64urlToBytes(rthB64) : new Uint8Array(32);
 
     const result = await refreshAccessToken({

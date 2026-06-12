@@ -9,7 +9,7 @@ import { describe, it, expect } from "vitest";
 import { buildPoP } from "./pop";
 import { fromBase64Url } from "./token";
 import { MemoryKeyStore } from "./keystore";
-import { getOrCreateSessionKey, exportSpkiDer } from "./keypair";
+import { getOrCreateSessionKey } from "./keypair";
 import { mapNackCode, mapAsError, isCnfMismatch } from "./errors";
 
 const POP_DOMAIN = "spawnery/refresh-pop/v1";

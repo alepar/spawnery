@@ -39,7 +39,8 @@ export function mapAsError(raw: string | null | undefined): AsErrorCode {
     case "access_denied":       return "access_denied";
     case "invalid_request":     return "invalid_request";
     case "server_error":        return "server_error";
-    default: return raw ? "unknown" : "unknown";
+    case "state_mismatch":      return "state_mismatch";
+    default:                    return "unknown";
   }
 }
 

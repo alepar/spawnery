@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { refreshAccessToken, computeRefreshDelay, REFRESH_LOCK_NAME } from "./refresh";
+import { refreshAccessToken, computeRefreshDelay } from "./refresh";
 import { MemoryKeyStore } from "./keystore";
 import { getOrCreateSessionKey, exportSpkiDer, sessionKeyHash } from "./keypair";
 import { ProtoWriter } from "./protobuf";
@@ -33,28 +33,6 @@ function makeResponse(status: number, body: unknown): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
-
-async function makeDeps(fetchFn: typeof fetch, opts?: { wrongHash?: boolean }) {
-  const store = new MemoryKeyStore();
-  const kp = await getOrCreateSessionKey(store);
-  const spki = await exportSpkiDer(kp.publicKey);
-  const hash = await sessionKeyHash(spki);
-  const wrongHash = opts?.wrongHash ? new Uint8Array(32).fill(0xff) : hash;
-
-  return {
-    privateKey: kp.privateKey,
-    publicKey: kp.publicKey,
-    localSpkiHash: hash,
-    refreshTokenHash: new Uint8Array(32).fill(0x11),
-    // No lock — use in-memory single-flight
-    acquireLock: undefined as undefined,
-    fetchFn,
-    now: () => 1700000000000,
-    _spki: spki,
-    _hash: hash,
-    _wrongHash: wrongHash,
-  };
 }
 
 beforeEach(() => {
