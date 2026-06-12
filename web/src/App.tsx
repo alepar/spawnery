@@ -10,6 +10,8 @@ import { useConnStatus } from "./shell/useConnStatus";
 import { initialTheme, setTheme } from "./lib/theme";
 import { useNav } from "./nav/useNav";
 import type { Nav } from "./nav/nav";
+import { useSessionStore, authEnabled } from "./auth/session";
+import { LoginView } from "./views/LoginView";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
@@ -25,7 +27,22 @@ function sectionLabel(section: Nav["section"]): string {
   }
 }
 
+/** AppRoot gates on auth status, rendering LoginView when not authed (login wall). */
 export function App() {
+  const status = useSessionStore((s) => s.status);
+  // bootstrap() carries any AS callback error code into the store so it survives
+  // the destructive parseCallback (which strips the URL/sessionStorage state).
+  const callbackErrorCode = useSessionStore((s) => s.callbackErrorCode);
+
+  // Login wall: show LoginView when auth is enabled and user is not authed.
+  if (authEnabled() && status !== "authed") {
+    return <LoginView errorCode={callbackErrorCode ?? undefined} />;
+  }
+
+  return <AppMain />;
+}
+
+function AppMain() {
   const [nav, navigate] = useNav();
   const [path] = useLocation(); // raw pathname, for the one-time "/" -> "/templates" normalize
   // useConnStatus tracks the spawn-LIFECYCLE hint (waiting while a spawn is starting, error if it

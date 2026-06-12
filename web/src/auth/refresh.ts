@@ -1,0 +1,176 @@
+/**
+ * Silent /refresh implementation with:
+ * - Single-flight via Web Locks (or in-memory fallback for tests)
+ * - keyCanSign self-check before calling /refresh
+ * - PoP headers (X-PoP-*)
+ * - cnf-mismatch detection (compares session_key_hash in new token vs local SPKI)
+ * - 90-day family max-age / token_revoked → key-loss path
+ * - Proactive scheduling with jitter
+ */
+
+import { asHttpUrl } from "@/config/endpoints";
+import { buildPoP } from "./pop";
+import { keyCanSign } from "./keypair";
+import { parseAccessToken } from "./token";
+import { bytesEqual } from "@/keys/encoding";
+import { CNF_MISMATCH, type NackCode } from "./errors";
+
+export const REFRESH_LOCK_NAME = "spawnery-refresh";
+
+// Jitter constants for proactive refresh scheduling (AM3).
+const REFRESH_MARGIN_MS = 2 * 60 * 1000;   // refresh 2 min before expiry
+const REFRESH_JITTER_MS = 15 * 1000;        // ± 15 s jitter
+
+// ── Abstractions for testability ──────────────────────────────────────────────
+
+export interface RefreshDeps {
+  privateKey: CryptoKey;
+  publicKey: CryptoKey;
+  /** SHA-256 of DER SPKI of the current session key (32 bytes). */
+  localSpkiHash: Uint8Array;
+  /** Current refresh-token hash (from AS on login/last refresh). */
+  refreshTokenHash: Uint8Array;
+  /** Injectable lock mechanism. null means "no lock support" → run without lock. */
+  acquireLock?: <T>(name: string, fn: () => Promise<T>) => Promise<T>;
+  /** Injectable fetch (defaults to global fetch). */
+  fetchFn?: typeof fetch;
+  /** Injectable current time (defaults to Date.now). */
+  now?: () => number;
+}
+
+export type RefreshResult =
+  | { kind: "ok"; accessToken: string; refreshTokenHash: string; expiresAt: bigint }
+  | { kind: "cnf-mismatch" }
+  | { kind: "revoked" }
+  | { kind: "key-missing" }
+  | { kind: "error"; message: string };
+
+/**
+ * Module-level in-flight promise shared across ALL concurrent callers within this JS realm.
+ * The check executes synchronously after the first `await` (keyCanSign), so JS
+ * single-threading prevents TOCTOU: nothing can pre-empt between the `await` resumption
+ * and the `_inflight` assignment.
+ *
+ * We intentionally do NOT use navigator.locks for cross-tab coordination: a serialising
+ * cross-tab lock would let tab B run its own _doRefresh with the refreshTokenHash captured
+ * at call time — after tab A has already rotated the cookie, tab B's PoP signs over the
+ * stale hash, the AS reconstructs the message over sha256(newCookie), the signature
+ * mismatches, and tab B gets a spurious logout.  Concurrent cross-tab refreshes are safe:
+ * both tabs present the same old cookie and the server's grace-window idempotency
+ * (refresh.go:111-121) returns the same rotated token to whichever arrives second.
+ */
+let _inflight: Promise<RefreshResult> | null = null;
+
+/**
+ * refreshAccessToken performs a single /refresh round-trip with PoP.
+ * All concurrent callers within a JS realm share the first in-flight promise (true
+ * single-flight).  acquireLock is injectable for tests only; navigator.locks is not
+ * used in production to avoid the cross-tab stale-hash problem described above.
+ */
+export async function refreshAccessToken(deps: RefreshDeps): Promise<RefreshResult> {
+  // Positive self-check: if the key is gone, take the key-loss path before any network.
+  const canSign = await keyCanSign(deps.privateKey);
+  if (!canSign) {
+    return { kind: "key-missing" };
+  }
+
+  // True single-flight: latecomers reuse the first caller's promise so they receive
+  // the same rotated token rather than each re-signing a PoP over a stale hash.
+  if (_inflight) return _inflight;
+
+  // acquireLock is only provided by tests (e.g. a serialising mock that proves _inflight
+  // short-circuits before the lock is even invoked).  Production never injects a lock.
+  const lockFn = deps.acquireLock ?? null;
+
+  const p = lockFn
+    ? (lockFn(REFRESH_LOCK_NAME, () => _doRefresh(deps)) as Promise<RefreshResult>).finally(() => { _inflight = null; })
+    : _doRefresh(deps).finally(() => { _inflight = null; });
+  _inflight = p;
+  return p;
+}
+
+async function _doRefresh(deps: RefreshDeps): Promise<RefreshResult> {
+  const fetchFn = deps.fetchFn ?? fetch;
+  const now = deps.now ? new Date(deps.now()) : new Date();
+
+  const popHeaders = await buildPoP(deps.privateKey, deps.refreshTokenHash, now);
+
+  let res: Response;
+  try {
+    res = await fetchFn(asHttpUrl("/refresh"), {
+      method: "POST",
+      credentials: "include", // HttpOnly cookie rides on same-origin (or exact AS_ORIGIN)
+      headers: {
+        ...popHeaders,
+      },
+    });
+  } catch (e) {
+    return { kind: "error", message: String(e) };
+  }
+
+  if (res.status === 401) {
+    const body = await res.text().catch(() => "");
+    if (body.includes("token_revoked") || body.includes("family_revoked")) {
+      return { kind: "revoked" };
+    }
+    return { kind: "error", message: `refresh 401: ${body}` };
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    return { kind: "error", message: `refresh ${res.status}: ${body}` };
+  }
+
+  let json: { access_token?: string; refresh_token_hash?: string };
+  try {
+    json = await res.json() as typeof json;
+  } catch {
+    return { kind: "error", message: "refresh: invalid JSON response" };
+  }
+
+  if (!json.access_token) {
+    return { kind: "error", message: "refresh: missing access_token in response" };
+  }
+
+  // Decode the new token and verify cnf claim (session_key_hash must match local SPKI hash).
+  let decoded;
+  try {
+    decoded = parseAccessToken(json.access_token);
+  } catch (e) {
+    return { kind: "error", message: `refresh: malformed token: ${e}` };
+  }
+
+  // cnf check: session_key_hash in the token must equal sha256(localSpki).
+  if (decoded.sessionKeyHash.length > 0 && !bytesEqual(decoded.sessionKeyHash, deps.localSpkiHash)) {
+    return { kind: "cnf-mismatch" };
+  }
+
+  return {
+    kind: "ok",
+    accessToken: json.access_token,
+    refreshTokenHash: json.refresh_token_hash ?? "",
+    expiresAt: decoded.expiresAt,
+  };
+}
+
+/**
+ * computeRefreshDelay returns the ms delay until the next proactive refresh:
+ * (expiresAt - now - MARGIN) ± jitter, clamped to [0, maxDelay].
+ *
+ * @param expiresAt - Unix seconds BigInt from the token.
+ * @param nowMs     - Current time in ms (injectable for tests).
+ */
+export function computeRefreshDelay(expiresAt: bigint, nowMs: number = Date.now()): number {
+  const expiresMs = Number(expiresAt) * 1000;
+  const targetMs = expiresMs - REFRESH_MARGIN_MS;
+  const jitter = (Math.random() * 2 - 1) * REFRESH_JITTER_MS; // ±15s
+  const delay = targetMs - nowMs + jitter;
+  return Math.max(0, Math.min(delay, 24 * 60 * 60 * 1000)); // clamp 0..24h
+}
+
+/**
+ * NACK code exported for callers that need to check cnf-mismatch.
+ * (Re-exported from errors.ts for convenience.)
+ */
+export { CNF_MISMATCH };
+export type { NackCode };

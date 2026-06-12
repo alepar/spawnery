@@ -299,10 +299,15 @@ func (i *IdP) serveCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	// RFC 8252 §7.3: for loopback redirect URIs (native app / spawnctl) also include the
 	// refresh_token in the query. The loopback listener is on localhost so the token only
-	// transits the local address bar — no cross-site exposure. The SPA path (non-loopback)
-	// is unchanged: refresh_token stays HttpOnly-cookie-only.
+	// transits the local address bar — no cross-site exposure.
 	if isLoopbackURI(row.ClientRedirectURI) {
 		out.Set("refresh_token", rawRefresh)
+	} else {
+		// R1 (A5/SPA): the SPA cannot read the HttpOnly cookie, so it cannot compute
+		// SHA-256(rawToken) for the PoP signed message. Return the hash (not the raw token)
+		// so the SPA can sign the PoP message correctly. The hash alone does not allow
+		// refreshing (the cookie + session key are also required), so URL exposure is safe.
+		out.Set("refresh_token_hash", base64.RawURLEncoding.EncodeToString(sha256sum([]byte(rawRefresh))))
 	}
 	dest.RawQuery = out.Encode()
 	http.Redirect(w, r, dest.String(), http.StatusFound)
@@ -372,9 +377,13 @@ func (i *IdP) serveRefresh(w http.ResponseWriter, r *http.Request) {
 	setLogoutSessionCookie(w, newRaw, now.Add(refreshSliding))
 	setDeviceSessionCookie(w, newRaw, now.Add(refreshSliding))
 
+	// R1 (A5/SPA): include the new refresh-token hash so the SPA can compute the PoP message
+	// for the next /refresh call. The hash alone does not allow refreshing (the new HttpOnly
+	// cookie + session key are also required). base64url-unpadded to match PoP header encoding.
+	newHash := base64.RawURLEncoding.EncodeToString(sha256sum([]byte(newRaw)))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"access_token":%q}`, accessWire)
+	fmt.Fprintf(w, `{"access_token":%q,"refresh_token_hash":%q}`, accessWire, newHash)
 }
 
 // --- helpers ---
@@ -450,7 +459,10 @@ func (i *IdP) getOrSetFlowCookie(w http.ResponseWriter, r *http.Request) string 
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
+		// SameSite=Lax (not Strict): the OAuth callback is a cross-site top-level GET
+		// navigation (from the IdP back to the AS), so Strict would block the cookie.
+		// Lax allows cross-site GET navigations while still blocking CSRF on unsafe methods.
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(flowCookieTTL.Seconds()),
 	})
 	return id
