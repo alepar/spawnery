@@ -160,19 +160,41 @@ async function labeledExpand(
   return output;
 }
 
+// ── DHKEM DeriveKeyPair (RFC 9180 §7.1.2) ────────────────────────────────────
+
+/**
+ * dhkemDerivePrivateScalar implements DHKEM(X25519, HKDF-SHA256) DeriveKeyPair
+ * (RFC 9180 §7.1.2), returning the raw 32-byte X25519 private scalar derived
+ * from ikm. Matches Go: kemScheme.DeriveKeyPair(ikm) → sk.MarshalBinary()
+ * (github.com/cloudflare/circl/hpke, xKEM.DeriveKeyPair).
+ *
+ * Algorithm:
+ *   dkp_prk = LabeledExtract("", "dkp_prk", ikm)   // HKDF-Extract with KEM suite-id
+ *   scalar  = LabeledExpand(dkp_prk, "sk", "", 32) // HKDF-Expand with KEM suite-id
+ */
+export async function dhkemDerivePrivateScalar(ikm: Uint8Array): Promise<Uint8Array> {
+  const dkpPrk = await labeledExtract(KEM_SUITE_ID, null, "dkp_prk", ikm);
+  return labeledExpand(KEM_SUITE_ID, dkpPrk, "sk", new Uint8Array(0), 32);
+}
+
 // ── KEM ExtractAndExpand (RFC 9180 §7.1) ─────────────────────────────────────
 
 /**
- * kemExtractAndExpand implements DHKEM-X25519-HKDF-SHA256 recipient Decap:
- *   dh = deriveBits(encKey, recipPriv)
- *   kem_context = enc || pk(recip)
- *   shared_secret = LabeledExpand(LabeledExtract("", "shared_secret", dh), "shared_secret", kem_context, 32)
+ * kemExtractAndExpand implements DHKEM-X25519-HKDF-SHA256 ExtractAndExpand
+ * (RFC 9180 §7.1.4 as implemented by CIRCL / Go's cloudflare/circl/hpke):
+ *   eae_prk = LabeledExtract("", "eae_prk", dh)
+ *   shared_secret = LabeledExpand(eae_prk, "shared_secret", kem_context, 32)
+ *
+ * Note: CIRCL (which Go uses) extracts under the "eae_prk" label. The
+ * intermediate draft that CIRCL tracks uses this label; using "shared_secret"
+ * for the extract step produces a different shared secret and breaks
+ * interoperability with Go's seal.go.
  */
 async function kemExtractAndExpand(
   dh: Uint8Array,
   kemContext: Uint8Array,
 ): Promise<Uint8Array> {
-  const prk = await labeledExtract(KEM_SUITE_ID, null, "shared_secret", dh);
+  const prk = await labeledExtract(KEM_SUITE_ID, null, "eae_prk", dh);
   return labeledExpand(KEM_SUITE_ID, prk, "shared_secret", kemContext, 32);
 }
 

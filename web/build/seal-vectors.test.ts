@@ -7,8 +7,9 @@
  *   2. deviceset_chain.json: the encodeFields+SHA-256 head-hash algorithm matches
  *      the stored head_hash for every chain entry.
  *
- * Key derivation re-validation (HKDF, X25519, P-256) is part of Phase 3
- * (WebCrypto layer) and will be added when that layer is implemented.
+ * Key re-derivation from mnemonics (HKDF, X25519 DHKEM DeriveKeyPair, P-256) is
+ * validated in src/keys/mnemonic-derivation.test.ts (WebCrypto, jsdom env).
+ * HPKE envelope interop is validated in src/keys/hpke.test.ts.
  */
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";

@@ -14,6 +14,7 @@
  */
 
 import { hkdfExpand } from "./hkdf";
+import { dhkemDerivePrivateScalar } from "./hpke";
 import { mnemonicToSeed } from "./bip39";
 
 const IDB_DB_NAME = "spawnery-device-keys";
@@ -116,17 +117,15 @@ export async function generateDeviceKeys(): Promise<DeviceKeys> {
  * Per WL1, mnemonic-derived keys are extractable-by-construction while in use.
  */
 export async function deriveDeviceKeysFromSeed(seed: Uint8Array): Promise<DeviceKeys> {
-  // X25519: derive a 32-byte sub-seed, then import as an X25519 private key.
-  // WebCrypto does not expose raw X25519 scalar import, but circl/hpke and
-  // go/x/crypto/ecdh use the standard "clamp-and-multiply" representation
-  // that WebCrypto also uses internally.
+  // X25519: HKDF-Expand to a 32-byte sub-seed, then run the DHKEM DeriveKeyPair
+  // (RFC 9180 §7.1.2) to match Go's kemScheme.DeriveKeyPair(xSeed) in
+  // internal/secrets/seal/device.go. Applying clamp(xSeed)·G directly would
+  // produce a different keypair — the DHKEM step is mandatory.
   const xSeed = await hkdfExpand(seed, "spawnery/device/x25519/v1", 32);
+  const xScalar = await dhkemDerivePrivateScalar(xSeed);
 
-  // Import the 32-byte scalar as a PKCS#8-wrapped private key.
-  // The "clamp" operation for X25519 is applied internally by WebCrypto when
-  // the scalar is imported as raw 32 bytes via PKCS#8.
-  const xPriv = await importX25519PrivateKey(xSeed, false);
-  const xPub = await crypto.subtle.exportKey("raw", await getX25519PublicKey(xPriv, xSeed));
+  const xPriv = await importX25519PrivateKey(xScalar, false);
+  const xPub = await crypto.subtle.exportKey("raw", await getX25519PublicKey(xPriv, xScalar));
 
   const x25519Public = await crypto.subtle.importKey(
     "raw",
@@ -140,7 +139,7 @@ export async function deriveDeviceKeysFromSeed(seed: Uint8Array): Promise<Device
   const p256Seed = await hkdfExpand(seed, "spawnery/device/ecdsa-p256/v1", 48);
   const scalar32 = reduceP256Scalar(p256Seed);
   const ecdsaPriv = await importP256PrivateKey(scalar32, false);
-  const ecdsaPub = await getP256PublicKey(ecdsaPriv);
+  const ecdsaPub = await getP256PublicKey(scalar32);
 
   return {
     x25519Private: xPriv,
@@ -371,9 +370,15 @@ async function importP256PrivateKey(
   );
 }
 
-/** getP256PublicKey extracts the public key from a P-256 private key. */
-async function getP256PublicKey(priv: CryptoKey): Promise<CryptoKey> {
-  const jwk = await crypto.subtle.exportKey("jwk", priv);
+/**
+ * getP256PublicKey derives the P-256 public key from a raw 32-byte scalar by
+ * importing it as extractable, reading x/y via JWK, then returning the public
+ * key. This mirrors getX25519PublicKey and avoids requiring an extractable
+ * private CryptoKey (non-extractable keys cannot be JWK-exported).
+ */
+async function getP256PublicKey(scalar32: Uint8Array): Promise<CryptoKey> {
+  const extractablePriv = await importP256PrivateKey(scalar32, true);
+  const jwk = await crypto.subtle.exportKey("jwk", extractablePriv);
   const pubJwk: JsonWebKey = { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y };
   return crypto.subtle.importKey(
     "jwk",
