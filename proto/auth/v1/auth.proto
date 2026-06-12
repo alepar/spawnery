@@ -1,0 +1,36 @@
+syntax = "proto3";
+package auth.v1;
+option go_package = "spawnery/gen/auth/v1;authv1";
+
+// SessionTokenBody is the AS-signed access-token payload (auth-identity design §3).
+// wire: base64.RawURLEncoding(body) "." base64.RawURLEncoding(sig)  [MC1]
+// sig = ed25519("spawnery/session-token/v1" || body_bytes) — every AS-signed artifact class
+// carries a mandatory domain-separation prefix [MC1]. Verifiers check the signature over the
+// EXACT received body bytes, then parse.
+message SessionTokenBody {
+  string account_id = 1;
+  string handle = 2; // display-only; nothing keys or authorizes on it [AM9]
+  string token_id = 3;
+  // "cp" | "node" [MC2] — split: node-relayed tokens are aud=node, REJECTED by the CP
+  // interceptor; aud=cp never leaves CP-bound use. A1 mints "cp" only; "node"-audience
+  // minting is A4's flow — do not mint node tokens here.
+  string audience = 4;
+  int64 issued_at = 5;
+  int64 expires_at = 6;
+  // SHA-256 over the DER SPKI exactly as WebCrypto exportKey('spki') /
+  // x509.MarshalPKIXPublicKey emit [AM11].
+  bytes session_key_hash = 7;
+  string key_id = 8; // AS signing-key selector [AM4]
+}
+
+// RevocationEntry is one signed entry in the AS revocation feed (design §4 [AM10]); the CP
+// polls GET /revocations?since= and consumes these (A2).
+// sig = ed25519("spawnery/revocation/v1" || body_bytes), same key/key_id discipline as
+// session tokens.
+message RevocationEntry {
+  int64 seq = 1;
+  string account_id = 2;
+  string family_id = 3;
+  repeated string token_ids = 4; // access-token token_ids the family had live at revocation
+  int64 revoked_at = 5;
+}
