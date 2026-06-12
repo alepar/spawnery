@@ -33,7 +33,7 @@ func goAckStarts(s *Server, sender *capSender) func() {
 			for _, st := range sender.starts() {
 				if !acked[st.GetSpawnId()] {
 					acked[st.GetSpawnId()] = true
-					s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ACTIVE)
+					s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
 				}
 			}
 			time.Sleep(time.Millisecond)

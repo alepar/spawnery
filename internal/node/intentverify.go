@@ -40,19 +40,23 @@ const (
 
 // NACKCode is a machine-readable reason for an intent rejection, threaded back through
 // Connect errors / WS close reasons [AC1 minor note].
-type NACKCode string
+// Type-aliased to intent.NACKCode so spawnctl (and any package that imports intent but not
+// node) can use the same constants without importing this package.
+type NACKCode = intent.NACKCode
 
+// Re-export the canonical constants from intent so existing code in this package compiles
+// unchanged. Callers outside this package should reference intent.NACK* directly.
 const (
-	NACKMissingIntent  NACKCode = "MISSING_INTENT"
-	NACKTokenInvalid   NACKCode = "TOKEN_INVALID"
-	NACKWrongAudience  NACKCode = "WRONG_AUDIENCE"
-	NACKOwnerMismatch  NACKCode = "OWNER_MISMATCH"
-	NACKCNFMismatch    NACKCode = "CNF_MISMATCH"
-	NACKBadSig         NACKCode = "BAD_SIG"
-	NACKCorrespondence NACKCode = "CORRESPONDENCE"
-	NACKStale          NACKCode = "STALE"
-	NACKSkew           NACKCode = "SKEW"
-	NACKReplay         NACKCode = "REPLAY"
+	NACKMissingIntent  = intent.NACKMissingIntent
+	NACKTokenInvalid   = intent.NACKTokenInvalid
+	NACKWrongAudience  = intent.NACKWrongAudience
+	NACKOwnerMismatch  = intent.NACKOwnerMismatch
+	NACKCNFMismatch    = intent.NACKCNFMismatch
+	NACKBadSig         = intent.NACKBadSig
+	NACKCorrespondence = intent.NACKCorrespondence
+	NACKStale          = intent.NACKStale
+	NACKSkew           = intent.NACKSkew
+	NACKReplay         = intent.NACKReplay
 )
 
 // IntentVerifier implements the A4 node-side verification chain.

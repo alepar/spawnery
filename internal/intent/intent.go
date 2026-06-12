@@ -12,12 +12,45 @@ import (
 	"crypto/x509"
 	"errors"
 	"math/big"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 )
+
+// NACKCode is a machine-readable reason for a node intent rejection, threaded back through
+// Connect errors so the client can classify retryable vs. non-retryable failures [AC1].
+// The node intentverify.go type-aliases this so both packages share the same string constants.
+type NACKCode string
+
+// Canonical NACK codes. The node intentverify package re-exports these via a type alias.
+const (
+	NACKMissingIntent  NACKCode = "MISSING_INTENT"
+	NACKTokenInvalid   NACKCode = "TOKEN_INVALID"
+	NACKWrongAudience  NACKCode = "WRONG_AUDIENCE"
+	NACKOwnerMismatch  NACKCode = "OWNER_MISMATCH"
+	NACKCNFMismatch    NACKCode = "CNF_MISMATCH"
+	NACKBadSig         NACKCode = "BAD_SIG"
+	NACKCorrespondence NACKCode = "CORRESPONDENCE"
+	NACKStale          NACKCode = "STALE"
+	NACKSkew           NACKCode = "SKEW"
+	NACKReplay         NACKCode = "REPLAY"
+)
+
+// RetryableNACK reports whether a Connect error detail string from a failed provision
+// contains a retryable NACK code. Retryable codes are transient freshness races (STALE,
+// SKEW, REPLAY); all others are non-retryable structural mismatches that a fresh key will
+// not fix. The detail format is "NACK_CODE: human detail..." as emitted by the node.
+func RetryableNACK(detail string) bool {
+	for _, code := range []NACKCode{NACKStale, NACKSkew, NACKReplay} {
+		if strings.HasPrefix(detail, string(code)+":") || detail == string(code) {
+			return true
+		}
+	}
+	return false
+}
 
 // FreshnessWindow is the maximum age of an intent (|now - issued_at| ≤ FreshnessWindow +
 // SkewBudget). Both are named constants so tests and the node verifier share the same values.

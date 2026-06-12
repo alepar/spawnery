@@ -5,13 +5,20 @@ package main
 // key, polls GetPendingIntent until the CP registers the pending intent, builds and signs the
 // IntentBody, then submits via SubmitIntent. It must be called concurrently with the lifecycle
 // RPC (CreateSpawn, MigrateSpawn, etc.) that blocks until the envelope is submitted.
+//
+// provisionWithIntent wraps a blocking lifecycle RPC (e.g. MigrateSpawn) with the pollAndSign
+// goroutine and implements retry-once on retryable NACK codes [AC1]. Non-blocking RPCs (e.g.
+// CreateSpawn which returns before provisioning completes) do not use this helper since the NACK
+// would surface via the spawn's status rather than the RPC error return.
 
 import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"connectrpc.com/connect"
@@ -123,4 +130,42 @@ func pollAndSign(ctx context.Context, ic intentClient, spawnID string, params in
 		return fmt.Errorf("pollAndSign %s: SubmitIntent: %w", spawnID, err)
 	}
 	return nil
+}
+
+// provisionWithIntent orchestrates a blocking lifecycle RPC (doRPC) concurrently with the
+// pollAndSign loop. If doRPC returns a retryable NACK error (e.g. STALE from a node clock
+// skew), it runs the pair exactly once more with a fresh session key and jti. Non-retryable
+// NACKs (CORRESPONDENCE, BAD_SIG, …) fail immediately without retry.
+//
+// doRPC MUST block until the CP provision is complete (or failed). Use this only for
+// synchronous RPCs such as MigrateSpawn/ResumeSpawn; for the async CreateSpawn path the
+// NACK surfaces via spawn status, not the RPC return.
+//
+// On a retryable NACK the caller's context is reused without a fresh cancel; the second
+// pollAndSign gets a fresh cancel so it does not outlive doRPC's second call.
+func provisionWithIntent(ctx context.Context, ic intentClient, spawnID string, params intentParams, doRPC func(context.Context) error) error {
+	attempt := func() error {
+		pollCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			if err := pollAndSign(pollCtx, ic, spawnID, params); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("provisionWithIntent %s: pollAndSign: %v", spawnID, err)
+			}
+		}()
+		return doRPC(ctx)
+	}
+
+	err := attempt()
+	if err == nil {
+		return nil
+	}
+	// Classify: is this a retryable node NACK that a fresh key + fresh jti can resolve?
+	var connErr *connect.Error
+	if errors.As(err, &connErr) && connErr.Code() == connect.CodeFailedPrecondition {
+		if intent.RetryableNACK(connErr.Message()) {
+			log.Printf("provisionWithIntent %s: retryable NACK (%s); retrying once", spawnID, connErr.Message())
+			return attempt()
+		}
+	}
+	return err
 }

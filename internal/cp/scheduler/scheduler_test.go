@@ -43,7 +43,7 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 	go func() {
 		for {
 			if m := send.first(); m != nil {
-				s.OnStatus(m.GetStart().GetSpawnId(), nodev1.SpawnPhase_ACTIVE)
+				s.OnStatus(m.GetStart().GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
 				return
 			}
 			time.Sleep(time.Millisecond)
@@ -84,7 +84,7 @@ func TestProvisionThreadsSelection(t *testing.T) {
 	go func() {
 		for {
 			if m := send.first(); m != nil {
-				s.OnStatus(m.GetStart().GetSpawnId(), nodev1.SpawnPhase_ACTIVE)
+				s.OnStatus(m.GetStart().GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
 				return
 			}
 			time.Sleep(time.Millisecond)

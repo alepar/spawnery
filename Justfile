@@ -57,6 +57,17 @@ web:
 dev:
     mprocs
 
+# full A4 signing path in dev: CP + node with intent flow enabled (CP_DEV_INTENT_ENABLED=1).
+# Use `spawnctl create` to exercise the two-phase pollAndSign cycle end-to-end.
+# NOT the default for `just dev` because the web SPA does not yet implement GetPendingIntent
+# /SubmitIntent (A5 scope) — web-initiated spawns would hang at the await until TTL.
+# When ready: `just cp-intent` in one pane, `just node` in another, `spawnctl create ...` from CLI.
+cp-intent:
+    @make bin/spawnery_cp
+    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    CP_DEV_INTENT_ENABLED=1 \
+    {{repo}}/bin/spawnery_cp
+
 # --- enforced node-auth dev stack (mTLS node<->CP) -----------------------
 
 # generate a LOCAL dev CA: root, self-hosted intermediate, CP node-listener server cert, and a
