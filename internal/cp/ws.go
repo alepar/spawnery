@@ -10,13 +10,24 @@ import (
 
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/telemetry"
+	"spawnery/internal/weborigin"
 )
 
 // HandleWS bridges a browser WebSocket to a spawn via the router. First message:
 // {"spawnId":"...","token":"..."} (text); then raw ACP bytes both ways.
-func (s *Server) HandleWS(authn *auth.Auth) http.HandlerFunc {
+//
+// CORS does not govern WS upgrades, so the Origin header is validated here against the
+// same allowlist as the Connect RPCs ([WM18]). Auth stays the in-band token bind frame —
+// browsers cannot attach headers to a WebSocket.
+func (s *Server) HandleWS(authn *auth.Auth, allow weborigin.Allowlist) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}}) // dev only
+		if !allow.Allowed(r.Header.Get("Origin")) {
+			http.Error(w, "origin not allowed", http.StatusForbidden)
+			return
+		}
+		// Our Origin check already ran (scheme-exact, unlike OriginPatterns' host-only match),
+		// so skip coder/websocket's own verification.
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {
 			return
 		}

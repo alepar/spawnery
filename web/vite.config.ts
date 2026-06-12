@@ -3,9 +3,26 @@ import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
+import { sriHeadersPlugin } from "./build/sri-headers-plugin";
+import { createHeadersMiddleware } from "./e2e/preview-headers";
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    sriHeadersPlugin({
+      cpOrigin: process.env.VITE_CP_ORIGIN,
+      asOrigin: process.env.VITE_AS_ORIGIN,
+    }),
+    // Inject dist/_headers into the preview server so the Playwright CSP suite
+    // exercises the REAL enforced CSP (vite preview ignores _headers natively).
+    {
+      name: "preview-csp-headers",
+      configurePreviewServer(server) {
+        server.middlewares.use(createHeadersMiddleware());
+      },
+    },
+  ],
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
   server: {
     host: true,
@@ -21,5 +38,11 @@ export default defineConfig({
     // e2e/ holds Playwright specs (own runner via `npm run test:e2e`); keep them
     // out of the hermetic Vitest unit run.
     exclude: [...configDefaults.exclude, "e2e/**"],
+    // build/ contains hermetic plugin tests that run under Node (no jsdom APIs).
+    include: ["src/**/*.test.{ts,tsx}", "build/**/*.test.ts"],
+    environmentMatchGlobs: [
+      // build/ tests are pure Node — no jsdom needed.
+      ["build/**", "node"],
+    ],
   },
 });

@@ -119,6 +119,13 @@ test-e2e:
 test-web-e2e:
     cd web && npm run test:e2e
 
+# CSP-enforced prod-bundle Playwright suite (W1, sp-2ckv.6).
+# Builds once (with pinned origins from .env.production if present), then runs
+# the csp-prod.spec.ts suite against vite preview + dist/_headers emulation.
+# Host-gated: skipped if PLAYWRIGHT_BROWSERS_UNAVAILABLE is set or browsers are absent.
+web-csp:
+    cd web && npm run build && npm run test:e2e:csp
+
 # egress-floor enforcement e2e — REAL iptables on a privileged host (needs Docker + iptables + root).
 # Compiles as the current user (warm cache), runs the binary as root with iptables/nsenter/docker on PATH.
 test-egress:

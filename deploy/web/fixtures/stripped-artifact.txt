@@ -1,0 +1,3 @@
+This file has no cosign signature bundle.
+It is used by the pipeline self-test to assert that verify.sh FAILS when
+presented with an unsigned artifact ([WM21]).

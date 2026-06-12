@@ -16,6 +16,10 @@ cp.db*
 *.out
 .env
 .env.*
+# env.example and .env.development have no secrets — committed as documentation.
+!.env.example
+!web/.env.example
+!web/.env.development
 /.make/
 /cp
 /authsvc

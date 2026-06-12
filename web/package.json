@@ -5,9 +5,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:csp-check": "npm run build && npx tsx build/forbidden-scan.ts dist",
     "test": "vitest run",
     "gen:themes": "node scripts/gen-term-themes.mjs",
     "test:e2e": "playwright test",
+    "test:e2e:csp": "playwright test --config=playwright.csp.config.ts",
     "lint": "eslint ."
   },
   "dependencies": {

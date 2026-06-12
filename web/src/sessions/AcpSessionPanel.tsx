@@ -3,6 +3,7 @@ import { Conn } from "@/acp/conn";
 import { encodePrompt, encodePermResponse, encodeSetMode, encodeCancel, type Frame } from "@/acp/frames";
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
 import { DEV_TOKEN } from "@/api/spawnlet";
+import { cpWsUrl } from "@/config/endpoints";
 import { ChatView } from "@/views/ChatView";
 import { MAX_QUEUED } from "@/lib/turn";
 import { useSessionStore } from "./store";
@@ -39,7 +40,7 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready, model, mode
     }
     const gen = ++genRef.current;
     useSessionStore.getState().setConn(sessionId, "connecting");
-    const sock = new ReconnectingSocket(`ws://${location.host}/ws/session`, {
+    const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
       onOpen: () => {
         if (genRef.current !== gen) return;
         // Fresh frame receiver per (re)connect; wire it BEFORE the bind so replay can't precede onmessage.

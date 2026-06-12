@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
 import { DEV_TOKEN } from "@/api/spawnlet";
+import { cpWsUrl } from "@/config/endpoints";
 import { encodeInput, encodeResize } from "@/term/wire";
 import { BacklogTracker } from "@/term/backlog";
 import { useTermSettings, applyToTerminal } from "@/term/settings";
@@ -89,7 +90,7 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     let closing = false;
 
     onConnRef.current?.("connecting");
-    const sock = new ReconnectingSocket(`ws://${location.host}/ws/session`, {
+    const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
       onOpen: () => {
         sock.send(JSON.stringify({ spawnId, sessionId, clientId: CLIENT_ID, token: DEV_TOKEN, cursor: 0 }));
         safeFit();

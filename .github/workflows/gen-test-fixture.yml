@@ -1,0 +1,49 @@
+# Generates deploy/web/fixtures/wrong-identity.bundle — the [WM21] wrong-identity
+# self-test fixture. Signs stripped-artifact.txt with THIS workflow's certificate identity
+# (gen-test-fixture.yml, distinct from web-release.yml). The resulting bundle proves that
+# cosign verify-blob pinned to web-release.yml correctly rejects a bundle signed by a
+# DIFFERENT identity (the attacker-fork scenario).
+#
+# Run once to populate the fixture:
+#   gh workflow run gen-test-fixture.yml
+# Then commit the resulting deploy/web/fixtures/wrong-identity.bundle.
+#
+# The fixture is STATIC — it only needs to be regenerated if the Sigstore CT log entry
+# expires or the repository path changes.
+
+name: gen-test-fixture
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write  # Required for cosign keyless OIDC signing.
+
+jobs:
+  generate:
+    name: Generate wrong-identity fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Sign stripped-artifact.txt with THIS workflow's identity (gen-test-fixture.yml).
+      # This identity differs from web-release.yml, so web-release.yml's verify step must reject it.
+      - name: Sign fixture with wrong (gen-test-fixture) identity
+        run: |
+          cosign sign-blob --yes \
+            deploy/web/fixtures/stripped-artifact.txt \
+            --bundle deploy/web/fixtures/wrong-identity.bundle
+          echo "Signed with identity: https://github.com/$GITHUB_REPOSITORY/.github/workflows/gen-test-fixture.yml@$GITHUB_REF"
+          echo "Bundle written to deploy/web/fixtures/wrong-identity.bundle"
+
+      - name: Commit and push wrong-identity fixture
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add deploy/web/fixtures/wrong-identity.bundle
+          git commit --no-verify -m "chore(fixtures): regenerate wrong-identity cosign bundle [WM21]"
+          git push
