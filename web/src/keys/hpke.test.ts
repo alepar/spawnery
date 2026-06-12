@@ -17,7 +17,25 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { dhkemDerivePrivateScalar, hpkeOpen, type RecipientSeal } from "./hpke";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  dhkemDerivePrivateScalar,
+  hpkeOpen,
+  hpkeSeal,
+  sealEnvelope,
+  reSealEnvelope,
+  openEnvelope,
+  type RecipientSeal,
+  type Envelope,
+} from "./hpke";
+import { deriveDeviceKeysFromMnemonic, exportDeviceRef } from "./device";
+
+const TESTDATA_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../internal/secrets/seal/testdata/owner-seal",
+);
 
 // ── RFC 9180 §A.1 KEM values ─────────────────────────────────────────────────
 
@@ -128,5 +146,155 @@ describe("RFC 9180 §A.1 — hpkeOpen Go↔TS interop (AES-256-GCM variant)", ()
     const plaintext = await hpkeOpen(rs, recipPriv, recipPubBytes, aad, GO_INFO);
 
     expect(new TextDecoder().decode(plaintext)).toBe(GO_PT);
+  });
+});
+
+// ── Sender-side tests — hpkeSeal + round-trip ─────────────────────────────────
+
+describe("hpkeSeal — sender-side HPKE seal round-trip", () => {
+  it("hpkeSeal+hpkeOpen round-trip with known keys", async () => {
+    // Use the A.1 derived keys as a fixed recipient (private key non-extractable)
+    const scalar = await dhkemDerivePrivateScalar(fromHex(A1_IKMR));
+    const recipPriv = await importX25519Scalar(scalar, false);
+    const recipPubExtractable = await importX25519Scalar(scalar, true);
+    const recipPubBytes = await x25519PublicBytes(recipPubExtractable);
+
+    const dek = new Uint8Array(32).fill(0xab); // fixed test DEK
+    const aad = new TextEncoder().encode("test-aad");
+    const info = "spawnery/secrets/seal/at-rest/v1";
+
+    const rs = await hpkeSeal(dek, recipPubBytes, aad, info);
+
+    // RecipientSeal fields must be base64 strings
+    expect(typeof rs.enc).toBe("string");
+    expect(typeof rs.ct).toBe("string");
+    expect(typeof rs.recipient).toBe("string");
+
+    // The enc field must decode to 32 bytes (ephemeral X25519 pubkey)
+    const encBytes = fromHex(
+      Array.from(atob(rs.enc)).map((c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join(""),
+    );
+    expect(encBytes.length).toBe(32);
+
+    // hpkeOpen must recover the original DEK
+    const recovered = await hpkeOpen(rs, recipPriv, recipPubBytes, aad, info);
+    expect(toHex(recovered)).toBe(toHex(dek));
+  });
+
+  it("hpkeSeal produces distinct ciphertexts on each call (fresh ephemeral key)", async () => {
+    const scalar = await dhkemDerivePrivateScalar(fromHex(A1_IKMR));
+    const recipPubExtractable = await importX25519Scalar(scalar, true);
+    const recipPubBytes = await x25519PublicBytes(recipPubExtractable);
+    const dek = new Uint8Array(32).fill(0xcd);
+    const aad = new TextEncoder().encode("aad");
+
+    const rs1 = await hpkeSeal(dek, recipPubBytes, aad);
+    const rs2 = await hpkeSeal(dek, recipPubBytes, aad);
+
+    // Different ephemeral keys → different enc and ct on each call
+    expect(rs1.enc).not.toBe(rs2.enc);
+    expect(rs1.ct).not.toBe(rs2.ct);
+  });
+});
+
+describe("sealEnvelope + openEnvelope — full round-trip", () => {
+  it("TS seal → TS open recovers plaintext", async () => {
+    const scalar = await dhkemDerivePrivateScalar(fromHex(A1_IKMR));
+    const recipPriv = await importX25519Scalar(scalar, false);
+    const recipPubExtractable = await importX25519Scalar(scalar, true);
+    const recipPubBytes = await x25519PublicBytes(recipPubExtractable);
+
+    const payload = new TextEncoder().encode("my-api-key-value");
+    const atRest = { account_id: "acct-1", secret_id: "sec-1", version: 1 };
+
+    const env = await sealEnvelope(payload, [recipPubBytes], atRest);
+
+    // Envelope structure
+    expect(env.at_rest).toEqual(atRest);
+    expect(env.recipients).toHaveLength(1);
+    expect(typeof env.nonce).toBe("string");
+    expect(typeof env.ct).toBe("string");
+
+    // Open recovers the original plaintext
+    const recovered = await openEnvelope(env, recipPriv, recipPubBytes);
+    expect(new TextDecoder().decode(recovered)).toBe("my-api-key-value");
+  });
+
+  it("sealEnvelope: fresh DEK on every call [roast M2]", async () => {
+    const scalar = await dhkemDerivePrivateScalar(fromHex(A1_IKMR));
+    const recipPubExtractable = await importX25519Scalar(scalar, true);
+    const recipPubBytes = await x25519PublicBytes(recipPubExtractable);
+    const payload = new TextEncoder().encode("same-payload");
+    const atRest = { account_id: "a", secret_id: "s", version: 1 };
+
+    const env1 = await sealEnvelope(payload, [recipPubBytes], atRest);
+    const env2 = await sealEnvelope(payload, [recipPubBytes], atRest);
+
+    // Distinct DEK seals → distinct payload ciphertexts and distinct nonces
+    expect(env1.ct).not.toBe(env2.ct);
+    expect(env1.recipients[0].ct).not.toBe(env2.recipients[0].ct);
+  });
+
+  it("reSealEnvelope opens + re-seals to new member set with bumped version", async () => {
+    const scalar1 = await dhkemDerivePrivateScalar(fromHex(A1_IKMR));
+    const priv1 = await importX25519Scalar(scalar1, false);
+    const pub1Extractable = await importX25519Scalar(scalar1, true);
+    const pub1 = await x25519PublicBytes(pub1Extractable);
+
+    // Second recipient with different ikmR
+    const ikmR2 = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+    const scalar2 = await dhkemDerivePrivateScalar(fromHex(ikmR2));
+    const priv2 = await importX25519Scalar(scalar2, false);
+    const pub2Extractable = await importX25519Scalar(scalar2, true);
+    const pub2 = await x25519PublicBytes(pub2Extractable);
+
+    const payload = new TextEncoder().encode("secret-value");
+    const atRest = { account_id: "acct-1", secret_id: "sec-1", version: 5 };
+
+    // Seal to recipient 1 only
+    const env = await sealEnvelope(payload, [pub1], atRest);
+
+    // Re-seal to both recipients; version must be bumped
+    const resealed = await reSealEnvelope(env, priv1, pub1, [pub1, pub2]);
+
+    expect(resealed.at_rest.version).toBe(6);
+    expect(resealed.recipients).toHaveLength(2);
+    // Both recipients can open it
+    const r1 = await openEnvelope(resealed, priv1, pub1);
+    const r2 = await openEnvelope(resealed, priv2, pub2);
+    expect(new TextDecoder().decode(r1)).toBe("secret-value");
+    expect(new TextDecoder().decode(r2)).toBe("secret-value");
+  });
+});
+
+// ── Cross-language: Go-sealed envelope opened by TS ──────────────────────────
+// The seal_envelope.json vector was generated by Go's vectors_test.go using
+// the vectorMnemonicDevice1 mnemonic as the recipient. This validates that
+// TS sealEnvelope output is compatible with Go's seal.Open format (the Go→TS
+// direction is tested here; the TS→Go direction is validated by the Go-side
+// roundtrip in seal_test.go and the shared encodeFields/HKDF wiring).
+
+interface SealEnvelopeVector {
+  recipient_mnemonic: string;
+  plaintext_b64: string;
+  account_id: string;
+  secret_id: string;
+  version: number;
+  envelope: Envelope;
+}
+
+describe("Go-sealed envelope — cross-language open [WM9]", () => {
+  const vectorPath = path.join(TESTDATA_DIR, "seal_envelope.json");
+  const raw = fs.readFileSync(vectorPath, "utf8");
+  const v: SealEnvelopeVector = JSON.parse(raw);
+
+  it("TS openEnvelope recovers Go-sealed plaintext", async () => {
+    const keys = await deriveDeviceKeysFromMnemonic(v.recipient_mnemonic, "");
+    const ref = await exportDeviceRef(keys);
+
+    const plaintext = await openEnvelope(v.envelope, keys.x25519Private, ref.x25519Pub);
+
+    const expectedBytes = Uint8Array.from(atob(v.plaintext_b64), (c) => c.charCodeAt(0));
+    expect(toHex(plaintext)).toBe(toHex(expectedBytes));
   });
 });

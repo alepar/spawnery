@@ -68,10 +68,11 @@ type X25519PubKey []byte
 // AtRestAAD is the additional authenticated data bound into every at-rest DEK
 // seal: (accountId, secretId, version). It stops a compromised CP from splicing
 // seals across envelopes or replaying an old version as current (§2).
+// json tags use snake_case to match the TypeScript AtRestAAD interface.
 type AtRestAAD struct {
-	AccountID string
-	SecretID  string
-	Version   uint64
+	AccountID string `json:"account_id"`
+	SecretID  string `json:"secret_id"`
+	Version   uint64 `json:"version"`
 }
 
 func (a AtRestAAD) bytes() []byte {

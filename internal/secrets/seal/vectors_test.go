@@ -204,6 +204,81 @@ func TestGenerateAndVerifyVectors(t *testing.T) {
 	}
 }
 
+// TestSealEnvelopeVector generates and/or verifies a full-envelope seal vector
+// (testdata/owner-seal/seal_envelope.json).  The vector contains a Go-sealed
+// envelope that the TypeScript test (hpke.test.ts) must be able to open.
+//
+// Because Go's rand.Reader is non-deterministic, the file is generated once
+// with -update and checked in.  Normal runs verify Go can still Open it.
+func TestSealEnvelopeVector(t *testing.T) {
+	d1, err := DeviceFromMnemonic(vectorMnemonicDevice1, "")
+	if err != nil {
+		t.Fatalf("DeviceFromMnemonic: %v", err)
+	}
+
+	const plaintext = "hello-ts-from-go"
+	aad := AtRestAAD{AccountID: "acct-1", SecretID: "seal-vec-1", Version: 1}
+
+	fpath := filepath.Join("testdata", "owner-seal", "seal_envelope.json")
+
+	if *update {
+		env, err := Seal([]byte(plaintext), []X25519PubKey{d1.X25519PubKey()}, aad)
+		if err != nil {
+			t.Fatalf("Seal: %v", err)
+		}
+		v := sealEnvelopeVector{
+			RecipientMnemonic: vectorMnemonicDevice1,
+			PlaintextB64:      base64.StdEncoding.EncodeToString([]byte(plaintext)),
+			AccountID:         aad.AccountID,
+			SecretID:          aad.SecretID,
+			Version:           aad.Version,
+			Envelope:          env,
+		}
+		data, err := json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal seal vector: %v", err)
+		}
+		if err := os.WriteFile(fpath, append(data, '\n'), 0o600); err != nil {
+			t.Fatalf("write seal_envelope.json: %v", err)
+		}
+		t.Logf("updated seal_envelope.json")
+		return
+	}
+
+	// Normal run: read and verify.
+	data, err := os.ReadFile(fpath)
+	if err != nil {
+		t.Fatalf("read seal_envelope.json (run with -update to create): %v", err)
+	}
+	var v sealEnvelopeVector
+	if err := json.Unmarshal(data, &v); err != nil {
+		t.Fatalf("unmarshal seal_envelope.json: %v", err)
+	}
+	wantD, _ := base64.StdEncoding.DecodeString(v.PlaintextB64)
+	if string(wantD) != plaintext {
+		t.Fatalf("seal_envelope.json plaintext mismatch: got %q want %q", string(wantD), plaintext)
+	}
+	got, err := Open(v.Envelope, d1.X25519Priv)
+	if err != nil {
+		t.Fatalf("Open(seal_envelope.json): %v", err)
+	}
+	if !bytes.Equal(got, wantD) {
+		t.Fatalf("Open: got %q want %q", got, wantD)
+	}
+	t.Logf("seal_envelope.json verified OK")
+}
+
+// sealEnvelopeVector is the JSON structure for seal_envelope.json.
+// Field names are snake_case so the TypeScript test can parse the file directly.
+type sealEnvelopeVector struct {
+	RecipientMnemonic string    `json:"recipient_mnemonic"`
+	PlaintextB64      string    `json:"plaintext_b64"`
+	AccountID         string    `json:"account_id"`
+	SecretID          string    `json:"secret_id"`
+	Version           uint64    `json:"version"`
+	Envelope          *Envelope `json:"envelope"`
+}
+
 // verifyStoredChainVectors reads testdata/owner-seal/deviceset_chain.json and
 // verifies:
 //  1. The full chain passes VerifyDeviceSet (signatures and structure).

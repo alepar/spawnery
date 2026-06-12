@@ -235,6 +235,16 @@ function idbDelete(db: IDBDatabase, key: string): Promise<void> {
 export async function storeDeviceKeys(
   keys: DeviceKeys,
 ): Promise<{ persistGranted: boolean }> {
+  // Defense-in-depth: refuse to store if the private halves are extractable.
+  // Both generateDeviceKeys and deriveDeviceKeysFromSeed set extractable:false;
+  // this guard catches any future code path that accidentally creates an
+  // extractable private key and tries to persist it (spec §1, [roast M15]).
+  if (keys.x25519Private.extractable) {
+    throw new Error("device: x25519 private key must not be extractable before storage");
+  }
+  if (keys.ecdsaPrivate.extractable) {
+    throw new Error("device: ecdsa private key must not be extractable before storage");
+  }
   const db = await openIDB();
   await Promise.all([
     idbPut(db, IDB_X25519_KEY, keys.x25519Private),

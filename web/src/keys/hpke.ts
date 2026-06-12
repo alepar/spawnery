@@ -95,6 +95,12 @@ function fromBase64(b64: string): Uint8Array {
   return out;
 }
 
+function toBase64(b: Uint8Array): string {
+  let s = "";
+  for (const byte of b) s += String.fromCharCode(byte);
+  return btoa(s);
+}
+
 function concat(...arrays: Uint8Array[]): Uint8Array {
   const total = arrays.reduce((n, a) => n + a.length, 0);
   const out = new Uint8Array(total);
@@ -296,6 +302,158 @@ export async function hpkeOpen(
     ciphertext as unknown as Uint8Array<ArrayBuffer>,
   );
   return new Uint8Array(plaintext);
+}
+
+// ── Sender Encap ─────────────────────────────────────────────────────────────
+
+/**
+ * encap performs the DHKEM-X25519 sender Encap operation (RFC 9180 §7.1).
+ * Generates a fresh ephemeral X25519 keypair (extractable is fine here — the
+ * key is single-use and never stored as a device key), computes DH against the
+ * recipient, and returns enc (ephemeral pubkey) + shared_secret.
+ */
+async function encap(
+  recipPubBytes: Uint8Array,
+): Promise<{ enc: Uint8Array; sharedSecret: Uint8Array }> {
+  // Ephemeral key: extractable so we can export the public bytes (enc)
+  // TS 5.9: cast required — generateKey returns CryptoKeyPair for asymmetric algos.
+  const ephemeral = await crypto.subtle.generateKey(
+    { name: "X25519" },
+    true, // extractable: needed to export enc (ephemeral pub); never persisted
+    ["deriveBits"],
+  ) as CryptoKeyPair;
+
+  // enc = raw ephemeral public key (32 bytes)
+  const encBuf = await crypto.subtle.exportKey("raw", ephemeral.publicKey);
+  const enc = new Uint8Array(encBuf as ArrayBuffer);
+
+  // Import recipient public key for DH
+  const recipKey = await crypto.subtle.importKey(
+    "raw",
+    recipPubBytes as unknown as Uint8Array<ArrayBuffer>,
+    { name: "X25519" },
+    false,
+    [],
+  );
+
+  // DH: ephemeralPriv × recipPub
+  const dhBits = await crypto.subtle.deriveBits(
+    { name: "X25519", public: recipKey } as AlgorithmIdentifier,
+    ephemeral.privateKey,
+    256,
+  );
+  const dh = new Uint8Array(dhBits);
+
+  // kem_context = enc || pk(recip)
+  const kemContext = concat(enc, recipPubBytes);
+  const sharedSecret = await kemExtractAndExpand(dh, kemContext);
+  return { enc, sharedSecret };
+}
+
+/**
+ * hpkeSeal seals a DEK to one recipient's X25519 public key using HPKE Base
+ * mode (RFC 9180). Matches Go's suite.NewSender + Setup + Seal leg in seal.go.
+ *
+ * info = "spawnery/secrets/seal/at-rest/v1" (infoAtRest from seal.go)
+ */
+export async function hpkeSeal(
+  dek: Uint8Array,
+  recipPubBytes: Uint8Array,
+  aad: Uint8Array,
+  info: string = "spawnery/secrets/seal/at-rest/v1",
+): Promise<RecipientSeal> {
+  const { enc, sharedSecret } = await encap(recipPubBytes);
+  const { key, baseNonce } = await keyScheduleBase(
+    sharedSecret,
+    new TextEncoder().encode(info),
+  );
+  // Single-message Seal (seq=0): nonce = base_nonce XOR 0 = base_nonce
+  // TS 5.9: cast Uint8Array<ArrayBufferLike> to concrete buffer type for WebCrypto.
+  const ct = new Uint8Array(await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: baseNonce as unknown as Uint8Array<ArrayBuffer>,
+      additionalData: aad as unknown as Uint8Array<ArrayBuffer>,
+    },
+    key,
+    dek as unknown as Uint8Array<ArrayBuffer>,
+  ));
+  return {
+    recipient: toBase64(recipPubBytes),
+    enc: toBase64(enc),
+    ct: toBase64(ct),
+  };
+}
+
+/**
+ * sealEnvelope encrypts payload under a fresh random DEK (new DEK on every
+ * call — roast M2) and HPKE-Base-seals that DEK to each recipient pubkey,
+ * binding atRest into every seal. Matches Go's seal.Seal() exactly.
+ */
+export async function sealEnvelope(
+  payload: Uint8Array,
+  recipients: Uint8Array[], // raw 32-byte X25519 pubkeys
+  atRest: AtRestAAD,
+): Promise<Envelope> {
+  if (recipients.length === 0) throw new Error("hpke: no recipients");
+  const aad = atRestAADBytes(atRest);
+
+  // Fresh DEK per write [roast M2]
+  const dek = crypto.getRandomValues(new Uint8Array(32));
+  try {
+    // Encrypt payload under the DEK (AES-256-GCM), binding atRest as AAD
+    // TS 5.9: cast Uint8Array<ArrayBufferLike> to concrete buffer type for WebCrypto.
+    const gcmKey = await crypto.subtle.importKey(
+      "raw", dek as unknown as Uint8Array<ArrayBuffer>, { name: "AES-GCM" }, false, ["encrypt"],
+    );
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const ctBytes = new Uint8Array(await crypto.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv: nonce as unknown as Uint8Array<ArrayBuffer>,
+        additionalData: aad as unknown as Uint8Array<ArrayBuffer>,
+      },
+      gcmKey,
+      payload as unknown as Uint8Array<ArrayBuffer>,
+    ));
+
+    // HPKE-seal the DEK to each recipient
+    const recipientSeals = await Promise.all(
+      recipients.map((r) => hpkeSeal(dek, r, aad)),
+    );
+
+    return {
+      at_rest: atRest,
+      recipients: recipientSeals,
+      nonce: toBase64(nonce),
+      ct: toBase64(ctBytes),
+    };
+  } finally {
+    dek.fill(0); // best-effort DEK zeroization
+  }
+}
+
+/**
+ * reSealEnvelope opens an existing envelope with this device's key, then
+ * re-seals the plaintext to a new recipient set with a fresh DEK (roast M2)
+ * and a bumped version. Used by the re-seal sweep after enrollment or removal.
+ */
+export async function reSealEnvelope(
+  env: Envelope,
+  recipPriv: CryptoKey,
+  recipPubBytes: Uint8Array,
+  newRecipients: Uint8Array[],
+): Promise<Envelope> {
+  // Open the existing envelope to recover the plaintext payload
+  const plaintext = await openEnvelope(env, recipPriv, recipPubBytes);
+
+  // Re-seal with a fresh DEK to the new member set; bump version to prevent
+  // the CP from replaying the pre-removal ciphertext (§2, AAD splice defence).
+  const newAtRest: AtRestAAD = {
+    ...env.at_rest,
+    version: env.at_rest.version + 1,
+  };
+  return sealEnvelope(plaintext, newRecipients, newAtRest);
 }
 
 // ── Envelope Open ─────────────────────────────────────────────────────────────

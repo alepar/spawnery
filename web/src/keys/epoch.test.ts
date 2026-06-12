@@ -33,6 +33,7 @@ describe("re-seal epoch sweep [WM2]", () => {
     expect(progress.targetVersion).toBe(3);
     expect(progress.total).toBe(3);
     expect(progress.done).toBe(0);
+    expect(progress.secretIds).toEqual(["s1", "s2", "s3"]);
     expect(progress.completed).toHaveLength(0);
     expect(progress.failed).toHaveLength(0);
     expect(progress.isRevocation).toBe(true);
@@ -73,6 +74,7 @@ describe("re-seal epoch sweep [WM2]", () => {
     expect(loaded).not.toBeNull();
     expect(loaded!.targetVersion).toBe(2);
     expect(loaded!.total).toBe(1);
+    expect(loaded!.secretIds).toEqual(["x"]);
   });
 
   it("clearSweepProgress removes persisted state", () => {

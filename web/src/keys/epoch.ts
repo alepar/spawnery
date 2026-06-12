@@ -21,6 +21,8 @@ export interface SweepProgress {
   total: number;
   /** Number of secrets that have been re-sealed so far. */
   done: number;
+  /** Full list of secret IDs to re-seal (needed for resume after restart). */
+  secretIds: string[];
   /** Secret IDs that have been successfully re-sealed. */
   completed: string[];
   /** Secret IDs that failed (will be retried on resume). */
@@ -117,6 +119,7 @@ export function initSweep(opts: {
     targetVersion: opts.targetVersion,
     total: opts.secretIds.length,
     done: 0,
+    secretIds: opts.secretIds,
     completed: [],
     failed: [],
     isRevocation: opts.isRevocation,
