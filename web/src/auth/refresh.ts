@@ -46,21 +46,26 @@ export type RefreshResult =
   | { kind: "error"; message: string };
 
 /**
- * Module-level in-flight promise shared across ALL concurrent callers, whether a lock
- * is available or not.  The check executes synchronously after the first `await`
- * (keyCanSign), so JS single-threading prevents TOCTOU: nothing can pre-empt between
- * the `await` resumption and the `_inflight` assignment.
+ * Module-level in-flight promise shared across ALL concurrent callers within this JS realm.
+ * The check executes synchronously after the first `await` (keyCanSign), so JS
+ * single-threading prevents TOCTOU: nothing can pre-empt between the `await` resumption
+ * and the `_inflight` assignment.
  *
- * Without this guard the Web Locks path serialises callers but each runs its own
- * _doRefresh with the refreshTokenHash captured at call time.  After caller A rotates
- * the cookie, caller B signs a PoP over the stale hash → AS reconstructs the message
- * over sha256(newCookie) → signature mismatch → spurious logout.
+ * We intentionally do NOT use navigator.locks for cross-tab coordination: a serialising
+ * cross-tab lock would let tab B run its own _doRefresh with the refreshTokenHash captured
+ * at call time — after tab A has already rotated the cookie, tab B's PoP signs over the
+ * stale hash, the AS reconstructs the message over sha256(newCookie), the signature
+ * mismatches, and tab B gets a spurious logout.  Concurrent cross-tab refreshes are safe:
+ * both tabs present the same old cookie and the server's grace-window idempotency
+ * (refresh.go:111-121) returns the same rotated token to whichever arrives second.
  */
 let _inflight: Promise<RefreshResult> | null = null;
 
 /**
  * refreshAccessToken performs a single /refresh round-trip with PoP.
- * All concurrent callers share the first in-flight promise (true single-flight).
+ * All concurrent callers within a JS realm share the first in-flight promise (true
+ * single-flight).  acquireLock is injectable for tests only; navigator.locks is not
+ * used in production to avoid the cross-tab stale-hash problem described above.
  */
 export async function refreshAccessToken(deps: RefreshDeps): Promise<RefreshResult> {
   // Positive self-check: if the key is gone, take the key-loss path before any network.
@@ -73,22 +78,13 @@ export async function refreshAccessToken(deps: RefreshDeps): Promise<RefreshResu
   // the same rotated token rather than each re-signing a PoP over a stale hash.
   if (_inflight) return _inflight;
 
-  const lockFn =
-    deps.acquireLock ??
-    (typeof navigator !== "undefined" && navigator.locks
-      ? <T>(name: string, fn: () => Promise<T>) =>
-          navigator.locks.request(name, fn)
-      : null);
+  // acquireLock is only provided by tests (e.g. a serialising mock that proves _inflight
+  // short-circuits before the lock is even invoked).  Production never injects a lock.
+  const lockFn = deps.acquireLock ?? null;
 
-  if (lockFn) {
-    // Cast required: lockFn is a union of generic overloads; TypeScript can't resolve
-    // the return type narrowly enough without an explicit annotation.
-    const p = (lockFn(REFRESH_LOCK_NAME, () => _doRefresh(deps)) as Promise<RefreshResult>).finally(() => { _inflight = null; });
-    _inflight = p;
-    return p;
-  }
-
-  const p = _doRefresh(deps).finally(() => { _inflight = null; });
+  const p = lockFn
+    ? (lockFn(REFRESH_LOCK_NAME, () => _doRefresh(deps)) as Promise<RefreshResult>).finally(() => { _inflight = null; })
+    : _doRefresh(deps).finally(() => { _inflight = null; });
   _inflight = p;
   return p;
 }

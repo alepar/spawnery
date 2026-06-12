@@ -10,7 +10,7 @@
  */
 
 import { create } from "zustand";
-import { AS_ORIGIN } from "@/config/endpoints";
+import { AS_ORIGIN, asHttpUrl } from "@/config/endpoints";
 import { parseCallback, browserHistory, sessionStateStorage } from "./oauth";
 import { loadSessionKey, exportSpkiDer, sessionKeyHash, clearSessionKey } from "./keypair";
 import { refreshAccessToken, computeRefreshDelay } from "./refresh";
@@ -244,7 +244,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     _clearRth();
     // Best-effort: revoke the server-side family.
     try {
-      await fetch(/* AS_ORIGIN + */ "/logout", {
+      await fetch(asHttpUrl("/logout"), {
         method: "POST",
         credentials: "include",
       });
