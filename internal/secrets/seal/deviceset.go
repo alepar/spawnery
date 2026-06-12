@@ -69,12 +69,13 @@ type EntryLabel struct {
 // from Body for semantic use only; all signatures and hashes operate on the
 // raw Body bytes (WM9: no re-serialization on either side).
 type entryBody struct {
-	Version  uint64      `json:"version"` // monotonic; genesis = 1
-	Type     EntryType   `json:"type"`
-	PrevHash []byte      `json:"prev"`            // SHA-256 of the previous StoredEntry; genesis = nil
-	Change   *DeviceRef  `json:"change"`          // device added/removed (nil for genesis)
-	Devices  []DeviceRef `json:"devices"`         // full membership AFTER this entry
-	Label    *EntryLabel `json:"label,omitempty"` // WM15: authenticated label for the Change device
+	Version       uint64      `json:"version"` // monotonic; genesis = 1
+	Type          EntryType   `json:"type"`
+	PrevHash      []byte      `json:"prev"`                     // SHA-256 of the previous StoredEntry; genesis = nil
+	Change        *DeviceRef  `json:"change"`                   // device added/removed (nil for genesis)
+	Devices       []DeviceRef `json:"devices"`                  // full membership AFTER this entry
+	Label         *EntryLabel `json:"label,omitempty"`          // WM15: authenticated label for the Change device (or device1 in genesis)
+	RecoveryLabel *EntryLabel `json:"recovery_label,omitempty"` // WM15: authenticated label for the recovery virtual device (genesis only)
 }
 
 // StoredEntry is the on-the-wire / on-disk shape of one log entry (WM9).
@@ -202,32 +203,37 @@ func buildEntry(b entryBody) (StoredEntry, error) {
 	return StoredEntry{Body: body}, nil
 }
 
-// nowNanoStr returns the current time as a decimal string of UnixNano (u64).
-func nowNanoStr() string {
+// nowNanoStr is the clock source for EnrolledAt labels. Tests that need stable
+// output (e.g. vector generation) replace this variable with a deterministic
+// stub; production code uses the default time.Now() implementation.
+var nowNanoStr = func() string {
 	return strconv.FormatUint(uint64(time.Now().UnixNano()), 10)
 }
 
 // NewGenesis creates a one-entry log whose genesis statement enrolls device1 and
 // the recovery virtual device, co-signed by both of their signing keys (§4).
-// Device1 gets an "device1" label; recovery's label name is "recovery" so the
-// W3 UI can render it distinctly (WM15).
+// Device1 gets a "device1" label and the recovery virtual device gets a
+// "recovery" label, both recorded in the signed Body (WM15).
 func NewGenesis(device1, recovery *Device) (*DeviceSetLog, error) {
 	return NewGenesisLabeled(device1, recovery, "device1", "recovery")
 }
 
 // NewGenesisLabeled is like NewGenesis but accepts explicit device names (WM15).
+// Both device1Name and recoveryName are recorded in the signed genesis Body so
+// the recovery device's identity is authenticated from genesis.
 func NewGenesisLabeled(device1, recovery *Device, device1Name, recoveryName string) (*DeviceSetLog, error) {
 	if device1 == nil || recovery == nil {
 		return nil, errors.New("seal: genesis needs device1 and recovery")
 	}
-	_ = recoveryName // documented: recovery label is implicit; the W3 label comes from device1Name
+	now := nowNanoStr()
 	b := entryBody{
-		Version:  1,
-		Type:     EntryGenesis,
-		PrevHash: nil,
-		Change:   nil,
-		Devices:  []DeviceRef{device1.Ref(), recovery.Ref()},
-		Label:    &EntryLabel{Name: device1Name, EnrolledAt: nowNanoStr()},
+		Version:       1,
+		Type:          EntryGenesis,
+		PrevHash:      nil,
+		Change:        nil,
+		Devices:       []DeviceRef{device1.Ref(), recovery.Ref()},
+		Label:         &EntryLabel{Name: device1Name, EnrolledAt: now},
+		RecoveryLabel: &EntryLabel{Name: recoveryName, EnrolledAt: now},
 	}
 	e, err := buildEntry(b)
 	if err != nil {
