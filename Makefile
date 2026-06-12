@@ -13,12 +13,15 @@ gen: .make/gen
 .make/gen: $(shell find proto -name '*.proto') buf.gen.yaml buf.yaml | .make
 	buf generate && touch $@
 
-# Image stamps — rebuild an image only when its build context changes.
+# Image stamps — rebuild an image only when its build context changes. Each image's deploy/
+# assets (launcher, entrypoints, configs) are COPY'd into it, so they are stamp deps too —
+# without them a launch-script edit never triggered a rebuild.
+DEPLOY_AGENT_SRCS := $(shell find deploy/agent -type f)
 images: .make/img-sidecar .make/img-stubagent .make/img-agent
 .make/img-sidecar:   deploy/sidecar/Dockerfile   $(GO_SRCS) | .make ; docker build -t spawnery/sidecar:dev   -f $< . && touch $@
-.make/img-stubagent: deploy/stubagent/Dockerfile $(GO_SRCS) | .make ; docker build -t spawnery/stubagent:dev -f $< . && touch $@
+.make/img-stubagent: deploy/stubagent/Dockerfile $(shell find deploy/stubagent -type f) $(DEPLOY_AGENT_SRCS) $(GO_SRCS) | .make ; docker build -t spawnery/stubagent:dev -f $< . && touch $@
 # The agent image now ships opencode + tmux (replacing goose). Tag stays generic.
-.make/img-agent:     deploy/agent/Dockerfile     $(GO_SRCS) | .make ; docker build -t spawnery/agent:dev     -f $< . && touch $@
+.make/img-agent:     deploy/agent/Dockerfile     $(DEPLOY_AGENT_SRCS) $(GO_SRCS) | .make ; docker build -t spawnery/agent:dev     -f $< . && touch $@
 
 bin:    ; @mkdir -p bin
 .make:  ; @mkdir -p .make

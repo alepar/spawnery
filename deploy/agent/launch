@@ -177,12 +177,32 @@ case "$RUNNABLE" in
     export CODEX_HOME="${CODEX_HOME:-/root/.codex}"
     export CODEX_SPAWNERY_KEY="${CODEX_SPAWNERY_KEY:-sk-unused-sidecar-injects-real-key}"
     mkdir -p "$CODEX_HOME"
+    # Codex only carries built-in model metadata for OpenAI slugs; any other model warns
+    # "Model metadata ... not found. Defaulting to fallback metadata" and degrades. Fetch the
+    # real context window / max output tokens for this spawn's model from OpenRouter's /models
+    # (sidecar passthrough) and pin them; fall back to safe generics if the lookup fails.
+    # NB: jq string interpolation of `empty` erases the whole string, so null fields map to 0
+    # and the shell treats 0 as lookup-failed.
+    MODEL_META="$(curl -fsS --max-time 10 "${SIDECAR_OAI}/models" 2>/dev/null \
+      | jq -r --arg m "$MODEL_ID" \
+          '.data[] | select(.id==$m) | "\(.context_length // 0) \(.top_provider.max_completion_tokens // 0)"' \
+      | head -1)" || MODEL_META=""
+    CTX_WINDOW="${MODEL_META%% *}"
+    MAX_OUT="${MODEL_META##* }"
+    case "$CTX_WINDOW" in ''|0|*[!0-9]*) CTX_WINDOW=131072 ;; esac
+    case "$MAX_OUT" in ''|0|*[!0-9]*) MAX_OUT=16384 ;; esac
     cat > "$CODEX_HOME/config.toml" <<EOF
 model = "${MODEL_ID}"
 model_provider = "spawnery"
+model_context_window = ${CTX_WINDOW}
+model_max_output_tokens = ${MAX_OUT}
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 disable_response_storage = true
+
+# The pod IS the sandbox; suppress the per-spawn "do you trust this directory" prompt.
+[projects."/app"]
+trust_level = "trusted"
 
 [model_providers.spawnery]
 name = "Spawnery Sidecar"
