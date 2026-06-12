@@ -69,6 +69,21 @@ BUCKET_ID="$(printf '%s' "$BUCKET_JSON" | grep -oE '"id": *"[^"]+"' | head -1 | 
 admin -X POST "${ADMIN_ENDPOINT}/v1/bucket/allow" \
   -d "{\"bucketId\":\"${BUCKET_ID}\",\"accessKeyId\":\"${ACCESS_KEY_ID}\",\"permissions\":{\"read\":true,\"write\":true,\"owner\":true}}" >/dev/null
 
+# Persist the creds where `just node` can pick them up (gitignored; dev only). Uses the
+# spawnlet's JOURNAL_* env names directly so the recipe can source the file as-is.
+CREDS="$DIR/dev-creds.env"
+cat > "$CREDS" <<EOF
+JOURNAL_BACKEND=s3
+JOURNAL_S3_ENDPOINT=${S3_ENDPOINT}
+JOURNAL_S3_BUCKET=${DEV_BUCKET}
+JOURNAL_S3_ACCESS_KEY=${ACCESS_KEY_ID}
+JOURNAL_S3_SECRET_KEY=${SECRET_KEY}
+JOURNAL_S3_REGION=garage
+JOURNAL_S3_DISABLE_TLS=true
+EOF
+chmod 600 "$CREDS"
+echo ">> wrote $CREDS (sourced automatically by 'just node')"
+
 cat <<EOF
 
 >> Garage ready. Dev S3 credentials for the journaler:

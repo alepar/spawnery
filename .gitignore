@@ -33,3 +33,4 @@ cp.db*
 # Local git worktrees (linked checkouts; not part of the tracked tree)
 .claude/worktrees/
 .superpowers/
+deploy/garage/dev-creds.env

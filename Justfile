@@ -35,8 +35,11 @@ authsvc:
     AS_DEV=1 AS_LISTEN={{addr_as}} {{repo}}/bin/authsvc
 
 # spawnlet attached to the CP — root-free dev node (self-hosted + egress floor off). `just node stub` = echo agent.
+# Sources deploy/garage/dev-creds.env when present (written by `just garage`), enabling the
+# transient-tier s3 journal against the dev Garage; without it journaling stays off.
 node agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
+    set -a; [ -f {{repo}}/deploy/garage/dev-creds.env ] && . {{repo}}/deploy/garage/dev-creds.env; set +a; \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \

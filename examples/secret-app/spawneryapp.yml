@@ -9,4 +9,5 @@ storage:
     - name: main
       path: data
       seed: seed
+      durability: node-local   # journaled to the dev Garage when `just garage` creds exist
 visibility: open
