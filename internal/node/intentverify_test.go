@@ -401,6 +401,29 @@ func TestSelfHostedOwnerEnforcement(t *testing.T) {
 	}
 }
 
+// Empty execution field vs non-empty signed field must be caught [AM1 hardening].
+// A CP that sends an empty image/model/app_ref while the client signed a non-empty value
+// must be rejected — the guard is on the signed (body) value, not the executed (fields) value.
+func TestCorrespondenceSignedNonEmptyExecEmptyRefused(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+	now := time.Unix(1_770_000_000, 0)
+	clock := func() time.Time { return now }
+
+	body := goodStartBody("sp-1", "node-1", 1, now)
+	body.Image = "img@sha256:signed" // signed a specific image
+	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, intent.OpCreateSpawn)
+
+	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
+	fields := goodStartFields("sp-1", "node-1", 1)
+	fields.Image = "" // CP sends empty — previously would skip the check, now must fail
+
+	nack, _ := v.VerifyStart(env, fields)
+	if nack != NACKCorrespondence {
+		t.Fatalf("signed non-empty vs exec empty: want NACKCorrespondence, got %q", nack)
+	}
+}
+
 // Nil AuthEnvelope in enforced mode must return NACKMissingIntent.
 func TestNilEnvelopeEnforcedMode(t *testing.T) {
 	_, ks := genASKey(t)

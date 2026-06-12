@@ -29,14 +29,24 @@ type intentClient interface {
 	SubmitIntent(context.Context, *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error)
 }
 
+// intentParams holds the user-initiated parameters spawnctl knows before pollAndSign —
+// used to validate the CP's PendingIntent against the originating request [AM1].
+// A zero field is not validated (the caller did not specify or know that value).
+type intentParams struct {
+	AppRef       string // user's requested app_ref (create flow)
+	Model        string // user's requested model (create flow)
+	TargetNodeID string // user's explicit target node (migrate flow; "" = cloud/CP-assigned)
+}
+
 // pollAndSign polls GetPendingIntent until the CP registers the pending intent for spawnID, then
-// builds and submits a signed AuthEnvelope. An ephemeral ECDSA P-256 session key is generated per
-// call; the caller need not manage key material. In dev mode the CP mints the cnf-bearing
-// aud=node token from the SPKI DER embedded in the SignedIntent (NodeAccessToken left empty here).
+// validates the returned tuple against params [AM1], builds and submits a signed AuthEnvelope. An
+// ephemeral ECDSA P-256 session key is generated per call; the caller need not manage key material.
+// In dev mode the CP mints the cnf-bearing aud=node token from the SPKI DER embedded in the
+// SignedIntent (NodeAccessToken left empty here).
 //
 // pollAndSign MUST be called concurrently with the lifecycle RPC that triggers the two-phase flow —
 // that RPC blocks at the CP until the envelope is submitted. Cancel the context to abort early.
-func pollAndSign(ctx context.Context, ic intentClient, spawnID string) error {
+func pollAndSign(ctx context.Context, ic intentClient, spawnID string, params intentParams) error {
 	sessionKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("pollAndSign %s: generate session key: %w", spawnID, err)
@@ -54,6 +64,17 @@ func pollAndSign(ctx context.Context, ic intentClient, spawnID string) error {
 		}
 		if resp.Msg.Ready {
 			pi = resp.Msg.Pending
+			// Validate the CP-supplied tuple against the user's known parameters [AM1]:
+			// a compromised CP could substitute a different workload; reject on mismatch.
+			if params.AppRef != "" && pi.GetAppRef() != params.AppRef {
+				return fmt.Errorf("pollAndSign %s: AM1: CP offered app_ref %q but client requested %q", spawnID, pi.GetAppRef(), params.AppRef)
+			}
+			if params.Model != "" && pi.GetModel() != params.Model {
+				return fmt.Errorf("pollAndSign %s: AM1: CP offered model %q but client requested %q", spawnID, pi.GetModel(), params.Model)
+			}
+			if params.TargetNodeID != "" && pi.GetTargetNodeId() != params.TargetNodeID {
+				return fmt.Errorf("pollAndSign %s: AM1: CP offered target_node_id %q but client requested %q", spawnID, pi.GetTargetNodeId(), params.TargetNodeID)
+			}
 			break
 		}
 		if time.Now().After(deadline) {

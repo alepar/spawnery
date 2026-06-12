@@ -188,7 +188,7 @@ func runCP(ctx context.Context, addr, appID, model string, src *cpTokenSource) {
 	pollCtx, cancelPoll := context.WithCancel(ctx)
 	defer cancelPoll()
 	go func() {
-		if err := pollAndSign(pollCtx, client, id); err != nil && !errors.Is(err, context.Canceled) {
+		if err := pollAndSign(pollCtx, client, id, intentParams{AppRef: appID, Model: model}); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("pollAndSign: %v (spawn may still become active if CP intent flow is disabled)", err)
 		}
 	}()

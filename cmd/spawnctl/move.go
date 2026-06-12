@@ -79,8 +79,14 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 	pollCtx, cancelPoll := context.WithCancel(ctx)
 	defer cancelPoll()
 	if ic != nil {
+		// For an explicit node target, validate the CP's resolved target_node_id [AM1].
+		// For "cloud", the CP selects the node — leave TargetNodeID empty (no validation).
+		var migrateTargetNodeID string
+		if target != targetCloud {
+			migrateTargetNodeID = target
+		}
 		go func() {
-			if err := pollAndSign(pollCtx, ic, spawnID); err != nil && !errors.Is(err, context.Canceled) {
+			if err := pollAndSign(pollCtx, ic, spawnID, intentParams{TargetNodeID: migrateTargetNodeID}); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("move pollAndSign %s: %v", spawnID, err)
 			}
 		}()

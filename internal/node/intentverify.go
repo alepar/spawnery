@@ -228,17 +228,19 @@ func (v *IntentVerifier) checkStartCorrespondence(body *authv1.IntentBody, field
 		return NACKCorrespondence, fmt.Sprintf("target_node_id: intent=%q nodeID=%q", body.TargetNodeId, v.nodeID)
 	}
 	// For create-spawn: app_ref, image, model must match.
-	if fields.AppRef != "" && body.AppRef != fields.AppRef {
+	// Guard on the signed body value (not the exec field) so that a CP sending an empty
+	// execution value for a field the client signed non-empty is caught [AM1].
+	if body.AppRef != "" && body.AppRef != fields.AppRef {
 		return NACKCorrespondence, fmt.Sprintf("app_ref: intent=%q exec=%q", body.AppRef, fields.AppRef)
 	}
-	if fields.Image != "" && body.Image != fields.Image {
+	if body.Image != "" && body.Image != fields.Image {
 		return NACKCorrespondence, fmt.Sprintf("image: intent=%q exec=%q", body.Image, fields.Image)
 	}
-	if fields.Model != "" && body.Model != fields.Model {
+	if body.Model != "" && body.Model != fields.Model {
 		return NACKCorrespondence, fmt.Sprintf("model: intent=%q exec=%q", body.Model, fields.Model)
 	}
 	// For resume/recreate/migrate: data_ref.
-	if fields.DataRef != "" && body.DataRef != fields.DataRef {
+	if body.DataRef != "" && body.DataRef != fields.DataRef {
 		return NACKCorrespondence, fmt.Sprintf("data_ref: intent=%q exec=%q", body.DataRef, fields.DataRef)
 	}
 	// Mounts: count and each (name, backend_uri) must match in order.
