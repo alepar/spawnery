@@ -8,11 +8,6 @@ import (
 
 // --- helpers ------------------------------------------------------------------
 
-func mkEntry(version uint64, prevHash, headHash []byte) (uint64, []byte, []byte, []byte, int64) {
-	body := []byte(`{"version":` + uint64str(version) + `}`)
-	return version, prevHash, headHash, body, int64(version) * 1000
-}
-
 func uint64str(n uint64) string {
 	buf := make([]byte, 0, 20)
 	if n == 0 {
