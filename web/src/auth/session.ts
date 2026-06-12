@@ -201,12 +201,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
 
     // No callback — try silent refresh.
-    // Use GET-only: a missing key means ITP/storage eviction → key-lost, not a fresh keypair.
+    // Use GET-only: a missing key means ITP/storage eviction or first-run.
     try {
       const kp = await loadSessionKey(store);
       if (!kp) {
-        _clearRth();
-        set({ status: "key-lost" });
+        const rth = _loadRth();
+        if (rth.length > 0) {
+          // Had a prior session; key was evicted (ITP/storage wipe) → show recovery screen.
+          _clearRth();
+          set({ status: "key-lost" });
+        } else {
+          // No key and no RTH: brand-new visitor → clean login wall.
+          set({ status: "login-required" });
+        }
         return;
       }
       const spki = await exportSpkiDer(kp.publicKey);

@@ -66,7 +66,17 @@ beforeEach(() => {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe("bootstrap — key missing (ITP/storage eviction)", () => {
-  it("sets status=key-lost when loadSessionKey returns null", async () => {
+  it("sets status=login-required when loadSessionKey returns null AND no RTH (first-run)", async () => {
+    // beforeEach already removed RTH_STORAGE_KEY → brand-new visitor scenario.
+    const store = new MemoryKeyStore();
+    await useSessionStore.getState().bootstrap(store);
+
+    expect(useSessionStore.getState().status).toBe("login-required");
+  });
+
+  it("sets status=key-lost when loadSessionKey returns null AND RTH is present (key evicted)", async () => {
+    localStorage.setItem(RTH_STORAGE_KEY, "stale-rth");
+
     const store = new MemoryKeyStore();
     await useSessionStore.getState().bootstrap(store);
 
