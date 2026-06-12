@@ -356,32 +356,46 @@ func (i *IdP) serveRefresh(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers ---
 
-// isAllowedRedirectURI checks the URI against the configured allowlist plus RFC 8252 loopback
-// relaxation for 127.0.0.1 / [::1] at any port [AM8].
+// isAllowedRedirectURI checks the URI against the configured allowlist. For registered loopback
+// URIs (http://127.0.0.1 or http://[::1]) RFC 8252 §7.3 port-only relaxation applies: the
+// incoming URI must match the registered URI's scheme, host, and path exactly, but may use any
+// port [AM8]. A loopback URI is NOT accepted unless a loopback redirect was registered.
 func (i *IdP) isAllowedRedirectURI(uri string) bool {
 	for _, allowed := range i.cfg.RedirectURIs {
 		if allowed == uri {
 			return true
 		}
+		if loopbackPortRelax(allowed, uri) {
+			return true
+		}
 	}
-	return isLoopbackURI(uri)
+	return false
 }
 
-// isLoopbackURI returns true for http://127.0.0.1:<any>/<path> or http://[::1]:<any>/<path>
-// (RFC 8252 §7.3 variable-port loopback — the ONLY port-loose relaxation) [AM8].
-func isLoopbackURI(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
+// loopbackPortRelax returns true when both allowed and incoming are http loopback URIs
+// (127.0.0.1 or [::1]) with the same host type and path but an arbitrary port [RFC 8252 §7.3].
+// Path must match exactly; only port is relaxed.
+func loopbackPortRelax(allowed, incoming string) bool {
+	a, err := url.Parse(allowed)
+	if err != nil || a.Scheme != "http" {
 		return false
 	}
-	if u.Scheme != "http" {
+	aHost, _, err := net.SplitHostPort(a.Host)
+	if err != nil {
+		aHost = a.Host
+	}
+	if aHost != "127.0.0.1" && aHost != "::1" {
 		return false
 	}
-	host, _, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		host = u.Host
+	b, err := url.Parse(incoming)
+	if err != nil || b.Scheme != "http" {
+		return false
 	}
-	return host == "127.0.0.1" || host == "::1"
+	bHost, _, err := net.SplitHostPort(b.Host)
+	if err != nil {
+		bHost = b.Host
+	}
+	return aHost == bHost && a.Path == b.Path
 }
 
 // pkceChallenge computes S256 PKCE challenge from verifier.
@@ -432,18 +446,17 @@ func redirectError(w http.ResponseWriter, _ *http.Request, redirectURI, code, de
 	w.WriteHeader(http.StatusFound)
 }
 
-// extractSPKIFromState pulls the session pubkey DER from the state row's ClientChallenge field.
-// Format: "<pkce_challenge>|spki:<base64url_spki>" — or just "<pkce_challenge>" if absent.
+// extractSPKIFromState pulls the session pubkey DER from the state row's ClientChallenge field
+// and validates that it is a well-formed ECDSA P-256 key (same requirement as the device flow).
+// Format: "<pkce_challenge>|spki:<base64_spki>" — or just "<pkce_challenge>" if absent.
 func extractSPKIFromState(row store.OAuthState) (spkiDER []byte, challenge string, err error) {
 	parts := strings.SplitN(row.ClientChallenge, "|spki:", 2)
 	challenge = parts[0]
 	if len(parts) < 2 {
 		return nil, challenge, nil
 	}
-	spkiDER, err = base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		spkiDER, err = base64.StdEncoding.DecodeString(parts[1])
-	}
+	// parseSessionSPKI accepts both base64 standard and raw-URL encodings and rejects non-P256.
+	spkiDER, _, err = parseSessionSPKI(parts[1])
 	return spkiDER, challenge, err
 }
 
@@ -457,14 +470,16 @@ func (i *IdP) enforceCapOrEvict(ctx context.Context, accountID string, now time.
 	if n < i.cfg.MaxFamilies {
 		return nil
 	}
-	// Evict oldest.
+	// Evict oldest — revoke + record atomically so the CP always receives the event.
 	oldest, err := i.store.RefreshSessions().OldestFamily(ctx, accountID)
 	if err != nil {
 		return err
 	}
-	liveIDs, err := i.store.RefreshSessions().RevokeFamily(ctx, oldest)
-	if err != nil {
-		return err
-	}
-	return appendRevocation(ctx, i.store, accountID, oldest, liveIDs, now)
+	return i.store.WithTx(ctx, func(tx store.Store) error {
+		liveIDs, err := tx.RefreshSessions().RevokeFamily(ctx, oldest)
+		if err != nil {
+			return err
+		}
+		return appendRevocation(ctx, tx, accountID, oldest, liveIDs, now)
+	})
 }

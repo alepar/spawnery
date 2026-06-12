@@ -13,6 +13,10 @@ package authsvc
 // R7 note: reusing the AS session-signing key for the revocation feed means the CP pins one
 // key set and consumes both artifacts. This is deliberate; confirm with A2 owner if a
 // dedicated feed key is required (the domain prefix already separates the two namespaces).
+//
+// Access control: if IdPConfig.CPSecret is non-empty (production), the CP MUST supply
+// "Authorization: Bearer <CPSecret>" or the request is rejected 401. This is a
+// server-to-server trust boundary; configure the secret via env/deploy config (see deploy/authsvc).
 
 import (
 	"encoding/json"
@@ -37,6 +41,12 @@ type SignedRevocationEntry struct {
 // serveRevocations handles GET /revocations?since=<seq>.
 // Returns all events with seq > since, each signed with the AS session key [AM10].
 func (i *IdP) serveRevocations(w http.ResponseWriter, r *http.Request) {
+	if i.cfg.CPSecret != "" {
+		if r.Header.Get("Authorization") != "Bearer "+i.cfg.CPSecret {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "CP bearer secret required")
+			return
+		}
+	}
 	sinceStr := r.URL.Query().Get("since")
 	var since int64
 	if sinceStr != "" {

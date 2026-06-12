@@ -175,6 +175,75 @@ func TestDeviceGrantExpired(t *testing.T) {
 	}
 }
 
+// TestDeviceGrantPerCodeLockout: after maxDeviceAttempt submissions the grant is locked [AM7].
+func TestDeviceGrantPerCodeLockout(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	// Set a very high IP rate limit so the per-code lockout fires first.
+	srv, _, st := testAS(t, fake, now,
+		func(cfg *IdPConfig) {
+			cfg.RateLimits = RateLimitConfig{DevicePerMin: 1000}
+		},
+	)
+	client := noRedirectClient()
+	_, spkiDER := newTestP256(t)
+	pubB64 := spkiB64(spkiDER)
+
+	// Create a device grant.
+	authResp, _ := client.Post(srv.URL+"/device/authorize",
+		"application/x-www-form-urlencoded",
+		strings.NewReader(url.Values{"session_pubkey": {pubB64}}.Encode()))
+	var authOut struct {
+		DeviceCode string `json:"device_code"`
+		UserCode   string `json:"user_code"`
+	}
+	body, _ := io.ReadAll(authResp.Body)
+	_ = json.Unmarshal(body, &authOut)
+
+	// Seed a browser user.
+	seedUser(t, st, "acct-lockout", 91001, now)
+	_, browser_spki := newTestP256(t)
+	browserToken := randOpaque()
+	_ = st.RefreshSessions().Insert(context.Background(), store.RefreshSession{
+		TokenHash:         sha256Hex(browserToken),
+		AccountID:         "acct-lockout",
+		FamilyID:          "lockout-fam",
+		ClientKind:        store.ClientWeb,
+		SessionPubkeySPKI: browser_spki,
+		AccessTokenID:     "lockout-tok",
+		CreatedAt:         now.Unix(),
+		LastUsedAt:        now.Unix(),
+		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),
+		FamilyCreatedAt:   now.Unix(),
+	})
+
+	// Submit maxDeviceAttempt times (each bumps the counter); the grant is approved on the first
+	// success, so subsequent submits return "invalid_grant" (not pending). We don't care about the
+	// per-attempt response until we exceed the limit.
+	for range maxDeviceAttempt {
+		verifyReq, _ := http.NewRequest("POST", srv.URL+"/device/verify",
+			strings.NewReader(url.Values{"user_code": {authOut.UserCode}}.Encode()))
+		verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		verifyReq.AddCookie(&http.Cookie{Name: "refresh_token", Value: browserToken})
+		_, _ = client.Do(verifyReq)
+	}
+
+	// The (maxDeviceAttempt+1)th attempt must be rejected with access_denied lockout.
+	verifyReq, _ := http.NewRequest("POST", srv.URL+"/device/verify",
+		strings.NewReader(url.Values{"user_code": {authOut.UserCode}}.Encode()))
+	verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	verifyReq.AddCookie(&http.Cookie{Name: "refresh_token", Value: browserToken})
+	resp, _ := client.Do(verifyReq)
+	body, _ = io.ReadAll(resp.Body)
+	var out struct{ Error string `json:"error"` }
+	_ = json.Unmarshal(body, &out)
+	if out.Error != "access_denied" {
+		t.Fatalf("per-code lockout: want access_denied after %d attempts, got %q (body: %s)",
+			maxDeviceAttempt, out.Error, body)
+	}
+}
+
 // TestDeviceGrantUserCodeRateLimit: too many /device/verify attempts are rate-limited.
 func TestDeviceGrantUserCodeRateLimit(t *testing.T) {
 	fake := githubfake.New()

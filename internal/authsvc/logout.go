@@ -6,6 +6,8 @@ package authsvc
 import (
 	"context"
 	"net/http"
+
+	"spawnery/internal/authsvc/store"
 )
 
 // serveLogout handles POST /logout. Accepts ?everywhere=1 to revoke all families.
@@ -24,16 +26,24 @@ func (i *IdP) serveLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var logoutErr error
 	if r.URL.Query().Get("everywhere") == "1" {
 		i.logoutEverywhere(r.Context(), row.AccountID, now)
 	} else {
-		liveIDs, rErr := i.store.RefreshSessions().RevokeFamily(r.Context(), row.FamilyID)
-		if rErr == nil {
-			_ = appendRevocation(r.Context(), i.store, row.AccountID, row.FamilyID, liveIDs, now)
-		}
+		logoutErr = i.store.WithTx(r.Context(), func(tx store.Store) error {
+			liveIDs, err := tx.RefreshSessions().RevokeFamily(r.Context(), row.FamilyID)
+			if err != nil {
+				return err
+			}
+			return appendRevocation(r.Context(), tx, row.AccountID, row.FamilyID, liveIDs, now)
+		})
 	}
 
-	expireRefreshCookie(w)
+	expireRefreshCookie(w) // always expire the cookie regardless of revocation outcome
+	if logoutErr != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "logout revocation failed")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"ok":true}`))
@@ -54,11 +64,15 @@ func (i *IdP) logoutEverywhere(ctx context.Context, accountID string, now interf
 		if err != nil {
 			return
 		}
-		liveIDs, err := i.store.RefreshSessions().RevokeFamily(ctx, oldest)
-		if err != nil {
+		if err := i.store.WithTx(ctx, func(tx store.Store) error {
+			liveIDs, err := tx.RefreshSessions().RevokeFamily(ctx, oldest)
+			if err != nil {
+				return err
+			}
+			return appendRevocation(ctx, tx, accountID, oldest, liveIDs, i.now())
+		}); err != nil {
 			return
 		}
-		_ = appendRevocation(ctx, i.store, accountID, oldest, liveIDs, i.now())
 	}
 }
 

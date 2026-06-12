@@ -275,12 +275,15 @@ func TestOAuthCodeInjection(t *testing.T) {
 	}
 }
 
-// TestOAuthRedirectURIExact: unregistered redirect_uri → rejected; loopback allowed [AM8].
+// TestOAuthRedirectURIExact: unregistered redirect_uri → rejected; loopback port relaxation [AM8].
 func TestOAuthRedirectURIExact(t *testing.T) {
 	fake := githubfake.New()
 	defer fake.Close()
 	now := time.Unix(1770000000, 0)
-	srv, _, _ := testAS(t, fake, now)
+	// Register a loopback redirect URI so port relaxation has a path anchor.
+	srv, _, _ := testAS(t, fake, now, func(cfg *IdPConfig) {
+		cfg.RedirectURIs = append(cfg.RedirectURIs, "http://127.0.0.1:8000/cb")
+	})
 	client := noRedirectClient()
 
 	// Unregistered non-loopback redirect_uri → 400.
@@ -292,13 +295,22 @@ func TestOAuthRedirectURIExact(t *testing.T) {
 		t.Fatalf("unregistered URI: want 400, got %d", resp.StatusCode)
 	}
 
-	// Loopback at any port is allowed (RFC 8252 §7.3).
+	// Loopback URI with registered path at a DIFFERENT port is allowed (RFC 8252 §7.3 port relaxation).
 	resp2, _ := client.Get(srv.URL + "/oauth/authorize?" + url.Values{
 		"redirect_uri": {"http://127.0.0.1:12345/cb"},
 		"state":        {"s4"},
 	}.Encode())
 	if resp2.StatusCode != http.StatusFound {
-		t.Fatalf("loopback URI: want 302, got %d", resp2.StatusCode)
+		t.Fatalf("loopback port relaxation: want 302, got %d", resp2.StatusCode)
+	}
+
+	// Loopback URI with an unregistered path → 400 (path is not relaxed, only port).
+	resp3, _ := client.Get(srv.URL + "/oauth/authorize?" + url.Values{
+		"redirect_uri": {"http://127.0.0.1:12345/unregistered-path"},
+		"state":        {"s5"},
+	}.Encode())
+	if resp3.StatusCode != http.StatusBadRequest {
+		t.Fatalf("loopback unregistered path: want 400, got %d", resp3.StatusCode)
 	}
 }
 

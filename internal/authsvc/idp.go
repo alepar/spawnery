@@ -68,6 +68,11 @@ type IdPConfig struct {
 	RegistrationEnabled bool // §6 kill switch
 	MaxFamilies         int  // 0 => defaultMaxFamilies
 
+	// CPSecret, if non-empty, requires GET /revocations to carry "Authorization: Bearer <CPSecret>".
+	// Set to a shared secret known only to the CP. Leave empty only in dev/test; the endpoint
+	// leaks account UUIDs and session-revocation timing to any caller otherwise.
+	CPSecret string
+
 	RateLimits RateLimitConfig
 
 	Now func() time.Time

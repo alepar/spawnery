@@ -10,7 +10,8 @@ package authsvc
 //
 // Security:
 //  - device_code stored as SHA-256 hash (never raw).
-//  - user_code is short + rate-limited: 10 attempts per device_code, 10 per IP per minute.
+//  - user_code is short + rate-limited: 10 per IP per minute (IP limiter) AND 10 attempts per
+//    grant (per-code lockout via BumpAttempt + maxDeviceAttempt; wired in serveDeviceVerifyPost).
 //  - The user confirms AT the AS in an already-authenticated browser (refresh cookie checked).
 //  - Token minting binds the refresh family to the posted session pubkey [AM7].
 
@@ -154,6 +155,20 @@ func (i *IdP) serveDeviceVerifyPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
+
+	// Per-code brute-force lockout: count every verify attempt against this grant [AM7].
+	// The IP limiter (above) is the first gate; this is the second — it prevents an attacker
+	// rotating IPs from exhausting a specific short-lived user_code.
+	count, err := i.store.DeviceGrants().BumpAttempt(r.Context(), grant.DeviceCodeHash)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "attempt tracking failed")
+		return
+	}
+	if count > maxDeviceAttempt {
+		writeError(w, http.StatusBadRequest, "access_denied", "too many user_code attempts")
+		return
+	}
+
 	now := i.now()
 	if now.Unix() >= grant.ExpiresAt {
 		writeError(w, http.StatusBadRequest, "expired_token", "user_code expired")
