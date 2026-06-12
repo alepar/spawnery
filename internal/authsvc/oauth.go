@@ -10,6 +10,17 @@ package authsvc
 //   - Forged or injected callback rejected: callback verifies the flow cookie matches the row.
 //   - Structured error redirects back to the SPA (registration-closed / access_denied / PKCE mismatch).
 //   - Redirect URI redirect only after validating state; never redirect to unvalidated URI.
+//
+// ADR — token delivery to the SPA:
+//   The access_token is placed in the redirect URL query string (implicit-like delivery) rather
+//   than via a /oauth/token code-exchange leg. This is deliberate for A1: the AS-to-GitHub leg
+//   already uses auth-code+PKCE (AS is a confidential client); the SPA↔AS leg uses the flow
+//   cookie + session-pubkey binding as the trust anchor. The access_token is short-lived (15 min)
+//   and the refresh family is HttpOnly-cookie-bound + PoP-gated; URL leakage via browser history
+//   or Referer is acceptable given SPA-origin CORS enforcement. A /oauth/token endpoint (removing
+//   the token from the URL) can be added in a later slice; the auth_codes table migration is
+//   retained but the AuthCode Go infrastructure has been removed to avoid dead-code confusion.
+//   See docs/superpowers/specs/ (A1 identity-core spec) for the full rationale.
 
 import (
 	"context"
@@ -204,13 +215,14 @@ func (i *IdP) serveCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse session pubkey from state row [R2: seam].
+	// Parse session pubkey from state row [R2: seam]. The SPA MUST supply session_pubkey on
+	// every authorize request; without it we cannot create a PoP-bound refresh family and would
+	// produce an un-refreshable session. Reject rather than silently mint a dead-end family.
+	// (A5 wires the SPA-side WebCrypto key generation before calling /oauth/authorize.)
 	spkiDER, _, err := extractSPKIFromState(row)
 	if err != nil || spkiDER == nil {
-		// No session pubkey supplied — this is allowed for non-PoP clients; family won't support
-		// /refresh PoP until the SPA binds a key. For now use an empty placeholder.
-		// TODO(A5): enforce pubkey presence once SPA always sends it.
-		spkiDER = []byte("placeholder-no-pubkey")
+		redirectError(w, r, row.ClientRedirectURI, "invalid_request", "session_pubkey required")
+		return
 	}
 
 	// Enforce concurrent-family cap [§6].
@@ -291,6 +303,17 @@ func (i *IdP) serveRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-account rate limit [§6]: look up the session to get accountID. If the token is unknown
+	// we skip the account check (handleRefresh will return the appropriate error). This intentionally
+	// loads the row here rather than inside handleRefresh to avoid threading a limiter callback
+	// through that function's signature.
+	if row, err := i.store.RefreshSessions().Get(r.Context(), sha256Hex(cookie.Value)); err == nil {
+		if !i.limits.refreshAcct.Allow(row.AccountID) {
+			tooMany(w)
+			return
+		}
+	}
+
 	pop, err := popFromRequest(r)
 	if err != nil && !errors.Is(err, ErrPoPMissing) {
 		writeError(w, http.StatusBadRequest, "invalid_pop", err.Error())
@@ -325,9 +348,6 @@ func (i *IdP) serveRefresh(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 		Expires:  now.Add(refreshSliding),
 	})
-
-	// Also rate-limit per account now that we've loaded the token.
-	// We do it post-facto here to not load the DB twice; the per-IP limit is the main guard.
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

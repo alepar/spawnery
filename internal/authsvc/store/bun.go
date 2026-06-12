@@ -32,6 +32,5 @@ func (s *bunStore) WithTx(ctx context.Context, fn func(tx Store) error) error {
 func (s *bunStore) Users() UserRepo                     { return &userRepo{db: s.db} }
 func (s *bunStore) RefreshSessions() RefreshSessionRepo { return &refreshSessionRepo{db: s.db} }
 func (s *bunStore) OAuthStates() OAuthStateRepo         { return &oauthStateRepo{db: s.db} }
-func (s *bunStore) AuthCodes() AuthCodeRepo             { return &authCodeRepo{db: s.db} }
 func (s *bunStore) DeviceGrants() DeviceGrantRepo       { return &deviceGrantRepo{db: s.db} }
 func (s *bunStore) Revocations() RevocationRepo         { return &revocationRepo{db: s.db} }

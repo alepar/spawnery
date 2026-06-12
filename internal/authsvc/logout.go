@@ -39,11 +39,17 @@ func (i *IdP) serveLogout(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
+// logoutEverywhereMaxFamilies is the safety cap for the logout-everywhere loop. It is larger
+// than cfg.MaxFamilies (default 20) so normal accounts always complete, while guarding against
+// an infinite loop if the OldestFamily invariant (returns only non-revoked rows) ever regresses.
+const logoutEverywhereMaxFamilies = 200
+
 // logoutEverywhere revokes all non-revoked families for the account and emits per-family events.
 func (i *IdP) logoutEverywhere(ctx context.Context, accountID string, now interface{ Unix() int64 }) {
-	// We iterate families via CountFamilies/OldestFamily loop to avoid a bulk-select.
-	// In practice accounts have ≤20 families (cap), so this is fine.
-	for {
+	// Iterate via OldestFamily; each successful RevokeFamily removes the family from the
+	// non-revoked set, so the loop terminates when OldestFamily returns ErrNotFound.
+	// The cap prevents an infinite loop if that invariant ever regresses.
+	for range logoutEverywhereMaxFamilies {
 		oldest, err := i.store.RefreshSessions().OldestFamily(ctx, accountID)
 		if err != nil {
 			return

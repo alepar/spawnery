@@ -28,22 +28,3 @@ func (r *oauthStateRepo) Consume(ctx context.Context, state string) (OAuthState,
 	return s, err
 }
 
-type authCodeRepo struct{ db bun.IDB }
-
-func (r *authCodeRepo) Create(ctx context.Context, c AuthCode) error {
-	_, err := r.db.NewInsert().Model(&c).Exec(ctx)
-	return err
-}
-
-func (r *authCodeRepo) Consume(ctx context.Context, codeHash string) (AuthCode, error) {
-	var c AuthCode
-	err := r.db.NewUpdate().Model(&c).
-		Set("used = 1").
-		Where("code_hash = ? AND used = 0", codeHash).
-		Returning("*").
-		Scan(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return AuthCode{}, ErrNotFound
-	}
-	return c, err
-}

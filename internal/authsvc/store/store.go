@@ -52,11 +52,6 @@ type OAuthStateRepo interface {
 	Consume(ctx context.Context, state string) (OAuthState, error)
 }
 
-type AuthCodeRepo interface {
-	Create(ctx context.Context, c AuthCode) error
-	Consume(ctx context.Context, codeHash string) (AuthCode, error) // single-use, as OAuthStates
-}
-
 type DeviceGrantRepo interface {
 	Create(ctx context.Context, g DeviceGrant) error
 	GetByUserCode(ctx context.Context, userCode string) (DeviceGrant, error)
@@ -83,7 +78,6 @@ type Store interface {
 	Users() UserRepo
 	RefreshSessions() RefreshSessionRepo
 	OAuthStates() OAuthStateRepo
-	AuthCodes() AuthCodeRepo
 	DeviceGrants() DeviceGrantRepo
 	Revocations() RevocationRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the

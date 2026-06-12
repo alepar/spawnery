@@ -63,16 +63,6 @@ type OAuthState struct {
 	Used              bool   `bun:"used,notnull"`
 }
 
-type AuthCode struct {
-	bun.BaseModel `bun:"table:auth_codes,alias:ac"`
-	CodeHash      string `bun:"code_hash,pk"`
-	AccountID     string `bun:"account_id,notnull"`
-	Challenge     string `bun:"challenge,notnull"`
-	RedirectURI   string `bun:"redirect_uri,notnull"`
-	ExpiresAt     int64  `bun:"expires_at,notnull"`
-	Used          bool   `bun:"used,notnull"`
-}
-
 type DeviceGrant struct {
 	bun.BaseModel     `bun:"table:device_grants,alias:dg"`
 	DeviceCodeHash    string `bun:"device_code_hash,pk"`

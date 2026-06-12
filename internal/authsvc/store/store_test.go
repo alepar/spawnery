@@ -147,7 +147,7 @@ func TestFamilyCounting(t *testing.T) {
 	}
 }
 
-func TestStateAndCodeSingleUse(t *testing.T) {
+func TestOAuthStateSingleUse(t *testing.T) {
 	st := NewTestStore(t)
 	if err := st.OAuthStates().Create(ctxT(), OAuthState{
 		State: "s1", FlowCookieHash: "f", ClientChallenge: "c", ClientRedirectURI: "r",
@@ -161,16 +161,6 @@ func TestStateAndCodeSingleUse(t *testing.T) {
 	}
 	if _, err := st.OAuthStates().Consume(ctxT(), "s1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second consume: want ErrNotFound, got %v", err)
-	}
-
-	if err := st.AuthCodes().Create(ctxT(), AuthCode{CodeHash: "ch", AccountID: "a", Challenge: "x", RedirectURI: "r", ExpiresAt: 100}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.AuthCodes().Consume(ctxT(), "ch"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.AuthCodes().Consume(ctxT(), "ch"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("second code consume: want ErrNotFound, got %v", err)
 	}
 }
 

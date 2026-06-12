@@ -34,7 +34,6 @@ const (
 	replayGrace        = 45 * time.Second     // [AM3] idempotent-replay grace window
 	popSkew            = 90 * time.Second     // [AM5] PoP timestamp tolerance
 	oauthStateTTL      = 10 * time.Minute     // [AM8] authorize->callback state lifetime
-	authCodeTTL        = 2 * time.Minute      // AS auth-code lifetime
 	userCodeTTL        = 15 * time.Minute     // [AM7] device-grant user_code lifetime
 	devicePollInterval = 5 * time.Second      // RFC 8628 minimum poll interval
 	defaultMaxFamilies = 20                   // §3 concurrent-family cap per account

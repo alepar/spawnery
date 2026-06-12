@@ -2,6 +2,7 @@ package authsvc
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -65,17 +66,22 @@ func noRedirectClient() *http.Client {
 // Returns the callback response (after GitHub redirect).
 func triggerCallback(t *testing.T, srv *httptest.Server, fake *githubfake.Fake) *http.Response {
 	t.Helper()
-	return triggerCallbackWith(t, srv, fake, "http://localhost:3000/callback", "client-state-abc")
+	_, spkiDER := newTestP256(t)
+	return triggerCallbackWith(t, srv, fake, "http://localhost:3000/callback", "client-state-abc",
+		base64.StdEncoding.EncodeToString(spkiDER))
 }
 
-func triggerCallbackWith(t *testing.T, srv *httptest.Server, fake *githubfake.Fake, clientRedirectURI, clientState string) *http.Response {
+// triggerCallbackWith drives the authorize→callback flow. sessionPubkeyB64 is the base64-encoded
+// DER SPKI of the SPA session key; it is required (callback rejects login without it).
+func triggerCallbackWith(t *testing.T, srv *httptest.Server, fake *githubfake.Fake, clientRedirectURI, clientState, sessionPubkeyB64 string) *http.Response {
 	t.Helper()
 	client := noRedirectClient()
 
-	// 1. GET /oauth/authorize: SPA sends redirect_uri (its own SPA callback route).
+	// 1. GET /oauth/authorize: SPA sends redirect_uri + session_pubkey (its own SPA callback route).
 	authURL := srv.URL + "/oauth/authorize?" + url.Values{
-		"redirect_uri": {clientRedirectURI},
-		"state":        {clientState},
+		"redirect_uri":   {clientRedirectURI},
+		"state":          {clientState},
+		"session_pubkey": {sessionPubkeyB64},
 	}.Encode()
 
 	resp, err := client.Get(authURL)
@@ -327,5 +333,87 @@ func TestOAuthAccessDenied(t *testing.T) {
 	location := cbResp.Header.Get("Location")
 	if extractQueryParam(location, "error") == "" {
 		t.Fatalf("access_denied not propagated to SPA: %q", location)
+	}
+}
+
+// TestOAuthCallbackNoPubkeyRejected: callback without session_pubkey → invalid_request redirect [Fix 3].
+func TestOAuthCallbackNoPubkeyRejected(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	fake.SetUser(55001, "nopubkey")
+	now := time.Unix(1770000000, 0)
+	srv, _, _ := testAS(t, fake, now)
+	client := noRedirectClient()
+
+	// Authorize without session_pubkey.
+	authResp, _ := client.Get(srv.URL + "/oauth/authorize?" + url.Values{
+		"redirect_uri": {"http://localhost:3000/callback"},
+		"state":        {"s-nopubkey"},
+	}.Encode())
+	flowCookie := ""
+	for _, c := range authResp.Cookies() {
+		if c.Name == flowCookieName {
+			flowCookie = c.Value
+		}
+	}
+	ghURL := authResp.Header.Get("Location")
+	ghResp, _ := client.Get(ghURL)
+	callbackURL := ghResp.Header.Get("Location")
+
+	cbReq, _ := http.NewRequest("GET", callbackURL, nil)
+	cbReq.AddCookie(&http.Cookie{Name: flowCookieName, Value: flowCookie})
+	cbResp, _ := client.Do(cbReq)
+	location := cbResp.Header.Get("Location")
+	if cbResp.StatusCode != http.StatusFound || extractQueryParam(location, "error") != "invalid_request" {
+		t.Fatalf("want 302 invalid_request redirect, got %d %q", cbResp.StatusCode, location)
+	}
+	if extractQueryParam(location, "access_token") != "" {
+		t.Fatal("callback without pubkey must not return access_token")
+	}
+}
+
+// TestRefreshPerAccountRateLimit: per-account rate limit on /refresh fires for a second request
+// from the same account [§6, Fix 1].
+func TestRefreshPerAccountRateLimit(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	srv, _, st := testAS(t, fake, now, func(cfg *IdPConfig) {
+		cfg.RateLimits = RateLimitConfig{RefreshPerMin: 1}
+	})
+	client := noRedirectClient()
+
+	// Seed a user with two refresh families (different tokens, same account).
+	seedUser(t, st, "acct-rl2", 88002, now)
+	_, spkiDER1 := newTestP256(t)
+	_, spkiDER2 := newTestP256(t)
+	token1, _ := seedFamily(t, st, "acct-rl2", spkiDER1, now)
+	token2, _ := seedFamily(t, st, "acct-rl2", spkiDER2, now)
+
+	// First request: per-account rate limit allows (burst=1), but PoP is absent → 401.
+	req1, _ := http.NewRequest("POST", srv.URL+"/refresh", nil)
+	req1.AddCookie(&http.Cookie{Name: "refresh_token", Value: token1})
+	req1.Header.Set("Origin", "http://localhost:3000")
+	resp1, err := client.Do(req1)
+	if err != nil {
+		t.Fatalf("refresh req1: %v", err)
+	}
+	if resp1.StatusCode == http.StatusTooManyRequests {
+		t.Fatalf("first request must not be rate-limited (burst=1): got 429")
+	}
+	if resp1.StatusCode != http.StatusUnauthorized {
+		t.Logf("req1 status=%d (expected 401 pop_required)", resp1.StatusCode)
+	}
+
+	// Second request (different token, same account): per-account limit exhausted → 429.
+	req2, _ := http.NewRequest("POST", srv.URL+"/refresh", nil)
+	req2.AddCookie(&http.Cookie{Name: "refresh_token", Value: token2})
+	req2.Header.Set("Origin", "http://localhost:3000")
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("refresh req2: %v", err)
+	}
+	if resp2.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second request from same account must be rate-limited (429), got %d", resp2.StatusCode)
 	}
 }

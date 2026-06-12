@@ -2,8 +2,8 @@ package authsvc
 
 import "net/http"
 
-// corsCredentialed wraps the AS's credentialed endpoints (/refresh, /oauth/token, /logout,
-// device endpoints) with the [AM2] contract: exact-origin Access-Control-Allow-Origin for THE
+// corsCredentialed wraps the AS's credentialed endpoints (/refresh, /logout, device endpoints)
+// with the [AM2] contract: exact-origin Access-Control-Allow-Origin for THE
 // canonical SPA origin + Allow-Credentials, Vary: Origin, and a hard 403 for any other Origin —
 // a foreign origin is rejected, not merely left header-less, because these endpoints carry the
 // refresh cookie. Requests without an Origin header (CLI, curl) pass through untouched.
