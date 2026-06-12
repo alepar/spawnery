@@ -259,16 +259,18 @@ jobs:
 
       # [WL2]: Anti-rollback — enforce monotonic release counter.
       - name: Anti-rollback check (monotonic release counter)
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
         run: |
           PREV=$(cat deploy/web/release-counter.txt | tr -d '[:space:]')
           # Extract the numeric part from the tag (web/vN -> N).
-          CURR="${{ needs.build.outputs.release-version }}"
-          CURR_NUM="${CURR#v}"  # strip leading 'v'
+          CURR_NUM="${RELEASE_VERSION#v}"  # strip leading 'v'
           echo "Previous counter: $PREV, Current: $CURR_NUM"
-          if ! python3 -c "
-          import sys
-          prev_raw = '$PREV' if '$PREV' else '0'
-          curr = '$CURR_NUM'
+          # Pass values via env vars — never interpolate tag-derived strings into Python source.
+          if ! ANTI_ROLLBACK_PREV="$PREV" ANTI_ROLLBACK_CURR="$CURR_NUM" python3 - <<'PYEOF'
+          import sys, os
+          prev_raw = os.environ.get('ANTI_ROLLBACK_PREV') or '0'
+          curr = os.environ['ANTI_ROLLBACK_CURR']
           # Compare as integer tuples to support semver tags (web/v1.1.0 > web/v1.0.0).
           # Non-numeric components are treated as 0 so alpha/rc suffixes don't silently pass.
           def to_tuple(s):
@@ -282,7 +284,8 @@ jobs:
               print(f'ANTI-ROLLBACK FAIL: {curr} <= previous {prev_raw}', file=sys.stderr)
               sys.exit(1)
           print(f'Anti-rollback OK: {curr} > {prev_raw}')
-          "; then
+          PYEOF
+          then
             exit 1
           fi
 
