@@ -53,7 +53,7 @@ func (h *deviceSetHandler) corsBearerSimple(next http.HandlerFunc) http.HandlerF
 //
 // Response 200 (JSON):
 //
-//	{ "version": <uint64>, "head": "<hex-encoded head hash>" }
+//	{ "version": <uint64>, "head": "<base64-encoded head hash>" }
 //
 // Response 409 (JSON) on CAS conflict:
 //

@@ -347,7 +347,7 @@ func TestEntryLabelRoundTrip(t *testing.T) {
 		t.Fatalf("NewGenesisLabeled: %v", err)
 	}
 
-	// Label is inside the signed Body.
+	// Both device1 and recovery labels are inside the signed Body (WM15).
 	genesisBody, err := log.Entries[0].parseBody()
 	if err != nil {
 		t.Fatalf("parseBody: %v", err)
@@ -357,6 +357,12 @@ func TestEntryLabelRoundTrip(t *testing.T) {
 	}
 	if genesisBody.Label.EnrolledAt == "" {
 		t.Fatal("genesis label enrolled_at is empty")
+	}
+	if genesisBody.RecoveryLabel == nil || genesisBody.RecoveryLabel.Name != "recovery" {
+		t.Fatalf("expected genesis recovery_label name %q, got %+v", "recovery", genesisBody.RecoveryLabel)
+	}
+	if genesisBody.RecoveryLabel.EnrolledAt == "" {
+		t.Fatal("genesis recovery_label enrolled_at is empty")
 	}
 
 	// Add a labeled device.
