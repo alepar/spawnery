@@ -365,11 +365,6 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-/** Return a fresh ArrayBuffer copy of a (possibly sub-array) Uint8Array. */
-function toArrayBuffer(u: Uint8Array): ArrayBuffer {
-  return u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength) as ArrayBuffer;
-}
-
 // ── Certificate chain verification ───────────────────────────────────────────
 
 /**
@@ -377,9 +372,14 @@ function toArrayBuffer(u: Uint8Array): ArrayBuffer {
  * Returns the issuer's CryptoKey (for downstream use), or throws on failure.
  */
 async function verifyCertSig(cert: ParsedCert, issuerSPKI: Uint8Array): Promise<CryptoKey> {
+  // TS 5.9: Uint8Array<ArrayBufferLike> not assignable to BufferSource; cast is safe —
+  // all these Uint8Arrays are backed by plain ArrayBuffers (no SharedArrayBuffer).
+  // Pass Uint8Array directly rather than converting to ArrayBuffer: jsdom's SubtleCrypto
+  // performs a realm-specific instanceof check on ArrayBuffer which fails for buffers
+  // created outside the jsdom realm (e.g., via .buffer.slice()).
   const issuerPub = await crypto.subtle.importKey(
     "spki",
-    toArrayBuffer(issuerSPKI),
+    issuerSPKI as unknown as Uint8Array<ArrayBuffer>,
     { name: "ECDSA", namedCurve: "P-256" },
     false,
     ["verify"],
@@ -388,8 +388,8 @@ async function verifyCertSig(cert: ParsedCert, issuerSPKI: Uint8Array): Promise<
   const ok = await crypto.subtle.verify(
     { name: "ECDSA", hash: "SHA-256" },
     issuerPub,
-    toArrayBuffer(sig),
-    toArrayBuffer(cert.tbsBytes),
+    sig as unknown as Uint8Array<ArrayBuffer>,
+    cert.tbsBytes as unknown as Uint8Array<ArrayBuffer>,
   );
   if (!ok) throw new Error("x509: certificate signature does not verify");
   return issuerPub;
@@ -476,9 +476,10 @@ function _dnsInPermitted(san: string, permitted: string[]): boolean {
  * Import the P-256 public key from a parsed cert's SPKI as a verify-only CryptoKey.
  */
 export async function importCertPubKey(cert: ParsedCert): Promise<CryptoKey> {
+  // TS 5.9 cast — see verifyCertSig comment above.
   return crypto.subtle.importKey(
     "spki",
-    toArrayBuffer(cert.spkiBytes),
+    cert.spkiBytes as unknown as Uint8Array<ArrayBuffer>,
     { name: "ECDSA", namedCurve: "P-256" },
     false,
     ["verify"],

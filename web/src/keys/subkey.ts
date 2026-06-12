@@ -109,11 +109,13 @@ export async function verifySignedSubKey(
   const sigDER = fromBase64(sk.sig);
   const sigP1363 = derToP1363(sigDER);
   const msg = signedBytes(sk);
+  // TS 5.9 cast — pass Uint8Array directly to avoid jsdom SubtleCrypto's realm-specific
+  // instanceof check on ArrayBuffer (same pattern as hpke.ts and x509.ts).
   const ok = await crypto.subtle.verify(
     { name: "ECDSA", hash: "SHA-256" },
     certPub,
-    sigP1363.buffer.slice(sigP1363.byteOffset, sigP1363.byteOffset + sigP1363.byteLength) as ArrayBuffer,
-    msg.buffer.slice(msg.byteOffset, msg.byteOffset + msg.byteLength) as ArrayBuffer,
+    sigP1363 as unknown as Uint8Array<ArrayBuffer>,
+    msg      as unknown as Uint8Array<ArrayBuffer>,
   );
   if (!ok) throw new Error("subkey: signature does not verify against the node cert key");
 }
