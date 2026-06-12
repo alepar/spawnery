@@ -82,7 +82,24 @@ func main() {
 	}
 
 	addr := env("AS_LISTEN", "127.0.0.1:8090")
-	srv := &http.Server{Addr: addr, Handler: allow.CORS(svc.Handler())}
+	svcHandler := svc.Handler()
+	// /refresh and /logout own their CORS via corsCredentialed, which supplies
+	// Access-Control-Allow-Credentials and the X-PoP-* allowed headers required by AM2/AM5.
+	// The outer weborigin.CORS layer lacks both; if it intercepts OPTIONS preflights for those
+	// paths (which it does when the origin is in AS_ALLOWED_ORIGINS), the browser rejects the
+	// subsequent credentialed request. Route credentialed paths directly to the inner handler.
+	outerCORS := allow.CORS(svcHandler)
+	srv := &http.Server{
+		Addr: addr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p := r.URL.Path
+			if p == "/refresh" || p == "/logout" {
+				svcHandler.ServeHTTP(w, r)
+				return
+			}
+			outerCORS.ServeHTTP(w, r)
+		}),
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

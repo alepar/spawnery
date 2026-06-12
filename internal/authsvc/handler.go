@@ -50,6 +50,9 @@ func (s *Service) Handler() http.Handler {
 
 		// Logout.
 		mux.HandleFunc("POST /logout", idp.corsCredentialed(idp.serveLogout))
+		mux.HandleFunc("OPTIONS /logout", idp.corsCredentialed(func(w http.ResponseWriter, r *http.Request) {
+			// Pre-flight handled by corsCredentialed itself.
+		}))
 
 		// Revocation feed (A2 consumption) — no CORS needed (server-to-server).
 		mux.HandleFunc("GET /revocations", idp.serveRevocations)
