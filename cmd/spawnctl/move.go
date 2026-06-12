@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"log"
 	"strings"
 	"time"
 
@@ -76,24 +74,30 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 	// A4 two-phase sign-after-resolve [AC1][AM12]: launch pollAndSign concurrently so it can submit
 	// the signed intent while MigrateSpawn blocks at the CP waiting for it.
 	fmt.Fprintln(out, "  migrating (suspend source -> resume on target)...")
-	pollCtx, cancelPoll := context.WithCancel(ctx)
-	defer cancelPoll()
+	var mr *connect.Response[cpv1.MigrateSpawnResponse]
 	if ic != nil {
+		// A4 two-phase sign-after-resolve [AC1][AM12]: MigrateSpawn is a blocking RPC so we
+		// can use provisionWithIntent for retry-once on retryable NACK codes (e.g. STALE).
 		// For an explicit node target, validate the CP's resolved target_node_id [AM1].
 		// For "cloud", the CP selects the node — leave TargetNodeID empty (no validation).
 		var migrateTargetNodeID string
 		if target != targetCloud {
 			migrateTargetNodeID = target
 		}
-		go func() {
-			if err := pollAndSign(pollCtx, ic, spawnID, intentParams{TargetNodeID: migrateTargetNodeID}); err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("move pollAndSign %s: %v", spawnID, err)
-			}
-		}()
-	}
-	mr, err := client.MigrateSpawn(ctx, connect.NewRequest(migrateTarget(spawnID, target)))
-	if err != nil {
-		return fmt.Errorf("migrate: %w (your data is safe — resume on the source)", err)
+		migrateErr := provisionWithIntent(ctx, ic, spawnID, intentParams{TargetNodeID: migrateTargetNodeID}, func(rpcCtx context.Context) error {
+			var rpcErr error
+			mr, rpcErr = client.MigrateSpawn(rpcCtx, connect.NewRequest(migrateTarget(spawnID, target)))
+			return rpcErr
+		})
+		if migrateErr != nil {
+			return fmt.Errorf("migrate: %w (your data is safe — resume on the source)", migrateErr)
+		}
+	} else {
+		var migrateErr error
+		mr, migrateErr = client.MigrateSpawn(ctx, connect.NewRequest(migrateTarget(spawnID, target)))
+		if migrateErr != nil {
+			return fmt.Errorf("migrate: %w (your data is safe — resume on the source)", migrateErr)
+		}
 	}
 	fmt.Fprintf(out, "  resumed on node %s\n", mr.Msg.NodeId)
 	if len(entries) == 0 {
