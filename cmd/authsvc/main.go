@@ -34,7 +34,7 @@
 //
 //	AS callback + SPA contract:
 //	  AS_GITHUB_REDIRECT_URI         AS's /oauth/callback URL as registered at GitHub App
-//	  AS_SPA_ORIGINS                 Comma-separated credentialed CORS allowed origins (SPA)
+//	  AS_SPA_ORIGINS                 The SPA origin for credentialed CORS (single origin; AM2 mandates one canonical origin per AS)
 //	  AS_REDIRECT_URIS               Comma-separated registered client redirect_uri allowlist
 //	  AS_VERIFICATION_URI            Device-grant user confirmation URL (SPA's /device/verify page)
 //

@@ -25,7 +25,7 @@ func (i *IdP) corsCredentialed(next http.HandlerFunc) http.HandlerFunc {
 		}
 		if r.Method == http.MethodOptions {
 			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-PoP-Timestamp, X-PoP-Nonce, X-PoP-Sig")
 			w.Header().Set("Access-Control-Max-Age", "600")
 			w.WriteHeader(http.StatusNoContent)
 			return

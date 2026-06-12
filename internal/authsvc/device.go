@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"math/big"
 	"net/http"
 	"time"
@@ -118,7 +119,7 @@ func (i *IdP) serveDeviceVerifyGet(w http.ResponseWriter, r *http.Request) {
 	}
 	userCode := r.URL.Query().Get("user_code")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, deviceVerifyHTML, accountID, userCode)
+	fmt.Fprintf(w, deviceVerifyHTML, html.EscapeString(accountID), html.EscapeString(userCode))
 }
 
 // serveDeviceVerifyPost handles POST /device/verify: the user submits their user_code.
