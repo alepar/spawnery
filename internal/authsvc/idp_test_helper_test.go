@@ -84,6 +84,21 @@ func newTestP256(t *testing.T) (*ecdsa.PrivateKey, []byte) {
 	return k, der
 }
 
+// newTestP384 generates a P-384 keypair and returns the SPKI DER bytes.
+// Used to verify that non-P256 keys are rejected by parseSessionSPKI.
+func newTestP384(t *testing.T) []byte {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
+}
+
 // spkiB64 encodes DER SPKI to base64 standard encoding.
 func spkiB64(der []byte) string {
 	return base64.StdEncoding.EncodeToString(der)

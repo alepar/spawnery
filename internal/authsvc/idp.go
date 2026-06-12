@@ -36,8 +36,7 @@ const (
 	oauthStateTTL      = 10 * time.Minute     // [AM8] authorize->callback state lifetime
 	userCodeTTL        = 15 * time.Minute     // [AM7] device-grant user_code lifetime
 	devicePollInterval = 5 * time.Second      // RFC 8628 minimum poll interval
-	defaultMaxFamilies = 20                   // §3 concurrent-family cap per account
-	maxGrantAttempts   = 10                   // device-grant probe lockout
+	defaultMaxFamilies = 20 // §3 concurrent-family cap per account
 )
 
 // refreshPoPDomain prefixes the bytes a client session key signs to authorize a /refresh

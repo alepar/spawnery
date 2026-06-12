@@ -384,6 +384,28 @@ func TestOAuthCallbackNoPubkeyRejected(t *testing.T) {
 	}
 }
 
+// TestOAuthCallbackNonP256PubkeyRejected: callback with a non-P256 session_pubkey (P-384) →
+// invalid_request redirect. Validates that extractSPKIFromState enforces P-256 consistently
+// with the device flow (parseSessionSPKI is called for both paths).
+func TestOAuthCallbackNonP256PubkeyRejected(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	fake.SetUser(55002, "nonp256user")
+	now := time.Unix(1770000000, 0)
+	srv, _, _ := testAS(t, fake, now)
+
+	p384DER := newTestP384(t)
+	resp := triggerCallbackWith(t, srv, fake, "http://localhost:3000/callback", "s-nonp256",
+		base64.StdEncoding.EncodeToString(p384DER))
+	location := resp.Header.Get("Location")
+	if resp.StatusCode != http.StatusFound || extractQueryParam(location, "error") != "invalid_request" {
+		t.Fatalf("non-P256 pubkey: want 302 invalid_request redirect, got %d %q", resp.StatusCode, location)
+	}
+	if extractQueryParam(location, "access_token") != "" {
+		t.Fatal("non-P256 pubkey: callback must not return access_token")
+	}
+}
+
 // TestOAuthLoopbackDeliversRefreshToken: loopback redirect_uri → refresh_token in query (A3 seam).
 // SPA (non-loopback) path must NOT carry refresh_token in query.
 func TestOAuthLoopbackDeliversRefreshToken(t *testing.T) {
