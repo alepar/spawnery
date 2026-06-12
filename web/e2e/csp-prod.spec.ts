@@ -73,29 +73,64 @@ test.describe("CSP-enforced prod bundle", () => {
     expect(violations).toHaveLength(0);
   });
 
-  test("dynamic import chunk loads without CSP violations [WM19]", async ({ page }) => {
-    // This checks that highlighted-body-*.js (the dynamic shiki/streamdown chunk)
-    // has an integrity attribute and loads without CSP errors.
+  test("highlight/diagram block renders without CSP violations (highlighted-body chunk) [WM19]", async ({ page }) => {
+    // This test exercises the shiki/streamdown render path — the precise dep that WM19 guards
+    // against eval/inline/wasm regressions. It navigates to an ACP chat session, injects an
+    // agent message with a fenced code block via a mocked WebSocket, and waits for the
+    // highlighted-body chunk to execute (HighlightedCodeBlockBody mounts and calls shiki).
+    // Merely preloading the chunk (via <link rel="modulepreload">) does not execute shiki;
+    // only rendering a CodeBlock fence imports and runs it.
     const violations: string[] = [];
-    const failedResources: string[] = [];
-
     page.on("console", (msg) => {
       if (msg.type() === "error" && msg.text().includes("Content Security Policy")) {
         if (!msg.text().includes("style-src")) violations.push(msg.text());
       }
     });
-    page.on("response", (resp) => {
-      // Track any JS asset that fails to load (blocked by CSP or SRI mismatch).
-      if (!resp.ok() && resp.url().includes("highlighted-body")) {
-        failedResources.push(`${resp.status()} ${resp.url()}`);
-      }
+
+    // Silence background polls.
+    await page.route("**/cp.v1.SpawnService/ListApps", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: '{"apps":[]}' })
+    );
+    await page.route("**/cp.v1.SpawnService/ListSpawns", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          spawns: [{ spawnId: "test-csp-hl", name: "CSP Highlight", appId: "test", status: "SPAWN_STATUS_ACTIVE", mode: "acp", model: "test", modelApplied: true }],
+        }),
+      })
+    );
+    // Return an ACP session so SpawnTabs mounts AcpSessionPanel (not TerminalView).
+    await page.route("**/cp.v1.SpawnService/ListSessions", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          sessions: [{ sessionId: "hl-1", transport: "SESSION_TRANSPORT_ACP", runnable: "agent", status: "active", pinned: true }],
+        }),
+      })
+    );
+
+    // Intercept the ACP WebSocket and inject a fenced code block frame.
+    // When AcpSessionPanel connects and sends its bind frame, reply with an agent message
+    // containing a Python code fence. This forces Streamdown to mount HighlightedCodeBlockBody
+    // (the lazy shiki chunk) and execute it under the enforced CSP, catching any eval/wasm
+    // regressions before they reach production.
+    await page.routeWebSocket("**/ws/session", (ws) => {
+      ws.onMessage(() => {
+        ws.send(JSON.stringify({ kind: "agent", seq: 1, text: "Result:\n\n```python\nprint(\"hello\")\n```\n" }) + "\n");
+        ws.send(JSON.stringify({ kind: "turn", seq: 2, state: "idle", queued: 0 }) + "\n");
+      });
     });
 
-    await page.goto("/");
+    await page.goto("/spawn/test-csp-hl");
+    // [data-language] is set by Streamdown's CodeBlock container — its presence proves the
+    // fenced code fence rendered and HighlightedCodeBlockBody (the lazy shiki module) mounted.
+    await page.waitForSelector("[data-language]", { timeout: 10000 });
+    // Allow async highlighting (shiki updates state via useEffect) to settle.
     await page.waitForLoadState("networkidle");
 
-    expect(violations).toHaveLength(0);
-    expect(failedResources).toHaveLength(0);
+    expect(violations, `Unexpected CSP violations:\n${violations.join("\n")}`).toHaveLength(0);
   });
 
   test("no inline scripts in HTML (theme-bootstrap externalized) [WM19]", async ({ page }) => {

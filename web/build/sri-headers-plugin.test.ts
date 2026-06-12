@@ -310,4 +310,48 @@ describe("sriHeadersPlugin.closeBundle", () => {
     expect(() => callCloseBundle(plugin)).not.toThrow();
     expect(fs.existsSync(path.join(tmpDir, "_headers"))).toBe(false);
   });
+
+  it("deduplicates crossorigin — no bare crossorigin left after SRI stamping", () => {
+    // Vite emits <script type="module" crossorigin src="..."> with a bare crossorigin (no value).
+    // The plugin must strip it before re-adding crossorigin="anonymous", so the output never
+    // has two crossorigin attributes on the same tag.
+    const code = "console.log('main');";
+    const integ = sha384(code);
+    fs.writeFileSync(path.join(tmpDir, "assets/main.js"), code, "utf8");
+    // Simulate Vite's output: bare `crossorigin` without a value, no integrity yet.
+    writeIndexHtml(
+      `<html><head><script type="module" crossorigin src="/assets/main.js"></script></head><body></body></html>`,
+    );
+    const plugin = sriHeadersPlugin({ cpOrigin: "https://cp.example.com" });
+    callConfigResolved(plugin, tmpDir);
+    callGenerateBundle(plugin, { "assets/main.js": { type: "chunk", code } });
+    callCloseBundle(plugin);
+
+    const html = fs.readFileSync(path.join(tmpDir, "index.html"), "utf8");
+    expect(html).toContain(`integrity="${integ}"`);
+    expect(html).toContain('crossorigin="anonymous"');
+    // Exactly one crossorigin attribute — the bare one must be stripped.
+    const matches = html.match(/\bcrossorigin\b/g) ?? [];
+    expect(matches).toHaveLength(1);
+  });
+
+  it("deduplicates crossorigin on link tags — bare crossorigin stripped before re-add", () => {
+    // Same issue for <link rel="stylesheet" crossorigin href="..."> emitted by Vite.
+    const css = "body { color: red; }";
+    const integ = sha384(css);
+    fs.writeFileSync(path.join(tmpDir, "assets/main.css"), css, "utf8");
+    writeIndexHtml(
+      `<html><head><link rel="stylesheet" crossorigin href="/assets/main.css"></head><body></body></html>`,
+    );
+    const plugin = sriHeadersPlugin({ cpOrigin: "https://cp.example.com" });
+    callConfigResolved(plugin, tmpDir);
+    callGenerateBundle(plugin, { "assets/main.css": { type: "asset", source: css } });
+    callCloseBundle(plugin);
+
+    const html = fs.readFileSync(path.join(tmpDir, "index.html"), "utf8");
+    expect(html).toContain(`integrity="${integ}"`);
+    expect(html).toContain('crossorigin="anonymous"');
+    const matches = html.match(/\bcrossorigin\b/g) ?? [];
+    expect(matches).toHaveLength(1);
+  });
 });

@@ -207,7 +207,8 @@ export function sriHeadersPlugin(opts: SriHeadersOptions = {}): Plugin {
           if (!integ) return _match;
           const attrs = (before + after)
             .replace(/\s*integrity="[^"]*"/g, "")
-            .replace(/\s*crossorigin="[^"]*"/g, "");
+            .replace(/\s*crossorigin="[^"]*"/g, "")
+            .replace(/\s*\bcrossorigin\b(?!=)/g, ""); // strip Vite's bare crossorigin (no ="...")
           return `<script${attrs} src="${src}" integrity="${integ}" crossorigin="anonymous">`;
         },
       );
@@ -230,7 +231,8 @@ export function sriHeadersPlugin(opts: SriHeadersOptions = {}): Plugin {
           if (!integ) return _match;
           const cleanedAttrs = attrs
             .replace(/\s*integrity="[^"]*"/g, "")
-            .replace(/\s*crossorigin="[^"]*"/g, "");
+            .replace(/\s*crossorigin="[^"]*"/g, "")
+            .replace(/\s*\bcrossorigin\b(?!=)/g, ""); // strip Vite's bare crossorigin (no ="...")
           return `<link${cleanedAttrs} integrity="${integ}" crossorigin="anonymous">`;
         },
       );
