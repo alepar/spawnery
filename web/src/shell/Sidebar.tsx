@@ -11,6 +11,7 @@ export interface SpawnActions {
   onResume: (spawnId: string) => void;
   onRecreate: (spawnId: string) => void;
   onStop: (spawnId: string) => void;
+  onMoveTo?: (spawnId: string) => void;
 }
 
 // The two top-nav buttons map to a target Nav. "Templates" stays highlighted across the whole
@@ -153,6 +154,15 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
           ) : (
             <button data-testid={`spawn-${lifecycle.kind}-${spawn.spawnId}`} className="rounded px-2 py-1 text-left text-sm hover:bg-accent" onClick={dispatchLifecycle}>
               {lifecycle.label}
+            </button>
+          )}
+          {actions?.onMoveTo && (
+            <button
+              data-testid={`spawn-moveto-${spawn.spawnId}`}
+              className="rounded px-2 py-1 text-left text-sm hover:bg-accent"
+              onClick={() => { setMenu(false); actions.onMoveTo!(spawn.spawnId); }}
+            >
+              Move to…
             </button>
           )}
           {confirmStop ? (
