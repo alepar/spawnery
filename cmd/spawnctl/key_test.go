@@ -78,39 +78,65 @@ func TestInitDeviceSetNoClobber(t *testing.T) {
 	}
 }
 
-// recover re-derives the SAME device from a fixed mnemonic every time.
-func TestRecoverDeterministic(t *testing.T) {
-	want, err := seal.RecoveryDevice(testMnemonic)
+// TestRecoverFlow verifies the full local recovery flow: init produces a recovery
+// mnemonic; recoverDevice accepts it, writes a fresh 0600 keyfile, rotates the
+// recovery phrase, and leaves the device set with 3 members (device1 + fresh +
+// new_recovery).
+func TestRecoverFlow(t *testing.T) {
+	dir := t.TempDir()
+
+	// init creates device1 + recovery (2 members).
+	recoveryMnemonic, err := initDeviceSet(dir, false)
 	if err != nil {
-		t.Fatalf("reference RecoveryDevice: %v", err)
+		t.Fatalf("initDeviceSet: %v", err)
 	}
 
-	dirs := []string{t.TempDir(), t.TempDir()}
-	var firstPub []byte
-	for i, dir := range dirs {
-		dev, err := recoverDevice(dir, testMnemonic, false)
-		if err != nil {
-			t.Fatalf("recoverDevice[%d]: %v", i, err)
-		}
-		if !bytes.Equal(dev.X25519Pub, want.X25519Pub) {
-			t.Fatalf("recoverDevice[%d] X25519 pub mismatch vs reference", i)
-		}
-		if !bytes.Equal(dev.Ref().SignPub, want.Ref().SignPub) {
-			t.Fatalf("recoverDevice[%d] sign pub mismatch vs reference", i)
-		}
-		// Perms on the recovered keyfile.
-		fi, err := os.Stat(keyfilePath(dir))
-		if err != nil {
-			t.Fatalf("stat recovered keyfile: %v", err)
-		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			t.Fatalf("recovered keyfile perm = %o, want 0600", perm)
-		}
-		if i == 0 {
-			firstPub = dev.X25519Pub
-		} else if !bytes.Equal(firstPub, dev.X25519Pub) {
-			t.Fatal("two recoveries from the same mnemonic differ")
-		}
+	// Remove the device1 keyfile so recoverDevice can write the fresh device's keyfile.
+	if err := os.Remove(keyfilePath(dir)); err != nil {
+		t.Fatalf("remove keyfile before recover: %v", err)
+	}
+
+	result, err := recoverDevice(dir, recoveryMnemonic, false)
+	if err != nil {
+		t.Fatalf("recoverDevice: %v", err)
+	}
+
+	// FreshDevice must have non-empty key material.
+	freshDev := result.FreshDevice
+	if len(freshDev.X25519Pub) == 0 || freshDev.Sign == nil {
+		t.Fatal("FreshDevice missing key material")
+	}
+
+	// NewRecoveryMnemonic must be a valid 24-word phrase distinct from the original.
+	newPhrase := result.NewRecoveryMnemonic
+	if !strings.Contains(newPhrase, " ") || len(strings.Fields(newPhrase)) != 24 {
+		t.Fatalf("NewRecoveryMnemonic is not 24 words: %q", newPhrase)
+	}
+	if newPhrase == recoveryMnemonic {
+		t.Fatal("NewRecoveryMnemonic must differ from the consumed recovery mnemonic")
+	}
+
+	// The written keyfile must be 0600.
+	fi, err := os.Stat(keyfilePath(dir))
+	if err != nil {
+		t.Fatalf("stat recovered keyfile: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("keyfile perm = %o, want 0600", perm)
+	}
+
+	// The device set must verify and contain exactly 3 members:
+	// device1 (from genesis) + fresh device + new recovery virtual device.
+	dsf, err := loadDeviceSet(dir)
+	if err != nil {
+		t.Fatalf("loadDeviceSet after recovery: %v", err)
+	}
+	members, err := seal.VerifyDeviceSet(dsf.Log, dsf.Root)
+	if err != nil {
+		t.Fatalf("VerifyDeviceSet after recovery: %v", err)
+	}
+	if len(members) != 3 {
+		t.Fatalf("members after recovery = %d, want 3 (device1 + fresh + new_recovery)", len(members))
 	}
 }
 
@@ -121,15 +147,30 @@ func TestRecoverInvalidMnemonic(t *testing.T) {
 }
 
 func TestRecoverNoClobber(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := recoverDevice(dir, testMnemonic, false); err != nil {
-		t.Fatalf("first recover: %v", err)
+	// Case 1: keyfile present, --force not set → must fail.
+	{
+		dir := t.TempDir()
+		recoveryMnemonic, err := initDeviceSet(dir, false)
+		if err != nil {
+			t.Fatalf("initDeviceSet: %v", err)
+		}
+		// init writes a device1 keyfile; recovery without --force must reject it.
+		if _, err := recoverDevice(dir, recoveryMnemonic, false); err == nil {
+			t.Fatal("recover without --force should fail when keyfile exists")
+		}
 	}
-	if _, err := recoverDevice(dir, testMnemonic, false); err == nil {
-		t.Fatal("recover over existing keyfile without --force should fail")
-	}
-	if _, err := recoverDevice(dir, testMnemonic, true); err != nil {
-		t.Fatalf("recover --force should overwrite: %v", err)
+
+	// Case 2: keyfile present, --force set → must succeed.
+	{
+		dir := t.TempDir()
+		recoveryMnemonic, err := initDeviceSet(dir, false)
+		if err != nil {
+			t.Fatalf("initDeviceSet: %v", err)
+		}
+		// Device1 keyfile exists; --force must overwrite it with the fresh device.
+		if _, err := recoverDevice(dir, recoveryMnemonic, true); err != nil {
+			t.Fatalf("recover --force should overwrite existing keyfile: %v", err)
+		}
 	}
 }
 
