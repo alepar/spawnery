@@ -13,7 +13,7 @@ import { create } from "zustand";
 import { AS_ORIGIN } from "@/config/endpoints";
 import { parseCallback, browserHistory, sessionStateStorage } from "./oauth";
 import { getOrCreateSessionKey, exportSpkiDer, sessionKeyHash, clearSessionKey } from "./keypair";
-import { refreshAccessToken } from "./refresh";
+import { refreshAccessToken, computeRefreshDelay } from "./refresh";
 import { parseAccessToken } from "./token";
 import { IDBKeyStore, type KeyStore } from "./keystore";
 import { mapAsError, type AsErrorCode } from "./errors";
@@ -74,6 +74,65 @@ export function authEnabled(): boolean {
   return !!AS_ORIGIN || !!import.meta.env.VITE_AUTH_ENABLED || import.meta.env.PROD === true;
 }
 
+// ── Proactive silent-refresh scheduler ───────────────────────────────────────
+// computeRefreshDelay is unit-tested in refresh.test.ts; this wires the timer that
+// invokes it. The timer is set after every successful token delivery (setToken) so
+// the access token is always renewed before it expires, keeping long-lived WS sessions
+// alive past the 15 min TTL without waiting for a reactive RPC 401.
+
+let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+function _clearRefreshTimer(): void {
+  if (_refreshTimer !== null) {
+    clearTimeout(_refreshTimer);
+    _refreshTimer = null;
+  }
+}
+
+function _scheduleProactiveRefresh(expiresAt: bigint): void {
+  _clearRefreshTimer();
+  if (!authEnabled()) return;
+  const delay = computeRefreshDelay(expiresAt);
+  _refreshTimer = setTimeout(() => {
+    _refreshTimer = null;
+    void _doProactiveRefresh();
+  }, delay);
+}
+
+async function _doProactiveRefresh(): Promise<void> {
+  if (!authEnabled()) return;
+  const session = useSessionStore.getState();
+  if (session.status !== "authed") return;
+
+  try {
+    const store = session.keyStore;
+    const kp = await getOrCreateSessionKey(store);
+    const spki = await exportSpkiDer(kp.publicKey);
+    const spkiHash = await sessionKeyHash(spki);
+    const rthB64 = session.refreshTokenHash;
+    const rth = rthB64.length > 0 ? _base64urlToBytes(rthB64) : new Uint8Array(32);
+
+    const result = await refreshAccessToken({
+      privateKey: kp.privateKey,
+      publicKey: kp.publicKey,
+      localSpkiHash: spkiHash,
+      refreshTokenHash: rth,
+    });
+
+    if (result.kind === "ok") {
+      // setToken reschedules the next proactive timer via _scheduleProactiveRefresh.
+      useSessionStore.getState().setToken(result.accessToken, result.refreshTokenHash);
+    } else if (result.kind === "cnf-mismatch") {
+      useSessionStore.getState().setStatus("cnf-mismatch");
+    } else if (result.kind === "revoked" || result.kind === "key-missing") {
+      useSessionStore.getState().setStatus("key-lost");
+    }
+    // Other errors (network, parse): silently ignore; next RPC 401 triggers reactive refresh.
+  } catch {
+    // Network or key errors: ignore; reactive path picks up on the next RPC.
+  }
+}
+
 export const useSessionStore = create<SessionState>((set, get) => ({
   status: "loading",
   accessToken: "",
@@ -86,13 +145,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Persist the hash before updating zustand so cold-reload bootstrap() can read it [AM2].
     _saveRth(rth);
     let account: AccountInfo | null = null;
+    let expiresAt: bigint | null = null;
     try {
       const decoded = parseAccessToken(token);
       account = { accountId: decoded.accountId, handle: decoded.handle };
+      expiresAt = decoded.expiresAt;
     } catch {
-      // Ignore parse errors; account remains null.
+      // Ignore parse errors; account remains null, no proactive timer scheduled.
     }
     set({ accessToken: token, refreshTokenHash: rth, account, status: "authed", callbackErrorCode: null });
+    // Schedule next proactive refresh so long-lived WS sessions never hit the 15 min expiry.
+    if (expiresAt !== null) _scheduleProactiveRefresh(expiresAt);
   },
 
   setStatus(status: AuthStatus) {
@@ -166,6 +229,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   async logout() {
+    _clearRefreshTimer();
     const store = get().keyStore;
     _clearRth();
     // Best-effort: revoke the server-side family.

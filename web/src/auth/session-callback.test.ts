@@ -41,9 +41,13 @@ vi.mock("./keypair", () => ({
   clearSessionKey: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock("./refresh", () => ({
-  refreshAccessToken: vi.fn().mockResolvedValue({ kind: "network-error" }),
-}));
+vi.mock("./refresh", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./refresh")>();
+  return {
+    ...actual,
+    refreshAccessToken: vi.fn().mockResolvedValue({ kind: "network-error" }),
+  };
+});
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

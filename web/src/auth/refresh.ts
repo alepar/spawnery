@@ -45,12 +45,22 @@ export type RefreshResult =
   | { kind: "key-missing" }
   | { kind: "error"; message: string };
 
-/** Single-flight state for environments without Web Locks (test fallback). */
+/**
+ * Module-level in-flight promise shared across ALL concurrent callers, whether a lock
+ * is available or not.  The check executes synchronously after the first `await`
+ * (keyCanSign), so JS single-threading prevents TOCTOU: nothing can pre-empt between
+ * the `await` resumption and the `_inflight` assignment.
+ *
+ * Without this guard the Web Locks path serialises callers but each runs its own
+ * _doRefresh with the refreshTokenHash captured at call time.  After caller A rotates
+ * the cookie, caller B signs a PoP over the stale hash → AS reconstructs the message
+ * over sha256(newCookie) → signature mismatch → spurious logout.
+ */
 let _inflight: Promise<RefreshResult> | null = null;
 
 /**
  * refreshAccessToken performs a single /refresh round-trip with PoP.
- * Single-flight: concurrent callers share one in-flight request.
+ * All concurrent callers share the first in-flight promise (true single-flight).
  */
 export async function refreshAccessToken(deps: RefreshDeps): Promise<RefreshResult> {
   // Positive self-check: if the key is gone, take the key-loss path before any network.
@@ -58,6 +68,10 @@ export async function refreshAccessToken(deps: RefreshDeps): Promise<RefreshResu
   if (!canSign) {
     return { kind: "key-missing" };
   }
+
+  // True single-flight: latecomers reuse the first caller's promise so they receive
+  // the same rotated token rather than each re-signing a PoP over a stale hash.
+  if (_inflight) return _inflight;
 
   const lockFn =
     deps.acquireLock ??
@@ -67,13 +81,16 @@ export async function refreshAccessToken(deps: RefreshDeps): Promise<RefreshResu
       : null);
 
   if (lockFn) {
-    return lockFn(REFRESH_LOCK_NAME, () => _doRefresh(deps));
+    // Cast required: lockFn is a union of generic overloads; TypeScript can't resolve
+    // the return type narrowly enough without an explicit annotation.
+    const p = (lockFn(REFRESH_LOCK_NAME, () => _doRefresh(deps)) as Promise<RefreshResult>).finally(() => { _inflight = null; });
+    _inflight = p;
+    return p;
   }
 
-  // Fallback in-memory single-flight (for tests / environments without Web Locks).
-  if (_inflight) return _inflight;
-  _inflight = _doRefresh(deps).finally(() => { _inflight = null; });
-  return _inflight;
+  const p = _doRefresh(deps).finally(() => { _inflight = null; });
+  _inflight = p;
+  return p;
 }
 
 async function _doRefresh(deps: RefreshDeps): Promise<RefreshResult> {

@@ -93,3 +93,30 @@ describe("logout", () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe("proactive refresh — timer is wired", () => {
+  it("schedules a timer after setToken when auth is enabled", () => {
+    vi.stubEnv("VITE_AUTH_ENABLED", "1");
+    vi.useFakeTimers();
+    try {
+      // Build a token expiring ~15 min from fake-now so computeRefreshDelay returns > 0.
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expiresAt = BigInt(nowSec + 15 * 60);
+      const w = new ProtoWriter();
+      w.writeBytes(1, "acc");
+      w.writeBytes(2, "h");
+      w.writeVarint(6, expiresAt);
+      const body = w.finish();
+      const wire = toBase64Url(body) + "." + toBase64Url(new Uint8Array(64));
+
+      useSessionStore.getState().setToken(wire, "rth-abc");
+
+      // setToken must have armed a proactive refresh timer.
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+    } finally {
+      vi.runAllTimers(); // drain the timer so it doesn't leak into other tests
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    }
+  });
+});

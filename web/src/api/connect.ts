@@ -27,8 +27,13 @@ export async function unary<T>(method: string, body: unknown): Promise<T> {
       if (!retryRes.ok) throw new Error(`${method} failed: ${retryRes.status} ${await retryRes.text()}`);
       return (await retryRes.json()) as T;
     }
-    // Refresh failed → route to login.
-    useSessionStore.getState().setStatus("login-required");
+    // Refresh failed → set login-required, but only if _tryRefresh hasn't already set a
+    // more specific status (cnf-mismatch or key-lost). Those drive distinct recovery UX
+    // in LoginView (spec §5) and must not be clobbered by the generic catch-all.
+    const s = useSessionStore.getState();
+    if (s.status !== "cnf-mismatch" && s.status !== "key-lost") {
+      s.setStatus("login-required");
+    }
     throw new Error(`${method}: session expired, please sign in again`);
   }
 

@@ -176,14 +176,17 @@ describe("refreshAccessToken — revoked", () => {
 });
 
 describe("refreshAccessToken — single-flight", () => {
-  it("two concurrent calls share one fetch via in-memory lock fallback", async () => {
+  it("two concurrent calls share one fetch even with a serializing (non-sharing) lock", async () => {
+    // This test validates the real-production scenario: navigator.locks.request() serialises
+    // callers but does NOT share results — each queued caller would normally run its own
+    // _doRefresh with a potentially-stale refreshTokenHash (cookie rotated by the first caller).
+    // The fix must guarantee only one fetch fires regardless of lock semantics.
     const store = new MemoryKeyStore();
     const kp = await getOrCreateSessionKey(store);
     const spki = await exportSpkiDer(kp.publicKey);
     const hash = await sessionKeyHash(spki);
     const accessToken = buildWireToken(hash, 1800000000n);
 
-    // Track fetch call count
     let fetchCount = 0;
     let resolveFetch!: (v: Response) => void;
     const pendingFetch = new Promise<Response>((resolve) => { resolveFetch = resolve; });
@@ -192,22 +195,30 @@ describe("refreshAccessToken — single-flight", () => {
       return pendingFetch;
     });
 
-    // Use a custom lock that serializes callers
+    // Serialising lock: queues callers and runs each fn() independently — semantically
+    // identical to navigator.locks.request().  Does NOT share the in-flight promise.
     type LockFn = <T>(name: string, fn: () => Promise<T>) => Promise<T>;
-    let pendingLock: Promise<unknown> | null = null;
-    const acquireLock: LockFn = async (_name, fn) => {
-      if (pendingLock) return pendingLock as Promise<never>;
-      const p = fn();
-      pendingLock = p;
-      try { return await p; } finally { pendingLock = null; }
-    };
+    let lockHeld = false;
+    const lockQueue: Array<() => void> = [];
+    const serializingLock: LockFn = (_name, fn) =>
+      new Promise<never>((resolve, reject) => {
+        const run = () => {
+          lockHeld = true;
+          (fn() as Promise<never>).then(resolve, reject).finally(() => {
+            lockHeld = false;
+            if (lockQueue.length > 0) lockQueue.shift()!();
+          });
+        };
+        if (!lockHeld) run();
+        else lockQueue.push(run);
+      });
 
     const deps = {
       privateKey: kp.privateKey,
       publicKey: kp.publicKey,
       localSpkiHash: hash,
       refreshTokenHash: new Uint8Array(32),
-      acquireLock,
+      acquireLock: serializingLock,
       fetchFn: fetchMock,
       now: () => 1700000000000,
     };
@@ -222,7 +233,7 @@ describe("refreshAccessToken — single-flight", () => {
     const [r1, r2] = await Promise.all([p1, p2]);
     expect(r1.kind).toBe("ok");
     expect(r2.kind).toBe("ok");
-    // Only one fetch was made
+    // Only one fetch was made — the _inflight guard short-circuits p2 before the lock.
     expect(fetchCount).toBe(1);
   });
 });
