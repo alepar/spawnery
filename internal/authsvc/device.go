@@ -30,6 +30,37 @@ import (
 	"spawnery/internal/authsvc/store"
 )
 
+const deviceSessionCookieName = "device_session"
+
+// setDeviceSessionCookie sets the browser-session cookie scoped to Path=/device so that
+// GET/POST /device/verify receive it. The refresh_token cookie lives at Path=/refresh and
+// RFC 6265 path scoping prevents it from reaching /device/verify — this parallel cookie
+// carries the same raw token value for the device-verify auth check only.
+func setDeviceSessionCookie(w http.ResponseWriter, value string, expires time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     deviceSessionCookieName,
+		Value:    value,
+		Path:     "/device",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		Expires:  expires,
+	})
+}
+
+// expireDeviceSessionCookie clears the device_session cookie.
+func expireDeviceSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     deviceSessionCookieName,
+		Value:    "",
+		Path:     "/device",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
 const (
 	userCodeLen      = 8    // 8 chars, XXXX-XXXX format
 	maxDeviceAttempt = 10   // lock out after 10 bad user_code attempts
@@ -110,13 +141,23 @@ func (i *IdP) serveDeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// serveDeviceVerifyGet handles GET /device/verify: the authed browser page. Requires refresh
-// cookie (user already logged in). Accepts user_code as a query param to pre-populate the form.
+// serveDeviceVerifyGet handles GET /device/verify: the authed browser page. Requires the
+// device_session cookie (set at login, Path=/device). Accepts user_code as a query param to
+// pre-populate the form.
 func (i *IdP) serveDeviceVerifyGet(w http.ResponseWriter, r *http.Request) {
 	_, accountID, err := i.requireRefreshCookieSession(r)
 	if err != nil {
-		// Not logged in — redirect to login with return_to.
-		http.Redirect(w, r, "/oauth/authorize?redirect_uri=/device/verify", http.StatusFound)
+		// Not logged in. /device/verify is an AS endpoint, not a registered redirect_uri, so
+		// redirecting to /oauth/authorize?redirect_uri=/device/verify would be rejected by
+		// isAllowedRedirectURI and create a dead loop. Show a prompt instead.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		if i.cfg.SPAOrigin != "" {
+			fmt.Fprintf(w, `<html><body><p>Please <a href="%s">log in to Spawnery</a> first, then return to this page to authorize the device.</p></body></html>`,
+				html.EscapeString(i.cfg.SPAOrigin))
+		} else {
+			fmt.Fprintln(w, `<html><body><p>Please log in to Spawnery first, then return to this page to authorize the device.</p></body></html>`)
+		}
 		return
 	}
 	userCode := r.URL.Query().Get("user_code")
@@ -304,11 +345,13 @@ func (i *IdP) serveDeviceToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// requireRefreshCookieSession validates the refresh cookie and returns (rawToken, accountID).
-// This is used by the device-verify page to know who the logged-in user is.
+// requireRefreshCookieSession validates the device_session cookie (Path=/device) and returns
+// (rawToken, accountID). Used by the device-verify page to identify the logged-in browser user.
+// Reads device_session (not refresh_token) because refresh_token is scoped to Path=/refresh
+// and RFC 6265 prevents it from reaching /device/verify in a real browser [Issue: cookie path].
 // IMPORTANT: this does NOT rotate the refresh token (read-only session check).
 func (i *IdP) requireRefreshCookieSession(r *http.Request) (rawToken, accountID string, err error) {
-	c, err := r.Cookie("refresh_token")
+	c, err := r.Cookie(deviceSessionCookieName)
 	if err != nil || c.Value == "" {
 		return "", "", fmt.Errorf("no session")
 	}

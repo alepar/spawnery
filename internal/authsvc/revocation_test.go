@@ -213,3 +213,51 @@ func TestLogoutNoSession(t *testing.T) {
 	}
 	_ = errors.New // suppress import lint
 }
+
+// TestRevocationsFeedGatedByCPSecret: when IdPConfig.CPSecret is set, GET /revocations must
+// reject requests without the bearer token (401) and accept those with the correct secret.
+// Verifies that the env wiring in cmd/authsvc/main.go actually gates the endpoint.
+func TestRevocationsFeedGatedByCPSecret(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	const secret = "test-cp-secret"
+	srv, _, st := testAS(t, fake, now, func(cfg *IdPConfig) {
+		cfg.CPSecret = secret
+	})
+
+	// Seed a revocation event so the feed is non-empty.
+	_, err := st.Revocations().Append(context.Background(), store.RevocationEvent{
+		AccountID: "acct-gated", FamilyID: "fam-gated", TokenIDs: `["t-gated"]`, RevokedAt: now.Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No credentials → 401.
+	resp, _ := http.Get(srv.URL + "/revocations?since=0")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no creds: want 401, got %d", resp.StatusCode)
+	}
+
+	// Wrong secret → 401.
+	req, _ := http.NewRequest("GET", srv.URL+"/revocations?since=0", nil)
+	req.Header.Set("Authorization", "Bearer wrong-secret")
+	resp, _ = (&http.Client{}).Do(req)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong secret: want 401, got %d", resp.StatusCode)
+	}
+
+	// Correct secret → 200 with entries.
+	req, _ = http.NewRequest("GET", srv.URL+"/revocations?since=0", nil)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, _ = (&http.Client{}).Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("correct secret: want 200, got %d", resp.StatusCode)
+	}
+	var entries []SignedRevocationEntry
+	_ = json.NewDecoder(resp.Body).Decode(&entries)
+	if len(entries) == 0 {
+		t.Fatal("correct secret: want non-empty feed, got empty")
+	}
+}

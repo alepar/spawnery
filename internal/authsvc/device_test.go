@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"testing"
@@ -13,6 +14,31 @@ import (
 	"spawnery/internal/authsvc/githubfake"
 	"spawnery/internal/authsvc/store"
 )
+
+// newDeviceVerifyClient returns an http.Client whose CookieJar is pre-seeded with a
+// device_session cookie scoped to Path=/device for srvURL. This exercises real RFC 6265 path
+// scoping (unlike AddCookie, which bypasses it) and verifies that the device_session cookie
+// at Path=/device reaches /device/verify but a Path=/refresh cookie would not.
+func newDeviceVerifyClient(t *testing.T, srvURL, token string) *http.Client {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(srvURL + "/device/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(u, []*http.Cookie{
+		{Name: deviceSessionCookieName, Value: token, Path: "/device"},
+	})
+	return &http.Client{
+		Jar: jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
 
 // TestDeviceGrantHappy: authorize → approve (browser) → poll gets tokens, family bound to pubkey [AM7].
 func TestDeviceGrantHappy(t *testing.T) {
@@ -75,12 +101,14 @@ func TestDeviceGrantHappy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// POST /device/verify as the logged-in browser user (cookie).
+	// POST /device/verify as the logged-in browser user.
+	// Use a jar-backed client so RFC 6265 path scoping is enforced: the device_session cookie
+	// is at Path=/device and must be sent to /device/verify.
+	verifyClient := newDeviceVerifyClient(t, srv.URL, browserToken)
 	verifyReq, _ := http.NewRequest("POST", srv.URL+"/device/verify",
 		strings.NewReader(url.Values{"user_code": {authOut.UserCode}}.Encode()))
 	verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	verifyReq.AddCookie(&http.Cookie{Name: "refresh_token", Value: browserToken})
-	verifyResp, err := client.Do(verifyReq)
+	verifyResp, err := verifyClient.Do(verifyReq)
 	if err != nil {
 		t.Fatalf("device/verify: %v", err)
 	}
@@ -221,20 +249,20 @@ func TestDeviceGrantPerCodeLockout(t *testing.T) {
 	// Submit maxDeviceAttempt times (each bumps the counter); the grant is approved on the first
 	// success, so subsequent submits return "invalid_grant" (not pending). We don't care about the
 	// per-attempt response until we exceed the limit.
+	// Use a jar-backed client so RFC 6265 path scoping is enforced.
+	verifyClient := newDeviceVerifyClient(t, srv.URL, browserToken)
 	for range maxDeviceAttempt {
 		verifyReq, _ := http.NewRequest("POST", srv.URL+"/device/verify",
 			strings.NewReader(url.Values{"user_code": {authOut.UserCode}}.Encode()))
 		verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		verifyReq.AddCookie(&http.Cookie{Name: "refresh_token", Value: browserToken})
-		_, _ = client.Do(verifyReq)
+		_, _ = verifyClient.Do(verifyReq)
 	}
 
 	// The (maxDeviceAttempt+1)th attempt must be rejected with access_denied lockout.
 	verifyReq, _ := http.NewRequest("POST", srv.URL+"/device/verify",
 		strings.NewReader(url.Values{"user_code": {authOut.UserCode}}.Encode()))
 	verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	verifyReq.AddCookie(&http.Cookie{Name: "refresh_token", Value: browserToken})
-	resp, _ := client.Do(verifyReq)
+	resp, _ := verifyClient.Do(verifyReq)
 	body, _ = io.ReadAll(resp.Body)
 	var out struct{ Error string `json:"error"` }
 	_ = json.Unmarshal(body, &out)
@@ -254,7 +282,6 @@ func TestDeviceGrantUserCodeRateLimit(t *testing.T) {
 			cfg.RateLimits = RateLimitConfig{DevicePerMin: 2}
 		},
 	)
-	client := noRedirectClient()
 	seedUser(t, st, "acct-rl", 77001, now)
 	_, browser_spki := newTestP256(t)
 	browserToken := randOpaque()
@@ -271,13 +298,14 @@ func TestDeviceGrantUserCodeRateLimit(t *testing.T) {
 		FamilyCreatedAt:   now.Unix(),
 	})
 
+	// Use a jar-backed client so RFC 6265 path scoping is enforced.
+	verifyClient := newDeviceVerifyClient(t, srv.URL, browserToken)
 	got429 := false
 	for i := 0; i < 5; i++ {
 		verifyReq, _ := http.NewRequest("POST", srv.URL+"/device/verify",
 			strings.NewReader(url.Values{"user_code": {"FAKE-CODE"}}.Encode()))
 		verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		verifyReq.AddCookie(&http.Cookie{Name: "refresh_token", Value: browserToken})
-		resp, _ := client.Do(verifyReq)
+		resp, _ := verifyClient.Do(verifyReq)
 		if resp.StatusCode == http.StatusTooManyRequests {
 			got429 = true
 			break
@@ -285,5 +313,23 @@ func TestDeviceGrantUserCodeRateLimit(t *testing.T) {
 	}
 	if !got429 {
 		t.Fatal("device verify rate limit not triggered")
+	}
+}
+
+// TestDeviceVerifyGetUnauthenticated: GET /device/verify without a session returns 401 HTML —
+// not a redirect to /oauth/authorize?redirect_uri=/device/verify (which would be rejected by
+// isAllowedRedirectURI creating a dead loop in production).
+func TestDeviceVerifyGetUnauthenticated(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	srv, _, _ := testAS(t, fake, now)
+
+	resp, err := http.Get(srv.URL + "/device/verify?user_code=XXXX-XXXX")
+	if err != nil {
+		t.Fatalf("GET /device/verify: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET /device/verify: want 401, got %d", resp.StatusCode)
 	}
 }

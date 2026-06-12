@@ -41,11 +41,16 @@
 //	Access controls:
 //	  REGISTRATION_ENABLED           "true"/"1" = allow new user registration (default: true)
 //	  AS_MAX_FAMILIES                Concurrent refresh-family cap per account (default: 20)
+//	  AS_CP_SECRET                   Shared bearer secret for GET /revocations (server-to-server; the CP
+//	                                 must supply "Authorization: Bearer <secret>"). Required in production;
+//	                                 leave unset only in AS_DEV. Without it the revocation feed (account
+//	                                 UUIDs + session-revocation timing) is served unauthenticated.
 package main
 
 import (
 	"context"
 	"crypto/ed25519"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -180,6 +185,7 @@ func buildService() (*authsvc.Service, error) {
 		VerificationURI:     env("AS_VERIFICATION_URI", ""),
 		RegistrationEnabled: regEnabled,
 		MaxFamilies:         maxFamilies,
+		CPSecret:            os.Getenv("AS_CP_SECRET"),
 	})
 	if err != nil {
 		return nil, err
@@ -226,9 +232,9 @@ func loadOrGenerateSigningKey() (ed25519.PrivateKey, error) {
 			log.Printf("authsvc: DEV — generated ephemeral session signing key")
 			return k, nil
 		}
-		log.Printf("authsvc: WARNING — AS_SESSION_KEY_PEM not set; generating ephemeral key (not production-safe)")
-		_, k, err := ed25519.GenerateKey(nil)
-		return k, err
+		// Production: a missing session key is a fatal misconfiguration [AM13]. An ephemeral key
+		// mints tokens the CP's pinned key-set cannot verify and that do not survive a restart.
+		return nil, fmt.Errorf("AS_SESSION_KEY_PEM is required in production (set AS_DEV=1 for development)")
 	}
 	pemBytes, err := os.ReadFile(path)
 	if err != nil {

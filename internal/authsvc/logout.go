@@ -76,7 +76,7 @@ func (i *IdP) logoutEverywhere(ctx context.Context, accountID string, now interf
 	}
 }
 
-// expireRefreshCookie sets the refresh_token cookie to expired.
+// expireRefreshCookie sets both the refresh_token and device_session cookies to expired.
 func expireRefreshCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
@@ -87,4 +87,5 @@ func expireRefreshCookie(w http.ResponseWriter) {
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
+	expireDeviceSessionCookie(w)
 }

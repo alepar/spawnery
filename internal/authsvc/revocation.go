@@ -19,10 +19,12 @@ package authsvc
 // server-to-server trust boundary; configure the secret via env/deploy config (see deploy/authsvc).
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"spawnery/internal/authsvc/store"
 	"spawnery/internal/authsvc/token"
@@ -42,7 +44,8 @@ type SignedRevocationEntry struct {
 // Returns all events with seq > since, each signed with the AS session key [AM10].
 func (i *IdP) serveRevocations(w http.ResponseWriter, r *http.Request) {
 	if i.cfg.CPSecret != "" {
-		if r.Header.Get("Authorization") != "Bearer "+i.cfg.CPSecret {
+		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(i.cfg.CPSecret)) != 1 {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "CP bearer secret required")
 			return
 		}
