@@ -166,16 +166,3 @@ type connectError string
 
 func (e connectError) Error() string { return string(e) }
 
-// --- Legacy shim (keeps old call-sites working during transition) -----------
-
-// Auth is the old token-map auth. Kept for backwards-compat; prefer Verifier.
-type Auth struct{ tokens map[string]string }
-
-// New builds an Auth from a token map.
-func New(tokens map[string]string) *Auth { return &Auth{tokens: tokens} }
-
-// Owner looks up a token in the dev map.
-func (a *Auth) Owner(t string) (string, bool) {
-	o, ok := a.tokens[t]
-	return o, ok
-}

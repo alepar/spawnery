@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -71,11 +72,21 @@ func (s *Server) HandleWS(v *auth.Verifier) http.HandlerFunc {
 		sessCtx, sessCancel := context.WithCancel(ctx)
 		defer sessCancel()
 
-		// Register for revocation fan-out.
+		// Track current session registration; swapped on token rotation to release the old id promptly.
+		var (
+			curRelMu   sync.Mutex
+			curRelease func()
+		)
 		if s.sessions != nil {
-			release := s.sessions.Add(identity.TokenID, identity.Owner, sessCancel)
-			defer release()
+			curRelease = s.sessions.Add(identity.TokenID, identity.Owner, sessCancel)
 		}
+		defer func() {
+			curRelMu.Lock()
+			defer curRelMu.Unlock()
+			if curRelease != nil {
+				curRelease()
+			}
+		}()
 
 		cs := wsClient{conn: conn, ctx: sessCtx}
 		done, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, cs, bind.Cursor)
@@ -134,10 +145,15 @@ func (s *Server) HandleWS(v *auth.Verifier) http.HandlerFunc {
 							}
 							log.Printf("ws reauth failed (dev-tolerant): %v", verr)
 						} else {
-							// Re-register under new token_id.
+							// Re-register under new token_id; release old so only one id is active.
 							if s.sessions != nil && newID.TokenID != "" && newID.TokenID != identity.TokenID {
-								rel := s.sessions.Add(newID.TokenID, newID.Owner, sessCancel)
-								defer rel()
+								newRel := s.sessions.Add(newID.TokenID, newID.Owner, sessCancel)
+								curRelMu.Lock()
+								if curRelease != nil {
+									curRelease()
+								}
+								curRelease = newRel
+								curRelMu.Unlock()
 							}
 							identity = newID
 							// Reset the deadline.

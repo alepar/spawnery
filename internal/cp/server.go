@@ -673,10 +673,36 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	sessCtx, sessCancel := context.WithCancel(ctx)
 	defer sessCancel()
 
-	// Register the session for revocation fan-out (skip dev sessions with no token_id).
+	// Track current session registration; swapped on token rotation to release the old id promptly.
+	var (
+		curRelMu      sync.Mutex
+		curRelease    func()
+	)
 	if s.sessions != nil {
-		release := s.sessions.Add(identity.TokenID, identity.Owner, sessCancel)
-		defer release()
+		curRelease = s.sessions.Add(identity.TokenID, identity.Owner, sessCancel)
+	}
+	defer func() {
+		curRelMu.Lock()
+		defer curRelMu.Unlock()
+		if curRelease != nil {
+			curRelease()
+		}
+	}()
+
+	// Reauth deadline: AS-token sessions in prod close if no reauth received in time.
+	reauthInterval := s.reauthInterval
+	if reauthInterval <= 0 {
+		reauthInterval = defaultReauthInterval
+	}
+	isProdAS := identity.TokenID != "" && !s.devMode
+	var reauthTimer *time.Timer
+	if isProdAS {
+		reauthTimer = time.NewTimer(reauthInterval + reauthGrace)
+	}
+	var reauthCh <-chan time.Time
+	if reauthTimer != nil {
+		reauthCh = reauthTimer.C
+		defer reauthTimer.Stop()
 	}
 
 	clientID := uuid.Must(uuid.NewV7()).String()
@@ -715,10 +741,25 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 						}
 						log.Printf("session reauth failed (dev-tolerant): %v", verr)
 					} else {
-						// Re-register under the new token_id (token rotation).
+						// Re-register under new token_id; release old so only one id is active.
 						if s.sessions != nil && newID.TokenID != "" && newID.TokenID != identity.TokenID {
-							release := s.sessions.Add(newID.TokenID, newID.Owner, sessCancel)
-							defer release()
+							newRel := s.sessions.Add(newID.TokenID, newID.Owner, sessCancel)
+							curRelMu.Lock()
+							if curRelease != nil {
+								curRelease()
+							}
+							curRelease = newRel
+							curRelMu.Unlock()
+						}
+						// Reset the reauth deadline.
+						if reauthTimer != nil {
+							if !reauthTimer.Stop() {
+								select {
+								case <-reauthTimer.C:
+								default:
+								}
+							}
+							reauthTimer.Reset(reauthInterval + reauthGrace)
 						}
 						identity = newID
 					}
@@ -740,6 +781,8 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-reauthCh:
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("reauth timeout"))
 	}
 }
 
