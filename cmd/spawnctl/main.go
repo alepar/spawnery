@@ -325,32 +325,6 @@ func h2cClient() *http.Client {
 	}
 }
 
-// cpBearer is a client-side interceptor that sets "Authorization: Bearer <token>"
-// on unary requests and on the streaming-client connection. Kept for use in tests and any
-// standalone (non-CP) paths that still use a raw static token.
-func cpBearer(token string) connect.Interceptor { return bearerInterceptor{token: token} }
-
-type bearerInterceptor struct{ token string }
-
-func (b bearerInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		req.Header().Set("Authorization", "Bearer "+b.token)
-		return next(ctx, req)
-	}
-}
-
-func (b bearerInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
-		conn := next(ctx, spec)
-		conn.RequestHeader().Set("Authorization", "Bearer "+b.token)
-		return conn
-	}
-}
-
-func (b bearerInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return next // server-side: no-op
-}
-
 // tokenSourceInterceptor builds a Connect interceptor backed by a cpTokenSource.
 // Unary: sets bearer token; on CodeUnauthenticated, forces refresh and retries once.
 // Streaming: proactively refreshes before opening the connection (mid-stream 401 needs reconnect — out of scope).

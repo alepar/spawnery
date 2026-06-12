@@ -475,6 +475,145 @@ func TestConcurrentRefreshSingleFlight(t *testing.T) {
 	}
 }
 
+// TestConcurrentRefreshFileLock: N independent cpTokenSource instances (separate in-process mutex,
+// separate file-descriptor) targeting the same dir call Token() concurrently. The advisory flock
+// in withFileLock must provide single-flight across the separate instances — exactly one /refresh
+// must reach the AS; all callers must receive the same fresh token.
+//
+// This is distinct from TestConcurrentRefreshSingleFlight, which shares one cpTokenSource and
+// therefore serialises via the in-process sync.Mutex. Here each goroutine holds its own instance,
+// so only the flock path is exercised.
+func TestConcurrentRefreshFileLock(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	fake.SetUser(10006, "flocktest")
+	srv, st, _ := buildTestAS(t, fake, nil)
+
+	dir := t.TempDir()
+
+	sessKey, err := generateSessionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubB64, err := sessionPubkeySPKIB64(sessKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spkiDER, _ := x509.MarshalPKIXPublicKey(&sessKey.PublicKey)
+	keyPEM, err := marshalSessionKey(sessKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedLoginTestUser(t, st, "acct-flock", 10006, time.Now())
+
+	form := url.Values{"session_pubkey": {pubB64}, "client_kind": {"cli"}}
+	authResp, err := http.PostForm(srv.URL+"/device/authorize", form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var authOut struct {
+		DeviceCode string `json:"device_code"`
+		UserCode   string `json:"user_code"`
+	}
+	body, _ := io.ReadAll(authResp.Body)
+	authResp.Body.Close()
+	if err := json.Unmarshal(body, &authOut); err != nil || authOut.DeviceCode == "" {
+		t.Fatalf("device/authorize: %v: %s", err, body)
+	}
+
+	browserToken := seedLoginTestFamilyWithSPKI(t, st, "acct-flock", spkiDER, time.Now())
+	verifyReq, _ := http.NewRequest("POST", srv.URL+"/device/verify",
+		strings.NewReader(url.Values{"user_code": {authOut.UserCode}}.Encode()))
+	verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	verifyReq.AddCookie(&http.Cookie{Name: "device_session", Value: browserToken, Path: "/device"})
+	vr, _ := http.DefaultClient.Do(verifyReq)
+	if vr != nil {
+		vrBody, _ := io.ReadAll(vr.Body)
+		vr.Body.Close()
+		if vr.StatusCode != http.StatusOK {
+			t.Fatalf("device/verify: status=%d body=%s", vr.StatusCode, vrBody)
+		}
+	}
+
+	var tokenOut struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		tr, err := http.PostForm(srv.URL+"/device/token",
+			url.Values{"device_code": {authOut.DeviceCode}})
+		if err != nil {
+			continue
+		}
+		b2, _ := io.ReadAll(tr.Body)
+		tr.Body.Close()
+		if json.Unmarshal(b2, &tokenOut) == nil && tokenOut.AccessToken != "" {
+			break
+		}
+	}
+	if tokenOut.AccessToken == "" {
+		t.Fatal("could not get tokens via device flow for flock test setup")
+	}
+
+	s := &authState{
+		ASURL:              srv.URL,
+		AccessToken:        tokenOut.AccessToken,
+		AccessExpiresAt:    time.Now().Add(5 * time.Second).Unix(),
+		RefreshToken:       tokenOut.RefreshToken,
+		SessionKeyPKCS8PEM: keyPEM,
+	}
+	if err := saveState(dir, s); err != nil {
+		t.Fatal(err)
+	}
+
+	origHandler := srv.Config.Handler
+	var refreshCount int32
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/refresh" {
+			atomic.AddInt32(&refreshCount, 1)
+		}
+		origHandler.ServeHTTP(w, r)
+	})
+
+	// Each goroutine owns its own cpTokenSource — separate mutex, separate file descriptor.
+	// Only the flock serialises them; the in-process sync.Mutex plays no role here.
+	const N = 10
+	results := make([]string, N)
+	errs := make([]error, N)
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			src := &cpTokenSource{dir: dir, httpClient: &http.Client{}}
+			results[i], errs[i] = src.Token(context.Background())
+		}()
+	}
+	wg.Wait()
+
+	srv.Config.Handler = origHandler
+
+	if got := atomic.LoadInt32(&refreshCount); got != 1 {
+		t.Fatalf("want exactly 1 /refresh, got %d", got)
+	}
+
+	first := results[0]
+	if first == "" {
+		t.Fatal("results[0] empty")
+	}
+	for i, tok := range results {
+		if errs[i] != nil {
+			t.Errorf("goroutine %d error: %v", i, errs[i])
+		}
+		if tok != first {
+			t.Errorf("goroutine %d token %q != %q", i, tok, first)
+		}
+	}
+}
+
 // TestLogout: logout calls /logout, revokes the family, and removes auth.json.
 func TestLogout(t *testing.T) {
 	fake := githubfake.New()
