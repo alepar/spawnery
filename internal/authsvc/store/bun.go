@@ -34,3 +34,4 @@ func (s *bunStore) RefreshSessions() RefreshSessionRepo { return &refreshSession
 func (s *bunStore) OAuthStates() OAuthStateRepo         { return &oauthStateRepo{db: s.db} }
 func (s *bunStore) DeviceGrants() DeviceGrantRepo       { return &deviceGrantRepo{db: s.db} }
 func (s *bunStore) Revocations() RevocationRepo         { return &revocationRepo{db: s.db} }
+func (s *bunStore) DeviceSets() DeviceSetRepo           { return &deviceSetRepo{db: s.db} }

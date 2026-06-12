@@ -174,6 +174,24 @@ type OwnerRoot struct {
 	RecoverySignPub []byte
 }
 
+// Hash computes and returns the chain hash of this entry
+// (sha256 of encodeFields(Body, sig₀.SignerPub, sig₀.Sig, …)).  This is the
+// value stored as head_hash in the AS registry and committed as PrevHash by
+// the next entry.  Exported so the AS can compute it without importing chain
+// verification logic.
+func (e *StoredEntry) Hash() ([]byte, error) { return e.hash() }
+
+// VersionAndPrevHash decodes the Body and returns the entry's version number
+// and prevHash.  The AS uses these for the CAS head-comparison without full
+// chain verification (WM1: AS stores, never authors).
+func (e *StoredEntry) VersionAndPrevHash() (version uint64, prevHash []byte, err error) {
+	var b entryBody
+	if err := json.Unmarshal(e.Body, &b); err != nil {
+		return 0, nil, fmt.Errorf("seal: parse entry version/prev: %w", err)
+	}
+	return b.Version, b.PrevHash, nil
+}
+
 // buildEntry marshals an entryBody to JSON exactly once, producing the
 // canonical Body bytes that will be stored and signed (WM9).
 func buildEntry(b entryBody) (StoredEntry, error) {

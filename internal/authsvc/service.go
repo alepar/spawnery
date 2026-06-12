@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"spawnery/internal/authsvc/store"
 	"spawnery/internal/pki"
 )
 
@@ -33,6 +34,8 @@ type Service struct {
 	sessionKey ed25519.PrivateKey // signs AS session tokens (sp-3ca); CP never holds it
 
 	idp *IdP // identity core (A1: OAuth, refresh, device grant); nil until WithIdP is called
+
+	deviceSet *deviceSetHandler // device-set registry; nil until WithDeviceSet is called
 
 	mu     sync.Mutex
 	tokens map[string]enrollToken // pending one-time enrollment tokens
@@ -61,6 +64,22 @@ func WithSessionKey(k ed25519.PrivateKey) Option { return func(s *Service) { s.s
 // WithIdP attaches the identity core (OAuth, refresh, device grant) to the Service. Call after
 // constructing a *IdP with NewIdP; the IdP's routes are registered in Handler().
 func WithIdP(idp *IdP) Option { return func(s *Service) { s.idp = idp } }
+
+// WithDeviceSet attaches the device-set registry to the Service.
+//
+//   - st is a DeviceSetRepo (the AS store's DeviceSets() method).
+//   - spaOrigin is the exact Origin the browser SPA is served from (e.g. "https://app.example.com").
+//     Pass "" to disable origin enforcement (tests only).
+//   - accountFromReq extracts the authenticated account ID from a request.
+func WithDeviceSet(st store.DeviceSetRepo, spaOrigin string, accountFromReq AccountFromRequest) Option {
+	return func(s *Service) {
+		s.deviceSet = &deviceSetHandler{
+			st:             st,
+			spaOrigin:      spaOrigin,
+			accountFromReq: accountFromReq,
+		}
+	}
+}
 
 // New builds a Service from an in-memory root cert + self-hosted intermediate CA.
 func New(root *x509.Certificate, selfHostedIntermediate *pki.CA, opts ...Option) *Service {

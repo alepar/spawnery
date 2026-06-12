@@ -85,3 +85,16 @@ type RevocationEvent struct {
 	TokenIDs      string `bun:"token_ids,notnull"` // JSON array of access-token token_ids
 	RevokedAt     int64  `bun:"revoked_at,notnull"`
 }
+
+// DeviceSetEntry is one append-only device-set log entry as stored in the AS.
+// The AS stores raw entry bytes and a pre-computed head hash; it performs pure
+// head comparison for the CAS gate and never validates signatures (WM1).
+type DeviceSetEntry struct {
+	bun.BaseModel `bun:"table:device_set_entries,alias:dse"`
+	AccountID     string `bun:"account_id,pk,notnull"`
+	Version       uint64 `bun:"version,pk,notnull"` // monotonic; genesis = 1
+	PrevHash      []byte `bun:"prev_hash"`          // NULL for genesis
+	HeadHash      []byte `bun:"head_hash,notnull"`  // encodeFields(Body, sigs...) chain hash
+	EntryBytes    []byte `bun:"entry_bytes,notnull"` // json.Marshal(StoredEntry)
+	CreatedAt     int64  `bun:"created_at,notnull"`
+}
