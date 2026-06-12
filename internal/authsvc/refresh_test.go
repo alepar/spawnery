@@ -231,9 +231,7 @@ func TestRefreshFamilyMaxAge(t *testing.T) {
 	nonce := make([]byte, 16)
 	proof := buildPoP(t, sessKey, rawToken, now.Unix(), nonce)
 	_, _, err := idp.handleRefresh(context.Background(), rawToken, proof, now)
-	if err == nil || errors.Is(err, ErrFamilyRevoked) {
-		// ErrFamilyRevoked is also acceptable (max age triggers revoke); any error is fine.
-	}
+	// ErrFamilyRevoked is also acceptable (max age triggers revoke); any non-nil error passes.
 	if err == nil {
 		t.Fatal("expected error for 91d family, got nil")
 	}

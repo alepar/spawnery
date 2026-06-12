@@ -68,6 +68,7 @@ type DeviceGrant struct {
 	DeviceCodeHash    string `bun:"device_code_hash,pk"`
 	UserCode          string `bun:"user_code,notnull"`
 	SessionPubkeySPKI []byte `bun:"session_pubkey_spki,notnull"` // [AM7] pubkey posted at device-authorization
+	ClientKind        string `bun:"client_kind,notnull"`
 	Status            string `bun:"status,notnull"`
 	AccountID         string `bun:"account_id,nullzero"`
 	AttemptCount      int    `bun:"attempt_count,notnull"`

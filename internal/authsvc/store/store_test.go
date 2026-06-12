@@ -167,7 +167,7 @@ func TestOAuthStateSingleUse(t *testing.T) {
 func TestDeviceGrantLifecycle(t *testing.T) {
 	st := NewTestStore(t)
 	g := DeviceGrant{DeviceCodeHash: "dch", UserCode: "AAAA-BBBB", SessionPubkeySPKI: []byte{1},
-		Status: GrantPending, CreatedAt: 1, ExpiresAt: 100}
+		ClientKind: ClientCLI, Status: GrantPending, CreatedAt: 1, ExpiresAt: 100}
 	if err := st.DeviceGrants().Create(ctxT(), g); err != nil {
 		t.Fatal(err)
 	}

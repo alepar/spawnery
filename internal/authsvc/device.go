@@ -83,6 +83,7 @@ func (i *IdP) serveDeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 		DeviceCodeHash:    sha256Hex(deviceCode),
 		UserCode:          userCode,
 		SessionPubkeySPKI: spkiDER,
+		ClientKind:        clientKind,
 		Status:            store.GrantPending,
 		CreatedAt:         now.Unix(),
 		ExpiresAt:         now.Add(deviceCodeTTL).Unix(),

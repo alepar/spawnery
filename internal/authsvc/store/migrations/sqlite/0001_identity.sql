@@ -51,6 +51,7 @@ CREATE TABLE device_grants (
   device_code_hash    TEXT PRIMARY KEY,
   user_code           TEXT NOT NULL UNIQUE,
   session_pubkey_spki BLOB NOT NULL,  -- [AM7] pubkey posted at device-authorization
+  client_kind         TEXT NOT NULL DEFAULT 'cli' CHECK (client_kind IN ('web','cli')),
   status              TEXT NOT NULL CHECK (status IN ('pending','approved','denied','redeemed','expired')),
   account_id          TEXT,
   attempt_count       INTEGER NOT NULL DEFAULT 0,
