@@ -355,10 +355,13 @@ func doLogout(ctx context.Context, dir string) error {
 	}
 
 	// Best-effort AS call: revoke the family.
+	// /logout reads the logout_session mirror cookie (Path=/logout); the refresh_token cookie
+	// lives at Path=/refresh and would not be sent by a browser. The CLI bypasses the browser
+	// cookie jar so we set logout_session directly, matching what the AS handler reads.
 	if s.ASURL != "" && s.RefreshToken != "" {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.ASURL+"/logout", nil)
 		if err == nil {
-			req.AddCookie(&http.Cookie{Name: "refresh_token", Value: s.RefreshToken})
+			req.AddCookie(&http.Cookie{Name: "logout_session", Value: s.RefreshToken})
 			resp, err := http.DefaultClient.Do(req)
 			if err == nil {
 				resp.Body.Close()

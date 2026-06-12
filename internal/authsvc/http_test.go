@@ -177,9 +177,10 @@ func TestHandlerFullVertical(t *testing.T) {
 		t.Fatal("no new refresh_token cookie after refresh")
 	}
 
-	// 5. /logout.
+	// 5. /logout — use the logout_session mirror cookie (Path=/logout).
+	// refresh_token lives at Path=/refresh; a browser would NOT send it to /logout.
 	logoutReq, _ := http.NewRequest("POST", srv.URL+"/logout", nil)
-	logoutReq.AddCookie(&http.Cookie{Name: "refresh_token", Value: newRefreshVal})
+	logoutReq.AddCookie(&http.Cookie{Name: "logout_session", Value: newRefreshVal})
 	logoutResp, err := client.Do(logoutReq)
 	if err != nil {
 		t.Fatalf("logout: %v", err)

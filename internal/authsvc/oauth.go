@@ -277,6 +277,8 @@ func (i *IdP) serveCallback(w http.ResponseWriter, r *http.Request) {
 	// Mirror the same token at Path=/device so the device-verify page (RFC 6265 path scoping
 	// prevents Path=/refresh cookies from reaching /device/verify in a real browser).
 	setDeviceSessionCookie(w, rawRefresh, now.Add(refreshSliding))
+	// Mirror at Path=/logout so POST /logout receives the token (same path-scoping reason).
+	setLogoutSessionCookie(w, rawRefresh, now.Add(refreshSliding))
 	// Clear the flow cookie (single-use).
 	http.SetCookie(w, &http.Cookie{
 		Name:     flowCookieName,
@@ -345,8 +347,9 @@ func (i *IdP) serveRefresh(w http.ResponseWriter, r *http.Request) {
 	rawToken := cookie.Value
 	accessWire, newRaw, err := i.handleRefresh(r.Context(), rawToken, pop, now)
 	if errors.Is(err, ErrFamilyRevoked) {
-		// Expire both cookies.
+		// Expire all three path-scoped cookies.
 		http.SetCookie(w, &http.Cookie{Name: "refresh_token", Value: "", Path: "/refresh", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+		expireLogoutSessionCookie(w)
 		expireDeviceSessionCookie(w)
 		writeError(w, http.StatusUnauthorized, "token_revoked", "refresh family revoked")
 		return
@@ -356,7 +359,7 @@ func (i *IdP) serveRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rotate cookies (both refresh_token and the device_session mirror).
+	// Rotate all three path-scoped cookies (refresh_token, logout_session, device_session mirrors).
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    newRaw,
@@ -366,6 +369,7 @@ func (i *IdP) serveRefresh(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 		Expires:  now.Add(refreshSliding),
 	})
+	setLogoutSessionCookie(w, newRaw, now.Add(refreshSliding))
 	setDeviceSessionCookie(w, newRaw, now.Add(refreshSliding))
 
 	w.Header().Set("Content-Type", "application/json")

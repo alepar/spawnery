@@ -33,7 +33,7 @@ func TestLogoutRevokesFamily(t *testing.T) {
 	client := &http.Client{}
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/logout", nil)
 	req.Header.Set("Origin", "http://localhost:3000")
-	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: rawToken})
+	req.AddCookie(&http.Cookie{Name: "logout_session", Value: rawToken})
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +196,7 @@ func TestLogoutNoSession(t *testing.T) {
 
 	client := &http.Client{}
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/logout", nil)
-	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: "nonexistent-token"})
+	req.AddCookie(&http.Cookie{Name: "logout_session", Value: "nonexistent-token"})
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -212,6 +212,50 @@ func TestLogoutNoSession(t *testing.T) {
 		t.Fatal("cookie not expired for non-existent session logout")
 	}
 	_ = errors.New // suppress import lint
+}
+
+// TestLogoutRejectsRefreshTokenAtLogoutPath proves that /logout only reads the logout_session
+// mirror cookie (Path=/logout), not refresh_token (Path=/refresh). A browser never sends
+// refresh_token to /logout due to RFC 6265 path scoping; a test that manually injects
+// refresh_token into the /logout request masks this defect.
+func TestLogoutRejectsRefreshTokenAtLogoutPath(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	srv, _, st := testAS(t, fake, now)
+
+	seedUser(t, st, "acct-scope-test", 77777, now)
+	_, spkiDER := newTestP256(t)
+	rawToken, _ := seedFamily(t, st, "acct-scope-test", spkiDER, now)
+
+	client := &http.Client{}
+
+	// Posting refresh_token (wrong path for /logout) must return 401 — a browser
+	// would never send this cookie to /logout, so the handler must not honor it.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/logout", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: rawToken})
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("logout with refresh_token (wrong path scope): want 401, got %d: %s", resp.StatusCode, body)
+	}
+
+	// Posting logout_session (correct Path=/logout mirror) must succeed.
+	req2, _ := http.NewRequest(http.MethodPost, srv.URL+"/logout", nil)
+	req2.Header.Set("Origin", "http://localhost:3000")
+	req2.AddCookie(&http.Cookie{Name: "logout_session", Value: rawToken})
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp2.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("logout with logout_session: want 200, got %d: %s", resp2.StatusCode, body)
+	}
 }
 
 // TestRevocationsFeedGatedByCPSecret: when IdPConfig.CPSecret is set, GET /revocations must

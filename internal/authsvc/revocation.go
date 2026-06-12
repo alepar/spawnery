@@ -31,13 +31,21 @@ import (
 )
 
 // SignedRevocationEntry is one entry in the /revocations feed that A2 consumes.
+//
+// SECURITY CONTRACT (A2 integrators must read this):
+// Sig is the full wire artifact: base64url(bodyBytes) "." base64url(ed25519sig), produced by
+// token.SignArtifact. The outer fields (Seq, AccountID, FamilyID, TokenIDs, RevokedAt) are
+// convenience copies — they are NOT authenticated. A2 MUST call token.VerifyArtifact on Sig
+// and read only the decoded body bytes (WM9 discipline). Never trust the outer fields without
+// first verifying the signature; any consumer that reads the outer fields before verification
+// is vulnerable to tampering.
 type SignedRevocationEntry struct {
 	Seq       int64  `json:"seq"`
 	AccountID string `json:"account_id"`
 	FamilyID  string `json:"family_id"`
 	TokenIDs  string `json:"token_ids"` // JSON array of access-token token_ids
 	RevokedAt int64  `json:"revoked_at"`
-	Sig       string `json:"sig"` // base64url(ed25519(RevocationDomainPrefix || entry_bytes))
+	Sig       string `json:"sig"` // full wire: base64url(body).base64url(ed25519sig) — verify before trusting outer fields
 }
 
 // serveRevocations handles GET /revocations?since=<seq>.
