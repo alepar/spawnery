@@ -234,15 +234,16 @@ jobs:
       # DIFFERENT workflow identity (attacker-fork scenario). The fixture is signed by
       # deploy/web/gen-test-fixture.yml (a different certificate identity than web-release.yml).
       # Run `gh workflow run gen-test-fixture.yml` once to generate deploy/web/fixtures/wrong-identity.bundle.
-      # If the fixture is absent the step warns and skips (exit 0) — see deploy/web/fixtures/README.md.
+      # If the fixture is absent the step FAILS (exit 1) — the gate must be falsifiable before
+      # the first release. See deploy/web/fixtures/README.md.
       - name: "Self-test: verify MUST fail with wrong workflow identity"
         run: |
           FIXTURE="deploy/web/fixtures/wrong-identity.bundle"
           if [ ! -f "$FIXTURE" ]; then
-            echo "WARN: deploy/web/fixtures/wrong-identity.bundle missing — wrong-identity self-test SKIPPED." >&2
+            echo "FATAL: deploy/web/fixtures/wrong-identity.bundle is missing." >&2
+            echo "The certificate-identity pin cannot be verified as falsifiable without this fixture." >&2
             echo "Run 'gh workflow run gen-test-fixture.yml' once to generate it, then commit the result." >&2
-            echo "Self-test SKIPPED (fixture absent)."
-            exit 0
+            exit 1
           fi
           # Verify with OUR identity against the WRONG-IDENTITY bundle — must fail because the
           # cert in the bundle was issued to a different workflow, not web-release.yml.

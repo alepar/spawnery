@@ -120,6 +120,7 @@ describe("dev-token", () => {
 describe("placeholder trust anchors", () => {
   it("fails when PLACEHOLDER-TRUST-ANCHOR-ROOT-CA is in the bundle", async () => {
     write("assets/main.js", `const CA = "PLACEHOLDER-TRUST-ANCHOR-ROOT-CA";`);
+    write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; connect-src https://cp.example.com`);
     const result = await scan(tmpDir);
     expect(result.ok).toBe(false);
     expect(result.violations.some(v => v.includes("PLACEHOLDER"))).toBe(true);
@@ -127,8 +128,42 @@ describe("placeholder trust anchors", () => {
 
   it("fails when PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY is in the bundle", async () => {
     write("assets/main.js", `const AS_PUBKEYS = ["PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY"];`);
+    write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; connect-src https://cp.example.com`);
     const result = await scan(tmpDir);
     expect(result.ok).toBe(false);
     expect(result.violations.some(v => v.includes("PLACEHOLDER"))).toBe(true);
+  });
+});
+
+// ── _headers presence + connect-src check ────────────────────────────────────
+
+describe("_headers structural check", () => {
+  it("fails when _headers is absent", async () => {
+    // No _headers written — must be flagged as a violation.
+    write("index.html", `<!doctype html><html><body></body></html>`);
+    const result = await scan(tmpDir);
+    expect(result.ok).toBe(false);
+    expect(result.violations.some(v => v.includes("_headers: file is absent"))).toBe(true);
+  });
+
+  it("fails when _headers has no connect-src directive", async () => {
+    write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; script-src 'self'`);
+    const result = await scan(tmpDir);
+    expect(result.ok).toBe(false);
+    expect(result.violations.some(v => v.includes("missing connect-src directive"))).toBe(true);
+  });
+
+  it("fails when connect-src is 'none' (origins were empty at build time)", async () => {
+    write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; connect-src 'none'`);
+    const result = await scan(tmpDir);
+    expect(result.ok).toBe(false);
+    expect(result.violations.some(v => v.includes("connect-src is"))).toBe(true);
+  });
+
+  it("passes when _headers has a real pinned connect-src", async () => {
+    write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; connect-src https://cp.spawnery.dev wss://cp.spawnery.dev\n  X-Frame-Options: DENY`);
+    const result = await scan(tmpDir);
+    const headersViolations = result.violations.filter(v => v.startsWith("_headers:"));
+    expect(headersViolations).toHaveLength(0);
   });
 });

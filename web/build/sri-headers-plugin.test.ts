@@ -76,8 +76,8 @@ function getTransformHandler(plugin: ReturnType<typeof sriHeadersPlugin>) {
 function callGenerateBundle(plugin: ReturnType<typeof sriHeadersPlugin>, bundle: Record<string, unknown>) {
   (plugin.generateBundle as unknown as (opts: unknown, bundle: unknown) => void)({}, bundle);
 }
-function callConfigResolved(plugin: ReturnType<typeof sriHeadersPlugin>, outDir: string) {
-  (plugin.configResolved as unknown as (cfg: { build: { outDir: string } }) => void)({ build: { outDir } });
+function callConfigResolved(plugin: ReturnType<typeof sriHeadersPlugin>, outDir: string, mode = "development") {
+  (plugin.configResolved as unknown as (cfg: { build: { outDir: string }; mode: string }) => void)({ build: { outDir }, mode });
 }
 function callCloseBundle(plugin: ReturnType<typeof sriHeadersPlugin>) {
   (plugin.closeBundle as unknown as () => void)();
@@ -220,7 +220,7 @@ describe("sriHeadersPlugin.closeBundle", () => {
     expect(cspLine).toContain("script-src 'self'");
   });
 
-  it("CSP rule /* comes BEFORE /assets/* so asset caching can override Cache-Control", () => {
+  it("CSP rule /* comes BEFORE /assets/* (CSP propagates to all paths)", () => {
     writeIndexHtml("<html><head></head><body></body></html>");
     const plugin = sriHeadersPlugin({ cpOrigin: "https://cp.example.com" });
     callConfigResolved(plugin, tmpDir);
@@ -232,17 +232,55 @@ describe("sriHeadersPlugin.closeBundle", () => {
     const wcIdx = lines.findIndex((l) => l.trim() === "/*");
     const assetsIdx = lines.findIndex((l) => l.trim() === "/assets/*");
     expect(wcIdx).toBeGreaterThanOrEqual(0);
-    expect(assetsIdx).toBeGreaterThan(wcIdx); // /assets/* after /* so it can override no-cache
+    expect(assetsIdx).toBeGreaterThan(wcIdx);
   });
 
-  it("does NOT emit _headers when no CP origin is configured", () => {
+  it("no-cache is scoped to / and /index.html, NOT on /*", () => {
+    // The /* rule carries only CSP + security headers. Cache-Control: no-cache is on
+    // / and /index.html only, so /assets/* never inherits no-cache and no host-specific
+    // override semantics are relied upon.
     writeIndexHtml("<html><head></head><body></body></html>");
-    const plugin = sriHeadersPlugin(); // no origin
+    const plugin = sriHeadersPlugin({ cpOrigin: "https://cp.example.com" });
     callConfigResolved(plugin, tmpDir);
     callGenerateBundle(plugin, {});
     callCloseBundle(plugin);
 
+    const content = fs.readFileSync(path.join(tmpDir, "_headers"), "utf8");
+    const lines = content.split("\n");
+    const wcIdx = lines.findIndex((l) => l.trim() === "/*");
+    const nextRuleIdx = lines.findIndex((l, i) => i > wcIdx && l.trim().match(/^\//) && l.trim() !== "/*");
+    // Everything between /* and the next rule should NOT include Cache-Control.
+    const wcBlock = lines.slice(wcIdx + 1, nextRuleIdx).join("\n");
+    expect(wcBlock).not.toContain("Cache-Control");
+
+    // / and /index.html rules must exist with no-cache.
+    const slashIdx = lines.findIndex((l) => l.trim() === "/");
+    const indexHtmlIdx = lines.findIndex((l) => l.trim() === "/index.html");
+    expect(slashIdx).toBeGreaterThan(wcIdx);
+    expect(indexHtmlIdx).toBeGreaterThan(wcIdx);
+
+    // Verify the actual Cache-Control values.
+    expect(lines[slashIdx + 1]?.trim()).toBe("Cache-Control: no-cache");
+    expect(lines[indexHtmlIdx + 1]?.trim()).toBe("Cache-Control: no-cache");
+  });
+
+  it("does NOT emit _headers in dev mode when no CP origin is configured", () => {
+    writeIndexHtml("<html><head></head><body></body></html>");
+    const plugin = sriHeadersPlugin(); // no origin, dev mode (default)
+    callConfigResolved(plugin, tmpDir); // mode defaults to 'development'
+    callGenerateBundle(plugin, {});
+    callCloseBundle(plugin);
+
     expect(fs.existsSync(path.join(tmpDir, "_headers"))).toBe(false);
+  });
+
+  it("[WL4] throws in production mode when cpOrigin is empty (fail-closed, not silent)", () => {
+    // A release build with no VITE_CP_ORIGIN must fail rather than ship a bundle with no CSP.
+    writeIndexHtml("<html><head></head><body></body></html>");
+    const plugin = sriHeadersPlugin(); // no origin
+    callConfigResolved(plugin, tmpDir, "production");
+    callGenerateBundle(plugin, {});
+    expect(() => callCloseBundle(plugin)).toThrow(/VITE_CP_ORIGIN is not set for a production build/);
   });
 
   it("stamps SRI integrity on script src tags in index.html", () => {

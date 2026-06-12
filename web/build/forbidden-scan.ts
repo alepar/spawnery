@@ -108,6 +108,31 @@ export async function scan(distDir: string): Promise<ScanResult> {
     }
   }
 
+  // 6. _headers must exist and contain a real connect-src. A missing _headers means no
+  //    CSP and no connect-src pinning will be applied — the core goal of W1 is defeated.
+  //    connect-src 'none' is equally bad: it means origins were empty at build time.
+  const headersPath = path.join(distDir, "_headers");
+  if (!fs.existsSync(headersPath)) {
+    violations.push(
+      `_headers: file is absent — production bundle must include _headers with a pinned connect-src`,
+    );
+  } else {
+    const headersContent = fs.readFileSync(headersPath, "utf8");
+    const connectMatch = headersContent.match(/connect-src\s+([^;\n]+)/);
+    if (!connectMatch) {
+      violations.push(
+        `_headers: CSP is missing connect-src directive — CP/AS origins must be pinned`,
+      );
+    } else {
+      const val = connectMatch[1].trim().replace(/;.*$/, "").trim();
+      if (!val || val === "'none'") {
+        violations.push(
+          `_headers: connect-src is '${val || "(empty)"}' — CP/AS origins must be pinned`,
+        );
+      }
+    }
+  }
+
   return { ok: violations.length === 0, violations };
 }
 

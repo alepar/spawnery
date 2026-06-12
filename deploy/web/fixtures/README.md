@@ -20,10 +20,10 @@ is FALSIFIABLE — it must refuse invalid/stripped/wrong-identity signatures.
   the resulting bundle here, and pushes. The bundle is STATIC — regenerate only if the
   Sigstore CT log entry expires or the repository path changes.
 
-  If the file is missing, the deploy job **warns and skips** (exits 0) the wrong-identity
-  self-test with a message directing the operator to run `gen-test-fixture.yml`. This
-  prevents the pipeline from being permanently blocked before the fixture is ever generated,
-  while still running the full check once the fixture is in place.
+  If the file is missing, the deploy job **fails** (exits 1) with a message directing
+  the operator to run `gen-test-fixture.yml`. The gate is fail-closed: the certificate-identity
+  pin must be proven falsifiable before the first release. Generate this fixture once before
+  the first `web/v*` tag.
 
 ## Purpose
 

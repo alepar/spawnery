@@ -101,6 +101,7 @@ export function sriHeadersPlugin(opts: SriHeadersOptions = {}): Plugin {
   //             stamp all SRI attributes, write _headers.
   const inlineScripts: { code: string; assetName: string; integ: string }[] = [];
   let outDir = "dist"; // updated from resolvedConfig
+  let mode = "development"; // updated from resolvedConfig; "production" triggers hard failure on missing origins
   const integrityMap = new Map<string, string>(); // fileName (no leading /) -> integrity
 
   return {
@@ -109,6 +110,7 @@ export function sriHeadersPlugin(opts: SriHeadersOptions = {}): Plugin {
 
     configResolved(config) {
       outDir = config.build.outDir ?? "dist";
+      mode = config.mode ?? "development";
     },
 
     // Phase A: extract inline scripts from index.html BEFORE Vite processes them.
@@ -267,23 +269,39 @@ export function sriHeadersPlugin(opts: SriHeadersOptions = {}): Plugin {
 
       fs.writeFileSync(htmlPath, html, "utf8");
 
-      // Emit _headers only when CP origin is configured (production build).
-      if (!cpOrigin) return;
+      // In production mode, cpOrigin is required. An empty origin means the CI env var
+      // was unset/typo'd — emit a hard failure rather than a CSP-less bundle ([WL4]).
+      if (!cpOrigin) {
+        if (mode === "production") {
+          throw new Error(
+            "[sri-headers-plugin] FATAL: VITE_CP_ORIGIN is not set for a production build. " +
+            "A release build without a pinned origin ships with no CSP and no connect-src. " +
+            "Set VITE_CP_ORIGIN (and VITE_AS_ORIGIN) before building a release.",
+          );
+        }
+        // Dev mode: no origins configured is expected; skip _headers emission.
+        return;
+      }
 
       const csp = buildCsp(cpOrigin, asOrigin);
-      // /* covers the SPA root path "/" and every SPA route. Cloudflare Pages / Netlify serve
-      // the document at "/" (not "/index.html"), so CSP must be on /* not just /index.html.
-      // Rules are applied top-to-bottom; later rules override earlier ones for the same header
-      // name — /assets/* comes last so it can override Cache-Control: no-cache with immutable.
+      // CSP is on /* so it applies to the SPA root and every SPA route. Cloudflare Pages /
+      // Netlify serve the document at "/" (not "/index.html"), so CSP must be on /*, not just
+      // /index.html. Cache-Control is scoped to the specific document paths (/ and /index.html)
+      // so that /assets/* never inherits no-cache and no host-specific override is needed.
       const headers = [
         "# Cache + CSP headers — emitted by sri-headers-plugin, shipped inside the signed dist/",
         "# [WL4]: this file ships INSIDE the signed dist, not hand-edited at the host.",
         "",
         "/*",
         `  Content-Security-Policy: ${csp}`,
-        "  Cache-Control: no-cache",
         "  X-Content-Type-Options: nosniff",
         "  X-Frame-Options: DENY",
+        "",
+        "/",
+        "  Cache-Control: no-cache",
+        "",
+        "/index.html",
+        "  Cache-Control: no-cache",
         "",
         "/assets/*",
         "  Cache-Control: public, max-age=31536000, immutable",
