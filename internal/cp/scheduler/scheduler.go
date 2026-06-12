@@ -75,7 +75,7 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Start{Start: &nodev1.StartSpawn{
 		SpawnId: id, AppRef: appRef, Model: model, Name: name, AppId: appID,
 		Image: placement.Image, RunnableId: runnable, Mode: mode, Generation: gen,
-		Auth: env,
+		Auth: env, AssertedOwner: placement.Owner,
 	}}}); err != nil {
 		return "", connect.NewError(connect.CodeUnavailable, err)
 	}

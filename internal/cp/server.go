@@ -688,6 +688,25 @@ func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.Sub
 	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil
 }
 
+// mintSessionEnv builds the session-open AuthEnvelope from a client-supplied envelope.
+// In dev mode (devASKey set), if access_token is empty the CP mints a cnf-bearing aud=node
+// token from the intent's SPKI DER so the full A4 verification chain runs [AM12].
+func (s *Server) mintSessionEnv(owner string, sa *authv1.AuthEnvelope) *authv1.AuthEnvelope {
+	if sa == nil || sa.Intent == nil {
+		return nil
+	}
+	nodeTok := sa.AccessToken
+	if nodeTok == "" && s.devASKey != nil && len(sa.Intent.SpkiDer) > 0 {
+		minted, err := token.MintNode(s.devASKey, s.devASKeyID, owner, sa.Intent.SpkiDer, s.now())
+		if err != nil {
+			log.Printf("mintSessionEnv: dev AS mint failed: %v", err)
+		} else {
+			nodeTok = minted
+		}
+	}
+	return &authv1.AuthEnvelope{AccessToken: nodeTok, Intent: sa.Intent}
+}
+
 // buildPendingIntent constructs the cp.v1.PendingIntent from the committed provision tuple.
 // mounts comes from the store's mount list for the spawn (may be nil for CreateSpawn).
 func buildPendingIntent(op intent.Op, spawnID string, gen uint64, targetNodeID, image, appRef, model, dataRef string, mounts []store.Mount) *cpv1.PendingIntent {
@@ -857,9 +876,14 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 
 	clientID := uuid.Must(uuid.NewV7()).String()
 	cs := &clientStream{stream: stream, spawnID: spawnID}
+	// A4: thread session-open AuthEnvelope from the bind frame into SessionOpen [AC1].
+	var sessionEnv *authv1.AuthEnvelope
+	if sa := first.GetSessionAuth(); sa != nil {
+		sessionEnv = s.mintSessionEnv(owner, sa)
+	}
 	// cursor 0: the cp.v1 Session-RPC transport has no resume cursor (only the WS bind does).
 	// session "0": this transport has no per-session selector yet (web uses the WS bind for that).
-	done, err := s.rt.AttachClient(spawnID, "0", clientID, sp.OwnerID, nil, cs, 0)
+	done, err := s.rt.AttachClient(spawnID, "0", clientID, sp.OwnerID, sessionEnv, cs, 0)
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}

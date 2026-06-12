@@ -546,10 +546,15 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 	}
 	out := make([]*cpv1.SpawnSummary, len(spawns))
 	for i, sp := range spawns {
+		var gen uint64
+		if c, ok, cerr := s.st.Spawns().LiveContainer(ctx, sp.ID); ok && cerr == nil {
+			gen = uint64(c.Generation)
+		}
 		out[i] = &cpv1.SpawnSummary{
 			SpawnId: sp.ID, AppId: sp.AppID, AppVersion: sp.AppVersion, Model: sp.Model,
 			Status: toSummaryStatus(sp.Status), CreatedAt: sp.CreatedAt, LastUsedAt: sp.LastUsedAt,
 			Name: sp.Name, Mode: sp.Mode, ModelApplied: sp.ModelApplied,
+			Generation: gen,
 		}
 	}
 	return connect.NewResponse(&cpv1.ListSpawnsResponse{Spawns: out}), nil

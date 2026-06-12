@@ -161,7 +161,8 @@ func seedErroredSpawn(t *testing.T, s *Server, id, owner string) {
 	}
 }
 
-// assertAuthThreaded verifies at least one StartSpawn for spawnID has a non-nil AuthEnvelope.
+// assertAuthThreaded verifies at least one StartSpawn for spawnID has a non-nil AuthEnvelope
+// and a non-empty AssertedOwner [AC1 scope-3: CP-asserted owner at StartSpawn].
 func assertAuthThreaded(t *testing.T, sender *capSender, spawnID string) {
 	t.Helper()
 	for _, ss := range sender.starts() {
@@ -177,6 +178,9 @@ func assertAuthThreaded(t *testing.T, sender *capSender, spawnID string) {
 		}
 		if env.GetIntent() == nil {
 			t.Fatalf("StartSpawn(%s).Auth.Intent is nil", spawnID)
+		}
+		if ss.GetAssertedOwner() == "" {
+			t.Fatalf("StartSpawn(%s).AssertedOwner is empty — CP-asserted owner not threaded", spawnID)
 		}
 		return
 	}
