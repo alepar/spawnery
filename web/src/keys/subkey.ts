@@ -140,12 +140,34 @@ export interface SealingExpectation {
 }
 
 /**
+ * RevocationChecker is the injected hook for the AS-published node revocation/deny-list
+ * (spec §3 step 2, prior-roast M12: revocation ≠ expiry).
+ *
+ * A node may re-sign fresh sub-keys with its own cert key indefinitely, so validity alone
+ * does not revoke. Clients consult this checker at delivery step 2 and refuse to seal to a
+ * revoked node. The checker MUST throw on any lookup error so callers fail closed.
+ *
+ * AllowAll is the default until the AS revocation-list endpoint is wired in.
+ * Mirror of subkey/verify.go RevocationChecker interface.
+ */
+export interface RevocationChecker {
+  /** Throw to block sealing (revoked node or lookup error). Return void to allow. */
+  check(nodeId: string): Promise<void>;
+}
+
+/** AllowAll is the default RevocationChecker: permits every node. */
+export const AllowAll: RevocationChecker = {
+  async check(_nodeId: string): Promise<void> { /* allow all */ },
+};
+
+/**
  * Full verification chain before sealing (spec §3 step 2). In order:
  *
  *   1. node cert chains to pinned rootPEM + SAN matches expect
- *   2. sub-key nodeID matches verified cert identity
- *   3. sub-key signature chains to cert key
- *   4. sub-key is unexpired
+ *   2. AS revocation check, fail-closed (prior-roast M12) — throws on revoked or lookup error
+ *   3. sub-key nodeID matches verified cert identity
+ *   4. sub-key signature chains to cert key
+ *   5. sub-key is unexpired
  *
  * Returns the trusted HPKE X25519 pubkey (raw 32 bytes) and the verified node
  * identity, or throws on any failure.
@@ -156,6 +178,7 @@ export interface SealingExpectation {
  *
  * subkeyJSON is the raw JSON string from GetSpawnNodeKeyResponse.signed_subkey.
  * now is the current time (injectable for testing).
+ * revocationChecker defaults to AllowAll if not supplied.
  */
 export async function verifyNodeForSealing(
   certChainPEM: string,
@@ -163,6 +186,7 @@ export async function verifyNodeForSealing(
   subkeyJSON: string,
   expect: SealingExpectation,
   now: Date,
+  revocationChecker?: RevocationChecker,
 ): Promise<{ hpkePub: Uint8Array; identity: NodeIdentity }> {
   const sk: SignedSubKey = JSON.parse(subkeyJSON);
 
@@ -189,12 +213,17 @@ export async function verifyNodeForSealing(
     }
   }
 
-  // 2. Sub-key nodeID must match verified cert identity.
+  // 2. AS revocation check, fail-closed (prior-roast M12).
+  // Any error from the checker (network, parse, revoked) propagates as-is and blocks sealing.
+  const checker = revocationChecker ?? AllowAll;
+  await checker.check(identity.nodeId);
+
+  // 3. Sub-key nodeID must match verified cert identity.
   if (sk.node_id !== identity.nodeId) {
     throw new Error(`subkey: sub-key node_id=${JSON.stringify(sk.node_id)} != cert nodeId=${JSON.stringify(identity.nodeId)}`);
   }
 
-  // 3 + 4. Verify sub-key signature + expiry.
+  // 4 + 5. Verify sub-key signature + expiry.
   const certPub = await importCertPubKey(leaf);
   await verifySignedSubKey(sk, certPub, now);
 

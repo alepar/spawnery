@@ -21,8 +21,30 @@ import { pollAndSign, registerPendedOp, clearPendedOp } from "@/auth/intent";
 import { openEnvelope, hpkeSeal } from "@/keys/hpke";
 import type { Envelope } from "@/keys/hpke";
 import { verifyNodeForSealing } from "@/keys/subkey";
+import type { RevocationChecker } from "@/keys/subkey";
 import type { DeviceKeys } from "@/keys/device";
 import { fromBase64, toBase64, encodeFields } from "@/keys/encoding";
+
+// ── Typed migration errors ────────────────────────────────────────────────────
+
+/**
+ * MigrateError carries a per-leg tag so the UI state machine can show distinct
+ * recovery actions (spec §3 "Errors — split by leg", WM3).
+ *
+ *   "suspend"  — MigrateSpawn failed while suspending the source; spawn is in error state.
+ *   "resume"   — MigrateSpawn suspended but failed to resume; spawn is in suspended state.
+ *   "delivery" — key delivery failed after migrate succeeded; persistent reload-derivable state.
+ *   "network"  — CP unreachable (offline); caller should retry with backoff.
+ */
+export class MigrateError extends Error {
+  constructor(
+    message: string,
+    public readonly leg: "suspend" | "resume" | "delivery" | "network",
+  ) {
+    super(message);
+    this.name = "MigrateError";
+  }
+}
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -131,6 +153,28 @@ async function deliverSecrets(
   secrets: Array<{ secretId: string; targetPath: string; sealed: string }>,
 ): Promise<void> {
   await unary<Record<string, never>>("DeliverSecrets", { spawnId, secrets });
+}
+
+/**
+ * upgradeToOwnerSealed asks the CP to instruct the spawn's hosting node to seal
+ * the existing node-local repo password to the owner's device set. After this call
+ * succeeds a subsequent MigrateSpawn with upgrade_to_owner_sealed=true is accepted.
+ *
+ * ownerDevicePubkeys are the raw X25519 pubkeys (32 bytes each) of all enrolled devices;
+ * passing null lets the node choose its own sub-key (for self-upgrade without re-seal).
+ *
+ * Mirrors UpgradeToOwnerSealed proto RPC (proto/cp/v1/cp.proto:46).
+ */
+export async function upgradeToOwnerSealed(
+  spawnId: string,
+  ownerDevicePubkeys: Uint8Array[],
+): Promise<void> {
+  // Connect-JSON encodes repeated bytes as base64 strings.
+  const pubkeysB64 = ownerDevicePubkeys.map(toBase64);
+  await unary<Record<string, never>>("UpgradeToOwnerSealed", {
+    spawnId,
+    ownerDevicePubkeys: pubkeysB64,
+  });
 }
 
 /** migrateSpawnRPC drives the MigrateSpawn RPC and returns the resolved node ID. */
@@ -249,16 +293,26 @@ async function reSealToNode(
  *   1. Fetch owner-sealed journal key ciphertext (CP holds ciphertext only).
  *   2. Drive MigrateSpawn (suspend source → resume on target); intent flow is
  *      launched concurrently via the A4 pollAndSign path.
- *   3. Fetch the target node's key material + PKI-verify via verifyNodeForSealing.
+ *   3. Fetch the target node's key material + PKI-verify via verifyNodeForSealing
+ *      (including AS revocation check if revocationChecker is supplied).
  *   4. Unseal each journal key with this device key, re-seal to the target node.
  *   5. Deliver the resealed ciphertext to the CP (which relays to the node).
+ *
+ * Throws MigrateError with a per-leg tag so callers can show distinct recovery actions:
+ *   leg="suspend"  — MigrateSpawn failed at source suspend; spawn is in error state.
+ *   leg="resume"   — MigrateSpawn suspended but failed to resume; spawn is in suspended state.
+ *   leg="delivery" — key delivery failed; spawn is active-but-keyless (persistent, reload-derivable).
+ *   leg="network"  — CP unreachable mid-operation; caller should retry with backoff.
  *
  * target: the selected MigrationTarget (nodeId + class from listMigrationTargets).
  *         For cloud class, nodeId may be empty and class = "cloud".
  * deviceKeys: the caller must load and pass the device X25519 keypair.
  * rootPEM: pinned Root CA PEM embedded in the web bundle (empty = dev/insecure mode).
  * now: injectable for testing; use new Date() in production.
+ * revocationChecker: optional AS revocation checker (default: AllowAll); fail-closed on error.
  * onProgress: optional per-step callback for UI progress updates.
+ * spawnStatusAfterFail: injectable for testing — resolves to current spawn status after
+ *   a migrate-leg failure so the "suspend" vs "resume" leg tag can be set correctly.
  */
 export async function runMigrate(
   spawnId:    string,
@@ -267,21 +321,42 @@ export async function runMigrate(
   rootPEM:    string,
   now:        Date,
   onProgress?: (p: MigrateProgress) => void,
+  revocationChecker?: RevocationChecker,
+  spawnStatusAfterFail?: (id: string) => Promise<string>,
 ): Promise<MigrateResult> {
   const targetNodeId  = target.class === "cloud" ? "" : target.nodeId;
   const targetClass   = target.class === "cloud" ? "cloud" : "";
 
   // Step 1: fetch owner-sealed journal key ciphertext.
   onProgress?.({ step: "fetching-keys" });
-  const entries = await getJournalKeyCiphertext(spawnId);
+  let entries: JournalEntry[];
+  try {
+    entries = await getJournalKeyCiphertext(spawnId);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new MigrateError(`Failed to fetch journal key ciphertext: ${msg}`, "network");
+  }
   // No entries → migration proceeds without journal key delivery (ephemeral or node-local).
 
   // Step 2: drive MigrateSpawn (suspend source → resume on target).
-  // The intent signing is launched fire-and-forget AFTER the RPC returns, matching
-  // the established pattern in spawnlet.ts (the CP may block internally, but the
-  // HTTP response unblocks us when ready; intent is submitted before data ops proceed).
   onProgress?.({ step: "migrating" });
-  const resolvedNodeId = await migrateSpawnRPC(spawnId, targetNodeId, targetClass, entries.length > 0);
+  let resolvedNodeId: string;
+  try {
+    resolvedNodeId = await migrateSpawnRPC(spawnId, targetNodeId, targetClass, entries.length > 0);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // Classify as suspend-fail or resume-fail by checking spawn status after failure.
+    // If we can't determine (offline), default to "network".
+    let leg: "suspend" | "resume" | "network" = "network";
+    const checkStatus = spawnStatusAfterFail ?? _defaultSpawnStatusCheck;
+    try {
+      const st = await checkStatus(spawnId);
+      if (st === "error" || st === "unreachable") leg = "suspend";
+      else if (st === "suspended") leg = "resume";
+      else leg = "network";
+    } catch { /* status check failed — offline */ }
+    throw new MigrateError(`Migration failed: ${msg}`, leg);
+  }
 
   // Intent signing: mirrors spawnlet.migrateSpawn.
   if (authEnabled()) {
@@ -302,46 +377,75 @@ export async function runMigrate(
 
   // Step 3: fetch the target node's key material and verify.
   onProgress?.({ step: "verifying-node", resolvedNodeId });
-  const nk = await getSpawnNodeKey(spawnId);
+  let nk: NodeKey;
+  try {
+    nk = await getSpawnNodeKey(spawnId);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new MigrateError(`Failed to fetch node key: ${msg}`, "delivery");
+  }
 
   // Parse the sub-key JSON (we need not_after for the in-flight AAD).
   const sk = JSON.parse(nk.signedSubkey) as { node_id: string; not_after: string };
   const notAfter = new Date(sk.not_after);
 
-  // verifyNodeForSealing returns the trusted HPKE pubkey, or throws on PKI failure.
-  // Dev mode: if the CP doesn't issue a cert chain (nodeCertChain is empty),
-  // verifyNodeForSealing auto-switches to insecure mode and returns a synthetic identity.
-  // Tenancy expectation uses the target class from listMigrationTargets (the user-selected target).
+  // verifyNodeForSealing returns the trusted HPKE pubkey, or throws on PKI failure
+  // (including AS revocation check — fail-closed on any checker error, WM8).
   const tenancy = (target.class === "cloud" ? "cloud" : "self-hosted") as "cloud" | "self-hosted";
-  const { hpkePub } = await verifyNodeForSealing(
-    nk.nodeCertChain,
-    rootPEM,
-    nk.signedSubkey,
-    { tenancy },
-    now,
-  );
+  let hpkePub: Uint8Array;
+  try {
+    const verified = await verifyNodeForSealing(
+      nk.nodeCertChain,
+      rootPEM,
+      nk.signedSubkey,
+      { tenancy },
+      now,
+      revocationChecker,
+    );
+    hpkePub = verified.hpkePub;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new MigrateError(`Node verification failed: ${msg}`, "delivery");
+  }
 
   // Step 4: unseal + re-seal each journal key to the target node.
   onProgress?.({ step: "resealing", resolvedNodeId });
   const secrets: Array<{ secretId: string; targetPath: string; sealed: string }> = [];
-  for (const entry of entries) {
-    const aad: InFlightAAD = {
-      spawnId,
-      generation: nk.generation,
-      nodeId:     resolvedNodeId,
-      notAfter,
-      version:    nk.generation,
-      deliveryId: crypto.randomUUID(),
-    };
-    const sealedB64 = await reSealToNode(entry.ciphertext, deviceKeys, hpkePub, aad);
-    const secretId = `journal/${entry.mount}`;
-    secrets.push({ secretId, targetPath: secretId, sealed: sealedB64 });
+  try {
+    for (const entry of entries) {
+      const aad: InFlightAAD = {
+        spawnId,
+        generation: nk.generation,
+        nodeId:     resolvedNodeId,
+        notAfter,
+        version:    nk.generation,
+        deliveryId: crypto.randomUUID(),
+      };
+      const sealedB64 = await reSealToNode(entry.ciphertext, deviceKeys, hpkePub, aad);
+      const secretId = `journal/${entry.mount}`;
+      secrets.push({ secretId, targetPath: secretId, sealed: sealedB64 });
+    }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new MigrateError(`Re-seal failed: ${msg}`, "delivery");
   }
 
   // Step 5: deliver the resealed ciphertext.
   onProgress?.({ step: "delivering", resolvedNodeId });
-  await deliverSecrets(spawnId, secrets);
+  try {
+    await deliverSecrets(spawnId, secrets);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new MigrateError(`Key delivery failed: ${msg}`, "delivery");
+  }
 
   onProgress?.({ step: "done", resolvedNodeId, journalKeysDelivered: secrets.length });
   return { resolvedNodeId, journalKeysDelivered: secrets.length };
+}
+
+/** Default spawn status check used by runMigrate to classify suspend vs resume failures. */
+async function _defaultSpawnStatusCheck(spawnId: string): Promise<string> {
+  const { listSpawns } = await import("./spawnlet");
+  const spawns = await listSpawns();
+  return spawns.find((s) => s.spawnId === spawnId)?.status ?? "unknown";
 }

@@ -79,6 +79,14 @@ function AppMain() {
       else if (active?.status === "error" || active?.status === "unreachable") errored();
       else reset(); // active/suspended: the store's session conn drives the header dot
     }
+    // Delivery-pending reconstruction (spec §3): if a spawn reports delivery pending
+    // and the modal is not already open for it, auto-open in delivery-pending state.
+    for (const sp of list) {
+      if (sp.journalKeyDeliveryPending && moveTo.state.phase === "idle") {
+        moveTo.openDeliveryPending(sp.spawnId);
+        break; // open at most one at a time
+      }
+    }
     return list;
   };
 

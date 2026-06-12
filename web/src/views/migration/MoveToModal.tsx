@@ -5,13 +5,19 @@
  * different node.  Driven entirely by the useMoveTo state machine.
  *
  * Steps rendered per phase:
- *   loading    — spinner
- *   selecting  — node list with durability context banner
- *   confirming — target summary + durability warning + "Migrate" button
- *   running    — progress steps (fetching-keys / migrating / verifying-node /
- *                                resealing / delivering / done)
- *   done       — success summary
- *   error      — error text + dismiss button
+ *   loading          — spinner
+ *   selecting        — node list with durability context banner + size/ETA estimate
+ *   needs-enroll     — unenrolled browser; show enroll/approve prompt (preflight gate)
+ *   upgrading        — node-local → owner-sealed upgrade in progress
+ *   confirming       — target summary + durability warning + "Migrate" button
+ *   running          — progress steps
+ *   done             — success summary
+ *   error-suspend    — suspend leg failed; Recreate action
+ *   error-resume     — resume leg failed (spawn suspended); Resume-on-origin action
+ *   delivery-pending — delivery failed; persistent Retry Delivery action
+ *   reconnecting     — CP unreachable; retry banner with backoff
+ *
+ * Minimize (WM14): rendered as a floating badge when minimized (modal hidden).
  */
 
 import {
@@ -27,11 +33,26 @@ import type { MigrationTarget } from "@/api/migration";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/** Format bytes as human-readable size. */
 function sizeLabel(bytes: number): string {
   if (bytes === 0) return "";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Rough transfer ETA based on journal size.
+ * Assumes ~5 MB/s (typical encrypted Kopia journal transfer over LAN/WAN).
+ * Returns an honest "at least N sec" string, or empty if size is unknown.
+ */
+function etaLabel(bytes: number): string {
+  if (bytes === 0) return "";
+  const secs = bytes / (5 * 1024 * 1024);
+  if (secs < 2) return "< 2 sec";
+  if (secs < 60) return `~${Math.ceil(secs)} sec`;
+  const mins = secs / 60;
+  return `~${Math.ceil(mins)} min`;
 }
 
 function classLabel(cls: string): string {
@@ -48,6 +69,7 @@ function TargetRow({
   onSelect: () => void;
 }) {
   const size = sizeLabel(t.journalSizeBytes);
+  const eta  = etaLabel(t.journalSizeBytes);
   return (
     <button
       data-testid={`migrate-target-${t.nodeId}`}
@@ -71,6 +93,7 @@ function TargetRow({
           <span className="text-zinc-400">offline</span>
         )}
         {size && <span>· journal {size}</span>}
+        {eta  && <span>· ETA {eta}</span>}
       </div>
     </button>
   );
@@ -128,10 +151,9 @@ function DurabilityBanner({ durability }: { durability: string | null }) {
   if (durability === "node-local") {
     return (
       <p data-testid="durability-banner-node-local" className="text-sm text-amber-600 rounded-md bg-amber-50 px-3 py-2">
-        This spawn has node-local journaled mounts that are not yet owner-sealed.
-        Migration will proceed, but the journal data will not be restored on the
-        target. Run <code className="font-mono text-xs">spawnctl upgrade-sealed</code> first
-        to enable full data portability.
+        This spawn uses node-local storage. Confirming will upgrade it to owner-sealed
+        (re-seals the repo password to your device set — no data is re-encrypted) so it
+        can travel to the new node.
       </p>
     );
   }
@@ -147,6 +169,20 @@ export function MoveToModal({
   state: MoveToState;
   actions: MoveToActions;
 }) {
+  // Minimized: show a floating badge instead of the full dialog.
+  if (state.minimized) {
+    return (
+      <div
+        data-testid="migrate-badge"
+        className="fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-lg cursor-pointer"
+        onClick={actions.restore}
+      >
+        <span>Migrating…</span>
+        <span className="text-xs opacity-70">click to restore</span>
+      </div>
+    );
+  }
+
   const open = state.phase !== "idle";
 
   return (
@@ -159,17 +195,30 @@ export function MoveToModal({
         {state.phase === "selecting" && (
           <SelectingView state={state} actions={actions} />
         )}
+        {state.phase === "needs-enroll" && (
+          <NeedsEnrollView state={state} onClose={actions.cancel} />
+        )}
+        {state.phase === "upgrading" && <UpgradingView />}
         {state.phase === "confirming" && (
           <ConfirmingView state={state} actions={actions} />
         )}
         {state.phase === "running" && (
-          <RunningView state={state} />
+          <RunningView state={state} actions={actions} />
         )}
         {state.phase === "done" && (
           <DoneView state={state} onClose={actions.cancel} />
         )}
-        {state.phase === "error" && (
-          <ErrorView state={state} onClose={actions.cancel} />
+        {state.phase === "error-suspend" && (
+          <ErrorSuspendView state={state} onClose={actions.cancel} />
+        )}
+        {state.phase === "error-resume" && (
+          <ErrorResumeView state={state} onClose={actions.cancel} />
+        )}
+        {state.phase === "delivery-pending" && (
+          <DeliveryPendingView state={state} actions={actions} />
+        )}
+        {state.phase === "reconnecting" && (
+          <ReconnectingView state={state} actions={actions} />
         )}
       </DialogContent>
     </Dialog>
@@ -220,6 +269,53 @@ function SelectingView({ state, actions }: { state: MoveToState; actions: MoveTo
   );
 }
 
+function NeedsEnrollView({ state, onClose }: { state: MoveToState; onClose: () => void }) {
+  void state;
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Device enrollment required</DialogTitle>
+      </DialogHeader>
+      <div data-testid="migrate-needs-enroll" className="space-y-3 text-sm text-muted-foreground">
+        <p>
+          This spawn uses owner-sealed storage and the journal key must be re-sealed
+          to the target node by an enrolled device.
+        </p>
+        <p>
+          This browser is not enrolled. To proceed, either:
+        </p>
+        <ul className="list-disc pl-4 space-y-1">
+          <li>Enroll this browser from the <strong>Settings → Devices</strong> page
+              (requires approving from another enrolled device).</li>
+          <li>Run the migration from the CLI:
+              <code className="ml-1 font-mono text-xs">spawnctl move</code>.</li>
+        </ul>
+        <p className="text-xs text-amber-600">
+          The spawn is still running and untouched — no lifecycle action was taken.
+        </p>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" onClick={onClose} data-testid="migrate-needs-enroll-close">
+          Close
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+function UpgradingView() {
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Upgrading storage…</DialogTitle>
+      </DialogHeader>
+      <p data-testid="migrate-upgrading" className="text-sm text-muted-foreground">
+        Upgrading this spawn&apos;s storage to owner-sealed so it can be migrated…
+      </p>
+    </>
+  );
+}
+
 function ConfirmingView({ state, actions }: { state: MoveToState; actions: MoveToActions }) {
   const t = state.selectedTarget;
   if (!t) return null;
@@ -251,13 +347,25 @@ function ConfirmingView({ state, actions }: { state: MoveToState; actions: MoveT
   );
 }
 
-function RunningView({ state }: { state: MoveToState }) {
+function RunningView({ state, actions }: { state: MoveToState; actions: MoveToActions }) {
+  // Minimize is available once migration has started (phase 1 = suspend initiated).
+  const canMinimize = state.progress?.step === "migrating" ||
+    state.progress?.step === "verifying-node" ||
+    state.progress?.step === "resealing" ||
+    state.progress?.step === "delivering";
   return (
     <>
       <DialogHeader>
         <DialogTitle>Migrating…</DialogTitle>
       </DialogHeader>
       <ProgressView step={state.progress?.step ?? "fetching-keys"} />
+      {canMinimize && (
+        <DialogFooter>
+          <Button variant="ghost" size="sm" onClick={actions.minimize} data-testid="migrate-minimize">
+            Minimize
+          </Button>
+        </DialogFooter>
+      )}
     </>
   );
 }
@@ -293,18 +401,132 @@ function DoneView({ state, onClose }: { state: MoveToState; onClose: () => void 
   );
 }
 
-function ErrorView({ state, onClose }: { state: MoveToState; onClose: () => void }) {
+/** Suspend-leg failure — spawn is in error state. Offer Recreate. */
+function ErrorSuspendView({ state, onClose }: { state: MoveToState; onClose: () => void }) {
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Migration failed</DialogTitle>
+        <DialogTitle>Migration failed — suspend error</DialogTitle>
       </DialogHeader>
-      <p data-testid="migrate-error" className="text-sm text-red-600 break-words">
-        {state.errorMsg}
-      </p>
+      <div className="space-y-2 text-sm">
+        <p className="text-red-600 break-words" data-testid="migrate-error-suspend">
+          {state.errorMsg}
+        </p>
+        <p className="text-muted-foreground">
+          The spawn could not be suspended and is in an error state. Data is intact as
+          of the last journal snapshot. Use <strong>Recreate</strong> to provision a
+          fresh container.
+        </p>
+      </div>
       <DialogFooter>
-        <Button variant="outline" onClick={onClose} data-testid="migrate-error-close">
+        <Button variant="outline" onClick={onClose} data-testid="migrate-error-dismiss">
           Dismiss
+        </Button>
+        <Button
+          variant="destructive"
+          onClick={onClose}
+          data-testid="migrate-error-recreate"
+        >
+          Recreate
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+/** Resume-leg failure — CP reverted, spawn is in suspended state. Offer Resume-on-origin. */
+function ErrorResumeView({ state, onClose }: { state: MoveToState; onClose: () => void }) {
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Migration failed — resume error</DialogTitle>
+      </DialogHeader>
+      <div className="space-y-2 text-sm">
+        <p className="text-amber-600 break-words" data-testid="migrate-error-resume">
+          {state.errorMsg}
+        </p>
+        <p className="text-muted-foreground">
+          The spawn was suspended but could not be resumed on the target. The CP has
+          reverted it to <strong>suspended</strong> on the origin node — your data is
+          intact. Use <strong>Resume</strong> to bring it back on the original node.
+        </p>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" onClick={onClose} data-testid="migrate-error-dismiss">
+          Dismiss
+        </Button>
+        <Button onClick={onClose} data-testid="migrate-error-resume">
+          Resume
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+/**
+ * Delivery-leg failure — spawn active on target but journal key not delivered.
+ * Persistent, reload-derivable state (spec §3 "delivery-fail"). Offer Retry Delivery.
+ */
+function DeliveryPendingView({ state, actions }: { state: MoveToState; actions: MoveToActions }) {
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Journal key delivery pending</DialogTitle>
+      </DialogHeader>
+      <div className="space-y-2 text-sm" data-testid="migrate-delivery-pending">
+        <p className="text-muted-foreground">
+          The spawn is running on the target node but the journal key has not been
+          delivered yet. The journaled mounts will not restore until delivery completes.
+        </p>
+        <p className="text-muted-foreground">
+          Retry delivery from this or any enrolled device.
+        </p>
+        {state.errorMsg && (
+          <p className="text-xs text-red-500 break-words">{state.errorMsg}</p>
+        )}
+      </div>
+      <DialogFooter>
+        <Button variant="outline" onClick={actions.cancel} data-testid="migrate-delivery-dismiss">
+          Dismiss
+        </Button>
+        <Button onClick={actions.retryDelivery} data-testid="migrate-delivery-retry">
+          Retry Delivery
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+/**
+ * CP unreachable — show retry banner with backoff indicator.
+ * Never shows an infinite spinner; always offers a Retry action.
+ */
+function ReconnectingView({ state, actions }: { state: MoveToState; actions: MoveToActions }) {
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Connection lost</DialogTitle>
+      </DialogHeader>
+      <div className="space-y-2 text-sm" data-testid="migrate-reconnecting">
+        <p className="text-amber-600">
+          Could not reach the control plane. Retrying…
+        </p>
+        {state.errorMsg && (
+          <p className="text-xs text-muted-foreground break-words">{state.errorMsg}</p>
+        )}
+        <p className="text-xs text-muted-foreground">
+          The spawn is unchanged — no migration action was taken.
+        </p>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" onClick={actions.cancel} data-testid="migrate-reconnect-cancel">
+          Cancel
+        </Button>
+        <Button
+          onClick={() => state.spawnId && actions.open(state.spawnId)}
+          data-testid="migrate-reconnect-retry"
+        >
+          Retry
         </Button>
       </DialogFooter>
     </>

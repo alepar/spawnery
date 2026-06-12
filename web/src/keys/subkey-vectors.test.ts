@@ -16,6 +16,7 @@ import {
   verifyNodeForSealing,
   verifySignedSubKey,
   type SignedSubKey,
+  type RevocationChecker,
 } from "./subkey";
 import {
   verifyCertChain,
@@ -123,5 +124,47 @@ describe("subkey Go-TS cross-language vectors", () => {
     await expect(
       verifyNodeForSealing(v.chain_pem, v.root_pem, v.subkey_json, { tenancy: "cloud" }, verifyAt),
     ).rejects.toThrow("tenancy");
+  });
+
+  // WM8: revoked-node-refusal — delivery to a node with a revoked cert must fail closed.
+  it("verifyNodeForSealing rejects a revoked node (WM8)", async () => {
+    const notBefore = new Date(v.not_before);
+    const verifyAt = new Date(notBefore.getTime() + 60 * 60 * 1000);
+    const revokedChecker: RevocationChecker = {
+      async check(_nodeId: string): Promise<void> {
+        throw new Error("node is on the AS revocation deny-list");
+      },
+    };
+    await expect(
+      verifyNodeForSealing(
+        v.chain_pem,
+        v.root_pem,
+        v.subkey_json,
+        { tenancy: "self-hosted", accountId: v.expected_account_id },
+        verifyAt,
+        revokedChecker,
+      ),
+    ).rejects.toThrow("revocation deny-list");
+  });
+
+  // WM8: revocation checker that errors (e.g., network failure) must also fail closed.
+  it("verifyNodeForSealing fails closed when revocation check errors (WM8)", async () => {
+    const notBefore = new Date(v.not_before);
+    const verifyAt = new Date(notBefore.getTime() + 60 * 60 * 1000);
+    const errorChecker: RevocationChecker = {
+      async check(_nodeId: string): Promise<void> {
+        throw new Error("revocation list unavailable (network error)");
+      },
+    };
+    await expect(
+      verifyNodeForSealing(
+        v.chain_pem,
+        v.root_pem,
+        v.subkey_json,
+        { tenancy: "self-hosted", accountId: v.expected_account_id },
+        verifyAt,
+        errorChecker,
+      ),
+    ).rejects.toThrow("network error");
   });
 });
