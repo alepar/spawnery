@@ -69,7 +69,14 @@ RUN set -eux; \
     tar -xzf /tmp/codex.tar.gz -C /tmp; \
     install -m 0755 /tmp/codex-x86_64-unknown-linux-musl /usr/local/bin/codex; \
     rm /tmp/codex.tar.gz /tmp/codex-x86_64-unknown-linux-musl; \
-    codex --version
+    codex --version; \
+    # codex's stock base instructions, baked for the launcher's model_catalog_json entry: a
+    # custom catalog REPLACES the bundled one, and each entry must carry base_instructions —
+    # anything other than the version-matched stock prompt would change codex's system prompt.
+    mkdir -p /usr/local/share/codex; \
+    curl -fsSL -o /usr/local/share/codex/base-instructions.md \
+      "https://raw.githubusercontent.com/openai/codex/${CODEX_VERSION}/codex-rs/models-manager/prompt.md"; \
+    test -s /usr/local/share/codex/base-instructions.md
 
 # nori CLI (Tilework) — Rust ACP TUI client (spawnctl attach to acp-mode spawns; wiring in sp-9xr.12)
 # tarball layout: ./nori/nori — extract to /tmp then install to /usr/local/bin

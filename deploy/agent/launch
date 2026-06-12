@@ -191,9 +191,34 @@ case "$RUNNABLE" in
     MAX_OUT="${MODEL_META##* }"
     case "$CTX_WINDOW" in ''|0|*[!0-9]*) CTX_WINDOW=131072 ;; esac
     case "$MAX_OUT" in ''|0|*[!0-9]*) MAX_OUT=16384 ;; esac
+    # config overrides alone do NOT clear codex's fallback-metadata flag (the per-turn warning)
+    # and get clamped to the fallback's 272k max_context_window — the slug must be IN the model
+    # catalog. Generate a one-model catalog (model_catalog_json REPLACES the bundled OpenAI-only
+    # catalog) using codex's stock base instructions baked into the image; field shapes match
+    # ModelInfo in codex-rs/protocol (rust-v0.137.0).
+    jq -n --arg slug "$MODEL_ID" --argjson ctx "$CTX_WINDOW" \
+          --rawfile prompt /usr/local/share/codex/base-instructions.md '{
+      models: [{
+        slug: $slug, display_name: $slug, description: null,
+        supported_reasoning_levels: [], shell_type: "default", visibility: "list",
+        supported_in_api: true, priority: 0,
+        availability_nux: null, upgrade: null,
+        base_instructions: $prompt,
+        supports_reasoning_summaries: false,
+        support_verbosity: false, default_verbosity: null,
+        apply_patch_tool_type: null,
+        truncation_policy: { mode: "bytes", limit: 10000 },
+        supports_parallel_tool_calls: false,
+        context_window: $ctx, max_context_window: $ctx,
+        effective_context_window_percent: 95,
+        experimental_supported_tools: [],
+        input_modalities: ["text"]
+      }]
+    }' > "$CODEX_HOME/models.json"
     cat > "$CODEX_HOME/config.toml" <<EOF
 model = "${MODEL_ID}"
 model_provider = "spawnery"
+model_catalog_json = "${CODEX_HOME}/models.json"
 model_context_window = ${CTX_WINDOW}
 model_max_output_tokens = ${MAX_OUT}
 approval_policy = "never"
