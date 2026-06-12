@@ -259,14 +259,14 @@ func formatDeviceSetShow(dsf *deviceSetFile) string {
 	var b strings.Builder
 	members, err := seal.VerifyDeviceSet(dsf.Log, dsf.Root)
 	version := uint64(0)
-	if dsf.Log != nil && len(dsf.Log.Entries) > 0 {
-		version = dsf.Log.Entries[len(dsf.Log.Entries)-1].Version
+	if dsf.Log != nil {
+		version = dsf.Log.HeadVersion()
 	}
 	if err != nil {
 		fmt.Fprintf(&b, "chain: INVALID — %v\n", err)
 		// Still show the (untrusted) claimed membership of the head for diagnosis.
-		if dsf.Log != nil && len(dsf.Log.Entries) > 0 {
-			members = dsf.Log.Entries[len(dsf.Log.Entries)-1].Devices
+		if dsf.Log != nil {
+			members = dsf.Log.HeadDevices()
 		}
 	} else {
 		fmt.Fprintf(&b, "chain: VALID (version %d, %d entr%s)\n", version, len(dsf.Log.Entries), plural(len(dsf.Log.Entries)))
