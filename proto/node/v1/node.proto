@@ -158,6 +158,7 @@ message SealJournalKeyToOwnerRequest {
   uint64 generation                = 2;
   repeated bytes owner_device_pubkeys = 3;
   string request_id                = 4;
+  string owner_id                  = 5; // owner account id — bound into AtRestAAD so the sealed ciphertext is identity-scoped
 }
 
 // One sealed journal key in a SealJournalKeyToOwnerResponse.
