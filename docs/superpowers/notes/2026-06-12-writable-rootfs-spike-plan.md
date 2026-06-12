@@ -74,6 +74,46 @@ own data-roots/sockets/bridges. Second daemon needs `--iptables=false` (DOCKER-c
    1M-wide subuid allotment; also requires expanding the default 65536 allotment at all) —
    future-lane follow-up, not load-bearing now.
 
+## Spike 2 — RESULTS (containerd 2.2.3 + runsc release-20260525.0) — ALL ANSWERED
+
+Dedicated containerd (own root/state/socket, CRI on, runsc handler, bridge CNI conf).
+
+1. **CONFIRMED — default `--overlay2` (root:self) swallows writes:** host upperdir contains
+   only a sentry-private `.gvisor.filestore.<sandbox>` blob (1 GB sparse) + CRI's `etc` copies;
+   the in-container write never materializes. Host-side diff would capture garbage.
+2. **`overlay2=none` → full host visibility:** files + kernel char-dev 0:0 whiteouts appear in
+   the upperdir. **Gofer cost is negligible for our workloads**: apt update+install 3.61 s vs
+   3.34 s (default), dd 256 MB ≈ equal. → cloud lane runs `overlay2=none`.
+3. **Diff capture works:** the CRI container id IS the snapshot key (`k8s.io` ns); containerd's
+   DiffService emits a proper OCI layer tar — kernel whiteout translated to **`.wh.media`**,
+   uids container-relative.
+4. **Cross-lane PASS:** the Spike-1 `docker save` bundle imports via `ImportIndex` and runs
+   under runsc — package, useradd'd user, chowned uids (1000) all intact.
+5. Plumbing notes: host-net runsc pods need `network = "host"` (hostinet) in runsc.toml; CRI
+   `dns_config` required (systemd-resolved stub unreachable from the sandbox); `apt-get update`
+   exits 0 even when all fetches fail — never use it as a health signal (matches research S5).
+
+## Spike 3 — RESULTS — KEP-127 runc PASS / runsc FAIL-BUT-UNNECESSARY
+
+1. **KEP-127 pod userns from a bare CRI client (crictl ≅ spawnlet): PASS on runc.** Sandbox +
+   container both carry `userns_options{mode:POD, uids/gids 0→900000 #65536}`; containerd 2.2.3
+   constructs it; `setgroups=allow` (post-#10611); apt install, useradd+chown, chmod setuid all
+   green. Constraints: container userns_options must MATCH the sandbox's; **hostNetwork pods are
+   rejected** (userns pinning needs a sandbox netns → CNI required).
+2. **KEP-127 + runsc: BROKEN** at this pairing — the gofer cannot `setns` into the pinned userns
+   (`invalid argument`; multithreaded Go process cannot join a userns). Do not design for it.
+3. **runsc does NOT need kernel userns:** without userns the sentry already virtualizes
+   privilege — uid_map reads `0→0 #4G` (sentry-internal), and apt/useradd/chown/chmod-setuid/
+   su-to-uid-1000 all PASS with default caps. Gofer writes host files with **container-relative
+   uids** (u2's home = 1000:1000 in the upperdir), so diffs need no uid shifting; isolation
+   comes from the sentry, not the mapping (upperdir lives under root-only containerd paths).
+
+**Net design input:** Docker lane = daemon userns-remap + default caps + commit/save;
+CRI/runsc lane = runsc with `overlay2=none` + default caps, NO kernel userns, capture via
+containerd DiffService; both lanes' artifacts interchange cleanly (proven both directions for
+the Docker→runsc leg; runsc-diff→Docker apply is the one untested direction — low risk, same
+OCI encoding).
+
 ## Wiring
 
 - Each spike = bd task under `sp-ei4.1`, **all three block `sp-ei4.1.3`** (the design spec).
