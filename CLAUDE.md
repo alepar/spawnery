@@ -152,3 +152,28 @@ Design docs + per-slice plans live in `docs/superpowers/specs/` and `docs/superp
 - **Regenerate after proto changes** (`make gen`); never hand-edit `gen/`.
 - **Toolchain pinned to go 1.26**; golangci-lint must be built with go ≥1.26 (`just lint-go` sets
   `GOTOOLCHAIN`).
+
+## Implementing Specced bd Tasks (multi-agent)
+
+When implementing tasks that are already specced + tracked in bd (design spec written, roast
+amendments folded in, bead notes carry the binding deltas), run them as **parallel subagents
+scheduled via a dynamic workflow** (the Workflow tool) — NOT as a long-lived coordinator agent
+spawning opaque headless processes. The workflow gives reviewable live progress: per-task phase
+groups, labeled agents, structured outputs at every stage, and a resumable journal.
+
+- **One coordinator, deterministic:** the workflow script is the coordinator — it encodes the
+  task dependency graph, dispatches planners/implementers/reviewers per task, waits on their
+  structured results, and serializes merges back to master (promise-mutex; one merge integrator
+  at a time).
+- **Per-task pipeline:** planner (writes a focused plan) → implementer → spec-compliance
+  reviewer → code-quality reviewer → bounded fix loops (≤2 per stage) → merge integrator
+  (merge `--no-ff`, full quality gates in the `dev-spawnery` distrobox, `bd close`, export +
+  commit, `git push` + `bd dolt push`, worktree cleanup). Never push a red master.
+- **Isolation posture:** every implementer works in its **own git worktree + branch**
+  (`spawnery-wt-<task>` / `feat/<task>`, cut from current master), never in the main repo's
+  working tree. Parallel tasks must have **disjoint file sets** (serialize `proto/`-touching
+  tasks; `gen/` merge conflicts → take either side, re-run `make gen`). `bd` commands run ONLY
+  from the main repo dir — worktrees lack the Dolt DB.
+- **Model preferences:** planners + spec/quality reviewers = **opus**; implementers + fixers +
+  merge integrators + final gate = **sonnet**. The reviewers are the quality bar — don't
+  economize there below opus.
