@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,28 @@ import (
 
 	"spawnery/internal/secrets/seal"
 )
+
+func decodeBase64(s string) ([]byte, error) {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		// Also try URL encoding
+		b, err = base64.URLEncoding.DecodeString(s)
+	}
+	return b, err
+}
+
+func encodeBase64(b []byte) string {
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// m8TrustedDeviceWarning is the verbatim M8 warning from the owner-sealed spec
+// §3, displayed before any operation where the user enters a recovery phrase.
+// It must never be suppressed or shortened.
+const m8TrustedDeviceWarning = `SECURITY WARNING: You are about to enter your BIP-39 recovery phrase.
+This phrase is the master key for all your sealed secrets. Only enter it on a
+device you personally control and trust. In a shared, hotel, or observed
+environment, cancel and use an enrolled device instead.
+`
 
 // Local owner device-key lifecycle for spawnctl (sp-2ckv.2, CLI-first). These
 // commands manage the owner's per-device keypairs and the hash-chained device
@@ -206,27 +230,195 @@ func loadDeviceSet(dir string) (*deviceSetFile, error) {
 
 // ---- recover ----
 
-// recoverDevice re-derives this device from a BIP-39 recovery mnemonic and
-// writes its 0600 keyfile (spec §4: the recovery virtual device). This is a
-// pure-local re-derivation; enrolling a fresh device and re-sealing DEKs to it
-// is a later (CP-wired) wave.
-func recoverDevice(dir, mnemonic string, force bool) (*seal.Device, error) {
+// recoverResult holds the output of a successful recovery.
+type recoverResult struct {
+	// FreshDevice is the newly-generated device whose keyfile was written.
+	FreshDevice *seal.Device
+	// NewRecoveryMnemonic is the replacement BIP-39 phrase (old one is now
+	// retired in the local device set).
+	NewRecoveryMnemonic string
+}
+
+// recoverDevice performs the full local recovery flow (spec §4 MVP [WM12]):
+//
+//  1. Re-derive the recovery virtual device from the entered mnemonic.
+//  2. Load and verify the local device set — confirm the recovery key is enrolled.
+//  3. Generate a fresh device (new X25519 + signing keypairs from a new mnemonic).
+//  4. Add the fresh device to the local device set (signed by the recovery key).
+//  5. Generate a NEW recovery mnemonic and add it to the local device set
+//     (signed by the recovery key).
+//  6. Remove the OLD recovery virtual device (signed by the fresh device, which
+//     is now enrolled).
+//  7. Write the fresh device's 0600 keyfile.
+//
+// Re-sealing existing DEKs to the updated device set requires CP/network access
+// and is deferred — the local chain mutations happen here so the device set
+// reflects the actual state (the removal is recorded; re-sealing follows
+// separately when network access is available).
+func recoverDevice(dir, mnemonic string, force bool) (*recoverResult, error) {
 	if !force {
 		if _, statErr := os.Stat(keyfilePath(dir)); statErr == nil {
 			return nil, fmt.Errorf("keyfile already exists at %s (use --force to overwrite)", keyfilePath(dir))
 		}
 	}
-	dev, err := seal.RecoveryDevice(mnemonic)
+
+	// 1. Derive the recovery key from the entered mnemonic.
+	recoveryDev, err := seal.RecoveryDevice(mnemonic)
 	if err != nil {
 		return nil, err
 	}
+
+	// 2. Load and verify the local device set.
+	dsf, err := loadDeviceSet(dir)
+	if err != nil {
+		return nil, err
+	}
+	members, err := seal.VerifyDeviceSet(dsf.Log, dsf.Root)
+	if err != nil {
+		return nil, fmt.Errorf("chain verification failed: %w", err)
+	}
+
+	// Confirm the recovery key is actually enrolled.
+	recoveryRef := recoveryDev.Ref()
+	found := false
+	for _, m := range members {
+		if bytes.Equal(m.SignPub, recoveryRef.SignPub) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, errors.New("the entered mnemonic does not match any enrolled recovery device")
+	}
+
+	// 3. Generate a fresh device for this machine.
+	freshMnemonic, err := seal.NewMnemonic()
+	if err != nil {
+		return nil, err
+	}
+	freshDev, err := seal.DeviceFromMnemonic(freshMnemonic, "")
+	if err != nil {
+		return nil, err
+	}
+
+	// 4. Add the fresh device to the local chain, signed by the recovery key.
+	if err := dsf.Log.AddDeviceLabeled(freshDev.Ref(), recoveryDev, "recovered-device"); err != nil {
+		return nil, fmt.Errorf("add fresh device to chain: %w", err)
+	}
+
+	// 5. Generate a new recovery phrase and add it, signed by the recovery key.
+	newRecoveryMnemonic, err := seal.NewMnemonic()
+	if err != nil {
+		return nil, err
+	}
+	newRecoveryDev, err := seal.RecoveryDevice(newRecoveryMnemonic)
+	if err != nil {
+		return nil, err
+	}
+	if err := dsf.Log.AddDeviceLabeled(newRecoveryDev.Ref(), recoveryDev, "recovery"); err != nil {
+		return nil, fmt.Errorf("add new recovery device to chain: %w", err)
+	}
+
+	// 6. Remove the OLD recovery virtual device, signed by the fresh device
+	//    (which is now a member after step 4).
+	if err := dsf.Log.RemoveDevice(recoveryRef.X25519Pub, freshDev); err != nil {
+		return nil, fmt.Errorf("remove old recovery device from chain: %w", err)
+	}
+
+	// 7. Persist.
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create config dir: %w", err)
 	}
-	if err := dev.WriteKeyfile(keyfilePath(dir)); err != nil {
+	if err := freshDev.WriteKeyfile(keyfilePath(dir)); err != nil {
 		return nil, fmt.Errorf("write keyfile: %w", err)
 	}
-	return dev, nil
+	if err := writeDeviceSet(dir, dsf); err != nil {
+		return nil, err
+	}
+	return &recoverResult{FreshDevice: freshDev, NewRecoveryMnemonic: newRecoveryMnemonic}, nil
+}
+
+// ---- approve ----
+
+// approveDevice processes an enrollment payload from a new device (the
+// enrollee), appends a member-signed add-entry to the local device set, and
+// prints the approval response (OwnerRoot + head) for the enrollee to paste.
+//
+// The caller is responsible for verifying the SAS out-of-band before running
+// this command. The SAS must be computed from:
+//   sha256(encodeFields("sas/v1", genesis_hash, head_hash, new_x25519_pub, new_sign_pub))
+//
+// The approval response returns the OwnerRoot + head so the enrollee can pin
+// them (spec §2 [WM5]: never TOFU from the AS).
+func approveDevice(dir, payloadJSON, deviceName string) (string, error) {
+	// Parse the enrollment payload.
+	var payload struct {
+		X25519Pub string `json:"x25519Pub"` // base64
+		SignPub   string `json:"signPub"`   // base64
+		DeviceName string `json:"deviceName"`
+		ExpiresAt string `json:"expiresAt"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return "", fmt.Errorf("parse enrollment payload: %w", err)
+	}
+
+	x25519Pub, err := decodeBase64(payload.X25519Pub)
+	if err != nil {
+		return "", fmt.Errorf("decode x25519_pub: %w", err)
+	}
+	signPub, err := decodeBase64(payload.SignPub)
+	if err != nil {
+		return "", fmt.Errorf("decode sign_pub: %w", err)
+	}
+
+	newDeviceRef := seal.DeviceRef{X25519Pub: x25519Pub, SignPub: signPub}
+	name := deviceName
+	if name == "" {
+		name = payload.DeviceName
+	}
+
+	// Load and verify the current chain.
+	dsf, err := loadDeviceSet(dir)
+	if err != nil {
+		return "", err
+	}
+	if _, err := seal.VerifyDeviceSet(dsf.Log, dsf.Root); err != nil {
+		return "", fmt.Errorf("chain verification failed: %w", err)
+	}
+
+	// Load the approver's device key.
+	approver, err := loadDevice(dir)
+	if err != nil {
+		return "", err
+	}
+
+	// Append the add-entry signed by this device.
+	if err := dsf.Log.AddDeviceLabeled(newDeviceRef, approver, name); err != nil {
+		return "", fmt.Errorf("add device to chain: %w", err)
+	}
+	if err := writeDeviceSet(dir, dsf); err != nil {
+		return "", err
+	}
+
+	headHash, err := dsf.Log.HeadHash()
+	if err != nil {
+		return "", err
+	}
+	headVersion := dsf.Log.HeadVersion()
+
+	// Format the approval response.
+	resp, err := json.MarshalIndent(map[string]any{
+		"ownerRoot": map[string]string{
+			"device1_sign_pub":  encodeBase64(dsf.Root.Device1SignPub),
+			"recovery_sign_pub": encodeBase64(dsf.Root.RecoverySignPub),
+		},
+		"headHash":    encodeBase64(headHash),
+		"headVersion": headVersion,
+	}, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(resp), nil
 }
 
 // ---- rendering (pure, testable) ----
@@ -303,7 +495,7 @@ func resolveDir(c *cli.Command) (string, error) {
 func keyCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "key",
-		Usage: "manage this device's owner-sealed-secrets keys (local only)",
+		Usage: "manage this device's owner-sealed-secrets keys",
 		Commands: []*cli.Command{
 			keyInitCmd(),
 			keyShowCmd(),
@@ -359,7 +551,7 @@ func keyShowCmd() *cli.Command {
 func keyRecoverCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "recover",
-		Usage: "re-derive this device from a BIP-39 recovery mnemonic",
+		Usage: "recover from a BIP-39 recovery mnemonic, enroll a fresh device, rotate the recovery code",
 		Flags: []cli.Flag{
 			configDirFlag(),
 			&cli.StringFlag{Name: "mnemonic", Usage: "the 24-word BIP-39 recovery code", Required: true},
@@ -370,13 +562,20 @@ func keyRecoverCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
+			// Surface the M8 trusted-device warning before any mnemonic processing.
+			fmt.Fprintln(c.Writer, m8TrustedDeviceWarning)
 			mnemonic := strings.TrimSpace(c.String("mnemonic"))
-			dev, err := recoverDevice(dir, mnemonic, c.Bool("force"))
+			result, err := recoverDevice(dir, mnemonic, c.Bool("force"))
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			fmt.Fprintf(c.Writer, "device key recovered: %s (0600)\n\n", keyfilePath(dir))
-			fmt.Fprint(c.Writer, formatKeyShow(dev))
+			fmt.Fprintf(c.Writer, "fresh device key written: %s (0600)\n", keyfilePath(dir))
+			fmt.Fprintf(c.Writer, "device set updated:       %s\n", deviceSetPath(dir))
+			fmt.Fprint(c.Writer, formatKeyShow(result.FreshDevice))
+			fmt.Fprintf(c.Writer, "\nYour NEW BIP-39 recovery code (24 words):\n\n    %s\n\n", result.NewRecoveryMnemonic)
+			fmt.Fprintln(c.Writer, recoveryLossWarning)
+			fmt.Fprintln(c.Writer, "NOTE: re-sealing existing secrets to the updated device set requires")
+			fmt.Fprintln(c.Writer, "CP/network access and must be performed separately (spawnctl key reseal).")
 			return nil
 		},
 	}
@@ -385,7 +584,7 @@ func keyRecoverCmd() *cli.Command {
 func keyDeviceSetCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "device-set",
-		Usage: "inspect the local device set",
+		Usage: "inspect and manage the local device set",
 		Commands: []*cli.Command{
 			{
 				Name:  "show",
@@ -404,6 +603,75 @@ func keyDeviceSetCmd() *cli.Command {
 					return nil
 				},
 			},
+			keyDeviceSetApproveCmd(),
+		},
+	}
+}
+
+// keyDeviceSetApproveCmd implements `spawnctl key device-set approve`.
+//
+// Takes an enrollment payload JSON (from the web or another CLI) and
+// appends a member-signed add-entry to the local device set, then
+// prints the approval response (OwnerRoot + head) for the enrollee.
+//
+// The SAS must be verified by the human operator before running this
+// command (spec §2 [WM4]).
+func keyDeviceSetApproveCmd() *cli.Command {
+	return &cli.Command{
+		Name:  "approve",
+		Usage: "approve a device enrollment from a JSON payload; print the approval response",
+		Description: `Processes an enrollment payload from a new device (web or another spawnctl).
+Appends a member-signed add-entry to the local device set and prints the
+approval response (OwnerRoot + head) for the enrollee to paste into their UI.
+
+IMPORTANT: verify the SAS code out-of-band BEFORE running this command.
+The SAS is computed from (genesis_hash || head_hash || new_device_pubkeys)
+and must match the code displayed by the enrolling device.`,
+		Flags: []cli.Flag{
+			configDirFlag(),
+			&cli.StringFlag{
+				Name:  "payload",
+				Usage: "enrollment payload JSON (from the new device's link/QR); reads stdin if omitted",
+			},
+			&cli.StringFlag{
+				Name:  "device-name",
+				Usage: "override the device name from the payload",
+			},
+		},
+		Action: func(_ context.Context, c *cli.Command) error {
+			dir, err := resolveDir(c)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+
+			payloadJSON := strings.TrimSpace(c.String("payload"))
+			if payloadJSON == "" {
+				// Read from stdin
+				var sb strings.Builder
+				buf := make([]byte, 4096)
+				for {
+					n, readErr := os.Stdin.Read(buf)
+					if n > 0 {
+						sb.Write(buf[:n])
+					}
+					if readErr != nil {
+						break
+					}
+				}
+				payloadJSON = strings.TrimSpace(sb.String())
+			}
+			if payloadJSON == "" {
+				return cli.Exit("no enrollment payload provided (use --payload or pipe JSON to stdin)", 1)
+			}
+
+			resp, err := approveDevice(dir, payloadJSON, c.String("device-name"))
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			fmt.Fprintln(c.Writer, "Device enrolled. Send this approval response to the enrollee:")
+			fmt.Fprintln(c.Writer)
+			fmt.Fprintln(c.Writer, resp)
+			return nil
 		},
 	}
 }
