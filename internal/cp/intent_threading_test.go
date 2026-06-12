@@ -62,7 +62,7 @@ func intentTestServer(t *testing.T) (*Server, *capSender, func()) {
 			}
 			starts := sender.starts()
 			for len(starts) > seen {
-				s.sched.OnStatus(starts[seen].GetSpawnId(), nodev1.SpawnPhase_ACTIVE)
+				s.sched.OnStatus(starts[seen].GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
 				seen++
 			}
 		}

@@ -211,7 +211,7 @@ func startAcker(t *testing.T, s *Server, reg *registry.Registry) func() {
 			}
 			sender.mu.Unlock()
 			for _, id := range ids {
-				s.sched.OnStatus(id, nodev1.SpawnPhase_ACTIVE)
+				s.sched.OnStatus(id, nodev1.SpawnPhase_ACTIVE, "")
 			}
 			for _, sc := range done {
 				s.suspends.deliver(sc)
@@ -311,7 +311,7 @@ func TestCreateSpawnIsAsyncReturnsStarting(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	s.sched.OnStatus(resp.Msg.SpawnId, nodev1.SpawnPhase_ACTIVE)
+	s.sched.OnStatus(resp.Msg.SpawnId, nodev1.SpawnPhase_ACTIVE, "")
 	waitActive(t, s, resp.Msg.SpawnId)
 }
 
@@ -323,7 +323,7 @@ func TestCreateSpawnProvisionFailureSetsError(t *testing.T) {
 		deadline := time.Now().Add(2 * time.Second)
 		for {
 			if st := sender.firstStart(); st != nil {
-				s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ERROR)
+				s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ERROR, "")
 				return
 			}
 			if time.Now().After(deadline) {

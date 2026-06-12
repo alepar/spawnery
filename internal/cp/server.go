@@ -211,7 +211,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			}
 			s.reconcileInventory(ctx, nodeID, sender, m.Heartbeat.Running)
 		case *nodev1.NodeMessage_Status:
-			s.sched.OnStatus(m.Status.SpawnId, m.Status.Phase)
+			s.sched.OnStatus(m.Status.SpawnId, m.Status.Phase, m.Status.Detail)
 			if m.Status.Phase == nodev1.SpawnPhase_ACTIVE {
 				var owner string
 				if sp, err := s.st.Spawns().Get(ctx, m.Status.SpawnId); err == nil {

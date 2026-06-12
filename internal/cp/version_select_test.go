@@ -36,7 +36,7 @@ func createActive(t *testing.T, s *Server, reg *registry.Registry, req *cpv1.Cre
 	go func() {
 		for {
 			if st := sender.firstStart(); st != nil {
-				s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ACTIVE)
+				s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
 				return
 			}
 			time.Sleep(time.Millisecond)

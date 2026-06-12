@@ -16,27 +16,37 @@ import (
 	"spawnery/internal/cp/router"
 )
 
+// spawnResult carries both the phase and the machine-readable NACK detail so callers can
+// surface a node's CORRESPONDENCE/STALE/etc. rejection as a typed Connect error [AC1].
+type spawnResult struct {
+	phase  nodev1.SpawnPhase
+	detail string // Status.Detail from the node (e.g. "STALE: intent is 35s old"); empty on ACTIVE
+}
+
 type Scheduler struct {
 	reg     *registry.Registry
 	rt      *router.Router
 	timeout time.Duration
 
 	mu      sync.Mutex
-	pending map[string]chan nodev1.SpawnPhase // spawn_id -> ACTIVE/ERROR signal
+	pending map[string]chan spawnResult // spawn_id -> ACTIVE/ERROR signal
 }
 
 func New(reg *registry.Registry, rt *router.Router, timeout time.Duration) *Scheduler {
-	return &Scheduler{reg: reg, rt: rt, timeout: timeout, pending: map[string]chan nodev1.SpawnPhase{}}
+	return &Scheduler{reg: reg, rt: rt, timeout: timeout, pending: map[string]chan spawnResult{}}
 }
 
 // OnStatus is called by the node receive loop when a SpawnStatus arrives.
-func (s *Scheduler) OnStatus(spawnID string, phase nodev1.SpawnPhase) {
+// detail carries the Status.Detail field from the node (machine-readable NACK code + human
+// explanation on ERROR; empty on ACTIVE). It is threaded through so callers can return a
+// typed Connect error containing the NACK code [AC1].
+func (s *Scheduler) OnStatus(spawnID string, phase nodev1.SpawnPhase, detail string) {
 	s.mu.Lock()
 	ch, ok := s.pending[spawnID]
 	s.mu.Unlock()
 	if ok && (phase == nodev1.SpawnPhase_ACTIVE || phase == nodev1.SpawnPhase_ERROR) {
 		select {
-		case ch <- phase:
+		case ch <- spawnResult{phase: phase, detail: detail}:
 		default:
 		}
 	}
@@ -66,7 +76,7 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 	if n == nil {
 		return "", connect.NewError(connect.CodeResourceExhausted, errors.New("no eligible node with capacity"))
 	}
-	ch := make(chan nodev1.SpawnPhase, 1)
+	ch := make(chan spawnResult, 1)
 	s.mu.Lock()
 	s.pending[id] = ch
 	s.mu.Unlock()
@@ -80,9 +90,15 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 		return "", connect.NewError(connect.CodeUnavailable, err)
 	}
 	select {
-	case ph := <-ch:
-		if ph != nodev1.SpawnPhase_ACTIVE {
-			return "", connect.NewError(connect.CodeInternal, errors.New("spawn failed to start"))
+	case res := <-ch:
+		if res.phase != nodev1.SpawnPhase_ACTIVE {
+			// Surface the node's machine-readable NACK code (e.g. "STALE: ...") as a
+			// FailedPrecondition error so lifecycle callers can classify retryable failures [AC1].
+			detail := res.detail
+			if detail == "" {
+				detail = "spawn failed to start"
+			}
+			return "", connect.NewError(connect.CodeFailedPrecondition, errors.New(detail))
 		}
 		s.rt.Bind(id, n.ID, n.Sender)
 		return n.ID, nil
