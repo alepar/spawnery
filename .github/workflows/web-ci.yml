@@ -50,11 +50,12 @@ jobs:
       - name: Vitest (hermetic unit tests)
         run: npm test
 
-      # Build without pinned origins (dev build — no VITE_CP_ORIGIN set).
-      # The SRI plugin skips _headers for dev builds; this still validates the plugin
-      # logic and that all assets are coverable.
+      # Build in development mode (no VITE_CP_ORIGIN set).
+      # Must pass --mode development so Vite sets config.mode='development'; otherwise the
+      # SRI plugin's production guard throws when VITE_CP_ORIGIN is absent. This still
+      # validates the plugin logic and that all assets are coverable.
       - name: Build (dev-origin, SRI validation)
-        run: npm run build
+        run: npx vite build --mode development
 
   go-web:
     name: Go — ws origin + CORS hermetic
