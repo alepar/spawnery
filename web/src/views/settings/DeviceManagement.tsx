@@ -426,9 +426,27 @@ export function DeviceManagement() {
 
     const transport = httpASTransport(asHttpUrl(""), token);
     const { log } = await transport.fetchLog();
-    // Pass the pinned head version so a stale-prefix AS cannot smuggle in the
-    // revoked device by serving a chain that omits the removal entry ([WM6]).
-    const { members } = await import("@/keys/deviceset").then(m => m.verifyDeviceSet(log, anchor.ownerRoot, anchor.headVersion));
+    // [WM6] Use the higher of the two known versions as the floor.
+    // progress.targetVersion is the post-removal head recorded by initSweep;
+    // anchor.headVersion is still at the pre-removal value because bumpPinnedHead
+    // runs only AFTER the sweep completes. An interrupted sweep leaves
+    // anchor.headVersion < progress.targetVersion, so using anchor.headVersion
+    // alone would let a stale-prefix AS serve a chain at the old version that
+    // still includes the revoked device.
+    const versionFloor = Math.max(anchor.headVersion, progress.targetVersion);
+    const { members } = await import("@/keys/deviceset").then(m => m.verifyDeviceSet(log, anchor.ownerRoot, versionFloor));
+
+    // Abort if the AS-served chain still contains the device that was being
+    // revoked — this means the AS returned a chain that predates the removal
+    // entry (stale-prefix attack [WM6]).
+    if (progress.revokedX25519Pub &&
+        members.some((m) => m.x25519_pub === progress.revokedX25519Pub)) {
+      setError(
+        "Resume aborted: fetched chain still includes the revoked device — " +
+        "AS may be serving a stale-prefix chain",
+      );
+      return;
+    }
 
     const newMemberPubs = members.map((m) => fromBase64(m.x25519_pub));
 
@@ -546,8 +564,6 @@ export function DeviceManagement() {
         />
       )}
 
-      {/* Suppress unused import warning */}
-      {void pendingTargetX25519Pubs}
     </div>
   );
 }

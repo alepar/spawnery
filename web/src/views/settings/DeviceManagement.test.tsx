@@ -400,8 +400,12 @@ describe("DeviceManagement — [WM6] resume re-seal passes pinned head version",
 
   afterEach(() => localStorage.clear());
 
-  it("verifyDeviceSet is called with anchor.headVersion in handleResumeRevocation", async () => {
-    const anchorWithVersion = { ...sampleAnchor, headVersion: 7 };
+  it("verifyDeviceSet is called with max(anchor.headVersion, progress.targetVersion)", async () => {
+    // Simulates the interrupted-sweep case: anchor was never bumped (headVersion=3)
+    // but the removal entries were already appended (targetVersion=7). The floor
+    // must be 7, not 3 — otherwise a stale-prefix AS can serve the pre-removal
+    // chain and the resume re-seals to the revoked device ([WM6]).
+    const anchorWithVersion = { ...sampleAnchor, headVersion: 3 };
     mockLoadAnchor.mockReturnValue(anchorWithVersion);
 
     const device = makeDevice({ name: "My Device", isCurrent: true });
@@ -410,10 +414,12 @@ describe("DeviceManagement — [WM6] resume re-seal passes pinned head version",
     const progress = {
       targetVersion: 7, total: 2, done: 0,
       secretIds: ["s1", "s2"], completed: [], failed: [],
-      isRevocation: true, updatedAt: Date.now(),
+      isRevocation: true, revokedX25519Pub: "revokedpub==",
+      updatedAt: Date.now(),
     };
     mockLoadSweepProgress.mockReturnValue(progress);
     mockRemainingCount.mockReturnValue(2);
+    // Simulate AS serving the post-removal chain (revoked device absent).
     mockVerifyDeviceSet.mockResolvedValue({ members: [], headHash: new Uint8Array(32), headVersion: 7 });
 
     render(<DeviceManagement />);
@@ -423,13 +429,54 @@ describe("DeviceManagement — [WM6] resume re-seal passes pinned head version",
       await userEvent.click(screen.getByTestId("revocation-resume"));
     });
 
-    // verifyDeviceSet must receive the pinned headVersion (7) so a stale-prefix
-    // AS cannot omit the removal entry and smuggle in the revoked device.
+    // Floor must be progress.targetVersion (7), not anchor.headVersion (3).
     await waitFor(() => {
       expect(mockVerifyDeviceSet).toHaveBeenCalledWith(
         expect.anything(),
         anchorWithVersion.ownerRoot,
         7,
+      );
+    });
+  });
+
+  it("resume aborts when AS chain still contains the revoked device", async () => {
+    // Verifies the fail-closed guard: if the AS serves a chain where the
+    // revoked device is still a member, the resume throws rather than
+    // re-sealing to the revoked device.
+    const anchorWithVersion = { ...sampleAnchor, headVersion: 3 };
+    mockLoadAnchor.mockReturnValue(anchorWithVersion);
+
+    const device = makeDevice({ name: "My Device", isCurrent: true });
+    mockBuildDeviceList.mockResolvedValue([device]);
+
+    const revokedPub = "revokedX25519pub==";
+    const progress = {
+      targetVersion: 7, total: 2, done: 0,
+      secretIds: ["s1", "s2"], completed: [], failed: [],
+      isRevocation: true, revokedX25519Pub: revokedPub,
+      updatedAt: Date.now(),
+    };
+    mockLoadSweepProgress.mockReturnValue(progress);
+    mockRemainingCount.mockReturnValue(2);
+    // AS serves a stale chain: revoked device is still a member.
+    mockVerifyDeviceSet.mockResolvedValue({
+      members: [{ x25519_pub: revokedPub, sign_pub: "revokedsignpub==" }],
+      headHash: new Uint8Array(32),
+      headVersion: 7,
+    });
+
+    render(<DeviceManagement />);
+    await waitFor(() => screen.getByTestId("revocation-resume"));
+
+    await act(async () => {
+      await userEvent.click(screen.getByTestId("revocation-resume"));
+    });
+
+    // executeSweep must NOT be called; an error must be shown instead.
+    await waitFor(() => {
+      expect(mockExecuteSweep).not.toHaveBeenCalled();
+      expect(screen.getByTestId("device-list-error").textContent).toContain(
+        "stale-prefix",
       );
     });
   });

@@ -213,7 +213,7 @@ describe("revokeDevices", () => {
     void genesisHead;
   });
 
-  it("rejects the recovery device as a revocation target", async () => {
+  it("rejects the genesis recovery device as a revocation target", async () => {
     const { d1Keys, d1Ref, recRef, ownerRoot, genesisLog, genesisHead } =
       await buildFixture();
 
@@ -237,6 +237,53 @@ describe("revokeDevices", () => {
         cpClient: noopCPClient(),
       }),
     ).rejects.toThrow(/recovery virtual device/);
+  });
+
+  it("rejects a post-rotation recovery device as a revocation target", async () => {
+    // After recoverAndRotate the live recovery device has a new sign_pub that
+    // does NOT match ownerRoot.recovery_sign_pub (the genesis key). The guard
+    // in revokeDevices must detect it via the name-based criterion ("recovery"
+    // label on the add entry) rather than the genesis sign_pub comparison.
+    const { d1Keys, d1Ref, recKeys, recRef, ownerRoot, genesisLog } =
+      await buildFixture();
+
+    // Simulate recoverAndRotate: add a new recovery device with name "recovery"
+    const newRecKeys = await generateDeviceKeys();
+    const newRecRef = await mkRef(newRecKeys);
+    // The new recovery device is added by the old recovery key
+    const addNewRec = await buildAddEntry(
+      genesisLog, newRecRef, "recovery", recRef, recKeys.ecdsaPrivate,
+    );
+    const logWithNewRec: DeviceSetLog = { entries: [...genesisLog.entries, addNewRec] };
+    const newRecHead = toBase64(await computeEntryHash(addNewRec));
+
+    // (Old recovery device would be removed next in a real rotate, but for this
+    // guard test only the new rec device needs to be present.)
+
+    const transport: ASTransport = {
+      fetchLog: async () => ({ log: { entries: [...logWithNewRec.entries] }, head: newRecHead, version: 2 }),
+      append: async (_e) => { throw new Error("should not append"); },
+    };
+
+    saveAnchor({ ownerRoot, headVersion: 2 });
+
+    // newRecRef.sign_pub !== ownerRoot.recovery_sign_pub, so the old genesis-only
+    // check would miss this and allow the revoke. The name-based check must catch it.
+    await expect(
+      revokeDevices({
+        transport,
+        signerKeys: d1Keys,
+        signerRef: d1Ref,
+        ownerRoot,
+        pinnedHeadVersion: 2,
+        targetX25519Pubs: [newRecRef.x25519_pub],
+        survivorX25519Pubs: [d1Ref.x25519_pub, recRef.x25519_pub],
+        secretIds: [],
+        cpClient: noopCPClient(),
+      }),
+    ).rejects.toThrow(/recovery virtual device/);
+
+    void recKeys;
   });
 
   it("sweep is initialized as revocation and persisted", async () => {

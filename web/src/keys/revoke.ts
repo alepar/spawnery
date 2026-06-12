@@ -11,6 +11,7 @@
 
 import {
   buildRemoveEntry,
+  parseEntryBody,
   verifyDeviceSet,
   type ASTransport,
   type DeviceRef,
@@ -102,17 +103,18 @@ export async function revokeDevices(opts: RevokeOpts): Promise<SweepProgress> {
   const { log } = await opts.transport.fetchLog();
   const verified = await verifyDeviceSet(log, opts.ownerRoot, opts.pinnedHeadVersion);
 
-  // Reject recovery targets (recovery virtual device cannot be removed via normal revoke)
+  // Reject recovery targets (recovery virtual device cannot be removed via normal revoke).
+  // The recovery sign_pub changes after recoverAndRotate, so checking solely against
+  // ownerRoot.recovery_sign_pub (the genesis key) fails to protect post-rotation
+  // recovery devices.  Build a union of all recovery sign_pubs from the log so
+  // the backstop is effective regardless of rotation history.
+  const recoverySignPubs = buildRecoverySignPubs(log, opts.ownerRoot);
   for (const member of verified.members) {
-    if (targetSet.has(member.x25519_pub)) {
-      // Check if this member is the genesis recovery device
-      // (ownerRoot.recovery_sign_pub is the genesis recovery signing key)
-      if (member.sign_pub === opts.ownerRoot.recovery_sign_pub) {
-        throw new Error(
-          "revoke: the recovery virtual device cannot be removed via normal revoke; " +
-          "use the recovery flow to rotate the recovery code",
-        );
-      }
+    if (targetSet.has(member.x25519_pub) && recoverySignPubs.has(member.sign_pub)) {
+      throw new Error(
+        "revoke: the recovery virtual device cannot be removed via normal revoke; " +
+        "use the recovery flow to rotate the recovery code",
+      );
     }
   }
 
@@ -189,4 +191,25 @@ function buildSurvivorPubBytes(
   survivorX25519Pubs: string[],
 ): Uint8Array[] {
   return survivorX25519Pubs.map((pub) => fromBase64(pub));
+}
+
+/**
+ * buildRecoverySignPubs returns the union of all sign_pubs that have ever been
+ * the recovery virtual device:
+ *   - ownerRoot.recovery_sign_pub (genesis recovery key, always included)
+ *   - any "add" entry whose body.label.name === "recovery" (post-rotation devices,
+ *     added by recovery.ts which always names the virtual device "recovery")
+ *
+ * Using only ownerRoot.recovery_sign_pub is insufficient after recoverAndRotate
+ * because the live recovery device's sign_pub differs from the genesis key.
+ */
+function buildRecoverySignPubs(log: DeviceSetLog, ownerRoot: OwnerRoot): Set<string> {
+  const pubs = new Set<string>([ownerRoot.recovery_sign_pub]);
+  for (const entry of log.entries) {
+    const body = parseEntryBody(entry);
+    if (body.type === "add" && body.change && body.label?.name === "recovery") {
+      pubs.add(body.change.sign_pub);
+    }
+  }
+  return pubs;
 }
