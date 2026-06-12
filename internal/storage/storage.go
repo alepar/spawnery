@@ -23,7 +23,14 @@ func NewScratch(root string) *Scratch { return &Scratch{Root: root} }
 
 func (s *Scratch) Prepare(_ context.Context, spawnID, mountName, seedDir string) (string, error) {
 	hostDir := filepath.Join(s.Root, spawnID, mountName)
-	if err := os.MkdirAll(hostDir, 0o755); err != nil {
+	if err := os.MkdirAll(hostDir, 0o777); err != nil {
+		return "", err
+	}
+	// The agent runs --cap-drop=ALL (no CAP_DAC_OVERRIDE), so its uid is subject to real
+	// permissions even as container-root; the host dir is owned by the (possibly different) node
+	// uid. Make the mount world-writable so the agent can write its own data dir regardless of the
+	// uid mapping (rootful / rootless / future userns). MkdirAll is umask-masked, so chmod explicitly.
+	if err := os.Chmod(hostDir, 0o777); err != nil {
 		return "", err
 	}
 	if err := copyDirFiles(seedDir, hostDir); err != nil {
@@ -54,7 +61,8 @@ func copyDirFiles(srcDir, dstDir string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(dstDir, e.Name()), b, 0o644); err != nil {
+		// 0o666: seeded files must be editable by the cap-dropped agent uid too (see Prepare).
+		if err := os.WriteFile(filepath.Join(dstDir, e.Name()), b, 0o666); err != nil {
 			return err
 		}
 	}
