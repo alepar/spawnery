@@ -26,10 +26,10 @@ import { generateMnemonic } from "./bip39";
 import {
   buildAddEntry,
   buildRemoveEntry,
-  appendEntry,
-  fetchDeviceSetLog,
   verifyDeviceSet,
   ConflictError,
+  type ASTransport,
+  type AppendResult,
   type DeviceRef,
   type OwnerRoot,
   type StoredEntry,
@@ -76,8 +76,7 @@ export async function recoverAndRotate(opts: {
   newDeviceName: string;
   ownerRoot: OwnerRoot;
   pinnedHeadVersion: number;
-  asUrl: string;
-  bearerToken: string;
+  transport: ASTransport;
   secretIds: string[];
 }): Promise<RecoveryResult> {
   // Derive recovery keys from the entered phrase
@@ -89,7 +88,7 @@ export async function recoverAndRotate(opts: {
   };
 
   // Fetch and verify the chain ([WM6] head-regression check)
-  const { log } = await fetchDeviceSetLog(opts.asUrl, opts.bearerToken);
+  const { log } = await opts.transport.fetchLog();
   const verified = await verifyDeviceSet(log, opts.ownerRoot, opts.pinnedHeadVersion);
 
   // Confirm the recovery key is actually a current member
@@ -121,46 +120,43 @@ export async function recoverAndRotate(opts: {
   // Step 3: Enroll the fresh device (signed by recovery key)
   let currentLog = log;
   await buildAndAppendWithRetry(
+    opts.transport,
     () => buildAddEntry(currentLog, freshDSRef, opts.newDeviceName, recoveryDSRef, recoveryKeys.ecdsaPrivate),
     async () => {
-      const refetched = await fetchDeviceSetLog(opts.asUrl, opts.bearerToken);
+      const refetched = await opts.transport.fetchLog();
       await verifyDeviceSet(refetched.log, opts.ownerRoot);
       currentLog = refetched.log;
     },
-    opts.asUrl,
-    opts.bearerToken,
   );
 
   // Rebuild currentLog to include the fresh device entry
-  const { log: logAfterAdd } = await fetchDeviceSetLog(opts.asUrl, opts.bearerToken);
+  const { log: logAfterAdd } = await opts.transport.fetchLog();
   currentLog = logAfterAdd;
 
   // Step 4a: Enroll the new recovery virtual device (signed by recovery key)
   await buildAndAppendWithRetry(
+    opts.transport,
     () => buildAddEntry(currentLog, newRecoveryDSRef, "recovery", recoveryDSRef, recoveryKeys.ecdsaPrivate),
     async () => {
-      const refetched = await fetchDeviceSetLog(opts.asUrl, opts.bearerToken);
+      const refetched = await opts.transport.fetchLog();
       await verifyDeviceSet(refetched.log, opts.ownerRoot);
       currentLog = refetched.log;
     },
-    opts.asUrl,
-    opts.bearerToken,
   );
 
   // Rebuild again
-  const { log: logAfterAddRecovery } = await fetchDeviceSetLog(opts.asUrl, opts.bearerToken);
+  const { log: logAfterAddRecovery } = await opts.transport.fetchLog();
   currentLog = logAfterAddRecovery;
 
   // Step 4b: Remove the OLD recovery virtual device (signed by fresh device — it's now enrolled)
   await buildAndAppendWithRetry(
+    opts.transport,
     () => buildRemoveEntry(currentLog, recoveryDSRef.x25519_pub, freshDSRef, freshDeviceKeys.ecdsaPrivate),
     async () => {
-      const refetched = await fetchDeviceSetLog(opts.asUrl, opts.bearerToken);
+      const refetched = await opts.transport.fetchLog();
       await verifyDeviceSet(refetched.log, opts.ownerRoot);
       currentLog = refetched.log;
     },
-    opts.asUrl,
-    opts.bearerToken,
   );
 
   // Persist the fresh device keys ([WM11])
@@ -179,18 +175,21 @@ export async function recoverAndRotate(opts: {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-async function buildAndAppendWithRetry(
+/**
+ * buildAndAppendWithRetry appends a single entry with CAS retry-rebase ([WM1]).
+ * Exported so hermetic tests can exercise the retry loop without a live AS.
+ */
+export async function buildAndAppendWithRetry(
+  transport: ASTransport,
   buildFn: () => Promise<StoredEntry>,
   rebaseFn: () => Promise<void>,
-  asUrl: string,
-  bearerToken: string,
   maxRetries = 5,
-): Promise<{ version: number; head: string }> {
+): Promise<AppendResult> {
   let retries = 0;
   while (true) {
     const entry = await buildFn();
     try {
-      return await appendEntry(asUrl, bearerToken, entry);
+      return await transport.append(entry);
     } catch (e) {
       if (e instanceof ConflictError && retries < maxRetries) {
         retries++;

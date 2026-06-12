@@ -287,6 +287,25 @@ export interface ConflictInfo {
 }
 
 /**
+ * ASTransport is the injectable seam for AS device-set operations.
+ * The HTTP implementation is httpASTransport; tests supply fakes.
+ */
+export interface ASTransport {
+  fetchLog(): Promise<{ log: DeviceSetLog; head: string; version: number }>;
+  append(entry: StoredEntry): Promise<AppendResult>;
+}
+
+/**
+ * httpASTransport builds the production ASTransport backed by the real AS HTTP API.
+ */
+export function httpASTransport(asUrl: string, bearerToken: string): ASTransport {
+  return {
+    fetchLog: () => fetchDeviceSetLog(asUrl, bearerToken),
+    append: (e) => appendEntry(asUrl, bearerToken, e),
+  };
+}
+
+/**
  * appendEntry posts a single entry to the AS device-set registry.
  * Returns the new head on success, or throws with ConflictError on 409.
  *

@@ -31,7 +31,7 @@ import {
   type ApprovalResult,
 } from "@/keys/enrollment";
 import { loadDeviceKeys } from "@/keys/device";
-import { fetchDeviceSetLog, type OwnerRoot, type DeviceRef } from "@/keys/deviceset";
+import { fetchDeviceSetLog, httpASTransport, type OwnerRoot, type DeviceRef } from "@/keys/deviceset";
 import { asHttpUrl } from "@/config/endpoints";
 
 // ── Enrollee side ─────────────────────────────────────────────────────────────
@@ -93,8 +93,7 @@ export function EnrolleeModal({
       const { persistGranted } = await finalizeEnrollment({
         pendingKeys: linkResult.keys,
         approval,
-        asUrl: asHttpUrl(""),
-        bearerToken,
+        transport: httpASTransport(asHttpUrl(""), bearerToken),
       });
       setStep("done");
       onComplete(persistGranted);
@@ -263,8 +262,7 @@ export function ApproverModal({
 
       const result = await approveEnrollment({
         payload,
-        asUrl: asHttpUrl(""),
-        bearerToken,
+        transport: httpASTransport(asHttpUrl(""), bearerToken),
         approverKeys,
         ownerRoot,
         secretIds,

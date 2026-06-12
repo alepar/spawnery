@@ -23,6 +23,7 @@ import {
   type CeremonyContext,
 } from "@/keys/ceremony";
 import { featureDetectX25519 } from "@/keys/device";
+import { httpASTransport } from "@/keys/deviceset";
 import { asHttpUrl } from "@/config/endpoints";
 
 export type CeremonyStep =
@@ -98,7 +99,7 @@ export function CeremonyModal({
   // Publish once we reach the publishing step
   useEffect(() => {
     if (step !== "publishing" || !ctx) return;
-    completeCeremony(ctx, asHttpUrl(""), bearerToken)
+    completeCeremony(ctx, httpASTransport(asHttpUrl(""), bearerToken))
       .then(({ persistGranted: granted }) => {
         setPersistGranted(granted);
         setStep("done");

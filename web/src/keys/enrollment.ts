@@ -26,10 +26,9 @@
 
 import {
   buildAddEntry,
-  appendEntry,
-  fetchDeviceSetLog,
   verifyDeviceSet,
   ConflictError,
+  type ASTransport,
   type DeviceRef,
   type OwnerRoot,
   type StoredEntry,
@@ -154,8 +153,7 @@ export interface ApprovalResult {
  */
 export async function approveEnrollment(opts: {
   payload: EnrollmentPayload;
-  asUrl: string;
-  bearerToken: string;
+  transport: ASTransport;
   approverKeys: DeviceKeys;
   ownerRoot: OwnerRoot;
   secretIds: string[]; // list of secret IDs for the re-seal sweep ([WM2])
@@ -172,7 +170,7 @@ export async function approveEnrollment(opts: {
   };
 
   // Fetch and verify current chain
-  const { log } = await fetchDeviceSetLog(opts.asUrl, opts.bearerToken);
+  const { log } = await opts.transport.fetchLog();
   await verifyDeviceSet(log, opts.ownerRoot, opts.pinnedHeadVersion);
 
   // Build the add entry and attempt to append with CAS retry-rebase ([WM1])
@@ -191,13 +189,13 @@ export async function approveEnrollment(opts: {
       opts.approverKeys.ecdsaPrivate,
     );
     try {
-      appendResult = await appendEntry(opts.asUrl, opts.bearerToken, addEntry);
+      appendResult = await opts.transport.append(addEntry);
       break;
     } catch (e) {
       if (e instanceof ConflictError && retries < MAX_RETRIES) {
         // Rebase: re-fetch the chain and rebuild on top of the new head ([WM1])
         retries++;
-        const refetched = await fetchDeviceSetLog(opts.asUrl, opts.bearerToken);
+        const refetched = await opts.transport.fetchLog();
         await verifyDeviceSet(refetched.log, opts.ownerRoot, opts.pinnedHeadVersion);
         currentLog = refetched.log;
         continue;
@@ -243,11 +241,10 @@ export interface EnrollmentApproval {
 export async function finalizeEnrollment(opts: {
   pendingKeys: DeviceKeys;
   approval: EnrollmentApproval;
-  asUrl: string;
-  bearerToken: string;
+  transport: ASTransport;
 }): Promise<{ persistGranted: boolean }> {
   // Verify the chain against the received OwnerRoot ([WM5])
-  const { log } = await fetchDeviceSetLog(opts.asUrl, opts.bearerToken);
+  const { log } = await opts.transport.fetchLog();
   await verifyDeviceSet(log, opts.approval.ownerRoot, opts.approval.headVersion);
 
   // Persist device keys ([WM11])

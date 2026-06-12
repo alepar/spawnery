@@ -20,7 +20,7 @@
 
 import { generateDeviceKeys, deriveDeviceKeysFromMnemonic, exportDeviceRef, storeDeviceKeys } from "./device";
 import { generateMnemonic } from "./bip39";
-import { buildGenesisEntry, appendEntry, type StoredEntry, type OwnerRoot } from "./deviceset";
+import { buildGenesisEntry, type ASTransport, type StoredEntry, type OwnerRoot } from "./deviceset";
 import { toBase64 } from "./encoding";
 
 export type CeremonyStep =
@@ -147,11 +147,10 @@ export async function ceremonyRoundTripCheck(
  */
 export async function completeCeremony(
   ctx: CeremonyContext,
-  asUrl: string,
-  bearerToken: string,
+  transport: ASTransport,
 ): Promise<{ persistGranted: boolean }> {
   // Publish genesis to AS first (atomic — no local state persisted until success)
-  await appendEntry(asUrl, bearerToken, ctx.genesisEntry);
+  await transport.append(ctx.genesisEntry);
 
   // Now persist keys to IndexedDB + call navigator.storage.persist()
   const { persistGranted } = await storeDeviceKeys(ctx.deviceKeys);

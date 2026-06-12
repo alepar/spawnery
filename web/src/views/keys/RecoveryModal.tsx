@@ -18,7 +18,7 @@
 import { useState, useCallback } from "react";
 import { recoverAndRotate, M8_TRUSTED_DEVICE_WARNING } from "@/keys/recovery";
 import { LOSS_DISCLOSURE } from "@/keys/ceremony";
-import { type OwnerRoot } from "@/keys/deviceset";
+import { httpASTransport, type OwnerRoot } from "@/keys/deviceset";
 import { asHttpUrl } from "@/config/endpoints";
 
 interface RecoveryModalProps {
@@ -55,8 +55,7 @@ export function RecoveryModal({
         newDeviceName: "browser",
         ownerRoot,
         pinnedHeadVersion,
-        asUrl: asHttpUrl(""),
-        bearerToken,
+        transport: httpASTransport(asHttpUrl(""), bearerToken),
         secretIds,
       });
       setNewPhrase(result.newRecoveryPhrase);
