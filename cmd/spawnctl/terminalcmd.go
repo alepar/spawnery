@@ -17,22 +17,28 @@ import (
 )
 
 // terminalFlags are shared by attach/exec/shell: -addr is the node terminal endpoint (the mosh data
-// plane goes straight there); -cp/-token are used only to list+pick a spawn when -spawn is omitted.
+// plane goes straight there); -cp/-token/-config-dir are used only to list+pick a spawn when -spawn is omitted.
 func terminalFlags() []cli.Flag {
 	return []cli.Flag{
+		configDirFlag(),
 		&cli.StringFlag{Name: "addr", Value: "http://127.0.0.1:9092", Usage: "node terminal endpoint"},
 		&cli.StringFlag{Name: "spawn", Usage: "spawn id (omit to pick interactively)"},
 		&cli.StringFlag{Name: "cp", Value: "http://127.0.0.1:8080", Usage: "control-plane (for listing/picking spawns)"},
-		&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP)"},
+		&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP); superseded by stored login credentials"},
 	}
 }
 
-// resolveSpawn returns the chosen spawn id: the -spawn flag if set, else an interactive pick.
+// resolveSpawn returns the chosen spawn id: the -spawn flag if set, else an interactive pick via the CP.
 func resolveSpawn(c *cli.Command) string {
 	if s := c.String("spawn"); s != "" {
 		return s
 	}
-	id := chooseSpawn(c.String("cp"), c.String("token"))
+	dir, err := resolveDir(c)
+	if err != nil {
+		log.Fatalf("resolveSpawn: config dir: %v", err)
+	}
+	src := buildTokenSource(dir, c.String("token"), h2cClient())
+	id := chooseSpawn(c.String("cp"), src)
 	if id == "" {
 		log.Fatal("no spawn selected")
 	}
