@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -20,6 +21,7 @@ import (
 
 	"spawnery/gen/spawn/v1/spawnv1connect"
 	"spawnery/internal/authsvc"
+	"spawnery/internal/authsvc/token"
 	"spawnery/internal/node"
 	"spawnery/internal/node/nodeid"
 	"spawnery/internal/pki"
@@ -111,6 +113,7 @@ func main() {
 		if sk := nodeSubKeys(cfg.NodeID); sk != nil {
 			cfg.SubKeys = sk
 		}
+		cfg.Verifier = buildIntentVerifier(cfg.NodeID, cfg.NodeOwner)
 		log.Printf("spawnlet attaching to CP at %s as %s", cfg.CPURL, cfg.NodeID)
 		err = node.Run(ctx, mgr, httpc, cfg) // returns when ctx is cancelled (signal) or on fatal error
 		gracefulStopAll(mgr)
@@ -307,6 +310,62 @@ func nodeSubKeys(nodeID string) *subkey.Node {
 		return nil
 	}
 	return subkey.NewNode(key, nodeID, 0)
+}
+
+// buildIntentVerifier builds the A4 IntentVerifier from the environment [AC1][AM12].
+//
+// NODE_AUTH_MODE=insecure (default): AuthModeVerifyLog — the full verification chain runs but
+// failures are logged rather than enforced. This satisfies AM12 (dev/prod parity via verify-and-log).
+// NODE_AUTH_MODE=enforced: AuthModeEnforced — failures block execution and return NACK codes.
+//
+// NODE_AS_PUBKEYS (comma-separated PEM file paths): the AS session signing public keys the node
+// uses to verify the aud=node access token. In insecure mode an empty key set is valid (the token
+// step fails with ErrUnknownKey which is logged but not enforced). In enforced mode, the AS public
+// keys must be configured here.
+//
+// NODE_OWNER: if non-empty AND NODE_AUTH_MODE=enforced, enables the self-hosted owner check
+// (the token's account_id must equal NODE_OWNER).
+func buildIntentVerifier(nodeID, nodeOwner string) *node.IntentVerifier {
+	enforced := env("NODE_AUTH_MODE", "insecure") == "enforced"
+	authMode := node.AuthModeVerifyLog
+	if enforced {
+		authMode = node.AuthModeEnforced
+	}
+
+	ks, err := loadNodeKeySet(env("NODE_AS_PUBKEYS", ""))
+	if err != nil {
+		log.Printf("buildIntentVerifier: load AS pubkeys: %v (verification will log token failures)", err)
+	} else if len(ks) > 0 {
+		log.Printf("node: loaded %d AS pubkey(s) for intent verification", len(ks))
+	}
+
+	selfHosted := enforced && nodeOwner != ""
+	return node.NewIntentVerifier(ks, nodeOwner, nodeID, selfHosted, authMode, nil)
+}
+
+// loadNodeKeySet parses comma-separated PEM file paths into a token.KeySet.
+// Empty s returns an empty KeySet (valid in insecure mode — token step logs ErrUnknownKey).
+func loadNodeKeySet(s string) (token.KeySet, error) {
+	if s == "" {
+		return token.KeySet{}, nil
+	}
+	var pubs []ed25519.PublicKey
+	for _, p := range splitCSV(s) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		pemBytes, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", p, err)
+		}
+		pub, err := token.ParsePublicKeyPEM(pemBytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", p, err)
+		}
+		pubs = append(pubs, pub)
+	}
+	return token.NewKeySet(pubs...)
 }
 
 func h2cClient() *http.Client {

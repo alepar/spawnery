@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"time"
 
@@ -51,11 +53,12 @@ func migrateTarget(spawnID, target string) *cpv1.MigrateSpawnRequest {
 	return &cpv1.MigrateSpawnRequest{SpawnId: spawnID, TargetNodeId: target}
 }
 
-// runMove is the testable orchestration of `spawnctl move`. dev is the local owner device (its private
-// X25519 half opens the owner-sealed envelopes). On any step failure it returns a clear, data-safe
-// message: the CP leaves the spawn in a defined state (resumed on the source's data, back to
-// suspended on a failed target), so the user's data is never lost.
-func runMove(ctx context.Context, client moveClient, dev *seal.Device, spawnID, target string, out io.Writer, now time.Time) error {
+// runMove is the testable orchestration of `spawnctl move`. ic is the A4 intent client used to
+// sign the migration intent (nil skips the intent flow for legacy/test CPs). dev is the local
+// owner device (its private X25519 half opens the owner-sealed envelopes). On any step failure
+// it returns a clear, data-safe message: the CP leaves the spawn in a defined state (resumed on
+// the source's data, back to suspended on a failed target), so the user's data is never lost.
+func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.Device, spawnID, target string, out io.Writer, now time.Time) error {
 	fmt.Fprintf(out, "move %s -> %s\n", spawnID, target)
 
 	// 1) Fetch the owner-sealed journal-key ciphertext for the spawn's mounts (CP holds ciphertext only).
@@ -70,7 +73,24 @@ func runMove(ctx context.Context, client moveClient, dev *seal.Device, spawnID, 
 	}
 
 	// 2) Drive the migration: suspend on the source, resume with a placement override on the target.
+	// A4 two-phase sign-after-resolve [AC1][AM12]: launch pollAndSign concurrently so it can submit
+	// the signed intent while MigrateSpawn blocks at the CP waiting for it.
 	fmt.Fprintln(out, "  migrating (suspend source -> resume on target)...")
+	pollCtx, cancelPoll := context.WithCancel(ctx)
+	defer cancelPoll()
+	if ic != nil {
+		// For an explicit node target, validate the CP's resolved target_node_id [AM1].
+		// For "cloud", the CP selects the node — leave TargetNodeID empty (no validation).
+		var migrateTargetNodeID string
+		if target != targetCloud {
+			migrateTargetNodeID = target
+		}
+		go func() {
+			if err := pollAndSign(pollCtx, ic, spawnID, intentParams{TargetNodeID: migrateTargetNodeID}); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("move pollAndSign %s: %v", spawnID, err)
+			}
+		}()
+	}
 	mr, err := client.MigrateSpawn(ctx, connect.NewRequest(migrateTarget(spawnID, target)))
 	if err != nil {
 		return fmt.Errorf("migrate: %w (your data is safe — resume on the source)", err)
@@ -175,7 +195,9 @@ func moveCmd() *cli.Command {
 			src := buildTokenSource(dir, c.String("token"), h2cClient())
 			client := cpv1connect.NewSpawnServiceClient(h2cClient(), c.String("cp"),
 				connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
-			if err := runMove(ctx, client, dev, spawnID, target, c.Writer, time.Now()); err != nil {
+			// Pass client as both moveClient and intentClient — cpv1connect.SpawnServiceClient
+			// satisfies both interfaces.
+			if err := runMove(ctx, client, client, dev, spawnID, target, c.Writer, time.Now()); err != nil {
 				return cli.Exit("move failed: "+err.Error(), 1)
 			}
 			return nil

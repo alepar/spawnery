@@ -11,11 +11,13 @@ import (
 
 	"connectrpc.com/connect"
 
+	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
+	"spawnery/internal/intent"
 )
 
 // defaultSuspendTimeout bounds how long SuspendSpawn waits for the hosting node's SuspendComplete
@@ -255,7 +257,7 @@ func (s *Server) ResumeSpawn(ctx context.Context, req *connect.Request[cpv1.Resu
 	defer unlock()
 	// A plain resume re-places anywhere the policy allows (no override) and, on failure, lands in
 	// 'error' (sp-a7fs contract). MigrateSpawn reuses resumeLocked with an override + revert-on-fail.
-	if _, err := s.resumeLocked(ctx, owner, req.Msg.SpawnId, placementOverride{}, false); err != nil {
+	if _, err := s.resumeLocked(ctx, owner, req.Msg.SpawnId, placementOverride{}, false, intent.OpResumeSpawn); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&cpv1.ResumeSpawnResponse{}), nil
@@ -273,7 +275,8 @@ type placementOverride struct {
 // and finalizes 'active'. On provision/activation failure it leaves a DEFINED state: revertOnFail=true
 // (migration) rolls back to 'suspended' with the target artifacts cleaned; false (plain resume) goes
 // to 'error'. Returns the node the spawn resumed on.
-func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placementOverride, revertOnFail bool) (string, error) {
+// op identifies the lifecycle operation for the A4 PendingIntent domain tag [AC1].
+func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placementOverride, revertOnFail bool, op intent.Op) (string, error) {
 	sp, err := s.st.Spawns().Get(ctx, id)
 	if err != nil {
 		return "", connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
@@ -307,7 +310,30 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	}); err != nil {
 		return "", connect.NewError(connect.CodeInternal, err)
 	}
-	nodeID, err := s.sched.Provision(ctx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement)
+
+	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
+	// Skipped when intentEnabled=false (nil env; node verify-and-log on the other side [AM12]).
+	var env *authv1.AuthEnvelope
+	if s.intentEnabled {
+		targetNodeID, pickErr := s.sched.PickNodeID(placement)
+		if pickErr != nil {
+			s.failResume(ctx, id, gen, revertOnFail, "PickNodeID")
+			return "", pickErr
+		}
+		mounts, _ := s.st.Spawns().GetMounts(ctx, id)
+		pi := buildPendingIntent(op, id, uint64(gen), targetNodeID, sp.Image, sp.AppRef, sp.Model, "", mounts)
+		ch := s.pendingIntents.register(id, owner, pi)
+		defer s.pendingIntents.cleanup(id)
+		env, err = s.pendingIntents.await(ctx, ch)
+		if err != nil {
+			s.failResume(ctx, id, gen, revertOnFail, "await SignedIntent")
+			return "", connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("await SignedIntent: %w", err))
+		}
+		// Pin the same node the client signed for.
+		placement.TargetNodeID = targetNodeID
+	}
+
+	nodeID, err := s.sched.Provision(ctx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env)
 	if err != nil {
 		s.failResume(ctx, id, gen, revertOnFail, "provision")
 		return "", err
@@ -406,7 +432,7 @@ func (s *Server) MigrateSpawn(ctx context.Context, req *connect.Request[cpv1.Mig
 	default:
 		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn must be active or suspended to migrate"))
 	}
-	nodeID, err := s.resumeLocked(ctx, owner, id, placementOverride{NodeID: targetNode, Class: targetClass}, true)
+	nodeID, err := s.resumeLocked(ctx, owner, id, placementOverride{NodeID: targetNode, Class: targetClass}, true, intent.OpMigrateSpawn)
 	if err != nil {
 		return nil, err
 	}
@@ -455,7 +481,33 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	placement.Image = sp.Image
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement)
+
+	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
+	var env *authv1.AuthEnvelope
+	if s.intentEnabled {
+		targetNodeID, pickErr := s.sched.PickNodeID(placement)
+		if pickErr != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+				log.Printf("RecreateSpawn %s: SetError after PickNodeID failure also failed: %v", req.Msg.SpawnId, serr)
+			}
+			return nil, pickErr
+		}
+		mounts, _ := s.st.Spawns().GetMounts(ctx, req.Msg.SpawnId)
+		pi := buildPendingIntent(intent.OpRecreateSpawn, req.Msg.SpawnId, uint64(gen), targetNodeID, sp.Image, sp.AppRef, sp.Model, "", mounts)
+		ch := s.pendingIntents.register(req.Msg.SpawnId, owner, pi)
+		defer s.pendingIntents.cleanup(req.Msg.SpawnId)
+		var awaitErr error
+		env, awaitErr = s.pendingIntents.await(ctx, ch)
+		if awaitErr != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+				log.Printf("RecreateSpawn %s: SetError after await failure also failed: %v", req.Msg.SpawnId, serr)
+			}
+			return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("await SignedIntent: %w", awaitErr))
+		}
+		placement.TargetNodeID = targetNodeID
+	}
+
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env)
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
@@ -494,10 +546,15 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 	}
 	out := make([]*cpv1.SpawnSummary, len(spawns))
 	for i, sp := range spawns {
+		var gen uint64
+		if c, ok, cerr := s.st.Spawns().LiveContainer(ctx, sp.ID); ok && cerr == nil {
+			gen = uint64(c.Generation)
+		}
 		out[i] = &cpv1.SpawnSummary{
 			SpawnId: sp.ID, AppId: sp.AppID, AppVersion: sp.AppVersion, Model: sp.Model,
 			Status: toSummaryStatus(sp.Status), CreatedAt: sp.CreatedAt, LastUsedAt: sp.LastUsedAt,
 			Name: sp.Name, Mode: sp.Mode, ModelApplied: sp.ModelApplied,
+			Generation: gen,
 		}
 	}
 	return connect.NewResponse(&cpv1.ListSpawnsResponse{Spawns: out}), nil

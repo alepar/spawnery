@@ -5,6 +5,7 @@ package cp
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log"
@@ -15,10 +16,13 @@ import (
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 
+	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/agentcaps"
+	"spawnery/internal/authsvc/token"
+	"spawnery/internal/intent"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/journalkeys"
 	"spawnery/internal/cp/lock"
@@ -77,6 +81,22 @@ type Server struct {
 	verify        func(string) (auth.Identity, error)
 	devMode       bool
 	reauthInterval time.Duration // reauth deadline; 0 uses defaultReauthInterval
+
+	// intentEnabled gates the A4 two-phase sign-after-resolve flow. Decoupled from devMode so that
+	// dev instances can run the full A4 flow (verify-and-log at the node) when a dev AS key is
+	// available. Default false keeps existing tests passing — tests that need the intent flow call
+	// SetIntentEnabled(true). Production callers also call SetIntentEnabled(true) after auth mode
+	// is confirmed [AM12].
+	intentEnabled bool
+	// devASKey is the dev-only AS Ed25519 signing key used to mint aud=node tokens in SubmitIntent
+	// when the client does not supply NodeAccessToken. Set via SetDevASKey; nil = no dev minting.
+	devASKey   ed25519.PrivateKey
+	devASKeyID string
+
+	// pendingIntents is the A4 two-phase sign-after-resolve registry [AC1]. Lifecycle handlers
+	// (Create/Resume/Recreate/Migrate) register a pending intent BEFORE calling Provision; the
+	// client polls GetPendingIntent and submits a SignedIntent via SubmitIntent, unblocking provision.
+	pendingIntents *pendingIntentRegistry
 }
 
 const (
@@ -96,7 +116,11 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout,
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
-		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry()}
+		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
+		pendingIntents: newPendingIntentRegistry(),
+		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
+		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
+		devMode: true}
 }
 
 // --- node side: NodeService/Attach ----------------------------------------
@@ -350,6 +374,19 @@ func (s *Server) SetVerify(v func(string) (auth.Identity, error)) { s.verify = v
 // SetDevMode sets whether the server is in dev mode (reauth enforced in prod only).
 func (s *Server) SetDevMode(dev bool) { s.devMode = dev }
 
+// SetIntentEnabled enables or disables the A4 two-phase sign-after-resolve flow [AC1][AM12].
+// Defaults to false so existing tests are unaffected. Production main and dev instances with a
+// dev AS key call SetIntentEnabled(true).
+func (s *Server) SetIntentEnabled(v bool) { s.intentEnabled = v }
+
+// SetDevASKey configures the dev-only AS Ed25519 signing key used to mint aud=node tokens in
+// SubmitIntent when the client omits NodeAccessToken. priv must be non-nil; keyID is the derived
+// token.KeyID. In prod mode this MUST NOT be set — prod clients obtain node tokens from the real AS.
+func (s *Server) SetDevASKey(priv ed25519.PrivateKey, keyID string) {
+	s.devASKey = priv
+	s.devASKeyID = keyID
+}
+
 // SetReauthInterval overrides the in-band reauth deadline (default 15 min).
 func (s *Server) SetReauthInterval(d time.Duration) { s.reauthInterval = d }
 
@@ -467,7 +504,7 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	// Provision asynchronously: return the spawn in 'starting' immediately; the background goroutine
 	// drives it to active/error on the node's signal, so the UI can show a 'starting' period. The
 	// request ctx is done once we return, so the goroutine uses a detached ctx.
-	go s.provisionSpawn(context.WithoutCancel(ctx), spawnID, ver.Ref, req.Msg.Model, placement)
+	go s.provisionSpawn(context.WithoutCancel(ctx), spawnID, owner, ver.Ref, req.Msg.Model, placement)
 	return connect.NewResponse(&cpv1.CreateSpawnResponse{SpawnId: spawnID}), nil
 }
 
@@ -475,7 +512,9 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 // the per-spawn lock (serializing a Stop/Suspend during starting AFTER it) and bails if the spawn was
 // already stopped in the lock gap; then Provision -> SetActive, or SetError on failure, with the same
 // teardown compensation as the old inline path on a post-provision SetActive failure.
-func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model string, placement registry.Placement) {
+// When intentEnabled=true the two-phase A4 flow runs: PickNodeID → register pending intent →
+// await SignedIntent from client → Provision. When intentEnabled=false the flow is skipped (nil env).
+func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, model string, placement registry.Placement) {
 	unlock := s.locks.Lock(spawnID)
 	defer unlock()
 	sp, err := s.st.Spawns().Get(ctx, spawnID)
@@ -483,8 +522,36 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model stri
 		return // stopped/deleted in the lock gap, or already advanced
 	}
 	placement.Image = sp.Image
+
 	// Gen 1: store.Create inserted the live container row at generation 1 (SetActive below matches).
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement)
+	var env *authv1.AuthEnvelope
+	if s.intentEnabled {
+		// Two-phase A4 sign-after-resolve [AC1]: pick node, register pending intent, await client.
+		targetNodeID, pickErr := s.sched.PickNodeID(placement)
+		if pickErr != nil {
+			log.Printf("provisionSpawn %s: PickNodeID failed: %v", spawnID, pickErr)
+			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+				log.Printf("provisionSpawn %s: SetError after PickNodeID failure also failed: %v", spawnID, serr)
+			}
+			return
+		}
+		mounts, _ := s.st.Spawns().GetMounts(ctx, spawnID)
+		pi := buildPendingIntent(intent.OpCreateSpawn, spawnID, 1, targetNodeID, sp.Image, appRef, model, "", mounts)
+		ch := s.pendingIntents.register(spawnID, ownerID, pi)
+		defer s.pendingIntents.cleanup(spawnID)
+		env, err = s.pendingIntents.await(ctx, ch)
+		if err != nil {
+			log.Printf("provisionSpawn %s: await SignedIntent: %v", spawnID, err)
+			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+				log.Printf("provisionSpawn %s: SetError after await failure also failed: %v", spawnID, serr)
+			}
+			return
+		}
+		// Pin the same node the client signed for.
+		placement.TargetNodeID = targetNodeID
+	}
+
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env)
 	if err != nil {
 		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
@@ -555,6 +622,108 @@ func (s *Server) stop(ctx context.Context, owner, spawnID string) error {
 	}
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	return nil
+}
+
+// --- A4 two-phase intent RPCs [AC1] ----------------------------------------
+
+// GetPendingIntent returns the CP-committed tuple for an in-flight lifecycle op so the client
+// can validate and sign it. Returns ready=true + the pending tuple when the lifecycle handler
+// has registered it; ready=false if not yet registered (client should poll).
+func (s *Server) GetPendingIntent(ctx context.Context, req *connect.Request[cpv1.GetPendingIntentRequest]) (*connect.Response[cpv1.GetPendingIntentResponse], error) {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	sp, err := s.st.Spawns().Get(ctx, req.Msg.SpawnId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+	}
+	if sp.OwnerID != owner {
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+	pi, ready := s.pendingIntents.get(req.Msg.SpawnId)
+	return connect.NewResponse(&cpv1.GetPendingIntentResponse{Pending: pi, Ready: ready}), nil
+}
+
+// SubmitIntent delivers the client's SignedIntent + node access token, unblocking the pending
+// provision. The node_access_token is the aud=node AS-signed token bound to the client's
+// session key (the cnf claim). Both are threaded verbatim into StartSpawn as an AuthEnvelope.
+//
+// In dev mode (devASKey set), if node_access_token is empty the CP mints a cnf-bearing aud=node
+// token from the intent's SPKI DER so the full A4 verification chain can run at the node in
+// verify-and-log mode (NODE_AUTH_MODE=insecure) [AM12].
+func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	sp, err := s.st.Spawns().Get(ctx, req.Msg.SpawnId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+	}
+	if sp.OwnerID != owner {
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+
+	nodeTok := req.Msg.NodeAccessToken
+	// Dev-mode cnf-bearing node token minting [AM12]: if the client omits the node token and a dev
+	// AS key is configured, mint one bound to the intent's SPKI DER so the node can run the full
+	// eight-step verification chain in AuthModeVerifyLog (verify-and-log, not skip).
+	if nodeTok == "" && s.devASKey != nil && req.Msg.Intent != nil && len(req.Msg.Intent.SpkiDer) > 0 {
+		minted, mintErr := token.MintNode(s.devASKey, s.devASKeyID, owner, req.Msg.Intent.SpkiDer, s.now())
+		if mintErr != nil {
+			log.Printf("SubmitIntent %s: dev AS mint failed: %v (node token empty)", req.Msg.SpawnId, mintErr)
+		} else {
+			nodeTok = minted
+		}
+	}
+
+	env := &authv1.AuthEnvelope{
+		AccessToken: nodeTok,
+		Intent:      req.Msg.Intent,
+	}
+	if err := s.pendingIntents.submit(req.Msg.SpawnId, owner, env); err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
+	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil
+}
+
+// mintSessionEnv builds the session-open AuthEnvelope from a client-supplied envelope.
+// In dev mode (devASKey set), if access_token is empty the CP mints a cnf-bearing aud=node
+// token from the intent's SPKI DER so the full A4 verification chain runs [AM12].
+func (s *Server) mintSessionEnv(owner string, sa *authv1.AuthEnvelope) *authv1.AuthEnvelope {
+	if sa == nil || sa.Intent == nil {
+		return nil
+	}
+	nodeTok := sa.AccessToken
+	if nodeTok == "" && s.devASKey != nil && len(sa.Intent.SpkiDer) > 0 {
+		minted, err := token.MintNode(s.devASKey, s.devASKeyID, owner, sa.Intent.SpkiDer, s.now())
+		if err != nil {
+			log.Printf("mintSessionEnv: dev AS mint failed: %v", err)
+		} else {
+			nodeTok = minted
+		}
+	}
+	return &authv1.AuthEnvelope{AccessToken: nodeTok, Intent: sa.Intent}
+}
+
+// buildPendingIntent constructs the cp.v1.PendingIntent from the committed provision tuple.
+// mounts comes from the store's mount list for the spawn (may be nil for CreateSpawn).
+func buildPendingIntent(op intent.Op, spawnID string, gen uint64, targetNodeID, image, appRef, model, dataRef string, mounts []store.Mount) *cpv1.PendingIntent {
+	pi := &cpv1.PendingIntent{
+		Op:           string(op),
+		SpawnId:      spawnID,
+		Generation:   gen,
+		TargetNodeId: targetNodeID,
+		Image:        image,
+		AppRef:       appRef,
+		Model:        model,
+		DataRef:      dataRef,
+	}
+	for _, m := range mounts {
+		pi.Mounts = append(pi.Mounts, &cpv1.MountBinding{Name: m.Name, BackendUri: m.BackendURI})
+	}
+	return pi
 }
 
 // --- client-facing session RPCs (answered from CP's mirrored roster) ------
@@ -707,9 +876,14 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 
 	clientID := uuid.Must(uuid.NewV7()).String()
 	cs := &clientStream{stream: stream, spawnID: spawnID}
+	// A4: thread session-open AuthEnvelope from the bind frame into SessionOpen [AC1].
+	var sessionEnv *authv1.AuthEnvelope
+	if sa := first.GetSessionAuth(); sa != nil {
+		sessionEnv = s.mintSessionEnv(owner, sa)
+	}
 	// cursor 0: the cp.v1 Session-RPC transport has no resume cursor (only the WS bind does).
 	// session "0": this transport has no per-session selector yet (web uses the WS bind for that).
-	done, err := s.rt.AttachClient(spawnID, "0", clientID, cs, 0)
+	done, err := s.rt.AttachClient(spawnID, "0", clientID, sp.OwnerID, sessionEnv, cs, 0)
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}

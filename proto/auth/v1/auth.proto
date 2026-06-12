@@ -34,3 +34,50 @@ message RevocationEntry {
   repeated string token_ids = 4; // access-token token_ids the family had live at revocation
   int64 revoked_at = 5;
 }
+
+// MountRef is a (name, backend_uri) pair inside an IntentBody. Structurally identical to
+// node.v1.MountBinding but defined here to keep auth.v1 leaf (no cross-package import).
+message MountRef { string name = 1; string backend_uri = 2; }
+
+// IntentBody is the signed-intent payload (auth-identity design §5 [AC1][AM11]).
+// Clients marshal this, sign domain || body_bytes with their session P-256 key, and embed
+// the raw bytes verbatim in SignedIntent.body. Nodes verify the signature over the EXACT
+// received body bytes — never re-marshalled (WM9 discipline). The op field mirrors the
+// domain suffix so a body cannot be replayed under a different domain even if a verifier
+// mis-wires the domain string. Only the fields relevant to the op are populated; the node's
+// correspondence check compares exactly the fields it is about to execute.
+//
+// Domain tags: spawnery/intent/<op>/v1 for op ∈ {create-spawn, resume-spawn,
+// recreate-spawn, migrate-spawn, session-open}.
+message IntentBody {
+  string jti            = 1;  // unique intent id (UUID); node caches to detect replay
+  int64  issued_at      = 2;  // unix seconds; node enforces freshness window ±skew
+  string spawn_id       = 3;
+  uint64 generation     = 4;  // CP-committed episode generation
+  string target_node_id = 5;  // explicit target binding; node refuses if != self
+  string op             = 6;  // mirrors domain suffix (e.g. "create-spawn")
+  string app_ref        = 7;  // create: immutable app ref
+  string image          = 8;  // create: agent container image digest/ref
+  string model          = 9;  // create: model
+  string data_ref       = 10; // resume/recreate/migrate: mount data reference
+  string session_id     = 11; // session-open: session being opened
+  repeated MountRef mounts = 12; // create/resume: mount bindings
+}
+
+// SignedIntent carries a client-signed per-operation intent [AC1][AM11].
+// sig = ECDSA P-256 over SHA-256(domain || body), P1363 raw 64-byte r||s (WebCrypto-native).
+// spki_der is the full DER SPKI of the client's session key (the node needs the key, not
+// just the cnf hash [AM11]).
+message SignedIntent {
+  string domain   = 1; // "spawnery/intent/<op>/v1"
+  bytes  body     = 2; // EXACT proto.Marshal(IntentBody) bytes; never re-marshalled
+  bytes  sig      = 3; // P1363 r||s, 64 bytes
+  bytes  spki_der = 4; // full DER SPKI of the client session key [AM11]
+}
+
+// AuthEnvelope bundles the node-audience access token and the client's SignedIntent for
+// relay to the node via StartSpawn / SessionOpen [AC1].
+message AuthEnvelope {
+  string      access_token = 1; // AS-signed aud=node token [MC2]
+  SignedIntent intent       = 2;
+}

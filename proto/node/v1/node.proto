@@ -2,6 +2,8 @@ syntax = "proto3";
 package node.v1;
 option go_package = "spawnery/gen/node/v1;nodev1";
 
+import "auth/v1/auth.proto";
+
 service NodeService {
   // Node dials the CP and holds this stream open. Node sends NodeMessage; CP sends CPMessage.
   rpc Attach(stream NodeMessage) returns (stream CPMessage);
@@ -63,11 +65,40 @@ message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string
 // sub-key stays fresh without a dedicated message. Empty on heartbeats that carry no rotation.
 message Heartbeat   { uint32 active_spawns = 1; uint32 free_slots = 2; uint32 cpu_pct = 3; uint32 gpu_pct = 4; repeated RunningSpawn running = 5; bytes signed_subkey = 6; }
 message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; uint64 generation = 4; }
-message StartSpawn  { string spawn_id = 1; string app_ref = 2; string data_ref = 3; string model = 4; uint64 generation = 5; repeated MountBinding mounts = 6; string name = 7; string app_id = 8; string image = 9; string runnable_id = 10; string mode = 11; }
+// auth (field 20): the client's signed intent + aud=node access token (A4). The node verifies
+// the full chain: AS sig on token -> aud=node -> owner match -> SPKI/cnf match -> intent sig
+// -> field-by-field correspondence -> freshness -> jti uniqueness. In verify-and-log mode
+// (NODE_AUTH_MODE=insecure) failures are logged but not enforced.
+// asserted_owner (field 21): the CP-asserted spawn owner (cloud split model, sp-ova §7a).
+message StartSpawn  {
+  string spawn_id    = 1;
+  string app_ref     = 2;
+  string data_ref    = 3;
+  string model       = 4;
+  uint64 generation  = 5;
+  repeated MountBinding mounts = 6;
+  string name        = 7;
+  string app_id      = 8;
+  string image       = 9;
+  string runnable_id = 10;
+  string mode        = 11;
+  auth.v1.AuthEnvelope auth           = 20;
+  string               asserted_owner = 21;
+}
 message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }
 message Suspend     { string spawn_id = 1; uint64 generation = 2; }
 message SuspendComplete { string spawn_id = 1; uint64 generation = 2; repeated MountMarker markers = 3; }
-message SessionOpen  { string spawn_id = 1; uint64 generation = 2; string client_id = 3; int64 cursor = 4; string session_id = 5; }
+// auth (field 10): the client's session-open signed intent + aud=node access token (A4).
+// asserted_owner (field 11): CP-asserted owner for the cloud owner-binding check.
+message SessionOpen  {
+  string spawn_id   = 1;
+  uint64 generation = 2;
+  string client_id  = 3;
+  int64  cursor     = 4;
+  string session_id = 5;
+  auth.v1.AuthEnvelope auth           = 10;
+  string               asserted_owner = 11;
+}
 message SessionClose { string spawn_id = 1; uint64 generation = 2; string client_id = 3; string session_id = 4; }
 // Frame carries no generation: data frames are correlated to an episode by spawn_id at the session layer.
 message Frame        { string spawn_id = 1; bytes data = 2; string client_id = 3; string session_id = 4; }

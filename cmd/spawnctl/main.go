@@ -3,6 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -18,13 +21,18 @@ import (
 	"github.com/urfave/cli/v3"
 	"golang.org/x/net/http2"
 
+	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 	spawnv1 "spawnery/gen/spawn/v1"
 	"spawnery/gen/spawn/v1/spawnv1connect"
 	"spawnery/internal/acp"
+	"spawnery/internal/intent"
 	"spawnery/internal/manifest"
 )
+
+// Ensure cpv1connect.SpawnServiceClient satisfies the narrow intentClient interface.
+var _ intentClient = (cpv1connect.SpawnServiceClient)(nil)
 
 func main() {
 	cmd := &cli.Command{
@@ -176,12 +184,48 @@ func runCP(ctx context.Context, addr, appID, model string, src *cpTokenSource) {
 	id := cs.Msg.SpawnId
 	fmt.Println("spawn:", id)
 
+	// A4 two-phase sign-after-resolve [AC1][AM12]: start the poll-and-sign loop concurrently with
+	// waitActiveCP. The CP blocks the spawn in 'starting' until the client submits a signed intent;
+	// pollAndSign polls until the CP registers the pending intent, then builds and submits it.
+	// If the CP does not have the intent flow enabled (old CP or intentEnabled=false), pollAndSign
+	// polls until its context is cancelled when waitActiveCP returns — the spawn becomes active
+	// without it and the context.Canceled error is suppressed.
+	pollCtx, cancelPoll := context.WithCancel(ctx)
+	defer cancelPoll()
+	go func() {
+		if err := pollAndSign(pollCtx, client, id, intentParams{AppRef: appID, Model: model}); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("pollAndSign: %v (spawn may still become active if CP intent flow is disabled)", err)
+		}
+	}()
+
 	// CreateSpawn is async: the CP binds the spawn to its node only once the node reports ACTIVE.
 	// Wait for that before attaching, else the session races provisioning and gets "unknown spawn".
-	waitActiveCP(ctx, client, id)
+	spawnGen := waitActiveCP(ctx, client, id)
+	cancelPoll()
+
+	// A4 session-open signing [AC1][AM12]: build a signed intent with the live episode generation
+	// so the node can verify correspondence. A fresh ephemeral key is used; the CP mints the
+	// aud=node token in dev mode when access_token is empty.
+	bindFrame := &cpv1.Frame{SpawnId: id}
+	if sessionKey, skErr := ecdsa.GenerateKey(elliptic.P256(), rand.Reader); skErr == nil {
+		var jtiBytes [16]byte
+		if _, rErr := rand.Read(jtiBytes[:]); rErr == nil {
+			body := &authv1.IntentBody{
+				Jti:        fmt.Sprintf("%x", jtiBytes),
+				IssuedAt:   time.Now().Unix(),
+				SpawnId:    id,
+				Generation: spawnGen,
+				SessionId:  "0",
+				Op:         string(intent.OpSessionOpen),
+			}
+			if si, bErr := intent.Build(intent.OpSessionOpen, body, sessionKey); bErr == nil {
+				bindFrame.SessionAuth = &authv1.AuthEnvelope{Intent: si}
+			}
+		}
+	}
 
 	stream := client.Session(ctx)
-	if err := stream.Send(&cpv1.Frame{SpawnId: id}); err != nil { // bind frame (carries the spawn id)
+	if err := stream.Send(bindFrame); err != nil { // bind frame (carries the spawn id + session-open auth)
 		log.Fatalf("bind: %v", err)
 	}
 
@@ -215,8 +259,9 @@ func runCP(ctx context.Context, addr, appID, model string, src *cpTokenSource) {
 }
 
 // waitActiveCP polls ListSpawns until the spawn is ACTIVE (router-bound), failing fast on a terminal
-// status. CreateSpawn returns in 'starting' and provisions asynchronously on the node.
-func waitActiveCP(ctx context.Context, client cpv1connect.SpawnServiceClient, id string) {
+// status. Returns the spawn's live episode generation for use in A4 session-open signing [AM11].
+// CreateSpawn returns in 'starting' and provisions asynchronously on the node.
+func waitActiveCP(ctx context.Context, client cpv1connect.SpawnServiceClient, id string) uint64 {
 	deadline := time.Now().Add(60 * time.Second)
 	for {
 		ls, err := client.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
@@ -229,7 +274,7 @@ func waitActiveCP(ctx context.Context, client cpv1connect.SpawnServiceClient, id
 			}
 			switch sp.Status {
 			case cpv1.SpawnStatus_SPAWN_STATUS_ACTIVE:
-				return
+				return sp.Generation
 			case cpv1.SpawnStatus_SPAWN_STATUS_ERROR, cpv1.SpawnStatus_SPAWN_STATUS_DELETED,
 				cpv1.SpawnStatus_SPAWN_STATUS_UNREACHABLE:
 				log.Fatalf("spawn %s reached terminal status %v before active", id, sp.Status)

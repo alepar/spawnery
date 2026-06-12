@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"google.golang.org/protobuf/proto"
 
+	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/telemetry"
 	"spawnery/internal/weborigin"
@@ -45,11 +47,14 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 			return
 		}
 		var bind struct {
-			SpawnID   string `json:"spawnId"`
-			Token     string `json:"token"`
-			ClientID  string `json:"clientId"`
-			SessionID string `json:"sessionId"` // empty => session #0
-			Cursor    int64  `json:"cursor"`
+			SpawnID      string `json:"spawnId"`
+			Token        string `json:"token"`
+			ClientID     string `json:"clientId"`
+			SessionID    string `json:"sessionId"` // empty => session #0
+			Cursor       int64  `json:"cursor"`
+			// signedIntent (A4): raw proto.Marshal(SignedIntent) bytes, base64-encoded [AC1][AM12].
+			// If present the CP mints a dev aud=node token and threads the envelope into SessionOpen.
+			SignedIntent []byte `json:"signedIntent,omitempty"`
 		}
 		if err := json.Unmarshal(first, &bind); err != nil {
 			conn.Close(websocket.StatusUnsupportedData, "bad bind frame")
@@ -99,8 +104,18 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 			}
 		}()
 
+		// A4: build session-open AuthEnvelope from the client-supplied SignedIntent bytes [AC1][AM12].
+		var sessionEnv *authv1.AuthEnvelope
+		if len(bind.SignedIntent) > 0 {
+			var si authv1.SignedIntent
+			if merr := proto.Unmarshal(bind.SignedIntent, &si); merr == nil {
+				sessionEnv = s.mintSessionEnv(owner, &authv1.AuthEnvelope{Intent: &si})
+			} else {
+				log.Printf("ws: bind frame signedIntent unmarshal failed: %v", merr)
+			}
+		}
 		cs := wsClient{conn: conn, ctx: sessCtx}
-		done, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, cs, bind.Cursor)
+		done, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, owner, sessionEnv, cs, bind.Cursor)
 		if err != nil {
 			conn.Close(websocket.StatusInternalError, "attach failed")
 			return

@@ -17,6 +17,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	authv1 "spawnery/gen/auth/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/gen/node/v1/nodev1connect"
 	"spawnery/internal/agentcaps"
@@ -57,6 +58,12 @@ type Config struct {
 	// node publishes no sub-key and rejects SecretDelivery. Shared across reconnects (it retains private
 	// halves), so it lives in Config (one holder per node process), not per-connection.
 	SubKeys *subkey.Node
+
+	// Verifier is the A4 intent verifier for StartSpawn and SessionOpen [AC1][AM12].
+	// nil = skip verification (dev/insecure default until the verifier is explicitly configured).
+	// Set via NewIntentVerifier with AuthModeVerifyLog for NODE_AUTH_MODE=insecure (verify-and-log)
+	// or AuthModeEnforced for NODE_AUTH_MODE=enforced.
+	Verifier *IntentVerifier
 }
 
 // cpStream is the subset of the Connect bidi stream the attacher uses. *connect.BidiStreamForClient
@@ -67,10 +74,11 @@ type cpStream interface {
 }
 
 type attacher struct {
-	cfg   Config
-	mgr   *spawnlet.Manager
-	httpc connect.HTTPClient
-	sx    sessionExec // container-exec boundary for additional-session launch/reap (sp-npxq.3)
+	cfg      Config
+	mgr      *spawnlet.Manager
+	httpc    connect.HTTPClient
+	sx       sessionExec // container-exec boundary for additional-session launch/reap (sp-npxq.3)
+	verifier *IntentVerifier // A4 intent verifier; nil = skip (tests + insecure mode without explicit verifier)
 
 	ctrlHTTP httpDoer // POSTs SetModel to the per-pod sidecar control endpoint (injectable for tests)
 
@@ -154,6 +162,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
+		verifier:   cfg.Verifier,
 		ctrlHTTP:   &http.Client{Timeout: controlPostTimeout},
 		sx:         &realSessionExec{mgr: mgr},
 		pumps:      map[sessionKey]*Pump{},
@@ -347,6 +356,25 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		}
 		a.stopSpawn(ctx, m.Stop.SpawnId)
 	case *nodev1.CPMessage_Open:
+		// A4 SessionOpen verification [AC1][AM12]. Run BEFORE attaching the client so a forged/replayed
+		// open is blocked in enforced mode. In verify-and-log mode (NODE_AUTH_MODE=insecure) failures are
+		// logged but the attach proceeds. Generation is read from the live spawn (mgr.SpawnGeneration) so
+		// the verifier can check correspondence even if the CP omits it from the SessionOpen wire message.
+		if a.verifier != nil {
+			spawnID := m.Open.GetSpawnId()
+			gen, _ := a.mgr.SpawnGeneration(spawnID)
+			fields := OpenFields{
+				SpawnID:       spawnID,
+				Generation:    gen,
+				SessionID:     sid(m.Open.GetSessionId()),
+				AssertedOwner: m.Open.GetAssertedOwner(),
+			}
+			if nack, detail := a.verifier.VerifyOpen(m.Open.GetAuth(), fields); nack != "" {
+				log.Printf("SessionOpen %s/%s: intent NACK %s: %s (client not attached)",
+					spawnID, sid(m.Open.GetSessionId()), nack, detail)
+				return // enforced: drop the open; verify-and-log never returns a nack
+			}
+		}
 		a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor)
 	case *nodev1.CPMessage_Close:
 		a.detachClient(m.Close.SpawnId, sid(m.Close.SessionId), m.Close.ClientId)
@@ -406,6 +434,32 @@ func (a *attacher) staleGen(spawnID string, gen uint64) bool {
 
 func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.status(st.SpawnId, nodev1.SpawnPhase_STARTING, "")
+
+	// A4 intent verification [AC1][AM12]. Verify BEFORE creating the container so a
+	// forged/replayed StartSpawn is rejected at the gate. In verify-and-log mode (NODE_AUTH_MODE=insecure)
+	// failures are logged but execution proceeds; in enforced mode a NACK returns ERROR status.
+	if a.verifier != nil {
+		mounts := make([]*authv1.MountRef, 0, len(st.GetMounts()))
+		for _, m := range st.GetMounts() {
+			mounts = append(mounts, &authv1.MountRef{Name: m.GetName(), BackendUri: m.GetBackendUri()})
+		}
+		fields := StartFields{
+			SpawnID:       st.GetSpawnId(),
+			Generation:    st.GetGeneration(),
+			AppRef:        st.GetAppRef(),
+			Image:         st.GetImage(),
+			Model:         st.GetModel(),
+			DataRef:       st.GetDataRef(),
+			Mounts:        mounts,
+			AssertedOwner: st.GetAssertedOwner(),
+		}
+		if nack, detail := a.verifier.VerifyStart(st.GetAuth(), fields); nack != "" {
+			log.Printf("startSpawn %s: intent NACK %s: %s", st.SpawnId, nack, detail)
+			a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, string(nack)+": "+detail)
+			return
+		}
+	}
+
 	sp, err := a.mgr.CreateWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation,
 		spawnlet.AgentSelection{Image: st.Image, RunnableID: st.RunnableId, Mode: st.Mode})
 	if err != nil {

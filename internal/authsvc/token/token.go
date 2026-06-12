@@ -7,6 +7,7 @@ package token
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -187,6 +188,28 @@ func ParsePublicKeyPEM(pemBytes []byte) (ed25519.PublicKey, error) {
 		return nil, errors.New("token: public key is not Ed25519")
 	}
 	return pub, nil
+}
+
+// MintNode mints a short-lived aud=node access token bound to spkiDER (the cnf claim) [A4][AM12].
+// priv is the Ed25519 signing key; keyID must equal KeyID(priv.Public().(ed25519.PublicKey)).
+// Used by the dev CP to issue cnf-bearing node tokens so the full A4 verification chain runs in
+// `just dev`. A 15-minute TTL mirrors the aud=cp access token.
+func MintNode(priv ed25519.PrivateKey, keyID, accountID string, spkiDER []byte, now time.Time) (string, error) {
+	var tidBytes [16]byte
+	if _, err := rand.Read(tidBytes[:]); err != nil {
+		return "", fmt.Errorf("MintNode: random token_id: %w", err)
+	}
+	const ttl = 15 * time.Minute
+	body := &authv1.SessionTokenBody{
+		AccountId:      accountID,
+		TokenId:        hex.EncodeToString(tidBytes[:]),
+		Audience:       "node",
+		IssuedAt:       now.Unix(),
+		ExpiresAt:      now.Add(ttl).Unix(),
+		SessionKeyHash: SessionKeyHash(spkiDER),
+		KeyId:          keyID,
+	}
+	return Mint(body, priv)
 }
 
 // equalPub avoids subtle nil-vs-empty issues when comparing keys in KeySet construction.

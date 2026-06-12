@@ -10,6 +10,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	authv1 "spawnery/gen/auth/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
@@ -41,12 +42,26 @@ func (s *Scheduler) OnStatus(spawnID string, phase nodev1.SpawnPhase) {
 	}
 }
 
+// PickNodeID selects an eligible node ID for the given placement without sending any message.
+// Used by lifecycle handlers to resolve target_node_id before registering a PendingIntent [AC1].
+// A follow-up Provision call with placement.TargetNodeID pinned to this ID will re-select the
+// same node (if still available). Returns ResourceExhausted if no eligible node exists.
+func (s *Scheduler) PickNodeID(placement registry.Placement) (string, error) {
+	n := s.reg.PickFor(placement)
+	if n == nil {
+		return "", connect.NewError(connect.CodeResourceExhausted, errors.New("no eligible node with capacity"))
+	}
+	return n.ID, nil
+}
+
 // Provision picks a node, sends StartSpawn for the (already-minted) spawn id, waits for ACTIVE,
 // and binds the route. Returns the chosen node id. The caller owns id-minting + persistence.
 // gen is the live container row's generation: the node labels + heartbeat-reports its pod with it,
 // and the inventory reconciler matches that report against the row — an omitted gen (0) would make
 // the orphan arm Stop the pod the CP itself just started (sp-gzvo).
-func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement) (string, error) {
+// env is the A4 AuthEnvelope (token + SignedIntent) to thread into StartSpawn [AC1]; nil is
+// allowed in dev/insecure mode where the node will verify-and-log-not-enforce.
+func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement, env *authv1.AuthEnvelope) (string, error) {
 	n := s.reg.PickFor(placement)
 	if n == nil {
 		return "", connect.NewError(connect.CodeResourceExhausted, errors.New("no eligible node with capacity"))
@@ -60,6 +75,7 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Start{Start: &nodev1.StartSpawn{
 		SpawnId: id, AppRef: appRef, Model: model, Name: name, AppId: appID,
 		Image: placement.Image, RunnableId: runnable, Mode: mode, Generation: gen,
+		Auth: env, AssertedOwner: placement.Owner,
 	}}}); err != nil {
 		return "", connect.NewError(connect.CodeUnavailable, err)
 	}

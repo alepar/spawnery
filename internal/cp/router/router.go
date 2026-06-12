@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	authv1 "spawnery/gen/auth/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/registry"
 )
@@ -80,7 +81,10 @@ func (r *Router) Bound(spawnID string) bool {
 }
 
 // AttachClient registers a client by id and tells the node to open the relay for it (carrying cursor).
-func (r *Router) AttachClient(spawnID, sessionID, clientID string, c ClientSender, cursor int64) (<-chan struct{}, error) {
+// env is the A4 AuthEnvelope (token + SignedIntent) to thread into SessionOpen [AC1]; nil is
+// allowed in dev/insecure mode where the node will verify-and-log-not-enforce.
+// assertedOwner is the CP-asserted spawn owner threaded into the node's owner-binding check.
+func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string, env *authv1.AuthEnvelope, c ClientSender, cursor int64) (<-chan struct{}, error) {
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	if !ok {
@@ -90,7 +94,11 @@ func (r *Router) AttachClient(spawnID, sessionID, clientID string, c ClientSende
 	rt.clients[ck(sessionID, clientID)] = c
 	node, done := rt.node, rt.done
 	r.mu.Unlock()
-	return done, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Cursor: cursor}}})
+	return done, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
+		SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Cursor: cursor,
+		Auth:          env,
+		AssertedOwner: assertedOwner,
+	}}})
 }
 
 // DetachClient removes a client and tells the node to close its relay (pod stays).
