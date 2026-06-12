@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -17,6 +18,7 @@ import (
 
 	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/gen/node/v1/nodev1connect"
+	"spawnery/internal/authsvc/token"
 	"spawnery/internal/cp"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/nodeauth"
@@ -52,8 +54,48 @@ func main() {
 	sched := scheduler.New(reg, rt, 60*time.Second)
 
 	ctx := context.Background()
-	tokens := parseTokens(env("CP_DEV_TOKENS", "dev-token=dev"))
-	authn := auth.New(tokens)
+
+	// --- Auth mode ---
+	// CP_AUTH_MODE: "dev" (default) | "prod".
+	// IMPORTANT: default is "dev" — a misconfigured prod is permissive.
+	// Prod REQUIRES CP_AS_SESSION_PUBKEYS; dev tokens are ignored in prod.
+	authMode := env("CP_AUTH_MODE", "dev")
+	devMode := authMode != "prod"
+	if !devMode {
+		log.Printf("cp: auth mode=prod (CP_DEV_TOKENS ignored)")
+	} else {
+		log.Printf("cp: auth mode=dev (CP_DEV_TOKENS active; NOT FOR PRODUCTION)")
+	}
+
+	// --- AS session pubkeys (CP_AS_SESSION_PUBKEYS = comma-separated PEM file paths) ---
+	ks, err := loadKeySet(env("CP_AS_SESSION_PUBKEYS", ""))
+	if err != nil {
+		log.Fatalf("cp: load AS pubkeys: %v", err)
+	}
+	if len(ks) > 0 {
+		log.Printf("cp: loaded %d AS session pubkey(s)", len(ks))
+	}
+	if !devMode && len(ks) == 0 {
+		log.Fatalf("cp: CP_AUTH_MODE=prod requires CP_AS_SESSION_PUBKEYS (no keys loaded)")
+	}
+
+	// --- Revocation + session registries ---
+	sessions := auth.NewSessionRegistry()
+	revreg := auth.NewRevocationRegistry(sessions)
+
+	// --- Dev tokens (honored only in dev mode) ---
+	devTokens := map[string]string{}
+	if devMode {
+		devTokens = parseTokens(env("CP_DEV_TOKENS", "dev-token=dev"))
+	}
+
+	// --- Verifier ---
+	verifier := auth.NewVerifier(auth.VerifierConfig{
+		Keys:      ks,
+		DevTokens: devTokens,
+		DevMode:   devMode,
+		Revoked:   revreg,
+	})
 
 	storeCfg, err := storeConfigFromEnv(os.Getenv)
 	if err != nil {
@@ -82,8 +124,15 @@ func main() {
 			DisplayName: "Secret App", Summary: "Vertical-slice smoke test — ask it for the secret word.",
 			Tags: []string{"demo", "smoke-test"}, Mounts: []string{"main"}},
 	}
-	if err := cp.Seed(ctx, st, tokens, seedApps); err != nil {
-		log.Fatalf("store seed: %v", err)
+	// Dev-owner seeding: only in dev mode (prod accountIds are created lazily by the AS).
+	if devMode {
+		if err := cp.Seed(ctx, st, devTokens, seedApps); err != nil {
+			log.Fatalf("store seed: %v", err)
+		}
+	} else {
+		if err := cp.SeedApps(ctx, st, seedApps); err != nil {
+			log.Fatalf("store seed apps: %v", err)
+		}
 	}
 	if n, err := st.Spawns().MarkBootUnreachable(ctx); err != nil {
 		log.Fatalf("boot reconcile: %v", err)
@@ -105,6 +154,12 @@ func main() {
 
 	srv := cp.NewServer(reg, rt, sched, st, tel)
 	srv.SetMaxSpawnsPerOwner(envInt("CP_MAX_SPAWNS_PER_OWNER", 5))
+	srv.SetSessionRegistry(sessions)
+	srv.SetVerify(verifier.Verify)
+	srv.SetDevMode(devMode)
+	if ri := envDuration("CP_SESSION_REAUTH_INTERVAL", 0); ri > 0 {
+		srv.SetReauthInterval(ri)
+	}
 	srv.StartReconciler(ctx) // background loop: drive model_applied=false spawns to convergence (sp-bp9w.7)
 
 	// Browser-origin allowlist for CORS + the WS upgrade ([WM18]). Empty = dev mode
@@ -114,9 +169,18 @@ func main() {
 		log.Printf("cp: CP_ALLOWED_ORIGINS unset — dev mode, allowing localhost browser origins only")
 	}
 
+	// Start revocation feed poller if configured.
+	if feedURL := env("CP_AS_REVOCATION_URL", ""); feedURL != "" {
+		bearer := env("CP_AS_CP_SECRET", "")
+		interval := envDuration("CP_REVOCATION_POLL_INTERVAL", 30*time.Second)
+		poller := auth.NewFeedPoller(http.DefaultClient, feedURL, bearer, ks, revreg, interval)
+		go poller.Run(ctx)
+		log.Printf("cp: revocation feed poller started (url=%s interval=%s)", feedURL, interval)
+	}
+
 	mux := http.NewServeMux()
-	mux.Handle(cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(authn.Interceptor())))
-	mux.HandleFunc("/ws/session", srv.HandleWS(authn, allow))
+	mux.Handle(cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(verifier.Interceptor())))
+	mux.HandleFunc("/ws/session", srv.HandleWS(verifier, allow))
 
 	// Node-auth mode (sp-ova). insecure (dev/test default): nodes share the main h2c listener with no
 	// auth — identity falls back to the self-asserted Register fields. enforced: nodes connect over mTLS
@@ -138,10 +202,7 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(allow.CORS(mux), &http2.Server{})))
 }
 
-// serveNodeTLS runs the NodeService over mTLS on its own listener. Nodes MUST present a client cert,
-// which nodeauth.Middleware verifies against the pinned Root CA (enforcing name constraints) and turns
-// into the node identity. TLS verification is RequireAnyClientCert so the middleware is the single
-// verification point (chain + name constraints + SAN identity, all via internal/pki).
+// serveNodeTLS runs the NodeService over mTLS on its own listener.
 func serveNodeTLS(addr, nodePath string, nodeHandler http.Handler) error {
 	rootPEM, err := os.ReadFile(env("CP_NODE_ROOT_CA", "/etc/spawnery/cp/node-root-ca.pem"))
 	if err != nil {
@@ -165,7 +226,7 @@ func serveNodeTLS(addr, nodePath string, nodeHandler http.Handler) error {
 		Handler: nodeauth.Middleware(nodeauth.ModeEnforced, root, nodeMux),
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{serverCert},
-			ClientAuth:   tls.RequireAnyClientCert, // present required; verified in the middleware
+			ClientAuth:   tls.RequireAnyClientCert,
 			MinVersion:   tls.VersionTLS12,
 			NextProtos:   []string{"h2", "http/1.1"},
 		},
@@ -177,6 +238,27 @@ func serveNodeTLS(addr, nodePath string, nodeHandler http.Handler) error {
 	return server.ListenAndServeTLS("", "")
 }
 
+// loadKeySet parses comma-separated PEM file paths into an ordered token.KeySet.
+// Empty s returns an empty set (valid in dev mode).
+func loadKeySet(s string) (token.KeySet, error) {
+	if s == "" {
+		return token.KeySet{}, nil
+	}
+	var pubs []ed25519.PublicKey
+	for _, p := range splitTrim(s, ",") {
+		pemBytes, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", p, err)
+		}
+		pub, err := token.ParsePublicKeyPEM(pemBytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", p, err)
+		}
+		pubs = append(pubs, pub)
+	}
+	return token.NewKeySet(pubs...)
+}
+
 func parseTokens(s string) map[string]string {
 	m := map[string]string{}
 	for _, pair := range strings.Split(s, ",") {
@@ -186,12 +268,14 @@ func parseTokens(s string) map[string]string {
 	}
 	return m
 }
+
 func dir(p string) string {
 	if i := strings.LastIndex(p, "/"); i >= 0 {
 		return p[:i]
 	}
 	return "."
 }
+
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
@@ -206,4 +290,25 @@ func envInt(k string, def int) int {
 		}
 	}
 	return def
+}
+
+func envDuration(k string, def time.Duration) time.Duration {
+	if v := os.Getenv(k); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+func splitTrim(s, sep string) []string {
+	parts := strings.Split(s, sep)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

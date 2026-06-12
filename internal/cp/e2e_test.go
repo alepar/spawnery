@@ -59,7 +59,7 @@ func TestCPEndToEndStub(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tel.Close()
-	authn := auth.New(map[string]string{"dev-token": "alice"})
+	authn := auth.NewVerifier(auth.VerifierConfig{DevTokens: map[string]string{"dev-token": "alice"}, DevMode: true})
 	// CWD is internal/cp; the node resolves the app ref against its process CWD,
 	// so hand it an absolute path to the repo-root fixture.
 	appRef, err := filepath.Abs("../../examples/secret-app")

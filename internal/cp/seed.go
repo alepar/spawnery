@@ -19,6 +19,12 @@ type AppSeed struct {
 	Mounts      []string // declared mount names
 }
 
+// SeedApps idempotently registers the demo apps/versions/mounts (no owner seeding).
+// Used in prod mode where accountIds are created lazily by the AS, not here.
+func SeedApps(ctx context.Context, st store.Store, apps []AppSeed) error {
+	return Seed(ctx, st, nil, apps)
+}
+
 // Seed idempotently registers the dev-token owners + the demo apps/versions/mounts so CreateSpawn
 // can resolve them. Owners come FROM the token map (every token's owner -> a row), so auth always
 // resolves to a real owner. Replaced by E4 (OAuth) + E5 (catalog) later; no schema change.

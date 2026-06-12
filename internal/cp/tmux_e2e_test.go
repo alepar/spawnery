@@ -71,7 +71,7 @@ func setupTmuxStack(t *testing.T) (cl cpv1connect.SpawnServiceClient, ctx contex
 	if err != nil {
 		t.Fatal(err)
 	}
-	authn := auth.New(map[string]string{"dev-token": "alice"})
+	authn := auth.NewVerifier(auth.VerifierConfig{DevTokens: map[string]string{"dev-token": "alice"}, DevMode: true})
 	appRef, err := filepath.Abs("../../examples/secret-app")
 	if err != nil {
 		t.Fatal(err)

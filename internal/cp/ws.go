@@ -3,7 +3,9 @@ package cp
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -14,12 +16,15 @@ import (
 )
 
 // HandleWS bridges a browser WebSocket to a spawn via the router. First message:
-// {"spawnId":"...","token":"..."} (text); then raw ACP bytes both ways.
+// {"spawnId":"...","token":"..."} (text); then raw ACP bytes (BINARY) both ways.
+// In-band reauth: a TEXT frame {"type":"reauth","token":"<wire>"} resets the deadline
+// and re-registers the session under the new token_id. An invalid reauth closes the
+// connection with StatusPolicyViolation in prod; dev mode logs but stays open.
 //
 // CORS does not govern WS upgrades, so the Origin header is validated here against the
 // same allowlist as the Connect RPCs ([WM18]). Auth stays the in-band token bind frame —
 // browsers cannot attach headers to a WebSocket.
-func (s *Server) HandleWS(authn *auth.Auth, allow weborigin.Allowlist) http.HandlerFunc {
+func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !allow.Allowed(r.Header.Get("Origin")) {
 			http.Error(w, "origin not allowed", http.StatusForbidden)
@@ -50,11 +55,15 @@ func (s *Server) HandleWS(authn *auth.Auth, allow weborigin.Allowlist) http.Hand
 			conn.Close(websocket.StatusUnsupportedData, "bad bind frame")
 			return
 		}
-		owner, ok := authn.Owner(bind.Token)
-		if !ok {
+
+		// Verify the bind token through the seam (AS or dev fallback).
+		identity, err := v.Verify(bind.Token)
+		if err != nil {
 			conn.Close(websocket.StatusPolicyViolation, "unauthenticated")
 			return
 		}
+		owner := identity.Owner
+
 		sp, err := s.st.Spawns().Get(ctx, bind.SpawnID)
 		if err != nil || sp.OwnerID != owner {
 			conn.Close(websocket.StatusPolicyViolation, "unknown or foreign spawn")
@@ -69,7 +78,28 @@ func (s *Server) HandleWS(authn *auth.Auth, allow weborigin.Allowlist) http.Hand
 		if sessionID == "" {
 			sessionID = "0" // default to session #0 (backward compat with single-session clients)
 		}
-		cs := wsClient{conn: conn, ctx: ctx}
+
+		// Per-session context for revocation cancellation.
+		sessCtx, sessCancel := context.WithCancel(ctx)
+		defer sessCancel()
+
+		// Track current session registration; swapped on token rotation to release the old id promptly.
+		var (
+			curRelMu   sync.Mutex
+			curRelease func()
+		)
+		if s.sessions != nil {
+			curRelease = s.sessions.Add(identity.TokenID, identity.Owner, sessCancel)
+		}
+		defer func() {
+			curRelMu.Lock()
+			defer curRelMu.Unlock()
+			if curRelease != nil {
+				curRelease()
+			}
+		}()
+
+		cs := wsClient{conn: conn, ctx: sessCtx}
 		done, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, cs, bind.Cursor)
 		if err != nil {
 			conn.Close(websocket.StatusInternalError, "attach failed")
@@ -81,13 +111,75 @@ func (s *Server) HandleWS(authn *auth.Auth, allow weborigin.Allowlist) http.Hand
 			_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: bind.SpawnID, Timestamp: time.Now().UTC()})
 		}()
 
+		// Reauth deadline: AS-token sessions in prod close if no reauth received in time.
+		// Dev-token sessions (TokenID=="") and dev mode: timer only logs.
+		reauthInterval := s.reauthInterval
+		if reauthInterval <= 0 {
+			reauthInterval = defaultReauthInterval
+		}
+		isProdAS := identity.TokenID != "" && !s.devMode
+		var reauthTimer *time.Timer
+		if isProdAS {
+			reauthTimer = time.NewTimer(reauthInterval + reauthGrace)
+		}
+		var reauthCh <-chan time.Time
+		if reauthTimer != nil {
+			reauthCh = reauthTimer.C
+			defer reauthTimer.Stop()
+		}
+
 		recvErr := make(chan struct{}, 1)
 		go func() {
 			for {
-				_, b, err := conn.Read(ctx)
-				if err != nil {
+				msgType, b, rerr := conn.Read(sessCtx)
+				if rerr != nil {
 					recvErr <- struct{}{}
 					return
+				}
+				// TEXT frames are control (reauth); BINARY frames are ACP data.
+				if msgType == websocket.MessageText {
+					var ctrl struct {
+						Type  string `json:"type"`
+						Token string `json:"token"`
+					}
+					if jErr := json.Unmarshal(b, &ctrl); jErr != nil || ctrl.Type != "reauth" {
+						// Unknown control — ignore.
+						continue
+					}
+					if s.verify != nil {
+						newID, verr := s.verify(ctrl.Token)
+						if verr != nil || newID.Owner != owner {
+							if !s.devMode {
+								conn.Close(websocket.StatusPolicyViolation, "reauth failed")
+								recvErr <- struct{}{}
+								return
+							}
+							log.Printf("ws reauth failed (dev-tolerant): %v", verr)
+						} else {
+							// Re-register under new token_id; release old so only one id is active.
+							if s.sessions != nil && newID.TokenID != "" && newID.TokenID != identity.TokenID {
+								newRel := s.sessions.Add(newID.TokenID, newID.Owner, sessCancel)
+								curRelMu.Lock()
+								if curRelease != nil {
+									curRelease()
+								}
+								curRelease = newRel
+								curRelMu.Unlock()
+							}
+							identity = newID
+							// Reset the deadline.
+							if reauthTimer != nil {
+								if !reauthTimer.Stop() {
+									select {
+									case <-reauthTimer.C:
+									default:
+									}
+								}
+								reauthTimer.Reset(reauthInterval + reauthGrace)
+							}
+						}
+					}
+					continue
 				}
 				if ferr := s.rt.FromClient(bind.SpawnID, sessionID, bind.ClientID, b); ferr != nil {
 					recvErr <- struct{}{}
@@ -98,7 +190,10 @@ func (s *Server) HandleWS(authn *auth.Auth, allow weborigin.Allowlist) http.Hand
 		select {
 		case <-done:
 		case <-recvErr:
+		case <-sessCtx.Done():
 		case <-ctx.Done():
+		case <-reauthCh:
+			conn.Close(websocket.StatusPolicyViolation, "reauth timeout")
 		}
 		conn.Close(websocket.StatusNormalClosure, "")
 	}
