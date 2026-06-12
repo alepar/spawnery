@@ -17,10 +17,10 @@ import (
 	"spawnery/gen/cp/v1/cpv1connect"
 )
 
-// listSpawns fetches the caller's spawns from the CP (the auth token scopes them to the owner).
-func listSpawns(cpAddr, token string) []*cpv1.SpawnSummary {
+// listSpawns fetches the caller's spawns from the CP (the token source scopes them to the owner).
+func listSpawns(cpAddr string, src *cpTokenSource) []*cpv1.SpawnSummary {
 	client := cpv1connect.NewSpawnServiceClient(h2cClient(), cpAddr,
-		connect.WithGRPC(), connect.WithInterceptors(cpBearer(token)))
+		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 	resp, err := client.ListSpawns(context.Background(), connect.NewRequest(&cpv1.ListSpawnsRequest{}))
 	if err != nil {
 		log.Fatalf("list spawns: %v", err)
@@ -46,11 +46,17 @@ func listCmd() *cli.Command {
 		Aliases: []string{"ls"},
 		Usage:   "list your spawns (id, status, name, app)",
 		Flags: []cli.Flag{
+			configDirFlag(),
 			&cli.StringFlag{Name: "cp", Value: "http://127.0.0.1:8080", Usage: "control-plane address"},
-			&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP)"},
+			&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP); superseded by stored login credentials"},
 		},
 		Action: func(_ context.Context, c *cli.Command) error {
-			sums := listSpawns(c.String("cp"), c.String("token"))
+			dir, err := resolveDir(c)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			src := buildTokenSource(dir, c.String("token"), h2cClient())
+			sums := listSpawns(c.String("cp"), src)
 			if len(sums) == 0 {
 				fmt.Fprintln(os.Stderr, "no spawns")
 				return nil
@@ -67,8 +73,8 @@ func listCmd() *cli.Command {
 
 // chooseSpawn lists the caller's spawns and lets them pick one (fzf if present, else a numbered
 // menu), returning the chosen spawn id.
-func chooseSpawn(cpAddr, token string) string {
-	sums := listSpawns(cpAddr, token)
+func chooseSpawn(cpAddr string, src *cpTokenSource) string {
+	sums := listSpawns(cpAddr, src)
 	if len(sums) == 0 {
 		log.Fatal("no spawns to choose from")
 	}

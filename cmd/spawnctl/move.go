@@ -172,8 +172,9 @@ func moveCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
+			src := buildTokenSource(dir, c.String("token"), h2cClient())
 			client := cpv1connect.NewSpawnServiceClient(h2cClient(), c.String("cp"),
-				connect.WithGRPC(), connect.WithInterceptors(cpBearer(c.String("token"))))
+				connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 			if err := runMove(ctx, client, dev, spawnID, target, c.Writer, time.Now()); err != nil {
 				return cli.Exit("move failed: "+err.Error(), 1)
 			}

@@ -22,11 +22,11 @@ func formatSetModelResult(model string, applied bool) string {
 }
 
 // setSpawnModel calls the CP SetSpawnModel RPC and returns the authoritative active model and whether
-// it applied to the live agent. Mirrors list.go's listSpawns: builds the gRPC client with the bearer
-// interceptor and log.Fatalf on RPC error.
-func setSpawnModel(cpAddr, token, spawnID, model string) (string, bool) {
+// it applied to the live agent. Mirrors list.go's listSpawns: builds the gRPC client with the token
+// source interceptor and log.Fatalf on RPC error.
+func setSpawnModel(cpAddr string, src *cpTokenSource, spawnID, model string) (string, bool) {
 	client := cpv1connect.NewSpawnServiceClient(h2cClient(), cpAddr,
-		connect.WithGRPC(), connect.WithInterceptors(cpBearer(token)))
+		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 	resp, err := client.SetSpawnModel(context.Background(), connect.NewRequest(&cpv1.SetSpawnModelRequest{
 		SpawnId: spawnID,
 		Model:   model,
@@ -45,15 +45,21 @@ func setModelCmd() *cli.Command {
 		Usage:     "set the inference model of a spawn (persist + live-switch)",
 		ArgsUsage: "<spawn-id> <openrouter-model-id>",
 		Flags: []cli.Flag{
+			configDirFlag(),
 			&cli.StringFlag{Name: "cp", Value: "http://127.0.0.1:8080", Usage: "control-plane address"},
-			&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP)"},
+			&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP); superseded by stored login credentials"},
 		},
 		Action: func(_ context.Context, c *cli.Command) error {
 			args := c.Args()
 			if args.Len() != 2 {
 				return cli.Exit("usage: spawnctl set-model <spawn-id> <openrouter-model-id>", 2)
 			}
-			model, applied := setSpawnModel(c.String("cp"), c.String("token"), args.Get(0), args.Get(1))
+			dir, err := resolveDir(c)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			src := buildTokenSource(dir, c.String("token"), h2cClient())
+			model, applied := setSpawnModel(c.String("cp"), src, args.Get(0), args.Get(1))
 			fmt.Println(formatSetModelResult(model, applied))
 			return nil
 		},
