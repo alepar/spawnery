@@ -48,6 +48,32 @@ Same containerd instance. Questions:
 2. Inside a **runsc** pod with userns: `apt update && apt install` — sentry userns/cap
    fidelity. This is the decisive cloud-lane gate.
 
+## Spike 1 — RESULTS (2026-06-12, host: Docker 29.4.2, kernel 7.0.8) — ALL PASS
+
+Setup: two dockerd instances, `--userns-remap=spikea` (base 700000) and `spikeb` (base 800000),
+own data-roots/sockets/bridges. Second daemon needs `--iptables=false` (DOCKER-chain clash).
+
+1. **apt/useradd/chown/chmod-setuid: PASS** with the **default cap set** under remap
+   (`uid_map: 0→700000 #65536`). `--cap-drop=ALL` control reproduces today's
+   setgroups/setegid/seteuid failures. No custom cap list needed — default set suffices.
+2. **Commit: PASS** — 1.19 GB delta committed in **4.0 s**; container blocked only ~**93 ms**
+   (exec probe during commit). Layer tar **excludes bind-mount + tmpfs content** (bare
+   mountpoint dir entries only); deletion encoded as OCI **`usr/.wh.games`** whiteout —
+   commit normalizes to the portable encoding. **Gotcha:** `/etc/hosts`, `/etc/resolv.conf`,
+   `/etc/hostname` are engine-managed bind mounts → their edits are NEVER captured by commit.
+3. **Cross-daemon uid-shift: PASS** — `docker save` writes **container-relative uids** (0 stays
+   0, 1000 stays 1000) — the artifact is mapping-agnostic; load+run on base-800000 daemon:
+   packages, useradd'd user, chowned files, whiteout deletion all intact.
+4. **0777 replacement: PASS** — chown host dir to `<base>:<base>` → container-root writes fine;
+   unmapped host uids surface as 65534 (nobody) as predicted.
+5. **Floor integrity: PASS** — agent with default caps **cannot read or flush** iptables in the
+   sidecar-owned netns (EPERM). **T5b:** with `--cap-add NET_ADMIN` the agent CAN flush it
+   (netns owned by the shared remap userns) → **invariant: never grant the agent CAP_NET_ADMIN**.
+6. **Podman data points:** default rootless mode runs the full workload green (root-in-userns
+   already). `--userns=auto` is **broken on podman 5.8.2 + crun** (`gid_map` EPERM even with a
+   1M-wide subuid allotment; also requires expanding the default 65536 allotment at all) —
+   future-lane follow-up, not load-bearing now.
+
 ## Wiring
 
 - Each spike = bd task under `sp-ei4.1`, **all three block `sp-ei4.1.3`** (the design spec).
