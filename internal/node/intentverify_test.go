@@ -265,21 +265,107 @@ func TestSkewRejectionReturnsNodeTime(t *testing.T) {
 	nodeNow := time.Unix(1_770_001_000, 0)
 	clock := func() time.Time { return nodeNow }
 
-	// Intent issued far in the future (> FreshnessWindow + SkewBudget from node time).
-	futureIssuedAt := nodeNow.Add(intent.FreshnessWindow + intent.SkewBudget + time.Minute)
+	// Intent issued well beyond SkewBudget in the future (spec §5: future tolerance = SkewBudget only).
+	futureIssuedAt := nodeNow.Add(intent.SkewBudget + time.Minute)
 	body := goodStartBody("sp-1", "node-1", 1, futureIssuedAt)
 	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", nodeNow, body, intent.OpCreateSpawn)
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
 	nack, detail := v.VerifyStart(env, fields)
-	if nack != NACKSkew && nack != NACKStale {
-		t.Fatalf("future intent: want SKEW or STALE, got %q", nack)
+	if nack != NACKSkew {
+		t.Fatalf("future intent beyond SkewBudget: want NACKSkew, got %q", nack)
 	}
 	// Node time must appear in the detail.
 	nodeTimeStr := "1770001000"
 	if detail == "" || !containsStr(detail, nodeTimeStr) {
 		t.Fatalf("skew detail should contain node time %s: got %q", nodeTimeStr, detail)
+	}
+}
+
+// Future intent within SkewBudget must be accepted [AC1][spec §5].
+func TestFutureIntentWithinSkewBudgetAccepted(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+
+	nodeNow := time.Unix(1_770_001_000, 0)
+	clock := func() time.Time { return nodeNow }
+
+	// Issued 1s less than SkewBudget in the future — should pass.
+	futureIssuedAt := nodeNow.Add(intent.SkewBudget - time.Second)
+	body := goodStartBody("sp-1", "node-1", 1, futureIssuedAt)
+	body.Jti = "jti-future-ok"
+	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", nodeNow, body, intent.OpCreateSpawn)
+
+	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
+	fields := goodStartFields("sp-1", "node-1", 1)
+	nack, detail := v.VerifyStart(env, fields)
+	if nack != "" {
+		t.Fatalf("future intent within SkewBudget: want success, got nack=%s detail=%s", nack, detail)
+	}
+}
+
+// Future intent beyond SkewBudget (but within old FreshnessWindow+SkewBudget) must be rejected [spec §5].
+func TestFutureIntentBeyondSkewBudgetRejected(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+
+	nodeNow := time.Unix(1_770_001_000, 0)
+	clock := func() time.Time { return nodeNow }
+
+	// Issued SkewBudget+1s in the future — outside the ±30s spec tolerance.
+	futureIssuedAt := nodeNow.Add(intent.SkewBudget + time.Second)
+	body := goodStartBody("sp-1", "node-1", 1, futureIssuedAt)
+	body.Jti = "jti-future-bad"
+	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", nodeNow, body, intent.OpCreateSpawn)
+
+	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
+	fields := goodStartFields("sp-1", "node-1", 1)
+	nack, _ := v.VerifyStart(env, fields)
+	if nack != NACKSkew {
+		t.Fatalf("future intent beyond SkewBudget: want NACKSkew, got %q", nack)
+	}
+}
+
+// Empty asserted_owner in enforced non-self-hosted (cloud) mode must be refused [review finding].
+func TestEnforcedCloudModeRejectsEmptyAssertedOwner(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+	now := time.Unix(1_770_000_000, 0)
+	clock := func() time.Time { return now }
+
+	body := goodStartBody("sp-1", "node-1", 1, now)
+	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, intent.OpCreateSpawn)
+
+	// Enforced non-self-hosted verifier with empty assertedOwner.
+	v := makeVerifier(t, ks, "", "node-1", false, clock)
+	fields := goodStartFields("sp-1", "node-1", 1)
+	fields.AssertedOwner = "" // no asserted owner from CP
+
+	nack, _ := v.VerifyStart(env, fields)
+	if nack != NACKOwnerMismatch {
+		t.Fatalf("empty asserted_owner in enforced cloud mode: want NACKOwnerMismatch, got %q", nack)
+	}
+}
+
+// Empty asserted_owner in enforced self-hosted mode must be tolerated (NodeOwner covers it) [spec §5].
+func TestSelfHostedToleratesEmptyAssertedOwner(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+	now := time.Unix(1_770_000_000, 0)
+	clock := func() time.Time { return now }
+
+	body := goodStartBody("sp-1", "node-1", 1, now)
+	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, intent.OpCreateSpawn)
+
+	// Self-hosted verifier: assertedOwner may be empty; nodeOwner check covers it.
+	v := makeVerifier(t, ks, "alice", "node-1", true, clock)
+	fields := goodStartFields("sp-1", "node-1", 1)
+	fields.AssertedOwner = "" // intentionally empty
+
+	nack, detail := v.VerifyStart(env, fields)
+	if nack != "" {
+		t.Fatalf("empty asserted_owner in self-hosted mode: want success, got nack=%s detail=%s", nack, detail)
 	}
 }
 

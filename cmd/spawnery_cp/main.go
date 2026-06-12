@@ -164,9 +164,11 @@ func main() {
 
 	// A4 intent flow setup [AC1][AM12].
 	// Prod mode: intent flow always active; clients obtain node tokens from the real AS.
-	// Dev mode: intent flow active when CP_DEV_AS_KEY is set (explicit) or by default (ephemeral key).
-	//   In either case the CP mints cnf-bearing aud=node tokens in SubmitIntent so the full 8-step
-	//   verification chain runs at the node under AuthModeVerifyLog (verify-and-log, not skip).
+	// Dev mode: intent flow is OFF by default — the web SPA does not yet implement
+	// GetPendingIntent/SubmitIntent (A5). The dev AS key is always provisioned so spawnctl's
+	// pollAndSign works when opted in. Set CP_DEV_INTENT_ENABLED=1 to enable the two-phase
+	// flow in dev; without it web-initiated spawns proceed with a nil env and the node runs
+	// in verify-and-log mode.
 	if !devMode {
 		srv.SetIntentEnabled(true)
 	} else {
@@ -182,7 +184,7 @@ func main() {
 			if devASErr != nil {
 				log.Fatalf("cp: load CP_DEV_AS_KEY: %v", devASErr)
 			}
-			log.Printf("cp: loaded dev AS key from %s (id=%s) for cnf-bearing node token minting [AM12]", p, devASKeyID)
+			log.Printf("cp: loaded dev AS key from %s (id=%s) [AM12]", p, devASKeyID)
 		} else {
 			_, devASPriv, devASErr = ed25519.GenerateKey(rand.Reader)
 			if devASErr != nil {
@@ -192,10 +194,17 @@ func main() {
 			if devASErr != nil {
 				log.Fatalf("cp: derive dev AS key id: %v", devASErr)
 			}
-			log.Printf("cp: using ephemeral dev AS key (id=%s) for cnf-bearing node token minting [AM12]", devASKeyID)
+			log.Printf("cp: using ephemeral dev AS key (id=%s) [AM12]", devASKeyID)
 		}
 		srv.SetDevASKey(devASPriv, devASKeyID)
-		srv.SetIntentEnabled(true)
+		// CP_DEV_INTENT_ENABLED=1: opt into the two-phase sign flow in dev mode.
+		// Default off until the web client implements GetPendingIntent/SubmitIntent (A5).
+		if env("CP_DEV_INTENT_ENABLED", "") == "1" {
+			srv.SetIntentEnabled(true)
+			log.Printf("cp: dev intent flow enabled (CP_DEV_INTENT_ENABLED=1) [AM12]")
+		} else {
+			log.Printf("cp: dev intent flow off (set CP_DEV_INTENT_ENABLED=1 to enable; web spawns proceed without signing) [AM12]")
+		}
 	}
 
 	srv.StartReconciler(ctx) // background loop: drive model_applied=false spawns to convergence (sp-bp9w.7)

@@ -8,7 +8,7 @@ package node
 //  4. SPKI hashes to token.session_key_hash     [AM11]
 //  5. Intent sig over exact received bytes      [WM9]
 //  6. Field-by-field correspondence             [AC1]
-//  7. Freshness: |now - issued_at| ≤ 90s ±30s  [AC1]
+//  7. Freshness: past ≤ FreshnessWindow+SkewBudget; future ≤ SkewBudget  [AC1]
 //  8. JTI uniqueness + process-start floor      [AC1]
 //
 // In verify-and-log mode (AuthModeVerifyLog) failures are logged but execution proceeds
@@ -162,6 +162,12 @@ func (v *IntentVerifier) doVerify(
 	}
 
 	// Step 3: owner match. CP-asserted owner must match the token's account_id.
+	// In enforced cloud mode (not self-hosted) asserted_owner must not be empty: an empty
+	// value would silently skip this cross-check, which is the only per-request CP→owner
+	// binding in cloud deployments. Self-hosted nodes rely on the NodeOwner check below.
+	if v.mode == AuthModeEnforced && !v.selfHosted && assertedOwner == "" {
+		return NACKOwnerMismatch, "asserted_owner must not be empty in enforced cloud mode"
+	}
 	if assertedOwner != "" && body.AccountId != assertedOwner {
 		return NACKOwnerMismatch, fmt.Sprintf("token account_id=%q != asserted_owner=%q", body.AccountId, assertedOwner)
 	}
@@ -197,12 +203,14 @@ func (v *IntentVerifier) doVerify(
 	}
 
 	// Step 7: freshness [AC1].
+	// Past direction: age ≤ FreshnessWindow + SkewBudget.
+	// Future direction: only SkewBudget tolerance (spec §5 pins skew at ±30s; FreshnessWindow
+	// does not extend in the future direction).
 	issuedAt := time.Unix(intentBody.IssuedAt, 0)
 	age := now.Sub(issuedAt)
 	if age < 0 {
-		age = -age // absolute value
-		if age > intent.FreshnessWindow+intent.SkewBudget {
-			return NACKSkew, fmt.Sprintf("intent issued_at is %.0fs in the future; node time: %d", age.Seconds(), now.Unix())
+		if -age > intent.SkewBudget {
+			return NACKSkew, fmt.Sprintf("intent issued_at is %.0fs in the future (max skew %s); node time: %d", (-age).Seconds(), intent.SkewBudget, now.Unix())
 		}
 	} else if age > intent.FreshnessWindow+intent.SkewBudget {
 		return NACKStale, fmt.Sprintf("intent is %.0fs old (max %s+%s); node time: %d", age.Seconds(), intent.FreshnessWindow, intent.SkewBudget, now.Unix())
@@ -244,6 +252,10 @@ func (v *IntentVerifier) checkStartCorrespondence(body *authv1.IntentBody, field
 		return NACKCorrespondence, fmt.Sprintf("data_ref: intent=%q exec=%q", body.DataRef, fields.DataRef)
 	}
 	// Mounts: count and each (name, backend_uri) must match in order.
+	// NOTE: this check is vacuous today — pollAndSign (spawnctl) does not copy PendingIntent.Mounts
+	// into the signed IntentBody, and scheduler.Provision does not set StartSpawn.Mounts, so both
+	// sides are always empty (0==0). The logic is correct and will enforce once mounts are threaded
+	// end-to-end for non-Scratch storage (tracked separately).
 	if len(body.Mounts) != len(fields.Mounts) {
 		return NACKCorrespondence, fmt.Sprintf("mounts count: intent=%d exec=%d", len(body.Mounts), len(fields.Mounts))
 	}
