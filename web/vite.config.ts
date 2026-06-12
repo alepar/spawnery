@@ -29,6 +29,13 @@ export default defineConfig({
     proxy: {
       "/cp.v1.SpawnService": { target: "http://127.0.0.1:8080", changeOrigin: true },
       "/ws": { target: "http://127.0.0.1:8080", ws: true, changeOrigin: true },
+      // AS routes: proxy /oauth, /refresh, /logout, /ca to the AS dev origin.
+      // When VITE_AS_ORIGIN is unset (dev without AS), these 404 gracefully.
+      // Same-origin proxy so HttpOnly cookie + credentialed CORS work in dev (AM2).
+      "/oauth": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
+      "/refresh": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
+      "/logout": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
+      "/ca": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
     },
   },
   test: {

@@ -1,5 +1,8 @@
 import { unary } from "./connect";
 export { DEV_TOKEN } from "./connect";
+import { authEnabled } from "@/auth/session";
+import { useSessionStore } from "@/auth/session";
+import { pollAndSign, registerPendedOp, clearPendedOp } from "@/auth/intent";
 
 export type SpawnStatus =
   | "starting" | "active" | "suspending" | "suspended" | "unreachable" | "error" | "unknown";
@@ -49,7 +52,20 @@ export function spawnLifecycleAction(status: SpawnStatus): SpawnLifecycleAction 
 
 export async function createSpawn(appId: string, model: string, image = "", runnableId = ""): Promise<string> {
   const r = await unary<{ spawnId: string }>("CreateSpawn", { appId, model, image, runnableId });
-  return r.spawnId;
+  const spawnId = r.spawnId;
+  // In auth-enabled mode, kick off the intent signing concurrently (the CP blocks on it).
+  if (authEnabled()) {
+    const session = useSessionStore.getState();
+    const store = session.keyStore;
+    const { getOrCreateSessionKey } = await import("@/auth/keypair");
+    const kp = await getOrCreateSessionKey(store);
+    const pended = { op: "create-spawn", spawnId, appRef: appId, model };
+    registerPendedOp(pended);
+    pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
+      .catch((e: unknown) => console.error("intent sign failed:", e))
+      .finally(() => clearPendedOp(spawnId));
+  }
+  return spawnId;
 }
 
 export async function listSpawns(): Promise<SpawnView[]> {
@@ -81,10 +97,28 @@ export async function suspendSpawn(spawnId: string): Promise<void> {
 }
 export async function resumeSpawn(spawnId: string): Promise<void> {
   await unary<Record<string, never>>("ResumeSpawn", { spawnId });
+  if (authEnabled()) {
+    const { getOrCreateSessionKey } = await import("@/auth/keypair");
+    const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
+    const pended = { op: "resume-spawn", spawnId };
+    registerPendedOp(pended);
+    pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
+      .catch((e: unknown) => console.error("intent sign failed:", e))
+      .finally(() => clearPendedOp(spawnId));
+  }
 }
 // recreateSpawn re-provisions a fresh container; the recovery path for unreachable/error spawns.
 export async function recreateSpawn(spawnId: string): Promise<void> {
   await unary<Record<string, never>>("RecreateSpawn", { spawnId });
+  if (authEnabled()) {
+    const { getOrCreateSessionKey } = await import("@/auth/keypair");
+    const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
+    const pended = { op: "recreate-spawn", spawnId };
+    registerPendedOp(pended);
+    pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
+      .catch((e: unknown) => console.error("intent sign failed:", e))
+      .finally(() => clearPendedOp(spawnId));
+  }
 }
 // UI "Stop" = DeleteSpawn (soft-delete; drops from the list). Legacy stopSpawn kept for non-UI callers.
 export async function deleteSpawn(spawnId: string): Promise<void> {

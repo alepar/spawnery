@@ -10,6 +10,10 @@ import { useConnStatus } from "./shell/useConnStatus";
 import { initialTheme, setTheme } from "./lib/theme";
 import { useNav } from "./nav/useNav";
 import type { Nav } from "./nav/nav";
+import { useSessionStore, authEnabled } from "./auth/session";
+import { LoginView } from "./views/LoginView";
+import { parseCallback, sessionStateStorage, browserHistory } from "./auth/oauth";
+import type { AsErrorCode } from "./auth/errors";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
@@ -25,7 +29,31 @@ function sectionLabel(section: Nav["section"]): string {
   }
 }
 
+/** AppRoot gates on auth status, rendering LoginView when not authed (login wall). */
 export function App() {
+  const status = useSessionStore((s) => s.status);
+
+  // Check for a callback error code in the URL (e.g. ?error=registration_closed).
+  // This is needed when the AS redirects back with an error before the session store
+  // has had a chance to parse it (bootstrap handles success; we handle the error display here).
+  const [callbackError, setCallbackError] = useState<AsErrorCode | null>(null);
+  useEffect(() => {
+    const cb = parseCallback(sessionStateStorage, browserHistory);
+    if (cb.kind === "error") {
+      setCallbackError(cb.code as AsErrorCode);
+    }
+    // Only run once on mount — no deps needed.
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Login wall: show LoginView when auth is enabled and user is not authed.
+  if (authEnabled() && status !== "authed") {
+    return <LoginView errorCode={callbackError ?? undefined} />;
+  }
+
+  return <AppMain />;
+}
+
+function AppMain() {
   const [nav, navigate] = useNav();
   const [path] = useLocation(); // raw pathname, for the one-time "/" -> "/templates" normalize
   // useConnStatus tracks the spawn-LIFECYCLE hint (waiting while a spawn is starting, error if it

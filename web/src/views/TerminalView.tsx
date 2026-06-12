@@ -3,7 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
-import { DEV_TOKEN } from "@/api/spawnlet";
+import { getAccessToken, authEnabled, useSessionStore } from "@/auth/session";
 import { cpWsUrl } from "@/config/endpoints";
 import { encodeInput, encodeResize } from "@/term/wire";
 import { BacklogTracker } from "@/term/backlog";
@@ -92,7 +92,7 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     onConnRef.current?.("connecting");
     const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
       onOpen: () => {
-        sock.send(JSON.stringify({ spawnId, sessionId, clientId: CLIENT_ID, token: DEV_TOKEN, cursor: 0 }));
+        sock.send(JSON.stringify({ spawnId, sessionId, clientId: CLIENT_ID, token: getAccessToken(), cursor: 0 }));
         safeFit();
         sock.send(encodeResize(term.cols, term.rows));
         onConnRef.current?.("connected");
@@ -119,8 +119,30 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     const ro = new ResizeObserver(() => safeFit());
     ro.observe(host);
 
+    // In-band reauth: ~15min interval matches ws.go defaultReauthInterval.
+    // Sends a text reauth frame so the CP resets the 15min expiry deadline.
+    // Use a best-effort send (errors ignored — socket reconnects will re-handshake).
+    const REAUTH_INTERVAL_MS = 14 * 60 * 1000; // 14 min (slightly under 15)
+    const sendReauth = (token: string) => {
+      try { sockRef.current?.send(JSON.stringify({ type: "reauth", token })); } catch { /* socket closing */ }
+    };
+    const reauthInterval = authEnabled()
+      ? setInterval(() => sendReauth(getAccessToken()), REAUTH_INTERVAL_MS)
+      : null;
+
+    // Subscribe to token changes (fresh token after a silent refresh) → push reauth immediately.
+    const unsubSession = authEnabled()
+      ? useSessionStore.subscribe((state, prev) => {
+          if (state.accessToken !== prev.accessToken && state.accessToken) {
+            sendReauth(state.accessToken);
+          }
+        })
+      : null;
+
     return () => {
       closing = true; // intentional teardown -> suppress the close-driven onDown "reconnecting"
+      if (reauthInterval) clearInterval(reauthInterval);
+      if (unsubSession) unsubSession();
       ro.disconnect();
       onData.dispose();
       onResize.dispose();

@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { Conn } from "@/acp/conn";
 import { encodePrompt, encodePermResponse, encodeSetMode, encodeCancel, type Frame } from "@/acp/frames";
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
-import { DEV_TOKEN } from "@/api/spawnlet";
+import { getAccessToken, authEnabled, useSessionStore as useAuthStore } from "@/auth/session";
 import { cpWsUrl } from "@/config/endpoints";
 import { ChatView } from "@/views/ChatView";
 import { MAX_QUEUED } from "@/lib/turn";
@@ -46,17 +46,38 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready, model, mode
         // Fresh frame receiver per (re)connect; wire it BEFORE the bind so replay can't precede onmessage.
         new Conn(sock, (m) => { if (genRef.current === gen) useSessionStore.getState().applyFrame(sessionId, m as Frame); });
         const cursor = useSessionStore.getState().acp[sessionId]?.lastSeq ?? 0;
-        sock.send(JSON.stringify({ spawnId, sessionId, clientId: CLIENT_ID, token: DEV_TOKEN, cursor }));
+        sock.send(JSON.stringify({ spawnId, sessionId, clientId: CLIENT_ID, token: getAccessToken(), cursor }));
         useSessionStore.getState().setConn(sessionId, "connected");
       },
       onDown: () => { if (genRef.current === gen) useSessionStore.getState().setConn(sessionId, "reconnecting"); },
     });
     sockRef.current = sock;
+
+    // In-band reauth: ~14min interval (under the 15min ws.go deadline).
+    const REAUTH_MS = 14 * 60 * 1000;
+    const sendReauth = (token: string) => {
+      try { sockRef.current?.send(JSON.stringify({ type: "reauth", token })); } catch { /* socket closing */ }
+    };
+    const reauthInterval = authEnabled()
+      ? setInterval(() => sendReauth(getAccessToken()), REAUTH_MS)
+      : null;
+
+    // Push a reauth frame immediately when the token refreshes.
+    const unsubAuth = authEnabled()
+      ? useAuthStore.subscribe((state, prev) => {
+          if (state.accessToken !== prev.accessToken && state.accessToken) {
+            sendReauth(state.accessToken);
+          }
+        })
+      : null;
+
     return () => {
       // Intentionally bump the LIVE gen so any in-flight reconnect callback self-invalidates — we
       // want the current ref value at teardown time, not a captured snapshot.
       // eslint-disable-next-line react-hooks/exhaustive-deps
       genRef.current++;
+      if (reauthInterval) clearInterval(reauthInterval);
+      if (unsubAuth) unsubAuth();
       sock.close();
       sockRef.current = null;
       useSessionStore.getState().setConn(sessionId, null);
