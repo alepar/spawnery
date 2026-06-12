@@ -196,6 +196,29 @@ export function sriHeadersPlugin(opts: SriHeadersOptions = {}): Plugin {
         fs.writeFileSync(assetPath, code, "utf8");
       }
 
+      // Rebuild integrityMap from actual on-disk bytes — Vite rewrites the entry chunk
+      // (substituting dynamic-import asset names) and post-processes CSS in later
+      // generateBundle passes that run AFTER this plugin. In-memory hashes from
+      // generateBundle therefore diverge from what the browser fetches. Reading here
+      // guarantees every integrity attribute in index.html matches the deployed bytes.
+      const outDirAbs = path.resolve(outDir);
+      function walkAndHash(dir: string) {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            walkAndHash(full);
+          } else {
+            const ext = path.extname(full).toLowerCase();
+            if (ext === ".js" || ext === ".css") {
+              const rel = path.relative(outDirAbs, full).replace(/\\/g, "/");
+              integrityMap.set(rel, sha384(fs.readFileSync(full)));
+            }
+          }
+        }
+      }
+      integrityMap.clear();
+      walkAndHash(outDirAbs);
+
       let html = fs.readFileSync(htmlPath, "utf8");
 
       // Stamp SRI on <script src="..."> tags.

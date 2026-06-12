@@ -24,10 +24,6 @@ export interface ScanResult {
   violations: string[];
 }
 
-// The ONE documented 'unsafe-inline' value the plugin is allowed to emit (style-src only).
-// Any OTHER occurrence is a violation.
-const DOCUMENTED_UNSAFE_INLINE = "style-src 'self' 'unsafe-inline'";
-
 async function* walk(dir: string): AsyncGenerator<string> {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   for (const e of entries) {
@@ -77,15 +73,22 @@ export async function scan(distDir: string): Promise<ScanResult> {
       violations.push(`${rel}: contains forbidden 'unsafe-eval'`);
     }
 
-    // 3. unsafe-inline — only the ONE documented exception is allowed.
-    //    Scan for any unsafe-inline that is NOT part of the documented string.
+    // 3. unsafe-inline — only permitted inside the style-src CSP directive.
+    //    Parse the directive name by scanning backwards to the nearest preceding ';'
+    //    and extracting the first token. A context-window approach was previously used
+    //    but is unsafe: when script-src and style-src are adjacent, the documented
+    //    style-src string falls inside the window for a script-src 'unsafe-inline'
+    //    occurrence, silently whitelisting it.
     const uiRe = /unsafe-inline/g;
-    while ((uiRe.lastIndex, (m = uiRe.exec(content))) !== null) {
-      // Extract surrounding context (the full directive it's part of).
-      const start = Math.max(0, m.index - 50);
-      const end = Math.min(content.length, m.index + 100);
-      const ctx = content.slice(start, end);
-      if (!ctx.includes(DOCUMENTED_UNSAFE_INLINE)) {
+    while ((m = uiRe.exec(content)) !== null) {
+      const before = content.slice(0, m.index);
+      const semiIdx = before.lastIndexOf(";");
+      const directiveText = content.slice(semiIdx + 1, m.index).trim();
+      const directiveName = directiveText.split(/\s+/)[0].toLowerCase();
+      if (directiveName !== "style-src") {
+        const ctxStart = Math.max(0, m.index - 30);
+        const ctxEnd = Math.min(content.length, m.index + 50);
+        const ctx = content.slice(ctxStart, ctxEnd);
         violations.push(`${rel}: undocumented 'unsafe-inline' at offset ${m.index}: ...${ctx.trim()}...`);
       }
     }

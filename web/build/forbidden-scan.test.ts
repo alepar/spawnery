@@ -96,6 +96,16 @@ describe("unsafe-inline", () => {
     expect(result.violations.some(v => v.includes("undocumented") && v.includes("unsafe-inline"))).toBe(true);
   });
 
+  it("fails for unsafe-inline in script-src even when style-src unsafe-inline is adjacent (regression: context-window bypass)", async () => {
+    // The old context-window approach was fooled when script-src and style-src were within
+    // ~80 chars of each other: the documented style-src string fell inside the window for the
+    // script-src occurrence and the scanner silently passed a script-src 'unsafe-inline'.
+    write("_headers", `Content-Security-Policy: script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'`);
+    const result = await scan(tmpDir);
+    expect(result.ok).toBe(false);
+    expect(result.violations.some(v => v.includes("undocumented") && v.includes("unsafe-inline"))).toBe(true);
+  });
+
   it("fails for unsafe-inline in a JS bundle", async () => {
     write("assets/main.js", `// CSP: script-src 'unsafe-inline' is not allowed`);
     const result = await scan(tmpDir);

@@ -267,15 +267,21 @@ jobs:
           echo "Previous counter: $PREV, Current: $CURR_NUM"
           if ! python3 -c "
           import sys
-          prev = int('$PREV') if '$PREV' else 0
+          prev_raw = '$PREV' if '$PREV' else '0'
           curr = '$CURR_NUM'
-          # Accept either a pure integer or a semver where major > prev.
-          parts = curr.split('.')
-          major = int(parts[0]) if parts[0].isdigit() else 0
-          if major <= prev:
-              print(f'ANTI-ROLLBACK FAIL: $CURR_NUM <= previous $PREV', file=sys.stderr)
+          # Compare as integer tuples to support semver tags (web/v1.1.0 > web/v1.0.0).
+          # Non-numeric components are treated as 0 so alpha/rc suffixes don't silently pass.
+          def to_tuple(s):
+              return [int(x) if x.isdigit() else 0 for x in s.split('.')]
+          prev_t = to_tuple(prev_raw)
+          curr_t = to_tuple(curr)
+          length = max(len(prev_t), len(curr_t))
+          prev_t += [0] * (length - len(prev_t))
+          curr_t += [0] * (length - len(curr_t))
+          if curr_t <= prev_t:
+              print(f'ANTI-ROLLBACK FAIL: {curr} <= previous {prev_raw}', file=sys.stderr)
               sys.exit(1)
-          print(f'Anti-rollback OK: $CURR_NUM > $PREV')
+          print(f'Anti-rollback OK: {curr} > {prev_raw}')
           "; then
             exit 1
           fi

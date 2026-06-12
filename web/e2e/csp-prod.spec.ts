@@ -19,12 +19,19 @@
  */
 
 import { test, expect } from "@playwright/test";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, "../dist");
+
+/** Compute the sha384 integrity value over the raw bytes of a dist file. */
+function sha384FromDisk(filePath: string): string {
+  const buf = fs.readFileSync(filePath);
+  return "sha384-" + crypto.createHash("sha384").update(buf).digest("base64");
+}
 
 // Skip the entire suite if no prod build exists or browsers are unavailable.
 const skipReason = !fs.existsSync(DIST_DIR)
@@ -39,19 +46,33 @@ test.describe("CSP-enforced prod bundle", () => {
   test("page loads without script-src CSP violations", async ({ page }) => {
     const violations: string[] = [];
     page.on("console", (msg) => {
-      if (msg.type() === "error" && msg.text().includes("Content Security Policy")) {
-        // script-src violations are blocking — fail the test.
-        // style-src 'unsafe-inline' violations are expected (xterm/sonner) and allowed.
-        if (!msg.text().includes("style-src")) {
-          violations.push(msg.text());
-        }
+      if (msg.type() !== "error") return;
+      const text = msg.text();
+      // Capture both CSP policy violations AND SRI integrity mismatches. SRI errors say
+      // "Failed to find a valid digest in the integrity attribute" — no "Content Security
+      // Policy" substring — so they must be collected separately.
+      const isCspOrSri =
+        text.includes("Content Security Policy") ||
+        text.includes("Failed to find a valid digest") ||
+        text.includes("integrity attribute");
+      if (isCspOrSri && !text.includes("style-src")) {
+        violations.push(text);
       }
     });
+
+    // Silence background polls so networkidle resolves promptly.
+    await page.route("**/cp.v1.SpawnService/**", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: '{}' })
+    );
 
     await page.goto("/");
     await page.waitForLoadState("networkidle");
 
-    expect(violations, `CSP violations:\n${violations.join("\n")}`).toHaveLength(0);
+    // Assert the app root rendered — an SRI mismatch would block the entry script and
+    // leave #root empty; React mounting proves the bundle was accepted by the browser.
+    await expect(page.locator("#root > *")).toBeAttached({ timeout: 5000 });
+
+    expect(violations, `CSP/SRI violations:\n${violations.join("\n")}`).toHaveLength(0);
   });
 
   test("fonts load without CSP violations (terminal font render) [WM19]", async ({ page }) => {
@@ -148,38 +169,73 @@ test.describe("CSP-enforced prod bundle", () => {
     const response = await page.goto("/");
     const html = await response!.text();
 
-    // Every <script src="..."> must have integrity= and crossorigin= attributes.
+    // Every <script src="..."> must have integrity= and crossorigin= attributes,
+    // AND the integrity value must match the actual on-disk bytes. A stale/wrong
+    // hash means the browser rejects the script and the app never boots.
     const scriptTagRe = /<script[^>]+\bsrc="([^"]+)"[^>]*>/g;
     let m: RegExpExecArray | null;
     const missing: string[] = [];
+    const mismatch: string[] = [];
 
     while ((m = scriptTagRe.exec(html)) !== null) {
       const tag = m[0];
+      const src = m[1];
       if (!tag.includes("integrity=")) {
-        missing.push(m[1]);
+        missing.push(src);
+        continue;
+      }
+      const integrityM = tag.match(/\bintegrity="([^"]+)"/);
+      if (integrityM) {
+        const claimed = integrityM[1];
+        const fileName = src.replace(/^\//, "");
+        const filePath = path.join(DIST_DIR, fileName);
+        if (fs.existsSync(filePath)) {
+          const actual = sha384FromDisk(filePath);
+          if (actual !== claimed) {
+            mismatch.push(`${src}: stamped integrity does not match disk bytes (browser would reject)`);
+          }
+        }
       }
     }
 
     expect(missing, `Script tags missing integrity:\n${missing.join("\n")}`).toHaveLength(0);
+    expect(mismatch, `SRI integrity mismatch:\n${mismatch.join("\n")}`).toHaveLength(0);
   });
 
   test("all stylesheet links have integrity attributes (SRI) [WL4]", async ({ page }) => {
     const response = await page.goto("/");
     const html = await response!.text();
 
+    // Same as the script check: verify integrity= is present AND matches on-disk bytes.
     const linkRe = /<link[^>]+\brel="stylesheet"[^>]*>/g;
     let m: RegExpExecArray | null;
     const missing: string[] = [];
+    const mismatch: string[] = [];
 
     while ((m = linkRe.exec(html)) !== null) {
       const tag = m[0];
+      const hrefM = tag.match(/href="([^"]+)"/);
+      const src = hrefM ? hrefM[1] : tag;
       if (!tag.includes("integrity=")) {
-        const hrefM = tag.match(/href="([^"]+)"/);
-        missing.push(hrefM ? hrefM[1] : tag);
+        missing.push(src);
+        continue;
+      }
+      const integrityM = tag.match(/\bintegrity="([^"]+)"/);
+      if (integrityM && hrefM) {
+        const claimed = integrityM[1];
+        const fileName = hrefM[1].replace(/^\//, "");
+        const filePath = path.join(DIST_DIR, fileName);
+        if (fs.existsSync(filePath)) {
+          const actual = sha384FromDisk(filePath);
+          if (actual !== claimed) {
+            mismatch.push(`${hrefM[1]}: stamped integrity does not match disk bytes (browser would reject)`);
+          }
+        }
       }
     }
 
     expect(missing, `Stylesheet links missing integrity:\n${missing.join("\n")}`).toHaveLength(0);
+    expect(mismatch, `SRI integrity mismatch:\n${mismatch.join("\n")}`).toHaveLength(0);
   });
 
   test("sonner toast renders without CSP violations [WM19]", async ({ page }) => {
