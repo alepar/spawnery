@@ -420,6 +420,13 @@ func (s *Server) MigrateSpawn(ctx context.Context, req *connect.Request[cpv1.Mig
 			return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("target node %q belongs to another owner", targetNode))
 		}
 	}
+	// Durability-class guard (sp-8dkp §2): for a cross-node move, node-local mounts require
+	// upgrading to owner-sealed first. Checked BEFORE suspending so a rejected move leaves the
+	// spawn untouched. Same-node moves skip the guard.
+	liveNode := s.liveNodeForSpawn(ctx, id)
+	if err := s.guardCrossNodeDurability(ctx, id, liveNode, targetNode, req.Msg.UpgradeToOwnerSealed); err != nil {
+		return nil, err
+	}
 	// Suspend the source if still active (markers persist). An already-suspended spawn skips straight
 	// to the placement-overridden resume.
 	switch sp.Status {
