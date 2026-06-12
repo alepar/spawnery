@@ -120,6 +120,19 @@ export async function recreateSpawn(spawnId: string): Promise<void> {
       .finally(() => clearPendedOp(spawnId));
   }
 }
+// migrateSpawn moves a spawn to a new node; requires node-verified intent (DOMAIN_MIGRATE_SPAWN).
+export async function migrateSpawn(spawnId: string): Promise<void> {
+  await unary<Record<string, never>>("MigrateSpawn", { spawnId });
+  if (authEnabled()) {
+    const { getOrCreateSessionKey } = await import("@/auth/keypair");
+    const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
+    const pended = { op: "migrate-spawn", spawnId };
+    registerPendedOp(pended);
+    pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
+      .catch((e: unknown) => console.error("intent sign failed:", e))
+      .finally(() => clearPendedOp(spawnId));
+  }
+}
 // UI "Stop" = DeleteSpawn (soft-delete; drops from the list). Legacy stopSpawn kept for non-UI callers.
 export async function deleteSpawn(spawnId: string): Promise<void> {
   await unary<Record<string, never>>("DeleteSpawn", { spawnId });

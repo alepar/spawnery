@@ -21,6 +21,21 @@ import { mapAsError, type AsErrorCode } from "./errors";
 // Access the dev token through the env var (same source as connect.ts).
 export const DEV_TOKEN: string = import.meta.env.VITE_AUTH_TOKEN ?? "";
 
+// Key used to persist refresh_token_hash across cold reloads. The hash alone does not
+// allow refreshing (HttpOnly cookie + session key are also required), so localStorage
+// exposure is safe [AM2/AM5].
+export const RTH_STORAGE_KEY = "spawnery-rth";
+
+function _saveRth(rth: string): void {
+  try { localStorage.setItem(RTH_STORAGE_KEY, rth); } catch { /* private-browsing fallback */ }
+}
+function _loadRth(): string {
+  try { return localStorage.getItem(RTH_STORAGE_KEY) ?? ""; } catch { return ""; }
+}
+function _clearRth(): void {
+  try { localStorage.removeItem(RTH_STORAGE_KEY); } catch { /* ignore */ }
+}
+
 export type AuthStatus =
   | "loading"
   | "login-required"
@@ -52,10 +67,11 @@ export interface SessionState {
 
 /**
  * authEnabled returns true when auth is configured or we are in production.
- * Dev mode with no AS_ORIGIN → auth disabled (dev-token fallback).
+ * Dev mode with no AS_ORIGIN and no VITE_AUTH_ENABLED → auth disabled (dev-token fallback).
+ * VITE_AUTH_ENABLED=1 forces auth in dev for e2e auth testing without requiring AS_ORIGIN.
  */
 export function authEnabled(): boolean {
-  return !!AS_ORIGIN || import.meta.env.PROD === true;
+  return !!AS_ORIGIN || !!import.meta.env.VITE_AUTH_ENABLED || import.meta.env.PROD === true;
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -67,6 +83,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   callbackErrorCode: null,
 
   setToken(token: string, rth: string) {
+    // Persist the hash before updating zustand so cold-reload bootstrap() can read it [AM2].
+    _saveRth(rth);
     let account: AccountInfo | null = null;
     try {
       const decoded = parseAccessToken(token);
@@ -116,7 +134,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const kp = await getOrCreateSessionKey(store);
       const spki = await exportSpkiDer(kp.publicKey);
       const spkiHash = await sessionKeyHash(spki);
-      const rth = get().refreshTokenHash;
+      // On cold reload, refreshTokenHash is empty in zustand memory; read from localStorage.
+      const rth = get().refreshTokenHash || _loadRth();
 
       const result = await refreshAccessToken({
         privateKey: kp.privateKey,
@@ -148,6 +167,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   async logout() {
     const store = get().keyStore;
+    _clearRth();
     // Best-effort: revoke the server-side family.
     try {
       await fetch(/* AS_ORIGIN + */ "/logout", {

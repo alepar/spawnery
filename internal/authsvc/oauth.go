@@ -459,7 +459,10 @@ func (i *IdP) getOrSetFlowCookie(w http.ResponseWriter, r *http.Request) string 
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
+		// SameSite=Lax (not Strict): the OAuth callback is a cross-site top-level GET
+		// navigation (from the IdP back to the AS), so Strict would block the cookie.
+		// Lax allows cross-site GET navigations while still blocking CSRF on unsafe methods.
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(flowCookieTTL.Seconds()),
 	})
 	return id

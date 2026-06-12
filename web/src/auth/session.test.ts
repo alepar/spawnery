@@ -3,13 +3,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { useSessionStore, authEnabled, DEV_TOKEN } from "./session";
+import { useSessionStore, authEnabled, DEV_TOKEN, RTH_STORAGE_KEY } from "./session";
 import { MemoryKeyStore } from "./keystore";
 import { ProtoWriter } from "./protobuf";
 import { toBase64Url } from "./token";
 
-// Reset zustand state between tests
+// Reset zustand state and localStorage between tests
 beforeEach(() => {
+  localStorage.removeItem(RTH_STORAGE_KEY);
   useSessionStore.setState({
     status: "loading",
     accessToken: "",
