@@ -22,6 +22,9 @@ func openBun(cfg Config) (*bun.DB, error) {
 		if err != nil {
 			return nil, err
 		}
+		// SQLite is single-writer; cap the pool to 1 connection so concurrent ops are serialized
+		// at the driver level rather than fighting the retry mutex (R5 / AM3 ops note).
+		sqldb.SetMaxOpenConns(1)
 		if err := migrate(sqldb, "sqlite3", "migrations/sqlite"); err != nil {
 			sqldb.Close()
 			return nil, err

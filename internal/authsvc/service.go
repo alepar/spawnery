@@ -32,6 +32,8 @@ type Service struct {
 
 	sessionKey ed25519.PrivateKey // signs AS session tokens (sp-3ca); CP never holds it
 
+	idp *IdP // identity core (A1: OAuth, refresh, device grant); nil until WithIdP is called
+
 	mu     sync.Mutex
 	tokens map[string]enrollToken // pending one-time enrollment tokens
 }
@@ -55,6 +57,10 @@ func WithEnrollTokenTTL(d time.Duration) Option { return func(s *Service) { s.en
 
 // WithSessionKey sets the session-signing key (production loads a persisted key; default generates one).
 func WithSessionKey(k ed25519.PrivateKey) Option { return func(s *Service) { s.sessionKey = k } }
+
+// WithIdP attaches the identity core (OAuth, refresh, device grant) to the Service. Call after
+// constructing a *IdP with NewIdP; the IdP's routes are registered in Handler().
+func WithIdP(idp *IdP) Option { return func(s *Service) { s.idp = idp } }
 
 // New builds a Service from an in-memory root cert + self-hosted intermediate CA.
 func New(root *x509.Certificate, selfHostedIntermediate *pki.CA, opts ...Option) *Service {
