@@ -12,6 +12,8 @@ import { useNav } from "./nav/useNav";
 import type { Nav } from "./nav/nav";
 import { useSessionStore, authEnabled } from "./auth/session";
 import { LoginView } from "./views/LoginView";
+import { useMoveTo } from "./views/migration/useMoveTo";
+import { MoveToModal } from "./views/migration/MoveToModal";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
@@ -52,6 +54,7 @@ function AppMain() {
   const { errored, reset, waiting } = useConnStatus();
   const [spawns, setSpawns] = useState<SpawnView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const moveTo = useMoveTo();
 
   // refs mirroring state so async callbacks (poll) don't read stale closures.
   const activeIdRef = useRef<string | null>(null);
@@ -75,6 +78,14 @@ function AppMain() {
       if (active?.status === "starting") waiting();
       else if (active?.status === "error" || active?.status === "unreachable") errored();
       else reset(); // active/suspended: the store's session conn drives the header dot
+    }
+    // Delivery-pending reconstruction (spec §3): if a spawn reports delivery pending
+    // and the modal is not already open for it, auto-open in delivery-pending state.
+    for (const sp of list) {
+      if (sp.journalKeyDeliveryPending && moveTo.state.phase === "idle") {
+        moveTo.openDeliveryPending(sp.spawnId);
+        break; // open at most one at a time
+      }
     }
     return list;
   };
@@ -202,13 +213,24 @@ function AppMain() {
   };
 
   return (
-    <AppShell
-      onSpawnApp={spawnApp}
-      spawns={spawns}
-      activeId={activeId}
-      actions={{ onSelectSpawn: (id) => navigate({ section: "spawn", spawnId: id }), onRename, onSuspend, onResume, onRecreate, onStop }}
-      nav={nav}
-      navigate={navigate}
-    />
+    <>
+      <AppShell
+        onSpawnApp={spawnApp}
+        spawns={spawns}
+        activeId={activeId}
+        actions={{
+          onSelectSpawn: (id) => navigate({ section: "spawn", spawnId: id }),
+          onRename,
+          onSuspend,
+          onResume,
+          onRecreate,
+          onStop,
+          onMoveTo: (id) => moveTo.open(id),
+        }}
+        nav={nav}
+        navigate={navigate}
+      />
+      <MoveToModal state={moveTo.state} actions={moveTo} />
+    </>
   );
 }

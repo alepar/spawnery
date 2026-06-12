@@ -41,6 +41,9 @@ service SpawnService {
   // tuple it must sign, then submits its signed intent to unblock provision.
   rpc GetPendingIntent(GetPendingIntentRequest) returns (GetPendingIntentResponse);
   rpc SubmitIntent(SubmitIntentRequest) returns (SubmitIntentResponse);
+  // W4: migration target enumeration + node-local->owner-sealed upgrade seam (sp-8dkp).
+  rpc ListMigrationTargets(ListMigrationTargetsRequest) returns (ListMigrationTargetsResponse);
+  rpc UpgradeToOwnerSealed(UpgradeToOwnerSealedRequest) returns (UpgradeToOwnerSealedResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -80,6 +83,10 @@ message SpawnSummary {
   // generation (field 11): current live episode generation [AM11]. Clients need this to
   // validate the signed-open tuple for A4 SessionOpen intent.
   uint64 generation   = 11;
+  // journal_key_delivery_pending (field 12): true when the spawn is active on a target node but the
+  // owner client has not yet delivered the owner-sealed journal key (the delivery-retry leg). The UI
+  // derives this state on reload (WM3 reload-derivable) to reconstruct the delivery-retry modal leg.
+  bool journal_key_delivery_pending = 12;
 }
 // Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
 message ListSpawnsRequest  {}
@@ -204,7 +211,9 @@ message ManifestModel {
   bool vision                = 3;
   string recommended_default = 4;
 }
-message ManifestMount { string name = 1; string path = 2; string seed = 3; }
+// durability (field 4): per-mount durability class (transient-tier §1a): "ephemeral" (default),
+// "node-local", or "owner-sealed". Empty/unset = ephemeral (no journaling).
+message ManifestMount { string name = 1; string path = 2; string seed = 3; string durability = 4; }
 
 message RegisterAppVersionRequest {
   AppManifest manifest = 1;
@@ -247,7 +256,9 @@ message DeliverSecretsResponse {}
 // MigrateSpawn picks the resume target either by exact node id (target_node_id) or, when that is
 // empty, by node CLASS (target_class, e.g. "cloud"). Tenancy still applies: a self-hosted target
 // must belong to the spawn owner. node_id in the response is the node the spawn resumed on.
-message MigrateSpawnRequest  { string spawn_id = 1; string target_node_id = 2; string target_class = 3; }
+// upgrade_to_owner_sealed (field 4): when true the caller has already upgraded node-local mounts to
+// owner-sealed (via UpgradeToOwnerSealed) and the durability guard may proceed for those mounts.
+message MigrateSpawnRequest  { string spawn_id = 1; string target_node_id = 2; string target_class = 3; bool upgrade_to_owner_sealed = 4; }
 message MigrateSpawnResponse { string node_id = 1; }
 
 // JournalKeyCiphertext is one mount's owner-sealed journal-password ciphertext (a JSON-encoded
@@ -291,3 +302,35 @@ message SubmitIntentRequest {
   string               node_access_token = 3; // aud=node token for the AuthEnvelope
 }
 message SubmitIntentResponse {}
+
+// --- W4: Migration target enumeration (sp-8dkp) ----------------------------
+
+// MigrationTarget is one candidate node for a spawn migration.
+// journal_size_bytes is best-effort/0 when stats aren't cheaply available (size/ETA follow-up bead sp-e642).
+message MigrationTarget {
+  string node_id            = 1;
+  string class              = 2; // "cloud" | "self-hosted"
+  bool   yours              = 3; // owned by the requesting user (always true for self-hosted)
+  bool   online             = 4; // heartbeated within the live window
+  bool   is_current         = 5; // this is the spawn's current hosting node
+  uint64 journal_size_bytes = 6; // best-effort journal size (0 = unknown)
+}
+
+message ListMigrationTargetsRequest  { string spawn_id = 1; }
+message ListMigrationTargetsResponse {
+  repeated MigrationTarget targets = 1;
+  // spawn_durability_class is the CP-resolved durability of the spawn's storage:
+  // "ephemeral", "node-local", or "owner-sealed". This is the authoritative class for
+  // the browser client to decide whether to offer the upgrade pivot (WM16); it is needed
+  // because journal_size_bytes on each target is hardcoded to 0 until sp-e642.
+  string spawn_durability_class = 2;
+}
+
+// UpgradeToOwnerSealed asks the CP to instruct the spawn's hosting node to seal the
+// existing node-local journal repo password to the owner's device set, storing the
+// resulting Envelopes via PutJournalKeyCiphertext. This is the cheap node-local ->
+// owner-sealed upgrade (no repo re-encryption). On success the mounts are owner-sealed
+// and a subsequent MigrateSpawn with upgrade_to_owner_sealed=true is accepted.
+// owner_device_pubkeys are the raw X25519 pubkeys of the owner's currently enrolled devices.
+message UpgradeToOwnerSealedRequest  { string spawn_id = 1; repeated bytes owner_device_pubkeys = 2; }
+message UpgradeToOwnerSealedResponse {}

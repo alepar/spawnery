@@ -2,6 +2,7 @@
 package manifest
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,4 +71,37 @@ func Parse(appPath string) (*Manifest, error) {
 		return nil, fmt.Errorf("parse manifest: %w", err)
 	}
 	return &m, nil
+}
+
+// protoManifest is a minimal struct to extract durability from the CP-stored protojson blob.
+// The protojson representation uses camelCase keys (proto field names are camelCase in JSON).
+type protoManifest struct {
+	Mounts []struct {
+		Name       string `json:"name"`
+		Durability string `json:"durability"`
+	} `json:"mounts"`
+}
+
+// MountDurabilityFromJSON parses the protojson AppManifest string stored in the CP store and
+// returns a map of mount-name -> durability class ("ephemeral" | "node-local" | "owner-sealed").
+// Absent/empty durability defaults to "ephemeral" (the no-journaling contract).
+// This is used by the CP durability guard (internal/cp/durability.go) to classify mounts
+// without requiring a durability column on spawn_mounts.
+func MountDurabilityFromJSON(manifestJSON string) (map[string]string, error) {
+	if manifestJSON == "" {
+		return map[string]string{}, nil
+	}
+	var pm protoManifest
+	if err := json.Unmarshal([]byte(manifestJSON), &pm); err != nil {
+		return nil, fmt.Errorf("manifest: parse protojson: %w", err)
+	}
+	out := make(map[string]string, len(pm.Mounts))
+	for _, m := range pm.Mounts {
+		d := m.Durability
+		if d == "" {
+			d = "ephemeral"
+		}
+		out[m.Name] = d
+	}
+	return out, nil
 }

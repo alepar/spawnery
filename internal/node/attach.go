@@ -413,6 +413,12 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		// Async: unsealing + writing the tmpfs files must not stall the single per-connection Receive loop.
 		// The generation fence above stays SYNCHRONOUS (reads the live gen here), matching Stop/Suspend.
 		go a.handleSecretDelivery(m.SecretDelivery)
+	case *nodev1.CPMessage_SealJournalKey:
+		if a.staleGen(m.SealJournalKey.SpawnId, m.SealJournalKey.Generation) {
+			return // stale generation: drop (matches Stop/Suspend/SecretDelivery fence discipline)
+		}
+		// Async: crypto sealing must not stall the single per-connection Receive loop.
+		go a.sealJournalKey(ctx, m.SealJournalKey)
 	default:
 	}
 }

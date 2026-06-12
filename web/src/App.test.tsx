@@ -49,7 +49,7 @@ vi.mock("./views/TerminalView", () => ({
 import { App } from "./App";
 import { useSessionStore } from "./sessions/store";
 
-const ACTIVE_SPAWN: SpawnView = { spawnId: "s1", name: "My Spawn", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true };
+const ACTIVE_SPAWN: SpawnView = { spawnId: "s1", name: "My Spawn", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false };
 
 function renderWith(hook: ReturnType<typeof memoryLocation>["hook"]) {
   render(

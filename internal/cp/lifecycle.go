@@ -420,6 +420,13 @@ func (s *Server) MigrateSpawn(ctx context.Context, req *connect.Request[cpv1.Mig
 			return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("target node %q belongs to another owner", targetNode))
 		}
 	}
+	// Durability-class guard (sp-8dkp §2): for a cross-node move, node-local mounts require
+	// upgrading to owner-sealed first. Checked BEFORE suspending so a rejected move leaves the
+	// spawn untouched. Same-node moves skip the guard.
+	liveNode := s.liveNodeForSpawn(ctx, id)
+	if err := s.guardCrossNodeDurability(ctx, id, liveNode, targetNode, req.Msg.UpgradeToOwnerSealed); err != nil {
+		return nil, err
+	}
 	// Suspend the source if still active (markers persist). An already-suspended spawn skips straight
 	// to the placement-overridden resume.
 	switch sp.Status {
@@ -435,6 +442,12 @@ func (s *Server) MigrateSpawn(ctx context.Context, req *connect.Request[cpv1.Mig
 	nodeID, err := s.resumeLocked(ctx, owner, id, placementOverride{NodeID: targetNode, Class: targetClass}, true, intent.OpMigrateSpawn)
 	if err != nil {
 		return nil, err
+	}
+	// Mark delivery-pending when the owner-sealed upgrade path is active: the target node needs the
+	// journal key delivered before it can open the Kopia repo. The web UI polls ListSpawns and prompts
+	// the owner to deliver. The flag auto-expires (deliveryPendingDeadline) if delivery never arrives.
+	if req.Msg.UpgradeToOwnerSealed {
+		s.deliveryPending.mark(id)
 	}
 	return connect.NewResponse(&cpv1.MigrateSpawnResponse{NodeId: nodeID}), nil
 }
@@ -554,7 +567,7 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 			SpawnId: sp.ID, AppId: sp.AppID, AppVersion: sp.AppVersion, Model: sp.Model,
 			Status: toSummaryStatus(sp.Status), CreatedAt: sp.CreatedAt, LastUsedAt: sp.LastUsedAt,
 			Name: sp.Name, Mode: sp.Mode, ModelApplied: sp.ModelApplied,
-			Generation: gen,
+			Generation: gen, JournalKeyDeliveryPending: s.deliveryPending.isPending(sp.ID),
 		}
 	}
 	return connect.NewResponse(&cpv1.ListSpawnsResponse{Spawns: out}), nil

@@ -56,6 +56,11 @@ type Server struct {
 	suspends       *suspendWaiters // correlates a SuspendSpawn with the node's SuspendComplete (markers)
 	suspendTimeout time.Duration   // bound for awaiting SuspendComplete; overridable in tests
 
+	// upgradeWaiters correlates UpgradeToOwnerSealed requests with SealJournalKeyToOwnerResponse
+	// messages from the node (sp-8dkp §4). Keyed by per-request request_id.
+	upgradeWaiters  *upgradeWaiters
+	upgradeTimeout  time.Duration // bound for awaiting node seal; overridable in tests
+
 	// Reconciler: a background loop drives model_applied=false spawns to convergence (sp-bp9w.7).
 	reconcileInterval time.Duration               // tick period; overridable in tests
 	reconcileGiveUp   time.Duration               // per-spawn bounded retry window before giving up
@@ -97,6 +102,12 @@ type Server struct {
 	// (Create/Resume/Recreate/Migrate) register a pending intent BEFORE calling Provision; the
 	// client polls GetPendingIntent and submits a SignedIntent via SubmitIntent, unblocking provision.
 	pendingIntents *pendingIntentRegistry
+
+	// deliveryPending tracks spawns that are active on a target node but whose owner-sealed journal
+	// key has not yet been delivered by the browser (the post-migration delivery step, sp-8dkp §5).
+	// Set by MigrateSpawn when upgrade_to_owner_sealed=true; cleared by DeliverSecrets on journal-key
+	// delivery. Surfaced as journal_key_delivery_pending in ListSpawns to drive the web-UI step.
+	deliveryPending *deliveryPendingTracker
 }
 
 const (
@@ -114,10 +125,12 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 	return &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
 		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout,
+		upgradeWaiters: newUpgradeWaiters(),
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
 		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
 		pendingIntents: newPendingIntentRegistry(),
+		deliveryPending: newDeliveryPendingTracker(),
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
 		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
 		devMode: true}
@@ -227,6 +240,8 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			s.rt.ApplySessionStatus(m.SessionStatus.SpawnId, m.SessionStatus.SessionId, m.SessionStatus.State)
 		case *nodev1.NodeMessage_SetModelResult:
 			s.models.deliver(m.SetModelResult)
+		case *nodev1.NodeMessage_SealJournalKeyResult:
+			s.upgradeWaiters.deliver(m.SealJournalKeyResult)
 		case *nodev1.NodeMessage_SuspendComplete:
 			// Route to the SuspendSpawn awaiting this spawn's persist markers. deliver drops a
 			// stale-episode reply (generation != the awaiting episode's) — mirrors the generation fence

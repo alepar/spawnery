@@ -129,6 +129,16 @@ func (m *Manager) DeliverKey(spawnID string, gen uint64, password string) error 
 	return m.cfg.OwnerSealed.Deliver(spawnID, gen, password)
 }
 
+// NodeLocalPassword returns the node-local repo password for spawnID from the
+// Custody PasswordProvider. Used by the UpgradeToOwnerSealed node handler to
+// read the password and seal it to the owner's device set (the node-local →
+// owner-sealed upgrade seam, design §4). It calls Custody.PasswordFor which
+// generates-and-seals a fresh password on first call, so calling this before
+// any snapshot is safe. Returns an error if the custody call fails.
+func (m *Manager) NodeLocalPassword(spawnID string) (string, error) {
+	return m.cfg.Custody.PasswordFor(spawnID)
+}
+
 // WaitDelivered blocks until an owner-sealed key has been delivered for spawnID
 // or ctx is done — the "wait for the delivered key before Restore" hook on the
 // cross-node resume path (design §4/§5). Errors if no owner-sealed custody is

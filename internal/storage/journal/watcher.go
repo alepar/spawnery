@@ -109,7 +109,7 @@ func (w *Watcher) Degraded() bool {
 func (w *Watcher) addTree(root string) {
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // unreadable entry: skip, periodic rescan retries
+			return nil //nolint:nilerr // intentional: skip unreadable entries, let periodic rescan retry
 		}
 		if d.IsDir() {
 			w.add(path)

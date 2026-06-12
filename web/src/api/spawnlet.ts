@@ -15,6 +15,9 @@ export interface SpawnView {
   mode: string;
   model: string;
   modelApplied: boolean;
+  // journalKeyDeliveryPending: spawn is active on target but the browser-side delivery
+  // leg was interrupted mid-re-seal (spec §3 "delivery-fail" persistent state, WM3).
+  journalKeyDeliveryPending: boolean;
 }
 
 // statusFromProto maps the Connect-JSON enum NAME (e.g. "SPAWN_STATUS_ACTIVE") to a short status.
@@ -69,7 +72,7 @@ export async function createSpawn(appId: string, model: string, image = "", runn
 }
 
 export async function listSpawns(): Promise<SpawnView[]> {
-  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; mode?: string; model?: string; modelApplied?: boolean }> }>(
+  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; mode?: string; model?: string; modelApplied?: boolean; journalKeyDeliveryPending?: boolean }> }>(
     "ListSpawns", {},
   );
   return (r.spawns ?? []).map((s) => ({
@@ -80,6 +83,7 @@ export async function listSpawns(): Promise<SpawnView[]> {
     mode: s.mode ?? "",
     model: s.model ?? "",
     modelApplied: s.modelApplied ?? true,
+    journalKeyDeliveryPending: !!s.journalKeyDeliveryPending,
   }));
 }
 

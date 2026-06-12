@@ -41,6 +41,11 @@ func New() *Registry {
 	return &Registry{m: map[string]*Node{}, liveWindow: defaultLiveWindow, now: time.Now}
 }
 
+// NewWithClock creates a Registry with an injectable clock (for tests).
+func NewWithClock(now func() time.Time) *Registry {
+	return &Registry{m: map[string]*Node{}, liveWindow: defaultLiveWindow, now: now}
+}
+
 // Add unconditionally registers n (overwriting any existing id), marking it alive now. Used by tests
 // and internal seeding; the live node path uses Register, which enforces the displace-only-if-dead
 // policy.
@@ -178,4 +183,33 @@ func (r *Registry) TargetEligible(nodeID, owner string) (exists, eligible bool) 
 		return false, false
 	}
 	return true, eligibleForOwner(n, owner)
+}
+
+// TargetInfo is one node entry returned by EligibleTargets.
+type TargetInfo struct {
+	ID     string
+	Class  string
+	Owner  string
+	Online bool
+}
+
+// EligibleTargets returns info for every node that is tenancy-eligible for owner (their own
+// self-hosted + all cloud nodes). Online reflects liveness within liveWindow.
+func (r *Registry) EligibleTargets(owner string) []TargetInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	var out []TargetInfo
+	for _, n := range r.m {
+		if !eligibleForOwner(n, owner) {
+			continue
+		}
+		out = append(out, TargetInfo{
+			ID:     n.ID,
+			Class:  n.Class,
+			Owner:  n.Owner,
+			Online: now.Sub(n.lastBeat) < r.liveWindow,
+		})
+	}
+	return out
 }

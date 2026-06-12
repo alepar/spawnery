@@ -35,8 +35,8 @@ describe("listSpawns", () => {
     const out = await listSpawns();
     expect(calls[0].url).toContain("/cp.v1.SpawnService/ListSpawns");
     expect(out).toEqual([
-      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true },
-      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true },
+      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false },
+      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false },
     ]);
   });
   it("maps model and modelApplied from the response", async () => {
