@@ -16,6 +16,7 @@ import (
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/store"
+	"spawnery/internal/weborigin"
 )
 
 // helpers for WS tests
@@ -83,7 +84,7 @@ func newWSTestServer(t *testing.T, priv ed25519.PrivateKey, devMode bool, devTok
 	s.SetVerify(v.Verify)
 	s.SetDevMode(devMode)
 
-	ts := httptest.NewServer(s.HandleWS(v))
+	ts := httptest.NewServer(s.HandleWS(v, weborigin.FromEnv("")))
 	t.Cleanup(ts.Close)
 	return s, v, sessions, ts
 }

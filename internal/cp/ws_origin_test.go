@@ -27,19 +27,22 @@ func dialWS(t *testing.T, url, origin string) (*websocket.Conn, error) {
 	return conn, err
 }
 
-func newWSTestServer(t *testing.T, allowEnv string) string {
+func newWSOriginTestServer(t *testing.T, allowEnv string) string {
 	t.Helper()
 	s, _, _ := newTestServer(t)
-	authn := auth.New(map[string]string{"dev-token": "alice"})
+	v := auth.NewVerifier(auth.VerifierConfig{
+		DevTokens: map[string]string{"dev-token": "alice"},
+		DevMode:   true,
+	})
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws/session", s.HandleWS(authn, weborigin.FromEnv(allowEnv)))
+	mux.HandleFunc("/ws/session", s.HandleWS(v, weborigin.FromEnv(allowEnv)))
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	return "ws" + ts.URL[len("http"):] + "/ws/session"
 }
 
 func TestHandleWSAllowedOriginUpgrades(t *testing.T) {
-	url := newWSTestServer(t, "https://app.spawnery.dev")
+	url := newWSOriginTestServer(t, "https://app.spawnery.dev")
 	conn, err := dialWS(t, url, "https://app.spawnery.dev")
 	if err != nil {
 		t.Fatalf("allowed origin must upgrade: %v", err)
@@ -60,7 +63,7 @@ func TestHandleWSAllowedOriginUpgrades(t *testing.T) {
 }
 
 func TestHandleWSDisallowedOriginRejected(t *testing.T) {
-	url := newWSTestServer(t, "https://app.spawnery.dev")
+	url := newWSOriginTestServer(t, "https://app.spawnery.dev")
 	conn, err := dialWS(t, url, "https://evil.example")
 	if err == nil {
 		conn.CloseNow() //nolint:errcheck
@@ -69,7 +72,7 @@ func TestHandleWSDisallowedOriginRejected(t *testing.T) {
 }
 
 func TestHandleWSAbsentOriginAllowed(t *testing.T) {
-	url := newWSTestServer(t, "https://app.spawnery.dev")
+	url := newWSOriginTestServer(t, "https://app.spawnery.dev")
 	conn, err := dialWS(t, url, "")
 	if err != nil {
 		t.Fatalf("absent Origin (non-browser client) must upgrade: %v", err)
@@ -78,7 +81,7 @@ func TestHandleWSAbsentOriginAllowed(t *testing.T) {
 }
 
 func TestHandleWSDevModeAllowsLocalhost(t *testing.T) {
-	url := newWSTestServer(t, "")
+	url := newWSOriginTestServer(t, "")
 	conn, err := dialWS(t, url, "http://localhost:5173")
 	if err != nil {
 		t.Fatalf("dev mode must allow localhost origin: %v", err)
