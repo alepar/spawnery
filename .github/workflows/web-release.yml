@@ -1,0 +1,241 @@
+# Signed release pipeline for the Spawnery SPA (W1, sp-2ckv.6).
+#
+# Produces a cosign-keyless-signed dist/ artifact. The deploy step is a STUB
+# (no real static host configured) — see deploy/web/README.md for the ops checklist
+# to wire up the real host.
+#
+# Security properties:
+#  - [WM20] Builds ONCE with npm ci from the committed lockfile; the tested bundle
+#    is the signed bundle is the deployed bundle — same digest flows build→sign→deploy.
+#  - [WM21] The gate is falsifiable: every release asserts verify FAILS for a
+#    signature-stripped artifact and a wrong-identity fixture.
+#  - [WL2] Anti-rollback: deploy job enforces a monotonic release counter.
+#  - [WL3] Pre-sign forbidden-value scan: localhost origins, unsafe-eval/unsafe-inline
+#    (except the documented xterm/sonner exception), dev-token, PLACEHOLDER anchors.
+#  - [WM17] Sequencing gate: public DNS flip is gated on per-account auth (see README).
+#    This pipeline deploys to a private/staging origin until then.
+#
+# Residuals (stated honestly [WM20]):
+#  - The static host, the CI signing path, and the npm dependency tree at build time
+#    are trusted. A compromised transitive dep produces a signed, CSP-clean bundle.
+#  - Lockfile discipline + SLSA attestation (deferred follow-up) reduce but do not
+#    eliminate supply-chain risk.
+
+name: web-release
+
+on:
+  push:
+    tags:
+      - "web/v[0-9]*"
+
+permissions:
+  contents: read
+  id-token: write  # Required for cosign keyless OIDC signing.
+
+jobs:
+  # ── Build ──────────────────────────────────────────────────────────────────
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    outputs:
+      dist-digest: ${{ steps.digest.outputs.digest }}
+      release-version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      # [WM20]: NEVER npm install — always npm ci from the committed lockfile.
+      - name: Install dependencies (npm ci from lockfile)
+        run: npm ci
+
+      # Build with pinned origins from the release environment.
+      # VITE_CP_ORIGIN and VITE_AS_ORIGIN are set in the GitHub Environment secrets.
+      - name: Build (production, pinned origins)
+        env:
+          VITE_CP_ORIGIN: ${{ vars.VITE_CP_ORIGIN }}
+          VITE_AS_ORIGIN: ${{ vars.VITE_AS_ORIGIN }}
+        run: npm run build
+
+      # [WL3]: Pre-sign forbidden-value scan — must pass before signing.
+      - name: Pre-sign forbidden-value scan
+        run: |
+          cd ..
+          deploy/web/forbidden-scan.sh web/dist
+
+      - name: Compute dist digest
+        id: digest
+        run: |
+          DIGEST=$(tar -cf - dist/ | sha256sum | cut -d' ' -f1)
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "dist digest: $DIGEST"
+
+      - name: Extract release version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#web/}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release version: $VERSION"
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist-${{ steps.digest.outputs.digest }}
+          path: web/dist/
+          if-no-files-found: error
+
+  # ── Sign ───────────────────────────────────────────────────────────────────
+  sign:
+    name: Sign
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    outputs:
+      bundle-name: ${{ steps.sign.outputs.bundle-name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dist artifact (same digest as tested)
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist-${{ needs.build.outputs.dist-digest }}
+          path: dist/
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Create dist archive for signing
+        run: tar -czf dist.tar.gz dist/
+
+      # Cosign keyless signing via GitHub Actions OIDC — no long-lived keys.
+      - name: Sign dist archive
+        id: sign
+        run: |
+          cosign sign-blob --yes dist.tar.gz --bundle dist.tar.gz.bundle
+          echo "bundle-name=dist.tar.gz.bundle" >> "$GITHUB_OUTPUT"
+          echo "Signed: $(cat dist.tar.gz.bundle | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get(\"rekorBundle\", {}).get(\"SignedEntryTimestamp\", \"(no timestamp)\")[:30])')"
+
+      - name: Upload signature bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-sig-${{ needs.build.outputs.dist-digest }}
+          path: dist.tar.gz.bundle
+
+  # ── Deploy ─────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy (stub)
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    # Scoped deploy environment — separate from CI build env, own credentials.
+    environment: deploy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist-${{ needs.build.outputs.dist-digest }}
+          path: dist/
+
+      - name: Download signature bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: web-sig-${{ needs.build.outputs.dist-digest }}
+          path: ./
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Create the archive for verification.
+      - name: Recreate dist archive (same content as signed)
+        run: tar -czf dist.tar.gz dist/
+
+      # [WM21]: Verify with EXACT identity pinning — no regexp flags.
+      - name: Verify signature before deploy
+        env:
+          COSIGN_CERT_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/web-release.yml@${{ github.ref }}"
+          COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
+        run: |
+          cosign verify-blob \
+            --certificate-identity "$COSIGN_CERT_IDENTITY" \
+            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+            --bundle dist.tar.gz.bundle \
+            dist.tar.gz
+          echo "Signature VERIFIED. Proceeding to deploy."
+
+      # [WM21] Falsifiable self-test: assert verify FAILS for bad cases.
+      - name: "Self-test: verify MUST fail on signature-stripped artifact"
+        run: |
+          # Use /dev/null as the bundle — no signature exists for this file.
+          if cosign verify-blob \
+               --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/web-release.yml@${{ github.ref }}" \
+               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+               --bundle /dev/null \
+               deploy/web/fixtures/stripped-artifact.txt 2>/dev/null; then
+            echo "FATAL: verify passed on stripped artifact — gate is broken" >&2
+            exit 1
+          fi
+          echo "Self-test PASSED: verify correctly rejected stripped artifact."
+
+      - name: "Self-test: verify MUST fail with wrong OIDC issuer"
+        run: |
+          # Use a wrong OIDC issuer — should be rejected.
+          if cosign verify-blob \
+               --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/web-release.yml@${{ github.ref }}" \
+               --certificate-oidc-issuer "https://evil.example.invalid" \
+               --bundle dist.tar.gz.bundle \
+               dist.tar.gz 2>/dev/null; then
+            echo "FATAL: verify passed with wrong OIDC issuer — gate is broken" >&2
+            exit 1
+          fi
+          echo "Self-test PASSED: verify correctly rejected wrong OIDC issuer."
+
+      # [WL2]: Anti-rollback — enforce monotonic release counter.
+      - name: Anti-rollback check (monotonic release counter)
+        run: |
+          PREV=$(cat deploy/web/release-counter.txt | tr -d '[:space:]')
+          # Extract the numeric part from the tag (web/vN -> N).
+          CURR="${{ needs.build.outputs.release-version }}"
+          CURR_NUM="${CURR#v}"  # strip leading 'v'
+          echo "Previous counter: $PREV, Current: $CURR_NUM"
+          if ! python3 -c "
+          import sys
+          prev = int('$PREV') if '$PREV' else 0
+          curr = '$CURR_NUM'
+          # Accept either a pure integer or a semver where major > prev.
+          parts = curr.split('.')
+          major = int(parts[0]) if parts[0].isdigit() else 0
+          if major <= prev:
+              print(f'ANTI-ROLLBACK FAIL: $CURR_NUM <= previous $PREV', file=sys.stderr)
+              sys.exit(1)
+          print(f'Anti-rollback OK: $CURR_NUM > $PREV')
+          "; then
+            exit 1
+          fi
+
+      # DEPLOY STUB: no real static host configured yet.
+      # See deploy/web/README.md for the ops checklist to wire up the real host.
+      # The [WM17] sequencing gate means this MUST remain a private/staging origin
+      # until minimal per-account auth (invite tokens) is in place.
+      - name: "Deploy (STUB — no real host configured)"
+        run: |
+          echo "============================================================"
+          echo "DEPLOY STUB: dist/ is signed and verified."
+          echo "Release: ${{ needs.build.outputs.release-version }}"
+          echo "Digest:  ${{ needs.build.outputs.dist-digest }}"
+          echo ""
+          echo "To complete deployment, follow deploy/web/README.md:"
+          echo "  1. Configure the static host (Cloudflare Pages / Netlify class)"
+          echo "  2. Set DEPLOY_TOKEN in the 'deploy' GitHub Environment"
+          echo "  3. Replace this stub with the real upload command"
+          echo "  4. Update deploy/web/release-counter.txt after successful deploy"
+          echo ""
+          echo "[WM17] Sequencing gate: public DNS flip is gated on per-account auth."
+          echo "============================================================"

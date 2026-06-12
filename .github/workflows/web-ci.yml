@@ -1,0 +1,71 @@
+# PR gate for the Spawnery web SPA (W1, sp-2ckv.6).
+# Runs on every push / PR against master that touches web/ or Go web-related paths.
+# Does NOT deploy — that's web-release.yml.
+name: web-ci
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "web/**"
+      - "internal/cp/**"
+      - "internal/weborigin/**"
+      - "cmd/spawnery_cp/**"
+      - "cmd/authsvc/**"
+  pull_request:
+    branches: [master]
+    paths:
+      - "web/**"
+      - "internal/cp/**"
+      - "internal/weborigin/**"
+      - "cmd/spawnery_cp/**"
+      - "cmd/authsvc/**"
+
+jobs:
+  web:
+    name: Web — lint, type-check, test, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      # [WM20]: NEVER npm install — always npm ci from the committed lockfile.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript type-check
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npx eslint .
+
+      - name: Vitest (hermetic unit tests)
+        run: npm test
+
+      # Build without pinned origins (dev build — no VITE_CP_ORIGIN set).
+      # The SRI plugin skips _headers for dev builds; this still validates the plugin
+      # logic and that all assets are coverable.
+      - name: Build (dev-origin, SRI validation)
+        run: npm run build
+
+  go-web:
+    name: Go — ws origin + CORS hermetic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test -race ./internal/cp/... ./internal/weborigin/... ./cmd/spawnery_cp/...
+        run: CGO_ENABLED=1 go test -race -count=1 ./internal/cp/... ./internal/weborigin/... ./cmd/spawnery_cp/...

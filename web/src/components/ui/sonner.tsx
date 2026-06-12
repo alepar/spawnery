@@ -1,5 +1,12 @@
 "use client"
 
+// Bundle sonner's stylesheet as a static hashed asset (style-src 'self').
+// Note: the sonner JS module ALSO calls __insertCSS() at load time, which is a
+// runtime <style> injection that cannot be hashed. The CSP therefore includes
+// 'unsafe-inline' on style-src — see build/sri-headers-plugin.ts for the full
+// rationale and deploy/web/README.md §CSP for the decision record.
+import "sonner/dist/styles.css";
+
 import {
   CircleCheckIcon,
   InfoIcon,
