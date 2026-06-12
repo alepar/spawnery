@@ -38,14 +38,12 @@ import { initSweep, type SweepProgress } from "./epoch";
 import { toBase64 } from "./encoding";
 
 /**
- * M8 trusted-device warning — verbatim from the owner-sealed spec §3, displayed
- * before any recovery-code entry. Never skip this ([WM12]).
+ * M8 trusted-device warning — verbatim banner copy from the owner-sealed spec §3,
+ * displayed before any recovery-code entry. Never skip this ([WM12]).
+ * Cross-language: must match cmd/spawnctl/key.go m8TrustedDeviceWarning exactly.
  */
-export const M8_TRUSTED_DEVICE_WARNING = `Recovery requires entering your BIP-39 phrase. \
-This phrase is the master key for all your sealed secrets. \
-Only enter it on a device you personally control and trust: the machine running \
-this browser must not be shared, observed, or compromised. \
-In a hotel or on someone else's computer, cancel and use an enrolled device instead.`;
+export const M8_TRUSTED_DEVICE_WARNING =
+  "approve from your phone / enter recovery code only on a trusted device";
 
 export interface RecoveryResult {
   /** The new recovery phrase to display and have the user record. */

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -285,4 +287,114 @@ func bytesToHex(b []byte) string {
 		out[i*2+1] = hexdigits[v&0x0f]
 	}
 	return string(out)
+}
+
+// sasFmt matches the "xxxx-xxxx-xxxx" 3×4 base-36 output format.
+var sasFmt = regexp.MustCompile(`^[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$`)
+
+// TestApproveDeviceSAS verifies that approveDevice independently derives the
+// SAS from the chain state and the new device's pubkeys (spec §2 [WM4]).
+// The returned SAS must be in the expected 3×4 base-36 format and must be
+// non-empty so the CLI can display it for human comparison.
+func TestApproveDeviceSAS(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := initDeviceSet(dir, false); err != nil {
+		t.Fatalf("initDeviceSet: %v", err)
+	}
+
+	// Build a minimal enrollment payload for a fresh second device.
+	freshDev, err := seal.NewMnemonic()
+	if err != nil {
+		t.Fatalf("NewMnemonic: %v", err)
+	}
+	enrollDev, err := seal.DeviceFromMnemonic(freshDev, "")
+	if err != nil {
+		t.Fatalf("DeviceFromMnemonic: %v", err)
+	}
+	ref := enrollDev.Ref()
+
+	payload, err := json.Marshal(map[string]string{
+		"x25519Pub":  encodeBase64(ref.X25519Pub),
+		"signPub":    encodeBase64(ref.SignPub),
+		"deviceName": "test-device",
+		"expiresAt":  "2099-01-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	result, err := approveDevice(dir, string(payload), "test-device")
+	if err != nil {
+		t.Fatalf("approveDevice: %v", err)
+	}
+
+	// SAS must be in the correct format.
+	if !sasFmt.MatchString(result.SAS) {
+		t.Fatalf("approveDevice SAS format wrong: %q (want xxxx-xxxx-xxxx base-36)", result.SAS)
+	}
+	// Response must contain the ownerRoot fields.
+	if !strings.Contains(result.Response, "ownerRoot") {
+		t.Fatalf("approveDevice Response missing ownerRoot: %s", result.Response)
+	}
+}
+
+// TestApproveDeviceSASMITM verifies that approving two different enrollment
+// payloads with different x25519 pubkeys produces different SAS codes — a
+// MITM that substitutes a pubkey must be detectable via the SAS (spec §2 [WM4]).
+func TestApproveDeviceSASMITM(t *testing.T) {
+	// Initialize a device set on a temp dir.
+	dir := t.TempDir()
+	if _, err := initDeviceSet(dir, false); err != nil {
+		t.Fatalf("initDeviceSet: %v", err)
+	}
+
+	makePayload := func(x25519 []byte, signPub []byte) string {
+		p, _ := json.Marshal(map[string]string{
+			"x25519Pub":  encodeBase64(x25519),
+			"signPub":    encodeBase64(signPub),
+			"deviceName": "dev",
+			"expiresAt":  "2099-01-01T00:00:00Z",
+		})
+		return string(p)
+	}
+
+	dev1, _ := seal.DeviceFromMnemonic(testMnemonic, "")
+	ref1 := dev1.Ref()
+
+	mn2, _ := seal.NewMnemonic()
+	dev2, _ := seal.DeviceFromMnemonic(mn2, "")
+	ref2 := dev2.Ref()
+
+	// Approve the legitimate device first to get its SAS.
+	legitResult, err := approveDevice(dir, makePayload(ref1.X25519Pub, ref1.SignPub), "legit")
+	if err != nil {
+		t.Fatalf("approveDevice legit: %v", err)
+	}
+
+	// Re-initialise with a fresh device set for the MITM comparison (so the
+	// chain state is the same as the first approval).
+	dir2 := t.TempDir()
+	if _, err := initDeviceSet(dir2, false); err != nil {
+		t.Fatalf("initDeviceSet MITM: %v", err)
+	}
+	// Approve with the MITM's substituted x25519 pubkey.
+	mitmResult, err := approveDevice(dir2, makePayload(ref2.X25519Pub, ref1.SignPub), "mitm")
+	if err != nil {
+		t.Fatalf("approveDevice MITM: %v", err)
+	}
+
+	if legitResult.SAS == mitmResult.SAS {
+		t.Fatalf("MITM failure: substituted x25519 pubkey produced identical SAS %q — "+
+			"a MITM'd enrollment would pass human comparison undetected", legitResult.SAS)
+	}
+}
+
+// TestM8WarningVerbatim asserts the CLI constant reproduces the verbatim M8
+// banner copy from the owner-sealed spec §3 (spec [WM12]).
+func TestM8WarningVerbatim(t *testing.T) {
+	const specText = "approve from your phone / enter recovery code only on a trusted device"
+	if !strings.Contains(m8TrustedDeviceWarning, specText) {
+		t.Fatalf("m8TrustedDeviceWarning does not contain the verbatim spec §3 banner copy %q;\n"+
+			"got: %q", specText, m8TrustedDeviceWarning)
+	}
 }

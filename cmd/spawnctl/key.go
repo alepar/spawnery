@@ -30,14 +30,11 @@ func encodeBase64(b []byte) string {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
-// m8TrustedDeviceWarning is the verbatim M8 warning from the owner-sealed spec
-// §3, displayed before any operation where the user enters a recovery phrase.
-// It must never be suppressed or shortened.
-const m8TrustedDeviceWarning = `SECURITY WARNING: You are about to enter your BIP-39 recovery phrase.
-This phrase is the master key for all your sealed secrets. Only enter it on a
-device you personally control and trust. In a shared, hotel, or observed
-environment, cancel and use an enrolled device instead.
-`
+// m8TrustedDeviceWarning is the verbatim M8 banner copy from the owner-sealed
+// spec §3, displayed before any operation where the user enters a recovery phrase.
+// It must never be suppressed or shortened (spec §3 [WM12]).
+// Cross-language: must match web/src/keys/recovery.ts M8_TRUSTED_DEVICE_WARNING exactly.
+const m8TrustedDeviceWarning = "approve from your phone / enter recovery code only on a trusted device\n"
 
 // Local owner device-key lifecycle for spawnctl (sp-2ckv.2, CLI-first). These
 // commands manage the owner's per-device keypairs and the hash-chained device
@@ -340,17 +337,29 @@ func recoverDevice(dir, mnemonic string, force bool) (*recoverResult, error) {
 
 // ---- approve ----
 
+// approveResult holds the SAS code (for human comparison) and the JSON
+// approval response to hand to the enrollee.
+type approveResult struct {
+	// SAS is the independently-derived Short Authentication String (spec §2
+	// [WM4]).  Display it to the approver so they can confirm it matches the
+	// code shown on the enrolling device before trusting the payload.
+	SAS string
+	// Response is the JSON approval payload (OwnerRoot + head) for the enrollee.
+	Response string
+}
+
 // approveDevice processes an enrollment payload from a new device (the
 // enrollee), appends a member-signed add-entry to the local device set, and
-// prints the approval response (OwnerRoot + head) for the enrollee to paste.
+// returns the SAS (for the approver to compare with the enrollee's display) and
+// the approval response (OwnerRoot + head) for the enrollee to paste.
 //
-// The caller is responsible for verifying the SAS out-of-band before running
-// this command. The SAS must be computed from:
-//   sha256(encodeFields("sas/v1", genesis_hash, head_hash, new_x25519_pub, new_sign_pub))
+// The SAS is computed from the chain state BEFORE the add-entry so both sides
+// derive it independently from the same snapshot (spec §2 [WM4]).
+// Formula: sha256(encodeFields("sas/v1", genesis_hash, head_hash, new_x25519_pub, new_sign_pub))
 //
 // The approval response returns the OwnerRoot + head so the enrollee can pin
 // them (spec §2 [WM5]: never TOFU from the AS).
-func approveDevice(dir, payloadJSON, deviceName string) (string, error) {
+func approveDevice(dir, payloadJSON, deviceName string) (*approveResult, error) {
 	// Parse the enrollment payload.
 	var payload struct {
 		X25519Pub string `json:"x25519Pub"` // base64
@@ -359,16 +368,16 @@ func approveDevice(dir, payloadJSON, deviceName string) (string, error) {
 		ExpiresAt string `json:"expiresAt"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return "", fmt.Errorf("parse enrollment payload: %w", err)
+		return nil, fmt.Errorf("parse enrollment payload: %w", err)
 	}
 
 	x25519Pub, err := decodeBase64(payload.X25519Pub)
 	if err != nil {
-		return "", fmt.Errorf("decode x25519_pub: %w", err)
+		return nil, fmt.Errorf("decode x25519_pub: %w", err)
 	}
 	signPub, err := decodeBase64(payload.SignPub)
 	if err != nil {
-		return "", fmt.Errorf("decode sign_pub: %w", err)
+		return nil, fmt.Errorf("decode sign_pub: %w", err)
 	}
 
 	newDeviceRef := seal.DeviceRef{X25519Pub: x25519Pub, SignPub: signPub}
@@ -380,29 +389,44 @@ func approveDevice(dir, payloadJSON, deviceName string) (string, error) {
 	// Load and verify the current chain.
 	dsf, err := loadDeviceSet(dir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if _, err := seal.VerifyDeviceSet(dsf.Log, dsf.Root); err != nil {
-		return "", fmt.Errorf("chain verification failed: %w", err)
+		return nil, fmt.Errorf("chain verification failed: %w", err)
+	}
+
+	// Derive the SAS BEFORE adding the new device — both sides compute from the
+	// same pre-approval chain snapshot (spec §2 [WM4]).
+	genesisHash, err := dsf.Log.Entries[0].Hash()
+	if err != nil {
+		return nil, fmt.Errorf("genesis hash: %w", err)
+	}
+	headHashBefore, err := dsf.Log.HeadHash()
+	if err != nil {
+		return nil, fmt.Errorf("head hash before add: %w", err)
+	}
+	sas, err := seal.DeriveSAS(genesisHash, headHashBefore, x25519Pub, signPub)
+	if err != nil {
+		return nil, fmt.Errorf("derive SAS: %w", err)
 	}
 
 	// Load the approver's device key.
 	approver, err := loadDevice(dir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	// Append the add-entry signed by this device.
 	if err := dsf.Log.AddDeviceLabeled(newDeviceRef, approver, name); err != nil {
-		return "", fmt.Errorf("add device to chain: %w", err)
+		return nil, fmt.Errorf("add device to chain: %w", err)
 	}
 	if err := writeDeviceSet(dir, dsf); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	headHash, err := dsf.Log.HeadHash()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	headVersion := dsf.Log.HeadVersion()
 
@@ -416,9 +440,9 @@ func approveDevice(dir, payloadJSON, deviceName string) (string, error) {
 		"headVersion": headVersion,
 	}, "", "  ")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return string(resp), nil
+	return &approveResult{SAS: sas, Response: string(resp)}, nil
 }
 
 // ---- rendering (pure, testable) ----
@@ -612,21 +636,24 @@ func keyDeviceSetCmd() *cli.Command {
 //
 // Takes an enrollment payload JSON (from the web or another CLI) and
 // appends a member-signed add-entry to the local device set, then
-// prints the approval response (OwnerRoot + head) for the enrollee.
+// prints the SAS (for human comparison) and the approval response
+// (OwnerRoot + head) for the enrollee.
 //
-// The SAS must be verified by the human operator before running this
-// command (spec §2 [WM4]).
+// Both sides independently derive the SAS (spec §2 [WM4]); the human
+// confirms the codes match before the enrollee finalises enrollment.
 func keyDeviceSetApproveCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "approve",
-		Usage: "approve a device enrollment from a JSON payload; print the approval response",
+		Usage: "approve a device enrollment: compute and display the SAS, then print the approval response",
 		Description: `Processes an enrollment payload from a new device (web or another spawnctl).
-Appends a member-signed add-entry to the local device set and prints the
-approval response (OwnerRoot + head) for the enrollee to paste into their UI.
 
-IMPORTANT: verify the SAS code out-of-band BEFORE running this command.
-The SAS is computed from (genesis_hash || head_hash || new_device_pubkeys)
-and must match the code displayed by the enrolling device.`,
+This command independently derives the Short Authentication String (SAS) from
+the chain state and the new device's pubkeys (spec §2 [WM4]), then displays it.
+Compare it with the code shown on the enrolling device — they must match.
+Only hand the approval response to the enrollee after confirming the codes match.
+
+If the codes do not match, discard the response and do not share it: a mismatch
+indicates the link was tampered with in transit (substituted-pubkey MITM).`,
 		Flags: []cli.Flag{
 			configDirFlag(),
 			&cli.StringFlag{
@@ -664,13 +691,16 @@ and must match the code displayed by the enrolling device.`,
 				return cli.Exit("no enrollment payload provided (use --payload or pipe JSON to stdin)", 1)
 			}
 
-			resp, err := approveDevice(dir, payloadJSON, c.String("device-name"))
+			result, err := approveDevice(dir, payloadJSON, c.String("device-name"))
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			fmt.Fprintln(c.Writer, "Device enrolled. Send this approval response to the enrollee:")
+			fmt.Fprintf(c.Writer, "SAS code:  %s\n", result.SAS)
+			fmt.Fprintln(c.Writer, "Confirm this code matches the enrolling device before sharing the response.")
 			fmt.Fprintln(c.Writer)
-			fmt.Fprintln(c.Writer, resp)
+			fmt.Fprintln(c.Writer, "Approval response (send to enrollee after SAS confirmation):")
+			fmt.Fprintln(c.Writer)
+			fmt.Fprintln(c.Writer, result.Response)
 			return nil
 		},
 	}
