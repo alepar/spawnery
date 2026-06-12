@@ -3,8 +3,9 @@ import { Switch } from "@/components/ui/switch";
 import { setTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { TerminalSettings } from "./settings/TerminalSettings";
+import { DeviceManagement } from "./settings/DeviceManagement";
 
-type Tab = "general" | "terminal";
+type Tab = "general" | "terminal" | "devices";
 
 export function SettingsView() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
@@ -27,6 +28,13 @@ export function SettingsView() {
         >
           Terminal
         </TabButton>
+        <TabButton
+          id="settings-tab-devices"
+          active={tab === "devices"}
+          onClick={() => setTab("devices")}
+        >
+          Devices
+        </TabButton>
       </div>
 
       {tab === "general" && (
@@ -44,6 +52,8 @@ export function SettingsView() {
       )}
 
       {tab === "terminal" && <TerminalSettings />}
+
+      {tab === "devices" && <DeviceManagement />}
     </div>
   );
 }

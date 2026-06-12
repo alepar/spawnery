@@ -35,6 +35,7 @@ import {
   type StoredEntry,
 } from "./deviceset";
 import { initSweep, type SweepProgress } from "./epoch";
+import { bumpPinnedHead } from "./anchor";
 import { toBase64 } from "./encoding";
 
 /**
@@ -161,6 +162,14 @@ export async function recoverAndRotate(opts: {
 
   // Persist the fresh device keys ([WM11])
   const { persistGranted } = await storeDeviceKeys(freshDeviceKeys);
+
+  // Bump the pinned head version by 3 (addFresh + addNewRecovery + removeOldRecovery).
+  // OwnerRoot is NOT changed here — the genesis-pinned root stays constant because
+  // verifyDeviceSet uses it only to verify the genesis co-signatures; later entries
+  // are verified against the current member set. Risk: if a future flow rotates
+  // device1 (not recovery), the genesis pubkey in OwnerRoot would also need updating.
+  // For recovery rotation only, this is safe.
+  bumpPinnedHead(verified.headVersion + 3);
 
   // Init re-seal sweep ([WM2])
   const sweepProgress = initSweep({

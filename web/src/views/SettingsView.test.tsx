@@ -11,6 +11,11 @@ globalThis.ResizeObserver = class {
 };
 (document as any).fonts = { load: vi.fn().mockResolvedValue([]) };
 
+// Mock DeviceManagement (it brings in crypto + IDB which are heavy in jsdom)
+vi.mock("./settings/DeviceManagement", () => ({
+  DeviceManagement: () => <div data-testid="device-management-stub">device management</div>,
+}));
+
 vi.mock("@xterm/xterm", () => ({
   Terminal: vi.fn(() => ({
     loadAddon: vi.fn(),
@@ -65,6 +70,14 @@ describe("SettingsView", () => {
     renderView();
     await userEvent.click(screen.getByTestId("settings-tab-terminal"));
     expect(screen.getByTestId("term-follow")).toBeTruthy();
+    expect(screen.queryByTestId("theme-toggle")).toBeNull();
+  });
+
+  it("Devices tab is present and switching to it shows DeviceManagement", async () => {
+    renderView();
+    expect(screen.getByTestId("settings-tab-devices")).toBeTruthy();
+    await userEvent.click(screen.getByTestId("settings-tab-devices"));
+    expect(screen.getByTestId("device-management-stub")).toBeTruthy();
     expect(screen.queryByTestId("theme-toggle")).toBeNull();
   });
 });

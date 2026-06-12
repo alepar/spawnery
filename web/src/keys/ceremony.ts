@@ -21,6 +21,7 @@
 import { generateDeviceKeys, deriveDeviceKeysFromMnemonic, exportDeviceRef, storeDeviceKeys } from "./device";
 import { generateMnemonic } from "./bip39";
 import { buildGenesisEntry, type ASTransport, type StoredEntry, type OwnerRoot } from "./deviceset";
+import { saveAnchor } from "./anchor";
 import { toBase64 } from "./encoding";
 
 export type CeremonyStep =
@@ -154,6 +155,10 @@ export async function completeCeremony(
 
   // Now persist keys to IndexedDB + call navigator.storage.persist()
   const { persistGranted } = await storeDeviceKeys(ctx.deviceKeys);
+
+  // Pin OwnerRoot + genesis head version locally ([WM5])
+  saveAnchor({ ownerRoot: ctx.ownerRoot, headVersion: 1 });
+
   return { persistGranted };
 }
 
