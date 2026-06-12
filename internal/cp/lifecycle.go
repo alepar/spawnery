@@ -312,9 +312,9 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	}
 
 	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
-	// Skipped in dev mode (nil env; node verify-and-log-not-enforce on the other side [AM12]).
+	// Skipped when intentEnabled=false (nil env; node verify-and-log on the other side [AM12]).
 	var env *authv1.AuthEnvelope
-	if !s.devMode {
+	if s.intentEnabled {
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
 			s.failResume(ctx, id, gen, revertOnFail, "PickNodeID")
@@ -484,7 +484,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 
 	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
 	var env *authv1.AuthEnvelope
-	if !s.devMode {
+	if s.intentEnabled {
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
 			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {

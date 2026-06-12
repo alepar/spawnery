@@ -87,7 +87,7 @@ func TestRunMoveResealsAndDelivers(t *testing.T) {
 	defer func() { genDeliveryID = prev }()
 
 	var out bytes.Buffer
-	if err := runMove(context.Background(), client, dev, "sp1", "node-b", &out, time.Now()); err != nil {
+	if err := runMove(context.Background(), client, nil, dev, "sp1", "node-b", &out, time.Now()); err != nil {
 		t.Fatalf("runMove: %v", err)
 	}
 
@@ -143,7 +143,7 @@ func TestRunMoveMigrateFailureIsDataSafe(t *testing.T) {
 		migErr:  fmt.Errorf("no capacity"),
 	}
 	var out bytes.Buffer
-	err := runMove(context.Background(), client, dev, "sp1", "cloud", &out, time.Now())
+	err := runMove(context.Background(), client, nil, dev, "sp1", "cloud", &out, time.Now())
 	if err == nil || !strings.Contains(err.Error(), "your data is safe") {
 		t.Fatalf("migrate failure err = %v, want a data-safe message", err)
 	}

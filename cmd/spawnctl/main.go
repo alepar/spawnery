@@ -26,6 +26,9 @@ import (
 	"spawnery/internal/manifest"
 )
 
+// Ensure cpv1connect.SpawnServiceClient satisfies the narrow intentClient interface.
+var _ intentClient = (cpv1connect.SpawnServiceClient)(nil)
+
 func main() {
 	cmd := &cli.Command{
 		Name:  "spawnctl",
@@ -176,9 +179,24 @@ func runCP(ctx context.Context, addr, appID, model string, src *cpTokenSource) {
 	id := cs.Msg.SpawnId
 	fmt.Println("spawn:", id)
 
+	// A4 two-phase sign-after-resolve [AC1][AM12]: start the poll-and-sign loop concurrently with
+	// waitActiveCP. The CP blocks the spawn in 'starting' until the client submits a signed intent;
+	// pollAndSign polls until the CP registers the pending intent, then builds and submits it.
+	// If the CP does not have the intent flow enabled (old CP or intentEnabled=false), pollAndSign
+	// polls until its context is cancelled when waitActiveCP returns — the spawn becomes active
+	// without it and the context.Canceled error is suppressed.
+	pollCtx, cancelPoll := context.WithCancel(ctx)
+	defer cancelPoll()
+	go func() {
+		if err := pollAndSign(pollCtx, client, id); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("pollAndSign: %v (spawn may still become active if CP intent flow is disabled)", err)
+		}
+	}()
+
 	// CreateSpawn is async: the CP binds the spawn to its node only once the node reports ACTIVE.
 	// Wait for that before attaching, else the session races provisioning and gets "unknown spawn".
 	waitActiveCP(ctx, client, id)
+	cancelPoll()
 
 	stream := client.Session(ctx)
 	if err := stream.Send(&cpv1.Frame{SpawnId: id}); err != nil { // bind frame (carries the spawn id)

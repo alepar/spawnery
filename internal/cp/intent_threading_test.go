@@ -38,12 +38,12 @@ func nextTestJTI() string {
 	return fmt.Sprintf("test-jti-%d", intentTestJTI.Add(1))
 }
 
-// intentTestServer builds a Server with devMode=false (intent flow enabled) and a fresh node.
+// intentTestServer builds a Server with intentEnabled=true (A4 flow active) and a fresh node.
 // Returns (server, capSender for the node, stopFn to clean up the ACK goroutine).
 func intentTestServer(t *testing.T) (*Server, *capSender, func()) {
 	t.Helper()
 	s, _, _ := newTestServer(t)
-	s.SetDevMode(false)
+	s.SetIntentEnabled(true)
 	// Short TTL so tests fail fast if the signing goroutine hangs.
 	s.pendingIntents.ttl = 5 * time.Second
 

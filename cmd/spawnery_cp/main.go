@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -160,6 +161,43 @@ func main() {
 	if ri := envDuration("CP_SESSION_REAUTH_INTERVAL", 0); ri > 0 {
 		srv.SetReauthInterval(ri)
 	}
+
+	// A4 intent flow setup [AC1][AM12].
+	// Prod mode: intent flow always active; clients obtain node tokens from the real AS.
+	// Dev mode: intent flow active when CP_DEV_AS_KEY is set (explicit) or by default (ephemeral key).
+	//   In either case the CP mints cnf-bearing aud=node tokens in SubmitIntent so the full 8-step
+	//   verification chain runs at the node under AuthModeVerifyLog (verify-and-log, not skip).
+	if !devMode {
+		srv.SetIntentEnabled(true)
+	} else {
+		var devASPriv ed25519.PrivateKey
+		var devASKeyID string
+		var devASErr error
+		if p := env("CP_DEV_AS_KEY", ""); p != "" {
+			var pemBytes []byte
+			pemBytes, devASErr = os.ReadFile(p)
+			if devASErr == nil {
+				devASPriv, devASKeyID, devASErr = token.LoadSigningKey(pemBytes)
+			}
+			if devASErr != nil {
+				log.Fatalf("cp: load CP_DEV_AS_KEY: %v", devASErr)
+			}
+			log.Printf("cp: loaded dev AS key from %s (id=%s) for cnf-bearing node token minting [AM12]", p, devASKeyID)
+		} else {
+			_, devASPriv, devASErr = ed25519.GenerateKey(rand.Reader)
+			if devASErr != nil {
+				log.Fatalf("cp: generate ephemeral dev AS key: %v", devASErr)
+			}
+			devASKeyID, devASErr = token.KeyID(devASPriv.Public().(ed25519.PublicKey))
+			if devASErr != nil {
+				log.Fatalf("cp: derive dev AS key id: %v", devASErr)
+			}
+			log.Printf("cp: using ephemeral dev AS key (id=%s) for cnf-bearing node token minting [AM12]", devASKeyID)
+		}
+		srv.SetDevASKey(devASPriv, devASKeyID)
+		srv.SetIntentEnabled(true)
+	}
+
 	srv.StartReconciler(ctx) // background loop: drive model_applied=false spawns to convergence (sp-bp9w.7)
 
 	// Browser-origin allowlist for CORS + the WS upgrade ([WM18]). Empty = dev mode
