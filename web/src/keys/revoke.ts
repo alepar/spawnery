@@ -17,12 +17,12 @@ import {
   type DeviceSetLog,
   type OwnerRoot,
 } from "./deviceset";
-import { type DeviceKeys, exportDeviceRef, clearDeviceKeys } from "./device";
+import { type DeviceKeys, clearDeviceKeys } from "./device";
 import { buildAndAppendWithRetry } from "./recovery";
 import { initSweep, type SweepProgress } from "./epoch";
 import { executeSweep, type SecretsCPClient } from "./sweep";
 import { bumpPinnedHead, clearAnchor } from "./anchor";
-import { toBase64, fromBase64 } from "./encoding";
+import { fromBase64 } from "./encoding";
 import type { DeviceListItem } from "./devicelist";
 
 // ── Guard logic ───────────────────────────────────────────────────────────────
@@ -116,9 +116,18 @@ export async function revokeDevices(opts: RevokeOpts): Promise<SweepProgress> {
     }
   }
 
+  // The signer's remove entry must be appended last: once the signer's own
+  // remove entry is on the chain, subsequent verifyDeviceSet calls over the
+  // updated log would reject the next iteration's entry as "not signed by a
+  // current member", corrupting the chain mid-sweep (self-revoke with cascade).
+  const signerX25519Pub = opts.signerRef.x25519_pub;
+  const orderedTargets = targetSet.has(signerX25519Pub)
+    ? [...opts.targetX25519Pubs.filter((p) => p !== signerX25519Pub), signerX25519Pub]
+    : opts.targetX25519Pubs;
+
   // Append a remove entry for each target (CAS retry-rebase per target, [WM1])
   let currentLog = log;
-  for (const targetX25519Pub of opts.targetX25519Pubs) {
+  for (const targetX25519Pub of orderedTargets) {
     await buildAndAppendWithRetry(
       opts.transport,
       () => buildRemoveEntry(currentLog, targetX25519Pub, opts.signerRef, opts.signerKeys.ecdsaPrivate),
@@ -159,9 +168,8 @@ export async function revokeDevices(opts: RevokeOpts): Promise<SweepProgress> {
   // Bump pinned head ([WM6])
   bumpPinnedHead(finalHeadVersion);
 
-  // Self-revocation: clear local keys and anchor
-  const signerRef = await exportDeviceRef(opts.signerKeys);
-  const signerX25519Pub = toBase64(signerRef.x25519Pub);
+  // Self-revocation: clear local keys and anchor.
+  // signerX25519Pub is already computed above from opts.signerRef.x25519_pub.
   if (targetSet.has(signerX25519Pub)) {
     await clearDeviceKeys();
     clearAnchor();

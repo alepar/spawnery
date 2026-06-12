@@ -41,13 +41,14 @@ vi.mock("@/keys/device", () => ({
 
 const mockFetchLog = vi.fn();
 const mockAppend = vi.fn();
+const mockVerifyDeviceSet = vi.fn().mockResolvedValue({ members: [], headHash: new Uint8Array(32), headVersion: 1 });
 
 vi.mock("@/keys/deviceset", () => ({
   httpASTransport: () => ({
     fetchLog: () => mockFetchLog(),
     append: () => mockAppend(),
   }),
-  verifyDeviceSet: vi.fn().mockResolvedValue({ members: [], headHash: new Uint8Array(32), headVersion: 1 }),
+  verifyDeviceSet: (...args: unknown[]) => mockVerifyDeviceSet(...args),
 }));
 
 const mockLoadSweepProgress = vi.fn();
@@ -64,8 +65,10 @@ vi.mock("@/keys/epoch", () => ({
   markSecretFailed: vi.fn(),
 }));
 
+const mockExecuteSweep = vi.fn();
+
 vi.mock("@/keys/sweep", () => ({
-  executeSweep: vi.fn(),
+  executeSweep: (...args: unknown[]) => mockExecuteSweep(...args),
 }));
 
 const mockRevokeDevices = vi.fn();
@@ -144,6 +147,9 @@ function setupDefaultMocks() {
   mockCascadeForDevice.mockReturnValue([]);
   mockIsRevocableByNormalRevoke.mockImplementation((item: DeviceListItem) => !item.isRecovery);
   mockRequiresRecoveryConfirmation.mockReturnValue(false);
+  mockVerifyDeviceSet.mockResolvedValue({ members: [], headHash: new Uint8Array(32), headVersion: 2 });
+  mockExecuteSweep.mockResolvedValue({ total: 0, done: 0, secretIds: [], completed: [], failed: [], isRevocation: true, targetVersion: 2, updatedAt: Date.now() });
+  mockRevokeDevices.mockResolvedValue({ total: 0, done: 0, secretIds: [], completed: [], failed: [], isRevocation: true, targetVersion: 2, updatedAt: Date.now() });
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -380,5 +386,192 @@ describe("DeviceManagement — error handling", () => {
       expect(screen.getByTestId("device-list-error")).toBeTruthy();
     });
     expect(screen.getByTestId("device-list-error").textContent).toContain("chain verification failed");
+  });
+});
+
+// ── Security / correctness regression tests ───────────────────────────────────
+
+describe("DeviceManagement — [WM6] resume re-seal passes pinned head version", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    setupDefaultMocks();
+  });
+
+  afterEach(() => localStorage.clear());
+
+  it("verifyDeviceSet is called with anchor.headVersion in handleResumeRevocation", async () => {
+    const anchorWithVersion = { ...sampleAnchor, headVersion: 7 };
+    mockLoadAnchor.mockReturnValue(anchorWithVersion);
+
+    const device = makeDevice({ name: "My Device", isCurrent: true });
+    mockBuildDeviceList.mockResolvedValue([device]);
+
+    const progress = {
+      targetVersion: 7, total: 2, done: 0,
+      secretIds: ["s1", "s2"], completed: [], failed: [],
+      isRevocation: true, updatedAt: Date.now(),
+    };
+    mockLoadSweepProgress.mockReturnValue(progress);
+    mockRemainingCount.mockReturnValue(2);
+    mockVerifyDeviceSet.mockResolvedValue({ members: [], headHash: new Uint8Array(32), headVersion: 7 });
+
+    render(<DeviceManagement />);
+    await waitFor(() => screen.getByTestId("revocation-resume"));
+
+    await act(async () => {
+      await userEvent.click(screen.getByTestId("revocation-resume"));
+    });
+
+    // verifyDeviceSet must receive the pinned headVersion (7) so a stale-prefix
+    // AS cannot omit the removal entry and smuggle in the revoked device.
+    await waitFor(() => {
+      expect(mockVerifyDeviceSet).toHaveBeenCalledWith(
+        expect.anything(),
+        anchorWithVersion.ownerRoot,
+        7,
+      );
+    });
+  });
+});
+
+describe("DeviceManagement — [WM15] cascade guard bypass prevention", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    setupDefaultMocks();
+  });
+
+  afterEach(() => localStorage.clear());
+
+  it("shows recovery gate when cascade expands target set to all non-recovery devices", async () => {
+    // current = non-recovery device that also happens to be isCurrent
+    // other   = target for revoke (non-current, non-last by itself)
+    // recovery = recovery device (not counted for non-recovery guard)
+    //
+    // Revoking [other] alone: 1 survivor (current) → requiresRecoveryConfirmation = false
+    // Cascade includes [current]: 0 survivors → requiresRecoveryConfirmation = true
+    // The pre-cascade check fires only on [other.signPub]; the post-cascade check must
+    // catch this and show the recovery gate before performing the revoke.
+    const current = makeDevice({ x25519Pub: "x-curr", signPub: "sign-curr", name: "Current", isCurrent: true });
+    const other = makeDevice({ x25519Pub: "x-other", signPub: "sign-other", name: "Other", isCurrent: false });
+    const recovery = makeDevice({ x25519Pub: "x-rec", signPub: "sign-rec", name: "recovery", isRecovery: true });
+    mockBuildDeviceList.mockResolvedValue([current, other, recovery]);
+    mockIsRevocableByNormalRevoke.mockImplementation((item: DeviceListItem) => !item.isRecovery);
+
+    // Pre-cascade: revoking [other] alone does not need recovery (current survives)
+    // Post-cascade: revoking [other, current] removes all non-recovery → needs recovery
+    mockRequiresRecoveryConfirmation.mockImplementation((_: DeviceListItem[], signPubs: string[]) => {
+      return signPubs.length >= 2; // true only when cascade is included
+    });
+
+    // "other" device has "current" as a cascade child
+    mockCascadeForDevice.mockImplementation((_, targetSignPub: string) => {
+      if (targetSignPub === "sign-other") {
+        return [{ sign_pub: "sign-curr", x25519_pub: "x-curr" }];
+      }
+      return [];
+    });
+
+    render(<DeviceManagement />);
+    await waitFor(() => screen.getByText("Other"));
+
+    // The device rows have testids based on x25519Pub prefix.
+    // "other" has x25519Pub="x-other" → row testid = "device-row-x-other"
+    const otherRow = screen.getByTestId("device-row-x-other");
+    const otherRevokeBtn = otherRow.querySelector("[data-testid='revoke-button']") as HTMLElement;
+    expect(otherRevokeBtn).toBeTruthy();
+    await act(async () => {
+      await userEvent.click(otherRevokeBtn);
+    });
+
+    // Cascade dialog should appear (pre-cascade check was false)
+    await waitFor(() => {
+      expect(screen.getByTestId("cascade-dialog")).toBeTruthy();
+    });
+
+    // Include cascade (adds "Current" to targets)
+    await act(async () => {
+      await userEvent.click(screen.getByTestId("cascade-include"));
+    });
+
+    // Confirm cascade
+    await act(async () => {
+      await userEvent.click(screen.getByTestId("cascade-confirm"));
+    });
+
+    // Recovery gate must appear because cascade pushes full set over the threshold
+    await waitFor(() => {
+      expect(screen.getByTestId("recovery-gate")).toBeTruthy();
+    });
+  });
+});
+
+describe("DeviceManagement — [WM15] post-rotation recovery gate uses current signPub", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    setupDefaultMocks();
+  });
+
+  afterEach(() => localStorage.clear());
+
+  it("RecoveryGate validates against current recovery member signPub, not genesis anchor", async () => {
+    // The recovery device in the verified list has a ROTATED signPub that differs from
+    // the genesis anchor's recovery_sign_pub. After recovery rotation, the user's valid
+    // phrase derives to the new pubkey. The gate must use the current member's signPub.
+    const genesisRecoverySignPub = "recsignpub"; // what's in sampleAnchor.ownerRoot
+
+    // A distinct base64 string that represents the rotated recovery pubkey bytes.
+    // The bytes are Buffer.from(rotatedRecoverySignPub, "base64") so that
+    // toBase64(bytes) === rotatedRecoverySignPub (the mock uses Buffer base64 round-trip).
+    const rotatedRecoverySignPub = "cm90YXRlZC1yZWNvdmVyeQ=="; // base64 of "rotated-recovery"
+    const rotatedSignPubBytes = new Uint8Array(Buffer.from(rotatedRecoverySignPub, "base64"));
+
+    const normalDevice = makeDevice({ x25519Pub: "x-curr", signPub: "sign-curr", name: "Only Device", isCurrent: true });
+    const recoveryDevice = makeDevice({
+      x25519Pub: "x-rec",
+      signPub: rotatedRecoverySignPub, // the ROTATED signPub, not the genesis one
+      name: "recovery",
+      isRecovery: true,
+    });
+    mockBuildDeviceList.mockResolvedValue([normalDevice, recoveryDevice]);
+    mockIsRevocableByNormalRevoke.mockImplementation((item: DeviceListItem) => !item.isRecovery);
+    mockRequiresRecoveryConfirmation.mockReturnValue(true); // triggers gate
+
+    render(<DeviceManagement />);
+    await waitFor(() => screen.getByText("Only Device"));
+
+    await act(async () => {
+      await userEvent.click(screen.getByTestId("revoke-button"));
+    });
+
+    // Recovery gate is shown
+    await waitFor(() => {
+      expect(screen.getByTestId("recovery-gate")).toBeTruthy();
+    });
+
+    // Simulate entering a phrase that derives to the ROTATED pubkey (the correct current one).
+    // deriveDeviceKeysFromMnemonic → keys, exportDeviceRef → { signPub: rotatedSignPubBytes }
+    // toBase64(rotatedSignPubBytes) === rotatedRecoverySignPub → gate passes.
+    mockDeriveDeviceKeysFromMnemonic.mockResolvedValue({ ecdsaPrivate: {}, ecdsaPublic: {} });
+    mockExportDeviceRef.mockResolvedValue({ x25519Pub: new Uint8Array(4), signPub: rotatedSignPubBytes });
+
+    await act(async () => {
+      await userEvent.type(screen.getByTestId("recovery-phrase-input"), "some phrase words here");
+    });
+    await act(async () => {
+      await userEvent.click(screen.getByTestId("recovery-gate-submit"));
+    });
+
+    // If the gate used the rotated pubkey (correct), the phrase passes and cascade appears.
+    // If it used the genesis pubkey (bug), it would show an error instead.
+    await waitFor(() => {
+      expect(screen.queryByTestId("recovery-phrase-error")).toBeNull();
+      expect(screen.getByTestId("cascade-dialog")).toBeTruthy();
+    });
+
+    // Sanity-check: the genesis pubkey is different from the rotated one.
+    expect(genesisRecoverySignPub).not.toBe(rotatedRecoverySignPub);
   });
 });

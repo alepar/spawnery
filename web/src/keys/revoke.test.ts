@@ -5,7 +5,7 @@
  * SecretsCPClient — hermetic, no network.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   isRevocableByNormalRevoke,
   requiresRecoveryConfirmation,
@@ -24,6 +24,13 @@ import {
   type StoredEntry,
 } from "./deviceset";
 import { generateDeviceKeys, exportDeviceRef } from "./device";
+
+// Mock clearDeviceKeys: IndexedDB is unavailable in the test environment.
+// Real key generation and export remain unaffected via importOriginal.
+vi.mock("./device", async (importOriginal) => {
+  const original = await importOriginal() as typeof import("./device");
+  return { ...original, clearDeviceKeys: vi.fn().mockResolvedValue(undefined) };
+});
 import { toBase64 } from "./encoding";
 import { loadSweepProgress } from "./epoch";
 import { loadAnchor, saveAnchor } from "./anchor";
@@ -344,6 +351,62 @@ describe("revokeDevices", () => {
 
     void genesisHead;
     void d3Keys;
+  });
+
+  it("orders signer last when signer is in the target set (self-revoke with cascade)", async () => {
+    // Regression test for the ordering bug: when the UI sends [signerPub, cascadePub],
+    // the signer's remove entry must land last — otherwise the next verifyDeviceSet
+    // call after the first removal throws "not signed by a current member".
+    const { d1Keys, d1Ref, recRef, ownerRoot, genesisLog } = await buildFixture();
+
+    const d2Keys = await generateDeviceKeys();
+    const d2Ref = await mkRef(d2Keys);
+    let currentLog: DeviceSetLog = genesisLog;
+    const add2 = await buildAddEntry(currentLog, d2Ref, "d2", d1Ref, d1Keys.ecdsaPrivate);
+    currentLog = { entries: [...currentLog.entries, add2] };
+
+    let serverVersion = 2;
+    let serverHead = toBase64(await computeEntryHash(add2));
+    const serverLog = { entries: [...currentLog.entries] };
+
+    const appendedBodies: Array<{ type: string; change: { x25519_pub: string } }> = [];
+    const transport: ASTransport = {
+      fetchLog: async () => ({ log: { entries: [...serverLog.entries] }, head: serverHead, version: serverVersion }),
+      append: async (entry: StoredEntry): Promise<AppendResult> => {
+        const body = JSON.parse(new TextDecoder().decode(
+          new Uint8Array(atob(entry.body).split("").map((c) => c.charCodeAt(0))),
+        ));
+        appendedBodies.push(body as { type: string; change: { x25519_pub: string } });
+        serverLog.entries.push(entry);
+        serverVersion++;
+        serverHead = toBase64(await computeEntryHash(entry));
+        return { version: serverVersion, head: serverHead };
+      },
+    };
+
+    saveAnchor({ ownerRoot, headVersion: 2 });
+
+    // targetX25519Pubs has the signer (d1) first — the order the UI sends for self-revoke
+    await revokeDevices({
+      transport,
+      signerKeys: d1Keys,
+      signerRef: d1Ref,
+      ownerRoot,
+      pinnedHeadVersion: 2,
+      targetX25519Pubs: [d1Ref.x25519_pub, d2Ref.x25519_pub], // signer first (intentional)
+      survivorX25519Pubs: [recRef.x25519_pub],
+      secretIds: [],
+      cpClient: noopCPClient(),
+    });
+
+    // Both remove entries must be present
+    expect(appendedBodies).toHaveLength(2);
+    const removedPubs = appendedBodies.map((b) => b.change.x25519_pub);
+    // Non-signer (d2) must be removed first; signer (d1) must be last
+    expect(removedPubs[0]).toBe(d2Ref.x25519_pub);
+    expect(removedPubs[1]).toBe(d1Ref.x25519_pub);
+
+    void d2Keys;
   });
 
   it("sweep is resumable after interruption (re-run skips completed secrets)", async () => {

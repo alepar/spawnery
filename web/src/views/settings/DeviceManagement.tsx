@@ -240,6 +240,9 @@ export function DeviceManagement() {
   const [pendingTargetX25519Pubs, setPendingTargetX25519Pubs] = useState<string[] | null>(null);
   const [showRecoveryGate, setShowRecoveryGate] = useState(false);
   const [showCascadeDialog, setShowCascadeDialog] = useState(false);
+  // True when the recovery gate was confirmed before the cascade dialog; prevents
+  // a double-gate when the pre-cascade check already triggered recovery confirmation.
+  const [recoveryGateConfirmed, setRecoveryGateConfirmed] = useState(false);
   const [cascadeDevices, setCascadeDevices] = useState<DeviceListItem[]>([]);
   const [currentSignPub, setCurrentSignPub] = useState<string | undefined>(undefined);
 
@@ -319,11 +322,37 @@ export function DeviceManagement() {
 
   const handleRecoveryGateConfirmed = () => {
     setShowRecoveryGate(false);
-    setShowCascadeDialog(true);
+    if (pendingTargetX25519Pubs !== null) {
+      // Recovery gate was triggered mid-cascade (post-cascade guard re-evaluation).
+      // Proceed directly to revoke with the already-stored targets.
+      void performRevoke(pendingTargetX25519Pubs);
+    } else {
+      // Recovery gate was triggered before the cascade dialog. Mark it confirmed
+      // so the post-cascade re-evaluation does not show the gate a second time.
+      setRecoveryGateConfirmed(true);
+      setShowCascadeDialog(true);
+    }
   };
 
   const handleCascadeConfirm = async (targetX25519Pubs: string[]) => {
     setShowCascadeDialog(false);
+
+    // Re-evaluate the recovery guard against the full (cascade-expanded) target set.
+    // The pre-cascade check used only the primary signPub; including the cascade can
+    // push all non-recovery devices into the target set, which requires confirmation.
+    if (!recoveryGateConfirmed && devices) {
+      const allTargetSignPubs = targetX25519Pubs
+        .map((x) => devices.find((d) => d.x25519Pub === x)?.signPub)
+        .filter((s): s is string => s !== undefined);
+      if (requiresRecoveryConfirmation(devices, allTargetSignPubs)) {
+        // Store targets now so handleRecoveryGateConfirmed can proceed to revoke.
+        setPendingTargetX25519Pubs(targetX25519Pubs);
+        setShowRecoveryGate(true);
+        return;
+      }
+    }
+
+    setRecoveryGateConfirmed(false);
     setPendingTargetX25519Pubs(targetX25519Pubs);
     await performRevoke(targetX25519Pubs);
   };
@@ -378,6 +407,7 @@ export function DeviceManagement() {
       setRevoking(false);
       setPendingTargetX25519Pubs(null);
       setRevokingTarget(null);
+      setRecoveryGateConfirmed(false);
     }
   };
 
@@ -396,7 +426,9 @@ export function DeviceManagement() {
 
     const transport = httpASTransport(asHttpUrl(""), token);
     const { log } = await transport.fetchLog();
-    const { members } = await import("@/keys/deviceset").then(m => m.verifyDeviceSet(log, anchor.ownerRoot));
+    // Pass the pinned head version so a stale-prefix AS cannot smuggle in the
+    // revoked device by serving a chain that omits the removal entry ([WM6]).
+    const { members } = await import("@/keys/deviceset").then(m => m.verifyDeviceSet(log, anchor.ownerRoot, anchor.headVersion));
 
     const newMemberPubs = members.map((m) => fromBase64(m.x25519_pub));
 
@@ -421,7 +453,10 @@ export function DeviceManagement() {
 
   const recoveryDevice = devices?.find((d) => d.isRecovery);
   const realDevices = devices?.filter((d) => !d.isRecovery) ?? [];
-  const anchorRecoverySignPub = loadAnchor()?.ownerRoot.recovery_sign_pub ?? "";
+  // After a recovery rotation the genesis anchor pubkey no longer matches the
+  // user's current phrase; use the verified current recovery member's signPub
+  // so the gate rejects the retired phrase and accepts the current one.
+  const recoverySignPub = recoveryDevice?.signPub ?? loadAnchor()?.ownerRoot.recovery_sign_pub ?? "";
 
   return (
     <div className="space-y-6" data-testid="device-management">
@@ -486,11 +521,13 @@ export function DeviceManagement() {
       {/* Recovery gate dialog */}
       {showRecoveryGate && revokingTarget && (
         <RecoveryGate
-          recoverySignPub={anchorRecoverySignPub}
+          recoverySignPub={recoverySignPub}
           onConfirmed={handleRecoveryGateConfirmed}
           onCancel={() => {
             setShowRecoveryGate(false);
             setRevokingTarget(null);
+            setPendingTargetX25519Pubs(null);
+            setRecoveryGateConfirmed(false);
           }}
         />
       )}
@@ -504,6 +541,7 @@ export function DeviceManagement() {
           onCancel={() => {
             setShowCascadeDialog(false);
             setRevokingTarget(null);
+            setRecoveryGateConfirmed(false);
           }}
         />
       )}
