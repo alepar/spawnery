@@ -100,7 +100,7 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 		}()
 
 		cs := wsClient{conn: conn, ctx: sessCtx}
-		done, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, cs, bind.Cursor)
+		done, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, owner, nil, cs, bind.Cursor)
 		if err != nil {
 			conn.Close(websocket.StatusInternalError, "attach failed")
 			return

@@ -15,10 +15,12 @@ import (
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 
+	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/agentcaps"
+	"spawnery/internal/intent"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/journalkeys"
 	"spawnery/internal/cp/lock"
@@ -77,6 +79,11 @@ type Server struct {
 	verify        func(string) (auth.Identity, error)
 	devMode       bool
 	reauthInterval time.Duration // reauth deadline; 0 uses defaultReauthInterval
+
+	// pendingIntents is the A4 two-phase sign-after-resolve registry [AC1]. Lifecycle handlers
+	// (Create/Resume/Recreate/Migrate) register a pending intent BEFORE calling Provision; the
+	// client polls GetPendingIntent and submits a SignedIntent via SubmitIntent, unblocking provision.
+	pendingIntents *pendingIntentRegistry
 }
 
 const (
@@ -96,7 +103,11 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout,
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
-		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry()}
+		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
+		pendingIntents: newPendingIntentRegistry(),
+		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
+		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
+		devMode: true}
 }
 
 // --- node side: NodeService/Attach ----------------------------------------
@@ -467,7 +478,7 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	// Provision asynchronously: return the spawn in 'starting' immediately; the background goroutine
 	// drives it to active/error on the node's signal, so the UI can show a 'starting' period. The
 	// request ctx is done once we return, so the goroutine uses a detached ctx.
-	go s.provisionSpawn(context.WithoutCancel(ctx), spawnID, ver.Ref, req.Msg.Model, placement)
+	go s.provisionSpawn(context.WithoutCancel(ctx), spawnID, owner, ver.Ref, req.Msg.Model, placement)
 	return connect.NewResponse(&cpv1.CreateSpawnResponse{SpawnId: spawnID}), nil
 }
 
@@ -475,7 +486,9 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 // the per-spawn lock (serializing a Stop/Suspend during starting AFTER it) and bails if the spawn was
 // already stopped in the lock gap; then Provision -> SetActive, or SetError on failure, with the same
 // teardown compensation as the old inline path on a post-provision SetActive failure.
-func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model string, placement registry.Placement) {
+// In production mode (devMode=false) the two-phase A4 flow runs: PickNodeID → register pending
+// intent → await SignedIntent from client → Provision. In dev mode the flow is skipped (nil env).
+func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, model string, placement registry.Placement) {
 	unlock := s.locks.Lock(spawnID)
 	defer unlock()
 	sp, err := s.st.Spawns().Get(ctx, spawnID)
@@ -483,8 +496,36 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, appRef, model stri
 		return // stopped/deleted in the lock gap, or already advanced
 	}
 	placement.Image = sp.Image
+
 	// Gen 1: store.Create inserted the live container row at generation 1 (SetActive below matches).
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement)
+	var env *authv1.AuthEnvelope
+	if !s.devMode {
+		// Two-phase A4 sign-after-resolve [AC1]: pick node, register pending intent, await client.
+		targetNodeID, pickErr := s.sched.PickNodeID(placement)
+		if pickErr != nil {
+			log.Printf("provisionSpawn %s: PickNodeID failed: %v", spawnID, pickErr)
+			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+				log.Printf("provisionSpawn %s: SetError after PickNodeID failure also failed: %v", spawnID, serr)
+			}
+			return
+		}
+		mounts, _ := s.st.Spawns().GetMounts(ctx, spawnID)
+		pi := buildPendingIntent(intent.OpCreateSpawn, spawnID, 1, targetNodeID, sp.Image, appRef, model, "", mounts)
+		ch := s.pendingIntents.register(spawnID, ownerID, pi)
+		defer s.pendingIntents.cleanup(spawnID)
+		env, err = s.pendingIntents.await(ctx, ch)
+		if err != nil {
+			log.Printf("provisionSpawn %s: await SignedIntent: %v", spawnID, err)
+			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+				log.Printf("provisionSpawn %s: SetError after await failure also failed: %v", spawnID, serr)
+			}
+			return
+		}
+		// Pin the same node the client signed for.
+		placement.TargetNodeID = targetNodeID
+	}
+
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env)
 	if err != nil {
 		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
@@ -555,6 +596,71 @@ func (s *Server) stop(ctx context.Context, owner, spawnID string) error {
 	}
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	return nil
+}
+
+// --- A4 two-phase intent RPCs [AC1] ----------------------------------------
+
+// GetPendingIntent returns the CP-committed tuple for an in-flight lifecycle op so the client
+// can validate and sign it. Returns ready=true + the pending tuple when the lifecycle handler
+// has registered it; ready=false if not yet registered (client should poll).
+func (s *Server) GetPendingIntent(ctx context.Context, req *connect.Request[cpv1.GetPendingIntentRequest]) (*connect.Response[cpv1.GetPendingIntentResponse], error) {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	sp, err := s.st.Spawns().Get(ctx, req.Msg.SpawnId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+	}
+	if sp.OwnerID != owner {
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+	pi, ready := s.pendingIntents.get(req.Msg.SpawnId)
+	return connect.NewResponse(&cpv1.GetPendingIntentResponse{Pending: pi, Ready: ready}), nil
+}
+
+// SubmitIntent delivers the client's SignedIntent + node access token, unblocking the pending
+// provision. The node_access_token is the aud=node AS-signed token bound to the client's
+// session key (the cnf claim). Both are threaded verbatim into StartSpawn as an AuthEnvelope.
+func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	sp, err := s.st.Spawns().Get(ctx, req.Msg.SpawnId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+	}
+	if sp.OwnerID != owner {
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+	env := &authv1.AuthEnvelope{
+		AccessToken: req.Msg.NodeAccessToken,
+		Intent:      req.Msg.Intent,
+	}
+	if err := s.pendingIntents.submit(req.Msg.SpawnId, owner, env); err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
+	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil
+}
+
+// buildPendingIntent constructs the cp.v1.PendingIntent from the committed provision tuple.
+// mounts comes from the store's mount list for the spawn (may be nil for CreateSpawn).
+func buildPendingIntent(op intent.Op, spawnID string, gen uint64, targetNodeID, image, appRef, model, dataRef string, mounts []store.Mount) *cpv1.PendingIntent {
+	pi := &cpv1.PendingIntent{
+		Op:           string(op),
+		SpawnId:      spawnID,
+		Generation:   gen,
+		TargetNodeId: targetNodeID,
+		Image:        image,
+		AppRef:       appRef,
+		Model:        model,
+		DataRef:      dataRef,
+	}
+	for _, m := range mounts {
+		pi.Mounts = append(pi.Mounts, &cpv1.MountBinding{Name: m.Name, BackendUri: m.BackendURI})
+	}
+	return pi
 }
 
 // --- client-facing session RPCs (answered from CP's mirrored roster) ------
@@ -709,7 +815,7 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	cs := &clientStream{stream: stream, spawnID: spawnID}
 	// cursor 0: the cp.v1 Session-RPC transport has no resume cursor (only the WS bind does).
 	// session "0": this transport has no per-session selector yet (web uses the WS bind for that).
-	done, err := s.rt.AttachClient(spawnID, "0", clientID, cs, 0)
+	done, err := s.rt.AttachClient(spawnID, "0", clientID, sp.OwnerID, nil, cs, 0)
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}

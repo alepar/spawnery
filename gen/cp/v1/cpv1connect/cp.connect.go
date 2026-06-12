@@ -99,6 +99,12 @@ const (
 	// SpawnServicePutJournalKeyCiphertextProcedure is the fully-qualified name of the SpawnService's
 	// PutJournalKeyCiphertext RPC.
 	SpawnServicePutJournalKeyCiphertextProcedure = "/cp.v1.SpawnService/PutJournalKeyCiphertext"
+	// SpawnServiceGetPendingIntentProcedure is the fully-qualified name of the SpawnService's
+	// GetPendingIntent RPC.
+	SpawnServiceGetPendingIntentProcedure = "/cp.v1.SpawnService/GetPendingIntent"
+	// SpawnServiceSubmitIntentProcedure is the fully-qualified name of the SpawnService's SubmitIntent
+	// RPC.
+	SpawnServiceSubmitIntentProcedure = "/cp.v1.SpawnService/SubmitIntent"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -135,6 +141,10 @@ type SpawnServiceClient interface {
 	// node-local -> owner-sealed upgrade) stores it. Owner-only; the CP holds ONLY ciphertext.
 	GetJournalKeyCiphertext(context.Context, *connect.Request[v1.GetJournalKeyCiphertextRequest]) (*connect.Response[v1.GetJournalKeyCiphertextResponse], error)
 	PutJournalKeyCiphertext(context.Context, *connect.Request[v1.PutJournalKeyCiphertextRequest]) (*connect.Response[v1.PutJournalKeyCiphertextResponse], error)
+	// Two-phase sign-after-resolve (A4 §5 [AC1][AM1]): the client polls for the CP-committed
+	// tuple it must sign, then submits its signed intent to unblock provision.
+	GetPendingIntent(context.Context, *connect.Request[v1.GetPendingIntentRequest]) (*connect.Response[v1.GetPendingIntentResponse], error)
+	SubmitIntent(context.Context, *connect.Request[v1.SubmitIntentRequest]) (*connect.Response[v1.SubmitIntentResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -292,6 +302,18 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("PutJournalKeyCiphertext")),
 			connect.WithClientOptions(opts...),
 		),
+		getPendingIntent: connect.NewClient[v1.GetPendingIntentRequest, v1.GetPendingIntentResponse](
+			httpClient,
+			baseURL+SpawnServiceGetPendingIntentProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("GetPendingIntent")),
+			connect.WithClientOptions(opts...),
+		),
+		submitIntent: connect.NewClient[v1.SubmitIntentRequest, v1.SubmitIntentResponse](
+			httpClient,
+			baseURL+SpawnServiceSubmitIntentProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("SubmitIntent")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -321,6 +343,8 @@ type spawnServiceClient struct {
 	migrateSpawn            *connect.Client[v1.MigrateSpawnRequest, v1.MigrateSpawnResponse]
 	getJournalKeyCiphertext *connect.Client[v1.GetJournalKeyCiphertextRequest, v1.GetJournalKeyCiphertextResponse]
 	putJournalKeyCiphertext *connect.Client[v1.PutJournalKeyCiphertextRequest, v1.PutJournalKeyCiphertextResponse]
+	getPendingIntent        *connect.Client[v1.GetPendingIntentRequest, v1.GetPendingIntentResponse]
+	submitIntent            *connect.Client[v1.SubmitIntentRequest, v1.SubmitIntentResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -443,6 +467,16 @@ func (c *spawnServiceClient) PutJournalKeyCiphertext(ctx context.Context, req *c
 	return c.putJournalKeyCiphertext.CallUnary(ctx, req)
 }
 
+// GetPendingIntent calls cp.v1.SpawnService.GetPendingIntent.
+func (c *spawnServiceClient) GetPendingIntent(ctx context.Context, req *connect.Request[v1.GetPendingIntentRequest]) (*connect.Response[v1.GetPendingIntentResponse], error) {
+	return c.getPendingIntent.CallUnary(ctx, req)
+}
+
+// SubmitIntent calls cp.v1.SpawnService.SubmitIntent.
+func (c *spawnServiceClient) SubmitIntent(ctx context.Context, req *connect.Request[v1.SubmitIntentRequest]) (*connect.Response[v1.SubmitIntentResponse], error) {
+	return c.submitIntent.CallUnary(ctx, req)
+}
+
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -477,6 +511,10 @@ type SpawnServiceHandler interface {
 	// node-local -> owner-sealed upgrade) stores it. Owner-only; the CP holds ONLY ciphertext.
 	GetJournalKeyCiphertext(context.Context, *connect.Request[v1.GetJournalKeyCiphertextRequest]) (*connect.Response[v1.GetJournalKeyCiphertextResponse], error)
 	PutJournalKeyCiphertext(context.Context, *connect.Request[v1.PutJournalKeyCiphertextRequest]) (*connect.Response[v1.PutJournalKeyCiphertextResponse], error)
+	// Two-phase sign-after-resolve (A4 §5 [AC1][AM1]): the client polls for the CP-committed
+	// tuple it must sign, then submits its signed intent to unblock provision.
+	GetPendingIntent(context.Context, *connect.Request[v1.GetPendingIntentRequest]) (*connect.Response[v1.GetPendingIntentResponse], error)
+	SubmitIntent(context.Context, *connect.Request[v1.SubmitIntentRequest]) (*connect.Response[v1.SubmitIntentResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -630,6 +668,18 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("PutJournalKeyCiphertext")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceGetPendingIntentHandler := connect.NewUnaryHandler(
+		SpawnServiceGetPendingIntentProcedure,
+		svc.GetPendingIntent,
+		connect.WithSchema(spawnServiceMethods.ByName("GetPendingIntent")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceSubmitIntentHandler := connect.NewUnaryHandler(
+		SpawnServiceSubmitIntentProcedure,
+		svc.SubmitIntent,
+		connect.WithSchema(spawnServiceMethods.ByName("SubmitIntent")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
@@ -680,6 +730,10 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceGetJournalKeyCiphertextHandler.ServeHTTP(w, r)
 		case SpawnServicePutJournalKeyCiphertextProcedure:
 			spawnServicePutJournalKeyCiphertextHandler.ServeHTTP(w, r)
+		case SpawnServiceGetPendingIntentProcedure:
+			spawnServiceGetPendingIntentHandler.ServeHTTP(w, r)
+		case SpawnServiceSubmitIntentProcedure:
+			spawnServiceSubmitIntentHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -783,4 +837,12 @@ func (UnimplementedSpawnServiceHandler) GetJournalKeyCiphertext(context.Context,
 
 func (UnimplementedSpawnServiceHandler) PutJournalKeyCiphertext(context.Context, *connect.Request[v1.PutJournalKeyCiphertextRequest]) (*connect.Response[v1.PutJournalKeyCiphertextResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.PutJournalKeyCiphertext is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetPendingIntent(context.Context, *connect.Request[v1.GetPendingIntentRequest]) (*connect.Response[v1.GetPendingIntentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetPendingIntent is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) SubmitIntent(context.Context, *connect.Request[v1.SubmitIntentRequest]) (*connect.Response[v1.SubmitIntentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.SubmitIntent is not implemented"))
 }

@@ -216,6 +216,340 @@ func (x *RevocationEntry) GetRevokedAt() int64 {
 	return 0
 }
 
+// MountRef is a (name, backend_uri) pair inside an IntentBody. Structurally identical to
+// node.v1.MountBinding but defined here to keep auth.v1 leaf (no cross-package import).
+type MountRef struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Name       string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	BackendUri string `protobuf:"bytes,2,opt,name=backend_uri,json=backendUri,proto3" json:"backend_uri,omitempty"`
+}
+
+func (x *MountRef) Reset() {
+	*x = MountRef{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_auth_v1_auth_proto_msgTypes[2]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *MountRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MountRef) ProtoMessage() {}
+
+func (x *MountRef) ProtoReflect() protoreflect.Message {
+	mi := &file_auth_v1_auth_proto_msgTypes[2]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MountRef.ProtoReflect.Descriptor instead.
+func (*MountRef) Descriptor() ([]byte, []int) {
+	return file_auth_v1_auth_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *MountRef) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *MountRef) GetBackendUri() string {
+	if x != nil {
+		return x.BackendUri
+	}
+	return ""
+}
+
+// IntentBody is the signed-intent payload (auth-identity design §5 [AC1][AM11]).
+// Clients marshal this, sign domain || body_bytes with their session P-256 key, and embed
+// the raw bytes verbatim in SignedIntent.body. Nodes verify the signature over the EXACT
+// received body bytes — never re-marshalled (WM9 discipline). The op field mirrors the
+// domain suffix so a body cannot be replayed under a different domain even if a verifier
+// mis-wires the domain string. Only the fields relevant to the op are populated; the node's
+// correspondence check compares exactly the fields it is about to execute.
+//
+// Domain tags: spawnery/intent/<op>/v1 for op ∈ {create-spawn, resume-spawn,
+// recreate-spawn, migrate-spawn, session-open}.
+type IntentBody struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Jti          string      `protobuf:"bytes,1,opt,name=jti,proto3" json:"jti,omitempty"`                            // unique intent id (UUID); node caches to detect replay
+	IssuedAt     int64       `protobuf:"varint,2,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"` // unix seconds; node enforces freshness window ±skew
+	SpawnId      string      `protobuf:"bytes,3,opt,name=spawn_id,json=spawnId,proto3" json:"spawn_id,omitempty"`
+	Generation   uint64      `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`                          // CP-committed episode generation
+	TargetNodeId string      `protobuf:"bytes,5,opt,name=target_node_id,json=targetNodeId,proto3" json:"target_node_id,omitempty"` // explicit target binding; node refuses if != self
+	Op           string      `protobuf:"bytes,6,opt,name=op,proto3" json:"op,omitempty"`                                           // mirrors domain suffix (e.g. "create-spawn")
+	AppRef       string      `protobuf:"bytes,7,opt,name=app_ref,json=appRef,proto3" json:"app_ref,omitempty"`                     // create: immutable app ref
+	Image        string      `protobuf:"bytes,8,opt,name=image,proto3" json:"image,omitempty"`                                     // create: agent container image digest/ref
+	Model        string      `protobuf:"bytes,9,opt,name=model,proto3" json:"model,omitempty"`                                     // create: model
+	DataRef      string      `protobuf:"bytes,10,opt,name=data_ref,json=dataRef,proto3" json:"data_ref,omitempty"`                 // resume/recreate/migrate: mount data reference
+	SessionId    string      `protobuf:"bytes,11,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`           // session-open: session being opened
+	Mounts       []*MountRef `protobuf:"bytes,12,rep,name=mounts,proto3" json:"mounts,omitempty"`                                  // create/resume: mount bindings
+}
+
+func (x *IntentBody) Reset() {
+	*x = IntentBody{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_auth_v1_auth_proto_msgTypes[3]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *IntentBody) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IntentBody) ProtoMessage() {}
+
+func (x *IntentBody) ProtoReflect() protoreflect.Message {
+	mi := &file_auth_v1_auth_proto_msgTypes[3]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IntentBody.ProtoReflect.Descriptor instead.
+func (*IntentBody) Descriptor() ([]byte, []int) {
+	return file_auth_v1_auth_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *IntentBody) GetJti() string {
+	if x != nil {
+		return x.Jti
+	}
+	return ""
+}
+
+func (x *IntentBody) GetIssuedAt() int64 {
+	if x != nil {
+		return x.IssuedAt
+	}
+	return 0
+}
+
+func (x *IntentBody) GetSpawnId() string {
+	if x != nil {
+		return x.SpawnId
+	}
+	return ""
+}
+
+func (x *IntentBody) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *IntentBody) GetTargetNodeId() string {
+	if x != nil {
+		return x.TargetNodeId
+	}
+	return ""
+}
+
+func (x *IntentBody) GetOp() string {
+	if x != nil {
+		return x.Op
+	}
+	return ""
+}
+
+func (x *IntentBody) GetAppRef() string {
+	if x != nil {
+		return x.AppRef
+	}
+	return ""
+}
+
+func (x *IntentBody) GetImage() string {
+	if x != nil {
+		return x.Image
+	}
+	return ""
+}
+
+func (x *IntentBody) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *IntentBody) GetDataRef() string {
+	if x != nil {
+		return x.DataRef
+	}
+	return ""
+}
+
+func (x *IntentBody) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *IntentBody) GetMounts() []*MountRef {
+	if x != nil {
+		return x.Mounts
+	}
+	return nil
+}
+
+// SignedIntent carries a client-signed per-operation intent [AC1][AM11].
+// sig = ECDSA P-256 over SHA-256(domain || body), P1363 raw 64-byte r||s (WebCrypto-native).
+// spki_der is the full DER SPKI of the client's session key (the node needs the key, not
+// just the cnf hash [AM11]).
+type SignedIntent struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Domain  string `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`                  // "spawnery/intent/<op>/v1"
+	Body    []byte `protobuf:"bytes,2,opt,name=body,proto3" json:"body,omitempty"`                      // EXACT proto.Marshal(IntentBody) bytes; never re-marshalled
+	Sig     []byte `protobuf:"bytes,3,opt,name=sig,proto3" json:"sig,omitempty"`                        // P1363 r||s, 64 bytes
+	SpkiDer []byte `protobuf:"bytes,4,opt,name=spki_der,json=spkiDer,proto3" json:"spki_der,omitempty"` // full DER SPKI of the client session key [AM11]
+}
+
+func (x *SignedIntent) Reset() {
+	*x = SignedIntent{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_auth_v1_auth_proto_msgTypes[4]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *SignedIntent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SignedIntent) ProtoMessage() {}
+
+func (x *SignedIntent) ProtoReflect() protoreflect.Message {
+	mi := &file_auth_v1_auth_proto_msgTypes[4]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SignedIntent.ProtoReflect.Descriptor instead.
+func (*SignedIntent) Descriptor() ([]byte, []int) {
+	return file_auth_v1_auth_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *SignedIntent) GetDomain() string {
+	if x != nil {
+		return x.Domain
+	}
+	return ""
+}
+
+func (x *SignedIntent) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *SignedIntent) GetSig() []byte {
+	if x != nil {
+		return x.Sig
+	}
+	return nil
+}
+
+func (x *SignedIntent) GetSpkiDer() []byte {
+	if x != nil {
+		return x.SpkiDer
+	}
+	return nil
+}
+
+// AuthEnvelope bundles the node-audience access token and the client's SignedIntent for
+// relay to the node via StartSpawn / SessionOpen [AC1].
+type AuthEnvelope struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	AccessToken string        `protobuf:"bytes,1,opt,name=access_token,json=accessToken,proto3" json:"access_token,omitempty"` // AS-signed aud=node token [MC2]
+	Intent      *SignedIntent `protobuf:"bytes,2,opt,name=intent,proto3" json:"intent,omitempty"`
+}
+
+func (x *AuthEnvelope) Reset() {
+	*x = AuthEnvelope{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_auth_v1_auth_proto_msgTypes[5]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *AuthEnvelope) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuthEnvelope) ProtoMessage() {}
+
+func (x *AuthEnvelope) ProtoReflect() protoreflect.Message {
+	mi := &file_auth_v1_auth_proto_msgTypes[5]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuthEnvelope.ProtoReflect.Descriptor instead.
+func (*AuthEnvelope) Descriptor() ([]byte, []int) {
+	return file_auth_v1_auth_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *AuthEnvelope) GetAccessToken() string {
+	if x != nil {
+		return x.AccessToken
+	}
+	return ""
+}
+
+func (x *AuthEnvelope) GetIntent() *SignedIntent {
+	if x != nil {
+		return x.Intent
+	}
+	return nil
+}
+
 var File_auth_v1_auth_proto protoreflect.FileDescriptor
 
 var file_auth_v1_auth_proto_rawDesc = []byte{
@@ -246,10 +580,48 @@ var file_auth_v1_auth_proto_rawDesc = []byte{
 	0x1b, 0x0a, 0x09, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x5f, 0x69, 0x64, 0x73, 0x18, 0x04, 0x20, 0x03,
 	0x28, 0x09, 0x52, 0x08, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x49, 0x64, 0x73, 0x12, 0x1d, 0x0a, 0x0a,
 	0x72, 0x65, 0x76, 0x6f, 0x6b, 0x65, 0x64, 0x5f, 0x61, 0x74, 0x18, 0x05, 0x20, 0x01, 0x28, 0x03,
-	0x52, 0x09, 0x72, 0x65, 0x76, 0x6f, 0x6b, 0x65, 0x64, 0x41, 0x74, 0x42, 0x1d, 0x5a, 0x1b, 0x73,
-	0x70, 0x61, 0x77, 0x6e, 0x65, 0x72, 0x79, 0x2f, 0x67, 0x65, 0x6e, 0x2f, 0x61, 0x75, 0x74, 0x68,
-	0x2f, 0x76, 0x31, 0x3b, 0x61, 0x75, 0x74, 0x68, 0x76, 0x31, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74,
-	0x6f, 0x33,
+	0x52, 0x09, 0x72, 0x65, 0x76, 0x6f, 0x6b, 0x65, 0x64, 0x41, 0x74, 0x22, 0x3f, 0x0a, 0x08, 0x4d,
+	0x6f, 0x75, 0x6e, 0x74, 0x52, 0x65, 0x66, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18,
+	0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x1f, 0x0a, 0x0b, 0x62,
+	0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x5f, 0x75, 0x72, 0x69, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09,
+	0x52, 0x0a, 0x62, 0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x55, 0x72, 0x69, 0x22, 0xd6, 0x02, 0x0a,
+	0x0a, 0x49, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x42, 0x6f, 0x64, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x6a,
+	0x74, 0x69, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x6a, 0x74, 0x69, 0x12, 0x1b, 0x0a,
+	0x09, 0x69, 0x73, 0x73, 0x75, 0x65, 0x64, 0x5f, 0x61, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x03,
+	0x52, 0x08, 0x69, 0x73, 0x73, 0x75, 0x65, 0x64, 0x41, 0x74, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x70,
+	0x61, 0x77, 0x6e, 0x5f, 0x69, 0x64, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x73, 0x70,
+	0x61, 0x77, 0x6e, 0x49, 0x64, 0x12, 0x1e, 0x0a, 0x0a, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74,
+	0x69, 0x6f, 0x6e, 0x18, 0x04, 0x20, 0x01, 0x28, 0x04, 0x52, 0x0a, 0x67, 0x65, 0x6e, 0x65, 0x72,
+	0x61, 0x74, 0x69, 0x6f, 0x6e, 0x12, 0x24, 0x0a, 0x0e, 0x74, 0x61, 0x72, 0x67, 0x65, 0x74, 0x5f,
+	0x6e, 0x6f, 0x64, 0x65, 0x5f, 0x69, 0x64, 0x18, 0x05, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0c, 0x74,
+	0x61, 0x72, 0x67, 0x65, 0x74, 0x4e, 0x6f, 0x64, 0x65, 0x49, 0x64, 0x12, 0x0e, 0x0a, 0x02, 0x6f,
+	0x70, 0x18, 0x06, 0x20, 0x01, 0x28, 0x09, 0x52, 0x02, 0x6f, 0x70, 0x12, 0x17, 0x0a, 0x07, 0x61,
+	0x70, 0x70, 0x5f, 0x72, 0x65, 0x66, 0x18, 0x07, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x61, 0x70,
+	0x70, 0x52, 0x65, 0x66, 0x12, 0x14, 0x0a, 0x05, 0x69, 0x6d, 0x61, 0x67, 0x65, 0x18, 0x08, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x05, 0x69, 0x6d, 0x61, 0x67, 0x65, 0x12, 0x14, 0x0a, 0x05, 0x6d, 0x6f,
+	0x64, 0x65, 0x6c, 0x18, 0x09, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x6d, 0x6f, 0x64, 0x65, 0x6c,
+	0x12, 0x19, 0x0a, 0x08, 0x64, 0x61, 0x74, 0x61, 0x5f, 0x72, 0x65, 0x66, 0x18, 0x0a, 0x20, 0x01,
+	0x28, 0x09, 0x52, 0x07, 0x64, 0x61, 0x74, 0x61, 0x52, 0x65, 0x66, 0x12, 0x1d, 0x0a, 0x0a, 0x73,
+	0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x5f, 0x69, 0x64, 0x18, 0x0b, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x09, 0x73, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x49, 0x64, 0x12, 0x29, 0x0a, 0x06, 0x6d, 0x6f,
+	0x75, 0x6e, 0x74, 0x73, 0x18, 0x0c, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x11, 0x2e, 0x61, 0x75, 0x74,
+	0x68, 0x2e, 0x76, 0x31, 0x2e, 0x4d, 0x6f, 0x75, 0x6e, 0x74, 0x52, 0x65, 0x66, 0x52, 0x06, 0x6d,
+	0x6f, 0x75, 0x6e, 0x74, 0x73, 0x22, 0x67, 0x0a, 0x0c, 0x53, 0x69, 0x67, 0x6e, 0x65, 0x64, 0x49,
+	0x6e, 0x74, 0x65, 0x6e, 0x74, 0x12, 0x16, 0x0a, 0x06, 0x64, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x18,
+	0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x64, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x12, 0x12, 0x0a,
+	0x04, 0x62, 0x6f, 0x64, 0x79, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x04, 0x62, 0x6f, 0x64,
+	0x79, 0x12, 0x10, 0x0a, 0x03, 0x73, 0x69, 0x67, 0x18, 0x03, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x03,
+	0x73, 0x69, 0x67, 0x12, 0x19, 0x0a, 0x08, 0x73, 0x70, 0x6b, 0x69, 0x5f, 0x64, 0x65, 0x72, 0x18,
+	0x04, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x07, 0x73, 0x70, 0x6b, 0x69, 0x44, 0x65, 0x72, 0x22, 0x60,
+	0x0a, 0x0c, 0x41, 0x75, 0x74, 0x68, 0x45, 0x6e, 0x76, 0x65, 0x6c, 0x6f, 0x70, 0x65, 0x12, 0x21,
+	0x0a, 0x0c, 0x61, 0x63, 0x63, 0x65, 0x73, 0x73, 0x5f, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x18, 0x01,
+	0x20, 0x01, 0x28, 0x09, 0x52, 0x0b, 0x61, 0x63, 0x63, 0x65, 0x73, 0x73, 0x54, 0x6f, 0x6b, 0x65,
+	0x6e, 0x12, 0x2d, 0x0a, 0x06, 0x69, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28,
+	0x0b, 0x32, 0x15, 0x2e, 0x61, 0x75, 0x74, 0x68, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x69, 0x67, 0x6e,
+	0x65, 0x64, 0x49, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x52, 0x06, 0x69, 0x6e, 0x74, 0x65, 0x6e, 0x74,
+	0x42, 0x1d, 0x5a, 0x1b, 0x73, 0x70, 0x61, 0x77, 0x6e, 0x65, 0x72, 0x79, 0x2f, 0x67, 0x65, 0x6e,
+	0x2f, 0x61, 0x75, 0x74, 0x68, 0x2f, 0x76, 0x31, 0x3b, 0x61, 0x75, 0x74, 0x68, 0x76, 0x31, 0x62,
+	0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
 }
 
 var (
@@ -264,17 +636,23 @@ func file_auth_v1_auth_proto_rawDescGZIP() []byte {
 	return file_auth_v1_auth_proto_rawDescData
 }
 
-var file_auth_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_auth_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_auth_v1_auth_proto_goTypes = []any{
 	(*SessionTokenBody)(nil), // 0: auth.v1.SessionTokenBody
 	(*RevocationEntry)(nil),  // 1: auth.v1.RevocationEntry
+	(*MountRef)(nil),         // 2: auth.v1.MountRef
+	(*IntentBody)(nil),       // 3: auth.v1.IntentBody
+	(*SignedIntent)(nil),     // 4: auth.v1.SignedIntent
+	(*AuthEnvelope)(nil),     // 5: auth.v1.AuthEnvelope
 }
 var file_auth_v1_auth_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	2, // 0: auth.v1.IntentBody.mounts:type_name -> auth.v1.MountRef
+	4, // 1: auth.v1.AuthEnvelope.intent:type_name -> auth.v1.SignedIntent
+	2, // [2:2] is the sub-list for method output_type
+	2, // [2:2] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_auth_v1_auth_proto_init() }
@@ -307,6 +685,54 @@ func file_auth_v1_auth_proto_init() {
 				return nil
 			}
 		}
+		file_auth_v1_auth_proto_msgTypes[2].Exporter = func(v any, i int) any {
+			switch v := v.(*MountRef); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_auth_v1_auth_proto_msgTypes[3].Exporter = func(v any, i int) any {
+			switch v := v.(*IntentBody); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_auth_v1_auth_proto_msgTypes[4].Exporter = func(v any, i int) any {
+			switch v := v.(*SignedIntent); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_auth_v1_auth_proto_msgTypes[5].Exporter = func(v any, i int) any {
+			switch v := v.(*AuthEnvelope); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -314,7 +740,7 @@ func file_auth_v1_auth_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_auth_v1_auth_proto_rawDesc,
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

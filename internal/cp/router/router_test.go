@@ -64,10 +64,10 @@ func TestMultiClientFanoutAndPerClientRouting(t *testing.T) {
 	node := &mcNode{}
 	r.Bind("sp1", "node-1", node)
 	a, b := &mcClient{}, &mcClient{}
-	if _, err := r.AttachClient("sp1", "0", "ca", a, 0); err != nil {
+	if _, err := r.AttachClient("sp1", "0", "ca", "", nil, a, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.AttachClient("sp1", "0", "cb", b, 7); err != nil {
+	if _, err := r.AttachClient("sp1", "0", "cb", "", nil, b, 7); err != nil {
 		t.Fatal(err)
 	}
 	opens := node.opens()
@@ -105,7 +105,7 @@ func TestFromClientTagsClientID(t *testing.T) {
 	node := &mcNode{}
 	r.Bind("sp1", "node-1", node)
 	a := &mcClient{}
-	r.AttachClient("sp1", "0", "ca", a, 0)
+	r.AttachClient("sp1", "0", "ca", "", nil, a, 0)
 	if err := r.FromClient("sp1", "0", "ca", []byte("hi")); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestRouteBothWays(t *testing.T) {
 	r.Bind("sp1", "n1", node)
 
 	cl := &fakeClient{}
-	done, err := r.AttachClient("sp1", "0", "c1", cl, 0)
+	done, err := r.AttachClient("sp1", "0", "c1", "", nil, cl, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,10 +277,10 @@ func TestPerSessionClientRouting(t *testing.T) {
 	node := &mcNode{}
 	r.Bind("sp1", "node-1", node)
 	s0, s1 := &mcClient{}, &mcClient{}
-	if _, err := r.AttachClient("sp1", "0", "shared", s0, 0); err != nil {
+	if _, err := r.AttachClient("sp1", "0", "shared", "", nil, s0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.AttachClient("sp1", "1", "shared", s1, 0); err != nil {
+	if _, err := r.AttachClient("sp1", "1", "shared", "", nil, s1, 0); err != nil {
 		t.Fatal(err)
 	}
 	r.FromNode("sp1", "0", "shared", []byte("for-0"))
@@ -307,7 +307,7 @@ func TestFromNodeEmptySessionRoutesToZero(t *testing.T) {
 	node := &mcNode{}
 	r.Bind("sp1", "node-1", node)
 	c := &mcClient{}
-	if _, err := r.AttachClient("sp1", "0", "shared", c, 0); err != nil {
+	if _, err := r.AttachClient("sp1", "0", "shared", "", nil, c, 0); err != nil {
 		t.Fatal(err)
 	}
 	// FromNode with an EMPTY sessionID must reach the "0" client.

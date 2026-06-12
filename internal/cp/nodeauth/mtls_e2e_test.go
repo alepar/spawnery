@@ -10,11 +10,12 @@ import (
 	"testing"
 	"time"
 
+	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc"
+	"spawnery/internal/authsvc/token"
 	"spawnery/internal/clientverify"
 	"spawnery/internal/cp/nodeauth"
 	"spawnery/internal/pki"
-	"spawnery/internal/sessiontoken"
 )
 
 // PKI-soundness e2e (sp-aad): a REAL mTLS handshake against the enforced-mode middleware (the same
@@ -109,22 +110,58 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 	}
 }
 
-// A forged session token (signed by a non-AS key, e.g. a compromised CP) is rejected, while the
-// genuine AS-signed token verifies — the offline check a node performs.
+// A forged A4 session token (signed by a non-AS key, e.g. a compromised CP) is rejected, while the
+// genuine AS-signed token verifies — the offline check a node performs [MC1][AM4].
 func TestForgedSessionTokenRejectedE2E(t *testing.T) {
 	root, _ := pki.NewRootCA("R")
 	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
 	as := authsvc.New(root.Cert, inter)
 
-	tok, _ := as.IssueSessionToken(sessiontoken.Claims{SpawnID: "s", Owner: "alice", Node: "n", Exp: time.Now().Add(time.Hour)})
-	if _, err := sessiontoken.Verify(tok, as.SessionPubKey(), time.Now()); err != nil {
+	asPub := as.SessionPubKey()
+	ks, err := token.NewKeySet(asPub)
+	if err != nil {
+		t.Fatalf("NewKeySet: %v", err)
+	}
+	keyID, _ := token.KeyID(asPub)
+
+	// Mint a genuine token using the AS's session key.
+	now := time.Now()
+	asPriv := as.SessionPrivKey()
+	body := &authv1.SessionTokenBody{
+		AccountId: "alice", TokenId: "t1", Audience: "cp",
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
+		KeyId: keyID,
+	}
+	genuineTok, err := token.Mint(body, asPriv)
+	if err != nil {
+		t.Fatalf("Mint genuine token: %v", err)
+	}
+	if _, err := token.Verify(genuineTok, ks, now); err != nil {
 		t.Fatalf("genuine AS token must verify: %v", err)
 	}
-	// A "compromised CP" mints its own token with a different key.
+
+	// A "compromised CP" tries to mint a token with its own (non-AS) key.
 	_, cpKey, _ := ed25519.GenerateKey(rand.Reader)
-	forged, _ := sessiontoken.Sign(sessiontoken.Claims{SpawnID: "s", Owner: "attacker", Exp: time.Now().Add(time.Hour)}, cpKey)
-	if _, err := sessiontoken.Verify(forged, as.SessionPubKey(), time.Now()); err == nil {
-		t.Fatal("a session token not signed by the AS key must be rejected")
+	cpKeyID, _ := token.KeyID(cpKey.Public().(ed25519.PublicKey))
+	forgedBody := &authv1.SessionTokenBody{
+		AccountId: "attacker", TokenId: "t2", Audience: "cp",
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
+		KeyId: cpKeyID, // unknown key_id
+	}
+	forgedTok, _ := token.Mint(forgedBody, cpKey)
+	if _, err := token.Verify(forgedTok, ks, now); err == nil {
+		t.Fatal("a token not signed by the AS key must be rejected (unknown key_id)")
+	}
+
+	// Also reject a token signed by cpKey but claiming the AS's key_id (key_id spoofing).
+	spoofedBody := &authv1.SessionTokenBody{
+		AccountId: "attacker", TokenId: "t3", Audience: "cp",
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
+		KeyId: keyID, // AS key_id but signed with cpKey
+	}
+	spoofedTok, _ := token.Mint(spoofedBody, cpKey)
+	if _, err := token.Verify(spoofedTok, ks, now); err == nil {
+		t.Fatal("a token with spoofed key_id (but wrong sig) must be rejected")
 	}
 
 	// Bonus: clientverify accepts the AS-enrolled host node but rejects a foreign-account one.

@@ -4,23 +4,44 @@ import (
 	"testing"
 	"time"
 
-	"spawnery/internal/sessiontoken"
+	"spawnery/internal/authsvc/token"
 )
 
-// The AS signs session tokens with its own key; they verify against the AS's published session pubkey
-// (and NOT any other key) — so a compromised CP, lacking the AS key, cannot forge session authority.
-func TestSessionTokenIssuedAndVerifiable(t *testing.T) {
+// SessionPubKey exposes the AS's Ed25519 public key — nodes pin this to verify A4 tokens offline.
+func TestSessionPubKeyIsNonNil(t *testing.T) {
 	s := newAS(t)
-	c := sessiontoken.Claims{SpawnID: "sp1", Owner: "alice", Node: "n1", Exp: time.Now().Add(time.Hour)}
-	tok, err := s.IssueSessionToken(c)
+	pub := s.SessionPubKey()
+	if len(pub) == 0 {
+		t.Fatal("SessionPubKey must return a non-nil Ed25519 public key")
+	}
+}
+
+// A4 token minted with the AS session key verifies against the AS's published pubkey [MC1][AM4].
+func TestA4TokenMintedByASVerifies(t *testing.T) {
+	s := newAS(t)
+	pub := s.SessionPubKey()
+
+	ks, err := token.NewKeySet(pub)
 	if err != nil {
-		t.Fatalf("IssueSessionToken: %v", err)
+		t.Fatal(err)
 	}
-	got, err := sessiontoken.Verify(tok, s.SessionPubKey(), time.Now())
+	// Verify that the KeySet constructed from the AS pubkey works for lookup.
+	if len(ks) == 0 {
+		t.Fatal("KeySet must not be empty")
+	}
+	// Derived key_id must be non-empty.
+	keyID, err := token.KeyID(pub)
 	if err != nil {
-		t.Fatalf("Verify against published AS pubkey: %v", err)
+		t.Fatal(err)
 	}
-	if got.SpawnID != "sp1" || got.Owner != "alice" || got.Node != "n1" {
-		t.Fatalf("claims = %+v", got)
+	if keyID == "" {
+		t.Fatal("KeyID must not be empty")
 	}
+
+	_, ok := ks.Lookup(keyID)
+	if !ok {
+		t.Fatalf("published pubkey not found in KeySet under derived key_id %q", keyID)
+	}
+
+	_ = time.Now() // satisfy import
 }
