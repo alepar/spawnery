@@ -16,6 +16,7 @@ import { getOrCreateSessionKey, exportSpkiDer, sessionKeyHash, clearSessionKey }
 import { refreshAccessToken } from "./refresh";
 import { parseAccessToken } from "./token";
 import { IDBKeyStore, type KeyStore } from "./keystore";
+import { mapAsError, type AsErrorCode } from "./errors";
 
 // Access the dev token through the env var (same source as connect.ts).
 export const DEV_TOKEN: string = import.meta.env.VITE_AUTH_TOKEN ?? "";
@@ -38,6 +39,8 @@ export interface SessionState {
   refreshTokenHash: string; // SHA-256 of current refresh token (from AS, for PoP)
   account: AccountInfo | null;
   keyStore: KeyStore;
+  /** AS error code carried from the callback into the store so App can render it. */
+  callbackErrorCode: AsErrorCode | null;
 
   // Actions
   setToken(token: string, refreshTokenHash: string): void;
@@ -61,6 +64,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   refreshTokenHash: "",
   account: null,
   keyStore: new IDBKeyStore(),
+  callbackErrorCode: null,
 
   setToken(token: string, rth: string) {
     let account: AccountInfo | null = null;
@@ -70,7 +74,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     } catch {
       // Ignore parse errors; account remains null.
     }
-    set({ accessToken: token, refreshTokenHash: rth, account, status: "authed" });
+    set({ accessToken: token, refreshTokenHash: rth, account, status: "authed", callbackErrorCode: null });
   },
 
   setStatus(status: AuthStatus) {
@@ -96,13 +100,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Check if we are on the callback URL.
     const cb = parseCallback(sessionStateStorage, browserHistory);
     if (cb.kind === "ok") {
-      // Persist the new token.
+      // Persist the new token and restore the original pre-login route.
       get().setToken(cb.accessToken, cb.refreshTokenHash);
+      if (cb.route) browserHistory.replaceState(cb.route);
       return;
     }
     if (cb.kind === "error") {
-      // If state_mismatch or AS error, force re-login.
-      set({ status: "login-required" });
+      // Carry the AS error code into the store so App/LoginView can display it.
+      set({ status: "login-required", callbackErrorCode: mapAsError(cb.code) });
       return;
     }
 

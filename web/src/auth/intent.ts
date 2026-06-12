@@ -242,56 +242,6 @@ export async function pollAndSign(deps: PollAndSignDeps): Promise<string> {
   return jti;
 }
 
-/**
- * buildSessionOpenIntentBytes returns base64-encoded proto.Marshal(SignedIntent)
- * for inclusion in the WS bind frame's signedIntent field.
- *
- * For session-open, the body includes only jti, issuedAt, spawnId, sessionId.
- */
-export async function buildSessionOpenIntentBytes(
-  spawnId: string,
-  sessionId: string,
-  privateKey: CryptoKey,
-  publicKey: CryptoKey,
-): Promise<string> {
-  const spki = await exportSpkiDer(publicKey);
-
-  const jtiBytes = crypto.getRandomValues(new Uint8Array(16));
-  const jti = Array.from(jtiBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-
-  const bodyBytes = buildIntentBodyBytes({
-    jti,
-    issuedAt: Math.floor(Date.now() / 1000),
-    spawnId,
-    generation: 0n,
-    targetNodeId: "",
-    op: "session-open",
-    appRef: "",
-    image: "",
-    model: "",
-    dataRef: "",
-    sessionId,
-    mounts: [],
-  });
-
-  const domain = DOMAIN_SESSION_OPEN;
-  const domainBytes = new TextEncoder().encode(domain);
-  const msg = new Uint8Array(domainBytes.length + bodyBytes.length);
-  msg.set(domainBytes);
-  msg.set(bodyBytes, domainBytes.length);
-  const sig = await signP1363(privateKey, msg);
-  const toB64 = (b: Uint8Array) => btoa(String.fromCharCode(...b));
-
-  // Encode proto SignedIntent manually:
-  // SignedIntent { domain:f1, body:f2, sig:f3, spki_der:f4 }
-  const sw = new ProtoWriter();
-  sw.writeBytes(1, domain);
-  sw.writeBytes(2, bodyBytes);
-  sw.writeBytes(3, sig);
-  sw.writeBytes(4, spki);
-  return toB64(sw.finish());
-}
-
 // ── Tuple validation (AM1) ────────────────────────────────────────────────────
 
 function _validateTuple(pending: PendingIntentProto, pended: PendedOp): void {
