@@ -41,7 +41,7 @@ export interface StoredEntry {
   sigs: Signature[];
 }
 
-interface EntryBody {
+export interface EntryBody {
   version: number;
   type: "genesis" | "add" | "remove";
   prev: string | null; // base64 SHA-256 of prior StoredEntry, null for genesis
@@ -376,6 +376,14 @@ export async function fetchDeviceSetLog(
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/**
+ * parseEntryBody decodes the base64-encoded body of a StoredEntry and returns
+ * the parsed EntryBody. Exported for device list building and label extraction.
+ */
+export function parseEntryBody(entry: StoredEntry): EntryBody {
+  return parseBody(entry);
+}
 
 function parseBody(entry: StoredEntry): EntryBody {
   const raw = fromBase64(entry.body);

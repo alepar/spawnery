@@ -42,6 +42,7 @@ import {
 } from "./device";
 import { deriveSAS } from "./sas";
 import { initSweep, type SweepProgress } from "./epoch";
+import { saveAnchor } from "./anchor";
 import { toBase64, fromBase64 } from "./encoding";
 
 // ── Enrollment link (enrollee side) ──────────────────────────────────────────
@@ -249,6 +250,10 @@ export async function finalizeEnrollment(opts: {
 
   // Persist device keys ([WM11])
   const { persistGranted } = await storeDeviceKeys(opts.pendingKeys);
+
+  // Pin OwnerRoot + head version locally ([WM5])
+  saveAnchor({ ownerRoot: opts.approval.ownerRoot, headVersion: opts.approval.headVersion });
+
   return { persistGranted };
 }
 
