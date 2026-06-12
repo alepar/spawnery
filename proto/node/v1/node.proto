@@ -15,28 +15,30 @@ enum SpawnPhase { SPAWN_PHASE_UNSPECIFIED = 0; STARTING = 1; ACTIVE = 2; STOPPIN
 
 message NodeMessage {
   oneof msg {
-    Register        register         = 1;
-    Heartbeat       heartbeat        = 2;
-    SpawnStatus     status           = 3;
-    Frame           frame            = 4;   // agent -> client bytes
-    SuspendComplete suspend_complete = 5;   // node -> CP: per-mount suspend markers
-    SessionRoster   roster           = 6;   // node -> CP: full live session set for a spawn
-    SessionStatus   session_status   = 7;   // node -> CP: single-session state delta
-    SetModelResult  set_model_result = 8;   // node -> CP: ack/result of a SetModel push
+    Register                      register              = 1;
+    Heartbeat                     heartbeat             = 2;
+    SpawnStatus                   status                = 3;
+    Frame                         frame                 = 4;   // agent -> client bytes
+    SuspendComplete               suspend_complete      = 5;   // node -> CP: per-mount suspend markers
+    SessionRoster                 roster                = 6;   // node -> CP: full live session set for a spawn
+    SessionStatus                 session_status        = 7;   // node -> CP: single-session state delta
+    SetModelResult                set_model_result      = 8;   // node -> CP: ack/result of a SetModel push
+    SealJournalKeyToOwnerResponse seal_journal_key_result = 9; // node -> CP: result of a SealJournalKeyToOwner request (sp-8dkp)
   }
 }
 message CPMessage {
   oneof msg {
-    StartSpawn   start   = 1;
-    StopSpawn    stop    = 2;
-    SessionOpen  open    = 3;
-    SessionClose close   = 4;
-    Frame        frame   = 5;             // client -> agent bytes
-    Suspend      suspend = 6;             // CP -> node: persist + tear down
-    CreateSession create_session = 7;     // CP -> node: launch an additional session (impl: sp-npxq.3)
-    CloseSession  close_session  = 8;     // CP -> node: reap one session
-    SetModel      set_model      = 9;      // CP -> node: switch the running pod's effective model (generation-fenced)
-    SecretDelivery secret_delivery = 10;   // CP -> node: relay owner-sealed secret ciphertext (sp-2ckv.4)
+    StartSpawn                   start                 = 1;
+    StopSpawn                    stop                  = 2;
+    SessionOpen                  open                  = 3;
+    SessionClose                 close                 = 4;
+    Frame                        frame                 = 5;             // client -> agent bytes
+    Suspend                      suspend               = 6;             // CP -> node: persist + tear down
+    CreateSession                create_session        = 7;             // CP -> node: launch an additional session (impl: sp-npxq.3)
+    CloseSession                 close_session         = 8;             // CP -> node: reap one session
+    SetModel                     set_model             = 9;             // CP -> node: switch the running pod's effective model (generation-fenced)
+    SecretDelivery               secret_delivery       = 10;            // CP -> node: relay owner-sealed secret ciphertext (sp-2ckv.4)
+    SealJournalKeyToOwnerRequest seal_journal_key      = 11;            // CP -> node: seal node-local journal password to owner (sp-8dkp)
   }
 }
 
@@ -143,3 +145,30 @@ message SetModel       { string spawn_id = 1; uint64 generation = 2; string mode
 // request_id: the node echoes request_id from the SetModel it handled, so the CP can route the
 // result to the exact push that is waiting (a stale ack with no live waiter is dropped).
 message SetModelResult { string spawn_id = 1; bool ok = 2; string detail = 3; string request_id = 4; }
+
+// --- W4: node-local -> owner-sealed upgrade seam (sp-8dkp) -------------------
+
+// CP -> node: for each journaled mount of spawn_id, read the node-local repo password and seal it
+// to the owner's device set (owner_device_pubkeys are raw X25519 pubkeys). The node responds with
+// SealJournalKeyToOwnerResponse carrying the sealed Envelope bytes per mount.
+// generation fences this against a superseded pod.
+// request_id correlates this push with its response.
+message SealJournalKeyToOwnerRequest {
+  string spawn_id                  = 1;
+  uint64 generation                = 2;
+  repeated bytes owner_device_pubkeys = 3;
+  string request_id                = 4;
+}
+
+// One sealed journal key in a SealJournalKeyToOwnerResponse.
+message SealedJournalKey { string mount = 1; bytes ciphertext = 2; }
+
+// node -> CP: the node has sealed each journaled mount's repo password to the owner's devices.
+// error is non-empty on failure (e.g. mount has no node-local password, is ephemeral, etc.).
+// The node echoes request_id so the CP can correlate the response.
+message SealJournalKeyToOwnerResponse {
+  string spawn_id                    = 1;
+  string request_id                  = 2;
+  repeated SealedJournalKey entries  = 3;
+  string error                       = 4; // non-empty on failure
+}

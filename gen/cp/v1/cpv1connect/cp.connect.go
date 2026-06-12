@@ -105,6 +105,12 @@ const (
 	// SpawnServiceSubmitIntentProcedure is the fully-qualified name of the SpawnService's SubmitIntent
 	// RPC.
 	SpawnServiceSubmitIntentProcedure = "/cp.v1.SpawnService/SubmitIntent"
+	// SpawnServiceListMigrationTargetsProcedure is the fully-qualified name of the SpawnService's
+	// ListMigrationTargets RPC.
+	SpawnServiceListMigrationTargetsProcedure = "/cp.v1.SpawnService/ListMigrationTargets"
+	// SpawnServiceUpgradeToOwnerSealedProcedure is the fully-qualified name of the SpawnService's
+	// UpgradeToOwnerSealed RPC.
+	SpawnServiceUpgradeToOwnerSealedProcedure = "/cp.v1.SpawnService/UpgradeToOwnerSealed"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -145,6 +151,9 @@ type SpawnServiceClient interface {
 	// tuple it must sign, then submits its signed intent to unblock provision.
 	GetPendingIntent(context.Context, *connect.Request[v1.GetPendingIntentRequest]) (*connect.Response[v1.GetPendingIntentResponse], error)
 	SubmitIntent(context.Context, *connect.Request[v1.SubmitIntentRequest]) (*connect.Response[v1.SubmitIntentResponse], error)
+	// W4: migration target enumeration + node-local->owner-sealed upgrade seam (sp-8dkp).
+	ListMigrationTargets(context.Context, *connect.Request[v1.ListMigrationTargetsRequest]) (*connect.Response[v1.ListMigrationTargetsResponse], error)
+	UpgradeToOwnerSealed(context.Context, *connect.Request[v1.UpgradeToOwnerSealedRequest]) (*connect.Response[v1.UpgradeToOwnerSealedResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -314,6 +323,18 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("SubmitIntent")),
 			connect.WithClientOptions(opts...),
 		),
+		listMigrationTargets: connect.NewClient[v1.ListMigrationTargetsRequest, v1.ListMigrationTargetsResponse](
+			httpClient,
+			baseURL+SpawnServiceListMigrationTargetsProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ListMigrationTargets")),
+			connect.WithClientOptions(opts...),
+		),
+		upgradeToOwnerSealed: connect.NewClient[v1.UpgradeToOwnerSealedRequest, v1.UpgradeToOwnerSealedResponse](
+			httpClient,
+			baseURL+SpawnServiceUpgradeToOwnerSealedProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("UpgradeToOwnerSealed")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -345,6 +366,8 @@ type spawnServiceClient struct {
 	putJournalKeyCiphertext *connect.Client[v1.PutJournalKeyCiphertextRequest, v1.PutJournalKeyCiphertextResponse]
 	getPendingIntent        *connect.Client[v1.GetPendingIntentRequest, v1.GetPendingIntentResponse]
 	submitIntent            *connect.Client[v1.SubmitIntentRequest, v1.SubmitIntentResponse]
+	listMigrationTargets    *connect.Client[v1.ListMigrationTargetsRequest, v1.ListMigrationTargetsResponse]
+	upgradeToOwnerSealed    *connect.Client[v1.UpgradeToOwnerSealedRequest, v1.UpgradeToOwnerSealedResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -477,6 +500,16 @@ func (c *spawnServiceClient) SubmitIntent(ctx context.Context, req *connect.Requ
 	return c.submitIntent.CallUnary(ctx, req)
 }
 
+// ListMigrationTargets calls cp.v1.SpawnService.ListMigrationTargets.
+func (c *spawnServiceClient) ListMigrationTargets(ctx context.Context, req *connect.Request[v1.ListMigrationTargetsRequest]) (*connect.Response[v1.ListMigrationTargetsResponse], error) {
+	return c.listMigrationTargets.CallUnary(ctx, req)
+}
+
+// UpgradeToOwnerSealed calls cp.v1.SpawnService.UpgradeToOwnerSealed.
+func (c *spawnServiceClient) UpgradeToOwnerSealed(ctx context.Context, req *connect.Request[v1.UpgradeToOwnerSealedRequest]) (*connect.Response[v1.UpgradeToOwnerSealedResponse], error) {
+	return c.upgradeToOwnerSealed.CallUnary(ctx, req)
+}
+
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -515,6 +548,9 @@ type SpawnServiceHandler interface {
 	// tuple it must sign, then submits its signed intent to unblock provision.
 	GetPendingIntent(context.Context, *connect.Request[v1.GetPendingIntentRequest]) (*connect.Response[v1.GetPendingIntentResponse], error)
 	SubmitIntent(context.Context, *connect.Request[v1.SubmitIntentRequest]) (*connect.Response[v1.SubmitIntentResponse], error)
+	// W4: migration target enumeration + node-local->owner-sealed upgrade seam (sp-8dkp).
+	ListMigrationTargets(context.Context, *connect.Request[v1.ListMigrationTargetsRequest]) (*connect.Response[v1.ListMigrationTargetsResponse], error)
+	UpgradeToOwnerSealed(context.Context, *connect.Request[v1.UpgradeToOwnerSealedRequest]) (*connect.Response[v1.UpgradeToOwnerSealedResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -680,6 +716,18 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("SubmitIntent")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceListMigrationTargetsHandler := connect.NewUnaryHandler(
+		SpawnServiceListMigrationTargetsProcedure,
+		svc.ListMigrationTargets,
+		connect.WithSchema(spawnServiceMethods.ByName("ListMigrationTargets")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceUpgradeToOwnerSealedHandler := connect.NewUnaryHandler(
+		SpawnServiceUpgradeToOwnerSealedProcedure,
+		svc.UpgradeToOwnerSealed,
+		connect.WithSchema(spawnServiceMethods.ByName("UpgradeToOwnerSealed")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
@@ -734,6 +782,10 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceGetPendingIntentHandler.ServeHTTP(w, r)
 		case SpawnServiceSubmitIntentProcedure:
 			spawnServiceSubmitIntentHandler.ServeHTTP(w, r)
+		case SpawnServiceListMigrationTargetsProcedure:
+			spawnServiceListMigrationTargetsHandler.ServeHTTP(w, r)
+		case SpawnServiceUpgradeToOwnerSealedProcedure:
+			spawnServiceUpgradeToOwnerSealedHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -845,4 +897,12 @@ func (UnimplementedSpawnServiceHandler) GetPendingIntent(context.Context, *conne
 
 func (UnimplementedSpawnServiceHandler) SubmitIntent(context.Context, *connect.Request[v1.SubmitIntentRequest]) (*connect.Response[v1.SubmitIntentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.SubmitIntent is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ListMigrationTargets(context.Context, *connect.Request[v1.ListMigrationTargetsRequest]) (*connect.Response[v1.ListMigrationTargetsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListMigrationTargets is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) UpgradeToOwnerSealed(context.Context, *connect.Request[v1.UpgradeToOwnerSealedRequest]) (*connect.Response[v1.UpgradeToOwnerSealedResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.UpgradeToOwnerSealed is not implemented"))
 }
