@@ -70,11 +70,20 @@ type Server struct {
 	// recipient set), wired to a populatable MemDeviceRegistry — not the fail-closed UnwiredRegistry.
 	journalKeys  journalkeys.Store
 	ownerDevices journalkeys.OwnerDeviceRegistry
+
+	// Auth: session registry for revocation fan-out + in-band reauth; verify for the reauth path.
+	// verify is a func to avoid an import cycle: main wires it; nil = no reauth enforcement.
+	sessions      *auth.SessionRegistry
+	verify        func(string) (auth.Identity, error)
+	devMode       bool
+	reauthInterval time.Duration // reauth deadline; 0 uses defaultReauthInterval
 }
 
 const (
-	defaultReconcileInterval = 5 * time.Second // reconciler tick period
-	defaultReconcileGiveUp   = 2 * time.Minute // bounded per-spawn retry window
+	defaultReconcileInterval = 5 * time.Second  // reconciler tick period
+	defaultReconcileGiveUp   = 2 * time.Minute  // bounded per-spawn retry window
+	defaultReauthInterval    = 15 * time.Minute // in-band reauth deadline
+	reauthGrace              = 30 * time.Second // grace period beyond the reauth deadline
 )
 
 // Server must satisfy the (now larger) connect handler interface; the 5 new lifecycle RPCs are
@@ -330,6 +339,19 @@ func lookupRunnable(bins []string, id string) (agentcaps.Runnable, bool) {
 
 // SetMaxSpawnsPerOwner sets the per-owner concurrent-spawn cap (0 = unlimited).
 func (s *Server) SetMaxSpawnsPerOwner(n int) { s.maxSpawnsPerOwner = n }
+
+// SetSessionRegistry wires the session registry for revocation fan-out.
+func (s *Server) SetSessionRegistry(sr *auth.SessionRegistry) { s.sessions = sr }
+
+// SetVerify wires the token verifier function for in-band reauth.
+// v is called with the raw token wire; returns an Identity or an error.
+func (s *Server) SetVerify(v func(string) (auth.Identity, error)) { s.verify = v }
+
+// SetDevMode sets whether the server is in dev mode (reauth enforced in prod only).
+func (s *Server) SetDevMode(dev bool) { s.devMode = dev }
+
+// SetReauthInterval overrides the in-band reauth deadline (default 15 min).
+func (s *Server) SetReauthInterval(d time.Duration) { s.reauthInterval = d }
 
 // checkSpawnQuota returns ResourceExhausted if the owner is at/over the per-owner spawn cap.
 func (s *Server) checkSpawnQuota(ctx context.Context, owner string) error {
@@ -634,13 +656,27 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 		return err
 	}
 	spawnID := first.SpawnId
-	owner, _ := auth.OwnerFromContext(ctx)
+	identity, _ := auth.IdentityFromContext(ctx)
+	owner := identity.Owner
+	if owner == "" {
+		owner, _ = auth.OwnerFromContext(ctx)
+	}
 	sp, err := s.st.Spawns().Get(ctx, spawnID)
 	if err != nil {
 		return connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
 	}
 	if owner != sp.OwnerID {
 		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+
+	// Per-session context for revocation cancellation.
+	sessCtx, sessCancel := context.WithCancel(ctx)
+	defer sessCancel()
+
+	// Register the session for revocation fan-out (skip dev sessions with no token_id).
+	if s.sessions != nil {
+		release := s.sessions.Add(identity.TokenID, identity.Owner, sessCancel)
+		defer release()
 	}
 
 	clientID := uuid.Must(uuid.NewV7()).String()
@@ -668,6 +704,27 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 				recvErr <- err
 				return
 			}
+			// Reauth control frame: consume, verify, re-register. Never forwarded to FromClient.
+			if f.ReauthToken != "" {
+				if s.verify != nil {
+					newID, verr := s.verify(f.ReauthToken)
+					if verr != nil || newID.Owner != owner {
+						if !s.devMode {
+							recvErr <- connect.NewError(connect.CodePermissionDenied, fmt.Errorf("reauth failed"))
+							return
+						}
+						log.Printf("session reauth failed (dev-tolerant): %v", verr)
+					} else {
+						// Re-register under the new token_id (token rotation).
+						if s.sessions != nil && newID.TokenID != "" && newID.TokenID != identity.TokenID {
+							release := s.sessions.Add(newID.TokenID, newID.Owner, sessCancel)
+							defer release()
+						}
+						identity = newID
+					}
+				}
+				continue
+			}
 			if ferr := s.rt.FromClient(spawnID, "0", clientID, f.Data); ferr != nil {
 				recvErr <- ferr
 				return
@@ -678,6 +735,8 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	case <-done:
 		return nil
 	case <-recvErr:
+		return nil
+	case <-sessCtx.Done():
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestOwnerLookup verifies the legacy Auth shim (kept for compat during transition).
 func TestOwnerLookup(t *testing.T) {
 	a := New(map[string]string{"dev-token": "alice"})
 	if o, ok := a.Owner("dev-token"); !ok || o != "alice" {
@@ -22,5 +23,24 @@ func TestContextRoundTrip(t *testing.T) {
 	}
 	if _, ok := OwnerFromContext(context.Background()); ok {
 		t.Fatal("empty ctx should have no owner")
+	}
+}
+
+func TestWithIdentity_ContextRoundTrip(t *testing.T) {
+	id := Identity{Owner: "bob", TokenID: "tok-1"}
+	ctx := WithIdentity(context.Background(), id)
+
+	got, ok := IdentityFromContext(ctx)
+	if !ok {
+		t.Fatal("IdentityFromContext: not ok")
+	}
+	if got.Owner != "bob" || got.TokenID != "tok-1" {
+		t.Errorf("got %+v", got)
+	}
+
+	// OwnerFromContext still works when set via WithIdentity.
+	owner, ok := OwnerFromContext(ctx)
+	if !ok || owner != "bob" {
+		t.Errorf("OwnerFromContext after WithIdentity: %q ok=%v", owner, ok)
 	}
 }
