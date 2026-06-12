@@ -7,6 +7,33 @@ import (
 	"io"
 )
 
+// CapPolicy controls the Linux capability set applied to a container.
+// Zero value is CapDefaultSet so unset container specs (sidecar, preflight smoke)
+// keep today's behavior: no CapDrop, engine default capability set.
+type CapPolicy int
+
+const (
+	// CapDefaultSet leaves the engine's default capability set in place — used when
+	// the daemon's userns-remap or a sentry (runsc/native) shields the host.
+	CapDefaultSet CapPolicy = iota
+	// CapDropAll issues CapDrop=ALL — the degraded / legacy behavior used when no
+	// kernel user-namespace isolation is present (USERNS_MODE=off or degraded fallback).
+	CapDropAll
+)
+
+// CapPolicyForUsernsMode returns the CapPolicy implied by the node's USERNS_MODE string.
+// "remap" and "native" both provide kernel isolation (userns-remap or runsc sentry) and
+// allow the agent's default capability set. Any other value ("off", "", unknown) falls
+// back to CapDropAll so an unprotected node always applies the safe default.
+func CapPolicyForUsernsMode(mode string) CapPolicy {
+	switch mode {
+	case "remap", "native":
+		return CapDefaultSet
+	default:
+		return CapDropAll
+	}
+}
+
 // ACPPort is the TCP port the in-pod acpadapter listens on for the node's ACP
 // connection. Both lanes use TCP: the runc/shared-netns lane dials the pod bridge
 // IP, the runsc/CRI lane dials the pod IP via the CNI bridge. (gVisor isolates the
@@ -29,8 +56,9 @@ type ContainerSpec struct {
 	MemoryBytes int64  // 0 = unlimited
 	NanoCPUs    int64  // 0 = unlimited; 1 CPU = 1_000_000_000
 	PidsLimit   int64  // 0 = unlimited
-	Runtime        string // "" = Docker default; e.g. "runsc"
-	DropAllCaps    bool
+	Runtime        string    // "" = Docker default; e.g. "runsc"
+	CapPolicy      CapPolicy // zero = CapDefaultSet (engine default capability set)
+	CapAdd         []string  // capabilities to ADD — rejected by the Docker backend (§7 floor-defeat guard)
 	ReadonlyRootfs bool
 	Labels         map[string]string // container labels (spawnery.managed/spawn-id/generation/node-id/role)
 }

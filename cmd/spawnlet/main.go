@@ -51,6 +51,7 @@ func main() {
 		ContainerRuntime: os.Getenv("CONTAINER_RUNTIME"),
 		HardenRootfs:     getenvBool("HARDEN_ROOTFS", false),
 		AdvertiseIP:      env("NODE_ADVERTISE_IP", "127.0.0.1"),
+		UsernsMode:       env("USERNS_MODE", "off"),
 	}
 	mgr, err := buildManager(cfg)
 	if err != nil {
@@ -232,6 +233,22 @@ func buildManager(cfg spawnlet.ManagerConfig) (*spawnlet.Manager, error) {
 	rt, err := runtime.NewDocker()
 	if err != nil {
 		return nil, fmt.Errorf("docker: %w", err)
+	}
+	// Userns-remap probe: when USERNS_MODE=remap, verify the daemon actually runs with userns-remap
+	// and learn the remap base UID. On failure or missing userns → loud log + degraded fallback (off).
+	// Node startup MUST NOT fail here; a misconfigured USERNS_MODE degrades to cap-drop=ALL.
+	if cfg.UsernsMode == "remap" {
+		base, active, perr := rt.UsernsRemap(context.Background())
+		if perr != nil {
+			log.Printf("USERNS_MODE=remap but daemon probe failed: %v — FALLING BACK TO DEGRADED (cap-drop=ALL)", perr)
+			cfg.UsernsMode = "off"
+		} else if !active {
+			log.Printf("USERNS_MODE=remap but daemon reports no userns-remap (security options contain no name=userns) — FALLING BACK TO DEGRADED (cap-drop=ALL)")
+			cfg.UsernsMode = "off"
+		} else {
+			cfg.UsernsRemapBase = base
+			log.Printf("userns-remap active: base UID=%d (USERNS_MODE=remap confirmed)", base)
+		}
 	}
 	return spawnlet.NewManager(rt, cfg), nil
 }

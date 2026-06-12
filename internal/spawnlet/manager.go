@@ -49,6 +49,17 @@ type ManagerConfig struct {
 	ContainerRuntime string  // OCI runtime name; "" = Docker default
 	HardenRootfs     bool    // if true, run agent with read-only rootfs + /tmp tmpfs
 	AdvertiseIP      string  // node IP mosh advertises to spawnctl for terminal attach ("" => auto)
+
+	// UsernsMode controls the Linux user-namespace isolation posture (spec §2).
+	// "remap"  — Docker daemon runs with userns-remap; agent gets the default capability set.
+	// "native" — runsc/gVisor sentry provides isolation; agent gets the default capability set.
+	// "off"    — no kernel user-namespace isolation; agent is cap-drop=ALL (degraded, default).
+	// cmd/spawnlet sets this from USERNS_MODE; buildManager probes + may downgrade to "off".
+	UsernsMode string
+	// UsernsRemapBase is the sub-UID base that the userns-remap daemon uses (0 when not in
+	// remap mode). Learned at startup by probing docker info; exposed via RemapBase() for
+	// the storage layer to compute host-side ownership (spec §2, task .8).
+	UsernsRemapBase uint32
 }
 
 type Manager struct {
@@ -161,6 +172,11 @@ func (m *Manager) egressEnforced() bool {
 }
 
 func (m *Manager) Store() *Store { return m.store }
+
+// RemapBase returns the userns-remap base UID learned at startup from the Docker daemon probe
+// (spec §2). Returns 0 when USERNS_MODE is not "remap" or the probe found no active remap.
+// Consumed by the storage layer (.8) to compute host-side ownership for userns-remapped mounts.
+func (m *Manager) RemapBase() uint32 { return m.cfg.UsernsRemapBase }
 
 // ExecPrefix returns the runtime exec invocation (docker/crictl exec -it ...) for execing into a
 // spawn's agent container — used by the node's tmux raw-PTY relay.
@@ -505,7 +521,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		Mounts:         mounts,
 		Resources:      res,
 		Runtime:        m.cfg.ContainerRuntime,
-		DropAllCaps:    true,
+		DropAllCaps:    runtime.CapPolicyForUsernsMode(m.cfg.UsernsMode) == runtime.CapDropAll,
 		ReadonlyRootfs: m.cfg.HardenRootfs,
 		Labels:         labels,
 	}); err != nil {
