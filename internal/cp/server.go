@@ -102,6 +102,12 @@ type Server struct {
 	// (Create/Resume/Recreate/Migrate) register a pending intent BEFORE calling Provision; the
 	// client polls GetPendingIntent and submits a SignedIntent via SubmitIntent, unblocking provision.
 	pendingIntents *pendingIntentRegistry
+
+	// deliveryPending tracks spawns that are active on a target node but whose owner-sealed journal
+	// key has not yet been delivered by the browser (the post-migration delivery step, sp-8dkp §5).
+	// Set by MigrateSpawn when upgrade_to_owner_sealed=true; cleared by DeliverSecrets on journal-key
+	// delivery. Surfaced as journal_key_delivery_pending in ListSpawns to drive the web-UI step.
+	deliveryPending *deliveryPendingTracker
 }
 
 const (
@@ -124,6 +130,7 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
 		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
 		pendingIntents: newPendingIntentRegistry(),
+		deliveryPending: newDeliveryPendingTracker(),
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
 		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
 		devMode: true}

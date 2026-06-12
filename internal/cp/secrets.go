@@ -9,6 +9,7 @@ import (
 
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/secrets/journalkey"
 )
 
 // Owner-sealed secret delivery, CP side (sp-2ckv.4, design §3). The CP is a CIPHERTEXT-ONLY relay: it
@@ -112,6 +113,13 @@ func (s *Server) DeliverSecrets(ctx context.Context, req *connect.Request[cpv1.D
 	}
 	if derr := s.rt.DeliverSecrets(req.Msg.SpawnId, generation, secrets); derr != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, derr)
+	}
+	// Clear delivery-pending when a journal key is included in the delivery (sp-8dkp §5).
+	for _, sec := range req.Msg.Secrets {
+		if journalkey.IsJournalKey(sec.SecretId) {
+			s.deliveryPending.clear(req.Msg.SpawnId)
+			break
+		}
 	}
 	return connect.NewResponse(&cpv1.DeliverSecretsResponse{}), nil
 }

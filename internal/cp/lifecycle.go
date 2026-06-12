@@ -443,6 +443,12 @@ func (s *Server) MigrateSpawn(ctx context.Context, req *connect.Request[cpv1.Mig
 	if err != nil {
 		return nil, err
 	}
+	// Mark delivery-pending when the owner-sealed upgrade path is active: the target node needs the
+	// journal key delivered before it can open the Kopia repo. The web UI polls ListSpawns and prompts
+	// the owner to deliver. The flag auto-expires (deliveryPendingDeadline) if delivery never arrives.
+	if req.Msg.UpgradeToOwnerSealed {
+		s.deliveryPending.mark(id)
+	}
 	return connect.NewResponse(&cpv1.MigrateSpawnResponse{NodeId: nodeID}), nil
 }
 
@@ -561,7 +567,7 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 			SpawnId: sp.ID, AppId: sp.AppID, AppVersion: sp.AppVersion, Model: sp.Model,
 			Status: toSummaryStatus(sp.Status), CreatedAt: sp.CreatedAt, LastUsedAt: sp.LastUsedAt,
 			Name: sp.Name, Mode: sp.Mode, ModelApplied: sp.ModelApplied,
-			Generation: gen,
+			Generation: gen, JournalKeyDeliveryPending: s.deliveryPending.isPending(sp.ID),
 		}
 	}
 	return connect.NewResponse(&cpv1.ListSpawnsResponse{Spawns: out}), nil
