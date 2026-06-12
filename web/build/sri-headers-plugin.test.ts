@@ -43,7 +43,8 @@ describe("buildCsp", () => {
     const csp = buildCsp("https://cp.spawnery.dev", "https://as.spawnery.dev");
     expect(csp).toContain("default-src 'none'");
     expect(csp).toContain("script-src 'self'");
-    expect(csp).toContain("font-src 'self'");
+    // data: is required: Vite inlines webfonts as data: URI @font-face in the CSS bundle.
+    expect(csp).toContain("font-src 'self' data:");
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("base-uri 'none'");
     expect(csp).toContain("object-src 'none'");
@@ -300,6 +301,38 @@ describe("sriHeadersPlugin.closeBundle", () => {
     const html = fs.readFileSync(path.join(tmpDir, "index.html"), "utf8");
     expect(html).toContain(`integrity="${integ}"`);
     expect(html).toContain('crossorigin="anonymous"');
+  });
+
+  it("[WL4] throws when a CSS asset is emitted but not referenced with integrity in index.html", () => {
+    // Simulates a dynamically-imported CSS chunk: Vite emits it as an asset but does NOT
+    // add a <link rel="stylesheet"> for it in index.html — Vite injects it at runtime via
+    // __vitePreload without an integrity attribute.  The plugin must catch this and fail.
+    const css = "body { background: blue; }";
+    fs.writeFileSync(path.join(tmpDir, "assets/lazy.css"), css, "utf8");
+    // index.html has NO <link> for lazy.css — it would be injected at runtime.
+    writeIndexHtml("<html><head></head><body></body></html>");
+    const plugin = sriHeadersPlugin({ cpOrigin: "https://cp.example.com" });
+    callConfigResolved(plugin, tmpDir);
+    callGenerateBundle(plugin, {
+      "assets/lazy.css": { type: "asset", source: css },
+    });
+    expect(() => callCloseBundle(plugin)).toThrow(/FATAL \[WL4\]: CSS assets emitted but not referenced/);
+  });
+
+  it("[WL4] does NOT throw when a CSS asset IS referenced with integrity in index.html", () => {
+    const css = "body { color: red; }";
+    const integ = sha384(css);
+    fs.writeFileSync(path.join(tmpDir, "assets/main.css"), css, "utf8");
+    writeIndexHtml(
+      `<html><head><link rel="stylesheet" crossorigin href="/assets/main.css"></head><body></body></html>`,
+    );
+    const plugin = sriHeadersPlugin({ cpOrigin: "https://cp.example.com" });
+    callConfigResolved(plugin, tmpDir);
+    callGenerateBundle(plugin, { "assets/main.css": { type: "asset", source: css } });
+    expect(() => callCloseBundle(plugin)).not.toThrow();
+    // Also verify the integrity was stamped.
+    const html = fs.readFileSync(path.join(tmpDir, "index.html"), "utf8");
+    expect(html).toContain(`integrity="${integ}"`);
   });
 
   it("skips processing when index.html does not exist", () => {

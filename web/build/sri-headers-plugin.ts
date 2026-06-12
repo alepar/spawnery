@@ -78,7 +78,10 @@ export function buildCsp(cpOrigin: string, asOrigin: string): string {
     // Removing this requires switching xterm to the WebGL/Canvas renderer AND patching
     // or replacing sonner.
     "style-src 'self' 'unsafe-inline'",
-    "font-src 'self'",
+    // data: allows webfonts inlined as data: URIs in the CSS bundle (Vite's assetsInlineLimit
+    // converts small woff2/woff files to data: URI @font-face sources at build time).
+    // This mirrors img-src which also includes data: for the same reason.
+    "font-src 'self' data:",
     `connect-src ${connectSrc}`,
     "img-src 'self' data:",
     "frame-ancestors 'none'",
@@ -293,6 +296,37 @@ export function sriHeadersPlugin(opts: SriHeadersOptions = {}): Plugin {
       }
 
       fs.writeFileSync(htmlPath, html, "utf8");
+
+      // [WL4] guard: every CSS asset emitted into the bundle must be referenced with an
+      // integrity attribute in index.html. A dynamically-imported CSS chunk (Vite type:
+      // "asset") is hashed above but would be injected at runtime by __vitePreload WITHOUT
+      // an integrity check — no such chunk exists today, but this guard catches it early
+      // rather than silently shipping an uncovered asset.
+      const coveredCss = new Set<string>();
+      const cssLinkRe = /<link([^>]*)>/g;
+      let cssM: RegExpExecArray | null;
+      while ((cssM = cssLinkRe.exec(html)) !== null) {
+        const attrs = cssM[1];
+        if (!attrs.includes('rel="stylesheet"') && !attrs.includes("rel='stylesheet'")) continue;
+        const hrefM = attrs.match(/\shref="([^"]+)"/);
+        if (hrefM && /integrity="sha384-/.test(attrs)) {
+          coveredCss.add(hrefM[1].replace(/^\//, ""));
+        }
+      }
+      const uncoveredCss: string[] = [];
+      for (const fileName of integrityMap.keys()) {
+        if (fileName.endsWith(".css") && !coveredCss.has(fileName)) {
+          uncoveredCss.push(fileName);
+        }
+      }
+      if (uncoveredCss.length > 0) {
+        throw new Error(
+          `[sri-headers-plugin] FATAL [WL4]: CSS assets emitted but not referenced with integrity in index.html:\n` +
+          uncoveredCss.map((f) => `  ${f}`).join("\n") +
+          `\nVite injects dynamic CSS at runtime via __vitePreload without an integrity attribute.` +
+          ` Ensure every CSS asset has a <link rel="stylesheet" integrity="..."> in index.html.`,
+        );
+      }
 
       // In production mode, cpOrigin is required. An empty origin means the CI env var
       // was unset/typo'd — emit a hard failure rather than a CSP-less bundle ([WL4]).
