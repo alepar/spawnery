@@ -240,11 +240,18 @@ func (i *IdP) serveCallback(w http.ResponseWriter, r *http.Request) {
 	rawRefresh := randOpaque()
 	tokenID := uuid.NewString()
 	famID := uuid.NewString()
+	// RFC 8252 native-app seam [A3]: loopback redirect_uri → CLI client kind so the refresh
+	// family carries the right ClientKind for audit. The token is also delivered in the query
+	// (see below) since the loopback listener cannot receive Set-Cookie from the AS domain.
+	clientKind := store.ClientWeb
+	if isLoopbackURI(row.ClientRedirectURI) {
+		clientKind = store.ClientCLI
+	}
 	refreshRow := store.RefreshSession{
 		TokenHash:         sha256Hex(rawRefresh),
 		AccountID:         u.AccountID,
 		FamilyID:          famID,
-		ClientKind:        store.ClientWeb,
+		ClientKind:        clientKind,
 		SessionPubkeySPKI: spkiDER,
 		AccessTokenID:     tokenID,
 		CreatedAt:         now.Unix(),
@@ -287,6 +294,13 @@ func (i *IdP) serveCallback(w http.ResponseWriter, r *http.Request) {
 	out.Set("access_token", accessWire)
 	if row.ClientState != "" {
 		out.Set("state", row.ClientState)
+	}
+	// RFC 8252 §7.3: for loopback redirect URIs (native app / spawnctl) also include the
+	// refresh_token in the query. The loopback listener is on localhost so the token only
+	// transits the local address bar — no cross-site exposure. The SPA path (non-loopback)
+	// is unchanged: refresh_token stays HttpOnly-cookie-only.
+	if isLoopbackURI(row.ClientRedirectURI) {
+		out.Set("refresh_token", rawRefresh)
 	}
 	dest.RawQuery = out.Encode()
 	http.Redirect(w, r, dest.String(), http.StatusFound)
@@ -375,6 +389,17 @@ func (i *IdP) isAllowedRedirectURI(uri string) bool {
 		}
 	}
 	return false
+}
+
+// isLoopbackURI returns true when the URI's host is a loopback address (127.0.0.1 or ::1).
+// Used by serveCallback to identify native-app (spawnctl) redirect URIs [RFC 8252 §7.3].
+func isLoopbackURI(uri string) bool {
+	u, err := url.Parse(uri)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	return host == "127.0.0.1" || host == "::1"
 }
 
 // loopbackPortRelax returns true when both allowed and incoming are http loopback URIs

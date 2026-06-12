@@ -384,6 +384,55 @@ func TestOAuthCallbackNoPubkeyRejected(t *testing.T) {
 	}
 }
 
+// TestOAuthLoopbackDeliversRefreshToken: loopback redirect_uri → refresh_token in query (A3 seam).
+// SPA (non-loopback) path must NOT carry refresh_token in query.
+func TestOAuthLoopbackDeliversRefreshToken(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	fake.SetUser(70001, "loopback-user")
+	now := time.Unix(1770000000, 0)
+	// Register a loopback anchor URI so loopback port-relaxation works.
+	srv, _, st := testAS(t, fake, now, func(cfg *IdPConfig) {
+		cfg.RedirectURIs = append(cfg.RedirectURIs, "http://127.0.0.1:8000/cb")
+	})
+	_, spkiDER := newTestP256(t)
+	pubB64 := spkiB64(spkiDER)
+
+	// 1. Loopback redirect_uri (port differs from registered — RFC 8252 §7.3 port relaxation).
+	resp := triggerCallbackWith(t, srv, fake, "http://127.0.0.1:54321/cb", "loop-state", pubB64)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("loopback callback: want 302, got %d", resp.StatusCode)
+	}
+	location := resp.Header.Get("Location")
+	refreshToken := extractQueryParam(location, "refresh_token")
+	if refreshToken == "" {
+		t.Fatalf("loopback: refresh_token must be in query, got location %q", location)
+	}
+	accessToken := extractQueryParam(location, "access_token")
+	if accessToken == "" {
+		t.Fatalf("loopback: access_token missing from location %q", location)
+	}
+	// ClientKind must be "cli" for the loopback family.
+	row, err := st.RefreshSessions().Get(context.Background(), sha256Hex(refreshToken))
+	if err != nil {
+		t.Fatalf("get refresh session: %v", err)
+	}
+	if row.ClientKind != store.ClientCLI {
+		t.Fatalf("loopback: want client_kind=cli, got %q", row.ClientKind)
+	}
+
+	// 2. SPA (non-loopback) redirect_uri: refresh_token must NOT appear in the query.
+	fake.SetUser(70002, "spa-user")
+	resp2 := triggerCallback(t, srv, fake) // uses "http://localhost:3000/callback"
+	if resp2.StatusCode != http.StatusFound {
+		t.Fatalf("spa callback: want 302, got %d", resp2.StatusCode)
+	}
+	loc2 := resp2.Header.Get("Location")
+	if extractQueryParam(loc2, "refresh_token") != "" {
+		t.Fatalf("SPA callback must NOT include refresh_token in query, got %q", loc2)
+	}
+}
+
 // TestRefreshPerAccountRateLimit: per-account rate limit on /refresh fires for a second request
 // from the same account [§6, Fix 1].
 func TestRefreshPerAccountRateLimit(t *testing.T) {

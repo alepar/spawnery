@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -43,7 +44,7 @@ func main() {
 			&cli.StringFlag{Name: "ref", Usage: "immutable app ref creator/app@sha (with -register)"},
 		},
 		Action:   rootAction,
-		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), setModelCmd(), keyCmd(), moveCmd()},
+		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), setModelCmd(), keyCmd(), moveCmd(), loginCmd(), logoutCmd()},
 	}
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		log.Fatal(err)
@@ -52,15 +53,19 @@ func main() {
 
 // rootAction is the default (no-subcommand) behavior: register, CP-create, or standalone-create.
 func rootAction(ctx context.Context, c *cli.Command) error {
+	configDir, _ := defaultConfigDir()
+	httpCl := h2cClient()
 	if c.Bool("register") {
 		if c.String("cp") == "" {
 			return cli.Exit("-register requires -cp", 2)
 		}
-		runRegister(ctx, c.String("cp"), c.String("app"), c.String("version"), c.String("ref"), c.String("token"))
+		src := buildTokenSource(configDir, c.String("token"), httpCl)
+		runRegister(ctx, c.String("cp"), c.String("app"), c.String("version"), c.String("ref"), src)
 		return nil
 	}
 	if c.String("cp") != "" {
-		runCP(ctx, c.String("cp"), c.String("app-id"), c.String("model"), c.String("token"))
+		src := buildTokenSource(configDir, c.String("token"), httpCl)
+		runCP(ctx, c.String("cp"), c.String("app-id"), c.String("model"), src)
 		return nil
 	}
 	runStandalone(ctx, c.String("addr"), c.String("app"), c.String("model"))
@@ -94,13 +99,13 @@ func manifestToProto(appDir string) (*cpv1.AppManifest, error) {
 
 // runRegister is the reference CI client: it maps the local manifest to the
 // AppManifest proto and calls RegisterAppVersion on the control plane.
-func runRegister(ctx context.Context, cpAddr, appDir, version, ref, token string) {
+func runRegister(ctx context.Context, cpAddr, appDir, version, ref string, src *cpTokenSource) {
 	pm, err := manifestToProto(appDir)
 	if err != nil {
 		log.Fatalf("manifest: %v", err)
 	}
 	client := cpv1connect.NewSpawnServiceClient(h2cClient(), cpAddr,
-		connect.WithGRPC(), connect.WithInterceptors(cpBearer(token)))
+		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 	resp, err := client.RegisterAppVersion(ctx, connect.NewRequest(&cpv1.RegisterAppVersionRequest{Manifest: pm, Version: version, Ref: ref}))
 	if err != nil {
 		log.Fatalf("register: %v", err)
@@ -157,9 +162,9 @@ func runStandalone(ctx context.Context, addr, appPath, model string) {
 }
 
 // runCP drives the agent through the control plane via the cp.v1 service.
-func runCP(ctx context.Context, addr, appID, model, token string) {
+func runCP(ctx context.Context, addr, appID, model string, src *cpTokenSource) {
 	client := cpv1connect.NewSpawnServiceClient(h2cClient(), addr,
-		connect.WithGRPC(), connect.WithInterceptors(cpBearer(token)))
+		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 
 	cs, err := client.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
 		AppId: appID,
@@ -321,8 +326,8 @@ func h2cClient() *http.Client {
 }
 
 // cpBearer is a client-side interceptor that sets "Authorization: Bearer <token>"
-// on unary requests and on the streaming-client connection, mirroring the CP's
-// server-side auth interceptor (internal/cp/auth).
+// on unary requests and on the streaming-client connection. Kept for use in tests and any
+// standalone (non-CP) paths that still use a raw static token.
 func cpBearer(token string) connect.Interceptor { return bearerInterceptor{token: token} }
 
 type bearerInterceptor struct{ token string }
@@ -343,6 +348,54 @@ func (b bearerInterceptor) WrapStreamingClient(next connect.StreamingClientFunc)
 }
 
 func (b bearerInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return next // server-side: no-op
+}
+
+// tokenSourceInterceptor builds a Connect interceptor backed by a cpTokenSource.
+// Unary: sets bearer token; on CodeUnauthenticated, forces refresh and retries once.
+// Streaming: proactively refreshes before opening the connection (mid-stream 401 needs reconnect — out of scope).
+func tokenSourceInterceptor(src *cpTokenSource) connect.Interceptor {
+	return &tsInterceptor{src: src}
+}
+
+type tsInterceptor struct{ src *cpTokenSource }
+
+func (t *tsInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		tok, err := t.src.Token(ctx)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeUnauthenticated, err)
+		}
+		req.Header().Set("Authorization", "Bearer "+tok)
+		resp, err := next(ctx, req)
+		if err != nil {
+			var connErr *connect.Error
+			if errors.As(err, &connErr) && connErr.Code() == connect.CodeUnauthenticated {
+				// Force refresh and retry once.
+				if refreshErr := t.src.OnUnauthenticated(ctx); refreshErr == nil {
+					if newTok, tokErr := t.src.Token(ctx); tokErr == nil {
+						req.Header().Set("Authorization", "Bearer "+newTok)
+						return next(ctx, req)
+					}
+				}
+			}
+		}
+		return resp, err
+	}
+}
+
+func (t *tsInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
+		conn := next(ctx, spec)
+		tok, err := t.src.Token(ctx)
+		if err == nil {
+			conn.RequestHeader().Set("Authorization", "Bearer "+tok)
+		}
+		return conn
+	}
+}
+
+func (t *tsInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
 	return next // server-side: no-op
 }
 
