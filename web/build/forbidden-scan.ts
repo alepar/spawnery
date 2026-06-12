@@ -44,7 +44,7 @@ function isTextFile(filePath: string): boolean {
   return [".html", ".js", ".mjs", ".css", ".json", ".txt", ".sh", ".ts", ".tsx"].includes(ext);
 }
 
-export async function scan(distDir: string): Promise<ScanResult> {
+export async function scan(distDir: string, srcDir?: string): Promise<ScanResult> {
   const violations: string[] = [];
 
   for await (const filePath of walk(distDir)) {
@@ -111,6 +111,31 @@ export async function scan(distDir: string): Promise<ScanResult> {
     }
   }
 
+  // S. PLACEHOLDER markers in source files — catches constants that Vite tree-shakes out
+  //    of dist/ because they are not yet consumed by runtime code (e.g. trustAnchors.ts
+  //    in W1 before W2/W4 wire them in). The scanner must reject a build whose source
+  //    still carries the placeholder values even if they never reach the bundle.
+  if (srcDir && fs.existsSync(srcDir)) {
+    for await (const filePath of walk(srcDir)) {
+      if (!isTextFile(filePath)) continue;
+      let srcContent: string;
+      try {
+        srcContent = fs.readFileSync(filePath, "utf8");
+      } catch {
+        continue;
+      }
+      const rel = path.relative(srcDir, filePath);
+      if (
+        srcContent.includes("PLACEHOLDER-TRUST-ANCHOR-ROOT-CA") ||
+        srcContent.includes("PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY")
+      ) {
+        violations.push(
+          `src/${rel}: contains PLACEHOLDER trust anchor — replace before release`,
+        );
+      }
+    }
+  }
+
   // 6. _headers must exist and contain a real connect-src. A missing _headers means no
   //    CSP and no connect-src pinning will be applied — the core goal of W1 is defeated.
   //    connect-src 'none' is equally bad: it means origins were empty at build time.
@@ -143,7 +168,8 @@ export async function scan(distDir: string): Promise<ScanResult> {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const distDir = process.argv[2] ?? path.join(process.cwd(), "dist");
-  scan(distDir).then(({ ok, violations }) => {
+  const srcDir = process.argv[3];
+  scan(distDir, srcDir).then(({ ok, violations }) => {
     if (ok) {
       console.log("forbidden-scan: PASS — no violations found");
       process.exit(0);

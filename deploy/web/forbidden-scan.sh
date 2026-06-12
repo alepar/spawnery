@@ -11,6 +11,8 @@
 set -euo pipefail
 
 DIST="${1:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)/web/dist}"
+# Resolve to absolute path BEFORE the cd below changes cwd.
+[[ "$DIST" = /* ]] || DIST="$(pwd)/$DIST"
 
 if [[ ! -d "$DIST" ]]; then
   echo "forbidden-scan: dist directory not found: $DIST" >&2
@@ -20,4 +22,4 @@ fi
 # Run the TS scanner via tsx (available in the web dev environment).
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT/web"
-npx tsx build/forbidden-scan.ts "$DIST"
+npx tsx build/forbidden-scan.ts "$DIST" "$REPO_ROOT/web/src"

@@ -145,6 +145,67 @@ describe("placeholder trust anchors", () => {
   });
 });
 
+// ── Source-tree PLACEHOLDER scan (catches tree-shaken constants) ─────────────
+
+describe("source-tree placeholder scan", () => {
+  let srcDir: string;
+
+  beforeEach(() => {
+    srcDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawnery-scan-src-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(srcDir, { recursive: true, force: true });
+  });
+
+  function writeSrc(name: string, content: string) {
+    const p = path.join(srcDir, name);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, content);
+  }
+
+  it("fails when a source .ts file contains PLACEHOLDER-TRUST-ANCHOR-ROOT-CA even with a clean dist", async () => {
+    // dist is clean — no placeholder in the bundle (tree-shaken away).
+    write("assets/main.js", `console.log("hello");`);
+    write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; connect-src https://cp.example.com`);
+    // source file carries the placeholder.
+    writeSrc("config/trustAnchors.ts", `export const PINNED_ROOT_CA_PEM = "PLACEHOLDER-TRUST-ANCHOR-ROOT-CA";`);
+
+    const result = await scan(tmpDir, srcDir);
+    expect(result.ok).toBe(false);
+    expect(result.violations.some(v => v.includes("PLACEHOLDER") && v.startsWith("src/"))).toBe(true);
+  });
+
+  it("fails when a source .ts file contains PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY even with a clean dist", async () => {
+    write("assets/main.js", `console.log("hello");`);
+    write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; connect-src https://cp.example.com`);
+    writeSrc("config/trustAnchors.ts", `export const AS_PUBKEYS = ["PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY"];`);
+
+    const result = await scan(tmpDir, srcDir);
+    expect(result.ok).toBe(false);
+    expect(result.violations.some(v => v.includes("PLACEHOLDER") && v.startsWith("src/"))).toBe(true);
+  });
+
+  it("passes when the source tree has no PLACEHOLDER markers", async () => {
+    write("assets/main.js", `console.log("hello");`);
+    write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; connect-src https://cp.example.com`);
+    writeSrc("config/trustAnchors.ts", `export const PINNED_ROOT_CA_PEM = "-----BEGIN CERTIFICATE-----\nREALCERTDATA\n-----END CERTIFICATE-----";`);
+
+    const result = await scan(tmpDir, srcDir);
+    const srcViolations = result.violations.filter(v => v.startsWith("src/") && v.includes("PLACEHOLDER"));
+    expect(srcViolations).toHaveLength(0);
+  });
+
+  it("passes when no srcDir is provided (backward compat — dist-only mode)", async () => {
+    write("assets/main.js", `console.log("hello");`);
+    write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; connect-src https://cp.example.com`);
+    // Source carries PLACEHOLDER but we don't pass srcDir — should not flag.
+    const result = await scan(tmpDir);
+    const srcViolations = result.violations.filter(v => v.startsWith("src/") && v.includes("PLACEHOLDER"));
+    expect(srcViolations).toHaveLength(0);
+  });
+});
+
 // ── _headers presence + connect-src check ────────────────────────────────────
 
 describe("_headers structural check", () => {
