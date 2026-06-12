@@ -23,8 +23,22 @@ const TAG_SEQUENCE  = 0x30;
 const TAG_BIT_STR   = 0x03;
 const TAG_OID       = 0x06;
 const TAG_OCTET_STR = 0x04;
+const TAG_BOOLEAN   = 0x01;
 const TAG_CONTEXT_3 = 0xa3; // [3] EXPLICIT Extensions
 const TAG_CONTEXT_2 = 0x82; // [2] dNSName in GeneralName CHOICE
+const TAG_UTCTIME   = 0x17; // UTCTime
+const TAG_GENTIME   = 0x18; // GeneralizedTime
+
+// ── OID byte sequences ────────────────────────────────────────────────────────
+
+/** SAN OID 2.5.29.17 in DER: 55 1d 11. */
+const SAN_OID               = new Uint8Array([0x55, 0x1d, 0x11]);
+/** BasicConstraints OID 2.5.29.19 in DER: 55 1d 13. */
+const BASIC_CONSTRAINTS_OID = new Uint8Array([0x55, 0x1d, 0x13]);
+/** KeyUsage OID 2.5.29.15 in DER: 55 1d 0f. */
+const KEY_USAGE_OID         = new Uint8Array([0x55, 0x1d, 0x0f]);
+/** NameConstraints OID 2.5.29.30 in DER: 55 1d 1e. */
+const NAME_CONSTRAINTS_OID  = new Uint8Array([0x55, 0x1d, 0x1e]);
 
 // ── DER TLV reader ────────────────────────────────────────────────────────────
 
@@ -97,6 +111,16 @@ export interface ParsedCert {
   spkiBytes: Uint8Array;
   /** First DNS SAN, if present; empty string otherwise. */
   sanDNS: string;
+  /** Certificate validity start (notBefore). */
+  notBefore: Date;
+  /** Certificate validity end (notAfter). */
+  notAfter: Date;
+  /** basicConstraints cA=TRUE: this cert is a CA and may sign other certs. */
+  isCA: boolean;
+  /** keyUsage has keyCertSign bit set. */
+  certSignKeyUsage: boolean;
+  /** nameConstraints permittedSubtrees dNSNames (empty = no constraint). */
+  permittedDNSDomains: string[];
 }
 
 /**
@@ -123,7 +147,7 @@ export function parseCertDER(der: Uint8Array): ParsedCert {
 
   // TBSCertificate TLV bytes: startOff within outer.val, so we reconstruct within der.
   // outer.val starts at offset (outer header length) in der.
-  const outerHdrLen = tbsChild.startOff + (der.byteOffset - outer.val.byteOffset + outer.val.byteOffset - outer.val.byteOffset);
+  const _outerHdrLen = tbsChild.startOff + (der.byteOffset - outer.val.byteOffset + outer.val.byteOffset - outer.val.byteOffset);
   // Simpler: the TBSCertificate full TLV starts at (outer tag+len offset + tbsChild.startOff).
   // We compute the outer header length = der.length - outer.val.length.
   const outerHeaderLen = der.length - outer.val.length;
@@ -135,25 +159,28 @@ export function parseCertDER(der: Uint8Array): ParsedCert {
   if (sigChild.val[0] !== 0) throw new Error("x509: signature BIT STRING has non-zero unused bits");
   const sigDER = sigChild.val.subarray(1);
 
-  const { spkiBytes, sanDNS } = parseTBS(tbsChild.val, outer.val);
+  const { spkiBytes, sanDNS, notBefore, notAfter, isCA, certSignKeyUsage, permittedDNSDomains } =
+    parseTBS(tbsChild.val, outer.val);
 
-  return { tbsBytes, sigDER, spkiBytes, sanDNS };
+  return { tbsBytes, sigDER, spkiBytes, sanDNS, notBefore, notAfter, isCA, certSignKeyUsage, permittedDNSDomains };
 }
 
 interface TBSFields {
-  spkiBytes: Uint8Array;
-  sanDNS: string;
+  spkiBytes:           Uint8Array;
+  sanDNS:              string;
+  notBefore:           Date;
+  notAfter:            Date;
+  isCA:                boolean;
+  certSignKeyUsage:    boolean;
+  permittedDNSDomains: string[];
 }
 
 /**
- * Parse TBSCertificate body for SPKI and SAN.
+ * Parse TBSCertificate body for SPKI, SAN, validity, and constraint extensions.
  *
- * TBSCertificate contains (in RFC 5280 order):
+ * TBSCertificate contains (RFC 5280 order):
  *   [0] version (optional), serialNumber, signature, issuer, validity, subject,
  *   SubjectPublicKeyInfo, [3] extensions (optional)
- *
- * tbsVal is the VALUE bytes of the TBSCertificate; certVal is the value of the outer
- * Certificate SEQUENCE (used to get absolute offsets back into the cert for SPKI).
  */
 function parseTBS(tbsVal: Uint8Array, certVal: Uint8Array): TBSFields {
   const items = [...iterSeq(tbsVal)];
@@ -169,54 +196,167 @@ function parseTBS(tbsVal: Uint8Array, certVal: Uint8Array): TBSFields {
   const spkiIdx = extsIdx >= 0 ? extsIdx - 1 : items.length - 1;
   const spkiItem = items[spkiIdx];
   if (spkiItem.tag !== TAG_SEQUENCE) throw new Error("x509: SPKI is not a SEQUENCE");
-
-  // We need the full SPKI TLV (tag+len+val) from tbsVal.
   const spkiBytes = tbsVal.subarray(spkiItem.startOff, spkiItem.next);
 
-  // Parse SAN if extensions are present.
+  // Validity SEQUENCE is 2 positions before SPKI (subject occupies the slot between them).
+  const validityIdx = spkiIdx - 2;
+  if (validityIdx < 0 || items[validityIdx].tag !== TAG_SEQUENCE) {
+    throw new Error("x509: could not locate Validity field in TBSCertificate");
+  }
+  const { notBefore, notAfter } = _parseValidity(items[validityIdx].val);
+
+  // Parse all relevant extensions.
   let sanDNS = "";
+  let isCA = false;
+  let certSignKeyUsage = false;
+  let permittedDNSDomains: string[] = [];
   if (extsIdx >= 0) {
-    sanDNS = parseSAN(items[extsIdx].val);
+    const exts = _parseExtensions(items[extsIdx].val);
+    sanDNS             = exts.sanDNS;
+    isCA               = exts.isCA;
+    certSignKeyUsage   = exts.certSignKeyUsage;
+    permittedDNSDomains = exts.permittedDNSDomains;
   }
 
-  void certVal; // certVal not needed for computing SPKI offset within tbsVal
-  return { spkiBytes, sanDNS };
+  void certVal;
+  return { spkiBytes, sanDNS, notBefore, notAfter, isCA, certSignKeyUsage, permittedDNSDomains };
 }
 
-/** SAN OID 2.5.29.17 in DER: 55 1d 11. */
-const SAN_OID = new Uint8Array([0x55, 0x1d, 0x11]);
+// ── Time parsing ──────────────────────────────────────────────────────────────
+
+function _parseValidity(validityVal: Uint8Array): { notBefore: Date; notAfter: Date } {
+  const times = [...iterSeq(validityVal)];
+  if (times.length < 2) throw new Error("x509: Validity has fewer than 2 time values");
+  return { notBefore: _parseDERTime(times[0]), notAfter: _parseDERTime(times[1]) };
+}
+
+function _parseDERTime(tlv: TLV): Date {
+  if (tlv.tag !== TAG_UTCTIME && tlv.tag !== TAG_GENTIME) {
+    throw new Error(`x509: unexpected time tag 0x${tlv.tag.toString(16)} in Validity`);
+  }
+  const s = new TextDecoder("ascii").decode(tlv.val);
+  if (tlv.tag === TAG_UTCTIME) {
+    // YYMMDDHHMMSSZ — RFC 5280 mandates Z and seconds
+    const yy = parseInt(s.slice(0, 2), 10);
+    const year = yy >= 50 ? 1900 + yy : 2000 + yy;
+    return new Date(Date.UTC(
+      year,
+      parseInt(s.slice(2, 4), 10) - 1,
+      parseInt(s.slice(4, 6), 10),
+      parseInt(s.slice(6, 8), 10),
+      parseInt(s.slice(8, 10), 10),
+      parseInt(s.slice(10, 12), 10),
+    ));
+  } else {
+    // YYYYMMDDHHMMSSZ (GeneralizedTime)
+    return new Date(Date.UTC(
+      parseInt(s.slice(0, 4), 10),
+      parseInt(s.slice(4, 6), 10) - 1,
+      parseInt(s.slice(6, 8), 10),
+      parseInt(s.slice(8, 10), 10),
+      parseInt(s.slice(10, 12), 10),
+      parseInt(s.slice(12, 14), 10),
+    ));
+  }
+}
+
+// ── Extension parsing ─────────────────────────────────────────────────────────
+
+interface _ParsedExtensions {
+  sanDNS:             string;
+  isCA:               boolean;
+  certSignKeyUsage:   boolean;
+  permittedDNSDomains: string[];
+}
 
 /**
- * Parse the [3] Extensions body for the SubjectAltName DNS name.
- *
- * [3] ::= SEQUENCE OF Extension
- * Extension ::= SEQUENCE { OID, [critical BOOLEAN,] OCTET STRING(GeneralNames) }
- * GeneralNames ::= SEQUENCE OF GeneralName
- * GeneralName ::= CHOICE { dNSName [2] IA5String, ... }
+ * Parse all security-relevant extensions from the [3] Extensions body.
+ * extsBody is the value of the [3] EXPLICIT wrapper (contains SEQUENCE OF Extension).
  */
-function parseSAN(extsBody: Uint8Array): string {
-  // extsBody is the value of the [3] EXPLICIT wrapper; it contains a SEQUENCE of Extensions.
+function _parseExtensions(extsBody: Uint8Array): _ParsedExtensions {
   const extsList = readTLV(extsBody, 0);
   if (extsList.tag !== TAG_SEQUENCE) throw new Error("x509: extensions outer is not a SEQUENCE");
+
+  let sanDNS = "";
+  let isCA = false;
+  let certSignKeyUsage = false;
+  let permittedDNSDomains: string[] = [];
 
   for (const ext of iterSeq(extsList.val)) {
     if (ext.tag !== TAG_SEQUENCE) continue;
     const extChildren = [...iterSeq(ext.val)];
     if (extChildren.length < 2) continue;
     if (extChildren[0].tag !== TAG_OID) continue;
-    if (!bytesEqual(extChildren[0].val, SAN_OID)) continue;
-    // Last element is OCTET STRING containing DER-encoded GeneralNames.
+    const oidBytes = extChildren[0].val;
+    // Last element is OCTET STRING containing the extension value.
     const valChild = extChildren[extChildren.length - 1];
     if (valChild.tag !== TAG_OCTET_STR) continue;
-    const gnames = readTLV(valChild.val, 0);
-    if (gnames.tag !== TAG_SEQUENCE) continue;
-    for (const gn of iterSeq(gnames.val)) {
-      if (gn.tag === TAG_CONTEXT_2) { // [2] dNSName
-        return new TextDecoder("ascii").decode(gn.val);
+    const octVal = valChild.val;
+
+    if (bytesEqual(oidBytes, SAN_OID)) {
+      const gnames = readTLV(octVal, 0);
+      if (gnames.tag !== TAG_SEQUENCE) continue;
+      for (const gn of iterSeq(gnames.val)) {
+        if (gn.tag === TAG_CONTEXT_2 && sanDNS === "") {
+          sanDNS = new TextDecoder("ascii").decode(gn.val);
+        }
+      }
+    } else if (bytesEqual(oidBytes, BASIC_CONSTRAINTS_OID)) {
+      isCA = _parseIsCA(octVal);
+    } else if (bytesEqual(oidBytes, KEY_USAGE_OID)) {
+      certSignKeyUsage = _parseCertSignKeyUsage(octVal);
+    } else if (bytesEqual(oidBytes, NAME_CONSTRAINTS_OID)) {
+      permittedDNSDomains = _parsePermittedDNSDomains(octVal);
+    }
+  }
+
+  return { sanDNS, isCA, certSignKeyUsage, permittedDNSDomains };
+}
+
+/** Parse BasicConstraints OCTET STRING value; returns true iff cA=TRUE. */
+function _parseIsCA(octVal: Uint8Array): boolean {
+  // BasicConstraints ::= SEQUENCE { cA BOOLEAN OPTIONAL, pathLenConstraint INTEGER OPTIONAL }
+  const seq = readTLV(octVal, 0);
+  if (seq.tag !== TAG_SEQUENCE) return false;
+  for (const item of iterSeq(seq.val)) {
+    if (item.tag === TAG_BOOLEAN && item.val.length > 0) return item.val[0] !== 0;
+  }
+  return false; // cA absent → default FALSE
+}
+
+/**
+ * Parse KeyUsage BIT STRING value; returns true iff keyCertSign (bit 5) is set.
+ * RFC 5280: keyCertSign = bit 5 from the MSB → 0x04 in the first content byte.
+ */
+function _parseCertSignKeyUsage(octVal: Uint8Array): boolean {
+  const bs = readTLV(octVal, 0);
+  if (bs.tag !== TAG_BIT_STR || bs.val.length < 2) return false;
+  // bs.val[0] = unused-bit count; bs.val[1] = first content byte.
+  return (bs.val[1] & 0x04) !== 0;
+}
+
+/**
+ * Parse NameConstraints OCTET STRING value; returns the permitted DNS subtrees.
+ * RFC 5280: permittedSubtrees [0] IMPLICIT GeneralSubtrees; dNSName [2] IA5String.
+ */
+function _parsePermittedDNSDomains(octVal: Uint8Array): string[] {
+  // NameConstraints ::= SEQUENCE { [0] permittedSubtrees, [1] excludedSubtrees }
+  const nc = readTLV(octVal, 0);
+  if (nc.tag !== TAG_SEQUENCE) return [];
+  const permitted: string[] = [];
+  for (const item of iterSeq(nc.val)) {
+    if (item.tag !== 0xa0) continue; // [0] IMPLICIT on SEQUENCE OF GeneralSubtree
+    // item.val is the content of the GeneralSubtrees (no outer SEQUENCE TLV, IMPLICIT tag)
+    for (const subtree of iterSeq(item.val)) {
+      if (subtree.tag !== TAG_SEQUENCE) continue;
+      if (subtree.val.length === 0) continue;
+      const base = readTLV(subtree.val, 0);
+      if (base.tag === TAG_CONTEXT_2) { // [2] dNSName
+        permitted.push(new TextDecoder("ascii").decode(base.val));
       }
     }
   }
-  return "";
+  return permitted;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -260,27 +400,76 @@ async function verifyCertSig(cert: ParsedCert, issuerSPKI: Uint8Array): Promise<
  *
  * chain is the CP-relayed cert chain (leaf + optional intermediates, PEM-concatenated).
  * rootPEM is the client-pinned Root CA PEM (embedded in the web bundle).
+ * now is the reference time for validity checks (injectable for testing).
+ *
+ * Enforced on top of signature verification (mirrors crypto/x509 behaviour):
+ *   (a) nameConstraints — issuer's permittedDNSDomains must cover the signed cert's SAN
+ *   (b) basicConstraints CA:TRUE + keyUsage keyCertSign on every issuing cert
+ *   (c) notBefore/notAfter validity window on every cert in the chain
  *
  * Returns the verified leaf ParsedCert on success, or throws on any failure.
  */
-export async function verifyCertChain(chain: string, rootPEM: string): Promise<ParsedCert> {
+export async function verifyCertChain(chain: string, rootPEM: string, now: Date): Promise<ParsedCert> {
   const chainDERs = pemToDerList(chain);
   const rootDERs  = pemToDerList(rootPEM);
   if (rootDERs.length === 0) throw new Error("x509: empty pinned root PEM");
   if (chainDERs.length === 0) throw new Error("x509: empty cert chain PEM");
 
-  const root    = parseCertDER(rootDERs[0]);
-  const parsed  = chainDERs.map(parseCertDER);
+  const root   = parseCertDER(rootDERs[0]);
+  const parsed = chainDERs.map(parseCertDER);
 
-  // Verify each cert is signed by the next in line; last cert is verified by root.
-  for (let i = 0; i < parsed.length; i++) {
-    const issuerSPKI = i + 1 < parsed.length ? parsed[i + 1].spkiBytes : root.spkiBytes;
-    await verifyCertSig(parsed[i], issuerSPKI);
-  }
-  // Verify root is self-signed.
+  // Verify root is self-signed, is a CA, has certSign usage, and is within validity.
   await verifyCertSig(root, root.spkiBytes);
+  if (!root.isCA) throw new Error("x509: pinned root cert lacks basicConstraints CA:TRUE");
+  if (!root.certSignKeyUsage) throw new Error("x509: pinned root cert lacks keyCertSign key usage");
+  _checkValidity(root, now, "root");
+
+  // Verify each cert in the chain.
+  for (let i = 0; i < parsed.length; i++) {
+    const issuerCert = i + 1 < parsed.length ? parsed[i + 1] : root;
+
+    // (b) Intermediate issuers (not the pre-checked root) must have CA:TRUE + certSign.
+    if (i + 1 < parsed.length) {
+      if (!issuerCert.isCA) {
+        throw new Error(`x509: chain[${i + 1}] lacks basicConstraints CA:TRUE`);
+      }
+      if (!issuerCert.certSignKeyUsage) {
+        throw new Error(`x509: chain[${i + 1}] lacks keyCertSign key usage`);
+      }
+    }
+
+    // Signature check.
+    await verifyCertSig(parsed[i], issuerCert.spkiBytes);
+
+    // (c) Validity window.
+    _checkValidity(parsed[i], now, `chain[${i}]`);
+
+    // (a) Name constraints: issuer's permittedDNSDomains must cover the signed cert's SAN.
+    if (issuerCert.permittedDNSDomains.length > 0 && parsed[i].sanDNS) {
+      if (!_dnsInPermitted(parsed[i].sanDNS, issuerCert.permittedDNSDomains)) {
+        throw new Error(
+          `x509: cert SAN ${JSON.stringify(parsed[i].sanDNS)} violates issuer name constraints ` +
+          `[${issuerCert.permittedDNSDomains.join(", ")}]`,
+        );
+      }
+    }
+  }
 
   return parsed[0]; // leaf
+}
+
+function _checkValidity(cert: ParsedCert, now: Date, label: string): void {
+  if (now < cert.notBefore) {
+    throw new Error(`x509: ${label} cert not yet valid (notBefore=${cert.notBefore.toISOString()})`);
+  }
+  if (now >= cert.notAfter) {
+    throw new Error(`x509: ${label} cert has expired (notAfter=${cert.notAfter.toISOString()})`);
+  }
+}
+
+/** Returns true if san equals or is a subdomain of any entry in the permitted list. */
+function _dnsInPermitted(san: string, permitted: string[]): boolean {
+  return permitted.some((domain) => san === domain || san.endsWith("." + domain));
 }
 
 /**

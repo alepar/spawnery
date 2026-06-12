@@ -48,5 +48,30 @@ func (s *Server) ListMigrationTargets(ctx context.Context, req *connect.Request[
 			JournalSizeBytes: 0,
 		})
 	}
-	return connect.NewResponse(&cpv1.ListMigrationTargetsResponse{Targets: targets}), nil
+
+	// Compute the spawn's authoritative durability class. If classification fails (e.g.,
+	// no manifest), default to "ephemeral" so the UI is conservative.
+	spawnDurabilityClass := "ephemeral"
+	if classes, classErr := s.classifyMounts(ctx, req.Msg.SpawnId); classErr == nil {
+		hasNodeLocal := false
+		hasOwnerSealed := false
+		for _, mc := range classes {
+			switch mc {
+			case mountClassNodeLocal:
+				hasNodeLocal = true
+			case mountClassOwnerSealed:
+				hasOwnerSealed = true
+			}
+		}
+		if hasNodeLocal {
+			spawnDurabilityClass = "node-local"
+		} else if hasOwnerSealed {
+			spawnDurabilityClass = "owner-sealed"
+		}
+	}
+
+	return connect.NewResponse(&cpv1.ListMigrationTargetsResponse{
+		Targets:              targets,
+		SpawnDurabilityClass: spawnDurabilityClass,
+	}), nil
 }

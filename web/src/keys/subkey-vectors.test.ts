@@ -30,17 +30,20 @@ const VECTORS_FILE = path.resolve(
 );
 
 interface SubKeyVector {
-  root_pem:           string;
-  leaf_pem:           string;
-  intermediate_pem:   string;
-  chain_pem:          string;
-  subkey_json:        string;
-  expected_hpke_pub:  string;
-  expected_node_id:   string;
-  expected_account_id: string;
-  expected_class:     string;
-  not_before:         string;
-  not_after:          string;
+  root_pem:              string;
+  leaf_pem:              string;
+  intermediate_pem:      string;
+  chain_pem:             string;
+  subkey_json:           string;
+  expected_hpke_pub:     string;
+  expected_node_id:      string;
+  expected_account_id:   string;
+  expected_class:        string;
+  not_before:            string;
+  not_after:             string;
+  leaf_not_after:        string;  // leaf cert expiry — for cert-validity negative tests
+  forged_cloud_chain_pem: string; // cloud-SAN leaf signed by SH intermediate
+  non_ca_leaf_chain_pem:  string; // leaf cert used as CA to sign another leaf
 }
 
 function loadVectors(): SubKeyVector | null {
@@ -65,13 +68,16 @@ describe("subkey Go-TS cross-language vectors", () => {
     return;
   }
 
+  // verifyAt is 1 hour into the sub-key's validity window, within the cert validity too.
+  const verifyAt = new Date(new Date(v.not_before).getTime() + 60 * 60 * 1000);
+
   it("verifyCertChain accepts the node leaf against the pinned root", async () => {
-    const leaf = await verifyCertChain(v.chain_pem, v.root_pem);
+    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt);
     expect(leaf.sanDNS).toContain("nodes.spawnery.internal");
   });
 
   it("parseSANIdentity extracts correct identity from SAN", async () => {
-    const leaf = await verifyCertChain(v.chain_pem, v.root_pem);
+    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt);
     const id = parseSANIdentity(leaf.sanDNS);
     expect(id.nodeId).toBe(v.expected_node_id);
     expect(id.accountId).toBe(v.expected_account_id);
@@ -79,28 +85,23 @@ describe("subkey Go-TS cross-language vectors", () => {
   });
 
   it("verifySignedSubKey accepts valid sub-key", async () => {
-    const leaf = await verifyCertChain(v.chain_pem, v.root_pem);
+    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt);
     const certPub = await importCertPubKey(leaf);
     const sk: SignedSubKey = JSON.parse(v.subkey_json);
-    // Use a time 1 hour into the validity window.
-    const notBefore = new Date(v.not_before);
-    const verifyAt = new Date(notBefore.getTime() + 60 * 60 * 1000);
     await expect(verifySignedSubKey(sk, certPub, verifyAt)).resolves.toBeUndefined();
   });
 
   it("verifySignedSubKey rejects an expired sub-key", async () => {
-    const leaf = await verifyCertChain(v.chain_pem, v.root_pem);
+    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt);
     const certPub = await importCertPubKey(leaf);
     const sk: SignedSubKey = JSON.parse(v.subkey_json);
     const notAfter = new Date(v.not_after);
-    const expired = new Date(notAfter.getTime() + 1000); // 1s past expiry
+    const expired = new Date(notAfter.getTime() + 1000); // 1s past sub-key expiry
     await expect(verifySignedSubKey(sk, certPub, expired)).rejects.toThrow("expired");
   });
 
   it("verifyNodeForSealing returns expected HPKE pubkey + identity", async () => {
     const sk: SignedSubKey = JSON.parse(v.subkey_json);
-    const notBefore = new Date(v.not_before);
-    const verifyAt = new Date(notBefore.getTime() + 60 * 60 * 1000);
     const result = await verifyNodeForSealing(
       v.chain_pem,
       v.root_pem,
@@ -119,8 +120,6 @@ describe("subkey Go-TS cross-language vectors", () => {
   });
 
   it("verifyNodeForSealing rejects wrong tenancy expectation", async () => {
-    const notBefore = new Date(v.not_before);
-    const verifyAt = new Date(notBefore.getTime() + 60 * 60 * 1000);
     await expect(
       verifyNodeForSealing(v.chain_pem, v.root_pem, v.subkey_json, { tenancy: "cloud" }, verifyAt),
     ).rejects.toThrow("tenancy");
@@ -128,8 +127,6 @@ describe("subkey Go-TS cross-language vectors", () => {
 
   // WM8: revoked-node-refusal — delivery to a node with a revoked cert must fail closed.
   it("verifyNodeForSealing rejects a revoked node (WM8)", async () => {
-    const notBefore = new Date(v.not_before);
-    const verifyAt = new Date(notBefore.getTime() + 60 * 60 * 1000);
     const revokedChecker: RevocationChecker = {
       async check(_nodeId: string): Promise<void> {
         throw new Error("node is on the AS revocation deny-list");
@@ -149,8 +146,6 @@ describe("subkey Go-TS cross-language vectors", () => {
 
   // WM8: revocation checker that errors (e.g., network failure) must also fail closed.
   it("verifyNodeForSealing fails closed when revocation check errors (WM8)", async () => {
-    const notBefore = new Date(v.not_before);
-    const verifyAt = new Date(notBefore.getTime() + 60 * 60 * 1000);
     const errorChecker: RevocationChecker = {
       async check(_nodeId: string): Promise<void> {
         throw new Error("revocation list unavailable (network error)");
@@ -166,5 +161,29 @@ describe("subkey Go-TS cross-language vectors", () => {
         errorChecker,
       ),
     ).rejects.toThrow("network error");
+  });
+
+  // SECURITY: name constraints — a cloud-SAN leaf signed by a self-hosted intermediate
+  // must be rejected even though the signature chain is cryptographically valid.
+  it("verifyCertChain rejects forged-cloud cert (name constraints, security)", async () => {
+    await expect(
+      verifyCertChain(v.forged_cloud_chain_pem, v.root_pem, verifyAt),
+    ).rejects.toThrow("name constraints");
+  });
+
+  // SECURITY: non-CA intermediate — a chain where the intermediate lacks CA:TRUE must be rejected.
+  it("verifyCertChain rejects chain with non-CA intermediate (basicConstraints, security)", async () => {
+    await expect(
+      verifyCertChain(v.non_ca_leaf_chain_pem, v.root_pem, verifyAt),
+    ).rejects.toThrow("CA:TRUE");
+  });
+
+  // SECURITY: validity — a cert that has expired (notAfter in the past) must be rejected.
+  it("verifyCertChain rejects an expired leaf cert (validity, security)", async () => {
+    const leafNotAfter = new Date(v.leaf_not_after);
+    const pastExpiry = new Date(leafNotAfter.getTime() + 1000); // 1s past leaf notAfter
+    await expect(
+      verifyCertChain(v.chain_pem, v.root_pem, pastExpiry),
+    ).rejects.toThrow("expired");
   });
 });

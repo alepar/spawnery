@@ -134,13 +134,13 @@ export function useMoveTo(): { state: MoveToState } & MoveToActions {
   const open = useCallback(async (spawnId: string) => {
     setState({ ...IDLE, phase: "loading", spawnId });
     try {
-      const [targets, entries] = await Promise.all([
+      const [targetsData, entries] = await Promise.all([
         listMigrationTargets(spawnId),
         getJournalKeyCiphertext(spawnId),
       ]);
-      const durability = classifyDurability(entries, targets);
+      const durability = classifyDurability(entries, targetsData.targets, targetsData.spawnDurabilityClass);
       // Exclude the current node (can't migrate to where you already are).
-      const selectable = targets.filter((t) => !t.isCurrent);
+      const selectable = targetsData.targets.filter((t) => !t.isCurrent);
       setState((s) => ({
         ...s,
         phase: "selecting",
@@ -338,7 +338,7 @@ export function useMoveTo(): { state: MoveToState } & MoveToActions {
     // so we redirect the user to target selection to pick again (safe: migration already done).
     setState((s) => ({ ...s, phase: "loading", errorMsg: null }));
     try {
-      const [targets, entries] = await Promise.all([
+      const [targetsData, entries] = await Promise.all([
         listMigrationTargets(spawnId),
         getJournalKeyCiphertext(spawnId),
       ]);
@@ -351,8 +351,8 @@ export function useMoveTo(): { state: MoveToState } & MoveToActions {
         }));
         return;
       }
-      const durability = classifyDurability(entries, targets);
-      const selectable = targets.filter((t) => !t.isCurrent);
+      const durability = classifyDurability(entries, targetsData.targets, targetsData.spawnDurabilityClass);
+      const selectable = targetsData.targets.filter((t) => !t.isCurrent);
       setState((s) => ({
         ...s,
         phase: "selecting",

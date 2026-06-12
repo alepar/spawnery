@@ -103,7 +103,7 @@ describe("useMoveTo state machine", () => {
   });
 
   it("happy path: idle → selecting → confirming → done (ephemeral)", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A, TARGET_CURRENT]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A, TARGET_CURRENT], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("ephemeral");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
@@ -131,7 +131,7 @@ describe("useMoveTo state machine", () => {
   });
 
   it("happy path: owner-sealed with journal key delivery", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "owner-sealed" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([ENTRY]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("owner-sealed");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
@@ -150,7 +150,7 @@ describe("useMoveTo state machine", () => {
   });
 
   it("cancel resets to idle", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("ephemeral");
 
@@ -166,7 +166,7 @@ describe("useMoveTo state machine", () => {
 
 describe("useMoveTo per-leg error states (WM3)", () => {
   it("suspend-leg failure → error-suspend phase", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("ephemeral");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
@@ -184,7 +184,7 @@ describe("useMoveTo per-leg error states (WM3)", () => {
   });
 
   it("resume-leg failure → error-resume phase", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("ephemeral");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
@@ -202,7 +202,7 @@ describe("useMoveTo per-leg error states (WM3)", () => {
   });
 
   it("delivery-leg failure → delivery-pending phase (WM3 / WM8 revocation path)", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([ENTRY]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("owner-sealed");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
@@ -221,7 +221,7 @@ describe("useMoveTo per-leg error states (WM3)", () => {
   });
 
   it("network error → reconnecting phase", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("ephemeral");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
@@ -250,7 +250,7 @@ describe("useMoveTo per-leg error states (WM3)", () => {
 
 describe("useMoveTo enrollment check preflight", () => {
   it("owner-sealed + unenrolled browser → needs-enroll (spawn untouched)", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([ENTRY]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("owner-sealed");
     // Simulate unenrolled browser.
@@ -267,7 +267,7 @@ describe("useMoveTo enrollment check preflight", () => {
   });
 
   it("node-local + unenrolled browser → needs-enroll before upgrade", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("node-local");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(null);
@@ -286,7 +286,7 @@ describe("useMoveTo enrollment check preflight", () => {
 describe("useMoveTo node-local upgrade pivot (WM16)", () => {
   it("node-local → upgrading → done after upgrade + migrate", async () => {
     stubExportKey();
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("node-local");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
@@ -311,7 +311,7 @@ describe("useMoveTo node-local upgrade pivot (WM16)", () => {
 
   it("node-local upgrade failure → reconnecting phase", async () => {
     stubExportKey();
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("node-local");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
@@ -330,7 +330,7 @@ describe("useMoveTo node-local upgrade pivot (WM16)", () => {
 
 describe("useMoveTo minimize / restore (WM14)", () => {
   it("minimize sets minimized=true; restore sets minimized=false from selecting phase", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("ephemeral");
 
@@ -347,7 +347,7 @@ describe("useMoveTo minimize / restore (WM14)", () => {
   });
 
   it("minimize survives a done phase", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("ephemeral");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
@@ -379,7 +379,7 @@ describe("useMoveTo delivery-pending reconstruction (spec §3)", () => {
   });
 
   it("retryDelivery in delivery-pending → loading → selecting (entries still present)", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([ENTRY]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("owner-sealed");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
@@ -393,7 +393,7 @@ describe("useMoveTo delivery-pending reconstruction (spec §3)", () => {
   });
 
   it("retryDelivery when CP reports no entries → done (delivered on another device)", async () => {
-    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue([TARGET_A]);
+    vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
 

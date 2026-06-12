@@ -46,6 +46,15 @@ type subKeyVector struct {
 	// Validity window for the sub-key (ISO 8601, UTC).
 	NotBefore string `json:"not_before"`
 	NotAfter  string `json:"not_after"`
+	// Leaf cert notAfter (for cert-validity negative tests).
+	LeafNotAfter string `json:"leaf_not_after"`
+	// Negative test vectors for the TS x509 verifier.
+	// ForgedCloudChainPEM: a cloud-SAN leaf signed by the self-hosted intermediate —
+	// signatures are valid but name constraints are violated (Go rejects it; TS must too).
+	ForgedCloudChainPEM string `json:"forged_cloud_chain_pem"`
+	// NonCALeafChainPEM: a new leaf cert "signed" by the original leaf cert used as a CA —
+	// the chain cert lacks basicConstraints CA:TRUE (both Go and TS must reject it).
+	NonCALeafChainPEM string `json:"non_ca_leaf_chain_pem"`
 }
 
 const vectorsFile = "testdata/subkey/verify_node.json"
@@ -92,18 +101,38 @@ func generateSubKeyVectors(t *testing.T) {
 	rootPEM  := pki.MarshalCertPEM(r.Cert)
 	chainPEM := string(leafPEM) + string(interPEM)
 
+	// Forged-cloud negative vector: SH intermediate signs a cloud-class leaf.
+	// The signature chain is cryptographically valid but violates name constraints.
+	forgedCloudNode, err := inter.IssueNode("forge", "acc", pki.ClassCloud, vectorTime.Add(365*24*time.Hour))
+	if err != nil {
+		t.Fatalf("IssueNode (forged cloud): %v", err)
+	}
+	forgedCloudChainPEM := string(pki.MarshalCertPEM(forgedCloudNode.Cert)) + string(interPEM)
+
+	// Non-CA-intermediate negative vector: use the leaf cert's key to sign another leaf.
+	// The resulting chain has a non-CA cert at position [1]; both Go and TS must reject it.
+	fakeCA := &pki.CA{Cert: n.Cert, Key: n.Key}
+	nonCANode, err := fakeCA.IssueNode("n2", "alice", pki.ClassSelfHosted, vectorTime.Add(365*24*time.Hour))
+	if err != nil {
+		t.Fatalf("IssueNode (non-CA chain): %v", err)
+	}
+	nonCALeafChainPEM := string(pki.MarshalCertPEM(nonCANode.Cert)) + string(leafPEM)
+
 	v := subKeyVector{
-		RootPEM:           string(rootPEM),
-		LeafPEM:           string(leafPEM),
-		IntermediatePEM:   string(interPEM),
-		ChainPEM:          chainPEM,
-		SubKeyJSON:        string(skJSON),
-		ExpectedHPKEPub:   base64.StdEncoding.EncodeToString(sk.HPKEPub),
-		ExpectedNodeID:    "node1",
-		ExpectedAccountID: "alice",
-		ExpectedClass:     pki.ClassSelfHosted,
-		NotBefore:         sk.NotBefore.UTC().Format(time.RFC3339Nano),
-		NotAfter:          sk.NotAfter.UTC().Format(time.RFC3339Nano),
+		RootPEM:             string(rootPEM),
+		LeafPEM:             string(leafPEM),
+		IntermediatePEM:     string(interPEM),
+		ChainPEM:            chainPEM,
+		SubKeyJSON:          string(skJSON),
+		ExpectedHPKEPub:     base64.StdEncoding.EncodeToString(sk.HPKEPub),
+		ExpectedNodeID:      "node1",
+		ExpectedAccountID:   "alice",
+		ExpectedClass:       pki.ClassSelfHosted,
+		NotBefore:           sk.NotBefore.UTC().Format(time.RFC3339Nano),
+		NotAfter:            sk.NotAfter.UTC().Format(time.RFC3339Nano),
+		LeafNotAfter:        n.Cert.NotAfter.UTC().Format(time.RFC3339),
+		ForgedCloudChainPEM: forgedCloudChainPEM,
+		NonCALeafChainPEM:   nonCALeafChainPEM,
 	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

@@ -199,7 +199,8 @@ export async function verifyNodeForSealing(
   }
 
   // 1. Verify cert chain against pinned root + extract identity from SAN.
-  const leaf = await verifyCertChain(certChainPEM, rootPEM);
+  // now is passed through so the cert validity window is checked with the same clock as the sub-key.
+  const leaf = await verifyCertChain(certChainPEM, rootPEM, now);
   const identity = parseSANIdentity(leaf.sanDNS);
 
   // Tenancy check.

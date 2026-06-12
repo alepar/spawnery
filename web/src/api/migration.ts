@@ -98,15 +98,23 @@ export interface MigrateResult {
 
 // ── RPC wrappers ──────────────────────────────────────────────────────────────
 
+/** Result of listMigrationTargets: target list + CP-computed spawn durability class. */
+export interface MigrationTargetsData {
+  targets:              MigrationTarget[];
+  /** CP-resolved durability class: "ephemeral" | "node-local" | "owner-sealed" */
+  spawnDurabilityClass: string;
+}
+
 /** listMigrationTargets enumerates candidate nodes for a spawn migration. */
-export async function listMigrationTargets(spawnId: string): Promise<MigrationTarget[]> {
+export async function listMigrationTargets(spawnId: string): Promise<MigrationTargetsData> {
   const r = await unary<{
     targets?: Array<{
       nodeId?: string; class?: string; yours?: boolean; online?: boolean;
       isCurrent?: boolean; journalSizeBytes?: string;
-    }>
+    }>;
+    spawnDurabilityClass?: string;
   }>("ListMigrationTargets", { spawnId });
-  return (r.targets ?? []).map((t) => ({
+  const targets = (r.targets ?? []).map((t) => ({
     nodeId:           t.nodeId          ?? "",
     class:            t.class           ?? "",
     yours:            !!t.yours,
@@ -115,6 +123,7 @@ export async function listMigrationTargets(spawnId: string): Promise<MigrationTa
     // uint64 arrives as decimal string in Connect-JSON; treat as number (safe for reasonable sizes).
     journalSizeBytes: t.journalSizeBytes ? Number(t.journalSizeBytes) : 0,
   }));
+  return { targets, spawnDurabilityClass: r.spawnDurabilityClass ?? "" };
 }
 
 /** getJournalKeyCiphertext fetches the owner-sealed journal-password ciphertext for a spawn. */
@@ -196,20 +205,27 @@ async function migrateSpawnRPC(
 // ── Durability classification ─────────────────────────────────────────────────
 
 /**
- * classifyDurability classifies a spawn's storage durability based on the
- * journal key ciphertext entries and the current migration targets.
+ * classifyDurability classifies a spawn's storage durability.
  *
- * - "ephemeral":     no journal entries AND current node has no journal
- * - "owner-sealed":  journal ciphertext entries exist → can deliver key on migrate
- * - "node-local":    current node has a journal but no owner-sealed ciphertext
- *                    → must UpgradeToOwnerSealed before migrating
+ * - "owner-sealed":  journal ciphertext entries exist → full migration with key delivery
+ * - "node-local":    CP reports node-local journal (no owner-sealed ciphertext yet)
+ *                    → must UpgradeToOwnerSealed before migrating (WM16)
+ * - "ephemeral":     no journal
+ *
+ * spawnDurabilityClass is the authoritative CP-reported class (from ListMigrationTargets).
+ * It takes precedence over journalSizeBytes (which the CP hardcodes to 0, sp-e642).
+ * journalEntries is checked first: if entries exist, the spawn is definitively owner-sealed.
  */
 export function classifyDurability(
   journalEntries: JournalEntry[],
   targets: MigrationTarget[],
+  spawnDurabilityClass: string,
 ): DurabilityClass {
   if (journalEntries.length > 0) return "owner-sealed";
-  // No ciphertext. Check whether the current node reports a journal.
+  // Use the CP-authoritative class when available.
+  if (spawnDurabilityClass === "node-local") return "node-local";
+  if (spawnDurabilityClass === "owner-sealed") return "owner-sealed";
+  // Fall back to journalSizeBytes heuristic (sp-e642: currently always 0 from CP).
   const current = targets.find((t) => t.isCurrent);
   if (current && current.journalSizeBytes > 0) return "node-local";
   return "ephemeral";
@@ -392,13 +408,17 @@ export async function runMigrate(
   // verifyNodeForSealing returns the trusted HPKE pubkey, or throws on PKI failure
   // (including AS revocation check — fail-closed on any checker error, WM8).
   const tenancy = (target.class === "cloud" ? "cloud" : "self-hosted") as "cloud" | "self-hosted";
+  // For self-hosted targets, accountId is required: the owner's account must match the node's SAN.
+  const accountId = tenancy === "self-hosted"
+    ? (useSessionStore.getState().account?.accountId ?? "")
+    : undefined;
   let hpkePub: Uint8Array;
   try {
     const verified = await verifyNodeForSealing(
       nk.nodeCertChain,
       rootPEM,
       nk.signedSubkey,
-      { tenancy },
+      { tenancy, accountId },
       now,
       revocationChecker,
     );
