@@ -7,8 +7,11 @@
 # "ECHO: <prompt>" with no model/sidecar/keys, so the live e2e runs with no credentials.
 FROM golang:1.26 AS build
 WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /stubagent ./cmd/stubagent \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -o /stubagent ./cmd/stubagent \
  && CGO_ENABLED=0 go build -o /acpmux ./deploy/agent/acpmux
 
 FROM debian:bookworm-slim

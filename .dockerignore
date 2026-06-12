@@ -1,0 +1,17 @@
+# Keep the image build context to what the Dockerfiles actually need: Go sources
+# (cmd/ internal/ gen/ deploy/), go.mod/go.sum, and deploy/ assets. Everything heavy
+# or irrelevant stays out — context transfer was the slowest part of every build.
+.git
+web
+docs
+bin
+.make
+.beads
+.spawns
+.dev-ca
+.superpowers
+.worktrees
+telemetry
+node_modules
+*.test
+.env

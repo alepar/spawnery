@@ -23,11 +23,14 @@ RUN curl -fsSL \
 
 FROM golang:1.26 AS gobuild
 WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /acpadapter ./deploy/agent/acpadapter
-RUN CGO_ENABLED=0 go build -o /acpexec ./deploy/agent/acpexec
-RUN CGO_ENABLED=0 go build -o /acpmux ./deploy/agent/acpmux
-RUN CGO_ENABLED=0 go build -o /acpdial ./deploy/agent/acpdial
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -o /acpadapter ./deploy/agent/acpadapter \
+ && CGO_ENABLED=0 go build -o /acpexec ./deploy/agent/acpexec \
+ && CGO_ENABLED=0 go build -o /acpmux ./deploy/agent/acpmux \
+ && CGO_ENABLED=0 go build -o /acpdial ./deploy/agent/acpdial
 
 FROM debian:stable
 # UTF-8 locale so tmux + claude render box/line-drawing glyphs (─│●) instead of ACS q/x or the
@@ -40,15 +43,6 @@ RUN apt-get update \
       git openssh-client ripgrep fd-find unzip xz-utils build-essential cmake just \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=fetch /usr/local/bin/opencode /usr/local/bin/opencode
-COPY --from=gobuild /acpadapter /usr/local/bin/acpadapter
-COPY --from=gobuild /acpexec /usr/local/bin/acpexec
-COPY --from=gobuild /acpmux /usr/local/bin/acpmux
-COPY --from=gobuild /acpdial /usr/local/bin/acpdial
-COPY deploy/agent/entrypoint.sh /entrypoint.sh
-COPY deploy/agent/launch /usr/local/bin/launcher
-COPY deploy/agent/spawn-tui.sh /usr/local/bin/spawn-tui
-COPY deploy/agent/tmux.conf /etc/tmux.conf
-RUN chmod +x /entrypoint.sh /usr/local/bin/launcher /usr/local/bin/spawn-tui
 
 # goose CLI (Block) — TUI/ACP agent
 RUN set -eux; \
@@ -67,12 +61,6 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends claude-code; \
     rm -rf /var/lib/apt/lists/*; \
     claude --version
-# Supply the dummy Anthropic key via an apiKeyHelper instead of ANTHROPIC_API_KEY, so Claude Code
-# does NOT print "Detected a custom API key in your environment" at startup. The sidecar injects the
-# real OpenRouter key on the wire regardless (sp-9xr.18).
-RUN mkdir -p /root/.claude
-COPY deploy/agent/claude-settings.json /root/.claude/settings.json
-
 # codex CLI (OpenAI) — Rust TUI/headless agent (codex-tui launcher case)
 ARG CODEX_VERSION=rust-v0.137.0
 RUN set -eux; \
@@ -92,10 +80,6 @@ RUN set -eux; \
     install -m 0755 /tmp/nori/nori /usr/local/bin/nori; \
     rm -rf /tmp/nori.tar.gz /tmp/nori; \
     nori --version
-# Bake nori's config so `nori -a spawnery` (the acp-mode terminal attach) launches
-# the acpdial shim -> acpmux on 127.0.0.1:7000 = the shared goose session (sp-9xr.12.2).
-RUN mkdir -p /root/.nori/cli
-COPY deploy/agent/nori-config.toml /root/.nori/cli/config.toml
 # Pre-run the one-time SQLite migration + models.json fetch at build time (network available here),
 # so a fresh container is ready in seconds instead of doing a multi-minute first-run migration.
 RUN sh -c 'opencode serve --port 4096 --hostname 127.0.0.1 >/tmp/m.log 2>&1 & P=$!; \
@@ -106,6 +90,28 @@ RUN sh -c 'opencode serve --port 4096 --hostname 127.0.0.1 >/tmp/m.log 2>&1 & P=
 # (claude-tui/opencode-tui/goose-tui) must be able to create /tmp/tmux-<uid>. Restore the standard
 # world-writable sticky /tmp so every tmux-wrapped runnable can start.
 RUN chmod 1777 /tmp
+
+# --- volatile layers LAST: our Go binaries + config files change on every code edit, so they sit
+# below all the network-heavy installs above — a Go change re-runs only these cheap COPYs.
+COPY --from=gobuild /acpadapter /usr/local/bin/acpadapter
+COPY --from=gobuild /acpexec /usr/local/bin/acpexec
+COPY --from=gobuild /acpmux /usr/local/bin/acpmux
+COPY --from=gobuild /acpdial /usr/local/bin/acpdial
+COPY deploy/agent/entrypoint.sh /entrypoint.sh
+COPY deploy/agent/launch /usr/local/bin/launcher
+COPY deploy/agent/spawn-tui.sh /usr/local/bin/spawn-tui
+COPY deploy/agent/tmux.conf /etc/tmux.conf
+# Dummy Anthropic key via apiKeyHelper instead of ANTHROPIC_API_KEY, so Claude Code does NOT print
+# "Detected a custom API key in your environment" at startup; the sidecar injects the real
+# OpenRouter key on the wire regardless (sp-9xr.18).
+RUN mkdir -p /root/.claude
+COPY deploy/agent/claude-settings.json /root/.claude/settings.json
+# Bake nori's config so `nori -a spawnery` (the acp-mode terminal attach) launches the acpdial
+# shim -> acpmux on 127.0.0.1:7000 = the shared session (sp-9xr.12.2).
+RUN mkdir -p /root/.nori/cli
+COPY deploy/agent/nori-config.toml /root/.nori/cli/config.toml
+RUN chmod +x /entrypoint.sh /usr/local/bin/launcher /usr/local/bin/spawn-tui
+
 WORKDIR /app
 # tini reaps the opencode serve child; entrypoint launches serve + adapter.
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
