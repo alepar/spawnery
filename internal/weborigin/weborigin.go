@@ -9,6 +9,7 @@
 package weborigin
 
 import (
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,8 +23,8 @@ type Allowlist struct {
 }
 
 // FromEnv parses a comma-separated list of exact origins (e.g.
-// "https://app.spawnery.dev"). An empty value means DEV MODE: any localhost /
-// 127.0.0.1 / [::1] origin is allowed. A non-empty list is exact, case-insensitive
+// "https://app.spawnery.dev"). An empty value means DEV MODE: loopback and
+// private-network (LAN) origins are allowed. A non-empty list is exact, case-insensitive
 // full-origin match ONLY — localhost is never implicit in production ([WL5]).
 func FromEnv(val string) Allowlist {
 	val = strings.TrimSpace(val)
@@ -52,13 +53,17 @@ func (a Allowlist) Allowed(origin string) bool {
 	}
 	origin = strings.ToLower(strings.TrimSuffix(origin, "/"))
 	if a.dev {
-		return isLoopbackOrigin(origin)
+		return isDevOrigin(origin)
 	}
 	return a.origins[origin]
 }
 
-// isLoopbackOrigin matches http(s)://localhost[:port], 127.0.0.1, and [::1] origins.
-func isLoopbackOrigin(origin string) bool {
+// isDevOrigin matches the origins a dev stack is legitimately browsed from: loopback
+// (localhost / 127.0.0.1 / [::1]) and private-network hosts (RFC 1918 IPv4, IPv6 ULA,
+// link-local) — `just web` serves LAN-accessible (`--host`), so a phone/laptop on the
+// LAN hits the dev CP with e.g. Origin http://192.168.1.10:5173. Public origins stay
+// denied even in dev.
+func isDevOrigin(origin string) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
@@ -66,9 +71,13 @@ func isLoopbackOrigin(origin string) bool {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return false
 	}
-	switch u.Hostname() {
+	host := u.Hostname()
+	switch host {
 	case "localhost", "127.0.0.1", "::1":
 		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
 	}
 	return false
 }

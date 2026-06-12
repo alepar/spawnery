@@ -213,7 +213,7 @@ func main() {
 	// (localhost-only origins); production sets the exact canonical SPA origin(s).
 	allow := weborigin.FromEnv(env("CP_ALLOWED_ORIGINS", ""))
 	if allow.Dev() {
-		log.Printf("cp: CP_ALLOWED_ORIGINS unset — dev mode, allowing localhost browser origins only")
+		log.Printf("cp: CP_ALLOWED_ORIGINS unset — dev mode, allowing loopback + private-network (LAN) browser origins only")
 	}
 
 	// Start revocation feed poller if configured.

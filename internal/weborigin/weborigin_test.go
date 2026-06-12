@@ -16,6 +16,10 @@ func TestFromEnvDevMode(t *testing.T) {
 		"http://127.0.0.1:1234",
 		"https://localhost",
 		"http://[::1]:8080",
+		// LAN origins: `just web` serves --host, so dev browsing happens from private IPs.
+		"http://192.168.1.10:5173",
+		"http://10.0.0.7:5173",
+		"http://172.16.4.2:5173",
 	} {
 		if !a.Allowed(o) {
 			t.Errorf("dev mode should allow %q", o)
@@ -26,6 +30,8 @@ func TestFromEnvDevMode(t *testing.T) {
 		"http://localhost.evil.example",
 		"ftp://localhost",
 		"null",
+		"http://8.8.8.8:5173",           // public IP — never implicit, even in dev
+		"http://192.168.1.evil.example", // name, not a private IP
 	} {
 		if a.Allowed(o) {
 			t.Errorf("dev mode should deny %q", o)

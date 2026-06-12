@@ -79,7 +79,7 @@ func main() {
 	// browser->AS call. Empty = dev mode (localhost origins only).
 	allow := weborigin.FromEnv(env("AS_ALLOWED_ORIGINS", ""))
 	if allow.Dev() {
-		log.Printf("authsvc: AS_ALLOWED_ORIGINS unset — dev mode, allowing localhost browser origins only")
+		log.Printf("authsvc: AS_ALLOWED_ORIGINS unset — dev mode, allowing loopback + private-network (LAN) browser origins only")
 	}
 
 	addr := env("AS_LISTEN", "127.0.0.1:8090")

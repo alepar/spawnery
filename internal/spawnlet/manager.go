@@ -250,12 +250,19 @@ func (m *Manager) RunningInventory() []runtime.ManagedPod {
 // ReapOrphans tears down every spawnery-managed pod the runtime still has that this Manager is NOT
 // tracking — leftovers from a previous node process (the in-mem store is empty after a restart). Call
 // it at startup so a crashed/restarted node doesn't leak pods.
+//
+// Scoped by the spawnery.node-id label: pods created by a DIFFERENT node id are left alone — two
+// spawnlets sharing one Docker daemon (dev stack + an e2e run, or multi-node-on-one-host) must not
+// reap each other's live pods. Unlabeled pods (pre-label versions) are still reaped.
 func (m *Manager) ReapOrphans(ctx context.Context) error {
 	managed, err := m.pod.ListManaged(ctx)
 	if err != nil {
 		return err
 	}
 	for _, mp := range managed {
+		if mp.NodeID != "" && mp.NodeID != m.cfg.NodeID {
+			continue // another node's pod (shared daemon) — not ours to reap
+		}
 		if _, live := m.store.Get(mp.SpawnID); live {
 			continue // still ours
 		}
