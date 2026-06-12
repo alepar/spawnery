@@ -563,7 +563,7 @@ func keyRecoverCmd() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 			// Surface the M8 trusted-device warning before any mnemonic processing.
-			fmt.Fprintln(c.Writer, m8TrustedDeviceWarning)
+			fmt.Fprint(c.Writer, m8TrustedDeviceWarning)
 			mnemonic := strings.TrimSpace(c.String("mnemonic"))
 			result, err := recoverDevice(dir, mnemonic, c.Bool("force"))
 			if err != nil {
