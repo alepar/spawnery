@@ -101,6 +101,17 @@ export async function signP1363(privateKey: CryptoKey, msg: Uint8Array): Promise
   return new Uint8Array(sig as ArrayBuffer);
 }
 
+/**
+ * loadSessionKey loads the session keypair from the store. Returns null if absent.
+ *
+ * Use this on restore/refresh paths — callers treat null as key-lost and route to
+ * recovery rather than silently minting a fresh keypair. Reserve getOrCreateSessionKey
+ * for the explicit login action in LoginView.
+ */
+export async function loadSessionKey(store: KeyStore): Promise<SessionKeyPair | null> {
+  return store.get();
+}
+
 /** clearSessionKey removes the session keypair from the store (key loss / logout). */
 export async function clearSessionKey(store: KeyStore): Promise<void> {
   await store.delete();

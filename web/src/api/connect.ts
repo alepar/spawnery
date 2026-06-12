@@ -2,7 +2,7 @@
 import { cpHttpUrl } from "@/config/endpoints";
 import { getAccessToken, authEnabled, DEV_TOKEN as SESSION_DEV_TOKEN, useSessionStore } from "@/auth/session";
 import { refreshAccessToken } from "@/auth/refresh";
-import { getOrCreateSessionKey, exportSpkiDer, sessionKeyHash } from "@/auth/keypair";
+import { loadSessionKey, exportSpkiDer, sessionKeyHash } from "@/auth/keypair";
 
 // Re-export DEV_TOKEN for backward-compat (WS consumers, spawnlet.ts re-export).
 export const DEV_TOKEN = SESSION_DEV_TOKEN;
@@ -58,7 +58,12 @@ async function _tryRefresh(): Promise<boolean> {
   try {
     const session = useSessionStore.getState();
     const store = session.keyStore;
-    const kp = await getOrCreateSessionKey(store);
+    const kp = await loadSessionKey(store);
+    if (!kp) {
+      // Key missing (ITP/storage eviction): route to key-lost rather than minting a fresh keypair.
+      session.setStatus("key-lost");
+      return false;
+    }
     const spki = await exportSpkiDer(kp.publicKey);
     const spkiHash = await sessionKeyHash(spki);
     const rthB64 = session.refreshTokenHash;

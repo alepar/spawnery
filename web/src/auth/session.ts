@@ -12,7 +12,7 @@
 import { create } from "zustand";
 import { AS_ORIGIN } from "@/config/endpoints";
 import { parseCallback, browserHistory, sessionStateStorage } from "./oauth";
-import { getOrCreateSessionKey, exportSpkiDer, sessionKeyHash, clearSessionKey } from "./keypair";
+import { loadSessionKey, exportSpkiDer, sessionKeyHash, clearSessionKey } from "./keypair";
 import { refreshAccessToken, computeRefreshDelay } from "./refresh";
 import { parseAccessToken } from "./token";
 import { IDBKeyStore, type KeyStore } from "./keystore";
@@ -106,7 +106,11 @@ async function _doProactiveRefresh(): Promise<void> {
 
   try {
     const store = session.keyStore;
-    const kp = await getOrCreateSessionKey(store);
+    const kp = await loadSessionKey(store);
+    if (!kp) {
+      useSessionStore.getState().setStatus("key-lost");
+      return;
+    }
     const spki = await exportSpkiDer(kp.publicKey);
     const spkiHash = await sessionKeyHash(spki);
     const rthB64 = session.refreshTokenHash;
@@ -193,8 +197,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
 
     // No callback — try silent refresh.
+    // Use GET-only: a missing key means ITP/storage eviction → key-lost, not a fresh keypair.
     try {
-      const kp = await getOrCreateSessionKey(store);
+      const kp = await loadSessionKey(store);
+      if (!kp) {
+        _clearRth();
+        set({ status: "key-lost" });
+        return;
+      }
       const spki = await exportSpkiDer(kp.publicKey);
       const spkiHash = await sessionKeyHash(spki);
       // On cold reload, refreshTokenHash is empty in zustand memory; read from localStorage.

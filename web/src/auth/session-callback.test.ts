@@ -34,8 +34,10 @@ vi.mock("./oauth", () => ({
 }));
 
 // Prevent real keypair/IDB operations during bootstrap's refresh fallback.
+// loadSessionKey is used on restore/refresh paths; returning null routes to key-lost (not reached by
+// the callback tests below, which all short-circuit via parseCallback before key loading).
 vi.mock("./keypair", () => ({
-  getOrCreateSessionKey: vi.fn().mockRejectedValue(new Error("no keystore in test")),
+  loadSessionKey: vi.fn().mockResolvedValue(null),
   exportSpkiDer: vi.fn(),
   sessionKeyHash: vi.fn(),
   clearSessionKey: vi.fn().mockResolvedValue(undefined),
