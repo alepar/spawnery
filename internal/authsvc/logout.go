@@ -2,19 +2,58 @@ package authsvc
 
 // /logout — revoke family + expire cookie + emit revocation event [AM10].
 // "Sign out everywhere" revokes ALL non-revoked families for the account.
+//
+// Cookie path scoping: the refresh_token cookie lives at Path=/refresh (RFC 6265 prevents it
+// from reaching /logout in a real browser). /logout reads the logout_session mirror cookie
+// (Path=/logout), which carries the same raw token value. Both are set together by serveCallback
+// and serveRefresh. The device_session cookie uses the same pattern for Path=/device.
 
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"spawnery/internal/authsvc/store"
 )
 
+const logoutSessionCookieName = "logout_session"
+
+// setLogoutSessionCookie sets the browser-session cookie scoped to Path=/logout so that
+// POST /logout receives it. The refresh_token cookie lives at Path=/refresh and RFC 6265
+// path scoping prevents it from reaching /logout in a real browser — this parallel cookie
+// carries the same raw token value for the logout auth check only.
+func setLogoutSessionCookie(w http.ResponseWriter, value string, expires time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     logoutSessionCookieName,
+		Value:    value,
+		Path:     "/logout",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		Expires:  expires,
+	})
+}
+
+// expireLogoutSessionCookie clears the logout_session cookie.
+func expireLogoutSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     logoutSessionCookieName,
+		Value:    "",
+		Path:     "/logout",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
 // serveLogout handles POST /logout. Accepts ?everywhere=1 to revoke all families.
 func (i *IdP) serveLogout(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("refresh_token")
+	// Read the logout_session mirror cookie (Path=/logout). The refresh_token cookie lives at
+	// Path=/refresh and a browser will not send it to /logout (RFC 6265 path scoping).
+	cookie, err := r.Cookie(logoutSessionCookieName)
 	if err != nil || cookie.Value == "" {
-		writeError(w, http.StatusUnauthorized, "missing_token", "refresh_token cookie required")
+		writeError(w, http.StatusUnauthorized, "missing_token", "logout_session cookie required")
 		return
 	}
 	now := i.now()
@@ -76,7 +115,7 @@ func (i *IdP) logoutEverywhere(ctx context.Context, accountID string, now interf
 	}
 }
 
-// expireRefreshCookie sets both the refresh_token and device_session cookies to expired.
+// expireRefreshCookie expires the refresh_token, logout_session, and device_session cookies.
 func expireRefreshCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
@@ -87,5 +126,6 @@ func expireRefreshCookie(w http.ResponseWriter) {
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
+	expireLogoutSessionCookie(w)
 	expireDeviceSessionCookie(w)
 }
