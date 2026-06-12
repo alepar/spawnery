@@ -26,6 +26,7 @@ import (
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 	"spawnery/internal/pki"
+	"spawnery/internal/weborigin"
 )
 
 const sqliteDefaultDSN = "file:cp.db?_pragma=busy_timeout(5000)"
@@ -106,9 +107,16 @@ func main() {
 	srv.SetMaxSpawnsPerOwner(envInt("CP_MAX_SPAWNS_PER_OWNER", 5))
 	srv.StartReconciler(ctx) // background loop: drive model_applied=false spawns to convergence (sp-bp9w.7)
 
+	// Browser-origin allowlist for CORS + the WS upgrade ([WM18]). Empty = dev mode
+	// (localhost-only origins); production sets the exact canonical SPA origin(s).
+	allow := weborigin.FromEnv(env("CP_ALLOWED_ORIGINS", ""))
+	if allow.Dev() {
+		log.Printf("cp: CP_ALLOWED_ORIGINS unset — dev mode, allowing localhost browser origins only")
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle(cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(authn.Interceptor())))
-	mux.HandleFunc("/ws/session", srv.HandleWS(authn))
+	mux.HandleFunc("/ws/session", srv.HandleWS(authn, allow))
 
 	// Node-auth mode (sp-ova). insecure (dev/test default): nodes share the main h2c listener with no
 	// auth — identity falls back to the self-asserted Register fields. enforced: nodes connect over mTLS
@@ -127,7 +135,7 @@ func main() {
 
 	addr := env("CP_LISTEN", "127.0.0.1:8080")
 	log.Printf("cp listening on %s (node-auth mode=%s)", addr, mode)
-	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{})))
+	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(allow.CORS(mux), &http2.Server{})))
 }
 
 // serveNodeTLS runs the NodeService over mTLS on its own listener. Nodes MUST present a client cert,

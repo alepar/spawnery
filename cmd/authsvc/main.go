@@ -15,6 +15,7 @@ import (
 
 	"spawnery/internal/authsvc"
 	"spawnery/internal/pki"
+	"spawnery/internal/weborigin"
 )
 
 func main() {
@@ -23,8 +24,15 @@ func main() {
 		log.Fatalf("authsvc: %v", err)
 	}
 
+	// Browser-origin allowlist, same mechanism as the CP's ([WL6]): every device-set RPC is a
+	// browser->AS call. Empty = dev mode (localhost origins only).
+	allow := weborigin.FromEnv(env("AS_ALLOWED_ORIGINS", ""))
+	if allow.Dev() {
+		log.Printf("authsvc: AS_ALLOWED_ORIGINS unset — dev mode, allowing localhost browser origins only")
+	}
+
 	addr := env("AS_LISTEN", "127.0.0.1:8090")
-	srv := &http.Server{Addr: addr, Handler: svc.Handler()}
+	srv := &http.Server{Addr: addr, Handler: allow.CORS(svc.Handler())}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
