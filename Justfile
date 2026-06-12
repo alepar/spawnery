@@ -89,6 +89,7 @@ cp-enforced:
 authsvc-enforced:
     @make bin/authsvc
     AS_LISTEN={{addr_as}} \
+    AS_DB_DSN="file:{{data_root}}/authsvc.db?_pragma=foreign_keys(1)" \
     AS_ROOT_CA_PEM={{devca}}/root.pem \
     AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
     AS_INTERMEDIATE_KEY_PEM={{devca}}/self-hosted-intermediate-key.pem \

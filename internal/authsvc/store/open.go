@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/pressly/goose/v3"
 	"github.com/uptrace/bun"
@@ -15,9 +18,28 @@ import (
 //go:embed migrations/sqlite/*.sql
 var migrationsFS embed.FS
 
+// ensureParentDir creates the directory holding a file-backed sqlite DB so a fresh
+// deployment (or dev data root) doesn't fail with SQLITE_CANTOPEN before first write.
+func ensureParentDir(dsn string) error {
+	if !strings.HasPrefix(dsn, "file:") || strings.Contains(dsn, "mode=memory") || strings.Contains(dsn, ":memory:") {
+		return nil
+	}
+	path := strings.TrimPrefix(dsn, "file:")
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	if dir := filepath.Dir(path); dir != "." && dir != "/" {
+		return os.MkdirAll(dir, 0o700)
+	}
+	return nil
+}
+
 func openBun(cfg Config) (*bun.DB, error) {
 	switch cfg.Driver {
 	case "sqlite":
+		if err := ensureParentDir(cfg.DSN); err != nil {
+			return nil, fmt.Errorf("authsvc/store: creating db dir: %w", err)
+		}
 		sqldb, err := sql.Open("sqlite", cfg.DSN)
 		if err != nil {
 			return nil, err

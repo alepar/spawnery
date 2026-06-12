@@ -23,7 +23,8 @@
 //	  AS_SESSION_KEY_NEXT_PEM        Path to next session signing key (published for rotation; optional)
 //
 //	Database (sqlite tier-0; see deploy/authsvc/README.md for litestream replication):
-//	  AS_DB_DSN                      SQLite DSN (default: file:/var/lib/authsvc/identity.db)
+//	  AS_DB_DSN                      SQLite DSN (default: file:/var/lib/authsvc/identity.db;
+//	                                 AS_DEV=1 default: ephemeral in-memory)
 //	  AS_DB_DRIVER                   "sqlite" (only; kept for future pg expansion)
 //
 //	GitHub OAuth (required for real login; ignored if AS_FAKE_GITHUB=1):
@@ -153,19 +154,29 @@ func buildService() (*authsvc.Service, error) {
 		return nil, err
 	}
 
-	// Identity store.
+	// Identity store. Dev mode defaults to an ephemeral in-memory DB, matching the dev CA and
+	// dev session key — the prod default path is root-owned and must not be a dev dependency.
+	defaultDSN := "file:/var/lib/authsvc/identity.db?_pragma=foreign_keys(1)"
+	if os.Getenv("AS_DEV") == "1" {
+		defaultDSN = "file:authsvc-dev?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	}
+	dsn := env("AS_DB_DSN", defaultDSN)
+	if os.Getenv("AS_DEV") == "1" && dsn == defaultDSN {
+		log.Printf("authsvc: DEV — ephemeral in-memory identity store (set AS_DB_DSN to persist)")
+	}
 	idStore, err := store.Open(context.Background(), store.Config{
 		Driver: env("AS_DB_DRIVER", "sqlite"),
-		DSN:    env("AS_DB_DSN", "file:/var/lib/authsvc/identity.db?_pragma=foreign_keys(1)"),
+		DSN:    dsn,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// GitHub provider.
+	// GitHub provider. AS_DEV without real creds falls back to the in-process fake, so
+	// `just dev` boots with zero GitHub setup (matching the header doc); real creds win.
 	var ghProvider authsvc.GitHubProvider
-	if os.Getenv("AS_FAKE_GITHUB") == "1" {
-		log.Printf("authsvc: AS_FAKE_GITHUB=1 — using in-process fake GitHub (dev/CI only)")
+	if os.Getenv("AS_FAKE_GITHUB") == "1" || (os.Getenv("AS_DEV") == "1" && os.Getenv("GITHUB_CLIENT_ID") == "") {
+		log.Printf("authsvc: using in-process fake GitHub (dev/CI only)")
 		fake := githubfake.New()
 		ghProvider = authsvc.NewGitHubProvider(fake.URL(), fake.URL(), fake.ClientID, fake.ClientSecret)
 	} else {
