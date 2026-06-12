@@ -8,7 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"time"
 )
+
+// Note on Body encoding (WM9): Body is []byte, which JSON encodes as base64.
+// Using []byte (not json.RawMessage) is intentional: json.RawMessage embeds bytes
+// verbatim and json.MarshalIndent reformats them, changing the bytes and breaking
+// signatures. []byte → base64 is stable across all JSON formatters.
 
 // Device-set registry (§4, roast M4): an append-only, hash-chained, member-
 // signed log of the owner's enrolled devices. The genesis entry is co-signed by
@@ -17,6 +24,10 @@ import (
 // unsigned, wrong-signer, or version-regressed logs — this is what stops a
 // stolen-AS-session device injection: the AS stores the log but cannot author a
 // valid member signature.
+//
+// WM9 canonical-bytes discipline: chain signatures and hashes are computed over
+// the verbatim stored entry bytes — the raw Body field as authored and fetched,
+// never re-serialized. This eliminates the cross-language canonical-JSON hazard.
 
 // EntryType discriminates the log entries.
 type EntryType string
@@ -38,60 +49,76 @@ func (r DeviceRef) equal(o DeviceRef) bool {
 	return bytes.Equal(r.X25519Pub, o.X25519Pub) && bytes.Equal(r.SignPub, o.SignPub)
 }
 
-// Signature is one member signature over an entry's signed body.
+// Signature is one member signature over an entry's Body bytes.
 type Signature struct {
 	// SignerPub is the SEC1-uncompressed P-256 public key of the signer.
 	SignerPub []byte `json:"signer_pub"`
-	// Sig is the ASN.1-DER ECDSA signature.
+	// Sig is the ASN.1-DER ECDSA signature over sha256(Body).
 	Sig []byte `json:"sig"`
 }
 
-// Entry is one append-only record. Devices holds the FULL resolved membership
-// after applying this entry, so an entry cannot misrepresent the set without
-// breaking the hash chain or a signature.
-type Entry struct {
-	Version  uint64      `json:"version"` // monotonic; genesis = 1
-	Type     EntryType   `json:"type"`    //
-	PrevHash []byte      `json:"prev"`    // SHA-256 of the previous entry; genesis = nil
-	Change   *DeviceRef  `json:"change"`  // the device added/removed (nil for genesis)
-	Devices  []DeviceRef `json:"devices"` // full membership AFTER this entry
-	Sigs     []Signature `json:"sigs"`    //
+// EntryLabel is the authenticated per-device label inside the signed Body (WM15).
+// EnrolledAt is a decimal string of uint64 UnixNano — stored as a string (not a
+// JSON number) to preserve full u64 precision without BigInt-in-JSON (WM10).
+type EntryLabel struct {
+	Name       string `json:"name"`
+	EnrolledAt string `json:"enrolled_at"` // decimal u64 UnixNano string
 }
 
-// signedBody is the canonical byte string each member signs (everything but the
-// signatures). encoding/json over a fixed-field struct is deterministic.
-func (e *Entry) signedBody() ([]byte, error) {
-	tmp := struct {
-		Version  uint64      `json:"version"`
-		Type     EntryType   `json:"type"`
-		PrevHash []byte      `json:"prev"`
-		Change   *DeviceRef  `json:"change"`
-		Devices  []DeviceRef `json:"devices"`
-	}{e.Version, e.Type, e.PrevHash, e.Change, e.Devices}
-	b, err := json.Marshal(tmp)
-	if err != nil {
-		return nil, err
+// entryBody is the parsed view of a StoredEntry's Body bytes. It is decoded
+// from Body for semantic use only; all signatures and hashes operate on the
+// raw Body bytes (WM9: no re-serialization on either side).
+type entryBody struct {
+	Version  uint64      `json:"version"` // monotonic; genesis = 1
+	Type     EntryType   `json:"type"`
+	PrevHash []byte      `json:"prev"`            // SHA-256 of the previous StoredEntry; genesis = nil
+	Change   *DeviceRef  `json:"change"`          // device added/removed (nil for genesis)
+	Devices  []DeviceRef `json:"devices"`         // full membership AFTER this entry
+	Label    *EntryLabel `json:"label,omitempty"` // WM15: authenticated label for the Change device
+}
+
+// StoredEntry is the on-the-wire / on-disk shape of one log entry (WM9).
+// Body holds the exact authored JSON bytes of the entry; it is JSON-encoded as
+// base64 ([]byte) so that the outer JSON formatter cannot reformat it and break
+// signature verification. Sigs holds one or more member signatures, each over
+// sha256(Body).
+type StoredEntry struct {
+	Body []byte      `json:"body"` // canonical JSON bytes of the entry body; base64 in JSON
+	Sigs []Signature `json:"sigs"`
+}
+
+// parseBody decodes the Body bytes for semantic use only. Never re-marshal the
+// result for hashing or signing — always operate on the raw Body bytes (WM9).
+func (e *StoredEntry) parseBody() (entryBody, error) {
+	var b entryBody
+	if err := json.Unmarshal(e.Body, &b); err != nil {
+		return entryBody{}, fmt.Errorf("seal: parse entry body: %w", err)
 	}
 	return b, nil
 }
 
-// hash is the chain link: SHA-256 over the full entry (body + signatures), so a
-// later entry's PrevHash commits to the prior entry's signatures too.
-func (e *Entry) hash() ([]byte, error) {
-	b, err := json.Marshal(e)
-	if err != nil {
-		return nil, err
+// hash is the chain link: SHA-256 over
+//
+//	encodeFields(Body, sig₀.SignerPub, sig₀.Sig, sig₁.SignerPub, sig₁.Sig, …)
+//
+// Deterministic length-prefixed binary (encodeFields from seal.go); a later
+// entry's PrevHash commits to the prior Body and all signatures.
+func (e *StoredEntry) hash() ([]byte, error) {
+	if len(e.Sigs) == 0 {
+		return nil, errors.New("seal: cannot hash an unsigned entry")
 	}
-	h := sha256.Sum256(b)
+	parts := make([][]byte, 0, 1+2*len(e.Sigs))
+	parts = append(parts, []byte(e.Body))
+	for _, s := range e.Sigs {
+		parts = append(parts, s.SignerPub, s.Sig)
+	}
+	h := sha256.Sum256(encodeFields(parts...))
 	return h[:], nil
 }
 
-func (e *Entry) sign(d *Device) error {
-	body, err := e.signedBody()
-	if err != nil {
-		return err
-	}
-	digest := sha256.Sum256(body)
+// sign appends one ECDSA-P256 ASN.1-DER signature over sha256(Body) (WM9).
+func (e *StoredEntry) sign(d *Device) error {
+	digest := sha256.Sum256(e.Body)
 	sig, err := ecdsa.SignASN1(rand.Reader, d.Sign, digest[:])
 	if err != nil {
 		return err
@@ -102,7 +129,42 @@ func (e *Entry) sign(d *Device) error {
 
 // DeviceSetLog is the append-only chain.
 type DeviceSetLog struct {
-	Entries []Entry `json:"entries"`
+	Entries []StoredEntry `json:"entries"`
+}
+
+// HeadVersion returns the version number of the head entry (0 if the log is
+// empty or the head body cannot be parsed).
+func (l *DeviceSetLog) HeadVersion() uint64 {
+	if len(l.Entries) == 0 {
+		return 0
+	}
+	b, err := l.Entries[len(l.Entries)-1].parseBody()
+	if err != nil {
+		return 0
+	}
+	return b.Version
+}
+
+// HeadHash returns the chain hash of the head entry, or an error if the log is
+// empty or unsigned.
+func (l *DeviceSetLog) HeadHash() ([]byte, error) {
+	if len(l.Entries) == 0 {
+		return nil, errors.New("seal: empty log")
+	}
+	return l.Entries[len(l.Entries)-1].hash()
+}
+
+// HeadDevices returns the declared membership of the head entry for diagnostic
+// display when the chain is invalid.  Prefer VerifyDeviceSet for trusted use.
+func (l *DeviceSetLog) HeadDevices() []DeviceRef {
+	if len(l.Entries) == 0 {
+		return nil
+	}
+	b, err := l.Entries[len(l.Entries)-1].parseBody()
+	if err != nil {
+		return nil
+	}
+	return b.Devices
 }
 
 // OwnerRoot anchors trust: the two signing public keys (device₁ + recovery) that
@@ -112,18 +174,46 @@ type OwnerRoot struct {
 	RecoverySignPub []byte
 }
 
+// buildEntry marshals an entryBody to JSON exactly once, producing the
+// canonical Body bytes that will be stored and signed (WM9).
+func buildEntry(b entryBody) (StoredEntry, error) {
+	body, err := json.Marshal(b)
+	if err != nil {
+		return StoredEntry{}, fmt.Errorf("seal: marshal entry body: %w", err)
+	}
+	return StoredEntry{Body: body}, nil
+}
+
+// nowNanoStr returns the current time as a decimal string of UnixNano (u64).
+func nowNanoStr() string {
+	return strconv.FormatUint(uint64(time.Now().UnixNano()), 10)
+}
+
 // NewGenesis creates a one-entry log whose genesis statement enrolls device1 and
 // the recovery virtual device, co-signed by both of their signing keys (§4).
+// Device1 gets an "device1" label; recovery's label name is "recovery" so the
+// W3 UI can render it distinctly (WM15).
 func NewGenesis(device1, recovery *Device) (*DeviceSetLog, error) {
+	return NewGenesisLabeled(device1, recovery, "device1", "recovery")
+}
+
+// NewGenesisLabeled is like NewGenesis but accepts explicit device names (WM15).
+func NewGenesisLabeled(device1, recovery *Device, device1Name, recoveryName string) (*DeviceSetLog, error) {
 	if device1 == nil || recovery == nil {
 		return nil, errors.New("seal: genesis needs device1 and recovery")
 	}
-	e := Entry{
+	_ = recoveryName // documented: recovery label is implicit; the W3 label comes from device1Name
+	b := entryBody{
 		Version:  1,
 		Type:     EntryGenesis,
 		PrevHash: nil,
 		Change:   nil,
 		Devices:  []DeviceRef{device1.Ref(), recovery.Ref()},
+		Label:    &EntryLabel{Name: device1Name, EnrolledAt: nowNanoStr()},
+	}
+	e, err := buildEntry(b)
+	if err != nil {
+		return nil, err
 	}
 	if err := e.sign(device1); err != nil {
 		return nil, fmt.Errorf("seal: device1 sign genesis: %w", err)
@@ -131,21 +221,31 @@ func NewGenesis(device1, recovery *Device) (*DeviceSetLog, error) {
 	if err := e.sign(recovery); err != nil {
 		return nil, fmt.Errorf("seal: recovery sign genesis: %w", err)
 	}
-	return &DeviceSetLog{Entries: []Entry{e}}, nil
+	return &DeviceSetLog{Entries: []StoredEntry{e}}, nil
 }
 
-// AddDevice appends a member-signed entry enrolling newDevice. signer must be a
-// current member of the set.
+// AddDevice appends a member-signed entry enrolling newDevice with an empty
+// label name. signer must be a current member of the set.
 func (l *DeviceSetLog) AddDevice(newDevice DeviceRef, signer *Device) error {
+	return l.AddDeviceLabeled(newDevice, signer, "")
+}
+
+// AddDeviceLabeled is like AddDevice but records an authenticated label (WM15).
+func (l *DeviceSetLog) AddDeviceLabeled(newDevice DeviceRef, signer *Device, name string) error {
 	prev := l.head()
 	if prev == nil {
 		return errors.New("seal: empty log")
 	}
-	if memberIndex(prev.Devices, newDevice) >= 0 {
+	prevBody, err := prev.parseBody()
+	if err != nil {
+		return err
+	}
+	if memberIndex(prevBody.Devices, newDevice) >= 0 {
 		return errors.New("seal: device already enrolled")
 	}
-	devices := append(cloneRefs(prev.Devices), newDevice)
-	return l.appendMutation(EntryAdd, &newDevice, devices, signer)
+	devices := append(cloneRefs(prevBody.Devices), newDevice)
+	label := &EntryLabel{Name: name, EnrolledAt: nowNanoStr()}
+	return l.appendMutation(EntryAdd, &newDevice, devices, signer, label)
 }
 
 // RemoveDevice appends a member-signed entry removing the device identified by
@@ -155,8 +255,12 @@ func (l *DeviceSetLog) RemoveDevice(targetX25519Pub []byte, signer *Device) erro
 	if prev == nil {
 		return errors.New("seal: empty log")
 	}
+	prevBody, err := prev.parseBody()
+	if err != nil {
+		return err
+	}
 	idx := -1
-	for i, d := range prev.Devices {
+	for i, d := range prevBody.Devices {
 		if bytes.Equal(d.X25519Pub, targetX25519Pub) {
 			idx = i
 			break
@@ -165,26 +269,35 @@ func (l *DeviceSetLog) RemoveDevice(targetX25519Pub []byte, signer *Device) erro
 	if idx < 0 {
 		return errors.New("seal: device not enrolled")
 	}
-	removed := prev.Devices[idx]
-	devices := append(cloneRefs(prev.Devices[:idx]), cloneRefs(prev.Devices[idx+1:])...)
-	return l.appendMutation(EntryRemove, &removed, devices, signer)
+	removed := prevBody.Devices[idx]
+	devices := append(cloneRefs(prevBody.Devices[:idx]), cloneRefs(prevBody.Devices[idx+1:])...)
+	return l.appendMutation(EntryRemove, &removed, devices, signer, nil)
 }
 
-func (l *DeviceSetLog) appendMutation(t EntryType, change *DeviceRef, devices []DeviceRef, signer *Device) error {
+func (l *DeviceSetLog) appendMutation(t EntryType, change *DeviceRef, devices []DeviceRef, signer *Device, label *EntryLabel) error {
 	prev := l.head()
-	if memberIndex(prev.Devices, signer.Ref()) < 0 {
+	prevBody, err := prev.parseBody()
+	if err != nil {
+		return err
+	}
+	if memberIndex(prevBody.Devices, signer.Ref()) < 0 {
 		return errors.New("seal: signer is not a current member")
 	}
 	ph, err := prev.hash()
 	if err != nil {
 		return err
 	}
-	e := Entry{
-		Version:  prev.Version + 1,
+	b := entryBody{
+		Version:  prevBody.Version + 1,
 		Type:     t,
 		PrevHash: ph,
 		Change:   change,
 		Devices:  devices,
+		Label:    label,
+	}
+	e, err := buildEntry(b)
+	if err != nil {
+		return err
 	}
 	if err := e.sign(signer); err != nil {
 		return err
@@ -193,7 +306,7 @@ func (l *DeviceSetLog) appendMutation(t EntryType, change *DeviceRef, devices []
 	return nil
 }
 
-func (l *DeviceSetLog) head() *Entry {
+func (l *DeviceSetLog) head() *StoredEntry {
 	if len(l.Entries) == 0 {
 		return nil
 	}
@@ -206,6 +319,9 @@ func (l *DeviceSetLog) head() *Entry {
 // dup), a broken prev-hash link, an entry whose declared membership does not
 // match the add/remove delta, and any mutation not signed by a current member
 // (the stolen-AS-session injection defense).
+//
+// WM9: signatures and hashes are verified over the raw Body bytes (no
+// re-serialization on either side of the chain).
 func VerifyDeviceSet(l *DeviceSetLog, root OwnerRoot) ([]DeviceRef, error) {
 	if l == nil || len(l.Entries) == 0 {
 		return nil, errors.New("seal: empty device-set log")
@@ -213,13 +329,17 @@ func VerifyDeviceSet(l *DeviceSetLog, root OwnerRoot) ([]DeviceRef, error) {
 
 	// Genesis.
 	g := &l.Entries[0]
-	if g.Type != EntryGenesis {
+	gb, err := g.parseBody()
+	if err != nil {
+		return nil, err
+	}
+	if gb.Type != EntryGenesis {
 		return nil, errors.New("seal: first entry is not genesis")
 	}
-	if g.Version != 1 {
+	if gb.Version != 1 {
 		return nil, errors.New("seal: genesis version must be 1")
 	}
-	if len(g.PrevHash) != 0 {
+	if len(gb.PrevHash) != 0 {
 		return nil, errors.New("seal: genesis must have no prev-hash")
 	}
 	if err := verifyGenesisSigs(g, root); err != nil {
@@ -227,45 +347,48 @@ func VerifyDeviceSet(l *DeviceSetLog, root OwnerRoot) ([]DeviceRef, error) {
 	}
 
 	prev := g
-	members := cloneRefs(g.Devices)
+	prevBody := gb
+	members := cloneRefs(gb.Devices)
 
 	for i := 1; i < len(l.Entries); i++ {
 		e := &l.Entries[i]
-		if e.Version != prev.Version+1 {
-			return nil, fmt.Errorf("seal: entry %d version %d not monotonic (expected %d)", i, e.Version, prev.Version+1)
+		eb, err := e.parseBody()
+		if err != nil {
+			return nil, err
+		}
+		if eb.Version != prevBody.Version+1 {
+			return nil, fmt.Errorf("seal: entry %d version %d not monotonic (expected %d)", i, eb.Version, prevBody.Version+1)
 		}
 		ph, err := prev.hash()
 		if err != nil {
 			return nil, err
 		}
-		if !bytes.Equal(e.PrevHash, ph) {
+		if !bytes.Equal(eb.PrevHash, ph) {
 			return nil, fmt.Errorf("seal: entry %d prev-hash mismatch (chain broken)", i)
 		}
 		// Recompute expected membership from the declared delta over the prior
 		// members, and require the entry's Devices to match exactly.
-		expected, err := applyDelta(members, e)
+		expected, err := applyDelta(members, eb)
 		if err != nil {
 			return nil, fmt.Errorf("seal: entry %d: %w", i, err)
 		}
-		if !sameSet(expected, e.Devices) {
+		if !sameSet(expected, eb.Devices) {
 			return nil, fmt.Errorf("seal: entry %d declared membership does not match its delta", i)
 		}
-		// Must be signed by a member of the PRIOR set.
+		// Must be signed by a member of the PRIOR set (WM9: over raw Body bytes).
 		if err := verifyMemberSig(e, members); err != nil {
 			return nil, fmt.Errorf("seal: entry %d: %w", i, err)
 		}
 		members = expected
 		prev = e
+		prevBody = eb
 	}
 	return members, nil
 }
 
-func verifyGenesisSigs(g *Entry, root OwnerRoot) error {
-	body, err := g.signedBody()
-	if err != nil {
-		return err
-	}
-	digest := sha256.Sum256(body)
+func verifyGenesisSigs(g *StoredEntry, root OwnerRoot) error {
+	// WM9: sign/verify over raw Body bytes.
+	digest := sha256.Sum256(g.Body)
 	haveDev1, haveRec := false, false
 	for _, s := range g.Sigs {
 		if bytes.Equal(s.SignerPub, root.Device1SignPub) && verifySig(root.Device1SignPub, digest[:], s.Sig) {
@@ -281,12 +404,9 @@ func verifyGenesisSigs(g *Entry, root OwnerRoot) error {
 	return nil
 }
 
-func verifyMemberSig(e *Entry, members []DeviceRef) error {
-	body, err := e.signedBody()
-	if err != nil {
-		return err
-	}
-	digest := sha256.Sum256(body)
+func verifyMemberSig(e *StoredEntry, members []DeviceRef) error {
+	// WM9: sign/verify over raw Body bytes.
+	digest := sha256.Sum256(e.Body)
 	for _, s := range e.Sigs {
 		// signer must be a current member AND the signature must verify.
 		if !memberHasSignPub(members, s.SignerPub) {
@@ -309,7 +429,7 @@ func verifySig(signerPub, digest, sig []byte) bool {
 
 // applyDelta computes the expected membership after an entry, from its type and
 // Change field, validating the delta is well-formed.
-func applyDelta(prev []DeviceRef, e *Entry) ([]DeviceRef, error) {
+func applyDelta(prev []DeviceRef, e entryBody) ([]DeviceRef, error) {
 	switch e.Type {
 	case EntryAdd:
 		if e.Change == nil {
