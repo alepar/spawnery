@@ -42,20 +42,14 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   // Serve the prod build via vite preview.
-  // The preview-headers middleware injects the dist/_headers CSP so the browser
-  // actually enforces the Content-Security-Policy (vite preview ignores _headers).
+  // The preview-headers middleware (wired in vite.config.ts via configurePreviewServer)
+  // injects the dist/_headers CSP so the browser actually enforces Content-Security-Policy.
+  // Vite preview ignores _headers natively; without the middleware the CSP would not be sent
+  // and violation checks would pass vacuously.
   webServer: {
     command: "npx vite preview --port 4173",
     url: "http://localhost:4173",
     reuseExistingServer: false,
     timeout: 30_000,
-    // vite preview does not support custom headers natively; the CSP enforcement test
-    // uses page.on('console') to catch CSP violations rather than relying on the server
-    // header (browsers report violations as console errors). This config also sets up
-    // a standard preview — the full header injection requires a custom preview server
-    // (see e2e/preview-headers.ts for the middleware). For now, this config serves as
-    // the host-gated gate: it runs the suite against the prod bundle and catches any
-    // eval/inline dependency regressions via the browser's own CSP enforcement when
-    // headers are present.
   },
 });

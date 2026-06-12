@@ -271,22 +271,23 @@ export function sriHeadersPlugin(opts: SriHeadersOptions = {}): Plugin {
       if (!cpOrigin) return;
 
       const csp = buildCsp(cpOrigin, asOrigin);
+      // /* covers the SPA root path "/" and every SPA route. Cloudflare Pages / Netlify serve
+      // the document at "/" (not "/index.html"), so CSP must be on /* not just /index.html.
+      // Rules are applied top-to-bottom; later rules override earlier ones for the same header
+      // name — /assets/* comes last so it can override Cache-Control: no-cache with immutable.
       const headers = [
         "# Cache + CSP headers — emitted by sri-headers-plugin, shipped inside the signed dist/",
         "# [WL4]: this file ships INSIDE the signed dist, not hand-edited at the host.",
         "",
-        "/index.html",
+        "/*",
         `  Content-Security-Policy: ${csp}`,
         "  Cache-Control: no-cache",
         "  X-Content-Type-Options: nosniff",
+        "  X-Frame-Options: DENY",
         "",
         "/assets/*",
         "  Cache-Control: public, max-age=31536000, immutable",
         "  X-Content-Type-Options: nosniff",
-        "",
-        "/*",
-        "  X-Content-Type-Options: nosniff",
-        "  X-Frame-Options: DENY",
       ].join("\n");
 
       fs.writeFileSync(path.resolve(outDir, "_headers"), headers, "utf8");

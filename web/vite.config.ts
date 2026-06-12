@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import { sriHeadersPlugin } from "./build/sri-headers-plugin";
+import { createHeadersMiddleware } from "./e2e/preview-headers";
 
 export default defineConfig({
   plugins: [
@@ -13,6 +14,14 @@ export default defineConfig({
       cpOrigin: process.env.VITE_CP_ORIGIN,
       asOrigin: process.env.VITE_AS_ORIGIN,
     }),
+    // Inject dist/_headers into the preview server so the Playwright CSP suite
+    // exercises the REAL enforced CSP (vite preview ignores _headers natively).
+    {
+      name: "preview-csp-headers",
+      configurePreviewServer(server) {
+        server.middlewares.use(createHeadersMiddleware());
+      },
+    },
   ],
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
   server: {

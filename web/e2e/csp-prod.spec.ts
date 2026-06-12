@@ -146,4 +146,90 @@ test.describe("CSP-enforced prod bundle", () => {
 
     expect(missing, `Stylesheet links missing integrity:\n${missing.join("\n")}`).toHaveLength(0);
   });
+
+  test("sonner toast renders without CSP violations [WM19]", async ({ page }) => {
+    // Exercises sonner's __insertCSS (called at module import time) and the <Toaster>
+    // component rendering — the two code paths whose style injection necessitates
+    // 'unsafe-inline' in style-src. If a regression adds eval/inline to script-src the
+    // violation is caught here.
+    const violations: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error" && msg.text().includes("Content Security Policy")) {
+        if (!msg.text().includes("style-src")) violations.push(msg.text());
+      }
+    });
+
+    // Route the publish API to return an error so the Publish form triggers toast.error().
+    await page.route("**/cp.v1.SpawnService/RegisterAppVersion", (route) =>
+      route.fulfill({ status: 500, contentType: "application/json", body: '{"code":"internal","message":"test error"}' })
+    );
+    // Silence background polls so we don't get noise in the console.
+    await page.route("**/cp.v1.SpawnService/ListSpawns", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: '{"spawns":[]}' })
+    );
+    await page.route("**/cp.v1.SpawnService/ListApps", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: '{"apps":[]}' })
+    );
+
+    await page.goto("/publish");
+    await page.waitForLoadState("networkidle");
+
+    // AppShell always renders <Toaster>; verify the portal container is in the DOM.
+    // This proves the sonner module loaded (triggering __insertCSS) and the component rendered.
+    const toaster = page.locator("[data-sonner-toaster]");
+    await expect(toaster).toBeAttached();
+
+    // Trigger toast.error() via the Publish form's error path.
+    await page.fill("[data-testid='publish-id']", "test/app");
+    await page.fill("[data-testid='publish-title']", "Test");
+    await page.fill("[data-testid='publish-version']", "1.0.0");
+    await page.fill("[data-testid='publish-ref']", "test/app@abc123");
+    await page.click("[data-testid='publish-submit']");
+
+    // Wait for the toast to appear (proves toast.error() rendered under enforced CSP).
+    await expect(page.locator("[data-sonner-toaster] li")).toBeAttached({ timeout: 5000 });
+
+    expect(violations, `Unexpected CSP violations:\n${violations.join("\n")}`).toHaveLength(0);
+  });
+
+  test("xterm terminal renders without CSP violations (terminal render) [WM19]", async ({ page }) => {
+    // Exercises xterm's terminal.open() style injection — the code path whose runtime
+    // <style> injection necessitates 'unsafe-inline' in style-src [WM19]. Without this
+    // test a dep regression that adds eval to xterm's rendering path would go undetected.
+    const violations: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error" && msg.text().includes("Content Security Policy")) {
+        if (!msg.text().includes("style-src")) violations.push(msg.text());
+      }
+    });
+
+    // Mock the spawn list so the app binds the test spawn as active.
+    await page.route("**/cp.v1.SpawnService/ListSpawns", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          spawns: [{ spawnId: "test-csp-spawn", name: "CSP Test", appId: "test", status: "SPAWN_STATUS_ACTIVE", mode: "tmux", model: "test", modelApplied: true }],
+        }),
+      })
+    );
+
+    // Return a mosh (tmux) session so SpawnTabs mounts TerminalView (not AcpSessionPanel).
+    // xterm's terminal.open() fires when TerminalView's useEffect runs — before the WS dial.
+    await page.route("**/cp.v1.SpawnService/ListSessions", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          sessions: [{ sessionId: "1", transport: "SESSION_TRANSPORT_MOSH", runnable: "bash", status: "active", pinned: true }],
+        }),
+      })
+    );
+
+    await page.goto("/spawn/test-csp-spawn");
+    // Wait for TerminalView to mount and xterm.open() to fire.
+    await expect(page.locator("[data-testid='terminal-view']")).toBeAttached({ timeout: 8000 });
+
+    expect(violations, `Unexpected CSP violations:\n${violations.join("\n")}`).toHaveLength(0);
+  });
 });

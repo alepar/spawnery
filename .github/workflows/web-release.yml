@@ -64,6 +64,19 @@ jobs:
           VITE_AS_ORIGIN: ${{ vars.VITE_AS_ORIGIN }}
         run: npm run build
 
+      # [WM20]: Run the full test suite against the BUILT artifact so the same bundle
+      # that flows into sign/deploy is the one the tests ran on (not just source).
+      - name: Vitest (unit tests on built artifact)
+        run: npm test
+
+      # CSP Playwright suite — exercises the prod bundle under enforced CSP.
+      # A dep that regresses to eval/inline fails here before signing.
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: CSP Playwright suite (prod bundle, enforced CSP)
+        run: npm run test:e2e:csp
+
       # [WL3]: Pre-sign forbidden-value scan — must pass before signing.
       - name: Pre-sign forbidden-value scan
         run: |
@@ -196,6 +209,30 @@ jobs:
             exit 1
           fi
           echo "Self-test PASSED: verify correctly rejected wrong OIDC issuer."
+
+      # [WM21] Wrong-identity self-test: verify MUST fail when the bundle was signed by a
+      # DIFFERENT workflow identity (attacker-fork scenario). The fixture is signed by
+      # deploy/web/gen-test-fixture.yml (a different certificate identity than web-release.yml).
+      # Run `gh workflow run gen-test-fixture.yml` once to generate deploy/web/fixtures/wrong-identity.bundle.
+      - name: "Self-test: verify MUST fail with wrong workflow identity"
+        run: |
+          FIXTURE="deploy/web/fixtures/wrong-identity.bundle"
+          if [ ! -f "$FIXTURE" ]; then
+            echo "ERROR: deploy/web/fixtures/wrong-identity.bundle missing." >&2
+            echo "Run 'gh workflow run gen-test-fixture.yml' to generate it." >&2
+            exit 1
+          fi
+          # Verify with OUR identity against the WRONG-IDENTITY bundle — must fail because the
+          # cert in the bundle was issued to a different workflow, not web-release.yml.
+          if cosign verify-blob \
+               --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/web-release.yml@${{ github.ref }}" \
+               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+               --bundle "$FIXTURE" \
+               deploy/web/fixtures/stripped-artifact.txt 2>/dev/null; then
+            echo "FATAL: verify passed with wrong-identity bundle — gate is broken" >&2
+            exit 1
+          fi
+          echo "Self-test PASSED: verify correctly rejected wrong-identity bundle."
 
       # [WL2]: Anti-rollback — enforce monotonic release counter.
       - name: Anti-rollback check (monotonic release counter)

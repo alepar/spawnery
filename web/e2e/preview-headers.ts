@@ -35,19 +35,20 @@ export function parseHeaders(content: string): HeaderRule[] {
   let current: HeaderRule | null = null;
 
   for (const rawLine of content.split("\n")) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
 
-    if (!line.startsWith(" ") && !line.startsWith("\t")) {
-      // New path rule.
-      current = { pattern: line, headers: {} };
+    // Indentation on the RAW line (before trim) distinguishes path rules from headers.
+    if (!rawLine.startsWith(" ") && !rawLine.startsWith("\t")) {
+      // New path rule (not indented).
+      current = { pattern: trimmed, headers: {} };
       rules.push(current);
     } else if (current) {
-      // Header line.
-      const idx = line.indexOf(":");
+      // Header line (indented under the current path rule).
+      const idx = trimmed.indexOf(":");
       if (idx > 0) {
-        const name = line.slice(0, idx).trim();
-        const value = line.slice(idx + 1).trim();
+        const name = trimmed.slice(0, idx).trim();
+        const value = trimmed.slice(idx + 1).trim();
         current.headers[name] = value;
       }
     }
