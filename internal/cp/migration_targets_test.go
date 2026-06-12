@@ -12,10 +12,6 @@ import (
 	"spawnery/internal/cp/registry"
 )
 
-// newLiveRegistry is a helper that returns a *registry.Registry with an injectable clock, so we can
-// test online/offline without sleeping. Uses the package-level addNode helper.
-func newLiveRegistry() *registry.Registry { return registry.New() }
-
 // TestListMigrationTargetsOwnerSeesForeignSelfHosted: Alice's owner scope must NOT include Bob's self-hosted node.
 func TestListMigrationTargetsOwnAndCloud(t *testing.T) {
 	s, reg, rt := newTestServer(t)

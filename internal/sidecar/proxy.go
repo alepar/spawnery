@@ -89,7 +89,7 @@ func rewriteRequestModel(r *http.Request, model string) error {
 		// Not a JSON object (e.g. GET with empty body): forward the original bytes.
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
-		return nil
+		return nil //nolint:nilerr // intentional: patchModelJSON error means non-JSON body; forward as-is
 	}
 	r.Body = io.NopCloser(bytes.NewReader(patched))
 	r.ContentLength = int64(len(patched))

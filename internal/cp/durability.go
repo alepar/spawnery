@@ -8,7 +8,6 @@ import (
 	"connectrpc.com/connect"
 
 	"spawnery/internal/cp/journalkeys"
-	"spawnery/internal/cp/store"
 	"spawnery/internal/manifest"
 	"spawnery/internal/secrets/journalkey"
 )
@@ -133,24 +132,3 @@ func (s *Server) liveNodeForSpawn(ctx context.Context, spawnID string) string {
 	return c.NodeID
 }
 
-// mountsAreOwnerSealed reports whether every non-ephemeral mount of spawnID has an owner-sealed
-// ciphertext in the CP store — the condition for a cross-node move without re-delivery.
-func (s *Server) mountsAreOwnerSealed(ctx context.Context, spawnID string) bool {
-	mounts, err := s.st.Spawns().GetMounts(ctx, spawnID)
-	if err != nil {
-		return false
-	}
-	for _, m := range mounts {
-		_, gerr := s.journalKeys.Get(ctx, spawnID, journalkey.SecretID(m.Name))
-		if errors.Is(gerr, journalkeys.ErrNotFound) {
-			return false
-		}
-		if gerr != nil {
-			return false
-		}
-	}
-	return len(mounts) > 0 // true only if there are mounts and all have ciphertexts
-}
-
-// noActiveMounts reports whether the spawn has no mounts (no delivery needed).
-func noActiveMounts(mounts []store.Mount) bool { return len(mounts) == 0 }
