@@ -116,9 +116,11 @@ type Manager struct {
 
 	// scrubFn is called BEFORE each CaptureDelta commit to remove noisy paths from the
 	// agent container's writable layer (live capture-time scrub, Docker lane).  Default
-	// (set by NewManagerWithBackend) calls ExecRun("rm","-rf",paths...) in the container.
+	// (set by NewManagerWithBackend) execs `rm -rf <paths>` directly against the agentID
+	// container without routing through ExecRun/store-lookup — the spawn has already been
+	// claimed from the store (removed) by the time teardown calls scrubFn.
 	// Injected as a seam in tests so the hermetic unit tests do not shell out to Docker.
-	scrubFn func(ctx context.Context, spawnID string, paths []string) error
+	scrubFn func(ctx context.Context, agentID string, paths []string) error
 
 	// squashNeeded is called when DeltaDepth reaches DeltaSquashDepth.
 	// nil → log a "SQUASH-NEEDED" warning line.
@@ -213,12 +215,23 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		secrets:    SecretInjector{Root: cfg.SecretsRoot},
 		deltaState: &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
 	}
-	// Default scrub function: exec `rm -rf <paths>` in the agent container before commit.
+	// Default scrub function: exec `rm -rf <paths>` directly in the agent container before commit.
 	// This runs while the container is still live (before pod.Stop).
+	// IMPORTANT: we exec by agentID directly — NOT via ExecRun — because by the time teardown
+	// calls scrubFn the spawn has already been removed from the store by Claim (in Stop/Suspend/
+	// Delete), so ExecRun's store.Get would always return "no agent container".
 	// The seam allows unit tests to inject a fake without shelling out to Docker.
-	m.scrubFn = func(ctx context.Context, spawnID string, paths []string) error {
+	m.scrubFn = func(ctx context.Context, agentID string, paths []string) error {
+		if agentID == "" {
+			return fmt.Errorf("scrub: no agent container id")
+		}
 		args := append([]string{"rm", "-rf"}, paths...)
-		return m.ExecRun(ctx, spawnID, args)
+		argv := execArgv(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime), agentID, args)
+		out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("exec %v: %w (%s)", args, err, out)
+		}
+		return nil
 	}
 	return m
 }
@@ -802,7 +815,10 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc bool) map
 		// Live capture-time scrub: `rm -rf <paths>` in the agent container BEFORE commit so the
 		// committed layer does not include apt caches, /tmp noise, etc. Best-effort, non-fatal.
 		if len(m.cfg.DeltaScrubPaths) > 0 && m.scrubFn != nil {
-			if serr := m.scrubFn(ctx, id, m.cfg.DeltaScrubPaths); serr != nil {
+			// Pass sp.AgentID directly: the spawn has already been removed from the store
+			// by Claim above, so passing the spawn id and re-looking-up via ExecRun would
+			// always fail with "spawn X has no agent container".
+			if serr := m.scrubFn(ctx, sp.AgentID, m.cfg.DeltaScrubPaths); serr != nil {
 				log.Printf("delta scrub for %s: %v (non-fatal; proceeding with capture)", id, serr)
 			}
 		}
