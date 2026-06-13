@@ -50,6 +50,12 @@ func main() {
 		PidsLimit:        getenvInt64("PIDS_LIMIT", 256),
 		ContainerRuntime: os.Getenv("CONTAINER_RUNTIME"),
 		DeltaCapture:     getenvBool("DELTA_CAPTURE", false),
+		// Delta tuning (spec §3/§7). Zero/empty → the manager applies its defaults
+		// (squash depth 16; scrub /var/cache/apt,/var/lib/apt/lists,/tmp; quotas off).
+		DeltaSquashDepth: int(getenvInt64("DELTA_SQUASH_DEPTH", 0)),
+		DeltaScrubPaths:  splitCSV(os.Getenv("DELTA_SCRUB_PATHS")),
+		DeltaQuotaSoftMB: getenvInt64("DELTA_QUOTA_SOFT_MB", 0),
+		DeltaQuotaHardMB: getenvInt64("DELTA_QUOTA_HARD_MB", 0),
 		AdvertiseIP:      env("NODE_ADVERTISE_IP", "127.0.0.1"),
 		UsernsMode:       env("USERNS_MODE", "off"),
 	}

@@ -16,6 +16,14 @@ gen: .make/gen
 # Image stamps — rebuild an image only when its build context changes. Each image's deploy/
 # assets (launcher, entrypoints, configs) are COPY'd into it, so they are stamp deps too —
 # without them a launch-script edit never triggered a rebuild.
+#
+# Self-healing: a stamp records "image built", but the Docker image can vanish out-of-band —
+# e.g. enabling userns-remap shifts the daemon's storage root and orphans every prior build,
+# yet the stamps still look fresh. On every make run, drop any stamp whose image is no longer
+# present in the daemon so its target rebuilds. Only probes images that have a stamp (cheap;
+# skipped on a clean tree), and a stopped daemon counts as "missing" → safe rebuild.
+$(foreach i,sidecar stubagent agent,$(if $(wildcard .make/img-$(i)),$(if $(shell docker image inspect spawnery/$(i):dev >/dev/null 2>&1 && echo ok),,$(shell rm -f .make/img-$(i)))))
+
 DEPLOY_AGENT_SRCS := $(shell find deploy/agent -type f)
 images: .make/img-sidecar .make/img-stubagent .make/img-agent
 .make/img-sidecar:   deploy/sidecar/Dockerfile   $(GO_SRCS) | .make ; docker build -t spawnery/sidecar:dev   -f $< . && touch $@
