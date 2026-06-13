@@ -9,6 +9,10 @@ services:
     # network_mode host keeps S3 (3900) and admin (3903) on 127.0.0.1 for the dev stack
     # and the garage_e2e test, matching the addresses other `just` recipes bind to.
     network_mode: host
+    # Opt this trusted dev-infra container out of the daemon's userns-remap (enabled for the
+    # writable-rootfs work, sp-ei4.1): Docker forbids host networking for containers in a user
+    # namespace ("cannot share the host's network namespace when user namespaces are enabled").
+    userns_mode: host
     volumes:
       - ./garage.toml:/etc/garage.toml:ro
       - garage-meta:/var/lib/garage/meta
