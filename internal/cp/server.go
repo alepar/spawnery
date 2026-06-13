@@ -231,6 +231,15 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 					owner = sp.OwnerID
 				}
 				_ = s.tel.Emit(telemetry.Event{Kind: "spawn_create", Owner: owner, NodeID: nodeID, NodeClass: nodeClass, SpawnID: m.Status.SpawnId, Tier: "reviewed", Storage: "managed", Timestamp: time.Now().UTC()})
+				// Spec §4 report-back: node resolves the base-image digest at create time and
+				// sends it with the ACTIVE status so the CP can persist it for cross-node resume.
+				// Best-effort: non-fatal if the digest is empty (resolution failed on the node)
+				// or if the store call fails (e.g. spawn deleted before ACTIVE lands).
+				if dg := m.Status.BaseImageDigest; dg != "" {
+					if err := s.st.Spawns().SetBaseImageDigest(ctx, m.Status.SpawnId, dg); err != nil {
+						log.Printf("spawn %s: persist base_image_digest %q: %v (non-fatal)", m.Status.SpawnId, dg, err)
+					}
+				}
 			}
 		case *nodev1.NodeMessage_Frame:
 			s.rt.FromNode(m.Frame.SpawnId, m.Frame.SessionId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected

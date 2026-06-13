@@ -308,6 +308,17 @@ func (a *attacher) status(spawnID string, ph nodev1.SpawnPhase, detail string) {
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{SpawnId: spawnID, Phase: ph, Detail: detail}}})
 }
 
+// statusActive sends phase=ACTIVE including the resolved base-image digest so the CP can
+// persist it for cross-node resume (spec §4 report-back). baseImageDigest may be empty when
+// resolution failed at create time (non-fatal; CP keeps the previously stored digest or "").
+func (a *attacher) statusActive(spawnID, baseImageDigest string) {
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{
+		SpawnId:         spawnID,
+		Phase:           nodev1.SpawnPhase_ACTIVE,
+		BaseImageDigest: baseImageDigest,
+	}}})
+}
+
 // zeroKey is the map key for a spawn's session #0 (the primary).
 func zeroKey(spawnID string) sessionKey {
 	return sessionKey{spawnID: spawnID, sessionID: SessionZeroID}
@@ -467,7 +478,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	}
 
 	sp, err := a.mgr.CreateWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation,
-		spawnlet.AgentSelection{Image: st.Image, RunnableID: st.RunnableId, Mode: st.Mode})
+		spawnlet.AgentSelection{Image: st.Image, RunnableID: st.RunnableId, Mode: st.Mode, BaseImageDigest: st.GetBaseImageDigest()})
 	if err != nil {
 		logErr("startSpawn "+st.SpawnId, err)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
@@ -492,7 +503,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		a.active++
 		a.mu.Unlock()
 		a.emitRoster(st.SpawnId)
-		a.status(st.SpawnId, nodev1.SpawnPhase_ACTIVE, "")
+		a.statusActive(st.SpawnId, sp.BaseImageDigest)
 		return
 	}
 	att, err := a.mgr.Attach(ctx, sp)
@@ -543,7 +554,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.active++
 	a.mu.Unlock()
 	a.emitRoster(st.SpawnId)
-	a.status(st.SpawnId, nodev1.SpawnPhase_ACTIVE, "")
+	a.statusActive(st.SpawnId, sp.BaseImageDigest)
 }
 
 // reapSessions removes every session of spawnID — session #0 plus any additional sessions 1..N

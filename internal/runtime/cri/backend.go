@@ -291,13 +291,16 @@ func (b *CRIPodBackend) ListManaged(ctx context.Context) ([]runtime.ManagedPod, 
 var errCRINotImpl = errors.New("not implemented on the CRI lane (sp-ei4.1.11)")
 
 // ResolveImageDigest is not yet implemented on the CRI lane (sp-ei4.1.11 fills this).
+// Returns ("", nil) so the manager's non-fatal log-and-continue path is taken.
 func (b *CRIPodBackend) ResolveImageDigest(_ context.Context, _ string) (string, error) {
-	return "", errCRINotImpl
+	return "", nil
 }
 
-// EnsureImage is not yet implemented on the CRI lane (sp-ei4.1.11 fills this).
-func (b *CRIPodBackend) EnsureImage(_ context.Context, _ string, _ string) (string, error) {
-	return "", errCRINotImpl
+// EnsureImage on the CRI lane has no delta support yet (sp-ei4.1.11 fills this).
+// Returns baseRef so that agent launch always falls back to the base image — no delta
+// is applied, but the create path succeeds (no regression on the CRI/runsc lane).
+func (b *CRIPodBackend) EnsureImage(_ context.Context, baseRef string, _ string) (string, error) {
+	return baseRef, nil
 }
 
 // CaptureDelta is not yet implemented on the CRI lane (sp-ei4.1.11 fills this).

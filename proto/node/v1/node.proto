@@ -66,7 +66,10 @@ message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string
 // signed_subkey (field 6): re-published on rotation (the node rotates at half-life) so the CP's cached
 // sub-key stays fresh without a dedicated message. Empty on heartbeats that carry no rotation.
 message Heartbeat   { uint32 active_spawns = 1; uint32 free_slots = 2; uint32 cpu_pct = 3; uint32 gpu_pct = 4; repeated RunningSpawn running = 5; bytes signed_subkey = 6; }
-message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; uint64 generation = 4; }
+// base_image_digest (field 5): the content-addressable base-image digest resolved by the node
+// at create time (spec §4). Non-empty only when phase=ACTIVE on the initial create, so the CP
+// can record it for cross-node resume. Empty on phase transitions that have no new digest.
+message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; uint64 generation = 4; string base_image_digest = 5; }
 // auth (field 20): the client's signed intent + aud=node access token (A4). The node verifies
 // the full chain: AS sig on token -> aud=node -> owner match -> SPKI/cnf match -> intent sig
 // -> field-by-field correspondence -> freshness -> jti uniqueness. In verify-and-log mode
