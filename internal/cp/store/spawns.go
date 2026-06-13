@@ -263,7 +263,8 @@ func (r *spawnRepo) ClaimStarting(ctx context.Context, id string, from []Status)
 }
 
 func (r *spawnRepo) SetActive(ctx context.Context, id, nodeID string, gen int64) error {
-	if err := r.guardStatus(ctx, id, []Status{Starting}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+	// Accepts Starting (fresh create / recreate) and Resuming (resume path, sp-u53.7.5).
+	if err := r.guardStatus(ctx, id, []Status{Starting, Resuming}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
 		return q.Set("status = ?", Active)
 	}); err != nil {
 		return err
@@ -308,15 +309,17 @@ func (r *spawnRepo) SetSuspended(ctx context.Context, id string, gen int64) erro
 	return r.endLiveContainer(ctx, id, PhaseStopped, ts)
 }
 
-// RevertSuspended rolls a starting episode back to suspended (migration defined-failure path). It is
-// gen-fenced on the (failed) target container and ends that row, so the spawn returns to exactly the
-// suspended state it held before the migrate attempt — the prior suspend's per-mount markers remain
-// the recoverable state, and the user can resume on the source. starting -> suspended.
+// RevertSuspended rolls a starting or resuming episode back to suspended (migration defined-failure
+// path). It is gen-fenced on the (failed) target container and ends that row, so the spawn returns
+// to exactly the suspended state it held before the migrate attempt — the prior suspend's per-mount
+// markers remain the recoverable state, and the user can resume on the source.
+// starting|resuming -> suspended.
 func (r *spawnRepo) RevertSuspended(ctx context.Context, id string, gen int64) error {
 	if err := r.guardContainerGen(ctx, id, gen); err != nil {
 		return err
 	}
-	if err := r.guardStatus(ctx, id, []Status{Starting}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+	// Accepts Starting (old path) and Resuming (sp-u53.7.5: resume now passes through Resuming).
+	if err := r.guardStatus(ctx, id, []Status{Starting, Resuming}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
 		return q.Set("status = ?", Suspended).Set("suspended_at = last_used_at")
 	}); err != nil {
 		return err
@@ -329,7 +332,8 @@ func (r *spawnRepo) RevertSuspended(ctx context.Context, id string, gen int64) e
 }
 
 func (r *spawnRepo) SetError(ctx context.Context, id string) error {
-	if err := r.guardStatus(ctx, id, []Status{Starting, Active, Suspending, Unreachable}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+	// Includes Resuming (sp-u53.7.5: failed resume can bail from Resuming status).
+	if err := r.guardStatus(ctx, id, []Status{Starting, Active, Suspending, Resuming, Unreachable}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
 		return q.Set("status = ?", Errored)
 	}); err != nil {
 		return err

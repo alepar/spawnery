@@ -573,11 +573,11 @@ func TestReconcileInventory(t *testing.T) {
 	}
 }
 
-// Regression: a suspend in flight makes the node stop reporting the torn-down container while the
-// CP row is still Active (SetSuspending is deferred to the node's reply). The inventory reconcile
-// must NOT flip such a container to Unreachable — otherwise the suspend's SetSuspending (guarded on
-// Active) fails with a transition conflict (the "spawns fail to suspend" bug).
-func TestReconcileInventorySkipsSuspendInFlight(t *testing.T) {
+// A suspend in flight writes Active→Suspending to the DB BEFORE the node round-trip (sp-u53.7.5).
+// The inventory reconcile must NOT flip a Suspending spawn to Unreachable — the container is still
+// PhaseActive but the transient status signals "driver owns this". Also verified: a claimed Active
+// spawn (not yet transitioned) is also skipped.
+func TestReconcileInventorySkipsSuspendingAndClaimed(t *testing.T) {
 	s, reg, _ := newTestServer(t)
 	stop := startAcker(t, s, reg)
 	defer stop()
@@ -590,21 +590,36 @@ func TestReconcileInventorySkipsSuspendInFlight(t *testing.T) {
 	id := resp.Msg.SpawnId
 	waitActive(t, s, id)
 
-	// A suspend is in flight: a waiter is registered (as SuspendSpawn does before the node round-trip).
-	_ = s.suspends.register(id, 1)
-	defer s.suspends.unregister(id)
-
-	// The node stops reporting the (being-suspended) container. It must STAY active, not flip.
-	s.reconcileInventory(ctx, "n1", &capSender{}, nil)
-	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Active {
-		t.Fatalf("suspend-in-flight spawn must stay active (not unreachable), got %v", sp.Status)
+	// Simulate the suspend driver: acquire a DB claim then transition Active→Suspending before
+	// the node round-trip. The container phase stays PhaseActive throughout.
+	bgCtx := context.Background()
+	sp, _ := s.st.Spawns().Get(bgCtx, id)
+	c, _, _ := s.st.Spawns().LiveContainer(bgCtx, id)
+	gen := c.Generation
+	leaseID := "test-suspend-lease"
+	now := time.Now()
+	newSeq, err := s.st.Spawns().Acquire(bgCtx, id, "test-cp", leaseID,
+		now.UnixNano(), now.Add(time.Minute).UnixNano(), sp.StatusSeq)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if _, err := s.st.Spawns().TransitionClaimed(bgCtx, id, leaseID, newSeq, gen, store.Suspending); err != nil {
+		t.Fatalf("TransitionClaimed Active→Suspending: %v", err)
 	}
 
-	// Once the suspend round-trip ends (waiter gone), the reconcile resumes its normal sweep.
-	s.suspends.unregister(id)
+	// The node stops reporting the (being-suspended) container. Reconcile must SKIP it — status is
+	// Suspending (transient), so it is not flipped to Unreachable.
 	s.reconcileInventory(ctx, "n1", &capSender{}, nil)
-	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Unreachable {
-		t.Fatalf("after suspend ends, unreported spawn must be marked unreachable, got %v", sp.Status)
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Suspending {
+		t.Fatalf("suspending spawn must stay suspending (not unreachable), got %v", sp.Status)
+	}
+
+	// Release the claim (simulates the driver completing or the claim expiring). A stranded
+	// Suspending spawn is STILL skipped by the reconcile — recovery sweep handles it (sp-u53.7.6).
+	_ = s.st.Spawns().Release(bgCtx, id, leaseID)
+	s.reconcileInventory(ctx, "n1", &capSender{}, nil)
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Suspending {
+		t.Fatalf("stranded suspending spawn must remain suspending (not unreachable), got %v", sp.Status)
 	}
 }
 

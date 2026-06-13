@@ -25,3 +25,15 @@ func inTx(t *testing.T, st Store, fn func(tx Store) error) {
 		t.Fatalf("WithTx: %v", err)
 	}
 }
+
+// ExpireClaim forcibly clears the claim columns on a spawn row (simulates lease expiry or
+// preemption). Test-only helper; production code must not use this.
+func ExpireClaim(ctx context.Context, st Store, id string) error {
+	db := st.(*bunStore).db
+	_, err := db.NewUpdate().Model((*Spawn)(nil)).
+		Set("claim_holder = NULL").
+		Set("claim_lease_id = NULL").
+		Set("claim_deadline = NULL").
+		Where("id = ?", id).Exec(ctx)
+	return err
+}
