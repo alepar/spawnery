@@ -116,6 +116,7 @@ message SuspendComplete {
   uint64 generation = 2;
   repeated MountMarker markers = 3;
   repeated RootfsArtifact rootfs_artifacts = 4;
+  string error = 5; // non-empty on a fail-closed suspend gate failure; empty on success
 }
 // auth (field 10): the client's session-open signed intent + aud=node access token (A4).
 // asserted_owner (field 11): CP-asserted owner for the cloud owner-binding check.
