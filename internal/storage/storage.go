@@ -4,6 +4,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -48,7 +49,7 @@ func (s *Scratch) Prepare(_ context.Context, spawnID, mountName, seedDir string,
 				log.Printf("storage: chown %s to uid %d failed (%v); falling back to world-writable", hostDir, agentUID, err)
 				degraded = true
 			} else {
-				return "", err
+				return "", fmt.Errorf("chown mount dir: %w", err)
 			}
 		}
 	}
@@ -107,7 +108,9 @@ func copyDirFiles(srcDir, dstDir string, filePerm os.FileMode, chownUID int) err
 			return err
 		}
 		if chownUID >= 0 {
-			if err := osChown(dst, chownUID, chownUID); err != nil && !errors.Is(err, os.ErrPermission) {
+			// Dir chown already succeeded above, so EPERM here would be contradictory;
+			// propagate any error rather than silently leaving files root-owned.
+			if err := osChown(dst, chownUID, chownUID); err != nil {
 				return err
 			}
 		}
