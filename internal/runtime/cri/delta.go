@@ -21,10 +21,12 @@ type deltaEngine interface {
 	Capture(ctx context.Context, snapshotKey, name, baseRef, leaseID string) (ref string, deltaSize int64, err error)
 	// Release drops the per-spawn image record and its pinning lease (GC hook).
 	Release(ctx context.Context, name, leaseID string) error
-	// Export streams the per-spawn delta image archive.
-	Export(ctx context.Context, name, leaseID string, w io.Writer) error
-	// Import loads a per-spawn delta image archive and pins it with leaseID.
-	Import(ctx context.Context, name, baseRef, leaseID string, r io.Reader) error
+	// ExportTopLayer streams ONLY the per-spawn image's top (delta) layer blob — not the whole
+	// image. Delta-only migration: the base stays resident on both nodes (sp-ei4.1.14).
+	ExportTopLayer(ctx context.Context, name string, w io.Writer) error
+	// AssembleOnBase writes the shipped delta layer blob and reconstructs newTag = baseRef's
+	// layers + that delta, pinned with leaseID. baseRef must already be present on the target.
+	AssembleOnBase(ctx context.Context, baseRef, newTag, leaseID string, r io.Reader) error
 	// Pause/Resume the agent container's containerd task (suspend quiescence, spec §3).
 	// key is the CRI container id (k8s.io namespace).
 	Pause(ctx context.Context, key string) error
@@ -150,7 +152,7 @@ func (b *CRIPodBackend) ExportDelta(ctx context.Context, spawnID string, w io.Wr
 		return fmt.Errorf("cri delta engine: %w", err)
 	}
 	name := runtime.DeltaTag(spawnID)
-	if err := eng.Export(ctx, name, deltaLeaseID(spawnID), w); err != nil {
+	if err := eng.ExportTopLayer(ctx, name, w); err != nil {
 		return fmt.Errorf("cri export delta %s: %w", name, err)
 	}
 	return nil
@@ -193,7 +195,7 @@ func (b *CRIPodBackend) ImportDelta(ctx context.Context, spawnID, baseRef string
 		return "", fmt.Errorf("cri delta engine: %w", err)
 	}
 	name := runtime.DeltaTag(spawnID)
-	if err := eng.Import(ctx, name, baseRef, deltaLeaseID(spawnID), r); err != nil {
+	if err := eng.AssembleOnBase(ctx, baseRef, name, deltaLeaseID(spawnID), r); err != nil {
 		return "", fmt.Errorf("cri import delta %s: %w", name, err)
 	}
 	return name, nil

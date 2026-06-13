@@ -34,7 +34,6 @@ type fakeDeltaEngine struct {
 	closeCalled        bool
 
 	exportName    string
-	exportLeaseID string
 	exportBytes   []byte
 	exportErr     error
 
@@ -68,21 +67,20 @@ func (f *fakeDeltaEngine) Release(_ context.Context, name, leaseID string) error
 	return f.releaseErr
 }
 
-func (f *fakeDeltaEngine) Export(_ context.Context, name, leaseID string, w io.Writer) error {
+func (f *fakeDeltaEngine) ExportTopLayer(_ context.Context, name string, w io.Writer) error {
 	f.exportName = name
-	f.exportLeaseID = leaseID
 	if f.exportErr != nil {
 		return f.exportErr
 	}
 	if len(f.exportBytes) == 0 {
-		f.exportBytes = []byte("cri-delta-tar")
+		f.exportBytes = []byte("cri-delta-layer")
 	}
 	_, err := w.Write(f.exportBytes)
 	return err
 }
 
-func (f *fakeDeltaEngine) Import(_ context.Context, name, baseRef, leaseID string, r io.Reader) error {
-	f.importName = name
+func (f *fakeDeltaEngine) AssembleOnBase(_ context.Context, baseRef, newTag, leaseID string, r io.Reader) error {
+	f.importName = newTag
 	f.importBaseRef = baseRef
 	f.importLeaseID = leaseID
 	if f.importErr != nil {
@@ -429,9 +427,6 @@ func TestExportDeltaUsesDeterministicSpawnTag(t *testing.T) {
 	}
 	if fakeEng.exportName != runtime.DeltaTag(spawnID) {
 		t.Fatalf("Export name = %q, want %q", fakeEng.exportName, runtime.DeltaTag(spawnID))
-	}
-	if fakeEng.exportLeaseID != deltaLeaseID(spawnID) {
-		t.Fatalf("Export lease = %q, want %q", fakeEng.exportLeaseID, deltaLeaseID(spawnID))
 	}
 	if got := buf.Bytes(); !bytes.Equal(got, []byte("cri-layer-tar")) {
 		t.Fatalf("exported bytes = %q", got)

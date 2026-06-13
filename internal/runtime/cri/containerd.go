@@ -6,6 +6,7 @@ package cri
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,7 +16,6 @@ import (
 	ctrclient "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
-	imagearchive "github.com/containerd/containerd/v2/core/images/archive"
 	"github.com/containerd/containerd/v2/core/leases"
 	pkgrootfs "github.com/containerd/containerd/v2/pkg/rootfs"
 	"github.com/containerd/errdefs"
@@ -80,56 +80,61 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 		return "", 0, fmt.Errorf("create diff for snapshot %s: %w", snapshotKey, err)
 	}
 
-	// Derive the uncompressed diffID (OCI image config rootfs.diff_ids uses uncompressed digests).
-	cs := e.client.ContentStore()
-	diffID, err := images.GetDiffID(ctx, cs, deltaDesc)
+	// Uncompressed diffID for the config rootfs.diff_ids (GetDiffID reads the
+	// containerd.io/uncompressed label CreateDiff set, else decompresses the gzip blob).
+	diffID, err := images.GetDiffID(ctx, e.client.ContentStore(), deltaDesc)
 	if err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
 		return "", 0, fmt.Errorf("get diffid for delta layer: %w", err)
 	}
+	// Assemble per-spawn image `name` = base layers + the freshly-diffed delta descriptor.
+	if err := e.assembleDeltaImage(ctx, name, baseRef, deltaDesc, diffID); err != nil {
+		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
+		return "", 0, err
+	}
+	// Return the compressed byte size of the delta blob so the caller can guard against
+	// an empty/corrupt diff (moby#47065-class check in delta.go).
+	return name, deltaDesc.Size, nil
+}
 
-	// Read the base image manifest and config.
+// assembleDeltaImage builds + registers per-spawn image `name` = baseRef's layers + deltaDesc,
+// appending the delta's uncompressed diffID to the config's rootfs.diff_ids. ctx MUST already
+// carry the pinning lease — the caller owns the lease lifecycle and deletes it on error; this
+// helper never touches the lease. Shared by Capture (delta from a fresh local diff) and
+// AssembleOnBase (delta blob shipped from another node, sp-ei4.1.14).
+func (e *containerdEngine) assembleDeltaImage(ctx context.Context, name, baseRef string, deltaDesc ocispec.Descriptor, diffID digest.Digest) error {
+	cs := e.client.ContentStore()
 	baseImg, err := e.client.ImageService().Get(ctx, baseRef)
 	if err != nil {
-		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", 0, fmt.Errorf("get base image %s: %w", baseRef, err)
+		return fmt.Errorf("get base image %s: %w", baseRef, err)
 	}
 	baseMfst, err := images.Manifest(ctx, cs, baseImg.Target, platforms.Default())
 	if err != nil {
-		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", 0, fmt.Errorf("read base manifest: %w", err)
+		return fmt.Errorf("read base manifest: %w", err)
 	}
 	cfgBlob, err := content.ReadBlob(ctx, cs, baseMfst.Config)
 	if err != nil {
-		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", 0, fmt.Errorf("read base config: %w", err)
+		return fmt.Errorf("read base config: %w", err)
 	}
 	var cfg ocispec.Image
 	if err := json.Unmarshal(cfgBlob, &cfg); err != nil {
-		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", 0, fmt.Errorf("parse base config: %w", err)
+		return fmt.Errorf("parse base config: %w", err)
 	}
-
-	// Build the new image config: append the delta diffID to RootFS.DiffIDs.
 	cfg.RootFS.DiffIDs = append(cfg.RootFS.DiffIDs, diffID)
 	newCfgJSON, err := json.Marshal(cfg)
 	if err != nil {
-		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", 0, fmt.Errorf("marshal new config: %w", err)
+		return fmt.Errorf("marshal new config: %w", err)
 	}
-	newCfgDigest := digest.FromBytes(newCfgJSON)
 	newCfgDesc := ocispec.Descriptor{
 		MediaType: baseMfst.Config.MediaType,
-		Digest:    newCfgDigest,
+		Digest:    digest.FromBytes(newCfgJSON),
 		Size:      int64(len(newCfgJSON)),
 	}
 	// WriteBlob is idempotent: if the blob already exists (same digest), it returns nil.
 	if err := content.WriteBlob(ctx, cs, "spawnery-config-"+name, bytes.NewReader(newCfgJSON), newCfgDesc); err != nil {
-		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", 0, fmt.Errorf("write new config: %w", err)
+		return fmt.Errorf("write new config: %w", err)
 	}
 
-	// Build the new manifest: base layers + the delta descriptor.
 	newLayers := make([]ocispec.Descriptor, len(baseMfst.Layers)+1)
 	copy(newLayers, baseMfst.Layers)
 	newLayers[len(baseMfst.Layers)] = deltaDesc
@@ -140,8 +145,7 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	// rootfs. This is the real reference check; delta.go's size>0 check is a separate diff-sanity
 	// guard against an empty/corrupt CreateDiff.
 	if last := newLayers[len(newLayers)-1]; last.Digest == "" || last.Digest != deltaDesc.Digest {
-		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", 0, fmt.Errorf("assembled manifest does not reference delta descriptor %s (moby#47065 guard)", deltaDesc.Digest)
+		return fmt.Errorf("assembled manifest does not reference delta descriptor %s (moby#47065 guard)", deltaDesc.Digest)
 	}
 	newMfst := ocispec.Manifest{
 		Versioned: specs.Versioned{SchemaVersion: 2},
@@ -151,22 +155,18 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	}
 	newMfstJSON, err := json.Marshal(newMfst)
 	if err != nil {
-		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", 0, fmt.Errorf("marshal new manifest: %w", err)
+		return fmt.Errorf("marshal new manifest: %w", err)
 	}
-	newMfstDigest := digest.FromBytes(newMfstJSON)
 	newMfstDesc := ocispec.Descriptor{
 		MediaType: ocispec.MediaTypeImageManifest,
-		Digest:    newMfstDigest,
+		Digest:    digest.FromBytes(newMfstJSON),
 		Size:      int64(len(newMfstJSON)),
 	}
 	if err := content.WriteBlob(ctx, cs, "spawnery-manifest-"+name, bytes.NewReader(newMfstJSON), newMfstDesc); err != nil {
-		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", 0, fmt.Errorf("write new manifest: %w", err)
+		return fmt.Errorf("write new manifest: %w", err)
 	}
 
 	// Create or update the image record so the CRI image service can resolve it.
-	// The io.cri-containerd.image=managed label marks it as CRI-resolvable.
 	imgRecord := images.Image{
 		Name:   name,
 		Target: newMfstDesc,
@@ -175,18 +175,13 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	imgSvc := e.client.ImageService()
 	if _, err := imgSvc.Create(ctx, imgRecord); err != nil {
 		if !errdefs.IsAlreadyExists(err) {
-			_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-			return "", 0, fmt.Errorf("create image record %s: %w", name, err)
+			return fmt.Errorf("create image record %s: %w", name, err)
 		}
 		if _, err := imgSvc.Update(ctx, imgRecord); err != nil {
-			_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-			return "", 0, fmt.Errorf("update image record %s: %w", name, err)
+			return fmt.Errorf("update image record %s: %w", name, err)
 		}
 	}
-
-	// Return the compressed byte size of the delta blob so the caller can guard against
-	// an empty/corrupt diff (moby#47065-class check in delta.go).
-	return name, deltaDesc.Size, nil
+	return nil
 }
 
 // Pause pauses the containerd task for the container identified by key (CRI container id in
@@ -244,43 +239,94 @@ func (e *containerdEngine) Release(ctx context.Context, name, leaseID string) er
 	return nil
 }
 
-func (e *containerdEngine) Export(ctx context.Context, name, leaseID string, w io.Writer) error {
-	if err := e.client.Export(ctx, w, imagearchive.WithImage(e.client.ImageService(), name)); err != nil {
-		return fmt.Errorf("export image %s: %w", name, err)
+// ExportTopLayer streams ONLY image `name`'s top (delta) layer blob from the content store — not
+// the whole image archive (sp-ei4.1.14). The base layers stay resident on both nodes; only the
+// writable delta crosses the wire, reassembled on the target by AssembleOnBase. The blob is the
+// gzip layer tar produced by CreateDiff, shipped as-is.
+func (e *containerdEngine) ExportTopLayer(ctx context.Context, name string, w io.Writer) error {
+	cs := e.client.ContentStore()
+	img, err := e.client.ImageService().Get(ctx, name)
+	if err != nil {
+		return fmt.Errorf("get image %s: %w", name, err)
+	}
+	mfst, err := images.Manifest(ctx, cs, img.Target, platforms.Default())
+	if err != nil {
+		return fmt.Errorf("read manifest %s: %w", name, err)
+	}
+	if len(mfst.Layers) == 0 {
+		return fmt.Errorf("image %s has no layers", name)
+	}
+	top := mfst.Layers[len(mfst.Layers)-1]
+	ra, err := cs.ReaderAt(ctx, top)
+	if err != nil {
+		return fmt.Errorf("open top layer blob %s: %w", top.Digest, err)
+	}
+	defer ra.Close()
+	var src io.Reader = content.NewReader(ra)
+	// Ship the UNCOMPRESSED tar so the Kopia journal's CDC dedup collapses successive deltas
+	// (a 1-byte source change rewrites a gzip stream wholesale). CreateDiff stores the layer
+	// gzip-compressed; decompress it here. AssembleOnBase re-stores it uncompressed.
+	if strings.HasSuffix(top.MediaType, "gzip") {
+		gz, err := gzip.NewReader(src)
+		if err != nil {
+			return fmt.Errorf("open gzip top layer of %s: %w", name, err)
+		}
+		defer gz.Close()
+		src = gz
+	}
+	if _, err := io.Copy(w, src); err != nil {
+		return fmt.Errorf("stream top layer of %s: %w", name, err)
 	}
 	return nil
 }
 
-func (e *containerdEngine) Import(ctx context.Context, name, baseRef, leaseID string, r io.Reader) error {
+// AssembleOnBase writes the shipped delta layer blob into the content store and reconstructs
+// per-spawn image `newTag` = baseRef's layers + that delta, pinned by leaseID (sp-ei4.1.14). The
+// base must already be present on the target (CP-pinned by digest). The blob is the gzip layer tar
+// from ExportTopLayer; assembleDeltaImage recomputes its uncompressed diffID for the config.
+func (e *containerdEngine) AssembleOnBase(ctx context.Context, baseRef, newTag, leaseID string, r io.Reader) error {
 	if baseRef != "" {
 		if _, err := e.client.ImageService().Get(ctx, baseRef); err != nil {
 			return fmt.Errorf("get base image %s: %w", baseRef, err)
 		}
 	}
-
 	leaseMgr := e.client.LeasesService()
 	if _, err := leaseMgr.Create(ctx, leases.WithID(leaseID)); err != nil && !errdefs.IsAlreadyExists(err) {
 		return fmt.Errorf("create lease %s: %w", leaseID, err)
 	}
 	ctx = leases.WithLease(ctx, leaseID)
+	cs := e.client.ContentStore()
 
-	imgs, err := e.client.Import(ctx, r,
-		ctrclient.WithImageRefTranslator(func(string) string { return name }),
-		ctrclient.WithIndexName(name),
-		ctrclient.WithImageLabels(map[string]string{"io.cri-containerd.image": "managed"}),
-	)
+	// Stream the delta blob into the content store; its digest is computed on commit.
+	cw, err := content.OpenWriter(ctx, cs, content.WithRef("spawnery-delta-"+newTag))
 	if err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return fmt.Errorf("import image archive for %s: %w", name, err)
+		return fmt.Errorf("open content writer: %w", err)
 	}
-	for _, img := range imgs {
-		if img.Name == name {
-			return nil
-		}
-	}
-	if _, err := e.client.ImageService().Get(ctx, name); err != nil {
+	size, err := io.Copy(cw, r)
+	if err != nil {
+		_ = cw.Close()
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return fmt.Errorf("imported archive did not create %s: %w", name, err)
+		return fmt.Errorf("write delta blob: %w", err)
+	}
+	if err := cw.Commit(ctx, size, ""); err != nil && !errdefs.IsAlreadyExists(err) {
+		_ = cw.Close()
+		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
+		return fmt.Errorf("commit delta blob: %w", err)
+	}
+	dgst := cw.Digest()
+	_ = cw.Close()
+
+	// The shipped blob is the UNCOMPRESSED layer tar (ExportTopLayer decompressed it), so its
+	// content digest IS the diffID and the layer mediatype is the uncompressed tar type.
+	deltaDesc := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageLayer,
+		Digest:    dgst,
+		Size:      size,
+	}
+	if err := e.assembleDeltaImage(ctx, newTag, baseRef, deltaDesc, dgst); err != nil {
+		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
+		return err
 	}
 	return nil
 }
