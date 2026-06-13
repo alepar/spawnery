@@ -769,6 +769,31 @@ func (m *Manager) startJournalWatchers(id string, gen uint64, mounts []journal.M
 	return watchers
 }
 
+// snapshotJournal takes the final per-mount journal snapshot, stringifies the resulting manifest
+// ids into a markers map, and persists them to journalState (for same-node resume without CP
+// protocol). The caller is responsible for the `m.journal != nil && len(sp.JournalMounts) > 0`
+// guard. journal.Close is intentionally NOT called here — it stays in teardown so FinishSuspend
+// (snapshot=false) still closes the repo.
+func (m *Manager) snapshotJournal(ctx context.Context, sp *Spawn) (map[string]string, error) {
+	id := sp.ID
+	ids, err := m.journal.FinalSnapshot(ctx, id, sp.Generation, sp.JournalMounts)
+	if err != nil {
+		return nil, err
+	}
+	markers := map[string]string{}
+	for mount, mid := range ids {
+		markers[mount] = string(mid)
+		log.Printf("journal: spawn=%s gen=%d mount=%s final manifest=%s", id, sp.Generation, mount, mid)
+	}
+	if m.journalState != nil {
+		rec := journalRecord{Generation: sp.Generation, Manifests: ids}
+		if serr := m.journalState.Save(id, rec); serr != nil {
+			log.Printf("journal state save for %s: %v", id, serr)
+		}
+	}
+	return markers, nil
+}
+
 func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceGeneration uint64, baseRef string, artifacts []RootfsArtifact) error {
 	if m.journal == nil {
 		return fmt.Errorf("rootfs artifact restore for %s: no journaler configured", id)
@@ -842,7 +867,8 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
-	_, _ = m.teardown(ctx, sp, false, false, false)
+	// snapshot=true: best-effort final journal snapshot, never blocks teardown (fail-closed is suspend-gate-only).
+	_, _ = m.teardown(ctx, sp, false, false, false, true)
 	return nil
 }
 
@@ -858,7 +884,8 @@ func (m *Manager) Suspend(ctx context.Context, id string) (map[string]string, er
 	if !ok {
 		return nil, fmt.Errorf("unknown spawn %s", id)
 	}
-	res, err := m.teardown(ctx, sp, true, false, false)
+	// snapshot=true: best-effort final journal snapshot, never blocks teardown (fail-closed is suspend-gate-only).
+	res, err := m.teardown(ctx, sp, true, false, false, true)
 	return res.MountMarkers, err
 }
 
@@ -867,7 +894,87 @@ func (m *Manager) SuspendForMigration(ctx context.Context, id string, captureRoo
 	if !ok {
 		return SuspendResult{}, fmt.Errorf("unknown spawn %s", id)
 	}
-	return m.teardown(ctx, sp, true, false, captureRootfsArtifact)
+	// snapshot=true: best-effort final journal snapshot, never blocks teardown (fail-closed is suspend-gate-only).
+	return m.teardown(ctx, sp, true, false, captureRootfsArtifact, true)
+}
+
+// SnapshotForSuspend is the non-destructive suspend GATE (spec §4, fail-closed): it quiesces
+// the agent (Pause), takes the final journal snapshot, and returns the per-mount persist markers
+// — WITHOUT removing the spawn from the store or stopping the pod. The node calls this BEFORE
+// reaping ACP sessions, so sessions are cleanly torn down between the quiesce and the teardown.
+//
+// On snapshot SUCCESS the agent is left PAUSED and the journal watchers are stopped (roast-M17:
+// no writes between snapshot and pod.Stop). The caller must follow up with FinishSuspend to
+// complete the teardown.
+//
+// On snapshot FAILURE the agent is Unpaused and the journal watchers are restarted — the spawn
+// is fully restored to its live state and an error is returned. The caller may retry or leave
+// the spawn running.
+//
+// Pause failure is NON-FATAL (spec §3): we log and snapshot the live tree anyway. The roast-M17
+// guarantee (no writes between snapshot and stop) is best-effort when Pause fails.
+func (m *Manager) SnapshotForSuspend(ctx context.Context, id string) (SuspendResult, error) {
+	sp, ok := m.store.Get(id)
+	if !ok {
+		return SuspendResult{}, fmt.Errorf("unknown spawn %s", id)
+	}
+	// Cleanup/abort must run even if the caller's ctx is already cancelled.
+	ctx = context.WithoutCancel(ctx)
+
+	// Stop continuous journal watchers so no background RequestSnapshot races the snapshot below.
+	for _, w := range sp.journalWatchers {
+		w.Stop()
+	}
+	sp.journalWatchers = nil
+
+	h := &runtime.PodHandle{
+		PodIP:     sp.PodIP,
+		AgentID:   sp.AgentID,
+		NetnsPath: sp.NetnsPath,
+		SidecarID: sp.SidecarID,
+		SandboxID: sp.SandboxID,
+	}
+	if perr := m.pod.Pause(ctx, h); perr != nil {
+		// Non-fatal (spec §3): snapshot the live tree. Roast-M17 is best-effort.
+		log.Printf("suspend gate: pause %s: %v (non-fatal; snapshotting live tree)", id, perr)
+	}
+
+	result := SuspendResult{MountMarkers: map[string]string{}}
+	if m.journal != nil && len(sp.JournalMounts) > 0 {
+		markers, err := m.snapshotJournal(ctx, sp)
+		if err != nil {
+			// Abort/restore: unpause so the agent can keep running, restart watchers.
+			if uerr := m.pod.Unpause(ctx, h); uerr != nil {
+				log.Printf("suspend gate abort: unpause %s: %v", id, uerr)
+			}
+			sp.journalWatchers = m.startJournalWatchers(id, sp.Generation, sp.JournalMounts)
+			return SuspendResult{}, fmt.Errorf("suspend gate: journal final snapshot for %s: %w", id, err)
+		}
+		result.MountMarkers = markers
+	}
+	// Success: agent left paused, watchers stopped, markers persisted by snapshotJournal.
+	// Spawn stays in store until FinishSuspend claims and tears it down.
+	return result, nil
+}
+
+// FinishSuspend completes the suspend teardown started by SnapshotForSuspend (spec §4): it
+// claims the spawn from the store, captures the rootfs delta (on the paused container — commit
+// works on paused containers), stops the pod, removes the egress floor, finalizes mount dirs,
+// and closes the journal repo. The journal snapshot was already taken by SnapshotForSuspend, so
+// FinishSuspend passes snapshot=false to teardown.
+//
+// The returned SuspendResult carries RootfsArtifacts (when captureRootfsArtifact=true and
+// DeltaCapture is enabled). MountMarkers is intentionally empty — the node already holds them
+// from the SnapshotForSuspend call and does not need them re-returned here.
+func (m *Manager) FinishSuspend(ctx context.Context, id string, captureRootfsArtifact bool) (SuspendResult, error) {
+	sp, ok := m.store.Claim(id)
+	if !ok {
+		return SuspendResult{}, fmt.Errorf("unknown spawn %s", id)
+	}
+	// capture=true: rootfs CaptureDelta on the paused container (non-fatal as always).
+	// gc=false: delta image preserved for same-node restart-resume.
+	// snapshot=false: SnapshotForSuspend already took the final journal snapshot.
+	return m.teardown(ctx, sp, true, false, captureRootfsArtifact, false)
 }
 
 // Delete tears down the spawn (without capturing a delta) and runs GC: releases the per-spawn
@@ -883,7 +990,8 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
-	_, _ = m.teardown(ctx, sp, false, true, false)
+	// snapshot=true: best-effort final journal snapshot, never blocks teardown (fail-closed is suspend-gate-only).
+	_, _ = m.teardown(ctx, sp, false, true, false, true)
 	return nil
 }
 
@@ -896,7 +1004,9 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 //   - capture=true (Suspend path): trigger the rootfs delta capture BEFORE pod.Stop (live container).
 //   - gc=true (Delete path): release the delta image after pod.Stop and purge durable state files.
 //     (Stop and Suspend both have gc=false — the delta image must survive for same-node restart-resume.)
-func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureRootfsArtifact bool) (SuspendResult, error) {
+//   - snapshot=true: take a final journal snapshot + persist node-local state (best-effort, non-fatal).
+//     false when SnapshotForSuspend (the gate) already did it — FinishSuspend calls with snapshot=false.
+func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureRootfsArtifact, snapshot bool) (SuspendResult, error) {
 	id := sp.ID
 	result := SuspendResult{MountMarkers: map[string]string{}}
 	var resultErr error
@@ -999,27 +1109,18 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 	// so drain pending snapshots and take the final per-mount snapshot BEFORE the
 	// scratch backend nukes the host dirs below. Guarded: only runs when a
 	// journaler is installed and this spawn actually has journaled mounts —
-	// scratch-only spawns skip it entirely.
+	// scratch-only spawns skip it entirely. snapshot=false when SnapshotForSuspend
+	// (the gate) already handled this — FinishSuspend skips the snapshot and lets
+	// Close alone finalize the repo.
 	if m.journal != nil && len(sp.JournalMounts) > 0 {
-		ids, err := m.journal.FinalSnapshot(ctx, id, sp.Generation, sp.JournalMounts)
-		if err != nil {
+		if snapshot {
 			// Non-fatal: teardown must still complete. With no markers, the CP records an empty
 			// marker set (a same-node resume falls back to the seeded scratch dir).
-			log.Printf("journal final snapshot for %s: %v", id, err)
-		} else {
-			// Node-local: persist the pinned manifest ids durably on this node so
-			// the next same-node resume (Create) restores from them — no CP
-			// protocol required (transient-tier §4). The same ids are returned to
-			// the caller as the per-mount persist markers the CP records on suspend
-			// (CP↔node suspend-marker protocol, design §3 M6, sp-a7fs).
-			for mount, mid := range ids {
-				result.MountMarkers[mount] = string(mid)
-				log.Printf("journal: spawn=%s gen=%d mount=%s final manifest=%s", id, sp.Generation, mount, mid)
-			}
-			if m.journalState != nil {
-				rec := journalRecord{Generation: sp.Generation, Manifests: ids}
-				if serr := m.journalState.Save(id, rec); serr != nil {
-					log.Printf("journal state save for %s: %v", id, serr)
+			if markers, serr := m.snapshotJournal(ctx, sp); serr != nil {
+				log.Printf("journal final snapshot for %s: %v", id, serr)
+			} else {
+				for k, v := range markers {
+					result.MountMarkers[k] = v
 				}
 			}
 		}

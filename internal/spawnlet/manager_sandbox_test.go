@@ -29,6 +29,14 @@ type fakePodBackend struct {
 	// ops records call order for ordering assertions, e.g. "capture:<id>", "stop".
 	ops []string
 
+	// Pause/Unpause tracking (dedicated fields — NOT in ops to avoid shifting indices
+	// that existing scrub/reconcile tests assert against).
+	paused        bool   // true after Pause, false after Unpause
+	pauseCount    int    // total Pause calls
+	unpauseCount  int    // total Unpause calls
+	pausedAgentID string // AgentID from the most-recent Pause call
+	pauseErr      error  // if non-nil, Pause returns this error (non-fatal pause test)
+
 	// listManaged controls ListManaged return value (for ReapOrphans tests).
 	listManaged []runtime.ManagedPod
 
@@ -96,9 +104,23 @@ func (f *fakePodBackend) ImportDelta(_ context.Context, spawnID, _ string, r io.
 	return runtime.DeltaTag(spawnID), nil
 }
 
-// Pause/Unpause stubs — not exercised in spawnlet manager tests (drift fix after sp-ei4.1.15.2).
-func (f *fakePodBackend) Pause(_ context.Context, _ *runtime.PodHandle) error   { return nil }
-func (f *fakePodBackend) Unpause(_ context.Context, _ *runtime.PodHandle) error { return nil }
+// Pause records the call and sets paused=true. Returns pauseErr if set (non-fatal in the gate).
+func (f *fakePodBackend) Pause(_ context.Context, h *runtime.PodHandle) error {
+	if f.pauseErr != nil {
+		return f.pauseErr
+	}
+	f.paused = true
+	f.pauseCount++
+	f.pausedAgentID = h.AgentID
+	return nil
+}
+
+// Unpause records the call and sets paused=false.
+func (f *fakePodBackend) Unpause(_ context.Context, _ *runtime.PodHandle) error {
+	f.paused = false
+	f.unpauseCount++
+	return nil
+}
 
 // DeltaSize implements the optional deltaSizer interface used by CheckQuotas.
 // It is defined on fakePodBackend so tests can enable it by setting deltaSizeMB > 0.

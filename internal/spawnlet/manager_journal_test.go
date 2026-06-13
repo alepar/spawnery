@@ -26,6 +26,15 @@ type fakeJournal struct {
 	artifactPuts     []journal.ArtifactDescriptor
 	artifactGets     []journal.ArtifactDescriptor
 	artifactPayloads map[string][]byte
+
+	// finalErr, when non-nil, makes FinalSnapshot return this error (used to test abort/restore paths).
+	// Zero-valued: unchanged behavior (FinalSnapshot succeeds, existing tests unaffected).
+	finalErr error
+	// onFinal, when non-nil, is called at the start of FinalSnapshot before checking finalErr.
+	// Useful for asserting pod state at the moment of the snapshot (e.g. that Pause fired first).
+	onFinal func()
+	// closeCount is incremented by each Close call. Lets tests assert journal.Close was/wasn't called.
+	closeCount int
 }
 
 func newFakeJournal(id journal.ManifestID) *fakeJournal {
@@ -45,6 +54,12 @@ func (f *fakeJournal) RequestSnapshot(_ context.Context, _ string, _ uint64, mt 
 }
 
 func (f *fakeJournal) FinalSnapshot(_ context.Context, _ string, _ uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
+	if f.onFinal != nil {
+		f.onFinal()
+	}
+	if f.finalErr != nil {
+		return nil, f.finalErr
+	}
 	out := map[string]journal.ManifestID{}
 	for _, mt := range mounts {
 		out[mt.Name] = f.finalID
@@ -94,7 +109,12 @@ func (f *fakeJournal) ListArtifacts(context.Context, string, uint64, string) ([]
 	return nil, nil
 }
 func (f *fakeJournal) QuickMaintenance(context.Context, string) error { return nil }
-func (f *fakeJournal) Close(context.Context, string) error            { return nil }
+func (f *fakeJournal) Close(context.Context, string) error {
+	f.mu.Lock()
+	f.closeCount++
+	f.mu.Unlock()
+	return nil
+}
 
 // writeJournalApp is writeApp with the mount opted into the node-local
 // durability class, so the journal seams engage.
