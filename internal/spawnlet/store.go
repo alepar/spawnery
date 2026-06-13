@@ -48,7 +48,8 @@ type Spawn struct {
 	// DeltaImageRef is the local Docker image tag ("spawnery/delta:<id>") set after a successful
 	// CaptureDelta on suspend. In-memory only: same-node resume reads the tag directly from the
 	// backend (EnsureImage probes it); cross-node resume is a stage-2 concern.
-	// TODO(stage2/report-back): wire BaseImageDigest + DeltaImageRef to CP on suspend.
+	// BaseImageDigest is reported to the CP at the ACTIVE transition (node statusActive);
+	// DeltaImageRef stays node-local (same-node resume) until stage-2 migration ships it.
 	DeltaImageRef string
 }
 
