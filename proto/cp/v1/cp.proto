@@ -56,6 +56,11 @@ enum SpawnStatus {
   SPAWN_STATUS_UNREACHABLE = 5;
   SPAWN_STATUS_ERROR       = 6;
   SPAWN_STATUS_DELETED     = 7;
+  // RESUMING is the symmetric transient to SUSPENDING (spec §4): a spawn is in this state
+  // from the moment the CP begins restoring it (Suspended→Resuming) until the node confirms
+  // the pod is live (Resuming→Active). Distinct from STARTING so the UI and sweepers can tell
+  // a resume-restore apart from a fresh create; both read as "busy" to background actors.
+  SPAWN_STATUS_RESUMING    = 8;
 }
 
 // Per-mount backend choice the user picks at spawn time (validated against the app version's
