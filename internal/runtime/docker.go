@@ -283,3 +283,23 @@ func (d *Docker) RemoveImage(ctx context.Context, ref string) error {
 	}
 	return err
 }
+
+func (d *Docker) ExportImage(ctx context.Context, ref string, w io.Writer) error {
+	rc, err := d.cli.ImageSave(ctx, []string{ref})
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	_, err = io.Copy(w, rc)
+	return err
+}
+
+func (d *Docker) ImportImage(ctx context.Context, r io.Reader) error {
+	resp, err := d.cli.ImageLoad(ctx, r)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, err = io.Copy(io.Discard, resp.Body)
+	return err
+}

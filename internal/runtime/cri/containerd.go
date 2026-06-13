@@ -9,11 +9,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	ctrclient "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
+	imagearchive "github.com/containerd/containerd/v2/core/images/archive"
 	"github.com/containerd/containerd/v2/core/leases"
 	pkgrootfs "github.com/containerd/containerd/v2/pkg/rootfs"
 	"github.com/containerd/errdefs"
@@ -204,6 +206,47 @@ func (e *containerdEngine) Release(ctx context.Context, name, leaseID string) er
 
 	if len(errParts) > 0 {
 		return fmt.Errorf("release delta: %s", strings.Join(errParts, "; "))
+	}
+	return nil
+}
+
+func (e *containerdEngine) Export(ctx context.Context, name, leaseID string, w io.Writer) error {
+	if err := e.client.Export(ctx, w, imagearchive.WithImage(e.client.ImageService(), name)); err != nil {
+		return fmt.Errorf("export image %s: %w", name, err)
+	}
+	return nil
+}
+
+func (e *containerdEngine) Import(ctx context.Context, name, baseRef, leaseID string, r io.Reader) error {
+	if baseRef != "" {
+		if _, err := e.client.ImageService().Get(ctx, baseRef); err != nil {
+			return fmt.Errorf("get base image %s: %w", baseRef, err)
+		}
+	}
+
+	leaseMgr := e.client.LeasesService()
+	if _, err := leaseMgr.Create(ctx, leases.WithID(leaseID)); err != nil && !errdefs.IsAlreadyExists(err) {
+		return fmt.Errorf("create lease %s: %w", leaseID, err)
+	}
+	ctx = leases.WithLease(ctx, leaseID)
+
+	imgs, err := e.client.Import(ctx, r,
+		ctrclient.WithImageRefTranslator(func(string) string { return name }),
+		ctrclient.WithIndexName(name),
+		ctrclient.WithImageLabels(map[string]string{"io.cri-containerd.image": "managed"}),
+	)
+	if err != nil {
+		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
+		return fmt.Errorf("import image archive for %s: %w", name, err)
+	}
+	for _, img := range imgs {
+		if img.Name == name {
+			return nil
+		}
+	}
+	if _, err := e.client.ImageService().Get(ctx, name); err != nil {
+		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
+		return fmt.Errorf("imported archive did not create %s: %w", name, err)
 	}
 	return nil
 }

@@ -85,6 +85,16 @@ func (f *fakePodBackend) ReleaseDelta(_ context.Context, spawnID string) error {
 	f.ops = append(f.ops, "release:"+spawnID)
 	return nil
 }
+func (f *fakePodBackend) ExportDelta(_ context.Context, spawnID string, w io.Writer) error {
+	f.ops = append(f.ops, "export:"+spawnID)
+	_, err := w.Write([]byte(runtime.DeltaTag(spawnID)))
+	return err
+}
+func (f *fakePodBackend) ImportDelta(_ context.Context, spawnID, _ string, r io.Reader) (string, error) {
+	f.ops = append(f.ops, "import:"+spawnID)
+	_, _ = io.Copy(io.Discard, r)
+	return runtime.DeltaTag(spawnID), nil
+}
 
 // DeltaSize implements the optional deltaSizer interface used by CheckQuotas.
 // It is defined on fakePodBackend so tests can enable it by setting deltaSizeMB > 0.

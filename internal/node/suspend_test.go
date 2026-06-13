@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,6 +30,22 @@ func (f *fakeNodeJournal) Restore(context.Context, string, string, journal.Manif
 }
 func (f *fakeNodeJournal) LatestForGeneration(context.Context, string, string, uint64) (journal.ManifestID, error) {
 	return "", nil
+}
+func (f *fakeNodeJournal) PutArtifact(_ context.Context, spawnID string, generation uint64, desc journal.ArtifactDescriptor, r io.Reader) (journal.ArtifactDescriptor, error) {
+	_, _ = io.Copy(io.Discard, r)
+	desc.SpawnID = spawnID
+	desc.Generation = generation
+	if desc.ArtifactID == "" {
+		desc.ArtifactID = "artifact-test"
+	}
+	return desc, nil
+}
+func (f *fakeNodeJournal) GetArtifact(_ context.Context, spawnID string, generation uint64, artifactID string, w io.Writer) (journal.ArtifactDescriptor, error) {
+	_, _ = w.Write([]byte("artifact-test"))
+	return journal.ArtifactDescriptor{SpawnID: spawnID, Generation: generation, ArtifactID: artifactID}, nil
+}
+func (f *fakeNodeJournal) ListArtifacts(context.Context, string, uint64, string) ([]journal.ArtifactDescriptor, error) {
+	return nil, nil
 }
 func (f *fakeNodeJournal) QuickMaintenance(context.Context, string) error { return nil }
 func (f *fakeNodeJournal) Close(context.Context, string) error            { return nil }

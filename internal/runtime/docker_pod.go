@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 )
@@ -243,4 +244,37 @@ func (d *DockerPodBackend) CaptureDelta(ctx context.Context, h *PodHandle) (stri
 // ReleaseDelta removes the per-spawn delta tag (GC hook). Task .12 wires the callers.
 func (d *DockerPodBackend) ReleaseDelta(ctx context.Context, spawnID string) error {
 	return d.rt.RemoveImage(ctx, DeltaTag(spawnID))
+}
+
+func (d *DockerPodBackend) ExportDelta(ctx context.Context, spawnID string, w io.Writer) error {
+	tag := DeltaTag(spawnID)
+	if _, ok, err := d.rt.InspectImage(ctx, tag); err != nil {
+		return fmt.Errorf("inspect delta %s: %w", tag, err)
+	} else if !ok {
+		return fmt.Errorf("delta image %s not found", tag)
+	}
+	if err := d.rt.ExportImage(ctx, tag, w); err != nil {
+		return fmt.Errorf("export delta %s: %w", tag, err)
+	}
+	return nil
+}
+
+func (d *DockerPodBackend) ImportDelta(ctx context.Context, spawnID, baseRef string, r io.Reader) (string, error) {
+	tag := DeltaTag(spawnID)
+	if baseRef != "" {
+		if _, ok, err := d.rt.InspectImage(ctx, baseRef); err != nil {
+			return "", fmt.Errorf("inspect base %s: %w", baseRef, err)
+		} else if !ok {
+			return "", fmt.Errorf("base image %s not found", baseRef)
+		}
+	}
+	if err := d.rt.ImportImage(ctx, r); err != nil {
+		return "", fmt.Errorf("import delta %s: %w", tag, err)
+	}
+	if _, ok, err := d.rt.InspectImage(ctx, tag); err != nil {
+		return "", fmt.Errorf("inspect imported delta %s: %w", tag, err)
+	} else if !ok {
+		return "", fmt.Errorf("imported delta archive did not create %s", tag)
+	}
+	return tag, nil
 }
