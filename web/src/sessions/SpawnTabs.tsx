@@ -7,13 +7,12 @@ import { TerminalView } from "@/views/TerminalView";
 import { AddSessionMenu } from "./AddSessionMenu";
 import { useSessionStore, type SessionMeta } from "./store";
 import { listSessions, createSession, closeSession, type Transport, type SessionDescriptor } from "@/api/sessions";
-import type { SpawnView } from "@/api/spawnlet";
 
 function toMeta(d: SessionDescriptor): SessionMeta {
   return { ...d, label: d.runnable || "session" };
 }
 
-export function SpawnTabs({ spawnId, spawn }: { spawnId: string; spawn?: SpawnView }) {
+export function SpawnTabs({ spawnId }: { spawnId: string }) {
   const sessions = useSessionStore((s) => s.sessions);
   const activeId = useSessionStore((s) => s.activeId);
   const connMap = useSessionStore((s) => s.conn);
@@ -106,7 +105,7 @@ export function SpawnTabs({ spawnId, spawn }: { spawnId: string; spawn?: SpawnVi
               style={{ display: isActive ? "block" : "none" }}
             >
               {s.transport === "acp"
-                ? <AcpSessionPanel spawnId={spawnId} sessionId={s.sessionId} active={isActive} ready={s.status === "active"} model={spawn?.model} modelApplied={spawn?.modelApplied} />
+                ? <AcpSessionPanel spawnId={spawnId} sessionId={s.sessionId} active={isActive} ready={s.status === "active"} />
                 : <TerminalView spawnId={spawnId} sessionId={s.sessionId} active={isActive} onConn={(st) => setConn(s.sessionId, st)} />}
             </div>
           );

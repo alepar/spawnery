@@ -12,6 +12,7 @@ export interface SpawnActions {
   onRecreate: (spawnId: string) => void;
   onStop: (spawnId: string) => void;
   onMoveTo?: (spawnId: string) => void;
+  onSetModel?: (spawnId: string) => void;
 }
 
 // The two top-nav buttons map to a target Nav. "Templates" stays highlighted across the whole
@@ -163,6 +164,20 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
               onClick={() => { setMenu(false); actions.onMoveTo!(spawn.spawnId); }}
             >
               Move to…
+            </button>
+          )}
+          {actions?.onSetModel && (
+            <button
+              data-testid={`spawn-setmodel-${spawn.spawnId}`}
+              className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-accent"
+              onClick={() => { setMenu(false); actions.onSetModel!(spawn.spawnId); }}
+            >
+              <span>Set model…</span>
+              {!spawn.modelApplied && (
+                <span data-testid={`spawn-model-pending-${spawn.spawnId}`} className="rounded bg-amber-500/20 px-1 text-xs text-amber-600">
+                  pending
+                </span>
+              )}
             </button>
           )}
           {confirmStop ? (

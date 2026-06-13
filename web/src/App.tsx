@@ -14,6 +14,7 @@ import { useSessionStore, authEnabled } from "./auth/session";
 import { LoginView } from "./views/LoginView";
 import { useMoveTo } from "./views/migration/useMoveTo";
 import { MoveToModal } from "./views/migration/MoveToModal";
+import { SetModelModal } from "./views/model/SetModelModal";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
@@ -54,6 +55,8 @@ function AppMain() {
   const { errored, reset, waiting } = useConnStatus();
   const [spawns, setSpawns] = useState<SpawnView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  // The spawn whose "Set model…" modal is open (from the sidebar kebab), or null when closed.
+  const [modelSpawnId, setModelSpawnId] = useState<string | null>(null);
   const moveTo = useMoveTo();
 
   // refs mirroring state so async callbacks (poll) don't read stale closures.
@@ -226,11 +229,17 @@ function AppMain() {
           onRecreate,
           onStop,
           onMoveTo: (id) => moveTo.open(id),
+          onSetModel: (id) => setModelSpawnId(id),
         }}
         nav={nav}
         navigate={navigate}
       />
       <MoveToModal state={moveTo.state} actions={moveTo} />
+      {/* Live spawn lookup so the modal's model/modelApplied stay fresh across the poll. */}
+      <SetModelModal
+        spawn={modelSpawnId ? spawns.find((s) => s.spawnId === modelSpawnId) ?? null : null}
+        onClose={() => setModelSpawnId(null)}
+      />
     </>
   );
 }
