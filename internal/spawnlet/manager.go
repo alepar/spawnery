@@ -178,6 +178,21 @@ func (m *Manager) Store() *Store { return m.store }
 // Consumed by the storage layer (.8) to compute host-side ownership for userns-remapped mounts.
 func (m *Manager) RemapBase() uint32 { return m.cfg.UsernsRemapBase }
 
+// agentRootUID returns the host uid that the in-container agent-root maps to, used by
+// the storage layer for host-side ownership of data mounts (spec §5): remap lane = the
+// learned sub-uid base; native (runsc) lane = 0 (container uids are literal there);
+// off/degraded = -1 (unknown — storage keeps the world-writable fallback).
+func (m *Manager) agentRootUID() int {
+	switch m.cfg.UsernsMode {
+	case "remap":
+		return int(m.cfg.UsernsRemapBase)
+	case "native":
+		return 0
+	default:
+		return -1
+	}
+}
+
 // ExecPrefix returns the runtime exec invocation (docker/crictl exec -it ...) for execing into a
 // spawn's agent container — used by the node's tmux raw-PTY relay.
 func (m *Manager) ExecPrefix() []string { return ExecPrefixFor(m.cfg.ContainerRuntime) }
@@ -385,9 +400,10 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			_ = m.backend.Finalize(ctx, d)
 		}
 	}
+	agentUID := m.agentRootUID()
 	for _, mt := range mf.Storage.Mounts {
 		seedDir := filepath.Join(appPath, mt.Seed)
-		hostDir, err := m.backend.Prepare(ctx, id, mt.Name, seedDir)
+		hostDir, err := m.backend.Prepare(ctx, id, mt.Name, seedDir, agentUID)
 		if err != nil {
 			finalizeAll()
 			return nil, fmt.Errorf("prepare mount %q: %w", mt.Name, err)
