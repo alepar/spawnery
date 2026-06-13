@@ -38,8 +38,13 @@ type Spawn struct {
 
 	// BaseImageDigest is the content-addressable digest of the base image resolved at create time
 	// (spec §4). Set by Manager.Create via ResolveImageDigest; empty when resolution fails (non-fatal).
-	// Used as BaseImageRef in PodHandle for the moby#47065 layer-count guard in CaptureDelta.
+	// Threaded to the CP on ACTIVE (§4 report-back) so cross-node resume can pin the exact base.
 	BaseImageDigest string
+	// LaunchImageRef is the image ref the agent was actually started from: the delta tag on a
+	// same-node resume (EnsureImage returned the existing delta), or the base ref on a fresh create.
+	// Passed as PodHandle.BaseImageRef in teardown so CaptureDelta's moby#47065 layer-count guard
+	// compares against the correct parent — not the original base — on chained suspends.
+	LaunchImageRef string
 	// DeltaImageRef is the local Docker image tag ("spawnery/delta:<id>") set after a successful
 	// CaptureDelta on suspend. In-memory only: same-node resume reads the tag directly from the
 	// backend (EnsureImage probes it); cross-node resume is a stage-2 concern.

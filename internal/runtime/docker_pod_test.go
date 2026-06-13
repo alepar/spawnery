@@ -334,3 +334,29 @@ func TestReleaseDeltaRemovesTag(t *testing.T) {
 		t.Fatalf("Removed = %v, want [%s]", f.Removed, delta)
 	}
 }
+
+// A2b: The moby#47065 layer-count guard catches a zero-layer commit on a chained delta
+// (second suspend: the agent was launched from a prior delta image, not the original base).
+// Without this fix, baseLayers = original base (5), committed = delta+0 = 6 > 5 → no error (BUG).
+// With the fix, BaseImageRef is the launch image (delta = 6), committed = 6 ≤ 6 → error (CORRECT).
+func TestCaptureDeltaLayerGuardChained(t *testing.T) {
+	f := NewFake()
+	const deltaRef = "spawnery/delta:sp1" // first delta = the launch image for the second suspend
+	f.Images[deltaRef] = ImageInfo{ID: "sha256:delta1", Layers: 6}
+	// The agent was resumed from the delta image (not the original base).
+	f.Started = append(f.Started, ContainerSpec{Image: deltaRef})
+	// Force CommitContainer to produce 6 layers (= launch image layers, i.e. zero real writes).
+	f.CommitLayers = 6
+
+	b := NewDockerPodBackend(f, "", "smoke")
+	// BaseImageRef is the launch image (the first delta), not the original base.
+	h := &PodHandle{SpawnID: "sp1", AgentID: "ag", BaseImageRef: deltaRef}
+
+	_, err := b.CaptureDelta(context.Background(), h)
+	if err == nil {
+		t.Fatal("CaptureDelta must error when committed layers <= launch image layers (chained delta zero-layer guard)")
+	}
+	if !strings.Contains(err.Error(), "guard") && !strings.Contains(err.Error(), "47065") {
+		t.Fatalf("error should mention the guard: %v", err)
+	}
+}

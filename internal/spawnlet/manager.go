@@ -596,6 +596,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID,
 		Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL,
 		BaseImageDigest: baseDigest,
+		LaunchImageRef:  launchImage, // delta tag on same-node resume, base ref on fresh create
 	}
 	m.store.Put(sp)
 	return sp, nil
@@ -684,10 +685,13 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture bool) map[str
 	// Orthogonal to the journal block below (journal handles data mounts; delta handles rootfs).
 	if capture && m.cfg.DeltaCapture && sp.AgentID != "" {
 		h := &runtime.PodHandle{
-			SpawnID:      sp.ID,
-			AgentID:      sp.AgentID,
-			SidecarID:    sp.SidecarID,
-			BaseImageRef: sp.BaseImageDigest,
+			SpawnID:   sp.ID,
+			AgentID:   sp.AgentID,
+			SidecarID: sp.SidecarID,
+			// Use the launch image (delta on resume, base on fresh create) as the layer-count
+			// reference for the moby#47065 guard — NOT the original base — so chained captures
+			// correctly detect a zero-layer commit on the 2nd+ suspend (spec §3 validation).
+			BaseImageRef: sp.LaunchImageRef,
 		}
 		if ref, cerr := m.pod.CaptureDelta(ctx, h); cerr != nil {
 			log.Printf("delta capture for %s: %v (non-fatal; next resume uses base image)", id, cerr)
