@@ -62,7 +62,7 @@ were already made in one of these docs.
 - [Tiered Storage & Migration Research (Results + Merged Synthesis)](2026-06-10-tiered-storage-migration-research-results.md) — verified findings + merged conclusions of both runs: watcher+rescan capture, embedded-Kopia journal (repo-per-mount), Garage sink, staged adoption; Mutagen-as-is + Duplicacy rejections.
 - [Tiered Storage & Migration Research (Cloud Run)](2026-06-10-tiered-storage-migration-research-results-cloud.md) — parallel cloud-session report, imported verbatim; fills the in-session run's gaps (Kopia/restic, Garage-vs-MinIO, fanotify/overlayfs, fencing theory, Coder/DevPod/Daytona/Modal).
 - [Transient Tier — Kopia Journal + Migration](2026-06-10-transient-tier-kopia-journal-design.md) — per-spawn embedded-Kopia journal of all mounts (incl. `.git` + scratch) to Garage; watcher-triggered, generation-fenced; resume = pure Kopia restore; `MigrateSpawn` local↔cloud; owner-sealed keys (blocked on secret-delivery epic).
-- [Encrypted Migration Transfer Set](2026-06-13-encrypted-migration-transfer-set-design.md) — cross-epic bridge for `sp-ei4.1.13`: ceremony-first encrypted Garage transfer sets, typed rootfs artifacts keyed by `(spawn_id, generation)`, and target restore pins; draft; `sp-u53`, `sp-ei4.1`.
+- [Encrypted Migration Transfer Set](2026-06-13-encrypted-migration-transfer-set-design.md) — cross-epic bridge for `sp-ei4.1.13`: ceremony-first encrypted Garage transfer sets, typed rootfs artifacts keyed by `(spawn_id, generation)`, and target restore pins; implemented 2026-06-13; `sp-u53`, `sp-ei4.1`.
 
 ## Marketplace (E5/E6 slices)
 - [E5 Slice 1 — Catalog Read Surface](2026-06-01-e5-catalog-read-surface-slice1.md) — the read side of the catalog (browse/search), pure-CP.

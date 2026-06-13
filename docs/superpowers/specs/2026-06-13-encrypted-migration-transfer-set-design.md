@@ -1,7 +1,7 @@
 # Encrypted Migration Transfer Set — Runtime/Storage Bridge
 
 **Date:** 2026-06-13  
-**Status:** Draft  
+**Status:** Implemented
 **Beads:** `sp-u53` blocker design for `sp-ei4.1.13`  
 **Amends:** [Transient Tier — Kopia Journal + Migration](2026-06-10-transient-tier-kopia-journal-design.md),
 [Writable Rootfs Survival](2026-06-12-writable-rootfs-survival-design.md),
@@ -199,3 +199,29 @@ The target node must reject:
 ## Post-Implementation Notes
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+### 2026-06-13 — Implementation Complete
+
+- Storage/journal work under `sp-u53.6` shipped owner-sealed readiness audit, generation-keyed
+  typed journal artifacts, and the CP transfer-set model with encrypted transfer-key ceremony
+  preflight.
+- Runtime/node work under `sp-ei4.1.13.1` and `.2` added rootfs delta export/import hooks,
+  generation-keyed journal `rootfs_delta` artifact production on migration suspend, and target
+  restore using CP-pinned artifact IDs only.
+- CP orchestration under `sp-ei4.1.13.4` now requests rootfs artifact capture during `MigrateSpawn`,
+  validates returned artifact id/generation/base digest, records mount and rootfs pins on the
+  transfer set, and starts the target with `rootfs_source_generation` plus the pinned artifacts.
+- Normal same-node suspend/resume continues to use local delta-image state and does not upload rootfs
+  artifacts.
+- Residual follow-ups: `sp-ei4.1.14` verifies whether the runtime image-archive transport includes
+  base blobs and tightens it to top-diff-only if needed; `sp-clxm` tracks an unrelated
+  Docker-backed `TestTmuxRelayLiveAttach` failure that keeps the full `just test` gate red.
+
+Verification:
+
+- `env GOCACHE=/tmp/spawnery-go-cache go test ./internal/runtime ./internal/runtime/cri ./internal/spawnlet ./internal/node ./internal/contract ./internal/cp ./internal/cp/scheduler -count=1 -run 'Test(.*Rootfs.*|.*rootfs.*|MigrateSpawn|SuspendSpawn|Provision|StartSpawn|SuspendComplete|NodeContractFields|ExportDelta|ImportDelta|CaptureDelta|EnsureImage|ResolveImageDigest|ReleaseDelta|DeltaLeaseID|Journal)'` passed.
+- `distrobox enter --root dev-spawnery -- bash -lc 'PATH=$(go env GOPATH)/bin:$PATH make gen'`
+  passed with no generated-code drift.
+- `just test` reached all packages but failed in `internal/node TestTmuxRelayLiveAttach` with
+  `docker run: exit status 125`; focused migration/runtime/storage gates passed and `sp-clxm` tracks
+  that repo-level blocker.
