@@ -74,6 +74,7 @@ were already made in one of these docs.
 
 ## Spawn lifecycle & chat
 - [Spawn Lifecycle](2026-05-31-spawn-lifecycle-design.md) — suspend/resume/persist; consistency protocol (hard-depends on E3 storage).
+- [Fail-Closed Suspend (sp-ei4.1.15)](2026-06-13-fail-closed-suspend-design.md) — abort suspend + keep the spawn ACTIVE if the journal snapshot fails: pause-snapshot gate before any teardown, `error` on `SuspendComplete`, node reorders gate→reap→finish, existing web toast.
 - [Spawn Lifecycle UI](2026-06-02-spawn-lifecycle-ui-design.md) — spawns as first-class, named, multi-instance objects in the web UI.
 - [Visible "Starting" Lifecycle](2026-06-02-spawn-starting-lifecycle-design.md) — non-blocking provision + surfaced "starting" status.
 - [Suspend Clears Message History](2026-06-03-suspend-clears-message-history-design.md) — drop a suspended spawn's in-UI message history.
