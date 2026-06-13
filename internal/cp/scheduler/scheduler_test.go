@@ -50,7 +50,7 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 		}
 	}()
 
-	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", "", "", 3, registry.Placement{}, nil, "")
+	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", "", "", 3, registry.Placement{}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 
 func TestProvisionNoCapacity(t *testing.T) {
 	s := New(registry.New(), router.New(), time.Second)
-	if _, err := s.Provision(context.Background(), "sp-x", "ref", "m", "", "", "", "", 1, registry.Placement{}, nil, ""); err == nil {
+	if _, err := s.Provision(context.Background(), "sp-x", "ref", "m", "", "", "", "", 1, registry.Placement{}, nil, "", nil); err == nil {
 		t.Fatal("expected ResourceExhausted when no node")
 	}
 }
@@ -92,7 +92,7 @@ func TestProvisionThreadsSelection(t *testing.T) {
 	}()
 
 	_, err := s.Provision(context.Background(), "sp-sel", "ref", "m", "nm", "app", "goose-acp", "acp",
-		1, registry.Placement{Image: "img:1"}, nil, "")
+		1, registry.Placement{Image: "img:1"}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestProvisionThreadsBaseImageDigest(t *testing.T) {
 
 	const digest = "spawnery/agent@sha256:deadbeef"
 	_, err := s.Provision(context.Background(), "sp-digest", "ref", "m", "", "", "", "", 1,
-		registry.Placement{}, nil, digest)
+		registry.Placement{}, nil, digest, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,12 +154,48 @@ func TestProvisionFreshCreateSendsEmptyDigest(t *testing.T) {
 	}()
 
 	_, err := s.Provision(context.Background(), "sp-fresh", "ref", "m", "", "", "", "", 1,
-		registry.Placement{}, nil, "") // empty = fresh create
+		registry.Placement{}, nil, "", nil) // empty = fresh create
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := send.first().GetStart()
 	if got.GetBaseImageDigest() != "" {
 		t.Fatalf("StartSpawn.BaseImageDigest = %q, want empty on fresh create", got.GetBaseImageDigest())
+	}
+}
+
+func TestProvisionThreadsRootfsRestorePins(t *testing.T) {
+	reg := registry.New()
+	rt := router.New()
+	s := New(reg, rt, 2*time.Second)
+
+	send := &fakeSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: send, Max: 1, Free: 1})
+
+	go func() {
+		for {
+			if m := send.first(); m != nil {
+				s.OnStatus(m.GetStart().GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	rootfs := &RootfsRestore{
+		SourceGeneration: 9,
+		Artifacts: []*nodev1.RootfsArtifact{{
+			ArtifactId: "rootfs-gen9", Generation: 9, BaseImageDigest: "agent@sha256:base", Format: "oci_layout",
+		}},
+	}
+	_, err := s.Provision(context.Background(), "sp-rootfs", "ref", "m", "", "", "", "", 10,
+		registry.Placement{}, nil, "agent@sha256:base", rootfs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := send.first().GetStart()
+	if got.GetRootfsSourceGeneration() != 9 || len(got.GetRootfsArtifacts()) != 1 ||
+		got.GetRootfsArtifacts()[0].GetArtifactId() != "rootfs-gen9" {
+		t.Fatalf("StartSpawn rootfs restore = gen %d artifacts %+v", got.GetRootfsSourceGeneration(), got.GetRootfsArtifacts())
 	}
 }

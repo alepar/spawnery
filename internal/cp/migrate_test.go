@@ -110,6 +110,132 @@ func TestMigrateSpawnSuspendsThenResumesOnTarget(t *testing.T) {
 	}
 }
 
+func TestMigrateSpawnPersistsRootfsPinsAndStartsTargetWithPinnedArtifacts(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	const baseDigest = "agent@sha256:base"
+	src := &suspendSender{
+		markers: []*nodev1.MountMarker{{Name: "main", Marker: "gen1-marker"}},
+		rootfs: []*nodev1.RootfsArtifact{{
+			ArtifactId:       "rootfs-gen1",
+			Generation:       1,
+			Sequence:         1,
+			BaseImageDigest:  baseDigest,
+			Format:           "oci_layout",
+			ContentDigest:    "sha256:delta",
+			UncompressedSize: 42,
+			ProducerNodeId:   "n1",
+			ProducerRuntime:  "docker",
+		}},
+	}
+	src.s = s
+	activeSpawnWithRoute(t, s, reg, rt, "sp-rootfs", "alice", src)
+	if err := s.st.Spawns().SetBaseImageDigest(context.Background(), "sp-rootfs", baseDigest); err != nil {
+		t.Fatalf("SetBaseImageDigest: %v", err)
+	}
+
+	tgt := &capSender{}
+	addNode(reg, "n2", "cloud", "", 5, tgt)
+	stop := goAckStarts(s, tgt)
+	defer stop()
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.MigrateSpawn(ctx, connect.NewRequest(&cpv1.MigrateSpawnRequest{SpawnId: "sp-rootfs", TargetNodeId: "n2"}))
+	if err != nil {
+		t.Fatalf("MigrateSpawn: %v", err)
+	}
+	src.mu.Lock()
+	gotCapture := src.lastCapture
+	src.mu.Unlock()
+	if !gotCapture {
+		t.Fatal("MigrateSpawn must ask the source node to capture a rootfs artifact before suspend")
+	}
+	ts, err := s.st.TransferSets().Get(ctx, resp.Msg.TransferSetId)
+	if err != nil {
+		t.Fatalf("Get transfer set: %v", err)
+	}
+	if len(ts.RootfsArtifactPins) != 1 {
+		t.Fatalf("transfer set rootfs pins = %+v, want one", ts.RootfsArtifactPins)
+	}
+	pin := ts.RootfsArtifactPins[0]
+	if pin.ArtifactID != "rootfs-gen1" || pin.Generation != 1 || pin.BaseImageDigest != baseDigest {
+		t.Fatalf("rootfs pin = %+v, want artifact rootfs-gen1 generation 1 base %s", pin, baseDigest)
+	}
+	start := tgt.firstStart()
+	if start == nil {
+		t.Fatal("target did not receive StartSpawn")
+	}
+	if start.GetRootfsSourceGeneration() != 1 {
+		t.Fatalf("target rootfs source generation = %d, want 1", start.GetRootfsSourceGeneration())
+	}
+	if len(start.GetRootfsArtifacts()) != 1 {
+		t.Fatalf("target rootfs artifacts = %+v, want one", start.GetRootfsArtifacts())
+	}
+	got := start.GetRootfsArtifacts()[0]
+	if got.GetArtifactId() != "rootfs-gen1" || got.GetGeneration() != 1 || got.GetBaseImageDigest() != baseDigest {
+		t.Fatalf("target rootfs artifact = %+v", got)
+	}
+}
+
+func TestMigrateSpawnRejectsRootfsArtifactBaseMismatchBeforeTargetStart(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	const baseDigest = "agent@sha256:base"
+	src := &suspendSender{
+		markers: []*nodev1.MountMarker{{Name: "main", Marker: "safe-marker"}},
+		rootfs: []*nodev1.RootfsArtifact{{
+			ArtifactId: "rootfs-gen1", Generation: 1, BaseImageDigest: "agent@sha256:other", Format: "oci_layout",
+		}},
+	}
+	src.s = s
+	activeSpawnWithRoute(t, s, reg, rt, "sp-bad-rootfs", "alice", src)
+	if err := s.st.Spawns().SetBaseImageDigest(context.Background(), "sp-bad-rootfs", baseDigest); err != nil {
+		t.Fatalf("SetBaseImageDigest: %v", err)
+	}
+
+	tgt := &capSender{}
+	addNode(reg, "n2", "cloud", "", 5, tgt)
+	stop := goAckStarts(s, tgt)
+	defer stop()
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.MigrateSpawn(ctx, connect.NewRequest(&cpv1.MigrateSpawnRequest{SpawnId: "sp-bad-rootfs", TargetNodeId: "n2"}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("MigrateSpawn base mismatch: want FailedPrecondition, got %v", err)
+	}
+	if st := tgt.firstStart(); st != nil {
+		t.Fatalf("target must not start after invalid rootfs pin, got %+v", st)
+	}
+	sp, _ := s.st.Spawns().Get(ctx, "sp-bad-rootfs")
+	if sp.Status != store.Suspended {
+		t.Fatalf("spawn status = %s, want suspended after source capture succeeded but pin validation failed", sp.Status)
+	}
+}
+
+func TestMigrateSpawnRejectsRootfsArtifactGenerationMismatchBeforeTargetStart(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	src := &suspendSender{
+		markers: []*nodev1.MountMarker{{Name: "main", Marker: "safe-marker"}},
+		rootfs: []*nodev1.RootfsArtifact{{
+			ArtifactId: "rootfs-gen0", Generation: 0, Format: "oci_layout",
+		}},
+	}
+	src.s = s
+	activeSpawnWithRoute(t, s, reg, rt, "sp-bad-rootfs-gen", "alice", src)
+
+	tgt := &capSender{}
+	addNode(reg, "n2", "cloud", "", 5, tgt)
+	stop := goAckStarts(s, tgt)
+	defer stop()
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.MigrateSpawn(ctx, connect.NewRequest(&cpv1.MigrateSpawnRequest{SpawnId: "sp-bad-rootfs-gen", TargetNodeId: "n2"}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("MigrateSpawn generation mismatch: want FailedPrecondition, got %v", err)
+	}
+	if st := tgt.firstStart(); st != nil {
+		t.Fatalf("target must not start after invalid rootfs generation, got %+v", st)
+	}
+}
+
 // MigrateSpawn to a class target (cloud) picks an eligible cloud node.
 func TestMigrateSpawnClassTargetPicksCloud(t *testing.T) {
 	s, reg, rt := newTestServer(t)
