@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"spawnery/internal/agentcaps"
@@ -110,6 +111,15 @@ type Manager struct {
 	// secrets injects owner-sealed secret plaintext into each spawn's tmpfs secrets dir (design §6).
 	// Always set (NewManagerWithBackend defaults SecretsRoot); the node calls InjectSecret after unseal.
 	secrets SecretInjector
+
+	// watchersMu guards sp.journalWatchers on each Spawn against concurrent access from
+	// SnapshotForSuspend (which uses store.Get, leaving the spawn in the store) and
+	// teardown (called via Stop after store.Claim). Both callers hold the same *Spawn
+	// pointer, so without a lock a concurrent write (nil-out on success or restart on
+	// abort) and a read (range in teardown) constitute a data race (sp-csks).
+	// All accesses to sp.journalWatchers go through takeWatchers / setWatchers; w.Stop
+	// is called outside the lock to avoid holding it across a potentially-blocking call.
+	watchersMu sync.Mutex
 
 	// deltaState durably records the per-spawn delta chain depth across node restarts so
 	// a resumed spawn continues counting from where it left off.
@@ -776,6 +786,30 @@ func (m *Manager) startJournalWatchers(id string, gen uint64, mounts []journal.M
 	return watchers
 }
 
+// takeWatchers atomically takes sp.journalWatchers, sets the field to nil, and returns the
+// original slice. The caller MUST call w.Stop() on the returned watchers OUTSIDE this call
+// (i.e. after releasing the lock) — Stop may block until the watcher goroutine exits, and
+// holding watchersMu across a blocking call risks lock-ordering issues or delays.
+//
+// This is the single safe path for reading-and-clearing sp.journalWatchers: both
+// SnapshotForSuspend (store.Get, spawn stays live) and teardown (store.Claim, spawn removed)
+// hold the same *Spawn pointer and can race without the lock.
+func (m *Manager) takeWatchers(sp *Spawn) []*journal.Watcher {
+	m.watchersMu.Lock()
+	ws := sp.journalWatchers
+	sp.journalWatchers = nil
+	m.watchersMu.Unlock()
+	return ws
+}
+
+// setWatchers atomically assigns ws to sp.journalWatchers. Used by the SnapshotForSuspend
+// abort path to restart watchers when the journal snapshot fails and the spawn is kept live.
+func (m *Manager) setWatchers(sp *Spawn, ws []*journal.Watcher) {
+	m.watchersMu.Lock()
+	sp.journalWatchers = ws
+	m.watchersMu.Unlock()
+}
+
 // snapshotJournal takes the final per-mount journal snapshot, stringifies the resulting manifest
 // ids into a markers map, and persists them to journalState (for same-node resume without CP
 // protocol). The caller is responsible for the `m.journal != nil && len(sp.JournalMounts) > 0`
@@ -929,10 +963,12 @@ func (m *Manager) SnapshotForSuspend(ctx context.Context, id string) (SuspendRes
 	ctx = context.WithoutCancel(ctx)
 
 	// Stop continuous journal watchers so no background RequestSnapshot races the snapshot below.
-	for _, w := range sp.journalWatchers {
+	// takeWatchers atomically takes the slice under watchersMu — guards against a concurrent
+	// Stop/teardown that holds the same *Spawn via store.Claim (data race on journalWatchers,
+	// sp-csks). w.Stop is called outside the lock; it may block until the goroutine exits.
+	for _, w := range m.takeWatchers(sp) {
 		w.Stop()
 	}
-	sp.journalWatchers = nil
 
 	h := &runtime.PodHandle{
 		PodIP:     sp.PodIP,
@@ -954,7 +990,9 @@ func (m *Manager) SnapshotForSuspend(ctx context.Context, id string) (SuspendRes
 			if uerr := m.pod.Unpause(ctx, h); uerr != nil {
 				log.Printf("suspend gate abort: unpause %s: %v", id, uerr)
 			}
-			sp.journalWatchers = m.startJournalWatchers(id, sp.Generation, sp.JournalMounts)
+			// setWatchers stores the restarted slice under watchersMu so a concurrent
+			// Stop/teardown (which calls takeWatchers) cannot race the assignment.
+			m.setWatchers(sp, m.startJournalWatchers(id, sp.Generation, sp.JournalMounts))
 			return SuspendResult{}, fmt.Errorf("suspend gate: journal final snapshot for %s: %w", id, err)
 		}
 		result.MountMarkers = markers
@@ -1023,7 +1061,10 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 	// Stop the continuous journal watchers FIRST so no background RequestSnapshot
 	// races the suspend barrier below (the serial queue would drop a post-suspend
 	// request anyway, but stopping here also reclaims the watcher goroutines).
-	for _, w := range sp.journalWatchers {
+	// takeWatchers atomically takes the slice under watchersMu, guarding against a
+	// concurrent SnapshotForSuspend that holds the same *Spawn via store.Get and may
+	// be writing (nil-out or restart) sp.journalWatchers (data race, sp-csks).
+	for _, w := range m.takeWatchers(sp) {
 		w.Stop()
 	}
 
