@@ -107,6 +107,11 @@ type ContainerRuntime interface {
 	ExportImage(ctx context.Context, ref string, w io.Writer) error
 	// ImportImage loads an image archive stream into the runtime image store.
 	ImportImage(ctx context.Context, r io.Reader) error
+	// PauseContainer pauses all processes in the container (SIGSTOP / cgroup freeze).
+	// Used by the suspend gate to quiesce agent writes before the final snapshot (spec §3).
+	PauseContainer(ctx context.Context, id string) error
+	// UnpauseContainer resumes a previously-paused container.
+	UnpauseContainer(ctx context.Context, id string) error
 }
 
 // FakeRuntime records calls for unit tests.
@@ -134,6 +139,11 @@ type FakeRuntime struct {
 	// CommitLayers overrides the layer count of a committed image (0 = base+1 default).
 	// Set to a value ≤ base layers to trigger the moby#47065 guard in tests.
 	CommitLayers int
+
+	// Paused is an ordered log of PauseContainer calls (container ids).
+	Paused []string
+	// Unpaused is an ordered log of UnpauseContainer calls (container ids).
+	Unpaused []string
 }
 
 func NewFake() *FakeRuntime {
@@ -240,5 +250,15 @@ func (f *FakeRuntime) ImportImage(_ context.Context, r io.Reader) error {
 	f.ImportedImages = append(f.ImportedImages, ref)
 	f.Images[ref] = ImageInfo{ID: "sha256:imported-" + ref, Layers: 1}
 	f.ImageArchives[ref] = payload
+	return nil
+}
+
+func (f *FakeRuntime) PauseContainer(_ context.Context, id string) error {
+	f.Paused = append(f.Paused, id)
+	return nil
+}
+
+func (f *FakeRuntime) UnpauseContainer(_ context.Context, id string) error {
+	f.Unpaused = append(f.Unpaused, id)
 	return nil
 }

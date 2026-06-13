@@ -42,6 +42,12 @@ type fakeDeltaEngine struct {
 	importBaseRef string
 	importLeaseID string
 	importErr     error
+
+	// pause/resume fields
+	pauseKey  string
+	pauseErr  error
+	resumeKey string
+	resumeErr error
 }
 
 func (f *fakeDeltaEngine) Capture(_ context.Context, snapshotKey, name, baseRef, leaseID string) (string, int64, error) {
@@ -89,6 +95,16 @@ func (f *fakeDeltaEngine) Import(_ context.Context, name, baseRef, leaseID strin
 func (f *fakeDeltaEngine) Close() error {
 	f.closeCalled = true
 	return nil
+}
+
+func (f *fakeDeltaEngine) Pause(_ context.Context, key string) error {
+	f.pauseKey = key
+	return f.pauseErr
+}
+
+func (f *fakeDeltaEngine) Resume(_ context.Context, key string) error {
+	f.resumeKey = key
+	return f.resumeErr
 }
 
 // TestResolveImageDigest covers the three cases: present with RepoDigests, present without,
@@ -453,5 +469,77 @@ func TestDeltaLeaseID(t *testing.T) {
 	want := "spawnery-delta-abc-123"
 	if got != want {
 		t.Errorf("deltaLeaseID = %q, want %q", got, want)
+	}
+}
+
+// TestCRIPauseUnpauseCallsEngineOnAgent verifies that Pause/Unpause delegate to the engine
+// using h.AgentID as the container key.
+func TestCRIPauseUnpauseCallsEngineOnAgent(t *testing.T) {
+	fakeEng := &fakeDeltaEngine{}
+	c, _ := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
+
+	agentID := "ctr-agent-42"
+	h := &runtime.PodHandle{AgentID: agentID}
+
+	if err := b.Pause(context.Background(), h); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if fakeEng.pauseKey != agentID {
+		t.Errorf("Pause key = %q, want %q", fakeEng.pauseKey, agentID)
+	}
+
+	if err := b.Unpause(context.Background(), h); err != nil {
+		t.Fatalf("Unpause: %v", err)
+	}
+	if fakeEng.resumeKey != agentID {
+		t.Errorf("Resume key = %q, want %q", fakeEng.resumeKey, agentID)
+	}
+}
+
+// TestCRIPauseRejectsEmptyAgentID verifies that an empty AgentID returns an error without
+// calling the engine.
+func TestCRIPauseRejectsEmptyAgentID(t *testing.T) {
+	fakeEng := &fakeDeltaEngine{}
+	c, _ := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
+
+	h := &runtime.PodHandle{} // empty AgentID
+
+	if err := b.Pause(context.Background(), h); err == nil {
+		t.Fatal("Pause must error when AgentID is empty")
+	}
+	if fakeEng.pauseKey != "" {
+		t.Error("Pause must not call engine when AgentID is empty")
+	}
+
+	if err := b.Unpause(context.Background(), h); err == nil {
+		t.Fatal("Unpause must error when AgentID is empty")
+	}
+	if fakeEng.resumeKey != "" {
+		t.Error("Unpause must not call engine when AgentID is empty")
+	}
+}
+
+// TestCRIPauseErrorPropagation verifies that engine Pause/Resume errors are wrapped and returned.
+func TestCRIPauseErrorPropagation(t *testing.T) {
+	pauseErr := errors.New("task is not running")
+	fakeEng := &fakeDeltaEngine{pauseErr: pauseErr, resumeErr: errors.New("not paused")}
+	c, _ := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
+
+	h := &runtime.PodHandle{AgentID: "ctr-1"}
+
+	err := b.Pause(context.Background(), h)
+	if err == nil {
+		t.Fatal("Pause must propagate engine error")
+	}
+	if !strings.Contains(err.Error(), pauseErr.Error()) {
+		t.Errorf("Pause error %q must contain %q", err, pauseErr)
+	}
+
+	err = b.Unpause(context.Background(), h)
+	if err == nil {
+		t.Fatal("Unpause must propagate engine error")
 	}
 }

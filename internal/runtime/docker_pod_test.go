@@ -385,6 +385,93 @@ func TestImportDeltaLoadsDeterministicSpawnTag(t *testing.T) {
 	}
 }
 
+// TestDockerPodBackendPauseUnpause verifies that Pause/Unpause call PauseContainer/UnpauseContainer
+// on the AGENT container only.
+func TestDockerPodBackendPauseUnpause(t *testing.T) {
+	f := NewFake()
+	b := NewDockerPodBackend(f, "", "smoke")
+	ctx := context.Background()
+
+	// StartPod (fake-1 = sidecar) + StartAgent (fake-2 = agent).
+	h, err := b.StartPod(ctx, PodSpec{ID: "sp1", SidecarImage: "s", Resources: Resources{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.StartAgent(ctx, h, AgentSpec{Image: "a", Resources: Resources{}}); err != nil {
+		t.Fatal(err)
+	}
+	// h.AgentID == "fake-2"; sidecar is "fake-1".
+
+	if err := b.Pause(ctx, h); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if len(f.Paused) != 1 || f.Paused[0] != "fake-2" {
+		t.Errorf("Paused = %v, want [fake-2]", f.Paused)
+	}
+	// Sidecar must NOT be paused.
+	for _, id := range f.Paused {
+		if id == "fake-1" {
+			t.Error("sidecar must not be paused")
+		}
+	}
+
+	if err := b.Unpause(ctx, h); err != nil {
+		t.Fatalf("Unpause: %v", err)
+	}
+	if len(f.Unpaused) != 1 || f.Unpaused[0] != "fake-2" {
+		t.Errorf("Unpaused = %v, want [fake-2]", f.Unpaused)
+	}
+}
+
+// TestDockerPodBackendPauseRejectsEmptyAgentID verifies that Pause/Unpause return an error
+// and do not call the runtime when AgentID is empty.
+func TestDockerPodBackendPauseRejectsEmptyAgentID(t *testing.T) {
+	f := NewFake()
+	b := NewDockerPodBackend(f, "", "smoke")
+	ctx := context.Background()
+	h := &PodHandle{} // no AgentID
+
+	if err := b.Pause(ctx, h); err == nil {
+		t.Fatal("Pause must error when AgentID is empty")
+	}
+	if len(f.Paused) != 0 {
+		t.Errorf("PauseContainer must not be called when AgentID is empty; Paused=%v", f.Paused)
+	}
+
+	if err := b.Unpause(ctx, h); err == nil {
+		t.Fatal("Unpause must error when AgentID is empty")
+	}
+	if len(f.Unpaused) != 0 {
+		t.Errorf("UnpauseContainer must not be called when AgentID is empty; Unpaused=%v", f.Unpaused)
+	}
+}
+
+// errOnPause wraps FakeRuntime and returns an error from PauseContainer.
+type errOnPause struct{ *FakeRuntime }
+
+func (r errOnPause) PauseContainer(_ context.Context, _ string) error {
+	return errors.New("pause failed")
+}
+
+// TestDockerPodBackendPauseErrorPropagation verifies that ContainerRuntime errors are surfaced.
+func TestDockerPodBackendPauseErrorPropagation(t *testing.T) {
+	f := NewFake()
+	b := NewDockerPodBackend(errOnPause{f}, "", "smoke")
+	ctx := context.Background()
+
+	h, err := b.StartPod(ctx, PodSpec{ID: "sp1", SidecarImage: "s", Resources: Resources{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.StartAgent(ctx, h, AgentSpec{Image: "a", Resources: Resources{}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.Pause(ctx, h); err == nil {
+		t.Fatal("Pause must propagate ContainerRuntime error")
+	}
+}
+
 // A2b: The moby#47065 layer-count guard catches a zero-layer commit on a chained delta
 // (second suspend: the agent was launched from a prior delta image, not the original base).
 // Without this fix, baseLayers = original base (5), committed = delta+0 = 6 > 5 → no error (BUG).

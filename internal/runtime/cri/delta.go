@@ -25,6 +25,10 @@ type deltaEngine interface {
 	Export(ctx context.Context, name, leaseID string, w io.Writer) error
 	// Import loads a per-spawn delta image archive and pins it with leaseID.
 	Import(ctx context.Context, name, baseRef, leaseID string, r io.Reader) error
+	// Pause/Resume the agent container's containerd task (suspend quiescence, spec §3).
+	// key is the CRI container id (k8s.io namespace).
+	Pause(ctx context.Context, key string) error
+	Resume(ctx context.Context, key string) error
 	// Close releases any resources held by the engine. Does not close the shared gRPC conn.
 	Close() error
 }
@@ -148,6 +152,37 @@ func (b *CRIPodBackend) ExportDelta(ctx context.Context, spawnID string, w io.Wr
 	name := runtime.DeltaTag(spawnID)
 	if err := eng.Export(ctx, name, deltaLeaseID(spawnID), w); err != nil {
 		return fmt.Errorf("cri export delta %s: %w", name, err)
+	}
+	return nil
+}
+
+// Pause pauses the AGENT container's containerd task (quiesces agent writes before the final
+// snapshot, spec §3). Empty AgentID is a caller bug — returns an error without building the engine.
+func (b *CRIPodBackend) Pause(ctx context.Context, h *runtime.PodHandle) error {
+	if h.AgentID == "" {
+		return fmt.Errorf("cri pause: no agent container id")
+	}
+	eng, err := b.engine()
+	if err != nil {
+		return fmt.Errorf("cri delta engine: %w", err)
+	}
+	if err := eng.Pause(ctx, h.AgentID); err != nil {
+		return fmt.Errorf("cri pause %s: %w", h.AgentID, err)
+	}
+	return nil
+}
+
+// Unpause resumes a previously-paused agent container's containerd task.
+func (b *CRIPodBackend) Unpause(ctx context.Context, h *runtime.PodHandle) error {
+	if h.AgentID == "" {
+		return fmt.Errorf("cri unpause: no agent container id")
+	}
+	eng, err := b.engine()
+	if err != nil {
+		return fmt.Errorf("cri delta engine: %w", err)
+	}
+	if err := eng.Resume(ctx, h.AgentID); err != nil {
+		return fmt.Errorf("cri unpause %s: %w", h.AgentID, err)
 	}
 	return nil
 }

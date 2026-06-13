@@ -259,6 +259,25 @@ func (d *DockerPodBackend) ExportDelta(ctx context.Context, spawnID string, w io
 	return nil
 }
 
+// Pause pauses the AGENT container (quiesces agent writes before the final snapshot, spec §3).
+// Empty AgentID is a caller bug, not a best-effort teardown case — returns an error.
+func (d *DockerPodBackend) Pause(ctx context.Context, h *PodHandle) error {
+	if h.AgentID == "" {
+		return fmt.Errorf("docker pause: no agent container id")
+	}
+	return d.rt.PauseContainer(ctx, h.AgentID)
+}
+
+// Unpause resumes a previously-paused agent container.
+func (d *DockerPodBackend) Unpause(ctx context.Context, h *PodHandle) error {
+	if h.AgentID == "" {
+		return fmt.Errorf("docker unpause: no agent container id")
+	}
+	return d.rt.UnpauseContainer(ctx, h.AgentID)
+}
+
+var _ PodBackend = (*DockerPodBackend)(nil)
+
 func (d *DockerPodBackend) ImportDelta(ctx context.Context, spawnID, baseRef string, r io.Reader) (string, error) {
 	tag := DeltaTag(spawnID)
 	if baseRef != "" {

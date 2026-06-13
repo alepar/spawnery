@@ -189,6 +189,40 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	return name, deltaDesc.Size, nil
 }
 
+// Pause pauses the containerd task for the container identified by key (CRI container id in
+// k8s.io namespace). Used by the suspend gate to quiesce agent writes before the final snapshot
+// (spec §3). Thin wrapper: LoadContainer → Task → Pause.
+func (e *containerdEngine) Pause(ctx context.Context, key string) error {
+	c, err := e.client.LoadContainer(ctx, key)
+	if err != nil {
+		return fmt.Errorf("load container %s: %w", key, err)
+	}
+	t, err := c.Task(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("get task %s: %w", key, err)
+	}
+	if err := t.Pause(ctx); err != nil {
+		return fmt.Errorf("pause task %s: %w", key, err)
+	}
+	return nil
+}
+
+// Resume resumes the containerd task for the container identified by key.
+func (e *containerdEngine) Resume(ctx context.Context, key string) error {
+	c, err := e.client.LoadContainer(ctx, key)
+	if err != nil {
+		return fmt.Errorf("load container %s: %w", key, err)
+	}
+	t, err := c.Task(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("get task %s: %w", key, err)
+	}
+	if err := t.Resume(ctx); err != nil {
+		return fmt.Errorf("resume task %s: %w", key, err)
+	}
+	return nil
+}
+
 // Release deletes the per-spawn image record and its pinning lease so the GC can reclaim the
 // blobs. Ignores NotFound so a double-Release is safe.
 func (e *containerdEngine) Release(ctx context.Context, name, leaseID string) error {
