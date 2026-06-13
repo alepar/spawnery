@@ -16,10 +16,12 @@ import (
 // fakeNodeJournal is a journal.JournalManager double for the node-side suspend tests: FinalSnapshot
 // returns a canned pinned manifest id per journaled mount, so a Suspend yields per-mount markers
 // without the real Kopia stack. When finalErr is set, FinalSnapshot returns that error instead,
-// simulating a suspend gate failure (e.g. journal sink unreachable).
+// simulating a suspend gate failure (e.g. journal sink unreachable). When putArtifactErr is set,
+// PutArtifact returns that error, simulating a rootfs artifact store failure (FinishSuspend path).
 type fakeNodeJournal struct {
-	finalID  journal.ManifestID
-	finalErr error
+	finalID        journal.ManifestID
+	finalErr       error
+	putArtifactErr error
 }
 
 func (f *fakeNodeJournal) RequestSnapshot(context.Context, string, uint64, journal.Mount) {}
@@ -41,6 +43,9 @@ func (f *fakeNodeJournal) LatestForGeneration(context.Context, string, string, u
 }
 func (f *fakeNodeJournal) PutArtifact(_ context.Context, spawnID string, generation uint64, desc journal.ArtifactDescriptor, r io.Reader) (journal.ArtifactDescriptor, error) {
 	_, _ = io.Copy(io.Discard, r)
+	if f.putArtifactErr != nil {
+		return journal.ArtifactDescriptor{}, f.putArtifactErr
+	}
 	desc.SpawnID = spawnID
 	desc.Generation = generation
 	if desc.ArtifactID == "" {
@@ -117,6 +122,22 @@ func newGateFailManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager 
 		DeltaCapture: true,
 	})
 	mgr.SetJournal(&fakeNodeJournal{finalErr: errors.New("journal sink unreachable")}, t.TempDir())
+	return mgr
+}
+
+// newFinishFailManager creates a manager whose journal gate succeeds but PutArtifact fails,
+// so FinishSuspend (called with captureRootfsArtifact=true) returns an error. This drives the
+// post-gate teardown error path where sessions are already reaped.
+func newFinishFailManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager {
+	t.Helper()
+	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
+		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+		DeltaCapture: true,
+	})
+	mgr.SetJournal(&fakeNodeJournal{
+		finalID:        "manifest-abc",
+		putArtifactErr: errors.New("artifact store unavailable"),
+	}, t.TempDir())
 	return mgr
 }
 
@@ -307,5 +328,48 @@ func TestSuspendGateFailureStaysActive(t *testing.T) {
 	// Spawn must still be live in the manager store.
 	if _, live := mgr.SpawnGeneration("sp1"); !live {
 		t.Fatal("spawn must remain live in manager store after gate failure")
+	}
+}
+
+// TestSuspendFinishFailureReleasesSlot verifies that when the gate (SnapshotForSuspend) succeeds
+// but FinishSuspend fails (e.g. rootfs artifact store unavailable), the capacity slot IS released.
+// Sessions are reaped before FinishSuspend runs, so the spawn is dead from the attacher's
+// perspective regardless of the finish outcome — keeping the slot would permanently leak capacity.
+func TestSuspendFinishFailureReleasesSlot(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newFinishFailManager(t, be)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	ctx := context.Background()
+
+	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeJournalApp(t), Model: "m", Generation: 4})
+	if got := lastPhase(fs.phasesFor("sp1")); got != nodev1.SpawnPhase_ACTIVE {
+		t.Fatalf("phase before suspend = %v, want ACTIVE", got)
+	}
+
+	// Trigger suspend with rootfs capture so FinishSuspend's PutArtifact path runs and fails.
+	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_Suspend{Suspend: &nodev1.Suspend{
+		SpawnId: "sp1", Generation: 4, CaptureRootfsArtifact: true,
+	}}})
+
+	// Wait for the ERROR status that FinishSuspend failure emits.
+	waitFor(t, "ERROR phase after finish failure", func() bool {
+		return lastPhase(fs.phasesFor("sp1")) == nodev1.SpawnPhase_ERROR
+	})
+
+	// Capacity slot MUST be released — sessions were reaped before FinishSuspend.
+	a.mu.Lock()
+	pumps, act := len(a.pumps), a.active
+	a.mu.Unlock()
+	if act != 0 {
+		t.Fatalf("active=%d, want 0 after finish failure (slot must be released)", act)
+	}
+	if pumps != 0 {
+		t.Fatalf("pumps=%d, want 0 after finish failure (sessions must be reaped)", pumps)
+	}
+
+	// Must NOT reach SUSPENDED.
+	if hasPhase(fs.phasesFor("sp1"), nodev1.SpawnPhase_SUSPENDED) {
+		t.Fatal("spawn must NOT reach SUSPENDED on finish failure")
 	}
 }

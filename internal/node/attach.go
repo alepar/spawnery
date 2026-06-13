@@ -699,6 +699,9 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 	res, err := a.mgr.FinishSuspend(ctx, spawnID, m.GetCaptureRootfsArtifact())
 	if err != nil {
 		logErr("suspendSpawn finish "+spawnID, err)
+		// Sessions were already reaped above; release the capacity slot before returning so
+		// the node does not permanently hold a slot for a spawn that is no longer tracked.
+		a.releaseSlot()
 		a.status(spawnID, nodev1.SpawnPhase_ERROR, err.Error())
 		return
 	}
