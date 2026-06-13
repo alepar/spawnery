@@ -231,6 +231,15 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 					owner = sp.OwnerID
 				}
 				_ = s.tel.Emit(telemetry.Event{Kind: "spawn_create", Owner: owner, NodeID: nodeID, NodeClass: nodeClass, SpawnID: m.Status.SpawnId, Tier: "reviewed", Storage: "managed", Timestamp: time.Now().UTC()})
+				// Spec §4 report-back: node resolves the base-image digest at create time and
+				// sends it with the ACTIVE status so the CP can persist it for cross-node resume.
+				// Best-effort: non-fatal if the digest is empty (resolution failed on the node)
+				// or if the store call fails (e.g. spawn deleted before ACTIVE lands).
+				if dg := m.Status.BaseImageDigest; dg != "" {
+					if err := s.st.Spawns().SetBaseImageDigest(ctx, m.Status.SpawnId, dg); err != nil {
+						log.Printf("spawn %s: persist base_image_digest %q: %v (non-fatal)", m.Status.SpawnId, dg, err)
+					}
+				}
 			}
 		case *nodev1.NodeMessage_Frame:
 			s.rt.FromNode(m.Frame.SpawnId, m.Frame.SessionId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected
@@ -566,7 +575,9 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		placement.TargetNodeID = targetNodeID
 	}
 
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env)
+	// Fresh create: base_image_digest is unknown until the node resolves it at create time.
+	// Pass "" so the node resolves and records the digest on first startup (spec §4).
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, "")
 	if err != nil {
 		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {

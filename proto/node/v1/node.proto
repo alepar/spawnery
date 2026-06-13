@@ -66,12 +66,18 @@ message Register    { string node_id = 1; uint32 max_spawns = 2; repeated string
 // signed_subkey (field 6): re-published on rotation (the node rotates at half-life) so the CP's cached
 // sub-key stays fresh without a dedicated message. Empty on heartbeats that carry no rotation.
 message Heartbeat   { uint32 active_spawns = 1; uint32 free_slots = 2; uint32 cpu_pct = 3; uint32 gpu_pct = 4; repeated RunningSpawn running = 5; bytes signed_subkey = 6; }
-message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; uint64 generation = 4; }
+// base_image_digest (field 5): the content-addressable base-image digest resolved by the node
+// at create time (spec §4). Non-empty only when phase=ACTIVE on the initial create, so the CP
+// can record it for cross-node resume. Empty on phase transitions that have no new digest.
+message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; uint64 generation = 4; string base_image_digest = 5; }
 // auth (field 20): the client's signed intent + aud=node access token (A4). The node verifies
 // the full chain: AS sig on token -> aud=node -> owner match -> SPKI/cnf match -> intent sig
 // -> field-by-field correspondence -> freshness -> jti uniqueness. In verify-and-log mode
 // (NODE_AUTH_MODE=insecure) failures are logged but not enforced.
 // asserted_owner (field 21): the CP-asserted spawn owner (cloud split model, sp-ova §7a).
+// base_image_digest (field 22): pinned base digest for cross-node resume (sp-ei4.1.10);
+// empty on fresh create. The node resolves and records the digest at create time; on resume
+// the CP threads the stored digest down so the node launches from the exact same base image.
 message StartSpawn  {
   string spawn_id    = 1;
   string app_ref     = 2;
@@ -86,6 +92,7 @@ message StartSpawn  {
   string mode        = 11;
   auth.v1.AuthEnvelope auth           = 20;
   string               asserted_owner = 21;
+  string               base_image_digest = 22;
 }
 message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }
 message Suspend     { string spawn_id = 1; uint64 generation = 2; }

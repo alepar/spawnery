@@ -47,7 +47,7 @@ type ManagerConfig struct {
 	CPULimit         float64 // CPU cores; default 1.0
 	PidsLimit        int64   // max pids per container; default 256
 	ContainerRuntime string  // OCI runtime name; "" = Docker default
-	HardenRootfs     bool    // if true, run agent with read-only rootfs + /tmp tmpfs
+	DeltaCapture     bool    // if true, capture agent rootfs delta on suspend (DELTA_CAPTURE=1)
 	AdvertiseIP      string  // node IP mosh advertises to spawnctl for terminal attach ("" => auto)
 
 	// UsernsMode controls the Linux user-namespace isolation posture (spec §2).
@@ -322,6 +322,10 @@ type AgentSelection struct {
 	Image      string
 	RunnableID string
 	Mode       string
+	// BaseImageDigest is the CP-pinned base image digest for cross-node resume (spec §4).
+	// Empty on fresh create (the node resolves the digest at create time via ResolveImageDigest).
+	// On resume/recreate the CP threads the stored digest down so the node uses the exact base.
+	BaseImageDigest string
 }
 
 func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID string, generation uint64) (*Spawn, error) {
@@ -525,21 +529,47 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		floorIP = h.PodIP
 	}
 
+	// Delta-survival image resolution (spec §4): runs AFTER the pod/floor are up (so a failure here
+	// tears the pod down via the Stop+finalizeAll paths) and BEFORE StartAgent.
+	//
+	// baseRef: the base image tag/digest. If the CP threaded a pinned digest (cross-node resume),
+	// use it; otherwise use the agentImage tag (fresh create or same-node resume).
+	baseRef := agentImage
+	if sel.BaseImageDigest != "" {
+		baseRef = sel.BaseImageDigest
+	}
+	// Pin: resolve and record the digest (best-effort; non-fatal so dev daemons without
+	// RepoDigests — which expose only an image ID — still spawn).
+	baseDigest := sel.BaseImageDigest
+	if baseDigest == "" {
+		if dg, derr := m.pod.ResolveImageDigest(ctx, baseRef); derr == nil {
+			baseDigest = dg
+		} else {
+			log.Printf("spawn %s: resolve base digest for %q: %v (non-fatal; delta-survival pinning skipped)", id, baseRef, derr)
+		}
+	}
+	// Launch image: delta tag if already present locally (same-node resume), else base.
+	launchImage, eerr := m.pod.EnsureImage(ctx, baseRef, runtime.DeltaTag(id))
+	if eerr != nil {
+		_ = m.pod.Stop(ctx, h)
+		finalizeAll()
+		return nil, fmt.Errorf("ensure launch image: %w", eerr)
+	}
+
 	// Phase 2: the untrusted agent, into the existing pod.
 	if err := m.pod.StartAgent(ctx, h, runtime.AgentSpec{
-		Image: agentImage,
+		Image: launchImage,
 		Cmd:   agentCmd,
 		Env: []string{
 			"OPENAI_BASE_URL=http://" + addr + "/v1",
 			"SPAWN_MODEL=" + model,
 			"SPAWN_SESSION_TITLE=" + sessionTitle,
 		},
-		Mounts:         mounts,
-		Resources:      res,
-		Runtime:        m.cfg.ContainerRuntime,
-		DropAllCaps:    runtime.CapPolicyForUsernsMode(m.cfg.UsernsMode) == runtime.CapDropAll,
-		ReadonlyRootfs: m.cfg.HardenRootfs,
-		Labels:         labels,
+		Mounts:      mounts,
+		Resources:   res,
+		Runtime:     m.cfg.ContainerRuntime,
+		DropAllCaps: runtime.CapPolicyForUsernsMode(m.cfg.UsernsMode) == runtime.CapDropAll,
+		Labels:      labels,
 	}); err != nil {
 		_ = m.pod.Stop(ctx, h)
 		finalizeAll()
@@ -560,7 +590,14 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	// host dirs exist and any resume restore has landed.
 	watchers := m.startJournalWatchers(id, generation, journalMounts)
 
-	sp := &Spawn{ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID, MountDirs: mountDirs, JournalMounts: journalMounts, journalWatchers: watchers, FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID, Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL}
+	sp := &Spawn{
+		ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
+		MountDirs: mountDirs, JournalMounts: journalMounts, journalWatchers: watchers,
+		FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID,
+		Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL,
+		BaseImageDigest: baseDigest,
+		LaunchImageRef:  launchImage, // delta tag on same-node resume, base ref on fresh create
+	}
 	m.store.Put(sp)
 	return sp, nil
 }
@@ -605,7 +642,7 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
-	m.teardown(ctx, sp)
+	m.teardown(ctx, sp, false)
 	return nil
 }
 
@@ -620,7 +657,7 @@ func (m *Manager) Suspend(ctx context.Context, id string) (map[string]string, er
 	if !ok {
 		return nil, fmt.Errorf("unknown spawn %s", id)
 	}
-	return m.teardown(ctx, sp), nil
+	return m.teardown(ctx, sp, true), nil
 }
 
 // teardown is the shared Stop/Suspend body: stop the pod, remove the egress floor, run the journal
@@ -628,7 +665,9 @@ func (m *Manager) Suspend(ctx context.Context, id string) (map[string]string, er
 // spawn from the in-mem store. It returns the per-mount persist markers from the final snapshot
 // (empty when journaling is off / the spawn has no journaled mounts) so Suspend can hand them to the
 // CP; Stop discards them.
-func (m *Manager) teardown(ctx context.Context, sp *Spawn) map[string]string {
+// capture=true (Suspend path) triggers the rootfs delta capture BEFORE pod.Stop so the commit runs
+// on the live container. capture=false (Stop path) skips capture.
+func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture bool) map[string]string {
 	id := sp.ID
 	// Teardown must complete even if the caller's ctx is already cancelled (e.g. the CP connection
 	// dropped mid-startup and the readiness probe failed): detach so firewall + mount cleanup run.
@@ -639,6 +678,29 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn) map[string]string {
 	for _, w := range sp.journalWatchers {
 		w.Stop()
 	}
+
+	// Delta capture (spec §2/§4): commit the agent container's writable layer to a local image tag
+	// BEFORE pod.Stop (which removes the container). Non-fatal: a capture failure is logged and the
+	// teardown continues normally — the next resume falls back to the base image (cold-ish start).
+	// Orthogonal to the journal block below (journal handles data mounts; delta handles rootfs).
+	if capture && m.cfg.DeltaCapture && sp.AgentID != "" {
+		h := &runtime.PodHandle{
+			SpawnID:   sp.ID,
+			AgentID:   sp.AgentID,
+			SidecarID: sp.SidecarID,
+			// Use the launch image (delta on resume, base on fresh create) as the layer-count
+			// reference for the moby#47065 guard — NOT the original base — so chained captures
+			// correctly detect a zero-layer commit on the 2nd+ suspend (spec §3 validation).
+			BaseImageRef: sp.LaunchImageRef,
+		}
+		if ref, cerr := m.pod.CaptureDelta(ctx, h); cerr != nil {
+			log.Printf("delta capture for %s: %v (non-fatal; next resume uses base image)", id, cerr)
+		} else {
+			sp.DeltaImageRef = ref
+			log.Printf("delta captured spawn=%s ref=%s", id, ref)
+		}
+	}
+
 	_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: sp.SidecarID, AgentID: sp.AgentID, SandboxID: sp.SandboxID})
 	if sp.FloorIP != "" {
 		if err := m.fw.Remove(ctx, firewall.Rules(sp.FloorIP, m.cfg.EgressAllowCIDRs)); err != nil {

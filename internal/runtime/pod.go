@@ -37,14 +37,13 @@ type AgentSpec struct {
 	// CRI maps it to Command (overrides the ENTRYPOINT). For images that respect a full-argv launch
 	// (no opinionated entrypoint, or an exec-form passthrough) both behave the same; an image with a
 	// hardcoded entrypoint must be made argv-aware for non-default runnables to actually launch.
-	Cmd            []string
-	Env            []string
-	Mounts         []Mount
-	Resources      Resources
-	Runtime        string
-	DropAllCaps    bool
-	ReadonlyRootfs bool
-	Labels         map[string]string // applied to the agent container
+	Cmd         []string
+	Env         []string
+	Mounts      []Mount
+	Resources   Resources
+	Runtime     string
+	DropAllCaps bool
+	Labels      map[string]string // applied to the agent container
 }
 
 // ManagedPod is one spawnery-managed pod the backend currently sees running (from its labels), used
@@ -67,6 +66,10 @@ type PodHandle struct {
 	SidecarID string // Docker backend: the sidecar container id (netns owner)
 	AgentID   string // Docker backend: the agent container id (set by StartAgent)
 	SandboxID string // CRI backend: the pod sandbox id (Docker backend leaves empty)
+
+	// Delta-capture fields (spec §4): set by the Manager from the Spawn before calling CaptureDelta.
+	SpawnID      string // used to derive the delta tag ("spawnery/delta:<id>")
+	BaseImageRef string // pinned base ref/digest — base layer count for the moby#47065 guard
 }
 
 // PodBackend runs a spawn pod: a sidecar + an agent sharing one network namespace, with the model
@@ -84,4 +87,17 @@ type PodBackend interface {
 	// ListManaged returns every spawnery-managed pod the backend currently sees (from its labels), so
 	// the Manager can reap orphans on startup and report a running inventory to the CP.
 	ListManaged(ctx context.Context) ([]ManagedPod, error)
+
+	// ResolveImageDigest returns the content-addressable digest of ref (Docker: RepoDigests[0],
+	// fallback Id). Used by Manager.Create to pin the base image digest (spec §4).
+	ResolveImageDigest(ctx context.Context, ref string) (digest string, err error)
+	// EnsureImage returns the image ref to launch the agent from: deltaRef if it exists locally,
+	// else baseRef. Resume picks the per-spawn delta tag; fresh create has none yet → baseRef.
+	EnsureImage(ctx context.Context, baseRef, deltaRef string) (imageRef string, err error)
+	// CaptureDelta stops+commits the agent container to "spawnery/delta:<h.SpawnID>", validates
+	// the committed layer count > base layer count (moby#47065 guard), and returns the delta tag.
+	// Suspend-path only; .Stop removes the container afterward via the normal path.
+	CaptureDelta(ctx context.Context, h *PodHandle) (ref string, err error)
+	// ReleaseDelta removes the per-spawn delta tag (GC). Task .12 wires the callers.
+	ReleaseDelta(ctx context.Context, spawnID string) error
 }

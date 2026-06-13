@@ -9,10 +9,18 @@ import (
 )
 
 // fakePodBackend records Stop's handle and returns a sandbox-bearing handle from StartPod.
+// It also implements the delta-capture methods so the manager tests compile against the full
+// PodBackend interface (ResolveImageDigest/EnsureImage/CaptureDelta/ReleaseDelta).
 type fakePodBackend struct {
 	stopped   *runtime.PodHandle
 	agentSpec runtime.AgentSpec // captured by StartAgent
 	podSpec   runtime.PodSpec   // captured by StartPod
+
+	// Delta-capture controls (overridable per test).
+	capturedRef    string // set by CaptureDelta if called
+	captureErr     error  // if non-nil, CaptureDelta returns this
+	resolveDigest  string // returned by ResolveImageDigest
+	ensureImageRef string // returned by EnsureImage (empty -> returns baseRef)
 }
 
 func (f *fakePodBackend) Ping(context.Context) error      { return nil }
@@ -35,6 +43,24 @@ func (f *fakePodBackend) Attach(_ context.Context, _ *runtime.PodHandle) (*runti
 	return &runtime.AttachedStream{Stdin: pw, Stdout: pr, Close: pw.Close}, nil
 }
 func (f *fakePodBackend) ListManaged(_ context.Context) ([]runtime.ManagedPod, error) { return nil, nil }
+
+func (f *fakePodBackend) ResolveImageDigest(_ context.Context, _ string) (string, error) {
+	return f.resolveDigest, nil
+}
+func (f *fakePodBackend) EnsureImage(_ context.Context, baseRef, _ string) (string, error) {
+	if f.ensureImageRef != "" {
+		return f.ensureImageRef, nil
+	}
+	return baseRef, nil
+}
+func (f *fakePodBackend) CaptureDelta(_ context.Context, h *runtime.PodHandle) (string, error) {
+	if f.captureErr != nil {
+		return "", f.captureErr
+	}
+	f.capturedRef = runtime.DeltaTag(h.SpawnID)
+	return f.capturedRef, nil
+}
+func (f *fakePodBackend) ReleaseDelta(_ context.Context, _ string) error { return nil }
 
 func TestManagerThreadsSandboxID(t *testing.T) {
 	m := NewManager(runtime.NewFake(), ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})

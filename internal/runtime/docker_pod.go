@@ -104,16 +104,15 @@ func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec Ag
 		Cmd:     spec.Cmd,
 		NetnsOf: h.SidecarID,
 		// The adapter listens on TCP for the node (both lanes now); no stdio ACP channel.
-		Env:            append([]string{fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", d.port())}, spec.Env...),
-		Mounts:         spec.Mounts,
-		AttachStdio:    false,
-		MemoryBytes:    spec.Resources.MemoryBytes,
-		NanoCPUs:       spec.Resources.NanoCPUs,
-		PidsLimit:      spec.Resources.PidsLimit,
-		Runtime:        spec.Runtime,
-		CapPolicy:      capPolicy,
-		ReadonlyRootfs: spec.ReadonlyRootfs,
-		Labels:         withRole(spec.Labels, "agent"),
+		Env:         append([]string{fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", d.port())}, spec.Env...),
+		Mounts:      spec.Mounts,
+		AttachStdio: false,
+		MemoryBytes: spec.Resources.MemoryBytes,
+		NanoCPUs:    spec.Resources.NanoCPUs,
+		PidsLimit:   spec.Resources.PidsLimit,
+		Runtime:     spec.Runtime,
+		CapPolicy:   capPolicy,
+		Labels:      withRole(spec.Labels, "agent"),
 	})
 	if err != nil {
 		return fmt.Errorf("agent: %w", err)
@@ -179,4 +178,69 @@ func (d *DockerPodBackend) Stop(ctx context.Context, h *PodHandle) error {
 		_ = d.rt.StopContainer(ctx, h.SidecarID)
 	}
 	return nil
+}
+
+// DeltaTag returns the local Docker image tag for a spawn's delta image ("spawnery/delta:<id>").
+// This is the single source of truth for the tag format — both the backend and Manager use this.
+func DeltaTag(spawnID string) string { return "spawnery/delta:" + spawnID }
+
+// ResolveImageDigest returns the content-addressable digest of ref: RepoDigests[0] when present,
+// fallback to the image Id. Used by Manager.Create to pin the base image (spec §4).
+func (d *DockerPodBackend) ResolveImageDigest(ctx context.Context, ref string) (string, error) {
+	info, ok, err := d.rt.InspectImage(ctx, ref)
+	if err != nil {
+		return "", fmt.Errorf("inspect %q: %w", ref, err)
+	}
+	if !ok {
+		return "", fmt.Errorf("image %q not found", ref)
+	}
+	if len(info.RepoDigests) > 0 {
+		return info.RepoDigests[0], nil
+	}
+	return info.ID, nil
+}
+
+// EnsureImage returns the image ref to launch the agent from. If deltaRef is non-empty and
+// present locally it is returned (resume from delta); otherwise baseRef is returned (fresh create
+// or delta not yet available). Base image pull is a stage-2 concern; dev lane has the base locally.
+func (d *DockerPodBackend) EnsureImage(ctx context.Context, baseRef, deltaRef string) (string, error) {
+	if deltaRef != "" {
+		if _, ok, err := d.rt.InspectImage(ctx, deltaRef); err == nil && ok {
+			return deltaRef, nil
+		}
+	}
+	return baseRef, nil
+}
+
+// CaptureDelta stops+commits the agent container to "spawnery/delta:<h.SpawnID>", validates the
+// committed image has more layers than the base (moby#47065 zero-layer guard), and returns the
+// delta tag. The container is left stopped (not removed); the normal pod Stop path removes it.
+func (d *DockerPodBackend) CaptureDelta(ctx context.Context, h *PodHandle) (string, error) {
+	tag := DeltaTag(h.SpawnID)
+
+	// Derive base layer count for the moby#47065 guard.
+	baseLayers := 0
+	if h.BaseImageRef != "" {
+		if bi, ok, err := d.rt.InspectImage(ctx, h.BaseImageRef); err == nil && ok {
+			baseLayers = bi.Layers
+		}
+	}
+
+	if _, err := d.rt.CommitContainer(ctx, h.AgentID, tag); err != nil {
+		return "", fmt.Errorf("commit delta for %s: %w", h.SpawnID, err)
+	}
+	ni, ok, err := d.rt.InspectImage(ctx, tag)
+	if err != nil || !ok {
+		return "", fmt.Errorf("inspect committed delta %s: %w", tag, err)
+	}
+	if ni.Layers <= baseLayers {
+		return "", fmt.Errorf("delta capture for %s produced %d layers <= base %d "+
+			"(moby#47065 zero-layer guard)", h.SpawnID, ni.Layers, baseLayers)
+	}
+	return tag, nil
+}
+
+// ReleaseDelta removes the per-spawn delta tag (GC hook). Task .12 wires the callers.
+func (d *DockerPodBackend) ReleaseDelta(ctx context.Context, spawnID string) error {
+	return d.rt.RemoveImage(ctx, DeltaTag(spawnID))
 }

@@ -49,7 +49,7 @@ func main() {
 		CPULimit:         getenvFloat("CPU_LIMIT", 1.0),
 		PidsLimit:        getenvInt64("PIDS_LIMIT", 256),
 		ContainerRuntime: os.Getenv("CONTAINER_RUNTIME"),
-		HardenRootfs:     getenvBool("HARDEN_ROOTFS", false),
+		DeltaCapture:     getenvBool("DELTA_CAPTURE", false),
 		AdvertiseIP:      env("NODE_ADVERTISE_IP", "127.0.0.1"),
 		UsernsMode:       env("USERNS_MODE", "off"),
 	}

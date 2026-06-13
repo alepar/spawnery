@@ -49,6 +49,18 @@ func (f *fakeCPStream) phasesFor(spawnID string) []nodev1.SpawnPhase {
 }
 
 // lastRoster returns the most recent SessionRoster the attacher sent to the CP (nil if none).
+func (f *fakeCPStream) lastStatusFor(spawnID string) *nodev1.SpawnStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var last *nodev1.SpawnStatus
+	for _, m := range f.sent {
+		if st := m.GetStatus(); st != nil && st.SpawnId == spawnID {
+			last = st
+		}
+	}
+	return last
+}
+
 func (f *fakeCPStream) lastRoster() *nodev1.SessionRoster {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -116,6 +128,19 @@ func (f *scriptedPodBackend) Attach(context.Context, *runtime.PodHandle) (*runti
 func (f *scriptedPodBackend) ListManaged(context.Context) ([]runtime.ManagedPod, error) {
 	return nil, nil
 }
+
+// Delta-capture stubs: not exercised in the node lifecycle tests (Docker-lane only, sp-ei4.1.10).
+func (f *scriptedPodBackend) ResolveImageDigest(_ context.Context, _ string) (string, error) {
+	return "sha256:fakedigest", nil
+}
+func (f *scriptedPodBackend) EnsureImage(_ context.Context, baseRef, _ string) (string, error) {
+	return baseRef, nil
+}
+func (f *scriptedPodBackend) CaptureDelta(_ context.Context, _ *runtime.PodHandle) (string, error) {
+	return "", nil
+}
+func (f *scriptedPodBackend) ReleaseDelta(_ context.Context, _ string) error { return nil }
+
 func (f *scriptedPodBackend) wasStopped() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -229,6 +254,11 @@ func TestStartSpawnSuccessReportsActive(t *testing.T) {
 
 	if got := lastPhase(a.stream.(*fakeCPStream).phasesFor("sp1")); got != nodev1.SpawnPhase_ACTIVE {
 		t.Fatalf("final phase = %v, want ACTIVE", got)
+	}
+	// The ACTIVE report must carry the resolved base-image digest — the CP's only way to pin
+	// the base on the spawn row (spec §4); an empty digest here means the pinning chain is dead.
+	if got := a.stream.(*fakeCPStream).lastStatusFor("sp1").GetBaseImageDigest(); got != "sha256:fakedigest" {
+		t.Fatalf("ACTIVE BaseImageDigest = %q, want sha256:fakedigest", got)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()

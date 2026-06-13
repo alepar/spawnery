@@ -104,12 +104,11 @@ func TestStartAgentAndStopLifecycle(t *testing.T) {
 	}
 
 	err = b.StartAgent(ctx, h, runtime.AgentSpec{
-		Image:          "goose:dev",
-		Env:            []string{"SPAWN_MODEL=m"},
-		Mounts:         []runtime.Mount{{HostPath: "/h", ContainerPath: "/app", ReadOnly: true}},
-		Resources:      runtime.Resources{MemoryBytes: 1 << 20},
-		DropAllCaps:    true,
-		ReadonlyRootfs: true,
+		Image:       "goose:dev",
+		Env:         []string{"SPAWN_MODEL=m"},
+		Mounts:      []runtime.Mount{{HostPath: "/h", ContainerPath: "/app", ReadOnly: true}},
+		Resources:   runtime.Resources{MemoryBytes: 1 << 20},
+		DropAllCaps: true,
 	})
 	if err != nil {
 		t.Fatalf("StartAgent: %v", err)
@@ -121,9 +120,13 @@ func TestStartAgentAndStopLifecycle(t *testing.T) {
 		t.Fatalf("agent create wrong: names=%v", f.createdNames)
 	}
 	ag := f.created[1]
+	// ReadonlyRootfs is retired (spec §6); only cap-drop=ALL is checked.
 	if ag.Linux.SecurityContext == nil || len(ag.Linux.SecurityContext.Capabilities.DropCapabilities) != 1 ||
-		ag.Linux.SecurityContext.Capabilities.DropCapabilities[0] != "ALL" || !ag.Linux.SecurityContext.ReadonlyRootfs {
+		ag.Linux.SecurityContext.Capabilities.DropCapabilities[0] != "ALL" {
 		t.Fatalf("agent hardening wrong: %+v", ag.Linux.SecurityContext)
+	}
+	if ag.Linux.SecurityContext.ReadonlyRootfs {
+		t.Fatal("ReadonlyRootfs must not be set (retired by spec §6)")
 	}
 	if len(ag.Mounts) != 1 || ag.Mounts[0].HostPath != "/h" || ag.Mounts[0].ContainerPath != "/app" || !ag.Mounts[0].Readonly {
 		t.Fatalf("agent mount wrong: %+v", ag.Mounts)
