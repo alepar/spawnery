@@ -60,6 +60,30 @@ type ManagerConfig struct {
 	// remap mode). Learned at startup by probing docker info; exposed via RemapBase() for
 	// the storage layer to compute host-side ownership (spec §2, task .8).
 	UsernsRemapBase uint32
+
+	// DeltaSquashDepth is the number of suspend captures after which the manager
+	// surfaces a SQUASH-NEEDED warning (default 16). Squash execution is deferred
+	// until a backend layer-export method is available; the warning surfaces the
+	// growing chain so operators know when to intervene.
+	// 0 → use default (16). Set to a very large value to disable.
+	DeltaSquashDepth int
+
+	// DeltaScrubPaths are path prefixes (absolute) exec-scrubbed from the agent
+	// container via `rm -rf` BEFORE each CaptureDelta commit (live Docker-lane
+	// capture-time scrub; best-effort, non-fatal).  The deltamerge package
+	// applies the same filter during squash.  Default:
+	// ["/var/cache/apt", "/var/lib/apt/lists", "/tmp"].
+	DeltaScrubPaths []string
+
+	// DeltaQuotaSoftMB: if > 0 and a spawn's captured delta image exceeds this
+	// threshold, the watchdog suspends the spawn and logs a warning.
+	// Precision: depends on the backend exposing DeltaSize (optional interface).
+	// When DeltaSize is unavailable the quota is dormant (logged once).
+	DeltaQuotaSoftMB int64
+
+	// DeltaQuotaHardMB: if > 0 and a spawn's captured delta image exceeds this
+	// threshold, the watchdog stops the spawn hard (no delta kept by Stop).
+	DeltaQuotaHardMB int64
 }
 
 type Manager struct {
@@ -85,6 +109,27 @@ type Manager struct {
 	// secrets injects owner-sealed secret plaintext into each spawn's tmpfs secrets dir (design §6).
 	// Always set (NewManagerWithBackend defaults SecretsRoot); the node calls InjectSecret after unseal.
 	secrets SecretInjector
+
+	// deltaState durably records the per-spawn delta chain depth across node restarts so
+	// a resumed spawn continues counting from where it left off.
+	deltaState *deltaStateStore
+
+	// scrubFn is called BEFORE each CaptureDelta commit to remove noisy paths from the
+	// agent container's writable layer (live capture-time scrub, Docker lane).  Default
+	// (set by NewManagerWithBackend) execs `rm -rf <paths>` directly against the agentID
+	// container without routing through ExecRun/store-lookup — the spawn has already been
+	// claimed from the store (removed) by the time teardown calls scrubFn.
+	// Injected as a seam in tests so the hermetic unit tests do not shell out to Docker.
+	scrubFn func(ctx context.Context, agentID string, paths []string) error
+
+	// squashNeeded is called when DeltaDepth reaches DeltaSquashDepth.
+	// nil → log a "SQUASH-NEEDED" warning line.
+	// Injected in tests so they can observe the callback without log parsing.
+	squashNeeded func(id string, depth int)
+
+	// quotaWarnedOnce guards the "no size source" dormant-quota log (emitted once per
+	// manager lifetime, not on every CheckQuotas call).
+	quotaWarnedOnce bool
 }
 
 // JournalKeyReceiver injects an owner-delivered Kopia repo password into the
@@ -155,14 +200,40 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 	if cfg.SecretsRoot == "" {
 		cfg.SecretsRoot = filepath.Join(cfg.DataRoot, "secrets")
 	}
-	return &Manager{
-		pod:     pod,
-		cfg:     cfg,
-		store:   NewStore(),
-		backend: storage.NewScratch(cfg.DataRoot),
-		fw:      fw,
-		secrets: SecretInjector{Root: cfg.SecretsRoot},
+	if cfg.DeltaSquashDepth == 0 {
+		cfg.DeltaSquashDepth = 16
 	}
+	if len(cfg.DeltaScrubPaths) == 0 {
+		cfg.DeltaScrubPaths = []string{"/var/cache/apt", "/var/lib/apt/lists", "/tmp"}
+	}
+	m := &Manager{
+		pod:        pod,
+		cfg:        cfg,
+		store:      NewStore(),
+		backend:    storage.NewScratch(cfg.DataRoot),
+		fw:         fw,
+		secrets:    SecretInjector{Root: cfg.SecretsRoot},
+		deltaState: &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
+	}
+	// Default scrub function: exec `rm -rf <paths>` directly in the agent container before commit.
+	// This runs while the container is still live (before pod.Stop).
+	// IMPORTANT: we exec by agentID directly — NOT via ExecRun — because by the time teardown
+	// calls scrubFn the spawn has already been removed from the store by Claim (in Stop/Suspend/
+	// Delete), so ExecRun's store.Get would always return "no agent container".
+	// The seam allows unit tests to inject a fake without shelling out to Docker.
+	m.scrubFn = func(ctx context.Context, agentID string, paths []string) error {
+		if agentID == "" {
+			return fmt.Errorf("scrub: no agent container id")
+		}
+		args := append([]string{"rm", "-rf"}, paths...)
+		argv := execArgv(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime), agentID, args)
+		out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("exec %v: %w (%s)", args, err, out)
+		}
+		return nil
+	}
+	return m
 }
 
 // egressEnforced reports whether the egress floor must be applied: cloud nodes always enforce
@@ -285,6 +356,16 @@ func (m *Manager) RunningInventory() []runtime.ManagedPod {
 // Scoped by the spawnery.node-id label: pods created by a DIFFERENT node id are left alone — two
 // spawnlets sharing one Docker daemon (dev stack + an e2e run, or multi-node-on-one-host) must not
 // reap each other's live pods. Unlabeled pods (pre-label versions) are still reaped.
+//
+// Crash-survival (spec §4): when DeltaCapture is enabled, a CaptureDelta is attempted on the
+// orphaned agent container BEFORE pod.Stop, so the spawn's work is preserved for a future resume.
+// This is best-effort and non-fatal — a capture failure just means the next resume starts from the
+// last known-good delta (or the base image if none existed).
+//
+// moby#47065 note: the moby layer-count guard in CaptureDelta requires the BaseImageRef of the
+// launch image to compare against.  Orphan reaping does not have the Spawn record (the in-mem store
+// was wiped on restart), so BaseImageRef is empty and the guard degrades to rejecting only truly
+// zero-layer commits.
 func (m *Manager) ReapOrphans(ctx context.Context) error {
 	managed, err := m.pod.ListManaged(ctx)
 	if err != nil {
@@ -298,6 +379,19 @@ func (m *Manager) ReapOrphans(ctx context.Context) error {
 			continue // still ours
 		}
 		log.Printf("reaping orphaned pod spawn=%s gen=%d (not in store; node restart)", mp.SpawnID, mp.Generation)
+
+		// Capture-before-reap (spec §4 crash-survival): commit the agent's writable layer to
+		// the delta tag BEFORE stopping so a future same-node resume picks up where it crashed.
+		// Best-effort: non-fatal, logged.
+		if m.cfg.DeltaCapture && mp.AgentID != "" {
+			h := &runtime.PodHandle{SpawnID: mp.SpawnID, AgentID: mp.AgentID}
+			if ref, cerr := m.pod.CaptureDelta(ctx, h); cerr != nil {
+				log.Printf("capture-before-reap spawn=%s: %v (non-fatal; delta may be stale)", mp.SpawnID, cerr)
+			} else {
+				log.Printf("capture-before-reap spawn=%s ref=%s", mp.SpawnID, ref)
+			}
+		}
+
 		_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: mp.SidecarID, AgentID: mp.AgentID, SandboxID: mp.SandboxID})
 	}
 	return nil
@@ -590,6 +684,17 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	// host dirs exist and any resume restore has landed.
 	watchers := m.startJournalWatchers(id, generation, journalMounts)
 
+	// Delta chain depth continuation: load the persisted depth so a resumed spawn
+	// keeps counting from where it left off. Non-fatal: on load failure we start at 0.
+	var deltaDepth int
+	if m.cfg.DeltaCapture {
+		if drec, found, derr := m.deltaState.Load(id); derr != nil {
+			log.Printf("delta state load for %s: %v (starting depth at 0)", id, derr)
+		} else if found {
+			deltaDepth = drec.Depth
+		}
+	}
+
 	sp := &Spawn{
 		ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
 		MountDirs: mountDirs, JournalMounts: journalMounts, journalWatchers: watchers,
@@ -597,6 +702,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL,
 		BaseImageDigest: baseDigest,
 		LaunchImageRef:  launchImage, // delta tag on same-node resume, base ref on fresh create
+		DeltaDepth:      deltaDepth,
 	}
 	m.store.Put(sp)
 	return sp, nil
@@ -638,11 +744,13 @@ func (m *Manager) PreflightRuntime(ctx context.Context) error {
 }
 
 func (m *Manager) Stop(ctx context.Context, id string) error {
-	sp, ok := m.store.Get(id)
+	// Claim atomically removes the spawn from the store so a concurrent quota-watchdog
+	// Stop or CP-driven Delete cannot race into a double-teardown.
+	sp, ok := m.store.Claim(id)
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
-	m.teardown(ctx, sp, false)
+	m.teardown(ctx, sp, false, false)
 	return nil
 }
 
@@ -653,21 +761,41 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 // cancelled. The CP-side per-spawn lock + generation fence (the node drops a stale Suspend before
 // calling here) guarantee at most one in-flight suspend/stop per spawn.
 func (m *Manager) Suspend(ctx context.Context, id string) (map[string]string, error) {
-	sp, ok := m.store.Get(id)
+	// Claim atomically removes the spawn so concurrent watchdog/CP teardowns cannot race.
+	sp, ok := m.store.Claim(id)
 	if !ok {
 		return nil, fmt.Errorf("unknown spawn %s", id)
 	}
-	return m.teardown(ctx, sp, true), nil
+	return m.teardown(ctx, sp, true, false), nil
 }
 
-// teardown is the shared Stop/Suspend body: stop the pod, remove the egress floor, run the journal
-// suspend barrier (final snapshot + node-local pin save), finalize the scratch dirs, and drop the
-// spawn from the in-mem store. It returns the per-mount persist markers from the final snapshot
-// (empty when journaling is off / the spawn has no journaled mounts) so Suspend can hand them to the
-// CP; Stop discards them.
-// capture=true (Suspend path) triggers the rootfs delta capture BEFORE pod.Stop so the commit runs
-// on the live container. capture=false (Stop path) skips capture.
-func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture bool) map[string]string {
+// Delete tears down the spawn (without capturing a delta) and runs GC: releases the per-spawn
+// delta image (ReleaseDelta) and purges the durable delta + journal state files.  This is the
+// destroy path — the CP issues an explicit delete when it has confirmed the spawn will not
+// resume.  Stop does NOT GC (the delta image must survive for same-node restart-resume).
+//
+// Wiring note: the node's CPMessage_Stop→STOPPED destroy path currently calls Stop; switching it
+// to Delete is a REQUIRED follow-up in internal/node (out of allowed files for this task).
+func (m *Manager) Delete(ctx context.Context, id string) error {
+	// Claim atomically removes the spawn so concurrent watchdog/CP teardowns cannot race.
+	sp, ok := m.store.Claim(id)
+	if !ok {
+		return fmt.Errorf("unknown spawn %s", id)
+	}
+	m.teardown(ctx, sp, false, true)
+	return nil
+}
+
+// teardown is the shared Stop/Suspend/Delete body: stop the pod, remove the egress floor, run the
+// journal suspend barrier (final snapshot + node-local pin save), finalize the scratch dirs, and
+// drop the spawn from the in-mem store. It returns the per-mount persist markers from the final
+// snapshot (empty when journaling is off / the spawn has no journaled mounts) so Suspend can hand
+// them to the CP; Stop and Delete discard them.
+//
+//   - capture=true (Suspend path): trigger the rootfs delta capture BEFORE pod.Stop (live container).
+//   - gc=true (Delete path): release the delta image after pod.Stop and purge durable state files.
+//     (Stop and Suspend both have gc=false — the delta image must survive for same-node restart-resume.)
+func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc bool) map[string]string {
 	id := sp.ID
 	// Teardown must complete even if the caller's ctx is already cancelled (e.g. the CP connection
 	// dropped mid-startup and the readiness probe failed): detach so firewall + mount cleanup run.
@@ -684,6 +812,16 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture bool) map[str
 	// teardown continues normally — the next resume falls back to the base image (cold-ish start).
 	// Orthogonal to the journal block below (journal handles data mounts; delta handles rootfs).
 	if capture && m.cfg.DeltaCapture && sp.AgentID != "" {
+		// Live capture-time scrub: `rm -rf <paths>` in the agent container BEFORE commit so the
+		// committed layer does not include apt caches, /tmp noise, etc. Best-effort, non-fatal.
+		if len(m.cfg.DeltaScrubPaths) > 0 && m.scrubFn != nil {
+			// Pass sp.AgentID directly: the spawn has already been removed from the store
+			// by Claim above, so passing the spawn id and re-looking-up via ExecRun would
+			// always fail with "spawn X has no agent container".
+			if serr := m.scrubFn(ctx, sp.AgentID, m.cfg.DeltaScrubPaths); serr != nil {
+				log.Printf("delta scrub for %s: %v (non-fatal; proceeding with capture)", id, serr)
+			}
+		}
 		h := &runtime.PodHandle{
 			SpawnID:   sp.ID,
 			AgentID:   sp.AgentID,
@@ -697,7 +835,22 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture bool) map[str
 			log.Printf("delta capture for %s: %v (non-fatal; next resume uses base image)", id, cerr)
 		} else {
 			sp.DeltaImageRef = ref
-			log.Printf("delta captured spawn=%s ref=%s", id, ref)
+			sp.DeltaDepth++
+			// Persist the updated depth so a resume continuation starts at the right depth.
+			if serr := m.deltaState.Save(id, deltaRecord{Depth: sp.DeltaDepth}); serr != nil {
+				log.Printf("delta state save for %s: %v", id, serr)
+			}
+			log.Printf("delta captured spawn=%s ref=%s depth=%d", id, ref, sp.DeltaDepth)
+			// Squash-needed heuristic: warn (or call injected callback) when the chain grows long.
+			if sp.DeltaDepth >= m.cfg.DeltaSquashDepth {
+				if m.squashNeeded != nil {
+					m.squashNeeded(id, sp.DeltaDepth)
+				} else {
+					log.Printf("SQUASH-NEEDED spawn=%s depth=%d threshold=%d "+
+						"(squash exec deferred until backend layer-export method available)",
+						id, sp.DeltaDepth, m.cfg.DeltaSquashDepth)
+				}
+			}
 		}
 	}
 
@@ -750,7 +903,25 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture bool) map[str
 	if serr := m.secrets.Remove(id); serr != nil {
 		log.Printf("secrets dir cleanup for %s: %v", id, serr)
 	}
-	m.store.Delete(id)
+
+	// GC path (Delete only): release the delta image and purge durable state files.
+	// Stop and Suspend leave the delta image in place for same-node restart-resume.
+	if gc {
+		if gerr := m.pod.ReleaseDelta(ctx, id); gerr != nil {
+			log.Printf("delta release for %s: %v (non-fatal)", id, gerr)
+		}
+		if derr := m.deltaState.Delete(id); derr != nil {
+			log.Printf("delta state delete for %s: %v", id, derr)
+		}
+		if m.journalState != nil {
+			if jerr := m.journalState.Delete(id); jerr != nil {
+				log.Printf("journal state delete for %s: %v", id, jerr)
+			}
+		}
+	}
+
+	// The spawn was removed from the store atomically by Claim (in Stop/Suspend/Delete)
+	// before teardown was called, so no store.Delete is needed here.
 	return markers
 }
 

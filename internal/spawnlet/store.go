@@ -51,6 +51,14 @@ type Spawn struct {
 	// BaseImageDigest is reported to the CP at the ACTIVE transition (node statusActive);
 	// DeltaImageRef stays node-local (same-node resume) until stage-2 migration ships it.
 	DeltaImageRef string
+
+	// DeltaDepth is the number of CaptureDelta calls committed for this spawn so far
+	// (i.e. the length of the delta commit chain above the base image). Loaded from
+	// deltaStateStore on Create (resume continuation) and incremented on each successful
+	// Suspend capture. When DeltaDepth reaches ManagerConfig.DeltaSquashDepth the
+	// manager surfaces a SQUASH-NEEDED warning (squash execution is deferred until a
+	// backend layer-export method is available).
+	DeltaDepth int
 }
 
 type Store struct {
@@ -68,6 +76,21 @@ func (s *Store) Get(id string) (*Spawn, bool) {
 	return sp, ok
 }
 func (s *Store) Delete(id string) { s.mu.Lock(); delete(s.m, id); s.mu.Unlock() }
+
+// Claim atomically removes the spawn from the store and returns it.  If the id is
+// unknown (or was already claimed by a concurrent caller), it returns nil, false.
+// Use this instead of Get+Delete when starting a teardown: only one concurrent caller
+// can successfully claim a given spawn, preventing double-teardown races (e.g. the
+// quota watchdog and a CP-driven stop firing simultaneously).
+func (s *Store) Claim(id string) (*Spawn, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sp, ok := s.m[id]
+	if ok {
+		delete(s.m, id)
+	}
+	return sp, ok
+}
 
 // List returns a snapshot of all live spawns (for the running inventory).
 func (s *Store) List() []*Spawn {
