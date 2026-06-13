@@ -59,24 +59,24 @@ func (f *fakeDeltaEngine) Close() error {
 // and absent.
 func TestResolveImageDigest(t *testing.T) {
 	cases := []struct {
-		name       string
-		imageName  string
-		present    bool
+		name        string
+		imageName   string
+		present     bool
 		repoDigests []string
-		wantDigest string
-		wantErr    bool
+		wantDigest  string
+		wantErr     bool
 	}{
 		{
-			name:       "present with RepoDigests returns first digest",
-			imageName:  "myimage:latest",
-			present:    true,
+			name:        "present with RepoDigests returns first digest",
+			imageName:   "myimage:latest",
+			present:     true,
 			repoDigests: []string{"myimage@sha256:abc123", "myimage@sha256:def456"},
-			wantDigest: "myimage@sha256:abc123",
+			wantDigest:  "myimage@sha256:abc123",
 		},
 		{
-			name:      "present without RepoDigests returns Id",
-			imageName: "myimage:v2",
-			present:   true,
+			name:       "present without RepoDigests returns Id",
+			imageName:  "myimage:v2",
+			present:    true,
 			wantDigest: "myimage:v2",
 		},
 		{
@@ -117,25 +117,25 @@ func TestResolveImageDigest(t *testing.T) {
 // baseRef, empty deltaRef → baseRef.
 func TestEnsureImage(t *testing.T) {
 	cases := []struct {
-		name        string
-		baseRef     string
-		deltaRef    string
+		name         string
+		baseRef      string
+		deltaRef     string
 		deltaPresent bool
-		wantRef     string
+		wantRef      string
 	}{
 		{
-			name:        "deltaRef present returns deltaRef",
-			baseRef:     "base:v1",
-			deltaRef:    "spawnery/delta:s1",
+			name:         "deltaRef present returns deltaRef",
+			baseRef:      "base:v1",
+			deltaRef:     "spawnery/delta:s1",
 			deltaPresent: true,
-			wantRef:     "spawnery/delta:s1",
+			wantRef:      "spawnery/delta:s1",
 		},
 		{
-			name:        "deltaRef absent returns baseRef",
-			baseRef:     "base:v1",
-			deltaRef:    "spawnery/delta:s2",
+			name:         "deltaRef absent returns baseRef",
+			baseRef:      "base:v1",
+			deltaRef:     "spawnery/delta:s2",
 			deltaPresent: false,
-			wantRef:     "base:v1",
+			wantRef:      "base:v1",
 		},
 		{
 			name:    "empty deltaRef returns baseRef",
@@ -372,4 +372,3 @@ func TestDeltaLeaseID(t *testing.T) {
 		t.Errorf("deltaLeaseID = %q, want %q", got, want)
 	}
 }
-

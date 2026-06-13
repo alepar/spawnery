@@ -40,16 +40,16 @@ type fakeCRI struct {
 	digests map[string][]string
 
 	// recorded calls.
-	createdNames     []string // container Metadata.Name in CreateContainer order
-	created          []*runtimeapi.ContainerConfig
-	createSandbox    []string // PodSandboxId per CreateContainer
-	started          []string // StartContainer ids
-	stopped          []string // StopContainer ids
+	createdNames      []string // container Metadata.Name in CreateContainer order
+	created           []*runtimeapi.ContainerConfig
+	createSandbox     []string // PodSandboxId per CreateContainer
+	started           []string // StartContainer ids
+	stopped           []string // StopContainer ids
 	removedContainers []string // RemoveContainer ids
-	pulled           []string // PullImage images
-	stopSandbox      []string
-	removeSandbox    []string
-	nextID           int
+	pulled            []string // PullImage images
+	stopSandbox       []string
+	removeSandbox     []string
+	nextID            int
 }
 
 func (f *fakeCRI) Status(_ context.Context, _ *runtimeapi.StatusRequest) (*runtimeapi.StatusResponse, error) {

@@ -36,7 +36,7 @@ type CRIPodBackend struct {
 
 	// delta is the engine used by CaptureDelta/ReleaseDelta. Nil until first use (lazy-built from
 	// the shared CRI conn) or injected via WithDeltaEngine (tests).
-	delta    deltaEngine
+	delta     deltaEngine
 	deltaOnce sync.Once
 	deltaErr  error
 }
