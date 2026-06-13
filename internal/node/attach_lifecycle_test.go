@@ -116,6 +116,19 @@ func (f *scriptedPodBackend) Attach(context.Context, *runtime.PodHandle) (*runti
 func (f *scriptedPodBackend) ListManaged(context.Context) ([]runtime.ManagedPod, error) {
 	return nil, nil
 }
+
+// Delta-capture stubs: not exercised in the node lifecycle tests (Docker-lane only, sp-ei4.1.10).
+func (f *scriptedPodBackend) ResolveImageDigest(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+func (f *scriptedPodBackend) EnsureImage(_ context.Context, baseRef, _ string) (string, error) {
+	return baseRef, nil
+}
+func (f *scriptedPodBackend) CaptureDelta(_ context.Context, _ *runtime.PodHandle) (string, error) {
+	return "", nil
+}
+func (f *scriptedPodBackend) ReleaseDelta(_ context.Context, _ string) error { return nil }
+
 func (f *scriptedPodBackend) wasStopped() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

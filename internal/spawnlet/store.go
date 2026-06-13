@@ -35,6 +35,16 @@ type Spawn struct {
 	// ControlURL is the node-reachable sidecar control endpoint,
 	// "http://<PodIP>:<controlPort>/control/model". Empty if the pod has no IP.
 	ControlURL string
+
+	// BaseImageDigest is the content-addressable digest of the base image resolved at create time
+	// (spec §4). Set by Manager.Create via ResolveImageDigest; empty when resolution fails (non-fatal).
+	// Used as BaseImageRef in PodHandle for the moby#47065 layer-count guard in CaptureDelta.
+	BaseImageDigest string
+	// DeltaImageRef is the local Docker image tag ("spawnery/delta:<id>") set after a successful
+	// CaptureDelta on suspend. In-memory only: same-node resume reads the tag directly from the
+	// backend (EnsureImage probes it); cross-node resume is a stage-2 concern.
+	// TODO(stage2/report-back): wire BaseImageDigest + DeltaImageRef to CP on suspend.
+	DeltaImageRef string
 }
 
 type Store struct {

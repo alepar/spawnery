@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -86,13 +87,6 @@ func buildHostConfig(s ContainerSpec) *container.HostConfig {
 	case CapDropAll:
 		host.CapDrop = []string{"ALL"}
 	default: // CapDefaultSet: no CapDrop/CapAdd — engine default capability set
-	}
-	if s.ReadonlyRootfs {
-		host.ReadonlyRootfs = true
-		if host.Tmpfs == nil {
-			host.Tmpfs = map[string]string{}
-		}
-		host.Tmpfs["/tmp"] = ""
 	}
 	return host
 }
@@ -250,6 +244,41 @@ func (d *Docker) StopContainer(ctx context.Context, id string) error {
 	_ = d.cli.ContainerStop(ctx, id, container.StopOptions{Timeout: &to})
 	err := d.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
 	if err != nil && client.IsErrNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// CommitContainer stops the container (without removing it) and commits its writable layer to a
+// new image tagged ref. Used by the Docker delta-capture path (spec §2). The caller is responsible
+// for removing the container afterward via the normal Stop path.
+func (d *Docker) CommitContainer(ctx context.Context, containerID, ref string) (string, error) {
+	to := 0
+	_ = d.cli.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &to})
+	resp, err := d.cli.ContainerCommit(ctx, containerID, container.CommitOptions{Reference: ref, Pause: false})
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
+// InspectImage returns image metadata for ref. Returns (ImageInfo{}, false, nil) when the image
+// is not present locally (equivalent to "docker inspect not found").
+func (d *Docker) InspectImage(ctx context.Context, ref string) (ImageInfo, bool, error) {
+	info, err := d.cli.ImageInspect(ctx, ref)
+	if client.IsErrNotFound(err) {
+		return ImageInfo{}, false, nil
+	}
+	if err != nil {
+		return ImageInfo{}, false, err
+	}
+	return ImageInfo{ID: info.ID, RepoDigests: info.RepoDigests, Layers: len(info.RootFS.Layers)}, true, nil
+}
+
+// RemoveImage removes the image tagged ref. A not-found image is silently ignored (idempotent).
+func (d *Docker) RemoveImage(ctx context.Context, ref string) error {
+	_, err := d.cli.ImageRemove(ctx, ref, image.RemoveOptions{Force: true})
+	if client.IsErrNotFound(err) {
 		return nil
 	}
 	return err

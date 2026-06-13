@@ -71,7 +71,8 @@ func (s *Scheduler) PickNodeID(placement registry.Placement) (string, error) {
 // the orphan arm Stop the pod the CP itself just started (sp-gzvo).
 // env is the A4 AuthEnvelope (token + SignedIntent) to thread into StartSpawn [AC1]; nil is
 // allowed in dev/insecure mode where the node will verify-and-log-not-enforce.
-func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement, env *authv1.AuthEnvelope) (string, error) {
+// baseImageDigest is threaded to the node for cross-node resume (sp-ei4.1.10); empty on fresh create.
+func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement, env *authv1.AuthEnvelope, baseImageDigest string) (string, error) {
 	n := s.reg.PickFor(placement)
 	if n == nil {
 		return "", connect.NewError(connect.CodeResourceExhausted, errors.New("no eligible node with capacity"))
@@ -85,7 +86,7 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Start{Start: &nodev1.StartSpawn{
 		SpawnId: id, AppRef: appRef, Model: model, Name: name, AppId: appID,
 		Image: placement.Image, RunnableId: runnable, Mode: mode, Generation: gen,
-		Auth: env, AssertedOwner: placement.Owner,
+		Auth: env, AssertedOwner: placement.Owner, BaseImageDigest: baseImageDigest,
 	}}}); err != nil {
 		return "", connect.NewError(connect.CodeUnavailable, err)
 	}

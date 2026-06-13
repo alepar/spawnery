@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -44,13 +45,12 @@ func TestDockerPodBackendStartPodStartAgentStop(t *testing.T) {
 	}
 
 	err = b.StartAgent(ctx, h, AgentSpec{
-		Image:          "agent-img",
-		Env:            []string{"SPAWN_MODEL=m"},
-		Mounts:         []Mount{{HostPath: "/h", ContainerPath: "/app"}},
-		Resources:      res,
-		Runtime:        "runsc",
-		DropAllCaps:    true,
-		ReadonlyRootfs: true,
+		Image:       "agent-img",
+		Env:         []string{"SPAWN_MODEL=m"},
+		Mounts:      []Mount{{HostPath: "/h", ContainerPath: "/app"}},
+		Resources:   res,
+		Runtime:     "runsc",
+		DropAllCaps: true,
 	})
 	if err != nil {
 		t.Fatalf("StartAgent: %v", err)
@@ -63,7 +63,7 @@ func TestDockerPodBackendStartPodStartAgentStop(t *testing.T) {
 	}
 	ag := f.Started[1]
 	// AgentSpec.DropAllCaps=true is mapped to ContainerSpec.CapPolicy=CapDropAll by StartAgent.
-	if ag.Image != "agent-img" || ag.NetnsOf != "fake-1" || ag.CapPolicy != CapDropAll || !ag.ReadonlyRootfs || ag.Runtime != "runsc" {
+	if ag.Image != "agent-img" || ag.NetnsOf != "fake-1" || ag.CapPolicy != CapDropAll || ag.Runtime != "runsc" {
 		t.Fatalf("agent spec wrong: %+v", ag)
 	}
 
@@ -201,5 +201,136 @@ func TestDockerPodBackendPreflight(t *testing.T) {
 	}
 	if err := NewDockerPodBackend(errOnRuntime{NewFake()}, "runsc", "smoke").Preflight(ctx); err == nil {
 		t.Fatal("broken runtime must fail preflight")
+	}
+}
+
+// --- Delta-capture method tests (A1–A5) -------------------------------------
+
+// A1: CaptureDelta commits the agent container and returns the delta tag.
+func TestCaptureDeltaCommitsAndTags(t *testing.T) {
+	f := NewFake()
+	const baseRef = "spawnery/agent:dev"
+	// Seed the base image with 5 layers so the guard passes (committed = 6).
+	f.Images[baseRef] = ImageInfo{ID: "sha256:base", Layers: 5}
+	// Also ensure the last-started image matches so CommitContainer derives baseLayers correctly.
+	f.Started = append(f.Started, ContainerSpec{Image: baseRef})
+
+	b := NewDockerPodBackend(f, "", "smoke")
+	ctx := context.Background()
+	h := &PodHandle{SpawnID: "sp1", AgentID: "agent-1", BaseImageRef: baseRef}
+
+	ref, err := b.CaptureDelta(ctx, h)
+	if err != nil {
+		t.Fatalf("CaptureDelta: %v", err)
+	}
+	if ref != "spawnery/delta:sp1" {
+		t.Fatalf("delta tag = %q, want spawnery/delta:sp1", ref)
+	}
+	if len(f.Committed) != 1 {
+		t.Fatalf("want 1 commit, got %d", len(f.Committed))
+	}
+	if f.Committed[0].ContainerID != "agent-1" || f.Committed[0].Ref != "spawnery/delta:sp1" {
+		t.Fatalf("commit wrong: %+v", f.Committed[0])
+	}
+	// Verify the committed image is inspectable (CommitContainer seeded it).
+	ni, ok, err := f.InspectImage(ctx, "spawnery/delta:sp1")
+	if err != nil || !ok {
+		t.Fatalf("committed image not inspectable: ok=%v err=%v", ok, err)
+	}
+	if ni.Layers <= 5 {
+		t.Fatalf("committed image layers = %d, want > 5 (base)", ni.Layers)
+	}
+}
+
+// A2: CaptureDelta returns an error when the committed image has <= base layers (moby#47065 guard).
+func TestCaptureDeltaLayerGuard(t *testing.T) {
+	f := NewFake()
+	const baseRef = "spawnery/agent:dev"
+	f.Images[baseRef] = ImageInfo{ID: "sha256:base", Layers: 5}
+	f.Started = append(f.Started, ContainerSpec{Image: baseRef})
+	// Force CommitContainer to produce only 3 layers (< base = 5).
+	f.CommitLayers = 3
+
+	b := NewDockerPodBackend(f, "", "smoke")
+	h := &PodHandle{SpawnID: "sp-guard", AgentID: "ag", BaseImageRef: baseRef}
+
+	_, err := b.CaptureDelta(context.Background(), h)
+	if err == nil {
+		t.Fatal("CaptureDelta must error when committed layers <= base (moby#47065 guard)")
+	}
+	// Error should mention the guard.
+	if !strings.Contains(err.Error(), "guard") && !strings.Contains(err.Error(), "47065") {
+		t.Fatalf("error should mention the guard: %v", err)
+	}
+}
+
+// A3: EnsureImage returns the delta tag when present, base ref otherwise.
+func TestEnsureImagePrefersDeltaTag(t *testing.T) {
+	f := NewFake()
+	b := NewDockerPodBackend(f, "", "smoke")
+	ctx := context.Background()
+	const base = "spawnery/agent:dev"
+	const delta = "spawnery/delta:sp1"
+
+	// Without the delta image present → returns base.
+	got, err := b.EnsureImage(ctx, base, delta)
+	if err != nil {
+		t.Fatalf("EnsureImage (no delta): %v", err)
+	}
+	if got != base {
+		t.Fatalf("EnsureImage (no delta) = %q, want %q", got, base)
+	}
+
+	// Seed the delta image → returns delta.
+	f.Images[delta] = ImageInfo{ID: "sha256:delta", Layers: 6}
+	got, err = b.EnsureImage(ctx, base, delta)
+	if err != nil {
+		t.Fatalf("EnsureImage (with delta): %v", err)
+	}
+	if got != delta {
+		t.Fatalf("EnsureImage (with delta) = %q, want %q", got, delta)
+	}
+}
+
+// A4: ResolveImageDigest returns RepoDigests[0] when present, falls back to ID.
+func TestResolveImageDigest(t *testing.T) {
+	f := NewFake()
+	b := NewDockerPodBackend(f, "", "smoke")
+	ctx := context.Background()
+	const ref = "spawnery/agent:dev"
+
+	// With a RepoDigest → returns the digest.
+	f.Images[ref] = ImageInfo{ID: "sha256:id", RepoDigests: []string{"spawnery/agent@sha256:abc"}, Layers: 5}
+	got, err := b.ResolveImageDigest(ctx, ref)
+	if err != nil {
+		t.Fatalf("ResolveImageDigest: %v", err)
+	}
+	if got != "spawnery/agent@sha256:abc" {
+		t.Fatalf("ResolveImageDigest = %q, want digest", got)
+	}
+
+	// Without RepoDigests → falls back to ID.
+	f.Images[ref] = ImageInfo{ID: "sha256:id-only", Layers: 5}
+	got, err = b.ResolveImageDigest(ctx, ref)
+	if err != nil {
+		t.Fatalf("ResolveImageDigest (id fallback): %v", err)
+	}
+	if got != "sha256:id-only" {
+		t.Fatalf("ResolveImageDigest (id fallback) = %q, want sha256:id-only", got)
+	}
+}
+
+// A5: ReleaseDelta calls RemoveImage on the delta tag.
+func TestReleaseDeltaRemovesTag(t *testing.T) {
+	f := NewFake()
+	b := NewDockerPodBackend(f, "", "smoke")
+	const delta = "spawnery/delta:sp1"
+	f.Images[delta] = ImageInfo{ID: "sha256:delta"}
+
+	if err := b.ReleaseDelta(context.Background(), "sp1"); err != nil {
+		t.Fatalf("ReleaseDelta: %v", err)
+	}
+	if len(f.Removed) != 1 || f.Removed[0] != delta {
+		t.Fatalf("Removed = %v, want [%s]", f.Removed, delta)
 	}
 }

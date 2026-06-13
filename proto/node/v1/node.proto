@@ -72,6 +72,9 @@ message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail =
 // -> field-by-field correspondence -> freshness -> jti uniqueness. In verify-and-log mode
 // (NODE_AUTH_MODE=insecure) failures are logged but not enforced.
 // asserted_owner (field 21): the CP-asserted spawn owner (cloud split model, sp-ova §7a).
+// base_image_digest (field 22): pinned base digest for cross-node resume (sp-ei4.1.10);
+// empty on fresh create. The node resolves and records the digest at create time; on resume
+// the CP threads the stored digest down so the node launches from the exact same base image.
 message StartSpawn  {
   string spawn_id    = 1;
   string app_ref     = 2;
@@ -86,6 +89,7 @@ message StartSpawn  {
   string mode        = 11;
   auth.v1.AuthEnvelope auth           = 20;
   string               asserted_owner = 21;
+  string               base_image_digest = 22;
 }
 message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }
 message Suspend     { string spawn_id = 1; uint64 generation = 2; }

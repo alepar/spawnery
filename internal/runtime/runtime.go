@@ -7,6 +7,14 @@ import (
 	"io"
 )
 
+// ImageInfo is the subset of image metadata consumed by the delta-capture path.
+// Layers is used to guard against the moby#47065 zero-layer-commit class of bugs.
+type ImageInfo struct {
+	ID          string
+	RepoDigests []string
+	Layers      int // len(RootFS.Layers)
+}
+
 // CapPolicy controls the Linux capability set applied to a container.
 // Zero value is CapDefaultSet so unset container specs (sidecar, preflight smoke)
 // keep today's behavior: no CapDrop, engine default capability set.
@@ -56,11 +64,10 @@ type ContainerSpec struct {
 	MemoryBytes int64  // 0 = unlimited
 	NanoCPUs    int64  // 0 = unlimited; 1 CPU = 1_000_000_000
 	PidsLimit   int64  // 0 = unlimited
-	Runtime        string    // "" = Docker default; e.g. "runsc"
-	CapPolicy      CapPolicy // zero = CapDefaultSet (engine default capability set)
-	CapAdd         []string  // capabilities to ADD — rejected by the Docker backend (§7 floor-defeat guard)
-	ReadonlyRootfs bool
-	Labels         map[string]string // container labels (spawnery.managed/spawn-id/generation/node-id/role)
+	Runtime   string    // "" = Docker default; e.g. "runsc"
+	CapPolicy CapPolicy // zero = CapDefaultSet (engine default capability set)
+	CapAdd    []string  // capabilities to ADD — rejected by the Docker backend (§7 floor-defeat guard)
+	Labels    map[string]string // container labels (spawnery.managed/spawn-id/generation/node-id/role)
 }
 
 // ContainerSummary is the minimal view ListByLabel returns: the container id + its labels.
@@ -86,6 +93,15 @@ type ContainerRuntime interface {
 	ContainerIP(ctx context.Context, id string) (string, error)
 	// ListByLabel returns all containers (any state) carrying label key=value, with their labels.
 	ListByLabel(ctx context.Context, key, value string) ([]ContainerSummary, error)
+
+	// CommitContainer stops the container (without removing it) then commits its writable
+	// layer to a new image tagged ref. Used by the Docker delta-capture path (spec §2).
+	CommitContainer(ctx context.Context, containerID, ref string) (imageID string, err error)
+	// InspectImage returns image metadata for ref. exists=false (nil err) when the image is
+	// not present locally (equivalent to a docker inspect "not found").
+	InspectImage(ctx context.Context, ref string) (info ImageInfo, exists bool, err error)
+	// RemoveImage removes the image tagged ref. A not-found image is not an error (idempotent).
+	RemoveImage(ctx context.Context, ref string) error
 }
 
 // FakeRuntime records calls for unit tests.
@@ -94,9 +110,27 @@ type FakeRuntime struct {
 	Stopped map[string]bool
 	byID    map[string]ContainerSpec // id -> spec (for ListByLabel)
 	n       int
+
+	// Delta-capture fields (docker-lane image ops, spec §2–4).
+	// Committed is an ordered log of CommitContainer calls.
+	Committed []struct{ ContainerID, Ref string }
+	// Images is the seeded + committed image store, keyed by ref.
+	// Tests seed this to control InspectImage responses.
+	Images map[string]ImageInfo
+	// Removed is an ordered log of RemoveImage calls.
+	Removed []string
+	// CommitLayers overrides the layer count of a committed image (0 = base+1 default).
+	// Set to a value ≤ base layers to trigger the moby#47065 guard in tests.
+	CommitLayers int
 }
 
-func NewFake() *FakeRuntime { return &FakeRuntime{Stopped: map[string]bool{}, byID: map[string]ContainerSpec{}} }
+func NewFake() *FakeRuntime {
+	return &FakeRuntime{
+		Stopped: map[string]bool{},
+		byID:    map[string]ContainerSpec{},
+		Images:  map[string]ImageInfo{},
+	}
+}
 
 func (f *FakeRuntime) Ping(_ context.Context) error { return nil }
 
@@ -130,4 +164,39 @@ func (f *FakeRuntime) ListByLabel(_ context.Context, key, value string) ([]Conta
 		}
 	}
 	return out, nil
+}
+
+// CommitContainer records the call and synthesises a committed ImageInfo into Images[ref].
+// The committed image's layer count is: CommitLayers if > 0, else (base layers)+1.
+// "base layers" is derived from the seeded Images entry whose ref was the last-started container's
+// image — tests that need precise layer counts should seed Images[ref] for the base before calling.
+func (f *FakeRuntime) CommitContainer(_ context.Context, containerID, ref string) (string, error) {
+	f.Committed = append(f.Committed, struct{ ContainerID, Ref string }{ContainerID: containerID, Ref: ref})
+	// Derive the base layer count from the seeded image that matches the last-started container.
+	baseLayers := 0
+	for _, cs := range f.Started {
+		if bi, ok := f.Images[cs.Image]; ok {
+			if bi.Layers > baseLayers {
+				baseLayers = bi.Layers
+			}
+		}
+	}
+	layers := baseLayers + 1
+	if f.CommitLayers > 0 {
+		layers = f.CommitLayers
+	}
+	id := fmt.Sprintf("sha256:committed-%s", ref)
+	f.Images[ref] = ImageInfo{ID: id, Layers: layers}
+	return id, nil
+}
+
+func (f *FakeRuntime) InspectImage(_ context.Context, ref string) (ImageInfo, bool, error) {
+	info, ok := f.Images[ref]
+	return info, ok, nil
+}
+
+func (f *FakeRuntime) RemoveImage(_ context.Context, ref string) error {
+	f.Removed = append(f.Removed, ref)
+	delete(f.Images, ref)
+	return nil
 }

@@ -85,10 +85,14 @@ type Spawn struct {
 	Recovered        bool   `bun:"recovered,notnull"`
 	ModelApplied     bool   `bun:"model_applied,notnull"`
 	ModelApplyDetail string `bun:"model_apply_detail,notnull"`
-	CreatedAt        int64  `bun:"created_at,notnull"`
-	LastUsedAt       int64  `bun:"last_used_at,notnull"`
-	SuspendedAt      *int64 `bun:"suspended_at"`
-	DeletedAt        *int64 `bun:"deleted_at"`
+	// BaseImageDigest is the content-addressable digest of the agent's base image, resolved at
+	// create time by the node and stored here for cross-node resume (spec §4 / sp-ei4.1.10).
+	// Empty for spawns created before this field was introduced.
+	BaseImageDigest string `bun:"base_image_digest,notnull"`
+	CreatedAt       int64  `bun:"created_at,notnull"`
+	LastUsedAt      int64  `bun:"last_used_at,notnull"`
+	SuspendedAt     *int64 `bun:"suspended_at"`
+	DeletedAt       *int64 `bun:"deleted_at"`
 }
 
 // Container is the running episode. spawn:container = 1-to-0..1 (uniq_live_container on ended_at IS NULL).

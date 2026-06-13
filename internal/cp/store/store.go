@@ -65,6 +65,10 @@ type SpawnRepo interface {
 	MarkModelApplyFailed(ctx context.Context, id, detail string) error
 	ListUnappliedModel(ctx context.Context) ([]Spawn, error)
 
+	// SetBaseImageDigest records the content-addressable base-image digest resolved by the node
+	// at create time (spec §4 / sp-ei4.1.10). ErrNotFound when the spawn is missing or deleted.
+	SetBaseImageDigest(ctx context.Context, id, digest string) error
+
 	ClaimStarting(ctx context.Context, id string, from []Status) (newGen int64, err error)
 	SetActive(ctx context.Context, id, nodeID string, gen int64) error
 	SetSuspending(ctx context.Context, id string, gen int64) error

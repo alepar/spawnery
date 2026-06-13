@@ -3,6 +3,7 @@ package cri
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -87,7 +88,7 @@ func (b *CRIPodBackend) StartPod(ctx context.Context, spec runtime.PodSpec) (*ru
 		Image:    &runtimeapi.ImageSpec{Image: spec.SidecarImage},
 		Envs:     toKeyValues(spec.SidecarEnv),
 		Labels:   spec.Labels,
-		Linux:    linuxContainer(spec.Resources, false, false),
+		Linux:    linuxContainer(spec.Resources, false),
 	})
 	if err != nil {
 		cleanup()
@@ -184,9 +185,10 @@ func toCRIMounts(ms []runtime.Mount) []*runtimeapi.Mount {
 	return out
 }
 
-// linuxContainer maps our Resources + hardening flags to the CRI LinuxContainerConfig. Pids has no
+// linuxContainer maps our Resources + cap-drop flag to the CRI LinuxContainerConfig. Pids has no
 // dedicated CRI field, so it goes through the cgroup-v2 Unified map ("pids.max").
-func linuxContainer(res runtime.Resources, dropCaps, roRootfs bool) *runtimeapi.LinuxContainerConfig {
+// ReadonlyRootfs is retired (spec §6 — writable rootfs survival replaces it).
+func linuxContainer(res runtime.Resources, dropCaps bool) *runtimeapi.LinuxContainerConfig {
 	r := &runtimeapi.LinuxContainerResources{}
 	if res.MemoryBytes > 0 {
 		r.MemoryLimitInBytes = res.MemoryBytes
@@ -200,13 +202,9 @@ func linuxContainer(res runtime.Resources, dropCaps, roRootfs bool) *runtimeapi.
 		r.Unified = map[string]string{"pids.max": strconv.FormatInt(res.PidsLimit, 10)}
 	}
 	lc := &runtimeapi.LinuxContainerConfig{Resources: r}
-	if dropCaps || roRootfs {
-		lc.SecurityContext = &runtimeapi.LinuxContainerSecurityContext{}
-		if dropCaps {
-			lc.SecurityContext.Capabilities = &runtimeapi.Capability{DropCapabilities: []string{"ALL"}}
-		}
-		if roRootfs {
-			lc.SecurityContext.ReadonlyRootfs = true
+	if dropCaps {
+		lc.SecurityContext = &runtimeapi.LinuxContainerSecurityContext{
+			Capabilities: &runtimeapi.Capability{DropCapabilities: []string{"ALL"}},
 		}
 	}
 	return lc
@@ -230,7 +228,7 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 		Envs:     toKeyValues(append([]string{"ACP_ADAPTER=1", fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", acpPort)}, spec.Env...)),
 		Mounts:   toCRIMounts(spec.Mounts),
 		Labels:   spec.Labels,
-		Linux:    linuxContainer(spec.Resources, spec.DropAllCaps, spec.ReadonlyRootfs),
+		Linux:    linuxContainer(spec.Resources, spec.DropAllCaps),
 	})
 	if err != nil {
 		return fmt.Errorf("agent: %w", err)
@@ -286,6 +284,30 @@ func (b *CRIPodBackend) ListManaged(ctx context.Context) ([]runtime.ManagedPod, 
 		out = append(out, runtime.ManagedPod{SpawnID: sid, Generation: gen, NodeID: l[runtime.LabelNodeID], SandboxID: sb.GetId()})
 	}
 	return out, nil
+}
+
+// errCRINotImpl is returned by the CRI backend's delta-capture methods until task sp-ei4.1.11
+// implements the containerd DiffService path.
+var errCRINotImpl = errors.New("not implemented on the CRI lane (sp-ei4.1.11)")
+
+// ResolveImageDigest is not yet implemented on the CRI lane (sp-ei4.1.11 fills this).
+func (b *CRIPodBackend) ResolveImageDigest(_ context.Context, _ string) (string, error) {
+	return "", errCRINotImpl
+}
+
+// EnsureImage is not yet implemented on the CRI lane (sp-ei4.1.11 fills this).
+func (b *CRIPodBackend) EnsureImage(_ context.Context, _ string, _ string) (string, error) {
+	return "", errCRINotImpl
+}
+
+// CaptureDelta is not yet implemented on the CRI lane (sp-ei4.1.11 fills this).
+func (b *CRIPodBackend) CaptureDelta(_ context.Context, _ *runtime.PodHandle) (string, error) {
+	return "", errCRINotImpl
+}
+
+// ReleaseDelta is not yet implemented on the CRI lane (sp-ei4.1.11 fills this).
+func (b *CRIPodBackend) ReleaseDelta(_ context.Context, _ string) error {
+	return errCRINotImpl
 }
 
 var _ runtime.PodBackend = (*CRIPodBackend)(nil)

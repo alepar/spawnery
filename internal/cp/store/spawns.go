@@ -116,6 +116,22 @@ func (r *spawnRepo) Rename(ctx context.Context, id, name string) error {
 	return nil
 }
 
+// SetBaseImageDigest records the content-addressable base-image digest resolved by the node at
+// create time (spec §4 / sp-ei4.1.10). Like Rename/SetModel, it refuses deleted spawns and
+// returns ErrNotFound when no row is updated.
+func (r *spawnRepo) SetBaseImageDigest(ctx context.Context, id, digest string) error {
+	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("base_image_digest = ?", digest).
+		Where("id = ?", id).Where("status <> ?", Deleted).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetModel writes the new model and marks it unapplied (model_applied=false), clearing any prior
 // failure detail — all in one UPDATE (atomic). The CP SetSpawnModel handler calls this. Like Rename,
 // it refuses deleted spawns and returns ErrNotFound when no row is updated.
