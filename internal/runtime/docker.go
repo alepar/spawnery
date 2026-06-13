@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +16,10 @@ import (
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/daemon"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 )
 
 type Docker struct{ cli *client.Client }
@@ -284,24 +289,80 @@ func (d *Docker) RemoveImage(ctx context.Context, ref string) error {
 	return err
 }
 
-func (d *Docker) ExportImage(ctx context.Context, ref string, w io.Writer) error {
-	rc, err := d.cli.ImageSave(ctx, []string{ref})
+// ExportTopLayer streams ref's top (delta) layer as an uncompressed tar via go-containerregistry
+// (sp-ei4.1.14). docker save/load can't ship a single layer against a base already on the target
+// (moby#18723), so we read the image from the daemon, take only its last layer, and stream the
+// raw tar — preserving .wh. whiteouts / modes / xattrs / uids and feeding Kopia uncompressed for
+// CDC dedup. crane uses its own env-based daemon client (DOCKER_HOST), independent of d.cli.
+func (d *Docker) ExportTopLayer(ctx context.Context, ref string, w io.Writer) error {
+	r, err := name.ParseReference(ref)
 	if err != nil {
-		return err
+		return fmt.Errorf("parse ref %s: %w", ref, err)
+	}
+	img, err := daemon.Image(r, daemon.WithContext(ctx))
+	if err != nil {
+		return fmt.Errorf("read image %s from daemon: %w", ref, err)
+	}
+	layers, err := img.Layers()
+	if err != nil {
+		return fmt.Errorf("list layers of %s: %w", ref, err)
+	}
+	if len(layers) == 0 {
+		return fmt.Errorf("image %s has no layers", ref)
+	}
+	rc, err := layers[len(layers)-1].Uncompressed()
+	if err != nil {
+		return fmt.Errorf("open top layer of %s: %w", ref, err)
 	}
 	defer rc.Close()
-	_, err = io.Copy(w, rc)
-	return err
+	if _, err := io.Copy(w, rc); err != nil {
+		return fmt.Errorf("stream top layer of %s: %w", ref, err)
+	}
+	return nil
 }
 
-func (d *Docker) ImportImage(ctx context.Context, r io.Reader) error {
-	resp, err := d.cli.ImageLoad(ctx, r)
+// AssembleOnBase reconstructs base+delta on a target that already has the pinned base: read base
+// from the daemon, append the shipped delta layer tar (byte-for-byte, preserving whiteouts/uids),
+// and write the result back as newTag (sp-ei4.1.14). daemon.Write side-steps the partial-load
+// limitation entirely. The layer is buffered to a temp file because tarball.LayerFromFile needs a
+// re-openable source.
+func (d *Docker) AssembleOnBase(ctx context.Context, baseRef, newTag string, layer io.Reader) error {
+	bref, err := name.ParseReference(baseRef)
 	if err != nil {
-		return err
+		return fmt.Errorf("parse base ref %s: %w", baseRef, err)
 	}
-	defer resp.Body.Close()
-	_, err = io.Copy(io.Discard, resp.Body)
-	return err
+	base, err := daemon.Image(bref, daemon.WithContext(ctx))
+	if err != nil {
+		return fmt.Errorf("read base %s from daemon: %w", baseRef, err)
+	}
+	tmp, err := os.CreateTemp("", "spawnery-delta-*.tar")
+	if err != nil {
+		return fmt.Errorf("temp delta layer file: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := io.Copy(tmp, layer); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("buffer delta layer: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp delta layer: %w", err)
+	}
+	dl, err := tarball.LayerFromFile(tmp.Name())
+	if err != nil {
+		return fmt.Errorf("read delta layer: %w", err)
+	}
+	out, err := mutate.AppendLayers(base, dl)
+	if err != nil {
+		return fmt.Errorf("append delta to base %s: %w", baseRef, err)
+	}
+	tref, err := name.NewTag(newTag)
+	if err != nil {
+		return fmt.Errorf("parse new tag %s: %w", newTag, err)
+	}
+	if _, err := daemon.Write(tref, out, daemon.WithContext(ctx)); err != nil {
+		return fmt.Errorf("write assembled image %s: %w", newTag, err)
+	}
+	return nil
 }
 
 func (d *Docker) PauseContainer(ctx context.Context, id string) error {

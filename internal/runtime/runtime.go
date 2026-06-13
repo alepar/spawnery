@@ -2,7 +2,6 @@
 package runtime
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -103,10 +102,16 @@ type ContainerRuntime interface {
 	InspectImage(ctx context.Context, ref string) (info ImageInfo, exists bool, err error)
 	// RemoveImage removes the image tagged ref. A not-found image is not an error (idempotent).
 	RemoveImage(ctx context.Context, ref string) error
-	// ExportImage writes an uncompressed image archive stream for ref.
-	ExportImage(ctx context.Context, ref string, w io.Writer) error
-	// ImportImage loads an image archive stream into the runtime image store.
-	ImportImage(ctx context.Context, r io.Reader) error
+	// ExportTopLayer writes ONLY ref's top (writable/delta) layer as an uncompressed tar — not
+	// the whole image. Delta-only migration (sp-ei4.1.14): docker save/load cannot ship a layer
+	// against a base already on the target (moby#18723), so the layer is shipped alone and
+	// reassembled via AssembleOnBase; uncompressed so the Kopia journal's CDC dedup collapses
+	// successive deltas. Preserves .wh. whiteouts / modes / xattrs / uids byte-for-byte.
+	ExportTopLayer(ctx context.Context, ref string, w io.Writer) error
+	// AssembleOnBase reads baseRef from the runtime, appends the single delta layer tar, and
+	// writes the result back as newTag — reconstructing base+delta on a target that already has
+	// the pinned base (sp-ei4.1.14). baseRef must be present locally.
+	AssembleOnBase(ctx context.Context, baseRef, newTag string, layer io.Reader) error
 	// PauseContainer pauses all processes in the container (SIGSTOP / cgroup freeze).
 	// Used by the suspend gate to quiesce agent writes before the final snapshot (spec §3).
 	PauseContainer(ctx context.Context, id string) error
@@ -224,7 +229,7 @@ func (f *FakeRuntime) RemoveImage(_ context.Context, ref string) error {
 	return nil
 }
 
-func (f *FakeRuntime) ExportImage(_ context.Context, ref string, w io.Writer) error {
+func (f *FakeRuntime) ExportTopLayer(_ context.Context, ref string, w io.Writer) error {
 	f.ExportedImages = append(f.ExportedImages, ref)
 	payload, ok := f.ImageArchives[ref]
 	if !ok {
@@ -237,19 +242,17 @@ func (f *FakeRuntime) ExportImage(_ context.Context, ref string, w io.Writer) er
 	return err
 }
 
-func (f *FakeRuntime) ImportImage(_ context.Context, r io.Reader) error {
-	payload, err := io.ReadAll(r)
-	if err != nil {
+func (f *FakeRuntime) AssembleOnBase(_ context.Context, baseRef, newTag string, layer io.Reader) error {
+	if _, err := io.Copy(io.Discard, layer); err != nil {
 		return err
 	}
-	refBytes, _, _ := bytes.Cut(payload, []byte{'\n'})
-	ref := string(refBytes)
-	if ref == "" {
-		return fmt.Errorf("import image archive missing image ref")
+	if baseRef != "" {
+		if _, ok := f.Images[baseRef]; !ok {
+			return fmt.Errorf("base image %q not found", baseRef)
+		}
 	}
-	f.ImportedImages = append(f.ImportedImages, ref)
-	f.Images[ref] = ImageInfo{ID: "sha256:imported-" + ref, Layers: 1}
-	f.ImageArchives[ref] = payload
+	f.ImportedImages = append(f.ImportedImages, newTag)
+	f.Images[newTag] = ImageInfo{ID: "sha256:assembled-" + newTag, Layers: 1}
 	return nil
 }
 

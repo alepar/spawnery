@@ -253,7 +253,7 @@ func (d *DockerPodBackend) ExportDelta(ctx context.Context, spawnID string, w io
 	} else if !ok {
 		return fmt.Errorf("delta image %s not found", tag)
 	}
-	if err := d.rt.ExportImage(ctx, tag, w); err != nil {
+	if err := d.rt.ExportTopLayer(ctx, tag, w); err != nil {
 		return fmt.Errorf("export delta %s: %w", tag, err)
 	}
 	return nil
@@ -280,20 +280,11 @@ var _ PodBackend = (*DockerPodBackend)(nil)
 
 func (d *DockerPodBackend) ImportDelta(ctx context.Context, spawnID, baseRef string, r io.Reader) (string, error) {
 	tag := DeltaTag(spawnID)
-	if baseRef != "" {
-		if _, ok, err := d.rt.InspectImage(ctx, baseRef); err != nil {
-			return "", fmt.Errorf("inspect base %s: %w", baseRef, err)
-		} else if !ok {
-			return "", fmt.Errorf("base image %s not found", baseRef)
-		}
-	}
-	if err := d.rt.ImportImage(ctx, r); err != nil {
-		return "", fmt.Errorf("import delta %s: %w", tag, err)
-	}
-	if _, ok, err := d.rt.InspectImage(ctx, tag); err != nil {
-		return "", fmt.Errorf("inspect imported delta %s: %w", tag, err)
-	} else if !ok {
-		return "", fmt.Errorf("imported delta archive did not create %s", tag)
+	// Reassemble base + the shipped single delta layer into the deterministic delta tag. The base
+	// must already be present locally (CP-pinned by digest); AssembleOnBase reads it, appends the
+	// layer, and writes the tag back via the daemon — no full-image archive crosses the wire.
+	if err := d.rt.AssembleOnBase(ctx, baseRef, tag, r); err != nil {
+		return "", fmt.Errorf("assemble delta %s on base %s: %w", tag, baseRef, err)
 	}
 	return tag, nil
 }
