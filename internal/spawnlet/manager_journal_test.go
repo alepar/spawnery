@@ -2,6 +2,7 @@ package spawnlet
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -50,6 +51,22 @@ func (f *fakeJournal) Restore(_ context.Context, _, mountName string, id journal
 
 func (f *fakeJournal) LatestForGeneration(context.Context, string, string, uint64) (journal.ManifestID, error) {
 	return "", nil
+}
+func (f *fakeJournal) PutArtifact(_ context.Context, spawnID string, generation uint64, desc journal.ArtifactDescriptor, r io.Reader) (journal.ArtifactDescriptor, error) {
+	_, _ = io.Copy(io.Discard, r)
+	desc.SpawnID = spawnID
+	desc.Generation = generation
+	if desc.ArtifactID == "" {
+		desc.ArtifactID = "artifact-test"
+	}
+	return desc, nil
+}
+func (f *fakeJournal) GetArtifact(_ context.Context, spawnID string, generation uint64, artifactID string, w io.Writer) (journal.ArtifactDescriptor, error) {
+	_, _ = w.Write([]byte("artifact-test"))
+	return journal.ArtifactDescriptor{SpawnID: spawnID, Generation: generation, ArtifactID: artifactID}, nil
+}
+func (f *fakeJournal) ListArtifacts(context.Context, string, uint64, string) ([]journal.ArtifactDescriptor, error) {
+	return nil, nil
 }
 func (f *fakeJournal) QuickMaintenance(context.Context, string) error { return nil }
 func (f *fakeJournal) Close(context.Context, string) error            { return nil }

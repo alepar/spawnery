@@ -3,6 +3,7 @@ package cri
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"spawnery/internal/runtime"
 
@@ -20,6 +21,10 @@ type deltaEngine interface {
 	Capture(ctx context.Context, snapshotKey, name, baseRef, leaseID string) (ref string, deltaSize int64, err error)
 	// Release drops the per-spawn image record and its pinning lease (GC hook).
 	Release(ctx context.Context, name, leaseID string) error
+	// Export streams the per-spawn delta image archive.
+	Export(ctx context.Context, name, leaseID string, w io.Writer) error
+	// Import loads a per-spawn delta image archive and pins it with leaseID.
+	Import(ctx context.Context, name, baseRef, leaseID string, r io.Reader) error
 	// Close releases any resources held by the engine. Does not close the shared gRPC conn.
 	Close() error
 }
@@ -133,4 +138,28 @@ func (b *CRIPodBackend) ReleaseDelta(ctx context.Context, spawnID string) error 
 		return fmt.Errorf("cri delta engine: %w", err)
 	}
 	return eng.Release(ctx, runtime.DeltaTag(spawnID), deltaLeaseID(spawnID))
+}
+
+func (b *CRIPodBackend) ExportDelta(ctx context.Context, spawnID string, w io.Writer) error {
+	eng, err := b.engine()
+	if err != nil {
+		return fmt.Errorf("cri delta engine: %w", err)
+	}
+	name := runtime.DeltaTag(spawnID)
+	if err := eng.Export(ctx, name, deltaLeaseID(spawnID), w); err != nil {
+		return fmt.Errorf("cri export delta %s: %w", name, err)
+	}
+	return nil
+}
+
+func (b *CRIPodBackend) ImportDelta(ctx context.Context, spawnID, baseRef string, r io.Reader) (string, error) {
+	eng, err := b.engine()
+	if err != nil {
+		return "", fmt.Errorf("cri delta engine: %w", err)
+	}
+	name := runtime.DeltaTag(spawnID)
+	if err := eng.Import(ctx, name, baseRef, deltaLeaseID(spawnID), r); err != nil {
+		return "", fmt.Errorf("cri import delta %s: %w", name, err)
+	}
+	return name, nil
 }

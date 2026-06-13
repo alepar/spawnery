@@ -1,9 +1,11 @@
 package cri
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -30,6 +32,16 @@ type fakeDeltaEngine struct {
 	releaseCallLeaseID string
 	releaseCalled      bool
 	closeCalled        bool
+
+	exportName    string
+	exportLeaseID string
+	exportBytes   []byte
+	exportErr     error
+
+	importName    string
+	importBaseRef string
+	importLeaseID string
+	importErr     error
 }
 
 func (f *fakeDeltaEngine) Capture(_ context.Context, snapshotKey, name, baseRef, leaseID string) (string, int64, error) {
@@ -48,6 +60,30 @@ func (f *fakeDeltaEngine) Release(_ context.Context, name, leaseID string) error
 	f.releaseCallName = name
 	f.releaseCallLeaseID = leaseID
 	return f.releaseErr
+}
+
+func (f *fakeDeltaEngine) Export(_ context.Context, name, leaseID string, w io.Writer) error {
+	f.exportName = name
+	f.exportLeaseID = leaseID
+	if f.exportErr != nil {
+		return f.exportErr
+	}
+	if len(f.exportBytes) == 0 {
+		f.exportBytes = []byte("cri-delta-tar")
+	}
+	_, err := w.Write(f.exportBytes)
+	return err
+}
+
+func (f *fakeDeltaEngine) Import(_ context.Context, name, baseRef, leaseID string, r io.Reader) error {
+	f.importName = name
+	f.importBaseRef = baseRef
+	f.importLeaseID = leaseID
+	if f.importErr != nil {
+		return f.importErr
+	}
+	_, err := io.Copy(io.Discard, r)
+	return err
 }
 
 func (f *fakeDeltaEngine) Close() error {
@@ -362,6 +398,52 @@ func TestReleaseDelta(t *testing.T) {
 	fakeEng.releaseErr = fmt.Errorf("injected release error")
 	if err := b.ReleaseDelta(context.Background(), spawnID); err == nil {
 		t.Error("ReleaseDelta must propagate Release error")
+	}
+}
+
+func TestExportDeltaUsesDeterministicSpawnTag(t *testing.T) {
+	spawnID := "s-export"
+	fakeEng := &fakeDeltaEngine{exportBytes: []byte("cri-layer-tar")}
+	c, _ := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
+
+	var buf bytes.Buffer
+	if err := b.ExportDelta(context.Background(), spawnID, &buf); err != nil {
+		t.Fatalf("ExportDelta: %v", err)
+	}
+	if fakeEng.exportName != runtime.DeltaTag(spawnID) {
+		t.Fatalf("Export name = %q, want %q", fakeEng.exportName, runtime.DeltaTag(spawnID))
+	}
+	if fakeEng.exportLeaseID != deltaLeaseID(spawnID) {
+		t.Fatalf("Export lease = %q, want %q", fakeEng.exportLeaseID, deltaLeaseID(spawnID))
+	}
+	if got := buf.Bytes(); !bytes.Equal(got, []byte("cri-layer-tar")) {
+		t.Fatalf("exported bytes = %q", got)
+	}
+	if bytes.HasPrefix(buf.Bytes(), []byte{0x1f, 0x8b}) {
+		t.Fatal("ExportDelta must feed Kopia an uncompressed tar stream, not gzip")
+	}
+}
+
+func TestImportDeltaUsesDeterministicSpawnTagAndBase(t *testing.T) {
+	spawnID := "s-import"
+	baseRef := "base@sha256:abc"
+	fakeEng := &fakeDeltaEngine{}
+	c, _ := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
+
+	ref, err := b.ImportDelta(context.Background(), spawnID, baseRef, bytes.NewReader([]byte("tar")))
+	if err != nil {
+		t.Fatalf("ImportDelta: %v", err)
+	}
+	if ref != runtime.DeltaTag(spawnID) {
+		t.Fatalf("ImportDelta ref = %q, want %q", ref, runtime.DeltaTag(spawnID))
+	}
+	if fakeEng.importName != runtime.DeltaTag(spawnID) || fakeEng.importBaseRef != baseRef {
+		t.Fatalf("Import args name/base = %q/%q", fakeEng.importName, fakeEng.importBaseRef)
+	}
+	if fakeEng.importLeaseID != deltaLeaseID(spawnID) {
+		t.Fatalf("Import lease = %q, want %q", fakeEng.importLeaseID, deltaLeaseID(spawnID))
 	}
 }
 

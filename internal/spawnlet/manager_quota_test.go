@@ -10,6 +10,7 @@ package spawnlet
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"spawnery/internal/runtime"
@@ -57,6 +58,12 @@ func (n *noSizeFakeBackend) CaptureDelta(ctx context.Context, h *runtime.PodHand
 }
 func (n *noSizeFakeBackend) ReleaseDelta(ctx context.Context, spawnID string) error {
 	return n.inner.ReleaseDelta(ctx, spawnID)
+}
+func (n *noSizeFakeBackend) ExportDelta(ctx context.Context, spawnID string, w io.Writer) error {
+	return n.inner.ExportDelta(ctx, spawnID, w)
+}
+func (n *noSizeFakeBackend) ImportDelta(ctx context.Context, spawnID, baseRef string, r io.Reader) (string, error) {
+	return n.inner.ImportDelta(ctx, spawnID, baseRef, r)
 }
 
 // Compile-time assertion: *noSizeFakeBackend must satisfy PodBackend but NOT deltaSizer.

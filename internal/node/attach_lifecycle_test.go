@@ -140,6 +140,14 @@ func (f *scriptedPodBackend) CaptureDelta(_ context.Context, _ *runtime.PodHandl
 	return "", nil
 }
 func (f *scriptedPodBackend) ReleaseDelta(_ context.Context, _ string) error { return nil }
+func (f *scriptedPodBackend) ExportDelta(_ context.Context, spawnID string, w io.Writer) error {
+	_, err := w.Write([]byte(runtime.DeltaTag(spawnID)))
+	return err
+}
+func (f *scriptedPodBackend) ImportDelta(_ context.Context, spawnID, _ string, r io.Reader) (string, error) {
+	_, _ = io.Copy(io.Discard, r)
+	return runtime.DeltaTag(spawnID), nil
+}
 
 func (f *scriptedPodBackend) wasStopped() bool {
 	f.mu.Lock()

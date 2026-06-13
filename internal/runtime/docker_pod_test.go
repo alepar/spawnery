@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -332,6 +333,55 @@ func TestReleaseDeltaRemovesTag(t *testing.T) {
 	}
 	if len(f.Removed) != 1 || f.Removed[0] != delta {
 		t.Fatalf("Removed = %v, want [%s]", f.Removed, delta)
+	}
+}
+
+func TestExportDeltaUsesDeterministicSpawnTag(t *testing.T) {
+	f := NewFake()
+	b := NewDockerPodBackend(f, "", "smoke")
+	const delta = "spawnery/delta:sp1"
+	f.Images[delta] = ImageInfo{ID: "sha256:delta", Layers: 6}
+	f.ImageArchives = map[string][]byte{delta: []byte("tar-stream-not-gzip")}
+
+	var buf bytes.Buffer
+	if err := b.ExportDelta(context.Background(), "sp1", &buf); err != nil {
+		t.Fatalf("ExportDelta: %v", err)
+	}
+	if len(f.ExportedImages) != 1 || f.ExportedImages[0] != delta {
+		t.Fatalf("ExportedImages = %v, want [%s]", f.ExportedImages, delta)
+	}
+	if got := buf.Bytes(); !bytes.Equal(got, []byte("tar-stream-not-gzip")) {
+		t.Fatalf("exported bytes = %q", got)
+	}
+	if bytes.HasPrefix(buf.Bytes(), []byte{0x1f, 0x8b}) {
+		t.Fatal("ExportDelta must feed Kopia an uncompressed tar stream, not gzip")
+	}
+}
+
+func TestExportDeltaRejectsMissingSpawnTag(t *testing.T) {
+	b := NewDockerPodBackend(NewFake(), "", "smoke")
+	if err := b.ExportDelta(context.Background(), "missing", &bytes.Buffer{}); err == nil {
+		t.Fatal("ExportDelta must reject a missing deterministic delta tag")
+	}
+}
+
+func TestImportDeltaLoadsDeterministicSpawnTag(t *testing.T) {
+	f := NewFake()
+	b := NewDockerPodBackend(f, "", "smoke")
+	f.Images["base@sha256:abc"] = ImageInfo{ID: "sha256:base", Layers: 5}
+
+	ref, err := b.ImportDelta(context.Background(), "sp1", "base@sha256:abc", bytes.NewReader([]byte("spawnery/delta:sp1\npayload")))
+	if err != nil {
+		t.Fatalf("ImportDelta: %v", err)
+	}
+	if ref != "spawnery/delta:sp1" {
+		t.Fatalf("ImportDelta ref = %q, want spawnery/delta:sp1", ref)
+	}
+	if len(f.ImportedImages) != 1 || f.ImportedImages[0] != "spawnery/delta:sp1" {
+		t.Fatalf("ImportedImages = %v, want [spawnery/delta:sp1]", f.ImportedImages)
+	}
+	if _, ok, err := f.InspectImage(context.Background(), "spawnery/delta:sp1"); err != nil || !ok {
+		t.Fatalf("imported delta tag not inspectable: ok=%v err=%v", ok, err)
 	}
 }
 

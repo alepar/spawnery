@@ -2,6 +2,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -59,15 +60,15 @@ type ContainerSpec struct {
 	Cmd         []string
 	Env         []string
 	Mounts      []Mount
-	NetnsOf     string // if set, join this container's network namespace
-	AttachStdio bool   // attach stdin+stdout (for the agent)
-	MemoryBytes int64  // 0 = unlimited
-	NanoCPUs    int64  // 0 = unlimited; 1 CPU = 1_000_000_000
-	PidsLimit   int64  // 0 = unlimited
-	Runtime   string    // "" = Docker default; e.g. "runsc"
-	CapPolicy CapPolicy // zero = CapDefaultSet (engine default capability set)
-	CapAdd    []string  // capabilities to ADD — rejected by the Docker backend (§7 floor-defeat guard)
-	Labels    map[string]string // container labels (spawnery.managed/spawn-id/generation/node-id/role)
+	NetnsOf     string            // if set, join this container's network namespace
+	AttachStdio bool              // attach stdin+stdout (for the agent)
+	MemoryBytes int64             // 0 = unlimited
+	NanoCPUs    int64             // 0 = unlimited; 1 CPU = 1_000_000_000
+	PidsLimit   int64             // 0 = unlimited
+	Runtime     string            // "" = Docker default; e.g. "runsc"
+	CapPolicy   CapPolicy         // zero = CapDefaultSet (engine default capability set)
+	CapAdd      []string          // capabilities to ADD — rejected by the Docker backend (§7 floor-defeat guard)
+	Labels      map[string]string // container labels (spawnery.managed/spawn-id/generation/node-id/role)
 }
 
 // ContainerSummary is the minimal view ListByLabel returns: the container id + its labels.
@@ -102,6 +103,10 @@ type ContainerRuntime interface {
 	InspectImage(ctx context.Context, ref string) (info ImageInfo, exists bool, err error)
 	// RemoveImage removes the image tagged ref. A not-found image is not an error (idempotent).
 	RemoveImage(ctx context.Context, ref string) error
+	// ExportImage writes an uncompressed image archive stream for ref.
+	ExportImage(ctx context.Context, ref string, w io.Writer) error
+	// ImportImage loads an image archive stream into the runtime image store.
+	ImportImage(ctx context.Context, r io.Reader) error
 }
 
 // FakeRuntime records calls for unit tests.
@@ -119,6 +124,13 @@ type FakeRuntime struct {
 	Images map[string]ImageInfo
 	// Removed is an ordered log of RemoveImage calls.
 	Removed []string
+	// ImageArchives are fake archive payloads keyed by image ref. Tests use these
+	// to assert ExportImage streams the exact deterministic delta tag.
+	ImageArchives map[string][]byte
+	// ExportedImages is an ordered log of ExportImage refs.
+	ExportedImages []string
+	// ImportedImages is an ordered log of refs loaded by ImportImage.
+	ImportedImages []string
 	// CommitLayers overrides the layer count of a committed image (0 = base+1 default).
 	// Set to a value ≤ base layers to trigger the moby#47065 guard in tests.
 	CommitLayers int
@@ -126,9 +138,10 @@ type FakeRuntime struct {
 
 func NewFake() *FakeRuntime {
 	return &FakeRuntime{
-		Stopped: map[string]bool{},
-		byID:    map[string]ContainerSpec{},
-		Images:  map[string]ImageInfo{},
+		Stopped:       map[string]bool{},
+		byID:          map[string]ContainerSpec{},
+		Images:        map[string]ImageInfo{},
+		ImageArchives: map[string][]byte{},
 	}
 }
 
@@ -198,5 +211,34 @@ func (f *FakeRuntime) InspectImage(_ context.Context, ref string) (ImageInfo, bo
 func (f *FakeRuntime) RemoveImage(_ context.Context, ref string) error {
 	f.Removed = append(f.Removed, ref)
 	delete(f.Images, ref)
+	return nil
+}
+
+func (f *FakeRuntime) ExportImage(_ context.Context, ref string, w io.Writer) error {
+	f.ExportedImages = append(f.ExportedImages, ref)
+	payload, ok := f.ImageArchives[ref]
+	if !ok {
+		if _, ok := f.Images[ref]; !ok {
+			return fmt.Errorf("image %q not found", ref)
+		}
+		payload = []byte(ref + "\n")
+	}
+	_, err := w.Write(payload)
+	return err
+}
+
+func (f *FakeRuntime) ImportImage(_ context.Context, r io.Reader) error {
+	payload, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	refBytes, _, _ := bytes.Cut(payload, []byte{'\n'})
+	ref := string(refBytes)
+	if ref == "" {
+		return fmt.Errorf("import image archive missing image ref")
+	}
+	f.ImportedImages = append(f.ImportedImages, ref)
+	f.Images[ref] = ImageInfo{ID: "sha256:imported-" + ref, Layers: 1}
+	f.ImageArchives[ref] = payload
 	return nil
 }

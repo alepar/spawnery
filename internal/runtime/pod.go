@@ -1,6 +1,9 @@
 package runtime
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // Container/sandbox label keys identifying spawnery-managed pods so a restarted node (or the CP) can
 // reconcile a running pod against the authoritative ledger and reap orphans/stale generations.
@@ -100,4 +103,11 @@ type PodBackend interface {
 	CaptureDelta(ctx context.Context, h *PodHandle) (ref string, err error)
 	// ReleaseDelta removes the per-spawn delta tag (GC). Task .12 wires the callers.
 	ReleaseDelta(ctx context.Context, spawnID string) error
+	// ExportDelta streams the deterministic per-spawn delta image archive. Cross-node
+	// migration stores this stream as a generation-keyed journal artifact; callers must
+	// address it by CP-pinned artifact id, not by probing for "latest".
+	ExportDelta(ctx context.Context, spawnID string, w io.Writer) error
+	// ImportDelta loads a CP-pinned delta artifact onto the target node and returns the
+	// deterministic local delta image ref used by EnsureImage.
+	ImportDelta(ctx context.Context, spawnID, baseRef string, r io.Reader) (ref string, err error)
 }
