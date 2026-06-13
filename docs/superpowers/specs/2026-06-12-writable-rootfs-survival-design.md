@@ -128,6 +128,14 @@ Two orthogonal features, separately deployable:
 
 ## 8. Migration (stage 2, after same-node survival)
 
+**2026-06-13 amendment:** Stage 2 is governed by
+[Encrypted Migration Transfer Set](2026-06-13-encrypted-migration-transfer-set-design.md). Rootfs
+deltas are keyed by `(spawn_id, generation)` where `generation` is the source generation that
+produced the delta. Cross-node migration does not depend on a permanent "owner-sealed spawn" trait;
+it depends on ceremony-first migration preflight, encrypted Garage contents, and transfer key
+delivery through the owner-sealed path. Delta artifacts should be fed to Kopia uncompressed (not
+pre-gzipped) so content-defined chunking can deduplicate successive deltas.
+
 Delta layer tars ship as Kopia files in the existing per-spawn journal (CDC dedup across
 successive deltas; revisit unpacked-tree storage only if dedup measures poorly). Upload is
 generation-fenced like data-mount snapshots. Resume on the target: pull pinned base (by
