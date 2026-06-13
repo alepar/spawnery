@@ -182,3 +182,105 @@ func TestScratchPrepareNonEPERMChownErrorPropagates(t *testing.T) {
 		t.Fatal("expected error from non-EPERM chown failure, got nil")
 	}
 }
+
+// TestNormalizeOwnershipPrivilegedPreservesMode: when chown into the agent uid succeeds
+// (privileged/cloud node), restored entries are chowned and their modes are PRESERVED — a 0600
+// file stays 0600 (owned by agent-root → writable), not loosened to world-writable.
+func TestNormalizeOwnershipPrivilegedPreservesMode(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate a journal restore: a 0600 file + a nested dir/file, all node-owned.
+	if err := os.WriteFile(filepath.Join(dir, "data-pass"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "f"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var chowned []string
+	orig := osChown
+	osChown = func(name string, uid, gid int) error {
+		if uid != 4242 || gid != 4242 {
+			t.Errorf("chown %s to %d:%d, want 4242:4242", name, uid, gid)
+		}
+		chowned = append(chowned, filepath.Base(name))
+		return nil // privileged: succeeds
+	}
+	defer func() { osChown = orig }()
+
+	if err := NormalizeOwnership(dir, 4242); err != nil {
+		t.Fatalf("NormalizeOwnership: %v", err)
+	}
+	// Every entry (root, data-pass, sub, sub/f) chowned to the agent uid.
+	if len(chowned) != 4 {
+		t.Fatalf("chowned %v, want 4 entries", chowned)
+	}
+	// Modes preserved (not loosened) on the privileged path.
+	if m := statPerm(t, filepath.Join(dir, "data-pass")); m != 0o600 {
+		t.Errorf("data-pass mode = %04o, want 0600 (preserved)", m)
+	}
+	if m := statPerm(t, filepath.Join(dir, "sub", "f")); m != 0o644 {
+		t.Errorf("sub/f mode = %04o, want 0644 (preserved)", m)
+	}
+}
+
+// TestNormalizeOwnershipEPERMFallbackWorldWritable: on a rootless node chown is denied, so the
+// restored tree must be made world-writable instead (the agent can't be made owner). This is the
+// dev-node case that produced the `nobody`/0600 unwritable bug.
+func TestNormalizeOwnershipEPERMFallbackWorldWritable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "data-pass"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := osChown
+	osChown = func(string, int, int) error { return os.ErrPermission }
+	defer func() { osChown = orig }()
+
+	if err := NormalizeOwnership(dir, 100000); err != nil {
+		t.Fatalf("NormalizeOwnership: %v", err)
+	}
+	if m := statPerm(t, filepath.Join(dir, "data-pass")); m&0o006 != 0o006 {
+		t.Errorf("data-pass mode = %04o, want world rw (agent must be able to write)", m)
+	}
+	if m := statPerm(t, filepath.Join(dir, "sub")); m&0o007 != 0o007 {
+		t.Errorf("sub dir mode = %04o, want world rwx (agent must traverse+create)", m)
+	}
+}
+
+// TestNormalizeOwnershipDegradedNoChown: agentUID<0 (no-userns degraded lane) never chowns and
+// makes the tree world-writable so the cap-dropped agent uid can write regardless of mapping.
+func TestNormalizeOwnershipDegradedNoChown(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chownCalled := false
+	orig := osChown
+	osChown = func(string, int, int) error { chownCalled = true; return nil }
+	defer func() { osChown = orig }()
+
+	if err := NormalizeOwnership(dir, -1); err != nil {
+		t.Fatalf("NormalizeOwnership: %v", err)
+	}
+	if chownCalled {
+		t.Error("degraded lane must not attempt chown")
+	}
+	if m := statPerm(t, filepath.Join(dir, "f")); m&0o006 != 0o006 {
+		t.Errorf("f mode = %04o, want world rw", m)
+	}
+}
+
+func statPerm(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Mode().Perm()
+}

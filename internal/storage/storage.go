@@ -77,6 +77,51 @@ func (s *Scratch) Finalize(_ context.Context, hostDir string) error {
 	return os.RemoveAll(hostDir)
 }
 
+// NormalizeOwnership makes every entry under hostDir writable by the in-container agent-root
+// after files were materialized by something OTHER than Prepare — notably a journal restore,
+// which writes files owned by the node daemon's OWN uid (not the agent's mapped uid) with their
+// original modes. Without this, a userns-remapped agent sees restored files as `nobody` and
+// cannot write any that aren't already world-writable (sp-ei4.1: data-mount restore ownership).
+//
+// Policy mirrors Prepare. When privileged enough to chown into the agent uid, chown each entry
+// and PRESERVE its mode — a 0600 file owned by agent-root is agent-writable, with no loosening.
+// When chown is denied (rootless node → EPERM) or agentUID < 0 (degraded/no-userns lane), fall
+// back to adding world rw (files) / rwx (dirs) — the same tradeoff Prepare's 0777 mount dir
+// already makes — because the agent cannot be made the owner. Recurses the whole tree (a restored
+// mount can be arbitrarily deep), unlike Prepare's flat seed copy.
+func NormalizeOwnership(hostDir string, agentUID int) error {
+	degraded := agentUID < 0
+	return filepath.WalkDir(hostDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !degraded {
+			if err := osChown(path, agentUID, agentUID); err != nil {
+				if errors.Is(err, os.ErrPermission) {
+					log.Printf("storage: chown %s to uid %d failed (%v); world-writable fallback for restored tree", path, agentUID, err)
+					degraded = true
+				} else {
+					return fmt.Errorf("chown restored entry %s: %w", path, err)
+				}
+			}
+		}
+		if degraded {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			add := os.FileMode(0o006) // world rw for files
+			if d.IsDir() {
+				add = 0o007 // world rwx for dirs (the agent needs +x to traverse, +w to create)
+			}
+			if err := os.Chmod(path, info.Mode().Perm()|add); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // copyDirFiles copies top-level regular files from srcDir into dstDir.
 // A missing srcDir yields an empty mount (no error).
 // filePerm is the mode to write each file with; chownUID >= 0 causes each file to be

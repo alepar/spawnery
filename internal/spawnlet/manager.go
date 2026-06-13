@@ -577,6 +577,13 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 					if rerr := m.journal.Restore(ctx, id, mt.Name, pin, hostDir); rerr != nil {
 						log.Printf("journal restore for %s mount %s (manifest %s): %v", id, mt.Name, pin, rerr)
 					} else {
+						// Restore writes files owned by THIS node daemon's uid with their original
+						// modes; under userns-remap that uid is outside the agent's range, so the
+						// agent sees them as `nobody` and can't write non-world-writable ones.
+						// Re-apply Prepare's ownership policy to the restored tree (sp-ei4.1).
+						if nerr := storage.NormalizeOwnership(hostDir, agentUID); nerr != nil {
+							log.Printf("journal restore for %s mount %s: normalize ownership: %v", id, mt.Name, nerr)
+						}
 						log.Printf("journal: spawn=%s mount=%s restored from manifest=%s", id, mt.Name, pin)
 					}
 				}
