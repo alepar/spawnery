@@ -103,14 +103,26 @@ func Merge(layers []io.Reader, opts Options, out io.Writer) error {
 				if opts.isScrubbed(target) {
 					continue
 				}
-				// If target is in the accumulator (from an earlier delta layer) →
-				// remove it from the accumulator and DROP the whiteout (already applied).
-				if _, ok := acc[target]; ok {
-					delete(acc, target)
-					continue
+				// Remove target AND all of its children from the accumulator.
+				// OCI whiteout of a directory masks everything under it, so a merged
+				// layer must not emit any accumulated descendant of the whited-out dir.
+				// (Finding: the original code only deleted the exact key, leaving
+				// children — e.g. opt/tool/bin — alive in the accumulator.)
+				targetPrefix := target + "/"
+				delete(acc, target)
+				for k := range acc {
+					if strings.HasPrefix(k, targetPrefix) {
+						delete(acc, k)
+					}
 				}
-				// If target is in BasePaths → KEEP the whiteout (must mask base content).
-				if opts.baseContains(target) {
+				// Keep the whiteout if the base image contains the target itself OR
+				// any descendant — the merged layer must still mask that base content.
+				// This check runs AFTER the acc deletion so it is not short-circuited
+				// by an earlier-delta-layer touch of the same path (finding: the old
+				// code skipped baseContains when acc[target] existed, so a path in both
+				// an earlier delta and the base lost its whiteout in the squashed layer,
+				// letting the base content resurface on apply).
+				if opts.baseContains(target) || opts.baseDirHasEntries(target) {
 					hdr.Name = name
 					acc[name] = &entry{hdr: cloneHeader(hdr)}
 					continue

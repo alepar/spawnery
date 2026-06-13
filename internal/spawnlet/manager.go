@@ -731,7 +731,9 @@ func (m *Manager) PreflightRuntime(ctx context.Context) error {
 }
 
 func (m *Manager) Stop(ctx context.Context, id string) error {
-	sp, ok := m.store.Get(id)
+	// Claim atomically removes the spawn from the store so a concurrent quota-watchdog
+	// Stop or CP-driven Delete cannot race into a double-teardown.
+	sp, ok := m.store.Claim(id)
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
@@ -746,7 +748,8 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 // cancelled. The CP-side per-spawn lock + generation fence (the node drops a stale Suspend before
 // calling here) guarantee at most one in-flight suspend/stop per spawn.
 func (m *Manager) Suspend(ctx context.Context, id string) (map[string]string, error) {
-	sp, ok := m.store.Get(id)
+	// Claim atomically removes the spawn so concurrent watchdog/CP teardowns cannot race.
+	sp, ok := m.store.Claim(id)
 	if !ok {
 		return nil, fmt.Errorf("unknown spawn %s", id)
 	}
@@ -761,7 +764,8 @@ func (m *Manager) Suspend(ctx context.Context, id string) (map[string]string, er
 // Wiring note: the node's CPMessage_Stop→STOPPED destroy path currently calls Stop; switching it
 // to Delete is a REQUIRED follow-up in internal/node (out of allowed files for this task).
 func (m *Manager) Delete(ctx context.Context, id string) error {
-	sp, ok := m.store.Get(id)
+	// Claim atomically removes the spawn so concurrent watchdog/CP teardowns cannot race.
+	sp, ok := m.store.Claim(id)
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
@@ -900,7 +904,8 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc bool) map
 		}
 	}
 
-	m.store.Delete(id)
+	// The spawn was removed from the store atomically by Claim (in Stop/Suspend/Delete)
+	// before teardown was called, so no store.Delete is needed here.
 	return markers
 }
 

@@ -11,16 +11,61 @@ package spawnlet
 import (
 	"context"
 	"testing"
+
+	"spawnery/internal/runtime"
 )
 
-// noSizeFakeBackend is a minimal PodBackend that does NOT implement deltaSizer.
-// Used to verify that CheckQuotas degrades gracefully when the backend lacks DeltaSize.
+// noSizeFakeBackend is a PodBackend that does NOT implement deltaSizer (no DeltaSize method).
+// It delegates all PodBackend methods to an inner *fakePodBackend via explicit forwarding
+// (NOT embedding) so that method promotion cannot accidentally surface DeltaSize on
+// *noSizeFakeBackend.  The type-assertion in CheckQuotas must fail, triggering the
+// dormant-quota path.
+//
+// NOTE: embedding fakePodBackend by value would promote DeltaSize (pointer receiver) to
+// *noSizeFakeBackend, making it satisfy deltaSizer — the opposite of what we want.
 type noSizeFakeBackend struct {
-	fakePodBackend
+	inner *fakePodBackend
 }
 
-// Note: noSizeFakeBackend intentionally does NOT define DeltaSize so the deltaSizer
-// interface assertion in CheckQuotas fails, triggering the dormant-quota path.
+func (n *noSizeFakeBackend) Ping(ctx context.Context) error { return n.inner.Ping(ctx) }
+func (n *noSizeFakeBackend) Preflight(ctx context.Context) error {
+	return n.inner.Preflight(ctx)
+}
+func (n *noSizeFakeBackend) StartPod(ctx context.Context, spec runtime.PodSpec) (*runtime.PodHandle, error) {
+	return n.inner.StartPod(ctx, spec)
+}
+func (n *noSizeFakeBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, spec runtime.AgentSpec) error {
+	return n.inner.StartAgent(ctx, h, spec)
+}
+func (n *noSizeFakeBackend) Stop(ctx context.Context, h *runtime.PodHandle) error {
+	return n.inner.Stop(ctx, h)
+}
+func (n *noSizeFakeBackend) Attach(ctx context.Context, h *runtime.PodHandle) (*runtime.AttachedStream, error) {
+	return n.inner.Attach(ctx, h)
+}
+func (n *noSizeFakeBackend) ListManaged(ctx context.Context) ([]runtime.ManagedPod, error) {
+	return n.inner.ListManaged(ctx)
+}
+func (n *noSizeFakeBackend) ResolveImageDigest(ctx context.Context, ref string) (string, error) {
+	return n.inner.ResolveImageDigest(ctx, ref)
+}
+func (n *noSizeFakeBackend) EnsureImage(ctx context.Context, baseRef, deltaRef string) (string, error) {
+	return n.inner.EnsureImage(ctx, baseRef, deltaRef)
+}
+func (n *noSizeFakeBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) (string, error) {
+	return n.inner.CaptureDelta(ctx, h)
+}
+func (n *noSizeFakeBackend) ReleaseDelta(ctx context.Context, spawnID string) error {
+	return n.inner.ReleaseDelta(ctx, spawnID)
+}
+
+// Compile-time assertion: *noSizeFakeBackend must satisfy PodBackend but NOT deltaSizer.
+var _ runtime.PodBackend = (*noSizeFakeBackend)(nil)
+
+// newNoSizeFakeBackend returns a PodBackend without DeltaSize for dormant-quota tests.
+func newNoSizeFakeBackend() *noSizeFakeBackend {
+	return &noSizeFakeBackend{inner: &fakePodBackend{}}
+}
 
 // Q1: Hard threshold stops the spawn; Stop does NOT release the delta image.
 func TestQuotaHardStopsSpawn(t *testing.T) {
@@ -111,7 +156,7 @@ func TestQuotaUnderThresholdNoOp(t *testing.T) {
 // Q4: Backend without DeltaSize → CheckQuotas is dormant (spawn still live).
 func TestQuotaDormantWhenNoSizeSource(t *testing.T) {
 	ctx := context.Background()
-	ns := &noSizeFakeBackend{}
+	ns := newNoSizeFakeBackend()
 	m := NewManagerWithBackend(ns, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture:     true,

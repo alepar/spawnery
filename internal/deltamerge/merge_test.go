@@ -268,6 +268,108 @@ func TestMerge_T6_ScrubPrefix(t *testing.T) {
 	}
 }
 
+// T_InBothAccAndBase: target modified in an earlier delta AND present in BasePaths →
+// whiteout KEPT (the base still contains it and must be masked downstream).
+// Regression: old code deleted from acc and continued without checking baseContains.
+func TestMerge_T_InBothAccAndBase(t *testing.T) {
+	// delta1 modifies etc/foo (base also has it).
+	layerA := buildTar(t, []tarEntry{
+		{name: "etc/foo", content: []byte("modified")},
+	})
+	// delta2 whiteouts etc/foo.
+	layerB := buildTar(t, []tarEntry{
+		{name: "etc/.wh.foo", content: []byte{}},
+	})
+
+	opts := deltamerge.Options{
+		BasePaths: map[string]struct{}{"/etc/foo": {}},
+	}
+	var out bytes.Buffer
+	if err := deltamerge.Merge([]io.Reader{layerA, layerB}, opts, &out); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	entries := readTar(t, &out)
+
+	// etc/foo must be gone from the merged layer (delta2 deleted it).
+	if _, ok := entries["etc/foo"]; ok {
+		t.Error("etc/foo should have been removed by the whiteout")
+	}
+	// The whiteout must be KEPT because the base image still has /etc/foo — it
+	// must be masked when the merged layer is applied on top of the base.
+	if _, ok := entries["etc/.wh.foo"]; !ok {
+		t.Error("etc/.wh.foo must be preserved: base image contains /etc/foo")
+	}
+}
+
+// T_DirWhiteoutRecurse: a regular whiteout for a directory removes the directory
+// AND all accumulated children from the merged output.
+// Regression: old code only deleted the exact acc[target] key, leaving children alive.
+func TestMerge_T_DirWhiteoutRecurse(t *testing.T) {
+	// delta1 creates a directory with two children.
+	layerA := buildTar(t, []tarEntry{
+		{name: "opt/tool/", content: nil},
+		{name: "opt/tool/bin", content: []byte("binary")},
+		{name: "opt/tool/lib", content: []byte("library")},
+	})
+	// delta2 whiteouts the whole directory.
+	layerB := buildTar(t, []tarEntry{
+		{name: "opt/.wh.tool", content: []byte{}},
+	})
+
+	// BasePaths has nothing under opt/tool/ — whiteout should be dropped too.
+	opts := deltamerge.Options{
+		BasePaths: map[string]struct{}{"/etc/passwd": {}},
+	}
+	var out bytes.Buffer
+	if err := deltamerge.Merge([]io.Reader{layerA, layerB}, opts, &out); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	entries := readTar(t, &out)
+
+	for _, name := range []string{"opt/tool/", "opt/tool/bin", "opt/tool/lib"} {
+		if _, ok := entries[name]; ok {
+			t.Errorf("%s should have been removed by the directory whiteout", name)
+		}
+	}
+	// Whiteout dropped (no base content under opt/tool/).
+	if _, ok := entries["opt/.wh.tool"]; ok {
+		t.Error("opt/.wh.tool should be dropped: no base content under opt/tool/")
+	}
+}
+
+// T_DirWhiteoutRecurse_WithBase: same as T_DirWhiteoutRecurse but the base image
+// has content under the whiteout'd dir → whiteout KEPT, children gone from merged layer.
+func TestMerge_T_DirWhiteoutRecurse_WithBase(t *testing.T) {
+	layerA := buildTar(t, []tarEntry{
+		{name: "opt/tool/", content: nil},
+		{name: "opt/tool/bin", content: []byte("binary")},
+	})
+	layerB := buildTar(t, []tarEntry{
+		{name: "opt/.wh.tool", content: []byte{}},
+	})
+
+	opts := deltamerge.Options{
+		// Base has opt/tool/lib — must be masked.
+		BasePaths: map[string]struct{}{"/opt/tool/lib": {}},
+	}
+	var out bytes.Buffer
+	if err := deltamerge.Merge([]io.Reader{layerA, layerB}, opts, &out); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	entries := readTar(t, &out)
+
+	// Accumulated children removed.
+	for _, name := range []string{"opt/tool/", "opt/tool/bin"} {
+		if _, ok := entries[name]; ok {
+			t.Errorf("%s should have been removed by the directory whiteout", name)
+		}
+	}
+	// Whiteout kept because base has content under opt/tool/.
+	if _, ok := entries["opt/.wh.tool"]; !ok {
+		t.Error("opt/.wh.tool must be kept: base image has content under opt/tool/")
+	}
+}
+
 // T6b: scrub also drops whiteouts whose targets are scrubbed paths.
 func TestMerge_T6b_ScrubDropsTargetWhiteout(t *testing.T) {
 	// A delta that whiteouts /var/cache/apt as a whole (from base).
