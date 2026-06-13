@@ -37,6 +37,10 @@ authsvc:
 # spawnlet attached to the CP — root-free dev node (self-hosted + egress floor off). `just node stub` = echo agent.
 # Sources deploy/garage/dev-creds.env when present (written by `just garage`), enabling the
 # transient-tier s3 journal against the dev Garage; without it journaling stays off.
+# USERNS_MODE=remap (writable-rootfs, sp-ei4.1) gives the agent the default cap set so apt/useradd/
+# chown work in the spawn. REQUIRES the Docker daemon to run with userns-remap — one-time host setup:
+#   echo '{"userns-remap":"default"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
+# Without it, spawnlet probes the daemon, logs a warning, and FALLS BACK to cap-drop=ALL (apt fails).
 node agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     set -a; [ -f {{repo}}/deploy/garage/dev-creds.env ] && . {{repo}}/deploy/garage/dev-creds.env; set +a; \
@@ -45,6 +49,7 @@ node agent="agent": (_images agent)
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
     NODE_CLASS=self-hosted NODE_OWNER=alice EGRESS_ENFORCE=false \
     NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
+    USERNS_MODE=remap \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
     {{repo}}/bin/spawnlet
 
