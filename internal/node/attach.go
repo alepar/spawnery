@@ -662,13 +662,33 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 	a.status(spawnID, nodev1.SpawnPhase_STOPPED, "")
 }
 
-// suspendSpawn persists the spawn's mounts and tears the pod down, then reports the per-mount persist
-// markers to the CP (NodeMessage_SuspendComplete, carrying the request's generation so the CP can
-// fence a stale episode) and goes SUSPENDED. Mirrors stopSpawn's session reap + slot release, but
-// uses Manager.Suspend (which RETURNS the markers from the journal final snapshot) in place of Stop.
-// Generation fencing is done by the caller (handle). Runs on its own goroutine.
+// suspendSpawn persists the spawn's mounts and tears the pod down, using a fail-closed gate->reap->finish
+// sequence per spec §5:
+//
+//  1. GATE (sessions/pumps still live): SnapshotForSuspend takes the final journal snapshot while the
+//     agent is still reachable. On FAILURE: emit SuspendComplete{Error} and status ACTIVE, then return
+//     without touching sessions or releasing the capacity slot — the spawn keeps running.
+//  2. On SUCCESS: reap sessions (reapSessions + p.stop/r.stop), then FinishSuspend to tear down the pod.
+//  3. releaseSlot, emit SuspendComplete{Markers, RootfsArtifacts} (Markers from gate result, RootfsArtifacts
+//     from finish result), status SUSPENDED.
+//
+// Mount markers MUST come from the gate (SnapshotForSuspend); FinishSuspend intentionally returns empty
+// MountMarkers. Generation fencing is done by the caller (handle). Runs on its own goroutine.
 func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 	spawnID := m.SpawnId
+
+	// Step 1: gate — snapshot while sessions/pumps are still live.
+	gate, err := a.mgr.SnapshotForSuspend(ctx, spawnID)
+	if err != nil {
+		logErr("suspendSpawn gate "+spawnID, err)
+		_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SuspendComplete{SuspendComplete: &nodev1.SuspendComplete{
+			SpawnId: spawnID, Generation: m.Generation, Error: err.Error(),
+		}}})
+		a.status(spawnID, nodev1.SpawnPhase_ACTIVE, err.Error())
+		return
+	}
+
+	// Step 2: gate succeeded — reap sessions then finish suspend teardown.
 	ps, relays := a.reapSessions(spawnID)
 	for _, p := range ps {
 		p.stop()
@@ -676,15 +696,17 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 	for _, r := range relays {
 		r.stop()
 	}
-	res, err := a.mgr.SuspendForMigration(ctx, spawnID, m.GetCaptureRootfsArtifact())
+	res, err := a.mgr.FinishSuspend(ctx, spawnID, m.GetCaptureRootfsArtifact())
 	if err != nil {
-		logErr("suspendSpawn "+spawnID, err)
+		logErr("suspendSpawn finish "+spawnID, err)
 		a.status(spawnID, nodev1.SpawnPhase_ERROR, err.Error())
 		return
 	}
+
+	// Step 3: success — markers from gate, rootfs artifacts from finish.
 	a.releaseSlot()
-	mm := make([]*nodev1.MountMarker, 0, len(res.MountMarkers))
-	for name, marker := range res.MountMarkers {
+	mm := make([]*nodev1.MountMarker, 0, len(gate.MountMarkers))
+	for name, marker := range gate.MountMarkers {
 		mm = append(mm, &nodev1.MountMarker{Name: name, Marker: marker})
 	}
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SuspendComplete{SuspendComplete: &nodev1.SuspendComplete{

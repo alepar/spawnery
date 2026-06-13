@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,11 +15,18 @@ import (
 
 // fakeNodeJournal is a journal.JournalManager double for the node-side suspend tests: FinalSnapshot
 // returns a canned pinned manifest id per journaled mount, so a Suspend yields per-mount markers
-// without the real Kopia stack.
-type fakeNodeJournal struct{ finalID journal.ManifestID }
+// without the real Kopia stack. When finalErr is set, FinalSnapshot returns that error instead,
+// simulating a suspend gate failure (e.g. journal sink unreachable).
+type fakeNodeJournal struct {
+	finalID  journal.ManifestID
+	finalErr error
+}
 
 func (f *fakeNodeJournal) RequestSnapshot(context.Context, string, uint64, journal.Mount) {}
 func (f *fakeNodeJournal) FinalSnapshot(_ context.Context, _ string, _ uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
+	if f.finalErr != nil {
+		return nil, f.finalErr
+	}
 	out := map[string]journal.ManifestID{}
 	for _, mt := range mounts {
 		out[mt.Name] = f.finalID
@@ -97,6 +105,18 @@ func newJournaledManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager
 		DeltaCapture: true,
 	})
 	mgr.SetJournal(&fakeNodeJournal{finalID: "manifest-abc"}, t.TempDir())
+	return mgr
+}
+
+// newGateFailManager creates a manager whose journal FinalSnapshot always returns an error, so
+// SnapshotForSuspend (the suspend gate) fails. This drives the fail-closed ACTIVE-on-gate-failure path.
+func newGateFailManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager {
+	t.Helper()
+	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
+		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+		DeltaCapture: true,
+	})
+	mgr.SetJournal(&fakeNodeJournal{finalErr: errors.New("journal sink unreachable")}, t.TempDir())
 	return mgr
 }
 
@@ -220,5 +240,72 @@ func TestSuspendStaleGenerationDropped(t *testing.T) {
 	}
 	if _, live := mgr.SpawnGeneration("sp1"); !live {
 		t.Fatal("stale Suspend must leave the spawn running")
+	}
+}
+
+// TestSuspendGateFailureStaysActive verifies the fail-closed gate path (spec §5): when
+// SnapshotForSuspend fails (journal sink unreachable), the node emits SuspendComplete{Error}
+// and keeps the spawn ACTIVE — sessions are NOT reaped, the pod is NOT stopped, the slot
+// is NOT released.
+func TestSuspendGateFailureStaysActive(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newGateFailManager(t, be)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	ctx := context.Background()
+
+	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeJournalApp(t), Model: "m", Generation: 3})
+	if got := lastPhase(fs.phasesFor("sp1")); got != nodev1.SpawnPhase_ACTIVE {
+		t.Fatalf("phase before suspend = %v, want ACTIVE", got)
+	}
+
+	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_Suspend{Suspend: &nodev1.Suspend{SpawnId: "sp1", Generation: 3}}})
+
+	waitFor(t, "SuspendComplete with error", func() bool {
+		sc := lastSuspendComplete(fs)
+		return sc != nil && sc.Error != ""
+	})
+
+	sc := lastSuspendComplete(fs)
+	if sc.Error == "" {
+		t.Fatal("SuspendComplete.Error must be non-empty on gate failure")
+	}
+	if sc.SpawnId != "sp1" {
+		t.Fatalf("SuspendComplete.SpawnId = %q, want sp1", sc.SpawnId)
+	}
+	if sc.Generation != 3 {
+		t.Fatalf("SuspendComplete.Generation = %d, want 3", sc.Generation)
+	}
+	if len(sc.Markers) != 0 {
+		t.Fatalf("SuspendComplete.Markers = %v, want empty on gate failure", sc.Markers)
+	}
+	if len(sc.RootfsArtifacts) != 0 {
+		t.Fatalf("SuspendComplete.RootfsArtifacts = %v, want empty on gate failure", sc.RootfsArtifacts)
+	}
+
+	// Status must return to ACTIVE (not SUSPENDED or ERROR).
+	waitFor(t, "ACTIVE phase after gate failure", func() bool {
+		return lastPhase(fs.phasesFor("sp1")) == nodev1.SpawnPhase_ACTIVE
+	})
+	if hasPhase(fs.phasesFor("sp1"), nodev1.SpawnPhase_SUSPENDED) {
+		t.Fatal("spawn must NOT reach SUSPENDED on gate failure")
+	}
+
+	// Sessions must NOT be reaped — pump still registered, active count unchanged.
+	a.mu.Lock()
+	n, act := len(a.pumps), a.active
+	a.mu.Unlock()
+	if n != 1 || act != 1 {
+		t.Fatalf("pumps=%d active=%d, want 1/1 after gate failure (sessions must not be reaped)", n, act)
+	}
+
+	// Pod must NOT be stopped.
+	if be.wasStopped() {
+		t.Fatal("pod must NOT be stopped on gate failure")
+	}
+
+	// Spawn must still be live in the manager store.
+	if _, live := mgr.SpawnGeneration("sp1"); !live {
+		t.Fatal("spawn must remain live in manager store after gate failure")
 	}
 }
