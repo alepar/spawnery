@@ -92,6 +92,13 @@ func (d *DockerPodBackend) StartPod(ctx context.Context, spec PodSpec) (*PodHand
 
 // StartAgent starts the agent container in the sidecar's netns and records its id on the handle.
 func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec AgentSpec) error {
+	// Map the AgentSpec bool to the Docker-lane CapPolicy.
+	// AgentSpec.DropAllCaps is the shared interface field (also consumed by the CRI backend);
+	// ContainerSpec.CapPolicy is Docker-lane-only and drives buildHostConfig.
+	capPolicy := CapDefaultSet
+	if spec.DropAllCaps {
+		capPolicy = CapDropAll
+	}
 	agentID, err := d.rt.StartContainer(ctx, ContainerSpec{
 		Image:   spec.Image,
 		Cmd:     spec.Cmd,
@@ -104,7 +111,7 @@ func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec Ag
 		NanoCPUs:       spec.Resources.NanoCPUs,
 		PidsLimit:      spec.Resources.PidsLimit,
 		Runtime:        spec.Runtime,
-		DropAllCaps:    spec.DropAllCaps,
+		CapPolicy:      capPolicy,
 		ReadonlyRootfs: spec.ReadonlyRootfs,
 		Labels:         withRole(spec.Labels, "agent"),
 	})

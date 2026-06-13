@@ -51,6 +51,7 @@ func main() {
 		ContainerRuntime: os.Getenv("CONTAINER_RUNTIME"),
 		HardenRootfs:     getenvBool("HARDEN_ROOTFS", false),
 		AdvertiseIP:      env("NODE_ADVERTISE_IP", "127.0.0.1"),
+		UsernsMode:       env("USERNS_MODE", "off"),
 	}
 	mgr, err := buildManager(cfg)
 	if err != nil {
@@ -210,6 +211,14 @@ func configureJournal(m *spawnlet.Manager, dataRoot string) error {
 }
 
 func buildManager(cfg spawnlet.ManagerConfig) (*spawnlet.Manager, error) {
+	// Warn early on unrecognised USERNS_MODE values (e.g. 'Remap', 'enabled'): they silently
+	// degrade to cap-drop=ALL, which is safe but almost certainly not the operator's intent.
+	switch cfg.UsernsMode {
+	case "remap", "native", "off", "":
+		// known values
+	default:
+		log.Printf("WARNING: unrecognized USERNS_MODE=%q (want remap|native|off) — treating as off (cap-drop=ALL)", cfg.UsernsMode)
+	}
 	if cfg.ContainerRuntime == "runsc" {
 		endpoint := env("CRI_ENDPOINT", "unix:///run/containerd/containerd.sock")
 		client, err := cri.Dial(endpoint)
@@ -233,7 +242,42 @@ func buildManager(cfg spawnlet.ManagerConfig) (*spawnlet.Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("docker: %w", err)
 	}
+	// Userns-remap probe: when USERNS_MODE=remap, verify the daemon actually runs with userns-remap
+	// and learn the remap base UID. On failure or missing userns → loud log + degraded fallback (off).
+	// Node startup MUST NOT fail here; a misconfigured USERNS_MODE degrades to cap-drop=ALL.
+	if cfg.UsernsMode == "remap" {
+		base, active, perr := rt.UsernsRemap(context.Background())
+		mode, remapBase := applyUsernsProbe(base, active, perr)
+		switch {
+		case perr != nil:
+			log.Printf("USERNS_MODE=remap but daemon probe failed: %v — FALLING BACK TO DEGRADED (cap-drop=ALL)", perr)
+		case !active:
+			log.Printf("USERNS_MODE=remap but daemon reports no userns-remap (security options contain no name=userns) — FALLING BACK TO DEGRADED (cap-drop=ALL)")
+		default:
+			log.Printf("userns-remap active: base UID=%d (USERNS_MODE=remap confirmed)", remapBase)
+		}
+		cfg.UsernsMode = mode
+		cfg.UsernsRemapBase = remapBase
+	}
 	return spawnlet.NewManager(rt, cfg), nil
+}
+
+// applyUsernsProbe converts the daemon probe result into the effective userns mode and remap
+// base UID for the node config. It is pure (no logging, no mutation) so the degraded-fallback
+// ordering is hermetically testable.
+//
+// The probe-error check is intentionally first: the case where the daemon reports userns active
+// (active=true) but the base UID is unparseable (probeErr!=nil) degrades to "off" rather than
+// proceeding with a zero remap base — a zero base would silently miscalculate host-side ownership
+// for every userns-remapped mount.
+func applyUsernsProbe(base uint32, active bool, probeErr error) (mode string, remapBase uint32) {
+	if probeErr != nil {
+		return "off", 0
+	}
+	if !active {
+		return "off", 0
+	}
+	return "remap", base
 }
 
 // h2cClient mirrors cmd/spawnctl's: cleartext HTTP/2 for the CP dial.

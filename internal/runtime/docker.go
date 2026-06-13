@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 )
@@ -28,6 +32,9 @@ func (d *Docker) Ping(ctx context.Context) error {
 }
 
 func (d *Docker) StartContainer(ctx context.Context, s ContainerSpec) (string, error) {
+	if err := assertNoAddedCaps(s); err != nil {
+		return "", err
+	}
 	cfg := &container.Config{
 		Image:       s.Image,
 		Cmd:         s.Cmd,
@@ -75,8 +82,10 @@ func buildHostConfig(s ContainerSpec) *container.HostConfig {
 	if s.Runtime != "" {
 		host.Runtime = s.Runtime
 	}
-	if s.DropAllCaps {
+	switch s.CapPolicy {
+	case CapDropAll:
 		host.CapDrop = []string{"ALL"}
+	default: // CapDefaultSet: no CapDrop/CapAdd — engine default capability set
 	}
 	if s.ReadonlyRootfs {
 		host.ReadonlyRootfs = true
@@ -94,6 +103,68 @@ func bind(m Mount) string {
 		b += ":ro"
 	}
 	return b
+}
+
+// assertNoAddedCaps rejects any ContainerSpec that requests added capabilities.
+// Granting extra caps (e.g. CAP_NET_ADMIN) in the agent container lets the agent flush the
+// egress floor in the sidecar-owned shared network namespace — a direct floor-defeat (spec §7).
+// This is always wrong: the agent path never sets CapAdd; the assertion is a defensive guard.
+func assertNoAddedCaps(s ContainerSpec) error {
+	if len(s.CapAdd) > 0 {
+		return fmt.Errorf("capability add rejected: agent containers must not receive extra capabilities "+
+			"(got %v) — granting CAP_NET_ADMIN or similar lets the agent flush the egress floor in the "+
+			"shared sidecar netns (spec §7 floor-defeat guard)", s.CapAdd)
+	}
+	return nil
+}
+
+// UsernsRemap probes the Docker daemon to determine whether it is running with
+// userns-remap enabled and, if so, parses the remap base UID from the daemon's
+// data-root directory suffix (e.g. "/var/lib/docker/700000.700000" → 700000).
+//
+// Returns (base, true, nil) when userns-remap is active and the base UID is parsed.
+// Returns (0, false, nil) when userns-remap is not active (degraded: caller falls back to off).
+// Returns a non-nil error when the probe itself fails or the base UID cannot be parsed.
+func (d *Docker) UsernsRemap(ctx context.Context) (base uint32, active bool, err error) {
+	info, err := d.cli.Info(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("docker info: %w", err)
+	}
+	if !hasUsernsSecurityOption(info) {
+		return 0, false, nil
+	}
+	b, ok := parseRemapBase(info.DockerRootDir)
+	if !ok {
+		return 0, true, fmt.Errorf("userns-remap is active but remap base UID could not be parsed from DockerRootDir %q", info.DockerRootDir)
+	}
+	return b, true, nil
+}
+
+// hasUsernsSecurityOption reports whether the daemon's SecurityOptions list contains
+// a "name=userns" entry, which signals that userns-remap is active.
+func hasUsernsSecurityOption(info system.Info) bool {
+	for _, opt := range info.SecurityOptions {
+		if strings.Contains(opt, "name=userns") {
+			return true
+		}
+	}
+	return false
+}
+
+// parseRemapBase extracts the remap base UID from a Docker data-root path whose
+// last path segment is "<uid>.<gid>" (e.g. "/var/lib/docker/700000.700000" → 700000).
+// Returns (0, false) if the path does not match the expected format.
+func parseRemapBase(rootDir string) (uint32, bool) {
+	base := filepath.Base(rootDir)
+	uid, _, ok := strings.Cut(base, ".")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(uid, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(n), true
 }
 
 func (d *Docker) Attach(ctx context.Context, id string) (*AttachedStream, error) {

@@ -25,7 +25,8 @@ func TestBuildHostConfigLimits(t *testing.T) {
 }
 
 func TestBuildHostConfigHardening(t *testing.T) {
-	h := buildHostConfig(ContainerSpec{DropAllCaps: true, ReadonlyRootfs: true})
+	// CapDropAll + ReadonlyRootfs: cap-drop=ALL and read-only rootfs with /tmp tmpfs.
+	h := buildHostConfig(ContainerSpec{CapPolicy: CapDropAll, ReadonlyRootfs: true})
 	if len(h.CapDrop) != 1 || h.CapDrop[0] != "ALL" {
 		t.Fatalf("CapDrop = %v (want [ALL])", h.CapDrop)
 	}
@@ -35,7 +36,12 @@ func TestBuildHostConfigHardening(t *testing.T) {
 	if _, ok := h.Tmpfs["/tmp"]; !ok {
 		t.Fatalf("expected /tmp tmpfs, got %v", h.Tmpfs)
 	}
-	// zero values -> nothing set
+	// CapDefaultSet: no CapDrop (engine default capability set).
+	hDef := buildHostConfig(ContainerSpec{CapPolicy: CapDefaultSet})
+	if len(hDef.CapDrop) != 0 {
+		t.Fatalf("CapDefaultSet must not set CapDrop: %v", hDef.CapDrop)
+	}
+	// zero values (CapPolicy zero = CapDefaultSet) -> nothing set
 	h2 := buildHostConfig(ContainerSpec{})
 	if len(h2.CapDrop) != 0 || h2.ReadonlyRootfs || h2.Tmpfs != nil {
 		t.Fatalf("zero spec must not set hardening: capdrop=%v ro=%v tmpfs=%v", h2.CapDrop, h2.ReadonlyRootfs, h2.Tmpfs)

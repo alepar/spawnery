@@ -62,7 +62,8 @@ func TestDockerPodBackendStartPodStartAgentStop(t *testing.T) {
 		t.Fatalf("want 2 started, got %d", len(f.Started))
 	}
 	ag := f.Started[1]
-	if ag.Image != "agent-img" || ag.NetnsOf != "fake-1" || !ag.DropAllCaps || !ag.ReadonlyRootfs || ag.Runtime != "runsc" {
+	// AgentSpec.DropAllCaps=true is mapped to ContainerSpec.CapPolicy=CapDropAll by StartAgent.
+	if ag.Image != "agent-img" || ag.NetnsOf != "fake-1" || ag.CapPolicy != CapDropAll || !ag.ReadonlyRootfs || ag.Runtime != "runsc" {
 		t.Fatalf("agent spec wrong: %+v", ag)
 	}
 
