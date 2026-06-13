@@ -259,7 +259,11 @@ message DeliverSecretsResponse {}
 // upgrade_to_owner_sealed (field 4): when true the caller has already upgraded node-local mounts to
 // owner-sealed (via UpgradeToOwnerSealed) and the durability guard may proceed for those mounts.
 message MigrateSpawnRequest  { string spawn_id = 1; string target_node_id = 2; string target_class = 3; bool upgrade_to_owner_sealed = 4; }
-message MigrateSpawnResponse { string node_id = 1; }
+message MigrateSpawnResponse {
+  string node_id = 1;
+  // transfer_set_id is the CP-pinned migration transfer set recorded before source capture.
+  string transfer_set_id = 2;
+}
 
 // JournalKeyCiphertext is one mount's owner-sealed journal-password ciphertext (a JSON-encoded
 // seal.Envelope, opaque to the CP). mount is the originating mount label (journalkey.SecretID

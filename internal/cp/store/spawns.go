@@ -85,6 +85,22 @@ func (r *spawnRepo) LiveContainer(ctx context.Context, id string) (Container, bo
 	return c, true, nil
 }
 
+func (r *spawnRepo) LatestContainer(ctx context.Context, id string) (Container, bool, error) {
+	var c Container
+	err := r.db.NewSelect().Model(&c).
+		Where("spawn_id = ?", id).
+		Order("generation DESC").
+		Limit(1).
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Container{}, false, nil
+	}
+	if err != nil {
+		return Container{}, false, err
+	}
+	return c, true, nil
+}
+
 func (r *spawnRepo) GetMounts(ctx context.Context, id string) ([]Mount, error) {
 	var out []Mount
 	err := r.db.NewSelect().Model(&out).Where("spawn_id = ?", id).Order("name ASC").Scan(ctx)

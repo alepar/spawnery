@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/google/uuid"
 
 	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
@@ -427,21 +428,88 @@ func (s *Server) MigrateSpawn(ctx context.Context, req *connect.Request[cpv1.Mig
 	if err := s.guardCrossNodeDurability(ctx, id, liveNode, targetNode, req.Msg.UpgradeToOwnerSealed); err != nil {
 		return nil, err
 	}
+	if targetNode == "" && targetClass != "" {
+		ver, err := s.st.Apps().GetVersion(ctx, sp.AppID, sp.AppVersion)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+		placement, err := s.placementFor(ctx, owner, sp.AppID, ver)
+		if err != nil {
+			return nil, err
+		}
+		placement.Image = sp.Image
+		placement.RequireClass = targetClass
+		pickedNode, err := s.sched.PickNodeID(placement)
+		if err != nil {
+			return nil, err
+		}
+		targetNode = pickedNode
+		targetClass = ""
+	}
+	if sp.Status != store.Active && sp.Status != store.Suspended {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn must be active or suspended to migrate"))
+	}
+
+	sourceGeneration, sourceNodeID := uint64(0), liveNode
+	if c, hasLive, cerr := s.st.Spawns().LiveContainer(ctx, id); cerr != nil {
+		return nil, connect.NewError(connect.CodeInternal, cerr)
+	} else if hasLive {
+		sourceGeneration = uint64(c.Generation)
+		sourceNodeID = c.NodeID
+	} else if c, hasAny, cerr := s.st.Spawns().LatestContainer(ctx, id); cerr != nil {
+		return nil, connect.NewError(connect.CodeInternal, cerr)
+	} else if hasAny {
+		sourceGeneration = uint64(c.Generation)
+		sourceNodeID = c.NodeID
+	}
+	targetGeneration := sourceGeneration + 1
+	transferSetID := uuid.NewString()
+	now := s.now().UnixNano()
+	if err := s.st.TransferSets().Create(ctx, store.TransferSet{
+		ID:                transferSetID,
+		SpawnID:           id,
+		SourceGeneration:  sourceGeneration,
+		TargetGeneration:  targetGeneration,
+		SourceNodeID:      sourceNodeID,
+		TargetNodeID:      targetNode,
+		BaseImageDigest:   sp.BaseImageDigest,
+		TransferKeyStatus: store.TransferKeyTargetReady,
+		Status:            store.TransferSetPending,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create transfer set: %w", err))
+	}
+	if err := s.st.TransferSets().SetStatus(ctx, transferSetID, store.TransferSetCapturing, s.now().UnixNano()); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("mark transfer set capturing: %w", err))
+	}
 	// Suspend the source if still active (markers persist). An already-suspended spawn skips straight
 	// to the placement-overridden resume.
 	switch sp.Status {
 	case store.Active:
 		if err := s.suspendLocked(ctx, owner, id); err != nil {
+			_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
 			return nil, err
 		}
 	case store.Suspended:
 		// already down — resume elsewhere.
-	default:
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn must be active or suspended to migrate"))
+	}
+	if err := s.st.TransferSets().SetStatus(ctx, transferSetID, store.TransferSetRestoring, s.now().UnixNano()); err != nil {
+		_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("mark transfer set restoring: %w", err))
 	}
 	nodeID, err := s.resumeLocked(ctx, owner, id, placementOverride{NodeID: targetNode, Class: targetClass}, true, intent.OpMigrateSpawn)
 	if err != nil {
+		_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
 		return nil, err
+	}
+	if err := s.st.TransferSets().SetTargetNode(ctx, transferSetID, nodeID, s.now().UnixNano()); err != nil {
+		_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("update transfer set target node: %w", err))
+	}
+	if err := s.st.TransferSets().SetStatus(ctx, transferSetID, store.TransferSetActive, s.now().UnixNano()); err != nil {
+		_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("mark transfer set active: %w", err))
 	}
 	// Mark delivery-pending when the owner-sealed upgrade path is active: the target node needs the
 	// journal key delivered before it can open the Kopia repo. The web UI polls ListSpawns and prompts
@@ -449,7 +517,7 @@ func (s *Server) MigrateSpawn(ctx context.Context, req *connect.Request[cpv1.Mig
 	if req.Msg.UpgradeToOwnerSealed {
 		s.deliveryPending.mark(id)
 	}
-	return connect.NewResponse(&cpv1.MigrateSpawnResponse{NodeId: nodeID}), nil
+	return connect.NewResponse(&cpv1.MigrateSpawnResponse{NodeId: nodeID, TransferSetId: transferSetID}), nil
 }
 
 // RecreateSpawn provisions a FRESH container for a spawn that lost its node (unreachable) or errored

@@ -68,6 +68,9 @@ func TestMigrateSpawnSuspendsThenResumesOnTarget(t *testing.T) {
 	if resp.Msg.NodeId != "n2" {
 		t.Fatalf("resumed on node %q, want n2", resp.Msg.NodeId)
 	}
+	if resp.Msg.TransferSetId == "" {
+		t.Fatal("MigrateSpawn must return a transfer_set_id")
+	}
 	// The source was asked to suspend at the live generation (1).
 	src.mu.Lock()
 	gotSuspend, lastGen := src.gotSuspend, src.lastGen
@@ -88,6 +91,22 @@ func TestMigrateSpawnSuspendsThenResumesOnTarget(t *testing.T) {
 	mounts, _ := s.st.Spawns().GetMounts(ctx, "sp1")
 	if len(mounts) != 1 || mounts[0].PersistMarker != "gen1-marker" {
 		t.Fatalf("mounts=%+v, want one main mount with marker gen1-marker", mounts)
+	}
+	ts, err := s.st.TransferSets().Get(ctx, resp.Msg.TransferSetId)
+	if err != nil {
+		t.Fatalf("Get transfer set: %v", err)
+	}
+	if ts.SpawnID != "sp1" || ts.SourceGeneration != 1 || ts.TargetGeneration != 2 {
+		t.Fatalf("transfer set generations = %+v", ts)
+	}
+	if ts.SourceNodeID != "n1" || ts.TargetNodeID != "n2" {
+		t.Fatalf("transfer set nodes = %+v", ts)
+	}
+	if ts.Status != store.TransferSetActive {
+		t.Fatalf("transfer set status = %s, want active", ts.Status)
+	}
+	if ts.TransferKeyStatus != store.TransferKeyTargetReady {
+		t.Fatalf("transfer key status = %s, want target_ready", ts.TransferKeyStatus)
 	}
 }
 
@@ -110,6 +129,13 @@ func TestMigrateSpawnClassTargetPicksCloud(t *testing.T) {
 	}
 	if resp.Msg.NodeId != "cloud-1" {
 		t.Fatalf("resumed on %q, want cloud-1", resp.Msg.NodeId)
+	}
+	ts, err := s.st.TransferSets().Get(ctx, resp.Msg.TransferSetId)
+	if err != nil {
+		t.Fatalf("Get transfer set: %v", err)
+	}
+	if ts.TargetNodeID != "cloud-1" {
+		t.Fatalf("class-target transfer set target node = %q, want cloud-1", ts.TargetNodeID)
 	}
 }
 

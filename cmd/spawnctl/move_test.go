@@ -41,7 +41,7 @@ func (f *fakeMoveClient) MigrateSpawn(_ context.Context, req *connect.Request[cp
 	if f.migErr != nil {
 		return nil, f.migErr
 	}
-	return connect.NewResponse(&cpv1.MigrateSpawnResponse{NodeId: f.nodeID}), nil
+	return connect.NewResponse(&cpv1.MigrateSpawnResponse{NodeId: f.nodeID, TransferSetId: "ts-test"}), nil
 }
 
 func (f *fakeMoveClient) GetSpawnNodeKey(_ context.Context, _ *connect.Request[cpv1.GetSpawnNodeKeyRequest]) (*connect.Response[cpv1.GetSpawnNodeKeyResponse], error) {

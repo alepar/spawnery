@@ -114,6 +114,59 @@ type Mount struct {
 	PersistMarker string `bun:"persist_marker"`
 }
 
+type TransferSetStatus string
+
+const (
+	TransferSetPending            TransferSetStatus = "pending"
+	TransferSetCapturing          TransferSetStatus = "capturing"
+	TransferSetKeyDeliveryPending TransferSetStatus = "key_delivery_pending"
+	TransferSetRestoring          TransferSetStatus = "restoring"
+	TransferSetActive             TransferSetStatus = "active"
+	TransferSetFailed             TransferSetStatus = "failed"
+)
+
+type TransferKeyStatus string
+
+const (
+	TransferKeyPending     TransferKeyStatus = "pending"
+	TransferKeySourceReady TransferKeyStatus = "source_ready"
+	TransferKeyTargetReady TransferKeyStatus = "target_ready"
+)
+
+type RootfsArtifactPin struct {
+	ArtifactID       string `json:"artifact_id"`
+	ArtifactType     string `json:"artifact_type"`
+	Generation       uint64 `json:"generation"`
+	Sequence         int    `json:"sequence"`
+	BaseImageDigest  string `json:"base_image_digest"`
+	Format           string `json:"format"`
+	ContentDigest    string `json:"content_digest"`
+	UncompressedSize int64  `json:"uncompressed_size"`
+}
+
+// TransferSet is the CP's durable migration restore authority. MountManifestPins and
+// RootfsArtifactPins are decoded from JSON columns on read; callers must restore only these pins.
+type TransferSet struct {
+	bun.BaseModel                 `bun:"table:migration_transfer_sets,alias:mts"`
+	ID                            string              `bun:"id,pk"`
+	SpawnID                       string              `bun:"spawn_id,notnull"`
+	SourceGeneration              uint64              `bun:"source_generation,notnull"`
+	TargetGeneration              uint64              `bun:"target_generation,notnull"`
+	SourceNodeID                  string              `bun:"source_node_id,notnull"`
+	TargetNodeID                  string              `bun:"target_node_id,notnull"`
+	BaseImageDigest               string              `bun:"base_image_digest,notnull"`
+	MountManifestPinsJSON         string              `bun:"mount_manifest_pins,notnull"`
+	RootfsArtifactPinsJSON        string              `bun:"rootfs_artifact_pins,notnull"`
+	TransferKeyMetadataJSON       string              `bun:"transfer_key_ciphertext_metadata,notnull"`
+	MountManifestPins             map[string]string   `bun:"-"`
+	RootfsArtifactPins            []RootfsArtifactPin `bun:"-"`
+	TransferKeyCiphertextMetadata map[string]string   `bun:"-"`
+	TransferKeyStatus             TransferKeyStatus   `bun:"transfer_key_status,notnull"`
+	Status                        TransferSetStatus   `bun:"status,notnull"`
+	CreatedAt                     int64               `bun:"created_at,notnull"`
+	UpdatedAt                     int64               `bun:"updated_at,notnull"`
+}
+
 type AgentImage struct {
 	bun.BaseModel `bun:"table:agent_images,alias:ai"`
 	Image         string `bun:"image,pk"`

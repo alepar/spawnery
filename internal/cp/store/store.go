@@ -57,6 +57,7 @@ type SpawnRepo interface {
 	Create(ctx context.Context, s Spawn, mounts []Mount) error
 	Get(ctx context.Context, id string) (Spawn, error) // ErrNotFound on missing OR deleted
 	LiveContainer(ctx context.Context, id string) (Container, bool, error)
+	LatestContainer(ctx context.Context, id string) (Container, bool, error)
 	GetMounts(ctx context.Context, id string) ([]Mount, error)
 	ListByOwner(ctx context.Context, ownerID string) ([]Spawn, error)
 	Rename(ctx context.Context, id, name string) error    // ErrNotFound on missing OR deleted
@@ -100,11 +101,21 @@ type AgentImageRepo interface {
 	List(ctx context.Context) ([]AgentImage, error)
 }
 
+type TransferSetRepo interface {
+	Create(ctx context.Context, ts TransferSet) error
+	Get(ctx context.Context, id string) (TransferSet, error)
+	SetPins(ctx context.Context, id string, sourceGeneration uint64, mountPins map[string]string, rootfsPins []RootfsArtifactPin, updatedAt int64) error
+	SetTargetNode(ctx context.Context, id string, targetNodeID string, updatedAt int64) error
+	SetStatus(ctx context.Context, id string, status TransferSetStatus, updatedAt int64) error
+	SetTransferKeyStatus(ctx context.Context, id string, status TransferKeyStatus, updatedAt int64) error
+}
+
 type Store interface {
 	Owners() OwnerRepo
 	Apps() AppRepo
 	Spawns() SpawnRepo
 	AgentImages() AgentImageRepo
+	TransferSets() TransferSetRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error

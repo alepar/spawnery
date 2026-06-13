@@ -93,6 +93,7 @@ export interface MigrateProgress {
 /** Full runMigrate result on success. */
 export interface MigrateResult {
   resolvedNodeId:     string;
+  transferSetId:      string;
   journalKeysDelivered: number;
 }
 
@@ -186,20 +187,20 @@ export async function upgradeToOwnerSealed(
   });
 }
 
-/** migrateSpawnRPC drives the MigrateSpawn RPC and returns the resolved node ID. */
+/** migrateSpawnRPC drives the MigrateSpawn RPC and returns the resolved node ID + transfer set. */
 async function migrateSpawnRPC(
   spawnId: string,
   targetNodeId: string,
   targetClass: string,
   upgradeToOwnerSealed: boolean,
-): Promise<string> {
-  const r = await unary<{ nodeId?: string }>("MigrateSpawn", {
+): Promise<{ nodeId: string; transferSetId: string }> {
+  const r = await unary<{ nodeId?: string; transferSetId?: string }>("MigrateSpawn", {
     spawnId,
     targetNodeId,
     targetClass,
     upgradeToOwnerSealed,
   });
-  return r.nodeId ?? "";
+  return { nodeId: r.nodeId ?? "", transferSetId: r.transferSetId ?? "" };
 }
 
 // ── Durability classification ─────────────────────────────────────────────────
@@ -357,8 +358,11 @@ export async function runMigrate(
   // Step 2: drive MigrateSpawn (suspend source → resume on target).
   onProgress?.({ step: "migrating" });
   let resolvedNodeId: string;
+  let transferSetId = "";
   try {
-    resolvedNodeId = await migrateSpawnRPC(spawnId, targetNodeId, targetClass, entries.length > 0);
+    const migrated = await migrateSpawnRPC(spawnId, targetNodeId, targetClass, entries.length > 0);
+    resolvedNodeId = migrated.nodeId;
+    transferSetId = migrated.transferSetId;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     // Classify as suspend-fail or resume-fail by checking spawn status after failure.
@@ -388,7 +392,7 @@ export async function runMigrate(
   if (entries.length === 0) {
     // No journal mounts; migration is complete.
     onProgress?.({ step: "done", resolvedNodeId, journalKeysDelivered: 0 });
-    return { resolvedNodeId, journalKeysDelivered: 0 };
+    return { resolvedNodeId, transferSetId, journalKeysDelivered: 0 };
   }
 
   // Step 3: fetch the target node's key material and verify.
@@ -460,7 +464,7 @@ export async function runMigrate(
   }
 
   onProgress?.({ step: "done", resolvedNodeId, journalKeysDelivered: secrets.length });
-  return { resolvedNodeId, journalKeysDelivered: secrets.length };
+  return { resolvedNodeId, transferSetId, journalKeysDelivered: secrets.length };
 }
 
 /** Default spawn status check used by runMigrate to classify suspend vs resume failures. */

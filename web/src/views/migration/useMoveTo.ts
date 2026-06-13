@@ -347,7 +347,7 @@ export function useMoveTo(): { state: MoveToState } & MoveToActions {
         setState((s) => ({
           ...s,
           phase: "done",
-          result: { resolvedNodeId: "", journalKeysDelivered: 0 },
+          result: { resolvedNodeId: "", journalKeysDelivered: 0, transferSetId: "" },
         }));
         return;
       }

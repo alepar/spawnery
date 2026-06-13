@@ -48,6 +48,35 @@ func TestHappyLifecycle(t *testing.T) {
 	}
 }
 
+func TestLatestContainerReturnsHighestGenerationWhenSuspended(t *testing.T) {
+	st := NewTestStore(t)
+	seedAppAndOwner(t, st)
+	ctx := context.Background()
+	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp1"), nil) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp1", "source", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetSuspending(ctx, "sp1", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetSuspended(ctx, "sp1", 1) })
+	var newGen int64
+	inTx(t, st, func(tx Store) error {
+		var err error
+		newGen, err = tx.Spawns().ClaimStarting(ctx, "sp1", []Status{Suspended})
+		return err
+	})
+	if err := st.Spawns().SetActive(ctx, "sp1", "target", newGen); err != nil {
+		t.Fatal(err)
+	}
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetSuspending(ctx, "sp1", newGen) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetSuspended(ctx, "sp1", newGen) })
+
+	got, ok, err := st.Spawns().LatestContainer(ctx, "sp1")
+	if err != nil || !ok {
+		t.Fatalf("LatestContainer ok=%v err=%v", ok, err)
+	}
+	if got.Generation != 2 || got.NodeID != "target" {
+		t.Fatalf("LatestContainer = %+v, want target gen 2", got)
+	}
+}
+
 func TestGuardedTransitionsReject(t *testing.T) {
 	st := NewTestStore(t)
 	seedAppAndOwner(t, st)

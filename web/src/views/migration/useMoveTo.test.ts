@@ -110,6 +110,7 @@ describe("useMoveTo state machine", () => {
     vi.mocked(migrationMod.runMigrate).mockResolvedValue({
       resolvedNodeId: "node-a",
       journalKeysDelivered: 0,
+      transferSetId: "ts-test",
     });
 
     const { result } = renderHook(() => useMoveTo());
@@ -138,6 +139,7 @@ describe("useMoveTo state machine", () => {
     vi.mocked(migrationMod.runMigrate).mockResolvedValue({
       resolvedNodeId: "node-a",
       journalKeysDelivered: 1,
+      transferSetId: "ts-test",
     });
 
     const { result } = renderHook(() => useMoveTo());
@@ -294,6 +296,7 @@ describe("useMoveTo node-local upgrade pivot (WM16)", () => {
     vi.mocked(migrationMod.runMigrate).mockResolvedValue({
       resolvedNodeId: "node-a",
       journalKeysDelivered: 0,
+      transferSetId: "ts-test",
     });
 
     const { result } = renderHook(() => useMoveTo());
@@ -351,7 +354,7 @@ describe("useMoveTo minimize / restore (WM14)", () => {
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("ephemeral");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
-    vi.mocked(migrationMod.runMigrate).mockResolvedValue({ resolvedNodeId: "node-a", journalKeysDelivered: 0 });
+    vi.mocked(migrationMod.runMigrate).mockResolvedValue({ resolvedNodeId: "node-a", journalKeysDelivered: 0, transferSetId: "ts-test" });
 
     const { result } = renderHook(() => useMoveTo());
     await act(async () => { result.current.open("spawn-mm"); });
