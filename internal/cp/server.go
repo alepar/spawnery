@@ -50,6 +50,14 @@ type Server struct {
 	tel                                          telemetry.Sink
 	locks                                        *lock.Keyed
 
+	// cpID is a stable per-process holder identifier used for DB claim ownership.
+	// Set once in NewServer; never changes for the lifetime of the process.
+	cpID string
+
+	// claimTTL is the lease duration for suspend/resume DB claims. The heartbeat goroutine renews
+	// the claim every claimTTL/3. Overridable in tests to keep them fast.
+	claimTTL time.Duration
+
 	models          *modelWaiters // correlates inline SetSpawnModel pushes with node SetModelResult acks
 	setModelTimeout time.Duration // bound for the inline SetModel push; overridable in tests
 
@@ -115,6 +123,7 @@ const (
 	defaultReconcileGiveUp   = 2 * time.Minute  // bounded per-spawn retry window
 	defaultReauthInterval    = 15 * time.Minute // in-band reauth deadline
 	reauthGrace              = 30 * time.Second // grace period beyond the reauth deadline
+	defaultClaimTTL          = 30 * time.Second // lease duration for suspend/resume DB claims
 )
 
 // Server must satisfy the (now larger) connect handler interface; the 5 new lifecycle RPCs are
@@ -123,6 +132,7 @@ var _ cpv1connect.SpawnServiceHandler = (*Server)(nil)
 
 func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Scheduler, st store.Store, tel telemetry.Sink) *Server {
 	return &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
+		cpID: uuid.NewString(), claimTTL: defaultClaimTTL,
 		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout,
 		upgradeWaiters:    newUpgradeWaiters(),
@@ -134,6 +144,72 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
 		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
 		devMode: true}
+}
+
+// withClaim acquires the DB claim for spawn id, runs fn under it (with a heartbeat goroutine
+// renewing the lease every claimTTL/3), then releases the claim. The fn receives a claimCtx that is
+// cancelled if the heartbeat detects ErrClaimLost (lease expired / preempted), signalling the driver
+// to bail immediately and commit no further transitions.
+//
+// Acquire is retried up to maxAcquireRetries times on ErrConflict (benign seq bump); if all retries
+// are exhausted the claim is held by another driver → CodeAborted "spawn busy".
+func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx context.Context, leaseID string) error) error {
+	const maxAcquireRetries = 3
+	leaseID := uuid.NewString()
+	ttl := s.claimTTL
+
+	var acquireErr error
+	for i := 0; i < maxAcquireRetries; i++ {
+		sp, gerr := s.st.Spawns().Get(ctx, id)
+		if gerr != nil {
+			return connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+		}
+		now := time.Now()
+		_, acquireErr = s.st.Spawns().Acquire(ctx, id, s.cpID, leaseID,
+			now.UnixNano(), now.Add(ttl).UnixNano(), sp.StatusSeq)
+		if acquireErr == nil {
+			break
+		}
+		if !errors.Is(acquireErr, store.ErrConflict) {
+			return connect.NewError(connect.CodeInternal, acquireErr)
+		}
+		// ErrConflict: stale seq (benign concurrent bump) or active claim; re-read and retry.
+	}
+	if acquireErr != nil {
+		return connect.NewError(connect.CodeAborted, fmt.Errorf("spawn busy — transition in progress"))
+	}
+
+	// claimCtx is cancelled either by us (after fn returns) or by the heartbeat on ErrClaimLost.
+	claimCtx, claimCancel := context.WithCancel(ctx)
+	hbDone := make(chan struct{})
+	go func() {
+		defer close(hbDone)
+		tick := time.NewTicker(ttl / 3)
+		defer tick.Stop()
+		for {
+			select {
+			case <-claimCtx.Done():
+				return
+			case <-tick.C:
+				newDeadline := time.Now().Add(ttl).UnixNano()
+				herr := s.st.Spawns().Heartbeat(context.WithoutCancel(ctx), id, leaseID, newDeadline)
+				if errors.Is(herr, store.ErrClaimLost) {
+					claimCancel() // signal the driver to bail
+					return
+				}
+				if herr != nil {
+					log.Printf("withClaim %s: heartbeat error: %v", id, herr)
+				}
+			}
+		}
+	}()
+
+	fnErr := fn(claimCtx, leaseID)
+	claimCancel() // stop heartbeat goroutine
+	<-hbDone
+	// Release: ErrClaimLost means the claim expired/was preempted — acceptable, ignore.
+	_ = s.st.Spawns().Release(context.WithoutCancel(ctx), id, leaseID)
+	return fnErr
 }
 
 // --- node side: NodeService/Attach ----------------------------------------
@@ -273,6 +349,9 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 //     the pod, or the pod died) -> drop the route, mark the spawn unreachable. The live row is KEPT
 //     so a later report can re-adopt it. Starting spawns are skipped (may not be in the inventory
 //     yet). User-driven recovery (RecreateSpawn) also remains available.
+//     Spawns in a transient status (Suspending/Resuming) or currently claimed are skipped: a suspend
+//     driver writes Suspending BEFORE the round-trip so the container is still PhaseActive; a
+//     Resuming spawn's container is PhaseStarting (not PhaseActive) but we guard both for safety.
 func (s *Server) reconcileInventory(ctx context.Context, nodeID string, sender registry.NodeSender, running []*nodev1.RunningSpawn) {
 	if nodeID == "" {
 		return
@@ -286,13 +365,24 @@ func (s *Server) reconcileInventory(ctx context.Context, nodeID string, sender r
 	if err != nil {
 		return
 	}
+	now := time.Now().UnixNano()
 	var lost []string
 	for _, c := range live {
-		// A suspend in flight INTENTIONALLY makes the node stop reporting the torn-down container
-		// while the CP row is still Active (SetSuspending is deferred to the node's reply). Such a
-		// container is not "lost" — exempt it so the reconcile doesn't flip it Unreachable and make
-		// the suspend's SetSuspending conflict.
-		if c.Phase == store.PhaseActive && !reported[c.SpawnID] && !s.suspends.inFlight(c.SpawnID) {
+		if c.Phase == store.PhaseActive && !reported[c.SpawnID] {
+			// Skip spawns in a transient status (Suspending/Resuming) — a suspend driver writes
+			// Suspending BEFORE the node round-trip, so the container is still PhaseActive while
+			// the pod is being torn down. Skip claimed spawns too: the active driver will finalise
+			// the transition. A read, no claim taken (spec §5).
+			sp, spErr := s.st.Spawns().Get(ctx, c.SpawnID)
+			if spErr != nil {
+				continue
+			}
+			if sp.Status == store.Suspending || sp.Status == store.Resuming {
+				continue
+			}
+			if sp.ClaimHolder != nil && sp.ClaimDeadline != nil && *sp.ClaimDeadline > now {
+				continue
+			}
 			lost = append(lost, c.SpawnID)
 		}
 	}

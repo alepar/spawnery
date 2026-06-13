@@ -8,6 +8,7 @@ const (
 	Active      Status = "active"
 	Suspending  Status = "suspending"
 	Suspended   Status = "suspended"
+	Resuming    Status = "resuming"
 	Unreachable Status = "unreachable"
 	Errored     Status = "error"
 	Deleted     Status = "deleted"
@@ -70,9 +71,8 @@ type MountDecl struct {
 
 // transientStatuses are spawn statuses that represent an in-progress transition. Every spawn in one
 // of these states is expected to have an active claim; one without (NULL claim or expired
-// claim_deadline) is considered stranded and eligible for recovery. Task 7.5 will extend this slice
-// with Resuming once that status is added.
-var transientStatuses = []Status{Suspending}
+// claim_deadline) is considered stranded and eligible for recovery.
+var transientStatuses = []Status{Suspending, Resuming}
 
 type Spawn struct {
 	bun.BaseModel    `bun:"table:spawns,alias:s"`
