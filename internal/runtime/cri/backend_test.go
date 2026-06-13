@@ -2,8 +2,10 @@ package cri
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"spawnery/internal/runtime"
 )
 
@@ -156,6 +158,117 @@ func TestStartAgentAndStopLifecycle(t *testing.T) {
 	}
 	if len(f.stopSandbox) != 1 || f.stopSandbox[0] != "sandbox-1" || len(f.removeSandbox) != 1 || f.removeSandbox[0] != "sandbox-1" {
 		t.Fatalf("sandbox teardown wrong: stop=%v remove=%v", f.stopSandbox, f.removeSandbox)
+	}
+}
+
+func TestStartAgentCapPolicyEmission(t *testing.T) {
+	cases := []struct {
+		name        string
+		dropAllCaps bool
+		wantDropAll bool
+	}{
+		{
+			name:        "DropAll=true emits DropCapabilities=ALL",
+			dropAllCaps: true,
+			wantDropAll: true,
+		},
+		{
+			name:        "DropAll=false (DefaultSet) emits no SecurityContext (no cap mods)",
+			dropAllCaps: false,
+			wantDropAll: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, f := newFakeCRI(t)
+			b := NewCRIPodBackend(c, "runsc")
+			ctx := context.Background()
+
+			h, err := b.StartPod(ctx, runtime.PodSpec{ID: "spawn-cap", SidecarImage: "sidecar:dev"})
+			if err != nil {
+				t.Fatalf("StartPod: %v", err)
+			}
+			if err := b.StartAgent(ctx, h, runtime.AgentSpec{
+				Image:       "agent:dev",
+				DropAllCaps: tc.dropAllCaps,
+			}); err != nil {
+				t.Fatalf("StartAgent: %v", err)
+			}
+
+			// f.created[0] = sidecar, f.created[1] = agent
+			if len(f.created) != 2 {
+				t.Fatalf("expected 2 containers created, got %d", len(f.created))
+			}
+
+			// Sidecar must always use CapDefaultSet (no cap mods).
+			sc := f.created[0]
+			if sc.Linux.GetSecurityContext().GetCapabilities().GetDropCapabilities() != nil {
+				t.Errorf("sidecar must not have DropCapabilities; got %v",
+					sc.Linux.GetSecurityContext().GetCapabilities().GetDropCapabilities())
+			}
+
+			ag := f.created[1]
+			if tc.wantDropAll {
+				// DropAll path: SecurityContext with DropCapabilities=["ALL"]
+				if ag.Linux.GetSecurityContext() == nil {
+					t.Fatal("DropAll: expected non-nil SecurityContext")
+				}
+				got := ag.Linux.GetSecurityContext().GetCapabilities().GetDropCapabilities()
+				if len(got) != 1 || got[0] != "ALL" {
+					t.Errorf("DropAll: DropCapabilities = %v, want [ALL]", got)
+				}
+				if ag.Linux.GetSecurityContext().GetReadonlyRootfs() {
+					t.Error("ReadonlyRootfs must not be set (retired by spec §6)")
+				}
+			} else {
+				// DefaultSet path: NO SecurityContext → NO capability modifications.
+				if ag.Linux.GetSecurityContext() != nil {
+					t.Errorf("DefaultSet: expected nil SecurityContext (no cap mods), got %+v",
+						ag.Linux.GetSecurityContext())
+				}
+			}
+		})
+	}
+}
+
+func TestAssertNoAddedCaps(t *testing.T) {
+	// nil SecurityContext → no error.
+	if err := assertNoAddedCaps(nil); err != nil {
+		t.Fatalf("nil sc: expected nil error, got %v", err)
+	}
+
+	// SecurityContext with nil Capabilities → no error.
+	if err := assertNoAddedCaps(&runtimeapi.LinuxContainerSecurityContext{}); err != nil {
+		t.Fatalf("nil Capabilities: expected nil error, got %v", err)
+	}
+
+	// SecurityContext with empty AddCapabilities → no error.
+	if err := assertNoAddedCaps(&runtimeapi.LinuxContainerSecurityContext{
+		Capabilities: &runtimeapi.Capability{AddCapabilities: []string{}},
+	}); err != nil {
+		t.Fatalf("empty AddCapabilities: expected nil error, got %v", err)
+	}
+
+	// Single CAP_NET_ADMIN → error mentioning CAP_NET_ADMIN.
+	err := assertNoAddedCaps(&runtimeapi.LinuxContainerSecurityContext{
+		Capabilities: &runtimeapi.Capability{AddCapabilities: []string{"CAP_NET_ADMIN"}},
+	})
+	if err == nil {
+		t.Fatal("CAP_NET_ADMIN: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "CAP_NET_ADMIN") {
+		t.Errorf("error should mention CAP_NET_ADMIN, got: %v", err)
+	}
+
+	// Multiple caps → error.
+	err2 := assertNoAddedCaps(&runtimeapi.LinuxContainerSecurityContext{
+		Capabilities: &runtimeapi.Capability{AddCapabilities: []string{"CAP_SYS_ADMIN", "CAP_NET_ADMIN"}},
+	})
+	if err2 == nil {
+		t.Fatal("multi-cap: expected error, got nil")
+	}
+	if !strings.Contains(err2.Error(), "CAP_SYS_ADMIN") {
+		t.Errorf("error should mention CAP_SYS_ADMIN, got: %v", err2)
 	}
 }
 

@@ -88,7 +88,7 @@ func (b *CRIPodBackend) StartPod(ctx context.Context, spec runtime.PodSpec) (*ru
 		Image:    &runtimeapi.ImageSpec{Image: spec.SidecarImage},
 		Envs:     toKeyValues(spec.SidecarEnv),
 		Labels:   spec.Labels,
-		Linux:    linuxContainer(spec.Resources, false),
+		Linux:    linuxContainer(spec.Resources, runtime.CapDefaultSet),
 	})
 	if err != nil {
 		cleanup()
@@ -185,10 +185,16 @@ func toCRIMounts(ms []runtime.Mount) []*runtimeapi.Mount {
 	return out
 }
 
-// linuxContainer maps our Resources + cap-drop flag to the CRI LinuxContainerConfig. Pids has no
+// linuxContainer maps our Resources + CapPolicy to the CRI LinuxContainerConfig. Pids has no
 // dedicated CRI field, so it goes through the cgroup-v2 Unified map ("pids.max").
 // ReadonlyRootfs is retired (spec §6 — writable rootfs survival replaces it).
-func linuxContainer(res runtime.Resources, dropCaps bool) *runtimeapi.LinuxContainerConfig {
+//
+// CapPolicy emission:
+//   - CapDefaultSet → emit NO SecurityContext capability modifications; the CRI runtime's default
+//     capability set applies. Under runsc the sentry virtualizes privilege, so apt/useradd/chown
+//     pass without kernel userns (spike 3 result 3).
+//   - CapDropAll → emit DropCapabilities=["ALL"]; used when no kernel/sentry isolation is present.
+func linuxContainer(res runtime.Resources, policy runtime.CapPolicy) *runtimeapi.LinuxContainerConfig {
 	r := &runtimeapi.LinuxContainerResources{}
 	if res.MemoryBytes > 0 {
 		r.MemoryLimitInBytes = res.MemoryBytes
@@ -202,12 +208,29 @@ func linuxContainer(res runtime.Resources, dropCaps bool) *runtimeapi.LinuxConta
 		r.Unified = map[string]string{"pids.max": strconv.FormatInt(res.PidsLimit, 10)}
 	}
 	lc := &runtimeapi.LinuxContainerConfig{Resources: r}
-	if dropCaps {
+	switch policy {
+	case runtime.CapDropAll:
 		lc.SecurityContext = &runtimeapi.LinuxContainerSecurityContext{
 			Capabilities: &runtimeapi.Capability{DropCapabilities: []string{"ALL"}},
 		}
+	default: // CapDefaultSet: emit NO capability modifications — runtime default set.
+		// Under runsc the sentry virtualizes privilege (spike 3 result 3).
 	}
 	return lc
+}
+
+// assertNoAddedCaps rejects a security context that requests added capabilities. The agent
+// path never sets AddCapabilities; this is a defensive guard mirroring the Docker lane
+// (spec §7) — CAP_NET_ADMIN in the shared pod netns lets the agent flush the egress floor
+// (spike T5b).
+func assertNoAddedCaps(sc *runtimeapi.LinuxContainerSecurityContext) error {
+	if sc.GetCapabilities() == nil || len(sc.GetCapabilities().GetAddCapabilities()) == 0 {
+		return nil
+	}
+	return fmt.Errorf("capability add rejected: agent containers must not receive extra "+
+		"capabilities (got %v) — granting CAP_NET_ADMIN or similar lets the agent flush the "+
+		"egress floor in the shared pod netns (spec §7 floor-defeat guard)",
+		sc.GetCapabilities().GetAddCapabilities())
 }
 
 // StartAgent starts the (untrusted) agent container in the existing pod sandbox.
@@ -221,6 +244,15 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 	if err := b.pullImage(ctx, spec.Image); err != nil {
 		return err
 	}
+	// Map DropAllCaps bool → CapPolicy, mirroring the Docker lane (docker_pod.go).
+	capPolicy := runtime.CapDefaultSet
+	if spec.DropAllCaps {
+		capPolicy = runtime.CapDropAll
+	}
+	lc := linuxContainer(spec.Resources, capPolicy)
+	if err := assertNoAddedCaps(lc.GetSecurityContext()); err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
 	agentID, err := b.createAndStart(ctx, h.SandboxID, sandboxCfg, &runtimeapi.ContainerConfig{
 		Metadata: &runtimeapi.ContainerMetadata{Name: "agent"},
 		Image:    &runtimeapi.ImageSpec{Image: spec.Image},
@@ -228,7 +260,7 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 		Envs:     toKeyValues(append([]string{"ACP_ADAPTER=1", fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", acpPort)}, spec.Env...)),
 		Mounts:   toCRIMounts(spec.Mounts),
 		Labels:   spec.Labels,
-		Linux:    linuxContainer(spec.Resources, spec.DropAllCaps),
+		Linux:    lc,
 	})
 	if err != nil {
 		return fmt.Errorf("agent: %w", err)
