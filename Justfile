@@ -61,8 +61,10 @@ _images agent="agent":
 web:
     cd web && npm run dev -- --host
 
-# both, in mprocs panes (one Ctrl-C)
-dev:
+# both, in mprocs panes (one Ctrl-C). Depends on `garage` so the transient-tier journal is
+# backed before the node starts (compose runs detached + bootstrap writes dev-creds.env, which
+# `just node` sources) — without it, journaled mounts silently fail to persist on suspend.
+dev: garage
     mprocs
 
 # full A4 signing path in dev: CP + node with intent flow enabled (CP_DEV_INTENT_ENABLED=1).
