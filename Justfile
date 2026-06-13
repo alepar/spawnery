@@ -161,6 +161,28 @@ test-cni-egress:
     go test -tags cni_egress_e2e -c -o /tmp/cni-egress.test ./internal/spawnlet/firewall/
     sudo env "PATH=/sbin:/usr/sbin:/usr/bin:/bin:$(dirname $(command -v docker))" /tmp/cni-egress.test -test.run TestCNIEgressFloorEnforced -test.v -test.count=1
 
+# CRI/containerd delta-only export/import e2e (sp-ei4.1.16). Stands up a DEDICATED containerd
+# (own root/state/socket — never touches the system daemon), pulls the base image, runs the
+# cri_delta_e2e round-trip (Capture→ExportTopLayer→AssembleOnBase→unpack+run, asserting the
+# uncompressed delta layer materializes + the whiteout applies), then tears down. Needs root +
+# containerd + ctr + runc on the host.
+test-cri-delta:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sock=/run/spawnery-cde2e/c.sock; root=/var/tmp/spawnery-cde2e
+    go test -tags cri_delta_e2e -c -o /tmp/cde2e.test ./internal/runtime/cri/
+    sudo mkdir -p "$root/root" /run/spawnery-cde2e
+    printf 'version = 3\nroot = "%s/root"\nstate = "/run/spawnery-cde2e"\n[grpc]\n  address = "%s"\n' "$root" "$sock" | sudo tee "$root/config.toml" >/dev/null
+    cleanup(){ sudo systemctl stop spawnery-cde2e 2>/dev/null || true; sudo rm -rf "$root" /run/spawnery-cde2e; }
+    trap cleanup EXIT
+    sudo systemctl reset-failed spawnery-cde2e 2>/dev/null || true
+    sudo systemd-run --unit=spawnery-cde2e --collect containerd --config "$root/config.toml"
+    for i in $(seq 1 30); do sudo ctr --address "$sock" version >/dev/null 2>&1 && break; sleep 0.5; done
+    sudo ctr --address "$sock" -n k8s.io images pull --snapshotter overlayfs docker.io/library/debian:stable
+    sudo env "PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" CONTAINERD_ADDRESS="$sock" \
+        BASE_IMAGE=docker.io/library/debian:stable \
+        /tmp/cde2e.test -test.run TestCRIDeltaOnlyRoundTrip -test.v -test.count=1
+
 # --- lint (correctness-focused: bugs, not formatting/style) --------------
 
 # run all linters
