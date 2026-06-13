@@ -13,18 +13,17 @@ import (
 // fakeDeltaEngine records calls and returns scripted values/errors.
 type fakeDeltaEngine struct {
 	// scripted responses for Capture
-	captureRef     string
-	captureDelta   string
-	captureLayers  []string
-	captureErr     error
+	captureRef       string
+	captureDeltaSize int64 // compressed byte size of the delta blob; 0 triggers the moby#47065 guard
+	captureErr       error
 
 	// scripted error for Release
 	releaseErr error
 
 	// recorded call args
-	captureKey    string
-	captureName   string
-	captureBase   string
+	captureKey     string
+	captureName    string
+	captureBase    string
 	captureLeaseID string
 
 	releaseCallName    string
@@ -33,15 +32,15 @@ type fakeDeltaEngine struct {
 	closeCalled        bool
 }
 
-func (f *fakeDeltaEngine) Capture(_ context.Context, snapshotKey, name, baseRef, leaseID string) (string, string, []string, error) {
+func (f *fakeDeltaEngine) Capture(_ context.Context, snapshotKey, name, baseRef, leaseID string) (string, int64, error) {
 	f.captureKey = snapshotKey
 	f.captureName = name
 	f.captureBase = baseRef
 	f.captureLeaseID = leaseID
 	if f.captureErr != nil {
-		return "", "", nil, f.captureErr
+		return "", 0, f.captureErr
 	}
-	return f.captureRef, f.captureDelta, f.captureLayers, nil
+	return f.captureRef, f.captureDeltaSize, nil
 }
 
 func (f *fakeDeltaEngine) Release(_ context.Context, name, leaseID string) error {
@@ -170,9 +169,8 @@ func TestCaptureDeltaHappyPath(t *testing.T) {
 	baseRef := "myimage@sha256:base"
 
 	fakeEng := &fakeDeltaEngine{
-		captureRef:    runtime.DeltaTag(spawnID),
-		captureDelta:  "sha256:delta999",
-		captureLayers: []string{"sha256:base-layer1", "sha256:base-layer2", "sha256:delta999"},
+		captureRef:       runtime.DeltaTag(spawnID),
+		captureDeltaSize: 1024, // non-zero: passes the moby#47065 guard
 	}
 
 	c, f := newFakeCRI(t)
@@ -239,16 +237,14 @@ func TestCaptureDeltaCaptureError(t *testing.T) {
 	}
 }
 
-// TestCaptureDeltaMobyGuard verifies that when the assembled manifest does NOT contain the
-// delta digest (moby#47065 guard), Release is called, RemoveContainer is NOT called, and an
-// error mentioning "moby#47065" is returned.
+// TestCaptureDeltaMobyGuard verifies that when the diff produces an empty delta layer
+// (captureDeltaSize == 0, moby#47065 guard), Release is called, RemoveContainer is NOT
+// called, and an error mentioning "moby#47065" is returned.
 func TestCaptureDeltaMobyGuard(t *testing.T) {
 	spawnID := "s-guard"
 	fakeEng := &fakeDeltaEngine{
-		captureRef:    runtime.DeltaTag(spawnID),
-		captureDelta:  "sha256:delta-missing",
-		// manifestLayers does NOT include the delta digest
-		captureLayers: []string{"sha256:base-layer1", "sha256:base-layer2"},
+		captureRef:       runtime.DeltaTag(spawnID),
+		captureDeltaSize: 0, // zero size triggers the guard — empty diff must be rejected
 	}
 	c, f := newFakeCRI(t)
 	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
@@ -279,9 +275,8 @@ func TestCaptureDeltaMobyGuard(t *testing.T) {
 // and the error is propagated.
 func TestCaptureDeltaStopError(t *testing.T) {
 	fakeEng := &fakeDeltaEngine{
-		captureRef:   "should-not-be-returned",
-		captureDelta: "sha256:x",
-		captureLayers: []string{"sha256:x"},
+		captureRef:       "should-not-be-returned",
+		captureDeltaSize: 1,
 	}
 	c, f := newFakeCRI(t)
 	f.failStop = true

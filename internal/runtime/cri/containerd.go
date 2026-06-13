@@ -54,14 +54,15 @@ func (e *containerdEngine) Close() error { return nil }
 
 // Capture diffs the rw snapshot for snapshotKey (== the CRI container id, k8s.io ns) against
 // its parent chain, assembles a new image `name` (base layers + delta layer) pinned by lease
-// leaseID, and returns (name, deltaLayerDigest, allManifestLayerDigests, err).
+// leaseID, and returns (name, deltaLayerSize, err). deltaLayerSize is the compressed byte size
+// of the produced delta blob; a zero value means the diff was empty.
 // On any error a best-effort lease deletion is attempted to prevent orphaned blobs.
-func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseRef, leaseID string) (string, string, []string, error) {
+func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseRef, leaseID string) (string, int64, error) {
 	leaseMgr := e.client.LeasesService()
 
 	// Create the lease (idempotent: ignore AlreadyExists).
 	if _, err := leaseMgr.Create(ctx, leases.WithID(leaseID)); err != nil && !errdefs.IsAlreadyExists(err) {
-		return "", "", nil, fmt.Errorf("create lease %s: %w", leaseID, err)
+		return "", 0, fmt.Errorf("create lease %s: %w", leaseID, err)
 	}
 
 	// All subsequent writes to the content store are automatically attached to this lease.
@@ -74,7 +75,7 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	deltaDesc, err := pkgrootfs.CreateDiff(ctx, snapshotKey, sn, diffSvc)
 	if err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", "", nil, fmt.Errorf("create diff for snapshot %s: %w", snapshotKey, err)
+		return "", 0, fmt.Errorf("create diff for snapshot %s: %w", snapshotKey, err)
 	}
 
 	// Derive the uncompressed diffID (OCI image config rootfs.diff_ids uses uncompressed digests).
@@ -82,29 +83,29 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	diffID, err := images.GetDiffID(ctx, cs, deltaDesc)
 	if err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", "", nil, fmt.Errorf("get diffid for delta layer: %w", err)
+		return "", 0, fmt.Errorf("get diffid for delta layer: %w", err)
 	}
 
 	// Read the base image manifest and config.
 	baseImg, err := e.client.ImageService().Get(ctx, baseRef)
 	if err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", "", nil, fmt.Errorf("get base image %s: %w", baseRef, err)
+		return "", 0, fmt.Errorf("get base image %s: %w", baseRef, err)
 	}
 	baseMfst, err := images.Manifest(ctx, cs, baseImg.Target, platforms.Default())
 	if err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", "", nil, fmt.Errorf("read base manifest: %w", err)
+		return "", 0, fmt.Errorf("read base manifest: %w", err)
 	}
 	cfgBlob, err := content.ReadBlob(ctx, cs, baseMfst.Config)
 	if err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", "", nil, fmt.Errorf("read base config: %w", err)
+		return "", 0, fmt.Errorf("read base config: %w", err)
 	}
 	var cfg ocispec.Image
 	if err := json.Unmarshal(cfgBlob, &cfg); err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", "", nil, fmt.Errorf("parse base config: %w", err)
+		return "", 0, fmt.Errorf("parse base config: %w", err)
 	}
 
 	// Build the new image config: append the delta diffID to RootFS.DiffIDs.
@@ -112,7 +113,7 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	newCfgJSON, err := json.Marshal(cfg)
 	if err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", "", nil, fmt.Errorf("marshal new config: %w", err)
+		return "", 0, fmt.Errorf("marshal new config: %w", err)
 	}
 	newCfgDigest := digest.FromBytes(newCfgJSON)
 	newCfgDesc := ocispec.Descriptor{
@@ -123,7 +124,7 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	// WriteBlob is idempotent: if the blob already exists (same digest), it returns nil.
 	if err := content.WriteBlob(ctx, cs, "spawnery-config-"+name, bytes.NewReader(newCfgJSON), newCfgDesc); err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", "", nil, fmt.Errorf("write new config: %w", err)
+		return "", 0, fmt.Errorf("write new config: %w", err)
 	}
 
 	// Build the new manifest: base layers + the delta descriptor.
@@ -139,7 +140,7 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	newMfstJSON, err := json.Marshal(newMfst)
 	if err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", "", nil, fmt.Errorf("marshal new manifest: %w", err)
+		return "", 0, fmt.Errorf("marshal new manifest: %w", err)
 	}
 	newMfstDigest := digest.FromBytes(newMfstJSON)
 	newMfstDesc := ocispec.Descriptor{
@@ -149,7 +150,7 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	}
 	if err := content.WriteBlob(ctx, cs, "spawnery-manifest-"+name, bytes.NewReader(newMfstJSON), newMfstDesc); err != nil {
 		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-		return "", "", nil, fmt.Errorf("write new manifest: %w", err)
+		return "", 0, fmt.Errorf("write new manifest: %w", err)
 	}
 
 	// Create or update the image record so the CRI image service can resolve it.
@@ -163,21 +164,17 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	if _, err := imgSvc.Create(ctx, imgRecord); err != nil {
 		if !errdefs.IsAlreadyExists(err) {
 			_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-			return "", "", nil, fmt.Errorf("create image record %s: %w", name, err)
+			return "", 0, fmt.Errorf("create image record %s: %w", name, err)
 		}
 		if _, err := imgSvc.Update(ctx, imgRecord); err != nil {
 			_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
-			return "", "", nil, fmt.Errorf("update image record %s: %w", name, err)
+			return "", 0, fmt.Errorf("update image record %s: %w", name, err)
 		}
 	}
 
-	// Collect all manifest layer digests for the moby#47065 guard in the caller.
-	layerDigests := make([]string, len(newLayers))
-	for i, l := range newLayers {
-		layerDigests[i] = l.Digest.String()
-	}
-
-	return name, deltaDesc.Digest.String(), layerDigests, nil
+	// Return the compressed byte size of the delta blob so the caller can guard against
+	// an empty/corrupt diff (moby#47065-class check in delta.go).
+	return name, deltaDesc.Size, nil
 }
 
 // Release deletes the per-spawn image record and its pinning lease so the GC can reclaim the

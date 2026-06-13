@@ -3,7 +3,6 @@ package cri
 import (
 	"context"
 	"fmt"
-	"slices"
 
 	"spawnery/internal/runtime"
 
@@ -15,10 +14,10 @@ import (
 type deltaEngine interface {
 	// Capture diffs the rw snapshot keyed by snapshotKey (CRI container id, k8s.io ns) against its
 	// parent chain, assembles per-spawn image `name` = baseRef layers + the delta layer, pinned by
-	// lease leaseID, and returns the image ref, the delta layer digest, and ALL layer digests the
-	// assembled manifest references (for the moby#47065 guard). On any error it leaves no
-	// half-imported image (internal best-effort cleanup of the lease/blobs).
-	Capture(ctx context.Context, snapshotKey, name, baseRef, leaseID string) (ref, deltaDigest string, manifestLayers []string, err error)
+	// lease leaseID, and returns the image ref and the byte size of the produced delta layer.
+	// A zero/negative size indicates the diff produced no bytes and is treated as a guard failure.
+	// On any error it leaves no half-imported image (internal best-effort cleanup of the lease/blobs).
+	Capture(ctx context.Context, snapshotKey, name, baseRef, leaseID string) (ref string, deltaSize int64, err error)
 	// Release drops the per-spawn image record and its pinning lease (GC hook).
 	Release(ctx context.Context, name, leaseID string) error
 	// Close releases any resources held by the engine. Does not close the shared gRPC conn.
@@ -40,13 +39,16 @@ func deltaLeaseID(spawnID string) string { return "spawnery-delta-" + spawnID }
 
 // engine returns the deltaEngine for this backend, building it lazily on first use.
 // Builds the real containerdEngine from the shared CRI gRPC connection. If opts injected
-// a fake engine (WithDeltaEngine), that is returned immediately without building the real one.
+// a fake engine (WithDeltaEngine), that is returned without building the real one.
+// All reads of b.delta are routed through the Once to prevent a data race: a concurrent
+// first-call to engine() on a nil b.delta (no injection) would race with the write inside
+// Do without this synchronization.
 func (b *CRIPodBackend) engine() (deltaEngine, error) {
-	if b.delta != nil {
-		return b.delta, nil // injected (tests) or already built
-	}
 	b.deltaOnce.Do(func() {
-		b.delta, b.deltaErr = newContainerdEngine(b.c.conn)
+		if b.delta == nil {
+			b.delta, b.deltaErr = newContainerdEngine(b.c.conn)
+		}
+		// else: already set by WithDeltaEngine (tests); nothing to do.
 	})
 	return b.delta, b.deltaErr
 }
@@ -102,16 +104,18 @@ func (b *CRIPodBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) 
 		return "", fmt.Errorf("cri capture stop %s: %w", h.AgentID, err)
 	}
 
-	ref, deltaDigest, layers, err := eng.Capture(ctx, h.AgentID, name, h.BaseImageRef, leaseID)
+	ref, deltaSize, err := eng.Capture(ctx, h.AgentID, name, h.BaseImageRef, leaseID)
 	if err != nil {
 		return "", fmt.Errorf("cri capture %s: %w", h.SpawnID, err)
 	}
 
-	// moby#47065-class guard: assembled manifest must reference the delta layer.
-	if !slices.Contains(layers, deltaDigest) {
+	// moby#47065-class guard: the diff must produce a non-empty layer blob.
+	// A zero/negative size means CreateDiff silently returned a corrupt or empty result,
+	// which would produce a malformed image that fails to launch.
+	if deltaSize <= 0 {
 		_ = eng.Release(context.WithoutCancel(ctx), name, leaseID)
-		return "", fmt.Errorf("cri capture %s: assembled manifest does not reference delta layer %s (moby#47065 guard)",
-			h.SpawnID, deltaDigest)
+		return "", fmt.Errorf("cri capture %s: diff produced empty delta layer (size=%d) — moby#47065 guard",
+			h.SpawnID, deltaSize)
 	}
 
 	// Best-effort remove after capture is pinned. Mirrors the docker lane's best-effort Stop.
