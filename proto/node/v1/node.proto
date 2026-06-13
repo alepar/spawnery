@@ -70,7 +70,20 @@ message RootfsArtifact {
   string producer_runtime = 9;
 }
 // One entry of a node's running-container inventory (node -> CP on Register/Heartbeat).
-message RunningSpawn { string spawn_id = 1; uint64 generation = 2; SpawnPhase phase = 3; }
+// Fields 4-5 carry per-spawn resource/idle FACTS reported by the node — data, not decisions.
+// CP-side evaluators (quota watchdog, idle reaper) consume them per spec §6; the node never acts
+// on them unilaterally. Both fields ride on every Register.running and Heartbeat.running entry.
+message RunningSpawn {
+  string     spawn_id               = 1;
+  uint64     generation             = 2;
+  SpawnPhase phase                  = 3;
+  // delta_size_bytes: committed per-spawn delta-image size, uncompressed bytes, for the CP quota
+  // evaluator. 0 = no delta yet (fresh create) or not applicable (ephemeral / no rootfs capture).
+  int64      delta_size_bytes       = 4;
+  // last_activity_unix_ms: last observed agent/session activity, epoch milliseconds (UTC), for the
+  // CP idle evaluator. 0 = unknown (node has not observed any activity since tracking began).
+  int64      last_activity_unix_ms  = 5;
+}
 
 // signed_subkey (field 8): the node's current SignedSubKey (JSON-encoded subkey.SignedSubKey) — its
 // cert-signed HPKE encryption sub-key, published so the CP can relay it to owner clients for sealing
