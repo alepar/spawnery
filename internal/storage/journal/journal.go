@@ -25,6 +25,7 @@ package journal
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -86,6 +87,34 @@ func ParseDurability(s string) (DurabilityClass, error) {
 type ManifestID string
 
 func (m ManifestID) String() string { return string(m) }
+
+const (
+	// ArtifactRootfsDelta is the typed artifact used by writable-rootfs cross-node migration.
+	ArtifactRootfsDelta = "rootfs_delta"
+	// ArtifactFormatOCILayerTar is an uncompressed OCI layer tar. Rootfs deltas must use this
+	// or another uncompressed format so Kopia CDC can deduplicate successive deltas.
+	ArtifactFormatOCILayerTar = "oci_layer_tar"
+	// ArtifactFormatOCILayout is an uncompressed OCI layout directory serialized as a tar stream.
+	ArtifactFormatOCILayout = "oci_layout"
+)
+
+// ArtifactDescriptor is a typed non-mount journal artifact pinned by (spawn_id, generation,
+// artifact_type, artifact_id). Normal restore paths must call GetArtifact with a CP-recorded
+// ArtifactID; ListArtifacts is diagnostic/crash-recovery only and never selects "latest".
+type ArtifactDescriptor struct {
+	SpawnID          string
+	Generation       uint64
+	Type             string
+	ArtifactID       string
+	Sequence         int
+	BaseImageDigest  string
+	Format           string
+	ContentDigest    string
+	UncompressedSize int64
+	ProducerNodeID   string
+	ProducerRuntime  string
+	CreatedAt        time.Time
+}
 
 // Mount is the journaler's view of one mount: its name, the host dir to
 // snapshot/restore, its durability class, and whether it is a secret tmpfs
@@ -158,6 +187,15 @@ type JournalManager interface {
 	// generation) — the crash fallback ONLY (design §2/§3). The primary restore
 	// path is Restore by pinned id.
 	LatestForGeneration(ctx context.Context, spawnID, mountName string, gen uint64) (ManifestID, error)
+
+	// PutArtifact stores a typed non-mount artifact in the spawn's encrypted Kopia repo.
+	PutArtifact(ctx context.Context, spawnID string, generation uint64, desc ArtifactDescriptor, r io.Reader) (ArtifactDescriptor, error)
+
+	// GetArtifact restores exactly the CP-pinned artifactID for (spawnID,generation).
+	GetArtifact(ctx context.Context, spawnID string, generation uint64, artifactID string, w io.Writer) (ArtifactDescriptor, error)
+
+	// ListArtifacts lists descriptors for exact (spawnID,generation,type). It is not a restore selector.
+	ListArtifacts(ctx context.Context, spawnID string, generation uint64, typ string) ([]ArtifactDescriptor, error)
 
 	// QuickMaintenance runs index-compacting (non-deleting) maintenance on the
 	// spawn's repo (design §2 roast M5). Cadence-driving is out of scope.
