@@ -6,15 +6,17 @@
 
 ## Version Pins (verified-good floor)
 
-| Component   | Version                    |
-|-------------|----------------------------|
-| containerd  | 2.2.3                      |
-| runsc       | release-20260525.0         |
-| kernel      | 7.0.8-200.fc44.x86_64      |
+| Component   | Version                    | Notes                                              |
+|-------------|----------------------------|----------------------------------------------------|
+| containerd  | 2.2.3                      | Hard pin — validate upgrades against spike checklist |
+| runsc       | release-20260525.0         | Hard pin — validate upgrades against spike checklist |
+| kernel      | 7.0.8-200.fc44.x86_64      | Spike host only (Fedora workstation); not a cloud-node requirement |
 
-These are the exact versions used for the spike. Newer patch releases are expected to work;
-any kernel/containerd/runsc version combination should be validated against the spike
-checklist before deploying to production.
+**containerd and runsc are the real version pins** for cloud-node provisioning. The kernel
+entry records the spike environment; cloud nodes will run a different kernel (e.g. Ubuntu
+LTS or a cloud-provider image). Newer containerd/runsc patch releases are expected to work,
+but any new combination should be validated against the spike checklist before deploying to
+production.
 
 ## runsc handler — `overlay2=none` is MANDATORY
 
