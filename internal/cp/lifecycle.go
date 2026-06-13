@@ -244,7 +244,6 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 		}
 		return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node suspend"))
 	}
-	return nil, nil
 }
 
 // ResumeSpawn provisions a FRESH container for a suspended spawn (non-lossless — a brand-new
