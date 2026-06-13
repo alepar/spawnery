@@ -51,6 +51,14 @@ type Spawn struct {
 	// BaseImageDigest is reported to the CP at the ACTIVE transition (node statusActive);
 	// DeltaImageRef stays node-local (same-node resume) until stage-2 migration ships it.
 	DeltaImageRef string
+
+	// DeltaDepth is the number of CaptureDelta calls committed for this spawn so far
+	// (i.e. the length of the delta commit chain above the base image). Loaded from
+	// deltaStateStore on Create (resume continuation) and incremented on each successful
+	// Suspend capture. When DeltaDepth reaches ManagerConfig.DeltaSquashDepth the
+	// manager surfaces a SQUASH-NEEDED warning (squash execution is deferred until a
+	// backend layer-export method is available).
+	DeltaDepth int
 }
 
 type Store struct {

@@ -17,10 +17,24 @@ type fakePodBackend struct {
 	podSpec   runtime.PodSpec   // captured by StartPod
 
 	// Delta-capture controls (overridable per test).
-	capturedRef    string // set by CaptureDelta if called
-	captureErr     error  // if non-nil, CaptureDelta returns this
-	resolveDigest  string // returned by ResolveImageDigest
-	ensureImageRef string // returned by EnsureImage (empty -> returns baseRef)
+	capturedRef    string   // set by CaptureDelta if called (last capture)
+	capturedRefs   []string // ordered list of all captured refs
+	captureErr     error    // if non-nil, CaptureDelta returns this
+	resolveDigest  string   // returned by ResolveImageDigest
+	ensureImageRef string   // returned by EnsureImage (empty -> returns baseRef)
+
+	// GC tracking.
+	releasedSpawn string // set by ReleaseDelta with the spawnID
+
+	// ops records call order for ordering assertions, e.g. "capture:<id>", "stop".
+	ops []string
+
+	// listManaged controls ListManaged return value (for ReapOrphans tests).
+	listManaged []runtime.ManagedPod
+
+	// deltaSizeMB, if > 0, makes this backend implement the deltaSizer interface.
+	// Call enableDeltaSize() after construction to activate it.
+	deltaSizeMB int64
 }
 
 func (f *fakePodBackend) Ping(context.Context) error      { return nil }
@@ -36,13 +50,16 @@ func (f *fakePodBackend) StartAgent(_ context.Context, h *runtime.PodHandle, spe
 }
 func (f *fakePodBackend) Stop(_ context.Context, h *runtime.PodHandle) error {
 	f.stopped = h
+	f.ops = append(f.ops, "stop")
 	return nil
 }
 func (f *fakePodBackend) Attach(_ context.Context, _ *runtime.PodHandle) (*runtime.AttachedStream, error) {
 	pr, pw := io.Pipe()
 	return &runtime.AttachedStream{Stdin: pw, Stdout: pr, Close: pw.Close}, nil
 }
-func (f *fakePodBackend) ListManaged(_ context.Context) ([]runtime.ManagedPod, error) { return nil, nil }
+func (f *fakePodBackend) ListManaged(_ context.Context) ([]runtime.ManagedPod, error) {
+	return f.listManaged, nil
+}
 
 func (f *fakePodBackend) ResolveImageDigest(_ context.Context, _ string) (string, error) {
 	return f.resolveDigest, nil
@@ -57,10 +74,25 @@ func (f *fakePodBackend) CaptureDelta(_ context.Context, h *runtime.PodHandle) (
 	if f.captureErr != nil {
 		return "", f.captureErr
 	}
-	f.capturedRef = runtime.DeltaTag(h.SpawnID)
-	return f.capturedRef, nil
+	ref := runtime.DeltaTag(h.SpawnID)
+	f.capturedRef = ref
+	f.capturedRefs = append(f.capturedRefs, ref)
+	f.ops = append(f.ops, "capture:"+h.SpawnID)
+	return ref, nil
 }
-func (f *fakePodBackend) ReleaseDelta(_ context.Context, _ string) error { return nil }
+func (f *fakePodBackend) ReleaseDelta(_ context.Context, spawnID string) error {
+	f.releasedSpawn = spawnID
+	f.ops = append(f.ops, "release:"+spawnID)
+	return nil
+}
+
+// DeltaSize implements the optional deltaSizer interface used by CheckQuotas.
+// It is defined on fakePodBackend so tests can enable it by setting deltaSizeMB > 0.
+// The interface assertion in CheckQuotas will succeed for any *fakePodBackend because
+// the method always exists; tests that want a "no size source" backend use noSizeFakeBackend.
+func (f *fakePodBackend) DeltaSize(_ context.Context, _ string) (int64, error) {
+	return f.deltaSizeMB << 20, nil
+}
 
 func TestManagerThreadsSandboxID(t *testing.T) {
 	m := NewManager(runtime.NewFake(), ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
