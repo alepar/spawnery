@@ -14,6 +14,7 @@ import (
 func (r *spawnRepo) MarkBootUnreachable(ctx context.Context) (int, error) {
 	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
 		Set("status = ?", Unreachable).
+		Set("status_seq = status_seq + 1").
 		Where("status IN (?)", bun.In([]Status{Starting, Active, Suspending})).
 		Exec(ctx)
 	if err != nil {

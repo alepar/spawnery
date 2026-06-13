@@ -197,8 +197,11 @@ func (r *spawnRepo) ListUnappliedModel(ctx context.Context) ([]Spawn, error) {
 
 // guardStatus runs a status-guarded UPDATE on spawns; rowcount=0 -> ErrConflict.
 // The set closure must add ONLY .Set(...) clauses; the id + status WHERE is owned by guardStatus.
+// Every guardStatus call bumps status_seq so that any concurrent CAS on the row observes the change.
 func (r *spawnRepo) guardStatus(ctx context.Context, id string, from []Status, set func(*bun.UpdateQuery) *bun.UpdateQuery) error {
-	q := r.db.NewUpdate().Model((*Spawn)(nil)).Where("id = ?", id).Where("status IN (?)", bun.In(from))
+	q := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("status_seq = status_seq + 1").
+		Where("id = ?", id).Where("status IN (?)", bun.In(from))
 	res, err := set(q).Exec(ctx)
 	if err != nil {
 		return err
@@ -344,6 +347,7 @@ func (r *spawnRepo) MarkUnreachable(ctx context.Context, ids []string) (int, err
 	}
 	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
 		Set("status = ?", Unreachable).
+		Set("status_seq = status_seq + 1").
 		Where("id IN (?)", bun.In(ids)).Where("status IN (?)", bun.In([]Status{Starting, Active})).
 		Exec(ctx)
 	if err != nil {
@@ -373,7 +377,12 @@ func (r *spawnRepo) MarkRecovered(ctx context.Context, id string) error {
 }
 
 func (r *spawnRepo) Touch(ctx context.Context, id string, ts int64) error {
-	_, err := r.db.NewUpdate().Model((*Spawn)(nil)).Set("last_used_at = ?", ts).Where("id = ?", id).Exec(ctx)
+	// status_seq bump closes the idle-reaper TOCTOU: a reaper that read (seq=S) then calls
+	// Acquire(expectedSeq=S) will get ErrConflict if activity arrived between the two calls.
+	_, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("last_used_at = ?", ts).
+		Set("status_seq = status_seq + 1").
+		Where("id = ?", id).Exec(ctx)
 	return err
 }
 
@@ -450,6 +459,96 @@ func (r *spawnRepo) Adopt(ctx context.Context, id, nodeID string, gen int64) err
 		return ErrConflict
 	}
 	return nil
+}
+
+// Acquire atomically claims the spawn row. See SpawnRepo.Acquire for full semantics.
+func (r *spawnRepo) Acquire(ctx context.Context, id, holder, leaseID string, nowTS, deadlineTS, expectedSeq int64) (int64, error) {
+	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("claim_holder = ?", holder).
+		Set("claim_lease_id = ?", leaseID).
+		Set("claim_deadline = ?", deadlineTS).
+		Set("status_seq = status_seq + 1").
+		Where("id = ?", id).
+		Where("status_seq = ?", expectedSeq).
+		Where("(claim_holder IS NULL OR claim_deadline < ?)", nowTS).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return 0, ErrConflict
+	}
+	return expectedSeq + 1, nil
+}
+
+// Heartbeat extends the claim deadline without bumping status_seq. See SpawnRepo.Heartbeat.
+func (r *spawnRepo) Heartbeat(ctx context.Context, id, leaseID string, newDeadlineTS int64) error {
+	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("claim_deadline = ?", newDeadlineTS).
+		Where("id = ?", id).
+		Where("claim_lease_id = ?", leaseID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrClaimLost
+	}
+	return nil
+}
+
+// Release clears claim columns and bumps status_seq. See SpawnRepo.Release.
+func (r *spawnRepo) Release(ctx context.Context, id, leaseID string) error {
+	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("claim_holder = NULL").
+		Set("claim_lease_id = NULL").
+		Set("claim_deadline = NULL").
+		Set("status_seq = status_seq + 1").
+		Where("id = ?", id).
+		Where("claim_lease_id = ?", leaseID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrClaimLost
+	}
+	return nil
+}
+
+// TransitionClaimed performs a generation+lease+seq-fenced status transition. See SpawnRepo.TransitionClaimed.
+// The generation fence is a correlated subquery on spawn_containers: only the current live episode
+// (ended_at IS NULL) is matched, so a pod recreate that started a new generation returns rowcount 0.
+// The subquery references "id" without a table qualifier — SQLite's UPDATE does not allow "spawns.id"
+// in a correlated subquery WHERE clause; the unqualified form resolves to the outer spawns row's id.
+func (r *spawnRepo) TransitionClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, to Status) (int64, error) {
+	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("status = ?", to).
+		Set("status_seq = status_seq + 1").
+		Where("id = ?", id).
+		Where("status_seq = ?", expectedSeq).
+		Where("claim_lease_id = ?", leaseID).
+		Where("? = (SELECT generation FROM spawn_containers WHERE spawn_id = id AND ended_at IS NULL)", expectedGen).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return 0, ErrConflict
+	}
+	return expectedSeq + 1, nil
+}
+
+// ListStranded returns spawns in transient statuses whose claim is absent or expired (nowTS is a
+// unix timestamp; store never reads the wall clock). See SpawnRepo.ListStranded.
+func (r *spawnRepo) ListStranded(ctx context.Context, nowTS int64) ([]Spawn, error) {
+	var out []Spawn
+	err := r.db.NewSelect().Model(&out).
+		Where("status IN (?)", bun.In(transientStatuses)).
+		Where("(claim_holder IS NULL OR claim_deadline < ?)", nowTS).
+		Order("id ASC").
+		Scan(ctx)
+	return out, err
 }
 
 // Compile-time check that *spawnRepo fully implements SpawnRepo.
