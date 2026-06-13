@@ -30,22 +30,26 @@ type fakeCRI struct {
 	podIP         string
 	infoPid       int               // -> Info["info"] {"pid":...}
 	failCreate    bool              // inject a CreateContainer failure (exercises the cleanup path)
+	failStop      bool              // inject a StopContainer failure
 	sandboxLabels map[string]string // labels from the last RunPodSandbox (for ListPodSandbox)
 	removed       bool              // sandbox removed (ListPodSandbox returns empty)
 
 	// image presence: images already pulled (ImageStatus returns non-nil).
 	present map[string]bool
+	// digests maps image name -> RepoDigests (for ResolveImageDigest tests).
+	digests map[string][]string
 
 	// recorded calls.
-	createdNames  []string // container Metadata.Name in CreateContainer order
-	created       []*runtimeapi.ContainerConfig
-	createSandbox []string // PodSandboxId per CreateContainer
-	started       []string // StartContainer ids
-	stopped       []string // StopContainer ids
-	pulled        []string // PullImage images
-	stopSandbox   []string
-	removeSandbox []string
-	nextID        int
+	createdNames     []string // container Metadata.Name in CreateContainer order
+	created          []*runtimeapi.ContainerConfig
+	createSandbox    []string // PodSandboxId per CreateContainer
+	started          []string // StartContainer ids
+	stopped          []string // StopContainer ids
+	removedContainers []string // RemoveContainer ids
+	pulled           []string // PullImage images
+	stopSandbox      []string
+	removeSandbox    []string
+	nextID           int
 }
 
 func (f *fakeCRI) Status(_ context.Context, _ *runtimeapi.StatusRequest) (*runtimeapi.StatusResponse, error) {
@@ -137,16 +141,32 @@ func (f *fakeCRI) StartContainer(_ context.Context, req *runtimeapi.StartContain
 
 func (f *fakeCRI) StopContainer(_ context.Context, req *runtimeapi.StopContainerRequest) (*runtimeapi.StopContainerResponse, error) {
 	f.mu.Lock()
+	fail := f.failStop
 	f.stopped = append(f.stopped, req.ContainerId)
 	f.mu.Unlock()
+	if fail {
+		return nil, fmt.Errorf("injected stop failure")
+	}
 	return &runtimeapi.StopContainerResponse{}, nil
+}
+
+func (f *fakeCRI) RemoveContainer(_ context.Context, req *runtimeapi.RemoveContainerRequest) (*runtimeapi.RemoveContainerResponse, error) {
+	f.mu.Lock()
+	f.removedContainers = append(f.removedContainers, req.ContainerId)
+	f.mu.Unlock()
+	return &runtimeapi.RemoveContainerResponse{}, nil
 }
 
 func (f *fakeCRI) ImageStatus(_ context.Context, req *runtimeapi.ImageStatusRequest) (*runtimeapi.ImageStatusResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.present[req.Image.GetImage()] {
-		return &runtimeapi.ImageStatusResponse{Image: &runtimeapi.Image{Id: req.Image.GetImage()}}, nil
+	name := req.Image.GetImage()
+	if f.present[name] {
+		img := &runtimeapi.Image{Id: name}
+		if ds := f.digests[name]; len(ds) > 0 {
+			img.RepoDigests = ds
+		}
+		return &runtimeapi.ImageStatusResponse{Image: img}, nil
 	}
 	return &runtimeapi.ImageStatusResponse{}, nil // not present
 }
@@ -166,6 +186,7 @@ func newFakeCRI(t *testing.T) (*Client, *fakeCRI) {
 		runtimeReady: true, networkReady: true,
 		sandboxID: "sandbox-1", podIP: "10.244.0.7", infoPid: 4242,
 		present: map[string]bool{},
+		digests: map[string][]string{},
 	}
 	lis := bufconn.Listen(1024 * 1024)
 	s := grpc.NewServer()
