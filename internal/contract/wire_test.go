@@ -13,11 +13,16 @@ func TestNodeContractFields(t *testing.T) {
 	// generation threaded onto every CP->node command + onto SpawnStatus
 	start := &nodev1.StartSpawn{
 		SpawnId: "sp1", AppRef: "ref", DataRef: "", Model: "m",
-		Generation: 7,
-		Mounts:     []*nodev1.MountBinding{{Name: "main", BackendUri: "managed:repo"}},
+		Generation:             7,
+		Mounts:                 []*nodev1.MountBinding{{Name: "main", BackendUri: "managed:repo"}},
+		RootfsSourceGeneration: 6,
+		RootfsArtifacts: []*nodev1.RootfsArtifact{{
+			ArtifactId: "artifact-rootfs-gen6", Generation: 6, BaseImageDigest: "agent@sha256:base",
+			Format: "oci_layout",
+		}},
 	}
 	_ = &nodev1.StopSpawn{SpawnId: "sp1", Generation: 7}
-	_ = &nodev1.Suspend{SpawnId: "sp1", Generation: 7}
+	_ = &nodev1.Suspend{SpawnId: "sp1", Generation: 7, CaptureRootfsArtifact: true}
 	_ = &nodev1.SessionOpen{SpawnId: "sp1", Generation: 7}
 	_ = &nodev1.SessionClose{SpawnId: "sp1", Generation: 7}
 	_ = &nodev1.SpawnStatus{SpawnId: "sp1", Phase: nodev1.SpawnPhase_SUSPENDED, Generation: 7}
@@ -29,6 +34,9 @@ func TestNodeContractFields(t *testing.T) {
 		SuspendComplete: &nodev1.SuspendComplete{
 			SpawnId: "sp1", Generation: 7,
 			Markers: []*nodev1.MountMarker{{Name: "main", Marker: "spawnery-suspend/sp1/7"}},
+			RootfsArtifacts: []*nodev1.RootfsArtifact{{
+				ArtifactId: "artifact-rootfs-gen7", Generation: 7, BaseImageDigest: "agent@sha256:base",
+			}},
 		}}}
 
 	// node inventory on Register + Heartbeat
@@ -46,13 +54,18 @@ func TestNodeContractFields(t *testing.T) {
 	if err := proto.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Generation != 7 || len(got.Mounts) != 1 || got.Mounts[0].Name != "main" {
+	if got.Generation != 7 || len(got.Mounts) != 1 || got.Mounts[0].Name != "main" ||
+		got.RootfsSourceGeneration != 6 || len(got.RootfsArtifacts) != 1 ||
+		got.RootfsArtifacts[0].ArtifactId != "artifact-rootfs-gen6" {
 		t.Fatalf("round-trip lost fields: %+v", &got)
 	}
 
 	// round-trip a nested-repeated field (SuspendComplete.Markers) — most likely to mis-serialize
 	sc := &nodev1.SuspendComplete{SpawnId: "sp1", Generation: 7,
-		Markers: []*nodev1.MountMarker{{Name: "main", Marker: "spawnery-suspend/sp1/7"}}}
+		Markers: []*nodev1.MountMarker{{Name: "main", Marker: "spawnery-suspend/sp1/7"}},
+		RootfsArtifacts: []*nodev1.RootfsArtifact{{
+			ArtifactId: "artifact-rootfs-gen7", Generation: 7, BaseImageDigest: "agent@sha256:base",
+		}}}
 	scb, err := proto.Marshal(sc)
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +74,8 @@ func TestNodeContractFields(t *testing.T) {
 	if err := proto.Unmarshal(scb, &gotSC); err != nil {
 		t.Fatal(err)
 	}
-	if gotSC.Generation != 7 || len(gotSC.Markers) != 1 || gotSC.Markers[0].Marker != "spawnery-suspend/sp1/7" {
+	if gotSC.Generation != 7 || len(gotSC.Markers) != 1 || gotSC.Markers[0].Marker != "spawnery-suspend/sp1/7" ||
+		len(gotSC.RootfsArtifacts) != 1 || gotSC.RootfsArtifacts[0].ArtifactId != "artifact-rootfs-gen7" {
 		t.Fatalf("SuspendComplete round-trip lost fields: %+v", &gotSC)
 	}
 }

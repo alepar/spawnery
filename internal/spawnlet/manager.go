@@ -1,6 +1,7 @@
 package spawnlet
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -420,6 +421,30 @@ type AgentSelection struct {
 	// Empty on fresh create (the node resolves the digest at create time via ResolveImageDigest).
 	// On resume/recreate the CP threads the stored digest down so the node uses the exact base.
 	BaseImageDigest string
+	// RootfsSourceGeneration and RootfsArtifacts are CP-pinned migration restore inputs.
+	// Normal same-node resume leaves them empty and continues to use the local DeltaImageRef.
+	RootfsSourceGeneration uint64
+	RootfsArtifacts        []RootfsArtifact
+}
+
+// RootfsArtifact is the node/spawnlet-facing copy of a journal rootfs artifact descriptor.
+// It deliberately carries explicit generation and artifact id; callers must never ask the
+// journaler for "latest" during migration restore.
+type RootfsArtifact struct {
+	ArtifactID       string
+	Generation       uint64
+	Sequence         int
+	BaseImageDigest  string
+	Format           string
+	ContentDigest    string
+	UncompressedSize int64
+	ProducerNodeID   string
+	ProducerRuntime  string
+}
+
+type SuspendResult struct {
+	MountMarkers    map[string]string
+	RootfsArtifacts []RootfsArtifact
 }
 
 func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID string, generation uint64) (*Spawn, error) {
@@ -642,6 +667,13 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			log.Printf("spawn %s: resolve base digest for %q: %v (non-fatal; delta-survival pinning skipped)", id, baseRef, derr)
 		}
 	}
+	if len(sel.RootfsArtifacts) > 0 {
+		if err := m.restoreRootfsArtifacts(ctx, id, sel.RootfsSourceGeneration, baseRef, sel.RootfsArtifacts); err != nil {
+			_ = m.pod.Stop(ctx, h)
+			finalizeAll()
+			return nil, err
+		}
+	}
 	// Launch image: delta tag if already present locally (same-node resume), else base.
 	launchImage, eerr := m.pod.EnsureImage(ctx, baseRef, runtime.DeltaTag(id))
 	if eerr != nil {
@@ -737,6 +769,66 @@ func (m *Manager) startJournalWatchers(id string, gen uint64, mounts []journal.M
 	return watchers
 }
 
+func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceGeneration uint64, baseRef string, artifacts []RootfsArtifact) error {
+	if m.journal == nil {
+		return fmt.Errorf("rootfs artifact restore for %s: no journaler configured", id)
+	}
+	if sourceGeneration == 0 {
+		return fmt.Errorf("rootfs artifact restore for %s: missing source generation", id)
+	}
+	for _, art := range artifacts {
+		if art.ArtifactID == "" {
+			return fmt.Errorf("rootfs artifact restore for %s: empty artifact id (restore must be pinned)", id)
+		}
+		if art.Generation != 0 && art.Generation != sourceGeneration {
+			return fmt.Errorf("rootfs artifact restore for %s: artifact %s generation %d does not match source generation %d",
+				id, art.ArtifactID, art.Generation, sourceGeneration)
+		}
+		if art.BaseImageDigest != "" && art.BaseImageDigest != baseRef {
+			return fmt.Errorf("rootfs artifact restore for %s: artifact %s base digest %s does not match pinned base digest %s",
+				id, art.ArtifactID, art.BaseImageDigest, baseRef)
+		}
+		var payload bytes.Buffer
+		desc, err := m.journal.GetArtifact(ctx, id, sourceGeneration, art.ArtifactID, &payload)
+		if err != nil {
+			return fmt.Errorf("rootfs artifact restore for %s: get artifact %s: %w", id, art.ArtifactID, err)
+		}
+		if desc.Generation != 0 && desc.Generation != sourceGeneration {
+			return fmt.Errorf("rootfs artifact restore for %s: journal returned artifact %s generation %d, want %d",
+				id, art.ArtifactID, desc.Generation, sourceGeneration)
+		}
+		if desc.BaseImageDigest != "" && desc.BaseImageDigest != baseRef {
+			return fmt.Errorf("rootfs artifact restore for %s: journal returned artifact %s base digest %s, want %s",
+				id, art.ArtifactID, desc.BaseImageDigest, baseRef)
+		}
+		if _, err := m.pod.ImportDelta(ctx, id, baseRef, bytes.NewReader(payload.Bytes())); err != nil {
+			return fmt.Errorf("rootfs artifact restore for %s: import artifact %s: %w", id, art.ArtifactID, err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) rootfsProducerRuntime() string {
+	if m.cfg.ContainerRuntime != "" {
+		return m.cfg.ContainerRuntime
+	}
+	return "docker"
+}
+
+func rootfsArtifactFromJournal(desc journal.ArtifactDescriptor) RootfsArtifact {
+	return RootfsArtifact{
+		ArtifactID:       desc.ArtifactID,
+		Generation:       desc.Generation,
+		Sequence:         desc.Sequence,
+		BaseImageDigest:  desc.BaseImageDigest,
+		Format:           desc.Format,
+		ContentDigest:    desc.ContentDigest,
+		UncompressedSize: desc.UncompressedSize,
+		ProducerNodeID:   desc.ProducerNodeID,
+		ProducerRuntime:  desc.ProducerRuntime,
+	}
+}
+
 // PreflightRuntime validates a configured non-default container runtime at startup (delegates to the
 // backend's smoke check). Callers should fail hard rather than discover a broken runtime at first spawn.
 func (m *Manager) PreflightRuntime(ctx context.Context) error {
@@ -750,7 +842,7 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
-	m.teardown(ctx, sp, false, false)
+	_, _ = m.teardown(ctx, sp, false, false, false)
 	return nil
 }
 
@@ -766,7 +858,16 @@ func (m *Manager) Suspend(ctx context.Context, id string) (map[string]string, er
 	if !ok {
 		return nil, fmt.Errorf("unknown spawn %s", id)
 	}
-	return m.teardown(ctx, sp, true, false), nil
+	res, err := m.teardown(ctx, sp, true, false, false)
+	return res.MountMarkers, err
+}
+
+func (m *Manager) SuspendForMigration(ctx context.Context, id string, captureRootfsArtifact bool) (SuspendResult, error) {
+	sp, ok := m.store.Claim(id)
+	if !ok {
+		return SuspendResult{}, fmt.Errorf("unknown spawn %s", id)
+	}
+	return m.teardown(ctx, sp, true, false, captureRootfsArtifact)
 }
 
 // Delete tears down the spawn (without capturing a delta) and runs GC: releases the per-spawn
@@ -782,7 +883,7 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
-	m.teardown(ctx, sp, false, true)
+	_, _ = m.teardown(ctx, sp, false, true, false)
 	return nil
 }
 
@@ -795,8 +896,10 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 //   - capture=true (Suspend path): trigger the rootfs delta capture BEFORE pod.Stop (live container).
 //   - gc=true (Delete path): release the delta image after pod.Stop and purge durable state files.
 //     (Stop and Suspend both have gc=false — the delta image must survive for same-node restart-resume.)
-func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc bool) map[string]string {
+func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureRootfsArtifact bool) (SuspendResult, error) {
 	id := sp.ID
+	result := SuspendResult{MountMarkers: map[string]string{}}
+	var resultErr error
 	// Teardown must complete even if the caller's ctx is already cancelled (e.g. the CP connection
 	// dropped mid-startup and the readiness probe failed): detach so firewall + mount cleanup run.
 	ctx = context.WithoutCancel(ctx)
@@ -833,6 +936,9 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc bool) map
 		}
 		if ref, cerr := m.pod.CaptureDelta(ctx, h); cerr != nil {
 			log.Printf("delta capture for %s: %v (non-fatal; next resume uses base image)", id, cerr)
+			if captureRootfsArtifact {
+				resultErr = fmt.Errorf("rootfs artifact capture for %s: capture delta: %w", id, cerr)
+			}
 		} else {
 			sp.DeltaImageRef = ref
 			sp.DeltaDepth++
@@ -851,6 +957,34 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc bool) map
 						id, sp.DeltaDepth, m.cfg.DeltaSquashDepth)
 				}
 			}
+			if captureRootfsArtifact {
+				if m.journal == nil {
+					resultErr = fmt.Errorf("rootfs artifact capture for %s: no journaler configured", id)
+				} else {
+					var payload bytes.Buffer
+					if err := m.pod.ExportDelta(ctx, id, &payload); err != nil {
+						resultErr = fmt.Errorf("rootfs artifact capture for %s: export delta: %w", id, err)
+					} else {
+						desc := journal.ArtifactDescriptor{
+							Type:            journal.ArtifactRootfsDelta,
+							Sequence:        sp.DeltaDepth,
+							BaseImageDigest: sp.BaseImageDigest,
+							Format:          journal.ArtifactFormatOCILayout,
+							ProducerNodeID:  m.cfg.NodeID,
+							ProducerRuntime: m.rootfsProducerRuntime(),
+						}
+						stored, err := m.journal.PutArtifact(ctx, id, sp.Generation, desc, bytes.NewReader(payload.Bytes()))
+						if err != nil {
+							resultErr = fmt.Errorf("rootfs artifact capture for %s: put artifact: %w", id, err)
+						} else {
+							result.RootfsArtifacts = append(result.RootfsArtifacts, rootfsArtifactFromJournal(stored))
+						}
+					}
+				}
+				if resultErr != nil {
+					log.Printf("%v", resultErr)
+				}
+			}
 		}
 	}
 
@@ -866,7 +1000,6 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc bool) map
 	// scratch backend nukes the host dirs below. Guarded: only runs when a
 	// journaler is installed and this spawn actually has journaled mounts —
 	// scratch-only spawns skip it entirely.
-	markers := map[string]string{}
 	if m.journal != nil && len(sp.JournalMounts) > 0 {
 		ids, err := m.journal.FinalSnapshot(ctx, id, sp.Generation, sp.JournalMounts)
 		if err != nil {
@@ -880,7 +1013,7 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc bool) map
 			// the caller as the per-mount persist markers the CP records on suspend
 			// (CP↔node suspend-marker protocol, design §3 M6, sp-a7fs).
 			for mount, mid := range ids {
-				markers[mount] = string(mid)
+				result.MountMarkers[mount] = string(mid)
 				log.Printf("journal: spawn=%s gen=%d mount=%s final manifest=%s", id, sp.Generation, mount, mid)
 			}
 			if m.journalState != nil {
@@ -922,7 +1055,7 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc bool) map
 
 	// The spawn was removed from the store atomically by Claim (in Stop/Suspend/Delete)
 	// before teardown was called, so no store.Delete is needed here.
-	return markers
+	return result, resultErr
 }
 
 // InjectSecret writes one unsealed secret's plaintext into spawnID's tmpfs secrets dir at target

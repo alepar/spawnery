@@ -13,7 +13,11 @@ package spawnlet
 
 import (
 	"context"
+	"strings"
 	"testing"
+
+	"spawnery/internal/runtime"
+	"spawnery/internal/storage/journal"
 )
 
 // E1: Suspend with DeltaCapture=true triggers CaptureDelta before pod.Stop, and DeltaImageRef
@@ -155,5 +159,162 @@ func TestCreateRecordsBaseImageDigest(t *testing.T) {
 
 	if sp.BaseImageDigest != digest {
 		t.Fatalf("BaseImageDigest = %q, want %q", sp.BaseImageDigest, digest)
+	}
+}
+
+func TestMigrationSuspendStoresRootfsArtifactForSourceGeneration(t *testing.T) {
+	ctx := context.Background()
+	fb := &fakePodBackend{resolveDigest: "agent@sha256:base"}
+	fj := newFakeJournal("")
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		NodeID: "node-a", AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
+		DeltaCapture: true,
+	})
+	m.SetJournal(fj, t.TempDir())
+
+	sp, err := m.Create(ctx, "sp-migrate-src", writeApp(t), "model", "", "", 7)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	result, err := m.SuspendForMigration(ctx, sp.ID, true)
+	if err != nil {
+		t.Fatalf("SuspendForMigration: %v", err)
+	}
+	if len(result.RootfsArtifacts) != 1 {
+		t.Fatalf("RootfsArtifacts = %+v, want one artifact", result.RootfsArtifacts)
+	}
+	if len(fj.artifactPuts) != 1 {
+		t.Fatalf("journal PutArtifact calls = %d, want 1", len(fj.artifactPuts))
+	}
+	got := fj.artifactPuts[0]
+	if got.SpawnID != sp.ID || got.Generation != 7 {
+		t.Fatalf("artifact key = %s/%d, want %s/7", got.SpawnID, got.Generation, sp.ID)
+	}
+	if got.Type != journal.ArtifactRootfsDelta || got.Format != journal.ArtifactFormatOCILayout {
+		t.Fatalf("artifact type/format = %s/%s", got.Type, got.Format)
+	}
+	if got.BaseImageDigest != "agent@sha256:base" {
+		t.Fatalf("artifact base digest = %q", got.BaseImageDigest)
+	}
+	if got.ProducerNodeID != "node-a" || got.ProducerRuntime == "" {
+		t.Fatalf("producer metadata = node %q runtime %q", got.ProducerNodeID, got.ProducerRuntime)
+	}
+	if string(fj.artifactPayloads[got.ArtifactID]) != runtime.DeltaTag(sp.ID) {
+		t.Fatalf("artifact payload = %q, want exported delta tag", fj.artifactPayloads[got.ArtifactID])
+	}
+	if !strings.Contains(strings.Join(fb.ops, ","), "export:"+sp.ID) {
+		t.Fatalf("expected ExportDelta before migration suspend completes, ops=%v", fb.ops)
+	}
+}
+
+func TestNormalSuspendDoesNotStoreRootfsArtifact(t *testing.T) {
+	ctx := context.Background()
+	fb := &fakePodBackend{}
+	fj := newFakeJournal("")
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
+		DeltaCapture: true,
+	})
+	m.SetJournal(fj, t.TempDir())
+
+	sp, err := m.Create(ctx, "sp-local-suspend", writeApp(t), "model", "", "", 7)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := m.Suspend(ctx, sp.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if len(fj.artifactPuts) != 0 {
+		t.Fatalf("normal same-node Suspend must not upload rootfs artifacts, got %+v", fj.artifactPuts)
+	}
+}
+
+func TestCreateRestoresPinnedRootfsArtifactBeforeLaunch(t *testing.T) {
+	ctx := context.Background()
+	const (
+		spawnID    = "sp-migrate-target"
+		base       = "agent@sha256:base"
+		artifactID = "artifact-rootfs-gen4"
+	)
+	fb := &fakePodBackend{ensureImageRef: runtime.DeltaTag(spawnID)}
+	fj := newFakeJournal("")
+	fj.artifactPayloads[artifactID] = []byte(runtime.DeltaTag(spawnID))
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
+		DeltaCapture: true,
+	})
+	m.SetJournal(fj, t.TempDir())
+
+	_, err := m.CreateWithSelection(ctx, spawnID, writeApp(t), "model", "", "", 5, AgentSelection{
+		BaseImageDigest:        base,
+		RootfsSourceGeneration: 4,
+		RootfsArtifacts: []RootfsArtifact{{
+			ArtifactID: artifactID, Generation: 4, BaseImageDigest: base,
+			Format: journal.ArtifactFormatOCILayout,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreateWithSelection: %v", err)
+	}
+	if len(fj.artifactGets) != 1 {
+		t.Fatalf("journal GetArtifact calls = %d, want 1", len(fj.artifactGets))
+	}
+	got := fj.artifactGets[0]
+	if got.SpawnID != spawnID || got.Generation != 4 || got.ArtifactID != artifactID {
+		t.Fatalf("GetArtifact key = %+v", got)
+	}
+	if fb.agentSpec.Image != runtime.DeltaTag(spawnID) {
+		t.Fatalf("agent launched from %q, want imported delta tag", fb.agentSpec.Image)
+	}
+	if !strings.Contains(strings.Join(fb.ops, ","), "import:"+spawnID) {
+		t.Fatalf("expected ImportDelta before launch, ops=%v", fb.ops)
+	}
+}
+
+func TestCreateRejectsRootfsArtifactBaseMismatch(t *testing.T) {
+	ctx := context.Background()
+	fb := &fakePodBackend{}
+	fj := newFakeJournal("")
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+	m.SetJournal(fj, t.TempDir())
+
+	_, err := m.CreateWithSelection(ctx, "sp-bad-artifact", writeApp(t), "model", "", "", 5, AgentSelection{
+		BaseImageDigest:        "agent@sha256:base",
+		RootfsSourceGeneration: 4,
+		RootfsArtifacts: []RootfsArtifact{{
+			ArtifactID: "artifact-rootfs-gen4", Generation: 4, BaseImageDigest: "agent@sha256:other",
+			Format: journal.ArtifactFormatOCILayout,
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "base digest") {
+		t.Fatalf("CreateWithSelection must reject rootfs artifact base mismatch, got %v", err)
+	}
+}
+
+func TestCreateRejectsUnpinnedRootfsArtifact(t *testing.T) {
+	ctx := context.Background()
+	fb := &fakePodBackend{}
+	fj := newFakeJournal("")
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+	m.SetJournal(fj, t.TempDir())
+
+	_, err := m.CreateWithSelection(ctx, "sp-unpinned-artifact", writeApp(t), "model", "", "", 5, AgentSelection{
+		BaseImageDigest:        "agent@sha256:base",
+		RootfsSourceGeneration: 4,
+		RootfsArtifacts: []RootfsArtifact{{
+			Generation: 4, BaseImageDigest: "agent@sha256:base",
+			Format: journal.ArtifactFormatOCILayout,
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "empty artifact id") {
+		t.Fatalf("CreateWithSelection must reject unpinned rootfs artifact, got %v", err)
+	}
+	if len(fj.artifactGets) != 0 {
+		t.Fatalf("journal must not be queried for unpinned artifact, got %+v", fj.artifactGets)
 	}
 }

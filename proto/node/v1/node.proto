@@ -56,6 +56,19 @@ message SecretDelivery { string spawn_id = 1; uint64 generation = 2; repeated Se
 message MountBinding { string name = 1; string backend_uri = 2; }
 // Per-mount suspend marker reported back after a clean suspend (node -> CP).
 message MountMarker  { string name = 1; string marker = 2; }
+// Rootfs delta artifact pinned by the CP for migration restore. The artifact is keyed by
+// (spawn_id, generation, artifact_id); target restore must use this pinned id, never latest.
+message RootfsArtifact {
+  string artifact_id = 1;
+  uint64 generation = 2;
+  int32 sequence = 3;
+  string base_image_digest = 4;
+  string format = 5;
+  string content_digest = 6;
+  int64 uncompressed_size = 7;
+  string producer_node_id = 8;
+  string producer_runtime = 9;
+}
 // One entry of a node's running-container inventory (node -> CP on Register/Heartbeat).
 message RunningSpawn { string spawn_id = 1; uint64 generation = 2; SpawnPhase phase = 3; }
 
@@ -93,10 +106,17 @@ message StartSpawn  {
   auth.v1.AuthEnvelope auth           = 20;
   string               asserted_owner = 21;
   string               base_image_digest = 22;
+  uint64               rootfs_source_generation = 23;
+  repeated RootfsArtifact rootfs_artifacts = 24;
 }
 message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }
-message Suspend     { string spawn_id = 1; uint64 generation = 2; }
-message SuspendComplete { string spawn_id = 1; uint64 generation = 2; repeated MountMarker markers = 3; }
+message Suspend     { string spawn_id = 1; uint64 generation = 2; bool capture_rootfs_artifact = 3; }
+message SuspendComplete {
+  string spawn_id = 1;
+  uint64 generation = 2;
+  repeated MountMarker markers = 3;
+  repeated RootfsArtifact rootfs_artifacts = 4;
+}
 // auth (field 10): the client's session-open signed intent + aud=node access token (A4).
 // asserted_owner (field 11): CP-asserted owner for the cloud owner-binding check.
 message SessionOpen  {

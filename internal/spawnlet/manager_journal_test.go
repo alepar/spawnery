@@ -1,7 +1,9 @@
 package spawnlet
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,14 +19,22 @@ import (
 // test can assert the node-local suspend→resume round trip (save on Stop, load +
 // restore on the next Create) without the real Kopia stack.
 type fakeJournal struct {
-	mu          sync.Mutex
-	finalID     journal.ManifestID
-	restoreSeen map[string]journal.ManifestID // mountName -> manifest id Restore was called with
-	requested   chan journal.Mount            // each RequestSnapshot pushes the mount (drops if full)
+	mu               sync.Mutex
+	finalID          journal.ManifestID
+	restoreSeen      map[string]journal.ManifestID // mountName -> manifest id Restore was called with
+	requested        chan journal.Mount            // each RequestSnapshot pushes the mount (drops if full)
+	artifactPuts     []journal.ArtifactDescriptor
+	artifactGets     []journal.ArtifactDescriptor
+	artifactPayloads map[string][]byte
 }
 
 func newFakeJournal(id journal.ManifestID) *fakeJournal {
-	return &fakeJournal{finalID: id, restoreSeen: map[string]journal.ManifestID{}, requested: make(chan journal.Mount, 256)}
+	return &fakeJournal{
+		finalID:          id,
+		restoreSeen:      map[string]journal.ManifestID{},
+		requested:        make(chan journal.Mount, 256),
+		artifactPayloads: map[string][]byte{},
+	}
 }
 
 func (f *fakeJournal) RequestSnapshot(_ context.Context, _ string, _ uint64, mt journal.Mount) {
@@ -53,17 +63,32 @@ func (f *fakeJournal) LatestForGeneration(context.Context, string, string, uint6
 	return "", nil
 }
 func (f *fakeJournal) PutArtifact(_ context.Context, spawnID string, generation uint64, desc journal.ArtifactDescriptor, r io.Reader) (journal.ArtifactDescriptor, error) {
-	_, _ = io.Copy(io.Discard, r)
+	payload, _ := io.ReadAll(r)
 	desc.SpawnID = spawnID
 	desc.Generation = generation
 	if desc.ArtifactID == "" {
 		desc.ArtifactID = "artifact-test"
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.artifactPuts = append(f.artifactPuts, desc)
+	f.artifactPayloads[desc.ArtifactID] = payload
 	return desc, nil
 }
 func (f *fakeJournal) GetArtifact(_ context.Context, spawnID string, generation uint64, artifactID string, w io.Writer) (journal.ArtifactDescriptor, error) {
-	_, _ = w.Write([]byte("artifact-test"))
-	return journal.ArtifactDescriptor{SpawnID: spawnID, Generation: generation, ArtifactID: artifactID}, nil
+	if artifactID == "" {
+		return journal.ArtifactDescriptor{}, fmt.Errorf("empty artifact id")
+	}
+	f.mu.Lock()
+	payload := f.artifactPayloads[artifactID]
+	desc := journal.ArtifactDescriptor{SpawnID: spawnID, Generation: generation, ArtifactID: artifactID}
+	f.artifactGets = append(f.artifactGets, desc)
+	f.mu.Unlock()
+	if len(payload) == 0 {
+		payload = []byte("artifact-test")
+	}
+	_, _ = io.Copy(w, bytes.NewReader(payload))
+	return desc, nil
 }
 func (f *fakeJournal) ListArtifacts(context.Context, string, uint64, string) ([]journal.ArtifactDescriptor, error) {
 	return nil, nil

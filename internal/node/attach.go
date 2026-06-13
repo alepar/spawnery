@@ -77,7 +77,7 @@ type attacher struct {
 	cfg      Config
 	mgr      *spawnlet.Manager
 	httpc    connect.HTTPClient
-	sx       sessionExec // container-exec boundary for additional-session launch/reap (sp-npxq.3)
+	sx       sessionExec     // container-exec boundary for additional-session launch/reap (sp-npxq.3)
 	verifier *IntentVerifier // A4 intent verifier; nil = skip (tests + insecure mode without explicit verifier)
 
 	ctrlHTTP httpDoer // POSTs SetModel to the per-pod sidecar control endpoint (injectable for tests)
@@ -445,6 +445,51 @@ func (a *attacher) staleGen(spawnID string, gen uint64) bool {
 	return false
 }
 
+func rootfsArtifactsFromProto(in []*nodev1.RootfsArtifact) []spawnlet.RootfsArtifact {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]spawnlet.RootfsArtifact, 0, len(in))
+	for _, a := range in {
+		if a == nil {
+			continue
+		}
+		out = append(out, spawnlet.RootfsArtifact{
+			ArtifactID:       a.GetArtifactId(),
+			Generation:       a.GetGeneration(),
+			Sequence:         int(a.GetSequence()),
+			BaseImageDigest:  a.GetBaseImageDigest(),
+			Format:           a.GetFormat(),
+			ContentDigest:    a.GetContentDigest(),
+			UncompressedSize: a.GetUncompressedSize(),
+			ProducerNodeID:   a.GetProducerNodeId(),
+			ProducerRuntime:  a.GetProducerRuntime(),
+		})
+	}
+	return out
+}
+
+func rootfsArtifactsToProto(in []spawnlet.RootfsArtifact) []*nodev1.RootfsArtifact {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*nodev1.RootfsArtifact, 0, len(in))
+	for _, a := range in {
+		out = append(out, &nodev1.RootfsArtifact{
+			ArtifactId:       a.ArtifactID,
+			Generation:       a.Generation,
+			Sequence:         int32(a.Sequence),
+			BaseImageDigest:  a.BaseImageDigest,
+			Format:           a.Format,
+			ContentDigest:    a.ContentDigest,
+			UncompressedSize: a.UncompressedSize,
+			ProducerNodeId:   a.ProducerNodeID,
+			ProducerRuntime:  a.ProducerRuntime,
+		})
+	}
+	return out
+}
+
 func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.status(st.SpawnId, nodev1.SpawnPhase_STARTING, "")
 
@@ -474,7 +519,14 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	}
 
 	sp, err := a.mgr.CreateWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation,
-		spawnlet.AgentSelection{Image: st.Image, RunnableID: st.RunnableId, Mode: st.Mode, BaseImageDigest: st.GetBaseImageDigest()})
+		spawnlet.AgentSelection{
+			Image:                  st.Image,
+			RunnableID:             st.RunnableId,
+			Mode:                   st.Mode,
+			BaseImageDigest:        st.GetBaseImageDigest(),
+			RootfsSourceGeneration: st.GetRootfsSourceGeneration(),
+			RootfsArtifacts:        rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
+		})
 	if err != nil {
 		logErr("startSpawn "+st.SpawnId, err)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
@@ -624,19 +676,19 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 	for _, r := range relays {
 		r.stop()
 	}
-	markers, err := a.mgr.Suspend(ctx, spawnID)
+	res, err := a.mgr.SuspendForMigration(ctx, spawnID, m.GetCaptureRootfsArtifact())
 	if err != nil {
 		logErr("suspendSpawn "+spawnID, err)
 		a.status(spawnID, nodev1.SpawnPhase_ERROR, err.Error())
 		return
 	}
 	a.releaseSlot()
-	mm := make([]*nodev1.MountMarker, 0, len(markers))
-	for name, marker := range markers {
+	mm := make([]*nodev1.MountMarker, 0, len(res.MountMarkers))
+	for name, marker := range res.MountMarkers {
 		mm = append(mm, &nodev1.MountMarker{Name: name, Marker: marker})
 	}
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SuspendComplete{SuspendComplete: &nodev1.SuspendComplete{
-		SpawnId: spawnID, Generation: m.Generation, Markers: mm,
+		SpawnId: spawnID, Generation: m.Generation, Markers: mm, RootfsArtifacts: rootfsArtifactsToProto(res.RootfsArtifacts),
 	}}})
 	a.status(spawnID, nodev1.SpawnPhase_SUSPENDED, "")
 }

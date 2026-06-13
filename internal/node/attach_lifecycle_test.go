@@ -99,9 +99,11 @@ func (noopApplier) Remove(context.Context, []firewall.Rule) error { return nil }
 // script runs in a goroutine; when it returns, the agent's stdout is closed (modelling the agent
 // process exiting), which the pump observes as EOF.
 type scriptedPodBackend struct {
-	script  func(io.Reader, io.Writer)
-	mu      sync.Mutex
-	stopped bool
+	script     func(io.Reader, io.Writer)
+	mu         sync.Mutex
+	stopped    bool
+	importBase string
+	imported   bool
 }
 
 func (f *scriptedPodBackend) Ping(context.Context) error      { return nil }
@@ -144,8 +146,12 @@ func (f *scriptedPodBackend) ExportDelta(_ context.Context, spawnID string, w io
 	_, err := w.Write([]byte(runtime.DeltaTag(spawnID)))
 	return err
 }
-func (f *scriptedPodBackend) ImportDelta(_ context.Context, spawnID, _ string, r io.Reader) (string, error) {
+func (f *scriptedPodBackend) ImportDelta(_ context.Context, spawnID, baseRef string, r io.Reader) (string, error) {
 	_, _ = io.Copy(io.Discard, r)
+	f.mu.Lock()
+	f.imported = true
+	f.importBase = baseRef
+	f.mu.Unlock()
 	return runtime.DeltaTag(spawnID), nil
 }
 
