@@ -267,12 +267,14 @@ func (r *Router) StopOnNode(spawnID string) {
 // SuspendSpawn). The generation fences the message against a superseded episode: the node-side
 // staleGen check drops a Suspend whose generation is below the live pod's, and the SuspendComplete
 // echoes this generation so the CP can drop a stale-episode reply. A no-op if the spawn has no route.
-func (r *Router) SuspendOnNode(spawnID string, generation uint64) {
+func (r *Router) SuspendOnNode(spawnID string, generation uint64, captureRootfsArtifact bool) {
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	r.mu.Unlock()
 	if ok {
-		_ = rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Suspend{Suspend: &nodev1.Suspend{SpawnId: spawnID, Generation: generation}}})
+		_ = rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Suspend{Suspend: &nodev1.Suspend{
+			SpawnId: spawnID, Generation: generation, CaptureRootfsArtifact: captureRootfsArtifact,
+		}}})
 	}
 }
 

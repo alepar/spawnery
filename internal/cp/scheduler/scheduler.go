@@ -32,6 +32,11 @@ type Scheduler struct {
 	pending map[string]chan spawnResult // spawn_id -> ACTIVE/ERROR signal
 }
 
+type RootfsRestore struct {
+	SourceGeneration uint64
+	Artifacts        []*nodev1.RootfsArtifact
+}
+
 func New(reg *registry.Registry, rt *router.Router, timeout time.Duration) *Scheduler {
 	return &Scheduler{reg: reg, rt: rt, timeout: timeout, pending: map[string]chan spawnResult{}}
 }
@@ -72,7 +77,7 @@ func (s *Scheduler) PickNodeID(placement registry.Placement) (string, error) {
 // env is the A4 AuthEnvelope (token + SignedIntent) to thread into StartSpawn [AC1]; nil is
 // allowed in dev/insecure mode where the node will verify-and-log-not-enforce.
 // baseImageDigest is threaded to the node for cross-node resume (sp-ei4.1.10); empty on fresh create.
-func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement, env *authv1.AuthEnvelope, baseImageDigest string) (string, error) {
+func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement, env *authv1.AuthEnvelope, baseImageDigest string, rootfs *RootfsRestore) (string, error) {
 	n := s.reg.PickFor(placement)
 	if n == nil {
 		return "", connect.NewError(connect.CodeResourceExhausted, errors.New("no eligible node with capacity"))
@@ -83,11 +88,16 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.pending, id); s.mu.Unlock() }()
 
-	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Start{Start: &nodev1.StartSpawn{
+	start := &nodev1.StartSpawn{
 		SpawnId: id, AppRef: appRef, Model: model, Name: name, AppId: appID,
 		Image: placement.Image, RunnableId: runnable, Mode: mode, Generation: gen,
 		Auth: env, AssertedOwner: placement.Owner, BaseImageDigest: baseImageDigest,
-	}}}); err != nil {
+	}
+	if rootfs != nil && len(rootfs.Artifacts) > 0 {
+		start.RootfsSourceGeneration = rootfs.SourceGeneration
+		start.RootfsArtifacts = rootfs.Artifacts
+	}
+	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Start{Start: start}}); err != nil {
 		return "", connect.NewError(connect.CodeUnavailable, err)
 	}
 	select {

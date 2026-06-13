@@ -22,7 +22,6 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/agentcaps"
 	"spawnery/internal/authsvc/token"
-	"spawnery/internal/intent"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/journalkeys"
 	"spawnery/internal/cp/lock"
@@ -32,6 +31,7 @@ import (
 	"spawnery/internal/cp/scheduler"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
+	"spawnery/internal/intent"
 )
 
 // reconcileAttempt tracks, for one spawn, when the reconciler first started trying to apply the
@@ -58,8 +58,8 @@ type Server struct {
 
 	// upgradeWaiters correlates UpgradeToOwnerSealed requests with SealJournalKeyToOwnerResponse
 	// messages from the node (sp-8dkp §4). Keyed by per-request request_id.
-	upgradeWaiters  *upgradeWaiters
-	upgradeTimeout  time.Duration // bound for awaiting node seal; overridable in tests
+	upgradeWaiters *upgradeWaiters
+	upgradeTimeout time.Duration // bound for awaiting node seal; overridable in tests
 
 	// Reconciler: a background loop drives model_applied=false spawns to convergence (sp-bp9w.7).
 	reconcileInterval time.Duration               // tick period; overridable in tests
@@ -82,9 +82,9 @@ type Server struct {
 
 	// Auth: session registry for revocation fan-out + in-band reauth; verify for the reauth path.
 	// verify is a func to avoid an import cycle: main wires it; nil = no reauth enforcement.
-	sessions      *auth.SessionRegistry
-	verify        func(string) (auth.Identity, error)
-	devMode       bool
+	sessions       *auth.SessionRegistry
+	verify         func(string) (auth.Identity, error)
+	devMode        bool
 	reauthInterval time.Duration // reauth deadline; 0 uses defaultReauthInterval
 
 	// intentEnabled gates the A4 two-phase sign-after-resolve flow. Decoupled from devMode so that
@@ -125,11 +125,11 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 	return &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
 		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout,
-		upgradeWaiters: newUpgradeWaiters(),
+		upgradeWaiters:    newUpgradeWaiters(),
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
 		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
-		pendingIntents: newPendingIntentRegistry(),
+		pendingIntents:  newPendingIntentRegistry(),
 		deliveryPending: newDeliveryPendingTracker(),
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
 		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
@@ -577,7 +577,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 
 	// Fresh create: base_image_digest is unknown until the node resolves it at create time.
 	// Pass "" so the node resolves and records the digest on first startup (spec §4).
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, "")
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, "", nil)
 	if err != nil {
 		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
@@ -870,8 +870,8 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 
 	// Track current session registration; swapped on token rotation to release the old id promptly.
 	var (
-		curRelMu      sync.Mutex
-		curRelease    func()
+		curRelMu   sync.Mutex
+		curRelease func()
 	)
 	if s.sessions != nil {
 		curRelease = s.sessions.Add(identity.TokenID, identity.Owner, sessCancel)

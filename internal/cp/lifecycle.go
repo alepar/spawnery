@@ -16,6 +16,7 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
+	"spawnery/internal/cp/scheduler"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 	"spawnery/internal/intent"
@@ -166,7 +167,7 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 	id := req.Msg.SpawnId
 	unlock := s.locks.Lock(id)
 	defer unlock()
-	if err := s.suspendLocked(ctx, owner, id); err != nil {
+	if _, err := s.suspendLocked(ctx, owner, id, false); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&cpv1.SuspendSpawnResponse{}), nil
@@ -177,35 +178,35 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 // decide-in-DB → SuspendOnNode → await markers → finalize 'suspended' sequence and returns a connect
 // error on any failure, leaving the spawn in a DEFINED state ('suspended' on success, 'error' on
 // persist-await failure — exactly the sp-a7fs contract).
-func (s *Server) suspendLocked(ctx context.Context, owner, id string) error {
+func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRootfsArtifact bool) (*nodev1.SuspendComplete, error) {
 	sp, err := s.st.Spawns().Get(ctx, id)
 	if err != nil {
-		return connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
 	}
 	if sp.OwnerID != owner {
-		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
 	}
 	if sp.Status != store.Active {
-		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn is not active"))
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn is not active"))
 	}
 	c, hasLive, err := s.st.Spawns().LiveContainer(ctx, id)
 	if err != nil {
-		return connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	if !hasLive {
-		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("no live container"))
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("no live container"))
 	}
 	gen := c.Generation
 	// Decide-in-DB FIRST (generation-fenced): a recreate/stop racing in concurrently fences this out.
 	if err := s.st.Spawns().SetSuspending(ctx, id, gen); err != nil {
-		return connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 
 	// Register the marker waiter BEFORE asking the node to suspend, so a fast SuspendComplete is never
 	// missed. The node persists each mount, tears the pod down, and replies with the per-mount markers.
 	ch := s.suspends.register(id, uint64(gen))
 	defer s.suspends.unregister(id)
-	s.rt.SuspendOnNode(id, uint64(gen))
+	s.rt.SuspendOnNode(id, uint64(gen), captureRootfsArtifact)
 
 	wait, cancel := context.WithTimeout(ctx, s.suspendTimeout)
 	defer cancel()
@@ -228,8 +229,10 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string) error {
 			if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
 				log.Printf("suspendLocked %s: SetError after SetSuspended failure also failed: %v", id, serr)
 			}
-			return connect.NewError(connect.CodeInternal, err)
+			return nil, connect.NewError(connect.CodeInternal, err)
 		}
+		_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: id, Timestamp: time.Now().UTC()})
+		return sc, nil
 	case <-wait.Done():
 		// Persist did not complete in time (slow/wedged/unreachable node). Per design §5 ("persist
 		// failure → error"), move the spawn to a terminal 'error' rather than leaving it stuck in
@@ -239,10 +242,9 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string) error {
 		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
 			log.Printf("suspendLocked %s: SetError after suspend await timeout also failed: %v", id, serr)
 		}
-		return connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node suspend"))
+		return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node suspend"))
 	}
-	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: id, Timestamp: time.Now().UTC()})
-	return nil
+	return nil, nil
 }
 
 // ResumeSpawn provisions a FRESH container for a suspended spawn (non-lossless — a brand-new
@@ -258,7 +260,7 @@ func (s *Server) ResumeSpawn(ctx context.Context, req *connect.Request[cpv1.Resu
 	defer unlock()
 	// A plain resume re-places anywhere the policy allows (no override) and, on failure, lands in
 	// 'error' (sp-a7fs contract). MigrateSpawn reuses resumeLocked with an override + revert-on-fail.
-	if _, err := s.resumeLocked(ctx, owner, req.Msg.SpawnId, placementOverride{}, false, intent.OpResumeSpawn); err != nil {
+	if _, err := s.resumeLocked(ctx, owner, req.Msg.SpawnId, placementOverride{}, false, intent.OpResumeSpawn, nil); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&cpv1.ResumeSpawnResponse{}), nil
@@ -271,13 +273,68 @@ type placementOverride struct {
 	Class  string
 }
 
+type rootfsRestorePins struct {
+	SourceGeneration uint64
+	Pins             []store.RootfsArtifactPin
+}
+
+func schedulerRootfsRestore(rootfs *rootfsRestorePins) *scheduler.RootfsRestore {
+	if rootfs == nil || len(rootfs.Pins) == 0 {
+		return nil
+	}
+	out := make([]*nodev1.RootfsArtifact, 0, len(rootfs.Pins))
+	for _, pin := range rootfs.Pins {
+		out = append(out, &nodev1.RootfsArtifact{
+			ArtifactId:       pin.ArtifactID,
+			Generation:       pin.Generation,
+			Sequence:         int32(pin.Sequence),
+			BaseImageDigest:  pin.BaseImageDigest,
+			Format:           pin.Format,
+			ContentDigest:    pin.ContentDigest,
+			UncompressedSize: pin.UncompressedSize,
+		})
+	}
+	return &scheduler.RootfsRestore{SourceGeneration: rootfs.SourceGeneration, Artifacts: out}
+}
+
+func rootfsPinsFromSuspend(sc *nodev1.SuspendComplete, sourceGeneration uint64, baseImageDigest string) ([]store.RootfsArtifactPin, error) {
+	if sc == nil || len(sc.GetRootfsArtifacts()) == 0 {
+		return nil, nil
+	}
+	pins := make([]store.RootfsArtifactPin, 0, len(sc.GetRootfsArtifacts()))
+	for _, art := range sc.GetRootfsArtifacts() {
+		if art.GetArtifactId() == "" {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("rootfs artifact restore pin is missing artifact id"))
+		}
+		if art.GetGeneration() != sourceGeneration {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("rootfs artifact %s generation %d does not match source generation %d",
+				art.GetArtifactId(), art.GetGeneration(), sourceGeneration))
+		}
+		if baseImageDigest != "" && art.GetBaseImageDigest() != "" && art.GetBaseImageDigest() != baseImageDigest {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("rootfs artifact %s base digest %s does not match pinned base digest %s",
+				art.GetArtifactId(), art.GetBaseImageDigest(), baseImageDigest))
+		}
+		pins = append(pins, store.RootfsArtifactPin{
+			ArtifactID:       art.GetArtifactId(),
+			ArtifactType:     "rootfs_delta",
+			Generation:       art.GetGeneration(),
+			Sequence:         int(art.GetSequence()),
+			BaseImageDigest:  art.GetBaseImageDigest(),
+			Format:           art.GetFormat(),
+			ContentDigest:    art.GetContentDigest(),
+			UncompressedSize: art.GetUncompressedSize(),
+		})
+	}
+	return pins, nil
+}
+
 // resumeLocked is the shared resume core (the per-spawn lock is the CALLER's responsibility). It
 // claims 'starting' (bumping the generation), provisions onto a placement — optionally forced by ov —
 // and finalizes 'active'. On provision/activation failure it leaves a DEFINED state: revertOnFail=true
 // (migration) rolls back to 'suspended' with the target artifacts cleaned; false (plain resume) goes
 // to 'error'. Returns the node the spawn resumed on.
 // op identifies the lifecycle operation for the A4 PendingIntent domain tag [AC1].
-func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placementOverride, revertOnFail bool, op intent.Op) (string, error) {
+func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placementOverride, revertOnFail bool, op intent.Op, rootfs *rootfsRestorePins) (string, error) {
 	sp, err := s.st.Spawns().Get(ctx, id)
 	if err != nil {
 		return "", connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
@@ -334,7 +391,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 		placement.TargetNodeID = targetNodeID
 	}
 
-	nodeID, err := s.sched.Provision(ctx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest)
+	nodeID, err := s.sched.Provision(ctx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, schedulerRootfsRestore(rootfs))
 	if err != nil {
 		s.failResume(ctx, id, gen, revertOnFail, "provision")
 		return "", err
@@ -483,22 +540,58 @@ func (s *Server) MigrateSpawn(ctx context.Context, req *connect.Request[cpv1.Mig
 	if err := s.st.TransferSets().SetStatus(ctx, transferSetID, store.TransferSetCapturing, s.now().UnixNano()); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("mark transfer set capturing: %w", err))
 	}
+	var (
+		sourceComplete *nodev1.SuspendComplete
+		rootfsPins     []store.RootfsArtifactPin
+	)
 	// Suspend the source if still active (markers persist). An already-suspended spawn skips straight
 	// to the placement-overridden resume.
 	switch sp.Status {
 	case store.Active:
-		if err := s.suspendLocked(ctx, owner, id); err != nil {
+		sc, err := s.suspendLocked(ctx, owner, id, true)
+		if err != nil {
 			_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
 			return nil, err
 		}
+		sourceComplete = sc
 	case store.Suspended:
 		// already down — resume elsewhere.
+	}
+	if sourceComplete != nil {
+		var err error
+		rootfsPins, err = rootfsPinsFromSuspend(sourceComplete, sourceGeneration, sp.BaseImageDigest)
+		if err != nil {
+			_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
+			return nil, err
+		}
+	}
+	mountPins := map[string]string{}
+	if sourceComplete != nil {
+		for _, mk := range sourceComplete.GetMarkers() {
+			mountPins[mk.GetName()] = mk.GetMarker()
+		}
+	} else {
+		mounts, err := s.st.Spawns().GetMounts(ctx, id)
+		if err != nil {
+			_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+		for _, mk := range mounts {
+			if mk.PersistMarker != "" {
+				mountPins[mk.Name] = mk.PersistMarker
+			}
+		}
+	}
+	if err := s.st.TransferSets().SetPins(ctx, transferSetID, sourceGeneration, mountPins, rootfsPins, s.now().UnixNano()); err != nil {
+		_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("record transfer set pins: %w", err))
 	}
 	if err := s.st.TransferSets().SetStatus(ctx, transferSetID, store.TransferSetRestoring, s.now().UnixNano()); err != nil {
 		_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("mark transfer set restoring: %w", err))
 	}
-	nodeID, err := s.resumeLocked(ctx, owner, id, placementOverride{NodeID: targetNode, Class: targetClass}, true, intent.OpMigrateSpawn)
+	nodeID, err := s.resumeLocked(ctx, owner, id, placementOverride{NodeID: targetNode, Class: targetClass}, true, intent.OpMigrateSpawn,
+		&rootfsRestorePins{SourceGeneration: sourceGeneration, Pins: rootfsPins})
 	if err != nil {
 		_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
 		return nil, err
@@ -588,7 +681,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 		placement.TargetNodeID = targetNodeID
 	}
 
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest)
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, nil)
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)

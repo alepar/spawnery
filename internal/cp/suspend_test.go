@@ -23,13 +23,15 @@ import (
 type suspendSender struct {
 	s        *Server
 	markers  []*nodev1.MountMarker
+	rootfs   []*nodev1.RootfsArtifact
 	replyGen *uint64 // if set, the gen echoed in SuspendComplete (else echo the request's)
 	drop     bool    // if true, never reply (forces the await to time out)
 	delay    time.Duration
 
-	mu         sync.Mutex
-	gotSuspend bool
-	lastGen    uint64
+	mu          sync.Mutex
+	gotSuspend  bool
+	lastGen     uint64
+	lastCapture bool
 }
 
 func (a *suspendSender) Send(m *nodev1.CPMessage) error {
@@ -40,6 +42,7 @@ func (a *suspendSender) Send(m *nodev1.CPMessage) error {
 	a.mu.Lock()
 	a.gotSuspend = true
 	a.lastGen = sp.GetGeneration()
+	a.lastCapture = sp.GetCaptureRootfsArtifact()
 	a.mu.Unlock()
 	if a.drop {
 		return nil
@@ -52,7 +55,9 @@ func (a *suspendSender) Send(m *nodev1.CPMessage) error {
 		if a.delay > 0 {
 			time.Sleep(a.delay)
 		}
-		a.s.suspends.deliver(&nodev1.SuspendComplete{SpawnId: sp.GetSpawnId(), Generation: gen, Markers: a.markers})
+		a.s.suspends.deliver(&nodev1.SuspendComplete{
+			SpawnId: sp.GetSpawnId(), Generation: gen, Markers: a.markers, RootfsArtifacts: a.rootfs,
+		})
 	}()
 	return nil
 }
