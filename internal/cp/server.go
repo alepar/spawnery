@@ -288,7 +288,11 @@ func (s *Server) reconcileInventory(ctx context.Context, nodeID string, sender r
 	}
 	var lost []string
 	for _, c := range live {
-		if c.Phase == store.PhaseActive && !reported[c.SpawnID] {
+		// A suspend in flight INTENTIONALLY makes the node stop reporting the torn-down container
+		// while the CP row is still Active (SetSuspending is deferred to the node's reply). Such a
+		// container is not "lost" — exempt it so the reconcile doesn't flip it Unreachable and make
+		// the suspend's SetSuspending conflict.
+		if c.Phase == store.PhaseActive && !reported[c.SpawnID] && !s.suspends.inFlight(c.SpawnID) {
 			lost = append(lost, c.SpawnID)
 		}
 	}

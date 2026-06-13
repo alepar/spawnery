@@ -573,6 +573,41 @@ func TestReconcileInventory(t *testing.T) {
 	}
 }
 
+// Regression: a suspend in flight makes the node stop reporting the torn-down container while the
+// CP row is still Active (SetSuspending is deferred to the node's reply). The inventory reconcile
+// must NOT flip such a container to Unreachable — otherwise the suspend's SetSuspending (guarded on
+// Active) fails with a transition conflict (the "spawns fail to suspend" bug).
+func TestReconcileInventorySkipsSuspendInFlight(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id)
+
+	// A suspend is in flight: a waiter is registered (as SuspendSpawn does before the node round-trip).
+	_ = s.suspends.register(id, 1)
+	defer s.suspends.unregister(id)
+
+	// The node stops reporting the (being-suspended) container. It must STAY active, not flip.
+	s.reconcileInventory(ctx, "n1", &capSender{}, nil)
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Active {
+		t.Fatalf("suspend-in-flight spawn must stay active (not unreachable), got %v", sp.Status)
+	}
+
+	// Once the suspend round-trip ends (waiter gone), the reconcile resumes its normal sweep.
+	s.suspends.unregister(id)
+	s.reconcileInventory(ctx, "n1", &capSender{}, nil)
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Unreachable {
+		t.Fatalf("after suspend ends, unreported spawn must be marked unreachable, got %v", sp.Status)
+	}
+}
+
 // A returning node's inventory re-adopts an unreachable spawn: status flips back to active, the
 // route is rebound, the live row keeps its generation, and NO Stop is sent. Idempotent across the
 // per-heartbeat repeat.

@@ -62,6 +62,21 @@ func (w *suspendWaiters) unregister(spawnID string) {
 	w.mu.Unlock()
 }
 
+// inFlight reports whether a suspend round-trip is currently registered for spawnID. The inventory
+// reconcile uses this to avoid racing a suspend: a suspend INTENTIONALLY makes the node stop
+// reporting the (torn-down) container while the CP row is still Active — SetSuspending is deferred
+// until the node's clean reply (so a gate abort never leaves a stuck Suspending row). Without this
+// exemption the reconcile sweeps the still-Active, no-longer-reported container to Unreachable, and
+// the suspend's later SetSuspending (guarded on Active) fails with a transition conflict. The
+// registration spans the whole SetSuspending→SetSuspended transition (unregister is deferred), so
+// there is no window where the row is mid-transition yet not in-flight.
+func (w *suspendWaiters) inFlight(spawnID string) bool {
+	w.mu.Lock()
+	_, ok := w.m[spawnID]
+	w.mu.Unlock()
+	return ok
+}
+
 // deliver routes an inbound SuspendComplete to its waiter (if any), matched by spawn_id AND
 // generation. Non-blocking: a reply with no live waiter, or one whose generation != the awaiting
 // episode's (a stale-episode reply from a superseded pod), is dropped rather than blocking the node
