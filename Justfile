@@ -49,7 +49,7 @@ node agent="agent": (_images agent)
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
     NODE_CLASS=self-hosted NODE_OWNER=alice EGRESS_ENFORCE=false \
     NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
-    USERNS_MODE=remap \
+    USERNS_MODE=remap DELTA_CAPTURE=1 \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
     {{repo}}/bin/spawnlet
 
