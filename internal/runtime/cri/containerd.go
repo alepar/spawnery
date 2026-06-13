@@ -131,6 +131,16 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 	newLayers := make([]ocispec.Descriptor, len(baseMfst.Layers)+1)
 	copy(newLayers, baseMfst.Layers)
 	newLayers[len(baseMfst.Layers)] = deltaDesc
+	// moby#47065-class guard: assert the assembled manifest actually references the delta
+	// descriptor as its top layer before we persist it. The manifest is hand-built here, so a
+	// regression in the copy/append above (not a daemon bug) is the realistic failure mode; an
+	// image whose layers silently drop the delta would launch the bare base and lose the spawn's
+	// rootfs. This is the real reference check; delta.go's size>0 check is a separate diff-sanity
+	// guard against an empty/corrupt CreateDiff.
+	if last := newLayers[len(newLayers)-1]; last.Digest == "" || last.Digest != deltaDesc.Digest {
+		_ = leaseMgr.Delete(context.WithoutCancel(ctx), leases.Lease{ID: leaseID})
+		return "", 0, fmt.Errorf("assembled manifest does not reference delta descriptor %s (moby#47065 guard)", deltaDesc.Digest)
+	}
 	newMfst := ocispec.Manifest{
 		Versioned: specs.Versioned{SchemaVersion: 2},
 		MediaType: ocispec.MediaTypeImageManifest,

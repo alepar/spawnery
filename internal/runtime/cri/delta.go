@@ -84,9 +84,10 @@ func (b *CRIPodBackend) EnsureImage(ctx context.Context, baseRef, deltaRef strin
 }
 
 // CaptureDelta stops the agent container, diffs its snapshot via containerd DiffService, assembles
-// a per-spawn image (base layers + delta layer, lease-pinned), validates the manifest references
-// the delta descriptor (moby#47065 guard), and removes the container. Returns the assembled image
-// ref ("spawnery/delta:<spawnID>").
+// a per-spawn image (base layers + delta layer, lease-pinned) — assembly asserts the manifest
+// references the delta descriptor (the moby#47065 reference guard lives in containerd.Capture) —
+// then sanity-checks the diff produced a non-empty layer and removes the container. Returns the
+// assembled image ref ("spawnery/delta:<spawnID>").
 func (b *CRIPodBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) (string, error) {
 	eng, err := b.engine()
 	if err != nil {
@@ -109,12 +110,12 @@ func (b *CRIPodBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) 
 		return "", fmt.Errorf("cri capture %s: %w", h.SpawnID, err)
 	}
 
-	// moby#47065-class guard: the diff must produce a non-empty layer blob.
-	// A zero/negative size means CreateDiff silently returned a corrupt or empty result,
-	// which would produce a malformed image that fails to launch.
+	// Diff-sanity check (distinct from the manifest reference guard in containerd.Capture):
+	// a zero/negative size means CreateDiff silently returned an empty/corrupt result, which
+	// would pin a degenerate delta layer. Reject it so the next resume falls back to the base.
 	if deltaSize <= 0 {
 		_ = eng.Release(context.WithoutCancel(ctx), name, leaseID)
-		return "", fmt.Errorf("cri capture %s: diff produced empty delta layer (size=%d) — moby#47065 guard",
+		return "", fmt.Errorf("cri capture %s: diff produced empty delta layer (size=%d)",
 			h.SpawnID, deltaSize)
 	}
 

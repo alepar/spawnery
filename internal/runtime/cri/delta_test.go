@@ -237,14 +237,15 @@ func TestCaptureDeltaCaptureError(t *testing.T) {
 	}
 }
 
-// TestCaptureDeltaMobyGuard verifies that when the diff produces an empty delta layer
-// (captureDeltaSize == 0, moby#47065 guard), Release is called, RemoveContainer is NOT
-// called, and an error mentioning "moby#47065" is returned.
-func TestCaptureDeltaMobyGuard(t *testing.T) {
+// TestCaptureDeltaEmptyDiffRejected verifies the diff-sanity check: when CreateDiff produces
+// an empty delta layer (captureDeltaSize == 0), Release is called, RemoveContainer is NOT
+// called, and an error mentioning the empty delta layer is returned. (The moby#47065 manifest
+// reference guard proper lives in containerd.Capture, which the fake engine bypasses.)
+func TestCaptureDeltaEmptyDiffRejected(t *testing.T) {
 	spawnID := "s-guard"
 	fakeEng := &fakeDeltaEngine{
 		captureRef:       runtime.DeltaTag(spawnID),
-		captureDeltaSize: 0, // zero size triggers the guard — empty diff must be rejected
+		captureDeltaSize: 0, // zero size triggers the sanity check — empty diff must be rejected
 	}
 	c, f := newFakeCRI(t)
 	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
@@ -253,21 +254,21 @@ func TestCaptureDeltaMobyGuard(t *testing.T) {
 		AgentID: "ctr-1", SpawnID: spawnID, BaseImageRef: "base:v1",
 	})
 	if err == nil {
-		t.Fatal("expected moby#47065 guard error, got nil")
+		t.Fatal("expected empty-diff sanity error, got nil")
 	}
-	if !strings.Contains(err.Error(), "moby#47065") {
-		t.Errorf("error should mention moby#47065, got: %v", err)
+	if !strings.Contains(err.Error(), "empty delta layer") {
+		t.Errorf("error should mention the empty delta layer, got: %v", err)
 	}
 	// Release must have been called to clean up the half-imported image.
 	if !fakeEng.releaseCalled {
-		t.Error("Release must be called on moby#47065 guard failure")
+		t.Error("Release must be called on empty-diff failure")
 	}
 	if fakeEng.releaseCallName != runtime.DeltaTag(spawnID) {
 		t.Errorf("Release name = %q, want %q", fakeEng.releaseCallName, runtime.DeltaTag(spawnID))
 	}
-	// Container must NOT be removed on guard failure.
+	// Container must NOT be removed on the sanity-check failure.
 	if len(f.removedContainers) != 0 {
-		t.Errorf("container must NOT be removed on moby#47065 guard failure; removedContainers=%v", f.removedContainers)
+		t.Errorf("container must NOT be removed on empty-diff failure; removedContainers=%v", f.removedContainers)
 	}
 }
 
