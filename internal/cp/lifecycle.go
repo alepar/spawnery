@@ -216,7 +216,7 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 	gen := c.Generation
 
 	// Write Active→Suspending BEFORE the round-trip (lease+seq+gen fenced via TransitionClaimed).
-	// Sweepers now read Suspending and skip — the inFlight exemption is no longer needed.
+	// Sweepers (reconcileInventory) read the transient status and skip — no in-memory exemption set.
 	seq := sp.StatusSeq
 	if _, err := s.st.Spawns().TransitionClaimed(ctx, id, leaseID, seq, gen, store.Suspending); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Active→Suspending: %w", err))

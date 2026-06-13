@@ -590,8 +590,8 @@ func TestReconcileInventorySkipsSuspendingAndClaimed(t *testing.T) {
 	id := resp.Msg.SpawnId
 	waitActive(t, s, id)
 
-	// Simulate the suspend driver: acquire a DB claim then transition Active→Suspending before
-	// the node round-trip. The container phase stays PhaseActive throughout.
+	// Simulate the suspend driver: acquire a DB claim BEFORE the Active→Suspending transition.
+	// The container phase stays PhaseActive throughout.
 	bgCtx := context.Background()
 	sp, _ := s.st.Spawns().Get(bgCtx, id)
 	c, _, _ := s.st.Spawns().LiveContainer(bgCtx, id)
@@ -603,19 +603,29 @@ func TestReconcileInventorySkipsSuspendingAndClaimed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
+
+	// (1) Claimed but still Active: reconcile must skip — an active claim means a driver owns the
+	// spawn; forcing Unreachable here would race with the driver's pending transition.
+	s.reconcileInventory(ctx, "n1", &capSender{}, nil)
+	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Active {
+		t.Fatalf("Active+claimed spawn must stay active (not unreachable), got %v", sp.Status)
+	}
+
+	// Driver now writes Active→Suspending (BEFORE the node round-trip).
 	if _, err := s.st.Spawns().TransitionClaimed(bgCtx, id, leaseID, newSeq, gen, store.Suspending); err != nil {
 		t.Fatalf("TransitionClaimed Active→Suspending: %v", err)
 	}
 
-	// The node stops reporting the (being-suspended) container. Reconcile must SKIP it — status is
-	// Suspending (transient), so it is not flipped to Unreachable.
+	// (2) The node stops reporting the (being-suspended) container. Reconcile must SKIP it — status
+	// is Suspending (transient), so it is not flipped to Unreachable.
 	s.reconcileInventory(ctx, "n1", &capSender{}, nil)
 	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Suspending {
 		t.Fatalf("suspending spawn must stay suspending (not unreachable), got %v", sp.Status)
 	}
 
-	// Release the claim (simulates the driver completing or the claim expiring). A stranded
-	// Suspending spawn is STILL skipped by the reconcile — recovery sweep handles it (sp-u53.7.6).
+	// (3) Release the claim (simulates the driver completing or the claim expiring). A stranded
+	// Suspending spawn is STILL skipped — the transient status itself guards it; recovery sweep handles
+	// the stranded case (sp-u53.7.7).
 	_ = s.st.Spawns().Release(bgCtx, id, leaseID)
 	s.reconcileInventory(ctx, "n1", &capSender{}, nil)
 	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Suspending {

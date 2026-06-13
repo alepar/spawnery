@@ -400,6 +400,16 @@ func (s *Server) reconcileInventory(ctx context.Context, nodeID string, sender r
 // adoptOrStop handles ONE reported running spawn: the adopt + orphan arms of reconcileInventory.
 // Idempotent per heartbeat: when the live row already points at this node and the route is bound,
 // it is a single point read and a map lookup — no writes.
+//
+// Spec §5 reconnect-resync — generation as the tiebreak:
+//   - gen matches & CP live row exists → confirm/adopt: re-bind node_id if stale, bind route,
+//     flip Unreachable→Active if applicable (the "gen matches & status live" case).
+//   - gen behind live (superseded after recreate) → orphan → StopSpawn(id, stale_gen): the node
+//     still runs a pod whose episode has been replaced; the node-side gen fence ensures only that
+//     stale pod is stopped (the "node gen behind live → destroy stale pod" case).
+//   - no live container row (suspended/deleted/errored spawn, or any dormant status): `ok=false`
+//     → matched=false → orphan → StopSpawn: the node runs a pod whose CP side is dormant
+//     (the "status dormant but node still running gen → orphan → destroy" case).
 func (s *Server) adoptOrStop(ctx context.Context, nodeID string, sender registry.NodeSender, rs *nodev1.RunningSpawn) {
 	id, gen := rs.GetSpawnId(), int64(rs.GetGeneration())
 	c, ok, err := s.st.Spawns().LiveContainer(ctx, id)
