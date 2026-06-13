@@ -96,6 +96,10 @@ func (f *fakePodBackend) ImportDelta(_ context.Context, spawnID, _ string, r io.
 	return runtime.DeltaTag(spawnID), nil
 }
 
+// Pause/Unpause stubs — not exercised in spawnlet manager tests (drift fix after sp-ei4.1.15.2).
+func (f *fakePodBackend) Pause(_ context.Context, _ *runtime.PodHandle) error   { return nil }
+func (f *fakePodBackend) Unpause(_ context.Context, _ *runtime.PodHandle) error { return nil }
+
 // DeltaSize implements the optional deltaSizer interface used by CheckQuotas.
 // It is defined on fakePodBackend so tests can enable it by setting deltaSizeMB > 0.
 // The interface assertion in CheckQuotas will succeed for any *fakePodBackend because

@@ -66,6 +66,14 @@ func (n *noSizeFakeBackend) ImportDelta(ctx context.Context, spawnID, baseRef st
 	return n.inner.ImportDelta(ctx, spawnID, baseRef, r)
 }
 
+// Pause/Unpause stubs — delegates to inner (drift fix after sp-ei4.1.15.2).
+func (n *noSizeFakeBackend) Pause(ctx context.Context, h *runtime.PodHandle) error {
+	return n.inner.Pause(ctx, h)
+}
+func (n *noSizeFakeBackend) Unpause(ctx context.Context, h *runtime.PodHandle) error {
+	return n.inner.Unpause(ctx, h)
+}
+
 // Compile-time assertion: *noSizeFakeBackend must satisfy PodBackend but NOT deltaSizer.
 var _ runtime.PodBackend = (*noSizeFakeBackend)(nil)
 
