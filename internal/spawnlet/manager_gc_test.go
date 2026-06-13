@@ -15,15 +15,23 @@ import (
 	"testing"
 )
 
+// noScrub disables the exec-based delta scrub so these hermetic tests never shell out to
+// Docker (the constructor defaults DeltaScrubPaths, so DeltaCapture+Suspend would otherwise
+// exec `docker exec <agentID> rm -rf ...` against the fake's non-existent container).
+func noScrub(m *Manager) *Manager {
+	m.scrubFn = func(context.Context, string, []string) error { return nil }
+	return m
+}
+
 // G1: Delete triggers ReleaseDelta + removes spawn from store.
 func TestDeleteReleasesGC(t *testing.T) {
 	ctx := context.Background()
 	fb := &fakePodBackend{}
 	dataDir := t.TempDir()
-	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: dataDir,
 		DeltaCapture: true,
-	})
+	}))
 
 	sp, err := m.Create(ctx, "sp-gc", writeApp(t), "model", "", "", 1)
 	if err != nil {
@@ -49,10 +57,10 @@ func TestDeleteReleasesGC(t *testing.T) {
 func TestSuspendDoesNotGC(t *testing.T) {
 	ctx := context.Background()
 	fb := &fakePodBackend{}
-	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
-	})
+	}))
 
 	sp, err := m.Create(ctx, "sp-sus-gc", writeApp(t), "model", "", "", 1)
 	if err != nil {
@@ -72,10 +80,10 @@ func TestSuspendDoesNotGC(t *testing.T) {
 func TestStopDoesNotGC(t *testing.T) {
 	ctx := context.Background()
 	fb := &fakePodBackend{}
-	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
-	})
+	}))
 
 	sp, err := m.Create(ctx, "sp-stop-gc", writeApp(t), "model", "", "", 1)
 	if err != nil {
@@ -96,10 +104,10 @@ func TestDeletePurgesDeltaStateFile(t *testing.T) {
 	ctx := context.Background()
 	fb := &fakePodBackend{}
 	dataDir := t.TempDir()
-	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: dataDir,
 		DeltaCapture: true,
-	})
+	}))
 
 	// Suspend writes the delta state file.
 	sp, err := m.Create(ctx, "sp-state-purge", writeApp(t), "model", "", "", 1)

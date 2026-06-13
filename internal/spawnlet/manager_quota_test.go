@@ -71,11 +71,11 @@ func newNoSizeFakeBackend() *noSizeFakeBackend {
 func TestQuotaHardStopsSpawn(t *testing.T) {
 	ctx := context.Background()
 	fb := &fakePodBackend{deltaSizeMB: 200} // reports 200 MiB
-	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture:     true,
 		DeltaQuotaHardMB: 100, // threshold = 100 MiB; spawn at 200 → hard stop
-	})
+	}))
 
 	sp, err := m.Create(ctx, "sp-hard", writeApp(t), "model", "", "", 1)
 	if err != nil {
@@ -98,12 +98,12 @@ func TestQuotaHardStopsSpawn(t *testing.T) {
 func TestQuotaSoftSuspendsSpawn(t *testing.T) {
 	ctx := context.Background()
 	fb := &fakePodBackend{deltaSizeMB: 60} // reports 60 MiB
-	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture:     true,
 		DeltaQuotaSoftMB: 50, // threshold = 50 MiB; spawn at 60 → soft suspend
 		DeltaQuotaHardMB: 0,  // hard disabled
-	})
+	}))
 
 	sp, err := m.Create(ctx, "sp-soft", writeApp(t), "model", "", "", 1)
 	if err != nil {
@@ -130,12 +130,12 @@ func TestQuotaSoftSuspendsSpawn(t *testing.T) {
 func TestQuotaUnderThresholdNoOp(t *testing.T) {
 	ctx := context.Background()
 	fb := &fakePodBackend{deltaSizeMB: 10} // reports 10 MiB
-	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture:     true,
 		DeltaQuotaSoftMB: 50,
 		DeltaQuotaHardMB: 100,
-	})
+	}))
 
 	sp, err := m.Create(ctx, "sp-under", writeApp(t), "model", "", "", 1)
 	if err != nil {
@@ -157,12 +157,12 @@ func TestQuotaUnderThresholdNoOp(t *testing.T) {
 func TestQuotaDormantWhenNoSizeSource(t *testing.T) {
 	ctx := context.Background()
 	ns := newNoSizeFakeBackend()
-	m := NewManagerWithBackend(ns, &fakeApplier{}, ManagerConfig{
+	m := noScrub(NewManagerWithBackend(ns, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture:     true,
 		DeltaQuotaSoftMB: 1,
 		DeltaQuotaHardMB: 1,
-	})
+	}))
 
 	sp, err := m.Create(ctx, "sp-nodelta", writeApp(t), "model", "", "", 1)
 	if err != nil {

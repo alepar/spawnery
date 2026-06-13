@@ -18,11 +18,11 @@ func TestDeltaDepthIncrements(t *testing.T) {
 	ctx := context.Background()
 	fb := &fakePodBackend{}
 	dataDir := t.TempDir()
-	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: dataDir,
 		DeltaCapture:     true,
 		DeltaSquashDepth: 10,
-	})
+	}))
 
 	app := writeApp(t)
 	for i := 1; i <= 3; i++ {
@@ -56,11 +56,11 @@ func TestDeltaDepthResumesContinuation(t *testing.T) {
 	dataDir := t.TempDir()
 
 	newMgr := func() *Manager {
-		return NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		return noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 			AgentImage: "agent:base", SidecarImage: "s", DataRoot: dataDir,
 			DeltaCapture:     true,
 			DeltaSquashDepth: 10,
-		})
+		}))
 	}
 
 	app := writeApp(t)
@@ -106,11 +106,11 @@ func TestSquashNeededCallbackFires(t *testing.T) {
 	dataDir := t.TempDir()
 
 	var squashCalls []string
-	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: dataDir,
 		DeltaCapture:     true,
 		DeltaSquashDepth: 2, // low threshold for testing
-	})
+	}))
 	m.squashNeeded = func(id string, depth int) {
 		squashCalls = append(squashCalls, id)
 	}
@@ -143,11 +143,11 @@ func TestSquashNeededNotFiredBelowThreshold(t *testing.T) {
 	fb := &fakePodBackend{}
 
 	var squashCalls int
-	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture:     true,
 		DeltaSquashDepth: 10, // high threshold
-	})
+	}))
 	m.squashNeeded = func(_ string, _ int) {
 		squashCalls++
 	}
