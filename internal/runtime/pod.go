@@ -110,4 +110,10 @@ type PodBackend interface {
 	// ImportDelta loads a CP-pinned delta artifact onto the target node and returns the
 	// deterministic local delta image ref used by EnsureImage.
 	ImportDelta(ctx context.Context, spawnID, baseRef string, r io.Reader) (ref string, err error)
+
+	// Pause pauses (quiesces) the AGENT container. Used by the suspend gate to quiesce
+	// agent writes before the final rootfs snapshot — see spec §3.
+	Pause(ctx context.Context, h *PodHandle) error
+	// Unpause resumes a previously-paused agent container.
+	Unpause(ctx context.Context, h *PodHandle) error
 }

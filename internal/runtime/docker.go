@@ -303,3 +303,13 @@ func (d *Docker) ImportImage(ctx context.Context, r io.Reader) error {
 	_, err = io.Copy(io.Discard, resp.Body)
 	return err
 }
+
+func (d *Docker) PauseContainer(ctx context.Context, id string) error {
+	return d.cli.ContainerPause(ctx, id)
+}
+
+func (d *Docker) UnpauseContainer(ctx context.Context, id string) error {
+	return d.cli.ContainerUnpause(ctx, id)
+}
+
+var _ ContainerRuntime = (*Docker)(nil)
