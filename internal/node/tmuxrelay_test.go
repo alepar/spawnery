@@ -98,9 +98,18 @@ func TestTmuxRelayLiveAttach(t *testing.T) {
 	if os.Getenv("SKIP_DOCKER") != "" {
 		t.Skip("SKIP_DOCKER set")
 	}
-	// Check Docker is available.
+	// This is a live, Docker-backed test (not hermetic): it needs the docker CLI, a reachable
+	// daemon, and the built spawnery/agent:dev image. Skip — never fail — when any prerequisite
+	// is absent, so the default `just test` stays green on machines/CI without them (sp-clxm).
+	// Run it deliberately with `make .make/img-agent` first and docker reachable.
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not in PATH")
+	}
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		t.Skip("docker daemon not reachable")
+	}
+	if err := exec.Command("docker", "image", "inspect", "spawnery/agent:dev").Run(); err != nil {
+		t.Skip("spawnery/agent:dev image not present (build it: make .make/img-agent)")
 	}
 
 	// Launch the agent container via the dispatcher entrypoint (the runnable id; the image owns the
