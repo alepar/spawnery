@@ -155,10 +155,12 @@ func (s *Server) RenameSpawn(ctx context.Context, req *connect.Request[cpv1.Rena
 
 // SuspendSpawn persists the spawn's mounts on the hosting node and tears the container down, keeping
 // the spawn row 'suspended' (resumable) with the per-mount persist markers recorded. Marker-protocol
-// flow (sp-a7fs): decide-in-DB (SetSuspending, generation-fenced) → ask the node to persist+tear down
-// (SuspendOnNode) → await SuspendComplete with a bounded timeout → record the markers + finalize
-// 'suspended'. On timeout/await-failure the spawn is moved to 'error' (design §5: "persist failure →
-// error"). active -> suspending -> (node persist + teardown) -> suspended.
+// flow (sp-a7fs): ask the node to persist+tear down (SuspendOnNode) → await SuspendComplete with a
+// bounded timeout → on success, decide-in-DB (SetSuspending, generation-fenced) → record the markers
+// + finalize 'suspended'. On timeout/await-failure the spawn is moved to 'error' (design §5: "persist
+// failure → error"). If the node's fail-closed gate aborts (SuspendComplete.error non-empty) the spawn
+// is left ACTIVE with no state change and this RPC returns FailedPrecondition (spec §6).
+// active -> (node persist + teardown) -> [on success] suspending -> suspended.
 func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.SuspendSpawnRequest]) (*connect.Response[cpv1.SuspendSpawnResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
@@ -175,9 +177,16 @@ func (s *Server) SuspendSpawn(ctx context.Context, req *connect.Request[cpv1.Sus
 
 // suspendLocked is the marker-protocol suspend core (the per-spawn lock is the CALLER's
 // responsibility — held by SuspendSpawn and, re-used unchanged, by MigrateSpawn). It owns the
-// decide-in-DB → SuspendOnNode → await markers → finalize 'suspended' sequence and returns a connect
-// error on any failure, leaving the spawn in a DEFINED state ('suspended' on success, 'error' on
-// persist-await failure — exactly the sp-a7fs contract).
+// SuspendOnNode → await markers → decide-in-DB → finalize 'suspended' sequence and returns a connect
+// error on any failure, leaving the spawn in a DEFINED state:
+//   - success: 'suspended' (markers recorded, route dropped)
+//   - node gate failure (SuspendComplete.error non-empty): spawn left ACTIVE, no store mutation, RPC
+//     returns FailedPrecondition — spawn still running on its node (spec §6)
+//   - timeout/await-failure: 'error' — exactly the sp-a7fs contract
+//
+// NOTE: SetSuspending (Active→Suspending) is intentionally deferred until a clean (error-empty)
+// SuspendComplete arrives. Since all mutating ops hold the same per-spawn lock, the generation is
+// stable across the round-trip and the generation fence remains effective.
 func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRootfsArtifact bool) (*nodev1.SuspendComplete, error) {
 	sp, err := s.st.Spawns().Get(ctx, id)
 	if err != nil {
@@ -197,10 +206,6 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("no live container"))
 	}
 	gen := c.Generation
-	// Decide-in-DB FIRST (generation-fenced): a recreate/stop racing in concurrently fences this out.
-	if err := s.st.Spawns().SetSuspending(ctx, id, gen); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
-	}
 
 	// Register the marker waiter BEFORE asking the node to suspend, so a fast SuspendComplete is never
 	// missed. The node persists each mount, tears the pod down, and replies with the per-mount markers.
@@ -210,10 +215,22 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 
 	wait, cancel := context.WithTimeout(ctx, s.suspendTimeout)
 	defer cancel()
-	// Post-decision store writes use a detached ctx so the suspend outcome survives a client disconnect.
+	// Post-node-round-trip store writes use a detached ctx so the outcome survives a client disconnect.
 	storeCtx := context.WithoutCancel(ctx)
 	select {
 	case sc := <-ch:
+		// Fail-closed gate (spec §6): node aborted the suspend — nothing reaped/torn down, spawn still
+		// running. Row was never transitioned (still ACTIVE). Record no markers. Return FailedPrecondition
+		// so the caller knows the spawn is alive and usable.
+		if detail := sc.GetError(); detail != "" {
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				fmt.Errorf("suspend failed: %s — spawn left running", detail))
+		}
+		// Decide-in-DB (generation-fenced) NOW — deferred until a clean reply so that a gate failure
+		// never leaves the row in a transient Suspending state with no Suspending->Active revert path.
+		if err := s.st.Spawns().SetSuspending(storeCtx, id, gen); err != nil {
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
 		// Record the per-mount persist markers (design §5: markers recorded incrementally) before
 		// finalizing. A marker write failure is logged, not fatal — losing a marker degrades a later
 		// resume to the seeded scratch dir, which is strictly better than failing the whole suspend.
@@ -235,9 +252,9 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 		return sc, nil
 	case <-wait.Done():
 		// Persist did not complete in time (slow/wedged/unreachable node). Per design §5 ("persist
-		// failure → error"), move the spawn to a terminal 'error' rather than leaving it stuck in
-		// 'suspending'. Drop the route + best-effort fence: SetError ends the live container row, so a
-		// later heartbeat's inventory orphan arm tells the node to destroy any pod that did tear down.
+		// failure → error"), move the spawn to a terminal 'error'. Drop the route + best-effort fence:
+		// SetError ends the live container row, so a later heartbeat's inventory orphan arm tells the
+		// node to destroy any pod that did tear down. SetError from Active is permitted by the store.
 		s.rt.Drop(id)
 		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
 			log.Printf("suspendLocked %s: SetError after suspend await timeout also failed: %v", id, serr)

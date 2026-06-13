@@ -2,6 +2,7 @@ package cp
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,14 +19,16 @@ import (
 
 // suspendSender is a fake NodeSender for the marker-protocol SuspendSpawn flow: on a Suspend it
 // records the request and (unless drop) asynchronously delivers a SuspendComplete into the server's
-// suspend-waiter registry — the per-mount markers, gen override, and delay are all configurable so a
-// test can exercise the happy path, an await timeout, and a stale-episode reply.
+// suspend-waiter registry — the per-mount markers, gen override, errMsg, and delay are all
+// configurable so a test can exercise the happy path, an await timeout, a stale-episode reply, and a
+// fail-closed gate failure (errMsg non-empty).
 type suspendSender struct {
 	s        *Server
 	markers  []*nodev1.MountMarker
 	rootfs   []*nodev1.RootfsArtifact
 	replyGen *uint64 // if set, the gen echoed in SuspendComplete (else echo the request's)
 	drop     bool    // if true, never reply (forces the await to time out)
+	errMsg   string  // if non-empty, SuspendComplete.error carries this (gate failure path)
 	delay    time.Duration
 
 	mu          sync.Mutex
@@ -57,6 +60,7 @@ func (a *suspendSender) Send(m *nodev1.CPMessage) error {
 		}
 		a.s.suspends.deliver(&nodev1.SuspendComplete{
 			SpawnId: sp.GetSpawnId(), Generation: gen, Markers: a.markers, RootfsArtifacts: a.rootfs,
+			Error: a.errMsg,
 		})
 	}()
 	return nil
@@ -165,6 +169,65 @@ func TestSuspendSpawnStaleSuspendCompleteIgnored(t *testing.T) {
 	mounts, _ := s.st.Spawns().GetMounts(ctx, "sp1")
 	if len(mounts) == 1 && mounts[0].PersistMarker == "stale" {
 		t.Fatal("stale-episode marker must not be recorded")
+	}
+}
+
+// Gate failure (spec §6): a SuspendComplete with a non-empty error field means the node's fail-closed
+// gate aborted the suspend — nothing was reaped/torn down. The spawn must remain ACTIVE, the route
+// must remain bound, no persist markers must be recorded, and SuspendSpawn must return
+// FailedPrecondition carrying the node's error detail and "spawn left running".
+func TestSuspendSpawnGateFailureLeavesActive(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	const nodeErrDetail = "journal snapshot failed (journal sink unreachable)"
+	sender := &suspendSender{
+		errMsg:  nodeErrDetail,
+		markers: []*nodev1.MountMarker{{Name: "main", Marker: "should-not-record"}},
+	}
+	sender.s = s
+	activeSpawnWithRoute(t, s, reg, rt, "sp1", "alice", sender)
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	_, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: "sp1"}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("want FailedPrecondition on gate failure, got code=%v err=%v", connect.CodeOf(err), err)
+	}
+	if err == nil || err.Error() == "" {
+		t.Fatal("expected non-nil error with message")
+	}
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, nodeErrDetail) {
+		t.Errorf("error %q must contain node detail %q", errMsg, nodeErrDetail)
+	}
+	if !strings.Contains(errMsg, "spawn left running") {
+		t.Errorf("error %q must contain \"spawn left running\"", errMsg)
+	}
+
+	// Spawn row must still be ACTIVE — no state transition.
+	sp, getErr := s.st.Spawns().Get(ctx, "sp1")
+	if getErr != nil {
+		t.Fatalf("Get spawn: %v", getErr)
+	}
+	if sp.Status != store.Active {
+		t.Fatalf("spawn status=%v, want Active after gate failure", sp.Status)
+	}
+
+	// Live container must still be present — pod was not reaped.
+	if _, ok, lcErr := s.st.Spawns().LiveContainer(ctx, "sp1"); lcErr != nil || !ok {
+		t.Fatalf("LiveContainer ok=%v err=%v, want live container present after gate failure", ok, lcErr)
+	}
+
+	// Route must still be bound — node is still routing to the spawn.
+	if !rt.Bound("sp1") {
+		t.Fatal("route must remain bound after gate failure")
+	}
+
+	// No persist marker must have been recorded despite the SuspendComplete carrying one.
+	mounts, mErr := s.st.Spawns().GetMounts(ctx, "sp1")
+	if mErr != nil {
+		t.Fatalf("GetMounts: %v", mErr)
+	}
+	if len(mounts) > 0 && mounts[0].PersistMarker != "" {
+		t.Fatalf("persist_marker = %q, want empty — marker must not be recorded on gate failure", mounts[0].PersistMarker)
 	}
 }
 
