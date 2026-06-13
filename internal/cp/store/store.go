@@ -7,11 +7,14 @@ import (
 	"errors"
 )
 
-// ErrConflict is returned when a guarded transition's precondition (status set) is not met.
+// ErrConflict is returned when a guarded transition's precondition (status set or CAS) is not met.
 // ErrNotFound is returned for a missing or soft-deleted entity on a lifecycle lookup.
+// ErrClaimLost is returned when a claim-fenced operation finds the lease is gone (expired,
+// preempted, or released); the driver MUST bail out and commit no further transitions.
 var (
-	ErrConflict = errors.New("store: transition conflict")
-	ErrNotFound = errors.New("store: not found")
+	ErrConflict  = errors.New("store: transition conflict")
+	ErrNotFound  = errors.New("store: not found")
+	ErrClaimLost = errors.New("store: claim lost")
 )
 
 // Config selects the backend. Driver is "sqlite" or "postgres".
@@ -90,6 +93,39 @@ type SpawnRepo interface {
 
 	LiveContainersByNode(ctx context.Context, nodeID string) ([]Container, error)
 	Adopt(ctx context.Context, id, nodeID string, gen int64) error
+
+	// Acquire atomically claims the spawn row for the given holder+leaseID.
+	// It CAS-es on expectedSeq (the status_seq the caller just read) and requires that the spawn
+	// has no active claim (claim_holder IS NULL OR claim_deadline < nowTS). On success the claim
+	// columns are set, status_seq is bumped, and newSeq = expectedSeq+1 is returned so the caller
+	// can chain TransitionClaimed without a re-read. rowcount 0 → ErrConflict (stale seq or
+	// active claim); the caller must re-read and re-decide.
+	Acquire(ctx context.Context, id, holder, leaseID string, nowTS, deadlineTS, expectedSeq int64) (newSeq int64, err error)
+
+	// Heartbeat extends the claim's deadline. It is fenced only by leaseID (NOT by status_seq)
+	// so it does NOT bump status_seq. rowcount 0 → ErrClaimLost (the claim was expired, preempted,
+	// or released); the driver MUST stop driving immediately and commit no further transitions.
+	Heartbeat(ctx context.Context, id, leaseID string, newDeadlineTS int64) error
+
+	// Release clears the claim columns and bumps status_seq (returning authority to CP sweepers).
+	// It is lease-fenced: only the holder with the matching leaseID can release.
+	// rowcount 0 → ErrClaimLost (the claim was already gone — preempted or expired).
+	Release(ctx context.Context, id, leaseID string) error
+
+	// TransitionClaimed performs a fully-fenced status transition on a claimed spawn. It CAS-es on
+	// expectedSeq (must match) AND leaseID (must match) AND expectedGen (must be the current live
+	// container's generation — fences against a recreated episode). On success status_seq is bumped
+	// and newSeq = expectedSeq+1 is returned. The caller should chain Acquire's newSeq here.
+	// rowcount 0 → ErrConflict; the status predicate is intentionally absent (if status_seq matched,
+	// status cannot have changed concurrently).
+	TransitionClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, to Status) (newSeq int64, err error)
+
+	// ListStranded returns spawns in a transient status (Suspending, and Resuming once 7.5 adds it)
+	// whose claim is absent or expired (claim_holder IS NULL OR claim_deadline < nowTS). These are
+	// candidates for recovery: the driving CP goroutine crashed and the lease was not renewed.
+	// Results are ordered by id ASC for deterministic test output.
+	// Decision and revert logic (reconcile against node ground truth) lives in the CP layer (7.6/7.7).
+	ListStranded(ctx context.Context, nowTS int64) ([]Spawn, error)
 }
 
 type AgentImageRepo interface {
