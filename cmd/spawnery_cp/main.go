@@ -29,6 +29,7 @@ import (
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 	"spawnery/internal/pki"
+	"spawnery/internal/rpclog"
 	"spawnery/internal/weborigin"
 )
 
@@ -226,14 +227,14 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle(cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(verifier.Interceptor())))
+	mux.Handle(cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(rpclog.Interceptor("cp"), verifier.Interceptor())))
 	mux.HandleFunc("/ws/session", srv.HandleWS(verifier, allow))
 
 	// Node-auth mode (sp-ova). insecure (dev/test default): nodes share the main h2c listener with no
 	// auth — identity falls back to the self-asserted Register fields. enforced: nodes connect over mTLS
 	// on a dedicated listener and their identity is the verified client cert (see internal/cp/nodeauth).
 	mode := nodeauth.Mode(env("NODE_AUTH_MODE", string(nodeauth.ModeInsecure)))
-	nodePath, nodeHandler := nodev1connect.NewNodeServiceHandler(srv)
+	nodePath, nodeHandler := nodev1connect.NewNodeServiceHandler(srv, connect.WithInterceptors(rpclog.Interceptor("cp")))
 	if mode == nodeauth.ModeEnforced {
 		go func() {
 			if err := serveNodeTLS(env("CP_NODE_LISTEN", "127.0.0.1:8081"), nodePath, nodeHandler); err != nil {

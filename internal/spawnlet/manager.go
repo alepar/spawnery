@@ -1032,6 +1032,22 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 	// teardown continues normally — the next resume falls back to the base image (cold-ish start).
 	// Orthogonal to the journal block below (journal handles data mounts; delta handles rootfs).
 	if capture && m.cfg.DeltaCapture && sp.AgentID != "" {
+		h := &runtime.PodHandle{
+			SpawnID:   sp.ID,
+			AgentID:   sp.AgentID,
+			SidecarID: sp.SidecarID,
+			// Use the launch image (delta on resume, base on fresh create) as the layer-count
+			// reference for the moby#47065 guard — NOT the original base — so chained captures
+			// correctly detect a zero-layer commit on the 2nd+ suspend (spec §3 validation).
+			BaseImageRef: sp.LaunchImageRef,
+		}
+		// The suspend gate (SnapshotForSuspend) leaves the agent PAUSED for journal-snapshot
+		// quiescence; sessions are already reaped by the time FinishSuspend calls teardown, so the
+		// agent has no driver. Unpause it (best-effort) before the live-container rootfs ops below:
+		// the scrub `docker exec` CANNOT run on a paused container ("container is paused"), and
+		// capture/stop are cleaner on a running one. Harmless no-op (ignored error) on the non-gate
+		// paths (Stop/Delete, crash-survival reconcile) where the container was never paused.
+		_ = m.pod.Unpause(ctx, h)
 		// Live capture-time scrub: `rm -rf <paths>` in the agent container BEFORE commit so the
 		// committed layer does not include apt caches, /tmp noise, etc. Best-effort, non-fatal.
 		if len(m.cfg.DeltaScrubPaths) > 0 && m.scrubFn != nil {
@@ -1041,15 +1057,6 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 			if serr := m.scrubFn(ctx, sp.AgentID, m.cfg.DeltaScrubPaths); serr != nil {
 				log.Printf("delta scrub for %s: %v (non-fatal; proceeding with capture)", id, serr)
 			}
-		}
-		h := &runtime.PodHandle{
-			SpawnID:   sp.ID,
-			AgentID:   sp.AgentID,
-			SidecarID: sp.SidecarID,
-			// Use the launch image (delta on resume, base on fresh create) as the layer-count
-			// reference for the moby#47065 guard — NOT the original base — so chained captures
-			// correctly detect a zero-layer commit on the 2nd+ suspend (spec §3 validation).
-			BaseImageRef: sp.LaunchImageRef,
 		}
 		if ref, cerr := m.pod.CaptureDelta(ctx, h); cerr != nil {
 			log.Printf("delta capture for %s: %v (non-fatal; next resume uses base image)", id, cerr)

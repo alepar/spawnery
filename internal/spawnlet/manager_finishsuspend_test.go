@@ -324,3 +324,40 @@ func TestFinishSuspendUnknownID(t *testing.T) {
 		t.Fatal("FinishSuspend on unknown id must return an error")
 	}
 }
+
+// FS7 (regression, scrub-on-paused): the gate (SnapshotForSuspend) pauses the agent for journal
+// quiescence and leaves it paused; FinishSuspend must UNPAUSE it before the rootfs scrub/capture,
+// because the scrub `docker exec` cannot run on a paused container ("container is paused").
+func TestFinishSuspendUnpausesAgentBeforeCapture(t *testing.T) {
+	ctx := context.Background()
+	app := writeJournalApp(t)
+
+	fj := newFakeJournal("manifest-unpause")
+	fb := &fakePodBackend{}
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+		DeltaCapture: true,
+	})
+	m.SetJournal(fj, t.TempDir())
+	m.scrubFn = func(_ context.Context, _ string, _ []string) error { return nil }
+
+	sp, err := m.Create(ctx, "sp-unpause", app, "model", "", "", 1)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := m.SnapshotForSuspend(ctx, sp.ID); err != nil {
+		t.Fatalf("SnapshotForSuspend: %v", err)
+	}
+	if !fb.paused {
+		t.Fatal("gate must leave the agent paused for journal quiescence")
+	}
+	if _, err := m.FinishSuspend(ctx, sp.ID, false); err != nil {
+		t.Fatalf("FinishSuspend: %v", err)
+	}
+	if fb.unpauseCount == 0 {
+		t.Fatal("FinishSuspend must unpause the agent before the rootfs scrub/capture")
+	}
+	if fb.paused {
+		t.Fatal("agent still paused after FinishSuspend — scrub/capture/stop would run on a frozen container")
+	}
+}

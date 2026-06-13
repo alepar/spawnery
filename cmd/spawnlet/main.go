@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
@@ -25,9 +26,10 @@ import (
 	"spawnery/internal/node"
 	"spawnery/internal/node/nodeid"
 	"spawnery/internal/pki"
+	"spawnery/internal/rpclog"
 	"spawnery/internal/runtime"
-	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/runtime/cri"
+	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/spawnlet/firewall"
 	"spawnery/internal/storage/journal"
@@ -133,7 +135,7 @@ func main() {
 	// Standalone mode (unchanged): inbound spawn.v1 server + /ws.
 	srv := spawnlet.NewServer(mgr)
 	mux := http.NewServeMux()
-	mux.Handle(spawnv1connect.NewSpawnServiceHandler(srv))
+	mux.Handle(spawnv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(rpclog.Interceptor("node"))))
 	mux.HandleFunc("/ws/session", srv.HandleWS)
 	mux.HandleFunc("/terminal", srv.HandleTerminal)
 	addr := env("SPAWNLET_ADDR", "127.0.0.1:9090")
