@@ -104,14 +104,16 @@ func (f *fakePodBackend) ImportDelta(_ context.Context, spawnID, _ string, r io.
 	return runtime.DeltaTag(spawnID), nil
 }
 
-// Pause records the call and sets paused=true. Returns pauseErr if set (non-fatal in the gate).
+// Pause records the call. Always increments pauseCount and captures pausedAgentID so tests can
+// assert the call was attempted even when it fails. Sets paused=true only on success.
+// Returns pauseErr if set (non-fatal in the gate — the manager logs and snapshots anyway).
 func (f *fakePodBackend) Pause(_ context.Context, h *runtime.PodHandle) error {
+	f.pauseCount++
+	f.pausedAgentID = h.AgentID
 	if f.pauseErr != nil {
 		return f.pauseErr
 	}
 	f.paused = true
-	f.pauseCount++
-	f.pausedAgentID = h.AgentID
 	return nil
 }
 
