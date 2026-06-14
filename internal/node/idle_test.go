@@ -10,37 +10,9 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 )
 
-// An idle ADDITIONAL-session pump (session id != 0) must NOT cause the whole spawn to be reaped —
-// only session #0's idleness reaps the spawn (sp-npxq.3, plan decision 8).
-func TestReapIdleIgnoresNonZeroSessions(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
-	a := newAttacher(newGooseManager(t, be), &fakeCPStream{})
-	ctx := context.Background()
-	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "s1", AppRef: writeNodeApp(t), Model: "m", RunnableId: "goose-acp"})
-	defer a.stopSpawn(ctx, "s1")
-
-	// inject an ANCIENT additional-session pump under a non-zero key; session #0 stays fresh (its
-	// pump's lastActivity is ~now from the handshake just completed above).
-	now := time.Now()
-	stale := newPump(io.Discard, strings.NewReader(""))
-	stale.mu.Lock()
-	stale.lastActivity = now.Add(-time.Hour)
-	stale.mu.Unlock()
-	a.mu.Lock()
-	a.pumps[sessionKey{"s1", "1"}] = stale
-	a.mu.Unlock()
-
-	// session #0 is fresh (< 1m), session "1" is ancient (1h): without the decision-8 fix the ancient
-	// non-zero pump would stopSpawn the whole container.
-	a.reapIdle(ctx, now, time.Minute, time.Minute)
-
-	if _, ok := a.mgr.SpawnGeneration("s1"); !ok {
-		t.Fatal("spawn was reaped because an additional session was idle — reaper must ignore non-zero sessions")
-	}
-}
-
 // The pump tracks last-relay-activity (a frame in EITHER direction refreshes it) and whether any
-// client is attached — the two inputs the idle reaper needs. Covers sp-8hf item 3 (activity side).
+// client is attached — the two inputs the CP-side idle evaluator needs. Covers sp-8hf item 3
+// (activity side). The node now reports these as metrics; the CP drives the suspend decision.
 func TestPumpTracksActivityAndAttached(t *testing.T) {
 	p := newPump(io.Discard, strings.NewReader(""))
 
@@ -78,34 +50,98 @@ func TestPumpTracksActivityAndAttached(t *testing.T) {
 	}
 }
 
-// reapIdle tears down spawns idle past their stage threshold: a DETACHED spawn gets a short budget; an
-// ATTACHED spawn gets a longer one. Covers sp-8hf item 3 (reap side).
-func TestReapIdleTwoStage(t *testing.T) {
+// runningSpawns fills DeltaSizeBytes and LastActivityUnixMs: an active spawn with a pump
+// reports a non-zero LastActivityUnixMs (epoch-ms) and the backend delta size, so the CP
+// evaluator can make quota and idle decisions.
+func TestRunningSpawnsPopulatesMetrics(t *testing.T) {
 	be := &scriptedPodBackend{script: scriptGoose}
 	a := newAttacher(newGooseManager(t, be), &fakeCPStream{})
 	ctx := context.Background()
 
-	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "idle", AppRef: writeNodeApp(t), Model: "m"})
-	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "kept", AppRef: writeNodeApp(t), Model: "m"})
-	a.attachClient("kept", SessionZeroID, "c1", 0) // "kept" has a live client -> the longer idle budget
+	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
+	defer a.stopSpawn(ctx, "sp1")
 
-	now := time.Now()
-	for _, id := range []string{"idle", "kept"} {
-		p := a.pumps[zeroKey(id)]
-		p.mu.Lock()
-		p.lastActivity = now.Add(-10 * time.Minute)
-		p.mu.Unlock()
-	}
-
-	// detached budget 5m (idle 10m -> reap), attached budget 30m (idle 10m -> keep).
-	a.reapIdle(ctx, now, 5*time.Minute, 30*time.Minute)
-
+	// Back-date the pump's lastActivity so we can verify it is reported faithfully.
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.pumps[zeroKey("idle")] != nil {
-		t.Fatal("detached spawn idle past its budget must be reaped")
+	p := a.pumps[zeroKey("sp1")]
+	a.mu.Unlock()
+	if p == nil {
+		t.Fatal("pump not registered for sp1")
 	}
-	if a.pumps[zeroKey("kept")] == nil {
-		t.Fatal("attached spawn within its longer budget must survive")
+	knownTime := time.Now().Add(-5 * time.Minute)
+	p.mu.Lock()
+	p.lastActivity = knownTime
+	p.mu.Unlock()
+
+	running := a.runningSpawns(ctx)
+	if len(running) == 0 {
+		t.Fatal("runningSpawns returned empty; spawn should be live")
+	}
+	var rs *nodev1.RunningSpawn
+	for _, r := range running {
+		if r.GetSpawnId() == "sp1" {
+			rs = r
+			break
+		}
+	}
+	if rs == nil {
+		t.Fatal("sp1 not found in runningSpawns")
+	}
+
+	// LastActivityUnixMs must reflect the pump's lastActivity (within a generous epsilon).
+	gotMs := rs.GetLastActivityUnixMs()
+	wantMs := knownTime.UnixMilli()
+	if gotMs == 0 {
+		t.Fatal("LastActivityUnixMs must be non-zero when pump exists")
+	}
+	const epsilonMs = 1000 // 1 second tolerance
+	if diff := gotMs - wantMs; diff < -epsilonMs || diff > epsilonMs {
+		t.Fatalf("LastActivityUnixMs=%d wantMs=%d diff=%d exceeds epsilon %d", gotMs, wantMs, diff, epsilonMs)
+	}
+
+	// DeltaSizeBytes is 0 when the fake backend does not have a delta (no DeltaSize configured
+	// in the fake that scriptedPodBackend uses) — just assert it doesn't error (field present).
+	_ = rs.GetDeltaSizeBytes()
+}
+
+// TestLastActivityMsAggregatesAcrossSessionsAndRelays verifies that lastActivityMs returns the
+// maximum lastActivity across pumps AND tmux relays for a spawn (both contribute to the max).
+func TestLastActivityMsAggregatesAcrossSessionsAndRelays(t *testing.T) {
+	a := &attacher{
+		pumps:      map[sessionKey]*Pump{},
+		tmuxRelays: map[sessionKey]*tmuxRelay{},
+	}
+
+	newer := time.Now().Add(-1 * time.Minute)
+	older := time.Now().Add(-5 * time.Minute)
+
+	// Pump with older activity.
+	p := newPump(io.Discard, strings.NewReader(""))
+	p.mu.Lock()
+	p.lastActivity = older
+	p.mu.Unlock()
+	a.pumps[sessionKey{"s1", SessionZeroID}] = p
+
+	// Relay with newer activity.
+	relay := newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
+	relay.mu.Lock()
+	relay.lastActivity = newer
+	relay.mu.Unlock()
+	a.tmuxRelays[sessionKey{"s1", "1"}] = relay
+
+	gotMs := a.lastActivityMs("s1")
+	if gotMs == 0 {
+		t.Fatal("lastActivityMs should be non-zero when pumps/relays exist")
+	}
+	// Should reflect the NEWER time (the relay's), not the older (the pump's).
+	newerMs := newer.UnixMilli()
+	const epsilonMs = 100
+	if diff := gotMs - newerMs; diff < -epsilonMs || diff > epsilonMs {
+		t.Fatalf("lastActivityMs=%d newerMs=%d diff=%d; should reflect the max (relay's newer time)", gotMs, newerMs, diff)
+	}
+
+	// A spawn with no pumps/relays returns 0.
+	if ms := a.lastActivityMs("unknown-spawn"); ms != 0 {
+		t.Fatalf("lastActivityMs for unknown spawn want 0, got %d", ms)
 	}
 }

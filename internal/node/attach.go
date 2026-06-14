@@ -174,13 +174,12 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 	a.stream = client.Attach(connCtx)
 
 	if err := a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{
-		Register: registerMessage(cfg, a.runningSpawns(), a.publishSubKey(time.Now())),
+		Register: registerMessage(cfg, a.runningSpawns(connCtx), a.publishSubKey(time.Now())),
 	}}); err != nil {
 		return err
 	}
 	log.Printf("node: connected to CP at %s (id=%s class=%s)", cfg.CPURL, cfg.NodeID, cfg.NodeClass)
 	go a.heartbeatLoop(connCtx)
-	go a.idleReapLoop(connCtx)
 
 	for {
 		msg, err := a.stream.Receive()
@@ -192,14 +191,53 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 }
 
 // runningSpawns maps the Manager's live inventory to proto RunningSpawn (all ACTIVE — the Manager
-// only holds running spawns), for the CP reconcile carried on Register/Heartbeat.
-func (a *attacher) runningSpawns() []*nodev1.RunningSpawn {
+// only holds running spawns), for the CP reconcile carried on Register/Heartbeat. It also
+// populates per-spawn resource metrics for the CP-side evaluators (§6 node-local detectors →
+// CP-side reporters):
+//   - DeltaSizeBytes: committed delta image size (bytes), 0 when unavailable (no DeltaSize backend)
+//   - LastActivityUnixMs: max lastActivity across all pumps/relays for the spawn, epoch-ms (UTC);
+//     0 when the spawn has no pumps or relays (e.g. mode=tmux with no active relay)
+func (a *attacher) runningSpawns(ctx context.Context) []*nodev1.RunningSpawn {
 	inv := a.mgr.RunningInventory()
 	out := make([]*nodev1.RunningSpawn, 0, len(inv))
 	for _, mp := range inv {
-		out = append(out, &nodev1.RunningSpawn{SpawnId: mp.SpawnID, Generation: mp.Generation, Phase: nodev1.SpawnPhase_ACTIVE})
+		sz, _ := a.mgr.DeltaSize(ctx, mp.SpawnID)
+		out = append(out, &nodev1.RunningSpawn{
+			SpawnId:            mp.SpawnID,
+			Generation:         mp.Generation,
+			Phase:              nodev1.SpawnPhase_ACTIVE,
+			DeltaSizeBytes:     sz,
+			LastActivityUnixMs: a.lastActivityMs(mp.SpawnID),
+		})
 	}
 	return out
+}
+
+// lastActivityMs returns the most recent lastActivity time across all pumps and tmux relays for
+// spawnID, expressed as epoch-milliseconds (UTC). Returns 0 when no pump or relay is registered
+// for the spawn (the spawn may be mid-launch or tmux-only with no relay yet).
+func (a *attacher) lastActivityMs(spawnID string) int64 {
+	var latest time.Time
+	a.mu.Lock()
+	for k, p := range a.pumps {
+		if k.spawnID == spawnID {
+			if t := p.lastActive(); t.After(latest) {
+				latest = t
+			}
+		}
+	}
+	for k, r := range a.tmuxRelays {
+		if k.spawnID == spawnID {
+			if t := r.lastActive(); t.After(latest) {
+				latest = t
+			}
+		}
+	}
+	a.mu.Unlock()
+	if latest.IsZero() {
+		return 0
+	}
+	return latest.UnixMilli()
 }
 
 func (a *attacher) send(m *nodev1.NodeMessage) error {
@@ -221,88 +259,13 @@ func (a *attacher) heartbeatLoop(ctx context.Context) {
 			a.mu.Unlock()
 			free := a.cfg.MaxSpawns - active
 			_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Heartbeat{Heartbeat: &nodev1.Heartbeat{
-				ActiveSpawns: active, FreeSlots: free, Running: a.runningSpawns(),
+				ActiveSpawns: active, FreeSlots: free, Running: a.runningSpawns(ctx),
 				SignedSubkey: a.rotatedSubKey(time.Now()), // re-publish only when the sub-key just rotated
 			}}})
 		}
 	}
 }
 
-// Two-stage idle budgets (sp-8hf item 3): a detached spawn (no clients) is reaped sooner than an
-// attached one. NOTE: this is a LOSSY teardown (reports STOPPED) — the lossless suspend-on-idle path is
-// sp-gd9, gated on E3 persistent storage.
-const (
-	idleDetachedTimeout = 15 * time.Minute
-	idleAttachedTimeout = 60 * time.Minute
-	idleReapInterval    = time.Minute
-)
-
-// idleReapLoop periodically reaps spawns idle past their stage budget, until ctx is cancelled.
-func (a *attacher) idleReapLoop(ctx context.Context) {
-	t := time.NewTicker(idleReapInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			a.reapIdle(ctx, time.Now(), idleDetachedTimeout, idleAttachedTimeout)
-		}
-	}
-}
-
-// reapIdle tears down every spawn whose last relay activity is older than its stage budget (detached
-// vs attached), measured from now. Candidates are snapshotted under the lock, then stopped outside it
-// (stopSpawn takes the lock itself). Both ACP pumps and tmux relays are reaped.
-func (a *attacher) reapIdle(ctx context.Context, now time.Time, detachedTimeout, attachedTimeout time.Duration) {
-	// Session #0 keys gate whole-spawn idle reaping; additional sessions are reaped only on explicit
-	// close (sp-npxq.3, plan decision 8) — an idle session-N pump/relay must NOT stopSpawn the container.
-	a.mu.Lock()
-	type cand struct {
-		key sessionKey
-		p   *Pump
-	}
-	type relayCand struct {
-		key sessionKey
-		r   *tmuxRelay
-	}
-	cands := make([]cand, 0, len(a.pumps))
-	for k, p := range a.pumps {
-		if k.sessionID != SessionZeroID {
-			continue // additional sessions are reaped by explicit close / stopSpawn, not idle (decision 8)
-		}
-		cands = append(cands, cand{k, p})
-	}
-	relayCands := make([]relayCand, 0, len(a.tmuxRelays))
-	for k, r := range a.tmuxRelays {
-		if k.sessionID != SessionZeroID {
-			continue
-		}
-		relayCands = append(relayCands, relayCand{k, r})
-	}
-	a.mu.Unlock()
-
-	for _, c := range cands {
-		budget := detachedTimeout
-		if c.p.attached() {
-			budget = attachedTimeout
-		}
-		if now.Sub(c.p.lastActive()) >= budget {
-			log.Printf("idle-reaping spawn=%s (idle past %s, attached=%v)", c.key.spawnID, budget, c.p.attached())
-			a.stopSpawn(ctx, c.key.spawnID)
-		}
-	}
-	for _, c := range relayCands {
-		budget := detachedTimeout
-		if c.r.attached() {
-			budget = attachedTimeout
-		}
-		if now.Sub(c.r.lastActive()) >= budget {
-			log.Printf("idle-reaping tmux spawn=%s (idle past %s, attached=%v)", c.key.spawnID, budget, c.r.attached())
-			a.stopSpawn(ctx, c.key.spawnID)
-		}
-	}
-}
 
 func (a *attacher) status(spawnID string, ph nodev1.SpawnPhase, detail string) {
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{SpawnId: spawnID, Phase: ph, Detail: detail}}})
