@@ -423,6 +423,11 @@ type AgentSelection struct {
 	// Normal same-node resume leaves them empty and continues to use the local DeltaImageRef.
 	RootfsSourceGeneration uint64
 	RootfsArtifacts        []RootfsArtifact
+	// ProgressFunc is an optional callback invoked at phase boundaries during CreateWithSelection
+	// (specifically once per rootfs artifact during restoreRootfsArtifacts) so that callers
+	// (attach.go startSpawn) can relay resume progress to the CP stall detector (sp-u53.7.2).
+	// nil = no-op. Only the resume path (RootfsArtifacts non-empty) produces useful events.
+	ProgressFunc func(phase, detail string)
 }
 
 // RootfsArtifact is the node/spawnlet-facing copy of a journal rootfs artifact descriptor.
@@ -445,12 +450,14 @@ type SuspendResult struct {
 	RootfsArtifacts []RootfsArtifact
 }
 
-// SuspendProgressFunc is an optional callback invoked at each phase boundary of SnapshotForSuspend
+// SuspendProgressFunc is an optional callback invoked at phase boundaries of SnapshotForSuspend
 // and FinishSuspend/teardown so that callers (attach.go) can relay progress signals upstream
 // (e.g. to the CP via the Attach stream — sp-u53.7.2). nil = no-op (Stop, Delete, SuspendForMigration
 // callers pass nil; only the gate/finish sequence wires this).
-// NOTE: intra-FinalSnapshot byte-level granularity (journal hook) is a documented follow-up; this
-// function fires only at coarse phase boundaries (gate/snapshot/capture/export/stop/finalize).
+// snapshotJournal calls this ONCE PER JOURNALED MOUNT (not just once for all mounts) so a
+// multi-mount suspend or a single large mount resets the stall timer between mounts. Byte-level
+// intra-mount granularity (a journal.FinalSnapshot progress hook) is a follow-up; the per-mount
+// coarseness here ensures a large-but-advancing snapshot never false-times-out (sp-u53.7.2 AC).
 type SuspendProgressFunc func(phase, detail string)
 
 func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID string, generation uint64) (*Spawn, error) {
@@ -681,7 +688,9 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		}
 	}
 	if len(sel.RootfsArtifacts) > 0 {
-		if err := m.restoreRootfsArtifacts(ctx, id, sel.RootfsSourceGeneration, baseRef, sel.RootfsArtifacts); err != nil {
+		// Pass sel.ProgressFunc so each artifact emits a resume progress event (sp-u53.7.2):
+		// a large delta being fetched+imported can exceed the stall window without resets.
+		if err := m.restoreRootfsArtifacts(ctx, id, sel.RootfsSourceGeneration, baseRef, sel.RootfsArtifacts, sel.ProgressFunc); err != nil {
 			_ = m.pod.Stop(ctx, h)
 			finalizeAll()
 			return nil, err
@@ -811,19 +820,37 @@ func (m *Manager) setWatchers(sp *Spawn, ws []*journal.Watcher) {
 // protocol). The caller is responsible for the `m.journal != nil && len(sp.JournalMounts) > 0`
 // guard. journal.Close is intentionally NOT called here — it stays in teardown so FinishSuspend
 // (snapshot=false) still closes the repo.
-func (m *Manager) snapshotJournal(ctx context.Context, sp *Spawn) (map[string]string, error) {
+//
+// progress (optional, nil-safe) is called ONCE PER JOURNALED MOUNT before its FinalSnapshot so the
+// CP stall detector can reset its timer between mounts (sp-u53.7.2 AC: large-but-advancing snapshot
+// must not false-time-out). Byte-level intra-mount granularity (a journal.FinalSnapshot progress
+// hook on the Kopia scan path) is a follow-up — open a bead scoped to internal/storage/journal
+// for byte-level callbacks. This coarse per-mount level already meets the bead's AC.
+func (m *Manager) snapshotJournal(ctx context.Context, sp *Spawn, progress SuspendProgressFunc) (map[string]string, error) {
 	id := sp.ID
-	ids, err := m.journal.FinalSnapshot(ctx, id, sp.Generation, sp.JournalMounts)
-	if err != nil {
-		return nil, err
+	// Snapshot each journaled mount individually so progress fires per mount. Calling
+	// FinalSnapshot with a single-element slice is semantically equivalent to the batch
+	// call: each mount has its own serialQueue and the suspend barrier drains per mount.
+	allIDs := make(map[string]journal.ManifestID, len(sp.JournalMounts))
+	for _, mt := range sp.JournalMounts {
+		if progress != nil {
+			progress("snapshot", "journaling mount "+mt.Name)
+		}
+		ids, err := m.journal.FinalSnapshot(ctx, id, sp.Generation, []journal.Mount{mt})
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range ids {
+			allIDs[k] = v
+			log.Printf("journal: spawn=%s gen=%d mount=%s final manifest=%s", id, sp.Generation, k, v)
+		}
 	}
-	markers := map[string]string{}
-	for mount, mid := range ids {
+	markers := make(map[string]string, len(allIDs))
+	for mount, mid := range allIDs {
 		markers[mount] = string(mid)
-		log.Printf("journal: spawn=%s gen=%d mount=%s final manifest=%s", id, sp.Generation, mount, mid)
 	}
 	if m.journalState != nil {
-		rec := journalRecord{Generation: sp.Generation, Manifests: ids}
+		rec := journalRecord{Generation: sp.Generation, Manifests: allIDs}
 		if serr := m.journalState.Save(id, rec); serr != nil {
 			log.Printf("journal state save for %s: %v", id, serr)
 		}
@@ -831,14 +858,18 @@ func (m *Manager) snapshotJournal(ctx context.Context, sp *Spawn) (map[string]st
 	return markers, nil
 }
 
-func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceGeneration uint64, baseRef string, artifacts []RootfsArtifact) error {
+// restoreRootfsArtifacts fetches and imports each CP-pinned rootfs artifact (delta) into the local
+// image store. progress (optional, nil-safe) is called ONCE PER ARTIFACT so the CP resume stall
+// detector can reset its timer between artifacts — a single large delta can exceed the stall window
+// (sp-u53.7.2). Byte-level intra-artifact progress is a follow-up.
+func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceGeneration uint64, baseRef string, artifacts []RootfsArtifact, progress func(phase, detail string)) error {
 	if m.journal == nil {
 		return fmt.Errorf("rootfs artifact restore for %s: no journaler configured", id)
 	}
 	if sourceGeneration == 0 {
 		return fmt.Errorf("rootfs artifact restore for %s: missing source generation", id)
 	}
-	for _, art := range artifacts {
+	for i, art := range artifacts {
 		if art.ArtifactID == "" {
 			return fmt.Errorf("rootfs artifact restore for %s: empty artifact id (restore must be pinned)", id)
 		}
@@ -849,6 +880,10 @@ func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceG
 		if art.BaseImageDigest != "" && art.BaseImageDigest != baseRef {
 			return fmt.Errorf("rootfs artifact restore for %s: artifact %s base digest %s does not match pinned base digest %s",
 				id, art.ArtifactID, art.BaseImageDigest, baseRef)
+		}
+		// Emit per-artifact progress so the CP stall timer resets between artifacts.
+		if progress != nil {
+			progress("restore_rootfs", fmt.Sprintf("restoring rootfs artifact %d/%d (id=%s)", i+1, len(artifacts), art.ArtifactID))
 		}
 		var payload bytes.Buffer
 		desc, err := m.journal.GetArtifact(ctx, id, sourceGeneration, art.ArtifactID, &payload)
@@ -1002,12 +1037,11 @@ func (m *Manager) SnapshotForSuspend(ctx context.Context, id string, progress Su
 		log.Printf("suspend gate: pause %s: %v (non-fatal; snapshotting live tree)", id, perr)
 	}
 
-	if progress != nil {
-		progress("snapshot", "journal final snapshot")
-	}
+	// snapshotJournal emits progress PER MOUNT (not a single batch event here): each mount
+	// call resets the CP stall timer so a large-mount suspend never false-times-out (sp-u53.7.2).
 	result := SuspendResult{MountMarkers: map[string]string{}}
 	if m.journal != nil && len(sp.JournalMounts) > 0 {
-		markers, err := m.snapshotJournal(ctx, sp)
+		markers, err := m.snapshotJournal(ctx, sp, progress)
 		if err != nil {
 			// Abort/restore: unpause so the agent can keep running, restart watchers.
 			if uerr := m.pod.Unpause(ctx, h); uerr != nil {
@@ -1208,7 +1242,8 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 		if snapshot {
 			// Non-fatal: teardown must still complete. With no markers, the CP records an empty
 			// marker set (a same-node resume falls back to the seeded scratch dir).
-			if markers, serr := m.snapshotJournal(ctx, sp); serr != nil {
+			// Pass progress so the stall timer resets per mount (sp-u53.7.2).
+			if markers, serr := m.snapshotJournal(ctx, sp, progress); serr != nil {
 				log.Printf("journal final snapshot for %s: %v", id, serr)
 			} else {
 				for k, v := range markers {

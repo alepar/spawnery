@@ -15,9 +15,10 @@ import (
 )
 
 // progressSender is a fake NodeSender for stall-detector tests. On a Suspend CPMessage it
-// emits SuspendProgress hints directly into s.suspends at progressPeriod intervals (bypassing
-// the wire, since the SuspendProgress proto message is not yet added to node.proto — sp-u53.7.2
-// TODO). After totalProgress events it optionally delivers SuspendComplete.
+// emits SuspendProgress hints directly into s.suspends at progressPeriod intervals (simulating
+// what the real node does: attach.go's suspendSpawn emits a SuspendProgress carrying gate markers
+// after SnapshotForSuspend succeeds, and snapshotJournal emits per-mount progress events). After
+// totalProgress events it optionally delivers SuspendComplete.
 // If stallOnly=true, SuspendComplete is never delivered (forces the stall path).
 type progressSender struct {
 	s               *Server

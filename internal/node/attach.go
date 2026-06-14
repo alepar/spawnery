@@ -483,6 +483,8 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 
 	// Emit resume progress at key phase boundaries so the CP stall detector can reset (sp-u53.7.2).
 	// The CP's resumeWaiters drops these if no waiter is registered (fresh creates have no waiter).
+	// ProgressFunc is wired into AgentSelection so restoreRootfsArtifacts can emit per-artifact
+	// progress — a large rootfs delta can exceed the 30s stall window without these resets.
 	a.resumeProgress(st.SpawnId, st.Generation, "starting", "creating containers")
 	sp, err := a.mgr.CreateWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation,
 		spawnlet.AgentSelection{
@@ -492,6 +494,9 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			BaseImageDigest:        st.GetBaseImageDigest(),
 			RootfsSourceGeneration: st.GetRootfsSourceGeneration(),
 			RootfsArtifacts:        rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
+			ProgressFunc: func(phase, detail string) {
+				a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
+			},
 		})
 	if err != nil {
 		logErr("startSpawn "+st.SpawnId, err)
@@ -689,7 +694,17 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 		return
 	}
 
-	// Step 2: gate succeeded — reap sessions then finish suspend teardown.
+	// Step 2: gate succeeded — relay gate markers via SuspendProgress so the CP's
+	// partialMarkers accumulator has real data if FinishSuspend stalls (sp-u53.7.2).
+	// This is the ONLY place mount markers are emitted mid-suspend: snapshotJournal
+	// returns them in gate.MountMarkers, and we surface them here before tearing down
+	// sessions. The terminal SuspendComplete (step 3) carries the same markers again
+	// (the CP's SetMountMarker call is idempotent for the same values).
+	if len(gate.MountMarkers) > 0 {
+		a.suspendProgress(spawnID, gen, "gate_complete", "journal snapshot done", gate.MountMarkers)
+	}
+
+	// Reap sessions then finish suspend teardown.
 	ps, relays := a.reapSessions(spawnID)
 	for _, p := range ps {
 		p.stop()
