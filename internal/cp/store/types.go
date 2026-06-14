@@ -129,6 +129,22 @@ type Mount struct {
 	PersistMarker string `bun:"persist_marker"`
 }
 
+// Artifact is one content-agnostic delivery unit persisted per spawn (mirrors the wire ArtifactSpec).
+// Sensitive artifacts are stored metadata-only (Inline is nil); their values ride the existing
+// DeliverSecrets/SealedSecret path keyed by EnvVarName.
+type Artifact struct {
+	bun.BaseModel   `bun:"table:spawn_artifacts,alias:art"`
+	SpawnID         string `bun:"spawn_id,pk"`
+	ArtifactID      string `bun:"artifact_id,pk"`
+	Inline          []byte `bun:"inline"`
+	ContentType     int32  `bun:"content_type,notnull"`
+	TargetContainer int32  `bun:"target_container,notnull"`
+	DestPath        string `bun:"dest_path,notnull"`
+	Mode            uint32 `bun:"mode,notnull"`
+	Sensitive       bool   `bun:"sensitive,notnull"`
+	EnvVarName      string `bun:"env_var_name,notnull"`
+}
+
 type TransferSetStatus string
 
 const (

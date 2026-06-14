@@ -62,6 +62,8 @@ type SpawnRepo interface {
 	LiveContainer(ctx context.Context, id string) (Container, bool, error)
 	LatestContainer(ctx context.Context, id string) (Container, bool, error)
 	GetMounts(ctx context.Context, id string) ([]Mount, error)
+	GetArtifacts(ctx context.Context, id string) ([]Artifact, error)
+	AddArtifacts(ctx context.Context, id string, artifacts []Artifact) error
 	ListByOwner(ctx context.Context, ownerID string) ([]Spawn, error)
 	Rename(ctx context.Context, id, name string) error    // ErrNotFound on missing OR deleted
 	SetModel(ctx context.Context, id, model string) error // ErrNotFound on missing OR deleted
