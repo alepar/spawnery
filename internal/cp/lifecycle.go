@@ -783,7 +783,8 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	provCtx, provCancel := context.WithCancel(ctx)
 	defer provCancel()
 	go func() {
-		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, schedulerRootfsRestore(rootfs))
+		arts, _ := s.st.Spawns().GetArtifacts(provCtx, id)
+		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(arts))
 		provCh <- provisionResult{n, e}
 	}()
 
@@ -1133,7 +1134,8 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 		placement.TargetNodeID = targetNodeID
 	}
 
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, nil)
+	arts, _ := s.st.Spawns().GetArtifacts(ctx, req.Msg.SpawnId)
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, nil, storeToNodeArtifacts(arts))
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
