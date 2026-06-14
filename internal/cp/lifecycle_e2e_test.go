@@ -377,6 +377,19 @@ func TestSuspendResumeLifecycleE2E(t *testing.T) {
 	got1 := promptEchoOnce(ctx, t, cl, id, "before suspend")
 	t.Logf("pre-suspend echo: %q", got1)
 
+	// Phase 2b: DATA WRITE — write a known marker file into the journaled `main` mount's
+	// host directory so it is captured by the journal snapshot during suspend.
+	// The scratch backend places the host dir at DataRoot/<spawnID>/<mountName>.
+	// The journal watcher and SnapshotForSuspend both operate on this path, so writing
+	// here (as root, from the test) is the correct and most direct injection point.
+	mainMountHostDir := filepath.Join(dataRoot, id, "main")
+	markerContent := "lifecycle-test-marker:" + id
+	markerHostPath := filepath.Join(mainMountHostDir, "lifecycle-test-marker.txt")
+	if err := os.WriteFile(markerHostPath, []byte(markerContent), 0o644); err != nil {
+		t.Fatalf("write marker to %s: %v", markerHostPath, err)
+	}
+	t.Logf("wrote marker to host dir: %s", markerHostPath)
+
 	// Phase 3: SuspendSpawn — blocking: returns when the node has emitted SuspendComplete
 	// and the CP has written SUSPENDED to the store.
 	t.Log("phase 3: SuspendSpawn (blocking)")
@@ -419,6 +432,19 @@ func TestSuspendResumeLifecycleE2E(t *testing.T) {
 	t.Log("phase 6: echo after resume")
 	got2 := promptEchoOnce(ctx, t, cl, id, "after resume")
 	t.Logf("post-resume echo: %q", got2)
+
+	// Phase 6b: DATA SURVIVAL — assert the marker written before suspend is present in
+	// the restored `main` mount. The journal Restore unpacked the snapshot back into the
+	// same host path (DataRoot/<spawnID>/main) on resume.
+	t.Log("phase 6b: data survival check")
+	restored, err := os.ReadFile(markerHostPath)
+	if err != nil {
+		t.Fatalf("data survival FAIL: marker file %s not found after resume: %v", markerHostPath, err)
+	}
+	if string(restored) != markerContent {
+		t.Fatalf("data survival FAIL: marker content mismatch: want %q got %q", markerContent, string(restored))
+	}
+	t.Logf("data survival PASS: marker restored correctly: %q", string(restored))
 
 	t.Logf("TestSuspendResumeLifecycleE2E PASS: gen1=%d gen2=%d", gen1, gen2)
 }
