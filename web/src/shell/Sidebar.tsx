@@ -34,6 +34,23 @@ const DOT: Record<SpawnStatus, string> = {
   unknown: "bg-zinc-400",
 };
 
+const STATUS_LABEL: Record<SpawnStatus, string> = {
+  active: "active",
+  suspended: "suspended",
+  suspending: "suspending…",
+  resuming: "resuming…",
+  starting: "starting…",
+  unreachable: "unreachable",
+  error: "error",
+  unknown: "unknown",
+};
+
+function spawnStatusLabel(spawn: SpawnView): string {
+  if (spawn.transitionPhase && spawn.status === "suspending") return `Suspending: ${spawn.transitionPhase}`;
+  if (spawn.transitionPhase && spawn.status === "resuming") return `Resuming: ${spawn.transitionPhase}`;
+  return STATUS_LABEL[spawn.status];
+}
+
 export function Sidebar({ nav, navigate, spawns = [], actions }: {
   nav: Nav;
   navigate: (nav: Nav) => void;
@@ -71,6 +88,7 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
   const [confirmStop, setConfirmStop] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(spawn.name);
+  const statusLabel = spawnStatusLabel(spawn);
 
   // The single lifecycle menu item follows the actual status (suspend/resume/recreate), so the menu
   // never offers an action the CP would reject; transitional/unknown states render a disabled item.
@@ -104,6 +122,8 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
           <span
             data-testid={`spawn-dot-${spawn.spawnId}`}
             data-status={spawn.status}
+            title={statusLabel}
+            aria-label={statusLabel}
             className={`inline-block h-2 w-2 shrink-0 rounded-full ${DOT[spawn.status]}`}
           />
           {editing ? (

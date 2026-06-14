@@ -69,6 +69,22 @@ describe("Sidebar", () => {
     expect(screen.getByTestId("spawn-dot-b").getAttribute("data-status")).toBe("suspended");
   });
 
+  it.each([
+    ["a", "active", "active"],
+    ["b", "suspended", "suspended"],
+    ["c", "starting", "starting…"],
+    ["d", "unreachable", "unreachable"],
+    ["e", "error", "error"],
+    ["f", "suspending", "suspending…"],
+  ] as const)("exposes %s status label via title/aria-label without inline text", (id, status, label) => {
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={noopActions} />);
+    const dot = screen.getByTestId(`spawn-dot-${id}`);
+    expect(dot.getAttribute("data-status")).toBe(status);
+    expect(dot.getAttribute("title")).toBe(label);
+    expect(dot.getAttribute("aria-label")).toBe(label);
+    expect(dot.textContent).toBe("");
+  });
+
   it("highlights the spawn row matching nav.spawnId", () => {
     render(<Sidebar nav={spawnNav("b")} navigate={vi.fn()} spawns={spawns} actions={noopActions} />);
     expect(screen.getByTestId("spawn-row-b").className).toContain("bg-secondary");
