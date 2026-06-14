@@ -73,9 +73,14 @@ Emitter must handle claude's space-boundary form (`Bash(ls *)` ≠ `lsof`) and o
   perms for codex, **emit the experimental `execpolicy` `.rules`** (Starlark `prefix_rule(pattern=[…],
   decision="allow|forbidden")` in the codex rules dir), accepting the preview-stability risk. The
   emitted artifact still carries a **capability signal** noting codex per-command uses an experimental
-  path. (Runtime enforcement — beyond `codex execpolicy check`, the dry-run evaluator — is being
-  confirmed by a follow-up spike; if it does NOT enforce at runtime in codex's pty lane, fall back to
-  reporting `deniedCommands` unsupported on codex.)
+  path. **Runtime enforcement CONFIRMED (follow-up spike):** codex auto-loads
+  **`$CODEX_HOME/rules/default.rules`** at startup (on by default, no flag; `--ignore-rules` is the
+  off-switch) and rejects a `forbidden` command in `codex_core::tools::router` **before** spawning —
+  proven under `danger-full-access` (so the sandbox wasn't the blocker). Enforcement is the **shared
+  exec path for both `codex exec` and the interactive TUI**, so it holds in spawnery's `codex-tui`
+  lane. ⇒ codex `deniedCommands` is **genuinely supported**, not best-effort. *Stability:* vendor-
+  flagged "experimental, may change" → **pin the codex version + isolate the `.rules` (Starlark)
+  emission behind an adapter**.
 - opencode `webfetch`/`websearch` take only a bare action (no per-domain) — `Web(domain:x)` degrades
   to all-or-nothing there.
 

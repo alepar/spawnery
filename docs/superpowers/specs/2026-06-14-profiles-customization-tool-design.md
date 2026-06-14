@@ -120,9 +120,11 @@ carries `{ normalized:{…}, native:{<agent>:<fragment>}, instructions:<content?
     prefix + trailing `*`, **no `?`/regex/interior wildcards** ([spike-verified enforcement](2026-06-14-profiles-spike-results.md)).
     **claude + opencode are first-class** (deny actually blocks — emitter handles claude's
     space-boundary form + opencode's catch-all-first/last-match ordering). **codex per-command →
-    emit the experimental `execpolicy` `.rules`** (`prefix_rule(...)`; decision 2026-06-14, preview-
-    stability accepted; the artifact reports an "experimental" capability signal; runtime enforcement
-    under confirmation). `Web(domain:x)` is lossy on opencode (no per-domain) → reported.
+    emit `$CODEX_HOME/rules/default.rules`** (experimental `execpolicy` Starlark `prefix_rule(...)`;
+    decision 2026-06-14). **Spike-CONFIRMED runtime-enforced** (on by default; rejects before spawn;
+    works in both `exec` and the `codex-tui` pty lane) → codex `deniedCommands` is genuinely supported.
+    Pin the codex version + isolate the `.rules` emission behind an adapter (vendor "experimental").
+    `Web(domain:x)` is lossy on opencode (no per-domain) → reported.
 - **`instructions`**: a content blob written to a **dedicated managed file** in each agent's
   instruction *set* (NOT `CLAUDE.md`/`SOUL.md`, which hold the agent's own runtime memory — roast C4):
   e.g. `~/.claude/profile-instructions.md` referenced from the instructions glob, opencode
@@ -277,12 +279,13 @@ At `CreateSpawn` with `profile_id`, the CP:
 (confirmed all 3); ✅ approvalPosture realization (no launch flag; `auto` egress-safe but model-tier-
 gated; codex limited; default=`yolo`); ✅ plugin headless (works all 3 — build them); ✅ command grammar
 (claude+opencode native, codex via experimental execpolicy).
+Also ✅ **codex `execpolicy` runtime enforcement** — CONFIRMED (auto-loads `$CODEX_HOME/rules/default.rules`,
+on by default, enforced before spawn in both `exec` + `codex-tui` lanes) → codex `deniedCommands`
+supported; pin version + adapter-isolate the `.rules` format.
 **FOLLOW-UPS (during implementation):**
-1. **codex `execpolicy` runtime enforcement** — confirm codex enforces auto-loaded `.rules` at runtime
-   (not just `execpolicy check`) in the pty lane; *if not*, fall back to codex `deniedCommands` reported
-   unsupported. *(spike in progress)*
-2. **codex tmux/ACP approval lane** — does `approval_policy` take effect in `codex-tui` (vs `exec`,
-   which ignores it)? Determines whether codex non-`yolo` posture is partially supported.
+1. **codex `approval_policy` posture in the `codex-tui` lane** — does `always-ask`/`ask-risky` take
+   effect via `approval_policy` in the pty lane (vs `exec`, which ignores it)? Determines whether codex
+   non-`yolo` *posture* (distinct from per-command deny, already confirmed) is partially supported.
 3. **codex MCP tool-call e2e** — codex `mcp list` has no live health-check, so validate MCP load on
    codex via an actual tool-call (the load proof covered this once; keep in the e2e suite).
 4. Curated-catalog ↔ E5-marketplace reuse boundary; goose config-surface verification before any goose
