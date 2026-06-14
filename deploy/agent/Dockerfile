@@ -88,6 +88,19 @@ RUN set -eux; \
     install -m 0755 /tmp/nori/nori /usr/local/bin/nori; \
     rm -rf /tmp/nori.tar.gz /tmp/nori; \
     nori --version
+# hermes (Nous Research hermes-agent) — Python ACP agent (hermes-acp launcher case).
+# Pinned; the [acp] extra pulls agent-client-protocol. Isolated venv (PEP-668).
+ARG HERMES_VERSION=0.15.2
+RUN set -eux; \
+    chmod 1777 /tmp; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends python3 python3-venv; \
+    rm -rf /var/lib/apt/lists/*; \
+    python3 -m venv /opt/hermes/venv; \
+    /opt/hermes/venv/bin/pip install --no-cache-dir "hermes-agent[acp]==${HERMES_VERSION}"; \
+    ln -sf /opt/hermes/venv/bin/hermes /usr/local/bin/hermes; \
+    hermes acp --check
+
 # Pre-run the one-time SQLite migration + models.json fetch at build time (network available here),
 # so a fresh container is ready in seconds instead of doing a multi-minute first-run migration.
 RUN sh -c 'opencode serve --port 4096 --hostname 127.0.0.1 >/tmp/m.log 2>&1 & P=$!; \

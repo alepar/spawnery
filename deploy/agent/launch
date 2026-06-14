@@ -112,6 +112,20 @@ case "$RUNNABLE" in
     export GOOSE_TELEMETRY_OFF="${GOOSE_TELEMETRY_OFF:-1}"
     exec /usr/local/bin/acpmux goose acp
     ;;
+  hermes-acp)
+    # Hermes (Nous Research hermes-agent) speaks native ACP over stdio; acpmux fans N ACP
+    # clients onto one shared `hermes acp`. Inference rides the OpenAI sidecar path (its own
+    # chat.completions loop), like goose — the sidecar injects the real OpenRouter key.
+    export ACP_LISTEN="tcp://0.0.0.0:${ACP_PORT}"
+    SIDECAR_OAI="${OPENAI_BASE_URL:-http://127.0.0.1:8080/v1}"
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-$SIDECAR_OAI}"
+    export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-unused-sidecar-injects-real-key}"
+    export HERMES_INFERENCE_PROVIDER="${HERMES_INFERENCE_PROVIDER:-custom}"
+    export HERMES_BASE_URL="${HERMES_BASE_URL:-$SIDECAR_OAI}"
+    export HERMES_API_KEY="${HERMES_API_KEY:-sk-unused-sidecar-injects-real-key}"
+    export HERMES_INFERENCE_MODEL="${HERMES_INFERENCE_MODEL:-${SPAWN_MODEL:-openai/gpt-4o-mini}}"
+    exec /usr/local/bin/acpmux hermes acp
+    ;;
   opencode-tui)
     export TERM="${TERM:-xterm-256color}"
     setup_opencode_provider   # same sidecar provider + model as opencode-served

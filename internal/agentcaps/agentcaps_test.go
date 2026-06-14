@@ -48,13 +48,26 @@ func TestLookup(t *testing.T) {
 }
 
 func TestKnown(t *testing.T) {
-	for _, b := range []string{"goose", "opencode", "claude-code", "codex"} {
+	for _, b := range []string{"goose", "opencode", "claude-code", "codex", "hermes"} {
 		if !Known(b) {
 			t.Fatalf("%q should be known", b)
 		}
 	}
 	if Known("aider") {
 		t.Fatalf("aider is not seeded yet; should not be known")
+	}
+}
+
+func TestHermesAcpRunnable(t *testing.T) {
+	r, ok := Lookup("hermes", "hermes-acp")
+	if !ok {
+		t.Fatalf("hermes/hermes-acp should resolve")
+	}
+	if r.Mode != ModeACP || r.Relay != RelayPump {
+		t.Fatalf("hermes-acp = mode %q relay %q", r.Mode, r.Relay)
+	}
+	if len(r.Launch) == 0 {
+		t.Fatalf("hermes-acp needs a Launch argv")
 	}
 }
 
