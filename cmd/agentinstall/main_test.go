@@ -138,13 +138,13 @@ func TestApplySmoke(t *testing.T) {
 		t.Errorf("report[0].Status: got %q, want %q", r0.Status, "applied")
 	}
 
-	// Second report: codex/mcp → skipped (MCP emitter not yet implemented)
+	// Second report: codex/mcp → applied (InstallMCP implemented in sp-cywj)
 	r1 := result.Reports[1]
 	if r1.Agent != "codex" || r1.Kind != "mcp" || r1.Name != "test-mcp" {
 		t.Errorf("report[1]: got %+v, want codex/mcp/test-mcp", r1)
 	}
-	if r1.Status != "skipped" {
-		t.Errorf("report[1].Status: got %q, want %q", r1.Status, "skipped")
+	if r1.Status != "applied" {
+		t.Errorf("report[1].Status: got %q, want %q", r1.Status, "applied")
 	}
 }
 
