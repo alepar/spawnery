@@ -37,4 +37,15 @@ func (e gooseEmitter) InstallSkill(a Artifact, _ Options) Report {
 	}
 }
 
-// InstallMCP and ApplyConfig are base placeholders (sp-cywj/g5x8 fill).
+// ApplyConfig is permanently deferred for goose — goose config format/scope not yet validated.
+func (e gooseEmitter) ApplyConfig(a Artifact, _ Options) Report {
+	return Report{
+		Agent:  e.layout.Name,
+		Kind:   KindConfig,
+		Name:   a.Name,
+		Status: StatusSkipped,
+		Reason: "goose config deferred",
+	}
+}
+
+// InstallMCP is a base placeholder (sp-cywj fills).

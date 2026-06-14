@@ -249,3 +249,65 @@ func TestApplyMissingManifest(t *testing.T) {
 		t.Fatal("expected non-zero exit for missing manifest")
 	}
 }
+
+// TestInstallConfigSetFlag exercises the `install --agent codex config --set approvalPosture=never` CLI path.
+func TestInstallConfigSetFlag(t *testing.T) {
+	bin := buildAgentinstall(t)
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin,
+		"install", "--agent", "codex",
+		"config", "--name", "myconfig", "--set", "approvalPosture=never",
+	)
+	cmd.Env = append(os.Environ(), "HOME="+home, "CODEX_HOME="+codexHome)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("install --agent codex config --set approvalPosture=never: %v\noutput: %s", err, out)
+	}
+
+	var result struct {
+		Reports []struct {
+			Agent  string `json:"agent"`
+			Kind   string `json:"kind"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"reports"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse output: %v\noutput: %s", err, out)
+	}
+	if len(result.Reports) != 1 {
+		t.Fatalf("expected 1 report, got %d: %+v", len(result.Reports), result.Reports)
+	}
+	r := result.Reports[0]
+	if r.Agent != "codex" {
+		t.Errorf("Agent: got %q, want codex", r.Agent)
+	}
+	if r.Kind != "config" {
+		t.Errorf("Kind: got %q, want config", r.Kind)
+	}
+	if r.Name != "myconfig" {
+		t.Errorf("Name: got %q, want myconfig", r.Name)
+	}
+	if r.Status != "applied" {
+		t.Errorf("Status: got %q (reason: %q), want applied", r.Status, r.Reason)
+	}
+
+	// Verify config.toml contains approval_policy = "never"
+	configPath := filepath.Join(codexHome, "config.toml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	if !strings.Contains(string(data), "approval_policy") {
+		t.Errorf("config.toml does not contain approval_policy\ncontent:\n%s", data)
+	}
+	if !strings.Contains(string(data), "never") {
+		t.Errorf("config.toml does not contain 'never'\ncontent:\n%s", data)
+	}
+}

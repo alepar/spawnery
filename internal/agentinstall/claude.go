@@ -31,4 +31,5 @@ func (e claudeEmitter) InstallSkill(a Artifact, opts Options) Report {
 	return installSkillTree(e.layout, a, opts)
 }
 
-// InstallMCP and ApplyConfig are base placeholders (sp-cywj/g5x8 fill).
+// InstallMCP is implemented in mcp.go (sp-cywj). ApplyConfig is implemented in config.go (sp-g5x8).
+// ForbiddenConfigKeys: ["model"] — model is launcher-regenerated; writing it would cause conflicts.

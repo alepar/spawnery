@@ -131,8 +131,24 @@ func installCmd() *cli.Command {
 		Commands: []*cli.Command{
 			installSubCmd("skill", "Install a skill directory"),
 			installSubCmd("mcp", "Install an MCP server entry"),
-			installSubCmd("config", "Apply config keys"),
+			installConfigSubCmd(),
 		},
+	}
+}
+
+// resolveTargets parses the --agent / --all-detected flags from cmd (a subcommand whose
+// parent carries those flags) and returns the targets slice.
+func resolveInstallTargets(cmd *cli.Command) ([]string, error) {
+	// urfave/cli v3 walks the lineage upward, so cmd.Bool/String finds flags on parent "install".
+	allDetected := cmd.Bool("all-detected")
+	agentName := cmd.String("agent")
+	switch {
+	case allDetected:
+		return []string{"all-detected"}, nil
+	case agentName != "":
+		return strings.Split(agentName, ","), nil
+	default:
+		return nil, fmt.Errorf("either --agent or --all-detected must be specified")
 	}
 }
 
@@ -168,26 +184,13 @@ func installSubCmd(kindStr, usage string) *cli.Command {
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			env := osEnviron()
 
-			// Resolve targets
-			// NOTE: use cmd (the subcommand), not cmd.Root(); urfave/cli v3 walks
-			// the lineage upward, so cmd.Bool/String finds flags declared on the
-			// parent "install" command without crossing to the root.
-			var targets []string
-			parentCmd := cmd
-			allDetected := parentCmd.Bool("all-detected")
-			agentName := parentCmd.String("agent")
-
-			switch {
-			case allDetected:
-				targets = []string{"all-detected"}
-			case agentName != "":
-				targets = strings.Split(agentName, ",")
-			default:
-				return fmt.Errorf("either --agent or --all-detected must be specified")
+			targets, err := resolveInstallTargets(cmd)
+			if err != nil {
+				return err
 			}
 
 			name := cmd.String("name")
-			secretsDir := parentCmd.String("secrets")
+			secretsDir := cmd.String("secrets")
 
 			artifact := agentinstall.Artifact{
 				Kind:    kind,
@@ -219,10 +222,77 @@ func installSubCmd(kindStr, usage string) *cli.Command {
 				} else {
 					return fmt.Errorf("either --command or --url is required for mcp kind")
 				}
-			case agentinstall.KindConfig:
-				artifact.Config = &agentinstall.ConfigPayload{
-					Normalized: map[string]interface{}{},
+			}
+
+			m := agentinstall.Manifest{Artifacts: []agentinstall.Artifact{artifact}}
+			reg := agentinstall.NewRegistry(env)
+			opts := agentinstall.Options{
+				HomeDir:    env.Home(),
+				SecretsDir: secretsDir,
+			}
+
+			result := agentinstall.Apply(reg, m, opts, env)
+
+			data, err := json.Marshal(result)
+			if err != nil {
+				return fmt.Errorf("marshal result: %w", err)
+			}
+			fmt.Println(string(data))
+			return nil
+		},
+	}
+}
+
+// installConfigSubCmd returns the `install config` subcommand with --set key=value support.
+func installConfigSubCmd() *cli.Command {
+	return &cli.Command{
+		Name:  "config",
+		Usage: "Apply config keys to agent config files",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:     "name",
+				Aliases:  []string{"n"},
+				Usage:    "Artifact name",
+				Required: true,
+			},
+			&cli.StringSliceFlag{
+				Name:  "set",
+				Usage: "Set a normalized config key (format: key=value, repeatable; e.g. --set approvalPosture=never)",
+			},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			env := osEnviron()
+
+			targets, err := resolveInstallTargets(cmd)
+			if err != nil {
+				return err
+			}
+
+			name := cmd.String("name")
+			secretsDir := cmd.String("secrets")
+
+			// Parse --set key=value pairs into the normalized map.
+			normalized := make(map[string]interface{})
+			for _, kv := range cmd.StringSlice("set") {
+				idx := strings.IndexByte(kv, '=')
+				if idx < 0 {
+					return fmt.Errorf("--set %q: expected key=value format", kv)
 				}
+				key := kv[:idx]
+				val := kv[idx+1:]
+				if key == "" {
+					return fmt.Errorf("--set %q: key must not be empty", kv)
+				}
+				normalized[key] = val
+			}
+
+			artifact := agentinstall.Artifact{
+				Kind:    agentinstall.KindConfig,
+				Name:    name,
+				Targets: targets,
+				Config: &agentinstall.ConfigPayload{
+					Normalized: normalized,
+				},
 			}
 
 			m := agentinstall.Manifest{Artifacts: []agentinstall.Artifact{artifact}}
