@@ -65,6 +65,10 @@ type Server struct {
 	suspendTimeout      time.Duration   // generous absolute backstop for suspend; overridable in tests
 	suspendStallWindow  time.Duration   // per-transition stall window (operative bound); overridable in tests
 
+	resumes            *resumeWaiters // correlates a ResumeSpawn with node progress/ACTIVE (sp-u53.7.2)
+	resumeTimeout      time.Duration  // generous absolute backstop for resume; overridable in tests
+	resumeStallWindow  time.Duration  // per-transition stall window (operative bound); overridable in tests
+
 	// upgradeWaiters correlates UpgradeToOwnerSealed requests with SealJournalKeyToOwnerResponse
 	// messages from the node (sp-8dkp §4). Keyed by per-request request_id.
 	upgradeWaiters *upgradeWaiters
@@ -150,6 +154,7 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		cpID: uuid.NewString(), claimTTL: defaultClaimTTL,
 		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout, suspendStallWindow: defaultSuspendStallWindow,
+		resumes: newResumeWaiters(), resumeTimeout: defaultResumeTimeout, resumeStallWindow: defaultResumeStallWindow,
 		upgradeWaiters:    newUpgradeWaiters(),
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
@@ -353,17 +358,40 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			if !s.suspends.deliver(m.SuspendComplete) {
 				go s.reconcileLateSuspend(context.WithoutCancel(ctx), m.SuspendComplete)
 			}
-			// TODO(sp-u53.7.2-proto): when proto/node/v1/node.proto gains SuspendProgress, add:
-			// case *nodev1.NodeMessage_SuspendProgress:
-			//     s.suspends.progress(SuspendProgressHint{
-			//         SpawnID:    m.SuspendProgress.GetSpawnId(),
-			//         Generation: m.SuspendProgress.GetGeneration(),
-			//         Phase:      m.SuspendProgress.GetPhase(),
-			//         Detail:     m.SuspendProgress.GetDetail(),
-			//         Markers:    mountMarkersToMap(m.SuspendProgress.GetMarkers()),
-			//     })
+		case *nodev1.NodeMessage_SuspendProgress:
+			// Route incremental suspend progress to the in-flight SuspendSpawn waiter so the CP
+			// stall detector resets its timer (sp-u53.7.2). Stale-gen or unmatched signals are dropped.
+			s.suspends.progress(SuspendProgressHint{
+				SpawnID:    m.SuspendProgress.GetSpawnId(),
+				Generation: m.SuspendProgress.GetGeneration(),
+				Phase:      m.SuspendProgress.GetPhase(),
+				Detail:     m.SuspendProgress.GetDetail(),
+				Markers:    mountMarkersToMap(m.SuspendProgress.GetMarkers()),
+			})
+		case *nodev1.NodeMessage_ResumeProgress:
+			// Route incremental resume progress to the in-flight ResumeSpawn waiter so the CP
+			// stall detector resets its timer (sp-u53.7.2). Stale-gen or unmatched signals are dropped.
+			s.resumes.progress(ResumeProgressHint{
+				SpawnID:    m.ResumeProgress.GetSpawnId(),
+				Generation: m.ResumeProgress.GetGeneration(),
+				Phase:      m.ResumeProgress.GetPhase(),
+				Detail:     m.ResumeProgress.GetDetail(),
+			})
 		}
 	}
+}
+
+// mountMarkersToMap converts a proto MountMarker slice to a string map for use with
+// SuspendProgressHint.Markers. Returns nil when markers is empty.
+func mountMarkersToMap(markers []*nodev1.MountMarker) map[string]string {
+	if len(markers) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(markers))
+	for _, mk := range markers {
+		m[mk.GetName()] = mk.GetMarker()
+	}
+	return m
 }
 
 // reconcileInventory diffs the node's reported running inventory against the store (state/DAO

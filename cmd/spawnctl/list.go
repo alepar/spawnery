@@ -29,7 +29,13 @@ func listSpawns(cpAddr string, src *cpTokenSource) []*cpv1.SpawnSummary {
 }
 
 func spawnStatus(s *cpv1.SpawnSummary) string {
-	return strings.TrimPrefix(s.GetStatus().String(), "SPAWN_STATUS_")
+	base := strings.TrimPrefix(s.GetStatus().String(), "SPAWN_STATUS_")
+	// Append the current transition phase for in-flight transitions so the user sees real
+	// progress rather than a frozen SUSPENDING/RESUMING label (sp-u53.7.2).
+	if phase := s.GetTransitionPhase(); phase != "" {
+		return base + ":" + phase
+	}
+	return base
 }
 
 func spawnName(s *cpv1.SpawnSummary) string {

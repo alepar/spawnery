@@ -35,8 +35,8 @@ describe("listSpawns", () => {
     const out = await listSpawns();
     expect(calls[0].url).toContain("/cp.v1.SpawnService/ListSpawns");
     expect(out).toEqual([
-      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false },
-      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false },
+      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
+      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
     ]);
   });
   it("maps model and modelApplied from the response", async () => {
@@ -79,11 +79,16 @@ describe("spawnLifecycleAction", () => {
       ["error", { kind: "recreate", label: "Recreate" }],
       ["starting", { kind: "pending", label: "Starting…" }],
       ["suspending", { kind: "pending", label: "Suspending…" }],
+      ["resuming", { kind: "pending", label: "Resuming…" }],
       ["unknown", { kind: "pending", label: "Unavailable" }],
     ];
     for (const [status, want] of cases) {
       expect(spawnLifecycleAction(status), status).toEqual(want);
     }
+  });
+  it("includes phase in suspending/resuming labels when transitionPhase is set", () => {
+    expect(spawnLifecycleAction("suspending", "snapshot")).toEqual({ kind: "pending", label: "Suspending: snapshot" });
+    expect(spawnLifecycleAction("resuming", "attaching")).toEqual({ kind: "pending", label: "Resuming: attaching" });
   });
 });
 

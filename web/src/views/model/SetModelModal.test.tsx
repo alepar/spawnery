@@ -23,6 +23,7 @@ function spawn(overrides: Partial<SpawnView> = {}): SpawnView {
     model: "a",
     modelApplied: true,
     journalKeyDeliveryPending: false,
+    transitionPhase: "",
     ...overrides,
   };
 }

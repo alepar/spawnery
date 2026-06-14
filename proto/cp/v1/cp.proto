@@ -92,6 +92,11 @@ message SpawnSummary {
   // owner client has not yet delivered the owner-sealed journal key (the delivery-retry leg). The UI
   // derives this state on reload (WM3 reload-derivable) to reconstruct the delivery-retry modal leg.
   bool journal_key_delivery_pending = 12;
+  // transition_phase and transition_detail (fields 13-14): non-empty when status is Suspending or
+  // Resuming — carries the last progress phase/detail emitted by the node (sp-u53.7.2). Populated
+  // from the live in-flight waiter; empty for all other statuses. Not persisted — cleared on restart.
+  string transition_phase  = 13;
+  string transition_detail = 14;
 }
 // Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
 message ListSpawnsRequest  {}
