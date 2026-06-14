@@ -35,7 +35,7 @@ import (
 // Returns the SpawnService client, a context with 150s timeout, and the seeded app id.
 // All teardown is registered via t.Cleanup (LIFO order). The caller must NOT cancel the
 // context itself — cleanup handles it.
-func setupTmuxStack(t *testing.T) (cl cpv1connect.SpawnServiceClient, ctx context.Context, appID string) {
+func setupTmuxStack(t *testing.T, opts ...func(*spawnlet.ManagerConfig)) (cl cpv1connect.SpawnServiceClient, ctx context.Context, appID string) {
 	t.Helper()
 
 	// Load OpenRouter key — try env first, then repo-root .env.
@@ -102,12 +102,16 @@ func setupTmuxStack(t *testing.T) (cl cpv1connect.SpawnServiceClient, ctx contex
 	t.Cleanup(cpSrv.Close)
 
 	// --- node (attached) with real Docker + opencode image ---
-	mgr := spawnlet.NewManager(rt, spawnlet.ManagerConfig{
+	mgrCfg := spawnlet.ManagerConfig{
 		AgentImage:    "spawnery/agent:dev",
 		SidecarImage:  "spawnery/sidecar:dev",
 		OpenRouterKey: key,
 		DataRoot:      t.TempDir(),
-	})
+	}
+	for _, opt := range opts {
+		opt(&mgrCfg)
+	}
+	mgr := spawnlet.NewManager(rt, mgrCfg)
 	nodeCtx, stopNode := context.WithCancel(context.Background())
 	t.Cleanup(stopNode)
 	go node.Run(nodeCtx, mgr, h2cClient(), node.Config{
@@ -326,6 +330,42 @@ func TestCPTmuxSuspendResume(t *testing.T) {
 	t.Log("tmux suspend→resume verified (non-lossless: fresh container, terminal works again)")
 }
 
+// TestCPTmuxSuspendResumeWithRootfsDelta proves the dev-stack path where
+// DELTA_CAPTURE=true resumes a tmux spawn from spawnery/delta:<spawn>. The
+// capture scrub removes /tmp noise before commit, so this catches regressions
+// where the delta image starts without a standard sticky /tmp and tmux exits
+// immediately with "no suitable socket path".
+func TestCPTmuxSuspendResumeWithRootfsDelta(t *testing.T) {
+	cl, ctx, appID := setupTmuxStack(t, func(cfg *spawnlet.ManagerConfig) {
+		cfg.DeltaCapture = true
+	})
+
+	id := createTmuxSpawn(t, ctx, cl, appID)
+
+	waitActiveTmux(ctx, t, cl, id)
+	t.Log("spawn is ACTIVE")
+
+	assertTerminalBytes(t, ctx, cl, id)
+	t.Log("terminal bytes confirmed before suspend")
+
+	if _, err := cl.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("SuspendSpawn: %v", err)
+	}
+	t.Log("SuspendSpawn called, waiting for SUSPENDED status")
+	waitStatus(ctx, t, cl, id, cpv1.SpawnStatus_SPAWN_STATUS_SUSPENDED, 30*time.Second)
+	t.Log("spawn is SUSPENDED")
+
+	if _, err := cl.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("ResumeSpawn: %v", err)
+	}
+	t.Log("ResumeSpawn called, waiting for ACTIVE status")
+	waitActiveTmux(ctx, t, cl, id)
+	t.Log("spawn is ACTIVE again after resume")
+
+	assertTerminalBytes(t, ctx, cl, id)
+	t.Log("tmux rootfs-delta suspend→resume verified")
+}
+
 // waitActiveTmux polls ListSpawns until the spawn reaches ACTIVE, with a 60s timeout for container boot.
 func waitActiveTmux(ctx context.Context, t *testing.T, cl cpv1connect.SpawnServiceClient, id string) {
 	t.Helper()
@@ -384,12 +424,12 @@ func truncate(b []byte, n int) []byte {
 }
 
 // TestCPGooseTuiEndToEnd drives the goose-tui path through the dispatcher:
-// - CP + node run in-process with a real Docker backend
-// - node uses spawnery/agent:dev (goose + tmux) and advertises "goose" binary
-// - CreateSpawn selects goose-tui (tmux mode)
-// - the image dispatcher sets GOOSE_PROVIDER=openai, GOOSE_MODEL=$SPAWN_MODEL,
-//   OPENAI_BASE_URL (sidecar), GOOSE_TELEMETRY_OFF=1 and runs goose session in tmux
-// - After ACTIVE, a client opens a Session and asserts >0 raw terminal bytes arrive
+//   - CP + node run in-process with a real Docker backend
+//   - node uses spawnery/agent:dev (goose + tmux) and advertises "goose" binary
+//   - CreateSpawn selects goose-tui (tmux mode)
+//   - the image dispatcher sets GOOSE_PROVIDER=openai, GOOSE_MODEL=$SPAWN_MODEL,
+//     OPENAI_BASE_URL (sidecar), GOOSE_TELEMETRY_OFF=1 and runs goose session in tmux
+//   - After ACTIVE, a client opens a Session and asserts >0 raw terminal bytes arrive
 //
 // Requires Docker + spawnery/agent:dev + OPENROUTER_API_KEY in env (or .env at repo root).
 // FAILS loudly (no skips) when the environment is broken.
@@ -425,15 +465,15 @@ func TestCPGooseTuiEndToEnd(t *testing.T) {
 }
 
 // TestCPClaudeTuiEndToEnd drives the claude-tui path through the dispatcher:
-// - CP + node run in-process with a real Docker backend
-// - node uses spawnery/agent:dev (claude-code + tmux) and advertises "claude-code"
-// - CreateSpawn selects claude-tui (tmux mode)
-// - the image dispatcher sets ANTHROPIC_BASE_URL=<sidecar> (strip /v1), a dummy
-//   ANTHROPIC_API_KEY, ANTHROPIC_CUSTOM_MODEL_OPTION=$SPAWN_MODEL and runs `claude` in tmux.
-//   Claude Code reaches the model through the in-pod sidecar's /v1/messages converter, which
-//   translates Anthropic Messages -> OpenAI Chat Completions against OpenRouter.
-// - After ACTIVE, a client opens a Session and asserts >0 raw terminal bytes arrive (claude's
-//   TUI renders), proving the converter wiring is reachable end-to-end.
+//   - CP + node run in-process with a real Docker backend
+//   - node uses spawnery/agent:dev (claude-code + tmux) and advertises "claude-code"
+//   - CreateSpawn selects claude-tui (tmux mode)
+//   - the image dispatcher sets ANTHROPIC_BASE_URL=<sidecar> (strip /v1), a dummy
+//     ANTHROPIC_API_KEY, ANTHROPIC_CUSTOM_MODEL_OPTION=$SPAWN_MODEL and runs `claude` in tmux.
+//     Claude Code reaches the model through the in-pod sidecar's /v1/messages converter, which
+//     translates Anthropic Messages -> OpenAI Chat Completions against OpenRouter.
+//   - After ACTIVE, a client opens a Session and asserts >0 raw terminal bytes arrive (claude's
+//     TUI renders), proving the converter wiring is reachable end-to-end.
 //
 // Requires Docker + spawnery/agent:dev + spawnery/sidecar:dev + OPENROUTER_API_KEY in env
 // (or .env at repo root). FAILS loudly (no skips) when the environment is broken.

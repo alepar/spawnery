@@ -105,7 +105,12 @@ func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec Ag
 		Cmd:     spec.Cmd,
 		NetnsOf: h.SidecarID,
 		// The adapter listens on TCP for the node (both lanes now); no stdio ACP channel.
-		Env:         append([]string{fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", d.port())}, spec.Env...),
+		// TMUX_TMPDIR=/dev/shm lets tmux-mode agents recover even from legacy delta images
+		// whose scrubbed rootfs is missing /tmp; Docker/CRI provide /dev/shm as a writable tmpfs.
+		Env: append([]string{
+			fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", d.port()),
+			"TMUX_TMPDIR=/dev/shm",
+		}, spec.Env...),
 		Mounts:      spec.Mounts,
 		AttachStdio: false,
 		MemoryBytes: spec.Resources.MemoryBytes,

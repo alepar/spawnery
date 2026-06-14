@@ -135,6 +135,7 @@ func TestStartAgentAndStopLifecycle(t *testing.T) {
 	}
 	var hasAdapter bool
 	var acpListen string
+	var tmuxTmpDir string
 	for _, kv := range ag.Envs {
 		if kv.Key == "ACP_ADAPTER" && kv.Value == "1" {
 			hasAdapter = true
@@ -142,12 +143,18 @@ func TestStartAgentAndStopLifecycle(t *testing.T) {
 		if kv.Key == "ACP_LISTEN" {
 			acpListen = kv.Value
 		}
+		if kv.Key == "TMUX_TMPDIR" {
+			tmuxTmpDir = kv.Value
+		}
 	}
 	if !hasAdapter {
 		t.Fatalf("CRI agent must set ACP_ADAPTER=1; envs=%+v", ag.Envs)
 	}
 	if acpListen != "tcp://0.0.0.0:7000" {
 		t.Fatalf("CRI agent must listen for ACP over TCP (gVisor isolates the abstract UDS); ACP_LISTEN=%q", acpListen)
+	}
+	if tmuxTmpDir != "/dev/shm" {
+		t.Fatalf("CRI agent TMUX_TMPDIR = %q, want /dev/shm", tmuxTmpDir)
 	}
 
 	if err := b.Stop(ctx, h); err != nil {

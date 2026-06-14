@@ -74,7 +74,9 @@ type ManagerConfig struct {
 	// container via `rm -rf` BEFORE each CaptureDelta commit (live Docker-lane
 	// capture-time scrub; best-effort, non-fatal).  The deltamerge package
 	// applies the same filter during squash.  Default:
-	// ["/var/cache/apt", "/var/lib/apt/lists", "/tmp"].
+	// ["/var/cache/apt", "/var/lib/apt/lists", "/tmp"]. When /tmp is scrubbed,
+	// the default scrub recreates it with mode 1777 before CaptureDelta so tmux can
+	// create its socket directory after resume.
 	DeltaScrubPaths []string
 }
 
@@ -217,7 +219,7 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		secrets:    SecretInjector{Root: cfg.SecretsRoot},
 		deltaState: &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
 	}
-	// Default scrub function: exec `rm -rf <paths>` directly in the agent container before commit.
+	// Default scrub function: exec scrub commands directly in the agent container before commit.
 	// This runs while the container is still live (before pod.Stop).
 	// IMPORTANT: we exec by agentID directly — NOT via ExecRun — because by the time teardown
 	// calls scrubFn the spawn has already been removed from the store by Claim (in Stop/Suspend/
@@ -227,15 +229,40 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		if agentID == "" {
 			return fmt.Errorf("scrub: no agent container id")
 		}
-		args := append([]string{"rm", "-rf"}, paths...)
-		argv := execArgv(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime), agentID, args)
-		out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("exec %v: %w (%s)", args, err, out)
+		var firstErr error
+		for _, args := range defaultScrubCommands(paths) {
+			argv := execArgv(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime), agentID, args)
+			out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+			if err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("exec %v: %w (%s)", args, err, out)
+			}
 		}
-		return nil
+		return firstErr
 	}
 	return m
+}
+
+func defaultScrubCommands(paths []string) [][]string {
+	if len(paths) == 0 {
+		return nil
+	}
+	commands := [][]string{append([]string{"rm", "-rf"}, paths...)}
+	if scrubPathsIncludeTmp(paths) {
+		commands = append(commands,
+			[]string{"mkdir", "-p", "/tmp"},
+			[]string{"chmod", "1777", "/tmp"},
+		)
+	}
+	return commands
+}
+
+func scrubPathsIncludeTmp(paths []string) bool {
+	for _, p := range paths {
+		if filepath.Clean(p) == "/tmp" {
+			return true
+		}
+	}
+	return false
 }
 
 // egressEnforced reports whether the egress floor must be applied: cloud nodes always enforce

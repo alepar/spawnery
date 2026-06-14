@@ -267,10 +267,14 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 		Metadata: &runtimeapi.ContainerMetadata{Name: "agent"},
 		Image:    &runtimeapi.ImageSpec{Image: spec.Image},
 		Command:  spec.Cmd,
-		Envs:     toKeyValues(append([]string{"ACP_ADAPTER=1", fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", acpPort)}, spec.Env...)),
-		Mounts:   toCRIMounts(spec.Mounts),
-		Labels:   spec.Labels,
-		Linux:    lc,
+		Envs: toKeyValues(append([]string{
+			"ACP_ADAPTER=1",
+			fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", acpPort),
+			"TMUX_TMPDIR=/dev/shm",
+		}, spec.Env...)),
+		Mounts: toCRIMounts(spec.Mounts),
+		Labels: spec.Labels,
+		Linux:  lc,
 	})
 	if err != nil {
 		return fmt.Errorf("agent: %w", err)

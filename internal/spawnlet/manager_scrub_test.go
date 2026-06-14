@@ -11,6 +11,7 @@ package spawnlet
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -153,5 +154,23 @@ func TestScrubHappensBeforeCapture(t *testing.T) {
 	if scrubFiredAtOpsLen > captureIdx {
 		t.Fatalf("scrub fired at ops-len=%d but capture is at index=%d; scrub should be first",
 			scrubFiredAtOpsLen, captureIdx)
+	}
+}
+
+// SC5: The default scrub removes /tmp noise but restores the directory before
+// CaptureDelta commits the image. tmux needs a standard sticky /tmp for its
+// socket directory after resume.
+func TestDefaultScrubCommandsRestoreTmpBeforeCapture(t *testing.T) {
+	paths := []string{"/var/cache/apt", "/var/lib/apt/lists", "/tmp"}
+
+	got := defaultScrubCommands(paths)
+	want := [][]string{
+		{"rm", "-rf", "/var/cache/apt", "/var/lib/apt/lists", "/tmp"},
+		{"mkdir", "-p", "/tmp"},
+		{"chmod", "1777", "/tmp"},
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("defaultScrubCommands(%v) = %v, want %v", paths, got, want)
 	}
 }

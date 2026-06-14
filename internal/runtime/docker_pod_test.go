@@ -67,6 +67,9 @@ func TestDockerPodBackendStartPodStartAgentStop(t *testing.T) {
 	if ag.Image != "agent-img" || ag.NetnsOf != "fake-1" || ag.CapPolicy != CapDropAll || ag.Runtime != "runsc" {
 		t.Fatalf("agent spec wrong: %+v", ag)
 	}
+	if got := envValue(ag.Env, "TMUX_TMPDIR"); got != "/dev/shm" {
+		t.Fatalf("agent TMUX_TMPDIR = %q, want /dev/shm", got)
+	}
 
 	if err := b.Stop(ctx, h); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -496,4 +499,14 @@ func TestCaptureDeltaLayerGuardChained(t *testing.T) {
 	if !strings.Contains(err.Error(), "guard") && !strings.Contains(err.Error(), "47065") {
 		t.Fatalf("error should mention the guard: %v", err)
 	}
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return strings.TrimPrefix(kv, prefix)
+		}
+	}
+	return ""
 }
