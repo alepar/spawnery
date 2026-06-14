@@ -78,10 +78,19 @@ func applyCmd() *cli.Command {
 				Aliases: []string{"s"},
 				Usage:   "Path to the secrets directory",
 			},
+			&cli.StringFlag{
+				Name:  "agent",
+				Usage: "Apply only artifacts targeting this agent (claude|codex|opencode|hermes|goose); if omitted, applies to all targets",
+			},
+			&cli.DurationFlag{
+				Name:  "secret-wait-timeout",
+				Usage: "Maximum duration to wait for async-delivered secret files before declaring them missing (0 disables the wait)",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			artifactsDir := cmd.String("artifacts")
 			secretsDir := cmd.String("secrets")
+			agentFilter := cmd.String("agent")
 
 			m, err := agentinstall.LoadManifest(artifactsDir)
 			if err != nil {
@@ -91,12 +100,13 @@ func applyCmd() *cli.Command {
 			env := osEnviron()
 			reg := agentinstall.NewRegistry(env)
 			opts := agentinstall.Options{
-				HomeDir:      env.Home(),
-				SecretsDir:   secretsDir,
-				ArtifactsDir: artifactsDir,
+				HomeDir:           env.Home(),
+				SecretsDir:        secretsDir,
+				ArtifactsDir:      artifactsDir,
+				SecretWaitTimeout: cmd.Duration("secret-wait-timeout"),
 			}
 
-			result := agentinstall.Apply(reg, m, opts, env)
+			result := agentinstall.ApplyFiltered(reg, m, opts, env, agentFilter)
 
 			data, err := json.Marshal(result)
 			if err != nil {

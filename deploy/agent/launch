@@ -95,6 +95,7 @@ case "$RUNNABLE" in
     # Default opencode serve + adapter. Same sidecar provider config as opencode-tui.
     export ACP_LISTEN="tcp://0.0.0.0:${ACP_PORT}"
     setup_opencode_provider
+    apply-artifacts "${RUNNABLE:-opencode-served}" || true
     # opencode listens on loopback; both clients (the adapter and the in-pod TUI) are in-pod.
     opencode serve --port 4096 --hostname 127.0.0.1 &
     export OPENCODE_BASE_URL="${OPENCODE_BASE_URL:-http://127.0.0.1:4096}"
@@ -114,6 +115,7 @@ case "$RUNNABLE" in
   opencode-tui)
     export TERM="${TERM:-xterm-256color}"
     setup_opencode_provider   # same sidecar provider + model as opencode-served
+    apply-artifacts "$RUNNABLE" || true
     # opencode-tui is role-agnostic (sp-npxq): the PRIMARY (#0) session is whatever runnable was
     # chosen at spawn creation, and every image runnable is freely selectable as an additional
     # session too. So probe the served opencode backend at the URL the launcher derives:
@@ -156,6 +158,7 @@ case "$RUNNABLE" in
     export DISABLE_TELEMETRY="${DISABLE_TELEMETRY:-1}"
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
     export CLAUDE_CODE_DISABLE_TERMINAL_TITLE="${CLAUDE_CODE_DISABLE_TERMINAL_TITLE:-1}"
+    apply-artifacts "$RUNNABLE" || true
     start_tmux TERM ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_MODEL_OPTION ANTHROPIC_CUSTOM_MODEL_OPTION_NAME \
                ANTHROPIC_MODEL ENABLE_TOOL_SEARCH DISABLE_AUTOUPDATER DISABLE_TELEMETRY \
                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_DISABLE_TERMINAL_TITLE \
@@ -235,6 +238,7 @@ base_url = "${SIDECAR_OAI}"  # /v1 suffix kept: Codex appends /responses -> effe
 env_key = "CODEX_SPAWNERY_KEY"
 wire_api = "responses"
 EOF
+    apply-artifacts "$RUNNABLE" || true
     start_tmux TERM CODEX_HOME CODEX_SPAWNERY_KEY -- codex
     ;;
   shell)

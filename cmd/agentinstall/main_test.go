@@ -311,3 +311,81 @@ func TestInstallConfigSetFlag(t *testing.T) {
 		t.Errorf("config.toml does not contain 'never'\ncontent:\n%s", data)
 	}
 }
+
+// TestApplyAgentFilter exercises `apply --agent claude` with a manifest that targets both
+// claude and codex: only the claude report should appear and ~/.claude.json should be written.
+func TestApplyAgentFilter(t *testing.T) {
+	bin := buildAgentinstall(t)
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a staging dir with a manifest targeting both claude and codex.
+	stagingDir := t.TempDir()
+	manifest := `{
+		"artifacts": [
+			{
+				"kind": "mcp",
+				"name": "filter-test-mcp",
+				"targets": ["claude", "codex"],
+				"mcp": {
+					"http": {"url": "http://localhost:9090"}
+				}
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(stagingDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "apply", "--artifacts", stagingDir, "--agent", "claude")
+	cmd.Env = append(os.Environ(), "HOME="+home, "CODEX_HOME="+codexHome)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("apply --agent claude: %v\noutput: %s", err, out)
+	}
+
+	var result struct {
+		Reports []struct {
+			Agent  string `json:"agent"`
+			Kind   string `json:"kind"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"reports"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse output: %v\noutput: %s", err, out)
+	}
+
+	// Only claude should appear (codex silently skipped).
+	if len(result.Reports) != 1 {
+		t.Fatalf("expected 1 report, got %d: %+v", len(result.Reports), result.Reports)
+	}
+	r := result.Reports[0]
+	if r.Agent != "claude" {
+		t.Errorf("agent: got %q, want claude", r.Agent)
+	}
+	if r.Kind != "mcp" {
+		t.Errorf("kind: got %q, want mcp", r.Kind)
+	}
+	if r.Name != "filter-test-mcp" {
+		t.Errorf("name: got %q, want filter-test-mcp", r.Name)
+	}
+	if r.Status != "applied" {
+		t.Errorf("status: got %q, want applied", r.Status)
+	}
+
+	// ~/.claude.json should have been written.
+	claudeJSON := filepath.Join(home, ".claude.json")
+	if _, err := os.Stat(claudeJSON); err != nil {
+		t.Errorf("~/.claude.json not written: %v", err)
+	}
+
+	// ~/.codex/config.toml should NOT have been written (filter excluded it).
+	codexConfig := filepath.Join(codexHome, "config.toml")
+	if _, err := os.Stat(codexConfig); !os.IsNotExist(err) {
+		t.Errorf("codex config should not have been written when filter=claude: err=%v", err)
+	}
+}
