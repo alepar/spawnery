@@ -111,6 +111,32 @@ const (
 	// SpawnServiceUpgradeToOwnerSealedProcedure is the fully-qualified name of the SpawnService's
 	// UpgradeToOwnerSealed RPC.
 	SpawnServiceUpgradeToOwnerSealedProcedure = "/cp.v1.SpawnService/UpgradeToOwnerSealed"
+	// SpawnServiceCreateProfileProcedure is the fully-qualified name of the SpawnService's
+	// CreateProfile RPC.
+	SpawnServiceCreateProfileProcedure = "/cp.v1.SpawnService/CreateProfile"
+	// SpawnServiceGetProfileProcedure is the fully-qualified name of the SpawnService's GetProfile RPC.
+	SpawnServiceGetProfileProcedure = "/cp.v1.SpawnService/GetProfile"
+	// SpawnServiceListProfilesProcedure is the fully-qualified name of the SpawnService's ListProfiles
+	// RPC.
+	SpawnServiceListProfilesProcedure = "/cp.v1.SpawnService/ListProfiles"
+	// SpawnServiceUpdateProfileProcedure is the fully-qualified name of the SpawnService's
+	// UpdateProfile RPC.
+	SpawnServiceUpdateProfileProcedure = "/cp.v1.SpawnService/UpdateProfile"
+	// SpawnServiceDeleteProfileProcedure is the fully-qualified name of the SpawnService's
+	// DeleteProfile RPC.
+	SpawnServiceDeleteProfileProcedure = "/cp.v1.SpawnService/DeleteProfile"
+	// SpawnServiceAddProfileEntryProcedure is the fully-qualified name of the SpawnService's
+	// AddProfileEntry RPC.
+	SpawnServiceAddProfileEntryProcedure = "/cp.v1.SpawnService/AddProfileEntry"
+	// SpawnServiceRemoveProfileEntryProcedure is the fully-qualified name of the SpawnService's
+	// RemoveProfileEntry RPC.
+	SpawnServiceRemoveProfileEntryProcedure = "/cp.v1.SpawnService/RemoveProfileEntry"
+	// SpawnServiceAddProfileSecretRefProcedure is the fully-qualified name of the SpawnService's
+	// AddProfileSecretRef RPC.
+	SpawnServiceAddProfileSecretRefProcedure = "/cp.v1.SpawnService/AddProfileSecretRef"
+	// SpawnServiceRemoveProfileSecretRefProcedure is the fully-qualified name of the SpawnService's
+	// RemoveProfileSecretRef RPC.
+	SpawnServiceRemoveProfileSecretRefProcedure = "/cp.v1.SpawnService/RemoveProfileSecretRef"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -154,6 +180,17 @@ type SpawnServiceClient interface {
 	// W4: migration target enumeration + node-local->owner-sealed upgrade seam (sp-8dkp).
 	ListMigrationTargets(context.Context, *connect.Request[v1.ListMigrationTargetsRequest]) (*connect.Response[v1.ListMigrationTargetsResponse], error)
 	UpgradeToOwnerSealed(context.Context, *connect.Request[v1.UpgradeToOwnerSealedRequest]) (*connect.Response[v1.UpgradeToOwnerSealedResponse], error)
+	// Profile CRUD (sp-nrzf.3.5): owner-scoped customization profiles with CAS version fencing.
+	// Owner is resolved from auth context server-side (no owner field in requests).
+	CreateProfile(context.Context, *connect.Request[v1.CreateProfileRequest]) (*connect.Response[v1.CreateProfileResponse], error)
+	GetProfile(context.Context, *connect.Request[v1.GetProfileRequest]) (*connect.Response[v1.GetProfileResponse], error)
+	ListProfiles(context.Context, *connect.Request[v1.ListProfilesRequest]) (*connect.Response[v1.ListProfilesResponse], error)
+	UpdateProfile(context.Context, *connect.Request[v1.UpdateProfileRequest]) (*connect.Response[v1.UpdateProfileResponse], error)
+	DeleteProfile(context.Context, *connect.Request[v1.DeleteProfileRequest]) (*connect.Response[v1.DeleteProfileResponse], error)
+	AddProfileEntry(context.Context, *connect.Request[v1.AddProfileEntryRequest]) (*connect.Response[v1.AddProfileEntryResponse], error)
+	RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error)
+	AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error)
+	RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -335,6 +372,60 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("UpgradeToOwnerSealed")),
 			connect.WithClientOptions(opts...),
 		),
+		createProfile: connect.NewClient[v1.CreateProfileRequest, v1.CreateProfileResponse](
+			httpClient,
+			baseURL+SpawnServiceCreateProfileProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("CreateProfile")),
+			connect.WithClientOptions(opts...),
+		),
+		getProfile: connect.NewClient[v1.GetProfileRequest, v1.GetProfileResponse](
+			httpClient,
+			baseURL+SpawnServiceGetProfileProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("GetProfile")),
+			connect.WithClientOptions(opts...),
+		),
+		listProfiles: connect.NewClient[v1.ListProfilesRequest, v1.ListProfilesResponse](
+			httpClient,
+			baseURL+SpawnServiceListProfilesProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ListProfiles")),
+			connect.WithClientOptions(opts...),
+		),
+		updateProfile: connect.NewClient[v1.UpdateProfileRequest, v1.UpdateProfileResponse](
+			httpClient,
+			baseURL+SpawnServiceUpdateProfileProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("UpdateProfile")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteProfile: connect.NewClient[v1.DeleteProfileRequest, v1.DeleteProfileResponse](
+			httpClient,
+			baseURL+SpawnServiceDeleteProfileProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("DeleteProfile")),
+			connect.WithClientOptions(opts...),
+		),
+		addProfileEntry: connect.NewClient[v1.AddProfileEntryRequest, v1.AddProfileEntryResponse](
+			httpClient,
+			baseURL+SpawnServiceAddProfileEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("AddProfileEntry")),
+			connect.WithClientOptions(opts...),
+		),
+		removeProfileEntry: connect.NewClient[v1.RemoveProfileEntryRequest, v1.RemoveProfileEntryResponse](
+			httpClient,
+			baseURL+SpawnServiceRemoveProfileEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileEntry")),
+			connect.WithClientOptions(opts...),
+		),
+		addProfileSecretRef: connect.NewClient[v1.AddProfileSecretRefRequest, v1.AddProfileSecretRefResponse](
+			httpClient,
+			baseURL+SpawnServiceAddProfileSecretRefProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("AddProfileSecretRef")),
+			connect.WithClientOptions(opts...),
+		),
+		removeProfileSecretRef: connect.NewClient[v1.RemoveProfileSecretRefRequest, v1.RemoveProfileSecretRefResponse](
+			httpClient,
+			baseURL+SpawnServiceRemoveProfileSecretRefProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileSecretRef")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -368,6 +459,15 @@ type spawnServiceClient struct {
 	submitIntent            *connect.Client[v1.SubmitIntentRequest, v1.SubmitIntentResponse]
 	listMigrationTargets    *connect.Client[v1.ListMigrationTargetsRequest, v1.ListMigrationTargetsResponse]
 	upgradeToOwnerSealed    *connect.Client[v1.UpgradeToOwnerSealedRequest, v1.UpgradeToOwnerSealedResponse]
+	createProfile           *connect.Client[v1.CreateProfileRequest, v1.CreateProfileResponse]
+	getProfile              *connect.Client[v1.GetProfileRequest, v1.GetProfileResponse]
+	listProfiles            *connect.Client[v1.ListProfilesRequest, v1.ListProfilesResponse]
+	updateProfile           *connect.Client[v1.UpdateProfileRequest, v1.UpdateProfileResponse]
+	deleteProfile           *connect.Client[v1.DeleteProfileRequest, v1.DeleteProfileResponse]
+	addProfileEntry         *connect.Client[v1.AddProfileEntryRequest, v1.AddProfileEntryResponse]
+	removeProfileEntry      *connect.Client[v1.RemoveProfileEntryRequest, v1.RemoveProfileEntryResponse]
+	addProfileSecretRef     *connect.Client[v1.AddProfileSecretRefRequest, v1.AddProfileSecretRefResponse]
+	removeProfileSecretRef  *connect.Client[v1.RemoveProfileSecretRefRequest, v1.RemoveProfileSecretRefResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -510,6 +610,51 @@ func (c *spawnServiceClient) UpgradeToOwnerSealed(ctx context.Context, req *conn
 	return c.upgradeToOwnerSealed.CallUnary(ctx, req)
 }
 
+// CreateProfile calls cp.v1.SpawnService.CreateProfile.
+func (c *spawnServiceClient) CreateProfile(ctx context.Context, req *connect.Request[v1.CreateProfileRequest]) (*connect.Response[v1.CreateProfileResponse], error) {
+	return c.createProfile.CallUnary(ctx, req)
+}
+
+// GetProfile calls cp.v1.SpawnService.GetProfile.
+func (c *spawnServiceClient) GetProfile(ctx context.Context, req *connect.Request[v1.GetProfileRequest]) (*connect.Response[v1.GetProfileResponse], error) {
+	return c.getProfile.CallUnary(ctx, req)
+}
+
+// ListProfiles calls cp.v1.SpawnService.ListProfiles.
+func (c *spawnServiceClient) ListProfiles(ctx context.Context, req *connect.Request[v1.ListProfilesRequest]) (*connect.Response[v1.ListProfilesResponse], error) {
+	return c.listProfiles.CallUnary(ctx, req)
+}
+
+// UpdateProfile calls cp.v1.SpawnService.UpdateProfile.
+func (c *spawnServiceClient) UpdateProfile(ctx context.Context, req *connect.Request[v1.UpdateProfileRequest]) (*connect.Response[v1.UpdateProfileResponse], error) {
+	return c.updateProfile.CallUnary(ctx, req)
+}
+
+// DeleteProfile calls cp.v1.SpawnService.DeleteProfile.
+func (c *spawnServiceClient) DeleteProfile(ctx context.Context, req *connect.Request[v1.DeleteProfileRequest]) (*connect.Response[v1.DeleteProfileResponse], error) {
+	return c.deleteProfile.CallUnary(ctx, req)
+}
+
+// AddProfileEntry calls cp.v1.SpawnService.AddProfileEntry.
+func (c *spawnServiceClient) AddProfileEntry(ctx context.Context, req *connect.Request[v1.AddProfileEntryRequest]) (*connect.Response[v1.AddProfileEntryResponse], error) {
+	return c.addProfileEntry.CallUnary(ctx, req)
+}
+
+// RemoveProfileEntry calls cp.v1.SpawnService.RemoveProfileEntry.
+func (c *spawnServiceClient) RemoveProfileEntry(ctx context.Context, req *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error) {
+	return c.removeProfileEntry.CallUnary(ctx, req)
+}
+
+// AddProfileSecretRef calls cp.v1.SpawnService.AddProfileSecretRef.
+func (c *spawnServiceClient) AddProfileSecretRef(ctx context.Context, req *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error) {
+	return c.addProfileSecretRef.CallUnary(ctx, req)
+}
+
+// RemoveProfileSecretRef calls cp.v1.SpawnService.RemoveProfileSecretRef.
+func (c *spawnServiceClient) RemoveProfileSecretRef(ctx context.Context, req *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error) {
+	return c.removeProfileSecretRef.CallUnary(ctx, req)
+}
+
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -551,6 +696,17 @@ type SpawnServiceHandler interface {
 	// W4: migration target enumeration + node-local->owner-sealed upgrade seam (sp-8dkp).
 	ListMigrationTargets(context.Context, *connect.Request[v1.ListMigrationTargetsRequest]) (*connect.Response[v1.ListMigrationTargetsResponse], error)
 	UpgradeToOwnerSealed(context.Context, *connect.Request[v1.UpgradeToOwnerSealedRequest]) (*connect.Response[v1.UpgradeToOwnerSealedResponse], error)
+	// Profile CRUD (sp-nrzf.3.5): owner-scoped customization profiles with CAS version fencing.
+	// Owner is resolved from auth context server-side (no owner field in requests).
+	CreateProfile(context.Context, *connect.Request[v1.CreateProfileRequest]) (*connect.Response[v1.CreateProfileResponse], error)
+	GetProfile(context.Context, *connect.Request[v1.GetProfileRequest]) (*connect.Response[v1.GetProfileResponse], error)
+	ListProfiles(context.Context, *connect.Request[v1.ListProfilesRequest]) (*connect.Response[v1.ListProfilesResponse], error)
+	UpdateProfile(context.Context, *connect.Request[v1.UpdateProfileRequest]) (*connect.Response[v1.UpdateProfileResponse], error)
+	DeleteProfile(context.Context, *connect.Request[v1.DeleteProfileRequest]) (*connect.Response[v1.DeleteProfileResponse], error)
+	AddProfileEntry(context.Context, *connect.Request[v1.AddProfileEntryRequest]) (*connect.Response[v1.AddProfileEntryResponse], error)
+	RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error)
+	AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error)
+	RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -728,6 +884,60 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("UpgradeToOwnerSealed")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceCreateProfileHandler := connect.NewUnaryHandler(
+		SpawnServiceCreateProfileProcedure,
+		svc.CreateProfile,
+		connect.WithSchema(spawnServiceMethods.ByName("CreateProfile")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceGetProfileHandler := connect.NewUnaryHandler(
+		SpawnServiceGetProfileProcedure,
+		svc.GetProfile,
+		connect.WithSchema(spawnServiceMethods.ByName("GetProfile")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceListProfilesHandler := connect.NewUnaryHandler(
+		SpawnServiceListProfilesProcedure,
+		svc.ListProfiles,
+		connect.WithSchema(spawnServiceMethods.ByName("ListProfiles")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceUpdateProfileHandler := connect.NewUnaryHandler(
+		SpawnServiceUpdateProfileProcedure,
+		svc.UpdateProfile,
+		connect.WithSchema(spawnServiceMethods.ByName("UpdateProfile")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceDeleteProfileHandler := connect.NewUnaryHandler(
+		SpawnServiceDeleteProfileProcedure,
+		svc.DeleteProfile,
+		connect.WithSchema(spawnServiceMethods.ByName("DeleteProfile")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceAddProfileEntryHandler := connect.NewUnaryHandler(
+		SpawnServiceAddProfileEntryProcedure,
+		svc.AddProfileEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("AddProfileEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceRemoveProfileEntryHandler := connect.NewUnaryHandler(
+		SpawnServiceRemoveProfileEntryProcedure,
+		svc.RemoveProfileEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceAddProfileSecretRefHandler := connect.NewUnaryHandler(
+		SpawnServiceAddProfileSecretRefProcedure,
+		svc.AddProfileSecretRef,
+		connect.WithSchema(spawnServiceMethods.ByName("AddProfileSecretRef")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceRemoveProfileSecretRefHandler := connect.NewUnaryHandler(
+		SpawnServiceRemoveProfileSecretRefProcedure,
+		svc.RemoveProfileSecretRef,
+		connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileSecretRef")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
@@ -786,6 +996,24 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceListMigrationTargetsHandler.ServeHTTP(w, r)
 		case SpawnServiceUpgradeToOwnerSealedProcedure:
 			spawnServiceUpgradeToOwnerSealedHandler.ServeHTTP(w, r)
+		case SpawnServiceCreateProfileProcedure:
+			spawnServiceCreateProfileHandler.ServeHTTP(w, r)
+		case SpawnServiceGetProfileProcedure:
+			spawnServiceGetProfileHandler.ServeHTTP(w, r)
+		case SpawnServiceListProfilesProcedure:
+			spawnServiceListProfilesHandler.ServeHTTP(w, r)
+		case SpawnServiceUpdateProfileProcedure:
+			spawnServiceUpdateProfileHandler.ServeHTTP(w, r)
+		case SpawnServiceDeleteProfileProcedure:
+			spawnServiceDeleteProfileHandler.ServeHTTP(w, r)
+		case SpawnServiceAddProfileEntryProcedure:
+			spawnServiceAddProfileEntryHandler.ServeHTTP(w, r)
+		case SpawnServiceRemoveProfileEntryProcedure:
+			spawnServiceRemoveProfileEntryHandler.ServeHTTP(w, r)
+		case SpawnServiceAddProfileSecretRefProcedure:
+			spawnServiceAddProfileSecretRefHandler.ServeHTTP(w, r)
+		case SpawnServiceRemoveProfileSecretRefProcedure:
+			spawnServiceRemoveProfileSecretRefHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -905,4 +1133,40 @@ func (UnimplementedSpawnServiceHandler) ListMigrationTargets(context.Context, *c
 
 func (UnimplementedSpawnServiceHandler) UpgradeToOwnerSealed(context.Context, *connect.Request[v1.UpgradeToOwnerSealedRequest]) (*connect.Response[v1.UpgradeToOwnerSealedResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.UpgradeToOwnerSealed is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) CreateProfile(context.Context, *connect.Request[v1.CreateProfileRequest]) (*connect.Response[v1.CreateProfileResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.CreateProfile is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetProfile(context.Context, *connect.Request[v1.GetProfileRequest]) (*connect.Response[v1.GetProfileResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetProfile is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ListProfiles(context.Context, *connect.Request[v1.ListProfilesRequest]) (*connect.Response[v1.ListProfilesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListProfiles is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) UpdateProfile(context.Context, *connect.Request[v1.UpdateProfileRequest]) (*connect.Response[v1.UpdateProfileResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.UpdateProfile is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) DeleteProfile(context.Context, *connect.Request[v1.DeleteProfileRequest]) (*connect.Response[v1.DeleteProfileResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DeleteProfile is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) AddProfileEntry(context.Context, *connect.Request[v1.AddProfileEntryRequest]) (*connect.Response[v1.AddProfileEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.AddProfileEntry is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RemoveProfileEntry is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.AddProfileSecretRef is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RemoveProfileSecretRef is not implemented"))
 }

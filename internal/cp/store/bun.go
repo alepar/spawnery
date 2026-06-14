@@ -35,3 +35,4 @@ func (s *bunStore) Apps() AppRepo                 { return &appRepo{db: s.db} }
 func (s *bunStore) Spawns() SpawnRepo             { return &spawnRepo{db: s.db} }
 func (s *bunStore) AgentImages() AgentImageRepo   { return &agentImageRepo{db: s.db} }
 func (s *bunStore) TransferSets() TransferSetRepo { return &transferSetRepo{db: s.db} }
+func (s *bunStore) Profiles() ProfileRepo         { return &profileRepo{db: s.db} }

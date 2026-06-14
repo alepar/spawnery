@@ -44,6 +44,17 @@ service SpawnService {
   // W4: migration target enumeration + node-local->owner-sealed upgrade seam (sp-8dkp).
   rpc ListMigrationTargets(ListMigrationTargetsRequest) returns (ListMigrationTargetsResponse);
   rpc UpgradeToOwnerSealed(UpgradeToOwnerSealedRequest) returns (UpgradeToOwnerSealedResponse);
+  // Profile CRUD (sp-nrzf.3.5): owner-scoped customization profiles with CAS version fencing.
+  // Owner is resolved from auth context server-side (no owner field in requests).
+  rpc CreateProfile(CreateProfileRequest)               returns (CreateProfileResponse);
+  rpc GetProfile(GetProfileRequest)                     returns (GetProfileResponse);
+  rpc ListProfiles(ListProfilesRequest)                 returns (ListProfilesResponse);
+  rpc UpdateProfile(UpdateProfileRequest)               returns (UpdateProfileResponse);
+  rpc DeleteProfile(DeleteProfileRequest)               returns (DeleteProfileResponse);
+  rpc AddProfileEntry(AddProfileEntryRequest)           returns (AddProfileEntryResponse);
+  rpc RemoveProfileEntry(RemoveProfileEntryRequest)     returns (RemoveProfileEntryResponse);
+  rpc AddProfileSecretRef(AddProfileSecretRefRequest)   returns (AddProfileSecretRefResponse);
+  rpc RemoveProfileSecretRef(RemoveProfileSecretRefRequest) returns (RemoveProfileSecretRefResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -381,3 +392,83 @@ message ListMigrationTargetsResponse {
 // owner_device_pubkeys are the raw X25519 pubkeys of the owner's currently enrolled devices.
 message UpgradeToOwnerSealedRequest  { string spawn_id = 1; repeated bytes owner_device_pubkeys = 2; }
 message UpgradeToOwnerSealedResponse {}
+
+// --- Profile CRUD (sp-nrzf.3.5) --------------------------------------------
+
+// ProfileEntryKind discriminates what a ProfileEntry installs into a spawn.
+enum ProfileEntryKind {
+  PROFILE_ENTRY_KIND_UNSPECIFIED = 0;
+  PROFILE_ENTRY_KIND_SKILL       = 1;
+  PROFILE_ENTRY_KIND_MCP         = 2;
+  PROFILE_ENTRY_KIND_CONFIG      = 3;
+  PROFILE_ENTRY_KIND_PLUGIN      = 4;
+}
+
+// ProfileEntrySource discriminates where a ProfileEntry's content originates.
+enum ProfileEntrySource {
+  PROFILE_ENTRY_SOURCE_UNSPECIFIED  = 0;
+  PROFILE_ENTRY_SOURCE_CATALOG_REF  = 1;
+  PROFILE_ENTRY_SOURCE_CUSTOM       = 2;
+}
+
+// ProfileEntry carries one customization item (skill, MCP server, config, or plugin).
+message ProfileEntry {
+  string            entry_id        = 1;
+  ProfileEntryKind  kind            = 2;
+  string            name            = 3;
+  ProfileEntrySource source         = 4;
+  string            catalog_id      = 5; // set when source=CATALOG_REF
+  bytes             custom_inline   = 6; // set when source=CUSTOM (inline MVP; by-ref deferred)
+  repeated string   targets         = 7; // spawn targets; empty → ["all"]
+  repeated string   mcp_secret_refs = 8; // env-var names for MCP secret bindings
+}
+
+// Profile is the full profile view including its entries and attached secret ids.
+message Profile {
+  string                profile_id = 1;
+  string                name       = 2;
+  uint64                version    = 3; // CAS token
+  int64                 updated_at = 4;
+  repeated ProfileEntry entries    = 5;
+  repeated string       secret_ids = 6;
+}
+
+// ProfileSummary is the lightweight list view (no entries/secrets).
+message ProfileSummary {
+  string profile_id = 1;
+  string name       = 2;
+  uint64 version    = 3;
+  int64  updated_at = 4;
+}
+
+message CreateProfileRequest  { string name = 1; }
+message CreateProfileResponse { string profile_id = 1; uint64 version = 2; }
+
+message GetProfileRequest  { string profile_id = 1; }
+message GetProfileResponse { Profile profile = 1; }
+
+message ListProfilesRequest  {}
+message ListProfilesResponse { repeated ProfileSummary profiles = 1; }
+
+// UpdateProfile renames a profile with CAS fencing on expected_version.
+message UpdateProfileRequest  { string profile_id = 1; uint64 expected_version = 2; string name = 3; }
+message UpdateProfileResponse { uint64 version = 1; }
+
+message DeleteProfileRequest  { string profile_id = 1; }
+message DeleteProfileResponse {}
+
+// AddProfileEntry adds an entry to a profile, CAS-fenced by expected_version.
+message AddProfileEntryRequest  { string profile_id = 1; uint64 expected_version = 2; ProfileEntry entry = 3; }
+message AddProfileEntryResponse { string entry_id = 1; uint64 version = 2; }
+
+// RemoveProfileEntry removes an entry by entry_id, CAS-fenced.
+message RemoveProfileEntryRequest  { string profile_id = 1; uint64 expected_version = 2; string entry_id = 3; }
+message RemoveProfileEntryResponse { uint64 version = 1; }
+
+// AddProfileSecretRef attaches a secret reference to the profile, CAS-fenced.
+message AddProfileSecretRefRequest  { string profile_id = 1; uint64 expected_version = 2; string secret_id = 3; }
+message AddProfileSecretRefResponse { uint64 version = 1; }
+
+// RemoveProfileSecretRef detaches a secret reference from the profile, CAS-fenced.
+message RemoveProfileSecretRefRequest  { string profile_id = 1; uint64 expected_version = 2; string secret_id = 3; }
+message RemoveProfileSecretRefResponse { uint64 version = 1; }

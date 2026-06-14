@@ -158,12 +158,37 @@ type TransferSetRepo interface {
 	SetTransferKeyStatus(ctx context.Context, id string, status TransferKeyStatus, updatedAt int64) error
 }
 
+// ProfileRepo manages the owner-scoped profile spine (Profile + ProfileEntry + ProfileSecret
+// references). All mutations are CAS-fenced via the profile's version column.
+type ProfileRepo interface {
+	// Create inserts a new Profile (version=1). Returns an error if profile_id conflicts.
+	Create(ctx context.Context, p Profile) error
+	// Get loads a profile by profile_id along with its entries (ordered by entry_id ASC) and
+	// secret refs (ordered by secret_id ASC). Returns ErrNotFound when absent.
+	Get(ctx context.Context, profileID string) (Profile, []ProfileEntry, []ProfileSecret, error)
+	// ListByOwner returns all profiles for the given owner (unordered).
+	ListByOwner(ctx context.Context, ownerID string) ([]Profile, error)
+	// Rename CAS-renames the profile. Returns ErrNotFound (missing) or ErrConflict (stale version).
+	Rename(ctx context.Context, profileID string, expectedVersion uint64, name string, now int64) (newVersion uint64, err error)
+	// Delete removes the profile and its children. Not CAS-fenced (caller already owns the profile).
+	Delete(ctx context.Context, profileID string) error
+	// AddEntry CAS-adds an entry to the profile. Returns ErrNotFound or ErrConflict.
+	AddEntry(ctx context.Context, profileID string, expectedVersion uint64, e ProfileEntry, now int64) (newVersion uint64, err error)
+	// RemoveEntry CAS-removes an entry. Returns ErrNotFound or ErrConflict.
+	RemoveEntry(ctx context.Context, profileID string, expectedVersion uint64, entryID string, now int64) (newVersion uint64, err error)
+	// AddSecretRef CAS-adds a secret reference. Returns ErrNotFound or ErrConflict.
+	AddSecretRef(ctx context.Context, profileID string, expectedVersion uint64, secretID string, now int64) (newVersion uint64, err error)
+	// RemoveSecretRef CAS-removes a secret reference. Returns ErrNotFound or ErrConflict.
+	RemoveSecretRef(ctx context.Context, profileID string, expectedVersion uint64, secretID string, now int64) (newVersion uint64, err error)
+}
+
 type Store interface {
 	Owners() OwnerRepo
 	Apps() AppRepo
 	Spawns() SpawnRepo
 	AgentImages() AgentImageRepo
 	TransferSets() TransferSetRepo
+	Profiles() ProfileRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error

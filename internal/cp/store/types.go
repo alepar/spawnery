@@ -209,3 +209,58 @@ type AgentImageBinary struct {
 	Image         string `bun:"image,pk"`
 	Binary        string `bun:"binary_name,pk"`
 }
+
+// --- Profiles (sp-nrzf.3.5) ------------------------------------------------
+
+// ProfileEntryKind discriminates what a ProfileEntry installs into a spawn.
+type ProfileEntryKind string
+
+const (
+	ProfileEntrySkill  ProfileEntryKind = "skill"
+	ProfileEntryMCP    ProfileEntryKind = "mcp"
+	ProfileEntryConfig ProfileEntryKind = "config"
+	ProfileEntryPlugin ProfileEntryKind = "plugin"
+)
+
+// ProfileSourceKind discriminates where a ProfileEntry's content comes from.
+type ProfileSourceKind string
+
+const (
+	ProfileSourceCatalog ProfileSourceKind = "catalog_ref"
+	ProfileSourceCustom  ProfileSourceKind = "custom"
+)
+
+// Profile is the owner-scoped customization container with a version-CAS column.
+type Profile struct {
+	bun.BaseModel `bun:"table:profiles,alias:pf"`
+	ProfileID     string `bun:"profile_id,pk"`
+	OwnerID       string `bun:"owner_id,notnull"`
+	Name          string `bun:"name,notnull"`
+	Version       uint64 `bun:"version,notnull"` // CAS token
+	UpdatedAt     int64  `bun:"updated_at,notnull"`
+}
+
+// ProfileEntry is one item (skill/mcp/config/plugin) inside a Profile.
+// Targets and MCPSecretRefs are decoded from JSON text columns on read.
+type ProfileEntry struct {
+	bun.BaseModel  `bun:"table:profile_entries,alias:pe"`
+	ProfileID      string            `bun:"profile_id,pk"`
+	EntryID        string            `bun:"entry_id,pk"`
+	Kind           ProfileEntryKind  `bun:"kind,notnull"`
+	Name           string            `bun:"name,notnull"`
+	SourceKind     ProfileSourceKind `bun:"source_kind,notnull"`
+	CatalogID      string            `bun:"catalog_id,notnull"`
+	CustomInline   []byte            `bun:"custom_inline"`
+	TargetsJSON    string            `bun:"targets,notnull"`         // JSON []string, default ["all"]
+	SecretRefsJSON string            `bun:"mcp_secret_refs,notnull"` // JSON []string env-var names
+	Targets        []string          `bun:"-"`                       // decoded in repo
+	MCPSecretRefs  []string          `bun:"-"`                       // decoded in repo
+}
+
+// ProfileSecret holds a reference from a Profile to a secret (schema-only;
+// attach/delivery is deferred to the secrets session sp-nrzf.3.7).
+type ProfileSecret struct {
+	bun.BaseModel `bun:"table:profile_secrets,alias:ps"`
+	ProfileID     string `bun:"profile_id,pk"`
+	SecretID      string `bun:"secret_id,pk"`
+}
