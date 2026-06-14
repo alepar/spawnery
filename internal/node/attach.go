@@ -679,8 +679,8 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 
 	// progressFn relays each phase boundary from SnapshotForSuspend/FinishSuspend to the CP's
 	// SuspendProgress wire message so the CP stall detector can reset its timer (sp-u53.7.2).
-	progressFn := func(phase, detail string) {
-		a.suspendProgress(spawnID, gen, phase, detail, nil)
+	progressFn := func(phase, detail string, markers map[string]string) {
+		a.suspendProgress(spawnID, gen, phase, detail, markers)
 	}
 
 	// Step 1: gate — snapshot while sessions/pumps are still live.

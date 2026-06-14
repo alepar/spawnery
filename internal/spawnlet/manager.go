@@ -455,10 +455,11 @@ type SuspendResult struct {
 // (e.g. to the CP via the Attach stream — sp-u53.7.2). nil = no-op (Stop, Delete, SuspendForMigration
 // callers pass nil; only the gate/finish sequence wires this).
 // snapshotJournal calls this ONCE PER JOURNALED MOUNT (not just once for all mounts) so a
-// multi-mount suspend or a single large mount resets the stall timer between mounts. Byte-level
-// intra-mount granularity (a journal.FinalSnapshot progress hook) is a follow-up; the per-mount
-// coarseness here ensures a large-but-advancing snapshot never false-times-out (sp-u53.7.2 AC).
-type SuspendProgressFunc func(phase, detail string)
+// multi-mount suspend or a single large mount resets the stall timer between mounts. The markers
+// parameter carries the just-completed mount's persist marker (non-nil only when a mount finishes)
+// so the CP can accumulate partial markers incrementally (sp-u53.7.2 B). Byte-level intra-mount
+// granularity (a journal.FinalSnapshot progress hook) is a follow-up.
+type SuspendProgressFunc func(phase, detail string, markers map[string]string)
 
 func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID string, generation uint64) (*Spawn, error) {
 	return m.CreateWithSelection(ctx, id, appPath, model, name, appID, generation, AgentSelection{})
@@ -696,6 +697,12 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			return nil, err
 		}
 	}
+	// Emit a resume progress event before potentially-slow image pull so the CP stall detector
+	// does not fire on a cold-image node (sp-u53.7.2 C). Byte-level intra-pull granularity is a
+	// tracked follow-up.
+	if sel.ProgressFunc != nil {
+		sel.ProgressFunc("pulling_image", "ensuring base image is available")
+	}
 	// Launch image: delta tag if already present locally (same-node resume), else base.
 	launchImage, eerr := m.pod.EnsureImage(ctx, baseRef, runtime.DeltaTag(id))
 	if eerr != nil {
@@ -834,7 +841,8 @@ func (m *Manager) snapshotJournal(ctx context.Context, sp *Spawn, progress Suspe
 	allIDs := make(map[string]journal.ManifestID, len(sp.JournalMounts))
 	for _, mt := range sp.JournalMounts {
 		if progress != nil {
-			progress("snapshot", "journaling mount "+mt.Name)
+			// Pre-start signal: resets the CP stall timer before the potentially slow FinalSnapshot.
+			progress("snapshot", "journaling mount "+mt.Name, nil)
 		}
 		ids, err := m.journal.FinalSnapshot(ctx, id, sp.Generation, []journal.Mount{mt})
 		if err != nil {
@@ -843,6 +851,16 @@ func (m *Manager) snapshotJournal(ctx context.Context, sp *Spawn, progress Suspe
 		for k, v := range ids {
 			allIDs[k] = v
 			log.Printf("journal: spawn=%s gen=%d mount=%s final manifest=%s", id, sp.Generation, k, v)
+		}
+		// Post-mount signal: carry the completed mount's marker so the CP can accumulate
+		// partial markers incrementally (sp-u53.7.2 B). A mid-snapshot stall then persists
+		// markers of already-completed mounts rather than losing them all.
+		if progress != nil && len(ids) > 0 {
+			mountMarkers := make(map[string]string, len(ids))
+			for k, v := range ids {
+				mountMarkers[string(k)] = string(v)
+			}
+			progress("snapshot_done", "journaled mount "+mt.Name, mountMarkers)
 		}
 	}
 	markers := make(map[string]string, len(allIDs))
@@ -1030,7 +1048,7 @@ func (m *Manager) SnapshotForSuspend(ctx context.Context, id string, progress Su
 		SandboxID: sp.SandboxID,
 	}
 	if progress != nil {
-		progress("gate", "pausing agent")
+		progress("gate", "pausing agent", nil)
 	}
 	if perr := m.pod.Pause(ctx, h); perr != nil {
 		// Non-fatal (spec §3): snapshot the live tree. Roast-M17 is best-effort.
@@ -1162,7 +1180,7 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 			}
 		}
 		if progress != nil {
-			progress("capture", "committing rootfs delta")
+			progress("capture", "committing rootfs delta", nil)
 		}
 		if ref, cerr := m.pod.CaptureDelta(ctx, h); cerr != nil {
 			log.Printf("delta capture for %s: %v (non-fatal; next resume uses base image)", id, cerr)
@@ -1192,7 +1210,7 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 					resultErr = fmt.Errorf("rootfs artifact capture for %s: no journaler configured", id)
 				} else {
 					if progress != nil {
-						progress("export", "exporting rootfs delta artifact")
+						progress("export", "exporting rootfs delta artifact", nil)
 					}
 					var payload bytes.Buffer
 					if err := m.pod.ExportDelta(ctx, id, &payload); err != nil {
@@ -1222,7 +1240,7 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 	}
 
 	if progress != nil {
-		progress("stop", "stopping pod")
+		progress("stop", "stopping pod", nil)
 	}
 	_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: sp.SidecarID, AgentID: sp.AgentID, SandboxID: sp.SandboxID})
 	if sp.FloorIP != "" {
@@ -1257,7 +1275,7 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 	}
 
 	if progress != nil {
-		progress("finalize", "finalizing mount dirs")
+		progress("finalize", "finalizing mount dirs", nil)
 	}
 	for _, d := range sp.MountDirs {
 		_ = m.backend.Finalize(ctx, d)
