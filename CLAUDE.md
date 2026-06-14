@@ -121,6 +121,38 @@ just setup          # one-time: mprocs, web deps, playwright chromium
 
 `.env` with `OPENROUTER_API_KEY` is auto-loaded by Just; container images need Docker/Podman.
 
+### Build/test environment — the `dev-spawnery` distrobox
+
+**The host shell does NOT carry the full toolchain. Run all builds, tests, codegen, and lint inside the
+`dev-spawnery` distrobox**, which has `make`, Go 1.26 + `gcc` (so `-race`/CGO works), `buf`, and `docker`
++ the compose plugin. The distrobox shares the host home filesystem, so it sees the repo (and any
+worktree) at the same path:
+
+```bash
+distrobox enter --root dev-spawnery -- bash -lc 'cd <repo-or-worktree> && <cmd>'
+```
+
+- **Race/unit tests:** `CGO_ENABLED=1 go test -race ./...` — the `-race` detector needs CGO/gcc, which
+  the bare host lacks; running `go test -race` outside the distrobox fails to link.
+- **Lint:** golangci-lint must be built with Go ≥1.26 — `GOTOOLCHAIN=go1.26.0 "$(go env GOPATH)/bin/golangci-lint" run ./...`
+  (or `just lint`, which also runs eslint/tsc for `web/`). Aim for **0 issues**.
+- **Codegen:** `make gen` (buf) — run it here too; never hand-edit `gen/`.
+- **e2e (`-tags e2e`):** build the container images first (`make images`) and have Docker reachable.
+- **Garage-backed e2e** (journaled suspend/resume — `garage_e2e` and the CP lifecycle test): bring Garage
+  up with `just garage`, then source its creds before `go test`:
+  `set -a; . deploy/garage/dev-creds.env; set +a; CGO_ENABLED=1 go test -tags e2e -run <Name> ./internal/cp/`.
+  `deploy/garage/dev-creds.env` is gitignored. If a stray host-run garage or a crash-looping
+  `spawnery-garage` container is fighting for `:3900/:3903`, kill the stray and `just garage` again.
+- The dev node (`just node`) runs the **Docker/runc lane** (it sets `USERNS_MODE=remap` but not
+  `CONTAINER_RUNTIME`, so `buildManager` uses `runtime.NewDocker()`), **rootless** (uid 1001), with the
+  Docker daemon in **userns-remap** (base 100000). Code touching container/file ownership must account
+  for this (see `internal/storage`). The **runsc lane is different** — selected by
+  `CONTAINER_RUNTIME=runsc` (containerd/CRI backend, runtime handler `runsc`); it uses gVisor
+  *sentry-native* privilege (`overlay2=none`), **not** kernel userns-remap. No dev `just node` variant
+  wires runsc — the only runsc path is the `test-cri-delta` (`cri_delta_e2e`) recipe.
+- Prefer installing a proper tool in the distrobox over a host-side workaround (`distrobox enter --root
+  dev-spawnery -- <install>`); don't shell out to a one-off binary in `/tmp`.
+
 ## Architecture Overview
 
 Spawnery runs sandboxed coding-agent **spawns** on local/cloud nodes, driven over ACP.
