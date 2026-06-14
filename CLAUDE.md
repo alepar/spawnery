@@ -155,14 +155,16 @@ Design docs + per-slice plans live in `docs/superpowers/specs/` and `docs/superp
   `issues.jsonl`; verify your `bd close`/`update`s survived after any branch op.
 - **Unit tests are hermetic** — in-memory store, no network/keys; run with `-race`. End-to-end
   tests are **build-tagged** (`e2e`, `egress_e2e`, `cni_egress_e2e`) and need images/root.
-- **e2e/integration tests must FAIL, not `t.Skip`, when a required dependency is down** (Docker,
-  Garage, built images, etc.). A skipped test silently hides breakage; under the build tag the deps
-  are a precondition, so a missing one is an error, not a no-op. Use `t.Fatalf` with a clear message
-  naming the missing dep and how to start it (e.g. "run `just garage`").
-  **EXCEPTION — lane-specific tests may skip:** a test exercising a SPECIFIC, environment-bound lane
-  (the runsc/CRI isolation lane, a macOS/Docker-Desktop-only path, etc.) MAY `t.Skip` when that
-  lane's dep is absent — those lanes aren't present in every environment by design. The default
-  lane (Docker) and shared deps (Garage, images) are NOT lanes: their absence is a failure.
+- **Every integration/e2e/lane test is BUILD-TAGGED and FAILS (never `t.Skip`s) when its dep is
+  down.** The build tag IS the opt-in for that lane/environment (`e2e`, `garage_e2e`, `cri_delta_e2e`,
+  `pgtest`, …), so once you run under a tag its preconditions are required: a missing dep — Docker,
+  Garage, containerd/runsc, a built image, a Postgres DSN — is an error, not a no-op. Use `t.Fatalf`
+  naming the missing dep and how to provide it. This applies to **lane-specific** tests too (runsc/CRI,
+  mosh, postgres, macOS): give them their lane's build tag and let them fail; do NOT leave an
+  integration test untagged in the hermetic default suite relying on a runtime skip (split it into a
+  `//go:build <tag>` file if it shares a file with hermetic tests). The ONLY legitimate `t.Skip`s are
+  non-dep test *modes* — a `-update` golden-vector regen, a manual spike needing hand-provided file
+  paths — not "a service/lane is down". `SKIP_DOCKER` remains an explicit opt-out.
 - **Regenerate after proto changes** (`make gen`); never hand-edit `gen/`.
 - **Toolchain pinned to go 1.26**; golangci-lint must be built with go ≥1.26 (`just lint-go` sets
   `GOTOOLCHAIN`).

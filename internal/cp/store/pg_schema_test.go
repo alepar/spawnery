@@ -20,7 +20,9 @@ import (
 func TestPostgresSchemaSoundness(t *testing.T) {
 	dsn := os.Getenv("CP_PG_DSN")
 	if dsn == "" {
-		t.Skip("set CP_PG_DSN to run the Postgres schema-soundness test")
+		// Build-tagged (pgtest) postgres lane: the DSN is a precondition under the tag, so its
+		// absence FAILS rather than skips (run `just garage`-style pg or set CP_PG_DSN).
+		t.Fatalf("CP_PG_DSN not set — required for the pgtest postgres lane")
 	}
 	st, err := Open(context.Background(), Config{Driver: "postgres", DSN: dsn})
 	if err != nil {

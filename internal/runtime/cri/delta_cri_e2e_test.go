@@ -42,23 +42,23 @@ func TestCRIDeltaOnlyRoundTrip(t *testing.T) {
 		baseRef = "docker.io/library/debian:stable"
 	}
 
-	// runsc/CRI lane test: skip (not fail) when the lane's deps (containerd/runsc, base image in
-	// the k8s.io namespace) are absent — this lane is not present in every environment by design
-	// (CLAUDE.md lane-specific exception). Non-lane shared deps (Docker, Garage) still fail.
+	// runsc/CRI lane test, build-tagged cri_delta_e2e: the tag IS the opt-in for this lane, so its
+	// deps (containerd/runsc reachable, base image in the k8s.io namespace) are preconditions — a
+	// missing one FAILS, not skips (CLAUDE.md: lane tests are tagged and fail, never skip).
 	cl, err := ctrclient.New(addr, ctrclient.WithDefaultNamespace("k8s.io"))
 	if err != nil {
-		t.Skipf("containerd not reachable at %s: %v", addr, err)
+		t.Fatalf("containerd not reachable at %s: %v", addr, err)
 	}
 	defer cl.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	if _, err := cl.Version(ctx); err != nil {
-		t.Skipf("containerd ping failed: %v", err)
+		t.Fatalf("containerd ping failed: %v", err)
 	}
 
 	base, err := cl.GetImage(ctx, baseRef)
 	if err != nil {
-		t.Skipf("base image %s not present (pull it into ns k8s.io first): %v", baseRef, err)
+		t.Fatalf("base image %s not present (pull it into ns k8s.io first): %v", baseRef, err)
 	}
 	if err := base.Unpack(ctx, e2eSnapshotter); err != nil {
 		t.Fatalf("unpack base: %v", err)

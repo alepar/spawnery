@@ -1,3 +1,5 @@
+//go:build e2e
+
 package spawnlet
 
 import (
@@ -8,11 +10,11 @@ import (
 )
 
 // TestStartTerminal_RealMoshServer exercises the real mosh-server launch + parse path with a
-// harmless child command (echo), proving StartTerminal returns valid connect info. Skips if
-// mosh-server isn't installed.
+// harmless child command (echo), proving StartTerminal returns valid connect info. Build-tagged
+// e2e (mosh lane): mosh-server is a precondition under the tag, so its absence FAILS, not skips.
 func TestStartTerminal_RealMoshServer(t *testing.T) {
 	if _, err := exec.LookPath("mosh-server"); err != nil {
-		t.Skip("mosh-server not installed")
+		t.Fatalf("mosh-server not installed — required for this e2e test (install mosh)")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
