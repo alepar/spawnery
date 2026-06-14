@@ -80,6 +80,19 @@ func (r *Router) Bound(spawnID string) bool {
 	return ok
 }
 
+// Attached reports whether spawnID's route has at least one client currently connected. Used by
+// CP-side evaluators to apply the idle-attached vs idle-detached budget (§6 of the spec). Returns
+// false when the spawn has no route (unbound) — callers should treat it as detached.
+func (r *Router) Attached(spawnID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rt, ok := r.m[spawnID]
+	if !ok {
+		return false
+	}
+	return len(rt.clients) > 0
+}
+
 // AttachClient registers a client by id and tells the node to open the relay for it (carrying cursor).
 // env is the A4 AuthEnvelope (token + SignedIntent) to thread into SessionOpen [AC1]; nil is
 // allowed in dev/insecure mode where the node will verify-and-log-not-enforce.

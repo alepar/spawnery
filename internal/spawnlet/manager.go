@@ -77,15 +77,6 @@ type ManagerConfig struct {
 	// ["/var/cache/apt", "/var/lib/apt/lists", "/tmp"].
 	DeltaScrubPaths []string
 
-	// DeltaQuotaSoftMB: if > 0 and a spawn's captured delta image exceeds this
-	// threshold, the watchdog suspends the spawn and logs a warning.
-	// Precision: depends on the backend exposing DeltaSize (optional interface).
-	// When DeltaSize is unavailable the quota is dormant (logged once).
-	DeltaQuotaSoftMB int64
-
-	// DeltaQuotaHardMB: if > 0 and a spawn's captured delta image exceeds this
-	// threshold, the watchdog stops the spawn hard (no delta kept by Stop).
-	DeltaQuotaHardMB int64
 }
 
 type Manager struct {
@@ -138,9 +129,6 @@ type Manager struct {
 	// Injected in tests so they can observe the callback without log parsing.
 	squashNeeded func(id string, depth int)
 
-	// quotaWarnedOnce guards the "no size source" dormant-quota log (emitted once per
-	// manager lifetime, not on every CheckQuotas call).
-	quotaWarnedOnce bool
 }
 
 // JournalKeyReceiver injects an owner-delivered Kopia repo password into the

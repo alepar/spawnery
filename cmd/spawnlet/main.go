@@ -53,11 +53,11 @@ func main() {
 		ContainerRuntime: os.Getenv("CONTAINER_RUNTIME"),
 		DeltaCapture:     getenvBool("DELTA_CAPTURE", false),
 		// Delta tuning (spec §3/§7). Zero/empty → the manager applies its defaults
-		// (squash depth 16; scrub /var/cache/apt,/var/lib/apt/lists,/tmp; quotas off).
+		// (squash depth 16; scrub /var/cache/apt,/var/lib/apt/lists,/tmp).
+		// Quota thresholds are now evaluated CP-side (§6 transition-coordination-design):
+		// set EVALUATOR_QUOTA_SUSPEND_MB on the CP, not here.
 		DeltaSquashDepth: int(getenvInt64("DELTA_SQUASH_DEPTH", 0)),
 		DeltaScrubPaths:  splitCSV(os.Getenv("DELTA_SCRUB_PATHS")),
-		DeltaQuotaSoftMB: getenvInt64("DELTA_QUOTA_SOFT_MB", 0),
-		DeltaQuotaHardMB: getenvInt64("DELTA_QUOTA_HARD_MB", 0),
 		AdvertiseIP:      env("NODE_ADVERTISE_IP", "127.0.0.1"),
 		UsernsMode:       env("USERNS_MODE", "off"),
 	}

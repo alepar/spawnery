@@ -116,6 +116,20 @@ type Server struct {
 	// Set by MigrateSpawn when upgrade_to_owner_sealed=true; cleared by DeliverSecrets on journal-key
 	// delivery. Surfaced as journal_key_delivery_pending in ListSpawns to drive the web-UI step.
 	deliveryPending *deliveryPendingTracker
+
+	// Evaluator policy fields (§6 node-local detectors → CP-side reporters). All default to
+	// "disabled" (evaluatorEnabled=false, quotaSuspendMB=0) so no enforcement runs until
+	// SetEvaluatorPolicy is called. cmd/spawnery_cp wires this; tests that need evaluation call
+	// SetEvaluatorPolicy explicitly.
+	evaluatorEnabled       bool
+	idleDetachedTimeout    time.Duration
+	idleAttachedTimeout    time.Duration
+	quotaSuspendMB         int64
+
+	// evaluatorInFlight guards the per-spawn async suspend launched by evaluateSpawnMetrics:
+	// a map from spawn id to struct{} (present = driver already running). Guarded by evaluatorMu.
+	evaluatorMu       sync.Mutex
+	evaluatorInFlight map[string]struct{}
 }
 
 const (
@@ -141,6 +155,8 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
 		pendingIntents:  newPendingIntentRegistry(),
 		deliveryPending: newDeliveryPendingTracker(),
+		// evaluator disabled by default; cmd/spawnery_cp wires it via SetEvaluatorPolicy.
+		evaluatorInFlight: map[string]struct{}{},
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
 		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
 		devMode: true}
@@ -442,7 +458,13 @@ func (s *Server) adoptOrStop(ctx context.Context, nodeID string, sender registry
 		return
 	}
 	if s.rt.Bound(id) {
-		return // steady state: route bound + row already adopted -> per-heartbeat no-op
+		// Steady state: route bound + row already adopted → per-heartbeat no-op on routing.
+		// Still evaluate per-spawn metrics when the evaluator is enabled, so quota/idle checks
+		// run on every heartbeat (not only at the first bind). The route is already bound.
+		if s.evaluatorEnabled {
+			s.evaluateSpawnMetrics(ctx, id, rs)
+		}
+		return
 	}
 	s.rt.Bind(id, nodeID, sender)
 	// Wait->adopt: a spawn marked unreachable (boot sweep or node loss) turned out to be alive.
@@ -456,6 +478,10 @@ func (s *Server) adoptOrStop(ctx context.Context, nodeID string, sender registry
 		case !errors.Is(rerr, store.ErrConflict):
 			log.Printf("node %s inventory: MarkReachable spawn %s gen %d: %v", nodeID, id, gen, rerr)
 		}
+	}
+	// After a fresh bind, evaluate the spawn's reported metrics (§6). Skip when disabled.
+	if s.evaluatorEnabled {
+		s.evaluateSpawnMetrics(ctx, id, rs)
 	}
 }
 
@@ -491,6 +517,27 @@ func lookupRunnable(bins []string, id string) (agentcaps.Runnable, bool) {
 
 // SetMaxSpawnsPerOwner sets the per-owner concurrent-spawn cap (0 = unlimited).
 func (s *Server) SetMaxSpawnsPerOwner(n int) { s.maxSpawnsPerOwner = n }
+
+// SetEvaluatorPolicy enables CP-side metric evaluators and configures their policy thresholds.
+// When enabled, per-spawn metrics reported on every heartbeat are evaluated against the given
+// thresholds; over-quota or idle spawns are suspended via the same withClaim+suspendLocked path
+// as the operator-driven SuspendSpawn. Disabled by default — cmd/spawnery_cp calls this.
+//
+//   - idleDetached: idle budget for a spawn with no attached clients (default 15m when 0)
+//   - idleAttached: idle budget for a spawn with at least one client (default 60m when 0)
+//   - quotaMB: delta-image size threshold for quota-suspend (0 = quota evaluation disabled)
+func (s *Server) SetEvaluatorPolicy(idleDetached, idleAttached time.Duration, quotaMB int64) {
+	if idleDetached <= 0 {
+		idleDetached = 15 * time.Minute
+	}
+	if idleAttached <= 0 {
+		idleAttached = 60 * time.Minute
+	}
+	s.evaluatorEnabled = true
+	s.idleDetachedTimeout = idleDetached
+	s.idleAttachedTimeout = idleAttached
+	s.quotaSuspendMB = quotaMB
+}
 
 // SetSessionRegistry wires the session registry for revocation fan-out.
 func (s *Server) SetSessionRegistry(sr *auth.SessionRegistry) { s.sessions = sr }

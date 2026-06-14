@@ -159,6 +159,20 @@ func main() {
 	srv.SetSessionRegistry(sessions)
 	srv.SetVerify(verifier.Verify)
 	srv.SetDevMode(devMode)
+	// CP-side metric evaluators (§6 transition-coordination-design): disabled by default.
+	// Set EVALUATOR_QUOTA_SUSPEND_MB > 0 and/or EVALUATOR_IDLE_ENABLED=1 to activate.
+	// Idle timeouts default to 15m (detached) / 60m (attached) when set to 0 by the env.
+	if quotaMB := int64(envInt("EVALUATOR_QUOTA_SUSPEND_MB", 0)); quotaMB > 0 {
+		idleDetached := envDuration("EVALUATOR_IDLE_DETACHED", 15*time.Minute)
+		idleAttached := envDuration("EVALUATOR_IDLE_ATTACHED", 60*time.Minute)
+		srv.SetEvaluatorPolicy(idleDetached, idleAttached, quotaMB)
+		log.Printf("evaluator: enabled quota=%dMiB idle_detached=%s idle_attached=%s", quotaMB, idleDetached, idleAttached)
+	} else if getenvBool("EVALUATOR_IDLE_ENABLED") {
+		idleDetached := envDuration("EVALUATOR_IDLE_DETACHED", 15*time.Minute)
+		idleAttached := envDuration("EVALUATOR_IDLE_ATTACHED", 60*time.Minute)
+		srv.SetEvaluatorPolicy(idleDetached, idleAttached, 0)
+		log.Printf("evaluator: idle-only enabled detached=%s attached=%s", idleDetached, idleAttached)
+	}
 	if ri := envDuration("CP_SESSION_REAUTH_INTERVAL", 0); ri > 0 {
 		srv.SetReauthInterval(ri)
 	}
@@ -347,6 +361,11 @@ func envDuration(k string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+func getenvBool(k string) bool {
+	v := os.Getenv(k)
+	return v == "1" || v == "true" || v == "yes"
 }
 
 func splitTrim(s, sep string) []string {
