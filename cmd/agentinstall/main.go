@@ -168,8 +168,11 @@ func installSubCmd(kindStr, usage string) *cli.Command {
 			env := osEnviron()
 
 			// Resolve targets
+			// NOTE: use cmd (the subcommand), not cmd.Root(); urfave/cli v3 walks
+			// the lineage upward, so cmd.Bool/String finds flags declared on the
+			// parent "install" command without crossing to the root.
 			var targets []string
-			parentCmd := cmd.Root()
+			parentCmd := cmd
 			allDetected := parentCmd.Bool("all-detected")
 			agentName := parentCmd.String("agent")
 

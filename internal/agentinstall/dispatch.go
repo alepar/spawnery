@@ -74,8 +74,9 @@ func dispatchArtifact(e Emitter, a Artifact, opts Options) Report {
 		return e.InstallSkill(a, opts)
 	case KindMCP:
 		report := e.InstallMCP(a, opts)
-		// Runtime dep check for stdio MCP commands.
-		if a.MCP != nil && a.MCP.Stdio != nil && report.RuntimeDepMissing == "" {
+		// Runtime dep check for stdio MCP commands — only when the artifact was
+		// actually applied; stamping skipped/deferred reports would be misleading.
+		if report.Status == StatusApplied && a.MCP != nil && a.MCP.Stdio != nil && report.RuntimeDepMissing == "" {
 			cmd := a.MCP.Stdio.Command
 			if cmd != "" && !checkRuntime(cmd) {
 				report.RuntimeDepMissing = cmd

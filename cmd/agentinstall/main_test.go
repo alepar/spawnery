@@ -140,6 +140,95 @@ func TestApplySmoke(t *testing.T) {
 	}
 }
 
+// TestInstallSkillByAgent exercises the `install --agent <name> skill` path,
+// which was broken by parentCmd := cmd.Root() (the root has no --agent flag).
+func TestInstallSkillByAgent(t *testing.T) {
+	bin := buildAgentinstall(t)
+	home := t.TempDir()
+	skillDir := t.TempDir()
+
+	cmd := exec.Command(bin,
+		"install", "--agent", "claude",
+		"skill", "--name", "my-skill", "--dir", skillDir,
+	)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("install --agent claude skill: %v\noutput: %s", err, out)
+	}
+
+	var result struct {
+		Reports []struct {
+			Agent  string `json:"agent"`
+			Kind   string `json:"kind"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"reports"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse install output: %v\noutput: %s", err, out)
+	}
+	if len(result.Reports) == 0 {
+		t.Fatalf("expected at least 1 report, got 0\noutput: %s", out)
+	}
+	r := result.Reports[0]
+	if r.Agent != "claude" {
+		t.Errorf("report.Agent: got %q, want %q", r.Agent, "claude")
+	}
+	if r.Kind != "skill" {
+		t.Errorf("report.Kind: got %q, want %q", r.Kind, "skill")
+	}
+	if r.Name != "my-skill" {
+		t.Errorf("report.Name: got %q, want %q", r.Name, "my-skill")
+	}
+}
+
+// TestInstallSkillAllDetected exercises the `install --all-detected skill` path.
+func TestInstallSkillAllDetected(t *testing.T) {
+	bin := buildAgentinstall(t)
+	home := t.TempDir()
+	skillDir := t.TempDir()
+
+	// Create claude config root so at least one agent is detected.
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin,
+		"install", "--all-detected",
+		"skill", "--name", "auto-skill", "--dir", skillDir,
+	)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("install --all-detected skill: %v\noutput: %s", err, out)
+	}
+
+	var result struct {
+		Reports []struct {
+			Agent string `json:"agent"`
+			Kind  string `json:"kind"`
+			Name  string `json:"name"`
+		} `json:"reports"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse install output: %v\noutput: %s", err, out)
+	}
+	if len(result.Reports) == 0 {
+		t.Fatalf("expected at least 1 report (claude detected), got 0\noutput: %s", out)
+	}
+	// Verify at least one report is for claude.
+	found := false
+	for _, r := range result.Reports {
+		if r.Agent == "claude" && r.Kind == "skill" && r.Name == "auto-skill" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a claude/skill/auto-skill report, got %+v", result.Reports)
+	}
+}
+
 func TestApplyMissingManifest(t *testing.T) {
 	bin := buildAgentinstall(t)
 	home := t.TempDir()

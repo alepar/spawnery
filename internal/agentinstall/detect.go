@@ -28,11 +28,11 @@ func (OSEnviron) CodexHome() string {
 	return os.Getenv("CODEX_HOME")
 }
 
-func (OSEnviron) XDGConfigHome() string {
+func (o OSEnviron) XDGConfigHome() string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
 		return x
 	}
-	return os.Getenv("HOME") + "/.config"
+	return o.Home() + "/.config"
 }
 
 // MapEnviron implements Environ from a static map (for tests).
