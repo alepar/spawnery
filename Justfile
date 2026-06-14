@@ -144,7 +144,7 @@ test-garage-env:
     @[ -f {{repo}}/deploy/garage/dev-creds.env ] && cat {{repo}}/deploy/garage/dev-creds.env || true
 
 # suspend/resume lifecycle e2e (sp-u53.7.9): real CP + real node + real Docker pods.
-# Sources deploy/garage/dev-creds.env for the S3 journal; skips gracefully if Garage not running.
+# Sources deploy/garage/dev-creds.env for the S3 journal; FAILS (not skips) if Garage is down.
 test-e2e-lifecycle:
     make images
     @set -a; [ -f {{repo}}/deploy/garage/dev-creds.env ] && . {{repo}}/deploy/garage/dev-creds.env; set +a; \

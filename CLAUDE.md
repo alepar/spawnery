@@ -91,6 +91,12 @@ cp -rf source dest          # NOT: cp -r source dest
 Others that may prompt: `scp`/`ssh` (`-o BatchMode=yes`), `apt-get` (`-y`), `brew`
 (`HOMEBREW_NO_AUTO_UPDATE=1`).
 
+## Commands
+
+When writing files or running commands that involve shell chaining/redirection, prefer writing in
+smaller discrete steps (e.g. use the Write tool or `tee` per-chunk) since complex command chaining
+triggers approval blocks.
+
 ## Build & Test
 
 Go 1.26 monorepo (host binaries in `cmd/`) + a Vite/React SPA in `web/`. Recipes live in the
@@ -149,6 +155,10 @@ Design docs + per-slice plans live in `docs/superpowers/specs/` and `docs/superp
   `issues.jsonl`; verify your `bd close`/`update`s survived after any branch op.
 - **Unit tests are hermetic** — in-memory store, no network/keys; run with `-race`. End-to-end
   tests are **build-tagged** (`e2e`, `egress_e2e`, `cni_egress_e2e`) and need images/root.
+- **e2e/integration tests must FAIL, not `t.Skip`, when a required dependency is down** (Docker,
+  Garage, built images, etc.). A skipped test silently hides breakage; under the build tag the deps
+  are a precondition, so a missing one is an error, not a no-op. Use `t.Fatalf` with a clear message
+  naming the missing dep and how to start it (e.g. "run `just garage`").
 - **Regenerate after proto changes** (`make gen`); never hand-edit `gen/`.
 - **Toolchain pinned to go 1.26**; golangci-lint must be built with go ≥1.26 (`just lint-go` sets
   `GOTOOLCHAIN`).

@@ -54,7 +54,7 @@ import (
 //  2. The repo's deploy/garage/dev-creds.env file (written by `just garage`).
 //
 // Returns a populated S3Config and true when credentials are found; otherwise ("", false)
-// with no credentials set — the caller should call t.Skip.
+// with no credentials set — the caller FAILS the test (a down dependency is an error, not a skip).
 func garageS3Config(t *testing.T) (journal.S3Config, bool) {
 	t.Helper()
 
@@ -115,13 +115,14 @@ func kvOr(m map[string]string, key, def string) string {
 }
 
 // buildJournalForTest wires the node-local transient-tier journaler against Garage S3.
-// Calls t.Skip when Garage credentials are not available.
+// FAILS the test (t.Fatalf) when Garage is not available — under the e2e build tag a required
+// dependency being down is an error, not a reason to silently skip (hidden breakage).
 func buildJournalForTest(t *testing.T, dataRoot string) journal.JournalManager {
 	t.Helper()
 
 	s3cfg, ok := garageS3Config(t)
 	if !ok {
-		t.Skip("Garage S3 credentials not available — run `just garage` to start the dev Garage, " +
+		t.Fatalf("Garage S3 credentials not available — start the dev Garage (`just garage`), " +
 			"or set JOURNAL_S3_ENDPOINT + JOURNAL_S3_BUCKET + JOURNAL_S3_ACCESS_KEY + JOURNAL_S3_SECRET_KEY")
 		return nil
 	}
