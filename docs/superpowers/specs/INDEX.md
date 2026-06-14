@@ -92,6 +92,8 @@ were already made in one of these docs.
 - [opencode Swap + Terminal](2026-06-05-opencode-swap-and-terminal-design.md) — swap goose→opencode; ACP as canonical protocol with concurrent TUI + web.
 - [Tmux Terminal Mode](2026-06-06-tmux-terminal-mode-design.md) — tmux terminal mode + agent-container capability taxonomy.
 - [Codex CLI Support](2026-06-08-codex-cli-support-design.md) — OpenAI Codex CLI as a selectable agent (tmux mode), model wired via the sidecar like claude-code.
+- [Cross-Agent Installer Research (sp-l5sx/sp-1bia)](2026-06-14-cross-agent-installer-research-results.md) — ultradeep research grounding the artifact-injection substrate + universal install adapter: canonical-source→per-agent-emitter architecture, the launcher-clobber/idempotency/secret-indirection gotchas, per-agent (Claude/Codex/opencode/Hermes) format+scope reality.
+- [Artifact-Injection + Cross-Agent Installer Design (sp-l5sx/sp-1bia)](2026-06-14-cross-agent-installer-design.md) — three-tier design: content-agnostic delivery substrate (sensitive→E2E relay, plain→staging tmpfs) under a standalone `agentinstall` CLI (canonical artifact→per-agent emitters, upsert+atomic, no-op+report), launcher-sequenced in-pod to avoid the config clobber.
 
 ## Web UI surface
 - [UI Framework Adoption](2026-05-30-web-ui-framework-adoption-design.md) — adopt React 19 + Tailwind v4 + shadcn/ui (Radix).
