@@ -1,5 +1,10 @@
 package agentinstall
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Apply processes all artifacts in the manifest against the registry and returns a Result.
 //
 // Routing rules:
@@ -65,6 +70,77 @@ func resolveTargets(targets []string, reg Registry, env Environ) []resolvedTarge
 		}
 	}
 	return out
+}
+
+// ApplyFiltered applies only the artifacts that target the named agentFilter, with bounded
+// secret-wait for MCP artifacts that carry secretRefs.
+//
+// Filtering rules:
+//   - agentFilter == "": delegates to Apply (no filtering).
+//   - "all-detected" targets: the artifact always targets the filter agent (unconditionally).
+//   - Explicit targets: the artifact is dispatched only if agentFilter is in the list.
+//   - Non-targeting artifacts produce no report (silent skip).
+//   - Targeting artifacts whose agent is not in the registry produce a skipped report.
+//   - KindMCP with secretRefs and opts.SecretWaitTimeout > 0: waits up to the timeout for
+//     the secret files; if still missing, produces a StatusSkipped report and skips InstallMCP.
+func ApplyFiltered(reg Registry, m Manifest, opts Options, env Environ, agentFilter string) Result {
+	if agentFilter == "" {
+		return Apply(reg, m, opts, env)
+	}
+
+	var reports []Report
+
+	emitter, emitterOk := reg.Lookup(agentFilter)
+
+	for _, artifact := range m.Artifacts {
+		if !artifactTargetsAgent(artifact.Targets, agentFilter) {
+			continue // no report — artifact is not meant for this agent
+		}
+
+		if !emitterOk {
+			reports = append(reports, Report{
+				Agent:  agentFilter,
+				Kind:   artifact.Kind,
+				Name:   artifact.Name,
+				Status: StatusSkipped,
+				Reason: "unknown or unsupported agent",
+			})
+			continue
+		}
+
+		// For MCP artifacts with secretRefs, perform a bounded wait before dispatch.
+		if artifact.Kind == KindMCP && artifact.MCP != nil && len(artifact.MCP.SecretRefs) > 0 && opts.SecretWaitTimeout > 0 {
+			missing := waitForSecrets(opts.SecretsDir, artifact.MCP.SecretRefs, opts.SecretWaitTimeout)
+			if len(missing) > 0 {
+				reports = append(reports, Report{
+					Agent:  agentFilter,
+					Kind:   artifact.Kind,
+					Name:   artifact.Name,
+					Status: StatusSkipped,
+					Reason: fmt.Sprintf("secret(s) not delivered within %s: %s", opts.SecretWaitTimeout, strings.Join(missing, ", ")),
+				})
+				continue
+			}
+		}
+
+		reports = append(reports, dispatchArtifact(emitter, artifact, opts))
+	}
+
+	return Result{Reports: reports}
+}
+
+// artifactTargetsAgent reports whether the artifact's targets list includes the named agent.
+// "all-detected" is treated as targeting every registered agent unconditionally.
+func artifactTargetsAgent(targets []string, agent string) bool {
+	if len(targets) == 1 && targets[0] == "all-detected" {
+		return true
+	}
+	for _, t := range targets {
+		if t == agent {
+			return true
+		}
+	}
+	return false
 }
 
 // dispatchArtifact calls the appropriate emitter method based on artifact Kind.

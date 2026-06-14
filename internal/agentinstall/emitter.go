@@ -1,5 +1,7 @@
 package agentinstall
 
+import "time"
+
 // Format is the file format used by an agent for a particular config file.
 type Format string
 
@@ -40,6 +42,11 @@ type Options struct {
 	SecretsDir string
 	// ArtifactsDir is the staging root; relative skill source dirs resolve against it.
 	ArtifactsDir string
+	// SecretWaitTimeout is the maximum duration to wait for async-delivered secret files
+	// (in /run/spawnery/secrets/<envVarName>) before declaring them missing.
+	// A zero value disables the wait (single-check fallthrough to the emitter, which
+	// will return StatusFailed if the file is absent).
+	SecretWaitTimeout time.Duration
 }
 
 // Emitter installs or applies a single canonical Artifact into an agent's native config.

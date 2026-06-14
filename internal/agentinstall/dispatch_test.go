@@ -3,7 +3,9 @@ package agentinstall_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"spawnery/internal/agentinstall"
 )
@@ -319,5 +321,225 @@ func TestDispatchMultipleArtifacts(t *testing.T) {
 
 	if len(result.Reports) != 2 {
 		t.Fatalf("expected 2 reports, got %d", len(result.Reports))
+	}
+}
+
+// TestApplyFiltered_OnlyNamedAgent verifies that ApplyFiltered with filter="claude" only
+// dispatches the artifact to claude, even though codex is also in the target list.
+func TestApplyFiltered_OnlyNamedAgent(t *testing.T) {
+	home := t.TempDir()
+	artifacts := t.TempDir()
+	skillDir := filepath.Join(artifacts, "payloads", "my-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# my-skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+
+	m := agentinstall.Manifest{
+		Artifacts: []agentinstall.Artifact{
+			{
+				Kind:    agentinstall.KindSkill,
+				Name:    "my-skill",
+				Targets: []string{"claude", "codex"},
+				Skill:   &agentinstall.SkillPayload{Dir: "payloads/my-skill"},
+			},
+		},
+	}
+	opts := agentinstall.Options{HomeDir: home, ArtifactsDir: artifacts}
+	result := agentinstall.ApplyFiltered(reg, m, opts, env, "claude")
+
+	// Only claude should appear; codex is silently skipped.
+	if len(result.Reports) != 1 {
+		t.Fatalf("expected 1 report, got %d: %+v", len(result.Reports), result.Reports)
+	}
+	r := result.Reports[0]
+	if r.Agent != "claude" {
+		t.Errorf("agent: got %q, want claude", r.Agent)
+	}
+	if r.Status != agentinstall.StatusApplied {
+		t.Errorf("status: got %q (reason: %q), want applied", r.Status, r.Reason)
+	}
+}
+
+// TestApplyFiltered_AllDetectedTargetsFilter verifies that an artifact with "all-detected" targets
+// is dispatched unconditionally to the filter agent (even if its config root does not exist).
+func TestApplyFiltered_AllDetectedTargetsFilter(t *testing.T) {
+	home := t.TempDir()
+	// claude config root does NOT exist — with Apply it would not be detected, but with
+	// ApplyFiltered the artifact still applies unconditionally.
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+
+	m := agentinstall.Manifest{
+		Artifacts: []agentinstall.Artifact{
+			{
+				Kind:    agentinstall.KindMCP,
+				Name:    "ctx7",
+				Targets: []string{"all-detected"},
+				MCP: &agentinstall.MCPPayload{
+					Stdio: &agentinstall.MCPTransportStdio{Command: "npx", Args: []string{"-y", "ctx7"}},
+				},
+			},
+		},
+	}
+	opts := agentinstall.Options{HomeDir: home}
+	result := agentinstall.ApplyFiltered(reg, m, opts, env, "claude")
+
+	// Should produce exactly one report for claude (unconditional; no detection check).
+	if len(result.Reports) != 1 {
+		t.Fatalf("expected 1 report, got %d: %+v", len(result.Reports), result.Reports)
+	}
+	r := result.Reports[0]
+	if r.Agent != "claude" {
+		t.Errorf("agent: got %q, want claude", r.Agent)
+	}
+	// InstallMCP for claude returns applied.
+	if r.Status != agentinstall.StatusApplied {
+		t.Errorf("status: got %q (reason: %q), want applied", r.Status, r.Reason)
+	}
+}
+
+// TestApplyFiltered_NonTargetingArtifact verifies that an artifact targeting only "codex"
+// produces zero reports when the filter is "claude".
+func TestApplyFiltered_NonTargetingArtifact(t *testing.T) {
+	home := t.TempDir()
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+
+	m := agentinstall.Manifest{
+		Artifacts: []agentinstall.Artifact{
+			{
+				Kind:    agentinstall.KindMCP,
+				Name:    "codex-only-mcp",
+				Targets: []string{"codex"},
+				MCP:     &agentinstall.MCPPayload{HTTP: &agentinstall.MCPTransportHTTP{URL: "http://localhost"}},
+			},
+		},
+	}
+	opts := agentinstall.Options{HomeDir: home}
+	result := agentinstall.ApplyFiltered(reg, m, opts, env, "claude")
+
+	if len(result.Reports) != 0 {
+		t.Errorf("expected 0 reports, got %d: %+v", len(result.Reports), result.Reports)
+	}
+}
+
+// TestApplyFiltered_UnknownAgentFilter verifies that an artifact targeting an unknown agent
+// via filter produces a skipped report.
+func TestApplyFiltered_UnknownAgentFilter(t *testing.T) {
+	home := t.TempDir()
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+
+	m := agentinstall.Manifest{
+		Artifacts: []agentinstall.Artifact{
+			{
+				Kind:    agentinstall.KindMCP,
+				Name:    "my-mcp",
+				Targets: []string{"all-detected"},
+				MCP:     &agentinstall.MCPPayload{HTTP: &agentinstall.MCPTransportHTTP{URL: "http://localhost"}},
+			},
+		},
+	}
+	opts := agentinstall.Options{HomeDir: home}
+	result := agentinstall.ApplyFiltered(reg, m, opts, env, "unknown-agent")
+
+	if len(result.Reports) != 1 {
+		t.Fatalf("expected 1 skipped report, got %d: %+v", len(result.Reports), result.Reports)
+	}
+	r := result.Reports[0]
+	if r.Agent != "unknown-agent" {
+		t.Errorf("agent: got %q, want unknown-agent", r.Agent)
+	}
+	if r.Status != agentinstall.StatusSkipped {
+		t.Errorf("status: got %q, want skipped", r.Status)
+	}
+	if r.Reason != "unknown or unsupported agent" {
+		t.Errorf("reason: got %q", r.Reason)
+	}
+}
+
+// TestApplyFiltered_MissingSecret_StatusSkipped verifies that a KindMCP artifact with secretRefs
+// that are not present after the wait timeout produces StatusSkipped (not StatusFailed).
+func TestApplyFiltered_MissingSecret_StatusSkipped(t *testing.T) {
+	home := t.TempDir()
+	secretsDir := t.TempDir()
+	// Do NOT write the secret file — it will never appear.
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+
+	m := agentinstall.Manifest{
+		Artifacts: []agentinstall.Artifact{
+			{
+				Kind:    agentinstall.KindMCP,
+				Name:    "secret-mcp",
+				Targets: []string{"claude"},
+				MCP: &agentinstall.MCPPayload{
+					Stdio:      &agentinstall.MCPTransportStdio{Command: "npx"},
+					SecretRefs: []string{"MISSING_TOKEN"},
+				},
+			},
+		},
+	}
+	opts := agentinstall.Options{
+		HomeDir:           home,
+		SecretsDir:        secretsDir,
+		SecretWaitTimeout: time.Millisecond, // very short — will timeout immediately
+	}
+	result := agentinstall.ApplyFiltered(reg, m, opts, env, "claude")
+
+	if len(result.Reports) != 1 {
+		t.Fatalf("expected 1 report, got %d: %+v", len(result.Reports), result.Reports)
+	}
+	r := result.Reports[0]
+	if r.Status != agentinstall.StatusSkipped {
+		t.Errorf("status: got %q (reason: %q), want skipped", r.Status, r.Reason)
+	}
+	if !strings.Contains(r.Reason, "MISSING_TOKEN") {
+		t.Errorf("reason should mention the missing secret, got: %q", r.Reason)
+	}
+	if !strings.Contains(r.Reason, "not delivered within") {
+		t.Errorf("reason should mention timeout, got: %q", r.Reason)
+	}
+	// No partial write should have occurred.
+	if _, err := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(err) {
+		t.Error("partial write should not occur when secret is missing")
+	}
+}
+
+// TestApplyFilteredEmptyFilter verifies that filter="" delegates to Apply (full target expansion).
+func TestApplyFilteredEmptyFilter(t *testing.T) {
+	home := t.TempDir()
+	for _, d := range []string{".claude", ".codex"} {
+		if err := os.MkdirAll(filepath.Join(home, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+
+	m := agentinstall.Manifest{
+		Artifacts: []agentinstall.Artifact{
+			{
+				Kind:    agentinstall.KindMCP,
+				Name:    "all-mcp",
+				Targets: []string{"all-detected"},
+				MCP: &agentinstall.MCPPayload{
+					HTTP: &agentinstall.MCPTransportHTTP{URL: "http://localhost"},
+				},
+			},
+		},
+	}
+	opts := agentinstall.Options{HomeDir: home}
+	result := agentinstall.ApplyFiltered(reg, m, opts, env, "") // "" → delegates to Apply
+
+	// Both claude and codex are detected; should have 2 reports.
+	if len(result.Reports) != 2 {
+		t.Fatalf("expected 2 reports (claude+codex), got %d: %+v", len(result.Reports), result.Reports)
 	}
 }
