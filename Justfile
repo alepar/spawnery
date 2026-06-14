@@ -138,6 +138,18 @@ test-e2e:
     make images
     go test -tags e2e ./... -count=1 -v
 
+# output the Garage S3 env vars for the journaler from deploy/garage/dev-creds.env.
+# Pipe into `export $(just test-garage-env | tr -d " ")` before running e2e tests.
+test-garage-env:
+    @[ -f {{repo}}/deploy/garage/dev-creds.env ] && cat {{repo}}/deploy/garage/dev-creds.env || true
+
+# suspend/resume lifecycle e2e (sp-u53.7.9): real CP + real node + real Docker pods.
+# Sources deploy/garage/dev-creds.env for the S3 journal; skips gracefully if Garage not running.
+test-e2e-lifecycle:
+    make images
+    @set -a; [ -f {{repo}}/deploy/garage/dev-creds.env ] && . {{repo}}/deploy/garage/dev-creds.env; set +a; \
+    go test -tags e2e -run TestSuspendResumeLifecycleE2E -v -count=1 -timeout 5m ./internal/cp/
+
 test-web-e2e:
     cd web && npm run test:e2e
 
