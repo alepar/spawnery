@@ -38,6 +38,8 @@ type Options struct {
 	HomeDir string
 	// SecretsDir is the directory containing secret value files.
 	SecretsDir string
+	// ArtifactsDir is the staging root; relative skill source dirs resolve against it.
+	ArtifactsDir string
 }
 
 // Emitter installs or applies a single canonical Artifact into an agent's native config.

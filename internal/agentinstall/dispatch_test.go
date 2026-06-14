@@ -10,8 +10,18 @@ import (
 
 func TestDispatchExplicitTarget(t *testing.T) {
 	home := t.TempDir()
+	artifacts := t.TempDir()
 	env := agentinstall.MapEnviron{"HOME": home}
 	reg := agentinstall.NewRegistry(env)
+
+	// Stage a real skill tree so InstallSkill can succeed.
+	skillDir := filepath.Join(artifacts, "payloads", "my-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# my-skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	m := agentinstall.Manifest{
 		Artifacts: []agentinstall.Artifact{
@@ -23,7 +33,7 @@ func TestDispatchExplicitTarget(t *testing.T) {
 			},
 		},
 	}
-	opts := agentinstall.Options{HomeDir: home}
+	opts := agentinstall.Options{HomeDir: home, ArtifactsDir: artifacts}
 	result := agentinstall.Apply(reg, m, opts, env)
 
 	if len(result.Reports) != 1 {
@@ -39,9 +49,9 @@ func TestDispatchExplicitTarget(t *testing.T) {
 	if r.Name != "my-skill" {
 		t.Errorf("name: got %q, want %q", r.Name, "my-skill")
 	}
-	// Base placeholder returns skipped
-	if r.Status != agentinstall.StatusSkipped {
-		t.Errorf("status: got %q, want %q", r.Status, agentinstall.StatusSkipped)
+	// InstallSkill now applies for claude when source is valid
+	if r.Status != agentinstall.StatusApplied {
+		t.Errorf("status: got %q, want %q (reason: %q)", r.Status, agentinstall.StatusApplied, r.Reason)
 	}
 }
 
@@ -78,13 +88,13 @@ func TestDispatchUnknownAgent(t *testing.T) {
 		t.Errorf("report[0].Reason: got %q", r0.Reason)
 	}
 
-	// Second report: claude → skipped (base placeholder)
+	// Second report: claude → failed (source dir does not exist; InstallSkill now implemented)
 	r1 := result.Reports[1]
 	if r1.Agent != "claude" {
 		t.Errorf("report[1].Agent: got %q, want %q", r1.Agent, "claude")
 	}
-	if r1.Status != agentinstall.StatusSkipped {
-		t.Errorf("report[1].Status: got %q, want %q", r1.Status, agentinstall.StatusSkipped)
+	if r1.Status != agentinstall.StatusFailed {
+		t.Errorf("report[1].Status: got %q, want %q (reason: %q)", r1.Status, agentinstall.StatusFailed, r1.Reason)
 	}
 }
 
@@ -230,14 +240,15 @@ func TestDispatchBasePlaceholdersReturnSkipped(t *testing.T) {
 	env := agentinstall.MapEnviron{"HOME": home}
 	reg := agentinstall.NewRegistry(env)
 
-	// claude, codex, goose (mcp/config) all return skipped from base placeholder
+	// claude, codex, goose (mcp/config) all return skipped from base placeholder.
+	// Note: KindSkill for claude and codex is now implemented (sp-w5aa), so those
+	// rows are removed from this table.
 	tests := []struct {
 		agent string
 		kind  agentinstall.Kind
 	}{
 		{"claude", agentinstall.KindMCP},
 		{"claude", agentinstall.KindConfig},
-		{"codex", agentinstall.KindSkill},
 		{"codex", agentinstall.KindMCP},
 		{"codex", agentinstall.KindConfig},
 		{"opencode", agentinstall.KindMCP},

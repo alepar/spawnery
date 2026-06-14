@@ -26,4 +26,9 @@ func newClaudeEmitter(homeDir string) claudeEmitter {
 	}
 }
 
-// InstallSkill, InstallMCP, ApplyConfig are all base placeholders (sp-w5aa/cywj/g5x8 fill).
+// InstallSkill installs a skill directory tree into ~/.claude/skills/<name>/.
+func (e claudeEmitter) InstallSkill(a Artifact, opts Options) Report {
+	return installSkillTree(e.layout, a, opts)
+}
+
+// InstallMCP and ApplyConfig are base placeholders (sp-cywj/g5x8 fill).

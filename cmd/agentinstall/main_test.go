@@ -74,8 +74,15 @@ func TestApplySmoke(t *testing.T) {
 	bin := buildAgentinstall(t)
 	home := t.TempDir()
 
-	// Create a staging dir with a manifest
+	// Create a staging dir with a manifest and a real skill tree.
 	stagingDir := t.TempDir()
+	skillPayloadDir := filepath.Join(stagingDir, "payloads", "test-skill")
+	if err := os.MkdirAll(skillPayloadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillPayloadDir, "SKILL.md"), []byte("# test-skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	manifest := `{
 		"artifacts": [
 			{
@@ -122,21 +129,22 @@ func TestApplySmoke(t *testing.T) {
 		t.Fatalf("expected 2 reports, got %d: %+v", len(result.Reports), result.Reports)
 	}
 
-	// Both should be skipped (seam only — no real emitter body yet)
-	for _, r := range result.Reports {
-		if r.Status != "skipped" {
-			t.Errorf("report %s/%s: expected skipped, got %q", r.Agent, r.Kind, r.Status)
-		}
-	}
-
-	// First report: claude/skill, second: codex/mcp
+	// First report: claude/skill → applied (InstallSkill implemented in sp-w5aa)
 	r0 := result.Reports[0]
 	if r0.Agent != "claude" || r0.Kind != "skill" || r0.Name != "test-skill" {
 		t.Errorf("report[0]: got %+v, want claude/skill/test-skill", r0)
 	}
+	if r0.Status != "applied" {
+		t.Errorf("report[0].Status: got %q, want %q", r0.Status, "applied")
+	}
+
+	// Second report: codex/mcp → skipped (MCP emitter not yet implemented)
 	r1 := result.Reports[1]
 	if r1.Agent != "codex" || r1.Kind != "mcp" || r1.Name != "test-mcp" {
 		t.Errorf("report[1]: got %+v, want codex/mcp/test-mcp", r1)
+	}
+	if r1.Status != "skipped" {
+		t.Errorf("report[1].Status: got %q, want %q", r1.Status, "skipped")
 	}
 }
 

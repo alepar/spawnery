@@ -1,0 +1,191 @@
+package agentinstall
+
+import (
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// installSkillTree is the shared skill-install implementation used by claude and codex.
+// It performs an atomic upsert-by-name: copies the source tree into a temp dir under
+// layout.SkillPath, then atomically replaces the destination with os.Rename.
+func installSkillTree(layout AgentLayout, a Artifact, opts Options) Report {
+	base := Report{
+		Agent: layout.Name,
+		Kind:  KindSkill,
+		Name:  a.Name,
+	}
+
+	// Validate Skill payload is present.
+	if a.Skill == nil {
+		base.Status = StatusSkipped
+		base.Reason = "skill artifact has no Skill payload"
+		return base
+	}
+
+	// Path confinement: name must be a clean single segment.
+	if err := validateSkillName(a.Name); err != nil {
+		base.Status = StatusSkipped
+		base.Reason = err.Error()
+		return base
+	}
+
+	// Resolve source directory.
+	src := a.Skill.Dir
+	if !filepath.IsAbs(src) {
+		src = filepath.Join(opts.ArtifactsDir, src)
+	}
+
+	// Verify source is a directory.
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		base.Status = StatusFailed
+		if os.IsNotExist(err) {
+			base.Reason = fmt.Sprintf("skill source directory does not exist: %s", src)
+		} else {
+			base.Reason = fmt.Sprintf("skill source directory not accessible: %v", err)
+		}
+		return base
+	}
+	if !srcInfo.IsDir() {
+		base.Status = StatusFailed
+		base.Reason = fmt.Sprintf("skill source path is not a directory: %s", src)
+		return base
+	}
+
+	// Verify SKILL.md is present in source.
+	skillMDPath := filepath.Join(src, "SKILL.md")
+	if _, err := os.Stat(skillMDPath); err != nil {
+		base.Status = StatusFailed
+		if os.IsNotExist(err) {
+			base.Reason = fmt.Sprintf("skill source directory missing SKILL.md: %s", src)
+		} else {
+			base.Reason = fmt.Sprintf("cannot access SKILL.md in source: %v", err)
+		}
+		return base
+	}
+
+	// Ensure the skills root exists.
+	if err := os.MkdirAll(layout.SkillPath, 0o755); err != nil {
+		base.Status = StatusFailed
+		base.Reason = fmt.Sprintf("create skills directory: %v", err)
+		return base
+	}
+
+	dest := filepath.Join(layout.SkillPath, a.Name)
+
+	// Atomic upsert: copy into a sibling temp dir, then rename into place.
+	tmp, err := os.MkdirTemp(layout.SkillPath, ".tmp-"+a.Name+"-")
+	if err != nil {
+		base.Status = StatusFailed
+		base.Reason = fmt.Sprintf("create temp directory for skill: %v", err)
+		return base
+	}
+	// Clean up temp dir on failure.
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.RemoveAll(tmp)
+		}
+	}()
+
+	if err := copyTree(src, tmp); err != nil {
+		base.Status = StatusFailed
+		base.Reason = fmt.Sprintf("copy skill tree: %v", err)
+		return base
+	}
+
+	// Remove previous install (if any), then rename tmp into place.
+	if err := os.RemoveAll(dest); err != nil {
+		base.Status = StatusFailed
+		base.Reason = fmt.Sprintf("remove previous skill install: %v", err)
+		return base
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		base.Status = StatusFailed
+		base.Reason = fmt.Sprintf("rename temp dir to dest: %v", err)
+		return base
+	}
+	ok = true
+
+	base.Status = StatusApplied
+	return base
+}
+
+// validateSkillName returns an error if name is not a clean single path segment.
+func validateSkillName(name string) error {
+	if name == "" {
+		return fmt.Errorf("skill name must not be empty")
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return fmt.Errorf("skill name must not contain path separators: %q", name)
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("skill name must not be %q", name)
+	}
+	if filepath.Clean(name) != name {
+		return fmt.Errorf("skill name is not a clean single path segment: %q", name)
+	}
+	return nil
+}
+
+// copyTree copies the contents of srcDir into dstDir, preserving file permissions.
+// Symlinks are not followed; they are skipped (MVP).
+func copyTree(srcDir, dstDir string) error {
+	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Compute destination path.
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(dstDir, rel)
+
+		if d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			return os.MkdirAll(dst, info.Mode().Perm())
+		}
+
+		// Skip symlinks (MVP: copy as nothing; could be revisited later).
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return copyFile(path, dst, info.Mode().Perm())
+	})
+}
+
+// copyFile copies a single regular file from src to dst with the given permissions.
+func copyFile(src, dst string, perm fs.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open source file %s: %w", src, err)
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return fmt.Errorf("create dest file %s: %w", dst, err)
+	}
+
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("copy %s -> %s: %w", src, dst, err)
+	}
+
+	return out.Close()
+}

@@ -91,8 +91,9 @@ func applyCmd() *cli.Command {
 			env := osEnviron()
 			reg := agentinstall.NewRegistry(env)
 			opts := agentinstall.Options{
-				HomeDir:    env.Home(),
-				SecretsDir: secretsDir,
+				HomeDir:      env.Home(),
+				SecretsDir:   secretsDir,
+				ArtifactsDir: artifactsDir,
 			}
 
 			result := agentinstall.Apply(reg, m, opts, env)
