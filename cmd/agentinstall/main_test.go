@@ -1,0 +1,154 @@
+package main_test
+
+import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// buildAgentinstall builds the agentinstall binary and returns its path.
+// It is cached per test run via a temp directory.
+func buildAgentinstall(t *testing.T) string {
+	t.Helper()
+	// Build the binary into a temp dir.
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "agentinstall")
+	cmd := exec.Command("go", "build", "-o", binPath, "spawnery/cmd/agentinstall")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build agentinstall: %v\n%s", err, out)
+	}
+	return binPath
+}
+
+func TestListAgentsSmoke(t *testing.T) {
+	bin := buildAgentinstall(t)
+	home := t.TempDir()
+
+	cmd := exec.Command(bin, "list-agents")
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("list-agents: %v", err)
+	}
+
+	output := string(out)
+	for _, agent := range []string{"claude", "codex", "opencode", "hermes", "goose"} {
+		if !strings.Contains(output, agent) {
+			t.Errorf("list-agents output missing %q\noutput:\n%s", agent, output)
+		}
+	}
+	// None should be detected since no config roots exist
+	if strings.Contains(output, "detected\n") && !strings.Contains(output, "not detected") {
+		t.Errorf("expected 'not detected' for all agents with empty home\noutput:\n%s", output)
+	}
+}
+
+func TestListAgentsDetected(t *testing.T) {
+	bin := buildAgentinstall(t)
+	home := t.TempDir()
+
+	// Create claude config root
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "list-agents")
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("list-agents: %v", err)
+	}
+
+	output := string(out)
+	if !strings.Contains(output, "claude") || !strings.Contains(output, "detected") {
+		t.Errorf("expected 'claude detected' in output\n%s", output)
+	}
+}
+
+func TestApplySmoke(t *testing.T) {
+	bin := buildAgentinstall(t)
+	home := t.TempDir()
+
+	// Create a staging dir with a manifest
+	stagingDir := t.TempDir()
+	manifest := `{
+		"artifacts": [
+			{
+				"kind": "skill",
+				"name": "test-skill",
+				"targets": ["claude"],
+				"skill": {"dir": "payloads/test-skill"}
+			},
+			{
+				"kind": "mcp",
+				"name": "test-mcp",
+				"targets": ["codex"],
+				"mcp": {
+					"http": {"url": "http://localhost:8080"}
+				}
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(stagingDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "apply", "--artifacts", stagingDir)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("apply: %v\noutput: %s", err, out)
+	}
+
+	// Parse the JSON result
+	var result struct {
+		Reports []struct {
+			Agent  string `json:"agent"`
+			Kind   string `json:"kind"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"reports"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse apply output: %v\noutput: %s", err, out)
+	}
+
+	if len(result.Reports) != 2 {
+		t.Fatalf("expected 2 reports, got %d: %+v", len(result.Reports), result.Reports)
+	}
+
+	// Both should be skipped (seam only — no real emitter body yet)
+	for _, r := range result.Reports {
+		if r.Status != "skipped" {
+			t.Errorf("report %s/%s: expected skipped, got %q", r.Agent, r.Kind, r.Status)
+		}
+	}
+
+	// First report: claude/skill, second: codex/mcp
+	r0 := result.Reports[0]
+	if r0.Agent != "claude" || r0.Kind != "skill" || r0.Name != "test-skill" {
+		t.Errorf("report[0]: got %+v, want claude/skill/test-skill", r0)
+	}
+	r1 := result.Reports[1]
+	if r1.Agent != "codex" || r1.Kind != "mcp" || r1.Name != "test-mcp" {
+		t.Errorf("report[1]: got %+v, want codex/mcp/test-mcp", r1)
+	}
+}
+
+func TestApplyMissingManifest(t *testing.T) {
+	bin := buildAgentinstall(t)
+	home := t.TempDir()
+	stagingDir := t.TempDir() // no manifest.json inside
+
+	cmd := exec.Command(bin, "apply", "--artifacts", stagingDir)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected non-zero exit for missing manifest")
+	}
+}
