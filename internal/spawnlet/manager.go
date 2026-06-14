@@ -1006,21 +1006,6 @@ func (m *Manager) SuspendForMigration(ctx context.Context, id string, captureRoo
 //
 // Pause failure is NON-FATAL (spec §3): we log and snapshot the live tree anyway. The roast-M17
 // guarantee (no writes between snapshot and stop) is best-effort when Pause fails.
-// SnapshotForSuspend is the non-destructive suspend GATE (spec §4, fail-closed): it quiesces
-// the agent (Pause), takes the final journal snapshot, and returns the per-mount persist markers
-// — WITHOUT removing the spawn from the store or stopping the pod. The node calls this BEFORE
-// reaping ACP sessions, so sessions are cleanly torn down between the quiesce and the teardown.
-//
-// On snapshot SUCCESS the agent is left PAUSED and the journal watchers are stopped (roast-M17:
-// no writes between snapshot and pod.Stop). The caller must follow up with FinishSuspend to
-// complete the teardown.
-//
-// On snapshot FAILURE the agent is Unpaused and the journal watchers are restarted — the spawn
-// is fully restored to its live state and an error is returned. The caller may retry or leave
-// the spawn running.
-//
-// Pause failure is NON-FATAL (spec §3): we log and snapshot the live tree anyway. The roast-M17
-// guarantee (no writes between snapshot and stop) is best-effort when Pause fails.
 //
 // progress (optional, nil-safe) is called at phase boundaries so the caller can relay progress
 // signals upstream (sp-u53.7.2). Byte-level intra-snapshot progress is a documented follow-up.
