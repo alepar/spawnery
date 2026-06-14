@@ -42,6 +42,9 @@ func TestCRIDeltaOnlyRoundTrip(t *testing.T) {
 		baseRef = "docker.io/library/debian:stable"
 	}
 
+	// runsc/CRI lane test: skip (not fail) when the lane's deps (containerd/runsc, base image in
+	// the k8s.io namespace) are absent — this lane is not present in every environment by design
+	// (CLAUDE.md lane-specific exception). Non-lane shared deps (Docker, Garage) still fail.
 	cl, err := ctrclient.New(addr, ctrclient.WithDefaultNamespace("k8s.io"))
 	if err != nil {
 		t.Skipf("containerd not reachable at %s: %v", addr, err)

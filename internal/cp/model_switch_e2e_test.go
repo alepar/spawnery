@@ -27,7 +27,9 @@ func skipWithoutDocker(t *testing.T) {
 		t.Skip("SKIP_DOCKER set")
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not in PATH")
+		// Build-tagged e2e: a missing required dep is an error, not a skip (SKIP_DOCKER above
+		// is the deliberate opt-out).
+		t.Fatalf("docker not in PATH — required for this e2e test (set SKIP_DOCKER to opt out)")
 	}
 }
 

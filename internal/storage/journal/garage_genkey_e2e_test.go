@@ -54,7 +54,7 @@ func putObject(ctx context.Context, cl *minio.Client, bucket, key, data string) 
 func TestGenerationKeyFenceGarage(t *testing.T) {
 	s3Endpoint := os.Getenv("GARAGE_S3_ENDPOINT")
 	if s3Endpoint == "" {
-		t.Skip("GARAGE_S3_ENDPOINT not set — bring up `just garage` and set GARAGE_S3_ENDPOINT/GARAGE_ADMIN_ENDPOINT/GARAGE_ADMIN_TOKEN to run")
+		t.Fatalf("GARAGE_S3_ENDPOINT not set — bring up `just garage` and set GARAGE_S3_ENDPOINT/GARAGE_ADMIN_ENDPOINT/GARAGE_ADMIN_TOKEN (a down dep is a failure under this build tag, not a skip)")
 	}
 	adminEndpoint := os.Getenv("GARAGE_ADMIN_ENDPOINT")
 	adminToken := os.Getenv("GARAGE_ADMIN_TOKEN")

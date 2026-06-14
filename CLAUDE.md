@@ -159,6 +159,10 @@ Design docs + per-slice plans live in `docs/superpowers/specs/` and `docs/superp
   Garage, built images, etc.). A skipped test silently hides breakage; under the build tag the deps
   are a precondition, so a missing one is an error, not a no-op. Use `t.Fatalf` with a clear message
   naming the missing dep and how to start it (e.g. "run `just garage`").
+  **EXCEPTION — lane-specific tests may skip:** a test exercising a SPECIFIC, environment-bound lane
+  (the runsc/CRI isolation lane, a macOS/Docker-Desktop-only path, etc.) MAY `t.Skip` when that
+  lane's dep is absent — those lanes aren't present in every environment by design. The default
+  lane (Docker) and shared deps (Garage, images) are NOT lanes: their absence is a failure.
 - **Regenerate after proto changes** (`make gen`); never hand-edit `gen/`.
 - **Toolchain pinned to go 1.26**; golangci-lint must be built with go ≥1.26 (`just lint-go` sets
   `GOTOOLCHAIN`).
