@@ -52,6 +52,7 @@ const ACPPort = 7000
 type Mount struct {
 	HostPath, ContainerPath string
 	ReadOnly                bool
+	SELinuxRelabelShared    bool
 }
 
 type ContainerSpec struct {

@@ -98,8 +98,15 @@ func buildHostConfig(s ContainerSpec) *container.HostConfig {
 
 func bind(m Mount) string {
 	b := m.HostPath + ":" + m.ContainerPath
+	var opts []string
 	if m.ReadOnly {
-		b += ":ro"
+		opts = append(opts, "ro")
+	}
+	if m.SELinuxRelabelShared {
+		opts = append(opts, "z")
+	}
+	if len(opts) > 0 {
+		b += ":" + strings.Join(opts, ",")
 	}
 	return b
 }

@@ -245,11 +245,11 @@ func TestNormalizeOwnershipEPERMFallbackWorldWritable(t *testing.T) {
 	if err := NormalizeOwnership(dir, 100000); err != nil {
 		t.Fatalf("NormalizeOwnership: %v", err)
 	}
-	if m := statPerm(t, filepath.Join(dir, "data-pass")); m&0o006 != 0o006 {
-		t.Errorf("data-pass mode = %04o, want world rw (agent must be able to write)", m)
+	if m := statPerm(t, filepath.Join(dir, "data-pass")); m != 0o666 {
+		t.Errorf("data-pass mode = %04o, want 0666 (match Prepare degraded fallback)", m)
 	}
-	if m := statPerm(t, filepath.Join(dir, "sub")); m&0o007 != 0o007 {
-		t.Errorf("sub dir mode = %04o, want world rwx (agent must traverse+create)", m)
+	if m := statPerm(t, filepath.Join(dir, "sub")); m != 0o777 {
+		t.Errorf("sub dir mode = %04o, want 0777 (match Prepare degraded fallback)", m)
 	}
 }
 
@@ -271,8 +271,8 @@ func TestNormalizeOwnershipDegradedNoChown(t *testing.T) {
 	if chownCalled {
 		t.Error("degraded lane must not attempt chown")
 	}
-	if m := statPerm(t, filepath.Join(dir, "f")); m&0o006 != 0o006 {
-		t.Errorf("f mode = %04o, want world rw", m)
+	if m := statPerm(t, filepath.Join(dir, "f")); m != 0o666 {
+		t.Errorf("f mode = %04o, want 0666 (match Prepare degraded fallback)", m)
 	}
 }
 

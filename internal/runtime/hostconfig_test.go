@@ -24,6 +24,15 @@ func TestBuildHostConfigLimits(t *testing.T) {
 	}
 }
 
+func TestBuildHostConfigBindSharedRelabel(t *testing.T) {
+	h := buildHostConfig(ContainerSpec{
+		Mounts: []Mount{{HostPath: "/h", ContainerPath: "/app", ReadOnly: true, SELinuxRelabelShared: true}},
+	})
+	if len(h.Binds) != 1 || h.Binds[0] != "/h:/app:ro,z" {
+		t.Fatalf("Binds = %v", h.Binds)
+	}
+}
+
 func TestBuildHostConfigHardening(t *testing.T) {
 	// CapDropAll: cap-drop=ALL applied; ReadonlyRootfs is retired (spec §6).
 	h := buildHostConfig(ContainerSpec{CapPolicy: CapDropAll})

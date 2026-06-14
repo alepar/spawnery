@@ -126,6 +126,11 @@ func TestJournalRestoredAgentCreatedFileRemainsWritableE2E(t *testing.T) {
 	gen1 := findSpawnGeneration(ctx, t, cl, id)
 	agent1 := findAgentContainer(ctx, t, id, gen1)
 
+	assertContainerOwner(ctx, t, agent1, "/app", "0:0")
+	assertContainerOwner(ctx, t, agent1, "/app/AGENTS.md", "0:0")
+	assertContainerOwner(ctx, t, agent1, "/app/data", "0:0")
+	assertContainerOwner(ctx, t, agent1, "/app/data/README.md", "0:0")
+
 	// Keep the file agent-owned and non-world-writable, while leaving read access
 	// for the rootless journal process so the e2e proves restore permissions
 	// instead of snapshot readability.
@@ -151,10 +156,24 @@ func TestJournalRestoredAgentCreatedFileRemainsWritableE2E(t *testing.T) {
 	}
 
 	agent2 := findAgentContainer(ctx, t, id, gen2)
+	assertContainerOwner(ctx, t, agent2, "/app", "0:0")
+	assertContainerOwner(ctx, t, agent2, "/app/AGENTS.md", "0:0")
+	assertContainerOwner(ctx, t, agent2, "/app/data", "0:0")
+	assertContainerOwner(ctx, t, agent2, "/app/data/agentfile", "0:0")
+	if mode := dockerOutput(ctx, t, "exec", agent2, "stat", "-c", "%a", "/app/data/agentfile"); mode != "666" {
+		t.Fatalf("restored agentfile mode = %s, want 666", mode)
+	}
 	runDocker(ctx, t, "exec", agent2, "sh", "-c", "printf more >> /app/data/agentfile")
 	got := dockerOutput(ctx, t, "exec", agent2, "cat", "/app/data/agentfile")
 	if got != "survivemore" {
 		t.Fatalf("restored agentfile content = %q, want %q", got, "survivemore")
+	}
+}
+
+func assertContainerOwner(ctx context.Context, t *testing.T, containerID, path, want string) {
+	t.Helper()
+	if got := dockerOutput(ctx, t, "exec", containerID, "stat", "-c", "%u:%g", path); got != want {
+		t.Fatalf("%s owner = %s, want %s", path, got, want)
 	}
 }
 

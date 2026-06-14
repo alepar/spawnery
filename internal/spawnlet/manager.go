@@ -76,15 +76,15 @@ type ManagerConfig struct {
 	// applies the same filter during squash.  Default:
 	// ["/var/cache/apt", "/var/lib/apt/lists", "/tmp"].
 	DeltaScrubPaths []string
-
 }
 
 type Manager struct {
-	pod     runtime.PodBackend
-	cfg     ManagerConfig
-	store   *Store
-	backend storage.Backend
-	fw      firewall.Applier
+	pod              runtime.PodBackend
+	cfg              ManagerConfig
+	store            *Store
+	backend          storage.Backend
+	rootMaterializer runtime.RootMaterializer
+	fw               firewall.Applier
 	// journal is the transient-tier journaler (node-local Kopia). nil disables
 	// journaling entirely — scratch-only behavior is unchanged. Set via
 	// SetJournal. The seam is exercised only for mounts whose durability class is
@@ -128,7 +128,6 @@ type Manager struct {
 	// nil → log a "SQUASH-NEEDED" warning line.
 	// Injected in tests so they can observe the callback without log parsing.
 	squashNeeded func(id string, depth int)
-
 }
 
 // JournalKeyReceiver injects an owner-delivered Kopia repo password into the
@@ -173,11 +172,15 @@ func (m *Manager) DeliverJournalKey(spawnID string, gen uint64, password string)
 // NewManager builds a Manager on the Docker/runc path: the Docker pod backend + the DOCKER-USER
 // egress floor. (cmd/spawnlet uses NewManagerWithBackend for the runsc/CRI path.)
 func NewManager(rt runtime.ContainerRuntime, cfg ManagerConfig) *Manager {
-	return NewManagerWithBackend(
+	m := NewManagerWithBackend(
 		runtime.NewDockerPodBackend(rt, cfg.ContainerRuntime, cfg.AgentImage),
 		firewall.HostFloorApplier{},
 		cfg,
 	)
+	if mat, ok := rt.(runtime.RootMaterializer); ok {
+		m.rootMaterializer = mat
+	}
+	return m
 }
 
 // NewManagerWithBackend builds a Manager around an explicit pod backend + egress-floor applier,
@@ -261,6 +264,20 @@ func (m *Manager) agentRootUID() int {
 	default:
 		return -1
 	}
+}
+
+func (m *Manager) useRootMaterializer() bool {
+	return m.cfg.UsernsMode == "remap" && m.rootMaterializer != nil
+}
+
+func (m *Manager) materializeRootOwned(ctx context.Context, helperImage, sourcePath, targetPath string, dirMode, fileMode os.FileMode) error {
+	return m.rootMaterializer.MaterializeRootOwned(ctx, runtime.RootMaterializeSpec{
+		Image:      helperImage,
+		SourcePath: sourcePath,
+		TargetPath: targetPath,
+		DirMode:    dirMode,
+		FileMode:   fileMode,
+	})
 }
 
 // ExecPrefix returns the runtime exec invocation (docker/crictl exec -it ...) for execing into a
@@ -512,11 +529,33 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		labels[runtime.LabelNodeID] = m.cfg.NodeID
 	}
 
-	// /app is read-only; each declared mount is a rw overlay at /app/<path>,
-	// backed (slice: scratch) by a host dir seeded from /app/<seed>.
-	mounts := []runtime.Mount{{HostPath: appPath, ContainerPath: "/app", ReadOnly: true}}
 	var mountDirs []string
 	var journalMounts []journal.Mount
+	finalizeAll := func() {
+		for _, d := range mountDirs {
+			_ = m.backend.Finalize(ctx, d)
+		}
+	}
+	rootMaterialize := m.useRootMaterializer()
+	helperImage := m.cfg.AgentImage
+
+	// /app is read-only; each declared mount is a rw overlay at /app/<path>,
+	// backed (slice: scratch) by a host dir seeded from /app/<seed>.
+	appMountPath := appPath
+	if rootMaterialize {
+		appMountPath = filepath.Join(m.cfg.DataRoot, id, "app")
+		if err := m.materializeRootOwned(ctx, helperImage, appPath, appMountPath, 0o777, 0o644); err != nil {
+			_ = m.backend.Finalize(ctx, appMountPath)
+			return nil, fmt.Errorf("materialize /app: %w", err)
+		}
+		mountDirs = append(mountDirs, appMountPath)
+	}
+	mounts := []runtime.Mount{{
+		HostPath:             appMountPath,
+		ContainerPath:        "/app",
+		ReadOnly:             true,
+		SELinuxRelabelShared: rootMaterialize,
+	}}
 
 	// Same-node resume (design §3, roast C1): if this spawn id has a durable
 	// node-local journal record, this Create is a resume — restore each mount's
@@ -532,18 +571,34 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		}
 	}
 
-	finalizeAll := func() {
-		for _, d := range mountDirs {
-			_ = m.backend.Finalize(ctx, d)
-		}
-	}
 	agentUID := m.agentRootUID()
 	for _, mt := range mf.Storage.Mounts {
 		seedDir := filepath.Join(appPath, mt.Seed)
-		hostDir, err := m.backend.Prepare(ctx, id, mt.Name, seedDir, agentUID)
-		if err != nil {
-			finalizeAll()
-			return nil, fmt.Errorf("prepare mount %q: %w", mt.Name, err)
+		hostDir := ""
+		restoreDir := ""
+		stageDir := ""
+		if rootMaterialize {
+			var err error
+			stageDir, err = m.backend.Prepare(ctx, id, mt.Name+".stage", seedDir, -1)
+			if err != nil {
+				finalizeAll()
+				return nil, fmt.Errorf("prepare mount %q staging: %w", mt.Name, err)
+			}
+			restoreDir = stageDir
+			hostDir = filepath.Join(m.cfg.DataRoot, id, mt.Name)
+		} else {
+			var err error
+			hostDir, err = m.backend.Prepare(ctx, id, mt.Name, seedDir, agentUID)
+			if err != nil {
+				finalizeAll()
+				return nil, fmt.Errorf("prepare mount %q: %w", mt.Name, err)
+			}
+			restoreDir = hostDir
+		}
+		cleanupStage := func() {
+			if stageDir != "" {
+				_ = m.backend.Finalize(ctx, stageDir)
+			}
 		}
 
 		// Transient-tier seam (design §1a/§3). Journaling only engages for mounts
@@ -551,12 +606,12 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		// default) leave the scratch path entirely untouched.
 		class, derr := journal.ParseDurability(mt.Durability)
 		if derr != nil {
+			cleanupStage()
 			finalizeAll()
 			return nil, fmt.Errorf("mount %q durability: %w", mt.Name, derr)
 		}
 		jm := journal.Mount{Name: mt.Name, HostDir: hostDir, Class: class}
 		if m.journal != nil && jm.Class.Journaled() {
-			journalMounts = append(journalMounts, jm)
 			// Owner-sealed mounts route the repo password to the owner-sealed
 			// custody (delivered, not node-locally minted): mark the spawn so the
 			// journaler never forks the repo under a fresh node-local key.
@@ -571,6 +626,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			// remains TODO(phase②) and rides the StartSpawn protocol.)
 			if haveJournalRecord {
 				if pin, ok := jrec.Manifests[mt.Name]; ok {
+					restore := true
 					// Owner-sealed resume: the repo password is custodied by the owner,
 					// not this node — wait (bounded) for it to be delivered over the
 					// secret-delivery path before opening the repo for Restore (design
@@ -581,31 +637,50 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 						wctx, cancel := context.WithTimeout(ctx, journalKeyDeliveryTimeout)
 						if werr := m.journalKeys.WaitDelivered(wctx, id); werr != nil {
 							log.Printf("journal restore for %s mount %s: owner-sealed key not delivered: %v", id, mt.Name, werr)
-							cancel()
-							mountDirs = append(mountDirs, hostDir)
-							mounts = append(mounts, runtime.Mount{HostPath: hostDir, ContainerPath: "/app/" + mt.Path})
-							continue
+							restore = false
 						}
 						cancel()
 					}
-					if rerr := m.journal.Restore(ctx, id, mt.Name, pin, hostDir); rerr != nil {
-						log.Printf("journal restore for %s mount %s (manifest %s): %v", id, mt.Name, pin, rerr)
-					} else {
-						// Restore writes files owned by THIS node daemon's uid with their original
-						// modes; under userns-remap that uid is outside the agent's range, so the
-						// agent sees them as `nobody` and can't write non-world-writable ones.
-						// Re-apply Prepare's ownership policy to the restored tree (sp-ei4.1).
-						if nerr := storage.NormalizeOwnership(hostDir, agentUID); nerr != nil {
-							log.Printf("journal restore for %s mount %s: normalize ownership: %v", id, mt.Name, nerr)
+					if restore {
+						if rerr := m.journal.Restore(ctx, id, mt.Name, pin, restoreDir); rerr != nil {
+							log.Printf("journal restore for %s mount %s (manifest %s): %v", id, mt.Name, pin, rerr)
+						} else {
+							// Restore writes files owned by THIS node daemon's uid with their original
+							// modes; under userns-remap that uid is outside the agent's range. In the
+							// direct-bind path, NormalizeOwnership is the final owner/mode authority.
+							// In the root-materialized path it makes the staging tree readable by the
+							// helper; the helper then recreates the actual bind root as container-root.
+							normalizeUID := agentUID
+							if rootMaterialize {
+								normalizeUID = -1
+							}
+							if nerr := storage.NormalizeOwnership(restoreDir, normalizeUID); nerr != nil {
+								log.Printf("journal restore for %s mount %s: normalize ownership: %v", id, mt.Name, nerr)
+							}
+							log.Printf("journal: spawn=%s mount=%s restored from manifest=%s", id, mt.Name, pin)
 						}
-						log.Printf("journal: spawn=%s mount=%s restored from manifest=%s", id, mt.Name, pin)
 					}
 				}
 			}
+			journalMounts = append(journalMounts, jm)
+		}
+
+		if rootMaterialize {
+			if err := m.materializeRootOwned(ctx, helperImage, restoreDir, hostDir, 0o777, 0o666); err != nil {
+				cleanupStage()
+				_ = m.backend.Finalize(ctx, hostDir)
+				finalizeAll()
+				return nil, fmt.Errorf("materialize mount %q: %w", mt.Name, err)
+			}
+			cleanupStage()
 		}
 
 		mountDirs = append(mountDirs, hostDir)
-		mounts = append(mounts, runtime.Mount{HostPath: hostDir, ContainerPath: "/app/" + mt.Path})
+		mounts = append(mounts, runtime.Mount{
+			HostPath:             hostDir,
+			ContainerPath:        "/app/" + mt.Path,
+			SELinuxRelabelShared: rootMaterialize,
+		})
 	}
 
 	// Owner-sealed secrets tmpfs (design §6): a per-spawn dir under SecretsRoot, bind-mounted into the

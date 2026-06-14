@@ -110,9 +110,9 @@ func NormalizeOwnership(hostDir string, agentUID int) error {
 			if err != nil {
 				return err
 			}
-			add := os.FileMode(0o006) // world rw for files
+			add := os.FileMode(0o066) // group+other rw for files, matching Prepare's 0666 fallback
 			if d.IsDir() {
-				add = 0o007 // world rwx for dirs (the agent needs +x to traverse, +w to create)
+				add = 0o077 // group+other rwx for dirs, matching Prepare's 0777 fallback
 			}
 			if err := os.Chmod(path, info.Mode().Perm()|add); err != nil {
 				return err
