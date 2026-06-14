@@ -8,6 +8,13 @@ gaps this spec closes), [config-settings research](2026-06-14-profile-config-set
 **Hard-depends on:** [User Secrets Store `sp-7h6.1`](2026-06-14-user-secrets-store-design.md).
 **Reframes the OPEN facet epics** `sp-freg` (user skills) + `sp-hau3` (MCP/config) under one model.
 
+> **Revised 2026-06-14 post-roast** ([adversarial review](2026-06-14-profiles-adversarial-review.md),
+> REVISE — 22 confirmed). Binding decisions from that review: config = **all 4 normalized keys** with
+> the `approvalPosture` enum expanded to **`always-ask | ask-risky | auto | yolo`**, implemented as a
+> **real per-agent engine translation** + **hardened `ForbiddenConfigKeys`** (the security hole);
+> secrets = **hard-require owner-online** (documented availability limit); plugins = **kept, gated on a
+> headless-viability spike** (per-agent no-op where blocked). Other amendments folded into §§5–9,13.
+
 ## 1. Problem & framing
 
 The substrate + `agentinstall` engine are built and merged, but roast v2 confirmed they form a
@@ -77,19 +84,50 @@ ProfileSecret  { profile_id, secret_id }            # ref into the sp-7h6.1 secr
 Per [the config research](2026-06-14-profile-config-settings-research.md). A `config` ProfileEntry
 carries `{ normalized:{…}, native:{<agent>:<fragment>}, instructions:<content?> }`:
 
-- **Normalized keys (MVP):**
-  - `approvalPosture`: enum `never-ask | ask-risky | always-ask` → emitter maps to Claude
-    `permissions.defaultMode`, Codex `approval_policy`, opencode `permission`, Hermes write-approval
-    gates. *(the anchor — strongest cross-agent normalization)*
-  - `allowedCommands` / `deniedCommands`: string[] tool/command patterns.
-  - `disabledTools`: string[] built-in tool names.
-- **`instructions`**: a content blob written as a **managed file** to each agent's native instruction
-  file (`~/.claude/CLAUDE.md` / `AGENTS.md` / opencode `instructions` / Hermes `SOUL.md`), tagged
-  `managed-by: spawnery-profile`. Not a normalized scalar.
+> **The normalized model is implemented as a REAL per-agent translation in the engine
+> (`agentinstall`), NOT a value the profile forwards verbatim** (roast A1: the profile vocabulary is
+> disjoint from the engine's; today every normalized value silently no-ops). The engine's
+> `translateNormalized()` gains a per-(key,agent) mapping; an *unmappable* value is a **hard error with
+> a report entry**, never a silent skip. The CP assembler validates normalized values against an
+> `agentinstall capabilities` export (§8) at profile-save so mismatches fail early.
+
+- **Normalized keys (MVP — all four):**
+  - **`approvalPosture`**: enum **`always-ask | ask-risky | auto | yolo`** → per-agent translation:
+    | posture | claude (`permissions.defaultMode`) | codex (`approval_policy`) | opencode (`permission`) | hermes |
+    |---|---|---|---|---|
+    | `always-ask` | `default`/`plan` | `untrusted` | `ask`/`deny` | gates on |
+    | `ask-risky` | `acceptEdits` | `on-request` | per-tool `ask` | partial gates |
+    | `auto` | `auto` + launch flag (see caveat) | `on-request` + workspace-write | `allow` | gates off |
+    | `yolo` | `bypassPermissions` + `--dangerously-skip-permissions` flag | `never` | `allow` | gates off |
+    Caveats wired in: (1) Claude `auto`/`bypassPermissions` need a **launch flag** the launcher must
+    inject (roast A2) — the launcher's per-runnable case reads the assembled posture; (2) Claude `auto`'s
+    safety classifier is a server call that must route via the sidecar `ANTHROPIC_BASE_URL` or the egress
+    floor breaks it (roast A3) — a spike confirms; (3) **`yolo` bypasses APPROVAL only — never sandbox
+    or egress** (the pod + egress floor remain the real containment); (4) **`always-ask` is rejected for
+    headless Codex** (would hang on a prompt with no human — roast A11): the assembler errors at save if
+    a Codex-targeted profile sets `always-ask`.
+  - **`disabledTools`**: string[] built-in tool names → opencode `tools:{<n>:false}`, Hermes
+    `agent.disabled_toolsets`, Claude/Codex deny patterns.
+  - **`allowedCommands` / `deniedCommands`**: string[] of a **defined canonical pattern grammar**
+    (`tool` or `tool(arg-glob)`, e.g. `Bash(rm *)`, `WebFetch(domain:x)`) that the engine translates to
+    each agent's native syntax (Claude `permissions.allow/deny`, Codex `approval_policy.granular`,
+    opencode per-tool map). The grammar + per-agent translation is **a spike** (roast A10 — syntaxes are
+    incompatible); until proven, an unmappable pattern is a save-time error.
+- **`instructions`**: a content blob written to a **dedicated managed file** in each agent's
+  instruction *set* (NOT `CLAUDE.md`/`SOUL.md`, which hold the agent's own runtime memory — roast C4):
+  e.g. `~/.claude/profile-instructions.md` referenced from the instructions glob, opencode
+  `instructions:[…profile file…]`, Codex a profile-owned instructions file (user-scope path, roast C5).
+  Replace-on-apply (idempotent); never appends or clobbers user/agent memory. Provenance via the
+  sidecar index (§9), not an in-file marker (avoids a model-visible metadata leak — roast C4).
 - **Native passthrough**: `native:{<agent>:{…}}` merged verbatim (hooks, reasoning/verbosity,
   telemetry, per-agent knobs).
-- **Excluded (launcher/sidecar-managed; emitter rejects):** inference wiring; **sandbox/isolation**
-  (Codex `sandbox_mode`, Hermes `terminal.backend` — security boundary); **sampling/reasoning** (sidecar-adjacent).
+- **Excluded — and ENFORCED, not just documented (roast A8, security):** the emitters' hardened
+  `ForbiddenConfigKeys` **reject in both the normalized AND native-passthrough paths**:
+  `model`/inference wiring; **sandbox/isolation** (Codex `sandbox_mode`/`[sandbox_workspace_write]`,
+  Hermes `terminal.backend`); the **raw approval/permission keys** themselves (Claude
+  `permissions.defaultMode`, Codex `approval_policy`, opencode `permission`) so they can only be set via
+  the validated `approvalPosture` enum, never smuggled through passthrough; **sampling/reasoning**. The
+  CP assembler also rejects these keys at save (defense in depth).
 - **goose** config: passthrough-only/unverified for MVP (verify before normalizing — matches the
   deferred goose emitter).
 
@@ -109,42 +147,82 @@ never values** — CP stays blind.
   profile's referenced secrets attach).
 - **Cross-link:** an MCP entry's `mcp_secret_refs` (env-var names) are satisfied by the profile's
   selected secrets (catalog entries carry `env_var_name`). Validate at profile-save: every MCP
-  secret-ref maps to a selected secret (else warn).
-- **Inherited custody invariant:** a secret-bearing profile requires the **owner device online at
-  spawn start/resume** (sp-7h6.1's locked invariant); the spawn waits on the secrets-ready gate. The
-  UI surfaces "this profile needs you online to start."
+  secret-ref maps to a selected secret — a **save-time ERROR** for a typed mismatch (roast B15), not a
+  dismissible warning (a missing cred → a silently-broken MCP at spawn time with the observability relay
+  deferred).
+- **Custody invariant — hard-require owner-online (decision, roast B13):** a secret-bearing profile
+  requires the **owner device online at every spawn start AND resume** (sp-7h6.1's locked invariant);
+  offline → the `pendingIntents.await` TTL fires → spawn **Errored** (no silent under-credentialed
+  start). **Documented limitation:** secret-bearing spawns **cannot hands-off resume** (automated/CI/
+  scheduled) and a node-failure auto-recovery that needs re-sealing will Error until the owner is
+  online. Non-secret profiles are unaffected. The UI surfaces "this profile needs you online to
+  start/resume"; a per-secret `optional`/degraded-start path is a **deferred** follow-up.
+- **Incremental delivery (roast B14):** the non-secret path (skills/MCP-without-secrets/config/plugins)
+  is **independently shippable** — `sp-7h6.1` is a hard dep only for the *secrets* facet. Assembly
+  step 3 (§8) is a no-op when a profile has no `ProfileSecret` entries; the team must not block the
+  whole feature on `sp-7h6.1`.
 
 ## 7. Plugin as a 4th emitter kind
 
-Add `InstallPlugin` to the `Emitter` interface + a `plugin` artifact kind; per-agent native install
-(Claude Code `.claude-plugin`/marketplace, opencode npm plugin, codex `codex plugin`;
-no-op+report where unsupported). **Needs a spike** (like S2/S6) to confirm each agent's plugin
-install format + headless behavior before implementing the emitters.
+Add `InstallPlugin` to the `Emitter` interface + a `plugin` artifact kind. **This is a breaking change
+to the shipped 3-method `Emitter` interface** (roast E2) — all 5 emitters + `baseEmitter` update in one
+task. Per-agent native install (Claude Code `.claude-plugin`/marketplace, opencode npm plugin, codex
+`codex plugin`).
+
+**Headless-viability spike is a HARD GATE (decision, roast D7/E3):** before wiring each agent's
+plugin emitter, the spike must prove the plugin actually **activates headlessly** — Claude plugin
+activation is gated on an interactive trust dialog that never fires in a non-TTY container (so
+`enabledPlugins` may be ignored, and fresh containers are unauthenticated for marketplace install);
+opencode plugins are npm packages Bun fetches **at agent startup** (needs Bun + npm-registry egress
+through the floor). **Implement the plugin emitter only for agents where the spike confirms headless
+activation; explicit `no-op + report` where it doesn't** (e.g. Claude if the trust dialog blocks).
+Keep `plugin` in MVP but each agent's support is spike-gated.
 
 ## 8. CP-side assembly layer (closes roast gap B/C)
 
 At `CreateSpawn` with `profile_id`, the CP:
 1. Loads the profile, resolves catalog refs + custom content.
-2. **Emits the canonical `Artifact` set → `manifest.json` (BYTES artifact at `destPath=manifest.json`)
-   + payload `ArtifactSpec`s** (TAR-packs skill trees). The canonical `Artifact` schema (today
-   internal to `agentinstall`) is promoted to a **shared encoder package** the CP and `agentinstall`
-   both import (engine stays spawnery-dep-free; only the *schema* is shared).
-3. **Attaches** the profile's secrets as sensitive spawn_artifacts (§6).
-4. Persists all artifacts on the spawn row and threads them into `StartSpawn` (existing path).
+2. **Emits the canonical `Artifact` set → `manifest.json` (BYTES artifact at `destPath=manifest.json`,
+   carrying a `schema_version`) + payload `ArtifactSpec`s** (TAR-packs skill trees). The canonical
+   `Artifact` schema is extracted into a **stdlib-only struct package** (just the types: `Artifact`,
+   `Manifest`, `Kind`, `*Payload`, `schema_version`) that both the CP and `agentinstall` import —
+   **NOT** a package that pulls `go-toml`/`hujson`/`gen` (that would violate `agentinstall`'s
+   `TestLeafInvariant`, roast E19). Translate `targets:"all"` → the engine's `"all-detected"` magic
+   string and validate explicit targets against registered emitters (roast E16).
+3. **Attaches** the profile's secrets as sensitive spawn_artifacts (§6) — no-op when the profile has no
+   `ProfileSecret` entries.
+4. Persists all artifacts on the spawn row (with `profile_id`/`profile_version`, §9) and threads them
+   into `StartSpawn` (existing path).
 
-- **Fail loud, not silent:** a profile that yields no `manifest.json`, or whose assembly fails, errors
-  at `CreateSpawn` (roast #2: today missing-manifest → `agentinstall` silently exits 0). `agentinstall
-  apply` also gains a "manifest expected but absent" hard error.
+- **Schema version (roast E20):** `manifest.json` carries `schema_version`; the baked `agentinstall`
+  binary **rejects a manifest above its known version** (MAJOR mismatch → hard error; MINOR →
+  forward-compatible). Pinned in the agent Dockerfile.
+- **Fail loud, but distinguish two cases (roast B18):** assembly that *attempts and fails* (bad catalog
+  ref, encode error) errors at `CreateSpawn`; a **legitimately non-sensitive-artifact-free profile**
+  (e.g. secrets-only / BYOK-only) produces no `manifest.json` and is **valid** — `agentinstall` only
+  hard-errors on "manifest expected (the spawn carries a manifest artifact) but absent/corrupt", never
+  on "no manifest because the profile is secrets-only".
+- **`agentinstall capabilities` export (roast E22):** a `list-agents --capabilities` mode emits the
+  `(kind,agent) → supported|no-op` matrix as JSON; the CP/web consume it for validation + the UI
+  "which entries apply to which agent" preview instead of duplicating the emitter registry.
 
 ## 9. Spawn selection, precedence, provenance
 
 - `CreateSpawnRequest` gains optional `profile_id`. `spawnctl --profile <id>` + web "select profile"
   at spawn create.
 - **Precedence (explicit — roast #6):** app-manifest artifacts **<** profile **<** (future) per-spawn
-  override. Within a profile, duplicate logical names per (kind,agent) are rejected at save. The
-  assembler emits in this order and records it; not an emergent property of staging order.
-- **Provenance:** emitted entries carry a **`managed-by: spawnery-profile`** marker so the fast-follow
-  reconcile/prune (roast #5) can remove deselected entries without clobbering user-native config.
+  override. Duplicate logical names per (kind,agent) are rejected at save; **for `kind=config`,
+  dedup/precedence is by the config KEY** (two entries setting the same `approvalPosture` is rejected),
+  not by `Artifact.Name` (roast C21). The assembler emits in this order and records it.
+- **Provenance via a sidecar index, not in-file markers (roast C6/C17):** the node writes a
+  **`~/.spawnery/managed.json`** index recording, per installed entry, `{kind, agent, native_path,
+  native_key|file, profile_id, profile_version}`. This (a) gives the deferred reconcile/prune an
+  unambiguous, format-independent way to remove only profile-managed entries, (b) avoids a
+  model-visible marker inside config/instruction files, and (c) records which profile state built the
+  spawn (audit). The snapshot's `spawn_artifacts` also store `profile_id`/`profile_version`.
+- **Emergency kill-switch (roast C12):** revoking/removing a curated-catalog entry that is later found
+  malicious must be able to **stop running spawns** using it — MVP wires a catalog-revoke that flags
+  affected live spawns for termination/quarantine (a focused task; not left to the deferred reconcile).
 
 ## 10. Web UI + CLI
 
@@ -164,22 +242,37 @@ At `CreateSpawn` with `profile_id`, the CP:
 
 ## 12. Scope / non-goals
 
-- **In:** profile model + store + web/CLI CRUD; curated catalog + custom intake; config facet
-  (normalized `approvalPosture`/allow-deny/disabledTools + instructions-managed-file + passthrough);
-  secrets facet (sp-7h6.1 refs + attach); `plugin` 4th kind (+spike); CP-side assembly + fail-loud;
-  `profile_id` on CreateSpawn + selection; explicit precedence + `managed-by` marker; live-agent load e2e.
+- **In:** profile model + store + web/CLI CRUD; curated catalog + custom intake; config facet (all 4
+  normalized keys with the engine per-agent translation — `approvalPosture` {always-ask|ask-risky|auto|
+  yolo} + disabledTools + allowed/deniedCommands; instructions-as-dedicated-managed-file; passthrough)
+  **+ hardened `ForbiddenConfigKeys`**; secrets facet (sp-7h6.1 refs + attach, **hard-require
+  owner-online**, save-time ref validation); `plugin` 4th kind (Emitter interface change, **per-agent
+  headless-spike-gated**); CP-side assembly (stdlib struct pkg + `schema_version` + capabilities export
+  + fail-loud-distinguished); `profile_id` on CreateSpawn + selection; explicit precedence + **sidecar
+  `managed.json` provenance index** + `profile_id`/`version` snapshot; **catalog kill-switch**;
+  live-agent load + posture + plugin spikes.
 - **Deferred (fast-follow):** live propagation of profile edits to running spawns + reconcile/prune
-  (roast #5/#4); multi-profile composition; profile sharing/marketplace; observability relay of the
-  apply-report (roast G / `sp-nrzf.2`); goose config normalization; per-spawn ad-hoc override layer.
+  (roast #5/#4 — the `managed.json` index is laid down now to enable it); per-secret `optional`/
+  degraded-start for hands-off resume (roast B13); multi-profile composition; profile sharing/
+  marketplace; observability relay of the apply-report (roast G / `sp-nrzf.2`); goose config
+  normalization; per-spawn ad-hoc override layer.
 - **Depends on:** `sp-7h6.1` (secrets catalog + attach + owner-online delivery); the built substrate +
   `agentinstall` engine; `sp-nrzf.2`/`sp-mofj.1` open items don't block the spine.
 
-## 13. Open items / spikes
-1. **Plugin install spike** — per-agent plugin format + headless install (claude/opencode/codex).
-2. **Live-agent load proof** — the inject→load→tool-call e2e (also de-risks the still-unverified
-   "files written ⇒ agent loads" assumption from roast #7).
-3. Confirm the curated-catalog ↔ E5-marketplace reuse boundary during implementation.
-4. goose config-surface verification before any goose normalization.
+## 13. Open items / spikes (gate implementation)
+1. **Live-agent load proof** (roast E7) — inject an MCP via a profile, prompt the agent to invoke it,
+   assert the tool call works; de-risks the load-bearing "files written ⇒ agent loads" invariant.
+2. **`approvalPosture` realization** (roast A1/A2/A3) — drive each posture through the engine per agent;
+   confirm it changes behavior; confirm Claude `auto`/`yolo` launch-flag injection works and that
+   `auto`'s safety classifier routes via the sidecar `ANTHROPIC_BASE_URL` under the egress floor (else
+   downgrade `auto`→`yolo` or document); confirm hardened `ForbiddenConfigKeys` blocks the dangerous
+   passthrough keys.
+3. **Plugin headless-viability** (roast D7/E3) — `claude plugin add </dev/null` no-TTY/no-auth; opencode
+   Bun-at-startup + npm egress; codex `codex plugin`. Gates which agents get a plugin emitter.
+4. **`allowedCommands`/`deniedCommands` grammar** (roast A10) — define the canonical pattern grammar +
+   per-agent translation; prove a `deny` actually denies per agent, else keep commands as passthrough.
+5. Curated-catalog ↔ E5-marketplace reuse boundary; goose config-surface verification before any goose
+   normalization.
 
 ## Post-Implementation Notes
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from
