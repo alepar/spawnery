@@ -56,6 +56,38 @@ message SecretDelivery { string spawn_id = 1; uint64 generation = 2; repeated Se
 
 // Per-mount backend binding chosen at create/resume (CP -> node).
 message MountBinding { string name = 1; string backend_uri = 2; }
+
+// ArtifactContentType discriminates how spawnlet materializes an artifact's inline bytes:
+// BYTES => a single file written verbatim at `mode`; TAR => a packaged directory tree
+// (e.g. a SKILL.md skill dir) unpacked preserving per-file modes.
+enum ArtifactContentType {
+  ARTIFACT_CONTENT_TYPE_UNSPECIFIED = 0;
+  ARTIFACT_CONTENT_TYPE_BYTES       = 1;
+  ARTIFACT_CONTENT_TYPE_TAR         = 2;
+}
+
+// ArtifactTarget selects which pod container receives the artifact (engine uses AGENT;
+// SIDECAR reserved).
+enum ArtifactTarget {
+  ARTIFACT_TARGET_UNSPECIFIED = 0;
+  ARTIFACT_TARGET_AGENT       = 1;
+  ARTIFACT_TARGET_SIDECAR     = 2;
+}
+
+// ArtifactSpec is a content-agnostic delivery unit: raw bytes landed into a pod container
+// at a confined dest path. Inline-only for MVP (by-ref deferred; reject oversize at CreateSpawn).
+// sensitive=true routes the payload through the E2E SealedSecret relay (CP stays
+// ciphertext-blind); env_var_name binds a sensitive MCP secret value to its target env var name.
+message ArtifactSpec {
+  string              id               = 1;
+  bytes               inline           = 2;  // inline content; by-ref dropped from MVP
+  ArtifactContentType content_type     = 3;
+  ArtifactTarget      target_container = 4;
+  string              dest_path        = 5;  // path-confined under staging/agent-config root
+  uint32              mode             = 6;  // unix mode for BYTES (TAR carries per-file modes)
+  bool                sensitive        = 7;
+  string              env_var_name     = 8;  // sensitive MCP secret -> env var binding
+}
 // Per-mount suspend marker reported back after a clean suspend (node -> CP).
 message MountMarker  { string name = 1; string marker = 2; }
 // Rootfs delta artifact pinned by the CP for migration restore. The artifact is keyed by
@@ -118,6 +150,7 @@ message StartSpawn  {
   string image       = 9;
   string runnable_id = 10;
   string mode        = 11;
+  repeated ArtifactSpec artifacts = 12;
   auth.v1.AuthEnvelope auth           = 20;
   string               asserted_owner = 21;
   string               base_image_digest = 22;

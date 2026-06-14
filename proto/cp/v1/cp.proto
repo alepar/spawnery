@@ -67,11 +67,43 @@ enum SpawnStatus {
 // declared mounts CP-side).
 message MountBinding { string name = 1; string backend_uri = 2; }
 
+// ArtifactContentType discriminates how spawnlet materializes an artifact's inline bytes:
+// BYTES => a single file written verbatim at `mode`; TAR => a packaged directory tree
+// (e.g. a SKILL.md skill dir) unpacked preserving per-file modes.
+enum ArtifactContentType {
+  ARTIFACT_CONTENT_TYPE_UNSPECIFIED = 0;
+  ARTIFACT_CONTENT_TYPE_BYTES       = 1;
+  ARTIFACT_CONTENT_TYPE_TAR         = 2;
+}
+
+// ArtifactTarget selects which pod container receives the artifact (engine uses AGENT;
+// SIDECAR reserved).
+enum ArtifactTarget {
+  ARTIFACT_TARGET_UNSPECIFIED = 0;
+  ARTIFACT_TARGET_AGENT       = 1;
+  ARTIFACT_TARGET_SIDECAR     = 2;
+}
+
+// ArtifactSpec is a content-agnostic delivery unit: raw bytes landed into a pod container
+// at a confined dest path. Inline-only for MVP (by-ref deferred; reject oversize at CreateSpawn).
+// sensitive=true routes the payload through the E2E SealedSecret relay (CP stays
+// ciphertext-blind); env_var_name binds a sensitive MCP secret value to its target env var name.
+message ArtifactSpec {
+  string              id               = 1;
+  bytes               inline           = 2;  // inline content; by-ref dropped from MVP
+  ArtifactContentType content_type     = 3;
+  ArtifactTarget      target_container = 4;
+  string              dest_path        = 5;  // path-confined under staging/agent-config root
+  uint32              mode             = 6;  // unix mode for BYTES (TAR carries per-file modes)
+  bool                sensitive        = 7;
+  string              env_var_name     = 8;  // sensitive MCP secret -> env var binding
+}
+
 // name (optional): human-readable spawn label; empty => the server assigns a default
 // (the app's display name, with a " 2"/" 3" counter suffix on collision).
 // image + runnable_id (optional today) select the agent container image (FQDN) and the
 // runnable within it (e.g. "goose-acp"); the CP resolves the run mode from the runnable.
-message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; string version = 4; bool pin = 5; string name = 6; string image = 7; string runnable_id = 8; }
+message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; string version = 4; bool pin = 5; string name = 6; string image = 7; string runnable_id = 8; repeated ArtifactSpec artifacts = 9; }
 message CreateSpawnResponse { string spawn_id = 1; }
 
 message SpawnSummary {
@@ -209,6 +241,7 @@ message AppManifest {
   ManifestModel model         = 11;
   string runtime_base_version = 12;
   repeated ManifestMount mounts = 13;
+  repeated ArtifactSpec artifacts = 14;  // publisher-supplied per-app default artifacts
 }
 message ManifestAgents {
   repeated string support      = 1;
