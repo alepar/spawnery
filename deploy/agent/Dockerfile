@@ -30,7 +30,8 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     CGO_ENABLED=0 go build -o /acpadapter ./deploy/agent/acpadapter \
  && CGO_ENABLED=0 go build -o /acpexec ./deploy/agent/acpexec \
  && CGO_ENABLED=0 go build -o /acpmux ./deploy/agent/acpmux \
- && CGO_ENABLED=0 go build -o /acpdial ./deploy/agent/acpdial
+ && CGO_ENABLED=0 go build -o /acpdial ./deploy/agent/acpdial \
+ && CGO_ENABLED=0 go build -o /agentinstall ./cmd/agentinstall
 
 FROM debian:stable
 # UTF-8 locale so tmux + claude render box/line-drawing glyphs (─│●) instead of ACS q/x or the
@@ -104,9 +105,11 @@ COPY --from=gobuild /acpadapter /usr/local/bin/acpadapter
 COPY --from=gobuild /acpexec /usr/local/bin/acpexec
 COPY --from=gobuild /acpmux /usr/local/bin/acpmux
 COPY --from=gobuild /acpdial /usr/local/bin/acpdial
+COPY --from=gobuild /agentinstall /usr/local/bin/agentinstall
 COPY deploy/agent/entrypoint.sh /entrypoint.sh
 COPY deploy/agent/launch /usr/local/bin/launcher
 COPY deploy/agent/spawn-tui.sh /usr/local/bin/spawn-tui
+COPY deploy/agent/apply-artifacts.sh /usr/local/bin/apply-artifacts
 COPY deploy/agent/tmux.conf /etc/tmux.conf
 # Dummy Anthropic key via apiKeyHelper instead of ANTHROPIC_API_KEY, so Claude Code does NOT print
 # "Detected a custom API key in your environment" at startup; the sidecar injects the real
@@ -117,7 +120,7 @@ COPY deploy/agent/claude-settings.json /root/.claude/settings.json
 # shim -> acpmux on 127.0.0.1:7000 = the shared session (sp-9xr.12.2).
 RUN mkdir -p /root/.nori/cli
 COPY deploy/agent/nori-config.toml /root/.nori/cli/config.toml
-RUN chmod +x /entrypoint.sh /usr/local/bin/launcher /usr/local/bin/spawn-tui
+RUN chmod +x /entrypoint.sh /usr/local/bin/launcher /usr/local/bin/spawn-tui /usr/local/bin/apply-artifacts
 
 WORKDIR /app
 # tini reaps the opencode serve child; entrypoint launches serve + adapter.
