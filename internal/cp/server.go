@@ -15,6 +15,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
@@ -676,6 +677,19 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	for i, d := range decls {
 		mounts[i] = store.Mount{Name: d.Name, BackendURI: "scratch"}
 	}
+	var manifestArtifacts []*cpv1.ArtifactSpec
+	if ver.Manifest != "" {
+		var m cpv1.AppManifest
+		if uerr := protojson.Unmarshal([]byte(ver.Manifest), &m); uerr == nil {
+			manifestArtifacts = m.Artifacts
+		} else {
+			log.Printf("CreateSpawn %s: manifest parse for artifacts: %v", appID, uerr) // non-fatal
+		}
+	}
+	artifacts, aerr := validateAndMergeArtifacts(manifestArtifacts, req.Msg.Artifacts)
+	if aerr != nil {
+		return nil, aerr
+	}
 	placement, err := s.placementFor(ctx, owner, appID, ver)
 	if err != nil {
 		return nil, err
@@ -714,7 +728,12 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 		Model: req.Msg.Model, Image: selImage, RunnableID: selRunnable, Mode: selMode,
 		Status: store.Starting, CreatedAt: now, LastUsedAt: now,
 	}
-	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, mounts) }); err != nil {
+	if err := s.st.WithTx(ctx, func(tx store.Store) error {
+		if cerr := tx.Spawns().Create(ctx, sp, mounts); cerr != nil {
+			return cerr
+		}
+		return tx.Spawns().AddArtifacts(ctx, spawnID, artifacts)
+	}); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	// Provision asynchronously: return the spawn in 'starting' immediately; the background goroutine
@@ -769,7 +788,11 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 
 	// Fresh create: base_image_digest is unknown until the node resolves it at create time.
 	// Pass "" so the node resolves and records the digest on first startup (spec §4).
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, "", nil)
+	arts, aerr := s.st.Spawns().GetArtifacts(ctx, spawnID)
+	if aerr != nil {
+		log.Printf("provisionSpawn %s: GetArtifacts: %v", spawnID, aerr)
+	}
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, "", nil, storeToNodeArtifacts(arts))
 	if err != nil {
 		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
