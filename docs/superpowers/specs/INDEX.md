@@ -94,6 +94,7 @@ were already made in one of these docs.
 - [Codex CLI Support](2026-06-08-codex-cli-support-design.md) — OpenAI Codex CLI as a selectable agent (tmux mode), model wired via the sidecar like claude-code.
 - [Cross-Agent Installer Research (sp-l5sx/sp-1bia)](2026-06-14-cross-agent-installer-research-results.md) — ultradeep research grounding the artifact-injection substrate + universal install adapter: canonical-source→per-agent-emitter architecture, the launcher-clobber/idempotency/secret-indirection gotchas, per-agent (Claude/Codex/opencode/Hermes) format+scope reality.
 - [Artifact-Injection + Cross-Agent Installer Design (sp-l5sx/sp-1bia)](2026-06-14-cross-agent-installer-design.md) — three-tier design: content-agnostic delivery substrate (sensitive→E2E relay, plain→staging tmpfs) under a standalone `agentinstall` CLI (canonical artifact→per-agent emitters, upsert+atomic, no-op+report), launcher-sequenced in-pod to avoid the config clobber.
+- [Cross-Agent Installer Adversarial Review (roast)](2026-06-14-cross-agent-installer-adversarial-review.md) — BLOCK verdict: 26 confirmed findings (1 blocker: Claude `.mcp.json` won't load headlessly) clustered into 9 themes — secrets-for-MCP timing/M10 conflict, undefined substrate↔engine staging contract, by-ref vacuum, resume artifact loss, launcher integration, trust model — with 7 spikes + a 10-point amendment plan.
 
 ## Web UI surface
 - [UI Framework Adoption](2026-05-30-web-ui-framework-adoption-design.md) — adopt React 19 + Tailwind v4 + shadcn/ui (Radix).
