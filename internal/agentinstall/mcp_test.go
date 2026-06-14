@@ -546,6 +546,209 @@ func TestInstallMCP_MissingSecretFailed(t *testing.T) {
 	}
 }
 
+// TestResolveStdioEnv_TrimsTrailingNewline verifies that a trailing newline in a secret
+// file is stripped from the injected env value (typical of echo/printf output).
+func TestResolveStdioEnv_TrimsTrailingNewline(t *testing.T) {
+	home := t.TempDir()
+	secretsDir := t.TempDir()
+	// Write secret with trailing newline (common from shell `echo`).
+	if err := os.WriteFile(filepath.Join(secretsDir, "TOK"), []byte("tok123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := agentinstall.Artifact{
+		Kind:    agentinstall.KindMCP,
+		Name:    "ctx7",
+		Targets: []string{"claude"},
+		MCP: &agentinstall.MCPPayload{
+			Stdio:      &agentinstall.MCPTransportStdio{Command: "npx"},
+			SecretRefs: []string{"TOK"},
+		},
+	}
+	r := applyMCP(t, home, secretsDir, "claude", a)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(home, ".claude.json"))
+	var root map[string]interface{}
+	_ = json.Unmarshal(data, &root)
+	servers := root["mcpServers"].(map[string]interface{})
+	server := servers["ctx7"].(map[string]interface{})
+	env, ok := server["env"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("env missing or wrong type: %T", server["env"])
+	}
+	if env["TOK"] != "tok123" {
+		t.Errorf("TOK: got %q, want %q (trailing newline should be trimmed)", env["TOK"], "tok123")
+	}
+}
+
+// TestInstallMCP_ClaudeForces0600OnExistingFile verifies that applying a non-secret stdio
+// MCP to claude always sets .claude.json to 0600, even if the file existed with 0644.
+func TestInstallMCP_ClaudeForces0600OnExistingFile(t *testing.T) {
+	home := t.TempDir()
+	// Pre-create ~/.claude.json with 0644.
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Apply a non-secret stdio MCP (no SecretRefs, no Sensitive flag).
+	r := applyMCP(t, home, "", "claude", stdioArtifact("ctx7", []string{"claude"}))
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+
+	info, err := os.Stat(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		t.Fatalf("stat .claude.json: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf(".claude.json perm: got %o, want 0600 (claude always 0600)", info.Mode().Perm())
+	}
+}
+
+// TestInstallMCP_CodexHTTPSensitiveIs0600 verifies that a codex HTTP MCP with Sensitive=true
+// results in config.toml written at 0600.
+func TestInstallMCP_CodexHTTPSensitiveIs0600(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := agentinstall.MapEnviron{"HOME": home, "CODEX_HOME": codexHome}
+	reg := agentinstall.NewRegistry(env)
+	opts := agentinstall.Options{HomeDir: home}
+	a := agentinstall.Artifact{
+		Kind:      agentinstall.KindMCP,
+		Name:      "ctx7",
+		Targets:   []string{"codex"},
+		Sensitive: true,
+		MCP: &agentinstall.MCPPayload{
+			HTTP: &agentinstall.MCPTransportHTTP{
+				URL:     "https://api.example.com/mcp",
+				Headers: map[string]string{"Authorization": "Bearer secret"},
+			},
+		},
+	}
+	res := agentinstall.Apply(reg, agentinstall.Manifest{Artifacts: []agentinstall.Artifact{a}}, opts, env)
+	if len(res.Reports) != 1 {
+		t.Fatalf("want 1 report, got %d", len(res.Reports))
+	}
+	r := res.Reports[0]
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+
+	info, err := os.Stat(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		t.Fatalf("stat config.toml: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("config.toml perm: got %o, want 0600 (Sensitive HTTP MCP)", info.Mode().Perm())
+	}
+}
+
+// TestInstallMCP_OpencodeHTTPHeadersIs0600 verifies that an opencode HTTP MCP with headers
+// (but no Sensitive flag) results in opencode.json written at 0600.
+func TestInstallMCP_OpencodeHTTPHeadersIs0600(t *testing.T) {
+	home := t.TempDir()
+	a := agentinstall.Artifact{
+		Kind:    agentinstall.KindMCP,
+		Name:    "ctx7",
+		Targets: []string{"opencode"},
+		MCP: &agentinstall.MCPPayload{
+			HTTP: &agentinstall.MCPTransportHTTP{
+				URL:     "https://api.example.com/mcp",
+				Headers: map[string]string{"X-Auth-Token": "secret"},
+			},
+		},
+	}
+	r := applyMCP(t, home, "", "opencode", a)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+
+	info, err := os.Stat(filepath.Join(home, ".config", "opencode", "opencode.json"))
+	if err != nil {
+		t.Fatalf("stat opencode.json: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("opencode.json perm: got %o, want 0600 (HTTP MCP with headers)", info.Mode().Perm())
+	}
+}
+
+// TestInstallMCP_OpencodeIdempotentApplyTwice verifies that applying the same opencode stdio
+// MCP twice results in exactly one entry in opencode.json (no duplication).
+func TestInstallMCP_OpencodeIdempotentApplyTwice(t *testing.T) {
+	home := t.TempDir()
+	a := agentinstall.Artifact{
+		Kind:    agentinstall.KindMCP,
+		Name:    "ctx7",
+		Targets: []string{"opencode"},
+		MCP: &agentinstall.MCPPayload{
+			Stdio: &agentinstall.MCPTransportStdio{
+				Command: "npx",
+				Args:    []string{"-y", "ctx7"},
+			},
+		},
+	}
+
+	r1 := applyMCP(t, home, "", "opencode", a)
+	if r1.Status != agentinstall.StatusApplied {
+		t.Fatalf("first apply: expected applied, got %q (reason: %q)", r1.Status, r1.Reason)
+	}
+
+	r2 := applyMCP(t, home, "", "opencode", a)
+	if r2.Status != agentinstall.StatusApplied {
+		t.Fatalf("second apply: expected applied, got %q (reason: %q)", r2.Status, r2.Reason)
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, ".config", "opencode", "opencode.json"))
+	if err != nil {
+		t.Fatalf("read opencode.json: %v", err)
+	}
+	std, err := hujson.Standardize(data)
+	if err != nil {
+		t.Fatalf("standardize JSONC: %v", err)
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(std, &root); err != nil {
+		t.Fatalf("parse opencode.json: %v", err)
+	}
+	mcp, ok := root["mcp"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("mcp missing or wrong type: %T", root["mcp"])
+	}
+	if len(mcp) != 1 {
+		t.Errorf("expected exactly 1 mcp entry after two applies, got %d", len(mcp))
+	}
+	server, ok := mcp["ctx7"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("ctx7 missing or wrong type: %T", mcp["ctx7"])
+	}
+	if server["type"] != "local" {
+		t.Errorf("type: got %v, want local", server["type"])
+	}
+	if server["enabled"] != true {
+		t.Errorf("enabled: got %v, want true", server["enabled"])
+	}
+	cmd, ok := server["command"].([]interface{})
+	if !ok {
+		t.Fatalf("command: expected array, got %T", server["command"])
+	}
+	want := []string{"npx", "-y", "ctx7"}
+	if len(cmd) != len(want) {
+		t.Fatalf("command len: got %d want %d", len(cmd), len(want))
+	}
+	for i, v := range want {
+		if cmd[i] != v {
+			t.Errorf("command[%d]: got %v want %s", i, cmd[i], v)
+		}
+	}
+}
+
 // TestInstallMCP_GooseSkipped tests that goose MCP is always skipped (deferred).
 func TestInstallMCP_GooseSkipped(t *testing.T) {
 	home := t.TempDir()

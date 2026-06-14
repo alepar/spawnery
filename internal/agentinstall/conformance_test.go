@@ -365,6 +365,12 @@ func assertClobberSurvival(t *testing.T, layout agentinstall.AgentLayout, agent 
 		if root["launcherKey"] != "keep" {
 			t.Fatalf("launcherKey clobbered: got %v want keep", root["launcherKey"])
 		}
+		// TOML base files also seed model="m"; verify it survives.
+		if layout.MCPFormat == agentinstall.FormatTOML {
+			if root["model"] != "m" {
+				t.Fatalf("TOML model key was clobbered after MCP apply: got %v want m", root["model"])
+			}
+		}
 		servers := mcpServers(t, agent, root)
 		if _, ok := servers[confName].(map[string]interface{}); !ok {
 			t.Fatalf("server %q not added", confName)
@@ -376,6 +382,12 @@ func assertClobberSurvival(t *testing.T, layout agentinstall.AgentLayout, agent 
 		root := parseBack(t, layout.ConfigFormat, layout.ConfigPath)
 		if root["launcherKey"] != "keep" {
 			t.Fatalf("launcherKey clobbered: got %v want keep", root["launcherKey"])
+		}
+		// TOML base files also seed model="m"; verify it survives.
+		if layout.ConfigFormat == agentinstall.FormatTOML {
+			if root["model"] != "m" {
+				t.Fatalf("TOML model key was clobbered after Config apply: got %v want m", root["model"])
+			}
 		}
 		if root["customKey"] != "customValue" {
 			t.Fatalf("config customKey: got %v want customValue", root["customKey"])

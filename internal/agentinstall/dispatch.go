@@ -76,13 +76,16 @@ func resolveTargets(targets []string, reg Registry, env Environ) []resolvedTarge
 // secret-wait for MCP artifacts that carry secretRefs.
 //
 // Filtering rules:
-//   - agentFilter == "": delegates to Apply (no filtering).
+//   - agentFilter == "": delegates to Apply (no filtering). Caveat: Apply does NO bounded
+//     secret-wait, so callers that need secret-wait must provide a non-empty agentFilter.
 //   - "all-detected" targets: the artifact always targets the filter agent (unconditionally).
 //   - Explicit targets: the artifact is dispatched only if agentFilter is in the list.
 //   - Non-targeting artifacts produce no report (silent skip).
 //   - Targeting artifacts whose agent is not in the registry produce a skipped report.
 //   - KindMCP with secretRefs and opts.SecretWaitTimeout > 0: waits up to the timeout for
 //     the secret files; if still missing, produces a StatusSkipped report and skips InstallMCP.
+//     Caveat: the wait is per-artifact, so N artifacts each with secretRefs can serialize up
+//     to N×SecretWaitTimeout total. TODO(sp-1bia): shared deadline across artifacts.
 func ApplyFiltered(reg Registry, m Manifest, opts Options, env Environ, agentFilter string) Result {
 	if agentFilter == "" {
 		return Apply(reg, m, opts, env)

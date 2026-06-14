@@ -102,12 +102,12 @@ const (
 
 // Report is the structured outcome for one (artifact × agent) combination.
 type Report struct {
-	Agent              string `json:"agent"`
-	Kind               Kind   `json:"kind"`
-	Name               string `json:"name"`
-	Status             Status `json:"status"`
-	Reason             string `json:"reason,omitempty"`
-	RuntimeDepMissing  string `json:"runtimeDepMissing,omitempty"`
+	Agent             string `json:"agent"`
+	Kind              Kind   `json:"kind"`
+	Name              string `json:"name"`
+	Status            Status `json:"status"`
+	Reason            string `json:"reason,omitempty"`
+	RuntimeDepMissing string `json:"runtimeDepMissing,omitempty"`
 }
 
 // Result is the JSON-serializable aggregate output of an Apply run.

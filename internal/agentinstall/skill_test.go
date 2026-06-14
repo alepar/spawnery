@@ -3,6 +3,8 @@ package agentinstall_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 
 	"spawnery/internal/agentinstall"
@@ -362,6 +364,133 @@ func TestInstallSkillAbsoluteSourceDir(t *testing.T) {
 	}
 	if string(got) != "# abs\n" {
 		t.Errorf("content: got %q want %q", string(got), "# abs\n")
+	}
+}
+
+// TestInstallSkill_PreservesModeUnderRestrictiveUmask verifies that explicit chmod calls
+// in copyTree/copyFile correctly set permissions even when the process umask is 0o077.
+// This test must NOT be run with t.Parallel() because umask is process-wide.
+func TestInstallSkill_PreservesModeUnderRestrictiveUmask(t *testing.T) {
+	home := t.TempDir()
+	artifacts := t.TempDir()
+	// Stage the skill tree BEFORE applying the restrictive umask so that the source
+	// files carry their intended permissions (0644 / 0755). The explicit chmodding in
+	// copyTree/copyFile is what we're testing against a restrictive destination umask.
+	stageSkillTree(t, artifacts, "payloads/my-skill")
+
+	// Set a highly restrictive umask that would strip group+other bits without explicit chmod.
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+
+	r, _ := applySkill(home, artifacts, "claude", "my-skill", "payloads/my-skill")
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+	e, ok := reg.Lookup("claude")
+	if !ok {
+		t.Fatalf("agent claude not in registry")
+	}
+	lay := e.Layout()
+
+	// SKILL.md must be 0644 despite the 0o077 umask.
+	mdPath := filepath.Join(lay.SkillPath, "my-skill", "SKILL.md")
+	info, err := os.Stat(mdPath)
+	if err != nil {
+		t.Fatalf("stat SKILL.md: %v", err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("SKILL.md perm: got %o, want 0644 (umask must not defeat explicit chmod)", info.Mode().Perm())
+	}
+
+	// sub/ must be 0755 despite the 0o077 umask.
+	subPath := filepath.Join(lay.SkillPath, "my-skill", "sub")
+	infoSub, err := os.Stat(subPath)
+	if err != nil {
+		t.Fatalf("stat sub/: %v", err)
+	}
+	if infoSub.Mode().Perm() != 0o755 {
+		t.Errorf("sub/ perm: got %o, want 0755 (umask must not defeat explicit chmod)", infoSub.Mode().Perm())
+	}
+}
+
+// TestInstallSkill_TopDirIs0700 verifies that the installed skill's top-level directory
+// (<SkillPath>/<name>) is always set to 0700 after a successful apply.
+func TestInstallSkill_TopDirIs0700(t *testing.T) {
+	home := t.TempDir()
+	artifacts := t.TempDir()
+	stageSkillTree(t, artifacts, "payloads/my-skill")
+
+	r, _ := applySkill(home, artifacts, "claude", "my-skill", "payloads/my-skill")
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+	e, ok := reg.Lookup("claude")
+	if !ok {
+		t.Fatalf("agent claude not in registry")
+	}
+	lay := e.Layout()
+
+	topDir := filepath.Join(lay.SkillPath, "my-skill")
+	info, err := os.Stat(topDir)
+	if err != nil {
+		t.Fatalf("stat skill top dir: %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Errorf("skill top dir perm: got %o, want 0700", info.Mode().Perm())
+	}
+}
+
+// TestInstallSkill_SignalsSkippedSymlinks verifies that a source tree containing a symlink
+// reports StatusApplied with a Reason mentioning the skipped symlink.
+func TestInstallSkill_SignalsSkippedSymlinks(t *testing.T) {
+	home := t.TempDir()
+	artifacts := t.TempDir()
+
+	// Stage a skill tree with a SKILL.md and a symlink.
+	skillDir := filepath.Join(artifacts, "payloads", "sym-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# sym-skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Create a symlink inside the skill tree.
+	if err := os.Symlink("SKILL.md", filepath.Join(skillDir, "link.md")); err != nil {
+		t.Skip("cannot create symlinks on this platform:", err)
+	}
+
+	r, _ := applySkill(home, artifacts, "claude", "sym-skill", "payloads/sym-skill")
+
+	// Status must be Applied (symlinks are skipped, not fatal).
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	// Reason must mention the skipped symlink.
+	if !strings.Contains(r.Reason, "symlink") {
+		t.Errorf("reason should mention skipped symlink(s), got: %q", r.Reason)
+	}
+
+	// The symlink itself must NOT have been copied (it was skipped).
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+	e, ok := reg.Lookup("claude")
+	if !ok {
+		t.Fatalf("agent claude not in registry")
+	}
+	lay := e.Layout()
+	linkPath := filepath.Join(lay.SkillPath, "sym-skill", "link.md")
+	if _, err := os.Lstat(linkPath); !os.IsNotExist(err) {
+		t.Errorf("symlink link.md should have been skipped, but exists at %s", linkPath)
+	}
+	// SKILL.md must be present.
+	if _, err := os.Stat(filepath.Join(lay.SkillPath, "sym-skill", "SKILL.md")); err != nil {
+		t.Errorf("SKILL.md should be present after apply: %v", err)
 	}
 }
 

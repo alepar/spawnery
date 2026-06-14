@@ -46,13 +46,7 @@ func TestLeafInvariant(t *testing.T) {
 	}
 }
 
-// packageDir returns the absolute path to the internal/agentinstall package directory.
-// It walks up from the test file's directory until it finds the go.mod, then locates the package.
+// packageDir returns the package directory; go test sets cwd to the package dir.
 func packageDir() (string, error) {
-	// Use the current working directory — go test sets cwd to the package directory.
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	return wd, nil
+	return os.Getwd()
 }

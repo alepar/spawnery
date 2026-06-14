@@ -59,6 +59,8 @@ if [ -n "$REPORT_JSON" ]; then
   # Warn on failed or skipped entries so they surface in the spawn log.
   if printf '%s\n' "$REPORT_JSON" | grep -q '"status":"failed"\|"status":"skipped"'; then
     printf 'apply-artifacts: WARNING — some artifacts were not applied for %s (see %s):\n' "$RUNNABLE" "$REPORT_FILE" >&2
+    # Best-effort human-readable summary on stderr; $REPORT_FILE holds the authoritative JSON
+    # (do not parse it programmatically — use $REPORT_FILE instead).
     printf '%s\n' "$REPORT_JSON" | grep -o '"name":"[^"]*","[^}]*"status":"[^"]*"' >&2 || true
   fi
 else

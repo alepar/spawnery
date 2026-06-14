@@ -53,14 +53,21 @@ func resolveStdioEnv(a Artifact, opts Options) (map[string]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read secret %q: %w", ref, err)
 		}
-		out[ref] = string(b)
+		out[ref] = strings.TrimRight(string(b), "\n")
 	}
 	return out, nil
 }
 
-// hasSecrets reports whether the artifact has secret refs.
+// hasSecrets reports whether the artifact carries any sensitive values that
+// should force the config file to 0600:
+//   - SecretRefs: resolved from files in SecretsDir
+//   - Sensitive: caller-flagged
+//   - HTTP with Headers: headers commonly carry Authorization tokens
 func hasSecrets(a Artifact) bool {
-	return a.MCP != nil && len(a.MCP.SecretRefs) > 0
+	if a.MCP == nil {
+		return false
+	}
+	return len(a.MCP.SecretRefs) > 0 || a.Sensitive || (a.MCP.HTTP != nil && len(a.MCP.HTTP.Headers) > 0)
 }
 
 // filePerm determines the file permission to use.
@@ -210,7 +217,8 @@ func (e claudeEmitter) InstallMCP(a Artifact, opts Options) Report {
 		return base
 	}
 
-	perm := filePerm(path, hasSecrets(a), 0o600)
+	// ~/.claude.json holds OAuth credentials as well as MCP secrets; always 0600.
+	perm := fs.FileMode(0o600)
 	if err := atomicWriteFile(path, data, perm); err != nil {
 		base.Status = StatusFailed
 		base.Reason = err.Error()

@@ -146,7 +146,7 @@ func installCmd() *cli.Command {
 	}
 }
 
-// resolveTargets parses the --agent / --all-detected flags from cmd (a subcommand whose
+// resolveInstallTargets parses the --agent / --all-detected flags from cmd (a subcommand whose
 // parent carries those flags) and returns the targets slice.
 func resolveInstallTargets(cmd *cli.Command) ([]string, error) {
 	// urfave/cli v3 walks the lineage upward, so cmd.Bool/String finds flags on parent "install".

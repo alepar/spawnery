@@ -512,6 +512,42 @@ func TestApplyFiltered_MissingSecret_StatusSkipped(t *testing.T) {
 	}
 }
 
+// TestDispatch_StampsRuntimeDepMissingWhenApplied verifies that dispatch.go stamps
+// RuntimeDepMissing on the report when the MCP stdio command is absent from PATH
+// and the artifact was otherwise applied successfully.
+func TestDispatch_StampsRuntimeDepMissingWhenApplied(t *testing.T) {
+	home := t.TempDir()
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+
+	const missingCmd = "spawnery-nonexistent-cmd-xyz"
+	m := agentinstall.Manifest{
+		Artifacts: []agentinstall.Artifact{
+			{
+				Kind:    agentinstall.KindMCP,
+				Name:    "test-mcp",
+				Targets: []string{"claude"},
+				MCP: &agentinstall.MCPPayload{
+					Stdio: &agentinstall.MCPTransportStdio{Command: missingCmd},
+				},
+			},
+		},
+	}
+	opts := agentinstall.Options{HomeDir: home}
+	result := agentinstall.Apply(reg, m, opts, env)
+
+	if len(result.Reports) != 1 {
+		t.Fatalf("expected 1 report, got %d", len(result.Reports))
+	}
+	r := result.Reports[0]
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied (MCP install succeeds; dep missing is stamped, not a failure), got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.RuntimeDepMissing != missingCmd {
+		t.Errorf("RuntimeDepMissing: got %q, want %q", r.RuntimeDepMissing, missingCmd)
+	}
+}
+
 // TestApplyFilteredEmptyFilter verifies that filter="" delegates to Apply (full target expansion).
 func TestApplyFilteredEmptyFilter(t *testing.T) {
 	home := t.TempDir()

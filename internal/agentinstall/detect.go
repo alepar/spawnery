@@ -18,10 +18,7 @@ type Environ interface {
 type OSEnviron struct{}
 
 func (OSEnviron) Home() string {
-	if h := os.Getenv("HOME"); h != "" {
-		return h
-	}
-	return ""
+	return os.Getenv("HOME")
 }
 
 func (OSEnviron) CodexHome() string {

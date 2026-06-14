@@ -526,8 +526,8 @@ func TestApplyConfig_CodexNativePassthroughAndForbiddenModel(t *testing.T) {
 		Config: &agentinstall.ConfigPayload{
 			Native: map[string]interface{}{
 				"codex": map[string]interface{}{
-					"model":      "gpt-4",  // forbidden
-					"some_key":   "val",    // allowed
+					"model":    "gpt-4", // forbidden
+					"some_key": "val",   // allowed
 				},
 			},
 		},
@@ -762,8 +762,8 @@ func TestApplyConfig_OpencodeForbiddenModelDropped(t *testing.T) {
 
 	a := configArtifactWithNative("cfg", []string{"opencode"}, nil, map[string]interface{}{
 		"opencode": map[string]interface{}{
-			"model":   "gpt-4", // forbidden
-			"theme":   "dark",  // allowed
+			"model": "gpt-4", // forbidden
+			"theme": "dark",  // allowed
 		},
 	})
 

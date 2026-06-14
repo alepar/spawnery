@@ -92,7 +92,8 @@ func installSkillTree(layout AgentLayout, a Artifact, opts Options) Report {
 		}
 	}()
 
-	if err := copyTree(src, tmp); err != nil {
+	skipped, err := copyTree(src, tmp)
+	if err != nil {
 		base.Status = StatusFailed
 		base.Reason = fmt.Sprintf("copy skill tree: %v", err)
 		return base
@@ -111,7 +112,17 @@ func installSkillTree(layout AgentLayout, a Artifact, opts Options) Report {
 	}
 	ok = true
 
+	// Restrict the skill top-level directory to owner-only access (0700).
+	if err := os.Chmod(dest, 0o700); err != nil {
+		base.Status = StatusFailed
+		base.Reason = fmt.Sprintf("chmod skill top dir: %v", err)
+		return base
+	}
+
 	base.Status = StatusApplied
+	if len(skipped) > 0 {
+		base.Reason = fmt.Sprintf("skipped %d symlink(s): %s", len(skipped), strings.Join(skipped, ", "))
+	}
 	return base
 }
 
@@ -133,42 +144,52 @@ func validateSkillName(name string) error {
 }
 
 // copyTree copies the contents of srcDir into dstDir, preserving file permissions.
-// Symlinks are not followed; they are skipped (MVP).
-func copyTree(srcDir, dstDir string) error {
-	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+// Symlinks are skipped (not followed); their relative paths are returned in skippedSymlinks.
+// Permissions are applied via explicit os.Chmod after each MkdirAll/file-write to defeat
+// any restrictive umask set by the calling process.
+func copyTree(srcDir, dstDir string) (skippedSymlinks []string, err error) {
+	err = filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
 
 		// Compute destination path.
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
+		rel, relErr := filepath.Rel(srcDir, path)
+		if relErr != nil {
+			return relErr
 		}
 		dst := filepath.Join(dstDir, rel)
 
 		if d.IsDir() {
-			info, err := d.Info()
-			if err != nil {
-				return err
+			info, infoErr := d.Info()
+			if infoErr != nil {
+				return infoErr
 			}
-			return os.MkdirAll(dst, info.Mode().Perm())
+			perm := info.Mode().Perm()
+			if mkErr := os.MkdirAll(dst, perm); mkErr != nil {
+				return mkErr
+			}
+			// Explicit chmod defeats any restrictive umask.
+			return os.Chmod(dst, perm)
 		}
 
-		// Skip symlinks (MVP: copy as nothing; could be revisited later).
+		// Skip symlinks; record the relative path for the caller to report.
 		if d.Type()&fs.ModeSymlink != 0 {
+			skippedSymlinks = append(skippedSymlinks, rel)
 			return nil
 		}
 
-		info, err := d.Info()
-		if err != nil {
-			return err
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
 		}
 		return copyFile(path, dst, info.Mode().Perm())
 	})
+	return
 }
 
 // copyFile copies a single regular file from src to dst with the given permissions.
+// An explicit os.Chmod is applied after close to defeat any restrictive umask.
 func copyFile(src, dst string, perm fs.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -187,5 +208,9 @@ func copyFile(src, dst string, perm fs.FileMode) error {
 		return fmt.Errorf("copy %s -> %s: %w", src, dst, err)
 	}
 
-	return out.Close()
+	if err := out.Close(); err != nil {
+		return err
+	}
+	// Explicit chmod defeats any restrictive umask.
+	return os.Chmod(dst, perm)
 }
