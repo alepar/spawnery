@@ -441,46 +441,7 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 	for {
 		select {
 		case sc := <-wt.ch:
-			// Fail-closed gate (spec §6): node aborted the suspend — nothing reaped/torn down, spawn
-			// still running. Revert Suspending→Active so the row is consistent and the caller can retry.
-			if detail := sc.GetError(); detail != "" {
-				const maxRevertRetries = 3
-				var revertErr error
-				for i := 0; i < maxRevertRetries; i++ {
-					freshSP, gerr := s.st.Spawns().Get(storeCtx, id)
-					if gerr != nil {
-						revertErr = gerr
-						break
-					}
-					_, revertErr = s.st.Spawns().TransitionClaimed(storeCtx, id, leaseID,
-						freshSP.StatusSeq, gen, store.Active)
-					if revertErr == nil || !errors.Is(revertErr, store.ErrConflict) {
-						break
-					}
-					// Benign seq bump (e.g. Touch): re-read and retry.
-				}
-				if revertErr != nil {
-					log.Printf("suspendLocked %s: revert Suspending→Active failed: %v", id, revertErr)
-				}
-				return nil, connect.NewError(connect.CodeFailedPrecondition,
-					fmt.Errorf("suspend failed: %s — spawn left running", detail))
-			}
-			// Success path: record markers, drop route, finalise suspended.
-			for _, mk := range sc.GetMarkers() {
-				if merr := s.st.Spawns().SetMountMarker(storeCtx, id, mk.GetName(), mk.GetMarker()); merr != nil {
-					log.Printf("SuspendSpawn %s: SetMountMarker(%s): %v", id, mk.GetName(), merr)
-				}
-			}
-			s.rt.Drop(id)
-			if err := s.st.Spawns().SetSuspended(storeCtx, id, gen); err != nil {
-				// Pod torn down but couldn't record 'suspended'. Compensate to terminal 'error'.
-				if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
-					log.Printf("suspendLocked %s: SetError after SetSuspended failure also failed: %v", id, serr)
-				}
-				return nil, connect.NewError(connect.CodeInternal, err)
-			}
-			_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: id, Timestamp: time.Now().UTC()})
-			return sc, nil
+			return s.handleSuspendReply(storeCtx, owner, id, gen, leaseID, sc)
 
 		case <-wt.progressCh:
 			// Progress event: node is still making forward progress — reset the stall timer.
@@ -495,8 +456,18 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 			persistAccumulatedMarkers("progress")
 
 		case <-stall.C:
-			// STALL: no progress for suspendStallWindow — node is wedged. Persist partial markers
-			// (best-effort) so they are not lost, then move the spawn to terminal 'error'.
+			// STALL: no progress for suspendStallWindow — node is wedged. Close the sp-iuo1 drop
+			// window FIRST: unregister the waiter so any SuspendComplete arriving from here on gets
+			// deliver()==false and is routed to reconcileLateSuspend, then drain anything already
+			// buffered (a reply that raced the timer) and finalise it as the real outcome rather
+			// than erroring. unregister is idempotent with the deferred one above.
+			s.suspends.unregister(id)
+			select {
+			case sc := <-wt.ch:
+				return s.handleSuspendReply(storeCtx, owner, id, gen, leaseID, sc)
+			default:
+			}
+			// Genuinely wedged: persist partial markers (best-effort), then move to terminal 'error'.
 			// reconcileLateSuspend will flip Errored→Suspended if the node eventually finishes (sp-iuo1).
 			persistAccumulatedMarkers("stall")
 			s.rt.Drop(id)
@@ -512,7 +483,14 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 				// Bail: commit no further transition; the recovery sweep will handle this.
 				return nil, connect.NewError(connect.CodeAborted, fmt.Errorf("claim lost or request cancelled during suspend"))
 			}
-			// Absolute backstop expired. Design §5 "persist failure → error".
+			// Absolute backstop expired. Design §5 "persist failure → error". Close the drop window
+			// first (same as the stall path): unregister, drain a raced reply, else error.
+			s.suspends.unregister(id)
+			select {
+			case sc := <-wt.ch:
+				return s.handleSuspendReply(storeCtx, owner, id, gen, leaseID, sc)
+			default:
+			}
 			s.rt.Drop(id)
 			if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
 				log.Printf("suspendLocked %s: SetError after suspend timeout also failed: %v", id, serr)
@@ -520,6 +498,54 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 			return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node suspend"))
 		}
 	}
+}
+
+// handleSuspendReply finalises a suspend from a node SuspendComplete. A gate-abort (error set)
+// reverts Suspending→Active (lease-fenced, retrying a benign seq bump) and returns
+// FailedPrecondition — the spawn is still running. A clean reply records the per-mount markers,
+// drops the route, and finalises Suspended. Shared by the main wait AND the stall/backstop drains
+// so a reply that races the stall/backstop timer is finalised here rather than dropped (sp-iuo1).
+func (s *Server) handleSuspendReply(storeCtx context.Context, owner, id string, gen int64, leaseID string, sc *nodev1.SuspendComplete) (*nodev1.SuspendComplete, error) {
+	// Fail-closed gate (spec §6): node aborted the suspend — nothing reaped/torn down, spawn still
+	// running. Revert Suspending→Active so the row is consistent and the caller can retry.
+	if detail := sc.GetError(); detail != "" {
+		const maxRevertRetries = 3
+		var revertErr error
+		for i := 0; i < maxRevertRetries; i++ {
+			freshSP, gerr := s.st.Spawns().Get(storeCtx, id)
+			if gerr != nil {
+				revertErr = gerr
+				break
+			}
+			_, revertErr = s.st.Spawns().TransitionClaimed(storeCtx, id, leaseID,
+				freshSP.StatusSeq, gen, store.Active)
+			if revertErr == nil || !errors.Is(revertErr, store.ErrConflict) {
+				break
+			}
+			// Benign seq bump (e.g. Touch): re-read and retry.
+		}
+		if revertErr != nil {
+			log.Printf("suspendLocked %s: revert Suspending→Active failed: %v", id, revertErr)
+		}
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("suspend failed: %s — spawn left running", detail))
+	}
+	// Success path: record markers, drop route, finalise suspended.
+	for _, mk := range sc.GetMarkers() {
+		if merr := s.st.Spawns().SetMountMarker(storeCtx, id, mk.GetName(), mk.GetMarker()); merr != nil {
+			log.Printf("SuspendSpawn %s: SetMountMarker(%s): %v", id, mk.GetName(), merr)
+		}
+	}
+	s.rt.Drop(id)
+	if err := s.st.Spawns().SetSuspended(storeCtx, id, gen); err != nil {
+		// Pod torn down but couldn't record 'suspended'. Compensate to terminal 'error'.
+		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+			log.Printf("suspendLocked %s: SetError after SetSuspended failure also failed: %v", id, serr)
+		}
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: id, Timestamp: time.Now().UTC()})
+	return sc, nil
 }
 
 // reconcileLateSuspend handles a SuspendComplete that arrived with no live waiter — the CP's
