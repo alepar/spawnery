@@ -445,6 +445,14 @@ type SuspendResult struct {
 	RootfsArtifacts []RootfsArtifact
 }
 
+// SuspendProgressFunc is an optional callback invoked at each phase boundary of SnapshotForSuspend
+// and FinishSuspend/teardown so that callers (attach.go) can relay progress signals upstream
+// (e.g. to the CP via the Attach stream — sp-u53.7.2). nil = no-op (Stop, Delete, SuspendForMigration
+// callers pass nil; only the gate/finish sequence wires this).
+// NOTE: intra-FinalSnapshot byte-level granularity (journal hook) is a documented follow-up; this
+// function fires only at coarse phase boundaries (gate/snapshot/capture/export/stop/finalize).
+type SuspendProgressFunc func(phase, detail string)
+
 func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID string, generation uint64) (*Spawn, error) {
 	return m.CreateWithSelection(ctx, id, appPath, model, name, appID, generation, AgentSelection{})
 }
@@ -897,7 +905,8 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
 	// snapshot=true: best-effort final journal snapshot, never blocks teardown (fail-closed is suspend-gate-only).
-	_, _ = m.teardown(ctx, sp, false, false, false, true)
+	// progress=nil: Stop is a destroy path — no stall-detector relay.
+	_, _ = m.teardown(ctx, sp, false, false, false, true, nil)
 	return nil
 }
 
@@ -914,7 +923,8 @@ func (m *Manager) Suspend(ctx context.Context, id string) (map[string]string, er
 		return nil, fmt.Errorf("unknown spawn %s", id)
 	}
 	// snapshot=true: best-effort final journal snapshot, never blocks teardown (fail-closed is suspend-gate-only).
-	res, err := m.teardown(ctx, sp, true, false, false, true)
+	// progress=nil: Suspend is the legacy single-step path (no SnapshotForSuspend gate); no caller to relay to.
+	res, err := m.teardown(ctx, sp, true, false, false, true, nil)
 	return res.MountMarkers, err
 }
 
@@ -924,7 +934,8 @@ func (m *Manager) SuspendForMigration(ctx context.Context, id string, captureRoo
 		return SuspendResult{}, fmt.Errorf("unknown spawn %s", id)
 	}
 	// snapshot=true: best-effort final journal snapshot, never blocks teardown (fail-closed is suspend-gate-only).
-	return m.teardown(ctx, sp, true, false, captureRootfsArtifact, true)
+	// progress=nil: SuspendForMigration is the migration path; no CP stall-detector relay needed.
+	return m.teardown(ctx, sp, true, false, captureRootfsArtifact, true, nil)
 }
 
 // SnapshotForSuspend is the non-destructive suspend GATE (spec §4, fail-closed): it quiesces
@@ -942,7 +953,25 @@ func (m *Manager) SuspendForMigration(ctx context.Context, id string, captureRoo
 //
 // Pause failure is NON-FATAL (spec §3): we log and snapshot the live tree anyway. The roast-M17
 // guarantee (no writes between snapshot and stop) is best-effort when Pause fails.
-func (m *Manager) SnapshotForSuspend(ctx context.Context, id string) (SuspendResult, error) {
+// SnapshotForSuspend is the non-destructive suspend GATE (spec §4, fail-closed): it quiesces
+// the agent (Pause), takes the final journal snapshot, and returns the per-mount persist markers
+// — WITHOUT removing the spawn from the store or stopping the pod. The node calls this BEFORE
+// reaping ACP sessions, so sessions are cleanly torn down between the quiesce and the teardown.
+//
+// On snapshot SUCCESS the agent is left PAUSED and the journal watchers are stopped (roast-M17:
+// no writes between snapshot and pod.Stop). The caller must follow up with FinishSuspend to
+// complete the teardown.
+//
+// On snapshot FAILURE the agent is Unpaused and the journal watchers are restarted — the spawn
+// is fully restored to its live state and an error is returned. The caller may retry or leave
+// the spawn running.
+//
+// Pause failure is NON-FATAL (spec §3): we log and snapshot the live tree anyway. The roast-M17
+// guarantee (no writes between snapshot and stop) is best-effort when Pause fails.
+//
+// progress (optional, nil-safe) is called at phase boundaries so the caller can relay progress
+// signals upstream (sp-u53.7.2). Byte-level intra-snapshot progress is a documented follow-up.
+func (m *Manager) SnapshotForSuspend(ctx context.Context, id string, progress SuspendProgressFunc) (SuspendResult, error) {
 	sp, ok := m.store.Get(id)
 	if !ok {
 		return SuspendResult{}, fmt.Errorf("unknown spawn %s", id)
@@ -965,11 +994,17 @@ func (m *Manager) SnapshotForSuspend(ctx context.Context, id string) (SuspendRes
 		SidecarID: sp.SidecarID,
 		SandboxID: sp.SandboxID,
 	}
+	if progress != nil {
+		progress("gate", "pausing agent")
+	}
 	if perr := m.pod.Pause(ctx, h); perr != nil {
 		// Non-fatal (spec §3): snapshot the live tree. Roast-M17 is best-effort.
 		log.Printf("suspend gate: pause %s: %v (non-fatal; snapshotting live tree)", id, perr)
 	}
 
+	if progress != nil {
+		progress("snapshot", "journal final snapshot")
+	}
 	result := SuspendResult{MountMarkers: map[string]string{}}
 	if m.journal != nil && len(sp.JournalMounts) > 0 {
 		markers, err := m.snapshotJournal(ctx, sp)
@@ -999,7 +1034,10 @@ func (m *Manager) SnapshotForSuspend(ctx context.Context, id string) (SuspendRes
 // The returned SuspendResult carries RootfsArtifacts (when captureRootfsArtifact=true and
 // DeltaCapture is enabled). MountMarkers is intentionally empty — the node already holds them
 // from the SnapshotForSuspend call and does not need them re-returned here.
-func (m *Manager) FinishSuspend(ctx context.Context, id string, captureRootfsArtifact bool) (SuspendResult, error) {
+//
+// progress (optional, nil-safe) is called at phase boundaries inside teardown so the caller
+// can relay progress signals upstream (sp-u53.7.2).
+func (m *Manager) FinishSuspend(ctx context.Context, id string, captureRootfsArtifact bool, progress SuspendProgressFunc) (SuspendResult, error) {
 	sp, ok := m.store.Claim(id)
 	if !ok {
 		return SuspendResult{}, fmt.Errorf("unknown spawn %s", id)
@@ -1007,7 +1045,7 @@ func (m *Manager) FinishSuspend(ctx context.Context, id string, captureRootfsArt
 	// capture=true: rootfs CaptureDelta on the paused container (non-fatal as always).
 	// gc=false: delta image preserved for same-node restart-resume.
 	// snapshot=false: SnapshotForSuspend already took the final journal snapshot.
-	return m.teardown(ctx, sp, true, false, captureRootfsArtifact, false)
+	return m.teardown(ctx, sp, true, false, captureRootfsArtifact, false, progress)
 }
 
 // Delete tears down the spawn (without capturing a delta) and runs GC: releases the per-spawn
@@ -1024,7 +1062,8 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("unknown spawn %s", id)
 	}
 	// snapshot=true: best-effort final journal snapshot, never blocks teardown (fail-closed is suspend-gate-only).
-	_, _ = m.teardown(ctx, sp, false, true, false, true)
+	// progress=nil: Delete is a destroy path — no stall-detector relay.
+	_, _ = m.teardown(ctx, sp, false, true, false, true, nil)
 	return nil
 }
 
@@ -1039,7 +1078,8 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 //     (Stop and Suspend both have gc=false — the delta image must survive for same-node restart-resume.)
 //   - snapshot=true: take a final journal snapshot + persist node-local state (best-effort, non-fatal).
 //     false when SnapshotForSuspend (the gate) already did it — FinishSuspend calls with snapshot=false.
-func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureRootfsArtifact, snapshot bool) (SuspendResult, error) {
+//   - progress (optional, nil-safe): called at phase boundaries so callers can relay signals upstream.
+func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureRootfsArtifact, snapshot bool, progress SuspendProgressFunc) (SuspendResult, error) {
 	id := sp.ID
 	result := SuspendResult{MountMarkers: map[string]string{}}
 	var resultErr error
@@ -1087,6 +1127,9 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 				log.Printf("delta scrub for %s: %v (non-fatal; proceeding with capture)", id, serr)
 			}
 		}
+		if progress != nil {
+			progress("capture", "committing rootfs delta")
+		}
 		if ref, cerr := m.pod.CaptureDelta(ctx, h); cerr != nil {
 			log.Printf("delta capture for %s: %v (non-fatal; next resume uses base image)", id, cerr)
 			if captureRootfsArtifact {
@@ -1114,6 +1157,9 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 				if m.journal == nil {
 					resultErr = fmt.Errorf("rootfs artifact capture for %s: no journaler configured", id)
 				} else {
+					if progress != nil {
+						progress("export", "exporting rootfs delta artifact")
+					}
 					var payload bytes.Buffer
 					if err := m.pod.ExportDelta(ctx, id, &payload); err != nil {
 						resultErr = fmt.Errorf("rootfs artifact capture for %s: export delta: %w", id, err)
@@ -1141,6 +1187,9 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 		}
 	}
 
+	if progress != nil {
+		progress("stop", "stopping pod")
+	}
 	_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: sp.SidecarID, AgentID: sp.AgentID, SandboxID: sp.SandboxID})
 	if sp.FloorIP != "" {
 		if err := m.fw.Remove(ctx, firewall.Rules(sp.FloorIP, m.cfg.EgressAllowCIDRs)); err != nil {
@@ -1172,6 +1221,9 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 		}
 	}
 
+	if progress != nil {
+		progress("finalize", "finalizing mount dirs")
+	}
 	for _, d := range sp.MountDirs {
 		_ = m.backend.Finalize(ctx, d)
 	}

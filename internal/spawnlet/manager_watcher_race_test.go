@@ -55,7 +55,7 @@ func TestSnapshotForSuspendRaceVsStop(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, _ = m.SnapshotForSuspend(ctx, id)
+			_, _ = m.SnapshotForSuspend(ctx, id, nil)
 		}()
 		go func() {
 			defer wg.Done()

@@ -126,6 +126,16 @@ type SpawnRepo interface {
 	// Results are ordered by id ASC for deterministic test output.
 	// Decision and revert logic (reconcile against node ground truth) lives in the CP layer (7.6/7.7).
 	ListStranded(ctx context.Context, nowTS int64) ([]Spawn, error)
+
+	// ReconcileSuspendedAfterError is the late-reply reconcile transition for sp-u53.7.2: when a
+	// node genuinely completed a suspend AFTER the CP's stall window fired (leaving the spawn in
+	// Errored with its container already ended by SetError), a late SuspendComplete can arrive with
+	// no live waiter. This method transitions Errored→Suspended without touching the container row
+	// (it was already ended). Unlike SetSuspended, it does NOT guard on a live container or try to
+	// end one. Accepts only Errored to prevent misuse on active/suspending rows.
+	// The generation fence must be applied by the caller (e.g. via LatestContainer check) before
+	// calling here — this method guards only on status to keep the store layer simple.
+	ReconcileSuspendedAfterError(ctx context.Context, id string) error
 }
 
 type AgentImageRepo interface {

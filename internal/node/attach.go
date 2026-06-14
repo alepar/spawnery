@@ -641,7 +641,10 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 	spawnID := m.SpawnId
 
 	// Step 1: gate — snapshot while sessions/pumps are still live.
-	gate, err := a.mgr.SnapshotForSuspend(ctx, spawnID)
+	// progress=nil: node-side emission of SuspendProgress to the CP stream requires a proto message
+	// not yet added (sp-u53.7.2 TODO). When proto/node/v1/node.proto gains SuspendProgress, wire
+	// a closure here that calls a.suspendProgress(spawnID, m.Generation, phase, detail, nil).
+	gate, err := a.mgr.SnapshotForSuspend(ctx, spawnID, nil)
 	if err != nil {
 		logErr("suspendSpawn gate "+spawnID, err)
 		_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SuspendComplete{SuspendComplete: &nodev1.SuspendComplete{
@@ -659,7 +662,8 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 	for _, r := range relays {
 		r.stop()
 	}
-	res, err := a.mgr.FinishSuspend(ctx, spawnID, m.GetCaptureRootfsArtifact())
+	// progress=nil: deferred until SuspendProgress proto message is available (sp-u53.7.2 TODO).
+	res, err := a.mgr.FinishSuspend(ctx, spawnID, m.GetCaptureRootfsArtifact(), nil)
 	if err != nil {
 		logErr("suspendSpawn finish "+spawnID, err)
 		// Sessions were already reaped above; release the capacity slot before returning so
