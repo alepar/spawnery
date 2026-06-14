@@ -240,18 +240,16 @@ func TestDispatchBasePlaceholdersReturnSkipped(t *testing.T) {
 	env := agentinstall.MapEnviron{"HOME": home}
 	reg := agentinstall.NewRegistry(env)
 
-	// claude, codex, goose (mcp/config) all return skipped from base placeholder.
-	// Note: KindSkill for claude and codex is now implemented (sp-w5aa), so those
-	// rows are removed from this table.
+	// Tracks which (agent, kind) pairs still return skipped from base placeholders.
+	// Note: KindSkill for claude/codex (sp-w5aa) and KindMCP for claude/codex/opencode
+	// (sp-cywj) are now implemented, so those rows are removed from this table.
+	// goose.InstallMCP returns skipped-deferred (explicit, not base placeholder).
 	tests := []struct {
 		agent string
 		kind  agentinstall.Kind
 	}{
-		{"claude", agentinstall.KindMCP},
 		{"claude", agentinstall.KindConfig},
-		{"codex", agentinstall.KindMCP},
 		{"codex", agentinstall.KindConfig},
-		{"opencode", agentinstall.KindMCP},
 		{"opencode", agentinstall.KindConfig},
 		{"goose", agentinstall.KindMCP},
 		{"goose", agentinstall.KindConfig},
