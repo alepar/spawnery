@@ -91,28 +91,38 @@ carries `{ normalized:{…}, native:{<agent>:<fragment>}, instructions:<content?
 > a report entry**, never a silent skip. The CP assembler validates normalized values against an
 > `agentinstall capabilities` export (§8) at profile-save so mismatches fail early.
 
+> **Default posture = `yolo` (spike decision):** isolated spawn containers run full-access by default —
+> the pod isolation + egress floor are the real containment, not in-process approval prompts. The
+> locked-down postures + per-command rules are **opt-in guardrails**; the complex agent-divergent
+> posture paths are the exception, not the path an MVP spawn travels.
+
 - **Normalized keys (MVP — all four):**
-  - **`approvalPosture`**: enum **`always-ask | ask-risky | auto | yolo`** → per-agent translation:
-    | posture | claude (`permissions.defaultMode`) | codex (`approval_policy`) | opencode (`permission`) | hermes |
-    |---|---|---|---|---|
-    | `always-ask` | `default`/`plan` | `untrusted` | `ask`/`deny` | gates on |
-    | `ask-risky` | `acceptEdits` | `on-request` | per-tool `ask` | partial gates |
-    | `auto` | `auto` + launch flag (see caveat) | `on-request` + workspace-write | `allow` | gates off |
-    | `yolo` | `bypassPermissions` + `--dangerously-skip-permissions` flag | `never` | `allow` | gates off |
-    Caveats wired in: (1) Claude `auto`/`bypassPermissions` need a **launch flag** the launcher must
-    inject (roast A2) — the launcher's per-runnable case reads the assembled posture; (2) Claude `auto`'s
-    safety classifier is a server call that must route via the sidecar `ANTHROPIC_BASE_URL` or the egress
-    floor breaks it (roast A3) — a spike confirms; (3) **`yolo` bypasses APPROVAL only — never sandbox
-    or egress** (the pod + egress floor remain the real containment); (4) **`always-ask` is rejected for
-    headless Codex** (would hang on a prompt with no human — roast A11): the assembler errors at save if
-    a Codex-targeted profile sets `always-ask`.
+  - **`approvalPosture`**: enum **`always-ask | ask-risky | auto | yolo`** (default `yolo`) → per-agent
+    translation **verified by the [posture spike](2026-06-14-profiles-spike-results.md)**:
+    | posture | claude (`permissions.defaultMode`) | codex | opencode (`permission`) |
+    |---|---|---|---|
+    | `always-ask` = **locked-down/deny-by-default** (no human headless) | `dontAsk` + allowlist | *limited — report* | per-tool `deny`/`ask` |
+    | `ask-risky` | `default` + targeted `allow` (NOT `acceptEdits` — too loose) | *limited — report* | per-tool `{bash:ask,…}` |
+    | `auto` | `auto` (model-tier caveat ↓) | *limited — report* | `allow` |
+    | `yolo` (default) | `bypassPermissions` | (full within launcher sandbox) | `allow` |
+    Verified facts: (1) **no launch flag needed** — claude honors `defaultMode` from `settings.json`
+    headlessly (spike overturns roast A2); (2) **`auto` is egress-safe** — its safety classifier routes
+    via the sidecar `ANTHROPIC_BASE_URL` (spike overturns roast A3) **BUT requires a model tier ≥
+    Sonnet/Opus 4.6**; on a lower sidecar model `auto` is unavailable → degrade to `yolo` + report;
+    (3) **`yolo` bypasses APPROVAL only — never the sandbox/egress** (pod + floor = real containment);
+    (4) **codex posture is LIMITED**: headless `codex exec` ignores `approval_policy` (fails *open* to
+    `never`), and `sandbox_mode` is launcher-managed/excluded → codex non-`yolo` postures are
+    **reported limited/best-effort**, never silently applied; the codex **tmux/ACP** approval lane is a
+    **follow-up spike**.
   - **`disabledTools`**: string[] built-in tool names → opencode `tools:{<n>:false}`, Hermes
     `agent.disabled_toolsets`, Claude/Codex deny patterns.
-  - **`allowedCommands` / `deniedCommands`**: string[] of a **defined canonical pattern grammar**
-    (`tool` or `tool(arg-glob)`, e.g. `Bash(rm *)`, `WebFetch(domain:x)`) that the engine translates to
-    each agent's native syntax (Claude `permissions.allow/deny`, Codex `approval_policy.granular`,
-    opencode per-tool map). The grammar + per-agent translation is **a spike** (roast A10 — syntaxes are
-    incompatible); until proven, an unmappable pattern is a save-time error.
+  - **`allowedCommands` / `deniedCommands`**: canonical grammar `<Tool>(<prefix> *)` — leading-token
+    prefix + trailing `*`, **no `?`/regex/interior wildcards** ([spike-verified enforcement](2026-06-14-profiles-spike-results.md)).
+    **claude + opencode are first-class** (deny actually blocks — emitter handles claude's
+    space-boundary form + opencode's catch-all-first/last-match ordering). **codex per-command →
+    emit the experimental `execpolicy` `.rules`** (`prefix_rule(...)`; decision 2026-06-14, preview-
+    stability accepted; the artifact reports an "experimental" capability signal; runtime enforcement
+    under confirmation). `Web(domain:x)` is lossy on opencode (no per-domain) → reported.
 - **`instructions`**: a content blob written to a **dedicated managed file** in each agent's
   instruction *set* (NOT `CLAUDE.md`/`SOUL.md`, which hold the agent's own runtime memory — roast C4):
   e.g. `~/.claude/profile-instructions.md` referenced from the instructions glob, opencode
@@ -169,14 +179,16 @@ to the shipped 3-method `Emitter` interface** (roast E2) — all 5 emitters + `b
 task. Per-agent native install (Claude Code `.claude-plugin`/marketplace, opencode npm plugin, codex
 `codex plugin`).
 
-**Headless-viability spike is a HARD GATE (decision, roast D7/E3):** before wiring each agent's
-plugin emitter, the spike must prove the plugin actually **activates headlessly** — Claude plugin
-activation is gated on an interactive trust dialog that never fires in a non-TTY container (so
-`enabledPlugins` may be ignored, and fresh containers are unauthenticated for marketplace install);
-opencode plugins are npm packages Bun fetches **at agent startup** (needs Bun + npm-registry egress
-through the floor). **Implement the plugin emitter only for agents where the spike confirms headless
-activation; explicit `no-op + report` where it doesn't** (e.g. Claude if the trust dialog blocks).
-Keep `plugin` in MVP but each agent's support is spike-gated.
+**The [plugin spike](2026-06-14-profiles-spike-results.md) confirmed headless activation works for
+ALL THREE agents** (no interactive trust-dialog gate — overturns roast D7). **Build the emitter for
+claude/codex/opencode**, targeting **local / image-baked plugins** (fully offline, deterministic):
+- **claude:** write `extraKnownMarketplaces` + `enabledPlugins:{ "p@mp":true }` to `~/.claude/settings.json`.
+- **codex:** write `[marketplaces.mp]` + `[plugins."p@mp"] enabled=true` to `~/.codex/config.toml`;
+  **`no-op + report`** plugins whose entry implies an OAuth `ON_INSTALL` app/MCP (can't complete headless).
+- **opencode:** drop a local plugin file + `opencode.json` `plugin:["./…"]`; **npm-module** plugins
+  need `registry.npmjs.org` egress every cold start and **fail soft** (configured ≠ active) → treat as
+  best-effort + report; prefer local/baked.
+Remote (github) marketplaces need git + github egress → prefer baking into the image.
 
 ## 8. CP-side assembly layer (closes roast gap B/C)
 
@@ -245,12 +257,13 @@ At `CreateSpawn` with `profile_id`, the CP:
 - **In:** profile model + store + web/CLI CRUD; curated catalog + custom intake; config facet (all 4
   normalized keys with the engine per-agent translation — `approvalPosture` {always-ask|ask-risky|auto|
   yolo} + disabledTools + allowed/deniedCommands; instructions-as-dedicated-managed-file; passthrough)
-  **+ hardened `ForbiddenConfigKeys`**; secrets facet (sp-7h6.1 refs + attach, **hard-require
-  owner-online**, save-time ref validation); `plugin` 4th kind (Emitter interface change, **per-agent
-  headless-spike-gated**); CP-side assembly (stdlib struct pkg + `schema_version` + capabilities export
-  + fail-loud-distinguished); `profile_id` on CreateSpawn + selection; explicit precedence + **sidecar
-  `managed.json` provenance index** + `profile_id`/`version` snapshot; **catalog kill-switch**;
-  live-agent load + posture + plugin spikes.
+  **+ hardened `ForbiddenConfigKeys`**, **default posture `yolo`**, codex per-command via experimental
+  `execpolicy`); secrets facet (sp-7h6.1 refs + attach, **hard-require owner-online**, save-time ref
+  validation); `plugin` 4th kind (Emitter interface change, **built for all 3 — local/baked**, codex-
+  OAuth + opencode-npm `no-op/best-effort`); CP-side assembly (stdlib struct pkg + `schema_version` +
+  **capabilities export** + **per-artifact capability/lossiness signal in the report** + fail-loud-
+  distinguished); `profile_id` on CreateSpawn + selection; explicit precedence + **sidecar
+  `managed.json` provenance index** + `profile_id`/`version` snapshot; **catalog kill-switch**.
 - **Deferred (fast-follow):** live propagation of profile edits to running spawns + reconcile/prune
   (roast #5/#4 — the `managed.json` index is laid down now to enable it); per-secret `optional`/
   degraded-start for hands-off resume (roast B13); multi-profile composition; profile sharing/
@@ -259,19 +272,20 @@ At `CreateSpawn` with `profile_id`, the CP:
 - **Depends on:** `sp-7h6.1` (secrets catalog + attach + owner-online delivery); the built substrate +
   `agentinstall` engine; `sp-nrzf.2`/`sp-mofj.1` open items don't block the spine.
 
-## 13. Open items / spikes (gate implementation)
-1. **Live-agent load proof** (roast E7) — inject an MCP via a profile, prompt the agent to invoke it,
-   assert the tool call works; de-risks the load-bearing "files written ⇒ agent loads" invariant.
-2. **`approvalPosture` realization** (roast A1/A2/A3) — drive each posture through the engine per agent;
-   confirm it changes behavior; confirm Claude `auto`/`yolo` launch-flag injection works and that
-   `auto`'s safety classifier routes via the sidecar `ANTHROPIC_BASE_URL` under the egress floor (else
-   downgrade `auto`→`yolo` or document); confirm hardened `ForbiddenConfigKeys` blocks the dangerous
-   passthrough keys.
-3. **Plugin headless-viability** (roast D7/E3) — `claude plugin add </dev/null` no-TTY/no-auth; opencode
-   Bun-at-startup + npm egress; codex `codex plugin`. Gates which agents get a plugin emitter.
-4. **`allowedCommands`/`deniedCommands` grammar** (roast A10) — define the canonical pattern grammar +
-   per-agent translation; prove a `deny` actually denies per agent, else keep commands as passthrough.
-5. Curated-catalog ↔ E5-marketplace reuse boundary; goose config-surface verification before any goose
+## 13. Spikes — resolved + follow-ups
+**RESOLVED** ([spike results](2026-06-14-profiles-spike-results.md)): ✅ live-agent load proof
+(confirmed all 3); ✅ approvalPosture realization (no launch flag; `auto` egress-safe but model-tier-
+gated; codex limited; default=`yolo`); ✅ plugin headless (works all 3 — build them); ✅ command grammar
+(claude+opencode native, codex via experimental execpolicy).
+**FOLLOW-UPS (during implementation):**
+1. **codex `execpolicy` runtime enforcement** — confirm codex enforces auto-loaded `.rules` at runtime
+   (not just `execpolicy check`) in the pty lane; *if not*, fall back to codex `deniedCommands` reported
+   unsupported. *(spike in progress)*
+2. **codex tmux/ACP approval lane** — does `approval_policy` take effect in `codex-tui` (vs `exec`,
+   which ignores it)? Determines whether codex non-`yolo` posture is partially supported.
+3. **codex MCP tool-call e2e** — codex `mcp list` has no live health-check, so validate MCP load on
+   codex via an actual tool-call (the load proof covered this once; keep in the e2e suite).
+4. Curated-catalog ↔ E5-marketplace reuse boundary; goose config-surface verification before any goose
    normalization.
 
 ## Post-Implementation Notes
