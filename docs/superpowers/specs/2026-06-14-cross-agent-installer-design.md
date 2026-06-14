@@ -6,13 +6,15 @@
 (Hermes), [Codex CLI Support](2026-06-08-codex-cli-support-design.md),
 [Tmux Terminal Mode](2026-06-06-tmux-terminal-mode-design.md).
 
-> **Revised 2026-06-14 post-roast.** The first draft drew a **BLOCK** —
+> **Revised 2026-06-14 post-roast + spikes.** The first draft drew a **BLOCK** —
 > [adversarial review](2026-06-14-cross-agent-installer-adversarial-review.md), 26 confirmed findings.
 > This version folds in all 10 amendments. Two binding decisions from that review drive the rest:
 > **(1) all artifacts install at USER scope, never project scope** (kills the Claude-MCP headless
-> blocker and the opencode clobber); **(2) MCP secret values are delivered file-based, per-server,
-> pre-exec** (honors the roast-M10 "files-never-env" invariant). Empirical spikes **S1–S7** (below)
-> gate implementation.
+> blocker and the opencode clobber); **(2) MCP secret values are file-based at 0600** — the launcher
+> bounded-waits for async secret delivery, then `agentinstall` writes the literal value into the
+> agent's MCP config (honors roast-M10 "files-never-env"). **Spikes S1–S7 are run** (results below):
+> S1/S2/S7 confirmed; S4/S5/S6 forced corrections (no pre-exec secret path; codex skills at
+> `~/.codex/skills` not `~/.agents/skills`).
 
 ## Problem
 
@@ -69,8 +71,8 @@ Artifact {
 ```
 
 The emitter performs **field/shape translation** per agent — the canonical model is not assumed to
-match any agent's wire shape (e.g. opencode renames `env`→`environment` and folds `command`+`args`
-into one array; codex stdio secrets use `env_vars`). See the emitter table.
+match any agent's wire shape (e.g. opencode renames `env`→`environment`, requires `enabled`, and
+folds `command`+`args` into one `command` array — **S2-validated**). See the emitter table.
 
 ## sp-1bia: the standalone `agentinstall` CLI
 
@@ -98,9 +100,9 @@ into one array; codex stdio secrets use `env_vars`). See the emitter table.
 
 | Agent | skill | mcp | config |
 |---|---|---|---|
-| **claude** | `~/.claude/skills/<dir>/SKILL.md` (**dir name = identity**) | **`~/.claude.json`** (USER scope — approval-free, CWD-independent) | `~/.claude/settings.json` merge |
-| **codex** | `~/.agents/skills/<name>/SKILL.md` (**native since Dec-2025**, S6) | `$CODEX_HOME/config.toml` `[mcp_servers.*]` merge **after base-gen**; stdio secrets via **`env_vars` (`source=local`)**, HTTP via `bearer_token_env_var`/`env_http_headers` | config.toml merge (no launcher-managed keys) |
-| **opencode** | `~/.agents/skills` if read (S6) else no-op+report | **`~/.config/opencode/opencode.json`** (USER global; separate from launcher's `OPENCODE_CONFIG` file → no clobber; opencode deep-merges). **JSONC**; `type:local\|remote`; env field is **`environment`**; `command` is a **single array** | opencode.json merge |
+| **claude** | `~/.claude/skills/<dir>/SKILL.md` (**dir name = identity**) — **S1 ✓** | **`~/.claude.json`** top-level `mcpServers` map (USER scope — **S1 ✓ approval-free + headless**; project `.mcp.json` is gated, confirmed); env = `env` map | `~/.claude/settings.json` merge |
+| **codex** | **`~/.codex/skills/<name>/SKILL.md`** (**native**, S6 ✓ — **NOT `~/.agents/skills`**; may require the `--with-skills` launch flag) | `$CODEX_HOME/config.toml` `[mcp_servers.*]` merge **after base-gen**; HTTP secret-by-name via `bearer_token_env_var`/`env_http_headers` (but see "MCP secrets" — stdio secret values land in `env` at 0600) | config.toml merge (no launcher-managed keys) |
+| **opencode** | no-op+report (S6 — opencode skills layout unconfirmed) | **`~/.config/opencode/opencode.json`** (USER global — **S2 ✓ read**; separate from launcher's `OPENCODE_CONFIG` → no clobber, opencode deep-merges). **JSONC** (opencode **hard-errors** on invalid config); `type:local\|remote` (**`enabled` required**); env field is **`environment`**; `command` is a **single array** (S2 validator ✓) | opencode.json merge |
 | **hermes** | `~/.agents/skills` (`skills.external_dirs`) | **native YAML** `~/.hermes/config.yaml` `mcp_servers` — **do not rely on Claude-Code discovery** (Hermes drives Claude with `--strict-mcp-config`/`--bare`, bypassing in-pod `.mcp.json`). Deferred to **sp-mofj** spike | YAML merge |
 | **goose** | no-op+report (deferred) | `~/.config/goose/config.yaml` merge **after base-gen** (launcher-regenerated) | config.yaml merge |
 
@@ -163,17 +165,33 @@ into one array; codex stdio secrets use `env_vars`). See the emitter table.
 - **Old-image guard:** if `agentinstall` is not on `PATH` (image predates it) but artifacts were
   delivered, spawnlet reports an incompatibility rather than silently dropping them.
 
-### MCP secrets — file-based, per-server, pre-exec (finding [11]/[12]/[13]/[14])
+### MCP secrets — launcher-waits-then-writes-config-0600 (S4/S5-corrected; finding [11]–[14])
 
-- The owner provisions sensitive MCP secret values; they ride the SealedSecret path and the node
-  unseals them into `/run/spawnery/secrets/<envVarName>` **before the agent execs** (reconciling the
-  post-start timing — **S4** confirms/establishes the pre-exec write path).
-- `agentinstall` emits each agent's **native env-by-name** reference so the value is injected into
-  **only that MCP server's** process env, never the whole tree: codex `env_vars (source=local)`,
-  opencode `environment`/`{env:VAR}`, claude `env`. **No global launcher `source`** of secret values
-  → honors roast-M10 (no `/proc/<pid>/environ` exposure across siblings).
-- `ArtifactSpec.envVarName` carries the binding from a SealedSecret to its env var (the proto gains
-  the field; the existing path is otherwise reused).
+Two spike findings reshape this from the first amendment:
+- **S4:** there is **no pre-exec secret path**. Sealing targets the hosting node's HPKE sub-key,
+  which exists only after the node registers (post-placement); the agent container execs immediately
+  at `StartAgent` with an **empty** secrets tmpfs; secret values arrive **async, after start** via the
+  separate `SecretDelivery` channel. `StartSpawn` carries no secret material. (Architectural — not a
+  bounded change.)
+- **S5:** all three agents resolve env-var indirection **from the agent's own process env** (claude
+  `${VAR}`, opencode `{env:VAR}`, codex `env_vars source=local` forwards a host var). So "give the MCP
+  server a var without the value being in the agent's env" is infeasible, and putting it in the agent
+  env violates **roast-M10** (inherited by every child + `/proc/<pid>/environ`).
+
+**Corrected flow:**
+1. The auto-inject secret flow (sp-7h6.1) delivers sealed MCP secret values; the node unseals them to
+   `/run/spawnery/secrets/<envVarName>` **asynchronously, after container start**.
+2. When a delivered MCP artifact carries `secretRefs`, the launcher **blocks (bounded wait) until
+   those secret files exist** *before* exec'ing the agent (the agent spawns its MCP servers on start,
+   so the wait must precede exec). No `secretRefs` → no wait. Timeout → diagnostic + start without
+   that server.
+3. `agentinstall` then writes the **literal secret value into the agent's native MCP config at mode
+   0600** (claude `mcpServers.<n>.env`, codex `[mcp_servers.<n>].env`, opencode `environment`). This
+   is **file-based (not env), and the agent passes the var to only that MCP server's child** — so it
+   honors M10's actual concerns (not runtime-env-persisted, not inherited by the whole process tree)
+   *better* than env indirection would. (A live env-isolation test confirms scoping at impl.)
+- `ArtifactSpec.envVarName` binds a SealedSecret to its target var name; the existing path is
+  otherwise reused.
 
 ## Trust & safety model (finding [25])
 
@@ -210,16 +228,33 @@ into one array; codex stdio secrets use `env_vars`). See the emitter table.
   (extends the M10 canary to cover env exposure [J52]).
 - All unit tests hermetic, `-race`, in the `dev-spawnery` distrobox.
 
-## Empirical spikes (gate implementation)
+## Spike results (run 2026-06-14)
 
-- **S1** Claude headless MCP via `~/.claude.json` (user scope) loads without approval — *kill:* if it
-  still prompts, bake `enableAllProjectMcpServers`.
-- **S2** opencode field shape (`environment` vs `env`; single `command` array) — which delivers env.
-- **S3** staging-dir contract round-trip (spawnlet-materialize ↔ agentinstall-apply) before coding.
-- **S4** SealedSecret/`InjectSecret` timing — establish/confirm a **pre-exec** unseal+write path.
-- **S5** file-based per-server MCP secret injection without `/proc/environ` sibling leak.
-- **S6** codex/opencode actually read `~/.agents/skills` → collapse skills to the shared dir.
-- **S7** resume — confirm staging dir is empty on resume; verify persist-on-row + re-thread restores.
+- **S1 ✅ confirmed** — claude 2.1.177: user-scope MCP added via `claude mcp add -s user` (→
+  `~/.claude.json` top-level `mcpServers`) is **active headlessly, no approval**; project-scope
+  `.mcp.json` shows `⏸ Pending approval` (the blocker, reproduced). **Decision validated:** emit to
+  user scope. No `enableAllProjectMcpServers` needed.
+- **S2 ✅ confirmed** — opencode 1.15.13: reads `~/.config/opencode/opencode.json` (XDG user); its
+  validator **rejects** `command` as a string ("Expected array"), requires `enabled`, and uses
+  `environment` (not `env`). opencode **hard-errors** on invalid config → JSONC-aware + exact emission
+  mandatory.
+- **S4 ⚠️ corrected** — **no pre-exec secret path** (architectural). Drove the "MCP secrets" redesign:
+  launcher bounded-wait for async delivery, then write-to-config-0600.
+- **S5 ⚠️ corrected** — agents resolve env indirection from their own process env → literal value into
+  config-0600 (scoped per-server) is the M10-honoring path, not env-by-name. (See "MCP secrets".)
+- **S6 ⚠️ corrected** — codex 0.139.0 **has** native skills (`--with-skills`, `codex_core_skills`) but
+  at **`~/.codex/skills`**, *not* `~/.agents/skills`. The shared-dir collapse is **dead** for codex;
+  keep **per-agent skill placement** (claude `~/.claude/skills`, codex `~/.codex/skills`). opencode
+  skills layout still unconfirmed → no-op+report.
+- **S7 ✅ confirmed + located** — all four lifecycle paths (Create/Resume/Recreate/Migrate) converge on
+  `Scheduler.Provision()` (`internal/cp/scheduler/scheduler.go:80-99`), which already threads
+  `BaseImageDigest`/rootfs. **Fix:** persist artifacts in a `spawn_artifacts` table (parallel to
+  `spawn_mounts`), fetch alongside `GetMounts`, add an `artifacts` param to `Provision` →
+  one point covers all paths. Agent HOME survives *same-node* resume via the rootfs delta, but the
+  staging tmpfs is ephemeral → re-thread + idempotent re-apply is mandatory.
+- **S3 — contract defined** (not yet round-tripped in code): the staging-dir contract is specified
+  above (`manifest.json` + `payloads/<id>/`); the literal materialize↔apply round-trip lands in the
+  first substrate PR (`sp-l5sx.1`/`.3`).
 
 ## Scope / non-goals (MVP)
 
