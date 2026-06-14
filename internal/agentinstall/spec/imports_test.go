@@ -32,7 +32,10 @@ func TestSpecLeafInvariant(t *testing.T) {
 				// Stdlib import paths have no dot in their first segment
 				// (e.g. "encoding/json"); everything else is a module path.
 				first, _, _ := strings.Cut(path, "/")
-				if strings.Contains(first, ".") {
+				// Stdlib paths have no dot in the first segment AND are not the
+				// local module (module name is "spawnery", no dot, so the dot
+				// check alone silently passes spawnery/internal/* and spawnery/gen/*).
+				if strings.Contains(first, ".") || first == "spawnery" {
 					t.Errorf("non-stdlib import in pkg %s file %s: %q (spec must be stdlib-only)",
 						pkgName, filepath.Base(filename), path)
 				}

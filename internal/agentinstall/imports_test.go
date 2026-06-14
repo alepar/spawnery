@@ -37,7 +37,8 @@ func TestLeafInvariant(t *testing.T) {
 				// (e.g. .../spec, separately guarded by TestSpecLeafInvariant);
 				// it must not import any OTHER spawnery/internal/* package.
 				if strings.HasPrefix(path, "spawnery/internal/") &&
-					!strings.HasPrefix(path, "spawnery/internal/agentinstall") {
+					path != "spawnery/internal/agentinstall" &&
+					!strings.HasPrefix(path, "spawnery/internal/agentinstall/") {
 					t.Errorf("leaf violation in pkg %s file %s: import %q (must not import other spawnery/internal/* packages)",
 						pkgName, filepath.Base(filename), path)
 				}
