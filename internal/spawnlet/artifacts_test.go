@@ -3,9 +3,12 @@ package spawnlet
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"spawnery/internal/runtime"
 )
 
 func tarBytes(t *testing.T, files map[string]struct {
@@ -173,5 +176,64 @@ func TestMaterialize_EmptyListNoop(t *testing.T) {
 	st, sec := newStagerPair(t)
 	if err := st.Materialize("sp1", nil, sec); err != nil {
 		t.Fatalf("empty Materialize: %v", err)
+	}
+}
+
+// TestManagerArtifactsMaterialized exercises the Manager-level wiring: CreateWithSelection with
+// AgentSelection.Artifacts materializes staging files and threads the bind-mount into AgentSpec.
+func TestManagerArtifactsMaterialized(t *testing.T) {
+	dataRoot := t.TempDir()
+	m := NewManager(runtime.NewFake(), ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot,
+	})
+	fb := &fakePodBackend{}
+	m.pod = fb
+
+	spawnID := "sp-art-test"
+	_, err := m.CreateWithSelection(context.Background(), spawnID, "../../examples/secret-app", "model", "", "", 0,
+		AgentSelection{
+			Artifacts: []Artifact{
+				{ID: "pub", Inline: []byte("payload"), ContentType: ArtifactBytes, DestPath: "manifest.json", Mode: 0o644},
+				{ID: "tok", Inline: []byte("secret-val"), ContentType: ArtifactBytes, Sensitive: true, EnvVarName: "MY_TOKEN"},
+			},
+		})
+	if err != nil {
+		t.Fatalf("CreateWithSelection: %v", err)
+	}
+
+	// (a) staging file exists under ArtifactsRoot/<spawnID>
+	artifactsRoot := filepath.Join(dataRoot, "artifacts")
+	stagingFile := filepath.Join(artifactsRoot, spawnID, "manifest.json")
+	got, err := os.ReadFile(stagingFile)
+	if err != nil || string(got) != "payload" {
+		t.Fatalf("staging file %s: %q err=%v", stagingFile, got, err)
+	}
+
+	// (b) AgentSpec.Mounts includes the artifacts bind-mount at ArtifactsMountPath
+	var found bool
+	for _, mt := range fb.agentSpec.Mounts {
+		if mt.ContainerPath == ArtifactsMountPath {
+			wantHost := filepath.Join(artifactsRoot, spawnID)
+			if mt.HostPath != wantHost {
+				t.Fatalf("artifacts mount HostPath = %q, want %q", mt.HostPath, wantHost)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("ArtifactsMountPath %q not found in agent mounts: %+v", ArtifactsMountPath, fb.agentSpec.Mounts)
+	}
+
+	// (c) sensitive artifact landed under secrets root, not staging
+	secretsRoot := filepath.Join(dataRoot, "secrets")
+	secretFile := filepath.Join(secretsRoot, spawnID, "MY_TOKEN")
+	secGot, err := os.ReadFile(secretFile)
+	if err != nil || string(secGot) != "secret-val" {
+		t.Fatalf("secret file %s: %q err=%v", secretFile, secGot, err)
+	}
+	// sensitive artifact must NOT appear in staging dir
+	if _, err := os.Stat(filepath.Join(artifactsRoot, spawnID, "MY_TOKEN")); !os.IsNotExist(err) {
+		t.Fatalf("sensitive artifact leaked into staging dir: err=%v", err)
 	}
 }

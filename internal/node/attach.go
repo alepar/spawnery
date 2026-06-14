@@ -432,6 +432,32 @@ func rootfsArtifactsFromProto(in []*nodev1.RootfsArtifact) []spawnlet.RootfsArti
 	return out
 }
 
+func artifactsFromProto(in []*nodev1.ArtifactSpec) []spawnlet.Artifact {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]spawnlet.Artifact, 0, len(in))
+	for _, a := range in {
+		if a == nil {
+			continue
+		}
+		ct := spawnlet.ArtifactBytes
+		if a.GetContentType() == nodev1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_TAR {
+			ct = spawnlet.ArtifactTar
+		}
+		out = append(out, spawnlet.Artifact{
+			ID:          a.GetId(),
+			Inline:      a.GetInline(),
+			ContentType: ct,
+			DestPath:    a.GetDestPath(),
+			Mode:        a.GetMode(),
+			Sensitive:   a.GetSensitive(),
+			EnvVarName:  a.GetEnvVarName(),
+		})
+	}
+	return out
+}
+
 func rootfsArtifactsToProto(in []spawnlet.RootfsArtifact) []*nodev1.RootfsArtifact {
 	if len(in) == 0 {
 		return nil
@@ -494,6 +520,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			BaseImageDigest:        st.GetBaseImageDigest(),
 			RootfsSourceGeneration: st.GetRootfsSourceGeneration(),
 			RootfsArtifacts:        rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
+			Artifacts:              artifactsFromProto(st.GetArtifacts()),
 			ProgressFunc: func(phase, detail string) {
 				a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
 			},

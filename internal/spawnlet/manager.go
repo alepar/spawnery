@@ -38,7 +38,12 @@ type ManagerConfig struct {
 	// into it (0600). Default DataRoot/secrets. Production should point this at a tmpfs (memory-backed)
 	// so plaintext never touches durable disk.
 	SecretsRoot string
-	SidecarPort int // default 8080
+	// ArtifactsRoot is the per-node root for non-sensitive artifact staging dirs (sp-l5sx.3). Each spawn
+	// gets a subdir here, bind-mounted into the agent at ArtifactsMountPath; spawnlet materializes
+	// StartSpawn.artifacts here at create/resume time. Default DataRoot/artifacts. Production should
+	// point this at a tmpfs (memory-backed) so transient payload bytes do not accumulate on durable disk.
+	ArtifactsRoot string
+	SidecarPort   int // default 8080
 
 	NodeID           string // this node's id (stamped on container labels for reconcile); "" standalone
 	NodeClass        string // "cloud" (always enforces) or "self-hosted" (honors EgressEnforce)
@@ -104,6 +109,10 @@ type Manager struct {
 	// secrets injects owner-sealed secret plaintext into each spawn's tmpfs secrets dir (design §6).
 	// Always set (NewManagerWithBackend defaults SecretsRoot); the node calls InjectSecret after unseal.
 	secrets SecretInjector
+	// artifacts stages non-sensitive create-time artifacts into a per-spawn tmpfs dir (sp-l5sx.3).
+	// Always set (NewManagerWithBackend defaults ArtifactsRoot); bind-mounted into the agent at
+	// ArtifactsMountPath; sensitive artifacts are routed to secrets by Materialize.
+	artifacts ArtifactStager
 
 	// watchersMu guards sp.journalWatchers on each Spawn against concurrent access from
 	// SnapshotForSuspend (which uses store.Get, leaving the spawn in the store) and
@@ -204,6 +213,9 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 	if cfg.SecretsRoot == "" {
 		cfg.SecretsRoot = filepath.Join(cfg.DataRoot, "secrets")
 	}
+	if cfg.ArtifactsRoot == "" {
+		cfg.ArtifactsRoot = filepath.Join(cfg.DataRoot, "artifacts")
+	}
 	if cfg.DeltaSquashDepth == 0 {
 		cfg.DeltaSquashDepth = 16
 	}
@@ -217,6 +229,7 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		backend:    storage.NewScratch(cfg.DataRoot),
 		fw:         fw,
 		secrets:    SecretInjector{Root: cfg.SecretsRoot},
+		artifacts:  ArtifactStager{Root: cfg.ArtifactsRoot},
 		deltaState: &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
 	}
 	// Default scrub function: exec scrub commands directly in the agent container before commit.
@@ -472,6 +485,10 @@ type AgentSelection struct {
 	// (attach.go startSpawn) can relay resume progress to the CP stall detector (sp-u53.7.2).
 	// nil = no-op. Only the resume path (RootfsArtifacts non-empty) produces useful events.
 	ProgressFunc func(phase, detail string)
+	// Artifacts are the per-spawn create-time artifacts re-threaded on every StartSpawn (including
+	// resume). Non-sensitive artifacts are materialized into the staging tmpfs at ArtifactsMountPath;
+	// sensitive+inline artifacts are routed to the secrets tmpfs. Converted from proto by the node.
+	Artifacts []Artifact
 }
 
 // RootfsArtifact is the node/spawnlet-facing copy of a journal rootfs artifact descriptor.
@@ -720,6 +737,16 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		return nil, fmt.Errorf("prepare secrets dir: %w", err)
 	}
 	mounts = append(mounts, runtime.Mount{HostPath: secretsDir, ContainerPath: SecretsMountPath})
+
+	// Non-sensitive artifact staging tmpfs (cross-agent installer, sp-l5sx.3): a per-spawn dir under
+	// ArtifactsRoot, bind-mounted at ArtifactsMountPath. Re-applied idempotently on every create/resume
+	// (artifacts are create-time-declared but durable across the spawn's life). Sensitive artifacts are
+	// routed to the secrets tmpfs (0600) by Materialize, never landed here.
+	if err := m.artifacts.Materialize(id, sel.Artifacts, m.secrets); err != nil {
+		finalizeAll()
+		return nil, fmt.Errorf("prepare artifacts: %w", err)
+	}
+	mounts = append(mounts, runtime.Mount{HostPath: m.artifacts.DirFor(id), ContainerPath: ArtifactsMountPath})
 
 	res := runtime.Resources{
 		MemoryBytes: m.cfg.MemLimitMB << 20,
@@ -1371,6 +1398,9 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 	// per-spawn secrets dir. Best-effort — a leftover dir is reseeded empty on the next Create.
 	if serr := m.secrets.Remove(id); serr != nil {
 		log.Printf("secrets dir cleanup for %s: %v", id, serr)
+	}
+	if aerr := m.artifacts.Remove(id); aerr != nil {
+		log.Printf("artifacts dir cleanup for %s: %v", id, aerr)
 	}
 
 	// GC path (Delete only): release the delta image and purge durable state files.
