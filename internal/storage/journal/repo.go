@@ -175,6 +175,10 @@ func (r *spawnRepo) restore(ctx context.Context, id ManifestID, targetDir string
 		OverwriteFiles:       true,
 		OverwriteSymlinks:    true,
 		WriteFilesAtomically: true,
+		// Snapshot owners are container-relative / host-remapped IDs. A rootless
+		// node cannot chown to them; storage.NormalizeOwnership is the single
+		// post-restore ownership authority.
+		SkipOwners: true,
 	}
 	if err := out.Init(ctx); err != nil {
 		return fmt.Errorf("journal restore: init output: %w", err)
