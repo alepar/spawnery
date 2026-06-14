@@ -24,6 +24,8 @@ message NodeMessage {
     SessionStatus                 session_status        = 7;   // node -> CP: single-session state delta
     SetModelResult                set_model_result      = 8;   // node -> CP: ack/result of a SetModel push
     SealJournalKeyToOwnerResponse seal_journal_key_result = 9; // node -> CP: result of a SealJournalKeyToOwner request (sp-8dkp)
+    SuspendProgress               suspend_progress      = 10;  // node -> CP: incremental suspend progress (sp-u53.7.2)
+    ResumeProgress                resume_progress       = 11;  // node -> CP: incremental resume/start progress (sp-u53.7.2)
   }
 }
 message CPMessage {
@@ -186,6 +188,30 @@ message SetModel       { string spawn_id = 1; uint64 generation = 2; string mode
 // request_id: the node echoes request_id from the SetModel it handled, so the CP can route the
 // result to the exact push that is waiting (a stale ack with no live waiter is dropped).
 message SetModelResult { string spawn_id = 1; bool ok = 2; string detail = 3; string request_id = 4; }
+
+// --- sp-u53.7.2: incremental suspend/resume progress --------------------------
+
+// node -> CP: incremental progress during a suspend operation (sp-u53.7.2). Keyed by
+// (spawn_id, generation). The CP stall detector resets its timer on each received message,
+// so a slow-but-advancing snapshot never false-times-out. phase and detail are informational.
+// markers carries accumulated per-mount markers received so far (may be partial).
+message SuspendProgress {
+  string spawn_id = 1;
+  uint64 generation = 2;
+  string phase = 3;
+  string detail = 4;
+  repeated MountMarker markers = 5;
+}
+
+// node -> CP: incremental progress during a resume/start restore operation (sp-u53.7.2).
+// Keyed by (spawn_id, generation). The CP resume stall detector resets its timer on each
+// received message so a slow-but-advancing restore never false-times-out.
+message ResumeProgress {
+  string spawn_id = 1;
+  uint64 generation = 2;
+  string phase = 3;
+  string detail = 4;
+}
 
 // --- W4: node-local -> owner-sealed upgrade seam (sp-8dkp) -------------------
 

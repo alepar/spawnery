@@ -5,7 +5,7 @@ import { useSessionStore } from "@/auth/session";
 import { pollAndSign, registerPendedOp, clearPendedOp } from "@/auth/intent";
 
 export type SpawnStatus =
-  | "starting" | "active" | "suspending" | "suspended" | "unreachable" | "error" | "unknown";
+  | "starting" | "active" | "suspending" | "suspended" | "resuming" | "unreachable" | "error" | "unknown";
 
 export interface SpawnView {
   spawnId: string;
@@ -18,6 +18,10 @@ export interface SpawnView {
   // journalKeyDeliveryPending: spawn is active on target but the browser-side delivery
   // leg was interrupted mid-re-seal (spec §3 "delivery-fail" persistent state, WM3).
   journalKeyDeliveryPending: boolean;
+  // transitionPhase: non-empty when status is "suspending" or "resuming"; carries the last
+  // phase reported by the node (sp-u53.7.2). Used by the UI to show progress instead of
+  // a frozen spinner. Empty for all other statuses.
+  transitionPhase: string;
 }
 
 // statusFromProto maps the Connect-JSON enum NAME (e.g. "SPAWN_STATUS_ACTIVE") to a short status.
@@ -27,6 +31,7 @@ export function statusFromProto(s: string | undefined): SpawnStatus {
     case "SPAWN_STATUS_ACTIVE": return "active";
     case "SPAWN_STATUS_SUSPENDING": return "suspending";
     case "SPAWN_STATUS_SUSPENDED": return "suspended";
+    case "SPAWN_STATUS_RESUMING": return "resuming";
     case "SPAWN_STATUS_UNREACHABLE": return "unreachable";
     case "SPAWN_STATUS_ERROR": return "error";
     default: return "unknown";
@@ -41,14 +46,15 @@ export type SpawnLifecycleAction =
   | { kind: "recreate"; label: string }
   | { kind: "pending"; label: string };
 
-export function spawnLifecycleAction(status: SpawnStatus): SpawnLifecycleAction {
+export function spawnLifecycleAction(status: SpawnStatus, transitionPhase?: string): SpawnLifecycleAction {
   switch (status) {
     case "active": return { kind: "suspend", label: "Suspend" };
     case "suspended": return { kind: "resume", label: "Resume" };
     case "unreachable":
     case "error": return { kind: "recreate", label: "Recreate" };
     case "starting": return { kind: "pending", label: "Starting…" };
-    case "suspending": return { kind: "pending", label: "Suspending…" };
+    case "suspending": return { kind: "pending", label: transitionPhase ? `Suspending: ${transitionPhase}` : "Suspending…" };
+    case "resuming": return { kind: "pending", label: transitionPhase ? `Resuming: ${transitionPhase}` : "Resuming…" };
     default: return { kind: "pending", label: "Unavailable" }; // unknown
   }
 }
@@ -72,7 +78,7 @@ export async function createSpawn(appId: string, model: string, image = "", runn
 }
 
 export async function listSpawns(): Promise<SpawnView[]> {
-  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; mode?: string; model?: string; modelApplied?: boolean; journalKeyDeliveryPending?: boolean }> }>(
+  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; mode?: string; model?: string; modelApplied?: boolean; journalKeyDeliveryPending?: boolean; transitionPhase?: string }> }>(
     "ListSpawns", {},
   );
   return (r.spawns ?? []).map((s) => ({
@@ -84,6 +90,7 @@ export async function listSpawns(): Promise<SpawnView[]> {
     model: s.model ?? "",
     modelApplied: s.modelApplied ?? true,
     journalKeyDeliveryPending: !!s.journalKeyDeliveryPending,
+    transitionPhase: s.transitionPhase ?? "",
   }));
 }
 

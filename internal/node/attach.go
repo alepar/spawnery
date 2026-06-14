@@ -481,6 +481,11 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		}
 	}
 
+	// Emit resume progress at key phase boundaries so the CP stall detector can reset (sp-u53.7.2).
+	// The CP's resumeWaiters drops these if no waiter is registered (fresh creates have no waiter).
+	// ProgressFunc is wired into AgentSelection so restoreRootfsArtifacts can emit per-artifact
+	// progress — a large rootfs delta can exceed the 30s stall window without these resets.
+	a.resumeProgress(st.SpawnId, st.Generation, "starting", "creating containers")
 	sp, err := a.mgr.CreateWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation,
 		spawnlet.AgentSelection{
 			Image:                  st.Image,
@@ -489,12 +494,16 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			BaseImageDigest:        st.GetBaseImageDigest(),
 			RootfsSourceGeneration: st.GetRootfsSourceGeneration(),
 			RootfsArtifacts:        rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
+			ProgressFunc: func(phase, detail string) {
+				a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
+			},
 		})
 	if err != nil {
 		logErr("startSpawn "+st.SpawnId, err)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
 		return
 	}
+	a.resumeProgress(st.SpawnId, st.Generation, "containers_ready", "containers created")
 	// tmux-mode spawns: register a raw-PTY relay per client (no ACP handshake, no Pump).
 	// Goes ACTIVE immediately after the relay is registered.
 	if st.Mode == string(agentcaps.ModeTmux) {
@@ -545,6 +554,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.mu.Lock()
 	a.pumps[zeroKey(st.SpawnId)] = p
 	a.mu.Unlock()
+	a.resumeProgress(st.SpawnId, st.Generation, "attaching", "awaiting agent ACP readiness")
 	if err := p.start(ctx, readyTimeout); err != nil {
 		logErr("startSpawn "+st.SpawnId+": agent not ready", err)
 		p.stop()
@@ -625,6 +635,32 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 	a.status(spawnID, nodev1.SpawnPhase_STOPPED, "")
 }
 
+// suspendProgress sends a SuspendProgress message to the CP on the node's Attach stream.
+// Called at each phase boundary of SnapshotForSuspend/FinishSuspend so the CP stall detector
+// can reset its timer (sp-u53.7.2). markers is nil except when partial mount markers are available.
+func (a *attacher) suspendProgress(spawnID string, gen uint64, phase, detail string, markers map[string]string) {
+	mm := make([]*nodev1.MountMarker, 0, len(markers))
+	for k, v := range markers {
+		mm = append(mm, &nodev1.MountMarker{Name: k, Marker: v})
+	}
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SuspendProgress{
+		SuspendProgress: &nodev1.SuspendProgress{
+			SpawnId: spawnID, Generation: gen, Phase: phase, Detail: detail, Markers: mm,
+		},
+	}})
+}
+
+// resumeProgress sends a ResumeProgress message to the CP on the node's Attach stream.
+// Called at key phase boundaries during startSpawn so the CP resume stall detector can reset
+// its timer (sp-u53.7.2). Only meaningful for resumes (rootfs restore path); ignored for fresh creates.
+func (a *attacher) resumeProgress(spawnID string, gen uint64, phase, detail string) {
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_ResumeProgress{
+		ResumeProgress: &nodev1.ResumeProgress{
+			SpawnId: spawnID, Generation: gen, Phase: phase, Detail: detail,
+		},
+	}})
+}
+
 // suspendSpawn persists the spawn's mounts and tears the pod down, using a fail-closed gate->reap->finish
 // sequence per spec §5:
 //
@@ -639,9 +675,16 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 // MountMarkers. Generation fencing is done by the caller (handle). Runs on its own goroutine.
 func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 	spawnID := m.SpawnId
+	gen := m.Generation
+
+	// progressFn relays each phase boundary from SnapshotForSuspend/FinishSuspend to the CP's
+	// SuspendProgress wire message so the CP stall detector can reset its timer (sp-u53.7.2).
+	progressFn := func(phase, detail string, markers map[string]string) {
+		a.suspendProgress(spawnID, gen, phase, detail, markers)
+	}
 
 	// Step 1: gate — snapshot while sessions/pumps are still live.
-	gate, err := a.mgr.SnapshotForSuspend(ctx, spawnID)
+	gate, err := a.mgr.SnapshotForSuspend(ctx, spawnID, progressFn)
 	if err != nil {
 		logErr("suspendSpawn gate "+spawnID, err)
 		_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SuspendComplete{SuspendComplete: &nodev1.SuspendComplete{
@@ -651,7 +694,17 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 		return
 	}
 
-	// Step 2: gate succeeded — reap sessions then finish suspend teardown.
+	// Step 2: gate succeeded — relay gate markers via SuspendProgress so the CP's
+	// partialMarkers accumulator has real data if FinishSuspend stalls (sp-u53.7.2).
+	// This is the ONLY place mount markers are emitted mid-suspend: snapshotJournal
+	// returns them in gate.MountMarkers, and we surface them here before tearing down
+	// sessions. The terminal SuspendComplete (step 3) carries the same markers again
+	// (the CP's SetMountMarker call is idempotent for the same values).
+	if len(gate.MountMarkers) > 0 {
+		a.suspendProgress(spawnID, gen, "gate_complete", "journal snapshot done", gate.MountMarkers)
+	}
+
+	// Reap sessions then finish suspend teardown.
 	ps, relays := a.reapSessions(spawnID)
 	for _, p := range ps {
 		p.stop()
@@ -659,7 +712,7 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 	for _, r := range relays {
 		r.stop()
 	}
-	res, err := a.mgr.FinishSuspend(ctx, spawnID, m.GetCaptureRootfsArtifact())
+	res, err := a.mgr.FinishSuspend(ctx, spawnID, m.GetCaptureRootfsArtifact(), progressFn)
 	if err != nil {
 		logErr("suspendSpawn finish "+spawnID, err)
 		// Sessions were already reaped above; release the capacity slot before returning so

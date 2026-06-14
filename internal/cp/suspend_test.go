@@ -235,20 +235,20 @@ func TestSuspendSpawnGateFailureLeavesActive(t *testing.T) {
 // and a generation mismatch (the stale-episode fence), without blocking.
 func TestSuspendWaitersDeliverGenerationFence(t *testing.T) {
 	w := newSuspendWaiters()
-	ch := w.register("sp1", 3)
+	wt := w.register("sp1", 3)
 	defer w.unregister("sp1")
 
 	w.deliver(&nodev1.SuspendComplete{SpawnId: "other", Generation: 3}) // unknown spawn -> dropped
 	w.deliver(&nodev1.SuspendComplete{SpawnId: "sp1", Generation: 2})   // stale gen -> dropped
 	select {
-	case got := <-ch:
+	case got := <-wt.ch:
 		t.Fatalf("dropped replies must not be delivered, got %+v", got)
 	default:
 	}
 
 	w.deliver(&nodev1.SuspendComplete{SpawnId: "sp1", Generation: 3, Markers: []*nodev1.MountMarker{{Name: "main", Marker: "m"}}})
 	select {
-	case got := <-ch:
+	case got := <-wt.ch:
 		if got.GetGeneration() != 3 || len(got.GetMarkers()) != 1 {
 			t.Fatalf("delivered = %+v, want gen 3 with 1 marker", got)
 		}

@@ -27,6 +27,7 @@ const DOT: Record<SpawnStatus, string> = {
   active: "bg-green-500",
   suspended: "bg-zinc-400",
   suspending: "bg-amber-500 animate-pulse",
+  resuming: "bg-amber-400 animate-pulse",
   starting: "bg-yellow-400 animate-pulse",
   unreachable: "bg-red-500",
   error: "bg-red-500",
@@ -73,7 +74,8 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
 
   // The single lifecycle menu item follows the actual status (suspend/resume/recreate), so the menu
   // never offers an action the CP would reject; transitional/unknown states render a disabled item.
-  const lifecycle = spawnLifecycleAction(spawn.status);
+  // Pass transitionPhase so Suspending/Resuming items show real progress instead of a frozen label.
+  const lifecycle = spawnLifecycleAction(spawn.status, spawn.transitionPhase || undefined);
   const dispatchLifecycle = () => {
     setMenu(false);
     if (lifecycle.kind === "suspend") actions?.onSuspend(spawn.spawnId);

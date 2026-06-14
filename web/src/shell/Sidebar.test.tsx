@@ -6,12 +6,12 @@ import type { SpawnView } from "@/api/spawnlet";
 import type { Nav } from "@/nav/nav";
 
 const spawns: SpawnView[] = [
-  { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false },
-  { spawnId: "b", name: "Zork 2", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false },
-  { spawnId: "c", name: "Starting One", appId: "spawnery/wiki", status: "starting", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false },
-  { spawnId: "d", name: "Reaped", appId: "spawnery/wiki", status: "unreachable", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false },
-  { spawnId: "e", name: "Broken", appId: "spawnery/wiki", status: "error", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false },
-  { spawnId: "f", name: "Winding Down", appId: "spawnery/wiki", status: "suspending", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false },
+  { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
+  { spawnId: "b", name: "Zork 2", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
+  { spawnId: "c", name: "Starting One", appId: "spawnery/wiki", status: "starting", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
+  { spawnId: "d", name: "Reaped", appId: "spawnery/wiki", status: "unreachable", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
+  { spawnId: "e", name: "Broken", appId: "spawnery/wiki", status: "error", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
+  { spawnId: "f", name: "Winding Down", appId: "spawnery/wiki", status: "suspending", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
 ];
 const noopActions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onRecreate: vi.fn(), onStop: vi.fn() };
 const templatesNav: Nav = { section: "templates" };

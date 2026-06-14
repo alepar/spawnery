@@ -46,7 +46,7 @@ func TestSnapshotForSuspendFailureAborts(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	_, gateErr := m.SnapshotForSuspend(ctx, sp.ID)
+	_, gateErr := m.SnapshotForSuspend(ctx, sp.ID, nil)
 	if gateErr == nil {
 		t.Fatal("SnapshotForSuspend with a failing journal must return an error")
 	}
@@ -111,7 +111,7 @@ func TestSnapshotForSuspendSuccessLeavesPaused(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	result, err := m.SnapshotForSuspend(ctx, sp.ID)
+	result, err := m.SnapshotForSuspend(ctx, sp.ID, nil)
 	if err != nil {
 		t.Fatalf("SnapshotForSuspend: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestSnapshotForSuspendSuccessLeavesPaused(t *testing.T) {
 	}
 
 	// Clean up via FinishSuspend (not Stop, to match the two-phase flow).
-	if _, err := m.FinishSuspend(ctx, sp.ID, false); err != nil {
+	if _, err := m.FinishSuspend(ctx, sp.ID, false, nil); err != nil {
 		t.Fatalf("FinishSuspend cleanup: %v", err)
 	}
 }
@@ -173,12 +173,12 @@ func TestFinishSuspendTearsDown(t *testing.T) {
 	}
 
 	// Gate first.
-	if _, err := m.SnapshotForSuspend(ctx, sp.ID); err != nil {
+	if _, err := m.SnapshotForSuspend(ctx, sp.ID, nil); err != nil {
 		t.Fatalf("SnapshotForSuspend: %v", err)
 	}
 
 	// Finish: must tear down.
-	if _, err := m.FinishSuspend(ctx, sp.ID, false); err != nil {
+	if _, err := m.FinishSuspend(ctx, sp.ID, false, nil); err != nil {
 		t.Fatalf("FinishSuspend: %v", err)
 	}
 
@@ -226,12 +226,12 @@ func TestFinishSuspendCapturesRootfsDelta(t *testing.T) {
 	}
 
 	// Gate.
-	if _, err := m.SnapshotForSuspend(ctx, sp.ID); err != nil {
+	if _, err := m.SnapshotForSuspend(ctx, sp.ID, nil); err != nil {
 		t.Fatalf("SnapshotForSuspend: %v", err)
 	}
 
 	// Finish with captureRootfsArtifact=false (rootfs export to journal not needed here).
-	if _, err := m.FinishSuspend(ctx, sp.ID, false); err != nil {
+	if _, err := m.FinishSuspend(ctx, sp.ID, false, nil); err != nil {
 		t.Fatalf("FinishSuspend: %v", err)
 	}
 
@@ -259,7 +259,7 @@ func TestSnapshotForSuspendUnknownID(t *testing.T) {
 	m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
-	_, err := m.SnapshotForSuspend(context.Background(), "no-such-spawn")
+	_, err := m.SnapshotForSuspend(context.Background(), "no-such-spawn", nil)
 	if err == nil {
 		t.Fatal("SnapshotForSuspend on unknown id must return an error")
 	}
@@ -280,7 +280,7 @@ func TestSnapshotForSuspendScratchOnly(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	result, err := m.SnapshotForSuspend(ctx, sp.ID)
+	result, err := m.SnapshotForSuspend(ctx, sp.ID, nil)
 	if err != nil {
 		t.Fatalf("SnapshotForSuspend on scratch-only spawn: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestSnapshotForSuspendScratchOnly(t *testing.T) {
 	}
 
 	// FinishSuspend must tear down cleanly.
-	if _, err := m.FinishSuspend(ctx, sp.ID, false); err != nil {
+	if _, err := m.FinishSuspend(ctx, sp.ID, false, nil); err != nil {
 		t.Fatalf("FinishSuspend: %v", err)
 	}
 	if fb.stopped == nil {
@@ -319,7 +319,7 @@ func TestFinishSuspendUnknownID(t *testing.T) {
 	m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
-	_, err := m.FinishSuspend(context.Background(), "no-such-spawn", false)
+	_, err := m.FinishSuspend(context.Background(), "no-such-spawn", false, nil)
 	if err == nil {
 		t.Fatal("FinishSuspend on unknown id must return an error")
 	}
@@ -345,13 +345,13 @@ func TestFinishSuspendUnpausesAgentBeforeCapture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := m.SnapshotForSuspend(ctx, sp.ID); err != nil {
+	if _, err := m.SnapshotForSuspend(ctx, sp.ID, nil); err != nil {
 		t.Fatalf("SnapshotForSuspend: %v", err)
 	}
 	if !fb.paused {
 		t.Fatal("gate must leave the agent paused for journal quiescence")
 	}
-	if _, err := m.FinishSuspend(ctx, sp.ID, false); err != nil {
+	if _, err := m.FinishSuspend(ctx, sp.ID, false, nil); err != nil {
 		t.Fatalf("FinishSuspend: %v", err)
 	}
 	if fb.unpauseCount == 0 {

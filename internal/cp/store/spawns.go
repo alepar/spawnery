@@ -555,5 +555,15 @@ func (r *spawnRepo) ListStranded(ctx context.Context, nowTS int64) ([]Spawn, err
 	return out, err
 }
 
+// ReconcileSuspendedAfterError implements SpawnRepo.ReconcileSuspendedAfterError.
+// It transitions Errored→Suspended without touching the container row (the container
+// was already ended by SetError in the stall path). Caller is responsible for gen-fencing
+// before calling (e.g. via LatestContainer comparison).
+func (r *spawnRepo) ReconcileSuspendedAfterError(ctx context.Context, id string) error {
+	return r.guardStatus(ctx, id, []Status{Errored}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		return q.Set("status = ?", Suspended).Set("suspended_at = last_used_at")
+	})
+}
+
 // Compile-time check that *spawnRepo fully implements SpawnRepo.
 var _ SpawnRepo = (*spawnRepo)(nil)

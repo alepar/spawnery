@@ -22,38 +22,82 @@ import (
 	"spawnery/internal/intent"
 )
 
-// defaultSuspendTimeout bounds how long SuspendSpawn waits for the hosting node's SuspendComplete
-// after asking it to persist+tear down. A real journal final snapshot can take a while, so this is
-// generous; on expiry the spawn is moved to 'error' (design §5: "persist failure → error").
-const defaultSuspendTimeout = 30 * time.Second
+// defaultSuspendTimeout is a generous absolute backstop for suspendLocked — it fires only if
+// the per-transition stall window (defaultSuspendStallWindow) fails to catch a wedge first.
+// Most suspend failures are caught earlier by the stall window; the backstop defends against a
+// completely frozen CP driver that never resets the stall timer.
+const defaultSuspendTimeout = 10 * time.Minute
 
-// suspendWaiters correlates a SuspendSpawn with the async SuspendComplete the hosting node sends back
-// on its Attach stream, carrying the per-mount persist markers. Keyed by spawn_id: the DB claim
-// serialises suspends, so at most one waiter per spawn is ever live. The waiter records the episode
-// generation it expects; deliver drops a SuspendComplete whose generation differs (a stale-episode
-// reply from a superseded pod), mirroring the node-side generation fence.
+// defaultSuspendStallWindow is the operative timeout for suspend: if no progress event arrives
+// within this window, the suspend is considered stalled (wedged) and is moved to 'error'. Unlike
+// the old 30s total deadline, the stall window resets on each phase-level progress event from the
+// node, so a slow-but-progressing snapshot does not spuriously fail (sp-u53.7.2).
+const defaultSuspendStallWindow = 30 * time.Second
+
+// defaultResumeTimeout is the generous absolute backstop for resumeLocked (the node's startSpawn).
+const defaultResumeTimeout = 10 * time.Minute
+
+// defaultResumeStallWindow is the stall window for resume: if no progress event from the node
+// arrives within this window, the resume is considered stalled and moved to 'error' (or reverted
+// to 'suspended' on migration). Symmetric to the suspend stall window (sp-u53.7.2).
+const defaultResumeStallWindow = 30 * time.Second
+
+// SuspendProgressHint is the CP-side progress signal for the stall detector (sp-u53.7.2). It
+// carries the same fields as the proto SuspendProgress message but as a Go type, decoupling the
+// stall detector from the wire protocol. When proto/node/v1/node.proto gains a SuspendProgress
+// message, the server's Receive loop will convert it via a thin adapter and call progress().
+// Fields Phase and Detail are informational (logged only). Markers carry partial per-mount
+// markers received so far — they are accumulated in the waiter and persisted on stall so a
+// wedge does not strand partial results.
+type SuspendProgressHint struct {
+	SpawnID    string
+	Generation uint64
+	Phase      string
+	Detail     string
+	Markers    map[string]string
+}
+
+// suspendWaiters correlates a SuspendSpawn with the async SuspendComplete the hosting node sends
+// back on its Attach stream, carrying the per-mount persist markers. Keyed by spawn_id: the DB
+// claim serialises suspends, so at most one waiter per spawn is ever live. The waiter records the
+// episode generation it expects; deliver drops a SuspendComplete whose generation differs (a
+// stale-episode reply from a superseded pod), mirroring the node-side generation fence.
 type suspendWaiters struct {
 	mu sync.Mutex
-	m  map[string]suspendWaiter
+	m  map[string]*suspendWaiter
 }
 
 type suspendWaiter struct {
-	gen uint64
-	ch  chan *nodev1.SuspendComplete
+	gen        uint64
+	ch         chan *nodev1.SuspendComplete
+	progressCh chan struct{} // buffered cap 1; non-blocking coalescing progress signal for the stall loop
+	markersMu  sync.Mutex
+	// partialMarkers accumulates per-mount markers from SuspendProgress events. On stall these are
+	// persisted to the store so a wedge does not strand markers that already arrived.
+	partialMarkers map[string]string
+	// lastPhase and lastDetail track the most recent progress event for UI display (transition_phase
+	// and transition_detail in SpawnSummary — surfaced by ListSpawns when status=Suspending).
+	lastPhase  string
+	lastDetail string
 }
 
 func newSuspendWaiters() *suspendWaiters {
-	return &suspendWaiters{m: map[string]suspendWaiter{}}
+	return &suspendWaiters{m: map[string]*suspendWaiter{}}
 }
 
-// register installs a buffered (cap 1) waiter for (spawnID, gen) and returns its channel. Call BEFORE
-// sending Suspend so a fast SuspendComplete is never missed.
-func (w *suspendWaiters) register(spawnID string, gen uint64) chan *nodev1.SuspendComplete {
-	ch := make(chan *nodev1.SuspendComplete, 1)
+// register installs a buffered (cap 1) waiter for (spawnID, gen) and returns the waiter. Call
+// BEFORE sending Suspend so a fast SuspendComplete is never missed.
+func (w *suspendWaiters) register(spawnID string, gen uint64) *suspendWaiter {
+	wt := &suspendWaiter{
+		gen:            gen,
+		ch:             make(chan *nodev1.SuspendComplete, 1),
+		progressCh:     make(chan struct{}, 1),
+		partialMarkers: map[string]string{},
+	}
 	w.mu.Lock()
-	w.m[spawnID] = suspendWaiter{gen: gen, ch: ch}
+	w.m[spawnID] = wt
 	w.mu.Unlock()
-	return ch
+	return wt
 }
 
 func (w *suspendWaiters) unregister(spawnID string) {
@@ -63,20 +107,156 @@ func (w *suspendWaiters) unregister(spawnID string) {
 }
 
 // deliver routes an inbound SuspendComplete to its waiter (if any), matched by spawn_id AND
-// generation. Non-blocking: a reply with no live waiter, or one whose generation != the awaiting
-// episode's (a stale-episode reply from a superseded pod), is dropped rather than blocking the node
-// receive loop or being misattributed to a later suspend.
-func (w *suspendWaiters) deliver(sc *nodev1.SuspendComplete) {
+// generation. Returns true when delivered to a live, gen-matched waiter; false when there is no
+// live waiter or the generation is stale (caller may then reconcile the late reply). Non-blocking:
+// a reply with no live waiter, or one whose generation != the awaiting episode's (a stale-episode
+// reply from a superseded pod), is NOT sent to the channel.
+func (w *suspendWaiters) deliver(sc *nodev1.SuspendComplete) bool {
 	w.mu.Lock()
 	wt, ok := w.m[sc.GetSpawnId()]
 	w.mu.Unlock()
 	if !ok || wt.gen != sc.GetGeneration() {
-		return
+		return false // no live waiter or stale-generation reply
 	}
 	select {
 	case wt.ch <- sc:
+		return true
+	default:
+		return false // channel full (duplicate delivery); treat as no live waiter
+	}
+}
+
+// progress routes a SuspendProgress hint to its waiter (if any), matched by spawn_id AND
+// generation. Stale-generation progress is dropped (returns false, no stall-timer reset). On match
+// it accumulates partial markers, tracks the last phase/detail for UI display, and signals
+// progressCh (non-blocking coalescing send) so the stall loop resets its timer.
+// Safe to call from any goroutine.
+func (w *suspendWaiters) progress(h SuspendProgressHint) bool {
+	w.mu.Lock()
+	wt, ok := w.m[h.SpawnID]
+	w.mu.Unlock()
+	if !ok || wt.gen != h.Generation {
+		return false // no live waiter or stale-generation progress: drop (no stall-timer reset)
+	}
+	// Accumulate partial markers and track last phase/detail under the waiter's own lock.
+	wt.markersMu.Lock()
+	for k, v := range h.Markers {
+		wt.partialMarkers[k] = v
+	}
+	if h.Phase != "" {
+		wt.lastPhase = h.Phase
+		wt.lastDetail = h.Detail
+	}
+	wt.markersMu.Unlock()
+	// Non-blocking coalescing send: if progressCh is already full, this progress event is already
+	// queued and the stall timer will be reset for this window — no need to block or drop-and-retry.
+	select {
+	case wt.progressCh <- struct{}{}:
 	default:
 	}
+	return true
+}
+
+// lastProgress returns the most recent phase/detail for a live suspend waiter (used by ListSpawns
+// to populate SpawnSummary.TransitionPhase/TransitionDetail). Returns empty strings if no waiter.
+func (w *suspendWaiters) lastProgress(spawnID string) (phase, detail string) {
+	w.mu.Lock()
+	wt, ok := w.m[spawnID]
+	w.mu.Unlock()
+	if !ok {
+		return "", ""
+	}
+	wt.markersMu.Lock()
+	phase, detail = wt.lastPhase, wt.lastDetail
+	wt.markersMu.Unlock()
+	return phase, detail
+}
+
+// ResumeProgressHint is the CP-side progress signal for the resume stall detector (sp-u53.7.2).
+// Symmetric to SuspendProgressHint; carries the same wire fields but as a Go type. When
+// proto/node/v1/node.proto's ResumeProgress message arrives, the server's Receive loop converts
+// it and calls resumeWaiters.progress() so the stall timer can reset.
+type ResumeProgressHint struct {
+	SpawnID    string
+	Generation uint64
+	Phase      string
+	Detail     string
+}
+
+// resumeWaiters correlates a ResumeSpawn with the async node progress and ACTIVE status the
+// hosting node sends back on its Attach stream. Keyed by spawn_id. The waiter tracks the
+// episode generation it expects; stale-generation signals are dropped.
+// Symmetric to suspendWaiters but without markers accumulation (no per-mount state for resume).
+type resumeWaiters struct {
+	mu sync.Mutex
+	m  map[string]*resumeWaiter
+}
+
+type resumeWaiter struct {
+	gen        uint64
+	progressCh chan struct{} // buffered cap 1; non-blocking coalescing progress signal for the stall loop
+	lastMu     sync.Mutex
+	lastPhase  string // most recent phase emitted by the node; for UI display (SpawnSummary.TransitionPhase)
+	lastDetail string
+}
+
+func newResumeWaiters() *resumeWaiters {
+	return &resumeWaiters{m: map[string]*resumeWaiter{}}
+}
+
+func (w *resumeWaiters) register(spawnID string, gen uint64) *resumeWaiter {
+	wt := &resumeWaiter{
+		gen:        gen,
+		progressCh: make(chan struct{}, 1),
+	}
+	w.mu.Lock()
+	w.m[spawnID] = wt
+	w.mu.Unlock()
+	return wt
+}
+
+func (w *resumeWaiters) unregister(spawnID string) {
+	w.mu.Lock()
+	delete(w.m, spawnID)
+	w.mu.Unlock()
+}
+
+// progress routes a ResumeProgressHint to its waiter (if any), matched by spawn_id AND generation.
+// Stale-generation signals are dropped (no stall-timer reset). On match it updates lastPhase/lastDetail
+// for UI display and signals progressCh so the stall loop resets its timer.
+func (w *resumeWaiters) progress(h ResumeProgressHint) bool {
+	w.mu.Lock()
+	wt, ok := w.m[h.SpawnID]
+	w.mu.Unlock()
+	if !ok || wt.gen != h.Generation {
+		return false
+	}
+	if h.Phase != "" {
+		wt.lastMu.Lock()
+		wt.lastPhase = h.Phase
+		wt.lastDetail = h.Detail
+		wt.lastMu.Unlock()
+	}
+	select {
+	case wt.progressCh <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// lastProgress returns the most recent phase/detail for a live resume waiter (used by ListSpawns
+// to populate SpawnSummary.TransitionPhase/TransitionDetail). Returns empty strings if no waiter.
+func (w *resumeWaiters) lastProgress(spawnID string) (phase, detail string) {
+	w.mu.Lock()
+	wt, ok := w.m[spawnID]
+	w.mu.Unlock()
+	if !ok {
+		return "", ""
+	}
+	wt.lastMu.Lock()
+	phase, detail = wt.lastPhase, wt.lastDetail
+	wt.lastMu.Unlock()
+	return phase, detail
 }
 
 // maxSpawnNameRunes caps a spawn display name (rune count). Shared by RenameSpawn (and any future
@@ -222,75 +402,211 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Active→Suspending: %w", err))
 	}
 
-	// Register the marker waiter BEFORE asking the node to suspend, so a fast SuspendComplete is
-	// never missed. The node persists each mount, tears the pod down, and replies with per-mount
-	// markers.
-	ch := s.suspends.register(id, uint64(gen))
+	// Register the stall-detecting waiter BEFORE asking the node to suspend, so a fast
+	// SuspendComplete or SuspendProgress is never missed. The node persists each mount, tears the
+	// pod down, emits phase-level progress events (sp-u53.7.2), and replies with per-mount markers.
+	wt := s.suspends.register(id, uint64(gen))
 	defer s.suspends.unregister(id)
 	s.rt.SuspendOnNode(id, uint64(gen), captureRootfsArtifact)
 
-	wait, waitCancel := context.WithTimeout(ctx, s.suspendTimeout)
-	defer waitCancel()
 	// Post-round-trip store writes use a detached ctx so the outcome survives a client disconnect.
 	storeCtx := context.WithoutCancel(ctx)
 
-	select {
-	case sc := <-ch:
-		// Fail-closed gate (spec §6): node aborted the suspend — nothing reaped/torn down, spawn
-		// still running. Revert Suspending→Active so the row is consistent and the caller can retry.
-		if detail := sc.GetError(); detail != "" {
-			const maxRevertRetries = 3
-			var revertErr error
-			for i := 0; i < maxRevertRetries; i++ {
-				freshSP, gerr := s.st.Spawns().Get(storeCtx, id)
-				if gerr != nil {
-					revertErr = gerr
-					break
-				}
-				_, revertErr = s.st.Spawns().TransitionClaimed(storeCtx, id, leaseID,
-					freshSP.StatusSeq, gen, store.Active)
-				if revertErr == nil || !errors.Is(revertErr, store.ErrConflict) {
-					break
-				}
-				// Benign seq bump (e.g. Touch): re-read and retry.
-			}
-			if revertErr != nil {
-				log.Printf("suspendLocked %s: revert Suspending→Active failed: %v", id, revertErr)
-			}
-			return nil, connect.NewError(connect.CodeFailedPrecondition,
-				fmt.Errorf("suspend failed: %s — spawn left running", detail))
-		}
-		// Success path: record markers, drop route, finalise suspended.
-		for _, mk := range sc.GetMarkers() {
-			if merr := s.st.Spawns().SetMountMarker(storeCtx, id, mk.GetName(), mk.GetMarker()); merr != nil {
-				log.Printf("SuspendSpawn %s: SetMountMarker(%s): %v", id, mk.GetName(), merr)
-			}
-		}
-		s.rt.Drop(id)
-		if err := s.st.Spawns().SetSuspended(storeCtx, id, gen); err != nil {
-			// Pod torn down but couldn't record 'suspended'. Compensate to terminal 'error'.
-			if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
-				log.Printf("suspendLocked %s: SetError after SetSuspended failure also failed: %v", id, serr)
-			}
-			return nil, connect.NewError(connect.CodeInternal, err)
-		}
-		_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: id, Timestamp: time.Now().UTC()})
-		return sc, nil
+	// Generous absolute backstop: fires only if the stall detector (below) somehow fails to catch
+	// a wedge — e.g. the CP goroutine itself is stuck. The operative failure signal is stall.C.
+	wait, waitCancel := context.WithTimeout(ctx, s.suspendTimeout)
+	defer waitCancel()
 
-	case <-wait.Done():
-		if ctx.Err() != nil {
-			// claimCtx was cancelled (ErrClaimLost from heartbeat, or client disconnect).
-			// Bail: commit no further transition; the recovery sweep will handle this.
-			return nil, connect.NewError(connect.CodeAborted, fmt.Errorf("claim lost or request cancelled during suspend"))
+	// Per-transition stall window: resets on each progress event. If no progress arrives within
+	// suspendStallWindow the suspend is considered wedged → SetError (design §5 "persist failure → error").
+	stall := time.NewTimer(s.suspendStallWindow)
+	defer stall.Stop()
+
+	// persistAccumulatedMarkers writes partial markers (from SuspendProgress events) to the store.
+	// Best-effort: a failure is logged and teardown continues so a wedge does not strand them.
+	persistAccumulatedMarkers := func(label string) {
+		wt.markersMu.Lock()
+		acc := make(map[string]string, len(wt.partialMarkers))
+		for k, v := range wt.partialMarkers {
+			acc[k] = v
 		}
-		// Pure suspendTimeout: persist did not complete in time. Design §5 "persist failure → error".
-		s.rt.Drop(id)
-		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
-			log.Printf("suspendLocked %s: SetError after suspend await timeout also failed: %v", id, serr)
+		wt.markersMu.Unlock()
+		for name, marker := range acc {
+			if merr := s.st.Spawns().SetMountMarker(storeCtx, id, name, marker); merr != nil {
+				log.Printf("suspendLocked %s: %s SetMountMarker(%s): %v", id, label, name, merr)
+			}
 		}
-		return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node suspend"))
+	}
+
+	for {
+		select {
+		case sc := <-wt.ch:
+			return s.handleSuspendReply(storeCtx, owner, id, gen, leaseID, sc)
+
+		case <-wt.progressCh:
+			// Progress event: node is still making forward progress — reset the stall timer.
+			// Opportunistically persist any partial markers that have accumulated.
+			if !stall.Stop() {
+				select {
+				case <-stall.C:
+				default:
+				}
+			}
+			stall.Reset(s.suspendStallWindow)
+			persistAccumulatedMarkers("progress")
+
+		case <-stall.C:
+			// STALL: no progress for suspendStallWindow — node is wedged. Close the sp-iuo1 drop
+			// window FIRST: unregister the waiter so any SuspendComplete arriving from here on gets
+			// deliver()==false and is routed to reconcileLateSuspend, then drain anything already
+			// buffered (a reply that raced the timer) and finalise it as the real outcome rather
+			// than erroring. unregister is idempotent with the deferred one above.
+			s.suspends.unregister(id)
+			select {
+			case sc := <-wt.ch:
+				return s.handleSuspendReply(storeCtx, owner, id, gen, leaseID, sc)
+			default:
+			}
+			// Genuinely wedged: persist partial markers (best-effort), then move to terminal 'error'.
+			// reconcileLateSuspend will flip Errored→Suspended if the node eventually finishes (sp-iuo1).
+			persistAccumulatedMarkers("stall")
+			s.rt.Drop(id)
+			if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+				log.Printf("suspendLocked %s: SetError after stall also failed: %v", id, serr)
+			}
+			return nil, connect.NewError(connect.CodeDeadlineExceeded,
+				fmt.Errorf("suspend stalled (no progress for %s)", s.suspendStallWindow))
+
+		case <-wait.Done():
+			if ctx.Err() != nil {
+				// claimCtx was cancelled (ErrClaimLost from heartbeat, or client disconnect).
+				// Bail: commit no further transition; the recovery sweep will handle this.
+				return nil, connect.NewError(connect.CodeAborted, fmt.Errorf("claim lost or request cancelled during suspend"))
+			}
+			// Absolute backstop expired. Design §5 "persist failure → error". Close the drop window
+			// first (same as the stall path): unregister, drain a raced reply, else error.
+			s.suspends.unregister(id)
+			select {
+			case sc := <-wt.ch:
+				return s.handleSuspendReply(storeCtx, owner, id, gen, leaseID, sc)
+			default:
+			}
+			s.rt.Drop(id)
+			if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+				log.Printf("suspendLocked %s: SetError after suspend timeout also failed: %v", id, serr)
+			}
+			return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node suspend"))
+		}
 	}
 }
+
+// handleSuspendReply finalises a suspend from a node SuspendComplete. A gate-abort (error set)
+// reverts Suspending→Active (lease-fenced, retrying a benign seq bump) and returns
+// FailedPrecondition — the spawn is still running. A clean reply records the per-mount markers,
+// drops the route, and finalises Suspended. Shared by the main wait AND the stall/backstop drains
+// so a reply that races the stall/backstop timer is finalised here rather than dropped (sp-iuo1).
+func (s *Server) handleSuspendReply(storeCtx context.Context, owner, id string, gen int64, leaseID string, sc *nodev1.SuspendComplete) (*nodev1.SuspendComplete, error) {
+	// Fail-closed gate (spec §6): node aborted the suspend — nothing reaped/torn down, spawn still
+	// running. Revert Suspending→Active so the row is consistent and the caller can retry.
+	if detail := sc.GetError(); detail != "" {
+		const maxRevertRetries = 3
+		var revertErr error
+		for i := 0; i < maxRevertRetries; i++ {
+			freshSP, gerr := s.st.Spawns().Get(storeCtx, id)
+			if gerr != nil {
+				revertErr = gerr
+				break
+			}
+			_, revertErr = s.st.Spawns().TransitionClaimed(storeCtx, id, leaseID,
+				freshSP.StatusSeq, gen, store.Active)
+			if revertErr == nil || !errors.Is(revertErr, store.ErrConflict) {
+				break
+			}
+			// Benign seq bump (e.g. Touch): re-read and retry.
+		}
+		if revertErr != nil {
+			log.Printf("suspendLocked %s: revert Suspending→Active failed: %v", id, revertErr)
+		}
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("suspend failed: %s — spawn left running", detail))
+	}
+	// Success path: record markers, drop route, finalise suspended.
+	for _, mk := range sc.GetMarkers() {
+		if merr := s.st.Spawns().SetMountMarker(storeCtx, id, mk.GetName(), mk.GetMarker()); merr != nil {
+			log.Printf("SuspendSpawn %s: SetMountMarker(%s): %v", id, mk.GetName(), merr)
+		}
+	}
+	s.rt.Drop(id)
+	if err := s.st.Spawns().SetSuspended(storeCtx, id, gen); err != nil {
+		// Pod torn down but couldn't record 'suspended'. Compensate to terminal 'error'.
+		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+			log.Printf("suspendLocked %s: SetError after SetSuspended failure also failed: %v", id, serr)
+		}
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: id, Timestamp: time.Now().UTC()})
+	return sc, nil
+}
+
+// reconcileLateSuspend handles a SuspendComplete that arrived with no live waiter — the CP's
+// stall window fired and left the spawn in Errored, but the node genuinely finished suspending
+// later (sp-iuo1). If the spawn is still Errored and the completed generation matches its latest
+// container, this flips Errored→Suspended and records the markers so the spawn is resumable.
+//
+// This function is called from a background goroutine (server.go) so it must not block the node
+// receive loop. It uses a best-effort withClaim: if the spawn is busy (another driver holds it
+// — e.g. RecreateSpawn mid-flight), it simply logs and returns.
+func (s *Server) reconcileLateSuspend(ctx context.Context, sc *nodev1.SuspendComplete) {
+	if sc.GetError() != "" {
+		return // gate failure: node refused the suspend, spawn is still running — nothing to reconcile
+	}
+	id := sc.GetSpawnId()
+	gen := int64(sc.GetGeneration())
+	claimErr := s.withClaim(ctx, id, func(cctx context.Context, leaseID string) error {
+		sp, err := s.st.Spawns().Get(cctx, id)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil // spawn deleted/unknown: no-op
+		}
+		if err != nil {
+			return err
+		}
+		if sp.Status != store.Errored {
+			return nil // already recovered, recreated, or active — do not interfere
+		}
+		// Gen fence: verify the latest container (ended or live) matches this late reply's gen.
+		// Prevents misattributing a very-late reply from an old episode when the spawn has been
+		// recreated and stalled again at a higher generation.
+		if c, hasAny, _ := s.st.Spawns().LatestContainer(cctx, id); hasAny && c.Generation != gen {
+			return nil // gen mismatch: this reply belongs to a superseded episode; skip
+		}
+		// Record any markers the late SuspendComplete carries (they may complement partial markers
+		// already persisted by the stall path).
+		for _, mk := range sc.GetMarkers() {
+			if merr := s.st.Spawns().SetMountMarker(cctx, id, mk.GetName(), mk.GetMarker()); merr != nil {
+				log.Printf("reconcileLateSuspend %s: SetMountMarker(%s): %v", id, mk.GetName(), merr)
+			}
+		}
+		// Flip Errored→Suspended (best-effort). The container was already ended by SetError in the
+		// stall path — ReconcileSuspendedAfterError does not attempt to end it again.
+		if rerr := s.st.Spawns().ReconcileSuspendedAfterError(cctx, id); rerr != nil {
+			log.Printf("reconcileLateSuspend %s: ReconcileSuspendedAfterError: %v", id, rerr)
+		}
+		return nil
+	})
+	if claimErr != nil {
+		// Spawn busy (another driver holds the claim) or not found: log and give up.
+		// The spawn is already in a defined state (Errored or moved on by the other driver).
+		log.Printf("reconcileLateSuspend %s: withClaim: %v", id, claimErr)
+	}
+}
+
+// SetSuspendStallWindow overrides the stall window for the current server. Used in tests to make
+// the stall detector fire quickly. In production this is always defaultSuspendStallWindow.
+func (s *Server) SetSuspendStallWindow(d time.Duration) { s.suspendStallWindow = d }
+
+// SetResumeStallWindow overrides the resume stall window. Used in tests to make the stall detector
+// fire quickly. In production this is always defaultResumeStallWindow.
+func (s *Server) SetResumeStallWindow(d time.Duration) { s.resumeStallWindow = d }
 
 // ResumeSpawn provisions a FRESH container for a suspended spawn (non-lossless — a brand-new
 // container, no prior in-container state). suspended -> starting -> resuming -> active. Reuses
@@ -452,23 +768,87 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 		placement.TargetNodeID = targetNodeID
 	}
 
-	nodeID, err := s.sched.Provision(ctx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, schedulerRootfsRestore(rootfs))
-	if err != nil {
-		s.failResume(ctx, id, gen, revertOnFail, "provision")
-		return "", err
+	// Register the resume stall-detecting waiter BEFORE launching the provision goroutine so a fast
+	// ResumeProgress is never missed. The stall window resets on each phase event from the node
+	// (sp-u53.7.2). The waiter is keyed by the NEW generation (gen) from ClaimStarting above.
+	rwt := s.resumes.register(id, uint64(gen))
+	defer s.resumes.unregister(id)
+
+	// Run Provision in a goroutine so the stall select loop can race it.
+	type provisionResult struct {
+		nodeID string
+		err    error
 	}
-	// SetActive now accepts Resuming (extended from-set in store/spawns.go, sp-u53.7.5).
-	if err := s.st.Spawns().SetActive(ctx, id, nodeID, gen); err != nil {
-		s.rt.StopOnNode(id)
-		s.rt.Drop(id)
-		s.failResume(ctx, id, gen, revertOnFail, "SetActive")
-		return "", connect.NewError(connect.CodeInternal, err)
+	provCh := make(chan provisionResult, 1)
+	provCtx, provCancel := context.WithCancel(ctx)
+	defer provCancel()
+	go func() {
+		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, schedulerRootfsRestore(rootfs))
+		provCh <- provisionResult{n, e}
+	}()
+
+	// Generous absolute backstop: fires only if the stall detector fails to catch a wedge.
+	wait, waitCancel := context.WithTimeout(ctx, s.resumeTimeout)
+	defer waitCancel()
+
+	// Per-transition stall window: resets on each ResumeProgress event from the node.
+	stall := time.NewTimer(s.resumeStallWindow)
+	defer stall.Stop()
+
+	storeCtx := context.WithoutCancel(ctx)
+	for {
+		select {
+		case res := <-provCh:
+			if res.err != nil {
+				s.failResume(storeCtx, id, gen, revertOnFail, "provision")
+				return "", res.err
+			}
+			nodeID := res.nodeID
+			// SetActive now accepts Resuming (extended from-set in store/spawns.go, sp-u53.7.5).
+			if err := s.st.Spawns().SetActive(storeCtx, id, nodeID, gen); err != nil {
+				s.rt.StopOnNode(id)
+				s.rt.Drop(id)
+				s.failResume(storeCtx, id, gen, revertOnFail, "SetActive")
+				return "", connect.NewError(connect.CodeInternal, err)
+			}
+			// Fresh container started with spawns.model -> mark applied.
+			if merr := s.st.Spawns().MarkModelApplied(storeCtx, id); merr != nil {
+				log.Printf("resumeLocked %s: MarkModelApplied after resume: %v", id, merr)
+			}
+			return nodeID, nil
+
+		case <-rwt.progressCh:
+			// Progress from the node: reset the stall timer.
+			if !stall.Stop() {
+				select {
+				case <-stall.C:
+				default:
+				}
+			}
+			stall.Reset(s.resumeStallWindow)
+
+		case <-stall.C:
+			// STALL: no progress for resumeStallWindow — node is wedged. Cancel provision and
+			// move the spawn to a defined state (error or reverted to suspended on migration).
+			provCancel()
+			s.rt.Drop(id)
+			s.failResume(storeCtx, id, gen, revertOnFail, "resume stall")
+			return "", connect.NewError(connect.CodeDeadlineExceeded,
+				fmt.Errorf("resume stalled (no progress for %s)", s.resumeStallWindow))
+
+		case <-wait.Done():
+			if ctx.Err() != nil {
+				// claimCtx was cancelled (ErrClaimLost from heartbeat, or client disconnect).
+				provCancel()
+				return "", connect.NewError(connect.CodeAborted, fmt.Errorf("claim lost or request cancelled during resume"))
+			}
+			// Absolute backstop expired.
+			provCancel()
+			s.rt.Drop(id)
+			s.failResume(storeCtx, id, gen, revertOnFail, "resume timeout")
+			return "", connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node resume"))
+		}
 	}
-	// Fresh container started with spawns.model -> mark applied.
-	if merr := s.st.Spawns().MarkModelApplied(context.WithoutCancel(ctx), id); merr != nil {
-		log.Printf("resumeLocked %s: MarkModelApplied after resume: %v", id, merr)
-	}
-	return nodeID, nil
 }
 
 // failResume puts a failed resume into a DEFINED state. For a migration (revert=true) it rolls the
@@ -794,11 +1174,21 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 		if c, ok, cerr := s.st.Spawns().LiveContainer(ctx, sp.ID); ok && cerr == nil {
 			gen = uint64(c.Generation)
 		}
+		// Populate live transition phase/detail for Suspending/Resuming spawns (sp-u53.7.2).
+		// These come from the in-flight waiters and are not persisted — empty on CP restart.
+		var transPhase, transDetail string
+		switch sp.Status {
+		case store.Suspending:
+			transPhase, transDetail = s.suspends.lastProgress(sp.ID)
+		case store.Resuming:
+			transPhase, transDetail = s.resumes.lastProgress(sp.ID)
+		}
 		out[i] = &cpv1.SpawnSummary{
 			SpawnId: sp.ID, AppId: sp.AppID, AppVersion: sp.AppVersion, Model: sp.Model,
 			Status: toSummaryStatus(sp.Status), CreatedAt: sp.CreatedAt, LastUsedAt: sp.LastUsedAt,
 			Name: sp.Name, Mode: sp.Mode, ModelApplied: sp.ModelApplied,
 			Generation: gen, JournalKeyDeliveryPending: s.deliveryPending.isPending(sp.ID),
+			TransitionPhase: transPhase, TransitionDetail: transDetail,
 		}
 	}
 	return connect.NewResponse(&cpv1.ListSpawnsResponse{Spawns: out}), nil
