@@ -234,7 +234,10 @@ func installSubCmd(kindStr, usage string) *cli.Command {
 				}
 			}
 
-			m := agentinstall.Manifest{Artifacts: []agentinstall.Artifact{artifact}}
+			m := agentinstall.Manifest{
+				SchemaVersion: agentinstall.CurrentSchemaVersion,
+				Artifacts:     []agentinstall.Artifact{artifact},
+			}
 			reg := agentinstall.NewRegistry(env)
 			opts := agentinstall.Options{
 				HomeDir:    env.Home(),
@@ -305,7 +308,10 @@ func installConfigSubCmd() *cli.Command {
 				},
 			}
 
-			m := agentinstall.Manifest{Artifacts: []agentinstall.Artifact{artifact}}
+			m := agentinstall.Manifest{
+				SchemaVersion: agentinstall.CurrentSchemaVersion,
+				Artifacts:     []agentinstall.Artifact{artifact},
+			}
 			reg := agentinstall.NewRegistry(env)
 			opts := agentinstall.Options{
 				HomeDir:    env.Home(),
