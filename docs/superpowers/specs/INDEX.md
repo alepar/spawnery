@@ -55,6 +55,7 @@ were already made in one of these docs.
 
 ## State & storage internals
 - [Per-Mount Data Backends](2026-05-29-data-mounts-design.md) — N named data mounts under `/app`, each bound to a `StorageBackend` (supersedes single `/data`).
+- [GitHub Storage Backend — Impl (sp-u53.1)](2026-06-14-github-storage-backend-impl-design.md) — implements the `github:owner/repo` `storage.Backend`: per-mount factory dispatch, **user-to-server OAuth token consumed as a generic secret** (CP never mints — `sp-v40s`/`sp-7h6.1`), node-side provisioning + suspend backstop push to `spawn/<id>/<generation>/<branch>`, GitHub=permanent / Garage-journal=transient layering, E3 LWW-surfaced conflict; supersedes E3 §2a/§3's installation-token model.
 - [State/DAO Research Brief](2026-05-31-state-dao-layer-research-brief.md) — requirements for moving CP state off in-memory maps.
 - [CP State / DAO Layer](2026-05-31-state-dao-layer-design.md) — persistent control-plane state/DAO design.
 - [CP Store Driver (sp-ylw)](2026-06-01-cp-store-driver-sp-ylw.md) — store driver selection (sqlite modernc vs postgres pgx; goose migrations).
