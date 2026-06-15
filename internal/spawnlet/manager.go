@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -299,16 +300,36 @@ func (m *Manager) scratchBackend() storage.Backend {
 // syncMaterializedMount mirrors the actual root-owned bind target back into the backend-prepared
 // working dir before Finalize runs, so remap-mode mounts still route through the resolved backend.
 func syncMaterializedMount(srcDir, dstDir string) error {
-	entries, err := os.ReadDir(dstDir)
+	srcAbs, err := filepath.Abs(srcDir)
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if err := os.RemoveAll(filepath.Join(dstDir, entry.Name())); err != nil {
-			return err
+	dstAbs, err := filepath.Abs(dstDir)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(srcAbs) == filepath.Clean(dstAbs) {
+		return fmt.Errorf("sync materialized mount: source and destination must not be the same path (%s)", srcDir)
+	}
+	if srcInfo, err := os.Stat(srcDir); err == nil {
+		if dstInfo, derr := os.Stat(dstDir); derr == nil && os.SameFile(srcInfo, dstInfo) {
+			return fmt.Errorf("sync materialized mount: source and destination must not be the same file (%s)", srcDir)
 		}
 	}
-	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, walkErr error) error {
+
+	parent := filepath.Dir(dstDir)
+	tmpDir, err := os.MkdirTemp(parent, filepath.Base(dstDir)+".sync-*")
+	if err != nil {
+		return err
+	}
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
+
+	if err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -319,37 +340,78 @@ func syncMaterializedMount(srcDir, dstDir string) error {
 		if err != nil {
 			return err
 		}
-		dst := filepath.Join(dstDir, rel)
-		if d.IsDir() {
-			info, err := d.Info()
+		dstPath := filepath.Join(tmpDir, rel)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+		switch {
+		case mode.IsDir():
+			return os.MkdirAll(dstPath, mode.Perm())
+		case mode&os.ModeSymlink != 0:
+			if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+				return err
+			}
+			target, err := os.Readlink(path)
 			if err != nil {
 				return err
 			}
-			return os.MkdirAll(dst, info.Mode().Perm())
+			return os.Symlink(target, dstPath)
+		case mode.IsRegular():
+			if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+				return err
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(dstPath, b, mode.Perm()); err != nil {
+				return err
+			}
+			return os.Chmod(dstPath, mode.Perm())
+		default:
+			return fmt.Errorf("sync materialized mount: unsupported file mode %v at %s", mode, path)
 		}
-		info, err := d.Info()
-		if err != nil {
+	}); err != nil {
+		return err
+	}
+
+	backupDir := filepath.Join(parent, fmt.Sprintf(".%s.backup-%d", filepath.Base(dstDir), time.Now().UnixNano()))
+	hadDst := false
+	if _, err := os.Lstat(dstDir); err == nil {
+		hadDst = true
+		if err := os.Rename(dstDir, backupDir); err != nil {
 			return err
 		}
-		b, err := os.ReadFile(path)
-		if err != nil {
+	}
+	if err := os.Rename(tmpDir, dstDir); err != nil {
+		if hadDst {
+			_ = os.Rename(backupDir, dstDir)
+		}
+		return err
+	}
+	cleanupTmp = false
+	if hadDst {
+		if err := os.RemoveAll(backupDir); err != nil {
 			return err
 		}
-		if err := os.WriteFile(dst, b, info.Mode().Perm()); err != nil {
-			return err
-		}
-		return os.Chmod(dst, info.Mode().Perm())
-	})
+	}
+	return nil
 }
 
-func (m *Manager) finalizeMountDirs(ctx context.Context, mountDirs []string, finalizers []MountFinalizer) {
+func (m *Manager) finalizeMountDirs(ctx context.Context, mountDirs []string, finalizers []MountFinalizer) error {
 	if len(finalizers) == 0 {
 		scratch := m.scratchBackend()
+		var errs []error
 		for _, dir := range mountDirs {
-			_ = scratch.Finalize(ctx, dir)
+			if err := scratch.Finalize(ctx, dir); err != nil {
+				errs = append(errs, err)
+			}
 		}
-		return
+		return errors.Join(errs...)
 	}
+	var errs []error
 	for _, finalizer := range finalizers {
 		backend := finalizer.Backend
 		if backend == nil {
@@ -357,14 +419,19 @@ func (m *Manager) finalizeMountDirs(ctx context.Context, mountDirs []string, fin
 		}
 		if finalizer.SyncFrom != "" {
 			if err := syncMaterializedMount(finalizer.SyncFrom, finalizer.HostDir); err != nil {
-				log.Printf("sync materialized mount %s -> %s: %v", finalizer.SyncFrom, finalizer.HostDir, err)
+				errs = append(errs, fmt.Errorf("sync materialized mount %s -> %s: %w", finalizer.SyncFrom, finalizer.HostDir, err))
+				continue
 			}
 		}
-		_ = backend.Finalize(ctx, finalizer.HostDir)
+		if err := backend.Finalize(ctx, finalizer.HostDir); err != nil {
+			errs = append(errs, fmt.Errorf("finalize mount dir %s: %w", finalizer.HostDir, err))
+			continue
+		}
 		if finalizer.CleanupDir != "" {
 			_ = m.scratchBackend().Finalize(ctx, finalizer.CleanupDir)
 		}
 	}
+	return errors.Join(errs...)
 }
 
 // agentRootUID returns the host uid that the in-container agent-root maps to, used by
@@ -658,7 +725,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	var mountFinalizers []MountFinalizer
 	var journalMounts []journal.Mount
 	finalizeAll := func() {
-		m.finalizeMountDirs(ctx, mountDirs, mountFinalizers)
+		_ = m.finalizeMountDirs(ctx, mountDirs, mountFinalizers)
 	}
 	rootMaterialize := m.useRootMaterializer()
 	helperImage := m.cfg.AgentImage
@@ -713,14 +780,22 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		hostDir := ""
 		restoreDir := ""
 		preparedDir := ""
+		prepareName := mt.Name
 		if rootMaterialize {
-			preparedDir, err = mountBackend.Prepare(ctx, id, mt.Name, seedDir, -1)
+			prepareName = mt.Name + ".stage"
+			preparedDir, err = mountBackend.Prepare(ctx, id, prepareName, seedDir, -1)
 			if err != nil {
 				finalizeAll()
 				return nil, fmt.Errorf("prepare mount %q: %w", mt.Name, err)
 			}
 			restoreDir = preparedDir
 			hostDir = filepath.Join(m.cfg.DataRoot, id, mt.Name)
+			if filepath.Clean(preparedDir) == filepath.Clean(hostDir) {
+				cleanupPrepared := func() { _ = mountBackend.Finalize(ctx, preparedDir) }
+				cleanupPrepared()
+				finalizeAll()
+				return nil, fmt.Errorf("prepare mount %q: root-materialized prepared dir must differ from bind target", mt.Name)
+			}
 		} else {
 			hostDir, err = mountBackend.Prepare(ctx, id, mt.Name, seedDir, agentUID)
 			if err != nil {
@@ -1491,7 +1566,10 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 	if progress != nil {
 		progress("finalize", "finalizing mount dirs", nil)
 	}
-	m.finalizeMountDirs(ctx, sp.MountDirs, sp.MountFinalizers)
+	if ferr := m.finalizeMountDirs(ctx, sp.MountDirs, sp.MountFinalizers); ferr != nil {
+		log.Printf("mount finalize for %s: %v", id, ferr)
+		resultErr = errors.Join(resultErr, fmt.Errorf("finalize mounts for %s: %w", id, ferr))
+	}
 	// Owner-sealed secret plaintext must not outlive the episode (design §6 never-persist): drop the
 	// per-spawn secrets dir. Best-effort — a leftover dir is reseeded empty on the next Create.
 	if serr := m.secrets.Remove(id); serr != nil {

@@ -66,9 +66,10 @@ func (b *countingPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandl
 }
 
 type recordingBackend struct {
-	root      string
-	prepared  []string
-	finalized []string
+	root        string
+	prepared    []string
+	finalized   []string
+	finalizeErr error
 }
 
 func (b *recordingBackend) Prepare(_ context.Context, spawnID, mountName, seedDir string, agentUID int) (string, error) {
@@ -82,7 +83,7 @@ func (b *recordingBackend) Prepare(_ context.Context, spawnID, mountName, seedDi
 
 func (b *recordingBackend) Finalize(_ context.Context, hostDir string) error {
 	b.finalized = append(b.finalized, hostDir)
-	return nil
+	return b.finalizeErr
 }
 
 type recordingResolver struct {
@@ -186,6 +187,36 @@ func TestStopFinalizesEachMountThroughPreparingBackend(t *testing.T) {
 	}
 }
 
+func TestRootMaterializeScratchMountUsesDistinctPreparedDir(t *testing.T) {
+	fb := &countingPodBackend{}
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), UsernsMode: "remap",
+	})
+	m.rootMaterializer = &fakeRootMaterializer{}
+
+	sp, err := m.CreateWithSelection(context.Background(), "sp-root-scratch", writeMountBindingApp(t, "main"), "model", "", "", 0, AgentSelection{})
+	if err != nil {
+		t.Fatalf("CreateWithSelection: %v", err)
+	}
+
+	var mountFinalizer *MountFinalizer
+	for i := range sp.MountFinalizers {
+		if strings.HasSuffix(sp.MountFinalizers[i].CleanupDir, "/main") || strings.HasSuffix(sp.MountFinalizers[i].SyncFrom, "/main") {
+			mountFinalizer = &sp.MountFinalizers[i]
+			break
+		}
+	}
+	if mountFinalizer == nil {
+		t.Fatal("missing mount finalizer for main")
+	}
+	if mountFinalizer.HostDir == mountFinalizer.SyncFrom {
+		t.Fatalf("root-materialized scratch mount must not self-sync: %+v", *mountFinalizer)
+	}
+	if mountFinalizer.HostDir == mountFinalizer.CleanupDir {
+		t.Fatalf("root-materialized scratch mount must use distinct prepared and bind dirs: %+v", *mountFinalizer)
+	}
+}
+
 func TestRootMaterializeUsesResolvedBackendForMountPrepareAndFinalize(t *testing.T) {
 	fb := &countingPodBackend{}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
@@ -217,5 +248,32 @@ func TestRootMaterializeUsesResolvedBackendForMountPrepareAndFinalize(t *testing
 	}
 	if len(githubBackend.finalized) != 1 || githubBackend.finalized[0] != githubBackend.prepared[0] {
 		t.Fatalf("github backend finalize = %v, want finalize of prepared dir %v", githubBackend.finalized, githubBackend.prepared)
+	}
+}
+
+func TestSuspendReturnsErrorWhenMountFinalizeFails(t *testing.T) {
+	fb := &countingPodBackend{}
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+
+	backendErr := errors.New("finalize boom")
+	githubBackend := &recordingBackend{root: filepath.Join(t.TempDir(), "github"), finalizeErr: backendErr}
+	m.backendResolver = recordingResolver{
+		backends: map[string]storage.Backend{
+			"":                  &recordingBackend{root: filepath.Join(t.TempDir(), "scratch")},
+			"github:owner/repo": githubBackend,
+		},
+	}
+
+	sp, err := m.CreateWithSelection(context.Background(), "sp-suspend-finalize-fail", writeMountBindingApp(t, "main"), "model", "", "", 0, AgentSelection{
+		Mounts: []MountBinding{{Name: "main", BackendURI: "github:owner/repo"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateWithSelection: %v", err)
+	}
+
+	if _, err := m.Suspend(context.Background(), sp.ID); !errors.Is(err, backendErr) {
+		t.Fatalf("Suspend error = %v, want %v", err, backendErr)
 	}
 }
