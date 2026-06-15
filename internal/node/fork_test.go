@@ -199,6 +199,151 @@ func TestForkTurnBoundaryWaitsForACPPumpIdle(t *testing.T) {
 	}
 }
 
+func TestForkTurnBoundaryBlocksPromptUntilForkSameNodeCompletes(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	p := newPump(io.Discard, strings.NewReader(""))
+	a.pumps[zeroKey("sp-source")] = p
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	waitFor(t, "ForkTurnBoundaryComplete", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+
+	a.fromClient("sp-source", SessionZeroID, "c1", encodeFrame(Frame{Kind: "prompt", Text: "during fork"}))
+	p.mu.Lock()
+	blockedBusy, blockedInflight, blockedLogLen := p.busy, p.inflightPromptID, len(p.log)
+	p.mu.Unlock()
+	if blockedBusy || blockedInflight != 0 || blockedLogLen != 0 {
+		t.Fatalf("prompt during fork barrier started a turn: busy=%v inflight=%d logLen=%d", blockedBusy, blockedInflight, blockedLogLen)
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkSameNode{ForkSameNode: &nodev1.ForkSameNode{
+		SourceSpawnId: "sp-source", ForkSpawnId: "sp-fork", SourceGeneration: 9, TargetGeneration: 1, TransferSetId: "ts-1",
+	}}})
+	waitFor(t, "ForkSameNodeComplete", func() bool { return lastForkSameNodeComplete(fs) != nil })
+	if fc := lastForkSameNodeComplete(fs); fc.GetError() != "" {
+		t.Fatalf("ForkSameNodeComplete error = %q", fc.GetError())
+	}
+
+	a.fromClient("sp-source", SessionZeroID, "c1", encodeFrame(Frame{Kind: "prompt", Text: "after fork"}))
+	p.mu.Lock()
+	releasedBusy, releasedInflight, releasedLogLen := p.busy, p.inflightPromptID, len(p.log)
+	p.mu.Unlock()
+	if !releasedBusy || releasedInflight == 0 || releasedLogLen == 0 {
+		t.Fatalf("prompt after fork barrier release did not start: busy=%v inflight=%d logLen=%d", releasedBusy, releasedInflight, releasedLogLen)
+	}
+}
+
+func TestForkSameNodeFailureReleasesForkTurnBoundaryBarrier(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	p := newPump(io.Discard, strings.NewReader(""))
+	a.pumps[zeroKey("missing-source")] = p
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "missing-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	waitFor(t, "ForkTurnBoundaryComplete", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkSameNode{ForkSameNode: &nodev1.ForkSameNode{
+		SourceSpawnId: "missing-source", ForkSpawnId: "sp-fork", SourceGeneration: 9, TargetGeneration: 1, TransferSetId: "ts-1",
+	}}})
+	waitFor(t, "ForkSameNodeComplete error", func() bool {
+		fc := lastForkSameNodeComplete(fs)
+		return fc != nil && fc.GetError() != ""
+	})
+
+	a.fromClient("missing-source", SessionZeroID, "c1", encodeFrame(Frame{Kind: "prompt", Text: "after failure"}))
+	p.mu.Lock()
+	releasedBusy, releasedInflight := p.busy, p.inflightPromptID
+	p.mu.Unlock()
+	if !releasedBusy || releasedInflight == 0 {
+		t.Fatalf("prompt after failed fork did not start: busy=%v inflight=%d", releasedBusy, releasedInflight)
+	}
+}
+
+func TestUnpauseIfPausedReleasesForkTurnBoundaryBarrier(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	p := newPump(io.Discard, strings.NewReader(""))
+	a.pumps[zeroKey("sp-source")] = p
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	waitFor(t, "ForkTurnBoundaryComplete", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+
+	a.fromClient("sp-source", SessionZeroID, "c1", encodeFrame(Frame{Kind: "prompt", Text: "during fork"}))
+	p.mu.Lock()
+	blockedBusy, blockedInflight := p.busy, p.inflightPromptID
+	p.mu.Unlock()
+	if blockedBusy || blockedInflight != 0 {
+		t.Fatalf("prompt before unpause release started a turn: busy=%v inflight=%d", blockedBusy, blockedInflight)
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_UnpauseIfPaused{UnpauseIfPaused: &nodev1.UnpauseIfPaused{
+		SpawnId: "sp-source", Generation: 9,
+	}}})
+	waitFor(t, "UnpauseIfPausedComplete", func() bool { return lastUnpauseIfPausedComplete(fs) != nil })
+
+	a.fromClient("sp-source", SessionZeroID, "c1", encodeFrame(Frame{Kind: "prompt", Text: "after unpause"}))
+	p.mu.Lock()
+	releasedBusy, releasedInflight := p.busy, p.inflightPromptID
+	p.mu.Unlock()
+	if !releasedBusy || releasedInflight == 0 {
+		t.Fatalf("prompt after unpause release did not start: busy=%v inflight=%d", releasedBusy, releasedInflight)
+	}
+}
+
+func TestForkTurnBoundaryBlocksNewACPPumpRegisteredDuringBarrier(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	sx := &fakeSessionExec{}
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	a.sx = sx
+	reg := newSessionRegistry("sp-source")
+	reg.register(&sessionEntry{id: SessionZeroID, state: nodev1.SessionState_SESSION_STATE_ACTIVE, pinned: true, runnable: "goose-acp"})
+	a.sessions["sp-source"] = reg
+	a.pumps[zeroKey("sp-source")] = newPump(io.Discard, strings.NewReader(""))
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	waitFor(t, "ForkTurnBoundaryComplete", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "sp-source", Generation: 9, Transport: nodev1.SessionTransport_SESSION_TRANSPORT_ACP, Runnable: "goose-acp",
+	}}})
+	waitFor(t, "new ACP pump", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.pumps[sessionKey{"sp-source", "1"}] != nil
+	})
+
+	a.fromClient("sp-source", "1", "c1", encodeFrame(Frame{Kind: "prompt", Text: "new session during fork"}))
+	a.mu.Lock()
+	p := a.pumps[sessionKey{"sp-source", "1"}]
+	a.mu.Unlock()
+	p.mu.Lock()
+	blockedBusy, blockedInflight, blockedLogLen := p.busy, p.inflightPromptID, len(p.log)
+	p.mu.Unlock()
+	if blockedBusy || blockedInflight != 0 || blockedLogLen != 0 {
+		t.Fatalf("new ACP pump bypassed fork barrier: busy=%v inflight=%d logLen=%d", blockedBusy, blockedInflight, blockedLogLen)
+	}
+	p.stop()
+}
+
 func TestForkTurnBoundaryFailsClosedWithoutObservableACPPump(t *testing.T) {
 	be := &scriptedPodBackend{script: scriptGoose}
 	mgr := newForkNodeManager(t, be)

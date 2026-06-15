@@ -61,6 +61,7 @@ type Pump struct {
 	busy             bool
 	queue            []string // queued prompt texts, FIFO
 	inflightPromptID int      // agent request id of the in-flight session/prompt (0 = none)
+	forkBarrier      *forkIngressBarrier
 
 	pending     map[string]*pendingPerm
 	permTimeout time.Duration
@@ -107,28 +108,33 @@ func (p *Pump) markActive() {
 	p.mu.Unlock()
 }
 
-func (p *Pump) idleForFork() bool {
+func (p *Pump) tryAcquireForkBarrier(b forkIngressBarrier) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return !p.busy && p.inflightPromptID == 0 && len(p.queue) == 0
+	if p.forkBarrier != nil {
+		return p.forkBarrier.matches(b)
+	}
+	if p.busy || p.inflightPromptID != 0 || len(p.queue) != 0 {
+		return false
+	}
+	bb := b
+	p.forkBarrier = &bb
+	return true
 }
 
-func (p *Pump) waitIdle(ctx context.Context, poll time.Duration) error {
-	if poll <= 0 {
-		poll = 10 * time.Millisecond
+func (p *Pump) setForkBarrier(b forkIngressBarrier) {
+	p.mu.Lock()
+	bb := b
+	p.forkBarrier = &bb
+	p.mu.Unlock()
+}
+
+func (p *Pump) releaseForkBarrier(match func(forkIngressBarrier) bool) {
+	p.mu.Lock()
+	if p.forkBarrier != nil && match(*p.forkBarrier) {
+		p.forkBarrier = nil
 	}
-	t := time.NewTicker(poll)
-	defer t.Stop()
-	for {
-		if p.idleForFork() {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-t.C:
-		}
-	}
+	p.mu.Unlock()
 }
 
 // appendFrames assigns seqs, appends to the log (trimming the oldest past maxLog), and wakes clients.
@@ -663,6 +669,10 @@ func (p *Pump) fromClient(clientID string, line []byte) {
 	switch f.Kind {
 	case "prompt":
 		p.mu.Lock()
+		if p.forkBarrier != nil {
+			p.mu.Unlock()
+			return
+		}
 		sid := p.sessionID
 		if !p.busy {
 			p.busy = true
