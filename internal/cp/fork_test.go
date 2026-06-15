@@ -154,6 +154,77 @@ func (h *turnBoundaryHookSender) Send(m *nodev1.CPMessage) error {
 	return nil
 }
 
+type blockingStartSender struct {
+	capSender
+	s       *Server
+	reached chan *nodev1.StartSpawn
+	unblock chan struct{}
+}
+
+func (b *blockingStartSender) Send(m *nodev1.CPMessage) error {
+	if err := b.capSender.Send(m); err != nil {
+		return err
+	}
+	if st := m.GetStart(); st != nil {
+		select {
+		case b.reached <- st:
+		default:
+		}
+		<-b.unblock
+		b.s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
+	}
+	return nil
+}
+
+type blockingTurnBoundarySender struct {
+	capSender
+	s       *Server
+	reached chan *nodev1.ForkTurnBoundary
+	unblock chan struct{}
+}
+
+func (b *blockingTurnBoundarySender) Send(m *nodev1.CPMessage) error {
+	if err := b.capSender.Send(m); err != nil {
+		return err
+	}
+	if cmd := m.GetForkTurnBoundary(); cmd != nil {
+		select {
+		case b.reached <- cmd:
+		default:
+		}
+		<-b.unblock
+		b.s.deliverForkTurnBoundaryComplete(&nodev1.ForkTurnBoundaryComplete{
+			SourceSpawnId:    cmd.GetSourceSpawnId(),
+			SourceGeneration: cmd.GetSourceGeneration(),
+			TransferSetId:    cmd.GetTransferSetId(),
+		})
+	}
+	return nil
+}
+
+type blockingBoundaryMaterializer struct {
+	nodeID  string
+	reached chan forkMaterializeRequest
+	unblock chan struct{}
+}
+
+func (b *blockingBoundaryMaterializer) WaitForForkTurnBoundary(ctx context.Context, req forkMaterializeRequest) error {
+	select {
+	case b.reached <- req:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-b.unblock:
+		return nil
+	}
+}
+
+func (b *blockingBoundaryMaterializer) MaterializeFork(context.Context, forkMaterializeRequest) (forkMaterializeResult, error) {
+	return forkMaterializeResult{NodeID: b.nodeID}, nil
+}
+
 func sawUnpause(sender *capSender, spawnID string) bool {
 	sender.mu.Lock()
 	defer sender.mu.Unlock()
@@ -524,6 +595,134 @@ func TestForkSpawnFencesSourceDuringMaterialization(t *testing.T) {
 		unlock()
 	case <-time.After(time.Second):
 		t.Fatal("source keyed lock probe did not acquire after ForkSpawn returned")
+	}
+}
+
+func TestForkSpawnDoesNotClaimSourceWhileWaitingForTurnBoundary(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	sourceSender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
+	stopAck := goAckStarts(s, sourceSender)
+	defer stopAck()
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	mat := &blockingBoundaryMaterializer{nodeID: "node-1", reached: make(chan forkMaterializeRequest, 1), unblock: make(chan struct{})}
+	s.forkMaterializer = mat
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source"}))
+		done <- err
+	}()
+	select {
+	case <-mat.reached:
+	case <-time.After(time.Second):
+		t.Fatal("fork did not reach turn-boundary wait")
+	}
+	defer func() {
+		select {
+		case <-mat.unblock:
+		default:
+			close(mat.unblock)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("ForkSpawn after turn-boundary release: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("ForkSpawn did not finish after releasing turn boundary")
+		}
+	}()
+
+	source, err := s.st.Spawns().Get(context.Background(), "sp-source")
+	if err != nil {
+		t.Fatalf("Get source: %v", err)
+	}
+	leaseID := "source-turn-boundary-probe"
+	if _, err := s.st.Spawns().Acquire(context.Background(), "sp-source", "competitor", leaseID,
+		time.Now().UnixNano(), time.Now().Add(time.Minute).UnixNano(), source.StatusSeq); err != nil {
+		t.Fatalf("source DB claim must not be held while fork waits for turn boundary: %v", err)
+	}
+	if err := s.st.Spawns().Release(context.Background(), "sp-source", leaseID); err != nil {
+		t.Fatalf("release source turn-boundary probe claim: %v", err)
+	}
+
+	lockAcquired := make(chan func(), 1)
+	go func() {
+		lockAcquired <- s.locks.Lock("sp-source")
+	}()
+	select {
+	case unlock := <-lockAcquired:
+		unlock()
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("source keyed lock must not be held while fork waits for turn boundary")
+	}
+}
+
+func TestForkSpawnReleasesSourceClaimAndLockBeforeForkStandup(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	sourceSender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
+	targetSender := &blockingStartSender{s: s, reached: make(chan *nodev1.StartSpawn, 1), unblock: make(chan struct{})}
+	reg.Add(&registry.Node{
+		ID: "node-2", Sender: targetSender, Max: 4, Free: 4, Class: "cloud",
+		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
+	})
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	s.forkMaterializer = &recordingForkMaterializer{nodeID: "node-2"}
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source", TargetNodeId: "node-2"}))
+		done <- err
+	}()
+	var start *nodev1.StartSpawn
+	select {
+	case start = <-targetSender.reached:
+	case <-time.After(time.Second):
+		t.Fatal("fork standup did not reach StartSpawn")
+	}
+	defer func() {
+		select {
+		case <-targetSender.unblock:
+		default:
+			close(targetSender.unblock)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("ForkSpawn after unblock: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("ForkSpawn did not finish after unblocking StartSpawn")
+		}
+	}()
+
+	source, err := s.st.Spawns().Get(context.Background(), "sp-source")
+	if err != nil {
+		t.Fatalf("Get source: %v", err)
+	}
+	if source.Status != store.Active {
+		t.Fatalf("source status while fork standup is blocked = %s, want Active", source.Status)
+	}
+	leaseID := "source-after-capture-probe"
+	if _, err := s.st.Spawns().Acquire(context.Background(), "sp-source", "competitor", leaseID,
+		time.Now().UnixNano(), time.Now().Add(time.Minute).UnixNano(), source.StatusSeq); err != nil {
+		t.Fatalf("source DB claim must be released before fork standup completes; StartSpawn=%s err=%v", start.GetSpawnId(), err)
+	}
+	defer s.st.Spawns().Release(context.Background(), "sp-source", leaseID)
+
+	lockAcquired := make(chan func(), 1)
+	go func() {
+		lockAcquired <- s.locks.Lock("sp-source")
+	}()
+	select {
+	case unlock := <-lockAcquired:
+		unlock()
+	case <-time.After(50 * time.Millisecond):
+		t.Fatalf("source keyed lock must be released before fork standup completes; StartSpawn=%s", start.GetSpawnId())
 	}
 }
 

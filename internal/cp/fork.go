@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
@@ -230,9 +231,6 @@ func (s *Server) ForkSpawn(ctx context.Context, req *connect.Request[cpv1.ForkSp
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("specify a target node id OR a class, not both"))
 	}
 
-	unlock := s.locks.Lock(sourceID)
-	defer unlock()
-
 	source, err := s.st.Spawns().Get(ctx, sourceID)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
@@ -242,17 +240,14 @@ func (s *Server) ForkSpawn(ctx context.Context, req *connect.Request[cpv1.ForkSp
 	}
 
 	var resp *connect.Response[cpv1.ForkSpawnResponse]
-	if err := s.withClaim(ctx, sourceID, func(claimCtx context.Context, leaseID string) error {
-		var err error
-		resp, err = s.forkSpawnClaimed(claimCtx, owner, sourceID, targetNode, targetClass, req.Msg.Name, leaseID)
-		return err
-	}); err != nil {
+	resp, err = s.forkSpawnClaimed(ctx, owner, sourceID, targetNode, targetClass, req.Msg.Name)
+	if err != nil {
 		return nil, err
 	}
 	return resp, nil
 }
 
-func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNode, targetClass, requestedName, leaseID string) (*connect.Response[cpv1.ForkSpawnResponse], error) {
+func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNode, targetClass, requestedName string) (*connect.Response[cpv1.ForkSpawnResponse], error) {
 	source, err := s.st.Spawns().Get(ctx, sourceID)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
@@ -262,6 +257,9 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 	}
 	if source.Status != store.Active {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn must be active to fork"))
+	}
+	if source.ClaimHolder != nil && source.ClaimDeadline != nil && *source.ClaimDeadline > time.Now().UnixNano() {
+		return nil, connect.NewError(connect.CodeAborted, fmt.Errorf("spawn busy — transition in progress"))
 	}
 	live, ok, err := s.st.Spawns().LiveContainer(ctx, sourceID)
 	if err != nil {
@@ -410,12 +408,52 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 	}
 	barrierAcquired = true
 
+	unlockSource := s.locks.Lock(sourceID)
+	sourceLockHeld := true
+	claim, claimErr := s.acquireClaim(ctx, sourceID)
+	releaseSource := func() {
+		if claim != nil {
+			claim.Release()
+			claim = nil
+		}
+		if sourceLockHeld {
+			unlockSource()
+			sourceLockHeld = false
+		}
+	}
+	defer releaseSource()
+	if claimErr != nil {
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, claimErr)
+	}
+	claimCtx := claim.ctx
+	leaseID := claim.leaseID
+	currentSource, err := s.st.Spawns().Get(claimCtx, sourceID)
+	if err != nil {
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn")))
+	}
+	if currentSource.Status != store.Active {
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration,
+			connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn must still be active to fork")))
+	}
+	currentLive, ok, err := s.st.Spawns().LiveContainer(claimCtx, sourceID)
+	if err != nil {
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, err))
+	}
+	if !ok || currentLive.NodeID == "" {
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration,
+			connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn has no live source container")))
+	}
+	if currentLive.Generation != int64(sourceGeneration) || currentLive.NodeID != live.NodeID {
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration,
+			connect.NewError(connect.CodeAborted, fmt.Errorf("source changed while fork was waiting for turn boundary")))
+	}
+
 	captureDeadline := s.now().Add(defaultForkCaptureTimeout).UnixNano()
-	if err := s.st.Spawns().SetForking(ctx, sourceID, live.Generation, captureDeadline); err != nil {
+	if err := s.st.Spawns().SetForking(claimCtx, sourceID, currentLive.Generation, captureDeadline); err != nil {
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("mark source forking: %w", err)))
 	}
 	restoreSource := func() error {
-		return s.restoreForkingSourceAfterUnpause(context.WithoutCancel(ctx), sourceID, leaseID, live.Generation)
+		return s.restoreForkingSourceAfterUnpause(context.WithoutCancel(ctx), sourceID, leaseID, currentLive.Generation)
 	}
 	restoreOnFailure := true
 	defer func() {
@@ -429,7 +467,7 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 	materializeReq := barrierReq
 	materializeReq.Mounts = mounts
 	materializeReq.Artifacts = artifacts
-	result, err := s.forkMaterializerOrDefault().MaterializeFork(ctx, materializeReq)
+	result, err := s.forkMaterializerOrDefault().MaterializeFork(claimCtx, materializeReq)
 	if err != nil {
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, asConnectError(connect.CodeInternal, err))
 	}
@@ -437,6 +475,7 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("restore source active: %w", err)))
 	}
 	restoreOnFailure = false
+	releaseSource()
 	if err := s.st.TransferSets().SetPins(ctx, transferSetID, sourceGeneration, result.MountPins, result.RootfsPins, s.now().UnixNano()); err != nil {
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("record fork transfer pins: %w", err)))
 	}

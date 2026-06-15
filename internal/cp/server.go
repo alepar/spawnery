@@ -187,14 +187,26 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 	return s
 }
 
-// withClaim acquires the DB claim for spawn id, runs fn under it (with a heartbeat goroutine
-// renewing the lease every claimTTL/3), then releases the claim. The fn receives a claimCtx that is
-// cancelled if the heartbeat detects ErrClaimLost (lease expired / preempted), signalling the driver
-// to bail immediately and commit no further transitions.
+type spawnClaim struct {
+	ctx     context.Context
+	leaseID string
+	release func()
+}
+
+func (c *spawnClaim) Release() {
+	if c != nil && c.release != nil {
+		c.release()
+	}
+}
+
+// acquireClaim acquires the DB claim for spawn id and starts a heartbeat goroutine renewing the lease
+// every claimTTL/3. The returned claim ctx is cancelled if the heartbeat detects ErrClaimLost (lease
+// expired / preempted), signalling the driver to bail immediately and commit no further transitions.
+// Release is idempotent and stops the heartbeat before releasing the DB claim.
 //
 // Acquire is retried up to maxAcquireRetries times on ErrConflict (benign seq bump); if all retries
 // are exhausted the claim is held by another driver → CodeAborted "spawn busy".
-func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx context.Context, leaseID string) error) error {
+func (s *Server) acquireClaim(ctx context.Context, id string) (*spawnClaim, error) {
 	const maxAcquireRetries = 3
 	leaseID := uuid.NewString()
 	ttl := s.claimTTL
@@ -203,7 +215,7 @@ func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx cont
 	for i := 0; i < maxAcquireRetries; i++ {
 		sp, gerr := s.st.Spawns().Get(ctx, id)
 		if gerr != nil {
-			return connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
 		}
 		now := time.Now()
 		_, acquireErr = s.st.Spawns().Acquire(ctx, id, s.cpID, leaseID,
@@ -212,12 +224,12 @@ func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx cont
 			break
 		}
 		if !errors.Is(acquireErr, store.ErrConflict) {
-			return connect.NewError(connect.CodeInternal, acquireErr)
+			return nil, connect.NewError(connect.CodeInternal, acquireErr)
 		}
 		// ErrConflict: stale seq (benign concurrent bump) or active claim; re-read and retry.
 	}
 	if acquireErr != nil {
-		return connect.NewError(connect.CodeAborted, fmt.Errorf("spawn busy — transition in progress"))
+		return nil, connect.NewError(connect.CodeAborted, fmt.Errorf("spawn busy — transition in progress"))
 	}
 
 	// claimCtx is cancelled either by us (after fn returns) or by the heartbeat on ErrClaimLost.
@@ -245,12 +257,29 @@ func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx cont
 		}
 	}()
 
-	fnErr := fn(claimCtx, leaseID)
-	claimCancel() // stop heartbeat goroutine
-	<-hbDone
-	// Release: ErrClaimLost means the claim expired/was preempted — acceptable, ignore.
-	_ = s.st.Spawns().Release(context.WithoutCancel(ctx), id, leaseID)
-	return fnErr
+	var releaseOnce sync.Once
+	return &spawnClaim{
+		ctx:     claimCtx,
+		leaseID: leaseID,
+		release: func() {
+			releaseOnce.Do(func() {
+				claimCancel() // stop heartbeat goroutine
+				<-hbDone
+				// Release: ErrClaimLost means the claim expired/was preempted — acceptable, ignore.
+				_ = s.st.Spawns().Release(context.WithoutCancel(ctx), id, leaseID)
+			})
+		},
+	}, nil
+}
+
+// withClaim acquires the DB claim for spawn id, runs fn under it, then releases the claim.
+func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx context.Context, leaseID string) error) error {
+	claim, err := s.acquireClaim(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer claim.Release()
+	return fn(claim.ctx, claim.leaseID)
 }
 
 // --- node side: NodeService/Attach ----------------------------------------
