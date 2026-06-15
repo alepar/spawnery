@@ -693,6 +693,7 @@ func (p *Pump) fromClient(clientID string, line []byte) {
 				return
 			}
 			p.mu.Unlock()
+			p.appendFrames([]Frame{{Kind: "turn", State: "idle", Queued: maxQueued, Error: &ErrorInfo{Message: "prompt queue full during fork barrier"}}})
 			return
 		}
 		sid := p.sessionID

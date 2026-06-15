@@ -158,6 +158,35 @@ func TestGenerationKeyManagerBackendForReusesRecordedGeneration(t *testing.T) {
 	}
 }
 
+func TestGenerationHoldDefersRevokeUntilRelease(t *testing.T) {
+	ctx := context.Background()
+	admin := newFakeAdmin()
+	g, err := NewGenerationKeyManager(GenerationKeyConfig{Admin: admin, S3Endpoint: "127.0.0.1:3900", DisableTLS: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := g.Mint(ctx, "sp-held", 7)
+	if err != nil {
+		t.Fatalf("mint held generation: %v", err)
+	}
+	hold := g.HoldGeneration("sp-held", 7, "fork")
+
+	if err := g.RevokeGeneration(ctx, "sp-held", 7); err != nil {
+		t.Fatalf("revoke held generation: %v", err)
+	}
+	if !admin.keyExists(cfg.AccessKeyID) {
+		t.Fatal("held generation key must remain valid until the fork hold releases")
+	}
+
+	hold.Release()
+	if admin.keyExists(cfg.AccessKeyID) {
+		t.Fatal("revoke requested during hold must apply when the hold releases")
+	}
+	if _, ok := g.lookupKey("sp-held", 7); ok {
+		t.Fatal("released deferred revoke must forget the generation key")
+	}
+}
+
 // TestGarageAdminHTTP exercises the real GarageAdmin HTTP client against an
 // httptest server mimicking the Garage v1 admin API — so the request/response
 // wiring (paths, bodies, 404-idempotent delete) is covered without a live Garage.

@@ -39,9 +39,10 @@ type GenerationKeyManager struct {
 	disableTLS bool
 	bucketPfx  string
 
-	mu    sync.Mutex
-	keys  map[string]map[uint64]generationKey // spawnID -> gen -> key material
-	holds map[string]map[uint64]int           // spawnID -> gen -> active fork-point holds
+	mu             sync.Mutex
+	keys           map[string]map[uint64]generationKey // spawnID -> gen -> key material
+	holds          map[string]map[uint64]int           // spawnID -> gen -> active fork-point holds
+	pendingRevokes map[string]map[uint64]bool          // spawnID -> gen -> revoke requested while held
 }
 
 type generationKey struct {
@@ -79,13 +80,14 @@ func NewGenerationKeyManager(cfg GenerationKeyConfig) (*GenerationKeyManager, er
 		pfx = "spawnery-spawn-"
 	}
 	return &GenerationKeyManager{
-		admin:      cfg.Admin,
-		s3Endpoint: cfg.S3Endpoint,
-		region:     cfg.Region,
-		disableTLS: cfg.DisableTLS,
-		bucketPfx:  pfx,
-		keys:       map[string]map[uint64]generationKey{},
-		holds:      map[string]map[uint64]int{},
+		admin:          cfg.Admin,
+		s3Endpoint:     cfg.S3Endpoint,
+		region:         cfg.Region,
+		disableTLS:     cfg.DisableTLS,
+		bucketPfx:      pfx,
+		keys:           map[string]map[uint64]generationKey{},
+		holds:          map[string]map[uint64]int{},
+		pendingRevokes: map[string]map[uint64]bool{},
 	}, nil
 }
 
@@ -149,17 +151,21 @@ func (g *GenerationKeyManager) BackendFor(ctx context.Context, spawnID string, g
 // supersede/teardown fence. A gen with no recorded key (already revoked, or
 // minted by another node) is a no-op.
 func (g *GenerationKeyManager) RevokeGeneration(ctx context.Context, spawnID string, gen uint64) error {
-	if g.held(spawnID, gen) {
+	g.mu.Lock()
+	if g.holds[spawnID][gen] > 0 {
+		g.markPendingRevokeLocked(spawnID, gen)
+		g.mu.Unlock()
 		return nil
 	}
-	ak := g.lookup(spawnID, gen)
+	ak := g.keys[spawnID][gen].accessKeyID
+	g.mu.Unlock()
 	if ak == "" {
 		return nil
 	}
 	if err := g.admin.DeleteKey(ctx, ak); err != nil {
 		return fmt.Errorf("genkey: revoke %s gen %d: %w", spawnID, gen, err)
 	}
-	g.forget(spawnID, gen)
+	g.forgetIfKey(spawnID, gen, ak)
 	return nil
 }
 
@@ -286,18 +292,30 @@ func (g *GenerationKeyManager) addHoldLocked(spawnID string, gen uint64) {
 
 func (g *GenerationKeyManager) releaseHoldFunc(spawnID string, gen uint64) func() {
 	return func() {
+		var ak string
 		g.mu.Lock()
-		defer g.mu.Unlock()
 		if g.holds[spawnID] == nil {
+			g.mu.Unlock()
 			return
 		}
 		if g.holds[spawnID][gen] > 1 {
 			g.holds[spawnID][gen]--
+			g.mu.Unlock()
 			return
 		}
 		delete(g.holds[spawnID], gen)
 		if len(g.holds[spawnID]) == 0 {
 			delete(g.holds, spawnID)
+		}
+		if g.pendingRevokes[spawnID][gen] {
+			ak = g.keys[spawnID][gen].accessKeyID
+		}
+		g.mu.Unlock()
+		if ak == "" {
+			return
+		}
+		if err := g.admin.DeleteKey(context.Background(), ak); err == nil {
+			g.forgetIfKey(spawnID, gen, ak)
 		}
 	}
 }
@@ -337,12 +355,38 @@ func (g *GenerationKeyManager) lookupKey(spawnID string, gen uint64) (generation
 func (g *GenerationKeyManager) forget(spawnID string, gen uint64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.forgetLocked(spawnID, gen)
+}
+
+func (g *GenerationKeyManager) forgetIfKey(spawnID string, gen uint64, accessKeyID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.keys[spawnID][gen].accessKeyID != accessKeyID {
+		return
+	}
+	g.forgetLocked(spawnID, gen)
+}
+
+func (g *GenerationKeyManager) forgetLocked(spawnID string, gen uint64) {
 	if g.keys[spawnID] != nil {
 		delete(g.keys[spawnID], gen)
 		if len(g.keys[spawnID]) == 0 {
 			delete(g.keys, spawnID)
 		}
 	}
+	if g.pendingRevokes[spawnID] != nil {
+		delete(g.pendingRevokes[spawnID], gen)
+		if len(g.pendingRevokes[spawnID]) == 0 {
+			delete(g.pendingRevokes, spawnID)
+		}
+	}
+}
+
+func (g *GenerationKeyManager) markPendingRevokeLocked(spawnID string, gen uint64) {
+	if g.pendingRevokes[spawnID] == nil {
+		g.pendingRevokes[spawnID] = map[uint64]bool{}
+	}
+	g.pendingRevokes[spawnID][gen] = true
 }
 
 func (g *GenerationKeyManager) generations(spawnID string) []uint64 {

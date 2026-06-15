@@ -347,6 +347,39 @@ func TestForkBarrierQueuesPromptUntilRelease(t *testing.T) {
 	}
 }
 
+func TestForkBarrierPromptQueueOverflowIsExplicitlyRejected(t *testing.T) {
+	p := newTestPump()
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	barrier := forkIngressBarrier{sourceGeneration: 9, transferSetID: "ts-1"}
+	if !p.tryAcquireForkBarrier(barrier) {
+		t.Fatal("fork barrier acquire failed")
+	}
+	p.mu.Lock()
+	for i := 0; i < maxQueued; i++ {
+		p.queue = append(p.queue, fmt.Sprintf("queued-%d", i))
+	}
+	p.mu.Unlock()
+
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "overflow"}))
+
+	a.waitLen(t, 1)
+	frames := a.frames()
+	if len(frames) == 0 {
+		t.Fatal("overflow prompt during fork barrier must emit an explicit rejection frame")
+	}
+	last := frames[len(frames)-1]
+	if last.Kind != "turn" || last.Error == nil || last.Error.Message == "" {
+		t.Fatalf("overflow prompt rejection frame = %+v, want turn error", last)
+	}
+	p.mu.Lock()
+	queueLen := len(p.queue)
+	p.mu.Unlock()
+	if queueLen != maxQueued {
+		t.Fatalf("overflow prompt must not exceed queue cap: queueLen=%d max=%d", queueLen, maxQueued)
+	}
+}
+
 func TestStopUnblocksReadLoop(t *testing.T) {
 	gooseInR, gooseInW := io.Pipe()
 	gooseOutR, gooseOutW := io.Pipe()
