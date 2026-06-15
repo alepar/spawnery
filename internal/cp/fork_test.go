@@ -460,6 +460,103 @@ func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
 	}
 }
 
+func TestForkSpawnRejectsNodeLocalCrossNodeBeforeCreatingForkRow(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	seedNodeLocalAppVersion(t, s)
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	reg.Add(&registry.Node{
+		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
+		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
+	})
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	mat := &recordingForkMaterializer{nodeID: "node-2"}
+	s.forkMaterializer = mat
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{
+		SpawnId:      "sp-source",
+		TargetNodeId: "node-2",
+	}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("ForkSpawn node-local cross-node = %v, want FailedPrecondition", err)
+	}
+	if len(mat.calls) != 0 {
+		t.Fatalf("materializer calls=%d, want 0 when durability guard rejects", len(mat.calls))
+	}
+	spawns, err := s.st.Spawns().ListByOwner(ctx, "alice")
+	if err != nil {
+		t.Fatalf("ListByOwner: %v", err)
+	}
+	if len(spawns) != 1 || spawns[0].ID != "sp-source" {
+		t.Fatalf("fork row should not be created after guard reject, spawns=%+v", spawns)
+	}
+	source, err := s.st.Spawns().Get(ctx, "sp-source")
+	if err != nil {
+		t.Fatalf("Get source: %v", err)
+	}
+	if source.Status != store.Active {
+		t.Fatalf("source status=%s want active after guard reject", source.Status)
+	}
+}
+
+func TestForkSpawnCrossNodeRecordsTransferSetAndMarksForkDeliveryPending(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sealKey(t, s, "sp-source", "main")
+	targetSender := &capSender{}
+	stopAck := goAckStarts(s, targetSender)
+	defer stopAck()
+	reg.Add(&registry.Node{
+		ID: "node-2", Sender: targetSender, Max: 4, Free: 4, Class: "cloud",
+		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
+	})
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	s.forkMaterializer = &recordingForkMaterializer{nodeID: "node-2", rootfsPins: []store.RootfsArtifactPin{{
+		ArtifactID:      "rootfs-fork-gen1",
+		Generation:      1,
+		Sequence:        1,
+		BaseImageDigest: "sha256:base",
+		Format:          "oci_layout",
+	}}}
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{
+		SpawnId:      "sp-source",
+		TargetNodeId: "node-2",
+	}))
+	if err != nil {
+		t.Fatalf("ForkSpawn: %v", err)
+	}
+	ts, err := s.st.TransferSets().Get(ctx, resp.Msg.TransferSetId)
+	if err != nil {
+		t.Fatalf("Get transfer set: %v", err)
+	}
+	if ts.Kind != store.TransferSetFork || ts.SpawnID != resp.Msg.ForkSpawnId ||
+		ts.SourceSpawnID != "sp-source" || ts.ForkSpawnID != resp.Msg.ForkSpawnId {
+		t.Fatalf("fork transfer set ids = %+v", ts)
+	}
+	if ts.SourceNodeID != "node-1" || ts.TargetNodeID != "node-2" ||
+		ts.SourceGeneration != 1 || ts.TargetGeneration != 1 {
+		t.Fatalf("fork transfer set route/generation = %+v", ts)
+	}
+	if ts.TransferKeyStatus != store.TransferKeyTargetReady {
+		t.Fatalf("cross-node fork transfer key status = %s, want %s", ts.TransferKeyStatus, store.TransferKeyTargetReady)
+	}
+	if !s.deliveryPending.isPending(resp.Msg.ForkSpawnId) {
+		t.Fatal("cross-node fork must mark the fork spawn delivery-pending")
+	}
+	if s.deliveryPending.isPending("sp-source") {
+		t.Fatal("cross-node fork must not mark the source spawn delivery-pending")
+	}
+	start := targetSender.firstStart()
+	if start == nil || start.GetSpawnId() != resp.Msg.ForkSpawnId {
+		t.Fatalf("target StartSpawn = %+v, want fork %s", start, resp.Msg.ForkSpawnId)
+	}
+	if start.GetRootfsArtifactsLocalOnly() {
+		t.Fatal("cross-node fork StartSpawn.RootfsArtifactsLocalOnly = true, want false")
+	}
+}
+
 func TestForkSpawnReleasesTurnBoundaryWhenSetForkingFails(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	s.forkFootprintEstimator = staticForkFootprint(100)
@@ -546,6 +643,12 @@ func TestForkSpawnSameNodeStartsFromLocalForkDeltaWithRootfsMetadata(t *testing.
 	}
 	if len(ts.RootfsArtifactPins) != 1 || ts.RootfsArtifactPins[0].ArtifactID != "rootfs-fork-gen1" {
 		t.Fatalf("transfer set should still record fork rootfs artifact pins, got %+v", ts.RootfsArtifactPins)
+	}
+	if ts.TransferKeyStatus != store.TransferKeySourceReady {
+		t.Fatalf("same-node fork transfer key status = %s, want %s", ts.TransferKeyStatus, store.TransferKeySourceReady)
+	}
+	if s.deliveryPending.isPending(resp.Msg.ForkSpawnId) {
+		t.Fatal("same-node fork must not mark journal-key delivery pending")
 	}
 }
 

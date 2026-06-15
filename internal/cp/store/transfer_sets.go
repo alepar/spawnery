@@ -80,6 +80,32 @@ func (r *transferSetRepo) Get(ctx context.Context, id string) (TransferSet, erro
 	return ts, nil
 }
 
+func (r *transferSetRepo) GetPendingForkByForkSpawnID(ctx context.Context, forkSpawnID string) (TransferSet, error) {
+	var ts TransferSet
+	err := r.db.NewSelect().Model(&ts).
+		Where("kind = ?", TransferSetFork).
+		Where("fork_spawn_id = ?", forkSpawnID).
+		Where("status IN (?)", bun.In([]TransferSetStatus{
+			TransferSetPending,
+			TransferSetCapturing,
+			TransferSetKeyDeliveryPending,
+			TransferSetRestoring,
+		})).
+		Order("created_at DESC", "id DESC").
+		Limit(1).
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TransferSet{}, ErrNotFound
+	}
+	if err != nil {
+		return TransferSet{}, err
+	}
+	if err := decodeTransferSetPins(&ts); err != nil {
+		return TransferSet{}, err
+	}
+	return ts, nil
+}
+
 func (r *transferSetRepo) ListFailedForks(ctx context.Context) ([]TransferSet, error) {
 	return r.listForks(ctx, func(q *bun.SelectQuery) *bun.SelectQuery {
 		return q.Where("mts.status = ?", TransferSetFailed)
