@@ -97,7 +97,10 @@ type Spawn struct {
 	BaseImageDigest string `bun:"base_image_digest,notnull"`
 	// ProfileID records which profile was applied at create time (sp-nrzf.3.8/3.9).
 	// Empty string for spawns created without a profile.
-	ProfileID   string  `bun:"profile_id,notnull"`
+	ProfileID string `bun:"profile_id,notnull"`
+	// ProfileVersion is the profile's CAS version at create time — the snapshot pin (sp-nrzf.3.8 §9).
+	// 0 for spawns created without a profile.
+	ProfileVersion uint64 `bun:"profile_version,notnull"`
 	CreatedAt   int64   `bun:"created_at,notnull"`
 	LastUsedAt  int64   `bun:"last_used_at,notnull"`
 	SuspendedAt *int64  `bun:"suspended_at"`
