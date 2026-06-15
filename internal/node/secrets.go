@@ -296,6 +296,14 @@ func (a *attacher) consumeStartupSecrets(ctx context.Context, spawnID string, ge
 	if len(secrets) == 0 {
 		return nil
 	}
+	seenSecretIDs := make(map[string]struct{}, len(secrets))
+	for _, sec := range secrets {
+		secretID := sec.GetSecretId()
+		if _, ok := seenSecretIDs[secretID]; ok {
+			return fmt.Errorf("startup secret delivery for %s: duplicate secret_id %q", spawnID, secretID)
+		}
+		seenSecretIDs[secretID] = struct{}{}
+	}
 	if a.cfg.SubKeys == nil {
 		return fmt.Errorf("startup secret delivery for %s: node has no HPKE sub-key holder", spawnID)
 	}

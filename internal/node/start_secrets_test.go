@@ -148,6 +148,50 @@ func TestConsumeStartupSecretsDoesNotConsumeBeforeBatchOpenSucceeds(t *testing.T
 	}
 }
 
+func TestConsumeStartupSecretsRejectsDuplicateSecretIDsBeforeOpening(t *testing.T) {
+	tests := []struct {
+		name     string
+		secretID string
+	}{
+		{name: "non-empty", secretID: "GITHUB_TOKEN"},
+		{name: "empty", secretID: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const nodeID, gen = "node-1", uint64(15)
+			spawnID := "sp-start-duplicate-" + tt.name
+			holder := startupSecretHolder(t, nodeID)
+			a := startupSecretAttacher(t, &scriptedPodBackend{}, &fakeCPStream{}, nodeID, holder, t.TempDir())
+			first := sealSecret(t, holder, spawnID, gen, "legacy/first", tt.secretID, 1, "startup-dup-secret-first-"+tt.name, []byte("first"))
+			second := sealSecret(t, holder, spawnID, gen, "legacy/second", tt.secretID, 1, "startup-dup-secret-second-"+tt.name, []byte("second"))
+
+			injectCalls := 0
+			inject := func(target string, plaintext []byte) (string, error) {
+				injectCalls++
+				return target, nil
+			}
+
+			errc := make(chan error, 1)
+			go func() {
+				errc <- a.consumeStartupSecrets(context.Background(), spawnID, gen, []*nodev1.SealedSecret{first, second}, nil, inject, "", "")
+			}()
+
+			select {
+			case err := <-errc:
+				if err == nil {
+					t.Fatal("consumeStartupSecrets returned nil, want duplicate secret_id error")
+				}
+			case <-time.After(200 * time.Millisecond):
+				t.Fatal("consumeStartupSecrets hung on duplicate startup secret_id")
+			}
+			if injectCalls != 0 {
+				t.Fatalf("inject calls = %d, want 0", injectCalls)
+			}
+		})
+	}
+}
+
 func TestStartSpawnRejectsDuplicateStartupSecretRoutes(t *testing.T) {
 	const nodeID, spawnID, gen = "node-1", "sp-start-dup-route", uint64(13)
 	holder := startupSecretHolder(t, nodeID)
