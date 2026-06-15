@@ -7,6 +7,7 @@ describe("asNodeRevocationChecker", () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ revoked_node_ids: ["node-b"] }), { status: 200 }));
     const checker = asNodeRevocationChecker({ fetcher });
     await expect(checker.check("node-a")).resolves.toBeUndefined();
+    expect(fetcher).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ cache: "no-store" }));
   });
 
   it("rejects revoked nodes", async () => {

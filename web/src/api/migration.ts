@@ -436,6 +436,9 @@ export async function runMigrate(
       now,
       checker,
     );
+    if (verified.identity.nodeId !== resolvedNodeId) {
+      throw new Error(`verified node ${JSON.stringify(verified.identity.nodeId)} does not match resolved node ${JSON.stringify(resolvedNodeId)}`);
+    }
     hpkePub = verified.hpkePub;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

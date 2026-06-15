@@ -150,7 +150,7 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 	for _, e := range entries {
 		version := nk.Msg.Generation
 		deliveryID := genDeliveryID()
-		sealedJSON, rerr := resealJournalKey(e.Ciphertext, dev, sk, nk.Msg.NodeCertChain, opts.RootPEM, expect, revoked, spawnID, nk.Msg.Generation, version, deliveryID, now)
+		sealedJSON, rerr := resealJournalKey(e.Ciphertext, dev, sk, nk.Msg.NodeCertChain, opts.RootPEM, expect, revoked, mr.Msg.NodeId, spawnID, nk.Msg.Generation, version, deliveryID, now)
 		if rerr != nil {
 			return fmt.Errorf("reseal journal key for mount %q: %w", e.Mount, rerr)
 		}
@@ -175,10 +175,9 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 // resealJournalKey unseals an owner-sealed envelope with the device key and re-seals the recovered
 // journal password to the target node's HPKE sub-key under the in-flight AAD, returning the JSON
 // seal.NodeSealed the CP relays. When the CP relayed a node cert chain (enforced/prod mode), the
-// chain+sub-key are NOT yet PKI-verified here — full verification (pinned root + SAN/tenancy +
-// revocation, via subkey.SealForNode) lands with the production delivery wiring; in dev/insecure mode
-// the chain is empty and the relayed sub-key's HPKE pubkey is used directly.
-func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKey, certChain []byte, rootPEM []byte, expect subkey.Expectation, revoked subkey.RevocationChecker, spawnID string, generation uint64, version uint64, deliveryID string, now time.Time) ([]byte, error) {
+// chain+sub-key are PKI-verified, revocation-checked, and compared against the CP-resolved node id;
+// in dev/insecure mode the chain is empty and the relayed sub-key's HPKE pubkey is used directly.
+func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKey, certChain []byte, rootPEM []byte, expect subkey.Expectation, revoked subkey.RevocationChecker, expectedNodeID string, spawnID string, generation uint64, version uint64, deliveryID string, now time.Time) ([]byte, error) {
 	var env seal.Envelope
 	if err := json.Unmarshal(ciphertext, &env); err != nil {
 		return nil, fmt.Errorf("ciphertext is not a valid owner-sealed envelope: %w", err)
@@ -205,7 +204,16 @@ func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKe
 	if err != nil {
 		return nil, err
 	}
-	sealed, err := subkey.SealForNode(&env, dev.X25519Priv, leafPEM, chainPEM, rootPEM, sk, expect, revoked, aad, now)
+	hpkePub, id, err := subkey.VerifyNodeForSealing(leafPEM, chainPEM, rootPEM, sk, expect, revoked, now)
+	if err != nil {
+		return nil, err
+	}
+	if id.NodeID != expectedNodeID {
+		return nil, fmt.Errorf("verified node %q does not match resolved node %q", id.NodeID, expectedNodeID)
+	}
+	aad.NodeID = id.NodeID
+	aad.NotAfter = sk.NotAfter
+	sealed, err := seal.ReSealToNode(&env, dev.X25519Priv, hpkePub, aad)
 	if err != nil {
 		return nil, err
 	}

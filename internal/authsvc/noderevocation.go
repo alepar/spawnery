@@ -6,6 +6,7 @@ import (
 )
 
 func (s *Service) serveNodeRevocations(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	rows, err := s.nodeRevocations.List(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "node revocations unavailable")

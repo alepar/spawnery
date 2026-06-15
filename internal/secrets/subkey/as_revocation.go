@@ -13,7 +13,10 @@ import (
 	"spawnery/internal/pki"
 )
 
-const maxNodeRevocationResponseBytes = 1 << 20
+const (
+	maxNodeRevocationResponseBytes = 1 << 20
+	defaultASRevocationTimeout     = 10 * time.Second
+)
 
 type ASRevocationChecker struct {
 	url    string
@@ -28,7 +31,7 @@ type ASRevocationChecker struct {
 
 func NewASRevocationChecker(url string, client *http.Client, ttl time.Duration) *ASRevocationChecker {
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: defaultASRevocationTimeout}
 	}
 	return &ASRevocationChecker{
 		url:    url,
@@ -92,6 +95,13 @@ func (c *ASRevocationChecker) fetch() (map[string]struct{}, error) {
 	}
 	if body.RevokedNodeIDs == nil {
 		return nil, errors.New("subkey: malformed node revocation response: revoked_node_ids missing or null")
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("subkey: malformed node revocation response: trailing JSON value")
+		}
+		return nil, fmt.Errorf("subkey: malformed node revocation response: trailing data: %w", err)
 	}
 
 	out := make(map[string]struct{}, len(*body.RevokedNodeIDs))

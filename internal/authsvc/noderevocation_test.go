@@ -60,6 +60,9 @@ func TestNodeRevocationsEndpointReturnsSortedList(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
 
 	var body struct {
 		RevokedNodeIDs []string `json:"revoked_node_ids"`

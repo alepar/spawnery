@@ -50,7 +50,10 @@ describe("runMigrate", () => {
 
     openEnvelopeMock.mockResolvedValue(new Uint8Array([9, 9, 9]));
     hpkeSealMock.mockResolvedValue({ enc: "sealed-enc", ct: "sealed-ct" });
-    verifyNodeForSealingMock.mockResolvedValue({ hpkePub: new Uint8Array([4, 5, 6]) });
+    verifyNodeForSealingMock.mockResolvedValue({
+      hpkePub: new Uint8Array([4, 5, 6]),
+      identity: { nodeId: "node-a", accountId: "acct-1", nodeClass: "self-hosted" },
+    });
   });
 
   afterEach(() => {
@@ -173,5 +176,43 @@ describe("runMigrate", () => {
       "root-pem",
       new Date("2026-06-15T00:00:00Z"),
     )).rejects.toMatchObject({ leg: "delivery" });
+  });
+
+  it("fails delivery when verified node identity differs from the resolved node", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ revoked_node_ids: [] }), { status: 200 })));
+    verifyNodeForSealingMock.mockResolvedValue({
+      hpkePub: new Uint8Array([4, 5, 6]),
+      identity: { nodeId: "node-c", accountId: "acct-1", nodeClass: "self-hosted" },
+    });
+    unaryMock.mockImplementation(async (method: string) => {
+      switch (method) {
+        case "GetJournalKeyCiphertext":
+          return {
+            entries: [{
+              mount: "main",
+              ciphertext: b64(JSON.stringify({ recipients: [], nonce: "", ct: "" })),
+            }],
+          };
+        case "MigrateSpawn":
+          return { nodeId: "node-b", transferSetId: "ts-1" };
+        case "GetSpawnNodeKey":
+          return {
+            nodeCertChain: b64("chain-pem"),
+            signedSubkey: b64(JSON.stringify({ node_id: "node-c", not_after: "2030-01-01T00:00:00Z" })),
+            generation: "7",
+          };
+        default:
+          throw new Error(`unexpected RPC ${method}`);
+      }
+    });
+
+    await expect(runMigrate(
+      "sp1",
+      { nodeId: "node-b", class: "self-hosted" },
+      { x25519Public: {} as CryptoKey, x25519Private: {} as CryptoKey },
+      "root-pem",
+      new Date("2026-06-15T00:00:00Z"),
+    )).rejects.toMatchObject({ leg: "delivery" });
+    expect(unaryMock.mock.calls.some(([method]) => method === "DeliverSecrets")).toBe(false);
   });
 });

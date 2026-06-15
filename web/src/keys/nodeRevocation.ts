@@ -25,6 +25,7 @@ export function asNodeRevocationChecker(opts: Options = {}): RevocationChecker {
     if (!inFlight) {
       inFlight = fetcher(url, {
         method: "GET",
+        cache: "no-store",
         headers: { Accept: "application/json" },
       }).then(async (res) => {
         if (!res.ok) throw new Error(`revocation list unavailable: AS returned ${res.status}`);

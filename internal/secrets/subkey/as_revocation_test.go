@@ -76,6 +76,20 @@ func TestASRevocationCheckerFailsClosedOnMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestASRevocationCheckerFailsClosedOnTrailingJSONGarbage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"revoked_node_ids":[]} junk`))
+	}))
+	defer srv.Close()
+
+	c := subkey.NewASRevocationChecker(srv.URL+"/node-revocations", srv.Client(), 0)
+	_, err := c.IsRevoked(pki.Identity{NodeID: "node-a"})
+	if err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestASRevocationCheckerFailsClosedOnMissingOrNullRevokedNodeIDs(t *testing.T) {
 	for _, body := range []string{`{}`, `{"revoked_node_ids":null}`} {
 		t.Run(body, func(t *testing.T) {
