@@ -22,6 +22,7 @@ func newOpencodeEmitter(xdgConfigHome string) opencodeEmitter {
 				ConfigFormat:        FormatJSONC,
 				SchemaVersion:       "opencode-1.15",
 				ForbiddenConfigKeys: []string{"model", "permission"},
+				InstructionsPath:    filepath.Join(configRoot, "profile-instructions.md"),
 			},
 		},
 	}

@@ -35,6 +35,9 @@ type AgentLayout struct {
 	// RulesDir is the directory where codex execpolicy rules are written.
 	// Empty for agents that do not use an execpolicy rules file.
 	RulesDir string
+	// InstructionsPath is the dedicated managed-instructions file ("" = no-op).
+	// Written on every Apply when config.instructions is non-empty (replace-on-apply).
+	InstructionsPath string
 }
 
 // Options holds runtime options passed to each emitter method.

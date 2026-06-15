@@ -23,6 +23,7 @@ func newCodexEmitter(codexHome string) codexEmitter {
 				SchemaVersion:       "codex-0.139",
 				ForbiddenConfigKeys: []string{"model", "approval_policy", "sandbox_mode", "sandbox_workspace_write"},
 				RulesDir:            filepath.Join(codexHome, "rules"),
+				InstructionsPath:    filepath.Join(codexHome, "profile-instructions.md"),
 			},
 		},
 	}

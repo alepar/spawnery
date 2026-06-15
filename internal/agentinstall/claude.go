@@ -21,6 +21,7 @@ func newClaudeEmitter(homeDir string) claudeEmitter {
 				ConfigFormat:        FormatJSON,
 				SchemaVersion:       "claude-2.1",
 				ForbiddenConfigKeys: []string{"model", "permissions"},
+				InstructionsPath:    filepath.Join(configRoot, "profile-instructions.md"),
 			},
 		},
 	}
