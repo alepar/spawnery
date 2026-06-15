@@ -62,6 +62,14 @@ type Options struct {
 	// A zero value disables the wait (single-check fallthrough to the emitter, which
 	// will return StatusFailed if the file is absent).
 	SecretWaitTimeout time.Duration
+	// ProfileID and ProfileVersion stamp managed.json provenance entries.
+	// May be empty for standalone CLI use (entries are still written without them).
+	ProfileID      string
+	ProfileVersion string
+	// ManagedIndexPath, when non-empty, is the path to the ~/.spawnery/managed.json
+	// provenance index to upsert after a successful apply.
+	// Empty disables index writing (existing tests and standalone install use).
+	ManagedIndexPath string
 }
 
 // Emitter installs or applies a single canonical Artifact into an agent's native config.

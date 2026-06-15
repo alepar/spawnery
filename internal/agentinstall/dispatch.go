@@ -14,6 +14,7 @@ import (
 //   - Per-item skip/failure does NOT fail the run; only catastrophic IO errors are returned.
 func Apply(reg Registry, m Manifest, opts Options, env Environ) Result {
 	var reports []Report
+	var prov []ManagedEntry
 
 	for _, artifact := range m.Artifacts {
 		targets := resolveTargets(artifact.Targets, reg, env)
@@ -31,8 +32,21 @@ func Apply(reg Registry, m Manifest, opts Options, env Environ) Result {
 				}
 			default:
 				report = dispatchArtifact(target.emitter, artifact, opts)
+				if report.Status == StatusApplied {
+					prov = append(prov, provenanceEntries(target.emitter.Layout(), artifact, opts.ProfileID, opts.ProfileVersion)...)
+				}
 			}
 			reports = append(reports, report)
+		}
+	}
+
+	if opts.ManagedIndexPath != "" {
+		if err := WriteManagedIndex(opts.ManagedIndexPath, prov); err != nil {
+			reports = append(reports, Report{
+				Kind:   Kind("managed-index"),
+				Status: StatusFailed,
+				Reason: err.Error(),
+			})
 		}
 	}
 
@@ -92,6 +106,7 @@ func ApplyFiltered(reg Registry, m Manifest, opts Options, env Environ, agentFil
 	}
 
 	var reports []Report
+	var prov []ManagedEntry
 
 	emitter, emitterOk := reg.Lookup(agentFilter)
 
@@ -126,7 +141,21 @@ func ApplyFiltered(reg Registry, m Manifest, opts Options, env Environ, agentFil
 			}
 		}
 
-		reports = append(reports, dispatchArtifact(emitter, artifact, opts))
+		report := dispatchArtifact(emitter, artifact, opts)
+		if report.Status == StatusApplied {
+			prov = append(prov, provenanceEntries(emitter.Layout(), artifact, opts.ProfileID, opts.ProfileVersion)...)
+		}
+		reports = append(reports, report)
+	}
+
+	if opts.ManagedIndexPath != "" {
+		if err := WriteManagedIndex(opts.ManagedIndexPath, prov); err != nil {
+			reports = append(reports, Report{
+				Kind:   Kind("managed-index"),
+				Status: StatusFailed,
+				Reason: err.Error(),
+			})
+		}
 	}
 
 	return Result{Reports: reports}
