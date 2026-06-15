@@ -61,6 +61,9 @@ type ConfigPayload struct {
 	Normalized map[string]interface{} `json:"normalized,omitempty"`
 	// Native is agent-specific passthrough fragments keyed by agent name.
 	Native map[string]interface{} `json:"native,omitempty"`
+	// Instructions is a content blob written to a DEDICATED per-agent managed file
+	// (replace-on-apply); never appended to CLAUDE.md/AGENTS.md memory.
+	Instructions string `json:"instructions,omitempty"`
 }
 
 // PluginPayload is the plugin artifact payload (local / image-baked install).

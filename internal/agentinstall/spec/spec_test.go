@@ -111,6 +111,25 @@ func TestLoadManifestMissingFile(t *testing.T) {
 	}
 }
 
+func TestConfigPayloadInstructionsRoundTrip(t *testing.T) {
+	a := spec.Artifact{Kind: spec.KindConfig, Name: "c", Targets: []string{"claude"},
+		Config: &spec.ConfigPayload{Instructions: "Always be terse."}}
+	data, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"instructions":"Always be terse."`) {
+		t.Fatalf("instructions not serialized: %s", data)
+	}
+	var a2 spec.Artifact
+	if err := json.Unmarshal(data, &a2); err != nil {
+		t.Fatal(err)
+	}
+	if a2.Config == nil || a2.Config.Instructions != "Always be terse." {
+		t.Fatalf("instructions not round-tripped: %+v", a2.Config)
+	}
+}
+
 func writeManifest(t *testing.T, dir, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(content), 0o600); err != nil {
