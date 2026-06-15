@@ -10,6 +10,7 @@ import {
   type AppManifest,
 } from "@/api/catalog";
 import { listAgentImages, type AgentImageView } from "@/api/spawnlet";
+import { ProfileSelect } from "@/views/profiles/ProfileSelect";
 
 export function Detail({
   id,
@@ -18,7 +19,7 @@ export function Detail({
 }: {
   id: string;
   onBack: () => void;
-  onSpawn?: (appId: string, image?: string, runnableId?: string) => void;
+  onSpawn?: (appId: string, image?: string, runnableId?: string, profileId?: string) => void;
 }) {
   const [app, setApp] = useState<AppSummary | null>(null);
   const [versions, setVersions] = useState<AppVersionSummary[]>([]);
@@ -28,6 +29,7 @@ export function Detail({
   const [images, setImages] = useState<AgentImageView[]>([]);
   const [imageIdx, setImageIdx] = useState(0);
   const [runnableId, setRunnableId] = useState("");
+  const [profileId, setProfileId] = useState("");
 
   useEffect(() => {
     listAgentImages().then((imgs) => {
@@ -107,7 +109,8 @@ export function Detail({
               </select>
             </div>
           )}
-          <Button data-testid="spawn-btn" onClick={() => onSpawn?.(id, selImage?.image ?? "", runnableId)}>
+          <ProfileSelect value={profileId} onChange={setProfileId} />
+          <Button data-testid="spawn-btn" onClick={() => onSpawn?.(id, selImage?.image ?? "", runnableId, profileId)}>
             Spawn
           </Button>
         </div>

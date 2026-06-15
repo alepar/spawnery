@@ -22,7 +22,7 @@ function navToTab(section: Nav["section"]): Tab {
 export function TemplatesView({ nav, navigate, onSpawn }: {
   nav: Nav;
   navigate: (nav: Nav) => void;
-  onSpawn?: (appId: string, image?: string, runnableId?: string) => void;
+  onSpawn?: (appId: string, image?: string, runnableId?: string, profileId?: string) => void;
 }) {
   const tab = navToTab(nav.section);
 

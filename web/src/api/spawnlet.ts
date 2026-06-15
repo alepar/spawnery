@@ -59,8 +59,8 @@ export function spawnLifecycleAction(status: SpawnStatus, transitionPhase?: stri
   }
 }
 
-export async function createSpawn(appId: string, model: string, image = "", runnableId = ""): Promise<string> {
-  const r = await unary<{ spawnId: string }>("CreateSpawn", { appId, model, image, runnableId });
+export async function createSpawn(appId: string, model: string, image = "", runnableId = "", profileId = ""): Promise<string> {
+  const r = await unary<{ spawnId: string }>("CreateSpawn", { appId, model, image, runnableId, profileId });
   const spawnId = r.spawnId;
   // In auth-enabled mode, kick off the intent signing concurrently (the CP blocks on it).
   if (authEnabled()) {

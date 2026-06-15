@@ -19,6 +19,7 @@ export interface SpawnActions {
 // Templates surface (browse/app-detail/my-apps/publish); "Settings" only for the settings section.
 const NAV: { id: string; label: string; target: Nav; sections: Nav["section"][] }[] = [
   { id: "templates", label: "Templates", target: { section: "templates" }, sections: ["templates", "app", "my-apps", "publish"] },
+  { id: "profiles", label: "Profiles", target: { section: "profiles" }, sections: ["profiles"] },
   { id: "settings", label: "Settings", target: { section: "settings" }, sections: ["settings"] },
 ];
 

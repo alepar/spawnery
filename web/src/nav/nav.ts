@@ -5,7 +5,8 @@ export type Nav =
   | { section: "my-apps" }
   | { section: "publish" }
   | { section: "spawn"; spawnId: string }
-  | { section: "settings" };
+  | { section: "settings" }
+  | { section: "profiles" };
 
 const TEMPLATES: Nav = { section: "templates" };
 
@@ -27,6 +28,7 @@ export function pathToNav(raw: string): Nav {
     case "my-apps":   return { section: "my-apps" };
     case "publish":   return { section: "publish" };
     case "settings":  return { section: "settings" };
+    case "profiles":  return { section: "profiles" };
     case "spawn":
       if (parts.length === 2) return { section: "spawn", spawnId: decodeURIComponent(parts[1]) };
       return TEMPLATES;
@@ -44,5 +46,6 @@ export function navToPath(nav: Nav): string {
     case "publish":   return "/publish";
     case "spawn":     return `/spawn/${encodeURIComponent(nav.spawnId)}`;
     case "settings":  return "/settings";
+    case "profiles":  return "/profiles";
   }
 }

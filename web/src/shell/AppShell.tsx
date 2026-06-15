@@ -3,20 +3,22 @@ import { Sidebar, type SpawnActions } from "./Sidebar";
 import { SpawnTabs } from "@/sessions/SpawnTabs";
 import { TemplatesView } from "@/views/TemplatesView";
 import { SettingsView } from "@/views/SettingsView";
+import { ProfilesView } from "@/views/ProfilesView";
 import type { SpawnView } from "@/api/spawnlet";
 import type { Nav } from "@/nav/nav";
 
 // The top-level pane is derived from nav (the URL is authoritative). spawn -> chat; settings ->
-// settings; the whole Templates surface (templates/app/my-apps/publish) -> templates.
-type TopView = "chat" | "templates" | "settings";
+// settings; profiles -> profiles; the whole Templates surface (templates/app/my-apps/publish) -> templates.
+type TopView = "chat" | "templates" | "settings" | "profiles";
 function topView(section: Nav["section"]): TopView {
   if (section === "spawn") return "chat";
   if (section === "settings") return "settings";
+  if (section === "profiles") return "profiles";
   return "templates";
 }
 
 export function AppShell({ onSpawnApp, spawns = [], activeId, actions, nav, navigate }: {
-  onSpawnApp: (appId: string, image?: string, runnableId?: string) => void;
+  onSpawnApp: (appId: string, image?: string, runnableId?: string, profileId?: string) => void;
   spawns?: SpawnView[];
   activeId?: string | null;
   actions?: SpawnActions;
@@ -27,7 +29,11 @@ export function AppShell({ onSpawnApp, spawns = [], activeId, actions, nav, navi
 }) {
   const view = topView(nav.section);
   const activeSpawn = spawns.find((s) => s.spawnId === activeId);
-  const headerLabel = view === "templates" ? "Templates" : view === "settings" ? "Settings" : activeSpawn?.name || "Chat";
+  const headerLabel =
+    view === "templates" ? "Templates" :
+    view === "settings" ? "Settings" :
+    view === "profiles" ? "Profiles" :
+    activeSpawn?.name || "Chat";
   return (
     <div className="flex h-screen bg-background text-foreground">
       <Sidebar nav={nav} navigate={navigate} spawns={spawns} actions={actions} />
@@ -45,6 +51,7 @@ export function AppShell({ onSpawnApp, spawns = [], activeId, actions, nav, navi
           )}
           {view === "templates" && <TemplatesView nav={nav} navigate={navigate} onSpawn={onSpawnApp} />}
           {view === "settings" && <SettingsView />}
+          {view === "profiles" && <ProfilesView />}
         </main>
       </div>
       <Toaster theme={typeof document !== "undefined" && document.documentElement.classList.contains("dark") ? "dark" : "light"} />

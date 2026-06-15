@@ -11,6 +11,7 @@ describe("pathToNav", () => {
   it('/publish -> publish', () => expect(pathToNav("/publish")).toEqual({ section: "publish" }));
   it('/spawn/<spawnId> -> spawn', () => expect(pathToNav("/spawn/abc123")).toEqual({ section: "spawn", spawnId: "abc123" }));
   it('/settings -> settings', () => expect(pathToNav("/settings")).toEqual({ section: "settings" }));
+  it('/profiles -> profiles', () => expect(pathToNav("/profiles")).toEqual({ section: "profiles" }));
   it('unknown path -> templates', () => expect(pathToNav("/not-a-known-route")).toEqual({ section: "templates" }));
   it('another unknown path -> templates', () => expect(pathToNav("/foo/bar/baz")).toEqual({ section: "templates" }));
 
@@ -34,6 +35,7 @@ describe("navToPath", () => {
   it('publish -> /publish', () => expect(navToPath({ section: "publish" })).toBe("/publish"));
   it('spawn -> /spawn/<spawnId>', () => expect(navToPath({ section: "spawn", spawnId: "abc123" })).toBe("/spawn/abc123"));
   it('settings -> /settings', () => expect(navToPath({ section: "settings" })).toBe("/settings"));
+  it('profiles -> /profiles', () => expect(navToPath({ section: "profiles" })).toBe("/profiles"));
 
   it('URL-encodes appId with special chars', () =>
     expect(navToPath({ section: "app", appId: "hello world" })).toBe("/templates/hello%20world"));
@@ -53,6 +55,7 @@ describe("round-trip: pathToNav(navToPath(nav)) === nav", () => {
     { section: "spawn", spawnId: "abc123" },
     { section: "spawn", spawnId: "sp/abc" },   // id needing encoding
     { section: "settings" },
+    { section: "profiles" },
   ];
 
   for (const nav of cases) {

@@ -20,6 +20,10 @@ vi.mock("@/api/spawnlet", () => ({
   ]),
 }));
 
+vi.mock("@/api/profiles", () => ({
+  listProfiles: vi.fn().mockResolvedValue([]),
+}));
+
 import { Detail } from "./Detail";
 
 describe("Detail", () => {
@@ -30,7 +34,7 @@ describe("Detail", () => {
     expect(screen.getByText("a wiki")).toBeInTheDocument();
     expect(screen.getByText("1.0.0")).toBeInTheDocument();
     await userEvent.click(screen.getByTestId("spawn-btn"));
-    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-acp");
+    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-acp", "");
   });
 
   it("shows the agent selector and spawns with the chosen runnable", async () => {
@@ -39,7 +43,7 @@ describe("Detail", () => {
     await waitFor(() => screen.getByTestId("runnable-select"));
     await userEvent.selectOptions(screen.getByTestId("runnable-select"), "goose-tui");
     await userEvent.click(screen.getByTestId("spawn-btn"));
-    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-tui");
+    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-tui", "");
   });
 
   it("sets document.title to the app's human title once loaded", async () => {

@@ -150,11 +150,16 @@ describe("createSpawn", () => {
     const calls = mockFetch({ spawnId: "sp1" });
     const id = await createSpawn("spawnery/wiki", "m", "img:1", "goose-acp");
     expect(id).toBe("sp1");
-    expect(calls[0].body).toEqual({ appId: "spawnery/wiki", model: "m", image: "img:1", runnableId: "goose-acp" });
+    expect(calls[0].body).toEqual({ appId: "spawnery/wiki", model: "m", image: "img:1", runnableId: "goose-acp", profileId: "" });
   });
   it("defaults selection to empty (legacy)", async () => {
     const calls = mockFetch({ spawnId: "sp2" });
     await createSpawn("spawnery/wiki", "m");
-    expect(calls[0].body).toEqual({ appId: "spawnery/wiki", model: "m", image: "", runnableId: "" });
+    expect(calls[0].body).toEqual({ appId: "spawnery/wiki", model: "m", image: "", runnableId: "", profileId: "" });
+  });
+  it("sends profileId when provided", async () => {
+    const calls = mockFetch({ spawnId: "sp3" });
+    await createSpawn("spawnery/wiki", "m", "img:1", "goose-acp", "prof-1");
+    expect(calls[0].body).toEqual({ appId: "spawnery/wiki", model: "m", image: "img:1", runnableId: "goose-acp", profileId: "prof-1" });
   });
 });

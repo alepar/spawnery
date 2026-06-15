@@ -25,6 +25,7 @@ function sectionLabel(section: Nav["section"]): string {
     case "my-apps":   return "My Apps";
     case "publish":   return "Publish";
     case "settings":  return "Settings";
+    case "profiles":  return "Profiles";
     case "app":       return ""; // caller substitutes appId
     case "spawn":     return ""; // caller substitutes the spawn name
   }
@@ -110,7 +111,7 @@ function AppMain() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const spawnApp = async (appId: string, image = "", runnableId = "") => {
+  const spawnApp = async (appId: string, image = "", runnableId = "", profileId = "") => {
     // Detach the previous spawn synchronously so the keyed SpawnTabs unmounts (tearing down its
     // sockets) before the new spawn arrives. The poll can't reopen the previous spawn while activeId
     // is null.
@@ -118,7 +119,7 @@ function AppMain() {
     activeIdRef.current = null;
     waiting(); // grey-pulse until the node signals active; SpawnTabs then opens the session sockets
     try {
-      const id = await createSpawn(appId, MODEL, image, runnableId); // async CP: returns immediately, status 'starting'
+      const id = await createSpawn(appId, MODEL, image, runnableId, profileId); // async CP: returns immediately, status 'starting'
       setActiveId(id);
       activeIdRef.current = id;
       navigate({ section: "spawn", spawnId: id }); // URL follows; the effect's bindSpawn(id) early-returns (already bound)
