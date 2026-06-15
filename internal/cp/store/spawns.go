@@ -565,5 +565,21 @@ func (r *spawnRepo) ReconcileSuspendedAfterError(ctx context.Context, id string)
 	})
 }
 
+// ListLiveByProfileIDs returns non-deleted spawns whose profile_id is in the given set,
+// ordered by id ASC for deterministic output. Returns nil, nil when profileIDs is empty
+// (no query issued). Used by the kill-switch (sp-nrzf.3.9).
+func (r *spawnRepo) ListLiveByProfileIDs(ctx context.Context, profileIDs []string) ([]Spawn, error) {
+	if len(profileIDs) == 0 {
+		return nil, nil
+	}
+	var out []Spawn
+	err := r.db.NewSelect().Model(&out).
+		Where("profile_id IN (?)", bun.In(profileIDs)).
+		Where("status <> ?", Deleted).
+		Order("id ASC").
+		Scan(ctx)
+	return out, err
+}
+
 // Compile-time check that *spawnRepo fully implements SpawnRepo.
 var _ SpawnRepo = (*spawnRepo)(nil)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -135,12 +136,19 @@ func (s *Server) DeleteCatalogEntry(ctx context.Context, req *connect.Request[cp
 	if e.CreatorID != owner {
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not the creator of %q", req.Msg.CatalogId))
 	}
+	// Resolve affected spawns BEFORE deleting — no FK cascade from catalog→profile_entries,
+	// so the entries survive the catalog delete, but capturing first is belt-and-suspenders.
+	affected, killErr := s.resolveAffectedSpawns(ctx, req.Msg.CatalogId)
+	if killErr != nil {
+		log.Printf("kill-switch: resolve for catalog %s failed: %v (delete proceeds)", req.Msg.CatalogId, killErr)
+	}
 	if err := s.st.CustomizationCatalog().Delete(ctx, req.Msg.CatalogId); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
+	s.killSwitchForCatalog(ctx, req.Msg.CatalogId, affected)
 	return connect.NewResponse(&cpv1.DeleteCatalogEntryResponse{}), nil
 }
 
@@ -167,7 +175,50 @@ func (s *Server) SetCatalogListing(ctx context.Context, req *connect.Request[cpv
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
+	// De-listing is a revoke: kill running spawns that use this entry.
+	// Re-listing (listed=true) is not a revoke — no kill.
+	if !req.Msg.Listed {
+		affected, killErr := s.resolveAffectedSpawns(ctx, req.Msg.CatalogId)
+		if killErr != nil {
+			log.Printf("kill-switch: resolve for catalog %s failed: %v (delist proceeds)", req.Msg.CatalogId, killErr)
+		}
+		s.killSwitchForCatalog(ctx, req.Msg.CatalogId, affected)
+	}
 	return connect.NewResponse(&cpv1.SetCatalogListingResponse{}), nil
+}
+
+// --- Kill-switch helpers (sp-nrzf.3.9) ----------------------------------------
+
+// resolveAffectedSpawns returns the live (non-deleted) spawns that reference catalogID
+// through a catalog_ref profile entry. Returns (nil, err) on store failure.
+func (s *Server) resolveAffectedSpawns(ctx context.Context, catalogID string) ([]store.Spawn, error) {
+	profileIDs, err := s.st.Profiles().ListProfileIDsByCatalogRef(ctx, catalogID)
+	if err != nil {
+		return nil, fmt.Errorf("list profile ids: %w", err)
+	}
+	spawns, err := s.st.Spawns().ListLiveByProfileIDs(ctx, profileIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list live spawns: %w", err)
+	}
+	return spawns, nil
+}
+
+// killSwitchForCatalog terminates all affected spawns on a best-effort basis.
+// Per-spawn errors are logged and do not abort subsequent terminations. A summary
+// log line is emitted regardless. The security goal is: the entry is revoked AND we
+// attempt to stop all referencing spawns; a transiently unreachable node must not block
+// the revoke itself (caller has already committed the Delete/SetListed change).
+func (s *Server) killSwitchForCatalog(ctx context.Context, catalogID string, affected []store.Spawn) {
+	terminated := 0
+	for _, sp := range affected {
+		reason := "catalog_revoke:" + catalogID
+		if err := s.terminateSpawn(ctx, sp.ID, reason); err != nil {
+			log.Printf("kill-switch: catalog %s: failed to terminate spawn %s: %v", catalogID, sp.ID, err)
+			continue
+		}
+		terminated++
+	}
+	log.Printf("kill-switch: catalog %s: terminated %d/%d affected spawns", catalogID, terminated, len(affected))
 }
 
 // --- Wire <-> store conversions -----------------------------------------------

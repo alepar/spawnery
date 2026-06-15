@@ -865,6 +865,28 @@ func (s *Server) stop(ctx context.Context, owner, spawnID string) error {
 	return nil
 }
 
+// terminateSpawn is the owner-agnostic kill-switch core: it locks the spawn, tells the node to
+// destroy the pod, drops the route, soft-deletes the record, and emits a session_end event.
+// Unlike stop(), it performs no ownership check — callers are expected to be authoritative
+// administrative paths (e.g. a catalog revoke that affects any subscriber's spawns).
+// Best-effort callers (killSwitchForCatalog) log errors; terminateSpawn itself returns them.
+func (s *Server) terminateSpawn(ctx context.Context, spawnID, reason string) error {
+	unlock := s.locks.Lock(spawnID)
+	defer unlock()
+	sp, err := s.st.Spawns().Get(ctx, spawnID)
+	if err != nil {
+		return fmt.Errorf("terminateSpawn %s: get: %w", spawnID, err)
+	}
+	s.rt.StopOnNode(spawnID)
+	s.rt.Drop(spawnID)
+	if err := s.st.Spawns().MarkDeleted(ctx, spawnID, time.Now().Unix()); err != nil {
+		return fmt.Errorf("terminateSpawn %s: mark deleted: %w", spawnID, err)
+	}
+	log.Printf("kill-switch: terminated spawn %s (owner=%s reason=%s)", spawnID, sp.OwnerID, reason)
+	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
+	return nil
+}
+
 // --- A4 two-phase intent RPCs [AC1] ----------------------------------------
 
 // GetPendingIntent returns the CP-committed tuple for an in-flight lifecycle op so the client
