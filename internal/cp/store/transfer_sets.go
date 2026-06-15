@@ -81,14 +81,28 @@ func (r *transferSetRepo) Get(ctx context.Context, id string) (TransferSet, erro
 }
 
 func (r *transferSetRepo) ListFailedForks(ctx context.Context) ([]TransferSet, error) {
+	return r.listForks(ctx, func(q *bun.SelectQuery) *bun.SelectQuery {
+		return q.Where("mts.status = ?", TransferSetFailed)
+	})
+}
+
+func (r *transferSetRepo) ListReclaimableForks(ctx context.Context, staleRestoringBefore int64) ([]TransferSet, error) {
+	return r.listForks(ctx, func(q *bun.SelectQuery) *bun.SelectQuery {
+		return q.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.WhereOr("mts.status = ?", TransferSetFailed).
+				WhereOr("(mts.status = ? AND mts.updated_at < ?)", TransferSetRestoring, staleRestoringBefore)
+		})
+	})
+}
+
+func (r *transferSetRepo) listForks(ctx context.Context, where func(*bun.SelectQuery) *bun.SelectQuery) ([]TransferSet, error) {
 	var out []TransferSet
-	err := r.db.NewSelect().Model(&out).
+	q := r.db.NewSelect().Model(&out).
 		Join("JOIN spawns AS fork ON fork.id = mts.fork_spawn_id").
 		Where("mts.kind = ?", TransferSetFork).
-		Where("mts.status = ?", TransferSetFailed).
 		Where("fork.status <> ?", Deleted).
-		Order("mts.created_at ASC", "mts.id ASC").
-		Scan(ctx)
+		Order("mts.created_at ASC", "mts.id ASC")
+	err := where(q).Scan(ctx)
 	if err != nil {
 		return nil, err
 	}

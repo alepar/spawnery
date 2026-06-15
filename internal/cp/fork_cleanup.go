@@ -196,7 +196,7 @@ func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) err
 }
 
 func (s *Server) sweepFailedForks(ctx context.Context, resources failedForkResources) error {
-	rows, err := s.st.TransferSets().ListFailedForks(ctx)
+	rows, err := s.st.TransferSets().ListReclaimableForks(ctx, s.now().Add(-s.claimTTL).UnixNano())
 	if err != nil {
 		return err
 	}

@@ -197,6 +197,55 @@ func TestSweepFailedForksIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSweepFailedForksReclaimsStaleRestoringForks(t *testing.T) {
+	s, st := newForkCleanupTestServer(t)
+	ctx := context.Background()
+	s.claimTTL = time.Second
+	s.now = func() time.Time { return time.Unix(0, 5*time.Second.Nanoseconds()) }
+	seedPartialFork(t, st, "source-stale-restoring")
+	seedPartialFork(t, st, "fork-stale-restoring")
+	if err := st.TransferSets().Create(ctx, store.TransferSet{
+		ID:                "ts-stale-restoring",
+		Kind:              store.TransferSetFork,
+		SpawnID:           "fork-stale-restoring",
+		SourceSpawnID:     "source-stale-restoring",
+		ForkSpawnID:       "fork-stale-restoring",
+		SourceGeneration:  3,
+		TargetGeneration:  1,
+		SourceNodeID:      "source-node",
+		TargetNodeID:      "target-node",
+		TransferKeyStatus: store.TransferKeyPending,
+		Status:            store.TransferSetRestoring,
+		CreatedAt:         100,
+		UpdatedAt:         int64(time.Second),
+	}); err != nil {
+		t.Fatalf("Create stale restoring fork transfer set: %v", err)
+	}
+
+	res := &recordingForkResources{}
+	if err := s.sweepFailedForks(ctx, res); err != nil {
+		t.Fatalf("sweepFailedForks: %v", err)
+	}
+	want := []string{
+		"revoke-key:fork-stale-restoring",
+		"empty-bucket:spawnery-spawn-fork-stale-restoring",
+		"drop-bucket:spawnery-spawn-fork-stale-restoring",
+		"delete-row:fork-stale-restoring",
+	}
+	if got := res.ops; len(got) != len(want) {
+		t.Fatalf("ops=%v want %v", got, want)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("ops=%v want %v", got, want)
+			}
+		}
+	}
+	if _, err := st.Spawns().Get(ctx, "fork-stale-restoring"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("stale restoring fork should be deleted after cleanup, err=%v", err)
+	}
+}
+
 type cleanupAckSender struct {
 	capSender
 	s *Server
