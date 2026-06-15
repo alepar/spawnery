@@ -19,6 +19,7 @@ type ForkSameNodeRequest struct {
 	TransferSetID    string
 	SourceGeneration uint64
 	TargetGeneration uint64
+	SourceRestored   func() error
 }
 
 type ForkSameNodeResult struct {
@@ -119,20 +120,25 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 		w.Stop()
 	}
 	sourceRestored := false
-	restoreSource := func() {
+	restoreSource := func() error {
 		if sourceRestored {
-			return
+			return nil
 		}
 		if err := m.UnpauseIfPaused(ctx, sp.ID, int64(sp.Generation)); err != nil {
-			log.Printf("fork same-node: unpause source %s: %v", sp.ID, err)
+			return fmt.Errorf("unpause source %s: %w", sp.ID, err)
 		}
 		if err := m.journal.Close(ctx, sp.ID); err != nil {
-			log.Printf("fork same-node: close source journal %s before watcher restart: %v", sp.ID, err)
+			return fmt.Errorf("close source journal %s before watcher restart: %w", sp.ID, err)
 		}
 		m.setWatchers(sp, m.startJournalWatchers(sp.ID, sp.Generation, sp.JournalMounts))
 		sourceRestored = true
+		return nil
 	}
-	defer restoreSource()
+	defer func() {
+		if err := restoreSource(); err != nil {
+			log.Printf("fork same-node: restore source %s: %v", sp.ID, err)
+		}
+	}()
 
 	h := m.podHandleForSpawn(sp)
 	h.SpawnID = sp.ID
@@ -156,7 +162,14 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 	if _, err := m.pod.CaptureDeltaAs(ctx, h, req.ForkSpawnID); err != nil {
 		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: capture rootfs as fork: %w", err)
 	}
-	restoreSource()
+	if err := restoreSource(); err != nil {
+		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: restore source after capture: %w", err)
+	}
+	if req.SourceRestored != nil {
+		if err := req.SourceRestored(); err != nil {
+			return ForkSameNodeResult{}, fmt.Errorf("fork same-node: report source restored: %w", err)
+		}
+	}
 
 	var rootfsPayload bytes.Buffer
 	if err := m.pod.ExportDelta(ctx, req.ForkSpawnID, &rootfsPayload); err != nil {

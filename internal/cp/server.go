@@ -129,6 +129,7 @@ type Server struct {
 	forkMaterializer       forkMaterializer
 	forkFootprintEstimator forkFootprintEstimator
 	forks                  *forkWaiters
+	forkSourceRestored     *forkSourceRestoredWaiters
 	forkTurnBoundaries     *forkTurnBoundaryWaiters
 	forkUnpauses           *forkUnpauseWaiters
 	failedForkCleanups     *failedForkCleanupWaiters
@@ -408,6 +409,8 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			}
 		case *nodev1.NodeMessage_ForkSameNodeComplete:
 			s.deliverForkSameNodeComplete(m.ForkSameNodeComplete)
+		case *nodev1.NodeMessage_ForkSourceRestored:
+			s.deliverForkSourceRestored(m.ForkSourceRestored)
 		case *nodev1.NodeMessage_ForkTurnBoundaryComplete:
 			s.deliverForkTurnBoundaryComplete(m.ForkTurnBoundaryComplete)
 		case *nodev1.NodeMessage_UnpauseIfPausedComplete:

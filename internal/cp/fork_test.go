@@ -176,6 +176,50 @@ func (b *blockingStartSender) Send(m *nodev1.CPMessage) error {
 	return nil
 }
 
+type blockingSameNodeForkSender struct {
+	capSender
+	s              *Server
+	sourceRestored chan struct{}
+	completeFork   chan struct{}
+	finalDelivered chan bool
+}
+
+func (b *blockingSameNodeForkSender) Send(m *nodev1.CPMessage) error {
+	if err := b.capSender.Send(m); err != nil {
+		return err
+	}
+	if cmd := m.GetForkTurnBoundary(); cmd != nil {
+		b.s.deliverForkTurnBoundaryComplete(&nodev1.ForkTurnBoundaryComplete{
+			SourceSpawnId:    cmd.GetSourceSpawnId(),
+			SourceGeneration: cmd.GetSourceGeneration(),
+			TransferSetId:    cmd.GetTransferSetId(),
+		})
+	}
+	if cmd := m.GetForkSameNode(); cmd != nil {
+		b.s.deliverForkSourceRestored(&nodev1.ForkSourceRestored{
+			SourceSpawnId:    cmd.GetSourceSpawnId(),
+			SourceGeneration: cmd.GetSourceGeneration(),
+			TransferSetId:    cmd.GetTransferSetId(),
+		})
+		close(b.sourceRestored)
+		go func() {
+			<-b.completeFork
+			delivered := b.s.deliverForkSameNodeComplete(&nodev1.ForkSameNodeComplete{
+				SourceSpawnId: cmd.GetSourceSpawnId(),
+				ForkSpawnId:   cmd.GetForkSpawnId(),
+				TransferSetId: cmd.GetTransferSetId(),
+				NodeId:        "node-1",
+				Mounts:        []*nodev1.MountMarker{{Name: "main", Marker: "fork-main"}},
+			})
+			select {
+			case b.finalDelivered <- delivered:
+			default:
+			}
+		}()
+	}
+	return nil
+}
+
 type blockingTurnBoundarySender struct {
 	capSender
 	s       *Server
@@ -723,6 +767,85 @@ func TestForkSpawnReleasesSourceClaimAndLockBeforeForkStandup(t *testing.T) {
 		unlock()
 	case <-time.After(50 * time.Millisecond):
 		t.Fatalf("source keyed lock must be released before fork standup completes; StartSpawn=%s", start.GetSpawnId())
+	}
+}
+
+func TestForkSpawnRestoresSourceBeforeSameNodeSeedCompletes(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	sourceSender := &blockingSameNodeForkSender{
+		s:              s,
+		sourceRestored: make(chan struct{}),
+		completeFork:   make(chan struct{}),
+		finalDelivered: make(chan bool, 1),
+	}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
+	stopAck := goAckStarts(s, &sourceSender.capSender)
+	defer stopAck()
+	s.forkFootprintEstimator = staticForkFootprint(100)
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source"}))
+		done <- err
+	}()
+	select {
+	case <-sourceSender.sourceRestored:
+	case <-time.After(time.Second):
+		t.Fatal("same-node fork did not report source restored")
+	}
+	defer func() {
+		select {
+		case <-sourceSender.completeFork:
+		default:
+			close(sourceSender.completeFork)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("ForkSpawn after same-node seed completion: %v", err)
+			}
+		case <-time.After(time.Second):
+			var delivered any = "missing"
+			select {
+			case delivered = <-sourceSender.finalDelivered:
+			default:
+			}
+			t.Fatalf("ForkSpawn did not finish after same-node seed completion; starts=%d finalDelivered=%v", len(sourceSender.starts()), delivered)
+		}
+	}()
+
+	var source store.Spawn
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		source, err = s.st.Spawns().Get(context.Background(), "sp-source")
+		if err == nil && source.Status == store.Active {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if source.Status != store.Active {
+		t.Fatalf("source status while same-node seed is still blocked = %s, want Active", source.Status)
+	}
+	leaseID := "source-restored-before-seed-probe"
+	if _, err := s.st.Spawns().Acquire(context.Background(), "sp-source", "competitor", leaseID,
+		time.Now().UnixNano(), time.Now().Add(time.Minute).UnixNano(), source.StatusSeq); err != nil {
+		t.Fatalf("source DB claim must be released before same-node seed completes: %v", err)
+	}
+	if err := s.st.Spawns().Release(context.Background(), "sp-source", leaseID); err != nil {
+		t.Fatalf("release source seed probe claim: %v", err)
+	}
+
+	lockAcquired := make(chan func(), 1)
+	go func() {
+		lockAcquired <- s.locks.Lock("sp-source")
+	}()
+	select {
+	case unlock := <-lockAcquired:
+		unlock()
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("source keyed lock must be released before same-node seed completes")
 	}
 }
 

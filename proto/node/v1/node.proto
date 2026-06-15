@@ -30,6 +30,7 @@ message NodeMessage {
     ForkTurnBoundaryComplete      fork_turn_boundary_complete = 13; // node -> CP: source has no in-flight ACP turn
     UnpauseIfPausedComplete       unpause_if_paused_complete = 14; // node -> CP: idempotent fork recovery unpause ack
     FailedForkCleanupComplete     failed_fork_cleanup_complete = 15; // node -> CP: failed fork resource cleanup op ack
+    ForkSourceRestored            fork_source_restored = 16; // node -> CP: fork source is unpaused/restored; seed may still run
   }
 }
 message CPMessage {
@@ -234,6 +235,12 @@ message ForkSameNodeComplete {
   repeated RootfsArtifact rootfs_artifacts = 5;
   string node_id = 6;
   string error = 7;
+}
+message ForkSourceRestored {
+  string source_spawn_id = 1;
+  uint64 source_generation = 2;
+  string transfer_set_id = 3;
+  string error = 4;
 }
 // auth (field 10): the client's session-open signed intent + aud=node access token (A4).
 // asserted_owner (field 11): CP-asserted owner for the cloud owner-binding check.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -467,15 +468,34 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 	materializeReq := barrierReq
 	materializeReq.Mounts = mounts
 	materializeReq.Artifacts = artifacts
-	result, err := s.forkMaterializerOrDefault().MaterializeFork(claimCtx, materializeReq)
+	materializeCtx, cancelMaterialize := context.WithCancel(ctx)
+	materializeDone := make(chan struct{})
+	sourceReleased := make(chan struct{})
+	var sourceReleasedOnce sync.Once
+	go func() {
+		select {
+		case <-claimCtx.Done():
+			cancelMaterialize()
+		case <-sourceReleased:
+		case <-materializeDone:
+		}
+	}()
+	defer func() {
+		close(materializeDone)
+		cancelMaterialize()
+	}()
+	result, err := s.materializeForkWithSourceRestored(materializeCtx, materializeReq, func() error {
+		if err := s.restoreForkingSource(context.WithoutCancel(ctx), sourceID, leaseID, currentLive.Generation); err != nil {
+			return err
+		}
+		restoreOnFailure = false
+		sourceReleasedOnce.Do(func() { close(sourceReleased) })
+		releaseSource()
+		return nil
+	})
 	if err != nil {
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, asConnectError(connect.CodeInternal, err))
 	}
-	if err := restoreSource(); err != nil {
-		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("restore source active: %w", err)))
-	}
-	restoreOnFailure = false
-	releaseSource()
 	if err := s.st.TransferSets().SetPins(ctx, transferSetID, sourceGeneration, result.MountPins, result.RootfsPins, s.now().UnixNano()); err != nil {
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("record fork transfer pins: %w", err)))
 	}

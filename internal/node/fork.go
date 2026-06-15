@@ -40,6 +40,13 @@ func (a *attacher) forkSameNode(ctx context.Context, m *nodev1.ForkSameNode) {
 		TransferSetID:    m.GetTransferSetId(),
 		SourceGeneration: m.GetSourceGeneration(),
 		TargetGeneration: m.GetTargetGeneration(),
+		SourceRestored: func() error {
+			return a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_ForkSourceRestored{ForkSourceRestored: &nodev1.ForkSourceRestored{
+				SourceSpawnId:    m.GetSourceSpawnId(),
+				SourceGeneration: m.GetSourceGeneration(),
+				TransferSetId:    m.GetTransferSetId(),
+			}}})
+		},
 	})
 	reply := &nodev1.ForkSameNodeComplete{
 		SourceSpawnId: m.GetSourceSpawnId(),

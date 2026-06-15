@@ -20,8 +20,17 @@ type forkWaiters struct {
 	m  map[string]chan *nodev1.ForkSameNodeComplete
 }
 
+type forkSourceRestoredWaiters struct {
+	mu sync.Mutex
+	m  map[string]chan *nodev1.ForkSourceRestored
+}
+
 func newForkWaiters() *forkWaiters {
 	return &forkWaiters{m: map[string]chan *nodev1.ForkSameNodeComplete{}}
+}
+
+func newForkSourceRestoredWaiters() *forkSourceRestoredWaiters {
+	return &forkSourceRestoredWaiters{m: map[string]chan *nodev1.ForkSourceRestored{}}
 }
 
 type forkTurnBoundaryWaiters struct {
@@ -105,6 +114,42 @@ func (s *Server) deliverForkSameNodeComplete(msg *nodev1.ForkSameNodeComplete) b
 	return s.forks.deliver(msg)
 }
 
+func (w *forkSourceRestoredWaiters) register(transferSetID string) chan *nodev1.ForkSourceRestored {
+	ch := make(chan *nodev1.ForkSourceRestored, 1)
+	w.mu.Lock()
+	w.m[transferSetID] = ch
+	w.mu.Unlock()
+	return ch
+}
+
+func (w *forkSourceRestoredWaiters) unregister(transferSetID string) {
+	w.mu.Lock()
+	delete(w.m, transferSetID)
+	w.mu.Unlock()
+}
+
+func (w *forkSourceRestoredWaiters) deliver(msg *nodev1.ForkSourceRestored) bool {
+	w.mu.Lock()
+	ch, ok := w.m[msg.GetTransferSetId()]
+	w.mu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case ch <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) deliverForkSourceRestored(msg *nodev1.ForkSourceRestored) bool {
+	if s.forkSourceRestored == nil {
+		return false
+	}
+	return s.forkSourceRestored.deliver(msg)
+}
+
 type sameNodeForkMaterializer struct {
 	s       *Server
 	timeout time.Duration
@@ -116,6 +161,27 @@ type forkTurnBoundaryWaiter interface {
 
 type forkTurnBoundaryReleaser interface {
 	ReleaseForkTurnBoundary(context.Context, forkMaterializeRequest) error
+}
+
+type forkSourceRestoredMaterializer interface {
+	MaterializeForkWithSourceRestored(context.Context, forkMaterializeRequest, func() error) (forkMaterializeResult, error)
+}
+
+func (s *Server) materializeForkWithSourceRestored(ctx context.Context, req forkMaterializeRequest, onSourceRestored func() error) (forkMaterializeResult, error) {
+	m := s.forkMaterializerOrDefault()
+	if sr, ok := m.(forkSourceRestoredMaterializer); ok {
+		return sr.MaterializeForkWithSourceRestored(ctx, req, onSourceRestored)
+	}
+	result, err := m.MaterializeFork(ctx, req)
+	if err != nil {
+		return forkMaterializeResult{}, err
+	}
+	if onSourceRestored != nil {
+		if err := onSourceRestored(); err != nil {
+			return forkMaterializeResult{}, err
+		}
+	}
+	return result, nil
 }
 
 func (s *Server) waitForkTurnBoundary(ctx context.Context, req forkMaterializeRequest) error {
@@ -206,6 +272,10 @@ func (m *sameNodeForkMaterializer) ReleaseForkTurnBoundary(ctx context.Context, 
 }
 
 func (m *sameNodeForkMaterializer) MaterializeFork(ctx context.Context, req forkMaterializeRequest) (forkMaterializeResult, error) {
+	return m.MaterializeForkWithSourceRestored(ctx, req, nil)
+}
+
+func (m *sameNodeForkMaterializer) MaterializeForkWithSourceRestored(ctx context.Context, req forkMaterializeRequest, onSourceRestored func() error) (forkMaterializeResult, error) {
 	if req.SourceNodeID != req.TargetNodeID {
 		return forkMaterializeResult{}, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("cross-node fork materialization is not implemented in this slice"))
 	}
@@ -216,8 +286,13 @@ func (m *sameNodeForkMaterializer) MaterializeFork(ctx context.Context, req fork
 	if m.s.forks == nil {
 		m.s.forks = newForkWaiters()
 	}
+	if m.s.forkSourceRestored == nil {
+		m.s.forkSourceRestored = newForkSourceRestoredWaiters()
+	}
 	ch := m.s.forks.register(req.TransferSetID)
 	defer m.s.forks.unregister(req.TransferSetID)
+	restoredCh := m.s.forkSourceRestored.register(req.TransferSetID)
+	defer m.s.forkSourceRestored.unregister(req.TransferSetID)
 
 	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkSameNode{ForkSameNode: &nodev1.ForkSameNode{
 		SourceSpawnId:    req.SourceSpawn.ID,
@@ -231,13 +306,50 @@ func (m *sameNodeForkMaterializer) MaterializeFork(ctx context.Context, req fork
 
 	timer := time.NewTimer(m.timeout)
 	defer timer.Stop()
+	sourceRestored := false
+	handleSourceRestored := func(msg *nodev1.ForkSourceRestored) error {
+		if msg.GetError() != "" {
+			return connect.NewError(connect.CodeInternal, fmt.Errorf("node fork source restore failed: %s", msg.GetError()))
+		}
+		if msg.GetSourceSpawnId() != req.SourceSpawn.ID || msg.GetSourceGeneration() != req.SourceGeneration || msg.GetTransferSetId() != req.TransferSetID {
+			return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("fork source-restored ids do not match request"))
+		}
+		if !sourceRestored && onSourceRestored != nil {
+			if err := onSourceRestored(); err != nil {
+				return err
+			}
+		}
+		sourceRestored = true
+		return nil
+	}
 	select {
 	case <-ctx.Done():
 		return forkMaterializeResult{}, ctx.Err()
-	case <-timer.C:
-		return forkMaterializeResult{}, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out waiting for same-node fork %s", req.TransferSetID))
-	case msg := <-ch:
-		return forkResultFromComplete(msg, req)
+	default:
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return forkMaterializeResult{}, ctx.Err()
+		case <-timer.C:
+			return forkMaterializeResult{}, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out waiting for same-node fork %s", req.TransferSetID))
+		case msg := <-restoredCh:
+			if err := handleSourceRestored(msg); err != nil {
+				return forkMaterializeResult{}, err
+			}
+		case msg := <-ch:
+			if !sourceRestored {
+				select {
+				case restored := <-restoredCh:
+					if err := handleSourceRestored(restored); err != nil {
+						return forkMaterializeResult{}, err
+					}
+				default:
+					return forkMaterializeResult{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("same-node fork completed before source-restored acknowledgement"))
+				}
+			}
+			return forkResultFromComplete(msg, req)
+		}
 	}
 }
 

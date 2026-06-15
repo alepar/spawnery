@@ -40,6 +40,11 @@ func TestForkMaterializerSendsForkSameNodeAndReturnsPins(t *testing.T) {
 	}()
 
 	waitForForkCPMessage(t, sender)
+	s.deliverForkSourceRestored(&nodev1.ForkSourceRestored{
+		SourceSpawnId:    "sp-source",
+		SourceGeneration: 9,
+		TransferSetId:    "ts-1",
+	})
 	s.deliverForkSameNodeComplete(&nodev1.ForkSameNodeComplete{
 		SourceSpawnId: "sp-source",
 		ForkSpawnId:   "sp-fork",
@@ -69,6 +74,70 @@ func TestForkMaterializerSendsForkSameNodeAndReturnsPins(t *testing.T) {
 	if msg.GetSourceSpawnId() != "sp-source" || msg.GetForkSpawnId() != "sp-fork" ||
 		msg.GetSourceGeneration() != 9 || msg.GetTargetGeneration() != 1 || msg.GetTransferSetId() != "ts-1" {
 		t.Fatalf("ForkSameNode message = %+v", msg)
+	}
+}
+
+func TestForkMaterializerReportsSourceRestoredBeforeFinalCompletion(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	s.forks = newForkWaiters()
+	s.forkSourceRestored = newForkSourceRestoredWaiters()
+	sender := &capSender{}
+	reg.Add(registryNode("node-1", sender))
+	mat := newSameNodeForkMaterializer(s, time.Second).(forkSourceRestoredMaterializer)
+
+	restored := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := mat.MaterializeForkWithSourceRestored(context.Background(), forkMaterializeRequest{
+			SourceSpawn:      store.Spawn{ID: "sp-source", BaseImageDigest: "agent@sha256:base"},
+			ForkSpawn:        store.Spawn{ID: "sp-fork"},
+			TransferSetID:    "ts-1",
+			SourceGeneration: 9,
+			TargetGeneration: 1,
+			SourceNodeID:     "node-1",
+			TargetNodeID:     "node-1",
+		}, func() error {
+			close(restored)
+			return nil
+		})
+		done <- err
+	}()
+
+	waitForForkCPMessage(t, sender)
+	s.deliverForkSourceRestored(&nodev1.ForkSourceRestored{
+		SourceSpawnId:    "sp-source",
+		SourceGeneration: 9,
+		TransferSetId:    "ts-1",
+	})
+	select {
+	case <-restored:
+	case <-time.After(time.Second):
+		t.Fatal("source restored callback was not invoked")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("materializer completed before final ForkSameNodeComplete: %v", err)
+	default:
+	}
+
+	s.deliverForkSameNodeComplete(&nodev1.ForkSameNodeComplete{
+		SourceSpawnId: "sp-source",
+		ForkSpawnId:   "sp-fork",
+		TransferSetId: "ts-1",
+		NodeId:        "node-1",
+		Mounts:        []*nodev1.MountMarker{{Name: "work", Marker: "fork-manifest"}},
+		RootfsArtifacts: []*nodev1.RootfsArtifact{{
+			ArtifactId: "rootfs-fork-gen1", Generation: 1, BaseImageDigest: "agent@sha256:base",
+			Format: "oci_layout",
+		}},
+	})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("MaterializeForkWithSourceRestored: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("materializer did not finish after final completion")
 	}
 }
 
