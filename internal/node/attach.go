@@ -266,7 +266,6 @@ func (a *attacher) heartbeatLoop(ctx context.Context) {
 	}
 }
 
-
 func (a *attacher) status(spawnID string, ph nodev1.SpawnPhase, detail string) {
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{SpawnId: spawnID, Phase: ph, Detail: detail}}})
 }
@@ -458,6 +457,23 @@ func artifactsFromProto(in []*nodev1.ArtifactSpec) []spawnlet.Artifact {
 	return out
 }
 
+func mountBindingsFromProto(in []*nodev1.MountBinding) []spawnlet.MountBinding {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]spawnlet.MountBinding, 0, len(in))
+	for _, binding := range in {
+		if binding == nil {
+			continue
+		}
+		out = append(out, spawnlet.MountBinding{
+			Name:       binding.GetName(),
+			BackendURI: binding.GetBackendUri(),
+		})
+	}
+	return out
+}
+
 func rootfsArtifactsToProto(in []spawnlet.RootfsArtifact) []*nodev1.RootfsArtifact {
 	if len(in) == 0 {
 		return nil
@@ -517,6 +533,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			Image:                  st.Image,
 			RunnableID:             st.RunnableId,
 			Mode:                   st.Mode,
+			Mounts:                 mountBindingsFromProto(st.GetMounts()),
 			BaseImageDigest:        st.GetBaseImageDigest(),
 			RootfsSourceGeneration: st.GetRootfsSourceGeneration(),
 			RootfsArtifacts:        rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
