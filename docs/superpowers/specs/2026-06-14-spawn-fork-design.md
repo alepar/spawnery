@@ -133,8 +133,12 @@ aware**:
   `docker unpause` **only if the container is actually paused** (unpause of a running container errors —
   tolerate it) → revert status to **Active** under a `status_seq` CAS. Safe to re-drive: a sweep that
   unpaused but crashed before the CAS leaves a running+`Forking` source the next sweep fixes.
-- **Wedged worker, claim never expires** (driver alive, heartbeating, but the scan hangs): add a
-  **capture deadline** so a wedged `Forking` source is force-reverted rather than frozen forever.
+- **Wedged worker, claim never expires** (driver alive, heartbeating, but the scan hangs): `Forking`
+  stores a durable `fork_capture_deadline` separate from `claim_deadline`. The driver heartbeats the
+  claim to prove liveness during slow-but-healthy capture, while the recovery sweep may preempt the
+  claim once `fork_capture_deadline < now`, unpause the source if needed, and CAS the row back to
+  `Active`. Keeping these as separate timestamps is required: reusing `claim_deadline` would either
+  strand a wedged capture forever or falsely recover a slow healthy capture.
 - **Claim TTL vs commit duration:** the driver **heartbeats/renews** the claim across the (bounded but
   non-trivial) under-pause scan+commit, so a slow-but-alive driver is not mistaken for dead.
 - **Node death** is **not** a new failure mode: an `Active` spawn already dies if its node reboots, and a
@@ -274,3 +278,8 @@ the assumptions above — append a dated note here, whether or not a formal debu
   still needs a fork variant before `sp-jdzb` implementation because the current `migration_transfer_sets`
   schema has a single `spawn_id`; fork orchestration needs durable source and fork spawn IDs so the target
   never interprets source pins as fork-owned artifacts before import/re-journal.
+- **2026-06-15 (Spike G plan):** Recovery validation requires a durable internal `forking` status plus a
+  separate `fork_capture_deadline`. Claim heartbeats continue to protect slow healthy captures; the
+  capture deadline is the wedge detector. Failed-fork unwind remains ordered as v3 states: fence/claim
+  the fork row, revoke the fork generation key, empty then drop the fork bucket, and delete the fork row
+  last. No compensation-order change is expected from the spike plan.
