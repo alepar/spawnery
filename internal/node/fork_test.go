@@ -230,10 +230,11 @@ func TestForkTurnBoundaryWaitsForStartingMoshSession(t *testing.T) {
 	}
 
 	close(sx.moshGate)
-	waitFor(t, "ForkTurnBoundaryComplete error after mosh relay appears", func() bool {
-		got := lastForkTurnBoundaryComplete(fs)
-		return got != nil && got.GetError() != ""
-	})
+	waitFor(t, "ForkTurnBoundaryComplete after mosh relay appears", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+	got := lastForkTurnBoundaryComplete(fs)
+	if got.GetError() != "" {
+		t.Fatalf("ForkTurnBoundaryComplete error = %q", got.GetError())
+	}
 }
 
 func TestForkTurnBoundaryWaitsForStartingACPSession(t *testing.T) {
@@ -501,13 +502,31 @@ func TestForkTurnBoundaryRejectsNewACPSessionDuringBarrier(t *testing.T) {
 	}
 }
 
-func TestForkTurnBoundaryFailsClosedWithoutObservableACPPump(t *testing.T) {
+func TestForkTurnBoundaryCompletesForTmuxRelaySource(t *testing.T) {
 	be := &scriptedPodBackend{script: scriptGoose}
 	mgr := newForkNodeManager(t, be)
 	putForkNodeSource(t, mgr, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	a.tmuxRelays[zeroKey("sp-source")] = newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+
+	waitFor(t, "ForkTurnBoundaryComplete", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+	got := lastForkTurnBoundaryComplete(fs)
+	if got.GetError() != "" {
+		t.Fatalf("ForkTurnBoundaryComplete error = %q", got.GetError())
+	}
+}
+
+func TestForkTurnBoundaryFailsClosedWithoutObservableSession(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
 
 	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
 		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",

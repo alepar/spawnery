@@ -47,6 +47,7 @@ type tmuxRelay struct {
 	mu           sync.Mutex
 	clients      map[string]*tmuxClient
 	lastActivity time.Time // last relay frame in either direction; the idle reaper's clock
+	forkBarrier  *forkIngressBarrier
 }
 
 type tmuxClient struct {
@@ -66,6 +67,25 @@ func (r *tmuxRelay) lastActive() time.Time { r.mu.Lock(); defer r.mu.Unlock(); r
 
 // attached reports whether any client is currently attached.
 func (r *tmuxRelay) attached() bool { r.mu.Lock(); defer r.mu.Unlock(); return len(r.clients) > 0 }
+
+func (r *tmuxRelay) tryAcquireForkBarrier(b forkIngressBarrier) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.forkBarrier != nil {
+		return r.forkBarrier.matches(b)
+	}
+	bb := b
+	r.forkBarrier = &bb
+	return true
+}
+
+func (r *tmuxRelay) releaseForkBarrier(match func(forkIngressBarrier) bool) {
+	r.mu.Lock()
+	if r.forkBarrier != nil && match(*r.forkBarrier) {
+		r.forkBarrier = nil
+	}
+	r.mu.Unlock()
+}
 
 // attach starts a `tmux attach` PTY for clientID and pumps its output back via send.
 func (r *tmuxRelay) attach(ctx context.Context, clientID string) error {
@@ -105,14 +125,17 @@ func (r *tmuxRelay) attach(ctx context.Context, clientID string) error {
 }
 
 func (r *tmuxRelay) fromClient(clientID string, b []byte) {
+	kind, data, cols, rows := parseClientFrame(b)
 	r.mu.Lock()
 	c := r.clients[clientID]
+	blocked := c != nil && kind == tmuxOpInput && r.forkBarrier != nil
+	if c != nil {
+		r.lastActivity = time.Now()
+	}
 	r.mu.Unlock()
-	if c == nil {
+	if c == nil || blocked {
 		return
 	}
-	r.markActive() // client input = activity
-	kind, data, cols, rows := parseClientFrame(b)
 	switch kind {
 	case tmuxOpResize:
 		if cols > 0 && rows > 0 {

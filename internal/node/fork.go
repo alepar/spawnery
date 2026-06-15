@@ -203,24 +203,19 @@ func (a *attacher) tryAcquireForkBarrier(spawnID string, barrier forkIngressBarr
 			pumps = append(pumps, p)
 		}
 	}
-	hasRelay := false
-	for key := range a.tmuxRelays {
+	var relays []*tmuxRelay
+	for key, r := range a.tmuxRelays {
 		if key.spawnID == spawnID {
-			hasRelay = true
-			break
+			relays = append(relays, r)
 		}
-	}
-	if hasRelay {
-		a.mu.Unlock()
-		return fmt.Errorf("fork turn-boundary gate unavailable for non-ACP source"), false
 	}
 	if reg := a.sessions[spawnID]; reg != nil && reg.hasStarting() {
 		a.mu.Unlock()
 		return nil, false
 	}
-	if len(pumps) == 0 {
+	if len(pumps) == 0 && len(relays) == 0 {
 		a.mu.Unlock()
-		return fmt.Errorf("fork turn-boundary gate unavailable: no observable ACP pump"), false
+		return fmt.Errorf("fork turn-boundary gate unavailable: no observable ACP pump or tmux relay"), false
 	}
 	var acquired []*Pump
 	for _, p := range pumps {
@@ -232,6 +227,20 @@ func (a *attacher) tryAcquireForkBarrier(spawnID string, barrier forkIngressBarr
 			return nil, false
 		}
 		acquired = append(acquired, p)
+	}
+	var acquiredRelays []*tmuxRelay
+	for _, r := range relays {
+		if !r.tryAcquireForkBarrier(barrier) {
+			for _, held := range acquired {
+				held.releaseForkBarrier(func(b forkIngressBarrier) bool { return b.matches(barrier) })
+			}
+			for _, held := range acquiredRelays {
+				held.releaseForkBarrier(func(b forkIngressBarrier) bool { return b.matches(barrier) })
+			}
+			a.mu.Unlock()
+			return nil, false
+		}
+		acquiredRelays = append(acquiredRelays, r)
 	}
 	a.ensureForkBarriersLocked()
 	a.forkBarriers[spawnID] = barrier
@@ -271,6 +280,7 @@ func (a *attacher) forkBarrierActiveOrPendingLocked(spawnID string) bool {
 func (a *attacher) releaseForkBarrier(spawnID string, match func(forkIngressBarrier) bool) {
 	a.mu.Lock()
 	var releasePumps []*Pump
+	var releaseRelays []*tmuxRelay
 	if a.forkBarriers != nil {
 		if b, ok := a.forkBarriers[spawnID]; ok && match(b) {
 			delete(a.forkBarriers, spawnID)
@@ -279,11 +289,19 @@ func (a *attacher) releaseForkBarrier(spawnID string, match func(forkIngressBarr
 					releasePumps = append(releasePumps, p)
 				}
 			}
+			for key, r := range a.tmuxRelays {
+				if key.spawnID == spawnID {
+					releaseRelays = append(releaseRelays, r)
+				}
+			}
 		}
 	}
 	a.mu.Unlock()
 	for _, p := range releasePumps {
 		p.releaseForkBarrier(match)
+	}
+	for _, r := range releaseRelays {
+		r.releaseForkBarrier(match)
 	}
 }
 

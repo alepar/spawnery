@@ -122,6 +122,19 @@ func TestCodexTuiRunnable(t *testing.T) {
 	if len(r.Launch) == 0 {
 		t.Fatalf("codex-tui needs a Launch argv")
 	}
+	if got, want := r.Resume, []string{"codex", "resume", "--last"}; !sameStrings(got, want) {
+		t.Fatalf("codex-tui Resume = %v, want %v", got, want)
+	}
+}
+
+func TestClaudeTuiRunnableResume(t *testing.T) {
+	r, ok := Lookup("claude-code", "claude-tui")
+	if !ok {
+		t.Fatalf("claude-code/claude-tui should resolve")
+	}
+	if got, want := r.Resume, []string{"claude", "--continue"}; !sameStrings(got, want) {
+		t.Fatalf("claude-tui Resume = %v, want %v", got, want)
+	}
 }
 
 func TestRegistryInvariants(t *testing.T) {
@@ -155,4 +168,16 @@ func TestRegistryInvariants(t *testing.T) {
 			}
 		}
 	}
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
