@@ -64,6 +64,9 @@ owner's hands; cannot be done headless). Do not ship the gated features until th
 > WRONG token type and proves nothing about the user-to-server path. `sp-v40s.1` still needs a real
 > App user token.
 
+**Step-by-step runbooks for all four spikes are in Appendix A** (throwaway-App setup + device-flow
+token mint + exact curl calls + how to read the result).
+
 ## 4. Bead map (what to build)
 
 **New impl beads (under `sp-v40s`):**
@@ -135,3 +138,99 @@ merge integrator (sonnet: merge --no-ff, full gates in `dev-spawnery` distrobox,
 - **Revoke the classic PAT** used for that test (it was pasted into the design-session transcript).
 - A separate re-roast bead `sp-nrzf.3.13` was filed for the **Profiles customization** spec (different
   effort; depends on all profiles impl beads) -- unrelated to this work, just don't be surprised by it.
+
+---
+
+## Appendix A: Spike runbooks (how to actually run them)
+
+All four need a **throwaway GitHub App** + the owner's GitHub account. Use a disposable App and clean
+up created repos afterward. Token-type prefixes are your sanity check: `ghu_` = user-to-server access
+(what we need), `ghr_` = user-to-server refresh, `ghp_` = classic PAT (WRONG type -- ignore),
+`github_pat_` = fine-grained PAT, `ghs_` = installation token.
+
+### A.0 One-time setup (shared by spikes 1-3)
+
+1. github.com -> Settings -> Developer settings -> **GitHub Apps -> New GitHub App**.
+   - Permissions: **Repository -> Administration: Read & write** and **Contents: Read & write**.
+   - **Expiring user authorization tokens: enabled** (default for new Apps -- confirm it is on; this is
+     what yields refresh tokens and the 8h/6mo lifetimes).
+   - **Enable Device Flow: checked** (lets the spike get a user token with no callback server -- easiest).
+   - Webhook: uncheck Active. Where can it be installed: only this account.
+2. Save. Note the **Client ID**; generate and copy a **Client secret**.
+3. **Install** the App on your account: App page -> Install App -> pick **All repositories** (needed for
+   spike 2's "all repos" lever) for one run, and **Only select repositories** for the spike-2 contrast run.
+4. **Mint a user-to-server token via device flow** (no callback server needed):
+   ```bash
+   CID=<client_id>
+   # 1) request a device + user code
+   curl -s -X POST https://github.com/login/device/code \
+     -H 'Accept: application/json' -d "client_id=$CID" -d "scope="
+   # -> {"device_code":"...","user_code":"XXXX-XXXX","verification_uri":"https://github.com/login/device", "interval":5}
+   # 2) open verification_uri in a browser, enter user_code, authorize the App
+   # 3) poll for the token (repeat until it stops returning authorization_pending)
+   curl -s -X POST https://github.com/login/oauth/access_token \
+     -H 'Accept: application/json' -d "client_id=$CID" -d "device_code=<device_code>" \
+     -d "grant_type=urn:ietf:params:oauth:grant-type:device_code"
+   # -> {"access_token":"ghu_...","expires_in":28800,"refresh_token":"ghr_...","refresh_token_expires_in":15897600,...}
+   ```
+   Confirm the access token starts with **`ghu_`** -- if it does not, you are not testing a
+   user-to-server token and the result is meaningless.
+   (Web flow alternative if device flow is undesirable: browse
+   `https://github.com/login/oauth/authorize?client_id=$CID`, authorize, grab `?code=` from the
+   callback, then `POST /login/oauth/access_token` with `client_id`+`client_secret`+`code`.)
+
+### A.1 (sp-v40s.1, THE gate) Can a `ghu_` token create a personal repo?
+
+```bash
+TK=ghu_<token from A.0>
+curl -sS -o /tmp/r.json -w '%{http_code}\n' -X POST \
+  -H "Authorization: Bearer $TK" -H 'X-GitHub-Api-Version: 2022-11-28' \
+  https://api.github.com/user/repos \
+  -d '{"name":"spk-del-me","private":true,"auto_init":false}'
+cat /tmp/r.json   # look at full_name / message
+```
+- **201** -> create works with a user-to-server token: keep `Administration:write`, keep
+  `create_if_missing` in MVP.
+- **403 / 404 / 422 with a "resource not accessible by integration"-style message** -> the docs' `x`
+  marker holds: **KILL** -- drop `create_if_missing` (require pre-existing repo) and drop
+  `Administration:write` from the App. Record the exact status + message in the bead.
+- Clean up: delete the repo from the GitHub UI (the token likely lacks delete rights).
+
+### A.2 (sp-v40s.2) Newly-created-repo coverage + `repository_id` scoping
+
+Two questions, two runs:
+1. **All-repositories install** (A.0 step 3 variant A): right after a successful A.1 create, with the
+   same `ghu_` token, `GET /repos/<owner>/spk-del-me` and try a `git clone` over HTTPS using the token.
+   200/clone-ok -> new repos are auto-covered.
+2. **Selected-repositories install** (variant B, the new repo NOT in the selection): repeat -> expect
+   **404** until the installation's repo selection is updated to include it. That confirms the lever:
+   **require an "all repositories" installation for create-capable links**, or programmatically update
+   the selection before clone.
+3. **`repository_id` narrowing:** verify *where* GitHub accepts `repository_id` to scope a user token to
+   one repo (deep-research cites it on user-access-token generation; confirm the exact request -- it is
+   the param the node will use per-mount). Mint a token narrowed to one repo id and confirm it can reach
+   that repo and 404s on another the user otherwise has.
+
+### A.3 (sp-v40s.3) Token revocation before 8h
+
+```bash
+CID=<client_id>; CS=<client_secret>; TK=ghu_<token>
+# revoke a single user token (Basic auth = client_id:client_secret)
+curl -sS -o /dev/null -w '%{http_code}\n' -X DELETE \
+  -u "$CID:$CS" -H 'Accept: application/vnd.github+json' \
+  https://api.github.com/applications/$CID/token \
+  -d "{\"access_token\":\"$TK\"}"      # 204 = revoked
+# confirm the token is now dead:
+curl -sS -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TK" https://api.github.com/user  # expect 401
+```
+- 204 then 401 -> there IS a pre-expiry kill switch (good for the exfil story). Also note: refreshing
+  already invalidates the prior access token (doc-confirmed single-use) -- this DELETE is the
+  *explicit, immediate* path. Record which works.
+
+### A.4 (sp-v40s.4) Scaled-AS nonce -- reasoning, not curl
+
+No GitHub call. Decide how the single-use response-wrap nonce is redeemed when the AS runs multiple
+instances: (a) shared store (Redis/DB) holding `nonce -> wrapped-tuple` with single-use delete, or
+(b) sticky-session pinning redemption to the issuing instance. Pick one, write it into the AS deploy
+notes, and ensure leaked-nonce replay is rejected (single-use + short TTL + authenticated redemption).
+Only blocks multi-instance AS deployment.
