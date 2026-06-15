@@ -136,7 +136,7 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 		if strings.TrimSpace(opts.RevocationURL) == "" {
 			return errors.New("production node verification requires an Auth Service URL for node revocation checks")
 		}
-		revoked = subkey.NewASRevocationChecker(opts.RevocationURL, opts.RevocationClient, 30*time.Second)
+		revoked = subkey.NewASRevocationChecker(opts.RevocationURL, opts.RevocationClient, 0)
 		expect, err = moveExpectation(target, opts.AccountID)
 		if err != nil {
 			return err

@@ -30,9 +30,6 @@ func NewASRevocationChecker(url string, client *http.Client, ttl time.Duration) 
 	if client == nil {
 		client = http.DefaultClient
 	}
-	if ttl <= 0 {
-		ttl = 30 * time.Second
-	}
 	return &ASRevocationChecker{
 		url:    url,
 		client: client,
@@ -47,7 +44,7 @@ func (c *ASRevocationChecker) IsRevoked(id pki.Identity) (bool, error) {
 	}
 
 	c.mu.Lock()
-	if c.revoked != nil && c.now().Before(c.expires) {
+	if c.ttl > 0 && c.revoked != nil && c.now().Before(c.expires) {
 		_, ok := c.revoked[id.NodeID]
 		c.mu.Unlock()
 		return ok, nil
@@ -60,9 +57,11 @@ func (c *ASRevocationChecker) IsRevoked(id pki.Identity) (bool, error) {
 	}
 
 	c.mu.Lock()
-	c.revoked = revoked
-	c.expires = c.now().Add(c.ttl)
-	_, ok := c.revoked[id.NodeID]
+	if c.ttl > 0 {
+		c.revoked = revoked
+		c.expires = c.now().Add(c.ttl)
+	}
+	_, ok := revoked[id.NodeID]
 	c.mu.Unlock()
 	return ok, nil
 }
@@ -85,15 +84,18 @@ func (c *ASRevocationChecker) fetch() (map[string]struct{}, error) {
 	}
 
 	var body struct {
-		RevokedNodeIDs []string `json:"revoked_node_ids"`
+		RevokedNodeIDs *[]string `json:"revoked_node_ids"`
 	}
 	dec := json.NewDecoder(io.LimitReader(resp.Body, maxNodeRevocationResponseBytes))
 	if err := dec.Decode(&body); err != nil {
 		return nil, fmt.Errorf("subkey: malformed node revocation response: %w", err)
 	}
+	if body.RevokedNodeIDs == nil {
+		return nil, errors.New("subkey: malformed node revocation response: revoked_node_ids missing or null")
+	}
 
-	out := make(map[string]struct{}, len(body.RevokedNodeIDs))
-	for _, nodeID := range body.RevokedNodeIDs {
+	out := make(map[string]struct{}, len(*body.RevokedNodeIDs))
+	for _, nodeID := range *body.RevokedNodeIDs {
 		out[nodeID] = struct{}{}
 	}
 	return out, nil

@@ -335,7 +335,7 @@ async function reSealToNode(
  * deviceKeys: the caller must load and pass the device X25519 keypair.
  * rootPEM: pinned Root CA PEM embedded in the web bundle (empty = dev/insecure mode).
  * now: injectable for testing; use new Date() in production.
- * revocationChecker: optional AS revocation checker (default: AllowAll); fail-closed on error.
+ * revocationChecker: optional checker override; default is the AS checker with no cache.
  * onProgress: optional per-step callback for UI progress updates.
  * spawnStatusAfterFail: injectable for testing — resolves to current spawn status after
  *   a migrate-leg failure so the "suspend" vs "resume" leg tag can be set correctly.

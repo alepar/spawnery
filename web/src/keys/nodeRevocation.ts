@@ -13,7 +13,7 @@ interface Options {
 
 export function asNodeRevocationChecker(opts: Options = {}): RevocationChecker {
   const fetcher = opts.fetcher ?? fetch;
-  const ttlMs = opts.ttlMs ?? 30_000;
+  const ttlMs = opts.ttlMs ?? 0;
   const nowMs = opts.nowMs ?? (() => Date.now());
   const url = opts.url ?? asHttpUrl("/node-revocations");
   let expiresAt = 0;
@@ -21,7 +21,7 @@ export function asNodeRevocationChecker(opts: Options = {}): RevocationChecker {
   let inFlight: Promise<Set<string>> | null = null;
 
   async function load(): Promise<Set<string>> {
-    if (cached && nowMs() < expiresAt) return cached;
+    if (ttlMs > 0 && cached && nowMs() < expiresAt) return cached;
     if (!inFlight) {
       inFlight = fetcher(url, {
         method: "GET",
@@ -33,8 +33,10 @@ export function asNodeRevocationChecker(opts: Options = {}): RevocationChecker {
           throw new Error("revocation list unavailable: malformed AS response");
         }
         const set = new Set(body.revoked_node_ids);
-        cached = set;
-        expiresAt = nowMs() + ttlMs;
+        if (ttlMs > 0) {
+          cached = set;
+          expiresAt = nowMs() + ttlMs;
+        }
         return set;
       }).finally(() => {
         inFlight = null;
