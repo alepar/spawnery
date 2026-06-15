@@ -55,6 +55,16 @@ func (o staticTransferKeyOpener) OpenForkTransferKey(_ []byte, _ string, _ uint6
 	return append([]byte(nil), o.key...), nil
 }
 
+type trackingTransferKeyOpener struct {
+	key    []byte
+	called bool
+}
+
+func (o *trackingTransferKeyOpener) OpenForkTransferKey(_ []byte, _ string, _ uint64, _ string) ([]byte, error) {
+	o.called = true
+	return append([]byte(nil), o.key...), nil
+}
+
 func TestForkTransferExportGeneratesKeySealsToVerifiedTargetAndRestoresSource(t *testing.T) {
 	ctx := context.Background()
 	rec := &forkOpRecorder{}
@@ -281,6 +291,32 @@ func TestForkTransferImportRejectsSourceForkAADMismatch(t *testing.T) {
 	}, staticTransferKeyOpener{key: key})
 	if err == nil {
 		t.Fatal("AAD mismatch must reject import")
+	}
+}
+
+func TestForkTransferImportRejectsNonGenerationOneTarget(t *testing.T) {
+	ctx := context.Background()
+	rec := &forkOpRecorder{}
+	j := &recordingForkJournal{rec: rec}
+	m, _ := newForkTestManager(t, rec, j)
+
+	opener := &trackingTransferKeyOpener{key: bytes.Repeat([]byte{2}, 32)}
+	_, err := m.ForkTransferImport(ctx, ForkTransferImportRequest{
+		SourceSpawnID:     "sp-source",
+		ForkSpawnID:       "sp-fork",
+		TransferSetID:     "ts-1",
+		TargetGeneration:  2,
+		SealedTransferKey: []byte("opaque-sealed-key"),
+		Payload:           []byte("sealed-payload"),
+	}, opener)
+	if err == nil {
+		t.Fatal("non-generation-1 target must reject")
+	}
+	if opener.called {
+		t.Fatal("generation guard must reject before opening transfer key")
+	}
+	if ops := rec.snapshot(); len(ops) != 0 {
+		t.Fatalf("journal should not run on rejected generation, ops=%v", ops)
 	}
 }
 

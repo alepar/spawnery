@@ -264,6 +264,67 @@ func (b *blockingSameNodeForkSender) Send(m *nodev1.CPMessage) error {
 	return nil
 }
 
+type autoCrossNodeForkSourceSender struct {
+	capSender
+	s *Server
+}
+
+func (a *autoCrossNodeForkSourceSender) Send(m *nodev1.CPMessage) error {
+	if err := a.capSender.Send(m); err != nil {
+		return err
+	}
+	if cmd := m.GetForkTurnBoundary(); cmd != nil {
+		a.s.deliverForkTurnBoundaryComplete(&nodev1.ForkTurnBoundaryComplete{
+			SourceSpawnId:    cmd.GetSourceSpawnId(),
+			SourceGeneration: cmd.GetSourceGeneration(),
+			TransferSetId:    cmd.GetTransferSetId(),
+		})
+	}
+	if cmd := m.GetForkTransferExport(); cmd != nil {
+		a.s.deliverForkSourceRestored(&nodev1.ForkSourceRestored{
+			SourceSpawnId:    cmd.GetSourceSpawnId(),
+			SourceGeneration: cmd.GetSourceGeneration(),
+			TransferSetId:    cmd.GetTransferSetId(),
+		})
+		go func(cmd *nodev1.ForkTransferExport) {
+			time.Sleep(time.Millisecond)
+			a.s.deliverForkTransferExported(&nodev1.ForkTransferExported{
+				SourceSpawnId:     cmd.GetSourceSpawnId(),
+				ForkSpawnId:       cmd.GetForkSpawnId(),
+				TransferSetId:     cmd.GetTransferSetId(),
+				SealedTransferKey: []byte("sealed-key"),
+				Payload:           []byte("sealed-payload"),
+			})
+		}(cmd)
+	}
+	return nil
+}
+
+type autoCrossNodeForkTargetSender struct {
+	capSender
+	s *Server
+}
+
+func (a *autoCrossNodeForkTargetSender) Send(m *nodev1.CPMessage) error {
+	if err := a.capSender.Send(m); err != nil {
+		return err
+	}
+	if cmd := m.GetForkTransferImport(); cmd != nil {
+		a.s.deliverForkTransferImported(&nodev1.ForkTransferImported{
+			SourceSpawnId: cmd.GetSourceSpawnId(),
+			ForkSpawnId:   cmd.GetForkSpawnId(),
+			TransferSetId: cmd.GetTransferSetId(),
+			NodeId:        "node-2",
+			Mounts:        []*nodev1.MountMarker{{Name: "main", Marker: "fork-main"}},
+			RootfsArtifacts: []*nodev1.RootfsArtifact{{
+				ArtifactId: "rootfs-fork-gen1", Generation: 1, Sequence: 1, BaseImageDigest: "sha256:base",
+				Format: "oci_layout",
+			}},
+		})
+	}
+	return nil
+}
+
 type blockingTurnBoundarySender struct {
 	capSender
 	s       *Server
@@ -554,6 +615,40 @@ func TestForkSpawnCrossNodeRecordsTransferSetAndMarksForkDeliveryPending(t *test
 	}
 	if start.GetRootfsArtifactsLocalOnly() {
 		t.Fatal("cross-node fork StartSpawn.RootfsArtifactsLocalOnly = true, want false")
+	}
+}
+
+func TestForkSpawnCrossNodeDefaultMaterializerGatesTurnBoundaryOnSourceAndStartsFork(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	sourceSender := &autoCrossNodeForkSourceSender{s: s}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
+	sealKey(t, s, "sp-source", "main")
+	targetSender := &autoCrossNodeForkTargetSender{s: s}
+	stopAck := goAckStarts(s, &targetSender.capSender)
+	defer stopAck()
+	reg.Add(&registry.Node{
+		ID: "node-2", Sender: targetSender, Max: 4, Free: 4, Class: "cloud",
+		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
+	})
+	s.nodeKeys.put("node-2", []byte("signed-subkey"), []byte("leaf-chain"))
+	s.forkFootprintEstimator = staticForkFootprint(100)
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{
+		SpawnId:      "sp-source",
+		TargetNodeId: "node-2",
+	}))
+	if err != nil {
+		t.Fatalf("ForkSpawn: %v", err)
+	}
+	waitForForkTurnBoundaryCPMessage(t, &sourceSender.capSender)
+	waitForForkAnyCPMessage(t, "ForkTransferExport", &sourceSender.capSender)
+	if msg := targetSender.lastCPMessage(); msg.GetStart() == nil {
+		t.Fatalf("target last message = %+v, want StartSpawn", msg)
+	}
+	start := targetSender.firstStart()
+	if start == nil || start.GetSpawnId() != resp.Msg.ForkSpawnId || start.GetGeneration() != 1 {
+		t.Fatalf("target StartSpawn = %+v, want fork %s gen1", start, resp.Msg.ForkSpawnId)
 	}
 }
 

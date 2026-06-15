@@ -300,9 +300,6 @@ func newSameNodeForkMaterializer(s *Server, timeout time.Duration) forkMateriali
 }
 
 func (m *sameNodeForkMaterializer) WaitForForkTurnBoundary(ctx context.Context, req forkMaterializeRequest) (err error) {
-	if req.SourceNodeID != req.TargetNodeID {
-		return connect.NewError(connect.CodeUnimplemented, fmt.Errorf("cross-node fork materialization is not implemented in this slice"))
-	}
 	n, ok := m.s.reg.Get(req.SourceNodeID)
 	if !ok || n.Sender == nil {
 		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("source node %q is not connected", req.SourceNodeID))

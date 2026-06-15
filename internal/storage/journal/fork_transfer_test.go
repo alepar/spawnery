@@ -218,6 +218,57 @@ func TestForkTransferPayloadRejectsUnsafePaths(t *testing.T) {
 	}
 }
 
+func TestForkTransferPayloadRejectsUnsafeManifestMountNames(t *testing.T) {
+	key := bytes.Repeat([]byte{8}, 32)
+	for _, name := range []string{"", ".", "..", "/abs", "work/subdir", "./work"} {
+		t.Run(name, func(t *testing.T) {
+			var plain bytes.Buffer
+			tw := tar.NewWriter(&plain)
+			writeTarEntry(t, tw, "manifest.json", []byte(`{"source_spawn_id":"sp-source","fork_spawn_id":"sp-fork","mounts":[{"name":"`+name+`","class":"owner-sealed"}]}`), 0o600)
+			if err := tw.Close(); err != nil {
+				t.Fatalf("close tar: %v", err)
+			}
+
+			sealed, err := sealForkTransferBytesForTest(key, "sp-source", "sp-fork", plain.Bytes())
+			if err != nil {
+				t.Fatalf("seal test payload: %v", err)
+			}
+			opened, err := OpenForkTransferPayload(key, "sp-source", "sp-fork", sealed)
+			if err != nil {
+				t.Fatalf("OpenForkTransferPayload: %v", err)
+			}
+			if _, _, err := UnpackForkTransferPayload(opened, t.TempDir()); err == nil {
+				t.Fatalf("mount name %q must reject", name)
+			}
+		})
+	}
+}
+
+func TestForkTransferPayloadRejectsDuplicateTarEntries(t *testing.T) {
+	key := bytes.Repeat([]byte{3}, 32)
+
+	var plain bytes.Buffer
+	tw := tar.NewWriter(&plain)
+	writeTarEntry(t, tw, "manifest.json", []byte(`{"source_spawn_id":"sp-source","fork_spawn_id":"sp-fork","mounts":[{"name":"work","class":"owner-sealed"}]}`), 0o600)
+	writeTarEntry(t, tw, "mounts/work/file.txt", []byte("first"), 0o600)
+	writeTarEntry(t, tw, "mounts/work/file.txt", []byte("second"), 0o600)
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	sealed, err := sealForkTransferBytesForTest(key, "sp-source", "sp-fork", plain.Bytes())
+	if err != nil {
+		t.Fatalf("seal test payload: %v", err)
+	}
+	opened, err := OpenForkTransferPayload(key, "sp-source", "sp-fork", sealed)
+	if err != nil {
+		t.Fatalf("OpenForkTransferPayload: %v", err)
+	}
+	if _, _, err := UnpackForkTransferPayload(opened, t.TempDir()); err == nil {
+		t.Fatal("duplicate tar entries must reject")
+	}
+}
+
 func writeTarEntry(t *testing.T, tw *tar.Writer, name string, payload []byte, mode int64) {
 	t.Helper()
 	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(payload))}); err != nil {

@@ -305,8 +305,10 @@ func TestForkMaterializerWaitsForTurnBoundaryPreflight(t *testing.T) {
 	s, reg, _ := newTestServer(t)
 	s.forks = newForkWaiters()
 	s.forkTurnBoundaries = newForkTurnBoundaryWaiters()
-	sender := &capSender{}
-	reg.Add(registryNode("node-1", sender))
+	sourceSender := &capSender{}
+	targetSender := &capSender{}
+	reg.Add(registryNode("node-1", sourceSender))
+	reg.Add(registryNode("node-2", targetSender))
 	mat := newSameNodeForkMaterializer(s, time.Second).(forkTurnBoundaryWaiter)
 
 	done := make(chan error, 1)
@@ -318,14 +320,17 @@ func TestForkMaterializerWaitsForTurnBoundaryPreflight(t *testing.T) {
 			SourceGeneration: 9,
 			TargetGeneration: 1,
 			SourceNodeID:     "node-1",
-			TargetNodeID:     "node-1",
+			TargetNodeID:     "node-2",
 		})
 		done <- err
 	}()
 
-	waitForForkTurnBoundaryCPMessage(t, sender)
-	if msg := sender.lastCPMessage(); msg.GetForkSameNode() != nil {
+	waitForForkTurnBoundaryCPMessage(t, sourceSender)
+	if msg := sourceSender.lastCPMessage(); msg.GetForkSameNode() != nil {
 		t.Fatalf("turn-boundary preflight must not send ForkSameNode: %+v", msg)
+	}
+	if msg := targetSender.lastCPMessage(); msg != nil {
+		t.Fatalf("turn-boundary preflight must gate only against source node, target saw %+v", msg)
 	}
 	s.deliverForkTurnBoundaryComplete(&nodev1.ForkTurnBoundaryComplete{
 		SourceSpawnId: "sp-source",

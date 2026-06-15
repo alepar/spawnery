@@ -138,8 +138,8 @@ func UnpackForkTransferPayload(payload ForkTransferPayload, targetRoot string) (
 	mountsByName := make(map[string]ForkTransferMount, len(payload.Mounts))
 	outMounts := make([]Mount, 0, len(payload.Mounts))
 	for _, mt := range payload.Mounts {
-		if mt.Name == "" {
-			return nil, nil, fmt.Errorf("fork transfer: mount name is required")
+		if err := validateForkTransferMountName(mt.Name); err != nil {
+			return nil, nil, err
 		}
 		if _, exists := mountsByName[mt.Name]; exists {
 			return nil, nil, fmt.Errorf("fork transfer: duplicate mount %q", mt.Name)
@@ -172,6 +172,7 @@ func UnpackForkTransferPayload(payload ForkTransferPayload, targetRoot string) (
 
 	tr := tar.NewReader(bytes.NewReader(payload.rawTar))
 	seenManifest := false
+	seenPaths := make(map[string]struct{})
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -184,6 +185,10 @@ func UnpackForkTransferPayload(payload ForkTransferPayload, targetRoot string) (
 		if err != nil {
 			return nil, nil, err
 		}
+		if _, exists := seenPaths[clean]; exists {
+			return nil, nil, fmt.Errorf("fork transfer: duplicate tar entry %q", clean)
+		}
+		seenPaths[clean] = struct{}{}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(filepath.Join(targetRoot, filepath.FromSlash(clean)), 0o755); err != nil {
@@ -383,6 +388,22 @@ func validateForkTransferTarPath(name string) (string, error) {
 		return "", fmt.Errorf("fork transfer: non-canonical tar path %q", name)
 	}
 	return clean, nil
+}
+
+func validateForkTransferMountName(name string) error {
+	if name == "" {
+		return fmt.Errorf("fork transfer: mount name is required")
+	}
+	if filepath.IsAbs(name) || name == "." || name == ".." {
+		return fmt.Errorf("fork transfer: unsafe mount name %q", name)
+	}
+	if filepath.Clean(name) != name {
+		return fmt.Errorf("fork transfer: non-canonical mount name %q", name)
+	}
+	if filepath.Base(name) != name {
+		return fmt.Errorf("fork transfer: mount name must be a single path component %q", name)
+	}
+	return nil
 }
 
 func writeRegularFile(path string, r io.Reader, mode fs.FileMode) error {
