@@ -695,6 +695,15 @@ func startupSecretIDsFromArtifacts(arts []store.Artifact) []string {
 	return out
 }
 
+func (s *Server) ensureStartupSecretsExist(ctx context.Context, owner string, required []string) error {
+	for _, id := range required {
+		if _, err := s.st.Secrets().Get(ctx, owner, id); err != nil {
+			return mapSecretStoreErr(err)
+		}
+	}
+	return nil
+}
+
 func validateSubmittedStartupSecrets(required []string, got []*nodev1.SealedSecret) error {
 	requiredSet := map[string]struct{}{}
 	for _, id := range required {
@@ -702,9 +711,15 @@ func validateSubmittedStartupSecrets(required []string, got []*nodev1.SealedSecr
 	}
 	seen := map[string]struct{}{}
 	for _, sec := range got {
+		if sec == nil {
+			return fmt.Errorf("startup secret is nil")
+		}
 		id := strings.TrimSpace(sec.GetSecretId())
 		if id == "" {
 			return fmt.Errorf("startup secret has empty secret_id")
+		}
+		if len(sec.GetSealed()) == 0 {
+			return fmt.Errorf("startup secret %q has empty sealed payload", id)
 		}
 		if _, ok := seen[id]; ok {
 			return fmt.Errorf("duplicate startup secret %q", id)
@@ -913,6 +928,13 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 			return
 		}
 		requiredSecretIDs = startupSecretIDsFromArtifacts(arts)
+		if err := s.ensureStartupSecretsExist(ctx, ownerID, requiredSecretIDs); err != nil {
+			log.Printf("provisionSpawn %s: validate startup secret catalog: %v", spawnID, err)
+			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+				log.Printf("provisionSpawn %s: SetError after startup secret catalog validation failure also failed: %v", spawnID, serr)
+			}
+			return
+		}
 		// Two-phase A4 sign-after-resolve [AC1]: pick node, register pending intent, await client.
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {

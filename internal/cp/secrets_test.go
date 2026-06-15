@@ -169,10 +169,12 @@ func TestStartupSecretIDsFromArtifactsAndValidation(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "none required none submitted", req: nil, got: nil},
-		{name: "all required submitted", req: []string{"byok", "gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "gh-main"}, {SecretId: "byok"}}},
-		{name: "empty submitted id", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{{SecretId: ""}}, wantErr: true},
-		{name: "duplicate submitted id", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "gh-main"}, {SecretId: "gh-main"}}, wantErr: true},
-		{name: "undeclared submitted id", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "gh-main"}, {SecretId: "extra"}}, wantErr: true},
+		{name: "all required submitted", req: []string{"byok", "gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "gh-main", Sealed: []byte("ciphertext")}, {SecretId: "byok", Sealed: []byte("ciphertext")}}},
+		{name: "nil submitted secret", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{nil}, wantErr: true},
+		{name: "empty submitted id", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "", Sealed: []byte("ciphertext")}}, wantErr: true},
+		{name: "empty sealed payload", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "gh-main"}}, wantErr: true},
+		{name: "duplicate submitted id", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "gh-main", Sealed: []byte("ciphertext")}, {SecretId: "gh-main", Sealed: []byte("ciphertext")}}, wantErr: true},
+		{name: "undeclared submitted id", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "gh-main", Sealed: []byte("ciphertext")}, {SecretId: "extra", Sealed: []byte("ciphertext")}}, wantErr: true},
 		{name: "missing required id", req: []string{"gh-main"}, got: nil, wantErr: true},
 	}
 	for _, tt := range tests {
