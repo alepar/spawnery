@@ -37,6 +37,8 @@ type Service struct {
 
 	deviceSet *deviceSetHandler // device-set registry; nil until WithDeviceSet is called
 
+	nodeRevocations store.NodeRevocationRepo
+
 	mu     sync.Mutex
 	tokens map[string]enrollToken // pending one-time enrollment tokens
 }
@@ -79,6 +81,11 @@ func WithDeviceSet(st store.DeviceSetRepo, spaOrigin string, accountFromReq Acco
 			accountFromReq: accountFromReq,
 		}
 	}
+}
+
+// WithNodeRevocations attaches the AS-published node deny-list store.
+func WithNodeRevocations(st store.NodeRevocationRepo) Option {
+	return func(s *Service) { s.nodeRevocations = st }
 }
 
 // New builds a Service from an in-memory root cert + self-hosted intermediate CA.

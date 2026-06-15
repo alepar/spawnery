@@ -90,6 +90,12 @@ type DeviceSetRepo interface {
 	FetchAll(ctx context.Context, accountID string) ([][]byte, error)
 }
 
+type NodeRevocationRepo interface {
+	Revoke(ctx context.Context, nodeID, reason string, revokedAt int64) error
+	IsRevoked(ctx context.Context, nodeID string) (bool, error)
+	List(ctx context.Context) ([]NodeRevocation, error)
+}
+
 type Store interface {
 	Users() UserRepo
 	RefreshSessions() RefreshSessionRepo
@@ -97,6 +103,7 @@ type Store interface {
 	DeviceGrants() DeviceGrantRepo
 	Revocations() RevocationRepo
 	DeviceSets() DeviceSetRepo
+	NodeRevocations() NodeRevocationRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error

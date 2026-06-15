@@ -92,9 +92,16 @@ type RevocationEvent struct {
 type DeviceSetEntry struct {
 	bun.BaseModel `bun:"table:device_set_entries,alias:dse"`
 	AccountID     string `bun:"account_id,pk,notnull"`
-	Version       uint64 `bun:"version,pk,notnull"` // monotonic; genesis = 1
-	PrevHash      []byte `bun:"prev_hash"`          // NULL for genesis
-	HeadHash      []byte `bun:"head_hash,notnull"`  // encodeFields(Body, sigs...) chain hash
+	Version       uint64 `bun:"version,pk,notnull"`  // monotonic; genesis = 1
+	PrevHash      []byte `bun:"prev_hash"`           // NULL for genesis
+	HeadHash      []byte `bun:"head_hash,notnull"`   // encodeFields(Body, sigs...) chain hash
 	EntryBytes    []byte `bun:"entry_bytes,notnull"` // json.Marshal(StoredEntry)
 	CreatedAt     int64  `bun:"created_at,notnull"`
+}
+
+type NodeRevocation struct {
+	bun.BaseModel `bun:"table:node_revocations,alias:nr"`
+	NodeID        string `bun:"node_id,pk"`
+	Reason        string `bun:"reason,notnull"`
+	RevokedAt     int64  `bun:"revoked_at,notnull"`
 }
