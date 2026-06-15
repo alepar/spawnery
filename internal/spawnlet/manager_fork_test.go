@@ -63,12 +63,16 @@ func (b *recordingForkBackend) ExportDelta(ctx context.Context, spawnID string, 
 }
 
 type recordingForkJournal struct {
-	rec            *forkOpRecorder
-	finalErr       error
-	finalErrOnCall int
-	finalCalls     int
-	suspended      map[string]bool
-	closeSawCancel bool
+	rec              *forkOpRecorder
+	finalErr         error
+	finalErrOnCall   int
+	finalCalls       int
+	suspended        map[string]bool
+	closeSawCancel   bool
+	artifactPayloads map[string][]byte
+	artifactDescs    map[string]journal.ArtifactDescriptor
+	putArtifacts     []journal.ArtifactDescriptor
+	putPayloads      []string
 }
 
 func (j *recordingForkJournal) RequestSnapshot(_ context.Context, spawnID string, gen uint64, _ journal.Mount) {
@@ -123,17 +127,34 @@ func (j *recordingForkJournal) LatestForGeneration(context.Context, string, stri
 
 func (j *recordingForkJournal) PutArtifact(_ context.Context, spawnID string, generation uint64, desc journal.ArtifactDescriptor, r io.Reader) (journal.ArtifactDescriptor, error) {
 	j.rec.add(fmt.Sprintf("put-fork-rootfs-artifact:%s:%d", spawnID, generation))
-	_, _ = io.Copy(io.Discard, r)
+	payload, _ := io.ReadAll(r)
+	j.putPayloads = append(j.putPayloads, string(payload))
 	desc.SpawnID = spawnID
 	desc.Generation = generation
 	if desc.ArtifactID == "" {
 		desc.ArtifactID = "fork-rootfs"
 	}
+	j.putArtifacts = append(j.putArtifacts, desc)
 	return desc, nil
 }
 
-func (j *recordingForkJournal) GetArtifact(context.Context, string, uint64, string, io.Writer) (journal.ArtifactDescriptor, error) {
-	return journal.ArtifactDescriptor{}, nil
+func (j *recordingForkJournal) GetArtifact(_ context.Context, spawnID string, generation uint64, artifactID string, w io.Writer) (journal.ArtifactDescriptor, error) {
+	key := forkArtifactKey(spawnID, generation, artifactID)
+	if payload, ok := j.artifactPayloads[key]; ok {
+		_, _ = w.Write(payload)
+		desc := j.artifactDescs[key]
+		if desc.ArtifactID == "" {
+			desc.ArtifactID = artifactID
+		}
+		if desc.SpawnID == "" {
+			desc.SpawnID = spawnID
+		}
+		if desc.Generation == 0 {
+			desc.Generation = generation
+		}
+		return desc, nil
+	}
+	return journal.ArtifactDescriptor{}, fmt.Errorf("missing artifact %s", key)
 }
 func (j *recordingForkJournal) ListArtifacts(context.Context, string, uint64, string) ([]journal.ArtifactDescriptor, error) {
 	return nil, nil
@@ -164,6 +185,10 @@ func newForkTestManager(t *testing.T, rec *forkOpRecorder, j *recordingForkJourn
 		return nil
 	}
 	return m, fb
+}
+
+func forkArtifactKey(spawnID string, generation uint64, artifactID string) string {
+	return fmt.Sprintf("%s/%d/%s", spawnID, generation, artifactID)
 }
 
 func putForkSource(t *testing.T, m *Manager, sourceID string, generation uint64) {
@@ -220,6 +245,60 @@ func TestForkSameNodeCapturesMountsAndRootfsUnderOnePause(t *testing.T) {
 		"final-snapshot:sp-fork:1",
 	}
 	assertForkOpsPrefix(t, rec.snapshot(), want)
+}
+
+func TestForkSameNodeCopiesInheritedRootfsArtifactChainAsForkOwned(t *testing.T) {
+	ctx := context.Background()
+	rec := &forkOpRecorder{}
+	inherited := journal.ArtifactDescriptor{
+		ArtifactID:      "source-rootfs-gen9-seq1",
+		Type:            journal.ArtifactRootfsDelta,
+		Generation:      9,
+		Sequence:        1,
+		BaseImageDigest: "agent@sha256:base",
+		Format:          journal.ArtifactFormatOCILayout,
+	}
+	j := &recordingForkJournal{
+		rec: rec,
+		artifactPayloads: map[string][]byte{
+			forkArtifactKey("sp-source", 9, inherited.ArtifactID): []byte("source-rootfs-layer-1"),
+		},
+		artifactDescs: map[string]journal.ArtifactDescriptor{
+			forkArtifactKey("sp-source", 9, inherited.ArtifactID): inherited,
+		},
+	}
+	m, _ := newForkTestManager(t, rec, j)
+	putForkSource(t, m, "sp-source", 9)
+	src, ok := m.store.Get("sp-source")
+	if !ok {
+		t.Fatal("missing source")
+	}
+	src.LaunchImageRef = runtime.DeltaTag("sp-source")
+	src.RootfsArtifacts = []RootfsArtifact{rootfsArtifactFromJournal(inherited)}
+	src.DeltaDepth = 1
+
+	res, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
+		SourceSpawnID:    "sp-source",
+		ForkSpawnID:      "sp-fork",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+	})
+	if err != nil {
+		t.Fatalf("ForkSameNode: %v", err)
+	}
+	if len(res.RootfsArtifacts) != 2 {
+		t.Fatalf("rootfs artifact chain = %+v, want inherited + fork top layer", res.RootfsArtifacts)
+	}
+	if got := res.RootfsArtifacts[0]; got.ArtifactID != inherited.ArtifactID || got.Generation != 1 || got.Sequence != 1 {
+		t.Fatalf("inherited fork-owned artifact = %+v", got)
+	}
+	if got := res.RootfsArtifacts[1]; got.Generation != 1 || got.Sequence != 2 {
+		t.Fatalf("fork top-layer artifact = %+v", got)
+	}
+	if len(j.putArtifacts) != 2 || j.putArtifacts[0].SpawnID != "sp-fork" || j.putArtifacts[0].Generation != 1 ||
+		j.putArtifacts[0].ArtifactID != inherited.ArtifactID || j.putPayloads[0] != "source-rootfs-layer-1" {
+		t.Fatalf("copied inherited artifact puts=%+v payloads=%+v", j.putArtifacts, j.putPayloads)
+	}
 }
 
 func TestForkSameNodeFailsClosedWhenRequiredGenerationHoldIsUnwired(t *testing.T) {

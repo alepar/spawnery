@@ -201,7 +201,7 @@ func TestSweepFailedForksReclaimsStaleRestoringForks(t *testing.T) {
 	s, st := newForkCleanupTestServer(t)
 	ctx := context.Background()
 	s.claimTTL = time.Second
-	s.now = func() time.Time { return time.Unix(0, int64(defaultForkMaterializeTimeout+5*time.Second)) }
+	s.now = func() time.Time { return time.Unix(0, int64(staleRestoringForkGrace(s.claimTTL)+5*time.Second)) }
 	seedPartialFork(t, st, "source-stale-restoring")
 	seedPartialFork(t, st, "fork-stale-restoring")
 	if err := st.TransferSets().Create(ctx, store.TransferSet{
@@ -281,6 +281,44 @@ func TestSweepFailedForksDoesNotReclaimRestoringForkWithinMaterializeTimeout(t *
 	}
 	if _, err := st.Spawns().Get(ctx, "fork-active-restoring"); err != nil {
 		t.Fatalf("active restoring fork should remain visible, err=%v", err)
+	}
+}
+
+func TestSweepFailedForksDoesNotReclaimRestoringForkAcrossBoundaryAndMaterializeTimeouts(t *testing.T) {
+	s, st := newForkCleanupTestServer(t)
+	ctx := context.Background()
+	s.claimTTL = time.Second
+	now := time.Unix(0, int64(defaultForkMaterializeTimeout+defaultForkMaterializeTimeout/2))
+	s.now = func() time.Time { return now }
+	seedPartialFork(t, st, "source-long-restoring")
+	seedPartialFork(t, st, "fork-long-restoring")
+	if err := st.TransferSets().Create(ctx, store.TransferSet{
+		ID:                "ts-long-restoring",
+		Kind:              store.TransferSetFork,
+		SpawnID:           "fork-long-restoring",
+		SourceSpawnID:     "source-long-restoring",
+		ForkSpawnID:       "fork-long-restoring",
+		SourceGeneration:  3,
+		TargetGeneration:  1,
+		SourceNodeID:      "source-node",
+		TargetNodeID:      "target-node",
+		TransferKeyStatus: store.TransferKeyPending,
+		Status:            store.TransferSetRestoring,
+		CreatedAt:         100,
+		UpdatedAt:         0,
+	}); err != nil {
+		t.Fatalf("Create long restoring fork transfer set: %v", err)
+	}
+
+	res := &recordingForkResources{}
+	if err := s.sweepFailedForks(ctx, res); err != nil {
+		t.Fatalf("sweepFailedForks: %v", err)
+	}
+	if len(res.ops) != 0 {
+		t.Fatalf("restoring fork within boundary+materialize window must not be reclaimed, ops=%v", res.ops)
+	}
+	if _, err := st.Spawns().Get(ctx, "fork-long-restoring"); err != nil {
+		t.Fatalf("long restoring fork should remain visible, err=%v", err)
 	}
 }
 

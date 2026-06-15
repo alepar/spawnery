@@ -230,6 +230,9 @@ func (s *Server) sweepFailedForks(ctx context.Context, resources failedForkResou
 }
 
 func (s *Server) staleRestoringForkBefore() time.Time {
-	grace := defaultForkMaterializeTimeout + s.claimTTL
-	return s.now().Add(-grace)
+	return s.now().Add(-staleRestoringForkGrace(s.claimTTL))
+}
+
+func staleRestoringForkGrace(claimTTL time.Duration) time.Duration {
+	return 2*defaultForkMaterializeTimeout + defaultResumeTimeout + claimTTL
 }

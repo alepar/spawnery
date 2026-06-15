@@ -520,6 +520,15 @@ type RootfsArtifact struct {
 	ProducerRuntime  string
 }
 
+func cloneRootfsArtifacts(in []RootfsArtifact) []RootfsArtifact {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]RootfsArtifact, len(in))
+	copy(out, in)
+	return out
+}
+
 type SuspendResult struct {
 	MountMarkers    map[string]string
 	RootfsArtifacts []RootfsArtifact
@@ -898,6 +907,9 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			deltaDepth = drec.Depth
 		}
 	}
+	if len(sel.RootfsArtifacts) > deltaDepth {
+		deltaDepth = len(sel.RootfsArtifacts)
+	}
 
 	sp := &Spawn{
 		ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
@@ -907,6 +919,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		BaseImageDigest: baseDigest,
 		LaunchImageRef:  launchImage, // delta tag on same-node resume, base ref on fresh create
 		DeltaDepth:      deltaDepth,
+		RootfsArtifacts: cloneRootfsArtifacts(sel.RootfsArtifacts),
 	}
 	m.store.Put(sp)
 	return sp, nil
@@ -1030,6 +1043,7 @@ func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceG
 	if sourceGeneration == 0 {
 		return fmt.Errorf("rootfs artifact restore for %s: missing source generation", id)
 	}
+	importBaseRef := baseRef
 	for i, art := range artifacts {
 		if art.ArtifactID == "" {
 			return fmt.Errorf("rootfs artifact restore for %s: empty artifact id (restore must be pinned)", id)
@@ -1059,9 +1073,10 @@ func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceG
 			return fmt.Errorf("rootfs artifact restore for %s: journal returned artifact %s base digest %s, want %s",
 				id, art.ArtifactID, desc.BaseImageDigest, baseRef)
 		}
-		if _, err := m.pod.ImportDelta(ctx, id, baseRef, bytes.NewReader(payload.Bytes())); err != nil {
+		if _, err := m.pod.ImportDelta(ctx, id, importBaseRef, bytes.NewReader(payload.Bytes())); err != nil {
 			return fmt.Errorf("rootfs artifact restore for %s: import artifact %s: %w", id, art.ArtifactID, err)
 		}
+		importBaseRef = runtime.DeltaTag(id)
 	}
 	return nil
 }

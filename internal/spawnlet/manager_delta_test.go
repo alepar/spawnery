@@ -13,6 +13,7 @@ package spawnlet
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -269,6 +270,39 @@ func TestCreateRestoresPinnedRootfsArtifactBeforeLaunch(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(fb.ops, ","), "import:"+spawnID) {
 		t.Fatalf("expected ImportDelta before launch, ops=%v", fb.ops)
+	}
+}
+
+func TestCreateRestoresRootfsArtifactChainSequentially(t *testing.T) {
+	ctx := context.Background()
+	const (
+		spawnID = "sp-chain-target"
+		base    = "agent@sha256:base"
+	)
+	fb := &fakePodBackend{ensureImageRef: runtime.DeltaTag(spawnID)}
+	fj := newFakeJournal("")
+	fj.artifactPayloads["artifact-rootfs-seq1"] = []byte("layer-1")
+	fj.artifactPayloads["artifact-rootfs-seq2"] = []byte("layer-2")
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
+		DeltaCapture: true,
+	})
+	m.SetJournal(fj, t.TempDir())
+
+	_, err := m.CreateWithSelection(ctx, spawnID, writeApp(t), "model", "", "", 5, AgentSelection{
+		BaseImageDigest:        base,
+		RootfsSourceGeneration: 4,
+		RootfsArtifacts: []RootfsArtifact{
+			{ArtifactID: "artifact-rootfs-seq1", Generation: 4, Sequence: 1, BaseImageDigest: base, Format: journal.ArtifactFormatOCILayout},
+			{ArtifactID: "artifact-rootfs-seq2", Generation: 4, Sequence: 2, BaseImageDigest: base, Format: journal.ArtifactFormatOCILayout},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateWithSelection: %v", err)
+	}
+	want := []string{base, runtime.DeltaTag(spawnID)}
+	if !reflect.DeepEqual(fb.importBaseRefs, want) {
+		t.Fatalf("rootfs artifact import bases = %v, want sequential chain %v", fb.importBaseRefs, want)
 	}
 }
 

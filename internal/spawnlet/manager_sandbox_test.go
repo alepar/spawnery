@@ -22,6 +22,7 @@ type fakePodBackend struct {
 	captureErr     error    // if non-nil, CaptureDelta returns this
 	resolveDigest  string   // returned by ResolveImageDigest
 	ensureImageRef string   // returned by EnsureImage (empty -> returns baseRef)
+	importBaseRefs []string // baseRef observed by ImportDelta, in call order
 
 	// GC tracking.
 	releasedSpawn string // set by ReleaseDelta with the spawnID
@@ -101,8 +102,9 @@ func (f *fakePodBackend) ExportDelta(_ context.Context, spawnID string, w io.Wri
 	_, err := w.Write([]byte(runtime.DeltaTag(spawnID)))
 	return err
 }
-func (f *fakePodBackend) ImportDelta(_ context.Context, spawnID, _ string, r io.Reader) (string, error) {
+func (f *fakePodBackend) ImportDelta(_ context.Context, spawnID, baseRef string, r io.Reader) (string, error) {
 	f.ops = append(f.ops, "import:"+spawnID)
+	f.importBaseRefs = append(f.importBaseRefs, baseRef)
 	_, _ = io.Copy(io.Discard, r)
 	return runtime.DeltaTag(spawnID), nil
 }

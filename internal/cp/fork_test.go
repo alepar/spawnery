@@ -462,6 +462,44 @@ func TestForkSpawnDefaultsToSameNode(t *testing.T) {
 	}
 }
 
+func TestForkSpawnSameNodeStartsFromLocalForkDeltaWithoutRootfsRestore(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	sender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+	stopAck := goAckStarts(s, sender)
+	defer stopAck()
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	s.forkMaterializer = &recordingForkMaterializer{nodeID: "node-1", rootfsPins: []store.RootfsArtifactPin{{
+		ArtifactID:      "rootfs-fork-gen1",
+		Generation:      1,
+		Sequence:        2,
+		BaseImageDigest: "sha256:base",
+		Format:          "oci_layout",
+	}}}
+
+	resp, err := s.ForkSpawn(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.ForkSpawnRequest{
+		SpawnId: "sp-source",
+	}))
+	if err != nil {
+		t.Fatalf("ForkSpawn: %v", err)
+	}
+	start := sender.firstStart()
+	if start == nil || start.GetSpawnId() != resp.Msg.ForkSpawnId {
+		t.Fatalf("same-node fork StartSpawn = %+v, want fork %s", start, resp.Msg.ForkSpawnId)
+	}
+	if start.GetRootfsSourceGeneration() != 0 || len(start.GetRootfsArtifacts()) != 0 {
+		t.Fatalf("same-node fork must launch from local fork delta without lossy rootfs restore, gen=%d artifacts=%+v",
+			start.GetRootfsSourceGeneration(), start.GetRootfsArtifacts())
+	}
+	ts, err := s.st.TransferSets().Get(context.Background(), resp.Msg.TransferSetId)
+	if err != nil {
+		t.Fatalf("Get transfer set: %v", err)
+	}
+	if len(ts.RootfsArtifactPins) != 1 || ts.RootfsArtifactPins[0].ArtifactID != "rootfs-fork-gen1" {
+		t.Fatalf("transfer set should still record fork rootfs artifact pins, got %+v", ts.RootfsArtifactPins)
+	}
+}
+
 func TestForkSpawnIntentEnabledSignsForkStartViaSourcePendingIntent(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	s.SetIntentEnabled(true)

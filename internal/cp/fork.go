@@ -507,7 +507,11 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 	if nodeID == "" {
 		nodeID = targetNode
 	}
-	nodeID, err = s.startFork(ctx, owner, sourceID, fork, nodeID, targetGeneration, result.RootfsPins)
+	startRootfsPins := result.RootfsPins
+	if nodeID == live.NodeID {
+		startRootfsPins = nil
+	}
+	nodeID, err = s.startFork(ctx, owner, sourceID, fork, nodeID, targetGeneration, startRootfsPins)
 	if err != nil {
 		s.rt.StopOnNode(forkID)
 		s.rt.Drop(forkID)

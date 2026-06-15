@@ -175,6 +175,10 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 	if err := m.pod.ExportDelta(ctx, req.ForkSpawnID, &rootfsPayload); err != nil {
 		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: export fork rootfs delta: %w", err)
 	}
+	rootfsArtifacts, err := m.copyForkRootfsArtifacts(ctx, sp, req.ForkSpawnID, targetGen)
+	if err != nil {
+		return ForkSameNodeResult{}, err
+	}
 
 	stageRoot, err := os.MkdirTemp(m.cfg.DataRoot, "fork-seed-"+req.ForkSpawnID+"-")
 	if err != nil {
@@ -200,7 +204,7 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 
 	rootfsDesc := journal.ArtifactDescriptor{
 		Type:            journal.ArtifactRootfsDelta,
-		Sequence:        sp.DeltaDepth + 1,
+		Sequence:        nextRootfsArtifactSequence(sp.DeltaDepth, rootfsArtifacts),
 		BaseImageDigest: sp.BaseImageDigest,
 		Format:          journal.ArtifactFormatOCILayout,
 		ProducerNodeID:  m.cfg.NodeID,
@@ -224,11 +228,93 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 	for name, pin := range forkPins {
 		mountPins[name] = pin.String()
 	}
+	rootfsArtifacts = append(rootfsArtifacts, rootfsArtifactFromJournal(storedRootfs))
 	return ForkSameNodeResult{
 		NodeID:          m.cfg.NodeID,
 		MountPins:       mountPins,
-		RootfsArtifacts: []RootfsArtifact{rootfsArtifactFromJournal(storedRootfs)},
+		RootfsArtifacts: rootfsArtifacts,
 	}, nil
+}
+
+func (m *Manager) copyForkRootfsArtifacts(ctx context.Context, sp *Spawn, forkID string, targetGen uint64) ([]RootfsArtifact, error) {
+	if len(sp.RootfsArtifacts) == 0 {
+		return nil, nil
+	}
+	out := make([]RootfsArtifact, 0, len(sp.RootfsArtifacts))
+	for _, art := range sp.RootfsArtifacts {
+		if art.ArtifactID == "" {
+			return nil, fmt.Errorf("fork same-node: source rootfs artifact has empty artifact id")
+		}
+		sourceGen := art.Generation
+		if sourceGen == 0 {
+			sourceGen = sp.Generation
+		}
+		var payload bytes.Buffer
+		desc, err := m.journal.GetArtifact(ctx, sp.ID, sourceGen, art.ArtifactID, &payload)
+		if err != nil {
+			return nil, fmt.Errorf("fork same-node: get inherited rootfs artifact %s: %w", art.ArtifactID, err)
+		}
+		desc = forkRootfsCopyDescriptor(desc, art, sp.BaseImageDigest, m.cfg.NodeID, m.rootfsProducerRuntime())
+		stored, err := m.journal.PutArtifact(ctx, forkID, targetGen, desc, bytes.NewReader(payload.Bytes()))
+		if err != nil {
+			return nil, fmt.Errorf("fork same-node: put inherited rootfs artifact %s: %w", art.ArtifactID, err)
+		}
+		out = append(out, rootfsArtifactFromJournal(stored))
+	}
+	return out, nil
+}
+
+func forkRootfsCopyDescriptor(desc journal.ArtifactDescriptor, art RootfsArtifact, baseImageDigest, nodeID, producerRuntime string) journal.ArtifactDescriptor {
+	if desc.ArtifactID == "" {
+		desc.ArtifactID = art.ArtifactID
+	}
+	if desc.Type == "" {
+		desc.Type = journal.ArtifactRootfsDelta
+	}
+	if desc.Sequence == 0 {
+		desc.Sequence = art.Sequence
+	}
+	if desc.BaseImageDigest == "" {
+		desc.BaseImageDigest = art.BaseImageDigest
+	}
+	if desc.BaseImageDigest == "" {
+		desc.BaseImageDigest = baseImageDigest
+	}
+	if desc.Format == "" {
+		desc.Format = art.Format
+	}
+	if desc.Format == "" {
+		desc.Format = journal.ArtifactFormatOCILayout
+	}
+	if desc.ContentDigest == "" {
+		desc.ContentDigest = art.ContentDigest
+	}
+	if desc.UncompressedSize == 0 {
+		desc.UncompressedSize = art.UncompressedSize
+	}
+	if desc.ProducerNodeID == "" {
+		desc.ProducerNodeID = art.ProducerNodeID
+	}
+	if desc.ProducerNodeID == "" {
+		desc.ProducerNodeID = nodeID
+	}
+	if desc.ProducerRuntime == "" {
+		desc.ProducerRuntime = art.ProducerRuntime
+	}
+	if desc.ProducerRuntime == "" {
+		desc.ProducerRuntime = producerRuntime
+	}
+	return desc
+}
+
+func nextRootfsArtifactSequence(deltaDepth int, artifacts []RootfsArtifact) int {
+	next := deltaDepth + 1
+	for _, art := range artifacts {
+		if art.Sequence >= next {
+			next = art.Sequence + 1
+		}
+	}
+	return next
 }
 
 func (m *Manager) UnpauseIfPaused(ctx context.Context, spawnID string, generation int64) error {
