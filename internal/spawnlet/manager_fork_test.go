@@ -3,6 +3,7 @@ package spawnlet
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -67,6 +68,7 @@ type recordingForkJournal struct {
 	finalErrOnCall int
 	finalCalls     int
 	suspended      map[string]bool
+	closeSawCancel bool
 }
 
 func (j *recordingForkJournal) RequestSnapshot(_ context.Context, spawnID string, gen uint64, _ journal.Mount) {
@@ -86,9 +88,12 @@ func (j *recordingForkJournal) WarmSnapshot(_ context.Context, spawnID string, g
 	return out, nil
 }
 
-func (j *recordingForkJournal) FinalSnapshot(_ context.Context, spawnID string, gen uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
+func (j *recordingForkJournal) FinalSnapshot(ctx context.Context, spawnID string, gen uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
 	j.rec.add(fmt.Sprintf("final-snapshot:%s:%d", spawnID, gen))
 	j.finalCalls++
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if j.finalErr != nil && (j.finalErrOnCall == 0 || j.finalErrOnCall == j.finalCalls) {
 		return nil, j.finalErr
 	}
@@ -134,8 +139,12 @@ func (j *recordingForkJournal) ListArtifacts(context.Context, string, uint64, st
 	return nil, nil
 }
 func (j *recordingForkJournal) QuickMaintenance(context.Context, string) error { return nil }
-func (j *recordingForkJournal) Close(_ context.Context, spawnID string) error {
+func (j *recordingForkJournal) Close(ctx context.Context, spawnID string) error {
 	j.rec.add(fmt.Sprintf("close-journal:%s", spawnID))
+	if err := ctx.Err(); err != nil {
+		j.closeSawCancel = true
+		return err
+	}
 	if j.suspended != nil {
 		delete(j.suspended, spawnID)
 	}
@@ -273,6 +282,50 @@ func TestForkCaptureFailureUnpausesAndRestartsWatchers(t *testing.T) {
 	}
 	if bytes.Contains([]byte(strings.Join(rec.snapshot(), ",")), []byte("capture-rootfs-as")) {
 		t.Fatalf("rootfs capture must not run after failed final snapshot, ops=%v", rec.snapshot())
+	}
+}
+
+func TestForkSameNodeHonorsCancellationDuringCaptureAndRestoresSource(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &forkOpRecorder{}
+	j := &recordingForkJournal{rec: rec}
+	m, fb := newForkTestManager(t, rec, j)
+	m.forkSyncFn = func(context.Context) error {
+		rec.add("sync-host")
+		cancel()
+		return nil
+	}
+	putForkSource(t, m, "sp-source", 9)
+
+	_, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
+		SourceSpawnID:    "sp-source",
+		ForkSpawnID:      "sp-fork",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ForkSameNode error = %v, want context.Canceled", err)
+	}
+	ops := rec.snapshot()
+	for _, forbidden := range []string{
+		"capture-rootfs-as:sp-fork",
+		"export-rootfs:sp-fork",
+		"put-fork-rootfs-artifact:sp-fork:1",
+		"final-snapshot:sp-fork:1",
+	} {
+		if indexOfForkOp(ops, forbidden) != -1 {
+			t.Fatalf("canceled fork must stop before %q, ops=%v", forbidden, ops)
+		}
+	}
+	if fb.unpauseCount == 0 {
+		t.Fatalf("canceled fork must still unpause source, ops=%v", ops)
+	}
+	if indexOfForkOp(ops, "close-journal:sp-source") == -1 {
+		t.Fatalf("canceled fork must still close source journal before restarting watchers, ops=%v", ops)
+	}
+	if j.closeSawCancel {
+		t.Fatalf("source restore cleanup must not use the canceled fork context, ops=%v", ops)
 	}
 }
 

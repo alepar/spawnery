@@ -98,7 +98,6 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 	if m.journal == nil {
 		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: journaler is required to seed fork repo")
 	}
-	ctx = context.WithoutCancel(ctx)
 	if m.forkGenerationHold == nil {
 		if m.forkGenerationHoldRequired {
 			return ForkSameNodeResult{}, fmt.Errorf("fork same-node: generation hold is required but no generation key manager is wired")
@@ -124,10 +123,11 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 		if sourceRestored {
 			return nil
 		}
-		if err := m.UnpauseIfPaused(ctx, sp.ID, int64(sp.Generation)); err != nil {
+		cleanupCtx := context.WithoutCancel(ctx)
+		if err := m.UnpauseIfPaused(cleanupCtx, sp.ID, int64(sp.Generation)); err != nil {
 			return fmt.Errorf("unpause source %s: %w", sp.ID, err)
 		}
-		if err := m.journal.Close(ctx, sp.ID); err != nil {
+		if err := m.journal.Close(cleanupCtx, sp.ID); err != nil {
 			return fmt.Errorf("close source journal %s before watcher restart: %w", sp.ID, err)
 		}
 		m.setWatchers(sp, m.startJournalWatchers(sp.ID, sp.Generation, sp.JournalMounts))
