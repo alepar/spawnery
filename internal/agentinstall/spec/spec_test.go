@@ -36,6 +36,12 @@ func TestManifestRoundTripWithSchemaVersion(t *testing.T) {
 				Targets: []string{"claude"},
 				Config:  &spec.ConfigPayload{Normalized: map[string]interface{}{"approvalPosture": "strict"}},
 			},
+			{
+				Kind:    spec.KindPlugin,
+				Name:    "my-plugin",
+				Targets: []string{"claude"},
+				Plugin:  &spec.PluginPayload{Plugin: "p", Marketplace: "mp", Source: "./mp", LocalFile: "./p.js", NPM: "", RequiresOAuth: true},
+			},
 		},
 	}
 	data, err := json.Marshal(m)
@@ -52,8 +58,11 @@ func TestManifestRoundTripWithSchemaVersion(t *testing.T) {
 	if m2.SchemaVersion != spec.CurrentSchemaVersion {
 		t.Errorf("SchemaVersion: got %d want %d", m2.SchemaVersion, spec.CurrentSchemaVersion)
 	}
-	if len(m2.Artifacts) != 3 || m2.Artifacts[1].MCP == nil || m2.Artifacts[1].MCP.Stdio == nil {
+	if len(m2.Artifacts) != 4 || m2.Artifacts[1].MCP == nil || m2.Artifacts[1].MCP.Stdio == nil {
 		t.Fatalf("artifacts not round-tripped: %+v", m2.Artifacts)
+	}
+	if m2.Artifacts[3].Plugin == nil || m2.Artifacts[3].Plugin.Marketplace != "mp" || !m2.Artifacts[3].Plugin.RequiresOAuth {
+		t.Fatalf("plugin not round-tripped: %+v", m2.Artifacts)
 	}
 }
 

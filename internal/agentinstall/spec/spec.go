@@ -25,6 +25,7 @@ const (
 	KindSkill  Kind = "skill"
 	KindMCP    Kind = "mcp"
 	KindConfig Kind = "config"
+	KindPlugin Kind = "plugin"
 )
 
 // SkillPayload is the skill artifact payload.
@@ -62,6 +63,23 @@ type ConfigPayload struct {
 	Native map[string]interface{} `json:"native,omitempty"`
 }
 
+// PluginPayload is the plugin artifact payload (local / image-baked install).
+type PluginPayload struct {
+	// Plugin is the plugin name (identity within a marketplace).
+	Plugin string `json:"plugin"`
+	// Marketplace is the marketplace name; the enable key is "<Plugin>@<Marketplace>".
+	Marketplace string `json:"marketplace"`
+	// Source is the local/baked marketplace source (path); claude+codex.
+	Source string `json:"source,omitempty"`
+	// LocalFile is an opencode local plugin file path (preferred, offline).
+	LocalFile string `json:"localFile,omitempty"`
+	// NPM is an opencode npm module spec (best-effort: needs registry egress at cold start).
+	NPM string `json:"npm,omitempty"`
+	// RequiresOAuth marks a codex plugin whose marketplace implies an OAuth ON_INSTALL
+	// app/MCP — cannot complete headless, so codex no-ops + reports.
+	RequiresOAuth bool `json:"requiresOAuth,omitempty"`
+}
+
 // Artifact is the canonical descriptor of a single logical artifact.
 // Targets is either a list of agent names (claude|codex|opencode|hermes|goose)
 // or the string "all-detected".
@@ -70,10 +88,11 @@ type Artifact struct {
 	Name    string   `json:"name"`
 	Targets []string `json:"targets"`
 
-	// Exactly one of Skill, MCP, or Config is set (matching Kind).
+	// Exactly one of Skill, MCP, Config, or Plugin is set (matching Kind).
 	Skill  *SkillPayload  `json:"skill,omitempty"`
 	MCP    *MCPPayload    `json:"mcp,omitempty"`
 	Config *ConfigPayload `json:"config,omitempty"`
+	Plugin *PluginPayload `json:"plugin,omitempty"`
 
 	// Payload is the relative path within the staging dir to the artifact payload.
 	Payload string `json:"payload,omitempty"`
