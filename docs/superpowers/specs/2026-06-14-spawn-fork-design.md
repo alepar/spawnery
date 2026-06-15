@@ -283,3 +283,4 @@ the assumptions above — append a dated note here, whether or not a formal debu
   capture deadline is the wedge detector. Failed-fork unwind remains ordered as v3 states: fence/claim
   the fork row, revoke the fork generation key, empty then drop the fork bucket, and delete the fork row
   last. No compensation-order change is expected from the spike plan.
+- **2026-06-15 (Spike E):** Deterministic representative journal tree measured `19761` files / `164855808` bytes (the plan's earlier count/byte placeholders were inconsistent with the listed files). Warm pre-snapshot p95 was `1.99603684s`; under-pause final snapshot p95/max were `753.587948ms` / `753.587948ms`; rootfs commit p95 was `166.128395ms`; total freeze p95 was `911.527337ms`. Mid-turn source behavior: current turn `not measured` (marker count `0`, truncated `false`); follow-up prompt recovery `false`. Gate decision: `turn_boundary_gate_required=true` because mid-turn source behavior incomplete.
