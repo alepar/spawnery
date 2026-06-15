@@ -21,7 +21,7 @@ func newOpencodeEmitter(xdgConfigHome string) opencodeEmitter {
 				ConfigPath:          configFile,
 				ConfigFormat:        FormatJSONC,
 				SchemaVersion:       "opencode-1.15",
-				ForbiddenConfigKeys: []string{"model"},
+				ForbiddenConfigKeys: []string{"model", "permission"},
 			},
 		},
 	}
@@ -39,4 +39,5 @@ func (e opencodeEmitter) InstallSkill(a Artifact, _ Options) Report {
 }
 
 // InstallMCP is implemented in mcp.go (sp-cywj). ApplyConfig is implemented in config.go (sp-g5x8).
-// approvalPosture is not mapped for opencode (hard-errors on invalid config); use native passthrough.
+// ForbiddenConfigKeys: ["model","permission"] — approvalPosture is not mapped for opencode
+// (hard-errors on invalid config); allowedCommands/deniedCommands go via permission.bash.

@@ -32,6 +32,9 @@ type AgentLayout struct {
 	SchemaVersion string
 	// ForbiddenConfigKeys lists config keys that must never be written by the emitter.
 	ForbiddenConfigKeys []string
+	// RulesDir is the directory where codex execpolicy rules are written.
+	// Empty for agents that do not use an execpolicy rules file.
+	RulesDir string
 }
 
 // Options holds runtime options passed to each emitter method.

@@ -20,7 +20,7 @@ func newClaudeEmitter(homeDir string) claudeEmitter {
 				ConfigPath:          filepath.Join(configRoot, "settings.json"),
 				ConfigFormat:        FormatJSON,
 				SchemaVersion:       "claude-2.1",
-				ForbiddenConfigKeys: []string{"model"},
+				ForbiddenConfigKeys: []string{"model", "permissions"},
 			},
 		},
 	}
@@ -32,4 +32,6 @@ func (e claudeEmitter) InstallSkill(a Artifact, opts Options) Report {
 }
 
 // InstallMCP is implemented in mcp.go (sp-cywj). ApplyConfig is implemented in config.go (sp-g5x8).
-// ForbiddenConfigKeys: ["model"] — model is launcher-regenerated; writing it would cause conflicts.
+// ForbiddenConfigKeys: ["model","permissions"] — model is launcher-regenerated; permissions is
+// managed via normalized keys (approvalPosture, disabledTools, allowedCommands, deniedCommands)
+// and must not be overridden wholesale via native passthrough.

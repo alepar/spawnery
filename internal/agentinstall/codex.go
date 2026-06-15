@@ -21,7 +21,8 @@ func newCodexEmitter(codexHome string) codexEmitter {
 				ConfigPath:          filepath.Join(codexHome, "config.toml"),
 				ConfigFormat:        FormatTOML,
 				SchemaVersion:       "codex-0.139",
-				ForbiddenConfigKeys: []string{"model"},
+				ForbiddenConfigKeys: []string{"model", "approval_policy", "sandbox_mode", "sandbox_workspace_write"},
+				RulesDir:            filepath.Join(codexHome, "rules"),
 			},
 		},
 	}
@@ -33,3 +34,5 @@ func (e codexEmitter) InstallSkill(a Artifact, opts Options) Report {
 }
 
 // InstallMCP is implemented in mcp.go (sp-cywj). ApplyConfig is implemented in config.go (sp-g5x8).
+// ForbiddenConfigKeys: ["model","approval_policy","sandbox_mode","sandbox_workspace_write"] — these
+// are launcher-managed or security-sensitive; allowedCommands/deniedCommands go to RulesDir instead.
