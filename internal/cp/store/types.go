@@ -111,6 +111,8 @@ type Spawn struct {
 	ClaimLeaseID        *string `bun:"claim_lease_id"`
 	ClaimDeadline       *int64  `bun:"claim_deadline"`
 	ForkCaptureDeadline *int64  `bun:"fork_capture_deadline"`
+	ParentSpawnID       *string `bun:"parent_spawn_id"`
+	ForkedAt            *int64  `bun:"forked_at"`
 }
 
 // Container is the running episode. spawn:container = 1-to-0..1 (uniq_live_container on ended_at IS NULL).
@@ -159,6 +161,13 @@ const (
 	TransferSetFailed             TransferSetStatus = "failed"
 )
 
+type TransferSetKind string
+
+const (
+	TransferSetMigration TransferSetKind = "migration"
+	TransferSetFork      TransferSetKind = "fork"
+)
+
 type TransferKeyStatus string
 
 const (
@@ -183,7 +192,10 @@ type RootfsArtifactPin struct {
 type TransferSet struct {
 	bun.BaseModel                 `bun:"table:migration_transfer_sets,alias:mts"`
 	ID                            string              `bun:"id,pk"`
+	Kind                          TransferSetKind     `bun:"kind,notnull"`
 	SpawnID                       string              `bun:"spawn_id,notnull"`
+	SourceSpawnID                 string              `bun:"source_spawn_id,notnull"`
+	ForkSpawnID                   string              `bun:"fork_spawn_id,notnull"`
 	SourceGeneration              uint64              `bun:"source_generation,notnull"`
 	TargetGeneration              uint64              `bun:"target_generation,notnull"`
 	SourceNodeID                  string              `bun:"source_node_id,notnull"`

@@ -1194,6 +1194,12 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 			Generation: gen, JournalKeyDeliveryPending: s.deliveryPending.isPending(sp.ID),
 			TransitionPhase: transPhase, TransitionDetail: transDetail,
 		}
+		if sp.ParentSpawnID != nil {
+			out[i].ParentSpawnId = *sp.ParentSpawnID
+		}
+		if sp.ForkedAt != nil {
+			out[i].ForkedAt = *sp.ForkedAt
+		}
 	}
 	return connect.NewResponse(&cpv1.ListSpawnsResponse{Spawns: out}), nil
 }

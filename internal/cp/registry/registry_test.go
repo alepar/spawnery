@@ -138,3 +138,23 @@ func TestPickForImage(t *testing.T) {
 		t.Fatalf("empty placement should still pick a node")
 	}
 }
+
+func TestRegistryPlacementHonorsMinDiskFreeBytes(t *testing.T) {
+	r := New()
+	r.Add(&Node{ID: "too-small", Max: 1, Free: 9, DiskFreeBytes: 299})
+	r.Add(&Node{ID: "enough", Max: 1, Free: 1, DiskFreeBytes: 300})
+
+	if n := r.PickFor(Placement{MinDiskFreeBytes: 300}); n == nil || n.ID != "enough" {
+		t.Fatalf("PickFor MinDiskFreeBytes=300 = %+v, want enough", n)
+	}
+	if n := r.PickFor(Placement{TargetNodeID: "too-small", MinDiskFreeBytes: 300}); n != nil {
+		t.Fatalf("forced target with insufficient disk picked %+v, want nil", n)
+	}
+	if n := r.PickFor(Placement{TargetNodeID: "missing-telemetry", MinDiskFreeBytes: 1}); n != nil {
+		t.Fatalf("unknown target picked %+v, want nil", n)
+	}
+	r.Add(&Node{ID: "missing-telemetry", Max: 1, Free: 1})
+	if n := r.PickFor(Placement{TargetNodeID: "missing-telemetry", MinDiskFreeBytes: 1}); n != nil {
+		t.Fatalf("node without disk telemetry picked %+v, want fail-closed nil", n)
+	}
+}

@@ -32,6 +32,9 @@ service SpawnService {
   // resume with a placement override on the target. The owner client re-delivers the owner-sealed
   // journal key to the target via DeliverSecrets so the journaled mounts restore there.
   rpc MigrateSpawn(MigrateSpawnRequest) returns (MigrateSpawnResponse);
+  // Source-preserving fork foundation: mint a child spawn and transfer-set fork pin, then delegate
+  // capture/seeding to the fork materializer seam. The source remains ACTIVE throughout.
+  rpc ForkSpawn(ForkSpawnRequest) returns (ForkSpawnResponse);
   // Owner-sealed journal-key ciphertext custody (sp-u53.5.4 deferred to this slice): the owner client
   // fetches the at-rest owner-sealed ciphertext to unseal+reseal on a migration, and (on the
   // node-local -> owner-sealed upgrade) stores it. Owner-only; the CP holds ONLY ciphertext.
@@ -148,6 +151,8 @@ message SpawnSummary {
   // from the live in-flight waiter; empty for all other statuses. Not persisted — cleared on restart.
   string transition_phase  = 13;
   string transition_detail = 14;
+  string parent_spawn_id = 15; // source spawn id when this row was created by ForkSpawn
+  int64  forked_at       = 16; // unix seconds when the fork row was minted
 }
 // Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
 message ListSpawnsRequest  {}
@@ -325,6 +330,17 @@ message MigrateSpawnResponse {
   string node_id = 1;
   // transfer_set_id is the CP-pinned migration transfer set recorded before source capture.
   string transfer_set_id = 2;
+}
+message ForkSpawnRequest {
+  string spawn_id = 1;        // source spawn id, matching existing lifecycle RPC naming
+  string target_node_id = 2;  // optional exact target; empty defaults to same node
+  string target_class = 3;    // optional class picker; mutually exclusive with target_node_id
+  string name = 4;            // optional fork display name
+}
+message ForkSpawnResponse {
+  string fork_spawn_id = 1;
+  string transfer_set_id = 2;
+  string node_id = 3;
 }
 
 // JournalKeyCiphertext is one mount's owner-sealed journal-password ciphertext (a JSON-encoded

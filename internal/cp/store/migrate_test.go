@@ -113,3 +113,60 @@ func TestSQLiteDownForkingDeletesDependentRows(t *testing.T) {
 		t.Fatalf("foreign_key_check rows: %v", err)
 	}
 }
+
+func TestSQLiteDownForkContractDropsAddedColumns(t *testing.T) {
+	sqldb, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqldb.Close()
+
+	goose.SetBaseFS(migrationsFS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(sqldb, "migrations/sqlite", 16); err != nil {
+		t.Fatalf("migrate up to 16: %v", err)
+	}
+	if err := goose.DownTo(sqldb, "migrations/sqlite", 15); err != nil {
+		t.Fatalf("migrate down to 15: %v", err)
+	}
+
+	cols := func(table string) map[string]bool {
+		t.Helper()
+		rows, err := sqldb.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			t.Fatalf("table_info %s: %v", table, err)
+		}
+		defer rows.Close()
+		out := map[string]bool{}
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notnull int
+			var dflt any
+			var pk int
+			if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+				t.Fatalf("scan table_info %s: %v", table, err)
+			}
+			out[name] = true
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("table_info rows %s: %v", table, err)
+		}
+		return out
+	}
+	spawns := cols("spawns")
+	for _, col := range []string{"parent_spawn_id", "forked_at"} {
+		if spawns[col] {
+			t.Fatalf("spawns.%s still present after rollback", col)
+		}
+	}
+	transferSets := cols("migration_transfer_sets")
+	for _, col := range []string{"kind", "source_spawn_id", "fork_spawn_id"} {
+		if transferSets[col] {
+			t.Fatalf("migration_transfer_sets.%s still present after rollback", col)
+		}
+	}
+}

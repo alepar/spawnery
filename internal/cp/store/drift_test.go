@@ -37,10 +37,11 @@ func TestSchemaDriftSqlite(t *testing.T) {
 	check("apps", "id", "display_name", "summary", "tags", "visibility", "listed", "created_at", "creator_id")
 	check("app_versions", "app_id", "version", "ref", "tier", "created_at", "manifest")
 	check("app_version_mounts", "app_id", "version", "name", "required", "path", "seed")
-	check("spawns", "id", "owner_id", "name", "app_id", "app_version", "app_ref", "pinned", "model", "image", "runnable_id", "mode", "status", "recovered", "created_at", "last_used_at", "suspended_at", "deleted_at", "status_seq", "claim_holder", "claim_lease_id", "claim_deadline", "fork_capture_deadline")
+	check("spawns", "id", "owner_id", "name", "app_id", "app_version", "app_ref", "pinned", "model", "image", "runnable_id", "mode", "status", "recovered", "created_at", "last_used_at", "suspended_at", "deleted_at", "status_seq", "claim_holder", "claim_lease_id", "claim_deadline", "fork_capture_deadline", "parent_spawn_id", "forked_at")
 	check("spawn_containers", "spawn_id", "generation", "node_id", "phase", "started_at", "ended_at")
 	check("spawn_mounts", "spawn_id", "name", "backend_uri", "persist_marker")
 	check("spawn_artifacts", "spawn_id", "artifact_id", "inline", "content_type", "target_container", "dest_path", "mode", "sensitive", "env_var_name")
+	check("migration_transfer_sets", "id", "kind", "spawn_id", "source_spawn_id", "fork_spawn_id", "source_generation", "target_generation", "source_node_id", "target_node_id", "base_image_digest", "mount_manifest_pins", "rootfs_artifact_pins", "transfer_key_ciphertext_metadata", "transfer_key_status", "status", "created_at", "updated_at")
 }
 
 func TestSchemaDriftSqliteTypes(t *testing.T) {
@@ -73,6 +74,9 @@ func TestSchemaDriftSqliteTypes(t *testing.T) {
 		{"spawns", "status_seq"}:            "INTEGER",
 		{"spawns", "claim_deadline"}:        "INTEGER",
 		{"spawns", "fork_capture_deadline"}: "INTEGER",
+		{"spawns", "parent_spawn_id"}:       "TEXT",
+		{"spawns", "forked_at"}:             "INTEGER",
+		{"migration_transfer_sets", "kind"}: "TEXT",
 		{"app_versions", "tier"}:            "TEXT",
 		{"spawn_containers", "generation"}:  "INTEGER",
 		{"spawn_containers", "ended_at"}:    "INTEGER",
