@@ -576,3 +576,10 @@ user branches; an agent's own pushes to a protected branch are the agent/user's 
 
 *As this design is implemented and iterated on -- bug fixes, adjustments, anything that diverged from
 the assumptions above -- append a dated note here, whether or not a formal debugging skill was used.*
+
+- 2026-06-15: Resolved spike `sp-v40s.4` for horizontally scaled AS response-wrap redemption.
+  Production multi-instance AS deployments must use a shared volatile response-wrap store with
+  atomic redeem-and-delete semantics, encrypted payloads, short TTL, auth-bound redemption, and no
+  durable plaintext tuple persistence. Sticky-session pinning is acceptable only as a single-instance
+  or temporary development posture, not as the production scaling mechanism. See
+  `deploy/authsvc/README.md`.
