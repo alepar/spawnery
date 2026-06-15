@@ -65,6 +65,57 @@ func (s *Server) liveNode(ctx context.Context, spawnID string) (nodeID string, g
 	return c.NodeID, uint64(c.Generation), nil
 }
 
+func sealedSecretsToNode(in []*cpv1.SealedSecret) []*nodev1.SealedSecret {
+	if in == nil {
+		return nil
+	}
+	out := make([]*nodev1.SealedSecret, len(in))
+	for i, sec := range in {
+		out[i] = sealedSecretToNode(sec)
+	}
+	return out
+}
+
+func sealedSecretToNode(sec *cpv1.SealedSecret) *nodev1.SealedSecret {
+	if sec == nil {
+		return nil
+	}
+	usages := make([]nodev1.SecretUsage, len(sec.Usages))
+	for i, usage := range sec.Usages {
+		usages[i] = nodev1.SecretUsage(usage)
+	}
+	out := &nodev1.SealedSecret{
+		TargetPath: sec.TargetPath,
+		Sealed:     append([]byte(nil), sec.Sealed...),
+		SecretId:   sec.SecretId,
+		Type:       nodev1.SecretType(sec.Type),
+		Version:    sec.Version,
+		DeliveryId: sec.DeliveryId,
+		Usages:     usages,
+		MountNames: append([]string(nil), sec.MountNames...),
+	}
+	if sec.Render != nil {
+		out.Render = &nodev1.SecretRenderSpec{
+			Profile:              sec.Render.Profile,
+			TargetPath:           sec.Render.TargetPath,
+			GhConfigDir:          sec.Render.GhConfigDir,
+			HostsPath:            sec.Render.HostsPath,
+			GitConfigPath:        sec.Render.GitConfigPath,
+			CredentialHelperPath: sec.Render.CredentialHelperPath,
+		}
+	}
+	if sec.GithubToken != nil {
+		out.GithubToken = &nodev1.GitHubTokenClearMetadata{
+			Host:                 sec.GithubToken.Host,
+			Login:                sec.GithubToken.Login,
+			GithubUserId:         sec.GithubToken.GithubUserId,
+			RefreshExpiresAtUnix: sec.GithubToken.RefreshExpiresAtUnix,
+			AppClientId:          sec.GithubToken.AppClientId,
+		}
+	}
+	return out
+}
+
 // GetSpawnNodeKey returns the hosting node's relayed key material so the owner client can verify the
 // node and seal to it (design §3 steps 1–3). Owner-only + ownership-checked (ownSpawn). The CP relays
 // the sub-key + cert chain untrusted — the client re-verifies the chain against pinned roots and the
@@ -102,17 +153,7 @@ func (s *Server) DeliverSecrets(ctx context.Context, req *connect.Request[cpv1.D
 	if err != nil {
 		return nil, err
 	}
-	// Translate cp.v1.SealedSecret -> node.v1.SealedSecret, copying the ciphertext bytes opaquely.
-	secrets := make([]*nodev1.SealedSecret, len(req.Msg.Secrets))
-	for i, sec := range req.Msg.Secrets {
-		secrets[i] = &nodev1.SealedSecret{
-			TargetPath: sec.TargetPath,
-			Sealed:     append([]byte(nil), sec.Sealed...),
-			SecretId:   sec.SecretId,
-			Version:    sec.Version,
-			DeliveryId: sec.DeliveryId,
-		}
-	}
+	secrets := sealedSecretsToNode(req.Msg.Secrets)
 	if derr := s.rt.DeliverSecrets(req.Msg.SpawnId, generation, secrets); derr != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, derr)
 	}

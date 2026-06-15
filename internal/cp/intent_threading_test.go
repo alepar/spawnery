@@ -73,6 +73,10 @@ func intentTestServer(t *testing.T) (*Server, *capSender, func()) {
 // goSubmitIntent launches a goroutine that polls GetPendingIntent until ready, then builds
 // and submits a SignedIntent. The submitter uses the given session key. Errors land in errCh.
 func goSubmitIntent(ctx context.Context, s *Server, spawnID, owner string, sessionKey *ecdsa.PrivateKey, errCh chan<- error) {
+	goSubmitIntentWithSecrets(ctx, s, spawnID, owner, sessionKey, nil, errCh)
+}
+
+func goSubmitIntentWithSecrets(ctx context.Context, s *Server, spawnID, owner string, sessionKey *ecdsa.PrivateKey, secrets []*cpv1.SealedSecret, errCh chan<- error) {
 	go func() {
 		ownerCtx := auth.WithOwner(ctx, owner)
 		var pi *cpv1.PendingIntent
@@ -116,9 +120,41 @@ func goSubmitIntent(ctx context.Context, s *Server, spawnID, owner string, sessi
 			SpawnId:         spawnID,
 			Intent:          si,
 			NodeAccessToken: "fake-node-token-for-test",
+			Secrets:         secrets,
 		}))
 		errCh <- err
 	}()
+}
+
+func intentThreadingCPSecret() *cpv1.SealedSecret {
+	return &cpv1.SealedSecret{
+		TargetPath: "github/workspace/legacy-target",
+		Sealed:     []byte("cp-sealed-refresh-tuple"),
+		SecretId:   "gh-main",
+		Type:       cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN,
+		Version:    11,
+		DeliveryId: "delivery-sp-intent-secrets-gen1-gh-main-v11",
+		Usages: []cpv1.SecretUsage{
+			cpv1.SecretUsage_SECRET_USAGE_NODE_STORAGE,
+			cpv1.SecretUsage_SECRET_USAGE_AGENT_RENDER,
+		},
+		MountNames: []string{"workspace"},
+		Render: &cpv1.SecretRenderSpec{
+			Profile:              "gh-cli-v1",
+			TargetPath:           "github/workspace",
+			GhConfigDir:          "github/workspace/gh",
+			HostsPath:            "github/workspace/gh/hosts.yml",
+			GitConfigPath:        "github/workspace/gitconfig",
+			CredentialHelperPath: "github/workspace/git-credential-spawnery",
+		},
+		GithubToken: &cpv1.GitHubTokenClearMetadata{
+			Host:                 "github.com",
+			Login:                "alice",
+			GithubUserId:         "123456",
+			RefreshExpiresAtUnix: 1893456000,
+			AppClientId:          "Iv1.spawnerytest",
+		},
+	}
 }
 
 // seedSuspendedSpawn inserts a spawn directly into the store in Suspended state.
@@ -187,6 +223,42 @@ func assertAuthThreaded(t *testing.T, sender *capSender, spawnID string) {
 	t.Fatalf("no StartSpawn for %q found", spawnID)
 }
 
+func assertSealedSecretsThreaded(t *testing.T, sender *capSender, spawnID string) {
+	t.Helper()
+	for _, ss := range sender.starts() {
+		if ss.GetSpawnId() != spawnID {
+			continue
+		}
+		if len(ss.GetSecrets()) != 1 {
+			t.Fatalf("StartSpawn(%s).Secrets len=%d want 1", spawnID, len(ss.GetSecrets()))
+		}
+		got := ss.GetSecrets()[0]
+		if got.GetSecretId() != "gh-main" || got.GetVersion() != 11 || got.GetDeliveryId() != "delivery-sp-intent-secrets-gen1-gh-main-v11" {
+			t.Fatalf("StartSpawn(%s) secret identity = %+v", spawnID, got)
+		}
+		if got.GetType() != nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN {
+			t.Fatalf("StartSpawn(%s) secret type=%v want github-token", spawnID, got.GetType())
+		}
+		if len(got.GetUsages()) != 2 || got.GetUsages()[0] != nodev1.SecretUsage_SECRET_USAGE_NODE_STORAGE || got.GetUsages()[1] != nodev1.SecretUsage_SECRET_USAGE_AGENT_RENDER {
+			t.Fatalf("StartSpawn(%s) secret usages = %+v", spawnID, got.GetUsages())
+		}
+		if len(got.GetMountNames()) != 1 || got.GetMountNames()[0] != "workspace" {
+			t.Fatalf("StartSpawn(%s) mount names = %+v", spawnID, got.GetMountNames())
+		}
+		if got.GetRender().GetCredentialHelperPath() != "github/workspace/git-credential-spawnery" {
+			t.Fatalf("StartSpawn(%s) render routing = %+v", spawnID, got.GetRender())
+		}
+		if got.GetGithubToken().GetHost() != "github.com" || got.GetGithubToken().GetGithubUserId() != "123456" {
+			t.Fatalf("StartSpawn(%s) github metadata = %+v", spawnID, got.GetGithubToken())
+		}
+		if string(got.GetSealed()) != "cp-sealed-refresh-tuple" {
+			t.Fatalf("StartSpawn(%s) sealed bytes = %q", spawnID, string(got.GetSealed()))
+		}
+		return
+	}
+	t.Fatalf("no StartSpawn for %q found", spawnID)
+}
+
 // ---- The four handler tests -----------------------------------------------
 
 func TestIntentThreadedCreateSpawn(t *testing.T) {
@@ -227,6 +299,44 @@ func TestIntentThreadedCreateSpawn(t *testing.T) {
 		t.Fatalf("SubmitIntent error: %v", submitErr)
 	}
 	assertAuthThreaded(t, sender, spawnID)
+}
+
+func TestIntentThreadedSealedSecretsReachStartSpawn(t *testing.T) {
+	s, sender, stopACK := intentTestServer(t)
+	defer stopACK()
+
+	sessionKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	errCh := make(chan error, 1)
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId: "secret-app",
+		Model: "m",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawnID := resp.Msg.SpawnId
+
+	goSubmitIntentWithSecrets(context.Background(), s, spawnID, "alice", sessionKey, []*cpv1.SealedSecret{intentThreadingCPSecret()}, errCh)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sp, _ := s.st.Spawns().Get(context.Background(), spawnID)
+		if sp.Status == store.Active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("spawn never became active (status=%v)", sp.Status)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if submitErr := <-errCh; submitErr != nil {
+		t.Fatalf("SubmitIntent error: %v", submitErr)
+	}
+	assertAuthThreaded(t, sender, spawnID)
+	assertSealedSecretsThreaded(t, sender, spawnID)
 }
 
 func TestIntentThreadedResumeSpawn(t *testing.T) {

@@ -750,6 +750,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
 	// Skipped when intentEnabled=false.
 	var env *authv1.AuthEnvelope
+	var secrets []*nodev1.SealedSecret
 	mounts, mountsErr := s.st.Spawns().GetMounts(ctx, id)
 	if mountsErr != nil {
 		s.failResume(ctx, id, gen, revertOnFail, "GetMounts")
@@ -764,11 +765,14 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 		pi := buildPendingIntent(op, id, uint64(gen), targetNodeID, sp.Image, sp.AppRef, sp.Model, "", mounts)
 		ch := s.pendingIntents.register(id, owner, pi)
 		defer s.pendingIntents.cleanup(id)
-		env, err = s.pendingIntents.await(ctx, ch)
+		submission, awaitErr := s.pendingIntents.await(ctx, ch)
+		err = awaitErr
 		if err != nil {
 			s.failResume(ctx, id, gen, revertOnFail, "await SignedIntent")
 			return "", connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("await SignedIntent: %w", err))
 		}
+		env = submission.Env
+		secrets = submission.Secrets
 		placement.TargetNodeID = targetNodeID
 	}
 
@@ -788,7 +792,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	defer provCancel()
 	go func() {
 		arts, _ := s.st.Spawns().GetArtifacts(provCtx, id)
-		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(arts))
+		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(arts), secrets)
 		provCh <- provisionResult{n, e}
 	}()
 
@@ -1115,6 +1119,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 
 	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
 	var env *authv1.AuthEnvelope
+	var secrets []*nodev1.SealedSecret
 	mounts, mountsErr := s.st.Spawns().GetMounts(ctx, req.Msg.SpawnId)
 	if mountsErr != nil {
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
@@ -1133,19 +1138,20 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 		pi := buildPendingIntent(intent.OpRecreateSpawn, req.Msg.SpawnId, uint64(gen), targetNodeID, sp.Image, sp.AppRef, sp.Model, "", mounts)
 		ch := s.pendingIntents.register(req.Msg.SpawnId, owner, pi)
 		defer s.pendingIntents.cleanup(req.Msg.SpawnId)
-		var awaitErr error
-		env, awaitErr = s.pendingIntents.await(ctx, ch)
+		submission, awaitErr := s.pendingIntents.await(ctx, ch)
 		if awaitErr != nil {
 			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after await failure also failed: %v", req.Msg.SpawnId, serr)
 			}
 			return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("await SignedIntent: %w", awaitErr))
 		}
+		env = submission.Env
+		secrets = submission.Secrets
 		placement.TargetNodeID = targetNodeID
 	}
 
 	arts, _ := s.st.Spawns().GetArtifacts(ctx, req.Msg.SpawnId)
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, nil, storeToNodeArtifacts(arts))
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, nil, storeToNodeArtifacts(arts), secrets)
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)

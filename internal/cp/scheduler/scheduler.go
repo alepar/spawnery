@@ -79,7 +79,7 @@ func (s *Scheduler) PickNodeID(placement registry.Placement) (string, error) {
 // mounts are the persisted per-mount backend bindings to thread into StartSpawn; nil/empty means
 // the spawn has no bound mounts.
 // baseImageDigest is threaded to the node for cross-node resume (sp-ei4.1.10); empty on fresh create.
-func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement, env *authv1.AuthEnvelope, mounts []*nodev1.MountBinding, baseImageDigest string, rootfs *RootfsRestore, artifacts []*nodev1.ArtifactSpec) (string, error) {
+func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement, env *authv1.AuthEnvelope, mounts []*nodev1.MountBinding, baseImageDigest string, rootfs *RootfsRestore, artifacts []*nodev1.ArtifactSpec, secrets []*nodev1.SealedSecret) (string, error) {
 	n := s.reg.PickFor(placement)
 	if n == nil {
 		return "", connect.NewError(connect.CodeResourceExhausted, errors.New("no eligible node with capacity"))
@@ -104,6 +104,9 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 	}
 	if len(artifacts) > 0 {
 		start.Artifacts = artifacts
+	}
+	if len(secrets) > 0 {
+		start.Secrets = secrets
 	}
 	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Start{Start: start}}); err != nil {
 		return "", connect.NewError(connect.CodeUnavailable, err)

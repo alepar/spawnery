@@ -163,37 +163,40 @@ func TestCPGitHubSecretRoutingProtoSurface(t *testing.T) {
 	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "github_user_id", 3)
 	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "refresh_expires_at_unix", 4)
 	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "app_client_id", 5)
+	requireFieldNumber(t, &cpv1.SubmitIntentRequest{}, "secrets", 4)
+
+	secret := &cpv1.SealedSecret{
+		TargetPath: "github/workspace/legacy-target",
+		Sealed:     []byte("cp-sealed-refresh-tuple"),
+		SecretId:   "gh-main",
+		Type:       cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN,
+		Version:    11,
+		DeliveryId: "delivery-sp1-gen3-gh-main-v11",
+		Usages: []cpv1.SecretUsage{
+			cpv1.SecretUsage_SECRET_USAGE_NODE_STORAGE,
+			cpv1.SecretUsage_SECRET_USAGE_AGENT_RENDER,
+		},
+		MountNames: []string{"workspace"},
+		Render: &cpv1.SecretRenderSpec{
+			Profile:              "gh-cli-v1",
+			TargetPath:           "github/workspace",
+			GhConfigDir:          "github/workspace/gh",
+			HostsPath:            "github/workspace/gh/hosts.yml",
+			GitConfigPath:        "github/workspace/gitconfig",
+			CredentialHelperPath: "github/workspace/git-credential-spawnery",
+		},
+		GithubToken: &cpv1.GitHubTokenClearMetadata{
+			Host:                 "github.com",
+			Login:                "alice",
+			GithubUserId:         "123456",
+			RefreshExpiresAtUnix: 1893456000,
+			AppClientId:          "Iv1.spawnerytest",
+		},
+	}
 
 	in := &cpv1.DeliverSecretsRequest{
 		SpawnId: "sp1",
-		Secrets: []*cpv1.SealedSecret{{
-			TargetPath: "github/workspace/legacy-target",
-			Sealed:     []byte("cp-sealed-refresh-tuple"),
-			SecretId:   "gh-main",
-			Type:       cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN,
-			Version:    11,
-			DeliveryId: "delivery-sp1-gen3-gh-main-v11",
-			Usages: []cpv1.SecretUsage{
-				cpv1.SecretUsage_SECRET_USAGE_NODE_STORAGE,
-				cpv1.SecretUsage_SECRET_USAGE_AGENT_RENDER,
-			},
-			MountNames: []string{"workspace"},
-			Render: &cpv1.SecretRenderSpec{
-				Profile:              "gh-cli-v1",
-				TargetPath:           "github/workspace",
-				GhConfigDir:          "github/workspace/gh",
-				HostsPath:            "github/workspace/gh/hosts.yml",
-				GitConfigPath:        "github/workspace/gitconfig",
-				CredentialHelperPath: "github/workspace/git-credential-spawnery",
-			},
-			GithubToken: &cpv1.GitHubTokenClearMetadata{
-				Host:                 "github.com",
-				Login:                "alice",
-				GithubUserId:         "123456",
-				RefreshExpiresAtUnix: 1893456000,
-				AppClientId:          "Iv1.spawnerytest",
-			},
-		}},
+		Secrets: []*cpv1.SealedSecret{secret},
 	}
 
 	b, err := proto.Marshal(in)
@@ -206,6 +209,42 @@ func TestCPGitHubSecretRoutingProtoSurface(t *testing.T) {
 	}
 	if len(got.GetSecrets()) != 1 || got.GetSecrets()[0].GetGithubToken().GetHost() != "github.com" {
 		t.Fatalf("cp secret routing lost on round-trip: %+v", got.GetSecrets())
+	}
+
+	submit := &cpv1.SubmitIntentRequest{
+		SpawnId:         "sp1",
+		NodeAccessToken: "node-token",
+		Secrets:         []*cpv1.SealedSecret{secret},
+	}
+	submitBytes, err := proto.Marshal(submit)
+	if err != nil {
+		t.Fatalf("marshal SubmitIntentRequest: %v", err)
+	}
+	var gotSubmit cpv1.SubmitIntentRequest
+	if err := proto.Unmarshal(submitBytes, &gotSubmit); err != nil {
+		t.Fatalf("unmarshal SubmitIntentRequest: %v", err)
+	}
+	if len(gotSubmit.GetSecrets()) != 1 {
+		t.Fatalf("SubmitIntentRequest.Secrets len=%d want 1", len(gotSubmit.GetSecrets()))
+	}
+	gotSecret := gotSubmit.GetSecrets()[0]
+	if gotSecret.GetSecretId() != "gh-main" || gotSecret.GetVersion() != 11 || gotSecret.GetDeliveryId() != "delivery-sp1-gen3-gh-main-v11" {
+		t.Fatalf("SubmitIntent secret identity lost on round-trip: %+v", gotSecret)
+	}
+	if gotSecret.GetType() != cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN {
+		t.Fatalf("SubmitIntent secret type=%v want github-token", gotSecret.GetType())
+	}
+	if len(gotSecret.GetUsages()) != 2 || gotSecret.GetUsages()[0] != cpv1.SecretUsage_SECRET_USAGE_NODE_STORAGE || gotSecret.GetUsages()[1] != cpv1.SecretUsage_SECRET_USAGE_AGENT_RENDER {
+		t.Fatalf("SubmitIntent secret usages lost on round-trip: %+v", gotSecret.GetUsages())
+	}
+	if len(gotSecret.GetMountNames()) != 1 || gotSecret.GetMountNames()[0] != "workspace" {
+		t.Fatalf("SubmitIntent mount names lost on round-trip: %+v", gotSecret.GetMountNames())
+	}
+	if gotSecret.GetRender().GetCredentialHelperPath() != "github/workspace/git-credential-spawnery" {
+		t.Fatalf("SubmitIntent render routing lost on round-trip: %+v", gotSecret.GetRender())
+	}
+	if gotSecret.GetGithubToken().GetLogin() != "alice" || gotSecret.GetGithubToken().GetAppClientId() != "Iv1.spawnerytest" {
+		t.Fatalf("SubmitIntent github clear metadata lost on round-trip: %+v", gotSecret.GetGithubToken())
 	}
 }
 

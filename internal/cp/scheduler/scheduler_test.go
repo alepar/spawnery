@@ -50,7 +50,7 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 		}
 	}()
 
-	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", "", "", 3, registry.Placement{}, nil, nil, "", nil, nil)
+	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", "", "", 3, registry.Placement{}, nil, nil, "", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 
 func TestProvisionNoCapacity(t *testing.T) {
 	s := New(registry.New(), router.New(), time.Second)
-	if _, err := s.Provision(context.Background(), "sp-x", "ref", "m", "", "", "", "", 1, registry.Placement{}, nil, nil, "", nil, nil); err == nil {
+	if _, err := s.Provision(context.Background(), "sp-x", "ref", "m", "", "", "", "", 1, registry.Placement{}, nil, nil, "", nil, nil, nil); err == nil {
 		t.Fatal("expected ResourceExhausted when no node")
 	}
 }
@@ -92,7 +92,7 @@ func TestProvisionThreadsSelection(t *testing.T) {
 	}()
 
 	_, err := s.Provision(context.Background(), "sp-sel", "ref", "m", "nm", "app", "goose-acp", "acp",
-		1, registry.Placement{Image: "img:1"}, nil, nil, "", nil, nil)
+		1, registry.Placement{Image: "img:1"}, nil, nil, "", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,13 +123,87 @@ func TestProvisionThreadsMountBindings(t *testing.T) {
 
 	mounts := []*nodev1.MountBinding{{Name: "main", BackendUri: "github:owner/repo"}}
 	_, err := s.Provision(context.Background(), "sp-mounts", "ref", "m", "", "", "", "", 1,
-		registry.Placement{}, nil, mounts, "", nil, nil)
+		registry.Placement{}, nil, mounts, "", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := send.first().GetStart()
 	if len(got.GetMounts()) != 1 || got.GetMounts()[0].GetName() != "main" || got.GetMounts()[0].GetBackendUri() != "github:owner/repo" {
 		t.Fatalf("StartSpawn mount bindings = %+v", got.GetMounts())
+	}
+}
+
+func TestProvisionThreadsSealedSecrets(t *testing.T) {
+	reg := registry.New()
+	rt := router.New()
+	s := New(reg, rt, 2*time.Second)
+
+	send := &fakeSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: send, Max: 1, Free: 1})
+
+	go func() {
+		for {
+			if m := send.first(); m != nil {
+				s.OnStatus(m.GetStart().GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	secrets := []*nodev1.SealedSecret{{
+		TargetPath: "github/workspace/legacy-target",
+		Sealed:     []byte("node-sealed-refresh-tuple"),
+		SecretId:   "gh-main",
+		Type:       nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN,
+		Version:    11,
+		DeliveryId: "delivery-sp-secrets-gen1-gh-main-v11",
+		Usages: []nodev1.SecretUsage{
+			nodev1.SecretUsage_SECRET_USAGE_NODE_STORAGE,
+			nodev1.SecretUsage_SECRET_USAGE_AGENT_RENDER,
+		},
+		MountNames: []string{"workspace"},
+		Render: &nodev1.SecretRenderSpec{
+			Profile:              "gh-cli-v1",
+			TargetPath:           "github/workspace",
+			GhConfigDir:          "github/workspace/gh",
+			HostsPath:            "github/workspace/gh/hosts.yml",
+			GitConfigPath:        "github/workspace/gitconfig",
+			CredentialHelperPath: "github/workspace/git-credential-spawnery",
+		},
+		GithubToken: &nodev1.GitHubTokenClearMetadata{
+			Host:                 "github.com",
+			Login:                "alice",
+			GithubUserId:         "123456",
+			RefreshExpiresAtUnix: 1893456000,
+			AppClientId:          "Iv1.spawnerytest",
+		},
+	}}
+
+	_, err := s.Provision(context.Background(), "sp-secrets", "ref", "m", "", "", "", "", 1,
+		registry.Placement{}, nil, nil, "", nil, nil, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := send.first().GetStart()
+	if len(got.GetSecrets()) != 1 {
+		t.Fatalf("StartSpawn.Secrets len=%d want 1", len(got.GetSecrets()))
+	}
+	gotSecret := got.GetSecrets()[0]
+	if gotSecret.GetSecretId() != "gh-main" || gotSecret.GetVersion() != 11 || gotSecret.GetDeliveryId() != "delivery-sp-secrets-gen1-gh-main-v11" {
+		t.Fatalf("StartSpawn secret identity = %+v", gotSecret)
+	}
+	if gotSecret.GetType() != nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN {
+		t.Fatalf("StartSpawn secret type=%v want github-token", gotSecret.GetType())
+	}
+	if len(gotSecret.GetUsages()) != 2 || gotSecret.GetUsages()[1] != nodev1.SecretUsage_SECRET_USAGE_AGENT_RENDER {
+		t.Fatalf("StartSpawn secret usages = %+v", gotSecret.GetUsages())
+	}
+	if gotSecret.GetRender().GetCredentialHelperPath() != "github/workspace/git-credential-spawnery" {
+		t.Fatalf("StartSpawn secret render = %+v", gotSecret.GetRender())
+	}
+	if gotSecret.GetGithubToken().GetLogin() != "alice" || gotSecret.GetGithubToken().GetAppClientId() != "Iv1.spawnerytest" {
+		t.Fatalf("StartSpawn github metadata = %+v", gotSecret.GetGithubToken())
 	}
 }
 
@@ -154,7 +228,7 @@ func TestProvisionThreadsBaseImageDigest(t *testing.T) {
 
 	const digest = "spawnery/agent@sha256:deadbeef"
 	_, err := s.Provision(context.Background(), "sp-digest", "ref", "m", "", "", "", "", 1,
-		registry.Placement{}, nil, nil, digest, nil, nil)
+		registry.Placement{}, nil, nil, digest, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +258,7 @@ func TestProvisionFreshCreateSendsEmptyDigest(t *testing.T) {
 	}()
 
 	_, err := s.Provision(context.Background(), "sp-fresh", "ref", "m", "", "", "", "", 1,
-		registry.Placement{}, nil, nil, "", nil, nil) // empty = fresh create
+		registry.Placement{}, nil, nil, "", nil, nil, nil) // empty = fresh create
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +293,7 @@ func TestProvisionThreadsArtifacts(t *testing.T) {
 		{Id: "s1", Sensitive: true, EnvVarName: "TOK", ContentType: nodev1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_BYTES, TargetContainer: nodev1.ArtifactTarget_ARTIFACT_TARGET_AGENT, DestPath: "mcp/y"},
 	}
 	_, err := s.Provision(context.Background(), "sp-arts", "ref", "m", "", "", "", "", 1,
-		registry.Placement{}, nil, nil, "", nil, arts)
+		registry.Placement{}, nil, nil, "", nil, arts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +334,7 @@ func TestProvisionThreadsRootfsRestorePins(t *testing.T) {
 		}},
 	}
 	_, err := s.Provision(context.Background(), "sp-rootfs", "ref", "m", "", "", "", "", 10,
-		registry.Placement{}, nil, nil, "agent@sha256:base", rootfs, nil)
+		registry.Placement{}, nil, nil, "agent@sha256:base", rootfs, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

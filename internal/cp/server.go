@@ -793,6 +793,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 
 	// Gen 1: store.Create inserted the live container row at generation 1 (SetActive below matches).
 	var env *authv1.AuthEnvelope
+	var secrets []*nodev1.SealedSecret
 	if s.intentEnabled {
 		// Two-phase A4 sign-after-resolve [AC1]: pick node, register pending intent, await client.
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
@@ -806,7 +807,8 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		pi := buildPendingIntent(intent.OpCreateSpawn, spawnID, 1, targetNodeID, sp.Image, appRef, model, "", mounts)
 		ch := s.pendingIntents.register(spawnID, ownerID, pi)
 		defer s.pendingIntents.cleanup(spawnID)
-		env, err = s.pendingIntents.await(ctx, ch)
+		submission, awaitErr := s.pendingIntents.await(ctx, ch)
+		err = awaitErr
 		if err != nil {
 			log.Printf("provisionSpawn %s: await SignedIntent: %v", spawnID, err)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
@@ -814,6 +816,8 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 			}
 			return
 		}
+		env = submission.Env
+		secrets = submission.Secrets
 		// Pin the same node the client signed for.
 		placement.TargetNodeID = targetNodeID
 	}
@@ -824,7 +828,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 	if aerr != nil {
 		log.Printf("provisionSpawn %s: GetArtifacts: %v", spawnID, aerr)
 	}
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, storeToNodeArtifacts(arts))
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, storeToNodeArtifacts(arts), secrets)
 	if err != nil {
 		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
@@ -977,7 +981,11 @@ func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.Sub
 		AccessToken: nodeTok,
 		Intent:      req.Msg.Intent,
 	}
-	if err := s.pendingIntents.submit(req.Msg.SpawnId, owner, env); err != nil {
+	submission := &pendingIntentSubmission{
+		Env:     env,
+		Secrets: sealedSecretsToNode(req.Msg.Secrets),
+	}
+	if err := s.pendingIntents.submit(req.Msg.SpawnId, owner, submission); err != nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
 	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil

@@ -415,6 +415,7 @@ message SubmitIntentRequest {
   string               spawn_id          = 1;
   auth.v1.SignedIntent intent             = 2;
   string               node_access_token = 3; // aud=node token for the AuthEnvelope
+  repeated SealedSecret secrets           = 4; // owner-sealed payloads to relay into StartSpawn
 }
 message SubmitIntentResponse {}
 
