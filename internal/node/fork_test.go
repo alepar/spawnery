@@ -291,6 +291,52 @@ func TestForkTurnBoundaryWaitsForACPPumpIdle(t *testing.T) {
 	}
 }
 
+func TestForkTurnBoundaryQueuesPromptWhileWaitingForACPPumpIdle(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	p := newPump(io.Discard, strings.NewReader(""))
+	p.mu.Lock()
+	p.busy = true
+	p.inflightPromptID = 1
+	p.sessionID = "sess-1"
+	p.mu.Unlock()
+	a.pumps[zeroKey("sp-source")] = p
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	time.Sleep(2 * forkTurnBoundaryPoll)
+	if got := lastForkTurnBoundaryComplete(fs); got != nil {
+		t.Fatalf("turn-boundary completed while pump was busy: %+v", got)
+	}
+
+	a.fromClient("sp-source", SessionZeroID, "c1", encodeFrame(Frame{Kind: "prompt", Text: "after fork requested"}))
+	p.handleTurnEnd(nil)
+	time.Sleep(2 * forkTurnBoundaryPoll)
+	if got := lastForkTurnBoundaryComplete(fs); got == nil {
+		t.Fatal("turn-boundary should complete after the current turn ends")
+	}
+	p.mu.Lock()
+	blockedBusy, blockedInflight, queued := p.busy, p.inflightPromptID, len(p.queue)
+	p.mu.Unlock()
+	if blockedBusy || blockedInflight != 0 || queued != 1 {
+		t.Fatalf("prompt submitted after pending fork must wait behind barrier: busy=%v inflight=%d queue=%d", blockedBusy, blockedInflight, queued)
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ReleaseForkTurnBoundary{ReleaseForkTurnBoundary: &nodev1.ReleaseForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	p.mu.Lock()
+	releasedBusy, releasedInflight, releasedQueue := p.busy, p.inflightPromptID, len(p.queue)
+	p.mu.Unlock()
+	if !releasedBusy || releasedInflight == 0 || releasedQueue != 0 {
+		t.Fatalf("prompt did not start after fork barrier release: busy=%v inflight=%d queue=%d", releasedBusy, releasedInflight, releasedQueue)
+	}
+}
+
 func TestForkTurnBoundaryWaitsForStartingMoshSession(t *testing.T) {
 	be := &scriptedPodBackend{script: scriptGoose}
 	mgr := newForkNodeManager(t, be)

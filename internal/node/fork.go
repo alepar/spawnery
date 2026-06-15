@@ -407,18 +407,24 @@ func (a *attacher) releaseForkBarrier(spawnID string, match func(forkIngressBarr
 	a.mu.Lock()
 	var releasePumps []*Pump
 	var releaseRelays []*tmuxRelay
+	releaseResources := true
 	if a.forkBarriers != nil {
-		if b, ok := a.forkBarriers[spawnID]; ok && match(b) {
-			delete(a.forkBarriers, spawnID)
-			for key, p := range a.pumps {
-				if key.spawnID == spawnID {
-					releasePumps = append(releasePumps, p)
-				}
+		if b, ok := a.forkBarriers[spawnID]; ok {
+			releaseResources = match(b)
+			if releaseResources {
+				delete(a.forkBarriers, spawnID)
 			}
-			for key, r := range a.tmuxRelays {
-				if key.spawnID == spawnID {
-					releaseRelays = append(releaseRelays, r)
-				}
+		}
+	}
+	if releaseResources {
+		for key, p := range a.pumps {
+			if key.spawnID == spawnID {
+				releasePumps = append(releasePumps, p)
+			}
+		}
+		for key, r := range a.tmuxRelays {
+			if key.spawnID == spawnID {
+				releaseRelays = append(releaseRelays, r)
 			}
 		}
 	}

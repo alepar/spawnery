@@ -112,13 +112,13 @@ func (p *Pump) tryAcquireForkBarrier(b forkIngressBarrier) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.forkBarrier != nil {
-		return p.forkBarrier.matches(b)
-	}
-	if p.busy || p.inflightPromptID != 0 || len(p.queue) != 0 {
-		return false
+		return p.forkBarrier.matches(b) && !p.busy && p.inflightPromptID == 0
 	}
 	bb := b
 	p.forkBarrier = &bb
+	if p.busy || p.inflightPromptID != 0 {
+		return false
+	}
 	return true
 }
 
@@ -608,7 +608,7 @@ func (p *Pump) handleTurnEnd(result json.RawMessage) {
 	p.inflightPromptID = 0
 	var drainText string
 	var drained bool
-	if len(p.queue) > 0 {
+	if p.forkBarrier == nil && len(p.queue) > 0 {
 		drainText = p.queue[0]
 		p.queue = p.queue[1:]
 		drained = true
