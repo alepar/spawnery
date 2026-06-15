@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +29,7 @@ type fakeMoveClient struct {
 	nodeID        string
 	nodePub       []byte
 	nodeCertChain []byte
+	signedSubkey  []byte
 	gen           uint64
 	notAfter      time.Time // STABLE sub-key expiry so the AAD reconstructs identically
 	migErr        error
@@ -55,6 +57,9 @@ func (f *fakeMoveClient) GetSpawnNodeKey(_ context.Context, _ *connect.Request[c
 	}
 	sk := subkey.SignedSubKey{HPKEPub: f.nodePub, NodeID: f.nodeID, NotAfter: f.notAfter}
 	skJSON, _ := json.Marshal(sk)
+	if len(f.signedSubkey) != 0 {
+		skJSON = f.signedSubkey
+	}
 	return connect.NewResponse(&cpv1.GetSpawnNodeKeyResponse{
 		NodeCertChain: f.nodeCertChain,
 		SignedSubkey:  skJSON,
@@ -241,5 +246,68 @@ func TestRunMoveRejectsRevokedNodeBeforeDelivery(t *testing.T) {
 	}
 	if client.gotDelivery != nil {
 		t.Fatal("DeliverSecrets must not be called for a revoked node")
+	}
+}
+
+func TestRunMoveRefetchesNodeRevocationsForEachProductionSeal(t *testing.T) {
+	mn, _ := seal.NewMnemonic()
+	dev, _ := seal.DeviceFromMnemonic(mn, "")
+	env, err := journalkey.SealToOwner("repo-pw-123", []seal.X25519PubKey{dev.X25519PubKey()},
+		seal.AtRestAAD{AccountID: "alice", SecretID: journalkey.SecretID("main"), Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, _ := json.Marshal(env)
+
+	fx := issueProdNode(t, "node-b", "alice")
+	nodePub, _, err := seal.NodeKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	sk, err := subkey.Sign(fx.key, fx.nodeID, nodePub, now, now.Add(subkey.DefaultValidity))
+	if err != nil {
+		t.Fatal(err)
+	}
+	skJSON, _ := json.Marshal(sk)
+
+	client := &fakeMoveClient{
+		entries: []*cpv1.JournalKeyCiphertext{
+			{Mount: "main", Ciphertext: ct},
+			{Mount: "aux", Ciphertext: ct},
+		},
+		nodeID:        fx.nodeID,
+		nodePub:       sk.HPKEPub,
+		nodeCertChain: fx.chainPEM,
+		signedSubkey:  skJSON,
+		gen:           7,
+		notAfter:      sk.NotAfter,
+	}
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{"revoked_node_ids": []string{}})
+			return
+		}
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err = runMove(context.Background(), client, nil, dev, "sp1", fx.nodeID, &out, now, moveOptions{
+		AccountID:        "alice",
+		RootPEM:          fx.rootPEM,
+		RevocationURL:    srv.URL + "/node-revocations",
+		RevocationClient: srv.Client(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("err = %v", err)
+	}
+	if client.gotDelivery != nil {
+		t.Fatal("DeliverSecrets must not be called after revocation check becomes unavailable")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("revocation calls = %d, want 2", got)
 	}
 }
