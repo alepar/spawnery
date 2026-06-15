@@ -750,13 +750,17 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
 	// Skipped when intentEnabled=false.
 	var env *authv1.AuthEnvelope
+	mounts, mountsErr := s.st.Spawns().GetMounts(ctx, id)
+	if mountsErr != nil {
+		s.failResume(ctx, id, gen, revertOnFail, "GetMounts")
+		return "", connect.NewError(connect.CodeInternal, mountsErr)
+	}
 	if s.intentEnabled {
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
 			s.failResume(ctx, id, gen, revertOnFail, "PickNodeID")
 			return "", pickErr
 		}
-		mounts, _ := s.st.Spawns().GetMounts(ctx, id)
 		pi := buildPendingIntent(op, id, uint64(gen), targetNodeID, sp.Image, sp.AppRef, sp.Model, "", mounts)
 		ch := s.pendingIntents.register(id, owner, pi)
 		defer s.pendingIntents.cleanup(id)
@@ -784,7 +788,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	defer provCancel()
 	go func() {
 		arts, _ := s.st.Spawns().GetArtifacts(provCtx, id)
-		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(arts))
+		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(arts))
 		provCh <- provisionResult{n, e}
 	}()
 
@@ -1111,6 +1115,13 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 
 	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
 	var env *authv1.AuthEnvelope
+	mounts, mountsErr := s.st.Spawns().GetMounts(ctx, req.Msg.SpawnId)
+	if mountsErr != nil {
+		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			log.Printf("RecreateSpawn %s: SetError after GetMounts failure also failed: %v", req.Msg.SpawnId, serr)
+		}
+		return nil, connect.NewError(connect.CodeInternal, mountsErr)
+	}
 	if s.intentEnabled {
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
@@ -1119,7 +1130,6 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 			}
 			return nil, pickErr
 		}
-		mounts, _ := s.st.Spawns().GetMounts(ctx, req.Msg.SpawnId)
 		pi := buildPendingIntent(intent.OpRecreateSpawn, req.Msg.SpawnId, uint64(gen), targetNodeID, sp.Image, sp.AppRef, sp.Model, "", mounts)
 		ch := s.pendingIntents.register(req.Msg.SpawnId, owner, pi)
 		defer s.pendingIntents.cleanup(req.Msg.SpawnId)
@@ -1135,7 +1145,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	}
 
 	arts, _ := s.st.Spawns().GetArtifacts(ctx, req.Msg.SpawnId)
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, nil, storeToNodeArtifacts(arts))
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, nil, storeToNodeArtifacts(arts))
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)

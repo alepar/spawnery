@@ -50,7 +50,7 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 		}
 	}()
 
-	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", "", "", 3, registry.Placement{}, nil, "", nil, nil)
+	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", "", "", 3, registry.Placement{}, nil, nil, "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 
 func TestProvisionNoCapacity(t *testing.T) {
 	s := New(registry.New(), router.New(), time.Second)
-	if _, err := s.Provision(context.Background(), "sp-x", "ref", "m", "", "", "", "", 1, registry.Placement{}, nil, "", nil, nil); err == nil {
+	if _, err := s.Provision(context.Background(), "sp-x", "ref", "m", "", "", "", "", 1, registry.Placement{}, nil, nil, "", nil, nil); err == nil {
 		t.Fatal("expected ResourceExhausted when no node")
 	}
 }
@@ -92,7 +92,7 @@ func TestProvisionThreadsSelection(t *testing.T) {
 	}()
 
 	_, err := s.Provision(context.Background(), "sp-sel", "ref", "m", "nm", "app", "goose-acp", "acp",
-		1, registry.Placement{Image: "img:1"}, nil, "", nil, nil)
+		1, registry.Placement{Image: "img:1"}, nil, nil, "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,6 +100,36 @@ func TestProvisionThreadsSelection(t *testing.T) {
 	if got.GetImage() != "img:1" || got.GetRunnableId() != "goose-acp" || got.GetMode() != "acp" {
 		t.Fatalf("StartSpawn selection not threaded: image=%q runnable=%q mode=%q",
 			got.GetImage(), got.GetRunnableId(), got.GetMode())
+	}
+}
+
+func TestProvisionThreadsMountBindings(t *testing.T) {
+	reg := registry.New()
+	rt := router.New()
+	s := New(reg, rt, 2*time.Second)
+
+	send := &fakeSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: send, Max: 1, Free: 1})
+
+	go func() {
+		for {
+			if m := send.first(); m != nil {
+				s.OnStatus(m.GetStart().GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	mounts := []*nodev1.MountBinding{{Name: "main", BackendUri: "github:owner/repo"}}
+	_, err := s.Provision(context.Background(), "sp-mounts", "ref", "m", "", "", "", "", 1,
+		registry.Placement{}, nil, mounts, "", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := send.first().GetStart()
+	if len(got.GetMounts()) != 1 || got.GetMounts()[0].GetName() != "main" || got.GetMounts()[0].GetBackendUri() != "github:owner/repo" {
+		t.Fatalf("StartSpawn mount bindings = %+v", got.GetMounts())
 	}
 }
 
@@ -124,7 +154,7 @@ func TestProvisionThreadsBaseImageDigest(t *testing.T) {
 
 	const digest = "spawnery/agent@sha256:deadbeef"
 	_, err := s.Provision(context.Background(), "sp-digest", "ref", "m", "", "", "", "", 1,
-		registry.Placement{}, nil, digest, nil, nil)
+		registry.Placement{}, nil, nil, digest, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +184,7 @@ func TestProvisionFreshCreateSendsEmptyDigest(t *testing.T) {
 	}()
 
 	_, err := s.Provision(context.Background(), "sp-fresh", "ref", "m", "", "", "", "", 1,
-		registry.Placement{}, nil, "", nil, nil) // empty = fresh create
+		registry.Placement{}, nil, nil, "", nil, nil) // empty = fresh create
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +219,7 @@ func TestProvisionThreadsArtifacts(t *testing.T) {
 		{Id: "s1", Sensitive: true, EnvVarName: "TOK", ContentType: nodev1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_BYTES, TargetContainer: nodev1.ArtifactTarget_ARTIFACT_TARGET_AGENT, DestPath: "mcp/y"},
 	}
 	_, err := s.Provision(context.Background(), "sp-arts", "ref", "m", "", "", "", "", 1,
-		registry.Placement{}, nil, "", nil, arts)
+		registry.Placement{}, nil, nil, "", nil, arts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +260,7 @@ func TestProvisionThreadsRootfsRestorePins(t *testing.T) {
 		}},
 	}
 	_, err := s.Provision(context.Background(), "sp-rootfs", "ref", "m", "", "", "", "", 10,
-		registry.Placement{}, nil, "agent@sha256:base", rootfs, nil)
+		registry.Placement{}, nil, nil, "agent@sha256:base", rootfs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

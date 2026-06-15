@@ -62,13 +62,13 @@ type Server struct {
 	models          *modelWaiters // correlates inline SetSpawnModel pushes with node SetModelResult acks
 	setModelTimeout time.Duration // bound for the inline SetModel push; overridable in tests
 
-	suspends            *suspendWaiters // correlates a SuspendSpawn with the node's SuspendComplete (markers)
-	suspendTimeout      time.Duration   // generous absolute backstop for suspend; overridable in tests
-	suspendStallWindow  time.Duration   // per-transition stall window (operative bound); overridable in tests
+	suspends           *suspendWaiters // correlates a SuspendSpawn with the node's SuspendComplete (markers)
+	suspendTimeout     time.Duration   // generous absolute backstop for suspend; overridable in tests
+	suspendStallWindow time.Duration   // per-transition stall window (operative bound); overridable in tests
 
-	resumes            *resumeWaiters // correlates a ResumeSpawn with node progress/ACTIVE (sp-u53.7.2)
-	resumeTimeout      time.Duration  // generous absolute backstop for resume; overridable in tests
-	resumeStallWindow  time.Duration  // per-transition stall window (operative bound); overridable in tests
+	resumes           *resumeWaiters // correlates a ResumeSpawn with node progress/ACTIVE (sp-u53.7.2)
+	resumeTimeout     time.Duration  // generous absolute backstop for resume; overridable in tests
+	resumeStallWindow time.Duration  // per-transition stall window (operative bound); overridable in tests
 
 	// upgradeWaiters correlates UpgradeToOwnerSealed requests with SealJournalKeyToOwnerResponse
 	// messages from the node (sp-8dkp §4). Keyed by per-request request_id.
@@ -127,10 +127,10 @@ type Server struct {
 	// "disabled" (evaluatorEnabled=false, quotaSuspendMB=0) so no enforcement runs until
 	// SetEvaluatorPolicy is called. cmd/spawnery_cp wires this; tests that need evaluation call
 	// SetEvaluatorPolicy explicitly.
-	evaluatorEnabled       bool
-	idleDetachedTimeout    time.Duration
-	idleAttachedTimeout    time.Duration
-	quotaSuspendMB         int64
+	evaluatorEnabled    bool
+	idleDetachedTimeout time.Duration
+	idleAttachedTimeout time.Duration
+	quotaSuspendMB      int64
 
 	// evaluatorInFlight guards the per-spawn async suspend launched by evaluateSpawnMetrics:
 	// a map from spawn id to struct{} (present = driver already running). Guarded by evaluatorMu.
@@ -782,6 +782,14 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		return // stopped/deleted in the lock gap, or already advanced
 	}
 	placement.Image = sp.Image
+	mounts, merr := s.st.Spawns().GetMounts(ctx, spawnID)
+	if merr != nil {
+		log.Printf("provisionSpawn %s: GetMounts: %v", spawnID, merr)
+		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+			log.Printf("provisionSpawn %s: SetError after GetMounts failure also failed: %v", spawnID, serr)
+		}
+		return
+	}
 
 	// Gen 1: store.Create inserted the live container row at generation 1 (SetActive below matches).
 	var env *authv1.AuthEnvelope
@@ -795,7 +803,6 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 			}
 			return
 		}
-		mounts, _ := s.st.Spawns().GetMounts(ctx, spawnID)
 		pi := buildPendingIntent(intent.OpCreateSpawn, spawnID, 1, targetNodeID, sp.Image, appRef, model, "", mounts)
 		ch := s.pendingIntents.register(spawnID, ownerID, pi)
 		defer s.pendingIntents.cleanup(spawnID)
@@ -817,7 +824,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 	if aerr != nil {
 		log.Printf("provisionSpawn %s: GetArtifacts: %v", spawnID, aerr)
 	}
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, "", nil, storeToNodeArtifacts(arts))
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, storeToNodeArtifacts(arts))
 	if err != nil {
 		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {

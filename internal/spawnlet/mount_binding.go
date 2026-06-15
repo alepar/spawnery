@@ -19,6 +19,9 @@ func mountBindingsByName(manifestMounts []manifest.Mount, bindings []MountBindin
 
 	out := make(map[string]string, len(bindings))
 	for _, binding := range bindings {
+		if binding.Name == "" {
+			return nil, fmt.Errorf("mount binding name must not be empty")
+		}
 		if _, ok := manifestNames[binding.Name]; !ok {
 			return nil, fmt.Errorf("mount binding %q does not match any manifest mount", binding.Name)
 		}
