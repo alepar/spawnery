@@ -10,23 +10,37 @@ import (
 	"github.com/tailscale/hujson"
 )
 
-// ckApprovalPosture is the normalized key for the agent approval/permission posture.
-const ckApprovalPosture = "approvalPosture"
+// Normalized config key names (canonical grammar).
+const (
+	// ckApprovalPosture is the canonical key for agent approval / permission posture.
+	// Valid values: "always-ask" | "ask-risky" | "auto" | "yolo" (default).
+	ckApprovalPosture = "approvalPosture"
+	// ckDisabledTools lists tool names to disable in the agent.
+	ckDisabledTools = "disabledTools"
+	// ckAllowedCommands lists shell command / glob patterns to allow.
+	ckAllowedCommands = "allowedCommands"
+	// ckDeniedCommands lists shell command / glob patterns to deny.
+	ckDeniedCommands = "deniedCommands"
+)
 
-// approvalPostureCodex maps normalized approvalPosture values to codex approval_policy values (1:1).
-// The native key name is "approval_policy"; the values are identical to the normalized ones.
-var approvalPostureCodex = map[string]bool{
-	"untrusted":  true,
-	"on-failure": true,
-	"on-request": true,
-	"never":      true,
+// approvalPostureClaudeMap maps canonical approvalPosture values to
+// claude permissions.defaultMode values.  "auto" is best-effort: claude has no
+// model-tier-gated autonomous mode so it is mapped to the nearest alternative.
+var approvalPostureClaudeMap = map[string]string{
+	"always-ask": "default",
+	"ask-risky":  "acceptEdits",
+	"auto":       "acceptEdits", // best-effort
+	"yolo":       "bypassPermissions",
 }
 
-// approvalPostureClaude maps normalized approvalPosture values to claude permissions.defaultMode values.
-// "on-request" and "on-failure" are not cleanly mappable and are skipped.
-var approvalPostureClaude = map[string]string{
-	"never":     "bypassPermissions",
-	"untrusted": "default",
+// approvalPostureCodexMap maps canonical approvalPosture values to
+// codex approval_policy values.  "auto" is best-effort: model-tier gating is not
+// expressible in codex config.
+var approvalPostureCodexMap = map[string]string{
+	"always-ask": "untrusted",
+	"ask-risky":  "on-request",
+	"auto":       "on-failure", // best-effort
+	"yolo":       "never",
 }
 
 // deepMerge merges src into dst recursively.
@@ -67,87 +81,289 @@ func filterForbidden(native map[string]interface{}, forbidden []string) (map[str
 	return kept, dropped
 }
 
-// translateNormalized converts normalized config keys to agent-native key/value additions.
-// Unknown normalized keys are skipped with a descriptive reason string.
-// Returns the native additions map and a slice of skip reason strings.
-func translateNormalized(agent string, norm map[string]interface{}) (map[string]interface{}, []string) {
-	native := make(map[string]interface{})
-	var skips []string
+// toStringSlice converts an interface{} value to a []string, handling both
+// []interface{} (from JSON deserialization) and []string inputs.
+func toStringSlice(v interface{}) []string {
+	switch tv := v.(type) {
+	case []string:
+		return tv
+	case []interface{}:
+		out := make([]string, 0, len(tv))
+		for _, elem := range tv {
+			if s, ok := elem.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		return []string{tv}
+	}
+	return nil
+}
+
+// getOrCreateNestedMap ensures native[keys[0]][keys[1]]... exists as a
+// map[string]interface{} and returns the innermost map.
+func getOrCreateNestedMap(native map[string]interface{}, keys ...string) map[string]interface{} {
+	current := native
+	for _, key := range keys {
+		if next, ok := current[key]; ok {
+			if nextMap, ok := next.(map[string]interface{}); ok {
+				current = nextMap
+				continue
+			}
+		}
+		m := make(map[string]interface{})
+		current[key] = m
+		current = m
+	}
+	return current
+}
+
+// translateNormalized converts normalized config keys to agent-native key/value
+// additions and an optional codex command policy.
+//
+// forbidden is a set built from the agent's ForbiddenConfigKeys: any normalized
+// key whose NAME appears in this set is rejected (never emitted) regardless of
+// translation — this prevents callers from injecting native sandbox/permission
+// keys disguised as normalized ones.
+//
+// Returns:
+//
+//	native    – map to deep-merge into the agent's config file
+//	cap       – aggregate capability of all keys processed
+//	reasons   – per-key skip / best-effort / rejection notes
+//	codexCmd  – non-nil when codex command policy must be written to rules file
+func translateNormalized(agent string, norm map[string]interface{}, forbidden map[string]bool) (native map[string]interface{}, cap Capability, reasons []string, codexCmd *commandPolicy) {
+	native = make(map[string]interface{})
+	var hasBestEffort, hasApplied bool
+
+	// For claude: accumulate permissions sub-map to avoid multiple native["permissions"]
+	// assignments that would clobber each other.
+	var claudePerms map[string]interface{}
+	getClaudePerms := func() map[string]interface{} {
+		if claudePerms == nil {
+			claudePerms = make(map[string]interface{})
+		}
+		return claudePerms
+	}
+
+	// For codex: accumulate command policy (written to rules file, not config.toml).
+	var cp commandPolicy
 
 	for k, v := range norm {
+		// Hardening: reject any normalized key whose name is in the forbidden set.
+		// This prevents native sandbox / permission keys from being injected via
+		// the normalized pathway.
+		if forbidden[k] {
+			reasons = append(reasons, fmt.Sprintf("forbidden normalized key %q rejected", k))
+			continue // contributes to unsupported (no flag set)
+		}
+
 		switch k {
 		case ckApprovalPosture:
 			val, _ := v.(string)
 			switch agent {
-			case "codex":
-				if approvalPostureCodex[val] {
-					// Native key is approval_policy; values are identical to normalized.
-					native["approval_policy"] = val
-				} else {
-					skips = append(skips, fmt.Sprintf("approvalPosture value %q not recognized for codex", val))
-				}
 			case "claude":
-				if mapped, ok := approvalPostureClaude[val]; ok {
-					// claude uses permissions.defaultMode (nested).
-					perms := make(map[string]interface{})
-					perms["defaultMode"] = mapped
-					native["permissions"] = perms
+				if mapped, ok := approvalPostureClaudeMap[val]; ok {
+					getClaudePerms()["defaultMode"] = mapped
+					if val == "auto" {
+						hasBestEffort = true
+						reasons = append(reasons, "claude has no model-tier-gated autonomous mode; mapped to acceptEdits")
+					} else {
+						hasApplied = true
+					}
 				} else {
-					skips = append(skips, fmt.Sprintf("approvalPosture value %q not mappable for claude", val))
+					reasons = append(reasons, fmt.Sprintf("approvalPosture value %q not recognized", val))
+				}
+			case "codex":
+				if mapped, ok := approvalPostureCodexMap[val]; ok {
+					native["approval_policy"] = mapped
+					if val == "auto" {
+						hasBestEffort = true
+						reasons = append(reasons, "codex 'auto' mapped to limited on-failure approvals; model-tier gating not expressible")
+					} else {
+						hasApplied = true
+					}
+				} else {
+					reasons = append(reasons, fmt.Sprintf("approvalPosture value %q not recognized", val))
 				}
 			case "opencode":
-				skips = append(skips, "approvalPosture not mapped for opencode; use native passthrough")
+				reasons = append(reasons, "approvalPosture not mapped for opencode; use native passthrough")
 			default:
-				skips = append(skips, fmt.Sprintf("approvalPosture not mapped for %s", agent))
+				reasons = append(reasons, fmt.Sprintf("approvalPosture not mapped for %s", agent))
 			}
+
+		case ckDisabledTools:
+			tools := toStringSlice(v)
+			if len(tools) == 0 {
+				break
+			}
+			switch agent {
+			case "opencode":
+				toolsMap := make(map[string]interface{}, len(tools))
+				for _, t := range tools {
+					toolsMap[t] = false
+				}
+				native["tools"] = toolsMap
+				hasApplied = true
+			case "claude":
+				perms := getClaudePerms()
+				existing, _ := perms["deny"].([]interface{})
+				for _, t := range tools {
+					existing = append(existing, t)
+				}
+				perms["deny"] = existing
+				hasApplied = true
+			default:
+				// codex and any other agent have no per-tool disable.
+				reasons = append(reasons, fmt.Sprintf("%s has no per-tool disable", agent))
+			}
+
+		case ckAllowedCommands:
+			pats := toStringSlice(v)
+			if len(pats) == 0 {
+				break
+			}
+			switch agent {
+			case "claude":
+				perms := getClaudePerms()
+				existing, _ := perms["allow"].([]interface{})
+				for _, p := range pats {
+					existing = append(existing, fmt.Sprintf("Bash(%s)", p))
+				}
+				perms["allow"] = existing
+				hasApplied = true
+			case "opencode":
+				bashMap := getOrCreateNestedMap(native, "permission", "bash")
+				for _, p := range pats {
+					bashMap[p] = "allow"
+				}
+				hasApplied = true
+			case "codex":
+				cp.Allowed = append(cp.Allowed, pats...)
+				hasApplied = true
+			default:
+				reasons = append(reasons, fmt.Sprintf("allowedCommands not mapped for %s", agent))
+			}
+
+		case ckDeniedCommands:
+			pats := toStringSlice(v)
+			if len(pats) == 0 {
+				break
+			}
+			switch agent {
+			case "claude":
+				perms := getClaudePerms()
+				existing, _ := perms["deny"].([]interface{})
+				for _, p := range pats {
+					existing = append(existing, fmt.Sprintf("Bash(%s)", p))
+				}
+				perms["deny"] = existing
+				hasApplied = true
+			case "opencode":
+				bashMap := getOrCreateNestedMap(native, "permission", "bash")
+				for _, p := range pats {
+					bashMap[p] = "deny"
+				}
+				hasApplied = true
+			case "codex":
+				cp.Denied = append(cp.Denied, pats...)
+				hasApplied = true
+			default:
+				reasons = append(reasons, fmt.Sprintf("deniedCommands not mapped for %s", agent))
+			}
+
 		default:
-			skips = append(skips, fmt.Sprintf("unknown normalized key %q", k))
+			reasons = append(reasons, fmt.Sprintf("unknown normalized key %q", k))
 		}
 	}
 
-	return native, skips
+	// Commit accumulated claude permissions to the native map.
+	if claudePerms != nil {
+		native["permissions"] = claudePerms
+	}
+
+	// Commit codex command policy (non-empty only).
+	if !cp.empty() {
+		codexCmd = &cp
+	}
+
+	// Aggregate capability across all keys processed.
+	if hasBestEffort {
+		cap = CapabilityBestEffort
+	} else if hasApplied {
+		cap = CapabilityApplied
+	} else {
+		cap = CapabilityUnsupported
+	}
+
+	return native, cap, reasons, codexCmd
 }
 
 // buildAdditions constructs the final additions map for a given agent from the ConfigPayload.
-// Order: native passthrough (filtered) is applied first, normalized-derived wins on conflict.
-// Also returns skip reason strings and forbidden-key drop messages for the Report.
-func buildAdditions(agentName string, forbidden []string, cfg *ConfigPayload) (additions map[string]interface{}, allSkips []string) {
+//
+// Order: native passthrough (filtered) is applied first; normalized-derived keys win on conflict.
+// Returns the additions map, aggregate capability, all reason strings, and any codex command policy.
+func buildAdditions(agentName string, forbiddenSlice []string, cfg *ConfigPayload) (additions map[string]interface{}, cap Capability, reasons []string, codexCmd *commandPolicy) {
 	additions = make(map[string]interface{})
 
+	// Build the forbidden set once for O(1) lookups.
+	forbidden := make(map[string]bool, len(forbiddenSlice))
+	for _, k := range forbiddenSlice {
+		forbidden[k] = true
+	}
+
 	// 1. Native passthrough: filter forbidden keys then merge.
+	nativeContributed := false
 	if v, ok := cfg.Native[agentName]; ok {
 		if nativeMap, ok := v.(map[string]interface{}); ok {
-			kept, dropped := filterForbidden(nativeMap, forbidden)
+			kept, dropped := filterForbidden(nativeMap, forbiddenSlice)
 			for _, k := range dropped {
-				allSkips = append(allSkips, fmt.Sprintf("forbidden native key %q dropped", k))
+				reasons = append(reasons, fmt.Sprintf("forbidden native key %q dropped", k))
 			}
-			deepMerge(additions, kept)
+			if len(kept) > 0 {
+				deepMerge(additions, kept)
+				nativeContributed = true
+			}
 		}
 	}
 
-	// 2. Normalized keys translated to native (wins over passthrough).
-	normalizedNative, skips := translateNormalized(agentName, cfg.Normalized)
-	allSkips = append(allSkips, skips...)
-	deepMerge(additions, normalizedNative) // normalized overwrites passthrough on conflict
+	// 2. Normalized keys translated to native (wins over passthrough on conflict).
+	normalizedNative, normCap, normReasons, cp := translateNormalized(agentName, cfg.Normalized, forbidden)
+	reasons = append(reasons, normReasons...)
+	deepMerge(additions, normalizedNative)
+	codexCmd = cp
 
-	return additions, allSkips
+	// 3. Aggregate capability: normCap takes precedence; native passthrough upgrades
+	// unsupported to applied (something was written).
+	if normCap == CapabilityBestEffort {
+		cap = CapabilityBestEffort
+	} else if normCap == CapabilityApplied || nativeContributed {
+		cap = CapabilityApplied
+	} else {
+		cap = CapabilityUnsupported
+	}
+
+	return additions, cap, reasons, codexCmd
 }
 
-// skipReport returns a Skipped report with the given base and reason, incorporating any skips.
-func skipReport(base Report, reason string, skips []string) Report {
+// skipReport returns a Skipped report with the given base, reason, capability, and skip notes.
+func skipReport(base Report, reason string, cap Capability, skips []string) Report {
 	if len(skips) > 0 {
 		reason = reason + ": " + strings.Join(skips, "; ")
 	}
 	base.Status = StatusSkipped
+	base.Capability = cap
 	base.Reason = reason
 	return base
 }
 
-// appliedReport returns an Applied report, with Reason set to any skip messages.
-func appliedReport(base Report, skips []string) Report {
+// appliedReport returns an Applied report with Capability stamped and any reason notes joined.
+func appliedReport(base Report, cap Capability, skips []string) Report {
 	base.Status = StatusApplied
+	base.Capability = cap
 	if len(skips) > 0 {
-		base.Reason = "skipped keys: " + strings.Join(skips, "; ")
+		base.Reason = strings.Join(skips, "; ")
 	}
 	return base
 }
@@ -157,7 +373,9 @@ func appliedReport(base Report, skips []string) Report {
 // ApplyConfig applies config keys to ~/.claude/settings.json (JSON format, USER scope).
 // Normalized keys are translated per-agent; native passthrough is deep-merged.
 // Normalized-derived keys win over native passthrough on conflict.
-// Forbidden keys (e.g. "model") are dropped and reported.
+// Forbidden keys ("model", "permissions") in native passthrough are dropped and reported.
+// "permissions" is managed via normalized keys (approvalPosture, disabledTools,
+// allowedCommands, deniedCommands) and must not be overridden wholesale via passthrough.
 func (e claudeEmitter) ApplyConfig(a Artifact, opts Options) Report {
 	base := Report{Agent: e.layout.Name, Kind: KindConfig, Name: a.Name}
 
@@ -167,10 +385,10 @@ func (e claudeEmitter) ApplyConfig(a Artifact, opts Options) Report {
 		return base
 	}
 
-	additions, allSkips := buildAdditions(e.layout.Name, e.layout.ForbiddenConfigKeys, a.Config)
+	additions, cap, allSkips, _ := buildAdditions(e.layout.Name, e.layout.ForbiddenConfigKeys, a.Config)
 
 	if len(additions) == 0 {
-		return skipReport(base, "no applicable config additions", allSkips)
+		return skipReport(base, "no applicable config additions", cap, allSkips)
 	}
 
 	path := e.layout.ConfigPath
@@ -197,14 +415,17 @@ func (e claudeEmitter) ApplyConfig(a Artifact, opts Options) Report {
 		return base
 	}
 
-	return appliedReport(base, allSkips)
+	return appliedReport(base, cap, allSkips)
 }
 
 // ---- codexEmitter -----------------------------------------------------------
 
 // ApplyConfig applies config keys to $CODEX_HOME/config.toml (TOML format, USER scope).
 // The same file is shared with MCP server entries; all existing keys survive via deep-merge.
-// Forbidden keys (e.g. "model") in native passthrough are dropped and reported.
+// Forbidden keys ("model", "approval_policy", "sandbox_mode", "sandbox_workspace_write")
+// in native passthrough are dropped and reported.
+// allowedCommands / deniedCommands are written to $CODEX_HOME/rules/default.rules
+// (via the execpolicy adapter) rather than config.toml.
 func (e codexEmitter) ApplyConfig(a Artifact, opts Options) Report {
 	base := Report{Agent: e.layout.Name, Kind: KindConfig, Name: a.Name}
 
@@ -214,53 +435,64 @@ func (e codexEmitter) ApplyConfig(a Artifact, opts Options) Report {
 		return base
 	}
 
-	additions, allSkips := buildAdditions(e.layout.Name, e.layout.ForbiddenConfigKeys, a.Config)
+	additions, cap, allSkips, codexCmd := buildAdditions(e.layout.Name, e.layout.ForbiddenConfigKeys, a.Config)
 
-	if len(additions) == 0 {
-		return skipReport(base, "no applicable config additions", allSkips)
+	if len(additions) == 0 && (codexCmd == nil || codexCmd.empty()) {
+		return skipReport(base, "no applicable config additions", cap, allSkips)
 	}
 
-	path := e.layout.ConfigPath
+	// Write config.toml if there are native/normalized config additions.
+	if len(additions) > 0 {
+		path := e.layout.ConfigPath
 
-	// Read existing TOML or start fresh.
-	var doc map[string]interface{}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			doc = make(map[string]interface{})
+		var doc map[string]interface{}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				doc = make(map[string]interface{})
+			} else {
+				base.Status = StatusFailed
+				base.Reason = fmt.Sprintf("read %s: %v", path, err)
+				return base
+			}
 		} else {
+			if err := toml.Unmarshal(data, &doc); err != nil {
+				base.Status = StatusFailed
+				base.Reason = fmt.Sprintf("parse %s: %v", path, err)
+				return base
+			}
+			if doc == nil {
+				doc = make(map[string]interface{})
+			}
+		}
+
+		deepMerge(doc, additions)
+
+		out, err := toml.Marshal(doc)
+		if err != nil {
 			base.Status = StatusFailed
-			base.Reason = fmt.Sprintf("read %s: %v", path, err)
+			base.Reason = fmt.Sprintf("marshal %s: %v", path, err)
 			return base
 		}
-	} else {
-		if err := toml.Unmarshal(data, &doc); err != nil {
+
+		perm := filePerm(path, false, 0o644)
+		if err := atomicWriteFile(path, out, perm); err != nil {
 			base.Status = StatusFailed
-			base.Reason = fmt.Sprintf("parse %s: %v", path, err)
+			base.Reason = err.Error()
 			return base
 		}
-		if doc == nil {
-			doc = make(map[string]interface{})
+	}
+
+	// Write execpolicy rules file if allowedCommands / deniedCommands were given.
+	if codexCmd != nil && !codexCmd.empty() {
+		if _, err := writeCodexExecPolicy(e.layout.RulesDir, *codexCmd); err != nil {
+			base.Status = StatusFailed
+			base.Reason = fmt.Sprintf("write execpolicy: %v", err)
+			return base
 		}
 	}
 
-	deepMerge(doc, additions)
-
-	out, err := toml.Marshal(doc)
-	if err != nil {
-		base.Status = StatusFailed
-		base.Reason = fmt.Sprintf("marshal %s: %v", path, err)
-		return base
-	}
-
-	perm := filePerm(path, false, 0o644)
-	if err := atomicWriteFile(path, out, perm); err != nil {
-		base.Status = StatusFailed
-		base.Reason = err.Error()
-		return base
-	}
-
-	return appliedReport(base, allSkips)
+	return appliedReport(base, cap, allSkips)
 }
 
 // ---- opencodeEmitter --------------------------------------------------------
@@ -268,8 +500,9 @@ func (e codexEmitter) ApplyConfig(a Artifact, opts Options) Report {
 // ApplyConfig applies config keys to ~/.config/opencode/opencode.json (JSONC, USER scope).
 // Uses format-preserving hujson patching so existing comments on untouched sibling keys survive.
 // For each top-level key in the additions, existing nested maps are deep-merged before patching.
-// Forbidden keys in native passthrough are dropped and reported.
-// approvalPosture is not mapped for opencode (hard-errors on invalid config); use native passthrough.
+// Forbidden keys ("model", "permission") in native passthrough are dropped and reported.
+// approvalPosture is not mapped for opencode (hard-errors on invalid config).
+// allowedCommands/deniedCommands are written via the normalized permission.bash map.
 func (e opencodeEmitter) ApplyConfig(a Artifact, opts Options) Report {
 	base := Report{Agent: e.layout.Name, Kind: KindConfig, Name: a.Name}
 
@@ -279,10 +512,10 @@ func (e opencodeEmitter) ApplyConfig(a Artifact, opts Options) Report {
 		return base
 	}
 
-	additions, allSkips := buildAdditions(e.layout.Name, e.layout.ForbiddenConfigKeys, a.Config)
+	additions, cap, allSkips, _ := buildAdditions(e.layout.Name, e.layout.ForbiddenConfigKeys, a.Config)
 
 	if len(additions) == 0 {
-		return skipReport(base, "no applicable config additions", allSkips)
+		return skipReport(base, "no applicable config additions", cap, allSkips)
 	}
 
 	path := e.layout.ConfigPath
@@ -365,5 +598,5 @@ func (e opencodeEmitter) ApplyConfig(a Artifact, opts Options) Report {
 		return base
 	}
 
-	return appliedReport(base, allSkips)
+	return appliedReport(base, cap, allSkips)
 }
