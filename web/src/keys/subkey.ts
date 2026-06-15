@@ -175,8 +175,9 @@ export const AllowAll: RevocationChecker = {
  * identity, or throws on any failure.
  *
  * certChainPEM is the CP-relayed leaf+chain PEM; rootPEM is the client-pinned
- * Root CA. If certChainPEM is empty (dev/insecure mode), step 1 is skipped and
- * the sub-key pubkey is returned trusted with a synthetic "dev" identity.
+ * Root CA. If both certChainPEM and rootPEM are empty (explicit dev/insecure
+ * mode), step 1 is skipped and the sub-key pubkey is returned trusted with a
+ * synthetic "dev" identity.
  *
  * subkeyJSON is the raw JSON string from GetSpawnNodeKeyResponse.signed_subkey.
  * now is the current time (injectable for testing).
@@ -192,8 +193,11 @@ export async function verifyNodeForSealing(
 ): Promise<{ hpkePub: Uint8Array; identity: NodeIdentity }> {
   const sk: SignedSubKey = JSON.parse(subkeyJSON);
 
-  // Dev/insecure mode: no cert chain → skip chain verification.
+  // Dev/insecure mode: no cert chain and no pinned root → skip chain verification.
   if (!certChainPEM) {
+    if (rootPEM.trim() !== "") {
+      throw new Error("subkey: node cert chain missing while root PEM is configured");
+    }
     return {
       hpkePub:  fromBase64(sk.hpke_pub),
       identity: { nodeId: sk.node_id, accountId: "dev", nodeClass: "cloud" },

@@ -413,6 +413,9 @@ export async function runMigrate(
     const msg = e instanceof Error ? e.message : String(e);
     throw new MigrateError(`Failed to fetch node key: ${msg}`, "delivery");
   }
+  if (rootPEM.trim() !== "" && nk.nodeCertChain.trim() === "") {
+    throw new MigrateError("Node verification failed: node cert chain missing while root PEM is configured", "delivery");
+  }
 
   // Parse the sub-key JSON (we need not_after for the in-flight AAD).
   const sk = JSON.parse(nk.signedSubkey) as { node_id: string; not_after: string };

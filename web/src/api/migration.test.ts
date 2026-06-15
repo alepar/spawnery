@@ -215,4 +215,38 @@ describe("runMigrate", () => {
     )).rejects.toMatchObject({ leg: "delivery" });
     expect(unaryMock.mock.calls.some(([method]) => method === "DeliverSecrets")).toBe(false);
   });
+
+  it("fails delivery when a pinned root is configured but the CP omits the node cert chain", async () => {
+    unaryMock.mockImplementation(async (method: string) => {
+      switch (method) {
+        case "GetJournalKeyCiphertext":
+          return {
+            entries: [{
+              mount: "main",
+              ciphertext: b64(JSON.stringify({ recipients: [], nonce: "", ct: "" })),
+            }],
+          };
+        case "MigrateSpawn":
+          return { nodeId: "node-a", transferSetId: "ts-1" };
+        case "GetSpawnNodeKey":
+          return {
+            nodeCertChain: "",
+            signedSubkey: b64(JSON.stringify({ node_id: "node-a", not_after: "2030-01-01T00:00:00Z" })),
+            generation: "7",
+          };
+        default:
+          throw new Error(`unexpected RPC ${method}`);
+      }
+    });
+
+    await expect(runMigrate(
+      "sp1",
+      { nodeId: "node-a", class: "self-hosted" },
+      { x25519Public: {} as CryptoKey, x25519Private: {} as CryptoKey },
+      "root-pem",
+      new Date("2026-06-15T00:00:00Z"),
+    )).rejects.toMatchObject({ leg: "delivery" });
+    expect(verifyNodeForSealingMock).not.toHaveBeenCalled();
+    expect(unaryMock.mock.calls.some(([method]) => method === "DeliverSecrets")).toBe(false);
+  });
 });

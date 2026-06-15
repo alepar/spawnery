@@ -189,6 +189,9 @@ func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKe
 		DeliveryID: deliveryID,
 	}
 	if len(certChain) == 0 {
+		if len(rootPEM) != 0 {
+			return nil, errors.New("production node verification requires target node cert chain")
+		}
 		aad.NodeID = sk.NodeID
 		aad.NotAfter = sk.NotAfter
 		sealed, err := journalkey.ResealForNode(&env, dev.X25519Priv, sk.HPKEPub, aad)

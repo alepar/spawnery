@@ -307,6 +307,40 @@ func TestRunMoveRejectsMismatchedVerifiedNodeBeforeDelivery(t *testing.T) {
 	}
 }
 
+func TestRunMoveRejectsMissingCertChainWhenRootConfigured(t *testing.T) {
+	mn, _ := seal.NewMnemonic()
+	dev, _ := seal.DeviceFromMnemonic(mn, "")
+	env, err := journalkey.SealToOwner("repo-pw-123", []seal.X25519PubKey{dev.X25519PubKey()},
+		seal.AtRestAAD{AccountID: "alice", SecretID: journalkey.SecretID("main"), Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, _ := json.Marshal(env)
+
+	nodePub, _, err := seal.NodeKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeMoveClient{
+		entries:  []*cpv1.JournalKeyCiphertext{{Mount: "main", Ciphertext: ct}},
+		nodeID:   "node-b",
+		nodePub:  nodePub,
+		gen:      7,
+		notAfter: time.Now().Add(time.Hour).Round(0),
+	}
+
+	var out bytes.Buffer
+	err = runMove(context.Background(), client, nil, dev, "sp1", "node-b", &out, time.Now(), moveOptions{
+		RootPEM: []byte("pinned-root-pem"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "node cert chain") {
+		t.Fatalf("err = %v", err)
+	}
+	if client.gotDelivery != nil {
+		t.Fatal("DeliverSecrets must not be called when a pinned root is configured but CP omits the node cert chain")
+	}
+}
+
 func TestRunMoveRefetchesNodeRevocationsForEachProductionSeal(t *testing.T) {
 	mn, _ := seal.NewMnemonic()
 	dev, _ := seal.DeviceFromMnemonic(mn, "")
