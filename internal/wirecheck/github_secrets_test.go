@@ -24,8 +24,14 @@ func requireFieldNumber(t *testing.T, msg proto.Message, name protoreflect.Name,
 }
 
 func TestNodeGitHubSecretRoutingProtoSurface(t *testing.T) {
+	if got := nodev1.SecretType_SECRET_TYPE_UNSPECIFIED.Number(); got != 0 {
+		t.Fatalf("SECRET_TYPE_UNSPECIFIED=%d want 0", got)
+	}
 	if got := nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN.Number(); got != 1 {
 		t.Fatalf("SECRET_TYPE_GITHUB_TOKEN=%d want 1", got)
+	}
+	if got := nodev1.SecretUsage_SECRET_USAGE_UNSPECIFIED.Number(); got != 0 {
+		t.Fatalf("SECRET_USAGE_UNSPECIFIED=%d want 0", got)
 	}
 	if got := nodev1.SecretUsage_SECRET_USAGE_NODE_STORAGE.Number(); got != 1 {
 		t.Fatalf("SECRET_USAGE_NODE_STORAGE=%d want 1", got)
@@ -45,6 +51,17 @@ func TestNodeGitHubSecretRoutingProtoSurface(t *testing.T) {
 	requireFieldNumber(t, &nodev1.SealedSecret{}, "render", 9)
 	requireFieldNumber(t, &nodev1.SealedSecret{}, "github_token", 10)
 	requireFieldNumber(t, &nodev1.StartSpawn{}, "secrets", 25)
+	requireFieldNumber(t, &nodev1.SecretRenderSpec{}, "profile", 1)
+	requireFieldNumber(t, &nodev1.SecretRenderSpec{}, "target_path", 2)
+	requireFieldNumber(t, &nodev1.SecretRenderSpec{}, "gh_config_dir", 3)
+	requireFieldNumber(t, &nodev1.SecretRenderSpec{}, "hosts_path", 4)
+	requireFieldNumber(t, &nodev1.SecretRenderSpec{}, "git_config_path", 5)
+	requireFieldNumber(t, &nodev1.SecretRenderSpec{}, "credential_helper_path", 6)
+	requireFieldNumber(t, &nodev1.GitHubTokenClearMetadata{}, "host", 1)
+	requireFieldNumber(t, &nodev1.GitHubTokenClearMetadata{}, "login", 2)
+	requireFieldNumber(t, &nodev1.GitHubTokenClearMetadata{}, "github_user_id", 3)
+	requireFieldNumber(t, &nodev1.GitHubTokenClearMetadata{}, "refresh_expires_at_unix", 4)
+	requireFieldNumber(t, &nodev1.GitHubTokenClearMetadata{}, "app_client_id", 5)
 
 	secret := &nodev1.SealedSecret{
 		TargetPath: "github/workspace/legacy-target",
@@ -109,8 +126,14 @@ func TestNodeGitHubSecretRoutingProtoSurface(t *testing.T) {
 }
 
 func TestCPGitHubSecretRoutingProtoSurface(t *testing.T) {
+	if got := cpv1.SecretType_SECRET_TYPE_UNSPECIFIED.Number(); got != 0 {
+		t.Fatalf("cp SECRET_TYPE_UNSPECIFIED=%d want 0", got)
+	}
 	if got := cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN.Number(); got != 1 {
 		t.Fatalf("cp SECRET_TYPE_GITHUB_TOKEN=%d want 1", got)
+	}
+	if got := cpv1.SecretUsage_SECRET_USAGE_UNSPECIFIED.Number(); got != 0 {
+		t.Fatalf("cp SECRET_USAGE_UNSPECIFIED=%d want 0", got)
 	}
 	if got := cpv1.SecretUsage_SECRET_USAGE_NODE_STORAGE.Number(); got != 1 {
 		t.Fatalf("cp SECRET_USAGE_NODE_STORAGE=%d want 1", got)
@@ -129,6 +152,17 @@ func TestCPGitHubSecretRoutingProtoSurface(t *testing.T) {
 	requireFieldNumber(t, &cpv1.SealedSecret{}, "mount_names", 8)
 	requireFieldNumber(t, &cpv1.SealedSecret{}, "render", 9)
 	requireFieldNumber(t, &cpv1.SealedSecret{}, "github_token", 10)
+	requireFieldNumber(t, &cpv1.SecretRenderSpec{}, "profile", 1)
+	requireFieldNumber(t, &cpv1.SecretRenderSpec{}, "target_path", 2)
+	requireFieldNumber(t, &cpv1.SecretRenderSpec{}, "gh_config_dir", 3)
+	requireFieldNumber(t, &cpv1.SecretRenderSpec{}, "hosts_path", 4)
+	requireFieldNumber(t, &cpv1.SecretRenderSpec{}, "git_config_path", 5)
+	requireFieldNumber(t, &cpv1.SecretRenderSpec{}, "credential_helper_path", 6)
+	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "host", 1)
+	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "login", 2)
+	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "github_user_id", 3)
+	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "refresh_expires_at_unix", 4)
+	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "app_client_id", 5)
 
 	in := &cpv1.DeliverSecretsRequest{
 		SpawnId: "sp1",
