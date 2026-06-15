@@ -73,6 +73,25 @@ type secretDeliveryTarget struct {
 	pendingFork bool
 }
 
+type forkTargetKeyMaterial struct {
+	signedSubKey []byte
+	certChain    []byte
+}
+
+func (s *Server) forkTargetKeyMaterial(nodeID string) (forkTargetKeyMaterial, error) {
+	entry, ok := s.nodeKeys.get(nodeID)
+	if !ok || len(entry.subkey) == 0 {
+		return forkTargetKeyMaterial{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("target node %q has not published an HPKE sub-key", nodeID))
+	}
+	if len(entry.certChain) == 0 {
+		return forkTargetKeyMaterial{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("target node %q has not published a cert chain", nodeID))
+	}
+	return forkTargetKeyMaterial{
+		signedSubKey: append([]byte(nil), entry.subkey...),
+		certChain:    append([]byte(nil), entry.certChain...),
+	}, nil
+}
+
 func (s *Server) resolveSecretDeliveryTarget(ctx context.Context, spawnID string) (secretDeliveryTarget, error) {
 	if nodeID, generation, err := s.liveNode(ctx, spawnID); err == nil {
 		return secretDeliveryTarget{nodeID: nodeID, generation: generation}, nil

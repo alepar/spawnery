@@ -127,6 +127,29 @@ func TestNodeForkMessagesExist(t *testing.T) {
 	if unpauseDone.GetUnpauseIfPausedComplete().GetSpawnId() != "sp-source" {
 		t.Fatalf("unpause complete not threaded: %+v", unpauseDone)
 	}
+
+	export := &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTransferExport{ForkTransferExport: &nodev1.ForkTransferExport{
+		SourceSpawnId: "sp-source", ForkSpawnId: "sp-fork", SourceGeneration: 9, TargetGeneration: 1,
+		TransferSetId: "ts-1", TargetNodeId: "node-2", TargetNodeClass: "cloud",
+		TargetSignedSubkey: []byte("signed-subkey"), TargetNodeCertChain: []byte("leaf-chain"),
+	}}}
+	if string(export.GetForkTransferExport().GetTargetSignedSubkey()) != "signed-subkey" {
+		t.Fatal("lost target subkey")
+	}
+	exported := &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_ForkTransferExported{ForkTransferExported: &nodev1.ForkTransferExported{
+		SourceSpawnId: "sp-source", ForkSpawnId: "sp-fork", TransferSetId: "ts-1",
+		SealedTransferKey: []byte("sealed-key"), Payload: []byte("sealed-payload"),
+	}}}
+	if string(exported.GetForkTransferExported().GetSealedTransferKey()) != "sealed-key" {
+		t.Fatal("lost sealed transfer key")
+	}
+	importReq := &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTransferImport{ForkTransferImport: &nodev1.ForkTransferImport{
+		SourceSpawnId: "sp-source", ForkSpawnId: "sp-fork", TargetGeneration: 1, TransferSetId: "ts-1",
+		SealedTransferKey: []byte("sealed-key"), Payload: []byte("sealed-payload"),
+	}}}
+	if string(importReq.GetForkTransferImport().GetPayload()) != "sealed-payload" {
+		t.Fatal("lost import payload")
+	}
 }
 
 func TestCPContractSurface(t *testing.T) {

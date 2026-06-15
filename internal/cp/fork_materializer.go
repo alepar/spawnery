@@ -25,12 +25,30 @@ type forkSourceRestoredWaiters struct {
 	m  map[string]chan *nodev1.ForkSourceRestored
 }
 
+type forkTransferExportedWaiters struct {
+	mu sync.Mutex
+	m  map[string]chan *nodev1.ForkTransferExported
+}
+
+type forkTransferImportedWaiters struct {
+	mu sync.Mutex
+	m  map[string]chan *nodev1.ForkTransferImported
+}
+
 func newForkWaiters() *forkWaiters {
 	return &forkWaiters{m: map[string]chan *nodev1.ForkSameNodeComplete{}}
 }
 
 func newForkSourceRestoredWaiters() *forkSourceRestoredWaiters {
 	return &forkSourceRestoredWaiters{m: map[string]chan *nodev1.ForkSourceRestored{}}
+}
+
+func newForkTransferExportedWaiters() *forkTransferExportedWaiters {
+	return &forkTransferExportedWaiters{m: map[string]chan *nodev1.ForkTransferExported{}}
+}
+
+func newForkTransferImportedWaiters() *forkTransferImportedWaiters {
+	return &forkTransferImportedWaiters{m: map[string]chan *nodev1.ForkTransferImported{}}
 }
 
 type forkTurnBoundaryWaiters struct {
@@ -148,6 +166,78 @@ func (s *Server) deliverForkSourceRestored(msg *nodev1.ForkSourceRestored) bool 
 		return false
 	}
 	return s.forkSourceRestored.deliver(msg)
+}
+
+func (w *forkTransferExportedWaiters) register(transferSetID string) chan *nodev1.ForkTransferExported {
+	ch := make(chan *nodev1.ForkTransferExported, 1)
+	w.mu.Lock()
+	w.m[transferSetID] = ch
+	w.mu.Unlock()
+	return ch
+}
+
+func (w *forkTransferExportedWaiters) unregister(transferSetID string) {
+	w.mu.Lock()
+	delete(w.m, transferSetID)
+	w.mu.Unlock()
+}
+
+func (w *forkTransferExportedWaiters) deliver(msg *nodev1.ForkTransferExported) bool {
+	w.mu.Lock()
+	ch, ok := w.m[msg.GetTransferSetId()]
+	w.mu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case ch <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) deliverForkTransferExported(msg *nodev1.ForkTransferExported) bool {
+	if s.forkTransferExports == nil {
+		return false
+	}
+	return s.forkTransferExports.deliver(msg)
+}
+
+func (w *forkTransferImportedWaiters) register(transferSetID string) chan *nodev1.ForkTransferImported {
+	ch := make(chan *nodev1.ForkTransferImported, 1)
+	w.mu.Lock()
+	w.m[transferSetID] = ch
+	w.mu.Unlock()
+	return ch
+}
+
+func (w *forkTransferImportedWaiters) unregister(transferSetID string) {
+	w.mu.Lock()
+	delete(w.m, transferSetID)
+	w.mu.Unlock()
+}
+
+func (w *forkTransferImportedWaiters) deliver(msg *nodev1.ForkTransferImported) bool {
+	w.mu.Lock()
+	ch, ok := w.m[msg.GetTransferSetId()]
+	w.mu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case ch <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) deliverForkTransferImported(msg *nodev1.ForkTransferImported) bool {
+	if s.forkTransferImports == nil {
+		return false
+	}
+	return s.forkTransferImports.deliver(msg)
 }
 
 type sameNodeForkMaterializer struct {
@@ -291,7 +381,7 @@ func (m *sameNodeForkMaterializer) cancelForkSameNode(req forkMaterializeRequest
 
 func (m *sameNodeForkMaterializer) MaterializeForkWithSourceRestored(ctx context.Context, req forkMaterializeRequest, onSourceRestored func() error) (forkMaterializeResult, error) {
 	if req.SourceNodeID != req.TargetNodeID {
-		return forkMaterializeResult{}, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("cross-node fork materialization is not implemented in this slice"))
+		return m.materializeCrossNodeForkWithSourceRestored(ctx, req, onSourceRestored)
 	}
 	n, ok := m.s.reg.Get(req.SourceNodeID)
 	if !ok || n.Sender == nil {
@@ -370,6 +460,133 @@ func (m *sameNodeForkMaterializer) MaterializeForkWithSourceRestored(ctx context
 	}
 }
 
+func (m *sameNodeForkMaterializer) materializeCrossNodeForkWithSourceRestored(ctx context.Context, req forkMaterializeRequest, onSourceRestored func() error) (forkMaterializeResult, error) {
+	sourceNode, ok := m.s.reg.Get(req.SourceNodeID)
+	if !ok || sourceNode.Sender == nil {
+		return forkMaterializeResult{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("source node %q is not connected", req.SourceNodeID))
+	}
+	targetNode, ok := m.s.reg.Get(req.TargetNodeID)
+	if !ok || targetNode.Sender == nil {
+		return forkMaterializeResult{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("target node %q is not connected", req.TargetNodeID))
+	}
+	keyMaterial, err := m.s.forkTargetKeyMaterial(req.TargetNodeID)
+	if err != nil {
+		return forkMaterializeResult{}, err
+	}
+	if m.s.forkSourceRestored == nil {
+		m.s.forkSourceRestored = newForkSourceRestoredWaiters()
+	}
+	if m.s.forkTransferExports == nil {
+		m.s.forkTransferExports = newForkTransferExportedWaiters()
+	}
+	if m.s.forkTransferImports == nil {
+		m.s.forkTransferImports = newForkTransferImportedWaiters()
+	}
+	restoredCh := m.s.forkSourceRestored.register(req.TransferSetID)
+	defer m.s.forkSourceRestored.unregister(req.TransferSetID)
+	exportedCh := m.s.forkTransferExports.register(req.TransferSetID)
+	defer m.s.forkTransferExports.unregister(req.TransferSetID)
+	importedCh := m.s.forkTransferImports.register(req.TransferSetID)
+	defer m.s.forkTransferImports.unregister(req.TransferSetID)
+
+	cancel := func() { m.cancelForkTransfer(req) }
+	if err := sourceNode.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTransferExport{ForkTransferExport: &nodev1.ForkTransferExport{
+		SourceSpawnId:       req.SourceSpawn.ID,
+		ForkSpawnId:         req.ForkSpawn.ID,
+		SourceGeneration:    req.SourceGeneration,
+		TargetGeneration:    req.TargetGeneration,
+		TransferSetId:       req.TransferSetID,
+		TargetNodeId:        req.TargetNodeID,
+		TargetNodeClass:     targetNode.Class,
+		TargetNodeOwner:     targetNode.Owner,
+		TargetSignedSubkey:  keyMaterial.signedSubKey,
+		TargetNodeCertChain: keyMaterial.certChain,
+	}}}); err != nil {
+		return forkMaterializeResult{}, connect.NewError(connect.CodeUnavailable, fmt.Errorf("send fork transfer export to node %q: %w", req.SourceNodeID, err))
+	}
+
+	timer := time.NewTimer(m.timeout)
+	defer timer.Stop()
+	sourceRestored := false
+	for {
+		select {
+		case <-ctx.Done():
+			cancel()
+			return forkMaterializeResult{}, ctx.Err()
+		case <-timer.C:
+			cancel()
+			return forkMaterializeResult{}, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out waiting for cross-node fork %s", req.TransferSetID))
+		case msg := <-restoredCh:
+			if msg.GetError() != "" {
+				cancel()
+				return forkMaterializeResult{}, connect.NewError(connect.CodeInternal, fmt.Errorf("node fork source restore failed: %s", msg.GetError()))
+			}
+			if msg.GetSourceSpawnId() != req.SourceSpawn.ID || msg.GetSourceGeneration() != req.SourceGeneration || msg.GetTransferSetId() != req.TransferSetID {
+				cancel()
+				return forkMaterializeResult{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("fork source-restored ids do not match request"))
+			}
+			if !sourceRestored && onSourceRestored != nil {
+				if err := onSourceRestored(); err != nil {
+					cancel()
+					return forkMaterializeResult{}, err
+				}
+			}
+			sourceRestored = true
+		case msg := <-exportedCh:
+			if msg.GetError() != "" {
+				cancel()
+				return forkMaterializeResult{}, connect.NewError(connect.CodeInternal, fmt.Errorf("node fork export failed: %s", msg.GetError()))
+			}
+			if msg.GetSourceSpawnId() != req.SourceSpawn.ID || msg.GetForkSpawnId() != req.ForkSpawn.ID || msg.GetTransferSetId() != req.TransferSetID {
+				cancel()
+				return forkMaterializeResult{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("fork transfer export ids do not match request"))
+			}
+			if len(msg.GetSealedTransferKey()) == 0 || len(msg.GetPayload()) == 0 {
+				cancel()
+				return forkMaterializeResult{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("fork transfer export is missing ciphertext"))
+			}
+			if err := targetNode.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTransferImport{ForkTransferImport: &nodev1.ForkTransferImport{
+				SourceSpawnId:     req.SourceSpawn.ID,
+				ForkSpawnId:       req.ForkSpawn.ID,
+				TargetGeneration:  req.TargetGeneration,
+				TransferSetId:     req.TransferSetID,
+				SealedTransferKey: append([]byte(nil), msg.GetSealedTransferKey()...),
+				Payload:           append([]byte(nil), msg.GetPayload()...),
+			}}}); err != nil {
+				cancel()
+				return forkMaterializeResult{}, connect.NewError(connect.CodeUnavailable, fmt.Errorf("send fork transfer import to node %q: %w", req.TargetNodeID, err))
+			}
+		case msg := <-importedCh:
+			if !sourceRestored {
+				cancel()
+				return forkMaterializeResult{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cross-node fork completed before source-restored acknowledgement"))
+			}
+			return forkResultFromImported(msg, req)
+		}
+	}
+}
+
+func (m *sameNodeForkMaterializer) cancelForkTransfer(req forkMaterializeRequest) {
+	cancel := &nodev1.CPMessage{Msg: &nodev1.CPMessage_CancelForkTransfer{CancelForkTransfer: &nodev1.CancelForkTransfer{
+		SourceSpawnId: req.SourceSpawn.ID,
+		ForkSpawnId:   req.ForkSpawn.ID,
+		TransferSetId: req.TransferSetID,
+	}}}
+	if n, ok := m.s.reg.Get(req.SourceNodeID); ok && n.Sender != nil {
+		if err := n.Sender.Send(cancel); err != nil {
+			log.Printf("cancel fork transfer %s on source node %s: %v", req.TransferSetID, req.SourceNodeID, err)
+		}
+	}
+	if req.TargetNodeID == req.SourceNodeID {
+		return
+	}
+	if n, ok := m.s.reg.Get(req.TargetNodeID); ok && n.Sender != nil {
+		if err := n.Sender.Send(cancel); err != nil {
+			log.Printf("cancel fork transfer %s on target node %s: %v", req.TransferSetID, req.TargetNodeID, err)
+		}
+	}
+}
+
 func forkResultFromComplete(msg *nodev1.ForkSameNodeComplete, req forkMaterializeRequest) (forkMaterializeResult, error) {
 	if msg.GetError() != "" {
 		return forkMaterializeResult{}, connect.NewError(connect.CodeInternal, fmt.Errorf("node fork failed: %s", msg.GetError()))
@@ -379,6 +596,25 @@ func forkResultFromComplete(msg *nodev1.ForkSameNodeComplete, req forkMaterializ
 	}
 	mountPins := mountPinsFromForkComplete(msg.GetMounts())
 	rootfsPins, err := rootfsPinsFromForkComplete(msg, req.TargetGeneration, req.SourceSpawn.BaseImageDigest)
+	if err != nil {
+		return forkMaterializeResult{}, err
+	}
+	nodeID := msg.GetNodeId()
+	if nodeID == "" {
+		nodeID = req.TargetNodeID
+	}
+	return forkMaterializeResult{NodeID: nodeID, MountPins: mountPins, RootfsPins: rootfsPins}, nil
+}
+
+func forkResultFromImported(msg *nodev1.ForkTransferImported, req forkMaterializeRequest) (forkMaterializeResult, error) {
+	if msg.GetError() != "" {
+		return forkMaterializeResult{}, connect.NewError(connect.CodeInternal, fmt.Errorf("node fork import failed: %s", msg.GetError()))
+	}
+	if msg.GetSourceSpawnId() != req.SourceSpawn.ID || msg.GetForkSpawnId() != req.ForkSpawn.ID {
+		return forkMaterializeResult{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("fork import ids do not match request"))
+	}
+	mountPins := mountPinsFromForkComplete(msg.GetMounts())
+	rootfsPins, err := rootfsPinsFromArtifacts(msg.GetRootfsArtifacts(), req.TargetGeneration, req.SourceSpawn.BaseImageDigest)
 	if err != nil {
 		return forkMaterializeResult{}, err
 	}
@@ -406,8 +642,15 @@ func rootfsPinsFromForkComplete(msg *nodev1.ForkSameNodeComplete, targetGenerati
 	if msg == nil || len(msg.GetRootfsArtifacts()) == 0 {
 		return nil, nil
 	}
-	pins := make([]store.RootfsArtifactPin, 0, len(msg.GetRootfsArtifacts()))
-	for _, art := range msg.GetRootfsArtifacts() {
+	return rootfsPinsFromArtifacts(msg.GetRootfsArtifacts(), targetGeneration, baseImageDigest)
+}
+
+func rootfsPinsFromArtifacts(artifacts []*nodev1.RootfsArtifact, targetGeneration uint64, baseImageDigest string) ([]store.RootfsArtifactPin, error) {
+	if len(artifacts) == 0 {
+		return nil, nil
+	}
+	pins := make([]store.RootfsArtifactPin, 0, len(artifacts))
+	for _, art := range artifacts {
 		if art.GetArtifactId() == "" {
 			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("fork rootfs artifact restore pin is missing artifact id"))
 		}

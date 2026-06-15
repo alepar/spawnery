@@ -77,7 +77,99 @@ func TestForkMaterializerSendsForkSameNodeAndReturnsPins(t *testing.T) {
 	}
 }
 
-func TestForkMaterializerCrossNodeFailsClosed(t *testing.T) {
+func TestForkMaterializerCrossNodeRelaysTargetKeyMaterialAndReturnsTargetPins(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	s.nodeKeys.put("node-2", []byte("signed-subkey"), []byte("leaf-chain"))
+	sourceSender := &capSender{}
+	targetSender := &capSender{}
+	reg.Add(registryNode("node-1", sourceSender))
+	reg.Add(registryNode("node-2", targetSender))
+	mat := newSameNodeForkMaterializer(s, time.Second).(forkSourceRestoredMaterializer)
+
+	restored := make(chan struct{}, 1)
+	done := make(chan struct{})
+	var (
+		got forkMaterializeResult
+		err error
+	)
+	go func() {
+		got, err = mat.MaterializeForkWithSourceRestored(context.Background(), forkMaterializeRequest{
+			SourceSpawn:      store.Spawn{ID: "sp-source", BaseImageDigest: "agent@sha256:base"},
+			ForkSpawn:        store.Spawn{ID: "sp-fork"},
+			TransferSetID:    "ts-cross-node",
+			SourceGeneration: 9,
+			TargetGeneration: 1,
+			SourceNodeID:     "node-1",
+			TargetNodeID:     "node-2",
+			TargetClass:      "cloud",
+		}, func() error {
+			restored <- struct{}{}
+			return nil
+		})
+		close(done)
+	}()
+
+	waitForForkAnyCPMessage(t, "ForkTransferExport", sourceSender)
+	export := sourceSender.lastCPMessage().GetForkTransferExport()
+	if export == nil {
+		t.Fatalf("source message = %+v, want ForkTransferExport", sourceSender.lastCPMessage())
+	}
+	if export.GetTargetNodeId() != "node-2" || string(export.GetTargetSignedSubkey()) != "signed-subkey" || string(export.GetTargetNodeCertChain()) != "leaf-chain" {
+		t.Fatalf("ForkTransferExport = %+v", export)
+	}
+	s.deliverForkSourceRestored(&nodev1.ForkSourceRestored{
+		SourceSpawnId:    "sp-source",
+		SourceGeneration: 9,
+		TransferSetId:    "ts-cross-node",
+	})
+	select {
+	case <-restored:
+	case <-time.After(time.Second):
+		t.Fatal("source restored callback did not fire")
+	}
+	s.deliverForkTransferExported(&nodev1.ForkTransferExported{
+		SourceSpawnId:     "sp-source",
+		ForkSpawnId:       "sp-fork",
+		TransferSetId:     "ts-cross-node",
+		SealedTransferKey: []byte("sealed-key"),
+		Payload:           []byte("sealed-payload"),
+	})
+	waitForForkAnyCPMessage(t, "ForkTransferImport", targetSender)
+	importReq := targetSender.lastCPMessage().GetForkTransferImport()
+	if importReq == nil {
+		t.Fatalf("target message = %+v, want ForkTransferImport", targetSender.lastCPMessage())
+	}
+	if string(importReq.GetSealedTransferKey()) != "sealed-key" || string(importReq.GetPayload()) != "sealed-payload" {
+		t.Fatalf("ForkTransferImport = %+v", importReq)
+	}
+	s.deliverForkTransferImported(&nodev1.ForkTransferImported{
+		SourceSpawnId: "sp-source",
+		ForkSpawnId:   "sp-fork",
+		TransferSetId: "ts-cross-node",
+		NodeId:        "node-2",
+		Mounts:        []*nodev1.MountMarker{{Name: "work", Marker: "fork-manifest"}},
+		RootfsArtifacts: []*nodev1.RootfsArtifact{{
+			ArtifactId: "rootfs-fork-gen1", Generation: 1, Sequence: 1, BaseImageDigest: "agent@sha256:base",
+			Format: "oci_layout",
+		}},
+	})
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("materializer did not finish")
+	}
+	if err != nil {
+		t.Fatalf("MaterializeForkWithSourceRestored: %v", err)
+	}
+	if got.NodeID != "node-2" || got.MountPins["work"] != "fork-manifest" {
+		t.Fatalf("materializer result = %+v", got)
+	}
+	if len(got.RootfsPins) != 1 || got.RootfsPins[0].ArtifactID != "rootfs-fork-gen1" || got.RootfsPins[0].Generation != 1 {
+		t.Fatalf("rootfs pins = %+v", got.RootfsPins)
+	}
+}
+
+func TestForkMaterializerCrossNodeFailsClosedWithoutTargetSubkey(t *testing.T) {
 	s, reg, _ := newTestServer(t)
 	sourceSender := &capSender{}
 	targetSender := &capSender{}
@@ -93,12 +185,13 @@ func TestForkMaterializerCrossNodeFailsClosed(t *testing.T) {
 		TargetGeneration: 1,
 		SourceNodeID:     "node-1",
 		TargetNodeID:     "node-2",
+		TargetClass:      "cloud",
 	})
-	if connect.CodeOf(err) != connect.CodeUnimplemented {
-		t.Fatalf("cross-node MaterializeFork error = %v, want Unimplemented", err)
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("cross-node MaterializeFork error = %v, want FailedPrecondition", err)
 	}
 	if sourceSender.lastCPMessage() != nil || targetSender.lastCPMessage() != nil {
-		t.Fatalf("cross-node materializer must not dispatch same-node commands, source=%+v target=%+v",
+		t.Fatalf("cross-node materializer must fail before dispatch, source=%+v target=%+v",
 			sourceSender.lastCPMessage(), targetSender.lastCPMessage())
 	}
 }
@@ -328,6 +421,18 @@ func waitForForkCPMessage(t *testing.T, sender *capSender) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("timed out waiting for ForkSameNode CP message")
+}
+
+func waitForForkAnyCPMessage(t *testing.T, name string, sender *capSender) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if sender.lastCPMessage() != nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s CP message", name)
 }
 
 func waitForForkCancelCPMessage(t *testing.T, sender *capSender) {

@@ -1,20 +1,54 @@
 package node
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/pki"
 	"spawnery/internal/runtime"
+	"spawnery/internal/secrets/seal"
+	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/storage/journal"
 )
+
+type nodeTransferFixture struct {
+	leaf, chain, root []byte
+	key               *ecdsa.PrivateKey
+}
+
+func issueNodeTransferFixture(t *testing.T, nodeID, account, class string) nodeTransferFixture {
+	t.Helper()
+	r, err := pki.NewRootCA("node-transfer-root")
+	if err != nil {
+		t.Fatalf("NewRootCA: %v", err)
+	}
+	inter, err := r.NewIntermediate(class)
+	if err != nil {
+		t.Fatalf("NewIntermediate: %v", err)
+	}
+	n, err := inter.IssueNode(nodeID, account, class, time.Now().Add(365*24*time.Hour))
+	if err != nil {
+		t.Fatalf("IssueNode: %v", err)
+	}
+	return nodeTransferFixture{
+		leaf:  pki.MarshalCertPEM(n.Cert),
+		chain: pki.MarshalCertPEM(inter.Cert),
+		root:  pki.MarshalCertPEM(r.Cert),
+		key:   n.Key,
+	}
+}
 
 func lastForkSameNodeComplete(f *fakeCPStream) *nodev1.ForkSameNodeComplete {
 	f.mu.Lock()
@@ -43,6 +77,39 @@ func lastForkTurnBoundaryComplete(f *fakeCPStream) *nodev1.ForkTurnBoundaryCompl
 	defer f.mu.Unlock()
 	for i := len(f.sent) - 1; i >= 0; i-- {
 		if fc := f.sent[i].GetForkTurnBoundaryComplete(); fc != nil {
+			return fc
+		}
+	}
+	return nil
+}
+
+func lastForkSourceRestoredMsg(f *fakeCPStream) *nodev1.ForkSourceRestored {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.sent) - 1; i >= 0; i-- {
+		if fc := f.sent[i].GetForkSourceRestored(); fc != nil {
+			return fc
+		}
+	}
+	return nil
+}
+
+func lastForkTransferExported(f *fakeCPStream) *nodev1.ForkTransferExported {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.sent) - 1; i >= 0; i-- {
+		if fc := f.sent[i].GetForkTransferExported(); fc != nil {
+			return fc
+		}
+	}
+	return nil
+}
+
+func lastForkTransferImported(f *fakeCPStream) *nodev1.ForkTransferImported {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.sent) - 1; i >= 0; i-- {
+		if fc := f.sent[i].GetForkTransferImported(); fc != nil {
 			return fc
 		}
 	}
@@ -129,6 +196,175 @@ func TestForkSameNodeStaleGenerationDropped(t *testing.T) {
 
 	if fc := lastForkSameNodeComplete(fs); fc != nil {
 		t.Fatalf("stale ForkSameNode must not emit completion, got %+v", fc)
+	}
+}
+
+func TestForkTransferExportStaleGenerationDropped(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTransferExport{ForkTransferExport: &nodev1.ForkTransferExport{
+		SourceSpawnId:       "sp-source",
+		ForkSpawnId:         "sp-fork",
+		SourceGeneration:    8,
+		TargetGeneration:    1,
+		TransferSetId:       "ts-1",
+		TargetNodeId:        "node-2",
+		TargetNodeClass:     "cloud",
+		TargetSignedSubkey:  []byte("signed"),
+		TargetNodeCertChain: []byte("chain"),
+	}}})
+
+	if fc := lastForkTransferExported(fs); fc != nil {
+		t.Fatalf("stale ForkTransferExport must not emit completion, got %+v", fc)
+	}
+}
+
+func TestForkTransferExportEmitsSourceRestoredSealedKeyAndPayload(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+
+	targetFx := issueNodeTransferFixture(t, "node-2", "alice", pki.ClassSelfHosted)
+	holder := subkey.NewNode(targetFx.key, "node-2", time.Hour)
+	published, err := holder.Rotate(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedSubkey, err := json.Marshal(published)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.NodeRootPEM = targetFx.root
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTransferExport{ForkTransferExport: &nodev1.ForkTransferExport{
+		SourceSpawnId:       "sp-source",
+		ForkSpawnId:         "sp-fork",
+		SourceGeneration:    9,
+		TargetGeneration:    1,
+		TransferSetId:       "ts-1",
+		TargetNodeId:        "node-2",
+		TargetNodeClass:     "self-hosted",
+		TargetNodeOwner:     "alice",
+		TargetSignedSubkey:  signedSubkey,
+		TargetNodeCertChain: append(append([]byte{}, targetFx.leaf...), targetFx.chain...),
+	}}})
+
+	waitFor(t, "ForkSourceRestored", func() bool { return lastForkSourceRestoredMsg(fs) != nil })
+	waitFor(t, "ForkTransferExported", func() bool { return lastForkTransferExported(fs) != nil })
+	exported := lastForkTransferExported(fs)
+	if exported.GetError() != "" {
+		t.Fatalf("ForkTransferExported error = %q", exported.GetError())
+	}
+	if len(exported.GetSealedTransferKey()) == 0 || len(exported.GetPayload()) == 0 {
+		t.Fatalf("ForkTransferExported = %+v", exported)
+	}
+
+	var sealedKey seal.NodeSealed
+	if err := json.Unmarshal(exported.GetSealedTransferKey(), &sealedKey); err != nil {
+		t.Fatalf("unmarshal sealed key: %v", err)
+	}
+	key, err := holder.OpenDelivered(&sealedKey, seal.InFlightAAD{SpawnID: "sp-fork", Generation: 1, DeliveryID: "ts-1"}, time.Now())
+	if err != nil {
+		t.Fatalf("OpenDelivered: %v", err)
+	}
+	if _, err := journal.OpenForkTransferPayload(key, "sp-source", "sp-fork", exported.GetPayload()); err != nil {
+		t.Fatalf("OpenForkTransferPayload: %v", err)
+	}
+}
+
+func TestForkTransferExportFailsClosedWithoutTargetKeyMaterial(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTransferExport{ForkTransferExport: &nodev1.ForkTransferExport{
+		SourceSpawnId:    "sp-source",
+		ForkSpawnId:      "sp-fork",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+		TransferSetId:    "ts-1",
+		TargetNodeId:     "node-2",
+		TargetNodeClass:  "cloud",
+	}}})
+
+	waitFor(t, "ForkTransferExported error", func() bool {
+		msg := lastForkTransferExported(fs)
+		return msg != nil && msg.GetError() != ""
+	})
+}
+
+func TestForkTransferImportOpensSealedKeyAndEmitsForkOwnedPins(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+
+	targetFx := issueNodeTransferFixture(t, "node-2", "alice", pki.ClassSelfHosted)
+	holder := subkey.NewNode(targetFx.key, "node-2", time.Hour)
+	published, err := holder.Rotate(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.SubKeys = holder
+	a.cfg.NodeID = "node-2"
+
+	key := bytes.Repeat([]byte{8}, 32)
+	stage := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stage, "work.txt"), []byte("fork payload\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sealedPayload, err := journal.SealForkTransferPayload(key, journal.ForkTransferPayload{
+		SourceSpawnID: "sp-source",
+		ForkSpawnID:   "sp-fork",
+		Mounts: []journal.ForkTransferMount{{
+			Name:    "work",
+			Class:   journal.NodeLocal,
+			HostDir: stage,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("SealForkTransferPayload: %v", err)
+	}
+	sealedKey, _, err := subkey.SealTransferKeyForNode(key, targetFx.leaf, targetFx.chain, targetFx.root, published, subkey.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, subkey.AllowAll{}, seal.InFlightAAD{
+		SpawnID:    "sp-fork",
+		Generation: 1,
+		DeliveryID: "ts-1",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("SealTransferKeyForNode: %v", err)
+	}
+	sealedKeyBytes, err := json.Marshal(sealedKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTransferImport{ForkTransferImport: &nodev1.ForkTransferImport{
+		SourceSpawnId:     "sp-source",
+		ForkSpawnId:       "sp-fork",
+		TargetGeneration:  1,
+		TransferSetId:     "ts-1",
+		SealedTransferKey: sealedKeyBytes,
+		Payload:           sealedPayload,
+	}}})
+
+	waitFor(t, "ForkTransferImported", func() bool { return lastForkTransferImported(fs) != nil })
+	imported := lastForkTransferImported(fs)
+	if imported.GetError() != "" {
+		t.Fatalf("ForkTransferImported error = %q", imported.GetError())
+	}
+	if len(imported.GetMounts()) != 1 || imported.GetMounts()[0].GetName() != "work" {
+		t.Fatalf("mounts = %+v", imported.GetMounts())
+	}
+	if len(imported.GetRootfsArtifacts()) != 0 {
+		t.Fatalf("rootfs artifacts = %+v, want none for mount-only payload", imported.GetRootfsArtifacts())
 	}
 }
 

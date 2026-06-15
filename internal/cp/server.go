@@ -130,6 +130,8 @@ type Server struct {
 	forkFootprintEstimator forkFootprintEstimator
 	forks                  *forkWaiters
 	forkSourceRestored     *forkSourceRestoredWaiters
+	forkTransferExports    *forkTransferExportedWaiters
+	forkTransferImports    *forkTransferImportedWaiters
 	forkTurnBoundaries     *forkTurnBoundaryWaiters
 	forkUnpauses           *forkUnpauseWaiters
 	failedForkCleanups     *failedForkCleanupWaiters
@@ -172,12 +174,14 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
 		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
-		pendingIntents:     newPendingIntentRegistry(),
-		deliveryPending:    newDeliveryPendingTracker(),
-		forks:              newForkWaiters(),
-		forkTurnBoundaries: newForkTurnBoundaryWaiters(),
-		forkUnpauses:       newForkUnpauseWaiters(),
-		failedForkCleanups: newFailedForkCleanupWaiters(),
+		pendingIntents:      newPendingIntentRegistry(),
+		deliveryPending:     newDeliveryPendingTracker(),
+		forks:               newForkWaiters(),
+		forkTransferExports: newForkTransferExportedWaiters(),
+		forkTransferImports: newForkTransferImportedWaiters(),
+		forkTurnBoundaries:  newForkTurnBoundaryWaiters(),
+		forkUnpauses:        newForkUnpauseWaiters(),
+		failedForkCleanups:  newFailedForkCleanupWaiters(),
 		// evaluator disabled by default; cmd/spawnery_cp wires it via SetEvaluatorPolicy.
 		evaluatorInFlight: map[string]struct{}{},
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
@@ -411,6 +415,10 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			s.deliverForkSameNodeComplete(m.ForkSameNodeComplete)
 		case *nodev1.NodeMessage_ForkSourceRestored:
 			s.deliverForkSourceRestored(m.ForkSourceRestored)
+		case *nodev1.NodeMessage_ForkTransferExported:
+			s.deliverForkTransferExported(m.ForkTransferExported)
+		case *nodev1.NodeMessage_ForkTransferImported:
+			s.deliverForkTransferImported(m.ForkTransferImported)
 		case *nodev1.NodeMessage_ForkTurnBoundaryComplete:
 			s.deliverForkTurnBoundaryComplete(m.ForkTurnBoundaryComplete)
 		case *nodev1.NodeMessage_UnpauseIfPausedComplete:

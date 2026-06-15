@@ -116,6 +116,7 @@ func main() {
 			log.Fatalf("node: identity/transport setup: %v", err)
 		}
 		cfg.CPURL = dialURL
+		cfg.NodeRootPEM = nodeRootPEM()
 		// Owner-sealed secrets (sp-2ckv.4): in enforced mode build the HPKE sub-key holder signed by the
 		// node's cert key, so the node can publish a sub-key and unseal delivered secrets. Best-effort:
 		// insecure mode (no cert) and a key-parse failure both leave SubKeys nil (no sub-key published).
@@ -382,6 +383,23 @@ func nodeSubKeys(nodeID string) *subkey.Node {
 		return nil
 	}
 	return subkey.NewNode(key, nodeID, 0)
+}
+
+func nodeRootPEM() []byte {
+	if env("NODE_AUTH_MODE", "insecure") != "enforced" {
+		return nil
+	}
+	dir := env("NODE_ID_DIR", "/var/lib/spawnlet/identity")
+	path := os.Getenv("NODE_ROOT_CA")
+	if path == "" {
+		path = filepath.Join(dir, "root.pem")
+	}
+	rootPEM, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("node root PEM unavailable at %s; cross-node fork transfer will fail closed: %v", path, err)
+		return nil
+	}
+	return rootPEM
 }
 
 // buildIntentVerifier builds the A4 IntentVerifier from the environment [AC1][AM12].

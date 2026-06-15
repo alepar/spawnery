@@ -31,6 +31,8 @@ message NodeMessage {
     UnpauseIfPausedComplete       unpause_if_paused_complete = 14; // node -> CP: idempotent fork recovery unpause ack
     FailedForkCleanupComplete     failed_fork_cleanup_complete = 15; // node -> CP: failed fork resource cleanup op ack
     ForkSourceRestored            fork_source_restored = 16; // node -> CP: fork source is unpaused/restored; seed may still run
+    ForkTransferExported          fork_transfer_exported = 17; // node -> CP: source-side cross-node fork transfer payload export
+    ForkTransferImported          fork_transfer_imported = 18; // node -> CP: target-side cross-node fork transfer import complete
   }
 }
 message CPMessage {
@@ -52,6 +54,9 @@ message CPMessage {
     ReleaseForkTurnBoundary      release_fork_turn_boundary = 15;       // CP -> node: cancel/release a fork turn-boundary barrier
     FailedForkCleanup            failed_fork_cleanup   = 16;            // CP -> node: cleanup one failed fork resource step
     CancelForkSameNode           cancel_fork_same_node = 17;            // CP -> node: cancel in-flight same-node fork capture/seed
+    ForkTransferExport           fork_transfer_export  = 18;            // CP -> node: source-side cross-node fork transfer export
+    ForkTransferImport           fork_transfer_import  = 19;            // CP -> node: target-side cross-node fork transfer import
+    CancelForkTransfer           cancel_fork_transfer  = 20;            // CP -> node: cancel in-flight cross-node fork transfer work
   }
 }
 
@@ -187,6 +192,48 @@ message ForkSameNode {
   uint64 source_generation = 3;
   uint64 target_generation = 4;
   string transfer_set_id = 5;
+}
+message ForkTransferExport {
+  string source_spawn_id = 1;
+  string fork_spawn_id = 2;
+  uint64 source_generation = 3;
+  uint64 target_generation = 4;
+  string transfer_set_id = 5;
+  string target_node_id = 6;
+  string target_node_class = 7;
+  string target_node_owner = 8;
+  bytes target_signed_subkey = 9;
+  bytes target_node_cert_chain = 10; // concatenated target leaf + intermediates from CP's mTLS context
+}
+message ForkTransferExported {
+  string source_spawn_id = 1;
+  string fork_spawn_id = 2;
+  string transfer_set_id = 3;
+  bytes sealed_transfer_key = 4; // HPKE NodeSealed JSON bytes; CP relays opaquely
+  bytes payload = 5;             // AES-GCM sealed transfer payload; CP relays opaquely
+  string error = 6;
+}
+message ForkTransferImport {
+  string source_spawn_id = 1;
+  string fork_spawn_id = 2;
+  uint64 target_generation = 3;
+  string transfer_set_id = 4;
+  bytes sealed_transfer_key = 5;
+  bytes payload = 6;
+}
+message ForkTransferImported {
+  string source_spawn_id = 1;
+  string fork_spawn_id = 2;
+  string transfer_set_id = 3;
+  repeated MountMarker mounts = 4;
+  repeated RootfsArtifact rootfs_artifacts = 5;
+  string node_id = 6;
+  string error = 7;
+}
+message CancelForkTransfer {
+  string source_spawn_id = 1;
+  string fork_spawn_id = 2;
+  string transfer_set_id = 3;
 }
 message CancelForkSameNode {
   string source_spawn_id = 1;

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/secrets/seal"
 	"spawnery/internal/spawnlet"
 )
 
@@ -27,6 +28,12 @@ type forkBarrierWait struct {
 }
 
 type activeSameNodeFork struct {
+	sourceSpawnID string
+	forkSpawnID   string
+	cancel        context.CancelFunc
+}
+
+type activeForkTransfer struct {
 	sourceSpawnID string
 	forkSpawnID   string
 	cancel        context.CancelFunc
@@ -68,6 +75,91 @@ func (a *attacher) forkSameNode(ctx context.Context, m *nodev1.ForkSameNode) {
 		reply.RootfsArtifacts = rootfsArtifactsToProto(res.RootfsArtifacts)
 	}
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_ForkSameNodeComplete{ForkSameNodeComplete: reply}})
+}
+
+func (a *attacher) forkTransferExport(ctx context.Context, m *nodev1.ForkTransferExport) {
+	defer a.releaseForkBarrier(m.GetSourceSpawnId(), func(b forkIngressBarrier) bool {
+		return b.matches(forkIngressBarrier{sourceGeneration: m.GetSourceGeneration(), transferSetID: m.GetTransferSetId()})
+	})
+	res, err := a.mgr.ForkTransferExport(ctx, spawnlet.ForkTransferExportRequest{
+		SourceSpawnID:       m.GetSourceSpawnId(),
+		ForkSpawnID:         m.GetForkSpawnId(),
+		TransferSetID:       m.GetTransferSetId(),
+		SourceGeneration:    m.GetSourceGeneration(),
+		TargetGeneration:    m.GetTargetGeneration(),
+		TargetNodeID:        m.GetTargetNodeId(),
+		TargetNodeClass:     m.GetTargetNodeClass(),
+		TargetNodeOwner:     m.GetTargetNodeOwner(),
+		TargetSignedSubKey:  append([]byte(nil), m.GetTargetSignedSubkey()...),
+		TargetNodeCertChain: append([]byte(nil), m.GetTargetNodeCertChain()...),
+		NodeRootPEM:         append([]byte(nil), a.cfg.NodeRootPEM...),
+		SourceRestored: func() error {
+			return a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_ForkSourceRestored{ForkSourceRestored: &nodev1.ForkSourceRestored{
+				SourceSpawnId:    m.GetSourceSpawnId(),
+				SourceGeneration: m.GetSourceGeneration(),
+				TransferSetId:    m.GetTransferSetId(),
+			}}})
+		},
+	})
+	reply := &nodev1.ForkTransferExported{
+		SourceSpawnId: m.GetSourceSpawnId(),
+		ForkSpawnId:   m.GetForkSpawnId(),
+		TransferSetId: m.GetTransferSetId(),
+	}
+	if err != nil {
+		logErr("forkTransferExport "+m.GetForkSpawnId(), err)
+		reply.Error = err.Error()
+	} else {
+		reply.SealedTransferKey = res.SealedTransferKey
+		reply.Payload = res.Payload
+	}
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_ForkTransferExported{ForkTransferExported: reply}})
+}
+
+type nodeTransferKeyOpener struct {
+	a *attacher
+}
+
+func (o nodeTransferKeyOpener) OpenForkTransferKey(sealedBytes []byte, forkID string, generation uint64, transferSetID string) ([]byte, error) {
+	if o.a.cfg.SubKeys == nil {
+		return nil, fmt.Errorf("fork transfer import: node has no HPKE sub-key holder")
+	}
+	var sealedKey seal.NodeSealed
+	if err := json.Unmarshal(sealedBytes, &sealedKey); err != nil {
+		return nil, fmt.Errorf("fork transfer import: decode sealed transfer key: %w", err)
+	}
+	o.a.subkeysMu.Lock()
+	defer o.a.subkeysMu.Unlock()
+	return o.a.cfg.SubKeys.OpenDelivered(&sealedKey, seal.InFlightAAD{
+		SpawnID:    forkID,
+		Generation: generation,
+		DeliveryID: transferSetID,
+	}, time.Now())
+}
+
+func (a *attacher) forkTransferImport(ctx context.Context, m *nodev1.ForkTransferImport) {
+	res, err := a.mgr.ForkTransferImport(ctx, spawnlet.ForkTransferImportRequest{
+		SourceSpawnID:     m.GetSourceSpawnId(),
+		ForkSpawnID:       m.GetForkSpawnId(),
+		TransferSetID:     m.GetTransferSetId(),
+		TargetGeneration:  m.GetTargetGeneration(),
+		SealedTransferKey: append([]byte(nil), m.GetSealedTransferKey()...),
+		Payload:           append([]byte(nil), m.GetPayload()...),
+	}, nodeTransferKeyOpener{a: a})
+	reply := &nodev1.ForkTransferImported{
+		SourceSpawnId: m.GetSourceSpawnId(),
+		ForkSpawnId:   m.GetForkSpawnId(),
+		TransferSetId: m.GetTransferSetId(),
+		NodeId:        res.NodeID,
+	}
+	if err != nil {
+		logErr("forkTransferImport "+m.GetForkSpawnId(), err)
+		reply.Error = err.Error()
+	} else {
+		reply.Mounts = mountPinsToProto(res.MountPins)
+		reply.RootfsArtifacts = rootfsArtifactsToProto(res.RootfsArtifacts)
+	}
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_ForkTransferImported{ForkTransferImported: reply}})
 }
 
 func (a *attacher) forkTurnBoundary(ctx context.Context, m *nodev1.ForkTurnBoundary) {
@@ -135,6 +227,50 @@ func (a *attacher) startForkSameNode(ctx context.Context, m *nodev1.ForkSameNode
 	}()
 }
 
+func (a *attacher) startForkTransferExport(ctx context.Context, m *nodev1.ForkTransferExport) {
+	workCtx, cancel := context.WithCancel(ctx)
+	a.mu.Lock()
+	if a.activeForks == nil {
+		a.activeForks = map[string]activeSameNodeFork{}
+	}
+	if prev, ok := a.activeForks[m.GetTransferSetId()]; ok {
+		prev.cancel()
+	}
+	a.activeForks[m.GetTransferSetId()] = activeSameNodeFork{
+		sourceSpawnID: m.GetSourceSpawnId(),
+		forkSpawnID:   m.GetForkSpawnId(),
+		cancel:        cancel,
+	}
+	a.mu.Unlock()
+
+	go func() {
+		defer a.forgetActiveFork(m.GetTransferSetId())
+		a.forkTransferExport(workCtx, m)
+	}()
+}
+
+func (a *attacher) startForkTransferImport(ctx context.Context, m *nodev1.ForkTransferImport) {
+	workCtx, cancel := context.WithCancel(ctx)
+	a.mu.Lock()
+	if a.activeForks == nil {
+		a.activeForks = map[string]activeSameNodeFork{}
+	}
+	if prev, ok := a.activeForks[m.GetTransferSetId()]; ok {
+		prev.cancel()
+	}
+	a.activeForks[m.GetTransferSetId()] = activeSameNodeFork{
+		sourceSpawnID: m.GetSourceSpawnId(),
+		forkSpawnID:   m.GetForkSpawnId(),
+		cancel:        cancel,
+	}
+	a.mu.Unlock()
+
+	go func() {
+		defer a.forgetActiveFork(m.GetTransferSetId())
+		a.forkTransferImport(workCtx, m)
+	}()
+}
+
 func (a *attacher) forgetActiveFork(transferSetID string) {
 	a.mu.Lock()
 	if a.activeForks != nil {
@@ -144,6 +280,23 @@ func (a *attacher) forgetActiveFork(transferSetID string) {
 }
 
 func (a *attacher) cancelForkSameNode(m *nodev1.CancelForkSameNode) {
+	if m == nil {
+		return
+	}
+	var cancel context.CancelFunc
+	a.mu.Lock()
+	if f, ok := a.activeForks[m.GetTransferSetId()]; ok &&
+		f.sourceSpawnID == m.GetSourceSpawnId() && f.forkSpawnID == m.GetForkSpawnId() {
+		cancel = f.cancel
+		delete(a.activeForks, m.GetTransferSetId())
+	}
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (a *attacher) cancelForkTransfer(m *nodev1.CancelForkTransfer) {
 	if m == nil {
 		return
 	}

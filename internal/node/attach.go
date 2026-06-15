@@ -58,6 +58,11 @@ type Config struct {
 	// node publishes no sub-key and rejects SecretDelivery. Shared across reconnects (it retains private
 	// halves), so it lives in Config (one holder per node process), not per-connection.
 	SubKeys *subkey.Node
+	// NodeRootPEM is the pinned node root CA bundle used to verify a target node's
+	// CP-relayed cert chain and SignedSubKey before source-side fork transfer
+	// sealing. Empty in insecure mode; cross-node owner-sealed fork transfer
+	// fails closed when it is missing.
+	NodeRootPEM []byte
 
 	// Verifier is the A4 intent verifier for StartSpawn and SessionOpen [AC1][AM12].
 	// nil = skip verification (dev/insecure default until the verifier is explicitly configured).
@@ -389,8 +394,23 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			return // stale generation: drop (matches Stop/Suspend).
 		}
 		a.startForkSameNode(ctx, m.ForkSameNode)
+	case *nodev1.CPMessage_ForkTransferExport:
+		if a.staleGen(m.ForkTransferExport.SourceSpawnId, m.ForkTransferExport.SourceGeneration) {
+			a.releaseForkBarrier(m.ForkTransferExport.SourceSpawnId, func(b forkIngressBarrier) bool {
+				return b.matches(forkIngressBarrier{
+					sourceGeneration: m.ForkTransferExport.SourceGeneration,
+					transferSetID:    m.ForkTransferExport.TransferSetId,
+				})
+			})
+			return
+		}
+		a.startForkTransferExport(ctx, m.ForkTransferExport)
+	case *nodev1.CPMessage_ForkTransferImport:
+		a.startForkTransferImport(ctx, m.ForkTransferImport)
 	case *nodev1.CPMessage_CancelForkSameNode:
 		a.cancelForkSameNode(m.CancelForkSameNode)
+	case *nodev1.CPMessage_CancelForkTransfer:
+		a.cancelForkTransfer(m.CancelForkTransfer)
 	case *nodev1.CPMessage_ForkTurnBoundary:
 		if a.staleGen(m.ForkTurnBoundary.SourceSpawnId, m.ForkTurnBoundary.SourceGeneration) {
 			return // stale generation: drop (matches Stop/Suspend).
