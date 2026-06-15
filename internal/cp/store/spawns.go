@@ -625,6 +625,26 @@ func (r *spawnRepo) ReconcileSuspendedAfterError(ctx context.Context, id string)
 }
 
 func (r *spawnRepo) MarkDeletedClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, ts int64) (int64, error) {
+	var newSeq int64
+	err := r.withTx(ctx, func(tx *spawnRepo) error {
+		var err error
+		newSeq, err = tx.markDeletedClaimed(ctx, id, leaseID, expectedSeq, expectedGen, ts)
+		return err
+	})
+	return newSeq, err
+}
+
+func (r *spawnRepo) withTx(ctx context.Context, fn func(tx *spawnRepo) error) error {
+	top, ok := r.db.(*bun.DB)
+	if !ok {
+		return fn(r)
+	}
+	return top.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		return fn(&spawnRepo{db: tx})
+	})
+}
+
+func (r *spawnRepo) markDeletedClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, ts int64) (int64, error) {
 	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
 		Set("status = ?", Deleted).
 		Set("deleted_at = ?", ts).

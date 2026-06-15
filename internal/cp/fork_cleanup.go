@@ -20,11 +20,12 @@ type failedForkRowDeleteObserver interface {
 }
 
 type failedForkUnwind struct {
-	ForkID     string
-	Generation uint64
-	Bucket     string
-	NowUnix    int64
-	Resources  failedForkResources
+	ForkID        string
+	Generation    uint64
+	Bucket        string
+	NowUnixNano   int64
+	DeletedAtUnix int64
+	Resources     failedForkResources
 }
 
 func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) error {
@@ -44,7 +45,7 @@ func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) err
 	}
 
 	leaseID := uuid.NewString()
-	seq, err := s.st.Spawns().Acquire(ctx, cfg.ForkID, s.cpID, leaseID, cfg.NowUnix, cfg.NowUnix+int64(s.claimTTL), sp.StatusSeq)
+	seq, err := s.st.Spawns().Acquire(ctx, cfg.ForkID, s.cpID, leaseID, cfg.NowUnixNano, cfg.NowUnixNano+s.claimTTL.Nanoseconds(), sp.StatusSeq)
 	if errors.Is(err, store.ErrConflict) {
 		return nil
 	}
@@ -66,6 +67,6 @@ func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) err
 	if obs, ok := cfg.Resources.(failedForkRowDeleteObserver); ok {
 		obs.RecordForkRowDelete(cfg.ForkID)
 	}
-	_, err = s.st.Spawns().MarkDeletedClaimed(ctx, cfg.ForkID, leaseID, seq, c.Generation, cfg.NowUnix)
+	_, err = s.st.Spawns().MarkDeletedClaimed(ctx, cfg.ForkID, leaseID, seq, c.Generation, cfg.DeletedAtUnix)
 	return err
 }

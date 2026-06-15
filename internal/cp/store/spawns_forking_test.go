@@ -146,18 +146,25 @@ func TestMarkDeletedClaimedHidesRowClearsMetadataAndEndsContainer(t *testing.T) 
 	st := NewTestStore(t)
 	seedAppAndOwner(t, st)
 	ctx := context.Background()
+	nowNS := int64(500_000_000_000)
+	claimDeadlineNS := int64(530_000_000_000)
+	deletedAtUnix := int64(500)
 
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp-delete"), nil) })
 	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp-delete", "node-a", 1) })
 	inTx(t, st, func(tx Store) error { return tx.Spawns().SetForking(ctx, "sp-delete", 1, 250) })
 	seq := spawnSeq(t, st, "sp-delete")
 	gen := liveGen(t, st, "sp-delete")
-	claimedSeq, err := st.Spawns().Acquire(ctx, "sp-delete", "cleanup", "lease-delete", 10, 100, seq)
+	claimedSeq, err := st.Spawns().Acquire(ctx, "sp-delete", "cleanup", "lease-delete", nowNS, claimDeadlineNS, seq)
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
+	claimed := rawSpawnRow(t, st, "sp-delete")
+	if claimed.ClaimDeadline == nil || *claimed.ClaimDeadline != claimDeadlineNS {
+		t.Fatalf("claim_deadline=%v want nanosecond deadline %d", claimed.ClaimDeadline, claimDeadlineNS)
+	}
 
-	newSeq, err := st.Spawns().MarkDeletedClaimed(ctx, "sp-delete", "lease-delete", claimedSeq, gen, 500)
+	newSeq, err := st.Spawns().MarkDeletedClaimed(ctx, "sp-delete", "lease-delete", claimedSeq, gen, deletedAtUnix)
 	if err != nil {
 		t.Fatalf("MarkDeletedClaimed: %v", err)
 	}
@@ -172,8 +179,8 @@ func TestMarkDeletedClaimedHidesRowClearsMetadataAndEndsContainer(t *testing.T) 
 	if sp.Status != Deleted {
 		t.Fatalf("status=%v want Deleted", sp.Status)
 	}
-	if sp.DeletedAt == nil || *sp.DeletedAt != 500 {
-		t.Fatalf("deleted_at=%v want 500", sp.DeletedAt)
+	if sp.DeletedAt == nil || *sp.DeletedAt != deletedAtUnix {
+		t.Fatalf("deleted_at=%v want Unix seconds %d", sp.DeletedAt, deletedAtUnix)
 	}
 	if sp.ForkCaptureDeadline != nil {
 		t.Fatalf("fork_capture_deadline=%v want nil", sp.ForkCaptureDeadline)
@@ -188,8 +195,49 @@ func TestMarkDeletedClaimedHidesRowClearsMetadataAndEndsContainer(t *testing.T) 
 	if err != nil || !ok {
 		t.Fatalf("LatestContainer: ok=%v err=%v", ok, err)
 	}
-	if c.Phase != PhaseLost || c.EndedAt == nil || *c.EndedAt != 500 {
-		t.Fatalf("latest container=%+v want lost ended_at=500", c)
+	if c.Phase != PhaseLost || c.EndedAt == nil || *c.EndedAt != deletedAtUnix {
+		t.Fatalf("latest container=%+v want lost ended_at=%d", c, deletedAtUnix)
+	}
+}
+
+func TestMarkDeletedClaimedRollsBackWhenEndingLiveContainerFails(t *testing.T) {
+	st := NewTestStore(t)
+	seedAppAndOwner(t, st)
+	ctx := context.Background()
+
+	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp-rollback"), nil) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp-rollback", "node-a", 1) })
+	seq := spawnSeq(t, st, "sp-rollback")
+	gen := liveGen(t, st, "sp-rollback")
+	claimedSeq, err := st.Spawns().Acquire(ctx, "sp-rollback", "cleanup", "lease-rollback", 10, 100, seq)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	bs := st.(*bunStore)
+	if _, err := bs.db.NewRaw(`
+CREATE TRIGGER fail_end_live_container
+BEFORE UPDATE OF ended_at ON spawn_containers
+WHEN NEW.ended_at = 777
+BEGIN
+  SELECT RAISE(ABORT, 'injected end live failure');
+END;
+`).Exec(ctx); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	_, err = st.Spawns().MarkDeletedClaimed(ctx, "sp-rollback", "lease-rollback", claimedSeq, gen, 777)
+	if err == nil {
+		t.Fatal("MarkDeletedClaimed must return injected end-live-container failure")
+	}
+	sp, err := st.Spawns().Get(ctx, "sp-rollback")
+	if err != nil {
+		t.Fatalf("Get after failed MarkDeletedClaimed: %v", err)
+	}
+	if sp.Status == Deleted {
+		t.Fatalf("failed MarkDeletedClaimed must roll back deleted status: %+v", sp)
+	}
+	if _, ok, err := st.Spawns().LiveContainer(ctx, "sp-rollback"); err != nil || !ok {
+		t.Fatalf("LiveContainer after failed MarkDeletedClaimed: ok=%v err=%v, want live", ok, err)
 	}
 }
 
