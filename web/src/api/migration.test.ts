@@ -27,9 +27,19 @@ vi.mock("@/keys/subkey", () => ({
 }));
 
 import { runMigrate } from "./migration";
+import type { DeviceKeys } from "@/keys/device";
 
 function b64(s: string): string {
   return btoa(s);
+}
+
+function fakeDeviceKeys(): DeviceKeys {
+  return {
+    x25519Public: {} as CryptoKey,
+    x25519Private: {} as CryptoKey,
+    ecdsaPrivate: {} as CryptoKey,
+    ecdsaPublic: {} as CryptoKey,
+  };
 }
 
 describe("runMigrate", () => {
@@ -88,7 +98,7 @@ describe("runMigrate", () => {
     await runMigrate(
       "sp1",
       { nodeId: "node-a", class: "self-hosted" },
-      { x25519Public: {} as CryptoKey, x25519Private: {} as CryptoKey },
+      fakeDeviceKeys(),
       "",
       new Date("2026-06-15T00:00:00Z"),
     );
@@ -130,7 +140,7 @@ describe("runMigrate", () => {
     await runMigrate(
       "sp1",
       { nodeId: "node-a", class: "self-hosted" },
-      { x25519Public: {} as CryptoKey, x25519Private: {} as CryptoKey },
+      fakeDeviceKeys(),
       "root-pem",
       new Date("2026-06-15T00:00:00Z"),
     );
@@ -172,7 +182,7 @@ describe("runMigrate", () => {
     await expect(runMigrate(
       "sp1",
       { nodeId: "node-a", class: "self-hosted" },
-      { x25519Public: {} as CryptoKey, x25519Private: {} as CryptoKey },
+      fakeDeviceKeys(),
       "root-pem",
       new Date("2026-06-15T00:00:00Z"),
     )).rejects.toMatchObject({ leg: "delivery" });
@@ -209,7 +219,7 @@ describe("runMigrate", () => {
     await expect(runMigrate(
       "sp1",
       { nodeId: "node-b", class: "self-hosted" },
-      { x25519Public: {} as CryptoKey, x25519Private: {} as CryptoKey },
+      fakeDeviceKeys(),
       "root-pem",
       new Date("2026-06-15T00:00:00Z"),
     )).rejects.toMatchObject({ leg: "delivery" });
@@ -242,7 +252,7 @@ describe("runMigrate", () => {
     await expect(runMigrate(
       "sp1",
       { nodeId: "node-a", class: "self-hosted" },
-      { x25519Public: {} as CryptoKey, x25519Private: {} as CryptoKey },
+      fakeDeviceKeys(),
       "root-pem",
       new Date("2026-06-15T00:00:00Z"),
     )).rejects.toMatchObject({ leg: "delivery" });
