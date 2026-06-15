@@ -82,6 +82,59 @@ func TestPendingIntentDoubleSubmit(t *testing.T) {
 	}
 }
 
+func TestPendingIntentDuplicateSubmitAfterAwaitDoesNotBlock(t *testing.T) {
+	r := newPendingIntentRegistry()
+	r.ttl = 5 * time.Second
+
+	ch := r.register("spawn-drained", "alice", testPI("spawn-drained"))
+	if err := r.submit("spawn-drained", "alice", testSubmission()); err != nil {
+		t.Fatalf("first submit should succeed; got: %v", err)
+	}
+	if _, err := r.await(context.Background(), ch); err != nil {
+		t.Fatalf("await should drain first submission; got: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- r.submit("spawn-drained", "alice", testSubmission())
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("second submit after await must return error; got nil")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("second submit after await blocked; want quick duplicate-submit error")
+	}
+}
+
+func TestPendingIntentSubmitRejectsNilSubmission(t *testing.T) {
+	tests := []struct {
+		name       string
+		submission *pendingIntentSubmission
+	}{
+		{name: "nil submission", submission: nil},
+		{name: "nil envelope", submission: &pendingIntentSubmission{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newPendingIntentRegistry()
+			r.register("spawn-nil", "alice", testPI("spawn-nil"))
+
+			defer func() {
+				if rec := recover(); rec != nil {
+					t.Fatalf("submit panicked for %s: %v", tt.name, rec)
+				}
+			}()
+			if err := r.submit("spawn-nil", "alice", tt.submission); err == nil {
+				t.Fatalf("submit must reject %s; got nil", tt.name)
+			}
+		})
+	}
+}
+
 // TestPendingIntentGetNotReady: get returns (nil, false) when no entry exists.
 func TestPendingIntentGetNotReady(t *testing.T) {
 	r := newPendingIntentRegistry()

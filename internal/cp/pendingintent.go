@@ -44,6 +44,7 @@ type intentEntry struct {
 	pending      *cpv1.PendingIntent
 	ch           chan *authv1.AuthEnvelope     // compatibility read path for older tests
 	submissionCh chan *pendingIntentSubmission // buffered cap 1: Submit is non-blocking
+	submitted    bool
 }
 
 type pendingIntentSubmission struct {
@@ -113,20 +114,31 @@ func (r *pendingIntentRegistry) get(spawnID string) (*cpv1.PendingIntent, bool) 
 func (r *pendingIntentRegistry) submit(spawnID, ownerID string, submission *pendingIntentSubmission) error {
 	r.mu.Lock()
 	e, ok := r.entries[spawnID]
-	r.mu.Unlock()
 	if !ok {
+		r.mu.Unlock()
 		return fmt.Errorf("no pending intent for spawn %q", spawnID)
 	}
 	if e.ownerID != ownerID {
+		r.mu.Unlock()
 		return fmt.Errorf("permission denied: submitter %q is not the owner of spawn %q", ownerID, spawnID)
 	}
-	select {
-	case e.submissionCh <- submission:
-		e.ch <- submission.Env
-		return nil
-	default:
+	if submission == nil || submission.Env == nil {
+		r.mu.Unlock()
+		return fmt.Errorf("invalid pending intent submission for spawn %q", spawnID)
+	}
+	if e.submitted {
+		r.mu.Unlock()
 		return fmt.Errorf("intent already submitted for spawn %q", spawnID)
 	}
+	e.submitted = true
+	r.mu.Unlock()
+
+	e.submissionCh <- submission
+	select {
+	case e.ch <- submission.Env:
+	default:
+	}
+	return nil
 }
 
 // cleanup removes the entry for a spawn after provision completes (success or failure).
