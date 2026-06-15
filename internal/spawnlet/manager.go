@@ -633,6 +633,17 @@ type AgentSelection struct {
 	// resume). Non-sensitive artifacts are materialized into the staging tmpfs at ArtifactsMountPath;
 	// sensitive+inline artifacts are routed to the secrets tmpfs. Converted from proto by the node.
 	Artifacts []Artifact
+	// BeforeStartAgent runs after the sidecar pod and pre-agent prep complete, immediately before the
+	// untrusted agent starts. It can stage spawn-local secrets before the spawn is visible in the store.
+	BeforeStartAgent func(context.Context, PreAgentContext) error
+}
+
+type PreAgentContext struct {
+	SpawnID      string
+	Generation   uint64
+	ControlURL   string
+	ControlToken string
+	InjectSecret func(target string, plaintext []byte) (string, error)
 }
 
 // RootfsArtifact is the node/spawnlet-facing copy of a journal rootfs artifact descriptor.
@@ -955,6 +966,12 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		finalizeAll()
 		return nil, err
 	}
+	// Node-reachable control endpoint (pod IP + control port). Empty PodIP => unreachable URL;
+	// the reconciler/node handler treats that as "no live control plane".
+	controlURL := ""
+	if h.PodIP != "" {
+		controlURL = "http://" + net.JoinHostPort(h.PodIP, strconv.Itoa(controlPort)) + "/control/model"
+	}
 
 	// Egress floor: applied after the pod IP exists, before the untrusted agent starts (fail-closed).
 	var floorIP string
@@ -1013,6 +1030,22 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		finalizeAll()
 		return nil, fmt.Errorf("ensure launch image: %w", eerr)
 	}
+	if sel.BeforeStartAgent != nil {
+		preAgent := PreAgentContext{
+			SpawnID:      id,
+			Generation:   generation,
+			ControlURL:   controlURL,
+			ControlToken: controlToken,
+			InjectSecret: func(target string, plaintext []byte) (string, error) {
+				return m.secrets.Write(id, target, plaintext)
+			},
+		}
+		if err := sel.BeforeStartAgent(ctx, preAgent); err != nil {
+			_ = m.pod.Stop(ctx, h)
+			finalizeAll()
+			return nil, err
+		}
+	}
 
 	// Phase 2: the untrusted agent, into the existing pod.
 	if err := m.pod.StartAgent(ctx, h, runtime.AgentSpec{
@@ -1034,12 +1067,6 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		return nil, err
 	}
 
-	// Node-reachable control endpoint (pod IP + control port). Empty PodIP => unreachable URL;
-	// the reconciler/node handler treats that as "no live control plane".
-	controlURL := ""
-	if h.PodIP != "" {
-		controlURL = "http://" + net.JoinHostPort(h.PodIP, strconv.Itoa(controlPort)) + "/control/model"
-	}
 	// Continuous journaling (design §2, sp-u53.5.2): start a per-mount file watcher
 	// driving RequestSnapshot for the spawn's lifetime. The journal's adaptive
 	// debounce + serial queue coalesce the events, and a periodic fallback inside
