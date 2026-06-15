@@ -72,6 +72,46 @@ func TestForkMaterializerSendsForkSameNodeAndReturnsPins(t *testing.T) {
 	}
 }
 
+func TestForkMaterializerWaitsForTurnBoundaryPreflight(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	s.forks = newForkWaiters()
+	s.forkTurnBoundaries = newForkTurnBoundaryWaiters()
+	sender := &capSender{}
+	reg.Add(registryNode("node-1", sender))
+	mat := newSameNodeForkMaterializer(s, time.Second).(forkTurnBoundaryWaiter)
+
+	done := make(chan error, 1)
+	go func() {
+		err := mat.WaitForForkTurnBoundary(context.Background(), forkMaterializeRequest{
+			SourceSpawn:      store.Spawn{ID: "sp-source"},
+			ForkSpawn:        store.Spawn{ID: "sp-fork"},
+			TransferSetID:    "ts-1",
+			SourceGeneration: 9,
+			TargetGeneration: 1,
+			SourceNodeID:     "node-1",
+			TargetNodeID:     "node-1",
+		})
+		done <- err
+	}()
+
+	waitForForkTurnBoundaryCPMessage(t, sender)
+	if msg := sender.lastCPMessage(); msg.GetForkSameNode() != nil {
+		t.Fatalf("turn-boundary preflight must not send ForkSameNode: %+v", msg)
+	}
+	s.deliverForkTurnBoundaryComplete(&nodev1.ForkTurnBoundaryComplete{
+		SourceSpawnId: "sp-source",
+		TransferSetId: "ts-1",
+	})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WaitForForkTurnBoundary: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("turn-boundary preflight did not finish")
+	}
+}
+
 func TestForkSpawnRecordsMaterializerPinsOnTransferSet(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	sender := &capSender{}
@@ -126,4 +166,21 @@ func waitForForkCPMessage(t *testing.T, sender *capSender) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("timed out waiting for ForkSameNode CP message")
+}
+
+func waitForForkTurnBoundaryCPMessage(t *testing.T, sender *capSender) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		sender.mu.Lock()
+		for _, msg := range sender.sent {
+			if msg.GetForkTurnBoundary() != nil {
+				sender.mu.Unlock()
+				return
+			}
+		}
+		sender.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for ForkTurnBoundary CP message")
 }

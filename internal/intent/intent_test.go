@@ -123,7 +123,7 @@ func TestVerifySigRejectsNonP256SPKI(t *testing.T) {
 func TestDomainTagsAreDistinct(t *testing.T) {
 	ops := []intent.Op{
 		intent.OpCreateSpawn, intent.OpResumeSpawn, intent.OpRecreateSpawn,
-		intent.OpMigrateSpawn, intent.OpSessionOpen,
+		intent.OpMigrateSpawn, intent.OpForkSpawn, intent.OpSessionOpen,
 	}
 	seen := map[string]bool{}
 	for _, op := range ops {

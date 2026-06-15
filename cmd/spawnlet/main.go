@@ -214,6 +214,27 @@ func configureJournal(m *spawnlet.Manager, dataRoot string) error {
 		return err
 	}
 	m.SetJournal(jm, filepath.Join(root, "state"))
+	if kind == journal.BackendS3 {
+		adminEndpoint := os.Getenv("JOURNAL_GARAGE_ADMIN_ENDPOINT")
+		adminToken := os.Getenv("JOURNAL_GARAGE_ADMIN_TOKEN")
+		if adminEndpoint == "" || adminToken == "" {
+			return fmt.Errorf("journal s3: JOURNAL_GARAGE_ADMIN_ENDPOINT and JOURNAL_GARAGE_ADMIN_TOKEN are required for fork generation holds")
+		}
+		admin, err := journal.NewGarageAdmin(adminEndpoint, adminToken, &http.Client{Timeout: 15 * time.Second})
+		if err != nil {
+			return fmt.Errorf("journal genkey admin: %w", err)
+		}
+		gkm, err := journal.NewGenerationKeyManager(journal.GenerationKeyConfig{
+			Admin:      admin,
+			S3Endpoint: strings.TrimPrefix(strings.TrimPrefix(bcfg.S3.Endpoint, "https://"), "http://"),
+			Region:     bcfg.S3.Region,
+			DisableTLS: bcfg.S3.DisableTLS,
+		})
+		if err != nil {
+			return fmt.Errorf("journal genkey: %w", err)
+		}
+		m.SetGenerationKeyManager(gkm)
+	}
 	log.Printf("journal: journaler enabled (backend=%s, root=%s; node-local + owner-sealed custody)", kind, root)
 	return nil
 }

@@ -10,10 +10,12 @@ import (
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 
+	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/store"
+	"spawnery/internal/intent"
 )
 
 const forkHeadroomMultiplier = int64(3)
@@ -53,6 +55,10 @@ type unimplementedForkMaterializer struct{}
 
 func (unimplementedForkMaterializer) MaterializeFork(context.Context, forkMaterializeRequest) (forkMaterializeResult, error) {
 	return forkMaterializeResult{}, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("fork materialization is not implemented yet"))
+}
+
+func (unimplementedForkMaterializer) WaitForForkTurnBoundary(context.Context, forkMaterializeRequest) error {
+	return nil
 }
 
 func requiredForkHeadroomBytes(sourceFootprintBytes int64) int64 {
@@ -178,15 +184,26 @@ func (s *Server) restoreForkingSource(ctx context.Context, sourceID, leaseID str
 	return nil
 }
 
-func (s *Server) startFork(ctx context.Context, owner string, fork store.Spawn, nodeID string, targetGeneration uint64, rootfsPins []store.RootfsArtifactPin) (string, error) {
+func (s *Server) startFork(ctx context.Context, owner, sourceID string, fork store.Spawn, nodeID string, targetGeneration uint64, rootfsPins []store.RootfsArtifactPin) (string, error) {
 	placement := registry.Placement{Owner: owner, Image: fork.Image, TargetNodeID: nodeID}
 	artifacts, err := s.st.Spawns().GetArtifacts(ctx, fork.ID)
 	if err != nil {
 		return "", connect.NewError(connect.CodeInternal, err)
 	}
+	var env *authv1.AuthEnvelope
+	if s.intentEnabled {
+		mounts, _ := s.st.Spawns().GetMounts(ctx, fork.ID)
+		pi := buildPendingIntent(intent.OpForkSpawn, fork.ID, targetGeneration, nodeID, fork.Image, fork.AppRef, fork.Model, "", mounts)
+		ch := s.pendingIntents.register(sourceID, owner, pi)
+		defer s.pendingIntents.cleanup(sourceID)
+		env, err = s.pendingIntents.await(ctx, ch)
+		if err != nil {
+			return "", connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("await fork SignedIntent: %w", err))
+		}
+	}
 	rootfs := &rootfsRestorePins{SourceGeneration: targetGeneration, Pins: rootfsPins}
 	return s.sched.Provision(ctx, fork.ID, fork.AppRef, fork.Model, fork.Name, fork.AppID, fork.RunnableID, fork.Mode,
-		targetGeneration, placement, nil, fork.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(artifacts))
+		targetGeneration, placement, env, fork.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(artifacts))
 }
 
 func (s *Server) ForkSpawn(ctx context.Context, req *connect.Request[cpv1.ForkSpawnRequest]) (*connect.Response[cpv1.ForkSpawnResponse], error) {
@@ -360,6 +377,19 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("mark transfer set restoring: %w", err)))
 	}
 
+	if err := s.waitForkTurnBoundary(ctx, forkMaterializeRequest{
+		SourceSpawn:      source,
+		ForkSpawn:        fork,
+		TransferSetID:    transferSetID,
+		SourceGeneration: sourceGeneration,
+		TargetGeneration: targetGeneration,
+		SourceNodeID:     live.NodeID,
+		TargetNodeID:     targetNode,
+		TargetClass:      targetClass,
+	}); err != nil {
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, asConnectError(connect.CodeInternal, err))
+	}
+
 	captureDeadline := s.now().Add(defaultForkCaptureTimeout).UnixNano()
 	if err := s.st.Spawns().SetForking(ctx, sourceID, live.Generation, captureDeadline); err != nil {
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("mark source forking: %w", err)))
@@ -402,7 +432,7 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 	if nodeID == "" {
 		nodeID = targetNode
 	}
-	nodeID, err = s.startFork(ctx, owner, fork, nodeID, targetGeneration, result.RootfsPins)
+	nodeID, err = s.startFork(ctx, owner, sourceID, fork, nodeID, targetGeneration, result.RootfsPins)
 	if err != nil {
 		s.rt.StopOnNode(forkID)
 		s.rt.Drop(forkID)

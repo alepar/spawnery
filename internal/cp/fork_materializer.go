@@ -23,6 +23,51 @@ func newForkWaiters() *forkWaiters {
 	return &forkWaiters{m: map[string]chan *nodev1.ForkSameNodeComplete{}}
 }
 
+type forkTurnBoundaryWaiters struct {
+	mu sync.Mutex
+	m  map[string]chan *nodev1.ForkTurnBoundaryComplete
+}
+
+func newForkTurnBoundaryWaiters() *forkTurnBoundaryWaiters {
+	return &forkTurnBoundaryWaiters{m: map[string]chan *nodev1.ForkTurnBoundaryComplete{}}
+}
+
+func (w *forkTurnBoundaryWaiters) register(transferSetID string) chan *nodev1.ForkTurnBoundaryComplete {
+	ch := make(chan *nodev1.ForkTurnBoundaryComplete, 1)
+	w.mu.Lock()
+	w.m[transferSetID] = ch
+	w.mu.Unlock()
+	return ch
+}
+
+func (w *forkTurnBoundaryWaiters) unregister(transferSetID string) {
+	w.mu.Lock()
+	delete(w.m, transferSetID)
+	w.mu.Unlock()
+}
+
+func (w *forkTurnBoundaryWaiters) deliver(msg *nodev1.ForkTurnBoundaryComplete) bool {
+	w.mu.Lock()
+	ch, ok := w.m[msg.GetTransferSetId()]
+	w.mu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case ch <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) deliverForkTurnBoundaryComplete(msg *nodev1.ForkTurnBoundaryComplete) bool {
+	if s.forkTurnBoundaries == nil {
+		return false
+	}
+	return s.forkTurnBoundaries.deliver(msg)
+}
+
 func (w *forkWaiters) register(transferSetID string) chan *nodev1.ForkSameNodeComplete {
 	ch := make(chan *nodev1.ForkSameNodeComplete, 1)
 	w.mu.Lock()
@@ -64,11 +109,63 @@ type sameNodeForkMaterializer struct {
 	timeout time.Duration
 }
 
+type forkTurnBoundaryWaiter interface {
+	WaitForForkTurnBoundary(context.Context, forkMaterializeRequest) error
+}
+
+func (s *Server) waitForkTurnBoundary(ctx context.Context, req forkMaterializeRequest) error {
+	waiter, ok := s.forkMaterializerOrDefault().(forkTurnBoundaryWaiter)
+	if !ok {
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("fork materializer cannot gate source turn boundary"))
+	}
+	return waiter.WaitForForkTurnBoundary(ctx, req)
+}
+
 func newSameNodeForkMaterializer(s *Server, timeout time.Duration) forkMaterializer {
 	if timeout == 0 {
 		timeout = defaultForkMaterializeTimeout
 	}
 	return &sameNodeForkMaterializer{s: s, timeout: timeout}
+}
+
+func (m *sameNodeForkMaterializer) WaitForForkTurnBoundary(ctx context.Context, req forkMaterializeRequest) error {
+	if req.SourceNodeID != req.TargetNodeID {
+		return connect.NewError(connect.CodeUnimplemented, fmt.Errorf("cross-node fork materialization is not implemented in this slice"))
+	}
+	n, ok := m.s.reg.Get(req.SourceNodeID)
+	if !ok || n.Sender == nil {
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("source node %q is not connected", req.SourceNodeID))
+	}
+	if m.s.forkTurnBoundaries == nil {
+		m.s.forkTurnBoundaries = newForkTurnBoundaryWaiters()
+	}
+	ch := m.s.forkTurnBoundaries.register(req.TransferSetID)
+	defer m.s.forkTurnBoundaries.unregister(req.TransferSetID)
+
+	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId:    req.SourceSpawn.ID,
+		SourceGeneration: req.SourceGeneration,
+		TransferSetId:    req.TransferSetID,
+	}}}); err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("send fork turn-boundary command to node %q: %w", req.SourceNodeID, err))
+	}
+
+	timer := time.NewTimer(m.timeout)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out waiting for fork turn boundary %s", req.TransferSetID))
+	case msg := <-ch:
+		if msg.GetError() != "" {
+			return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("fork turn-boundary gate failed: %s", msg.GetError()))
+		}
+		if msg.GetSourceSpawnId() != req.SourceSpawn.ID || msg.GetTransferSetId() != req.TransferSetID {
+			return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("fork turn-boundary completion ids do not match request"))
+		}
+		return nil
+	}
 }
 
 func (m *sameNodeForkMaterializer) MaterializeFork(ctx context.Context, req forkMaterializeRequest) (forkMaterializeResult, error) {

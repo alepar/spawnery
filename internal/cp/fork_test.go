@@ -2,6 +2,9 @@ package cp
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"strings"
@@ -15,6 +18,7 @@ import (
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/store"
+	"spawnery/internal/intent"
 )
 
 type recordingForkMaterializer struct {
@@ -33,10 +37,18 @@ func (r *recordingForkMaterializer) MaterializeFork(ctx context.Context, req for
 	return forkMaterializeResult{NodeID: r.nodeID, RootfsPins: r.rootfsPins}, nil
 }
 
+func (r *recordingForkMaterializer) WaitForForkTurnBoundary(context.Context, forkMaterializeRequest) error {
+	return nil
+}
+
 type forkMaterializerFunc func(context.Context, forkMaterializeRequest) (forkMaterializeResult, error)
 
 func (f forkMaterializerFunc) MaterializeFork(ctx context.Context, req forkMaterializeRequest) (forkMaterializeResult, error) {
 	return f(ctx, req)
+}
+
+func (f forkMaterializerFunc) WaitForForkTurnBoundary(context.Context, forkMaterializeRequest) error {
+	return nil
 }
 
 type staticForkFootprint int64
@@ -238,6 +250,59 @@ func TestForkSpawnDefaultsToSameNode(t *testing.T) {
 	}
 	if resp.Msg.NodeId != "node-1" || mat.calls[0].TargetNodeID != "node-1" {
 		t.Fatalf("default target response=%+v call=%+v", resp.Msg, mat.calls[0])
+	}
+}
+
+func TestForkSpawnIntentEnabledSignsForkStartViaSourcePendingIntent(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	s.SetIntentEnabled(true)
+	s.pendingIntents.ttl = 5 * time.Second
+	sender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+	stopAck := goAckStarts(s, sender)
+	defer stopAck()
+	s.forkMaterializer = &recordingForkMaterializer{nodeID: "node-1"}
+	s.forkFootprintEstimator = staticForkFootprint(100)
+
+	errCh := make(chan error, 1)
+	sessionKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	goSubmitIntent(context.Background(), s, "sp-source", "alice", sessionKey, errCh)
+
+	resp, err := s.ForkSpawn(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.ForkSpawnRequest{
+		SpawnId: "sp-source",
+	}))
+	if err != nil {
+		t.Fatalf("ForkSpawn: %v", err)
+	}
+	select {
+	case submitErr := <-errCh:
+		if submitErr != nil {
+			t.Fatalf("SubmitIntent: %v", submitErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SubmitIntent did not complete")
+	}
+
+	start := sender.firstStart()
+	if start == nil || start.GetSpawnId() != resp.Msg.ForkSpawnId {
+		t.Fatalf("fork StartSpawn = %+v, response=%+v", start, resp.Msg)
+	}
+	if start.GetAuth() == nil || start.GetAuth().GetIntent() == nil {
+		t.Fatalf("fork StartSpawn auth must be non-nil in intent mode: %+v", start)
+	}
+	body, err := intent.ParseBody(start.GetAuth().GetIntent().GetBody())
+	if err != nil {
+		t.Fatalf("parse signed fork intent: %v", err)
+	}
+	if body.GetSpawnId() != resp.Msg.ForkSpawnId || body.GetOp() != string(intent.OpForkSpawn) {
+		t.Fatalf("signed fork intent body spawn/op = %q/%q, want %q/%q",
+			body.GetSpawnId(), body.GetOp(), resp.Msg.ForkSpawnId, intent.OpForkSpawn)
+	}
+	if _, ready := s.pendingIntents.get("sp-source"); ready {
+		t.Fatal("source-keyed fork pending intent must be cleaned up after start")
 	}
 }
 

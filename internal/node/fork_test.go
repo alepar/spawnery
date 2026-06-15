@@ -2,7 +2,10 @@ package node
 
 import (
 	"context"
+	"io"
+	"strings"
 	"testing"
+	"time"
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/spawnlet"
@@ -14,6 +17,28 @@ func lastForkSameNodeComplete(f *fakeCPStream) *nodev1.ForkSameNodeComplete {
 	defer f.mu.Unlock()
 	for i := len(f.sent) - 1; i >= 0; i-- {
 		if fc := f.sent[i].GetForkSameNodeComplete(); fc != nil {
+			return fc
+		}
+	}
+	return nil
+}
+
+func lastUnpauseIfPausedComplete(f *fakeCPStream) *nodev1.UnpauseIfPausedComplete {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.sent) - 1; i >= 0; i-- {
+		if fc := f.sent[i].GetUnpauseIfPausedComplete(); fc != nil {
+			return fc
+		}
+	}
+	return nil
+}
+
+func lastForkTurnBoundaryComplete(f *fakeCPStream) *nodev1.ForkTurnBoundaryComplete {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.sent) - 1; i >= 0; i-- {
+		if fc := f.sent[i].GetForkTurnBoundaryComplete(); fc != nil {
 			return fc
 		}
 	}
@@ -99,4 +124,72 @@ func TestForkSameNodeFailureCompletionDoesNotMarkForkActive(t *testing.T) {
 	if hasPhase(fs.phasesFor("sp-fork"), nodev1.SpawnPhase_ACTIVE) {
 		t.Fatal("failed fork materialization must not report fork ACTIVE")
 	}
+}
+
+func TestUnpauseIfPausedEmitsCompletion(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_UnpauseIfPaused{UnpauseIfPaused: &nodev1.UnpauseIfPaused{
+		SpawnId: "sp-source", Generation: 9,
+	}}})
+
+	waitFor(t, "UnpauseIfPausedComplete", func() bool { return lastUnpauseIfPausedComplete(fs) != nil })
+	got := lastUnpauseIfPausedComplete(fs)
+	if got.GetSpawnId() != "sp-source" || got.GetGeneration() != 9 || got.GetError() != "" {
+		t.Fatalf("UnpauseIfPausedComplete = %+v", got)
+	}
+}
+
+func TestForkTurnBoundaryWaitsForACPPumpIdle(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	p := newPump(io.Discard, strings.NewReader(""))
+	p.mu.Lock()
+	p.busy = true
+	p.inflightPromptID = 1
+	p.mu.Unlock()
+	a.pumps[zeroKey("sp-source")] = p
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	time.Sleep(20 * time.Millisecond)
+	if got := lastForkTurnBoundaryComplete(fs); got != nil {
+		t.Fatalf("turn-boundary completed while pump was busy: %+v", got)
+	}
+
+	p.mu.Lock()
+	p.busy = false
+	p.inflightPromptID = 0
+	p.mu.Unlock()
+	waitFor(t, "ForkTurnBoundaryComplete", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+	got := lastForkTurnBoundaryComplete(fs)
+	if got.GetError() != "" || got.GetSourceSpawnId() != "sp-source" || got.GetTransferSetId() != "ts-1" {
+		t.Fatalf("ForkTurnBoundaryComplete = %+v", got)
+	}
+}
+
+func TestForkTurnBoundaryFailsClosedWithoutObservableACPPump(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	a.tmuxRelays[zeroKey("sp-source")] = newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+
+	waitFor(t, "ForkTurnBoundaryComplete error", func() bool {
+		got := lastForkTurnBoundaryComplete(fs)
+		return got != nil && got.GetError() != ""
+	})
 }

@@ -34,11 +34,17 @@ type generationHold interface {
 func (m *Manager) SetGenerationKeyManager(g *journal.GenerationKeyManager) {
 	if g == nil {
 		m.forkGenerationHold = nil
+		m.forkGenerationHoldRequired = false
 		return
 	}
 	m.forkGenerationHold = func(spawnID string, gen uint64, reason string) generationHold {
 		return g.HoldGeneration(spawnID, gen, reason)
 	}
+	m.forkGenerationHoldRequired = true
+}
+
+func (m *Manager) RequireForkGenerationHold(required bool) {
+	m.forkGenerationHoldRequired = required
 }
 
 func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (ForkSameNodeResult, error) {
@@ -60,13 +66,22 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: journaler is required to seed fork repo")
 	}
 	ctx = context.WithoutCancel(ctx)
-	if m.forkGenerationHold != nil {
+	if m.forkGenerationHold == nil {
+		if m.forkGenerationHoldRequired {
+			return ForkSameNodeResult{}, fmt.Errorf("fork same-node: generation hold is required but no generation key manager is wired")
+		}
+	} else {
 		hold := m.forkGenerationHold(sp.ID, sp.Generation, "fork "+req.TransferSetID)
-		defer hold.Release()
+		if hold == nil && m.forkGenerationHoldRequired {
+			return ForkSameNodeResult{}, fmt.Errorf("fork same-node: generation hold is required but was not acquired")
+		}
+		if hold != nil {
+			defer hold.Release()
+		}
 	}
 
-	for _, mt := range sp.JournalMounts {
-		m.journal.RequestSnapshot(ctx, sp.ID, sp.Generation, mt)
+	if _, err := m.journal.FinalSnapshot(ctx, sp.ID, sp.Generation, sp.JournalMounts); err != nil {
+		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: warm source snapshot: %w", err)
 	}
 	for _, w := range m.takeWatchers(sp) {
 		w.Stop()

@@ -62,8 +62,10 @@ func (b *recordingForkBackend) ExportDelta(ctx context.Context, spawnID string, 
 }
 
 type recordingForkJournal struct {
-	rec      *forkOpRecorder
-	finalErr error
+	rec            *forkOpRecorder
+	finalErr       error
+	finalErrOnCall int
+	finalCalls     int
 }
 
 func (j *recordingForkJournal) RequestSnapshot(_ context.Context, spawnID string, gen uint64, _ journal.Mount) {
@@ -72,7 +74,8 @@ func (j *recordingForkJournal) RequestSnapshot(_ context.Context, spawnID string
 
 func (j *recordingForkJournal) FinalSnapshot(_ context.Context, spawnID string, gen uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
 	j.rec.add(fmt.Sprintf("final-snapshot:%s:%d", spawnID, gen))
-	if j.finalErr != nil {
+	j.finalCalls++
+	if j.finalErr != nil && (j.finalErrOnCall == 0 || j.finalErrOnCall == j.finalCalls) {
 		return nil, j.finalErr
 	}
 	out := map[string]journal.ManifestID{}
@@ -167,7 +170,7 @@ func TestForkSameNodeCapturesMountsAndRootfsUnderOnePause(t *testing.T) {
 	}
 
 	want := []string{
-		"warm-final-snapshot:sp-source:9",
+		"final-snapshot:sp-source:9",
 		"pause-agent:sp-source",
 		"sync-host",
 		"final-snapshot:sp-source:9",
@@ -179,6 +182,29 @@ func TestForkSameNodeCapturesMountsAndRootfsUnderOnePause(t *testing.T) {
 		"final-snapshot:sp-fork:1",
 	}
 	assertForkOpsPrefix(t, rec.snapshot(), want)
+}
+
+func TestForkSameNodeFailsClosedWhenRequiredGenerationHoldIsUnwired(t *testing.T) {
+	ctx := context.Background()
+	rec := &forkOpRecorder{}
+	j := &recordingForkJournal{rec: rec}
+	m, _ := newForkTestManager(t, rec, j)
+	m.forkGenerationHoldRequired = true
+	putForkSource(t, m, "sp-source", 9)
+
+	_, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
+		SourceSpawnID:    "sp-source",
+		ForkSpawnID:      "sp-fork",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+		TransferSetID:    "ts-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "generation hold is required") {
+		t.Fatalf("ForkSameNode error = %v, want generation hold requirement", err)
+	}
+	if ops := rec.snapshot(); len(ops) != 0 {
+		t.Fatalf("fork must fail before snapshots/pause when hold is required but unwired, ops=%v", ops)
+	}
 }
 
 func TestForkUnpauseIfPausedToleratesAlreadyRunning(t *testing.T) {
@@ -197,7 +223,7 @@ func TestForkUnpauseIfPausedToleratesAlreadyRunning(t *testing.T) {
 func TestForkCaptureFailureUnpausesAndRestartsWatchers(t *testing.T) {
 	ctx := context.Background()
 	rec := &forkOpRecorder{}
-	j := &recordingForkJournal{rec: rec, finalErr: fmt.Errorf("snapshot failed")}
+	j := &recordingForkJournal{rec: rec, finalErr: fmt.Errorf("snapshot failed"), finalErrOnCall: 2}
 	m, fb := newForkTestManager(t, rec, j)
 	putForkSource(t, m, "sp-source", 9)
 

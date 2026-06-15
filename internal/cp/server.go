@@ -129,6 +129,8 @@ type Server struct {
 	forkMaterializer       forkMaterializer
 	forkFootprintEstimator forkFootprintEstimator
 	forks                  *forkWaiters
+	forkTurnBoundaries     *forkTurnBoundaryWaiters
+	forkUnpauses           *forkUnpauseWaiters
 	failedForkResources    failedForkResources
 
 	// Evaluator policy fields (§6 node-local detectors → CP-side reporters). All default to
@@ -168,9 +170,11 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
 		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
-		pendingIntents:  newPendingIntentRegistry(),
-		deliveryPending: newDeliveryPendingTracker(),
-		forks:           newForkWaiters(),
+		pendingIntents:     newPendingIntentRegistry(),
+		deliveryPending:    newDeliveryPendingTracker(),
+		forks:              newForkWaiters(),
+		forkTurnBoundaries: newForkTurnBoundaryWaiters(),
+		forkUnpauses:       newForkUnpauseWaiters(),
 		// evaluator disabled by default; cmd/spawnery_cp wires it via SetEvaluatorPolicy.
 		evaluatorInFlight: map[string]struct{}{},
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
@@ -372,6 +376,10 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			}
 		case *nodev1.NodeMessage_ForkSameNodeComplete:
 			s.deliverForkSameNodeComplete(m.ForkSameNodeComplete)
+		case *nodev1.NodeMessage_ForkTurnBoundaryComplete:
+			s.deliverForkTurnBoundaryComplete(m.ForkTurnBoundaryComplete)
+		case *nodev1.NodeMessage_UnpauseIfPausedComplete:
+			s.deliverUnpauseIfPausedComplete(m.UnpauseIfPausedComplete)
 		case *nodev1.NodeMessage_SuspendProgress:
 			// Route incremental suspend progress to the in-flight SuspendSpawn waiter so the CP
 			// stall detector resets its timer (sp-u53.7.2). Stale-gen or unmatched signals are dropped.

@@ -107,6 +107,30 @@ func (p *Pump) markActive() {
 	p.mu.Unlock()
 }
 
+func (p *Pump) idleForFork() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.busy && p.inflightPromptID == 0 && len(p.queue) == 0
+}
+
+func (p *Pump) waitIdle(ctx context.Context, poll time.Duration) error {
+	if poll <= 0 {
+		poll = 10 * time.Millisecond
+	}
+	t := time.NewTicker(poll)
+	defer t.Stop()
+	for {
+		if p.idleForFork() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
 // appendFrames assigns seqs, appends to the log (trimming the oldest past maxLog), and wakes clients.
 func (p *Pump) appendFrames(fs []Frame) {
 	if len(fs) == 0 {

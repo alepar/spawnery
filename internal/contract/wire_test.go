@@ -103,6 +103,30 @@ func TestNodeForkMessagesExist(t *testing.T) {
 	if reply.GetForkSameNodeComplete().GetForkSpawnId() != "sp-fork" {
 		t.Fatalf("fork complete not threaded: %+v", reply)
 	}
+	gate := &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}}
+	if gate.GetForkTurnBoundary().GetTransferSetId() != "ts-1" {
+		t.Fatalf("fork turn-boundary not threaded: %+v", gate)
+	}
+	gateDone := &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_ForkTurnBoundaryComplete{ForkTurnBoundaryComplete: &nodev1.ForkTurnBoundaryComplete{
+		SourceSpawnId: "sp-source", TransferSetId: "ts-1",
+	}}}
+	if gateDone.GetForkTurnBoundaryComplete().GetSourceSpawnId() != "sp-source" {
+		t.Fatalf("fork turn-boundary complete not threaded: %+v", gateDone)
+	}
+	unpause := &nodev1.CPMessage{Msg: &nodev1.CPMessage_UnpauseIfPaused{UnpauseIfPaused: &nodev1.UnpauseIfPaused{
+		SpawnId: "sp-source", Generation: 9,
+	}}}
+	if unpause.GetUnpauseIfPaused().GetGeneration() != 9 {
+		t.Fatalf("unpause command not threaded: %+v", unpause)
+	}
+	unpauseDone := &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_UnpauseIfPausedComplete{UnpauseIfPausedComplete: &nodev1.UnpauseIfPausedComplete{
+		SpawnId: "sp-source", Generation: 9,
+	}}}
+	if unpauseDone.GetUnpauseIfPausedComplete().GetSpawnId() != "sp-source" {
+		t.Fatalf("unpause complete not threaded: %+v", unpauseDone)
+	}
 }
 
 func TestCPContractSurface(t *testing.T) {

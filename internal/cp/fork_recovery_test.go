@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/store"
 )
 
@@ -169,6 +171,45 @@ func TestRecoverForkingSourceWedgedCaptureDeadlinePreemptsLiveClaim(t *testing.T
 	}
 	if err := st.Spawns().Heartbeat(ctx, "sp-wedge", "lease-sp-wedge", 2000); !errors.Is(err, store.ErrClaimLost) {
 		t.Fatalf("old driver heartbeat: want ErrClaimLost, got %v", err)
+	}
+}
+
+func TestReconcileTickRecoversForkingSourceThroughNodeUnpause(t *testing.T) {
+	s, st := newForkRecoveryTestServer(t)
+	s.forkUnpauses = newForkUnpauseWaiters()
+	ctx := context.Background()
+	seedForkingSource(t, st, "sp-reconcile", 100, 100)
+	sender := &capSender{}
+	s.reg.Add(&registry.Node{ID: "node-a", Sender: sender, Max: 1, Free: 1})
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			if msg := sender.lastCPMessage(); msg != nil && msg.GetUnpauseIfPaused() != nil {
+				cmd := msg.GetUnpauseIfPaused()
+				s.deliverUnpauseIfPausedComplete(&nodev1.UnpauseIfPausedComplete{
+					SpawnId:    cmd.GetSpawnId(),
+					Generation: cmd.GetGeneration(),
+				})
+				close(done)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	s.reconcileTick(ctx)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reconcile did not send UnpauseIfPaused")
+	}
+	sp, err := st.Spawns().Get(ctx, "sp-reconcile")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if sp.Status != store.Active || sp.ForkCaptureDeadline != nil {
+		t.Fatalf("after reconcile = status %s deadline %v, want active nil", sp.Status, sp.ForkCaptureDeadline)
 	}
 }
 

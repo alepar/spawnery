@@ -27,6 +27,8 @@ message NodeMessage {
     SuspendProgress               suspend_progress      = 10;  // node -> CP: incremental suspend progress (sp-u53.7.2)
     ResumeProgress                resume_progress       = 11;  // node -> CP: incremental resume/start progress (sp-u53.7.2)
     ForkSameNodeComplete          fork_same_node_complete = 12; // node -> CP: same-node fork capture/seed completion
+    ForkTurnBoundaryComplete      fork_turn_boundary_complete = 13; // node -> CP: source has no in-flight ACP turn
+    UnpauseIfPausedComplete       unpause_if_paused_complete = 14; // node -> CP: idempotent fork recovery unpause ack
   }
 }
 message CPMessage {
@@ -43,6 +45,8 @@ message CPMessage {
     SecretDelivery               secret_delivery       = 10;            // CP -> node: relay owner-sealed secret ciphertext (sp-2ckv.4)
     SealJournalKeyToOwnerRequest seal_journal_key      = 11;            // CP -> node: seal node-local journal password to owner (sp-8dkp)
     ForkSameNode                 fork_same_node        = 12;            // CP -> node: same-node fork capture/seed
+    ForkTurnBoundary             fork_turn_boundary    = 13;            // CP -> node: wait until source has no in-flight ACP turn
+    UnpauseIfPaused              unpause_if_paused     = 14;            // CP -> node: idempotent source unpause for fork recovery
   }
 }
 
@@ -174,6 +178,26 @@ message ForkSameNode {
   uint64 source_generation = 3;
   uint64 target_generation = 4;
   string transfer_set_id = 5;
+}
+message ForkTurnBoundary {
+  string source_spawn_id = 1;
+  uint64 source_generation = 2;
+  string transfer_set_id = 3;
+}
+message ForkTurnBoundaryComplete {
+  string source_spawn_id = 1;
+  uint64 source_generation = 2;
+  string transfer_set_id = 3;
+  string error = 4;
+}
+message UnpauseIfPaused {
+  string spawn_id = 1;
+  uint64 generation = 2;
+}
+message UnpauseIfPausedComplete {
+  string spawn_id = 1;
+  uint64 generation = 2;
+  string error = 3;
 }
 message ForkSameNodeComplete {
   string source_spawn_id = 1;

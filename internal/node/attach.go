@@ -380,6 +380,16 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			return // stale generation: drop (matches Stop/Suspend).
 		}
 		go a.forkSameNode(ctx, m.ForkSameNode)
+	case *nodev1.CPMessage_ForkTurnBoundary:
+		if a.staleGen(m.ForkTurnBoundary.SourceSpawnId, m.ForkTurnBoundary.SourceGeneration) {
+			return // stale generation: drop (matches Stop/Suspend).
+		}
+		go a.forkTurnBoundary(ctx, m.ForkTurnBoundary)
+	case *nodev1.CPMessage_UnpauseIfPaused:
+		if a.staleGen(m.UnpauseIfPaused.SpawnId, m.UnpauseIfPaused.Generation) {
+			return // stale generation: drop (matches Stop/Suspend).
+		}
+		go a.unpauseIfPaused(ctx, m.UnpauseIfPaused)
 	case *nodev1.CPMessage_SecretDelivery:
 		if a.staleGen(m.SecretDelivery.SpawnId, m.SecretDelivery.Generation) {
 			return // stale generation: a newer pod exists; the owner re-seals to the current episode. Drop.
