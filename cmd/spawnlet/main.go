@@ -168,26 +168,42 @@ func configureJournal(m *spawnlet.Manager, dataRoot string) error {
 	}
 	root := env("JOURNAL_ROOT", filepath.Join(dataRoot, "journal"))
 
-	var bcfg journal.BackendConfig
+	var backend journal.BlobBackend
+	var generationBackends journal.GenerationBackendProvider
+	var gkm *journal.GenerationKeyManager
 	switch kind {
 	case journal.BackendFilesystem:
-		bcfg = journal.BackendConfig{Kind: kind, FilesystemRoot: env("JOURNAL_FS_ROOT", filepath.Join(root, "blobs"))}
+		var err error
+		backend, err = journal.NewBackend(journal.BackendConfig{Kind: kind, FilesystemRoot: env("JOURNAL_FS_ROOT", filepath.Join(root, "blobs"))})
+		if err != nil {
+			return err
+		}
 	case journal.BackendS3:
-		bcfg = journal.BackendConfig{Kind: kind, S3: journal.S3Config{
-			Endpoint:        os.Getenv("JOURNAL_S3_ENDPOINT"),
-			Bucket:          os.Getenv("JOURNAL_S3_BUCKET"),
-			AccessKeyID:     os.Getenv("JOURNAL_S3_ACCESS_KEY"),
-			SecretAccessKey: os.Getenv("JOURNAL_S3_SECRET_KEY"),
-			Region:          env("JOURNAL_S3_REGION", "garage"),
-			Prefix:          os.Getenv("JOURNAL_S3_PREFIX"),
-			DisableTLS:      getenvBool("JOURNAL_S3_DISABLE_TLS", false),
-		}}
+		s3Endpoint := os.Getenv("JOURNAL_S3_ENDPOINT")
+		if s3Endpoint == "" {
+			return fmt.Errorf("journal s3: JOURNAL_S3_ENDPOINT is required")
+		}
+		adminEndpoint := os.Getenv("JOURNAL_GARAGE_ADMIN_ENDPOINT")
+		adminToken := os.Getenv("JOURNAL_GARAGE_ADMIN_TOKEN")
+		if adminEndpoint == "" || adminToken == "" {
+			return fmt.Errorf("journal s3: JOURNAL_GARAGE_ADMIN_ENDPOINT and JOURNAL_GARAGE_ADMIN_TOKEN are required for generation-keyed journaling")
+		}
+		admin, err := journal.NewGarageAdmin(adminEndpoint, adminToken, &http.Client{Timeout: 15 * time.Second})
+		if err != nil {
+			return fmt.Errorf("journal genkey admin: %w", err)
+		}
+		gkm, err = journal.NewGenerationKeyManager(journal.GenerationKeyConfig{
+			Admin:      admin,
+			S3Endpoint: strings.TrimPrefix(strings.TrimPrefix(s3Endpoint, "https://"), "http://"),
+			Region:     env("JOURNAL_S3_REGION", "garage"),
+			DisableTLS: getenvBool("JOURNAL_S3_DISABLE_TLS", false),
+		})
+		if err != nil {
+			return fmt.Errorf("journal genkey: %w", err)
+		}
+		generationBackends = gkm
 	default:
 		return fmt.Errorf("unknown JOURNAL_BACKEND %q (want filesystem|s3)", kind)
-	}
-	backend, err := journal.NewBackend(bcfg)
-	if err != nil {
-		return err
 	}
 
 	keyfile := env("JOURNAL_NODE_KEY", filepath.Join(root, "node.key"))
@@ -205,15 +221,19 @@ func configureJournal(m *spawnlet.Manager, dataRoot string) error {
 	// memory for the episode.
 	ownerSealed := journal.NewOwnerSealedCustody()
 	jm, err := journal.NewManager(journal.Config{
-		RepoRoot:    filepath.Join(root, "repos"),
-		Backend:     backend,
-		Custody:     custody,
-		OwnerSealed: ownerSealed,
+		RepoRoot:           filepath.Join(root, "repos"),
+		Backend:            backend,
+		GenerationBackends: generationBackends,
+		Custody:            custody,
+		OwnerSealed:        ownerSealed,
 	})
 	if err != nil {
 		return err
 	}
 	m.SetJournal(jm, filepath.Join(root, "state"))
+	if gkm != nil {
+		m.SetGenerationKeyManager(gkm)
+	}
 	log.Printf("journal: journaler enabled (backend=%s, root=%s; node-local + owner-sealed custody)", kind, root)
 	return nil
 }

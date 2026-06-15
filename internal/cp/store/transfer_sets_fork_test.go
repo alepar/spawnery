@@ -145,3 +145,61 @@ func TestListFailedForksReturnsOnlyVisibleFailedForks(t *testing.T) {
 		}
 	}
 }
+
+func TestListReclaimableForksIncludesFailedAndStaleRestoring(t *testing.T) {
+	st := NewTestStore(t)
+	ctx := context.Background()
+	for _, id := range []string{
+		"sp-source",
+		"sp-fork-failed",
+		"sp-fork-stale-restoring",
+		"sp-fork-fresh-restoring",
+		"sp-fork-deleted",
+	} {
+		seedTransferSetSpawn(t, st, id, "alice")
+	}
+
+	create := func(ts TransferSet) {
+		t.Helper()
+		if err := st.TransferSets().Create(ctx, ts); err != nil {
+			t.Fatalf("Create %s: %v", ts.ID, err)
+		}
+	}
+	base := TransferSet{
+		Kind:              TransferSetFork,
+		SourceSpawnID:     "sp-source",
+		SourceGeneration:  7,
+		TargetGeneration:  1,
+		SourceNodeID:      "node-a",
+		TargetNodeID:      "node-b",
+		TransferKeyStatus: TransferKeyPending,
+		CreatedAt:         100,
+	}
+	fork := func(id, forkID string, status TransferSetStatus, updatedAt int64) TransferSet {
+		ts := base
+		ts.ID = id
+		ts.SpawnID = forkID
+		ts.ForkSpawnID = forkID
+		ts.Status = status
+		ts.UpdatedAt = updatedAt
+		return ts
+	}
+	create(fork("ts-failed", "sp-fork-failed", TransferSetFailed, 500))
+	create(fork("ts-stale-restoring", "sp-fork-stale-restoring", TransferSetRestoring, 100))
+	create(fork("ts-fresh-restoring", "sp-fork-fresh-restoring", TransferSetRestoring, 900))
+	create(fork("ts-deleted-restoring", "sp-fork-deleted", TransferSetRestoring, 100))
+	if err := st.Spawns().MarkDeleted(ctx, "sp-fork-deleted", 99); err != nil {
+		t.Fatalf("MarkDeleted fork: %v", err)
+	}
+
+	rows, err := st.TransferSets().ListReclaimableForks(ctx, 700)
+	if err != nil {
+		t.Fatalf("ListReclaimableForks: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("ListReclaimableForks rows = %+v, want failed + stale restoring", rows)
+	}
+	if rows[0].ID != "ts-failed" || rows[1].ID != "ts-stale-restoring" {
+		t.Fatalf("ListReclaimableForks order/ids = %+v, want ts-failed, ts-stale-restoring", rows)
+	}
+}

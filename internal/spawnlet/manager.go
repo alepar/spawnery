@@ -139,6 +139,17 @@ type Manager struct {
 	// nil → log a "SQUASH-NEEDED" warning line.
 	// Injected in tests so they can observe the callback without log parsing.
 	squashNeeded func(id string, depth int)
+
+	// forkSyncFn flushes host filesystem buffers while the source agent is paused for a fork capture.
+	// The default calls sync(1); tests replace it with a recorder.
+	forkSyncFn func(context.Context) error
+
+	// forkGenerationHold protects the source generation's journal key/blobs from revoke/prune while
+	// a fork is seeding. Required when the configured journal backend depends on generation-key
+	// fencing; filesystem-backed dev/tests can leave it optional.
+	generationKeys             *journal.GenerationKeyManager
+	forkGenerationHold         func(spawnID string, gen uint64, reason string) generationHold
+	forkGenerationHoldRequired bool
 }
 
 // JournalKeyReceiver injects an owner-delivered Kopia repo password into the
@@ -231,6 +242,9 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		secrets:    SecretInjector{Root: cfg.SecretsRoot},
 		artifacts:  ArtifactStager{Root: cfg.ArtifactsRoot},
 		deltaState: &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
+	}
+	m.forkSyncFn = func(ctx context.Context) error {
+		return exec.CommandContext(ctx, "sync").Run()
 	}
 	// Default scrub function: exec scrub commands directly in the agent container before commit.
 	// This runs while the container is still live (before pod.Stop).
@@ -480,6 +494,10 @@ type AgentSelection struct {
 	// Normal same-node resume leaves them empty and continues to use the local DeltaImageRef.
 	RootfsSourceGeneration uint64
 	RootfsArtifacts        []RootfsArtifact
+	// RootfsArtifactsLocalOnly means RootfsArtifacts describe an already-local fork delta image.
+	// The node must launch runtime.DeltaTag(id) without restoring artifacts, and must fail if
+	// that local image is absent.
+	RootfsArtifactsLocalOnly bool
 	// ProgressFunc is an optional callback invoked at phase boundaries during CreateWithSelection
 	// (specifically once per rootfs artifact during restoreRootfsArtifacts) so that callers
 	// (attach.go startSpawn) can relay resume progress to the CP stall detector (sp-u53.7.2).
@@ -504,6 +522,15 @@ type RootfsArtifact struct {
 	UncompressedSize int64
 	ProducerNodeID   string
 	ProducerRuntime  string
+}
+
+func cloneRootfsArtifacts(in []RootfsArtifact) []RootfsArtifact {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]RootfsArtifact, len(in))
+	copy(out, in)
+	return out
 }
 
 type SuspendResult struct {
@@ -686,7 +713,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 						cancel()
 					}
 					if restore {
-						if rerr := m.journal.Restore(ctx, id, mt.Name, pin, restoreDir); rerr != nil {
+						if rerr := m.journal.RestoreGeneration(ctx, id, jrec.Generation, mt.Name, pin, restoreDir); rerr != nil {
 							log.Printf("journal restore for %s mount %s (manifest %s): %v", id, mt.Name, pin, rerr)
 						} else {
 							// Restore writes files owned by THIS node daemon's uid with their original
@@ -817,13 +844,44 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			log.Printf("spawn %s: resolve base digest for %q: %v (non-fatal; delta-survival pinning skipped)", id, baseRef, derr)
 		}
 	}
-	if len(sel.RootfsArtifacts) > 0 {
-		// Pass sel.ProgressFunc so each artifact emits a resume progress event (sp-u53.7.2):
-		// a large delta being fetched+imported can exceed the stall window without resets.
-		if err := m.restoreRootfsArtifacts(ctx, id, sel.RootfsSourceGeneration, baseRef, sel.RootfsArtifacts, sel.ProgressFunc); err != nil {
+	deltaRef := runtime.DeltaTag(id)
+	launchImage := ""
+	rootfsArtifacts := cloneRootfsArtifacts(sel.RootfsArtifacts)
+	if len(rootfsArtifacts) > 0 {
+		var err error
+		rootfsArtifacts, err = sortedRootfsArtifactChain(rootfsArtifacts)
+		if err != nil {
+			_ = m.pod.Stop(ctx, h)
+			finalizeAll()
+			return nil, fmt.Errorf("rootfs artifact restore for %s: %w", id, err)
+		}
+		if err := validateRootfsArtifactPins(id, sel.RootfsSourceGeneration, baseRef, rootfsArtifacts); err != nil {
 			_ = m.pod.Stop(ctx, h)
 			finalizeAll()
 			return nil, err
+		}
+		if sel.RootfsArtifactsLocalOnly {
+			existingImage, eerr := m.pod.EnsureImage(ctx, baseRef, deltaRef)
+			if eerr != nil {
+				_ = m.pod.Stop(ctx, h)
+				finalizeAll()
+				return nil, fmt.Errorf("ensure launch image: %w", eerr)
+			}
+			if existingImage != deltaRef {
+				_ = m.pod.Stop(ctx, h)
+				finalizeAll()
+				return nil, fmt.Errorf("rootfs local-only start for %s: missing local delta image %s", id, deltaRef)
+			}
+			launchImage = existingImage
+		} else {
+			// Pass sel.ProgressFunc so each artifact emits a resume progress event (sp-u53.7.2):
+			// a large delta being fetched+imported can exceed the stall window without resets.
+			if err := m.restoreRootfsArtifacts(ctx, id, sel.RootfsSourceGeneration, baseRef, rootfsArtifacts, sel.ProgressFunc); err != nil {
+				_ = m.pod.Stop(ctx, h)
+				finalizeAll()
+				return nil, err
+			}
+			launchImage = deltaRef
 		}
 	}
 	// Emit a resume progress event before potentially-slow image pull so the CP stall detector
@@ -833,11 +891,14 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		sel.ProgressFunc("pulling_image", "ensuring base image is available")
 	}
 	// Launch image: delta tag if already present locally (same-node resume), else base.
-	launchImage, eerr := m.pod.EnsureImage(ctx, baseRef, runtime.DeltaTag(id))
-	if eerr != nil {
-		_ = m.pod.Stop(ctx, h)
-		finalizeAll()
-		return nil, fmt.Errorf("ensure launch image: %w", eerr)
+	if launchImage == "" {
+		var eerr error
+		launchImage, eerr = m.pod.EnsureImage(ctx, baseRef, deltaRef)
+		if eerr != nil {
+			_ = m.pod.Stop(ctx, h)
+			finalizeAll()
+			return nil, fmt.Errorf("ensure launch image: %w", eerr)
+		}
 	}
 
 	// Phase 2: the untrusted agent, into the existing pod.
@@ -884,6 +945,9 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			deltaDepth = drec.Depth
 		}
 	}
+	if restoredDepth := maxRootfsArtifactSequence(rootfsArtifacts); restoredDepth > deltaDepth {
+		deltaDepth = restoredDepth
+	}
 
 	sp := &Spawn{
 		ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
@@ -893,6 +957,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		BaseImageDigest: baseDigest,
 		LaunchImageRef:  launchImage, // delta tag on same-node resume, base ref on fresh create
 		DeltaDepth:      deltaDepth,
+		RootfsArtifacts: cloneRootfsArtifacts(rootfsArtifacts),
 	}
 	m.store.Put(sp)
 	return sp, nil
@@ -1009,14 +1074,11 @@ func (m *Manager) snapshotJournal(ctx context.Context, sp *Spawn, progress Suspe
 // image store. progress (optional, nil-safe) is called ONCE PER ARTIFACT so the CP resume stall
 // detector can reset its timer between artifacts — a single large delta can exceed the stall window
 // (sp-u53.7.2). Byte-level intra-artifact progress is a follow-up.
-func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceGeneration uint64, baseRef string, artifacts []RootfsArtifact, progress func(phase, detail string)) error {
-	if m.journal == nil {
-		return fmt.Errorf("rootfs artifact restore for %s: no journaler configured", id)
-	}
+func validateRootfsArtifactPins(id string, sourceGeneration uint64, baseRef string, artifacts []RootfsArtifact) error {
 	if sourceGeneration == 0 {
 		return fmt.Errorf("rootfs artifact restore for %s: missing source generation", id)
 	}
-	for i, art := range artifacts {
+	for _, art := range artifacts {
 		if art.ArtifactID == "" {
 			return fmt.Errorf("rootfs artifact restore for %s: empty artifact id (restore must be pinned)", id)
 		}
@@ -1028,6 +1090,58 @@ func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceG
 			return fmt.Errorf("rootfs artifact restore for %s: artifact %s base digest %s does not match pinned base digest %s",
 				id, art.ArtifactID, art.BaseImageDigest, baseRef)
 		}
+	}
+	return nil
+}
+
+func (m *Manager) rootfsArtifactsForMigrationGeneration(ctx context.Context, sp *Spawn) ([]RootfsArtifact, error) {
+	artifacts, err := sortedPortableRootfsArtifacts("rootfs artifact migration", sp.ID, sp.DeltaDepth-1, sp.RootfsArtifacts)
+	if err != nil {
+		return nil, err
+	}
+	if len(artifacts) == 0 {
+		return nil, nil
+	}
+	out := make([]RootfsArtifact, 0, len(artifacts))
+	for _, art := range artifacts {
+		if art.ArtifactID == "" {
+			return nil, fmt.Errorf("rootfs artifact migration for %s: inherited artifact has empty artifact id", sp.ID)
+		}
+		sourceGen := art.Generation
+		if sourceGen == 0 || sourceGen == sp.Generation {
+			art.Generation = sp.Generation
+			out = append(out, art)
+			continue
+		}
+		var payload bytes.Buffer
+		desc, err := m.journal.GetArtifact(ctx, sp.ID, sourceGen, art.ArtifactID, &payload)
+		if err != nil {
+			return nil, fmt.Errorf("rootfs artifact migration for %s: get inherited artifact %s: %w", sp.ID, art.ArtifactID, err)
+		}
+		desc = forkRootfsCopyDescriptor(desc, art, sp.BaseImageDigest, m.cfg.NodeID, m.rootfsProducerRuntime())
+		stored, err := m.journal.PutArtifact(ctx, sp.ID, sp.Generation, desc, bytes.NewReader(payload.Bytes()))
+		if err != nil {
+			return nil, fmt.Errorf("rootfs artifact migration for %s: put inherited artifact %s: %w", sp.ID, art.ArtifactID, err)
+		}
+		out = append(out, rootfsArtifactFromJournal(stored))
+	}
+	return out, nil
+}
+
+func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceGeneration uint64, baseRef string, artifacts []RootfsArtifact, progress func(phase, detail string)) error {
+	if m.journal == nil {
+		return fmt.Errorf("rootfs artifact restore for %s: no journaler configured", id)
+	}
+	var err error
+	artifacts, err = sortedRootfsArtifactChain(artifacts)
+	if err != nil {
+		return fmt.Errorf("rootfs artifact restore for %s: %w", id, err)
+	}
+	if err := validateRootfsArtifactPins(id, sourceGeneration, baseRef, artifacts); err != nil {
+		return err
+	}
+	importBaseRef := baseRef
+	for i, art := range artifacts {
 		// Emit per-artifact progress so the CP stall timer resets between artifacts.
 		if progress != nil {
 			progress("restore_rootfs", fmt.Sprintf("restoring rootfs artifact %d/%d (id=%s)", i+1, len(artifacts), art.ArtifactID))
@@ -1045,9 +1159,10 @@ func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceG
 			return fmt.Errorf("rootfs artifact restore for %s: journal returned artifact %s base digest %s, want %s",
 				id, art.ArtifactID, desc.BaseImageDigest, baseRef)
 		}
-		if _, err := m.pod.ImportDelta(ctx, id, baseRef, bytes.NewReader(payload.Bytes())); err != nil {
+		if _, err := m.pod.ImportDelta(ctx, id, importBaseRef, bytes.NewReader(payload.Bytes())); err != nil {
 			return fmt.Errorf("rootfs artifact restore for %s: import artifact %s: %w", id, art.ArtifactID, err)
 		}
+		importBaseRef = runtime.DeltaTag(id)
 	}
 	return nil
 }
@@ -1323,26 +1438,32 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 				if m.journal == nil {
 					resultErr = fmt.Errorf("rootfs artifact capture for %s: no journaler configured", id)
 				} else {
-					if progress != nil {
-						progress("export", "exporting rootfs delta artifact", nil)
-					}
-					var payload bytes.Buffer
-					if err := m.pod.ExportDelta(ctx, id, &payload); err != nil {
-						resultErr = fmt.Errorf("rootfs artifact capture for %s: export delta: %w", id, err)
+					inherited, err := m.rootfsArtifactsForMigrationGeneration(ctx, sp)
+					if err != nil {
+						resultErr = err
 					} else {
-						desc := journal.ArtifactDescriptor{
-							Type:            journal.ArtifactRootfsDelta,
-							Sequence:        sp.DeltaDepth,
-							BaseImageDigest: sp.BaseImageDigest,
-							Format:          journal.ArtifactFormatOCILayout,
-							ProducerNodeID:  m.cfg.NodeID,
-							ProducerRuntime: m.rootfsProducerRuntime(),
+						result.RootfsArtifacts = inherited
+						if progress != nil {
+							progress("export", "exporting rootfs delta artifact", nil)
 						}
-						stored, err := m.journal.PutArtifact(ctx, id, sp.Generation, desc, bytes.NewReader(payload.Bytes()))
-						if err != nil {
-							resultErr = fmt.Errorf("rootfs artifact capture for %s: put artifact: %w", id, err)
+						var payload bytes.Buffer
+						if err := m.pod.ExportDelta(ctx, id, &payload); err != nil {
+							resultErr = fmt.Errorf("rootfs artifact capture for %s: export delta: %w", id, err)
 						} else {
-							result.RootfsArtifacts = append(result.RootfsArtifacts, rootfsArtifactFromJournal(stored))
+							desc := journal.ArtifactDescriptor{
+								Type:            journal.ArtifactRootfsDelta,
+								Sequence:        sp.DeltaDepth,
+								BaseImageDigest: sp.BaseImageDigest,
+								Format:          journal.ArtifactFormatOCILayout,
+								ProducerNodeID:  m.cfg.NodeID,
+								ProducerRuntime: m.rootfsProducerRuntime(),
+							}
+							stored, err := m.journal.PutArtifact(ctx, id, sp.Generation, desc, bytes.NewReader(payload.Bytes()))
+							if err != nil {
+								resultErr = fmt.Errorf("rootfs artifact capture for %s: put artifact: %w", id, err)
+							} else {
+								result.RootfsArtifacts = append(result.RootfsArtifacts, rootfsArtifactFromJournal(stored))
+							}
 						}
 					}
 				}

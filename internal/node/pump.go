@@ -61,6 +61,7 @@ type Pump struct {
 	busy             bool
 	queue            []string // queued prompt texts, FIFO
 	inflightPromptID int      // agent request id of the in-flight session/prompt (0 = none)
+	forkBarrier      *forkIngressBarrier
 
 	pending     map[string]*pendingPerm
 	permTimeout time.Duration
@@ -105,6 +106,50 @@ func (p *Pump) markActive() {
 	p.mu.Lock()
 	p.lastActivity = time.Now()
 	p.mu.Unlock()
+}
+
+func (p *Pump) tryAcquireForkBarrier(b forkIngressBarrier) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.forkBarrier != nil {
+		return p.forkBarrier.matches(b) && !p.busy && p.inflightPromptID == 0
+	}
+	bb := b
+	p.forkBarrier = &bb
+	if p.busy || p.inflightPromptID != 0 {
+		return false
+	}
+	return true
+}
+
+func (p *Pump) setForkBarrier(b forkIngressBarrier) {
+	p.mu.Lock()
+	bb := b
+	p.forkBarrier = &bb
+	p.mu.Unlock()
+}
+
+func (p *Pump) releaseForkBarrier(match func(forkIngressBarrier) bool) {
+	var drainText, sid string
+	var queued int
+	var drained bool
+	p.mu.Lock()
+	if p.forkBarrier != nil && match(*p.forkBarrier) {
+		p.forkBarrier = nil
+		if !p.busy && p.inflightPromptID == 0 && len(p.queue) > 0 {
+			drainText = p.queue[0]
+			p.queue = p.queue[1:]
+			p.busy = true
+			queued = len(p.queue)
+			sid = p.sessionID
+			drained = true
+		}
+	}
+	p.mu.Unlock()
+	if drained {
+		p.appendFrames([]Frame{{Kind: "turn", State: "busy", Queued: queued}})
+		p.sendPrompt(sid, drainText)
+	}
 }
 
 // appendFrames assigns seqs, appends to the log (trimming the oldest past maxLog), and wakes clients.
@@ -563,7 +608,7 @@ func (p *Pump) handleTurnEnd(result json.RawMessage) {
 	p.inflightPromptID = 0
 	var drainText string
 	var drained bool
-	if len(p.queue) > 0 {
+	if p.forkBarrier == nil && len(p.queue) > 0 {
 		drainText = p.queue[0]
 		p.queue = p.queue[1:]
 		drained = true
@@ -639,6 +684,18 @@ func (p *Pump) fromClient(clientID string, line []byte) {
 	switch f.Kind {
 	case "prompt":
 		p.mu.Lock()
+		if p.forkBarrier != nil {
+			if len(p.queue) < maxQueued {
+				p.queue = append(p.queue, f.Text)
+				queued := len(p.queue)
+				p.mu.Unlock()
+				p.appendFrames([]Frame{{Kind: "user", Text: f.Text}, {Kind: "turn", State: "busy", Queued: queued}})
+				return
+			}
+			p.mu.Unlock()
+			p.appendFrames([]Frame{{Kind: "turn", State: "idle", Queued: maxQueued, Error: &ErrorInfo{Message: "prompt queue full during fork barrier"}}})
+			return
+		}
 		sid := p.sessionID
 		if !p.busy {
 			p.busy = true

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -200,5 +201,42 @@ func TestProxyStreamingPassthroughAfterRewrite(t *testing.T) {
 	b, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(b), "[DONE]") {
 		t.Fatalf("streamed body not passed through: %q", b)
+	}
+}
+
+func TestProxyTracksInflightUntilResponseCompletes(t *testing.T) {
+	release := make(chan struct{})
+	reached := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(reached)
+		<-release
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	inflight := NewInflight()
+	srv := httptest.NewServer(NewHandler(upstream.URL, "k", &Override{}, inflight))
+	defer srv.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		resp, err := http.Post(srv.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"m"}`))
+		if err != nil {
+			t.Errorf("POST: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+	}()
+	<-reached
+	if got := inflight.Active(); got != 1 {
+		t.Fatalf("inflight while upstream response is blocked = %d, want 1", got)
+	}
+	close(release)
+	wg.Wait()
+	if got := inflight.Active(); got != 0 {
+		t.Fatalf("inflight after response completes = %d, want 0", got)
 	}
 }

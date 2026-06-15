@@ -188,6 +188,8 @@ JOURNAL_S3_ENDPOINT=http://127.0.0.1:3900
 JOURNAL_S3_BUCKET=spawnery
 JOURNAL_S3_ACCESS_KEY=… JOURNAL_S3_SECRET_KEY=…
 JOURNAL_S3_REGION=garage JOURNAL_S3_DISABLE_TLS=true
+JOURNAL_GARAGE_ADMIN_ENDPOINT=http://127.0.0.1:3903
+JOURNAL_GARAGE_ADMIN_TOKEN=…
 ```
 
 Dev shortcut: `just garage` starts a local Garage and writes `deploy/garage/dev-creds.env`, which

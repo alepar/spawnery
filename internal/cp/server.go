@@ -128,6 +128,11 @@ type Server struct {
 	// footprint estimator is fail-closed when nil because CP cannot infer fork disk headroom yet.
 	forkMaterializer       forkMaterializer
 	forkFootprintEstimator forkFootprintEstimator
+	forks                  *forkWaiters
+	forkSourceRestored     *forkSourceRestoredWaiters
+	forkTurnBoundaries     *forkTurnBoundaryWaiters
+	forkUnpauses           *forkUnpauseWaiters
+	failedForkCleanups     *failedForkCleanupWaiters
 	failedForkResources    failedForkResources
 
 	// Evaluator policy fields (§6 node-local detectors → CP-side reporters). All default to
@@ -158,7 +163,7 @@ const (
 var _ cpv1connect.SpawnServiceHandler = (*Server)(nil)
 
 func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Scheduler, st store.Store, tel telemetry.Sink) *Server {
-	return &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
+	s := &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
 		cpID: uuid.NewString(), claimTTL: defaultClaimTTL,
 		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout, suspendStallWindow: defaultSuspendStallWindow,
@@ -167,23 +172,42 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
 		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
-		pendingIntents:  newPendingIntentRegistry(),
-		deliveryPending: newDeliveryPendingTracker(),
+		pendingIntents:     newPendingIntentRegistry(),
+		deliveryPending:    newDeliveryPendingTracker(),
+		forks:              newForkWaiters(),
+		forkTurnBoundaries: newForkTurnBoundaryWaiters(),
+		forkUnpauses:       newForkUnpauseWaiters(),
+		failedForkCleanups: newFailedForkCleanupWaiters(),
 		// evaluator disabled by default; cmd/spawnery_cp wires it via SetEvaluatorPolicy.
 		evaluatorInFlight: map[string]struct{}{},
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
 		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
 		devMode: true}
+	s.forkMaterializer = newSameNodeForkMaterializer(s, defaultForkMaterializeTimeout)
+	s.failedForkResources = &nodeFailedForkResources{s: s}
+	return s
 }
 
-// withClaim acquires the DB claim for spawn id, runs fn under it (with a heartbeat goroutine
-// renewing the lease every claimTTL/3), then releases the claim. The fn receives a claimCtx that is
-// cancelled if the heartbeat detects ErrClaimLost (lease expired / preempted), signalling the driver
-// to bail immediately and commit no further transitions.
+type spawnClaim struct {
+	ctx     context.Context
+	leaseID string
+	release func()
+}
+
+func (c *spawnClaim) Release() {
+	if c != nil && c.release != nil {
+		c.release()
+	}
+}
+
+// acquireClaim acquires the DB claim for spawn id and starts a heartbeat goroutine renewing the lease
+// every claimTTL/3. The returned claim ctx is cancelled if the heartbeat detects ErrClaimLost (lease
+// expired / preempted), signalling the driver to bail immediately and commit no further transitions.
+// Release is idempotent and stops the heartbeat before releasing the DB claim.
 //
 // Acquire is retried up to maxAcquireRetries times on ErrConflict (benign seq bump); if all retries
 // are exhausted the claim is held by another driver → CodeAborted "spawn busy".
-func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx context.Context, leaseID string) error) error {
+func (s *Server) acquireClaim(ctx context.Context, id string) (*spawnClaim, error) {
 	const maxAcquireRetries = 3
 	leaseID := uuid.NewString()
 	ttl := s.claimTTL
@@ -192,7 +216,7 @@ func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx cont
 	for i := 0; i < maxAcquireRetries; i++ {
 		sp, gerr := s.st.Spawns().Get(ctx, id)
 		if gerr != nil {
-			return connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
+			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
 		}
 		now := time.Now()
 		_, acquireErr = s.st.Spawns().Acquire(ctx, id, s.cpID, leaseID,
@@ -201,12 +225,12 @@ func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx cont
 			break
 		}
 		if !errors.Is(acquireErr, store.ErrConflict) {
-			return connect.NewError(connect.CodeInternal, acquireErr)
+			return nil, connect.NewError(connect.CodeInternal, acquireErr)
 		}
 		// ErrConflict: stale seq (benign concurrent bump) or active claim; re-read and retry.
 	}
 	if acquireErr != nil {
-		return connect.NewError(connect.CodeAborted, fmt.Errorf("spawn busy — transition in progress"))
+		return nil, connect.NewError(connect.CodeAborted, fmt.Errorf("spawn busy — transition in progress"))
 	}
 
 	// claimCtx is cancelled either by us (after fn returns) or by the heartbeat on ErrClaimLost.
@@ -234,12 +258,29 @@ func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx cont
 		}
 	}()
 
-	fnErr := fn(claimCtx, leaseID)
-	claimCancel() // stop heartbeat goroutine
-	<-hbDone
-	// Release: ErrClaimLost means the claim expired/was preempted — acceptable, ignore.
-	_ = s.st.Spawns().Release(context.WithoutCancel(ctx), id, leaseID)
-	return fnErr
+	var releaseOnce sync.Once
+	return &spawnClaim{
+		ctx:     claimCtx,
+		leaseID: leaseID,
+		release: func() {
+			releaseOnce.Do(func() {
+				claimCancel() // stop heartbeat goroutine
+				<-hbDone
+				// Release: ErrClaimLost means the claim expired/was preempted — acceptable, ignore.
+				_ = s.st.Spawns().Release(context.WithoutCancel(ctx), id, leaseID)
+			})
+		},
+	}, nil
+}
+
+// withClaim acquires the DB claim for spawn id, runs fn under it, then releases the claim.
+func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx context.Context, leaseID string) error) error {
+	claim, err := s.acquireClaim(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer claim.Release()
+	return fn(claim.ctx, claim.leaseID)
 }
 
 // --- node side: NodeService/Attach ----------------------------------------
@@ -366,6 +407,16 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			if !s.suspends.deliver(m.SuspendComplete) {
 				go s.reconcileLateSuspend(context.WithoutCancel(ctx), m.SuspendComplete)
 			}
+		case *nodev1.NodeMessage_ForkSameNodeComplete:
+			s.deliverForkSameNodeComplete(m.ForkSameNodeComplete)
+		case *nodev1.NodeMessage_ForkSourceRestored:
+			s.deliverForkSourceRestored(m.ForkSourceRestored)
+		case *nodev1.NodeMessage_ForkTurnBoundaryComplete:
+			s.deliverForkTurnBoundaryComplete(m.ForkTurnBoundaryComplete)
+		case *nodev1.NodeMessage_UnpauseIfPausedComplete:
+			s.deliverUnpauseIfPausedComplete(m.UnpauseIfPausedComplete)
+		case *nodev1.NodeMessage_FailedForkCleanupComplete:
+			s.deliverFailedForkCleanupComplete(m.FailedForkCleanupComplete)
 		case *nodev1.NodeMessage_SuspendProgress:
 			// Route incremental suspend progress to the in-flight SuspendSpawn waiter so the CP
 			// stall detector resets its timer (sp-u53.7.2). Stale-gen or unmatched signals are dropped.
@@ -440,6 +491,17 @@ func (s *Server) reconcileInventory(ctx context.Context, nodeID string, sender r
 			// the transition. A read, no claim taken (spec §5).
 			sp, spErr := s.st.Spawns().Get(ctx, c.SpawnID)
 			if spErr != nil {
+				continue
+			}
+			if sp.Status == store.Forking {
+				s.rt.Drop(c.SpawnID)
+				if _, err := s.st.Spawns().MarkForkingLost(ctx, c.SpawnID, sp.StatusSeq); errors.Is(err, store.ErrConflict) {
+					continue
+				} else if err != nil {
+					log.Printf("node %s inventory: mark forking spawn %s lost: %v", nodeID, c.SpawnID, err)
+					continue
+				}
+				log.Printf("node %s inventory: forking spawn %s not reported -> error", nodeID, c.SpawnID)
 				continue
 			}
 			if sp.Status == store.Suspending || sp.Status == store.Resuming {

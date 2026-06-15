@@ -37,6 +37,12 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 //
 // The reconciler adds only a bounded per-spawn give-up clock (in memory) on top of that.
 func (s *Server) reconcileTick(ctx context.Context) {
+	if err := s.recoverForkingSources(ctx, s.forkPauseController()); err != nil {
+		log.Printf("reconcile: recover forking sources: %v", err)
+	}
+	if err := s.sweepFailedForks(ctx, s.failedForkResources); err != nil {
+		log.Printf("reconcile: sweep failed forks: %v", err)
+	}
 	rows, err := s.st.Spawns().ListUnappliedModel(ctx)
 	if err != nil {
 		log.Printf("reconcile: list unapplied: %v", err)

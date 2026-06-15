@@ -40,6 +40,15 @@ func (c *capSender) firstStart() *nodev1.StartSpawn {
 	return nil
 }
 
+func (c *capSender) lastCPMessage() *nodev1.CPMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.sent) == 0 {
+		return nil
+	}
+	return c.sent[len(c.sent)-1]
+}
+
 // starts returns every StartSpawn this sender has been asked to deliver, in send order.
 func (c *capSender) starts() []*nodev1.StartSpawn {
 	c.mu.Lock()

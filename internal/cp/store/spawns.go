@@ -576,6 +576,9 @@ func (r *spawnRepo) TransitionForkingRecovered(ctx context.Context, id, leaseID 
 	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
 		Set("status = ?", Active).
 		Set("fork_capture_deadline = NULL").
+		Set("claim_holder = NULL").
+		Set("claim_lease_id = NULL").
+		Set("claim_deadline = NULL").
 		Set("status_seq = status_seq + 1").
 		Where("id = ?", id).
 		Where("status = ?", Forking).
@@ -590,6 +593,39 @@ func (r *spawnRepo) TransitionForkingRecovered(ctx context.Context, id, leaseID 
 		return 0, ErrConflict
 	}
 	return expectedSeq + 1, nil
+}
+
+func (r *spawnRepo) MarkForkingLost(ctx context.Context, id string, expectedSeq int64) (int64, error) {
+	var newSeq int64
+	err := r.withTx(ctx, func(tx *spawnRepo) error {
+		res, err := tx.db.NewUpdate().Model((*Spawn)(nil)).
+			Set("status = ?", Errored).
+			Set("fork_capture_deadline = NULL").
+			Set("claim_holder = NULL").
+			Set("claim_lease_id = NULL").
+			Set("claim_deadline = NULL").
+			Set("status_seq = status_seq + 1").
+			Where("id = ?", id).
+			Where("status = ?", Forking).
+			Where("status_seq = ?", expectedSeq).
+			Exec(ctx)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return ErrConflict
+		}
+		ts, err := tx.lastUsedTS(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := tx.endLiveContainer(ctx, id, PhaseLost, ts); err != nil {
+			return err
+		}
+		newSeq = expectedSeq + 1
+		return nil
+	})
+	return newSeq, err
 }
 
 // ListStranded returns spawns in transient statuses whose claim is absent or expired (nowTS is a
@@ -645,7 +681,7 @@ func (r *spawnRepo) withTx(ctx context.Context, fn func(tx *spawnRepo) error) er
 }
 
 func (r *spawnRepo) markDeletedClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, ts int64) (int64, error) {
-	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+	q := r.db.NewUpdate().Model((*Spawn)(nil)).
 		Set("status = ?", Deleted).
 		Set("deleted_at = ?", ts).
 		Set("fork_capture_deadline = NULL").
@@ -655,9 +691,13 @@ func (r *spawnRepo) markDeletedClaimed(ctx context.Context, id, leaseID string, 
 		Set("status_seq = status_seq + 1").
 		Where("id = ?", id).
 		Where("status_seq = ?", expectedSeq).
-		Where("claim_lease_id = ?", leaseID).
-		Where("? = (SELECT generation FROM spawn_containers WHERE spawn_id = id AND ended_at IS NULL)", expectedGen).
-		Exec(ctx)
+		Where("claim_lease_id = ?", leaseID)
+	if expectedGen == 0 {
+		q = q.Where("NOT EXISTS (SELECT 1 FROM spawn_containers WHERE spawn_id = id AND ended_at IS NULL)")
+	} else {
+		q = q.Where("? = (SELECT generation FROM spawn_containers WHERE spawn_id = id AND ended_at IS NULL)", expectedGen)
+	}
+	res, err := q.Exec(ctx)
 	if err != nil {
 		return 0, err
 	}

@@ -2,6 +2,9 @@ package cp
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"strings"
@@ -11,16 +14,19 @@ import (
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
+	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/store"
+	"spawnery/internal/intent"
 )
 
 type recordingForkMaterializer struct {
-	nodeID string
-	err    error
-	calls  []forkMaterializeRequest
+	nodeID     string
+	rootfsPins []store.RootfsArtifactPin
+	err        error
+	calls      []forkMaterializeRequest
 }
 
 func (r *recordingForkMaterializer) MaterializeFork(ctx context.Context, req forkMaterializeRequest) (forkMaterializeResult, error) {
@@ -29,13 +35,65 @@ func (r *recordingForkMaterializer) MaterializeFork(ctx context.Context, req for
 	if r.err != nil {
 		return forkMaterializeResult{}, r.err
 	}
-	return forkMaterializeResult{NodeID: r.nodeID}, nil
+	return forkMaterializeResult{NodeID: r.nodeID, RootfsPins: r.rootfsPins}, nil
+}
+
+func (r *recordingForkMaterializer) WaitForForkTurnBoundary(context.Context, forkMaterializeRequest) error {
+	return nil
+}
+
+type transferSetErrorStore struct {
+	store.Store
+	setTargetErr       error
+	setActiveStatusErr error
+}
+
+func (s transferSetErrorStore) TransferSets() store.TransferSetRepo {
+	return transferSetPostActiveErrorRepo{
+		TransferSetRepo:    s.Store.TransferSets(),
+		setTargetErr:       s.setTargetErr,
+		setActiveStatusErr: s.setActiveStatusErr,
+	}
+}
+
+func (s transferSetErrorStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(transferSetErrorStore{
+			Store:              tx,
+			setTargetErr:       s.setTargetErr,
+			setActiveStatusErr: s.setActiveStatusErr,
+		})
+	})
+}
+
+type transferSetPostActiveErrorRepo struct {
+	store.TransferSetRepo
+	setTargetErr       error
+	setActiveStatusErr error
+}
+
+func (r transferSetPostActiveErrorRepo) SetTargetNode(ctx context.Context, id string, targetNodeID string, updatedAt int64) error {
+	if r.setTargetErr != nil {
+		return r.setTargetErr
+	}
+	return r.TransferSetRepo.SetTargetNode(ctx, id, targetNodeID, updatedAt)
+}
+
+func (r transferSetPostActiveErrorRepo) SetStatus(ctx context.Context, id string, status store.TransferSetStatus, updatedAt int64) error {
+	if status == store.TransferSetActive && r.setActiveStatusErr != nil {
+		return r.setActiveStatusErr
+	}
+	return r.TransferSetRepo.SetStatus(ctx, id, status, updatedAt)
 }
 
 type forkMaterializerFunc func(context.Context, forkMaterializeRequest) (forkMaterializeResult, error)
 
 func (f forkMaterializerFunc) MaterializeFork(ctx context.Context, req forkMaterializeRequest) (forkMaterializeResult, error) {
 	return f(ctx, req)
+}
+
+func (f forkMaterializerFunc) WaitForForkTurnBoundary(context.Context, forkMaterializeRequest) error {
+	return nil
 }
 
 type staticForkFootprint int64
@@ -88,22 +146,213 @@ func seedForkSource(t *testing.T, s *Server, reg *registry.Registry, rt *router.
 	}); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
+	nodeSender := sender
+	if sender != nil {
+		nodeSender = autoUnpauseSender{s: s, inner: sender}
+	}
 	reg.Add(&registry.Node{
-		ID: nodeID, Sender: sender, Max: 4, Free: 4, Class: "cloud",
+		ID: nodeID, Sender: nodeSender, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
 	})
-	rt.Bind(id, nodeID, sender)
+	rt.Bind(id, nodeID, nodeSender)
+}
+
+type autoUnpauseSender struct {
+	s     *Server
+	inner registry.NodeSender
+}
+
+func (a autoUnpauseSender) Send(m *nodev1.CPMessage) error {
+	if err := a.inner.Send(m); err != nil {
+		return err
+	}
+	if cmd := m.GetUnpauseIfPaused(); cmd != nil {
+		a.s.deliverUnpauseIfPausedComplete(&nodev1.UnpauseIfPausedComplete{
+			SpawnId:    cmd.GetSpawnId(),
+			Generation: cmd.GetGeneration(),
+		})
+	}
+	return nil
+}
+
+type turnBoundaryHookSender struct {
+	capSender
+	s    *Server
+	hook func(*nodev1.ForkTurnBoundary)
+}
+
+func (h *turnBoundaryHookSender) Send(m *nodev1.CPMessage) error {
+	if err := h.capSender.Send(m); err != nil {
+		return err
+	}
+	if cmd := m.GetForkTurnBoundary(); cmd != nil {
+		if h.hook != nil {
+			h.hook(cmd)
+		}
+		h.s.deliverForkTurnBoundaryComplete(&nodev1.ForkTurnBoundaryComplete{
+			SourceSpawnId:    cmd.GetSourceSpawnId(),
+			SourceGeneration: cmd.GetSourceGeneration(),
+			TransferSetId:    cmd.GetTransferSetId(),
+		})
+	}
+	return nil
+}
+
+type blockingStartSender struct {
+	capSender
+	s       *Server
+	reached chan *nodev1.StartSpawn
+	unblock chan struct{}
+}
+
+func (b *blockingStartSender) Send(m *nodev1.CPMessage) error {
+	if err := b.capSender.Send(m); err != nil {
+		return err
+	}
+	if st := m.GetStart(); st != nil {
+		select {
+		case b.reached <- st:
+		default:
+		}
+		<-b.unblock
+		b.s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
+	}
+	return nil
+}
+
+type blockingSameNodeForkSender struct {
+	capSender
+	s              *Server
+	sourceRestored chan struct{}
+	completeFork   chan struct{}
+	finalDelivered chan bool
+}
+
+func (b *blockingSameNodeForkSender) Send(m *nodev1.CPMessage) error {
+	if err := b.capSender.Send(m); err != nil {
+		return err
+	}
+	if cmd := m.GetForkTurnBoundary(); cmd != nil {
+		b.s.deliverForkTurnBoundaryComplete(&nodev1.ForkTurnBoundaryComplete{
+			SourceSpawnId:    cmd.GetSourceSpawnId(),
+			SourceGeneration: cmd.GetSourceGeneration(),
+			TransferSetId:    cmd.GetTransferSetId(),
+		})
+	}
+	if cmd := m.GetForkSameNode(); cmd != nil {
+		b.s.deliverForkSourceRestored(&nodev1.ForkSourceRestored{
+			SourceSpawnId:    cmd.GetSourceSpawnId(),
+			SourceGeneration: cmd.GetSourceGeneration(),
+			TransferSetId:    cmd.GetTransferSetId(),
+		})
+		close(b.sourceRestored)
+		go func() {
+			<-b.completeFork
+			delivered := b.s.deliverForkSameNodeComplete(&nodev1.ForkSameNodeComplete{
+				SourceSpawnId: cmd.GetSourceSpawnId(),
+				ForkSpawnId:   cmd.GetForkSpawnId(),
+				TransferSetId: cmd.GetTransferSetId(),
+				NodeId:        "node-1",
+				Mounts:        []*nodev1.MountMarker{{Name: "main", Marker: "fork-main"}},
+			})
+			select {
+			case b.finalDelivered <- delivered:
+			default:
+			}
+		}()
+	}
+	return nil
+}
+
+type blockingTurnBoundarySender struct {
+	capSender
+	s       *Server
+	reached chan *nodev1.ForkTurnBoundary
+	unblock chan struct{}
+}
+
+func (b *blockingTurnBoundarySender) Send(m *nodev1.CPMessage) error {
+	if err := b.capSender.Send(m); err != nil {
+		return err
+	}
+	if cmd := m.GetForkTurnBoundary(); cmd != nil {
+		select {
+		case b.reached <- cmd:
+		default:
+		}
+		<-b.unblock
+		b.s.deliverForkTurnBoundaryComplete(&nodev1.ForkTurnBoundaryComplete{
+			SourceSpawnId:    cmd.GetSourceSpawnId(),
+			SourceGeneration: cmd.GetSourceGeneration(),
+			TransferSetId:    cmd.GetTransferSetId(),
+		})
+	}
+	return nil
+}
+
+type blockingBoundaryMaterializer struct {
+	nodeID  string
+	reached chan forkMaterializeRequest
+	unblock chan struct{}
+}
+
+func (b *blockingBoundaryMaterializer) WaitForForkTurnBoundary(ctx context.Context, req forkMaterializeRequest) error {
+	select {
+	case b.reached <- req:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-b.unblock:
+		return nil
+	}
+}
+
+func (b *blockingBoundaryMaterializer) MaterializeFork(context.Context, forkMaterializeRequest) (forkMaterializeResult, error) {
+	return forkMaterializeResult{NodeID: b.nodeID}, nil
+}
+
+func sawUnpause(sender *capSender, spawnID string) bool {
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	for _, msg := range sender.sent {
+		if cmd := msg.GetUnpauseIfPaused(); cmd != nil && cmd.GetSpawnId() == spawnID {
+			return true
+		}
+	}
+	return false
+}
+
+func sawForkSameNode(sender *capSender) bool {
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	for _, msg := range sender.sent {
+		if msg.GetForkSameNode() != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	s.now = func() time.Time { return time.Unix(1234, 0) }
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	targetSender := &capSender{}
+	stopAck := goAckStarts(s, targetSender)
+	defer stopAck()
 	reg.Add(&registry.Node{
-		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
+		ID: "node-2", Sender: targetSender, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
 	})
-	mat := &recordingForkMaterializer{nodeID: "node-2"}
+	mat := &recordingForkMaterializer{nodeID: "node-2", rootfsPins: []store.RootfsArtifactPin{{
+		ArtifactID:      "rootfs-fork-gen1",
+		Generation:      1,
+		Sequence:        1,
+		BaseImageDigest: "sha256:base",
+		Format:          "oci_layout",
+	}}}
 	s.forkMaterializer = mat
 	s.forkFootprintEstimator = staticForkFootprint(100)
 
@@ -150,6 +399,17 @@ func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
 	forkLive, ok, err := s.st.Spawns().LiveContainer(ctx, resp.Msg.ForkSpawnId)
 	if err != nil || !ok || forkLive.NodeID != "node-2" || forkLive.Generation != 1 {
 		t.Fatalf("fork live = %+v ok=%v err=%v", forkLive, ok, err)
+	}
+	start := targetSender.firstStart()
+	if start == nil {
+		t.Fatal("fork materialization must start the fork pod")
+	}
+	if start.GetSpawnId() != resp.Msg.ForkSpawnId || start.GetGeneration() != 1 {
+		t.Fatalf("fork StartSpawn id/gen = %s/%d, want %s/1", start.GetSpawnId(), start.GetGeneration(), resp.Msg.ForkSpawnId)
+	}
+	if start.GetRootfsSourceGeneration() != 1 || len(start.GetRootfsArtifacts()) != 1 ||
+		start.GetRootfsArtifacts()[0].GetArtifactId() != "rootfs-fork-gen1" {
+		t.Fatalf("fork StartSpawn rootfs restore = gen %d artifacts %+v", start.GetRootfsSourceGeneration(), start.GetRootfsArtifacts())
 	}
 	mounts, err := s.st.Spawns().GetMounts(ctx, resp.Msg.ForkSpawnId)
 	if err != nil || len(mounts) != 1 || mounts[0].Name != "main" || mounts[0].SpawnID != resp.Msg.ForkSpawnId {
@@ -200,9 +460,38 @@ func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
 	}
 }
 
+func TestForkSpawnReleasesTurnBoundaryWhenSetForkingFails(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	sourceSender := &turnBoundaryHookSender{s: s}
+	sourceSender.hook = func(cmd *nodev1.ForkTurnBoundary) {
+		if err := s.st.Spawns().SetSuspending(context.Background(), cmd.GetSourceSpawnId(), int64(cmd.GetSourceGeneration())); err != nil {
+			t.Errorf("force source out of Active after turn-boundary: %v", err)
+		}
+	}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
+
+	_, err := s.ForkSpawn(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.ForkSpawnRequest{
+		SpawnId: "sp-source",
+	}))
+	if err == nil {
+		t.Fatal("ForkSpawn should fail after source leaves Active before SetForking")
+	}
+	if sawForkSameNode(&sourceSender.capSender) {
+		t.Fatal("ForkSameNode must not be sent after SetForking fails")
+	}
+	if msg := waitForReleaseForkTurnBoundaryCPMessage(t, &sourceSender.capSender); msg.GetSourceSpawnId() != "sp-source" ||
+		msg.GetSourceGeneration() != 1 || msg.GetTransferSetId() == "" {
+		t.Fatalf("ReleaseForkTurnBoundary = %+v", msg)
+	}
+}
+
 func TestForkSpawnDefaultsToSameNode(t *testing.T) {
 	s, reg, rt := newTestServer(t)
-	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+	stopAck := goAckStarts(s, sender)
+	defer stopAck()
 	mat := &recordingForkMaterializer{nodeID: "node-1"}
 	s.forkMaterializer = mat
 	s.forkFootprintEstimator = staticForkFootprint(100)
@@ -218,11 +507,195 @@ func TestForkSpawnDefaultsToSameNode(t *testing.T) {
 	}
 }
 
+func TestForkSpawnSameNodeStartsFromLocalForkDeltaWithRootfsMetadata(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	sender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+	stopAck := goAckStarts(s, sender)
+	defer stopAck()
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	s.forkMaterializer = &recordingForkMaterializer{nodeID: "node-1", rootfsPins: []store.RootfsArtifactPin{{
+		ArtifactID:      "rootfs-fork-gen1",
+		Generation:      1,
+		Sequence:        1,
+		BaseImageDigest: "sha256:base",
+		Format:          "oci_layout",
+	}}}
+
+	resp, err := s.ForkSpawn(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.ForkSpawnRequest{
+		SpawnId: "sp-source",
+	}))
+	if err != nil {
+		t.Fatalf("ForkSpawn: %v", err)
+	}
+	start := sender.firstStart()
+	if start == nil || start.GetSpawnId() != resp.Msg.ForkSpawnId {
+		t.Fatalf("same-node fork StartSpawn = %+v, want fork %s", start, resp.Msg.ForkSpawnId)
+	}
+	if start.GetRootfsSourceGeneration() != 1 || len(start.GetRootfsArtifacts()) != 1 ||
+		start.GetRootfsArtifacts()[0].GetArtifactId() != "rootfs-fork-gen1" {
+		t.Fatalf("same-node fork StartSpawn must carry fork rootfs metadata, gen=%d artifacts=%+v",
+			start.GetRootfsSourceGeneration(), start.GetRootfsArtifacts())
+	}
+	if !start.GetRootfsArtifactsLocalOnly() {
+		t.Fatal("same-node fork StartSpawn.RootfsArtifactsLocalOnly = false, want true")
+	}
+	ts, err := s.st.TransferSets().Get(context.Background(), resp.Msg.TransferSetId)
+	if err != nil {
+		t.Fatalf("Get transfer set: %v", err)
+	}
+	if len(ts.RootfsArtifactPins) != 1 || ts.RootfsArtifactPins[0].ArtifactID != "rootfs-fork-gen1" {
+		t.Fatalf("transfer set should still record fork rootfs artifact pins, got %+v", ts.RootfsArtifactPins)
+	}
+}
+
+func TestForkSpawnActivationTransferSetBookkeepingFailureUnwindsBeforeActive(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		setTargetErr       error
+		setActiveStatusErr error
+	}{
+		{name: "target-node", setTargetErr: errors.New("set target boom")},
+		{name: "active-status", setActiveStatusErr: errors.New("set active boom")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, reg, rt := newTestServer(t)
+			sender := &capSender{}
+			seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+			stopAck := goAckStarts(s, sender)
+			defer stopAck()
+			resources := &recordingForkResources{}
+			s.failedForkResources = resources
+			s.forkFootprintEstimator = staticForkFootprint(100)
+			s.forkMaterializer = &recordingForkMaterializer{nodeID: "node-1"}
+			baseStore := s.st
+			s.st = transferSetErrorStore{
+				Store:              baseStore,
+				setTargetErr:       tc.setTargetErr,
+				setActiveStatusErr: tc.setActiveStatusErr,
+			}
+
+			_, err := s.ForkSpawn(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.ForkSpawnRequest{
+				SpawnId: "sp-source",
+			}))
+			if err == nil {
+				t.Fatal("ForkSpawn should fail when activation bookkeeping cannot commit atomically")
+			}
+			start := sender.firstStart()
+			if start == nil {
+				t.Fatal("expected fork StartSpawn before activation bookkeeping failure")
+			}
+			if fork, err := baseStore.Spawns().Get(context.Background(), start.GetSpawnId()); err == nil && fork.Status == store.Active {
+				t.Fatalf("fork must not remain active after activation bookkeeping failure: %+v", fork)
+			}
+			if len(resources.ops) == 0 {
+				t.Fatal("failed-fork cleanup resources were not invoked")
+			}
+		})
+	}
+}
+
+func TestForkSpawnIntentEnabledSignsForkStartViaSourcePendingIntent(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	s.SetIntentEnabled(true)
+	s.pendingIntents.ttl = 5 * time.Second
+	sender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+	stopAck := goAckStarts(s, sender)
+	defer stopAck()
+	s.forkMaterializer = &recordingForkMaterializer{nodeID: "node-1"}
+	s.forkFootprintEstimator = staticForkFootprint(100)
+
+	errCh := make(chan error, 1)
+	sessionKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	goSubmitIntent(context.Background(), s, "sp-source", "alice", sessionKey, errCh)
+
+	resp, err := s.ForkSpawn(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.ForkSpawnRequest{
+		SpawnId: "sp-source",
+	}))
+	if err != nil {
+		t.Fatalf("ForkSpawn: %v", err)
+	}
+	select {
+	case submitErr := <-errCh:
+		if submitErr != nil {
+			t.Fatalf("SubmitIntent: %v", submitErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SubmitIntent did not complete")
+	}
+
+	start := sender.firstStart()
+	if start == nil || start.GetSpawnId() != resp.Msg.ForkSpawnId {
+		t.Fatalf("fork StartSpawn = %+v, response=%+v", start, resp.Msg)
+	}
+	if start.GetAuth() == nil || start.GetAuth().GetIntent() == nil {
+		t.Fatalf("fork StartSpawn auth must be non-nil in intent mode: %+v", start)
+	}
+	body, err := intent.ParseBody(start.GetAuth().GetIntent().GetBody())
+	if err != nil {
+		t.Fatalf("parse signed fork intent: %v", err)
+	}
+	if body.GetSpawnId() != resp.Msg.ForkSpawnId || body.GetOp() != string(intent.OpForkSpawn) {
+		t.Fatalf("signed fork intent body spawn/op = %q/%q, want %q/%q",
+			body.GetSpawnId(), body.GetOp(), resp.Msg.ForkSpawnId, intent.OpForkSpawn)
+	}
+	if _, ready := s.pendingIntents.get("sp-source"); ready {
+		t.Fatal("source-keyed fork pending intent must be cleaned up after start")
+	}
+}
+
+func TestForkSpawnMarksSourceForkingOnlyDuringMaterialization(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	sender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+	stopAck := goAckStarts(s, sender)
+	defer stopAck()
+	s.forkFootprintEstimator = staticForkFootprint(100)
+
+	seenForking := false
+	s.forkMaterializer = forkMaterializerFunc(func(ctx context.Context, req forkMaterializeRequest) (forkMaterializeResult, error) {
+		sp, err := s.st.Spawns().Get(ctx, req.SourceSpawn.ID)
+		if err != nil {
+			return forkMaterializeResult{}, err
+		}
+		if sp.Status != store.Forking {
+			return forkMaterializeResult{}, fmt.Errorf("source status during materialization = %s, want forking", sp.Status)
+		}
+		if sp.ForkCaptureDeadline == nil {
+			return forkMaterializeResult{}, fmt.Errorf("source fork_capture_deadline must be set")
+		}
+		seenForking = true
+		return forkMaterializeResult{NodeID: req.TargetNodeID}, nil
+	})
+
+	resp, err := s.ForkSpawn(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source"}))
+	if err != nil {
+		t.Fatalf("ForkSpawn: %v", err)
+	}
+	if resp.Msg.ForkSpawnId == "" || !seenForking {
+		t.Fatalf("fork response=%+v seenForking=%v", resp.Msg, seenForking)
+	}
+	source, err := s.st.Spawns().Get(context.Background(), "sp-source")
+	if err != nil {
+		t.Fatalf("Get source: %v", err)
+	}
+	if source.Status != store.Active || source.ForkCaptureDeadline != nil {
+		t.Fatalf("source after fork = status %s deadline %v, want active nil", source.Status, source.ForkCaptureDeadline)
+	}
+}
+
 func TestForkSpawnClassTargetPicksEligibleNode(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	targetSender := &capSender{}
+	stopAck := goAckStarts(s, targetSender)
+	defer stopAck()
 	reg.Add(&registry.Node{
-		ID: "cloud-1", Sender: &capSender{}, Max: 9, Free: 9, Class: "cloud",
+		ID: "cloud-1", Sender: targetSender, Max: 9, Free: 9, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
 	})
 	mat := &recordingForkMaterializer{nodeID: "cloud-1"}
@@ -242,7 +715,10 @@ func TestForkSpawnClassTargetPicksEligibleNode(t *testing.T) {
 
 func TestForkSpawnFencesSourceDuringMaterialization(t *testing.T) {
 	s, reg, rt := newTestServer(t)
-	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+	stopAck := goAckStarts(s, sender)
+	defer stopAck()
 	s.forkFootprintEstimator = staticForkFootprint(100)
 
 	keyedLockAttempting := make(chan struct{})
@@ -296,6 +772,217 @@ func TestForkSpawnFencesSourceDuringMaterialization(t *testing.T) {
 		unlock()
 	case <-time.After(time.Second):
 		t.Fatal("source keyed lock probe did not acquire after ForkSpawn returned")
+	}
+}
+
+func TestForkSpawnDoesNotClaimSourceWhileWaitingForTurnBoundary(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	sourceSender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
+	stopAck := goAckStarts(s, sourceSender)
+	defer stopAck()
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	mat := &blockingBoundaryMaterializer{nodeID: "node-1", reached: make(chan forkMaterializeRequest, 1), unblock: make(chan struct{})}
+	s.forkMaterializer = mat
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source"}))
+		done <- err
+	}()
+	select {
+	case <-mat.reached:
+	case <-time.After(time.Second):
+		t.Fatal("fork did not reach turn-boundary wait")
+	}
+	defer func() {
+		select {
+		case <-mat.unblock:
+		default:
+			close(mat.unblock)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("ForkSpawn after turn-boundary release: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("ForkSpawn did not finish after releasing turn boundary")
+		}
+	}()
+
+	source, err := s.st.Spawns().Get(context.Background(), "sp-source")
+	if err != nil {
+		t.Fatalf("Get source: %v", err)
+	}
+	leaseID := "source-turn-boundary-probe"
+	if _, err := s.st.Spawns().Acquire(context.Background(), "sp-source", "competitor", leaseID,
+		time.Now().UnixNano(), time.Now().Add(time.Minute).UnixNano(), source.StatusSeq); err != nil {
+		t.Fatalf("source DB claim must not be held while fork waits for turn boundary: %v", err)
+	}
+	if err := s.st.Spawns().Release(context.Background(), "sp-source", leaseID); err != nil {
+		t.Fatalf("release source turn-boundary probe claim: %v", err)
+	}
+
+	lockAcquired := make(chan func(), 1)
+	go func() {
+		lockAcquired <- s.locks.Lock("sp-source")
+	}()
+	select {
+	case unlock := <-lockAcquired:
+		unlock()
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("source keyed lock must not be held while fork waits for turn boundary")
+	}
+}
+
+func TestForkSpawnReleasesSourceClaimAndLockBeforeForkStandup(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	sourceSender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
+	targetSender := &blockingStartSender{s: s, reached: make(chan *nodev1.StartSpawn, 1), unblock: make(chan struct{})}
+	reg.Add(&registry.Node{
+		ID: "node-2", Sender: targetSender, Max: 4, Free: 4, Class: "cloud",
+		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
+	})
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	s.forkMaterializer = &recordingForkMaterializer{nodeID: "node-2"}
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source", TargetNodeId: "node-2"}))
+		done <- err
+	}()
+	var start *nodev1.StartSpawn
+	select {
+	case start = <-targetSender.reached:
+	case <-time.After(time.Second):
+		t.Fatal("fork standup did not reach StartSpawn")
+	}
+	defer func() {
+		select {
+		case <-targetSender.unblock:
+		default:
+			close(targetSender.unblock)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("ForkSpawn after unblock: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("ForkSpawn did not finish after unblocking StartSpawn")
+		}
+	}()
+
+	source, err := s.st.Spawns().Get(context.Background(), "sp-source")
+	if err != nil {
+		t.Fatalf("Get source: %v", err)
+	}
+	if source.Status != store.Active {
+		t.Fatalf("source status while fork standup is blocked = %s, want Active", source.Status)
+	}
+	leaseID := "source-after-capture-probe"
+	if _, err := s.st.Spawns().Acquire(context.Background(), "sp-source", "competitor", leaseID,
+		time.Now().UnixNano(), time.Now().Add(time.Minute).UnixNano(), source.StatusSeq); err != nil {
+		t.Fatalf("source DB claim must be released before fork standup completes; StartSpawn=%s err=%v", start.GetSpawnId(), err)
+	}
+	defer s.st.Spawns().Release(context.Background(), "sp-source", leaseID)
+
+	lockAcquired := make(chan func(), 1)
+	go func() {
+		lockAcquired <- s.locks.Lock("sp-source")
+	}()
+	select {
+	case unlock := <-lockAcquired:
+		unlock()
+	case <-time.After(50 * time.Millisecond):
+		t.Fatalf("source keyed lock must be released before fork standup completes; StartSpawn=%s", start.GetSpawnId())
+	}
+}
+
+func TestForkSpawnRestoresSourceBeforeSameNodeSeedCompletes(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	sourceSender := &blockingSameNodeForkSender{
+		s:              s,
+		sourceRestored: make(chan struct{}),
+		completeFork:   make(chan struct{}),
+		finalDelivered: make(chan bool, 1),
+	}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
+	stopAck := goAckStarts(s, &sourceSender.capSender)
+	defer stopAck()
+	s.forkFootprintEstimator = staticForkFootprint(100)
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source"}))
+		done <- err
+	}()
+	select {
+	case <-sourceSender.sourceRestored:
+	case <-time.After(time.Second):
+		t.Fatal("same-node fork did not report source restored")
+	}
+	defer func() {
+		select {
+		case <-sourceSender.completeFork:
+		default:
+			close(sourceSender.completeFork)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("ForkSpawn after same-node seed completion: %v", err)
+			}
+		case <-time.After(time.Second):
+			var delivered any = "missing"
+			select {
+			case delivered = <-sourceSender.finalDelivered:
+			default:
+			}
+			t.Fatalf("ForkSpawn did not finish after same-node seed completion; starts=%d finalDelivered=%v", len(sourceSender.starts()), delivered)
+		}
+	}()
+
+	var source store.Spawn
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		source, err = s.st.Spawns().Get(context.Background(), "sp-source")
+		if err == nil && source.Status == store.Active {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if source.Status != store.Active {
+		t.Fatalf("source status while same-node seed is still blocked = %s, want Active", source.Status)
+	}
+	leaseID := "source-restored-before-seed-probe"
+	if _, err := s.st.Spawns().Acquire(context.Background(), "sp-source", "competitor", leaseID,
+		time.Now().UnixNano(), time.Now().Add(time.Minute).UnixNano(), source.StatusSeq); err != nil {
+		t.Fatalf("source DB claim must be released before same-node seed completes: %v", err)
+	}
+	if err := s.st.Spawns().Release(context.Background(), "sp-source", leaseID); err != nil {
+		t.Fatalf("release source seed probe claim: %v", err)
+	}
+	if msg := waitForReleaseForkTurnBoundaryCPMessage(t, &sourceSender.capSender); msg.GetSourceSpawnId() != "sp-source" ||
+		msg.GetSourceGeneration() != 1 || msg.GetTransferSetId() == "" {
+		t.Fatalf("ReleaseForkTurnBoundary before seed completion = %+v", msg)
+	}
+
+	lockAcquired := make(chan func(), 1)
+	go func() {
+		lockAcquired <- s.locks.Lock("sp-source")
+	}()
+	select {
+	case unlock := <-lockAcquired:
+		unlock()
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("source keyed lock must be released before same-node seed completes")
 	}
 }
 
@@ -476,7 +1163,8 @@ func TestForkSpawnRechecksDiskBeforeMaterialization(t *testing.T) {
 
 func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 	s, reg, rt := newTestServer(t)
-	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sourceSender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
 	reg.Add(&registry.Node{
 		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
@@ -484,6 +1172,7 @@ func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 	res := &recordingForkResources{}
 	s.failedForkResources = res
 	s.forkFootprintEstimator = staticForkFootprint(100)
+	s.forkMaterializer = unimplementedForkMaterializer{}
 
 	ctx := auth.WithOwner(context.Background(), "alice")
 	_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source", TargetNodeId: "node-2"}))
@@ -501,7 +1190,10 @@ func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 	if err != nil || source.Status != store.Active {
 		t.Fatalf("source after failed fork = %+v err=%v", source, err)
 	}
-	wantPrefixes := []string{"revoke-key:", "empty-bucket:spawnery-spawn-", "drop-bucket:spawnery-spawn-", "delete-row:"}
+	if !sawUnpause(sourceSender, "sp-source") {
+		t.Fatal("failed fork cleanup must unpause source before restoring it active")
+	}
+	wantPrefixes := []string{"revoke-key:", "empty-bucket:spawnery-spawn-", "drop-bucket:spawnery-spawn-", "release-delta:", "delete-row:"}
 	if len(res.ops) != len(wantPrefixes) {
 		t.Fatalf("unwind ops=%v want prefixes %v", res.ops, wantPrefixes)
 	}
@@ -512,14 +1204,45 @@ func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 	}
 }
 
+func TestForkSpawnMaterializerFailureLeavesSourceForkingWhenUnpauseUnavailable(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", nil)
+	reg.Add(&registry.Node{
+		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
+		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
+	})
+	res := &recordingForkResources{}
+	s.failedForkResources = res
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	s.forkMaterializer = unimplementedForkMaterializer{}
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source", TargetNodeId: "node-2"}))
+	if connect.CodeOf(err) != connect.CodeUnimplemented {
+		t.Fatalf("default materializer should fail unimplemented, got %v", err)
+	}
+	source, err := s.st.Spawns().Get(ctx, "sp-source")
+	if err != nil {
+		t.Fatalf("Get source: %v", err)
+	}
+	if source.Status != store.Forking {
+		t.Fatalf("source status=%s want Forking after failed unpause", source.Status)
+	}
+	if source.ForkCaptureDeadline == nil {
+		t.Fatal("fork_capture_deadline must remain set for recovery")
+	}
+}
+
 func TestForkSpawnMaterializerFailureWithoutResourcesLeavesFailedForkForRetry(t *testing.T) {
 	s, reg, rt := newTestServer(t)
+	s.failedForkResources = nil
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
 	reg.Add(&registry.Node{
 		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
 	})
 	s.forkFootprintEstimator = staticForkFootprint(100)
+	s.forkMaterializer = unimplementedForkMaterializer{}
 
 	ctx := auth.WithOwner(context.Background(), "alice")
 	_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source", TargetNodeId: "node-2"}))

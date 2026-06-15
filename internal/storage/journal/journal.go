@@ -149,6 +149,9 @@ type SnapshotKind string
 const (
 	// SnapshotContinuous is a watcher/periodic-driven snapshot during a live spawn.
 	SnapshotContinuous SnapshotKind = "continuous"
+	// SnapshotWarm is an awaited, non-suspending snapshot used to shrink a later
+	// final snapshot's loss window while the spawn remains live.
+	SnapshotWarm SnapshotKind = "warm"
 	// SnapshotFinal is the suspend-barrier final snapshot.
 	SnapshotFinal SnapshotKind = "final"
 )
@@ -179,9 +182,18 @@ type JournalManager interface {
 	// that are not journaled are absent from the result.
 	FinalSnapshot(ctx context.Context, spawnID string, gen uint64, mounts []Mount) (map[string]ManifestID, error)
 
+	// WarmSnapshot drains pending work for each journaled mount, takes one
+	// immediate snapshot, and leaves the queues open for later RequestSnapshot
+	// calls. Mounts that are not journaled are absent from the result.
+	WarmSnapshot(ctx context.Context, spawnID string, gen uint64, mounts []Mount) (map[string]ManifestID, error)
+
 	// Restore restores a pinned manifest into hostDir before bind (design §3,
 	// roast C1 — explicit manifest id, never "latest").
 	Restore(ctx context.Context, spawnID, mountName string, id ManifestID, hostDir string) error
+
+	// RestoreGeneration restores a pinned manifest using the exact generation's
+	// backend/key. Production S3 callers must use this when reopening a repo.
+	RestoreGeneration(ctx context.Context, spawnID string, gen uint64, mountName string, id ManifestID, hostDir string) error
 
 	// LatestForGeneration returns the latest COMPLETE manifest for (mount,
 	// generation) — the crash fallback ONLY (design §2/§3). The primary restore

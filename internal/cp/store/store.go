@@ -132,6 +132,11 @@ type SpawnRepo interface {
 	// durable fork capture deadline while leaving claim release to the caller's follow-up Release.
 	TransitionForkingRecovered(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64) (newSeq int64, err error)
 
+	// MarkForkingLost resolves a forking source whose backing pod cannot be recovered. It CAS-es on
+	// status_seq while status is Forking, clears fork/claim metadata, and ends any live container as
+	// lost.
+	MarkForkingLost(ctx context.Context, id string, expectedSeq int64) (newSeq int64, err error)
+
 	// ListStranded returns spawns in a transient status (Suspending, and Resuming once 7.5 adds it)
 	// whose claim is absent or expired (claim_holder IS NULL OR claim_deadline < nowTS). These are
 	// candidates for recovery: the driving CP goroutine crashed and the lease was not renewed.
@@ -155,7 +160,8 @@ type SpawnRepo interface {
 
 	// MarkDeletedClaimed is the claim/lease/gen-fenced deleted transition for claimed cleanup flows.
 	// It hides the row from Get/ListByOwner, clears claim/forking metadata, and ends the live
-	// container as lost after the durable row update succeeds.
+	// container as lost after the durable row update succeeds. expectedGen=0 fences on there being no
+	// live container, for cleanup of half-created forks whose container row already ended.
 	MarkDeletedClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, ts int64) (newSeq int64, err error)
 }
 
@@ -172,6 +178,7 @@ type TransferSetRepo interface {
 	Create(ctx context.Context, ts TransferSet) error
 	Get(ctx context.Context, id string) (TransferSet, error)
 	ListFailedForks(ctx context.Context) ([]TransferSet, error)
+	ListReclaimableForks(ctx context.Context, staleRestoringBefore int64) ([]TransferSet, error)
 	SetPins(ctx context.Context, id string, sourceGeneration uint64, mountPins map[string]string, rootfsPins []RootfsArtifactPin, updatedAt int64) error
 	SetTargetNode(ctx context.Context, id string, targetNodeID string, updatedAt int64) error
 	SetStatus(ctx context.Context, id string, status TransferSetStatus, updatedAt int64) error

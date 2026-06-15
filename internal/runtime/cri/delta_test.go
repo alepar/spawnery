@@ -33,9 +33,9 @@ type fakeDeltaEngine struct {
 	releaseCalled      bool
 	closeCalled        bool
 
-	exportName    string
-	exportBytes   []byte
-	exportErr     error
+	exportName  string
+	exportBytes []byte
+	exportErr   error
 
 	importName    string
 	importBaseRef string
@@ -261,6 +261,31 @@ func TestCaptureDeltaHappyPath(t *testing.T) {
 	// Verify RemoveContainer was called.
 	if len(f.removedContainers) != 1 || f.removedContainers[0] != agentID {
 		t.Errorf("RemoveContainer: got %v, want [%s]", f.removedContainers, agentID)
+	}
+}
+
+func TestCaptureDeltaAsRejectsForkBeforeStoppingSource(t *testing.T) {
+	fakeEng := &fakeDeltaEngine{
+		captureRef:       runtime.DeltaTag("sp-fork"),
+		captureDeltaSize: 1024,
+	}
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
+
+	_, err := b.CaptureDeltaAs(context.Background(), &runtime.PodHandle{
+		AgentID: "ctr-source", SpawnID: "sp-source", BaseImageRef: "base:v1",
+	}, "sp-fork")
+	if err == nil {
+		t.Fatal("CaptureDeltaAs must reject fork capture in the CRI lane")
+	}
+	if !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("CaptureDeltaAs error = %v, want unsupported", err)
+	}
+	if len(f.stopped) != 0 || len(f.removedContainers) != 0 {
+		t.Fatalf("fork CaptureDeltaAs must not stop/remove source: stopped=%v removed=%v", f.stopped, f.removedContainers)
+	}
+	if fakeEng.captureKey != "" {
+		t.Fatalf("fork CaptureDeltaAs must not capture after rejecting: captureKey=%q", fakeEng.captureKey)
 	}
 }
 

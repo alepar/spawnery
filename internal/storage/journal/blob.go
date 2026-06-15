@@ -21,6 +21,13 @@ type BlobBackend interface {
 	Open(ctx context.Context, spawnID string, create bool) (blob.Storage, error)
 }
 
+// GenerationBackendProvider returns the blob backend for one spawn generation.
+// Production S3 implements this with GenerationKeyManager so normal snapshots,
+// fork seeds, and restores open the repo with the generation-scoped key.
+type GenerationBackendProvider interface {
+	BackendFor(ctx context.Context, spawnID string, gen uint64) (BlobBackend, error)
+}
+
 // FilesystemBackend is a Kopia filesystem-backed blob store rooted at Root,
 // one sub-directory per spawn. This is the hermetic-test + node-local-disk
 // backend: no network. (The bounded-local-disk spool of design §6 also rides
@@ -50,8 +57,5 @@ func (f *FilesystemBackend) Open(ctx context.Context, spawnID string, create boo
 //
 // The bucket-per-spawn + per-generation access-key mint/revoke fence (design §3
 // roast M1) + lazy bucket mint (design §6) is implemented by GenerationKeyManager
-// (genkey.go) over GarageAdmin (garage_admin.go): its BackendFor(spawnID, gen)
-// mints a fresh per-generation key on the spawn's bucket and returns an S3Backend
-// bound to it. Threading that minted backend through the live StartSpawn protocol
-// (CP→node) is the remaining wiring (sp-u53.5.2 follow-up); the mint/revoke fence
-// itself is proven by the garage_e2e (TestGenerationKeyFenceGarage).
+// (genkey.go) over GarageAdmin (garage_admin.go): production S3 Manager wiring
+// uses its BackendFor(spawnID, gen) on the actual snapshot/restore data path.

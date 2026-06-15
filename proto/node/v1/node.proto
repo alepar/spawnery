@@ -26,6 +26,11 @@ message NodeMessage {
     SealJournalKeyToOwnerResponse seal_journal_key_result = 9; // node -> CP: result of a SealJournalKeyToOwner request (sp-8dkp)
     SuspendProgress               suspend_progress      = 10;  // node -> CP: incremental suspend progress (sp-u53.7.2)
     ResumeProgress                resume_progress       = 11;  // node -> CP: incremental resume/start progress (sp-u53.7.2)
+    ForkSameNodeComplete          fork_same_node_complete = 12; // node -> CP: same-node fork capture/seed completion
+    ForkTurnBoundaryComplete      fork_turn_boundary_complete = 13; // node -> CP: source has no in-flight ACP turn
+    UnpauseIfPausedComplete       unpause_if_paused_complete = 14; // node -> CP: idempotent fork recovery unpause ack
+    FailedForkCleanupComplete     failed_fork_cleanup_complete = 15; // node -> CP: failed fork resource cleanup op ack
+    ForkSourceRestored            fork_source_restored = 16; // node -> CP: fork source is unpaused/restored; seed may still run
   }
 }
 message CPMessage {
@@ -41,6 +46,12 @@ message CPMessage {
     SetModel                     set_model             = 9;             // CP -> node: switch the running pod's effective model (generation-fenced)
     SecretDelivery               secret_delivery       = 10;            // CP -> node: relay owner-sealed secret ciphertext (sp-2ckv.4)
     SealJournalKeyToOwnerRequest seal_journal_key      = 11;            // CP -> node: seal node-local journal password to owner (sp-8dkp)
+    ForkSameNode                 fork_same_node        = 12;            // CP -> node: same-node fork capture/seed
+    ForkTurnBoundary             fork_turn_boundary    = 13;            // CP -> node: wait until source has no in-flight ACP turn
+    UnpauseIfPaused              unpause_if_paused     = 14;            // CP -> node: idempotent source unpause for fork recovery
+    ReleaseForkTurnBoundary      release_fork_turn_boundary = 15;       // CP -> node: cancel/release a fork turn-boundary barrier
+    FailedForkCleanup            failed_fork_cleanup   = 16;            // CP -> node: cleanup one failed fork resource step
+    CancelForkSameNode           cancel_fork_same_node = 17;            // CP -> node: cancel in-flight same-node fork capture/seed
   }
 }
 
@@ -156,6 +167,10 @@ message StartSpawn  {
   string               base_image_digest = 22;
   uint64               rootfs_source_generation = 23;
   repeated RootfsArtifact rootfs_artifacts = 24;
+  // rootfs_artifacts_local_only means rootfs_artifacts are metadata for an already-local
+  // spawnery/delta:<spawn_id> image. The node must not restore them and must fail the start
+  // if that local delta image is absent. Unset means rootfs_artifacts are restore inputs.
+  bool                 rootfs_artifacts_local_only = 25;
 }
 message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }
 message Suspend     { string spawn_id = 1; uint64 generation = 2; bool capture_rootfs_artifact = 3; }
@@ -165,6 +180,78 @@ message SuspendComplete {
   repeated MountMarker markers = 3;
   repeated RootfsArtifact rootfs_artifacts = 4;
   string error = 5; // non-empty on a fail-closed suspend gate failure; empty on success
+}
+message ForkSameNode {
+  string source_spawn_id = 1;
+  string fork_spawn_id = 2;
+  uint64 source_generation = 3;
+  uint64 target_generation = 4;
+  string transfer_set_id = 5;
+}
+message CancelForkSameNode {
+  string source_spawn_id = 1;
+  string fork_spawn_id = 2;
+  string transfer_set_id = 3;
+}
+message ForkTurnBoundary {
+  string source_spawn_id = 1;
+  uint64 source_generation = 2;
+  string transfer_set_id = 3;
+}
+message ForkTurnBoundaryComplete {
+  string source_spawn_id = 1;
+  uint64 source_generation = 2;
+  string transfer_set_id = 3;
+  string error = 4;
+}
+message ReleaseForkTurnBoundary {
+  string source_spawn_id = 1;
+  uint64 source_generation = 2;
+  string transfer_set_id = 3;
+}
+enum FailedForkCleanupOp {
+  FAILED_FORK_CLEANUP_OP_UNSPECIFIED       = 0;
+  FAILED_FORK_CLEANUP_OP_REVOKE_GENERATION = 1;
+  FAILED_FORK_CLEANUP_OP_EMPTY_BUCKET      = 2;
+  FAILED_FORK_CLEANUP_OP_DROP_BUCKET       = 3;
+  FAILED_FORK_CLEANUP_OP_RELEASE_DELTA     = 4;
+}
+message FailedForkCleanup {
+  string request_id = 1;
+  string fork_spawn_id = 2;
+  uint64 generation = 3;
+  string bucket = 4;
+  FailedForkCleanupOp op = 5;
+}
+message FailedForkCleanupComplete {
+  string request_id = 1;
+  string fork_spawn_id = 2;
+  FailedForkCleanupOp op = 3;
+  string error = 4;
+}
+message UnpauseIfPaused {
+  string spawn_id = 1;
+  uint64 generation = 2;
+}
+message UnpauseIfPausedComplete {
+  string spawn_id = 1;
+  uint64 generation = 2;
+  string error = 3;
+}
+message ForkSameNodeComplete {
+  string source_spawn_id = 1;
+  string fork_spawn_id = 2;
+  string transfer_set_id = 3;
+  repeated MountMarker mounts = 4;
+  repeated RootfsArtifact rootfs_artifacts = 5;
+  string node_id = 6;
+  string error = 7;
+}
+message ForkSourceRestored {
+  string source_spawn_id = 1;
+  uint64 source_generation = 2;
+  string transfer_set_id = 3;
+  string error = 4;
 }
 // auth (field 10): the client's session-open signed intent + aud=node access token (A4).
 // asserted_owner (field 11): CP-asserted owner for the cloud owner-binding check.

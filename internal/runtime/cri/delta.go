@@ -100,6 +100,13 @@ func (b *CRIPodBackend) EnsureImage(ctx context.Context, baseRef, deltaRef strin
 // then sanity-checks the diff produced a non-empty layer and removes the container. Returns the
 // assembled image ref ("spawnery/delta:<spawnID>").
 func (b *CRIPodBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) (string, error) {
+	return b.CaptureDeltaAs(ctx, h, h.SpawnID)
+}
+
+func (b *CRIPodBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle, targetSpawnID string) (string, error) {
+	if targetSpawnID != h.SpawnID {
+		return "", fmt.Errorf("cri source-preserving fork capture from %s as %s is unsupported", h.SpawnID, targetSpawnID)
+	}
 	eng, err := b.engine()
 	if err != nil {
 		return "", fmt.Errorf("cri delta engine: %w", err)
@@ -108,8 +115,8 @@ func (b *CRIPodBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) 
 		return "", fmt.Errorf("cri capture: no agent container id")
 	}
 
-	name := runtime.DeltaTag(h.SpawnID)
-	leaseID := deltaLeaseID(h.SpawnID)
+	name := runtime.DeltaTag(targetSpawnID)
+	leaseID := deltaLeaseID(targetSpawnID)
 
 	// Stop the container (not remove) so its snapshot is quiesced before diff.
 	if _, err := b.c.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{ContainerId: h.AgentID}); err != nil {
@@ -118,7 +125,7 @@ func (b *CRIPodBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) 
 
 	ref, deltaSize, err := eng.Capture(ctx, h.AgentID, name, h.BaseImageRef, leaseID)
 	if err != nil {
-		return "", fmt.Errorf("cri capture %s: %w", h.SpawnID, err)
+		return "", fmt.Errorf("cri capture %s as %s: %w", h.SpawnID, targetSpawnID, err)
 	}
 
 	// Diff-sanity check (distinct from the manifest reference guard in containerd.Capture):
@@ -127,7 +134,7 @@ func (b *CRIPodBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) 
 	if deltaSize <= 0 {
 		_ = eng.Release(context.WithoutCancel(ctx), name, leaseID)
 		return "", fmt.Errorf("cri capture %s: diff produced empty delta layer (size=%d)",
-			h.SpawnID, deltaSize)
+			targetSpawnID, deltaSize)
 	}
 
 	// Best-effort remove after capture is pinned. Mirrors the docker lane's best-effort Stop.
