@@ -163,6 +163,14 @@ type TransferSetRepo interface {
 	SetTransferKeyStatus(ctx context.Context, id string, status TransferKeyStatus, updatedAt int64) error
 }
 
+type SecretRepo interface {
+	Create(ctx context.Context, s Secret) error
+	Get(ctx context.Context, accountID, secretID string) (Secret, error)
+	ListByOwner(ctx context.Context, accountID string, f SecretListFilter) ([]Secret, error)
+	Put(ctx context.Context, accountID, secretID string, expectedVersion uint64, next Secret) (newVersion uint64, err error)
+	Delete(ctx context.Context, accountID, secretID string) error
+}
+
 // ProfileRepo manages the owner-scoped profile spine (Profile + ProfileEntry + ProfileSecret
 // references). All mutations are CAS-fenced via the profile's version column.
 type ProfileRepo interface {
@@ -218,6 +226,7 @@ type Store interface {
 	Spawns() SpawnRepo
 	AgentImages() AgentImageRepo
 	TransferSets() TransferSetRepo
+	Secrets() SecretRepo
 	Profiles() ProfileRepo
 	CustomizationCatalog() CustomizationCatalogRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the

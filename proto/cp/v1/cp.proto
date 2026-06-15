@@ -55,6 +55,12 @@ service SpawnService {
   rpc RemoveProfileEntry(RemoveProfileEntryRequest)     returns (RemoveProfileEntryResponse);
   rpc AddProfileSecretRef(AddProfileSecretRefRequest)   returns (AddProfileSecretRefResponse);
   rpc RemoveProfileSecretRef(RemoveProfileSecretRefRequest) returns (RemoveProfileSecretRefResponse);
+  // User secrets catalog CRUD (sp-7h6.1.1): owner-scoped sealed secret metadata + opaque envelope bytes.
+  rpc CreateSecret(CreateSecretRequest) returns (CreateSecretResponse);
+  rpc GetSecret(GetSecretRequest)       returns (GetSecretResponse);
+  rpc ListSecrets(ListSecretsRequest)   returns (ListSecretsResponse);
+  rpc PutSecret(PutSecretRequest)       returns (PutSecretResponse);
+  rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
   // Customization catalog CRUD (sp-nrzf.3.6): curated catalog entries, creator-scoped writes,
   // globally-readable list (listed=true only). Owner resolved from auth context server-side.
   rpc CreateCatalogEntry(CreateCatalogEntryRequest)     returns (CreateCatalogEntryResponse);
@@ -523,6 +529,70 @@ message AddProfileSecretRefResponse { uint64 version = 1; }
 // RemoveProfileSecretRef detaches a secret reference from the profile, CAS-fenced.
 message RemoveProfileSecretRefRequest  { string profile_id = 1; uint64 expected_version = 2; string secret_id = 3; }
 message RemoveProfileSecretRefResponse { uint64 version = 1; }
+
+// --- User secrets catalog (sp-7h6.1.1) ------------------------------------
+
+enum UserSecretType {
+  USER_SECRET_TYPE_UNSPECIFIED   = 0;
+  USER_SECRET_TYPE_GITHUB_TOKEN  = 1;
+  USER_SECRET_TYPE_INFERENCE_KEY = 2;
+  USER_SECRET_TYPE_GENERIC_KV    = 3;
+}
+
+message SecretWrite {
+  string         secret_id        = 1;
+  UserSecretType type             = 2;
+  string         name             = 3;
+  string         provider         = 4;
+  ArtifactTarget target_container = 5;
+  string         env_var_name     = 6;
+  string         dest_path        = 7;
+  uint64         deviceset_epoch  = 8;
+  bytes          envelope         = 9;
+}
+
+message Secret {
+  string         secret_id        = 1;
+  UserSecretType type             = 2;
+  string         name             = 3;
+  string         provider         = 4;
+  ArtifactTarget target_container = 5;
+  string         env_var_name     = 6;
+  string         dest_path        = 7;
+  uint64         version          = 8;
+  uint64         deviceset_epoch  = 9;
+  bytes          envelope         = 10;
+  int64          created_at       = 11;
+  int64          updated_at       = 12;
+}
+
+message SecretSummary {
+  string         secret_id        = 1;
+  UserSecretType type             = 2;
+  string         name             = 3;
+  string         provider         = 4;
+  ArtifactTarget target_container = 5;
+  string         env_var_name     = 6;
+  string         dest_path        = 7;
+  uint64         version          = 8;
+  uint64         deviceset_epoch  = 9;
+  int64          updated_at       = 10;
+}
+
+message CreateSecretRequest  { SecretWrite secret = 1; }
+message CreateSecretResponse { Secret secret = 1; }
+
+message GetSecretRequest  { string secret_id = 1; }
+message GetSecretResponse { Secret secret = 1; }
+
+message ListSecretsRequest  { uint64 deviceset_epoch_before = 1; }
+message ListSecretsResponse { repeated SecretSummary secrets = 1; }
+
+message PutSecretRequest  { SecretWrite secret = 1; uint64 expected_version = 2; }
+message PutSecretResponse { Secret secret = 1; }
+
+message DeleteSecretRequest  { string secret_id = 1; }
+message DeleteSecretResponse {}
 
 // --- Customization Catalog (sp-nrzf.3.6) -----------------------------------
 
