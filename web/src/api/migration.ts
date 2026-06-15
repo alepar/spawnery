@@ -97,6 +97,10 @@ export interface MigrateResult {
   journalKeysDelivered: number;
 }
 
+export interface OwnerSealedDeliveryResult {
+  journalKeysDelivered: number;
+}
+
 // ── RPC wrappers ──────────────────────────────────────────────────────────────
 
 /** Result of listMigrationTargets: target list + CP-computed spawn durability class. */
@@ -303,6 +307,85 @@ async function reSealToNode(
   return toBase64(sealedBytes);
 }
 
+export async function deliverOwnerSealedJournalKeys(
+  spawnId: string,
+  entries: JournalEntry[],
+  target: Pick<MigrationTarget, "nodeId" | "class">,
+  deviceKeys: DeviceKeys,
+  rootPEM: string,
+  now: Date,
+  onProgress?: (step: "verifying-node" | "resealing" | "delivering") => void,
+  revocationChecker?: RevocationChecker,
+): Promise<OwnerSealedDeliveryResult> {
+  if (entries.length === 0) {
+    return { journalKeysDelivered: 0 };
+  }
+
+  onProgress?.("verifying-node");
+  let nk: NodeKey;
+  try {
+    nk = await getSpawnNodeKey(spawnId);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`Failed to fetch node key: ${msg}`);
+  }
+
+  const sk = JSON.parse(nk.signedSubkey) as { node_id: string; not_after: string };
+  const notAfter = new Date(sk.not_after);
+  const resolvedNodeId = target.nodeId || sk.node_id;
+
+  const tenancy = (target.class === "cloud" ? "cloud" : "self-hosted") as "cloud" | "self-hosted";
+  const accountId = tenancy === "self-hosted"
+    ? (useSessionStore.getState().account?.accountId ?? "")
+    : undefined;
+  let hpkePub: Uint8Array;
+  try {
+    const verified = await verifyNodeForSealing(
+      nk.nodeCertChain,
+      rootPEM,
+      nk.signedSubkey,
+      { tenancy, accountId },
+      now,
+      revocationChecker,
+    );
+    hpkePub = verified.hpkePub;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`Node verification failed: ${msg}`);
+  }
+
+  onProgress?.("resealing");
+  const secrets: Array<{ secretId: string; targetPath: string; sealed: string }> = [];
+  try {
+    for (const entry of entries) {
+      const aad: InFlightAAD = {
+        spawnId,
+        generation: nk.generation,
+        nodeId: resolvedNodeId,
+        notAfter,
+        version: nk.generation,
+        deliveryId: crypto.randomUUID(),
+      };
+      const sealedB64 = await reSealToNode(entry.ciphertext, deviceKeys, hpkePub, aad);
+      const secretId = `journal/${entry.mount}`;
+      secrets.push({ secretId, targetPath: secretId, sealed: sealedB64 });
+    }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`Re-seal failed: ${msg}`);
+  }
+
+  onProgress?.("delivering");
+  try {
+    await deliverSecrets(spawnId, secrets);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`Key delivery failed: ${msg}`);
+  }
+
+  return { journalKeysDelivered: secrets.length };
+}
+
 // ── Full migration orchestration ──────────────────────────────────────────────
 
 /**
@@ -395,76 +478,25 @@ export async function runMigrate(
     return { resolvedNodeId, transferSetId, journalKeysDelivered: 0 };
   }
 
-  // Step 3: fetch the target node's key material and verify.
-  onProgress?.({ step: "verifying-node", resolvedNodeId });
-  let nk: NodeKey;
+  let delivered: OwnerSealedDeliveryResult;
   try {
-    nk = await getSpawnNodeKey(spawnId);
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new MigrateError(`Failed to fetch node key: ${msg}`, "delivery");
-  }
-
-  // Parse the sub-key JSON (we need not_after for the in-flight AAD).
-  const sk = JSON.parse(nk.signedSubkey) as { node_id: string; not_after: string };
-  const notAfter = new Date(sk.not_after);
-
-  // verifyNodeForSealing returns the trusted HPKE pubkey, or throws on PKI failure
-  // (including AS revocation check — fail-closed on any checker error, WM8).
-  const tenancy = (target.class === "cloud" ? "cloud" : "self-hosted") as "cloud" | "self-hosted";
-  // For self-hosted targets, accountId is required: the owner's account must match the node's SAN.
-  const accountId = tenancy === "self-hosted"
-    ? (useSessionStore.getState().account?.accountId ?? "")
-    : undefined;
-  let hpkePub: Uint8Array;
-  try {
-    const verified = await verifyNodeForSealing(
-      nk.nodeCertChain,
+    delivered = await deliverOwnerSealedJournalKeys(
+      spawnId,
+      entries,
+      { nodeId: resolvedNodeId, class: target.class },
+      deviceKeys,
       rootPEM,
-      nk.signedSubkey,
-      { tenancy, accountId },
       now,
+      (step) => onProgress?.({ step, resolvedNodeId }),
       revocationChecker,
     );
-    hpkePub = verified.hpkePub;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw new MigrateError(`Node verification failed: ${msg}`, "delivery");
+    throw new MigrateError(msg, "delivery");
   }
 
-  // Step 4: unseal + re-seal each journal key to the target node.
-  onProgress?.({ step: "resealing", resolvedNodeId });
-  const secrets: Array<{ secretId: string; targetPath: string; sealed: string }> = [];
-  try {
-    for (const entry of entries) {
-      const aad: InFlightAAD = {
-        spawnId,
-        generation: nk.generation,
-        nodeId:     resolvedNodeId,
-        notAfter,
-        version:    nk.generation,
-        deliveryId: crypto.randomUUID(),
-      };
-      const sealedB64 = await reSealToNode(entry.ciphertext, deviceKeys, hpkePub, aad);
-      const secretId = `journal/${entry.mount}`;
-      secrets.push({ secretId, targetPath: secretId, sealed: sealedB64 });
-    }
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new MigrateError(`Re-seal failed: ${msg}`, "delivery");
-  }
-
-  // Step 5: deliver the resealed ciphertext.
-  onProgress?.({ step: "delivering", resolvedNodeId });
-  try {
-    await deliverSecrets(spawnId, secrets);
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new MigrateError(`Key delivery failed: ${msg}`, "delivery");
-  }
-
-  onProgress?.({ step: "done", resolvedNodeId, journalKeysDelivered: secrets.length });
-  return { resolvedNodeId, transferSetId, journalKeysDelivered: secrets.length };
+  onProgress?.({ step: "done", resolvedNodeId, journalKeysDelivered: delivered.journalKeysDelivered });
+  return { resolvedNodeId, transferSetId, journalKeysDelivered: delivered.journalKeysDelivered };
 }
 
 /** Default spawn status check used by runMigrate to classify suspend vs resume failures. */

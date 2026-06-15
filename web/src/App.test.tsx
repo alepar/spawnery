@@ -7,6 +7,8 @@ import type { SpawnView } from "./api/spawnlet";
 import type { SessionDescriptor } from "./api/sessions";
 import type { Frame } from "./acp/frames";
 
+const forkHookMock = vi.hoisted(() => vi.fn());
+
 // --- Mocks ---------------------------------------------------------------
 // The api is fully mocked so no network happens; listSpawns drives the poll + sidebar.
 const listSpawnsMock = vi.fn(async (): Promise<SpawnView[]> => []);
@@ -46,10 +48,42 @@ vi.mock("./views/TerminalView", () => ({
   TerminalView: ({ spawnId, sessionId }: { spawnId: string; sessionId: string }) => { termPanels.push({ spawnId, sessionId }); return <div>term</div>; },
 }));
 
+vi.mock("./views/fork/useForkSpawn", () => ({
+  useForkSpawn: () => forkHookMock(),
+}));
+
 import { App } from "./App";
 import { useSessionStore } from "./sessions/store";
 
-const ACTIVE_SPAWN: SpawnView = { spawnId: "s1", name: "My Spawn", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" };
+const ACTIVE_SPAWN: SpawnView = { spawnId: "s1", name: "My Spawn", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 };
+
+function mockUseForkSpawn(overrides: Record<string, unknown> = {}) {
+  forkHookMock.mockReturnValue({
+    state: { phase: "idle" },
+    open: vi.fn(),
+    select: vi.fn(),
+    setName: vi.fn(),
+    confirm: vi.fn(),
+    cancel: vi.fn(),
+    openDeliveryPending: vi.fn(),
+    retryDelivery: vi.fn(),
+    ...overrides,
+  });
+}
+
+function mockUseForkSpawnFactory(factory: () => Record<string, unknown>) {
+  forkHookMock.mockImplementation(() => ({
+    state: { phase: "idle" },
+    open: vi.fn(),
+    select: vi.fn(),
+    setName: vi.fn(),
+    confirm: vi.fn(),
+    cancel: vi.fn(),
+    openDeliveryPending: vi.fn(),
+    retryDelivery: vi.fn(),
+    ...factory(),
+  }));
+}
 
 function renderWith(hook: ReturnType<typeof memoryLocation>["hook"]) {
   render(
@@ -72,6 +106,7 @@ beforeEach(() => {
   listSpawnsMock.mockResolvedValue([ACTIVE_SPAWN]);
   listSessionsMock.mockReset();
   listSessionsMock.mockResolvedValue([acp0]);
+  mockUseForkSpawn();
   document.title = "";
   // jsdom has no matchMedia; theme.initialTheme() calls it on mount.
   (window as any).matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: () => {}, removeEventListener: () => {} });
@@ -154,6 +189,57 @@ describe("App URL-authoritative nav", () => {
     expect(recreateSpawnMock).toHaveBeenCalledWith("s1");
     // navigate({section:"spawn", spawnId:"s1"}) — the title re-derives off the spawn's name.
     await waitFor(() => expect(document.title).toBe("Spawnery — My Spawn"));
+  });
+
+  it("kebab → Fork opens the fork modal flow", async () => {
+    const openFork = vi.fn();
+    mockUseForkSpawn({ open: openFork, state: { phase: "idle" } });
+    renderAt("/spawn/s1");
+
+    await waitFor(() => expect(screen.getByTestId("spawn-kebab-s1")).toBeTruthy());
+    await userEvent.click(screen.getByTestId("spawn-kebab-s1"));
+    await userEvent.click(screen.getByTestId("spawn-fork-s1"));
+
+    expect(openFork).toHaveBeenCalledWith("s1");
+  });
+
+  it("reconstructs fork delivery pending for fork children", async () => {
+    const openDeliveryPending = vi.fn();
+    mockUseForkSpawn({ openDeliveryPending, state: { phase: "idle" } });
+    listSpawnsMock.mockResolvedValue([
+      { ...ACTIVE_SPAWN, spawnId: "fork-1", parentSpawnId: "s1", journalKeyDeliveryPending: true },
+    ]);
+
+    renderAt("/templates");
+
+    await waitFor(() => expect(openDeliveryPending).toHaveBeenCalledWith("fork-1"));
+  });
+
+  it("does not auto-navigate to a completed fork after the user leaves the source route", async () => {
+    const mem = memoryLocation({ path: "/spawn/s1", record: true });
+    const openFork = vi.fn();
+    let forkState: Record<string, unknown> = { phase: "idle" };
+    mockUseForkSpawnFactory(() => ({ open: openFork, state: forkState }));
+    renderWith(mem.hook);
+
+    await waitFor(() => expect(screen.getByTestId("spawn-kebab-s1")).toBeTruthy());
+    await userEvent.click(screen.getByTestId("spawn-kebab-s1"));
+    await userEvent.click(screen.getByTestId("spawn-fork-s1"));
+    expect(openFork).toHaveBeenCalledWith("s1");
+
+    forkState = {
+      phase: "done",
+      result: {
+        forkSpawnId: "123e4567-e89b-12d3-a456-426614174000",
+        resolvedNodeId: "node-a",
+        transferSetId: "",
+        journalKeysDelivered: 0,
+      },
+    };
+    mem.navigate("/settings");
+
+    await waitFor(() => expect(document.title).toBe("Spawnery — Settings"));
+    expect(mem.history[mem.history.length - 1]).toBe("/settings");
   });
 
   // §5 regression (spec 2026-06-08 sidebar-lifecycle, corrected §3 amendment): recreating the

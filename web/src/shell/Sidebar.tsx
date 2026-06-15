@@ -12,6 +12,7 @@ export interface SpawnActions {
   onRecreate: (spawnId: string) => void;
   onStop: (spawnId: string) => void;
   onMoveTo?: (spawnId: string) => void;
+  onFork?: (spawnId: string) => void;
   onSetModel?: (spawnId: string) => void;
 }
 
@@ -48,6 +49,7 @@ const STATUS_LABEL: Record<SpawnStatus, string> = {
 function spawnStatusLabel(spawn: SpawnView): string {
   if (spawn.transitionPhase && spawn.status === "suspending") return `Suspending: ${spawn.transitionPhase}`;
   if (spawn.transitionPhase && spawn.status === "resuming") return `Resuming: ${spawn.transitionPhase}`;
+  if (spawn.status === "starting" && spawn.parentSpawnId) return "seeding…";
   return STATUS_LABEL[spawn.status];
 }
 
@@ -57,6 +59,7 @@ export function Sidebar({ nav, navigate, spawns = [], actions }: {
   spawns?: SpawnView[];
   actions?: SpawnActions;
 }) {
+  const namesByID = new Map(spawns.map((s) => [s.spawnId, s.name || s.spawnId.slice(0, 8)]));
   return (
     <nav data-testid="sidebar" className="flex w-52 flex-col gap-1 border-r border-border bg-card p-3">
       <div className="px-2 pb-3 text-sm font-semibold">Spawnery</div>
@@ -76,14 +79,20 @@ export function Sidebar({ nav, navigate, spawns = [], actions }: {
         <div className="px-2 text-xs text-muted-foreground/70">— none yet —</div>
       ) : (
         spawns.map((s) => (
-          <SpawnRow key={s.spawnId} spawn={s} active={nav.section === "spawn" && s.spawnId === nav.spawnId} actions={actions} />
+          <SpawnRow
+            key={s.spawnId}
+            spawn={s}
+            active={nav.section === "spawn" && s.spawnId === nav.spawnId}
+            actions={actions}
+            parentName={s.parentSpawnId ? namesByID.get(s.parentSpawnId) ?? s.parentSpawnId.slice(0, 8) : ""}
+          />
         ))
       )}
     </nav>
   );
 }
 
-function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolean; actions?: SpawnActions }) {
+function SpawnRow({ spawn, active, actions, parentName }: { spawn: SpawnView; active: boolean; actions?: SpawnActions; parentName: string }) {
   const [menu, setMenu] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -93,7 +102,7 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
   // The single lifecycle menu item follows the actual status (suspend/resume/recreate), so the menu
   // never offers an action the CP would reject; transitional/unknown states render a disabled item.
   // Pass transitionPhase so Suspending/Resuming items show real progress instead of a frozen label.
-  const lifecycle = spawnLifecycleAction(spawn.status, spawn.transitionPhase || undefined);
+  const lifecycle = spawnLifecycleAction(spawn.status, spawn.transitionPhase || undefined, !!spawn.parentSpawnId);
   const dispatchLifecycle = () => {
     setMenu(false);
     if (lifecycle.kind === "suspend") actions?.onSuspend(spawn.spawnId);
@@ -150,7 +159,9 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
             </span>
           )}
         </span>
-        <span className="truncate pl-4 text-xs text-muted-foreground/70">{spawn.appId}</span>
+        <span className="truncate pl-4 text-xs text-muted-foreground/70">
+          {spawn.appId}{parentName ? ` · fork of ${parentName}` : ""}
+        </span>
       </button>
 
       <button
@@ -187,6 +198,25 @@ function SpawnRow({ spawn, active, actions }: { spawn: SpawnView; active: boolea
             >
               Move to…
             </button>
+          )}
+          {actions?.onFork && (
+            spawn.status === "active" ? (
+              <button
+                data-testid={`spawn-fork-${spawn.spawnId}`}
+                className="rounded px-2 py-1 text-left text-sm hover:bg-accent"
+                onClick={() => { setMenu(false); actions.onFork!(spawn.spawnId); }}
+              >
+                Fork...
+              </button>
+            ) : (
+              <button
+                data-testid={`spawn-fork-disabled-${spawn.spawnId}`}
+                disabled
+                className="rounded px-2 py-1 text-left text-sm text-muted-foreground/50 cursor-default"
+              >
+                Fork...
+              </button>
+            )
           )}
           {actions?.onSetModel && (
             <button

@@ -22,6 +22,8 @@ export interface SpawnView {
   // phase reported by the node (sp-u53.7.2). Used by the UI to show progress instead of
   // a frozen spinner. Empty for all other statuses.
   transitionPhase: string;
+  parentSpawnId?: string;
+  forkedAt?: number;
 }
 
 // statusFromProto maps the Connect-JSON enum NAME (e.g. "SPAWN_STATUS_ACTIVE") to a short status.
@@ -46,13 +48,13 @@ export type SpawnLifecycleAction =
   | { kind: "recreate"; label: string }
   | { kind: "pending"; label: string };
 
-export function spawnLifecycleAction(status: SpawnStatus, transitionPhase?: string): SpawnLifecycleAction {
+export function spawnLifecycleAction(status: SpawnStatus, transitionPhase?: string, isForkChild = false): SpawnLifecycleAction {
   switch (status) {
     case "active": return { kind: "suspend", label: "Suspend" };
     case "suspended": return { kind: "resume", label: "Resume" };
     case "unreachable":
     case "error": return { kind: "recreate", label: "Recreate" };
-    case "starting": return { kind: "pending", label: "Starting…" };
+    case "starting": return { kind: "pending", label: isForkChild ? "Seeding…" : "Starting…" };
     case "suspending": return { kind: "pending", label: transitionPhase ? `Suspending: ${transitionPhase}` : "Suspending…" };
     case "resuming": return { kind: "pending", label: transitionPhase ? `Resuming: ${transitionPhase}` : "Resuming…" };
     default: return { kind: "pending", label: "Unavailable" }; // unknown
@@ -78,7 +80,7 @@ export async function createSpawn(appId: string, model: string, image = "", runn
 }
 
 export async function listSpawns(): Promise<SpawnView[]> {
-  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; mode?: string; model?: string; modelApplied?: boolean; journalKeyDeliveryPending?: boolean; transitionPhase?: string }> }>(
+  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; mode?: string; model?: string; modelApplied?: boolean; journalKeyDeliveryPending?: boolean; transitionPhase?: string; parentSpawnId?: string; forkedAt?: string | number }> }>(
     "ListSpawns", {},
   );
   return (r.spawns ?? []).map((s) => ({
@@ -91,6 +93,8 @@ export async function listSpawns(): Promise<SpawnView[]> {
     modelApplied: s.modelApplied ?? true,
     journalKeyDeliveryPending: !!s.journalKeyDeliveryPending,
     transitionPhase: s.transitionPhase ?? "",
+    parentSpawnId: s.parentSpawnId ?? "",
+    forkedAt: s.forkedAt ? Number(s.forkedAt) : 0,
   }));
 }
 

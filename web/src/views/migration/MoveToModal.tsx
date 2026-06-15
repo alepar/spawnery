@@ -61,22 +61,27 @@ function classLabel(cls: string): string {
 
 // ── Target row ────────────────────────────────────────────────────────────────
 
-function TargetRow({
+export function TargetRow({
   t,
   onSelect,
+  testIdPrefix = "migrate-target",
+  selected = false,
 }: {
   t: MigrationTarget;
   onSelect: () => void;
+  testIdPrefix?: string;
+  selected?: boolean;
 }) {
   const size = sizeLabel(t.journalSizeBytes);
   const eta  = etaLabel(t.journalSizeBytes);
   return (
     <button
-      data-testid={`migrate-target-${t.nodeId}`}
+      data-testid={`${testIdPrefix}-${t.nodeId || t.class}`}
       onClick={onSelect}
       disabled={!t.online}
       className={[
         "w-full rounded-md border border-border px-3 py-2 text-left text-sm",
+        selected ? "border-primary bg-accent/50" : "",
         t.online
           ? "hover:bg-accent cursor-pointer"
           : "opacity-40 cursor-not-allowed",
@@ -92,10 +97,39 @@ function TargetRow({
         ) : (
           <span className="text-zinc-400">offline</span>
         )}
+        {t.isCurrent && <span>· current</span>}
         {size && <span>· journal {size}</span>}
         {eta  && <span>· ETA {eta}</span>}
       </div>
     </button>
+  );
+}
+
+export function TargetList({
+  targets,
+  onSelect,
+  testId,
+  targetTestIdPrefix,
+  selectedTarget,
+}: {
+  targets: MigrationTarget[];
+  onSelect: (target: MigrationTarget) => void;
+  testId: string;
+  targetTestIdPrefix?: string;
+  selectedTarget?: MigrationTarget | null;
+}) {
+  return (
+    <div data-testid={testId} className="space-y-1.5">
+      {targets.map((t) => (
+        <TargetRow
+          key={t.nodeId || t.class}
+          t={t}
+          selected={!!selectedTarget && (selectedTarget.nodeId || selectedTarget.class) === (t.nodeId || t.class)}
+          testIdPrefix={targetTestIdPrefix}
+          onSelect={() => onSelect(t)}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -261,11 +295,11 @@ function SelectingView({ state, actions }: { state: MoveToState; actions: MoveTo
             No other nodes are available.
           </p>
         ) : (
-          <div data-testid="migrate-target-list" className="space-y-1.5">
-            {state.targets.map((t) => (
-              <TargetRow key={t.nodeId} t={t} onSelect={() => actions.select(t)} />
-            ))}
-          </div>
+          <TargetList
+            targets={state.targets}
+            testId="migrate-target-list"
+            onSelect={actions.select}
+          />
         )}
       </div>
       <DialogFooter>
@@ -475,33 +509,73 @@ function ErrorResumeView({ state, onClose }: { state: MoveToState; onClose: () =
  * Delivery-leg failure — spawn active on target but journal key not delivered.
  * Persistent, reload-derivable state (spec §3 "delivery-fail"). Offer Retry Delivery.
  */
-function DeliveryPendingView({ state, actions }: { state: MoveToState; actions: MoveToActions }) {
+export function DeliveryPendingPanel({
+  title,
+  body,
+  errorMsg,
+  containerTestId,
+  dismissTestId,
+  retryTestId,
+  dismissLabel,
+  retryLabel,
+  onDismiss,
+  onRetry,
+}: {
+  title: string;
+  body: string[];
+  errorMsg?: string | null;
+  containerTestId: string;
+  dismissTestId: string;
+  retryTestId: string;
+  dismissLabel: string;
+  retryLabel: string;
+  onDismiss: () => void;
+  onRetry: () => void;
+}) {
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Journal key delivery pending</DialogTitle>
+        <DialogTitle>{title}</DialogTitle>
       </DialogHeader>
-      <div className="space-y-2 text-sm" data-testid="migrate-delivery-pending">
-        <p className="text-muted-foreground">
-          The spawn is running on the target node but the journal key has not been
-          delivered yet. The journaled mounts will not restore until delivery completes.
-        </p>
-        <p className="text-muted-foreground">
-          Retry delivery from this or any enrolled device.
-        </p>
-        {state.errorMsg && (
-          <p className="text-xs text-red-500 break-words">{state.errorMsg}</p>
+      <div className="space-y-2 text-sm" data-testid={containerTestId}>
+        {body.map((line) => (
+          <p key={line} className="text-muted-foreground">
+            {line}
+          </p>
+        ))}
+        {errorMsg && (
+          <p className="text-xs text-red-500 break-words">{errorMsg}</p>
         )}
       </div>
       <DialogFooter>
-        <Button variant="outline" onClick={actions.cancel} data-testid="migrate-delivery-dismiss">
-          Dismiss
+        <Button variant="outline" onClick={onDismiss} data-testid={dismissTestId}>
+          {dismissLabel}
         </Button>
-        <Button onClick={actions.retryDelivery} data-testid="migrate-delivery-retry">
-          Retry Delivery
+        <Button onClick={onRetry} data-testid={retryTestId}>
+          {retryLabel}
         </Button>
       </DialogFooter>
     </>
+  );
+}
+
+function DeliveryPendingView({ state, actions }: { state: MoveToState; actions: MoveToActions }) {
+  return (
+    <DeliveryPendingPanel
+      title="Journal key delivery pending"
+      body={[
+        "The spawn is running on the target node but the journal key has not been delivered yet. The journaled mounts will not restore until delivery completes.",
+        "Retry delivery from this or any enrolled device.",
+      ]}
+      errorMsg={state.errorMsg}
+      containerTestId="migrate-delivery-pending"
+      dismissTestId="migrate-delivery-dismiss"
+      retryTestId="migrate-delivery-retry"
+      dismissLabel="Dismiss"
+      retryLabel="Retry Delivery"
+      onDismiss={actions.cancel}
+      onRetry={actions.retryDelivery}
+    />
   );
 }
 
