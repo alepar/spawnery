@@ -144,6 +144,29 @@ func TestUnpauseIfPausedEmitsCompletion(t *testing.T) {
 	}
 }
 
+func TestUnpauseIfPausedMissingSourceEmitsErrorCompletion(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_UnpauseIfPaused{UnpauseIfPaused: &nodev1.UnpauseIfPaused{
+		SpawnId: "missing-source", Generation: 9,
+	}}})
+
+	waitFor(t, "UnpauseIfPausedComplete error", func() bool {
+		got := lastUnpauseIfPausedComplete(fs)
+		return got != nil && got.GetError() != ""
+	})
+	got := lastUnpauseIfPausedComplete(fs)
+	if got.GetSpawnId() != "missing-source" || got.GetGeneration() != 9 {
+		t.Fatalf("UnpauseIfPausedComplete ids = %+v", got)
+	}
+	if !strings.Contains(got.GetError(), "missing-source") {
+		t.Fatalf("UnpauseIfPausedComplete error = %q, want missing spawn id", got.GetError())
+	}
+}
+
 func TestForkTurnBoundaryWaitsForACPPumpIdle(t *testing.T) {
 	be := &scriptedPodBackend{script: scriptGoose}
 	mgr := newForkNodeManager(t, be)

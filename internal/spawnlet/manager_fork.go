@@ -190,7 +190,7 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 func (m *Manager) UnpauseIfPaused(ctx context.Context, spawnID string, generation int64) error {
 	sp, ok := m.store.Get(spawnID)
 	if !ok {
-		return nil
+		return fmt.Errorf("unpause if paused: source spawn %s is not tracked on this node", spawnID)
 	}
 	if generation != 0 && sp.Generation != uint64(generation) {
 		return nil

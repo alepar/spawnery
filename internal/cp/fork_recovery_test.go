@@ -278,6 +278,49 @@ func TestReconcileTickRecoversForkingSourceThroughNodeUnpause(t *testing.T) {
 	}
 }
 
+func TestReconcileTickMarksForkingSourceLostOnNodeUnpauseError(t *testing.T) {
+	s, st := newForkRecoveryTestServer(t)
+	s.forkUnpauses = newForkUnpauseWaiters()
+	ctx := context.Background()
+	seedForkingSource(t, st, "sp-reconcile-lost", 100, 100)
+	sender := &capSender{}
+	s.reg.Add(&registry.Node{ID: "node-a", Sender: sender, Max: 1, Free: 1})
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			if msg := sender.lastCPMessage(); msg != nil && msg.GetUnpauseIfPaused() != nil {
+				cmd := msg.GetUnpauseIfPaused()
+				s.deliverUnpauseIfPausedComplete(&nodev1.UnpauseIfPausedComplete{
+					SpawnId:    cmd.GetSpawnId(),
+					Generation: cmd.GetGeneration(),
+					Error:      "unpause source missing",
+				})
+				close(done)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	s.reconcileTick(ctx)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reconcile did not send UnpauseIfPaused")
+	}
+	sp, err := st.Spawns().Get(ctx, "sp-reconcile-lost")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if sp.Status != store.Errored {
+		t.Fatalf("status=%v want Errored", sp.Status)
+	}
+	if sp.ForkCaptureDeadline != nil {
+		t.Fatalf("fork_capture_deadline=%v want nil", sp.ForkCaptureDeadline)
+	}
+}
+
 func liveGenForCPTest(t *testing.T, st store.Store, id string) int64 {
 	t.Helper()
 	c, ok, err := st.Spawns().LiveContainer(context.Background(), id)
