@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/urfave/cli/v3"
@@ -39,9 +40,25 @@ func listAgentsCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "list-agents",
 		Usage: "List registered agent emitters and which are currently detected",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "capabilities",
+				Usage: "Emit the (kind,agent)->supported|no-op|best-effort matrix as JSON",
+			},
+		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			env := osEnviron()
 			reg := agentinstall.NewRegistry(env)
+
+			if cmd.Bool("capabilities") {
+				data, err := json.Marshal(agentinstall.Capabilities(reg))
+				if err != nil {
+					return fmt.Errorf("marshal capabilities: %w", err)
+				}
+				fmt.Println(string(data))
+				return nil
+			}
+
 			detected := agentinstall.Detect(env)
 
 			detectedSet := make(map[string]bool)
@@ -86,6 +103,14 @@ func applyCmd() *cli.Command {
 				Name:  "secret-wait-timeout",
 				Usage: "Maximum duration to wait for async-delivered secret files before declaring them missing (0 disables the wait)",
 			},
+			&cli.StringFlag{
+				Name:  "profile-id",
+				Usage: "Profile ID to stamp into managed.json provenance entries",
+			},
+			&cli.StringFlag{
+				Name:  "profile-version",
+				Usage: "Profile version to stamp into managed.json provenance entries",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			artifactsDir := cmd.String("artifacts")
@@ -100,10 +125,13 @@ func applyCmd() *cli.Command {
 			env := osEnviron()
 			reg := agentinstall.NewRegistry(env)
 			opts := agentinstall.Options{
-				HomeDir:           env.Home(),
-				SecretsDir:        secretsDir,
-				ArtifactsDir:      artifactsDir,
+				HomeDir:          env.Home(),
+				SecretsDir:       secretsDir,
+				ArtifactsDir:     artifactsDir,
 				SecretWaitTimeout: cmd.Duration("secret-wait-timeout"),
+				ProfileID:        cmd.String("profile-id"),
+				ProfileVersion:   cmd.String("profile-version"),
+				ManagedIndexPath: filepath.Join(env.Home(), ".spawnery", "managed.json"),
 			}
 
 			result := agentinstall.ApplyFiltered(reg, m, opts, env, agentFilter)

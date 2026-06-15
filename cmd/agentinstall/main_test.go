@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"spawnery/internal/agentinstall"
 )
 
 // buildAgentinstall builds the agentinstall binary and returns its path.
@@ -234,6 +236,32 @@ func TestInstallSkillAllDetected(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a claude/skill/auto-skill report, got %+v", result.Reports)
+	}
+}
+
+func TestListAgentsCapabilitiesJSON(t *testing.T) {
+	bin := buildAgentinstall(t)
+	home := t.TempDir()
+
+	cmd := exec.Command(bin, "list-agents", "--capabilities")
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("list-agents --capabilities: %v", err)
+	}
+
+	var entries []agentinstall.CapabilityEntry
+	if err := json.Unmarshal(out, &entries); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Kind == "plugin" && e.Agent == "opencode" && e.Status == "best-effort" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected opencode/plugin=best-effort in %s", out)
 	}
 }
 
