@@ -14,8 +14,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
-	"strings"
 )
 
 func main() {
@@ -26,8 +24,8 @@ func main() {
 }
 
 // serve is the testable core: reads JSON-RPC messages from r and writes
-// responses to w using Content-Length framing (MCP stdio transport wire format,
-// identical to LSP).
+// responses to w using newline-delimited JSON (MCP stdio transport wire format:
+// one JSON object per line, no Content-Length headers).
 func serve(r io.Reader, w io.Writer) error {
 	br := bufio.NewReader(r)
 	for {
@@ -46,44 +44,36 @@ func serve(r io.Reader, w io.Writer) error {
 
 // ----------- wire transport --------------------------------------------------
 
-// readMessage reads one Content-Length framed JSON message from br.
+// readMessage reads one newline-delimited JSON message from br.
+// MCP stdio transport sends one JSON-RPC object per line (no Content-Length headers).
 func readMessage(br *bufio.Reader) (map[string]interface{}, error) {
-	var contentLen int
-	for {
-		line, err := br.ReadString('\n')
-		if err != nil {
+	line, err := br.ReadString('\n')
+	if err != nil {
+		if len(line) == 0 {
+			// Clean EOF with no partial data — normal end of stream.
+			return nil, io.EOF
+		}
+		if err != io.EOF {
+			// Real read error with partial data.
 			return nil, err
 		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			break
-		}
-		if strings.HasPrefix(line, "Content-Length:") {
-			n, _ := strconv.Atoi(strings.TrimSpace(line[len("Content-Length:"):]))
-			contentLen = n
-		}
-	}
-	if contentLen == 0 {
-		return nil, fmt.Errorf("missing or zero Content-Length")
-	}
-	body := make([]byte, contentLen)
-	if _, err := io.ReadFull(br, body); err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+		// err == io.EOF with leftover bytes: last line missing trailing newline — parse it.
 	}
 	var msg map[string]interface{}
-	if err := json.Unmarshal(body, &msg); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if parseErr := json.Unmarshal([]byte(line), &msg); parseErr != nil {
+		return nil, fmt.Errorf("unmarshal: %w", parseErr)
 	}
 	return msg, nil
 }
 
-// writeMessage marshals msg to JSON and sends it with Content-Length framing.
+// writeMessage marshals msg to JSON and writes it as a single newline-terminated line.
 func writeMessage(w io.Writer, msg interface{}) error {
 	b, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "Content-Length: %d\r\n\r\n%s", len(b), b)
+	b = append(b, '\n')
+	_, err = w.Write(b)
 	return err
 }
 

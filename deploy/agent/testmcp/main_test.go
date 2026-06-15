@@ -5,7 +5,6 @@ package main
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,19 +14,21 @@ import (
 
 // ----------- test wire helpers -----------------------------------------------
 
-// sendRPC writes a JSON-RPC message to w using Content-Length framing.
+// sendRPC writes a JSON-RPC message to w as a newline-terminated JSON line.
+// This matches MCP stdio transport (one JSON object per line).
 func sendRPC(t *testing.T, w io.Writer, msg interface{}) {
 	t.Helper()
 	b, err := json.Marshal(msg)
 	if err != nil {
 		t.Fatalf("sendRPC marshal: %v", err)
 	}
-	if _, err := fmt.Fprintf(w, "Content-Length: %d\r\n\r\n%s", len(b), b); err != nil {
+	b = append(b, '\n')
+	if _, err := w.Write(b); err != nil {
 		t.Fatalf("sendRPC write: %v", err)
 	}
 }
 
-// recvRPC reads one Content-Length framed JSON-RPC message from br.
+// recvRPC reads one newline-delimited JSON-RPC message from br.
 func recvRPC(t *testing.T, br *bufio.Reader) map[string]interface{} {
 	t.Helper()
 	msg, err := readMessage(br)
