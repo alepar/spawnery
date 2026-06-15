@@ -59,6 +59,7 @@ type Emitter interface {
 	InstallSkill(a Artifact, opts Options) Report
 	InstallMCP(a Artifact, opts Options) Report
 	ApplyConfig(a Artifact, opts Options) Report
+	InstallPlugin(a Artifact, opts Options) Report
 }
 
 // baseEmitter provides placeholder implementations for all three Emitter methods,
@@ -96,6 +97,16 @@ func (b baseEmitter) ApplyConfig(a Artifact, _ Options) Report {
 	return Report{
 		Agent:  b.layout.Name,
 		Kind:   KindConfig,
+		Name:   a.Name,
+		Status: StatusSkipped,
+		Reason: "not implemented in this slice (seam only)",
+	}
+}
+
+func (b baseEmitter) InstallPlugin(a Artifact, _ Options) Report {
+	return Report{
+		Agent:  b.layout.Name,
+		Kind:   KindPlugin,
 		Name:   a.Name,
 		Status: StatusSkipped,
 		Reason: "not implemented in this slice (seam only)",

@@ -164,6 +164,8 @@ func dispatchArtifact(e Emitter, a Artifact, opts Options) Report {
 		return report
 	case KindConfig:
 		return e.ApplyConfig(a, opts)
+	case KindPlugin:
+		return e.InstallPlugin(a, opts)
 	default:
 		return Report{
 			Agent:  e.Layout().Name,

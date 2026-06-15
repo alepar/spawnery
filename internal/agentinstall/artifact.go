@@ -15,6 +15,7 @@ type (
 	MCPTransportHTTP  = spec.MCPTransportHTTP
 	MCPPayload        = spec.MCPPayload
 	ConfigPayload     = spec.ConfigPayload
+	PluginPayload     = spec.PluginPayload
 	Artifact          = spec.Artifact
 	Manifest          = spec.Manifest
 )
@@ -23,6 +24,7 @@ const (
 	KindSkill  = spec.KindSkill
 	KindMCP    = spec.KindMCP
 	KindConfig = spec.KindConfig
+	KindPlugin = spec.KindPlugin
 
 	// CurrentSchemaVersion mirrors spec.CurrentSchemaVersion for in-package use.
 	CurrentSchemaVersion = spec.CurrentSchemaVersion
@@ -45,7 +47,7 @@ const (
 
 // Capability describes the fidelity of a config translation: whether the canonical
 // keys were fully honoured, approximated (best-effort), or not expressible for the
-// target agent.  Only config-kind reports set this field; mcp/skill leave it empty.
+// target agent.  Only config- and plugin-kind reports set this field; mcp/skill leave it empty.
 type Capability string
 
 const (
