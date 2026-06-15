@@ -52,7 +52,7 @@ func TestForkMaterializerSendsForkSameNodeAndReturnsPins(t *testing.T) {
 		NodeId:        "node-1",
 		Mounts:        []*nodev1.MountMarker{{Name: "work", Marker: "fork-manifest"}},
 		RootfsArtifacts: []*nodev1.RootfsArtifact{{
-			ArtifactId: "rootfs-fork-gen1", Generation: 1, BaseImageDigest: "agent@sha256:base",
+			ArtifactId: "rootfs-fork-gen1", Generation: 1, Sequence: 1, BaseImageDigest: "agent@sha256:base",
 			Format: "oci_layout",
 		}},
 	})
@@ -127,7 +127,7 @@ func TestForkMaterializerReportsSourceRestoredBeforeFinalCompletion(t *testing.T
 		NodeId:        "node-1",
 		Mounts:        []*nodev1.MountMarker{{Name: "work", Marker: "fork-manifest"}},
 		RootfsArtifacts: []*nodev1.RootfsArtifact{{
-			ArtifactId: "rootfs-fork-gen1", Generation: 1, BaseImageDigest: "agent@sha256:base",
+			ArtifactId: "rootfs-fork-gen1", Generation: 1, Sequence: 1, BaseImageDigest: "agent@sha256:base",
 			Format: "oci_layout",
 		}},
 	})
@@ -261,6 +261,7 @@ func TestForkSpawnRecordsMaterializerPinsOnTransferSet(t *testing.T) {
 			RootfsPins: []store.RootfsArtifactPin{{
 				ArtifactID: "rootfs-fork-gen1",
 				Generation: 1,
+				Sequence:   1,
 				Format:     "oci_layout",
 			}},
 		}, nil

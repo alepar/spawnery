@@ -167,6 +167,10 @@ message StartSpawn  {
   string               base_image_digest = 22;
   uint64               rootfs_source_generation = 23;
   repeated RootfsArtifact rootfs_artifacts = 24;
+  // rootfs_artifacts_local_only means rootfs_artifacts are metadata for an already-local
+  // spawnery/delta:<spawn_id> image. The node must not restore them and must fail the start
+  // if that local delta image is absent. Unset means rootfs_artifacts are restore inputs.
+  bool                 rootfs_artifacts_local_only = 25;
 }
 message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }
 message Suspend     { string spawn_id = 1; uint64 generation = 2; bool capture_rootfs_artifact = 3; }
@@ -210,6 +214,7 @@ enum FailedForkCleanupOp {
   FAILED_FORK_CLEANUP_OP_REVOKE_GENERATION = 1;
   FAILED_FORK_CLEANUP_OP_EMPTY_BUCKET      = 2;
   FAILED_FORK_CLEANUP_OP_DROP_BUCKET       = 3;
+  FAILED_FORK_CLEANUP_OP_RELEASE_DELTA     = 4;
 }
 message FailedForkCleanup {
   string request_id = 1;

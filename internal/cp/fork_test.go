@@ -42,6 +42,50 @@ func (r *recordingForkMaterializer) WaitForForkTurnBoundary(context.Context, for
 	return nil
 }
 
+type transferSetErrorStore struct {
+	store.Store
+	setTargetErr       error
+	setActiveStatusErr error
+}
+
+func (s transferSetErrorStore) TransferSets() store.TransferSetRepo {
+	return transferSetPostActiveErrorRepo{
+		TransferSetRepo:    s.Store.TransferSets(),
+		setTargetErr:       s.setTargetErr,
+		setActiveStatusErr: s.setActiveStatusErr,
+	}
+}
+
+func (s transferSetErrorStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(transferSetErrorStore{
+			Store:              tx,
+			setTargetErr:       s.setTargetErr,
+			setActiveStatusErr: s.setActiveStatusErr,
+		})
+	})
+}
+
+type transferSetPostActiveErrorRepo struct {
+	store.TransferSetRepo
+	setTargetErr       error
+	setActiveStatusErr error
+}
+
+func (r transferSetPostActiveErrorRepo) SetTargetNode(ctx context.Context, id string, targetNodeID string, updatedAt int64) error {
+	if r.setTargetErr != nil {
+		return r.setTargetErr
+	}
+	return r.TransferSetRepo.SetTargetNode(ctx, id, targetNodeID, updatedAt)
+}
+
+func (r transferSetPostActiveErrorRepo) SetStatus(ctx context.Context, id string, status store.TransferSetStatus, updatedAt int64) error {
+	if status == store.TransferSetActive && r.setActiveStatusErr != nil {
+		return r.setActiveStatusErr
+	}
+	return r.TransferSetRepo.SetStatus(ctx, id, status, updatedAt)
+}
+
 type forkMaterializerFunc func(context.Context, forkMaterializeRequest) (forkMaterializeResult, error)
 
 func (f forkMaterializerFunc) MaterializeFork(ctx context.Context, req forkMaterializeRequest) (forkMaterializeResult, error) {
@@ -305,6 +349,7 @@ func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
 	mat := &recordingForkMaterializer{nodeID: "node-2", rootfsPins: []store.RootfsArtifactPin{{
 		ArtifactID:      "rootfs-fork-gen1",
 		Generation:      1,
+		Sequence:        1,
 		BaseImageDigest: "sha256:base",
 		Format:          "oci_layout",
 	}}}
@@ -462,7 +507,7 @@ func TestForkSpawnDefaultsToSameNode(t *testing.T) {
 	}
 }
 
-func TestForkSpawnSameNodeStartsFromLocalForkDeltaWithoutRootfsRestore(t *testing.T) {
+func TestForkSpawnSameNodeStartsFromLocalForkDeltaWithRootfsMetadata(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	sender := &capSender{}
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
@@ -472,7 +517,7 @@ func TestForkSpawnSameNodeStartsFromLocalForkDeltaWithoutRootfsRestore(t *testin
 	s.forkMaterializer = &recordingForkMaterializer{nodeID: "node-1", rootfsPins: []store.RootfsArtifactPin{{
 		ArtifactID:      "rootfs-fork-gen1",
 		Generation:      1,
-		Sequence:        2,
+		Sequence:        1,
 		BaseImageDigest: "sha256:base",
 		Format:          "oci_layout",
 	}}}
@@ -487,9 +532,13 @@ func TestForkSpawnSameNodeStartsFromLocalForkDeltaWithoutRootfsRestore(t *testin
 	if start == nil || start.GetSpawnId() != resp.Msg.ForkSpawnId {
 		t.Fatalf("same-node fork StartSpawn = %+v, want fork %s", start, resp.Msg.ForkSpawnId)
 	}
-	if start.GetRootfsSourceGeneration() != 0 || len(start.GetRootfsArtifacts()) != 0 {
-		t.Fatalf("same-node fork must launch from local fork delta without lossy rootfs restore, gen=%d artifacts=%+v",
+	if start.GetRootfsSourceGeneration() != 1 || len(start.GetRootfsArtifacts()) != 1 ||
+		start.GetRootfsArtifacts()[0].GetArtifactId() != "rootfs-fork-gen1" {
+		t.Fatalf("same-node fork StartSpawn must carry fork rootfs metadata, gen=%d artifacts=%+v",
 			start.GetRootfsSourceGeneration(), start.GetRootfsArtifacts())
+	}
+	if !start.GetRootfsArtifactsLocalOnly() {
+		t.Fatal("same-node fork StartSpawn.RootfsArtifactsLocalOnly = false, want true")
 	}
 	ts, err := s.st.TransferSets().Get(context.Background(), resp.Msg.TransferSetId)
 	if err != nil {
@@ -497,6 +546,52 @@ func TestForkSpawnSameNodeStartsFromLocalForkDeltaWithoutRootfsRestore(t *testin
 	}
 	if len(ts.RootfsArtifactPins) != 1 || ts.RootfsArtifactPins[0].ArtifactID != "rootfs-fork-gen1" {
 		t.Fatalf("transfer set should still record fork rootfs artifact pins, got %+v", ts.RootfsArtifactPins)
+	}
+}
+
+func TestForkSpawnActivationTransferSetBookkeepingFailureUnwindsBeforeActive(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		setTargetErr       error
+		setActiveStatusErr error
+	}{
+		{name: "target-node", setTargetErr: errors.New("set target boom")},
+		{name: "active-status", setActiveStatusErr: errors.New("set active boom")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, reg, rt := newTestServer(t)
+			sender := &capSender{}
+			seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+			stopAck := goAckStarts(s, sender)
+			defer stopAck()
+			resources := &recordingForkResources{}
+			s.failedForkResources = resources
+			s.forkFootprintEstimator = staticForkFootprint(100)
+			s.forkMaterializer = &recordingForkMaterializer{nodeID: "node-1"}
+			baseStore := s.st
+			s.st = transferSetErrorStore{
+				Store:              baseStore,
+				setTargetErr:       tc.setTargetErr,
+				setActiveStatusErr: tc.setActiveStatusErr,
+			}
+
+			_, err := s.ForkSpawn(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.ForkSpawnRequest{
+				SpawnId: "sp-source",
+			}))
+			if err == nil {
+				t.Fatal("ForkSpawn should fail when activation bookkeeping cannot commit atomically")
+			}
+			start := sender.firstStart()
+			if start == nil {
+				t.Fatal("expected fork StartSpawn before activation bookkeeping failure")
+			}
+			if fork, err := baseStore.Spawns().Get(context.Background(), start.GetSpawnId()); err == nil && fork.Status == store.Active {
+				t.Fatalf("fork must not remain active after activation bookkeeping failure: %+v", fork)
+			}
+			if len(resources.ops) == 0 {
+				t.Fatal("failed-fork cleanup resources were not invoked")
+			}
+		})
 	}
 }
 
@@ -1098,7 +1193,7 @@ func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 	if !sawUnpause(sourceSender, "sp-source") {
 		t.Fatal("failed fork cleanup must unpause source before restoring it active")
 	}
-	wantPrefixes := []string{"revoke-key:", "empty-bucket:spawnery-spawn-", "drop-bucket:spawnery-spawn-", "delete-row:"}
+	wantPrefixes := []string{"revoke-key:", "empty-bucket:spawnery-spawn-", "drop-bucket:spawnery-spawn-", "release-delta:", "delete-row:"}
 	if len(res.ops) != len(wantPrefixes) {
 		t.Fatalf("unwind ops=%v want prefixes %v", res.ops, wantPrefixes)
 	}

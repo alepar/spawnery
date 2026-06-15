@@ -99,11 +99,13 @@ func (noopApplier) Remove(context.Context, []firewall.Rule) error { return nil }
 // script runs in a goroutine; when it returns, the agent's stdout is closed (modelling the agent
 // process exiting), which the pump observes as EOF.
 type scriptedPodBackend struct {
-	script     func(io.Reader, io.Writer)
-	mu         sync.Mutex
-	stopped    bool
-	importBase string
-	imported   bool
+	script         func(io.Reader, io.Writer)
+	mu             sync.Mutex
+	stopped        bool
+	importBase     string
+	imported       bool
+	ensureImageRef string
+	releasedDelta  string
 }
 
 func (f *scriptedPodBackend) Ping(context.Context) error      { return nil }
@@ -136,6 +138,9 @@ func (f *scriptedPodBackend) ResolveImageDigest(_ context.Context, _ string) (st
 	return "sha256:fakedigest", nil
 }
 func (f *scriptedPodBackend) EnsureImage(_ context.Context, baseRef, _ string) (string, error) {
+	if f.ensureImageRef != "" {
+		return f.ensureImageRef, nil
+	}
 	return baseRef, nil
 }
 func (f *scriptedPodBackend) CaptureDelta(_ context.Context, _ *runtime.PodHandle) (string, error) {
@@ -144,7 +149,12 @@ func (f *scriptedPodBackend) CaptureDelta(_ context.Context, _ *runtime.PodHandl
 func (f *scriptedPodBackend) CaptureDeltaAs(_ context.Context, _ *runtime.PodHandle, _ string) (string, error) {
 	return "", nil
 }
-func (f *scriptedPodBackend) ReleaseDelta(_ context.Context, _ string) error { return nil }
+func (f *scriptedPodBackend) ReleaseDelta(_ context.Context, spawnID string) error {
+	f.mu.Lock()
+	f.releasedDelta = spawnID
+	f.mu.Unlock()
+	return nil
+}
 func (f *scriptedPodBackend) ExportDelta(_ context.Context, spawnID string, w io.Writer) error {
 	_, err := w.Write([]byte(runtime.DeltaTag(spawnID)))
 	return err

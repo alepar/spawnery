@@ -646,14 +646,16 @@ type placementOverride struct {
 type rootfsRestorePins struct {
 	SourceGeneration uint64
 	Pins             []store.RootfsArtifactPin
+	LocalOnly        bool
 }
 
 func schedulerRootfsRestore(rootfs *rootfsRestorePins) *scheduler.RootfsRestore {
 	if rootfs == nil || len(rootfs.Pins) == 0 {
 		return nil
 	}
-	out := make([]*nodev1.RootfsArtifact, 0, len(rootfs.Pins))
-	for _, pin := range rootfs.Pins {
+	pins := sortedRootfsArtifactPins(rootfs.Pins)
+	out := make([]*nodev1.RootfsArtifact, 0, len(pins))
+	for _, pin := range pins {
 		out = append(out, &nodev1.RootfsArtifact{
 			ArtifactId:       pin.ArtifactID,
 			Generation:       pin.Generation,
@@ -664,7 +666,7 @@ func schedulerRootfsRestore(rootfs *rootfsRestorePins) *scheduler.RootfsRestore 
 			UncompressedSize: pin.UncompressedSize,
 		})
 	}
-	return &scheduler.RootfsRestore{SourceGeneration: rootfs.SourceGeneration, Artifacts: out}
+	return &scheduler.RootfsRestore{SourceGeneration: rootfs.SourceGeneration, Artifacts: out, LocalOnly: rootfs.LocalOnly}
 }
 
 func rootfsPinsFromSuspend(sc *nodev1.SuspendComplete, sourceGeneration uint64, baseImageDigest string) ([]store.RootfsArtifactPin, error) {
@@ -694,6 +696,10 @@ func rootfsPinsFromSuspend(sc *nodev1.SuspendComplete, sourceGeneration uint64, 
 			ContentDigest:    art.GetContentDigest(),
 			UncompressedSize: art.GetUncompressedSize(),
 		})
+	}
+	pins = sortedRootfsArtifactPins(pins)
+	if err := validateRootfsArtifactPinChain(pins); err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
 	return pins, nil
 }

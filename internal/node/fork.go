@@ -217,6 +217,8 @@ func (a *attacher) failedForkCleanup(ctx context.Context, m *nodev1.FailedForkCl
 		err = a.mgr.EmptyForkBucket(ctx, m.GetForkSpawnId(), m.GetBucket())
 	case nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_DROP_BUCKET:
 		err = a.mgr.DropForkBucket(ctx, m.GetForkSpawnId(), m.GetBucket())
+	case nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_RELEASE_DELTA:
+		err = a.mgr.ReleaseForkDelta(ctx, m.GetForkSpawnId())
 	default:
 		err = fmt.Errorf("unknown failed fork cleanup op %s", m.GetOp())
 	}

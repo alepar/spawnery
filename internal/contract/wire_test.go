@@ -17,7 +17,7 @@ func TestNodeContractFields(t *testing.T) {
 		Mounts:                 []*nodev1.MountBinding{{Name: "main", BackendUri: "managed:repo"}},
 		RootfsSourceGeneration: 6,
 		RootfsArtifacts: []*nodev1.RootfsArtifact{{
-			ArtifactId: "artifact-rootfs-gen6", Generation: 6, BaseImageDigest: "agent@sha256:base",
+			ArtifactId: "artifact-rootfs-gen6", Generation: 6, Sequence: 1, BaseImageDigest: "agent@sha256:base",
 			Format: "oci_layout",
 		}},
 	}
@@ -35,7 +35,7 @@ func TestNodeContractFields(t *testing.T) {
 			SpawnId: "sp1", Generation: 7,
 			Markers: []*nodev1.MountMarker{{Name: "main", Marker: "spawnery-suspend/sp1/7"}},
 			RootfsArtifacts: []*nodev1.RootfsArtifact{{
-				ArtifactId: "artifact-rootfs-gen7", Generation: 7, BaseImageDigest: "agent@sha256:base",
+				ArtifactId: "artifact-rootfs-gen7", Generation: 7, Sequence: 1, BaseImageDigest: "agent@sha256:base",
 			}},
 		}}}
 
@@ -64,7 +64,7 @@ func TestNodeContractFields(t *testing.T) {
 	sc := &nodev1.SuspendComplete{SpawnId: "sp1", Generation: 7,
 		Markers: []*nodev1.MountMarker{{Name: "main", Marker: "spawnery-suspend/sp1/7"}},
 		RootfsArtifacts: []*nodev1.RootfsArtifact{{
-			ArtifactId: "artifact-rootfs-gen7", Generation: 7, BaseImageDigest: "agent@sha256:base",
+			ArtifactId: "artifact-rootfs-gen7", Generation: 7, Sequence: 1, BaseImageDigest: "agent@sha256:base",
 		}}}
 	scb, err := proto.Marshal(sc)
 	if err != nil {
@@ -97,7 +97,7 @@ func TestNodeForkMessagesExist(t *testing.T) {
 		ForkSpawnId:     "sp-fork",
 		TransferSetId:   "ts-1",
 		Mounts:          []*nodev1.MountMarker{{Name: "work", Marker: "kopia-manifest"}},
-		RootfsArtifacts: []*nodev1.RootfsArtifact{{ArtifactId: "rootfs-1", Generation: 1}},
+		RootfsArtifacts: []*nodev1.RootfsArtifact{{ArtifactId: "rootfs-1", Generation: 1, Sequence: 1}},
 	}
 	reply := &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_ForkSameNodeComplete{ForkSameNodeComplete: complete}}
 	if reply.GetForkSameNodeComplete().GetForkSpawnId() != "sp-fork" {

@@ -546,13 +546,14 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.resumeProgress(st.SpawnId, st.Generation, "starting", "creating containers")
 	sp, err := a.mgr.CreateWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation,
 		spawnlet.AgentSelection{
-			Image:                  st.Image,
-			RunnableID:             st.RunnableId,
-			Mode:                   st.Mode,
-			BaseImageDigest:        st.GetBaseImageDigest(),
-			RootfsSourceGeneration: st.GetRootfsSourceGeneration(),
-			RootfsArtifacts:        rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
-			Artifacts:              artifactsFromProto(st.GetArtifacts()),
+			Image:                    st.Image,
+			RunnableID:               st.RunnableId,
+			Mode:                     st.Mode,
+			BaseImageDigest:          st.GetBaseImageDigest(),
+			RootfsSourceGeneration:   st.GetRootfsSourceGeneration(),
+			RootfsArtifacts:          rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
+			RootfsArtifactsLocalOnly: st.GetRootfsArtifactsLocalOnly(),
+			Artifacts:                artifactsFromProto(st.GetArtifacts()),
 			ProgressFunc: func(phase, detail string) {
 				a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
 			},

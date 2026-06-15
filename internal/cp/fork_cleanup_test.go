@@ -43,6 +43,13 @@ func (r *recordingForkResources) DropForkBucket(ctx context.Context, nodeID, for
 	return nil
 }
 
+func (r *recordingForkResources) ReleaseForkDelta(ctx context.Context, nodeID, forkID string) error {
+	_ = ctx
+	_ = nodeID
+	r.ops = append(r.ops, "release-delta:"+forkID)
+	return nil
+}
+
 func newForkCleanupTestServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
 	s, _, _ := newTestServer(t)
@@ -94,6 +101,7 @@ func TestUnwindFailedForkOrderingAndRowLast(t *testing.T) {
 		"revoke-key:fork-1",
 		"empty-bucket:spawnery-spawn-fork-1",
 		"drop-bucket:spawnery-spawn-fork-1",
+		"release-delta:fork-1",
 		"delete-row:fork-1",
 	}
 	if got := res.ops; len(got) != len(want) {
@@ -183,6 +191,7 @@ func TestSweepFailedForksIsIdempotent(t *testing.T) {
 		"revoke-key:fork-sweep",
 		"empty-bucket:spawnery-spawn-fork-sweep",
 		"drop-bucket:spawnery-spawn-fork-sweep",
+		"release-delta:fork-sweep",
 		"delete-row:fork-sweep",
 	}
 	if got := res.ops; len(got) != len(want) {
@@ -295,6 +304,7 @@ func TestSweepFailedForksReclaimsStaleRestoringForks(t *testing.T) {
 		"revoke-key:fork-stale-restoring",
 		"empty-bucket:spawnery-spawn-fork-stale-restoring",
 		"drop-bucket:spawnery-spawn-fork-stale-restoring",
+		"release-delta:fork-stale-restoring",
 		"delete-row:fork-stale-restoring",
 	}
 	if got := res.ops; len(got) != len(want) {
@@ -422,6 +432,7 @@ func TestSweepFailedForksCleansForkWithoutLiveContainer(t *testing.T) {
 		"revoke-key:fork-no-live",
 		"empty-bucket:spawnery-spawn-fork-no-live",
 		"drop-bucket:spawnery-spawn-fork-no-live",
+		"release-delta:fork-no-live",
 		"delete-row:fork-no-live",
 	}
 	if got := res.ops; len(got) != len(want) {
@@ -506,6 +517,7 @@ func TestSweepFailedForksUsesDefaultNodeResources(t *testing.T) {
 		nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_REVOKE_GENERATION,
 		nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_EMPTY_BUCKET,
 		nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_DROP_BUCKET,
+		nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_RELEASE_DELTA,
 	}
 	if got := sender.cleanupOps(); len(got) != len(wantOps) {
 		t.Fatalf("cleanup ops = %v want %v", got, wantOps)
@@ -577,6 +589,7 @@ func TestStartReconcilerSweepsFailedForks(t *testing.T) {
 		"revoke-key:fork-reconcile",
 		"empty-bucket:spawnery-spawn-fork-reconcile",
 		"drop-bucket:spawnery-spawn-fork-reconcile",
+		"release-delta:fork-reconcile",
 		"delete-row:fork-reconcile",
 	}
 	if got := res.ops; len(got) != len(want) {
@@ -622,6 +635,7 @@ func TestReconcileTickSweepsFailedForksPeriodically(t *testing.T) {
 		"revoke-key:fork-periodic",
 		"empty-bucket:spawnery-spawn-fork-periodic",
 		"drop-bucket:spawnery-spawn-fork-periodic",
+		"release-delta:fork-periodic",
 		"delete-row:fork-periodic",
 	}
 	if got := res.ops; len(got) != len(want) {

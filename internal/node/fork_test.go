@@ -11,6 +11,7 @@ import (
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/runtime"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/storage/journal"
 )
@@ -158,6 +159,67 @@ func TestForkSameNodeEmitsCompletion(t *testing.T) {
 	}
 }
 
+func TestSameNodeForkStartCarriesForkRootfsMetadataWithoutRestore(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose, ensureImageRef: runtime.DeltaTag("sp-fork")}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	source, ok := mgr.Store().Get("sp-source")
+	if !ok {
+		t.Fatal("missing source")
+	}
+	source.RootfsArtifacts = []spawnlet.RootfsArtifact{{
+		ArtifactID: "source-rootfs-gen9-seq1", Generation: 9, Sequence: 1,
+		BaseImageDigest: "agent@sha256:base", Format: journal.ArtifactFormatOCILayout,
+	}}
+	source.DeltaDepth = 1
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkSameNode{ForkSameNode: &nodev1.ForkSameNode{
+		SourceSpawnId: "sp-source", ForkSpawnId: "sp-fork", SourceGeneration: 9, TargetGeneration: 1, TransferSetId: "ts-1",
+	}}})
+
+	waitFor(t, "ForkSameNodeComplete", func() bool { return lastForkSameNodeComplete(fs) != nil })
+	fc := lastForkSameNodeComplete(fs)
+	if fc.GetError() != "" {
+		t.Fatalf("ForkSameNodeComplete error = %q", fc.GetError())
+	}
+	if len(fc.GetRootfsArtifacts()) != 2 {
+		t.Fatalf("fork rootfs artifact chain = %+v, want inherited + fork top layer", fc.GetRootfsArtifacts())
+	}
+
+	a.startSpawn(context.Background(), &nodev1.StartSpawn{
+		SpawnId: "sp-fork", AppRef: writeNodeJournalApp(t), Model: "m", Generation: 1,
+		BaseImageDigest:          "agent@sha256:base",
+		RootfsSourceGeneration:   fc.GetRootfsArtifacts()[0].GetGeneration(),
+		RootfsArtifacts:          fc.GetRootfsArtifacts(),
+		RootfsArtifactsLocalOnly: true,
+	})
+
+	if got := lastPhase(fs.phasesFor("sp-fork")); got != nodev1.SpawnPhase_ACTIVE {
+		t.Fatalf("phase after fork start = %v, want ACTIVE", got)
+	}
+	be.mu.Lock()
+	imported := be.imported
+	be.mu.Unlock()
+	if imported {
+		t.Fatal("same-node fork start must attach rootfs metadata without importing artifacts")
+	}
+	fork, ok := mgr.Store().Get("sp-fork")
+	if !ok {
+		t.Fatal("missing live fork")
+	}
+	if len(fork.RootfsArtifacts) != 2 {
+		t.Fatalf("live fork rootfs artifact chain = %+v, want copied fork metadata", fork.RootfsArtifacts)
+	}
+	if fork.DeltaDepth != 2 {
+		t.Fatalf("fork DeltaDepth = %d, want 2", fork.DeltaDepth)
+	}
+	if fork.LaunchImageRef != runtime.DeltaTag("sp-fork") {
+		t.Fatalf("fork LaunchImageRef = %q, want local fork delta", fork.LaunchImageRef)
+	}
+}
+
 func TestForkSameNodeFailureCompletionDoesNotMarkForkActive(t *testing.T) {
 	be := &scriptedPodBackend{script: scriptGoose}
 	mgr := newForkNodeManager(t, be)
@@ -233,6 +295,36 @@ func TestUnpauseIfPausedEmitsCompletion(t *testing.T) {
 	got := lastUnpauseIfPausedComplete(fs)
 	if got.GetSpawnId() != "sp-source" || got.GetGeneration() != 9 || got.GetError() != "" {
 		t.Fatalf("UnpauseIfPausedComplete = %+v", got)
+	}
+}
+
+func TestFailedForkCleanupReleasesDelta(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_FailedForkCleanup{FailedForkCleanup: &nodev1.FailedForkCleanup{
+		RequestId:   "cleanup-1",
+		ForkSpawnId: "sp-fork",
+		Op:          nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_RELEASE_DELTA,
+	}}})
+
+	waitFor(t, "failed fork cleanup completion", func() bool {
+		fs.mu.Lock()
+		defer fs.mu.Unlock()
+		for _, msg := range fs.sent {
+			if done := msg.GetFailedForkCleanupComplete(); done != nil && done.GetRequestId() == "cleanup-1" {
+				return true
+			}
+		}
+		return false
+	})
+	be.mu.Lock()
+	released := be.releasedDelta
+	be.mu.Unlock()
+	if released != "sp-fork" {
+		t.Fatalf("ReleaseDelta called with %q, want sp-fork", released)
 	}
 }
 

@@ -48,6 +48,8 @@ type Manager struct {
 	mu          sync.Mutex
 	spawns      map[repoKey]*spawnState
 	ownerSealed map[string]bool // spawnID -> routed to owner-sealed custody
+	closeHolds  map[string]int
+	closeWaits  map[string]chan struct{}
 }
 
 type repoKey struct {
@@ -77,7 +79,14 @@ func NewManager(cfg Config) (*Manager, error) {
 	if clock == nil {
 		clock = systemClock{}
 	}
-	return &Manager{cfg: cfg, clock: clock, spawns: map[repoKey]*spawnState{}, ownerSealed: map[string]bool{}}, nil
+	return &Manager{
+		cfg:         cfg,
+		clock:       clock,
+		spawns:      map[repoKey]*spawnState{},
+		ownerSealed: map[string]bool{},
+		closeHolds:  map[string]int{},
+		closeWaits:  map[string]chan struct{}{},
+	}, nil
 }
 
 var _ JournalManager = (*Manager)(nil)
@@ -396,6 +405,9 @@ func (m *Manager) FullMaintenance(ctx context.Context, spawnID string) error {
 // Close implements JournalManager: release the spawn's repo handle + scheduler
 // state. Does NOT forget the sealed password (that is Forget, on spawn delete).
 func (m *Manager) Close(ctx context.Context, spawnID string) error {
+	if err := m.waitCloseHolds(ctx, spawnID); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	var states []*spawnState
 	for key, s := range m.spawns {
@@ -415,4 +427,54 @@ func (m *Manager) Close(ctx context.Context, spawnID string) error {
 		}
 	}
 	return firstErr
+}
+
+// HoldClose prevents Close(spawnID) from closing the repo while a caller is
+// still using source manifests/artifacts after the live source has been restored.
+func (m *Manager) HoldClose(spawnID string) func() {
+	m.mu.Lock()
+	if m.closeHolds == nil {
+		m.closeHolds = map[string]int{}
+	}
+	if m.closeWaits == nil {
+		m.closeWaits = map[string]chan struct{}{}
+	}
+	m.closeHolds[spawnID]++
+	m.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			m.closeHolds[spawnID]--
+			if m.closeHolds[spawnID] <= 0 {
+				delete(m.closeHolds, spawnID)
+				if ch := m.closeWaits[spawnID]; ch != nil {
+					close(ch)
+					delete(m.closeWaits, spawnID)
+				}
+			}
+			m.mu.Unlock()
+		})
+	}
+}
+
+func (m *Manager) waitCloseHolds(ctx context.Context, spawnID string) error {
+	for {
+		m.mu.Lock()
+		if m.closeHolds[spawnID] == 0 {
+			m.mu.Unlock()
+			return nil
+		}
+		ch := m.closeWaits[spawnID]
+		if ch == nil {
+			ch = make(chan struct{})
+			m.closeWaits[spawnID] = ch
+		}
+		m.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ch:
+		}
+	}
 }

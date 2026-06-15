@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"spawnery/internal/runtime"
 	"spawnery/internal/storage/journal"
@@ -73,6 +74,9 @@ type recordingForkJournal struct {
 	artifactDescs    map[string]journal.ArtifactDescriptor
 	putArtifacts     []journal.ArtifactDescriptor
 	putPayloads      []string
+	closeMu          sync.Mutex
+	closeHolds       map[string]int
+	closeWaiters     map[string]chan struct{}
 }
 
 func (j *recordingForkJournal) RequestSnapshot(_ context.Context, spawnID string, gen uint64, _ journal.Mount) {
@@ -166,10 +170,62 @@ func (j *recordingForkJournal) Close(ctx context.Context, spawnID string) error 
 		j.closeSawCancel = true
 		return err
 	}
+	if err := j.waitCloseHold(ctx, spawnID); err != nil {
+		j.closeSawCancel = true
+		return err
+	}
 	if j.suspended != nil {
 		delete(j.suspended, spawnID)
 	}
 	return nil
+}
+
+func (j *recordingForkJournal) HoldClose(spawnID string) func() {
+	j.closeMu.Lock()
+	if j.closeHolds == nil {
+		j.closeHolds = map[string]int{}
+	}
+	if j.closeWaiters == nil {
+		j.closeWaiters = map[string]chan struct{}{}
+	}
+	j.closeHolds[spawnID]++
+	j.closeMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			j.closeMu.Lock()
+			j.closeHolds[spawnID]--
+			if j.closeHolds[spawnID] <= 0 {
+				delete(j.closeHolds, spawnID)
+				if ch := j.closeWaiters[spawnID]; ch != nil {
+					close(ch)
+					delete(j.closeWaiters, spawnID)
+				}
+			}
+			j.closeMu.Unlock()
+		})
+	}
+}
+
+func (j *recordingForkJournal) waitCloseHold(ctx context.Context, spawnID string) error {
+	for {
+		j.closeMu.Lock()
+		if j.closeHolds[spawnID] == 0 {
+			j.closeMu.Unlock()
+			return nil
+		}
+		ch := j.closeWaiters[spawnID]
+		if ch == nil {
+			ch = make(chan struct{})
+			j.closeWaiters[spawnID] = ch
+		}
+		j.closeMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ch:
+		}
+	}
 }
 
 func newForkTestManager(t *testing.T, rec *forkOpRecorder, j *recordingForkJournal) (*Manager, *recordingForkBackend) {
@@ -298,6 +354,141 @@ func TestForkSameNodeCopiesInheritedRootfsArtifactChainAsForkOwned(t *testing.T)
 	if len(j.putArtifacts) != 2 || j.putArtifacts[0].SpawnID != "sp-fork" || j.putArtifacts[0].Generation != 1 ||
 		j.putArtifacts[0].ArtifactID != inherited.ArtifactID || j.putPayloads[0] != "source-rootfs-layer-1" {
 		t.Fatalf("copied inherited artifact puts=%+v payloads=%+v", j.putArtifacts, j.putPayloads)
+	}
+}
+
+func TestForkSameNodeCopiesInheritedRootfsArtifactChainInSequenceOrder(t *testing.T) {
+	ctx := context.Background()
+	rec := &forkOpRecorder{}
+	seq1 := journal.ArtifactDescriptor{
+		ArtifactID:      "source-rootfs-gen9-seq1",
+		Type:            journal.ArtifactRootfsDelta,
+		Generation:      9,
+		Sequence:        1,
+		BaseImageDigest: "agent@sha256:base",
+		Format:          journal.ArtifactFormatOCILayout,
+	}
+	seq2 := journal.ArtifactDescriptor{
+		ArtifactID:      "source-rootfs-gen9-seq2",
+		Type:            journal.ArtifactRootfsDelta,
+		Generation:      9,
+		Sequence:        2,
+		BaseImageDigest: "agent@sha256:base",
+		Format:          journal.ArtifactFormatOCILayout,
+	}
+	j := &recordingForkJournal{
+		rec: rec,
+		artifactPayloads: map[string][]byte{
+			forkArtifactKey("sp-source", 9, seq1.ArtifactID): []byte("source-rootfs-layer-1"),
+			forkArtifactKey("sp-source", 9, seq2.ArtifactID): []byte("source-rootfs-layer-2"),
+		},
+		artifactDescs: map[string]journal.ArtifactDescriptor{
+			forkArtifactKey("sp-source", 9, seq1.ArtifactID): seq1,
+			forkArtifactKey("sp-source", 9, seq2.ArtifactID): seq2,
+		},
+	}
+	m, _ := newForkTestManager(t, rec, j)
+	putForkSource(t, m, "sp-source", 9)
+	src, ok := m.store.Get("sp-source")
+	if !ok {
+		t.Fatal("missing source")
+	}
+	src.LaunchImageRef = runtime.DeltaTag("sp-source")
+	src.RootfsArtifacts = []RootfsArtifact{rootfsArtifactFromJournal(seq2), rootfsArtifactFromJournal(seq1)}
+	src.DeltaDepth = 2
+
+	res, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
+		SourceSpawnID:    "sp-source",
+		ForkSpawnID:      "sp-fork",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+	})
+	if err != nil {
+		t.Fatalf("ForkSameNode: %v", err)
+	}
+	if len(res.RootfsArtifacts) != 3 {
+		t.Fatalf("rootfs artifact chain = %+v, want two inherited plus fork top layer", res.RootfsArtifacts)
+	}
+	if res.RootfsArtifacts[0].ArtifactID != seq1.ArtifactID || res.RootfsArtifacts[1].ArtifactID != seq2.ArtifactID ||
+		res.RootfsArtifacts[2].Sequence != 3 {
+		t.Fatalf("rootfs artifact chain order = %+v, want seq1, seq2, top seq3", res.RootfsArtifacts)
+	}
+	if len(j.putArtifacts) < 2 || j.putArtifacts[0].ArtifactID != seq1.ArtifactID || j.putArtifacts[1].ArtifactID != seq2.ArtifactID {
+		t.Fatalf("copied inherited artifact puts = %+v, want sequence order", j.putArtifacts)
+	}
+}
+
+func TestForkSameNodeFailsClosedWithUnexportedLocalRootfsHistory(t *testing.T) {
+	ctx := context.Background()
+	rec := &forkOpRecorder{}
+	inherited := journal.ArtifactDescriptor{
+		ArtifactID:      "source-rootfs-gen9-seq1",
+		Type:            journal.ArtifactRootfsDelta,
+		Generation:      9,
+		Sequence:        1,
+		BaseImageDigest: "agent@sha256:base",
+		Format:          journal.ArtifactFormatOCILayout,
+	}
+	j := &recordingForkJournal{rec: rec}
+	m, _ := newForkTestManager(t, rec, j)
+	putForkSource(t, m, "sp-source", 9)
+	src, ok := m.store.Get("sp-source")
+	if !ok {
+		t.Fatal("missing source")
+	}
+	src.LaunchImageRef = runtime.DeltaTag("sp-source")
+	src.RootfsArtifacts = []RootfsArtifact{rootfsArtifactFromJournal(inherited)}
+	src.DeltaDepth = 2
+
+	_, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
+		SourceSpawnID:    "sp-source",
+		ForkSpawnID:      "sp-fork",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unexported local rootfs delta history") {
+		t.Fatalf("ForkSameNode error = %v, want unexported local rootfs delta history", err)
+	}
+	for _, op := range rec.snapshot() {
+		if strings.HasPrefix(op, "capture-rootfs-as:") {
+			t.Fatalf("must fail before rootfs capture, ops=%v", rec.snapshot())
+		}
+	}
+}
+
+func TestForkSameNodeHoldsSourceJournalAfterSourceRestored(t *testing.T) {
+	ctx := context.Background()
+	rec := &forkOpRecorder{}
+	j := &recordingForkJournal{rec: rec}
+	m, _ := newForkTestManager(t, rec, j)
+	putForkSource(t, m, "sp-source", 9)
+	closeDone := make(chan struct{})
+
+	_, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
+		SourceSpawnID:    "sp-source",
+		ForkSpawnID:      "sp-fork",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+		SourceRestored: func() error {
+			go func() {
+				_ = j.Close(context.Background(), "sp-source")
+				close(closeDone)
+			}()
+			select {
+			case <-closeDone:
+				t.Fatal("source journal close completed while fork seeding still needed source repo")
+			default:
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ForkSameNode: %v", err)
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("source journal close did not complete after fork seeding released its hold")
 	}
 }
 

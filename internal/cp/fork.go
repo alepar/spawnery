@@ -168,6 +168,21 @@ func (s *Server) failForkAfterRow(ctx context.Context, forkID, transferSetID str
 	return cause
 }
 
+func (s *Server) activateForkAndTransferSet(ctx context.Context, forkID, transferSetID, nodeID string, targetGeneration uint64) error {
+	return s.st.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.Spawns().SetActive(ctx, forkID, nodeID, int64(targetGeneration)); err != nil {
+			return fmt.Errorf("mark fork active: %w", err)
+		}
+		if err := tx.TransferSets().SetTargetNode(ctx, transferSetID, nodeID, s.now().UnixNano()); err != nil {
+			return fmt.Errorf("update transfer set target node: %w", err)
+		}
+		if err := tx.TransferSets().SetStatus(ctx, transferSetID, store.TransferSetActive, s.now().UnixNano()); err != nil {
+			return fmt.Errorf("mark transfer set active: %w", err)
+		}
+		return nil
+	})
+}
+
 func (s *Server) restoreForkingSource(ctx context.Context, sourceID, leaseID string, generation int64) error {
 	sp, err := s.st.Spawns().Get(ctx, sourceID)
 	if err != nil {
@@ -198,7 +213,7 @@ func (s *Server) restoreForkingSourceAfterUnpause(ctx context.Context, sourceID,
 	return s.restoreForkingSource(ctx, sourceID, leaseID, generation)
 }
 
-func (s *Server) startFork(ctx context.Context, owner, sourceID string, fork store.Spawn, nodeID string, targetGeneration uint64, rootfsPins []store.RootfsArtifactPin) (string, error) {
+func (s *Server) startFork(ctx context.Context, owner, sourceID string, fork store.Spawn, nodeID string, targetGeneration uint64, rootfsPins []store.RootfsArtifactPin, rootfsLocalOnly bool) (string, error) {
 	placement := registry.Placement{Owner: owner, Image: fork.Image, TargetNodeID: nodeID}
 	artifacts, err := s.st.Spawns().GetArtifacts(ctx, fork.ID)
 	if err != nil {
@@ -215,7 +230,7 @@ func (s *Server) startFork(ctx context.Context, owner, sourceID string, fork sto
 			return "", connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("await fork SignedIntent: %w", err))
 		}
 	}
-	rootfs := &rootfsRestorePins{SourceGeneration: targetGeneration, Pins: rootfsPins}
+	rootfs := &rootfsRestorePins{SourceGeneration: targetGeneration, Pins: rootfsPins, LocalOnly: rootfsLocalOnly}
 	return s.sched.Provision(ctx, fork.ID, fork.AppRef, fork.Model, fork.Name, fork.AppID, fork.RunnableID, fork.Mode,
 		targetGeneration, placement, env, fork.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(artifacts))
 }
@@ -507,26 +522,16 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 	if nodeID == "" {
 		nodeID = targetNode
 	}
-	startRootfsPins := result.RootfsPins
-	if nodeID == live.NodeID {
-		startRootfsPins = nil
-	}
-	nodeID, err = s.startFork(ctx, owner, sourceID, fork, nodeID, targetGeneration, startRootfsPins)
+	nodeID, err = s.startFork(ctx, owner, sourceID, fork, nodeID, targetGeneration, result.RootfsPins, nodeID == live.NodeID)
 	if err != nil {
 		s.rt.StopOnNode(forkID)
 		s.rt.Drop(forkID)
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, asConnectError(connect.CodeInternal, err))
 	}
-	if err := s.st.Spawns().SetActive(ctx, forkID, nodeID, int64(targetGeneration)); err != nil {
+	if err := s.activateForkAndTransferSet(ctx, forkID, transferSetID, nodeID, targetGeneration); err != nil {
 		s.rt.StopOnNode(forkID)
 		s.rt.Drop(forkID)
-		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("mark fork active: %w", err)))
-	}
-	if err := s.st.TransferSets().SetTargetNode(ctx, transferSetID, nodeID, s.now().UnixNano()); err != nil {
-		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("update transfer set target node: %w", err)))
-	}
-	if err := s.st.TransferSets().SetStatus(ctx, transferSetID, store.TransferSetActive, s.now().UnixNano()); err != nil {
-		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("mark transfer set active: %w", err)))
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, err))
 	}
 
 	return connect.NewResponse(&cpv1.ForkSpawnResponse{

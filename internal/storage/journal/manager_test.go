@@ -205,6 +205,39 @@ func TestManagerUsesGenerationBackendForSnapshotArtifactAndRestore(t *testing.T)
 	}
 }
 
+func TestCloseWaitsForCloseHold(t *testing.T) {
+	ctx := context.Background()
+	m := newTestManager(t)
+	const spawnID = "spawn-held"
+	src := t.TempDir()
+	writeFile(t, src, "work.txt", "held")
+	if _, err := m.FinalSnapshot(ctx, spawnID, 1, []Mount{{Name: "work", HostDir: src, Class: NodeLocal}}); err != nil {
+		t.Fatalf("FinalSnapshot: %v", err)
+	}
+
+	release := m.HoldClose(spawnID)
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- m.Close(context.Background(), spawnID)
+	}()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned while hold was active: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close after hold release: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after hold release")
+	}
+}
+
 // TestFinalSnapshotSkipsEphemeralAndSecretMounts verifies the journaler captures
 // only journaled, non-secret mounts (design §1a / §2 secret exclusion).
 func TestFinalSnapshotSkipsEphemeralAndSecretMounts(t *testing.T) {

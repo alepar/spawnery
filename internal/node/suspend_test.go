@@ -244,7 +244,7 @@ func TestStartSpawnRestoresPinnedRootfsArtifacts(t *testing.T) {
 		BaseImageDigest:        "agent@sha256:base",
 		RootfsSourceGeneration: 7,
 		RootfsArtifacts: []*nodev1.RootfsArtifact{{
-			ArtifactId: "artifact-rootfs-gen7", Generation: 7, BaseImageDigest: "agent@sha256:base",
+			ArtifactId: "artifact-rootfs-gen7", Generation: 7, Sequence: 1, BaseImageDigest: "agent@sha256:base",
 			Format: journal.ArtifactFormatOCILayout,
 		}},
 	})

@@ -18,6 +18,7 @@ type failedForkResources interface {
 	RevokeForkGeneration(ctx context.Context, nodeID, forkID string, gen uint64) error
 	EmptyForkBucket(ctx context.Context, nodeID, forkID, bucket string) error
 	DropForkBucket(ctx context.Context, nodeID, forkID, bucket string) error
+	ReleaseForkDelta(ctx context.Context, nodeID, forkID string) error
 }
 
 const defaultFailedForkCleanupTimeout = 30 * time.Second
@@ -82,6 +83,10 @@ func (r *nodeFailedForkResources) EmptyForkBucket(ctx context.Context, nodeID, f
 
 func (r *nodeFailedForkResources) DropForkBucket(ctx context.Context, nodeID, forkID, bucket string) error {
 	return r.send(ctx, nodeID, forkID, 0, bucket, nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_DROP_BUCKET)
+}
+
+func (r *nodeFailedForkResources) ReleaseForkDelta(ctx context.Context, nodeID, forkID string) error {
+	return r.send(ctx, nodeID, forkID, 0, "", nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_RELEASE_DELTA)
 }
 
 func (r *nodeFailedForkResources) send(ctx context.Context, nodeID, forkID string, gen uint64, bucket string, op nodev1.FailedForkCleanupOp) error {
@@ -190,6 +195,9 @@ func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) err
 		return err
 	}
 	if err := cfg.Resources.DropForkBucket(ctx, nodeID, cfg.ForkID, cfg.Bucket); err != nil {
+		return err
+	}
+	if err := cfg.Resources.ReleaseForkDelta(ctx, nodeID, cfg.ForkID); err != nil {
 		return err
 	}
 	if obs, ok := cfg.Resources.(failedForkRowDeleteObserver); ok {

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"spawnery/internal/runtime"
@@ -30,6 +31,10 @@ type ForkSameNodeResult struct {
 
 type generationHold interface {
 	Release()
+}
+
+type journalCloseHolder interface {
+	HoldClose(spawnID string) func()
 }
 
 func (m *Manager) SetGenerationKeyManager(g *journal.GenerationKeyManager) {
@@ -98,6 +103,9 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 	if m.journal == nil {
 		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: journaler is required to seed fork repo")
 	}
+	if err := requirePortableRootfsHistory("fork same-node", sp.ID, sp.DeltaDepth, sp.RootfsArtifacts); err != nil {
+		return ForkSameNodeResult{}, err
+	}
 	if m.forkGenerationHold == nil {
 		if m.forkGenerationHoldRequired {
 			return ForkSameNodeResult{}, fmt.Errorf("fork same-node: generation hold is required but no generation key manager is wired")
@@ -165,6 +173,11 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 	if err := restoreSource(); err != nil {
 		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: restore source after capture: %w", err)
 	}
+	releaseSourceJournalCloseHold := func() {}
+	if holder, ok := m.journal.(journalCloseHolder); ok {
+		releaseSourceJournalCloseHold = holder.HoldClose(sp.ID)
+	}
+	defer releaseSourceJournalCloseHold()
 	if req.SourceRestored != nil {
 		if err := req.SourceRestored(); err != nil {
 			return ForkSameNodeResult{}, fmt.Errorf("fork same-node: report source restored: %w", err)
@@ -237,11 +250,15 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 }
 
 func (m *Manager) copyForkRootfsArtifacts(ctx context.Context, sp *Spawn, forkID string, targetGen uint64) ([]RootfsArtifact, error) {
-	if len(sp.RootfsArtifacts) == 0 {
+	artifacts, err := sortedPortableRootfsArtifacts("fork same-node", sp.ID, sp.DeltaDepth, sp.RootfsArtifacts)
+	if err != nil {
+		return nil, err
+	}
+	if len(artifacts) == 0 {
 		return nil, nil
 	}
-	out := make([]RootfsArtifact, 0, len(sp.RootfsArtifacts))
-	for _, art := range sp.RootfsArtifacts {
+	out := make([]RootfsArtifact, 0, len(artifacts))
+	for _, art := range artifacts {
 		if art.ArtifactID == "" {
 			return nil, fmt.Errorf("fork same-node: source rootfs artifact has empty artifact id")
 		}
@@ -315,6 +332,67 @@ func nextRootfsArtifactSequence(deltaDepth int, artifacts []RootfsArtifact) int 
 		}
 	}
 	return next
+}
+
+func maxRootfsArtifactSequence(artifacts []RootfsArtifact) int {
+	var maxSeq int
+	for _, art := range artifacts {
+		if art.Sequence > maxSeq {
+			maxSeq = art.Sequence
+		}
+	}
+	return maxSeq
+}
+
+func requirePortableRootfsHistory(prefix, spawnID string, deltaDepth int, artifacts []RootfsArtifact) error {
+	_, err := sortedPortableRootfsArtifacts(prefix, spawnID, deltaDepth, artifacts)
+	return err
+}
+
+func sortedPortableRootfsArtifacts(prefix, spawnID string, deltaDepth int, artifacts []RootfsArtifact) ([]RootfsArtifact, error) {
+	sorted, err := sortedRootfsArtifactChain(artifacts)
+	if err != nil {
+		return nil, fmt.Errorf("%s for %s: %w", prefix, spawnID, err)
+	}
+	if deltaDepth <= 0 {
+		return sorted, nil
+	}
+	portableDepth := len(sorted)
+	if portableDepth >= deltaDepth {
+		return sorted, nil
+	}
+	return nil, fmt.Errorf("%s for %s: unexported local rootfs delta history (delta_depth=%d portable_depth=%d)",
+		prefix, spawnID, deltaDepth, portableDepth)
+}
+
+func sortedRootfsArtifactChain(artifacts []RootfsArtifact) ([]RootfsArtifact, error) {
+	if len(artifacts) == 0 {
+		return nil, nil
+	}
+	out := cloneRootfsArtifacts(artifacts)
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Sequence < out[j].Sequence
+	})
+	for i, art := range out {
+		if art.Sequence <= 0 {
+			return nil, fmt.Errorf("rootfs artifact chain has missing sequence for artifact %s", art.ArtifactID)
+		}
+		if i > 0 && art.Sequence == out[i-1].Sequence {
+			return nil, fmt.Errorf("rootfs artifact chain has duplicate sequence %d", art.Sequence)
+		}
+		want := i + 1
+		if art.Sequence != want {
+			return nil, fmt.Errorf("rootfs artifact chain has sequence gap: got %d want %d", art.Sequence, want)
+		}
+	}
+	return out, nil
+}
+
+func (m *Manager) ReleaseForkDelta(ctx context.Context, forkID string) error {
+	if m.pod == nil {
+		return fmt.Errorf("failed fork cleanup: pod backend is not wired")
+	}
+	return m.pod.ReleaseDelta(context.WithoutCancel(ctx), forkID)
 }
 
 func (m *Manager) UnpauseIfPaused(ctx context.Context, spawnID string, generation int64) error {

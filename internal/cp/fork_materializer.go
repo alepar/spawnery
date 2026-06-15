@@ -430,5 +430,9 @@ func rootfsPinsFromForkComplete(msg *nodev1.ForkSameNodeComplete, targetGenerati
 			UncompressedSize: art.GetUncompressedSize(),
 		})
 	}
+	pins = sortedRootfsArtifactPins(pins)
+	if err := validateRootfsArtifactPinChain(pins); err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
 	return pins, nil
 }
