@@ -122,7 +122,7 @@ message ArtifactSpec {
 // (the app's display name, with a " 2"/" 3" counter suffix on collision).
 // image + runnable_id (optional today) select the agent container image (FQDN) and the
 // runnable within it (e.g. "goose-acp"); the CP resolves the run mode from the runnable.
-message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; string version = 4; bool pin = 5; string name = 6; string image = 7; string runnable_id = 8; repeated ArtifactSpec artifacts = 9; }
+message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; string version = 4; bool pin = 5; string name = 6; string image = 7; string runnable_id = 8; repeated ArtifactSpec artifacts = 9; string profile_id = 10; }
 message CreateSpawnResponse { string spawn_id = 1; }
 
 message SpawnSummary {
