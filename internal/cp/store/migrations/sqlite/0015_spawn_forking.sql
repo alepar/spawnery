@@ -1,3 +1,5 @@
+-- +goose NO TRANSACTION
+
 -- +goose Up
 -- Add the internal 'forking' source-capture status and its durable capture deadline.
 -- SQLite cannot alter CHECK constraints in place, so recreate the table.
@@ -49,6 +51,16 @@ PRAGMA foreign_keys = ON;
 -- +goose Down
 PRAGMA foreign_keys = OFF;
 
+DROP TABLE IF EXISTS forking_spawn_ids;
+CREATE TEMP TABLE forking_spawn_ids (id TEXT PRIMARY KEY);
+INSERT INTO forking_spawn_ids
+  SELECT id FROM spawns WHERE status = 'forking';
+
+DELETE FROM migration_transfer_sets WHERE spawn_id IN (SELECT id FROM forking_spawn_ids);
+DELETE FROM spawn_artifacts WHERE spawn_id IN (SELECT id FROM forking_spawn_ids);
+DELETE FROM spawn_mounts WHERE spawn_id IN (SELECT id FROM forking_spawn_ids);
+DELETE FROM spawn_containers WHERE spawn_id IN (SELECT id FROM forking_spawn_ids);
+
 CREATE TABLE spawns_old (
   id                 TEXT PRIMARY KEY,
   owner_id           TEXT NOT NULL REFERENCES owners(id),
@@ -89,5 +101,7 @@ ALTER TABLE spawns_old RENAME TO spawns;
 
 CREATE INDEX idx_spawns_owner  ON spawns(owner_id, last_used_at DESC);
 CREATE INDEX idx_spawns_status ON spawns(status);
+
+DROP TABLE forking_spawn_ids;
 
 PRAGMA foreign_keys = ON;
