@@ -111,7 +111,13 @@ func TestDeliverSecretsRelaysOpaqueCiphertext(t *testing.T) {
 	ctx := auth.WithOwner(context.Background(), "alice")
 	_, err := s.DeliverSecrets(ctx, connect.NewRequest(&cpv1.DeliverSecretsRequest{
 		SpawnId: "sp1",
-		Secrets: []*cpv1.SealedSecret{{TargetPath: "gh/hosts.yml", Sealed: ciphertext, SecretId: "gh"}},
+		Secrets: []*cpv1.SealedSecret{{
+			TargetPath: "gh/hosts.yml",
+			Sealed:     ciphertext,
+			SecretId:   "gh",
+			Version:    11,
+			DeliveryId: "delivery-gh-v11",
+		}},
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -132,6 +138,9 @@ func TestDeliverSecretsRelaysOpaqueCiphertext(t *testing.T) {
 	}
 	if sd.Secrets[0].TargetPath != "gh/hosts.yml" || sd.Secrets[0].SecretId != "gh" {
 		t.Fatalf("relayed secret metadata mangled: %+v", sd.Secrets[0])
+	}
+	if sd.Secrets[0].Version != 11 || sd.Secrets[0].DeliveryId != "delivery-gh-v11" {
+		t.Fatalf("relayed delivery metadata = version %d id %q, want version 11 id delivery-gh-v11", sd.Secrets[0].Version, sd.Secrets[0].DeliveryId)
 	}
 }
 

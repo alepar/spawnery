@@ -71,6 +71,14 @@ export interface NodeKey {
   generation:    number;
 }
 
+type DeliverySecret = {
+  secretId:   string;
+  targetPath: string;
+  sealed:     string;
+  version:    number;
+  deliveryId: string;
+};
+
 /**
  * Durability of a spawn's storage, from the owner client's perspective.
  * "ephemeral"     – scratch storage only, no journal; migration is data-loss-free.
@@ -160,7 +168,7 @@ export async function getSpawnNodeKey(spawnId: string): Promise<NodeKey> {
 /** deliverSecrets hands the CP owner-sealed ciphertext to relay to the spawn's live node. */
 async function deliverSecrets(
   spawnId: string,
-  secrets: Array<{ secretId: string; targetPath: string; sealed: string }>,
+  secrets: DeliverySecret[],
 ): Promise<void> {
   await unary<Record<string, never>>("DeliverSecrets", { spawnId, secrets });
 }
@@ -434,7 +442,7 @@ export async function runMigrate(
 
   // Step 4: unseal + re-seal each journal key to the target node.
   onProgress?.({ step: "resealing", resolvedNodeId });
-  const secrets: Array<{ secretId: string; targetPath: string; sealed: string }> = [];
+  const secrets: DeliverySecret[] = [];
   try {
     for (const entry of entries) {
       const aad: InFlightAAD = {
@@ -447,7 +455,7 @@ export async function runMigrate(
       };
       const sealedB64 = await reSealToNode(entry.ciphertext, deviceKeys, hpkePub, aad);
       const secretId = `journal/${entry.mount}`;
-      secrets.push({ secretId, targetPath: secretId, sealed: sealedB64 });
+      secrets.push({ secretId, targetPath: secretId, sealed: sealedB64, version: aad.version, deliveryId: aad.deliveryId });
     }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

@@ -97,6 +97,8 @@ type attacher struct {
 	// synchronized.
 	subkeysMu    sync.Mutex
 	lastSubKeyID string // KeyID of the most recently published sub-key (heartbeat re-publishes only on change)
+
+	secretReplay *secretDeliveryReplay
 }
 
 // pendingClient is a client attach that arrived before its session's pump/relay was registered (the
@@ -119,9 +121,10 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	}
 	const minBackoff, maxBackoff = time.Second, 30 * time.Second
 	backoff := minBackoff
+	secretReplay := newSecretDeliveryReplay()
 	for {
 		start := time.Now()
-		err := runOnce(ctx, mgr, httpc, cfg)
+		err := runOnce(ctx, mgr, httpc, cfg, secretReplay)
 		if ctx.Err() != nil {
 			return ctx.Err() // clean shutdown
 		}
@@ -156,19 +159,20 @@ func registerMessage(cfg Config, running []*nodev1.RunningSpawn, signedSubKey []
 // runOnce serves a single CP connection: dial + Register + heartbeat + receive loop. It returns when
 // the connection ends (stream error) or ctx is cancelled. Everything connection-scoped (heartbeat,
 // pump sessions) is tied to connCtx so it stops cleanly when the connection ends.
-func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config) error {
+func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, secretReplay *secretDeliveryReplay) error {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
-		verifier:   cfg.Verifier,
-		ctrlHTTP:   &http.Client{Timeout: controlPostTimeout},
-		sx:         &realSessionExec{mgr: mgr},
-		pumps:      map[sessionKey]*Pump{},
-		tmuxRelays: map[sessionKey]*tmuxRelay{},
-		sessions:   map[string]*sessionRegistry{},
-		pending:    map[sessionKey][]pendingClient{},
+		verifier:     cfg.Verifier,
+		ctrlHTTP:     &http.Client{Timeout: controlPostTimeout},
+		sx:           &realSessionExec{mgr: mgr},
+		pumps:        map[sessionKey]*Pump{},
+		tmuxRelays:   map[sessionKey]*tmuxRelay{},
+		sessions:     map[string]*sessionRegistry{},
+		pending:      map[sessionKey][]pendingClient{},
+		secretReplay: secretReplay,
 	}
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)

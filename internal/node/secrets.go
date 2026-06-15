@@ -2,7 +2,9 @@ package node
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
@@ -15,6 +17,92 @@ import (
 // On SecretDelivery the node trial-Opens each ciphertext across its retained sub-keys (enforcing AAD
 // equality + the notAfter clock check), then writes the plaintext into the spawn's tmpfs secrets dir
 // at the declared path (0600). Plaintext exists only in this process's memory and that tmpfs.
+
+type secretDeliveryReplayKey struct {
+	spawnID    string
+	generation uint64
+	secretID   string
+}
+
+type secretDeliveryReplayState struct {
+	highWater uint64
+	seen      map[string]struct{}
+}
+
+type secretDeliveryReplay struct {
+	mu         sync.Mutex
+	deliveries map[secretDeliveryReplayKey]*secretDeliveryReplayState
+}
+
+func newSecretDeliveryReplay() *secretDeliveryReplay {
+	return &secretDeliveryReplay{deliveries: map[secretDeliveryReplayKey]*secretDeliveryReplayState{}}
+}
+
+func (r *secretDeliveryReplay) begin(spawnID string, generation uint64, secretID string, version uint64, deliveryID string) (func(), func(), error) {
+	if version == 0 {
+		return nil, nil, fmt.Errorf("missing delivery version")
+	}
+	if deliveryID == "" {
+		return nil, nil, fmt.Errorf("missing delivery id")
+	}
+
+	key := secretDeliveryReplayKey{spawnID: spawnID, generation: generation, secretID: secretID}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	st := r.deliveries[key]
+	if st == nil {
+		st = &secretDeliveryReplayState{seen: map[string]struct{}{}}
+		r.deliveries[key] = st
+	}
+	if version < st.highWater {
+		return nil, nil, fmt.Errorf("stale delivery version %d below accepted high-water %d", version, st.highWater)
+	}
+	if _, ok := st.seen[deliveryID]; ok {
+		return nil, nil, fmt.Errorf("duplicate delivery id %q", deliveryID)
+	}
+	st.seen[deliveryID] = struct{}{}
+
+	done := false
+	commit := func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if done {
+			return
+		}
+		done = true
+		if st := r.deliveries[key]; st != nil && version > st.highWater {
+			st.highWater = version
+		}
+	}
+	rollback := func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if done {
+			return
+		}
+		done = true
+		st := r.deliveries[key]
+		if st == nil {
+			return
+		}
+		delete(st.seen, deliveryID)
+		if st.highWater == 0 && len(st.seen) == 0 {
+			delete(r.deliveries, key)
+		}
+	}
+	return commit, rollback, nil
+}
+
+func (r *secretDeliveryReplay) pruneSpawnOlderThan(spawnID string, generation uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key := range r.deliveries {
+		if key.spawnID == spawnID && key.generation < generation {
+			delete(r.deliveries, key)
+		}
+	}
+}
 
 // publishSubKey returns the current SignedSubKey JSON to advertise on Register, rotating it first if it
 // is past half-life (or absent). Returns nil when the node has no sub-key holder (insecure/dev mode) —
@@ -79,25 +167,34 @@ func (a *attacher) handleSecretDelivery(sd *nodev1.SecretDelivery) {
 		log.Printf("secret-delivery for %s dropped: node has no HPKE sub-key holder", sd.SpawnId)
 		return
 	}
-	now := time.Now()
-	// The in-flight AAD context the node knows out-of-band (design §3 M11). NodeID + NotAfter are filled
-	// per-retained-sub-key by OpenDelivered. Version + DeliveryID are 0/"" for this slice: the
-	// version-monotonic and deliveryId-once stateful checks are documented follow-up hooks (sp-u53.5.4),
-	// matching seal.OpenFromOwner's contract — the owner seals with the same zero values, so AAD matches.
-	base := seal.InFlightAAD{
-		SpawnID:    sd.SpawnId,
-		Generation: sd.Generation,
+	if a.secretReplay == nil {
+		log.Printf("secret-delivery for %s dropped: node has no replay guard", sd.SpawnId)
+		return
 	}
+	a.secretReplay.pruneSpawnOlderThan(sd.SpawnId, sd.Generation)
+	now := time.Now()
 	for _, sec := range sd.Secrets {
 		var sealed seal.NodeSealed
 		if err := json.Unmarshal(sec.Sealed, &sealed); err != nil {
 			log.Printf("secret-delivery %s/%s: malformed sealed payload: %v", sd.SpawnId, sec.SecretId, err)
 			continue
 		}
+		base := seal.InFlightAAD{
+			SpawnID:    sd.SpawnId,
+			Generation: sd.Generation,
+			Version:    sec.Version,
+			DeliveryID: sec.DeliveryId,
+		}
+		commit, rollback, err := a.secretReplay.begin(sd.SpawnId, sd.Generation, sec.SecretId, sec.Version, sec.DeliveryId)
+		if err != nil {
+			log.Printf("secret-delivery %s/%s: replay rejected: %v", sd.SpawnId, sec.SecretId, err)
+			continue
+		}
 		a.subkeysMu.Lock()
 		pt, err := a.cfg.SubKeys.OpenDelivered(&sealed, base, now)
 		a.subkeysMu.Unlock()
 		if err != nil {
+			rollback()
 			log.Printf("secret-delivery %s/%s: unseal failed: %v", sd.SpawnId, sec.SecretId, err)
 			continue
 		}
@@ -112,9 +209,11 @@ func (a *attacher) handleSecretDelivery(sd *nodev1.SecretDelivery) {
 				pt[i] = 0
 			}
 			if derr != nil {
+				rollback()
 				log.Printf("secret-delivery %s/%s: journal key inject failed: %v", sd.SpawnId, sec.SecretId, derr)
 				continue
 			}
+			commit()
 			log.Printf("secret-delivery %s: injected journal key %q (gen %d)", sd.SpawnId, sec.SecretId, sd.Generation)
 			continue
 		}
@@ -126,9 +225,11 @@ func (a *attacher) handleSecretDelivery(sd *nodev1.SecretDelivery) {
 			pt[i] = 0
 		}
 		if werr != nil {
+			rollback()
 			log.Printf("secret-delivery %s/%s: write %q: %v", sd.SpawnId, sec.SecretId, sec.TargetPath, werr)
 			continue
 		}
+		commit()
 		log.Printf("secret-delivery %s: injected secret %q -> %s", sd.SpawnId, sec.SecretId, path)
 	}
 }

@@ -120,7 +120,9 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 	fmt.Fprintf(out, "  resealing %d journal key(s) to node %s...\n", len(entries), sk.NodeID)
 	secrets := make([]*cpv1.SealedSecret, 0, len(entries))
 	for _, e := range entries {
-		sealedJSON, rerr := resealJournalKey(e.Ciphertext, dev, sk, nk.Msg.NodeCertChain, spawnID, nk.Msg.Generation, now)
+		version := nk.Msg.Generation
+		deliveryID := genDeliveryID()
+		sealedJSON, rerr := resealJournalKey(e.Ciphertext, dev, sk, nk.Msg.NodeCertChain, spawnID, nk.Msg.Generation, version, deliveryID, now)
 		if rerr != nil {
 			return fmt.Errorf("reseal journal key for mount %q: %w", e.Mount, rerr)
 		}
@@ -128,6 +130,8 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 			SecretId:   journalkey.SecretID(e.Mount),
 			TargetPath: journalkey.SecretID(e.Mount),
 			Sealed:     sealedJSON,
+			Version:    version,
+			DeliveryId: deliveryID,
 		})
 	}
 
@@ -146,7 +150,7 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 // chain+sub-key are NOT yet PKI-verified here — full verification (pinned root + SAN/tenancy +
 // revocation, via subkey.SealForNode) lands with the production delivery wiring; in dev/insecure mode
 // the chain is empty and the relayed sub-key's HPKE pubkey is used directly.
-func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKey, certChain []byte, spawnID string, generation uint64, now time.Time) ([]byte, error) {
+func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKey, certChain []byte, spawnID string, generation uint64, version uint64, deliveryID string, now time.Time) ([]byte, error) {
 	var env seal.Envelope
 	if err := json.Unmarshal(ciphertext, &env); err != nil {
 		return nil, fmt.Errorf("ciphertext is not a valid owner-sealed envelope: %w", err)
@@ -157,8 +161,8 @@ func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKe
 		Generation: generation,
 		NodeID:     sk.NodeID,
 		NotAfter:   sk.NotAfter,
-		Version:    generation,
-		DeliveryID: genDeliveryID(),
+		Version:    version,
+		DeliveryID: deliveryID,
 	}
 	sealed, err := journalkey.ResealForNode(&env, dev.X25519Priv, sk.HPKEPub, aad)
 	if err != nil {

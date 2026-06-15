@@ -103,6 +103,9 @@ func TestRunMoveResealsAndDelivers(t *testing.T) {
 	if sec.SecretId != journalkey.SecretID("main") {
 		t.Fatalf("delivered secret id = %q, want %q", sec.SecretId, journalkey.SecretID("main"))
 	}
+	if sec.Version != 7 || sec.DeliveryId != "fixed-delivery" {
+		t.Fatalf("delivery metadata = version %d id %q, want version 7 id fixed-delivery", sec.Version, sec.DeliveryId)
+	}
 	// Node B opens the delivered ciphertext (proving the reseal targeted B's key + AAD).
 	var sealed seal.NodeSealed
 	if err := json.Unmarshal(sec.Sealed, &sealed); err != nil {

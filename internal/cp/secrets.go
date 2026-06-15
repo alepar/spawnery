@@ -109,6 +109,8 @@ func (s *Server) DeliverSecrets(ctx context.Context, req *connect.Request[cpv1.D
 			TargetPath: sec.TargetPath,
 			Sealed:     append([]byte(nil), sec.Sealed...),
 			SecretId:   sec.SecretId,
+			Version:    sec.Version,
+			DeliveryId: sec.DeliveryId,
 		}
 	}
 	if derr := s.rt.DeliverSecrets(req.Msg.SpawnId, generation, secrets); derr != nil {
