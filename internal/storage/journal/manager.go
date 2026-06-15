@@ -12,9 +12,13 @@ type Config struct {
 	// RepoRoot holds per-spawn Kopia config files + (for FilesystemBackend) the
 	// repo blobs. One sub-dir per spawn.
 	RepoRoot string
-	// Backend opens the blob storage for each spawn's repo (filesystem here;
-	// Garage/S3 later). Required.
+	// Backend opens the blob storage for each spawn's repo when generation
+	// backends are not configured. Required unless GenerationBackends is set.
 	Backend BlobBackend
+	// GenerationBackends opens the blob storage for a specific spawn generation.
+	// Production S3 uses this to put GenerationKeyManager on the journal data
+	// path; Backend remains the static/local fallback.
+	GenerationBackends GenerationBackendProvider
 	// Custody custodies per-spawn repo passwords (node-local default). Required.
 	Custody PasswordProvider
 	// OwnerSealed is the owner-sealed receiving custody (design §4), holding
@@ -42,8 +46,13 @@ type Manager struct {
 	clock Clock
 
 	mu          sync.Mutex
-	spawns      map[string]*spawnState
+	spawns      map[repoKey]*spawnState
 	ownerSealed map[string]bool // spawnID -> routed to owner-sealed custody
+}
+
+type repoKey struct {
+	spawnID string
+	gen     uint64
 }
 
 // spawnState is the live per-spawn journaler state.
@@ -55,8 +64,8 @@ type spawnState struct {
 
 // NewManager builds a Manager. Backend and Custody are required.
 func NewManager(cfg Config) (*Manager, error) {
-	if cfg.Backend == nil {
-		return nil, fmt.Errorf("journal: Config.Backend is required")
+	if cfg.Backend == nil && cfg.GenerationBackends == nil {
+		return nil, fmt.Errorf("journal: Config.Backend or Config.GenerationBackends is required")
 	}
 	if cfg.Custody == nil {
 		return nil, fmt.Errorf("journal: Config.Custody is required")
@@ -68,7 +77,7 @@ func NewManager(cfg Config) (*Manager, error) {
 	if clock == nil {
 		clock = systemClock{}
 	}
-	return &Manager{cfg: cfg, clock: clock, spawns: map[string]*spawnState{}, ownerSealed: map[string]bool{}}, nil
+	return &Manager{cfg: cfg, clock: clock, spawns: map[repoKey]*spawnState{}, ownerSealed: map[string]bool{}}, nil
 }
 
 var _ JournalManager = (*Manager)(nil)
@@ -150,24 +159,51 @@ func (m *Manager) WaitDelivered(ctx context.Context, spawnID string) error {
 	return m.cfg.OwnerSealed.WaitDelivered(ctx, spawnID)
 }
 
-// state returns the live state for spawnID, opening its repo on first use.
-func (m *Manager) state(ctx context.Context, spawnID string) (*spawnState, error) {
+// state returns the live state for spawnID/generation, opening its repo on first use.
+func (m *Manager) state(ctx context.Context, spawnID string, gen uint64) (*spawnState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if s, ok := m.spawns[spawnID]; ok {
+	key := repoKey{spawnID: spawnID, gen: gen}
+	if s, ok := m.spawns[key]; ok {
 		return s, nil
 	}
 	pw, err := m.passwordFor(spawnID)
 	if err != nil {
 		return nil, err
 	}
-	r, err := openOrCreateRepo(ctx, spawnID, m.cfg.RepoRoot, pw, m.cfg.Backend)
+	backend := m.cfg.Backend
+	if m.cfg.GenerationBackends != nil {
+		backend, err = m.cfg.GenerationBackends.BackendFor(ctx, spawnID, gen)
+		if err != nil {
+			return nil, err
+		}
+	}
+	r, err := openOrCreateRepo(ctx, spawnID, gen, m.cfg.RepoRoot, pw, backend)
 	if err != nil {
 		return nil, err
 	}
 	s := &spawnState{repo: r, queues: map[string]*serialQueue{}, debs: map[string]*Debouncer{}}
-	m.spawns[spawnID] = s
+	m.spawns[key] = s
 	return s, nil
+}
+
+func (m *Manager) activeState(spawnID string) (*spawnState, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out *spawnState
+	for key, s := range m.spawns {
+		if key.spawnID != spawnID {
+			continue
+		}
+		if out != nil {
+			return nil, fmt.Errorf("journal: restore for %s requires generation when multiple generations are open", spawnID)
+		}
+		out = s
+	}
+	if out == nil {
+		return nil, fmt.Errorf("journal: restore for %s requires generation", spawnID)
+	}
+	return out, nil
 }
 
 // mountState returns the per-mount queue + debouncer, creating them on first use.
@@ -218,7 +254,7 @@ func (m *Manager) RequestSnapshot(ctx context.Context, spawnID string, gen uint6
 	if !mt.shouldJournal() {
 		return
 	}
-	s, err := m.state(ctx, spawnID)
+	s, err := m.state(ctx, spawnID, gen)
 	if err != nil {
 		return // best-effort; periodic + suspend snapshots are the safety net
 	}
@@ -239,7 +275,7 @@ func (m *Manager) WarmSnapshot(ctx context.Context, spawnID string, gen uint64, 
 		return nil, nil
 	}
 
-	s, err := m.state(ctx, spawnID)
+	s, err := m.state(ctx, spawnID, gen)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +311,7 @@ func (m *Manager) FinalSnapshot(ctx context.Context, spawnID string, gen uint64,
 		return nil, nil // no journaled mounts — scratch-only spawn, nothing to do
 	}
 
-	s, err := m.state(ctx, spawnID)
+	s, err := m.state(ctx, spawnID, gen)
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +337,24 @@ func (m *Manager) FinalSnapshot(ctx context.Context, spawnID string, gen uint64,
 
 // Restore implements JournalManager.
 func (m *Manager) Restore(ctx context.Context, spawnID, mountName string, id ManifestID, hostDir string) error {
-	s, err := m.state(ctx, spawnID)
+	if m.cfg.GenerationBackends == nil {
+		s, err := m.state(ctx, spawnID, 0)
+		if err != nil {
+			return err
+		}
+		return s.repo.restore(ctx, id, hostDir)
+	}
+	s, err := m.activeState(spawnID)
+	if err != nil {
+		return err
+	}
+	return s.repo.restore(ctx, id, hostDir)
+}
+
+// RestoreGeneration restores a pinned manifest using the backend/key recorded
+// for the requested generation.
+func (m *Manager) RestoreGeneration(ctx context.Context, spawnID string, gen uint64, mountName string, id ManifestID, hostDir string) error {
+	s, err := m.state(ctx, spawnID, gen)
 	if err != nil {
 		return err
 	}
@@ -310,7 +363,7 @@ func (m *Manager) Restore(ctx context.Context, spawnID, mountName string, id Man
 
 // LatestForGeneration implements JournalManager.
 func (m *Manager) LatestForGeneration(ctx context.Context, spawnID, mountName string, gen uint64) (ManifestID, error) {
-	s, err := m.state(ctx, spawnID)
+	s, err := m.state(ctx, spawnID, gen)
 	if err != nil {
 		return "", err
 	}
@@ -319,7 +372,7 @@ func (m *Manager) LatestForGeneration(ctx context.Context, spawnID, mountName st
 
 // QuickMaintenance implements JournalManager.
 func (m *Manager) QuickMaintenance(ctx context.Context, spawnID string) error {
-	s, err := m.state(ctx, spawnID)
+	s, err := m.state(ctx, spawnID, 0)
 	if err != nil {
 		return err
 	}
@@ -333,7 +386,7 @@ func (m *Manager) QuickMaintenance(ctx context.Context, spawnID string) error {
 // — holding a concrete *Manager — invokes it. (The CP→node command wiring is a
 // sp-u53.5.2 follow-up; this is the node-side primitive it calls.)
 func (m *Manager) FullMaintenance(ctx context.Context, spawnID string) error {
-	s, err := m.state(ctx, spawnID)
+	s, err := m.state(ctx, spawnID, 0)
 	if err != nil {
 		return err
 	}
@@ -344,13 +397,22 @@ func (m *Manager) FullMaintenance(ctx context.Context, spawnID string) error {
 // state. Does NOT forget the sealed password (that is Forget, on spawn delete).
 func (m *Manager) Close(ctx context.Context, spawnID string) error {
 	m.mu.Lock()
-	s, ok := m.spawns[spawnID]
-	if ok {
-		delete(m.spawns, spawnID)
+	var states []*spawnState
+	for key, s := range m.spawns {
+		if key.spawnID == spawnID {
+			states = append(states, s)
+			delete(m.spawns, key)
+		}
 	}
 	m.mu.Unlock()
-	if !ok {
+	if len(states) == 0 {
 		return nil
 	}
-	return s.repo.close(ctx)
+	var firstErr error
+	for _, s := range states {
+		if err := s.repo.close(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

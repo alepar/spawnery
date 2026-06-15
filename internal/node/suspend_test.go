@@ -45,6 +45,9 @@ func (f *fakeNodeJournal) WarmSnapshot(_ context.Context, _ string, _ uint64, mo
 func (f *fakeNodeJournal) Restore(context.Context, string, string, journal.ManifestID, string) error {
 	return nil
 }
+func (f *fakeNodeJournal) RestoreGeneration(context.Context, string, uint64, string, journal.ManifestID, string) error {
+	return nil
+}
 func (f *fakeNodeJournal) LatestForGeneration(context.Context, string, string, uint64) (journal.ManifestID, error) {
 	return "", nil
 }

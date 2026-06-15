@@ -107,6 +107,11 @@ func (j *recordingForkJournal) Restore(_ context.Context, spawnID, mountName str
 	return nil
 }
 
+func (j *recordingForkJournal) RestoreGeneration(_ context.Context, spawnID string, gen uint64, mountName string, id journal.ManifestID, hostDir string) error {
+	j.rec.add(fmt.Sprintf("seed-fork-mount:%s:%d:%s:%s:%s", spawnID, gen, mountName, id, hostDir))
+	return nil
+}
+
 func (j *recordingForkJournal) LatestForGeneration(context.Context, string, string, uint64) (journal.ManifestID, error) {
 	return "", nil
 }
@@ -201,7 +206,7 @@ func TestForkSameNodeCapturesMountsAndRootfsUnderOnePause(t *testing.T) {
 		"export-rootfs:sp-fork",
 		"unpause-agent:sp-source",
 		"close-journal:sp-source",
-		"seed-fork-mount:sp-source:work:sp-source-work-gen9:",
+		"seed-fork-mount:sp-source:9:work:sp-source-work-gen9:",
 		"put-fork-rootfs-artifact:sp-fork:1",
 		"final-snapshot:sp-fork:1",
 	}

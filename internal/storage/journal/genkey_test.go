@@ -120,6 +120,44 @@ func TestGenerationKeyManagerMintRevoke(t *testing.T) {
 	}
 }
 
+func TestGenerationKeyManagerBackendForReusesRecordedGeneration(t *testing.T) {
+	ctx := context.Background()
+	admin := newFakeAdmin()
+	g, err := NewGenerationKeyManager(GenerationKeyConfig{Admin: admin, S3Endpoint: "127.0.0.1:3900", DisableTLS: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b1, err := g.BackendFor(ctx, "sp-reopen", 4)
+	if err != nil {
+		t.Fatalf("backend first open: %v", err)
+	}
+	b2, err := g.BackendFor(ctx, "sp-reopen", 4)
+	if err != nil {
+		t.Fatalf("backend reopen: %v", err)
+	}
+
+	s31, ok := b1.(*S3Backend)
+	if !ok {
+		t.Fatalf("first backend type = %T, want *S3Backend", b1)
+	}
+	s32, ok := b2.(*S3Backend)
+	if !ok {
+		t.Fatalf("second backend type = %T, want *S3Backend", b2)
+	}
+	if s31.cfg.AccessKeyID != s32.cfg.AccessKeyID {
+		t.Fatalf("reopening same generation minted a different key: %q then %q", s31.cfg.AccessKeyID, s32.cfg.AccessKeyID)
+	}
+	if admin.nextKeyID != 1 {
+		t.Fatalf("same (spawn,generation) should mint once, minted %d keys", admin.nextKeyID)
+	}
+	if h := g.HoldExistingGeneration("sp-reopen", 4, "fork test"); h == nil {
+		t.Fatal("reused generation key must remain recorded for fork holds")
+	} else {
+		h.Release()
+	}
+}
+
 // TestGarageAdminHTTP exercises the real GarageAdmin HTTP client against an
 // httptest server mimicking the Garage v1 admin API — so the request/response
 // wiring (paths, bodies, 404-idempotent delete) is covered without a live Garage.

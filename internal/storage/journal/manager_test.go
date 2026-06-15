@@ -2,8 +2,10 @@ package journal
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,6 +52,26 @@ func readFile(t *testing.T, dir, name string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+type recordingGenerationBackendProvider struct {
+	root string
+
+	mu    sync.Mutex
+	opens []string
+}
+
+func (p *recordingGenerationBackendProvider) BackendFor(_ context.Context, spawnID string, gen uint64) (BlobBackend, error) {
+	p.mu.Lock()
+	p.opens = append(p.opens, fmt.Sprintf("%s:%d", spawnID, gen))
+	p.mu.Unlock()
+	return &FilesystemBackend{Root: p.root}, nil
+}
+
+func (p *recordingGenerationBackendProvider) snapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.opens...)
 }
 
 // TestSnapshotRestoreRoundTripAndPinning is the core e2e: snapshot a mount at
@@ -125,6 +147,61 @@ func TestSnapshotRestoreRoundTripAndPinning(t *testing.T) {
 	}
 	if got, err := m.LatestForGeneration(ctx, spawnID, "work", 2); err != nil || got != id2 {
 		t.Fatalf("LatestForGeneration(2) = %s, %v; want %s", got, err, id2)
+	}
+}
+
+func TestManagerUsesGenerationBackendForSnapshotArtifactAndRestore(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	keyfile := filepath.Join(root, "node.key")
+	if err := GenerateNodeKeyfile(keyfile); err != nil {
+		t.Fatal(err)
+	}
+	custody, err := NewNodeLocalCustody(keyfile, filepath.Join(root, "seals"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &recordingGenerationBackendProvider{root: filepath.Join(root, "blobs")}
+	m, err := NewManager(Config{
+		RepoRoot:           filepath.Join(root, "repos"),
+		GenerationBackends: provider,
+		Custody:            custody,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src := t.TempDir()
+	writeFile(t, src, "work.txt", "source gen9")
+	mt := Mount{Name: "work", HostDir: src, Class: NodeLocal}
+	pins, err := m.FinalSnapshot(ctx, "sp-source", 9, []Mount{mt})
+	if err != nil {
+		t.Fatalf("source final snapshot: %v", err)
+	}
+	if _, err := m.PutArtifact(ctx, "sp-fork", 1, ArtifactDescriptor{Type: ArtifactRootfsDelta, Format: ArtifactFormatOCILayout}, strings.NewReader("rootfs")); err != nil {
+		t.Fatalf("fork artifact: %v", err)
+	}
+	if err := m.Close(ctx, "sp-source"); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := t.TempDir()
+	if err := m.RestoreGeneration(ctx, "sp-source", 9, "work", pins["work"], dst); err != nil {
+		t.Fatalf("restore source gen9: %v", err)
+	}
+	if got := readFile(t, dst, "work.txt"); got != "source gen9" {
+		t.Fatalf("restored work.txt = %q, want source gen9", got)
+	}
+
+	got := provider.snapshot()
+	want := []string{"sp-source:9", "sp-fork:1", "sp-source:9"}
+	if len(got) != len(want) {
+		t.Fatalf("generation backend opens = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("generation backend opens = %v, want %v", got, want)
+		}
 	}
 }
 

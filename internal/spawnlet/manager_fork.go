@@ -151,7 +151,7 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 		if err := os.MkdirAll(hostDir, 0o755); err != nil {
 			return ForkSameNodeResult{}, fmt.Errorf("fork same-node: stage mount %s: %w", mt.Name, err)
 		}
-		if err := m.journal.Restore(ctx, sp.ID, mt.Name, pin, hostDir); err != nil {
+		if err := m.journal.RestoreGeneration(ctx, sp.ID, sp.Generation, mt.Name, pin, hostDir); err != nil {
 			return ForkSameNodeResult{}, fmt.Errorf("fork same-node: restore source mount %s: %w", mt.Name, err)
 		}
 		forkMounts = append(forkMounts, journal.Mount{Name: mt.Name, HostDir: hostDir, Class: mt.Class})

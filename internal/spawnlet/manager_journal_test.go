@@ -82,6 +82,11 @@ func (f *fakeJournal) Restore(_ context.Context, _, mountName string, id journal
 	return nil
 }
 
+func (f *fakeJournal) RestoreGeneration(ctx context.Context, spawnID string, gen uint64, mountName string, id journal.ManifestID, hostDir string) error {
+	_ = gen
+	return f.Restore(ctx, spawnID, mountName, id, hostDir)
+}
+
 func (f *fakeJournal) LatestForGeneration(context.Context, string, string, uint64) (journal.ManifestID, error) {
 	return "", nil
 }

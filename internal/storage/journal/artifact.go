@@ -33,7 +33,7 @@ const (
 
 // PutArtifact implements JournalManager.
 func (m *Manager) PutArtifact(ctx context.Context, spawnID string, generation uint64, desc ArtifactDescriptor, r io.Reader) (ArtifactDescriptor, error) {
-	s, err := m.state(ctx, spawnID)
+	s, err := m.state(ctx, spawnID, generation)
 	if err != nil {
 		return ArtifactDescriptor{}, err
 	}
@@ -45,7 +45,7 @@ func (m *Manager) GetArtifact(ctx context.Context, spawnID string, generation ui
 	if artifactID == "" {
 		return ArtifactDescriptor{}, fmt.Errorf("journal artifact restore: empty artifact id (restore must be pinned, not latest)")
 	}
-	s, err := m.state(ctx, spawnID)
+	s, err := m.state(ctx, spawnID, generation)
 	if err != nil {
 		return ArtifactDescriptor{}, err
 	}
@@ -54,7 +54,7 @@ func (m *Manager) GetArtifact(ctx context.Context, spawnID string, generation ui
 
 // ListArtifacts implements JournalManager.
 func (m *Manager) ListArtifacts(ctx context.Context, spawnID string, generation uint64, typ string) ([]ArtifactDescriptor, error) {
-	s, err := m.state(ctx, spawnID)
+	s, err := m.state(ctx, spawnID, generation)
 	if err != nil {
 		return nil, err
 	}

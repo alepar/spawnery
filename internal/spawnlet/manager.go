@@ -699,7 +699,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 						cancel()
 					}
 					if restore {
-						if rerr := m.journal.Restore(ctx, id, mt.Name, pin, restoreDir); rerr != nil {
+						if rerr := m.journal.RestoreGeneration(ctx, id, jrec.Generation, mt.Name, pin, restoreDir); rerr != nil {
 							log.Printf("journal restore for %s mount %s (manifest %s): %v", id, mt.Name, pin, rerr)
 						} else {
 							// Restore writes files owned by THIS node daemon's uid with their original

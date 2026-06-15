@@ -191,6 +191,10 @@ type JournalManager interface {
 	// roast C1 — explicit manifest id, never "latest").
 	Restore(ctx context.Context, spawnID, mountName string, id ManifestID, hostDir string) error
 
+	// RestoreGeneration restores a pinned manifest using the exact generation's
+	// backend/key. Production S3 callers must use this when reopening a repo.
+	RestoreGeneration(ctx context.Context, spawnID string, gen uint64, mountName string, id ManifestID, hostDir string) error
+
 	// LatestForGeneration returns the latest COMPLETE manifest for (mount,
 	// generation) — the crash fallback ONLY (design §2/§3). The primary restore
 	// path is Restore by pinned id.

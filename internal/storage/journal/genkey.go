@@ -36,8 +36,13 @@ type GenerationKeyManager struct {
 	bucketPfx  string
 
 	mu    sync.Mutex
-	keys  map[string]map[uint64]string // spawnID -> gen -> accessKeyID (for revoke)
-	holds map[string]map[uint64]int    // spawnID -> gen -> active fork-point holds
+	keys  map[string]map[uint64]generationKey // spawnID -> gen -> key material
+	holds map[string]map[uint64]int           // spawnID -> gen -> active fork-point holds
+}
+
+type generationKey struct {
+	accessKeyID     string
+	secretAccessKey string
 }
 
 // GenerationKeyConfig configures a GenerationKeyManager.
@@ -75,7 +80,7 @@ func NewGenerationKeyManager(cfg GenerationKeyConfig) (*GenerationKeyManager, er
 		region:     cfg.Region,
 		disableTLS: cfg.DisableTLS,
 		bucketPfx:  pfx,
-		keys:       map[string]map[uint64]string{},
+		keys:       map[string]map[uint64]generationKey{},
 		holds:      map[string]map[uint64]int{},
 	}, nil
 }
@@ -104,7 +109,7 @@ func (g *GenerationKeyManager) Mint(ctx context.Context, spawnID string, gen uin
 		_ = g.admin.DeleteKey(ctx, ak)
 		return S3Config{}, fmt.Errorf("genkey: allow key on bucket %q: %w", bucket, err)
 	}
-	g.record(spawnID, gen, ak)
+	g.record(spawnID, gen, ak, sk)
 	return S3Config{
 		Endpoint:        g.s3Endpoint,
 		Bucket:          bucket,
@@ -115,9 +120,20 @@ func (g *GenerationKeyManager) Mint(ctx context.Context, spawnID string, gen uin
 	}, nil
 }
 
-// BackendFor mints this generation's key (Mint) and returns a ready S3Backend —
-// the slot-in seam for the journal Manager / cmd/spawnlet wiring.
+// BackendFor returns a ready S3Backend for the generation. The first open mints
+// and records key material; repeated opens for the same (spawn,generation) reuse
+// that key so reconnect/restore paths do not orphan fresh keys.
 func (g *GenerationKeyManager) BackendFor(ctx context.Context, spawnID string, gen uint64) (BlobBackend, error) {
+	if key, ok := g.lookupKey(spawnID, gen); ok {
+		return NewS3Backend(S3Config{
+			Endpoint:        g.s3Endpoint,
+			Bucket:          g.BucketFor(spawnID),
+			AccessKeyID:     key.accessKeyID,
+			SecretAccessKey: key.secretAccessKey,
+			Region:          g.region,
+			DisableTLS:      g.disableTLS,
+		})
+	}
 	cfg, err := g.Mint(ctx, spawnID, gen)
 	if err != nil {
 		return nil, err
@@ -180,7 +196,7 @@ func (g *GenerationKeyManager) HoldGeneration(spawnID string, gen uint64, reason
 func (g *GenerationKeyManager) HoldExistingGeneration(spawnID string, gen uint64, reason string) *GenerationHold {
 	_ = reason
 	g.mu.Lock()
-	if g.keys[spawnID][gen] == "" {
+	if g.keys[spawnID][gen].accessKeyID == "" {
 		g.mu.Unlock()
 		return nil
 	}
@@ -225,19 +241,26 @@ func (g *GenerationKeyManager) holdCount(spawnID string, gen uint64) int {
 	return g.holds[spawnID][gen]
 }
 
-func (g *GenerationKeyManager) record(spawnID string, gen uint64, accessKeyID string) {
+func (g *GenerationKeyManager) record(spawnID string, gen uint64, accessKeyID, secretAccessKey string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.keys[spawnID] == nil {
-		g.keys[spawnID] = map[uint64]string{}
+		g.keys[spawnID] = map[uint64]generationKey{}
 	}
-	g.keys[spawnID][gen] = accessKeyID
+	g.keys[spawnID][gen] = generationKey{accessKeyID: accessKeyID, secretAccessKey: secretAccessKey}
 }
 
 func (g *GenerationKeyManager) lookup(spawnID string, gen uint64) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.keys[spawnID][gen]
+	return g.keys[spawnID][gen].accessKeyID
+}
+
+func (g *GenerationKeyManager) lookupKey(spawnID string, gen uint64) (generationKey, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	key := g.keys[spawnID][gen]
+	return key, key.accessKeyID != "" && key.secretAccessKey != ""
 }
 
 func (g *GenerationKeyManager) forget(spawnID string, gen uint64) {
