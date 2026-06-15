@@ -268,6 +268,90 @@ type generationHoldFunc func()
 
 func (f generationHoldFunc) Release() { f() }
 
+type spawnletFakeGenKeyAdmin struct {
+	mu      sync.Mutex
+	buckets map[string]string
+	nextKey int
+}
+
+func newSpawnletFakeGenKeyAdmin() *spawnletFakeGenKeyAdmin {
+	return &spawnletFakeGenKeyAdmin{buckets: map[string]string{}}
+}
+
+func (f *spawnletFakeGenKeyAdmin) EnsureBucket(_ context.Context, alias string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if id, ok := f.buckets[alias]; ok {
+		return id, nil
+	}
+	id := "bucket-" + alias
+	f.buckets[alias] = id
+	return id, nil
+}
+
+func (f *spawnletFakeGenKeyAdmin) CreateKey(_ context.Context, name string) (string, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextKey++
+	ak := fmt.Sprintf("GK%08d", f.nextKey)
+	return ak, "secret-" + name, nil
+}
+
+func (f *spawnletFakeGenKeyAdmin) AllowKeyOnBucket(context.Context, string, string) error {
+	return nil
+}
+
+func (f *spawnletFakeGenKeyAdmin) DeleteKey(context.Context, string) error {
+	return nil
+}
+
+func TestForkSameNodeRequiredGenerationHoldRequiresRecordedKey(t *testing.T) {
+	ctx := context.Background()
+	rec := &forkOpRecorder{}
+	j := &recordingForkJournal{rec: rec}
+	m, _ := newForkTestManager(t, rec, j)
+	g, err := journal.NewGenerationKeyManager(journal.GenerationKeyConfig{
+		Admin:      newSpawnletFakeGenKeyAdmin(),
+		S3Endpoint: "127.0.0.1:3900",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetGenerationKeyManager(g)
+	putForkSource(t, m, "sp-source", 9)
+
+	_, err = m.ForkSameNode(ctx, ForkSameNodeRequest{
+		SourceSpawnID:    "sp-source",
+		ForkSpawnID:      "sp-fork",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+		TransferSetID:    "ts-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "generation hold is required but was not acquired") {
+		t.Fatalf("ForkSameNode error = %v, want missing recorded generation key", err)
+	}
+	if ops := rec.snapshot(); len(ops) != 0 {
+		t.Fatalf("fork must fail before snapshots/pause when recorded generation key is missing, ops=%v", ops)
+	}
+
+	if _, err := g.Mint(ctx, "sp-source", 9); err != nil {
+		t.Fatalf("mint source gen9: %v", err)
+	}
+	res, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
+		SourceSpawnID:    "sp-source",
+		ForkSpawnID:      "sp-fork",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+		TransferSetID:    "ts-1",
+	})
+	if err != nil {
+		t.Fatalf("ForkSameNode after recorded key: %v", err)
+	}
+	if res.MountPins["work"] != "sp-fork-work-gen1" {
+		t.Fatalf("mount pins = %+v", res.MountPins)
+	}
+}
+
 func TestForkSameNodeReleasesGenerationHoldOnSuccessAndFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

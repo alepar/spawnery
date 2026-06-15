@@ -171,13 +171,34 @@ func (h *GenerationHold) Release() {
 func (g *GenerationKeyManager) HoldGeneration(spawnID string, gen uint64, reason string) *GenerationHold {
 	_ = reason
 	g.mu.Lock()
+	g.addHoldLocked(spawnID, gen)
+	g.mu.Unlock()
+
+	return &GenerationHold{release: g.releaseHoldFunc(spawnID, gen)}
+}
+
+func (g *GenerationKeyManager) HoldExistingGeneration(spawnID string, gen uint64, reason string) *GenerationHold {
+	_ = reason
+	g.mu.Lock()
+	if g.keys[spawnID][gen] == "" {
+		g.mu.Unlock()
+		return nil
+	}
+	g.addHoldLocked(spawnID, gen)
+	g.mu.Unlock()
+
+	return &GenerationHold{release: g.releaseHoldFunc(spawnID, gen)}
+}
+
+func (g *GenerationKeyManager) addHoldLocked(spawnID string, gen uint64) {
 	if g.holds[spawnID] == nil {
 		g.holds[spawnID] = map[uint64]int{}
 	}
 	g.holds[spawnID][gen]++
-	g.mu.Unlock()
+}
 
-	return &GenerationHold{release: func() {
+func (g *GenerationKeyManager) releaseHoldFunc(spawnID string, gen uint64) func() {
+	return func() {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		if g.holds[spawnID] == nil {
@@ -191,7 +212,7 @@ func (g *GenerationKeyManager) HoldGeneration(spawnID string, gen uint64, reason
 		if len(g.holds[spawnID]) == 0 {
 			delete(g.holds, spawnID)
 		}
-	}}
+	}
 }
 
 func (g *GenerationKeyManager) held(spawnID string, gen uint64) bool {

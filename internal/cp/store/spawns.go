@@ -592,6 +592,39 @@ func (r *spawnRepo) TransitionForkingRecovered(ctx context.Context, id, leaseID 
 	return expectedSeq + 1, nil
 }
 
+func (r *spawnRepo) MarkForkingLost(ctx context.Context, id string, expectedSeq int64) (int64, error) {
+	var newSeq int64
+	err := r.withTx(ctx, func(tx *spawnRepo) error {
+		res, err := tx.db.NewUpdate().Model((*Spawn)(nil)).
+			Set("status = ?", Errored).
+			Set("fork_capture_deadline = NULL").
+			Set("claim_holder = NULL").
+			Set("claim_lease_id = NULL").
+			Set("claim_deadline = NULL").
+			Set("status_seq = status_seq + 1").
+			Where("id = ?", id).
+			Where("status = ?", Forking).
+			Where("status_seq = ?", expectedSeq).
+			Exec(ctx)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return ErrConflict
+		}
+		ts, err := tx.lastUsedTS(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := tx.endLiveContainer(ctx, id, PhaseLost, ts); err != nil {
+			return err
+		}
+		newSeq = expectedSeq + 1
+		return nil
+	})
+	return newSeq, err
+}
+
 // ListStranded returns spawns in transient statuses whose claim is absent or expired (nowTS is a
 // unix timestamp; store never reads the wall clock). See SpawnRepo.ListStranded.
 func (r *spawnRepo) ListStranded(ctx context.Context, nowTS int64) ([]Spawn, error) {

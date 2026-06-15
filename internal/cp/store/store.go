@@ -132,6 +132,11 @@ type SpawnRepo interface {
 	// durable fork capture deadline while leaving claim release to the caller's follow-up Release.
 	TransitionForkingRecovered(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64) (newSeq int64, err error)
 
+	// MarkForkingLost resolves a forking source whose backing pod cannot be recovered. It CAS-es on
+	// status_seq while status is Forking, clears fork/claim metadata, and ends any live container as
+	// lost.
+	MarkForkingLost(ctx context.Context, id string, expectedSeq int64) (newSeq int64, err error)
+
 	// ListStranded returns spawns in a transient status (Suspending, and Resuming once 7.5 adds it)
 	// whose claim is absent or expired (claim_holder IS NULL OR claim_deadline < nowTS). These are
 	// candidates for recovery: the driving CP goroutine crashed and the lease was not renewed.

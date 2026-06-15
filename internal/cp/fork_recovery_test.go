@@ -174,6 +174,71 @@ func TestRecoverForkingSourceWedgedCaptureDeadlinePreemptsLiveClaim(t *testing.T
 	}
 }
 
+func TestRecoverForkingSourceWithoutLiveContainerMarksLost(t *testing.T) {
+	s, st := newForkRecoveryTestServer(t)
+	ctx := context.Background()
+	seedForkingSource(t, st, "sp-lost", 100, 1000)
+	gen := liveGenForCPTest(t, st, "sp-lost")
+	if err := st.WithTx(ctx, func(tx store.Store) error {
+		return tx.Spawns().EndContainer(ctx, "sp-lost", gen, store.PhaseLost)
+	}); err != nil {
+		t.Fatalf("EndContainer: %v", err)
+	}
+
+	pause := &fakeForkPauseController{paused: map[string]bool{"sp-lost": true}}
+	if err := s.recoverForkingSources(ctx, pause); err != nil {
+		t.Fatalf("recoverForkingSources: %v", err)
+	}
+	if len(pause.unpause) != 0 {
+		t.Fatalf("source with no live container must not be unpaused, calls=%v", pause.unpause)
+	}
+	sp, err := st.Spawns().Get(ctx, "sp-lost")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if sp.Status != store.Errored {
+		t.Fatalf("status=%v want Errored", sp.Status)
+	}
+	if sp.ForkCaptureDeadline != nil {
+		t.Fatalf("fork_capture_deadline=%v want nil", sp.ForkCaptureDeadline)
+	}
+	if sp.ClaimHolder != nil || sp.ClaimLeaseID != nil || sp.ClaimDeadline != nil {
+		t.Fatalf("claim metadata not cleared: holder=%v lease=%v deadline=%v", sp.ClaimHolder, sp.ClaimLeaseID, sp.ClaimDeadline)
+	}
+}
+
+func TestReconcileInventoryMarksMissingForkingSourceLost(t *testing.T) {
+	s, st := newForkRecoveryTestServer(t)
+	ctx := context.Background()
+	seedForkingSource(t, st, "sp-missing", time.Now().Add(time.Hour).UnixNano(), time.Now().Add(time.Hour).UnixNano())
+
+	s.reconcileInventory(ctx, "node-a", &capSender{}, nil)
+
+	sp, err := st.Spawns().Get(ctx, "sp-missing")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if sp.Status != store.Errored {
+		t.Fatalf("status=%v want Errored", sp.Status)
+	}
+	if sp.ForkCaptureDeadline != nil {
+		t.Fatalf("fork_capture_deadline=%v want nil", sp.ForkCaptureDeadline)
+	}
+	if sp.ClaimHolder != nil || sp.ClaimLeaseID != nil || sp.ClaimDeadline != nil {
+		t.Fatalf("claim metadata not cleared: holder=%v lease=%v deadline=%v", sp.ClaimHolder, sp.ClaimLeaseID, sp.ClaimDeadline)
+	}
+	if _, ok, err := st.Spawns().LiveContainer(ctx, "sp-missing"); err != nil || ok {
+		t.Fatalf("LiveContainer after missing forking source: ok=%v err=%v, want none", ok, err)
+	}
+	c, ok, err := st.Spawns().LatestContainer(ctx, "sp-missing")
+	if err != nil || !ok {
+		t.Fatalf("LatestContainer: ok=%v err=%v", ok, err)
+	}
+	if c.Phase != store.PhaseLost || c.EndedAt == nil {
+		t.Fatalf("latest container=%+v want lost and ended", c)
+	}
+}
+
 func TestReconcileTickRecoversForkingSourceThroughNodeUnpause(t *testing.T) {
 	s, st := newForkRecoveryTestServer(t)
 	s.forkUnpauses = newForkUnpauseWaiters()

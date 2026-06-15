@@ -138,6 +138,11 @@ func (s *Server) recoverForkingSource(ctx context.Context, sp store.Spawn, pause
 		return err
 	}
 	if !ok {
+		if _, err := s.st.Spawns().MarkForkingLost(ctx, sp.ID, sp.StatusSeq); errors.Is(err, store.ErrConflict) {
+			return nil
+		} else if err != nil {
+			return err
+		}
 		return nil
 	}
 
@@ -151,6 +156,15 @@ func (s *Server) recoverForkingSource(ctx context.Context, sp store.Spawn, pause
 		return err
 	}
 	if err := pause.UnpauseIfPaused(ctx, sp.ID, c.Generation); err != nil {
+		code := connect.CodeOf(err)
+		if code == connect.CodeFailedPrecondition || code == connect.CodeUnavailable {
+			if _, lerr := s.st.Spawns().MarkForkingLost(ctx, sp.ID, seq); errors.Is(lerr, store.ErrConflict) {
+				return nil
+			} else if lerr != nil {
+				return lerr
+			}
+			return nil
+		}
 		return err
 	}
 	if _, err := s.st.Spawns().TransitionForkingRecovered(ctx, sp.ID, leaseID, seq, c.Generation); errors.Is(err, store.ErrConflict) {

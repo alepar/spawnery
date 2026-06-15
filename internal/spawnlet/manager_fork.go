@@ -38,7 +38,11 @@ func (m *Manager) SetGenerationKeyManager(g *journal.GenerationKeyManager) {
 		return
 	}
 	m.forkGenerationHold = func(spawnID string, gen uint64, reason string) generationHold {
-		return g.HoldGeneration(spawnID, gen, reason)
+		h := g.HoldExistingGeneration(spawnID, gen, reason)
+		if h == nil {
+			return nil
+		}
+		return h
 	}
 	m.forkGenerationHoldRequired = true
 }

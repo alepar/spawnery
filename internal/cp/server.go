@@ -456,6 +456,17 @@ func (s *Server) reconcileInventory(ctx context.Context, nodeID string, sender r
 			if spErr != nil {
 				continue
 			}
+			if sp.Status == store.Forking {
+				s.rt.Drop(c.SpawnID)
+				if _, err := s.st.Spawns().MarkForkingLost(ctx, c.SpawnID, sp.StatusSeq); errors.Is(err, store.ErrConflict) {
+					continue
+				} else if err != nil {
+					log.Printf("node %s inventory: mark forking spawn %s lost: %v", nodeID, c.SpawnID, err)
+					continue
+				}
+				log.Printf("node %s inventory: forking spawn %s not reported -> error", nodeID, c.SpawnID)
+				continue
+			}
 			if sp.Status == store.Suspending || sp.Status == store.Resuming {
 				continue
 			}
