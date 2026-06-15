@@ -77,9 +77,7 @@ export interface RevokeOpts {
   targetX25519Pubs: string[];
   /** x25519 public keys (base64) of surviving members (post-revocation). */
   survivorX25519Pubs: string[];
-  /** Secret IDs for re-seal sweep ([WM2]). Empty list is valid (CP GAP sp-7h6.1). */
-  secretIds: string[];
-  /** CP client for the re-seal sweep. Pass a stub until sp-7h6.1 lands. */
+  /** CP client for the re-seal sweep. */
   cpClient: SecretsCPClient;
   /** Optional progress callback during the re-seal sweep. */
   onProgress?: (progress: SweepProgress) => void;
@@ -150,11 +148,12 @@ export async function revokeDevices(opts: RevokeOpts): Promise<SweepProgress> {
 
   // Build survivor pubkey bytes for the re-seal sweep
   const survivorPubBytes = buildSurvivorPubBytes(currentLog, opts.survivorX25519Pubs);
+  const secretIds = await opts.cpClient.listSecretIdsForSweep(finalHeadVersion);
 
   // Init + execute re-seal sweep ([WM2])
   const progress = initSweep({
     targetVersion: finalHeadVersion,
-    secretIds: opts.secretIds,
+    secretIds,
     isRevocation: true,
     revokedX25519Pub: opts.targetX25519Pubs[0], // record first revoked device
   });
