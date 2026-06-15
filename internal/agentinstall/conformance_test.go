@@ -21,16 +21,17 @@ var allKinds = []agentinstall.Kind{
 	agentinstall.KindSkill,
 	agentinstall.KindMCP,
 	agentinstall.KindConfig,
+	agentinstall.KindPlugin,
 }
 
 // expectApplied[agent][kind] is true when the (agent×kind) cell is expected to
 // produce StatusApplied; false means StatusSkipped (no-op / deferred).
 var expectApplied = map[string]map[agentinstall.Kind]bool{
-	"claude":   {agentinstall.KindSkill: true, agentinstall.KindMCP: true, agentinstall.KindConfig: true},
-	"codex":    {agentinstall.KindSkill: true, agentinstall.KindMCP: true, agentinstall.KindConfig: true},
-	"opencode": {agentinstall.KindSkill: false, agentinstall.KindMCP: true, agentinstall.KindConfig: true},
-	"hermes":   {agentinstall.KindSkill: false, agentinstall.KindMCP: false, agentinstall.KindConfig: false},
-	"goose":    {agentinstall.KindSkill: false, agentinstall.KindMCP: false, agentinstall.KindConfig: false},
+	"claude":   {agentinstall.KindSkill: true, agentinstall.KindMCP: true, agentinstall.KindConfig: true, agentinstall.KindPlugin: true},
+	"codex":    {agentinstall.KindSkill: true, agentinstall.KindMCP: true, agentinstall.KindConfig: true, agentinstall.KindPlugin: true},
+	"opencode": {agentinstall.KindSkill: false, agentinstall.KindMCP: true, agentinstall.KindConfig: true, agentinstall.KindPlugin: true},
+	"hermes":   {agentinstall.KindSkill: false, agentinstall.KindMCP: false, agentinstall.KindConfig: false, agentinstall.KindPlugin: false},
+	"goose":    {agentinstall.KindSkill: false, agentinstall.KindMCP: false, agentinstall.KindConfig: false, agentinstall.KindPlugin: false},
 }
 
 const confName = "ctx7"
@@ -66,6 +67,18 @@ func confArtifact(kind agentinstall.Kind, agent string) agentinstall.Artifact {
 				Native: map[string]interface{}{
 					agent: map[string]interface{}{"customKey": "customValue"},
 				},
+			},
+		}
+	case agentinstall.KindPlugin:
+		return agentinstall.Artifact{
+			Kind:    kind,
+			Name:    confName,
+			Targets: []string{agent},
+			Plugin: &agentinstall.PluginPayload{
+				Plugin:      "ctx7",
+				Marketplace: "mp",
+				Source:      "/baked/mp",
+				LocalFile:   "./plugins/ctx7.js",
 			},
 		}
 	}
@@ -198,6 +211,31 @@ func TestConformance_PathFormatPresence(t *testing.T) {
 					if root["customKey"] != "customValue" {
 						t.Fatalf("config customKey: got %v want customValue", root["customKey"])
 					}
+				case agentinstall.KindPlugin:
+					root := parseBack(t, layout.ConfigFormat, layout.ConfigPath)
+					switch agent {
+					case "claude":
+						ep, ok := root["enabledPlugins"].(map[string]interface{})
+						if !ok {
+							t.Fatalf("claude enabledPlugins missing or wrong type: %v", root)
+						}
+						if _, ok := ep["ctx7@mp"]; !ok {
+							t.Fatalf("claude enabledPlugins missing ctx7@mp: %v", root)
+						}
+					case "codex":
+						plugins, ok := root["plugins"].(map[string]interface{})
+						if !ok {
+							t.Fatalf("codex plugins missing or wrong type: %v", root)
+						}
+						if _, ok := plugins["ctx7@mp"]; !ok {
+							t.Fatalf("codex plugins missing ctx7@mp: %v", root)
+						}
+					case "opencode":
+						arr, _ := root["plugin"].([]interface{})
+						if len(arr) == 0 {
+							t.Fatalf("opencode plugin array empty: %v", root)
+						}
+					}
 				}
 			})
 		}
@@ -243,10 +281,14 @@ func TestConformance_Idempotency(t *testing.T) {
 					return
 				}
 
-				// mcp/config share file machinery: assert byte-stable + single entry.
+				// mcp/config/plugin share file machinery: assert byte-stable + single entry.
 				path := layout.MCPPath
 				format := layout.MCPFormat
 				if kind == agentinstall.KindConfig {
+					path = layout.ConfigPath
+					format = layout.ConfigFormat
+				}
+				if kind == agentinstall.KindPlugin {
 					path = layout.ConfigPath
 					format = layout.ConfigFormat
 				}
@@ -287,6 +329,7 @@ func TestConformance_LauncherClobberSurvival(t *testing.T) {
 		{"claude", agentinstall.KindSkill}, {"claude", agentinstall.KindMCP}, {"claude", agentinstall.KindConfig},
 		{"codex", agentinstall.KindSkill}, {"codex", agentinstall.KindMCP}, {"codex", agentinstall.KindConfig},
 		{"opencode", agentinstall.KindMCP}, {"opencode", agentinstall.KindConfig},
+		{"claude", agentinstall.KindPlugin}, {"codex", agentinstall.KindPlugin}, {"opencode", agentinstall.KindPlugin},
 	}
 	for _, c := range cells {
 		c := c
@@ -322,6 +365,8 @@ func seedClobberBase(t *testing.T, layout agentinstall.AgentLayout, agent string
 	case agentinstall.KindMCP:
 		writeBaseFile(t, layout.MCPPath, layout.MCPFormat)
 	case agentinstall.KindConfig:
+		writeBaseFile(t, layout.ConfigPath, layout.ConfigFormat)
+	case agentinstall.KindPlugin:
 		writeBaseFile(t, layout.ConfigPath, layout.ConfigFormat)
 	}
 }
@@ -394,6 +439,24 @@ func assertClobberSurvival(t *testing.T, layout agentinstall.AgentLayout, agent 
 		}
 		if agent == "opencode" {
 			assertJSONCCommentSurvived(t, layout.ConfigPath)
+		}
+	case agentinstall.KindPlugin:
+		root := parseBack(t, layout.ConfigFormat, layout.ConfigPath)
+		if root["launcherKey"] != "keep" {
+			t.Fatalf("launcherKey clobbered after plugin apply: got %v want keep", root["launcherKey"])
+		}
+		// TOML base files also seed model="m"; verify it survives.
+		if layout.ConfigFormat == agentinstall.FormatTOML {
+			if root["model"] != "m" {
+				t.Fatalf("TOML model key was clobbered after plugin apply: got %v want m", root["model"])
+			}
+		}
+		if agent == "opencode" {
+			assertJSONCCommentSurvived(t, layout.ConfigPath)
+			arr, _ := root["plugin"].([]interface{})
+			if len(arr) == 0 {
+				t.Fatalf("opencode plugin array empty after clobber-survival apply: %v", root)
+			}
 		}
 	}
 }
