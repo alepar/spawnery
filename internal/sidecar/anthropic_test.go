@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -294,6 +295,79 @@ func TestMessagesHandlerCredentialsOverrideAppliesPerRequest(t *testing.T) {
 	}
 	if gotPath != "/v1/chat/completions" {
 		t.Fatalf("path = %q, want /v1/chat/completions", gotPath)
+	}
+}
+
+func TestMessagesHandlerRedactsCredentialFromUpstreamError(t *testing.T) {
+	const upstreamBody = `{"error":{"message":"provider echoed Bearer byok-key and byok-key"}}`
+	var logs bytes.Buffer
+	prevLog := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prevLog)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		io.WriteString(w, upstreamBody)
+	}))
+	defer upstream.Close()
+
+	ov := &Override{}
+	if err := ov.SetCredentials(upstream.URL, "byok-key"); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(NewMessagesHandler("http://default.invalid", "default-key", ov))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"agent/model","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 503; body=%s", resp.StatusCode, body)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(got), "byok-key") {
+		t.Fatalf("response body leaked credential: %s", got)
+	}
+	if strings.Contains(logs.String(), "byok-key") {
+		t.Fatalf("logs leaked credential: %s", logs.String())
+	}
+}
+
+func TestMessagesHandlerCredentialUpstreamPreservesPathAndQuery(t *testing.T) {
+	var gotPath, gotQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		io.WriteString(w, `{"id":"chatcmpl-1","model":"override","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{}}`)
+	}))
+	defer upstream.Close()
+
+	ov := &Override{}
+	if err := ov.SetCredentials(upstream.URL+"/api?tenant=x", "byok-key"); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(NewMessagesHandler("http://default.invalid", "default-key", ov))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"agent/model","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if gotPath != "/api/v1/chat/completions" {
+		t.Fatalf("path = %q, want /api/v1/chat/completions", gotPath)
+	}
+	if gotQuery != "tenant=x" {
+		t.Fatalf("query = %q, want tenant=x", gotQuery)
 	}
 }
 

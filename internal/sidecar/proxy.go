@@ -48,8 +48,11 @@ func NewHandler(upstream, key string, ov *Override) http.Handler {
 			resp.Body = io.NopCloser(bytes.NewReader(nil))
 			return nil
 		}
-		resp.Body = io.NopCloser(bytes.NewReader(b)) // restore the full body for the agent
-		snippet := strings.TrimSpace(string(b))
+		body := redactCredentialEcho(string(b), resp.Request.Header.Get("Authorization"))
+		resp.Body = io.NopCloser(strings.NewReader(body)) // restore the redacted body for the agent
+		resp.ContentLength = int64(len(body))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		snippet := strings.TrimSpace(body)
 		if len(snippet) > 512 {
 			snippet = snippet[:512] + "…"
 		}
@@ -120,6 +123,24 @@ func singleJoiningSlash(a, b string) string {
 	default:
 		return a + b
 	}
+}
+
+func redactCredentialEcho(s, credential string) string {
+	credential = strings.TrimSpace(credential)
+	if credential == "" {
+		return s
+	}
+	replacements := []string{credential, "[REDACTED]"}
+	const bearerPrefix = "Bearer "
+	if strings.HasPrefix(credential, bearerPrefix) {
+		key := strings.TrimSpace(strings.TrimPrefix(credential, bearerPrefix))
+		if key != "" {
+			replacements = append(replacements, key, "[REDACTED]")
+		}
+	} else {
+		replacements = append(replacements, bearerPrefix+credential, "[REDACTED]")
+	}
+	return strings.NewReplacer(replacements...).Replace(s)
 }
 
 // rewriteRequestModel buffers r's JSON body, replaces the top-level "model" with model,
