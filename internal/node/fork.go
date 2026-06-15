@@ -33,12 +33,6 @@ type activeSameNodeFork struct {
 	cancel        context.CancelFunc
 }
 
-type activeForkTransfer struct {
-	sourceSpawnID string
-	forkSpawnID   string
-	cancel        context.CancelFunc
-}
-
 func (b forkIngressBarrier) matches(other forkIngressBarrier) bool {
 	return b.sourceGeneration == other.sourceGeneration && b.transferSetID == other.transferSetID
 }

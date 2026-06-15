@@ -320,10 +320,6 @@ func (g *GenerationKeyManager) releaseHoldFunc(spawnID string, gen uint64) func(
 	}
 }
 
-func (g *GenerationKeyManager) held(spawnID string, gen uint64) bool {
-	return g.holdCount(spawnID, gen) > 0
-}
-
 func (g *GenerationKeyManager) holdCount(spawnID string, gen uint64) int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -350,12 +346,6 @@ func (g *GenerationKeyManager) lookupKey(spawnID string, gen uint64) (generation
 	defer g.mu.Unlock()
 	key := g.keys[spawnID][gen]
 	return key, key.accessKeyID != "" && key.secretAccessKey != ""
-}
-
-func (g *GenerationKeyManager) forget(spawnID string, gen uint64) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.forgetLocked(spawnID, gen)
 }
 
 func (g *GenerationKeyManager) forgetIfKey(spawnID string, gen uint64, accessKeyID string) {

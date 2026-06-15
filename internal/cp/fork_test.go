@@ -325,32 +325,6 @@ func (a *autoCrossNodeForkTargetSender) Send(m *nodev1.CPMessage) error {
 	return nil
 }
 
-type blockingTurnBoundarySender struct {
-	capSender
-	s       *Server
-	reached chan *nodev1.ForkTurnBoundary
-	unblock chan struct{}
-}
-
-func (b *blockingTurnBoundarySender) Send(m *nodev1.CPMessage) error {
-	if err := b.capSender.Send(m); err != nil {
-		return err
-	}
-	if cmd := m.GetForkTurnBoundary(); cmd != nil {
-		select {
-		case b.reached <- cmd:
-		default:
-		}
-		<-b.unblock
-		b.s.deliverForkTurnBoundaryComplete(&nodev1.ForkTurnBoundaryComplete{
-			SourceSpawnId:    cmd.GetSourceSpawnId(),
-			SourceGeneration: cmd.GetSourceGeneration(),
-			TransferSetId:    cmd.GetTransferSetId(),
-		})
-	}
-	return nil
-}
-
 type blockingBoundaryMaterializer struct {
 	nodeID  string
 	reached chan forkMaterializeRequest
