@@ -142,6 +142,106 @@ func TestTransitionForkingRecoveredClearsDeadline(t *testing.T) {
 	}
 }
 
+func TestMarkDeletedClaimedHidesRowClearsMetadataAndEndsContainer(t *testing.T) {
+	st := NewTestStore(t)
+	seedAppAndOwner(t, st)
+	ctx := context.Background()
+
+	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp-delete"), nil) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp-delete", "node-a", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetForking(ctx, "sp-delete", 1, 250) })
+	seq := spawnSeq(t, st, "sp-delete")
+	gen := liveGen(t, st, "sp-delete")
+	claimedSeq, err := st.Spawns().Acquire(ctx, "sp-delete", "cleanup", "lease-delete", 10, 100, seq)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	newSeq, err := st.Spawns().MarkDeletedClaimed(ctx, "sp-delete", "lease-delete", claimedSeq, gen, 500)
+	if err != nil {
+		t.Fatalf("MarkDeletedClaimed: %v", err)
+	}
+	if newSeq != claimedSeq+1 {
+		t.Fatalf("newSeq=%d want %d", newSeq, claimedSeq+1)
+	}
+	if _, err := st.Spawns().Get(ctx, "sp-delete"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get after MarkDeletedClaimed: want ErrNotFound, got %v", err)
+	}
+
+	sp := rawSpawnRow(t, st, "sp-delete")
+	if sp.Status != Deleted {
+		t.Fatalf("status=%v want Deleted", sp.Status)
+	}
+	if sp.DeletedAt == nil || *sp.DeletedAt != 500 {
+		t.Fatalf("deleted_at=%v want 500", sp.DeletedAt)
+	}
+	if sp.ForkCaptureDeadline != nil {
+		t.Fatalf("fork_capture_deadline=%v want nil", sp.ForkCaptureDeadline)
+	}
+	if sp.ClaimHolder != nil || sp.ClaimLeaseID != nil || sp.ClaimDeadline != nil {
+		t.Fatalf("claim metadata not cleared: holder=%v lease=%v deadline=%v", sp.ClaimHolder, sp.ClaimLeaseID, sp.ClaimDeadline)
+	}
+	if _, ok, err := st.Spawns().LiveContainer(ctx, "sp-delete"); err != nil || ok {
+		t.Fatalf("LiveContainer after delete: ok=%v err=%v, want no live container", ok, err)
+	}
+	c, ok, err := st.Spawns().LatestContainer(ctx, "sp-delete")
+	if err != nil || !ok {
+		t.Fatalf("LatestContainer: ok=%v err=%v", ok, err)
+	}
+	if c.Phase != PhaseLost || c.EndedAt == nil || *c.EndedAt != 500 {
+		t.Fatalf("latest container=%+v want lost ended_at=500", c)
+	}
+}
+
+func TestMarkDeletedClaimedFencesLeaseSeqAndGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		leaseID   string
+		seqDelta  int64
+		genDelta  int64
+		wantError error
+	}{
+		{name: "lease", leaseID: "wrong-lease", wantError: ErrConflict},
+		{name: "seq", seqDelta: -1, wantError: ErrConflict},
+		{name: "generation", genDelta: 1, wantError: ErrConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := NewTestStore(t)
+			seedAppAndOwner(t, st)
+			ctx := context.Background()
+
+			id := "sp-fence-" + tc.name
+			inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn(id), nil) })
+			inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, id, "node-a", 1) })
+			seq := spawnSeq(t, st, id)
+			gen := liveGen(t, st, id)
+			claimedSeq, err := st.Spawns().Acquire(ctx, id, "cleanup", "lease-delete", 10, 100, seq)
+			if err != nil {
+				t.Fatalf("Acquire: %v", err)
+			}
+
+			leaseID := "lease-delete"
+			if tc.leaseID != "" {
+				leaseID = tc.leaseID
+			}
+			_, err = st.Spawns().MarkDeletedClaimed(ctx, id, leaseID, claimedSeq+tc.seqDelta, gen+tc.genDelta, 500)
+			if !errors.Is(err, tc.wantError) {
+				t.Fatalf("MarkDeletedClaimed fenced %s: want %v, got %v", tc.name, tc.wantError, err)
+			}
+			sp, err := st.Spawns().Get(ctx, id)
+			if err != nil {
+				t.Fatalf("Get after failed MarkDeletedClaimed: %v", err)
+			}
+			if sp.Status == Deleted {
+				t.Fatalf("failed fenced delete must not mark row deleted: %+v", sp)
+			}
+			if _, ok, err := st.Spawns().LiveContainer(ctx, id); err != nil || !ok {
+				t.Fatalf("LiveContainer after failed fenced delete: ok=%v err=%v, want live", ok, err)
+			}
+		})
+	}
+}
+
 func forceForkCaptureDeadline(ctx context.Context, st Store, id string, deadline int64) error {
 	bs := st.(*bunStore)
 	_, err := bs.db.NewUpdate().Model((*Spawn)(nil)).
@@ -149,4 +249,14 @@ func forceForkCaptureDeadline(ctx context.Context, st Store, id string, deadline
 		Where("id = ?", id).
 		Exec(ctx)
 	return err
+}
+
+func rawSpawnRow(t *testing.T, st Store, id string) Spawn {
+	t.Helper()
+	bs := st.(*bunStore)
+	var sp Spawn
+	if err := bs.db.NewSelect().Model(&sp).Where("id = ?", id).Scan(context.Background()); err != nil {
+		t.Fatalf("raw Spawn(%s): %v", id, err)
+	}
+	return sp
 }

@@ -127,13 +127,18 @@ func TestRecoverForkingSourcePostUnpausePreCAS(t *testing.T) {
 	if err := pause.UnpauseIfPaused(ctx, "sp-post", liveGenForCPTest(t, st, "sp-post")); err != nil {
 		t.Fatalf("staged UnpauseIfPaused: %v", err)
 	}
-	if err := st.Spawns().Release(ctx, "sp-post", leaseID); err != nil {
-		t.Fatalf("Release staged lease: %v", err)
-	}
 	if seq <= sp.StatusSeq {
 		t.Fatalf("staged recovery seq=%d want > %d", seq, sp.StatusSeq)
 	}
+	staged, err := st.Spawns().Get(ctx, "sp-post")
+	if err != nil {
+		t.Fatalf("Get after staged recovery crash: %v", err)
+	}
+	if staged.ClaimLeaseID == nil || *staged.ClaimLeaseID != leaseID {
+		t.Fatalf("staged recovery should leave crashed claim in place, got lease=%v", staged.ClaimLeaseID)
+	}
 
+	s.now = func() time.Time { return time.Unix(0, 400) }
 	if err := s.recoverForkingSources(ctx, pause); err != nil {
 		t.Fatalf("recoverForkingSources: %v", err)
 	}
