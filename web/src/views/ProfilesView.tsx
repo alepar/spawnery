@@ -73,7 +73,9 @@ export function ProfilesView() {
   const [catalogEntries, setCatalogEntries] = useState<CatalogEntrySummary[]>([]);
   const [showAddCatalog, setShowAddCatalog] = useState(false);
   const [showAddCustom, setShowAddCustom] = useState(false);
-  const [customKind, setCustomKind] = useState<ProfileEntryKind>("PROFILE_ENTRY_KIND_SKILL");
+  // SKILL is excluded: the CP validates custom inline SKILL entries as a tar archive,
+  // which a plain textarea cannot produce. Use catalog-ref for skills instead.
+  const [customKind, setCustomKind] = useState<ProfileEntryKind>("PROFILE_ENTRY_KIND_MCP");
   const [customName, setCustomName] = useState("");
   const [customInline, setCustomInline] = useState("");
   const [addingEntry, setAddingEntry] = useState(false);
@@ -244,7 +246,9 @@ export function ProfilesView() {
   const handleUpdateTargets = async (entry: ProfileEntry, targets: string[]) => {
     if (!profile) return;
     try {
-      // Remove the old entry and re-add with updated targets
+      // Remove the old entry and re-add with updated targets.
+      // Two-step CAS: if the add leg fails after remove succeeds, attempt to restore
+      // the original entry to avoid silent data loss.
       const removeResult = await removeProfileEntry(profile.profileId, profile.version, entry.entryId);
       const entryInput: Omit<ProfileEntry, "entryId"> = {
         kind: entry.kind,
@@ -255,7 +259,20 @@ export function ProfilesView() {
         targets,
         mcpSecretRefs: entry.mcpSecretRefs,
       };
-      await addProfileEntry(profile.profileId, removeResult.version, entryInput);
+      try {
+        await addProfileEntry(profile.profileId, removeResult.version, entryInput);
+      } catch (addErr: any) {
+        // Add failed after remove succeeded — attempt to restore the original entry.
+        const restoreInput: Omit<ProfileEntry, "entryId"> = { ...entryInput, targets: entry.targets };
+        try {
+          await addProfileEntry(profile.profileId, removeResult.version, restoreInput);
+          toast.error("Update targets failed (entry restored): " + addErr.message);
+        } catch {
+          toast.error("Update targets failed and restore failed — entry may be lost: " + addErr.message);
+        }
+        if (selectedId) await refreshProfile(selectedId);
+        return;
+      }
       if (selectedId) await refreshProfile(selectedId);
     } catch (e: any) {
       toast.error("Update targets failed: " + e.message);
@@ -480,7 +497,8 @@ export function ProfilesView() {
                   onChange={(e) => setCustomKind(e.target.value as ProfileEntryKind)}
                   className="rounded border border-input bg-background px-2 py-1 text-sm"
                 >
-                  <option value="PROFILE_ENTRY_KIND_SKILL">Skill</option>
+                  {/* SKILL is omitted: CP validates custom inline Skills as a tar archive,
+                      which a free-text textarea cannot produce. Use "Add from catalog" for Skills. */}
                   <option value="PROFILE_ENTRY_KIND_MCP">MCP</option>
                   <option value="PROFILE_ENTRY_KIND_CONFIG">Config</option>
                   <option value="PROFILE_ENTRY_KIND_PLUGIN">Plugin</option>

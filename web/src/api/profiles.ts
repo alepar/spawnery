@@ -1,5 +1,23 @@
 import { unary } from "./connect";
 
+// --- Base64 helpers for proto `bytes` fields (Connect-JSON encodes bytes as base64) ---
+
+/** Encode a raw UTF-8 string to standard base64 for a proto `bytes` wire field. */
+function utf8ToBase64(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+/** Decode a base64 proto `bytes` field back to a raw UTF-8 string. */
+function base64ToUtf8(b64: string): string {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
 // --- Types & enums -----------------------------------------------------------
 
 export type ProfileEntryKind =
@@ -93,7 +111,13 @@ export async function getProfile(profileId: string): Promise<Profile> {
     "GetProfile", { profileId },
   );
   const p = r.profile!;
-  return { ...p, entries: p.entries ?? [], secretIds: p.secretIds ?? [] };
+  // Decode proto `bytes` field customInline from base64 (Connect-JSON encoding) to raw string.
+  const entries = (p.entries ?? []).map((e) =>
+    e.customInline !== undefined
+      ? { ...e, customInline: base64ToUtf8(e.customInline) }
+      : e,
+  );
+  return { ...p, entries, secretIds: p.secretIds ?? [] };
 }
 
 export async function updateProfile(
@@ -113,10 +137,14 @@ export async function addProfileEntry(
   expectedVersion: number,
   entry: Omit<ProfileEntry, "entryId">,
 ): Promise<{ entryId: string; version: number }> {
+  // proto `bytes` field customInline must be base64-encoded in Connect-JSON.
+  const wireEntry = entry.customInline !== undefined
+    ? { ...entry, customInline: utf8ToBase64(entry.customInline) }
+    : entry;
   return unary<{ entryId: string; version: number }>("AddProfileEntry", {
     profileId,
     expectedVersion,
-    entry,
+    entry: wireEntry,
   });
 }
 

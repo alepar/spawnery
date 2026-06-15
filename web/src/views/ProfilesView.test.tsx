@@ -159,6 +159,28 @@ describe("ProfilesView", () => {
     expect(claudeBadge.getAttribute("data-status")).toBe("supported");
   });
 
+  it("opens Add custom form, fills name and inline content, and calls addProfileEntry", async () => {
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("add-custom-btn"));
+    await userEvent.click(screen.getByTestId("add-custom-btn"));
+    await waitFor(() => screen.getByTestId("custom-entry-form"));
+    await userEvent.type(screen.getByTestId("custom-name-input"), "My Custom MCP");
+    // Use plain text — userEvent.type treats { as a special key modifier, so avoid JSON braces
+    await userEvent.type(screen.getByTestId("custom-inline-input"), "mcp inline content");
+    await userEvent.click(screen.getByTestId("custom-entry-submit"));
+    expect(addProfileEntry).toHaveBeenCalledWith(
+      "p1",
+      2,
+      expect.objectContaining({
+        source: "PROFILE_ENTRY_SOURCE_CUSTOM",
+        name: "My Custom MCP",
+        customInline: "mcp inline content",
+      }),
+    );
+  });
+
   it("CapabilityPreview renders no-op badge for opencode (skill is no-op)", async () => {
     render(<ProfilesView />);
     await waitFor(() => screen.getByTestId("profile-item-p1"));

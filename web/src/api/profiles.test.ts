@@ -75,6 +75,20 @@ describe("profiles api", () => {
     expect(profile.secretIds).toEqual(["s1"]);
   });
 
+  it("getProfile decodes base64 customInline from proto bytes wire field to raw string", async () => {
+    // "dGVzdA==" is base64 for "test" (as proto bytes → Connect-JSON encodes bytes as base64)
+    const entry = {
+      entryId: "e2",
+      kind: "PROFILE_ENTRY_KIND_MCP",
+      name: "My MCP",
+      source: "PROFILE_ENTRY_SOURCE_CUSTOM",
+      customInline: "dGVzdA==",
+    };
+    vi.stubGlobal("fetch", mockFetch({ profile: { profileId: "p1", name: "N", version: 3, entries: [entry] } }));
+    const profile = await getProfile("p1");
+    expect(profile.entries[0].customInline).toBe("test");
+  });
+
   it("updateProfile POSTs UpdateProfile with CAS fields", async () => {
     const f = mockFetch({ version: 3 });
     vi.stubGlobal("fetch", f);
@@ -106,6 +120,32 @@ describe("profiles api", () => {
     expect(body.entry.kind).toBe("PROFILE_ENTRY_KIND_SKILL");
     expect(r.entryId).toBe("e1");
     expect(r.version).toBe(2);
+  });
+
+  it("addProfileEntry base64-encodes customInline for proto bytes wire field", async () => {
+    const f = mockFetch({ entryId: "e2", version: 3 });
+    vi.stubGlobal("fetch", f);
+    await addProfileEntry("p1", 1, {
+      kind: "PROFILE_ENTRY_KIND_MCP",
+      name: "My MCP",
+      source: "PROFILE_ENTRY_SOURCE_CUSTOM",
+      customInline: "hello world",
+    });
+    const body = JSON.parse((f.mock.calls[0][1] as any).body);
+    // "hello world" UTF-8 → base64 = "aGVsbG8gd29ybGQ="
+    expect(body.entry.customInline).toBe("aGVsbG8gd29ybGQ=");
+  });
+
+  it("addProfileEntry omits customInline from wire body when not provided", async () => {
+    const f = mockFetch({ entryId: "e3", version: 2 });
+    vi.stubGlobal("fetch", f);
+    await addProfileEntry("p1", 1, {
+      kind: "PROFILE_ENTRY_KIND_MCP",
+      name: "No Inline",
+      source: "PROFILE_ENTRY_SOURCE_CUSTOM",
+    });
+    const body = JSON.parse((f.mock.calls[0][1] as any).body);
+    expect(body.entry.customInline).toBeUndefined();
   });
 
   it("removeProfileEntry POSTs RemoveProfileEntry", async () => {
