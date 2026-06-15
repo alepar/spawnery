@@ -202,11 +202,14 @@ be **idempotent, ordered, and re-drivable** (not a fire-and-forget `revertOnFail
    idempotently and pause-phase-aware (driver death pre-pause, mid-pause, post-unpause-pre-CAS; wedged
    worker → capture deadline); and that the failed-fork unwind is re-drivable (empty-then-drop bucket;
    row deleted last; orphan-GC reclaims a half-created fork).
-4. **[H — transfer-set fork variant]** *Question:* does the encrypted transfer set compose for a
-   `source_id → fork_id` seed into a **fresh** repo (vs migration's same-`spawn_id` generation chain)?
-   *Cheapest test:* export a source-rehydrated staging set under the transfer key, import + re-journal on
-   the target into a new repo. *Kill criteria:* if the contract can't express cross-spawn artifacts,
-   define the fork variant before `sp-jdzb`.
+4. **[H — transfer-set fork variant]** *Result:* journal-level composition works when the source node
+   restores the pinned mount manifest to staging, exports those plain files plus the source rootfs delta
+   through a transfer-key envelope bound to `source_id → fork_id`, and the target imports that payload
+   into fork host dirs before re-journaling as fork generation 1. The existing migration transfer-set
+   row is still not expressive enough as the durable CP contract because it has one `spawn_id` and
+   migration-style `source_generation`/`target_generation`; `sp-jdzb` must introduce an explicit fork
+   transfer-set variant or equivalent fields naming both `source_spawn_id` and `fork_spawn_id`, with
+   pins interpreted as source artifacts until import and fork artifacts after re-journal.
 
 ## Testing (`sp-jkpv`)
 
@@ -258,3 +261,9 @@ the assumptions above — append a dated note here, whether or not a formal debu
   corrected ~2.5–3× disk gate, a fork-ready SLO, and defined `Forking`/"seeding…" client semantics
   (Theme 7); documented that a mid-turn fork may abort the **source's** in-flight turn (Theme 3, accepted
   for MVP). Spikes E/F/G/H carried above.
+- **2026-06-15 (Spike H):** Hermetic journal spike confirmed the substrate composes for `source_id →
+  fork_id`: source repo rehydrate to staging, transfer-key-bound tar payload containing plain mount files
+  plus rootfs delta, target import, and fork gen-1 re-journal into a fresh repo. The CP transfer-set model
+  still needs a fork variant before `sp-jdzb` implementation because the current `migration_transfer_sets`
+  schema has a single `spawn_id`; fork orchestration needs durable source and fork spawn IDs so the target
+  never interprets source pins as fork-owned artifacts before import/re-journal.
