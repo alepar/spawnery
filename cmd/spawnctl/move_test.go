@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/internal/pki"
 	"spawnery/internal/secrets/journalkey"
 	"spawnery/internal/secrets/seal"
 	"spawnery/internal/secrets/subkey"
@@ -20,13 +24,14 @@ import (
 // fakeMoveClient is a canned moveClient that records each request so runMove's orchestration can be
 // asserted. node{Pub,Priv} model the target node's HPKE sub-key.
 type fakeMoveClient struct {
-	entries   []*cpv1.JournalKeyCiphertext
-	nodeID    string
-	nodePub   []byte
-	gen       uint64
-	notAfter  time.Time // STABLE sub-key expiry so the AAD reconstructs identically
-	migErr    error
-	getKeyErr error
+	entries       []*cpv1.JournalKeyCiphertext
+	nodeID        string
+	nodePub       []byte
+	nodeCertChain []byte
+	gen           uint64
+	notAfter      time.Time // STABLE sub-key expiry so the AAD reconstructs identically
+	migErr        error
+	getKeyErr     error
 
 	gotMigrate  *cpv1.MigrateSpawnRequest
 	gotDelivery *cpv1.DeliverSecretsRequest
@@ -50,7 +55,11 @@ func (f *fakeMoveClient) GetSpawnNodeKey(_ context.Context, _ *connect.Request[c
 	}
 	sk := subkey.SignedSubKey{HPKEPub: f.nodePub, NodeID: f.nodeID, NotAfter: f.notAfter}
 	skJSON, _ := json.Marshal(sk)
-	return connect.NewResponse(&cpv1.GetSpawnNodeKeyResponse{SignedSubkey: skJSON, Generation: f.gen}), nil
+	return connect.NewResponse(&cpv1.GetSpawnNodeKeyResponse{
+		NodeCertChain: f.nodeCertChain,
+		SignedSubkey:  skJSON,
+		Generation:    f.gen,
+	}), nil
 }
 
 func (f *fakeMoveClient) DeliverSecrets(_ context.Context, req *connect.Request[cpv1.DeliverSecretsRequest]) (*connect.Response[cpv1.DeliverSecretsResponse], error) {
@@ -87,7 +96,7 @@ func TestRunMoveResealsAndDelivers(t *testing.T) {
 	defer func() { genDeliveryID = prev }()
 
 	var out bytes.Buffer
-	if err := runMove(context.Background(), client, nil, dev, "sp1", "node-b", &out, time.Now()); err != nil {
+	if err := runMove(context.Background(), client, nil, dev, "sp1", "node-b", &out, time.Now(), moveOptions{}); err != nil {
 		t.Fatalf("runMove: %v", err)
 	}
 
@@ -146,11 +155,91 @@ func TestRunMoveMigrateFailureIsDataSafe(t *testing.T) {
 		migErr:  fmt.Errorf("no capacity"),
 	}
 	var out bytes.Buffer
-	err := runMove(context.Background(), client, nil, dev, "sp1", "cloud", &out, time.Now())
+	err := runMove(context.Background(), client, nil, dev, "sp1", "cloud", &out, time.Now(), moveOptions{})
 	if err == nil || !strings.Contains(err.Error(), "your data is safe") {
 		t.Fatalf("migrate failure err = %v, want a data-safe message", err)
 	}
 	if client.gotDelivery != nil {
 		t.Fatal("must not deliver the journal key after a failed migrate")
+	}
+}
+
+type prodNodeFix struct {
+	rootPEM  []byte
+	chainPEM []byte
+	key      *ecdsa.PrivateKey
+	nodeID   string
+}
+
+func issueProdNode(t *testing.T, nodeID, accountID string) prodNodeFix {
+	t.Helper()
+
+	root, err := pki.NewRootCA("test-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inter, err := root.NewIntermediate(pki.ClassSelfHosted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := inter.IssueNode(nodeID, accountID, pki.ClassSelfHosted, time.Now().Add(365*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prodNodeFix{
+		rootPEM:  pki.MarshalCertPEM(root.Cert),
+		chainPEM: append(pki.MarshalCertPEM(node.Cert), pki.MarshalCertPEM(inter.Cert)...),
+		key:      node.Key,
+		nodeID:   nodeID,
+	}
+}
+
+func TestRunMoveRejectsRevokedNodeBeforeDelivery(t *testing.T) {
+	mn, _ := seal.NewMnemonic()
+	dev, _ := seal.DeviceFromMnemonic(mn, "")
+	env, err := journalkey.SealToOwner("repo-pw-123", []seal.X25519PubKey{dev.X25519PubKey()},
+		seal.AtRestAAD{AccountID: "alice", SecretID: journalkey.SecretID("main"), Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, _ := json.Marshal(env)
+
+	fx := issueProdNode(t, "node-b", "alice")
+	nodePub, _, err := seal.NodeKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	sk, err := subkey.Sign(fx.key, fx.nodeID, nodePub, now, now.Add(subkey.DefaultValidity))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeMoveClient{
+		entries:       []*cpv1.JournalKeyCiphertext{{Mount: "main", Ciphertext: ct}},
+		nodeID:        fx.nodeID,
+		nodePub:       sk.HPKEPub,
+		nodeCertChain: fx.chainPEM,
+		gen:           7,
+		notAfter:      sk.NotAfter,
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"revoked_node_ids": []string{fx.nodeID}})
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err = runMove(context.Background(), client, nil, dev, "sp1", fx.nodeID, &out, now, moveOptions{
+		AccountID:        "alice",
+		RootPEM:          fx.rootPEM,
+		RevocationURL:    srv.URL + "/node-revocations",
+		RevocationClient: srv.Client(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "node is revoked") {
+		t.Fatalf("err = %v", err)
+	}
+	if client.gotDelivery != nil {
+		t.Fatal("DeliverSecrets must not be called for a revoked node")
 	}
 }
