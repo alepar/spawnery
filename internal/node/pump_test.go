@@ -308,6 +308,45 @@ func TestQueuedPromptDrainsOnTurnEnd(t *testing.T) {
 	}
 }
 
+func TestForkBarrierQueuesPromptUntilRelease(t *testing.T) {
+	gooseInR, gooseInW := io.Pipe()
+	gooseOutR, gooseOutW := io.Pipe()
+	go scriptGoose(gooseInR, gooseOutW)
+	p := newPump(gooseInW, gooseOutR)
+	if err := p.start(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop()
+	a := &capSender{}
+	p.attachClient("a", 0, a.send)
+	barrier := forkIngressBarrier{sourceGeneration: 9, transferSetID: "ts-1"}
+	if !p.tryAcquireForkBarrier(barrier) {
+		t.Fatal("fork barrier acquire failed")
+	}
+
+	p.fromClient("a", encodeFrame(Frame{Kind: "prompt", Text: "blocked"}))
+	time.Sleep(20 * time.Millisecond)
+	for _, f := range a.frames() {
+		if f.Kind == "agent" {
+			t.Fatalf("prompt reached agent before fork barrier release: %v", a.frames())
+		}
+	}
+
+	p.releaseForkBarrier(func(b forkIngressBarrier) bool { return b.matches(barrier) })
+	deadline := time.Now().Add(time.Second)
+	for {
+		for _, f := range a.frames() {
+			if f.Kind == "agent" {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("queued prompt did not drain after fork barrier release: %v", a.frames())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestStopUnblocksReadLoop(t *testing.T) {
 	gooseInR, gooseInW := io.Pipe()
 	gooseOutR, gooseOutW := io.Pipe()

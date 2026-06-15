@@ -275,6 +275,20 @@ func (m *sameNodeForkMaterializer) MaterializeFork(ctx context.Context, req fork
 	return m.MaterializeForkWithSourceRestored(ctx, req, nil)
 }
 
+func (m *sameNodeForkMaterializer) cancelForkSameNode(req forkMaterializeRequest) {
+	n, ok := m.s.reg.Get(req.SourceNodeID)
+	if !ok || n.Sender == nil {
+		return
+	}
+	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_CancelForkSameNode{CancelForkSameNode: &nodev1.CancelForkSameNode{
+		SourceSpawnId: req.SourceSpawn.ID,
+		ForkSpawnId:   req.ForkSpawn.ID,
+		TransferSetId: req.TransferSetID,
+	}}}); err != nil {
+		log.Printf("cancel same-node fork %s on node %s: %v", req.TransferSetID, req.SourceNodeID, err)
+	}
+}
+
 func (m *sameNodeForkMaterializer) MaterializeForkWithSourceRestored(ctx context.Context, req forkMaterializeRequest, onSourceRestored func() error) (forkMaterializeResult, error) {
 	if req.SourceNodeID != req.TargetNodeID {
 		return forkMaterializeResult{}, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("cross-node fork materialization is not implemented in this slice"))
@@ -324,14 +338,17 @@ func (m *sameNodeForkMaterializer) MaterializeForkWithSourceRestored(ctx context
 	}
 	select {
 	case <-ctx.Done():
+		m.cancelForkSameNode(req)
 		return forkMaterializeResult{}, ctx.Err()
 	default:
 	}
 	for {
 		select {
 		case <-ctx.Done():
+			m.cancelForkSameNode(req)
 			return forkMaterializeResult{}, ctx.Err()
 		case <-timer.C:
+			m.cancelForkSameNode(req)
 			return forkMaterializeResult{}, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out waiting for same-node fork %s", req.TransferSetID))
 		case msg := <-restoredCh:
 			if err := handleSourceRestored(msg); err != nil {

@@ -26,6 +26,12 @@ type forkBarrierWait struct {
 	cancel  context.CancelFunc
 }
 
+type activeSameNodeFork struct {
+	sourceSpawnID string
+	forkSpawnID   string
+	cancel        context.CancelFunc
+}
+
 func (b forkIngressBarrier) matches(other forkIngressBarrier) bool {
 	return b.sourceGeneration == other.sourceGeneration && b.transferSetID == other.transferSetID
 }
@@ -105,6 +111,53 @@ func (a *attacher) startForkTurnBoundary(ctx context.Context, m *nodev1.ForkTurn
 		defer a.forgetForkBarrierWait(m.GetTransferSetId(), m.GetSourceSpawnId(), barrier)
 		a.forkTurnBoundary(waitCtx, m)
 	}()
+}
+
+func (a *attacher) startForkSameNode(ctx context.Context, m *nodev1.ForkSameNode) {
+	workCtx, cancel := context.WithCancel(ctx)
+	a.mu.Lock()
+	if a.activeForks == nil {
+		a.activeForks = map[string]activeSameNodeFork{}
+	}
+	if prev, ok := a.activeForks[m.GetTransferSetId()]; ok {
+		prev.cancel()
+	}
+	a.activeForks[m.GetTransferSetId()] = activeSameNodeFork{
+		sourceSpawnID: m.GetSourceSpawnId(),
+		forkSpawnID:   m.GetForkSpawnId(),
+		cancel:        cancel,
+	}
+	a.mu.Unlock()
+
+	go func() {
+		defer a.forgetActiveFork(m.GetTransferSetId())
+		a.forkSameNode(workCtx, m)
+	}()
+}
+
+func (a *attacher) forgetActiveFork(transferSetID string) {
+	a.mu.Lock()
+	if a.activeForks != nil {
+		delete(a.activeForks, transferSetID)
+	}
+	a.mu.Unlock()
+}
+
+func (a *attacher) cancelForkSameNode(m *nodev1.CancelForkSameNode) {
+	if m == nil {
+		return
+	}
+	var cancel context.CancelFunc
+	a.mu.Lock()
+	if f, ok := a.activeForks[m.GetTransferSetId()]; ok &&
+		f.sourceSpawnID == m.GetSourceSpawnId() && f.forkSpawnID == m.GetForkSpawnId() {
+		cancel = f.cancel
+		delete(a.activeForks, m.GetTransferSetId())
+	}
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (a *attacher) releaseForkTurnBoundary(m *nodev1.ReleaseForkTurnBoundary) {

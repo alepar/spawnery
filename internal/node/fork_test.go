@@ -177,6 +177,47 @@ func TestForkSameNodeFailureCompletionDoesNotMarkForkActive(t *testing.T) {
 	}
 }
 
+func TestCancelForkSameNodeCancelsRunningFork(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	finalStarted := make(chan struct{})
+	finalBlock := make(chan struct{})
+	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
+		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+		DeltaCapture: true,
+	})
+	mgr.SetJournal(&fakeNodeJournal{
+		finalID:      "manifest-abc",
+		finalStarted: finalStarted,
+		finalBlock:   finalBlock,
+	}, t.TempDir())
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkSameNode{ForkSameNode: &nodev1.ForkSameNode{
+		SourceSpawnId: "sp-source", ForkSpawnId: "sp-fork", SourceGeneration: 9, TargetGeneration: 1, TransferSetId: "ts-1",
+	}}})
+	select {
+	case <-finalStarted:
+	case <-time.After(time.Second):
+		t.Fatal("fork did not reach final snapshot")
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CancelForkSameNode{CancelForkSameNode: &nodev1.CancelForkSameNode{
+		SourceSpawnId: "sp-source", ForkSpawnId: "sp-fork", TransferSetId: "ts-1",
+	}}})
+
+	waitFor(t, "ForkSameNodeComplete cancellation", func() bool {
+		fc := lastForkSameNodeComplete(fs)
+		return fc != nil && strings.Contains(fc.GetError(), "canceled")
+	})
+	fc := lastForkSameNodeComplete(fs)
+	if len(fc.GetMounts()) != 0 || len(fc.GetRootfsArtifacts()) != 0 {
+		t.Fatalf("canceled fork completion must not include seed pins: %+v", fc)
+	}
+	close(finalBlock)
+}
+
 func TestUnpauseIfPausedEmitsCompletion(t *testing.T) {
 	be := &scriptedPodBackend{script: scriptGoose}
 	mgr := newForkNodeManager(t, be)
@@ -349,10 +390,10 @@ func TestForkTurnBoundaryBlocksPromptUntilForkSameNodeCompletes(t *testing.T) {
 
 	a.fromClient("sp-source", SessionZeroID, "c1", encodeFrame(Frame{Kind: "prompt", Text: "during fork"}))
 	p.mu.Lock()
-	blockedBusy, blockedInflight, blockedLogLen := p.busy, p.inflightPromptID, len(p.log)
+	blockedBusy, blockedInflight, blockedLogLen, blockedQueueLen := p.busy, p.inflightPromptID, len(p.log), len(p.queue)
 	p.mu.Unlock()
-	if blockedBusy || blockedInflight != 0 || blockedLogLen != 0 {
-		t.Fatalf("prompt during fork barrier started a turn: busy=%v inflight=%d logLen=%d", blockedBusy, blockedInflight, blockedLogLen)
+	if blockedBusy || blockedInflight != 0 || blockedLogLen != 2 || blockedQueueLen != 1 {
+		t.Fatalf("prompt during fork barrier must queue without starting: busy=%v inflight=%d logLen=%d queue=%d", blockedBusy, blockedInflight, blockedLogLen, blockedQueueLen)
 	}
 
 	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkSameNode{ForkSameNode: &nodev1.ForkSameNode{

@@ -74,6 +74,7 @@ func TestTmuxRelayForkBarrierBlocksInputUntilRelease(t *testing.T) {
 	assertNoPipeData(t, readFile)
 
 	relay.releaseForkBarrier(func(b forkIngressBarrier) bool { return b.matches(barrier) })
+	assertPipeData(t, readFile, "blocked")
 	relay.fromClient("c1", append([]byte{tmuxOpInput}, []byte("after")...))
 	assertPipeData(t, readFile, "after")
 }

@@ -51,6 +51,7 @@ message CPMessage {
     UnpauseIfPaused              unpause_if_paused     = 14;            // CP -> node: idempotent source unpause for fork recovery
     ReleaseForkTurnBoundary      release_fork_turn_boundary = 15;       // CP -> node: cancel/release a fork turn-boundary barrier
     FailedForkCleanup            failed_fork_cleanup   = 16;            // CP -> node: cleanup one failed fork resource step
+    CancelForkSameNode           cancel_fork_same_node = 17;            // CP -> node: cancel in-flight same-node fork capture/seed
   }
 }
 
@@ -182,6 +183,11 @@ message ForkSameNode {
   uint64 source_generation = 3;
   uint64 target_generation = 4;
   string transfer_set_id = 5;
+}
+message CancelForkSameNode {
+  string source_spawn_id = 1;
+  string fork_spawn_id = 2;
+  string transfer_set_id = 3;
 }
 message ForkTurnBoundary {
   string source_spawn_id = 1;

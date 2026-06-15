@@ -142,6 +142,35 @@ func TestTransitionForkingRecoveredClearsDeadline(t *testing.T) {
 	}
 }
 
+func TestTransitionForkingRecoveredClearsClaimAtomically(t *testing.T) {
+	st := NewTestStore(t)
+	seedAppAndOwner(t, st)
+	ctx := context.Background()
+
+	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp-recover-claim"), nil) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetActive(ctx, "sp-recover-claim", "node-a", 1) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetForking(ctx, "sp-recover-claim", 1, 100) })
+
+	seq := spawnSeq(t, st, "sp-recover-claim")
+	gen := liveGen(t, st, "sp-recover-claim")
+	recoverySeq, err := st.Spawns().AcquireForkingRecovery(ctx, "sp-recover-claim", "recovery", "lease-recovery", 200, 300, seq)
+	if err != nil {
+		t.Fatalf("AcquireForkingRecovery: %v", err)
+	}
+	newSeq, err := st.Spawns().TransitionForkingRecovered(ctx, "sp-recover-claim", "lease-recovery", recoverySeq, gen)
+	if err != nil {
+		t.Fatalf("TransitionForkingRecovered: %v", err)
+	}
+
+	sp := spawnRow(t, st, "sp-recover-claim")
+	if sp.Status != Active || sp.ClaimHolder != nil || sp.ClaimLeaseID != nil || sp.ClaimDeadline != nil {
+		t.Fatalf("recovered spawn = status:%v holder:%v lease:%v deadline:%v, want active with no claim", sp.Status, sp.ClaimHolder, sp.ClaimLeaseID, sp.ClaimDeadline)
+	}
+	if _, err := st.Spawns().Acquire(ctx, "sp-recover-claim", "competitor", "lease-competitor", 400, 500, newSeq); err != nil {
+		t.Fatalf("recovered source must be immediately claimable: %v", err)
+	}
+}
+
 func TestMarkDeletedClaimedHidesRowClearsMetadataAndEndsContainer(t *testing.T) {
 	st := NewTestStore(t)
 	seedAppAndOwner(t, st)

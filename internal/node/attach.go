@@ -89,6 +89,7 @@ type attacher struct {
 	pending      map[sessionKey][]pendingClient // attaches that arrived before the pump/relay existed (session STARTING)
 	forkBarriers map[string]forkIngressBarrier
 	forkWaits    map[string]forkBarrierWait
+	activeForks  map[string]activeSameNodeFork
 	active       uint32
 
 	sendMu sync.Mutex
@@ -387,7 +388,9 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			})
 			return // stale generation: drop (matches Stop/Suspend).
 		}
-		go a.forkSameNode(ctx, m.ForkSameNode)
+		a.startForkSameNode(ctx, m.ForkSameNode)
+	case *nodev1.CPMessage_CancelForkSameNode:
+		a.cancelForkSameNode(m.CancelForkSameNode)
 	case *nodev1.CPMessage_ForkTurnBoundary:
 		if a.staleGen(m.ForkTurnBoundary.SourceSpawnId, m.ForkTurnBoundary.SourceGeneration) {
 			return // stale generation: drop (matches Stop/Suspend).

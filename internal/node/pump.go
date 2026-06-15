@@ -130,11 +130,26 @@ func (p *Pump) setForkBarrier(b forkIngressBarrier) {
 }
 
 func (p *Pump) releaseForkBarrier(match func(forkIngressBarrier) bool) {
+	var drainText, sid string
+	var queued int
+	var drained bool
 	p.mu.Lock()
 	if p.forkBarrier != nil && match(*p.forkBarrier) {
 		p.forkBarrier = nil
+		if !p.busy && p.inflightPromptID == 0 && len(p.queue) > 0 {
+			drainText = p.queue[0]
+			p.queue = p.queue[1:]
+			p.busy = true
+			queued = len(p.queue)
+			sid = p.sessionID
+			drained = true
+		}
 	}
 	p.mu.Unlock()
+	if drained {
+		p.appendFrames([]Frame{{Kind: "turn", State: "busy", Queued: queued}})
+		p.sendPrompt(sid, drainText)
+	}
 }
 
 // appendFrames assigns seqs, appends to the log (trimming the oldest past maxLog), and wakes clients.
@@ -670,6 +685,13 @@ func (p *Pump) fromClient(clientID string, line []byte) {
 	case "prompt":
 		p.mu.Lock()
 		if p.forkBarrier != nil {
+			if len(p.queue) < maxQueued {
+				p.queue = append(p.queue, f.Text)
+				queued := len(p.queue)
+				p.mu.Unlock()
+				p.appendFrames([]Frame{{Kind: "user", Text: f.Text}, {Kind: "turn", State: "busy", Queued: queued}})
+				return
+			}
 			p.mu.Unlock()
 			return
 		}

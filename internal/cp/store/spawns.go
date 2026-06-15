@@ -576,6 +576,9 @@ func (r *spawnRepo) TransitionForkingRecovered(ctx context.Context, id, leaseID 
 	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
 		Set("status = ?", Active).
 		Set("fork_capture_deadline = NULL").
+		Set("claim_holder = NULL").
+		Set("claim_lease_id = NULL").
+		Set("claim_deadline = NULL").
 		Set("status_seq = status_seq + 1").
 		Where("id = ?", id).
 		Where("status = ?", Forking).

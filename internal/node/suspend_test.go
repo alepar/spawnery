@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	nodev1 "spawnery/gen/node/v1"
@@ -19,13 +20,26 @@ import (
 // simulating a suspend gate failure (e.g. journal sink unreachable). When putArtifactErr is set,
 // PutArtifact returns that error, simulating a rootfs artifact store failure (FinishSuspend path).
 type fakeNodeJournal struct {
-	finalID        journal.ManifestID
-	finalErr       error
-	putArtifactErr error
+	finalID          journal.ManifestID
+	finalErr         error
+	putArtifactErr   error
+	finalStarted     chan struct{}
+	finalStartedOnce sync.Once
+	finalBlock       <-chan struct{}
 }
 
 func (f *fakeNodeJournal) RequestSnapshot(context.Context, string, uint64, journal.Mount) {}
-func (f *fakeNodeJournal) FinalSnapshot(_ context.Context, _ string, _ uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
+func (f *fakeNodeJournal) FinalSnapshot(ctx context.Context, _ string, _ uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
+	if f.finalStarted != nil {
+		f.finalStartedOnce.Do(func() { close(f.finalStarted) })
+	}
+	if f.finalBlock != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-f.finalBlock:
+		}
+	}
 	if f.finalErr != nil {
 		return nil, f.finalErr
 	}

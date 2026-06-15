@@ -48,6 +48,7 @@ type tmuxRelay struct {
 	clients      map[string]*tmuxClient
 	lastActivity time.Time // last relay frame in either direction; the idle reaper's clock
 	forkBarrier  *forkIngressBarrier
+	queuedInput  map[string][][]byte
 }
 
 type tmuxClient struct {
@@ -56,7 +57,7 @@ type tmuxClient struct {
 }
 
 func newTmuxRelay(attachArgv []string, send func(clientID string, data []byte) error) *tmuxRelay {
-	return &tmuxRelay{execArgv: attachArgv, send: send, clients: map[string]*tmuxClient{}, lastActivity: time.Now()}
+	return &tmuxRelay{execArgv: attachArgv, send: send, clients: map[string]*tmuxClient{}, queuedInput: map[string][][]byte{}, lastActivity: time.Now()}
 }
 
 // markActive refreshes the idle clock. Callers must NOT already hold mu.
@@ -80,11 +81,29 @@ func (r *tmuxRelay) tryAcquireForkBarrier(b forkIngressBarrier) bool {
 }
 
 func (r *tmuxRelay) releaseForkBarrier(match func(forkIngressBarrier) bool) {
+	type pendingWrite struct {
+		ptmx *os.File
+		data []byte
+	}
+	var writes []pendingWrite
 	r.mu.Lock()
 	if r.forkBarrier != nil && match(*r.forkBarrier) {
 		r.forkBarrier = nil
+		for clientID, chunks := range r.queuedInput {
+			c := r.clients[clientID]
+			if c == nil {
+				continue
+			}
+			for _, chunk := range chunks {
+				writes = append(writes, pendingWrite{ptmx: c.ptmx, data: chunk})
+			}
+		}
+		clear(r.queuedInput)
 	}
 	r.mu.Unlock()
+	for _, w := range writes {
+		_, _ = w.ptmx.Write(w.data)
+	}
 }
 
 // attach starts a `tmux attach` PTY for clientID and pumps its output back via send.
@@ -131,6 +150,9 @@ func (r *tmuxRelay) fromClient(clientID string, b []byte) {
 	blocked := c != nil && kind == tmuxOpInput && r.forkBarrier != nil
 	if c != nil {
 		r.lastActivity = time.Now()
+	}
+	if blocked {
+		r.queuedInput[clientID] = append(r.queuedInput[clientID], append([]byte(nil), data...))
 	}
 	r.mu.Unlock()
 	if c == nil || blocked {

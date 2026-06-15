@@ -141,6 +141,47 @@ func TestForkMaterializerReportsSourceRestoredBeforeFinalCompletion(t *testing.T
 	}
 }
 
+func TestForkMaterializerCancelsDispatchedSameNodeForkOnContextCancel(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	s.forks = newForkWaiters()
+	s.forkSourceRestored = newForkSourceRestoredWaiters()
+	sender := &capSender{}
+	reg.Add(registryNode("node-1", sender))
+	mat := newSameNodeForkMaterializer(s, time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := mat.MaterializeFork(ctx, forkMaterializeRequest{
+			SourceSpawn:      store.Spawn{ID: "sp-source", BaseImageDigest: "agent@sha256:base"},
+			ForkSpawn:        store.Spawn{ID: "sp-fork"},
+			TransferSetID:    "ts-1",
+			SourceGeneration: 9,
+			TargetGeneration: 1,
+			SourceNodeID:     "node-1",
+			TargetNodeID:     "node-1",
+		})
+		done <- err
+	}()
+
+	waitForForkCPMessage(t, sender)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("MaterializeFork error = nil, want cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("materializer did not return after context cancellation")
+	}
+	waitForForkCancelCPMessage(t, sender)
+	cancelMsg := sender.lastCPMessage().GetCancelForkSameNode()
+	if cancelMsg.GetSourceSpawnId() != "sp-source" || cancelMsg.GetForkSpawnId() != "sp-fork" || cancelMsg.GetTransferSetId() != "ts-1" {
+		t.Fatalf("CancelForkSameNode = %+v", cancelMsg)
+	}
+}
+
 func TestForkMaterializerWaitsForTurnBoundaryPreflight(t *testing.T) {
 	s, reg, _ := newTestServer(t)
 	s.forks = newForkWaiters()
@@ -260,6 +301,23 @@ func waitForForkCPMessage(t *testing.T, sender *capSender) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("timed out waiting for ForkSameNode CP message")
+}
+
+func waitForForkCancelCPMessage(t *testing.T, sender *capSender) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		sender.mu.Lock()
+		for _, msg := range sender.sent {
+			if msg.GetCancelForkSameNode() != nil {
+				sender.mu.Unlock()
+				return
+			}
+		}
+		sender.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for CancelForkSameNode CP message")
 }
 
 func waitForForkTurnBoundaryCPMessage(t *testing.T, sender *capSender) {
