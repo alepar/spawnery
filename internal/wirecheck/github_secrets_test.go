@@ -248,6 +248,38 @@ func TestCPGitHubSecretRoutingProtoSurface(t *testing.T) {
 	}
 }
 
+func TestA4SecretAttachmentProtoSurface(t *testing.T) {
+	create := &cpv1.CreateSpawnRequest{AttachedSecretIds: []string{"gh-main"}}
+	if got := create.GetAttachedSecretIds(); len(got) != 1 || got[0] != "gh-main" {
+		t.Fatalf("CreateSpawnRequest.AttachedSecretIds = %+v", got)
+	}
+
+	resume := &cpv1.ResumeSpawnRequest{SpawnId: "sp1", AttachedSecretIds: []string{"gh-main"}}
+	if got := resume.GetAttachedSecretIds(); len(got) != 1 || got[0] != "gh-main" {
+		t.Fatalf("ResumeSpawnRequest.AttachedSecretIds = %+v", got)
+	}
+
+	pending := &cpv1.PendingIntent{AttachedSecretIds: []string{"gh-main"}}
+	if got := pending.GetAttachedSecretIds(); len(got) != 1 || got[0] != "gh-main" {
+		t.Fatalf("PendingIntent.AttachedSecretIds = %+v", got)
+	}
+
+	resp := &cpv1.GetPendingIntentResponse{
+		NodeCertChain: []byte("cert-chain"),
+		SignedSubkey:  []byte(`{"hpke_pub":"pub","node_id":"n1"}`),
+		Generation:    7,
+	}
+	if string(resp.GetNodeCertChain()) != "cert-chain" {
+		t.Fatalf("GetPendingIntentResponse.NodeCertChain = %q", string(resp.GetNodeCertChain()))
+	}
+	if string(resp.GetSignedSubkey()) != `{"hpke_pub":"pub","node_id":"n1"}` {
+		t.Fatalf("GetPendingIntentResponse.SignedSubkey = %q", string(resp.GetSignedSubkey()))
+	}
+	if resp.GetGeneration() != 7 {
+		t.Fatalf("GetPendingIntentResponse.Generation = %d want 7", resp.GetGeneration())
+	}
+}
+
 func TestAuthGitHubMintProtoSurface(t *testing.T) {
 	if got, want := authv1connect.AuthServiceMintGitHubAccessTokenProcedure, "/auth.v1.AuthService/MintGitHubAccessToken"; got != want {
 		t.Fatalf("mint procedure=%q want %q", got, want)

@@ -128,7 +128,19 @@ message ArtifactSpec {
 // (the app's display name, with a " 2"/" 3" counter suffix on collision).
 // image + runnable_id (optional today) select the agent container image (FQDN) and the
 // runnable within it (e.g. "goose-acp"); the CP resolves the run mode from the runnable.
-message CreateSpawnRequest  { string app_id = 1; string model = 2; repeated MountBinding mounts = 3; string version = 4; bool pin = 5; string name = 6; string image = 7; string runnable_id = 8; repeated ArtifactSpec artifacts = 9; string profile_id = 10; }
+message CreateSpawnRequest {
+  string app_id = 1;
+  string model = 2;
+  repeated MountBinding mounts = 3;
+  string version = 4;
+  bool pin = 5;
+  string name = 6;
+  string image = 7;
+  string runnable_id = 8;
+  repeated ArtifactSpec artifacts = 9;
+  string profile_id = 10;
+  repeated string attached_secret_ids = 11;
+}
 message CreateSpawnResponse { string spawn_id = 1; }
 
 message SpawnSummary {
@@ -161,7 +173,10 @@ message ListSpawnsResponse { repeated SpawnSummary spawns = 1; }
 
 message SuspendSpawnRequest   { string spawn_id = 1; }
 message SuspendSpawnResponse  {}
-message ResumeSpawnRequest    { string spawn_id = 1; }
+message ResumeSpawnRequest {
+  string spawn_id = 1;
+  repeated string attached_secret_ids = 2;
+}
 message ResumeSpawnResponse   {}
 message RecreateSpawnRequest  { string spawn_id = 1; }
 message RecreateSpawnResponse {}
@@ -401,12 +416,19 @@ message PendingIntent {
   string model          = 7;
   string data_ref       = 8;
   repeated MountBinding mounts = 9;
+  repeated string attached_secret_ids = 10;
 }
 
 // GetPendingIntent polls for the CP-committed tuple for a spawn's in-flight lifecycle op.
 // ready=false while the CP is still resolving placement; poll until ready.
 message GetPendingIntentRequest  { string spawn_id = 1; }
-message GetPendingIntentResponse { PendingIntent pending = 1; bool ready = 2; }
+message GetPendingIntentResponse {
+  PendingIntent pending = 1;
+  bool ready = 2;
+  bytes node_cert_chain = 3;
+  bytes signed_subkey = 4;
+  uint64 generation = 5;
+}
 
 // SubmitIntent delivers the client's signed intent to unblock the pending provision.
 // node_access_token is the client's aud=node AS-signed token (cnf-bound to the same session
