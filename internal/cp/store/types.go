@@ -94,11 +94,14 @@ type Spawn struct {
 	// BaseImageDigest is the content-addressable digest of the agent's base image, resolved at
 	// create time by the node and stored here for cross-node resume (spec §4 / sp-ei4.1.10).
 	// Empty for spawns created before this field was introduced.
-	BaseImageDigest string  `bun:"base_image_digest,notnull"`
-	CreatedAt       int64   `bun:"created_at,notnull"`
-	LastUsedAt      int64   `bun:"last_used_at,notnull"`
-	SuspendedAt     *int64  `bun:"suspended_at"`
-	DeletedAt       *int64  `bun:"deleted_at"`
+	BaseImageDigest string `bun:"base_image_digest,notnull"`
+	// ProfileID records which profile was applied at create time (sp-nrzf.3.8/3.9).
+	// Empty string for spawns created without a profile.
+	ProfileID   string  `bun:"profile_id,notnull"`
+	CreatedAt   int64   `bun:"created_at,notnull"`
+	LastUsedAt  int64   `bun:"last_used_at,notnull"`
+	SuspendedAt *int64  `bun:"suspended_at"`
+	DeletedAt   *int64  `bun:"deleted_at"`
 	// StatusSeq is an optimistic-concurrency version that increments on every status or activity
 	// mutation. It is CP-store-internal — not surfaced on the wire. Every guarded write CAS-es on
 	// the StatusSeq the caller read, closing the TOCTOU window between a sweeper's decision and

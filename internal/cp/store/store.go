@@ -138,6 +138,11 @@ type SpawnRepo interface {
 	// The generation fence must be applied by the caller (e.g. via LatestContainer check) before
 	// calling here — this method guards only on status to keep the store layer simple.
 	ReconcileSuspendedAfterError(ctx context.Context, id string) error
+
+	// ListLiveByProfileIDs returns non-deleted spawns whose profile_id is in the given set,
+	// ordered by id ASC (deterministic). Returns nil, nil when profileIDs is empty (no query).
+	// Used by the kill-switch (sp-nrzf.3.9) to find spawns to terminate on catalog revoke.
+	ListLiveByProfileIDs(ctx context.Context, profileIDs []string) ([]Spawn, error)
 }
 
 type AgentImageRepo interface {
@@ -180,6 +185,10 @@ type ProfileRepo interface {
 	AddSecretRef(ctx context.Context, profileID string, expectedVersion uint64, secretID string, now int64) (newVersion uint64, err error)
 	// RemoveSecretRef CAS-removes a secret reference. Returns ErrNotFound or ErrConflict.
 	RemoveSecretRef(ctx context.Context, profileID string, expectedVersion uint64, secretID string, now int64) (newVersion uint64, err error)
+	// ListProfileIDsByCatalogRef returns distinct profile_ids that contain a catalog_ref entry
+	// pointing to the given catalogID. Returns an empty slice (not an error) when none match.
+	// Used by the kill-switch (sp-nrzf.3.9) to resolve profiles affected by a catalog revoke.
+	ListProfileIDsByCatalogRef(ctx context.Context, catalogID string) ([]string, error)
 }
 
 // CustomizationCatalogRepo manages curated catalog entries.

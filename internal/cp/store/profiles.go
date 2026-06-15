@@ -192,6 +192,24 @@ func (r *profileRepo) RemoveSecretRef(ctx context.Context, profileID string, exp
 	return newVersion, err
 }
 
+// ListProfileIDsByCatalogRef returns the distinct profile_ids of profiles that contain at least
+// one catalog_ref entry pointing to the given catalogID. Empty slice (not error) when none match.
+func (r *profileRepo) ListProfileIDsByCatalogRef(ctx context.Context, catalogID string) ([]string, error) {
+	var ids []string
+	err := r.db.NewSelect().
+		TableExpr("profile_entries").
+		ColumnExpr("DISTINCT profile_id").
+		Where("source_kind = ? AND catalog_id = ?", string(ProfileSourceCatalog), catalogID).
+		Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
 // casUpdate is a convenience wrapper around casUpdateDB using r.db.
 func (r *profileRepo) casUpdate(ctx context.Context, profileID string, expectedVersion uint64, now int64, extra func(*bun.UpdateQuery) *bun.UpdateQuery) (uint64, error) {
 	return casUpdateDB(ctx, r.db, profileID, expectedVersion, now, extra)
@@ -265,3 +283,6 @@ func decodeProfileEntry(e *ProfileEntry) error {
 	}
 	return nil
 }
+
+// Compile-time check that *profileRepo fully implements ProfileRepo.
+var _ ProfileRepo = (*profileRepo)(nil)
