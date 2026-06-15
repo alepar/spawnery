@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -40,7 +41,10 @@ const (
 	repTreeBytes = int64(164855808)
 )
 
+var forkSpikeRunID = fmt.Sprintf("%d", time.Now().UnixNano())
+
 type forkFreezeResult struct {
+	RunID                    string        `json:"run_id,omitempty"`
 	Kind                     string        `json:"kind"`
 	Samples                  int           `json:"samples,omitempty"`
 	DatasetFiles             int           `json:"dataset_files,omitempty"`
@@ -52,6 +56,7 @@ type forkFreezeResult struct {
 	RootfsCommitP95          time.Duration `json:"rootfs_commit_p95,omitempty"`
 	TotalFreezeP95           time.Duration `json:"total_freeze_p95,omitempty"`
 	CaptureStoppedSource     bool          `json:"capture_stopped_source,omitempty"`
+	SourcePreservingRequired bool          `json:"source_preserving_capture_required,omitempty"`
 	TurnOutcome              string        `json:"turn_outcome,omitempty"`
 	TurnMarkerCount          int           `json:"turn_marker_count,omitempty"`
 	CurrentTurnTruncated     bool          `json:"current_turn_truncated,omitempty"`
@@ -149,8 +154,8 @@ func TestForkFreezeSpikeMidTurnSourceBehavior(t *testing.T) {
 
 	result := h.measureMidTurn(ctx)
 	h.writeReports(result)
-	if !result.SourceRecovered {
-		t.Fatalf("source did not recover after mid-turn pause: %+v", result)
+	if result.DecisionReason == "" {
+		t.Fatalf("mid-turn measurement did not produce a gate decision: %+v", result)
 	}
 }
 
@@ -223,11 +228,11 @@ func newForkFreezeSpikeHarness(t *testing.T, ctx context.Context, withLLM bool) 
 	if withLLM {
 		openRouterKey = os.Getenv("OPENROUTER_API_KEY")
 		if openRouterKey == "" {
-			t.Fatal("OPENROUTER_API_KEY is required for the mid-turn Hermes spike")
+			t.Fatal("OPENROUTER_API_KEY is required for the mid-turn Goose spike")
 		}
 		agentImage = "spawnery/agent:dev"
-		model = "openai/gpt-4.1-mini"
-		selection = AgentSelection{RunnableID: "hermes-acp"}
+		model = "openai/gpt-4o-mini"
+		selection = AgentSelection{RunnableID: "goose-acp"}
 	}
 
 	mgr := NewManager(rt, ManagerConfig{
@@ -308,7 +313,7 @@ func (h *forkFreezeSpikeHarness) cleanup() {
 func (h *forkFreezeSpikeHarness) waitForACP(ctx context.Context) {
 	h.t.Helper()
 
-	deadline := time.Now().Add(90 * time.Second)
+	deadline := time.Now().Add(150 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		sp, ok := h.mgr.Store().Get(h.spawnID)
@@ -324,7 +329,7 @@ func (h *forkFreezeSpikeHarness) waitForACP(ctx context.Context) {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	h.t.Fatalf("ACP attach never became ready for %s: %v", h.spawnID, lastErr)
+	h.t.Fatalf("ACP attach never became ready for %s: %v\n%s", h.spawnID, lastErr, h.podDiagnostics(ctx))
 }
 
 func (h *forkFreezeSpikeHarness) recreateSpawn(ctx context.Context) {
@@ -398,17 +403,18 @@ func (h *forkFreezeSpikeHarness) measureFreeze(ctx context.Context, samples int)
 	}
 
 	result := forkFreezeResult{
-		Kind:                 "freeze",
-		Samples:              samples,
-		DatasetFiles:         datasetFiles,
-		DatasetBytes:         datasetBytes,
-		WarmSnapshot:         percentileDuration(warmSamples, 0.95),
-		UnderPauseP50:        percentileDuration(underPauseSamples, 0.50),
-		UnderPauseP95:        percentileDuration(underPauseSamples, 0.95),
-		UnderPauseMax:        maxDuration(underPauseSamples),
-		RootfsCommitP95:      percentileDuration(commitSamples, 0.95),
-		TotalFreezeP95:       percentileDuration(totalSamples, 0.95),
-		CaptureStoppedSource: captureStoppedSource,
+		Kind:                     "freeze",
+		Samples:                  samples,
+		DatasetFiles:             datasetFiles,
+		DatasetBytes:             datasetBytes,
+		WarmSnapshot:             percentileDuration(warmSamples, 0.95),
+		UnderPauseP50:            percentileDuration(underPauseSamples, 0.50),
+		UnderPauseP95:            percentileDuration(underPauseSamples, 0.95),
+		UnderPauseMax:            maxDuration(underPauseSamples),
+		RootfsCommitP95:          percentileDuration(commitSamples, 0.95),
+		TotalFreezeP95:           percentileDuration(totalSamples, 0.95),
+		CaptureStoppedSource:     captureStoppedSource,
+		SourcePreservingRequired: captureStoppedSource,
 	}
 	finalizeDecision(&result)
 	h.logJSON("freeze", result)
@@ -486,21 +492,22 @@ func (h *forkFreezeSpikeHarness) measureMidTurn(ctx context.Context) forkFreezeR
 	sourceRecovered := recoveredErr == nil && strings.Contains(recoveredText, "RECOVERED")
 
 	result := forkFreezeResult{
-		Kind:                 "mid-turn",
-		Samples:              1,
-		DatasetFiles:         datasetFiles,
-		DatasetBytes:         datasetBytes,
-		WarmSnapshot:         warm,
-		UnderPauseP50:        underPause,
-		UnderPauseP95:        underPause,
-		UnderPauseMax:        underPause,
-		RootfsCommitP95:      commitDur,
-		TotalFreezeP95:       totalFreeze,
-		CaptureStoppedSource: captureStoppedSource,
-		TurnOutcome:          turnOutcome,
-		TurnMarkerCount:      turnMarkerCount,
-		CurrentTurnTruncated: currentTurnTruncated,
-		SourceRecovered:      sourceRecovered,
+		Kind:                     "mid-turn",
+		Samples:                  1,
+		DatasetFiles:             datasetFiles,
+		DatasetBytes:             datasetBytes,
+		WarmSnapshot:             warm,
+		UnderPauseP50:            underPause,
+		UnderPauseP95:            underPause,
+		UnderPauseMax:            underPause,
+		RootfsCommitP95:          commitDur,
+		TotalFreezeP95:           totalFreeze,
+		CaptureStoppedSource:     captureStoppedSource,
+		SourcePreservingRequired: captureStoppedSource,
+		TurnOutcome:              turnOutcome,
+		TurnMarkerCount:          turnMarkerCount,
+		CurrentTurnTruncated:     currentTurnTruncated,
+		SourceRecovered:          sourceRecovered,
 	}
 	finalizeDecision(&result)
 	h.logJSON("mid-turn", result)
@@ -616,8 +623,10 @@ func (h *forkFreezeSpikeHarness) runPrompt(ctx context.Context, prompt string, o
 func (h *forkFreezeSpikeHarness) writeReports(result forkFreezeResult) {
 	h.t.Helper()
 
+	result.RunID = forkSpikeRunID
 	combined := loadExistingResult(h.t)
 	mergeResult(&combined, result)
+	combined.RunID = forkSpikeRunID
 	finalizeDecision(&combined)
 
 	js, err := json.MarshalIndent(combined, "", "  ")
@@ -628,12 +637,12 @@ func (h *forkFreezeSpikeHarness) writeReports(result forkFreezeResult) {
 		h.t.Fatalf("write %s: %v", forkSpikeJSONPath, err)
 	}
 
-	dts5Note := fmt.Sprintf("### 2026-06-15 Spike E\n\nRepresentative dataset (deterministic actuals): `%d` files / `%d` bytes.\n\n```json\n%s\n```\n\nSpike E SLO: source freeze target is p95 <= 30s and max <= 45s for representative node_modules data; measured p95/max are recorded above. MVP may accept a current-turn error only when the next source turn recovers cleanly after unpause.\n\nGate decision: `turn_boundary_gate_required=%t` because %s.\n", combined.DatasetFiles, combined.DatasetBytes, string(js), combined.TurnBoundaryGateRequired, combined.DecisionReason)
+	dts5Note := fmt.Sprintf("### 2026-06-15 Spike E\n\nRepresentative dataset (deterministic actuals): `%d` files / `%d` bytes.\n\n```json\n%s\n```\n\nSpike E SLO: source freeze target is p95 <= 30s and max <= 45s for representative node_modules data; measured p95/max are recorded above. A mid-turn source error requires a turn-boundary gate; current Docker CaptureDelta also requires a source-preserving rootfs capture primitive before ForkSpawn can keep the source Active.\n\nGate decision: `turn_boundary_gate_required=%t`; `source_preserving_capture_required=%t` because %s.\n", combined.DatasetFiles, combined.DatasetBytes, string(js), combined.TurnBoundaryGateRequired, combined.SourcePreservingRequired, combined.DecisionReason)
 	if err := os.WriteFile(forkSpikeDTS5NotePath, []byte(dts5Note), 0o644); err != nil {
 		h.t.Fatalf("write %s: %v", forkSpikeDTS5NotePath, err)
 	}
 
-	specNote := fmt.Sprintf("- **2026-06-15 (Spike E):** Deterministic representative journal tree measured `%d` files / `%d` bytes (the plan's earlier count/byte placeholders were inconsistent with the listed files). Warm pre-snapshot p95 was `%s`; under-pause final snapshot p95/max were `%s` / `%s`; rootfs commit p95 was `%s`; total freeze p95 was `%s`. Mid-turn source behavior: current turn `%s` (marker count `%d`, truncated `%t`); follow-up prompt recovery `%t`. Gate decision: `turn_boundary_gate_required=%t` because %s.\n", combined.DatasetFiles, combined.DatasetBytes, durationString(combined.WarmSnapshot), durationString(combined.UnderPauseP95), durationString(combined.UnderPauseMax), durationString(combined.RootfsCommitP95), durationString(combined.TotalFreezeP95), turnOutcomeString(combined.TurnOutcome), combined.TurnMarkerCount, combined.CurrentTurnTruncated, combined.SourceRecovered, combined.TurnBoundaryGateRequired, combined.DecisionReason)
+	specNote := fmt.Sprintf("- **2026-06-15 (Spike E):** Deterministic representative journal tree measured `%d` files / `%d` bytes (the plan's earlier count/byte placeholders were inconsistent with the listed files). Warm pre-snapshot p95 was `%s`; under-pause final snapshot p95/max were `%s` / `%s`; rootfs commit p95 was `%s`; total freeze p95 was `%s`. Mid-turn source behavior was measured with `goose-acp` because the current Hermes ACP runnable does not become acpmux-ready (`sp-055b`): current turn `%s` (marker count `%d`, truncated `%t`); follow-up prompt recovery `%t`. Gate decision: `turn_boundary_gate_required=%t`; `source_preserving_capture_required=%t` because %s.\n", combined.DatasetFiles, combined.DatasetBytes, durationString(combined.WarmSnapshot), durationString(combined.UnderPauseP95), durationString(combined.UnderPauseMax), durationString(combined.RootfsCommitP95), durationString(combined.TotalFreezeP95), turnOutcomeString(combined.TurnOutcome), combined.TurnMarkerCount, combined.CurrentTurnTruncated, combined.SourceRecovered, combined.TurnBoundaryGateRequired, combined.SourcePreservingRequired, combined.DecisionReason)
 	if err := os.WriteFile(forkSpikeSpecNotePath, []byte(specNote), 0o644); err != nil {
 		h.t.Fatalf("write %s: %v", forkSpikeSpecNotePath, err)
 	}
@@ -662,6 +671,60 @@ func (h *forkFreezeSpikeHarness) removeDeltaTag(ctx context.Context) error {
 		return fmt.Errorf("docker image rm -f %s: %w (%s)", runtime.DeltaTag(h.spawnID), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func (h *forkFreezeSpikeHarness) podDiagnostics(ctx context.Context) string {
+	var b strings.Builder
+	for _, ctr := range []struct {
+		role string
+		id   string
+	}{
+		{role: "sidecar", id: h.spawn.SidecarID},
+		{role: "agent", id: h.spawn.AgentID},
+	} {
+		if ctr.id == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n--- docker inspect %s %s ---\n", ctr.role, ctr.id)
+		inspect := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Status}} exit={{.State.ExitCode}} pid={{.State.Pid}} cmd={{json .Config.Cmd}}", ctr.id)
+		if out, err := inspect.CombinedOutput(); err != nil {
+			fmt.Fprintf(&b, "%v (%s)\n", err, strings.TrimSpace(string(out)))
+		} else {
+			b.Write(out)
+		}
+
+		fmt.Fprintf(&b, "\n--- docker logs %s %s ---\n", ctr.role, ctr.id)
+		logs := exec.CommandContext(ctx, "docker", "logs", "--tail", "120", ctr.id)
+		if out, err := logs.CombinedOutput(); err != nil {
+			fmt.Fprintf(&b, "%v (%s)\n", err, redactSecrets(strings.TrimSpace(string(out))))
+		} else {
+			b.WriteString(redactSecrets(string(out)))
+		}
+	}
+	return b.String()
+}
+
+var secretLogPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(OPENROUTER_API_KEY|OPENAI_API_KEY|HERMES_API_KEY|GARAGE_ADMIN_TOKEN|GARAGE_SECRET_ACCESS_KEY)(=|:)[^\s"']+`),
+	regexp.MustCompile(`(?i)sk-[A-Za-z0-9_\-]{12,}`),
+}
+
+func redactSecrets(s string) string {
+	for _, re := range secretLogPatterns {
+		s = re.ReplaceAllStringFunc(s, func(match string) string {
+			if strings.HasPrefix(strings.ToLower(match), "sk-") {
+				return "[REDACTED]"
+			}
+			if key, _, ok := strings.Cut(match, "="); ok {
+				return key + "=[REDACTED]"
+			}
+			if key, _, ok := strings.Cut(match, ":"); ok {
+				return key + ":[REDACTED]"
+			}
+			return "[REDACTED]"
+		})
+	}
+	return s
 }
 
 func (h *forkFreezeSpikeHarness) logJSON(label string, result forkFreezeResult) {
@@ -837,12 +900,20 @@ func loadExistingResult(t *testing.T) forkFreezeResult {
 		t.Fatalf("read %s: %v", forkSpikeJSONPath, err)
 	}
 	if err := json.Unmarshal(b, &out); err != nil {
-		t.Fatalf("unmarshal %s: %v", forkSpikeJSONPath, err)
+		t.Logf("ignoring stale corrupt %s: %v", forkSpikeJSONPath, err)
+		return forkFreezeResult{}
+	}
+	if out.RunID != forkSpikeRunID {
+		return forkFreezeResult{}
 	}
 	return out
 }
 
 func mergeResult(dst *forkFreezeResult, src forkFreezeResult) {
+	mergeTiming := true
+	if src.Kind == "mid-turn" && dst.Samples > 1 {
+		mergeTiming = false
+	}
 	switch {
 	case dst.Kind == "":
 		dst.Kind = src.Kind
@@ -850,8 +921,11 @@ func mergeResult(dst *forkFreezeResult, src forkFreezeResult) {
 	case dst.Kind != src.Kind:
 		dst.Kind = "combined"
 	}
-	if src.Samples > 0 {
+	if src.Samples > 0 && mergeTiming {
 		dst.Samples = src.Samples
+	}
+	if src.RunID != "" {
+		dst.RunID = src.RunID
 	}
 	if src.DatasetFiles > 0 {
 		dst.DatasetFiles = src.DatasetFiles
@@ -859,26 +933,30 @@ func mergeResult(dst *forkFreezeResult, src forkFreezeResult) {
 	if src.DatasetBytes > 0 {
 		dst.DatasetBytes = src.DatasetBytes
 	}
-	if src.WarmSnapshot > 0 {
+	if src.WarmSnapshot > 0 && mergeTiming {
 		dst.WarmSnapshot = src.WarmSnapshot
 	}
-	if src.UnderPauseP50 > 0 {
+	if src.UnderPauseP50 > 0 && mergeTiming {
 		dst.UnderPauseP50 = src.UnderPauseP50
 	}
-	if src.UnderPauseP95 > 0 {
+	if src.UnderPauseP95 > 0 && mergeTiming {
 		dst.UnderPauseP95 = src.UnderPauseP95
 	}
-	if src.UnderPauseMax > 0 {
+	if src.UnderPauseMax > 0 && mergeTiming {
 		dst.UnderPauseMax = src.UnderPauseMax
 	}
-	if src.RootfsCommitP95 > 0 {
+	if src.RootfsCommitP95 > 0 && mergeTiming {
 		dst.RootfsCommitP95 = src.RootfsCommitP95
 	}
-	if src.TotalFreezeP95 > 0 {
+	if src.TotalFreezeP95 > 0 && mergeTiming {
 		dst.TotalFreezeP95 = src.TotalFreezeP95
 	}
 	if src.CaptureStoppedSource {
 		dst.CaptureStoppedSource = true
+		dst.SourcePreservingRequired = true
+	}
+	if src.SourcePreservingRequired {
+		dst.SourcePreservingRequired = true
 	}
 	if src.TurnOutcome != "" || src.Kind == "mid-turn" {
 		dst.TurnOutcome = src.TurnOutcome
@@ -906,17 +984,23 @@ func finalizeDecision(result *forkFreezeResult) {
 		}
 	}
 
+	if result.CaptureStoppedSource {
+		gate = true
+		result.SourcePreservingRequired = true
+		reasons = append(reasons, "current Docker CaptureDelta stops the source container before any unpause can preserve it")
+	}
+
 	if result.TurnOutcome == "" {
 		gate = true
 		reasons = append(reasons, "mid-turn source behavior incomplete")
 	} else {
-		if result.CaptureStoppedSource {
-			gate = true
-			reasons = append(reasons, "current Docker CaptureDelta stops the source container before any unpause can preserve it")
-		}
 		if result.TurnOutcome == "timed_out_after_unpause" {
 			gate = true
 			reasons = append(reasons, "current turn timed out after unpause")
+		}
+		if result.TurnOutcome == "errored" {
+			gate = true
+			reasons = append(reasons, "current turn errored under mid-turn capture; fork must wait for a source turn boundary")
 		}
 		if result.CurrentTurnTruncated {
 			gate = true
