@@ -250,7 +250,9 @@ func TestApplyMissingManifest(t *testing.T) {
 	}
 }
 
-// TestInstallConfigSetFlag exercises the `install --agent codex config --set approvalPosture=never` CLI path.
+// TestInstallConfigSetFlag exercises the `install --agent codex config --set approvalPosture=yolo` CLI path.
+// yolo is the canonical "bypass all approvals" value in the new 4-value grammar
+// (always-ask | ask-risky | auto | yolo); it maps to codex approval_policy=never.
 func TestInstallConfigSetFlag(t *testing.T) {
 	bin := buildAgentinstall(t)
 	home := t.TempDir()
@@ -261,12 +263,12 @@ func TestInstallConfigSetFlag(t *testing.T) {
 
 	cmd := exec.Command(bin,
 		"install", "--agent", "codex",
-		"config", "--name", "myconfig", "--set", "approvalPosture=never",
+		"config", "--name", "myconfig", "--set", "approvalPosture=yolo",
 	)
 	cmd.Env = append(os.Environ(), "HOME="+home, "CODEX_HOME="+codexHome)
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("install --agent codex config --set approvalPosture=never: %v\noutput: %s", err, out)
+		t.Fatalf("install --agent codex config --set approvalPosture=yolo: %v\noutput: %s", err, out)
 	}
 
 	var result struct {

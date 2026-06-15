@@ -270,7 +270,7 @@ func installConfigSubCmd() *cli.Command {
 			},
 			&cli.StringSliceFlag{
 				Name:  "set",
-				Usage: "Set a normalized config key (format: key=value, repeatable; e.g. --set approvalPosture=never)",
+				Usage: "Set a normalized config key (format: key=value, repeatable; e.g. --set approvalPosture=yolo)",
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {

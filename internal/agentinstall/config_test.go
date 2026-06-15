@@ -53,8 +53,9 @@ func configArtifactWithNative(name string, targets []string, norm map[string]int
 
 // ---- Claude tests -----------------------------------------------------------
 
-// TestApplyConfig_ClaudeNativePassthroughSurvival pre-seeds settings.json with existing content,
-// applies a native passthrough, and asserts all pre-existing entries survive.
+// TestApplyConfig_ClaudeNativePassthroughSurvival pre-seeds settings.json with existing
+// content, applies a native passthrough with non-forbidden keys, and asserts all
+// pre-existing entries survive (deep merge).
 func TestApplyConfig_ClaudeNativePassthroughSurvival(t *testing.T) {
 	home := t.TempDir()
 	claudeDir := filepath.Join(home, ".claude")
@@ -62,10 +63,10 @@ func TestApplyConfig_ClaudeNativePassthroughSurvival(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Pre-seed with existing config
+	// Pre-seed with existing config (non-forbidden keys only).
 	existing := map[string]interface{}{
-		"permissions": map[string]interface{}{
-			"allow": []interface{}{"Bash(*)", "Read(*)"},
+		"existingMap": map[string]interface{}{
+			"nested": "existingVal",
 		},
 		"otherKey": "existingValue",
 	}
@@ -74,13 +75,13 @@ func TestApplyConfig_ClaudeNativePassthroughSurvival(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Apply native passthrough that adds permissions.defaultMode and a new top-level key
+	// Apply native passthrough that deep-merges existingMap and adds a new key.
 	a := configArtifactWithNative("myconfig", []string{"claude"}, nil, map[string]interface{}{
 		"claude": map[string]interface{}{
-			"permissions": map[string]interface{}{
-				"defaultMode": "bypassPermissions",
+			"existingMap": map[string]interface{}{
+				"added": "newVal",
 			},
-			"newKey": "newValue",
+			"newTopKey": "newValue",
 		},
 	})
 
@@ -98,137 +99,162 @@ func TestApplyConfig_ClaudeNativePassthroughSurvival(t *testing.T) {
 		t.Fatalf("parse settings.json: %v", err)
 	}
 
-	// Pre-existing otherKey survives
+	// Pre-existing otherKey survives.
 	if root["otherKey"] != "existingValue" {
 		t.Errorf("otherKey was lost or changed: got %v", root["otherKey"])
 	}
-
-	// New key was added
-	if root["newKey"] != "newValue" {
-		t.Errorf("newKey not added: got %v", root["newKey"])
+	// New top-level key was added.
+	if root["newTopKey"] != "newValue" {
+		t.Errorf("newTopKey not added: got %v", root["newTopKey"])
 	}
-
-	// permissions.allow survives (deep merge)
-	perms, ok := root["permissions"].(map[string]interface{})
+	// existingMap.nested survives (deep merge).
+	existingMap, ok := root["existingMap"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("permissions missing or wrong type: %T", root["permissions"])
+		t.Fatalf("existingMap missing or wrong type: %T", root["existingMap"])
 	}
-	allow, ok := perms["allow"].([]interface{})
-	if !ok {
-		t.Fatalf("permissions.allow missing or wrong type: %T", perms["allow"])
+	if existingMap["nested"] != "existingVal" {
+		t.Errorf("existingMap.nested was lost: got %v", existingMap["nested"])
 	}
-	if len(allow) != 2 {
-		t.Errorf("permissions.allow: got %v, want 2 entries", allow)
-	}
-
-	// New permissions.defaultMode was added
-	if perms["defaultMode"] != "bypassPermissions" {
-		t.Errorf("permissions.defaultMode: got %v, want bypassPermissions", perms["defaultMode"])
+	if existingMap["added"] != "newVal" {
+		t.Errorf("existingMap.added not added: got %v", existingMap["added"])
 	}
 }
 
-// TestApplyConfig_ClaudeApprovalPostureNever tests approvalPosture=never -> permissions.defaultMode=bypassPermissions.
-func TestApplyConfig_ClaudeApprovalPostureNever(t *testing.T) {
+// TestApplyConfig_ClaudeApprovalPostureAlwaysAsk tests always-ask → permissions.defaultMode=default.
+func TestApplyConfig_ClaudeApprovalPostureAlwaysAsk(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
 	a := configArtifact("cfg", []string{"claude"}, map[string]interface{}{
-		"approvalPosture": "never",
+		"approvalPosture": "always-ask",
 	})
-
 	r := applyConfig(t, home, "claude", a)
 	if r.Status != agentinstall.StatusApplied {
 		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
 	}
-
-	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
-	if err != nil {
-		t.Fatalf("read settings.json: %v", err)
+	if r.Capability != agentinstall.CapabilityApplied {
+		t.Errorf("Capability: got %q, want applied", r.Capability)
 	}
-	var root map[string]interface{}
-	if err := json.Unmarshal(data, &root); err != nil {
-		t.Fatalf("parse settings.json: %v", err)
-	}
-	perms, ok := root["permissions"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("permissions missing or wrong type: %T", root["permissions"])
-	}
-	if perms["defaultMode"] != "bypassPermissions" {
-		t.Errorf("permissions.defaultMode: got %v, want bypassPermissions", perms["defaultMode"])
-	}
-}
-
-// TestApplyConfig_ClaudeApprovalPostureUntrusted tests approvalPosture=untrusted -> permissions.defaultMode=default.
-func TestApplyConfig_ClaudeApprovalPostureUntrusted(t *testing.T) {
-	home := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	a := configArtifact("cfg", []string{"claude"}, map[string]interface{}{
-		"approvalPosture": "untrusted",
-	})
-
-	r := applyConfig(t, home, "claude", a)
-	if r.Status != agentinstall.StatusApplied {
-		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
-	}
-
 	data, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	var root map[string]interface{}
 	_ = json.Unmarshal(data, &root)
 	perms, ok := root["permissions"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("permissions missing or wrong type: %T", root["permissions"])
+		t.Fatalf("permissions missing or wrong type")
 	}
 	if perms["defaultMode"] != "default" {
 		t.Errorf("permissions.defaultMode: got %v, want default", perms["defaultMode"])
 	}
 }
 
-// TestApplyConfig_ClaudeApprovalPostureOnRequestSkipped tests that on-request is skipped with a reason.
-func TestApplyConfig_ClaudeApprovalPostureOnRequestSkipped(t *testing.T) {
+// TestApplyConfig_ClaudeApprovalPostureAskRisky tests ask-risky → permissions.defaultMode=acceptEdits.
+func TestApplyConfig_ClaudeApprovalPostureAskRisky(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
 	a := configArtifact("cfg", []string{"claude"}, map[string]interface{}{
-		"approvalPosture": "on-request",
+		"approvalPosture": "ask-risky",
 	})
-
 	r := applyConfig(t, home, "claude", a)
-	if r.Status != agentinstall.StatusSkipped {
-		t.Fatalf("expected skipped (no applicable additions), got %q (reason: %q)", r.Status, r.Reason)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
 	}
-	if !strings.Contains(r.Reason, "not mappable") {
-		t.Errorf("reason should mention not mappable, got: %q", r.Reason)
+	if r.Capability != agentinstall.CapabilityApplied {
+		t.Errorf("Capability: got %q, want applied", r.Capability)
 	}
-	// settings.json must not be created (nothing to write)
-	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); !os.IsNotExist(err) {
-		t.Error("settings.json should not be created when all keys are skipped")
+	data, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	var root map[string]interface{}
+	_ = json.Unmarshal(data, &root)
+	perms, ok := root["permissions"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("permissions missing or wrong type")
+	}
+	if perms["defaultMode"] != "acceptEdits" {
+		t.Errorf("permissions.defaultMode: got %v, want acceptEdits", perms["defaultMode"])
 	}
 }
 
-// TestApplyConfig_ClaudeApprovalPostureOnFailureSkipped tests that on-failure is also skipped.
-func TestApplyConfig_ClaudeApprovalPostureOnFailureSkipped(t *testing.T) {
+// TestApplyConfig_ClaudeApprovalPostureYolo tests yolo → permissions.defaultMode=bypassPermissions.
+func TestApplyConfig_ClaudeApprovalPostureYolo(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
 	a := configArtifact("cfg", []string{"claude"}, map[string]interface{}{
-		"approvalPosture": "on-failure",
+		"approvalPosture": "yolo",
 	})
+	r := applyConfig(t, home, "claude", a)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityApplied {
+		t.Errorf("Capability: got %q, want applied", r.Capability)
+	}
+	data, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	var root map[string]interface{}
+	_ = json.Unmarshal(data, &root)
+	perms, ok := root["permissions"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("permissions missing or wrong type")
+	}
+	if perms["defaultMode"] != "bypassPermissions" {
+		t.Errorf("permissions.defaultMode: got %v, want bypassPermissions", perms["defaultMode"])
+	}
+}
 
+// TestApplyConfig_ClaudeApprovalPostureAuto tests auto → permissions.defaultMode=acceptEdits
+// with Capability=best-effort and a model-tier reason.
+func TestApplyConfig_ClaudeApprovalPostureAuto(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := configArtifact("cfg", []string{"claude"}, map[string]interface{}{
+		"approvalPosture": "auto",
+	})
+	r := applyConfig(t, home, "claude", a)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityBestEffort {
+		t.Errorf("Capability: got %q, want best-effort", r.Capability)
+	}
+	if !strings.Contains(r.Reason, "model-tier") {
+		t.Errorf("reason should mention model-tier, got: %q", r.Reason)
+	}
+	data, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	var root map[string]interface{}
+	_ = json.Unmarshal(data, &root)
+	perms, ok := root["permissions"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("permissions missing or wrong type")
+	}
+	if perms["defaultMode"] != "acceptEdits" {
+		t.Errorf("permissions.defaultMode: got %v, want acceptEdits (auto best-effort)", perms["defaultMode"])
+	}
+}
+
+// TestApplyConfig_ClaudeApprovalPostureUnrecognized tests that an unrecognized value
+// results in StatusSkipped with capability=unsupported.
+func TestApplyConfig_ClaudeApprovalPostureUnrecognized(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := configArtifact("cfg", []string{"claude"}, map[string]interface{}{
+		"approvalPosture": "bogus-value",
+	})
 	r := applyConfig(t, home, "claude", a)
 	if r.Status != agentinstall.StatusSkipped {
 		t.Fatalf("expected skipped, got %q (reason: %q)", r.Status, r.Reason)
 	}
-	if !strings.Contains(r.Reason, "not mappable") {
-		t.Errorf("reason should mention not mappable, got: %q", r.Reason)
+	if r.Capability != agentinstall.CapabilityUnsupported {
+		t.Errorf("Capability: got %q, want unsupported", r.Capability)
+	}
+	if !strings.Contains(r.Reason, "not recognized") {
+		t.Errorf("reason should mention not recognized, got: %q", r.Reason)
 	}
 }
 
@@ -258,32 +284,99 @@ func TestApplyConfig_ClaudeForbiddenModelDropped(t *testing.T) {
 	var root map[string]interface{}
 	_ = json.Unmarshal(data, &root)
 
-	// "model" must NOT be written
 	if root["model"] != nil {
 		t.Errorf("forbidden key 'model' was written to settings.json: %v", root["model"])
 	}
-	// "someKey" must be written
 	if root["someKey"] != "someVal" {
 		t.Errorf("someKey: got %v, want someVal", root["someKey"])
 	}
 }
 
-// TestApplyConfig_ClaudeNormalizedWinsOverNative tests that normalized-derived keys win over native passthrough.
+// TestApplyConfig_ClaudeForbiddenPermissionsPassthrough tests that native "permissions"
+// passthrough is dropped and noted in reason, while other native keys still apply.
+func TestApplyConfig_ClaudeForbiddenPermissionsPassthrough(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	a := configArtifactWithNative("cfg", []string{"claude"}, nil, map[string]interface{}{
+		"claude": map[string]interface{}{
+			"permissions": map[string]interface{}{"defaultMode": "bypassPermissions"},
+			"otherKey":    "otherVal",
+		},
+	})
+
+	r := applyConfig(t, home, "claude", a)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied (otherKey should be written), got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if !strings.Contains(r.Reason, "permissions") {
+		t.Errorf("reason should mention forbidden permissions key, got: %q", r.Reason)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	var root map[string]interface{}
+	_ = json.Unmarshal(data, &root)
+
+	// permissions must NOT be written via passthrough (it's forbidden).
+	if root["permissions"] != nil {
+		t.Errorf("forbidden 'permissions' key was written: %v", root["permissions"])
+	}
+	if root["otherKey"] != "otherVal" {
+		t.Errorf("otherKey: got %v, want otherVal", root["otherKey"])
+	}
+}
+
+// TestApplyConfig_ClaudeForbiddenNormalizedPermissionsKey tests that a normalized key
+// named "permissions" (a forbidden key for claude) is rejected without being written,
+// resulting in StatusSkipped with Capability=unsupported.
+func TestApplyConfig_ClaudeForbiddenNormalizedPermissionsKey(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempt to inject "permissions" via the normalized pathway — should be rejected.
+	a := configArtifact("cfg", []string{"claude"}, map[string]interface{}{
+		"permissions": map[string]interface{}{"allow": []interface{}{"*"}},
+	})
+
+	r := applyConfig(t, home, "claude", a)
+	if r.Status != agentinstall.StatusSkipped {
+		t.Fatalf("expected skipped (forbidden normalized key), got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityUnsupported {
+		t.Errorf("Capability: got %q, want unsupported", r.Capability)
+	}
+	if !strings.Contains(r.Reason, "forbidden") {
+		t.Errorf("reason should mention forbidden, got: %q", r.Reason)
+	}
+	// settings.json must NOT be created.
+	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); !os.IsNotExist(err) {
+		t.Error("settings.json should not be created for forbidden-only normalized key")
+	}
+}
+
+// TestApplyConfig_ClaudeNormalizedWinsOverNative shows that native "permissions" passthrough
+// is forbidden and dropped, while normalized approvalPosture still sets permissions.defaultMode.
+// This demonstrates that the normalized pathway applies even when the native pathway is blocked.
 func TestApplyConfig_ClaudeNormalizedWinsOverNative(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Native says permissions.defaultMode=default, normalized says never->bypassPermissions
+	// Native tries to set permissions.defaultMode=default via forbidden passthrough.
+	// Normalized sets approvalPosture=yolo → permissions.defaultMode=bypassPermissions.
 	a := configArtifactWithNative("cfg", []string{"claude"},
 		map[string]interface{}{
-			"approvalPosture": "never", // translates to permissions.defaultMode=bypassPermissions
+			"approvalPosture": "yolo",
 		},
 		map[string]interface{}{
 			"claude": map[string]interface{}{
 				"permissions": map[string]interface{}{
-					"defaultMode": "default", // should be overwritten by normalized
+					"defaultMode": "default", // forbidden — dropped
 				},
 			},
 		})
@@ -292,17 +385,108 @@ func TestApplyConfig_ClaudeNormalizedWinsOverNative(t *testing.T) {
 	if r.Status != agentinstall.StatusApplied {
 		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
 	}
+	// The forbidden native "permissions" should be noted in reason.
+	if !strings.Contains(r.Reason, "permissions") {
+		t.Errorf("reason should mention forbidden permissions key, got: %q", r.Reason)
+	}
 
 	data, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	var root map[string]interface{}
 	_ = json.Unmarshal(data, &root)
 	perms, ok := root["permissions"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("permissions missing")
+		t.Fatalf("permissions missing (normalized translation should have written it)")
 	}
-	// normalized wins: bypassPermissions, not "default"
+	// Normalized wins: bypassPermissions from yolo, not "default" from forbidden passthrough.
 	if perms["defaultMode"] != "bypassPermissions" {
-		t.Errorf("permissions.defaultMode: got %v, want bypassPermissions (normalized should win)", perms["defaultMode"])
+		t.Errorf("permissions.defaultMode: got %v, want bypassPermissions (normalized applies even with native forbidden)", perms["defaultMode"])
+	}
+}
+
+// TestApplyConfig_ClaudeDisabledTools tests disabledTools → permissions.deny for claude.
+func TestApplyConfig_ClaudeDisabledTools(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := configArtifact("cfg", []string{"claude"}, map[string]interface{}{
+		"disabledTools": []interface{}{"WebFetch"},
+	})
+	r := applyConfig(t, home, "claude", a)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityApplied {
+		t.Errorf("Capability: got %q, want applied", r.Capability)
+	}
+	data, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	var root map[string]interface{}
+	_ = json.Unmarshal(data, &root)
+	perms, ok := root["permissions"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("permissions missing or wrong type")
+	}
+	deny, ok := perms["deny"].([]interface{})
+	if !ok {
+		t.Fatalf("permissions.deny missing or wrong type: %T", perms["deny"])
+	}
+	found := false
+	for _, e := range deny {
+		if e == "WebFetch" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("permissions.deny does not contain WebFetch: %v", deny)
+	}
+}
+
+// TestApplyConfig_ClaudeAllowedDeniedCommands tests allowedCommands → permissions.allow
+// and deniedCommands → permissions.deny for claude (Bash-wrapped).
+func TestApplyConfig_ClaudeAllowedDeniedCommands(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := configArtifact("cfg", []string{"claude"}, map[string]interface{}{
+		"allowedCommands": []interface{}{"git status"},
+		"deniedCommands":  []interface{}{"rm -rf *"},
+	})
+	r := applyConfig(t, home, "claude", a)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityApplied {
+		t.Errorf("Capability: got %q, want applied", r.Capability)
+	}
+	data, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	var root map[string]interface{}
+	_ = json.Unmarshal(data, &root)
+	perms, ok := root["permissions"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("permissions missing or wrong type")
+	}
+	allow, _ := perms["allow"].([]interface{})
+	deny, _ := perms["deny"].([]interface{})
+
+	foundAllow := false
+	for _, e := range allow {
+		if e == "Bash(git status)" {
+			foundAllow = true
+		}
+	}
+	if !foundAllow {
+		t.Errorf("permissions.allow does not contain Bash(git status): %v", allow)
+	}
+
+	foundDeny := false
+	for _, e := range deny {
+		if e == "Bash(rm -rf *)" {
+			foundDeny = true
+		}
+	}
+	if !foundDeny {
+		t.Errorf("permissions.deny does not contain Bash(rm -rf *): %v", deny)
 	}
 }
 
@@ -313,7 +497,7 @@ func TestApplyConfig_ClaudeIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := configArtifact("cfg", []string{"claude"}, map[string]interface{}{
-		"approvalPosture": "never",
+		"approvalPosture": "yolo",
 	})
 
 	for i := 1; i <= 2; i++ {
@@ -351,28 +535,29 @@ func TestApplyConfig_ClaudeNilConfigSkipped(t *testing.T) {
 	}
 }
 
-// TestApplyConfig_ClaudeUnknownNormalizedKeySkipped tests that unknown normalized keys are skipped with reason.
+// TestApplyConfig_ClaudeUnknownNormalizedKeySkipped tests that unknown normalized keys are
+// skipped with reason while valid keys are still applied.
 func TestApplyConfig_ClaudeUnknownNormalizedKeySkipped(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Mix: unknown key (skipped) + valid approvalPosture (applied)
+	// Mix: unknown key (skipped) + valid approvalPosture (applied).
 	a := configArtifact("cfg", []string{"claude"}, map[string]interface{}{
-		"approvalPosture": "never",
+		"approvalPosture": "yolo",
 		"unknownKey":      "val",
 	})
 
 	r := applyConfig(t, home, "claude", a)
 	if r.Status != agentinstall.StatusApplied {
-		t.Fatalf("expected applied (approvalPosture:never is valid), got %q (reason: %q)", r.Status, r.Reason)
+		t.Fatalf("expected applied (approvalPosture:yolo is valid), got %q (reason: %q)", r.Status, r.Reason)
 	}
 	if !strings.Contains(r.Reason, "unknownKey") {
 		t.Errorf("reason should mention unknownKey, got: %q", r.Reason)
 	}
 
-	// settings.json should have permissions.defaultMode
+	// settings.json should have permissions.defaultMode.
 	data, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	var root map[string]interface{}
 	_ = json.Unmarshal(data, &root)
@@ -383,7 +568,7 @@ func TestApplyConfig_ClaudeUnknownNormalizedKeySkipped(t *testing.T) {
 	if perms["defaultMode"] != "bypassPermissions" {
 		t.Errorf("permissions.defaultMode: got %v, want bypassPermissions", perms["defaultMode"])
 	}
-	// unknownKey itself should not be written to the file
+	// unknownKey itself should not be written to the file.
 	if root["unknownKey"] != nil {
 		t.Errorf("unknownKey should not appear in settings.json, got: %v", root["unknownKey"])
 	}
@@ -399,7 +584,7 @@ func TestApplyConfig_CodexApprovalPostureMergeAfterBaseGen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate launcher-generated base config (same as MCP test)
+	// Simulate launcher-generated base config.
 	baseToml := `model = "m"
 
 [model_providers.spawnery]
@@ -421,7 +606,7 @@ trust_level = "trusted"
 		Targets: []string{"codex"},
 		Config: &agentinstall.ConfigPayload{
 			Normalized: map[string]interface{}{
-				"approvalPosture": "never",
+				"approvalPosture": "yolo",
 			},
 		},
 	}
@@ -443,12 +628,12 @@ trust_level = "trusted"
 		t.Fatalf("parse config.toml: %v", err)
 	}
 
-	// New entry: approval_policy = "never"
+	// New entry: approval_policy = "never" (yolo → never).
 	if doc["approval_policy"] != "never" {
 		t.Errorf("approval_policy: got %v, want never", doc["approval_policy"])
 	}
 
-	// Base-gen keys survive
+	// Base-gen keys survive.
 	if doc["model"] != "m" {
 		t.Errorf("model was lost after apply: got %v", doc["model"])
 	}
@@ -468,47 +653,220 @@ trust_level = "trusted"
 	}
 }
 
-// TestApplyConfig_CodexApprovalPostureAllValues tests all four codex approval_policy values.
-func TestApplyConfig_CodexApprovalPostureAllValues(t *testing.T) {
-	values := []string{"untrusted", "on-failure", "on-request", "never"}
-	for _, v := range values {
-		v := v
-		t.Run(v, func(t *testing.T) {
-			home := t.TempDir()
-			codexHome := filepath.Join(home, ".codex")
-			if err := os.MkdirAll(codexHome, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			env := agentinstall.MapEnviron{"HOME": home, "CODEX_HOME": codexHome}
-			reg := agentinstall.NewRegistry(env)
-			opts := agentinstall.Options{HomeDir: home}
-			a := agentinstall.Artifact{
-				Kind:    agentinstall.KindConfig,
-				Name:    "cfg",
-				Targets: []string{"codex"},
-				Config: &agentinstall.ConfigPayload{
-					Normalized: map[string]interface{}{
-						"approvalPosture": v,
-					},
-				},
-			}
-			res := agentinstall.Apply(reg, agentinstall.Manifest{Artifacts: []agentinstall.Artifact{a}}, opts, env)
-			r := res.Reports[0]
-			if r.Status != agentinstall.StatusApplied {
-				t.Fatalf("approvalPosture=%q: expected applied, got %q (reason: %q)", v, r.Status, r.Reason)
-			}
-
-			data, _ := os.ReadFile(filepath.Join(codexHome, "config.toml"))
-			var doc map[string]interface{}
-			_ = toml.Unmarshal(data, &doc)
-			if doc["approval_policy"] != v {
-				t.Errorf("approval_policy: got %v, want %v", doc["approval_policy"], v)
-			}
-		})
+// TestApplyConfig_CodexApprovalPostureAlwaysAsk tests always-ask → approval_policy=untrusted.
+func TestApplyConfig_CodexApprovalPostureAlwaysAsk(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := agentinstall.MapEnviron{"HOME": home, "CODEX_HOME": codexHome}
+	reg := agentinstall.NewRegistry(env)
+	opts := agentinstall.Options{HomeDir: home}
+	a := agentinstall.Artifact{
+		Kind:    agentinstall.KindConfig,
+		Name:    "cfg",
+		Targets: []string{"codex"},
+		Config: &agentinstall.ConfigPayload{
+			Normalized: map[string]interface{}{"approvalPosture": "always-ask"},
+		},
+	}
+	res := agentinstall.Apply(reg, agentinstall.Manifest{Artifacts: []agentinstall.Artifact{a}}, opts, env)
+	r := res.Reports[0]
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityApplied {
+		t.Errorf("Capability: got %q, want applied", r.Capability)
+	}
+	data, _ := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	var doc map[string]interface{}
+	_ = toml.Unmarshal(data, &doc)
+	if doc["approval_policy"] != "untrusted" {
+		t.Errorf("approval_policy: got %v, want untrusted", doc["approval_policy"])
 	}
 }
 
-// TestApplyConfig_CodexNativePassthroughAndForbiddenModel tests native merge + forbidden model drop.
+// TestApplyConfig_CodexApprovalPostureAskRisky tests ask-risky → approval_policy=on-request.
+func TestApplyConfig_CodexApprovalPostureAskRisky(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := agentinstall.MapEnviron{"HOME": home, "CODEX_HOME": codexHome}
+	reg := agentinstall.NewRegistry(env)
+	opts := agentinstall.Options{HomeDir: home}
+	a := agentinstall.Artifact{
+		Kind:    agentinstall.KindConfig,
+		Name:    "cfg",
+		Targets: []string{"codex"},
+		Config: &agentinstall.ConfigPayload{
+			Normalized: map[string]interface{}{"approvalPosture": "ask-risky"},
+		},
+	}
+	res := agentinstall.Apply(reg, agentinstall.Manifest{Artifacts: []agentinstall.Artifact{a}}, opts, env)
+	r := res.Reports[0]
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityApplied {
+		t.Errorf("Capability: got %q, want applied", r.Capability)
+	}
+	data, _ := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	var doc map[string]interface{}
+	_ = toml.Unmarshal(data, &doc)
+	if doc["approval_policy"] != "on-request" {
+		t.Errorf("approval_policy: got %v, want on-request", doc["approval_policy"])
+	}
+}
+
+// TestApplyConfig_CodexApprovalPostureYolo tests yolo → approval_policy=never.
+func TestApplyConfig_CodexApprovalPostureYolo(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := agentinstall.MapEnviron{"HOME": home, "CODEX_HOME": codexHome}
+	reg := agentinstall.NewRegistry(env)
+	opts := agentinstall.Options{HomeDir: home}
+	a := agentinstall.Artifact{
+		Kind:    agentinstall.KindConfig,
+		Name:    "cfg",
+		Targets: []string{"codex"},
+		Config: &agentinstall.ConfigPayload{
+			Normalized: map[string]interface{}{"approvalPosture": "yolo"},
+		},
+	}
+	res := agentinstall.Apply(reg, agentinstall.Manifest{Artifacts: []agentinstall.Artifact{a}}, opts, env)
+	r := res.Reports[0]
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityApplied {
+		t.Errorf("Capability: got %q, want applied", r.Capability)
+	}
+	data, _ := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	var doc map[string]interface{}
+	_ = toml.Unmarshal(data, &doc)
+	if doc["approval_policy"] != "never" {
+		t.Errorf("approval_policy: got %v, want never", doc["approval_policy"])
+	}
+}
+
+// TestApplyConfig_CodexApprovalPostureAuto tests auto → approval_policy=on-failure with best-effort.
+func TestApplyConfig_CodexApprovalPostureAuto(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := agentinstall.MapEnviron{"HOME": home, "CODEX_HOME": codexHome}
+	reg := agentinstall.NewRegistry(env)
+	opts := agentinstall.Options{HomeDir: home}
+	a := agentinstall.Artifact{
+		Kind:    agentinstall.KindConfig,
+		Name:    "cfg",
+		Targets: []string{"codex"},
+		Config: &agentinstall.ConfigPayload{
+			Normalized: map[string]interface{}{"approvalPosture": "auto"},
+		},
+	}
+	res := agentinstall.Apply(reg, agentinstall.Manifest{Artifacts: []agentinstall.Artifact{a}}, opts, env)
+	r := res.Reports[0]
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityBestEffort {
+		t.Errorf("Capability: got %q, want best-effort", r.Capability)
+	}
+	if !strings.Contains(r.Reason, "model-tier") {
+		t.Errorf("reason should mention model-tier gating, got: %q", r.Reason)
+	}
+	data, _ := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	var doc map[string]interface{}
+	_ = toml.Unmarshal(data, &doc)
+	if doc["approval_policy"] != "on-failure" {
+		t.Errorf("approval_policy: got %v, want on-failure (auto best-effort)", doc["approval_policy"])
+	}
+}
+
+// TestApplyConfig_CodexDisabledToolsUnsupported tests that codex returns capability=unsupported
+// for disabledTools since codex has no per-tool disable.
+func TestApplyConfig_CodexDisabledToolsUnsupported(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := agentinstall.MapEnviron{"HOME": home, "CODEX_HOME": codexHome}
+	reg := agentinstall.NewRegistry(env)
+	opts := agentinstall.Options{HomeDir: home}
+	a := agentinstall.Artifact{
+		Kind:    agentinstall.KindConfig,
+		Name:    "cfg",
+		Targets: []string{"codex"},
+		Config: &agentinstall.ConfigPayload{
+			Normalized: map[string]interface{}{
+				"disabledTools": []interface{}{"SomeTool"},
+			},
+		},
+	}
+	res := agentinstall.Apply(reg, agentinstall.Manifest{Artifacts: []agentinstall.Artifact{a}}, opts, env)
+	r := res.Reports[0]
+	if r.Status != agentinstall.StatusSkipped {
+		t.Fatalf("expected skipped, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityUnsupported {
+		t.Errorf("Capability: got %q, want unsupported", r.Capability)
+	}
+	if !strings.Contains(r.Reason, "codex has no per-tool disable") {
+		t.Errorf("reason should mention 'codex has no per-tool disable', got: %q", r.Reason)
+	}
+}
+
+// TestApplyConfig_CodexForbiddenNormalizedSandboxMode tests that normalized "sandbox_mode"
+// (a forbidden key for codex) is rejected without being written.
+func TestApplyConfig_CodexForbiddenNormalizedSandboxMode(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := agentinstall.MapEnviron{"HOME": home, "CODEX_HOME": codexHome}
+	reg := agentinstall.NewRegistry(env)
+	opts := agentinstall.Options{HomeDir: home}
+	a := agentinstall.Artifact{
+		Kind:    agentinstall.KindConfig,
+		Name:    "cfg",
+		Targets: []string{"codex"},
+		Config: &agentinstall.ConfigPayload{
+			Normalized: map[string]interface{}{
+				"sandbox_mode": "danger-full-access",
+			},
+		},
+	}
+	res := agentinstall.Apply(reg, agentinstall.Manifest{Artifacts: []agentinstall.Artifact{a}}, opts, env)
+	r := res.Reports[0]
+	if r.Status != agentinstall.StatusSkipped {
+		t.Fatalf("expected skipped, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityUnsupported {
+		t.Errorf("Capability: got %q, want unsupported", r.Capability)
+	}
+	if !strings.Contains(r.Reason, "forbidden") {
+		t.Errorf("reason should mention forbidden, got: %q", r.Reason)
+	}
+	// config.toml must NOT be created.
+	if _, err := os.Stat(filepath.Join(codexHome, "config.toml")); !os.IsNotExist(err) {
+		t.Error("config.toml should not be created for forbidden-only normalized key")
+	}
+}
+
+// TestApplyConfig_CodexNativePassthroughAndForbiddenModel tests native merge + forbidden
+// model drop.  Now codex also forbids approval_policy, sandbox_mode,
+// sandbox_workspace_write from native passthrough.
 func TestApplyConfig_CodexNativePassthroughAndForbiddenModel(t *testing.T) {
 	home := t.TempDir()
 	codexHome := filepath.Join(home, ".codex")
@@ -553,6 +911,108 @@ func TestApplyConfig_CodexNativePassthroughAndForbiddenModel(t *testing.T) {
 	}
 }
 
+// TestApplyConfig_CodexForbiddenSandboxModePassthrough tests that native sandbox_mode
+// is dropped from passthrough.
+func TestApplyConfig_CodexForbiddenSandboxModePassthrough(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := agentinstall.MapEnviron{"HOME": home, "CODEX_HOME": codexHome}
+	reg := agentinstall.NewRegistry(env)
+	opts := agentinstall.Options{HomeDir: home}
+	a := agentinstall.Artifact{
+		Kind:    agentinstall.KindConfig,
+		Name:    "cfg",
+		Targets: []string{"codex"},
+		Config: &agentinstall.ConfigPayload{
+			Native: map[string]interface{}{
+				"codex": map[string]interface{}{
+					"sandbox_mode": "danger-full-access", // forbidden
+					"my_setting":   "val",                // allowed
+				},
+			},
+		},
+	}
+	res := agentinstall.Apply(reg, agentinstall.Manifest{Artifacts: []agentinstall.Artifact{a}}, opts, env)
+	r := res.Reports[0]
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied (my_setting should be written), got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if !strings.Contains(r.Reason, "sandbox_mode") {
+		t.Errorf("reason should mention sandbox_mode, got: %q", r.Reason)
+	}
+	data, _ := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	var doc map[string]interface{}
+	_ = toml.Unmarshal(data, &doc)
+	if doc["sandbox_mode"] != nil {
+		t.Errorf("sandbox_mode was written (should be forbidden): %v", doc["sandbox_mode"])
+	}
+	if doc["my_setting"] != "val" {
+		t.Errorf("my_setting: got %v, want val", doc["my_setting"])
+	}
+}
+
+// TestApplyConfig_CodexAllowedCommandsWritesRulesFile tests that allowedCommands and
+// deniedCommands for codex are written to the execpolicy rules file (not config.toml).
+func TestApplyConfig_CodexAllowedCommandsWritesRulesFile(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := agentinstall.MapEnviron{"HOME": home, "CODEX_HOME": codexHome}
+	reg := agentinstall.NewRegistry(env)
+	opts := agentinstall.Options{HomeDir: home}
+	a := agentinstall.Artifact{
+		Kind:    agentinstall.KindConfig,
+		Name:    "cfg",
+		Targets: []string{"codex"},
+		Config: &agentinstall.ConfigPayload{
+			Normalized: map[string]interface{}{
+				"allowedCommands": []interface{}{"git status"},
+				"deniedCommands":  []interface{}{"rm -rf *"},
+			},
+		},
+	}
+	res := agentinstall.Apply(reg, agentinstall.Manifest{Artifacts: []agentinstall.Artifact{a}}, opts, env)
+	if len(res.Reports) != 1 {
+		t.Fatalf("want 1 report, got %d", len(res.Reports))
+	}
+	r := res.Reports[0]
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityApplied {
+		t.Errorf("Capability: got %q, want applied", r.Capability)
+	}
+
+	// rules/default.rules must exist with allow/deny entries.
+	rulesPath := filepath.Join(codexHome, "rules", "default.rules")
+	rulesData, err := os.ReadFile(rulesPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", rulesPath, err)
+	}
+	rulesStr := string(rulesData)
+	if !strings.Contains(rulesStr, "allow git status") {
+		t.Errorf("rules file missing 'allow git status':\n%s", rulesStr)
+	}
+	if !strings.Contains(rulesStr, "deny rm -rf *") {
+		t.Errorf("rules file missing 'deny rm -rf *':\n%s", rulesStr)
+	}
+
+	// config.toml must NOT contain the command patterns (they go to rules, not TOML).
+	if _, err := os.Stat(filepath.Join(codexHome, "config.toml")); os.IsNotExist(err) {
+		// config.toml not created at all — that's fine (commands-only artifact).
+	} else {
+		data, _ := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+		if strings.Contains(string(data), "git status") {
+			t.Errorf("config.toml should not contain command patterns:\n%s", data)
+		}
+	}
+}
+
 // TestApplyConfig_CodexIdempotent tests that applying twice produces a stable config.toml.
 func TestApplyConfig_CodexIdempotent(t *testing.T) {
 	home := t.TempDir()
@@ -569,7 +1029,7 @@ func TestApplyConfig_CodexIdempotent(t *testing.T) {
 		Targets: []string{"codex"},
 		Config: &agentinstall.ConfigPayload{
 			Normalized: map[string]interface{}{
-				"approvalPosture": "never",
+				"approvalPosture": "yolo",
 			},
 		},
 	}
@@ -602,7 +1062,7 @@ func TestApplyConfig_OpencodeApprovalPostureSkippedNativeApplied(t *testing.T) {
 
 	a := configArtifactWithNative("cfg", []string{"opencode"},
 		map[string]interface{}{
-			"approvalPosture": "never", // skipped for opencode
+			"approvalPosture": "yolo", // skipped for opencode
 		},
 		map[string]interface{}{
 			"opencode": map[string]interface{}{
@@ -630,7 +1090,8 @@ func TestApplyConfig_OpencodeApprovalPostureSkippedNativeApplied(t *testing.T) {
 	}
 }
 
-// TestApplyConfig_OpencodeApprovalPostureOnlySkipped tests that only approvalPosture results in Skipped.
+// TestApplyConfig_OpencodeApprovalPostureOnlySkipped tests that only approvalPosture results
+// in Skipped with capability=unsupported.
 func TestApplyConfig_OpencodeApprovalPostureOnlySkipped(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".config", "opencode"), 0o755); err != nil {
@@ -638,15 +1099,87 @@ func TestApplyConfig_OpencodeApprovalPostureOnlySkipped(t *testing.T) {
 	}
 
 	a := configArtifact("cfg", []string{"opencode"}, map[string]interface{}{
-		"approvalPosture": "never",
+		"approvalPosture": "yolo",
 	})
 
 	r := applyConfig(t, home, "opencode", a)
 	if r.Status != agentinstall.StatusSkipped {
 		t.Fatalf("expected skipped (no applicable additions), got %q (reason: %q)", r.Status, r.Reason)
 	}
+	if r.Capability != agentinstall.CapabilityUnsupported {
+		t.Errorf("Capability: got %q, want unsupported", r.Capability)
+	}
 	if !strings.Contains(r.Reason, "approvalPosture") {
 		t.Errorf("reason should mention approvalPosture, got: %q", r.Reason)
+	}
+}
+
+// TestApplyConfig_OpencodeDisabledTools tests disabledTools → tools map for opencode.
+func TestApplyConfig_OpencodeDisabledTools(t *testing.T) {
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := configArtifact("cfg", []string{"opencode"}, map[string]interface{}{
+		"disabledTools": []interface{}{"write"},
+	})
+	r := applyConfig(t, home, "opencode", a)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityApplied {
+		t.Errorf("Capability: got %q, want applied", r.Capability)
+	}
+	data, _ := os.ReadFile(filepath.Join(configDir, "opencode.json"))
+	std, _ := hujson.Standardize(data)
+	var root map[string]interface{}
+	_ = json.Unmarshal(std, &root)
+	tools, ok := root["tools"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("tools missing or wrong type: %T", root["tools"])
+	}
+	if tools["write"] != false {
+		t.Errorf("tools.write: got %v, want false", tools["write"])
+	}
+}
+
+// TestApplyConfig_OpencodeAllowedDeniedCommands tests allowedCommands/deniedCommands →
+// permission.bash map for opencode.
+func TestApplyConfig_OpencodeAllowedDeniedCommands(t *testing.T) {
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := configArtifact("cfg", []string{"opencode"}, map[string]interface{}{
+		"allowedCommands": []interface{}{"git status"},
+		"deniedCommands":  []interface{}{"rm -rf *"},
+	})
+	r := applyConfig(t, home, "opencode", a)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+	if r.Capability != agentinstall.CapabilityApplied {
+		t.Errorf("Capability: got %q, want applied", r.Capability)
+	}
+	data, _ := os.ReadFile(filepath.Join(configDir, "opencode.json"))
+	std, _ := hujson.Standardize(data)
+	var root map[string]interface{}
+	_ = json.Unmarshal(std, &root)
+	permission, ok := root["permission"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("permission missing or wrong type: %T", root["permission"])
+	}
+	bash, ok := permission["bash"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("permission.bash missing or wrong type: %T", permission["bash"])
+	}
+	if bash["git status"] != "allow" {
+		t.Errorf("permission.bash[\"git status\"]: got %v, want \"allow\"", bash["git status"])
+	}
+	if bash["rm -rf *"] != "deny" {
+		t.Errorf("permission.bash[\"rm -rf *\"]: got %v, want \"deny\"", bash["rm -rf *"])
 	}
 }
 
@@ -657,7 +1190,7 @@ func TestApplyConfig_OpencodeJSONCCommentTolerance(t *testing.T) {
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Pre-write a JSONC file with comments and existing entries
+	// Pre-write a JSONC file with comments and existing entries.
 	existingJSONC := `{
   // This is a comment
   "existingKey": "existingVal",
@@ -687,7 +1220,7 @@ func TestApplyConfig_OpencodeJSONCCommentTolerance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read opencode.json: %v", err)
 	}
-	// Verify the file remains valid JSONC (hujson can parse it)
+	// Verify the file remains valid JSONC.
 	_, err = hujson.Parse(data)
 	if err != nil {
 		t.Fatalf("result is not valid JSONC: %v\ncontent:\n%s", err, data)
@@ -704,12 +1237,11 @@ func TestApplyConfig_OpencodeJSONCCommentTolerance(t *testing.T) {
 		t.Errorf("newKey not added: got %v", root["newKey"])
 	}
 
-	// nested.a survives, nested.b added (deep merge)
+	// nested.a survives, nested.b added (deep merge).
 	nested, ok := root["nested"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("nested missing or wrong type: %T", root["nested"])
 	}
-	// Note: JSON numbers deserialize as float64
 	if nested["a"] != float64(1) {
 		t.Errorf("nested.a was lost: got %v", nested["a"])
 	}
@@ -821,7 +1353,7 @@ func TestApplyConfig_OpencodeIdempotent(t *testing.T) {
 func TestApplyConfig_GooseDeferred(t *testing.T) {
 	home := t.TempDir()
 	a := configArtifact("cfg", []string{"goose"}, map[string]interface{}{
-		"approvalPosture": "never",
+		"approvalPosture": "yolo",
 	})
 	r := applyConfig(t, home, "goose", a)
 	if r.Status != agentinstall.StatusSkipped {
@@ -836,7 +1368,7 @@ func TestApplyConfig_GooseDeferred(t *testing.T) {
 func TestApplyConfig_HermesDeferred(t *testing.T) {
 	home := t.TempDir()
 	a := configArtifact("cfg", []string{"hermes"}, map[string]interface{}{
-		"approvalPosture": "never",
+		"approvalPosture": "yolo",
 	})
 	r := applyConfig(t, home, "hermes", a)
 	if r.Status != agentinstall.StatusSkipped {
@@ -854,8 +1386,6 @@ func TestApplyConfig_NilConfigAlwaysSkipped(t *testing.T) {
 		agent := agent
 		t.Run(agent, func(t *testing.T) {
 			home := t.TempDir()
-			// For agents that need their config dir to be detected, we don't create it —
-			// the nil payload check happens before any IO.
 			a := agentinstall.Artifact{
 				Kind:    agentinstall.KindConfig,
 				Name:    "cfg",
