@@ -449,6 +449,54 @@ func TestStartReconcilerSweepsFailedForks(t *testing.T) {
 	}
 }
 
+func TestReconcileTickSweepsFailedForksPeriodically(t *testing.T) {
+	s, st := newForkCleanupTestServer(t)
+	ctx := context.Background()
+	s.now = func() time.Time { return time.Unix(500, 0) }
+	seedPartialFork(t, st, "source-periodic")
+	seedPartialFork(t, st, "fork-periodic")
+	if err := st.TransferSets().Create(ctx, store.TransferSet{
+		ID:                "ts-periodic",
+		Kind:              store.TransferSetFork,
+		SpawnID:           "fork-periodic",
+		SourceSpawnID:     "source-periodic",
+		ForkSpawnID:       "fork-periodic",
+		SourceGeneration:  3,
+		TargetGeneration:  1,
+		SourceNodeID:      "source-node",
+		TargetNodeID:      "target-node",
+		TransferKeyStatus: store.TransferKeyPending,
+		Status:            store.TransferSetFailed,
+		CreatedAt:         100,
+		UpdatedAt:         100,
+	}); err != nil {
+		t.Fatalf("Create failed fork transfer set: %v", err)
+	}
+	res := &recordingForkResources{}
+	s.failedForkResources = res
+
+	s.reconcileTick(ctx)
+
+	want := []string{
+		"revoke-key:fork-periodic",
+		"empty-bucket:spawnery-spawn-fork-periodic",
+		"drop-bucket:spawnery-spawn-fork-periodic",
+		"delete-row:fork-periodic",
+	}
+	if got := res.ops; len(got) != len(want) {
+		t.Fatalf("ops=%v want %v", got, want)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("ops=%v want %v", got, want)
+			}
+		}
+	}
+	if _, err := st.Spawns().Get(ctx, "fork-periodic"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("periodic reconcile should delete failed fork, err=%v", err)
+	}
+}
+
 func TestUnwindFailedForkUsesNanoClaimDeadlineAndSecondDeletedAt(t *testing.T) {
 	ctx := context.Background()
 	nowNS := int64(500_000_000_000)
