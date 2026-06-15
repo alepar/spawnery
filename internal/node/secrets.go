@@ -27,6 +27,8 @@ type secretDeliveryReplayKey struct {
 type secretDeliveryReplayState struct {
 	highWater uint64
 	seen      map[string]struct{}
+	busy      bool
+	cond      *sync.Cond
 }
 
 type secretDeliveryReplay struct {
@@ -53,7 +55,11 @@ func (r *secretDeliveryReplay) begin(spawnID string, generation uint64, secretID
 	st := r.deliveries[key]
 	if st == nil {
 		st = &secretDeliveryReplayState{seen: map[string]struct{}{}}
+		st.cond = sync.NewCond(&r.mu)
 		r.deliveries[key] = st
+	}
+	for st.busy {
+		st.cond.Wait()
 	}
 	if version < st.highWater {
 		return nil, nil, fmt.Errorf("stale delivery version %d below accepted high-water %d", version, st.highWater)
@@ -62,6 +68,7 @@ func (r *secretDeliveryReplay) begin(spawnID string, generation uint64, secretID
 		return nil, nil, fmt.Errorf("duplicate delivery id %q", deliveryID)
 	}
 	st.seen[deliveryID] = struct{}{}
+	st.busy = true
 
 	done := false
 	commit := func() {
@@ -73,6 +80,10 @@ func (r *secretDeliveryReplay) begin(spawnID string, generation uint64, secretID
 		done = true
 		if st := r.deliveries[key]; st != nil && version > st.highWater {
 			st.highWater = version
+		}
+		if st := r.deliveries[key]; st != nil {
+			st.busy = false
+			st.cond.Broadcast()
 		}
 	}
 	rollback := func() {
@@ -87,11 +98,24 @@ func (r *secretDeliveryReplay) begin(spawnID string, generation uint64, secretID
 			return
 		}
 		delete(st.seen, deliveryID)
-		if st.highWater == 0 && len(st.seen) == 0 {
-			delete(r.deliveries, key)
-		}
+		st.busy = false
+		st.cond.Broadcast()
 	}
 	return commit, rollback, nil
+}
+
+func (r *secretDeliveryReplay) checkBeforeConsume(spawnID string, generation uint64, secretID string, version uint64) error {
+	key := secretDeliveryReplayKey{spawnID: spawnID, generation: generation, secretID: secretID}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st := r.deliveries[key]
+	if st == nil {
+		return fmt.Errorf("delivery replay lease missing")
+	}
+	if version < st.highWater {
+		return fmt.Errorf("stale delivery version %d below accepted high-water %d", version, st.highWater)
+	}
+	return nil
 }
 
 func (r *secretDeliveryReplay) pruneSpawnOlderThan(spawnID string, generation uint64) {
@@ -196,6 +220,14 @@ func (a *attacher) handleSecretDelivery(sd *nodev1.SecretDelivery) {
 		if err != nil {
 			rollback()
 			log.Printf("secret-delivery %s/%s: unseal failed: %v", sd.SpawnId, sec.SecretId, err)
+			continue
+		}
+		if err := a.secretReplay.checkBeforeConsume(sd.SpawnId, sd.Generation, sec.SecretId, sec.Version); err != nil {
+			for i := range pt {
+				pt[i] = 0
+			}
+			rollback()
+			log.Printf("secret-delivery %s/%s: replay rejected before consume: %v", sd.SpawnId, sec.SecretId, err)
 			continue
 		}
 

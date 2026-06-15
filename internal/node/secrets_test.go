@@ -275,6 +275,50 @@ func TestSecretDeliveryRejectsOlderVersionAfterNewerAccepted(t *testing.T) {
 	}
 }
 
+func TestSecretDeliveryReplaySerializesSameSecretReservations(t *testing.T) {
+	r := newSecretDeliveryReplay()
+	_, oldRollback, err := r.begin("sp1", 7, "gh", 4, "delivery-v4")
+	if err != nil {
+		t.Fatalf("old begin: %v", err)
+	}
+
+	newerReady := make(chan error, 1)
+	newerCommit := make(chan func(), 1)
+	go func() {
+		commit, rollback, err := r.begin("sp1", 7, "gh", 5, "delivery-v5")
+		if err != nil {
+			newerReady <- err
+			return
+		}
+		newerCommit <- commit
+		_ = rollback
+		newerReady <- nil
+	}()
+
+	select {
+	case err := <-newerReady:
+		t.Fatalf("newer reservation completed while older delivery was still in-flight: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	oldRollback()
+	select {
+	case err := <-newerReady:
+		if err != nil {
+			t.Fatalf("newer begin after old rollback: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("newer reservation did not proceed after old rollback")
+	}
+	(<-newerCommit)()
+
+	_, staleRollback, err := r.begin("sp1", 7, "gh", 4, "delivery-v4b")
+	if err == nil {
+		staleRollback()
+		t.Fatal("older version began after newer version committed")
+	}
+}
+
 // publishSubKey returns the current SignedSubKey JSON (rotating if needed); rotatedSubKey returns bytes
 // only when the published key changes, so steady-state heartbeats carry none.
 func TestPublishSubKey(t *testing.T) {
