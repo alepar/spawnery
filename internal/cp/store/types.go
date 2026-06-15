@@ -264,3 +264,21 @@ type ProfileSecret struct {
 	ProfileID     string `bun:"profile_id,pk"`
 	SecretID      string `bun:"secret_id,pk"`
 }
+
+// --- Customization Catalog (sp-nrzf.3.6) -----------------------------------
+
+// CustomizationCatalogEntry is one curated customization item in the catalog.
+// Any authenticated owner may create entries they own (creator_id); writes (Update/Delete/SetListed)
+// are creator-only; List returns only listed=true entries (globally readable).
+type CustomizationCatalogEntry struct {
+	bun.BaseModel `bun:"table:customization_catalog,alias:cc"`
+	CatalogID     string `bun:"catalog_id,pk"`
+	CreatorID     string `bun:"creator_id,notnull"`
+	Kind          string `bun:"kind,notnull"`        // skill|mcp|config|plugin (ProfileEntryKind string)
+	Name          string `bun:"name,notnull"`
+	Description   string `bun:"description,notnull"`
+	Content       []byte `bun:"content"`             // curated inline content (BLOB/bytea)
+	Listed        bool   `bun:"listed,notnull"`
+	CreatedAt     int64  `bun:"created_at,notnull"`
+	UpdatedAt     int64  `bun:"updated_at,notnull"`
+}

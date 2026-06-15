@@ -137,6 +137,24 @@ const (
 	// SpawnServiceRemoveProfileSecretRefProcedure is the fully-qualified name of the SpawnService's
 	// RemoveProfileSecretRef RPC.
 	SpawnServiceRemoveProfileSecretRefProcedure = "/cp.v1.SpawnService/RemoveProfileSecretRef"
+	// SpawnServiceCreateCatalogEntryProcedure is the fully-qualified name of the SpawnService's
+	// CreateCatalogEntry RPC.
+	SpawnServiceCreateCatalogEntryProcedure = "/cp.v1.SpawnService/CreateCatalogEntry"
+	// SpawnServiceGetCatalogEntryProcedure is the fully-qualified name of the SpawnService's
+	// GetCatalogEntry RPC.
+	SpawnServiceGetCatalogEntryProcedure = "/cp.v1.SpawnService/GetCatalogEntry"
+	// SpawnServiceListCatalogEntriesProcedure is the fully-qualified name of the SpawnService's
+	// ListCatalogEntries RPC.
+	SpawnServiceListCatalogEntriesProcedure = "/cp.v1.SpawnService/ListCatalogEntries"
+	// SpawnServiceUpdateCatalogEntryProcedure is the fully-qualified name of the SpawnService's
+	// UpdateCatalogEntry RPC.
+	SpawnServiceUpdateCatalogEntryProcedure = "/cp.v1.SpawnService/UpdateCatalogEntry"
+	// SpawnServiceDeleteCatalogEntryProcedure is the fully-qualified name of the SpawnService's
+	// DeleteCatalogEntry RPC.
+	SpawnServiceDeleteCatalogEntryProcedure = "/cp.v1.SpawnService/DeleteCatalogEntry"
+	// SpawnServiceSetCatalogListingProcedure is the fully-qualified name of the SpawnService's
+	// SetCatalogListing RPC.
+	SpawnServiceSetCatalogListingProcedure = "/cp.v1.SpawnService/SetCatalogListing"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -191,6 +209,14 @@ type SpawnServiceClient interface {
 	RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error)
 	AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error)
 	RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error)
+	// Customization catalog CRUD (sp-nrzf.3.6): curated catalog entries, creator-scoped writes,
+	// globally-readable list (listed=true only). Owner resolved from auth context server-side.
+	CreateCatalogEntry(context.Context, *connect.Request[v1.CreateCatalogEntryRequest]) (*connect.Response[v1.CreateCatalogEntryResponse], error)
+	GetCatalogEntry(context.Context, *connect.Request[v1.GetCatalogEntryRequest]) (*connect.Response[v1.GetCatalogEntryResponse], error)
+	ListCatalogEntries(context.Context, *connect.Request[v1.ListCatalogEntriesRequest]) (*connect.Response[v1.ListCatalogEntriesResponse], error)
+	UpdateCatalogEntry(context.Context, *connect.Request[v1.UpdateCatalogEntryRequest]) (*connect.Response[v1.UpdateCatalogEntryResponse], error)
+	DeleteCatalogEntry(context.Context, *connect.Request[v1.DeleteCatalogEntryRequest]) (*connect.Response[v1.DeleteCatalogEntryResponse], error)
+	SetCatalogListing(context.Context, *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -426,6 +452,42 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileSecretRef")),
 			connect.WithClientOptions(opts...),
 		),
+		createCatalogEntry: connect.NewClient[v1.CreateCatalogEntryRequest, v1.CreateCatalogEntryResponse](
+			httpClient,
+			baseURL+SpawnServiceCreateCatalogEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("CreateCatalogEntry")),
+			connect.WithClientOptions(opts...),
+		),
+		getCatalogEntry: connect.NewClient[v1.GetCatalogEntryRequest, v1.GetCatalogEntryResponse](
+			httpClient,
+			baseURL+SpawnServiceGetCatalogEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("GetCatalogEntry")),
+			connect.WithClientOptions(opts...),
+		),
+		listCatalogEntries: connect.NewClient[v1.ListCatalogEntriesRequest, v1.ListCatalogEntriesResponse](
+			httpClient,
+			baseURL+SpawnServiceListCatalogEntriesProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ListCatalogEntries")),
+			connect.WithClientOptions(opts...),
+		),
+		updateCatalogEntry: connect.NewClient[v1.UpdateCatalogEntryRequest, v1.UpdateCatalogEntryResponse](
+			httpClient,
+			baseURL+SpawnServiceUpdateCatalogEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("UpdateCatalogEntry")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteCatalogEntry: connect.NewClient[v1.DeleteCatalogEntryRequest, v1.DeleteCatalogEntryResponse](
+			httpClient,
+			baseURL+SpawnServiceDeleteCatalogEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("DeleteCatalogEntry")),
+			connect.WithClientOptions(opts...),
+		),
+		setCatalogListing: connect.NewClient[v1.SetCatalogListingRequest, v1.SetCatalogListingResponse](
+			httpClient,
+			baseURL+SpawnServiceSetCatalogListingProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("SetCatalogListing")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -468,6 +530,12 @@ type spawnServiceClient struct {
 	removeProfileEntry      *connect.Client[v1.RemoveProfileEntryRequest, v1.RemoveProfileEntryResponse]
 	addProfileSecretRef     *connect.Client[v1.AddProfileSecretRefRequest, v1.AddProfileSecretRefResponse]
 	removeProfileSecretRef  *connect.Client[v1.RemoveProfileSecretRefRequest, v1.RemoveProfileSecretRefResponse]
+	createCatalogEntry      *connect.Client[v1.CreateCatalogEntryRequest, v1.CreateCatalogEntryResponse]
+	getCatalogEntry         *connect.Client[v1.GetCatalogEntryRequest, v1.GetCatalogEntryResponse]
+	listCatalogEntries      *connect.Client[v1.ListCatalogEntriesRequest, v1.ListCatalogEntriesResponse]
+	updateCatalogEntry      *connect.Client[v1.UpdateCatalogEntryRequest, v1.UpdateCatalogEntryResponse]
+	deleteCatalogEntry      *connect.Client[v1.DeleteCatalogEntryRequest, v1.DeleteCatalogEntryResponse]
+	setCatalogListing       *connect.Client[v1.SetCatalogListingRequest, v1.SetCatalogListingResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -655,6 +723,36 @@ func (c *spawnServiceClient) RemoveProfileSecretRef(ctx context.Context, req *co
 	return c.removeProfileSecretRef.CallUnary(ctx, req)
 }
 
+// CreateCatalogEntry calls cp.v1.SpawnService.CreateCatalogEntry.
+func (c *spawnServiceClient) CreateCatalogEntry(ctx context.Context, req *connect.Request[v1.CreateCatalogEntryRequest]) (*connect.Response[v1.CreateCatalogEntryResponse], error) {
+	return c.createCatalogEntry.CallUnary(ctx, req)
+}
+
+// GetCatalogEntry calls cp.v1.SpawnService.GetCatalogEntry.
+func (c *spawnServiceClient) GetCatalogEntry(ctx context.Context, req *connect.Request[v1.GetCatalogEntryRequest]) (*connect.Response[v1.GetCatalogEntryResponse], error) {
+	return c.getCatalogEntry.CallUnary(ctx, req)
+}
+
+// ListCatalogEntries calls cp.v1.SpawnService.ListCatalogEntries.
+func (c *spawnServiceClient) ListCatalogEntries(ctx context.Context, req *connect.Request[v1.ListCatalogEntriesRequest]) (*connect.Response[v1.ListCatalogEntriesResponse], error) {
+	return c.listCatalogEntries.CallUnary(ctx, req)
+}
+
+// UpdateCatalogEntry calls cp.v1.SpawnService.UpdateCatalogEntry.
+func (c *spawnServiceClient) UpdateCatalogEntry(ctx context.Context, req *connect.Request[v1.UpdateCatalogEntryRequest]) (*connect.Response[v1.UpdateCatalogEntryResponse], error) {
+	return c.updateCatalogEntry.CallUnary(ctx, req)
+}
+
+// DeleteCatalogEntry calls cp.v1.SpawnService.DeleteCatalogEntry.
+func (c *spawnServiceClient) DeleteCatalogEntry(ctx context.Context, req *connect.Request[v1.DeleteCatalogEntryRequest]) (*connect.Response[v1.DeleteCatalogEntryResponse], error) {
+	return c.deleteCatalogEntry.CallUnary(ctx, req)
+}
+
+// SetCatalogListing calls cp.v1.SpawnService.SetCatalogListing.
+func (c *spawnServiceClient) SetCatalogListing(ctx context.Context, req *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error) {
+	return c.setCatalogListing.CallUnary(ctx, req)
+}
+
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -707,6 +805,14 @@ type SpawnServiceHandler interface {
 	RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error)
 	AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error)
 	RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error)
+	// Customization catalog CRUD (sp-nrzf.3.6): curated catalog entries, creator-scoped writes,
+	// globally-readable list (listed=true only). Owner resolved from auth context server-side.
+	CreateCatalogEntry(context.Context, *connect.Request[v1.CreateCatalogEntryRequest]) (*connect.Response[v1.CreateCatalogEntryResponse], error)
+	GetCatalogEntry(context.Context, *connect.Request[v1.GetCatalogEntryRequest]) (*connect.Response[v1.GetCatalogEntryResponse], error)
+	ListCatalogEntries(context.Context, *connect.Request[v1.ListCatalogEntriesRequest]) (*connect.Response[v1.ListCatalogEntriesResponse], error)
+	UpdateCatalogEntry(context.Context, *connect.Request[v1.UpdateCatalogEntryRequest]) (*connect.Response[v1.UpdateCatalogEntryResponse], error)
+	DeleteCatalogEntry(context.Context, *connect.Request[v1.DeleteCatalogEntryRequest]) (*connect.Response[v1.DeleteCatalogEntryResponse], error)
+	SetCatalogListing(context.Context, *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -938,6 +1044,42 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileSecretRef")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceCreateCatalogEntryHandler := connect.NewUnaryHandler(
+		SpawnServiceCreateCatalogEntryProcedure,
+		svc.CreateCatalogEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("CreateCatalogEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceGetCatalogEntryHandler := connect.NewUnaryHandler(
+		SpawnServiceGetCatalogEntryProcedure,
+		svc.GetCatalogEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("GetCatalogEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceListCatalogEntriesHandler := connect.NewUnaryHandler(
+		SpawnServiceListCatalogEntriesProcedure,
+		svc.ListCatalogEntries,
+		connect.WithSchema(spawnServiceMethods.ByName("ListCatalogEntries")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceUpdateCatalogEntryHandler := connect.NewUnaryHandler(
+		SpawnServiceUpdateCatalogEntryProcedure,
+		svc.UpdateCatalogEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("UpdateCatalogEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceDeleteCatalogEntryHandler := connect.NewUnaryHandler(
+		SpawnServiceDeleteCatalogEntryProcedure,
+		svc.DeleteCatalogEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("DeleteCatalogEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceSetCatalogListingHandler := connect.NewUnaryHandler(
+		SpawnServiceSetCatalogListingProcedure,
+		svc.SetCatalogListing,
+		connect.WithSchema(spawnServiceMethods.ByName("SetCatalogListing")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
@@ -1014,6 +1156,18 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceAddProfileSecretRefHandler.ServeHTTP(w, r)
 		case SpawnServiceRemoveProfileSecretRefProcedure:
 			spawnServiceRemoveProfileSecretRefHandler.ServeHTTP(w, r)
+		case SpawnServiceCreateCatalogEntryProcedure:
+			spawnServiceCreateCatalogEntryHandler.ServeHTTP(w, r)
+		case SpawnServiceGetCatalogEntryProcedure:
+			spawnServiceGetCatalogEntryHandler.ServeHTTP(w, r)
+		case SpawnServiceListCatalogEntriesProcedure:
+			spawnServiceListCatalogEntriesHandler.ServeHTTP(w, r)
+		case SpawnServiceUpdateCatalogEntryProcedure:
+			spawnServiceUpdateCatalogEntryHandler.ServeHTTP(w, r)
+		case SpawnServiceDeleteCatalogEntryProcedure:
+			spawnServiceDeleteCatalogEntryHandler.ServeHTTP(w, r)
+		case SpawnServiceSetCatalogListingProcedure:
+			spawnServiceSetCatalogListingHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1169,4 +1323,28 @@ func (UnimplementedSpawnServiceHandler) AddProfileSecretRef(context.Context, *co
 
 func (UnimplementedSpawnServiceHandler) RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RemoveProfileSecretRef is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) CreateCatalogEntry(context.Context, *connect.Request[v1.CreateCatalogEntryRequest]) (*connect.Response[v1.CreateCatalogEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.CreateCatalogEntry is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetCatalogEntry(context.Context, *connect.Request[v1.GetCatalogEntryRequest]) (*connect.Response[v1.GetCatalogEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetCatalogEntry is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ListCatalogEntries(context.Context, *connect.Request[v1.ListCatalogEntriesRequest]) (*connect.Response[v1.ListCatalogEntriesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListCatalogEntries is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) UpdateCatalogEntry(context.Context, *connect.Request[v1.UpdateCatalogEntryRequest]) (*connect.Response[v1.UpdateCatalogEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.UpdateCatalogEntry is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) DeleteCatalogEntry(context.Context, *connect.Request[v1.DeleteCatalogEntryRequest]) (*connect.Response[v1.DeleteCatalogEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DeleteCatalogEntry is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) SetCatalogListing(context.Context, *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.SetCatalogListing is not implemented"))
 }

@@ -179,9 +179,19 @@ func (s *Server) AddProfileEntry(ctx context.Context, req *connect.Request[cpv1.
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("catalog_id is required for CATALOG_REF source"))
 		}
 	case cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CUSTOM:
-		if len(e.CustomInline) == 0 {
-			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("custom_inline is required for CUSTOM source"))
+		// Full validation: name rules, size cap, path confinement (sp-nrzf.3.6).
+		if err := validateCustomContent(protoToEntryKind(e.Kind), strings.TrimSpace(e.Name), e.CustomInline); err != nil {
+			return nil, err
 		}
+	}
+
+	// Enforce per-profile entry count cap before inserting (sp-nrzf.3.6).
+	_, existingEntries, _, err := s.st.Profiles().Get(ctx, req.Msg.ProfileId)
+	if err != nil {
+		return nil, mapProfileErr(err)
+	}
+	if err := enforceProfileEntryCap(len(existingEntries)); err != nil {
+		return nil, err
 	}
 
 	entryID := uuid.NewString()

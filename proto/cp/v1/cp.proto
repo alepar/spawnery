@@ -55,6 +55,14 @@ service SpawnService {
   rpc RemoveProfileEntry(RemoveProfileEntryRequest)     returns (RemoveProfileEntryResponse);
   rpc AddProfileSecretRef(AddProfileSecretRefRequest)   returns (AddProfileSecretRefResponse);
   rpc RemoveProfileSecretRef(RemoveProfileSecretRefRequest) returns (RemoveProfileSecretRefResponse);
+  // Customization catalog CRUD (sp-nrzf.3.6): curated catalog entries, creator-scoped writes,
+  // globally-readable list (listed=true only). Owner resolved from auth context server-side.
+  rpc CreateCatalogEntry(CreateCatalogEntryRequest)     returns (CreateCatalogEntryResponse);
+  rpc GetCatalogEntry(GetCatalogEntryRequest)           returns (GetCatalogEntryResponse);
+  rpc ListCatalogEntries(ListCatalogEntriesRequest)     returns (ListCatalogEntriesResponse);
+  rpc UpdateCatalogEntry(UpdateCatalogEntryRequest)     returns (UpdateCatalogEntryResponse);
+  rpc DeleteCatalogEntry(DeleteCatalogEntryRequest)     returns (DeleteCatalogEntryResponse);
+  rpc SetCatalogListing(SetCatalogListingRequest)       returns (SetCatalogListingResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -472,3 +480,44 @@ message AddProfileSecretRefResponse { uint64 version = 1; }
 // RemoveProfileSecretRef detaches a secret reference from the profile, CAS-fenced.
 message RemoveProfileSecretRefRequest  { string profile_id = 1; uint64 expected_version = 2; string secret_id = 3; }
 message RemoveProfileSecretRefResponse { uint64 version = 1; }
+
+// --- Customization Catalog (sp-nrzf.3.6) -----------------------------------
+
+// CustomizationCatalogEntry is the full view of a curated catalog entry.
+message CustomizationCatalogEntry {
+  string           catalog_id   = 1;
+  string           creator_id   = 2;
+  ProfileEntryKind kind         = 3;
+  string           name         = 4;
+  string           description  = 5;
+  bytes            content      = 6;
+  bool             listed       = 7;
+  int64            created_at   = 8;
+  int64            updated_at   = 9;
+}
+
+// CatalogEntrySummary is the lightweight list view (omits content).
+message CatalogEntrySummary {
+  string           catalog_id  = 1;
+  ProfileEntryKind kind        = 2;
+  string           name        = 3;
+  string           description = 4;
+}
+
+message CreateCatalogEntryRequest  { ProfileEntryKind kind = 1; string name = 2; string description = 3; bytes content = 4; }
+message CreateCatalogEntryResponse { string catalog_id = 1; }
+
+message GetCatalogEntryRequest  { string catalog_id = 1; }
+message GetCatalogEntryResponse { CustomizationCatalogEntry entry = 1; }
+
+message ListCatalogEntriesRequest  {}
+message ListCatalogEntriesResponse { repeated CatalogEntrySummary entries = 1; }
+
+message UpdateCatalogEntryRequest  { string catalog_id = 1; string name = 2; string description = 3; bytes content = 4; }
+message UpdateCatalogEntryResponse {}
+
+message DeleteCatalogEntryRequest  { string catalog_id = 1; }
+message DeleteCatalogEntryResponse {}
+
+message SetCatalogListingRequest  { string catalog_id = 1; bool listed = 2; }
+message SetCatalogListingResponse {}

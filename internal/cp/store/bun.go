@@ -30,9 +30,12 @@ func (s *bunStore) WithTx(ctx context.Context, fn func(tx Store) error) error {
 }
 
 // Owners and Apps — implemented in Task 4. Spawns — implemented in Task 5.
-func (s *bunStore) Owners() OwnerRepo             { return &ownerRepo{db: s.db} }
-func (s *bunStore) Apps() AppRepo                 { return &appRepo{db: s.db} }
-func (s *bunStore) Spawns() SpawnRepo             { return &spawnRepo{db: s.db} }
-func (s *bunStore) AgentImages() AgentImageRepo   { return &agentImageRepo{db: s.db} }
-func (s *bunStore) TransferSets() TransferSetRepo { return &transferSetRepo{db: s.db} }
-func (s *bunStore) Profiles() ProfileRepo         { return &profileRepo{db: s.db} }
+func (s *bunStore) Owners() OwnerRepo                         { return &ownerRepo{db: s.db} }
+func (s *bunStore) Apps() AppRepo                             { return &appRepo{db: s.db} }
+func (s *bunStore) Spawns() SpawnRepo                         { return &spawnRepo{db: s.db} }
+func (s *bunStore) AgentImages() AgentImageRepo               { return &agentImageRepo{db: s.db} }
+func (s *bunStore) TransferSets() TransferSetRepo             { return &transferSetRepo{db: s.db} }
+func (s *bunStore) Profiles() ProfileRepo                     { return &profileRepo{db: s.db} }
+func (s *bunStore) CustomizationCatalog() CustomizationCatalogRepo {
+	return &customizationCatalogRepo{db: s.db}
+}

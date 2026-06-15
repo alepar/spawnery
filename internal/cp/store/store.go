@@ -182,6 +182,27 @@ type ProfileRepo interface {
 	RemoveSecretRef(ctx context.Context, profileID string, expectedVersion uint64, secretID string, now int64) (newVersion uint64, err error)
 }
 
+// CustomizationCatalogRepo manages curated catalog entries.
+// Any authenticated owner may Create an entry they own; List returns only listed=true entries
+// (globally readable). Get is owner-readable (any authenticated caller). Update/Delete/SetListed
+// are creator-only (enforced at the handler layer, not here).
+type CustomizationCatalogRepo interface {
+	// Create inserts a new catalog entry. Returns an error on duplicate catalog_id.
+	Create(ctx context.Context, e CustomizationCatalogEntry) error
+	// Get returns the entry for catalogID. ErrNotFound when absent.
+	Get(ctx context.Context, catalogID string) (CustomizationCatalogEntry, error)
+	// List returns only listed=true entries, ordered by name ASC.
+	List(ctx context.Context) ([]CustomizationCatalogEntry, error)
+	// ListByCreator returns all entries for the given creator (including unlisted), ordered by name ASC.
+	ListByCreator(ctx context.Context, creatorID string) ([]CustomizationCatalogEntry, error)
+	// Update replaces name, description, and content for an entry. ErrNotFound when absent.
+	Update(ctx context.Context, catalogID string, name, description string, content []byte, now int64) error
+	// SetListed sets the listing visibility of an entry. ErrNotFound when absent.
+	SetListed(ctx context.Context, catalogID string, listed bool) error
+	// Delete removes an entry. ErrNotFound when absent.
+	Delete(ctx context.Context, catalogID string) error
+}
+
 type Store interface {
 	Owners() OwnerRepo
 	Apps() AppRepo
@@ -189,6 +210,7 @@ type Store interface {
 	AgentImages() AgentImageRepo
 	TransferSets() TransferSetRepo
 	Profiles() ProfileRepo
+	CustomizationCatalog() CustomizationCatalogRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error
