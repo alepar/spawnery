@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,6 +317,44 @@ func TestSecretDeliveryReplaySerializesSameSecretReservations(t *testing.T) {
 	if err == nil {
 		staleRollback()
 		t.Fatal("older version began after newer version committed")
+	}
+}
+
+func TestSecretDeliveryReplayPruneReleasesSameSecretWaiters(t *testing.T) {
+	r := newSecretDeliveryReplay()
+	_, activeRollback, err := r.begin("sp1", 7, "gh", 4, "delivery-v4")
+	if err != nil {
+		t.Fatalf("active begin: %v", err)
+	}
+
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, rollback, err := r.begin("sp1", 7, "gh", 5, "delivery-v5")
+		if err == nil {
+			rollback()
+		}
+		waiterDone <- err
+	}()
+
+	select {
+	case err := <-waiterDone:
+		t.Fatalf("waiter completed before prune/release: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	r.pruneSpawnOlderThan("sp1", 8)
+	activeRollback()
+
+	select {
+	case err := <-waiterDone:
+		if err == nil {
+			t.Fatal("waiter begin succeeded after its generation was pruned")
+		}
+		if !strings.Contains(err.Error(), "pruned") {
+			t.Fatalf("waiter error = %v, want pruned", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiter begin remained blocked after prune and active rollback")
 	}
 }
 

@@ -28,6 +28,7 @@ type secretDeliveryReplayState struct {
 	highWater uint64
 	seen      map[string]struct{}
 	busy      bool
+	pruned    bool
 	cond      *sync.Cond
 }
 
@@ -58,8 +59,11 @@ func (r *secretDeliveryReplay) begin(spawnID string, generation uint64, secretID
 		st.cond = sync.NewCond(&r.mu)
 		r.deliveries[key] = st
 	}
-	for st.busy {
+	for st.busy && !st.pruned {
 		st.cond.Wait()
+	}
+	if st.pruned {
+		return nil, nil, fmt.Errorf("delivery generation pruned for spawn=%s generation=%d secret=%s", spawnID, generation, secretID)
 	}
 	if version < st.highWater {
 		return nil, nil, fmt.Errorf("stale delivery version %d below accepted high-water %d", version, st.highWater)
@@ -78,12 +82,13 @@ func (r *secretDeliveryReplay) begin(spawnID string, generation uint64, secretID
 			return
 		}
 		done = true
-		if st := r.deliveries[key]; st != nil && version > st.highWater {
+		if version > st.highWater {
 			st.highWater = version
 		}
-		if st := r.deliveries[key]; st != nil {
-			st.busy = false
-			st.cond.Broadcast()
+		st.busy = false
+		st.cond.Broadcast()
+		if st.pruned {
+			delete(r.deliveries, key)
 		}
 	}
 	rollback := func() {
@@ -93,13 +98,12 @@ func (r *secretDeliveryReplay) begin(spawnID string, generation uint64, secretID
 			return
 		}
 		done = true
-		st := r.deliveries[key]
-		if st == nil {
-			return
-		}
 		delete(st.seen, deliveryID)
 		st.busy = false
 		st.cond.Broadcast()
+		if st.pruned {
+			delete(r.deliveries, key)
+		}
 	}
 	return commit, rollback, nil
 }
@@ -112,6 +116,9 @@ func (r *secretDeliveryReplay) checkBeforeConsume(spawnID string, generation uin
 	if st == nil {
 		return fmt.Errorf("delivery replay lease missing")
 	}
+	if st.pruned {
+		return fmt.Errorf("delivery generation pruned for spawn=%s generation=%d secret=%s", spawnID, generation, secretID)
+	}
 	if version < st.highWater {
 		return fmt.Errorf("stale delivery version %d below accepted high-water %d", version, st.highWater)
 	}
@@ -121,8 +128,13 @@ func (r *secretDeliveryReplay) checkBeforeConsume(spawnID string, generation uin
 func (r *secretDeliveryReplay) pruneSpawnOlderThan(spawnID string, generation uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for key := range r.deliveries {
+	for key, st := range r.deliveries {
 		if key.spawnID == spawnID && key.generation < generation {
+			if st.busy {
+				st.pruned = true
+				st.cond.Broadcast()
+				continue
+			}
 			delete(r.deliveries, key)
 		}
 	}

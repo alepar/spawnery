@@ -4,6 +4,7 @@ const unaryMock = vi.fn();
 const openEnvelopeMock = vi.fn();
 const hpkeSealMock = vi.fn();
 const verifyNodeForSealingMock = vi.fn();
+const randomUUIDMock = vi.fn();
 
 vi.mock("./connect", () => ({ unary: (...a: unknown[]) => unaryMock(...a) }));
 vi.mock("@/auth/session", () => ({
@@ -37,12 +38,14 @@ describe("runMigrate", () => {
     openEnvelopeMock.mockReset();
     hpkeSealMock.mockReset();
     verifyNodeForSealingMock.mockReset();
+    randomUUIDMock.mockReset();
+    randomUUIDMock.mockReturnValue("fixed-delivery-id");
 
     vi.stubGlobal("crypto", {
       subtle: {
         exportKey: vi.fn(async () => new Uint8Array([1, 2, 3]).buffer),
       },
-      randomUUID: () => "fixed-delivery-id",
+      randomUUID: randomUUIDMock,
     });
 
     openEnvelopeMock.mockResolvedValue(new Uint8Array([9, 9, 9]));
@@ -92,5 +95,6 @@ describe("runMigrate", () => {
     const deliverReq = deliverCall?.[1] as { secrets: Array<{ version?: number; deliveryId?: string }> };
     expect(deliverReq.secrets[0].version).toBe(7);
     expect(deliverReq.secrets[0].deliveryId).toBe("fixed-delivery-id");
+    expect(randomUUIDMock).toHaveBeenCalledTimes(1);
   });
 });
