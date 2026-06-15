@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -18,6 +19,8 @@ import (
 const forkHeadroomMultiplier = int64(3)
 
 var errForkFootprintUnknown = errors.New("fork source disk footprint is unknown")
+
+const defaultForkCaptureTimeout = defaultSuspendTimeout
 
 type forkMaterializer interface {
 	MaterializeFork(context.Context, forkMaterializeRequest) (forkMaterializeResult, error)
@@ -37,7 +40,9 @@ type forkMaterializeRequest struct {
 }
 
 type forkMaterializeResult struct {
-	NodeID string
+	NodeID     string
+	MountPins  map[string]string
+	RootfsPins []store.RootfsArtifactPin
 }
 
 type forkFootprintEstimator interface {
@@ -150,6 +155,40 @@ func (s *Server) failForkAfterRow(ctx context.Context, forkID, transferSetID str
 	return cause
 }
 
+func (s *Server) restoreForkingSource(ctx context.Context, sourceID, leaseID string, generation int64) error {
+	sp, err := s.st.Spawns().Get(ctx, sourceID)
+	if err != nil {
+		return err
+	}
+	if sp.Status == store.Active && sp.ForkCaptureDeadline == nil {
+		return nil
+	}
+	if sp.Status != store.Forking {
+		return store.ErrConflict
+	}
+	if _, err := s.st.Spawns().TransitionForkingRecovered(ctx, sourceID, leaseID, sp.StatusSeq, generation); errors.Is(err, store.ErrConflict) {
+		current, getErr := s.st.Spawns().Get(ctx, sourceID)
+		if getErr == nil && current.Status == store.Active && current.ForkCaptureDeadline == nil {
+			return nil
+		}
+		return err
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) startFork(ctx context.Context, owner string, fork store.Spawn, nodeID string, targetGeneration uint64, rootfsPins []store.RootfsArtifactPin) (string, error) {
+	placement := registry.Placement{Owner: owner, Image: fork.Image, TargetNodeID: nodeID}
+	artifacts, err := s.st.Spawns().GetArtifacts(ctx, fork.ID)
+	if err != nil {
+		return "", connect.NewError(connect.CodeInternal, err)
+	}
+	rootfs := &rootfsRestorePins{SourceGeneration: targetGeneration, Pins: rootfsPins}
+	return s.sched.Provision(ctx, fork.ID, fork.AppRef, fork.Model, fork.Name, fork.AppID, fork.RunnableID, fork.Mode,
+		targetGeneration, placement, nil, fork.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(artifacts))
+}
+
 func (s *Server) ForkSpawn(ctx context.Context, req *connect.Request[cpv1.ForkSpawnRequest]) (*connect.Response[cpv1.ForkSpawnResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
@@ -175,9 +214,8 @@ func (s *Server) ForkSpawn(ctx context.Context, req *connect.Request[cpv1.ForkSp
 
 	var resp *connect.Response[cpv1.ForkSpawnResponse]
 	if err := s.withClaim(ctx, sourceID, func(claimCtx context.Context, leaseID string) error {
-		_ = leaseID
 		var err error
-		resp, err = s.forkSpawnClaimed(claimCtx, owner, sourceID, targetNode, targetClass, req.Msg.Name)
+		resp, err = s.forkSpawnClaimed(claimCtx, owner, sourceID, targetNode, targetClass, req.Msg.Name, leaseID)
 		return err
 	}); err != nil {
 		return nil, err
@@ -185,7 +223,7 @@ func (s *Server) ForkSpawn(ctx context.Context, req *connect.Request[cpv1.ForkSp
 	return resp, nil
 }
 
-func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNode, targetClass, requestedName string) (*connect.Response[cpv1.ForkSpawnResponse], error) {
+func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNode, targetClass, requestedName, leaseID string) (*connect.Response[cpv1.ForkSpawnResponse], error) {
 	source, err := s.st.Spawns().Get(ctx, sourceID)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
@@ -322,6 +360,22 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("mark transfer set restoring: %w", err)))
 	}
 
+	captureDeadline := s.now().Add(defaultForkCaptureTimeout).UnixNano()
+	if err := s.st.Spawns().SetForking(ctx, sourceID, live.Generation, captureDeadline); err != nil {
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("mark source forking: %w", err)))
+	}
+	restoreSource := func() error {
+		return s.restoreForkingSource(context.WithoutCancel(ctx), sourceID, leaseID, live.Generation)
+	}
+	restoreOnFailure := true
+	defer func() {
+		if restoreOnFailure {
+			if err := restoreSource(); err != nil {
+				log.Printf("restore source %s after failed fork: %v", sourceID, err)
+			}
+		}
+	}()
+
 	result, err := s.forkMaterializerOrDefault().MaterializeFork(ctx, forkMaterializeRequest{
 		SourceSpawn:      source,
 		ForkSpawn:        fork,
@@ -337,11 +391,26 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 	if err != nil {
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, asConnectError(connect.CodeInternal, err))
 	}
+	if err := restoreSource(); err != nil {
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("restore source active: %w", err)))
+	}
+	restoreOnFailure = false
+	if err := s.st.TransferSets().SetPins(ctx, transferSetID, sourceGeneration, result.MountPins, result.RootfsPins, s.now().UnixNano()); err != nil {
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("record fork transfer pins: %w", err)))
+	}
 	nodeID := strings.TrimSpace(result.NodeID)
 	if nodeID == "" {
 		nodeID = targetNode
 	}
+	nodeID, err = s.startFork(ctx, owner, fork, nodeID, targetGeneration, result.RootfsPins)
+	if err != nil {
+		s.rt.StopOnNode(forkID)
+		s.rt.Drop(forkID)
+		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, asConnectError(connect.CodeInternal, err))
+	}
 	if err := s.st.Spawns().SetActive(ctx, forkID, nodeID, int64(targetGeneration)); err != nil {
+		s.rt.StopOnNode(forkID)
+		s.rt.Drop(forkID)
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("mark fork active: %w", err)))
 	}
 	if err := s.st.TransferSets().SetTargetNode(ctx, transferSetID, nodeID, s.now().UnixNano()); err != nil {

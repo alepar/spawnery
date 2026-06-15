@@ -141,6 +141,9 @@ func (f *scriptedPodBackend) EnsureImage(_ context.Context, baseRef, _ string) (
 func (f *scriptedPodBackend) CaptureDelta(_ context.Context, _ *runtime.PodHandle) (string, error) {
 	return "", nil
 }
+func (f *scriptedPodBackend) CaptureDeltaAs(_ context.Context, _ *runtime.PodHandle, _ string) (string, error) {
+	return "", nil
+}
 func (f *scriptedPodBackend) ReleaseDelta(_ context.Context, _ string) error { return nil }
 func (f *scriptedPodBackend) ExportDelta(_ context.Context, spawnID string, w io.Writer) error {
 	_, err := w.Write([]byte(runtime.DeltaTag(spawnID)))

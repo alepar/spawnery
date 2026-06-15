@@ -139,6 +139,14 @@ type Manager struct {
 	// nil → log a "SQUASH-NEEDED" warning line.
 	// Injected in tests so they can observe the callback without log parsing.
 	squashNeeded func(id string, depth int)
+
+	// forkSyncFn flushes host filesystem buffers while the source agent is paused for a fork capture.
+	// The default calls sync(1); tests replace it with a recorder.
+	forkSyncFn func(context.Context) error
+
+	// forkGenerationHold protects the source generation's journal key/blobs from revoke/prune while
+	// a fork is seeding. Optional because journaling can be filesystem-backed in dev/tests.
+	forkGenerationHold func(spawnID string, gen uint64, reason string) generationHold
 }
 
 // JournalKeyReceiver injects an owner-delivered Kopia repo password into the
@@ -231,6 +239,9 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		secrets:    SecretInjector{Root: cfg.SecretsRoot},
 		artifacts:  ArtifactStager{Root: cfg.ArtifactsRoot},
 		deltaState: &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
+	}
+	m.forkSyncFn = func(ctx context.Context) error {
+		return exec.CommandContext(ctx, "sync").Run()
 	}
 	// Default scrub function: exec scrub commands directly in the agent container before commit.
 	// This runs while the container is still live (before pod.Stop).

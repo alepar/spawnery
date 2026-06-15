@@ -35,8 +35,9 @@ type GenerationKeyManager struct {
 	disableTLS bool
 	bucketPfx  string
 
-	mu   sync.Mutex
-	keys map[string]map[uint64]string // spawnID -> gen -> accessKeyID (for revoke)
+	mu    sync.Mutex
+	keys  map[string]map[uint64]string // spawnID -> gen -> accessKeyID (for revoke)
+	holds map[string]map[uint64]int    // spawnID -> gen -> active fork-point holds
 }
 
 // GenerationKeyConfig configures a GenerationKeyManager.
@@ -75,6 +76,7 @@ func NewGenerationKeyManager(cfg GenerationKeyConfig) (*GenerationKeyManager, er
 		disableTLS: cfg.DisableTLS,
 		bucketPfx:  pfx,
 		keys:       map[string]map[uint64]string{},
+		holds:      map[string]map[uint64]int{},
 	}, nil
 }
 
@@ -127,6 +129,9 @@ func (g *GenerationKeyManager) BackendFor(ctx context.Context, spawnID string, g
 // supersede/teardown fence. A gen with no recorded key (already revoked, or
 // minted by another node) is a no-op.
 func (g *GenerationKeyManager) RevokeGeneration(ctx context.Context, spawnID string, gen uint64) error {
+	if g.held(spawnID, gen) {
+		return nil
+	}
 	ak := g.lookup(spawnID, gen)
 	if ak == "" {
 		return nil
@@ -150,6 +155,53 @@ func (g *GenerationKeyManager) RevokeSuperseded(ctx context.Context, spawnID str
 		}
 	}
 	return nil
+}
+
+type GenerationHold struct {
+	once    sync.Once
+	release func()
+}
+
+func (h *GenerationHold) Release() {
+	if h != nil {
+		h.once.Do(h.release)
+	}
+}
+
+func (g *GenerationKeyManager) HoldGeneration(spawnID string, gen uint64, reason string) *GenerationHold {
+	_ = reason
+	g.mu.Lock()
+	if g.holds[spawnID] == nil {
+		g.holds[spawnID] = map[uint64]int{}
+	}
+	g.holds[spawnID][gen]++
+	g.mu.Unlock()
+
+	return &GenerationHold{release: func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.holds[spawnID] == nil {
+			return
+		}
+		if g.holds[spawnID][gen] > 1 {
+			g.holds[spawnID][gen]--
+			return
+		}
+		delete(g.holds[spawnID], gen)
+		if len(g.holds[spawnID]) == 0 {
+			delete(g.holds, spawnID)
+		}
+	}}
+}
+
+func (g *GenerationKeyManager) held(spawnID string, gen uint64) bool {
+	return g.holdCount(spawnID, gen) > 0
+}
+
+func (g *GenerationKeyManager) holdCount(spawnID string, gen uint64) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.holds[spawnID][gen]
 }
 
 func (g *GenerationKeyManager) record(spawnID string, gen uint64, accessKeyID string) {

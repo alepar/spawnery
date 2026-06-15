@@ -128,6 +128,7 @@ type Server struct {
 	// footprint estimator is fail-closed when nil because CP cannot infer fork disk headroom yet.
 	forkMaterializer       forkMaterializer
 	forkFootprintEstimator forkFootprintEstimator
+	forks                  *forkWaiters
 	failedForkResources    failedForkResources
 
 	// Evaluator policy fields (§6 node-local detectors → CP-side reporters). All default to
@@ -158,7 +159,7 @@ const (
 var _ cpv1connect.SpawnServiceHandler = (*Server)(nil)
 
 func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Scheduler, st store.Store, tel telemetry.Sink) *Server {
-	return &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
+	s := &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
 		cpID: uuid.NewString(), claimTTL: defaultClaimTTL,
 		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout, suspendStallWindow: defaultSuspendStallWindow,
@@ -169,11 +170,14 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
 		pendingIntents:  newPendingIntentRegistry(),
 		deliveryPending: newDeliveryPendingTracker(),
+		forks:           newForkWaiters(),
 		// evaluator disabled by default; cmd/spawnery_cp wires it via SetEvaluatorPolicy.
 		evaluatorInFlight: map[string]struct{}{},
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
 		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
 		devMode: true}
+	s.forkMaterializer = newSameNodeForkMaterializer(s, defaultForkMaterializeTimeout)
+	return s
 }
 
 // withClaim acquires the DB claim for spawn id, runs fn under it (with a heartbeat goroutine
@@ -366,6 +370,8 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			if !s.suspends.deliver(m.SuspendComplete) {
 				go s.reconcileLateSuspend(context.WithoutCancel(ctx), m.SuspendComplete)
 			}
+		case *nodev1.NodeMessage_ForkSameNodeComplete:
+			s.deliverForkSameNodeComplete(m.ForkSameNodeComplete)
 		case *nodev1.NodeMessage_SuspendProgress:
 			// Route incremental suspend progress to the in-flight SuspendSpawn waiter so the CP
 			// stall detector resets its timer (sp-u53.7.2). Stale-gen or unmatched signals are dropped.

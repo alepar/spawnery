@@ -18,9 +18,10 @@ import (
 )
 
 type recordingForkMaterializer struct {
-	nodeID string
-	err    error
-	calls  []forkMaterializeRequest
+	nodeID     string
+	rootfsPins []store.RootfsArtifactPin
+	err        error
+	calls      []forkMaterializeRequest
 }
 
 func (r *recordingForkMaterializer) MaterializeFork(ctx context.Context, req forkMaterializeRequest) (forkMaterializeResult, error) {
@@ -29,7 +30,7 @@ func (r *recordingForkMaterializer) MaterializeFork(ctx context.Context, req for
 	if r.err != nil {
 		return forkMaterializeResult{}, r.err
 	}
-	return forkMaterializeResult{NodeID: r.nodeID}, nil
+	return forkMaterializeResult{NodeID: r.nodeID, RootfsPins: r.rootfsPins}, nil
 }
 
 type forkMaterializerFunc func(context.Context, forkMaterializeRequest) (forkMaterializeResult, error)
@@ -99,11 +100,19 @@ func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	s.now = func() time.Time { return time.Unix(1234, 0) }
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	targetSender := &capSender{}
+	stopAck := goAckStarts(s, targetSender)
+	defer stopAck()
 	reg.Add(&registry.Node{
-		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
+		ID: "node-2", Sender: targetSender, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
 	})
-	mat := &recordingForkMaterializer{nodeID: "node-2"}
+	mat := &recordingForkMaterializer{nodeID: "node-2", rootfsPins: []store.RootfsArtifactPin{{
+		ArtifactID:      "rootfs-fork-gen1",
+		Generation:      1,
+		BaseImageDigest: "sha256:base",
+		Format:          "oci_layout",
+	}}}
 	s.forkMaterializer = mat
 	s.forkFootprintEstimator = staticForkFootprint(100)
 
@@ -150,6 +159,17 @@ func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
 	forkLive, ok, err := s.st.Spawns().LiveContainer(ctx, resp.Msg.ForkSpawnId)
 	if err != nil || !ok || forkLive.NodeID != "node-2" || forkLive.Generation != 1 {
 		t.Fatalf("fork live = %+v ok=%v err=%v", forkLive, ok, err)
+	}
+	start := targetSender.firstStart()
+	if start == nil {
+		t.Fatal("fork materialization must start the fork pod")
+	}
+	if start.GetSpawnId() != resp.Msg.ForkSpawnId || start.GetGeneration() != 1 {
+		t.Fatalf("fork StartSpawn id/gen = %s/%d, want %s/1", start.GetSpawnId(), start.GetGeneration(), resp.Msg.ForkSpawnId)
+	}
+	if start.GetRootfsSourceGeneration() != 1 || len(start.GetRootfsArtifacts()) != 1 ||
+		start.GetRootfsArtifacts()[0].GetArtifactId() != "rootfs-fork-gen1" {
+		t.Fatalf("fork StartSpawn rootfs restore = gen %d artifacts %+v", start.GetRootfsSourceGeneration(), start.GetRootfsArtifacts())
 	}
 	mounts, err := s.st.Spawns().GetMounts(ctx, resp.Msg.ForkSpawnId)
 	if err != nil || len(mounts) != 1 || mounts[0].Name != "main" || mounts[0].SpawnID != resp.Msg.ForkSpawnId {
@@ -202,7 +222,10 @@ func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
 
 func TestForkSpawnDefaultsToSameNode(t *testing.T) {
 	s, reg, rt := newTestServer(t)
-	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+	stopAck := goAckStarts(s, sender)
+	defer stopAck()
 	mat := &recordingForkMaterializer{nodeID: "node-1"}
 	s.forkMaterializer = mat
 	s.forkFootprintEstimator = staticForkFootprint(100)
@@ -218,11 +241,54 @@ func TestForkSpawnDefaultsToSameNode(t *testing.T) {
 	}
 }
 
+func TestForkSpawnMarksSourceForkingOnlyDuringMaterialization(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	sender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+	stopAck := goAckStarts(s, sender)
+	defer stopAck()
+	s.forkFootprintEstimator = staticForkFootprint(100)
+
+	seenForking := false
+	s.forkMaterializer = forkMaterializerFunc(func(ctx context.Context, req forkMaterializeRequest) (forkMaterializeResult, error) {
+		sp, err := s.st.Spawns().Get(ctx, req.SourceSpawn.ID)
+		if err != nil {
+			return forkMaterializeResult{}, err
+		}
+		if sp.Status != store.Forking {
+			return forkMaterializeResult{}, fmt.Errorf("source status during materialization = %s, want forking", sp.Status)
+		}
+		if sp.ForkCaptureDeadline == nil {
+			return forkMaterializeResult{}, fmt.Errorf("source fork_capture_deadline must be set")
+		}
+		seenForking = true
+		return forkMaterializeResult{NodeID: req.TargetNodeID}, nil
+	})
+
+	resp, err := s.ForkSpawn(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source"}))
+	if err != nil {
+		t.Fatalf("ForkSpawn: %v", err)
+	}
+	if resp.Msg.ForkSpawnId == "" || !seenForking {
+		t.Fatalf("fork response=%+v seenForking=%v", resp.Msg, seenForking)
+	}
+	source, err := s.st.Spawns().Get(context.Background(), "sp-source")
+	if err != nil {
+		t.Fatalf("Get source: %v", err)
+	}
+	if source.Status != store.Active || source.ForkCaptureDeadline != nil {
+		t.Fatalf("source after fork = status %s deadline %v, want active nil", source.Status, source.ForkCaptureDeadline)
+	}
+}
+
 func TestForkSpawnClassTargetPicksEligibleNode(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	targetSender := &capSender{}
+	stopAck := goAckStarts(s, targetSender)
+	defer stopAck()
 	reg.Add(&registry.Node{
-		ID: "cloud-1", Sender: &capSender{}, Max: 9, Free: 9, Class: "cloud",
+		ID: "cloud-1", Sender: targetSender, Max: 9, Free: 9, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
 	})
 	mat := &recordingForkMaterializer{nodeID: "cloud-1"}
@@ -242,7 +308,10 @@ func TestForkSpawnClassTargetPicksEligibleNode(t *testing.T) {
 
 func TestForkSpawnFencesSourceDuringMaterialization(t *testing.T) {
 	s, reg, rt := newTestServer(t)
-	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sender)
+	stopAck := goAckStarts(s, sender)
+	defer stopAck()
 	s.forkFootprintEstimator = staticForkFootprint(100)
 
 	keyedLockAttempting := make(chan struct{})
@@ -484,6 +553,7 @@ func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 	res := &recordingForkResources{}
 	s.failedForkResources = res
 	s.forkFootprintEstimator = staticForkFootprint(100)
+	s.forkMaterializer = unimplementedForkMaterializer{}
 
 	ctx := auth.WithOwner(context.Background(), "alice")
 	_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source", TargetNodeId: "node-2"}))
@@ -520,6 +590,7 @@ func TestForkSpawnMaterializerFailureWithoutResourcesLeavesFailedForkForRetry(t 
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
 	})
 	s.forkFootprintEstimator = staticForkFootprint(100)
+	s.forkMaterializer = unimplementedForkMaterializer{}
 
 	ctx := auth.WithOwner(context.Background(), "alice")
 	_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source", TargetNodeId: "node-2"}))

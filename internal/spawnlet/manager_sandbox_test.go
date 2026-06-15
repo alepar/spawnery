@@ -79,13 +79,16 @@ func (f *fakePodBackend) EnsureImage(_ context.Context, baseRef, _ string) (stri
 	return baseRef, nil
 }
 func (f *fakePodBackend) CaptureDelta(_ context.Context, h *runtime.PodHandle) (string, error) {
+	return f.CaptureDeltaAs(context.Background(), h, h.SpawnID)
+}
+func (f *fakePodBackend) CaptureDeltaAs(_ context.Context, h *runtime.PodHandle, targetSpawnID string) (string, error) {
 	if f.captureErr != nil {
 		return "", f.captureErr
 	}
-	ref := runtime.DeltaTag(h.SpawnID)
+	ref := runtime.DeltaTag(targetSpawnID)
 	f.capturedRef = ref
 	f.capturedRefs = append(f.capturedRefs, ref)
-	f.ops = append(f.ops, "capture:"+h.SpawnID)
+	f.ops = append(f.ops, "capture:"+targetSpawnID)
 	return ref, nil
 }
 func (f *fakePodBackend) ReleaseDelta(_ context.Context, spawnID string) error {

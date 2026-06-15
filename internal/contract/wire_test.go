@@ -80,6 +80,31 @@ func TestNodeContractFields(t *testing.T) {
 	}
 }
 
+func TestNodeForkMessagesExist(t *testing.T) {
+	req := &nodev1.ForkSameNode{
+		SourceSpawnId:    "sp-source",
+		ForkSpawnId:      "sp-fork",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+		TransferSetId:    "ts-1",
+	}
+	msg := &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkSameNode{ForkSameNode: req}}
+	if msg.GetForkSameNode().GetSourceSpawnId() != "sp-source" {
+		t.Fatalf("fork request not threaded: %+v", msg)
+	}
+	complete := &nodev1.ForkSameNodeComplete{
+		SourceSpawnId:   "sp-source",
+		ForkSpawnId:     "sp-fork",
+		TransferSetId:   "ts-1",
+		Mounts:          []*nodev1.MountMarker{{Name: "work", Marker: "kopia-manifest"}},
+		RootfsArtifacts: []*nodev1.RootfsArtifact{{ArtifactId: "rootfs-1", Generation: 1}},
+	}
+	reply := &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_ForkSameNodeComplete{ForkSameNodeComplete: complete}}
+	if reply.GetForkSameNodeComplete().GetForkSpawnId() != "sp-fork" {
+		t.Fatalf("fork complete not threaded: %+v", reply)
+	}
+}
+
 func TestCPContractSurface(t *testing.T) {
 	// per-mount backend choices now ride the CreateSpawn request
 	_ = &cpv1.CreateSpawnRequest{AppId: "a", Model: "m",

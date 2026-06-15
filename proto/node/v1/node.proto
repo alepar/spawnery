@@ -26,6 +26,7 @@ message NodeMessage {
     SealJournalKeyToOwnerResponse seal_journal_key_result = 9; // node -> CP: result of a SealJournalKeyToOwner request (sp-8dkp)
     SuspendProgress               suspend_progress      = 10;  // node -> CP: incremental suspend progress (sp-u53.7.2)
     ResumeProgress                resume_progress       = 11;  // node -> CP: incremental resume/start progress (sp-u53.7.2)
+    ForkSameNodeComplete          fork_same_node_complete = 12; // node -> CP: same-node fork capture/seed completion
   }
 }
 message CPMessage {
@@ -41,6 +42,7 @@ message CPMessage {
     SetModel                     set_model             = 9;             // CP -> node: switch the running pod's effective model (generation-fenced)
     SecretDelivery               secret_delivery       = 10;            // CP -> node: relay owner-sealed secret ciphertext (sp-2ckv.4)
     SealJournalKeyToOwnerRequest seal_journal_key      = 11;            // CP -> node: seal node-local journal password to owner (sp-8dkp)
+    ForkSameNode                 fork_same_node        = 12;            // CP -> node: same-node fork capture/seed
   }
 }
 
@@ -165,6 +167,22 @@ message SuspendComplete {
   repeated MountMarker markers = 3;
   repeated RootfsArtifact rootfs_artifacts = 4;
   string error = 5; // non-empty on a fail-closed suspend gate failure; empty on success
+}
+message ForkSameNode {
+  string source_spawn_id = 1;
+  string fork_spawn_id = 2;
+  uint64 source_generation = 3;
+  uint64 target_generation = 4;
+  string transfer_set_id = 5;
+}
+message ForkSameNodeComplete {
+  string source_spawn_id = 1;
+  string fork_spawn_id = 2;
+  string transfer_set_id = 3;
+  repeated MountMarker mounts = 4;
+  repeated RootfsArtifact rootfs_artifacts = 5;
+  string node_id = 6;
+  string error = 7;
 }
 // auth (field 10): the client's session-open signed intent + aud=node access token (A4).
 // asserted_owner (field 11): CP-asserted owner for the cloud owner-binding check.

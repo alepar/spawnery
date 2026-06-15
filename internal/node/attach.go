@@ -266,7 +266,6 @@ func (a *attacher) heartbeatLoop(ctx context.Context) {
 	}
 }
 
-
 func (a *attacher) status(spawnID string, ph nodev1.SpawnPhase, detail string) {
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{SpawnId: spawnID, Phase: ph, Detail: detail}}})
 }
@@ -376,6 +375,11 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		// Async like setModel/startSpawn: the suspend persists mounts (a journal final snapshot can
 		// block) + tears the pod down, so it must not stall the single per-connection Receive loop.
 		go a.suspendSpawn(ctx, m.Suspend)
+	case *nodev1.CPMessage_ForkSameNode:
+		if a.staleGen(m.ForkSameNode.SourceSpawnId, m.ForkSameNode.SourceGeneration) {
+			return // stale generation: drop (matches Stop/Suspend).
+		}
+		go a.forkSameNode(ctx, m.ForkSameNode)
 	case *nodev1.CPMessage_SecretDelivery:
 		if a.staleGen(m.SecretDelivery.SpawnId, m.SecretDelivery.Generation) {
 			return // stale generation: a newer pod exists; the owner re-seals to the current episode. Drop.
