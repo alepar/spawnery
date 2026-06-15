@@ -53,9 +53,28 @@ independent, serious ways. Clusters (representative confirmed findings):
 The shared-repo "dedup-free seed" optimization (and its full challenge list) is preserved as a deferred
 backlog epic, **`sp-3y92`**, to revisit only if seed-upload cost proves material at scale.
 
+## Roast v2 (2026-06-15) → REVISE (drove v3)
+
+Re-roast of the v2 isolated-repo spec. **Full clean panel** — 9 lenses + 3 domains, 86→85 findings,
+**85/85 fully judged** (no spend-cap degradation). **74 confirmed: 0 blockers, 71 major, 3 minor** → the
+architecture is sound; the majors are fixable spec revisions. The 71 majors collapsed into 7 clusters →
+all addressed in **v3**:
+
+| # | Cluster | v3 fix |
+|---|---------|--------|
+| 1 | **Split-capture skew** (the headline) — v2 pinned mounts live at T0 and the rootfs/session under pause at T1, so the fork inherited a session referencing edits the snapshot predates; "same as suspend/resume" is false (suspend pauses first). | **Pause-first single-pause capture** + a live warm pre-snapshot to bound the under-pause scan. One coherent fork-point. |
+| 2 | **Saga atomicity** — `Forking` recovery + failed-fork unwind are non-atomic compensations (orphaned bucket / permanently frozen source). | Idempotent, ordered, pause-phase-aware compensations; orphan-GC sweep; capture deadline; claim heartbeat; empty-then-drop bucket, row deleted last. |
+| 3 | **Sidecar stream across pause** — frozen agent → backpressure → provider idle-timeout; source's in-flight turn silently truncated/masked. | Documented: a mid-turn fork may abort the **source's** current turn (errors/retries); tight SLO; Spike E. Accepted for MVP. |
+| 4 | **Cross-node transfer-set** — single-`spawn_id`-keyed, encryption-domain bridge + ceremony ordering unspecified. | Ceremony-first; **source-side rehydrate-to-staging** under the transfer key (target never holds source password); **transfer-set fork variant** `source_id→fork_id` (Spike H). |
+| 5 | **Mid-turn `--continue`** — a torn JSONL line likely **hard-crashes** `--resume`; "fresh session" fallback isn't a real mode. | `sync` before commit + **deterministic truncate-to-last-valid-record** then `--continue` (Spike F, mandatory). |
+| 6 | **Fork-point gen/key survival** — the source keeps advancing generations + `force=true` maintenance + revoke-on-supersede, which can prune the pinned fork-point before seeding finishes. | **Hold** the source's fork-point generation (manifest+key+blobs) until seeding completes; pause the source watcher during capture. |
+| 7 | **Disk gate + SLO + `Forking` UX** | Corrected disk estimate to **~2.5–3×**; stated fork-ready SLO (blocks on first durable gen-1 snapshot); defined `Forking`/"seeding…" client semantics. |
+
+6 escalations + 15 judge-raised issues (mostly facets of clusters 1/2/4) are in the run output; the table
+captures the load-bearing ones.
+
 ## Notes
 
-- 25 load-bearing assumptions and 41 escalations (mostly incomplete panels from the spend cap) are in
-  the run output; the clusters above capture the load-bearing ones.
-- v2 should be **re-roasted** when the spend cap allows, on its residual risks (E/F/G), rather than
-  resuming v1's degraded panel (whose B/C/D findings v2 already moots).
+- v1's confirmed set was a floor (degraded panel); v2's was a complete panel. v3 has not been re-roasted
+  (roast loop capped at ~2 iterations to avoid thrash; REVISE = fix majors then proceed). A v3 re-roast is
+  optional before implementation.

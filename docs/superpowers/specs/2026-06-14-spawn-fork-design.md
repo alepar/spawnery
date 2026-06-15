@@ -1,17 +1,17 @@
 # Spawn Fork — Clone a Running Spawn (Both Stay Active)
 
-**Status:** designed 2026-06-14 · **revised v2 2026-06-15** (post-roast BLOCK → reverted to isolated
-per-fork repos; shared-repo seed-dedup deferred to `sp-3y92`). · **Beads:** `sp-li7h` (epic);
-children `sp-pmay` (this spec), `sp-dts5`, `sp-vr3v`, `sp-jdzb`, `sp-6344`, `sp-jkpv`. Deferred:
-`sp-5h3.8` (opencode fork), `sp-3y92` (shared-repo dedup-free seed optimization).
+**Status:** designed 2026-06-14 · **v2 2026-06-15** (roast BLOCK → isolated per-fork repos) ·
+**v3 2026-06-15** (roast REVISE → pause-first consistent capture; cross-node + compensation hardening).
+· **Beads:** `sp-li7h` (epic); children `sp-pmay` (this spec), `sp-dts5`, `sp-vr3v`, `sp-jdzb`,
+`sp-6344`, `sp-jkpv`. Deferred: `sp-5h3.8` (opencode fork), `sp-3y92` (shared-repo dedup-free seed).
 **Builds on:** the migration machinery (`MigrateSpawn`/`resumeLocked`), the transient-tier Kopia
 journal (`2026-06-10-transient-tier-kopia-journal-design.md`), the encrypted transfer set
 (`2026-06-13-encrypted-migration-transfer-set-design.md`), the writable-rootfs delta
 (`2026-06-12-writable-rootfs-survival-design.md`), the transition-coordination claim primitive
 (`2026-06-13-transition-coordination-design.md`), and owner-sealed key delivery
 (`2026-06-10-owner-sealed-secrets-design.md`).
-**Adversarial review:** `2026-06-14-spawn-fork-adversarial-review.md` (roast v1 → BLOCK; this v2 is the
-response).
+**Adversarial review:** `2026-06-14-spawn-fork-adversarial-review.md` (roast v1 → BLOCK drove v2; roast
+v2 → REVISE drove v3).
 
 ## Problem
 
@@ -46,16 +46,23 @@ id** is minted; and the new spawn gets its **own fully-isolated journal repo** s
    freshly-created spawn. **No lineage refcount, no shared maintenance owner, no shared crypto domain.**
    *(The shared-repo "dedup-free seed" alternative was roasted → BLOCK for breaking isolation, the
    delete-fence, and Kopia's maintenance model; deferred to `sp-3y92` with the full challenge list.)*
-5. **Fork-point capture = live mount checkpoint (no pause) + brief pause for the rootfs only.**
-   *(Revised v2.)* The expensive part — scanning the journaled tree — happens **live**, off the critical
-   freeze path:
-   - **(a) Mount checkpoint, live + awaited.** Trigger a journal checkpoint snapshot of the source's
-     mounts *while the source runs*, await its completion, and **pin** the resulting manifest. Consistency
-     is the journal's existing best-effort live-snapshot semantics (same as suspend/resume); no pause.
-   - **(b) Rootfs capture under a brief agent-only pause.** `docker pause` **the agent container only**
-     (not the sidecar) → `docker commit` → the fork's **own** rootfs OCI delta → `docker unpause`. The
-     freeze ≈ commit time, **not** journal scan time.
-   The source is restored to running before the fork stands up on the target.
+5. **Fork-point capture = pause-first, single consistent instant.** *(Revised v3 — v2's live-mount +
+   paused-rootfs split was roasted REVISE: it pinned the mounts at T0 and the rootfs/session at T1 with
+   the agent writing in between, so the fork inherited a session referencing workspace edits the snapshot
+   predates. v3 captures **both** artifacts under **one** pause so the fork-point is a single coherent
+   instant — this restores the brainstormed "brief quiesce" intent.)* Sequence:
+   - **(a) Warm pre-snapshot, live (off the critical path).** Trigger a normal live journal checkpoint of
+     the mounts *before* pausing and await it; this pre-uploads almost all blobs (Kopia dedup), shrinking
+     the work left to do under pause.
+   - **(b) Pause the agent container** (the sidecar keeps running — see Source-liveness), `sync` the
+     container filesystem, then under that single pause take **both**: the **final** mount checkpoint
+     (re-walk picks up only post-warm deltas; pinned manifest) **and** the `docker commit` of the fork's
+     **own** rootfs OCI delta. **unpause.**
+   The freeze ≈ (under-pause incremental scan + commit), bounded by the warm pre-snapshot. Because Kopia
+   has no dirty-path API the re-walk is still scan-bound, so the freeze has an explicit **SLO + a "forking…"
+   UX**, and the duration is the #1 spike. The source's continuous journal **watcher is paused** for the
+   capture (as suspend does) so no background snapshot races the final one. The source is restored to
+   running before the fork stands up on the target.
 
 ### Lineage (display only)
 
@@ -85,54 +92,85 @@ Handler flow (reusing migration primitives in `internal/cp/lifecycle.go` / `serv
    `sched.PickNodeID` (default = source's live node).
 2. **Durability guard + placement gate.** `guardCrossNodeDurability(...)` — node-local mounts block a
    cross-node fork (ephemeral seeded fresh; owner-sealed portable). **New:** a scheduler
-   **disk-headroom gate** for fork placement — a same-node fork fully materializes the restored mounts
-   **and** the rootfs delta on the target's local disk (~2× the source's footprint), so placement must
-   verify headroom/quota.
-3. **Mint the fork.** `uuid.NewV7()` → new spawn id; `Spawns().Create` a new row + `Container{gen:1}`
+   **disk-headroom gate** for fork placement. The transient peak is **~2.5–3×** the source's footprint,
+   not 2×: a same-node fork concurrently holds the restored mount copy **+** the rootfs OCI delta **+**
+   the fork's freshly re-journaled local Kopia seed staged for upload. The gate uses the scheduler's
+   local-disk-headroom signal and is re-checked at materialization (TOCTOU against other spawns).
+3. **Ceremony-first (cross-node).** Per the transfer-set contract, the owner-key ceremony + delivery of
+   the **transfer key** to the **source** node happens **before** capture/upload — *not* after the pause.
+   The fork's **own new repo password** is owner-sealed-minted and queued for delivery to the target now.
+4. **Mint the fork.** `uuid.NewV7()` → new spawn id; `Spawns().Create` a new row + `Container{gen:1}`
    copying the source's app/version/model/runnable/mode/mounts. Record `parent_spawn_id` (display).
-4. **Fork-point capture** on the source node, under a source claim, with the source in a new
-   **`Forking` transient status** (see Source-liveness below): (a) live awaited mount checkpoint → pinned
-   manifest; (b) agent-only `docker pause` → `docker commit` (fork's own rootfs delta) → `docker
-   unpause`. Source returns to **Active**; claim released.
-5. **Stand up the fork** on the target via the `resumeLocked`/`Provision` path, seeding the fork's
+5. **Fork-point capture** on the source node, under a source claim, source in the **`Forking` transient
+   status** (see Source-liveness): warm pre-snapshot (live) → pause agent + `sync` → final mount
+   checkpoint **and** rootfs `docker commit` under one pause → unpause. **Hold** the source's fork-point
+   generation (manifest + per-gen S3 key + referenced blobs) against the source's own
+   revoke-on-supersede / prune / `force=true` maintenance until seeding completes (released on success
+   **or** unwind). Source returns to **Active**; claim released.
+6. **Stand up the fork** on the target via the `resumeLocked`/`Provision` path, seeding the fork's
    **own** repo:
-   - **Same-node:** restore the pinned mount manifest + the rootfs delta locally into the fork's host
+   - **Same-node:** restore the held fork-point mount manifest + rootfs delta locally into the fork's host
      dirs; the fork's journaler re-journals from gen 1 into its **own** bucket/repo (own password sealed
      locally).
-   - **Cross-node:** ship the rootfs delta **and** the mount checkpoint to the target via the existing
-     **encrypted transfer set** (`sp-ei4.1.13`); the target restores them into the fork's own host dirs
-     and re-journals into the fork's own repo. The target **never** holds the source's repo password —
-     only the fork's new password is owner-sealed-delivered to it (`sp-jdzb`).
-   - Launch the fork agent with `--continue`.
+   - **Cross-node:** the **source node rehydrates** the pinned manifest into a staging dir (it has its own
+     password), then exports those **plain files** + the rootfs delta into a **fork transfer-set variant**
+     encrypted under the **transfer key** (keyed `source_id → fork_id`, *not* the migration `(spawn_id,
+     gen)` chain — the existing transfer set must grow this variant). The target restores from the transfer
+     set into the fork's own host dirs and re-journals into the fork's own repo. The target **never** holds
+     the source's repo password — only the fork's new password is owner-sealed-delivered (`sp-jdzb`).
+   - **Fork-ready SLO:** the fork is usable once its **first durable gen-1 snapshot** exists; standup
+     blocks on that (full seed re-upload, no cross-source dedup). State the SLO; surface "seeding…".
+   - Launch the fork agent with `--continue` (see Spike F for the torn-session repair).
 
 ### Source-liveness during capture (`sp-dts5` / `sp-vr3v`)
 
-The roast's sharpest correctness finding: a fork pauses the source but the existing recovery sweep keys
-on transient statuses, so a fork-driver/node death mid-capture would strand the source **frozen and
-unrecoverable**. v2:
+A fork pauses the source, so a fork-driver death mid-capture must not strand it. The source enters a
+**`Forking` transient status** for the capture (claim + `status_seq` CAS, per transition-coordination).
+The **recovery sweep** is extended to repair a stranded source, and must be **idempotent + pause-phase-
+aware**:
 
-- The source enters a **`Forking` transient status** for the duration of capture (claim + `status_seq`
-  CAS, per the transition-coordination model). The **recovery sweep** is extended to catch a
-  `Forking` + expired-claim source and **unpause + revert to Active**.
-- The capture is **local to the source node** (live snapshot + local pause/commit/unpause); the source
-  claim is **not** held across any cross-node round-trip — the fork's cross-node standup happens **after**
-  the source is unpaused, back to Active, and the claim released (the capture artifacts are already
-  pinned/exported).
-- Pause scope is the **agent container only**; the sidecar (model proxy) keeps running. A brief
-  agent-only pause may still interrupt an in-flight LLM/SSE turn — bounded by the commit time and treated
-  as a residual risk (spike below).
+- **Driver death, node alive** (the recoverable case): the sweep sees `Forking` + expired claim →
+  `docker unpause` **only if the container is actually paused** (unpause of a running container errors —
+  tolerate it) → revert status to **Active** under a `status_seq` CAS. Safe to re-drive: a sweep that
+  unpaused but crashed before the CAS leaves a running+`Forking` source the next sweep fixes.
+- **Wedged worker, claim never expires** (driver alive, heartbeating, but the scan hangs): add a
+  **capture deadline** so a wedged `Forking` source is force-reverted rather than frozen forever.
+- **Claim TTL vs commit duration:** the driver **heartbeats/renews** the claim across the (bounded but
+  non-trivial) under-pause scan+commit, so a slow-but-alive driver is not mistaken for dead.
+- **Node death** is **not** a new failure mode: an `Active` spawn already dies if its node reboots, and a
+  paused container is lost the same way. A source-node death during `Forking` resolves like any node loss
+  (`Unreachable`/`Errored` + user notice); only driver-death-with-node-alive needs the unpause sweep.
+- **Pause scope = agent container only**; the sidecar (model proxy) keeps running. The frozen agent
+  stops draining its localhost socket, so a fork taken **mid-turn may abort the source's in-flight LLM
+  turn** (backpressure → provider idle-timeout; the sidecar may synthesize a clean `message_stop`,
+  masking the truncation). The source recovers by erroring/retrying that turn. Bounded by the freeze SLO;
+  see Spike E. MVP accepts this (forking mid-turn can interrupt the source's current turn).
+- **Concurrent source ops:** the `Forking` claim also fences a user `Stop`/`Suspend`/`Migrate` of the
+  source for the brief capture window (they queue or fail-fast, like any claimed transition).
 
-### Failed-fork cleanup
+### Failed-fork cleanup (compensating transaction)
 
-Fork creation is **independent** (no refcount to corrupt). On standup failure (provision / restore /
-re-journal fails), reuse migration's `revertOnFail` pattern to **unwind**: delete the fork row, revoke
-the fork's newly-minted gen key, drop the fork's new bucket. The source is untouched throughout.
+Fork creation is independent of the source, but the unwind is a **multi-resource compensation** and must
+be **idempotent, ordered, and re-drivable** (not a fire-and-forget `revertOnFail`):
+
+- **Order:** fence the fork's `status_seq` → revoke the fork's gen key → **empty then drop** the fork
+  bucket (Garage `DeleteBucket` fails `BucketNotEmpty` once a partial seed has written objects, so the
+  unwind must delete objects first) → **delete the fork row last** (the row is the durable record an
+  orphan-GC sweep keys on; deleting it first would orphan the bucket/key).
+- **Orphan-GC sweep:** a periodic sweep reclaims half-created forks (row in a failed/aborted state with a
+  bucket/key still present) and any fork stranded by a driver death **during standup** — the recovery
+  sweep covers the source; this covers the fork side.
+- Release the source's held fork-point generation (above) on both the success and unwind paths.
 
 ### Client surfaces (`sp-6344`)
 
 - **Web:** spawn context-menu **"Fork"**; target picker reuses `ListMigrationTargets` (default
   same-node). `parent_spawn_id` shown in spawn list/detail.
 - **spawnctl:** `spawnctl fork <id> [--node <id> | --class <class>]`.
+- **`Forking` client semantics:** the source stays presented as Active, but while it sits in `Forking`
+  (the brief capture freeze) client input to the source is **queued/stalled**, not lost, and resumes when
+  the source unpauses — surfaced as a short "forking…" stall, not a status change. The **fork** shows
+  "seeding…" until its first durable gen-1 snapshot (the fork-ready SLO).
 
 ## Scope / non-goals (MVP)
 
@@ -144,21 +182,31 @@ the fork's newly-minted gen key, drop the fork's new bucket. The source is untou
 
 ## Risks / spikes (do early)
 
-1. **[F — mid-turn `--continue` tolerance]** The agent-only pause does not fsync; `docker commit` can
-   capture the session JSONL mid-assistant-turn (torn/truncated trailing line). *Question:* does
-   claude-code/codex `--continue` cleanly resume from a session captured mid-turn? *Cheapest test:* pause
-   an agent mid-turn → commit → restore → `--continue`, observe load. *Kill criteria:* if `--continue`
-   fails on a torn capture, fall back to "history present, fresh session" (decision #2's lower rung) or
-   capture only at a turn boundary. (Each side has its **own copy** of the session dir, so there is no
-   shared-session-id collision between source and fork — they resume independently.)
-2. **[E — freeze SLO]** Even agent-only, `docker commit` of a large rootfs delta is seconds (writable-
-   rootfs spike measured ~4 s / 1.2 GB). *Question:* what's the real pause duration distribution, and does
-   an in-flight LLM request survive it? *Cheapest test:* measure commit-time on a representative delta;
-   pause mid-request and observe upstream timeout. *Kill criteria:* if pauses routinely exceed the
-   upstream idle timeout, add request-draining or a turn-boundary gate. State an explicit freeze SLO + a
-   "forking…" UX.
-3. **[G — stranded-source recovery]** Verify the recovery sweep unpauses+reverts a `Forking`+expired-
-   claim source after a simulated fork-driver death.
+1. **[F — torn-session `--continue` repair]** Even captured under pause, the session JSONL has no fsync
+   guarantee, so the trailing line can be torn. External evidence indicates a corrupt trailing line can
+   make `--resume` **hard-crash on a JSON parse error**, not degrade gracefully — so a repair is
+   **mandatory**, not optional. *Plan:* `sync` the container before commit (already in capture step 5);
+   on the fork, **deterministically truncate the session log to its last valid JSONL record** before
+   launching `--continue` (a real, implementable fallback — *not* "fresh session", since for these agents
+   the displayed history *is* the session file). *Spike:* confirm `--continue`/`--resume` loads cleanly
+   after truncation for claude-code and codex. (Each side has its **own copy** of the session dir → no
+   shared-session-id collision; they resume independently.)
+2. **[E — freeze SLO + source turn-abort]** The under-pause incremental scan (Kopia has no dirty-path
+   API → scan-bound) + `docker commit` (~4 s / 1.2 GB measured) set the freeze. *Question:* real pause
+   duration distribution, and does the **source's** in-flight LLM turn survive it (frozen agent →
+   backpressure → provider idle-timeout; does the sidecar mask the drop)? *Cheapest test:* measure
+   under-pause scan+commit on a representative tree (incl. node_modules); fork mid-turn and observe the
+   source turn. *Kill criteria:* if pauses routinely exceed the upstream idle timeout, add a turn-boundary
+   gate. State an explicit freeze SLO; the warm pre-snapshot bounds the under-pause scan.
+3. **[G — recovery + unwind idempotency]** Verify the recovery sweep repairs a stranded `Forking` source
+   idempotently and pause-phase-aware (driver death pre-pause, mid-pause, post-unpause-pre-CAS; wedged
+   worker → capture deadline); and that the failed-fork unwind is re-drivable (empty-then-drop bucket;
+   row deleted last; orphan-GC reclaims a half-created fork).
+4. **[H — transfer-set fork variant]** *Question:* does the encrypted transfer set compose for a
+   `source_id → fork_id` seed into a **fresh** repo (vs migration's same-`spawn_id` generation chain)?
+   *Cheapest test:* export a source-rehydrated staging set under the transfer key, import + re-journal on
+   the target into a new repo. *Kill criteria:* if the contract can't express cross-spawn artifacts,
+   define the fork variant before `sp-jdzb`.
 
 ## Testing (`sp-jkpv`)
 
@@ -168,19 +216,24 @@ the fork's newly-minted gen key, drop the fork's new bucket. The source is untou
   fork-password delivery; node-local mount on a cross-node fork is correctly **blocked** by the guard.
 - **Isolation assertion:** deleting the **source** while the fork is live leaves the fork's repo fully
   readable/writable (independent bucket/password) — no shared teardown.
-- **Stranded-source recovery:** kill the fork driver mid-pause → recovery sweep unpauses + reverts the
-  source to Active.
-- **Failed-fork cleanup:** force a standup failure → fork row + bucket + key are unwound; source intact.
+- **Fork-point coherence:** a file written during the (pre-pause) warm scan is captured consistently in
+  **both** the mount snapshot and the session under the single pause — no T0/T1 skew (the v2 regression).
+- **Stranded-source recovery (idempotent):** kill the fork driver pre-pause / mid-pause / post-unpause →
+  the sweep reverts the source to Active exactly once; a wedged capture hits the deadline.
+- **Failed-fork cleanup (re-drivable):** force a standup failure after a partial seed → unwind empties +
+  drops the bucket, revokes the key, deletes the row last; re-running the unwind is a no-op; source intact.
+- **Source turn-abort (Spike E):** fork mid-turn → the source's current turn errors/retries cleanly and
+  the source stays Active.
 
 ## Task mapping
 
 | Bead | Covers |
 |------|--------|
 | `sp-pmay` | this spec + settled decisions |
-| `sp-dts5` | live mount-checkpoint primitive · isolated per-fork repo seeding · `Forking` transient + recovery wiring |
-| `sp-vr3v` | `ForkSpawn` RPC + handler · `parent_spawn_id` column + lineage display · failed-fork unwind |
-| `sp-jdzb` | cross-node transfer-set seeding + fork-password owner-sealed delivery · reused durability guard |
-| `sp-6344` | web context-menu + spawnctl + lineage display |
+| `sp-dts5` | pause-first capture (warm pre-snapshot + single-pause mount-checkpoint+commit) · isolated per-fork repo seeding · fork-point generation **hold** · `Forking` transient + **idempotent pause-phase-aware** recovery + capture deadline |
+| `sp-vr3v` | `ForkSpawn` RPC + handler · `parent_spawn_id` · disk-headroom gate (~2.5–3×) · **ordered/idempotent** failed-fork unwind + orphan-GC sweep |
+| `sp-jdzb` | cross-node **ceremony-first** + source-side rehydrate-to-staging + **transfer-set fork variant** (`source_id→fork_id`) + fork-password owner-sealed delivery · reused durability guard |
+| `sp-6344` | web context-menu + spawnctl + lineage display + `Forking`/"seeding…" client semantics |
 | `sp-jkpv` | e2e suite above |
 
 ## Post-Implementation Notes
@@ -190,11 +243,18 @@ the assumptions above — append a dated note here, whether or not a formal debu
 
 - **2026-06-15 (v2, pre-implementation):** roast v1 returned BLOCK. Root cause: decision #4's shared-repo
   lineage broke spawn isolation, the per-`(spawn,gen)`-key delete-fence, and Kopia's single-maintenance-
-  owner model (the substrate fuses repo+source identity to one `spawnID` and runs `force=true`
-  maintenance gated on "no live container row"). Reverted #4 to **isolated per-fork repos** (accept full
-  seed-upload cost), which dissolves those clusters; deferred the shared-repo optimization to `sp-3y92`.
-  Also split the fork-point capture (#5) so the scan-bound journal snapshot runs **live** and only the
-  rootfs `docker commit` is under a brief **agent-only** pause; added a `Forking` transient status +
-  recovery wiring for stranded-source safety; added a disk-headroom placement gate and a failed-fork
-  unwind. Residual spikes E/F/G carried above. (roast panel was degraded by a monthly spend cap — 51/90
-  findings got full panels — so the confirmed set is a floor; v2 should be re-roasted when the cap allows.)
+  owner model. Reverted #4 to **isolated per-fork repos**; deferred the shared-repo optimization to
+  `sp-3y92`. (roast panel degraded by a monthly spend cap — 51/90 full panels.)
+- **2026-06-15 (v3, pre-implementation):** roast v2 returned **REVISE** (full clean panel 85/85, no
+  blockers). The headline major: v2's live-mount + paused-rootfs **split** pinned the two artifacts at
+  different instants → torn fork-point (session refs workspace edits the snapshot predates); "same as
+  suspend/resume" was false (suspend pauses first). Fixed by reverting #5 to a **pause-first single-pause
+  capture** (warm live pre-snapshot bounds the under-pause scan), restoring the brainstormed quiesce
+  intent. Other confirmed clusters folded in: hold the source's fork-point generation against its own
+  prune/revoke/maintenance (Theme 6); make the `Forking` recovery + the failed-fork unwind **idempotent,
+  ordered, pause-phase-aware** compensations with an orphan-GC sweep + capture deadline + claim heartbeat
+  (Theme 2); ceremony-first + **source-side rehydrate** + a **transfer-set fork variant** for cross-node
+  seeding (Theme 4); a **deterministic torn-JSONL truncate-and-`--continue`** repair (Theme 5); a
+  corrected ~2.5–3× disk gate, a fork-ready SLO, and defined `Forking`/"seeding…" client semantics
+  (Theme 7); documented that a mid-turn fork may abort the **source's** in-flight turn (Theme 3, accepted
+  for MVP). Spikes E/F/G/H carried above.
