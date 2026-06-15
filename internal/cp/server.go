@@ -686,7 +686,31 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 			log.Printf("CreateSpawn %s: manifest parse for artifacts: %v", appID, uerr) // non-fatal
 		}
 	}
-	artifacts, aerr := validateAndMergeArtifacts(manifestArtifacts, req.Msg.Artifacts)
+	// Profile assembly (sp-nrzf.3.8 §8/§9): when a profile is selected, load + authorize it,
+	// assemble its non-secret entries into ArtifactSpecs, and fold them into the owner layer
+	// BEFORE the per-spawn request artifacts so precedence is app-manifest < profile < request.
+	var profileVersion uint64
+	ownerArtifacts := req.Msg.Artifacts
+	if pid := req.Msg.ProfileId; pid != "" {
+		p, entries, _, perr := s.st.Profiles().Get(ctx, pid)
+		if errors.Is(perr, store.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("profile not found"))
+		}
+		if perr != nil {
+			return nil, connect.NewError(connect.CodeInternal, perr)
+		}
+		if p.OwnerID != owner {
+			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("profile not found"))
+		}
+		profileSpecs, aerr := s.assembleProfileArtifacts(ctx, p, entries)
+		if aerr != nil {
+			return nil, aerr // already Connect-coded by the assembler
+		}
+		profileVersion = p.Version
+		// profile layer first, then per-spawn override (request) — request wins by id.
+		ownerArtifacts = append(append([]*cpv1.ArtifactSpec{}, profileSpecs...), req.Msg.Artifacts...)
+	}
+	artifacts, aerr := validateAndMergeArtifacts(manifestArtifacts, ownerArtifacts)
 	if aerr != nil {
 		return nil, aerr
 	}
@@ -727,6 +751,7 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 		ID: spawnID, OwnerID: owner, Name: name, AppID: appID, AppVersion: ver.Version, AppRef: ver.Ref, Pinned: req.Msg.Pin,
 		Model: req.Msg.Model, Image: selImage, RunnableID: selRunnable, Mode: selMode,
 		Status: store.Starting, CreatedAt: now, LastUsedAt: now,
+		ProfileID: req.Msg.ProfileId, ProfileVersion: profileVersion,
 	}
 	if err := s.st.WithTx(ctx, func(tx store.Store) error {
 		if cerr := tx.Spawns().Create(ctx, sp, mounts); cerr != nil {
