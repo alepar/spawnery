@@ -32,6 +32,17 @@ func (e claudeEmitter) InstallSkill(a Artifact, opts Options) Report {
 	return installSkillTree(e.layout, a, opts)
 }
 
+// Capabilities returns the full support matrix for claude: all kinds fully supported.
+func (e claudeEmitter) Capabilities() map[Kind]CapabilityStatus {
+	return map[Kind]CapabilityStatus{
+		KindSkill:            CapStatusSupported,
+		KindMCP:              CapStatusSupported,
+		KindConfig:           CapStatusSupported,
+		KindPlugin:           CapStatusSupported,
+		Kind("instructions"): CapStatusSupported,
+	}
+}
+
 // InstallMCP is implemented in mcp.go (sp-cywj). ApplyConfig is implemented in config.go (sp-g5x8).
 // ForbiddenConfigKeys: ["model","permissions"] — model is launcher-regenerated; permissions is
 // managed via normalized keys (approvalPosture, disabledTools, allowedCommands, deniedCommands)

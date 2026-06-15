@@ -2,6 +2,15 @@ package agentinstall
 
 import "time"
 
+// CapabilityStatus describes the support level for a given (kind, agent) pair.
+type CapabilityStatus string
+
+const (
+	CapStatusSupported  CapabilityStatus = "supported"
+	CapStatusNoOp       CapabilityStatus = "no-op"
+	CapStatusBestEffort CapabilityStatus = "best-effort"
+)
+
 // Format is the file format used by an agent for a particular config file.
 type Format string
 
@@ -63,6 +72,9 @@ type Emitter interface {
 	InstallMCP(a Artifact, opts Options) Report
 	ApplyConfig(a Artifact, opts Options) Report
 	InstallPlugin(a Artifact, opts Options) Report
+	// Capabilities returns the support level for each artifact kind (and "instructions")
+	// for this emitter. Deferred/unimplemented emitters return no-op for all kinds.
+	Capabilities() map[Kind]CapabilityStatus
 }
 
 // baseEmitter provides placeholder implementations for all three Emitter methods,
@@ -113,5 +125,18 @@ func (b baseEmitter) InstallPlugin(a Artifact, _ Options) Report {
 		Name:   a.Name,
 		Status: StatusSkipped,
 		Reason: "not implemented in this slice (seam only)",
+	}
+}
+
+// Capabilities returns a no-op matrix for all kinds.
+// Deferred/unimplemented emitters (hermes, goose) inherit this and report honestly.
+// Fully-implemented emitters (claude, codex, opencode) override with their real matrix.
+func (b baseEmitter) Capabilities() map[Kind]CapabilityStatus {
+	return map[Kind]CapabilityStatus{
+		KindSkill:            CapStatusNoOp,
+		KindMCP:              CapStatusNoOp,
+		KindConfig:           CapStatusNoOp,
+		KindPlugin:           CapStatusNoOp,
+		Kind("instructions"): CapStatusNoOp,
 	}
 }

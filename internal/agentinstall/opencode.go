@@ -39,6 +39,17 @@ func (e opencodeEmitter) InstallSkill(a Artifact, _ Options) Report {
 	}
 }
 
+// Capabilities returns the support matrix for opencode: skill=no-op, mcp+config+instructions=supported, plugin=best-effort.
+func (e opencodeEmitter) Capabilities() map[Kind]CapabilityStatus {
+	return map[Kind]CapabilityStatus{
+		KindSkill:            CapStatusNoOp,
+		KindMCP:              CapStatusSupported,
+		KindConfig:           CapStatusSupported,
+		KindPlugin:           CapStatusBestEffort,
+		Kind("instructions"): CapStatusSupported,
+	}
+}
+
 // InstallMCP is implemented in mcp.go (sp-cywj). ApplyConfig is implemented in config.go (sp-g5x8).
 // ForbiddenConfigKeys: ["model","permission"] — approvalPosture is not mapped for opencode
 // (hard-errors on invalid config); allowedCommands/deniedCommands go via permission.bash.

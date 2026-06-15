@@ -34,6 +34,17 @@ func (e codexEmitter) InstallSkill(a Artifact, opts Options) Report {
 	return installSkillTree(e.layout, a, opts)
 }
 
+// Capabilities returns the full support matrix for codex: all kinds fully supported.
+func (e codexEmitter) Capabilities() map[Kind]CapabilityStatus {
+	return map[Kind]CapabilityStatus{
+		KindSkill:            CapStatusSupported,
+		KindMCP:              CapStatusSupported,
+		KindConfig:           CapStatusSupported,
+		KindPlugin:           CapStatusSupported,
+		Kind("instructions"): CapStatusSupported,
+	}
+}
+
 // InstallMCP is implemented in mcp.go (sp-cywj). ApplyConfig is implemented in config.go (sp-g5x8).
 // ForbiddenConfigKeys: ["model","approval_policy","sandbox_mode","sandbox_workspace_write"] — these
 // are launcher-managed or security-sensitive; allowedCommands/deniedCommands go to RulesDir instead.
