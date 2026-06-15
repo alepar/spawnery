@@ -270,6 +270,8 @@ func toSummaryStatus(s store.Status) cpv1.SpawnStatus {
 		return cpv1.SpawnStatus_SPAWN_STATUS_STARTING
 	case store.Active:
 		return cpv1.SpawnStatus_SPAWN_STATUS_ACTIVE
+	case store.Forking:
+		return cpv1.SpawnStatus_SPAWN_STATUS_ACTIVE
 	case store.Suspending:
 		return cpv1.SpawnStatus_SPAWN_STATUS_SUSPENDING
 	case store.Suspended:

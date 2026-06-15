@@ -78,6 +78,7 @@ type SpawnRepo interface {
 	ClaimStarting(ctx context.Context, id string, from []Status) (newGen int64, err error)
 	SetActive(ctx context.Context, id, nodeID string, gen int64) error
 	SetSuspending(ctx context.Context, id string, gen int64) error
+	SetForking(ctx context.Context, id string, gen int64, captureDeadlineTS int64) error
 	SetMountMarker(ctx context.Context, id, mount, marker string) error
 	SetSuspended(ctx context.Context, id string, gen int64) error
 	// RevertSuspended is the migration "defined failure" transition (sp-u53.5.3): a starting episode
@@ -104,6 +105,11 @@ type SpawnRepo interface {
 	// active claim); the caller must re-read and re-decide.
 	Acquire(ctx context.Context, id, holder, leaseID string, nowTS, deadlineTS, expectedSeq int64) (newSeq int64, err error)
 
+	// AcquireForkingRecovery is the recovery-sweeper variant of Acquire for forking sources. It can
+	// take over when the claim is absent/expired OR when fork_capture_deadline has expired, even if
+	// the driver is still heartbeating the normal claim.
+	AcquireForkingRecovery(ctx context.Context, id, holder, leaseID string, nowTS, deadlineTS, expectedSeq int64) (newSeq int64, err error)
+
 	// Heartbeat extends the claim's deadline. It is fenced only by leaseID (NOT by status_seq)
 	// so it does NOT bump status_seq. rowcount 0 → ErrClaimLost (the claim was expired, preempted,
 	// or released); the driver MUST stop driving immediately and commit no further transitions.
@@ -122,12 +128,20 @@ type SpawnRepo interface {
 	// status cannot have changed concurrently).
 	TransitionClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, to Status) (newSeq int64, err error)
 
+	// TransitionForkingRecovered returns a recovered source from Forking to Active, clearing its
+	// durable fork capture deadline while leaving claim release to the caller's follow-up Release.
+	TransitionForkingRecovered(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64) (newSeq int64, err error)
+
 	// ListStranded returns spawns in a transient status (Suspending, and Resuming once 7.5 adds it)
 	// whose claim is absent or expired (claim_holder IS NULL OR claim_deadline < nowTS). These are
 	// candidates for recovery: the driving CP goroutine crashed and the lease was not renewed.
 	// Results are ordered by id ASC for deterministic test output.
 	// Decision and revert logic (reconcile against node ground truth) lives in the CP layer (7.6/7.7).
 	ListStranded(ctx context.Context, nowTS int64) ([]Spawn, error)
+
+	// ListRecoverableForking returns forking sources whose claim is absent/expired OR whose
+	// fork_capture_deadline has expired. Results are ordered by id ASC for deterministic recovery.
+	ListRecoverableForking(ctx context.Context, nowTS int64) ([]Spawn, error)
 
 	// ReconcileSuspendedAfterError is the late-reply reconcile transition for sp-u53.7.2: when a
 	// node genuinely completed a suspend AFTER the CP's stall window fired (leaving the spawn in
@@ -138,6 +152,11 @@ type SpawnRepo interface {
 	// The generation fence must be applied by the caller (e.g. via LatestContainer check) before
 	// calling here — this method guards only on status to keep the store layer simple.
 	ReconcileSuspendedAfterError(ctx context.Context, id string) error
+
+	// MarkDeletedClaimed is the claim/lease/gen-fenced deleted transition for claimed cleanup flows.
+	// It hides the row from Get/ListByOwner, clears claim/forking metadata, and ends the live
+	// container as lost after the durable row update succeeds.
+	MarkDeletedClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, ts int64) (newSeq int64, err error)
 }
 
 type AgentImageRepo interface {

@@ -37,7 +37,7 @@ func TestSchemaDriftSqlite(t *testing.T) {
 	check("apps", "id", "display_name", "summary", "tags", "visibility", "listed", "created_at", "creator_id")
 	check("app_versions", "app_id", "version", "ref", "tier", "created_at", "manifest")
 	check("app_version_mounts", "app_id", "version", "name", "required", "path", "seed")
-	check("spawns", "id", "owner_id", "name", "app_id", "app_version", "app_ref", "pinned", "model", "image", "runnable_id", "mode", "status", "recovered", "created_at", "last_used_at", "suspended_at", "deleted_at", "status_seq", "claim_holder", "claim_lease_id", "claim_deadline")
+	check("spawns", "id", "owner_id", "name", "app_id", "app_version", "app_ref", "pinned", "model", "image", "runnable_id", "mode", "status", "recovered", "created_at", "last_used_at", "suspended_at", "deleted_at", "status_seq", "claim_holder", "claim_lease_id", "claim_deadline", "fork_capture_deadline")
 	check("spawn_containers", "spawn_id", "generation", "node_id", "phase", "started_at", "ended_at")
 	check("spawn_mounts", "spawn_id", "name", "backend_uri", "persist_marker")
 	check("spawn_artifacts", "spawn_id", "artifact_id", "inline", "content_type", "target_container", "dest_path", "mode", "sensitive", "env_var_name")
@@ -72,6 +72,7 @@ func TestSchemaDriftSqliteTypes(t *testing.T) {
 		{"spawns", "created_at"}:            "INTEGER",
 		{"spawns", "status_seq"}:            "INTEGER",
 		{"spawns", "claim_deadline"}:        "INTEGER",
+		{"spawns", "fork_capture_deadline"}: "INTEGER",
 		{"app_versions", "tier"}:            "TEXT",
 		{"spawn_containers", "generation"}:  "INTEGER",
 		{"spawn_containers", "ended_at"}:    "INTEGER",
