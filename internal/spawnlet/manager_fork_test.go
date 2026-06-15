@@ -374,7 +374,7 @@ func (f *spawnletFakeGenKeyAdmin) DeleteKey(context.Context, string) error {
 	return nil
 }
 
-func TestForkSameNodeRequiredGenerationHoldRequiresRecordedKey(t *testing.T) {
+func TestForkSameNodeGenerationHoldAllowsWarmSnapshotToEstablishKey(t *testing.T) {
 	ctx := context.Background()
 	rec := &forkOpRecorder{}
 	j := &recordingForkJournal{rec: rec}
@@ -389,23 +389,6 @@ func TestForkSameNodeRequiredGenerationHoldRequiresRecordedKey(t *testing.T) {
 	m.SetGenerationKeyManager(g)
 	putForkSource(t, m, "sp-source", 9)
 
-	_, err = m.ForkSameNode(ctx, ForkSameNodeRequest{
-		SourceSpawnID:    "sp-source",
-		ForkSpawnID:      "sp-fork",
-		SourceGeneration: 9,
-		TargetGeneration: 1,
-		TransferSetID:    "ts-1",
-	})
-	if err == nil || !strings.Contains(err.Error(), "generation hold is required but was not acquired") {
-		t.Fatalf("ForkSameNode error = %v, want missing recorded generation key", err)
-	}
-	if ops := rec.snapshot(); len(ops) != 0 {
-		t.Fatalf("fork must fail before snapshots/pause when recorded generation key is missing, ops=%v", ops)
-	}
-
-	if _, err := g.Mint(ctx, "sp-source", 9); err != nil {
-		t.Fatalf("mint source gen9: %v", err)
-	}
 	res, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
 		SourceSpawnID:    "sp-source",
 		ForkSpawnID:      "sp-fork",
@@ -414,10 +397,13 @@ func TestForkSameNodeRequiredGenerationHoldRequiresRecordedKey(t *testing.T) {
 		TransferSetID:    "ts-1",
 	})
 	if err != nil {
-		t.Fatalf("ForkSameNode after recorded key: %v", err)
+		t.Fatalf("ForkSameNode without pre-recorded generation key: %v", err)
 	}
 	if res.MountPins["work"] != "sp-fork-work-gen1" {
 		t.Fatalf("mount pins = %+v", res.MountPins)
+	}
+	if indexOfForkOp(rec.snapshot(), "warm-snapshot:sp-source:9") == -1 {
+		t.Fatalf("warm snapshot did not run before fork capture, ops=%v", rec.snapshot())
 	}
 }
 
