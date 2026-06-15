@@ -72,6 +72,53 @@ func TestTransferSetForkVariantValidation(t *testing.T) {
 	}
 }
 
+func TestGetPendingForkByForkSpawnIDReturnsLatestNonTerminalFork(t *testing.T) {
+	st := NewTestStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"sp-source", "sp-fork", "sp-other"} {
+		seedTransferSetSpawn(t, st, id, "alice")
+	}
+
+	base := TransferSet{
+		Kind:              TransferSetFork,
+		SourceSpawnID:     "sp-source",
+		SourceGeneration:  7,
+		TargetGeneration:  1,
+		SourceNodeID:      "node-a",
+		TargetNodeID:      "node-b",
+		TransferKeyStatus: TransferKeyTargetReady,
+	}
+	create := func(id, forkID string, status TransferSetStatus, createdAt int64) {
+		t.Helper()
+		ts := base
+		ts.ID = id
+		ts.SpawnID = forkID
+		ts.ForkSpawnID = forkID
+		ts.Status = status
+		ts.CreatedAt = createdAt
+		ts.UpdatedAt = createdAt
+		if err := st.TransferSets().Create(ctx, ts); err != nil {
+			t.Fatalf("Create %s: %v", id, err)
+		}
+	}
+	create("ts-old-pending", "sp-fork", TransferSetPending, 10)
+	create("ts-active-ignored", "sp-fork", TransferSetActive, 30)
+	create("ts-failed-ignored", "sp-fork", TransferSetFailed, 40)
+	create("ts-restoring-latest", "sp-fork", TransferSetRestoring, 20)
+	create("ts-other", "sp-other", TransferSetRestoring, 50)
+
+	got, err := st.TransferSets().GetPendingForkByForkSpawnID(ctx, "sp-fork")
+	if err != nil {
+		t.Fatalf("GetPendingForkByForkSpawnID: %v", err)
+	}
+	if got.ID != "ts-restoring-latest" || got.ForkSpawnID != "sp-fork" || got.TargetNodeID != "node-b" {
+		t.Fatalf("pending fork transfer set = %+v", got)
+	}
+	if _, err := st.TransferSets().GetPendingForkByForkSpawnID(ctx, "sp-missing"); err != ErrNotFound {
+		t.Fatalf("missing pending fork error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestListFailedForksReturnsOnlyVisibleFailedForks(t *testing.T) {
 	st := NewTestStore(t)
 	ctx := context.Background()

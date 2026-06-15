@@ -2,6 +2,7 @@ package cp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -9,6 +10,7 @@ import (
 
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/cp/store"
 	"spawnery/internal/secrets/journalkey"
 )
 
@@ -59,10 +61,36 @@ func (s *Server) liveNode(ctx context.Context, spawnID string) (nodeID string, g
 	if lerr != nil {
 		return "", 0, connect.NewError(connect.CodeInternal, lerr)
 	}
-	if !hasLive {
+	if !hasLive || c.NodeID == "" {
 		return "", 0, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn has no live container"))
 	}
 	return c.NodeID, uint64(c.Generation), nil
+}
+
+type secretDeliveryTarget struct {
+	nodeID      string
+	generation  uint64
+	pendingFork bool
+}
+
+func (s *Server) resolveSecretDeliveryTarget(ctx context.Context, spawnID string) (secretDeliveryTarget, error) {
+	if nodeID, generation, err := s.liveNode(ctx, spawnID); err == nil {
+		return secretDeliveryTarget{nodeID: nodeID, generation: generation}, nil
+	} else if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		return secretDeliveryTarget{}, err
+	}
+
+	ts, err := s.st.TransferSets().GetPendingForkByForkSpawnID(ctx, spawnID)
+	if errors.Is(err, store.ErrNotFound) {
+		return secretDeliveryTarget{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn has no live container"))
+	}
+	if err != nil {
+		return secretDeliveryTarget{}, connect.NewError(connect.CodeInternal, err)
+	}
+	if ts.TargetNodeID == "" || ts.TargetGeneration == 0 {
+		return secretDeliveryTarget{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("pending fork has no target node/generation"))
+	}
+	return secretDeliveryTarget{nodeID: ts.TargetNodeID, generation: ts.TargetGeneration, pendingFork: true}, nil
 }
 
 // GetSpawnNodeKey returns the hosting node's relayed key material so the owner client can verify the
@@ -73,19 +101,43 @@ func (s *Server) GetSpawnNodeKey(ctx context.Context, req *connect.Request[cpv1.
 	if err := s.ownSpawn(ctx, req.Msg.SpawnId); err != nil {
 		return nil, err
 	}
-	nodeID, generation, err := s.liveNode(ctx, req.Msg.SpawnId)
+	target, err := s.resolveSecretDeliveryTarget(ctx, req.Msg.SpawnId)
 	if err != nil {
 		return nil, err
 	}
-	entry, ok := s.nodeKeys.get(nodeID)
+	entry, ok := s.nodeKeys.get(target.nodeID)
 	if !ok {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("hosting node has not published an HPKE sub-key"))
 	}
 	return connect.NewResponse(&cpv1.GetSpawnNodeKeyResponse{
 		NodeCertChain: entry.certChain,
 		SignedSubkey:  entry.subkey,
-		Generation:    generation,
+		Generation:    target.generation,
 	}), nil
+}
+
+func cpSecretsToNode(secrets []*cpv1.SealedSecret) []*nodev1.SealedSecret {
+	out := make([]*nodev1.SealedSecret, len(secrets))
+	for i, sec := range secrets {
+		out[i] = &nodev1.SealedSecret{
+			TargetPath: sec.TargetPath,
+			Sealed:     append([]byte(nil), sec.Sealed...),
+			SecretId:   sec.SecretId,
+		}
+	}
+	return out
+}
+
+func (s *Server) deliverSecretsToPendingForkTarget(spawnID string, target secretDeliveryTarget, secrets []*nodev1.SealedSecret) error {
+	n, ok := s.reg.Get(target.nodeID)
+	if !ok || n.Sender == nil {
+		return fmt.Errorf("target node %q is not connected", target.nodeID)
+	}
+	return n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_SecretDelivery{SecretDelivery: &nodev1.SecretDelivery{
+		SpawnId:    spawnID,
+		Generation: target.generation,
+		Secrets:    secrets,
+	}}})
 }
 
 // DeliverSecrets relays owner-sealed ciphertext to the spawn's live node (design §3 step 4). Owner-only
@@ -98,20 +150,19 @@ func (s *Server) DeliverSecrets(ctx context.Context, req *connect.Request[cpv1.D
 	if len(req.Msg.Secrets) == 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("no secrets to deliver"))
 	}
-	_, generation, err := s.liveNode(ctx, req.Msg.SpawnId)
+	target, err := s.resolveSecretDeliveryTarget(ctx, req.Msg.SpawnId)
 	if err != nil {
 		return nil, err
 	}
 	// Translate cp.v1.SealedSecret -> node.v1.SealedSecret, copying the ciphertext bytes opaquely.
-	secrets := make([]*nodev1.SealedSecret, len(req.Msg.Secrets))
-	for i, sec := range req.Msg.Secrets {
-		secrets[i] = &nodev1.SealedSecret{
-			TargetPath: sec.TargetPath,
-			Sealed:     append([]byte(nil), sec.Sealed...),
-			SecretId:   sec.SecretId,
-		}
+	secrets := cpSecretsToNode(req.Msg.Secrets)
+	var derr error
+	if target.pendingFork {
+		derr = s.deliverSecretsToPendingForkTarget(req.Msg.SpawnId, target, secrets)
+	} else {
+		derr = s.rt.DeliverSecrets(req.Msg.SpawnId, target.generation, secrets)
 	}
-	if derr := s.rt.DeliverSecrets(req.Msg.SpawnId, generation, secrets); derr != nil {
+	if derr != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, derr)
 	}
 	// Clear delivery-pending when a journal key is included in the delivery (sp-8dkp §5).

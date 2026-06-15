@@ -77,6 +77,32 @@ func TestForkMaterializerSendsForkSameNodeAndReturnsPins(t *testing.T) {
 	}
 }
 
+func TestForkMaterializerCrossNodeFailsClosed(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	sourceSender := &capSender{}
+	targetSender := &capSender{}
+	reg.Add(registryNode("node-1", sourceSender))
+	reg.Add(registryNode("node-2", targetSender))
+	mat := newSameNodeForkMaterializer(s, time.Second)
+
+	_, err := mat.MaterializeFork(context.Background(), forkMaterializeRequest{
+		SourceSpawn:      store.Spawn{ID: "sp-source", BaseImageDigest: "agent@sha256:base"},
+		ForkSpawn:        store.Spawn{ID: "sp-fork"},
+		TransferSetID:    "ts-cross-node",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+		SourceNodeID:     "node-1",
+		TargetNodeID:     "node-2",
+	})
+	if connect.CodeOf(err) != connect.CodeUnimplemented {
+		t.Fatalf("cross-node MaterializeFork error = %v, want Unimplemented", err)
+	}
+	if sourceSender.lastCPMessage() != nil || targetSender.lastCPMessage() != nil {
+		t.Fatalf("cross-node materializer must not dispatch same-node commands, source=%+v target=%+v",
+			sourceSender.lastCPMessage(), targetSender.lastCPMessage())
+	}
+}
+
 func TestForkMaterializerReportsSourceRestoredBeforeFinalCompletion(t *testing.T) {
 	s, reg, _ := newTestServer(t)
 	s.forks = newForkWaiters()

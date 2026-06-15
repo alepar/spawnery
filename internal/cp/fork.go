@@ -127,6 +127,22 @@ func forkBucketName(forkID string) string {
 	return "spawnery-spawn-" + forkID
 }
 
+func (s *Server) forkNeedsJournalKeyDelivery(ctx context.Context, sourceID, sourceNodeID, targetNodeID string) (bool, error) {
+	if targetNodeID != "" && targetNodeID == sourceNodeID {
+		return false, nil
+	}
+	classes, err := s.classifyMounts(ctx, sourceID)
+	if err != nil {
+		return false, connect.NewError(connect.CodeInternal, err)
+	}
+	for _, class := range classes {
+		if class == mountClassOwnerSealed {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Server) forkName(ctx context.Context, owner string, source store.Spawn, requested string) (string, error) {
 	name := strings.TrimSpace(requested)
 	if name != "" && len([]rune(name)) <= maxSpawnNameRunes {
@@ -149,6 +165,7 @@ func (s *Server) forkName(ctx context.Context, owner string, source store.Spawn,
 
 func (s *Server) failForkAfterRow(ctx context.Context, forkID, transferSetID string, gen uint64, cause error) error {
 	now := s.now()
+	s.deliveryPending.clear(forkID)
 	_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, now.UnixNano())
 	nodeID := ""
 	if ts, err := s.st.TransferSets().Get(context.WithoutCancel(ctx), transferSetID); err == nil {
@@ -329,6 +346,15 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 	if err := s.checkForkDiskHeadroom(owner, source, targetNode, headroomBytes); err != nil {
 		return nil, err
 	}
+	crossNode := targetNode != "" && targetNode != live.NodeID
+	needsJournalKeyDelivery, err := s.forkNeedsJournalKeyDelivery(ctx, sourceID, live.NodeID, targetNode)
+	if err != nil {
+		return nil, err
+	}
+	transferKeyStatus := store.TransferKeySourceReady
+	if crossNode {
+		transferKeyStatus = store.TransferKeyTargetReady
+	}
 
 	forkUUID, err := uuid.NewV7()
 	if err != nil {
@@ -379,13 +405,16 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 			SourceNodeID:      live.NodeID,
 			TargetNodeID:      targetNode,
 			BaseImageDigest:   source.BaseImageDigest,
-			TransferKeyStatus: store.TransferKeyPending,
+			TransferKeyStatus: transferKeyStatus,
 			Status:            store.TransferSetPending,
 			CreatedAt:         now.UnixNano(),
 			UpdatedAt:         now.UnixNano(),
 		})
 	}); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create fork rows: %w", err))
+	}
+	if needsJournalKeyDelivery {
+		s.deliveryPending.mark(forkID)
 	}
 
 	if err := s.st.TransferSets().SetStatus(ctx, transferSetID, store.TransferSetCapturing, s.now().UnixNano()); err != nil {

@@ -117,10 +117,10 @@ type Server struct {
 	// client polls GetPendingIntent and submits a SignedIntent via SubmitIntent, unblocking provision.
 	pendingIntents *pendingIntentRegistry
 
-	// deliveryPending tracks spawns that are active on a target node but whose owner-sealed journal
-	// key has not yet been delivered by the browser (the post-migration delivery step, sp-8dkp §5).
-	// Set by MigrateSpawn when upgrade_to_owner_sealed=true; cleared by DeliverSecrets on journal-key
-	// delivery. Surfaced as journal_key_delivery_pending in ListSpawns to drive the web-UI step.
+	// deliveryPending tracks spawn ids waiting for an owner-sealed journal-key delivery: migrations
+	// after the spawn is active on the target node, and forks while the fork is still starting before
+	// its live target route exists. Cleared by DeliverSecrets on journal-key delivery. Surfaced as
+	// journal_key_delivery_pending in ListSpawns to drive the web-UI step.
 	deliveryPending *deliveryPendingTracker
 
 	// ForkSpawn seams. The materializer is intentionally narrow and currently defaults to
