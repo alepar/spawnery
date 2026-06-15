@@ -673,9 +673,9 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	mounts := make([]store.Mount, len(decls))
-	for i, d := range decls {
-		mounts[i] = store.Mount{Name: d.Name, BackendURI: "scratch"}
+	mounts, err := mergeCreateSpawnMounts(decls, req.Msg.Mounts)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	var manifestArtifacts []*cpv1.ArtifactSpec
 	if ver.Manifest != "" {
