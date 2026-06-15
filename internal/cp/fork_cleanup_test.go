@@ -201,7 +201,7 @@ func TestSweepFailedForksReclaimsStaleRestoringForks(t *testing.T) {
 	s, st := newForkCleanupTestServer(t)
 	ctx := context.Background()
 	s.claimTTL = time.Second
-	s.now = func() time.Time { return time.Unix(0, 5*time.Second.Nanoseconds()) }
+	s.now = func() time.Time { return time.Unix(0, int64(defaultForkMaterializeTimeout+5*time.Second)) }
 	seedPartialFork(t, st, "source-stale-restoring")
 	seedPartialFork(t, st, "fork-stale-restoring")
 	if err := st.TransferSets().Create(ctx, store.TransferSet{
@@ -243,6 +243,44 @@ func TestSweepFailedForksReclaimsStaleRestoringForks(t *testing.T) {
 	}
 	if _, err := st.Spawns().Get(ctx, "fork-stale-restoring"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("stale restoring fork should be deleted after cleanup, err=%v", err)
+	}
+}
+
+func TestSweepFailedForksDoesNotReclaimRestoringForkWithinMaterializeTimeout(t *testing.T) {
+	s, st := newForkCleanupTestServer(t)
+	ctx := context.Background()
+	s.claimTTL = time.Second
+	now := time.Unix(0, int64(defaultForkMaterializeTimeout/2))
+	s.now = func() time.Time { return now }
+	seedPartialFork(t, st, "source-active-restoring")
+	seedPartialFork(t, st, "fork-active-restoring")
+	if err := st.TransferSets().Create(ctx, store.TransferSet{
+		ID:                "ts-active-restoring",
+		Kind:              store.TransferSetFork,
+		SpawnID:           "fork-active-restoring",
+		SourceSpawnID:     "source-active-restoring",
+		ForkSpawnID:       "fork-active-restoring",
+		SourceGeneration:  3,
+		TargetGeneration:  1,
+		SourceNodeID:      "source-node",
+		TargetNodeID:      "target-node",
+		TransferKeyStatus: store.TransferKeyPending,
+		Status:            store.TransferSetRestoring,
+		CreatedAt:         100,
+		UpdatedAt:         now.Add(-2 * s.claimTTL).UnixNano(),
+	}); err != nil {
+		t.Fatalf("Create active restoring fork transfer set: %v", err)
+	}
+
+	res := &recordingForkResources{}
+	if err := s.sweepFailedForks(ctx, res); err != nil {
+		t.Fatalf("sweepFailedForks: %v", err)
+	}
+	if len(res.ops) != 0 {
+		t.Fatalf("restoring fork within materialize timeout must not be reclaimed, ops=%v", res.ops)
+	}
+	if _, err := st.Spawns().Get(ctx, "fork-active-restoring"); err != nil {
+		t.Fatalf("active restoring fork should remain visible, err=%v", err)
 	}
 }
 

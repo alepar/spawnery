@@ -197,7 +197,7 @@ func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) err
 }
 
 func (s *Server) sweepFailedForks(ctx context.Context, resources failedForkResources) error {
-	rows, err := s.st.TransferSets().ListReclaimableForks(ctx, s.now().Add(-s.claimTTL).UnixNano())
+	rows, err := s.st.TransferSets().ListReclaimableForks(ctx, s.staleRestoringForkBefore().UnixNano())
 	if err != nil {
 		return err
 	}
@@ -227,4 +227,9 @@ func (s *Server) sweepFailedForks(ctx context.Context, resources failedForkResou
 		}
 	}
 	return nil
+}
+
+func (s *Server) staleRestoringForkBefore() time.Time {
+	grace := defaultForkMaterializeTimeout + s.claimTTL
+	return s.now().Add(-grace)
 }
