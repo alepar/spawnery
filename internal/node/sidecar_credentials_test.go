@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -53,7 +54,7 @@ func TestPostSidecarCredentialsFailsClosed(t *testing.T) {
 	}{
 		{name: "empty key", doer: stubDoerOK(), controlURL: "http://10.0.0.5:8081/control/model", key: nil},
 		{name: "empty control url", doer: stubDoerOK(), controlURL: "", key: []byte("sk-test")},
-		{name: "transport error", doer: &stubDoer{err: io.ErrUnexpectedEOF}, controlURL: "http://10.0.0.5:8081/control/model", key: []byte("sk-test")},
+		{name: "transport error", doer: &stubDoer{err: errors.New("permanent transport failure")}, controlURL: "http://10.0.0.5:8081/control/model", key: []byte("sk-test")},
 		{name: "non 2xx", doer: &stubDoer{status: 503}, controlURL: "http://10.0.0.5:8081/control/model", key: []byte("sk-test")},
 		{name: "bad url", doer: stubDoerOK(), controlURL: "://bad-url", key: []byte("sk-test")},
 	}
@@ -67,6 +68,29 @@ func TestPostSidecarCredentialsFailsClosed(t *testing.T) {
 				t.Fatal("error detail must be non-empty")
 			}
 		})
+	}
+}
+
+func TestPostSidecarCredentialsRetriesTransientTransportError(t *testing.T) {
+	doer := &flakySidecarCredentialsDoer{failures: 1}
+
+	if err := postSidecarCredentials(context.Background(), doer, "http://10.0.0.5:8081/control/model", "tok", []byte("sk-test"), ""); err != nil {
+		t.Fatalf("postSidecarCredentials returned error: %v", err)
+	}
+	if got := doer.calls(); got != 2 {
+		t.Fatalf("POST calls = %d, want 2", got)
+	}
+}
+
+func TestPostSidecarCredentialsDoesNotRetryPermanentTransportError(t *testing.T) {
+	doer := &stubDoer{err: errors.New("permanent transport failure")}
+
+	err := postSidecarCredentials(context.Background(), doer, "http://10.0.0.5:8081/control/model", "tok", []byte("sk-test"), "")
+	if err == nil {
+		t.Fatal("postSidecarCredentials returned nil, want error")
+	}
+	if got := doer.calls; got != 1 {
+		t.Fatalf("POST calls = %d, want 1", got)
 	}
 }
 

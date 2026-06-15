@@ -7,13 +7,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
@@ -914,7 +917,7 @@ func postSidecarCredentials(ctx context.Context, doer httpDoer, controlURL, toke
 		resp, err := doer.Do(req)
 		if err != nil {
 			lastErr = err
-			if attempt == sidecarCredentialsPostAttempts {
+			if !isRetriableSidecarCredentialsPostError(err) || attempt == sidecarCredentialsPostAttempts {
 				break
 			}
 			select {
@@ -931,6 +934,22 @@ func postSidecarCredentials(ctx context.Context, doer httpDoer, controlURL, toke
 		return nil
 	}
 	return fmt.Errorf("sidecar credentials POST: %w", lastErr)
+}
+
+func isRetriableSidecarCredentialsPostError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
 }
 
 // frameSenderFor builds the per-client send closure that relays a pump frame line to the CP. Shared by
