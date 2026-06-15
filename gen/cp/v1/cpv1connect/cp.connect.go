@@ -137,6 +137,19 @@ const (
 	// SpawnServiceRemoveProfileSecretRefProcedure is the fully-qualified name of the SpawnService's
 	// RemoveProfileSecretRef RPC.
 	SpawnServiceRemoveProfileSecretRefProcedure = "/cp.v1.SpawnService/RemoveProfileSecretRef"
+	// SpawnServiceCreateSecretProcedure is the fully-qualified name of the SpawnService's CreateSecret
+	// RPC.
+	SpawnServiceCreateSecretProcedure = "/cp.v1.SpawnService/CreateSecret"
+	// SpawnServiceGetSecretProcedure is the fully-qualified name of the SpawnService's GetSecret RPC.
+	SpawnServiceGetSecretProcedure = "/cp.v1.SpawnService/GetSecret"
+	// SpawnServiceListSecretsProcedure is the fully-qualified name of the SpawnService's ListSecrets
+	// RPC.
+	SpawnServiceListSecretsProcedure = "/cp.v1.SpawnService/ListSecrets"
+	// SpawnServicePutSecretProcedure is the fully-qualified name of the SpawnService's PutSecret RPC.
+	SpawnServicePutSecretProcedure = "/cp.v1.SpawnService/PutSecret"
+	// SpawnServiceDeleteSecretProcedure is the fully-qualified name of the SpawnService's DeleteSecret
+	// RPC.
+	SpawnServiceDeleteSecretProcedure = "/cp.v1.SpawnService/DeleteSecret"
 	// SpawnServiceCreateCatalogEntryProcedure is the fully-qualified name of the SpawnService's
 	// CreateCatalogEntry RPC.
 	SpawnServiceCreateCatalogEntryProcedure = "/cp.v1.SpawnService/CreateCatalogEntry"
@@ -209,6 +222,12 @@ type SpawnServiceClient interface {
 	RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error)
 	AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error)
 	RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error)
+	// User secrets catalog CRUD (sp-7h6.1.1): owner-scoped sealed secret metadata + opaque envelope bytes.
+	CreateSecret(context.Context, *connect.Request[v1.CreateSecretRequest]) (*connect.Response[v1.CreateSecretResponse], error)
+	GetSecret(context.Context, *connect.Request[v1.GetSecretRequest]) (*connect.Response[v1.GetSecretResponse], error)
+	ListSecrets(context.Context, *connect.Request[v1.ListSecretsRequest]) (*connect.Response[v1.ListSecretsResponse], error)
+	PutSecret(context.Context, *connect.Request[v1.PutSecretRequest]) (*connect.Response[v1.PutSecretResponse], error)
+	DeleteSecret(context.Context, *connect.Request[v1.DeleteSecretRequest]) (*connect.Response[v1.DeleteSecretResponse], error)
 	// Customization catalog CRUD (sp-nrzf.3.6): curated catalog entries, creator-scoped writes,
 	// globally-readable list (listed=true only). Owner resolved from auth context server-side.
 	CreateCatalogEntry(context.Context, *connect.Request[v1.CreateCatalogEntryRequest]) (*connect.Response[v1.CreateCatalogEntryResponse], error)
@@ -452,6 +471,36 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileSecretRef")),
 			connect.WithClientOptions(opts...),
 		),
+		createSecret: connect.NewClient[v1.CreateSecretRequest, v1.CreateSecretResponse](
+			httpClient,
+			baseURL+SpawnServiceCreateSecretProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("CreateSecret")),
+			connect.WithClientOptions(opts...),
+		),
+		getSecret: connect.NewClient[v1.GetSecretRequest, v1.GetSecretResponse](
+			httpClient,
+			baseURL+SpawnServiceGetSecretProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("GetSecret")),
+			connect.WithClientOptions(opts...),
+		),
+		listSecrets: connect.NewClient[v1.ListSecretsRequest, v1.ListSecretsResponse](
+			httpClient,
+			baseURL+SpawnServiceListSecretsProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ListSecrets")),
+			connect.WithClientOptions(opts...),
+		),
+		putSecret: connect.NewClient[v1.PutSecretRequest, v1.PutSecretResponse](
+			httpClient,
+			baseURL+SpawnServicePutSecretProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("PutSecret")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteSecret: connect.NewClient[v1.DeleteSecretRequest, v1.DeleteSecretResponse](
+			httpClient,
+			baseURL+SpawnServiceDeleteSecretProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("DeleteSecret")),
+			connect.WithClientOptions(opts...),
+		),
 		createCatalogEntry: connect.NewClient[v1.CreateCatalogEntryRequest, v1.CreateCatalogEntryResponse](
 			httpClient,
 			baseURL+SpawnServiceCreateCatalogEntryProcedure,
@@ -530,6 +579,11 @@ type spawnServiceClient struct {
 	removeProfileEntry      *connect.Client[v1.RemoveProfileEntryRequest, v1.RemoveProfileEntryResponse]
 	addProfileSecretRef     *connect.Client[v1.AddProfileSecretRefRequest, v1.AddProfileSecretRefResponse]
 	removeProfileSecretRef  *connect.Client[v1.RemoveProfileSecretRefRequest, v1.RemoveProfileSecretRefResponse]
+	createSecret            *connect.Client[v1.CreateSecretRequest, v1.CreateSecretResponse]
+	getSecret               *connect.Client[v1.GetSecretRequest, v1.GetSecretResponse]
+	listSecrets             *connect.Client[v1.ListSecretsRequest, v1.ListSecretsResponse]
+	putSecret               *connect.Client[v1.PutSecretRequest, v1.PutSecretResponse]
+	deleteSecret            *connect.Client[v1.DeleteSecretRequest, v1.DeleteSecretResponse]
 	createCatalogEntry      *connect.Client[v1.CreateCatalogEntryRequest, v1.CreateCatalogEntryResponse]
 	getCatalogEntry         *connect.Client[v1.GetCatalogEntryRequest, v1.GetCatalogEntryResponse]
 	listCatalogEntries      *connect.Client[v1.ListCatalogEntriesRequest, v1.ListCatalogEntriesResponse]
@@ -723,6 +777,31 @@ func (c *spawnServiceClient) RemoveProfileSecretRef(ctx context.Context, req *co
 	return c.removeProfileSecretRef.CallUnary(ctx, req)
 }
 
+// CreateSecret calls cp.v1.SpawnService.CreateSecret.
+func (c *spawnServiceClient) CreateSecret(ctx context.Context, req *connect.Request[v1.CreateSecretRequest]) (*connect.Response[v1.CreateSecretResponse], error) {
+	return c.createSecret.CallUnary(ctx, req)
+}
+
+// GetSecret calls cp.v1.SpawnService.GetSecret.
+func (c *spawnServiceClient) GetSecret(ctx context.Context, req *connect.Request[v1.GetSecretRequest]) (*connect.Response[v1.GetSecretResponse], error) {
+	return c.getSecret.CallUnary(ctx, req)
+}
+
+// ListSecrets calls cp.v1.SpawnService.ListSecrets.
+func (c *spawnServiceClient) ListSecrets(ctx context.Context, req *connect.Request[v1.ListSecretsRequest]) (*connect.Response[v1.ListSecretsResponse], error) {
+	return c.listSecrets.CallUnary(ctx, req)
+}
+
+// PutSecret calls cp.v1.SpawnService.PutSecret.
+func (c *spawnServiceClient) PutSecret(ctx context.Context, req *connect.Request[v1.PutSecretRequest]) (*connect.Response[v1.PutSecretResponse], error) {
+	return c.putSecret.CallUnary(ctx, req)
+}
+
+// DeleteSecret calls cp.v1.SpawnService.DeleteSecret.
+func (c *spawnServiceClient) DeleteSecret(ctx context.Context, req *connect.Request[v1.DeleteSecretRequest]) (*connect.Response[v1.DeleteSecretResponse], error) {
+	return c.deleteSecret.CallUnary(ctx, req)
+}
+
 // CreateCatalogEntry calls cp.v1.SpawnService.CreateCatalogEntry.
 func (c *spawnServiceClient) CreateCatalogEntry(ctx context.Context, req *connect.Request[v1.CreateCatalogEntryRequest]) (*connect.Response[v1.CreateCatalogEntryResponse], error) {
 	return c.createCatalogEntry.CallUnary(ctx, req)
@@ -805,6 +884,12 @@ type SpawnServiceHandler interface {
 	RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error)
 	AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error)
 	RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error)
+	// User secrets catalog CRUD (sp-7h6.1.1): owner-scoped sealed secret metadata + opaque envelope bytes.
+	CreateSecret(context.Context, *connect.Request[v1.CreateSecretRequest]) (*connect.Response[v1.CreateSecretResponse], error)
+	GetSecret(context.Context, *connect.Request[v1.GetSecretRequest]) (*connect.Response[v1.GetSecretResponse], error)
+	ListSecrets(context.Context, *connect.Request[v1.ListSecretsRequest]) (*connect.Response[v1.ListSecretsResponse], error)
+	PutSecret(context.Context, *connect.Request[v1.PutSecretRequest]) (*connect.Response[v1.PutSecretResponse], error)
+	DeleteSecret(context.Context, *connect.Request[v1.DeleteSecretRequest]) (*connect.Response[v1.DeleteSecretResponse], error)
 	// Customization catalog CRUD (sp-nrzf.3.6): curated catalog entries, creator-scoped writes,
 	// globally-readable list (listed=true only). Owner resolved from auth context server-side.
 	CreateCatalogEntry(context.Context, *connect.Request[v1.CreateCatalogEntryRequest]) (*connect.Response[v1.CreateCatalogEntryResponse], error)
@@ -1044,6 +1129,36 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileSecretRef")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceCreateSecretHandler := connect.NewUnaryHandler(
+		SpawnServiceCreateSecretProcedure,
+		svc.CreateSecret,
+		connect.WithSchema(spawnServiceMethods.ByName("CreateSecret")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceGetSecretHandler := connect.NewUnaryHandler(
+		SpawnServiceGetSecretProcedure,
+		svc.GetSecret,
+		connect.WithSchema(spawnServiceMethods.ByName("GetSecret")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceListSecretsHandler := connect.NewUnaryHandler(
+		SpawnServiceListSecretsProcedure,
+		svc.ListSecrets,
+		connect.WithSchema(spawnServiceMethods.ByName("ListSecrets")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServicePutSecretHandler := connect.NewUnaryHandler(
+		SpawnServicePutSecretProcedure,
+		svc.PutSecret,
+		connect.WithSchema(spawnServiceMethods.ByName("PutSecret")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceDeleteSecretHandler := connect.NewUnaryHandler(
+		SpawnServiceDeleteSecretProcedure,
+		svc.DeleteSecret,
+		connect.WithSchema(spawnServiceMethods.ByName("DeleteSecret")),
+		connect.WithHandlerOptions(opts...),
+	)
 	spawnServiceCreateCatalogEntryHandler := connect.NewUnaryHandler(
 		SpawnServiceCreateCatalogEntryProcedure,
 		svc.CreateCatalogEntry,
@@ -1156,6 +1271,16 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceAddProfileSecretRefHandler.ServeHTTP(w, r)
 		case SpawnServiceRemoveProfileSecretRefProcedure:
 			spawnServiceRemoveProfileSecretRefHandler.ServeHTTP(w, r)
+		case SpawnServiceCreateSecretProcedure:
+			spawnServiceCreateSecretHandler.ServeHTTP(w, r)
+		case SpawnServiceGetSecretProcedure:
+			spawnServiceGetSecretHandler.ServeHTTP(w, r)
+		case SpawnServiceListSecretsProcedure:
+			spawnServiceListSecretsHandler.ServeHTTP(w, r)
+		case SpawnServicePutSecretProcedure:
+			spawnServicePutSecretHandler.ServeHTTP(w, r)
+		case SpawnServiceDeleteSecretProcedure:
+			spawnServiceDeleteSecretHandler.ServeHTTP(w, r)
 		case SpawnServiceCreateCatalogEntryProcedure:
 			spawnServiceCreateCatalogEntryHandler.ServeHTTP(w, r)
 		case SpawnServiceGetCatalogEntryProcedure:
@@ -1323,6 +1448,26 @@ func (UnimplementedSpawnServiceHandler) AddProfileSecretRef(context.Context, *co
 
 func (UnimplementedSpawnServiceHandler) RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RemoveProfileSecretRef is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) CreateSecret(context.Context, *connect.Request[v1.CreateSecretRequest]) (*connect.Response[v1.CreateSecretResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.CreateSecret is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetSecret(context.Context, *connect.Request[v1.GetSecretRequest]) (*connect.Response[v1.GetSecretResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetSecret is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ListSecrets(context.Context, *connect.Request[v1.ListSecretsRequest]) (*connect.Response[v1.ListSecretsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListSecrets is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) PutSecret(context.Context, *connect.Request[v1.PutSecretRequest]) (*connect.Response[v1.PutSecretResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.PutSecret is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) DeleteSecret(context.Context, *connect.Request[v1.DeleteSecretRequest]) (*connect.Response[v1.DeleteSecretResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DeleteSecret is not implemented"))
 }
 
 func (UnimplementedSpawnServiceHandler) CreateCatalogEntry(context.Context, *connect.Request[v1.CreateCatalogEntryRequest]) (*connect.Response[v1.CreateCatalogEntryResponse], error) {

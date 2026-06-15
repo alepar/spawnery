@@ -3,8 +3,16 @@ package spawnlet
 import (
 	"sync"
 
+	"spawnery/internal/storage"
 	"spawnery/internal/storage/journal"
 )
+
+type MountFinalizer struct {
+	HostDir    string
+	Backend    storage.Backend
+	SyncFrom   string
+	CleanupDir string
+}
 
 type Spawn struct {
 	ID         string
@@ -12,6 +20,9 @@ type Spawn struct {
 	SidecarID  string
 	AgentID    string
 	MountDirs  []string // host dirs backing this spawn's mounts (for Finalize)
+	// MountFinalizers records which backend prepared each removable host dir so teardown finalizes
+	// through the same backend. Empty on legacy/reconstructed Spawn values; Stop falls back to scratch.
+	MountFinalizers []MountFinalizer
 	// JournalMounts records the journaled (node-local/owner-sealed, non-secret)
 	// mounts of this spawn, so Stop can take the final suspend snapshot. Empty
 	// for scratch-only spawns (the guard that leaves existing behavior unchanged).

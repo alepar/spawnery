@@ -71,6 +71,16 @@ vi.mock("@/keys/sweep", () => ({
   executeSweep: (...args: unknown[]) => mockExecuteSweep(...args),
 }));
 
+const mockListSecretIdsForSweep = vi.fn();
+const mockGetEnvelope = vi.fn();
+const mockPutEnvelope = vi.fn();
+
+vi.mock("@/api/secrets", () => ({
+  listSecretIdsForSweep: (...args: unknown[]) => mockListSecretIdsForSweep(...args),
+  getEnvelope: (...args: unknown[]) => mockGetEnvelope(...args),
+  putEnvelope: (...args: unknown[]) => mockPutEnvelope(...args),
+}));
+
 const mockRevokeDevices = vi.fn();
 const mockIsRevocableByNormalRevoke = vi.fn();
 const mockRequiresRecoveryConfirmation = vi.fn();
@@ -148,6 +158,9 @@ function setupDefaultMocks() {
   mockIsRevocableByNormalRevoke.mockImplementation((item: DeviceListItem) => !item.isRecovery);
   mockRequiresRecoveryConfirmation.mockReturnValue(false);
   mockVerifyDeviceSet.mockResolvedValue({ members: [], headHash: new Uint8Array(32), headVersion: 2 });
+  mockListSecretIdsForSweep.mockResolvedValue([]);
+  mockGetEnvelope.mockResolvedValue({ at_rest: { account_id: "alice", secret_id: "s1", version: 1 }, recipients: [], nonce: "", ct: "" });
+  mockPutEnvelope.mockResolvedValue(undefined);
   mockExecuteSweep.mockResolvedValue({ total: 0, done: 0, secretIds: [], completed: [], failed: [], isRevocation: true, targetVersion: 2, updatedAt: Date.now() });
   mockRevokeDevices.mockResolvedValue({ total: 0, done: 0, secretIds: [], completed: [], failed: [], isRevocation: true, targetVersion: 2, updatedAt: Date.now() });
 }
@@ -361,6 +374,43 @@ describe("DeviceManagement — revocation flow", () => {
     await waitFor(() => {
       expect(screen.getByTestId("revocation-resume")).toBeTruthy();
     });
+  });
+
+  it("passes the real secrets client to revokeDevices without secretIds", async () => {
+    const current = makeDevice({ name: "Current", isCurrent: true });
+    const other = makeDevice({ x25519Pub: "x25519-b", signPub: "signb", name: "Other" });
+    mockBuildDeviceList.mockResolvedValue([current, other]);
+    mockRequiresRecoveryConfirmation.mockReturnValue(false);
+    mockCascadeForDevice.mockReturnValue([]);
+
+    render(<DeviceManagement />);
+    await waitFor(() => screen.getByText("Other"));
+
+    const revokeButtons = screen.getAllByTestId("revoke-button");
+    await act(async () => {
+      await userEvent.click(revokeButtons[revokeButtons.length - 1]);
+    });
+    await waitFor(() => screen.getByTestId("cascade-dialog"));
+    await act(async () => {
+      await userEvent.click(screen.getByTestId("cascade-confirm"));
+    });
+
+    await waitFor(() => expect(mockRevokeDevices).toHaveBeenCalledTimes(1));
+    const args = mockRevokeDevices.mock.calls[0][0] as {
+      secretIds?: unknown;
+      cpClient: {
+        listSecretIdsForSweep: (devicesetEpochBefore: number) => Promise<unknown>;
+        getEnvelope: (secretId: string) => Promise<unknown>;
+        putEnvelope: (secretId: string, env: unknown, devicesetEpoch: number) => Promise<unknown>;
+      };
+    };
+    expect(args.secretIds).toBeUndefined();
+    await args.cpClient.listSecretIdsForSweep(7);
+    await args.cpClient.getEnvelope("s1");
+    await args.cpClient.putEnvelope("s1", { test: true }, 9);
+    expect(mockListSecretIdsForSweep).toHaveBeenCalledWith(7);
+    expect(mockGetEnvelope).toHaveBeenCalledWith("s1");
+    expect(mockPutEnvelope).toHaveBeenCalledWith("s1", { test: true }, 9);
   });
 });
 

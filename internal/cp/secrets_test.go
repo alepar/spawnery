@@ -3,6 +3,9 @@ package cp
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"testing"
 	"time"
 
@@ -81,6 +84,53 @@ func TestGetSpawnNodeKeyReturnsPublishedSubKey(t *testing.T) {
 	close(in)
 }
 
+func TestGetPendingIntentReturnsTargetNodeSubKey(t *testing.T) {
+	s, _, stopACK := intentTestServer(t)
+	defer stopACK()
+	subkeyJSON := []byte(`{"hpke_pub":"AAAA","node_id":"n-intent","not_after":"2099-01-01T00:00:00Z"}`)
+	s.nodeKeys.put("n-intent", subkeyJSON, []byte("cert-chain"))
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawnID := resp.Msg.GetSpawnId()
+
+	var pending *cpv1.PendingIntent
+	deadline := time.Now().Add(time.Second)
+	for {
+		got, err := s.GetPendingIntent(ctx, connect.NewRequest(&cpv1.GetPendingIntentRequest{SpawnId: spawnID}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Msg.GetReady() {
+			pending = got.Msg.GetPending()
+			if !bytes.Equal(got.Msg.GetSignedSubkey(), subkeyJSON) {
+				t.Fatalf("SignedSubkey = %q, want %q", got.Msg.GetSignedSubkey(), subkeyJSON)
+			}
+			if string(got.Msg.GetNodeCertChain()) != "cert-chain" {
+				t.Fatalf("NodeCertChain = %q, want cert-chain", string(got.Msg.GetNodeCertChain()))
+			}
+			if got.Msg.GetGeneration() != pending.GetGeneration() {
+				t.Fatalf("Generation = %d, want pending generation %d", got.Msg.GetGeneration(), pending.GetGeneration())
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pending intent never became ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	sessionKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	errCh := make(chan error, 1)
+	goSubmitIntent(context.Background(), s, spawnID, "alice", sessionKey, errCh)
+	if submitErr := <-errCh; submitErr != nil {
+		t.Fatalf("SubmitIntent cleanup: %v", submitErr)
+	}
+}
+
 // GetSpawnNodeKey rejects a non-owner (ownership-checked) and reports FailedPrecondition when the
 // hosting node has published no sub-key.
 func TestGetSpawnNodeKeyAuthAndPreconditions(t *testing.T) {
@@ -99,6 +149,56 @@ func TestGetSpawnNodeKeyAuthAndPreconditions(t *testing.T) {
 	}
 }
 
+func TestStartupSecretIDsFromArtifactsAndValidation(t *testing.T) {
+	arts := []store.Artifact{
+		{Sensitive: true, EnvVarName: "gh-main"},
+		{Sensitive: true, EnvVarName: "  byok  "},
+		{Sensitive: true, EnvVarName: "gh-main"},
+		{Sensitive: false, EnvVarName: "plain"},
+		{Sensitive: true},
+	}
+	required := startupSecretIDsFromArtifacts(arts)
+	if want := []string{"byok", "gh-main"}; !equalStringSlices(required, want) {
+		t.Fatalf("startupSecretIDsFromArtifacts = %+v, want %+v", required, want)
+	}
+
+	tests := []struct {
+		name    string
+		req     []string
+		got     []*nodev1.SealedSecret
+		wantErr bool
+	}{
+		{name: "none required none submitted", req: nil, got: nil},
+		{name: "all required submitted", req: []string{"byok", "gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "gh-main", Sealed: []byte("ciphertext")}, {SecretId: "byok", Sealed: []byte("ciphertext")}}},
+		{name: "nil submitted secret", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{nil}, wantErr: true},
+		{name: "empty submitted id", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "", Sealed: []byte("ciphertext")}}, wantErr: true},
+		{name: "empty sealed payload", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "gh-main"}}, wantErr: true},
+		{name: "duplicate submitted id", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "gh-main", Sealed: []byte("ciphertext")}, {SecretId: "gh-main", Sealed: []byte("ciphertext")}}, wantErr: true},
+		{name: "undeclared submitted id", req: []string{"gh-main"}, got: []*nodev1.SealedSecret{{SecretId: "gh-main", Sealed: []byte("ciphertext")}, {SecretId: "extra", Sealed: []byte("ciphertext")}}, wantErr: true},
+		{name: "missing required id", req: []string{"gh-main"}, got: nil, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSubmittedStartupSecrets(tt.req, tt.got)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateSubmittedStartupSecrets() err=%v, wantErr=%v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // DeliverSecrets relays the owner's ciphertext to the hosting node UNCHANGED (the CP never unseals):
 // the relayed SecretDelivery carries the exact `sealed` bytes, the live generation, and target path.
 func TestDeliverSecretsRelaysOpaqueCiphertext(t *testing.T) {
@@ -111,7 +211,13 @@ func TestDeliverSecretsRelaysOpaqueCiphertext(t *testing.T) {
 	ctx := auth.WithOwner(context.Background(), "alice")
 	_, err := s.DeliverSecrets(ctx, connect.NewRequest(&cpv1.DeliverSecretsRequest{
 		SpawnId: "sp1",
-		Secrets: []*cpv1.SealedSecret{{TargetPath: "gh/hosts.yml", Sealed: ciphertext, SecretId: "gh"}},
+		Secrets: []*cpv1.SealedSecret{{
+			TargetPath: "gh/hosts.yml",
+			Sealed:     ciphertext,
+			SecretId:   "gh",
+			Version:    11,
+			DeliveryId: "delivery-gh-v11",
+		}},
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -132,6 +238,9 @@ func TestDeliverSecretsRelaysOpaqueCiphertext(t *testing.T) {
 	}
 	if sd.Secrets[0].TargetPath != "gh/hosts.yml" || sd.Secrets[0].SecretId != "gh" {
 		t.Fatalf("relayed secret metadata mangled: %+v", sd.Secrets[0])
+	}
+	if sd.Secrets[0].Version != 11 || sd.Secrets[0].DeliveryId != "delivery-gh-v11" {
+		t.Fatalf("relayed delivery metadata = version %d id %q, want version 11 id delivery-gh-v11", sd.Secrets[0].Version, sd.Secrets[0].DeliveryId)
 	}
 }
 

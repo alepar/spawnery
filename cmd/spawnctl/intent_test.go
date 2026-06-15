@@ -15,6 +15,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/internal/intent"
 )
@@ -22,7 +23,7 @@ import (
 // fakeIntentClient returns a ready PendingIntent immediately on GetPendingIntent.
 // SubmitIntent always succeeds (we test that pollAndSign rejects before submitting).
 type fakeIntentClient struct {
-	pending  *cpv1.PendingIntent
+	pending   *cpv1.PendingIntent
 	submitted bool
 }
 
@@ -125,6 +126,35 @@ func TestAM1MatchingParamsAccepted(t *testing.T) {
 	}
 }
 
+func TestPollAndSignThreadsPendingIntentMounts(t *testing.T) {
+	ic := &capturingIntentClient{pending: &cpv1.PendingIntent{
+		Op:      "create-spawn",
+		SpawnId: "sp-mounts",
+		AppRef:  "myapp/ref",
+		Model:   "claude-3",
+		Mounts: []*cpv1.MountBinding{
+			{Name: "main", BackendUri: "github:owner/repo"},
+			{Name: "cache", BackendUri: "scratch"},
+		},
+	}}
+	if err := pollAndSign(context.Background(), ic, "sp-mounts", intentParams{AppRef: "myapp/ref", Model: "claude-3"}); err != nil {
+		t.Fatalf("pollAndSign: %v", err)
+	}
+	body := ic.firstBody()
+	if body == nil {
+		t.Fatal("SubmitIntent carried no parsable IntentBody")
+	}
+	if len(body.Mounts) != 2 {
+		t.Fatalf("IntentBody.Mounts len=%d, want 2", len(body.Mounts))
+	}
+	if body.Mounts[0].GetName() != "main" || body.Mounts[0].GetBackendUri() != "github:owner/repo" {
+		t.Fatalf("IntentBody.Mounts[0]=%+v", body.Mounts[0])
+	}
+	if body.Mounts[1].GetName() != "cache" || body.Mounts[1].GetBackendUri() != "scratch" {
+		t.Fatalf("IntentBody.Mounts[1]=%+v", body.Mounts[1])
+	}
+}
+
 // ---- provisionWithIntent tests [AC1] ------------------------------------------------
 
 // capturingIntentClient records each SubmitIntent call (the SpawnId + the JTI from the
@@ -132,6 +162,7 @@ func TestAM1MatchingParamsAccepted(t *testing.T) {
 type capturingIntentClient struct {
 	mu       sync.Mutex
 	jtisSeen []string
+	bodies   []*authv1.IntentBody
 	pending  *cpv1.PendingIntent
 }
 
@@ -141,13 +172,16 @@ func (c *capturingIntentClient) GetPendingIntent(_ context.Context, _ *connect.R
 
 func (c *capturingIntentClient) SubmitIntent(_ context.Context, req *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
 	jti := ""
+	var parsed *authv1.IntentBody
 	if si := req.Msg.Intent; si != nil {
 		if body, err := intent.ParseBody(si.Body); err == nil {
 			jti = body.Jti
+			parsed = body
 		}
 	}
 	c.mu.Lock()
 	c.jtisSeen = append(c.jtisSeen, jti)
+	c.bodies = append(c.bodies, parsed)
 	c.mu.Unlock()
 	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil
 }
@@ -156,6 +190,15 @@ func (c *capturingIntentClient) submitCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.jtisSeen)
+}
+
+func (c *capturingIntentClient) firstBody() *authv1.IntentBody {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.bodies) == 0 {
+		return nil
+	}
+	return c.bodies[0]
 }
 
 // waitSubmit blocks until the capturingIntentClient has received at least n SubmitIntent
@@ -265,4 +308,3 @@ func TestProvisionWithIntentNonRetryableNACKFails(t *testing.T) {
 		t.Fatalf("expected CodeFailedPrecondition, got: %v", err)
 	}
 }
-

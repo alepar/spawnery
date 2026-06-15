@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -89,7 +91,7 @@ type Manager struct {
 	pod              runtime.PodBackend
 	cfg              ManagerConfig
 	store            *Store
-	backend          storage.Backend
+	backendResolver  storage.BackendResolver
 	rootMaterializer runtime.RootMaterializer
 	fw               firewall.Applier
 	// journal is the transient-tier journaler (node-local Kopia). nil disables
@@ -223,14 +225,14 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		cfg.DeltaScrubPaths = []string{"/var/cache/apt", "/var/lib/apt/lists", "/tmp"}
 	}
 	m := &Manager{
-		pod:        pod,
-		cfg:        cfg,
-		store:      NewStore(),
-		backend:    storage.NewScratch(cfg.DataRoot),
-		fw:         fw,
-		secrets:    SecretInjector{Root: cfg.SecretsRoot},
-		artifacts:  ArtifactStager{Root: cfg.ArtifactsRoot},
-		deltaState: &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
+		pod:             pod,
+		cfg:             cfg,
+		store:           NewStore(),
+		backendResolver: storage.NewSchemeResolver(cfg.DataRoot),
+		fw:              fw,
+		secrets:         SecretInjector{Root: cfg.SecretsRoot},
+		artifacts:       ArtifactStager{Root: cfg.ArtifactsRoot},
+		deltaState:      &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
 	}
 	// Default scrub function: exec scrub commands directly in the agent container before commit.
 	// This runs while the container is still live (before pod.Stop).
@@ -290,6 +292,147 @@ func (m *Manager) Store() *Store { return m.store }
 // (spec §2). Returns 0 when USERNS_MODE is not "remap" or the probe found no active remap.
 // Consumed by the storage layer (.8) to compute host-side ownership for userns-remapped mounts.
 func (m *Manager) RemapBase() uint32 { return m.cfg.UsernsRemapBase }
+
+func (m *Manager) scratchBackend() storage.Backend {
+	return storage.NewScratch(m.cfg.DataRoot)
+}
+
+// syncMaterializedMount mirrors the actual root-owned bind target back into the backend-prepared
+// working dir before Finalize runs, so remap-mode mounts still route through the resolved backend.
+func syncMaterializedMount(srcDir, dstDir string) error {
+	srcAbs, err := filepath.Abs(srcDir)
+	if err != nil {
+		return err
+	}
+	dstAbs, err := filepath.Abs(dstDir)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(srcAbs) == filepath.Clean(dstAbs) {
+		return fmt.Errorf("sync materialized mount: source and destination must not be the same path (%s)", srcDir)
+	}
+	if srcInfo, err := os.Stat(srcDir); err == nil {
+		if dstInfo, derr := os.Stat(dstDir); derr == nil && os.SameFile(srcInfo, dstInfo) {
+			return fmt.Errorf("sync materialized mount: source and destination must not be the same file (%s)", srcDir)
+		}
+	}
+
+	parent := filepath.Dir(dstDir)
+	tmpDir, err := os.MkdirTemp(parent, filepath.Base(dstDir)+".sync-*")
+	if err != nil {
+		return err
+	}
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
+
+	if err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == srcDir {
+			return nil
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		dstPath := filepath.Join(tmpDir, rel)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+		switch {
+		case mode.IsDir():
+			return os.MkdirAll(dstPath, mode.Perm())
+		case mode&os.ModeSymlink != 0:
+			if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+				return err
+			}
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(target, dstPath)
+		case mode.IsRegular():
+			if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+				return err
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(dstPath, b, mode.Perm()); err != nil {
+				return err
+			}
+			return os.Chmod(dstPath, mode.Perm())
+		default:
+			return fmt.Errorf("sync materialized mount: unsupported file mode %v at %s", mode, path)
+		}
+	}); err != nil {
+		return err
+	}
+
+	backupDir := filepath.Join(parent, fmt.Sprintf(".%s.backup-%d", filepath.Base(dstDir), time.Now().UnixNano()))
+	hadDst := false
+	if _, err := os.Lstat(dstDir); err == nil {
+		hadDst = true
+		if err := os.Rename(dstDir, backupDir); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tmpDir, dstDir); err != nil {
+		if hadDst {
+			_ = os.Rename(backupDir, dstDir)
+		}
+		return err
+	}
+	cleanupTmp = false
+	if hadDst {
+		if err := os.RemoveAll(backupDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) finalizeMountDirs(ctx context.Context, mountDirs []string, finalizers []MountFinalizer) error {
+	if len(finalizers) == 0 {
+		scratch := m.scratchBackend()
+		var errs []error
+		for _, dir := range mountDirs {
+			if err := scratch.Finalize(ctx, dir); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
+	var errs []error
+	for _, finalizer := range finalizers {
+		backend := finalizer.Backend
+		if backend == nil {
+			backend = m.scratchBackend()
+		}
+		if finalizer.SyncFrom != "" {
+			if err := syncMaterializedMount(finalizer.SyncFrom, finalizer.HostDir); err != nil {
+				errs = append(errs, fmt.Errorf("sync materialized mount %s -> %s: %w", finalizer.SyncFrom, finalizer.HostDir, err))
+				continue
+			}
+		}
+		if err := backend.Finalize(ctx, finalizer.HostDir); err != nil {
+			errs = append(errs, fmt.Errorf("finalize mount dir %s: %w", finalizer.HostDir, err))
+			continue
+		}
+		if finalizer.CleanupDir != "" {
+			_ = m.scratchBackend().Finalize(ctx, finalizer.CleanupDir)
+		}
+	}
+	return errors.Join(errs...)
+}
 
 // agentRootUID returns the host uid that the in-container agent-root maps to, used by
 // the storage layer for host-side ownership of data mounts (spec §5): remap lane = the
@@ -472,6 +615,7 @@ type AgentSelection struct {
 	Image      string
 	RunnableID string
 	Mode       string
+	Mounts     []MountBinding
 	// BaseImageDigest is the CP-pinned base image digest for cross-node resume (spec §4).
 	// Empty on fresh create (the node resolves the digest at create time via ResolveImageDigest).
 	// On resume/recreate the CP threads the stored digest down so the node uses the exact base.
@@ -489,6 +633,17 @@ type AgentSelection struct {
 	// resume). Non-sensitive artifacts are materialized into the staging tmpfs at ArtifactsMountPath;
 	// sensitive+inline artifacts are routed to the secrets tmpfs. Converted from proto by the node.
 	Artifacts []Artifact
+	// BeforeStartAgent runs after the sidecar pod and pre-agent prep complete, immediately before the
+	// untrusted agent starts. It can stage spawn-local secrets before the spawn is visible in the store.
+	BeforeStartAgent func(context.Context, PreAgentContext) error
+}
+
+type PreAgentContext struct {
+	SpawnID      string
+	Generation   uint64
+	ControlURL   string
+	ControlToken string
+	InjectSecret func(target string, plaintext []byte) (string, error)
 }
 
 // RootfsArtifact is the node/spawnlet-facing copy of a journal rootfs artifact descriptor.
@@ -552,6 +707,10 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	if err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
+	mountBackendURIs, err := mountBindingsByName(mf.Storage.Mounts, sel.Mounts)
+	if err != nil {
+		return nil, err
+	}
 	// The opencode session title shown in the TUI/web: the spawn's friendly name, with the app id
 	// appended in brackets (session titles are single-line, so no newline). Prefer the CP-assigned
 	// app id; fall back to the manifest id for the standalone lane (no CP). Either part may be empty;
@@ -574,14 +733,18 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	}
 
 	var mountDirs []string
+	var mountFinalizers []MountFinalizer
 	var journalMounts []journal.Mount
 	finalizeAll := func() {
-		for _, d := range mountDirs {
-			_ = m.backend.Finalize(ctx, d)
-		}
+		_ = m.finalizeMountDirs(ctx, mountDirs, mountFinalizers)
 	}
 	rootMaterialize := m.useRootMaterializer()
 	helperImage := m.cfg.AgentImage
+	scratchBackend := m.scratchBackend()
+	resolver := m.backendResolver
+	if resolver == nil {
+		resolver = storage.NewSchemeResolver(m.cfg.DataRoot)
+	}
 
 	// /app is read-only; each declared mount is a rw overlay at /app/<path>,
 	// backed (slice: scratch) by a host dir seeded from /app/<seed>.
@@ -589,10 +752,11 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	if rootMaterialize {
 		appMountPath = filepath.Join(m.cfg.DataRoot, id, "app")
 		if err := m.materializeRootOwned(ctx, helperImage, appPath, appMountPath, 0o777, 0o644); err != nil {
-			_ = m.backend.Finalize(ctx, appMountPath)
+			_ = scratchBackend.Finalize(ctx, appMountPath)
 			return nil, fmt.Errorf("materialize /app: %w", err)
 		}
 		mountDirs = append(mountDirs, appMountPath)
+		mountFinalizers = append(mountFinalizers, MountFinalizer{HostDir: appMountPath, Backend: scratchBackend})
 	}
 	mounts := []runtime.Mount{{
 		HostPath:             appMountPath,
@@ -617,31 +781,42 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 
 	agentUID := m.agentRootUID()
 	for _, mt := range mf.Storage.Mounts {
+		backendURI := mountBackendURIs[mt.Name]
+		mountBackend, err := resolver.Resolve(backendURI)
+		if err != nil {
+			finalizeAll()
+			return nil, fmt.Errorf("mount %q backend %q: %w", mt.Name, backendURI, err)
+		}
 		seedDir := filepath.Join(appPath, mt.Seed)
 		hostDir := ""
 		restoreDir := ""
-		stageDir := ""
+		preparedDir := ""
 		if rootMaterialize {
-			var err error
-			stageDir, err = m.backend.Prepare(ctx, id, mt.Name+".stage", seedDir, -1)
+			prepareName := mt.Name + ".stage"
+			preparedDir, err = mountBackend.Prepare(ctx, id, prepareName, seedDir, -1)
 			if err != nil {
 				finalizeAll()
-				return nil, fmt.Errorf("prepare mount %q staging: %w", mt.Name, err)
+				return nil, fmt.Errorf("prepare mount %q: %w", mt.Name, err)
 			}
-			restoreDir = stageDir
+			restoreDir = preparedDir
 			hostDir = filepath.Join(m.cfg.DataRoot, id, mt.Name)
+			if filepath.Clean(preparedDir) == filepath.Clean(hostDir) {
+				cleanupPrepared := func() { _ = mountBackend.Finalize(ctx, preparedDir) }
+				cleanupPrepared()
+				finalizeAll()
+				return nil, fmt.Errorf("prepare mount %q: root-materialized prepared dir must differ from bind target", mt.Name)
+			}
 		} else {
-			var err error
-			hostDir, err = m.backend.Prepare(ctx, id, mt.Name, seedDir, agentUID)
+			hostDir, err = mountBackend.Prepare(ctx, id, mt.Name, seedDir, agentUID)
 			if err != nil {
 				finalizeAll()
 				return nil, fmt.Errorf("prepare mount %q: %w", mt.Name, err)
 			}
 			restoreDir = hostDir
 		}
-		cleanupStage := func() {
-			if stageDir != "" {
-				_ = m.backend.Finalize(ctx, stageDir)
+		cleanupPrepared := func() {
+			if preparedDir != "" {
+				_ = mountBackend.Finalize(ctx, preparedDir)
 			}
 		}
 
@@ -650,7 +825,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		// default) leave the scratch path entirely untouched.
 		class, derr := journal.ParseDurability(mt.Durability)
 		if derr != nil {
-			cleanupStage()
+			cleanupPrepared()
 			finalizeAll()
 			return nil, fmt.Errorf("mount %q durability: %w", mt.Name, derr)
 		}
@@ -711,15 +886,25 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 
 		if rootMaterialize {
 			if err := m.materializeRootOwned(ctx, helperImage, restoreDir, hostDir, 0o777, 0o666); err != nil {
-				cleanupStage()
-				_ = m.backend.Finalize(ctx, hostDir)
+				cleanupPrepared()
+				_ = scratchBackend.Finalize(ctx, hostDir)
 				finalizeAll()
 				return nil, fmt.Errorf("materialize mount %q: %w", mt.Name, err)
 			}
-			cleanupStage()
 		}
 
 		mountDirs = append(mountDirs, hostDir)
+		finalizerBackend := mountBackend
+		if rootMaterialize {
+			mountFinalizers = append(mountFinalizers, MountFinalizer{
+				HostDir:    preparedDir,
+				Backend:    mountBackend,
+				SyncFrom:   hostDir,
+				CleanupDir: hostDir,
+			})
+		} else {
+			mountFinalizers = append(mountFinalizers, MountFinalizer{HostDir: hostDir, Backend: finalizerBackend})
+		}
 		mounts = append(mounts, runtime.Mount{
 			HostPath:             hostDir,
 			ContainerPath:        "/app/" + mt.Path,
@@ -736,6 +921,14 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		finalizeAll()
 		return nil, fmt.Errorf("prepare secrets dir: %w", err)
 	}
+	cleanupSpawnDirs := func() {
+		if serr := m.secrets.Remove(id); serr != nil {
+			log.Printf("secrets dir cleanup for %s: %v", id, serr)
+		}
+		if aerr := m.artifacts.Remove(id); aerr != nil {
+			log.Printf("artifacts dir cleanup for %s: %v", id, aerr)
+		}
+	}
 	mounts = append(mounts, runtime.Mount{HostPath: secretsDir, ContainerPath: SecretsMountPath})
 
 	// Non-sensitive artifact staging tmpfs (cross-agent installer, sp-l5sx.3): a per-spawn dir under
@@ -744,9 +937,23 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	// routed to the secrets tmpfs (0600) by Materialize, never landed here.
 	if err := m.artifacts.Materialize(id, sel.Artifacts, m.secrets); err != nil {
 		finalizeAll()
+		cleanupSpawnDirs()
 		return nil, fmt.Errorf("prepare artifacts: %w", err)
 	}
 	mounts = append(mounts, runtime.Mount{HostPath: m.artifacts.DirFor(id), ContainerPath: ArtifactsMountPath})
+	cleanupPreStoreFailure := func(h *runtime.PodHandle, floorIP string) {
+		cleanupCtx := context.WithoutCancel(ctx)
+		if h != nil {
+			_ = m.pod.Stop(cleanupCtx, h)
+		}
+		if floorIP != "" {
+			if err := m.fw.Remove(cleanupCtx, firewall.Rules(floorIP, m.cfg.EgressAllowCIDRs)); err != nil {
+				log.Printf("egress floor cleanup for %s (ip %s): %v", id, floorIP, err)
+			}
+		}
+		_ = m.finalizeMountDirs(cleanupCtx, mountDirs, mountFinalizers)
+		cleanupSpawnDirs()
+	}
 
 	res := runtime.Resources{
 		MemoryBytes: m.cfg.MemLimitMB << 20,
@@ -778,21 +985,25 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		Labels:    labels,
 	})
 	if err != nil {
-		finalizeAll()
+		cleanupPreStoreFailure(nil, "")
 		return nil, err
+	}
+	// Node-reachable control endpoint (pod IP + control port). Empty PodIP => unreachable URL;
+	// the reconciler/node handler treats that as "no live control plane".
+	controlURL := ""
+	if h.PodIP != "" {
+		controlURL = "http://" + net.JoinHostPort(h.PodIP, strconv.Itoa(controlPort)) + "/control/model"
 	}
 
 	// Egress floor: applied after the pod IP exists, before the untrusted agent starts (fail-closed).
 	var floorIP string
 	if m.egressEnforced() {
 		if h.PodIP == "" {
-			_ = m.pod.Stop(ctx, h)
-			finalizeAll()
+			cleanupPreStoreFailure(h, "")
 			return nil, fmt.Errorf("egress floor (fail-closed): no pod IP to scope the floor")
 		}
 		if ferr := m.fw.Apply(ctx, firewall.Rules(h.PodIP, m.cfg.EgressAllowCIDRs)); ferr != nil {
-			_ = m.pod.Stop(ctx, h)
-			finalizeAll()
+			cleanupPreStoreFailure(h, "")
 			return nil, fmt.Errorf("egress floor (fail-closed): %w", ferr)
 		}
 		floorIP = h.PodIP
@@ -821,8 +1032,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		// Pass sel.ProgressFunc so each artifact emits a resume progress event (sp-u53.7.2):
 		// a large delta being fetched+imported can exceed the stall window without resets.
 		if err := m.restoreRootfsArtifacts(ctx, id, sel.RootfsSourceGeneration, baseRef, sel.RootfsArtifacts, sel.ProgressFunc); err != nil {
-			_ = m.pod.Stop(ctx, h)
-			finalizeAll()
+			cleanupPreStoreFailure(h, floorIP)
 			return nil, err
 		}
 	}
@@ -835,9 +1045,23 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	// Launch image: delta tag if already present locally (same-node resume), else base.
 	launchImage, eerr := m.pod.EnsureImage(ctx, baseRef, runtime.DeltaTag(id))
 	if eerr != nil {
-		_ = m.pod.Stop(ctx, h)
-		finalizeAll()
+		cleanupPreStoreFailure(h, floorIP)
 		return nil, fmt.Errorf("ensure launch image: %w", eerr)
+	}
+	if sel.BeforeStartAgent != nil {
+		preAgent := PreAgentContext{
+			SpawnID:      id,
+			Generation:   generation,
+			ControlURL:   controlURL,
+			ControlToken: controlToken,
+			InjectSecret: func(target string, plaintext []byte) (string, error) {
+				return m.secrets.Write(id, target, plaintext)
+			},
+		}
+		if err := sel.BeforeStartAgent(ctx, preAgent); err != nil {
+			cleanupPreStoreFailure(h, floorIP)
+			return nil, err
+		}
 	}
 
 	// Phase 2: the untrusted agent, into the existing pod.
@@ -855,17 +1079,10 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		DropAllCaps: runtime.CapPolicyForUsernsMode(m.cfg.UsernsMode) == runtime.CapDropAll,
 		Labels:      labels,
 	}); err != nil {
-		_ = m.pod.Stop(ctx, h)
-		finalizeAll()
+		cleanupPreStoreFailure(h, floorIP)
 		return nil, err
 	}
 
-	// Node-reachable control endpoint (pod IP + control port). Empty PodIP => unreachable URL;
-	// the reconciler/node handler treats that as "no live control plane".
-	controlURL := ""
-	if h.PodIP != "" {
-		controlURL = "http://" + net.JoinHostPort(h.PodIP, strconv.Itoa(controlPort)) + "/control/model"
-	}
 	// Continuous journaling (design §2, sp-u53.5.2): start a per-mount file watcher
 	// driving RequestSnapshot for the spawn's lifetime. The journal's adaptive
 	// debounce + serial queue coalesce the events, and a periodic fallback inside
@@ -887,7 +1104,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 
 	sp := &Spawn{
 		ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
-		MountDirs: mountDirs, JournalMounts: journalMounts, journalWatchers: watchers,
+		MountDirs: mountDirs, MountFinalizers: mountFinalizers, JournalMounts: journalMounts, journalWatchers: watchers,
 		FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID,
 		Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL,
 		BaseImageDigest: baseDigest,
@@ -1391,8 +1608,9 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 	if progress != nil {
 		progress("finalize", "finalizing mount dirs", nil)
 	}
-	for _, d := range sp.MountDirs {
-		_ = m.backend.Finalize(ctx, d)
+	if ferr := m.finalizeMountDirs(ctx, sp.MountDirs, sp.MountFinalizers); ferr != nil {
+		log.Printf("mount finalize for %s: %v", id, ferr)
+		resultErr = errors.Join(resultErr, fmt.Errorf("finalize mounts for %s: %w", id, ferr))
 	}
 	// Owner-sealed secret plaintext must not outlive the episode (design §6 never-persist): drop the
 	// per-spawn secrets dir. Best-effort — a leftover dir is reseeded empty on the next Create.

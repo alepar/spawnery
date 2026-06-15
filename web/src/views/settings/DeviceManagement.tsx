@@ -13,11 +13,10 @@
  *
  * All crypto work delegates to the W2 layer (keys/). No new crypto here.
  *
- * CP RPC GAP (sp-7h6.1): secrets re-seal uses a no-op stub client until the
- * CP GetSecret/PutSecret Connect RPCs land.
  */
 
 import { useState, useEffect, useCallback } from "react";
+import * as secretsClient from "@/api/secrets";
 import { buildDeviceList, type DeviceListItem } from "@/keys/devicelist";
 import { isRevocableByNormalRevoke, requiresRecoveryConfirmation, revokeDevices } from "@/keys/revoke";
 import { loadAnchor } from "@/keys/anchor";
@@ -25,17 +24,11 @@ import { loadDeviceKeys, exportDeviceRef } from "@/keys/device";
 import { deriveDeviceKeysFromMnemonic } from "@/keys/device";
 import { httpASTransport } from "@/keys/deviceset";
 import { loadSweepProgress, remainingCount, type SweepProgress } from "@/keys/epoch";
-import { executeSweep, type SecretsCPClient } from "@/keys/sweep";
+import { executeSweep } from "@/keys/sweep";
 import { M8_TRUSTED_DEVICE_WARNING } from "@/keys/recovery";
 import { asHttpUrl } from "@/config/endpoints";
 import { useSessionStore } from "@/auth/session";
 import { toBase64, fromBase64 } from "@/keys/encoding";
-
-// CP RPC GAP (sp-7h6.1): stub client until CP GetSecret/PutSecret land.
-const stubCPClient: SecretsCPClient = {
-  getEnvelope: () => Promise.reject(new Error("CP RPC GAP sp-7h6.1: secrets client not yet wired")),
-  putEnvelope: () => Promise.resolve(),
-};
 
 function formatEnrolledAt(nanoStr: string): string {
   try {
@@ -395,8 +388,7 @@ export function DeviceManagement() {
         pinnedHeadVersion: anchor.headVersion,
         targetX25519Pubs,
         survivorX25519Pubs,
-        secretIds: [], // CP RPC GAP sp-7h6.1: no secrets to re-seal yet
-        cpClient: stubCPClient,
+        cpClient: secretsClient,
         onProgress: (p) => setSweepProgress(p),
       });
       setSweepProgress(progress);
@@ -456,7 +448,7 @@ export function DeviceManagement() {
         progress,
         deviceKeys,
         newMemberPubs,
-        cpClient: stubCPClient,
+        cpClient: secretsClient,
         onProgress: (p) => setSweepProgress(p),
       });
       setSweepProgress(final);

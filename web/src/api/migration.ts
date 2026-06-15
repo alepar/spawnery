@@ -20,6 +20,7 @@ import { authEnabled, useSessionStore } from "@/auth/session";
 import { pollAndSign, registerPendedOp, clearPendedOp } from "@/auth/intent";
 import { openEnvelope, hpkeSeal } from "@/keys/hpke";
 import type { Envelope } from "@/keys/hpke";
+import { asNodeRevocationChecker } from "@/keys/nodeRevocation";
 import { verifyNodeForSealing } from "@/keys/subkey";
 import type { RevocationChecker } from "@/keys/subkey";
 import type { DeviceKeys } from "@/keys/device";
@@ -70,6 +71,14 @@ export interface NodeKey {
   signedSubkey:  string; // JSON text (base64-decoded from bytes field)
   generation:    number;
 }
+
+type DeliverySecret = {
+  secretId:   string;
+  targetPath: string;
+  sealed:     string;
+  version:    number;
+  deliveryId: string;
+};
 
 /**
  * Durability of a spawn's storage, from the owner client's perspective.
@@ -160,7 +169,7 @@ export async function getSpawnNodeKey(spawnId: string): Promise<NodeKey> {
 /** deliverSecrets hands the CP owner-sealed ciphertext to relay to the spawn's live node. */
 async function deliverSecrets(
   spawnId: string,
-  secrets: Array<{ secretId: string; targetPath: string; sealed: string }>,
+  secrets: DeliverySecret[],
 ): Promise<void> {
   await unary<Record<string, never>>("DeliverSecrets", { spawnId, secrets });
 }
@@ -326,7 +335,7 @@ async function reSealToNode(
  * deviceKeys: the caller must load and pass the device X25519 keypair.
  * rootPEM: pinned Root CA PEM embedded in the web bundle (empty = dev/insecure mode).
  * now: injectable for testing; use new Date() in production.
- * revocationChecker: optional AS revocation checker (default: AllowAll); fail-closed on error.
+ * revocationChecker: optional checker override; default is the AS checker with no cache.
  * onProgress: optional per-step callback for UI progress updates.
  * spawnStatusAfterFail: injectable for testing — resolves to current spawn status after
  *   a migrate-leg failure so the "suspend" vs "resume" leg tag can be set correctly.
@@ -404,6 +413,9 @@ export async function runMigrate(
     const msg = e instanceof Error ? e.message : String(e);
     throw new MigrateError(`Failed to fetch node key: ${msg}`, "delivery");
   }
+  if (rootPEM.trim() !== "" && nk.nodeCertChain.trim() === "") {
+    throw new MigrateError("Node verification failed: node cert chain missing while root PEM is configured", "delivery");
+  }
 
   // Parse the sub-key JSON (we need not_after for the in-flight AAD).
   const sk = JSON.parse(nk.signedSubkey) as { node_id: string; not_after: string };
@@ -416,6 +428,7 @@ export async function runMigrate(
   const accountId = tenancy === "self-hosted"
     ? (useSessionStore.getState().account?.accountId ?? "")
     : undefined;
+  const checker = revocationChecker ?? asNodeRevocationChecker();
   let hpkePub: Uint8Array;
   try {
     const verified = await verifyNodeForSealing(
@@ -424,8 +437,11 @@ export async function runMigrate(
       nk.signedSubkey,
       { tenancy, accountId },
       now,
-      revocationChecker,
+      checker,
     );
+    if (verified.identity.nodeId !== resolvedNodeId) {
+      throw new Error(`verified node ${JSON.stringify(verified.identity.nodeId)} does not match resolved node ${JSON.stringify(resolvedNodeId)}`);
+    }
     hpkePub = verified.hpkePub;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -434,7 +450,7 @@ export async function runMigrate(
 
   // Step 4: unseal + re-seal each journal key to the target node.
   onProgress?.({ step: "resealing", resolvedNodeId });
-  const secrets: Array<{ secretId: string; targetPath: string; sealed: string }> = [];
+  const secrets: DeliverySecret[] = [];
   try {
     for (const entry of entries) {
       const aad: InFlightAAD = {
@@ -447,7 +463,7 @@ export async function runMigrate(
       };
       const sealedB64 = await reSealToNode(entry.ciphertext, deviceKeys, hpkePub, aad);
       const secretId = `journal/${entry.mount}`;
-      secrets.push({ secretId, targetPath: secretId, sealed: sealedB64 });
+      secrets.push({ secretId, targetPath: secretId, sealed: sealedB64, version: aad.version, deliveryId: aad.deliveryId });
     }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

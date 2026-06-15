@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -641,7 +642,6 @@ func randID() string {
 // NewMessagesHandler returns an http.Handler for POST /v1/messages that translates the
 // Anthropic Messages API to OpenAI Chat Completions against upstream, injecting the bearer key.
 func NewMessagesHandler(upstream, key string, ov *Override) http.Handler {
-	upstream = strings.TrimRight(upstream, "/")
 	client := &http.Client{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -672,14 +672,19 @@ func NewMessagesHandler(upstream, key string, ov *Override) http.Handler {
 			}
 		}
 
-		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-			upstream+"/v1/chat/completions", bytes.NewReader(oaiBody))
+		creds := ov.Credentials(upstream, key)
+		upstreamURL, err := chatCompletionsURL(creds.Upstream)
+		if err != nil {
+			writeAnthropicError(w, http.StatusInternalServerError, "api_error", "build upstream request: "+err.Error())
+			return
+		}
+		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(oaiBody))
 		if err != nil {
 			writeAnthropicError(w, http.StatusInternalServerError, "api_error", "build upstream request: "+err.Error())
 			return
 		}
 		upReq.Header.Set("Content-Type", "application/json")
-		upReq.Header.Set("Authorization", "Bearer "+key)
+		upReq.Header.Set("Authorization", "Bearer "+creds.Key)
 		if stream {
 			upReq.Header.Set("Accept", "text/event-stream")
 		}
@@ -694,7 +699,7 @@ func NewMessagesHandler(upstream, key string, ov *Override) http.Handler {
 
 		if resp.StatusCode >= 400 {
 			b, _ := io.ReadAll(resp.Body)
-			snippet := strings.TrimSpace(string(b))
+			snippet := strings.TrimSpace(redactCredentialEcho(string(b), creds.Key))
 			log.Printf("warn: sidecar: /v1/messages upstream -> %d: %s", resp.StatusCode, truncateStr(snippet, 512))
 			// Pass the upstream error through as an Anthropic-shaped error.
 			writeAnthropicError(w, resp.StatusCode, "api_error", snippet)
@@ -730,6 +735,20 @@ func NewMessagesHandler(upstream, key string, ov *Override) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(anthBody)
 	})
+}
+
+func chatCompletionsURL(upstream string) (string, error) {
+	target, err := url.Parse(upstream)
+	if err != nil {
+		return "", err
+	}
+	endpoint := &url.URL{Path: "/v1/chat/completions"}
+	path, rawpath := joinURLPath(target, endpoint)
+	out := *target
+	out.Path = path
+	out.RawPath = rawpath
+	out.Fragment = ""
+	return out.String(), nil
 }
 
 // writeAnthropicError writes an Anthropic-shaped error JSON.

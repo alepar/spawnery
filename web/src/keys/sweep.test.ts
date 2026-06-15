@@ -43,6 +43,7 @@ async function x25519PublicBytes(priv: CryptoKey): Promise<Uint8Array> {
 /** fakeCPClient is an in-memory SecretsCPClient for testing. */
 function fakeCPClient(store: Map<string, Envelope>): SecretsCPClient {
   return {
+    listSecretIdsForSweep: async () => Array.from(store.keys()),
     getEnvelope: async (id) => {
       const env = store.get(id);
       if (!env) throw new Error(`secret not found: ${id}`);
@@ -148,6 +149,7 @@ describe("executeSweep [WM2]", () => {
 
     const getCalls: string[] = [];
     const cpClient: SecretsCPClient = {
+      listSecretIdsForSweep: async () => ["s1", "s2"],
       getEnvelope: async (id) => {
         getCalls.push(id);
         return store.get(id)!;
@@ -214,5 +216,37 @@ describe("executeSweep [WM2]", () => {
     });
 
     expect(progressSnapshots).toEqual([1, 2]);
+  });
+
+  it("stores the resealed envelope with progress.targetVersion as the new deviceset epoch", async () => {
+    const ikmR = "6db9df30aa07dd42ee5e8181afdb977e538f5e1fec8a06223f33f7013e525037";
+    const scalar = await dhkemDerivePrivateScalar(fromHex(ikmR));
+    const priv = await importX25519Scalar(scalar, false);
+    const pubE = await importX25519Scalar(scalar, true);
+    const pub = await x25519PublicBytes(pubE);
+
+    const env = await sealEnvelope(new TextEncoder().encode("v1"), [pub], { account_id: "a", secret_id: "s1", version: 1 });
+    const putCalls: Array<{ id: string; epoch: number }> = [];
+    const cpClient: SecretsCPClient = {
+      listSecretIdsForSweep: async () => ["s1"],
+      getEnvelope: async () => env,
+      putEnvelope: async (id, _env, devicesetEpoch) => {
+        putCalls.push({ id, epoch: devicesetEpoch });
+      },
+    };
+
+    await executeSweep({
+      progress: initSweep({ targetVersion: 9, secretIds: ["s1"], isRevocation: true }),
+      deviceKeys: {
+        x25519Private: priv,
+        x25519Public: await crypto.subtle.importKey("raw", pub as unknown as Uint8Array<ArrayBuffer>, { name: "X25519" }, true, []),
+        ecdsaPrivate: (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]) as CryptoKeyPair).privateKey,
+        ecdsaPublic: (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]) as CryptoKeyPair).publicKey,
+      } as Parameters<typeof executeSweep>[0]["deviceKeys"],
+      newMemberPubs: [pub],
+      cpClient,
+    });
+
+    expect(putCalls).toEqual([{ id: "s1", epoch: 9 }]);
   });
 });

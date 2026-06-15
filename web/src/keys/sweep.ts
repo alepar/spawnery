@@ -10,10 +10,9 @@
  * new set with a fresh DEK [roast M2], and stores the result back. Progress
  * survives a browser restart via the SweepProgress in localStorage (epoch.ts).
  *
- * CP RPC GAP: the concrete Connect/protobuf client for GetSecret / PutSecret
- * is deferred until the sp-7h6.1 user-secrets-store slice lands. Callers
- * provide a SecretsCPClient implementation; tests pass a fake. Once the CP
- * RPCs ship, wire the real client here.
+ * The executor fetches and updates sealed envelopes through the CP's secrets
+ * API client. Tests pass a fake; production wires the browser implementation
+ * from web/src/api/secrets.ts.
  */
 
 import { type Envelope, reSealEnvelope } from "./hpke";
@@ -29,11 +28,9 @@ import { toBase64 } from "./encoding";
  * SecretsCPClient is the seam between the sweep executor and the CP's secrets
  * store. Implementations call the CP's GetSecret / PutSecret RPCs.
  *
- * CP RPC GAP: the real Connect client is deferred (sp-7h6.1). Until it ships,
- * callers must supply a fake/stub that satisfies this interface — no real
- * secrets will be re-sealed in the browser until the real client is wired.
  */
 export interface SecretsCPClient {
+  listSecretIdsForSweep(devicesetEpochBefore: number): Promise<string[]>;
   /**
    * getEnvelope fetches the current sealed envelope for the given secret.
    * The returned Envelope is the at-rest JSON representation matching Go's
@@ -46,7 +43,7 @@ export interface SecretsCPClient {
    * The at_rest.version in env must be exactly (old version + 1); the CP
    * enforces monotonic versioning as a CAS guard.
    */
-  putEnvelope(secretId: string, env: Envelope): Promise<void>;
+  putEnvelope(secretId: string, env: Envelope, devicesetEpoch: number): Promise<void>;
 }
 
 /**
@@ -63,8 +60,6 @@ export interface SecretsCPClient {
  * executeSweep will skip already-completed secrets. The returned progress
  * reflects the final state.
  *
- * CP RPC GAP: cpClient must be a real implementation once the CP GetSecret /
- * PutSecret Connect RPCs land (sp-7h6.1). Until then only stubs are usable.
  */
 export async function executeSweep(opts: {
   progress: SweepProgress;
@@ -99,7 +94,7 @@ export async function executeSweep(opts: {
       );
 
       // 4. Store the re-sealed envelope
-      await opts.cpClient.putEnvelope(secretId, resealed);
+      await opts.cpClient.putEnvelope(secretId, resealed, progress.targetVersion);
 
       // 5. Mark complete and persist
       progress = markSecretsCompleted(progress, [secretId]);

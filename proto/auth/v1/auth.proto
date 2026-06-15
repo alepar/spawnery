@@ -2,6 +2,39 @@ syntax = "proto3";
 package auth.v1;
 option go_package = "spawnery/gen/auth/v1;authv1";
 
+service AuthService {
+  // Node -> AS: mint a repository_id-scoped GitHub user access token from the currently retained
+  // refresh credential. The AS combines refresh_token with the App client_secret; the client_secret
+  // never leaves the AS. Implementations must use request_id as the idempotency key for retrying an
+  // ambiguous single-use refresh rotation.
+  rpc MintGitHubAccessToken(MintGitHubAccessTokenRequest) returns (MintGitHubAccessTokenResponse);
+}
+
+message GitHubRefreshTokenRef {
+  string secret_id     = 1; // owner-sealed secret identity retained by the node.
+  uint64 version       = 2; // tuple version delivered to this spawn generation.
+  string delivery_id   = 3; // delivery identity for idempotency/replay correlation.
+  string refresh_token = 4; // current GitHub refresh token presented over the node<->AS channel.
+}
+
+message MintGitHubAccessTokenRequest {
+  string                request_id        = 1; // stable idempotency key for this mint attempt.
+  string                spawn_id          = 2;
+  uint64                generation        = 3;
+  GitHubRefreshTokenRef refresh_token_ref = 4;
+  string                repository_id     = 5; // GitHub repository_id generation-time narrowing.
+}
+
+message MintGitHubAccessTokenResponse {
+  string request_id              = 1; // echoes request_id so retry adopters can match responses.
+  string access_token            = 2;
+  int64  access_expires_at_unix  = 3;
+  string refresh_token           = 4; // rotated refresh token the node must atomically retain.
+  int64  refresh_expires_at_unix = 5;
+  string token_type              = 6; // normally "bearer"; preserved for GitHub parity.
+  string repository_id           = 7; // echoes the repository_id scoped into access_token.
+}
+
 // SessionTokenBody is the AS-signed access-token payload (auth-identity design §3).
 // wire: base64.RawURLEncoding(body) "." base64.RawURLEncoding(sig)  [MC1]
 // sig = ed25519("spawnery/session-token/v1" || body_bytes) — every AS-signed artifact class

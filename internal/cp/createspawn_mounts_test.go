@@ -1,0 +1,115 @@
+package cp
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"connectrpc.com/connect"
+	cpv1 "spawnery/gen/cp/v1"
+	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/cp/auth"
+	"spawnery/internal/cp/registry"
+	"spawnery/internal/cp/store"
+)
+
+func seedCreateSpawnMountApp(t *testing.T, s *Server, appID string, mountNames ...string) {
+	t.Helper()
+
+	ctx := context.Background()
+	now := time.Now().Unix()
+	if err := s.st.Apps().Upsert(ctx, store.App{
+		ID: appID, DisplayName: appID, Visibility: "public", Listed: true, CreatorID: "spawnery", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	decls := make([]store.MountDecl, len(mountNames))
+	for i, name := range mountNames {
+		decls[i] = store.MountDecl{AppID: appID, Version: "1.0.0", Name: name, Required: true}
+	}
+	if err := s.st.Apps().UpsertVersion(ctx,
+		store.AppVersion{AppID: appID, Version: "1.0.0", Ref: "examples/" + appID, Tier: store.TierReviewed, CreatedAt: now},
+		decls); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateSpawnPersistsRequestedMountBindingsAndDefaultsOthersToScratch(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	seedCreateSpawnMountApp(t, s, "multi-mount-app", "main", "cache")
+
+	sender := &capSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: sender, Max: 1, Free: 1})
+	go func() {
+		for {
+			if st := sender.firstStart(); st != nil {
+				s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId: "multi-mount-app",
+		Model: "m",
+		Mounts: []*cpv1.MountBinding{{
+			Name:       "main",
+			BackendUri: "github:owner/repo",
+		}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitActive(t, s, resp.Msg.SpawnId)
+
+	mounts, err := s.st.Spawns().GetMounts(ctx, resp.Msg.SpawnId)
+	if err != nil {
+		t.Fatalf("GetMounts: %v", err)
+	}
+	got := map[string]string{}
+	for _, mount := range mounts {
+		got[mount.Name] = mount.BackendURI
+	}
+	if got["main"] != "github:owner/repo" {
+		t.Fatalf("main backend = %q, want github:owner/repo; mounts=%+v", got["main"], mounts)
+	}
+	if got["cache"] != "scratch" {
+		t.Fatalf("cache backend = %q, want scratch; mounts=%+v", got["cache"], mounts)
+	}
+}
+
+func TestCreateSpawnRejectsUndeclaredMountBinding(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId: "secret-app",
+		Model: "m",
+		Mounts: []*cpv1.MountBinding{{
+			Name:       "bogus",
+			BackendUri: "github:owner/repo",
+		}},
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("CreateSpawn error code = %v, want InvalidArgument (err=%v)", connect.CodeOf(err), err)
+	}
+}
+
+func TestCreateSpawnRejectsDuplicateMountBindings(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId: "secret-app",
+		Model: "m",
+		Mounts: []*cpv1.MountBinding{
+			{Name: "main", BackendUri: "scratch:"},
+			{Name: "main", BackendUri: "github:owner/repo"},
+		},
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("CreateSpawn error code = %v, want InvalidArgument (err=%v)", connect.CodeOf(err), err)
+	}
+}

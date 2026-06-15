@@ -35,6 +35,7 @@ func (s *bunStore) Apps() AppRepo                             { return &appRepo{
 func (s *bunStore) Spawns() SpawnRepo                         { return &spawnRepo{db: s.db} }
 func (s *bunStore) AgentImages() AgentImageRepo               { return &agentImageRepo{db: s.db} }
 func (s *bunStore) TransferSets() TransferSetRepo             { return &transferSetRepo{db: s.db} }
+func (s *bunStore) Secrets() SecretRepo                       { return &secretRepo{db: s.db} }
 func (s *bunStore) Profiles() ProfileRepo                     { return &profileRepo{db: s.db} }
 func (s *bunStore) CustomizationCatalog() CustomizationCatalogRepo {
 	return &customizationCatalogRepo{db: s.db}

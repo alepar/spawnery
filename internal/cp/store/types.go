@@ -216,6 +216,36 @@ type AgentImageBinary struct {
 	Binary        string `bun:"binary_name,pk"`
 }
 
+// SecretType discriminates the durable owner-scoped secrets catalog entry type.
+type SecretType string
+
+const (
+	SecretTypeGitHubToken  SecretType = "github-token"
+	SecretTypeInferenceKey SecretType = "inference-key"
+	SecretTypeGenericKV    SecretType = "generic-kv"
+)
+
+type Secret struct {
+	bun.BaseModel   `bun:"table:secrets,alias:sec"`
+	AccountID       string     `bun:"account_id,pk"`
+	SecretID        string     `bun:"secret_id,pk"`
+	Type            SecretType `bun:"type,notnull"`
+	Name            string     `bun:"name,notnull"`
+	Provider        string     `bun:"provider,notnull"`
+	TargetContainer int32      `bun:"target_container,notnull"`
+	EnvVarName      string     `bun:"env_var_name,notnull"`
+	DestPath        string     `bun:"dest_path,notnull"`
+	Version         uint64     `bun:"version,notnull"`
+	DevicesetEpoch  uint64     `bun:"deviceset_epoch,notnull"`
+	Envelope        []byte     `bun:"envelope,notnull"`
+	CreatedAt       int64      `bun:"created_at,notnull"`
+	UpdatedAt       int64      `bun:"updated_at,notnull"`
+}
+
+type SecretListFilter struct {
+	DevicesetEpochBefore uint64
+}
+
 // --- Profiles (sp-nrzf.3.5) ------------------------------------------------
 
 // ProfileEntryKind discriminates what a ProfileEntry installs into a spawn.

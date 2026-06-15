@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,7 +58,7 @@ func secretTestRig(t *testing.T, nodeID, spawnID string, gen uint64) (*attacher,
 // sealSecret performs the OWNER-side leg: fresh-DEK envelope sealed to a device key, then re-sealed to
 // the node's published HPKE sub-key under the in-flight AAD — exactly internal/secrets/seal +
 // internal/secrets/subkey as a real owner client would, JSON-encoded onto a wire SealedSecret.
-func sealSecret(t *testing.T, holder *subkey.Node, spawnID string, gen uint64, target, secretID string, payload []byte) *nodev1.SealedSecret {
+func sealSecret(t *testing.T, holder *subkey.Node, spawnID string, gen uint64, target, secretID string, version uint64, deliveryID string, payload []byte) *nodev1.SealedSecret {
 	t.Helper()
 	devPub, devPriv, err := seal.NodeKeyPair()
 	if err != nil {
@@ -71,7 +72,14 @@ func sealSecret(t *testing.T, holder *subkey.Node, spawnID string, gen uint64, t
 	if !ok {
 		t.Fatal("holder has no current sub-key")
 	}
-	aad := seal.InFlightAAD{SpawnID: spawnID, Generation: gen, NodeID: signed.NodeID, NotAfter: signed.NotAfter}
+	aad := seal.InFlightAAD{
+		SpawnID:    spawnID,
+		Generation: gen,
+		NodeID:     signed.NodeID,
+		NotAfter:   signed.NotAfter,
+		Version:    version,
+		DeliveryID: deliveryID,
+	}
 	ns, err := seal.ReSealToNode(env, devPriv, signed.HPKEPub, aad)
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +88,7 @@ func sealSecret(t *testing.T, holder *subkey.Node, spawnID string, gen uint64, t
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &nodev1.SealedSecret{TargetPath: target, Sealed: b, SecretId: secretID}
+	return &nodev1.SealedSecret{TargetPath: target, Sealed: b, SecretId: secretID, Version: version, DeliveryId: deliveryID}
 }
 
 // Full round trip: seal with seal+subkey -> the wire SecretDelivery the CP relays -> node unseals ->
@@ -89,7 +97,7 @@ func TestSecretDeliveryUnsealsAndWritesTmpfs(t *testing.T) {
 	const nodeID, spawnID, gen = "node-1", "sp1", uint64(7)
 	a, holder, secretsRoot := secretTestRig(t, nodeID, spawnID, gen)
 	want := []byte("ghp_supersecrettoken\n")
-	sec := sealSecret(t, holder, spawnID, gen, "gh/hosts.yml", "gh", want)
+	sec := sealSecret(t, holder, spawnID, gen, "gh/hosts.yml", "gh", 1, "d-gh", want)
 
 	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{sec}})
 
@@ -116,7 +124,7 @@ func TestSecretDeliveryStaleGenerationDropped(t *testing.T) {
 	const nodeID, spawnID, liveGen = "node-1", "sp1", uint64(7)
 	a, holder, secretsRoot := secretTestRig(t, nodeID, spawnID, liveGen)
 	// Owner sealed for a now-superseded episode (gen 6 < live 7).
-	sec := sealSecret(t, holder, spawnID, 6, "gh/hosts.yml", "gh", []byte("stale"))
+	sec := sealSecret(t, holder, spawnID, 6, "gh/hosts.yml", "gh", 1, "d-gh-stale", []byte("stale"))
 
 	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_SecretDelivery{
 		SecretDelivery: &nodev1.SecretDelivery{SpawnId: spawnID, Generation: 6, Secrets: []*nodev1.SealedSecret{sec}},
@@ -135,7 +143,7 @@ func TestSecretDeliveryWrongContextRejected(t *testing.T) {
 	const nodeID, spawnID, gen = "node-1", "sp1", uint64(7)
 	a, holder, secretsRoot := secretTestRig(t, nodeID, spawnID, gen)
 	// Sealed with AAD generation 99, but delivered as generation 7 (the live one): AAD mismatch.
-	sec := sealSecret(t, holder, spawnID, 99, "gh/hosts.yml", "gh", []byte("nope"))
+	sec := sealSecret(t, holder, spawnID, 99, "gh/hosts.yml", "gh", 1, "d-gh-wrong-context", []byte("nope"))
 
 	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{sec}})
 
@@ -187,7 +195,7 @@ func TestSecretDeliveryRoutesJournalKeyToCustody(t *testing.T) {
 	a.mgr.SetJournal(jm, filepath.Join(jroot, "state"))
 
 	const repoPW = "kopia-repo-pw-delivered-cross-node"
-	sec := sealSecret(t, holder, spawnID, gen, "", journalkey.SecretID("work"), []byte(repoPW))
+	sec := sealSecret(t, holder, spawnID, gen, "", journalkey.SecretID("work"), 1, "d-journal-work", []byte(repoPW))
 	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{sec}})
 
 	got, err := osc.PasswordFor(spawnID)
@@ -209,9 +217,145 @@ func TestSecretDeliveryRoutesJournalKeyToCustody(t *testing.T) {
 func TestSecretDeliveryJournalKeyNoJournalerDropped(t *testing.T) {
 	const nodeID, spawnID, gen = "node-1", "sp1", uint64(3)
 	a, holder, _ := secretTestRig(t, nodeID, spawnID, gen) // rig manager has no journaler
-	sec := sealSecret(t, holder, spawnID, gen, "", journalkey.SecretID("work"), []byte("pw"))
+	sec := sealSecret(t, holder, spawnID, gen, "", journalkey.SecretID("work"), 1, "d-journal-work-no-journaler", []byte("pw"))
 	// Must not panic.
 	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{sec}})
+}
+
+func TestSecretDeliveryUsesWireVersionAndDeliveryIDForAAD(t *testing.T) {
+	const nodeID, spawnID, gen = "node-1", "sp1", uint64(7)
+	a, holder, secretsRoot := secretTestRig(t, nodeID, spawnID, gen)
+
+	sec := sealSecret(t, holder, spawnID, gen, "gh/hosts.yml", "gh", 11, "delivery-sp1-gh-v11", []byte("token-v11"))
+	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{sec}})
+
+	got, err := os.ReadFile(filepath.Join(secretsRoot, spawnID, "gh", "hosts.yml"))
+	if err != nil {
+		t.Fatalf("secret file not written: %v", err)
+	}
+	if string(got) != "token-v11" {
+		t.Fatalf("content = %q, want token-v11", got)
+	}
+}
+
+func TestSecretDeliveryRejectsDuplicateDeliveryID(t *testing.T) {
+	const nodeID, spawnID, gen = "node-1", "sp1", uint64(7)
+	a, holder, secretsRoot := secretTestRig(t, nodeID, spawnID, gen)
+
+	first := sealSecret(t, holder, spawnID, gen, "gh/hosts.yml", "gh", 3, "delivery-dup", []byte("first"))
+	replay := sealSecret(t, holder, spawnID, gen, "gh/hosts.yml", "gh", 3, "delivery-dup", []byte("second"))
+
+	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{first}})
+	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{replay}})
+
+	got, err := os.ReadFile(filepath.Join(secretsRoot, spawnID, "gh", "hosts.yml"))
+	if err != nil {
+		t.Fatalf("secret file not written: %v", err)
+	}
+	if string(got) != "first" {
+		t.Fatalf("duplicate delivery overwrote content: got %q, want first", got)
+	}
+}
+
+func TestSecretDeliveryRejectsOlderVersionAfterNewerAccepted(t *testing.T) {
+	const nodeID, spawnID, gen = "node-1", "sp1", uint64(7)
+	a, holder, secretsRoot := secretTestRig(t, nodeID, spawnID, gen)
+
+	newer := sealSecret(t, holder, spawnID, gen, "gh/hosts.yml", "gh", 5, "delivery-v5", []byte("newer"))
+	older := sealSecret(t, holder, spawnID, gen, "gh/hosts.yml", "gh", 4, "delivery-v4", []byte("older"))
+
+	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{newer}})
+	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{older}})
+
+	got, err := os.ReadFile(filepath.Join(secretsRoot, spawnID, "gh", "hosts.yml"))
+	if err != nil {
+		t.Fatalf("secret file not written: %v", err)
+	}
+	if string(got) != "newer" {
+		t.Fatalf("older version overwrote content: got %q, want newer", got)
+	}
+}
+
+func TestSecretDeliveryReplaySerializesSameSecretReservations(t *testing.T) {
+	r := newSecretDeliveryReplay()
+	_, oldRollback, err := r.begin("sp1", 7, "gh", 4, "delivery-v4")
+	if err != nil {
+		t.Fatalf("old begin: %v", err)
+	}
+
+	newerReady := make(chan error, 1)
+	newerCommit := make(chan func(), 1)
+	go func() {
+		commit, rollback, err := r.begin("sp1", 7, "gh", 5, "delivery-v5")
+		if err != nil {
+			newerReady <- err
+			return
+		}
+		newerCommit <- commit
+		_ = rollback
+		newerReady <- nil
+	}()
+
+	select {
+	case err := <-newerReady:
+		t.Fatalf("newer reservation completed while older delivery was still in-flight: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	oldRollback()
+	select {
+	case err := <-newerReady:
+		if err != nil {
+			t.Fatalf("newer begin after old rollback: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("newer reservation did not proceed after old rollback")
+	}
+	(<-newerCommit)()
+
+	_, staleRollback, err := r.begin("sp1", 7, "gh", 4, "delivery-v4b")
+	if err == nil {
+		staleRollback()
+		t.Fatal("older version began after newer version committed")
+	}
+}
+
+func TestSecretDeliveryReplayPruneReleasesSameSecretWaiters(t *testing.T) {
+	r := newSecretDeliveryReplay()
+	_, activeRollback, err := r.begin("sp1", 7, "gh", 4, "delivery-v4")
+	if err != nil {
+		t.Fatalf("active begin: %v", err)
+	}
+
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, rollback, err := r.begin("sp1", 7, "gh", 5, "delivery-v5")
+		if err == nil {
+			rollback()
+		}
+		waiterDone <- err
+	}()
+
+	select {
+	case err := <-waiterDone:
+		t.Fatalf("waiter completed before prune/release: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	r.pruneSpawnOlderThan("sp1", 8)
+	activeRollback()
+
+	select {
+	case err := <-waiterDone:
+		if err == nil {
+			t.Fatal("waiter begin succeeded after its generation was pruned")
+		}
+		if !strings.Contains(err.Error(), "pruned") {
+			t.Fatalf("waiter error = %v, want pruned", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiter begin remained blocked after prune and active rollback")
+	}
 }
 
 // publishSubKey returns the current SignedSubKey JSON (rotating if needed); rotatedSubKey returns bytes

@@ -1,19 +1,28 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"github.com/urfave/cli/v3"
+	"google.golang.org/protobuf/proto"
 
+	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
+	"spawnery/internal/clientverify"
 	"spawnery/internal/secrets/journalkey"
 	"spawnery/internal/secrets/seal"
 	"spawnery/internal/secrets/subkey"
@@ -43,6 +52,13 @@ type moveClient interface {
 
 var _ moveClient = (cpv1connect.SpawnServiceClient)(nil)
 
+type moveOptions struct {
+	AccountID        string
+	RootPEM          []byte
+	RevocationURL    string
+	RevocationClient *http.Client
+}
+
 // migrateTarget maps a <target> token onto a MigrateSpawnRequest's node/class fields.
 func migrateTarget(spawnID, target string) *cpv1.MigrateSpawnRequest {
 	if target == targetCloud {
@@ -56,7 +72,7 @@ func migrateTarget(spawnID, target string) *cpv1.MigrateSpawnRequest {
 // owner device (its private X25519 half opens the owner-sealed envelopes). On any step failure
 // it returns a clear, data-safe message: the CP leaves the spawn in a defined state (resumed on
 // the source's data, back to suspended on a failed target), so the user's data is never lost.
-func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.Device, spawnID, target string, out io.Writer, now time.Time) error {
+func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.Device, spawnID, target string, out io.Writer, now time.Time, opts moveOptions) error {
 	fmt.Fprintf(out, "move %s -> %s\n", spawnID, target)
 
 	// 1) Fetch the owner-sealed journal-key ciphertext for the spawn's mounts (CP holds ciphertext only).
@@ -114,13 +130,27 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 	if err := json.Unmarshal(nk.Msg.SignedSubkey, &sk); err != nil {
 		return fmt.Errorf("parse target sub-key: %w", err)
 	}
+	var revoked subkey.RevocationChecker = subkey.AllowAll{}
+	var expect subkey.Expectation
+	if len(nk.Msg.NodeCertChain) != 0 {
+		if strings.TrimSpace(opts.RevocationURL) == "" {
+			return errors.New("production node verification requires an Auth Service URL for node revocation checks")
+		}
+		revoked = subkey.NewASRevocationChecker(opts.RevocationURL, opts.RevocationClient, 0)
+		expect, err = moveExpectation(target, opts.AccountID)
+		if err != nil {
+			return err
+		}
+	}
 
 	// 4) For each mount: unseal the owner envelope locally + reseal to the target node's HPKE sub-key,
 	//    binding the in-flight AAD (spawn, generation, node, sub-key expiry, one-time delivery id).
 	fmt.Fprintf(out, "  resealing %d journal key(s) to node %s...\n", len(entries), sk.NodeID)
 	secrets := make([]*cpv1.SealedSecret, 0, len(entries))
 	for _, e := range entries {
-		sealedJSON, rerr := resealJournalKey(e.Ciphertext, dev, sk, nk.Msg.NodeCertChain, spawnID, nk.Msg.Generation, now)
+		version := nk.Msg.Generation
+		deliveryID := genDeliveryID()
+		sealedJSON, rerr := resealJournalKey(e.Ciphertext, dev, sk, nk.Msg.NodeCertChain, opts.RootPEM, expect, revoked, mr.Msg.NodeId, spawnID, nk.Msg.Generation, version, deliveryID, now)
 		if rerr != nil {
 			return fmt.Errorf("reseal journal key for mount %q: %w", e.Mount, rerr)
 		}
@@ -128,6 +158,8 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 			SecretId:   journalkey.SecretID(e.Mount),
 			TargetPath: journalkey.SecretID(e.Mount),
 			Sealed:     sealedJSON,
+			Version:    version,
+			DeliveryId: deliveryID,
 		})
 	}
 
@@ -143,28 +175,51 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 // resealJournalKey unseals an owner-sealed envelope with the device key and re-seals the recovered
 // journal password to the target node's HPKE sub-key under the in-flight AAD, returning the JSON
 // seal.NodeSealed the CP relays. When the CP relayed a node cert chain (enforced/prod mode), the
-// chain+sub-key are NOT yet PKI-verified here — full verification (pinned root + SAN/tenancy +
-// revocation, via subkey.SealForNode) lands with the production delivery wiring; in dev/insecure mode
-// the chain is empty and the relayed sub-key's HPKE pubkey is used directly.
-func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKey, certChain []byte, spawnID string, generation uint64, now time.Time) ([]byte, error) {
+// chain+sub-key are PKI-verified, revocation-checked, and compared against the CP-resolved node id;
+// in dev/insecure mode the chain is empty and the relayed sub-key's HPKE pubkey is used directly.
+func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKey, certChain []byte, rootPEM []byte, expect subkey.Expectation, revoked subkey.RevocationChecker, expectedNodeID string, spawnID string, generation uint64, version uint64, deliveryID string, now time.Time) ([]byte, error) {
 	var env seal.Envelope
 	if err := json.Unmarshal(ciphertext, &env); err != nil {
 		return nil, fmt.Errorf("ciphertext is not a valid owner-sealed envelope: %w", err)
 	}
-	_ = certChain // production PKI verification hook (see doc comment)
 	aad := seal.InFlightAAD{
 		SpawnID:    spawnID,
 		Generation: generation,
-		NodeID:     sk.NodeID,
-		NotAfter:   sk.NotAfter,
-		Version:    generation,
-		DeliveryID: genDeliveryID(),
+		Version:    version,
+		DeliveryID: deliveryID,
 	}
-	sealed, err := journalkey.ResealForNode(&env, dev.X25519Priv, sk.HPKEPub, aad)
+	if len(certChain) == 0 {
+		if len(rootPEM) != 0 {
+			return nil, errors.New("production node verification requires target node cert chain")
+		}
+		aad.NodeID = sk.NodeID
+		aad.NotAfter = sk.NotAfter
+		sealed, err := journalkey.ResealForNode(&env, dev.X25519Priv, sk.HPKEPub, aad)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(sealed)
+	}
+	if len(rootPEM) == 0 {
+		return nil, errors.New("production node verification requires --root-ca")
+	}
+	leafPEM, chainPEM, err := splitLeafChainPEM(certChain)
 	if err != nil {
 		return nil, err
 	}
-	_ = now
+	hpkePub, id, err := subkey.VerifyNodeForSealing(leafPEM, chainPEM, rootPEM, sk, expect, revoked, now)
+	if err != nil {
+		return nil, err
+	}
+	if id.NodeID != expectedNodeID {
+		return nil, fmt.Errorf("verified node %q does not match resolved node %q", id.NodeID, expectedNodeID)
+	}
+	aad.NodeID = id.NodeID
+	aad.NotAfter = sk.NotAfter
+	sealed, err := seal.ReSealToNode(&env, dev.X25519Priv, hpkePub, aad)
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(sealed)
 }
 
@@ -178,6 +233,8 @@ func moveCmd() *cli.Command {
 			configDirFlag(),
 			&cli.StringFlag{Name: "cp", Value: "http://127.0.0.1:8080", Usage: "control-plane address"},
 			&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token"},
+			&cli.StringFlag{Name: "root-ca", Usage: "path to the pinned Root CA PEM for production node verification"},
+			&cli.StringFlag{Name: "as", Usage: "Auth Service origin for node revocation checks; defaults to the stored login AS URL"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if c.Args().Len() != 2 {
@@ -192,6 +249,10 @@ func moveCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
+			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), strings.TrimSpace(c.String("root-ca")))
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
 			dev, err := loadDevice(dir)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
@@ -201,10 +262,90 @@ func moveCmd() *cli.Command {
 				connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 			// Pass client as both moveClient and intentClient — cpv1connect.SpawnServiceClient
 			// satisfies both interfaces.
-			if err := runMove(ctx, client, client, dev, spawnID, target, c.Writer, time.Now()); err != nil {
+			if err := runMove(ctx, client, client, dev, spawnID, target, c.Writer, time.Now(), opts); err != nil {
 				return cli.Exit("move failed: "+err.Error(), 1)
 			}
 			return nil
 		},
 	}
+}
+
+func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath string) (moveOptions, error) {
+	opts := moveOptions{
+		AccountID: resolveMoveAccountID(dir, tokenFlag),
+	}
+	if rootCAPath != "" {
+		rootPEM, err := os.ReadFile(rootCAPath)
+		if err != nil {
+			return moveOptions{}, fmt.Errorf("read root CA PEM: %w", err)
+		}
+		opts.RootPEM = rootPEM
+	}
+	asURL := strings.TrimRight(asFlag, "/")
+	if asURL == "" {
+		state, err := loadState(dir)
+		if err == nil && state != nil {
+			asURL = strings.TrimRight(state.ASURL, "/")
+		}
+	}
+	if asURL != "" {
+		opts.RevocationURL = asURL + "/node-revocations"
+	}
+	return opts, nil
+}
+
+func resolveMoveAccountID(dir, tokenFlag string) string {
+	for _, token := range []string{os.Getenv("SPAWNERY_TOKEN"), os.Getenv("CP_DEV_TOKEN")} {
+		if accountID, err := accountIDFromAccessToken(token); err == nil && accountID != "" {
+			return accountID
+		}
+	}
+	if tokenFlag != "" && tokenFlag != "dev-token" {
+		if accountID, err := accountIDFromAccessToken(tokenFlag); err == nil && accountID != "" {
+			return accountID
+		}
+	}
+	state, err := loadState(dir)
+	if err != nil || state == nil {
+		return ""
+	}
+	if state.AccountID != "" {
+		return state.AccountID
+	}
+	accountID, _ := accountIDFromAccessToken(state.AccessToken)
+	return accountID
+}
+
+func accountIDFromAccessToken(wire string) (string, error) {
+	bodyB64, _, ok := strings.Cut(wire, ".")
+	if !ok {
+		return "", errors.New("token is not in session-token wire format")
+	}
+	bodyBytes, err := base64.RawURLEncoding.DecodeString(bodyB64)
+	if err != nil {
+		return "", err
+	}
+	var body authv1.SessionTokenBody
+	if err := proto.Unmarshal(bodyBytes, &body); err != nil {
+		return "", err
+	}
+	return body.AccountId, nil
+}
+
+func moveExpectation(target, accountID string) (subkey.Expectation, error) {
+	if target == targetCloud {
+		return clientverify.Expectation{Tenancy: "cloud"}, nil
+	}
+	if strings.TrimSpace(accountID) == "" {
+		return clientverify.Expectation{}, errors.New("production self-hosted node verification requires a logged-in account")
+	}
+	return clientverify.Expectation{Tenancy: "self-hosted", AccountID: accountID}, nil
+}
+
+func splitLeafChainPEM(certChain []byte) (leafPEM, chainPEM []byte, err error) {
+	block, rest := pem.Decode(certChain)
+	if block == nil {
+		return nil, nil, errors.New("target node cert chain is not valid PEM")
+	}
+	return pem.EncodeToMemory(block), bytes.TrimSpace(rest), nil
 }

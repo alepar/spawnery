@@ -230,6 +230,7 @@ func buildService() (*authsvc.Service, error) {
 	return authsvc.New(root.Cert, inter,
 		authsvc.WithSessionKey(sigKey),
 		authsvc.WithIdP(idp),
+		authsvc.WithNodeRevocations(idStore.NodeRevocations()),
 	), nil
 }
 

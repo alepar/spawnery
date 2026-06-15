@@ -19,9 +19,9 @@ import (
 	"sync"
 	"time"
 
-	cpv1 "spawnery/gen/cp/v1"
-
 	authv1 "spawnery/gen/auth/v1"
+	cpv1 "spawnery/gen/cp/v1"
+	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/intent"
 )
 
@@ -35,18 +35,27 @@ const defaultIntentTTL = intent.FreshnessWindow + intent.SkewBudget + 5*time.Sec
 type pendingIntentRegistry struct {
 	mu      sync.Mutex
 	entries map[string]*intentEntry
+	byCh    map[chan *authv1.AuthEnvelope]*intentEntry
 	ttl     time.Duration // injectable for tests
 }
 
 type intentEntry struct {
-	ownerID string
-	pending *cpv1.PendingIntent
-	ch      chan *authv1.AuthEnvelope // buffered cap 1: Submit is non-blocking
+	ownerID      string
+	pending      *cpv1.PendingIntent
+	ch           chan *authv1.AuthEnvelope     // compatibility read path for older tests
+	submissionCh chan *pendingIntentSubmission // buffered cap 1: Submit is non-blocking
+	submitted    bool
+}
+
+type pendingIntentSubmission struct {
+	Env     *authv1.AuthEnvelope
+	Secrets []*nodev1.SealedSecret
 }
 
 func newPendingIntentRegistry() *pendingIntentRegistry {
 	return &pendingIntentRegistry{
 		entries: map[string]*intentEntry{},
+		byCh:    map[chan *authv1.AuthEnvelope]*intentEntry{},
 		ttl:     defaultIntentTTL,
 	}
 }
@@ -56,22 +65,31 @@ func newPendingIntentRegistry() *pendingIntentRegistry {
 // the caller holds means this should never happen in practice.
 func (r *pendingIntentRegistry) register(spawnID, ownerID string, pi *cpv1.PendingIntent) chan *authv1.AuthEnvelope {
 	ch := make(chan *authv1.AuthEnvelope, 1)
+	submissionCh := make(chan *pendingIntentSubmission, 1)
 	r.mu.Lock()
-	r.entries[spawnID] = &intentEntry{ownerID: ownerID, pending: pi, ch: ch}
+	e := &intentEntry{ownerID: ownerID, pending: pi, ch: ch, submissionCh: submissionCh}
+	r.entries[spawnID] = e
+	r.byCh[ch] = e
 	r.mu.Unlock()
 	return ch
 }
 
 // await blocks until a SignedIntent arrives, the ctx is cancelled, or the TTL fires.
-// Returns the AuthEnvelope on success. On timeout or cancel the caller should abort Provision.
-func (r *pendingIntentRegistry) await(ctx context.Context, ch chan *authv1.AuthEnvelope) (*authv1.AuthEnvelope, error) {
+// Returns the submission on success. On timeout or cancel the caller should abort Provision.
+func (r *pendingIntentRegistry) await(ctx context.Context, ch chan *authv1.AuthEnvelope) (*pendingIntentSubmission, error) {
+	r.mu.Lock()
+	e := r.byCh[ch]
+	r.mu.Unlock()
+	if e == nil {
+		return nil, fmt.Errorf("unknown pending intent channel")
+	}
 	ttl := r.ttl
 	if ttl <= 0 {
 		ttl = defaultIntentTTL
 	}
 	select {
-	case env := <-ch:
-		return env, nil
+	case submission := <-e.submissionCh:
+		return submission, nil
 	case <-time.After(ttl):
 		return nil, fmt.Errorf("timed out waiting for client SignedIntent (TTL %s)", ttl)
 	case <-ctx.Done():
@@ -91,29 +109,44 @@ func (r *pendingIntentRegistry) get(spawnID string) (*cpv1.PendingIntent, bool) 
 	return e.pending, true
 }
 
-// submit validates ownership and routes the AuthEnvelope into the channel.
+// submit validates ownership and routes the submitted AuthEnvelope/secrets into the channel.
 // Returns an error if: no pending entry, wrong owner, or channel already consumed (double-submit).
-func (r *pendingIntentRegistry) submit(spawnID, ownerID string, env *authv1.AuthEnvelope) error {
+func (r *pendingIntentRegistry) submit(spawnID, ownerID string, submission *pendingIntentSubmission) error {
 	r.mu.Lock()
 	e, ok := r.entries[spawnID]
-	r.mu.Unlock()
 	if !ok {
+		r.mu.Unlock()
 		return fmt.Errorf("no pending intent for spawn %q", spawnID)
 	}
 	if e.ownerID != ownerID {
+		r.mu.Unlock()
 		return fmt.Errorf("permission denied: submitter %q is not the owner of spawn %q", ownerID, spawnID)
 	}
-	select {
-	case e.ch <- env:
-		return nil
-	default:
+	if submission == nil || submission.Env == nil {
+		r.mu.Unlock()
+		return fmt.Errorf("invalid pending intent submission for spawn %q", spawnID)
+	}
+	if e.submitted {
+		r.mu.Unlock()
 		return fmt.Errorf("intent already submitted for spawn %q", spawnID)
 	}
+	e.submitted = true
+	r.mu.Unlock()
+
+	e.submissionCh <- submission
+	select {
+	case e.ch <- submission.Env:
+	default:
+	}
+	return nil
 }
 
 // cleanup removes the entry for a spawn after provision completes (success or failure).
 func (r *pendingIntentRegistry) cleanup(spawnID string) {
 	r.mu.Lock()
+	if e := r.entries[spawnID]; e != nil {
+		delete(r.byCh, e.ch)
+	}
 	delete(r.entries, spawnID)
 	r.mu.Unlock()
 }

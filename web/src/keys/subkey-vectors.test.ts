@@ -119,6 +119,31 @@ describe("subkey Go-TS cross-language vectors", () => {
     void sk; // ensure we parsed the JSON
   });
 
+  it("verifyNodeForSealing rejects missing cert chain when a root is pinned", async () => {
+    await expect(
+      verifyNodeForSealing(
+        "",
+        v.root_pem,
+        v.subkey_json,
+        { tenancy: "self-hosted", accountId: v.expected_account_id },
+        verifyAt,
+      ),
+    ).rejects.toThrow("cert chain");
+  });
+
+  it("verifyNodeForSealing preserves explicit dev mode when no root is pinned", async () => {
+    const result = await verifyNodeForSealing(
+      "",
+      "",
+      v.subkey_json,
+      { tenancy: "self-hosted", accountId: v.expected_account_id },
+      verifyAt,
+    );
+    expect(result.identity.nodeId).toBe(v.expected_node_id);
+    expect(result.identity.accountId).toBe("dev");
+    expect(result.identity.nodeClass).toBe("cloud");
+  });
+
   it("verifyNodeForSealing rejects wrong tenancy expectation", async () => {
     await expect(
       verifyNodeForSealing(v.chain_pem, v.root_pem, v.subkey_json, { tenancy: "cloud" }, verifyAt),

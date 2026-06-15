@@ -11,15 +11,16 @@ import (
 // endpoint exists for bootstrap/ops convenience, not as the trust mechanism.
 //
 // Identity routes (A1, sp-ussy.1) are registered when an *IdP is attached via WithIdP:
-//   GET  /oauth/authorize     — start auth-code+PKCE flow (rate-limited)
-//   GET  /oauth/callback      — GitHub redirects here; mints tokens
-//   POST /refresh             — credentialed-CORS; PoP-gated rotation [AM2,AM5]
-//   POST /logout              — revoke family + expire cookie [AM10]
-//   GET  /revocations         — signed revocation feed for CP (A2) [AM10]
-//   POST /device/authorize    — RFC 8628: spawnctl POSTs session pubkey [AM7]
-//   GET  /device/verify       — user confirmation page (authed browser) [AM7]
-//   POST /device/verify       — user submits user_code [AM7]
-//   POST /device/token        — spawnctl polls for tokens [AM7]
+//
+//	GET  /oauth/authorize     — start auth-code+PKCE flow (rate-limited)
+//	GET  /oauth/callback      — GitHub redirects here; mints tokens
+//	POST /refresh             — credentialed-CORS; PoP-gated rotation [AM2,AM5]
+//	POST /logout              — revoke family + expire cookie [AM10]
+//	GET  /revocations         — signed revocation feed for CP (A2) [AM10]
+//	POST /device/authorize    — RFC 8628: spawnctl POSTs session pubkey [AM7]
+//	GET  /device/verify       — user confirmation page (authed browser) [AM7]
+//	POST /device/verify       — user submits user_code [AM7]
+//	POST /device/token        — spawnctl polls for tokens [AM7]
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -35,6 +36,9 @@ func (s *Service) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte(base64.RawURLEncoding.EncodeToString(s.SessionPubKey())))
 	})
+	if s.nodeRevocations != nil {
+		mux.HandleFunc("GET /node-revocations", s.serveNodeRevocations)
+	}
 
 	if s.deviceSet != nil {
 		ds := s.deviceSet

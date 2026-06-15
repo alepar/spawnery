@@ -15,7 +15,7 @@ func main() {
 	controlToken := os.Getenv("SIDECAR_CONTROL_TOKEN")
 	controlAddr := os.Getenv("SIDECAR_CONTROL_ADDR")
 	if key == "" {
-		log.Fatal("OPENROUTER_API_KEY required")
+		log.Printf("sidecar starting without OPENROUTER_API_KEY; waiting for live credentials or forwarding with an empty bearer")
 	}
 	log.Printf("sidecar listening on %s -> %s", addr, upstream)
 

@@ -164,6 +164,29 @@ Cross-*site* placement (e.g. AS on a different TLD) breaks silent refresh under 
 Firefox TCP (a perpetual-login loop). The `/refresh` cookie is `SameSite=Strict` and is only
 sent by the browser to the AS origin.
 
+## GitHub Response-Wrap Store For Multi-Instance AS
+
+The GitHub credential link flow uses response wrapping: after the AS exchanges the GitHub App OAuth
+code, it holds the resulting user-token tuple behind a short-lived single-use nonce until the
+authenticated owner client redeems it and seals it into the CP-blind secrets store.
+
+Single-instance AS may keep this response-wrap state in process memory. A horizontally scaled AS
+must not rely on load-balancer stickiness for correctness. Production multi-instance deployments
+must provide a shared volatile response-wrap store with these properties:
+
+- atomic redeem-and-delete semantics (`GETDEL` or an equivalent compare/delete transaction)
+- short TTL, no refresh/extension on read, and automatic expiry cleanup
+- payload encrypted by the AS before storage; the store never contains plaintext GitHub tuples
+- no durable plaintext persistence, crash dumps, request logs, or metrics containing tuple material
+- redemption bound to the authenticated owner session and expected client context, so a leaked nonce
+  alone is insufficient
+- replay rejection after the first successful redemption and a clear "repeat link flow" outcome when
+  the issuing AS dies or the nonce expires before redemption
+
+Redis with TLS, authentication, disabled plaintext persistence, and atomic `GETDEL` is the preferred
+deployment shape. The sqlite tier-0 identity database is not the response-wrap store; writing token
+tuples there, even briefly, violates the custody contract.
+
 ## GitHub App Requirements
 
 Register a GitHub App (not OAuth App) for the confidential-client leg [AM9]:

@@ -82,6 +82,7 @@ function makeListItem(overrides: Partial<DeviceListItem>): DeviceListItem {
 
 function noopCPClient(): SecretsCPClient {
   return {
+    listSecretIdsForSweep: () => Promise.resolve([]),
     getEnvelope: () => Promise.reject(new Error("no secrets")),
     putEnvelope: () => Promise.resolve(),
   };
@@ -165,6 +166,7 @@ describe("revokeDevices", () => {
     const logWithD2: DeviceSetLog = { entries: [...genesisLog.entries, addD2] };
 
     const appendedEntries: StoredEntry[] = [];
+    const listSecretIdsForSweep = vi.fn().mockResolvedValue(["s1", "s2"]);
     const serverLog = { entries: [...logWithD2.entries] };
     let serverVersion = 2;
     let serverHead = addHead;
@@ -194,9 +196,14 @@ describe("revokeDevices", () => {
       pinnedHeadVersion: 2,
       targetX25519Pubs: [d2Ref.x25519_pub],
       survivorX25519Pubs: [d1Ref.x25519_pub, recRef.x25519_pub],
-      secretIds: [],
-      cpClient: noopCPClient(),
+      cpClient: {
+        listSecretIdsForSweep,
+        getEnvelope: () => Promise.reject(new Error("unused")),
+        putEnvelope: () => Promise.resolve(),
+      },
     });
+
+    expect(listSecretIdsForSweep).toHaveBeenCalledWith(3);
 
     expect(appendedEntries).toHaveLength(1);
     const body = JSON.parse(new TextDecoder().decode(
@@ -233,7 +240,6 @@ describe("revokeDevices", () => {
         pinnedHeadVersion: 1,
         targetX25519Pubs: [recRef.x25519_pub],
         survivorX25519Pubs: [d1Ref.x25519_pub],
-        secretIds: [],
         cpClient: noopCPClient(),
       }),
     ).rejects.toThrow(/recovery virtual device/);
@@ -278,7 +284,6 @@ describe("revokeDevices", () => {
         pinnedHeadVersion: 2,
         targetX25519Pubs: [newRecRef.x25519_pub],
         survivorX25519Pubs: [d1Ref.x25519_pub, recRef.x25519_pub],
-        secretIds: [],
         cpClient: noopCPClient(),
       }),
     ).rejects.toThrow(/recovery virtual device/);
@@ -320,8 +325,8 @@ describe("revokeDevices", () => {
       pinnedHeadVersion: 2,
       targetX25519Pubs: [d2Ref.x25519_pub],
       survivorX25519Pubs: [d1Ref.x25519_pub, recRef.x25519_pub],
-      secretIds: ["s1", "s2"],
       cpClient: {
+        listSecretIdsForSweep: () => Promise.resolve(["s1", "s2"]),
         getEnvelope: () => Promise.reject(new Error("no secrets in test")),
         putEnvelope: () => Promise.resolve(),
       } as SecretsCPClient,
@@ -384,7 +389,6 @@ describe("revokeDevices", () => {
       pinnedHeadVersion: 3,
       targetX25519Pubs: [d2Ref.x25519_pub, d3Ref.x25519_pub],
       survivorX25519Pubs: [d1Ref.x25519_pub, recRef.x25519_pub],
-      secretIds: [],
       cpClient: noopCPClient(),
     });
 
@@ -442,7 +446,6 @@ describe("revokeDevices", () => {
       pinnedHeadVersion: 2,
       targetX25519Pubs: [d1Ref.x25519_pub, d2Ref.x25519_pub], // signer first (intentional)
       survivorX25519Pubs: [recRef.x25519_pub],
-      secretIds: [],
       cpClient: noopCPClient(),
     });
 
@@ -482,6 +485,7 @@ describe("revokeDevices", () => {
 
     const getCalls: string[] = [];
     const cpClient: SecretsCPClient = {
+      listSecretIdsForSweep: () => Promise.resolve(["s1", "s2"]),
       getEnvelope: async (id) => {
         getCalls.push(id);
         throw new Error("fail-intentionally"); // simulate partial failure
@@ -500,7 +504,6 @@ describe("revokeDevices", () => {
       pinnedHeadVersion: 2,
       targetX25519Pubs: [d2Ref.x25519_pub],
       survivorX25519Pubs: [d1Ref.x25519_pub, recRef.x25519_pub],
-      secretIds: ["s1", "s2"],
       cpClient,
     });
 

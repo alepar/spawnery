@@ -626,7 +626,7 @@ func (s *Server) ResumeSpawn(ctx context.Context, req *connect.Request[cpv1.Resu
 	// A plain resume re-places anywhere the policy allows (no override) and, on failure, lands in
 	// 'error' (sp-a7fs contract). MigrateSpawn reuses resumeLocked with an override + revert-on-fail.
 	if err := s.withClaim(ctx, id, func(cctx context.Context, leaseID string) error {
-		_, err := s.resumeLocked(cctx, owner, id, placementOverride{}, false, intent.OpResumeSpawn, nil, leaseID)
+		_, err := s.resumeLocked(cctx, owner, id, placementOverride{}, false, intent.OpResumeSpawn, req.Msg.GetAttachedSecretIds(), nil, leaseID)
 		return err
 	}); err != nil {
 		return nil, err
@@ -702,7 +702,7 @@ func rootfsPinsFromSuspend(sc *nodev1.SuspendComplete, sourceGeneration uint64, 
 // DEFINED state: revertOnFail=true (migration) rolls back to 'suspended'; false (plain resume) goes
 // to 'error'. Returns the node the spawn resumed on.
 // op identifies the lifecycle operation for the A4 PendingIntent domain tag [AC1].
-func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placementOverride, revertOnFail bool, op intent.Op, rootfs *rootfsRestorePins, leaseID string) (string, error) {
+func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placementOverride, revertOnFail bool, op intent.Op, attachedSecretIDs []string, rootfs *rootfsRestorePins, leaseID string) (string, error) {
 	sp, err := s.st.Spawns().Get(ctx, id)
 	if err != nil {
 		return "", connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
@@ -712,6 +712,9 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	}
 	if sp.Status != store.Suspended {
 		return "", connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn is not suspended"))
+	}
+	if err := s.attachSecretArtifactsToSpawn(ctx, owner, id, attachedSecretIDs); err != nil {
+		return "", err
 	}
 	// Placement is re-evaluated against the version's CURRENT tier at resume time.
 	ver, err := s.st.Apps().GetVersion(ctx, sp.AppID, sp.AppVersion)
@@ -750,21 +753,50 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
 	// Skipped when intentEnabled=false.
 	var env *authv1.AuthEnvelope
+	var secrets []*nodev1.SealedSecret
+	mounts, mountsErr := s.st.Spawns().GetMounts(ctx, id)
+	if mountsErr != nil {
+		s.failResume(ctx, id, gen, revertOnFail, "GetMounts")
+		return "", connect.NewError(connect.CodeInternal, mountsErr)
+	}
+	var arts []store.Artifact
+	var requiredSecretIDs []string
 	if s.intentEnabled {
+		var aerr error
+		arts, aerr = s.st.Spawns().GetArtifacts(ctx, id)
+		if aerr != nil {
+			s.failResume(ctx, id, gen, revertOnFail, "GetArtifacts")
+			return "", connect.NewError(connect.CodeInternal, aerr)
+		}
+		requiredSecretIDs = startupSecretIDsFromArtifacts(arts)
+		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
+			s.failResume(ctx, id, gen, revertOnFail, "validate startup secret catalog")
+			return "", err
+		}
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
 			s.failResume(ctx, id, gen, revertOnFail, "PickNodeID")
 			return "", pickErr
 		}
-		mounts, _ := s.st.Spawns().GetMounts(ctx, id)
-		pi := buildPendingIntent(op, id, uint64(gen), targetNodeID, sp.Image, sp.AppRef, sp.Model, "", mounts)
+		pi := buildPendingIntent(op, id, uint64(gen), targetNodeID, sp.Image, sp.AppRef, sp.Model, "", mounts, requiredSecretIDs)
 		ch := s.pendingIntents.register(id, owner, pi)
 		defer s.pendingIntents.cleanup(id)
-		env, err = s.pendingIntents.await(ctx, ch)
+		submission, awaitErr := s.pendingIntents.await(ctx, ch)
+		err = awaitErr
 		if err != nil {
 			s.failResume(ctx, id, gen, revertOnFail, "await SignedIntent")
 			return "", connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("await SignedIntent: %w", err))
 		}
+		if err := validateSubmittedStartupSecrets(requiredSecretIDs, submission.Secrets); err != nil {
+			s.failResume(ctx, id, gen, revertOnFail, "validate startup secrets")
+			return "", connect.NewError(connect.CodeFailedPrecondition, err)
+		}
+		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
+			s.failResume(ctx, id, gen, revertOnFail, "recheck startup secret catalog")
+			return "", err
+		}
+		env = submission.Env
+		secrets = submission.Secrets
 		placement.TargetNodeID = targetNodeID
 	}
 
@@ -783,8 +815,11 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	provCtx, provCancel := context.WithCancel(ctx)
 	defer provCancel()
 	go func() {
-		arts, _ := s.st.Spawns().GetArtifacts(provCtx, id)
-		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(arts))
+		provisionArts := arts
+		if provisionArts == nil {
+			provisionArts, _ = s.st.Spawns().GetArtifacts(provCtx, id)
+		}
+		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(provisionArts), secrets)
 		provCh <- provisionResult{n, e}
 	}()
 
@@ -1036,7 +1071,7 @@ func (s *Server) MigrateSpawn(ctx context.Context, req *connect.Request[cpv1.Mig
 			return migrateErr
 		}
 		var err error
-		nodeID, err = s.resumeLocked(cctx, owner, id, placementOverride{NodeID: targetNode, Class: targetClass}, true, intent.OpMigrateSpawn,
+		nodeID, err = s.resumeLocked(cctx, owner, id, placementOverride{NodeID: targetNode, Class: targetClass}, true, intent.OpMigrateSpawn, nil,
 			&rootfsRestorePins{SourceGeneration: sourceGeneration, Pins: rootfsPins}, leaseID)
 		if err != nil {
 			_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, s.now().UnixNano())
@@ -1111,7 +1146,32 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 
 	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
 	var env *authv1.AuthEnvelope
+	var secrets []*nodev1.SealedSecret
+	mounts, mountsErr := s.st.Spawns().GetMounts(ctx, req.Msg.SpawnId)
+	if mountsErr != nil {
+		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			log.Printf("RecreateSpawn %s: SetError after GetMounts failure also failed: %v", req.Msg.SpawnId, serr)
+		}
+		return nil, connect.NewError(connect.CodeInternal, mountsErr)
+	}
+	var arts []store.Artifact
+	var requiredSecretIDs []string
 	if s.intentEnabled {
+		var aerr error
+		arts, aerr = s.st.Spawns().GetArtifacts(ctx, req.Msg.SpawnId)
+		if aerr != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+				log.Printf("RecreateSpawn %s: SetError after GetArtifacts failure also failed: %v", req.Msg.SpawnId, serr)
+			}
+			return nil, connect.NewError(connect.CodeInternal, aerr)
+		}
+		requiredSecretIDs = startupSecretIDsFromArtifacts(arts)
+		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+				log.Printf("RecreateSpawn %s: SetError after startup secret catalog validation failure also failed: %v", req.Msg.SpawnId, serr)
+			}
+			return nil, err
+		}
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
 			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
@@ -1119,23 +1179,37 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 			}
 			return nil, pickErr
 		}
-		mounts, _ := s.st.Spawns().GetMounts(ctx, req.Msg.SpawnId)
-		pi := buildPendingIntent(intent.OpRecreateSpawn, req.Msg.SpawnId, uint64(gen), targetNodeID, sp.Image, sp.AppRef, sp.Model, "", mounts)
+		pi := buildPendingIntent(intent.OpRecreateSpawn, req.Msg.SpawnId, uint64(gen), targetNodeID, sp.Image, sp.AppRef, sp.Model, "", mounts, requiredSecretIDs)
 		ch := s.pendingIntents.register(req.Msg.SpawnId, owner, pi)
 		defer s.pendingIntents.cleanup(req.Msg.SpawnId)
-		var awaitErr error
-		env, awaitErr = s.pendingIntents.await(ctx, ch)
+		submission, awaitErr := s.pendingIntents.await(ctx, ch)
 		if awaitErr != nil {
 			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after await failure also failed: %v", req.Msg.SpawnId, serr)
 			}
 			return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("await SignedIntent: %w", awaitErr))
 		}
+		if err := validateSubmittedStartupSecrets(requiredSecretIDs, submission.Secrets); err != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+				log.Printf("RecreateSpawn %s: SetError after startup secret validation failure also failed: %v", req.Msg.SpawnId, serr)
+			}
+			return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+		}
+		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+				log.Printf("RecreateSpawn %s: SetError after startup secret catalog recheck failure also failed: %v", req.Msg.SpawnId, serr)
+			}
+			return nil, err
+		}
+		env = submission.Env
+		secrets = submission.Secrets
 		placement.TargetNodeID = targetNodeID
 	}
 
-	arts, _ := s.st.Spawns().GetArtifacts(ctx, req.Msg.SpawnId)
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, sp.BaseImageDigest, nil, storeToNodeArtifacts(arts))
+	if arts == nil {
+		arts, _ = s.st.Spawns().GetArtifacts(ctx, req.Msg.SpawnId)
+	}
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, nil, storeToNodeArtifacts(arts), secrets)
 	if err != nil {
 		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
