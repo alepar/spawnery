@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -673,6 +674,54 @@ func (s *Server) attachedSecretArtifactSpecs(ctx context.Context, owner string, 
 	return out, nil
 }
 
+func startupSecretIDsFromArtifacts(arts []store.Artifact) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, art := range arts {
+		if !art.Sensitive {
+			continue
+		}
+		id := strings.TrimSpace(art.EnvVarName)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func validateSubmittedStartupSecrets(required []string, got []*nodev1.SealedSecret) error {
+	requiredSet := map[string]struct{}{}
+	for _, id := range required {
+		requiredSet[id] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	for _, sec := range got {
+		id := strings.TrimSpace(sec.GetSecretId())
+		if id == "" {
+			return fmt.Errorf("startup secret has empty secret_id")
+		}
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("duplicate startup secret %q", id)
+		}
+		seen[id] = struct{}{}
+		if _, ok := requiredSet[id]; !ok {
+			return fmt.Errorf("undeclared startup secret %q", id)
+		}
+	}
+	for _, id := range required {
+		if _, ok := seen[id]; !ok {
+			return fmt.Errorf("missing startup secret %q", id)
+		}
+	}
+	return nil
+}
+
 func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.CreateSpawnRequest]) (*connect.Response[cpv1.CreateSpawnResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
@@ -847,10 +896,23 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		return
 	}
 
+	var arts []store.Artifact
+	var requiredSecretIDs []string
+
 	// Gen 1: store.Create inserted the live container row at generation 1 (SetActive below matches).
 	var env *authv1.AuthEnvelope
 	var secrets []*nodev1.SealedSecret
 	if s.intentEnabled {
+		var aerr error
+		arts, aerr = s.st.Spawns().GetArtifacts(ctx, spawnID)
+		if aerr != nil {
+			log.Printf("provisionSpawn %s: GetArtifacts: %v", spawnID, aerr)
+			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+				log.Printf("provisionSpawn %s: SetError after GetArtifacts failure also failed: %v", spawnID, serr)
+			}
+			return
+		}
+		requiredSecretIDs = startupSecretIDsFromArtifacts(arts)
 		// Two-phase A4 sign-after-resolve [AC1]: pick node, register pending intent, await client.
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
@@ -860,7 +922,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 			}
 			return
 		}
-		pi := buildPendingIntent(intent.OpCreateSpawn, spawnID, 1, targetNodeID, sp.Image, appRef, model, "", mounts)
+		pi := buildPendingIntent(intent.OpCreateSpawn, spawnID, 1, targetNodeID, sp.Image, appRef, model, "", mounts, requiredSecretIDs)
 		ch := s.pendingIntents.register(spawnID, ownerID, pi)
 		defer s.pendingIntents.cleanup(spawnID)
 		submission, awaitErr := s.pendingIntents.await(ctx, ch)
@@ -872,6 +934,13 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 			}
 			return
 		}
+		if err := validateSubmittedStartupSecrets(requiredSecretIDs, submission.Secrets); err != nil {
+			log.Printf("provisionSpawn %s: validate startup secrets: %v", spawnID, err)
+			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+				log.Printf("provisionSpawn %s: SetError after startup secret validation failure also failed: %v", spawnID, serr)
+			}
+			return
+		}
 		env = submission.Env
 		secrets = submission.Secrets
 		// Pin the same node the client signed for.
@@ -880,9 +949,12 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 
 	// Fresh create: base_image_digest is unknown until the node resolves it at create time.
 	// Pass "" so the node resolves and records the digest on first startup (spec §4).
-	arts, aerr := s.st.Spawns().GetArtifacts(ctx, spawnID)
-	if aerr != nil {
-		log.Printf("provisionSpawn %s: GetArtifacts: %v", spawnID, aerr)
+	if arts == nil {
+		var aerr error
+		arts, aerr = s.st.Spawns().GetArtifacts(ctx, spawnID)
+		if aerr != nil {
+			log.Printf("provisionSpawn %s: GetArtifacts: %v", spawnID, aerr)
+		}
 	}
 	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, storeToNodeArtifacts(arts), secrets)
 	if err != nil {
@@ -997,7 +1069,15 @@ func (s *Server) GetPendingIntent(ctx context.Context, req *connect.Request[cpv1
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
 	}
 	pi, ready := s.pendingIntents.get(req.Msg.SpawnId)
-	return connect.NewResponse(&cpv1.GetPendingIntentResponse{Pending: pi, Ready: ready}), nil
+	resp := &cpv1.GetPendingIntentResponse{Pending: pi, Ready: ready}
+	if ready {
+		if entry, ok := s.pendingIntentNodeKey(pi); ok {
+			resp.NodeCertChain = append([]byte(nil), entry.certChain...)
+			resp.SignedSubkey = append([]byte(nil), entry.subkey...)
+			resp.Generation = pi.GetGeneration()
+		}
+	}
+	return connect.NewResponse(resp), nil
 }
 
 // SubmitIntent delivers the client's SignedIntent + node access token, unblocking the pending
@@ -1068,16 +1148,17 @@ func (s *Server) mintSessionEnv(owner string, sa *authv1.AuthEnvelope) *authv1.A
 
 // buildPendingIntent constructs the cp.v1.PendingIntent from the committed provision tuple.
 // mounts comes from the store's mount list for the spawn (may be nil for CreateSpawn).
-func buildPendingIntent(op intent.Op, spawnID string, gen uint64, targetNodeID, image, appRef, model, dataRef string, mounts []store.Mount) *cpv1.PendingIntent {
+func buildPendingIntent(op intent.Op, spawnID string, gen uint64, targetNodeID, image, appRef, model, dataRef string, mounts []store.Mount, attachedSecretIDs []string) *cpv1.PendingIntent {
 	pi := &cpv1.PendingIntent{
-		Op:           string(op),
-		SpawnId:      spawnID,
-		Generation:   gen,
-		TargetNodeId: targetNodeID,
-		Image:        image,
-		AppRef:       appRef,
-		Model:        model,
-		DataRef:      dataRef,
+		Op:                string(op),
+		SpawnId:           spawnID,
+		Generation:        gen,
+		TargetNodeId:      targetNodeID,
+		Image:             image,
+		AppRef:            appRef,
+		Model:             model,
+		DataRef:           dataRef,
+		AttachedSecretIds: append([]string(nil), attachedSecretIDs...),
 	}
 	for _, m := range mounts {
 		pi.Mounts = append(pi.Mounts, &cpv1.MountBinding{Name: m.Name, BackendUri: m.BackendURI})

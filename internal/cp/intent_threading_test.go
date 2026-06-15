@@ -89,6 +89,22 @@ func goSubmitIntentWithSecrets(ctx context.Context, s *Server, spawnID, owner st
 			}
 			if resp.Msg.Ready {
 				pi = resp.Msg.Pending
+				if len(secrets) > 0 {
+					required := map[string]struct{}{}
+					for _, id := range pi.GetAttachedSecretIds() {
+						required[id] = struct{}{}
+					}
+					if len(required) != len(secrets) {
+						errCh <- fmt.Errorf("pending intent attached_secret_ids=%+v, want %d submitted secret ids", pi.GetAttachedSecretIds(), len(secrets))
+						return
+					}
+					for _, sec := range secrets {
+						if _, ok := required[sec.GetSecretId()]; !ok {
+							errCh <- fmt.Errorf("pending intent attached_secret_ids=%+v missing submitted secret %q", pi.GetAttachedSecretIds(), sec.GetSecretId())
+							return
+						}
+					}
+				}
 				break
 			}
 			if time.Now().After(deadline) {
@@ -367,14 +383,16 @@ func TestIntentThreadedCreateSpawn(t *testing.T) {
 func TestIntentThreadedSealedSecretsReachStartSpawn(t *testing.T) {
 	s, sender, stopACK := intentTestServer(t)
 	defer stopACK()
+	createIntentCatalogSecret(t, s, "alice", "gh-main", cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT, "github/token", "GITHUB_TOKEN")
 
 	sessionKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	errCh := make(chan error, 1)
 
 	ctx := auth.WithOwner(context.Background(), "alice")
 	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
-		AppId: "secret-app",
-		Model: "m",
+		AppId:             "secret-app",
+		Model:             "m",
+		AttachedSecretIds: []string{"gh-main"},
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -400,6 +418,48 @@ func TestIntentThreadedSealedSecretsReachStartSpawn(t *testing.T) {
 	}
 	assertAuthThreaded(t, sender, spawnID)
 	assertSealedSecretsThreaded(t, sender, spawnID)
+}
+
+func TestIntentThreadedCreateSpawnRejectsMissingAttachedSecretSubmission(t *testing.T) {
+	s, sender, stopACK := intentTestServer(t)
+	defer stopACK()
+	createIntentCatalogSecret(t, s, "alice", "gh-main", cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT, "github/token", "GITHUB_TOKEN")
+
+	sessionKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	errCh := make(chan error, 1)
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId:             "secret-app",
+		Model:             "m",
+		AttachedSecretIds: []string{"gh-main"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawnID := resp.Msg.GetSpawnId()
+
+	goSubmitIntentWithSecrets(context.Background(), s, spawnID, "alice", sessionKey, nil, errCh)
+	if submitErr := <-errCh; submitErr != nil {
+		t.Fatalf("SubmitIntent should accept the envelope and let provision validation fail: %v", submitErr)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sp, _ := s.st.Spawns().Get(context.Background(), spawnID)
+		if sp.Status == store.Errored {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("spawn never became Errored (status=%v)", sp.Status)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for _, ss := range sender.starts() {
+		if ss.GetSpawnId() == spawnID {
+			t.Fatalf("StartSpawn was sent for %s despite missing attached secret submission", spawnID)
+		}
+	}
 }
 
 func TestIntentThreadedResumeSpawn(t *testing.T) {

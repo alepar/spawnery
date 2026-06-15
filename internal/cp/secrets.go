@@ -52,6 +52,13 @@ func (c *nodeKeyCache) get(nodeID string) (nodeKeyEntry, bool) {
 	return e, ok
 }
 
+func (s *Server) pendingIntentNodeKey(pi *cpv1.PendingIntent) (nodeKeyEntry, bool) {
+	if pi == nil || pi.GetTargetNodeId() == "" {
+		return nodeKeyEntry{}, false
+	}
+	return s.nodeKeys.get(pi.GetTargetNodeId())
+}
+
 // liveNode resolves a spawn's live hosting node id + episode generation (the binding GetSpawnNodeKey and
 // DeliverSecrets share). Returns FailedPrecondition when the spawn has no live container.
 func (s *Server) liveNode(ctx context.Context, spawnID string) (nodeID string, generation uint64, err error) {
