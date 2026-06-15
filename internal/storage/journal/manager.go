@@ -226,6 +226,42 @@ func (m *Manager) RequestSnapshot(ctx context.Context, spawnID string, gen uint6
 	q.Request()
 }
 
+// WarmSnapshot implements JournalManager: drain queued work and take one
+// immediate snapshot per journaled mount without suspending future requests.
+func (m *Manager) WarmSnapshot(ctx context.Context, spawnID string, gen uint64, mounts []Mount) (map[string]ManifestID, error) {
+	var journaled []Mount
+	for _, mt := range mounts {
+		if mt.shouldJournal() {
+			journaled = append(journaled, mt)
+		}
+	}
+	if len(journaled) == 0 {
+		return nil, nil
+	}
+
+	s, err := m.state(ctx, spawnID)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]ManifestID, len(journaled))
+	for _, mt := range journaled {
+		q, _ := m.mountState(s, spawnID, gen, mt)
+		warm := func(ctx context.Context) (ManifestID, error) {
+			start := m.clock.Now()
+			id, err := s.repo.snapshotMount(ctx, mt.Name, mt.HostDir, gen)
+			m.emit(spawnID, mt.Name, gen, SnapshotWarm, m.clock.Now().Sub(start), id, err)
+			return id, err
+		}
+		id, err := q.WarmSnapshot(ctx, warm)
+		if err != nil {
+			return out, fmt.Errorf("journal: warm snapshot mount %q: %w", mt.Name, err)
+		}
+		out[mt.Name] = id
+	}
+	return out, nil
+}
+
 // FinalSnapshot implements JournalManager: the suspend barrier + final snapshot
 // per journaled mount, returning the pinned manifest ids.
 func (m *Manager) FinalSnapshot(ctx context.Context, spawnID string, gen uint64, mounts []Mount) (map[string]ManifestID, error) {

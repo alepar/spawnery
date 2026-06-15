@@ -67,6 +67,14 @@ func (f *fakeJournal) FinalSnapshot(_ context.Context, _ string, _ uint64, mount
 	return out, nil
 }
 
+func (f *fakeJournal) WarmSnapshot(_ context.Context, _ string, _ uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
+	out := map[string]journal.ManifestID{}
+	for _, mt := range mounts {
+		out[mt.Name] = f.finalID
+	}
+	return out, nil
+}
+
 func (f *fakeJournal) Restore(_ context.Context, _, mountName string, id journal.ManifestID, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

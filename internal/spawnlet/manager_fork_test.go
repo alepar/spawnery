@@ -66,10 +66,24 @@ type recordingForkJournal struct {
 	finalErr       error
 	finalErrOnCall int
 	finalCalls     int
+	suspended      map[string]bool
 }
 
 func (j *recordingForkJournal) RequestSnapshot(_ context.Context, spawnID string, gen uint64, _ journal.Mount) {
-	j.rec.add(fmt.Sprintf("warm-final-snapshot:%s:%d", spawnID, gen))
+	if j.suspended != nil && j.suspended[spawnID] {
+		j.rec.add(fmt.Sprintf("request-snapshot-noop:%s:%d", spawnID, gen))
+		return
+	}
+	j.rec.add(fmt.Sprintf("request-snapshot:%s:%d", spawnID, gen))
+}
+
+func (j *recordingForkJournal) WarmSnapshot(_ context.Context, spawnID string, gen uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
+	j.rec.add(fmt.Sprintf("warm-snapshot:%s:%d", spawnID, gen))
+	out := map[string]journal.ManifestID{}
+	for _, mt := range mounts {
+		out[mt.Name] = journal.ManifestID(fmt.Sprintf("%s-%s-gen%d", spawnID, mt.Name, gen))
+	}
+	return out, nil
 }
 
 func (j *recordingForkJournal) FinalSnapshot(_ context.Context, spawnID string, gen uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
@@ -81,6 +95,9 @@ func (j *recordingForkJournal) FinalSnapshot(_ context.Context, spawnID string, 
 	out := map[string]journal.ManifestID{}
 	for _, mt := range mounts {
 		out[mt.Name] = journal.ManifestID(fmt.Sprintf("%s-%s-gen%d", spawnID, mt.Name, gen))
+	}
+	if j.suspended != nil {
+		j.suspended[spawnID] = true
 	}
 	return out, nil
 }
@@ -112,7 +129,13 @@ func (j *recordingForkJournal) ListArtifacts(context.Context, string, uint64, st
 	return nil, nil
 }
 func (j *recordingForkJournal) QuickMaintenance(context.Context, string) error { return nil }
-func (j *recordingForkJournal) Close(context.Context, string) error            { return nil }
+func (j *recordingForkJournal) Close(_ context.Context, spawnID string) error {
+	j.rec.add(fmt.Sprintf("close-journal:%s", spawnID))
+	if j.suspended != nil {
+		delete(j.suspended, spawnID)
+	}
+	return nil
+}
 
 func newForkTestManager(t *testing.T, rec *forkOpRecorder, j *recordingForkJournal) (*Manager, *recordingForkBackend) {
 	t.Helper()
@@ -170,13 +193,14 @@ func TestForkSameNodeCapturesMountsAndRootfsUnderOnePause(t *testing.T) {
 	}
 
 	want := []string{
-		"final-snapshot:sp-source:9",
+		"warm-snapshot:sp-source:9",
 		"pause-agent:sp-source",
 		"sync-host",
 		"final-snapshot:sp-source:9",
 		"capture-rootfs-as:sp-fork",
 		"export-rootfs:sp-fork",
 		"unpause-agent:sp-source",
+		"close-journal:sp-source",
 		"seed-fork-mount:sp-source:work:sp-source-work-gen9:",
 		"put-fork-rootfs-artifact:sp-fork:1",
 		"final-snapshot:sp-fork:1",
@@ -223,7 +247,7 @@ func TestForkUnpauseIfPausedToleratesAlreadyRunning(t *testing.T) {
 func TestForkCaptureFailureUnpausesAndRestartsWatchers(t *testing.T) {
 	ctx := context.Background()
 	rec := &forkOpRecorder{}
-	j := &recordingForkJournal{rec: rec, finalErr: fmt.Errorf("snapshot failed"), finalErrOnCall: 2}
+	j := &recordingForkJournal{rec: rec, finalErr: fmt.Errorf("snapshot failed"), finalErrOnCall: 1}
 	m, fb := newForkTestManager(t, rec, j)
 	putForkSource(t, m, "sp-source", 9)
 
@@ -244,6 +268,46 @@ func TestForkCaptureFailureUnpausesAndRestartsWatchers(t *testing.T) {
 	}
 	if bytes.Contains([]byte(strings.Join(rec.snapshot(), ",")), []byte("capture-rootfs-as")) {
 		t.Fatalf("rootfs capture must not run after failed final snapshot, ops=%v", rec.snapshot())
+	}
+}
+
+func TestForkSameNodeWarmSnapshotDoesNotDisableSourceJournaling(t *testing.T) {
+	ctx := context.Background()
+	rec := &forkOpRecorder{}
+	j := &recordingForkJournal{rec: rec, suspended: map[string]bool{}}
+	m, _ := newForkTestManager(t, rec, j)
+	putForkSource(t, m, "sp-source", 9)
+
+	_, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
+		SourceSpawnID:    "sp-source",
+		ForkSpawnID:      "sp-fork",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+	})
+	if err != nil {
+		t.Fatalf("ForkSameNode: %v", err)
+	}
+
+	sp, ok := m.store.Get("sp-source")
+	if !ok {
+		t.Fatal("source spawn missing after fork")
+	}
+	if len(sp.JournalMounts) != 1 {
+		t.Fatalf("source journal mounts = %d, want 1", len(sp.JournalMounts))
+	}
+	j.RequestSnapshot(ctx, sp.ID, sp.Generation, sp.JournalMounts[0])
+
+	ops := rec.snapshot()
+	warmIdx := indexOfForkOp(ops, "warm-snapshot:sp-source:9")
+	pauseIdx := indexOfForkOp(ops, "pause-agent:sp-source")
+	if warmIdx == -1 || pauseIdx == -1 || warmIdx > pauseIdx {
+		t.Fatalf("warm snapshot must be awaited before pause, ops=%v", ops)
+	}
+	if indexOfForkOp(ops, "request-snapshot-noop:sp-source:9") != -1 {
+		t.Fatalf("source RequestSnapshot after fork must not be disabled, ops=%v", ops)
+	}
+	if indexOfForkOp(ops, "request-snapshot:sp-source:9") == -1 {
+		t.Fatalf("source RequestSnapshot after fork was not accepted, ops=%v", ops)
 	}
 }
 
@@ -405,4 +469,13 @@ func assertForkOpsPrefix(t *testing.T, got, want []string) {
 			t.Fatalf("op %d = %q, want %q\nall ops: %v", i, got[i], w, got)
 		}
 	}
+}
+
+func indexOfForkOp(ops []string, want string) int {
+	for i, op := range ops {
+		if op == want {
+			return i
+		}
+	}
+	return -1
 }

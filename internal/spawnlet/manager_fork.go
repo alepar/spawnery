@@ -84,7 +84,7 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 		}
 	}
 
-	if _, err := m.journal.FinalSnapshot(ctx, sp.ID, sp.Generation, sp.JournalMounts); err != nil {
+	if _, err := m.journal.WarmSnapshot(ctx, sp.ID, sp.Generation, sp.JournalMounts); err != nil {
 		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: warm source snapshot: %w", err)
 	}
 	for _, w := range m.takeWatchers(sp) {
@@ -97,6 +97,9 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 		}
 		if err := m.UnpauseIfPaused(ctx, sp.ID, int64(sp.Generation)); err != nil {
 			log.Printf("fork same-node: unpause source %s: %v", sp.ID, err)
+		}
+		if err := m.journal.Close(ctx, sp.ID); err != nil {
+			log.Printf("fork same-node: close source journal %s before watcher restart: %v", sp.ID, err)
 		}
 		m.setWatchers(sp, m.startJournalWatchers(sp.ID, sp.Generation, sp.JournalMounts))
 		sourceRestored = true

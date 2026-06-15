@@ -132,3 +132,56 @@ func TestSerialQueueSuspendDrainsInFlight(t *testing.T) {
 		t.Fatalf("expected in-flight to drain before final, got %v", got)
 	}
 }
+
+// TestSerialQueueWarmSnapshotDrainsWithoutSuspending verifies the warm barrier
+// drains the current queue and runs one exclusive snapshot without turning later
+// Request calls into no-ops.
+func TestSerialQueueWarmSnapshotDrainsWithoutSuspending(t *testing.T) {
+	started := make(chan struct{})
+	proceed := make(chan struct{})
+	order := make(chan string, 4)
+
+	q := newSerialQueue(context.Background(), func(ctx context.Context) (ManifestID, error) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-proceed
+		order <- "queued"
+		return "queued", nil
+	})
+
+	q.Request()
+	<-started
+	q.Request()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		id, err := q.WarmSnapshot(context.Background(), func(ctx context.Context) (ManifestID, error) {
+			order <- "warm"
+			return "warm", nil
+		})
+		if err != nil {
+			t.Errorf("warm snapshot: %v", err)
+			return
+		}
+		if id != "warm" {
+			t.Errorf("warm snapshot id = %q, want warm", id)
+		}
+	}()
+
+	close(proceed)
+	<-done
+
+	if q.IsSuspended() {
+		t.Fatal("warm snapshot must not suspend the queue")
+	}
+
+	q.Request()
+	<-started
+	got := []string{<-order, <-order, <-order, <-order}
+	if got[0] != "queued" || got[1] != "queued" || got[2] != "warm" || got[3] != "queued" {
+		t.Fatalf("warm snapshot must drain queued work before warm snapshot, got %v", got)
+	}
+}

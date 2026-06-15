@@ -198,6 +198,61 @@ func TestRequestSnapshotThenSuspendProducesManifest(t *testing.T) {
 	}
 }
 
+func TestWarmSnapshotDoesNotSuspendLaterRequests(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	keyfile := filepath.Join(root, "node.key")
+	if err := GenerateNodeKeyfile(keyfile); err != nil {
+		t.Fatal(err)
+	}
+	custody, err := NewNodeLocalCustody(keyfile, filepath.Join(root, "seals"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tel := &recordingTelemetry{}
+	m, err := NewManager(Config{
+		RepoRoot:    filepath.Join(root, "repos"),
+		Backend:     &FilesystemBackend{Root: filepath.Join(root, "blobs")},
+		Custody:     custody,
+		DebounceMin: time.Nanosecond,
+		Telemetry:   tel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src := t.TempDir()
+	writeFile(t, src, "f.txt", "warm")
+	mt := Mount{Name: "work", HostDir: src, Class: NodeLocal}
+
+	ids, err := m.WarmSnapshot(ctx, "spawn-warm", 3, []Mount{mt})
+	if err != nil {
+		t.Fatalf("warm snapshot: %v", err)
+	}
+	if ids["work"] == "" {
+		t.Fatal("expected warm manifest id")
+	}
+
+	writeFile(t, src, "f.txt", "after-warm")
+	m.RequestSnapshot(ctx, "spawn-warm", 3, mt)
+
+	deadline := time.After(2 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		for _, e := range tel.snapshot() {
+			if e.mount == "work" && e.gen == 3 && e.kind == SnapshotContinuous && e.id != "" && e.err == nil {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("RequestSnapshot after WarmSnapshot did not produce a continuous snapshot; events=%+v", tel.snapshot())
+		case <-tick.C:
+		}
+	}
+}
+
 // TestQuickMaintenanceRuns verifies index-compacting maintenance runs without
 // error on a populated repo.
 func TestQuickMaintenanceRuns(t *testing.T) {

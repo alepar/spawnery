@@ -87,6 +87,29 @@ func (q *serialQueue) Suspend(ctx context.Context, final snapshotFn) (ManifestID
 	return final(ctx)
 }
 
+// WarmSnapshot drains the queue, runs one immediate snapshot exclusively, and
+// leaves the queue open for later Request calls.
+func (q *serialQueue) WarmSnapshot(ctx context.Context, warm snapshotFn) (ManifestID, error) {
+	q.mu.Lock()
+	for q.running {
+		q.cond.Wait()
+	}
+	q.running = true
+	q.mu.Unlock()
+
+	id, err := warm(ctx)
+
+	q.mu.Lock()
+	q.running = false
+	if q.pending && !q.suspended {
+		q.running = true
+		go q.run()
+	}
+	q.cond.Broadcast()
+	q.mu.Unlock()
+	return id, err
+}
+
 // IsSuspended reports whether the queue has been suspended.
 func (q *serialQueue) IsSuspended() bool {
 	q.mu.Lock()

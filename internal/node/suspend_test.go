@@ -35,6 +35,13 @@ func (f *fakeNodeJournal) FinalSnapshot(_ context.Context, _ string, _ uint64, m
 	}
 	return out, nil
 }
+func (f *fakeNodeJournal) WarmSnapshot(_ context.Context, _ string, _ uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
+	out := map[string]journal.ManifestID{}
+	for _, mt := range mounts {
+		out[mt.Name] = f.finalID
+	}
+	return out, nil
+}
 func (f *fakeNodeJournal) Restore(context.Context, string, string, journal.ManifestID, string) error {
 	return nil
 }
