@@ -655,6 +655,60 @@ func TestForkTurnBoundaryWaitsForTmuxSidecarInflight(t *testing.T) {
 	}
 }
 
+func TestForkTurnBoundaryWaitsForTmuxOutputDrainBeforeSidecarStatus(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	setForkNodeControl(t, mgr, "sp-source")
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	doer := idleForkStatusDoer()
+	a.ctrlHTTP = doer
+
+	outputStarted := make(chan struct{})
+	outputRelease := make(chan struct{})
+	var outputOnce sync.Once
+	relay := newTmuxRelay([]string{"/bin/sh", "-c", "printf fork-output; sleep 30"}, func(string, []byte) error {
+		outputOnce.Do(func() { close(outputStarted) })
+		<-outputRelease
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer func() {
+		select {
+		case <-outputRelease:
+		default:
+			close(outputRelease)
+		}
+		relay.stop()
+	}()
+	if err := relay.attach(ctx, "client-1"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-outputStarted:
+	case <-time.After(time.Second):
+		t.Fatal("tmux relay output did not reach send gate")
+	}
+	a.tmuxRelays[zeroKey("sp-source")] = relay
+
+	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	time.Sleep(2 * forkTurnBoundaryPoll)
+	if req := doer.lastReq(); req != nil {
+		t.Fatalf("sidecar status sampled before tmux output drained: %s", req.URL.String())
+	}
+
+	close(outputRelease)
+	waitFor(t, "sidecar status sampled after tmux output drained", func() bool { return doer.lastReq() != nil })
+	waitFor(t, "ForkTurnBoundaryComplete after tmux output drained", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+	if got := lastForkTurnBoundaryComplete(fs); got.GetError() != "" {
+		t.Fatalf("ForkTurnBoundaryComplete error = %q", got.GetError())
+	}
+}
+
 func TestForkTurnBoundaryBlocksTmuxInputWhileWaitingForSidecarIdle(t *testing.T) {
 	be := &scriptedPodBackend{script: scriptGoose}
 	mgr := newForkNodeManager(t, be)

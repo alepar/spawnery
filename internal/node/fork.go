@@ -312,6 +312,12 @@ func (a *attacher) tryAcquireForkBarrier(ctx context.Context, spawnID string, ba
 	a.ensureForkBarriersLocked()
 	a.forkBarriers[spawnID] = barrier
 	a.mu.Unlock()
+	for _, r := range acquiredRelays {
+		if err := r.waitOutputDrained(ctx); err != nil {
+			a.releaseForkBarrier(spawnID, func(b forkIngressBarrier) bool { return b.matches(barrier) })
+			return err, false
+		}
+	}
 	if len(relays) > 0 {
 		busy, err := a.sourceInferenceBusy(ctx, spawnID)
 		if err != nil {

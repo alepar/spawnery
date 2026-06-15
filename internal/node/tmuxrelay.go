@@ -44,11 +44,13 @@ type tmuxRelay struct {
 	execArgv []string // full argv to attach: <execprefix> <container> tmux attach -t spawn
 	send     func(clientID string, data []byte) error
 
-	mu           sync.Mutex
-	clients      map[string]*tmuxClient
-	lastActivity time.Time // last relay frame in either direction; the idle reaper's clock
-	forkBarrier  *forkIngressBarrier
-	queuedInput  map[string][][]byte
+	mu            sync.Mutex
+	clients       map[string]*tmuxClient
+	lastActivity  time.Time // last relay frame in either direction; the idle reaper's clock
+	forkBarrier   *forkIngressBarrier
+	queuedInput   map[string][][]byte
+	activeOutput  int
+	outputDrained chan struct{}
 }
 
 type tmuxClient struct {
@@ -57,7 +59,16 @@ type tmuxClient struct {
 }
 
 func newTmuxRelay(attachArgv []string, send func(clientID string, data []byte) error) *tmuxRelay {
-	return &tmuxRelay{execArgv: attachArgv, send: send, clients: map[string]*tmuxClient{}, queuedInput: map[string][][]byte{}, lastActivity: time.Now()}
+	outputDrained := make(chan struct{})
+	close(outputDrained)
+	return &tmuxRelay{
+		execArgv:      attachArgv,
+		send:          send,
+		clients:       map[string]*tmuxClient{},
+		queuedInput:   map[string][][]byte{},
+		lastActivity:  time.Now(),
+		outputDrained: outputDrained,
+	}
 }
 
 // markActive refreshes the idle clock. Callers must NOT already hold mu.
@@ -78,6 +89,41 @@ func (r *tmuxRelay) tryAcquireForkBarrier(b forkIngressBarrier) bool {
 	bb := b
 	r.forkBarrier = &bb
 	return true
+}
+
+func (r *tmuxRelay) beginOutput() {
+	r.mu.Lock()
+	if r.activeOutput == 0 {
+		r.outputDrained = make(chan struct{})
+	}
+	r.activeOutput++
+	r.mu.Unlock()
+}
+
+func (r *tmuxRelay) endOutput() {
+	r.mu.Lock()
+	if r.activeOutput > 0 {
+		r.activeOutput--
+		if r.activeOutput == 0 && r.outputDrained != nil {
+			close(r.outputDrained)
+		}
+	}
+	r.mu.Unlock()
+}
+
+func (r *tmuxRelay) waitOutputDrained(ctx context.Context) error {
+	r.mu.Lock()
+	drained := r.outputDrained
+	r.mu.Unlock()
+	if drained == nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-drained:
+		return nil
+	}
 }
 
 func (r *tmuxRelay) releaseForkBarrier(match func(forkIngressBarrier) bool) {
@@ -125,6 +171,7 @@ func (r *tmuxRelay) attach(ctx context.Context, clientID string) error {
 		for {
 			n, err := ptmx.Read(buf)
 			if n > 0 {
+				r.beginOutput()
 				r.markActive() // PTY output = activity
 				// r.send is synchronous and blocks when the downstream consumer is slow (gRPC stream
 				// flow control → WebSocket write → browser). That back-pressure propagates here: a
@@ -133,6 +180,7 @@ func (r *tmuxRelay) attach(ctx context.Context, clientID string) error {
 				// an unbounded buffer could form is xterm.js's internal write queue in the browser;
 				// that is observed by the BacklogTracker wedge metric (sp-9xr.11).
 				_ = r.send(clientID, append([]byte(nil), buf[:n]...))
+				r.endOutput()
 			}
 			if err != nil {
 				r.detach(clientID)

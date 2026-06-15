@@ -836,6 +836,10 @@ func TestForkSpawnRestoresSourceBeforeSameNodeSeedCompletes(t *testing.T) {
 	if err := s.st.Spawns().Release(context.Background(), "sp-source", leaseID); err != nil {
 		t.Fatalf("release source seed probe claim: %v", err)
 	}
+	if msg := waitForReleaseForkTurnBoundaryCPMessage(t, &sourceSender.capSender); msg.GetSourceSpawnId() != "sp-source" ||
+		msg.GetSourceGeneration() != 1 || msg.GetTransferSetId() == "" {
+		t.Fatalf("ReleaseForkTurnBoundary before seed completion = %+v", msg)
+	}
 
 	lockAcquired := make(chan func(), 1)
 	go func() {

@@ -491,6 +491,10 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 		restoreOnFailure = false
 		sourceReleasedOnce.Do(func() { close(sourceReleased) })
 		releaseSource()
+		if barrierAcquired {
+			s.releaseForkTurnBoundary(context.WithoutCancel(ctx), barrierReq)
+			barrierAcquired = false
+		}
 		return nil
 	})
 	if err != nil {
