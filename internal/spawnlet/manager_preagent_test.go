@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"spawnery/internal/runtime"
+	"spawnery/internal/spawnlet/firewall"
 )
 
 type preAgentBackend struct {
@@ -208,6 +209,63 @@ func TestCreateWithSelectionBeforeStartAgentFailureRemovesFloor(t *testing.T) {
 	}
 	if fb.stopped == nil {
 		t.Fatal("Stop was not called")
+	}
+}
+
+type contextCheckingApplier struct {
+	removed        bool
+	removeCanceled bool
+}
+
+func (a *contextCheckingApplier) Apply(context.Context, []firewall.Rule) error {
+	return nil
+}
+
+func (a *contextCheckingApplier) Remove(ctx context.Context, _ []firewall.Rule) error {
+	a.removed = true
+	if err := ctx.Err(); err != nil {
+		a.removeCanceled = true
+		return err
+	}
+	return nil
+}
+
+func TestCreateWithSelectionPreAgentFailureCleanupIgnoresCanceledCreateContext(t *testing.T) {
+	hookErr := errors.New("pre-agent failed")
+	fb := &preAgentBackend{}
+	fa := &contextCheckingApplier{}
+	m := NewManagerWithBackend(fb, fa, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), EgressEnforce: true,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, err := m.CreateWithSelection(ctx, "sp-preagent-canceled-cleanup", writeApp(t), "model", "", "", 0, AgentSelection{
+		BeforeStartAgent: func(context.Context, PreAgentContext) error {
+			cancel()
+			return hookErr
+		},
+	})
+	if !errors.Is(err, hookErr) {
+		t.Fatalf("CreateWithSelection error = %v, want %v", err, hookErr)
+	}
+	if !fa.removed {
+		t.Fatal("egress floor was not removed after pre-agent failure")
+	}
+	if fa.removeCanceled {
+		t.Fatal("egress floor cleanup used the canceled create context")
+	}
+	if fb.stopped == nil {
+		t.Fatal("Stop was not called")
+	}
+	if fb.startAgentCalls != 0 {
+		t.Fatalf("StartAgent calls = %d, want 0", fb.startAgentCalls)
+	}
+	assertMissingDir(t, m.secrets.DirFor("sp-preagent-canceled-cleanup"))
+	assertMissingDir(t, m.artifacts.DirFor("sp-preagent-canceled-cleanup"))
+	if _, ok := m.store.Get("sp-preagent-canceled-cleanup"); ok {
+		t.Fatal("failed pre-agent spawn was stored")
 	}
 }
 

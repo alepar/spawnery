@@ -942,15 +942,16 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	}
 	mounts = append(mounts, runtime.Mount{HostPath: m.artifacts.DirFor(id), ContainerPath: ArtifactsMountPath})
 	cleanupPreStoreFailure := func(h *runtime.PodHandle, floorIP string) {
+		cleanupCtx := context.WithoutCancel(ctx)
 		if h != nil {
-			_ = m.pod.Stop(ctx, h)
+			_ = m.pod.Stop(cleanupCtx, h)
 		}
 		if floorIP != "" {
-			if err := m.fw.Remove(ctx, firewall.Rules(floorIP, m.cfg.EgressAllowCIDRs)); err != nil {
+			if err := m.fw.Remove(cleanupCtx, firewall.Rules(floorIP, m.cfg.EgressAllowCIDRs)); err != nil {
 				log.Printf("egress floor cleanup for %s (ip %s): %v", id, floorIP, err)
 			}
 		}
-		finalizeAll()
+		_ = m.finalizeMountDirs(cleanupCtx, mountDirs, mountFinalizers)
 		cleanupSpawnDirs()
 	}
 
