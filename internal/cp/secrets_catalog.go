@@ -91,6 +91,10 @@ func (s *Server) PutSecret(ctx context.Context, req *connect.Request[cpv1.PutSec
 		return nil, err
 	}
 	now := time.Now().Unix()
+	existing, err := s.st.Secrets().Get(ctx, owner, secret.secretID)
+	if err != nil {
+		return nil, mapSecretStoreErr(err)
+	}
 	row := store.Secret{
 		AccountID:       owner,
 		SecretID:        secret.secretID,
@@ -103,18 +107,15 @@ func (s *Server) PutSecret(ctx context.Context, req *connect.Request[cpv1.PutSec
 		Version:         newVersion,
 		DevicesetEpoch:  secret.devicesetEpoch,
 		Envelope:        append([]byte(nil), secret.envelope...),
+		CreatedAt:       existing.CreatedAt,
 		UpdatedAt:       now,
 	}
 	version, err := s.st.Secrets().Put(ctx, owner, secret.secretID, req.Msg.GetExpectedVersion(), row)
 	if err != nil {
 		return nil, mapSecretStoreErr(err)
 	}
-	stored, err := s.st.Secrets().Get(ctx, owner, secret.secretID)
-	if err != nil {
-		return nil, mapSecretStoreErr(err)
-	}
-	stored.Version = version
-	return connect.NewResponse(&cpv1.PutSecretResponse{Secret: secretToProto(stored)}), nil
+	row.Version = version
+	return connect.NewResponse(&cpv1.PutSecretResponse{Secret: secretToProto(row)}), nil
 }
 
 func (s *Server) DeleteSecret(ctx context.Context, req *connect.Request[cpv1.DeleteSecretRequest]) (*connect.Response[cpv1.DeleteSecretResponse], error) {

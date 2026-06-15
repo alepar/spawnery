@@ -2,12 +2,14 @@ package cp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"testing"
 
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/internal/cp/store"
 	"spawnery/internal/secrets/seal"
 )
 
@@ -178,6 +180,50 @@ func TestPutSecretCASAndEnvelopeVersionValidation(t *testing.T) {
 	}
 }
 
+func TestPutSecretReturnsWrittenRowDespiteConcurrentUpdate(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	baseSecrets := s.st.Secrets()
+	s.st = secretRaceStore{
+		Store:   s.st,
+		secrets: &advancingSecretRepo{SecretRepo: baseSecrets, t: t},
+	}
+
+	if _, err := s.CreateSecret(aliceCtx(), connect.NewRequest(&cpv1.CreateSecretRequest{
+		Secret: &cpv1.SecretWrite{
+			SecretId:        "s1",
+			Type:            cpv1.UserSecretType_USER_SECRET_TYPE_GENERIC_KV,
+			Name:            "initial",
+			TargetContainer: cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT,
+			EnvVarName:      "SECRET_VALUE",
+			DevicesetEpoch:  1,
+			Envelope:        envelopeBytes(t, "alice", "s1", 1),
+		},
+	})); err != nil {
+		t.Fatalf("CreateSecret: %v", err)
+	}
+
+	writtenEnvelope := envelopeBytes(t, "alice", "s1", 2)
+	putResp, err := s.PutSecret(aliceCtx(), connect.NewRequest(&cpv1.PutSecretRequest{
+		ExpectedVersion: 1,
+		Secret: &cpv1.SecretWrite{
+			SecretId:        "s1",
+			Type:            cpv1.UserSecretType_USER_SECRET_TYPE_GENERIC_KV,
+			Name:            "caller write",
+			TargetContainer: cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT,
+			EnvVarName:      "SECRET_VALUE",
+			DevicesetEpoch:  2,
+			Envelope:        writtenEnvelope,
+		},
+	}))
+	if err != nil {
+		t.Fatalf("PutSecret: %v", err)
+	}
+	got := putResp.Msg.Secret
+	if got.GetVersion() != 2 || got.GetName() != "caller write" || got.GetDevicesetEpoch() != 2 || !bytes.Equal(got.GetEnvelope(), writtenEnvelope) {
+		t.Fatalf("PutSecret response = %+v, want the caller's version-2 write", got)
+	}
+}
+
 func TestListSecretsFiltersByDevicesetEpoch(t *testing.T) {
 	s, _, _ := newTestServer(t)
 
@@ -219,4 +265,32 @@ func envelopeBytes(t *testing.T, accountID, secretID string, version uint64) []b
 		t.Fatalf("json.Marshal envelope: %v", err)
 	}
 	return b
+}
+
+type secretRaceStore struct {
+	store.Store
+	secrets store.SecretRepo
+}
+
+func (s secretRaceStore) Secrets() store.SecretRepo { return s.secrets }
+
+type advancingSecretRepo struct {
+	store.SecretRepo
+	t *testing.T
+}
+
+func (r *advancingSecretRepo) Put(ctx context.Context, accountID, secretID string, expectedVersion uint64, next store.Secret) (uint64, error) {
+	newVersion, err := r.SecretRepo.Put(ctx, accountID, secretID, expectedVersion, next)
+	if err != nil {
+		return 0, err
+	}
+	later := next
+	later.Name = "concurrent write"
+	later.DevicesetEpoch = 99
+	later.Envelope = envelopeBytes(r.t, accountID, secretID, newVersion+1)
+	later.UpdatedAt = next.UpdatedAt + 1
+	if _, err := r.SecretRepo.Put(ctx, accountID, secretID, newVersion, later); err != nil {
+		r.t.Fatalf("advance secret version after Put: %v", err)
+	}
+	return newVersion, nil
 }

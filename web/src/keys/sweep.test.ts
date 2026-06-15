@@ -149,6 +149,7 @@ describe("executeSweep [WM2]", () => {
 
     const getCalls: string[] = [];
     const cpClient: SecretsCPClient = {
+      listSecretIdsForSweep: async () => ["s1", "s2"],
       getEnvelope: async (id) => {
         getCalls.push(id);
         return store.get(id)!;
