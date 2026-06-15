@@ -31,7 +31,8 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
  && CGO_ENABLED=0 go build -o /acpexec ./deploy/agent/acpexec \
  && CGO_ENABLED=0 go build -o /acpmux ./deploy/agent/acpmux \
  && CGO_ENABLED=0 go build -o /acpdial ./deploy/agent/acpdial \
- && CGO_ENABLED=0 go build -o /agentinstall ./cmd/agentinstall
+ && CGO_ENABLED=0 go build -o /agentinstall ./cmd/agentinstall \
+ && CGO_ENABLED=0 go build -o /spawnery-test-mcp ./deploy/agent/testmcp
 
 FROM debian:stable
 # UTF-8 locale so tmux + claude render box/line-drawing glyphs (─│●) instead of ACS q/x or the
@@ -119,6 +120,7 @@ COPY --from=gobuild /acpexec /usr/local/bin/acpexec
 COPY --from=gobuild /acpmux /usr/local/bin/acpmux
 COPY --from=gobuild /acpdial /usr/local/bin/acpdial
 COPY --from=gobuild /agentinstall /usr/local/bin/agentinstall
+COPY --from=gobuild /spawnery-test-mcp /usr/local/bin/spawnery-test-mcp
 COPY deploy/agent/entrypoint.sh /entrypoint.sh
 COPY deploy/agent/launch /usr/local/bin/launcher
 COPY deploy/agent/spawn-tui.sh /usr/local/bin/spawn-tui
@@ -133,7 +135,7 @@ COPY deploy/agent/claude-settings.json /root/.claude/settings.json
 # shim -> acpmux on 127.0.0.1:7000 = the shared session (sp-9xr.12.2).
 RUN mkdir -p /root/.nori/cli
 COPY deploy/agent/nori-config.toml /root/.nori/cli/config.toml
-RUN chmod +x /entrypoint.sh /usr/local/bin/launcher /usr/local/bin/spawn-tui /usr/local/bin/apply-artifacts
+RUN chmod +x /entrypoint.sh /usr/local/bin/launcher /usr/local/bin/spawn-tui /usr/local/bin/apply-artifacts /usr/local/bin/spawnery-test-mcp
 
 WORKDIR /app
 # tini reaps the opencode serve child; entrypoint launches serve + adapter.

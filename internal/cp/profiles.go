@@ -194,7 +194,11 @@ func (s *Server) AddProfileEntry(ctx context.Context, req *connect.Request[cpv1.
 		return nil, err
 	}
 
-	entryID := uuid.NewString()
+	eid, err := uuid.NewV7()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("generate entry id: %w", err))
+	}
+	entryID := eid.String()
 	se := store.ProfileEntry{
 		ProfileID:     req.Msg.ProfileId,
 		EntryID:       entryID,
