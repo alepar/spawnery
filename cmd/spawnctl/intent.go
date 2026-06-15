@@ -114,6 +114,18 @@ func pollAndSign(ctx context.Context, ic intentClient, spawnID string, params in
 		Model:        pi.GetModel(),
 		DataRef:      pi.GetDataRef(),
 	}
+	if len(pi.GetMounts()) > 0 {
+		body.Mounts = make([]*authv1.MountRef, 0, len(pi.GetMounts()))
+		for _, mount := range pi.GetMounts() {
+			if mount == nil {
+				continue
+			}
+			body.Mounts = append(body.Mounts, &authv1.MountRef{
+				Name:       mount.GetName(),
+				BackendUri: mount.GetBackendUri(),
+			})
+		}
+	}
 	si, err := intent.Build(op, body, sessionKey)
 	if err != nil {
 		return fmt.Errorf("pollAndSign %s: build intent: %w", spawnID, err)

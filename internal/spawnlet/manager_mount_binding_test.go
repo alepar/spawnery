@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,41 @@ import (
 	"spawnery/internal/runtime"
 	"spawnery/internal/storage"
 )
+
+type fakeRootMaterializer struct {
+	calls []runtime.RootMaterializeSpec
+}
+
+func (m *fakeRootMaterializer) MaterializeRootOwned(_ context.Context, spec runtime.RootMaterializeSpec) error {
+	m.calls = append(m.calls, spec)
+	if err := os.RemoveAll(spec.TargetPath); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(spec.TargetPath, spec.DirMode); err != nil {
+		return err
+	}
+	return filepath.WalkDir(spec.SourcePath, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == spec.SourcePath {
+			return nil
+		}
+		rel, err := filepath.Rel(spec.SourcePath, path)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(spec.TargetPath, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dst, spec.DirMode)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dst, b, spec.FileMode)
+	})
+}
 
 type countingPodBackend struct {
 	fakePodBackend
@@ -147,5 +183,39 @@ func TestStopFinalizesEachMountThroughPreparingBackend(t *testing.T) {
 	}
 	if len(scratchBackend.prepared) == 0 || len(scratchBackend.finalized) == 0 {
 		t.Fatalf("scratch backend prepare/finalize = %v/%v", scratchBackend.prepared, scratchBackend.finalized)
+	}
+}
+
+func TestRootMaterializeUsesResolvedBackendForMountPrepareAndFinalize(t *testing.T) {
+	fb := &countingPodBackend{}
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), UsernsMode: "remap",
+	})
+	m.rootMaterializer = &fakeRootMaterializer{}
+
+	githubBackend := &recordingBackend{root: filepath.Join(t.TempDir(), "github")}
+	m.backendResolver = recordingResolver{
+		backends: map[string]storage.Backend{
+			"":                  &recordingBackend{root: filepath.Join(t.TempDir(), "scratch")},
+			"github:owner/repo": githubBackend,
+		},
+	}
+
+	sp, err := m.CreateWithSelection(context.Background(), "sp-root-remap", writeMountBindingApp(t, "main"), "model", "", "", 0, AgentSelection{
+		Mounts: []MountBinding{{Name: "main", BackendURI: "github:owner/repo"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateWithSelection: %v", err)
+	}
+
+	if err := m.Stop(context.Background(), sp.ID); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if len(githubBackend.prepared) != 1 {
+		t.Fatalf("github backend prepared %v, want exactly one mount prepare", githubBackend.prepared)
+	}
+	if len(githubBackend.finalized) != 1 || githubBackend.finalized[0] != githubBackend.prepared[0] {
+		t.Fatalf("github backend finalize = %v, want finalize of prepared dir %v", githubBackend.finalized, githubBackend.prepared)
 	}
 }

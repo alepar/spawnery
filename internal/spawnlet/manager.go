@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -295,6 +296,52 @@ func (m *Manager) scratchBackend() storage.Backend {
 	return storage.NewScratch(m.cfg.DataRoot)
 }
 
+// syncMaterializedMount mirrors the actual root-owned bind target back into the backend-prepared
+// working dir before Finalize runs, so remap-mode mounts still route through the resolved backend.
+func syncMaterializedMount(srcDir, dstDir string) error {
+	entries, err := os.ReadDir(dstDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(dstDir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == srcDir {
+			return nil
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(dstDir, rel)
+		if d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			return os.MkdirAll(dst, info.Mode().Perm())
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(dst, b, info.Mode().Perm()); err != nil {
+			return err
+		}
+		return os.Chmod(dst, info.Mode().Perm())
+	})
+}
+
 func (m *Manager) finalizeMountDirs(ctx context.Context, mountDirs []string, finalizers []MountFinalizer) {
 	if len(finalizers) == 0 {
 		scratch := m.scratchBackend()
@@ -308,7 +355,15 @@ func (m *Manager) finalizeMountDirs(ctx context.Context, mountDirs []string, fin
 		if backend == nil {
 			backend = m.scratchBackend()
 		}
+		if finalizer.SyncFrom != "" {
+			if err := syncMaterializedMount(finalizer.SyncFrom, finalizer.HostDir); err != nil {
+				log.Printf("sync materialized mount %s -> %s: %v", finalizer.SyncFrom, finalizer.HostDir, err)
+			}
+		}
 		_ = backend.Finalize(ctx, finalizer.HostDir)
+		if finalizer.CleanupDir != "" {
+			_ = m.scratchBackend().Finalize(ctx, finalizer.CleanupDir)
+		}
 	}
 }
 
@@ -657,14 +712,14 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		seedDir := filepath.Join(appPath, mt.Seed)
 		hostDir := ""
 		restoreDir := ""
-		stageDir := ""
+		preparedDir := ""
 		if rootMaterialize {
-			stageDir, err = scratchBackend.Prepare(ctx, id, mt.Name+".stage", seedDir, -1)
+			preparedDir, err = mountBackend.Prepare(ctx, id, mt.Name, seedDir, -1)
 			if err != nil {
 				finalizeAll()
-				return nil, fmt.Errorf("prepare mount %q staging: %w", mt.Name, err)
+				return nil, fmt.Errorf("prepare mount %q: %w", mt.Name, err)
 			}
-			restoreDir = stageDir
+			restoreDir = preparedDir
 			hostDir = filepath.Join(m.cfg.DataRoot, id, mt.Name)
 		} else {
 			hostDir, err = mountBackend.Prepare(ctx, id, mt.Name, seedDir, agentUID)
@@ -674,9 +729,9 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			}
 			restoreDir = hostDir
 		}
-		cleanupStage := func() {
-			if stageDir != "" {
-				_ = scratchBackend.Finalize(ctx, stageDir)
+		cleanupPrepared := func() {
+			if preparedDir != "" {
+				_ = mountBackend.Finalize(ctx, preparedDir)
 			}
 		}
 
@@ -685,7 +740,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		// default) leave the scratch path entirely untouched.
 		class, derr := journal.ParseDurability(mt.Durability)
 		if derr != nil {
-			cleanupStage()
+			cleanupPrepared()
 			finalizeAll()
 			return nil, fmt.Errorf("mount %q durability: %w", mt.Name, derr)
 		}
@@ -746,20 +801,25 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 
 		if rootMaterialize {
 			if err := m.materializeRootOwned(ctx, helperImage, restoreDir, hostDir, 0o777, 0o666); err != nil {
-				cleanupStage()
+				cleanupPrepared()
 				_ = scratchBackend.Finalize(ctx, hostDir)
 				finalizeAll()
 				return nil, fmt.Errorf("materialize mount %q: %w", mt.Name, err)
 			}
-			cleanupStage()
 		}
 
 		mountDirs = append(mountDirs, hostDir)
 		finalizerBackend := mountBackend
 		if rootMaterialize {
-			finalizerBackend = scratchBackend
+			mountFinalizers = append(mountFinalizers, MountFinalizer{
+				HostDir:    preparedDir,
+				Backend:    mountBackend,
+				SyncFrom:   hostDir,
+				CleanupDir: hostDir,
+			})
+		} else {
+			mountFinalizers = append(mountFinalizers, MountFinalizer{HostDir: hostDir, Backend: finalizerBackend})
 		}
-		mountFinalizers = append(mountFinalizers, MountFinalizer{HostDir: hostDir, Backend: finalizerBackend})
 		mounts = append(mounts, runtime.Mount{
 			HostPath:             hostDir,
 			ContainerPath:        "/app/" + mt.Path,

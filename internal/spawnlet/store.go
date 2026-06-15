@@ -8,8 +8,10 @@ import (
 )
 
 type MountFinalizer struct {
-	HostDir string
-	Backend storage.Backend
+	HostDir    string
+	Backend    storage.Backend
+	SyncFrom   string
+	CleanupDir string
 }
 
 type Spawn struct {
