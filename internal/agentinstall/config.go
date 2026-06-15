@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -368,6 +369,21 @@ func appliedReport(base Report, cap Capability, skips []string) Report {
 	return base
 }
 
+// writeInstructions writes the dedicated managed instructions file (replace-on-apply).
+// Returns the file path written, or "" + skipped=true when the agent has no InstructionsPath.
+func writeInstructions(layout AgentLayout, content string) (path string, skipped bool, err error) {
+	if layout.InstructionsPath == "" {
+		return "", true, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.InstructionsPath), 0o755); err != nil {
+		return "", false, fmt.Errorf("create instructions dir: %w", err)
+	}
+	if err := atomicWriteFile(layout.InstructionsPath, []byte(content), 0o644); err != nil {
+		return "", false, err
+	}
+	return layout.InstructionsPath, false, nil
+}
+
 // ---- claudeEmitter ----------------------------------------------------------
 
 // ApplyConfig applies config keys to ~/.claude/settings.json (JSON format, USER scope).
@@ -387,8 +403,28 @@ func (e claudeEmitter) ApplyConfig(a Artifact, opts Options) Report {
 
 	additions, cap, allSkips, _ := buildAdditions(e.layout.Name, e.layout.ForbiddenConfigKeys, a.Config)
 
-	if len(additions) == 0 {
+	hasInstr := a.Config.Instructions != ""
+
+	if len(additions) == 0 && !hasInstr {
 		return skipReport(base, "no applicable config additions", cap, allSkips)
+	}
+
+	// Write the dedicated instructions file when present.
+	if hasInstr {
+		_, skipped, werr := writeInstructions(e.layout, a.Config.Instructions)
+		if werr != nil {
+			base.Status = StatusFailed
+			base.Reason = werr.Error()
+			return base
+		}
+		if skipped {
+			allSkips = append(allSkips, "instructions not supported for claude")
+		}
+	}
+
+	if len(additions) == 0 {
+		// Instructions only — nothing to merge into settings.json.
+		return appliedReport(base, cap, allSkips)
 	}
 
 	path := e.layout.ConfigPath
@@ -437,8 +473,23 @@ func (e codexEmitter) ApplyConfig(a Artifact, opts Options) Report {
 
 	additions, cap, allSkips, codexCmd := buildAdditions(e.layout.Name, e.layout.ForbiddenConfigKeys, a.Config)
 
-	if len(additions) == 0 && (codexCmd == nil || codexCmd.empty()) {
+	hasInstr := a.Config.Instructions != ""
+
+	if len(additions) == 0 && (codexCmd == nil || codexCmd.empty()) && !hasInstr {
 		return skipReport(base, "no applicable config additions", cap, allSkips)
+	}
+
+	// Write the dedicated instructions file when present.
+	if hasInstr {
+		_, skipped, werr := writeInstructions(e.layout, a.Config.Instructions)
+		if werr != nil {
+			base.Status = StatusFailed
+			base.Reason = werr.Error()
+			return base
+		}
+		if skipped {
+			allSkips = append(allSkips, "instructions not supported for codex")
+		}
 	}
 
 	// Write config.toml if there are native/normalized config additions.
@@ -514,7 +565,9 @@ func (e opencodeEmitter) ApplyConfig(a Artifact, opts Options) Report {
 
 	additions, cap, allSkips, _ := buildAdditions(e.layout.Name, e.layout.ForbiddenConfigKeys, a.Config)
 
-	if len(additions) == 0 {
+	hasInstr := a.Config.Instructions != ""
+
+	if len(additions) == 0 && !hasInstr {
 		return skipReport(base, "no applicable config additions", cap, allSkips)
 	}
 
@@ -558,6 +611,32 @@ func (e opencodeEmitter) ApplyConfig(a Artifact, opts Options) Report {
 	}
 	if existing == nil {
 		existing = make(map[string]interface{})
+	}
+
+	// Handle instructions: write the managed file and add its path to the instructions array.
+	if hasInstr {
+		instrPath, skipped, werr := writeInstructions(e.layout, a.Config.Instructions)
+		if werr != nil {
+			base.Status = StatusFailed
+			base.Reason = werr.Error()
+			return base
+		}
+		if skipped {
+			allSkips = append(allSkips, "instructions not supported for opencode")
+		} else {
+			// Merge-append path into existing instructions array (idempotent).
+			existingArr, _ := existing["instructions"].([]interface{})
+			already := false
+			for _, vv := range existingArr {
+				if vv == instrPath {
+					already = true
+				}
+			}
+			if !already {
+				existingArr = append(existingArr, instrPath)
+			}
+			additions["instructions"] = existingArr
+		}
 	}
 
 	// For each top-level key in additions: deep-merge with existing, then RFC-6902 patch.
