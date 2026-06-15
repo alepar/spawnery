@@ -2,6 +2,7 @@ package sidecar
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -137,6 +138,70 @@ func TestControlRejectsBadToken(t *testing.T) {
 			}
 			if ov.Get() != "" {
 				t.Fatalf("override mutated on rejected request: %q", ov.Get())
+			}
+		})
+	}
+}
+
+func TestControlPostSetsCredentialsWithoutEchoingKey(t *testing.T) {
+	ov := &Override{}
+	srv := httptest.NewServer(NewControlHandler(ov, "secret"))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/control/credentials",
+		strings.NewReader(`{"key":"byok-key","upstream":"https://example.test/api"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if strings.Contains(string(body), "byok-key") {
+		t.Fatalf("response echoed raw key: %s", body)
+	}
+	creds := ov.Credentials("https://default.test/api", "default-key")
+	if creds.Key != "byok-key" {
+		t.Fatalf("credential key = %q, want byok-key", creds.Key)
+	}
+	if creds.Upstream != "https://example.test/api" {
+		t.Fatalf("credential upstream = %q, want override upstream", creds.Upstream)
+	}
+}
+
+func TestControlCredentialsRejectsEmptyKeyAndBadUpstream(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty-key", `{"key":"","upstream":"https://example.test/api"}`},
+		{"non-http-upstream", `{"key":"byok-key","upstream":"ftp://example.test/api"}`},
+		{"unparsable-upstream", `{"key":"byok-key","upstream":":// bad"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ov := &Override{}
+			srv := httptest.NewServer(NewControlHandler(ov, "secret"))
+			defer srv.Close()
+
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/control/credentials", strings.NewReader(c.body))
+			req.Header.Set("Authorization", "Bearer secret")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			creds := ov.Credentials("https://default.test/api", "default-key")
+			if creds.Key != "default-key" || creds.Upstream != "https://default.test/api" {
+				t.Fatalf("credentials mutated on rejected request: %+v", creds)
 			}
 		})
 	}

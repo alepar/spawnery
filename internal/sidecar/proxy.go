@@ -16,16 +16,22 @@ import (
 // model override, the top-level "model" of each request body is rewritten to it; when
 // unset the request body is forwarded byte-identical (zero overhead).
 func NewHandler(upstream, key string, ov *Override) http.Handler {
-	target, err := url.Parse(upstream)
+	defaultTarget, err := url.Parse(upstream)
 	if err != nil {
 		panic(err)
 	}
-	rp := httputil.NewSingleHostReverseProxy(target)
-	orig := rp.Director
+	rp := &httputil.ReverseProxy{}
 	rp.Director = func(r *http.Request) {
-		orig(r)
+		creds := ov.Credentials(upstream, key)
+		target := defaultTarget
+		if creds.Upstream != upstream {
+			if parsed, err := url.Parse(creds.Upstream); err == nil {
+				target = parsed
+			}
+		}
+		rewriteProxyRequest(r, target)
 		r.Host = target.Host
-		r.Header.Set("Authorization", "Bearer "+key)
+		r.Header.Set("Authorization", "Bearer "+creds.Key)
 		r.Header.Del("X-Api-Key")
 	}
 	// Surface upstream (OpenRouter) ERROR responses in the sidecar logs — e.g. a 503
@@ -67,6 +73,53 @@ func NewHandler(upstream, key string, ov *Override) http.Handler {
 		}
 		rp.ServeHTTP(w, r)
 	})
+}
+
+func rewriteProxyRequest(r *http.Request, target *url.URL) {
+	targetQuery := target.RawQuery
+	r.URL.Scheme = target.Scheme
+	r.URL.Host = target.Host
+	r.URL.Path, r.URL.RawPath = joinURLPath(target, r.URL)
+	if targetQuery == "" || r.URL.RawQuery == "" {
+		r.URL.RawQuery = targetQuery + r.URL.RawQuery
+	} else {
+		r.URL.RawQuery = targetQuery + "&" + r.URL.RawQuery
+	}
+	if _, ok := r.Header["User-Agent"]; !ok {
+		r.Header.Set("User-Agent", "")
+	}
+}
+
+func joinURLPath(a, b *url.URL) (path, rawpath string) {
+	if a.RawPath == "" && b.RawPath == "" {
+		return singleJoiningSlash(a.Path, b.Path), ""
+	}
+	apath := a.EscapedPath()
+	bpath := b.EscapedPath()
+
+	aslash := strings.HasSuffix(apath, "/")
+	bslash := strings.HasPrefix(bpath, "/")
+	switch {
+	case aslash && bslash:
+		return a.Path + b.Path[1:], apath + bpath[1:]
+	case !aslash && !bslash:
+		return a.Path + "/" + b.Path, apath + "/" + bpath
+	default:
+		return a.Path + b.Path, apath + bpath
+	}
+}
+
+func singleJoiningSlash(a, b string) string {
+	aslash := strings.HasSuffix(a, "/")
+	bslash := strings.HasPrefix(b, "/")
+	switch {
+	case aslash && bslash:
+		return a + b[1:]
+	case !aslash && !bslash:
+		return a + "/" + b
+	default:
+		return a + b
+	}
 }
 
 // rewriteRequestModel buffers r's JSON body, replaces the top-level "model" with model,

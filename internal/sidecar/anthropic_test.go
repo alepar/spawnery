@@ -251,6 +251,52 @@ func TestOpenAIToAnthropicStopReasons(t *testing.T) {
 	}
 }
 
+func TestMessagesHandlerCredentialsOverrideAppliesPerRequest(t *testing.T) {
+	var defaultHit bool
+	defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defaultHit = true
+		io.WriteString(w, `{"id":"default","model":"default","choices":[{"message":{"role":"assistant","content":"wrong"},"finish_reason":"stop"}],"usage":{}}`)
+	}))
+	defer defaultUpstream.Close()
+
+	var gotAuth, gotPath string
+	overrideUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"chatcmpl-1","model":"override","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer overrideUpstream.Close()
+
+	ov := &Override{}
+	if err := ov.SetCredentials(overrideUpstream.URL, "byok-key"); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(NewMessagesHandler(defaultUpstream.URL, "default-key", ov))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"agent/model","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	if defaultHit {
+		t.Fatalf("request unexpectedly reached default upstream")
+	}
+	if gotAuth != "Bearer byok-key" {
+		t.Fatalf("auth = %q, want BYOK bearer", gotAuth)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want /v1/chat/completions", gotPath)
+	}
+}
+
 // --- Task 2: streaming SSE translation ---
 
 func TestStreamOpenAIToAnthropic(t *testing.T) {

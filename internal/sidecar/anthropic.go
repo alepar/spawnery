@@ -641,7 +641,7 @@ func randID() string {
 // NewMessagesHandler returns an http.Handler for POST /v1/messages that translates the
 // Anthropic Messages API to OpenAI Chat Completions against upstream, injecting the bearer key.
 func NewMessagesHandler(upstream, key string, ov *Override) http.Handler {
-	upstream = strings.TrimRight(upstream, "/")
+	defaultUpstream := strings.TrimRight(upstream, "/")
 	client := &http.Client{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -672,14 +672,16 @@ func NewMessagesHandler(upstream, key string, ov *Override) http.Handler {
 			}
 		}
 
+		creds := ov.Credentials(defaultUpstream, key)
+		creds.Upstream = strings.TrimRight(creds.Upstream, "/")
 		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-			upstream+"/v1/chat/completions", bytes.NewReader(oaiBody))
+			creds.Upstream+"/v1/chat/completions", bytes.NewReader(oaiBody))
 		if err != nil {
 			writeAnthropicError(w, http.StatusInternalServerError, "api_error", "build upstream request: "+err.Error())
 			return
 		}
 		upReq.Header.Set("Content-Type", "application/json")
-		upReq.Header.Set("Authorization", "Bearer "+key)
+		upReq.Header.Set("Authorization", "Bearer "+creds.Key)
 		if stream {
 			upReq.Header.Set("Accept", "text/event-stream")
 		}

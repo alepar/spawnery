@@ -202,3 +202,44 @@ func TestProxyStreamingPassthroughAfterRewrite(t *testing.T) {
 		t.Fatalf("streamed body not passed through: %q", b)
 	}
 }
+
+func TestProxyCredentialsOverrideAppliesPerRequest(t *testing.T) {
+	var defaultHit bool
+	defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defaultHit = true
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer defaultUpstream.Close()
+
+	var gotAuth, gotPath string
+	overrideUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer overrideUpstream.Close()
+
+	ov := &Override{}
+	if err := ov.SetCredentials(overrideUpstream.URL, "byok-key"); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(NewHandler(defaultUpstream.URL, "default-key", ov))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"agent/model"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if defaultHit {
+		t.Fatalf("request unexpectedly reached default upstream")
+	}
+	if gotAuth != "Bearer byok-key" {
+		t.Fatalf("auth = %q, want BYOK bearer", gotAuth)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want /v1/chat/completions", gotPath)
+	}
+}

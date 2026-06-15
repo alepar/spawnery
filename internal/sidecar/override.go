@@ -6,15 +6,23 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 )
+
+// Credentials is the immutable upstream/key pair used for one proxied request.
+type Credentials struct {
+	Upstream string
+	Key      string
+}
 
 // Override holds the live model override shared by the sidecar's proxy handlers.
 // An empty/nil value means passthrough: forward whatever model the agent chose.
 // All methods are safe for concurrent use and lock-free on the read path.
 type Override struct {
-	v atomic.Pointer[string]
+	v     atomic.Pointer[string]
+	creds atomic.Pointer[Credentials]
 }
 
 // Get returns the current override, or "" for passthrough. Safe on a nil receiver.
@@ -35,6 +43,46 @@ func (o *Override) Set(model string) {
 		return
 	}
 	o.v.Store(&model)
+}
+
+// SetCredentials stores the live upstream/key override. key is required. upstream
+// is optional; when empty, handlers keep using their configured default upstream.
+func (o *Override) SetCredentials(upstream, key string) error {
+	if o == nil {
+		return fmt.Errorf("override is nil")
+	}
+	key = strings.TrimSpace(key)
+	upstream = strings.TrimSpace(upstream)
+	if key == "" {
+		return fmt.Errorf("key is required")
+	}
+	if upstream != "" {
+		u, err := url.Parse(upstream)
+		if err != nil {
+			return fmt.Errorf("invalid upstream: %w", err)
+		}
+		if !u.IsAbs() || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("upstream must be an absolute http(s) URL")
+		}
+	}
+	o.creds.Store(&Credentials{Upstream: upstream, Key: key})
+	return nil
+}
+
+// Credentials returns the live credential override, falling back to the handler's
+// configured defaults. Safe on a nil receiver.
+func (o *Override) Credentials(defaultUpstream, defaultKey string) Credentials {
+	if o == nil {
+		return Credentials{Upstream: defaultUpstream, Key: defaultKey}
+	}
+	if c := o.creds.Load(); c != nil {
+		out := *c
+		if out.Upstream == "" {
+			out.Upstream = defaultUpstream
+		}
+		return out
+	}
+	return Credentials{Upstream: defaultUpstream, Key: defaultKey}
 }
 
 // patchModelJSON returns body with its top-level "model" field replaced by model,
@@ -87,6 +135,29 @@ func NewControlHandler(ov *Override, token string) http.Handler {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+	mux.HandleFunc("/control/credentials", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(r, token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Key      string `json:"key"`
+			Upstream string `json:"upstream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := ov.SetCredentials(body.Upstream, body.Key); err != nil {
+			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"applied": true, "upstream_set": strings.TrimSpace(body.Upstream) != ""})
 	})
 	return mux
 }
