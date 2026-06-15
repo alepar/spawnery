@@ -780,9 +780,8 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		hostDir := ""
 		restoreDir := ""
 		preparedDir := ""
-		prepareName := mt.Name
 		if rootMaterialize {
-			prepareName = mt.Name + ".stage"
+			prepareName := mt.Name + ".stage"
 			preparedDir, err = mountBackend.Prepare(ctx, id, prepareName, seedDir, -1)
 			if err != nil {
 				finalizeAll()
