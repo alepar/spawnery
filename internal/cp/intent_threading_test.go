@@ -157,6 +157,24 @@ func intentThreadingCPSecret() *cpv1.SealedSecret {
 	}
 }
 
+func createIntentCatalogSecret(t *testing.T, s *Server, owner, secretID string, target cpv1.ArtifactTarget, destPath, envName string) {
+	t.Helper()
+	_, err := s.CreateSecret(auth.WithOwner(context.Background(), owner), connect.NewRequest(&cpv1.CreateSecretRequest{
+		Secret: &cpv1.SecretWrite{
+			SecretId:        secretID,
+			Type:            cpv1.UserSecretType_USER_SECRET_TYPE_GENERIC_KV,
+			Name:            "Secret " + secretID,
+			TargetContainer: target,
+			EnvVarName:      envName,
+			DestPath:        destPath,
+			Envelope:        envelopeBytes(t, owner, secretID, 1),
+		},
+	}))
+	if err != nil {
+		t.Fatalf("CreateSecret(%s): %v", secretID, err)
+	}
+}
+
 // seedSuspendedSpawn inserts a spawn directly into the store in Suspended state.
 func seedSuspendedSpawn(t *testing.T, s *Server, id, owner string) {
 	t.Helper()
@@ -260,6 +278,51 @@ func assertSealedSecretsThreaded(t *testing.T, sender *capSender, spawnID string
 }
 
 // ---- The four handler tests -----------------------------------------------
+
+func TestCreateSpawnAttachedSecretsMintSensitiveArtifacts(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	createIntentCatalogSecret(t, s, "alice", "gh-main", cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT, "github/token", "GITHUB_TOKEN")
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId:             "secret-app",
+		Model:             "m",
+		AttachedSecretIds: []string{"gh-main"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arts, err := s.st.Spawns().GetArtifacts(context.Background(), resp.Msg.GetSpawnId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(arts) != 1 {
+		t.Fatalf("artifacts len=%d want 1: %+v", len(arts), arts)
+	}
+	got := arts[0]
+	if got.ArtifactID != "secret:gh-main" || !got.Sensitive || len(got.Inline) != 0 {
+		t.Fatalf("attached artifact identity/sensitivity = %+v", got)
+	}
+	if got.EnvVarName != "gh-main" {
+		t.Fatalf("delivery key EnvVarName=%q want secret id gh-main", got.EnvVarName)
+	}
+	if got.DestPath != "github/token" || got.TargetContainer != int32(cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT) {
+		t.Fatalf("routing artifact = %+v", got)
+	}
+}
+
+func TestCreateSpawnAttachedSecretMissingFailsClosed(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId:             "secret-app",
+		Model:             "m",
+		AttachedSecretIds: []string{"missing"},
+	}))
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("CreateSpawn missing secret code=%v err=%v, want NotFound", connect.CodeOf(err), err)
+	}
+}
 
 func TestIntentThreadedCreateSpawn(t *testing.T) {
 	s, sender, stopACK := intentTestServer(t)

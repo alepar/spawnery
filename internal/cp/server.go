@@ -622,6 +622,57 @@ func (s *Server) checkSpawnQuota(ctx context.Context, owner string) error {
 	return nil
 }
 
+func normalizeAttachedSecretIDs(ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("attached secret id is required"))
+		}
+		if _, ok := seen[id]; ok {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("duplicate attached secret id %q", id))
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func (s *Server) attachedSecretArtifactSpecs(ctx context.Context, owner string, ids []string) ([]*cpv1.ArtifactSpec, error) {
+	ids, err := normalizeAttachedSecretIDs(ids)
+	if err != nil || len(ids) == 0 {
+		return nil, err
+	}
+	out := make([]*cpv1.ArtifactSpec, 0, len(ids))
+	for _, id := range ids {
+		row, err := s.st.Secrets().Get(ctx, owner, id)
+		if err != nil {
+			return nil, mapSecretStoreErr(err)
+		}
+		dest := strings.TrimSpace(row.DestPath)
+		if dest == "" {
+			dest = strings.TrimSpace(row.EnvVarName)
+		}
+		if dest == "" {
+			dest = row.SecretID
+		}
+		out = append(out, &cpv1.ArtifactSpec{
+			Id:              "secret:" + row.SecretID,
+			ContentType:     cpv1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_BYTES,
+			TargetContainer: cpv1.ArtifactTarget(row.TargetContainer),
+			DestPath:        dest,
+			Mode:            0o600,
+			Sensitive:       true,
+			EnvVarName:      row.SecretID,
+		})
+	}
+	return out, nil
+}
+
 func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.CreateSpawnRequest]) (*connect.Response[cpv1.CreateSpawnResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
@@ -710,6 +761,11 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 		// profile layer first, then per-spawn override (request) — request wins by id.
 		ownerArtifacts = append(append([]*cpv1.ArtifactSpec{}, profileSpecs...), req.Msg.Artifacts...)
 	}
+	attachedSecretSpecs, serr := s.attachedSecretArtifactSpecs(ctx, owner, req.Msg.GetAttachedSecretIds())
+	if serr != nil {
+		return nil, serr
+	}
+	ownerArtifacts = append(ownerArtifacts, attachedSecretSpecs...)
 	artifacts, aerr := validateAndMergeArtifacts(manifestArtifacts, ownerArtifacts)
 	if aerr != nil {
 		return nil, aerr
