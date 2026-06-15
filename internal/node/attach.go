@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -461,6 +462,26 @@ func artifactsFromProto(in []*nodev1.ArtifactSpec) []spawnlet.Artifact {
 	return out
 }
 
+func startupSecretRoutesFromProto(in []*nodev1.ArtifactSpec) map[string]startupSecretRoute {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]startupSecretRoute)
+	for _, a := range in {
+		if a == nil || !a.GetSensitive() || a.GetEnvVarName() == "" {
+			continue
+		}
+		out[a.GetEnvVarName()] = startupSecretRoute{
+			target:   a.GetTargetContainer(),
+			destPath: a.GetDestPath(),
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func mountBindingsFromProto(in []*nodev1.MountBinding) []spawnlet.MountBinding {
 	if len(in) == 0 {
 		return nil
@@ -532,20 +553,28 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	// ProgressFunc is wired into AgentSelection so restoreRootfsArtifacts can emit per-artifact
 	// progress — a large rootfs delta can exceed the 30s stall window without these resets.
 	a.resumeProgress(st.SpawnId, st.Generation, "starting", "creating containers")
+	sel := spawnlet.AgentSelection{
+		Image:                  st.Image,
+		RunnableID:             st.RunnableId,
+		Mode:                   st.Mode,
+		Mounts:                 mountBindingsFromProto(st.GetMounts()),
+		BaseImageDigest:        st.GetBaseImageDigest(),
+		RootfsSourceGeneration: st.GetRootfsSourceGeneration(),
+		RootfsArtifacts:        rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
+		Artifacts:              artifactsFromProto(st.GetArtifacts()),
+		ProgressFunc: func(phase, detail string) {
+			a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
+		},
+	}
+	if len(st.GetSecrets()) > 0 {
+		secrets := st.GetSecrets()
+		routes := startupSecretRoutesFromProto(st.GetArtifacts())
+		sel.BeforeStartAgent = func(ctx context.Context, pc spawnlet.PreAgentContext) error {
+			return a.consumeStartupSecrets(ctx, pc.SpawnID, pc.Generation, secrets, routes, pc.InjectSecret, pc.ControlURL, pc.ControlToken)
+		}
+	}
 	sp, err := a.mgr.CreateWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation,
-		spawnlet.AgentSelection{
-			Image:                  st.Image,
-			RunnableID:             st.RunnableId,
-			Mode:                   st.Mode,
-			Mounts:                 mountBindingsFromProto(st.GetMounts()),
-			BaseImageDigest:        st.GetBaseImageDigest(),
-			RootfsSourceGeneration: st.GetRootfsSourceGeneration(),
-			RootfsArtifacts:        rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
-			Artifacts:              artifactsFromProto(st.GetArtifacts()),
-			ProgressFunc: func(phase, detail string) {
-				a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
-			},
-		})
+		sel)
 	if err != nil {
 		logErr("startSpawn "+st.SpawnId, err)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
@@ -828,6 +857,52 @@ func (a *attacher) setModel(ctx context.Context, sm *nodev1.SetModel) {
 		return
 	}
 	reply(true, "")
+}
+
+func postSidecarCredentials(ctx context.Context, doer httpDoer, controlURL, token string, key []byte, upstream string) error {
+	if doer == nil {
+		return fmt.Errorf("sidecar credentials POST: no HTTP client")
+	}
+	if controlURL == "" {
+		return fmt.Errorf("sidecar credentials POST: empty control URL")
+	}
+	if len(key) == 0 {
+		return fmt.Errorf("sidecar credentials POST: empty key")
+	}
+	u, err := url.Parse(controlURL)
+	if err != nil {
+		return fmt.Errorf("sidecar credentials POST: parse control URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("sidecar credentials POST: invalid control URL %q", controlURL)
+	}
+	u.Path = "/control/credentials"
+	u.RawQuery = ""
+	u.Fragment = ""
+
+	body, err := json.Marshal(struct {
+		Key      string `json:"key"`
+		Upstream string `json:"upstream"`
+	}{Key: string(key), Upstream: upstream})
+	if err != nil {
+		return fmt.Errorf("sidecar credentials POST: marshal body: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("sidecar credentials POST: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := doer.Do(req)
+	if err != nil {
+		return fmt.Errorf("sidecar credentials POST: %w", err)
+	}
+	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10)); _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("sidecar credentials POST: sidecar control returned %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // frameSenderFor builds the per-client send closure that relays a pump frame line to the CP. Shared by
