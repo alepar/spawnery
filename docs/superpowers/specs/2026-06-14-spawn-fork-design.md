@@ -183,13 +183,15 @@ be **idempotent, ordered, and re-drivable** (not a fire-and-forget `revertOnFail
 ## Risks / spikes (do early)
 
 1. **[F — torn-session `--continue` repair]** Even captured under pause, the session JSONL has no fsync
-   guarantee, so the trailing line can be torn. External evidence indicates a corrupt trailing line can
-   make `--resume` **hard-crash on a JSON parse error**, not degrade gracefully — so a repair is
-   **mandatory**, not optional. *Plan:* `sync` the container before commit (already in capture step 5);
-   on the fork, **deterministically truncate the session log to its last valid JSONL record** before
-   launching `--continue` (a real, implementable fallback — *not* "fresh session", since for these agents
-   the displayed history *is* the session file). *Spike:* confirm `--continue`/`--resume` loads cleanly
-   after truncation for claude-code and codex. (Each side has its **own copy** of the session dir → no
+   guarantee, so the trailing line can be torn. The pinned `spawnery/agent:dev` Spike F probe did **not**
+   reproduce the assumed local JSON parse crash for either claude-code or codex: both clients still
+   advanced far enough to hit the localhost fake provider with a torn trailing line. The same probe also
+   confirmed that **deterministically truncating the session log to its last valid JSONL record** removed
+   positive bytes and still let both clients reach the provider afterward. *Plan:* keep `sync` in the
+   capture flow (already in capture step 5); treat truncate-to-last-valid-record as a conservative repair
+   step before launching `--continue`, but do not rely on a hard-crash assumption when defining launcher or
+   client fallback behavior. Fresh-session fallback remains out of scope for MVP unless later implementation
+   evidence shows no robust continue path. (Each side has its **own copy** of the session dir → no
    shared-session-id collision; they resume independently.)
 2. **[E — freeze SLO + source turn-abort]** The under-pause incremental scan (Kopia has no dirty-path
    API → scan-bound) + `docker commit` (~4 s / 1.2 GB measured) set the freeze. *Question:* real pause
@@ -258,3 +260,8 @@ the assumptions above — append a dated note here, whether or not a formal debu
   corrected ~2.5–3× disk gate, a fork-ready SLO, and defined `Forking`/"seeding…" client semantics
   (Theme 7); documented that a mid-turn fork may abort the **source's** in-flight turn (Theme 3, accepted
   for MVP). Spikes E/F/G/H carried above.
+- **2026-06-15 (Spike F):** Torn-session JSONL probe against pinned `spawnery/agent:dev` found that
+  neither claude-code nor codex produced the expected local JSON parse failure on a corrupted trailing
+  JSONL line; both still reached the localhost fake provider before and after deterministic truncation to
+  the last valid record. The ForkSpawn launcher/client plan was adjusted accordingly; raw evidence is
+  stored in Beads `sp-li7h.1`, with implications copied to `sp-dts5` and `sp-6344`.
