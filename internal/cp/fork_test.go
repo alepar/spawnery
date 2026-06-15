@@ -14,6 +14,7 @@ import (
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
+	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
@@ -101,11 +102,44 @@ func seedForkSource(t *testing.T, s *Server, reg *registry.Registry, rt *router.
 	}); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
+	nodeSender := sender
+	if sender != nil {
+		nodeSender = autoUnpauseSender{s: s, inner: sender}
+	}
 	reg.Add(&registry.Node{
-		ID: nodeID, Sender: sender, Max: 4, Free: 4, Class: "cloud",
+		ID: nodeID, Sender: nodeSender, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
 	})
-	rt.Bind(id, nodeID, sender)
+	rt.Bind(id, nodeID, nodeSender)
+}
+
+type autoUnpauseSender struct {
+	s     *Server
+	inner registry.NodeSender
+}
+
+func (a autoUnpauseSender) Send(m *nodev1.CPMessage) error {
+	if err := a.inner.Send(m); err != nil {
+		return err
+	}
+	if cmd := m.GetUnpauseIfPaused(); cmd != nil {
+		a.s.deliverUnpauseIfPausedComplete(&nodev1.UnpauseIfPausedComplete{
+			SpawnId:    cmd.GetSpawnId(),
+			Generation: cmd.GetGeneration(),
+		})
+	}
+	return nil
+}
+
+func sawUnpause(sender *capSender, spawnID string) bool {
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	for _, msg := range sender.sent {
+		if cmd := msg.GetUnpauseIfPaused(); cmd != nil && cmd.GetSpawnId() == spawnID {
+			return true
+		}
+	}
+	return false
 }
 
 func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
@@ -610,7 +644,8 @@ func TestForkSpawnRechecksDiskBeforeMaterialization(t *testing.T) {
 
 func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 	s, reg, rt := newTestServer(t)
-	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sourceSender := &capSender{}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
 	reg.Add(&registry.Node{
 		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
@@ -636,6 +671,9 @@ func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 	if err != nil || source.Status != store.Active {
 		t.Fatalf("source after failed fork = %+v err=%v", source, err)
 	}
+	if !sawUnpause(sourceSender, "sp-source") {
+		t.Fatal("failed fork cleanup must unpause source before restoring it active")
+	}
 	wantPrefixes := []string{"revoke-key:", "empty-bucket:spawnery-spawn-", "drop-bucket:spawnery-spawn-", "delete-row:"}
 	if len(res.ops) != len(wantPrefixes) {
 		t.Fatalf("unwind ops=%v want prefixes %v", res.ops, wantPrefixes)
@@ -644,6 +682,35 @@ func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 		if !strings.HasPrefix(res.ops[i], prefix) {
 			t.Fatalf("unwind ops=%v want prefix %q at %d", res.ops, prefix, i)
 		}
+	}
+}
+
+func TestForkSpawnMaterializerFailureLeavesSourceForkingWhenUnpauseUnavailable(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", nil)
+	reg.Add(&registry.Node{
+		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
+		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
+	})
+	res := &recordingForkResources{}
+	s.failedForkResources = res
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	s.forkMaterializer = unimplementedForkMaterializer{}
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.ForkSpawn(ctx, connect.NewRequest(&cpv1.ForkSpawnRequest{SpawnId: "sp-source", TargetNodeId: "node-2"}))
+	if connect.CodeOf(err) != connect.CodeUnimplemented {
+		t.Fatalf("default materializer should fail unimplemented, got %v", err)
+	}
+	source, err := s.st.Spawns().Get(ctx, "sp-source")
+	if err != nil {
+		t.Fatalf("Get source: %v", err)
+	}
+	if source.Status != store.Forking {
+		t.Fatalf("source status=%s want Forking after failed unpause", source.Status)
+	}
+	if source.ForkCaptureDeadline == nil {
+		t.Fatal("fork_capture_deadline must remain set for recovery")
 	}
 }
 

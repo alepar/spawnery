@@ -184,6 +184,13 @@ func (s *Server) restoreForkingSource(ctx context.Context, sourceID, leaseID str
 	return nil
 }
 
+func (s *Server) restoreForkingSourceAfterUnpause(ctx context.Context, sourceID, leaseID string, generation int64) error {
+	if err := s.forkPauseController().UnpauseIfPaused(ctx, sourceID, generation); err != nil {
+		return err
+	}
+	return s.restoreForkingSource(ctx, sourceID, leaseID, generation)
+}
+
 func (s *Server) startFork(ctx context.Context, owner, sourceID string, fork store.Spawn, nodeID string, targetGeneration uint64, rootfsPins []store.RootfsArtifactPin) (string, error) {
 	placement := registry.Placement{Owner: owner, Image: fork.Image, TargetNodeID: nodeID}
 	artifacts, err := s.st.Spawns().GetArtifacts(ctx, fork.ID)
@@ -395,7 +402,7 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("mark source forking: %w", err)))
 	}
 	restoreSource := func() error {
-		return s.restoreForkingSource(context.WithoutCancel(ctx), sourceID, leaseID, live.Generation)
+		return s.restoreForkingSourceAfterUnpause(context.WithoutCancel(ctx), sourceID, leaseID, live.Generation)
 	}
 	restoreOnFailure := true
 	defer func() {
