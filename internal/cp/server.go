@@ -674,6 +674,53 @@ func (s *Server) attachedSecretArtifactSpecs(ctx context.Context, owner string, 
 	return out, nil
 }
 
+func (s *Server) attachSecretArtifactsToSpawn(ctx context.Context, owner, spawnID string, ids []string) error {
+	specs, err := s.attachedSecretArtifactSpecs(ctx, owner, ids)
+	if err != nil || len(specs) == 0 {
+		return err
+	}
+	next, err := validateAndMergeArtifacts(nil, specs)
+	if err != nil {
+		return err
+	}
+	if err := s.st.WithTx(ctx, func(tx store.Store) error {
+		existing, err := tx.Spawns().GetArtifacts(ctx, spawnID)
+		if err != nil {
+			return err
+		}
+		byID := make(map[string]store.Artifact, len(existing))
+		for _, art := range existing {
+			byID[art.ArtifactID] = art
+		}
+		toAdd := make([]store.Artifact, 0, len(next))
+		for _, art := range next {
+			if current, ok := byID[art.ArtifactID]; ok {
+				if !current.Sensitive || strings.TrimSpace(current.EnvVarName) != art.EnvVarName {
+					return connect.NewError(connect.CodeInvalidArgument,
+						fmt.Errorf("attached secret %q conflicts with existing artifact %q", art.EnvVarName, art.ArtifactID))
+				}
+				continue
+			}
+			toAdd = append(toAdd, art)
+		}
+		if len(existing)+len(toAdd) > maxArtifactsPerSpawn {
+			return connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("too many artifacts: %d (max %d)", len(existing)+len(toAdd), maxArtifactsPerSpawn))
+		}
+		if len(toAdd) == 0 {
+			return nil
+		}
+		return tx.Spawns().AddArtifacts(ctx, spawnID, toAdd)
+	}); err != nil {
+		var cerr *connect.Error
+		if errors.As(err, &cerr) {
+			return err
+		}
+		return connect.NewError(connect.CodeInternal, err)
+	}
+	return nil
+}
+
 func startupSecretIDsFromArtifacts(arts []store.Artifact) []string {
 	seen := map[string]struct{}{}
 	out := make([]string, 0)
@@ -960,6 +1007,13 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 			log.Printf("provisionSpawn %s: validate startup secrets: %v", spawnID, err)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
 				log.Printf("provisionSpawn %s: SetError after startup secret validation failure also failed: %v", spawnID, serr)
+			}
+			return
+		}
+		if err := s.ensureStartupSecretsExist(ctx, ownerID, requiredSecretIDs); err != nil {
+			log.Printf("provisionSpawn %s: recheck startup secret catalog: %v", spawnID, err)
+			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+				log.Printf("provisionSpawn %s: SetError after startup secret catalog recheck failure also failed: %v", spawnID, serr)
 			}
 			return
 		}

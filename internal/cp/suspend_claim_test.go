@@ -230,7 +230,7 @@ func TestResumePassesThroughResuming(t *testing.T) {
 	// Force placement to n2 so provision sends Start to resumeSdr (n1 is still registered but its
 	// route was dropped after suspend; without a forced override PickFor might choose either node).
 	if err := s.withClaim(ctx, "sp1", func(cctx context.Context, leaseID string) error {
-		_, err := s.resumeLocked(cctx, "alice", "sp1", placementOverride{NodeID: "n2"}, false, "test-resume", nil, leaseID)
+		_, err := s.resumeLocked(cctx, "alice", "sp1", placementOverride{NodeID: "n2"}, false, "test-resume", nil, nil, leaseID)
 		return err
 	}); err != nil {
 		t.Fatalf("resumeLocked: %v", err)

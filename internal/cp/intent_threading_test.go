@@ -77,6 +77,10 @@ func goSubmitIntent(ctx context.Context, s *Server, spawnID, owner string, sessi
 }
 
 func goSubmitIntentWithSecrets(ctx context.Context, s *Server, spawnID, owner string, sessionKey *ecdsa.PrivateKey, secrets []*cpv1.SealedSecret, errCh chan<- error) {
+	goSubmitIntentWithSecretsAfterReady(ctx, s, spawnID, owner, sessionKey, secrets, nil, errCh)
+}
+
+func goSubmitIntentWithSecretsAfterReady(ctx context.Context, s *Server, spawnID, owner string, sessionKey *ecdsa.PrivateKey, secrets []*cpv1.SealedSecret, onReady func(context.Context, *cpv1.PendingIntent) error, errCh chan<- error) {
 	go func() {
 		ownerCtx := auth.WithOwner(ctx, owner)
 		var pi *cpv1.PendingIntent
@@ -103,6 +107,12 @@ func goSubmitIntentWithSecrets(ctx context.Context, s *Server, spawnID, owner st
 							errCh <- fmt.Errorf("pending intent attached_secret_ids=%+v missing submitted secret %q", pi.GetAttachedSecretIds(), sec.GetSecretId())
 							return
 						}
+					}
+				}
+				if onReady != nil {
+					if err := onReady(ownerCtx, pi); err != nil {
+						errCh <- err
+						return
 					}
 				}
 				break
@@ -276,6 +286,31 @@ func assertNoStartSpawn(t *testing.T, sender *capSender, spawnID string) {
 		if ss.GetSpawnId() == spawnID {
 			t.Fatalf("StartSpawn was sent for %s despite startup secret validation failure", spawnID)
 		}
+	}
+}
+
+func waitIntentSpawnStatus(t *testing.T, s *Server, spawnID string, want store.Status) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sp, _ := s.st.Spawns().Get(context.Background(), spawnID)
+		if sp.Status == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("spawn %s never reached %s (status=%v)", spawnID, want, sp.Status)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func deleteSecretAfterPendingReady(s *Server, secretID string) func(context.Context, *cpv1.PendingIntent) error {
+	return func(ctx context.Context, _ *cpv1.PendingIntent) error {
+		_, err := s.DeleteSecret(ctx, connect.NewRequest(&cpv1.DeleteSecretRequest{SecretId: secretID}))
+		if err != nil {
+			return fmt.Errorf("delete secret after pending ready: %w", err)
+		}
+		return nil
 	}
 }
 
@@ -528,6 +563,32 @@ func TestIntentThreadedCreateProvisionRejectsDeletedAttachedSecret(t *testing.T)
 	assertNoStartSpawn(t, sender, spawnID)
 }
 
+func TestIntentThreadedCreateSpawnRejectsDeletedAttachedSecretAfterPendingReady(t *testing.T) {
+	s, sender, stopACK := intentTestServer(t)
+	defer stopACK()
+	createIntentCatalogSecret(t, s, "alice", "gh-main", cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT, "github/token", "GITHUB_TOKEN")
+
+	sessionKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	errCh := make(chan error, 1)
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId:             "secret-app",
+		Model:             "m",
+		AttachedSecretIds: []string{"gh-main"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawnID := resp.Msg.GetSpawnId()
+
+	goSubmitIntentWithSecretsAfterReady(context.Background(), s, spawnID, "alice", sessionKey, []*cpv1.SealedSecret{intentThreadingCPSecret()}, deleteSecretAfterPendingReady(s, "gh-main"), errCh)
+	if submitErr := <-errCh; submitErr != nil {
+		t.Fatalf("SubmitIntent should accept the envelope and let provision catalog recheck fail: %v", submitErr)
+	}
+	waitIntentSpawnStatus(t, s, spawnID, store.Errored)
+	assertNoStartSpawn(t, sender, spawnID)
+}
+
 func TestIntentThreadedRestartRejectsDeletedAttachedSecret(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -566,6 +627,62 @@ func TestIntentThreadedRestartRejectsDeletedAttachedSecret(t *testing.T) {
 			ownerCtx := auth.WithOwner(context.Background(), "alice")
 			if err := tc.call(ownerCtx, s, tc.spawnID); connect.CodeOf(err) != connect.CodeNotFound {
 				t.Fatalf("%s deleted attached secret code=%v err=%v, want NotFound", tc.name, connect.CodeOf(err), err)
+			}
+			sp, err := s.st.Spawns().Get(context.Background(), tc.spawnID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sp.Status != store.Errored {
+				t.Fatalf("%s status=%v want Errored after deleted attached secret", tc.name, sp.Status)
+			}
+			assertNoStartSpawn(t, sender, tc.spawnID)
+		})
+	}
+}
+
+func TestIntentThreadedRestartRejectsDeletedAttachedSecretAfterPendingReady(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		spawnID string
+		seed    func(*testing.T, *Server, string, string)
+		call    func(context.Context, *Server, string) error
+	}{
+		{
+			name:    "resume",
+			spawnID: "sp-resume-delete-after-pending",
+			seed:    seedSuspendedSpawn,
+			call: func(ctx context.Context, s *Server, spawnID string) error {
+				_, err := s.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: spawnID}))
+				return err
+			},
+		},
+		{
+			name:    "recreate",
+			spawnID: "sp-recreate-delete-after-pending",
+			seed:    seedErroredSpawn,
+			call: func(ctx context.Context, s *Server, spawnID string) error {
+				_, err := s.RecreateSpawn(ctx, connect.NewRequest(&cpv1.RecreateSpawnRequest{SpawnId: spawnID}))
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, sender, stopACK := intentTestServer(t)
+			defer stopACK()
+			createIntentCatalogSecret(t, s, "alice", "gh-main", cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT, "github/token", "GITHUB_TOKEN")
+			tc.seed(t, s, tc.spawnID, "alice")
+			addIntentStartupSecretArtifact(t, s, tc.spawnID, "gh-main")
+
+			sessionKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			errCh := make(chan error, 1)
+			goSubmitIntentWithSecretsAfterReady(context.Background(), s, tc.spawnID, "alice", sessionKey, []*cpv1.SealedSecret{intentThreadingCPSecret()}, deleteSecretAfterPendingReady(s, "gh-main"), errCh)
+
+			ownerCtx := auth.WithOwner(context.Background(), "alice")
+			if err := tc.call(ownerCtx, s, tc.spawnID); connect.CodeOf(err) != connect.CodeNotFound {
+				t.Fatalf("%s deleted attached secret after pending code=%v err=%v, want NotFound", tc.name, connect.CodeOf(err), err)
+			}
+			if submitErr := <-errCh; submitErr != nil {
+				t.Fatalf("SubmitIntent should accept the envelope and let provision catalog recheck fail: %v", submitErr)
 			}
 			sp, err := s.st.Spawns().Get(context.Background(), tc.spawnID)
 			if err != nil {
@@ -658,6 +775,59 @@ func TestIntentThreadedResumeSpawn(t *testing.T) {
 		t.Fatalf("SubmitIntent error: %v", submitErr)
 	}
 	assertAuthThreaded(t, sender, "sp-resume")
+}
+
+func TestIntentThreadedResumeSpawnAttachesRequestedSecrets(t *testing.T) {
+	s, sender, stopACK := intentTestServer(t)
+	defer stopACK()
+	createIntentCatalogSecret(t, s, "alice", "gh-main", cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT, "github/token", "GITHUB_TOKEN")
+	seedSuspendedSpawn(t, s, "sp-resume-attach", "alice")
+
+	sessionKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	errCh := make(chan error, 1)
+	goSubmitIntentWithSecrets(context.Background(), s, "sp-resume-attach", "alice", sessionKey, []*cpv1.SealedSecret{intentThreadingCPSecret()}, errCh)
+
+	ownerCtx := auth.WithOwner(context.Background(), "alice")
+	if _, err := s.ResumeSpawn(ownerCtx, connect.NewRequest(&cpv1.ResumeSpawnRequest{
+		SpawnId:           "sp-resume-attach",
+		AttachedSecretIds: []string{"gh-main"},
+	})); err != nil {
+		t.Fatalf("ResumeSpawn: %v", err)
+	}
+	if submitErr := <-errCh; submitErr != nil {
+		t.Fatalf("SubmitIntent error: %v", submitErr)
+	}
+	arts, err := s.st.Spawns().GetArtifacts(context.Background(), "sp-resume-attach")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(arts) != 1 || arts[0].ArtifactID != "secret:gh-main" || !arts[0].Sensitive || arts[0].EnvVarName != "gh-main" {
+		t.Fatalf("resume attached artifacts = %+v", arts)
+	}
+	assertAuthThreaded(t, sender, "sp-resume-attach")
+	assertSealedSecretsThreaded(t, sender, "sp-resume-attach")
+}
+
+func TestResumeSpawnAttachedSecretMissingFailsClosed(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	s.SetIntentEnabled(true)
+	seedSuspendedSpawn(t, s, "sp-resume-missing-secret", "alice")
+
+	ownerCtx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.ResumeSpawn(ownerCtx, connect.NewRequest(&cpv1.ResumeSpawnRequest{
+		SpawnId:           "sp-resume-missing-secret",
+		AttachedSecretIds: []string{"missing"},
+	}))
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("ResumeSpawn missing attached secret code=%v err=%v, want NotFound", connect.CodeOf(err), err)
+	}
+	sp, err := s.st.Spawns().Get(context.Background(), "sp-resume-missing-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp.Status != store.Suspended {
+		t.Fatalf("status=%v want Suspended after missing resume attached secret", sp.Status)
+	}
 }
 
 func TestIntentThreadedRecreateSpawn(t *testing.T) {
