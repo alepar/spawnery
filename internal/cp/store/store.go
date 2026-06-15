@@ -160,7 +160,8 @@ type SpawnRepo interface {
 
 	// MarkDeletedClaimed is the claim/lease/gen-fenced deleted transition for claimed cleanup flows.
 	// It hides the row from Get/ListByOwner, clears claim/forking metadata, and ends the live
-	// container as lost after the durable row update succeeds.
+	// container as lost after the durable row update succeeds. expectedGen=0 fences on there being no
+	// live container, for cleanup of half-created forks whose container row already ended.
 	MarkDeletedClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, ts int64) (newSeq int64, err error)
 }
 

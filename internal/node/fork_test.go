@@ -3,7 +3,9 @@ package node
 import (
 	"context"
 	"io"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,6 +64,54 @@ func putForkNodeSource(t *testing.T, mgr *spawnlet.Manager, id string, gen uint6
 		BaseImageDigest: "agent@sha256:base", LaunchImageRef: "agent:base",
 		JournalMounts: []journal.Mount{{Name: "main", HostDir: t.TempDir(), Class: journal.NodeLocal}},
 	})
+}
+
+type forkStatusDoer struct {
+	mu   sync.Mutex
+	idle chan struct{}
+	reqs []*http.Request
+}
+
+func (d *forkStatusDoer) Do(req *http.Request) (*http.Response, error) {
+	d.mu.Lock()
+	d.reqs = append(d.reqs, req)
+	d.mu.Unlock()
+	busy := true
+	select {
+	case <-d.idle:
+		busy = false
+	default:
+	}
+	body := `{"busy":true,"active_requests":1}`
+	if !busy {
+		body = `{"busy":false,"active_requests":0}`
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+}
+
+func (d *forkStatusDoer) lastReq() *http.Request {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.reqs) == 0 {
+		return nil
+	}
+	return d.reqs[len(d.reqs)-1]
+}
+
+func idleForkStatusDoer() *forkStatusDoer {
+	idle := make(chan struct{})
+	close(idle)
+	return &forkStatusDoer{idle: idle}
+}
+
+func setForkNodeControl(t *testing.T, mgr *spawnlet.Manager, id string) {
+	t.Helper()
+	sp, ok := mgr.Store().Get(id)
+	if !ok {
+		t.Fatalf("missing source %s in manager store", id)
+	}
+	sp.ControlURL = "http://10.0.0.5:8081/control/model"
+	sp.ControlToken = "tok-fork"
 }
 
 func TestForkSameNodeStaleGenerationDropped(t *testing.T) {
@@ -206,6 +256,8 @@ func TestForkTurnBoundaryWaitsForStartingMoshSession(t *testing.T) {
 	sx := &fakeSessionExec{moshGate: make(chan struct{}), moshReached: make(chan struct{})}
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
+	setForkNodeControl(t, mgr, "sp-source")
+	a.ctrlHTTP = idleForkStatusDoer()
 	a.sx = sx
 	reg := newSessionRegistry("sp-source")
 	reg.register(&sessionEntry{id: SessionZeroID, state: nodev1.SessionState_SESSION_STATE_ACTIVE, pinned: true, runnable: "goose-acp"})
@@ -506,8 +558,10 @@ func TestForkTurnBoundaryCompletesForTmuxRelaySource(t *testing.T) {
 	be := &scriptedPodBackend{script: scriptGoose}
 	mgr := newForkNodeManager(t, be)
 	putForkNodeSource(t, mgr, "sp-source", 9)
+	setForkNodeControl(t, mgr, "sp-source")
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
+	a.ctrlHTTP = idleForkStatusDoer()
 	a.tmuxRelays[zeroKey("sp-source")] = newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
 
 	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
@@ -518,6 +572,44 @@ func TestForkTurnBoundaryCompletesForTmuxRelaySource(t *testing.T) {
 	got := lastForkTurnBoundaryComplete(fs)
 	if got.GetError() != "" {
 		t.Fatalf("ForkTurnBoundaryComplete error = %q", got.GetError())
+	}
+}
+
+func TestForkTurnBoundaryWaitsForTmuxSidecarInflight(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	setForkNodeControl(t, mgr, "sp-source")
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	idle := make(chan struct{})
+	doer := &forkStatusDoer{idle: idle}
+	a.ctrlHTTP = doer
+	a.tmuxRelays[zeroKey("sp-source")] = newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	time.Sleep(2 * forkTurnBoundaryPoll)
+	if got := lastForkTurnBoundaryComplete(fs); got != nil {
+		t.Fatalf("turn-boundary completed while sidecar reported an active request: %+v", got)
+	}
+
+	close(idle)
+	waitFor(t, "ForkTurnBoundaryComplete after sidecar idle", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+	got := lastForkTurnBoundaryComplete(fs)
+	if got.GetError() != "" {
+		t.Fatalf("ForkTurnBoundaryComplete error = %q", got.GetError())
+	}
+	last := doer.lastReq()
+	if last == nil {
+		t.Fatal("turn-boundary must query sidecar control status")
+	}
+	if got := last.URL.String(); got != "http://10.0.0.5:8081/control/status" {
+		t.Fatalf("sidecar status URL = %s", got)
+	}
+	if got := last.Header.Get("Authorization"); got != "Bearer tok-fork" {
+		t.Fatalf("sidecar status auth = %q, want bearer token", got)
 	}
 }
 

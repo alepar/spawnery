@@ -678,7 +678,7 @@ func (r *spawnRepo) withTx(ctx context.Context, fn func(tx *spawnRepo) error) er
 }
 
 func (r *spawnRepo) markDeletedClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, ts int64) (int64, error) {
-	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+	q := r.db.NewUpdate().Model((*Spawn)(nil)).
 		Set("status = ?", Deleted).
 		Set("deleted_at = ?", ts).
 		Set("fork_capture_deadline = NULL").
@@ -688,9 +688,13 @@ func (r *spawnRepo) markDeletedClaimed(ctx context.Context, id, leaseID string, 
 		Set("status_seq = status_seq + 1").
 		Where("id = ?", id).
 		Where("status_seq = ?", expectedSeq).
-		Where("claim_lease_id = ?", leaseID).
-		Where("? = (SELECT generation FROM spawn_containers WHERE spawn_id = id AND ended_at IS NULL)", expectedGen).
-		Exec(ctx)
+		Where("claim_lease_id = ?", leaseID)
+	if expectedGen == 0 {
+		q = q.Where("NOT EXISTS (SELECT 1 FROM spawn_containers WHERE spawn_id = id AND ended_at IS NULL)")
+	} else {
+		q = q.Where("? = (SELECT generation FROM spawn_containers WHERE spawn_id = id AND ended_at IS NULL)", expectedGen)
+	}
+	res, err := q.Exec(ctx)
 	if err != nil {
 		return 0, err
 	}

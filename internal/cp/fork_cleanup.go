@@ -162,8 +162,9 @@ func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) err
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return nil
+	expectedGen := int64(0)
+	if ok {
+		expectedGen = c.Generation
 	}
 
 	leaseID := uuid.NewString()
@@ -176,7 +177,7 @@ func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) err
 	}
 
 	nodeID := cfg.NodeID
-	if nodeID == "" {
+	if nodeID == "" && ok {
 		nodeID = c.NodeID
 	}
 	if err := cfg.Resources.RevokeForkGeneration(ctx, nodeID, cfg.ForkID, cfg.Generation); err != nil {
@@ -191,7 +192,7 @@ func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) err
 	if obs, ok := cfg.Resources.(failedForkRowDeleteObserver); ok {
 		obs.RecordForkRowDelete(cfg.ForkID)
 	}
-	_, err = s.st.Spawns().MarkDeletedClaimed(ctx, cfg.ForkID, leaseID, seq, c.Generation, cfg.DeletedAtUnix)
+	_, err = s.st.Spawns().MarkDeletedClaimed(ctx, cfg.ForkID, leaseID, seq, expectedGen, cfg.DeletedAtUnix)
 	return err
 }
 

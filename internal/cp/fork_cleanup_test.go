@@ -246,6 +246,57 @@ func TestSweepFailedForksReclaimsStaleRestoringForks(t *testing.T) {
 	}
 }
 
+func TestSweepFailedForksCleansForkWithoutLiveContainer(t *testing.T) {
+	s, st := newForkCleanupTestServer(t)
+	ctx := context.Background()
+	s.now = func() time.Time { return time.Unix(500, 0) }
+	seedPartialFork(t, st, "source-no-live")
+	seedPartialFork(t, st, "fork-no-live")
+	if err := st.Spawns().EndContainer(ctx, "fork-no-live", 1, store.PhaseLost); err != nil {
+		t.Fatalf("EndContainer fork-no-live: %v", err)
+	}
+	if err := st.TransferSets().Create(ctx, store.TransferSet{
+		ID:                "ts-no-live",
+		Kind:              store.TransferSetFork,
+		SpawnID:           "fork-no-live",
+		SourceSpawnID:     "source-no-live",
+		ForkSpawnID:       "fork-no-live",
+		SourceGeneration:  3,
+		TargetGeneration:  1,
+		SourceNodeID:      "source-node",
+		TargetNodeID:      "target-node",
+		TransferKeyStatus: store.TransferKeyPending,
+		Status:            store.TransferSetFailed,
+		CreatedAt:         100,
+		UpdatedAt:         100,
+	}); err != nil {
+		t.Fatalf("Create failed fork transfer set: %v", err)
+	}
+
+	res := &recordingForkResources{}
+	if err := s.sweepFailedForks(ctx, res); err != nil {
+		t.Fatalf("sweepFailedForks: %v", err)
+	}
+	want := []string{
+		"revoke-key:fork-no-live",
+		"empty-bucket:spawnery-spawn-fork-no-live",
+		"drop-bucket:spawnery-spawn-fork-no-live",
+		"delete-row:fork-no-live",
+	}
+	if got := res.ops; len(got) != len(want) {
+		t.Fatalf("ops=%v want %v", got, want)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("ops=%v want %v", got, want)
+			}
+		}
+	}
+	if _, err := st.Spawns().Get(ctx, "fork-no-live"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("fork without live container should be deleted after cleanup, err=%v", err)
+	}
+}
+
 type cleanupAckSender struct {
 	capSender
 	s *Server

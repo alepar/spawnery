@@ -2,7 +2,11 @@ package node
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
@@ -180,7 +184,7 @@ func (a *attacher) acquireForkBarrier(ctx context.Context, spawnID string, sourc
 			return ctx.Err()
 		default:
 		}
-		err, acquired := a.tryAcquireForkBarrier(spawnID, barrier)
+		err, acquired := a.tryAcquireForkBarrier(ctx, spawnID, barrier)
 		if err != nil {
 			return err
 		}
@@ -195,7 +199,7 @@ func (a *attacher) acquireForkBarrier(ctx context.Context, spawnID string, sourc
 	}
 }
 
-func (a *attacher) tryAcquireForkBarrier(spawnID string, barrier forkIngressBarrier) (error, bool) {
+func (a *attacher) tryAcquireForkBarrier(ctx context.Context, spawnID string, barrier forkIngressBarrier) (error, bool) {
 	a.mu.Lock()
 	var pumps []*Pump
 	for key, p := range a.pumps {
@@ -217,13 +221,22 @@ func (a *attacher) tryAcquireForkBarrier(spawnID string, barrier forkIngressBarr
 		a.mu.Unlock()
 		return fmt.Errorf("fork turn-boundary gate unavailable: no observable ACP pump or tmux relay"), false
 	}
+	a.mu.Unlock()
+	if len(relays) > 0 {
+		busy, err := a.sourceInferenceBusy(ctx, spawnID)
+		if err != nil {
+			return err, false
+		}
+		if busy {
+			return nil, false
+		}
+	}
 	var acquired []*Pump
 	for _, p := range pumps {
 		if !p.tryAcquireForkBarrier(barrier) {
 			for _, held := range acquired {
 				held.releaseForkBarrier(func(b forkIngressBarrier) bool { return b.matches(barrier) })
 			}
-			a.mu.Unlock()
 			return nil, false
 		}
 		acquired = append(acquired, p)
@@ -237,15 +250,58 @@ func (a *attacher) tryAcquireForkBarrier(spawnID string, barrier forkIngressBarr
 			for _, held := range acquiredRelays {
 				held.releaseForkBarrier(func(b forkIngressBarrier) bool { return b.matches(barrier) })
 			}
-			a.mu.Unlock()
 			return nil, false
 		}
 		acquiredRelays = append(acquiredRelays, r)
 	}
+	a.mu.Lock()
 	a.ensureForkBarriersLocked()
 	a.forkBarriers[spawnID] = barrier
 	a.mu.Unlock()
 	return nil, true
+}
+
+func (a *attacher) sourceInferenceBusy(ctx context.Context, spawnID string) (bool, error) {
+	sp, ok := a.mgr.Store().Get(spawnID)
+	if !ok {
+		return false, fmt.Errorf("fork turn-boundary gate unavailable: unknown spawn")
+	}
+	if sp.ControlURL == "" || sp.ControlToken == "" {
+		return false, fmt.Errorf("fork turn-boundary gate unavailable: no sidecar control endpoint")
+	}
+	statusURL := strings.TrimSuffix(sp.ControlURL, "/model")
+	if statusURL == sp.ControlURL {
+		statusURL = strings.TrimRight(sp.ControlURL, "/")
+	}
+	statusURL += "/status"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+sp.ControlToken)
+	doer := a.ctrlHTTP
+	if doer == nil {
+		doer = &http.Client{Timeout: controlPostTimeout}
+	}
+	resp, err := doer.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("sidecar control status: %w", err)
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("sidecar control status returned %d", resp.StatusCode)
+	}
+	var body struct {
+		Busy           bool  `json:"busy"`
+		ActiveRequests int64 `json:"active_requests"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return false, fmt.Errorf("decode sidecar control status: %w", err)
+	}
+	return body.Busy || body.ActiveRequests > 0, nil
 }
 
 func (a *attacher) ensureForkBarriersLocked() {

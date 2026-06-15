@@ -57,14 +57,16 @@ func patchModelJSON(body []byte, model string) ([]byte, error) {
 	return json.Marshal(obj)
 }
 
-// NewControlHandler serves the token-gated /control/model endpoint:
+// NewControlHandler serves the token-gated control endpoints:
 //
-//	POST {"model":"<openrouter-id>"}  -> set the live override (empty clears it)
-//	GET                               -> {"model":"<current override>"}
+//	/control/model  POST {"model":"<openrouter-id>"} -> set the live override (empty clears it)
+//	/control/model  GET                              -> {"model":"<current override>"}
+//	/control/status GET                              -> {"model":"<current override>","busy":bool,"active_requests":n}
 //
 // Auth: Authorization: Bearer <token>, constant-time compared against token.
 // Intended to run on its own http.Server bound to the pod IP (not loopback).
-func NewControlHandler(ov *Override, token string) http.Handler {
+func NewControlHandler(ov *Override, token string, trackers ...*Inflight) http.Handler {
+	inflight := firstInflight(trackers)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/control/model", func(w http.ResponseWriter, r *http.Request) {
 		if !authorized(r, token) {
@@ -87,6 +89,18 @@ func NewControlHandler(ov *Override, token string) http.Handler {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+	mux.HandleFunc("/control/status", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(r, token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		active := inflight.Active()
+		writeJSON(w, http.StatusOK, map[string]any{"model": ov.Get(), "busy": active > 0, "active_requests": active})
 	})
 	return mux
 }
