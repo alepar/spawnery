@@ -64,6 +64,15 @@ func seedPartialFork(t *testing.T, st store.Store, forkID string) {
 	makeSpawn(t, &Server{st: st}, forkID, "alice")
 }
 
+func seedActiveFork(t *testing.T, st store.Store, forkID, nodeID string) {
+	t.Helper()
+	ctx := context.Background()
+	seedPartialFork(t, st, forkID)
+	if err := st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().SetActive(ctx, forkID, nodeID, 1) }); err != nil {
+		t.Fatalf("SetActive %s: %v", forkID, err)
+	}
+}
+
 func TestUnwindFailedForkOrderingAndRowLast(t *testing.T) {
 	s, st := newForkCleanupTestServer(t)
 	ctx := context.Background()
@@ -194,6 +203,62 @@ func TestSweepFailedForksIsIdempotent(t *testing.T) {
 	}
 	if got := res.ops; len(got) != len(want) {
 		t.Fatalf("second sweep must be a no-op, ops=%v want %v", got, want)
+	}
+}
+
+func TestSweepFailedForksDoesNotReclaimActiveForkWithStaleTransferSet(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status store.TransferSetStatus
+	}{
+		{name: "failed", status: store.TransferSetFailed},
+		{name: "restoring", status: store.TransferSetRestoring},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, st := newForkCleanupTestServer(t)
+			ctx := context.Background()
+			s.claimTTL = time.Second
+			s.now = func() time.Time { return time.Unix(0, int64(staleRestoringForkGrace(s.claimTTL)+5*time.Second)) }
+			sourceID := "source-active-" + tc.name
+			forkID := "fork-active-" + tc.name
+			seedPartialFork(t, st, sourceID)
+			seedActiveFork(t, st, forkID, "target-node")
+			if err := st.TransferSets().Create(ctx, store.TransferSet{
+				ID:                "ts-active-" + tc.name,
+				Kind:              store.TransferSetFork,
+				SpawnID:           forkID,
+				SourceSpawnID:     sourceID,
+				ForkSpawnID:       forkID,
+				SourceGeneration:  3,
+				TargetGeneration:  1,
+				SourceNodeID:      "source-node",
+				TargetNodeID:      "target-node",
+				TransferKeyStatus: store.TransferKeyPending,
+				Status:            tc.status,
+				CreatedAt:         100,
+				UpdatedAt:         0,
+			}); err != nil {
+				t.Fatalf("Create active fork transfer set: %v", err)
+			}
+
+			res := &recordingForkResources{}
+			if err := s.sweepFailedForks(ctx, res); err != nil {
+				t.Fatalf("sweepFailedForks: %v", err)
+			}
+			if len(res.ops) != 0 {
+				t.Fatalf("active fork must not be reclaimed from stale %s transfer set, ops=%v", tc.status, res.ops)
+			}
+			sp, err := st.Spawns().Get(ctx, forkID)
+			if err != nil {
+				t.Fatalf("active fork should remain visible, err=%v", err)
+			}
+			if sp.Status != store.Active {
+				t.Fatalf("fork status=%v want Active", sp.Status)
+			}
+			if c, ok, err := st.Spawns().LiveContainer(ctx, forkID); err != nil || !ok || c.Phase != store.PhaseActive {
+				t.Fatalf("active fork live container = %+v ok=%v err=%v", c, ok, err)
+			}
+		})
 	}
 }
 

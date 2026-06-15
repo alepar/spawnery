@@ -158,6 +158,9 @@ func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) err
 	if err != nil {
 		return err
 	}
+	if sp.Status == store.Active {
+		return nil
+	}
 	c, ok, err := s.st.Spawns().LiveContainer(ctx, cfg.ForkID)
 	if err != nil {
 		return err

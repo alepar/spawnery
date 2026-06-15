@@ -101,6 +101,7 @@ func (r *transferSetRepo) listForks(ctx context.Context, where func(*bun.SelectQ
 		Join("JOIN spawns AS fork ON fork.id = mts.fork_spawn_id").
 		Where("mts.kind = ?", TransferSetFork).
 		Where("fork.status <> ?", Deleted).
+		Where("fork.status <> ?", Active).
 		Order("mts.created_at ASC", "mts.id ASC")
 	err := where(q).Scan(ctx)
 	if err != nil {
