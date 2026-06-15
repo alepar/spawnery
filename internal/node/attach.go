@@ -38,6 +38,10 @@ const readyTimeout = 30 * time.Second
 // sidecar from stalling the SetModel handler.
 const controlPostTimeout = 5 * time.Second
 
+const sidecarCredentialsPostAttempts = 5
+
+const sidecarCredentialsRetryDelay = 100 * time.Millisecond
+
 // httpDoer is the minimal HTTP surface the SetModel handler needs (satisfied by *http.Client). It is a
 // seam so tests can stub the sidecar control endpoint without real network.
 type httpDoer interface {
@@ -462,14 +466,18 @@ func artifactsFromProto(in []*nodev1.ArtifactSpec) []spawnlet.Artifact {
 	return out
 }
 
-func startupSecretRoutesFromProto(in []*nodev1.ArtifactSpec) map[string]startupSecretRoute {
+func startupSecretRoutesFromProto(in []*nodev1.ArtifactSpec) (map[string]startupSecretRoute, error) {
 	if len(in) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make(map[string]startupSecretRoute)
 	for _, a := range in {
 		if a == nil || !a.GetSensitive() || a.GetEnvVarName() == "" {
 			continue
+		}
+		if prev, ok := out[a.GetEnvVarName()]; ok {
+			return nil, fmt.Errorf("duplicate sensitive artifact route for env_var_name %q (previous target=%s dest_path=%q, duplicate target=%s dest_path=%q)",
+				a.GetEnvVarName(), prev.target, prev.destPath, a.GetTargetContainer(), a.GetDestPath())
 		}
 		out[a.GetEnvVarName()] = startupSecretRoute{
 			target:   a.GetTargetContainer(),
@@ -477,9 +485,9 @@ func startupSecretRoutesFromProto(in []*nodev1.ArtifactSpec) map[string]startupS
 		}
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, nil
 	}
-	return out
+	return out, nil
 }
 
 func mountBindingsFromProto(in []*nodev1.MountBinding) []spawnlet.MountBinding {
@@ -568,7 +576,12 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	}
 	if len(st.GetSecrets()) > 0 {
 		secrets := st.GetSecrets()
-		routes := startupSecretRoutesFromProto(st.GetArtifacts())
+		routes, err := startupSecretRoutesFromProto(st.GetArtifacts())
+		if err != nil {
+			logErr("startSpawn "+st.SpawnId+": startup secret routes", err)
+			a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
+			return
+		}
 		sel.BeforeStartAgent = func(ctx context.Context, pc spawnlet.PreAgentContext) error {
 			return a.consumeStartupSecrets(ctx, pc.SpawnID, pc.Generation, secrets, routes, pc.InjectSecret, pc.ControlURL, pc.ControlToken)
 		}
@@ -887,22 +900,37 @@ func postSidecarCredentials(ctx context.Context, doer httpDoer, controlURL, toke
 	if err != nil {
 		return fmt.Errorf("sidecar credentials POST: marshal body: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("sidecar credentials POST: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	defer zeroBytes(body)
 
-	resp, err := doer.Do(req)
-	if err != nil {
-		return fmt.Errorf("sidecar credentials POST: %w", err)
+	var lastErr error
+	for attempt := 1; attempt <= sidecarCredentialsPostAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("sidecar credentials POST: build request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := doer.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt == sidecarCredentialsPostAttempts {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("sidecar credentials POST: %w", ctx.Err())
+			case <-time.After(sidecarCredentialsRetryDelay):
+			}
+			continue
+		}
+		defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10)); _ = resp.Body.Close() }()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("sidecar credentials POST: sidecar control returned %d", resp.StatusCode)
+		}
+		return nil
 	}
-	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10)); _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("sidecar credentials POST: sidecar control returned %d", resp.StatusCode)
-	}
-	return nil
+	return fmt.Errorf("sidecar credentials POST: %w", lastErr)
 }
 
 // frameSenderFor builds the per-client send closure that relays a pump frame line to the CP. Shared by

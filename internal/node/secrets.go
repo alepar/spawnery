@@ -307,19 +307,43 @@ func (a *attacher) consumeStartupSecrets(ctx context.Context, spawnID string, ge
 	}
 	a.secretReplay.pruneSpawnOlderThan(spawnID, generation)
 	now := time.Now()
+
+	type openedSecret struct {
+		sec      *nodev1.SealedSecret
+		pt       []byte
+		commit   func()
+		rollback func()
+	}
+	opened := make([]openedSecret, 0, len(secrets))
+	rollbackAll := func() {
+		for i := range opened {
+			zeroBytes(opened[i].pt)
+			opened[i].pt = nil
+		}
+		for i := len(opened) - 1; i >= 0; i-- {
+			opened[i].rollback()
+		}
+	}
 	for _, sec := range secrets {
 		pt, commit, rollback, err := a.openDeliveredSecret(spawnID, generation, sec, now)
 		if err != nil {
+			rollbackAll()
 			return fmt.Errorf("startup secret %s/%s: %w", spawnID, sec.GetSecretId(), err)
 		}
+		opened = append(opened, openedSecret{sec: sec, pt: pt, commit: commit, rollback: rollback})
+	}
 
-		consumeErr := a.consumeStartupSecret(ctx, spawnID, sec, pt, routes, inject, controlURL, controlToken)
-		zeroBytes(pt)
+	for i := range opened {
+		consumeErr := a.consumeStartupSecret(ctx, spawnID, opened[i].sec, opened[i].pt, routes, inject, controlURL, controlToken)
+		zeroBytes(opened[i].pt)
+		opened[i].pt = nil
 		if consumeErr != nil {
-			rollback()
-			return fmt.Errorf("startup secret %s/%s: %w", spawnID, sec.GetSecretId(), consumeErr)
+			rollbackAll()
+			return fmt.Errorf("startup secret %s/%s: %w", spawnID, opened[i].sec.GetSecretId(), consumeErr)
 		}
-		commit()
+	}
+	for _, opened := range opened {
+		opened.commit()
 	}
 	return nil
 }

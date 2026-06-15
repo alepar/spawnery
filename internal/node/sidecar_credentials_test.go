@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -67,4 +68,29 @@ func TestPostSidecarCredentialsFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+type flakySidecarCredentialsDoer struct {
+	mu       sync.Mutex
+	failures int
+	n        int
+}
+
+func (d *flakySidecarCredentialsDoer) Do(req *http.Request) (*http.Response, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.n++
+	if req.Body != nil {
+		_, _ = io.Copy(io.Discard, req.Body)
+	}
+	if d.n <= d.failures {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+}
+
+func (d *flakySidecarCredentialsDoer) calls() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.n
 }
