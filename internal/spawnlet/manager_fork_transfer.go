@@ -266,10 +266,10 @@ func (m *Manager) ForkTransferImport(ctx context.Context, req ForkTransferImport
 	if m.journal == nil {
 		return ForkTransferImportResult{}, fmt.Errorf("fork transfer import: journaler is required to seed fork repo")
 	}
-	if req.TargetGeneration != 0 && req.TargetGeneration != 1 {
+	if req.TargetGeneration != 1 {
 		return ForkTransferImportResult{}, fmt.Errorf("fork transfer import: target generation must be 1, got %d", req.TargetGeneration)
 	}
-	targetGen := uint64(1)
+	targetGen := req.TargetGeneration
 	transferKey, err := opener.OpenForkTransferKey(req.SealedTransferKey, req.ForkSpawnID, targetGen, req.TransferSetID)
 	if err != nil {
 		return ForkTransferImportResult{}, fmt.Errorf("fork transfer import: open transfer key: %w", err)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -295,28 +296,32 @@ func TestForkTransferImportRejectsSourceForkAADMismatch(t *testing.T) {
 }
 
 func TestForkTransferImportRejectsNonGenerationOneTarget(t *testing.T) {
-	ctx := context.Background()
-	rec := &forkOpRecorder{}
-	j := &recordingForkJournal{rec: rec}
-	m, _ := newForkTestManager(t, rec, j)
+	for _, targetGen := range []uint64{0, 2} {
+		t.Run(fmt.Sprintf("gen_%d", targetGen), func(t *testing.T) {
+			ctx := context.Background()
+			rec := &forkOpRecorder{}
+			j := &recordingForkJournal{rec: rec}
+			m, _ := newForkTestManager(t, rec, j)
 
-	opener := &trackingTransferKeyOpener{key: bytes.Repeat([]byte{2}, 32)}
-	_, err := m.ForkTransferImport(ctx, ForkTransferImportRequest{
-		SourceSpawnID:     "sp-source",
-		ForkSpawnID:       "sp-fork",
-		TransferSetID:     "ts-1",
-		TargetGeneration:  2,
-		SealedTransferKey: []byte("opaque-sealed-key"),
-		Payload:           []byte("sealed-payload"),
-	}, opener)
-	if err == nil {
-		t.Fatal("non-generation-1 target must reject")
-	}
-	if opener.called {
-		t.Fatal("generation guard must reject before opening transfer key")
-	}
-	if ops := rec.snapshot(); len(ops) != 0 {
-		t.Fatalf("journal should not run on rejected generation, ops=%v", ops)
+			opener := &trackingTransferKeyOpener{key: bytes.Repeat([]byte{2}, 32)}
+			_, err := m.ForkTransferImport(ctx, ForkTransferImportRequest{
+				SourceSpawnID:     "sp-source",
+				ForkSpawnID:       "sp-fork",
+				TransferSetID:     "ts-1",
+				TargetGeneration:  targetGen,
+				SealedTransferKey: []byte("opaque-sealed-key"),
+				Payload:           []byte("sealed-payload"),
+			}, opener)
+			if err == nil {
+				t.Fatalf("target generation %d must reject", targetGen)
+			}
+			if opener.called {
+				t.Fatal("generation guard must reject before opening transfer key")
+			}
+			if ops := rec.snapshot(); len(ops) != 0 {
+				t.Fatalf("journal should not run on rejected generation, ops=%v", ops)
+			}
+		})
 	}
 }
 
