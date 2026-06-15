@@ -44,10 +44,50 @@ message CPMessage {
   }
 }
 
-// One owner-sealed secret in a SecretDelivery: the agent-side target path the unsealed plaintext is
-// written to (RELATIVE to the per-spawn secrets tmpfs mount), the HPKE ciphertext sealed to the node's
-// sub-key (JSON-encoded seal.NodeSealed — opaque to the CP), and an opaque secret id for logs/dedup.
-message SealedSecret { string target_path = 1; bytes sealed = 2; string secret_id = 3; }
+enum SecretType {
+  SECRET_TYPE_UNSPECIFIED  = 0;
+  SECRET_TYPE_GITHUB_TOKEN = 1;
+}
+
+enum SecretUsage {
+  SECRET_USAGE_UNSPECIFIED  = 0;
+  SECRET_USAGE_NODE_STORAGE = 1;
+  SECRET_USAGE_AGENT_RENDER = 2;
+}
+
+message SecretRenderSpec {
+  string profile                = 1; // e.g. "gh-cli-v1"; consumers validate known profiles.
+  string target_path            = 2; // relative to the per-spawn secrets tmpfs.
+  string gh_config_dir          = 3; // relative directory for GH_CONFIG_DIR material.
+  string hosts_path             = 4; // relative hosts.yml path for gh.
+  string git_config_path        = 5; // relative git config path used by the agent.
+  string credential_helper_path = 6; // relative helper path/config target.
+}
+
+message GitHubTokenClearMetadata {
+  string host                    = 1; // MVP accepts github.com; future GHE validation hook.
+  string login                   = 2; // display/render fact; not an authz key.
+  string github_user_id          = 3; // immutable GitHub user id when available.
+  int64  refresh_expires_at_unix = 4; // clear validation/UX metadata; token remains sealed.
+  string app_client_id           = 5; // GitHub App/client identity expected by AS minting.
+}
+
+// One owner-sealed secret in StartSpawn or SecretDelivery. Fields 1-3 are the legacy ciphertext
+// relay contract. Fields 4+ are non-secret routing metadata for consumers such as github-token
+// node-storage and agent-render; replay semantics for version/delivery_id are owned by sp-7h6.1.8.
+message SealedSecret {
+  string target_path = 1;
+  bytes  sealed      = 2;
+  string secret_id   = 3;
+
+  SecretType               type         = 4;
+  uint64                   version      = 5;
+  string                   delivery_id  = 6;
+  repeated SecretUsage     usages       = 7;
+  repeated string          mount_names  = 8;
+  SecretRenderSpec         render       = 9;
+  GitHubTokenClearMetadata github_token = 10;
+}
 // CP -> node: deliver owner-sealed secret ciphertext for a spawn (sp-2ckv.4). generation fences the
 // delivery against a superseded pod (node-side staleGen drop) AND binds the in-flight HPKE AAD, so a
 // ciphertext sealed for one episode cannot open against another. The CP relays bytes only — it never
@@ -156,6 +196,11 @@ message StartSpawn  {
   string               base_image_digest = 22;
   uint64               rootfs_source_generation = 23;
   repeated RootfsArtifact rootfs_artifacts = 24;
+  // Self-contained owner-sealed secret attachments needed by the node at start/resume time.
+  // GitHub storage credentials ride here, not as spawn artifacts. Consumers enforce the
+  // declared type/usages/mount_names/render/github_token routing metadata; sp-7h6.1.8 owns
+  // version and delivery_id replay guards.
+  repeated SealedSecret secrets = 25;
 }
 message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }
 message Suspend     { string spawn_id = 1; uint64 generation = 2; bool capture_rootfs_artifact = 3; }
