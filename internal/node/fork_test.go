@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -610,6 +611,52 @@ func TestForkTurnBoundaryWaitsForTmuxSidecarInflight(t *testing.T) {
 	}
 	if got := last.Header.Get("Authorization"); got != "Bearer tok-fork" {
 		t.Fatalf("sidecar status auth = %q, want bearer token", got)
+	}
+}
+
+func TestForkTurnBoundaryBlocksTmuxInputWhileWaitingForSidecarIdle(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	setForkNodeControl(t, mgr, "sp-source")
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	idle := make(chan struct{})
+	doer := &forkStatusDoer{idle: idle}
+	a.ctrlHTTP = doer
+
+	relay := newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readEnd.Close()
+	relay.mu.Lock()
+	relay.clients["client-1"] = &tmuxClient{ptmx: writeEnd}
+	relay.mu.Unlock()
+	a.tmuxRelays[zeroKey("sp-source")] = relay
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	waitFor(t, "sidecar status sampled", func() bool { return doer.lastReq() != nil })
+
+	relay.fromClient("client-1", append([]byte{tmuxOpInput}, []byte("new prompt\n")...))
+	time.Sleep(2 * forkTurnBoundaryPoll)
+	_ = writeEnd.Close()
+	written, err := io.ReadAll(readEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(written) != 0 {
+		t.Fatalf("tmux input passed through while fork waited for sidecar idle: %q", written)
+	}
+
+	close(idle)
+	waitFor(t, "ForkTurnBoundaryComplete after sidecar idle", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+	got := lastForkTurnBoundaryComplete(fs)
+	if got.GetError() != "" {
+		t.Fatalf("ForkTurnBoundaryComplete error = %q", got.GetError())
 	}
 }
 

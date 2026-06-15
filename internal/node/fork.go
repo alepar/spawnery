@@ -172,6 +172,7 @@ func (a *attacher) acquireForkBarrier(ctx context.Context, spawnID string, sourc
 		return fmt.Errorf("fork turn-boundary gate unavailable: missing transfer set")
 	}
 	barrier := forkIngressBarrier{sourceGeneration: sourceGeneration, transferSetID: transferSetID}
+	matchesBarrier := func(b forkIngressBarrier) bool { return b.matches(barrier) }
 	poll := forkTurnBoundaryPoll
 	if poll <= 0 {
 		poll = 10 * time.Millisecond
@@ -181,6 +182,7 @@ func (a *attacher) acquireForkBarrier(ctx context.Context, spawnID string, sourc
 	for {
 		select {
 		case <-ctx.Done():
+			a.releaseForkBarrier(spawnID, matchesBarrier)
 			return ctx.Err()
 		default:
 		}
@@ -193,6 +195,7 @@ func (a *attacher) acquireForkBarrier(ctx context.Context, spawnID string, sourc
 		}
 		select {
 		case <-ctx.Done():
+			a.releaseForkBarrier(spawnID, matchesBarrier)
 			return ctx.Err()
 		case <-t.C:
 		}
@@ -222,15 +225,6 @@ func (a *attacher) tryAcquireForkBarrier(ctx context.Context, spawnID string, ba
 		return fmt.Errorf("fork turn-boundary gate unavailable: no observable ACP pump or tmux relay"), false
 	}
 	a.mu.Unlock()
-	if len(relays) > 0 {
-		busy, err := a.sourceInferenceBusy(ctx, spawnID)
-		if err != nil {
-			return err, false
-		}
-		if busy {
-			return nil, false
-		}
-	}
 	var acquired []*Pump
 	for _, p := range pumps {
 		if !p.tryAcquireForkBarrier(barrier) {
@@ -258,6 +252,16 @@ func (a *attacher) tryAcquireForkBarrier(ctx context.Context, spawnID string, ba
 	a.ensureForkBarriersLocked()
 	a.forkBarriers[spawnID] = barrier
 	a.mu.Unlock()
+	if len(relays) > 0 {
+		busy, err := a.sourceInferenceBusy(ctx, spawnID)
+		if err != nil {
+			a.releaseForkBarrier(spawnID, func(b forkIngressBarrier) bool { return b.matches(barrier) })
+			return err, false
+		}
+		if busy {
+			return nil, false
+		}
+	}
 	return nil, true
 }
 

@@ -156,12 +156,12 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 	if _, err := m.pod.CaptureDeltaAs(ctx, h, req.ForkSpawnID); err != nil {
 		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: capture rootfs as fork: %w", err)
 	}
+	restoreSource()
+
 	var rootfsPayload bytes.Buffer
 	if err := m.pod.ExportDelta(ctx, req.ForkSpawnID, &rootfsPayload); err != nil {
 		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: export fork rootfs delta: %w", err)
 	}
-
-	restoreSource()
 
 	stageRoot, err := os.MkdirTemp(m.cfg.DataRoot, "fork-seed-"+req.ForkSpawnID+"-")
 	if err != nil {
