@@ -50,9 +50,10 @@ func main() {
 			&cli.BoolFlag{Name: "register", Usage: "register the -app manifest with the CP and exit"},
 			&cli.StringFlag{Name: "version", Value: "1.0.0", Usage: "app version to register (with -register)"},
 			&cli.StringFlag{Name: "ref", Usage: "immutable app ref creator/app@sha (with -register)"},
+			&cli.StringFlag{Name: "profile", Usage: "customization profile id to apply at create (CP mode)"},
 		},
 		Action:   rootAction,
-		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), setModelCmd(), keyCmd(), moveCmd(), loginCmd(), logoutCmd()},
+		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), setModelCmd(), keyCmd(), moveCmd(), loginCmd(), logoutCmd(), profileCmd(), catalogCmd()},
 	}
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		log.Fatal(err)
@@ -73,7 +74,7 @@ func rootAction(ctx context.Context, c *cli.Command) error {
 	}
 	if c.String("cp") != "" {
 		src := buildTokenSource(configDir, c.String("token"), httpCl)
-		runCP(ctx, c.String("cp"), c.String("app-id"), c.String("model"), src)
+		runCP(ctx, c.String("cp"), c.String("app-id"), c.String("model"), c.String("profile"), src)
 		return nil
 	}
 	runStandalone(ctx, c.String("addr"), c.String("app"), c.String("model"))
@@ -170,13 +171,14 @@ func runStandalone(ctx context.Context, addr, appPath, model string) {
 }
 
 // runCP drives the agent through the control plane via the cp.v1 service.
-func runCP(ctx context.Context, addr, appID, model string, src *cpTokenSource) {
+func runCP(ctx context.Context, addr, appID, model, profileID string, src *cpTokenSource) {
 	client := cpv1connect.NewSpawnServiceClient(h2cClient(), addr,
 		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 
 	cs, err := client.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
-		AppId: appID,
-		Model: model,
+		AppId:     appID,
+		Model:     model,
+		ProfileId: profileID,
 	}))
 	if err != nil {
 		log.Fatalf("createSpawn: %v", err)
