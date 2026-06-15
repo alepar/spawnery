@@ -921,6 +921,14 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		finalizeAll()
 		return nil, fmt.Errorf("prepare secrets dir: %w", err)
 	}
+	cleanupSpawnDirs := func() {
+		if serr := m.secrets.Remove(id); serr != nil {
+			log.Printf("secrets dir cleanup for %s: %v", id, serr)
+		}
+		if aerr := m.artifacts.Remove(id); aerr != nil {
+			log.Printf("artifacts dir cleanup for %s: %v", id, aerr)
+		}
+	}
 	mounts = append(mounts, runtime.Mount{HostPath: secretsDir, ContainerPath: SecretsMountPath})
 
 	// Non-sensitive artifact staging tmpfs (cross-agent installer, sp-l5sx.3): a per-spawn dir under
@@ -929,9 +937,22 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	// routed to the secrets tmpfs (0600) by Materialize, never landed here.
 	if err := m.artifacts.Materialize(id, sel.Artifacts, m.secrets); err != nil {
 		finalizeAll()
+		cleanupSpawnDirs()
 		return nil, fmt.Errorf("prepare artifacts: %w", err)
 	}
 	mounts = append(mounts, runtime.Mount{HostPath: m.artifacts.DirFor(id), ContainerPath: ArtifactsMountPath})
+	cleanupPreStoreFailure := func(h *runtime.PodHandle, floorIP string) {
+		if h != nil {
+			_ = m.pod.Stop(ctx, h)
+		}
+		if floorIP != "" {
+			if err := m.fw.Remove(ctx, firewall.Rules(floorIP, m.cfg.EgressAllowCIDRs)); err != nil {
+				log.Printf("egress floor cleanup for %s (ip %s): %v", id, floorIP, err)
+			}
+		}
+		finalizeAll()
+		cleanupSpawnDirs()
+	}
 
 	res := runtime.Resources{
 		MemoryBytes: m.cfg.MemLimitMB << 20,
@@ -963,7 +984,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		Labels:    labels,
 	})
 	if err != nil {
-		finalizeAll()
+		cleanupPreStoreFailure(nil, "")
 		return nil, err
 	}
 	// Node-reachable control endpoint (pod IP + control port). Empty PodIP => unreachable URL;
@@ -977,13 +998,11 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	var floorIP string
 	if m.egressEnforced() {
 		if h.PodIP == "" {
-			_ = m.pod.Stop(ctx, h)
-			finalizeAll()
+			cleanupPreStoreFailure(h, "")
 			return nil, fmt.Errorf("egress floor (fail-closed): no pod IP to scope the floor")
 		}
 		if ferr := m.fw.Apply(ctx, firewall.Rules(h.PodIP, m.cfg.EgressAllowCIDRs)); ferr != nil {
-			_ = m.pod.Stop(ctx, h)
-			finalizeAll()
+			cleanupPreStoreFailure(h, "")
 			return nil, fmt.Errorf("egress floor (fail-closed): %w", ferr)
 		}
 		floorIP = h.PodIP
@@ -1012,8 +1031,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		// Pass sel.ProgressFunc so each artifact emits a resume progress event (sp-u53.7.2):
 		// a large delta being fetched+imported can exceed the stall window without resets.
 		if err := m.restoreRootfsArtifacts(ctx, id, sel.RootfsSourceGeneration, baseRef, sel.RootfsArtifacts, sel.ProgressFunc); err != nil {
-			_ = m.pod.Stop(ctx, h)
-			finalizeAll()
+			cleanupPreStoreFailure(h, floorIP)
 			return nil, err
 		}
 	}
@@ -1026,8 +1044,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	// Launch image: delta tag if already present locally (same-node resume), else base.
 	launchImage, eerr := m.pod.EnsureImage(ctx, baseRef, runtime.DeltaTag(id))
 	if eerr != nil {
-		_ = m.pod.Stop(ctx, h)
-		finalizeAll()
+		cleanupPreStoreFailure(h, floorIP)
 		return nil, fmt.Errorf("ensure launch image: %w", eerr)
 	}
 	if sel.BeforeStartAgent != nil {
@@ -1041,8 +1058,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			},
 		}
 		if err := sel.BeforeStartAgent(ctx, preAgent); err != nil {
-			_ = m.pod.Stop(ctx, h)
-			finalizeAll()
+			cleanupPreStoreFailure(h, floorIP)
 			return nil, err
 		}
 	}
@@ -1062,8 +1078,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		DropAllCaps: runtime.CapPolicyForUsernsMode(m.cfg.UsernsMode) == runtime.CapDropAll,
 		Labels:      labels,
 	}); err != nil {
-		_ = m.pod.Stop(ctx, h)
-		finalizeAll()
+		cleanupPreStoreFailure(h, floorIP)
 		return nil, err
 	}
 

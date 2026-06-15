@@ -16,6 +16,7 @@ type preAgentBackend struct {
 	startAgentCalls int
 	secretPath      string
 	secretPlaintext []byte
+	startAgentErr   error
 }
 
 func (b *preAgentBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, spec runtime.AgentSpec) error {
@@ -28,6 +29,9 @@ func (b *preAgentBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, 
 		return err
 	}
 	b.secretPlaintext = plaintext
+	if b.startAgentErr != nil {
+		return b.startAgentErr
+	}
 	return b.fakePodBackend.StartAgent(ctx, h, spec)
 }
 
@@ -107,5 +111,109 @@ func TestCreateWithSelectionBeforeStartAgentFailureStopsPodAndSkipsAgent(t *test
 	}
 	if _, ok := m.store.Get("sp-preagent-fail"); ok {
 		t.Fatal("failed pre-agent spawn was stored")
+	}
+}
+
+func TestCreateWithSelectionBeforeStartAgentFailureCleanupRemovesSecretAndArtifactDirs(t *testing.T) {
+	hookErr := errors.New("pre-agent failed")
+	fb := &preAgentBackend{}
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+
+	_, err := m.CreateWithSelection(context.Background(), "sp-preagent-cleanup", writeApp(t), "model", "", "", 0, AgentSelection{
+		BeforeStartAgent: func(_ context.Context, pc PreAgentContext) error {
+			if _, err := pc.InjectSecret("github/token", []byte("ghp_preagent")); err != nil {
+				t.Fatalf("InjectSecret: %v", err)
+			}
+			return hookErr
+		},
+	})
+	if !errors.Is(err, hookErr) {
+		t.Fatalf("CreateWithSelection error = %v, want %v", err, hookErr)
+	}
+	if fb.startAgentCalls != 0 {
+		t.Fatalf("StartAgent calls = %d, want 0", fb.startAgentCalls)
+	}
+	if fb.stopped == nil {
+		t.Fatal("Stop was not called")
+	}
+	assertMissingDir(t, m.secrets.DirFor("sp-preagent-cleanup"))
+	assertMissingDir(t, m.artifacts.DirFor("sp-preagent-cleanup"))
+	if _, ok := m.store.Get("sp-preagent-cleanup"); ok {
+		t.Fatal("failed pre-agent spawn was stored")
+	}
+}
+
+func TestCreateWithSelectionStartAgentFailureCleanupRemovesSecretAndArtifactDirs(t *testing.T) {
+	startErr := errors.New("agent failed")
+	fb := &preAgentBackend{startAgentErr: startErr}
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+
+	_, err := m.CreateWithSelection(context.Background(), "sp-startagent-cleanup", writeApp(t), "model", "", "", 0, AgentSelection{
+		BeforeStartAgent: func(_ context.Context, pc PreAgentContext) error {
+			secretPath, err := pc.InjectSecret("github/token", []byte("ghp_preagent"))
+			if err != nil {
+				t.Fatalf("InjectSecret: %v", err)
+			}
+			fb.secretPath = secretPath
+			return nil
+		},
+	})
+	if !errors.Is(err, startErr) {
+		t.Fatalf("CreateWithSelection error = %v, want %v", err, startErr)
+	}
+	if fb.startAgentCalls != 1 {
+		t.Fatalf("StartAgent calls = %d, want 1", fb.startAgentCalls)
+	}
+	if fb.stopped == nil {
+		t.Fatal("Stop was not called")
+	}
+	assertMissingDir(t, m.secrets.DirFor("sp-startagent-cleanup"))
+	assertMissingDir(t, m.artifacts.DirFor("sp-startagent-cleanup"))
+	if _, ok := m.store.Get("sp-startagent-cleanup"); ok {
+		t.Fatal("failed start-agent spawn was stored")
+	}
+}
+
+func TestCreateWithSelectionBeforeStartAgentFailureRemovesFloor(t *testing.T) {
+	hookErr := errors.New("pre-agent failed")
+	fb := &preAgentBackend{}
+	fa := &fakeApplier{}
+	m := NewManagerWithBackend(fb, fa, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), EgressEnforce: true,
+	})
+
+	_, err := m.CreateWithSelection(context.Background(), "sp-preagent-floor", writeApp(t), "model", "", "", 0, AgentSelection{
+		BeforeStartAgent: func(_ context.Context, pc PreAgentContext) error {
+			if _, err := pc.InjectSecret("github/token", []byte("ghp_preagent")); err != nil {
+				t.Fatalf("InjectSecret: %v", err)
+			}
+			return hookErr
+		},
+	})
+	if !errors.Is(err, hookErr) {
+		t.Fatalf("CreateWithSelection error = %v, want %v", err, hookErr)
+	}
+	if !fa.applied {
+		t.Fatal("egress floor was not applied")
+	}
+	if !fa.removed {
+		t.Fatal("egress floor was not removed after pre-agent failure")
+	}
+	if fb.startAgentCalls != 0 {
+		t.Fatalf("StartAgent calls = %d, want 0", fb.startAgentCalls)
+	}
+	if fb.stopped == nil {
+		t.Fatal("Stop was not called")
+	}
+}
+
+func assertMissingDir(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("dir %s exists or stat failed with unexpected error: %v", dir, err)
 	}
 }
