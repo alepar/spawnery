@@ -2,6 +2,7 @@ package cp
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -105,6 +106,142 @@ func TestUnwindFailedForkIsRedrivableAfterPartialBucketCleanup(t *testing.T) {
 	}
 }
 
+func TestUnwindFailedForkWithNilResourcesLeavesForkForRetry(t *testing.T) {
+	s, st := newForkCleanupTestServer(t)
+	ctx := context.Background()
+	seedPartialFork(t, st, "fork-nil-resources")
+
+	if err := s.unwindFailedFork(ctx, failedForkUnwind{
+		ForkID:        "fork-nil-resources",
+		Generation:    1,
+		Bucket:        "spawnery-spawn-fork-nil-resources",
+		NowUnixNano:   500_000_000_000,
+		DeletedAtUnix: 500,
+	}); err != nil {
+		t.Fatalf("unwindFailedFork: %v", err)
+	}
+	if _, err := st.Spawns().Get(ctx, "fork-nil-resources"); err != nil {
+		t.Fatalf("nil resources must leave fork row visible for retry, Get err=%v", err)
+	}
+}
+
+func TestSweepFailedForksIsIdempotent(t *testing.T) {
+	s, st := newForkCleanupTestServer(t)
+	ctx := context.Background()
+	s.now = func() time.Time { return time.Unix(500, 0) }
+	seedPartialFork(t, st, "source-1")
+	seedPartialFork(t, st, "fork-sweep")
+	if err := st.TransferSets().Create(ctx, store.TransferSet{
+		ID:                "ts-sweep",
+		Kind:              store.TransferSetFork,
+		SpawnID:           "fork-sweep",
+		SourceSpawnID:     "source-1",
+		ForkSpawnID:       "fork-sweep",
+		SourceGeneration:  3,
+		TargetGeneration:  1,
+		SourceNodeID:      "source-node",
+		TargetNodeID:      "target-node",
+		TransferKeyStatus: store.TransferKeyPending,
+		Status:            store.TransferSetFailed,
+		CreatedAt:         100,
+		UpdatedAt:         100,
+	}); err != nil {
+		t.Fatalf("Create failed fork transfer set: %v", err)
+	}
+
+	res := &recordingForkResources{}
+	if err := s.sweepFailedForks(ctx, res); err != nil {
+		t.Fatalf("sweepFailedForks first: %v", err)
+	}
+	want := []string{
+		"revoke-key:fork-sweep",
+		"empty-bucket:spawnery-spawn-fork-sweep",
+		"drop-bucket:spawnery-spawn-fork-sweep",
+		"delete-row:fork-sweep",
+	}
+	if got := res.ops; len(got) != len(want) {
+		t.Fatalf("ops=%v want %v", got, want)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("ops=%v want %v", got, want)
+			}
+		}
+	}
+	if _, err := st.Spawns().Get(ctx, "fork-sweep"); err == nil {
+		t.Fatal("sweep must hide the failed fork row after ordered unwind")
+	}
+
+	if err := s.sweepFailedForks(ctx, res); err != nil {
+		t.Fatalf("sweepFailedForks second: %v", err)
+	}
+	if got := res.ops; len(got) != len(want) {
+		t.Fatalf("second sweep must be a no-op, ops=%v want %v", got, want)
+	}
+}
+
+func TestStartReconcilerSweepsFailedForks(t *testing.T) {
+	s, st := newForkCleanupTestServer(t)
+	ctx := context.Background()
+	s.reconcileInterval = time.Hour
+	s.now = func() time.Time { return time.Unix(500, 0) }
+	seedPartialFork(t, st, "source-reconcile")
+	seedPartialFork(t, st, "fork-reconcile")
+	if err := st.TransferSets().Create(ctx, store.TransferSet{
+		ID:                "ts-reconcile",
+		Kind:              store.TransferSetFork,
+		SpawnID:           "fork-reconcile",
+		SourceSpawnID:     "source-reconcile",
+		ForkSpawnID:       "fork-reconcile",
+		SourceGeneration:  3,
+		TargetGeneration:  1,
+		SourceNodeID:      "source-node",
+		TargetNodeID:      "target-node",
+		TransferKeyStatus: store.TransferKeyPending,
+		Status:            store.TransferSetFailed,
+		CreatedAt:         100,
+		UpdatedAt:         100,
+	}); err != nil {
+		t.Fatalf("Create failed fork transfer set: %v", err)
+	}
+	res := &recordingForkResources{}
+	s.failedForkResources = res
+
+	loopCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.StartReconciler(loopCtx)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		_, err := st.Spawns().Get(ctx, "fork-reconcile")
+		if errors.Is(err, store.ErrNotFound) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Get fork-reconcile: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("StartReconciler did not sweep failed fork before first ticker interval, ops=%v", res.ops)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	want := []string{
+		"revoke-key:fork-reconcile",
+		"empty-bucket:spawnery-spawn-fork-reconcile",
+		"drop-bucket:spawnery-spawn-fork-reconcile",
+		"delete-row:fork-reconcile",
+	}
+	if got := res.ops; len(got) != len(want) {
+		t.Fatalf("ops=%v want %v", got, want)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("ops=%v want %v", got, want)
+			}
+		}
+	}
+}
+
 func TestUnwindFailedForkUsesNanoClaimDeadlineAndSecondDeletedAt(t *testing.T) {
 	ctx := context.Background()
 	nowNS := int64(500_000_000_000)
@@ -123,6 +260,7 @@ func TestUnwindFailedForkUsesNanoClaimDeadlineAndSecondDeletedAt(t *testing.T) {
 		Bucket:        "spawnery-spawn-fork-units",
 		NowUnixNano:   nowNS,
 		DeletedAtUnix: deletedAtUnix,
+		Resources:     &recordingForkResources{},
 	}); err != nil {
 		t.Fatalf("unwindFailedFork: %v", err)
 	}

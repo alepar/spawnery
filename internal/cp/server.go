@@ -62,13 +62,13 @@ type Server struct {
 	models          *modelWaiters // correlates inline SetSpawnModel pushes with node SetModelResult acks
 	setModelTimeout time.Duration // bound for the inline SetModel push; overridable in tests
 
-	suspends            *suspendWaiters // correlates a SuspendSpawn with the node's SuspendComplete (markers)
-	suspendTimeout      time.Duration   // generous absolute backstop for suspend; overridable in tests
-	suspendStallWindow  time.Duration   // per-transition stall window (operative bound); overridable in tests
+	suspends           *suspendWaiters // correlates a SuspendSpawn with the node's SuspendComplete (markers)
+	suspendTimeout     time.Duration   // generous absolute backstop for suspend; overridable in tests
+	suspendStallWindow time.Duration   // per-transition stall window (operative bound); overridable in tests
 
-	resumes            *resumeWaiters // correlates a ResumeSpawn with node progress/ACTIVE (sp-u53.7.2)
-	resumeTimeout      time.Duration  // generous absolute backstop for resume; overridable in tests
-	resumeStallWindow  time.Duration  // per-transition stall window (operative bound); overridable in tests
+	resumes           *resumeWaiters // correlates a ResumeSpawn with node progress/ACTIVE (sp-u53.7.2)
+	resumeTimeout     time.Duration  // generous absolute backstop for resume; overridable in tests
+	resumeStallWindow time.Duration  // per-transition stall window (operative bound); overridable in tests
 
 	// upgradeWaiters correlates UpgradeToOwnerSealed requests with SealJournalKeyToOwnerResponse
 	// messages from the node (sp-8dkp §4). Keyed by per-request request_id.
@@ -123,14 +123,21 @@ type Server struct {
 	// delivery. Surfaced as journal_key_delivery_pending in ListSpawns to drive the web-UI step.
 	deliveryPending *deliveryPendingTracker
 
+	// ForkSpawn seams. The materializer is intentionally narrow and currently defaults to
+	// Unimplemented; downstream fork tasks install real source-preserving capture/seeding. The
+	// footprint estimator is fail-closed when nil because CP cannot infer fork disk headroom yet.
+	forkMaterializer       forkMaterializer
+	forkFootprintEstimator forkFootprintEstimator
+	failedForkResources    failedForkResources
+
 	// Evaluator policy fields (§6 node-local detectors → CP-side reporters). All default to
 	// "disabled" (evaluatorEnabled=false, quotaSuspendMB=0) so no enforcement runs until
 	// SetEvaluatorPolicy is called. cmd/spawnery_cp wires this; tests that need evaluation call
 	// SetEvaluatorPolicy explicitly.
-	evaluatorEnabled       bool
-	idleDetachedTimeout    time.Duration
-	idleAttachedTimeout    time.Duration
-	quotaSuspendMB         int64
+	evaluatorEnabled    bool
+	idleDetachedTimeout time.Duration
+	idleAttachedTimeout time.Duration
+	quotaSuspendMB      int64
 
 	// evaluatorInFlight guards the per-spawn async suspend launched by evaluateSpawnMetrics:
 	// a map from spawn id to struct{} (present = driver already running). Guarded by evaluatorMu.

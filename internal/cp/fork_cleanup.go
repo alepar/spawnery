@@ -3,6 +3,7 @@ package cp
 import (
 	"context"
 	"errors"
+	"log"
 
 	"github.com/google/uuid"
 
@@ -29,6 +30,10 @@ type failedForkUnwind struct {
 }
 
 func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) error {
+	if cfg.Resources == nil {
+		log.Printf("unwindFailedFork %s: failed fork resources are not configured; leaving fork row for retry", cfg.ForkID)
+		return nil
+	}
 	sp, err := s.st.Spawns().Get(ctx, cfg.ForkID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
@@ -53,20 +58,50 @@ func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) err
 		return err
 	}
 
-	if cfg.Resources != nil {
-		if err := cfg.Resources.RevokeForkGeneration(ctx, cfg.ForkID, cfg.Generation); err != nil {
-			return err
-		}
-		if err := cfg.Resources.EmptyForkBucket(ctx, cfg.Bucket); err != nil {
-			return err
-		}
-		if err := cfg.Resources.DropForkBucket(ctx, cfg.Bucket); err != nil {
-			return err
-		}
+	if err := cfg.Resources.RevokeForkGeneration(ctx, cfg.ForkID, cfg.Generation); err != nil {
+		return err
+	}
+	if err := cfg.Resources.EmptyForkBucket(ctx, cfg.Bucket); err != nil {
+		return err
+	}
+	if err := cfg.Resources.DropForkBucket(ctx, cfg.Bucket); err != nil {
+		return err
 	}
 	if obs, ok := cfg.Resources.(failedForkRowDeleteObserver); ok {
 		obs.RecordForkRowDelete(cfg.ForkID)
 	}
 	_, err = s.st.Spawns().MarkDeletedClaimed(ctx, cfg.ForkID, leaseID, seq, c.Generation, cfg.DeletedAtUnix)
 	return err
+}
+
+func (s *Server) sweepFailedForks(ctx context.Context, resources failedForkResources) error {
+	rows, err := s.st.TransferSets().ListFailedForks(ctx)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	if resources == nil {
+		log.Printf("sweepFailedForks: failed fork resources are not configured; leaving %d row(s) for retry", len(rows))
+		return nil
+	}
+	for _, ts := range rows {
+		forkID := ts.ForkSpawnID
+		if forkID == "" {
+			forkID = ts.SpawnID
+		}
+		now := s.now()
+		if err := s.unwindFailedFork(ctx, failedForkUnwind{
+			ForkID:        forkID,
+			Generation:    ts.TargetGeneration,
+			Bucket:        forkBucketName(forkID),
+			NowUnixNano:   now.UnixNano(),
+			DeletedAtUnix: now.Unix(),
+			Resources:     resources,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }

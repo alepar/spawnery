@@ -16,6 +16,24 @@ func (r *transferSetRepo) Create(ctx context.Context, ts TransferSet) error {
 	if ts.ID == "" || ts.SpawnID == "" {
 		return fmt.Errorf("store: transfer set id and spawn id are required")
 	}
+	if ts.Kind == "" {
+		ts.Kind = TransferSetMigration
+	}
+	switch ts.Kind {
+	case TransferSetMigration:
+		if ts.SourceSpawnID == "" {
+			ts.SourceSpawnID = ts.SpawnID
+		}
+	case TransferSetFork:
+		if ts.SourceSpawnID == "" || ts.ForkSpawnID == "" {
+			return fmt.Errorf("store: fork transfer set requires source and fork spawn ids")
+		}
+		if ts.SpawnID != ts.ForkSpawnID {
+			return fmt.Errorf("store: fork transfer set spawn id must match fork spawn id")
+		}
+	default:
+		return fmt.Errorf("store: unknown transfer set kind %q", ts.Kind)
+	}
 	if ts.TransferKeyStatus == "" {
 		ts.TransferKeyStatus = TransferKeyPending
 	}
@@ -60,6 +78,26 @@ func (r *transferSetRepo) Get(ctx context.Context, id string) (TransferSet, erro
 		return TransferSet{}, err
 	}
 	return ts, nil
+}
+
+func (r *transferSetRepo) ListFailedForks(ctx context.Context) ([]TransferSet, error) {
+	var out []TransferSet
+	err := r.db.NewSelect().Model(&out).
+		Join("JOIN spawns AS fork ON fork.id = mts.fork_spawn_id").
+		Where("mts.kind = ?", TransferSetFork).
+		Where("mts.status = ?", TransferSetFailed).
+		Where("fork.status <> ?", Deleted).
+		Order("mts.created_at ASC", "mts.id ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if err := decodeTransferSetPins(&out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (r *transferSetRepo) SetPins(ctx context.Context, id string, sourceGeneration uint64, mountPins map[string]string, rootfsPins []RootfsArtifactPin, updatedAt int64) error {

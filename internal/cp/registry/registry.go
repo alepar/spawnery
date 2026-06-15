@@ -20,6 +20,10 @@ type Node struct {
 	Images []string
 	Class  string
 	Owner  string
+	// Disk telemetry is fail-closed for placements that request headroom: zero means unknown and
+	// does not satisfy a positive Placement.MinDiskFreeBytes.
+	DiskFreeBytes  int64
+	DiskTotalBytes int64
 
 	token    uint64    // per-connection identity, so a displaced stream's teardown is a no-op
 	lastBeat time.Time // last Register/Heartbeat; drives the alive/dead decision for duplicate ids
@@ -130,6 +134,8 @@ type Placement struct {
 
 	TargetNodeID string // if set, only the node with this exact id is eligible
 	RequireClass string // if set, only nodes whose Class matches are eligible
+
+	MinDiskFreeBytes int64 // if positive, node must report at least this much free disk
 }
 
 // eligibleForOwner reports whether a node may run a spawn owned by owner, per the tenancy rule.
@@ -160,6 +166,9 @@ func (r *Registry) PickFor(p Placement) *Node {
 		}
 		if p.RequireClass != "" && n.Class != p.RequireClass {
 			continue // migration override: forced to a node class (e.g. cloud)
+		}
+		if p.MinDiskFreeBytes > 0 && n.DiskFreeBytes < p.MinDiskFreeBytes {
+			continue
 		}
 		if best == nil || n.Free > best.Free {
 			best = n

@@ -171,6 +171,7 @@ type AgentImageRepo interface {
 type TransferSetRepo interface {
 	Create(ctx context.Context, ts TransferSet) error
 	Get(ctx context.Context, id string) (TransferSet, error)
+	ListFailedForks(ctx context.Context) ([]TransferSet, error)
 	SetPins(ctx context.Context, id string, sourceGeneration uint64, mountPins map[string]string, rootfsPins []RootfsArtifactPin, updatedAt int64) error
 	SetTargetNode(ctx context.Context, id string, targetNodeID string, updatedAt int64) error
 	SetStatus(ctx context.Context, id string, status TransferSetStatus, updatedAt int64) error

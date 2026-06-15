@@ -13,6 +13,9 @@ func (s *Server) StartReconciler(ctx context.Context) {
 }
 
 func (s *Server) reconcileLoop(ctx context.Context) {
+	if err := s.sweepFailedForks(ctx, s.failedForkResources); err != nil {
+		log.Printf("reconcile: sweep failed forks: %v", err)
+	}
 	t := time.NewTicker(s.reconcileInterval)
 	defer t.Stop()
 	for {
