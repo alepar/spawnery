@@ -35,8 +35,12 @@ var genDeliveryID = func() string { return uuid.NewString() }
 // moveClient is the subset of the cp.v1 client `spawnctl move` drives — narrowed to an interface so
 // the orchestration is unit-testable with a fake.
 type moveClient interface {
-	GetJournalKeyCiphertext(context.Context, *connect.Request[cpv1.GetJournalKeyCiphertextRequest]) (*connect.Response[cpv1.GetJournalKeyCiphertextResponse], error)
+	ownerSealedDeliveryClient
 	MigrateSpawn(context.Context, *connect.Request[cpv1.MigrateSpawnRequest]) (*connect.Response[cpv1.MigrateSpawnResponse], error)
+}
+
+type ownerSealedDeliveryClient interface {
+	GetJournalKeyCiphertext(context.Context, *connect.Request[cpv1.GetJournalKeyCiphertextRequest]) (*connect.Response[cpv1.GetJournalKeyCiphertextResponse], error)
 	GetSpawnNodeKey(context.Context, *connect.Request[cpv1.GetSpawnNodeKeyRequest]) (*connect.Response[cpv1.GetSpawnNodeKeyResponse], error)
 	DeliverSecrets(context.Context, *connect.Request[cpv1.DeliverSecretsRequest]) (*connect.Response[cpv1.DeliverSecretsResponse], error)
 }
@@ -105,24 +109,38 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 		return nil
 	}
 
-	// 3) Fetch the TARGET node's verified key material so we can reseal the journal key to it.
+	if _, err := deliverOwnerSealedJournalKeys(ctx, client, dev, spawnID, out, now); err != nil {
+		return fmt.Errorf("%w (migrated, but journal key not yet delivered — retry the move)", err)
+	}
+	fmt.Fprintln(out, "  done.")
+	return nil
+}
+
+func deliverOwnerSealedJournalKeys(ctx context.Context, client ownerSealedDeliveryClient, dev *seal.Device, spawnID string, out io.Writer, now time.Time) (int, error) {
+	jk, err := client.GetJournalKeyCiphertext(ctx, connect.NewRequest(&cpv1.GetJournalKeyCiphertextRequest{SpawnId: spawnID}))
+	if err != nil {
+		return 0, fmt.Errorf("fetch journal-key ciphertext: %w", err)
+	}
+	entries := jk.Msg.Entries
+	if len(entries) == 0 {
+		return 0, nil
+	}
+
 	nk, err := client.GetSpawnNodeKey(ctx, connect.NewRequest(&cpv1.GetSpawnNodeKeyRequest{SpawnId: spawnID}))
 	if err != nil {
-		return fmt.Errorf("fetch target node key: %w (migrated, but journal key not yet delivered — retry the move)", err)
+		return 0, fmt.Errorf("fetch target node key: %w", err)
 	}
 	var sk subkey.SignedSubKey
 	if err := json.Unmarshal(nk.Msg.SignedSubkey, &sk); err != nil {
-		return fmt.Errorf("parse target sub-key: %w", err)
+		return 0, fmt.Errorf("parse target sub-key: %w", err)
 	}
 
-	// 4) For each mount: unseal the owner envelope locally + reseal to the target node's HPKE sub-key,
-	//    binding the in-flight AAD (spawn, generation, node, sub-key expiry, one-time delivery id).
 	fmt.Fprintf(out, "  resealing %d journal key(s) to node %s...\n", len(entries), sk.NodeID)
 	secrets := make([]*cpv1.SealedSecret, 0, len(entries))
 	for _, e := range entries {
 		sealedJSON, rerr := resealJournalKey(e.Ciphertext, dev, sk, nk.Msg.NodeCertChain, spawnID, nk.Msg.Generation, now)
 		if rerr != nil {
-			return fmt.Errorf("reseal journal key for mount %q: %w", e.Mount, rerr)
+			return 0, fmt.Errorf("reseal journal key for mount %q: %w", e.Mount, rerr)
 		}
 		secrets = append(secrets, &cpv1.SealedSecret{
 			SecretId:   journalkey.SecretID(e.Mount),
@@ -131,13 +149,11 @@ func runMove(ctx context.Context, client moveClient, ic intentClient, dev *seal.
 		})
 	}
 
-	// 5) Deliver the resealed ciphertext; the CP relays it to the target, which restores the journal.
 	if _, err := client.DeliverSecrets(ctx, connect.NewRequest(&cpv1.DeliverSecretsRequest{SpawnId: spawnID, Secrets: secrets})); err != nil {
-		return fmt.Errorf("deliver journal key: %w (migrated, but delivery failed — retry the move)", err)
+		return 0, fmt.Errorf("deliver journal key: %w", err)
 	}
 	fmt.Fprintln(out, "  journal key delivered — target is restoring the journaled mounts.")
-	fmt.Fprintln(out, "  done.")
-	return nil
+	return len(secrets), nil
 }
 
 // resealJournalKey unseals an owner-sealed envelope with the device key and re-seals the recovered
