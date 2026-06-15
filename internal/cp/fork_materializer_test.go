@@ -112,6 +112,31 @@ func TestForkMaterializerWaitsForTurnBoundaryPreflight(t *testing.T) {
 	}
 }
 
+func TestForkMaterializerReleasesTurnBoundaryOnTimeout(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	s.forkTurnBoundaries = newForkTurnBoundaryWaiters()
+	sender := &capSender{}
+	reg.Add(registryNode("node-1", sender))
+	mat := newSameNodeForkMaterializer(s, time.Millisecond).(forkTurnBoundaryWaiter)
+
+	err := mat.WaitForForkTurnBoundary(context.Background(), forkMaterializeRequest{
+		SourceSpawn:      store.Spawn{ID: "sp-source"},
+		ForkSpawn:        store.Spawn{ID: "sp-fork"},
+		TransferSetID:    "ts-timeout",
+		SourceGeneration: 9,
+		TargetGeneration: 1,
+		SourceNodeID:     "node-1",
+		TargetNodeID:     "node-1",
+	})
+	if connect.CodeOf(err) != connect.CodeDeadlineExceeded {
+		t.Fatalf("WaitForForkTurnBoundary error = %v, want DeadlineExceeded", err)
+	}
+	if msg := waitForReleaseForkTurnBoundaryCPMessage(t, sender); msg.GetSourceSpawnId() != "sp-source" ||
+		msg.GetSourceGeneration() != 9 || msg.GetTransferSetId() != "ts-timeout" {
+		t.Fatalf("ReleaseForkTurnBoundary = %+v", msg)
+	}
+}
+
 func TestForkSpawnRecordsMaterializerPinsOnTransferSet(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	sender := &capSender{}
@@ -183,4 +208,22 @@ func waitForForkTurnBoundaryCPMessage(t *testing.T, sender *capSender) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("timed out waiting for ForkTurnBoundary CP message")
+}
+
+func waitForReleaseForkTurnBoundaryCPMessage(t *testing.T, sender *capSender) *nodev1.ReleaseForkTurnBoundary {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		sender.mu.Lock()
+		for _, msg := range sender.sent {
+			if cmd := msg.GetReleaseForkTurnBoundary(); cmd != nil {
+				sender.mu.Unlock()
+				return cmd
+			}
+		}
+		sender.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for ReleaseForkTurnBoundary CP message")
+	return nil
 }

@@ -144,6 +144,17 @@ func (r *sessionRegistry) get(id string) (*sessionEntry, bool) {
 	return e, ok
 }
 
+func (r *sessionRegistry) hasStarting() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.sessions {
+		if e.state == nodev1.SessionState_SESSION_STATE_STARTING {
+			return true
+		}
+	}
+	return false
+}
+
 // snapshot returns the session set as proto SessionInfo, session #0 first then ascending by id.
 func (r *sessionRegistry) snapshot() []*nodev1.SessionInfo {
 	r.mu.Lock()

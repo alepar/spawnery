@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 // bucketKeyAdmin is the subset of GarageAdmin the GenerationKeyManager needs,
@@ -171,6 +175,73 @@ func (g *GenerationKeyManager) RevokeSuperseded(ctx context.Context, spawnID str
 		}
 	}
 	return nil
+}
+
+func (g *GenerationKeyManager) EmptyBucket(ctx context.Context, bucket string) error {
+	cl, cleanup, err := g.cleanupClient(ctx, bucket, "empty")
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	for obj := range cl.ListObjects(ctx, bucket, minio.ListObjectsOptions{Recursive: true}) {
+		if obj.Err != nil {
+			return fmt.Errorf("genkey: list bucket %q for cleanup: %w", bucket, obj.Err)
+		}
+		if err := cl.RemoveObject(ctx, bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
+			return fmt.Errorf("genkey: remove object %q from bucket %q: %w", obj.Key, bucket, err)
+		}
+	}
+	return nil
+}
+
+func (g *GenerationKeyManager) DropBucket(ctx context.Context, bucket string) error {
+	cl, cleanup, err := g.cleanupClient(ctx, bucket, "drop")
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if err := cl.RemoveBucket(ctx, bucket); err != nil {
+		resp := minio.ToErrorResponse(err)
+		if resp.Code == "NoSuchBucket" {
+			return nil
+		}
+		return fmt.Errorf("genkey: drop bucket %q: %w", bucket, err)
+	}
+	return nil
+}
+
+func (g *GenerationKeyManager) cleanupClient(ctx context.Context, bucket, purpose string) (*minio.Client, func(), error) {
+	if bucket == "" {
+		return nil, func() {}, fmt.Errorf("genkey: cleanup bucket is required")
+	}
+	bucketID, err := g.admin.EnsureBucket(ctx, bucket)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("genkey: ensure cleanup bucket %q: %w", bucket, err)
+	}
+	keyName := fmt.Sprintf("%s-cleanup-%s-%d", bucket, purpose, time.Now().UnixNano())
+	ak, sk, err := g.admin.CreateKey(ctx, keyName)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("genkey: create cleanup key %q: %w", keyName, err)
+	}
+	cleanup := func() {
+		if err := g.admin.DeleteKey(context.WithoutCancel(ctx), ak); err != nil {
+			_ = err
+		}
+	}
+	if err := g.admin.AllowKeyOnBucket(ctx, bucketID, ak); err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("genkey: allow cleanup key on bucket %q: %w", bucket, err)
+	}
+	cl, err := minio.New(strings.TrimPrefix(strings.TrimPrefix(g.s3Endpoint, "https://"), "http://"), &minio.Options{
+		Creds:  credentials.NewStaticV4(ak, sk, ""),
+		Secure: !g.disableTLS,
+		Region: g.region,
+	})
+	if err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("genkey: cleanup s3 client for bucket %q: %w", bucket, err)
+	}
+	return cl, cleanup, nil
 }
 
 type GenerationHold struct {

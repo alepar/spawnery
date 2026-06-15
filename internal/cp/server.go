@@ -131,6 +131,7 @@ type Server struct {
 	forks                  *forkWaiters
 	forkTurnBoundaries     *forkTurnBoundaryWaiters
 	forkUnpauses           *forkUnpauseWaiters
+	failedForkCleanups     *failedForkCleanupWaiters
 	failedForkResources    failedForkResources
 
 	// Evaluator policy fields (§6 node-local detectors → CP-side reporters). All default to
@@ -175,12 +176,14 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		forks:              newForkWaiters(),
 		forkTurnBoundaries: newForkTurnBoundaryWaiters(),
 		forkUnpauses:       newForkUnpauseWaiters(),
+		failedForkCleanups: newFailedForkCleanupWaiters(),
 		// evaluator disabled by default; cmd/spawnery_cp wires it via SetEvaluatorPolicy.
 		evaluatorInFlight: map[string]struct{}{},
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
 		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
 		devMode: true}
 	s.forkMaterializer = newSameNodeForkMaterializer(s, defaultForkMaterializeTimeout)
+	s.failedForkResources = &nodeFailedForkResources{s: s}
 	return s
 }
 
@@ -380,6 +383,8 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			s.deliverForkTurnBoundaryComplete(m.ForkTurnBoundaryComplete)
 		case *nodev1.NodeMessage_UnpauseIfPausedComplete:
 			s.deliverUnpauseIfPausedComplete(m.UnpauseIfPausedComplete)
+		case *nodev1.NodeMessage_FailedForkCleanupComplete:
+			s.deliverFailedForkCleanupComplete(m.FailedForkCleanupComplete)
 		case *nodev1.NodeMessage_SuspendProgress:
 			// Route incremental suspend progress to the in-flight SuspendSpawn waiter so the CP
 			// stall detector resets its timer (sp-u53.7.2). Stale-gen or unmatched signals are dropped.

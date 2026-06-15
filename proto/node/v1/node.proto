@@ -29,6 +29,7 @@ message NodeMessage {
     ForkSameNodeComplete          fork_same_node_complete = 12; // node -> CP: same-node fork capture/seed completion
     ForkTurnBoundaryComplete      fork_turn_boundary_complete = 13; // node -> CP: source has no in-flight ACP turn
     UnpauseIfPausedComplete       unpause_if_paused_complete = 14; // node -> CP: idempotent fork recovery unpause ack
+    FailedForkCleanupComplete     failed_fork_cleanup_complete = 15; // node -> CP: failed fork resource cleanup op ack
   }
 }
 message CPMessage {
@@ -47,6 +48,8 @@ message CPMessage {
     ForkSameNode                 fork_same_node        = 12;            // CP -> node: same-node fork capture/seed
     ForkTurnBoundary             fork_turn_boundary    = 13;            // CP -> node: wait until source has no in-flight ACP turn
     UnpauseIfPaused              unpause_if_paused     = 14;            // CP -> node: idempotent source unpause for fork recovery
+    ReleaseForkTurnBoundary      release_fork_turn_boundary = 15;       // CP -> node: cancel/release a fork turn-boundary barrier
+    FailedForkCleanup            failed_fork_cleanup   = 16;            // CP -> node: cleanup one failed fork resource step
   }
 }
 
@@ -188,6 +191,30 @@ message ForkTurnBoundaryComplete {
   string source_spawn_id = 1;
   uint64 source_generation = 2;
   string transfer_set_id = 3;
+  string error = 4;
+}
+message ReleaseForkTurnBoundary {
+  string source_spawn_id = 1;
+  uint64 source_generation = 2;
+  string transfer_set_id = 3;
+}
+enum FailedForkCleanupOp {
+  FAILED_FORK_CLEANUP_OP_UNSPECIFIED       = 0;
+  FAILED_FORK_CLEANUP_OP_REVOKE_GENERATION = 1;
+  FAILED_FORK_CLEANUP_OP_EMPTY_BUCKET      = 2;
+  FAILED_FORK_CLEANUP_OP_DROP_BUCKET       = 3;
+}
+message FailedForkCleanup {
+  string request_id = 1;
+  string fork_spawn_id = 2;
+  uint64 generation = 3;
+  string bucket = 4;
+  FailedForkCleanupOp op = 5;
+}
+message FailedForkCleanupComplete {
+  string request_id = 1;
+  string fork_spawn_id = 2;
+  FailedForkCleanupOp op = 3;
   string error = 4;
 }
 message UnpauseIfPaused {

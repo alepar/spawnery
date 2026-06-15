@@ -148,10 +148,15 @@ func (s *Server) forkName(ctx context.Context, owner string, source store.Spawn,
 func (s *Server) failForkAfterRow(ctx context.Context, forkID, transferSetID string, gen uint64, cause error) error {
 	now := s.now()
 	_ = s.st.TransferSets().SetStatus(context.WithoutCancel(ctx), transferSetID, store.TransferSetFailed, now.UnixNano())
+	nodeID := ""
+	if ts, err := s.st.TransferSets().Get(context.WithoutCancel(ctx), transferSetID); err == nil {
+		nodeID = ts.TargetNodeID
+	}
 	if err := s.unwindFailedFork(context.WithoutCancel(ctx), failedForkUnwind{
 		ForkID:        forkID,
 		Generation:    gen,
 		Bucket:        forkBucketName(forkID),
+		NodeID:        nodeID,
 		NowUnixNano:   now.UnixNano(),
 		DeletedAtUnix: now.Unix(),
 		Resources:     s.failedForkResources,
@@ -384,7 +389,7 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, connect.NewError(connect.CodeInternal, fmt.Errorf("mark transfer set restoring: %w", err)))
 	}
 
-	if err := s.waitForkTurnBoundary(ctx, forkMaterializeRequest{
+	barrierReq := forkMaterializeRequest{
 		SourceSpawn:      source,
 		ForkSpawn:        fork,
 		TransferSetID:    transferSetID,
@@ -393,9 +398,17 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 		SourceNodeID:     live.NodeID,
 		TargetNodeID:     targetNode,
 		TargetClass:      targetClass,
-	}); err != nil {
+	}
+	barrierAcquired := false
+	defer func() {
+		if barrierAcquired {
+			s.releaseForkTurnBoundary(context.WithoutCancel(ctx), barrierReq)
+		}
+	}()
+	if err := s.waitForkTurnBoundary(ctx, barrierReq); err != nil {
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, asConnectError(connect.CodeInternal, err))
 	}
+	barrierAcquired = true
 
 	captureDeadline := s.now().Add(defaultForkCaptureTimeout).UnixNano()
 	if err := s.st.Spawns().SetForking(ctx, sourceID, live.Generation, captureDeadline); err != nil {
@@ -413,18 +426,10 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 		}
 	}()
 
-	result, err := s.forkMaterializerOrDefault().MaterializeFork(ctx, forkMaterializeRequest{
-		SourceSpawn:      source,
-		ForkSpawn:        fork,
-		TransferSetID:    transferSetID,
-		SourceGeneration: sourceGeneration,
-		TargetGeneration: targetGeneration,
-		SourceNodeID:     live.NodeID,
-		TargetNodeID:     targetNode,
-		TargetClass:      targetClass,
-		Mounts:           mounts,
-		Artifacts:        artifacts,
-	})
+	materializeReq := barrierReq
+	materializeReq.Mounts = mounts
+	materializeReq.Artifacts = artifacts
+	result, err := s.forkMaterializerOrDefault().MaterializeFork(ctx, materializeReq)
 	if err != nil {
 		return nil, s.failForkAfterRow(ctx, forkID, transferSetID, targetGeneration, asConnectError(connect.CodeInternal, err))
 	}

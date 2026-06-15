@@ -88,6 +88,7 @@ type attacher struct {
 	sessions     map[string]*sessionRegistry    // spawn_id -> live session set (roster source of truth)
 	pending      map[sessionKey][]pendingClient // attaches that arrived before the pump/relay existed (session STARTING)
 	forkBarriers map[string]forkIngressBarrier
+	forkWaits    map[string]forkBarrierWait
 	active       uint32
 
 	sendMu sync.Mutex
@@ -391,7 +392,7 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		if a.staleGen(m.ForkTurnBoundary.SourceSpawnId, m.ForkTurnBoundary.SourceGeneration) {
 			return // stale generation: drop (matches Stop/Suspend).
 		}
-		go a.forkTurnBoundary(ctx, m.ForkTurnBoundary)
+		a.startForkTurnBoundary(ctx, m.ForkTurnBoundary)
 	case *nodev1.CPMessage_UnpauseIfPaused:
 		if a.staleGen(m.UnpauseIfPaused.SpawnId, m.UnpauseIfPaused.Generation) {
 			a.releaseForkBarrier(m.UnpauseIfPaused.SpawnId, func(b forkIngressBarrier) bool {
@@ -400,6 +401,10 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			return // stale generation: drop (matches Stop/Suspend).
 		}
 		go a.unpauseIfPaused(ctx, m.UnpauseIfPaused)
+	case *nodev1.CPMessage_ReleaseForkTurnBoundary:
+		a.releaseForkTurnBoundary(m.ReleaseForkTurnBoundary)
+	case *nodev1.CPMessage_FailedForkCleanup:
+		go a.failedForkCleanup(ctx, m.FailedForkCleanup)
 	case *nodev1.CPMessage_SecretDelivery:
 		if a.staleGen(m.SecretDelivery.SpawnId, m.SecretDelivery.Generation) {
 			return // stale generation: a newer pod exists; the owner re-seals to the current episode. Drop.
@@ -946,9 +951,15 @@ func (a *attacher) fromClient(spawnID, sessionID, clientID string, data []byte) 
 func (a *attacher) createSession(ctx context.Context, m *nodev1.CreateSession) {
 	a.mu.Lock()
 	reg := a.sessions[m.SpawnId]
+	forkBarrierActive := a.forkBarrierActiveOrPendingLocked(m.SpawnId)
 	a.mu.Unlock()
 	if reg == nil {
 		log.Printf("warn: CreateSession for unknown spawn %s", m.SpawnId)
+		return
+	}
+	if forkBarrierActive {
+		log.Printf("rejecting session for %s: fork turn-boundary barrier active", m.SpawnId)
+		a.sessionStatus(m.SpawnId, "", nodev1.SessionState_SESSION_STATE_ERROR, "fork turn-boundary barrier active")
 		return
 	}
 

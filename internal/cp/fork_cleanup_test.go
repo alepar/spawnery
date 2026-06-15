@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/store"
 )
 
@@ -17,21 +19,26 @@ func (r *recordingForkResources) RecordForkRowDelete(forkID string) {
 	r.ops = append(r.ops, "delete-row:"+forkID)
 }
 
-func (r *recordingForkResources) RevokeForkGeneration(ctx context.Context, forkID string, gen uint64) error {
+func (r *recordingForkResources) RevokeForkGeneration(ctx context.Context, nodeID, forkID string, gen uint64) error {
 	_ = ctx
+	_ = nodeID
 	_ = gen
 	r.ops = append(r.ops, "revoke-key:"+forkID)
 	return nil
 }
 
-func (r *recordingForkResources) EmptyForkBucket(ctx context.Context, bucket string) error {
+func (r *recordingForkResources) EmptyForkBucket(ctx context.Context, nodeID, forkID, bucket string) error {
 	_ = ctx
+	_ = nodeID
+	_ = forkID
 	r.ops = append(r.ops, "empty-bucket:"+bucket)
 	return nil
 }
 
-func (r *recordingForkResources) DropForkBucket(ctx context.Context, bucket string) error {
+func (r *recordingForkResources) DropForkBucket(ctx context.Context, nodeID, forkID, bucket string) error {
 	_ = ctx
+	_ = nodeID
+	_ = forkID
 	r.ops = append(r.ops, "drop-bucket:"+bucket)
 	return nil
 }
@@ -40,6 +47,16 @@ func newForkCleanupTestServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
 	s, _, _ := newTestServer(t)
 	return s, s.st
+}
+
+func TestNewServerWiresFailedForkResourcesByDefault(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	if s.failedForkResources == nil {
+		t.Fatal("NewServer must wire production failed-fork resources by default")
+	}
+	if _, ok := s.failedForkResources.(*nodeFailedForkResources); !ok {
+		t.Fatalf("default failedForkResources = %T, want node-backed production resources", s.failedForkResources)
+	}
 }
 
 func seedPartialFork(t *testing.T, st store.Store, forkID string) {
@@ -177,6 +194,96 @@ func TestSweepFailedForksIsIdempotent(t *testing.T) {
 	}
 	if got := res.ops; len(got) != len(want) {
 		t.Fatalf("second sweep must be a no-op, ops=%v want %v", got, want)
+	}
+}
+
+type cleanupAckSender struct {
+	capSender
+	s *Server
+}
+
+func (c *cleanupAckSender) Send(m *nodev1.CPMessage) error {
+	if err := c.capSender.Send(m); err != nil {
+		return err
+	}
+	if cmd := m.GetFailedForkCleanup(); cmd != nil {
+		c.s.deliverFailedForkCleanupComplete(&nodev1.FailedForkCleanupComplete{
+			RequestId:   cmd.GetRequestId(),
+			ForkSpawnId: cmd.GetForkSpawnId(),
+			Op:          cmd.GetOp(),
+		})
+	}
+	return nil
+}
+
+func (c *cleanupAckSender) cleanupOps() []nodev1.FailedForkCleanupOp {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []nodev1.FailedForkCleanupOp
+	for _, msg := range c.sent {
+		if cmd := msg.GetFailedForkCleanup(); cmd != nil {
+			out = append(out, cmd.GetOp())
+		}
+	}
+	return out
+}
+
+func TestSweepFailedForksUsesDefaultNodeResources(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	st := s.st
+	ctx := context.Background()
+	s.now = func() time.Time { return time.Unix(500, 0) }
+	seedPartialFork(t, st, "source-default-sweep")
+	seedPartialFork(t, st, "fork-default-sweep")
+	sender := &cleanupAckSender{s: s}
+	reg.Add(&registry.Node{
+		ID: "target-node", Sender: sender, Max: 1, Free: 1, Class: "cloud",
+		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
+	})
+	if err := st.TransferSets().Create(ctx, store.TransferSet{
+		ID:                "ts-default-sweep",
+		Kind:              store.TransferSetFork,
+		SpawnID:           "fork-default-sweep",
+		SourceSpawnID:     "source-default-sweep",
+		ForkSpawnID:       "fork-default-sweep",
+		SourceGeneration:  3,
+		TargetGeneration:  1,
+		SourceNodeID:      "source-node",
+		TargetNodeID:      "target-node",
+		TransferKeyStatus: store.TransferKeyPending,
+		Status:            store.TransferSetFailed,
+		CreatedAt:         100,
+		UpdatedAt:         100,
+	}); err != nil {
+		t.Fatalf("Create failed fork transfer set: %v", err)
+	}
+
+	if err := s.sweepFailedForks(ctx, s.failedForkResources); err != nil {
+		t.Fatalf("sweepFailedForks: %v", err)
+	}
+	wantOps := []nodev1.FailedForkCleanupOp{
+		nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_REVOKE_GENERATION,
+		nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_EMPTY_BUCKET,
+		nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_DROP_BUCKET,
+	}
+	if got := sender.cleanupOps(); len(got) != len(wantOps) {
+		t.Fatalf("cleanup ops = %v want %v", got, wantOps)
+	} else {
+		for i := range wantOps {
+			if got[i] != wantOps[i] {
+				t.Fatalf("cleanup ops = %v want %v", got, wantOps)
+			}
+		}
+	}
+	if _, err := st.Spawns().Get(ctx, "fork-default-sweep"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("default failed-fork resources must let sweep hide row, err=%v", err)
+	}
+	rows, err := st.TransferSets().ListFailedForks(ctx)
+	if err != nil {
+		t.Fatalf("ListFailedForks: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("failed fork rows should not stay visible after default-resource sweep: %+v", rows)
 	}
 }
 

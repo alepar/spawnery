@@ -147,6 +147,7 @@ type Manager struct {
 	// forkGenerationHold protects the source generation's journal key/blobs from revoke/prune while
 	// a fork is seeding. Required when the configured journal backend depends on generation-key
 	// fencing; filesystem-backed dev/tests can leave it optional.
+	generationKeys             *journal.GenerationKeyManager
 	forkGenerationHold         func(spawnID string, gen uint64, reason string) generationHold
 	forkGenerationHoldRequired bool
 }

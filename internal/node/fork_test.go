@@ -199,6 +199,86 @@ func TestForkTurnBoundaryWaitsForACPPumpIdle(t *testing.T) {
 	}
 }
 
+func TestForkTurnBoundaryWaitsForStartingMoshSession(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	sx := &fakeSessionExec{moshGate: make(chan struct{}), moshReached: make(chan struct{})}
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	a.sx = sx
+	reg := newSessionRegistry("sp-source")
+	reg.register(&sessionEntry{id: SessionZeroID, state: nodev1.SessionState_SESSION_STATE_ACTIVE, pinned: true, runnable: "goose-acp"})
+	a.sessions["sp-source"] = reg
+	a.pumps[zeroKey("sp-source")] = newPump(io.Discard, strings.NewReader(""))
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "sp-source", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_MOSH, Runnable: "shell",
+	}}})
+	select {
+	case <-sx.moshReached:
+	case <-time.After(time.Second):
+		t.Fatal("mosh launch did not reach gate")
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	time.Sleep(20 * time.Millisecond)
+	if got := lastForkTurnBoundaryComplete(fs); got != nil {
+		t.Fatalf("turn-boundary completed while mosh session was STARTING: %+v", got)
+	}
+
+	close(sx.moshGate)
+	waitFor(t, "ForkTurnBoundaryComplete error after mosh relay appears", func() bool {
+		got := lastForkTurnBoundaryComplete(fs)
+		return got != nil && got.GetError() != ""
+	})
+}
+
+func TestForkTurnBoundaryWaitsForStartingACPSession(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	sx := &fakeSessionExec{dialGate: make(chan struct{}), dialReached: make(chan struct{})}
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	a.sx = sx
+	reg := newSessionRegistry("sp-source")
+	reg.register(&sessionEntry{id: SessionZeroID, state: nodev1.SessionState_SESSION_STATE_ACTIVE, pinned: true, runnable: "goose-acp"})
+	a.sessions["sp-source"] = reg
+	a.pumps[zeroKey("sp-source")] = newPump(io.Discard, strings.NewReader(""))
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "sp-source", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_ACP, Runnable: "goose-acp",
+	}}})
+	select {
+	case <-sx.dialReached:
+	case <-time.After(time.Second):
+		t.Fatal("acp launch did not reach dial gate")
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	time.Sleep(20 * time.Millisecond)
+	if got := lastForkTurnBoundaryComplete(fs); got != nil {
+		t.Fatalf("turn-boundary completed while acp session was STARTING: %+v", got)
+	}
+
+	close(sx.dialGate)
+	waitFor(t, "ForkTurnBoundaryComplete after acp pump appears", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+	got := lastForkTurnBoundaryComplete(fs)
+	if got.GetError() != "" {
+		t.Fatalf("ForkTurnBoundaryComplete error = %q", got.GetError())
+	}
+	a.mu.Lock()
+	if p := a.pumps[sessionKey{"sp-source", "1"}]; p != nil {
+		p.stop()
+	}
+	a.mu.Unlock()
+}
+
 func TestForkTurnBoundaryBlocksPromptUntilForkSameNodeCompletes(t *testing.T) {
 	be := &scriptedPodBackend{script: scriptGoose}
 	mgr := newForkNodeManager(t, be)
@@ -304,7 +384,81 @@ func TestUnpauseIfPausedReleasesForkTurnBoundaryBarrier(t *testing.T) {
 	}
 }
 
-func TestForkTurnBoundaryBlocksNewACPPumpRegisteredDuringBarrier(t *testing.T) {
+func TestForkTurnBoundaryReleaseCommandReleasesAcquiredBarrier(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	p := newPump(io.Discard, strings.NewReader(""))
+	a.pumps[zeroKey("sp-source")] = p
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	waitFor(t, "ForkTurnBoundaryComplete", func() bool { return lastForkTurnBoundaryComplete(fs) != nil })
+
+	a.fromClient("sp-source", SessionZeroID, "c1", encodeFrame(Frame{Kind: "prompt", Text: "during fork"}))
+	p.mu.Lock()
+	blockedBusy, blockedInflight := p.busy, p.inflightPromptID
+	p.mu.Unlock()
+	if blockedBusy || blockedInflight != 0 {
+		t.Fatalf("prompt before release started a turn: busy=%v inflight=%d", blockedBusy, blockedInflight)
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ReleaseForkTurnBoundary{ReleaseForkTurnBoundary: &nodev1.ReleaseForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+
+	a.fromClient("sp-source", SessionZeroID, "c1", encodeFrame(Frame{Kind: "prompt", Text: "after release"}))
+	p.mu.Lock()
+	releasedBusy, releasedInflight := p.busy, p.inflightPromptID
+	p.mu.Unlock()
+	if !releasedBusy || releasedInflight == 0 {
+		t.Fatalf("prompt after release did not start: busy=%v inflight=%d", releasedBusy, releasedInflight)
+	}
+}
+
+func TestForkTurnBoundaryReleaseCommandCancelsPendingAcquire(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	mgr := newForkNodeManager(t, be)
+	putForkNodeSource(t, mgr, "sp-source", 9)
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	p := newPump(io.Discard, strings.NewReader(""))
+	p.mu.Lock()
+	p.busy = true
+	p.inflightPromptID = 1
+	p.mu.Unlock()
+	a.pumps[zeroKey("sp-source")] = p
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	time.Sleep(20 * time.Millisecond)
+	if got := lastForkTurnBoundaryComplete(fs); got != nil {
+		t.Fatalf("turn-boundary completed while pump was busy: %+v", got)
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ReleaseForkTurnBoundary{ReleaseForkTurnBoundary: &nodev1.ReleaseForkTurnBoundary{
+		SourceSpawnId: "sp-source", SourceGeneration: 9, TransferSetId: "ts-1",
+	}}})
+	p.mu.Lock()
+	p.busy = false
+	p.inflightPromptID = 0
+	p.mu.Unlock()
+	time.Sleep(2 * forkTurnBoundaryPoll)
+
+	a.fromClient("sp-source", SessionZeroID, "c1", encodeFrame(Frame{Kind: "prompt", Text: "after canceled acquire"}))
+	p.mu.Lock()
+	releasedBusy, releasedInflight := p.busy, p.inflightPromptID
+	p.mu.Unlock()
+	if !releasedBusy || releasedInflight == 0 {
+		t.Fatalf("release must cancel pending acquire; prompt busy=%v inflight=%d", releasedBusy, releasedInflight)
+	}
+}
+
+func TestForkTurnBoundaryRejectsNewACPSessionDuringBarrier(t *testing.T) {
 	be := &scriptedPodBackend{script: scriptGoose}
 	mgr := newForkNodeManager(t, be)
 	putForkNodeSource(t, mgr, "sp-source", 9)
@@ -325,23 +479,26 @@ func TestForkTurnBoundaryBlocksNewACPPumpRegisteredDuringBarrier(t *testing.T) {
 	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
 		SpawnId: "sp-source", Generation: 9, Transport: nodev1.SessionTransport_SESSION_TRANSPORT_ACP, Runnable: "goose-acp",
 	}}})
-	waitFor(t, "new ACP pump", func() bool {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		return a.pumps[sessionKey{"sp-source", "1"}] != nil
-	})
+	time.Sleep(20 * time.Millisecond)
 
-	a.fromClient("sp-source", "1", "c1", encodeFrame(Frame{Kind: "prompt", Text: "new session during fork"}))
+	sx.mu.Lock()
+	acpLaunches, dials := len(sx.acpLaunched), sx.dials
+	sx.mu.Unlock()
+	if acpLaunches != 0 || dials != 0 {
+		t.Fatalf("acp session during fork barrier must not launch or dial, launches=%d dials=%d", acpLaunches, dials)
+	}
 	a.mu.Lock()
 	p := a.pumps[sessionKey{"sp-source", "1"}]
 	a.mu.Unlock()
-	p.mu.Lock()
-	blockedBusy, blockedInflight, blockedLogLen := p.busy, p.inflightPromptID, len(p.log)
-	p.mu.Unlock()
-	if blockedBusy || blockedInflight != 0 || blockedLogLen != 0 {
-		t.Fatalf("new ACP pump bypassed fork barrier: busy=%v inflight=%d logLen=%d", blockedBusy, blockedInflight, blockedLogLen)
+	if p != nil {
+		t.Fatal("acp session during fork barrier must not register a Pump")
 	}
-	p.stop()
+	if got := len(reg.snapshot()); got != 1 {
+		t.Fatalf("rejected acp session must not register a session, roster=%d", got)
+	}
+	if st := lastSessionStatus(fs); st == nil || st.State != nodev1.SessionState_SESSION_STATE_ERROR {
+		t.Fatalf("want ERROR SessionStatus for fork barrier rejection, got %+v", st)
+	}
 }
 
 func TestForkTurnBoundaryFailsClosedWithoutObservableACPPump(t *testing.T) {

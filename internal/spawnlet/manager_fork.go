@@ -32,6 +32,7 @@ type generationHold interface {
 }
 
 func (m *Manager) SetGenerationKeyManager(g *journal.GenerationKeyManager) {
+	m.generationKeys = g
 	if g == nil {
 		m.forkGenerationHold = nil
 		m.forkGenerationHoldRequired = false
@@ -45,6 +46,33 @@ func (m *Manager) SetGenerationKeyManager(g *journal.GenerationKeyManager) {
 		return h
 	}
 	m.forkGenerationHoldRequired = true
+}
+
+func (m *Manager) RevokeForkGeneration(ctx context.Context, forkID string, gen uint64) error {
+	if m.generationKeys == nil {
+		return fmt.Errorf("failed fork cleanup: generation key manager is not wired")
+	}
+	return m.generationKeys.RevokeGeneration(context.WithoutCancel(ctx), forkID, gen)
+}
+
+func (m *Manager) EmptyForkBucket(ctx context.Context, forkID, bucket string) error {
+	if m.generationKeys == nil {
+		return fmt.Errorf("failed fork cleanup: generation key manager is not wired")
+	}
+	if want := m.generationKeys.BucketFor(forkID); bucket != want {
+		return fmt.Errorf("failed fork cleanup: bucket %q does not match fork %s bucket %q", bucket, forkID, want)
+	}
+	return m.generationKeys.EmptyBucket(context.WithoutCancel(ctx), bucket)
+}
+
+func (m *Manager) DropForkBucket(ctx context.Context, forkID, bucket string) error {
+	if m.generationKeys == nil {
+		return fmt.Errorf("failed fork cleanup: generation key manager is not wired")
+	}
+	if want := m.generationKeys.BucketFor(forkID); bucket != want {
+		return fmt.Errorf("failed fork cleanup: bucket %q does not match fork %s bucket %q", bucket, forkID, want)
+	}
+	return m.generationKeys.DropBucket(context.WithoutCancel(ctx), bucket)
 }
 
 func (m *Manager) RequireForkGenerationHold(required bool) {

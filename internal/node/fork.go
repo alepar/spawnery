@@ -16,6 +16,12 @@ type forkIngressBarrier struct {
 	transferSetID    string
 }
 
+type forkBarrierWait struct {
+	spawnID string
+	barrier forkIngressBarrier
+	cancel  context.CancelFunc
+}
+
 func (b forkIngressBarrier) matches(other forkIngressBarrier) bool {
 	return b.sourceGeneration == other.sourceGeneration && b.transferSetID == other.transferSetID
 }
@@ -67,6 +73,57 @@ func (a *attacher) forkTurnBoundary(ctx context.Context, m *nodev1.ForkTurnBound
 	}
 }
 
+func (a *attacher) startForkTurnBoundary(ctx context.Context, m *nodev1.ForkTurnBoundary) {
+	barrier := forkIngressBarrier{sourceGeneration: m.GetSourceGeneration(), transferSetID: m.GetTransferSetId()}
+	waitCtx, cancel := context.WithCancel(ctx)
+	a.mu.Lock()
+	if a.forkWaits == nil {
+		a.forkWaits = map[string]forkBarrierWait{}
+	}
+	if prev, ok := a.forkWaits[m.GetTransferSetId()]; ok {
+		prev.cancel()
+	}
+	a.forkWaits[m.GetTransferSetId()] = forkBarrierWait{
+		spawnID: m.GetSourceSpawnId(),
+		barrier: barrier,
+		cancel:  cancel,
+	}
+	a.mu.Unlock()
+
+	go func() {
+		defer a.forgetForkBarrierWait(m.GetTransferSetId(), m.GetSourceSpawnId(), barrier)
+		a.forkTurnBoundary(waitCtx, m)
+	}()
+}
+
+func (a *attacher) releaseForkTurnBoundary(m *nodev1.ReleaseForkTurnBoundary) {
+	if m == nil {
+		return
+	}
+	barrier := forkIngressBarrier{sourceGeneration: m.GetSourceGeneration(), transferSetID: m.GetTransferSetId()}
+	var cancel context.CancelFunc
+	a.mu.Lock()
+	if wait, ok := a.forkWaits[m.GetTransferSetId()]; ok && wait.spawnID == m.GetSourceSpawnId() && wait.barrier.matches(barrier) {
+		cancel = wait.cancel
+		delete(a.forkWaits, m.GetTransferSetId())
+	}
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	a.releaseForkBarrier(m.GetSourceSpawnId(), func(b forkIngressBarrier) bool {
+		return b.matches(barrier)
+	})
+}
+
+func (a *attacher) forgetForkBarrierWait(transferSetID, spawnID string, barrier forkIngressBarrier) {
+	a.mu.Lock()
+	if wait, ok := a.forkWaits[transferSetID]; ok && wait.spawnID == spawnID && wait.barrier.matches(barrier) {
+		delete(a.forkWaits, transferSetID)
+	}
+	a.mu.Unlock()
+}
+
 func (a *attacher) unpauseIfPaused(ctx context.Context, m *nodev1.UnpauseIfPaused) {
 	reply := &nodev1.UnpauseIfPausedComplete{
 		SpawnId:    m.GetSpawnId(),
@@ -82,6 +139,30 @@ func (a *attacher) unpauseIfPaused(ctx context.Context, m *nodev1.UnpauseIfPause
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_UnpauseIfPausedComplete{UnpauseIfPausedComplete: reply}})
 }
 
+func (a *attacher) failedForkCleanup(ctx context.Context, m *nodev1.FailedForkCleanup) {
+	reply := &nodev1.FailedForkCleanupComplete{
+		RequestId:   m.GetRequestId(),
+		ForkSpawnId: m.GetForkSpawnId(),
+		Op:          m.GetOp(),
+	}
+	var err error
+	switch m.GetOp() {
+	case nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_REVOKE_GENERATION:
+		err = a.mgr.RevokeForkGeneration(ctx, m.GetForkSpawnId(), m.GetGeneration())
+	case nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_EMPTY_BUCKET:
+		err = a.mgr.EmptyForkBucket(ctx, m.GetForkSpawnId(), m.GetBucket())
+	case nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_DROP_BUCKET:
+		err = a.mgr.DropForkBucket(ctx, m.GetForkSpawnId(), m.GetBucket())
+	default:
+		err = fmt.Errorf("unknown failed fork cleanup op %s", m.GetOp())
+	}
+	if err != nil {
+		logErr("failedForkCleanup "+m.GetForkSpawnId(), err)
+		reply.Error = err.Error()
+	}
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_FailedForkCleanupComplete{FailedForkCleanupComplete: reply}})
+}
+
 func (a *attacher) acquireForkBarrier(ctx context.Context, spawnID string, sourceGeneration uint64, transferSetID string) error {
 	if transferSetID == "" {
 		return fmt.Errorf("fork turn-boundary gate unavailable: missing transfer set")
@@ -94,6 +175,11 @@ func (a *attacher) acquireForkBarrier(ctx context.Context, spawnID string, sourc
 	t := time.NewTicker(poll)
 	defer t.Stop()
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		err, acquired := a.tryAcquireForkBarrier(spawnID, barrier)
 		if err != nil {
 			return err
@@ -127,6 +213,10 @@ func (a *attacher) tryAcquireForkBarrier(spawnID string, barrier forkIngressBarr
 	if hasRelay {
 		a.mu.Unlock()
 		return fmt.Errorf("fork turn-boundary gate unavailable for non-ACP source"), false
+	}
+	if reg := a.sessions[spawnID]; reg != nil && reg.hasStarting() {
+		a.mu.Unlock()
+		return nil, false
 	}
 	if len(pumps) == 0 {
 		a.mu.Unlock()
@@ -162,6 +252,20 @@ func (a *attacher) applyForkBarrierLocked(spawnID string, p *Pump) {
 	if b, ok := a.forkBarriers[spawnID]; ok {
 		p.setForkBarrier(b)
 	}
+}
+
+func (a *attacher) forkBarrierActiveOrPendingLocked(spawnID string) bool {
+	if a.forkBarriers != nil {
+		if _, ok := a.forkBarriers[spawnID]; ok {
+			return true
+		}
+	}
+	for _, wait := range a.forkWaits {
+		if wait.spawnID == spawnID {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *attacher) releaseForkBarrier(spawnID string, match func(forkIngressBarrier) bool) {

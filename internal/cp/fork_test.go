@@ -131,11 +131,45 @@ func (a autoUnpauseSender) Send(m *nodev1.CPMessage) error {
 	return nil
 }
 
+type turnBoundaryHookSender struct {
+	capSender
+	s    *Server
+	hook func(*nodev1.ForkTurnBoundary)
+}
+
+func (h *turnBoundaryHookSender) Send(m *nodev1.CPMessage) error {
+	if err := h.capSender.Send(m); err != nil {
+		return err
+	}
+	if cmd := m.GetForkTurnBoundary(); cmd != nil {
+		if h.hook != nil {
+			h.hook(cmd)
+		}
+		h.s.deliverForkTurnBoundaryComplete(&nodev1.ForkTurnBoundaryComplete{
+			SourceSpawnId:    cmd.GetSourceSpawnId(),
+			SourceGeneration: cmd.GetSourceGeneration(),
+			TransferSetId:    cmd.GetTransferSetId(),
+		})
+	}
+	return nil
+}
+
 func sawUnpause(sender *capSender, spawnID string) bool {
 	sender.mu.Lock()
 	defer sender.mu.Unlock()
 	for _, msg := range sender.sent {
 		if cmd := msg.GetUnpauseIfPaused(); cmd != nil && cmd.GetSpawnId() == spawnID {
+			return true
+		}
+	}
+	return false
+}
+
+func sawForkSameNode(sender *capSender) bool {
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	for _, msg := range sender.sent {
+		if msg.GetForkSameNode() != nil {
 			return true
 		}
 	}
@@ -263,6 +297,32 @@ func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
 	}
 	if summary == nil || summary.ParentSpawnId != "sp-source" || summary.ForkedAt != 1234 {
 		t.Fatalf("fork summary = %+v", summary)
+	}
+}
+
+func TestForkSpawnReleasesTurnBoundaryWhenSetForkingFails(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	s.forkFootprintEstimator = staticForkFootprint(100)
+	sourceSender := &turnBoundaryHookSender{s: s}
+	sourceSender.hook = func(cmd *nodev1.ForkTurnBoundary) {
+		if err := s.st.Spawns().SetSuspending(context.Background(), cmd.GetSourceSpawnId(), int64(cmd.GetSourceGeneration())); err != nil {
+			t.Errorf("force source out of Active after turn-boundary: %v", err)
+		}
+	}
+	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
+
+	_, err := s.ForkSpawn(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.ForkSpawnRequest{
+		SpawnId: "sp-source",
+	}))
+	if err == nil {
+		t.Fatal("ForkSpawn should fail after source leaves Active before SetForking")
+	}
+	if sawForkSameNode(&sourceSender.capSender) {
+		t.Fatal("ForkSameNode must not be sent after SetForking fails")
+	}
+	if msg := waitForReleaseForkTurnBoundaryCPMessage(t, &sourceSender.capSender); msg.GetSourceSpawnId() != "sp-source" ||
+		msg.GetSourceGeneration() != 1 || msg.GetTransferSetId() == "" {
+		t.Fatalf("ReleaseForkTurnBoundary = %+v", msg)
 	}
 }
 
@@ -716,6 +776,7 @@ func TestForkSpawnMaterializerFailureLeavesSourceForkingWhenUnpauseUnavailable(t
 
 func TestForkSpawnMaterializerFailureWithoutResourcesLeavesFailedForkForRetry(t *testing.T) {
 	s, reg, rt := newTestServer(t)
+	s.failedForkResources = nil
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
 	reg.Add(&registry.Node{
 		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",

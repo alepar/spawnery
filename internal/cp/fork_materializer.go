@@ -3,6 +3,7 @@ package cp
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -113,12 +114,26 @@ type forkTurnBoundaryWaiter interface {
 	WaitForForkTurnBoundary(context.Context, forkMaterializeRequest) error
 }
 
+type forkTurnBoundaryReleaser interface {
+	ReleaseForkTurnBoundary(context.Context, forkMaterializeRequest) error
+}
+
 func (s *Server) waitForkTurnBoundary(ctx context.Context, req forkMaterializeRequest) error {
 	waiter, ok := s.forkMaterializerOrDefault().(forkTurnBoundaryWaiter)
 	if !ok {
 		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("fork materializer cannot gate source turn boundary"))
 	}
 	return waiter.WaitForForkTurnBoundary(ctx, req)
+}
+
+func (s *Server) releaseForkTurnBoundary(ctx context.Context, req forkMaterializeRequest) {
+	releaser, ok := s.forkMaterializerOrDefault().(forkTurnBoundaryReleaser)
+	if !ok {
+		return
+	}
+	if err := releaser.ReleaseForkTurnBoundary(ctx, req); err != nil {
+		log.Printf("release fork turn-boundary %s: %v", req.TransferSetID, err)
+	}
 }
 
 func newSameNodeForkMaterializer(s *Server, timeout time.Duration) forkMaterializer {
@@ -128,7 +143,7 @@ func newSameNodeForkMaterializer(s *Server, timeout time.Duration) forkMateriali
 	return &sameNodeForkMaterializer{s: s, timeout: timeout}
 }
 
-func (m *sameNodeForkMaterializer) WaitForForkTurnBoundary(ctx context.Context, req forkMaterializeRequest) error {
+func (m *sameNodeForkMaterializer) WaitForForkTurnBoundary(ctx context.Context, req forkMaterializeRequest) (err error) {
 	if req.SourceNodeID != req.TargetNodeID {
 		return connect.NewError(connect.CodeUnimplemented, fmt.Errorf("cross-node fork materialization is not implemented in this slice"))
 	}
@@ -142,6 +157,12 @@ func (m *sameNodeForkMaterializer) WaitForForkTurnBoundary(ctx context.Context, 
 	ch := m.s.forkTurnBoundaries.register(req.TransferSetID)
 	defer m.s.forkTurnBoundaries.unregister(req.TransferSetID)
 
+	sent := false
+	defer func() {
+		if err != nil && sent {
+			_ = m.ReleaseForkTurnBoundary(context.WithoutCancel(ctx), req)
+		}
+	}()
 	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTurnBoundary{ForkTurnBoundary: &nodev1.ForkTurnBoundary{
 		SourceSpawnId:    req.SourceSpawn.ID,
 		SourceGeneration: req.SourceGeneration,
@@ -149,6 +170,7 @@ func (m *sameNodeForkMaterializer) WaitForForkTurnBoundary(ctx context.Context, 
 	}}}); err != nil {
 		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("send fork turn-boundary command to node %q: %w", req.SourceNodeID, err))
 	}
+	sent = true
 
 	timer := time.NewTimer(m.timeout)
 	defer timer.Stop()
@@ -166,6 +188,21 @@ func (m *sameNodeForkMaterializer) WaitForForkTurnBoundary(ctx context.Context, 
 		}
 		return nil
 	}
+}
+
+func (m *sameNodeForkMaterializer) ReleaseForkTurnBoundary(ctx context.Context, req forkMaterializeRequest) error {
+	n, ok := m.s.reg.Get(req.SourceNodeID)
+	if !ok || n.Sender == nil {
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("source node %q is not connected", req.SourceNodeID))
+	}
+	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_ReleaseForkTurnBoundary{ReleaseForkTurnBoundary: &nodev1.ReleaseForkTurnBoundary{
+		SourceSpawnId:    req.SourceSpawn.ID,
+		SourceGeneration: req.SourceGeneration,
+		TransferSetId:    req.TransferSetID,
+	}}}); err != nil {
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("send fork turn-boundary release to node %q: %w", req.SourceNodeID, err))
+	}
+	return nil
 }
 
 func (m *sameNodeForkMaterializer) MaterializeFork(ctx context.Context, req forkMaterializeRequest) (forkMaterializeResult, error) {

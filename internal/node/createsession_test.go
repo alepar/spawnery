@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/runtime"
@@ -41,12 +42,26 @@ type fakeSessionExec struct {
 	killGate    chan struct{}
 	killReached chan struct{}
 	killOnce    sync.Once
+
+	// moshGate, when non-nil, parks the FIRST LaunchMosh call after recording the launch. This lets fork
+	// barrier tests hold a session in STARTING before a tmux relay exists.
+	moshGate    chan struct{}
+	moshReached chan struct{}
+	moshOnce    sync.Once
 }
 
 func (f *fakeSessionExec) LaunchMosh(_ context.Context, _, _, tmuxName string) error {
 	f.mu.Lock()
 	f.moshLaunched = append(f.moshLaunched, tmuxName)
 	f.mu.Unlock()
+	if f.moshGate != nil {
+		first := false
+		f.moshOnce.Do(func() { first = true })
+		if first {
+			close(f.moshReached)
+			<-f.moshGate
+		}
+	}
 	return f.launchMoshErr
 }
 func (f *fakeSessionExec) MoshAttachArgv(_, tmuxName string) ([]string, error) {
@@ -232,6 +247,66 @@ func TestCreateSessionACPRejectedWhenPoolExhausted(t *testing.T) {
 	defer sx.mu.Unlock()
 	if len(sx.acpLaunched) != 0 {
 		t.Fatal("no acp launch should happen when the pool is exhausted")
+	}
+}
+
+func TestCreateSessionMoshRejectedDuringForkBarrier(t *testing.T) {
+	sx := &fakeSessionExec{}
+	fs := &fakeCPStream{}
+	a := newSessionAttacher("s1", sx, fs)
+	a.forkBarriers = map[string]forkIngressBarrier{
+		"s1": {sourceGeneration: 1, transferSetID: "ts-1"},
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_MOSH, Runnable: "shell",
+	}}})
+	time.Sleep(20 * time.Millisecond)
+
+	sx.mu.Lock()
+	moshLaunches := len(sx.moshLaunched)
+	sx.mu.Unlock()
+	if moshLaunches != 0 {
+		t.Fatalf("mosh CreateSession during fork barrier must not launch tmux, launches=%d", moshLaunches)
+	}
+	if got := len(a.sessions["s1"].snapshot()); got != 1 {
+		t.Fatalf("rejected mosh CreateSession must not register a session, roster=%d", got)
+	}
+	if st := lastSessionStatus(fs); st == nil || st.State != nodev1.SessionState_SESSION_STATE_ERROR {
+		t.Fatalf("want an ERROR SessionStatus on fork barrier rejection, got %+v", st)
+	}
+}
+
+func TestCreateSessionACPRejectedDuringForkBarrierBeforeLaunchOrPump(t *testing.T) {
+	sx := &fakeSessionExec{}
+	fs := &fakeCPStream{}
+	a := newSessionAttacher("s1", sx, fs)
+	a.forkBarriers = map[string]forkIngressBarrier{
+		"s1": {sourceGeneration: 1, transferSetID: "ts-1"},
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CreateSession{CreateSession: &nodev1.CreateSession{
+		SpawnId: "s1", Transport: nodev1.SessionTransport_SESSION_TRANSPORT_ACP, Runnable: "goose-acp",
+	}}})
+	time.Sleep(20 * time.Millisecond)
+
+	sx.mu.Lock()
+	acpLaunches, dials := len(sx.acpLaunched), sx.dials
+	sx.mu.Unlock()
+	if acpLaunches != 0 || dials != 0 {
+		t.Fatalf("acp CreateSession during fork barrier must not launch or dial, launches=%d dials=%d", acpLaunches, dials)
+	}
+	a.mu.Lock()
+	pump := a.pumps[sessionKey{"s1", "1"}]
+	a.mu.Unlock()
+	if pump != nil {
+		t.Fatal("rejected acp CreateSession must not register a Pump")
+	}
+	if got := len(a.sessions["s1"].snapshot()); got != 1 {
+		t.Fatalf("rejected acp CreateSession must not register a session, roster=%d", got)
+	}
+	if st := lastSessionStatus(fs); st == nil || st.State != nodev1.SessionState_SESSION_STATE_ERROR {
+		t.Fatalf("want an ERROR SessionStatus on fork barrier rejection, got %+v", st)
 	}
 }
 
