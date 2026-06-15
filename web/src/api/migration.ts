@@ -20,6 +20,7 @@ import { authEnabled, useSessionStore } from "@/auth/session";
 import { pollAndSign, registerPendedOp, clearPendedOp } from "@/auth/intent";
 import { openEnvelope, hpkeSeal } from "@/keys/hpke";
 import type { Envelope } from "@/keys/hpke";
+import { asNodeRevocationChecker } from "@/keys/nodeRevocation";
 import { verifyNodeForSealing } from "@/keys/subkey";
 import type { RevocationChecker } from "@/keys/subkey";
 import type { DeviceKeys } from "@/keys/device";
@@ -424,6 +425,7 @@ export async function runMigrate(
   const accountId = tenancy === "self-hosted"
     ? (useSessionStore.getState().account?.accountId ?? "")
     : undefined;
+  const checker = revocationChecker ?? asNodeRevocationChecker();
   let hpkePub: Uint8Array;
   try {
     const verified = await verifyNodeForSealing(
@@ -432,7 +434,7 @@ export async function runMigrate(
       nk.signedSubkey,
       { tenancy, accountId },
       now,
-      revocationChecker,
+      checker,
     );
     hpkePub = verified.hpkePub;
   } catch (e: unknown) {

@@ -97,4 +97,81 @@ describe("runMigrate", () => {
     expect(deliverReq.secrets[0].deliveryId).toBe("fixed-delivery-id");
     expect(randomUUIDMock).toHaveBeenCalledTimes(1);
   });
+
+  it("uses the AS revocation checker by default for node verification", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ revoked_node_ids: [] }), { status: 200 })));
+    unaryMock.mockImplementation(async (method: string) => {
+      switch (method) {
+        case "GetJournalKeyCiphertext":
+          return {
+            entries: [{
+              mount: "main",
+              ciphertext: b64(JSON.stringify({ recipients: [], nonce: "", ct: "" })),
+            }],
+          };
+        case "MigrateSpawn":
+          return { nodeId: "node-a", transferSetId: "ts-1" };
+        case "GetSpawnNodeKey":
+          return {
+            nodeCertChain: b64("chain-pem"),
+            signedSubkey: b64(JSON.stringify({ node_id: "node-a", not_after: "2030-01-01T00:00:00Z" })),
+            generation: "7",
+          };
+        case "DeliverSecrets":
+          return {};
+        default:
+          throw new Error(`unexpected RPC ${method}`);
+      }
+    });
+
+    await runMigrate(
+      "sp1",
+      { nodeId: "node-a", class: "self-hosted" },
+      { x25519Public: {} as CryptoKey, x25519Private: {} as CryptoKey },
+      "root-pem",
+      new Date("2026-06-15T00:00:00Z"),
+    );
+
+    const checker = verifyNodeForSealingMock.mock.calls[0]?.[5] as { check(nodeId: string): Promise<void> } | undefined;
+    expect(checker).toBeTruthy();
+    await expect(checker?.check("node-a")).resolves.toBeUndefined();
+  });
+
+  it("surfaces AS node revocation as a delivery failure", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ revoked_node_ids: ["node-a"] }), { status: 200 })));
+    verifyNodeForSealingMock.mockImplementation(async (...args: unknown[]) => {
+      const checker = args[5] as { check(nodeId: string): Promise<void> };
+      await checker.check("node-a");
+      return { hpkePub: new Uint8Array([4, 5, 6]) };
+    });
+    unaryMock.mockImplementation(async (method: string) => {
+      switch (method) {
+        case "GetJournalKeyCiphertext":
+          return {
+            entries: [{
+              mount: "main",
+              ciphertext: b64(JSON.stringify({ recipients: [], nonce: "", ct: "" })),
+            }],
+          };
+        case "MigrateSpawn":
+          return { nodeId: "node-a", transferSetId: "ts-1" };
+        case "GetSpawnNodeKey":
+          return {
+            nodeCertChain: b64("chain-pem"),
+            signedSubkey: b64(JSON.stringify({ node_id: "node-a", not_after: "2030-01-01T00:00:00Z" })),
+            generation: "7",
+          };
+        default:
+          throw new Error(`unexpected RPC ${method}`);
+      }
+    });
+
+    await expect(runMigrate(
+      "sp1",
+      { nodeId: "node-a", class: "self-hosted" },
+      { x25519Public: {} as CryptoKey, x25519Private: {} as CryptoKey },
+      "root-pem",
+      new Date("2026-06-15T00:00:00Z"),
+    )).rejects.toMatchObject({ leg: "delivery" });
+  });
 });
