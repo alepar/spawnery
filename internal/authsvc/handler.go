@@ -3,6 +3,8 @@ package authsvc
 import (
 	"encoding/base64"
 	"net/http"
+
+	"spawnery/gen/auth/v1/authv1connect"
 )
 
 // Handler returns the AS's HTTP surface. The skeleton serves liveness and the Root CA for
@@ -39,6 +41,7 @@ func (s *Service) Handler() http.Handler {
 	if s.nodeRevocations != nil {
 		mux.HandleFunc("GET /node-revocations", s.serveNodeRevocations)
 	}
+	mux.Handle(authv1connect.NewAuthServiceHandler(s))
 
 	if s.deviceSet != nil {
 		ds := s.deviceSet
@@ -76,5 +79,5 @@ func (s *Service) Handler() http.Handler {
 		mux.HandleFunc("POST /device/token", idp.serveDeviceToken)
 	}
 
-	return mux
+	return nodeIdentityMiddleware(s.root, mux)
 }

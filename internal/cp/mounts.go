@@ -16,7 +16,13 @@ func storeToNodeMounts(in []store.Mount) []*nodev1.MountBinding {
 	}
 	out := make([]*nodev1.MountBinding, len(in))
 	for i, m := range in {
-		out[i] = &nodev1.MountBinding{Name: m.Name, BackendUri: m.BackendURI}
+		out[i] = &nodev1.MountBinding{
+			Name:               m.Name,
+			BackendUri:         m.BackendURI,
+			CredentialSecretId: m.CredentialSecretID,
+			CreateIfMissing:    m.CreateIfMissing,
+			RepositoryId:       m.RepositoryID,
+		}
 	}
 	return out
 }
@@ -29,7 +35,7 @@ func mergeCreateSpawnMounts(decls []store.MountDecl, req []*cpv1.MountBinding) (
 		out[i] = store.Mount{Name: decl.Name, BackendURI: "scratch"}
 	}
 
-	byName := make(map[string]string, len(req))
+	byName := make(map[string]store.Mount, len(req))
 	for _, binding := range req {
 		if binding == nil {
 			continue
@@ -48,12 +54,24 @@ func mergeCreateSpawnMounts(decls []store.MountDecl, req []*cpv1.MountBinding) (
 		if strings.TrimSpace(backendURI) == "" {
 			backendURI = "scratch"
 		}
-		byName[name] = backendURI
+		if strings.HasPrefix(backendURI, "github:") && strings.TrimSpace(binding.GetCredentialSecretId()) == "" {
+			return nil, fmt.Errorf("github mount binding %q requires credential_secret_id", name)
+		}
+		byName[name] = store.Mount{
+			Name:               name,
+			BackendURI:         backendURI,
+			CredentialSecretID: strings.TrimSpace(binding.GetCredentialSecretId()),
+			CreateIfMissing:    binding.GetCreateIfMissing(),
+			RepositoryID:       strings.TrimSpace(binding.GetRepositoryId()),
+		}
 	}
 
 	for i := range out {
-		if backendURI, ok := byName[out[i].Name]; ok {
-			out[i].BackendURI = backendURI
+		if binding, ok := byName[out[i].Name]; ok {
+			out[i].BackendURI = binding.BackendURI
+			out[i].CredentialSecretID = binding.CredentialSecretID
+			out[i].CreateIfMissing = binding.CreateIfMissing
+			out[i].RepositoryID = binding.RepositoryID
 		}
 	}
 	return out, nil

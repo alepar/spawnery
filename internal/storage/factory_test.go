@@ -29,7 +29,6 @@ func TestSchemeResolverRejectsUnsupportedBackends(t *testing.T) {
 		backendURI string
 		scheme     string
 	}{
-		{name: "github", backendURI: "github:owner/repo", scheme: "github"},
 		{name: "unknown", backendURI: "mystery:thing", scheme: "mystery"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -48,5 +47,18 @@ func TestSchemeResolverRejectsUnsupportedBackends(t *testing.T) {
 				t.Fatalf("Resolve(%q) scheme = %q, want %q", tc.backendURI, unsupported.Scheme, tc.scheme)
 			}
 		})
+	}
+}
+
+func TestSchemeResolverResolvesGitHubBackend(t *testing.T) {
+	t.Parallel()
+
+	resolver := NewSchemeResolver(t.TempDir())
+	backend, err := resolver.Resolve("github:octo-org/demo")
+	if err != nil {
+		t.Fatalf("Resolve(github): %v", err)
+	}
+	if _, ok := backend.(*GitHub); !ok {
+		t.Fatalf("Resolve(github) returned %T, want *GitHub", backend)
 	}
 }

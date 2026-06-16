@@ -241,7 +241,7 @@ func (s *Server) startFork(ctx context.Context, owner, sourceID string, fork sto
 	if err != nil {
 		return "", connect.NewError(connect.CodeInternal, err)
 	}
-	requiredSecretIDs := startupSecretIDsFromArtifacts(artifacts)
+	requiredSecretIDs := startupSecretIDsForSpawn(artifacts, mounts)
 	var env *authv1.AuthEnvelope
 	var secrets []*nodev1.SealedSecret
 	if s.intentEnabled {

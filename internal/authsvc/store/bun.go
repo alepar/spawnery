@@ -36,3 +36,4 @@ func (s *bunStore) DeviceGrants() DeviceGrantRepo       { return &deviceGrantRep
 func (s *bunStore) Revocations() RevocationRepo         { return &revocationRepo{db: s.db} }
 func (s *bunStore) DeviceSets() DeviceSetRepo           { return &deviceSetRepo{db: s.db} }
 func (s *bunStore) NodeRevocations() NodeRevocationRepo { return &nodeRevocationRepo{db: s.db} }
+func (s *bunStore) GitHubLinks() GitHubLinkRepo         { return &githubLinkRepo{db: s.db} }

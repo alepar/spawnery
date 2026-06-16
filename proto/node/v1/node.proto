@@ -110,8 +110,15 @@ message SealedSecret {
 // unseals (ciphertext-only relay; the node holds the sub-key private half and unseals).
 message SecretDelivery { string spawn_id = 1; uint64 generation = 2; repeated SealedSecret secrets = 3; }
 
-// Per-mount backend binding chosen at create/resume (CP -> node).
-message MountBinding { string name = 1; string backend_uri = 2; }
+// Per-mount backend binding chosen at create/resume (CP -> node). GitHub bindings carry non-secret
+// routing metadata; token material stays in SealedSecret deliveries.
+message MountBinding {
+  string name                 = 1;
+  string backend_uri          = 2;
+  string credential_secret_id = 3;
+  bool   create_if_missing    = 4;
+  string repository_id        = 5; // audit/validation metadata only; not a token scope guarantee.
+}
 
 // ArtifactContentType discriminates how spawnlet materializes an artifact's inline bytes:
 // BYTES => a single file written verbatim at `mode`; TAR => a packaged directory tree

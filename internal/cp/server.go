@@ -124,6 +124,10 @@ type Server struct {
 	// journal_key_delivery_pending in ListSpawns to drive the web-UI step.
 	deliveryPending *deliveryPendingTracker
 
+	// githubLinks is an in-memory live-spawn index for AS-custodial GitHub access-token fanout.
+	// It is populated only from owner/AS-sealed token deliveries; CP stores no plaintext token material.
+	githubLinks *githubLinkIndex
+
 	// ForkSpawn seams. The materializer is intentionally narrow and currently defaults to
 	// Unimplemented; downstream fork tasks install real source-preserving capture/seeding. The
 	// footprint estimator is fail-closed when nil because CP cannot infer fork disk headroom yet.
@@ -177,6 +181,7 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
 		pendingIntents:      newPendingIntentRegistry(),
 		deliveryPending:     newDeliveryPendingTracker(),
+		githubLinks:         newGitHubLinkIndex(),
 		forks:               newForkWaiters(),
 		forkTransferExports: newForkTransferExportedWaiters(),
 		forkTransferImports: newForkTransferImportedWaiters(),
@@ -819,6 +824,34 @@ func startupSecretIDsFromArtifacts(arts []store.Artifact) []string {
 	return out
 }
 
+func startupSecretIDsForSpawn(arts []store.Artifact, mounts []store.Mount) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, art := range arts {
+		if art.Sensitive {
+			add(art.EnvVarName)
+		}
+	}
+	for _, mount := range mounts {
+		if strings.HasPrefix(mount.BackendURI, "github:") {
+			add(mount.CredentialSecretID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (s *Server) ensureStartupSecretsExist(ctx context.Context, owner string, required []string) error {
 	for _, id := range required {
 		if _, err := s.st.Secrets().Get(ctx, owner, id); err != nil {
@@ -1051,7 +1084,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 			}
 			return
 		}
-		requiredSecretIDs = startupSecretIDsFromArtifacts(arts)
+		requiredSecretIDs = startupSecretIDsForSpawn(arts, mounts)
 		if err := s.ensureStartupSecretsExist(ctx, ownerID, requiredSecretIDs); err != nil {
 			log.Printf("provisionSpawn %s: validate startup secret catalog: %v", spawnID, err)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
@@ -1130,6 +1163,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 	if merr := s.st.Spawns().MarkModelApplied(ctx, spawnID); merr != nil {
 		log.Printf("provisionSpawn %s: MarkModelApplied after provision: %v", spawnID, merr)
 	}
+	s.githubLinks.noteNodeSecrets(spawnID, secrets)
 }
 
 // placementFor computes node placement for a spawn of the given app version. Apps run anywhere
@@ -1314,7 +1348,13 @@ func buildPendingIntent(op intent.Op, spawnID string, gen uint64, targetNodeID, 
 		AttachedSecretIds: append([]string(nil), attachedSecretIDs...),
 	}
 	for _, m := range mounts {
-		pi.Mounts = append(pi.Mounts, &cpv1.MountBinding{Name: m.Name, BackendUri: m.BackendURI})
+		pi.Mounts = append(pi.Mounts, &cpv1.MountBinding{
+			Name:               m.Name,
+			BackendUri:         m.BackendURI,
+			CredentialSecretId: m.CredentialSecretID,
+			CreateIfMissing:    m.CreateIfMissing,
+			RepositoryId:       m.RepositoryID,
+		})
 	}
 	return pi
 }

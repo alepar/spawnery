@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"spawnery/internal/runtime"
 	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
+	"spawnery/internal/storage"
 )
 
 type startAgentCheckBackend struct {
@@ -59,10 +61,39 @@ func (b *startPodCountBackend) podCalls() int {
 	return b.startPodCalls
 }
 
+type startupGitHubRepoService struct{}
+
+func (startupGitHubRepoService) Get(context.Context, storage.GitHubConfig, string) (storage.GitHubRepoInfo, error) {
+	return storage.GitHubRepoInfo{CloneURL: "https://github.com/octo/demo.git", Empty: false}, nil
+}
+
+func (startupGitHubRepoService) Create(context.Context, storage.GitHubConfig, string) (storage.GitHubRepoInfo, error) {
+	return storage.GitHubRepoInfo{}, nil
+}
+
+type startupGitRunner struct{}
+
+func (startupGitRunner) RunGit(_ context.Context, dir string, _ []string, args ...string) ([]byte, error) {
+	for i, arg := range args {
+		if arg == "clone" && i+3 < len(args) {
+			hostDir := args[len(args)-1]
+			if err := os.MkdirAll(filepath.Join(hostDir, ".git"), 0o755); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}
+	}
+	if dir == "" {
+		return nil, nil
+	}
+	return nil, nil
+}
+
 func startupSecretAttacher(t *testing.T, be runtime.PodBackend, fs *fakeCPStream, nodeID string, holder *subkey.Node, dataRoot string) *attacher {
 	t.Helper()
 	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot,
+		GitHubRepos: startupGitHubRepoService{}, GitHubGitRunner: startupGitRunner{},
 	})
 	a := newAttacher(mgr, fs)
 	a.cfg.NodeID = nodeID
@@ -94,7 +125,7 @@ func TestConsumeStartupSecretsRollsBackBatchOnLaterFailure(t *testing.T) {
 		return target, nil
 	}
 
-	err := a.consumeStartupSecrets(context.Background(), spawnID, gen, []*nodev1.SealedSecret{first, second}, routes, inject, "", "")
+	err := a.consumeStartupSecrets(context.Background(), spawnID, gen, []*nodev1.SealedSecret{first, second}, nil, routes, inject, "", "")
 	if err == nil {
 		t.Fatal("consumeStartupSecrets returned nil, want failure on second secret")
 	}
@@ -103,7 +134,7 @@ func TestConsumeStartupSecretsRollsBackBatchOnLaterFailure(t *testing.T) {
 	}
 
 	delete(injected, "first/token")
-	if err := a.consumeStartupSecrets(context.Background(), spawnID, gen, []*nodev1.SealedSecret{first}, routes, inject, "", ""); err != nil {
+	if err := a.consumeStartupSecrets(context.Background(), spawnID, gen, []*nodev1.SealedSecret{first}, nil, routes, inject, "", ""); err != nil {
 		t.Fatalf("first secret should be retryable after batch rollback: %v", err)
 	}
 	if got := injected["first/token"]; got != "first" {
@@ -132,7 +163,7 @@ func TestConsumeStartupSecretsDoesNotConsumeBeforeBatchOpenSucceeds(t *testing.T
 		return target, nil
 	}
 
-	err := a.consumeStartupSecrets(context.Background(), spawnID, gen, []*nodev1.SealedSecret{first, badSecond}, routes, inject, "", "")
+	err := a.consumeStartupSecrets(context.Background(), spawnID, gen, []*nodev1.SealedSecret{first, badSecond}, nil, routes, inject, "", "")
 	if err == nil {
 		t.Fatal("consumeStartupSecrets returned nil, want failure on bad second secret")
 	}
@@ -140,7 +171,7 @@ func TestConsumeStartupSecretsDoesNotConsumeBeforeBatchOpenSucceeds(t *testing.T
 		t.Fatalf("inject calls before full batch open = %d, want 0", injectCalls)
 	}
 
-	if err := a.consumeStartupSecrets(context.Background(), spawnID, gen, []*nodev1.SealedSecret{first}, routes, inject, "", ""); err != nil {
+	if err := a.consumeStartupSecrets(context.Background(), spawnID, gen, []*nodev1.SealedSecret{first}, nil, routes, inject, "", ""); err != nil {
 		t.Fatalf("first secret should be retryable after batch open rollback: %v", err)
 	}
 	if injectCalls != 1 {
@@ -174,7 +205,7 @@ func TestConsumeStartupSecretsRejectsDuplicateSecretIDsBeforeOpening(t *testing.
 
 			errc := make(chan error, 1)
 			go func() {
-				errc <- a.consumeStartupSecrets(context.Background(), spawnID, gen, []*nodev1.SealedSecret{first, second}, nil, inject, "", "")
+				errc <- a.consumeStartupSecrets(context.Background(), spawnID, gen, []*nodev1.SealedSecret{first, second}, nil, nil, inject, "", "")
 			}()
 
 			select {
@@ -265,6 +296,105 @@ func TestStartSpawnInjectsAgentSecretBeforeStartAgent(t *testing.T) {
 			Id: "github-token", Sensitive: true, EnvVarName: "GITHUB_TOKEN", DestPath: "github/token",
 			TargetContainer: nodev1.ArtifactTarget_ARTIFACT_TARGET_AGENT,
 		}},
+		Secrets: []*nodev1.SealedSecret{sec},
+	})
+	defer a.stopSpawn(context.Background(), spawnID)
+
+	if got := lastPhase(fs.phasesFor(spawnID)); got != nodev1.SpawnPhase_ACTIVE {
+		t.Fatalf("final phase = %v, want ACTIVE", got)
+	}
+	if be.agentCalls() != 1 {
+		t.Fatalf("StartAgent calls = %d, want 1", be.agentCalls())
+	}
+}
+
+func TestStartSpawnRendersGitHubAgentHelperBeforeStartAgent(t *testing.T) {
+	const nodeID, spawnID, gen = "node-1", "sp-start-github-render", uint64(17)
+	holder := startupSecretHolder(t, nodeID)
+	dataRoot := t.TempDir()
+	secretRoot := filepath.Join(dataRoot, "secrets", spawnID)
+	be := &startAgentCheckBackend{scriptedPodBackend: scriptedPodBackend{script: scriptGoose}}
+	be.check = func() {
+		helper := filepath.Join(secretRoot, "github", "git-credential-spawnery")
+		for _, path := range []string{
+			helper,
+			filepath.Join(secretRoot, "github", "gitconfig"),
+			filepath.Join(secretRoot, "github", "gh", "hosts.yml"),
+			filepath.Join(secretRoot, "github", "token"),
+		} {
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("StartAgent did not see rendered GitHub material at %s: %v", path, err)
+			}
+		}
+		token, err := os.ReadFile(filepath.Join(secretRoot, "github", "token"))
+		if err != nil {
+			t.Fatalf("read rendered token: %v", err)
+		}
+		if string(token) != "ghu_startup_token\n" {
+			t.Fatalf("rendered token = %q, want startup token", token)
+		}
+		cfg, err := os.ReadFile(filepath.Join(secretRoot, "github", "gitconfig"))
+		if err != nil {
+			t.Fatalf("read rendered git config: %v", err)
+		}
+		if !strings.Contains(string(cfg), "/run/spawnery/secrets/github/git-credential-spawnery") {
+			t.Fatalf("git config = %q, want container helper path", cfg)
+		}
+	}
+	fs := &fakeCPStream{}
+	a := startupSecretAttacher(t, be, fs, nodeID, holder, dataRoot)
+	sec := sealSecret(t, holder, spawnID, gen, "", "GITHUB_TOKEN", 1, "startup-gh-render-1", []byte("ghu_startup_token"))
+	sec.Type = nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN
+	sec.Usages = []nodev1.SecretUsage{nodev1.SecretUsage_SECRET_USAGE_NODE_STORAGE, nodev1.SecretUsage_SECRET_USAGE_AGENT_RENDER}
+	sec.Render = &nodev1.SecretRenderSpec{
+		Profile:              "gh-cli-v1",
+		TargetPath:           "github",
+		GhConfigDir:          "github/gh",
+		HostsPath:            "github/gh/hosts.yml",
+		GitConfigPath:        "github/gitconfig",
+		CredentialHelperPath: "github/git-credential-spawnery",
+	}
+	sec.GithubToken = &nodev1.GitHubTokenClearMetadata{Host: "github.com", Login: "octocat"}
+	sec.MountNames = []string{"main"}
+
+	a.startSpawn(context.Background(), &nodev1.StartSpawn{
+		SpawnId: spawnID, AppRef: writeNodeJournalApp(t), Model: "m", Generation: gen,
+		Mounts:  []*nodev1.MountBinding{{Name: "main", BackendUri: "github:octo/demo", CredentialSecretId: "GITHUB_TOKEN"}},
+		Secrets: []*nodev1.SealedSecret{sec},
+	})
+	defer a.stopSpawn(context.Background(), spawnID)
+
+	if got := lastPhase(fs.phasesFor(spawnID)); got != nodev1.SpawnPhase_ACTIVE {
+		t.Fatalf("final phase = %v, want ACTIVE", got)
+	}
+	if be.agentCalls() != 1 {
+		t.Fatalf("StartAgent calls = %d, want 1", be.agentCalls())
+	}
+}
+
+func TestStartSpawnDoesNotInjectNodeStorageOnlyGitHubSecretIntoAgentTmpfs(t *testing.T) {
+	const nodeID, spawnID, gen = "node-1", "sp-start-github-node-storage", uint64(18)
+	holder := startupSecretHolder(t, nodeID)
+	dataRoot := t.TempDir()
+	secretRoot := filepath.Join(dataRoot, "secrets", spawnID)
+	be := &startAgentCheckBackend{scriptedPodBackend: scriptedPodBackend{script: scriptGoose}}
+	be.check = func() {
+		if _, err := os.Stat(filepath.Join(secretRoot, "github", "token")); !os.IsNotExist(err) {
+			t.Fatalf("node-storage only GitHub secret landed in agent tmpfs, stat err=%v", err)
+		}
+	}
+	fs := &fakeCPStream{}
+	a := startupSecretAttacher(t, be, fs, nodeID, holder, dataRoot)
+	sec := sealSecret(t, holder, spawnID, gen, "github/token", "GITHUB_TOKEN", 1, "startup-gh-node-storage-1", []byte("ghu_node_storage_token"))
+	sec.Type = nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN
+	sec.Usages = []nodev1.SecretUsage{nodev1.SecretUsage_SECRET_USAGE_NODE_STORAGE}
+	sec.Render = &nodev1.SecretRenderSpec{TargetPath: "github"}
+	sec.GithubToken = &nodev1.GitHubTokenClearMetadata{Host: "github.com", Login: "octocat"}
+	sec.MountNames = []string{"main"}
+
+	a.startSpawn(context.Background(), &nodev1.StartSpawn{
+		SpawnId: spawnID, AppRef: writeNodeJournalApp(t), Model: "m", Generation: gen,
+		Mounts:  []*nodev1.MountBinding{{Name: "main", BackendUri: "github:octo/demo", CredentialSecretId: "GITHUB_TOKEN"}},
 		Secrets: []*nodev1.SealedSecret{sec},
 	})
 	defer a.stopSpawn(context.Background(), spawnID)

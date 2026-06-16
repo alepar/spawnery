@@ -556,8 +556,11 @@ func mountBindingsFromProto(in []*nodev1.MountBinding) []spawnlet.MountBinding {
 			continue
 		}
 		out = append(out, spawnlet.MountBinding{
-			Name:       binding.GetName(),
-			BackendURI: binding.GetBackendUri(),
+			Name:               binding.GetName(),
+			BackendURI:         binding.GetBackendUri(),
+			CredentialSecretID: binding.GetCredentialSecretId(),
+			CreateIfMissing:    binding.GetCreateIfMissing(),
+			RepositoryID:       binding.GetRepositoryId(),
 		})
 	}
 	return out
@@ -593,7 +596,13 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	if a.verifier != nil {
 		mounts := make([]*authv1.MountRef, 0, len(st.GetMounts()))
 		for _, m := range st.GetMounts() {
-			mounts = append(mounts, &authv1.MountRef{Name: m.GetName(), BackendUri: m.GetBackendUri()})
+			mounts = append(mounts, &authv1.MountRef{
+				Name:               m.GetName(),
+				BackendUri:         m.GetBackendUri(),
+				CredentialSecretId: m.GetCredentialSecretId(),
+				CreateIfMissing:    m.GetCreateIfMissing(),
+				RepositoryId:       m.GetRepositoryId(),
+			})
 		}
 		fields := StartFields{
 			SpawnID:       st.GetSpawnId(),
@@ -631,8 +640,17 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
 		},
 	}
-	if len(st.GetSecrets()) > 0 {
-		secrets := st.GetSecrets()
+	secrets := st.GetSecrets()
+	if len(secrets) > 0 {
+		consumedGitHub, err := a.consumeStartupGitHubSecrets(ctx, st.SpawnId, st.Generation, secrets, st.GetMounts())
+		if err != nil {
+			logErr("startSpawn "+st.SpawnId+": github startup secrets", err)
+			a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
+			return
+		}
+		secrets = filterConsumedStartupSecrets(secrets, consumedGitHub)
+	}
+	if len(secrets) > 0 {
 		routes, err := startupSecretRoutesFromProto(st.GetArtifacts())
 		if err != nil {
 			logErr("startSpawn "+st.SpawnId+": startup secret routes", err)
@@ -640,12 +658,13 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			return
 		}
 		sel.BeforeStartAgent = func(ctx context.Context, pc spawnlet.PreAgentContext) error {
-			return a.consumeStartupSecrets(ctx, pc.SpawnID, pc.Generation, secrets, routes, pc.InjectSecret, pc.ControlURL, pc.ControlToken)
+			return a.consumeStartupSecrets(ctx, pc.SpawnID, pc.Generation, secrets, st.GetMounts(), routes, pc.InjectSecret, pc.ControlURL, pc.ControlToken)
 		}
 	}
 	sp, err := a.mgr.CreateWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation,
 		sel)
 	if err != nil {
+		a.mgr.CleanupSpawnTransient(st.SpawnId)
 		logErr("startSpawn "+st.SpawnId, err)
 		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
 		return

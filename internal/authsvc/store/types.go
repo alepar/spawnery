@@ -105,3 +105,34 @@ type NodeRevocation struct {
 	Reason        string `bun:"reason,notnull"`
 	RevokedAt     int64  `bun:"revoked_at,notnull"`
 }
+
+type GitHubLink struct {
+	bun.BaseModel        `bun:"table:github_links,alias:ghl"`
+	SecretID             string `bun:"secret_id,pk"`
+	AccountID            string `bun:"account_id,notnull"`
+	Host                 string `bun:"host,notnull"`
+	Login                string `bun:"login,notnull"`
+	GithubUserID         string `bun:"github_user_id,notnull"`
+	AppClientID          string `bun:"app_client_id,notnull"`
+	RefreshToken         string `bun:"refresh_token,notnull"`
+	RefreshExpiresAtUnix int64  `bun:"refresh_expires_at_unix,notnull"`
+	AccessToken          string `bun:"access_token,nullzero"`
+	AccessExpiresAtUnix  int64  `bun:"access_expires_at_unix,nullzero"`
+	TokenType            string `bun:"token_type,notnull"`
+	Version              uint64 `bun:"version,notnull"`
+	DeliveryID           string `bun:"delivery_id,notnull"`
+	UpdatedAt            int64  `bun:"updated_at,notnull"`
+	Revoked              bool   `bun:"revoked,notnull"`
+	RevokedAt            int64  `bun:"revoked_at,nullzero"`
+}
+
+type GitHubTokenRotation struct {
+	RefreshToken         string
+	RefreshExpiresAtUnix int64
+	AccessToken          string
+	AccessExpiresAtUnix  int64
+	TokenType            string
+	Version              uint64
+	DeliveryID           string
+	UpdatedAt            int64
+}

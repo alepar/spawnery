@@ -222,6 +222,51 @@ func TestSecretDeliveryJournalKeyNoJournalerDropped(t *testing.T) {
 	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{sec}})
 }
 
+func TestSecretDeliveryRendersGitHubAgentCredentialOnFanout(t *testing.T) {
+	const nodeID, spawnID, gen = "node-1", "sp1", uint64(7)
+	a, holder, secretsRoot := secretTestRig(t, nodeID, spawnID, gen)
+	sp, ok := a.mgr.Store().Get(spawnID)
+	if !ok {
+		t.Fatal("spawn not live")
+	}
+	sp.MountBindings = []spawnlet.MountBinding{{Name: "main", BackendURI: "github:octo/demo"}}
+
+	sec := sealSecret(t, holder, spawnID, gen, "legacy/github/token", "gh-main", 12, "delivery-gh-main-v12", []byte("ghu_fanout_token"))
+	sec.Type = nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN
+	sec.Usages = []nodev1.SecretUsage{nodev1.SecretUsage_SECRET_USAGE_AGENT_RENDER}
+	sec.MountNames = []string{"main"}
+	sec.Render = &nodev1.SecretRenderSpec{
+		Profile:              "gh-cli-v1",
+		TargetPath:           "github",
+		GhConfigDir:          "github/gh",
+		HostsPath:            "github/gh/hosts.yml",
+		GitConfigPath:        "github/gitconfig",
+		CredentialHelperPath: "github/git-credential-spawnery",
+	}
+	sec.GithubToken = &nodev1.GitHubTokenClearMetadata{Host: "github.com", Login: "alice", GithubUserId: "123456"}
+
+	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{sec}})
+
+	tokenPath := filepath.Join(secretsRoot, spawnID, "github", "token")
+	got, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("github token not rendered at %s: %v", tokenPath, err)
+	}
+	if string(got) != "ghu_fanout_token\n" {
+		t.Fatalf("rendered token = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(secretsRoot, spawnID, "legacy", "github", "token")); !os.IsNotExist(err) {
+		t.Fatalf("github fanout must not write legacy target path, err=%v", err)
+	}
+	cfg, err := os.ReadFile(filepath.Join(secretsRoot, spawnID, "github", "gitconfig"))
+	if err != nil {
+		t.Fatalf("gitconfig not rendered: %v", err)
+	}
+	if !strings.Contains(string(cfg), "/run/spawnery/secrets/github/git-credential-spawnery") {
+		t.Fatalf("gitconfig helper path = %q", cfg)
+	}
+}
+
 func TestSecretDeliveryUsesWireVersionAndDeliveryIDForAAD(t *testing.T) {
 	const nodeID, spawnID, gen = "node-1", "sp1", uint64(7)
 	a, holder, secretsRoot := secretTestRig(t, nodeID, spawnID, gen)

@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	nodev1 "spawnery/gen/node/v1"
@@ -10,26 +9,31 @@ import (
 
 func TestStartSpawnThreadsMountBindingsIntoCreate(t *testing.T) {
 	fs := &fakeCPStream{}
-	a := newAttacher(newGooseManager(t, &scriptedPodBackend{script: scriptGooseDieOnPrompt}), fs)
+	mgr := newGooseManager(t, &scriptedPodBackend{script: scriptGooseDieOnPrompt})
+	a := newAttacher(mgr, fs)
 
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{
-		SpawnId: "sp-github-mount",
-		AppRef:  writeNodeApp(t),
+		SpawnId: "sp-bound-mount",
+		AppRef:  writeNodeJournalApp(t),
 		Model:   "m",
 		Mounts: []*nodev1.MountBinding{{
 			Name:       "main",
-			BackendUri: "github:owner/repo",
+			BackendUri: "scratch:",
 		}},
 	})
 
-	st := fs.lastStatusFor("sp-github-mount")
+	st := fs.lastStatusFor("sp-bound-mount")
 	if st == nil {
 		t.Fatal("missing spawn status")
 	}
-	if st.Phase != nodev1.SpawnPhase_ERROR {
-		t.Fatalf("final phase = %s, want ERROR", st.Phase)
+	if st.Phase != nodev1.SpawnPhase_ACTIVE {
+		t.Fatalf("final phase = %s, want ACTIVE", st.Phase)
 	}
-	if !strings.Contains(strings.ToLower(st.Detail), "unsupported backend") {
-		t.Fatalf("status detail = %q, want unsupported backend detail", st.Detail)
+	bindings, ok := mgr.MountBindings("sp-bound-mount")
+	if !ok {
+		t.Fatal("spawn manager did not retain mount bindings")
+	}
+	if len(bindings) != 1 || bindings[0].Name != "main" || bindings[0].BackendURI != "scratch:" {
+		t.Fatalf("mount bindings = %+v, want scratch main binding", bindings)
 	}
 }

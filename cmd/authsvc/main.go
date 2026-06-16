@@ -46,6 +46,9 @@
 //	                                 must supply "Authorization: Bearer <secret>"). Required in production;
 //	                                 leave unset only in AS_DEV. Without it the revocation feed (account
 //	                                 UUIDs + session-revocation timing) is served unauthenticated.
+//	  AS_CP_URL                      CP base URL for GitHub mint authorization/fanout.
+//	  AS_CP_RPC_SECRET               Scoped AS->CP secret for GitHub coordination RPCs; must match
+//	                                 CP_AS_RPC_SECRET on the CP.
 package main
 
 import (
@@ -61,6 +64,9 @@ import (
 	"syscall"
 	"time"
 
+	"connectrpc.com/connect"
+
+	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/githubfake"
 	"spawnery/internal/authsvc/store"
@@ -213,7 +219,7 @@ func buildService() (*authsvc.Service, error) {
 	idp, err := authsvc.NewIdP(authsvc.IdPConfig{
 		Store:               idStore,
 		GitHub:              ghProvider,
-		SigningKey:           sigKey,
+		SigningKey:          sigKey,
 		NextPubKeys:         nextPubs,
 		GitHubRedirectURI:   env("AS_GITHUB_REDIRECT_URI", ""),
 		SPAOrigin:           spaOrigin,
@@ -227,11 +233,55 @@ func buildService() (*authsvc.Service, error) {
 		return nil, err
 	}
 
-	return authsvc.New(root.Cert, inter,
+	opts := []authsvc.Option{
 		authsvc.WithSessionKey(sigKey),
 		authsvc.WithIdP(idp),
 		authsvc.WithNodeRevocations(idStore.NodeRevocations()),
-	), nil
+		authsvc.WithGitHubMinting(idStore, ghProvider),
+	}
+	if cpURL := strings.TrimSpace(os.Getenv("AS_CP_URL")); cpURL != "" {
+		cpClient := cpv1connect.NewSpawnServiceClient(http.DefaultClient, cpURL,
+			connect.WithInterceptors(staticHeaderInterceptor{
+				name:  "X-Spawnery-AS-Secret",
+				value: os.Getenv("AS_CP_RPC_SECRET"),
+			}),
+		)
+		opts = append(opts,
+			authsvc.WithGitHubMintAuthorizer(authsvc.NewCPGitHubMintAuthorizer(cpClient)),
+			authsvc.WithGitHubAccessTokenFanout(authsvc.NewCPGitHubAccessTokenFanout(cpClient, pki.MarshalCertPEM(root.Cert), time.Now)),
+		)
+		log.Printf("authsvc: GitHub mint authorization/fanout wired to CP %s", cpURL)
+	}
+
+	return authsvc.New(root.Cert, inter, opts...), nil
+}
+
+type staticHeaderInterceptor struct {
+	name  string
+	value string
+}
+
+func (i staticHeaderInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		if i.name != "" && i.value != "" {
+			req.Header().Set(i.name, i.value)
+		}
+		return next(ctx, req)
+	}
+}
+
+func (i staticHeaderInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
+		conn := next(ctx, spec)
+		if i.name != "" && i.value != "" {
+			conn.RequestHeader().Set(i.name, i.value)
+		}
+		return conn
+	}
+}
+
+func (i staticHeaderInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return next
 }
 
 type productionCA struct {

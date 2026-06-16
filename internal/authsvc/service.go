@@ -6,6 +6,7 @@
 package authsvc
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -39,6 +40,14 @@ type Service struct {
 
 	nodeRevocations store.NodeRevocationRepo
 
+	githubMintStore       store.Store
+	githubMintProvider    GitHubProvider
+	nodeIdentityExtractor NodeIdentityExtractor
+	githubMintAuthorizer  GitHubMintAuthorizer
+	githubTokenFanout     GitHubAccessTokenFanoutNotifier
+	githubMintLocksMu     sync.Mutex
+	githubMintLocks       map[string]*sync.Mutex
+
 	mu     sync.Mutex
 	tokens map[string]enrollToken // pending one-time enrollment tokens
 }
@@ -53,6 +62,49 @@ type enrollToken struct {
 
 // Option configures a Service.
 type Option func(*Service)
+
+type NodeIdentityExtractor func(context.Context) (nodeID string, ok bool)
+
+type GitHubMintAuthorization struct {
+	NodeID       string
+	SpawnID      string
+	Generation   uint64
+	SecretID     string
+	Version      uint64
+	DeliveryID   string
+	RepositoryID string
+}
+
+type GitHubMintAuthorizer interface {
+	AuthorizeGitHubMint(context.Context, GitHubMintAuthorization) error
+}
+
+type GitHubMintAuthorizerFunc func(context.Context, GitHubMintAuthorization) error
+
+func (f GitHubMintAuthorizerFunc) AuthorizeGitHubMint(ctx context.Context, req GitHubMintAuthorization) error {
+	return f(ctx, req)
+}
+
+type GitHubAccessTokenFanout struct {
+	SecretID            string
+	AccountID           string
+	Version             uint64
+	DeliveryID          string
+	RepositoryID        string
+	AccessToken         string
+	AccessExpiresAtUnix int64
+	TokenType           string
+}
+
+type GitHubAccessTokenFanoutNotifier interface {
+	FanoutGitHubAccessToken(context.Context, GitHubAccessTokenFanout) error
+}
+
+type GitHubAccessTokenFanoutFunc func(context.Context, GitHubAccessTokenFanout) error
+
+func (f GitHubAccessTokenFanoutFunc) FanoutGitHubAccessToken(ctx context.Context, req GitHubAccessTokenFanout) error {
+	return f(ctx, req)
+}
 
 // WithClock overrides the time source (tests).
 func WithClock(now func() time.Time) Option { return func(s *Service) { s.now = now } }
@@ -88,17 +140,46 @@ func WithNodeRevocations(st store.NodeRevocationRepo) Option {
 	return func(s *Service) { s.nodeRevocations = st }
 }
 
+func WithGitHubMinting(st store.Store, provider GitHubProvider) Option {
+	return func(s *Service) {
+		s.githubMintStore = st
+		s.githubMintProvider = provider
+	}
+}
+
+func WithNodeIdentityExtractor(extract NodeIdentityExtractor) Option {
+	return func(s *Service) { s.nodeIdentityExtractor = extract }
+}
+
+func WithGitHubMintAuthorizer(authz GitHubMintAuthorizer) Option {
+	return func(s *Service) { s.githubMintAuthorizer = authz }
+}
+
+func WithGitHubAccessTokenFanout(fanout GitHubAccessTokenFanoutNotifier) Option {
+	return func(s *Service) { s.githubTokenFanout = fanout }
+}
+
 // New builds a Service from an in-memory root cert + self-hosted intermediate CA.
 func New(root *x509.Certificate, selfHostedIntermediate *pki.CA, opts ...Option) *Service {
 	s := &Service{
-		root:         root,
-		intermediate: selfHostedIntermediate,
-		now:          time.Now,
-		enrollTTL:    defaultEnrollTTL,
-		tokens:       map[string]enrollToken{},
+		root:                  root,
+		intermediate:          selfHostedIntermediate,
+		now:                   time.Now,
+		enrollTTL:             defaultEnrollTTL,
+		tokens:                map[string]enrollToken{},
+		githubMintLocks:       map[string]*sync.Mutex{},
+		nodeIdentityExtractor: nodeIDFromContext,
 	}
 	for _, o := range opts {
 		o(s)
+	}
+	if s.idp != nil {
+		if s.githubMintStore == nil {
+			s.githubMintStore = s.idp.store
+		}
+		if s.githubMintProvider == nil {
+			s.githubMintProvider = s.idp.github
+		}
 	}
 	if s.sessionKey == nil {
 		_, s.sessionKey, _ = ed25519.GenerateKey(rand.Reader)

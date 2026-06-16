@@ -40,10 +40,11 @@ const (
 
 // AuthServiceClient is a client for the auth.v1.AuthService service.
 type AuthServiceClient interface {
-	// Node -> AS: mint a repository_id-scoped GitHub user access token from the currently retained
-	// refresh credential. The AS combines refresh_token with the App client_secret; the client_secret
-	// never leaves the AS. Implementations must use request_id as the idempotency key for retrying an
-	// ambiguous single-use refresh rotation.
+	// Node -> AS: mint or retrieve the current shared GitHub App user access token for a link.
+	// The AS is the sole refresh-chain custodian and rotation authority. The node authenticates with
+	// its established node identity; this request carries only a link reference, never a refresh token.
+	// repository_id is expected-target audit metadata only and must not be treated as a scope reducer.
+	// Implementations use request_id as the idempotency key for retrying an ambiguous refresh attempt.
 	MintGitHubAccessToken(context.Context, *connect.Request[v1.MintGitHubAccessTokenRequest]) (*connect.Response[v1.MintGitHubAccessTokenResponse], error)
 }
 
@@ -79,10 +80,11 @@ func (c *authServiceClient) MintGitHubAccessToken(ctx context.Context, req *conn
 
 // AuthServiceHandler is an implementation of the auth.v1.AuthService service.
 type AuthServiceHandler interface {
-	// Node -> AS: mint a repository_id-scoped GitHub user access token from the currently retained
-	// refresh credential. The AS combines refresh_token with the App client_secret; the client_secret
-	// never leaves the AS. Implementations must use request_id as the idempotency key for retrying an
-	// ambiguous single-use refresh rotation.
+	// Node -> AS: mint or retrieve the current shared GitHub App user access token for a link.
+	// The AS is the sole refresh-chain custodian and rotation authority. The node authenticates with
+	// its established node identity; this request carries only a link reference, never a refresh token.
+	// repository_id is expected-target audit metadata only and must not be treated as a scope reducer.
+	// Implementations use request_id as the idempotency key for retrying an ambiguous refresh attempt.
 	MintGitHubAccessToken(context.Context, *connect.Request[v1.MintGitHubAccessTokenRequest]) (*connect.Response[v1.MintGitHubAccessTokenResponse], error)
 }
 

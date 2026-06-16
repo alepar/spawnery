@@ -99,6 +99,10 @@ func (r recordingResolver) Resolve(backendURI string) (storage.Backend, error) {
 }
 
 func writeMountBindingApp(t *testing.T, mounts ...string) string {
+	return writeMountBindingAppWithDurability(t, nil, mounts...)
+}
+
+func writeMountBindingAppWithDurability(t *testing.T, durability map[string]string, mounts ...string) string {
 	t.Helper()
 
 	app := t.TempDir()
@@ -106,6 +110,9 @@ func writeMountBindingApp(t *testing.T, mounts ...string) string {
 	manifest.WriteString("id: spawnery/mount-bindings\nstorage:\n  mounts:\n")
 	for _, mountName := range mounts {
 		manifest.WriteString(fmt.Sprintf("    - name: %s\n      path: %s\n      seed: %s\n", mountName, mountName, mountName))
+		if d := durability[mountName]; d != "" {
+			manifest.WriteString(fmt.Sprintf("      durability: %s\n", d))
+		}
 		if err := os.MkdirAll(filepath.Join(app, mountName), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -122,14 +129,44 @@ func TestCreateWithSelectionRejectsUnsupportedMountBackendBeforePodStart(t *test
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
 
-	_, err := m.CreateWithSelection(context.Background(), "sp-github", writeMountBindingApp(t, "main"), "model", "", "", 0, AgentSelection{
-		Mounts: []MountBinding{{Name: "main", BackendURI: "github:owner/repo"}},
+	_, err := m.CreateWithSelection(context.Background(), "sp-unknown-backend", writeMountBindingApp(t, "main"), "model", "", "", 0, AgentSelection{
+		Mounts: []MountBinding{{Name: "main", BackendURI: "mystery:owner/repo"}},
 	})
 	if !errors.Is(err, storage.ErrUnsupportedBackend) {
 		t.Fatalf("CreateWithSelection error = %v, want ErrUnsupportedBackend", err)
 	}
 	if fb.startPodCalls != 0 || fb.startAgentCalls != 0 {
 		t.Fatalf("pod should not start on unsupported backend, got StartPod=%d StartAgent=%d", fb.startPodCalls, fb.startAgentCalls)
+	}
+}
+
+func TestCreateWithSelectionRejectsGithubMountWithoutJournaledDurabilityBeforePrepare(t *testing.T) {
+	fb := &countingPodBackend{}
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+	githubBackend := &recordingBackend{root: filepath.Join(t.TempDir(), "github")}
+	m.backendResolver = recordingResolver{
+		backends: map[string]storage.Backend{
+			"":                  &recordingBackend{root: filepath.Join(t.TempDir(), "scratch")},
+			"github:owner/repo": githubBackend,
+		},
+	}
+
+	_, err := m.CreateWithSelection(context.Background(), "sp-github-ephemeral", writeMountBindingApp(t, "main"), "model", "", "", 0, AgentSelection{
+		Mounts: []MountBinding{{Name: "main", BackendURI: "github:owner/repo"}},
+	})
+	if err == nil {
+		t.Fatal("CreateWithSelection returned nil, want journaled durability error")
+	}
+	if !strings.Contains(err.Error(), "github") || !strings.Contains(err.Error(), "journaled") {
+		t.Fatalf("CreateWithSelection error = %q, want github journaled durability detail", err)
+	}
+	if len(githubBackend.prepared) != 0 {
+		t.Fatalf("github backend Prepare calls = %v, want none before durability validation", githubBackend.prepared)
+	}
+	if fb.startPodCalls != 0 || fb.startAgentCalls != 0 {
+		t.Fatalf("pod should not start on invalid github durability, got StartPod=%d StartAgent=%d", fb.startPodCalls, fb.startAgentCalls)
 	}
 }
 
@@ -168,7 +205,7 @@ func TestStopFinalizesEachMountThroughPreparingBackend(t *testing.T) {
 		},
 	}
 
-	sp, err := m.CreateWithSelection(context.Background(), "sp-finalizers", writeMountBindingApp(t, "main", "cache"), "model", "", "", 0, AgentSelection{
+	sp, err := m.CreateWithSelection(context.Background(), "sp-finalizers", writeMountBindingAppWithDurability(t, map[string]string{"main": "node-local"}, "main", "cache"), "model", "", "", 0, AgentSelection{
 		Mounts: []MountBinding{{Name: "main", BackendURI: "github:owner/repo"}},
 	})
 	if err != nil {
@@ -232,7 +269,7 @@ func TestRootMaterializeUsesResolvedBackendForMountPrepareAndFinalize(t *testing
 		},
 	}
 
-	sp, err := m.CreateWithSelection(context.Background(), "sp-root-remap", writeMountBindingApp(t, "main"), "model", "", "", 0, AgentSelection{
+	sp, err := m.CreateWithSelection(context.Background(), "sp-root-remap", writeMountBindingAppWithDurability(t, map[string]string{"main": "node-local"}, "main"), "model", "", "", 0, AgentSelection{
 		Mounts: []MountBinding{{Name: "main", BackendURI: "github:owner/repo"}},
 	})
 	if err != nil {
@@ -266,7 +303,7 @@ func TestSuspendReturnsErrorWhenMountFinalizeFails(t *testing.T) {
 		},
 	}
 
-	sp, err := m.CreateWithSelection(context.Background(), "sp-suspend-finalize-fail", writeMountBindingApp(t, "main"), "model", "", "", 0, AgentSelection{
+	sp, err := m.CreateWithSelection(context.Background(), "sp-suspend-finalize-fail", writeMountBindingAppWithDurability(t, map[string]string{"main": "node-local"}, "main"), "model", "", "", 0, AgentSelection{
 		Mounts: []MountBinding{{Name: "main", BackendURI: "github:owner/repo"}},
 	})
 	if err != nil {

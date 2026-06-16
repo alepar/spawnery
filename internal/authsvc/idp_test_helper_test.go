@@ -41,6 +41,9 @@ func (fp *fakeProvider) Exchange(ctx context.Context, code, verifier, redirectUR
 func (fp *fakeProvider) FetchUser(ctx context.Context, token string) (GitHubUser, error) {
 	return fp.gh.FetchUser(ctx, token)
 }
+func (fp *fakeProvider) RefreshUserAccessToken(ctx context.Context, refreshToken string) (GitHubUserToken, error) {
+	return fp.gh.RefreshUserAccessToken(ctx, refreshToken)
+}
 
 // newTestIdP builds an IdP backed by in-memory store and the given fake GitHub.
 // The clock is fixed at `now`.

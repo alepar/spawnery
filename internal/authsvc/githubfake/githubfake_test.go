@@ -98,6 +98,67 @@ func TestHappyExchangeAndUser(t *testing.T) {
 	}
 }
 
+func TestRefreshInvalidatesPredecessorAccessAndRefresh(t *testing.T) {
+	f := New()
+	defer f.Close()
+	f.SetUser(424242, "alice")
+
+	verifier := "test-verifier-string-of-sufficient-length"
+	sum := sha256.Sum256([]byte(verifier))
+	code := authorizeCode(t, f, base64.RawURLEncoding.EncodeToString(sum[:]))
+	out := exchange(t, f, code, f.ClientSecret, verifier)
+	oldAccess := out["access_token"]
+	oldRefresh := out["refresh_token"]
+	if oldAccess == "" || oldRefresh == "" {
+		t.Fatalf("exchange did not issue access+refresh: %v", out)
+	}
+
+	refreshForm := url.Values{
+		"client_id":     {f.ClientID},
+		"client_secret": {f.ClientSecret},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {oldRefresh},
+	}
+	resp, err := http.PostForm(f.URL()+"/login/oauth/access_token", refreshForm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var refreshed map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if refreshed["access_token"] == "" || refreshed["refresh_token"] == "" {
+		t.Fatalf("refresh did not issue successor tokens: %v", refreshed)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, f.URL()+"/user", nil)
+	req.Header.Set("Authorization", "Bearer "+oldAccess)
+	oldResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oldResp.Body.Close()
+	if oldResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("predecessor access token still valid: status %d", oldResp.StatusCode)
+	}
+
+	refreshForm.Set("refresh_token", oldRefresh)
+	resp, err = http.PostForm(f.URL()+"/login/oauth/access_token", refreshForm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var reused map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&reused); err != nil {
+		t.Fatal(err)
+	}
+	reusedAccess, _ := reused["access_token"].(string)
+	if reusedAccess != "" || reused["error"] == nil {
+		t.Fatalf("predecessor refresh token reuse succeeded: %v", reused)
+	}
+}
+
 func TestPKCEMismatch(t *testing.T) {
 	f := New()
 	defer f.Close()

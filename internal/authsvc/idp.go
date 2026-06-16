@@ -132,12 +132,21 @@ type GitHubUser struct {
 	Login string
 }
 
+type GitHubUserToken struct {
+	AccessToken          string
+	AccessExpiresAtUnix  int64
+	RefreshToken         string
+	RefreshExpiresAtUnix int64
+	TokenType            string
+}
+
 // GitHubProvider abstracts the AS<->GitHub confidential-client leg; the production client and
 // the dev/test fake share it (same AS code path either way).
 type GitHubProvider interface {
 	AuthorizeURL(state, challenge, redirectURI string) string
 	Exchange(ctx context.Context, code, verifier, redirectURI string) (accessToken string, err error)
 	FetchUser(ctx context.Context, accessToken string) (GitHubUser, error)
+	RefreshUserAccessToken(ctx context.Context, refreshToken string) (GitHubUserToken, error)
 }
 
 // githubClient is the real provider over GitHub's web + API base URLs (overridable so the fake
@@ -201,6 +210,52 @@ func (g *githubClient) Exchange(ctx context.Context, code, verifier, redirectURI
 		return "", fmt.Errorf("github exchange failed: status %d error %q", resp.StatusCode, out.Error)
 	}
 	return out.AccessToken, nil
+}
+
+func (g *githubClient) RefreshUserAccessToken(ctx context.Context, refreshToken string) (GitHubUserToken, error) {
+	form := url.Values{
+		"client_id":     {g.clientID},
+		"client_secret": {g.clientSecret},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.webURL+"/login/oauth/access_token",
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return GitHubUserToken{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return GitHubUserToken{}, err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		AccessToken           string `json:"access_token"`
+		ExpiresIn             int64  `json:"expires_in"`
+		RefreshToken          string `json:"refresh_token"`
+		RefreshTokenExpiresIn int64  `json:"refresh_token_expires_in"`
+		TokenType             string `json:"token_type"`
+		Error                 string `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return GitHubUserToken{}, err
+	}
+	if resp.StatusCode != http.StatusOK || out.Error != "" || out.AccessToken == "" || out.RefreshToken == "" {
+		return GitHubUserToken{}, fmt.Errorf("github refresh failed: status %d error %q", resp.StatusCode, out.Error)
+	}
+	now := time.Now()
+	if out.TokenType == "" {
+		out.TokenType = "bearer"
+	}
+	return GitHubUserToken{
+		AccessToken:          out.AccessToken,
+		AccessExpiresAtUnix:  now.Add(time.Duration(out.ExpiresIn) * time.Second).Unix(),
+		RefreshToken:         out.RefreshToken,
+		RefreshExpiresAtUnix: now.Add(time.Duration(out.RefreshTokenExpiresIn) * time.Second).Unix(),
+		TokenType:            out.TokenType,
+	}, nil
 }
 
 func (g *githubClient) FetchUser(ctx context.Context, accessToken string) (GitHubUser, error) {

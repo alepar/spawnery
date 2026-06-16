@@ -96,6 +96,13 @@ type NodeRevocationRepo interface {
 	List(ctx context.Context) ([]NodeRevocation, error)
 }
 
+type GitHubLinkRepo interface {
+	Get(ctx context.Context, secretID string) (GitHubLink, error)
+	Upsert(ctx context.Context, link GitHubLink) error
+	Rotate(ctx context.Context, secretID string, rot GitHubTokenRotation) (GitHubLink, error)
+	Revoke(ctx context.Context, secretID string, revokedAt int64) error
+}
+
 type Store interface {
 	Users() UserRepo
 	RefreshSessions() RefreshSessionRepo
@@ -104,6 +111,7 @@ type Store interface {
 	Revocations() RevocationRepo
 	DeviceSets() DeviceSetRepo
 	NodeRevocations() NodeRevocationRepo
+	GitHubLinks() GitHubLinkRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error
