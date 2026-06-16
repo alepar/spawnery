@@ -1,6 +1,9 @@
 package store
 
 import (
+	"context"
+	"database/sql"
+	"encoding/base64"
 	"errors"
 	"testing"
 )
@@ -79,4 +82,81 @@ func TestGitHubLinksRotateRequiresLiveLink(t *testing.T) {
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("rotate missing link: want ErrNotFound, got %v", err)
 	}
+}
+
+func TestGitHubLinksEncryptedAtRest(t *testing.T) {
+	ctx := context.Background()
+	dsn := "file:as_atrest?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	cipher, err := NewAESGCMTokenCipher(bytesRepeat32(0x2a))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	st, err := Open(ctx, Config{Driver: "sqlite", DSN: dsn, TokenCipher: cipher})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	link := GitHubLink{
+		SecretID: "gh-main", AccountID: "acct-1", Host: "github.com", Login: "alice",
+		GithubUserID: "123456", AppClientID: "Iv1.test",
+		RefreshToken: "ghr_plain", RefreshExpiresAtUnix: 2000,
+		AccessToken: "ghu_plain", AccessExpiresAtUnix: 1000,
+		TokenType: "bearer", Version: 1, DeliveryID: "d1", UpdatedAt: 10,
+	}
+	if err := st.GitHubLinks().Upsert(ctx, link); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// Read the RAW columns on a second handle to the same shared in-memory DB.
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	defer raw.Close()
+	var rt, at string
+	if err := raw.QueryRowContext(ctx,
+		"SELECT refresh_token, access_token FROM github_links WHERE secret_id = ?", "gh-main",
+	).Scan(&rt, &at); err != nil {
+		t.Fatalf("raw select: %v", err)
+	}
+	if rt == "ghr_plain" || at == "ghu_plain" || rt == "" || at == "" {
+		t.Fatalf("tokens stored in plaintext at rest: refresh=%q access=%q", rt, at)
+	}
+	if _, err := base64.RawStdEncoding.DecodeString(rt); err != nil {
+		t.Fatalf("stored refresh_token is not base64 ciphertext: %v", err)
+	}
+
+	// A store opened with a DIFFERENT key on the same DB cannot read the tokens.
+	otherCipher, _ := NewAESGCMTokenCipher(bytesRepeat32(0x55))
+	st2, err := Open(ctx, Config{Driver: "sqlite", DSN: dsn, TokenCipher: otherCipher})
+	if err != nil {
+		t.Fatalf("open store2: %v", err)
+	}
+	t.Cleanup(func() { st2.Close() })
+	if _, err := st2.GitHubLinks().Get(ctx, "gh-main"); err == nil {
+		t.Fatal("Get with the wrong key must fail (tokens are key-bound at rest)")
+	}
+}
+
+func TestGitHubLinksRequireCipher(t *testing.T) {
+	ctx := context.Background()
+	dsn := "file:as_nocipher?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	st, err := Open(ctx, Config{Driver: "sqlite", DSN: dsn}) // no TokenCipher
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	err = st.GitHubLinks().Upsert(ctx, GitHubLink{SecretID: "x", RefreshToken: "r", TokenType: "bearer"})
+	if !errors.Is(err, ErrCipherRequired) {
+		t.Fatalf("Upsert without cipher must fail-closed with ErrCipherRequired, got %v", err)
+	}
+}
+
+func bytesRepeat32(b byte) []byte {
+	out := make([]byte, 32)
+	for i := range out {
+		out[i] = b
+	}
+	return out
 }
