@@ -797,3 +797,14 @@ the assumptions above -- append a dated note here, whether or not a formal debug
   short-lived access tokens and authenticates by node identity; the CP fans out rotated tokens to all
   nodes sharing a link; the suspend backstop is deferred from MVP (journaled mounts required). The
   per-refresh stale window is accepted; a transparent git proxy is the tracked future upgrade.
+- 2026-06-16 (round-3 IMPLEMENTED, `feat/sp-v40s-u53-integration`): the §16 AS-custodial credential
+  path is implemented + merged on the integration branch (gates green: `-race ./...`, no gen drift,
+  lint 0; final review PASS, all containment invariants hold). Landed: node proactive refresh caller
+  (sp-v40s.10), AS link bootstrap via response-wrap redemption → `GitHubLinks.Upsert` (sp-v40s.11),
+  fanout disconnected-sibling fix (sp-v40s.12), `DELETE /grant` kill switch (sp-v40s.13), AES-256-GCM
+  at-rest token encryption (sp-v40s.14), write-ahead rotation + typed `relink_required` (sp-v40s.15).
+  **Changes vs. design (follow-ups filed):** the node schedules refresh off an 8h receipt-relative
+  default because delivery metadata lacks the access-token expiry — a resume near expiry can 401
+  briefly (sp-v40s.18 adds `access_expires_at_unix`); and the real node-mTLS→AS mint leg is not in the
+  hermetic suite, only a fake client (sp-v40s.19 adds `github_e2e`). Still open for full MVP: the
+  sp-u53.1 storage-backend wiring, deferred .16/.17, and the backstop epic sp-u53.8.
