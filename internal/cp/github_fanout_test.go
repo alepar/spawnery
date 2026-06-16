@@ -55,7 +55,8 @@ func TestAuthorizeGitHubMintRPCConfirmsIndexedHostedNode(t *testing.T) {
 }
 
 func TestGitHubLinkTargetsReturnPublishedNodeKeys(t *testing.T) {
-	s, _, _ := newTestServer(t)
+	s, reg, _ := newTestServer(t)
+	reg.Add(&registry.Node{ID: "node-1", Sender: &capSender{}})
 	createActiveSpawn(t, s, "alice", "sp1", "node-1")
 	s.githubLinks.noteCPSecrets("sp1", []*cpv1.SealedSecret{{
 		SecretId:   "gh-main",
@@ -105,7 +106,8 @@ func TestGitHubLinkTargetsReturnPublishedNodeKeys(t *testing.T) {
 }
 
 func TestGitHubLinkTargetsRPCReturnsPublishedNodeKeys(t *testing.T) {
-	s, _, _ := newTestServer(t)
+	s, reg, _ := newTestServer(t)
+	reg.Add(&registry.Node{ID: "node-1", Sender: &capSender{}})
 	createActiveSpawn(t, s, "alice", "sp1", "node-1")
 	s.githubLinks.note("sp1", "gh-main")
 	s.nodeKeys.put("node-1", []byte("signed-subkey"), []byte("cert-chain"))
@@ -191,6 +193,67 @@ func TestGitHubLinkTargetsIndexesResumeAndRecreateStartupSecrets(t *testing.T) {
 				t.Fatalf("secret templates = %+v", templates)
 			}
 		})
+	}
+}
+
+func TestGitHubLinkTargetsSkipsDisconnectedAndSubkeylessSiblings(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	// node-1: connected + published subkey -> a valid target.
+	reg.Add(&registry.Node{ID: "node-1", Sender: &capSender{}})
+	createActiveSpawn(t, s, "alice", "sp1", "node-1")
+	s.githubLinks.note("sp1", "gh-main")
+	s.nodeKeys.put("node-1", []byte("signed-subkey"), []byte("cert-chain"))
+
+	// node-2: hosts a spawn on the link but is NOT connected (absent from registry),
+	// yet still has a stale cached subkey. Must be skipped, not abort the call.
+	createActiveSpawn(t, s, "alice", "sp2", "node-2")
+	s.githubLinks.note("sp2", "gh-main")
+	s.nodeKeys.put("node-2", []byte("stale-subkey"), []byte("stale-chain"))
+
+	// node-3: connected but never published a subkey. Must be skipped.
+	reg.Add(&registry.Node{ID: "node-3", Sender: &capSender{}})
+	createActiveSpawn(t, s, "alice", "sp3", "node-3")
+	s.githubLinks.note("sp3", "gh-main")
+
+	targets, err := s.githubLinkTargets(context.Background(), "gh-main")
+	if err != nil {
+		t.Fatalf("githubLinkTargets must not error on disconnected/subkeyless siblings: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("targets len=%d want 1 (only node-1): %+v", len(targets), targets)
+	}
+	if targets[0].SpawnID != "sp1" || targets[0].NodeID != "node-1" {
+		t.Fatalf("unexpected surviving target: %+v", targets[0])
+	}
+}
+
+func TestFanoutGitHubSealedAccessTokenSkipsDisconnectedSiblingAndDeliversToConnected(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	// node-1 connected (the requesting node), node-2 disconnected (absent from registry).
+	sender1 := &capSender{}
+	reg.Add(&registry.Node{ID: "node-1", Sender: sender1})
+	createActiveSpawn(t, s, "alice", "sp1", "node-1")
+	createActiveSpawn(t, s, "alice", "sp2", "node-2")
+	s.githubLinks.note("sp1", "gh-main")
+	s.githubLinks.note("sp2", "gh-main")
+
+	secret1 := &cpv1.SealedSecret{
+		SecretId: "gh-main", Type: cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN,
+		Version: 12, DeliveryId: "delivery-sp1-gh-main-v12", Sealed: []byte("sealed-for-node-1"),
+		Usages: []cpv1.SecretUsage{cpv1.SecretUsage_SECRET_USAGE_AGENT_RENDER},
+	}
+
+	// Deliveries cover ONLY sp1 (node-2 was skipped during sealing because it is disconnected).
+	err := s.fanoutGitHubSealedAccessToken(context.Background(), "gh-main", []GitHubSealedAccessTokenDelivery{
+		{SpawnID: "sp1", Generation: 1, Secrets: []*cpv1.SealedSecret{secret1}},
+	})
+	if err != nil {
+		t.Fatalf("fanout must succeed despite disconnected sibling sp2/node-2: %v", err)
+	}
+	got1 := sender1.secretDeliveries()
+	if len(got1) != 1 || got1[0].GetSpawnId() != "sp1" ||
+		string(got1[0].GetSecrets()[0].GetSealed()) != "sealed-for-node-1" {
+		t.Fatalf("requesting node did not receive its sealed token: %+v", got1)
 	}
 }
 

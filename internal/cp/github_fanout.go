@@ -3,6 +3,7 @@ package cp
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 
 	"connectrpc.com/connect"
@@ -133,9 +134,16 @@ func (s *Server) githubLinkTargets(ctx context.Context, secretID string) ([]GitH
 			}
 			return nil, err
 		}
+		// A disconnected hosting node re-syncs the current token on reconnect (spec §16.4 step 4);
+		// it must not abort the fanout for siblings or for the requesting node.
+		if n, ok := s.reg.Get(nodeID); !ok || n.Sender == nil {
+			log.Printf("githubLinkTargets %s: skipping disconnected hosting node %q for spawn %q (will re-sync on reconnect)", secretID, nodeID, spawnID)
+			continue
+		}
 		entry, ok := s.nodeKeys.get(nodeID)
 		if !ok || len(entry.subkey) == 0 {
-			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("hosting node %q has no published github fanout subkey", nodeID))
+			log.Printf("githubLinkTargets %s: skipping hosting node %q for spawn %q with no published github fanout subkey", secretID, nodeID, spawnID)
+			continue
 		}
 		targets = append(targets, GitHubLinkTarget{
 			SpawnID:         spawnID,
@@ -165,26 +173,34 @@ func (s *Server) fanoutGitHubSealedAccessToken(ctx context.Context, secretID str
 			}
 			return err
 		}
-		d, ok := bySpawn[spawnID]
-		if !ok {
-			return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("missing sealed github token delivery for spawn %q", spawnID))
-		}
-		if d.Generation != generation {
-			return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("stale github token delivery for spawn %q", spawnID))
-		}
-		if len(d.Secrets) == 0 {
-			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("github token delivery for spawn %q has no secrets", spawnID))
-		}
+		// Best-effort fanout: a per-spawn problem (disconnected node, missing/stale/empty
+		// delivery, transient send failure) must not deny the requesting node its token.
+		// Such spawns re-sync the current token on reconnect/resume (spec §16.4 step 4).
 		n, ok := s.reg.Get(nodeID)
 		if !ok || n.Sender == nil {
-			return connect.NewError(connect.CodeUnavailable, fmt.Errorf("hosting node %q is not connected", nodeID))
+			log.Printf("fanoutGitHubSealedAccessToken %s: skipping disconnected hosting node %q for spawn %q (will re-sync on reconnect)", secretID, nodeID, spawnID)
+			continue
+		}
+		d, ok := bySpawn[spawnID]
+		if !ok {
+			log.Printf("fanoutGitHubSealedAccessToken %s: no sealed delivery for spawn %q (hosting node skipped during sealing); will re-sync on reconnect", secretID, spawnID)
+			continue
+		}
+		if d.Generation != generation {
+			log.Printf("fanoutGitHubSealedAccessToken %s: stale delivery generation for spawn %q (have %d, live %d); skipping", secretID, spawnID, d.Generation, generation)
+			continue
+		}
+		if len(d.Secrets) == 0 {
+			log.Printf("fanoutGitHubSealedAccessToken %s: empty sealed delivery for spawn %q; skipping", secretID, spawnID)
+			continue
 		}
 		if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_SecretDelivery{SecretDelivery: &nodev1.SecretDelivery{
 			SpawnId:    spawnID,
 			Generation: generation,
 			Secrets:    sealedSecretsToNode(d.Secrets),
 		}}}); err != nil {
-			return connect.NewError(connect.CodeUnavailable, err)
+			log.Printf("fanoutGitHubSealedAccessToken %s: send to hosting node %q for spawn %q failed: %v; will re-sync on reconnect", secretID, nodeID, spawnID, err)
+			continue
 		}
 	}
 	return nil
