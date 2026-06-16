@@ -45,6 +45,11 @@ const (
 // signature = ECDSA P-256 over SHA-256(message), P1363 raw 64-byte r||s (WebCrypto-native).
 const refreshPoPDomain = "spawnery/refresh-pop/v1"
 
+// ErrRefreshRejected indicates GitHub rejected the presented refresh token (already-used / expired /
+// revoked). For a single-use rotation this means the chain is provably broken and a relink is
+// required. Callers test with errors.Is(err, ErrRefreshRejected).
+var ErrRefreshRejected = errors.New("github refresh token rejected")
+
 // IdPConfig wires the identity core into a Service.
 type IdPConfig struct {
 	Store  store.Store
@@ -241,6 +246,9 @@ func (g *githubClient) RefreshUserAccessToken(ctx context.Context, refreshToken 
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
 		return GitHubUserToken{}, err
+	}
+	if out.Error == "bad_refresh_token" || out.Error == "invalid_grant" {
+		return GitHubUserToken{}, fmt.Errorf("github refresh rejected (%s): %w", out.Error, ErrRefreshRejected)
 	}
 	if resp.StatusCode != http.StatusOK || out.Error != "" || out.AccessToken == "" || out.RefreshToken == "" {
 		return GitHubUserToken{}, fmt.Errorf("github refresh failed: status %d error %q", resp.StatusCode, out.Error)
