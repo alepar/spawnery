@@ -2,6 +2,7 @@ package cp
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"spawnery/internal/cp/store"
@@ -13,7 +14,7 @@ func TestSeedWritesCatalogMetadata(t *testing.T) {
 	apps := []AppSeed{{
 		ID: "spawnery/wiki", Ref: "examples/wiki", Version: "1.0.0",
 		DisplayName: "Wiki & Research Companion", Summary: "capture, connect, recall",
-		Tags: []string{"notes", "research"}, Mounts: []string{"main"},
+		Tags: []string{"notes", "research"},
 	}}
 	if err := Seed(ctx, st, map[string]string{"t": "alice"}, apps); err != nil {
 		t.Fatal(err)
@@ -55,5 +56,16 @@ func TestSeed(t *testing.T) {
 	}
 	if err := Seed(ctx, st, tokens, apps); err != nil { // idempotent
 		t.Fatalf("re-seed: %v", err)
+	}
+}
+
+func TestSeedFailsClosedWhenDeclaredMountManifestMissing(t *testing.T) {
+	st := store.NewTestStore(t)
+	t.Chdir(t.TempDir())
+	err := Seed(context.Background(), st, nil, []AppSeed{{
+		ID: "secret-app", Ref: "examples/secret-app", Version: "1.0.0", Mounts: []string{"main"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "parse seed manifest") {
+		t.Fatalf("Seed err=%v, want parse seed manifest failure", err)
 	}
 }

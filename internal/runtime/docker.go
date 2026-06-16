@@ -274,6 +274,16 @@ func (d *Docker) CommitContainer(ctx context.Context, containerID, ref string) (
 	return resp.ID, nil
 }
 
+// CommitContainerPreserving commits the container's writable layer without stopping or removing it.
+// Fork capture pauses/unpauses the source separately, so this must not change source liveness.
+func (d *Docker) CommitContainerPreserving(ctx context.Context, containerID, ref string) (string, error) {
+	resp, err := d.cli.ContainerCommit(ctx, containerID, container.CommitOptions{Reference: ref, Pause: false})
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
 // InspectImage returns image metadata for ref. Returns (ImageInfo{}, false, nil) when the image
 // is not present locally (equivalent to "docker inspect not found").
 func (d *Docker) InspectImage(ctx context.Context, ref string) (ImageInfo, bool, error) {
@@ -334,9 +344,13 @@ func (d *Docker) ExportTopLayer(ctx context.Context, ref string, w io.Writer) er
 // limitation entirely. The layer is buffered to a temp file because tarball.LayerFromFile needs a
 // re-openable source.
 func (d *Docker) AssembleOnBase(ctx context.Context, baseRef, newTag string, layer io.Reader) error {
-	bref, err := name.ParseReference(baseRef)
+	baseLookupRef, err := d.prepareDaemonBaseReference(ctx, baseRef)
 	if err != nil {
-		return fmt.Errorf("parse base ref %s: %w", baseRef, err)
+		return err
+	}
+	bref, err := name.ParseReference(baseLookupRef)
+	if err != nil {
+		return fmt.Errorf("parse base ref %s: %w", baseLookupRef, err)
 	}
 	base, err := daemon.Image(bref, daemon.WithContext(ctx))
 	if err != nil {
@@ -370,6 +384,31 @@ func (d *Docker) AssembleOnBase(ctx context.Context, baseRef, newTag string, lay
 		return fmt.Errorf("write assembled image %s: %w", newTag, err)
 	}
 	return nil
+}
+
+func (d *Docker) prepareDaemonBaseReference(ctx context.Context, baseRef string) (string, error) {
+	ref, tagNeeded := dockerDaemonBaseReference(baseRef)
+	if !tagNeeded {
+		return ref, nil
+	}
+	if err := d.cli.ImageTag(ctx, baseRef, ref); err != nil {
+		return "", fmt.Errorf("tag local base image %s as %s: %w", baseRef, ref, err)
+	}
+	return ref, nil
+}
+
+func dockerDaemonBaseReference(baseRef string) (string, bool) {
+	const prefix = "sha256:"
+	digest, ok := strings.CutPrefix(baseRef, prefix)
+	if !ok || len(digest) != 64 {
+		return baseRef, false
+	}
+	for _, r := range digest {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return baseRef, false
+		}
+	}
+	return "spawnery/local-base-id:" + strings.ToLower(digest), true
 }
 
 func (d *Docker) PauseContainer(ctx context.Context, id string) error {

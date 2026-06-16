@@ -76,6 +76,15 @@ func (s *Server) classifyMounts(ctx context.Context, spawnID string) (map[string
 	return result, nil
 }
 
+func hasJournaledMount(classes map[string]mountClass) bool {
+	for _, class := range classes {
+		if class != mountClassEphemeral {
+			return true
+		}
+	}
+	return false
+}
+
 // guardCrossNodeDurability is the MigrateSpawn durability-class guard. It is called after the
 // tenancy pre-check, BEFORE suspendLocked. For a cross-node move it:
 //   - Rejects node-local mounts unless upgradeToOwnerSealed is set AND the ciphertext now exists
@@ -131,4 +140,3 @@ func (s *Server) liveNodeForSpawn(ctx context.Context, spawnID string) string {
 	}
 	return c.NodeID
 }
-

@@ -66,17 +66,44 @@ func (a *suspendSender) Send(m *nodev1.CPMessage) error {
 	return nil
 }
 
+const (
+	activeSpawnTestAppID      = "test-lifecycle-app"
+	activeSpawnTestAppVersion = "1.0.0"
+	activeSpawnTestAppRef     = "test-ref"
+)
+
+func seedActiveSpawnTestApp(t *testing.T, s *Server) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.st.Apps().Upsert(ctx, store.App{
+		ID: activeSpawnTestAppID, DisplayName: "Test Lifecycle App", Summary: "test",
+		Tags: "", Visibility: "public", Listed: false, CreatorID: "test", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("seed active spawn test app: upsert app: %v", err)
+	}
+	if err := s.st.Apps().UpsertVersion(ctx, store.AppVersion{
+		AppID: activeSpawnTestAppID, Version: activeSpawnTestAppVersion, Ref: activeSpawnTestAppRef,
+		Tier: store.TierReviewed, Manifest: "", CreatedAt: 1,
+	}, []store.MountDecl{{
+		AppID: activeSpawnTestAppID, Version: activeSpawnTestAppVersion, Name: "main", Required: true,
+	}}); err != nil {
+		t.Fatalf("seed active spawn test app: upsert version: %v", err)
+	}
+}
+
 // activeSpawnWithRoute seeds an active spawn (gen-1 live container) on connected node "n1" with its
 // route bound to sender, so SuspendOnNode reaches sender. The spawn has one "main" mount (so
-// per-mount markers have a row to land on).
+// per-mount markers have a row to land on). It uses an app version with no manifest durability so
+// generic lifecycle tests do not inherit the demo secret-app's node-local durability.
 func activeSpawnWithRoute(t *testing.T, s *Server, reg *registry.Registry, rt *router.Router, id, owner string, sender registry.NodeSender) {
 	t.Helper()
 	ctx := context.Background()
+	seedActiveSpawnTestApp(t, s)
 	if err := s.st.Owners().Upsert(ctx, store.Owner{ID: owner, CreatedAt: 1}); err != nil {
 		t.Fatalf("seed owner %s: %v", owner, err)
 	}
 	sp := store.Spawn{
-		ID: id, OwnerID: owner, AppID: "secret-app", AppVersion: "1.0.0", AppRef: "examples/secret-app",
+		ID: id, OwnerID: owner, AppID: activeSpawnTestAppID, AppVersion: activeSpawnTestAppVersion, AppRef: activeSpawnTestAppRef,
 		Model: "m", Status: store.Starting, CreatedAt: 1, LastUsedAt: 1,
 	}
 	if err := s.st.WithTx(ctx, func(tx store.Store) error {

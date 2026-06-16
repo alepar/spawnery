@@ -222,13 +222,17 @@ func (d *DockerPodBackend) EnsureImage(ctx context.Context, baseRef, deltaRef st
 // committed image has more layers than the base (moby#47065 zero-layer guard), and returns the
 // delta tag. The container is left stopped (not removed); the normal pod Stop path removes it.
 func (d *DockerPodBackend) CaptureDelta(ctx context.Context, h *PodHandle) (string, error) {
-	return d.CaptureDeltaAs(ctx, h, h.SpawnID)
+	return d.captureDelta(ctx, h, h.SpawnID, false)
 }
 
 // CaptureDeltaAs commits h's source agent container to the delta tag for targetSpawnID without
-// stopping or removing the source container. Docker commit is source-preserving; callers that need
-// source liveness pause/unpause around this method.
+// stopping or removing the source container. Callers that need source liveness pause/unpause around
+// this method.
 func (d *DockerPodBackend) CaptureDeltaAs(ctx context.Context, h *PodHandle, targetSpawnID string) (string, error) {
+	return d.captureDelta(ctx, h, targetSpawnID, true)
+}
+
+func (d *DockerPodBackend) captureDelta(ctx context.Context, h *PodHandle, targetSpawnID string, preserveSource bool) (string, error) {
 	tag := DeltaTag(targetSpawnID)
 	// Derive base layer count for the moby#47065 guard.
 	baseLayers := 0
@@ -238,7 +242,13 @@ func (d *DockerPodBackend) CaptureDeltaAs(ctx context.Context, h *PodHandle, tar
 		}
 	}
 
-	if _, err := d.rt.CommitContainer(ctx, h.AgentID, tag); err != nil {
+	var err error
+	if preserveSource {
+		_, err = d.rt.CommitContainerPreserving(ctx, h.AgentID, tag)
+	} else {
+		_, err = d.rt.CommitContainer(ctx, h.AgentID, tag)
+	}
+	if err != nil {
 		return "", fmt.Errorf("commit delta for %s as %s: %w", h.SpawnID, targetSpawnID, err)
 	}
 	ni, ok, err := d.rt.InspectImage(ctx, tag)

@@ -733,6 +733,21 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	placement.Image = sp.Image
 	placement.TargetNodeID = ov.NodeID
 	placement.RequireClass = ov.Class
+	if placement.TargetNodeID == "" && placement.RequireClass == "" {
+		classes, cerr := s.classifyMounts(ctx, id)
+		if cerr != nil {
+			return "", connect.NewError(connect.CodeInternal, cerr)
+		}
+		if hasJournaledMount(classes) {
+			c, ok, cerr := s.st.Spawns().LatestContainer(ctx, id)
+			if cerr != nil {
+				return "", connect.NewError(connect.CodeInternal, cerr)
+			}
+			if ok && c.NodeID != "" {
+				placement.TargetNodeID = c.NodeID
+			}
+		}
+	}
 
 	var gen int64
 	if err := s.st.WithTx(ctx, func(tx store.Store) error {

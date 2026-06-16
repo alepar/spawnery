@@ -2,10 +2,14 @@ package cp
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"spawnery/internal/cp/store"
+	"spawnery/internal/manifest"
 )
 
 // AppSeed describes a demo app to register at boot (until E5's real publishing/registration).
@@ -51,15 +55,66 @@ func Seed(ctx context.Context, st store.Store, tokens map[string]string, apps []
 		}); err != nil {
 			return err
 		}
+		manifestJSON, manifestMounts, err := seedManifestJSON(a)
+		if err != nil {
+			return err
+		}
 		decls := make([]store.MountDecl, len(a.Mounts))
 		for i, name := range a.Mounts {
-			decls[i] = store.MountDecl{AppID: a.ID, Version: a.Version, Name: name, Required: true}
+			mt := manifestMounts[name]
+			decls[i] = store.MountDecl{AppID: a.ID, Version: a.Version, Name: name, Path: mt.Path, Seed: mt.Seed, Required: true}
 		}
 		if err := st.Apps().UpsertVersion(ctx,
-			store.AppVersion{AppID: a.ID, Version: a.Version, Ref: a.Ref, Tier: store.TierReviewed, CreatedAt: now},
+			store.AppVersion{AppID: a.ID, Version: a.Version, Ref: a.Ref, Tier: store.TierReviewed, Manifest: manifestJSON, CreatedAt: now},
 			decls); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func seedManifestJSON(a AppSeed) (string, map[string]manifest.Mount, error) {
+	mounts := map[string]manifest.Mount{}
+	mf, err := parseSeedManifest(a.Ref)
+	if err != nil {
+		if len(a.Mounts) == 0 {
+			return "", mounts, nil
+		}
+		return "", nil, fmt.Errorf("parse seed manifest for app %q ref %q: %w", a.ID, a.Ref, err)
+	}
+	for _, mt := range mf.Storage.Mounts {
+		mounts[mt.Name] = mt
+	}
+	type seedManifestMount struct {
+		Name       string `json:"name"`
+		Path       string `json:"path,omitempty"`
+		Seed       string `json:"seed,omitempty"`
+		Durability string `json:"durability,omitempty"`
+	}
+	type seedManifest struct {
+		Mounts []seedManifestMount `json:"mounts"`
+	}
+	out := seedManifest{Mounts: make([]seedManifestMount, 0, len(a.Mounts))}
+	for _, name := range a.Mounts {
+		mt := mounts[name]
+		out.Mounts = append(out.Mounts, seedManifestMount{
+			Name:       name,
+			Path:       mt.Path,
+			Seed:       mt.Seed,
+			Durability: mt.Durability,
+		})
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", nil, err
+	}
+	return string(b), mounts, nil
+}
+
+func parseSeedManifest(ref string) (*manifest.Manifest, error) {
+	mf, err := manifest.Parse(ref)
+	if err == nil || filepath.IsAbs(ref) {
+		return mf, err
+	}
+	return manifest.Parse(filepath.Join("..", "..", ref))
 }

@@ -374,6 +374,7 @@ func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	s.now = func() time.Time { return time.Unix(1234, 0) }
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sealKey(t, s, "sp-source", "main")
 	targetSender := &capSender{}
 	stopAck := goAckStarts(s, targetSender)
 	defer stopAck()
@@ -497,7 +498,7 @@ func TestForkSpawnMintsChildWithLineageAndSourceStaysActive(t *testing.T) {
 
 func TestForkSpawnRejectsNodeLocalCrossNodeBeforeCreatingForkRow(t *testing.T) {
 	s, reg, rt := newTestServer(t)
-	seedNodeLocalAppVersion(t, s)
+	seedNodeLocalAppVersion(t, s, "secret-app")
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
 	reg.Add(&registry.Node{
 		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
@@ -863,6 +864,7 @@ func TestForkSpawnMarksSourceForkingOnlyDuringMaterialization(t *testing.T) {
 func TestForkSpawnClassTargetPicksEligibleNode(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sealKey(t, s, "sp-source", "main")
 	targetSender := &capSender{}
 	stopAck := goAckStarts(s, targetSender)
 	defer stopAck()
@@ -1013,6 +1015,7 @@ func TestForkSpawnReleasesSourceClaimAndLockBeforeForkStandup(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	sourceSender := &capSender{}
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
+	sealKey(t, s, "sp-source", "main")
 	targetSender := &blockingStartSender{s: s, reached: make(chan *nodev1.StartSpawn, 1), unblock: make(chan struct{})}
 	reg.Add(&registry.Node{
 		ID: "node-2", Sender: targetSender, Max: 4, Free: 4, Class: "cloud",
@@ -1265,6 +1268,7 @@ func TestForkSpawnGuards(t *testing.T) {
 func TestForkSpawnRejectsInsufficientDiskBeforeCreatingFork(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sealKey(t, s, "sp-source", "main")
 	reg.Add(&registry.Node{
 		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 299,
@@ -1293,6 +1297,7 @@ func TestForkSpawnRejectsInsufficientDiskBeforeCreatingFork(t *testing.T) {
 func TestForkSpawnRechecksDiskBeforeMaterialization(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sealKey(t, s, "sp-source", "main")
 	reg.Add(&registry.Node{
 		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
@@ -1337,6 +1342,7 @@ func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	sourceSender := &capSender{}
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", sourceSender)
+	sealKey(t, s, "sp-source", "main")
 	reg.Add(&registry.Node{
 		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
@@ -1379,6 +1385,7 @@ func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 func TestForkSpawnMaterializerFailureLeavesSourceForkingWhenUnpauseUnavailable(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", nil)
+	sealKey(t, s, "sp-source", "main")
 	reg.Add(&registry.Node{
 		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
@@ -1409,6 +1416,7 @@ func TestForkSpawnMaterializerFailureWithoutResourcesLeavesFailedForkForRetry(t 
 	s, reg, rt := newTestServer(t)
 	s.failedForkResources = nil
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	sealKey(t, s, "sp-source", "main")
 	reg.Add(&registry.Node{
 		ID: "node-2", Sender: &capSender{}, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000,
