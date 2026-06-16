@@ -15,6 +15,8 @@ import { LoginView } from "./views/LoginView";
 import { useMoveTo } from "./views/migration/useMoveTo";
 import { MoveToModal } from "./views/migration/MoveToModal";
 import { SetModelModal } from "./views/model/SetModelModal";
+import { useForkSpawn } from "./views/fork/useForkSpawn";
+import { ForkSpawnModal } from "./views/fork/ForkSpawnModal";
 
 const MODEL = "deepseek/deepseek-v4-flash";
 
@@ -59,14 +61,31 @@ function AppMain() {
   // The spawn whose "Set model…" modal is open (from the sidebar kebab), or null when closed.
   const [modelSpawnId, setModelSpawnId] = useState<string | null>(null);
   const moveTo = useMoveTo();
+  const forkSpawn = useForkSpawn();
 
   // refs mirroring state so async callbacks (poll) don't read stale closures.
   const activeIdRef = useRef<string | null>(null);
   const spawnsRef = useRef<SpawnView[]>([]);
+  const moveToPhaseRef = useRef(moveTo.state.phase);
+  const forkSpawnPhaseRef = useRef(forkSpawn.state.phase);
+  const lastAutoOpenedForkRef = useRef<string | null>(null);
+  const forkAutoNavigatePathRef = useRef<string | null>(null);
 
   useEffect(() => { setTheme(initialTheme()); }, []);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
   useEffect(() => { spawnsRef.current = spawns; }, [spawns]);
+  useEffect(() => { moveToPhaseRef.current = moveTo.state.phase; }, [moveTo.state.phase]);
+  useEffect(() => { forkSpawnPhaseRef.current = forkSpawn.state.phase; }, [forkSpawn.state.phase]);
+  useEffect(() => {
+    const forkSpawnId = forkSpawn.state.result?.forkSpawnId;
+    if (forkSpawn.state.phase !== "done" || !forkSpawnId || lastAutoOpenedForkRef.current === forkSpawnId) return;
+    lastAutoOpenedForkRef.current = forkSpawnId;
+    const startPath = forkAutoNavigatePathRef.current;
+    forkAutoNavigatePathRef.current = null;
+    if (startPath && path === startPath) {
+      navigate({ section: "spawn", spawnId: forkSpawnId });
+    }
+  }, [forkSpawn.state.phase, forkSpawn.state.result?.forkSpawnId, navigate, path]);
 
   // refreshSpawns fetches the ledger and reconciles the active spawn's header LIFECYCLE hint off its
   // status. It no longer opens/teardowns any socket — SpawnTabs (keyed on activeId) owns the live
@@ -86,7 +105,12 @@ function AppMain() {
     // Delivery-pending reconstruction (spec §3): if a spawn reports delivery pending
     // and the modal is not already open for it, auto-open in delivery-pending state.
     for (const sp of list) {
-      if (sp.journalKeyDeliveryPending && moveTo.state.phase === "idle") {
+      const anyPendingModalOpen = moveToPhaseRef.current !== "idle" || forkSpawnPhaseRef.current !== "idle";
+      if (!sp.journalKeyDeliveryPending || anyPendingModalOpen) continue;
+      if (sp.parentSpawnId) {
+        forkSpawn.openDeliveryPending(sp.spawnId);
+        break; // open at most one at a time
+      } else {
         moveTo.openDeliveryPending(sp.spawnId);
         break; // open at most one at a time
       }
@@ -230,12 +254,23 @@ function AppMain() {
           onRecreate,
           onStop,
           onMoveTo: (id) => moveTo.open(id),
+          onFork: (id) => {
+            forkAutoNavigatePathRef.current = path;
+            forkSpawn.open(id);
+          },
           onSetModel: (id) => setModelSpawnId(id),
         }}
         nav={nav}
         navigate={navigate}
       />
       <MoveToModal state={moveTo.state} actions={moveTo} />
+      <ForkSpawnModal
+        state={forkSpawn.state}
+        actions={{
+          ...forkSpawn,
+          openFork: (id) => navigate({ section: "spawn", spawnId: id }),
+        }}
+      />
       {/* Live spawn lookup so the modal's model/modelApplied stay fresh across the poll. */}
       <SetModelModal
         spawn={modelSpawnId ? spawns.find((s) => s.spawnId === modelSpawnId) ?? null : null}

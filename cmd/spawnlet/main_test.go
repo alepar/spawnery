@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"spawnery/internal/spawnlet"
@@ -61,5 +62,46 @@ func TestApplyUsernsProbe(t *testing.T) {
 					tc.base, tc.active, tc.probeErr, mode, base, tc.wantMode, tc.wantBase)
 			}
 		})
+	}
+}
+
+func TestConfigureJournalS3WithGarageAdminDoesNotRequireStaticBucketCredentials(t *testing.T) {
+	t.Setenv("JOURNAL_BACKEND", "s3")
+	t.Setenv("JOURNAL_S3_ENDPOINT", "http://127.0.0.1:3900")
+	t.Setenv("JOURNAL_GARAGE_ADMIN_ENDPOINT", "http://127.0.0.1:3903")
+	t.Setenv("JOURNAL_GARAGE_ADMIN_TOKEN", "test-token")
+	t.Setenv("JOURNAL_S3_DISABLE_TLS", "true")
+
+	m, err := buildManager(spawnlet.ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("build manager: %v", err)
+	}
+	if err := configureJournal(m, t.TempDir()); err != nil {
+		t.Fatalf("configure generation-keyed s3 journal: %v", err)
+	}
+	if m == nil {
+		t.Fatal("nil manager")
+	}
+}
+
+func TestConfigureJournalS3FailsClosedWithoutGarageAdmin(t *testing.T) {
+	t.Setenv("JOURNAL_BACKEND", "s3")
+	t.Setenv("JOURNAL_S3_ENDPOINT", "http://127.0.0.1:3900")
+	t.Setenv("JOURNAL_S3_DISABLE_TLS", "true")
+
+	m, err := buildManager(spawnlet.ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("build manager: %v", err)
+	}
+	err = configureJournal(m, t.TempDir())
+	if err == nil {
+		t.Fatalf("configure journal = nil, want s3 generation-key manager requirement error")
+	}
+	if !strings.Contains(err.Error(), "JOURNAL_GARAGE_ADMIN_ENDPOINT") {
+		t.Fatalf("error = %v, want Garage admin requirement", err)
 	}
 }

@@ -109,6 +109,38 @@ func TestControlGetReturnsOverride(t *testing.T) {
 	}
 }
 
+func TestControlStatusReportsInflightRequests(t *testing.T) {
+	ov := &Override{}
+	ov.Set("cur/model")
+	inflight := NewInflight()
+	inflight.Begin()
+	defer inflight.End()
+	srv := httptest.NewServer(NewControlHandler(ov, "secret", inflight))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/control/status", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", resp.StatusCode)
+	}
+	var obj struct {
+		Model          string `json:"model"`
+		Busy           bool   `json:"busy"`
+		ActiveRequests int64  `json:"active_requests"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj.Model != "cur/model" || !obj.Busy || obj.ActiveRequests != 1 {
+		t.Fatalf("control status = %+v, want model cur/model busy=true active_requests=1", obj)
+	}
+}
+
 func TestControlRejectsBadToken(t *testing.T) {
 	ov := &Override{}
 	srv := httptest.NewServer(NewControlHandler(ov, "secret"))

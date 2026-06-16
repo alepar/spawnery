@@ -66,6 +66,11 @@ type Config struct {
 	// node publishes no sub-key and rejects SecretDelivery. Shared across reconnects (it retains private
 	// halves), so it lives in Config (one holder per node process), not per-connection.
 	SubKeys *subkey.Node
+	// NodeRootPEM is the pinned node root CA bundle used to verify a target node's
+	// CP-relayed cert chain and SignedSubKey before source-side fork transfer
+	// sealing. Empty in insecure mode; cross-node owner-sealed fork transfer
+	// fails closed when it is missing.
+	NodeRootPEM []byte
 
 	// Verifier is the A4 intent verifier for StartSpawn and SessionOpen [AC1][AM12].
 	// nil = skip verification (dev/insecure default until the verifier is explicitly configured).
@@ -90,12 +95,15 @@ type attacher struct {
 
 	ctrlHTTP httpDoer // POSTs SetModel to the per-pod sidecar control endpoint (injectable for tests)
 
-	mu         sync.Mutex
-	pumps      map[sessionKey]*Pump
-	tmuxRelays map[sessionKey]*tmuxRelay
-	sessions   map[string]*sessionRegistry    // spawn_id -> live session set (roster source of truth)
-	pending    map[sessionKey][]pendingClient // attaches that arrived before the pump/relay existed (session STARTING)
-	active     uint32
+	mu           sync.Mutex
+	pumps        map[sessionKey]*Pump
+	tmuxRelays   map[sessionKey]*tmuxRelay
+	sessions     map[string]*sessionRegistry    // spawn_id -> live session set (roster source of truth)
+	pending      map[sessionKey][]pendingClient // attaches that arrived before the pump/relay existed (session STARTING)
+	forkBarriers map[string]forkIngressBarrier
+	forkWaits    map[string]forkBarrierWait
+	activeForks  map[string]activeSameNodeFork
+	active       uint32
 
 	sendMu sync.Mutex
 	stream cpStream
@@ -387,6 +395,51 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		// Async like setModel/startSpawn: the suspend persists mounts (a journal final snapshot can
 		// block) + tears the pod down, so it must not stall the single per-connection Receive loop.
 		go a.suspendSpawn(ctx, m.Suspend)
+	case *nodev1.CPMessage_ForkSameNode:
+		if a.staleGen(m.ForkSameNode.SourceSpawnId, m.ForkSameNode.SourceGeneration) {
+			a.releaseForkBarrier(m.ForkSameNode.SourceSpawnId, func(b forkIngressBarrier) bool {
+				return b.matches(forkIngressBarrier{
+					sourceGeneration: m.ForkSameNode.SourceGeneration,
+					transferSetID:    m.ForkSameNode.TransferSetId,
+				})
+			})
+			return // stale generation: drop (matches Stop/Suspend).
+		}
+		a.startForkSameNode(ctx, m.ForkSameNode)
+	case *nodev1.CPMessage_ForkTransferExport:
+		if a.staleGen(m.ForkTransferExport.SourceSpawnId, m.ForkTransferExport.SourceGeneration) {
+			a.releaseForkBarrier(m.ForkTransferExport.SourceSpawnId, func(b forkIngressBarrier) bool {
+				return b.matches(forkIngressBarrier{
+					sourceGeneration: m.ForkTransferExport.SourceGeneration,
+					transferSetID:    m.ForkTransferExport.TransferSetId,
+				})
+			})
+			return
+		}
+		a.startForkTransferExport(ctx, m.ForkTransferExport)
+	case *nodev1.CPMessage_ForkTransferImport:
+		a.startForkTransferImport(ctx, m.ForkTransferImport)
+	case *nodev1.CPMessage_CancelForkSameNode:
+		a.cancelForkSameNode(m.CancelForkSameNode)
+	case *nodev1.CPMessage_CancelForkTransfer:
+		a.cancelForkTransfer(m.CancelForkTransfer)
+	case *nodev1.CPMessage_ForkTurnBoundary:
+		if a.staleGen(m.ForkTurnBoundary.SourceSpawnId, m.ForkTurnBoundary.SourceGeneration) {
+			return // stale generation: drop (matches Stop/Suspend).
+		}
+		a.startForkTurnBoundary(ctx, m.ForkTurnBoundary)
+	case *nodev1.CPMessage_UnpauseIfPaused:
+		if a.staleGen(m.UnpauseIfPaused.SpawnId, m.UnpauseIfPaused.Generation) {
+			a.releaseForkBarrier(m.UnpauseIfPaused.SpawnId, func(b forkIngressBarrier) bool {
+				return b.sourceGeneration == m.UnpauseIfPaused.Generation
+			})
+			return // stale generation: drop (matches Stop/Suspend).
+		}
+		go a.unpauseIfPaused(ctx, m.UnpauseIfPaused)
+	case *nodev1.CPMessage_ReleaseForkTurnBoundary:
+		a.releaseForkTurnBoundary(m.ReleaseForkTurnBoundary)
+	case *nodev1.CPMessage_FailedForkCleanup:
+		go a.failedForkCleanup(ctx, m.FailedForkCleanup)
 	case *nodev1.CPMessage_SecretDelivery:
 		if a.staleGen(m.SecretDelivery.SpawnId, m.SecretDelivery.Generation) {
 			return // stale generation: a newer pod exists; the owner re-seals to the current episode. Drop.
@@ -565,14 +618,15 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	// progress — a large rootfs delta can exceed the 30s stall window without these resets.
 	a.resumeProgress(st.SpawnId, st.Generation, "starting", "creating containers")
 	sel := spawnlet.AgentSelection{
-		Image:                  st.Image,
-		RunnableID:             st.RunnableId,
-		Mode:                   st.Mode,
-		Mounts:                 mountBindingsFromProto(st.GetMounts()),
-		BaseImageDigest:        st.GetBaseImageDigest(),
-		RootfsSourceGeneration: st.GetRootfsSourceGeneration(),
-		RootfsArtifacts:        rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
-		Artifacts:              artifactsFromProto(st.GetArtifacts()),
+		Image:                    st.Image,
+		RunnableID:               st.RunnableId,
+		Mode:                     st.Mode,
+		Mounts:                   mountBindingsFromProto(st.GetMounts()),
+		BaseImageDigest:          st.GetBaseImageDigest(),
+		RootfsSourceGeneration:   st.GetRootfsSourceGeneration(),
+		RootfsArtifacts:          rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
+		RootfsArtifactsLocalOnly: st.GetRootfsArtifactsLocalOnly(),
+		Artifacts:                artifactsFromProto(st.GetArtifacts()),
 		ProgressFunc: func(phase, detail string) {
 			a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
 		},
@@ -645,6 +699,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		}
 	}
 	a.mu.Lock()
+	a.applyForkBarrierLocked(st.SpawnId, p)
 	a.pumps[zeroKey(st.SpawnId)] = p
 	a.mu.Unlock()
 	a.resumeProgress(st.SpawnId, st.Generation, "attaching", "awaiting agent ACP readiness")
@@ -1064,9 +1119,15 @@ func (a *attacher) fromClient(spawnID, sessionID, clientID string, data []byte) 
 func (a *attacher) createSession(ctx context.Context, m *nodev1.CreateSession) {
 	a.mu.Lock()
 	reg := a.sessions[m.SpawnId]
+	forkBarrierActive := a.forkBarrierActiveOrPendingLocked(m.SpawnId)
 	a.mu.Unlock()
 	if reg == nil {
 		log.Printf("warn: CreateSession for unknown spawn %s", m.SpawnId)
+		return
+	}
+	if forkBarrierActive {
+		log.Printf("rejecting session for %s: fork turn-boundary barrier active", m.SpawnId)
+		a.sessionStatus(m.SpawnId, "", nodev1.SessionState_SESSION_STATE_ERROR, "fork turn-boundary barrier active")
 		return
 	}
 
@@ -1183,6 +1244,7 @@ func (a *attacher) launchACPSession(ctx context.Context, spawnID string, reg *se
 		return
 	}
 	a.pumps[k] = p
+	a.applyForkBarrierLocked(spawnID, p)
 	pend := a.takePending(k) // bind attaches that arrived while this session was STARTING (after unlock)
 	a.mu.Unlock()
 	for _, pc := range pend {

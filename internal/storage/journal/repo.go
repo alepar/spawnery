@@ -56,11 +56,11 @@ func (r *spawnRepo) sourceInfo(mountName string) snapshot.SourceInfo {
 }
 
 // openOrCreateRepo opens spawnID's Kopia repo, initializing + connecting it on
-// first use. The blob backend is the seam (filesystem here, Garage/S3 later).
-// configFile holds the local connection config + cache settings; it lives under
-// repoRoot/<spawnID>.
-func openOrCreateRepo(ctx context.Context, spawnID, repoRoot, password string, backend BlobBackend) (*spawnRepo, error) {
-	dir := filepath.Join(repoRoot, spawnID)
+// first use. configFile holds local connection config + cache settings. It is
+// generation-scoped because S3 credentials are generation-scoped and Kopia's
+// config stores the opened storage connection.
+func openOrCreateRepo(ctx context.Context, spawnID string, gen uint64, repoRoot, password string, backend BlobBackend) (*spawnRepo, error) {
+	dir := filepath.Join(repoRoot, spawnID, fmt.Sprintf("gen-%d", gen))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("journal: mkdir spawn repo dir: %w", err)
 	}

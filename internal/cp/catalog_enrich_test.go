@@ -28,14 +28,21 @@ func TestGetAppReturnsManifest(t *testing.T) {
 	}
 }
 
-func TestGetAppSeedAppNilManifest(t *testing.T) {
+func TestGetAppSeedAppIncludesParsedManifest(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	resp, err := s.GetApp(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.GetAppRequest{Id: "secret-app"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Msg.Manifest != nil {
-		t.Fatalf("seed app should have nil manifest, got %+v", resp.Msg.Manifest)
+	if resp.Msg.Manifest == nil {
+		t.Fatal("seed app should include its parsed manifest")
+	}
+	if len(resp.Msg.Manifest.Mounts) != 1 ||
+		resp.Msg.Manifest.Mounts[0].Name != "main" ||
+		resp.Msg.Manifest.Mounts[0].Path != "data" ||
+		resp.Msg.Manifest.Mounts[0].Seed != "seed" ||
+		resp.Msg.Manifest.Mounts[0].Durability != "node-local" {
+		t.Fatalf("seed app manifest mounts = %+v", resp.Msg.Manifest.Mounts)
 	}
 	if resp.Msg.App.Id != "secret-app" {
 		t.Fatalf("summary missing: %+v", resp.Msg.App)

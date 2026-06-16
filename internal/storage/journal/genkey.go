@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 // bucketKeyAdmin is the subset of GarageAdmin the GenerationKeyManager needs,
@@ -35,8 +39,15 @@ type GenerationKeyManager struct {
 	disableTLS bool
 	bucketPfx  string
 
-	mu   sync.Mutex
-	keys map[string]map[uint64]string // spawnID -> gen -> accessKeyID (for revoke)
+	mu             sync.Mutex
+	keys           map[string]map[uint64]generationKey // spawnID -> gen -> key material
+	holds          map[string]map[uint64]int           // spawnID -> gen -> active fork-point holds
+	pendingRevokes map[string]map[uint64]bool          // spawnID -> gen -> revoke requested while held
+}
+
+type generationKey struct {
+	accessKeyID     string
+	secretAccessKey string
 }
 
 // GenerationKeyConfig configures a GenerationKeyManager.
@@ -69,12 +80,14 @@ func NewGenerationKeyManager(cfg GenerationKeyConfig) (*GenerationKeyManager, er
 		pfx = "spawnery-spawn-"
 	}
 	return &GenerationKeyManager{
-		admin:      cfg.Admin,
-		s3Endpoint: cfg.S3Endpoint,
-		region:     cfg.Region,
-		disableTLS: cfg.DisableTLS,
-		bucketPfx:  pfx,
-		keys:       map[string]map[uint64]string{},
+		admin:          cfg.Admin,
+		s3Endpoint:     cfg.S3Endpoint,
+		region:         cfg.Region,
+		disableTLS:     cfg.DisableTLS,
+		bucketPfx:      pfx,
+		keys:           map[string]map[uint64]generationKey{},
+		holds:          map[string]map[uint64]int{},
+		pendingRevokes: map[string]map[uint64]bool{},
 	}, nil
 }
 
@@ -102,7 +115,7 @@ func (g *GenerationKeyManager) Mint(ctx context.Context, spawnID string, gen uin
 		_ = g.admin.DeleteKey(ctx, ak)
 		return S3Config{}, fmt.Errorf("genkey: allow key on bucket %q: %w", bucket, err)
 	}
-	g.record(spawnID, gen, ak)
+	g.record(spawnID, gen, ak, sk)
 	return S3Config{
 		Endpoint:        g.s3Endpoint,
 		Bucket:          bucket,
@@ -113,9 +126,20 @@ func (g *GenerationKeyManager) Mint(ctx context.Context, spawnID string, gen uin
 	}, nil
 }
 
-// BackendFor mints this generation's key (Mint) and returns a ready S3Backend —
-// the slot-in seam for the journal Manager / cmd/spawnlet wiring.
+// BackendFor returns a ready S3Backend for the generation. The first open mints
+// and records key material; repeated opens for the same (spawn,generation) reuse
+// that key so reconnect/restore paths do not orphan fresh keys.
 func (g *GenerationKeyManager) BackendFor(ctx context.Context, spawnID string, gen uint64) (BlobBackend, error) {
+	if key, ok := g.lookupKey(spawnID, gen); ok {
+		return NewS3Backend(S3Config{
+			Endpoint:        g.s3Endpoint,
+			Bucket:          g.BucketFor(spawnID),
+			AccessKeyID:     key.accessKeyID,
+			SecretAccessKey: key.secretAccessKey,
+			Region:          g.region,
+			DisableTLS:      g.disableTLS,
+		})
+	}
 	cfg, err := g.Mint(ctx, spawnID, gen)
 	if err != nil {
 		return nil, err
@@ -127,14 +151,21 @@ func (g *GenerationKeyManager) BackendFor(ctx context.Context, spawnID string, g
 // supersede/teardown fence. A gen with no recorded key (already revoked, or
 // minted by another node) is a no-op.
 func (g *GenerationKeyManager) RevokeGeneration(ctx context.Context, spawnID string, gen uint64) error {
-	ak := g.lookup(spawnID, gen)
+	g.mu.Lock()
+	if g.holds[spawnID][gen] > 0 {
+		g.markPendingRevokeLocked(spawnID, gen)
+		g.mu.Unlock()
+		return nil
+	}
+	ak := g.keys[spawnID][gen].accessKeyID
+	g.mu.Unlock()
 	if ak == "" {
 		return nil
 	}
 	if err := g.admin.DeleteKey(ctx, ak); err != nil {
 		return fmt.Errorf("genkey: revoke %s gen %d: %w", spawnID, gen, err)
 	}
-	g.forget(spawnID, gen)
+	g.forgetIfKey(spawnID, gen, ak)
 	return nil
 }
 
@@ -152,30 +183,200 @@ func (g *GenerationKeyManager) RevokeSuperseded(ctx context.Context, spawnID str
 	return nil
 }
 
-func (g *GenerationKeyManager) record(spawnID string, gen uint64, accessKeyID string) {
+func (g *GenerationKeyManager) EmptyBucket(ctx context.Context, bucket string) error {
+	cl, cleanup, err := g.cleanupClient(ctx, bucket, "empty")
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	for obj := range cl.ListObjects(ctx, bucket, minio.ListObjectsOptions{Recursive: true}) {
+		if obj.Err != nil {
+			return fmt.Errorf("genkey: list bucket %q for cleanup: %w", bucket, obj.Err)
+		}
+		if err := cl.RemoveObject(ctx, bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
+			return fmt.Errorf("genkey: remove object %q from bucket %q: %w", obj.Key, bucket, err)
+		}
+	}
+	return nil
+}
+
+func (g *GenerationKeyManager) DropBucket(ctx context.Context, bucket string) error {
+	cl, cleanup, err := g.cleanupClient(ctx, bucket, "drop")
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if err := cl.RemoveBucket(ctx, bucket); err != nil {
+		resp := minio.ToErrorResponse(err)
+		if resp.Code == "NoSuchBucket" {
+			return nil
+		}
+		return fmt.Errorf("genkey: drop bucket %q: %w", bucket, err)
+	}
+	return nil
+}
+
+func (g *GenerationKeyManager) cleanupClient(ctx context.Context, bucket, purpose string) (*minio.Client, func(), error) {
+	if bucket == "" {
+		return nil, func() {}, fmt.Errorf("genkey: cleanup bucket is required")
+	}
+	bucketID, err := g.admin.EnsureBucket(ctx, bucket)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("genkey: ensure cleanup bucket %q: %w", bucket, err)
+	}
+	keyName := fmt.Sprintf("%s-cleanup-%s-%d", bucket, purpose, time.Now().UnixNano())
+	ak, sk, err := g.admin.CreateKey(ctx, keyName)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("genkey: create cleanup key %q: %w", keyName, err)
+	}
+	cleanup := func() {
+		if err := g.admin.DeleteKey(context.WithoutCancel(ctx), ak); err != nil {
+			_ = err
+		}
+	}
+	if err := g.admin.AllowKeyOnBucket(ctx, bucketID, ak); err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("genkey: allow cleanup key on bucket %q: %w", bucket, err)
+	}
+	cl, err := minio.New(strings.TrimPrefix(strings.TrimPrefix(g.s3Endpoint, "https://"), "http://"), &minio.Options{
+		Creds:  credentials.NewStaticV4(ak, sk, ""),
+		Secure: !g.disableTLS,
+		Region: g.region,
+	})
+	if err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("genkey: cleanup s3 client for bucket %q: %w", bucket, err)
+	}
+	return cl, cleanup, nil
+}
+
+type GenerationHold struct {
+	once    sync.Once
+	release func()
+}
+
+func (h *GenerationHold) Release() {
+	if h != nil {
+		h.once.Do(h.release)
+	}
+}
+
+func (g *GenerationKeyManager) HoldGeneration(spawnID string, gen uint64, reason string) *GenerationHold {
+	_ = reason
+	g.mu.Lock()
+	g.addHoldLocked(spawnID, gen)
+	g.mu.Unlock()
+
+	return &GenerationHold{release: g.releaseHoldFunc(spawnID, gen)}
+}
+
+func (g *GenerationKeyManager) HoldExistingGeneration(spawnID string, gen uint64, reason string) *GenerationHold {
+	_ = reason
+	g.mu.Lock()
+	if g.keys[spawnID][gen].accessKeyID == "" {
+		g.mu.Unlock()
+		return nil
+	}
+	g.addHoldLocked(spawnID, gen)
+	g.mu.Unlock()
+
+	return &GenerationHold{release: g.releaseHoldFunc(spawnID, gen)}
+}
+
+func (g *GenerationKeyManager) addHoldLocked(spawnID string, gen uint64) {
+	if g.holds[spawnID] == nil {
+		g.holds[spawnID] = map[uint64]int{}
+	}
+	g.holds[spawnID][gen]++
+}
+
+func (g *GenerationKeyManager) releaseHoldFunc(spawnID string, gen uint64) func() {
+	return func() {
+		var ak string
+		g.mu.Lock()
+		if g.holds[spawnID] == nil {
+			g.mu.Unlock()
+			return
+		}
+		if g.holds[spawnID][gen] > 1 {
+			g.holds[spawnID][gen]--
+			g.mu.Unlock()
+			return
+		}
+		delete(g.holds[spawnID], gen)
+		if len(g.holds[spawnID]) == 0 {
+			delete(g.holds, spawnID)
+		}
+		if g.pendingRevokes[spawnID][gen] {
+			ak = g.keys[spawnID][gen].accessKeyID
+		}
+		g.mu.Unlock()
+		if ak == "" {
+			return
+		}
+		if err := g.admin.DeleteKey(context.Background(), ak); err == nil {
+			g.forgetIfKey(spawnID, gen, ak)
+		}
+	}
+}
+
+func (g *GenerationKeyManager) holdCount(spawnID string, gen uint64) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.holds[spawnID][gen]
+}
+
+func (g *GenerationKeyManager) record(spawnID string, gen uint64, accessKeyID, secretAccessKey string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.keys[spawnID] == nil {
-		g.keys[spawnID] = map[uint64]string{}
+		g.keys[spawnID] = map[uint64]generationKey{}
 	}
-	g.keys[spawnID][gen] = accessKeyID
+	g.keys[spawnID][gen] = generationKey{accessKeyID: accessKeyID, secretAccessKey: secretAccessKey}
 }
 
 func (g *GenerationKeyManager) lookup(spawnID string, gen uint64) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.keys[spawnID][gen]
+	return g.keys[spawnID][gen].accessKeyID
 }
 
-func (g *GenerationKeyManager) forget(spawnID string, gen uint64) {
+func (g *GenerationKeyManager) lookupKey(spawnID string, gen uint64) (generationKey, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	key := g.keys[spawnID][gen]
+	return key, key.accessKeyID != "" && key.secretAccessKey != ""
+}
+
+func (g *GenerationKeyManager) forgetIfKey(spawnID string, gen uint64, accessKeyID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.keys[spawnID][gen].accessKeyID != accessKeyID {
+		return
+	}
+	g.forgetLocked(spawnID, gen)
+}
+
+func (g *GenerationKeyManager) forgetLocked(spawnID string, gen uint64) {
 	if g.keys[spawnID] != nil {
 		delete(g.keys[spawnID], gen)
 		if len(g.keys[spawnID]) == 0 {
 			delete(g.keys, spawnID)
 		}
 	}
+	if g.pendingRevokes[spawnID] != nil {
+		delete(g.pendingRevokes[spawnID], gen)
+		if len(g.pendingRevokes[spawnID]) == 0 {
+			delete(g.pendingRevokes, spawnID)
+		}
+	}
+}
+
+func (g *GenerationKeyManager) markPendingRevokeLocked(spawnID string, gen uint64) {
+	if g.pendingRevokes[spawnID] == nil {
+		g.pendingRevokes[spawnID] = map[uint64]bool{}
+	}
+	g.pendingRevokes[spawnID][gen] = true
 }
 
 func (g *GenerationKeyManager) generations(spawnID string) []uint64 {

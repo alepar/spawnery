@@ -70,6 +70,10 @@ type Spawn struct {
 	// manager surfaces a SQUASH-NEEDED warning (squash execution is deferred until a
 	// backend layer-export method is available).
 	DeltaDepth int
+	// RootfsArtifacts is the fork/migration rootfs artifact chain used to assemble LaunchImageRef
+	// from BaseImageDigest. Fork copies these into its own journal namespace before adding the
+	// fork-point top layer, so a fork of a restored spawn preserves the full rootfs chain.
+	RootfsArtifacts []RootfsArtifact
 }
 
 type Store struct {

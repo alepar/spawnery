@@ -66,6 +66,7 @@ const (
 	DomainResumeSpawn   = "spawnery/intent/resume-spawn/v1"
 	DomainRecreateSpawn = "spawnery/intent/recreate-spawn/v1"
 	DomainMigrateSpawn  = "spawnery/intent/migrate-spawn/v1"
+	DomainForkSpawn     = "spawnery/intent/fork-spawn/v1"
 	DomainSessionOpen   = "spawnery/intent/session-open/v1"
 )
 
@@ -77,6 +78,7 @@ const (
 	OpResumeSpawn   Op = "resume-spawn"
 	OpRecreateSpawn Op = "recreate-spawn"
 	OpMigrateSpawn  Op = "migrate-spawn"
+	OpForkSpawn     Op = "fork-spawn"
 	OpSessionOpen   Op = "session-open"
 )
 
@@ -91,6 +93,8 @@ func DomainFor(op Op) string {
 		return DomainRecreateSpawn
 	case OpMigrateSpawn:
 		return DomainMigrateSpawn
+	case OpForkSpawn:
+		return DomainForkSpawn
 	case OpSessionOpen:
 		return DomainSessionOpen
 	default:

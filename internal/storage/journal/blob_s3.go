@@ -19,13 +19,12 @@ type S3Config struct {
 	// Endpoint is the S3 host[:port] WITHOUT scheme (e.g. "127.0.0.1:3900" for a
 	// local Garage). Required.
 	Endpoint string
-	// Bucket is the bucket holding this node's spawn repos. Required. Phase ①
-	// shares one bucket and isolates spawns by object prefix (Prefix/<spawnID>);
-	// the design's bucket-per-spawn + per-generation key (§3 roast M1) is a
-	// phase-② mint step layered on this same backend.
+	// Bucket is the bucket holding one spawn repo. Production S3 journaling gets
+	// this from GenerationKeyManager's bucket-per-spawn mint path; static bucket
+	// configuration remains useful for direct backend tests and local modes.
 	Bucket string
-	// AccessKeyID / SecretAccessKey authenticate to the store. For Garage these
-	// are minted per bucket via the admin API (deploy/garage). Required.
+	// AccessKeyID / SecretAccessKey authenticate to the store. Production Garage
+	// credentials are minted per generation via GenerationKeyManager. Required.
 	AccessKeyID     string
 	SecretAccessKey string
 	// Region is the S3 region label. Garage's default is "garage"; AWS-style
@@ -39,10 +38,9 @@ type S3Config struct {
 	DisableTLS bool
 }
 
-// S3Backend is a Garage/S3-backed BlobBackend (design §1, T.6). It implements
-// the same BlobBackend.Open(ctx, spawnID, create) contract as FilesystemBackend,
-// so the snapshot/restore/maintenance code in repo.go is unchanged — only the
-// blob sink moves from local disk to the object store.
+// S3Backend is a Garage/S3-backed BlobBackend (design §1, T.6). In production
+// the journal Manager receives S3Backend instances from GenerationKeyManager for
+// each (spawn,generation), so repo opens use generation-scoped credentials.
 type S3Backend struct {
 	cfg S3Config
 }

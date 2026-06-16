@@ -55,6 +55,9 @@ func (n *noSizeFakeBackend) EnsureImage(ctx context.Context, baseRef, deltaRef s
 func (n *noSizeFakeBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) (string, error) {
 	return n.inner.CaptureDelta(ctx, h)
 }
+func (n *noSizeFakeBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle, targetSpawnID string) (string, error) {
+	return n.inner.CaptureDeltaAs(ctx, h, targetSpawnID)
+}
 func (n *noSizeFakeBackend) ReleaseDelta(ctx context.Context, spawnID string) error {
 	return n.inner.ReleaseDelta(ctx, spawnID)
 }

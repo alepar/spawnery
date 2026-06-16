@@ -98,6 +98,9 @@ type ContainerRuntime interface {
 	// CommitContainer stops the container (without removing it) then commits its writable
 	// layer to a new image tagged ref. Used by the Docker delta-capture path (spec §2).
 	CommitContainer(ctx context.Context, containerID, ref string) (imageID string, err error)
+	// CommitContainerPreserving commits the writable layer without stopping or removing the container.
+	// Fork capture uses this after the caller has already paused the source container.
+	CommitContainerPreserving(ctx context.Context, containerID, ref string) (imageID string, err error)
 	// InspectImage returns image metadata for ref. exists=false (nil err) when the image is
 	// not present locally (equivalent to a docker inspect "not found").
 	InspectImage(ctx context.Context, ref string) (info ImageInfo, exists bool, err error)
@@ -195,12 +198,23 @@ func (f *FakeRuntime) ListByLabel(_ context.Context, key, value string) ([]Conta
 	return out, nil
 }
 
-// CommitContainer records the call and synthesises a committed ImageInfo into Images[ref].
+// CommitContainer records the call, marks the container stopped, and synthesises a committed ImageInfo
+// into Images[ref].
 // The committed image's layer count is: CommitLayers if > 0, else (base layers)+1.
 // "base layers" is derived from the seeded Images entry whose ref was the last-started container's
 // image — tests that need precise layer counts should seed Images[ref] for the base before calling.
 func (f *FakeRuntime) CommitContainer(_ context.Context, containerID, ref string) (string, error) {
 	f.Committed = append(f.Committed, struct{ ContainerID, Ref string }{ContainerID: containerID, Ref: ref})
+	f.Stopped[containerID] = true
+	return f.seedCommittedImage(ref), nil
+}
+
+func (f *FakeRuntime) CommitContainerPreserving(_ context.Context, containerID, ref string) (string, error) {
+	f.Committed = append(f.Committed, struct{ ContainerID, Ref string }{ContainerID: containerID, Ref: ref})
+	return f.seedCommittedImage(ref), nil
+}
+
+func (f *FakeRuntime) seedCommittedImage(ref string) string {
 	// Derive the base layer count from the seeded image that matches the last-started container.
 	baseLayers := 0
 	for _, cs := range f.Started {
@@ -216,7 +230,7 @@ func (f *FakeRuntime) CommitContainer(_ context.Context, containerID, ref string
 	}
 	id := fmt.Sprintf("sha256:committed-%s", ref)
 	f.Images[ref] = ImageInfo{ID: id, Layers: layers}
-	return id, nil
+	return id
 }
 
 func (f *FakeRuntime) InspectImage(_ context.Context, ref string) (ImageInfo, bool, error) {

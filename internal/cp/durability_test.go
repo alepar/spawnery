@@ -28,11 +28,11 @@ func sealKey(t *testing.T, s *Server, spawnID, mount string) {
 // fail with FailedPrecondition and leave the spawn untouched (still active, not suspended).
 func TestDurabilityGuardNodeLocalCrossNodeRejected(t *testing.T) {
 	s, reg, rt := newTestServer(t)
-	// Seed an app version declaring durability="node-local" for "main".
-	seedNodeLocalAppVersion(t, s)
 	src := &suspendSender{markers: []*nodev1.MountMarker{{Name: "main", Marker: "m"}}}
 	src.s = s
 	activeSpawnWithRoute(t, s, reg, rt, "sp1", "alice", src)
+	// Seed an app version declaring durability="node-local" for "main".
+	seedNodeLocalAppVersion(t, s, activeSpawnTestAppID)
 	addNode(reg, "n2", "cloud", "", 5, &capSender{})
 
 	// No journal-key ciphertext + node-local manifest → node-local classification, no upgrade flag.
@@ -63,10 +63,10 @@ func TestDurabilityGuardNodeLocalCrossNodeRejected(t *testing.T) {
 // missing → still FailedPrecondition (fail-closed).
 func TestDurabilityGuardUpgradeFlagWithNoCiphertextRejected(t *testing.T) {
 	s, reg, rt := newTestServer(t)
-	seedNodeLocalAppVersion(t, s)
 	src := &suspendSender{markers: []*nodev1.MountMarker{{Name: "main", Marker: "m"}}}
 	src.s = s
 	activeSpawnWithRoute(t, s, reg, rt, "sp1", "alice", src)
+	seedNodeLocalAppVersion(t, s, activeSpawnTestAppID)
 	addNode(reg, "n2", "cloud", "", 5, &capSender{})
 
 	ctx := auth.WithOwner(context.Background(), "alice")
@@ -147,6 +147,7 @@ func TestDurabilityGuardSameNodeNodeLocalAllowed(t *testing.T) {
 	src := &suspendSender{markers: []*nodev1.MountMarker{{Name: "main", Marker: "m"}}}
 	src.s = s
 	activeSpawnWithRoute(t, s, reg, rt, "sp1", "alice", src)
+	seedNodeLocalAppVersion(t, s, activeSpawnTestAppID)
 
 	// Find the node that was used.
 	c, ok, _ := s.st.Spawns().LiveContainer(context.Background(), "sp1")
@@ -176,6 +177,43 @@ func TestDurabilityGuardSameNodeNodeLocalAllowed(t *testing.T) {
 	_ = resp
 }
 
+func TestResumeSpawnPinsJournaledMountToPreviousNode(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	src := &suspendSender{markers: []*nodev1.MountMarker{{Name: "main", Marker: "m"}}}
+	src.s = s
+	activeSpawnWithRoute(t, s, reg, rt, "sp1", "alice", src)
+	sealKey(t, s, "sp1", "main")
+
+	other := &capSender{}
+	addNode(reg, "n2", "cloud", "", 5, other)
+	stopOther := goAckStarts(s, other)
+	defer stopOther()
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: "sp1"})); err != nil {
+		t.Fatalf("SuspendSpawn: %v", err)
+	}
+
+	previous := &capSender{}
+	addNode(reg, "n1", "cloud", "", 1, previous)
+	stopPrevious := goAckStarts(s, previous)
+	defer stopPrevious()
+
+	if _, err := s.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: "sp1"})); err != nil {
+		t.Fatalf("ResumeSpawn: %v", err)
+	}
+	c, ok, err := s.st.Spawns().LiveContainer(ctx, "sp1")
+	if err != nil || !ok {
+		t.Fatalf("LiveContainer after resume: ok=%v err=%v", ok, err)
+	}
+	if c.NodeID != "n1" {
+		t.Fatalf("journaled plain resume node=%q, want previous node n1", c.NodeID)
+	}
+	if len(other.starts()) != 0 {
+		t.Fatalf("journaled plain resume sent StartSpawn to n2: %+v", other.starts())
+	}
+}
+
 // TestDurabilityClassifyOwnerSealed: classifyMounts returns owner-sealed when ciphertext exists.
 func TestDurabilityClassifyOwnerSealed(t *testing.T) {
 	s, reg, rt := newTestServer(t)
@@ -193,6 +231,19 @@ func TestDurabilityClassifyOwnerSealed(t *testing.T) {
 	}
 	_ = reg
 	_ = rt
+}
+
+func TestSeedPersistsManifestDurabilityForClassification(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	seedForkSource(t, s, reg, rt, "sp1", "alice", "n1", &capSender{})
+
+	classes, err := s.classifyMounts(context.Background(), "sp1")
+	if err != nil {
+		t.Fatalf("classifyMounts: %v", err)
+	}
+	if classes["main"] != mountClassNodeLocal {
+		t.Fatalf("Seeded secret-app main class=%v, want node-local from spawneryapp.yml", classes["main"])
+	}
 }
 
 // TestDurabilityClassifyEphemeral: classifyMounts defaults to ephemeral when no ciphertext and no
@@ -218,10 +269,10 @@ func TestDurabilityClassifyEphemeral(t *testing.T) {
 // TestDurabilityClassifyNodeLocal: classifyMounts returns node-local when manifest declares it.
 func TestDurabilityClassifyNodeLocal(t *testing.T) {
 	s, reg, rt := newTestServer(t)
-	seedNodeLocalAppVersion(t, s)
 	src := &suspendSender{}
 	src.s = s
 	activeSpawnWithRoute(t, s, reg, rt, "sp1", "alice", src)
+	seedNodeLocalAppVersion(t, s, activeSpawnTestAppID)
 
 	classes, err := s.classifyMounts(context.Background(), "sp1")
 	if err != nil {
@@ -264,12 +315,12 @@ func TestDurabilityGuardUpgradeFlagWithCiphertextProceeds(t *testing.T) {
 
 // seedNodeLocalAppVersion registers a minimal app version with durability="node-local" on the
 // "main" mount. This lets classifyMounts detect node-local class even before any ciphertext exists.
-func seedNodeLocalAppVersion(t *testing.T, s *Server) {
+func seedNodeLocalAppVersion(t *testing.T, s *Server, appID string) {
 	t.Helper()
 	ctx := context.Background()
 	// Must upsert the app first (FK constraint).
 	if err := s.st.Apps().Upsert(ctx, store.App{
-		ID: "secret-app", DisplayName: "Secret App", Summary: "test",
+		ID: appID, DisplayName: "Node Local App", Summary: "test",
 		Tags: "", Visibility: "public", Listed: false, CreatorID: "test", CreatedAt: 1,
 	}); err != nil {
 		t.Fatalf("seedNodeLocalAppVersion: upsert app: %v", err)
@@ -277,8 +328,8 @@ func seedNodeLocalAppVersion(t *testing.T, s *Server) {
 	// Protojson: the durability field is stored as "durability" in the JSON blob.
 	manifestJSON := `{"mounts":[{"name":"main","durability":"node-local"}]}`
 	if err := s.st.Apps().UpsertVersion(ctx, store.AppVersion{
-		AppID: "secret-app", Version: "1.0.0", Ref: "test-ref",
-		Tier:     store.TierUnverified,
+		AppID: appID, Version: "1.0.0", Ref: "test-ref",
+		Tier:     store.TierReviewed,
 		Manifest: manifestJSON, CreatedAt: 1,
 	}, nil); err != nil {
 		t.Fatalf("seedNodeLocalAppVersion: upsert version: %v", err)

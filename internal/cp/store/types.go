@@ -3,12 +3,14 @@ package store
 import "github.com/uptrace/bun"
 
 type Status string // durable spawn lifecycle
+
 const (
 	Starting    Status = "starting"
 	Active      Status = "active"
 	Suspending  Status = "suspending"
 	Suspended   Status = "suspended"
 	Resuming    Status = "resuming"
+	Forking     Status = "forking"
 	Unreachable Status = "unreachable"
 	Errored     Status = "error"
 	Deleted     Status = "deleted"
@@ -72,7 +74,7 @@ type MountDecl struct {
 // transientStatuses are spawn statuses that represent an in-progress transition. Every spawn in one
 // of these states is expected to have an active claim; one without (NULL claim or expired
 // claim_deadline) is considered stranded and eligible for recovery.
-var transientStatuses = []Status{Suspending, Resuming}
+var transientStatuses = []Status{Suspending, Resuming, Forking}
 
 type Spawn struct {
 	bun.BaseModel    `bun:"table:spawns,alias:s"`
@@ -101,19 +103,22 @@ type Spawn struct {
 	// ProfileVersion is the profile's CAS version at create time — the snapshot pin (sp-nrzf.3.8 §9).
 	// 0 for spawns created without a profile.
 	ProfileVersion uint64 `bun:"profile_version,notnull"`
-	CreatedAt   int64   `bun:"created_at,notnull"`
-	LastUsedAt  int64   `bun:"last_used_at,notnull"`
-	SuspendedAt *int64  `bun:"suspended_at"`
-	DeletedAt   *int64  `bun:"deleted_at"`
+	CreatedAt      int64  `bun:"created_at,notnull"`
+	LastUsedAt     int64  `bun:"last_used_at,notnull"`
+	SuspendedAt    *int64 `bun:"suspended_at"`
+	DeletedAt      *int64 `bun:"deleted_at"`
 	// StatusSeq is an optimistic-concurrency version that increments on every status or activity
 	// mutation. It is CP-store-internal — not surfaced on the wire. Every guarded write CAS-es on
 	// the StatusSeq the caller read, closing the TOCTOU window between a sweeper's decision and
 	// an operator's write. The claim/lease primitives (Acquire/Heartbeat/Release/TransitionClaimed)
 	// fence on this column; Heartbeat is the sole mutation that does NOT bump it.
-	StatusSeq    int64   `bun:"status_seq,notnull"`
-	ClaimHolder  *string `bun:"claim_holder"`
-	ClaimLeaseID *string `bun:"claim_lease_id"`
-	ClaimDeadline *int64 `bun:"claim_deadline"`
+	StatusSeq           int64   `bun:"status_seq,notnull"`
+	ClaimHolder         *string `bun:"claim_holder"`
+	ClaimLeaseID        *string `bun:"claim_lease_id"`
+	ClaimDeadline       *int64  `bun:"claim_deadline"`
+	ForkCaptureDeadline *int64  `bun:"fork_capture_deadline"`
+	ParentSpawnID       *string `bun:"parent_spawn_id"`
+	ForkedAt            *int64  `bun:"forked_at"`
 }
 
 // Container is the running episode. spawn:container = 1-to-0..1 (uniq_live_container on ended_at IS NULL).
@@ -162,6 +167,13 @@ const (
 	TransferSetFailed             TransferSetStatus = "failed"
 )
 
+type TransferSetKind string
+
+const (
+	TransferSetMigration TransferSetKind = "migration"
+	TransferSetFork      TransferSetKind = "fork"
+)
+
 type TransferKeyStatus string
 
 const (
@@ -186,7 +198,10 @@ type RootfsArtifactPin struct {
 type TransferSet struct {
 	bun.BaseModel                 `bun:"table:migration_transfer_sets,alias:mts"`
 	ID                            string              `bun:"id,pk"`
+	Kind                          TransferSetKind     `bun:"kind,notnull"`
 	SpawnID                       string              `bun:"spawn_id,notnull"`
+	SourceSpawnID                 string              `bun:"source_spawn_id,notnull"`
+	ForkSpawnID                   string              `bun:"fork_spawn_id,notnull"`
 	SourceGeneration              uint64              `bun:"source_generation,notnull"`
 	TargetGeneration              uint64              `bun:"target_generation,notnull"`
 	SourceNodeID                  string              `bun:"source_node_id,notnull"`
@@ -310,10 +325,10 @@ type CustomizationCatalogEntry struct {
 	bun.BaseModel `bun:"table:customization_catalog,alias:cc"`
 	CatalogID     string `bun:"catalog_id,pk"`
 	CreatorID     string `bun:"creator_id,notnull"`
-	Kind          string `bun:"kind,notnull"`        // skill|mcp|config|plugin (ProfileEntryKind string)
+	Kind          string `bun:"kind,notnull"` // skill|mcp|config|plugin (ProfileEntryKind string)
 	Name          string `bun:"name,notnull"`
 	Description   string `bun:"description,notnull"`
-	Content       []byte `bun:"content"`             // curated inline content (BLOB/bytea)
+	Content       []byte `bun:"content"` // curated inline content (BLOB/bytea)
 	Listed        bool   `bun:"listed,notnull"`
 	CreatedAt     int64  `bun:"created_at,notnull"`
 	UpdatedAt     int64  `bun:"updated_at,notnull"`

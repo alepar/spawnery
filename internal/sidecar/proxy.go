@@ -15,11 +15,12 @@ import (
 // NewHandler proxies requests to upstream, injecting the bearer key. When ov holds a
 // model override, the top-level "model" of each request body is rewritten to it; when
 // unset the request body is forwarded byte-identical (zero overhead).
-func NewHandler(upstream, key string, ov *Override) http.Handler {
+func NewHandler(upstream, key string, ov *Override, trackers ...*Inflight) http.Handler {
 	defaultTarget, err := url.Parse(upstream)
 	if err != nil {
 		panic(err)
 	}
+	inflight := firstInflight(trackers)
 	rp := &httputil.ReverseProxy{}
 	rp.Director = func(r *http.Request) {
 		creds := ov.Credentials(upstream, key)
@@ -74,6 +75,8 @@ func NewHandler(upstream, key string, ov *Override) http.Handler {
 				return
 			}
 		}
+		inflight.Begin()
+		defer inflight.End()
 		rp.ServeHTTP(w, r)
 	})
 }

@@ -293,6 +293,15 @@ func (r *spawnRepo) SetSuspending(ctx context.Context, id string, gen int64) err
 	return r.setContainerPhase(ctx, id, gen, PhaseSuspending)
 }
 
+func (r *spawnRepo) SetForking(ctx context.Context, id string, gen int64, captureDeadlineTS int64) error {
+	if err := r.guardContainerGen(ctx, id, gen); err != nil {
+		return err
+	}
+	return r.guardStatus(ctx, id, []Status{Active}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		return q.Set("status = ?", Forking).Set("fork_capture_deadline = ?", captureDeadlineTS)
+	})
+}
+
 func (r *spawnRepo) SetSuspended(ctx context.Context, id string, gen int64) error {
 	if err := r.guardContainerGen(ctx, id, gen); err != nil {
 		return err
@@ -485,6 +494,26 @@ func (r *spawnRepo) Acquire(ctx context.Context, id, holder, leaseID string, now
 	return expectedSeq + 1, nil
 }
 
+func (r *spawnRepo) AcquireForkingRecovery(ctx context.Context, id, holder, leaseID string, nowTS, deadlineTS, expectedSeq int64) (int64, error) {
+	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("claim_holder = ?", holder).
+		Set("claim_lease_id = ?", leaseID).
+		Set("claim_deadline = ?", deadlineTS).
+		Set("status_seq = status_seq + 1").
+		Where("id = ?", id).
+		Where("status = ?", Forking).
+		Where("status_seq = ?", expectedSeq).
+		Where("(claim_holder IS NULL OR claim_deadline < ? OR (fork_capture_deadline IS NOT NULL AND fork_capture_deadline < ?))", nowTS, nowTS).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return 0, ErrConflict
+	}
+	return expectedSeq + 1, nil
+}
+
 // Heartbeat extends the claim deadline without bumping status_seq. See SpawnRepo.Heartbeat.
 func (r *spawnRepo) Heartbeat(ctx context.Context, id, leaseID string, newDeadlineTS int64) error {
 	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
@@ -543,6 +572,62 @@ func (r *spawnRepo) TransitionClaimed(ctx context.Context, id, leaseID string, e
 	return expectedSeq + 1, nil
 }
 
+func (r *spawnRepo) TransitionForkingRecovered(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64) (int64, error) {
+	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("status = ?", Active).
+		Set("fork_capture_deadline = NULL").
+		Set("claim_holder = NULL").
+		Set("claim_lease_id = NULL").
+		Set("claim_deadline = NULL").
+		Set("status_seq = status_seq + 1").
+		Where("id = ?", id).
+		Where("status = ?", Forking).
+		Where("status_seq = ?", expectedSeq).
+		Where("claim_lease_id = ?", leaseID).
+		Where("? = (SELECT generation FROM spawn_containers WHERE spawn_id = id AND ended_at IS NULL)", expectedGen).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return 0, ErrConflict
+	}
+	return expectedSeq + 1, nil
+}
+
+func (r *spawnRepo) MarkForkingLost(ctx context.Context, id string, expectedSeq int64) (int64, error) {
+	var newSeq int64
+	err := r.withTx(ctx, func(tx *spawnRepo) error {
+		res, err := tx.db.NewUpdate().Model((*Spawn)(nil)).
+			Set("status = ?", Errored).
+			Set("fork_capture_deadline = NULL").
+			Set("claim_holder = NULL").
+			Set("claim_lease_id = NULL").
+			Set("claim_deadline = NULL").
+			Set("status_seq = status_seq + 1").
+			Where("id = ?", id).
+			Where("status = ?", Forking).
+			Where("status_seq = ?", expectedSeq).
+			Exec(ctx)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return ErrConflict
+		}
+		ts, err := tx.lastUsedTS(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := tx.endLiveContainer(ctx, id, PhaseLost, ts); err != nil {
+			return err
+		}
+		newSeq = expectedSeq + 1
+		return nil
+	})
+	return newSeq, err
+}
+
 // ListStranded returns spawns in transient statuses whose claim is absent or expired (nowTS is a
 // unix timestamp; store never reads the wall clock). See SpawnRepo.ListStranded.
 func (r *spawnRepo) ListStranded(ctx context.Context, nowTS int64) ([]Spawn, error) {
@@ -550,6 +635,16 @@ func (r *spawnRepo) ListStranded(ctx context.Context, nowTS int64) ([]Spawn, err
 	err := r.db.NewSelect().Model(&out).
 		Where("status IN (?)", bun.In(transientStatuses)).
 		Where("(claim_holder IS NULL OR claim_deadline < ?)", nowTS).
+		Order("id ASC").
+		Scan(ctx)
+	return out, err
+}
+
+func (r *spawnRepo) ListRecoverableForking(ctx context.Context, nowTS int64) ([]Spawn, error) {
+	var out []Spawn
+	err := r.db.NewSelect().Model(&out).
+		Where("status = ?", Forking).
+		Where("(claim_holder IS NULL OR claim_deadline < ? OR (fork_capture_deadline IS NOT NULL AND fork_capture_deadline < ?))", nowTS, nowTS).
 		Order("id ASC").
 		Scan(ctx)
 	return out, err
@@ -579,6 +674,56 @@ func (r *spawnRepo) ListLiveByProfileIDs(ctx context.Context, profileIDs []strin
 		Order("id ASC").
 		Scan(ctx)
 	return out, err
+}
+
+func (r *spawnRepo) MarkDeletedClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, ts int64) (int64, error) {
+	var newSeq int64
+	err := r.withTx(ctx, func(tx *spawnRepo) error {
+		var err error
+		newSeq, err = tx.markDeletedClaimed(ctx, id, leaseID, expectedSeq, expectedGen, ts)
+		return err
+	})
+	return newSeq, err
+}
+
+func (r *spawnRepo) withTx(ctx context.Context, fn func(tx *spawnRepo) error) error {
+	top, ok := r.db.(*bun.DB)
+	if !ok {
+		return fn(r)
+	}
+	return top.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		return fn(&spawnRepo{db: tx})
+	})
+}
+
+func (r *spawnRepo) markDeletedClaimed(ctx context.Context, id, leaseID string, expectedSeq, expectedGen int64, ts int64) (int64, error) {
+	q := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("status = ?", Deleted).
+		Set("deleted_at = ?", ts).
+		Set("fork_capture_deadline = NULL").
+		Set("claim_holder = NULL").
+		Set("claim_lease_id = NULL").
+		Set("claim_deadline = NULL").
+		Set("status_seq = status_seq + 1").
+		Where("id = ?", id).
+		Where("status_seq = ?", expectedSeq).
+		Where("claim_lease_id = ?", leaseID)
+	if expectedGen == 0 {
+		q = q.Where("NOT EXISTS (SELECT 1 FROM spawn_containers WHERE spawn_id = id AND ended_at IS NULL)")
+	} else {
+		q = q.Where("? = (SELECT generation FROM spawn_containers WHERE spawn_id = id AND ended_at IS NULL)", expectedGen)
+	}
+	res, err := q.Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return 0, ErrConflict
+	}
+	if err := r.endLiveContainer(ctx, id, PhaseLost, ts); err != nil {
+		return 0, err
+	}
+	return expectedSeq + 1, nil
 }
 
 // Compile-time check that *spawnRepo fully implements SpawnRepo.

@@ -133,18 +133,27 @@ aware**:
   `docker unpause` **only if the container is actually paused** (unpause of a running container errors —
   tolerate it) → revert status to **Active** under a `status_seq` CAS. Safe to re-drive: a sweep that
   unpaused but crashed before the CAS leaves a running+`Forking` source the next sweep fixes.
-- **Wedged worker, claim never expires** (driver alive, heartbeating, but the scan hangs): add a
-  **capture deadline** so a wedged `Forking` source is force-reverted rather than frozen forever.
+- **Wedged worker, claim never expires** (driver alive, heartbeating, but the scan hangs): `Forking`
+  stores a durable `fork_capture_deadline` separate from `claim_deadline`. The driver heartbeats the
+  claim to prove liveness during slow-but-healthy capture, while the recovery sweep may preempt the
+  claim once `fork_capture_deadline < now`, unpause the source if needed, and CAS the row back to
+  `Active`. Keeping these as separate timestamps is required: reusing `claim_deadline` would either
+  strand a wedged capture forever or falsely recover a slow healthy capture.
 - **Claim TTL vs commit duration:** the driver **heartbeats/renews** the claim across the (bounded but
   non-trivial) under-pause scan+commit, so a slow-but-alive driver is not mistaken for dead.
 - **Node death** is **not** a new failure mode: an `Active` spawn already dies if its node reboots, and a
   paused container is lost the same way. A source-node death during `Forking` resolves like any node loss
   (`Unreachable`/`Errored` + user notice); only driver-death-with-node-alive needs the unpause sweep.
-- **Pause scope = agent container only**; the sidecar (model proxy) keeps running. The frozen agent
-  stops draining its localhost socket, so a fork taken **mid-turn may abort the source's in-flight LLM
-  turn** (backpressure → provider idle-timeout; the sidecar may synthesize a clean `message_stop`,
-  masking the truncation). The source recovers by erroring/retrying that turn. Bounded by the freeze SLO;
-  see Spike E. MVP accepts this (forking mid-turn can interrupt the source's current turn).
+- **Pause scope = agent container only; capture is turn-boundary gated and must preserve the source
+  container.** The sidecar (model proxy) keeps running. Spike E set `turn_boundary_gate_required=true`,
+  so MVP `ForkSpawn` must wait until the source has no in-flight agent turn before entering `Forking` and
+  pausing the agent. If the user requests a fork mid-turn, the source remains Active and the client
+  surfaces a queued "forking after current turn..." state; the actual warm-final capture begins
+  immediately after the current turn completes or errors. Spike E also showed the existing
+  suspend-oriented `CaptureDelta` primitive is source-destructive in the Docker lane, so `ForkSpawn` must
+  use a fork-specific source-preserving rootfs capture primitive before unpausing the source; reusing the
+  current suspend capture cannot satisfy "both stay Active". The capture deadline still bounds the
+  post-boundary pause.
 - **Concurrent source ops:** the `Forking` claim also fences a user `Stop`/`Suspend`/`Migrate` of the
   source for the brief capture window (they queue or fail-fast, like any claimed transition).
 
@@ -183,30 +192,34 @@ be **idempotent, ordered, and re-drivable** (not a fire-and-forget `revertOnFail
 ## Risks / spikes (do early)
 
 1. **[F — torn-session `--continue` repair]** Even captured under pause, the session JSONL has no fsync
-   guarantee, so the trailing line can be torn. External evidence indicates a corrupt trailing line can
-   make `--resume` **hard-crash on a JSON parse error**, not degrade gracefully — so a repair is
-   **mandatory**, not optional. *Plan:* `sync` the container before commit (already in capture step 5);
-   on the fork, **deterministically truncate the session log to its last valid JSONL record** before
-   launching `--continue` (a real, implementable fallback — *not* "fresh session", since for these agents
-   the displayed history *is* the session file). *Spike:* confirm `--continue`/`--resume` loads cleanly
-   after truncation for claude-code and codex. (Each side has its **own copy** of the session dir → no
+   guarantee, so the trailing line can be torn. The pinned `spawnery/agent:dev` Spike F probe did **not**
+   reproduce the assumed local JSON parse crash for either claude-code or codex: both clients still
+   advanced far enough to hit the localhost fake provider with a torn trailing line. The same probe also
+   confirmed that **deterministically truncating the session log to its last valid JSONL record** removed
+   positive bytes and still let both clients reach the provider afterward. *Plan:* keep `sync` in the
+   capture flow (already in capture step 5); treat truncate-to-last-valid-record as a conservative repair
+   step before launching `--continue`, but do not rely on a hard-crash assumption when defining launcher or
+   client fallback behavior. Fresh-session fallback remains out of scope for MVP unless later implementation
+   evidence shows no robust continue path. (Each side has its **own copy** of the session dir → no
    shared-session-id collision; they resume independently.)
-2. **[E — freeze SLO + source turn-abort]** The under-pause incremental scan (Kopia has no dirty-path
-   API → scan-bound) + `docker commit` (~4 s / 1.2 GB measured) set the freeze. *Question:* real pause
-   duration distribution, and does the **source's** in-flight LLM turn survive it (frozen agent →
-   backpressure → provider idle-timeout; does the sidecar mask the drop)? *Cheapest test:* measure
-   under-pause scan+commit on a representative tree (incl. node_modules); fork mid-turn and observe the
-   source turn. *Kill criteria:* if pauses routinely exceed the upstream idle timeout, add a turn-boundary
-   gate. State an explicit freeze SLO; the warm pre-snapshot bounds the under-pause scan.
+2. **[E — freeze SLO + source turn-abort]** Spike E measured the pause-first capture on a deterministic
+   representative tree (`19761` files / `164855808` bytes). The freeze SLO is healthy
+   (`total_freeze_p95=994.747146ms`, `under_pause_max=763.109183ms`), but the source-liveness result
+   requires two design changes: current Docker `CaptureDelta` stops the source container, so fork needs a
+   source-preserving rootfs capture primitive; and a mid-turn capture errored the source turn, so MVP fork
+   is turn-boundary gated. The warm pre-snapshot still bounds the post-boundary under-pause scan.
 3. **[G — recovery + unwind idempotency]** Verify the recovery sweep repairs a stranded `Forking` source
    idempotently and pause-phase-aware (driver death pre-pause, mid-pause, post-unpause-pre-CAS; wedged
    worker → capture deadline); and that the failed-fork unwind is re-drivable (empty-then-drop bucket;
    row deleted last; orphan-GC reclaims a half-created fork).
-4. **[H — transfer-set fork variant]** *Question:* does the encrypted transfer set compose for a
-   `source_id → fork_id` seed into a **fresh** repo (vs migration's same-`spawn_id` generation chain)?
-   *Cheapest test:* export a source-rehydrated staging set under the transfer key, import + re-journal on
-   the target into a new repo. *Kill criteria:* if the contract can't express cross-spawn artifacts,
-   define the fork variant before `sp-jdzb`.
+4. **[H — transfer-set fork variant]** *Result:* journal-level composition works when the source node
+   restores the pinned mount manifest to staging, exports those plain files plus the source rootfs delta
+   through a transfer-key envelope bound to `source_id → fork_id`, and the target imports that payload
+   into fork host dirs before re-journaling as fork generation 1. The existing migration transfer-set
+   row is still not expressive enough as the durable CP contract because it has one `spawn_id` and
+   migration-style `source_generation`/`target_generation`; `sp-jdzb` must introduce an explicit fork
+   transfer-set variant or equivalent fields naming both `source_spawn_id` and `fork_spawn_id`, with
+   pins interpreted as source artifacts until import and fork artifacts after re-journal.
 
 ## Testing (`sp-jkpv`)
 
@@ -222,8 +235,10 @@ be **idempotent, ordered, and re-drivable** (not a fire-and-forget `revertOnFail
   the sweep reverts the source to Active exactly once; a wedged capture hits the deadline.
 - **Failed-fork cleanup (re-drivable):** force a standup failure after a partial seed → unwind empties +
   drops the bucket, revokes the key, deletes the row last; re-running the unwind is a no-op; source intact.
-- **Source turn-abort (Spike E):** fork mid-turn → the source's current turn errors/retries cleanly and
-  the source stays Active.
+- **Source turn-abort (Spike E):** a fork requested mid-turn is queued until the source turn boundary; the
+  next source turn recovers and the source stays Active. ForkSpawn regression coverage (`sp-jkpv`, not
+  the Spike E measurement harness) must fail if the rootfs capture path stops/removes the source
+  container.
 
 ## Task mapping
 
@@ -256,5 +271,22 @@ the assumptions above — append a dated note here, whether or not a formal debu
   (Theme 2); ceremony-first + **source-side rehydrate** + a **transfer-set fork variant** for cross-node
   seeding (Theme 4); a **deterministic torn-JSONL truncate-and-`--continue`** repair (Theme 5); a
   corrected ~2.5–3× disk gate, a fork-ready SLO, and defined `Forking`/"seeding…" client semantics
-  (Theme 7); documented that a mid-turn fork may abort the **source's** in-flight turn (Theme 3, accepted
-  for MVP). Spikes E/F/G/H carried above.
+  (Theme 7); documented the then-open source mid-turn risk (Theme 3), which Spike E later resolved to
+  turn-boundary gating plus source-preserving rootfs capture. Spikes E/F/G/H carried above.
+- **2026-06-15 (Spike F):** Torn-session JSONL probe against pinned `spawnery/agent:dev` found that
+  neither claude-code nor codex produced the expected local JSON parse failure on a corrupted trailing
+  JSONL line; both still reached the localhost fake provider before and after deterministic truncation to
+  the last valid record. The ForkSpawn launcher/client plan was adjusted accordingly; raw evidence is
+  stored in Beads `sp-li7h.1`, with implications copied to `sp-dts5` and `sp-6344`.
+- **2026-06-15 (Spike H):** Hermetic journal spike confirmed the substrate composes for `source_id →
+  fork_id`: source repo rehydrate to staging, transfer-key-bound tar payload containing plain mount files
+  plus rootfs delta, target import, and fork gen-1 re-journal into a fresh repo. The CP transfer-set model
+  still needs a fork variant before `sp-jdzb` implementation because the current `migration_transfer_sets`
+  schema has a single `spawn_id`; fork orchestration needs durable source and fork spawn IDs so the target
+  never interprets source pins as fork-owned artifacts before import/re-journal.
+- **2026-06-15 (Spike G plan):** Recovery validation requires a durable internal `forking` status plus a
+  separate `fork_capture_deadline`. Claim heartbeats continue to protect slow healthy captures; the
+  capture deadline is the wedge detector. Failed-fork unwind remains ordered as v3 states: fence/claim
+  the fork row, revoke the fork generation key, empty then drop the fork bucket, and delete the fork row
+  last. No compensation-order change is expected from the spike plan.
+- **2026-06-15 (Spike E):** Deterministic representative journal tree measured `19761` files / `164855808` bytes (the plan's earlier count/byte placeholders were inconsistent with the listed files). Warm pre-snapshot p95 was `1.359671678s`; under-pause final snapshot p95/max were `763.109183ms` / `763.109183ms`; rootfs commit p95 was `230.470873ms`; total freeze p95 was `994.747146ms`. Mid-turn source behavior was measured with `goose-acp` because the current Hermes ACP runnable does not become acpmux-ready (`sp-055b`): current turn `errored` (marker count `0`, truncated `false`); follow-up prompt recovery `false`. Gate decision: `turn_boundary_gate_required=true`; `source_preserving_capture_required=true` because current Docker CaptureDelta stops the source container before any unpause can preserve it; follow-up source prompt did not recover cleanly.

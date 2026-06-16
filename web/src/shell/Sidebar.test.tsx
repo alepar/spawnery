@@ -6,12 +6,12 @@ import type { SpawnView } from "@/api/spawnlet";
 import type { Nav } from "@/nav/nav";
 
 const spawns: SpawnView[] = [
-  { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
-  { spawnId: "b", name: "Zork 2", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
-  { spawnId: "c", name: "Starting One", appId: "spawnery/wiki", status: "starting", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
-  { spawnId: "d", name: "Reaped", appId: "spawnery/wiki", status: "unreachable", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
-  { spawnId: "e", name: "Broken", appId: "spawnery/wiki", status: "error", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
-  { spawnId: "f", name: "Winding Down", appId: "spawnery/wiki", status: "suspending", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
+  { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
+  { spawnId: "b", name: "Zork 2", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
+  { spawnId: "c", name: "Starting One", appId: "spawnery/wiki", status: "starting", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
+  { spawnId: "d", name: "Reaped", appId: "spawnery/wiki", status: "unreachable", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
+  { spawnId: "e", name: "Broken", appId: "spawnery/wiki", status: "error", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
+  { spawnId: "f", name: "Winding Down", appId: "spawnery/wiki", status: "suspending", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
 ];
 const noopActions = { onSelectSpawn: vi.fn(), onRename: vi.fn(), onSuspend: vi.fn(), onResume: vi.fn(), onRecreate: vi.fn(), onStop: vi.fn() };
 const templatesNav: Nav = { section: "templates" };
@@ -127,6 +127,41 @@ describe("Sidebar", () => {
     expect(item.textContent).toBe("Recreate");
     await userEvent.click(item);
     expect(actions.onRecreate).toHaveBeenCalledWith("e");
+  });
+
+  it("kebab → Fork is enabled for active spawns and calls onFork", async () => {
+    const actions = { ...noopActions, onFork: vi.fn() };
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);
+    await userEvent.click(screen.getByTestId("spawn-kebab-a"));
+    await userEvent.click(screen.getByTestId("spawn-fork-a"));
+    expect(actions.onFork).toHaveBeenCalledWith("a");
+  });
+
+  it("kebab → Fork is disabled for non-active spawns", async () => {
+    const actions = { ...noopActions, onFork: vi.fn() };
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);
+    await userEvent.click(screen.getByTestId("spawn-kebab-b"));
+    const item = screen.getByTestId("spawn-fork-disabled-b") as HTMLButtonElement;
+    expect(item.disabled).toBe(true);
+    expect(item.textContent).toBe("Fork...");
+    expect(actions.onFork).not.toHaveBeenCalled();
+  });
+
+  it("shows fork lineage in the spawn row subline", () => {
+    const fork: SpawnView = { ...spawns[0], spawnId: "fork-1", parentSpawnId: "a", name: "Wiki fork" };
+    render(<Sidebar nav={spawnNav("fork-1")} navigate={vi.fn()} spawns={[spawns[0], fork]} actions={noopActions} />);
+    expect(screen.getByTestId("spawn-row-fork-1").textContent).toContain("fork of Wiki");
+  });
+
+  it("shows seeding copy for starting fork children", async () => {
+    const fork: SpawnView = { ...spawns[2], spawnId: "fork-starting", parentSpawnId: "a", name: "Wiki fork" };
+    render(<Sidebar nav={spawnNav("fork-starting")} navigate={vi.fn()} spawns={[spawns[0], fork]} actions={noopActions} />);
+    const dot = screen.getByTestId("spawn-dot-fork-starting");
+    expect(dot.getAttribute("title")).toBe("seeding…");
+    expect(dot.getAttribute("aria-label")).toBe("seeding…");
+
+    await userEvent.click(screen.getByTestId("spawn-kebab-fork-starting"));
+    expect(screen.getByTestId("spawn-pending-fork-starting").textContent).toBe("Seeding…");
   });
 
   it("kebab → disabled pending item for a starting spawn; clicking dispatches nothing", async () => {

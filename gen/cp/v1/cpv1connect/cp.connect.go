@@ -93,6 +93,8 @@ const (
 	// SpawnServiceMigrateSpawnProcedure is the fully-qualified name of the SpawnService's MigrateSpawn
 	// RPC.
 	SpawnServiceMigrateSpawnProcedure = "/cp.v1.SpawnService/MigrateSpawn"
+	// SpawnServiceForkSpawnProcedure is the fully-qualified name of the SpawnService's ForkSpawn RPC.
+	SpawnServiceForkSpawnProcedure = "/cp.v1.SpawnService/ForkSpawn"
 	// SpawnServiceGetJournalKeyCiphertextProcedure is the fully-qualified name of the SpawnService's
 	// GetJournalKeyCiphertext RPC.
 	SpawnServiceGetJournalKeyCiphertextProcedure = "/cp.v1.SpawnService/GetJournalKeyCiphertext"
@@ -199,6 +201,9 @@ type SpawnServiceClient interface {
 	// resume with a placement override on the target. The owner client re-delivers the owner-sealed
 	// journal key to the target via DeliverSecrets so the journaled mounts restore there.
 	MigrateSpawn(context.Context, *connect.Request[v1.MigrateSpawnRequest]) (*connect.Response[v1.MigrateSpawnResponse], error)
+	// Source-preserving fork foundation: mint a child spawn and transfer-set fork pin, then delegate
+	// capture/seeding to the fork materializer seam. The source remains ACTIVE throughout.
+	ForkSpawn(context.Context, *connect.Request[v1.ForkSpawnRequest]) (*connect.Response[v1.ForkSpawnResponse], error)
 	// Owner-sealed journal-key ciphertext custody (sp-u53.5.4 deferred to this slice): the owner client
 	// fetches the at-rest owner-sealed ciphertext to unseal+reseal on a migration, and (on the
 	// node-local -> owner-sealed upgrade) stores it. Owner-only; the CP holds ONLY ciphertext.
@@ -379,6 +384,12 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			httpClient,
 			baseURL+SpawnServiceMigrateSpawnProcedure,
 			connect.WithSchema(spawnServiceMethods.ByName("MigrateSpawn")),
+			connect.WithClientOptions(opts...),
+		),
+		forkSpawn: connect.NewClient[v1.ForkSpawnRequest, v1.ForkSpawnResponse](
+			httpClient,
+			baseURL+SpawnServiceForkSpawnProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ForkSpawn")),
 			connect.WithClientOptions(opts...),
 		),
 		getJournalKeyCiphertext: connect.NewClient[v1.GetJournalKeyCiphertextRequest, v1.GetJournalKeyCiphertextResponse](
@@ -564,6 +575,7 @@ type spawnServiceClient struct {
 	getSpawnNodeKey         *connect.Client[v1.GetSpawnNodeKeyRequest, v1.GetSpawnNodeKeyResponse]
 	deliverSecrets          *connect.Client[v1.DeliverSecretsRequest, v1.DeliverSecretsResponse]
 	migrateSpawn            *connect.Client[v1.MigrateSpawnRequest, v1.MigrateSpawnResponse]
+	forkSpawn               *connect.Client[v1.ForkSpawnRequest, v1.ForkSpawnResponse]
 	getJournalKeyCiphertext *connect.Client[v1.GetJournalKeyCiphertextRequest, v1.GetJournalKeyCiphertextResponse]
 	putJournalKeyCiphertext *connect.Client[v1.PutJournalKeyCiphertextRequest, v1.PutJournalKeyCiphertextResponse]
 	getPendingIntent        *connect.Client[v1.GetPendingIntentRequest, v1.GetPendingIntentResponse]
@@ -700,6 +712,11 @@ func (c *spawnServiceClient) DeliverSecrets(ctx context.Context, req *connect.Re
 // MigrateSpawn calls cp.v1.SpawnService.MigrateSpawn.
 func (c *spawnServiceClient) MigrateSpawn(ctx context.Context, req *connect.Request[v1.MigrateSpawnRequest]) (*connect.Response[v1.MigrateSpawnResponse], error) {
 	return c.migrateSpawn.CallUnary(ctx, req)
+}
+
+// ForkSpawn calls cp.v1.SpawnService.ForkSpawn.
+func (c *spawnServiceClient) ForkSpawn(ctx context.Context, req *connect.Request[v1.ForkSpawnRequest]) (*connect.Response[v1.ForkSpawnResponse], error) {
+	return c.forkSpawn.CallUnary(ctx, req)
 }
 
 // GetJournalKeyCiphertext calls cp.v1.SpawnService.GetJournalKeyCiphertext.
@@ -861,6 +878,9 @@ type SpawnServiceHandler interface {
 	// resume with a placement override on the target. The owner client re-delivers the owner-sealed
 	// journal key to the target via DeliverSecrets so the journaled mounts restore there.
 	MigrateSpawn(context.Context, *connect.Request[v1.MigrateSpawnRequest]) (*connect.Response[v1.MigrateSpawnResponse], error)
+	// Source-preserving fork foundation: mint a child spawn and transfer-set fork pin, then delegate
+	// capture/seeding to the fork materializer seam. The source remains ACTIVE throughout.
+	ForkSpawn(context.Context, *connect.Request[v1.ForkSpawnRequest]) (*connect.Response[v1.ForkSpawnResponse], error)
 	// Owner-sealed journal-key ciphertext custody (sp-u53.5.4 deferred to this slice): the owner client
 	// fetches the at-rest owner-sealed ciphertext to unseal+reseal on a migration, and (on the
 	// node-local -> owner-sealed upgrade) stores it. Owner-only; the CP holds ONLY ciphertext.
@@ -1037,6 +1057,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		SpawnServiceMigrateSpawnProcedure,
 		svc.MigrateSpawn,
 		connect.WithSchema(spawnServiceMethods.ByName("MigrateSpawn")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceForkSpawnHandler := connect.NewUnaryHandler(
+		SpawnServiceForkSpawnProcedure,
+		svc.ForkSpawn,
+		connect.WithSchema(spawnServiceMethods.ByName("ForkSpawn")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceGetJournalKeyCiphertextHandler := connect.NewUnaryHandler(
@@ -1241,6 +1267,8 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceDeliverSecretsHandler.ServeHTTP(w, r)
 		case SpawnServiceMigrateSpawnProcedure:
 			spawnServiceMigrateSpawnHandler.ServeHTTP(w, r)
+		case SpawnServiceForkSpawnProcedure:
+			spawnServiceForkSpawnHandler.ServeHTTP(w, r)
 		case SpawnServiceGetJournalKeyCiphertextProcedure:
 			spawnServiceGetJournalKeyCiphertextHandler.ServeHTTP(w, r)
 		case SpawnServicePutJournalKeyCiphertextProcedure:
@@ -1388,6 +1416,10 @@ func (UnimplementedSpawnServiceHandler) DeliverSecrets(context.Context, *connect
 
 func (UnimplementedSpawnServiceHandler) MigrateSpawn(context.Context, *connect.Request[v1.MigrateSpawnRequest]) (*connect.Response[v1.MigrateSpawnResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.MigrateSpawn is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ForkSpawn(context.Context, *connect.Request[v1.ForkSpawnRequest]) (*connect.Response[v1.ForkSpawnResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ForkSpawn is not implemented"))
 }
 
 func (UnimplementedSpawnServiceHandler) GetJournalKeyCiphertext(context.Context, *connect.Request[v1.GetJournalKeyCiphertextRequest]) (*connect.Response[v1.GetJournalKeyCiphertextResponse], error) {

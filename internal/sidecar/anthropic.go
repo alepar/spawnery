@@ -641,8 +641,10 @@ func randID() string {
 
 // NewMessagesHandler returns an http.Handler for POST /v1/messages that translates the
 // Anthropic Messages API to OpenAI Chat Completions against upstream, injecting the bearer key.
-func NewMessagesHandler(upstream, key string, ov *Override) http.Handler {
+func NewMessagesHandler(upstream, key string, ov *Override, trackers ...*Inflight) http.Handler {
+	upstream = strings.TrimRight(upstream, "/")
 	client := &http.Client{}
+	inflight := firstInflight(trackers)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeAnthropicError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
@@ -689,6 +691,8 @@ func NewMessagesHandler(upstream, key string, ov *Override) http.Handler {
 			upReq.Header.Set("Accept", "text/event-stream")
 		}
 
+		inflight.Begin()
+		defer inflight.End()
 		resp, err := client.Do(upReq)
 		if err != nil {
 			log.Printf("warn: sidecar: /v1/messages upstream request failed: %v", err)

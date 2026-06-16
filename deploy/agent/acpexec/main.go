@@ -65,25 +65,25 @@ func serve(ln net.Listener, argv []string) error {
 }
 
 // runChild starts the agent and relays bytes between conn and the child's
-// stdin/stdout with explicit copy goroutines, blocking until the child exits.
+// stdin/stdout, blocking until the child exits.
 //
-// We deliberately use cmd.StdinPipe/StdoutPipe + io.Copy rather than wiring
-// cmd.Stdin/cmd.Stdout = conn directly. Because conn is a net.Conn (not an
-// *os.File), os/exec would spawn internal copy goroutines AND make cmd.Wait()
-// block until they finish. If the child exits before the node closes conn (goose
-// crash / OOM / auth error / panic) while the node's Pump holds its long-lived
-// conn open and idle, that internal node->child copy stays blocked on
-// conn.Read() forever, so cmd.Wait() never returns, runChild never returns, the
-// deferred Kill never fires, and the accept loop is wedged — the bridge can
-// never accept the node's reconnect (the .16 review deadlock).
+// We deliberately use cmd.StdinPipe rather than wiring cmd.Stdin = conn
+// directly. Because conn is a net.Conn (not an *os.File), os/exec would spawn an
+// internal node->child copy goroutine AND make cmd.Wait() block until it
+// finishes. If the child exits before the node closes conn (goose crash / OOM /
+// auth error / panic) while the node's Pump holds its long-lived conn open and
+// idle, that internal node->child copy stays blocked on conn.Read() forever, so
+// cmd.Wait() never returns, runChild never returns, the deferred Kill never
+// fires, and the accept loop is wedged — the bridge can never accept the node's
+// reconnect (the .16 review deadlock).
 //
-// With pipes, cmd.Wait() does NOT wait on our copy goroutines, so it returns the
-// instant the child exits. We then Close conn to unblock the node->child copy
-// reading from it. cmd.Wait always runs so there are no zombies (the .6 zombie
-// lesson), and the conn.Close + EOF on the pipes ensure no goroutine leaks
-// across connections.
+// Stdout is safe to let os/exec copy to conn: that copy terminates when the
+// child's stdout reaches EOF, so cmd.Wait() can drain the final bytes before we
+// close conn. cmd.Wait always runs so there are no zombies (the .6 zombie
+// lesson), and conn.Close unblocks our node->child copy across connections.
 func runChild(conn net.Conn, argv []string) {
 	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdout = conn
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
 
@@ -92,15 +92,10 @@ func runChild(conn net.Conn, argv []string) {
 		log.Printf("stdin pipe for %v: %v", argv, err)
 		return
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Printf("stdout pipe for %v: %v", argv, err)
-		_ = stdin.Close()
-		return
-	}
 
 	if err := cmd.Start(); err != nil {
 		log.Printf("start agent %v: %v", argv, err)
+		_ = stdin.Close()
 		return
 	}
 	// Safety net: ensure the child is gone before we return so a fresh one starts
@@ -113,13 +108,8 @@ func runChild(conn net.Conn, argv []string) {
 		_, _ = io.Copy(stdin, conn)
 		_ = stdin.Close()
 	}()
-	// child -> node.
-	go func() {
-		_, _ = io.Copy(conn, stdout)
-	}()
 
-	// Wait returns the instant the child exits (pipes mean it does not block on
-	// our copy goroutines).
+	// Wait returns once the child exits and os/exec has drained stdout to conn.
 	if err := cmd.Wait(); err != nil {
 		log.Printf("agent %v exited: %v", argv, err)
 	}

@@ -14,7 +14,9 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
+	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/store"
+	"spawnery/internal/secrets/journalkey"
 )
 
 // createActiveSpawn inserts an active spawn owned by `owner`, bound to nodeID at generation 1, and
@@ -32,6 +34,51 @@ func createActiveSpawn(t *testing.T, s *Server, owner, spawnID, nodeID string) {
 	}
 	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().SetActive(ctx, spawnID, nodeID, 1) }); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func createPendingFork(t *testing.T, s *Server, owner, sourceID, forkID, sourceNodeID, targetNodeID string, sourceGeneration, targetGeneration uint64) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().Unix()
+	if err := s.st.Owners().Upsert(ctx, store.Owner{ID: owner, CreatedAt: now}); err != nil {
+		t.Fatalf("seed owner: %v", err)
+	}
+	source := store.Spawn{
+		ID: sourceID, OwnerID: owner, Name: "source", AppID: "secret-app", AppVersion: "1.0.0",
+		AppRef: "examples/secret-app", Model: "m", CreatedAt: now, LastUsedAt: now, Status: store.Active,
+	}
+	parentID := sourceID
+	forkedAt := now
+	fork := store.Spawn{
+		ID: forkID, OwnerID: owner, Name: "fork", AppID: source.AppID, AppVersion: source.AppVersion,
+		AppRef: source.AppRef, Model: source.Model, CreatedAt: now, LastUsedAt: now, Status: store.Starting,
+		ParentSpawnID: &parentID, ForkedAt: &forkedAt,
+	}
+	if err := s.st.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.Spawns().Create(ctx, source, []store.Mount{{Name: "main", BackendURI: "scratch"}}); err != nil {
+			return err
+		}
+		if err := tx.Spawns().Create(ctx, fork, []store.Mount{{Name: "main", BackendURI: "scratch"}}); err != nil {
+			return err
+		}
+		return tx.TransferSets().Create(ctx, store.TransferSet{
+			ID:                "ts-" + forkID,
+			Kind:              store.TransferSetFork,
+			SpawnID:           forkID,
+			SourceSpawnID:     sourceID,
+			ForkSpawnID:       forkID,
+			SourceGeneration:  sourceGeneration,
+			TargetGeneration:  targetGeneration,
+			SourceNodeID:      sourceNodeID,
+			TargetNodeID:      targetNodeID,
+			TransferKeyStatus: store.TransferKeyTargetReady,
+			Status:            store.TransferSetRestoring,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		})
+	}); err != nil {
+		t.Fatalf("seed pending fork: %v", err)
 	}
 }
 
@@ -128,6 +175,31 @@ func TestGetPendingIntentReturnsTargetNodeSubKey(t *testing.T) {
 	goSubmitIntent(context.Background(), s, spawnID, "alice", sessionKey, errCh)
 	if submitErr := <-errCh; submitErr != nil {
 		t.Fatalf("SubmitIntent cleanup: %v", submitErr)
+	}
+}
+
+func TestGetSpawnNodeKeyReturnsPendingForkTargetSubKey(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	subkeyJSON := []byte(`{"hpke_pub":"BBBB","node_id":"node-2","not_after":"2099-01-01T00:00:00Z"}`)
+	certChain := []byte("node-2-cert-chain")
+	s.nodeKeys.put("node-2", subkeyJSON, certChain)
+	createPendingFork(t, s, "alice", "sp-source", "sp-fork", "node-1", "node-2", 9, 1)
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.GetSpawnNodeKey(ctx, connect.NewRequest(&cpv1.GetSpawnNodeKeyRequest{SpawnId: "sp-fork"}))
+	if err != nil {
+		t.Fatalf("GetSpawnNodeKey pending fork: %v", err)
+	}
+	if !bytes.Equal(resp.Msg.SignedSubkey, subkeyJSON) || !bytes.Equal(resp.Msg.NodeCertChain, certChain) {
+		t.Fatalf("pending fork key material = subkey %q cert %q", resp.Msg.SignedSubkey, resp.Msg.NodeCertChain)
+	}
+	if resp.Msg.Generation != 1 {
+		t.Fatalf("pending fork generation = %d, want 1", resp.Msg.Generation)
+	}
+
+	mallory := auth.WithOwner(context.Background(), "mallory")
+	if _, err := s.GetSpawnNodeKey(mallory, connect.NewRequest(&cpv1.GetSpawnNodeKeyRequest{SpawnId: "sp-fork"})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("non-owner pending fork GetSpawnNodeKey: want PermissionDenied, got %v", err)
 	}
 }
 
@@ -241,6 +313,43 @@ func TestDeliverSecretsRelaysOpaqueCiphertext(t *testing.T) {
 	}
 	if sd.Secrets[0].Version != 11 || sd.Secrets[0].DeliveryId != "delivery-gh-v11" {
 		t.Fatalf("relayed delivery metadata = version %d id %q, want version 11 id delivery-gh-v11", sd.Secrets[0].Version, sd.Secrets[0].DeliveryId)
+	}
+}
+
+func TestDeliverSecretsRelaysOpaqueCiphertextToPendingForkTargetAndClearsJournalPending(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	createPendingFork(t, s, "alice", "sp-source", "sp-fork", "node-1", "node-2", 9, 1)
+	sender := &capSender{}
+	reg.Add(&registry.Node{ID: "node-2", Sender: sender, Max: 1, Free: 1, Class: "cloud"})
+	s.deliveryPending.mark("sp-fork")
+
+	ciphertext := []byte{0xCA, 0xFE, 0x00, 0x02}
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.DeliverSecrets(ctx, connect.NewRequest(&cpv1.DeliverSecretsRequest{
+		SpawnId: "sp-fork",
+		Secrets: []*cpv1.SealedSecret{{
+			TargetPath: "journal/main",
+			Sealed:     ciphertext,
+			SecretId:   journalkey.SecretID("main"),
+		}},
+	}))
+	if err != nil {
+		t.Fatalf("DeliverSecrets pending fork: %v", err)
+	}
+	got := sender.secretDeliveries()
+	if len(got) != 1 {
+		t.Fatalf("relayed %d SecretDelivery messages, want 1", len(got))
+	}
+	sd := got[0]
+	if sd.SpawnId != "sp-fork" || sd.Generation != 1 {
+		t.Fatalf("pending fork delivery wrong spawn/gen: %+v", sd)
+	}
+	if len(sd.Secrets) != 1 || !bytes.Equal(sd.Secrets[0].Sealed, ciphertext) ||
+		sd.Secrets[0].SecretId != journalkey.SecretID("main") {
+		t.Fatalf("pending fork delivery mangled ciphertext/metadata: %+v", sd.Secrets)
+	}
+	if s.deliveryPending.isPending("sp-fork") {
+		t.Fatal("journal-key delivery must clear pending state for the fork")
 	}
 }
 

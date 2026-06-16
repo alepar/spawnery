@@ -270,6 +270,8 @@ func toSummaryStatus(s store.Status) cpv1.SpawnStatus {
 		return cpv1.SpawnStatus_SPAWN_STATUS_STARTING
 	case store.Active:
 		return cpv1.SpawnStatus_SPAWN_STATUS_ACTIVE
+	case store.Forking:
+		return cpv1.SpawnStatus_SPAWN_STATUS_ACTIVE
 	case store.Suspending:
 		return cpv1.SpawnStatus_SPAWN_STATUS_SUSPENDING
 	case store.Suspended:
@@ -644,14 +646,16 @@ type placementOverride struct {
 type rootfsRestorePins struct {
 	SourceGeneration uint64
 	Pins             []store.RootfsArtifactPin
+	LocalOnly        bool
 }
 
 func schedulerRootfsRestore(rootfs *rootfsRestorePins) *scheduler.RootfsRestore {
 	if rootfs == nil || len(rootfs.Pins) == 0 {
 		return nil
 	}
-	out := make([]*nodev1.RootfsArtifact, 0, len(rootfs.Pins))
-	for _, pin := range rootfs.Pins {
+	pins := sortedRootfsArtifactPins(rootfs.Pins)
+	out := make([]*nodev1.RootfsArtifact, 0, len(pins))
+	for _, pin := range pins {
 		out = append(out, &nodev1.RootfsArtifact{
 			ArtifactId:       pin.ArtifactID,
 			Generation:       pin.Generation,
@@ -662,7 +666,7 @@ func schedulerRootfsRestore(rootfs *rootfsRestorePins) *scheduler.RootfsRestore 
 			UncompressedSize: pin.UncompressedSize,
 		})
 	}
-	return &scheduler.RootfsRestore{SourceGeneration: rootfs.SourceGeneration, Artifacts: out}
+	return &scheduler.RootfsRestore{SourceGeneration: rootfs.SourceGeneration, Artifacts: out, LocalOnly: rootfs.LocalOnly}
 }
 
 func rootfsPinsFromSuspend(sc *nodev1.SuspendComplete, sourceGeneration uint64, baseImageDigest string) ([]store.RootfsArtifactPin, error) {
@@ -692,6 +696,10 @@ func rootfsPinsFromSuspend(sc *nodev1.SuspendComplete, sourceGeneration uint64, 
 			ContentDigest:    art.GetContentDigest(),
 			UncompressedSize: art.GetUncompressedSize(),
 		})
+	}
+	pins = sortedRootfsArtifactPins(pins)
+	if err := validateRootfsArtifactPinChain(pins); err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
 	return pins, nil
 }
@@ -728,6 +736,21 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	placement.Image = sp.Image
 	placement.TargetNodeID = ov.NodeID
 	placement.RequireClass = ov.Class
+	if placement.TargetNodeID == "" && placement.RequireClass == "" {
+		classes, cerr := s.classifyMounts(ctx, id)
+		if cerr != nil {
+			return "", connect.NewError(connect.CodeInternal, cerr)
+		}
+		if hasJournaledMount(classes) {
+			c, ok, cerr := s.st.Spawns().LatestContainer(ctx, id)
+			if cerr != nil {
+				return "", connect.NewError(connect.CodeInternal, cerr)
+			}
+			if ok && c.NodeID != "" {
+				placement.TargetNodeID = c.NodeID
+			}
+		}
+	}
 
 	var gen int64
 	if err := s.st.WithTx(ctx, func(tx store.Store) error {
@@ -1265,6 +1288,12 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 			Name: sp.Name, Mode: sp.Mode, ModelApplied: sp.ModelApplied,
 			Generation: gen, JournalKeyDeliveryPending: s.deliveryPending.isPending(sp.ID),
 			TransitionPhase: transPhase, TransitionDetail: transDetail,
+		}
+		if sp.ParentSpawnID != nil {
+			out[i].ParentSpawnId = *sp.ParentSpawnID
+		}
+		if sp.ForkedAt != nil {
+			out[i].ForkedAt = *sp.ForkedAt
 		}
 	}
 	return connect.NewResponse(&cpv1.ListSpawnsResponse{Spawns: out}), nil

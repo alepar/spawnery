@@ -329,6 +329,7 @@ func TestProvisionThreadsRootfsRestorePins(t *testing.T) {
 
 	rootfs := &RootfsRestore{
 		SourceGeneration: 9,
+		LocalOnly:        true,
 		Artifacts: []*nodev1.RootfsArtifact{{
 			ArtifactId: "rootfs-gen9", Generation: 9, BaseImageDigest: "agent@sha256:base", Format: "oci_layout",
 		}},
@@ -342,5 +343,8 @@ func TestProvisionThreadsRootfsRestorePins(t *testing.T) {
 	if got.GetRootfsSourceGeneration() != 9 || len(got.GetRootfsArtifacts()) != 1 ||
 		got.GetRootfsArtifacts()[0].GetArtifactId() != "rootfs-gen9" {
 		t.Fatalf("StartSpawn rootfs restore = gen %d artifacts %+v", got.GetRootfsSourceGeneration(), got.GetRootfsArtifacts())
+	}
+	if !got.GetRootfsArtifactsLocalOnly() {
+		t.Fatal("StartSpawn.RootfsArtifactsLocalOnly = false, want true")
 	}
 }

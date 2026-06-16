@@ -35,6 +35,7 @@ type Scheduler struct {
 type RootfsRestore struct {
 	SourceGeneration uint64
 	Artifacts        []*nodev1.RootfsArtifact
+	LocalOnly        bool
 }
 
 func New(reg *registry.Registry, rt *router.Router, timeout time.Duration) *Scheduler {
@@ -101,6 +102,7 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 	if rootfs != nil && len(rootfs.Artifacts) > 0 {
 		start.RootfsSourceGeneration = rootfs.SourceGeneration
 		start.RootfsArtifacts = rootfs.Artifacts
+		start.RootfsArtifactsLocalOnly = rootfs.LocalOnly
 	}
 	if len(artifacts) > 0 {
 		start.Artifacts = artifacts

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	nodev1 "spawnery/gen/node/v1"
@@ -19,13 +20,26 @@ import (
 // simulating a suspend gate failure (e.g. journal sink unreachable). When putArtifactErr is set,
 // PutArtifact returns that error, simulating a rootfs artifact store failure (FinishSuspend path).
 type fakeNodeJournal struct {
-	finalID        journal.ManifestID
-	finalErr       error
-	putArtifactErr error
+	finalID          journal.ManifestID
+	finalErr         error
+	putArtifactErr   error
+	finalStarted     chan struct{}
+	finalStartedOnce sync.Once
+	finalBlock       <-chan struct{}
 }
 
 func (f *fakeNodeJournal) RequestSnapshot(context.Context, string, uint64, journal.Mount) {}
-func (f *fakeNodeJournal) FinalSnapshot(_ context.Context, _ string, _ uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
+func (f *fakeNodeJournal) FinalSnapshot(ctx context.Context, _ string, _ uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
+	if f.finalStarted != nil {
+		f.finalStartedOnce.Do(func() { close(f.finalStarted) })
+	}
+	if f.finalBlock != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-f.finalBlock:
+		}
+	}
 	if f.finalErr != nil {
 		return nil, f.finalErr
 	}
@@ -35,7 +49,17 @@ func (f *fakeNodeJournal) FinalSnapshot(_ context.Context, _ string, _ uint64, m
 	}
 	return out, nil
 }
+func (f *fakeNodeJournal) WarmSnapshot(_ context.Context, _ string, _ uint64, mounts []journal.Mount) (map[string]journal.ManifestID, error) {
+	out := map[string]journal.ManifestID{}
+	for _, mt := range mounts {
+		out[mt.Name] = f.finalID
+	}
+	return out, nil
+}
 func (f *fakeNodeJournal) Restore(context.Context, string, string, journal.ManifestID, string) error {
+	return nil
+}
+func (f *fakeNodeJournal) RestoreGeneration(context.Context, string, uint64, string, journal.ManifestID, string) error {
 	return nil
 }
 func (f *fakeNodeJournal) LatestForGeneration(context.Context, string, string, uint64) (journal.ManifestID, error) {
@@ -220,7 +244,7 @@ func TestStartSpawnRestoresPinnedRootfsArtifacts(t *testing.T) {
 		BaseImageDigest:        "agent@sha256:base",
 		RootfsSourceGeneration: 7,
 		RootfsArtifacts: []*nodev1.RootfsArtifact{{
-			ArtifactId: "artifact-rootfs-gen7", Generation: 7, BaseImageDigest: "agent@sha256:base",
+			ArtifactId: "artifact-rootfs-gen7", Generation: 7, Sequence: 1, BaseImageDigest: "agent@sha256:base",
 			Format: journal.ArtifactFormatOCILayout,
 		}},
 	})

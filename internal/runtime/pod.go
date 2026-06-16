@@ -101,6 +101,10 @@ type PodBackend interface {
 	// the committed layer count > base layer count (moby#47065 guard), and returns the delta tag.
 	// Suspend-path only; .Stop removes the container afterward via the normal path.
 	CaptureDelta(ctx context.Context, h *PodHandle) (ref string, err error)
+	// CaptureDeltaAs commits the agent container's writable layer to the delta tag for targetSpawnID
+	// while reading from h's source agent container. Fork uses this to preserve the source pod while
+	// seeding the fork's rootfs delta tag.
+	CaptureDeltaAs(ctx context.Context, h *PodHandle, targetSpawnID string) (ref string, err error)
 	// ReleaseDelta removes the per-spawn delta tag (GC). Task .12 wires the callers.
 	ReleaseDelta(ctx context.Context, spawnID string) error
 	// ExportDelta streams the deterministic per-spawn delta image archive. Cross-node

@@ -244,6 +244,30 @@ func TestCaptureDeltaCommitsAndTags(t *testing.T) {
 	if ni.Layers <= 5 {
 		t.Fatalf("committed image layers = %d, want > 5 (base)", ni.Layers)
 	}
+	if !f.Stopped["agent-1"] {
+		t.Fatal("CaptureDelta must stop the source agent container after suspend capture")
+	}
+}
+
+func TestCaptureDeltaAsCommitsWithoutStoppingSourceContainer(t *testing.T) {
+	f := NewFake()
+	const baseRef = "spawnery/agent:dev"
+	f.Images[baseRef] = ImageInfo{ID: "sha256:base", Layers: 5}
+	f.Started = append(f.Started, ContainerSpec{Image: baseRef})
+
+	b := NewDockerPodBackend(f, "", "smoke")
+	h := &PodHandle{SpawnID: "sp-source", AgentID: "agent-1", BaseImageRef: baseRef}
+
+	ref, err := b.CaptureDeltaAs(context.Background(), h, "sp-fork")
+	if err != nil {
+		t.Fatalf("CaptureDeltaAs: %v", err)
+	}
+	if ref != "spawnery/delta:sp-fork" {
+		t.Fatalf("delta tag = %q, want spawnery/delta:sp-fork", ref)
+	}
+	if f.Stopped["agent-1"] {
+		t.Fatal("CaptureDeltaAs must not stop the source agent container")
+	}
 }
 
 // A2: CaptureDelta returns an error when the committed image has <= base layers (moby#47065 guard).

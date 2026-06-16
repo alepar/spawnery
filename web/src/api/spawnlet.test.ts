@@ -35,9 +35,24 @@ describe("listSpawns", () => {
     const out = await listSpawns();
     expect(calls[0].url).toContain("/cp.v1.SpawnService/ListSpawns");
     expect(out).toEqual([
-      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
-      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "" },
+      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
+      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
     ]);
+  });
+  it("maps fork lineage fields from ListSpawns", async () => {
+    mockFetch({
+      spawns: [{
+        spawnId: "fork-1",
+        name: "Trial branch",
+        appId: "spawnery/wiki",
+        status: "SPAWN_STATUS_STARTING",
+        parentSpawnId: "source-1",
+        forkedAt: "1780000000",
+      }],
+    });
+    const out = await listSpawns();
+    expect(out[0].parentSpawnId).toBe("source-1");
+    expect(out[0].forkedAt).toBe(1780000000);
   });
   it("maps model and modelApplied from the response", async () => {
     mockFetch({
@@ -85,6 +100,9 @@ describe("spawnLifecycleAction", () => {
     for (const [status, want] of cases) {
       expect(spawnLifecycleAction(status), status).toEqual(want);
     }
+  });
+  it("uses seeding copy for fork children that are still starting", () => {
+    expect(spawnLifecycleAction("starting", undefined, true)).toEqual({ kind: "pending", label: "Seeding…" });
   });
   it("includes phase in suspending/resuming labels when transitionPhase is set", () => {
     expect(spawnLifecycleAction("suspending", "snapshot")).toEqual({ kind: "pending", label: "Suspending: snapshot" });

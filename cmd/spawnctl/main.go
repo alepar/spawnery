@@ -53,7 +53,7 @@ func main() {
 			&cli.StringFlag{Name: "profile", Usage: "customization profile id to apply at create (CP mode)"},
 		},
 		Action:   rootAction,
-		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), setModelCmd(), keyCmd(), moveCmd(), loginCmd(), logoutCmd(), profileCmd(), catalogCmd()},
+		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), setModelCmd(), keyCmd(), moveCmd(), forkCmd(), loginCmd(), logoutCmd(), profileCmd(), catalogCmd()},
 	}
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		log.Fatal(err)
