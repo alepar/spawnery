@@ -12,12 +12,18 @@ import (
 var (
 	ErrConflict = errors.New("authsvc/store: conflict")
 	ErrNotFound = errors.New("authsvc/store: not found")
+	// ErrCipherRequired is returned by GitHubLinks operations when the store was
+	// opened without a TokenCipher (fail-closed: never silently store plaintext).
+	ErrCipherRequired = errors.New("authsvc/store: github token cipher not configured")
 )
 
 // Config selects the backend. Driver is "sqlite" (only).
 type Config struct {
 	Driver string
 	DSN    string
+	// TokenCipher encrypts AS-custodial github_links token columns at rest
+	// (§16.2 / MAJOR-2). Required for the GitHubLinks repo; other repos ignore it.
+	TokenCipher TokenCipher
 }
 
 type UserRepo interface {

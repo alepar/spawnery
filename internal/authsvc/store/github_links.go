@@ -8,7 +8,31 @@ import (
 	"github.com/uptrace/bun"
 )
 
-type githubLinkRepo struct{ db bun.IDB }
+type githubLinkRepo struct {
+	db     bun.IDB
+	cipher TokenCipher
+}
+
+func aadRefresh(secretID string) string { return "github_link/refresh/v1/" + secretID }
+func aadAccess(secretID string) string  { return "github_link/access/v1/" + secretID }
+
+// decryptTokens converts the on-disk ciphertext token columns back to plaintext
+// in place. Callers receive plaintext GitHubLink fields, unchanged in shape.
+func (r *githubLinkRepo) decryptTokens(l *GitHubLink) error {
+	if r.cipher == nil {
+		return ErrCipherRequired
+	}
+	rt, err := r.cipher.Decrypt(l.RefreshToken, aadRefresh(l.SecretID))
+	if err != nil {
+		return err
+	}
+	at, err := r.cipher.Decrypt(l.AccessToken, aadAccess(l.SecretID))
+	if err != nil {
+		return err
+	}
+	l.RefreshToken, l.AccessToken = rt, at
+	return nil
+}
 
 func (r *githubLinkRepo) Get(ctx context.Context, secretID string) (GitHubLink, error) {
 	var link GitHubLink
@@ -18,11 +42,28 @@ func (r *githubLinkRepo) Get(ctx context.Context, secretID string) (GitHubLink, 
 	if errors.Is(err, sql.ErrNoRows) {
 		return GitHubLink{}, ErrNotFound
 	}
-	return link, err
+	if err != nil {
+		return GitHubLink{}, err
+	}
+	if err := r.decryptTokens(&link); err != nil {
+		return GitHubLink{}, err
+	}
+	return link, nil
 }
 
 func (r *githubLinkRepo) Upsert(ctx context.Context, link GitHubLink) error {
-	_, err := r.db.NewInsert().Model(&link).
+	if r.cipher == nil {
+		return ErrCipherRequired
+	}
+	enc := link
+	var err error
+	if enc.RefreshToken, err = r.cipher.Encrypt(link.RefreshToken, aadRefresh(link.SecretID)); err != nil {
+		return err
+	}
+	if enc.AccessToken, err = r.cipher.Encrypt(link.AccessToken, aadAccess(link.SecretID)); err != nil {
+		return err
+	}
+	_, err = r.db.NewInsert().Model(&enc).
 		On("CONFLICT (secret_id) DO UPDATE").
 		Set("account_id = EXCLUDED.account_id").
 		Set("host = EXCLUDED.host").
@@ -44,14 +85,25 @@ func (r *githubLinkRepo) Upsert(ctx context.Context, link GitHubLink) error {
 }
 
 func (r *githubLinkRepo) Rotate(ctx context.Context, secretID string, rot GitHubTokenRotation) (GitHubLink, error) {
+	if r.cipher == nil {
+		return GitHubLink{}, ErrCipherRequired
+	}
 	if rot.TokenType == "" {
 		rot.TokenType = "bearer"
 	}
+	encRefresh, err := r.cipher.Encrypt(rot.RefreshToken, aadRefresh(secretID))
+	if err != nil {
+		return GitHubLink{}, err
+	}
+	encAccess, err := r.cipher.Encrypt(rot.AccessToken, aadAccess(secretID))
+	if err != nil {
+		return GitHubLink{}, err
+	}
 	var link GitHubLink
 	q := r.db.NewUpdate().Model(&link).
-		Set("refresh_token = ?", rot.RefreshToken).
+		Set("refresh_token = ?", encRefresh).
 		Set("refresh_expires_at_unix = ?", rot.RefreshExpiresAtUnix).
-		Set("access_token = ?", rot.AccessToken).
+		Set("access_token = ?", encAccess).
 		Set("access_expires_at_unix = ?", rot.AccessExpiresAtUnix).
 		Set("token_type = ?", rot.TokenType).
 		Set("updated_at = ?", rot.UpdatedAt)
@@ -61,13 +113,19 @@ func (r *githubLinkRepo) Rotate(ctx context.Context, secretID string, rot GitHub
 	if rot.DeliveryID != "" {
 		q = q.Set("delivery_id = ?", rot.DeliveryID)
 	}
-	err := q.Where("secret_id = ? AND revoked = 0", secretID).
+	err = q.Where("secret_id = ? AND revoked = 0", secretID).
 		Returning("*").
 		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return GitHubLink{}, ErrNotFound
 	}
-	return link, err
+	if err != nil {
+		return GitHubLink{}, err
+	}
+	if err := r.decryptTokens(&link); err != nil {
+		return GitHubLink{}, err
+	}
+	return link, nil
 }
 
 func (r *githubLinkRepo) Revoke(ctx context.Context, secretID string, revokedAt int64) error {
