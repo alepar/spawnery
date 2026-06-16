@@ -105,3 +105,58 @@ type NodeRevocation struct {
 	Reason        string `bun:"reason,notnull"`
 	RevokedAt     int64  `bun:"revoked_at,notnull"`
 }
+
+type GitHubLink struct {
+	bun.BaseModel        `bun:"table:github_links,alias:ghl"`
+	SecretID             string `bun:"secret_id,pk"`
+	AccountID            string `bun:"account_id,notnull"`
+	Host                 string `bun:"host,notnull"`
+	Login                string `bun:"login,notnull"`
+	GithubUserID         string `bun:"github_user_id,notnull"`
+	AppClientID          string `bun:"app_client_id,notnull"`
+	RefreshToken         string `bun:"refresh_token,notnull"`
+	RefreshExpiresAtUnix int64  `bun:"refresh_expires_at_unix,notnull"`
+	AccessToken          string `bun:"access_token,nullzero"`
+	AccessExpiresAtUnix  int64  `bun:"access_expires_at_unix,nullzero"`
+	TokenType            string `bun:"token_type,notnull"`
+	Version              uint64 `bun:"version,notnull"`
+	DeliveryID           string `bun:"delivery_id,notnull"`
+	UpdatedAt            int64  `bun:"updated_at,notnull"`
+	Revoked              bool   `bun:"revoked,notnull"`
+	RevokedAt            int64  `bun:"revoked_at,nullzero"`
+
+	// Pending staging slot: write-ahead of an in-flight rotation (sp-v40s.15).
+	// Staged durably BEFORE the live tuple is advanced so a commit failure does not
+	// lose the single-use rotation result.  Cleared atomically by Rotate (promote).
+	PendingRefreshToken         string `bun:"pending_refresh_token,nullzero"`
+	PendingRefreshExpiresAtUnix int64  `bun:"pending_refresh_expires_at_unix,nullzero"`
+	PendingAccessToken          string `bun:"pending_access_token,nullzero"`
+	PendingAccessExpiresAtUnix  int64  `bun:"pending_access_expires_at_unix,nullzero"`
+	PendingTokenType            string `bun:"pending_token_type,nullzero"`
+	PendingVersion              uint64 `bun:"pending_version,nullzero"`
+	RelinkRequired              bool   `bun:"relink_required,notnull"`
+}
+
+// GitHubStagedRotation is the write-ahead capture of a GitHub rotation result: the new tuple plus
+// the version it will promote to. Staged durably BEFORE the rotation is committed (version bump +
+// delivery id) so a commit failure does not lose the single-use rotation (the predecessor refresh
+// token is already dead at GitHub). A retry promotes the staged tuple without re-calling GitHub.
+type GitHubStagedRotation struct {
+	RefreshToken         string
+	RefreshExpiresAtUnix int64
+	AccessToken          string
+	AccessExpiresAtUnix  int64
+	TokenType            string
+	Version              uint64 // target version this stage promotes to (current Version + 1)
+}
+
+type GitHubTokenRotation struct {
+	RefreshToken         string
+	RefreshExpiresAtUnix int64
+	AccessToken          string
+	AccessExpiresAtUnix  int64
+	TokenType            string
+	Version              uint64
+	DeliveryID           string
+	UpdatedAt            int64
+}

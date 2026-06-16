@@ -28,6 +28,11 @@ service SpawnService {
   // key material, seals locally, and hands the ciphertext back for the CP to relay (ciphertext-only).
   rpc GetSpawnNodeKey(GetSpawnNodeKeyRequest) returns (GetSpawnNodeKeyResponse);
   rpc DeliverSecrets(DeliverSecretsRequest)   returns (DeliverSecretsResponse);
+  // GitHub access-token refresh coordination (sp-v40s.9): AS asks CP to confirm a node hosts the
+  // spawn/link and to fan out AS-sealed access tokens. CP remains ciphertext-only.
+  rpc AuthorizeGitHubMint(AuthorizeGitHubMintRequest) returns (AuthorizeGitHubMintResponse);
+  rpc GetGitHubLinkTargets(GetGitHubLinkTargetsRequest) returns (GetGitHubLinkTargetsResponse);
+  rpc FanoutGitHubSealedAccessToken(FanoutGitHubSealedAccessTokenRequest) returns (FanoutGitHubSealedAccessTokenResponse);
   // Data-only local<->cloud migration (sp-u53.5.3): claim-guarded suspend on the source node ->
   // resume with a placement override on the target. The owner client re-delivers the owner-sealed
   // journal key to the target via DeliverSecrets so the journaled mounts restore there.
@@ -92,8 +97,15 @@ enum SpawnStatus {
 }
 
 // Per-mount backend choice the user picks at spawn time (validated against the app version's
-// declared mounts CP-side).
-message MountBinding { string name = 1; string backend_uri = 2; }
+// declared mounts CP-side). GitHub bindings carry non-secret routing metadata; token material
+// stays in SealedSecret deliveries.
+message MountBinding {
+  string name                 = 1;
+  string backend_uri          = 2;
+  string credential_secret_id = 3;
+  bool   create_if_missing    = 4;
+  string repository_id        = 5; // audit/validation metadata only; not a token scope guarantee.
+}
 
 // ArtifactContentType discriminates how spawnlet materializes an artifact's inline bytes:
 // BYTES => a single file written verbatim at `mode`; TAR => a packaged directory tree
@@ -383,6 +395,39 @@ message GetSpawnNodeKeyResponse { bytes node_cert_chain = 1; bytes signed_subkey
 // a SecretDelivery on the node's Attach stream.
 message DeliverSecretsRequest  { string spawn_id = 1; repeated SealedSecret secrets = 2; }
 message DeliverSecretsResponse {}
+
+message AuthorizeGitHubMintRequest {
+  string node_id       = 1;
+  string spawn_id      = 2;
+  uint64 generation    = 3;
+  string secret_id     = 4;
+  uint64 version       = 5;
+  string delivery_id   = 6;
+  string repository_id = 7;
+}
+message AuthorizeGitHubMintResponse {}
+
+message GitHubLinkTarget {
+  string spawn_id        = 1;
+  string node_id         = 2;
+  uint64 generation      = 3;
+  bytes  signed_subkey   = 4;
+  bytes  node_cert_chain = 5;
+  repeated SealedSecret secret_templates = 6; // clear routing metadata only; sealed bytes are stripped.
+}
+message GetGitHubLinkTargetsRequest  { string secret_id = 1; }
+message GetGitHubLinkTargetsResponse { repeated GitHubLinkTarget targets = 1; }
+
+message GitHubSealedAccessTokenDelivery {
+  string spawn_id = 1;
+  uint64 generation = 2;
+  repeated SealedSecret secrets = 3;
+}
+message FanoutGitHubSealedAccessTokenRequest {
+  string secret_id = 1;
+  repeated GitHubSealedAccessTokenDelivery deliveries = 2;
+}
+message FanoutGitHubSealedAccessTokenResponse {}
 
 // MigrateSpawn picks the resume target either by exact node id (target_node_id) or, when that is
 // empty, by node CLASS (target_class, e.g. "cloud"). Tenancy still applies: a self-hosted target

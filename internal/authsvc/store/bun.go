@@ -10,6 +10,7 @@ import (
 type bunStore struct {
 	db     bun.IDB
 	closer *bun.DB // non-nil only for the top-level store (so WithTx children don't close the pool)
+	cipher TokenCipher
 }
 
 func (s *bunStore) Close() error {
@@ -25,7 +26,7 @@ func (s *bunStore) WithTx(ctx context.Context, fn func(tx Store) error) error {
 		return fn(s) // already inside a tx — run inline (no nested tx)
 	}
 	return top.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		return fn(&bunStore{db: tx})
+		return fn(&bunStore{db: tx, cipher: s.cipher})
 	})
 }
 
@@ -36,3 +37,4 @@ func (s *bunStore) DeviceGrants() DeviceGrantRepo       { return &deviceGrantRep
 func (s *bunStore) Revocations() RevocationRepo         { return &revocationRepo{db: s.db} }
 func (s *bunStore) DeviceSets() DeviceSetRepo           { return &deviceSetRepo{db: s.db} }
 func (s *bunStore) NodeRevocations() NodeRevocationRepo { return &nodeRevocationRepo{db: s.db} }
+func (s *bunStore) GitHubLinks() GitHubLinkRepo         { return &githubLinkRepo{db: s.db, cipher: s.cipher} }

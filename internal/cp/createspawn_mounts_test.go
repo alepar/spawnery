@@ -55,8 +55,11 @@ func TestCreateSpawnPersistsRequestedMountBindingsAndDefaultsOthersToScratch(t *
 		AppId: "multi-mount-app",
 		Model: "m",
 		Mounts: []*cpv1.MountBinding{{
-			Name:       "main",
-			BackendUri: "github:owner/repo",
+			Name:               "main",
+			BackendUri:         "github:owner/repo",
+			CredentialSecretId: "gh-main",
+			CreateIfMissing:    true,
+			RepositoryId:       "123",
 		}},
 	}))
 	if err != nil {
@@ -68,15 +71,15 @@ func TestCreateSpawnPersistsRequestedMountBindingsAndDefaultsOthersToScratch(t *
 	if err != nil {
 		t.Fatalf("GetMounts: %v", err)
 	}
-	got := map[string]string{}
+	got := map[string]store.Mount{}
 	for _, mount := range mounts {
-		got[mount.Name] = mount.BackendURI
+		got[mount.Name] = mount
 	}
-	if got["main"] != "github:owner/repo" {
-		t.Fatalf("main backend = %q, want github:owner/repo; mounts=%+v", got["main"], mounts)
+	if got["main"].BackendURI != "github:owner/repo" || got["main"].CredentialSecretID != "gh-main" || !got["main"].CreateIfMissing || got["main"].RepositoryID != "123" {
+		t.Fatalf("main mount = %+v, want github metadata; mounts=%+v", got["main"], mounts)
 	}
-	if got["cache"] != "scratch" {
-		t.Fatalf("cache backend = %q, want scratch; mounts=%+v", got["cache"], mounts)
+	if got["cache"].BackendURI != "scratch" {
+		t.Fatalf("cache backend = %q, want scratch; mounts=%+v", got["cache"].BackendURI, mounts)
 	}
 }
 
@@ -108,6 +111,23 @@ func TestCreateSpawnRejectsDuplicateMountBindings(t *testing.T) {
 			{Name: "main", BackendUri: "scratch:"},
 			{Name: "main", BackendUri: "github:owner/repo"},
 		},
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("CreateSpawn error code = %v, want InvalidArgument (err=%v)", connect.CodeOf(err), err)
+	}
+}
+
+func TestCreateSpawnRejectsGithubMountWithoutCredentialSecretID(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId: "secret-app",
+		Model: "m",
+		Mounts: []*cpv1.MountBinding{{
+			Name:       "main",
+			BackendUri: "github:owner/repo",
+		}},
 	}))
 	if connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("CreateSpawn error code = %v, want InvalidArgument (err=%v)", connect.CodeOf(err), err)

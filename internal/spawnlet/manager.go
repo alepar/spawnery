@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"spawnery/internal/agentcaps"
+	"spawnery/internal/githubcred"
 	"spawnery/internal/manifest"
 	"spawnery/internal/runtime"
 	"spawnery/internal/spawnlet/firewall"
@@ -45,7 +46,12 @@ type ManagerConfig struct {
 	// StartSpawn.artifacts here at create/resume time. Default DataRoot/artifacts. Production should
 	// point this at a tmpfs (memory-backed) so transient payload bytes do not accumulate on durable disk.
 	ArtifactsRoot string
-	SidecarPort   int // default 8080
+	// GitHubCredentialsRoot is a node-only tmpfs root for short-lived access tokens used by storage
+	// backends. It is never bind-mounted into the agent; agent-render credentials use SecretsRoot.
+	GitHubCredentialsRoot string
+	GitHubRepos           storage.GitHubRepoService
+	GitHubGitRunner       storage.GitRunner
+	SidecarPort           int // default 8080
 
 	NodeID           string // this node's id (stamped on container labels for reconcile); "" standalone
 	NodeClass        string // "cloud" (always enforces) or "self-hosted" (honors EgressEnforce)
@@ -115,6 +121,9 @@ type Manager struct {
 	// Always set (NewManagerWithBackend defaults ArtifactsRoot); bind-mounted into the agent at
 	// ArtifactsMountPath; sensitive artifacts are routed to secrets by Materialize.
 	artifacts ArtifactStager
+	// githubCreds stores node-storage GitHub access tokens in a node-only tmpfs root. This root must
+	// not be SecretInjector.DirFor(spawnID), because that path is bind-mounted into the agent.
+	githubCreds GitHubCredentialStore
 
 	// watchersMu guards sp.journalWatchers on each Spawn against concurrent access from
 	// SnapshotForSuspend (which uses store.Get, leaving the spawn in the store) and
@@ -229,6 +238,9 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 	if cfg.ArtifactsRoot == "" {
 		cfg.ArtifactsRoot = filepath.Join(cfg.DataRoot, "artifacts")
 	}
+	if cfg.GitHubCredentialsRoot == "" {
+		cfg.GitHubCredentialsRoot = filepath.Join(cfg.DataRoot, "github-creds")
+	}
 	if cfg.DeltaSquashDepth == 0 {
 		cfg.DeltaSquashDepth = 16
 	}
@@ -239,11 +251,16 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		pod:             pod,
 		cfg:             cfg,
 		store:           NewStore(),
-		backendResolver: storage.NewSchemeResolver(cfg.DataRoot),
+		backendResolver: storage.NewSchemeResolverWithGitHub(cfg.DataRoot, nil),
 		fw:              fw,
 		secrets:         SecretInjector{Root: cfg.SecretsRoot},
 		artifacts:       ArtifactStager{Root: cfg.ArtifactsRoot},
+		githubCreds:     GitHubCredentialStore{Root: cfg.GitHubCredentialsRoot},
 		deltaState:      &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
+	}
+	if resolver, ok := m.backendResolver.(*storage.SchemeResolver); ok {
+		resolver.SetGitHubCredentials(m)
+		resolver.SetGitHubServices(cfg.GitHubRepos, cfg.GitHubGitRunner)
 	}
 	m.forkSyncFn = func(ctx context.Context) error {
 		return exec.CommandContext(ctx, "sync").Run()
@@ -734,7 +751,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	if err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
-	mountBackendURIs, err := mountBindingsByName(mf.Storage.Mounts, sel.Mounts)
+	mountBackendBindings, err := mountBindingsByName(mf.Storage.Mounts, sel.Mounts)
 	if err != nil {
 		return nil, err
 	}
@@ -808,8 +825,21 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 
 	agentUID := m.agentRootUID()
 	for _, mt := range mf.Storage.Mounts {
-		backendURI := mountBackendURIs[mt.Name]
-		mountBackend, err := resolver.Resolve(backendURI)
+		binding := mountBackendBindings[mt.Name]
+		if binding.Name == "" {
+			binding.Name = mt.Name
+		}
+		backendURI := binding.BackendURI
+		class, derr := journal.ParseDurability(mt.Durability)
+		if derr != nil {
+			finalizeAll()
+			return nil, fmt.Errorf("mount %q durability: %w", mt.Name, derr)
+		}
+		if storage.IsGitHubBackendURI(backendURI) && !class.Journaled() {
+			finalizeAll()
+			return nil, fmt.Errorf("mount %q github backend requires a journaled durability class", mt.Name)
+		}
+		mountBackend, err := resolveMountBackend(resolver, binding)
 		if err != nil {
 			finalizeAll()
 			return nil, fmt.Errorf("mount %q backend %q: %w", mt.Name, backendURI, err)
@@ -850,12 +880,6 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		// Transient-tier seam (design §1a/§3). Journaling only engages for mounts
 		// that opt into a journaled durability class; ephemeral mounts (the
 		// default) leave the scratch path entirely untouched.
-		class, derr := journal.ParseDurability(mt.Durability)
-		if derr != nil {
-			cleanupPrepared()
-			finalizeAll()
-			return nil, fmt.Errorf("mount %q durability: %w", mt.Name, derr)
-		}
 		jm := journal.Mount{Name: mt.Name, HostDir: hostDir, Class: class}
 		if m.journal != nil && jm.Class.Journaled() {
 			// Owner-sealed mounts route the repo password to the owner-sealed
@@ -954,6 +978,9 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		}
 		if aerr := m.artifacts.Remove(id); aerr != nil {
 			log.Printf("artifacts dir cleanup for %s: %v", id, aerr)
+		}
+		if gerr := m.githubCreds.Remove(id); gerr != nil {
+			log.Printf("github credential cleanup for %s: %v", id, gerr)
 		}
 	}
 	mounts = append(mounts, runtime.Mount{HostPath: secretsDir, ContainerPath: SecretsMountPath})
@@ -1129,6 +1156,8 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			"OPENAI_BASE_URL=http://" + addr + "/v1",
 			"SPAWN_MODEL=" + model,
 			"SPAWN_SESSION_TITLE=" + sessionTitle,
+			"GH_CONFIG_DIR=" + SecretsMountPath + "/github/gh",
+			"GIT_CONFIG_GLOBAL=" + SecretsMountPath + "/github/gitconfig",
 		},
 		Mounts:      mounts,
 		Resources:   res,
@@ -1164,7 +1193,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 
 	sp := &Spawn{
 		ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
-		MountDirs: mountDirs, MountFinalizers: mountFinalizers, JournalMounts: journalMounts, journalWatchers: watchers,
+		MountDirs: mountDirs, MountBindings: append([]MountBinding(nil), sel.Mounts...), MountFinalizers: mountFinalizers, JournalMounts: journalMounts, journalWatchers: watchers,
 		FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID,
 		Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL,
 		BaseImageDigest: baseDigest,
@@ -1737,6 +1766,9 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 	if aerr := m.artifacts.Remove(id); aerr != nil {
 		log.Printf("artifacts dir cleanup for %s: %v", id, aerr)
 	}
+	if gerr := m.githubCreds.Remove(id); gerr != nil {
+		log.Printf("github credential cleanup for %s: %v", id, gerr)
+	}
 
 	// GC path (Delete only): release the delta image and purge durable state files.
 	// Stop and Suspend leave the delta image in place for same-node restart-resume.
@@ -1767,6 +1799,33 @@ func (m *Manager) InjectSecret(spawnID, target string, plaintext []byte) (string
 		return "", fmt.Errorf("unknown spawn %s", spawnID)
 	}
 	return m.secrets.Write(spawnID, target, plaintext)
+}
+
+func (m *Manager) CleanupSpawnTransient(spawnID string) {
+	if err := m.secrets.Remove(spawnID); err != nil {
+		log.Printf("secrets dir cleanup for %s: %v", spawnID, err)
+	}
+	if err := m.artifacts.Remove(spawnID); err != nil {
+		log.Printf("artifacts dir cleanup for %s: %v", spawnID, err)
+	}
+	if err := m.githubCreds.Remove(spawnID); err != nil {
+		log.Printf("github credential cleanup for %s: %v", spawnID, err)
+	}
+}
+
+// RenderGitHubAgentCredential renders the agent-facing exact-repo GitHub helper/config into the
+// agent-visible secrets tmpfs. The root itself is journal-excluded by construction.
+func (m *Manager) RenderGitHubAgentCredential(spawnID string, req githubcred.RenderRequest) (githubcred.Rendered, error) {
+	req.RootInsideContainer = SecretsMountPath
+	return githubcred.Render(m.secrets.DirFor(spawnID), req)
+}
+
+func (m *Manager) MountBindings(spawnID string) ([]MountBinding, bool) {
+	sp, ok := m.store.Get(spawnID)
+	if !ok {
+		return nil, false
+	}
+	return append([]MountBinding(nil), sp.MountBindings...), true
 }
 
 // newControlToken returns a 256-bit random hex string used as the sidecar control-endpoint

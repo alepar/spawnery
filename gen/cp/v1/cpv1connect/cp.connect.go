@@ -90,6 +90,15 @@ const (
 	// SpawnServiceDeliverSecretsProcedure is the fully-qualified name of the SpawnService's
 	// DeliverSecrets RPC.
 	SpawnServiceDeliverSecretsProcedure = "/cp.v1.SpawnService/DeliverSecrets"
+	// SpawnServiceAuthorizeGitHubMintProcedure is the fully-qualified name of the SpawnService's
+	// AuthorizeGitHubMint RPC.
+	SpawnServiceAuthorizeGitHubMintProcedure = "/cp.v1.SpawnService/AuthorizeGitHubMint"
+	// SpawnServiceGetGitHubLinkTargetsProcedure is the fully-qualified name of the SpawnService's
+	// GetGitHubLinkTargets RPC.
+	SpawnServiceGetGitHubLinkTargetsProcedure = "/cp.v1.SpawnService/GetGitHubLinkTargets"
+	// SpawnServiceFanoutGitHubSealedAccessTokenProcedure is the fully-qualified name of the
+	// SpawnService's FanoutGitHubSealedAccessToken RPC.
+	SpawnServiceFanoutGitHubSealedAccessTokenProcedure = "/cp.v1.SpawnService/FanoutGitHubSealedAccessToken"
 	// SpawnServiceMigrateSpawnProcedure is the fully-qualified name of the SpawnService's MigrateSpawn
 	// RPC.
 	SpawnServiceMigrateSpawnProcedure = "/cp.v1.SpawnService/MigrateSpawn"
@@ -197,6 +206,11 @@ type SpawnServiceClient interface {
 	// key material, seals locally, and hands the ciphertext back for the CP to relay (ciphertext-only).
 	GetSpawnNodeKey(context.Context, *connect.Request[v1.GetSpawnNodeKeyRequest]) (*connect.Response[v1.GetSpawnNodeKeyResponse], error)
 	DeliverSecrets(context.Context, *connect.Request[v1.DeliverSecretsRequest]) (*connect.Response[v1.DeliverSecretsResponse], error)
+	// GitHub access-token refresh coordination (sp-v40s.9): AS asks CP to confirm a node hosts the
+	// spawn/link and to fan out AS-sealed access tokens. CP remains ciphertext-only.
+	AuthorizeGitHubMint(context.Context, *connect.Request[v1.AuthorizeGitHubMintRequest]) (*connect.Response[v1.AuthorizeGitHubMintResponse], error)
+	GetGitHubLinkTargets(context.Context, *connect.Request[v1.GetGitHubLinkTargetsRequest]) (*connect.Response[v1.GetGitHubLinkTargetsResponse], error)
+	FanoutGitHubSealedAccessToken(context.Context, *connect.Request[v1.FanoutGitHubSealedAccessTokenRequest]) (*connect.Response[v1.FanoutGitHubSealedAccessTokenResponse], error)
 	// Data-only local<->cloud migration (sp-u53.5.3): claim-guarded suspend on the source node ->
 	// resume with a placement override on the target. The owner client re-delivers the owner-sealed
 	// journal key to the target via DeliverSecrets so the journaled mounts restore there.
@@ -380,6 +394,24 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("DeliverSecrets")),
 			connect.WithClientOptions(opts...),
 		),
+		authorizeGitHubMint: connect.NewClient[v1.AuthorizeGitHubMintRequest, v1.AuthorizeGitHubMintResponse](
+			httpClient,
+			baseURL+SpawnServiceAuthorizeGitHubMintProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("AuthorizeGitHubMint")),
+			connect.WithClientOptions(opts...),
+		),
+		getGitHubLinkTargets: connect.NewClient[v1.GetGitHubLinkTargetsRequest, v1.GetGitHubLinkTargetsResponse](
+			httpClient,
+			baseURL+SpawnServiceGetGitHubLinkTargetsProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("GetGitHubLinkTargets")),
+			connect.WithClientOptions(opts...),
+		),
+		fanoutGitHubSealedAccessToken: connect.NewClient[v1.FanoutGitHubSealedAccessTokenRequest, v1.FanoutGitHubSealedAccessTokenResponse](
+			httpClient,
+			baseURL+SpawnServiceFanoutGitHubSealedAccessTokenProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("FanoutGitHubSealedAccessToken")),
+			connect.WithClientOptions(opts...),
+		),
 		migrateSpawn: connect.NewClient[v1.MigrateSpawnRequest, v1.MigrateSpawnResponse](
 			httpClient,
 			baseURL+SpawnServiceMigrateSpawnProcedure,
@@ -553,55 +585,58 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 
 // spawnServiceClient implements SpawnServiceClient.
 type spawnServiceClient struct {
-	createSpawn             *connect.Client[v1.CreateSpawnRequest, v1.CreateSpawnResponse]
-	listSpawns              *connect.Client[v1.ListSpawnsRequest, v1.ListSpawnsResponse]
-	listApps                *connect.Client[v1.ListAppsRequest, v1.ListAppsResponse]
-	listAgentImages         *connect.Client[v1.ListAgentImagesRequest, v1.ListAgentImagesResponse]
-	getApp                  *connect.Client[v1.GetAppRequest, v1.GetAppResponse]
-	registerAppVersion      *connect.Client[v1.RegisterAppVersionRequest, v1.RegisterAppVersionResponse]
-	setAppListing           *connect.Client[v1.SetAppListingRequest, v1.SetAppListingResponse]
-	listMyApps              *connect.Client[v1.ListMyAppsRequest, v1.ListMyAppsResponse]
-	session                 *connect.Client[v1.Frame, v1.Frame]
-	suspendSpawn            *connect.Client[v1.SuspendSpawnRequest, v1.SuspendSpawnResponse]
-	resumeSpawn             *connect.Client[v1.ResumeSpawnRequest, v1.ResumeSpawnResponse]
-	recreateSpawn           *connect.Client[v1.RecreateSpawnRequest, v1.RecreateSpawnResponse]
-	renameSpawn             *connect.Client[v1.RenameSpawnRequest, v1.RenameSpawnResponse]
-	setSpawnModel           *connect.Client[v1.SetSpawnModelRequest, v1.SetSpawnModelResponse]
-	deleteSpawn             *connect.Client[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse]
-	stopSpawn               *connect.Client[v1.StopSpawnRequest, v1.StopSpawnResponse]
-	listSessions            *connect.Client[v1.ListSessionsRequest, v1.ListSessionsResponse]
-	createSession           *connect.Client[v1.CreateSessionRequest, v1.CreateSessionResponse]
-	closeSession            *connect.Client[v1.CloseSessionRequest, v1.CloseSessionResponse]
-	getSpawnNodeKey         *connect.Client[v1.GetSpawnNodeKeyRequest, v1.GetSpawnNodeKeyResponse]
-	deliverSecrets          *connect.Client[v1.DeliverSecretsRequest, v1.DeliverSecretsResponse]
-	migrateSpawn            *connect.Client[v1.MigrateSpawnRequest, v1.MigrateSpawnResponse]
-	forkSpawn               *connect.Client[v1.ForkSpawnRequest, v1.ForkSpawnResponse]
-	getJournalKeyCiphertext *connect.Client[v1.GetJournalKeyCiphertextRequest, v1.GetJournalKeyCiphertextResponse]
-	putJournalKeyCiphertext *connect.Client[v1.PutJournalKeyCiphertextRequest, v1.PutJournalKeyCiphertextResponse]
-	getPendingIntent        *connect.Client[v1.GetPendingIntentRequest, v1.GetPendingIntentResponse]
-	submitIntent            *connect.Client[v1.SubmitIntentRequest, v1.SubmitIntentResponse]
-	listMigrationTargets    *connect.Client[v1.ListMigrationTargetsRequest, v1.ListMigrationTargetsResponse]
-	upgradeToOwnerSealed    *connect.Client[v1.UpgradeToOwnerSealedRequest, v1.UpgradeToOwnerSealedResponse]
-	createProfile           *connect.Client[v1.CreateProfileRequest, v1.CreateProfileResponse]
-	getProfile              *connect.Client[v1.GetProfileRequest, v1.GetProfileResponse]
-	listProfiles            *connect.Client[v1.ListProfilesRequest, v1.ListProfilesResponse]
-	updateProfile           *connect.Client[v1.UpdateProfileRequest, v1.UpdateProfileResponse]
-	deleteProfile           *connect.Client[v1.DeleteProfileRequest, v1.DeleteProfileResponse]
-	addProfileEntry         *connect.Client[v1.AddProfileEntryRequest, v1.AddProfileEntryResponse]
-	removeProfileEntry      *connect.Client[v1.RemoveProfileEntryRequest, v1.RemoveProfileEntryResponse]
-	addProfileSecretRef     *connect.Client[v1.AddProfileSecretRefRequest, v1.AddProfileSecretRefResponse]
-	removeProfileSecretRef  *connect.Client[v1.RemoveProfileSecretRefRequest, v1.RemoveProfileSecretRefResponse]
-	createSecret            *connect.Client[v1.CreateSecretRequest, v1.CreateSecretResponse]
-	getSecret               *connect.Client[v1.GetSecretRequest, v1.GetSecretResponse]
-	listSecrets             *connect.Client[v1.ListSecretsRequest, v1.ListSecretsResponse]
-	putSecret               *connect.Client[v1.PutSecretRequest, v1.PutSecretResponse]
-	deleteSecret            *connect.Client[v1.DeleteSecretRequest, v1.DeleteSecretResponse]
-	createCatalogEntry      *connect.Client[v1.CreateCatalogEntryRequest, v1.CreateCatalogEntryResponse]
-	getCatalogEntry         *connect.Client[v1.GetCatalogEntryRequest, v1.GetCatalogEntryResponse]
-	listCatalogEntries      *connect.Client[v1.ListCatalogEntriesRequest, v1.ListCatalogEntriesResponse]
-	updateCatalogEntry      *connect.Client[v1.UpdateCatalogEntryRequest, v1.UpdateCatalogEntryResponse]
-	deleteCatalogEntry      *connect.Client[v1.DeleteCatalogEntryRequest, v1.DeleteCatalogEntryResponse]
-	setCatalogListing       *connect.Client[v1.SetCatalogListingRequest, v1.SetCatalogListingResponse]
+	createSpawn                   *connect.Client[v1.CreateSpawnRequest, v1.CreateSpawnResponse]
+	listSpawns                    *connect.Client[v1.ListSpawnsRequest, v1.ListSpawnsResponse]
+	listApps                      *connect.Client[v1.ListAppsRequest, v1.ListAppsResponse]
+	listAgentImages               *connect.Client[v1.ListAgentImagesRequest, v1.ListAgentImagesResponse]
+	getApp                        *connect.Client[v1.GetAppRequest, v1.GetAppResponse]
+	registerAppVersion            *connect.Client[v1.RegisterAppVersionRequest, v1.RegisterAppVersionResponse]
+	setAppListing                 *connect.Client[v1.SetAppListingRequest, v1.SetAppListingResponse]
+	listMyApps                    *connect.Client[v1.ListMyAppsRequest, v1.ListMyAppsResponse]
+	session                       *connect.Client[v1.Frame, v1.Frame]
+	suspendSpawn                  *connect.Client[v1.SuspendSpawnRequest, v1.SuspendSpawnResponse]
+	resumeSpawn                   *connect.Client[v1.ResumeSpawnRequest, v1.ResumeSpawnResponse]
+	recreateSpawn                 *connect.Client[v1.RecreateSpawnRequest, v1.RecreateSpawnResponse]
+	renameSpawn                   *connect.Client[v1.RenameSpawnRequest, v1.RenameSpawnResponse]
+	setSpawnModel                 *connect.Client[v1.SetSpawnModelRequest, v1.SetSpawnModelResponse]
+	deleteSpawn                   *connect.Client[v1.DeleteSpawnRequest, v1.DeleteSpawnResponse]
+	stopSpawn                     *connect.Client[v1.StopSpawnRequest, v1.StopSpawnResponse]
+	listSessions                  *connect.Client[v1.ListSessionsRequest, v1.ListSessionsResponse]
+	createSession                 *connect.Client[v1.CreateSessionRequest, v1.CreateSessionResponse]
+	closeSession                  *connect.Client[v1.CloseSessionRequest, v1.CloseSessionResponse]
+	getSpawnNodeKey               *connect.Client[v1.GetSpawnNodeKeyRequest, v1.GetSpawnNodeKeyResponse]
+	deliverSecrets                *connect.Client[v1.DeliverSecretsRequest, v1.DeliverSecretsResponse]
+	authorizeGitHubMint           *connect.Client[v1.AuthorizeGitHubMintRequest, v1.AuthorizeGitHubMintResponse]
+	getGitHubLinkTargets          *connect.Client[v1.GetGitHubLinkTargetsRequest, v1.GetGitHubLinkTargetsResponse]
+	fanoutGitHubSealedAccessToken *connect.Client[v1.FanoutGitHubSealedAccessTokenRequest, v1.FanoutGitHubSealedAccessTokenResponse]
+	migrateSpawn                  *connect.Client[v1.MigrateSpawnRequest, v1.MigrateSpawnResponse]
+	forkSpawn                     *connect.Client[v1.ForkSpawnRequest, v1.ForkSpawnResponse]
+	getJournalKeyCiphertext       *connect.Client[v1.GetJournalKeyCiphertextRequest, v1.GetJournalKeyCiphertextResponse]
+	putJournalKeyCiphertext       *connect.Client[v1.PutJournalKeyCiphertextRequest, v1.PutJournalKeyCiphertextResponse]
+	getPendingIntent              *connect.Client[v1.GetPendingIntentRequest, v1.GetPendingIntentResponse]
+	submitIntent                  *connect.Client[v1.SubmitIntentRequest, v1.SubmitIntentResponse]
+	listMigrationTargets          *connect.Client[v1.ListMigrationTargetsRequest, v1.ListMigrationTargetsResponse]
+	upgradeToOwnerSealed          *connect.Client[v1.UpgradeToOwnerSealedRequest, v1.UpgradeToOwnerSealedResponse]
+	createProfile                 *connect.Client[v1.CreateProfileRequest, v1.CreateProfileResponse]
+	getProfile                    *connect.Client[v1.GetProfileRequest, v1.GetProfileResponse]
+	listProfiles                  *connect.Client[v1.ListProfilesRequest, v1.ListProfilesResponse]
+	updateProfile                 *connect.Client[v1.UpdateProfileRequest, v1.UpdateProfileResponse]
+	deleteProfile                 *connect.Client[v1.DeleteProfileRequest, v1.DeleteProfileResponse]
+	addProfileEntry               *connect.Client[v1.AddProfileEntryRequest, v1.AddProfileEntryResponse]
+	removeProfileEntry            *connect.Client[v1.RemoveProfileEntryRequest, v1.RemoveProfileEntryResponse]
+	addProfileSecretRef           *connect.Client[v1.AddProfileSecretRefRequest, v1.AddProfileSecretRefResponse]
+	removeProfileSecretRef        *connect.Client[v1.RemoveProfileSecretRefRequest, v1.RemoveProfileSecretRefResponse]
+	createSecret                  *connect.Client[v1.CreateSecretRequest, v1.CreateSecretResponse]
+	getSecret                     *connect.Client[v1.GetSecretRequest, v1.GetSecretResponse]
+	listSecrets                   *connect.Client[v1.ListSecretsRequest, v1.ListSecretsResponse]
+	putSecret                     *connect.Client[v1.PutSecretRequest, v1.PutSecretResponse]
+	deleteSecret                  *connect.Client[v1.DeleteSecretRequest, v1.DeleteSecretResponse]
+	createCatalogEntry            *connect.Client[v1.CreateCatalogEntryRequest, v1.CreateCatalogEntryResponse]
+	getCatalogEntry               *connect.Client[v1.GetCatalogEntryRequest, v1.GetCatalogEntryResponse]
+	listCatalogEntries            *connect.Client[v1.ListCatalogEntriesRequest, v1.ListCatalogEntriesResponse]
+	updateCatalogEntry            *connect.Client[v1.UpdateCatalogEntryRequest, v1.UpdateCatalogEntryResponse]
+	deleteCatalogEntry            *connect.Client[v1.DeleteCatalogEntryRequest, v1.DeleteCatalogEntryResponse]
+	setCatalogListing             *connect.Client[v1.SetCatalogListingRequest, v1.SetCatalogListingResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -707,6 +742,21 @@ func (c *spawnServiceClient) GetSpawnNodeKey(ctx context.Context, req *connect.R
 // DeliverSecrets calls cp.v1.SpawnService.DeliverSecrets.
 func (c *spawnServiceClient) DeliverSecrets(ctx context.Context, req *connect.Request[v1.DeliverSecretsRequest]) (*connect.Response[v1.DeliverSecretsResponse], error) {
 	return c.deliverSecrets.CallUnary(ctx, req)
+}
+
+// AuthorizeGitHubMint calls cp.v1.SpawnService.AuthorizeGitHubMint.
+func (c *spawnServiceClient) AuthorizeGitHubMint(ctx context.Context, req *connect.Request[v1.AuthorizeGitHubMintRequest]) (*connect.Response[v1.AuthorizeGitHubMintResponse], error) {
+	return c.authorizeGitHubMint.CallUnary(ctx, req)
+}
+
+// GetGitHubLinkTargets calls cp.v1.SpawnService.GetGitHubLinkTargets.
+func (c *spawnServiceClient) GetGitHubLinkTargets(ctx context.Context, req *connect.Request[v1.GetGitHubLinkTargetsRequest]) (*connect.Response[v1.GetGitHubLinkTargetsResponse], error) {
+	return c.getGitHubLinkTargets.CallUnary(ctx, req)
+}
+
+// FanoutGitHubSealedAccessToken calls cp.v1.SpawnService.FanoutGitHubSealedAccessToken.
+func (c *spawnServiceClient) FanoutGitHubSealedAccessToken(ctx context.Context, req *connect.Request[v1.FanoutGitHubSealedAccessTokenRequest]) (*connect.Response[v1.FanoutGitHubSealedAccessTokenResponse], error) {
+	return c.fanoutGitHubSealedAccessToken.CallUnary(ctx, req)
 }
 
 // MigrateSpawn calls cp.v1.SpawnService.MigrateSpawn.
@@ -874,6 +924,11 @@ type SpawnServiceHandler interface {
 	// key material, seals locally, and hands the ciphertext back for the CP to relay (ciphertext-only).
 	GetSpawnNodeKey(context.Context, *connect.Request[v1.GetSpawnNodeKeyRequest]) (*connect.Response[v1.GetSpawnNodeKeyResponse], error)
 	DeliverSecrets(context.Context, *connect.Request[v1.DeliverSecretsRequest]) (*connect.Response[v1.DeliverSecretsResponse], error)
+	// GitHub access-token refresh coordination (sp-v40s.9): AS asks CP to confirm a node hosts the
+	// spawn/link and to fan out AS-sealed access tokens. CP remains ciphertext-only.
+	AuthorizeGitHubMint(context.Context, *connect.Request[v1.AuthorizeGitHubMintRequest]) (*connect.Response[v1.AuthorizeGitHubMintResponse], error)
+	GetGitHubLinkTargets(context.Context, *connect.Request[v1.GetGitHubLinkTargetsRequest]) (*connect.Response[v1.GetGitHubLinkTargetsResponse], error)
+	FanoutGitHubSealedAccessToken(context.Context, *connect.Request[v1.FanoutGitHubSealedAccessTokenRequest]) (*connect.Response[v1.FanoutGitHubSealedAccessTokenResponse], error)
 	// Data-only local<->cloud migration (sp-u53.5.3): claim-guarded suspend on the source node ->
 	// resume with a placement override on the target. The owner client re-delivers the owner-sealed
 	// journal key to the target via DeliverSecrets so the journaled mounts restore there.
@@ -1051,6 +1106,24 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		SpawnServiceDeliverSecretsProcedure,
 		svc.DeliverSecrets,
 		connect.WithSchema(spawnServiceMethods.ByName("DeliverSecrets")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceAuthorizeGitHubMintHandler := connect.NewUnaryHandler(
+		SpawnServiceAuthorizeGitHubMintProcedure,
+		svc.AuthorizeGitHubMint,
+		connect.WithSchema(spawnServiceMethods.ByName("AuthorizeGitHubMint")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceGetGitHubLinkTargetsHandler := connect.NewUnaryHandler(
+		SpawnServiceGetGitHubLinkTargetsProcedure,
+		svc.GetGitHubLinkTargets,
+		connect.WithSchema(spawnServiceMethods.ByName("GetGitHubLinkTargets")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceFanoutGitHubSealedAccessTokenHandler := connect.NewUnaryHandler(
+		SpawnServiceFanoutGitHubSealedAccessTokenProcedure,
+		svc.FanoutGitHubSealedAccessToken,
+		connect.WithSchema(spawnServiceMethods.ByName("FanoutGitHubSealedAccessToken")),
 		connect.WithHandlerOptions(opts...),
 	)
 	spawnServiceMigrateSpawnHandler := connect.NewUnaryHandler(
@@ -1265,6 +1338,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceGetSpawnNodeKeyHandler.ServeHTTP(w, r)
 		case SpawnServiceDeliverSecretsProcedure:
 			spawnServiceDeliverSecretsHandler.ServeHTTP(w, r)
+		case SpawnServiceAuthorizeGitHubMintProcedure:
+			spawnServiceAuthorizeGitHubMintHandler.ServeHTTP(w, r)
+		case SpawnServiceGetGitHubLinkTargetsProcedure:
+			spawnServiceGetGitHubLinkTargetsHandler.ServeHTTP(w, r)
+		case SpawnServiceFanoutGitHubSealedAccessTokenProcedure:
+			spawnServiceFanoutGitHubSealedAccessTokenHandler.ServeHTTP(w, r)
 		case SpawnServiceMigrateSpawnProcedure:
 			spawnServiceMigrateSpawnHandler.ServeHTTP(w, r)
 		case SpawnServiceForkSpawnProcedure:
@@ -1412,6 +1491,18 @@ func (UnimplementedSpawnServiceHandler) GetSpawnNodeKey(context.Context, *connec
 
 func (UnimplementedSpawnServiceHandler) DeliverSecrets(context.Context, *connect.Request[v1.DeliverSecretsRequest]) (*connect.Response[v1.DeliverSecretsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DeliverSecrets is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) AuthorizeGitHubMint(context.Context, *connect.Request[v1.AuthorizeGitHubMintRequest]) (*connect.Response[v1.AuthorizeGitHubMintResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.AuthorizeGitHubMint is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetGitHubLinkTargets(context.Context, *connect.Request[v1.GetGitHubLinkTargetsRequest]) (*connect.Response[v1.GetGitHubLinkTargetsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetGitHubLinkTargets is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) FanoutGitHubSealedAccessToken(context.Context, *connect.Request[v1.FanoutGitHubSealedAccessTokenRequest]) (*connect.Response[v1.FanoutGitHubSealedAccessTokenResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.FanoutGitHubSealedAccessToken is not implemented"))
 }
 
 func (UnimplementedSpawnServiceHandler) MigrateSpawn(context.Context, *connect.Request[v1.MigrateSpawnRequest]) (*connect.Response[v1.MigrateSpawnResponse], error) {

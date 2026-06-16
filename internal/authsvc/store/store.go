@@ -12,12 +12,18 @@ import (
 var (
 	ErrConflict = errors.New("authsvc/store: conflict")
 	ErrNotFound = errors.New("authsvc/store: not found")
+	// ErrCipherRequired is returned by GitHubLinks operations when the store was
+	// opened without a TokenCipher (fail-closed: never silently store plaintext).
+	ErrCipherRequired = errors.New("authsvc/store: github token cipher not configured")
 )
 
 // Config selects the backend. Driver is "sqlite" (only).
 type Config struct {
 	Driver string
 	DSN    string
+	// TokenCipher encrypts AS-custodial github_links token columns at rest
+	// (§16.2 / MAJOR-2). Required for the GitHubLinks repo; other repos ignore it.
+	TokenCipher TokenCipher
 }
 
 type UserRepo interface {
@@ -96,6 +102,19 @@ type NodeRevocationRepo interface {
 	List(ctx context.Context) ([]NodeRevocation, error)
 }
 
+type GitHubLinkRepo interface {
+	Get(ctx context.Context, secretID string) (GitHubLink, error)
+	Upsert(ctx context.Context, link GitHubLink) error
+	Rotate(ctx context.Context, secretID string, rot GitHubTokenRotation) (GitHubLink, error)
+	Revoke(ctx context.Context, secretID string, revokedAt int64) error
+	// StageRotation write-ahead persists a rotated tuple into the pending_* columns (encrypted),
+	// without changing the live tuple/version. Idempotent: re-staging overwrites.
+	StageRotation(ctx context.Context, secretID string, stage GitHubStagedRotation) error
+	// MarkRelinkRequired flags the link's refresh chain as provably broken (terminal). Subsequent
+	// mints fast-fail; the owner must relink.
+	MarkRelinkRequired(ctx context.Context, secretID string, at int64) error
+}
+
 type Store interface {
 	Users() UserRepo
 	RefreshSessions() RefreshSessionRepo
@@ -104,6 +123,7 @@ type Store interface {
 	Revocations() RevocationRepo
 	DeviceSets() DeviceSetRepo
 	NodeRevocations() NodeRevocationRepo
+	GitHubLinks() GitHubLinkRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error

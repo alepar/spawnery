@@ -1,0 +1,158 @@
+package node
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"connectrpc.com/connect"
+
+	authv1 "spawnery/gen/auth/v1"
+)
+
+type fakeMintClient struct {
+	mu   sync.Mutex
+	reqs []*authv1.MintGitHubAccessTokenRequest
+	resp *authv1.MintGitHubAccessTokenResponse
+	err  error
+}
+
+func (f *fakeMintClient) MintGitHubAccessToken(_ context.Context, req *connect.Request[authv1.MintGitHubAccessTokenRequest]) (*connect.Response[authv1.MintGitHubAccessTokenResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reqs = append(f.reqs, req.Msg)
+	if f.err != nil {
+		return nil, f.err
+	}
+	resp := f.resp
+	if resp == nil {
+		resp = &authv1.MintGitHubAccessTokenResponse{}
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (f *fakeMintClient) calls() []*authv1.MintGitHubAccessTokenRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*authv1.MintGitHubAccessTokenRequest(nil), f.reqs...)
+}
+
+func TestRefresherNoteThenForget(t *testing.T) {
+	base := time.Unix(1_900_000_000, 0)
+	r := newGitHubRefresher(&fakeMintClient{}) // nil client: scheduling is exercised via Tick with a fake in later tasks
+	r.now = func() time.Time { return base }
+
+	r.Note(githubRefreshEntry{
+		SpawnID: "s1", Generation: 3, SecretID: "sec-1", Version: 1,
+		DeliveryID: "d-1", RepositoryID: "42",
+	})
+	if got := r.due(base.Add(defaultRefreshInterval + time.Minute)); len(got) != 1 || got[0].SecretID != "sec-1" {
+		t.Fatalf("expected 1 due entry for sec-1, got %+v", got)
+	}
+	if got := r.due(base); len(got) != 0 {
+		t.Fatalf("entry should not be due before refreshAt, got %+v", got)
+	}
+	r.Forget("s1")
+	if got := r.due(base.Add(defaultRefreshInterval + time.Hour)); len(got) != 0 {
+		t.Fatalf("forgotten spawn must produce no due entries, got %+v", got)
+	}
+}
+
+func TestRefresherMintsWithNodeIdentityLinkRefOnly(t *testing.T) {
+	base := time.Unix(1_900_000_000, 0)
+	fake := &fakeMintClient{resp: &authv1.MintGitHubAccessTokenResponse{Refreshed: true, AccessExpiresAtUnix: base.Add(8 * time.Hour).Unix()}}
+	r := newGitHubRefresher(fake)
+	r.now = func() time.Time { return base }
+
+	r.Note(githubRefreshEntry{SpawnID: "s1", Generation: 7, SecretID: "sec-1", Version: 4, DeliveryID: "d-4", RepositoryID: "42"})
+
+	// Past the receipt-relative refreshAt → due → Tick issues exactly one mint.
+	fireAt := base.Add(defaultRefreshInterval + time.Minute)
+	r.Tick(context.Background(), fireAt)
+
+	calls := fake.calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 mint call, got %d", len(calls))
+	}
+	got := calls[0]
+	if got.GetSpawnId() != "s1" || got.GetGeneration() != 7 || got.GetRepositoryId() != "42" {
+		t.Fatalf("mint envelope mismatch: %+v", got)
+	}
+	ref := got.GetLinkRef()
+	if ref == nil || ref.GetSecretId() != "sec-1" || ref.GetVersion() != 4 || ref.GetDeliveryId() != "d-4" {
+		t.Fatalf("link_ref mismatch: %+v", ref)
+	}
+	if got.GetRequestId() != githubRefreshRequestID("sec-1", 4) {
+		t.Fatalf("request_id not stable/idempotent: %q", got.GetRequestId())
+	}
+	// CONTAINMENT: the request type has no token field — node identity (link_ref) is the authorization,
+	// never a bearer GitHub token. (Compile-time enforced by the proto; asserted here for intent.)
+
+	// In-flight grace: a second Tick within the grace window must NOT re-mint.
+	r.Tick(context.Background(), fireAt.Add(refreshInFlightGrace-time.Second))
+	if n := len(fake.calls()); n != 1 {
+		t.Fatalf("expected no re-mint within grace window, got %d calls", n)
+	}
+}
+
+func TestRefresherRetriesOnMintFailureThenSucceeds(t *testing.T) {
+	base := time.Unix(1_900_000_000, 0)
+	fake := &fakeMintClient{err: errors.New("AS unavailable")}
+	r := newGitHubRefresher(fake)
+	r.now = func() time.Time { return base }
+	r.Note(githubRefreshEntry{SpawnID: "s1", Generation: 1, SecretID: "sec-1", Version: 2, DeliveryID: "d-2"})
+
+	t0 := base.Add(defaultRefreshInterval + time.Minute)
+	r.Tick(context.Background(), t0) // attempt 1 -> error -> backoff floor
+	if n := len(fake.calls()); n != 1 {
+		t.Fatalf("attempt 1: want 1 call, got %d", n)
+	}
+	// Within the backoff floor: no retry.
+	r.Tick(context.Background(), t0.Add(refreshBackoffBase-time.Second))
+	if n := len(fake.calls()); n != 1 {
+		t.Fatalf("retry before backoff floor should be suppressed, got %d calls", n)
+	}
+	// After backoff: retry fires, now succeeding.
+	fake.mu.Lock()
+	fake.err = nil
+	fake.resp = &authv1.MintGitHubAccessTokenResponse{Refreshed: false, AccessExpiresAtUnix: base.Add(8 * time.Hour).Unix()}
+	fake.mu.Unlock()
+	r.Tick(context.Background(), t0.Add(refreshBackoffBase+time.Second))
+	if n := len(fake.calls()); n != 2 {
+		t.Fatalf("retry after backoff: want 2 calls, got %d", n)
+	}
+	// The in-flight grace (set by beginAttempt) blocks re-minting right after success.
+	// Note: refreshAt (expiry-lead = base+7h52m) is already in the past relative to t0, so only
+	// the nextAttempt gate prevents immediate re-scheduling.
+	if got := r.due(t0.Add(refreshBackoffBase + 2*time.Second)); len(got) != 0 {
+		t.Fatalf("after success, entry must not be immediately due within in-flight grace, got %+v", got)
+	}
+	// After the in-flight grace expires, the entry is due (refreshAt was already past at success time).
+	afterGrace := t0.Add(refreshBackoffBase + time.Second + refreshInFlightGrace + time.Second)
+	if got := r.due(afterGrace); len(got) != 1 {
+		t.Fatalf("entry should be due again after in-flight grace expires, got %+v", got)
+	}
+}
+
+// Models §16.4 resume-after-expiry: the access token is dead but the node still authorizes its first
+// refresh by node identity (link_ref), never a bearer token. We force the entry due immediately by
+// rewinding refreshAt via a fresh Note at an already-elapsed clock.
+func TestRefresherResumeAfterExpiryUsesNodeIdentity(t *testing.T) {
+	base := time.Unix(1_900_000_000, 0)
+	fake := &fakeMintClient{resp: &authv1.MintGitHubAccessTokenResponse{Refreshed: true, AccessExpiresAtUnix: base.Add(9 * time.Hour).Unix()}}
+	r := newGitHubRefresher(fake)
+	r.now = func() time.Time { return base }
+	r.Note(githubRefreshEntry{SpawnID: "s1", Generation: 12, SecretID: "sec-1", Version: 9, DeliveryID: "d-9", RepositoryID: "7"})
+
+	// Simulate clock far past the assumed 8h lifetime (token expired) and Tick.
+	r.Tick(context.Background(), base.Add(defaultAccessLifetime+time.Hour))
+	calls := fake.calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 refresh call after expiry, got %d", len(calls))
+	}
+	if calls[0].GetLinkRef().GetSecretId() != "sec-1" || calls[0].GetLinkRef().GetVersion() != 9 {
+		t.Fatalf("refresh must present link_ref, got %+v", calls[0].GetLinkRef())
+	}
+}

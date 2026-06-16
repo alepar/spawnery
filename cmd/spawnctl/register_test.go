@@ -10,7 +10,7 @@ func TestManifestToProto(t *testing.T) {
 	if pm.ApiVersion != "spawnery/v1" || pm.Id != "spawnery/secret-app" || pm.Title != "Secret App" {
 		t.Fatalf("proto = %+v", pm)
 	}
-	if len(pm.Mounts) != 1 || pm.Mounts[0].Name != "main" || pm.Mounts[0].Path != "data" {
+	if len(pm.Mounts) != 1 || pm.Mounts[0].Name != "main" || pm.Mounts[0].Path != "data" || pm.Mounts[0].Durability != "node-local" {
 		t.Fatalf("mounts = %+v", pm.Mounts)
 	}
 }

@@ -20,6 +20,9 @@ type Spawn struct {
 	SidecarID  string
 	AgentID    string
 	MountDirs  []string // host dirs backing this spawn's mounts (for Finalize)
+	// MountBindings records the CP-selected backend URI per named manifest mount. Runtime secret
+	// fanout uses it to recover the exact GitHub owner/repo binding for credential rendering.
+	MountBindings []MountBinding
 	// MountFinalizers records which backend prepared each removable host dir so teardown finalizes
 	// through the same backend. Empty on legacy/reconstructed Spawn values; Stop falls back to scratch.
 	MountFinalizers []MountFinalizer

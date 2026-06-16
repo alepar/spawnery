@@ -133,11 +133,14 @@ type Container struct {
 }
 
 type Mount struct {
-	bun.BaseModel `bun:"table:spawn_mounts,alias:m"`
-	SpawnID       string `bun:"spawn_id,pk"`
-	Name          string `bun:"name,pk"`
-	BackendURI    string `bun:"backend_uri,notnull"`
-	PersistMarker string `bun:"persist_marker"`
+	bun.BaseModel      `bun:"table:spawn_mounts,alias:m"`
+	SpawnID            string `bun:"spawn_id,pk"`
+	Name               string `bun:"name,pk"`
+	BackendURI         string `bun:"backend_uri,notnull"`
+	CredentialSecretID string `bun:"credential_secret_id,notnull"`
+	CreateIfMissing    bool   `bun:"create_if_missing,notnull"`
+	RepositoryID       string `bun:"repository_id,notnull"`
+	PersistMarker      string `bun:"persist_marker"`
 }
 
 // Artifact is one content-agnostic delivery unit persisted per spawn (mirrors the wire ArtifactSpec).

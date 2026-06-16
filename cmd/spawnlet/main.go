@@ -20,6 +20,7 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
+	"spawnery/gen/auth/v1/authv1connect"
 	"spawnery/gen/spawn/v1/spawnv1connect"
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/token"
@@ -124,6 +125,7 @@ func main() {
 			cfg.SubKeys = sk
 		}
 		cfg.Verifier = buildIntentVerifier(cfg.NodeID, cfg.NodeOwner)
+		cfg.GitHubMint = nodeGitHubMint()
 		log.Printf("spawnlet attaching to CP at %s as %s", cfg.CPURL, cfg.NodeID)
 		err = node.Run(ctx, mgr, httpc, cfg) // returns when ctx is cancelled (signal) or on fatal error
 		gracefulStopAll(mgr)
@@ -400,6 +402,32 @@ func nodeRootPEM() []byte {
 		return nil
 	}
 	return rootPEM
+}
+
+// nodeGitHubMint builds the AS AuthService client for proactive GitHub access-token refresh
+// (design §16.4), over the node's mTLS identity. Returns nil in insecure mode, when AS_URL is
+// unset, or when the identity can't be loaded — proactive refresh is then disabled (spawns run on
+// their delivered token until it lapses).
+func nodeGitHubMint() node.GitHubMintClient {
+	if env("NODE_AUTH_MODE", "insecure") != "enforced" {
+		return nil
+	}
+	asURL := os.Getenv("AS_URL")
+	if asURL == "" {
+		return nil
+	}
+	dir := env("NODE_ID_DIR", "/var/lib/spawnlet/identity")
+	id, err := nodeid.Load(dir)
+	if err != nil {
+		log.Printf("github refresh disabled: no identity in %s: %v", dir, err)
+		return nil
+	}
+	client, err := id.MTLSClient()
+	if err != nil {
+		log.Printf("github refresh disabled: mTLS client: %v", err)
+		return nil
+	}
+	return authv1connect.NewAuthServiceClient(client, asURL)
 }
 
 // buildIntentVerifier builds the A4 IntentVerifier from the environment [AC1][AM12].

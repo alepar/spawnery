@@ -121,8 +121,11 @@ func pollAndSign(ctx context.Context, ic intentClient, spawnID string, params in
 				continue
 			}
 			body.Mounts = append(body.Mounts, &authv1.MountRef{
-				Name:       mount.GetName(),
-				BackendUri: mount.GetBackendUri(),
+				Name:               mount.GetName(),
+				BackendUri:         mount.GetBackendUri(),
+				CredentialSecretId: mount.GetCredentialSecretId(),
+				CreateIfMissing:    mount.GetCreateIfMissing(),
+				RepositoryId:       mount.GetRepositoryId(),
 			})
 		}
 	}

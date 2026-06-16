@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/githubcred"
 	"spawnery/internal/secrets/journalkey"
 	"spawnery/internal/secrets/seal"
 )
@@ -278,6 +280,27 @@ func (a *attacher) handleSecretDelivery(sd *nodev1.SecretDelivery) {
 			continue
 		}
 
+		if sec.GetType() == nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN {
+			mounts, merr := a.nodeMountBindings(sd.SpawnId)
+			if merr == nil {
+				var handled bool
+				handled, merr = a.consumeGitHubSecret(sd.SpawnId, sec, pt, mounts)
+				if merr == nil && !handled {
+					merr = fmt.Errorf("github secret %q has no supported usage", sec.GetSecretId())
+				}
+			}
+			zeroBytes(pt)
+			if merr != nil {
+				rollback()
+				log.Printf("secret-delivery %s/%s: github render failed: %v", sd.SpawnId, sec.SecretId, merr)
+				continue
+			}
+			commit()
+			log.Printf("secret-delivery %s: rendered github secret %q (gen %d)", sd.SpawnId, sec.SecretId, sd.Generation)
+			a.noteGitHubRefresh(sd.SpawnId, sd.Generation, sec, mounts)
+			continue
+		}
+
 		path, werr := a.mgr.InjectSecret(sd.SpawnId, sec.TargetPath, pt)
 		// Zero the plaintext copy we hold once written (defense-in-depth, §6 — not a hard guarantee under
 		// Go's GC, but cheap and removes the obvious lingering buffer).
@@ -292,7 +315,7 @@ func (a *attacher) handleSecretDelivery(sd *nodev1.SecretDelivery) {
 	}
 }
 
-func (a *attacher) consumeStartupSecrets(ctx context.Context, spawnID string, generation uint64, secrets []*nodev1.SealedSecret, routes map[string]startupSecretRoute, inject func(string, []byte) (string, error), controlURL, controlToken string) error {
+func (a *attacher) consumeStartupSecrets(ctx context.Context, spawnID string, generation uint64, secrets []*nodev1.SealedSecret, mounts []*nodev1.MountBinding, routes map[string]startupSecretRoute, inject func(string, []byte) (string, error), controlURL, controlToken string) error {
 	if len(secrets) == 0 {
 		return nil
 	}
@@ -342,7 +365,7 @@ func (a *attacher) consumeStartupSecrets(ctx context.Context, spawnID string, ge
 	}
 
 	for i := range opened {
-		consumeErr := a.consumeStartupSecret(ctx, spawnID, opened[i].sec, opened[i].pt, routes, inject, controlURL, controlToken)
+		consumeErr := a.consumeStartupSecret(ctx, spawnID, opened[i].sec, opened[i].pt, mounts, routes, inject, controlURL, controlToken)
 		zeroBytes(opened[i].pt)
 		opened[i].pt = nil
 		if consumeErr != nil {
@@ -356,7 +379,53 @@ func (a *attacher) consumeStartupSecrets(ctx context.Context, spawnID string, ge
 	return nil
 }
 
-func (a *attacher) consumeStartupSecret(ctx context.Context, spawnID string, sec *nodev1.SealedSecret, plaintext []byte, routes map[string]startupSecretRoute, inject func(string, []byte) (string, error), controlURL, controlToken string) error {
+func (a *attacher) consumeStartupGitHubSecrets(ctx context.Context, spawnID string, generation uint64, secrets []*nodev1.SealedSecret, mounts []*nodev1.MountBinding) (map[string]struct{}, error) {
+	githubSecrets := make([]*nodev1.SealedSecret, 0)
+	for _, sec := range secrets {
+		if sec.GetType() == nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN {
+			githubSecrets = append(githubSecrets, sec)
+		}
+	}
+	if len(githubSecrets) == 0 {
+		return nil, nil
+	}
+	consumed := make(map[string]struct{}, len(githubSecrets))
+	inject := func(target string, plaintext []byte) (string, error) {
+		return "", fmt.Errorf("github startup secret unexpectedly routed to generic target %q", target)
+	}
+	if err := a.consumeStartupSecrets(ctx, spawnID, generation, githubSecrets, mounts, nil, inject, "", ""); err != nil {
+		_ = a.mgr.RemoveGitHubNodeCredentials(spawnID)
+		a.mgr.CleanupSpawnTransient(spawnID)
+		return nil, err
+	}
+	for _, sec := range githubSecrets {
+		consumed[sec.GetSecretId()] = struct{}{}
+		a.noteGitHubRefresh(spawnID, generation, sec, mounts)
+	}
+	return consumed, nil
+}
+
+func filterConsumedStartupSecrets(secrets []*nodev1.SealedSecret, consumed map[string]struct{}) []*nodev1.SealedSecret {
+	if len(consumed) == 0 {
+		return secrets
+	}
+	out := make([]*nodev1.SealedSecret, 0, len(secrets))
+	for _, sec := range secrets {
+		if _, ok := consumed[sec.GetSecretId()]; ok {
+			continue
+		}
+		out = append(out, sec)
+	}
+	return out
+}
+
+func (a *attacher) consumeStartupSecret(ctx context.Context, spawnID string, sec *nodev1.SealedSecret, plaintext []byte, mounts []*nodev1.MountBinding, routes map[string]startupSecretRoute, inject func(string, []byte) (string, error), controlURL, controlToken string) error {
+	if sec.GetType() == nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN {
+		handled, err := a.consumeGitHubSecret(spawnID, sec, plaintext, mounts)
+		if handled || err != nil {
+			return err
+		}
+	}
 	if route, ok := routes[sec.GetSecretId()]; ok {
 		switch route.target {
 		case nodev1.ArtifactTarget_ARTIFACT_TARGET_SIDECAR:
@@ -380,4 +449,144 @@ func (a *attacher) consumeStartupSecret(ctx context.Context, spawnID string, sec
 	}
 	_, err := inject(sec.GetTargetPath(), plaintext)
 	return err
+}
+
+func (a *attacher) consumeGitHubSecret(spawnID string, sec *nodev1.SealedSecret, plaintext []byte, mounts []*nodev1.MountBinding) (bool, error) {
+	handled := false
+	if hasSecretUsage(sec, nodev1.SecretUsage_SECRET_USAGE_NODE_STORAGE) {
+		owner, repo, mountName, err := githubRepoMountForSecret(sec, mounts)
+		if err != nil {
+			return true, err
+		}
+		meta := sec.GetGithubToken()
+		_, err = a.mgr.RenderGitHubNodeCredential(spawnID, mountName, githubcred.RenderRequest{
+			Host:        meta.GetHost(),
+			Owner:       owner,
+			Repo:        repo,
+			Login:       meta.GetLogin(),
+			AccessToken: string(plaintext),
+		})
+		if err != nil {
+			return true, err
+		}
+		handled = true
+	}
+	if hasSecretUsage(sec, nodev1.SecretUsage_SECRET_USAGE_AGENT_RENDER) {
+		owner, repo, _, err := githubRepoMountForSecret(sec, mounts)
+		if err != nil {
+			return true, err
+		}
+		render := sec.GetRender()
+		meta := sec.GetGithubToken()
+		_, err = a.mgr.RenderGitHubAgentCredential(spawnID, githubcred.RenderRequest{
+			Host:                 meta.GetHost(),
+			Owner:                owner,
+			Repo:                 repo,
+			Login:                meta.GetLogin(),
+			AccessToken:          string(plaintext),
+			TargetDir:            render.GetTargetPath(),
+			GHConfigDir:          render.GetGhConfigDir(),
+			HostsPath:            render.GetHostsPath(),
+			GitConfigPath:        render.GetGitConfigPath(),
+			CredentialHelperPath: render.GetCredentialHelperPath(),
+		})
+		return true, err
+	}
+	if handled {
+		return true, nil
+	}
+	return false, nil
+}
+
+// noteGitHubRefresh records the delivered GitHub link for proactive refresh scheduling (design §16.4).
+// It extracts the link reference (secret_id/version/delivery_id) and audit repository_id from the
+// matching mount; it never handles the token plaintext. nil-safe (refresher disabled in dev).
+func (a *attacher) noteGitHubRefresh(spawnID string, generation uint64, sec *nodev1.SealedSecret, mounts []*nodev1.MountBinding) {
+	if a.githubRefresh == nil || sec.GetSecretId() == "" {
+		return
+	}
+	repositoryID := ""
+	if _, _, mountName, err := githubRepoMountForSecret(sec, mounts); err == nil {
+		for _, m := range mounts {
+			if m.GetName() == mountName {
+				repositoryID = m.GetRepositoryId()
+				break
+			}
+		}
+	}
+	a.githubRefresh.Note(githubRefreshEntry{
+		SpawnID:      spawnID,
+		Generation:   generation,
+		SecretID:     sec.GetSecretId(),
+		Version:      sec.GetVersion(),
+		DeliveryID:   sec.GetDeliveryId(),
+		RepositoryID: repositoryID,
+	})
+}
+
+func (a *attacher) nodeMountBindings(spawnID string) ([]*nodev1.MountBinding, error) {
+	bindings, ok := a.mgr.MountBindings(spawnID)
+	if !ok {
+		return nil, fmt.Errorf("unknown spawn %s", spawnID)
+	}
+	out := make([]*nodev1.MountBinding, 0, len(bindings))
+	for _, binding := range bindings {
+		out = append(out, &nodev1.MountBinding{
+			Name:               binding.Name,
+			BackendUri:         binding.BackendURI,
+			CredentialSecretId: binding.CredentialSecretID,
+			CreateIfMissing:    binding.CreateIfMissing,
+			RepositoryId:       binding.RepositoryID,
+		})
+	}
+	return out, nil
+}
+
+func hasSecretUsage(sec *nodev1.SealedSecret, want nodev1.SecretUsage) bool {
+	for _, usage := range sec.GetUsages() {
+		if usage == want {
+			return true
+		}
+	}
+	return false
+}
+
+func githubRepoMountForSecret(sec *nodev1.SealedSecret, mounts []*nodev1.MountBinding) (string, string, string, error) {
+	wanted := map[string]struct{}{}
+	for _, name := range sec.GetMountNames() {
+		wanted[name] = struct{}{}
+	}
+	for _, mount := range mounts {
+		if len(wanted) > 0 {
+			if _, ok := wanted[mount.GetName()]; !ok {
+				continue
+			}
+		}
+		owner, repo, ok := parseGitHubBackendURI(mount.GetBackendUri())
+		if ok {
+			if sec.GetSecretId() != "" && mount.GetCredentialSecretId() != "" && mount.GetCredentialSecretId() != sec.GetSecretId() {
+				continue
+			}
+			return owner, repo, mount.GetName(), nil
+		}
+	}
+	return "", "", "", fmt.Errorf("github secret %q has no bound github mount", sec.GetSecretId())
+}
+
+func parseGitHubBackendURI(uri string) (string, string, bool) {
+	rest, ok := strings.CutPrefix(uri, "github:")
+	if !ok {
+		return "", "", false
+	}
+	rest = strings.TrimPrefix(rest, "//")
+	rest = strings.Trim(rest, "/")
+	owner, repo, ok := strings.Cut(rest, "/")
+	if !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
+		return "", "", false
+	}
+	repo = strings.TrimSuffix(repo, ".git")
+	if repo == "" {
+		return "", "", false
+	}
+	return owner, repo, true
 }

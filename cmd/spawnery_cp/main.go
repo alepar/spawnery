@@ -241,7 +241,19 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle(cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(rpclog.Interceptor("cp"), verifier.Interceptor())))
+	cpAuthInterceptor := verifier.Interceptor()
+	if asSecret := env("CP_AS_RPC_SECRET", ""); asSecret != "" {
+		cpAuthInterceptor = auth.NewServiceScopedInterceptor(
+			verifier,
+			auth.ServiceSecretHeader,
+			asSecret,
+			cpv1connect.SpawnServiceAuthorizeGitHubMintProcedure,
+			cpv1connect.SpawnServiceGetGitHubLinkTargetsProcedure,
+			cpv1connect.SpawnServiceFanoutGitHubSealedAccessTokenProcedure,
+		)
+		log.Printf("cp: AS GitHub coordination RPC secret enabled")
+	}
+	mux.Handle(cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(rpclog.Interceptor("cp"), cpAuthInterceptor)))
 	mux.HandleFunc("/ws/session", srv.HandleWS(verifier, allow))
 
 	// Node-auth mode (sp-ova). insecure (dev/test default): nodes share the main h2c listener with no

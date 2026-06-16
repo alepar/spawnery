@@ -791,7 +791,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 			s.failResume(ctx, id, gen, revertOnFail, "GetArtifacts")
 			return "", connect.NewError(connect.CodeInternal, aerr)
 		}
-		requiredSecretIDs = startupSecretIDsFromArtifacts(arts)
+		requiredSecretIDs = startupSecretIDsForSpawn(arts, mounts)
 		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
 			s.failResume(ctx, id, gen, revertOnFail, "validate startup secret catalog")
 			return "", err
@@ -874,6 +874,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 			if merr := s.st.Spawns().MarkModelApplied(storeCtx, id); merr != nil {
 				log.Printf("resumeLocked %s: MarkModelApplied after resume: %v", id, merr)
 			}
+			s.githubLinks.noteNodeSecrets(id, secrets)
 			return nodeID, nil
 
 		case <-rwt.progressCh:
@@ -1188,7 +1189,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 			}
 			return nil, connect.NewError(connect.CodeInternal, aerr)
 		}
-		requiredSecretIDs = startupSecretIDsFromArtifacts(arts)
+		requiredSecretIDs = startupSecretIDsForSpawn(arts, mounts)
 		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
 			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after startup secret catalog validation failure also failed: %v", req.Msg.SpawnId, serr)
@@ -1254,6 +1255,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	if rerr := s.st.Spawns().MarkRecovered(context.WithoutCancel(ctx), req.Msg.SpawnId); rerr != nil {
 		log.Printf("RecreateSpawn %s: MarkRecovered after recreate: %v", req.Msg.SpawnId, rerr)
 	}
+	s.githubLinks.noteNodeSecrets(req.Msg.SpawnId, secrets)
 	return connect.NewResponse(&cpv1.RecreateSpawnResponse{}), nil
 }
 

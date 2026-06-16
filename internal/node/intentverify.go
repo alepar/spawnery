@@ -255,18 +255,17 @@ func (v *IntentVerifier) checkStartCorrespondence(body *authv1.IntentBody, field
 	if body.DataRef != "" && body.DataRef != fields.DataRef {
 		return NACKCorrespondence, fmt.Sprintf("data_ref: intent=%q exec=%q", body.DataRef, fields.DataRef)
 	}
-	// Mounts: count and each (name, backend_uri) must match in order.
-	// NOTE: this check is vacuous today — pollAndSign (spawnctl) does not copy PendingIntent.Mounts
-	// into the signed IntentBody, and scheduler.Provision does not set StartSpawn.Mounts, so both
-	// sides are always empty (0==0). The logic is correct and will enforce once mounts are threaded
-	// end-to-end for non-Scratch storage (tracked separately).
+	// Mounts: count and each binding field must match in order.
 	if len(body.Mounts) != len(fields.Mounts) {
 		return NACKCorrespondence, fmt.Sprintf("mounts count: intent=%d exec=%d", len(body.Mounts), len(fields.Mounts))
 	}
 	for i, m := range fields.Mounts {
 		bm := body.Mounts[i]
-		if bm.Name != m.Name || bm.BackendUri != m.BackendUri {
-			return NACKCorrespondence, fmt.Sprintf("mounts[%d]: intent={%q,%q} exec={%q,%q}", i, bm.Name, bm.BackendUri, m.Name, m.BackendUri)
+		if bm.Name != m.Name || bm.BackendUri != m.BackendUri || bm.CredentialSecretId != m.CredentialSecretId || bm.CreateIfMissing != m.CreateIfMissing || bm.RepositoryId != m.RepositoryId {
+			return NACKCorrespondence, fmt.Sprintf("mounts[%d]: intent={%q,%q,%q,%t,%q} exec={%q,%q,%q,%t,%q}",
+				i,
+				bm.Name, bm.BackendUri, bm.CredentialSecretId, bm.CreateIfMissing, bm.RepositoryId,
+				m.Name, m.BackendUri, m.CredentialSecretId, m.CreateIfMissing, m.RepositoryId)
 		}
 	}
 	return "", ""

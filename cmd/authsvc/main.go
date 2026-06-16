@@ -26,6 +26,9 @@
 //	  AS_DB_DSN                      SQLite DSN (default: file:/var/lib/authsvc/identity.db;
 //	                                 AS_DEV=1 default: ephemeral in-memory)
 //	  AS_DB_DRIVER                   "sqlite" (only; kept for future pg expansion)
+//	  AS_GITHUB_TOKEN_ENC_KEY        Standard-base64 32-byte key for at-rest github token encryption
+//	                                 (required in production; generated ephemerally in AS_DEV=1)
+//	  AS_GITHUB_TOKEN_ENC_KEY_FILE   Path to a file holding the base64 key (alternative to _KEY)
 //
 //	GitHub OAuth (required for real login; ignored if AS_FAKE_GITHUB=1):
 //	  GITHUB_CLIENT_ID               GitHub App client_id
@@ -46,11 +49,15 @@
 //	                                 must supply "Authorization: Bearer <secret>"). Required in production;
 //	                                 leave unset only in AS_DEV. Without it the revocation feed (account
 //	                                 UUIDs + session-revocation timing) is served unauthenticated.
+//	  AS_CP_URL                      CP base URL for GitHub mint authorization/fanout.
+//	  AS_CP_RPC_SECRET               Scoped AS->CP secret for GitHub coordination RPCs; must match
+//	                                 CP_AS_RPC_SECRET on the CP.
 package main
 
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"net/http"
@@ -61,6 +68,9 @@ import (
 	"syscall"
 	"time"
 
+	"connectrpc.com/connect"
+
+	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/githubfake"
 	"spawnery/internal/authsvc/store"
@@ -164,9 +174,14 @@ func buildService() (*authsvc.Service, error) {
 	if os.Getenv("AS_DEV") == "1" && dsn == defaultDSN {
 		log.Printf("authsvc: DEV — ephemeral in-memory identity store (set AS_DB_DSN to persist)")
 	}
+	tokenCipher, err := loadGitHubTokenCipher()
+	if err != nil {
+		return nil, err
+	}
 	idStore, err := store.Open(context.Background(), store.Config{
-		Driver: env("AS_DB_DRIVER", "sqlite"),
-		DSN:    dsn,
+		Driver:      env("AS_DB_DRIVER", "sqlite"),
+		DSN:         dsn,
+		TokenCipher: tokenCipher,
 	})
 	if err != nil {
 		return nil, err
@@ -213,7 +228,7 @@ func buildService() (*authsvc.Service, error) {
 	idp, err := authsvc.NewIdP(authsvc.IdPConfig{
 		Store:               idStore,
 		GitHub:              ghProvider,
-		SigningKey:           sigKey,
+		SigningKey:          sigKey,
 		NextPubKeys:         nextPubs,
 		GitHubRedirectURI:   env("AS_GITHUB_REDIRECT_URI", ""),
 		SPAOrigin:           spaOrigin,
@@ -227,11 +242,55 @@ func buildService() (*authsvc.Service, error) {
 		return nil, err
 	}
 
-	return authsvc.New(root.Cert, inter,
+	opts := []authsvc.Option{
 		authsvc.WithSessionKey(sigKey),
 		authsvc.WithIdP(idp),
 		authsvc.WithNodeRevocations(idStore.NodeRevocations()),
-	), nil
+		authsvc.WithGitHubMinting(idStore, ghProvider),
+	}
+	if cpURL := strings.TrimSpace(os.Getenv("AS_CP_URL")); cpURL != "" {
+		cpClient := cpv1connect.NewSpawnServiceClient(http.DefaultClient, cpURL,
+			connect.WithInterceptors(staticHeaderInterceptor{
+				name:  "X-Spawnery-AS-Secret",
+				value: os.Getenv("AS_CP_RPC_SECRET"),
+			}),
+		)
+		opts = append(opts,
+			authsvc.WithGitHubMintAuthorizer(authsvc.NewCPGitHubMintAuthorizer(cpClient)),
+			authsvc.WithGitHubAccessTokenFanout(authsvc.NewCPGitHubAccessTokenFanout(cpClient, pki.MarshalCertPEM(root.Cert), time.Now)),
+		)
+		log.Printf("authsvc: GitHub mint authorization/fanout wired to CP %s", cpURL)
+	}
+
+	return authsvc.New(root.Cert, inter, opts...), nil
+}
+
+type staticHeaderInterceptor struct {
+	name  string
+	value string
+}
+
+func (i staticHeaderInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		if i.name != "" && i.value != "" {
+			req.Header().Set(i.name, i.value)
+		}
+		return next(ctx, req)
+	}
+}
+
+func (i staticHeaderInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
+		conn := next(ctx, spec)
+		if i.name != "" && i.value != "" {
+			conn.RequestHeader().Set(i.name, i.value)
+		}
+		return conn
+	}
+}
+
+func (i staticHeaderInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return next
 }
 
 type productionCA struct {
@@ -295,6 +354,35 @@ func loadNextPubs() ([]ed25519.PublicKey, error) {
 		return nil, err
 	}
 	return []ed25519.PublicKey{pub}, nil
+}
+
+// loadGitHubTokenCipher builds the at-rest cipher for AS-custodial github tokens
+// (§16.2 / MAJOR-2). The key is held OUTSIDE the DB. Precedence:
+//
+//	AS_GITHUB_TOKEN_ENC_KEY      (standard-base64 32-byte key), else
+//	AS_GITHUB_TOKEN_ENC_KEY_FILE (path to a file holding the base64 key), else
+//	AS_DEV=1                     -> ephemeral random key (in-memory DB; data is ephemeral), else
+//	error (fail-closed: prod must provide a key).
+func loadGitHubTokenCipher() (store.TokenCipher, error) {
+	if b64 := strings.TrimSpace(os.Getenv("AS_GITHUB_TOKEN_ENC_KEY")); b64 != "" {
+		return store.ParseTokenCipherKey(b64)
+	}
+	if path := strings.TrimSpace(os.Getenv("AS_GITHUB_TOKEN_ENC_KEY_FILE")); path != "" {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("authsvc: reading AS_GITHUB_TOKEN_ENC_KEY_FILE: %w", err)
+		}
+		return store.ParseTokenCipherKey(strings.TrimSpace(string(raw)))
+	}
+	if os.Getenv("AS_DEV") == "1" {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, err
+		}
+		log.Printf("authsvc: DEV — ephemeral in-memory github token encryption key (set AS_GITHUB_TOKEN_ENC_KEY to persist)")
+		return store.NewAESGCMTokenCipher(key)
+	}
+	return nil, fmt.Errorf("authsvc: AS_GITHUB_TOKEN_ENC_KEY (or _FILE) is required for at-rest github token encryption")
 }
 
 func mustRead(envKey, def string) []byte {

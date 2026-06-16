@@ -35,6 +35,11 @@ type issuedCode struct {
 	used        bool
 }
 
+type refreshGrant struct {
+	user   User
+	access string
+}
+
 // Fake is the in-process GitHub. Configure the next login's user via SetUser; force an
 // access_denied with DenyNext.
 type Fake struct {
@@ -47,6 +52,7 @@ type Fake struct {
 	denyNext bool
 	codes    map[string]*issuedCode
 	tokens   map[string]User
+	refresh  map[string]refreshGrant
 }
 
 // New starts the fake with registered confidential-client credentials.
@@ -57,11 +63,13 @@ func New() *Fake {
 		user:         User{ID: 1000001, Login: "octocat"},
 		codes:        map[string]*issuedCode{},
 		tokens:       map[string]User{},
+		refresh:      map[string]refreshGrant{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /login/oauth/authorize", f.authorize)
 	mux.HandleFunc("POST /login/oauth/access_token", f.exchange)
 	mux.HandleFunc("GET /user", f.userEndpoint)
+	mux.HandleFunc("DELETE /applications/{client_id}/grant", f.deleteGrant)
 	f.Srv = httptest.NewServer(mux)
 	return f
 }
@@ -133,6 +141,10 @@ func (f *Fake) exchange(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "incorrect_client_credentials"})
 		return
 	}
+	if r.PostForm.Get("grant_type") == "refresh_token" {
+		f.refreshAccessToken(w, r)
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	c, ok := f.codes[r.PostForm.Get("code")]
@@ -150,8 +162,40 @@ func (f *Fake) exchange(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	tok := "gho_" + randHex()
+	refreshTok := "ghr_" + randHex()
 	f.tokens[tok] = c.user
-	writeJSON(w, http.StatusOK, map[string]string{"access_token": tok, "token_type": "bearer"})
+	f.refresh[refreshTok] = refreshGrant{user: c.user, access: tok}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_token":             tok,
+		"expires_in":               28800,
+		"refresh_token":            refreshTok,
+		"refresh_token_expires_in": 15897600,
+		"token_type":               "bearer",
+	})
+}
+
+func (f *Fake) refreshAccessToken(w http.ResponseWriter, r *http.Request) {
+	oldRefresh := r.PostForm.Get("refresh_token")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	grant, ok := f.refresh[oldRefresh]
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]string{"error": "bad_refresh_token"})
+		return
+	}
+	delete(f.refresh, oldRefresh)
+	delete(f.tokens, grant.access)
+	nextAccess := "ghu_" + randHex()
+	nextRefresh := "ghr_" + randHex()
+	f.tokens[nextAccess] = grant.user
+	f.refresh[nextRefresh] = refreshGrant{user: grant.user, access: nextAccess}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_token":             nextAccess,
+		"expires_in":               28800,
+		"refresh_token":            nextRefresh,
+		"refresh_token_expires_in": 15897600,
+		"token_type":               "bearer",
+	})
 }
 
 func (f *Fake) userEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +215,47 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// deleteGrant models DELETE /applications/{client_id}/grant: Basic-auth confidential client,
+// {"access_token": ...} body, grant-WIDE teardown (every access+refresh token for that user dies).
+// 204 on success, 404 when the access token maps to no live grant.
+func (f *Fake) deleteGrant(w http.ResponseWriter, r *http.Request) {
+	cid, secret, ok := r.BasicAuth()
+	if !ok || cid != f.ClientID || secret != f.ClientSecret {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"message": "Bad credentials"})
+		return
+	}
+	if r.PathValue("client_id") != f.ClientID {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"message": "Bad credentials"})
+		return
+	}
+	var body struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil || body.AccessToken == "" {
+		http.Error(w, "bad body", http.StatusUnprocessableEntity)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	user, ok := f.tokens[body.AccessToken]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	// Grant-wide teardown: delete every access token and refresh grant for this user.
+	for tok, u := range f.tokens {
+		if u.ID == user.ID {
+			delete(f.tokens, tok)
+		}
+	}
+	for rt, g := range f.refresh {
+		if g.user.ID == user.ID {
+			delete(f.refresh, rt)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func randHex() string {

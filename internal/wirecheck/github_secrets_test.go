@@ -23,6 +23,14 @@ func requireFieldNumber(t *testing.T, msg proto.Message, name protoreflect.Name,
 	}
 }
 
+func requireNoField(t *testing.T, msg proto.Message, name protoreflect.Name) {
+	t.Helper()
+	fd := msg.ProtoReflect().Descriptor().Fields().ByName(name)
+	if fd != nil {
+		t.Fatalf("%T must not expose field %q", msg, name)
+	}
+}
+
 func TestNodeGitHubSecretRoutingProtoSurface(t *testing.T) {
 	if got := nodev1.SecretType_SECRET_TYPE_UNSPECIFIED.Number(); got != 0 {
 		t.Fatalf("SECRET_TYPE_UNSPECIFIED=%d want 0", got)
@@ -278,6 +286,19 @@ func TestA4SecretAttachmentProtoSurface(t *testing.T) {
 	if resp.GetGeneration() != 7 {
 		t.Fatalf("GetPendingIntentResponse.Generation = %d want 7", resp.GetGeneration())
 	}
+
+	requireFieldNumber(t, &cpv1.GitHubLinkTarget{}, "secret_templates", 6)
+	target := &cpv1.GitHubLinkTarget{
+		SpawnId:         "sp1",
+		NodeId:          "node-1",
+		Generation:      3,
+		SignedSubkey:    []byte(`{"hpke_pub":"pub","node_id":"node-1"}`),
+		NodeCertChain:   []byte("cert-chain"),
+		SecretTemplates: []*cpv1.SealedSecret{{SecretId: "gh-main", Type: cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN}},
+	}
+	if len(target.GetSecretTemplates()) != 1 || target.GetSecretTemplates()[0].GetSecretId() != "gh-main" {
+		t.Fatalf("GitHubLinkTarget.SecretTemplates lost routing template: %+v", target.GetSecretTemplates())
+	}
 }
 
 func TestAuthGitHubMintProtoSurface(t *testing.T) {
@@ -285,43 +306,42 @@ func TestAuthGitHubMintProtoSurface(t *testing.T) {
 		t.Fatalf("mint procedure=%q want %q", got, want)
 	}
 
-	requireFieldNumber(t, &authv1.GitHubRefreshTokenRef{}, "secret_id", 1)
-	requireFieldNumber(t, &authv1.GitHubRefreshTokenRef{}, "version", 2)
-	requireFieldNumber(t, &authv1.GitHubRefreshTokenRef{}, "delivery_id", 3)
-	requireFieldNumber(t, &authv1.GitHubRefreshTokenRef{}, "refresh_token", 4)
+	requireFieldNumber(t, &authv1.GitHubLinkRef{}, "secret_id", 1)
+	requireFieldNumber(t, &authv1.GitHubLinkRef{}, "version", 2)
+	requireFieldNumber(t, &authv1.GitHubLinkRef{}, "delivery_id", 3)
+	requireNoField(t, &authv1.GitHubLinkRef{}, "refresh_token")
 	requireFieldNumber(t, &authv1.MintGitHubAccessTokenRequest{}, "request_id", 1)
 	requireFieldNumber(t, &authv1.MintGitHubAccessTokenRequest{}, "spawn_id", 2)
 	requireFieldNumber(t, &authv1.MintGitHubAccessTokenRequest{}, "generation", 3)
-	requireFieldNumber(t, &authv1.MintGitHubAccessTokenRequest{}, "refresh_token_ref", 4)
+	requireFieldNumber(t, &authv1.MintGitHubAccessTokenRequest{}, "link_ref", 4)
 	requireFieldNumber(t, &authv1.MintGitHubAccessTokenRequest{}, "repository_id", 5)
 	requireFieldNumber(t, &authv1.MintGitHubAccessTokenResponse{}, "request_id", 1)
 	requireFieldNumber(t, &authv1.MintGitHubAccessTokenResponse{}, "access_token", 2)
 	requireFieldNumber(t, &authv1.MintGitHubAccessTokenResponse{}, "access_expires_at_unix", 3)
-	requireFieldNumber(t, &authv1.MintGitHubAccessTokenResponse{}, "refresh_token", 4)
-	requireFieldNumber(t, &authv1.MintGitHubAccessTokenResponse{}, "refresh_expires_at_unix", 5)
+	requireNoField(t, &authv1.MintGitHubAccessTokenResponse{}, "refresh_token")
+	requireNoField(t, &authv1.MintGitHubAccessTokenResponse{}, "refresh_expires_at_unix")
 	requireFieldNumber(t, &authv1.MintGitHubAccessTokenResponse{}, "token_type", 6)
 	requireFieldNumber(t, &authv1.MintGitHubAccessTokenResponse{}, "repository_id", 7)
+	requireFieldNumber(t, &authv1.MintGitHubAccessTokenResponse{}, "refreshed", 8)
 
 	req := &authv1.MintGitHubAccessTokenRequest{
 		RequestId:    "mint-sp1-gen3-gh-main-delivery-sp1-gen3-gh-main-v11-repo987654321",
 		SpawnId:      "sp1",
 		Generation:   3,
 		RepositoryId: "987654321",
-		RefreshTokenRef: &authv1.GitHubRefreshTokenRef{
-			SecretId:     "gh-main",
-			Version:      11,
-			DeliveryId:   "delivery-sp1-gen3-gh-main-v11",
-			RefreshToken: "github-refresh-token-before-rotation",
+		LinkRef: &authv1.GitHubLinkRef{
+			SecretId:   "gh-main",
+			Version:    11,
+			DeliveryId: "delivery-sp1-gen3-gh-main-v11",
 		},
 	}
 	resp := &authv1.MintGitHubAccessTokenResponse{
-		RequestId:            req.GetRequestId(),
-		AccessToken:          "github-access-token-after-rotation",
-		AccessExpiresAtUnix:  1890000000,
-		RefreshToken:         "github-refresh-token-after-rotation",
-		RefreshExpiresAtUnix: 1900000000,
-		TokenType:            "bearer",
-		RepositoryId:         req.GetRepositoryId(),
+		RequestId:           req.GetRequestId(),
+		AccessToken:         "github-access-token-current-shared",
+		AccessExpiresAtUnix: 1890000000,
+		TokenType:           "bearer",
+		RepositoryId:        req.GetRepositoryId(),
+		Refreshed:           true,
 	}
 
 	reqBytes, err := proto.Marshal(req)
@@ -332,7 +352,7 @@ func TestAuthGitHubMintProtoSurface(t *testing.T) {
 	if err := proto.Unmarshal(reqBytes, &gotReq); err != nil {
 		t.Fatalf("unmarshal mint request: %v", err)
 	}
-	if gotReq.GetRefreshTokenRef().GetSecretId() != "gh-main" || gotReq.GetRepositoryId() != "987654321" || gotReq.GetRequestId() == "" {
+	if gotReq.GetLinkRef().GetSecretId() != "gh-main" || gotReq.GetRepositoryId() != "987654321" || gotReq.GetRequestId() == "" {
 		t.Fatalf("mint request lost idempotency/routing fields: %+v", &gotReq)
 	}
 
@@ -344,7 +364,7 @@ func TestAuthGitHubMintProtoSurface(t *testing.T) {
 	if err := proto.Unmarshal(respBytes, &gotResp); err != nil {
 		t.Fatalf("unmarshal mint response: %v", err)
 	}
-	if gotResp.GetRefreshToken() != "github-refresh-token-after-rotation" || gotResp.GetRepositoryId() != "987654321" || gotResp.GetRequestId() != req.GetRequestId() {
-		t.Fatalf("mint response lost rotated tuple/idempotency fields: %+v", &gotResp)
+	if gotResp.GetAccessToken() != "github-access-token-current-shared" || gotResp.GetRepositoryId() != "987654321" || gotResp.GetRequestId() != req.GetRequestId() || !gotResp.GetRefreshed() {
+		t.Fatalf("mint response lost shared access token/idempotency fields: %+v", &gotResp)
 	}
 }

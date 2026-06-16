@@ -75,5 +75,5 @@ func Open(ctx context.Context, cfg Config) (Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &bunStore{db: db, closer: db}, nil
+	return &bunStore{db: db, closer: db, cipher: cfg.TokenCipher}, nil
 }
