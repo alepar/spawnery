@@ -1,9 +1,9 @@
 # GitHub Credentials + Storage Backend - Unified Design
 
-> **Status:** revised 2026-06-15 after adversarial review (`superpowers:roast`, BLOCK) plus a
-> `deep-research` pass on the GitHub-App token model. Keystone decisions re-made with the user;
-> see the Revision Log (Section 0) and Decision Log (Section 15). Repo-create and three smaller
-> facts remain gated on empirical spikes (Section 14).
+> **Status:** revised 2026-06-16 after empirical GitHub-App spikes. The MVP now explicitly accepts
+> installation-selection-scoped GitHub App user tokens rather than relying on refresh-time
+> `repository_id` narrowing. Keystone decisions are in the Revision Log (Section 0) and Decision Log
+> (Section 15); spike verdicts are recorded in Section 14.
 >
 > **Beads:** `sp-v40s` (GitHub token provisioning), `sp-u53.1` (GitHub storage backend),
 > gated by `sp-7h6.1` children and `sp-vd5w`.
@@ -27,15 +27,19 @@ This spec was BLOCKed by an adversarial review. The blocking findings and their 
   `existing-repo` / `repo-create` "re-linkable permission profiles on one App" design was infeasible.
   **Resolution:** one App with the union of permissions; permission *profiles* become a
   **Spawnery-enforced mount policy**, not a GitHub-enforced token capability (Section 5).
-- **Token blast radius.** Docs confirmed a `repository_id` generation-time parameter that scopes a
-  user token to a **single repo**. **Resolution:** the agent's token is minted scoped to exactly the
-  bound repo (Sections 7, 9), converting the "broad token to untrusted agent" finding into a bounded one.
+- **Token blast radius.** Docs suggested a `repository_id` generation-time parameter could scope a
+  user token to a **single repo**, but the empirical spike showed the load-bearing MVP path
+  (`grant_type=refresh_token` + `repository_id`) does **not** narrow a rotated token. **Resolution:**
+  the MVP stops promising GitHub-enforced per-repo token scope. Live access tokens are scoped by the
+  App installation's repository selection; Spawnery enforces the bound repo through mount validation
+  and an exact-repo credential helper (Sections 5, 7, 9).
 - **Single-use refresh + availability.** Docs confirmed refresh tokens are strictly single-use (using
   one invalidates both the old refresh and old access token) and that expiry is an opt-out App setting.
   The previous strict owner-online, memoryless refresh had an unrecoverable loss window and no
   long-running-spawn story. **Resolution:** hybrid minting -- the node retains the owner-delivered
-  refresh credential for the spawn's life and mints short-lived, repo-scoped tokens via a **new AS
-  mint API** that keeps the App `client_secret` AS-side (Section 3). This is a deliberate, documented
+  refresh credential for the spawn's life and refreshes short-lived, installation-selection-scoped
+  access tokens via a **new AS mint/refresh API** that keeps the App `client_secret` AS-side
+  (Section 3). This is a deliberate, documented
   relaxation of strict CP-blind custody (fully-CP-blind custody stays deferred to `sp-6pqt`).
 - **Conflict handling contradiction.** Resolved in favor of this spec's **no-push-rails** model:
   Spawnery never force-updates a user's real branch; the agent owns real pushes; Spawnery writes only
@@ -83,8 +87,8 @@ Production GitHub-token handling is blocked until the generic secret-delivery fl
   nodes in production.
 
 Backend mechanics may be built and tested earlier behind local/static-token seams, but no
-production GitHub user-token path ships before these gates **and** before the Section 14 spikes
-resolve (in particular the repo-create spike gates `create_if_missing`).
+production GitHub user-token path ships before these gates. Section 14 records the resolved spike
+verdicts that shape the implementation contract.
 
 ## 3. Custody Model
 
@@ -109,25 +113,26 @@ in-memory nonce assumes a single AS instance or sticky session for the redemptio
 horizontally-scaled AS must share the nonce out-of-band or pin redemption to the issuing instance --
 tracked as a deployment constraint, see Section 14.)
 
-### 3.1 Sustaining a running spawn (the AS mint API)
+### 3.1 Sustaining a running spawn (the AS mint/refresh API)
 
 The node, not the owner client, sustains a running spawn:
 
 1. At spawn start the node receives the owner-sealed GitHub credential (refresh token tuple) over the
    A4-folded delivery path and **unseals it into the per-spawn secrets tmpfs, retaining it for the
    spawn's life** (see Section 9 for the at-rest tradeoff).
-2. When the node needs a fresh access token (current one near/at its 8h expiry, or a per-mount
-   `repository_id`-scoped token is required), it calls a **new AS mint API**, presenting the current
-   refresh token plus the target `repository_id`.
+2. When the node needs a fresh access token (current one near/at its 8h expiry, or before a
+   pre-pod/backend operation), it calls a **new AS mint/refresh API**, presenting the current refresh
+   token plus expected target repo metadata (`host`, `owner`, `repo`, and `repository_id` when known).
 3. The AS combines the presented refresh token with the App `client_secret` (which never leaves the
    AS), calls GitHub's token endpoint, and returns the rotated tuple (new access token + new refresh
-   token, repo-scoped where requested) to the node.
+   token) to the node. The returned access token is treated as **installation-selection-scoped**; the
+   `repository_id` field is validation/audit metadata, not a GitHub narrowing guarantee.
 4. The node atomically updates its retained refresh token (single-use rotation) and the credential
    provider's live access token.
 
-**Single-use durability on the node<->AS channel.** Because each mint rotates the refresh token, a lost
-mint response would otherwise brick the spawn. The mint exchange is therefore **persist-before-confirm
-/ idempotent**: the node durably records the in-flight refresh attempt; the AS mint is safe to retry;
+**Single-use durability on the node<->AS channel.** Because each refresh rotates the refresh token, a
+lost response would otherwise brick the spawn. The exchange is therefore **persist-before-confirm /
+idempotent**: the node durably records the in-flight refresh attempt; the AS refresh is safe to retry;
 on an ambiguous outcome the node reconciles (if GitHub already rotated, adopt the new tuple; only a
 genuinely lost rotation forces a relink). A single running spawn has exactly **one** refresher (its
 node), so the web+spawnctl concurrent-refresh race does not apply to running spawns.
@@ -163,12 +168,13 @@ sealed payload includes:
 | `github_user_id` | Immutable numeric user id when available. |
 | `refresh_token` | GitHub App user refresh token (durable credential; single-use, rotates). |
 | `refresh_expires_at` | ~6-month window; reset on each refresh. Warn/re-link on inactivity. |
-| `app_metadata` | App/account metadata needed to verify the tuple and call the mint API. |
+| `app_metadata` | App/account metadata needed to verify the tuple and call the AS mint/refresh API. |
 
 An access token (`access_token` / `access_expires_at`) may be cached transiently for an active link
-but is not the durable credential; the node mints fresh, `repository_id`-scoped access tokens via the
-AS mint API. There is **no** `permission_profile` field on the token -- see Section 5; the token always
-carries the App's full permission set intersected with the user's access.
+but is not the durable credential; the node refreshes fresh installation-selection-scoped access
+tokens via the AS mint/refresh API. There is **no** `permission_profile` field on the token -- see
+Section 5; the token always carries the App's full permission set intersected with the user's access
+and the App installation's repository selection.
 
 The CP catalog stores non-secret metadata in cleartext as routing and validation facts:
 `host`, `login`, `github_user_id`, `refresh_expires_at`, display name, and version. The sealed tuple
@@ -180,38 +186,42 @@ writer that loses the CAS re-reads the newer tuple and discards stale results.
 
 ## 5. Permission Model (Spawnery-enforced, not GitHub-enforced)
 
-**Doc-confirmed facts (deep-research, primary GitHub docs):** user-to-server tokens do not use OAuth
-scopes; they use the App's fine-grained permissions, fixed at App registration; a token's effective
-permission is the intersection of App permissions, user permissions, and installation repository
-selection; a single App cannot vary permissions per authorization; `repository_id` can narrow a token
-to one repo at mint time.
+**Doc-confirmed facts (deep-research, primary GitHub docs) plus spike correction:** user-to-server
+tokens do not use OAuth scopes; they use the App's fine-grained permissions, fixed at App
+registration; a token's effective permission is the intersection of App permissions, user
+permissions, and installation repository selection; a single App cannot vary permissions per
+authorization. `repository_id` can narrow some initial user-token generation flows, but the empirical
+MVP refresh path did **not** narrow a rotated token.
 
 Consequences for the design:
 
 - The MVP ships **one GitHub App** whose registered permission set is the **union** of what backend
-  operations need: `Contents: write` (clone/fetch/push) and -- gated on the repo-create spike --
+  operations need: `Contents: write` (clone/fetch/push) and -- validated by the repo-create spike --
   `Administration: write` (create). Users consent once.
 - **"Permission profiles" are a Spawnery-enforced mount policy, not a GitHub token capability.** A
   mount declares whether it may create a missing repo; Spawnery's prepare logic enforces that policy
   before any GitHub call. GitHub does **not** enforce an `existing-repo` vs `repo-create` distinction
   -- the same token is technically capable of both; Spawnery is the gate.
-- **Least privilege is achieved by token scoping, not permission selection.** Per-mount tokens are
-  minted `repository_id`-scoped to the bound repo (Section 7/9), so a given spawn's token cannot reach
-  other repos even though the App's registered permission set is broad.
+- **Least privilege is achieved by installation selection plus Spawnery policy, not per-token GitHub
+  repo scope.** The raw access token can reach repositories selected in the App installation. Normal
+  Spawnery operation is bounded to the mount's repo by structured binding validation, backend access
+  verification, and an exact-repo credential helper (Sections 7/9). This is a deliberate MVP
+  relaxation; raw token exfiltration has installation-selection blast radius.
 
-A mount that asks to create a missing repo while the App lacks `Administration: write` (i.e. the
-repo-create spike failed and create was not enabled) fails before agent start with a typed
-"repo-create not available" error.
+A mount that asks to create a missing repo while the configured App lacks `Administration: write`
+fails before agent start with a typed "repo-create not available" error. The production MVP App keeps
+that permission because the 2026-06-16 create spike passed.
 
-The exact registered permission set is a **binding spike before production** (Section 14): minimum
-permissions for access verification, clone/fetch, push, create (if feasible), and refresh rotation.
+The exact registered permission set is now tied to the spike verdicts and `github_e2e`: minimum
+permissions for access verification, clone/fetch, push, create, and refresh rotation.
 Current external docs record: expiring user tokens have an 8-hour access token and ~6-month refresh
 token, refresh uses the App `client_secret`
 ([refreshing user access tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens));
 `POST /user/repos` requires `Administration: write`
-([create repository for the authenticated user](https://docs.github.com/en/rest/repos/repos#create-a-repository-for-the-authenticated-user)),
-but the fine-grained permissions reference marks that endpoint with `x` for GitHub-App user tokens --
-**creation via a user-to-server token is unproven** and gated (Section 14).
+([create repository for the authenticated user](https://docs.github.com/en/rest/repos/repos#create-a-repository-for-the-authenticated-user)).
+The fine-grained permissions reference marks that endpoint with `x` for GitHub-App user tokens, but
+the 2026-06-16 empirical spike proved a GitHub App user-to-server token can create a private
+personal repo. `create_if_missing` remains in MVP (Section 14).
 
 ## 6. Mount Binding And Repo Identity
 
@@ -244,8 +254,10 @@ Missing repo behavior:
 
 - missing + `create_if_missing=false`: fail before agent start
 - missing + `create_if_missing=true` (and create available): create private user-owned repo, then
-  initialize according to the app manifest/binding seed behavior; after create, mint/refresh the token
-  so it can reach the new repo (see the newly-created-repo-coverage spike, Section 14)
+  initialize according to the app manifest/binding seed behavior; after create, verify the refreshed
+  token can reach the new repo. The 2026-06-16 spike showed selected-repository installations
+  immediately covered the newly-created repo, so create-capable links do not require an
+  all-repositories install (Section 14).
 - existing empty repo: leave empty unless the app manifest/binding says to seed or initialize
 
 ## 7. Delivery Model And Node Lifecycle
@@ -253,10 +265,11 @@ Missing repo behavior:
 `github-token` attachments declare two consumers for one sealed tuple:
 
 - `node-storage`: eligible for targeted pre-pod unseal for `github:` mount preparation, on-demand
-  minting via the AS API, and suspend backstop.
-- `agent-render`: a `repository_id`-scoped access token rendered into the agent secrets tmpfs for
-  normal `git`/`gh` use after startup. The agent receives a **repo-scoped** token, not the durable
-  refresh credential and not an installation-wide token.
+  mint/refresh via the AS API, and suspend backstop.
+- `agent-render`: an installation-selection-scoped access token rendered into the agent secrets tmpfs
+  behind an exact-repo credential helper for normal `git`/`gh` use after startup. The agent receives
+  an access token, never the durable refresh credential. The helper enforces the bound repo in normal
+  operation; direct raw-token exfiltration retains installation-selection blast radius.
 
 Storage credentials are not `spawn_artifacts` and are not `ArtifactTarget` container payloads.
 GitHub storage credentials are carried by the A4-folded secret delivery path and mount binding
@@ -265,7 +278,8 @@ metadata.
 `StartSpawn.secrets` is self-contained for the node. Each entry carries sealed bytes plus
 non-secret routing metadata: secret id, type (`github-token`), version, delivery id, usages
 (`node-storage`, `agent-render`), consuming mount names, render profile/paths, and clear metadata for
-host/profile validation. **These rich routing fields plus the new AS mint API require proto changes**
+host/profile validation. **These rich routing fields plus the new AS mint/refresh API require proto
+changes**
 (today `SealedSecret={target_path,sealed,secret_id}` and `StartSpawn` has no secrets field); a single
 bead owns the proto delta and proto-touching tasks are serialized (Section 13).
 
@@ -275,10 +289,11 @@ Lifecycle:
 StartSpawn(secrets, mounts)
   -> pre-pod unseal only declared node-storage github-token secrets referenced by github mounts;
      retain the refresh credential in per-spawn secrets tmpfs for the spawn's life
-  -> mint a repository_id-scoped access token via the AS mint API for each github mount
+  -> refresh/mint an installation-selection-scoped access token via the AS mint/refresh API,
+     carrying target repo metadata for validation/audit
   -> GitHub backend verify/clone/create/prepare using the tmpfs credential provider
   -> StartPod(sidecar)
-  -> normal secret injection/rendering, including the agent's repo-scoped GitHub config
+  -> normal secret injection/rendering, including the agent's exact-repo GitHub helper config
   -> StartAgent
 ```
 
@@ -317,11 +332,12 @@ Backend prepare:
 
 1. Validate host support and token-host match.
 2. Validate the mount's Spawnery create policy for the requested action (Section 5).
-3. Mint a `repository_id`-scoped access token via the AS API for the bound repo.
+3. Refresh/mint an installation-selection-scoped access token via the AS API; include the bound repo
+   metadata and `repository_id` as expected-target validation/audit data, not as a scope guarantee.
 4. Verify repo access via GitHub REST and/or credentialed git fetch before `StartAgent`.
 5. If repo exists, clone/fetch into the mount host dir.
-6. If repo is missing and create is available + allowed, create a private user-owned repo, mint a
-   token covering the new repo, and initialize according to manifest/binding seed behavior.
+6. If repo is missing and create is available + allowed, create a private user-owned repo, verify the
+   live token covers the new repo, and initialize according to manifest/binding seed behavior.
 7. If repo is missing without create available/allowed, fail typed before agent start.
 
 Node-daemon GitHub egress is allowed only for declared `github:` mounts using bound `node-storage`
@@ -349,8 +365,8 @@ Rendered config:
 
 - `GH_CONFIG_DIR` points into the journal-excluded secrets tmpfs.
 - Git credential config points into the same tmpfs; `credential.useHttpPath=true`.
-- The helper returns a token only for exact `{host, owner, repo}` matches, and the token itself is
-  `repository_id`-scoped to that repo, so even direct token use cannot reach other repos.
+- The helper returns a token only for exact `{host, owner, repo}` matches. This helper is the primary
+  in-spawn boundary for normal Git operations.
 - No `~/.git-credentials`.
 - Node-side Git commands ignore or override repo-controlled credential helpers/config includes where
   feasible.
@@ -360,11 +376,14 @@ tmpfs for the spawn's life (needed for on-demand minting and the suspend backsto
 node-compromise exposure window from "zero immediately after inject" to session-lifetime. It is bounded
 by: sealed in transit, tmpfs-only (never durable disk, never journaled), and wiped on spawn end. Accepted.
 
-This hardening protects Spawnery-driven backend operations. The `repository_id`-scoped agent token
-reduces -- but does not eliminate -- exfiltration capability: a user-authorized agent can still use its
-repo-scoped token against the one bound repo (push to it, read it). Agent token availability is
-intentional capability and is documented as residual risk; the egress reconciliation with the per-pod
-egress floor for the required github.com channel is noted in Section 12/14.
+This hardening protects Spawnery-driven backend operations and normal in-spawn Git use. It does not
+make a leaked raw GitHub token repo-scoped: the access token can reach any repository selected in the
+App installation, subject to the App's permissions and the user's access. This raw-token exfiltration
+blast radius is the accepted MVP relaxation. It is bounded by short-lived access tokens, GitHub's token
+and grant revocation APIs, selected-repository installs, tmpfs-only storage, and no journal/log
+persistence. Agent token availability is intentional capability and is documented as residual risk;
+the egress reconciliation with the per-pod egress floor for the required github.com channel is noted in
+Section 12/14.
 
 ## 10. Suspend Backstop
 
@@ -375,7 +394,7 @@ committed work are both already in the Kopia journal (`.git` is journaled), so t
 **cross-node / human-recovery convenience layer, not the sole durability path**. Reconsidering a WIP
 dirty-state backstop is tracked by backlog epic `sp-lqld`.
 
-The node self-refreshes a token via the AS mint API at suspend time, so a system-triggered suspend
+The node self-refreshes a token via the AS mint/refresh API at suspend time, so a system-triggered suspend
 while the owner is offline can still authenticate the backstop push (this resolves the prior
 owner-offline backstop-auth gap).
 
@@ -453,8 +472,10 @@ Hermetic tests:
 - node<->AS mint idempotency / persist-before-confirm (lost-response reconcile, no brick on single-use)
 - mount binding validation; unsupported host rejection
 - Spawnery-enforced create-policy gating (mount may/may-not create)
-- `node-storage` pre-pod routing constraints; `repository_id`-scoped mint per mount
+- `node-storage` pre-pod routing constraints; AS refresh treats `repository_id` as expected-target
+  metadata, not as a scope guarantee
 - credential provider rendering and atomic refresh rewrite; secrets-tmpfs journal-exclusion assertion
+- exact-repo credential helper refuses non-bound repo URLs even when the raw token would be accepted
 - replay high-water/delivery-id guards
 - reachability-based backstop detection, including no-upstream branches and detached HEAD
 - backstop ref leaf-hash scheme (no `feat`/`feat/x` D/F conflict); multi-branch partial-failure warnings
@@ -467,59 +488,69 @@ existing repo clone/fetch/push, missing repo fail-closed, create-if-missing thro
 provider seam, suspend backstop ref production, GC behavior.
 
 `github_e2e` lane covers real GitHub semantics and fails loudly when opted into without required
-environment: App user-token handoff, the AS mint API (`repository_id`-scoped + single-use rotation),
-Spawnery create-policy gating, actual clone/fetch/push/create behavior, and refresh API behavior. The
-lane is also where the Section 14 spikes are mechanized once an App exists.
+environment: App user-token handoff, the AS mint/refresh API (single-use rotation, installation-selection
+scope, and an assertion that refresh+`repository_id` is **not** assumed to narrow), Spawnery
+create-policy gating, actual clone/fetch/push/create behavior, newly-created-repo coverage, token/grant
+revocation, and refresh API behavior. The lane is also where the Section 14 spike verdicts are
+mechanized.
 
 Token expiry tests use fake/forced-expiry paths for MVP. Do not add an 8-hour sleep test.
 
 The required github.com egress channel must be reconciled with the per-pod egress floor in the
 backend/egress design (whether the floor permits the node's mint/clone/push and the agent's
-repo-scoped push); this is called out as an integration requirement, not left implicit.
+exact-repo helper push); this is called out as an integration requirement, not left implicit.
 
 ## 13. Beads Update Plan
 
 After this spec lands:
 
 - keep `sp-v40s` and `sp-u53.1`; update both epics' notes to point to this revised spec
-- update `sp-v40s` children for: single-App union-permission set, the **new AS mint API**
-  (`repository_id`-scoped, single-use rotation, `client_secret` AS-side), node-retained refresh
-  credential, owner-side refresh + inactivity-based relink, response-wrap handoff hardening, web and
-  spawnctl surfaces
+- update `sp-v40s` children for: single-App union-permission set, the **new AS mint/refresh API**
+  (installation-selection-scoped access tokens, single-use rotation, `client_secret` AS-side,
+  `repository_id` as validation/audit metadata only), node-retained refresh credential, owner-side
+  refresh + inactivity-based relink, response-wrap handoff hardening, web and spawnctl surfaces
 - update `sp-u53.1` children for: Spawnery-enforced create policy (not GitHub permission profiles),
-  `repository_id`-scoped agent token, journal-excluded secrets tmpfs, backstop leaf-hash ref namespace,
-  reachability detection, multi-branch partial-failure warnings, backstop enumeration/recovery, defined
-  fail-closed outcomes
+  installation-selection-scoped agent token behind an exact-repo helper, journal-excluded secrets tmpfs,
+  backstop leaf-hash ref namespace, reachability detection, multi-branch partial-failure warnings,
+  backstop enumeration/recovery, defined fail-closed outcomes
 - **retire** the impl-design LWW/safety-ref scope on `sp-u53.1.3` (no push rails; agent owns real pushes)
-- assign a single proto-owner bead for the `StartSpawn.secrets` fields + AS mint API; serialize
+- assign a single proto-owner bead for the `StartSpawn.secrets` fields + AS mint/refresh API; serialize
   proto-touching tasks
 - assign a bead to own the GitHub agent-cred config render (`GH_CONFIG_DIR`/helper/`hosts.yml` ->
   journal-excluded tmpfs)
-- file the Section 14 spikes as blocking pre-impl gates on `sp-u53.1` / `sp-v40s`
+- update/close the Section 14 spike beads and add `github_e2e` backfill coverage for their verdicts
 - add production-token dependencies from `sp-u53.1` to the `sp-7h6.1` gates named in Section 2
 - record `sp-vd5w` as immediate prerequisite to merge first
 
-## 14. Spikes (pre-implementation gates)
+## 14. Spike Verdicts And E2E Backfill
 
-These are empirical (not doc-answerable) and gate production implementation. Each is filed as a
-blocking bead.
+These empirical spikes were run on 2026-06-16 against a throwaway GitHub App before implementation.
+The verdicts below are binding design inputs; `github_e2e` should later mechanize them so drift is
+caught in CI/lane runs.
 
-1. **Repo-create via user-to-server token (THE gate).** Question: can a GitHub App user-to-server
-   token with `Administration: write` call `POST /user/repos` to create a *personal* repo, despite the
-   docs' `x` marker? Cheapest test: register a throwaway App, complete the user-authorization flow,
-   call the endpoint. Kill criteria: if it cannot, **drop `create_if_missing` from MVP** (require the
-   repo to pre-exist) and remove `Administration: write` from the App permission set.
-2. **Newly-created-repo coverage.** Question: after creating a repo (or for a "selected repositories"
-   installation), is the new repo immediately reachable by a freshly minted token, or must the
-   installation's repo selection update first? Lever: require an **"all repositories" installation** for
-   create-capable links. Kill criteria: if neither auto-coverage nor a programmatic selection update is
-   possible, create-then-clone in one prepare flow is infeasible -- gate create accordingly.
-3. **Token revocation.** Question: is there an API to revoke a user-to-server access token (or the App
-   authorization) before its 8h expiry, and does re-link/refresh invalidate previously issued access
-   tokens beyond the single-use-refresh case? Informs the exfil kill-switch story.
-4. **Response-wrap nonce under a scaled AS.** Question (deployment): how is the single-use in-memory
-   nonce redeemed when the AS is horizontally scaled (shared store vs sticky redemption)? Resolve
-   before multi-instance AS deployment.
+1. **Repo-create via user-to-server token: PASS.** A GitHub App user-to-server token with
+   `Administration: write` and `Contents: write` successfully called `POST /user/repos` and created a
+   private personal repo. MVP implication: keep `create_if_missing` for private user-owned repos and
+   keep `Administration: write` in the App permission set, with Spawnery create policy as the product
+   gate.
+2. **Newly-created-repo coverage: PASS, with token-scope caveat.** With a selected-repositories App
+   installation, a repo created via the user-to-server token was immediately listed in the
+   installation's repositories and was clonable using an access token. Create-capable links do not
+   require an all-repositories install. However, `grant_type=refresh_token` plus `repository_id` did
+   **not** narrow the rotated token; the returned token could still access both selected repos. MVP
+   implication: create-then-clone is feasible, but the design must use installation-selection-scoped
+   live tokens plus Spawnery exact-repo controls.
+3. **Token revocation: PASS.** `DELETE /applications/{client_id}/token` revoked a user-to-server
+   access token before its 8h expiry. `DELETE /applications/{client_id}/grant` revoked the App
+   authorization and broke further refresh. Single-use refresh invalidated the predecessor access
+   token immediately. Independent re-link/new authorization did not invalidate an earlier still-valid
+   token. MVP implication: the exfil kill-switch story is token revoke for a known access token and
+   grant revoke for the whole GitHub App authorization; do not claim re-link alone kills every prior
+   access token.
+4. **Response-wrap nonce under a scaled AS: DESIGN RESOLVED.** Production multi-instance AS
+   deployments must use a shared volatile response-wrap store with atomic redeem-and-delete,
+   encrypted payloads, short TTL, auth-bound redemption, and no durable plaintext tuple persistence.
+   Sticky/in-memory redemption is acceptable only for single-instance development.
 
 (Branch-protection / ruleset bypass for force pushes is **out of scope** for Spawnery -- it never pushes
 user branches; an agent's own pushes to a protected branch are the agent/user's concern.)
@@ -534,22 +565,26 @@ user branches; an agent's own pushes to a protected branch are the agent/user's 
 4. The durable owner-sealed credential is the (single-use, rotating) refresh token; access tokens are
    ephemeral and minted on demand. Refresh resets the ~6-month window; relink is inactivity/breakage
    based, not a periodic cliff.
-5. **A new AS mint API** mints `repository_id`-scoped, short-lived access tokens; the node retains the
-   refresh credential for the spawn's life and is the single refresher for a running spawn; the
-   node<->AS exchange is persist-before-confirm/idempotent to survive single-use rotation loss.
+5. **A new AS mint/refresh API** rotates the GitHub App user token with the App `client_secret`
+   AS-side and returns short-lived, installation-selection-scoped access tokens; `repository_id` is
+   expected-target validation/audit metadata only. The node retains the refresh credential for the
+   spawn's life and is the single refresher for a running spawn; the node<->AS exchange is
+   persist-before-confirm/idempotent to survive single-use rotation loss.
 6. **A single GitHub App** with the union of permissions; there is no GitHub-enforced permission
    profile. "Profiles" are a **Spawnery-enforced mount create-policy**. Least privilege is achieved by
-   `repository_id` token scoping, not per-link permission selection.
+   selected-repository installations plus Spawnery binding/helper enforcement, not per-link permission
+   selection or refresh-time `repository_id` scoping.
 7. Mount bindings use structured repo identity and options, not URI query strings; repo references are
    fully qualified; MVP supports only `github.com`.
 8. Existing org/other-owner repos are allowed only where the **App is installed** (access = the
    intersection of App, user, and installation); MVP repo creation is private user-owned only and
-   gated on the repo-create spike.
+   enabled by the passing repo-create spike.
 9. `node-storage` GitHub credentials may be unsealed pre-pod, only when declared by a `github:` mount;
-   the agent receives a `repository_id`-scoped access token via the `agent-render` route, never the
-   refresh credential or an installation-wide token.
+   the agent receives an installation-selection-scoped access token via the `agent-render` route,
+   never the refresh credential, behind a credential helper that only answers for the exact bound repo.
 10. Storage credentials are not `spawn_artifacts`; `StartSpawn.secrets` carries self-contained routing
-    metadata and sealed bytes; the rich fields + AS mint API require a proto delta with a single owner.
+    metadata and sealed bytes; the rich fields + AS mint/refresh API require a proto delta with a
+    single owner.
 11. Node backend uses REST + plain git; `gh` is agent convenience only.
 12. **No push rails** for agent-driven Git; Spawnery never force-updates or LWW-overwrites a user
     branch. The impl-design LWW/safety-ref scheme is retired. Spawnery writes only namespaced backstop
@@ -569,8 +604,9 @@ user branches; an agent's own pushes to a protected branch are the agent/user's 
     check; owner-offline mid-run is re-drivable (node self-refreshes), only a lost rotation is terminal.
 19. Credential material lives only in a **journal-excluded** secrets tmpfs; the node retains the refresh
     credential for the spawn's life (documented at-rest tradeoff), wiped on spawn end.
-20. Empirical spikes (Section 14) gate production: repo-create feasibility (THE gate), newly-created-repo
-    coverage, token revocation, and the scaled-AS nonce redemption.
+20. Empirical spikes (Section 14) are resolved: repo-create and selected-install new-repo coverage
+    passed, refresh-time `repository_id` narrowing failed and drove the relaxed token-scope design,
+    token/grant revocation passed, and scaled-AS nonce redemption requires a shared volatile store.
 
 ## Post-Implementation Notes
 
@@ -583,3 +619,9 @@ the assumptions above -- append a dated note here, whether or not a formal debug
   durable plaintext tuple persistence. Sticky-session pinning is acceptable only as a single-instance
   or temporary development posture, not as the production scaling mechanism. See
   `deploy/authsvc/README.md`.
+- 2026-06-16: Resolved spikes `sp-v40s.1` through `sp-v40s.3` against a throwaway GitHub App.
+  Repo-create via GitHub App user-to-server token passed, selected-install new-repo coverage was
+  immediate, token/grant revocation worked, and refresh rotation invalidated the predecessor token.
+  The critical correction is that `grant_type=refresh_token` plus `repository_id` did **not** narrow
+  the rotated token; the MVP design is relaxed to installation-selection-scoped access tokens with
+  Spawnery exact-repo guards.
