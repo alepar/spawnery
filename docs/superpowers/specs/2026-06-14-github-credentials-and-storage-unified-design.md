@@ -5,6 +5,13 @@
 > `repository_id` narrowing. Keystone decisions are in the Revision Log (Section 0) and Decision Log
 > (Section 15); spike verdicts are recorded in Section 14.
 >
+> **Round-3 revision (2026-06-16):** after a round-2 adversarial review (`superpowers:roast`, BLOCK),
+> the custody posture is changed from **node-retains-refresh** to **AS-custodial refresh with
+> CP-coordinated fanout**: the node never holds the refresh token; the AS is the sole rotation
+> authority; the suspend backstop is deferred from MVP. **Section 16 is authoritative and supersedes
+> Sections 1, 3, 3.1, 8 (credential path), 9, 10–11, and Decision 5/19 where contradicted.** Read
+> Section 16 first.
+>
 > **Beads:** `sp-v40s` (GitHub token provisioning), `sp-u53.1` (GitHub storage backend),
 > gated by `sp-7h6.1` children and `sp-vd5w`.
 >
@@ -114,6 +121,11 @@ horizontally-scaled AS must share the nonce out-of-band or pin redemption to the
 tracked as a deployment constraint, see Section 14.)
 
 ### 3.1 Sustaining a running spawn (the AS mint/refresh API)
+
+> **Superseded by §16.2–16.5 (round-3).** The node does **not** retain the refresh token; the AS is
+> the durable custodian and sole refresher, and the node authenticates by node identity (not by
+> presenting the refresh token). The flow below is retained for history; read §16 for the binding
+> design.
 
 The node, not the owner client, sustains a running spawn:
 
@@ -323,10 +335,15 @@ The GitHub backend uses direct GitHub REST for API actions and plain `git` for c
 It does not depend on `gh` for backend mechanics. `gh` config is rendered for the agent's
 convenience only.
 
-The node-side credential path is explicit: a credential provider rooted at
-`SecretInjector.DirFor(spawnID)`. No plaintext token field is added to `spawnlet.Spawn`. The
-provider reads only from the per-spawn secrets tmpfs and is atomically refreshed when a mint rewrites
-the live access token.
+The node-side credential path is explicit: a credential provider rooted at a **node-only directory**.
+No plaintext token field is added to `spawnlet.Spawn`. The provider is atomically refreshed when a
+mint rewrites the live access token.
+
+> **Amended by §16.6 (round-3).** This directory must **not** be `SecretInjector.DirFor(spawnID)`:
+> that path is bind-mounted into the agent container (`internal/spawnlet/manager.go:946-959`), so
+> rooting node-storage credential material there would expose it to the agent (round-2 F30). The
+> node-side provider uses a node-only directory; the `agent-render` token is delivered to the agent
+> tmpfs separately.
 
 Backend prepare:
 
@@ -386,6 +403,11 @@ the egress reconciliation with the per-pod egress floor for the required github.
 Section 12/14.
 
 ## 10. Suspend Backstop
+
+> **Deferred from MVP — see §16.7 (round-3).** Sections 10–11 are not implemented in MVP; for
+> journaled `github:` mounts the Kopia journal already captures `.git`. MVP `github:` mounts MUST use
+> a journaled durability class. The backstop machinery below moves to a follow-up epic and is retained
+> here as its design baseline.
 
 GitHub backstop is a spawnlet suspend mechanism. It preserves already-committed local Git work that
 has not reached any **real remote branch**, by pushing it to a namespaced machine-ref namespace for
@@ -608,6 +630,149 @@ user branches; an agent's own pushes to a protected branch are the agent/user's 
     passed, refresh-time `repository_id` narrowing failed and drove the relaxed token-scope design,
     token/grant revocation passed, and scaled-AS nonce redemption requires a shared volatile store.
 
+**Round-3 decisions (2026-06-16) — supersede 5 and 19 where contradicted:**
+
+21. **AS-custodial refresh, CP-blind, AS≠CP.** The AS durably holds the refresh chain and is the sole
+    rotation authority; the node holds only short-lived installation-selection-scoped access tokens,
+    never the refresh token. The CP stays blind (owner-sealed copy for DR only). AS≠CP is a hard
+    invariant: co-located only for single-tenant dev with a documented downgrade; multi-tenant/prod
+    requires separate trust domains. (§16.2; resolves round-2 F2/F6/F30; accepts F4/F5.)
+22. **Node→AS refresh is node-identity-bound.** The call authenticates with the Register/Heartbeat
+    node identity (`nodeKeyCache`) plus CP confirmation that the node hosts the spawn; the access
+    token is a link reference, not the authorization. Resolves off-node replay and resume-after-8h.
+    (§16.3; resolves round-2 F7.)
+23. **Refresh is proactive and CP-coordinated.** AS rotates+seals → notifies CP → CP fans out the
+    sealed token to every node on the link → each node re-renders the agent token. Reactive-on-401 is
+    impossible (git runs in the agent); a transparent git proxy is a tracked future upgrade, not MVP.
+    (§16.4; resolves round-2 F11.)
+24. **One link = one single-active shared access token** (spike 3: rotation invalidates the
+    predecessor). The brief per-refresh stale window is accepted (in-flight agent git ops may 401 and
+    are re-run; the next op self-heals via the credential helper). Routine revoke is skipped (rotation
+    already kills the old token); the compromise kill switch is `DELETE /grant`. (§16.4–16.5.)
+25. **Node-side credential provider lives in a node-only directory**, never the agent-bind-mounted
+    `SecretsMountPath`; `agent-render` is delivered separately. (§16.6; resolves round-2 F30.)
+26. **Suspend backstop deferred from MVP** to a follow-up epic; MVP `github:` mounts MUST use a
+    journaled durability class so committed `.git` is cross-node durable; the key-independent WIP floor
+    stays at `sp-lqld` with the key-dependency asymmetry stated. (§16.7; resolves round-2
+    F16/F17/F18/F19/F20/F32.)
+27. **AS is a sustained refresh-path dependency** (not bootstrap-only); clone2leak hardening
+    (`gh>=2.63.0`, `protectProtocol`, `useHttpPath`, refuse repo-injected helpers) and an enforcing
+    replay-guard CI gate are required; `github_e2e` mechanizes the relaxed-scope + custody assertions.
+    (§16.8; resolves round-2 F22/F26/F36; documents F34.)
+
+## 16. Round-3 Revision (2026-06-16): AS-custodial refresh, CP-coordinated fanout
+
+This revision follows a round-2 adversarial review (`superpowers:roast`, **BLOCK** — 29 confirmed
+findings; report `docs/superpowers/specs/2026-06-16-github-storage-backend-adversarial-review-r2.md`)
+plus the 2026-06-16 spike verdicts. It **supersedes the node-retains-refresh custody posture** in
+Sections 1, 3, 3.1, 8 (credential path), 9, 10–11, and Decision 5/19 where contradicted. The
+storage-mechanics, scope-relaxation, and spike-verdict content elsewhere is unchanged.
+
+### 16.1 Why the prior posture failed review
+- The node-held refresh credential made node-compromise = whole-user-surface minting + owner lockout
+  (F6), leaked the refresh token into the agent via the bind-mounted secrets tmpfs (F30, code-grounded
+  at `internal/spawnlet/manager.go:946-959`), and could never be written back to durable owner custody
+  after a node-side single-use rotation (F2). "Persist-before-confirm" was self-contradictory: a
+  forgetful AS plus a tmpfs-only node cannot recover a lost rotation (F1/F12).
+- Spike `sp-v40s.3` confirmed refresh rotation **immediately invalidates the predecessor access
+  token**. With one shared link this makes independent per-spawn tokens impossible: **one link = one
+  single-active access token shared by all of the user's concurrent spawns.**
+
+### 16.2 Custody: AS-custodial, CP-blind, AS≠CP
+- The **AS durably holds the refresh chain** and is the **sole rotation authority**. The node NEVER
+  receives the refresh token — only short-lived, installation-selection-scoped **access tokens**.
+- The CP stays **blind**: it stores only an owner-sealed copy of the credential for owner
+  disaster-recovery / cross-device relink, never plaintext, and relays only sealed bytes during fanout.
+- **AS≠CP is a hard trust-boundary invariant.** Co-located AS/CP is acceptable only for a single-tenant
+  development deployment with a documented threat-model downgrade; any multi-tenant or production
+  deployment MUST run the AS and CP in separate trust/deployment domains — a CP that can read the AS
+  keystore collapses the residual "compromised CP cannot mint" property (round-2 F4).
+- This pulls a bounded slice of `sp-6pqt` into MVP. Fully-CP-blind custody (no AS-readable refresh
+  token) remains the `sp-6pqt` north star.
+- **Accepted threat (round-2 F5):** an AS compromise exposes every live link's refresh chain. This is
+  bounded by the AS≠CP isolation invariant and the grant-wide kill switch (§16.5) and is the explicit
+  price of node+AS-to-sustain custody.
+
+### 16.3 Node→AS authorization (node-identity-bound)
+A node calling the AS mint/refresh API authenticates with its **established node identity** (the
+Register/Heartbeat node certificate / signed sub-key already in the CP `nodeKeyCache`). The AS
+authorizes a refresh only when (1) the node identity is valid, (2) the CP confirms that node currently
+hosts the spawn/link, and (3) the presented link reference maps to a held refresh chain. The access
+token is a link reference, not the authorization. Consequences: an access token stolen off-node cannot
+drive a refresh (round-2 F7), and a spawn resumed after >8h (dead access token) can still authorize
+its first refresh because node identity does not expire with the GitHub token.
+
+### 16.4 Refresh flow (proactive, CP-coordinated fanout)
+`git`/`gh` run in the **agent**, not the spawnlet, so the node cannot intercept a 401 to refresh
+reactively (a transparent git proxy that would enable reactive refresh is a tracked future upgrade,
+not MVP). MVP refresh is **proactive and CP-coordinated**:
+
+1. A node, near the ~8h access-token expiry, requests a refresh from the AS (node-identity authZ,
+   §16.3).
+2. The AS **dedupes per link** (refreshed within a recent window → return the current shared token
+   without re-rotating; else rotate once), seals the new access token per recipient, and **notifies
+   the CP**.
+3. The **CP fans out** the sealed access token to every node currently hosting a spawn on that link,
+   over the existing Attach / sealed-delivery substrate (CP relays opaque ciphertext, stays blind).
+   Each node atomically updates its node-side credential provider **and re-renders the agent's
+   `agent-render` token file** (round-2 F11).
+4. **No explicit revoke on routine refresh:** rotation already invalidated the predecessor (spike 3),
+   so there is nothing to revoke and no make-before-break is possible with a single shared chain. The
+   CP may notify the AS once all currently-connected nodes acknowledge the new token, but the targeted
+   `DELETE /token` is redundant for a rotated token and is **skipped in MVP**. Nodes that were
+   disconnected/suspended during a fanout re-sync the current token on reconnect/resume.
+
+**Accepted per-refresh window.** At rotation the old shared token dies immediately, so until the
+fanout reaches a node its in-flight agent git operations may `401`. With no reactive path these fail
+and are re-run by the user; the **next** git invocation self-heals because the credential helper reads
+the freshly re-rendered token from tmpfs. Refresh happens < once per 8h per link and the window is the
+fanout latency. This is the accepted MVP cost; the git-proxy upgrade removes it.
+
+**Agent must use the credential helper, not an embedded token.** The `agent-render` path installs a git
+credential helper that answers only for the exact bound repo from journal-excluded tmpfs. This is both
+the rotation-pickup mechanism (the next op reads the current token) and the journaled-`.git/config`
+mitigation. Residual (round-2 F34): an untrusted agent can still embed a token into a journaled
+`.git/config` via `git remote set-url https://<token>@…`; Spawnery cannot prevent this without the git
+proxy. Documented residual.
+
+### 16.5 Revocation / kill switch
+- Routine generation supersession does **not** revoke — it would break sibling spawns sharing the live
+  token, and rotation already kills superseded tokens. Tokens lapse by TTL after nodes migrate.
+- The compromise kill switch is **`DELETE /applications/{client_id}/grant`** (grant-wide; it
+  intentionally breaks all of the user's spawns and the refresh chain), proven by spike `sp-v40s.3`.
+
+### 16.6 Backend credential-path correction (round-2 F30)
+The node-side credential provider is rooted in a **node-only directory that is NOT bind-mounted into
+the agent container**. Section 8's `SecretInjector.DirFor(spawnID)` is bind-mounted at
+`SecretsMountPath` (`internal/spawnlet/manager.go:946-959`) and must not host node-storage credential
+material. The `agent-render` token is delivered to the agent tmpfs separately.
+
+### 16.7 Backstop deferred from MVP
+The GitHub suspend backstop (Sections 10–11) is **deferred from MVP** to a follow-up epic. For
+journaled `github:` mounts the Kopia journal already captures `.git`, so committed work is cross-node
+durable without it (round-2 F20). Therefore **MVP `github:` mounts MUST use a journaled durability
+class**; a non-journaled `github:` mount is rejected at bind validation until the backstop epic lands
+(round-2 F19). The key-independent WIP-commit floor remains deferred to `sp-lqld`; the asymmetry is
+explicit — in MVP dirty working-tree state is recoverable only from the owner-sealed (key-dependent)
+journal (round-2 F18).
+
+### 16.8 Availability and testing deltas
+- The AS is now a **sustained refresh-path dependency** (a proactive refresh ~once per 8h per link plus
+  fanout), not bootstrap-only (round-2 F26). A brief AS outage is tolerated within the proactive
+  refresh budget; mint/refresh failures are fail-closed and retryable; deployments must state the AS
+  availability target.
+- clone2leak / CVE-2024-53858 (round-2 F22): node-side git pins `gh >= 2.63.0`, sets
+  `credential.protectProtocol` and `credential.useHttpPath=true`, and refuses repo-injected
+  `credential.helper` / config-includes (`.gitmodules`, `.lfsconfig`, `.git/config`) including
+  recursive submodules. The untrusted agent's own git on hostile content retains documented residual
+  exfil capability bounded by the installation-selection blast radius.
+- The replay-guard release gate (round-2 F36) is an **enforcing test/CI gate** — the github real-token
+  path must fail to build/run until the `sp-vd5w` / `sp-7h6.1.8` guards are present — not just a beads
+  ordering note.
+- The `github_e2e` lane is now runnable: the 2026-06-16 throwaway App (`app_id=4065493`) exists. The
+  lane asserts installation-selection scope (refresh+`repository_id` does **not** narrow), node-identity
+  authZ on refresh, CP-coordinated fanout + the accepted per-refresh window, and token/grant revocation.
+
 ## Post-Implementation Notes
 
 *As this design is implemented and iterated on -- bug fixes, adjustments, anything that diverged from
@@ -625,3 +790,10 @@ the assumptions above -- append a dated note here, whether or not a formal debug
   The critical correction is that `grant_type=refresh_token` plus `repository_id` did **not** narrow
   the rotated token; the MVP design is relaxed to installation-selection-scoped access tokens with
   Spawnery exact-repo guards.
+- 2026-06-16 (round-3): A round-2 `superpowers:roast` returned BLOCK (29 confirmed findings). The
+  node-retains-refresh posture was the root of the worst findings (node-compromise blast radius,
+  refresh-leak-to-agent, no rotation writeback). Reworked to **AS-custodial refresh + CP-coordinated
+  fanout** (Section 16): the AS owns the refresh chain and is the sole refresher; the node holds only
+  short-lived access tokens and authenticates by node identity; the CP fans out rotated tokens to all
+  nodes sharing a link; the suspend backstop is deferred from MVP (journaled mounts required). The
+  per-refresh stale window is accepted; a transparent git proxy is the tracked future upgrade.
