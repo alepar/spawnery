@@ -263,6 +263,33 @@ func TestGitHubLinkRelinkBumpsVersion(t *testing.T) {
 	}
 }
 
+func TestRevokeAppGrantKillsChainAtGitHub(t *testing.T) {
+	ex, f := newLinkExchanger(t)
+	// Bootstrap a live grant via the link exchanger.
+	verifier := "v-revoke"
+	redirectURI := "https://as.example.com/github/link/callback"
+	code := drive(t, ex.AppAuthorizeURL("st", pkceChallenge(verifier), redirectURI))
+	tok, err := ex.ExchangeUserToken(context.Background(), code, verifier, redirectURI)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if _, err := ex.FetchUser(context.Background(), tok.AccessToken); err != nil {
+		t.Fatalf("precondition FetchUser: %v", err)
+	}
+	if err := ex.RevokeAppGrant(context.Background(), tok.AccessToken); err != nil {
+		t.Fatalf("RevokeAppGrant: %v", err)
+	}
+	// Chain is dead: the access token no longer authenticates.
+	if _, err := ex.FetchUser(context.Background(), tok.AccessToken); err == nil {
+		t.Fatalf("FetchUser succeeded after RevokeAppGrant; want failure")
+	}
+	// Idempotent: revoking an already-dead token is a no-op success (GitHub 404 → nil).
+	if err := ex.RevokeAppGrant(context.Background(), tok.AccessToken); err != nil {
+		t.Fatalf("second RevokeAppGrant should be idempotent, got %v", err)
+	}
+	_ = f
+}
+
 func TestGitHubLinkAuthorizeRequiresAccountAndSecret(t *testing.T) {
 	now := time.Unix(1770000000, 0)
 	st := store.NewTestStore(t)

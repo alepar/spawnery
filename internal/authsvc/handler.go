@@ -47,6 +47,7 @@ func (s *Service) Handler() http.Handler {
 		mux.HandleFunc("GET /github/link/authorize", s.serveGitHubLinkAuthorize)
 		mux.HandleFunc("GET /github/link/callback", s.serveGitHubLinkCallback)
 		mux.HandleFunc("POST /github/link/redeem", s.serveGitHubLinkRedeem)
+		mux.HandleFunc("POST /github/link/revoke", s.serveGitHubLinkRevoke)
 	}
 
 	if s.deviceSet != nil {
