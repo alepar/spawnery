@@ -18,6 +18,7 @@ func aadAccess(secretID string) string  { return "github_link/access/v1/" + secr
 
 // decryptTokens converts the on-disk ciphertext token columns back to plaintext
 // in place. Callers receive plaintext GitHubLink fields, unchanged in shape.
+// It also decrypts pending_* tokens when present (non-empty ciphertext).
 func (r *githubLinkRepo) decryptTokens(l *GitHubLink) error {
 	if r.cipher == nil {
 		return ErrCipherRequired
@@ -31,6 +32,16 @@ func (r *githubLinkRepo) decryptTokens(l *GitHubLink) error {
 		return err
 	}
 	l.RefreshToken, l.AccessToken = rt, at
+	if l.PendingRefreshToken != "" {
+		if l.PendingRefreshToken, err = r.cipher.Decrypt(l.PendingRefreshToken, aadRefresh(l.SecretID)); err != nil {
+			return err
+		}
+	}
+	if l.PendingAccessToken != "" {
+		if l.PendingAccessToken, err = r.cipher.Decrypt(l.PendingAccessToken, aadAccess(l.SecretID)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -106,7 +117,15 @@ func (r *githubLinkRepo) Rotate(ctx context.Context, secretID string, rot GitHub
 		Set("access_token = ?", encAccess).
 		Set("access_expires_at_unix = ?", rot.AccessExpiresAtUnix).
 		Set("token_type = ?", rot.TokenType).
-		Set("updated_at = ?", rot.UpdatedAt)
+		Set("updated_at = ?", rot.UpdatedAt).
+		// promote = clear pending staging slot atomically
+		Set("pending_refresh_token = NULL").
+		Set("pending_refresh_expires_at_unix = NULL").
+		Set("pending_access_token = NULL").
+		Set("pending_access_expires_at_unix = NULL").
+		Set("pending_token_type = NULL").
+		Set("pending_version = NULL").
+		Set("relink_required = 0")
 	if rot.Version != 0 {
 		q = q.Set("version = ?", rot.Version)
 	}
@@ -133,6 +152,58 @@ func (r *githubLinkRepo) Revoke(ctx context.Context, secretID string, revokedAt 
 		Set("revoked = 1").
 		Set("revoked_at = ?", revokedAt).
 		Set("updated_at = ?", revokedAt).
+		Where("secret_id = ? AND revoked = 0", secretID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// StageRotation write-ahead persists a rotated tuple into the pending_* columns (encrypted),
+// without changing the live tuple/version. Idempotent: re-staging overwrites.
+func (r *githubLinkRepo) StageRotation(ctx context.Context, secretID string, stage GitHubStagedRotation) error {
+	if r.cipher == nil {
+		return ErrCipherRequired
+	}
+	if stage.TokenType == "" {
+		stage.TokenType = "bearer"
+	}
+	encRefresh, err := r.cipher.Encrypt(stage.RefreshToken, aadRefresh(secretID))
+	if err != nil {
+		return err
+	}
+	encAccess, err := r.cipher.Encrypt(stage.AccessToken, aadAccess(secretID))
+	if err != nil {
+		return err
+	}
+	res, err := r.db.NewUpdate().Model((*GitHubLink)(nil)).
+		Set("pending_refresh_token = ?", encRefresh).
+		Set("pending_refresh_expires_at_unix = ?", stage.RefreshExpiresAtUnix).
+		Set("pending_access_token = ?", encAccess).
+		Set("pending_access_expires_at_unix = ?", stage.AccessExpiresAtUnix).
+		Set("pending_token_type = ?", stage.TokenType).
+		Set("pending_version = ?", stage.Version).
+		Where("secret_id = ? AND revoked = 0", secretID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MarkRelinkRequired flags the link's refresh chain as provably broken (terminal). Subsequent
+// mints fast-fail; the owner must relink.
+func (r *githubLinkRepo) MarkRelinkRequired(ctx context.Context, secretID string, at int64) error {
+	res, err := r.db.NewUpdate().Model((*GitHubLink)(nil)).
+		Set("relink_required = 1").
+		Set("updated_at = ?", at).
 		Where("secret_id = ? AND revoked = 0", secretID).
 		Exec(ctx)
 	if err != nil {

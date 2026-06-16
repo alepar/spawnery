@@ -107,6 +107,12 @@ type GitHubLinkRepo interface {
 	Upsert(ctx context.Context, link GitHubLink) error
 	Rotate(ctx context.Context, secretID string, rot GitHubTokenRotation) (GitHubLink, error)
 	Revoke(ctx context.Context, secretID string, revokedAt int64) error
+	// StageRotation write-ahead persists a rotated tuple into the pending_* columns (encrypted),
+	// without changing the live tuple/version. Idempotent: re-staging overwrites.
+	StageRotation(ctx context.Context, secretID string, stage GitHubStagedRotation) error
+	// MarkRelinkRequired flags the link's refresh chain as provably broken (terminal). Subsequent
+	// mints fast-fail; the owner must relink.
+	MarkRelinkRequired(ctx context.Context, secretID string, at int64) error
 }
 
 type Store interface {

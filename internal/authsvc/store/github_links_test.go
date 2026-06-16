@@ -160,3 +160,97 @@ func bytesRepeat32(b byte) []byte {
 	}
 	return out
 }
+
+// seedLink upserts a canonical test GitHub link with secret_id "gh-main" (version 11).
+func seedLink(t *testing.T, st Store) {
+	t.Helper()
+	if err := st.GitHubLinks().Upsert(ctxT(), GitHubLink{
+		SecretID:             "gh-main",
+		AccountID:            "acct-1",
+		Host:                 "github.com",
+		Login:                "alice",
+		GithubUserID:         "123456",
+		AppClientID:          "Iv1.spawnerytest",
+		RefreshToken:         "ghr_old",
+		RefreshExpiresAtUnix: 2200000000,
+		AccessToken:          "ghu_current",
+		AccessExpiresAtUnix:  1770001000,
+		TokenType:            "bearer",
+		Version:              11,
+		DeliveryID:           "delivery-sp1-gen3-gh-main-v11",
+		UpdatedAt:            1770000000,
+	}); err != nil {
+		t.Fatalf("seedLink upsert: %v", err)
+	}
+}
+
+func TestGitHubLinksStageRotationPersistsPendingAndGetDecrypts(t *testing.T) {
+	ctx := context.Background()
+	st := NewTestStore(t)
+	seedLink(t, st)
+
+	if err := st.GitHubLinks().StageRotation(ctx, "gh-main", GitHubStagedRotation{
+		RefreshToken: "ghr_next", RefreshExpiresAtUnix: 2300000000,
+		AccessToken: "ghu_next", AccessExpiresAtUnix: 2100000000,
+		TokenType: "bearer", Version: 12,
+	}); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	got, err := st.GitHubLinks().Get(ctx, "gh-main")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.PendingRefreshToken != "ghr_next" || got.PendingAccessToken != "ghu_next" ||
+		got.PendingVersion != 12 || got.PendingRefreshExpiresAtUnix != 2300000000 {
+		t.Fatalf("pending not staged/decrypted: %+v", got)
+	}
+	// live tuple must be unchanged by staging
+	if got.RefreshToken == "ghr_next" || got.Version == 12 {
+		t.Fatalf("staging must not touch the live tuple: %+v", got)
+	}
+}
+
+func TestGitHubLinksRotatePromotesAndClearsPending(t *testing.T) {
+	ctx := context.Background()
+	st := NewTestStore(t)
+	seedLink(t, st)
+	if err := st.GitHubLinks().StageRotation(ctx, "gh-main", GitHubStagedRotation{
+		RefreshToken: "ghr_next", RefreshExpiresAtUnix: 2300000000,
+		AccessToken: "ghu_next", AccessExpiresAtUnix: 2100000000, TokenType: "bearer", Version: 12,
+	}); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if _, err := st.GitHubLinks().Rotate(ctx, "gh-main", GitHubTokenRotation{
+		RefreshToken: "ghr_next", RefreshExpiresAtUnix: 2300000000,
+		AccessToken: "ghu_next", AccessExpiresAtUnix: 2100000000, TokenType: "bearer",
+		Version: 12, DeliveryID: "github-access-gh-main-v12", UpdatedAt: 1770000001,
+	}); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	got, err := st.GitHubLinks().Get(ctx, "gh-main")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Version != 12 || got.RefreshToken != "ghr_next" {
+		t.Fatalf("rotate did not promote: %+v", got)
+	}
+	if got.PendingRefreshToken != "" || got.PendingVersion != 0 || got.PendingAccessToken != "" {
+		t.Fatalf("rotate must clear pending: %+v", got)
+	}
+}
+
+func TestGitHubLinksMarkRelinkRequired(t *testing.T) {
+	ctx := context.Background()
+	st := NewTestStore(t)
+	seedLink(t, st)
+	if err := st.GitHubLinks().MarkRelinkRequired(ctx, "gh-main", 1770000002); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	got, err := st.GitHubLinks().Get(ctx, "gh-main")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.RelinkRequired {
+		t.Fatalf("relink_required not set: %+v", got)
+	}
+}
