@@ -1,6 +1,7 @@
 package authsvc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,10 @@ type GitHubLinkExchanger interface {
 	AppAuthorizeURL(state, challenge, redirectURI string) string
 	ExchangeUserToken(ctx context.Context, code, verifier, redirectURI string) (GitHubUserToken, error)
 	FetchUser(ctx context.Context, accessToken string) (GitHubUser, error)
+	// RevokeAppGrant deletes the GitHub App authorization grant for the user behind accessToken
+	// (DELETE /applications/{client_id}/grant). Grant-WIDE: kills the whole refresh chain. The spec
+	// §16.5 / Decision 24 compromise kill switch. Idempotent: an already-deleted grant (404) is nil.
+	RevokeAppGrant(ctx context.Context, accessToken string) error
 }
 
 // AppAuthorizeURL builds a GitHub App user-to-server authorize URL. Unlike the login AuthorizeURL
@@ -92,6 +97,37 @@ func (g *githubClient) ExchangeUserToken(ctx context.Context, code, verifier, re
 		RefreshExpiresAtUnix: now.Add(time.Duration(out.RefreshTokenExpiresIn) * time.Second).Unix(),
 		TokenType:            out.TokenType,
 	}, nil
+}
+
+// RevokeAppGrant deletes the App authorization grant for the user behind accessToken via
+// DELETE /applications/{client_id}/grant (Basic auth confidential client + {access_token} body).
+// 204 = revoked, 404 = already gone (idempotent → nil). Only the access token is sent; the refresh
+// token never leaves AS custody (containment invariant a).
+func (g *githubClient) RevokeAppGrant(ctx context.Context, accessToken string) error {
+	body, err := json.Marshal(map[string]string{"access_token": accessToken})
+	if err != nil {
+		return err
+	}
+	endpoint := g.apiURL + "/applications/" + url.PathEscape(g.clientID) + "/grant"
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(g.clientID, g.clientSecret)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusNotFound:
+		return nil
+	default:
+		return fmt.Errorf("github grant revoke failed: status %d", resp.StatusCode)
+	}
 }
 
 // githubLinkState is the authorize→callback handoff row (in-memory, account-bound, single-use).
@@ -304,4 +340,61 @@ func (s *Service) redirectLinkError(w http.ResponseWriter, r *http.Request, code
 	qq.Set("error", code)
 	dest.RawQuery = qq.Encode()
 	http.Redirect(w, r, dest.String(), http.StatusFound)
+}
+
+// serveGitHubLinkRevoke is the §16.5 / Decision 24 compromise kill switch. Owner-triggered
+// (account-bound): it deletes the GitHub App grant (grant-wide, kills the refresh chain at GitHub)
+// AND flips the AS-side revoked flag so subsequent mints fail closed (Get filters revoked=0).
+// The DB flip is authoritative for local fail-closed and is attempted even when the GitHub call
+// errors (the kill switch must not hinge on GitHub reachability); a remote-teardown failure is
+// surfaced as 502 while the link is already locally dead (live access tokens lapse by TTL ≤8h).
+func (s *Service) serveGitHubLinkRevoke(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := s.githubLinkAccountFromReq(r)
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	secretID := strings.TrimSpace(r.FormValue("secret_id"))
+	if secretID == "" {
+		http.Error(w, "secret_id required", http.StatusBadRequest)
+		return
+	}
+	link, err := s.githubLinkStore.GitHubLinks().Get(r.Context(), secretID)
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "link not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "link lookup failed", http.StatusInternalServerError)
+		return
+	}
+	// Account-binding: only the owning account may revoke.
+	if link.AccountID != accountID {
+		http.Error(w, "link account mismatch", http.StatusForbidden)
+		return
+	}
+
+	// Remote teardown (best-effort, immediate); capture token BEFORE flipping the flag.
+	remoteErr := s.githubLinkExchanger.RevokeAppGrant(r.Context(), link.AccessToken)
+
+	// Local fail-closed: authoritative, always attempted.
+	if err := s.githubLinkStore.GitHubLinks().Revoke(r.Context(), secretID, s.now().Unix()); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// Raced with another revoke; already closed.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.Error(w, "link revoke persist failed", http.StatusInternalServerError)
+		return
+	}
+	if remoteErr != nil {
+		// Locally revoked (mints already fail closed) but GitHub teardown failed; operator may retry.
+		http.Error(w, "github grant revoke failed; link locally revoked", http.StatusBadGateway)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

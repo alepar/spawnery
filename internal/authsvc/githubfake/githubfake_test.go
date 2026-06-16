@@ -1,6 +1,7 @@
 package githubfake
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -194,5 +195,81 @@ func TestDenyNext(t *testing.T) {
 	loc, _ := url.Parse(resp.Header.Get("Location"))
 	if loc.Query().Get("error") != "access_denied" || loc.Query().Get("code") != "" {
 		t.Fatalf("deny: %s", loc)
+	}
+}
+
+func TestFakeDeleteGrantRevokesWholeAuthorization(t *testing.T) {
+	f := New()
+	defer f.Close()
+
+	// Mint an access+refresh pair via authorize→exchange so the fake has a live grant.
+	verifier := "verif"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	redirectURI := "https://as.example.test/cb"
+	code := authorizeCode(t, f, challenge)
+
+	form := url.Values{
+		"client_id":     {f.ClientID},
+		"client_secret": {f.ClientSecret},
+		"code":          {code},
+		"code_verifier": {verifier},
+		"redirect_uri":  {redirectURI},
+	}
+	xr, err := http.Post(f.URL()+"/login/oauth/access_token", "application/x-www-form-urlencoded",
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	var tok struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = json.NewDecoder(xr.Body).Decode(&tok)
+	xr.Body.Close()
+	if tok.AccessToken == "" || tok.RefreshToken == "" {
+		t.Fatalf("incomplete tuple")
+	}
+
+	// DELETE /applications/{client_id}/grant with Basic auth + JSON {access_token}.
+	body, _ := json.Marshal(map[string]string{"access_token": tok.AccessToken})
+	dreq, _ := http.NewRequest(http.MethodDelete, f.URL()+"/applications/"+f.ClientID+"/grant",
+		bytes.NewReader(body))
+	dreq.SetBasicAuth(f.ClientID, f.ClientSecret)
+	dresp, err := http.DefaultClient.Do(dreq)
+	if err != nil {
+		t.Fatalf("delete grant: %v", err)
+	}
+	if dresp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete grant status = %d, want 204", dresp.StatusCode)
+	}
+	dresp.Body.Close()
+
+	// Grant-wide: the old access token is dead at /user.
+	ureq, _ := http.NewRequest(http.MethodGet, f.URL()+"/user", nil)
+	ureq.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	uresp, _ := http.DefaultClient.Do(ureq)
+	if uresp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("/user after revoke = %d, want 401", uresp.StatusCode)
+	}
+	uresp.Body.Close()
+
+	// The refresh token can no longer rotate.
+	rform := url.Values{
+		"client_id":     {f.ClientID},
+		"client_secret": {f.ClientSecret},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {tok.RefreshToken},
+	}
+	rr, _ := http.Post(f.URL()+"/login/oauth/access_token", "application/x-www-form-urlencoded",
+		strings.NewReader(rform.Encode()))
+	var rout struct {
+		Error       string `json:"error"`
+		AccessToken string `json:"access_token"`
+	}
+	_ = json.NewDecoder(rr.Body).Decode(&rout)
+	rr.Body.Close()
+	if rout.Error != "bad_refresh_token" || rout.AccessToken != "" {
+		t.Fatalf("refresh after revoke = %+v, want bad_refresh_token", rout)
 	}
 }

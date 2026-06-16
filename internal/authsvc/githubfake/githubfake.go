@@ -69,6 +69,7 @@ func New() *Fake {
 	mux.HandleFunc("GET /login/oauth/authorize", f.authorize)
 	mux.HandleFunc("POST /login/oauth/access_token", f.exchange)
 	mux.HandleFunc("GET /user", f.userEndpoint)
+	mux.HandleFunc("DELETE /applications/{client_id}/grant", f.deleteGrant)
 	f.Srv = httptest.NewServer(mux)
 	return f
 }
@@ -214,6 +215,47 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// deleteGrant models DELETE /applications/{client_id}/grant: Basic-auth confidential client,
+// {"access_token": ...} body, grant-WIDE teardown (every access+refresh token for that user dies).
+// 204 on success, 404 when the access token maps to no live grant.
+func (f *Fake) deleteGrant(w http.ResponseWriter, r *http.Request) {
+	cid, secret, ok := r.BasicAuth()
+	if !ok || cid != f.ClientID || secret != f.ClientSecret {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"message": "Bad credentials"})
+		return
+	}
+	if r.PathValue("client_id") != f.ClientID {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"message": "Bad credentials"})
+		return
+	}
+	var body struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil || body.AccessToken == "" {
+		http.Error(w, "bad body", http.StatusUnprocessableEntity)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	user, ok := f.tokens[body.AccessToken]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	// Grant-wide teardown: delete every access token and refresh grant for this user.
+	for tok, u := range f.tokens {
+		if u.ID == user.ID {
+			delete(f.tokens, tok)
+		}
+	}
+	for rt, g := range f.refresh {
+		if g.user.ID == user.ID {
+			delete(f.refresh, rt)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func randHex() string {
