@@ -77,6 +77,12 @@ type Config struct {
 	// Set via NewIntentVerifier with AuthModeVerifyLog for NODE_AUTH_MODE=insecure (verify-and-log)
 	// or AuthModeEnforced for NODE_AUTH_MODE=enforced.
 	Verifier *IntentVerifier
+
+	// GitHubMint is the AS AuthService client used for proactive GitHub access-token refresh
+	// (design §16.4). Built in cmd/spawnlet from the node's mTLS identity in enforced mode with AS_URL
+	// set; nil in insecure/dev or when AS_URL is unset — then proactive refresh is disabled and spawns
+	// run on their delivered token until it lapses.
+	GitHubMint GitHubMintClient
 }
 
 // cpStream is the subset of the Connect bidi stream the attacher uses. *connect.BidiStreamForClient
@@ -114,7 +120,8 @@ type attacher struct {
 	subkeysMu    sync.Mutex
 	lastSubKeyID string // KeyID of the most recently published sub-key (heartbeat re-publishes only on change)
 
-	secretReplay *secretDeliveryReplay
+	secretReplay  *secretDeliveryReplay
+	githubRefresh *githubRefresher // process-lived; created in Run, shared across reconnects
 }
 
 // pendingClient is a client attach that arrived before its session's pump/relay was registered (the
@@ -138,9 +145,11 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	const minBackoff, maxBackoff = time.Second, 30 * time.Second
 	backoff := minBackoff
 	secretReplay := newSecretDeliveryReplay()
+	githubRefresh := newGitHubRefresher(cfg.GitHubMint)
+	go githubRefresh.run(ctx)
 	for {
 		start := time.Now()
-		err := runOnce(ctx, mgr, httpc, cfg, secretReplay)
+		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, githubRefresh)
 		if ctx.Err() != nil {
 			return ctx.Err() // clean shutdown
 		}
@@ -175,20 +184,21 @@ func registerMessage(cfg Config, running []*nodev1.RunningSpawn, signedSubKey []
 // runOnce serves a single CP connection: dial + Register + heartbeat + receive loop. It returns when
 // the connection ends (stream error) or ctx is cancelled. Everything connection-scoped (heartbeat,
 // pump sessions) is tied to connCtx so it stops cleanly when the connection ends.
-func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, secretReplay *secretDeliveryReplay) error {
+func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, secretReplay *secretDeliveryReplay, githubRefresh *githubRefresher) error {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
-		verifier:     cfg.Verifier,
-		ctrlHTTP:     &http.Client{Timeout: controlPostTimeout},
-		sx:           &realSessionExec{mgr: mgr},
-		pumps:        map[sessionKey]*Pump{},
-		tmuxRelays:   map[sessionKey]*tmuxRelay{},
-		sessions:     map[string]*sessionRegistry{},
-		pending:      map[sessionKey][]pendingClient{},
-		secretReplay: secretReplay,
+		verifier:      cfg.Verifier,
+		ctrlHTTP:      &http.Client{Timeout: controlPostTimeout},
+		sx:            &realSessionExec{mgr: mgr},
+		pumps:         map[sessionKey]*Pump{},
+		tmuxRelays:    map[sessionKey]*tmuxRelay{},
+		sessions:      map[string]*sessionRegistry{},
+		pending:       map[sessionKey][]pendingClient{},
+		secretReplay:  secretReplay,
+		githubRefresh: githubRefresh,
 	}
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)
@@ -799,6 +809,7 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 		logErr("stopSpawn "+spawnID, err)
 	}
 	a.releaseSlot()
+	a.githubRefresh.Forget(spawnID)
 	a.status(spawnID, nodev1.SpawnPhase_STOPPED, "")
 }
 
@@ -885,12 +896,14 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 		// Sessions were already reaped above; release the capacity slot before returning so
 		// the node does not permanently hold a slot for a spawn that is no longer tracked.
 		a.releaseSlot()
+		a.githubRefresh.Forget(spawnID)
 		a.status(spawnID, nodev1.SpawnPhase_ERROR, err.Error())
 		return
 	}
 
 	// Step 3: success — markers from gate, rootfs artifacts from finish.
 	a.releaseSlot()
+	a.githubRefresh.Forget(spawnID)
 	mm := make([]*nodev1.MountMarker, 0, len(gate.MountMarkers))
 	for name, marker := range gate.MountMarkers {
 		mm = append(mm, &nodev1.MountMarker{Name: name, Marker: marker})

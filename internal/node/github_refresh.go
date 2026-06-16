@@ -1,0 +1,257 @@
+package node
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"connectrpc.com/connect"
+
+	authv1 "spawnery/gen/auth/v1"
+)
+
+// GitHubMintClient is the subset of authv1connect.AuthServiceClient the refresher uses.
+// authv1connect.NewAuthServiceClient(...) satisfies it; tests inject a fake.
+type GitHubMintClient interface {
+	MintGitHubAccessToken(context.Context, *connect.Request[authv1.MintGitHubAccessTokenRequest]) (*connect.Response[authv1.MintGitHubAccessTokenResponse], error)
+}
+
+// Default timing. The node estimates an ~8h access-token lifetime and triggers a refresh slightly
+// INSIDE the AS rotate window (AS lead is 10m: it rotates only when expiry <= now+10m), so the AS
+// actually rotates. When the node lacks a precise expiry (first delivery) it uses receipt-relative
+// timing; a mint RESPONSE's access_expires_at_unix then refines refreshAt precisely.
+const (
+	defaultAccessLifetime  = 8 * time.Hour
+	nodeRefreshLead        = 8 * time.Minute // < AS 10m lead so the AS rotates on our call
+	defaultRefreshInterval = defaultAccessLifetime - nodeRefreshLead
+	refreshInFlightGrace   = 2 * time.Minute  // wait for the sealed fanout to arrive before re-minting
+	refreshBackoffBase     = 30 * time.Second // exponential, capped
+	refreshBackoffMax      = 5 * time.Minute
+	refreshMintTimeout     = 30 * time.Second
+	refreshTickInterval    = time.Minute
+)
+
+// githubRefreshEntry is the node-side record of a delivered GitHub link for one spawn. It carries the
+// link reference (secret_id/version/delivery_id) the node presents to the AS — NOT any token.
+type githubRefreshEntry struct {
+	SpawnID      string
+	Generation   uint64
+	SecretID     string
+	Version      uint64
+	DeliveryID   string
+	RepositoryID string
+}
+
+type refreshState struct {
+	entry       githubRefreshEntry
+	refreshAt   time.Time     // earliest time to attempt a refresh
+	nextAttempt time.Time     // backoff/grace floor for the next attempt
+	backoffDur  time.Duration // last retry backoff step; 0 = first failure → use refreshBackoffBase
+	inFlight    bool
+}
+
+type githubRefresher struct {
+	client GitHubMintClient
+	now    func() time.Time
+
+	mu     sync.Mutex
+	states map[string]map[string]*refreshState // spawnID -> secretID -> state
+}
+
+func newGitHubRefresher(client GitHubMintClient) *githubRefresher {
+	return &githubRefresher{
+		client: client,
+		now:    time.Now,
+		states: map[string]map[string]*refreshState{},
+	}
+}
+
+// Note records (or refreshes) a delivered link for a spawn and (re)schedules its next proactive
+// refresh receipt-relative. Safe to call repeatedly (every delivery/fanout). nil-safe.
+func (r *githubRefresher) Note(e githubRefreshEntry) {
+	if r == nil || e.SpawnID == "" || e.SecretID == "" {
+		return
+	}
+	now := r.now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	bySecret := r.states[e.SpawnID]
+	if bySecret == nil {
+		bySecret = map[string]*refreshState{}
+		r.states[e.SpawnID] = bySecret
+	}
+	st := bySecret[e.SecretID]
+	if st == nil {
+		st = &refreshState{}
+		bySecret[e.SecretID] = st
+	}
+	st.entry = e
+	st.refreshAt = now.Add(defaultRefreshInterval)
+	st.nextAttempt = time.Time{}
+	st.inFlight = false
+	st.backoffDur = 0
+}
+
+// Forget drops all link state for a spawn (stop/suspend). nil-safe.
+func (r *githubRefresher) Forget(spawnID string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.states, spawnID)
+}
+
+// due returns a snapshot of entries eligible for a mint attempt at `now` (refreshAt+nextAttempt
+// elapsed, not in-flight). Pure read used by Tick and tests.
+func (r *githubRefresher) due(now time.Time) []githubRefreshEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []githubRefreshEntry
+	for _, bySecret := range r.states {
+		for _, st := range bySecret {
+			if st.inFlight {
+				continue
+			}
+			if now.Before(st.refreshAt) {
+				continue
+			}
+			if !st.nextAttempt.IsZero() && now.Before(st.nextAttempt) {
+				continue
+			}
+			out = append(out, st.entry)
+		}
+	}
+	return out
+}
+
+func githubRefreshRequestID(secretID string, version uint64) string {
+	return fmt.Sprintf("node-refresh-%s-v%d", secretID, version)
+}
+
+// Tick attempts a mint for every due entry at `now`. Each attempt marks the entry in-flight and sets
+// a grace floor so the node waits for the sealed fanout (which re-Notes the new version) instead of
+// hammering the AS. On success the mint RESPONSE's access_expires_at_unix refines refreshAt; on
+// failure an exponential backoff floor is set. nil-safe; a nil client makes Tick a no-op.
+func (r *githubRefresher) Tick(ctx context.Context, now time.Time) {
+	if r == nil || r.client == nil {
+		return
+	}
+	for _, e := range r.due(now) {
+		r.attempt(ctx, e, now)
+	}
+}
+
+func (r *githubRefresher) attempt(ctx context.Context, e githubRefreshEntry, now time.Time) {
+	// Reserve the slot (mark in-flight + grace floor) BEFORE the RPC so a concurrent Tick can't double-fire.
+	if !r.beginAttempt(e, now) {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, refreshMintTimeout)
+	defer cancel()
+	resp, err := r.client.MintGitHubAccessToken(cctx, connect.NewRequest(&authv1.MintGitHubAccessTokenRequest{
+		RequestId:    githubRefreshRequestID(e.SecretID, e.Version),
+		SpawnId:      e.SpawnID,
+		Generation:   e.Generation,
+		RepositoryId: e.RepositoryID,
+		LinkRef: &authv1.GitHubLinkRef{
+			SecretId:   e.SecretID,
+			Version:    e.Version,
+			DeliveryId: e.DeliveryID,
+		},
+	}))
+	if err != nil {
+		r.failAttempt(e, now)
+		return
+	}
+	r.succeedAttempt(e, now, resp.Msg.GetAccessExpiresAtUnix())
+}
+
+// beginAttempt marks the entry in-flight + sets the grace floor. Returns false if the entry vanished
+// (spawn forgotten) or is already in-flight.
+func (r *githubRefresher) beginAttempt(e githubRefreshEntry, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st := r.lookupLocked(e.SpawnID, e.SecretID)
+	if st == nil || st.inFlight {
+		return false
+	}
+	st.inFlight = true
+	st.nextAttempt = now.Add(refreshInFlightGrace)
+	return true
+}
+
+func (r *githubRefresher) failAttempt(e githubRefreshEntry, now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st := r.lookupLocked(e.SpawnID, e.SecretID)
+	if st == nil {
+		return
+	}
+	st.inFlight = false
+	d := nextRetryBackoff(st.backoffDur)
+	st.backoffDur = d
+	st.nextAttempt = now.Add(d)
+}
+
+func (r *githubRefresher) succeedAttempt(e githubRefreshEntry, now time.Time, accessExpiresAtUnix int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st := r.lookupLocked(e.SpawnID, e.SecretID)
+	if st == nil {
+		return
+	}
+	st.inFlight = false
+	st.backoffDur = 0
+	// Keep the in-flight grace nextAttempt set by beginAttempt: the AS either rotated the token
+	// (a sealed fanout is incoming, re-minting before Note arrives is redundant) or confirmed the
+	// token is still valid (no fanout, but hammering again immediately wastes AS quota). The fanout
+	// delivery (or the next proactive window) will call Note, resetting nextAttempt.
+	if accessExpiresAtUnix > 0 {
+		// Precise correction: schedule the next refresh just inside the AS rotate window.
+		st.refreshAt = time.Unix(accessExpiresAtUnix, 0).Add(-nodeRefreshLead)
+	}
+	// else: keep the receipt-relative refreshAt set by Note (or the in-flight grace governs until the
+	// sealed fanout re-Notes a new version).
+}
+
+func (r *githubRefresher) lookupLocked(spawnID, secretID string) *refreshState {
+	bySecret := r.states[spawnID]
+	if bySecret == nil {
+		return nil
+	}
+	return bySecret[secretID]
+}
+
+// nextRetryBackoff doubles from refreshBackoffBase up to refreshBackoffMax using prev as the last
+// backoff step (0 = first failure, returns base). Deterministic: the same prev always yields the
+// same next step regardless of wall-clock timing.
+func nextRetryBackoff(prev time.Duration) time.Duration {
+	if prev < refreshBackoffBase {
+		return refreshBackoffBase
+	}
+	next := prev * 2
+	if next > refreshBackoffMax {
+		return refreshBackoffMax
+	}
+	return next
+}
+
+// run drives Tick on a fixed cadence until ctx is cancelled. Started once from node.Run; survives CP
+// reconnects (the refresher is process-lived, like secretReplay). nil-safe; nil client → idle.
+func (r *githubRefresher) run(ctx context.Context) {
+	if r == nil || r.client == nil {
+		return
+	}
+	t := time.NewTicker(refreshTickInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			r.Tick(ctx, r.now())
+		}
+	}
+}

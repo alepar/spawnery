@@ -297,6 +297,7 @@ func (a *attacher) handleSecretDelivery(sd *nodev1.SecretDelivery) {
 			}
 			commit()
 			log.Printf("secret-delivery %s: rendered github secret %q (gen %d)", sd.SpawnId, sec.SecretId, sd.Generation)
+			a.noteGitHubRefresh(sd.SpawnId, sd.Generation, sec, mounts)
 			continue
 		}
 
@@ -399,6 +400,7 @@ func (a *attacher) consumeStartupGitHubSecrets(ctx context.Context, spawnID stri
 	}
 	for _, sec := range githubSecrets {
 		consumed[sec.GetSecretId()] = struct{}{}
+		a.noteGitHubRefresh(spawnID, generation, sec, mounts)
 	}
 	return consumed, nil
 }
@@ -494,6 +496,32 @@ func (a *attacher) consumeGitHubSecret(spawnID string, sec *nodev1.SealedSecret,
 		return true, nil
 	}
 	return false, nil
+}
+
+// noteGitHubRefresh records the delivered GitHub link for proactive refresh scheduling (design §16.4).
+// It extracts the link reference (secret_id/version/delivery_id) and audit repository_id from the
+// matching mount; it never handles the token plaintext. nil-safe (refresher disabled in dev).
+func (a *attacher) noteGitHubRefresh(spawnID string, generation uint64, sec *nodev1.SealedSecret, mounts []*nodev1.MountBinding) {
+	if a.githubRefresh == nil || sec.GetSecretId() == "" {
+		return
+	}
+	repositoryID := ""
+	if _, _, mountName, err := githubRepoMountForSecret(sec, mounts); err == nil {
+		for _, m := range mounts {
+			if m.GetName() == mountName {
+				repositoryID = m.GetRepositoryId()
+				break
+			}
+		}
+	}
+	a.githubRefresh.Note(githubRefreshEntry{
+		SpawnID:      spawnID,
+		Generation:   generation,
+		SecretID:     sec.GetSecretId(),
+		Version:      sec.GetVersion(),
+		DeliveryID:   sec.GetDeliveryId(),
+		RepositoryID: repositoryID,
+	})
 }
 
 func (a *attacher) nodeMountBindings(spawnID string) ([]*nodev1.MountBinding, error) {
