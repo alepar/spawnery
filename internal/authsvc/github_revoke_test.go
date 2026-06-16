@@ -2,6 +2,7 @@ package authsvc
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +15,16 @@ import (
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/store"
 )
+
+// failingRevokeExchanger wraps a GitHubLinkExchanger but always returns an error from RevokeAppGrant.
+// Used to assert the local fail-closed invariant: DB revoke must still run even when GitHub is unreachable.
+type failingRevokeExchanger struct {
+	GitHubLinkExchanger
+}
+
+func (f failingRevokeExchanger) RevokeAppGrant(_ context.Context, _ string) error {
+	return errors.New("github unreachable")
+}
 
 // postRevoke sends a POST /github/link/revoke to the Service with optional account header.
 func postRevoke(t *testing.T, s *Service, secretID, account string) *httptest.ResponseRecorder {
@@ -95,6 +106,44 @@ func TestGitHubLinkRevokeUnauthenticated(t *testing.T) {
 	w := postRevoke(t, s, "sec-1", "") // no X-Test-Account header
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated revoke = %d, want 401", w.Code)
+	}
+}
+
+// TestGitHubLinkRevokeGitHubFailureStillLocalRevoke verifies the spec §16.5 invariant:
+// the local DB revoke (fail-closed) is authoritative and must succeed even when the GitHub
+// grant-delete call fails. The handler must:
+//   (a) still flip the DB revoked flag (link.Get returns ErrNotFound after the call), and
+//   (b) return 502 to signal the remote teardown failed (operator may retry later).
+//
+// This test is the critical regression guard for "local fail-closed must not hinge on
+// GitHub reachability" — live access tokens lapse by TTL ≤8h so the local revoke is enough.
+func TestGitHubLinkRevokeGitHubFailureStillLocalRevoke(t *testing.T) {
+	now := time.Unix(1770000000, 0)
+	st := store.NewTestStore(t)
+	realEx, _ := newLinkExchanger(t)
+	// Wrap the real exchanger so that RevokeAppGrant always errors.
+	failEx := failingRevokeExchanger{realEx}
+	s := newLinkAS(t, st, failEx, func() time.Time { return now })
+
+	// Build a live link using the failing exchanger (authorize/exchange/fetchuser succeed; only
+	// RevokeAppGrant is broken).
+	linkAndRedeem(t, s, failEx, "sec-fail", "acct-fail", now)
+
+	// Verify the link exists before we try to revoke it.
+	if _, err := st.GitHubLinks().Get(context.Background(), "sec-fail"); err != nil {
+		t.Fatalf("precondition: link not found before revoke: %v", err)
+	}
+
+	w := postRevoke(t, s, "sec-fail", "acct-fail")
+
+	// (b) HTTP response must be 502 — remote teardown failed.
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("revoke with GitHub failure status = %d, want 502; body=%s", w.Code, w.Body.String())
+	}
+
+	// (a) DB revoke must have run: the link is locally dead regardless of GitHub reachability.
+	if _, err := st.GitHubLinks().Get(context.Background(), "sec-fail"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("link must be locally revoked after GitHub failure; Get = %v, want ErrNotFound", err)
 	}
 }
 
