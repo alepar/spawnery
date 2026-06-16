@@ -48,6 +48,17 @@ type Service struct {
 	githubMintLocksMu     sync.Mutex
 	githubMintLocks       map[string]*sync.Mutex
 
+	githubLinkExchanger      GitHubLinkExchanger
+	githubLinkStore          store.Store
+	githubLinkAppClientID    string
+	githubLinkRedirectURI    string // AS's own /github/link/callback URL registered at the App
+	githubLinkPostRedeem     string // SPA page to land on after callback (no nonce in URL)
+	githubLinkDefaultHost    string // e.g. "github.com"
+	githubLinkAccountFromReq AccountFromRequest
+	githubLinkMu             sync.Mutex
+	githubLinkStates         map[string]githubLinkState
+	githubLinkPending        map[string]githubLinkPending
+
 	mu     sync.Mutex
 	tokens map[string]enrollToken // pending one-time enrollment tokens
 }
@@ -157,6 +168,32 @@ func WithGitHubMintAuthorizer(authz GitHubMintAuthorizer) Option {
 
 func WithGitHubAccessTokenFanout(fanout GitHubAccessTokenFanoutNotifier) Option {
 	return func(s *Service) { s.githubTokenFanout = fanout }
+}
+
+// GitHubLinkConfig configures the owner-driven GitHub App link-bootstrap flow (response-wrap
+// handoff, §3 / §16.2). Store is where the durable AS-custodial refresh chain is Upserted.
+type GitHubLinkConfig struct {
+	Exchanger          GitHubLinkExchanger
+	Store              store.Store
+	AppClientID        string
+	RedirectURI        string
+	PostRedeemRedirect string
+	DefaultHost        string
+	AccountFromReq     AccountFromRequest
+}
+
+func WithGitHubLink(cfg GitHubLinkConfig) Option {
+	return func(s *Service) {
+		s.githubLinkExchanger = cfg.Exchanger
+		s.githubLinkStore = cfg.Store
+		s.githubLinkAppClientID = cfg.AppClientID
+		s.githubLinkRedirectURI = cfg.RedirectURI
+		s.githubLinkPostRedeem = cfg.PostRedeemRedirect
+		s.githubLinkDefaultHost = cfg.DefaultHost
+		s.githubLinkAccountFromReq = cfg.AccountFromReq
+		s.githubLinkStates = map[string]githubLinkState{}
+		s.githubLinkPending = map[string]githubLinkPending{}
+	}
 }
 
 // New builds a Service from an in-memory root cert + self-hosted intermediate CA.

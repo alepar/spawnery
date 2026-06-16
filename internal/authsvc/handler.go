@@ -43,6 +43,12 @@ func (s *Service) Handler() http.Handler {
 	}
 	mux.Handle(authv1connect.NewAuthServiceHandler(s))
 
+	if s.githubLinkExchanger != nil {
+		mux.HandleFunc("GET /github/link/authorize", s.serveGitHubLinkAuthorize)
+		mux.HandleFunc("GET /github/link/callback", s.serveGitHubLinkCallback)
+		mux.HandleFunc("POST /github/link/redeem", s.serveGitHubLinkRedeem)
+	}
+
 	if s.deviceSet != nil {
 		ds := s.deviceSet
 		mux.HandleFunc("POST /devices/append", ds.corsBearerSimple(ds.serveAppend))
