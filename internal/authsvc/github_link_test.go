@@ -693,27 +693,88 @@ func TestRedeemPeekBeforePopIdentityChange(t *testing.T) {
 
 func TestRedeemOwnershipGuard(t *testing.T) {
 	now := time.Unix(1770000000, 0)
-	st := store.NewTestStore(t)
-	ex, f := newLinkExchanger(t)
-	f.SetUser(1, "u")
-	s := newLinkAS(t, st, ex, func() time.Time { return now })
 
-	// Pre-seed a row owned by acct-OTHER.
-	if err := st.GitHubLinks().Upsert(t.Context(), store.GitHubLink{
-		SecretID: "gh:acct-7", AccountID: "acct-OTHER", Host: "github.com", Login: "other",
-		GithubUserID: "999", AppClientID: "Iv1.spawneryapp", RefreshToken: "ghr_x",
-		AccessToken: "ghu_x", TokenType: "bearer", Version: 1,
-		DeliveryID: "github-access-gh:acct-7-v1", UpdatedAt: 1,
-	}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	// cross_account_existing_row_rejected: the bead's core scenario (defense-in-depth).
+	// Account B must not overwrite account A's link row via ON CONFLICT(secret_id) DO UPDATE.
+	t.Run("cross_account_existing_row_rejected", func(t *testing.T) {
+		st := store.NewTestStore(t)
+		ex, f := newLinkExchanger(t)
+		f.SetUser(1, "u")
+		s := newLinkAS(t, st, ex, func() time.Time { return now })
 
-	flowID, state, verifier := seedFlow(t, s, clientKindDevice, 0, "acct-7", "gh:acct-7", now)
-	runCallback(t, s, ex, state, verifier)
+		// Pre-seed a durable row at gh:acct-7 owned by acct-OTHER.
+		if err := st.GitHubLinks().Upsert(t.Context(), store.GitHubLink{
+			SecretID: "gh:acct-7", AccountID: "acct-OTHER", Host: "github.com", Login: "other",
+			GithubUserID: "999", AppClientID: "Iv1.spawneryapp", RefreshToken: "ghr_x",
+			AccessToken: "ghu_x", TokenType: "bearer", Version: 1,
+			DeliveryID: "github-access-gh:acct-7-v1", UpdatedAt: 1,
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
 
-	if got := redeemJSON(s, "acct-7", flowID, true, "", nil).Code; got != http.StatusForbidden {
-		t.Fatalf("cross-account ownership guard = %d, want 403", got)
-	}
+		flowID, state, verifier := seedFlow(t, s, clientKindDevice, 0, "acct-7", "gh:acct-7", now)
+		runCallback(t, s, ex, state, verifier)
+
+		// confirm_switch=true proves the ownership guard fires ahead of the identity-change branch.
+		rec := redeemJSON(s, "acct-7", flowID, true, "", nil)
+
+		// Clause 1: guard must reject with 403.
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("cross-account ownership guard = %d, want 403: %s", rec.Code, rec.Body.String())
+		}
+
+		// Clause 2: the pre-seeded row must be byte-for-byte unchanged (no overwrite via ON CONFLICT).
+		got, err := st.GitHubLinks().Get(t.Context(), "gh:acct-7")
+		if err != nil {
+			t.Fatalf("Get after rejected redeem: %v", err)
+		}
+		if got.AccountID != "acct-OTHER" {
+			t.Errorf("AccountID = %q, want acct-OTHER (row was overwritten)", got.AccountID)
+		}
+		if got.Login != "other" {
+			t.Errorf("Login = %q, want other", got.Login)
+		}
+		if got.GithubUserID != "999" {
+			t.Errorf("GithubUserID = %q, want 999", got.GithubUserID)
+		}
+		if got.Version != 1 {
+			t.Errorf("Version = %d, want 1", got.Version)
+		}
+		if got.RefreshToken != "ghr_x" {
+			t.Errorf("RefreshToken = %q, want ghr_x (row was overwritten)", got.RefreshToken)
+		}
+	})
+
+	// same_account_genesis_allowed: the ErrNotFound arm must let a legitimate first link through.
+	// Regression guard against an over-broad ownership check.
+	t.Run("same_account_genesis_allowed", func(t *testing.T) {
+		st := store.NewTestStore(t)
+		ex, f := newLinkExchanger(t)
+		f.SetUser(7, "octo")
+		s := newLinkAS(t, st, ex, func() time.Time { return now })
+
+		// No pre-seeded row: the guard's ErrNotFound arm must pass through.
+
+		flowID, state, verifier := seedFlow(t, s, clientKindDevice, 0, "acct-7", "gh:acct-7", now)
+		runCallback(t, s, ex, state, verifier)
+
+		rec := redeemJSON(s, "acct-7", flowID, false, "", nil)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("genesis link = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+
+		got, err := st.GitHubLinks().Get(t.Context(), "gh:acct-7")
+		if err != nil {
+			t.Fatalf("Get after genesis link: %v", err)
+		}
+		if got.AccountID != "acct-7" {
+			t.Errorf("AccountID = %q, want acct-7", got.AccountID)
+		}
+		if got.Version != 1 {
+			t.Errorf("Version = %d, want 1", got.Version)
+		}
+	})
 }
 
 // --- Task 7: serveGitHubLinkList ---
