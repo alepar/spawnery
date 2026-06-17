@@ -41,11 +41,13 @@ func postRevoke(t *testing.T, s *Service, secretID, account string) *httptest.Re
 }
 
 // linkAndRedeem drives the full authorize→callback→redeem flow to persist a link to the DB.
+// Uses a device flow (no completer secret required) so any secretID can be seeded directly.
 func linkAndRedeem(t *testing.T, s *Service, ex GitHubLinkExchanger, secretID, account string, now time.Time) {
 	t.Helper()
-	c := linkOnce(t, s, ex, secretID, account, now)
-	if w := redeem(s, account, c); w.Code != http.StatusOK {
-		t.Fatalf("redeem = %d: %s", w.Code, w.Body.String())
+	flowID, state, verifier := seedFlow(t, s, clientKindDevice, 0, account, secretID, now)
+	runCallback(t, s, ex, state, verifier)
+	if w := redeemJSON(s, account, flowID, false, "", nil); w.Code != http.StatusOK {
+		t.Fatalf("linkAndRedeem: redeem = %d: %s", w.Code, w.Body.String())
 	}
 }
 

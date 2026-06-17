@@ -113,6 +113,16 @@ type GitHubLinkRepo interface {
 	// MarkRelinkRequired flags the link's refresh chain as provably broken (terminal). Subsequent
 	// mints fast-fail; the owner must relink.
 	MarkRelinkRequired(ctx context.Context, secretID string, at int64) error
+	// PeekMeta reads token-free metadata for secretID INCLUDING revoked rows (the redeem ownership
+	// guard + identity-continuity peek). ErrNotFound when absent.
+	PeekMeta(ctx context.Context, secretID string) (GitHubLinkMeta, error)
+	// List returns token-free metadata for all links of accountID, including revoked/relink_required.
+	List(ctx context.Context, accountID string) ([]GitHubLinkMeta, error)
+	// RedeemUpsert inserts-or-relinks atomically: new row -> version=1; conflict (even a revoked row)
+	// -> version = existing.version+1 and clears revoked/relink_required, DB-side via RETURNING (no app
+	// Get->+1 race, no deliveryID collision across revoke->relink). deliveryID is derived in-SQL and
+	// MUST equal githubAccessDeliveryID (a guard test pins it). Returns the persisted link.
+	RedeemUpsert(ctx context.Context, link GitHubLink) (GitHubLink, error)
 }
 
 type Store interface {
