@@ -8,226 +8,334 @@
 ([`2026-06-16-github-storage-backend-adversarial-review-r2.md`](2026-06-16-github-storage-backend-adversarial-review-r2.md)).
 **This spec amends §16.2** (see Decision L1).
 
+> **Revision r1 (2026-06-17), post-roast (BLOCK → revised).** A `superpowers:roast` pass (5 critics,
+> 3-judge panel) found the original "unify on an initiator-held in-memory `link_session`, retire the
+> SameSite cookie" spine **unsafe**: the retired cookie was *channel-bound to the OAuth-completing
+> browser*, and moving the handle to the initiator opened two credential-capture/identity-injection
+> attacks (§5 threat model A1/A2). This revision **binds the redemption handle to the OAuth-completing
+> context** (cookie for web, loopback `rc` for CLI), keeps the AS-custodial custody decisions (L1/L2),
+> and closes the cross-account `secret_id` takeover, the flow-lifecycle/TTL gaps, the concurrent-link
+> race, the device error channel, the multi-instance-AS constraint, and the relink identity-continuity
+> gap. See the Decision Log and "Roast disposition" for the per-finding mapping.
+
 ---
 
 ## 1. Problem
 
-The AS-side GitHub-link machinery is **fully built and merged** on master (`6180cf6`,
-`sp-v40s.10-.15`): `internal/authsvc/github_link.go` exchanges the GitHub App OAuth code,
-holds the tuple, drives `GitHubLinks.Upsert` into AS-custodial storage, AS-custodial mint/refresh
-runs with node-identity authZ, and the CP fans the access token out to nodes. But **nothing drives
-it from the user side** — there is no web button and no `spawnctl` command, so an owner cannot
-*establish* a `github-token` at all. This is the #1 blocker for end-user GitHub mounts.
+The AS-side GitHub-link machinery is **built and merged** on master (`6180cf6`, `sp-v40s.10-.15`):
+`internal/authsvc/github_link.go` exchanges the GitHub App OAuth code, holds the tuple, drives
+`GitHubLinks.Upsert` into AS-custodial storage; AS-custodial mint/refresh runs with node-identity
+authZ; the CP fans the access token out to nodes. But **nothing drives it from the user side** — no web
+button, no `spawnctl` command — so an owner cannot *establish* a `github-token` at all. This is the #1
+blocker for end-user GitHub mounts.
 
-This spec designs the owner-facing driver — the web SPA and `spawnctl` flow that lets an owner
-**create / relink / revoke** a GitHub link — and reconciles the now-contradictory custody semantics
-(§3 predates §16.2) so the flow fits the AS-custodial reality.
+This spec designs the owner-facing driver — web SPA and `spawnctl` — that lets an owner **create /
+relink / revoke** a GitHub link, and reconciles the now-contradictory custody semantics (§3 predates
+§16.2) so the flow fits the AS-custodial reality.
 
 ## 2. Main challenges
 
-1. **Custody contradiction.** §3 has the owner seal the tuple as disaster-recovery (DR). §16.2 moved
-   durable custody to the AS as *sole rotation authority*, and spike 3 proved rotation **invalidates
-   the predecessor** refresh token. So any owner-held copy goes stale after the AS's first refresh
-   (~8h) and — being CP-blind (sealed client-side) — neither CP nor AS can keep it fresh. The owner's
-   "DR copy" therefore has no coherent operational job.
-2. **Nonce / possession handle (F14, unresolved).** §3 step 4 hand-waved how the owner client learns
-   to redeem the freshly-exchanged tuple "without the nonce landing in the URL / history / Referer /
-   AS logs," and what binds that redemption to the right exchange.
-3. **Web vs CLI mechanics.** A browser can do a top-level OAuth redirect; a CLI cannot. The built leg
-   assumes an *ambient browser session* (302-redirect `authorize` + a `SameSite=Strict` cookie), which
-   does not fit the SPA's real **Bearer** auth, and does not fit a CLI at all.
+1. **Custody contradiction.** §3 has the owner seal the tuple as DR. §16.2 made the AS the *sole*
+   custodian + rotation authority, and rotation invalidates the predecessor (spike 3), so any owner-held
+   copy goes stale within ~8h and — being CP-blind — cannot be refreshed by CP/AS. The owner's "DR copy"
+   has no coherent operational job.
+2. **Who may redeem (F14 + roast).** The handoff between the GitHub-initiated callback and the owner's
+   commit must be bound so that (a) the redeemed credential belongs to the GitHub identity the owner
+   *intended*, and (b) a third party can neither capture a victim's credential nor inject their own
+   identity into the owner's link. The binding must not leak the handle to URL/history/Referer/logs.
+3. **Web vs CLI mechanics.** A browser can do a top-level OAuth redirect; a CLI cannot. The merged leg
+   assumes an *ambient browser session* (302 `authorize`) which does not fit the SPA's **Bearer** auth,
+   and does not fit a CLI at all.
 
-## 3. Key decisions made
-
-**The AS is the sole custodian of the durable credential; the owner keeps nothing.** Because the AS
-can always mint a fresh access token from the refresh token + `client_secret` (both AS-side), there is
-no operational reason for the owner or CP to hold any token material. So: **no CP-side GitHub secret,
-no owner DR copy.** Recovery from a lost/broken chain is **relink** (re-run OAuth); a lost AS keystore
-means every link relinks. This dissolves challenge 1 and shrinks blast radius (the tuple never leaves
-the AS, not even to the browser).
-
-**A single in-memory `link_session` possession handle, unified across web + CLI.** An authenticated
-`start` call returns `{authorize_url, link_session}`; the client holds `link_session` only in memory
-(SPA: `sessionStorage`; CLI: process memory) — **never** in a URL, cookie, history, or Referer. Redeem
-requires `link_session` **and** fresh owner auth (session/Bearer). This resolves F14 *by elimination*
-(the handle never enters the browser) and replaces the built cookie/302 leg, fixing the
-Bearer-vs-top-level-navigation mismatch.
-
-**CLI mirrors `cmd/spawnctl/login.go`:** loopback (desktop) + device-poll (headless/SSH), auto-selected
-exactly as login already does.
-
-**Single default link per account for MVP** (the store stays `secret_id`-keyed, so multiple named links
-is a later additive change).
-
-## 4. Custody model (amends §16.2)
+## 3. Custody model (amends §16.2)
 
 | Artifact | Where it lives | Durable? |
 |---|---|---|
 | Refresh token (the credential) | **AS only**, encrypted at rest | Yes — sole copy |
 | Access token | Ephemeral; AS mints on demand, seals per-node, CP fans out (§16.4) | No |
 | Owner / CP copy | **None** | — |
-| Link metadata (login, github_user_id, host, version, …) | AS store; served read-only via `GET /github/links` | Yes |
+| Link metadata (login, github_user_id, host, version, status) | AS store; served via `GET /github/links` | Yes |
 
-Consequences:
 - **No DR.** A lost AS keystore forces every user to relink. Explicitly accepted (relink is cheap; the
-  refresh chain is intentionally single-homed). This **supersedes §16.2's "CP stores an owner-sealed
-  copy of the credential for owner disaster-recovery / cross-device relink"** clause — there is no
-  sealed copy; cross-device relink is served by account-bound AS endpoints instead (§7).
+  refresh chain is intentionally single-homed). **Supersedes §16.2's "CP stores an owner-sealed copy of
+  the credential for owner disaster-recovery / cross-device relink"** clause — there is no sealed copy;
+  cross-device relink is served by account-bound AS endpoints (§6.4).
 - **No tuple handoff to the client.** `redeem` returns **metadata only**. The access/refresh tokens
-  never transit to the browser or CLI — strictly safer than the built endpoint, which returns the full
-  tuple JSON (`github_link.go:317-330`).
-- **Fanout unaffected.** §16.4's per-node sealed fanout (AS→node, CP relays opaque bytes) is a runtime
-  delivery path, independent of the (now-removed) owner DR copy. No conflict.
+  never transit to the browser/CLI — strictly safer than the merged endpoint, which still returns the
+  full tuple JSON (`github_link.go:313-330`); that emission **must be removed in the same edit** (L2).
+- **Fanout unaffected.** §16.4's per-node sealed fanout is a runtime path independent of the
+  (now-removed) owner DR copy.
 
-## 5. Security spine — the `link_session` possession handle (resolves F14)
+## 4. Single default link & account-scoped `secret_id` (closes cross-account takeover)
 
-The two-step "commit only on a fresh authenticated request that proves possession of *this* exchange"
-shape is kept; only the possession channel changes from a browser cookie to an in-memory handle.
+MVP exposes **one GitHub link per account**. The link's `secret_id` is **server-derived from the
+account** (e.g. `gh:<accountID>`), **never** client-supplied as a raw cross-account string. The store
+must enforce ownership so a guessed/colliding `secret_id` cannot cross-account-clobber:
+
+- **Key by account.** Either make the durable key composite `(account_id, secret_id)`, or keep
+  `secret_id` the PK *and* derive it from `account_id` (so it is unique per account by construction).
+- **Redeem ownership guard (required).** Before `Upsert`, `redeem` MUST reject (`403`) when an existing
+  link row's `AccountID != caller` — mirroring the guard `revoke` already has (`github_link.go:376`).
+  The merged `redeem` lacks this guard; that is a latent cross-account-overwrite bug in shipped code
+  (file a fix bead).
+
+The store stays `secret_id`-addressable so multiple named links per account remain an additive change
+later. `start` does **not** accept an arbitrary cross-account `secret_id`; for MVP it takes at most a
+client-chosen *label* that is namespaced under the account server-side.
+
+## 5. Security spine — handle bound to the OAuth-completing context
+
+**Principle (corrected from the pre-roast design):** the secret that gates `redeem` is minted **at the
+callback** (post-OAuth) and delivered **only to the context that completed the GitHub OAuth** — never to
+the initiator. This restores the channel-binding the merged SameSite cookie provided and that the
+pre-roast initiator-held `link_session` destroyed.
+
+### 5.1 Flow and the three-state lifecycle
 
 ```
-1. start   (authenticated)  → AS mints account-bound `state` + `link_session`,
-                              records client-kind {web | loopback:<port> | device},
-                              returns {authorize_url, link_session}.    link_session: client memory only
-2. (client opens authorize_url in a browser; user approves on GitHub)
-3. callback (GitHub→AS, correlated by `state`) → AS exchanges code, stashes the pending tuple
-                              keyed by `link_session`, bounces the browser to the client-kind landing.
-4. redeem  (authenticated, body {link_session}) → AS checks the pending entry's account == caller,
-                              single-use pops it, Upserts into AS custody, returns metadata only.
+start  (authenticated)  → AS creates an account-bound `state` row (PKCE verifier, secret_id, host,
+                          client_kind∈{web,loopback:<port>,device}, status=ISSUED, TTL≈15m) and a
+                          separate poll-correlation `flow_id` stored IN the state row. Returns
+                          {authorize_url, flow_id}. No redemption secret is issued here.
+(browser opens authorize_url; user approves on GitHub)
+callback (GitHub→AS, correlated by `state`) → exchange code, FetchUser, transition the flow to READY
+                          and stash the pending tuple. Mint the COMPLETER-bound redemption secret and
+                          deliver it to the completing context:
+                            • web      → HttpOnly,Secure,SameSite=Strict cookie on the callback response
+                            • loopback → redirect browser to http://127.0.0.1:<port>/done?rc=<one-time>
+                            • device   → no completer channel exists (see 5.3); flow just marked READY
+                          On OAuth error, transition the flow to ERROR(code) (see §6.1 error channel).
+redeem (authenticated)  → present the completer-bound secret (web cookie / loopback rc) OR, device-only,
+                          the initiator `flow_id`. AS verifies caller==flow account, atomically pops the
+                          READY entry, applies the relink identity-continuity check (§6.5), Upserts, and
+                          returns metadata only (incl. resolved `login` for confirmation).
 ```
 
-Properties:
-- **`link_session` never appears in any URL, cookie, history, or Referer.** It is returned over the
-  authenticated `start` response body and presented over the authenticated `redeem` request body.
-  This is strictly stronger than the built `SameSite=Strict` cookie (which at least sits in browser
-  storage). **F14 is resolved by elimination.**
-- **Replay needs both factors.** A leaked `link_session` is inert without the owner's session/Bearer;
-  a stolen `state` (used to drive a forged callback) yields only a *pending* entry bound to the
-  owner's account that the attacker cannot redeem (no owner auth) and that the owner will not redeem
-  (wrong/unknown `link_session`). The entry expires.
-- `state`: high-entropy, single-use, account-bound, short TTL (existing `githubLinkStateTTL`).
-- `link_session`: high-entropy, single-use, short TTL (replaces `githubLinkNonceTTL`).
+`redeem` status mapping (enables device polling and fail-fast): **ISSUED → `202 {status:"pending"}`**,
+**ERROR → `4xx {status:"error", code}`** (terminal), **READY → `200` + metadata**,
+**unknown/expired → `404`**.
 
-## 6. Decision points, by section
+### 5.2 Threat model (what the binding defends)
+
+- **A1 — attacker-initiates / victim-completes (credential capture).** Attacker calls `start` (own
+  account), phishes the victim into opening `authorize_url`; GitHub silently re-consents a
+  previously-authorized App, so the callback binds the **victim's** refresh chain to the pending entry.
+  *Defended for web/loopback:* the redemption secret (cookie / `rc`) is delivered to the **victim's**
+  completing context, which the attacker does not control, so the attacker cannot `redeem`; the victim
+  cannot `redeem` either (flow account ≠ victim). The pending entry expires. *Device:* un-closable —
+  see §5.3.
+- **A2 — attacker-completes / owner-redeems (identity injection).** Attacker obtains the owner's
+  `authorize_url` and approves as themselves; owner redeems and unknowingly operates as the attacker's
+  GitHub identity. *Defended:* (1) for web/loopback the completer-bound secret lands in the *attacker's*
+  context, not the owner's, so the owner's `redeem` finds no secret; (2) **redeem-time `login`
+  confirmation** (defense-in-depth, all paths): `redeem` surfaces the resolved `@login`/`github_user_id`
+  and the client requires explicit owner confirmation before the commit, so a mismatched identity is
+  caught.
+- **PKCE caveat (documented).** GitHub App PKCE (S256, added 2025-07-14, optional/non-enforcing) protects
+  *code* confidentiality but, because the confidential-client AS holds both verifier and `client_secret`
+  and performs the exchange, **PKCE provides no defense against A1/A2** — the completer-binding above is
+  the real defense.
+- **`authorize_url` is possession-sensitive.** It carries `state`; treat it as a secret in the threat
+  model (it lands in browser history on the web path and is printed on the device path). State is
+  single-use and the callback consumes it; see the prefetch-DoS note in §6.1.
+
+### 5.3 Device flow residual (accepted, gated)
+
+The device path has **no return channel to the completing browser**, so the completer-bound secret
+cannot be delivered; device `redeem` falls back to the initiator-held `flow_id` + Bearer. This makes
+**A1 cryptographically un-closable for device flow** (redeem-time confirmation does not help — the
+attacker is the redeemer and *wants* the victim's identity). MVP keeps device flow for headless/SSH
+parity but:
+- requires the redeem-time `@login` confirmation,
+- prints a consent warning ("only approve a link URL you started yourself"),
+- documents A1 as an accepted device-flow residual (phishing-class, bounded by the consent UX).
+
+## 6. Component design
 
 ### 6.1 AS HTTP surface (`internal/authsvc`)
 
-Recommended: reshape the merged endpoints; retire the cookie/nonce machinery.
+- **`POST /github/link/start`** (was `GET …/authorize` 302). Authenticated (`githubLinkAccountFromReq`).
+  Creates the account-bound `state` row {PKCE verifier, **`flow_id`**, account-derived `secret_id`,
+  host, `client_kind`(+loopback port), `status=ISSUED`, TTL≈15m}; returns `{authorize_url, flow_id}`.
+  *Why not the 302:* a top-level browser navigation cannot carry the SPA's `Authorization: Bearer`;
+  returning the URL lets the client self-navigate and is identical for the CLI.
+- **`GET /github/link/callback`** (route unchanged; logic reworked). Correlate by `state`, exchange,
+  `FetchUser`, transition `flow_id`→`READY` with the pending tuple. Deliver the completer-bound secret
+  per `client_kind`: web cookie / loopback `…/done?rc=…` / device (none). On OAuth failure transition
+  `flow_id`→`ERROR(code)` **and** keep the existing browser `?error=` redirect.
+- **`POST /github/link/redeem`** (route unchanged; reworked). Authenticated. Accepts the completer
+  secret (cookie / `rc`) or, device-only, `flow_id`. Verify caller==flow account; **atomic CAS pop** of
+  the READY entry; **ownership guard** (§4); **relink continuity** (§6.5); `Upsert` with an
+  **atomic/DB-side version increment** (§6.6); return metadata only `{secret_id, host, login,
+  github_user_id, version, updated_at, status}`. Honors the §5.1 status codes. **Remove the tuple
+  emission** (L2).
+- **`GET /github/links`** (new). Authenticated, account-bound. Returns the account's link metadata with
+  an explicit **`status ∈ {linked, revoked, relink_required}`** (do not silently filter revoked rows to
+  look never-linked); MVP 0/1 row. Needs `GitHubLinks().List(ctx, accountID)`.
+- **`POST /github/link/revoke`** (unchanged) — account-bound kill switch.
+- **CORS:** the three SPA-called routes (`start`, `redeem`, `GET /github/links`) must be wrapped with
+  the established `corsBearerSimple` (per the `/devices` precedent) so cross-origin SPA→AS Bearer fetches
+  are not browser-blocked.
+- **Prefetch-DoS note:** `state` is single-use and the callback deletes it on first hit; a third party
+  who sees `state` (device-printed URL) can burn it with a junk callback, forcing the owner to restart.
+  MVP mitigation: delete `state` **only on a successful exchange** (so a junk callback does not consume
+  it); documented as a minor accepted residual otherwise.
 
-- **`POST /github/link/start`** (was `GET …/authorize`, 302-redirect). Authenticated
-  (`githubLinkAccountFromReq`). Body/query: `secret_id` (defaulted for MVP), optional `host`,
-  `client_kind` ∈ {`web`, `loopback`, `device`} (+ loopback `port`). Creates the account-bound `state`
-  (storing PKCE verifier, secret_id, host, client_kind/landing) and a `link_session`; returns JSON
-  `{authorize_url, link_session}`. *Why not keep the 302?* A top-level browser navigation cannot carry
-  the SPA's `Authorization: Bearer` header; returning the URL lets the client navigate itself and works
-  identically for the CLI.
-- **`GET /github/link/callback`** (unchanged route; logic adjusted). Correlate by `state`, exchange
-  the code, `FetchUser`, stash the pending tuple **keyed by `link_session`** (not a cookie nonce), then
-  redirect the browser to the recorded landing: SPA settings page / loopback `http://127.0.0.1:<port>/done`
-  / a device "you may close this tab" AS page. **No `Set-Cookie`.** `?error=` propagation unchanged.
-- **`POST /github/link/redeem`** (unchanged route; input changed). Authenticated. Body `{link_session}`.
-  Single-use pop the pending entry; verify `pending.accountID == caller`; `GitHubLinks.Upsert`; return
-  **metadata only** `{secret_id, host, login, github_user_id, version, updated_at}`. Returns **`202`
-  / `{status:"pending"}`** when the OAuth has not completed yet, so the device path can poll.
-- **`GET /github/links`** (new). Authenticated, account-bound. Returns the account's link metadata
-  (MVP: 0 or 1 row). Backs the web panel and `spawnctl gh status`. Needs a store
-  `GitHubLinks().List(ctx, accountID)` (today only `Get(secretID)` exists).
-- **`POST /github/link/revoke`** (unchanged). Account-bound kill switch (`DELETE /grant` + local
-  fail-closed flip), already built.
-
-Considered & discarded: **keep the web cookie, bolt CLI on separately** — two parallel possession
-mechanisms to maintain, and the web leg keeps the latent ambient-auth assumption that breaks under
-Bearer. Rejected for the unified handle.
-
-Considered & discarded: **let `callback` finalize the Upsert directly** (drop client redeem) — removes
-the fresh-auth + possession check, re-exposing the stolen-`state` attack (an attacker binds *their*
-GitHub identity into the owner's link slot). Rejected; the redeem step is the security spine.
+**Multi-instance AS constraint (restated from `sp-v40s.4`).** `state`/`flow_id`/pending are AS-side and
+today in-memory; `start`, `callback`, and `redeem` are three independently-routed requests, and the
+**GitHub→AS callback cannot honor browser sticky-session affinity** (GitHub originates it). Therefore a
+horizontally-scaled production AS MUST use the **shared volatile store with atomic redeem-and-delete**
+from `sp-v40s.4` (encrypted payloads, short TTL, auth-bound redemption); single-instance/sticky is a
+dev-only posture. MVP states this as a binding deployment constraint.
 
 ### 6.2 Web driver (`web/`)
 
-New "Settings → GitHub" panel. Reads `GET /github/links` → renders "Linked as @login (vN)" with
-**Relink** / **Revoke**, or "Link GitHub". Link/Relink:
-`POST start` (Bearer, `client_kind=web`) → write `link_session` to **`sessionStorage`** → navigate
-top-level to `authorize_url`. On return to the settings page → read `link_session` from `sessionStorage`
-→ `POST redeem` (Bearer) → clear `sessionStorage` → re-fetch the panel. Surface `?error=`.
+Settings → GitHub panel reads `GET /github/links` → "Linked as @login (vN)" / "Relink" / "Revoke" /
+"Link GitHub", rendering the `status`. Link/Relink:
+`POST start` (Bearer, `client_kind=web`) → record an in-progress marker (non-secret) in `sessionStorage`
+→ top-level navigate to `authorize_url`. On return to the settings page: **after `bootstrap()` /
+silent-refresh completes** (the SPA's Bearer lives only in memory and is wiped by the navigation), if
+the in-progress marker is present → `POST redeem` (the HttpOnly callback cookie is auto-sent same-site;
+Bearer attached) → **confirm the returned `@login`** → clear the marker → refresh the panel.
 
-*Why `sessionStorage`:* a top-level navigation to GitHub wipes SPA JS memory, but `sessionStorage` is
-per-origin and survives the round-trip, and never lands in a URL. It is script-readable (unlike the
-HttpOnly cookie), but it is inert without the Bearer, and an XSS that could read it already holds the
-Bearer — no net new exposure. No `secret_id`-keyed CP secret is created (Decision L1); the panel is
-metadata-only.
+- **Sequencing/recovery (required):** redeem MUST be gated on bootstrap success; if silent-refresh fails
+  (key-lost / cnf-mismatch / revoked / login-required), clear the stale marker and surface a retry — do
+  not strand a flow while the AS pending entry expires.
+- **Topology constraint (document):** the SameSite=Strict callback cookie requires the SPA origin and
+  the AS to be **same-site**; state this as a deployment requirement.
+- **TTL:** the callback cookie's lifetime must outlast a cold reload + bootstrap; pin a concrete value
+  (≈5m) distinct from the ≈15m flow TTL.
+- **New-tab caveat:** if the user opens `authorize_url` in a different tab, the return tab lacks the
+  marker; surface a "finish in the original tab / retry" affordance.
 
 ### 6.3 spawnctl driver (`cmd/spawnctl/`)
 
-Mirrors the loopback/device structure already proven in `login.go`.
-- **`spawnctl gh link`** (default `secret_id`): `POST start` (Bearer) →
+Structurally mirrors `login.go`'s loopback/device auto-selection (note: the device path is **not** RFC
+8628 — there is no short `user_code`; the user opens the full `authorize_url` — so "mirrors login.go" is
+structural only).
+- **`spawnctl gh link`** → `POST start` (Bearer):
   - **loopback** (default when a browser is reachable): bind `127.0.0.1:0`, `client_kind=loopback`+port,
-    open the browser to `authorize_url`; on the `/done` hit, `POST redeem` (Bearer, in-memory
-    `link_session`); print "Linked as @login".
+    open the browser to `authorize_url`; on `/done?rc=…` read `rc`, `POST redeem` (Bearer + `rc`),
+    **confirm `@login`**, print result. A per-attempt `rc` (minted at callback) also restores the
+    loopback CSRF-correlation `login.go`'s `/cb` has.
   - **device** (`--device`, or auto when headless / `--no-browser`): `client_kind=device`, print
-    `authorize_url`; poll `POST redeem` (Bearer) with backoff until `200` (success) or terminal error.
-  `link_session` lives only in process memory; it is never printed and never put in a URL.
-- **`spawnctl gh status`**: `GET /github/links` → print.
-- **`spawnctl gh revoke`**: `POST revoke`.
+    `authorize_url` + the §5.3 consent warning; poll `POST redeem` (Bearer + `flow_id`) honoring the
+    §5.1 status codes (`202` keep polling, `4xx{error}` fail fast, `200` confirm `@login` then done).
+- **`spawnctl gh status`** → `GET /github/links`. **`spawnctl gh revoke`** → `POST revoke`.
 
-### 6.4 Multi-device (open question d)
+### 6.4 Multi-device
 
-Falls out of account-binding. Every endpoint authorizes by account; the AS `version` (monotonic in
-`Upsert`) is the authority. Any owner-authenticated device may link / relink / revoke. No per-device
-copies, no deviceset sealing, no CAS — there is nothing client-side to keep in sync.
+Falls out of account-binding: every endpoint authorizes by account; the AS `version` (atomic, §6.6) is
+the authority. Any owner-authenticated device may link / relink / revoke. No per-device copies, no
+deviceset sealing, no client-side sync.
 
-### 6.5 Relink semantics
+### 6.5 Relink semantics + identity continuity
 
-Relink = a fresh OAuth that `Upsert`s `version+1`, replacing the AS chain. The superseded chain is not
-explicitly revoked (consistent with §16.5 — revoke is the compromise kill switch only). **Documented
-MVP rough edge:** spawns already running against the prior version keep their minted access token until
-it expires (~8h), then fail-closed on refresh (version superseded) and surface relink-required; they
-recover on rebind/restart. Not solved here (a make-before-break relink is out of MVP).
+Relink = a fresh OAuth that `Upsert`s `version+1`, replacing the AS chain (no explicit revoke of the
+prior chain — §16.5). **Identity-continuity guard (required):** on `redeem`, if the newly-authorized
+`github_user_id` differs from the existing link's, do **not** silently swap — require an explicit
+"switching from @old to @new" confirmation (web modal / `spawnctl --confirm`) before `Upsert`.
+
+**Running-spawn behavior on relink — needs a spike (S2).** L9 previously assumed running spawns keep
+their minted access token until ~8h expiry. It is **unverified** whether a fresh OAuth re-authorization
+of the same user+App invalidates the prior still-live access token immediately (GitHub: "tokens
+associated with a revoked authorization are revoked"). If it does, running spawns break at relink, not
+at ~8h. Resolve before relying on the "graceful until expiry" framing.
+
+### 6.6 Concurrency
+
+`redeem`'s version bump must be **atomic** (DB-side increment / CAS in `Upsert`), not the merged
+non-atomic `Get→+1→Upsert` (which lets two concurrent redeems write the same `version` and a colliding
+`deliveryID`). Define the loser's outcome: `409` + retry. MVP has at most one default link per account,
+but web+CLI double-submit makes the race reachable.
 
 ## 7. Scope
 
-**In:** the AS surface reshape (§6.1) incl. retiring the cookie/nonce and updating
-`internal/authsvc/github_link_test.go`; the new `List` store query; the web panel (§6.2); the spawnctl
-`gh link|status|revoke` commands (§6.3).
+**In:** the AS surface rework (§6.1) incl. completer-bound secret delivery, the 3-state flow lifecycle,
+status codes, account-scoped `secret_id` + ownership guard, atomic version bump, CORS, retiring the
+tuple emission, and updating `github_link_test.go`; the `List` store query + `status`; the web panel
+(§6.2); the spawnctl `gh link|status|revoke` (§6.3).
 
-**Out (tracked elsewhere):** egress floor for the AS↔GitHub + node legs (`sp-u53.1.6`); AS-custodial
-mint/refresh + CP fanout (built, `sp-v40s.10-.15`); spawn-start initial access-token delivery (runtime,
-built/elsewhere); suspend backstop (deferred, §16.7); multiple named links per account (additive
-later); make-before-break relink.
+**Out / dependencies (tracked elsewhere):** egress floor (`sp-u53.1.6`); AS-custodial mint/refresh + CP
+fanout (built); spawn-start initial access-token delivery (runtime); suspend backstop (deferred §16.7);
+multiple named links per account (additive later); make-before-break relink. **Escalation E1 — mount→link
+resolution:** how a `github:owner/repo` mount resolves to the account-default `secret_id`
+(`storage/github.go` `CredentialSecretID` is empty; CP `spawn_mounts.credential_secret_id` must point at
+it) is the epic's load-bearing binding and is **not** answered here — needs an owner under `sp-dl62`.
 
 ## 8. Testing
 
-- **AS handlers** (hermetic, table-driven like `github_link_test.go`): `start` mints account-bound
-  `state`+`link_session`; `callback` keys pending by `link_session` and sets **no cookie**; `redeem`
-  enforces account-match + single-use + returns metadata-only (asserts **no token material** in the
-  body) + `202` pending path; `List` is account-scoped; `revoke` unchanged. Assert `link_session`
-  never appears in any redirect `Location`.
-- **Web** (vitest): panel renders linked/unlinked from `GET /github/links`; link writes/reads
-  `sessionStorage` and clears it; `?error=` surfaced.
-- **spawnctl**: loopback `/done`→redeem and device poll→redeem, mirroring the `login.go` test shape;
-  assert `link_session` is never logged/printed.
+- **AS handlers** (hermetic, table-driven): `start` mints account-bound `state`+`flow_id`; `callback`
+  transitions ISSUED→READY/ERROR and delivers the secret per `client_kind` (web sets cookie; loopback
+  redirects to `/done?rc`; device sets none); `redeem` enforces caller==flow account, **ownership guard
+  (A start+redeem against B's `secret_id` is rejected)**, atomic CAS pop + version, the §5.1 status
+  codes incl. the **terminal ERROR** path, returns **metadata-only (assert no token material)**, and the
+  **relink identity-continuity** confirmation gate. Assert no redemption secret appears in any redirect
+  `Location`. Concurrency test: two simultaneous redeems → one `200`, one `409`, single version bump.
+- **Web** (vitest): panel renders `linked|revoked|relink_required`; redeem is gated on bootstrap; marker
+  cleared on success and on silent-refresh failure; `@login` confirmation; `?error=` surfaced.
+- **spawnctl:** loopback `/done?rc`→redeem (asserts `rc`/secrets never logged) and device poll honoring
+  status codes incl. fail-fast on terminal error; `@login` confirmation; device consent warning printed.
 
 ## 9. Decision Log
 
-- **L1 — AS is sole custodian; no owner/CP copy (amends §16.2).** The durable credential (refresh
-  token) lives only at the AS; no CP-side GitHub secret and no owner-sealed DR copy. Recovery = relink;
-  lost AS keystore = relink-all. Supersedes §16.2's owner-sealed-DR-copy clause.
-- **L2 — `redeem` returns metadata only.** Token material never transits to client; edit the merged
-  endpoint to drop the tuple from its response.
-- **L3 — Unified in-memory `link_session` possession handle** replaces the `SameSite` cookie + nonce;
-  `authorize` 302 → authenticated `start` that returns `{authorize_url, link_session}`. Resolves F14 by
-  elimination and fixes the Bearer-vs-top-level-nav mismatch.
-- **L4 — Keep the two-step (start→…→redeem) security spine.** `callback` does not finalize; redeem
-  requires fresh owner auth + the handle. Defeats the stolen-`state` link-hijack.
-- **L5 — CLI = loopback + device**, auto-selected, mirroring `cmd/spawnctl/login.go`.
-- **L6 — New account-bound `GET /github/links`** is the single source of truth for the UI/CLI; no
-  CP-side metadata mirror.
-- **L7 — Single default link per account for MVP**; store stays `secret_id`-keyed for later
-  multiplicity.
-- **L8 — Multi-device falls out of account-binding**; AS `version` is authority; no client-side sync.
-- **L9 — Relink does not revoke the prior chain**; running-spawn staleness on relink is a documented
-  MVP rough edge.
+- **L1 — AS is sole custodian; no owner/CP copy (amends §16.2).** Recovery = relink; lost AS keystore =
+  relink-all. *(roast: confirmed net-positive)*
+- **L2 — `redeem` returns metadata only;** remove the merged tuple emission in the same edit. *(roast
+  minor: unretired today)*
+- **L3 — `authorize` 302 → authenticated `start` returning `{authorize_url, flow_id}`** (fixes the
+  Bearer-vs-top-level-nav mismatch). The redemption secret is **not** issued here.
+- **L4 — Redemption handle is bound to the OAuth-completing context** (web cookie / loopback `rc`),
+  minted at callback — **reverses** the pre-roast initiator-held `link_session`. Closes threat-model
+  A1/A2 for web/loopback. *(roast blocker)*
+- **L5 — 3-state flow lifecycle** (ISSUED@start → READY/ERROR@callback → popped@redeem), `flow_id` stored
+  in the `state` row, explicit `202/4xx/200/404` status mapping. *(roast blocker: was unimplementable)*
+- **L6 — Account-scoped `secret_id` + redeem ownership guard** (composite key or account-derived id);
+  closes cross-account takeover (also a latent merged-code bug). *(roast blocker)*
+- **L7 — Atomic/DB-side version bump** with `409` on the concurrent-redeem loser. *(roast major)*
+- **L8 — Pinned TTLs:** flow ≈15m (covers human round-trip + device poll), callback secret ≈5m;
+  reconciled with `state` TTL. *(roast major)*
+- **L9 — Relink identity-continuity confirmation** (@old→@new) before `Upsert`; running-spawn
+  invalidation behavior is **spike S2**, not assumed. *(roast major + escalation)*
+- **L10 — Device flow kept with redeem-time `@login` confirmation + consent warning + documented A1
+  residual** (no completer channel). *(user decision)*
+- **L11 — Callback records terminal OAuth errors against `flow_id`;** redeem surfaces them so device/
+  loopback clients fail fast instead of polling to timeout. *(roast major)*
+- **L12 — Web redeem sequenced after `bootstrap()`/silent-refresh** with stale-marker recovery; SameSite
+  cookie ⇒ SPA same-site with AS (documented); `corsBearerSimple` on the new routes. *(roast major+minor)*
+- **L13 — Multi-instance AS:** single-instance/dev or the `sp-v40s.4` shared volatile store; sticky
+  sessions cannot bind the GitHub-originated callback. *(roast major)*
+- **L14 — Multi-device falls out of account-binding;** AS `version` is authority. *(unchanged)*
+
+## Roast disposition (r1)
+
+| Roast finding (clustered) | Disposition |
+|---|---|
+| Cross-account `secret_id` takeover (blocker) | Fixed — §4, L6 |
+| Handle bound to initiator, not completer; A1/A2 (blocker) | Fixed — §5, L4; device residual §5.3/L10 |
+| Flow not implementable / `flow_id` not persisted / 202-vs-404 (blocker) | Fixed — §5.1, L5 |
+| TTL too short for the reshaped flow (major ×) | Fixed — §6/L8 |
+| Relink silently swaps identity (major) | Fixed — §6.5, L9 |
+| Multi-instance AS constraint dropped (major) | Restated — §6.1, L13 |
+| Concurrent-link version race (major) | Fixed — §6.6, L7 |
+| Device poll has no terminal-error channel (major) | Fixed — §6.1, L11 |
+| Web in-memory Bearer wiped by nav (major) | Fixed — §6.2, L12 |
+| Tuple still emitted / CORS / `GET /github/links` revoked contract / "fresh" wording / state-DoS / "mirrors login.go" overclaim / sessionStorage new-tab (minors) | Folded into §6/§8 |
+| Escalation E1 — mount→link resolution | §7 (separate `sp-dl62` bead) |
+| Escalation S2 — relink token-invalidation | §6.5 spike |
+| PKCE feasible (S256, 2025-07-14) but no A1/A2 defense | Documented — §5.2 |
+
+## 10. Spikes
+
+- **S1 — Web round-trip timing.** Prototype start→`sessionStorage` marker→top-level nav→cold
+  `bootstrap()`+silent-refresh→redeem; confirm it completes within the callback-cookie TTL. *Kill:* if
+  bootstrap routinely exceeds the cookie TTL, raise the TTL or re-architect the return.
+- **S2 — Relink token invalidation.** Against the throwaway App: link, mint an access token, then run a
+  fresh OAuth re-authorization; check whether the prior access token + refresh token are immediately
+  invalidated. *Kill:* if immediate, L9's "graceful until ~8h" framing is wrong → document relink as
+  break-now and adjust the running-spawn story.
 
 ## Post-Implementation Notes
 
-*As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from
-the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+*As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the
+assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
