@@ -499,8 +499,10 @@ func (a *attacher) consumeGitHubSecret(spawnID string, sec *nodev1.SealedSecret,
 }
 
 // noteGitHubRefresh records the delivered GitHub link for proactive refresh scheduling (design §16.4).
-// It extracts the link reference (secret_id/version/delivery_id) and audit repository_id from the
-// matching mount; it never handles the token plaintext. nil-safe (refresher disabled in dev).
+// It extracts the link reference (secret_id/version/delivery_id), the audit repository_id from the
+// matching mount, and the precise access-token expiry from delivery clear metadata (enabling accurate
+// resume scheduling without relying on the receipt-relative default). Never handles token plaintext.
+// nil-safe (refresher disabled in dev).
 func (a *attacher) noteGitHubRefresh(spawnID string, generation uint64, sec *nodev1.SealedSecret, mounts []*nodev1.MountBinding) {
 	if a.githubRefresh == nil || sec.GetSecretId() == "" {
 		return
@@ -515,12 +517,13 @@ func (a *attacher) noteGitHubRefresh(spawnID string, generation uint64, sec *nod
 		}
 	}
 	a.githubRefresh.Note(githubRefreshEntry{
-		SpawnID:      spawnID,
-		Generation:   generation,
-		SecretID:     sec.GetSecretId(),
-		Version:      sec.GetVersion(),
-		DeliveryID:   sec.GetDeliveryId(),
-		RepositoryID: repositoryID,
+		SpawnID:             spawnID,
+		Generation:          generation,
+		SecretID:            sec.GetSecretId(),
+		Version:             sec.GetVersion(),
+		DeliveryID:          sec.GetDeliveryId(),
+		RepositoryID:        repositoryID,
+		AccessExpiresAtUnix: sec.GetGithubToken().GetAccessExpiresAtUnix(),
 	})
 }
 

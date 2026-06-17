@@ -136,6 +136,87 @@ func TestRefresherRetriesOnMintFailureThenSucceeds(t *testing.T) {
 	}
 }
 
+// TestRefresherNotePreciseExpirySchedulesPrecisely verifies that when AccessExpiresAtUnix is carried
+// in the delivery metadata, Note sets refreshAt precisely relative to the real expiry rather than the
+// receipt-relative default — fixing the resume-near-expiry window (sp-v40s.18).
+func TestRefresherNotePreciseExpirySchedulesPrecisely(t *testing.T) {
+	base := time.Unix(1_900_000_000, 0)
+	// Token expires in 1h from base — far shorter than the 8h default lifetime assumption.
+	tokenExpiry := base.Add(1 * time.Hour)
+	r := newGitHubRefresher(&fakeMintClient{})
+	r.now = func() time.Time { return base }
+
+	r.Note(githubRefreshEntry{
+		SpawnID: "s1", Generation: 1, SecretID: "sec-1", Version: 3,
+		DeliveryID: "d-3", AccessExpiresAtUnix: tokenExpiry.Unix(),
+	})
+	// Refresh should be scheduled at expiry-nodeRefreshLead, NOT at base+defaultRefreshInterval (base+7h52m).
+	wantRefreshAt := tokenExpiry.Add(-nodeRefreshLead)
+	// Not due yet (before wantRefreshAt).
+	if got := r.due(wantRefreshAt.Add(-time.Second)); len(got) != 0 {
+		t.Fatalf("entry must not be due before precise refreshAt, got %+v", got)
+	}
+	// Due at wantRefreshAt.
+	if got := r.due(wantRefreshAt); len(got) != 1 || got[0].SecretID != "sec-1" {
+		t.Fatalf("entry must be due at precise refreshAt, got %+v", got)
+	}
+	// Crucially NOT due after the receipt-relative default interval (which would be ~7h52m from base),
+	// because we scheduled from the real expiry instead.
+	receiptRelative := base.Add(defaultRefreshInterval)
+	if wantRefreshAt.After(receiptRelative) {
+		t.Skipf("test only meaningful when precise expiry < receipt-relative default (have expiry=%v, default=%v)", wantRefreshAt, receiptRelative)
+	}
+}
+
+// TestRefresherNoteZeroExpiryFallsBackToReceiptRelative verifies that Note without a precise expiry
+// (AccessExpiresAtUnix=0) still schedules using the receipt-relative default — backward compat.
+func TestRefresherNoteZeroExpiryFallsBackToReceiptRelative(t *testing.T) {
+	base := time.Unix(1_900_000_000, 0)
+	r := newGitHubRefresher(&fakeMintClient{})
+	r.now = func() time.Time { return base }
+
+	r.Note(githubRefreshEntry{
+		SpawnID: "s1", Generation: 1, SecretID: "sec-1", Version: 1,
+		DeliveryID: "d-1", AccessExpiresAtUnix: 0, // absent
+	})
+	// Not due just before the receipt-relative default window.
+	if got := r.due(base.Add(defaultRefreshInterval - time.Second)); len(got) != 0 {
+		t.Fatalf("entry must not be due before receipt-relative default, got %+v", got)
+	}
+	// Due at the receipt-relative default.
+	if got := r.due(base.Add(defaultRefreshInterval)); len(got) != 1 {
+		t.Fatalf("entry must be due at receipt-relative default, got %+v", got)
+	}
+}
+
+// TestRefresherResumeNearExpiryFiresPromptly simulates a resume where the token is already near
+// expiry (only 5 minutes left). With AccessExpiresAtUnix, the entry is immediately due (or due very
+// soon) rather than waiting the full receipt-relative interval.
+func TestRefresherResumeNearExpiryFiresPromptly(t *testing.T) {
+	base := time.Unix(1_900_000_000, 0)
+	// Token expires in 5 minutes — well within the nodeRefreshLead (8m) → refreshAt is in the past.
+	tokenExpiry := base.Add(5 * time.Minute)
+	fake := &fakeMintClient{resp: &authv1.MintGitHubAccessTokenResponse{
+		Refreshed: true, AccessExpiresAtUnix: base.Add(8 * time.Hour).Unix(),
+	}}
+	r := newGitHubRefresher(fake)
+	r.now = func() time.Time { return base }
+
+	r.Note(githubRefreshEntry{
+		SpawnID: "s1", Generation: 5, SecretID: "sec-1", Version: 7,
+		DeliveryID: "d-7", AccessExpiresAtUnix: tokenExpiry.Unix(),
+	})
+	// refreshAt = tokenExpiry - nodeRefreshLead = base - 3m (already in the past) → immediately due.
+	if got := r.due(base); len(got) != 1 {
+		t.Fatalf("near-expiry entry must be immediately due after Note, got %+v", got)
+	}
+	// Tick fires the refresh.
+	r.Tick(context.Background(), base)
+	if n := len(fake.calls()); n != 1 {
+		t.Fatalf("expected 1 mint call for near-expiry token, got %d", n)
+	}
+}
+
 // Models §16.4 resume-after-expiry: the access token is dead but the node still authorizes its first
 // refresh by node identity (link_ref), never a bearer token. We force the entry due immediately by
 // rewinding refreshAt via a fresh Note at an already-elapsed clock.

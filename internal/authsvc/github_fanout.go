@@ -103,6 +103,11 @@ func (f *cpGitHubAccessTokenFanout) sealForTarget(target *cpv1.GitHubLinkTarget,
 		secret := cloneGitHubFanoutTemplate(tmpl)
 		secret.Version = req.Version
 		secret.DeliveryId = req.DeliveryID
+		// Stamp the precise access-token expiry from the fanout request so the receiving node
+		// can schedule its proactive refresh accurately (especially on resume, §16.4).
+		if req.AccessExpiresAtUnix > 0 && secret.GetGithubToken() != nil {
+			secret.GithubToken.AccessExpiresAtUnix = req.AccessExpiresAtUnix
+		}
 		aad := seal.InFlightAAD{
 			SpawnID:    target.GetSpawnId(),
 			Generation: target.GetGeneration(),
@@ -206,6 +211,7 @@ func cloneGitHubFanoutTemplate(tmpl *cpv1.SealedSecret) *cpv1.SealedSecret {
 			GithubUserId:         tmpl.GetGithubToken().GetGithubUserId(),
 			RefreshExpiresAtUnix: tmpl.GetGithubToken().GetRefreshExpiresAtUnix(),
 			AppClientId:          tmpl.GetGithubToken().GetAppClientId(),
+			AccessExpiresAtUnix:  tmpl.GetGithubToken().GetAccessExpiresAtUnix(),
 		}
 	}
 	return out

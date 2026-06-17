@@ -281,6 +281,7 @@ func nodeGitHubSecretTemplate(sec *nodev1.SealedSecret) *cpv1.SealedSecret {
 			GithubUserId:         sec.GetGithubToken().GetGithubUserId(),
 			RefreshExpiresAtUnix: sec.GetGithubToken().GetRefreshExpiresAtUnix(),
 			AppClientId:          sec.GetGithubToken().GetAppClientId(),
+			AccessExpiresAtUnix:  sec.GetGithubToken().GetAccessExpiresAtUnix(),
 		}
 	}
 	return out
@@ -316,6 +317,7 @@ func cpGitHubSecretTemplate(sec *cpv1.SealedSecret) *cpv1.SealedSecret {
 			GithubUserId:         sec.GetGithubToken().GetGithubUserId(),
 			RefreshExpiresAtUnix: sec.GetGithubToken().GetRefreshExpiresAtUnix(),
 			AppClientId:          sec.GetGithubToken().GetAppClientId(),
+			AccessExpiresAtUnix:  sec.GetGithubToken().GetAccessExpiresAtUnix(),
 		}
 	}
 	return out
