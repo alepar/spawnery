@@ -30,6 +30,10 @@ type GitHubConfig struct {
 	CredentialSecretID string
 	CreateIfMissing    bool
 	RepositoryID       string
+	// AllowInsecureHost bypasses the github.com host restriction and allows HTTP
+	// clone URLs. Set ONLY in tests against a local git server (e.g., gitea).
+	// Production code must never set this field.
+	AllowInsecureHost bool
 }
 
 type GitHubCredential struct {
@@ -137,7 +141,7 @@ func (g *GitHub) Prepare(ctx context.Context, spawnID, mountName, seedDir string
 	if cfg.MountName == "" {
 		cfg.MountName = mountName
 	}
-	if cfg.Host != "github.com" {
+	if cfg.Host != "github.com" && !cfg.AllowInsecureHost {
 		return "", fmt.Errorf("github unsupported host %q", cfg.Host)
 	}
 
@@ -343,7 +347,10 @@ func validateGitHubCloneURL(raw string, cfg GitHubConfig) error {
 	if err != nil {
 		return fmt.Errorf("github clone_url %q: %w", raw, err)
 	}
-	if u.Scheme != "https" || u.Host != cfg.Host || u.User != nil {
+	// For production (github.com), enforce HTTPS to prevent token exposure over the wire.
+	// AllowInsecureHost relaxes this for local test git servers (e.g., gitea over HTTP).
+	schemeOK := u.Scheme == "https" || (cfg.AllowInsecureHost && u.Scheme == "http")
+	if !schemeOK || u.Host != cfg.Host || u.User != nil {
 		return fmt.Errorf("github clone_url %q does not match bound host", raw)
 	}
 	wantPath := "/" + cfg.Owner + "/" + cfg.Repo + ".git"

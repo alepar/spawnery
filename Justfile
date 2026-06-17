@@ -235,6 +235,13 @@ test-garage:
     GARAGE_ADMIN_TOKEN="$(awk -F'\"' '/^admin_token/{print $2}' {{repo}}/deploy/garage/garage.toml)" \
     go test -tags garage_e2e -run TestS3BackendRoundTripGarage -v -count=1 {{repo}}/internal/storage/journal/
 
+# GitHub backend e2e: create->agent commit->suspend->resume against a local Gitea (sp-u53.1.5).
+# Requires a running Gitea: set GITEA_URL, GITEA_TOKEN, GITEA_OWNER before running.
+#   docker run -d -p 3000:3000 gitea/gitea:latest   # start gitea
+#   GITEA_URL=http://localhost:3000 GITEA_TOKEN=<tok> GITEA_OWNER=<user> just test-github
+test-github:
+    go test -tags github_e2e -run TestGitHub -v -count=1 ./internal/storage/
+
 # --- housekeeping --------------------------------------------------------
 
 # install dev tooling not in the repo (mprocs, playwright browser, web deps)
