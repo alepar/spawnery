@@ -808,3 +808,32 @@ the assumptions above -- append a dated note here, whether or not a formal debug
   briefly (sp-v40s.18 adds `access_expires_at_unix`); and the real node-mTLS→AS mint leg is not in the
   hermetic suite, only a fake client (sp-v40s.19 adds `github_e2e`). Still open for full MVP: the
   sp-u53.1 storage-backend wiring, deferred .16/.17, and the backstop epic sp-u53.8.
+- 2026-06-17 (epic sp-dl62 IMPLEMENTED, `feat/sp-dl62-integration`): the end-user `github:owner/repo`
+  mount epic was integrated and the two non-blocking follow-ups from the round-3 run were closed.
+  Gates green on the combined branch (`CGO_ENABLED=1 go test -race ./...`, `make gen` → no `gen/`
+  drift, `golangci-lint` 0 issues); final whole-epic review PASS with all five containment invariants
+  re-confirmed across the combined change. Landed this run:
+  - **sp-v40s.18** — `access_expires_at_unix` added to `GitHubTokenClearMetadata` (proto §16; *clear*
+    metadata, NOT the sealed token). The node's `githubRefresher.Note` now schedules the proactive
+    refresh from the precise access-token expiry when present (falling back to the 8h receipt-relative
+    default when absent), closing the resume-near-expiry 401 window. CP fanout/secret relay copies the
+    new field through the template untouched (invariant c held: the CP reads no token).
+  - **sp-v40s.19** — a `github_e2e`-tagged suite (`internal/node/github_refresh_e2e_test.go` +
+    `just test-github`) now drives the **real** node-mTLS → AS `MintGitHubAccessToken` rotation leg
+    (single-use refresh against a throwaway App / `githubfake`), plus `TestGitHubE2E_RequiresNodeIdentity`
+    pinning invariant (d): a well-formed mint with **no** node client cert is rejected `Unauthenticated`
+    (authZ is node-identity-bound, not access-token-bearer).
+  - **sp-u53.1.1** — acceptance tests locking the per-mount backend dispatch end-to-end
+    (`scratch:`/unset → Scratch; `github:owner/repo` → `NewGitHub`; unbound persistent mount → Scratch;
+    bind-validation rejects a non-journaled `github:` mount). The dispatch + GitHub backend themselves
+    shipped earlier (sp-u53.1.2); this run is the acceptance lock.
+  - **sp-v40s.20.{1–4}** — the owner-facing GitHub-link driver: see the dedicated Post-Implementation
+    Notes in `2026-06-17-owner-github-link-flow-design.md`. Net containment effect here: `redeem`/`List`
+    return **metadata only**, the merged sealed-tuple emission was removed, and the redeem-time
+    cross-account ownership guard is in place (invariant a held end-to-end).
+
+  **Residuals (still open for full MVP):** suspend-backstop push epic `sp-u53.8`; deferred design
+  follow-ups `sp-v40s.16`/`.17`; the storage-backend `Finalize`/conflict tasks under `sp-u53.1`
+  beyond the per-mount dispatch acceptance landed here. The `github_e2e` lane is build-tagged
+  (real-wire mint), so it is not exercised by the default hermetic suite or the standard distrobox
+  gate — run it explicitly via `just test-github` against a live AS + throwaway App.
