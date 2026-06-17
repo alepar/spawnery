@@ -16,21 +16,31 @@ func (testGitHubCreds) TokenForGitHubMount(context.Context, string, string, GitH
 }
 
 type testGitHubRepos struct {
-	getErr  error
-	created bool
-	url     string
+	getErr      error
+	coverageErr error // forces the post-create coverage GET to fail
+	created     bool
+	url         string
+	id          int64
+	getCalls    int
 }
 
 func (r *testGitHubRepos) Get(context.Context, GitHubConfig, string) (GitHubRepoInfo, error) {
+	r.getCalls++
+	if r.created { // post-create coverage GET: the live token now reaches the repo
+		if r.coverageErr != nil {
+			return GitHubRepoInfo{}, r.coverageErr
+		}
+		return GitHubRepoInfo{CloneURL: r.url, Empty: true, ID: r.id}, nil
+	}
 	if r.getErr != nil {
 		return GitHubRepoInfo{}, r.getErr
 	}
-	return GitHubRepoInfo{CloneURL: r.url, Empty: false}, nil
+	return GitHubRepoInfo{CloneURL: r.url, Empty: false, ID: r.id}, nil
 }
 
 func (r *testGitHubRepos) Create(context.Context, GitHubConfig, string) (GitHubRepoInfo, error) {
 	r.created = true
-	return GitHubRepoInfo{CloneURL: r.url, Empty: true}, nil
+	return GitHubRepoInfo{CloneURL: r.url, Empty: true, ID: r.id}, nil
 }
 
 type gitCall struct {
@@ -111,6 +121,11 @@ func TestGitHubPrepareCreatesMissingRepoSeedsAndUsesHardenedGit(t *testing.T) {
 		if !containsArg(call.args, "-c") || !containsArg(call.args, "credential.helper=") || !containsArg(call.args, "credential.helper=/node-only/helper") {
 			t.Fatalf("git args missing credential helper reset/helper: %+v", call.args)
 		}
+		// CVE-2024-53858 / clone2leak hardening (§16.8): all node-side git ops must set
+		// credential.protectProtocol=true to refuse credential delivery on protocol downgrade.
+		if !containsArg(call.args, "credential.protectProtocol=true") {
+			t.Fatalf("git args missing credential.protectProtocol=true (CVE-2024-53858 hardening): %+v", call.args)
+		}
 	}
 	if strings.Contains(joined.String(), "SECRET-GITHUB-TOKEN") {
 		t.Fatalf("git argv/env leaked token: %q", joined.String())
@@ -179,6 +194,141 @@ func TestGitHubPrepareCleansNodeOnlyHomeOnCloneFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "github-home", "sp1", "main")); !os.IsNotExist(err) {
 		t.Fatalf("node-only HOME still exists after failure, stat err=%v", err)
+	}
+}
+
+func TestGitHubPrepareRepositoryIDMismatchFailsBeforeGit(t *testing.T) {
+	runner := &testGitRunner{}
+	backend := &GitHub{
+		Root:        t.TempDir(),
+		Config:      GitHubConfig{Host: "github.com", Owner: "octo", Repo: "demo", RepositoryID: "42"},
+		Credentials: testGitHubCreds{},
+		Repos:       &testGitHubRepos{url: "https://github.com/octo/demo.git", id: 999},
+		Git:         runner,
+	}
+	_, err := backend.Prepare(context.Background(), "sp1", "main", t.TempDir(), -1)
+	if !errors.Is(err, ErrGitHubRepoIDMismatch) {
+		t.Fatalf("Prepare err = %v, want ErrGitHubRepoIDMismatch", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("git calls = %+v, want none (audit fails before clone)", runner.calls)
+	}
+}
+
+func TestGitHubPrepareRepositoryIDMatchClonesExisting(t *testing.T) {
+	runner := &testGitRunner{}
+	backend := &GitHub{
+		Root:        t.TempDir(),
+		Config:      GitHubConfig{Host: "github.com", Owner: "octo", Repo: "demo", RepositoryID: "42"},
+		Credentials: testGitHubCreds{},
+		Repos:       &testGitHubRepos{url: "https://github.com/octo/demo.git", id: 42},
+		Git:         runner,
+	}
+	if _, err := backend.Prepare(context.Background(), "sp1", "main", t.TempDir(), -1); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(runner.calls) != 1 || !containsArg(runner.calls[0].args, "clone") {
+		t.Fatalf("git calls = %+v, want a single clone", runner.calls)
+	}
+}
+
+// TestGitHubPrepareClone2LeakHardening verifies CVE-2024-53858 / clone2leak protections:
+//   - credential.protectProtocol=true is set on the clone command
+//   - credential.helper= (empty reset) appears before the actual helper
+//   - --recurse-submodules is NOT passed (node does not process untrusted .gitmodules)
+func TestGitHubPrepareClone2LeakHardening(t *testing.T) {
+	runner := &testGitRunner{}
+	backend := &GitHub{
+		Root:        t.TempDir(),
+		Config:      GitHubConfig{Host: "github.com", Owner: "octo", Repo: "demo"},
+		Credentials: testGitHubCreds{},
+		Repos:       &testGitHubRepos{url: "https://github.com/octo/demo.git"},
+		Git:         runner,
+	}
+	if _, err := backend.Prepare(context.Background(), "sp1", "main", t.TempDir(), -1); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(runner.calls) == 0 {
+		t.Fatal("no git calls recorded")
+	}
+	cloneCall := runner.calls[0]
+	if !containsArg(cloneCall.args, "clone") {
+		t.Fatalf("first git call is not clone: %+v", cloneCall.args)
+	}
+	// CVE-2024-53858: must refuse credential delivery on protocol downgrade.
+	if !containsArg(cloneCall.args, "credential.protectProtocol=true") {
+		t.Fatalf("clone missing credential.protectProtocol=true (CVE-2024-53858): %+v", cloneCall.args)
+	}
+	// Must reset credential.helper before setting ours, preventing any previously configured helper.
+	if !containsArg(cloneCall.args, "credential.helper=") {
+		t.Fatalf("clone missing credential.helper= (empty reset): %+v", cloneCall.args)
+	}
+	// Node must NOT clone with --recurse-submodules: .gitmodules from untrusted repos must not
+	// be processed by node-side git ops (F22 / §16.8 residual boundary).
+	for _, arg := range cloneCall.args {
+		if arg == "--recurse-submodules" || arg == "--recurse_submodules" {
+			t.Fatalf("clone must not pass --recurse-submodules (processes untrusted .gitmodules): %+v", cloneCall.args)
+		}
+	}
+}
+
+func TestGitHubPrepareCreatedRepoCoverageFailureFailsTyped(t *testing.T) {
+	runner := &testGitRunner{}
+	backend := &GitHub{
+		Root: t.TempDir(),
+		Config: GitHubConfig{
+			Host: "github.com", Owner: "octo", Repo: "demo", CreateIfMissing: true,
+		},
+		Credentials: testGitHubCreds{},
+		Repos: &testGitHubRepos{
+			getErr:      ErrGitHubRepoNotFound,
+			coverageErr: errors.New("403 not covered by installation"),
+			url:         "https://github.com/octo/demo.git",
+		},
+		Git: runner,
+	}
+	_, err := backend.Prepare(context.Background(), "sp1", "main", t.TempDir(), -1)
+	if !errors.Is(err, ErrGitHubRepoNotCovered) {
+		t.Fatalf("Prepare err = %v, want ErrGitHubRepoNotCovered", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("git calls = %+v, want none (coverage fails before clone)", runner.calls)
+	}
+}
+
+func TestGitHubPrepareSkipsCloneWhenRestorePending(t *testing.T) {
+	root := t.TempDir()
+	repos := &testGitHubRepos{getErr: errors.New("repos must not be consulted on restore")}
+	runner := &testGitRunner{}
+	backend := &GitHub{
+		Root:        root,
+		Config:      GitHubConfig{Host: "github.com", Owner: "octo", Repo: "demo", CreateIfMissing: true},
+		Credentials: testGitHubCreds{},
+		Repos:       repos,
+		Git:         runner,
+	}
+	backend.SetRestorePending(true)
+
+	hostDir, err := backend.Prepare(context.Background(), "sp1", "main", t.TempDir(), -1)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if repos.getCalls != 0 {
+		t.Fatalf("repos consulted %d times on restore, want 0", repos.getCalls)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("git calls = %+v, want none on restore", runner.calls)
+	}
+	entries, err := os.ReadDir(hostDir)
+	if err != nil {
+		t.Fatalf("read hostDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("hostDir not empty for journal to restore into: %+v", entries)
+	}
+	// node-only HOME must NOT be created when no git runs
+	if _, serr := os.Stat(filepath.Join(root, "github-home", "sp1", "main")); !os.IsNotExist(serr) {
+		t.Fatalf("github-home should not exist on restore-skip, stat=%v", serr)
 	}
 }
 

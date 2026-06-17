@@ -137,6 +137,21 @@ type GitHubLink struct {
 	RelinkRequired              bool   `bun:"relink_required,notnull"`
 }
 
+// GitHubLinkMeta is a token-free projection of a github_links row. It NEVER decrypts the token
+// columns (containment invariant a). Unlike GitHubLinkRepo.Get it does NOT filter revoked rows.
+type GitHubLinkMeta struct {
+	bun.BaseModel  `bun:"table:github_links,alias:ghl"`
+	SecretID       string `bun:"secret_id"`
+	AccountID      string `bun:"account_id"`
+	Host           string `bun:"host"`
+	Login          string `bun:"login"`
+	GithubUserID   string `bun:"github_user_id"`
+	Version        uint64 `bun:"version"`
+	UpdatedAt      int64  `bun:"updated_at"`
+	Revoked        bool   `bun:"revoked"`
+	RelinkRequired bool   `bun:"relink_required"`
+}
+
 // GitHubStagedRotation is the write-ahead capture of a GitHub rotation result: the new tuple plus
 // the version it will promote to. Staged durably BEFORE the rotation is committed (version bump +
 // delivery id) so a commit failure does not lose the single-use rotation (the predecessor refresh

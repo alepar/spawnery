@@ -288,6 +288,50 @@ func TestRootMaterializeUsesResolvedBackendForMountPrepareAndFinalize(t *testing
 	}
 }
 
+func TestCreateWithSelectionUnboundMountDefaultsToScratch(t *testing.T) {
+	fb := &countingPodBackend{}
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+
+	scratchBackend := &recordingBackend{root: filepath.Join(t.TempDir(), "scratch")}
+	githubBackend := &recordingBackend{root: filepath.Join(t.TempDir(), "github")}
+	m.backendResolver = recordingResolver{
+		backends: map[string]storage.Backend{
+			"":                  scratchBackend,
+			"github:owner/repo": githubBackend,
+		},
+	}
+
+	// Two mounts: "main" bound to github (node-local durability), "cache" intentionally unbound.
+	sp, err := m.CreateWithSelection(context.Background(), "sp-unbound-sibling",
+		writeMountBindingAppWithDurability(t, map[string]string{"main": "node-local"}, "main", "cache"),
+		"model", "", "", 0, AgentSelection{
+			Mounts: []MountBinding{{Name: "main", BackendURI: "github:owner/repo"}},
+		})
+	if err != nil {
+		t.Fatalf("CreateWithSelection: %v", err)
+	}
+
+	if len(githubBackend.prepared) != 1 {
+		t.Fatalf("github backend prepared %v, want exactly one dir (main)", githubBackend.prepared)
+	}
+	if len(scratchBackend.prepared) != 1 {
+		t.Fatalf("scratch backend prepared %v, want exactly one dir (unbound cache)", scratchBackend.prepared)
+	}
+
+	if err := m.Stop(context.Background(), sp.ID); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if len(githubBackend.finalized) != 1 || githubBackend.finalized[0] != githubBackend.prepared[0] {
+		t.Fatalf("github backend finalize = %v, want finalize of %v", githubBackend.finalized, githubBackend.prepared)
+	}
+	if len(scratchBackend.finalized) != 1 || scratchBackend.finalized[0] != scratchBackend.prepared[0] {
+		t.Fatalf("scratch backend finalize = %v, want finalize of %v", scratchBackend.finalized, scratchBackend.prepared)
+	}
+}
+
 func TestSuspendReturnsErrorWhenMountFinalizeFails(t *testing.T) {
 	fb := &countingPodBackend{}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{

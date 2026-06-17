@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -252,5 +254,169 @@ func TestGitHubLinksMarkRelinkRequired(t *testing.T) {
 	}
 	if !got.RelinkRequired {
 		t.Fatalf("relink_required not set: %+v", got)
+	}
+}
+
+// newLinksTestStore opens an isolated in-memory store with cipher for github_link tests.
+func newLinksTestStore(t *testing.T) Store {
+	t.Helper()
+	name := strings.NewReplacer("/", "_", "#", "_").Replace(t.Name())
+	dsn := "file:as_links_" + name + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	cipher, err := NewAESGCMTokenCipher(bytesRepeat32(0x2b))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	st, err := Open(context.Background(), Config{Driver: "sqlite", DSN: dsn, TokenCipher: cipher})
+	if err != nil {
+		t.Fatalf("open links test store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return st
+}
+
+func TestGitHubLinksPeekMetaIgnoresRevoked(t *testing.T) {
+	ctx := context.Background()
+	st := newLinksTestStore(t)
+	if err := st.GitHubLinks().Upsert(ctx, GitHubLink{
+		SecretID: "gh:a", AccountID: "acct-a", Host: "github.com", Login: "alice",
+		GithubUserID: "42", AppClientID: "app", RefreshToken: "ghr_x", AccessToken: "ghu_x",
+		TokenType: "bearer", Version: 1, DeliveryID: "github-access-gh:a-v1", UpdatedAt: 1,
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := st.GitHubLinks().Revoke(ctx, "gh:a", 2); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	// PeekMeta must still return the row even though it's revoked.
+	m, err := st.GitHubLinks().PeekMeta(ctx, "gh:a")
+	if err != nil {
+		t.Fatalf("PeekMeta after revoke: %v", err)
+	}
+	if m.AccountID != "acct-a" || m.GithubUserID != "42" || !m.Revoked {
+		t.Fatalf("PeekMeta unexpected result: %+v", m)
+	}
+}
+
+func TestGitHubLinksListSurfacesStatuses(t *testing.T) {
+	ctx := context.Background()
+	st := newLinksTestStore(t)
+	if err := st.GitHubLinks().Upsert(ctx, GitHubLink{
+		SecretID: "gh:a", AccountID: "acct-a", Host: "github.com", Login: "alice",
+		GithubUserID: "42", AppClientID: "app", RefreshToken: "ghr_x", AccessToken: "ghu_x",
+		TokenType: "bearer", Version: 1, DeliveryID: "github-access-gh:a-v1", UpdatedAt: 1,
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := st.GitHubLinks().MarkRelinkRequired(ctx, "gh:a", 2); err != nil {
+		t.Fatalf("mark relink: %v", err)
+	}
+	rows, err := st.GitHubLinks().List(ctx, "acct-a")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("List returned %d rows, want 1", len(rows))
+	}
+	if !rows[0].RelinkRequired || rows[0].Revoked {
+		t.Fatalf("List row unexpected: %+v", rows[0])
+	}
+	// Account-scoped: another account sees nothing.
+	other, err := st.GitHubLinks().List(ctx, "acct-other")
+	if err != nil {
+		t.Fatalf("List other: %v", err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("List other returned %d rows, want 0", len(other))
+	}
+}
+
+func TestRedeemUpsertGenesisAndRelinkBumpAcrossRevoke(t *testing.T) {
+	ctx := context.Background()
+	st := newLinksTestStore(t)
+
+	base := GitHubLink{
+		SecretID: "gh:a", AccountID: "acct-a", Host: "github.com", Login: "alice",
+		GithubUserID: "42", AppClientID: "app", RefreshToken: "ghr_r1", AccessToken: "ghu_a1",
+		TokenType: "bearer", UpdatedAt: 1,
+	}
+	got, err := st.GitHubLinks().RedeemUpsert(ctx, base)
+	if err != nil {
+		t.Fatalf("RedeemUpsert genesis: %v", err)
+	}
+	if got.Version != 1 {
+		t.Fatalf("genesis version = %d, want 1", got.Version)
+	}
+	wantDelivery := "github-access-gh:a-v1"
+	if got.DeliveryID != wantDelivery {
+		t.Fatalf("genesis deliveryID = %q, want %q", got.DeliveryID, wantDelivery)
+	}
+	if got.RefreshToken != "ghr_r1" || got.AccessToken != "ghu_a1" {
+		t.Fatalf("genesis tokens not plaintext: %+v", got)
+	}
+
+	if err := st.GitHubLinks().Revoke(ctx, "gh:a", 2); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	base.RefreshToken, base.AccessToken = "ghr_r2", "ghu_a2"
+	got2, err := st.GitHubLinks().RedeemUpsert(ctx, base)
+	if err != nil {
+		t.Fatalf("RedeemUpsert after revoke: %v", err)
+	}
+	if got2.Version != 2 {
+		t.Fatalf("relink version = %d, want 2", got2.Version)
+	}
+	if got2.DeliveryID == wantDelivery {
+		t.Fatalf("relink deliveryID must differ from v1: %q", got2.DeliveryID)
+	}
+
+	// Get filters revoked=0, so it should find the relinked row.
+	live, err := st.GitHubLinks().Get(ctx, "gh:a")
+	if err != nil {
+		t.Fatalf("Get after relink: %v", err)
+	}
+	if live.Version != 2 || live.RefreshToken != "ghr_r2" {
+		t.Fatalf("Get after relink: %+v", live)
+	}
+}
+
+func TestRedeemUpsertConcurrentDistinctVersions(t *testing.T) {
+	ctx := context.Background()
+	st := newLinksTestStore(t)
+
+	base := GitHubLink{
+		SecretID: "gh:c", AccountID: "acct-c", Host: "github.com", Login: "carol",
+		GithubUserID: "99", AppClientID: "app", RefreshToken: "ghr_c", AccessToken: "ghu_c",
+		TokenType: "bearer", UpdatedAt: 1,
+	}
+
+	type result struct {
+		version uint64
+		err     error
+	}
+	const n = 8
+	results := make(chan result, n)
+	for i := range n {
+		go func(i int) {
+			link := base
+			link.RefreshToken = "ghr_c" + strconv.Itoa(i)
+			link.AccessToken = "ghu_c" + strconv.Itoa(i)
+			res, err := st.GitHubLinks().RedeemUpsert(ctx, link)
+			results <- result{version: res.Version, err: err}
+		}(i)
+	}
+	seen := map[uint64]bool{}
+	for range n {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("concurrent RedeemUpsert: %v", r.err)
+		}
+		if seen[r.version] {
+			t.Fatalf("duplicate version %d (versions not DB-serialized)", r.version)
+		}
+		seen[r.version] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("expected %d distinct versions, got %d", n, len(seen))
 	}
 }

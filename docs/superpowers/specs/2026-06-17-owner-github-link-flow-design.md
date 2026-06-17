@@ -408,3 +408,40 @@ is **not** answered here — needs an owner under `sp-dl62`.
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the
 assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+- 2026-06-17 (IMPLEMENTED, `feat/sp-dl62-integration`): the owner-facing link flow (r2 spine) was
+  implemented and integrated as part of epic `sp-dl62`. Gates green on the combined branch
+  (`go test -race ./...`, no `gen/` drift, `golangci-lint` 0); final whole-epic review PASS,
+  containment invariant (a) (refresh token AS-only) re-confirmed across the combined change. Landed:
+  - **sp-v40s.20.1 (AS surface)** — `start` (302→authenticated JSON `{authorize_url, flow_id}`,
+    account-derived `secret_id = gh:<account>`), the two-structure lifecycle (single-use OAuth `state`
+    correlator + `flow_id`-keyed flow record `ISSUED/READY/ERROR`) with a background reaper that
+    `DELETE /token`s exchanged-but-abandoned access tokens, per-`client_kind` completer-bound delivery
+    (web HttpOnly/Secure/SameSite=Strict cookie · loopback `rc` · device none), `redeem` with the
+    channel rule + peek-before-pop `confirm_switch` identity continuity (409 leaves flow READY) +
+    DB-side atomic version/`deliveryID` via `RETURNING` (survives revoke→relink), account-bound
+    `GET /github/links`, and per-route CORS (`corsCredentialed` for the cookie-bearing redeem,
+    `corsBearerSimple` for start/list). **The merged sealed-tuple emission was removed — `redeem`/`List`
+    return metadata only** (`{secret_id, host, login, github_user_id, version, updated_at, status}`);
+    the token columns are never decrypted on these paths (invariant a).
+  - **sp-v40s.20.2 (web driver)** — Settings → GitHub panel: reads `GET /github/links`, drives
+    start → top-level OAuth navigate → redeem gated on `bootstrap()`/silent-refresh (so the in-memory
+    Bearer is restored), cookie via `credentials:'include'`, 409 `identity_change` confirm modal,
+    `?error=` surfacing, and a bootstrap-failure stranded-marker reaper. The only client-held secrets
+    are the non-secret `flow_id` marker and the browser-auto-attached HttpOnly completer cookie (never
+    read by JS). S1 (cross-origin CORS + cookie round-trip) is exercised here.
+  - **sp-v40s.20.3 (spawnctl driver)** — `gh link` (loopback default: binds `127.0.0.1:0`, serves a
+    self-contained `/done` page, reads `?rc`, redeems with `Bearer + flow_id + rc`, strips `rc` via
+    `history.replaceState`; device/`--device` polls `redeem` with `Bearer + flow_id`), `gh status`,
+    `gh revoke`. Client-only — holds no token; the loopback `rc` is never logged/reflected. S3
+    (shared-host loopback) is a documented single-user-host precondition; prefer device on shared hosts.
+  - **sp-v40s.20.4 (ownership guard)** — strengthened `TestRedeemOwnershipGuard` into a table-driven
+    test proving redeem rejects a cross-account `secret_id` with 403 **and** does not overwrite the
+    pre-seeded row (the load-bearing proof against the `account_id = EXCLUDED` overwrite). The
+    production guard was already folded in by .20.1; account-derived `secret_id` makes it normally
+    unreachable, so it stands as defense-in-depth.
+
+  **Residuals:** S1/S2/S3 spikes are resolved (S1 web round-trip wired as the .20.1/.20.2 test; S2
+  resolved via sp-v40s.3; S3 by local demonstration → single-user-host precondition). The link flow
+  ships single-default-link for MVP; multi-link selection and the per-user loopback isolation
+  (network namespaces) remain out of scope. E1 (mount→link resolution) tracks under sp-dl62.

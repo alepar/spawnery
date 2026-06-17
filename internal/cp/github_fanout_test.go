@@ -73,9 +73,10 @@ func TestGitHubLinkTargetsReturnPublishedNodeKeys(t *testing.T) {
 			Profile: "gh-and-git-helper-v1",
 		},
 		GithubToken: &cpv1.GitHubTokenClearMetadata{
-			Host:        "github.com",
-			Login:       "alice",
-			AppClientId: "Iv1.app",
+			Host:                "github.com",
+			Login:               "alice",
+			AppClientId:         "Iv1.app",
+			AccessExpiresAtUnix: 1893420000,
 		},
 	}})
 	s.nodeKeys.put("node-1", []byte("signed-subkey"), []byte("cert-chain"))
@@ -100,7 +101,8 @@ func TestGitHubLinkTargetsReturnPublishedNodeKeys(t *testing.T) {
 	}
 	if tmpl.GetSecretId() != "gh-main" || tmpl.GetVersion() != 11 || tmpl.GetDeliveryId() != "delivery-old" ||
 		len(tmpl.GetUsages()) != 2 || tmpl.GetMountNames()[0] != "main" ||
-		tmpl.GetGithubToken().GetHost() != "github.com" {
+		tmpl.GetGithubToken().GetHost() != "github.com" ||
+		tmpl.GetGithubToken().GetAccessExpiresAtUnix() != 1893420000 {
 		t.Fatalf("secret template lost routing metadata: %+v", tmpl)
 	}
 }

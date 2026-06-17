@@ -114,7 +114,9 @@ func Render(root string, req RenderRequest) (Rendered, error) {
 	if err := writeFileAtomic(rendered.HostsPath, []byte(hosts), 0o600); err != nil {
 		return Rendered{}, err
 	}
-	cfg := fmt.Sprintf("[credential]\n\thelper = %s\n\tuseHttpPath = true\n", rendered.ContainerCredentialHelperPath)
+	// credential.protectProtocol=true refuses credentials when the protocol is downgraded from
+	// https to http — clone2leak / CVE-2024-53858 hardening (§16.8).
+	cfg := fmt.Sprintf("[credential]\n\thelper = %s\n\tuseHttpPath = true\n\tprotectProtocol = true\n", rendered.ContainerCredentialHelperPath)
 	if err := writeFileAtomic(rendered.GitConfigPath, []byte(cfg), 0o600); err != nil {
 		return Rendered{}, err
 	}

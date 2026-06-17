@@ -17,6 +17,7 @@ import { refreshAccessToken, computeRefreshDelay } from "./refresh";
 import { parseAccessToken } from "./token";
 import { IDBKeyStore, type KeyStore } from "./keystore";
 import { mapAsError, type AsErrorCode } from "./errors";
+import { getFlowMarker } from "@/github/flow";
 
 // Access the dev token through the env var (same source as connect.ts).
 export const DEV_TOKEN: string = import.meta.env.VITE_AUTH_TOKEN ?? "";
@@ -186,18 +187,27 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const store = overrideKeyStore ?? get().keyStore;
     if (overrideKeyStore) set({ keyStore: store });
 
-    // Check if we are on the callback URL.
-    const cb = parseCallback(sessionStateStorage, browserHistory);
-    if (cb.kind === "ok") {
-      // Persist the new token and restore the original pre-login route.
-      get().setToken(cb.accessToken, cb.refreshTokenHash);
-      if (cb.route) browserHistory.replaceState(cb.route);
-      return;
-    }
-    if (cb.kind === "error") {
-      // Carry the AS error code into the store so App/LoginView can display it.
-      set({ status: "login-required", callbackErrorCode: mapAsError(cb.code) });
-      return;
+    // A GitHub-link callback return carries the flow marker and lands on the SPA with the same
+    // ?error= param name the login callback uses. Its ?error= (and clean returns) are owned by the
+    // Settings GitHub panel — NOT the login parser, which would strip ?error= and force the login
+    // wall. A login callback always carries access_token (success) or a login ?error= with no flow
+    // marker. When we detect a GitHub return, skip parseCallback and fall through to silent-refresh
+    // to restore the Bearer the top-level OAuth navigation wiped.
+    const hasAccessToken = new URLSearchParams(browserHistory.locationSearch()).has("access_token");
+    const githubReturn = getFlowMarker() !== null && !hasAccessToken;
+    if (!githubReturn) {
+      const cb = parseCallback(sessionStateStorage, browserHistory);
+      if (cb.kind === "ok") {
+        // Persist the new token and restore the original pre-login route.
+        get().setToken(cb.accessToken, cb.refreshTokenHash);
+        if (cb.route) browserHistory.replaceState(cb.route);
+        return;
+      }
+      if (cb.kind === "error") {
+        // Carry the AS error code into the store so App/LoginView can display it.
+        set({ status: "login-required", callbackErrorCode: mapAsError(cb.code) });
+        return;
+      }
     }
 
     // No callback — try silent refresh.

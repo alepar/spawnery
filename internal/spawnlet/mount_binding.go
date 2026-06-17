@@ -28,6 +28,14 @@ func resolveMountBackend(resolver storage.BackendResolver, binding MountBinding)
 	return resolver.Resolve(binding.BackendURI)
 }
 
+// applyRestoreHint tells a restore-aware backend (github) whether a journal restore will repopulate
+// this mount on resume, so it can skip a fresh network clone (spec §16.7). No-op for plain backends.
+func applyRestoreHint(backend storage.Backend, restorePending bool) {
+	if ra, ok := backend.(storage.RestoreAware); ok {
+		ra.SetRestorePending(restorePending)
+	}
+}
+
 func mountBindingsByName(manifestMounts []manifest.Mount, bindings []MountBinding) (map[string]MountBinding, error) {
 	manifestNames := make(map[string]struct{}, len(manifestMounts))
 	for _, mount := range manifestMounts {

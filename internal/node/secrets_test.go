@@ -403,6 +403,54 @@ func TestSecretDeliveryReplayPruneReleasesSameSecretWaiters(t *testing.T) {
 	}
 }
 
+// TestGitHubDeliveryPassesPreciseExpiryToRefresher verifies that a GitHub secret delivery carrying
+// access_expires_at_unix in clear metadata propagates that value into the githubRefresher (sp-v40s.18).
+// Without this, a resumed spawn near token expiry would wait the full receipt-relative interval.
+func TestGitHubDeliveryPassesPreciseExpiryToRefresher(t *testing.T) {
+	const nodeID, spawnID, gen = "node-1", "sp-expiry", uint64(5)
+	a, holder, _ := secretTestRig(t, nodeID, spawnID, gen)
+	sp, ok := a.mgr.Store().Get(spawnID)
+	if !ok {
+		t.Fatal("spawn not live")
+	}
+	sp.MountBindings = []spawnlet.MountBinding{{Name: "main", BackendURI: "github:octo/demo"}}
+
+	// Inject a githubRefresher so we can inspect what was Note-d.
+	refresher := newGitHubRefresher(&fakeMintClient{})
+	base := time.Unix(1_900_000_000, 0)
+	refresher.now = func() time.Time { return base }
+	a.githubRefresh = refresher
+
+	tokenExpiry := base.Add(30 * time.Minute) // near-expiry simulation
+	sec := sealSecret(t, holder, spawnID, gen, "", "gh-main", 3, "delivery-gh-expiry", []byte("ghu_tok"))
+	sec.Type = nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN
+	sec.Usages = []nodev1.SecretUsage{nodev1.SecretUsage_SECRET_USAGE_NODE_STORAGE}
+	sec.MountNames = []string{"main"}
+	sec.GithubToken = &nodev1.GitHubTokenClearMetadata{
+		Host:                "github.com",
+		Login:               "alice",
+		AccessExpiresAtUnix: tokenExpiry.Unix(),
+	}
+
+	a.handleSecretDelivery(&nodev1.SecretDelivery{SpawnId: spawnID, Generation: gen, Secrets: []*nodev1.SealedSecret{sec}})
+
+	// The entry must be due before the receipt-relative default (base + 7h52m), because precise expiry
+	// places refreshAt at tokenExpiry-nodeRefreshLead = base+22m.
+	wantRefreshAt := tokenExpiry.Add(-nodeRefreshLead) // base + 22m
+	if got := refresher.due(wantRefreshAt); len(got) != 1 {
+		t.Fatalf("entry must be due at precise expiry-lead time, got %+v", got)
+	}
+	receiptRelative := base.Add(defaultRefreshInterval) // base + 7h52m
+	if got := refresher.due(wantRefreshAt.Add(-time.Second)); len(got) != 0 {
+		t.Fatalf("entry must not be due before precise refreshAt, got %+v", got)
+	}
+	// Invariant: with tokenExpiry=base+30m the precise lead (base+22m) is well before the receipt-relative
+	// default (base+7h52m). Assert rather than skip so a constant change is a loud failure.
+	if wantRefreshAt.Equal(receiptRelative) || wantRefreshAt.After(receiptRelative) {
+		t.Fatalf("test invariant broken: precise expiry-lead %v must be before receipt-relative default %v — update test constants", wantRefreshAt, receiptRelative)
+	}
+}
+
 // publishSubKey returns the current SignedSubKey JSON (rotating if needed); rotatedSubKey returns bytes
 // only when the published key changes, so steady-state heartbeats carry none.
 func TestPublishSubKey(t *testing.T) {

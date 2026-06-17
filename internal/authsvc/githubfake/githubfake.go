@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -70,6 +71,7 @@ func New() *Fake {
 	mux.HandleFunc("POST /login/oauth/access_token", f.exchange)
 	mux.HandleFunc("GET /user", f.userEndpoint)
 	mux.HandleFunc("DELETE /applications/{client_id}/grant", f.deleteGrant)
+	mux.HandleFunc("DELETE /applications/{client_id}/token", f.deleteToken)
 	f.Srv = httptest.NewServer(mux)
 	return f
 }
@@ -254,6 +256,33 @@ func (f *Fake) deleteGrant(w http.ResponseWriter, r *http.Request) {
 		if g.user.ID == user.ID {
 			delete(f.refresh, rt)
 		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteToken models DELETE /applications/{client_id}/token: Basic-auth confidential client,
+// {"access_token": ...} body, targeted single-token teardown (grant/refresh chain untouched).
+// 204 on success, 404 when the access token is not live.
+func (f *Fake) deleteToken(w http.ResponseWriter, r *http.Request) {
+	id, secret, ok := r.BasicAuth()
+	if !ok || id != f.ClientID || secret != f.ClientSecret {
+		http.Error(w, "bad client auth", http.StatusUnauthorized)
+		return
+	}
+	var body struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil || body.AccessToken == "" {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	f.mu.Lock()
+	_, present := f.tokens[body.AccessToken]
+	delete(f.tokens, body.AccessToken)
+	f.mu.Unlock()
+	if !present {
+		w.WriteHeader(http.StatusNotFound)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

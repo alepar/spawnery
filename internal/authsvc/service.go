@@ -55,9 +55,10 @@ type Service struct {
 	githubLinkPostRedeem     string // SPA page to land on after callback (no nonce in URL)
 	githubLinkDefaultHost    string // e.g. "github.com"
 	githubLinkAccountFromReq AccountFromRequest
+	githubLinkSPAOrigin      string // exact Origin the SPA is served from; "" disables enforcement
 	githubLinkMu             sync.Mutex
-	githubLinkStates         map[string]githubLinkState
-	githubLinkPending        map[string]githubLinkPending
+	githubLinkStates         map[string]githubLinkState  // keyed by OAuth state param
+	githubLinkFlows          map[string]*githubLinkFlow  // keyed by flow_id
 
 	mu     sync.Mutex
 	tokens map[string]enrollToken // pending one-time enrollment tokens
@@ -170,8 +171,8 @@ func WithGitHubAccessTokenFanout(fanout GitHubAccessTokenFanoutNotifier) Option 
 	return func(s *Service) { s.githubTokenFanout = fanout }
 }
 
-// GitHubLinkConfig configures the owner-driven GitHub App link-bootstrap flow (response-wrap
-// handoff, §3 / §16.2). Store is where the durable AS-custodial refresh chain is Upserted.
+// GitHubLinkConfig configures the owner-driven GitHub App link-bootstrap flow (spec r2 §5-§6).
+// Store is where the durable AS-custodial refresh chain is persisted via RedeemUpsert.
 type GitHubLinkConfig struct {
 	Exchanger          GitHubLinkExchanger
 	Store              store.Store
@@ -180,6 +181,10 @@ type GitHubLinkConfig struct {
 	PostRedeemRedirect string
 	DefaultHost        string
 	AccountFromReq     AccountFromRequest
+	// SPAOrigin is the exact Origin the browser SPA is served from (e.g. "https://app.example.com").
+	// Required for credentialed CORS on /github/link/redeem (spike S1). Pass "" in tests that
+	// don't test CORS (all link endpoints will accept any Origin).
+	SPAOrigin string
 }
 
 func WithGitHubLink(cfg GitHubLinkConfig) Option {
@@ -191,8 +196,9 @@ func WithGitHubLink(cfg GitHubLinkConfig) Option {
 		s.githubLinkPostRedeem = cfg.PostRedeemRedirect
 		s.githubLinkDefaultHost = cfg.DefaultHost
 		s.githubLinkAccountFromReq = cfg.AccountFromReq
+		s.githubLinkSPAOrigin = cfg.SPAOrigin
 		s.githubLinkStates = map[string]githubLinkState{}
-		s.githubLinkPending = map[string]githubLinkPending{}
+		s.githubLinkFlows = map[string]*githubLinkFlow{}
 	}
 }
 

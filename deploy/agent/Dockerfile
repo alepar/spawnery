@@ -89,6 +89,15 @@ RUN set -eux; \
     install -m 0755 /tmp/nori/nori /usr/local/bin/nori; \
     rm -rf /tmp/nori.tar.gz /tmp/nori; \
     nori --version
+# gh CLI (GitHub) — PINNED >= 2.63.0 for CVE-2024-53858 / clone2leak fix (§16.8).
+# gh < 2.63.0 can be exploited via repo-injected credential.helper in .gitmodules/.git/config.
+ARG GH_VERSION=2.63.0
+RUN set -eux; \
+    curl -fsSL -o /tmp/gh.deb \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.deb"; \
+    dpkg -i /tmp/gh.deb; \
+    rm /tmp/gh.deb; \
+    gh --version
 # hermes (Nous Research hermes-agent) — Python ACP agent (hermes-acp launcher case).
 # Pinned; the [acp] extra pulls agent-client-protocol. Isolated venv (PEP-668).
 ARG HERMES_VERSION=0.15.2

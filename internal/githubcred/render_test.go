@@ -75,6 +75,11 @@ func TestRenderWritesJournalExcludedMaterialUnderRoot(t *testing.T) {
 	if !bytes.Contains(cfg, []byte("[credential]\n")) || !bytes.Contains(cfg, []byte("\tuseHttpPath = true\n")) {
 		t.Fatalf("git config missing useHttpPath: %q", cfg)
 	}
+	// CVE-2024-53858 / clone2leak: protectProtocol must be rendered so agent git ops refuse
+	// credential delivery on protocol downgrade.
+	if !bytes.Contains(cfg, []byte("\tprotectProtocol = true\n")) {
+		t.Fatalf("git config missing protectProtocol = true (CVE-2024-53858 hardening): %q", cfg)
+	}
 	if !bytes.Contains(cfg, []byte(rendered.CredentialHelperPath)) {
 		t.Fatalf("git config missing helper path %q: %q", rendered.CredentialHelperPath, cfg)
 	}

@@ -796,6 +796,10 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 			s.failResume(ctx, id, gen, revertOnFail, "validate startup secret catalog")
 			return "", err
 		}
+		if err := s.validateGitHubMountCredentialType(ctx, owner, mounts); err != nil {
+			s.failResume(ctx, id, gen, revertOnFail, "validate github mount credential type")
+			return "", err
+		}
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
 			s.failResume(ctx, id, gen, revertOnFail, "PickNodeID")
@@ -1193,6 +1197,12 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
 			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after startup secret catalog validation failure also failed: %v", req.Msg.SpawnId, serr)
+			}
+			return nil, err
+		}
+		if err := s.validateGitHubMountCredentialType(ctx, owner, mounts); err != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+				log.Printf("RecreateSpawn %s: SetError after github mount credential type validation failure also failed: %v", req.Msg.SpawnId, serr)
 			}
 			return nil, err
 		}
