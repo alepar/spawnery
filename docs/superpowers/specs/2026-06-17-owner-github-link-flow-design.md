@@ -25,7 +25,9 @@
 > gate; the prefetch-DoS/ERROR interaction is resolved (only user-denial is terminal); `secret_id` is
 > committed to account-derived; and the A1 device residual is re-characterized honestly (`client_kind`
 > is attacker-chosen, so A1 = App phishing, not "closed for web/loopback"). This was the roast cap
-> (iteration 2); remaining empirical items are spikes S1/S2/S3.
+> (iteration 2). The re-roast's "S2 (relink token invalidation)" escalation was **already answered by
+> spike `sp-v40s.3`** (relink does not invalidate predecessors) and is folded into §6.5; the only
+> genuinely open empirical items are spikes **S1** (web CORS/cookie) and **S3** (shared-host loopback).
 
 ---
 
@@ -258,14 +260,20 @@ differs and `confirm_switch` is not set → return `409 {identity_change, old:@a
 `confirm_switch=true`, which then atomically pops + Upserts. A concurrent redeem during the confirm window
 is handled by the single-use pop (loser → `404`, restart). First link (no existing row) needs no confirm.
 
-**Running-spawn behavior on relink — spike S2 (load-bearing).** Whether a fresh OAuth re-authorization of
-the same user+App immediately invalidates the prior access **and** refresh tokens is **unverified** (spike
-3 covered only refresh-token *rotation*, not a fresh code re-auth). This is load-bearing twice: (a) the
-"graceful until ~8h" running-spawn framing; (b) if re-auth does **not** invalidate predecessors, every
-relink — and every A1-captured callback whose flow merely expires — **orphans a live refresh chain** for
-up to 6 months, killable only by the grant-wide kill switch, widening the §16.2/F5 AS-compromise blast
-radius. Resolve S2 before relying on either; if predecessors survive, consider an explicit revoke on
-relink (accepting the make-before-break gap) and prompt eviction of A1-orphaned chains.
+**Running-spawn behavior on relink — RESOLVED by spike `sp-v40s.3`.** That spike empirically established:
+a fresh re-link (new device/web authorization) **does NOT invalidate predecessor tokens** — only
+refresh-token *rotation* (kills the immediate predecessor access token) and the grant-wide `DELETE /grant`
+do; a targeted `DELETE /applications/{client_id}/token` kills one access token. Consequences for this
+design, both now **confirmed** rather than assumed:
+- (a) "Graceful until ~8h" holds: a running spawn's already-minted access token survives a relink until
+  its own ~8h expiry, then fails-closed on refresh (superseded version) and surfaces relink-required.
+- (b) **Orphaned-chain residual (confirmed).** A relink leaves the prior refresh chain **alive at GitHub
+  for up to ~6 months**; there is no targeted refresh-token revoke (only grant-wide `/grant`, which would
+  also kill the new link). This widens the §16.2/F5 AS-compromise window. MVP mitigations: the **reaper**
+  (§5.1) calls targeted `DELETE /token` on any exchanged-but-abandoned flow's access token so it does not
+  linger 8h (the orphaned refresh token it discards is unreferenced — re-usable only via a new OAuth);
+  the relink-orphaned prior refresh chain is **documented as grant-wide-revoke-only** and accepted for
+  MVP. Make-before-break relink and per-chain revocation remain out of scope.
 
 ### 6.6 Atomic version + `deliveryID`, and revoke→relink
 
@@ -330,7 +338,9 @@ is **not** answered here — needs an owner under `sp-dl62`.
   (reads version across revoked rows). No app-level `Get→+1`.
 - **L8** — Pinned TTLs: flow ≈15m, callback cookie ≈5m (spike S1).
 - **L9** — Relink identity-continuity via **peek-before-pop `confirm_switch`** (`409` then confirm); first
-  link needs none. Running-spawn invalidation is **spike S2**.
+  link needs none. Running-spawn invalidation **confirmed by `sp-v40s.3`** (relink does not invalidate
+  predecessors → graceful-until-8h; orphaned prior refresh chain is grant-wide-revoke-only; reaper does
+  targeted `DELETE /token` on abandoned flows).
 - **L10** — Device flow kept; **A1 is an honest phishing residual** (not "closed for web/loopback" —
   `client_kind` is attacker-chosen), bounded by consent UX + installation-selection scope + kill switch;
   `@login` confirmation + consent warning protect the victim==operator case.
@@ -363,7 +373,7 @@ is **not** answered here — needs an owner under `sp-dl62`.
 | composite-key ≠ additive; commit to account-derived (major) | Fixed — §4, L6 |
 | loopback `rc`-in-URL / Referer / self-contained `/done` / port bound / shared-host (minors) | Fixed — §6.3, L15, S3 |
 | OPTIONS registration; device callback redirect target; status codes device-only (minors) | Folded — §6.1/§5.2 |
-| Escalation S2 — relink/fresh-auth token invalidation | §6.5 spike (load-bearing) |
+| Escalation S2 — relink/fresh-auth token invalidation | **Already resolved by `sp-v40s.3`** — folded into §6.5 (graceful-until-8h confirmed; orphaned-chain residual documented + reaper `DELETE /token`) |
 | Escalation E1 — mount→link resolution | §7 (separate `sp-dl62` bead) |
 
 ## 10. Spikes
@@ -372,10 +382,11 @@ is **not** answered here — needs an owner under `sp-dl62`.
   from `app.X` after a SameSite=Strict callback cookie: confirm it fails under `corsBearerSimple` and
   succeeds under `corsCredentialed`; measure cold `bootstrap()` latency vs the ≈5m cookie TTL. *Kill:* if
   bootstrap routinely exceeds the cookie TTL, raise it or re-architect the return.
-- **S2 — Relink / fresh-auth token invalidation.** Against the throwaway App: link → mint an access token
-  → run a fresh OAuth re-authorization; check whether the prior access **and** refresh tokens are
-  immediately invalidated. *Kill:* if predecessors survive, relink leaves orphaned live chains → adopt
-  explicit revoke-on-relink + adjust the running-spawn + blast-radius story.
+- ~~**S2 — Relink / fresh-auth token invalidation.**~~ **Already resolved by `sp-v40s.3`** (verdict
+  2026-06-16): a fresh re-link does NOT invalidate predecessor tokens; only rotation (predecessor access
+  token) and grant-wide `/grant` do. Folded into §6.5 as a confirmed design consequence (running-spawn
+  graceful-until-8h holds; relink-orphaned refresh chain is grant-wide-revoke-only; reaper does targeted
+  `DELETE /token` on abandoned flows). No new spike needed.
 - **S3 — Shared-host loopback isolation.** On a multi-user host, user A binds `127.0.0.1:<port>` for
   `gh link`; user B attempts to bind/probe the same port. *Kill:* if not OS-isolated per-user, document
   loopback A1 as host-trust-bounded (not closed) and/or fall back to device on shared hosts.
