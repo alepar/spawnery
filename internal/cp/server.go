@@ -861,6 +861,40 @@ func (s *Server) ensureStartupSecretsExist(ctx context.Context, owner string, re
 	return nil
 }
 
+// validateGitHubMountCredentialType verifies that every github: mount's credential secret resolves
+// to a github-token catalog entry. It reads only the non-secret Type routing field (the CP never
+// touches sealed bytes — invariant c), and fail-closes with a typed error on a wrong-typed or
+// missing credential. Mounts without the github: scheme, and github mounts with an empty
+// credential id (already rejected at bind time), are skipped.
+// Note: secret type IS mutable via PutSecret (which sets type= in the CAS update), so this check
+// is not race-free across an await window. No post-await type recheck is needed because the catalog
+// Type is a pre-flight UX/wiring gate only — not a delivery-security guarantee. The node receives
+// client-sealed bytes regardless (invariant c); validateSubmittedStartupSecrets and
+// ensureStartupSecretsExist verify ID-existence post-await, which is the actual dispatch
+// prerequisite. A type flip inside the await window is a same-owner operation and does not breach
+// containment invariants a–e.
+func (s *Server) validateGitHubMountCredentialType(ctx context.Context, owner string, mounts []store.Mount) error {
+	for _, m := range mounts {
+		if !strings.HasPrefix(m.BackendURI, "github:") {
+			continue
+		}
+		id := strings.TrimSpace(m.CredentialSecretID)
+		if id == "" {
+			continue
+		}
+		sec, err := s.st.Secrets().Get(ctx, owner, id)
+		if err != nil {
+			return mapSecretStoreErr(err)
+		}
+		if sec.Type != store.SecretTypeGitHubToken {
+			return connect.NewError(connect.CodeFailedPrecondition,
+				fmt.Errorf("github mount %q credential secret %q must be type %q, got %q",
+					m.Name, id, store.SecretTypeGitHubToken, sec.Type))
+		}
+	}
+	return nil
+}
+
 func validateSubmittedStartupSecrets(required []string, got []*nodev1.SealedSecret) error {
 	requiredSet := map[string]struct{}{}
 	for _, id := range required {
@@ -1089,6 +1123,13 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 			log.Printf("provisionSpawn %s: validate startup secret catalog: %v", spawnID, err)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
 				log.Printf("provisionSpawn %s: SetError after startup secret catalog validation failure also failed: %v", spawnID, serr)
+			}
+			return
+		}
+		if err := s.validateGitHubMountCredentialType(ctx, ownerID, mounts); err != nil {
+			log.Printf("provisionSpawn %s: validate github mount credential type: %v", spawnID, err)
+			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+				log.Printf("provisionSpawn %s: SetError after github mount credential type validation failure also failed: %v", spawnID, serr)
 			}
 			return
 		}
