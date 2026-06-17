@@ -861,6 +861,35 @@ func (s *Server) ensureStartupSecretsExist(ctx context.Context, owner string, re
 	return nil
 }
 
+// validateGitHubMountCredentialType verifies that every github: mount's credential secret resolves
+// to a github-token catalog entry. It reads only the non-secret Type routing field (the CP never
+// touches sealed bytes — invariant c), and fail-closes with a typed error on a wrong-typed or
+// missing credential. Mounts without the github: scheme, and github mounts with an empty
+// credential id (already rejected at bind time), are skipped.
+// Secret type is immutable for a given secret_id (set at CreateSecret; PutSecret only CASes the
+// envelope/version), so a single pre-/at-flow check is sufficient — no post-await recheck needed.
+func (s *Server) validateGitHubMountCredentialType(ctx context.Context, owner string, mounts []store.Mount) error {
+	for _, m := range mounts {
+		if !strings.HasPrefix(m.BackendURI, "github:") {
+			continue
+		}
+		id := strings.TrimSpace(m.CredentialSecretID)
+		if id == "" {
+			continue
+		}
+		sec, err := s.st.Secrets().Get(ctx, owner, id)
+		if err != nil {
+			return mapSecretStoreErr(err)
+		}
+		if sec.Type != store.SecretTypeGitHubToken {
+			return connect.NewError(connect.CodeFailedPrecondition,
+				fmt.Errorf("github mount %q credential secret %q must be type %q, got %q",
+					m.Name, id, store.SecretTypeGitHubToken, sec.Type))
+		}
+	}
+	return nil
+}
+
 func validateSubmittedStartupSecrets(required []string, got []*nodev1.SealedSecret) error {
 	requiredSet := map[string]struct{}{}
 	for _, id := range required {
@@ -1089,6 +1118,13 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 			log.Printf("provisionSpawn %s: validate startup secret catalog: %v", spawnID, err)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
 				log.Printf("provisionSpawn %s: SetError after startup secret catalog validation failure also failed: %v", spawnID, serr)
+			}
+			return
+		}
+		if err := s.validateGitHubMountCredentialType(ctx, ownerID, mounts); err != nil {
+			log.Printf("provisionSpawn %s: validate github mount credential type: %v", spawnID, err)
+			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+				log.Printf("provisionSpawn %s: SetError after github mount credential type validation failure also failed: %v", spawnID, serr)
 			}
 			return
 		}

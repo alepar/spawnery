@@ -258,6 +258,11 @@ func (s *Server) startFork(ctx context.Context, owner, sourceID string, fork sto
 		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
 			return "", err
 		}
+		// Secret type is immutable (set at CreateSecret; PutSecret only CASes the envelope/version),
+		// so a single at-flow type check is sufficient — no separate pre-await check is needed for fork.
+		if err := s.validateGitHubMountCredentialType(ctx, owner, mounts); err != nil {
+			return "", err
+		}
 		env = submission.Env
 		secrets = submission.Secrets
 	}
