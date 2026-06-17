@@ -154,7 +154,7 @@ test-e2e-lifecycle:
 # sub-tests are deterministic and always run; TestGitHubE2E_Rotation needs the throwaway App
 # (app_id=4065493) creds and FAILS (does not skip) without them: GITHUB_E2E_REFRESH_TOKEN (single-use
 # — the test logs its rotated successor to re-seed), GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET.
-test-github:
+test-github-mint:
     CGO_ENABLED=1 go test -tags github_e2e -run TestGitHubE2E -v -count=1 ./internal/node/
 
 test-web-e2e:
@@ -238,8 +238,8 @@ test-garage:
 # GitHub backend e2e: create->agent commit->suspend->resume against a local Gitea (sp-u53.1.5).
 # Requires a running Gitea: set GITEA_URL, GITEA_TOKEN, GITEA_OWNER before running.
 #   docker run -d -p 3000:3000 gitea/gitea:latest   # start gitea
-#   GITEA_URL=http://localhost:3000 GITEA_TOKEN=<tok> GITEA_OWNER=<user> just test-github
-test-github:
+#   GITEA_URL=http://localhost:3000 GITEA_TOKEN=<tok> GITEA_OWNER=<user> just test-github-storage
+test-github-storage:
     go test -tags github_e2e -run TestGitHub -v -count=1 ./internal/storage/
 
 # --- housekeeping --------------------------------------------------------
