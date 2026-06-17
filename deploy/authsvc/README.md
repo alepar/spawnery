@@ -148,8 +148,9 @@ Key variables for production:
 | `AS_DB_DSN` | Yes | SQLite file path with WAL enabled |
 | `AS_SESSION_KEY_PEM` | Yes | Path to session signing key (0600) |
 | `GITHUB_CLIENT_ID` | Yes | GitHub App client_id |
-| `GITHUB_CLIENT_SECRET` | Yes | GitHub App client_secret |
+| `GITHUB_CLIENT_SECRET` | Yes | GitHub App client_secret (the **client secret** string, not the private-key `.pem`) |
 | `AS_GITHUB_REDIRECT_URI` | Yes | AS callback URL registered at GitHub App |
+| `AS_GITHUB_TOKEN_ENC_KEY` | Yes | Standard-base64 32-byte key encrypting GitHub tokens at rest; **durable** — losing/rotating it forces every user to re-link (`AS_GITHUB_TOKEN_ENC_KEY_FILE` reads it from a file) |
 | `AS_SPA_ORIGINS` | Yes | SPA origin for credentialed CORS [AM2] |
 | `AS_REDIRECT_URIS` | Yes | Registered client redirect_uri allowlist |
 | `REGISTRATION_ENABLED` | No | Default: true; set false to close new registrations |
@@ -180,6 +181,31 @@ must provide a shared volatile response-wrap store with these properties:
 - no durable plaintext persistence, crash dumps, request logs, or metrics containing tuple material
 - redemption bound to the authenticated owner session and expected client context, so a leaked nonce
   alone is insufficient
+
+## GitHub App Registration
+
+The AS uses **one GitHub App** (not an OAuth App) for login, mount linking, and user-token refresh.
+Register it at `github.com/settings/apps/new` (or an org's *Developer settings → GitHub Apps*):
+
+- **Type:** GitHub App. OAuth Apps cannot issue expiring user tokens or fine-grained permissions.
+- **Callback URLs** — register **both**: `<AS_BASE>/oauth/callback` (login) and
+  `<AS_BASE>/github/link/callback` (mount linking). `<AS_BASE>` is the AS origin and must match
+  `AS_GITHUB_REDIRECT_URI`.
+- **Expiring user authorization tokens: ENABLED** — gives 8h access tokens + rotating refresh tokens;
+  load-bearing for the AS-custodial refresh model (design §16).
+- **Device Flow: ENABLED** — used by the spikes / `github_e2e` mint leg and the spawnctl (CLI) link flow.
+- **Permissions → Repository:** `Contents: Read and write` (clone/fetch/push) and
+  `Administration: Read and write` (repo create, gated by Spawnery mount create-policy). Permissions
+  are fixed at registration — user-to-server tokens do **not** use OAuth scopes.
+- **Webhook:** disabled (unused). **Installation:** any account (users install on their own account,
+  selected repositories).
+- **Credentials:** put the **client secret** (App → *Client secrets → Generate*) in
+  `GITHUB_CLIENT_SECRET`, and the Client ID in `GITHUB_CLIENT_ID`. The **private key (`.pem`) is NOT
+  used** — that is for installation/JWT tokens, which this design does not use.
+
+Least privilege is the App **installation's repository selection** plus Spawnery's exact-repo
+binding/credential-helper — **not** per-token `repository_id` scoping (empirically `repository_id` is
+not honored on refresh; design §16 / spike `sp-v40s.2`).
 - replay rejection after the first successful redemption and a clear "repeat link flow" outcome when
   the issuing AS dies or the nonce expires before redemption
 
