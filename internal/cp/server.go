@@ -866,8 +866,13 @@ func (s *Server) ensureStartupSecretsExist(ctx context.Context, owner string, re
 // touches sealed bytes — invariant c), and fail-closes with a typed error on a wrong-typed or
 // missing credential. Mounts without the github: scheme, and github mounts with an empty
 // credential id (already rejected at bind time), are skipped.
-// Secret type is immutable for a given secret_id (set at CreateSecret; PutSecret only CASes the
-// envelope/version), so a single pre-/at-flow check is sufficient — no post-await recheck needed.
+// Note: secret type IS mutable via PutSecret (which sets type= in the CAS update), so this check
+// is not race-free across an await window. No post-await type recheck is needed because the catalog
+// Type is a pre-flight UX/wiring gate only — not a delivery-security guarantee. The node receives
+// client-sealed bytes regardless (invariant c); validateSubmittedStartupSecrets and
+// ensureStartupSecretsExist verify ID-existence post-await, which is the actual dispatch
+// prerequisite. A type flip inside the await window is a same-owner operation and does not breach
+// containment invariants a–e.
 func (s *Server) validateGitHubMountCredentialType(ctx context.Context, owner string, mounts []store.Mount) error {
 	for _, m := range mounts {
 		if !strings.HasPrefix(m.BackendURI, "github:") {

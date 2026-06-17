@@ -258,8 +258,10 @@ func (s *Server) startFork(ctx context.Context, owner, sourceID string, fork sto
 		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
 			return "", err
 		}
-		// Secret type is immutable (set at CreateSecret; PutSecret only CASes the envelope/version),
-		// so a single at-flow type check is sufficient — no separate pre-await check is needed for fork.
+		// Note: secret type IS mutable via PutSecret, so this at-flow check is not race-free across
+		// the await window. No post-await type recheck is needed because the catalog Type is a
+		// pre-flight UX/wiring gate only, not a delivery guarantee — the node receives client-sealed
+		// bytes (invariant c); a type flip by the same owner does not breach invariants a–e.
 		if err := s.validateGitHubMountCredentialType(ctx, owner, mounts); err != nil {
 			return "", err
 		}
