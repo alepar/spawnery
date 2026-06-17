@@ -62,3 +62,44 @@ func TestSchemeResolverResolvesGitHubBackend(t *testing.T) {
 		t.Fatalf("Resolve(github) returned %T, want *GitHub", backend)
 	}
 }
+
+func TestSchemeResolverResolveBindingFieldPassthrough(t *testing.T) {
+	t.Parallel()
+
+	resolver := NewSchemeResolverWithGitHub(t.TempDir(), nil)
+	backend, err := resolver.ResolveBinding(BackendBinding{
+		Name:               "main",
+		BackendURI:         "github:octo-org/demo",
+		CredentialSecretID: "sec-123",
+		CreateIfMissing:    true,
+		RepositoryID:       "42",
+	})
+	if err != nil {
+		t.Fatalf("ResolveBinding: %v", err)
+	}
+	gh, ok := backend.(*GitHub)
+	if !ok {
+		t.Fatalf("ResolveBinding returned %T, want *GitHub", backend)
+	}
+	if gh.Config.MountName != "main" {
+		t.Errorf("Config.MountName = %q, want %q", gh.Config.MountName, "main")
+	}
+	if gh.Config.CredentialSecretID != "sec-123" {
+		t.Errorf("Config.CredentialSecretID = %q, want %q", gh.Config.CredentialSecretID, "sec-123")
+	}
+	if !gh.Config.CreateIfMissing {
+		t.Errorf("Config.CreateIfMissing = false, want true")
+	}
+	if gh.Config.RepositoryID != "42" {
+		t.Errorf("Config.RepositoryID = %q, want %q", gh.Config.RepositoryID, "42")
+	}
+	if gh.Config.Owner != "octo-org" {
+		t.Errorf("Config.Owner = %q, want %q", gh.Config.Owner, "octo-org")
+	}
+	if gh.Config.Repo != "demo" {
+		t.Errorf("Config.Repo = %q, want %q", gh.Config.Repo, "demo")
+	}
+	if gh.Config.Host != "github.com" {
+		t.Errorf("Config.Host = %q, want %q", gh.Config.Host, "github.com")
+	}
+}

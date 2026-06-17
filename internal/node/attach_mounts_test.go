@@ -5,7 +5,39 @@ import (
 	"testing"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/spawnlet"
 )
+
+func TestMountBindingsFromProtoMapsAllFiveFieldsAndSkipsNil(t *testing.T) {
+	t.Parallel()
+
+	in := []*nodev1.MountBinding{
+		{
+			Name:               "main",
+			BackendUri:         "github:o/r",
+			CredentialSecretId: "sec-9",
+			CreateIfMissing:    true,
+			RepositoryId:       "7",
+		},
+		nil, // must be skipped
+	}
+	out := mountBindingsFromProto(in)
+
+	if len(out) != 1 {
+		t.Fatalf("mountBindingsFromProto returned %d entries, want 1 (nil skipped)", len(out))
+	}
+	want := spawnlet.MountBinding{
+		Name:               "main",
+		BackendURI:         "github:o/r",
+		CredentialSecretID: "sec-9",
+		CreateIfMissing:    true,
+		RepositoryID:       "7",
+	}
+	got := out[0]
+	if got != want {
+		t.Fatalf("mountBindingsFromProto[0] = %+v, want %+v", got, want)
+	}
+}
 
 func TestStartSpawnThreadsMountBindingsIntoCreate(t *testing.T) {
 	fs := &fakeCPStream{}
