@@ -235,7 +235,21 @@ func (g *GitHub) Prepare(ctx context.Context, spawnID, mountName, seedDir string
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"HOME=" + homeDir,
 	}
-	helperArgs := []string{"-c", "credential.helper=", "-c", "credential.useHttpPath=true"}
+	// clone2leak / CVE-2024-53858 hardening (§16.8):
+	//  - credential.helper= (empty) resets any repo-injected helper before our helper is set.
+	//  - credential.useHttpPath=true ensures exact-repo matching in our helper (set by sp-u53.1.2).
+	//  - credential.protectProtocol=true refuses credentials if the protocol is downgraded from
+	//    https to http by a repo-injected config or a MITM redirect — prevents token exfiltration
+	//    via protocol downgrade.
+	// We never pass --recurse-submodules: the node does not process .gitmodules on untrusted repos,
+	// so repo-injected credential.helper entries in .gitmodules and .lfsconfig are not evaluated
+	// during node-side git ops. The agent's own git on hostile content is a documented residual
+	// (bounded by the installation-selection blast radius; future: git proxy sp-51li).
+	helperArgs := []string{
+		"-c", "credential.helper=",
+		"-c", "credential.useHttpPath=true",
+		"-c", "credential.protectProtocol=true",
+	}
 	if cred.CredentialHelperPath != "" {
 		helperArgs = append(helperArgs, "-c", "credential.helper="+cred.CredentialHelperPath)
 	}

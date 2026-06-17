@@ -121,6 +121,11 @@ func TestGitHubPrepareCreatesMissingRepoSeedsAndUsesHardenedGit(t *testing.T) {
 		if !containsArg(call.args, "-c") || !containsArg(call.args, "credential.helper=") || !containsArg(call.args, "credential.helper=/node-only/helper") {
 			t.Fatalf("git args missing credential helper reset/helper: %+v", call.args)
 		}
+		// CVE-2024-53858 / clone2leak hardening (§16.8): all node-side git ops must set
+		// credential.protectProtocol=true to refuse credential delivery on protocol downgrade.
+		if !containsArg(call.args, "credential.protectProtocol=true") {
+			t.Fatalf("git args missing credential.protectProtocol=true (CVE-2024-53858 hardening): %+v", call.args)
+		}
 	}
 	if strings.Contains(joined.String(), "SECRET-GITHUB-TOKEN") {
 		t.Fatalf("git argv/env leaked token: %q", joined.String())
@@ -224,6 +229,46 @@ func TestGitHubPrepareRepositoryIDMatchClonesExisting(t *testing.T) {
 	}
 	if len(runner.calls) != 1 || !containsArg(runner.calls[0].args, "clone") {
 		t.Fatalf("git calls = %+v, want a single clone", runner.calls)
+	}
+}
+
+// TestGitHubPrepareClone2LeakHardening verifies CVE-2024-53858 / clone2leak protections:
+//   - credential.protectProtocol=true is set on the clone command
+//   - credential.helper= (empty reset) appears before the actual helper
+//   - --recurse-submodules is NOT passed (node does not process untrusted .gitmodules)
+func TestGitHubPrepareClone2LeakHardening(t *testing.T) {
+	runner := &testGitRunner{}
+	backend := &GitHub{
+		Root:        t.TempDir(),
+		Config:      GitHubConfig{Host: "github.com", Owner: "octo", Repo: "demo"},
+		Credentials: testGitHubCreds{},
+		Repos:       &testGitHubRepos{url: "https://github.com/octo/demo.git"},
+		Git:         runner,
+	}
+	if _, err := backend.Prepare(context.Background(), "sp1", "main", t.TempDir(), -1); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(runner.calls) == 0 {
+		t.Fatal("no git calls recorded")
+	}
+	cloneCall := runner.calls[0]
+	if !containsArg(cloneCall.args, "clone") {
+		t.Fatalf("first git call is not clone: %+v", cloneCall.args)
+	}
+	// CVE-2024-53858: must refuse credential delivery on protocol downgrade.
+	if !containsArg(cloneCall.args, "credential.protectProtocol=true") {
+		t.Fatalf("clone missing credential.protectProtocol=true (CVE-2024-53858): %+v", cloneCall.args)
+	}
+	// Must reset credential.helper before setting ours, preventing any previously configured helper.
+	if !containsArg(cloneCall.args, "credential.helper=") {
+		t.Fatalf("clone missing credential.helper= (empty reset): %+v", cloneCall.args)
+	}
+	// Node must NOT clone with --recurse-submodules: .gitmodules from untrusted repos must not
+	// be processed by node-side git ops (F22 / §16.8 residual boundary).
+	for _, arg := range cloneCall.args {
+		if arg == "--recurse-submodules" || arg == "--recurse_submodules" {
+			t.Fatalf("clone must not pass --recurse-submodules (processes untrusted .gitmodules): %+v", cloneCall.args)
+		}
 	}
 }
 
