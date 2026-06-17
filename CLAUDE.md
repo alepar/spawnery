@@ -58,6 +58,12 @@ GitHub `origin` and issue history lives under `refs/dolt/data` (a git ref, separ
 truth; `.beads/issues.jsonl` is a passive, regenerable export — **not** the wire protocol.
 
 - **After any `bd` change:** `bd dolt push` — publishes issue history to the remote.
+  - **NEVER pass `--force` to `bd dolt push`.** A default push is fast-forward-or-reject; a diverged
+    remote is reconciled by `bd dolt pull` (Dolt does a row/cell-level three-way merge, so concurrent
+    sessions editing different issues merge cleanly and nothing is silently lost). `--force` overwrites
+    the remote and **clobbers a concurrent session's pushed issue changes**. If a push is rejected, run
+    `bd dolt pull` then push again — do **not** reach for `--force`. The only legitimate `--force` use is
+    a deliberate remote-working-set repair, and even then you MUST confirm with the user before running it.
 - **Get others' issue changes:** `bd dolt pull`.
 - **Fresh clone / new git worktree / missing DB:** `bd bootstrap` — a plain `git clone` does
   NOT include the Dolt DB; bootstrap clones it from `refs/dolt/data`.
