@@ -12,10 +12,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
-var ErrGitHubRepoNotFound = errors.New("github: repository not found")
+var (
+	ErrGitHubRepoNotFound   = errors.New("github: repository not found")
+	ErrGitHubRepoIDMismatch = errors.New("github: bound repository_id does not match repository")
+	ErrGitHubRepoNotCovered = errors.New("github: live token does not cover repository")
+)
 
 type GitHubConfig struct {
 	Host               string
@@ -54,6 +59,7 @@ type GitHubCredentialProvider interface {
 type GitHubRepoInfo struct {
 	CloneURL string
 	Empty    bool
+	ID       int64
 }
 
 type GitHubRepoService interface {
@@ -80,7 +86,13 @@ type GitHub struct {
 	Credentials GitHubCredentialProvider
 	Repos       GitHubRepoService
 	Git         GitRunner
+
+	restorePending bool
 }
+
+// SetRestorePending implements storage.RestoreAware: when true, Prepare provides an empty
+// agent-writable dir for the journaler to restore into and skips the network clone/create/seed.
+func (g *GitHub) SetRestorePending(pending bool) { g.restorePending = pending }
 
 func NewGitHub(root string, cfg GitHubConfig) *GitHub {
 	return &GitHub{Root: root, Config: cfg}
@@ -104,6 +116,22 @@ func ParseGitHubURI(uri string) (GitHubConfig, error) {
 	return GitHubConfig{Host: "github.com", Owner: owner, Repo: repo}, nil
 }
 
+// validateRepositoryID is an AUDIT check, not a scope guarantee (invariant e): the bound
+// repository_id must equal the id of the repo actually reached for {owner,repo}. A mismatch means
+// the path was renamed/recreated/confused; fail closed. A zero/absent id from the service or an
+// empty binding is audit-skipped (the installation selection remains the only scope guarantee).
+func validateRepositoryID(cfg GitHubConfig, info GitHubRepoInfo) error {
+	want := strings.TrimSpace(cfg.RepositoryID)
+	if want == "" || info.ID == 0 {
+		return nil
+	}
+	if strconv.FormatInt(info.ID, 10) != want {
+		return fmt.Errorf("%w: bound %s, reached %d for %s/%s",
+			ErrGitHubRepoIDMismatch, want, info.ID, cfg.Owner, cfg.Repo)
+	}
+	return nil
+}
+
 func (g *GitHub) Prepare(ctx context.Context, spawnID, mountName, seedDir string, agentUID int) (string, error) {
 	cfg := g.Config
 	if cfg.MountName == "" {
@@ -112,6 +140,24 @@ func (g *GitHub) Prepare(ctx context.Context, spawnID, mountName, seedDir string
 	if cfg.Host != "github.com" {
 		return "", fmt.Errorf("github unsupported host %q", cfg.Host)
 	}
+
+	hostDir := filepath.Join(g.Root, "github", spawnID, mountName)
+
+	if g.restorePending {
+		// Resume (spec §16.7): a journal restore will repopulate hostDir; the journal is authoritative.
+		// Provide a clean, agent-writable empty dir and skip all network/git — no token mint, no clone.
+		if err := os.RemoveAll(hostDir); err != nil {
+			return "", err
+		}
+		if err := os.MkdirAll(hostDir, 0o755); err != nil {
+			return "", err
+		}
+		if err := NormalizeOwnership(hostDir, agentUID); err != nil {
+			return "", err
+		}
+		return hostDir, nil
+	}
+
 	if g.Credentials == nil {
 		return "", fmt.Errorf("github credential provider is not configured")
 	}
@@ -128,15 +174,29 @@ func (g *GitHub) Prepare(ctx context.Context, spawnID, mountName, seedDir string
 	if repos == nil {
 		repos = defaultGitHubRepoService{}
 	}
+	created := false
 	info, err := repos.Get(ctx, cfg, token)
 	if errors.Is(err, ErrGitHubRepoNotFound) {
 		if !cfg.CreateIfMissing {
 			return "", fmt.Errorf("github repo %s/%s not found and create_if_missing is false", cfg.Owner, cfg.Repo)
 		}
 		info, err = repos.Create(ctx, cfg, token)
+		created = true
 	}
 	if err != nil {
 		return "", fmt.Errorf("github repo %s/%s: %w", cfg.Owner, cfg.Repo, err)
+	}
+	if created {
+		// Spec §8 step 6: confirm the live installation-selection-scoped token actually reaches the
+		// freshly created repo (the spike showed selected-repo installs cover it immediately) BEFORE
+		// seeding. Coverage is the install selection, not repository_id (invariant e).
+		covInfo, cerr := repos.Get(ctx, cfg, token)
+		if cerr != nil {
+			return "", fmt.Errorf("%w: %s/%s: %v", ErrGitHubRepoNotCovered, cfg.Owner, cfg.Repo, cerr)
+		}
+		info = covInfo
+	} else if verr := validateRepositoryID(cfg, info); verr != nil {
+		return "", verr
 	}
 	if info.CloneURL == "" {
 		info.CloneURL = fmt.Sprintf("https://github.com/%s/%s.git", cfg.Owner, cfg.Repo)
@@ -145,7 +205,6 @@ func (g *GitHub) Prepare(ctx context.Context, spawnID, mountName, seedDir string
 		return "", err
 	}
 
-	hostDir := filepath.Join(g.Root, "github", spawnID, mountName)
 	homeDir := filepath.Join(g.Root, "github-home", spawnID, mountName)
 	cleanupDirs := func() {
 		_ = os.RemoveAll(hostDir)
@@ -299,11 +358,12 @@ func (s defaultGitHubRepoService) Get(ctx context.Context, cfg GitHubConfig, tok
 	var out struct {
 		CloneURL string `json:"clone_url"`
 		Size     int64  `json:"size"`
+		ID       int64  `json:"id"`
 	}
 	if err := s.do(ctx, http.MethodGet, "/repos/"+cfg.Owner+"/"+cfg.Repo, token, nil, &out); err != nil {
 		return GitHubRepoInfo{}, err
 	}
-	return GitHubRepoInfo{CloneURL: out.CloneURL, Empty: out.Size == 0}, nil
+	return GitHubRepoInfo{CloneURL: out.CloneURL, Empty: out.Size == 0, ID: out.ID}, nil
 }
 
 func (s defaultGitHubRepoService) Create(ctx context.Context, cfg GitHubConfig, token string) (GitHubRepoInfo, error) {
@@ -314,11 +374,12 @@ func (s defaultGitHubRepoService) Create(ctx context.Context, cfg GitHubConfig, 
 	var out struct {
 		CloneURL string `json:"clone_url"`
 		Size     int64  `json:"size"`
+		ID       int64  `json:"id"`
 	}
 	if err := s.do(ctx, http.MethodPost, "/user/repos", token, body, &out); err != nil {
 		return GitHubRepoInfo{}, err
 	}
-	return GitHubRepoInfo{CloneURL: out.CloneURL, Empty: out.Size == 0}, nil
+	return GitHubRepoInfo{CloneURL: out.CloneURL, Empty: out.Size == 0, ID: out.ID}, nil
 }
 
 func (s defaultGitHubRepoService) do(ctx context.Context, method, path, token string, body any, out any) error {
