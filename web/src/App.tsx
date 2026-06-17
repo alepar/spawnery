@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { recoverStaleFlowMarker } from "./github/flow";
 import { useLocation } from "wouter";
 import { toast } from "sonner";
 import {
@@ -39,6 +40,10 @@ export function App() {
   // bootstrap() carries any AS callback error code into the store so it survives
   // the destructive parseCallback (which strips the URL/sessionStorage state).
   const callbackErrorCode = useSessionStore((s) => s.callbackErrorCode);
+
+  // Reap a stranded GitHub-link flow marker if bootstrap settled to a non-authed (failure) state:
+  // the Settings GitHub panel will not mount on the login wall (spec §6.2 Recovery).
+  useEffect(() => { recoverStaleFlowMarker(status); }, [status]);
 
   // Login wall: show LoginView when auth is enabled and user is not authed.
   if (authEnabled() && status !== "authed") {

@@ -22,14 +22,15 @@ vi.mock("@/config/endpoints", () => ({
 
 const parseCallbackMock = vi.fn<() => CallbackResult>(() => ({ kind: "none" }));
 const replaceStateMock = vi.fn<(url: string) => void>();
+const locationSearchMock = vi.fn<() => string>().mockReturnValue("");
 
 vi.mock("./oauth", () => ({
   parseCallback: () => parseCallbackMock(),
   sessionStateStorage: { get: vi.fn(), set: vi.fn(), remove: vi.fn() },
   browserHistory: {
     replaceState: (url: string) => replaceStateMock(url),
-    locationSearch: vi.fn().mockReturnValue(""),
-    locationPathname: vi.fn().mockReturnValue("/callback"),
+    locationSearch: () => locationSearchMock(),
+    locationPathname: () => "/callback",
   },
 }));
 
@@ -65,8 +66,11 @@ beforeEach(() => {
     account: null,
     callbackErrorCode: null,
   });
+  parseCallbackMock.mockClear();
   parseCallbackMock.mockReturnValue({ kind: "none" });
   replaceStateMock.mockClear();
+  locationSearchMock.mockReturnValue("");
+  sessionStorage.clear();
 });
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -167,5 +171,32 @@ describe("bootstrap — success callback restores original route", () => {
 
     expect(useSessionStore.getState().callbackErrorCode).toBeNull();
     expect(useSessionStore.getState().status).toBe("authed");
+  });
+});
+
+describe("bootstrap — a GitHub-link return is not a login callback", () => {
+  it("with a flow marker + ?error= present, does NOT run the login parser and does NOT set the login error", async () => {
+    sessionStorage.setItem("spawnery-gh-link-flow", "flow-123");
+    locationSearchMock.mockReturnValue("?error=access_denied");
+    // Even if the parser WOULD report an error, the guard must short-circuit before calling it.
+    parseCallbackMock.mockReturnValue({ kind: "error", code: "access_denied", description: "" });
+
+    const store = new MemoryKeyStore();
+    await useSessionStore.getState().bootstrap(store);
+
+    expect(parseCallbackMock).not.toHaveBeenCalled();
+    expect(useSessionStore.getState().callbackErrorCode).toBeNull();
+  });
+
+  it("without a flow marker, a login ?error= still drives the login wall", async () => {
+    locationSearchMock.mockReturnValue("?error=registration_closed");
+    parseCallbackMock.mockReturnValue({ kind: "error", code: "registration_closed", description: "" });
+
+    const store = new MemoryKeyStore();
+    await useSessionStore.getState().bootstrap(store);
+
+    expect(parseCallbackMock).toHaveBeenCalled();
+    expect(useSessionStore.getState().status).toBe("login-required");
+    expect(useSessionStore.getState().callbackErrorCode).toBe("registration_closed");
   });
 });
