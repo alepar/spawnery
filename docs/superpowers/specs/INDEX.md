@@ -27,6 +27,7 @@ were already made in one of these docs.
 
 ## Isolation, networking & node
 - [Egress Floor (sp-rpa)](2026-06-01-egress-floor-sp-rpa.md) — per-pod default-allow egress block-floor via iptables in the sidecar netns.
+- [GitHub × Egress Floor Reconciliation (sp-u53.1.6)](2026-06-17-github-egress-floor-reconciliation-design.md) — §12 reconciliation: the shipped floor is default-*allow* applied host-side (`-s <PodIP>` in DOCKER-USER/SPAWNLET-EGRESS, not nsenter), so the GitHub channel needs **no floor change** — node clone/push/mint is host-netns (unfloored), agent git is default-allow public; CDN IP-churn (q-a) only bites under deny-by-default; agent exfil (q-c) is the already-accepted sp-rpa R.1 + §16/§9 relaxation, not a new channel; future deny-by-default → hostname/SNI proxy converging with the §16.4 git-proxy. status: draft; tags: egress,github,networking.
 - [gVisor Research Brief](2026-06-01-gvisor-isolation-research-brief.md) — deep-research prompt for gVisor multi-tenant agent sandboxing.
 - [gVisor Evaluation (Results)](2026-06-01-gvisor-isolation-research-results.md) — production security/systems evaluation of `runsc`.
 - [runsc Pod-Backend Research Brief](2026-06-01-runsc-pod-backend-research-brief.md) — how to run a gVisor two-container pod from a Go daemon.
