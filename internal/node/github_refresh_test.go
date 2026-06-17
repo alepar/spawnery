@@ -162,9 +162,11 @@ func TestRefresherNotePreciseExpirySchedulesPrecisely(t *testing.T) {
 	}
 	// Crucially NOT due after the receipt-relative default interval (which would be ~7h52m from base),
 	// because we scheduled from the real expiry instead.
+	// Invariant: with tokenExpiry=base+1h the precise lead (base+52m) is well before the receipt-relative
+	// default (base+7h52m). Assert rather than skip so a constant change is a loud failure.
 	receiptRelative := base.Add(defaultRefreshInterval)
 	if wantRefreshAt.After(receiptRelative) {
-		t.Skipf("test only meaningful when precise expiry < receipt-relative default (have expiry=%v, default=%v)", wantRefreshAt, receiptRelative)
+		t.Fatalf("test invariant broken: precise expiry-lead %v must be before receipt-relative default %v — update test constants", wantRefreshAt, receiptRelative)
 	}
 }
 

@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	nodev1 "spawnery/gen/node/v1"
 	authv1 "spawnery/gen/auth/v1"
+	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/intent"
 	"spawnery/internal/runtime"

@@ -19,8 +19,8 @@ type GitHubMintClient interface {
 
 // Default timing. The node estimates an ~8h access-token lifetime and triggers a refresh slightly
 // INSIDE the AS rotate window (AS lead is 10m: it rotates only when expiry <= now+10m), so the AS
-// actually rotates. When the node lacks a precise expiry (first delivery) it uses receipt-relative
-// timing; a mint RESPONSE's access_expires_at_unix then refines refreshAt precisely.
+// actually rotates. When a delivery lacks a precise expiry (access_expires_at_unix = 0) it falls
+// back to receipt-relative timing; a mint RESPONSE's access_expires_at_unix then refines refreshAt.
 const (
 	defaultAccessLifetime  = 8 * time.Hour
 	nodeRefreshLead        = 8 * time.Minute // < AS 10m lead so the AS rotates on our call
@@ -35,13 +35,13 @@ const (
 // githubRefreshEntry is the node-side record of a delivered GitHub link for one spawn. It carries the
 // link reference (secret_id/version/delivery_id) the node presents to the AS — NOT any token.
 type githubRefreshEntry struct {
-	SpawnID      string
-	Generation   uint64
-	SecretID             string
-	Version              uint64
-	DeliveryID           string
-	RepositoryID         string
-	AccessExpiresAtUnix  int64 // precise access-token expiry from delivery metadata (0 = unknown; use receipt-relative default).
+	SpawnID             string
+	Generation          uint64
+	SecretID            string
+	Version             uint64
+	DeliveryID          string
+	RepositoryID        string
+	AccessExpiresAtUnix int64 // precise access-token expiry from delivery metadata (0 = unknown; use receipt-relative default).
 }
 
 type refreshState struct {

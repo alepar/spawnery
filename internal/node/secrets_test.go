@@ -444,8 +444,10 @@ func TestGitHubDeliveryPassesPreciseExpiryToRefresher(t *testing.T) {
 	if got := refresher.due(wantRefreshAt.Add(-time.Second)); len(got) != 0 {
 		t.Fatalf("entry must not be due before precise refreshAt, got %+v", got)
 	}
+	// Invariant: with tokenExpiry=base+30m the precise lead (base+22m) is well before the receipt-relative
+	// default (base+7h52m). Assert rather than skip so a constant change is a loud failure.
 	if wantRefreshAt.Equal(receiptRelative) || wantRefreshAt.After(receiptRelative) {
-		t.Skip("test only meaningful when precise expiry is before receipt-relative default")
+		t.Fatalf("test invariant broken: precise expiry-lead %v must be before receipt-relative default %v — update test constants", wantRefreshAt, receiptRelative)
 	}
 }
 
