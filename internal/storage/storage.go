@@ -25,6 +25,14 @@ type Backend interface {
 	Finalize(ctx context.Context, hostDir string) error
 }
 
+// RestoreAware is an optional Backend capability: the spawnlet calls SetRestorePending(true) before
+// Prepare when a journal restore will repopulate the mount on resume (journal is authoritative —
+// spec §16.7), letting a network backend skip a fresh clone/create. Backends that don't implement it
+// are simply prepared normally.
+type RestoreAware interface {
+	SetRestorePending(pending bool)
+}
+
 // Scratch is an ephemeral backend: seed a fresh dir on Prepare, nuke it on Finalize.
 type Scratch struct{ Root string }
 
