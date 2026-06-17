@@ -844,6 +844,10 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			finalizeAll()
 			return nil, fmt.Errorf("mount %q backend %q: %w", mt.Name, backendURI, err)
 		}
+		// Resume clone-skip (spec §16.7): if a journal restore will repopulate this mount, tell a
+		// restore-aware backend (github) to skip the network clone — the journal is authoritative.
+		_, hasPin := jrec.Manifests[mt.Name]
+		applyRestoreHint(mountBackend, haveJournalRecord && class.Journaled() && hasPin)
 		seedDir := filepath.Join(appPath, mt.Seed)
 		hostDir := ""
 		restoreDir := ""

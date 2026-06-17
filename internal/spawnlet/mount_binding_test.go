@@ -1,11 +1,41 @@
 package spawnlet
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"spawnery/internal/manifest"
+	"spawnery/internal/storage"
 )
+
+type fakeRestoreAware struct {
+	pending   bool
+	pendingOK bool
+}
+
+func (f *fakeRestoreAware) Prepare(context.Context, string, string, string, int) (string, error) {
+	return "", nil
+}
+func (f *fakeRestoreAware) Finalize(context.Context, string) error { return nil }
+func (f *fakeRestoreAware) SetRestorePending(p bool)               { f.pending, f.pendingOK = p, true }
+
+func TestApplyRestoreHintSetsPendingOnRestoreAware(t *testing.T) {
+	f := &fakeRestoreAware{}
+	applyRestoreHint(f, true)
+	if !f.pendingOK || !f.pending {
+		t.Fatalf("SetRestorePending(true) not propagated: ok=%v pending=%v", f.pendingOK, f.pending)
+	}
+	applyRestoreHint(f, false)
+	if f.pending {
+		t.Fatalf("SetRestorePending(false) not propagated")
+	}
+}
+
+func TestApplyRestoreHintNoopOnPlainBackend(t *testing.T) {
+	// A backend without SetRestorePending must not panic.
+	applyRestoreHint(storage.NewScratch(t.TempDir()), true)
+}
 
 func TestMountBindingsByNameRejectsEmptyBindingName(t *testing.T) {
 	t.Parallel()
