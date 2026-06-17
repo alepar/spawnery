@@ -214,3 +214,76 @@ func (r *githubLinkRepo) MarkRelinkRequired(ctx context.Context, secretID string
 	}
 	return nil
 }
+
+// PeekMeta reads token-free metadata for secretID INCLUDING revoked rows (the redeem ownership
+// guard + identity-continuity peek). ErrNotFound when absent.
+func (r *githubLinkRepo) PeekMeta(ctx context.Context, secretID string) (GitHubLinkMeta, error) {
+	var m GitHubLinkMeta
+	err := r.db.NewSelect().Model(&m).Where("secret_id = ?", secretID).Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GitHubLinkMeta{}, ErrNotFound
+	}
+	if err != nil {
+		return GitHubLinkMeta{}, err
+	}
+	return m, nil
+}
+
+// List returns token-free metadata for all links of accountID, including revoked/relink_required.
+func (r *githubLinkRepo) List(ctx context.Context, accountID string) ([]GitHubLinkMeta, error) {
+	var rows []GitHubLinkMeta
+	if err := r.db.NewSelect().Model(&rows).Where("account_id = ?", accountID).Order("secret_id ASC").Scan(ctx); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// RedeemUpsert inserts-or-relinks atomically: new row -> version=1; conflict (even a revoked row)
+// -> version = existing.version+1 and clears revoked/relink_required, DB-side via RETURNING (no
+// app Get->+1 race, no deliveryID collision across revoke->relink). Returns the persisted link with
+// plaintext tokens (containment invariant: caller provides plaintext, tokens encrypted at rest).
+func (r *githubLinkRepo) RedeemUpsert(ctx context.Context, link GitHubLink) (GitHubLink, error) {
+	if r.cipher == nil {
+		return GitHubLink{}, ErrCipherRequired
+	}
+	enc := link
+	enc.Version = 1 // genesis for a brand-new row; ON CONFLICT overrides with ghl.version+1
+	enc.DeliveryID = "github-access-" + link.SecretID + "-v1"
+	enc.Revoked = false
+	enc.RelinkRequired = false
+	var err error
+	if enc.RefreshToken, err = r.cipher.Encrypt(link.RefreshToken, aadRefresh(link.SecretID)); err != nil {
+		return GitHubLink{}, err
+	}
+	if enc.AccessToken, err = r.cipher.Encrypt(link.AccessToken, aadAccess(link.SecretID)); err != nil {
+		return GitHubLink{}, err
+	}
+	// out starts as a copy of enc (has all fields); RETURNING overwrites version+delivery_id.
+	out := enc
+	err = r.db.NewInsert().Model(&enc).
+		On("CONFLICT (secret_id) DO UPDATE").
+		Set("account_id = EXCLUDED.account_id").
+		Set("host = EXCLUDED.host").
+		Set("login = EXCLUDED.login").
+		Set("github_user_id = EXCLUDED.github_user_id").
+		Set("app_client_id = EXCLUDED.app_client_id").
+		Set("refresh_token = EXCLUDED.refresh_token").
+		Set("refresh_expires_at_unix = EXCLUDED.refresh_expires_at_unix").
+		Set("access_token = EXCLUDED.access_token").
+		Set("access_expires_at_unix = EXCLUDED.access_expires_at_unix").
+		Set("token_type = EXCLUDED.token_type").
+		Set("updated_at = EXCLUDED.updated_at").
+		Set("version = ghl.version + 1").
+		Set("delivery_id = 'github-access-' || ghl.secret_id || '-v' || (ghl.version + 1)").
+		Set("revoked = 0").
+		Set("revoked_at = NULL").
+		Set("relink_required = 0").
+		Returning("version, delivery_id").
+		Scan(ctx, &out)
+	if err != nil {
+		return GitHubLink{}, err
+	}
+	// Return plaintext tokens to caller (not the ciphertext we stored).
+	out.RefreshToken, out.AccessToken = link.RefreshToken, link.AccessToken
+	return out, nil
+}
