@@ -76,6 +76,17 @@ via a stale JSONL. `issues.jsonl` is safe to discard/regenerate (`bd export`). D
 `bd import` as a sync mechanism; use `bd dolt pull`. See
 https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for anti-patterns.
 
+**JSONL exports are NOT tracked in git and auto-export is OFF (configured 2026-06-17).** The
+`.beads/*.jsonl` files (`issues.jsonl`, `interactions.jsonl`) are passive, regenerable exports of the
+Dolt DB; they churned on every `bd` op and have a bad concurrent-merge story, so they are gitignored
+(`.beads/*.jsonl` in the root `.gitignore`) and removed from the repo. Auto-export is disabled in
+`.beads/config.yaml` (`export.auto: false`, `export.git-add: false`).
+- **Do NOT re-enable JSONL export or re-add the jsonls to git.** Sync is Dolt-only: `bd dolt push` /
+  `bd dolt pull`. The jsonl is not the wire protocol and not an audit trail anymore.
+- **Do NOT `git add` a `.beads/*.jsonl`** (e.g. with `git add -f` or `git add .beads/`). If you ever
+  need a one-off snapshot, run `bd export` and read it locally — don't commit it.
+- Off-machine recovery is the local, gitignored `.beads/backup/` dir (separate auto-backup), not git.
+
 **Perms warning:** if bd warns `.beads` is `0777`, that's bd creating dirs under `umask 000`
 (hook-launched, not your interactive shell). `chmod 700 .beads` clears it; the durable fix is
 running bd under `umask 077`.
@@ -189,8 +200,9 @@ Design docs + per-slice plans live in `docs/superpowers/specs/` and `docs/superp
   on them; don't silently re-litigate.
 - **Maintain the spec index.** When you add a new design spec to `docs/superpowers/specs/`, add a
   one-line entry to `docs/superpowers/specs/INDEX.md` in the same commit (right section, one line).
-- **`git commit --no-verify`** is the project norm — the beads pre-commit hook exports
-  `issues.jsonl`; verify your `bd close`/`update`s survived after any branch op.
+- **`git commit --no-verify`** is the project norm — it skips the beads pre-commit hook. JSONL
+  auto-export is OFF and the jsonls are untracked (see "Beads Sync"), so the hook no longer stages
+  `issues.jsonl`; durability of `bd` changes comes from `bd dolt push`, not a committed jsonl.
 - **Unit tests are hermetic** — in-memory store, no network/keys; run with `-race`. End-to-end
   tests are **build-tagged** (`e2e`, `egress_e2e`, `cni_egress_e2e`) and need images/root.
 - **Every integration/e2e/lane test is BUILD-TAGGED and FAILS (never `t.Skip`s) when its dep is
@@ -221,8 +233,8 @@ groups, labeled agents, structured outputs at every stage, and a resumable journ
   at a time).
 - **Per-task pipeline:** planner (writes a focused plan) → implementer → spec-compliance
   reviewer → code-quality reviewer → bounded fix loops (≤2 per stage) → merge integrator
-  (merge `--no-ff`, full quality gates in the `dev-spawnery` distrobox, `bd close`, export +
-  commit, `git push` + `bd dolt push`, worktree cleanup). Never push a red master.
+  (merge `--no-ff`, full quality gates in the `dev-spawnery` distrobox, `bd close`, `git push` +
+  `bd dolt push`, worktree cleanup). Never push a red master.
 - **Isolation posture:** every implementer works in its **own git worktree + branch**
   (`spawnery-wt-<task>` / `feat/<task>`, cut from current master), never in the main repo's
   working tree. Parallel tasks must have **disjoint file sets** (serialize `proto/`-touching

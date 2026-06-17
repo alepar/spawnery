@@ -30,6 +30,12 @@ cp.db*
 # Syncthing conflict artifacts in the externally-synced .beads dir (not source of truth)
 .beads/*.sync-conflict-*
 
+# Beads JSONL exports (issues.jsonl, interactions.jsonl, …) — passive, regenerable exports of the
+# Dolt DB (the source of truth, synced via refs/dolt/data). NOT tracked in git: they churn on every
+# bd op and have a bad concurrent-merge story. Auto-export is disabled (export.auto/git-add=false in
+# .beads/config.yaml). Off-machine recovery is the local .beads/backup/ dir, not git.
+.beads/*.jsonl
+
 # Local git worktrees (linked checkouts; not part of the tracked tree)
 .worktrees/
 .claude/worktrees/
