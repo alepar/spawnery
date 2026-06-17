@@ -273,3 +273,100 @@ func TestFakeDeleteGrantRevokesWholeAuthorization(t *testing.T) {
 		t.Fatalf("refresh after revoke = %+v, want bad_refresh_token", rout)
 	}
 }
+
+func TestFakeDeleteTokenInvalidatesAccessButNotRefresh(t *testing.T) {
+	f := New()
+	defer f.Close()
+
+	// Mint an access+refresh pair.
+	verifier := "verif-tok"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	code := authorizeCode(t, f, challenge)
+	form := url.Values{
+		"client_id":     {f.ClientID},
+		"client_secret": {f.ClientSecret},
+		"code":          {code},
+		"code_verifier": {verifier},
+		"redirect_uri":  {"https://as.example.test/cb"},
+	}
+	xr, err := http.Post(f.URL()+"/login/oauth/access_token", "application/x-www-form-urlencoded",
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	var tok struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = json.NewDecoder(xr.Body).Decode(&tok)
+	xr.Body.Close()
+	if tok.AccessToken == "" || tok.RefreshToken == "" {
+		t.Fatalf("incomplete tuple")
+	}
+
+	// Precondition: access token works.
+	ureq, _ := http.NewRequest(http.MethodGet, f.URL()+"/user", nil)
+	ureq.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	uresp, _ := http.DefaultClient.Do(ureq)
+	if uresp.StatusCode != http.StatusOK {
+		t.Fatalf("/user before DELETE /token = %d, want 200", uresp.StatusCode)
+	}
+	uresp.Body.Close()
+
+	// DELETE /applications/{client_id}/token — targeted: kills only the access token.
+	tbody, _ := json.Marshal(map[string]string{"access_token": tok.AccessToken})
+	dreq, _ := http.NewRequest(http.MethodDelete, f.URL()+"/applications/"+f.ClientID+"/token",
+		bytes.NewReader(tbody))
+	dreq.SetBasicAuth(f.ClientID, f.ClientSecret)
+	dresp, err := http.DefaultClient.Do(dreq)
+	if err != nil {
+		t.Fatalf("delete token: %v", err)
+	}
+	dresp.Body.Close()
+	if dresp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete token status = %d, want 204", dresp.StatusCode)
+	}
+
+	// The access token is now dead at /user.
+	ureq2, _ := http.NewRequest(http.MethodGet, f.URL()+"/user", nil)
+	ureq2.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	uresp2, _ := http.DefaultClient.Do(ureq2)
+	if uresp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("/user after delete token = %d, want 401", uresp2.StatusCode)
+	}
+	uresp2.Body.Close()
+
+	// But the refresh chain is still alive — we can rotate.
+	rform := url.Values{
+		"client_id":     {f.ClientID},
+		"client_secret": {f.ClientSecret},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {tok.RefreshToken},
+	}
+	rr, err := http.Post(f.URL()+"/login/oauth/access_token", "application/x-www-form-urlencoded",
+		strings.NewReader(rform.Encode()))
+	if err != nil {
+		t.Fatalf("refresh after delete token: %v", err)
+	}
+	var rout struct {
+		AccessToken string `json:"access_token"`
+		Error       string `json:"error"`
+	}
+	_ = json.NewDecoder(rr.Body).Decode(&rout)
+	rr.Body.Close()
+	if rout.AccessToken == "" || rout.Error != "" {
+		t.Fatalf("refresh after delete token = %+v, want new access_token", rout)
+	}
+
+	// 404 on a second delete of the same (now-dead) access token.
+	tbody2, _ := json.Marshal(map[string]string{"access_token": tok.AccessToken})
+	dreq2, _ := http.NewRequest(http.MethodDelete, f.URL()+"/applications/"+f.ClientID+"/token",
+		bytes.NewReader(tbody2))
+	dreq2.SetBasicAuth(f.ClientID, f.ClientSecret)
+	dresp2, _ := http.DefaultClient.Do(dreq2)
+	dresp2.Body.Close()
+	if dresp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("idempotent delete token status = %d, want 404", dresp2.StatusCode)
+	}
+}

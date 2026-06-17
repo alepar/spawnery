@@ -44,10 +44,16 @@ func (s *Service) Handler() http.Handler {
 	mux.Handle(authv1connect.NewAuthServiceHandler(s))
 
 	if s.githubLinkExchanger != nil {
-		mux.HandleFunc("GET /github/link/authorize", s.serveGitHubLinkAuthorize)
-		mux.HandleFunc("GET /github/link/callback", s.serveGitHubLinkCallback)
-		mux.HandleFunc("POST /github/link/redeem", s.serveGitHubLinkRedeem)
-		mux.HandleFunc("POST /github/link/revoke", s.serveGitHubLinkRevoke)
+		ghNoop := func(http.ResponseWriter, *http.Request) {}
+		mux.HandleFunc("POST /github/link/start", s.ghLinkCORSBearerSimple(s.serveGitHubLinkStart))
+		mux.HandleFunc("OPTIONS /github/link/start", s.ghLinkCORSBearerSimple(ghNoop))
+		mux.HandleFunc("GET /github/link/callback", s.serveGitHubLinkCallback) // top-level nav from GitHub; no CORS
+		mux.HandleFunc("POST /github/link/redeem", s.ghLinkCORSCredentialed(s.serveGitHubLinkRedeem))
+		mux.HandleFunc("OPTIONS /github/link/redeem", s.ghLinkCORSCredentialed(ghNoop))
+		mux.HandleFunc("GET /github/links", s.ghLinkCORSBearerSimple(s.serveGitHubLinkList))
+		mux.HandleFunc("OPTIONS /github/links", s.ghLinkCORSBearerSimple(ghNoop))
+		mux.HandleFunc("POST /github/link/revoke", s.ghLinkCORSBearerSimple(s.serveGitHubLinkRevoke))
+		mux.HandleFunc("OPTIONS /github/link/revoke", s.ghLinkCORSBearerSimple(ghNoop))
 	}
 
 	if s.deviceSet != nil {

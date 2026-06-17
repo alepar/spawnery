@@ -390,35 +390,31 @@ func TestRedeemUpsertConcurrentDistinctVersions(t *testing.T) {
 		TokenType: "bearer", UpdatedAt: 1,
 	}
 
+	type result struct {
+		version uint64
+		err     error
+	}
 	const n = 8
-	versions := make(chan uint64, n)
-	errs := make(chan error, n)
+	results := make(chan result, n)
 	for i := range n {
 		go func(i int) {
 			link := base
 			link.RefreshToken = "ghr_c" + strconv.Itoa(i)
 			link.AccessToken = "ghu_c" + strconv.Itoa(i)
 			res, err := st.GitHubLinks().RedeemUpsert(ctx, link)
-			if err != nil {
-				errs <- err
-				return
-			}
-			errs <- nil
-			versions <- res.Version
+			results <- result{version: res.Version, err: err}
 		}(i)
 	}
-	for range n {
-		if err := <-errs; err != nil {
-			t.Fatalf("concurrent RedeemUpsert: %v", err)
-		}
-	}
-	close(versions)
 	seen := map[uint64]bool{}
-	for v := range versions {
-		if seen[v] {
-			t.Fatalf("duplicate version %d (versions not DB-serialized)", v)
+	for range n {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("concurrent RedeemUpsert: %v", r.err)
 		}
-		seen[v] = true
+		if seen[r.version] {
+			t.Fatalf("duplicate version %d (versions not DB-serialized)", r.version)
+		}
+		seen[r.version] = true
 	}
 	if len(seen) != n {
 		t.Fatalf("expected %d distinct versions, got %d", n, len(seen))
