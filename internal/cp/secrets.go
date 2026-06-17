@@ -120,6 +120,7 @@ func sealedSecretToNode(sec *cpv1.SealedSecret) *nodev1.SealedSecret {
 			GithubUserId:         sec.GithubToken.GithubUserId,
 			RefreshExpiresAtUnix: sec.GithubToken.RefreshExpiresAtUnix,
 			AppClientId:          sec.GithubToken.AppClientId,
+			AccessExpiresAtUnix:  sec.GithubToken.AccessExpiresAtUnix,
 		}
 	}
 	return out

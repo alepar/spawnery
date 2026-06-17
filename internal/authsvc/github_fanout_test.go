@@ -125,6 +125,10 @@ func TestCPGitHubFanoutSealsAccessTokenUsingTargetTemplates(t *testing.T) {
 		secret.GetGithubToken().GetHost() != "github.com" {
 		t.Fatalf("secret metadata = %+v", secret)
 	}
+	// access_expires_at_unix must be stamped from the fanout request so the node can schedule precisely.
+	if wantExpiry := now.Add(8 * time.Hour).Unix(); secret.GetGithubToken().GetAccessExpiresAtUnix() != wantExpiry {
+		t.Fatalf("access_expires_at_unix = %d want %d", secret.GetGithubToken().GetAccessExpiresAtUnix(), wantExpiry)
+	}
 	if string(secret.GetSealed()) == "old-ciphertext" || len(secret.GetSealed()) == 0 {
 		t.Fatalf("secret sealed payload was not replaced: %q", secret.GetSealed())
 	}

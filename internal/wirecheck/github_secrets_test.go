@@ -70,6 +70,7 @@ func TestNodeGitHubSecretRoutingProtoSurface(t *testing.T) {
 	requireFieldNumber(t, &nodev1.GitHubTokenClearMetadata{}, "github_user_id", 3)
 	requireFieldNumber(t, &nodev1.GitHubTokenClearMetadata{}, "refresh_expires_at_unix", 4)
 	requireFieldNumber(t, &nodev1.GitHubTokenClearMetadata{}, "app_client_id", 5)
+	requireFieldNumber(t, &nodev1.GitHubTokenClearMetadata{}, "access_expires_at_unix", 6)
 
 	secret := &nodev1.SealedSecret{
 		TargetPath: "github/workspace/legacy-target",
@@ -97,6 +98,7 @@ func TestNodeGitHubSecretRoutingProtoSurface(t *testing.T) {
 			GithubUserId:         "123456",
 			RefreshExpiresAtUnix: 1893456000,
 			AppClientId:          "Iv1.spawnerytest",
+			AccessExpiresAtUnix:  1893420000, // precise access-token expiry for proactive refresh (sp-v40s.18)
 		},
 	}
 	start := &nodev1.StartSpawn{SpawnId: "sp1", Generation: 3, Secrets: []*nodev1.SealedSecret{secret}}
@@ -128,7 +130,8 @@ func TestNodeGitHubSecretRoutingProtoSurface(t *testing.T) {
 	if gotSecret.GetRender().GetGhConfigDir() != "github/workspace/gh" || gotSecret.GetRender().GetHostsPath() != "github/workspace/gh/hosts.yml" {
 		t.Fatalf("render routing lost on round-trip: %+v", gotSecret.GetRender())
 	}
-	if gotSecret.GetGithubToken().GetHost() != "github.com" || gotSecret.GetGithubToken().GetGithubUserId() != "123456" {
+	if gotSecret.GetGithubToken().GetHost() != "github.com" || gotSecret.GetGithubToken().GetGithubUserId() != "123456" ||
+		gotSecret.GetGithubToken().GetAccessExpiresAtUnix() != 1893420000 {
 		t.Fatalf("github clear metadata lost on round-trip: %+v", gotSecret.GetGithubToken())
 	}
 }
@@ -171,6 +174,7 @@ func TestCPGitHubSecretRoutingProtoSurface(t *testing.T) {
 	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "github_user_id", 3)
 	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "refresh_expires_at_unix", 4)
 	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "app_client_id", 5)
+	requireFieldNumber(t, &cpv1.GitHubTokenClearMetadata{}, "access_expires_at_unix", 6)
 	requireFieldNumber(t, &cpv1.SubmitIntentRequest{}, "secrets", 4)
 
 	secret := &cpv1.SealedSecret{
@@ -199,6 +203,7 @@ func TestCPGitHubSecretRoutingProtoSurface(t *testing.T) {
 			GithubUserId:         "123456",
 			RefreshExpiresAtUnix: 1893456000,
 			AppClientId:          "Iv1.spawnerytest",
+			AccessExpiresAtUnix:  1893420000, // precise access-token expiry for proactive refresh (sp-v40s.18)
 		},
 	}
 
@@ -215,7 +220,8 @@ func TestCPGitHubSecretRoutingProtoSurface(t *testing.T) {
 	if err := proto.Unmarshal(b, &got); err != nil {
 		t.Fatalf("unmarshal DeliverSecretsRequest: %v", err)
 	}
-	if len(got.GetSecrets()) != 1 || got.GetSecrets()[0].GetGithubToken().GetHost() != "github.com" {
+	if len(got.GetSecrets()) != 1 || got.GetSecrets()[0].GetGithubToken().GetHost() != "github.com" ||
+		got.GetSecrets()[0].GetGithubToken().GetAccessExpiresAtUnix() != 1893420000 {
 		t.Fatalf("cp secret routing lost on round-trip: %+v", got.GetSecrets())
 	}
 

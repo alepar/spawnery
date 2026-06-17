@@ -19,8 +19,8 @@ type GitHubMintClient interface {
 
 // Default timing. The node estimates an ~8h access-token lifetime and triggers a refresh slightly
 // INSIDE the AS rotate window (AS lead is 10m: it rotates only when expiry <= now+10m), so the AS
-// actually rotates. When the node lacks a precise expiry (first delivery) it uses receipt-relative
-// timing; a mint RESPONSE's access_expires_at_unix then refines refreshAt precisely.
+// actually rotates. When a delivery lacks a precise expiry (access_expires_at_unix = 0) it falls
+// back to receipt-relative timing; a mint RESPONSE's access_expires_at_unix then refines refreshAt.
 const (
 	defaultAccessLifetime  = 8 * time.Hour
 	nodeRefreshLead        = 8 * time.Minute // < AS 10m lead so the AS rotates on our call
@@ -35,12 +35,13 @@ const (
 // githubRefreshEntry is the node-side record of a delivered GitHub link for one spawn. It carries the
 // link reference (secret_id/version/delivery_id) the node presents to the AS — NOT any token.
 type githubRefreshEntry struct {
-	SpawnID      string
-	Generation   uint64
-	SecretID     string
-	Version      uint64
-	DeliveryID   string
-	RepositoryID string
+	SpawnID             string
+	Generation          uint64
+	SecretID            string
+	Version             uint64
+	DeliveryID          string
+	RepositoryID        string
+	AccessExpiresAtUnix int64 // precise access-token expiry from delivery metadata (0 = unknown; use receipt-relative default).
 }
 
 type refreshState struct {
@@ -67,8 +68,11 @@ func newGitHubRefresher(client GitHubMintClient) *githubRefresher {
 	}
 }
 
-// Note records (or refreshes) a delivered link for a spawn and (re)schedules its next proactive
-// refresh receipt-relative. Safe to call repeatedly (every delivery/fanout). nil-safe.
+// Note records (or refreshes) a delivered link for a spawn and schedules its next proactive
+// refresh. When the entry carries a precise AccessExpiresAtUnix from the delivery metadata, that
+// expiry drives the schedule (important on resume when the token may already be near expiry).
+// Falls back to receipt-relative timing when the expiry is absent (0). Safe to call repeatedly
+// (every delivery/fanout). nil-safe.
 func (r *githubRefresher) Note(e githubRefreshEntry) {
 	if r == nil || e.SpawnID == "" || e.SecretID == "" {
 		return
@@ -87,7 +91,13 @@ func (r *githubRefresher) Note(e githubRefreshEntry) {
 		bySecret[e.SecretID] = st
 	}
 	st.entry = e
-	st.refreshAt = now.Add(defaultRefreshInterval)
+	if e.AccessExpiresAtUnix > 0 {
+		// Precise schedule: refresh just inside the AS rotate window relative to the actual expiry.
+		st.refreshAt = time.Unix(e.AccessExpiresAtUnix, 0).Add(-nodeRefreshLead)
+	} else {
+		// Fallback: receipt-relative default (8h lifetime assumption).
+		st.refreshAt = now.Add(defaultRefreshInterval)
+	}
 	st.nextAttempt = time.Time{}
 	st.inFlight = false
 	st.backoffDur = 0
