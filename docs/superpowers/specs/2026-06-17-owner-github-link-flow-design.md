@@ -378,18 +378,31 @@ is **not** answered here — needs an owner under `sp-dl62`.
 
 ## 10. Spikes
 
-- **S1 — Web CORS + cookie round-trip.** `fetch('https://auth.X/github/link/redeem',{credentials:'include'})`
-  from `app.X` after a SameSite=Strict callback cookie: confirm it fails under `corsBearerSimple` and
-  succeeds under `corsCredentialed`; measure cold `bootstrap()` latency vs the ≈5m cookie TTL. *Kill:* if
-  bootstrap routinely exceeds the cookie TTL, raise it or re-architect the return.
-- ~~**S2 — Relink / fresh-auth token invalidation.**~~ **Already resolved by `sp-v40s.3`** (verdict
-  2026-06-16): a fresh re-link does NOT invalidate predecessor tokens; only rotation (predecessor access
-  token) and grant-wide `/grant` do. Folded into §6.5 as a confirmed design consequence (running-spawn
-  graceful-until-8h holds; relink-orphaned refresh chain is grant-wide-revoke-only; reaper does targeted
-  `DELETE /token` on abandoned flows). No new spike needed.
-- **S3 — Shared-host loopback isolation.** On a multi-user host, user A binds `127.0.0.1:<port>` for
-  `gh link`; user B attempts to bind/probe the same port. *Kill:* if not OS-isolated per-user, document
-  loopback A1 as host-trust-bounded (not closed) and/or fall back to device on shared hosts.
+- **S1 — Web CORS + cookie round-trip. RESOLVED (2026-06-17, by code inspection).** `corsBearerSimple`
+  (`internal/authsvc/deviceset_http.go:22-46`) sets `Access-Control-Allow-Origin`+`Vary` but
+  **deliberately omits `Access-Control-Allow-Credentials`** (own doc comment); `corsCredentialed`
+  (`internal/authsvc/cors.go:14-34`) sets **`Access-Control-Allow-Credentials: true`** + exact-origin
+  ACAO (hard 403 for other origins) and passes Origin-less CLI callers through. Per the Fetch spec a
+  cross-origin `credentials:'include'` request (required to attach the HttpOnly SameSite=Strict callback
+  cookie) is blocked unless the response carries ACAC:true — so **`redeem`→`corsCredentialed` is correct
+  and necessary; `corsBearerSimple` would silently break web redeem** (the re-roast blocker). Cookie TTL
+  (≈5m) ≫ cold `bootstrap()` (seconds) — ample headroom; no TTL change needed. **Impl note for `.20.1`:**
+  `corsCredentialed` is a method on `*IdP`; the GitHub-link handlers hang off `*Service`, so the
+  credentialed wrapper (or an equivalent that also accepts `Authorization: Bearer`) must be shared/exposed
+  to them. The live browser round-trip is wired as a `.20.1`/`.20.2` integration test (cheapest live
+  confirmation; the rule itself is deterministic).
+- ~~**S2 — Relink / fresh-auth token invalidation.**~~ **Resolved by `sp-v40s.3`** (verdict 2026-06-16):
+  a fresh re-link does NOT invalidate predecessor tokens; only rotation (predecessor access token) and
+  grant-wide `/grant` do. Folded into §6.5. No new spike needed.
+- **S3 — Shared-host loopback isolation. RESOLVED (2026-06-17, by local demonstration).** A separate
+  process connected to another's `127.0.0.1` listener and delivered a fake `rc`; a second `bind()` on the
+  held port returns `EADDRINUSE` (first binder owns it). So `127.0.0.1` is **host-global with no
+  per-process/per-user isolation** (absent network namespaces) — RFC 8252 §8.3 loopback interception. On a
+  shared multi-user host, a co-resident attacker who picks `client_kind=loopback:<port>` and binds first
+  receives the victim's `rc`, so **loopback does not close A1 there** — it degrades to the device residual.
+  The single-user-host precondition (L15/§6.3) is therefore **necessary, not optional**; `.20.3` should
+  additionally prefer device flow on a detected shared/headless host (no worse than the documented device
+  residual). Per-user loopback isolation (network namespaces) is out of MVP scope.
 
 ## Post-Implementation Notes
 
