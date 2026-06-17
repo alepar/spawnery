@@ -4,12 +4,19 @@ import { setTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { TerminalSettings } from "./settings/TerminalSettings";
 import { DeviceManagement } from "./settings/DeviceManagement";
+import { GitHubSettings } from "./settings/GitHubSettings";
+import { getFlowMarker, parseLinkError } from "@/github/flow";
 
-type Tab = "general" | "terminal" | "devices";
+type Tab = "general" | "terminal" | "devices" | "github";
+
+function initialTab(): Tab {
+  if (getFlowMarker() !== null || parseLinkError(window.location.search) !== null) return "github";
+  return "general";
+}
 
 export function SettingsView() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
-  const [tab, setTab] = useState<Tab>("general");
+  const [tab, setTab] = useState<Tab>(initialTab);
 
   return (
     <div className="max-w-md space-y-6 p-6" data-testid="settings">
@@ -35,6 +42,13 @@ export function SettingsView() {
         >
           Devices
         </TabButton>
+        <TabButton
+          id="settings-tab-github"
+          active={tab === "github"}
+          onClick={() => setTab("github")}
+        >
+          GitHub
+        </TabButton>
       </div>
 
       {tab === "general" && (
@@ -54,6 +68,8 @@ export function SettingsView() {
       {tab === "terminal" && <TerminalSettings />}
 
       {tab === "devices" && <DeviceManagement />}
+
+      {tab === "github" && <GitHubSettings />}
     </div>
   );
 }

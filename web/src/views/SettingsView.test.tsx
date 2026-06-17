@@ -16,6 +16,10 @@ vi.mock("./settings/DeviceManagement", () => ({
   DeviceManagement: () => <div data-testid="device-management-stub">device management</div>,
 }));
 
+vi.mock("./settings/GitHubSettings", () => ({
+  GitHubSettings: () => <div data-testid="github-settings-stub" />,
+}));
+
 vi.mock("@xterm/xterm", () => ({
   Terminal: vi.fn(() => ({
     loadAddon: vi.fn(),
@@ -35,6 +39,7 @@ vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
 import { SettingsView } from "./SettingsView";
 import { TermSettingsProvider } from "@/term/settings";
+import { setFlowMarker } from "@/github/flow";
 
 function renderView() {
   return render(
@@ -45,7 +50,7 @@ function renderView() {
 }
 
 describe("SettingsView", () => {
-  beforeEach(() => { document.documentElement.className = ""; localStorage.clear(); });
+  beforeEach(() => { document.documentElement.className = ""; localStorage.clear(); sessionStorage.clear(); });
 
   it("renders with the settings root and General tab active by default", () => {
     renderView();
@@ -79,5 +84,21 @@ describe("SettingsView", () => {
     await userEvent.click(screen.getByTestId("settings-tab-devices"));
     expect(screen.getByTestId("device-management-stub")).toBeTruthy();
     expect(screen.queryByTestId("theme-toggle")).toBeNull();
+  });
+});
+
+describe("SettingsView — GitHub tab", () => {
+  beforeEach(() => { sessionStorage.clear(); });
+
+  it("shows the GitHub tab and opens the panel when clicked", async () => {
+    renderView();
+    await userEvent.click(screen.getByTestId("settings-tab-github"));
+    expect(screen.getByTestId("github-settings-stub")).toBeInTheDocument();
+  });
+
+  it("opens the GitHub tab by default when a flow marker is present (post-callback return)", () => {
+    setFlowMarker("flow-1");
+    renderView();
+    expect(screen.getByTestId("github-settings-stub")).toBeInTheDocument();
   });
 });
