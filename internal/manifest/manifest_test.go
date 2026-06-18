@@ -48,6 +48,38 @@ func TestParseFullSchema(t *testing.T) {
 	}
 }
 
+func TestParseGitHubSlotMount(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "spawneryapp.yml"), []byte(`
+apiVersion: spawnery/v1
+kind: App
+id: spawnery/gh
+storage:
+  mounts:
+    - name: repo
+      path: repo
+      durability: node-local
+      github: true
+    - name: cache
+      path: cache
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Parse(dir)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(m.Storage.Mounts) != 2 {
+		t.Fatalf("want 2 mounts, got %d", len(m.Storage.Mounts))
+	}
+	if !m.Storage.Mounts[0].Github {
+		t.Fatalf("mount[0] github = false, want true")
+	}
+	if m.Storage.Mounts[1].Github {
+		t.Fatalf("mount[1] github = true, want false (default)")
+	}
+}
+
 func TestParseNoStorage(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "spawneryapp.yml"), []byte("id: spawnery/zork\n"), 0o644)

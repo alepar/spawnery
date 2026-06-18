@@ -59,6 +59,7 @@ func (r *appRepo) UpsertVersion(ctx context.Context, v AppVersion, mounts []Moun
 		if _, err := r.db.NewInsert().Model(&mounts[i]).
 			On("CONFLICT (app_id, version, name) DO UPDATE").
 			Set("required = EXCLUDED.required").Set("path = EXCLUDED.path").Set("seed = EXCLUDED.seed").
+			Set("github = EXCLUDED.github").
 			Exec(ctx); err != nil {
 			return err
 		}

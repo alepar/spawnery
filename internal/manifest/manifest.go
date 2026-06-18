@@ -20,6 +20,10 @@ type Mount struct {
 	// Empty/ephemeral preserves today's scratch contract — the journaler is a
 	// no-op until a mount opts in. See internal/storage/journal.ParseDurability.
 	Durability string `yaml:"durability"`
+	// Github marks this mount as a GitHub SLOT (live-dev D1): the app declares the slot, the user
+	// supplies owner/repo at create. The CP requires a github:owner/repo binding and (T3) resolves
+	// the creator's link. Default false (a normal scratch/journaled mount).
+	Github bool `yaml:"github"`
 }
 
 type Storage struct {

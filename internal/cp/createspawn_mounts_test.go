@@ -133,3 +133,85 @@ func TestCreateSpawnRejectsGithubMountWithoutCredentialSecretID(t *testing.T) {
 		t.Fatalf("CreateSpawn error code = %v, want InvalidArgument (err=%v)", connect.CodeOf(err), err)
 	}
 }
+
+// seedCreateSpawnGitHubSlotApp seeds an app whose named mounts include a github SLOT plus optional
+// plain (scratch) mounts.
+func seedCreateSpawnGitHubSlotApp(t *testing.T, s *Server, appID, slot string, plain ...string) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().Unix()
+	if err := s.st.Apps().Upsert(ctx, store.App{
+		ID: appID, DisplayName: appID, Visibility: "public", Listed: true, CreatorID: "spawnery", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	decls := []store.MountDecl{{AppID: appID, Version: "1.0.0", Name: slot, Path: slot, Required: true, Github: true}}
+	for _, name := range plain {
+		decls = append(decls, store.MountDecl{AppID: appID, Version: "1.0.0", Name: name, Required: true})
+	}
+	if err := s.st.Apps().UpsertVersion(ctx,
+		store.AppVersion{AppID: appID, Version: "1.0.0", Ref: "examples/" + appID, Tier: store.TierReviewed, CreatedAt: now},
+		decls); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateSpawnGitHubSlotBindsRepoAndDefaultsOthersToScratch(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	seedCreateSpawnGitHubSlotApp(t, s, "gh-slot-app", "repo", "cache")
+
+	sender := &capSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: sender, Max: 1, Free: 1})
+	go func() {
+		for {
+			if st := sender.firstStart(); st != nil {
+				s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId: "gh-slot-app",
+		Model: "m",
+		Mounts: []*cpv1.MountBinding{{
+			Name:            "repo",
+			BackendUri:      "github:owner/repo",
+			CreateIfMissing: true,
+			RepositoryId:    "123",
+		}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitActive(t, s, resp.Msg.SpawnId)
+
+	mounts, err := s.st.Spawns().GetMounts(ctx, resp.Msg.SpawnId)
+	if err != nil {
+		t.Fatalf("GetMounts: %v", err)
+	}
+	got := map[string]store.Mount{}
+	for _, m := range mounts {
+		got[m.Name] = m
+	}
+	if got["repo"].BackendURI != "github:owner/repo" || got["repo"].CredentialSecretID != "" || !got["repo"].CreateIfMissing || got["repo"].RepositoryID != "123" {
+		t.Fatalf("repo mount = %+v; want github backend, empty credential (T3 resolves)", got["repo"])
+	}
+	if got["cache"].BackendURI != "scratch" {
+		t.Fatalf("cache backend = %q, want scratch", got["cache"].BackendURI)
+	}
+}
+
+func TestCreateSpawnRejectsUnboundGitHubSlot(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	seedCreateSpawnGitHubSlotApp(t, s, "gh-slot-app2", "repo")
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId: "gh-slot-app2", Model: "m",
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("CreateSpawn code = %v, want InvalidArgument (err=%v)", connect.CodeOf(err), err)
+	}
+}

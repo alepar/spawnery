@@ -54,6 +54,14 @@ func validateManifest(m *cpv1.AppManifest, version, ref string) error {
 		if strings.TrimSpace(mt.Path) == "" {
 			return fmt.Errorf("mount %q: path is required", mt.Name)
 		}
+		if mt.GetGithub() {
+			switch strings.TrimSpace(mt.Durability) {
+			case "node-local", "owner-sealed":
+				// journaled — ok; a github clone survives suspend/resume (§16.7).
+			default:
+				return fmt.Errorf("github mount %q: durability must be \"node-local\" or \"owner-sealed\" (got %q); a github slot must be journaled", mt.Name, mt.Durability)
+			}
+		}
 	}
 	return nil
 }

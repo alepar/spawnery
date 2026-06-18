@@ -69,6 +69,7 @@ type MountDecl struct {
 	Path          string `bun:"path,notnull"`
 	Seed          string `bun:"seed,notnull"`
 	Required      bool   `bun:"required,notnull"`
+	Github        bool   `bun:"github,notnull"`
 }
 
 // transientStatuses are spawn statuses that represent an in-progress transition. Every spawn in one

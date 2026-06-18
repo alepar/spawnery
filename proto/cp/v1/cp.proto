@@ -313,7 +313,14 @@ message ManifestModel {
 }
 // durability (field 4): per-mount durability class (transient-tier §1a): "ephemeral" (default),
 // "node-local", or "owner-sealed". Empty/unset = ephemeral (no journaling).
-message ManifestMount { string name = 1; string path = 2; string seed = 3; string durability = 4; }
+// durability (field 4): per-mount durability class (transient-tier §1a): "ephemeral" (default),
+// "node-local", or "owner-sealed". Empty/unset = ephemeral (no journaling).
+// github (field 5): marks this mount as a GitHub SLOT (live-dev D1). The app declares the slot
+// (name/path/durability); the USER supplies owner/repo at create. The CP requires a
+// github:owner/repo binding for a slot and (T3) auto-resolves the creator's gh:<account> link into a
+// node-JIT-mint link-ref — no token is named here. A github slot MUST use a journaled durability
+// class (node-local|owner-sealed); ephemeral loses the clone on suspend (§16.7).
+message ManifestMount { string name = 1; string path = 2; string seed = 3; string durability = 4; bool github = 5; }
 
 message RegisterAppVersionRequest {
   AppManifest manifest = 1;

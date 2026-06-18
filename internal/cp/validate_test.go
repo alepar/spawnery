@@ -17,6 +17,14 @@ func TestValidateManifest(t *testing.T) {
 	if err := validateManifest(validManifest(), "1.0.0", "alice/wiki@sha"); err != nil {
 		t.Fatalf("valid manifest rejected: %v", err)
 	}
+
+	okSlot := validManifest()
+	okSlot.Mounts[0].Github = true
+	okSlot.Mounts[0].Durability = "node-local"
+	if err := validateManifest(okSlot, "1.0.0", "alice/wiki@sha"); err != nil {
+		t.Fatalf("valid github-slot manifest rejected: %v", err)
+	}
+
 	cases := []struct {
 		name    string
 		mutate  func(*cpv1.AppManifest)
@@ -35,6 +43,9 @@ func TestValidateManifest(t *testing.T) {
 			m.Mounts = append(m.Mounts, &cpv1.ManifestMount{Name: "main", Path: "x"})
 		}, "1.0.0", "r"},
 		{"empty mount path", func(m *cpv1.AppManifest) { m.Mounts[0].Path = "" }, "1.0.0", "r"},
+		{"github slot rejects ephemeral durability", func(m *cpv1.AppManifest) {
+			m.Mounts[0].Github = true // durability empty == ephemeral
+		}, "1.0.0", "r"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

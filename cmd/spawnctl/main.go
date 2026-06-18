@@ -90,7 +90,7 @@ func manifestToProto(appDir string) (*cpv1.AppManifest, error) {
 	}
 	mounts := make([]*cpv1.ManifestMount, len(m.Storage.Mounts))
 	for i, mt := range m.Storage.Mounts {
-		mounts[i] = &cpv1.ManifestMount{Name: mt.Name, Path: mt.Path, Seed: mt.Seed, Durability: mt.Durability}
+		mounts[i] = &cpv1.ManifestMount{Name: mt.Name, Path: mt.Path, Seed: mt.Seed, Durability: mt.Durability, Github: mt.Github}
 	}
 	return &cpv1.AppManifest{
 		ApiVersion: m.APIVersion, Id: m.ID, Title: m.Title, Description: m.Description,

@@ -62,7 +62,7 @@ func Seed(ctx context.Context, st store.Store, tokens map[string]string, apps []
 		decls := make([]store.MountDecl, len(a.Mounts))
 		for i, name := range a.Mounts {
 			mt := manifestMounts[name]
-			decls[i] = store.MountDecl{AppID: a.ID, Version: a.Version, Name: name, Path: mt.Path, Seed: mt.Seed, Required: true}
+			decls[i] = store.MountDecl{AppID: a.ID, Version: a.Version, Name: name, Path: mt.Path, Seed: mt.Seed, Required: true, Github: mt.Github}
 		}
 		if err := st.Apps().UpsertVersion(ctx,
 			store.AppVersion{AppID: a.ID, Version: a.Version, Ref: a.Ref, Tier: store.TierReviewed, Manifest: manifestJSON, CreatedAt: now},
@@ -90,6 +90,7 @@ func seedManifestJSON(a AppSeed) (string, map[string]manifest.Mount, error) {
 		Path       string `json:"path,omitempty"`
 		Seed       string `json:"seed,omitempty"`
 		Durability string `json:"durability,omitempty"`
+		Github     bool   `json:"github,omitempty"`
 	}
 	type seedManifest struct {
 		Mounts []seedManifestMount `json:"mounts"`
@@ -102,6 +103,7 @@ func seedManifestJSON(a AppSeed) (string, map[string]manifest.Mount, error) {
 			Path:       mt.Path,
 			Seed:       mt.Seed,
 			Durability: mt.Durability,
+			Github:     mt.Github,
 		})
 	}
 	b, err := json.Marshal(out)

@@ -48,7 +48,7 @@ func (s *Server) RegisterAppVersion(ctx context.Context, req *connect.Request[cp
 	now := time.Now().Unix()
 	mounts := make([]store.MountDecl, len(m.Mounts))
 	for i, mt := range m.Mounts {
-		mounts[i] = store.MountDecl{AppID: m.Id, Version: req.Msg.Version, Name: mt.Name, Path: mt.Path, Seed: mt.Seed, Required: true}
+		mounts[i] = store.MountDecl{AppID: m.Id, Version: req.Msg.Version, Name: mt.Name, Path: mt.Path, Seed: mt.Seed, Required: true, Github: mt.GetGithub()}
 	}
 
 	if err := s.st.WithTx(ctx, func(tx store.Store) error {
