@@ -357,6 +357,204 @@ func TestMintGitHubAccessTokenRecoversStagedRotationAfterCommitFailure(t *testin
 	}
 }
 
+// initialMintReq builds a MintGitHubAccessTokenRequest with a bare initial link-ref (secret_id only;
+// version=0, delivery_id="" signals that the caller has never received a delivery).
+func initialMintReq() *authv1.MintGitHubAccessTokenRequest {
+	return &authv1.MintGitHubAccessTokenRequest{
+		RequestId:    "mint-initial-sp1-gen3-gh-main",
+		SpawnId:      "sp1",
+		Generation:   3,
+		RepositoryId: "987",
+		LinkRef: &authv1.GitHubLinkRef{SecretId: "gh-main"}, // version=0, delivery_id="" → initial
+	}
+}
+
+func TestMintGitHubAccessTokenInitialRefReturnsCurrentFreshToken(t *testing.T) {
+	now := time.Unix(1770000000, 0)
+	st := store.NewTestStore(t)
+	seedGitHubLink(t, st, now.Add(time.Hour).Unix()) // access token FRESH (beyond 10m lead)
+	provider := &testGitHubMintProvider{}             // must NOT be called
+
+	var authz GitHubMintAuthorization
+	var fanout GitHubAccessTokenFanout
+	svc := newMintAS(t,
+		WithClock(func() time.Time { return now }),
+		WithGitHubMinting(st, provider),
+		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "node-1", true }),
+		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(_ context.Context, got GitHubMintAuthorization) error {
+			authz = got
+			return nil
+		})),
+		WithGitHubAccessTokenFanout(GitHubAccessTokenFanoutFunc(func(_ context.Context, got GitHubAccessTokenFanout) error {
+			fanout = got
+			return nil
+		})),
+	)
+
+	resp, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(initialMintReq()))
+	if err != nil {
+		t.Fatalf("initial mint: %v", err)
+	}
+	if resp.Msg.GetAccessToken() != "ghu_current" {
+		t.Fatalf("access token = %q, want ghu_current", resp.Msg.GetAccessToken())
+	}
+	if resp.Msg.GetRefreshed() {
+		t.Fatalf("refreshed = true, want false for fresh token")
+	}
+	if resp.Msg.GetRepositoryId() != "987" {
+		t.Fatalf("repository_id = %q, want 987", resp.Msg.GetRepositoryId())
+	}
+	// Dedup: fresh token returned, no GitHub call.
+	if provider.calls != 0 {
+		t.Fatalf("provider calls = %d, want 0 (fresh dedup, no GitHub call)", provider.calls)
+	}
+	// authZ STILL ran for the initial ref — containment invariant (d).
+	if authz.NodeID != "node-1" || authz.SpawnID != "sp1" || authz.SecretID != "gh-main" || authz.Generation != 3 {
+		t.Fatalf("authz request = %+v", authz)
+	}
+	// The bare ref carries version=0 + delivery_id="" — CP ignores them (verified in design).
+	if authz.Version != 0 || authz.DeliveryID != "" {
+		t.Fatalf("authz version/deliveryID = %d/%q, want 0/empty (bare initial ref)", authz.Version, authz.DeliveryID)
+	}
+	// Fanout is not called for a fresh dedup (no new delivery).
+	_ = fanout // nothing fanout'd for a fresh token
+}
+
+func TestMintGitHubAccessTokenInitialRefRefreshesWhenStale(t *testing.T) {
+	now := time.Unix(1770000000, 0)
+	st := store.NewTestStore(t)
+	seedGitHubLink(t, st, now.Add(time.Minute).Unix()) // access EXPIRES within the 10m lead → stale
+	provider := &testGitHubMintProvider{
+		wantRefresh: "ghr_old",
+		next: GitHubUserToken{
+			AccessToken:          "ghu_rotated",
+			AccessExpiresAtUnix:  now.Add(8 * time.Hour).Unix(),
+			RefreshToken:         "ghr_rotated",
+			RefreshExpiresAtUnix: now.Add(180 * 24 * time.Hour).Unix(),
+			TokenType:            "bearer",
+		},
+	}
+	svc := newMintAS(t,
+		WithClock(func() time.Time { return now }),
+		WithGitHubMinting(st, provider),
+		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "node-1", true }),
+		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(context.Context, GitHubMintAuthorization) error { return nil })),
+		WithGitHubAccessTokenFanout(GitHubAccessTokenFanoutFunc(func(context.Context, GitHubAccessTokenFanout) error { return nil })),
+	)
+
+	resp, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(initialMintReq()))
+	if err != nil {
+		t.Fatalf("initial mint stale: %v", err)
+	}
+	if resp.Msg.GetAccessToken() != "ghu_rotated" || !resp.Msg.GetRefreshed() {
+		t.Fatalf("response = %+v, want ghu_rotated refreshed=true", resp.Msg)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("provider calls = %d, want 1 (stale → refresh)", provider.calls)
+	}
+	got, err := st.GitHubLinks().Get(context.Background(), "gh-main")
+	if err != nil {
+		t.Fatalf("get link after initial refresh: %v", err)
+	}
+	if got.Version != 12 || got.DeliveryID != "github-access-gh-main-v12" || got.RefreshToken != "ghr_rotated" {
+		t.Fatalf("rotated link = %+v", got)
+	}
+}
+
+func TestMintGitHubAccessTokenInitialRefStillRequiresNodeIdentity(t *testing.T) {
+	now := time.Unix(1770000000, 0)
+	st := store.NewTestStore(t)
+	seedGitHubLink(t, st, now.Add(time.Hour).Unix())
+	svc := newMintAS(t,
+		WithClock(func() time.Time { return now }),
+		WithGitHubMinting(st, &testGitHubMintProvider{}),
+		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "", false }),
+	)
+
+	_, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(initialMintReq()))
+	if connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Fatalf("code = %v err=%v, want CodeUnauthenticated", connect.CodeOf(err), err)
+	}
+}
+
+func TestMintGitHubAccessTokenInitialRefHonorsCPIndexCheck(t *testing.T) {
+	now := time.Unix(1770000000, 0)
+	st := store.NewTestStore(t)
+	seedGitHubLink(t, st, now.Add(time.Hour).Unix())
+	provider := &testGitHubMintProvider{}
+	svc := newMintAS(t,
+		WithClock(func() time.Time { return now }),
+		WithGitHubMinting(st, provider),
+		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "node-1", true }),
+		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(context.Context, GitHubMintAuthorization) error {
+			return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("spawn not in CP index"))
+		})),
+	)
+
+	_, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(initialMintReq()))
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("code = %v err=%v, want CodePermissionDenied", connect.CodeOf(err), err)
+	}
+	if provider.calls != 0 {
+		t.Fatalf("provider calls = %d, want 0 (authZ must block before any token handling)", provider.calls)
+	}
+}
+
+func TestMintGitHubAccessTokenInitialRefRelinkRequired(t *testing.T) {
+	now := time.Unix(1770000000, 0)
+	st := store.NewTestStore(t)
+	seedGitHubLink(t, st, now.Add(time.Hour).Unix())
+	if err := st.GitHubLinks().MarkRelinkRequired(context.Background(), "gh-main", now.Unix()); err != nil {
+		t.Fatalf("MarkRelinkRequired: %v", err)
+	}
+	svc := newMintAS(t,
+		WithClock(func() time.Time { return now }),
+		WithGitHubMinting(st, &testGitHubMintProvider{}),
+		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "node-1", true }),
+		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(context.Context, GitHubMintAuthorization) error { return nil })),
+	)
+
+	_, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(initialMintReq()))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("code = %v err=%v, want CodeFailedPrecondition", connect.CodeOf(err), err)
+	}
+	if !strings.Contains(err.Error(), "relink_required") {
+		t.Fatalf("error must carry relink_required token: %v", err)
+	}
+}
+
+func TestMintGitHubAccessTokenRejectsHalfPopulatedRef(t *testing.T) {
+	now := time.Unix(1770000000, 0)
+	st := store.NewTestStore(t)
+	seedGitHubLink(t, st, now.Add(time.Hour).Unix())
+	svc := newMintAS(t,
+		WithClock(func() time.Time { return now }),
+		WithGitHubMinting(st, &testGitHubMintProvider{}),
+		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "node-1", true }),
+		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(context.Context, GitHubMintAuthorization) error { return nil })),
+	)
+
+	// version set but delivery_id empty — malformed.
+	req := &authv1.MintGitHubAccessTokenRequest{
+		RequestId: "r1", SpawnId: "sp1", Generation: 3, RepositoryId: "987",
+		LinkRef: &authv1.GitHubLinkRef{SecretId: "gh-main", Version: 11},
+	}
+	_, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(req))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("half-populated (version only) code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+
+	// delivery_id set but version 0 — malformed mirror.
+	req2 := &authv1.MintGitHubAccessTokenRequest{
+		RequestId: "r2", SpawnId: "sp1", Generation: 3, RepositoryId: "987",
+		LinkRef: &authv1.GitHubLinkRef{SecretId: "gh-main", DeliveryId: "delivery-x"},
+	}
+	_, err = svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(req2))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("half-populated (delivery_id only) code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+}
+
 // GAP-B (lost GitHub response): the rotation result was lost; on retry GitHub rejects the now-dead
 // refresh token. The AS must surface a TERMINAL, non-retryable relink_required (CodeFailedPrecondition),
 // mark the link, and NOT keep calling GitHub on further retries.

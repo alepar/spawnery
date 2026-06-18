@@ -37,7 +37,12 @@
 //	  GITHUB_API_URL                 Base URL for GitHub API (default: https://api.github.com)
 //
 //	AS callback + SPA contract:
-//	  AS_GITHUB_REDIRECT_URI         AS's /oauth/callback URL as registered at GitHub App
+//	  AS_GITHUB_REDIRECT_URI         AS's /oauth/callback URL as registered at GitHub App (login flow)
+//	  AS_GITHUB_LINK_REDIRECT_URI    AS's /github/link/callback URL as registered at the GitHub App
+//	                                 (activates the owner GitHub link flow; distinct from
+//	                                 AS_GITHUB_REDIRECT_URI which is the login /oauth/callback)
+//	  AS_GITHUB_POST_REDEEM_REDIRECT SPA page to land on after a successful link callback (optional)
+//	  GITHUB_DEFAULT_HOST            Default git host for new links (default: github.com)
 //	  AS_SPA_ORIGINS                 The SPA origin for credentialed CORS (single origin; AM2 mandates one canonical origin per AS)
 //	  AS_REDIRECT_URIS               Comma-separated registered client redirect_uri allowlist
 //	  AS_VERIFICATION_URI            Device-grant user confirmation URL (SPA's /device/verify page)
@@ -190,15 +195,18 @@ func buildService() (*authsvc.Service, error) {
 	// GitHub provider. AS_DEV without real creds falls back to the in-process fake, so
 	// `just dev` boots with zero GitHub setup (matching the header doc); real creds win.
 	var ghProvider authsvc.GitHubProvider
+	var ghAppClientID string
 	if os.Getenv("AS_FAKE_GITHUB") == "1" || (os.Getenv("AS_DEV") == "1" && os.Getenv("GITHUB_CLIENT_ID") == "") {
 		log.Printf("authsvc: using in-process fake GitHub (dev/CI only)")
 		fake := githubfake.New()
 		ghProvider = authsvc.NewGitHubProvider(fake.URL(), fake.URL(), fake.ClientID, fake.ClientSecret)
+		ghAppClientID = fake.ClientID
 	} else {
+		ghAppClientID = mustEnv("GITHUB_CLIENT_ID")
 		ghProvider = authsvc.NewGitHubProvider(
 			env("GITHUB_WEB_URL", "https://github.com"),
 			env("GITHUB_API_URL", "https://api.github.com"),
-			mustEnv("GITHUB_CLIENT_ID"),
+			ghAppClientID,
 			mustEnv("GITHUB_CLIENT_SECRET"),
 		)
 	}
@@ -260,6 +268,27 @@ func buildService() (*authsvc.Service, error) {
 			authsvc.WithGitHubAccessTokenFanout(authsvc.NewCPGitHubAccessTokenFanout(cpClient, pki.MarshalCertPEM(root.Cert), time.Now)),
 		)
 		log.Printf("authsvc: GitHub mint authorization/fanout wired to CP %s", cpURL)
+	}
+
+	// GitHub link bootstrap flow. Active only when AS_GITHUB_LINK_REDIRECT_URI is set — a
+	// distinct callback from the login /oauth/callback (AS_GITHUB_REDIRECT_URI).  Non-GitHub
+	// lanes leave this unset and the /github/link/* handlers remain dormant.
+	if linkRedirect := strings.TrimSpace(os.Getenv("AS_GITHUB_LINK_REDIRECT_URI")); linkRedirect != "" {
+		exchanger, ok := ghProvider.(authsvc.GitHubLinkExchanger)
+		if !ok {
+			return nil, fmt.Errorf("authsvc: github provider does not implement GitHubLinkExchanger")
+		}
+		opts = append(opts, authsvc.WithGitHubLink(authsvc.GitHubLinkConfig{
+			Exchanger:          exchanger,
+			Store:              idStore,
+			AppClientID:        ghAppClientID,
+			RedirectURI:        linkRedirect,
+			PostRedeemRedirect: env("AS_GITHUB_POST_REDEEM_REDIRECT", ""),
+			DefaultHost:        env("GITHUB_DEFAULT_HOST", "github.com"),
+			AccountFromReq:     authsvc.SessionBearerAccount(idp.KeySet(), time.Now),
+			SPAOrigin:          spaOrigin,
+		}))
+		log.Printf("authsvc: GitHub link bootstrap flow ACTIVE (callback %s)", linkRedirect)
 	}
 
 	return authsvc.New(root.Cert, inter, opts...), nil

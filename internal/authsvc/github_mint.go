@@ -40,8 +40,16 @@ func (s *Service) MintGitHubAccessToken(ctx context.Context, req *connect.Reques
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("request_id, spawn_id, and link_ref are required"))
 	}
 	ref := msg.GetLinkRef()
-	if strings.TrimSpace(ref.GetSecretId()) == "" || ref.GetVersion() == 0 || strings.TrimSpace(ref.GetDeliveryId()) == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("link_ref secret_id, version, and delivery_id are required"))
+	if strings.TrimSpace(ref.GetSecretId()) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("link_ref secret_id is required"))
+	}
+	// Approach 2 create-time delivery: an INITIAL ref carries only secret_id; the node does not yet
+	// know the link's current version/delivery_id (it has never received a delivery). Resolve them
+	// from the AS-custodial link below. An EXPLICIT (refresh) ref carries BOTH version and
+	// delivery_id. A half-populated ref is malformed.
+	initialRef := ref.GetVersion() == 0 && strings.TrimSpace(ref.GetDeliveryId()) == ""
+	if !initialRef && (ref.GetVersion() == 0 || strings.TrimSpace(ref.GetDeliveryId()) == "") {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("link_ref version and delivery_id must both be set (refresh ref) or both be empty (initial ref)"))
 	}
 
 	nodeID, ok := s.nodeIdentityExtractor(ctx)
@@ -102,7 +110,11 @@ func (s *Service) MintGitHubAccessToken(ctx context.Context, req *connect.Reques
 	}
 
 	now := s.now()
-	if link.Version != ref.GetVersion() || link.DeliveryID != ref.GetDeliveryId() {
+	// For a refresh ref, the node's known (version,delivery_id) must match the live link (or be a
+	// strictly-older delivery we re-fan-out). An INITIAL ref has no known version yet → skip the
+	// mismatch gate and fall through to the freshness/dedup + refresh path, which resolves the
+	// link's CURRENT tuple. The node renders whatever current access token we return.
+	if !initialRef && (link.Version != ref.GetVersion() || link.DeliveryID != ref.GetDeliveryId()) {
 		if ref.GetVersion() < link.Version && link.AccessToken != "" && link.AccessExpiresAtUnix > now.Add(githubMintRefreshLead).Unix() {
 			if s.githubTokenFanout != nil {
 				if err := s.githubTokenFanout.FanoutGitHubAccessToken(ctx, GitHubAccessTokenFanout{
