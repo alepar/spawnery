@@ -10,6 +10,25 @@ import (
 	"spawnery/internal/storage"
 )
 
+// githubLinkSecretIDPrefix is the reserved namespace for AS-custodial GitHub link secret ids.
+// MUST stay equal to internal/authsvc.githubSecretIDPrefix ("gh:"): the node's at-provision mint
+// presents this exact secret_id to the AS, which resolves it to the owner's custodial refresh chain.
+// CP-derived only — clients may never name a gh: id (rejected in mergeCreateSpawnMounts).
+const githubLinkSecretIDPrefix = "gh:"
+
+// githubMintLinkSecretID is the per-owner JIT-mint link-ref id. The AS stores the link under
+// gh:<accountID>; in every wired lane the CP spawn owner == the AS account principal (shared session
+// key), so gh:<owner> resolves the creator's link. (Assumption validated end-to-end in T8.)
+func githubMintLinkSecretID(owner string) string {
+	return githubLinkSecretIDPrefix + strings.TrimSpace(owner)
+}
+
+// isGitHubMintLinkRef reports whether a credential id is a CP-derived gh: mint link-ref (vs an
+// owner-sealed catalog secret id). gh: ids have no catalog row and are minted at provision (Approach 2).
+func isGitHubMintLinkRef(id string) bool {
+	return strings.HasPrefix(strings.TrimSpace(id), githubLinkSecretIDPrefix)
+}
+
 // storeToNodeMounts converts persisted spawn mounts to the node StartSpawn wire form.
 func storeToNodeMounts(in []store.Mount) []*nodev1.MountBinding {
 	if len(in) == 0 {
@@ -17,18 +36,27 @@ func storeToNodeMounts(in []store.Mount) []*nodev1.MountBinding {
 	}
 	out := make([]*nodev1.MountBinding, len(in))
 	for i, m := range in {
-		out[i] = &nodev1.MountBinding{
+		mb := &nodev1.MountBinding{
 			Name:               m.Name,
 			BackendUri:         m.BackendURI,
 			CredentialSecretId: m.CredentialSecretID,
 			CreateIfMissing:    m.CreateIfMissing,
 			RepositoryId:       m.RepositoryID,
 		}
+		// Approach 2: a github mount whose credential is a CP-derived gh: link-ref carries a node
+		// JIT-mint descriptor. The node mints the access token at provision (renders into its node-only
+		// GitHubCredentialsRoot) — no owner-sealed delivery, no token via the CP. credential_secret_id is
+		// intentionally left as gh:<owner> for signed-intent correspondence; the node ignores it on the
+		// delivery path (it consumes only delivered SealedSecrets) and mints off github_mint_ref presence.
+		if strings.HasPrefix(m.BackendURI, "github:") && isGitHubMintLinkRef(m.CredentialSecretID) {
+			mb.GithubMintRef = &nodev1.GitHubMintRef{SecretId: strings.TrimSpace(m.CredentialSecretID)}
+		}
+		out[i] = mb
 	}
 	return out
 }
 
-func mergeCreateSpawnMounts(decls []store.MountDecl, req []*cpv1.MountBinding) ([]store.Mount, error) {
+func mergeCreateSpawnMounts(decls []store.MountDecl, req []*cpv1.MountBinding, owner string) ([]store.Mount, error) {
 	declared := make(map[string]store.MountDecl, len(decls))
 	out := make([]store.Mount, len(decls))
 	for i, decl := range decls {
@@ -45,6 +73,11 @@ func mergeCreateSpawnMounts(decls []store.MountDecl, req []*cpv1.MountBinding) (
 		name := strings.TrimSpace(binding.GetName())
 		if name == "" {
 			return nil, fmt.Errorf("mount binding name must not be empty")
+		}
+		// Containment guard: clients must not supply a gh: credential — that namespace is
+		// CP-derived only (from the authenticated spawn owner). Reject early before any gate routing.
+		if isGitHubMintLinkRef(binding.GetCredentialSecretId()) {
+			return nil, fmt.Errorf("mount binding %q: credential_secret_id with the reserved %q prefix is not allowed (the github link is resolved by the control plane)", name, githubLinkSecretIDPrefix)
 		}
 		decl, ok := declared[name]
 		if !ok {
@@ -67,12 +100,11 @@ func mergeCreateSpawnMounts(decls []store.MountDecl, req []*cpv1.MountBinding) (
 				return nil, fmt.Errorf("github mount slot %q: %w", name, perr)
 			}
 			byName[name] = store.Mount{
-				Name:            name,
-				BackendURI:      "github:" + cfg.Owner + "/" + cfg.Repo,
-				CreateIfMissing: binding.GetCreateIfMissing(),
-				RepositoryID:    strings.TrimSpace(binding.GetRepositoryId()),
-				// CredentialSecretID intentionally empty: T3 (CP auto-resolve) sets the link-ref;
-				// no token/credential is named by the client for a slot.
+				Name:               name,
+				BackendURI:         "github:" + cfg.Owner + "/" + cfg.Repo,
+				CredentialSecretID: githubMintLinkSecretID(owner), // T3: CP-derived gh:<owner> mint link-ref (Approach 2)
+				CreateIfMissing:    binding.GetCreateIfMissing(),
+				RepositoryID:       strings.TrimSpace(binding.GetRepositoryId()),
 			}
 			continue
 		}

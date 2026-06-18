@@ -70,6 +70,15 @@ func TestStartupSecretIDsForSpawnIncludesGithubMountCredentials(t *testing.T) {
 			},
 			want: []string{"a-cred", "z-cred"},
 		},
+		{
+			// T3: a gh: link-ref is minted at provision by the node; it is not a catalog secret,
+			// so it must NOT appear in the required startup-secret set.
+			name: "gh: link-ref is NOT a required startup secret",
+			mounts: []store.Mount{
+				{BackendURI: "github:owner/repo", CredentialSecretID: "gh:alice"},
+			},
+			want: nil,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -161,6 +170,14 @@ func TestValidateGitHubMountCredentialType(t *testing.T) {
 		{
 			name:       "empty credential id is ignored",
 			mounts:     []store.Mount{{Name: "main", BackendURI: "github:o/r", CredentialSecretID: ""}},
+			seedFn:     func(t *testing.T, s *Server) {},
+			wantNilErr: true,
+		},
+		{
+			// T3: gh: link-refs are CP-derived and have no catalog row — they must be routed past the
+			// credential-type gate. A missing catalog entry must NOT cause NotFound here.
+			name:       "gh: link-ref bypasses catalog type gate",
+			mounts:     []store.Mount{{Name: "repo", BackendURI: "github:o/r", CredentialSecretID: "gh:alice"}},
 			seedFn:     func(t *testing.T, s *Server) {},
 			wantNilErr: true,
 		},

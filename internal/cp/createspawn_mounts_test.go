@@ -196,11 +196,30 @@ func TestCreateSpawnGitHubSlotBindsRepoAndDefaultsOthersToScratch(t *testing.T) 
 	for _, m := range mounts {
 		got[m.Name] = m
 	}
-	if got["repo"].BackendURI != "github:owner/repo" || got["repo"].CredentialSecretID != "" || !got["repo"].CreateIfMissing || got["repo"].RepositoryID != "123" {
-		t.Fatalf("repo mount = %+v; want github backend, empty credential (T3 resolves)", got["repo"])
+	// T3: the slot's credential must be the CP-derived gh:<owner> mint link-ref, not empty.
+	if got["repo"].BackendURI != "github:owner/repo" || got["repo"].CredentialSecretID != "gh:alice" || !got["repo"].CreateIfMissing || got["repo"].RepositoryID != "123" {
+		t.Fatalf("repo mount = %+v; want github backend, gh:alice credential (T3 resolves)", got["repo"])
 	}
 	if got["cache"].BackendURI != "scratch" {
 		t.Fatalf("cache backend = %q, want scratch", got["cache"].BackendURI)
+	}
+}
+
+func TestCreateSpawnRejectsClientSuppliedGitHubLinkRefCredential(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	// "secret-app" has a declared non-slot mount named "main".
+	ctx := auth.WithOwner(context.Background(), "alice")
+	_, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+		AppId: "secret-app",
+		Model: "m",
+		Mounts: []*cpv1.MountBinding{{
+			Name:               "main",
+			BackendUri:         "github:owner/repo",
+			CredentialSecretId: "gh:evil",
+		}},
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("CreateSpawn with gh: credential code = %v, want InvalidArgument (err=%v)", connect.CodeOf(err), err)
 	}
 }
 

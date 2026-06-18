@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"connectrpc.com/connect"
@@ -11,6 +12,7 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/authsvc"
+	"spawnery/internal/cp/store"
 )
 
 type githubLinkIndex struct {
@@ -202,6 +204,48 @@ func (s *Server) fanoutGitHubSealedAccessToken(ctx context.Context, secretID str
 			log.Printf("fanoutGitHubSealedAccessToken %s: send to hosting node %q for spawn %q failed: %v; will re-sync on reconnect", secretID, nodeID, spawnID, err)
 			continue
 		}
+	}
+	return nil
+}
+
+// spawnHasGitHubMintMount reports whether any mount is a github mount carrying a CP-derived gh:
+// mint link-ref (Approach 2 — minted at provision by the hosting node).
+func spawnHasGitHubMintMount(mounts []store.Mount) bool {
+	for _, m := range mounts {
+		if strings.HasPrefix(m.BackendURI, "github:") && isGitHubMintLinkRef(m.CredentialSecretID) {
+			return true
+		}
+	}
+	return false
+}
+
+// seedGitHubMintLinks pre-seeds the in-memory github-link index for every gh: mint link-ref mount
+// so authorizeGitHubMint admits the hosting node's at-provision JIT mint, which races INSIDE the
+// blocking Provision/StartSpawn window (the node mints before acking ACTIVE). The entry needs no
+// SealedSecret template — has(secretID, spawnID) is all authorizeGitHubMint consults. Proactive-refresh
+// fanout (which needs templates) is out of scope for the live-dev demo (D3); a token never transits
+// the CP.
+func (s *Server) seedGitHubMintLinks(spawnID string, mounts []store.Mount) {
+	for _, m := range mounts {
+		if strings.HasPrefix(m.BackendURI, "github:") && isGitHubMintLinkRef(m.CredentialSecretID) {
+			s.githubLinks.note(spawnID, strings.TrimSpace(m.CredentialSecretID))
+		}
+	}
+}
+
+// prepareGitHubMintProvision makes a github-mint spawn mintable at provision: it seeds the link
+// index AND pre-binds the live container to the already-picked target node (Adopt), both BEFORE
+// StartSpawn is sent. The pre-bind is required because authorizeGitHubMint also calls liveNode,
+// but the gen-N container's node_id is "" until SetActive (which runs AFTER the blocking Provision).
+// No-op when the spawn has no gh: mint mount. Called only from the intentEnabled provision branches
+// (the dev-github lane — the only lane with a node->AS mint channel and a pre-Provision target node).
+func (s *Server) prepareGitHubMintProvision(ctx context.Context, spawnID string, gen uint64, targetNodeID string, mounts []store.Mount) error {
+	if !spawnHasGitHubMintMount(mounts) {
+		return nil
+	}
+	s.seedGitHubMintLinks(spawnID, mounts)
+	if err := s.st.Spawns().Adopt(ctx, spawnID, targetNodeID, int64(gen)); err != nil {
+		return fmt.Errorf("pre-bind node %q for github mint: %w", targetNodeID, err)
 	}
 	return nil
 }

@@ -825,6 +825,14 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 		env = submission.Env
 		secrets = submission.Secrets
 		placement.TargetNodeID = targetNodeID
+		// Seed the github-link index and pre-bind the hosting node BEFORE Provision.
+		// The node's at-provision JIT mint calls back AuthorizeGitHubMint INSIDE the blocking
+		// Provision/StartSpawn window (before the node acks ACTIVE), so both the index entry and the
+		// container node_id must be set now. No-op if the spawn has no gh: mint mount.
+		if err := s.prepareGitHubMintProvision(ctx, id, uint64(gen), targetNodeID, mounts); err != nil {
+			s.failResume(ctx, id, gen, revertOnFail, "prepare github mint provision")
+			return "", connect.NewError(connect.CodeInternal, err)
+		}
 	}
 
 	// Register the resume stall-detecting waiter BEFORE launching the provision goroutine so a fast
@@ -1238,6 +1246,16 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 		env = submission.Env
 		secrets = submission.Secrets
 		placement.TargetNodeID = targetNodeID
+		// Seed the github-link index and pre-bind the hosting node BEFORE Provision.
+		// The node's at-provision JIT mint calls back AuthorizeGitHubMint INSIDE the blocking
+		// Provision/StartSpawn window (before the node acks ACTIVE), so both the index entry and the
+		// container node_id must be set now. No-op if the spawn has no gh: mint mount.
+		if err := s.prepareGitHubMintProvision(ctx, req.Msg.SpawnId, uint64(gen), targetNodeID, mounts); err != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+				log.Printf("RecreateSpawn %s: SetError after prepare github mint provision also failed: %v", req.Msg.SpawnId, serr)
+			}
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
 	}
 
 	if arts == nil {

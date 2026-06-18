@@ -844,7 +844,9 @@ func startupSecretIDsForSpawn(arts []store.Artifact, mounts []store.Mount) []str
 		}
 	}
 	for _, mount := range mounts {
-		if strings.HasPrefix(mount.BackendURI, "github:") {
+		// gh: link-refs are minted at provision by the hosting node (Approach 2) — they are not
+		// catalog secrets and must not appear in the required startup-secret set.
+		if strings.HasPrefix(mount.BackendURI, "github:") && !isGitHubMintLinkRef(mount.CredentialSecretID) {
 			add(mount.CredentialSecretID)
 		}
 	}
@@ -880,6 +882,11 @@ func (s *Server) validateGitHubMountCredentialType(ctx context.Context, owner st
 		}
 		id := strings.TrimSpace(m.CredentialSecretID)
 		if id == "" {
+			continue
+		}
+		// gh: link-refs are CP-derived AS-custodial mint descriptors — they have no catalog row by
+		// design and are minted at provision by the hosting node (Approach 2). Skip the catalog gate.
+		if isGitHubMintLinkRef(id) {
 			continue
 		}
 		sec, err := s.st.Secrets().Get(ctx, owner, id)
@@ -979,7 +986,7 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	mounts, err := mergeCreateSpawnMounts(decls, req.Msg.Mounts)
+	mounts, err := mergeCreateSpawnMounts(decls, req.Msg.Mounts, owner)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
@@ -1172,6 +1179,17 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		secrets = submission.Secrets
 		// Pin the same node the client signed for.
 		placement.TargetNodeID = targetNodeID
+		// Seed the github-link index and pre-bind the hosting node BEFORE Provision.
+		// The node's at-provision JIT mint calls back AuthorizeGitHubMint INSIDE the blocking
+		// Provision/StartSpawn window (before the node acks ACTIVE), so both the index entry and the
+		// container node_id must be set now. No-op if the spawn has no gh: mint mount.
+		if err := s.prepareGitHubMintProvision(ctx, spawnID, 1, targetNodeID, mounts); err != nil {
+			log.Printf("provisionSpawn %s: prepare github mint provision: %v", spawnID, err)
+			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+				log.Printf("provisionSpawn %s: SetError after prepare github mint provision also failed: %v", spawnID, serr)
+			}
+			return
+		}
 	}
 
 	// Fresh create: base_image_digest is unknown until the node resolves it at create time.
