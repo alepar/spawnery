@@ -48,47 +48,81 @@ user's identity, let the agent **do git ops**, and **survive suspend/resume** �
 ```
 LINK (once):  web Settings→GitHub  OR  spawnctl gh link (device/loopback)
    → AS /github/link/start→callback→redeem        (T1: activate WithGitHubLink)
-   → AS stores the refresh chain (AS-custodial), mints an access token,
-     and the owner-sealed access token reaches the CP catalog as secret gh:<account>   ← S0
+   → AS stores the refresh chain + initial access token (AS-custodial); redeem is metadata-only.
+     NO token is pushed to the CP. (Link existence is all the CP needs — see S0 outcome.)
 
 CREATE (per spawn):  web create  OR  spawnctl create --app <id> --mount repo=github:owner/repo[,create]
    → CP loads the app manifest (declares a github mount SLOT — T4)
-   → CP AUTO-RESOLVES creator's gh:<account> link → mount.credential_secret_id          (T3 / E1)
-   → CP validates github-token type; puts the mount binding in the pending intent
+   → CP derives gh:<owner>, expresses the mount credential as a node-JIT-mint LINK-REF descriptor,
+     routes gh: past the owner-sealed catalog gate, seeds the github-link index entry        (T3)
    → client (web/spawnctl) signs the intent via pollAndSign (already implemented on both)
-   → node renders the sealed github-token into GitHubCredentialsRoot (node-only tmpfs)
+   → node, for the github mount, calls MintGitHubAccessToken(link-ref) and renders the token into
+     GitHubCredentialsRoot BEFORE Prepare — token arrives via the authenticated mint response,
+     NEVER via the CP; then Note the link for the existing proactive refresher                (Tb)
    → storage.GitHub.Prepare clones github.com/owner/repo; binds it writable into the agent pod
    → journal snapshots .git; suspend/resume restores the working tree incl. unpushed commits
 ```
 
-## S0 — load-bearing spike (do first)
+## S0 outcome (2026-06-18) — the assumed mechanism does not exist
 
-The riskiest hop, never run live: **how the AS-custodial token becomes a deliverable `gh:<account>`
-secret the node renders at create-time.** Expected mechanism: link → AS mints → **AS→CP fanout** seals
-it into the CP catalog → create-time owner-sealed delivery uses it. S0 must confirm:
-- whether the CP **holds** a fanned-out owner-sealed token keyed by `gh:<account>` for a spawn created
-  *later* (vs only delivering to an already-active spawn), and
-- whether initial credential acquisition is **fanout-then-deliver** or **node-JIT-mint**.
+The spike **disproved** the expected "link → AS mint → AS→CP fanout → CP owner-sealed catalog →
+create-time delivery" path. Findings (file:line in bead sp-ache.1):
+- Redeem persists link+access+refresh **AS-side only**, metadata-only to the client, **no CP fanout**.
+- `gh:<account>` is an **AS-side namespace**; there is **no CP catalog row**, and the CP's
+  `githubLinkIndex` is **in-memory/transient/metadata-only**, populated only by *active-spawn*
+  deliveries. Fanout targets only spawns **already in the index** → cannot bootstrap a new spawn.
+- `credential_secret_id = gh:<account>` therefore **fails CreateSpawn preflight today**.
+- Node initial acquisition is **render-of-a-delivered-secret**; node→AS mint is **refresh-only** and
+  double-gated on a prior delivery + a CP index entry.
 
-The answer determines whether T2 must wire `AS_CP_URL`/`AS_CP_SECRET` (fanout) and/or the node→AS
-channel, and how T3 hands the resolved credential to delivery. **Resolve S0 before T2/T3 wiring.**
+**Conclusion:** the **create-time initial token delivery** ("spawn-start initial token delivery
+(runtime)" — explicitly deferred in the owner-link-flow spec) is **unbuilt**. This slice builds it,
+via the design below.
+
+## Create-time initial token delivery — Approach 2 (node-JIT-mint at create)
+
+Chosen over a CP-proxied mint+seal because it reuses the *entire* existing, e2e-proven node→AS mint
+path, keeps the token off the CP entirely, and matches D3.
+
+1. **Mount link-ref descriptor (proto, minimal):** a github mount binding carries a **github
+   link-ref** (`secret_id=gh:<owner>`, mint-at-provision) instead of pointing at an owner-sealed
+   catalog secret.
+2. **CP resolution + seeding (T3):** at `CreateSpawn` for a github mount with no explicit credential,
+   the CP derives `gh:<owner-account>` from the spawn owner, sets the link-ref descriptor, **routes
+   `gh:` ids past the owner-sealed-secret catalog gate** (they have no catalog row by design), and at
+   provision **seeds the github-link index entry** so `authorizeGitHubMint` passes. No token touches
+   the CP.
+3. **AS initial-mint (small):** `MintGitHubAccessToken` accepts an **initial** link-ref (`secret_id`
+   only; resolves the link's current version/delivery_id when not supplied), keeping node-identity
+   authZ + the CP-index check + dedup.
+4. **Node mint-at-provision (Tb):** for a github mount carrying a link-ref, the node calls
+   `MintGitHubAccessToken` → renders the token into `GitHubCredentialsRoot` **before** `Prepare`
+   clones, then `Note`s the link for the existing proactive refresher.
+5. **Failure path:** owner has no link → mint returns `relink_required` → spawn errors with a clear
+   "link your GitHub first" message.
+
+**Containment:** (a) refresh AS-only ✓ (only the access token is minted); (c) CP relays only sealed
+bytes ✓ — the token never transits the CP at all; (d) node→AS node-identity authZ ✓ (relaxed in the
+dev lane per D3, e2e proves the secure leg); (e) installation-selection is the only scope guarantee ✓.
 
 ## Components / tasks
 
 | Task | What | Touches |
 |------|------|---------|
-| **S0** | Spike: trace + confirm the live credential-delivery mechanism (above) | read-only + a throwaway probe |
-| **T1** | Activate `WithGitHubLink` in `cmd/authsvc/main.go` (exchanger/store/client_id/redirect from `.env`), gated on config presence | `cmd/authsvc` |
-| **T2** | `dev-github` lane (extend `dev-enforced`): WithGitHubLink active, GitHub App env, `AS_CP_URL`+`AS_CP_SECRET` faithful fanout, relaxed node→AS, garage journaling | `Justfile`, `mprocs-*.yaml` |
-| **T3** | E1: CP auto-resolves creator's single `gh:<account>` → `credential_secret_id` for github mounts lacking an explicit credential | `internal/cp` (CreateSpawn / mounts.go) |
+| **S0** | ✅ DONE — spike disproved the assumed mechanism; design pivoted to Approach 2 (node-JIT-mint) | findings in sp-ache.1 |
+| **T1** | Activate `WithGitHubLink` in `cmd/authsvc/main.go` (from `.env`, gated on config presence) **+ AS initial-mint**: `MintGitHubAccessToken` accepts an initial link-ref (secret_id only → resolve current version/delivery_id) | `cmd/authsvc`, `internal/authsvc` |
+| **Tb** | **Node mint-at-provision** for github mounts + the mount **link-ref descriptor proto**: node mints via `MintGitHubAccessToken` and renders into `GitHubCredentialsRoot` before `Prepare`, then `Note`s the link | `proto/`, `internal/node`, `internal/spawnlet` |
+| **T3** | CP: for a github mount w/o explicit credential, derive `gh:<owner>`, set the link-ref descriptor, **route `gh:` past the owner-sealed catalog gate**, and **seed the github-link index** at provision | `internal/cp` (CreateSpawn / mounts.go / github_fanout index) |
+| **T2** | `dev-github` lane (extend `dev-enforced`): WithGitHubLink active, GitHub App env, **relaxed node→AS** mint channel (D3), garage journaling. AS→CP fanout refresh-only/optional for the demo | `Justfile`, `mprocs-*.yaml` |
 | **T4** | App-manifest github mount-slot marker (declare a mount is a github slot; user supplies repo) + bind validation | `internal/manifest`, `proto/`, `internal/cp` |
 | **T5** | spawnctl `create --mount name=github:owner/repo[,create]` → set `CreateSpawnRequest.Mounts` | `cmd/spawnctl` |
 | **T6** | web create-flow github-mount field (owner/repo + create_if_missing) → pass `mounts` to `createSpawn` | `web/` |
 | **T7** | Example app whose manifest declares a journaled github mount slot | `examples/` |
 | **T8** | Live verification runbook + checks, from both clients | docs / manual |
 
-Ordering: **S0 → T1 → T2** (link foundation) → **T3, T4** (CP/manifest) → **T5, T6** (clients; depend on
-T3/T4) → **T7** → **T8**. T4 is proto-touching (serialize; re-run `make gen`).
+Ordering: **S0 ✅ → T1, Tb, T4** (proto-touchers Tb/T4 serialize; re-run `make gen`) → **T3** (CP
+resolution; depends on Tb's descriptor + T4) → **T2** (dev lane) → **T5, T6** (clients) → **T7** →
+**T8**. `gh:`-id routing (T3) and node mint-at-provision (Tb) are the load-bearing new code.
 
 ## Acceptance (definition of done)
 
