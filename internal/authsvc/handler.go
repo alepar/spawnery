@@ -94,6 +94,11 @@ func (s *Service) Handler() http.Handler {
 
 	var inner http.Handler = mux
 	if s.devNodeIdentityHeader != "" {
+		// NOTE: devNodeIdentityMiddleware wraps the entire mux (not just the GitHub mint endpoint),
+		// so AS_DEV_RELAX_NODE_AUTH=1 relaxes header-trust on all node-identity-gated routes
+		// (enroll, fanout, revocation, mint). This is broader than the spec's "relaxed node->AS
+		// mint channel" framing but is strictly gated by AS_DEV_RELAX_NODE_AUTH=1 — never set in
+		// any enforced/prod recipe — and never overrides a verified mTLS identity (D3 invariant).
 		inner = devNodeIdentityMiddleware(s.devNodeIdentityHeader, inner)
 	}
 	return nodeIdentityMiddleware(s.root, inner)

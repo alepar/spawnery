@@ -103,6 +103,7 @@ authsvc-enforced:
     AS_ROOT_CA_PEM={{devca}}/root.pem \
     AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
     AS_INTERMEDIATE_KEY_PEM={{devca}}/self-hosted-intermediate-key.pem \
+    AS_SESSION_KEY_PEM={{devca}}/session-key.pem \
     {{repo}}/bin/authsvc
 
 # node with enforced auth: pre-provisioned identity from .dev-ca/node, mTLS to the CP node listener.
@@ -133,6 +134,7 @@ authsvc-github:
     AS_ROOT_CA_PEM={{devca}}/root.pem \
     AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
     AS_INTERMEDIATE_KEY_PEM={{devca}}/self-hosted-intermediate-key.pem \
+    AS_SESSION_KEY_PEM={{devca}}/session-key.pem \
     AS_GITHUB_TOKEN_ENC_KEY="$(printf %s 'spawnery-dev-github-mount-enck32' | base64)" \
     GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in .env (GitHub App client_id)}" \
     GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in .env}" \

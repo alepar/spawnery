@@ -5,6 +5,9 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"net"
@@ -27,7 +30,7 @@ func main() {
 	if err := genDev(dir); err != nil {
 		log.Fatalf("spawnery-ca: %v", err)
 	}
-	log.Printf("spawnery-ca: dev CA written to %s (root.pem, self-hosted-intermediate.*, cp-server.*, node/)", dir)
+	log.Printf("spawnery-ca: dev CA written to %s (root.pem, self-hosted-intermediate.*, cp-server.*, node/, session-key.pem)", dir)
 }
 
 func genDev(dir string) error {
@@ -88,10 +91,30 @@ func genDev(dir string) error {
 		}
 	}
 
-	return nodeid.Save(filepath.Join(dir, "node"), nodeid.Identity{
+	if err := nodeid.Save(filepath.Join(dir, "node"), nodeid.Identity{
 		CertPEM:  pki.MarshalCertPEM(node.Cert),
 		ChainPEM: pki.MarshalCertPEM(selfHosted.Cert),
 		KeyPEM:   nodeKey,
 		RootPEM:  pki.MarshalCertPEM(root.Cert),
-	})
+	}); err != nil {
+		return err
+	}
+
+	// AS session signing key (Ed25519, PKCS#8 PEM) — used by authsvc-enforced and authsvc-github
+	// to mint and verify session tokens. Generated once per dev-ca; stable across restarts so the
+	// CP's pinned key-set stays valid without re-provisioning.
+	_, sessionKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return fmt.Errorf("session key: %w", err)
+	}
+	sessionKeyDER, err := x509.MarshalPKCS8PrivateKey(sessionKey)
+	if err != nil {
+		return fmt.Errorf("session key marshal: %w", err)
+	}
+	sessionKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: sessionKeyDER})
+	if err := os.WriteFile(filepath.Join(dir, "session-key.pem"), sessionKeyPEM, 0o600); err != nil {
+		return err
+	}
+
+	return nil
 }
