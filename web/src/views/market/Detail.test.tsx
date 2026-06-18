@@ -25,6 +25,7 @@ vi.mock("@/api/profiles", () => ({
 }));
 
 import { Detail } from "./Detail";
+import { getApp } from "@/api/catalog";
 
 describe("Detail", () => {
   it("renders manifest + versions and spawns", async () => {
@@ -34,7 +35,7 @@ describe("Detail", () => {
     expect(screen.getByText("a wiki")).toBeInTheDocument();
     expect(screen.getByText("1.0.0")).toBeInTheDocument();
     await userEvent.click(screen.getByTestId("spawn-btn"));
-    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-acp", "");
+    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-acp", "", []);
   });
 
   it("shows the agent selector and spawns with the chosen runnable", async () => {
@@ -43,11 +44,81 @@ describe("Detail", () => {
     await waitFor(() => screen.getByTestId("runnable-select"));
     await userEvent.selectOptions(screen.getByTestId("runnable-select"), "goose-tui");
     await userEvent.click(screen.getByTestId("spawn-btn"));
-    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-tui", "");
+    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-tui", "", []);
   });
 
   it("sets document.title to the app's human title once loaded", async () => {
     render(<Detail id="spawnery/wiki" onBack={() => {}} onSpawn={vi.fn()} />);
     await waitFor(() => expect(document.title).toBe("Spawnery — Wiki"));
+  });
+});
+
+describe("Detail — github mount slot", () => {
+  it("renders the github owner/repo input and create checkbox for a github slot", async () => {
+    vi.mocked(getApp).mockResolvedValueOnce({
+      app: { id: "spawnery/github-app", displayName: "GitHub App", latestTier: "TRUST_TIER_REVIEWED" },
+      versions: [],
+      manifest: {
+        id: "spawnery/github-app",
+        title: "GitHub App",
+        mounts: [{ name: "repo", path: "repo", durability: "node-local", github: true }],
+      } as any,
+    });
+    render(<Detail id="spawnery/github-app" onBack={() => {}} onSpawn={vi.fn()} />);
+    await waitFor(() => screen.getByTestId("github-mount-repo"));
+    expect(screen.getByTestId("github-mount-repo")).toBeInTheDocument();
+    expect(screen.getByTestId("github-create-repo")).toBeInTheDocument();
+  });
+
+  it("spawn button is disabled until a valid owner/repo is entered", async () => {
+    vi.mocked(getApp).mockResolvedValueOnce({
+      app: { id: "spawnery/github-app", displayName: "GitHub App", latestTier: "TRUST_TIER_REVIEWED" },
+      versions: [],
+      manifest: {
+        id: "spawnery/github-app",
+        title: "GitHub App",
+        mounts: [{ name: "repo", path: "repo", github: true }],
+      } as any,
+    });
+    render(<Detail id="spawnery/github-app" onBack={() => {}} onSpawn={vi.fn()} />);
+    await waitFor(() => screen.getByTestId("github-mount-repo"));
+    expect(screen.getByTestId("spawn-btn")).toBeDisabled();
+    await userEvent.type(screen.getByTestId("github-mount-repo"), "octocat/hello");
+    expect(screen.getByTestId("spawn-btn")).not.toBeDisabled();
+  });
+
+  it("onSpawn called with github mount binding when spawning", async () => {
+    vi.mocked(getApp).mockResolvedValueOnce({
+      app: { id: "spawnery/github-app", displayName: "GitHub App", latestTier: "TRUST_TIER_REVIEWED" },
+      versions: [],
+      manifest: {
+        id: "spawnery/github-app",
+        title: "GitHub App",
+        mounts: [{ name: "repo", path: "repo", github: true }],
+      } as any,
+    });
+    const onSpawn = vi.fn();
+    render(<Detail id="spawnery/github-app" onBack={() => {}} onSpawn={onSpawn} />);
+    await waitFor(() => screen.getByTestId("github-mount-repo"));
+    await userEvent.type(screen.getByTestId("github-mount-repo"), "octocat/hello");
+    await userEvent.click(screen.getByTestId("github-create-repo"));
+    await userEvent.click(screen.getByTestId("spawn-btn"));
+    expect(onSpawn).toHaveBeenCalledWith(
+      "spawnery/github-app",
+      "img:1",
+      "goose-acp",
+      "",
+      [{ name: "repo", backendUri: "github:octocat/hello", createIfMissing: true }],
+    );
+  });
+
+  it("non-github app renders no github field and spawn works as before", async () => {
+    // Default mock has no github slots (mounts: [{name:"main", path:"data"}])
+    const onSpawn = vi.fn();
+    render(<Detail id="spawnery/wiki" onBack={() => {}} onSpawn={onSpawn} />);
+    await waitFor(() => screen.getByTestId("spawn-btn"));
+    expect(screen.queryByTestId("github-mount-main")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("spawn-btn"));
+    expect(onSpawn).toHaveBeenCalledWith("spawnery/wiki", "img:1", "goose-acp", "", []);
   });
 });

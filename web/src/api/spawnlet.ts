@@ -61,8 +61,21 @@ export function spawnLifecycleAction(status: SpawnStatus, transitionPhase?: stri
   }
 }
 
-export async function createSpawn(appId: string, model: string, image = "", runnableId = "", profileId = ""): Promise<string> {
-  const r = await unary<{ spawnId: string }>("CreateSpawn", { appId, model, image, runnableId, profileId });
+export interface CreateMountBinding {
+  name: string;
+  backendUri: string;
+  createIfMissing?: boolean;
+}
+
+export async function createSpawn(
+  appId: string,
+  model: string,
+  image = "",
+  runnableId = "",
+  profileId = "",
+  mounts: CreateMountBinding[] = [],
+): Promise<string> {
+  const r = await unary<{ spawnId: string }>("CreateSpawn", { appId, model, image, runnableId, profileId, mounts });
   const spawnId = r.spawnId;
   // In auth-enabled mode, kick off the intent signing concurrently (the CP blocks on it).
   if (authEnabled()) {
@@ -70,7 +83,7 @@ export async function createSpawn(appId: string, model: string, image = "", runn
     const store = session.keyStore;
     const { getOrCreateSessionKey } = await import("@/auth/keypair");
     const kp = await getOrCreateSessionKey(store);
-    const pended = { op: "create-spawn", spawnId, appRef: appId, model };
+    const pended = { op: "create-spawn", spawnId, appRef: appId, model, mounts };
     registerPendedOp(pended);
     pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
       .catch((e: unknown) => console.error("intent sign failed:", e))

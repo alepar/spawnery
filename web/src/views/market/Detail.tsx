@@ -9,7 +9,7 @@ import {
   type AppVersionSummary,
   type AppManifest,
 } from "@/api/catalog";
-import { listAgentImages, type AgentImageView } from "@/api/spawnlet";
+import { listAgentImages, type AgentImageView, type CreateMountBinding } from "@/api/spawnlet";
 import { ProfileSelect } from "@/views/profiles/ProfileSelect";
 
 export function Detail({
@@ -19,7 +19,7 @@ export function Detail({
 }: {
   id: string;
   onBack: () => void;
-  onSpawn?: (appId: string, image?: string, runnableId?: string, profileId?: string) => void;
+  onSpawn?: (appId: string, image?: string, runnableId?: string, profileId?: string, mounts?: CreateMountBinding[]) => void;
 }) {
   const [app, setApp] = useState<AppSummary | null>(null);
   const [versions, setVersions] = useState<AppVersionSummary[]>([]);
@@ -30,6 +30,7 @@ export function Detail({
   const [imageIdx, setImageIdx] = useState(0);
   const [runnableId, setRunnableId] = useState("");
   const [profileId, setProfileId] = useState("");
+  const [repoInputs, setRepoInputs] = useState<Record<string, { ownerRepo: string; create: boolean }>>({});
 
   useEffect(() => {
     listAgentImages().then((imgs) => {
@@ -66,6 +67,18 @@ export function Detail({
 
   const title = app?.displayName ?? manifest?.title ?? id;
   const tl = tierLabel(app?.latestTier);
+
+  // GitHub mount slots derived from manifest.
+  const githubSlots = (manifest?.mounts ?? []).filter((m) => m.github);
+  const slotValue = (n: string) => repoInputs[n] ?? { ownerRepo: "", create: false };
+  const ownerRepoOk = (s: string) => /^[^/\s]+\/[^/\s]+$/.test(s.trim());
+  const githubReady = githubSlots.every((s) => ownerRepoOk(slotValue(s.name).ownerRepo));
+
+  const buildMounts = (): CreateMountBinding[] =>
+    githubSlots.map((s) => {
+      const v = slotValue(s.name);
+      return { name: s.name, backendUri: `github:${v.ownerRepo.trim()}`, createIfMissing: v.create };
+    });
 
   // Detail is the sole writer of document.title for the app section: it sets the bare id until the
   // fetch resolves, then the real human title. App's title effect deliberately skips the "app"
@@ -110,7 +123,11 @@ export function Detail({
             </div>
           )}
           <ProfileSelect value={profileId} onChange={setProfileId} />
-          <Button data-testid="spawn-btn" onClick={() => onSpawn?.(id, selImage?.image ?? "", runnableId, profileId)}>
+          <Button
+            data-testid="spawn-btn"
+            disabled={githubSlots.length > 0 && !githubReady}
+            onClick={() => onSpawn?.(id, selImage?.image ?? "", runnableId, profileId, buildMounts())}
+          >
             Spawn
           </Button>
         </div>
@@ -131,6 +148,54 @@ export function Detail({
               <p className="text-sm text-muted-foreground">{manifest.description}</p>
             )}
           </div>
+
+          {githubSlots.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">GitHub repository</CardTitle>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-3">
+                {githubSlots.map((s) => {
+                  const v = slotValue(s.name);
+                  const invalid = v.ownerRepo !== "" && !ownerRepoOk(v.ownerRepo);
+                  return (
+                    <div key={s.name} className="flex flex-col gap-1">
+                      <label className="text-sm font-medium">{s.name}</label>
+                      <input
+                        data-testid={`github-mount-${s.name}`}
+                        className="border border-border rounded px-2 py-1 text-sm"
+                        placeholder="owner/repo"
+                        value={v.ownerRepo}
+                        onChange={(e) =>
+                          setRepoInputs((prev) => ({
+                            ...prev,
+                            [s.name]: { ...slotValue(s.name), ownerRepo: e.target.value },
+                          }))
+                        }
+                      />
+                      {invalid && (
+                        <p className="text-xs text-destructive">Enter as owner/repo</p>
+                      )}
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          data-testid={`github-create-${s.name}`}
+                          checked={v.create}
+                          onChange={(e) =>
+                            setRepoInputs((prev) => ({
+                              ...prev,
+                              [s.name]: { ...slotValue(s.name), create: e.target.checked },
+                            }))
+                          }
+                        />
+                        Create if it doesn't exist
+                      </label>
+                    </div>
+                  );
+                })}
+              </CardContent>
+            </Card>
+          )}
 
           {manifest && (
             <Card>

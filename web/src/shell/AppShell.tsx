@@ -4,7 +4,7 @@ import { SpawnTabs } from "@/sessions/SpawnTabs";
 import { TemplatesView } from "@/views/TemplatesView";
 import { SettingsView } from "@/views/SettingsView";
 import { ProfilesView } from "@/views/ProfilesView";
-import type { SpawnView } from "@/api/spawnlet";
+import type { SpawnView, CreateMountBinding } from "@/api/spawnlet";
 import type { Nav } from "@/nav/nav";
 
 // The top-level pane is derived from nav (the URL is authoritative). spawn -> chat; settings ->
@@ -18,7 +18,7 @@ function topView(section: Nav["section"]): TopView {
 }
 
 export function AppShell({ onSpawnApp, spawns = [], activeId, actions, nav, navigate }: {
-  onSpawnApp: (appId: string, image?: string, runnableId?: string, profileId?: string) => void;
+  onSpawnApp: (appId: string, image?: string, runnableId?: string, profileId?: string, mounts?: CreateMountBinding[]) => void;
   spawns?: SpawnView[];
   activeId?: string | null;
   actions?: SpawnActions;

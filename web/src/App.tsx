@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import {
   createSpawn, listSpawns, renameSpawn, suspendSpawn, resumeSpawn, recreateSpawn, deleteSpawn,
   type SpawnView,
+  type CreateMountBinding,
 } from "./api/spawnlet";
 import { AppShell } from "./shell/AppShell";
 import { useConnStatus } from "./shell/useConnStatus";
@@ -140,7 +141,7 @@ function AppMain() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const spawnApp = async (appId: string, image = "", runnableId = "", profileId = "") => {
+  const spawnApp = async (appId: string, image = "", runnableId = "", profileId = "", mounts: CreateMountBinding[] = []) => {
     // Detach the previous spawn synchronously so the keyed SpawnTabs unmounts (tearing down its
     // sockets) before the new spawn arrives. The poll can't reopen the previous spawn while activeId
     // is null.
@@ -148,7 +149,7 @@ function AppMain() {
     activeIdRef.current = null;
     waiting(); // grey-pulse until the node signals active; SpawnTabs then opens the session sockets
     try {
-      const id = await createSpawn(appId, MODEL, image, runnableId, profileId); // async CP: returns immediately, status 'starting'
+      const id = await createSpawn(appId, MODEL, image, runnableId, profileId, mounts); // async CP: returns immediately, status 'starting'
       setActiveId(id);
       activeIdRef.current = id;
       navigate({ section: "spawn", spawnId: id }); // URL follows; the effect's bindSpawn(id) early-returns (already bound)

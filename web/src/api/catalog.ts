@@ -13,7 +13,7 @@ export interface AppSummary {
   listed?: boolean;
 }
 export interface AppVersionSummary { version: string; ref?: string; tier?: TrustTier; createdAt?: string; }
-export interface ManifestMount { name: string; path: string; seed?: string; }
+export interface ManifestMount { name: string; path: string; seed?: string; durability?: string; github?: boolean; }
 export interface AppManifest {
   apiVersion: string; id: string; title: string; description?: string; tags?: string[];
   visibility?: string;

@@ -5,6 +5,7 @@ import { Detail } from "./market/Detail";
 import { MyApps } from "./market/MyApps";
 import { Publish } from "./market/Publish";
 import type { Nav } from "@/nav/nav";
+import type { CreateMountBinding } from "@/api/spawnlet";
 
 type Tab = "browse" | "detail" | "mine" | "publish";
 
@@ -22,7 +23,7 @@ function navToTab(section: Nav["section"]): Tab {
 export function TemplatesView({ nav, navigate, onSpawn }: {
   nav: Nav;
   navigate: (nav: Nav) => void;
-  onSpawn?: (appId: string, image?: string, runnableId?: string, profileId?: string) => void;
+  onSpawn?: (appId: string, image?: string, runnableId?: string, profileId?: string, mounts?: CreateMountBinding[]) => void;
 }) {
   const tab = navToTab(nav.section);
 

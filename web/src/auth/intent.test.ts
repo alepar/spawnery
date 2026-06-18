@@ -19,6 +19,7 @@ import {
   pollAndSign,
   type PendedOp,
 } from "./intent";
+import { readFields } from "./protobuf";
 import { MemoryKeyStore } from "./keystore";
 import { getOrCreateSessionKey, exportSpkiDer } from "./keypair";
 import { p1363ToDer } from "@/keys/der";
@@ -115,6 +116,87 @@ describe("buildIntentBodyBytes — golden vectors", () => {
     // p1363ToDer should not throw for valid 64-byte sig
     const der = p1363ToDer(p1363);
     expect(der.length).toBeGreaterThan(64);
+  });
+});
+
+// Helper: extract MountRef sub-messages from an encoded IntentBody.
+// Field 12 is repeated MountRef; each occurrence's bytes are decoded as a sub-message.
+function decodeMountRefs(bodyBytes: Uint8Array) {
+  return readFields(bodyBytes)
+    .filter((f) => f.fieldNumber === 12)
+    .map((f) => readFields(f.bytes!));
+}
+
+describe("buildIntentBodyBytes MountRef encoding", () => {
+  it("github mount encodes all 5 fields", () => {
+    const body = buildIntentBodyBytes({
+      jti: "j1",
+      issuedAt: 1770000000,
+      spawnId: "sp-1",
+      generation: 0n,
+      targetNodeId: "",
+      op: "create-spawn",
+      appRef: "spawnery/github-app",
+      image: "",
+      model: "claude-test",
+      dataRef: "",
+      sessionId: "",
+      mounts: [{
+        name: "repo",
+        backendUri: "github:octocat/hello",
+        credentialSecretId: "gh:octocat",
+        createIfMissing: true,
+        repositoryId: "12345",
+      }],
+    });
+
+    const mountFields = decodeMountRefs(body);
+    expect(mountFields).toHaveLength(1);
+    const mf = mountFields[0];
+
+    const byNum = (n: number) => mf.find((f) => f.fieldNumber === n);
+    const dec = new TextDecoder();
+
+    expect(dec.decode(byNum(1)!.bytes)).toBe("repo");
+    expect(dec.decode(byNum(2)!.bytes)).toBe("github:octocat/hello");
+    expect(dec.decode(byNum(3)!.bytes)).toBe("gh:octocat");
+    expect(byNum(4)!.varint).toBe(1n);  // createIfMissing=true → 1
+    expect(dec.decode(byNum(5)!.bytes)).toBe("12345");
+  });
+
+  it("scratch mount omits fields 3/4/5 (proto3 omit-zero parity)", () => {
+    const body = buildIntentBodyBytes({
+      jti: "j2",
+      issuedAt: 1770000000,
+      spawnId: "sp-2",
+      generation: 0n,
+      targetNodeId: "",
+      op: "create-spawn",
+      appRef: "spawnery/wiki",
+      image: "",
+      model: "claude-test",
+      dataRef: "",
+      sessionId: "",
+      mounts: [{
+        name: "cache",
+        backendUri: "scratch",
+        credentialSecretId: "",
+        createIfMissing: false,
+        repositoryId: "",
+      }],
+    });
+
+    const mountFields = decodeMountRefs(body);
+    expect(mountFields).toHaveLength(1);
+    const mf = mountFields[0];
+    const fieldNums = mf.map((f) => f.fieldNumber);
+
+    // Only fields 1 and 2 should be present (empty/zero fields omitted by proto3)
+    expect(fieldNums).toContain(1);
+    expect(fieldNums).toContain(2);
+    expect(fieldNums).not.toContain(3);
+    expect(fieldNums).not.toContain(4);
+    expect(fieldNums).not.toContain(5);
   });
 });
 

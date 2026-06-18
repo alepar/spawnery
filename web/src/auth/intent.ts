@@ -43,7 +43,13 @@ export interface IntentFields {
   model: string;          // field 9
   dataRef: string;        // field 10
   sessionId: string;      // field 11
-  mounts: Array<{ name: string; backendUri: string }>; // field 12 repeated MountRef
+  mounts: Array<{
+    name: string;
+    backendUri: string;
+    credentialSecretId?: string;
+    createIfMissing?: boolean;
+    repositoryId?: string;
+  }>; // field 12 repeated MountRef — all 5 fields signed (node correspondence compares all 5)
 }
 
 /**
@@ -63,11 +69,17 @@ export function buildIntentBodyBytes(f: IntentFields): Uint8Array {
   if (f.model)        w.writeBytes(9, f.model);
   if (f.dataRef)      w.writeBytes(10, f.dataRef);
   if (f.sessionId)    w.writeBytes(11, f.sessionId);
-  // Repeated MountRef (field 12): each mount encoded as embedded message {f1:name, f2:backendUri}
+  // Repeated MountRef (field 12): name=1, backendUri=2, credentialSecretId=3,
+  // createIfMissing=4 (varint), repositoryId=5. The node correspondence check
+  // (internal/node/intentverify.go) compares ALL FIVE fields, so all must be
+  // signed; ProtoWriter omits empty/zero to match Go proto3 marshalling.
   for (const mount of f.mounts ?? []) {
     const mw = new ProtoWriter();
-    if (mount.name)       mw.writeBytes(1, mount.name);
-    if (mount.backendUri) mw.writeBytes(2, mount.backendUri);
+    mw.writeBytes(1, mount.name ?? "");
+    mw.writeBytes(2, mount.backendUri ?? "");
+    mw.writeBytes(3, mount.credentialSecretId ?? "");
+    mw.writeVarint(4, mount.createIfMissing ? 1 : 0);
+    mw.writeBytes(5, mount.repositoryId ?? "");
     w.writeMessage(12, mw);
   }
   return w.finish();
@@ -128,7 +140,8 @@ export interface PendedOp {
   targetNodeId?: string;
   image?: string;
   dataRef?: string;
-  mounts?: Array<{ name: string; backendUri: string }>;
+  // credentialSecretId is CP-derived and intentionally NOT pended by the client.
+  mounts?: Array<{ name: string; backendUri: string; createIfMissing?: boolean }>;
 }
 
 /** In-memory registry of pending ops (keyed by spawnId). */
@@ -153,7 +166,14 @@ export interface PendingIntentProto {
   appRef: string;
   model: string;
   dataRef: string;
-  mounts?: Array<{ name: string; backendUri: string }>;
+  // CP-returned pending intent carries all 5 MountRef fields; the client signs them back verbatim.
+  mounts?: Array<{
+    name: string;
+    backendUri: string;
+    credentialSecretId?: string;
+    createIfMissing?: boolean;
+    repositoryId?: string;
+  }>;
 }
 
 export interface GetPendingIntentResponse {
@@ -228,7 +248,13 @@ export async function pollAndSign(deps: PollAndSignDeps): Promise<string> {
     model: pending.model ?? "",
     dataRef: pending.dataRef ?? "",
     sessionId: "",
-    mounts: (pending.mounts ?? []).map((m) => ({ name: m.name, backendUri: m.backendUri })),
+    mounts: (pending.mounts ?? []).map((m) => ({
+      name: m.name,
+      backendUri: m.backendUri,
+      credentialSecretId: m.credentialSecretId ?? "",
+      createIfMissing: m.createIfMissing ?? false,
+      repositoryId: m.repositoryId ?? "",
+    })),
   });
 
   const signedIntent = await buildSignedIntent(pending.op, bodyBytes, privateKey, spki);
