@@ -60,6 +60,8 @@ type Service struct {
 	githubLinkStates         map[string]githubLinkState  // keyed by OAuth state param
 	githubLinkFlows          map[string]*githubLinkFlow  // keyed by flow_id
 
+	devNodeIdentityHeader string // DEV-ONLY (D3): trusts this header as node-id when set; never set in prod
+
 	mu     sync.Mutex
 	tokens map[string]enrollToken // pending one-time enrollment tokens
 }
@@ -161,6 +163,14 @@ func WithGitHubMinting(st store.Store, provider GitHubProvider) Option {
 
 func WithNodeIdentityExtractor(extract NodeIdentityExtractor) Option {
 	return func(s *Service) { s.nodeIdentityExtractor = extract }
+}
+
+// WithDevNodeIdentityHeader trusts an inbound HTTP header as the node identity, BYPASSING mTLS
+// peer-cert verification. DEV-ONLY (D3, containment invariant d): wired solely by the dev-github
+// lane via AS_DEV_RELAX_NODE_AUTH=1; it MUST NOT be set in any enforced/production deployment. A
+// genuine mTLS-verified identity always takes precedence (the dev fallback only fills the gap).
+func WithDevNodeIdentityHeader(header string) Option {
+	return func(s *Service) { s.devNodeIdentityHeader = header }
 }
 
 func WithGitHubMintAuthorizer(authz GitHubMintAuthorizer) Option {

@@ -121,6 +121,65 @@ dev-enforced:
     @test -f {{devca}}/root.pem || just gen-dev-ca
     mprocs --config {{repo}}/mprocs-enforced.yaml
 
+# --- github-mount dev stack (real GitHub App + journaled mounts + D3 relaxed AS mint) ----------
+
+# AS for the github lane: enforced dev CA + real GitHub App link/mint + AS->CP fanout + D3 relaxed
+# node identity. Requires GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET in .env (the throwaway App). The
+# AS_DEV_RELAX_NODE_AUTH=1 header trust is DEV-ONLY (containment d) and MUST NOT be used in prod.
+authsvc-github:
+    @make bin/authsvc
+    AS_LISTEN={{addr_as}} \
+    AS_DB_DSN="file:{{data_root}}/authsvc.db?_pragma=foreign_keys(1)" \
+    AS_ROOT_CA_PEM={{devca}}/root.pem \
+    AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
+    AS_INTERMEDIATE_KEY_PEM={{devca}}/self-hosted-intermediate-key.pem \
+    AS_GITHUB_TOKEN_ENC_KEY="$(printf %s 'spawnery-dev-github-mount-enck32' | base64)" \
+    GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in .env (GitHub App client_id)}" \
+    GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in .env}" \
+    AS_GITHUB_REDIRECT_URI=http://{{addr_as}}/oauth/callback \
+    AS_GITHUB_LINK_REDIRECT_URI=http://{{addr_as}}/github/link/callback \
+    AS_SPA_ORIGINS=http://localhost:5173 \
+    AS_ALLOWED_ORIGINS=http://localhost:5173 \
+    AS_CP_URL=http://{{addr_cp}} \
+    AS_CP_RPC_SECRET=dev-as-cp-secret \
+    AS_DEV_RELAX_NODE_AUTH=1 \
+    {{repo}}/bin/authsvc
+
+# CP for the github lane: enforced node mTLS + mount-intent signing (pollAndSign) + AS->CP RPC auth.
+cp-github:
+    @make bin/cp
+    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \
+    CP_NODE_ROOT_CA={{devca}}/root.pem \
+    CP_NODE_TLS_CERT={{devca}}/cp-server.pem CP_NODE_TLS_KEY={{devca}}/cp-server-key.pem \
+    CP_DEV_INTENT_ENABLED=1 \
+    CP_AS_RPC_SECRET=dev-as-cp-secret \
+    {{repo}}/bin/cp
+
+# Node for the github lane: enforced mTLS to CP + journaled mounts (sources dev-creds.env) + D3
+# relaxed AS mint (plain HTTP, NODE_GITHUB_MINT_DEV_NODE_ID header). DEV-ONLY relaxation.
+node-github agent="agent": (_images agent)
+    @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
+    set -a; [ -f {{repo}}/deploy/garage/dev-creds.env ] && . {{repo}}/deploy/garage/dev-creds.env; set +a; \
+    AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
+    AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
+    CP_ADDR=http://{{addr_cp}} NODE_AUTH_MODE=enforced \
+    CP_NODE_ADDR=https://{{addr_cp_node}} NODE_ID=node-1 NODE_ID_DIR={{devca}}/node \
+    NODE_CLASS=self-hosted EGRESS_ENFORCE=false \
+    NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
+    USERNS_MODE=remap DELTA_CAPTURE=1 \
+    AS_URL=http://{{addr_as}} \
+    NODE_GITHUB_MINT_DEV_NODE_ID=node-1 \
+    OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
+    {{repo}}/bin/spawnlet
+
+# Full github-mount dev stack in mprocs: real GitHub App link + AS-custodial minted token + journaled
+# mounts. Requires GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET in .env and (for web link) the App's
+# callback registered; otherwise use `spawnctl` device/loopback link (spec S1).
+dev-github: garage
+    @test -f {{devca}}/root.pem || just gen-dev-ca
+    mprocs --config {{repo}}/mprocs-github.yaml
+
 # one-shot spawnctl against the running spawnlet
 spawnctl prompt="What is the secret word?" model=free:
     @make bin/spawnctl

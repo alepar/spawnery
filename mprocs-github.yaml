@@ -1,0 +1,5 @@
+procs:
+  authsvc: { shell: "just authsvc-github" }
+  cp:      { shell: "just cp-github" }
+  node:    { shell: "just node-github" }
+  web:     { shell: "just web" }

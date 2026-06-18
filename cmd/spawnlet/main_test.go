@@ -86,6 +86,32 @@ func TestConfigureJournalS3WithGarageAdminDoesNotRequireStaticBucketCredentials(
 	}
 }
 
+func TestNodeGitHubMint_RelaxedDevClient(t *testing.T) {
+	t.Setenv("NODE_GITHUB_MINT_DEV_NODE_ID", "node-1")
+	t.Setenv("AS_URL", "http://127.0.0.1:8090")
+	t.Setenv("NODE_AUTH_MODE", "insecure") // relaxed path must NOT require enforced mode
+	if got := nodeGitHubMint(); got == nil {
+		t.Fatal("relaxed dev mint client must be non-nil when NODE_GITHUB_MINT_DEV_NODE_ID + AS_URL are set")
+	}
+}
+
+func TestNodeGitHubMint_RelaxedRequiresASURL(t *testing.T) {
+	t.Setenv("NODE_GITHUB_MINT_DEV_NODE_ID", "node-1")
+	t.Setenv("AS_URL", "")
+	if got := nodeGitHubMint(); got != nil {
+		t.Fatal("relaxed dev mint must be nil without AS_URL")
+	}
+}
+
+func TestNodeGitHubMint_DisabledByDefault(t *testing.T) {
+	t.Setenv("NODE_GITHUB_MINT_DEV_NODE_ID", "")
+	t.Setenv("NODE_AUTH_MODE", "insecure")
+	t.Setenv("AS_URL", "http://127.0.0.1:8090")
+	if got := nodeGitHubMint(); got != nil {
+		t.Fatal("without dev env and in insecure mode, mint client must be nil (unchanged behavior)")
+	}
+}
+
 func TestConfigureJournalS3FailsClosedWithoutGarageAdmin(t *testing.T) {
 	t.Setenv("JOURNAL_BACKEND", "s3")
 	t.Setenv("JOURNAL_S3_ENDPOINT", "http://127.0.0.1:3900")

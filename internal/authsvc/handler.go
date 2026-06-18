@@ -92,5 +92,9 @@ func (s *Service) Handler() http.Handler {
 		mux.HandleFunc("POST /device/token", idp.serveDeviceToken)
 	}
 
-	return nodeIdentityMiddleware(s.root, mux)
+	var inner http.Handler = mux
+	if s.devNodeIdentityHeader != "" {
+		inner = devNodeIdentityMiddleware(s.devNodeIdentityHeader, inner)
+	}
+	return nodeIdentityMiddleware(s.root, inner)
 }

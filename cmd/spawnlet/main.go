@@ -407,14 +407,29 @@ func nodeRootPEM() []byte {
 }
 
 // nodeGitHubMint builds the AS AuthService client for proactive GitHub access-token refresh
-// (design §16.4), over the node's mTLS identity. Returns nil in insecure mode, when AS_URL is
-// unset, or when the identity can't be loaded — proactive refresh is then disabled (spawns run on
-// their delivered token until it lapses).
+// (design §16.4). Returns nil when mint is disabled — proactive refresh is then off (spawns run
+// on their delivered token until it lapses).
+//
+// Two paths:
+//  1. D3 dev-github lane: NODE_GITHUB_MINT_DEV_NODE_ID set → plain HTTP h2c client with the
+//     dev header identity. Works in any NODE_AUTH_MODE (no mTLS required). DEV-ONLY.
+//  2. Enforced/prod lane: NODE_AUTH_MODE=enforced + AS_URL + loaded mTLS identity → mTLS client.
 func nodeGitHubMint() node.GitHubMintClient {
+	asURL := os.Getenv("AS_URL")
+	// D3 dev-github lane: relaxed node->AS over plain HTTP with a header identity (NOT mTLS). The
+	// secure mTLS leg is proven by TestGitHubE2E_* and is the enforced/prod path below.
+	if devNodeID := strings.TrimSpace(os.Getenv("NODE_GITHUB_MINT_DEV_NODE_ID")); devNodeID != "" {
+		if asURL == "" {
+			log.Printf("github mint: NODE_GITHUB_MINT_DEV_NODE_ID set but AS_URL empty — relaxed mint disabled")
+			return nil
+		}
+		log.Printf("github mint: DEV RELAXED node->AS (plain HTTP, header identity %q) — NOT for production", devNodeID)
+		return authv1connect.NewAuthServiceClient(h2cClient(), asURL,
+			connect.WithInterceptors(devNodeIDInterceptor{nodeID: devNodeID}))
+	}
 	if env("NODE_AUTH_MODE", "insecure") != "enforced" {
 		return nil
 	}
-	asURL := os.Getenv("AS_URL")
 	if asURL == "" {
 		return nil
 	}
@@ -430,6 +445,27 @@ func nodeGitHubMint() node.GitHubMintClient {
 		return nil
 	}
 	return authv1connect.NewAuthServiceClient(client, asURL)
+}
+
+// devNodeIDInterceptor injects the D3 dev relaxed node-identity header on every call to the AS.
+// DEV-ONLY — used solely by the dev-github lane (NODE_GITHUB_MINT_DEV_NODE_ID); NOT for production.
+type devNodeIDInterceptor struct{ nodeID string }
+
+func (i devNodeIDInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		req.Header().Set("X-Spawnery-Dev-Node-Id", i.nodeID)
+		return next(ctx, req)
+	}
+}
+func (i devNodeIDInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
+		conn := next(ctx, spec)
+		conn.RequestHeader().Set("X-Spawnery-Dev-Node-Id", i.nodeID)
+		return conn
+	}
+}
+func (i devNodeIDInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return next
 }
 
 // buildIntentVerifier builds the A4 IntentVerifier from the environment [AC1][AM12].

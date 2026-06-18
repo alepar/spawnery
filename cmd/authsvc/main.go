@@ -57,6 +57,8 @@
 //	  AS_CP_URL                      CP base URL for GitHub mint authorization/fanout.
 //	  AS_CP_RPC_SECRET               Scoped AS->CP secret for GitHub coordination RPCs; must match
 //	                                 CP_AS_RPC_SECRET on the CP.
+//	  AS_DEV_RELAX_NODE_AUTH         "1" = DEV-ONLY (D3): trust the X-Spawnery-Dev-Node-Id header as the
+//	                                 node identity for GitHub mint, bypassing node mTLS. NEVER set in prod.
 package main
 
 import (
@@ -268,6 +270,11 @@ func buildService() (*authsvc.Service, error) {
 			authsvc.WithGitHubAccessTokenFanout(authsvc.NewCPGitHubAccessTokenFanout(cpClient, pki.MarshalCertPEM(root.Cert), time.Now)),
 		)
 		log.Printf("authsvc: GitHub mint authorization/fanout wired to CP %s", cpURL)
+	}
+
+	if os.Getenv("AS_DEV_RELAX_NODE_AUTH") == "1" {
+		log.Printf("authsvc: WARNING — AS_DEV_RELAX_NODE_AUTH=1: trusting %q header as node identity (DEV-ONLY, NOT for production)", "X-Spawnery-Dev-Node-Id")
+		opts = append(opts, authsvc.WithDevNodeIdentityHeader("X-Spawnery-Dev-Node-Id"))
 	}
 
 	// GitHub link bootstrap flow. Active only when AS_GITHUB_LINK_REDIRECT_URI is set — a
