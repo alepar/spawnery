@@ -111,6 +111,18 @@ message SealedSecret {
 // unseals (ciphertext-only relay; the node holds the sub-key private half and unseals).
 message SecretDelivery { string spawn_id = 1; uint64 generation = 2; repeated SealedSecret secrets = 3; }
 
+// GitHubMintRef marks a github mount whose node-storage credential is minted JUST-IN-TIME at
+// provision by the node (live-dev Approach 2): instead of an owner-sealed catalog secret delivery,
+// the node calls the AS MintGitHubAccessToken with this link reference and renders the returned
+// access token into its node-only GitHubCredentialsRoot BEFORE storage.GitHub.Prepare clones.
+// PRESENCE of this descriptor is the mint-at-provision marker. secret_id is gh:<owner-account>;
+// version/delivery_id are intentionally absent — an INITIAL mint, the AS resolves the link's
+// current tuple. The minted access token rides only the authenticated mint RESPONSE; it never
+// transits the CP (containment c). Refresh material stays AS-custodial (containment a).
+message GitHubMintRef {
+  string secret_id = 1; // gh:<owner-account>; AS maps this to its custodial refresh chain.
+}
+
 // Per-mount backend binding chosen at create/resume (CP -> node). GitHub bindings carry non-secret
 // routing metadata; token material stays in SealedSecret deliveries.
 message MountBinding {
@@ -119,6 +131,7 @@ message MountBinding {
   string credential_secret_id = 3;
   bool   create_if_missing    = 4;
   string repository_id        = 5; // audit/validation metadata only; not a token scope guarantee.
+  GitHubMintRef github_mint_ref = 6; // present => node mints the token JIT at provision (Approach 2).
 }
 
 // ArtifactContentType discriminates how spawnlet materializes an artifact's inline bytes:

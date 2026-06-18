@@ -650,6 +650,15 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
 		},
 	}
+	// Mint-at-provision (live-dev Approach 2): render node-storage tokens for github mounts that carry
+	// a JIT-mint link-ref, BEFORE CreateWithSelection runs storage.GitHub.Prepare.
+	if err := a.mintGitHubMountsAtProvision(ctx, st.SpawnId, st.Generation, st.GetMounts()); err != nil {
+		_ = a.mgr.RemoveGitHubNodeCredentials(st.SpawnId)
+		a.mgr.CleanupSpawnTransient(st.SpawnId)
+		logErr("startSpawn "+st.SpawnId+": github mint-at-provision", err)
+		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
+		return
+	}
 	secrets := st.GetSecrets()
 	if len(secrets) > 0 {
 		consumedGitHub, err := a.consumeStartupGitHubSecrets(ctx, st.SpawnId, st.Generation, secrets, st.GetMounts())

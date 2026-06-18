@@ -140,6 +140,45 @@ func githubRefreshRequestID(secretID string, version uint64) string {
 	return fmt.Sprintf("node-refresh-%s-v%d", secretID, version)
 }
 
+// githubInitialMintRequestID is the idempotency key for the at-provision INITIAL mint of a mount's
+// github link. It is stable across a retried StartSpawn for the same (spawn, generation, link) so the
+// AS dedups, and distinct from the proactive-refresh request ids (githubRefreshRequestID).
+func githubInitialMintRequestID(spawnID, secretID string, generation uint64) string {
+	return fmt.Sprintf("node-initial-mint-%s-%s-g%d", spawnID, secretID, generation)
+}
+
+// MintInitial performs the synchronous at-provision INITIAL mint for a github mount. It presents the
+// node identity (carried by r.client) and an initial link-ref (secret_id only — the AS resolves the
+// link's current version/delivery_id, T1). Unlike the proactive Tick path it does NOT mutate refresh
+// scheduling state: the caller renders the returned token, then calls Note to begin proactive refresh.
+// Returns the access token and its precise expiry (0 = unknown). A FailedPrecondition/NotFound from the
+// AS (broken/absent link) is surfaced as a clear "link your GitHub account first" error so the spawn
+// fails with an actionable message (spec §'Create-time initial token delivery' step 5). nil-safe: a nil
+// refresher or nil client means the dev lane lacks the mint channel — an explicit error, never a token.
+func (r *githubRefresher) MintInitial(ctx context.Context, spawnID string, generation uint64, secretID, repositoryID string) (string, int64, error) {
+	if r == nil || r.client == nil {
+		return "", 0, fmt.Errorf("github mint client unavailable (node->AS mint channel not configured)")
+	}
+	cctx, cancel := context.WithTimeout(ctx, refreshMintTimeout)
+	defer cancel()
+	resp, err := r.client.MintGitHubAccessToken(cctx, connect.NewRequest(&authv1.MintGitHubAccessTokenRequest{
+		RequestId:    githubInitialMintRequestID(spawnID, secretID, generation),
+		SpawnId:      spawnID,
+		Generation:   generation,
+		RepositoryId: repositoryID, // audit/expected-target only; never a scope reducer (containment e).
+		LinkRef: &authv1.GitHubLinkRef{
+			SecretId: secretID, // INITIAL: version/delivery_id unset; AS resolves the current tuple (T1).
+		},
+	}))
+	if err != nil {
+		if code := connect.CodeOf(err); code == connect.CodeFailedPrecondition || code == connect.CodeNotFound {
+			return "", 0, fmt.Errorf("link your GitHub account first: %w", err)
+		}
+		return "", 0, err
+	}
+	return resp.Msg.GetAccessToken(), resp.Msg.GetAccessExpiresAtUnix(), nil
+}
+
 // Tick attempts a mint for every due entry at `now`. Each attempt marks the entry in-flight and sets
 // a grace floor so the node waits for the sealed fanout (which re-Notes the new version) instead of
 // hammering the AS. On success the mint RESPONSE's access_expires_at_unix refines refreshAt; on

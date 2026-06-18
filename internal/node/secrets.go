@@ -527,6 +527,55 @@ func (a *attacher) noteGitHubRefresh(spawnID string, generation uint64, sec *nod
 	})
 }
 
+// mintGitHubMountsAtProvision handles every github mount carrying a JIT-mint link-ref descriptor
+// (live-dev Approach 2): for each such mount the node mints an access token via the AS mint client,
+// renders it into the node-only GitHubCredentialsRoot (containment b) BEFORE storage.GitHub.Prepare
+// runs (the caller invokes this prior to CreateWithSelection), then Notes the link so the existing
+// proactive refresher tracks it. The token arrives only via the authenticated mint RESPONSE and is
+// never relayed by the CP (containment c); only the ACCESS token is materialized — refresh material
+// stays AS-custodial (containment a). Runs on create AND resume (a resumed spawn needs a live token
+// for the agent's git push; storage.Prepare itself skips clone on resume but the helper still needs
+// the token file). nil refresher (dev lane without the mint channel) makes any descriptor an error.
+func (a *attacher) mintGitHubMountsAtProvision(ctx context.Context, spawnID string, generation uint64, mounts []*nodev1.MountBinding) error {
+	for _, m := range mounts {
+		ref := m.GetGithubMintRef()
+		if ref == nil || ref.GetSecretId() == "" {
+			continue
+		}
+		owner, repo, ok := parseGitHubBackendURI(m.GetBackendUri())
+		if !ok {
+			return fmt.Errorf("github mint mount %q: invalid backend uri %q (want github:owner/repo)", m.GetName(), m.GetBackendUri())
+		}
+		token, accessExpiresAtUnix, err := a.githubRefresh.MintInitial(ctx, spawnID, generation, ref.GetSecretId(), m.GetRepositoryId())
+		if err != nil {
+			return fmt.Errorf("github mount %q: mint access token: %w", m.GetName(), err)
+		}
+		// Node-only render (containment b): NEVER RenderGitHubAgentCredential here. Host/Login take
+		// their safe defaults (github.com / x-access-token) — the mint response carries no login.
+		// Note: unlike the delivery path's zeroBytes(pt), Go string values are immutable — zeroing
+		// the local variable is a no-op at the bytes level and is correctly flagged by the linter.
+		// The token goes out of scope at the end of the loop body; that is the defense-in-depth bound.
+		_, rerr := a.mgr.RenderGitHubNodeCredential(spawnID, m.GetName(), githubcred.RenderRequest{
+			Owner:       owner,
+			Repo:        repo,
+			AccessToken: token,
+		})
+		if rerr != nil {
+			return fmt.Errorf("github mount %q: render node credential: %w", m.GetName(), rerr)
+		}
+		// Note the link for the existing proactive refresher (initial: version 0/delivery "" — the
+		// refresher's MintGitHubAccessTokenRequest tolerates the initial tuple, AS resolves current).
+		a.githubRefresh.Note(githubRefreshEntry{
+			SpawnID:             spawnID,
+			Generation:          generation,
+			SecretID:            ref.GetSecretId(),
+			RepositoryID:        m.GetRepositoryId(),
+			AccessExpiresAtUnix: accessExpiresAtUnix,
+		})
+	}
+	return nil
+}
+
 func (a *attacher) nodeMountBindings(spawnID string) ([]*nodev1.MountBinding, error) {
 	bindings, ok := a.mgr.MountBindings(spawnID)
 	if !ok {
