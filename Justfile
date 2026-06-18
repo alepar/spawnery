@@ -88,12 +88,12 @@ gen-dev-ca:
 
 # control plane with enforced node auth: mTLS node listener on a second port; clients still use :8080.
 cp-enforced:
-    @make bin/cp
+    @make bin/spawnery_cp
     CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
     NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \
     CP_NODE_ROOT_CA={{devca}}/root.pem \
     CP_NODE_TLS_CERT={{devca}}/cp-server.pem CP_NODE_TLS_KEY={{devca}}/cp-server-key.pem \
-    {{repo}}/bin/cp
+    {{repo}}/bin/spawnery_cp
 
 # auth service loaded with the persistent dev CA (issues real certs; mints enrollment + session tokens).
 authsvc-enforced:
@@ -147,14 +147,14 @@ authsvc-github:
 
 # CP for the github lane: enforced node mTLS + mount-intent signing (pollAndSign) + AS->CP RPC auth.
 cp-github:
-    @make bin/cp
+    @make bin/spawnery_cp
     CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
     NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \
     CP_NODE_ROOT_CA={{devca}}/root.pem \
     CP_NODE_TLS_CERT={{devca}}/cp-server.pem CP_NODE_TLS_KEY={{devca}}/cp-server-key.pem \
     CP_DEV_INTENT_ENABLED=1 \
     CP_AS_RPC_SECRET=dev-as-cp-secret \
-    {{repo}}/bin/cp
+    {{repo}}/bin/spawnery_cp
 
 # Node for the github lane: enforced mTLS to CP + journaled mounts (sources dev-creds.env) + D3
 # relaxed AS mint (plain HTTP, NODE_GITHUB_MINT_DEV_NODE_ID header). DEV-ONLY relaxation.
