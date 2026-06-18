@@ -51,6 +51,7 @@ func main() {
 			&cli.StringFlag{Name: "version", Value: "1.0.0", Usage: "app version to register (with -register)"},
 			&cli.StringFlag{Name: "ref", Usage: "immutable app ref creator/app@sha (with -register)"},
 			&cli.StringFlag{Name: "profile", Usage: "customization profile id to apply at create (CP mode)"},
+			&cli.StringSliceFlag{Name: "mount", Usage: "mount binding name=backend_uri[,create] (repeatable; e.g. repo=github:owner/repo,create) — CP mode only"},
 		},
 		Action:   rootAction,
 		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), setModelCmd(), keyCmd(), moveCmd(), forkCmd(), loginCmd(), logoutCmd(), profileCmd(), catalogCmd(), ghCmd()},
@@ -73,9 +74,16 @@ func rootAction(ctx context.Context, c *cli.Command) error {
 		return nil
 	}
 	if c.String("cp") != "" {
+		mounts, err := parseMountFlags(c.StringSlice("mount"))
+		if err != nil {
+			return cli.Exit(err.Error(), 2)
+		}
 		src := buildTokenSource(configDir, c.String("token"), httpCl)
-		runCP(ctx, c.String("cp"), c.String("app-id"), c.String("model"), c.String("profile"), src)
+		runCP(ctx, c.String("cp"), c.String("app-id"), c.String("model"), c.String("profile"), mounts, src)
 		return nil
+	}
+	if len(c.StringSlice("mount")) > 0 {
+		return cli.Exit("--mount requires -cp (standalone/register mode has no mount bindings)", 2)
 	}
 	runStandalone(ctx, c.String("addr"), c.String("app"), c.String("model"))
 	return nil
@@ -171,7 +179,7 @@ func runStandalone(ctx context.Context, addr, appPath, model string) {
 }
 
 // runCP drives the agent through the control plane via the cp.v1 service.
-func runCP(ctx context.Context, addr, appID, model, profileID string, src *cpTokenSource) {
+func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*cpv1.MountBinding, src *cpTokenSource) {
 	client := cpv1connect.NewSpawnServiceClient(h2cClient(), addr,
 		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 
@@ -179,6 +187,7 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, src *cpTok
 		AppId:     appID,
 		Model:     model,
 		ProfileId: profileID,
+		Mounts:    mounts,
 	}))
 	if err != nil {
 		log.Fatalf("createSpawn: %v", err)
