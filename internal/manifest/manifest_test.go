@@ -91,3 +91,27 @@ func TestParseNoStorage(t *testing.T) {
 		t.Fatalf("want 0 mounts, got %d", len(m.Storage.Mounts))
 	}
 }
+
+func TestParseGitHubExampleApp(t *testing.T) {
+	m, err := Parse("../../examples/github-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.APIVersion != "spawnery/v1" || m.ID != "spawnery/github-app" {
+		t.Fatalf("manifest = %+v", m)
+	}
+	if len(m.Storage.Mounts) != 1 {
+		t.Fatalf("want 1 mount, got %d: %+v", len(m.Storage.Mounts), m.Storage.Mounts)
+	}
+	mt := m.Storage.Mounts[0]
+	if mt.Name != "repo" || mt.Path != "repo" || !mt.Github {
+		t.Fatalf("mount = %+v, want name=repo path=repo github=true", mt)
+	}
+	// T4 bind rule (internal/cp/validate.go): a github slot must be journaled.
+	if mt.Durability != "node-local" {
+		t.Fatalf("durability = %q, want node-local (journaled)", mt.Durability)
+	}
+	if m.Visibility != "open" {
+		t.Fatalf("visibility = %q, want open", m.Visibility)
+	}
+}

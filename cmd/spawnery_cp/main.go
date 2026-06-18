@@ -125,6 +125,9 @@ func main() {
 		{ID: "spawnery/secret-app", Ref: "examples/secret-app", Version: "1.0.0",
 			DisplayName: "Secret App", Summary: "Vertical-slice smoke test — ask it for the secret word.",
 			Tags: []string{"demo", "smoke-test"}, Mounts: []string{"main"}},
+		{ID: "spawnery/github-app", Ref: "examples/github-app", Version: "1.0.0",
+			DisplayName: "GitHub Repo Agent", Summary: "Clone a GitHub repo you pick into a journaled mount; the agent does git ops under your linked identity.",
+			Tags: []string{"github", "demo", "dev-integration"}, Mounts: []string{"repo"}},
 	}
 	// Dev-owner seeding: only in dev mode (prod accountIds are created lazily by the AS).
 	if devMode {

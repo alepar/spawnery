@@ -69,3 +69,22 @@ func TestSeedFailsClosedWhenDeclaredMountManifestMissing(t *testing.T) {
 		t.Fatalf("Seed err=%v, want parse seed manifest failure", err)
 	}
 }
+
+func TestSeedGitHubExampleAppDeclaresJournaledGitHubSlot(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+	apps := []AppSeed{{
+		ID: "spawnery/github-app", Ref: "examples/github-app", Version: "1.0.0",
+		DisplayName: "GitHub Repo Agent", Mounts: []string{"repo"},
+	}}
+	if err := Seed(ctx, st, map[string]string{"t": "alice"}, apps); err != nil {
+		t.Fatal(err)
+	}
+	decls, err := st.Apps().DeclaredMounts(ctx, "spawnery/github-app", "1.0.0")
+	if err != nil || len(decls) != 1 {
+		t.Fatalf("DeclaredMounts = %+v err=%v", decls, err)
+	}
+	if decls[0].Name != "repo" || !decls[0].Github {
+		t.Fatalf("decl = %+v, want name=repo github=true", decls[0])
+	}
+}
