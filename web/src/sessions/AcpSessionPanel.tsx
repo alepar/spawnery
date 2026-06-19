@@ -3,6 +3,7 @@ import { Conn } from "@/acp/conn";
 import { encodePrompt, encodePermResponse, encodeSetMode, encodeCancel, type Frame } from "@/acp/frames";
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
 import { getAccessToken, authEnabled, useSessionStore as useAuthStore } from "@/auth/session";
+import { buildSessionBindFrame } from "@/auth/sessionBind";
 import { cpWsUrl } from "@/config/endpoints";
 import { ChatView } from "@/views/ChatView";
 import { MAX_QUEUED } from "@/lib/turn";
@@ -39,12 +40,16 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
     const gen = ++genRef.current;
     useSessionStore.getState().setConn(sessionId, "connecting");
     const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
-      onOpen: () => {
+      onOpen: async () => {
         if (genRef.current !== gen) return;
         // Fresh frame receiver per (re)connect; wire it BEFORE the bind so replay can't precede onmessage.
         new Conn(sock, (m) => { if (genRef.current === gen) useSessionStore.getState().applyFrame(sessionId, m as Frame); });
         const cursor = useSessionStore.getState().acp[sessionId]?.lastSeq ?? 0;
-        sock.send(JSON.stringify({ spawnId, sessionId, clientId: CLIENT_ID, token: getAccessToken(), cursor }));
+        // Bind frame carries the session-open SignedIntent the enforced node requires (else
+        // MISSING_INTENT NACK -> client never attaches -> blank panel).
+        const frame = await buildSessionBindFrame(spawnId, sessionId, CLIENT_ID, cursor);
+        if (genRef.current !== gen) return;
+        sock.send(JSON.stringify(frame));
         useSessionStore.getState().setConn(sessionId, "connected");
       },
       onDown: () => { if (genRef.current === gen) useSessionStore.getState().setConn(sessionId, "reconnecting"); },

@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
 import { getAccessToken, authEnabled, useSessionStore } from "@/auth/session";
+import { buildSessionBindFrame } from "@/auth/sessionBind";
 import { cpWsUrl } from "@/config/endpoints";
 import { encodeInput, encodeResize } from "@/term/wire";
 import { BacklogTracker } from "@/term/backlog";
@@ -91,8 +92,10 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
 
     onConnRef.current?.("connecting");
     const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
-      onOpen: () => {
-        sock.send(JSON.stringify({ spawnId, sessionId, clientId: CLIENT_ID, token: getAccessToken(), cursor: 0 }));
+      onOpen: async () => {
+        // Bind frame MUST be the first message (ws.go reads it as the session-open). It carries the
+        // session-open SignedIntent the enforced node requires (else MISSING_INTENT NACK -> blank).
+        sock.send(JSON.stringify(await buildSessionBindFrame(spawnId, sessionId, CLIENT_ID, 0)));
         safeFit();
         sock.send(encodeResize(term.cols, term.rows));
         onConnRef.current?.("connected");

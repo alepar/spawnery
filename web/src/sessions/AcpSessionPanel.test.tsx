@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // instance (and its opts) so a test can drive onOpen/onDown and inspect sends.
 let fakeSocketInstance: {
   sent: (string | Uint8Array)[];
-  opts: { onOpen: () => void; onDown: () => void; onMessage?: (d: ArrayBuffer | string) => void };
+  opts: { onOpen: () => void | Promise<void>; onDown: () => void; onMessage?: (d: ArrayBuffer | string) => void };
   binaryType: string;
   send: (d: string | Uint8Array) => void;
   close: () => void;
@@ -44,7 +44,7 @@ describe("AcpSessionPanel — gate the socket on session readiness", () => {
     expect(useSessionStore.getState().conn["2"]).toBe("waiting"); // honest grey-pulse dot
   });
 
-  it("opens the socket and sends the bind once the session flips ready=true", () => {
+  it("opens the socket and sends the bind once the session flips ready=true", async () => {
     const { rerender } = render(<AcpSessionPanel spawnId="s1" sessionId="2" active ready={false} />);
     expect(fakeSocketInstance).toBeNull();
 
@@ -53,8 +53,8 @@ describe("AcpSessionPanel — gate the socket on session readiness", () => {
     expect(fakeSocketInstance).not.toBeNull();
     expect(useSessionStore.getState().conn["2"]).toBe("connecting");
 
-    // onOpen drives the bind + connected state, exactly as before the gate.
-    act(() => { fakeSocketInstance!.opts.onOpen(); });
+    // onOpen drives the bind + connected state (async: it awaits the session-open intent first).
+    await act(async () => { await fakeSocketInstance!.opts.onOpen(); });
     const bindMsg = fakeSocketInstance!.sent[0];
     expect(typeof bindMsg).toBe("string");
     const bind = JSON.parse(bindMsg as string);

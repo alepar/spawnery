@@ -35,8 +35,8 @@ describe("listSpawns", () => {
     const out = await listSpawns();
     expect(calls[0].url).toContain("/cp.v1.SpawnService/ListSpawns");
     expect(out).toEqual([
-      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
-      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
+      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", generation: 0n, mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
+      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", generation: 0n, mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
     ]);
   });
   it("maps fork lineage fields from ListSpawns", async () => {

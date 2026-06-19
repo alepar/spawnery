@@ -130,6 +130,62 @@ export async function buildSignedIntent(
   };
 }
 
+// ── Session-open intent (WS bind frame) ───────────────────────────────────────
+
+/**
+ * buildSessionOpenSignedIntentB64 builds, signs, and proto-marshals an OpSessionOpen SignedIntent
+ * for the /ws/session bind frame, returning the standard-base64 of proto.Marshal(SignedIntent).
+ *
+ * Mirrors cmd/spawnctl/main.go runCP's bindFrame.SessionAuth: the node's enforced IntentVerifier
+ * requires a session-open auth envelope (else MISSING_INTENT NACK -> client never attaches). Unlike
+ * create/resume there is no GetPendingIntent round-trip — the client signs spawnId + the live
+ * episode `generation` + sessionId directly. The CP (internal/cp/ws.go) does proto.Unmarshal on the
+ * `signedIntent` bind field, so it must be the wire bytes of the SignedIntent message, not the
+ * Connect-JSON {domain,body,sig,spkiDer} shape.
+ */
+export async function buildSessionOpenSignedIntentB64(
+  spawnId: string,
+  sessionId: string,
+  generation: bigint,
+  privateKey: CryptoKey,
+  publicKey: CryptoKey,
+): Promise<string> {
+  const spki = await exportSpkiDer(publicKey);
+  const jtiBytes = crypto.getRandomValues(new Uint8Array(16));
+  const jti = Array.from(jtiBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+
+  const bodyBytes = buildIntentBodyBytes({
+    jti,
+    issuedAt: Math.floor(Date.now() / 1000),
+    spawnId,
+    generation,
+    targetNodeId: "",
+    op: "session-open",
+    appRef: "",
+    image: "",
+    model: "",
+    dataRef: "",
+    sessionId: sessionId || "0",
+    mounts: [],
+  });
+
+  const domain = domainForOp("session-open");
+  const domainBytes = new TextEncoder().encode(domain);
+  const msg = new Uint8Array(domainBytes.length + bodyBytes.length);
+  msg.set(domainBytes);
+  msg.set(bodyBytes, domainBytes.length);
+  const sig = await signP1363(privateKey, msg);
+
+  // proto.Marshal(auth.v1.SignedIntent): domain=1 (string), body=2, sig=3, spki_der=4 (bytes).
+  const w = new ProtoWriter();
+  w.writeBytes(1, domain);
+  w.writeBytes(2, bodyBytes);
+  w.writeBytes(3, sig);
+  w.writeBytes(4, spki);
+  const protoBytes = w.finish();
+  return btoa(String.fromCharCode(...protoBytes));
+}
+
 // ── Locally-pended intent registry ───────────────────────────────────────────
 
 export interface PendedOp {

@@ -50,7 +50,7 @@ vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 // ─── Fake ReconnectingSocket ──────────────────────────────────────────────────
 let fakeSocketInstance: {
   sent: (string | Uint8Array)[] ;
-  opts: { onOpen: () => void; onDown: () => void; onMessage?: (d: ArrayBuffer | string) => void };
+  opts: { onOpen: () => void | Promise<void>; onDown: () => void; onMessage?: (d: ArrayBuffer | string) => void };
   binaryType: string;
   send: (d: string | Uint8Array) => void;
   close: () => void;
@@ -121,11 +121,11 @@ describe("TerminalView", () => {
     expect(mockTerminal.focus).toHaveBeenCalledTimes(2);
   });
 
-  it("sends a JSON bind with spawnId on socket open", () => {
+  it("sends a JSON bind with spawnId on socket open", async () => {
     renderWithSettings(<TerminalView spawnId="sp1" />);
     expect(fakeSocketInstance).not.toBeNull();
-    // Trigger the onOpen callback
-    fakeSocketInstance!.opts.onOpen();
+    // Trigger the onOpen callback (async: it awaits the session-open bind frame before sending).
+    await fakeSocketInstance!.opts.onOpen();
     // First send should be the JSON bind
     const bindMsg = fakeSocketInstance!.sent[0];
     expect(typeof bindMsg).toBe("string");
@@ -173,24 +173,24 @@ describe("TerminalView", () => {
     expect(new TextDecoder().decode(writtenData[0] as Uint8Array)).toBe("hello\r\n");
   });
 
-  it("reports socket state via onConn: connecting on mount, connected on open, reconnecting on down", () => {
+  it("reports socket state via onConn: connecting on mount, connected on open, reconnecting on down", async () => {
     const onConn = vi.fn();
     renderWithSettings(<TerminalView spawnId="sp1" onConn={onConn} />);
     expect(fakeSocketInstance).not.toBeNull();
     // onConn("connecting") fires synchronously when the socket is created (before open).
     expect(onConn).toHaveBeenCalledWith("connecting");
     onConn.mockClear();
-    fakeSocketInstance!.opts.onOpen();
+    await fakeSocketInstance!.opts.onOpen();
     expect(onConn).toHaveBeenCalledWith("connected");
     onConn.mockClear();
     fakeSocketInstance!.opts.onDown();
     expect(onConn).toHaveBeenCalledWith("reconnecting");
   });
 
-  it("includes sessionId in the bind frame", () => {
+  it("includes sessionId in the bind frame", async () => {
     renderWithSettings(<TerminalView spawnId="s1" sessionId="2" />);
     expect(fakeSocketInstance).not.toBeNull();
-    fakeSocketInstance!.opts.onOpen();
+    await fakeSocketInstance!.opts.onOpen();
     const bindMsg = fakeSocketInstance!.sent[0] as string;
     const bind = JSON.parse(bindMsg);
     expect(bind.sessionId).toBe("2");

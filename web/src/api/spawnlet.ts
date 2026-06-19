@@ -12,6 +12,10 @@ export interface SpawnView {
   name: string;
   appId: string;
   status: SpawnStatus;
+  // generation: current live episode generation (cp.proto SpawnStatus.generation). Clients sign it
+  // into the session-open intent (see buildSessionOpenSignedIntentB64). uint64 -> JSON string -> bigint.
+  // Optional in the type so partial test mocks compile; listSpawns always sets it (defaulting to 0n).
+  generation?: bigint;
   mode: string;
   model: string;
   modelApplied: boolean;
@@ -97,7 +101,7 @@ export async function createSpawn(
 }
 
 export async function listSpawns(): Promise<SpawnView[]> {
-  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; mode?: string; model?: string; modelApplied?: boolean; journalKeyDeliveryPending?: boolean; transitionPhase?: string; parentSpawnId?: string; forkedAt?: string | number }> }>(
+  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; generation?: string | number; mode?: string; model?: string; modelApplied?: boolean; journalKeyDeliveryPending?: boolean; transitionPhase?: string; parentSpawnId?: string; forkedAt?: string | number }> }>(
     "ListSpawns", {},
   );
   return (r.spawns ?? []).map((s) => ({
@@ -105,6 +109,7 @@ export async function listSpawns(): Promise<SpawnView[]> {
     name: s.name ?? "",
     appId: s.appId ?? "",
     status: statusFromProto(s.status),
+    generation: s.generation ? BigInt(s.generation) : 0n,
     mode: s.mode ?? "",
     model: s.model ?? "",
     modelApplied: s.modelApplied ?? true,
