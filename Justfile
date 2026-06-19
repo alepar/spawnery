@@ -61,6 +61,13 @@ _images agent="agent":
 web:
     cd web && npm run dev -- --host
 
+# web for the github lane: auth ENABLED so the SPA uses the AS session for CP calls AND signs spawn
+# intents (pollAndSign). The github lane's CP runs the intent flow (CP_DEV_INTENT_ENABLED=1) and
+# validates AS sessions (CP_AS_SESSION_PUBKEYS); the generic `just web` leaves auth off in dev
+# (authEnabled()=false), so it would skip intent signing and every spawn would hang in 'starting'.
+web-github:
+    cd web && VITE_AUTH_ENABLED=1 npm run dev -- --host
+
 # both, in mprocs panes (one Ctrl-C). Depends on `garage` so the transient-tier journal is
 # backed before the node starts (compose runs detached + bootstrap writes dev-creds.env, which
 # `just node` sources) — without it, journaled mounts silently fail to persist on suspend.
@@ -138,8 +145,9 @@ authsvc-github:
     AS_GITHUB_TOKEN_ENC_KEY="$(printf %s 'spawnery-dev-github-mount-enck32' | base64)" \
     GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in .env (GitHub App client_id)}" \
     GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in .env}" \
-    AS_GITHUB_REDIRECT_URI=http://{{addr_as}}/oauth/callback \
+    AS_GITHUB_REDIRECT_URI=${AS_GITHUB_REDIRECT_URI:-http://{{addr_as}}/oauth/callback} \
     AS_GITHUB_LINK_REDIRECT_URI=http://{{addr_as}}/github/link/callback \
+    AS_REDIRECT_URIS=http://127.0.0.1/cb,http://localhost:5173/callback \
     AS_SPA_ORIGINS=http://localhost:5173 \
     AS_ALLOWED_ORIGINS=http://localhost:5173 \
     AS_CP_URL=http://{{addr_cp}} \
@@ -148,13 +156,19 @@ authsvc-github:
     {{repo}}/bin/authsvc
 
 # CP for the github lane: enforced node mTLS + mount-intent signing (pollAndSign) + AS->CP RPC auth.
+# Validates real AS session tokens (CP_AS_SESSION_PUBKEYS) so the spawn owner == the AS accountID
+# the GitHub link is filed under — the gh:<owner> mount credential resolves end-to-end. The
+# dev-token shortcut stays available for non-github smoke tests.
 cp-github:
     @make bin/spawnery_cp
-    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    @test -f {{devca}}/session-pub.pem || just gen-dev-ca
+    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=${CP_DEV_OWNER:-alice} CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    CP_AS_SESSION_PUBKEYS={{devca}}/session-pub.pem \
     NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \
     CP_NODE_ROOT_CA={{devca}}/root.pem \
     CP_NODE_TLS_CERT={{devca}}/cp-server.pem CP_NODE_TLS_KEY={{devca}}/cp-server-key.pem \
     CP_DEV_INTENT_ENABLED=1 \
+    CP_DEV_AS_KEY={{devca}}/session-key.pem \
     CP_AS_RPC_SECRET=dev-as-cp-secret \
     {{repo}}/bin/spawnery_cp
 
@@ -171,6 +185,7 @@ node-github agent="agent": (_images agent)
     NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
     USERNS_MODE=remap DELTA_CAPTURE=1 \
     AS_URL=http://{{addr_as}} \
+    NODE_AS_PUBKEYS={{devca}}/session-pub.pem \
     NODE_GITHUB_MINT_DEV_NODE_ID=node-1 \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
     {{repo}}/bin/spawnlet

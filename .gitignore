@@ -25,7 +25,13 @@ cp.db*
 /authsvc
 /spawnery-ca
 /telemetry/
-/.dev-ca/   # local dev CA material (private keys) — never commit
+# local dev CA material (private keys) — never commit.
+# NOTE: the comment is on its own line; an inline "# ..." after a pattern is treated as a literal
+# part of the pattern by gitignore, which silently un-ignores the path.
+/.dev-ca/
+
+# local dev-lane process logs (just-launched components write here)
+/.logs/
 
 # Syncthing conflict artifacts in the externally-synced .beads dir (not source of truth)
 .beads/*.sync-conflict-*

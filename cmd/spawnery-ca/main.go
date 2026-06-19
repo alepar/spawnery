@@ -20,17 +20,69 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || os.Args[1] != "dev" {
-		log.Fatalf("usage: spawnery-ca dev [dir]   (default dir: .dev-ca)")
+	switch {
+	case len(os.Args) >= 2 && os.Args[1] == "dev":
+		dir := ".dev-ca"
+		if len(os.Args) >= 3 {
+			dir = os.Args[2]
+		}
+		if err := genDev(dir); err != nil {
+			log.Fatalf("spawnery-ca: %v", err)
+		}
+		log.Printf("spawnery-ca: dev CA written to %s (root.pem, self-hosted-intermediate.*, cp-server.*, node/, session-key.pem, session-pub.pem)", dir)
+	case len(os.Args) == 5 && os.Args[1] == "node":
+		// Re-mint ONLY the node identity (dir/node) under a given owner, reusing the existing
+		// intermediate — so a dev node can be re-owned (e.g. to a real AS accountID) without
+		// rotating the CA/session key and breaking a running stack.
+		dir, nodeID, owner := os.Args[2], os.Args[3], os.Args[4]
+		if err := remintNode(dir, nodeID, owner); err != nil {
+			log.Fatalf("spawnery-ca: %v", err)
+		}
+		log.Printf("spawnery-ca: re-minted node identity %s owned by %q in %s/node", nodeID, owner, dir)
+	default:
+		log.Fatalf("usage:\n  spawnery-ca dev [dir]                  (default dir: .dev-ca)\n  spawnery-ca node <dir> <node-id> <owner>")
 	}
-	dir := ".dev-ca"
-	if len(os.Args) >= 3 {
-		dir = os.Args[2]
+}
+
+// remintNode loads the existing self-hosted intermediate from <dir> and issues a fresh node
+// identity (<dir>/node) bound to nodeID + owner, leaving all other CA material untouched.
+func remintNode(dir, nodeID, owner string) error {
+	interCertPEM, err := os.ReadFile(filepath.Join(dir, "self-hosted-intermediate.pem"))
+	if err != nil {
+		return fmt.Errorf("read intermediate cert: %w", err)
 	}
-	if err := genDev(dir); err != nil {
-		log.Fatalf("spawnery-ca: %v", err)
+	interKeyPEM, err := os.ReadFile(filepath.Join(dir, "self-hosted-intermediate-key.pem"))
+	if err != nil {
+		return fmt.Errorf("read intermediate key: %w", err)
 	}
-	log.Printf("spawnery-ca: dev CA written to %s (root.pem, self-hosted-intermediate.*, cp-server.*, node/, session-key.pem)", dir)
+	rootCertPEM, err := os.ReadFile(filepath.Join(dir, "root.pem"))
+	if err != nil {
+		return fmt.Errorf("read root cert: %w", err)
+	}
+	interCert, err := pki.ParseCertPEM(interCertPEM)
+	if err != nil {
+		return fmt.Errorf("parse intermediate cert: %w", err)
+	}
+	interKey, err := pki.ParseKeyPEM(interKeyPEM)
+	if err != nil {
+		return fmt.Errorf("parse intermediate key: %w", err)
+	}
+	inter := &pki.CA{Cert: interCert, Key: interKey}
+
+	node, err := inter.IssueNode(nodeID, owner, pki.ClassSelfHosted, time.Now().Add(365*24*time.Hour))
+	if err != nil {
+		return fmt.Errorf("node cert: %w", err)
+	}
+	nodeKey, err := pki.MarshalKeyPEM(node.Key)
+	if err != nil {
+		return err
+	}
+	return nodeid.Save(filepath.Join(dir, "node"), nodeid.Identity{
+		CertPEM:  pki.MarshalCertPEM(node.Cert),
+		ChainPEM: interCertPEM,
+		KeyPEM:   nodeKey,
+		RootPEM:  rootCertPEM,
+	})
 }
 
 func genDev(dir string) error {
@@ -113,6 +165,18 @@ func genDev(dir string) error {
 	}
 	sessionKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: sessionKeyDER})
 	if err := os.WriteFile(filepath.Join(dir, "session-key.pem"), sessionKeyPEM, 0o600); err != nil {
+		return err
+	}
+
+	// Session public key (PKIX SPKI PEM) for the CP's CP_AS_SESSION_PUBKEYS: the CP verifies
+	// AS-issued session tokens offline against this key, so enforced lanes can run the real
+	// AS-session auth path (owner == AS accountID) instead of only the dev-token shortcut.
+	sessionPubDER, err := x509.MarshalPKIXPublicKey(sessionKey.Public())
+	if err != nil {
+		return fmt.Errorf("session pubkey marshal: %w", err)
+	}
+	sessionPubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: sessionPubDER})
+	if err := os.WriteFile(filepath.Join(dir, "session-pub.pem"), sessionPubPEM, 0o644); err != nil {
 		return err
 	}
 
