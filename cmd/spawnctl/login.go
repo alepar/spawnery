@@ -110,8 +110,13 @@ func loginLoopback(ctx context.Context, dir, asURL string, noBrowser bool, w io.
 		return fmt.Errorf("marshal session pubkey: %w", err)
 	}
 
-	// 2. Bind loopback listener on a random port.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// 2. Bind loopback listener. Random port by default; SPAWNCTL_LOGIN_PORT pins it so a remote
+	// box reached over an SSH tunnel keeps a stable forward across login retries.
+	bindAddr := "127.0.0.1:0"
+	if p := strings.TrimSpace(os.Getenv("SPAWNCTL_LOGIN_PORT")); p != "" {
+		bindAddr = "127.0.0.1:" + p
+	}
+	ln, err := net.Listen("tcp", bindAddr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}

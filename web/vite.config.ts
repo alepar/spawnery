@@ -35,7 +35,10 @@ export default defineConfig({
       "/oauth": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
       "/refresh": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
       "/logout": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
-      "/ca": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
+      // NOTE trailing slash: vite proxies by PREFIX, so a bare "/ca" also swallows the SPA's
+      // "/callback" auth-return route (it starts with "/ca") and 404s it from the AS. The AS
+      // endpoint is "/ca/root", so scope the rule to "/ca/".
+      "/ca/": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
     },
   },
   test: {

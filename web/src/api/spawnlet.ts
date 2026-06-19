@@ -83,7 +83,11 @@ export async function createSpawn(
     const store = session.keyStore;
     const { getOrCreateSessionKey } = await import("@/auth/keypair");
     const kp = await getOrCreateSessionKey(store);
-    const pended = { op: "create-spawn", spawnId, appRef: appId, model, mounts };
+    // appRef is intentionally omitted: the user picks an app *id*, not the immutable app_ref the
+    // CP resolves it to (id != ref for catalog/seed apps), so validating against a ref we never
+    // supplied would always mismatch and block the spawn. pollAndSign skips the appRef check when
+    // it's undefined; the model check still runs and the signed intent uses the CP-resolved appRef.
+    const pended = { op: "create-spawn", spawnId, model, mounts };
     registerPendedOp(pended);
     pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
       .catch((e: unknown) => console.error("intent sign failed:", e))

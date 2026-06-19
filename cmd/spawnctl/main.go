@@ -40,6 +40,9 @@ func main() {
 		Usage: "drive and attach to spawnery spawns",
 		// Root flags + Action preserve the original CLI: create a spawn and drive it (standalone via
 		// -addr, or through the CP via -cp), or register an app manifest with -register.
+		// The --mount value embeds a comma (name=backend_uri,create); disable the slice-flag comma
+		// separator so the ",create" option is not mis-split into a second mount binding.
+		DisableSliceFlagSeparator: true,
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "addr", Value: "http://127.0.0.1:9090", Usage: "spawnlet address (standalone)"},
 			&cli.StringFlag{Name: "app", Value: "examples/secret-app", Usage: "app definition dir"},
@@ -54,7 +57,7 @@ func main() {
 			&cli.StringSliceFlag{Name: "mount", Usage: "mount binding name=backend_uri[,create] (repeatable; e.g. repo=github:owner/repo,create) — CP mode only"},
 		},
 		Action:   rootAction,
-		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), setModelCmd(), keyCmd(), moveCmd(), forkCmd(), loginCmd(), logoutCmd(), profileCmd(), catalogCmd(), ghCmd()},
+		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), setModelCmd(), keyCmd(), moveCmd(), resumeCmd(), forkCmd(), loginCmd(), logoutCmd(), profileCmd(), catalogCmd(), ghCmd()},
 	}
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		log.Fatal(err)
@@ -204,7 +207,12 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 	pollCtx, cancelPoll := context.WithCancel(ctx)
 	defer cancelPoll()
 	go func() {
-		if err := pollAndSign(pollCtx, client, id, intentParams{AppRef: appID, Model: model}); err != nil && !errors.Is(err, context.Canceled) {
+		// AppRef is intentionally left empty: in CP create mode the user supplies an app *id*
+		// (--app-id), not the immutable app_ref the CP resolves it to (id != ref for catalog/seed
+		// apps). The client cannot validate a ref it never specified, so the AM1 app_ref gate is
+		// skipped; the model correspondence check still runs, and the signed intent carries the
+		// CP-resolved app_ref verbatim.
+		if err := pollAndSign(pollCtx, client, id, intentParams{Model: model}); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("pollAndSign: %v (spawn may still become active if CP intent flow is disabled)", err)
 		}
 	}()
