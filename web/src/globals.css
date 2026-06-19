@@ -126,3 +126,15 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* The terminal is always tmux-backed, so xterm sits on tmux's alternate screen
+   and has no scrollback of its own — its viewport scrollbar is a dead affordance.
+   Scrollback lives in tmux and is reached with the wheel (tmux mouse mode), so
+   hide the scrollbar chrome. This only hides the bar; wheel/scroll mechanics are
+   untouched. */
+.xterm .xterm-viewport {
+  scrollbar-width: none;
+}
+.xterm .xterm-viewport::-webkit-scrollbar {
+  display: none;
+}
