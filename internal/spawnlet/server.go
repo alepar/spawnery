@@ -9,6 +9,8 @@ import (
 	"net/http"
 
 	"connectrpc.com/connect"
+	"spawnery/internal/execstream"
+
 	spawnv1 "spawnery/gen/spawn/v1"
 	"spawnery/gen/spawn/v1/spawnv1connect"
 )
@@ -21,7 +23,7 @@ type Server struct {
 func NewServer(m *Manager) *Server { return &Server{m: m} }
 
 // HandleTerminal starts a mosh-backed terminal session for a spawn and returns the connect info
-// {host, port, key} as JSON. spawnctl attach/exec/shell POST here; the mosh UDP data plane then
+// {host, port, key} as JSON. spawnctl attach/shell POST here; the mosh UDP data plane then
 // goes straight to this node. An optional JSON body {"cmd":[...]} selects the in-container command:
 // empty => the opencode TUI; e.g. ["/bin/bash"] => a raw shell (un-audited; owner-only).
 //
@@ -46,6 +48,53 @@ func (s *Server) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ts)
+}
+
+// HandleExec runs a command non-interactively in a spawn's agent container and streams its stdout,
+// stderr, and exit code back as an execstream frame protocol over the (chunked) HTTP response. It is
+// the node side of `spawnctl exec` (sp-8v39) — a scriptable, exit-code-propagating sibling of the
+// mosh-backed /terminal. Like /terminal it is node-direct, owner-only, and un-audited (raw exec bypasses
+// the sidecar). Pre-stream failures (missing spawn/cmd) are clean non-200s; a failure after streaming
+// has begun is sent as an execstream Error frame.
+//
+//	POST /exec?spawn=<id>  {"cmd":["go","test","./..."]}
+func (s *Server) HandleExec(w http.ResponseWriter, r *http.Request) {
+	spawnID := r.URL.Query().Get("spawn")
+	if spawnID == "" {
+		http.Error(w, "missing ?spawn=<id>", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Cmd []string `json:"cmd"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+	if len(body.Cmd) == 0 {
+		http.Error(w, "missing cmd: POST {\"cmd\":[...]}", http.StatusBadRequest)
+		return
+	}
+	// Resolve the spawn before committing to a 200 streaming response, so an unknown spawn is a clean
+	// non-200 the client treats as fatal (rather than a mid-stream error frame).
+	if _, ok := s.m.Store().Get(spawnID); !ok {
+		http.Error(w, "spawn not found: "+spawnID, http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	flush := func() {}
+	if f, ok := w.(http.Flusher); ok {
+		flush = f.Flush
+	}
+	mux := execstream.NewMuxer(w, flush)
+	code, err := s.m.ExecStream(r.Context(), spawnID, body.Cmd,
+		mux.Writer(execstream.Stdout), mux.Writer(execstream.Stderr))
+	if err != nil {
+		_ = mux.WriteError(err.Error())
+		return
+	}
+	_ = mux.WriteExit(code)
 }
 
 func newID() string {

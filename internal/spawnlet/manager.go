@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -531,6 +532,44 @@ func (m *Manager) ExecRun(ctx context.Context, spawnID string, inner []string) e
 		return fmt.Errorf("exec %v: %w (%s)", inner, err, out)
 	}
 	return nil
+}
+
+// ExecStream runs inner non-interactively in spawnID's agent container, streaming its stdout/stderr to
+// the given writers as they arrive, and returns the inner command's exit code. It is the user-facing
+// `spawnctl exec` path (sp-8v39). Unlike ExecRun (buffered, error-on-nonzero), a non-zero command exit
+// is returned as exitCode with a nil error; err is reserved for failures to LAUNCH the exec — an
+// unknown spawn / no agent container, or the runtime CLI (docker/crictl) failing to start. Both
+// `docker exec` and `crictl exec` propagate the inner process's exit code as their own and demux
+// stdout/stderr when no TTY is requested (the non-interactive prefix omits -it), so this is a thin
+// wrapper. NOTE: cancelling ctx kills the docker/crictl client, which may leave the in-container
+// process orphaned until the spawn stops (documented limitation).
+func (m *Manager) ExecStream(ctx context.Context, spawnID string, inner []string, stdout, stderr io.Writer) (int, error) {
+	sp, ok := m.store.Get(spawnID)
+	if !ok || sp.AgentID == "" {
+		return 1, fmt.Errorf("spawn %s has no agent container", spawnID)
+	}
+	argv := execArgv(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime), sp.AgentID, inner)
+	return runExecStream(ctx, argv, stdout, stderr)
+}
+
+// runExecStream runs argv to completion, streaming its stdout/stderr to the given writers, and returns
+// the process's exit code. A non-zero exit is returned as the code with a nil error; err is reserved
+// for a failure to START the process (e.g. the runtime CLI is missing). Split out from ExecStream (the
+// container-resolution wrapper) so the exit-code/stream-demux logic is testable without a container.
+func runExecStream(ctx context.Context, argv []string, stdout, stderr io.Writer) (int, error) {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if err := cmd.Start(); err != nil {
+		return 1, fmt.Errorf("exec %v: %w", argv, err)
+	}
+	if err := cmd.Wait(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode(), nil // command ran to completion with a non-zero status
+		}
+		return 1, fmt.Errorf("exec %v: %w", argv, err)
+	}
+	return 0, nil
 }
 
 // AttachACPPort dials an additional acp session's in-pod ACP endpoint at podIP:port (sp-npxq.3),

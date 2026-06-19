@@ -59,18 +59,28 @@ func attachCmd() *cli.Command {
 
 func execCmd() *cli.Command {
 	return &cli.Command{
-		Name:      "exec",
-		Usage:     "run a command in the spawn's container over a terminal",
-		ArgsUsage: "[-it] -- <command> [args...]",
+		Name:  "exec",
+		Usage: "run a non-interactive command in the spawn's container (streams output, propagates exit code)",
+		Description: "Runs <command> non-interactively in the spawn's agent container — e.g. a test command — " +
+			"streaming its stdout/stderr live and exiting with the command's own exit code. No TTY/mosh required, " +
+			"so it is pipeable and scriptable. For an interactive shell use `spawnctl shell`; for the TUI use " +
+			"`spawnctl attach`.",
+		ArgsUsage: "-- <command> [args...]",
 		Flags: append(terminalFlags(),
-			// -it accepted for docker-like familiarity; the mosh path is always an interactive TTY.
-			&cli.BoolFlag{Name: "it", Aliases: []string{"i", "t"}, Usage: "interactive tty (accepted; always on)"}),
+			// -it is a no-op kept for docker muscle-memory: exec is always non-interactive.
+			&cli.BoolFlag{Name: "it", Aliases: []string{"i", "t"}, Usage: "no-op (exec is always non-interactive; use `spawnctl shell` for a TTY)"}),
 		Action: func(_ context.Context, c *cli.Command) error {
 			cmd := c.Args().Slice()
 			if len(cmd) == 0 {
-				return cli.Exit("usage: spawnctl exec [-it] [-spawn <id>] -- <command> [args...]", 2)
+				return cli.Exit("usage: spawnctl exec [-spawn <id>] -- <command> [args...]", 2)
 			}
-			attachToSpawn(c.String("addr"), resolveSpawn(c), cmd)
+			code, err := runExec(c.String("addr"), resolveSpawn(c), cmd, os.Stdout, os.Stderr)
+			if err != nil {
+				return cli.Exit(fmt.Sprintf("spawnctl exec: %v", err), 1)
+			}
+			if code != 0 {
+				return cli.Exit("", code)
+			}
 			return nil
 		},
 	}

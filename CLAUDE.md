@@ -138,6 +138,12 @@ just setup          # one-time: mprocs, web deps, playwright chromium
 
 `.env` with `OPENROUTER_API_KEY` is auto-loaded by Just; container images need Docker/Podman.
 
+**Run test commands inside a spawn:** `spawnctl exec` runs a command non-interactively in a running
+spawn's agent container, streaming stdout/stderr and exiting with the command's own exit code (so it is
+scriptable — no mosh/TTY). Use it to run a spawn's tests, e.g.
+`spawnctl exec -spawn <id> -- sh -lc 'cd /app && go test ./...'` (or `pytest`, etc.). For an interactive
+shell use `spawnctl shell`; for the TUI use `spawnctl attach`.
+
 ### Build/test environment — the `dev-spawnery` distrobox
 
 **The host shell does NOT carry the full toolchain. Run all builds, tests, codegen, and lint inside the
@@ -182,7 +188,9 @@ Spawnery runs sandboxed coding-agent **spawns** on local/cloud nodes, driven ove
 - **Spawn = a 2-container pod**: a **sidecar** (`cmd/sidecar`, `internal/sidecar` — OpenAI-compatible
   inference proxy holding the model key; Anthropic↔OpenAI translation) + an **agent** container
   sharing the sidecar's netns.
-- **spawnctl** (`cmd/spawnctl`) — driver/attach CLI (create/attach/exec/shell/list).
+- **spawnctl** (`cmd/spawnctl`) — driver/attach CLI (create/attach/exec/shell/list). `spawnctl exec`
+  runs a **non-interactive**, exit-code-propagating command in a spawn's agent container (run test
+  commands inside a spawn); `shell`/`attach` are the interactive mosh paths. See Build & Test.
 - **Storage** (`internal/storage`) — per-mount `Backend` (`Prepare`/`Finalize`); only `Scratch`
   (ephemeral) is implemented today.
 - **web/** — React/Vite SPA (Connect-JSON over the CP).

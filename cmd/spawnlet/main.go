@@ -103,6 +103,7 @@ func main() {
 			tsrv := spawnlet.NewServer(mgr)
 			tmux := http.NewServeMux()
 			tmux.HandleFunc("/terminal", tsrv.HandleTerminal)
+			tmux.HandleFunc("/exec", tsrv.HandleExec)
 			log.Printf("spawnlet terminal endpoint on %s (spawnctl attach -addr http://%s)", taddr, taddr)
 			go func() {
 				if err := http.Serve(ln, tmux); err != nil {
@@ -141,6 +142,7 @@ func main() {
 	mux.Handle(spawnv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(rpclog.Interceptor("node"))))
 	mux.HandleFunc("/ws/session", srv.HandleWS)
 	mux.HandleFunc("/terminal", srv.HandleTerminal)
+	mux.HandleFunc("/exec", srv.HandleExec)
 	addr := env("SPAWNLET_ADDR", "127.0.0.1:9090")
 	log.Printf("spawnlet listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{})))
