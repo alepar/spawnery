@@ -1,7 +1,7 @@
 # Agent Git Environment for GitHub Mounts
 
 **Date:** 2026-06-19
-**Status:** draft (push half redesigned to a MITM forward proxy after the dev-goal relaxation; identity half stable)
+**Status:** draft (MITM forward-proxy push half; spikes S2 + S3 resolved 2026-06-19 — both confirm the approach)
 **Closes:** sp-7amh (agent can't set git identity) · sp-m859.1 (inject git identity from gh) · sp-n7iy (agent cannot push — now: git **and** gh fully functional)
 **Follow-up review:** sp-jg7x (verify agent↔sidecar isolation boundary across all pod lanes)
 **Epic:** sp-m859 (MVP gaps)
@@ -129,19 +129,27 @@ to GitHub is through the proxy, a bypassing direct connection is merely unauthen
 worthless) — so the token is **unstealable** and all authed traffic is **attributable** to the spawn.
 
 **GitHub host set (MITM + inject):** `github.com`, `api.github.com`, `codeload.github.com`,
-`gist.github.com`, `*.githubusercontent.com`, and the GitHub LFS endpoints. **Header form by surface:**
-git smart-HTTP and LFS auth → `Authorization: Basic base64("x-access-token:"+token)`; the REST/GraphQL
-API → the token as a bearer. **Do not inject** on LFS **object-store** transfer URLs (presigned S3/Azure
-URLs returned by the batch API are already authorized) — those are tunneled, not re-authed. MITM is
-restricted to the GitHub host set; everything else is tunneled untouched.
+`gist.github.com`, `*.githubusercontent.com`, and the GitHub LFS **batch** endpoint. **Header form by
+surface:** git smart-HTTP and the LFS *batch* request → `Authorization: Basic base64("x-access-token:"+token)`;
+the REST/GraphQL API → the token as a bearer. **Do not inject** on (a) LFS **object-store** transfer
+URLs (presigned S3/Azure URLs returned by the batch API carry their own AWS4-HMAC auth — S2 confirmed
+these go to `github-cloud.s3.amazonaws.com` and must be **CONNECT-tunneled, not MITM'd**), nor (b) any
+request already carrying an **LFS-issued action token** (the `lfs.github.com` verify/action leg) —
+overwriting it with the PAT happened to work in S2 but the design should leave it untouched. MITM is
+restricted to the GitHub host set; everything else is tunneled untouched. Note (S2): because the proxy
+overwrites `Authorization` unconditionally on GitHub hosts, git's first request is already authed and it
+never sees a 401 / never invokes its credential helper — so the agent-side dummy helper is
+belt-and-suspenders; the proxy authing unconditionally is the actual mechanism.
 
-**Protocol fidelity (spike S2 — gating):** the proxy must faithfully carry git smart-HTTP (protocol-v2,
-`Expect: 100-continue`, chunked `git-receive-pack`, sideband-64k flushing) **and** the API over
-**HTTP/2**. After the MITM handshake the proxy can largely splice the decrypted byte stream, parsing
-only enough of each HTTP request to overwrite `Authorization`. S2 validates this for HTTP/1.1 (git) and
-HTTP/2 (api/gh); **kill criterion:** a surface can't be carried faithfully → for that surface, run git's
-node-side `http-backend` (git) / a thin API reverse proxy (gh) as a fallback. Build on a vetted MITM
-library (e.g. goproxy/martian-style) rather than hand-rolling TLS.
+**Protocol fidelity — spike S2 RESOLVED 2026-06-19: PASS.** A `goproxy`-based localhost MITM proxy
+faithfully carried **git clone (protocol-v2 + sideband)**, a **60 MB `git push`** (git streamed the pack
+as `Transfer-Encoding: chunked`, which the proxy carried cleanly), **`gh api` + `gh pr create`**, and
+**full Git LFS** (batch on the github host MITM'd; object transfer tunneled to S3). **No kill-criterion
+fallback was needed** — the node-side `git http-backend` / thin API reverse-proxy fallback is *not*
+required. Two findings folded into the design: (1) **HTTP/1.1-only on the MITM leg is sufficient** —
+goproxy downgrades the gh API's HTTP/2 to 1.1 and it was immaterial (git/gh/LFS all work over 1.1), so
+the proxy need not implement HTTP/2 MITM; (2) the CA must be delivered as a **combined bundle** (§2.5).
+Build on a vetted MITM library (goproxy/martian-style), not hand-rolled TLS.
 
 ### 2.3 Upstream TLS — hard invariant (T2)
 The proxy→github client **MUST** use stock TLS with default verification and the correct `ServerName`;
@@ -187,8 +195,13 @@ sign per-host leaf certs JIT). The **public CA cert** is delivered to the agent 
 - written to an agent-readable path under `<git-env>` (chowned to RemapBase, agent-owned);
 - **installed into the agent's system trust at launch** (the launcher copies it to
   `/usr/local/share/ca-certificates` + `update-ca-certificates`) so git, gh, curl, node, python all
-  trust it via the system pool; plus belt-and-suspenders env (`GIT_SSL_CAINFO`, `SSL_CERT_FILE`,
-  `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`) pointing at a bundle that includes it.
+  trust it via the system pool; plus env (`GIT_SSL_CAINFO`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`,
+  `REQUESTS_CA_BUNDLE`).
+- **Combined bundle, not a replacement (S2 finding — load-bearing):** the env vars and any bundle file
+  **MUST** point at **system CAs + the per-spawn CA concatenated**, never the per-spawn CA alone. The
+  non-MITM'd legs still need the real roots — notably the **LFS object store** (`*.s3.amazonaws.com`,
+  tunneled) — so a *replacement* bundle breaks LFS (S2 reproduced this: `SSL_CERT_FILE=ca.pem` alone
+  failed the object fetch; the combined bundle fixed it).
 
 The agent receives only the **public** cert (cannot mint certs). Trusting an extra CA only lets *the
 sidecar* intercept the agent's own traffic — it grants the agent no capability. **Lane-agnostic:** CA
@@ -256,11 +269,12 @@ push/gh suite runs in the docker-userns-remap and runsc lanes.
 
 ## Recommended spikes
 
-- **S2 — MITM proxy fidelity (implementation-gating, do first):** can a localhost MITM proxy faithfully
-  carry git smart-HTTP (v2 / 100-continue / sideband) over HTTP/1.1 **and** the gh/REST/GraphQL API over
-  HTTP/2, with `Authorization` overwrite? *Test:* prototype on a vetted MITM lib; run `git push` (large
-  pack) + `gh pr create` + `git lfs push` through it against real github. *Kill:* a surface can't be
-  carried → node-side `git http-backend` (git) / thin API reverse proxy (gh) for that surface.
+- **S2 — MITM proxy fidelity — RESOLVED (2026-06-19): PASS.** A `goproxy`-based localhost MITM proxy
+  carried `git clone` (v2/sideband), a 60 MB `git push` (chunked pack), `gh api`/`gh pr create`, and full
+  Git LFS, with `Authorization` overwritten on the wire and the real token never reaching the client.
+  **HTTP/1.1-only on the MITM leg sufficed** (gh's HTTP/2 downgraded to 1.1, immaterial). **No fallback
+  needed** — the node-side `git http-backend` / thin gh reverse-proxy kill-path is unnecessary. Required
+  by the design: a **combined CA bundle** (§2.5) and tunneling (not MITM'ing) the presigned object store.
 - **S3 — userns-remap raw-socket sniffability — RESOLVED (2026-06-19): the agent CAN sniff.** A
   userns-remapped container (default caps incl `CAP_NET_RAW`, `NET_ADMIN` dropped) joined to another's
   netns read a plaintext secret off the shared loopback via tcpdump/AF_PACKET. So the UDS confidential
@@ -308,3 +322,12 @@ assumptions above — append a dated note here, whether or not a formal debuggin
   pull-based `GetToken`, lane-aware confidential transport (T1), strict upstream TLS (T2), identity half,
   and the threat-model corrections. New load-bearing risk = MITM protocol fidelity (S2, HTTP/1.1+HTTP/2)
   and CA trust install across the tool ecosystem. Scope: **all lanes** (incl. runsc/CRI).
+- **2026-06-19 (spikes S2 + S3 — both confirm the approach):** **S3** (docker userns-remap experiment) —
+  the agent CAN sniff the shared netns (read a plaintext secret off the shared loopback), so the UDS
+  confidential transport is mandatory in the userns-remap lane and the existing cleartext control endpoint
+  is genuinely exposed today. **S2** (goproxy MITM prototype vs real github) — **PASS**: clone (v2/sideband),
+  a 60 MB push (chunked pack), `gh api`/`gh pr create`, and full LFS all worked with the dummy→real
+  `Authorization` swap and zero real-token leakage to the client; HTTP/1.1-only on the MITM leg sufficed;
+  no node-side `http-backend` fallback needed. Folded in: the CA must be a **combined** bundle (system +
+  per-spawn CA), the presigned object store is **tunneled not MITM'd**, and LFS-action tokens are left
+  untouched.
