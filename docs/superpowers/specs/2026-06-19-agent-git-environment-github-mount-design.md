@@ -1,84 +1,73 @@
 # Agent Git Environment for GitHub Mounts
 
 **Date:** 2026-06-19
-**Status:** draft (revised ×3 post-roast 2026-06-19)
-**Closes:** sp-7amh (agent can't set git identity) · sp-m859.1 (inject git identity from gh) · sp-n7iy (agent cannot push)
+**Status:** draft (push half redesigned to a MITM forward proxy after the dev-goal relaxation; identity half stable)
+**Closes:** sp-7amh (agent can't set git identity) · sp-m859.1 (inject git identity from gh) · sp-n7iy (agent cannot push — now: git **and** gh fully functional)
 **Follow-up review:** sp-jg7x (verify agent↔sidecar isolation boundary across all pod lanes)
 **Epic:** sp-m859 (MVP gaps)
 
 ## Problem
 
-In a `github:owner/repo` mount spawn the agent owns the working tree and is promised (AGENTS.md) it
-can commit and push. Today it can do neither:
+In a `github:owner/repo` mount spawn the agent owns the working tree and is promised (AGENTS.md) it can
+commit and push. Today it can do neither, and the GitHub CLI (`gh`) does not work either:
 
-1. **No commit identity (sp-7amh / sp-m859.1).** `GIT_CONFIG_GLOBAL` points at
-   `/run/spawnery/secrets/github/gitconfig`, which has only a `[credential]` section (no `[user]`) and
-   lives under the secrets tmpfs — owned, under userns-remap, by a host uid outside the container's
-   userns map, so it appears `nobody:nogroup drwx------` and the agent can't traverse it. `git commit`
+1. **No commit identity (sp-7amh / sp-m859.1).** `GIT_CONFIG_GLOBAL` points at the read-only,
+   node-owned secrets tmpfs (`nobody:nogroup` under userns-remap), with no `[user]`. `git commit`
    prompts; `git config --global …` fails with `Permission denied`.
-2. **No push credential (sp-n7iy).** `mintGitHubMountsAtProvision` renders the credential **node-only**
-   and never an agent-facing helper; the clone's ephemeral `-c credential.helper=<node-path>` is not
-   persisted, so `.git/config` has no helper and `git push` fails (`could not read Username`).
+2. **No push / no gh (sp-n7iy).** The credential is rendered **node-only** and never delivered to the
+   agent; the clone's ephemeral helper flags aren't persisted. `git push` fails (`could not read
+   Username`), and `gh` (which talks to `api.github.com`) has no token at all.
 
-Both stem from the agent's git environment sitting under the read-only, node-owned secrets tmpfs.
-`internal/storage/storage.go` already chowns mount dirs to `Manager.RemapBase()` (why `/app/repo` is
-agent-writable and local commits work); the git *environment* never got that treatment, and the
-credential is never delivered to the agent.
+`internal/storage/storage.go` already chowns mount trees to `Manager.RemapBase()` (why `/app/repo` is
+agent-writable and local commits work); the git *environment* never got that treatment, and no GitHub
+credential is delivered to the agent.
 
-## Threat model (load-bearing — corrected across three roasts)
+## Goal & security model (set by owner 2026-06-19)
 
-The agent is **untrusted**; the sidecar is the pod's **trusted credential boundary** (it already holds
-the model key). The two containers share **only the netns** (Docker `NetworkMode=container:<sidecar>`;
-CRI shared PodSandbox). What the agent can do to the sidecar varies by lane and must be pinned by
-sp-jg7x before this is production-trustworthy:
+**Goal:** git **and** gh (and LFS, submodules — any GitHub tool) fully functional in the spawn, across
+**all pod lanes**.
 
-| Lane | Agent raw-socket sniff of shared netns | PID ns | IPC ns | Mount ns |
-|---|---|---|---|---|
-| Docker rootless + userns-remap (self-hosted) | **maybe** — default caps incl `CAP_NET_RAW`, but in a *user* namespace `CAP_NET_RAW` only authorizes the devices that namespace owns (sp-jg7x spike S3) | separate (no ptrace) | separate | separate |
-| Docker rootful / CapDropAll (degraded) | no | separate | separate | separate |
-| containerd/CRI + runsc (cloud) | **no** — gVisor disables raw sockets absent `runsc --net-raw` (unset) | separate (MUST NOT enable shared-PID) | **shared** (CRI PodSandbox default) | separate |
+**Security model — the proxy's *only* job is to make the token unstealable.** The agent may do whatever
+the token can do *through the spawn's proxy* — capability narrowing is an explicit **non-goal**. What
+the proxy buys is that the **real token never enters the agent**, so:
+- every authenticated GitHub action is necessarily executed *through this spawn* (attributable; a
+  malicious action can't be laundered through a stolen token used from elsewhere);
+- killing or revoking the spawn cuts off access; the token cannot be exfiltrated and reused off-box.
 
-Corrections the roasts forced:
-- **IPC is shared in the CRI/runsc lane** — the confidentiality argument rests on **mount-ns** (agent
-  can't read the sidecar FS / token) and **PID-ns** (no ptrace of sidecar memory), NOT IPC. The CRI pod
-  **MUST NOT** set `shareProcessNamespace` (sp-jg7x verifies).
-- **Whether the userns-remap agent can actually sniff the shared netns is unproven** (spike S3): a
-  userns `CAP_NET_RAW` is scoped to namespace-owned devices, so the agent may be unable to sniff even
-  there. If S3 shows it cannot, the lane-aware transport below collapses to "TCP+bearer everywhere" and
-  the UDS is unnecessary — a simplification, not a new risk.
+Consequently the prior design's repo-scoping, exact-path allow-list, and per-mount routing are
+**removed**. The token's blast radius is whatever the user's GitHub App **installation selection**
+grants (containment e: `repository_id` never narrows scope) — accepted by design.
 
-Three invariants:
-- **T1 — no cleartext secret on any leg the agent can sniff.** The existing node→sidecar control
-  endpoint is plain HTTP on `0.0.0.0:<port>` over the pod IP (`manager.go:1074`, comment: *"the bearer
-  token … is the access control"*). A bearer stops unauthorized requests, not passive sniffing, and is
-  itself sniffable. §2.2 moves the **entire** control plane (secrets *and* the model-switch) onto a
-  confidential transport in any lane where S3 shows the agent can sniff.
-- **T2 — upstream token confidentiality rests on strict TLS verification.** A sniffing/spoofing agent
-  can DNS/ARP-spoof `github.com`; the token leaks only if the sidecar completes a handshake to an
-  attacker cert. Strict verification is a hard invariant (§2.5).
-- **T3 — token blast radius is the installation selection, not one repo (corrected).** The AS mints an
-  **OAuth user-to-server access token** via `RefreshUserAccessToken`, which has **no repository
-  parameter** — GitHub does not support per-repo scoping on this credential type (per-repo scoping
-  needs *installation* access tokens, a different app-JWT flow). This matches the codebase's
-  **already-spiked containment-e decision**: `repository_id` is audit/expected-target only, **never a
-  scope reducer**; the blast radius of a leaked token is whatever the user's App installation selection
-  covers. So repo narrowing is **in-band only** (the proxy allow-list, §2.4) — a leaked token (a
-  T1/T2 failure) carries full installation scope. T1+T2 are therefore the *primary* boundary; §2.4 is
-  defense-in-depth. (This corrects the prior draft, which wrongly demanded an infeasible repo-scoped
-  mint and re-litigated containment-e.)
+## Threat model (load-bearing; pinned by sp-jg7x)
+
+The agent is untrusted; the sidecar is the pod's trusted credential boundary (it already holds the
+model key). The two share **only the netns**; mount/PID namespaces are per-container (IPC is **shared**
+in the CRI/runsc lane — so confidentiality rests on mount-ns + PID-ns, never IPC; the CRI pod **MUST
+NOT** set `shareProcessNamespace`).
+
+| Lane | Agent raw-socket sniff of shared netns |
+|---|---|
+| Docker rootless + userns-remap (self-hosted/dev) | **maybe** — default caps incl `CAP_NET_RAW`, but in a *user* namespace that cap is scoped to namespace-owned devices (spike S3) |
+| Docker rootful / CapDropAll | no |
+| containerd/CRI + runsc (cloud) | no — gVisor disables raw sockets absent `runsc --net-raw` (unset) |
+
+Two invariants the proxy rests on:
+- **T1 — no real secret on any leg the agent can sniff.** The node→sidecar control plane is moved off
+  the sniffable netns onto a confidential transport (§2.4). The agent→proxy leg carries only a **dummy**
+  token (§2.2), so sniffing it is worthless.
+- **T2 — upstream confidentiality rests on strict TLS verification.** The proxy→github leg uses strict
+  verification (§2.3); a spoofing agent that redirects it leaks the token only if the sidecar completes
+  a handshake to an attacker cert, which strict verification prevents. The real token only ever appears
+  on this leg, encrypted.
 
 ## Key decisions
 
-Two independent halves, **both shipping now** (per owner direction 2026-06-19). T1 hardening ships
-**with** the push half.
-
+Two independent halves, **both shipping now**.
 1. **Identity half** — writable agent-owned global git config; `[user]` seeded from the linked GitHub
    identity (carried in the AS mint response).
-2. **Push half** — a **sidecar-hosted git smart-HTTP reverse proxy** that injects the credential on the
-   wire (agent holds no token/helper/config). The credential flow is **pull-based**: the node is a
-   credential *server* over a lane-appropriate confidential control transport, and the proxy pulls a
-   guaranteed-fresh token per git operation. Pull-not-push dissolves the ordering / refresh-delivery /
-   restart-replay / mid-push-expiry / re-mint-routing problems.
+2. **Push/gh half** — a **sidecar-hosted MITM forward proxy** that swaps a dummy token for the real one
+   on the wire for all GitHub hosts, so git/gh/LFS/submodules work against canonical URLs while the real
+   token never enters the agent.
 
 ---
 
@@ -87,285 +76,231 @@ Two independent halves, **both shipping now** (per owner direction 2026-06-19). 
 ### 1.1 Writable agent-owned global git config (all spawns)
 A per-spawn **`git-env` dir**, host-side under the node data root, **chowned to `Manager.RemapBase()`**
 (reusing `storage.go`'s chown + EPERM/0777 degraded fallback), bind-mounted at `/run/spawnery/git-env`
-— a **sibling of, not under,** the read-only secrets mount. Agent env:
+(a sibling of, not under, the read-only secrets mount). Agent env:
 - `GIT_CONFIG_GLOBAL=/run/spawnery/git-env/gitconfig` (writable);
-- `GIT_CONFIG_NOSYSTEM=1` (neutralize any `/etc/gitconfig` `url.insteadOf`/`credential.helper` in the
-  agent image that could bypass the loopback origin or re-introduce prompts);
-- `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS=/bin/false` (un-credentialed ops fail fast).
-
-Applies to **every** spawn (scratch included).
+- `GIT_CONFIG_NOSYSTEM=1` (neutralize any `/etc/gitconfig` that could re-introduce prompts/bypass);
+- `GIT_TERMINAL_PROMPT=0` (un-credentialed ops fail fast rather than hang).
 
 ### 1.2 Seed `[user]` identity (per account)
-One linked GitHub account per owner ⇒ a single global `[user]` is correct even for multi-github spawns:
+One linked GitHub account per owner ⇒ a single global `[user]`:
 ```
 [user]
 	name = <login>
 	email = <id>+<login>@users.noreply.github.com
 ```
-**Fallback (login-xor-id, org/app links):** the canonical form needs **both** login and id; if **either**
-is missing, or the link is an org/app-installation link with no user login, seed
-`name = <account handle or "spawnery">`, `email = <accountID>@users.noreply.spawnery.local`. Best-effort;
-**never fails provisioning**.
+**Fallback (login-xor-id / org-app links):** the canonical form needs **both** login and id; if either
+is missing or the link is an org/app-installation link with no user login, seed `name = <handle or
+"spawnery">`, `email = <accountID>@users.noreply.spawnery.local`. Best-effort; never fails provisioning.
 
 ### 1.3 Login source — AS mint response
-`MintInitial` returns `login` + numeric `id` alongside token/expiry (the AS knows them for the
-`gh:<accountID>` link; same authenticated channel — containment c unchanged). `mintGitHubMountsAtProvision`
-threads them into the render.
+`MintInitial` returns `login` + numeric `id` alongside token/expiry (same authenticated node↔AS channel
+— containment c unchanged); `mintGitHubMountsAtProvision` threads them into the render.
 
 ---
 
-## Section 2 — Push half (sp-n7iy): sidecar git-proxy, pull-based credential
+## Section 2 — Push/gh half (sp-n7iy): sidecar MITM forward proxy
 
-### 2.1 The proxy
-The sidecar runs a git smart-HTTP reverse proxy on a **fixed loopback port** `SIDECAR_GIT_ADDR`
-(fixed ⇒ origin is computable at clone time and stable across resume). It is **path-routed per mount**
-(route key = mount name) for N `github:` mounts:
-```
-origin (mount "src", repo o/r) = http://127.0.0.1:<gitport>/m/src/o/r
-```
-Per request the proxy:
-- **canonicalizes** the path (reject `.`/`..`, `%2e`/`%2f`, duplicate slashes) before matching;
-- matches the **exact** smart-HTTP endpoints for that route's repo and nothing else
-  (`…/o/r[.git]/info/refs?service=git-(upload|receive)-pack`, `…/git-upload-pack`,
-  `…/git-receive-pack`). Everything else — the **LFS batch path**, dumb-HTTP, the GitHub API — is
-  **403**;
-- **scrubs inbound client headers** before injecting credentials: strip any client-supplied
-  `Authorization`, `Proxy-Authorization`, `Cookie`, and `X-Forwarded-*` (a credential-injecting proxy
-  in front of an untrusted client must allow-list, not pass through);
-- rewrites the HTTP **`Host` → `github.com`** and sets outbound TLS **`ServerName=github.com`**;
-- forwards **`Git-Protocol`** (no silent v2 downgrade);
-- injects `Authorization: Basic base64("x-access-token:" + token)` (token from §2.3);
-- relays the response body **with prompt flushing** for sideband-64k progress, and handles a `30x`
-  **without auto-following** (an upstream client with `CheckRedirect = ErrUseLastResponse`), rewriting
-  a `Location: https://github.com/o/r…` back to the loopback route; a redirect to a *different* repo
-  (rename/transfer) is a surfaced error (recovery = re-provision/relink, §2.6).
+### 2.1 Topology
+The sidecar runs an **HTTP(S) forward proxy** on a fixed loopback port in the shared pod netns,
+alongside its existing inference proxy. The agent is configured to route all egress through it:
+- `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` = the sidecar proxy;
+- git: `http.proxy` = the sidecar proxy (set in the agent-owned `<git-env>/gitconfig`, §1.1);
+- `NO_PROXY=127.0.0.1,localhost` and the sidecar **inference** address (so the
+  `OPENAI_BASE_URL=http://<sidecar>/v1` path and loopback are not double-proxied).
 
-**Implementation reality (roast — S2 is load-bearing):** Go's `net/http` server **auto-acknowledges
-`Expect: 100-continue`** to the client on first body `Read`, and `httputil.ReverseProxy` cannot
-faithfully relay Expect handshakes or guarantee sideband flush semantics for a large chunked
-`git-receive-pack`. The proxy implementation is therefore **determined by spike S2**, not assumed:
-candidate forms are a **byte-level relay** (hijack the connection, splice after auth) or running git's
-own **`http-backend`/`upload-pack`/`receive-pack` node-side** and proxying bytes. Vanilla
-`ReverseProxy` is a starting point only. S2 **gates the proxy approach** (see Spikes); its kill
-criterion is the node-side git-http-backend fallback.
+For **non-GitHub** hosts the proxy is a plain `CONNECT` tunnel (no interception). For **GitHub** hosts
+it MITMs and injects (§2.2). Under an enforced egress floor (cloud lane) the floor permits only the
+proxy's own egress to GitHub; the proxy is the single GitHub chokepoint — the §16.4 convergence.
 
-### 2.2 Control transport — lane-aware, confidential, pathname-only
-The node↔sidecar control plane (the `GetToken` service of §2.3 **and** the model-switch) uses a
-transport the agent cannot sniff. Lane selection follows the node's known `UsernsMode`/`ContainerRuntime`
-(and spike S3's verdict on whether the userns-remap agent can sniff at all):
+### 2.2 Dummy-token swap via MITM (the unstealable mechanism)
+The agent holds only a **dummy** credential, mirroring spawnery's existing sidecar-injects-real-key
+pattern (the codex sidecar swaps a dummy `CODEX_SPAWNERY_KEY` for the real OpenRouter key):
+- git: a credential helper in `<git-env>/gitconfig` that emits `username=x-access-token`,
+  `password=<dummy>` for `github.com` (so git sends an `Authorization` header and never prompts);
+- gh and other tools: `GH_TOKEN=<dummy>` (and `GITHUB_TOKEN=<dummy>`) so they believe they are
+  authenticated and emit real API requests.
 
-- **Where the agent can sniff (userns-remap, pending S3):** a **unix-domain socket on a bind mount
-  shared only between the node (host) and the sidecar container** (host `…/<id>/control.sock` → sidecar
-  `/run/spawnery/control.sock`). The agent does not mount that path and is on a different mount ns ⇒
-  invisible, and nothing crosses the netns. **Ownership (roast blockers — both the dir and the socket):**
-  the **node** creates the dir mode **`0711`** and the socket mode **`0666`**, both owned by the host
-  node uid (1001). `0711` gives the userns-remapped sidecar uid the **traverse** bit it needs (a `0700`
-  dir would reproduce the §1.1 traverse-denied bug); `0666` lets the remapped sidecar **connect**; and
-  the host node uid owns both, so the node can serve/connect. The dir is private to node+sidecar (not
-  mounted into the agent), so world-rwx on these two inodes exposes nothing to the agent. The node is
-  the **server**; the sidecar connects. **Pathname socket only** — abstract (`@`) sockets are
-  netns-scoped and agent-reachable, so they are **prohibited** for any sidecar/node control listener.
-- **Where the agent provably cannot sniff (runsc, CapDropAll, or userns-remap if S3 clears it):** a
-  **node-hosted TCP `GetToken` listener** (the pull model needs node-as-server, the *reverse* of the
-  existing sidecar-as-server model-switch endpoint). The node binds it on the **pod-bridge gateway
-  address** reachable from the pod; its address is passed to the sidecar via sidecar env
-  (`SPAWNERY_NODE_CONTROL_URL`), and it is **bearer-gated with the bearer in sidecar env only**
-  (`SPAWNERY_NODE_CONTROL_TOKEN`), withheld from the agent env. The listener is reachable by the agent
-  on the shared netns, so the bearer (not the bind scope) is the access control — sound **only because**
-  the agent cannot sniff the bearer in these lanes (no raw sockets). The model-switch may stay on its
-  existing endpoint in these lanes (non-sniffable); in a sniffable lane it moves to the UDS.
+The sidecar proxy **MITMs the GitHub hosts** using a **per-spawn local CA** (§2.5): it presents a
+just-in-time cert for the requested GitHub host signed by that CA (which the agent trusts), terminates
+the agent's TLS, **overwrites the `Authorization` header with the real token** (pulled per §2.4),
+re-originates a **strictly-verified** TLS connection to the real host, and streams the exchange. The
+dummy is discarded; the agent never sees the real token. Because the agent's *only* authenticated path
+to GitHub is through the proxy, a bypassing direct connection is merely unauthenticated (the dummy is
+worthless) — so the token is **unstealable** and all authed traffic is **attributable** to the spawn.
 
-**No agent-reachable auxiliary listeners (roast):** the sidecar **MUST NOT** expose any other TCP
-listener on the shared netns (pprof/metrics/health/debug) — such a port is connectable by the agent
-with a plain `connect()` (no caps needed). Any such surface binds the UDS or is disabled.
+**GitHub host set (MITM + inject):** `github.com`, `api.github.com`, `codeload.github.com`,
+`gist.github.com`, `*.githubusercontent.com`, and the GitHub LFS endpoints. **Header form by surface:**
+git smart-HTTP and LFS auth → `Authorization: Basic base64("x-access-token:"+token)`; the REST/GraphQL
+API → the token as a bearer. **Do not inject** on LFS **object-store** transfer URLs (presigned S3/Azure
+URLs returned by the batch API are already authorized) — those are tunneled, not re-authed. MITM is
+restricted to the GitHub host set; everything else is tunneled untouched.
 
-### 2.3 Pull-based credential flow
-The node is a **credential server**; the sidecar proxy is a client. Before forwarding each git op the
-proxy calls, over the control transport:
-```
-GetToken(spawnID, route, minRemaining) → { owner, repo, token, accessExpiresAtUnix }
-```
-The **node** owns all state: it resolves `route → (spawnID, mount, secretID, generation)` from the
-spawn's mount bindings (recoverable from durable store, so a **node restart** re-derives it), and
-**mints a fresh token if the current one has < minRemaining left**, returning one valid for the
-operation plus its **expiry** (so the sidecar's route-keyed cache can honor `minRemaining` itself). The
-sidecar caches per route, invalidated on upstream 401.
+**Protocol fidelity (spike S2 — gating):** the proxy must faithfully carry git smart-HTTP (protocol-v2,
+`Expect: 100-continue`, chunked `git-receive-pack`, sideband-64k flushing) **and** the API over
+**HTTP/2**. After the MITM handshake the proxy can largely splice the decrypted byte stream, parsing
+only enough of each HTTP request to overwrite `Authorization`. S2 validates this for HTTP/1.1 (git) and
+HTTP/2 (api/gh); **kill criterion:** a surface can't be carried faithfully → for that surface, run git's
+node-side `http-backend` (git) / a thin API reverse proxy (gh) as a fallback. Build on a vetted MITM
+library (e.g. goproxy/martian-style) rather than hand-rolling TLS.
 
-This dissolves the roast cluster:
-- **Mid-push expiry:** the proxy fetches a token valid ≥ `minRemaining` *before* streaming the
-  `git-receive-pack` body → it cannot expire mid-POST, so no body replay is needed. **Residual
-  (accepted):** a single push that *streams longer than `minRemaining`* would still 401 mid-POST with
-  no replay; set `minRemaining` to the token's near-full headroom (e.g. ≥ 50 min for a 1h token) so
-  only a multi-hour single push hits it — a surfaced error, documented, not silently corrupting.
-- **Refresh / token-discard:** moot — the node mints on demand; nothing relies on the proactive `Tick`
-  *delivering* a token (it remains a warming optimization).
-- **Sidecar/node restart:** sidecar re-pulls; node re-derives from durable bindings. No replay path.
-- **Re-mint routing:** the `route → secretID/generation` map lives in the node.
-- **Startup ordering:** lazy pull removes "push before StartAgent"; the only requirement is
-  **sidecar-ready before agent-start** (gitport + control client wired), enforced by a `StartPod`
-  readiness probe — which also stops the agent **port-squatting** the fixed gitport (the sidecar owns
-  it first). For a **CRI sidecar app-container crash-restart** within a live PodSandbox (agent + netns
-  survive), the node must re-assert the readiness/port ownership or fail the spawn, since the restart
-  reopens the squat window.
-
-**Error semantics (401≠403; defined failure contract):**
-- **401** — invalidate cache, `GetToken` fresh, retry the idempotent `info/refs` GET once; a body POST
-  is not replayed. Persistent 401 surfaces cleanly.
-- **403** — permission/branch-protection/secondary-rate-limit; a new token doesn't help → **pass
-  through verbatim** (incl. `Retry-After`); **no re-mint**.
-- **`GetToken` node/AS failures** (AS unreachable, mint `NotFound`, `RelinkRequired`/broken chain,
-  rate-limited, installation/grant revoked mid-session) → the node returns a **typed error**; the proxy
-  maps it to a distinct, non-retrying upstream status with a short diagnostic body so the agent's git
-  (running `GIT_ASKPASS=/bin/false`) fails fast with a comprehensible message rather than an auth
-  prompt loop.
-- **Re-mint rate-limit:** the node bounds mints per route (token-bucket); `GetToken` uses a fresh
-  request id when minting (never a dedup id that would return the already-expired token).
-
-### 2.4 Repo scoping & accepted blast radius (defense-in-depth)
-The per-route exact-path allow-list + Host pin narrow the agent's **in-band** access to the mount's
-`owner/repo`. Per **T3 (corrected)** the minted token's *actual* scope is the user's App **installation
-selection** (`repository_id` is audit-only, never a scope reducer — containment e); a leaked token
-(T1/T2 failure) therefore carries full installation scope, so T1+T2 are the primary boundary. **Accepted,
-documented:** within the allowed repo, `git-receive-pack` permits force-push / branch deletion / history
-rewrite — bounded by GitHub **branch protection**, not Spawnery. The **sidecar→github:443** leg **MUST**
-be permitted by the egress floor (the sidecar is the github client now). Tightening agent→github
-**direct** egress is noted but **infeasible to scope per-host with the current source-IP floor** — a
-tracked future item, not relied on here.
-
-### 2.5 Upstream TLS — hard invariant (T2)
-The sidecar→github client **MUST** use stock TLS with default verification, `ServerName="github.com"`;
+### 2.3 Upstream TLS — hard invariant (T2)
+The proxy→github client **MUST** use stock TLS with default verification and the correct `ServerName`;
 **MUST NOT** set `InsecureSkipVerify`, add a custom CA pool, or honor `HTTP(S)_PROXY`/`NO_PROXY`. The
-sidecar image **MUST** ship a clean, current CA bundle. **Spike S1:** evaluate cert/IP pinning.
+sidecar image **MUST** ship a clean, current CA bundle. **Spike S1:** optional GitHub cert/IP pinning.
 
-### 2.6 `origin` rewrite — placement & durability (corrected: node-side clone, pre-chown)
-`origin` is set **inside the node-side clone** (`storage.GitHub.Prepare`), **before** the tree is
-chowned to `RemapBase` — at that moment `.git/config` is node-owned (uid 1001) and writable, avoiding
-the §1.1 wall that a *post-chown* `git remote set-url` by the node would hit. The URL uses the fixed
-gitport (`http://127.0.0.1:<gitport>/m/<route>/o/r`). On **resume** no clone runs and the journaled
-`.git/config` already carries this origin (stable because the port is fixed) — no node write against the
-chowned tree is needed.
+### 2.4 Pull-based token (lane-aware confidential control transport)
+The node is a **credential server**; the proxy pulls the real token on demand:
+```
+GetToken(spawnID, minRemaining) → { token, accessExpiresAtUnix }
+```
+The node resolves the spawn's GitHub link from durable mount bindings (so a **node restart** re-derives
+it), mints a fresh token if the current one has `< minRemaining` left, returns it plus its **expiry**
+(the proxy caches and honors `minRemaining` itself). The proxy fetches a token valid ≥ `minRemaining`
+**before** each exchange so it cannot expire mid-stream (set `minRemaining` near full token headroom;
+a single multi-hour exchange exceeding it is a surfaced error, not corruption). One token per spawn
+(one linked account); no per-repo routing.
 
-**Documented constraints / out of MVP scope (accepted, tracked as follow-ups):**
-- The agent owns `.git/config`; a tool that rewrites `origin` to the canonical https URL or adds a
-  second remote breaks push. Known limitation; `git remote -v` shows the loopback URL by design.
-- **Git LFS** (separate batch API + object host — common for asset/ML repos), **private submodules**
-  (other repos; the node-side recursive clone will also fail to auth them), the **`gh` CLI**, and any
-  extra remote / hardcoded `https://github.com` URL **bypass the single-origin proxy and fail auth**.
-  Explicitly not promised by this slice.
-- **Renamed/transferred repo:** surfaced error → recover by re-provision/relink.
+**Control transport (T1), lane-aware** — selected by `UsernsMode`/`ContainerRuntime` (+ S3):
+- **agent can sniff (userns-remap, pending S3):** a **pathname unix-domain socket on a node↔sidecar-only
+  bind mount** (host→sidecar). Off the netns, invisible to the agent (different mount ns). The node
+  creates the **dir `0711`** and **socket `0666`** owned by the host node uid, so the userns-remapped
+  sidecar can traverse + connect (a `0700` dir would reproduce the §1.1 traverse-denied bug). **Pathname
+  only** — abstract (`@`) sockets are netns-scoped/agent-reachable and are **prohibited**.
+- **agent cannot sniff (runsc, CapDropAll, or userns-remap if S3 clears it):** a **node-hosted TCP
+  `GetToken` listener** on the pod-bridge gateway, address passed to the sidecar via env, **bearer-gated
+  with the bearer in sidecar env only** (withheld from the agent). Sound because the agent can't sniff
+  the bearer in these lanes. The model-switch control moves onto the same transport in the sniffable
+  lane.
+
+**No agent-reachable auxiliary listeners:** the sidecar exposes no other TCP port (pprof/metrics/health)
+on the shared netns; any such surface binds the UDS or is disabled.
+
+**Error semantics:** `GetToken` node/AS failures (AS unreachable, mint `NotFound`,
+`RelinkRequired`/broken chain, rate-limited, revoked mid-session) → typed error → the proxy returns a
+distinct non-retrying upstream status with a short diagnostic body, so the agent's git/gh fails fast
+and comprehensibly (no prompt loop). The node **rate-limits** mints per spawn; `GetToken` uses a fresh
+request id when minting (never a dedup id returning the expired token).
+
+### 2.5 Per-spawn local CA delivery
+The **sidecar generates a per-spawn CA at startup**; the **private key stays sidecar-only** (used to
+sign per-host leaf certs JIT). The **public CA cert** is delivered to the agent and trusted:
+- written to an agent-readable path under `<git-env>` (chowned to RemapBase, agent-owned);
+- **installed into the agent's system trust at launch** (the launcher copies it to
+  `/usr/local/share/ca-certificates` + `update-ca-certificates`) so git, gh, curl, node, python all
+  trust it via the system pool; plus belt-and-suspenders env (`GIT_SSL_CAINFO`, `SSL_CERT_FILE`,
+  `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`) pointing at a bundle that includes it.
+
+The agent receives only the **public** cert (cannot mint certs). Trusting an extra CA only lets *the
+sidecar* intercept the agent's own traffic — it grants the agent no capability. **Lane-agnostic:** CA
+delivery + trust install are identical across docker and runsc (a file install in the agent container);
+the proxy listens on loopback in the pod netns in every lane.
+
+### 2.6 Lifecycle & ordering
+- **Provision/resume:** no `origin` rewrite, no pre-StartAgent token push — the agent clones/uses
+  **canonical** `https://github.com/...` URLs and pulls auth lazily through the proxy. The node-side
+  clone (`storage.Prepare`) is unchanged (it uses the node-only credential as today). The agent's later
+  pushes/fetches/gh-calls flow through the proxy.
+- **Sidecar-ready before agent-start:** the sidecar (Phase 1) must have bound the proxy port, generated
+  the CA, and wired the control client before the agent (Phase 2) starts — a `StartPod` readiness probe
+  (also prevents the agent **port-squatting** the proxy port). For a **CRI sidecar app-container
+  crash-restart** within a live PodSandbox, the node re-asserts readiness/port ownership or fails the
+  spawn (the CA is regenerated; the agent already trusts the CA *cert file*, so a new CA requires
+  re-delivery — handle by persisting the per-spawn CA in the sidecar's tmpfs across an app-restart, or
+  re-running the trust install; pinned in the impl).
+- **Egress floor:** in enforced lanes the floor **MUST** permit the sidecar→github hosts on :443.
 
 ---
 
-## Section 3 — Boundary review & per-lane posture (sp-jg7x, follow-up)
+## Section 3 — Boundary review (sp-jg7x, follow-up)
 
-sp-jg7x formally proves, per lane: mount-ns + PID-ns isolation (no FS read, no ptrace; CRI pods do not
-enable shared-PID), and — **spike S3** — whether the userns-remap agent's `CAP_NET_RAW` can actually
-sniff the shared netns (which decides §2.2's transport: UDS only if it can; TCP+bearer everywhere if it
-cannot). It also verifies the agent cannot reach the control socket/listener or extract the token/model
-key. Follow-up, **not** a merge gate — but the **T1 hardening (§2.2)** and **strict TLS (§2.5)** ship
-now, so the cleartext-delivery hole is closed at merge for the sniffable lane; the node-only-proxy
-fallback covers any failing lane.
+sp-jg7x proves per lane: mount-ns + PID-ns isolation (no FS read / no ptrace; CRI pods don't enable
+shared-PID); **spike S3** — whether the userns-remap agent's `CAP_NET_RAW` can actually sniff the shared
+netns (decides §2.4's transport: UDS if it can, TCP+bearer everywhere if it can't — a simplification);
+and that the agent cannot reach the control socket/listener or extract the real token / model key /
+**CA private key**. Follow-up, not a merge gate — T1 (§2.4) and strict TLS (§2.3) ship now.
 
 ## Section 4 — Containment reconciliation
 
-- **(b) token never in the agent container** — preserved (lives in the sidecar; agent pushes through the
-  proxy, never holds it).
-- **(a) refresh material AS-custodial** — unchanged.
-- **(c) token never relayed by the CP** — unchanged (pull flow is node↔sidecar + node↔AS; CP not in the
-  credential path).
-- **(e) `repository_id` is audit-only, never a scope reducer** — **now honored** (the prior draft
-  violated it with the infeasible repo-scoped-mint MUST; T3 corrected).
-- **Secrets tmpfs stays agent-unreadable** — unchanged (the new writable surface is the separate
-  git-env dir).
-- **Blast radius:** co-locating the github token with the model key in the sidecar is an accepted,
-  reviewed extension of the sidecar's trusted-proxy role (sp-jg7x covers the boundary). The pre-existing
-  cleartext exposure of the model-switch bearer / BYOK keys in a sniffable lane is **closed here** by
-  moving the control plane onto the confidential transport (§2.2).
+- **(b) real token never in the agent** — preserved (agent holds only a dummy; the proxy injects the
+  real token on the upstream leg).
+- **(a) refresh material AS-custodial** — unchanged (only short-lived access tokens are minted/served).
+- **(c) token never relayed by the CP** — unchanged (pull flow is node↔sidecar + node↔AS).
+- **(e) `repository_id` never narrows scope** — honored: narrowing is now an explicit non-goal; the
+  token's blast radius is the installation selection, accepted.
+- **Secrets tmpfs stays agent-unreadable** — unchanged (new writable surface is the separate git-env).
+- **Blast radius:** co-locating the github token (and the per-spawn CA key) with the model key in the
+  sidecar is an accepted, reviewed extension of the sidecar's trusted-proxy role (sp-jg7x covers it).
+  The pre-existing cleartext exposure of the model-switch bearer / BYOK keys in a sniffable lane is
+  **closed** by moving the control plane onto the confidential transport (§2.4).
 
 ## Section 5 — Testing
 
-**Identity (hermetic + e2e):** config rendered with seeded `[user]`; dir chowned to RemapBase; writable;
-fallback on login-xor-id and org/app links; `GIT_CONFIG_NOSYSTEM`/`GIT_TERMINAL_PROMPT=0` set; e2e
-in-spawn `git commit` records the GitHub author with no prompt.
+**Identity (hermetic + e2e):** seeded `[user]` rendered; git-env chowned to RemapBase + writable;
+login-xor-id / org-app fallback; `GIT_CONFIG_NOSYSTEM`/`GIT_TERMINAL_PROMPT` set; e2e in-spawn `git
+commit` records the GitHub author with no prompt.
 
-**Push (e2e):** clone → commit → **push** → suspend → resume → push, both clients; **multi-github** spawn
-(two routes/tokens, no cross-talk); proxy rejects a different `owner/repo`, the LFS batch path, and
-traversal/encoded variants (403); inbound client `Authorization`/`Cookie` are scrubbed; **protocol-v2**
-push and a **large/sideband** pack succeed; a near-expiry token triggers the `GetToken(minRemaining)`
-fresh-mint path; a 403 (protected branch) surfaces verbatim without a re-mint; a `GetToken` node error
-yields a fast, comprehensible git failure (no prompt loop).
+**Push/gh (e2e, per lane):** in-spawn, against a real private repo, with the proxy + CA in place:
+`git clone`/`fetch`/**`push`** (protocol-v2 + a large/sideband pack), **`gh pr create`** / `gh api`,
+**Git LFS** push/pull of a tracked file, and a **private submodule** update all succeed; suspend →
+resume → push still works; a near-expiry token triggers the `GetToken(minRemaining)` fresh-mint;
+`GetToken` node error yields a fast comprehensible failure (no prompt loop).
 
-**Control transport (hermetic + lane):** dir `0711` / socket `0666` pathname (not abstract), traversable
-+ connectable by the remapped sidecar uid, invisible from the agent mount ns; in the TCP lane the bearer
-is absent from agent env; sidecar-ready-before-agent ordering holds (incl. CRI app-restart); no
-auxiliary agent-reachable sidecar listener exists.
+**Unstealable / boundary (sp-jg7x + hermetic):** the real token and the CA **private key** are absent
+from the agent FS/env; the agent holds only the dummy; the agent cannot reach the control socket/listener;
+a direct (proxy-bypassing) agent connection to github is unauthenticated; control-socket dir `0711` /
+socket `0666` pathname; per-lane raw-socket (S3) + PID/IPC matrix; no auxiliary agent-reachable sidecar
+listener.
 
-**Boundary (sp-jg7x):** token absent from agent FS/env; control channel unreachable from the agent;
-per-lane raw-socket (S3) + PID/IPC matrix.
-
-All integration/e2e tests are build-tagged and fail (never skip) when their lane dep is down.
+All integration/e2e tests are build-tagged and fail (never skip) when their lane dep is down; the per-lane
+push/gh suite runs in the docker-userns-remap and runsc lanes.
 
 ## Recommended spikes
 
-- **S1 — upstream TLS pinning** *(hardening, optional):* does pinning GitHub's cert chain / IP set beat
-  default verification against a spoofing agent? *Kill:* breaks on cert rotation ops can't track →
-  strict default verification only.
-- **S2 — git smart-HTTP fidelity through re-origination** *(implementation-gating, do first):* can
-  protocol-v2, `Expect: 100-continue`/chunked `git-receive-pack`, sideband-64k flushing, and
-  `Location`/redirect handling be carried faithfully given Go's `net/http` auto-100-continue and
-  `ReverseProxy` limits? *Test:* prototype a byte-level relay (and a node-side `git http-backend`
-  variant), push a large-pack v2 repo against real github. *Kill:* no faithful relay → ship the
-  node-side git-http-backend backend (or the node-only proxy). **Gates the proxy during implementation.**
-- **S3 — userns-remap raw-socket sniffability** *(in sp-jg7x; do early):* can the userns-remapped agent
-  actually AF_PACKET-sniff the shared netns, given `CAP_NET_RAW` in a user namespace is scoped to
-  namespace-owned devices? *Test:* run tcpdump in the agent against node→sidecar/pod traffic in the
-  `just node` lane. *Kill:* if it cannot sniff → drop the UDS, use TCP+bearer in all lanes (simpler).
+- **S2 — MITM proxy fidelity (implementation-gating, do first):** can a localhost MITM proxy faithfully
+  carry git smart-HTTP (v2 / 100-continue / sideband) over HTTP/1.1 **and** the gh/REST/GraphQL API over
+  HTTP/2, with `Authorization` overwrite? *Test:* prototype on a vetted MITM lib; run `git push` (large
+  pack) + `gh pr create` + `git lfs push` through it against real github. *Kill:* a surface can't be
+  carried → node-side `git http-backend` (git) / thin API reverse proxy (gh) for that surface.
+- **S3 — userns-remap raw-socket sniffability (in sp-jg7x, do early):** can the userns-remapped agent
+  AF_PACKET-sniff the shared netns? *Kill:* if not → drop the UDS, use TCP+bearer in all lanes.
+- **S1 — upstream TLS pinning (optional hardening).**
 
 ## Implementation sketch (files)
 
 - `internal/spawnlet/secrets.go` / `manager.go` — git-env dir (chown RemapBase, bind); repoint
-  `GIT_CONFIG_GLOBAL`, set `GIT_CONFIG_NOSYSTEM`/`GIT_TERMINAL_PROMPT`/`GIT_ASKPASS`; create the control
-  UDS (node-owned, dir `0711` + socket `0666`, pathname) + bind mount in the sniffable lane, or the
-  node-hosted bearer-gated TCP `GetToken` listener otherwise; lane-select via `UsernsMode`/`ContainerRuntime`
-  + S3; sidecar-readiness gate (gitport + control) incl. CRI app-restart re-assertion.
-- `internal/githubcred/render.go` — identity-only gitconfig with the fallback rules; keep node
+  `GIT_CONFIG_GLOBAL`, set `GIT_CONFIG_NOSYSTEM`/`GIT_TERMINAL_PROMPT`, dummy-cred helper +
+  `HTTPS_PROXY`/`http.proxy`/`NO_PROXY` + `GH_TOKEN=<dummy>` + CA env; deliver the per-spawn CA cert
+  (agent-readable); create the control UDS (`0711` dir / `0666` pathname socket) or the node-hosted
+  TCP `GetToken` listener per lane (+ S3); sidecar-readiness gate.
+- `deploy/agent/launch` (or launcher) — install the per-spawn CA into the agent system trust
+  (`update-ca-certificates`) at startup.
+- `internal/githubcred/render.go` — identity-only gitconfig + dummy credential helper; keep node
   credential render for the node-side clone.
-- `internal/node/*` — node credential server: `GetToken(spawnID, route, minRemaining)` →
-  `{owner, repo, token, accessExpiresAtUnix}`, resolving `route→secretID/generation` from mount
-  bindings, minting fresh when stale, rate-limited, typed failures; thread login/id from the mint
-  response. **No repo-scope change to the mint** (T3 corrected — it isn't supported).
+- `internal/node/*` — node credential server `GetToken(spawnID, minRemaining)` →
+  `{token, accessExpiresAtUnix}` (resolve link from mount bindings, mint-when-stale, rate-limited,
+  typed failures); thread login/id from the mint response. **No repo-scope change to the mint.**
 - AS mint endpoint + mint client — add `login`+`id` to the response (no repository param).
-- `internal/sidecar/*` + `cmd/sidecar/main.go` — the path-routed git smart-HTTP proxy on
-  `SIDECAR_GIT_ADDR` (canonicalize, exact allow-list, header scrub, Host/SNI rewrite, `Git-Protocol`,
-  `Location` rewrite, strict upstream TLS, 401 vs 403, S2-determined transport); the `GetToken` control
-  client over the UDS/TCP transport; no auxiliary agent-reachable listeners.
-- `internal/storage/github.go` — set `origin` (fixed gitport, per-mount route) **in the node-side clone,
-  pre-chown**; resume relies on the journaled config.
-- proto/gen — mint response (`login`,`id`); control messages (`GetToken` req/resp incl. expiry,
-  per-route); `make gen`. `proto/`-touching work serialized ahead of consumers.
+- `internal/sidecar/*` + `cmd/sidecar/main.go` — the MITM forward proxy (per-spawn CA gen, JIT leaf
+  certs, GitHub-host MITM + `Authorization` overwrite, CONNECT tunnel for the rest, strict upstream TLS,
+  HTTP/1.1 + HTTP/2); the `GetToken` control client over the UDS/TCP transport; no auxiliary
+  agent-reachable listeners.
+- proto/gen — mint response (`login`,`id`); control messages (`GetToken` req/resp incl. expiry);
+  `make gen`. `proto/`-touching work serialized ahead of consumers.
 
 ## Post-Implementation Notes
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the
 assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
 
-- **2026-06-19 (roast r1 BLOCK):** corrected the cleartext control channel and the never-reaches-sidecar
-  refresh; added fixed gitport, per-mount routing, exact allow-list, Host/SNI rewrite, streaming, strict
-  TLS, identity fallbacks, runsc net-raw correction, LFS/submodules out of scope.
-- **2026-06-19 (roast r2 BLOCK):** flipped credential flow push→pull (node = credential server) —
-  dissolved stream-vs-retry, refresh-delivery, restart-replay, re-mint routing, ordering; made the
-  control transport lane-aware (UDS where sniffable, TCP+bearer otherwise); corrected the threat model
-  (IPC shared in CRI; rest on mount+PID); split 401/403; added re-mint rate-limit, `GIT_CONFIG_NOSYSTEM`,
-  100-continue, port-squat ordering, egress rule, abstract-socket prohibition.
-- **2026-06-19 (roast r3 BLOCK):** **dropped the infeasible repo-scoped-mint MUST** — GitHub user-access
-  tokens have no repository param and containment-e already settled that `repository_id` never narrows
-  scope; T3 now states the honest installation-selection blast radius (proxy allow-list = in-band
-  narrowing only). Fixed three introduced-complexity blockers: `origin` rewrite moved into the node-side
-  clone **pre-chown** (a post-chown node write hit the userns wall); control-socket **dir `0711` +
-  socket `0666`** (a `0700` dir reproduced the traverse-denied bug); defined the **node-as-server TCP
-  `GetToken`** transport (bind/discovery/bearer-withheld) for the non-UDS lanes. Added: inbound header
-  scrub, `GetToken` returns expiry + a typed failure contract, no auxiliary agent-reachable sidecar
-  listeners, CRI app-restart port-squat re-assertion, the large-push-exceeds-`minRemaining` accepted
-  residual, and **spike S3** (userns `CAP_NET_RAW` sniffability — may simplify the transport to TCP
-  everywhere). Reframed S2 (proxy fidelity) as implementation-gating with a node-side `git http-backend`
-  fallback, given Go's auto-100-continue / `ReverseProxy` limits.
+- **2026-06-19 (roasts r1–r3):** drove the cleartext-control-channel fix, the push→pull credential flip,
+  lane-aware transport, and the dropping of the infeasible repo-scoped-mint MUST (see git history).
+- **2026-06-19 (dev-goal relaxation → MITM redesign):** owner relaxed the push half to "git **and** gh
+  fully functional; the proxy need not narrow access — its sole job is to make the token unstealable
+  (all GitHub activity executed through the spawn, attributable, revocable)." Replaced the per-repo
+  reverse-proxy + origin-rewrite + allow-list apparatus with a **sidecar MITM forward proxy** that swaps
+  a **dummy token** for the real one on the wire for all GitHub hosts (per-spawn local CA installed into
+  the agent trust; agent holds only the dummy). git/gh/LFS/submodules work against canonical URLs; the
+  origin-rewrite/routing/allow-list/Host-SNI/path-canonicalization complexity is deleted. Kept the
+  pull-based `GetToken`, lane-aware confidential transport (T1), strict upstream TLS (T2), identity half,
+  and the threat-model corrections. New load-bearing risk = MITM protocol fidelity (S2, HTTP/1.1+HTTP/2)
+  and CA trust install across the tool ecosystem. Scope: **all lanes** (incl. runsc/CRI).
