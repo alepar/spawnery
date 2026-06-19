@@ -269,7 +269,12 @@ func (g *GitHub) Prepare(ctx context.Context, spawnID, mountName, seedDir string
 			cleanupDirs()
 			return "", err
 		}
-		if seeded {
+		// A genuinely empty repo (no commits, per the GitHub API) has no branch: always establish
+		// one with an initial commit and push it, so the agent has a main branch to work on and
+		// suspend/resume has a base. initialCommitAndPush uses --allow-empty, so this succeeds even
+		// with no seed. For an existing repo that merely cloned an empty tree, keep the prior
+		// behavior of committing only when a seed contributed files.
+		if info.Empty || seeded {
 			if err := g.initialCommitAndPush(ctx, runner, gitEnv, helperArgs, hostDir); err != nil {
 				cleanupDirs()
 				return "", err
@@ -287,7 +292,9 @@ func (g *GitHub) initialCommitAndPush(ctx context.Context, runner GitRunner, env
 	commitArgs := append(append([]string{}, helperArgs...),
 		"-c", "user.name=Spawnery",
 		"-c", "user.email=spawnery@example.invalid",
-		"commit", "-m", "Initialize Spawnery mount",
+		// --allow-empty: a github mount over an empty repo with no seed still gets a valid initial
+		// commit so the repo has a main branch (the agent can commit onto it; resume has a base).
+		"commit", "--allow-empty", "-m", "Initialize Spawnery mount",
 	)
 	commands := []struct {
 		name string

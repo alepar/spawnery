@@ -7,10 +7,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"spawnery/internal/githubcred"
 	"spawnery/internal/storage"
 )
+
+// stageMountNameSuffix is appended to a mount's logical name when it is root-materialized into a
+// staging dir (userns-remap lane). It is a filesystem-staging detail only and must not change which
+// per-mount github credential a mount resolves to (see githubCredentialTargetDir).
+const stageMountNameSuffix = ".stage"
 
 type GitHubCredentialStore struct {
 	Root string
@@ -31,7 +37,11 @@ func githubCredentialTargetDir(mountName string) (string, error) {
 	if mountName == "" {
 		return "", fmt.Errorf("github credential mount name is required")
 	}
-	sum := sha256.Sum256([]byte(mountName))
+	// Key the credential by the LOGICAL mount name. Root-materialized mounts (userns-remap) are
+	// prepared under "<name>.stage" (see stageMountNameSuffix); the at-provision render keys by the
+	// logical name, so strip the staging suffix here to keep render and Prepare-time lookup aligned.
+	name := strings.TrimSuffix(mountName, stageMountNameSuffix)
+	sum := sha256.Sum256([]byte(name))
 	return filepath.Join("github-node", hex.EncodeToString(sum[:8])), nil
 }
 

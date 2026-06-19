@@ -887,12 +887,18 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		// restore-aware backend (github) to skip the network clone — the journal is authoritative.
 		_, hasPin := jrec.Manifests[mt.Name]
 		applyRestoreHint(mountBackend, haveJournalRecord && class.Journaled() && hasPin)
-		seedDir := filepath.Join(appPath, mt.Seed)
+		// A mount seeds only from an explicitly declared seed dir. With no seed, seedDir stays
+		// empty (backends treat a missing seed as "empty mount") — never fall back to the whole
+		// app dir, which would copy the app's own files (e.g. AGENTS.md, the manifest) into the mount.
+		seedDir := ""
+		if mt.Seed != "" {
+			seedDir = filepath.Join(appPath, mt.Seed)
+		}
 		hostDir := ""
 		restoreDir := ""
 		preparedDir := ""
 		if rootMaterialize {
-			prepareName := mt.Name + ".stage"
+			prepareName := mt.Name + stageMountNameSuffix
 			preparedDir, err = mountBackend.Prepare(ctx, id, prepareName, seedDir, -1)
 			if err != nil {
 				finalizeAll()

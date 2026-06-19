@@ -68,6 +68,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"os"
 	"os/signal"
 	"strconv"
@@ -107,16 +110,21 @@ func main() {
 	// paths (which it does when the origin is in AS_ALLOWED_ORIGINS), the browser rejects the
 	// subsequent credentialed request. Route credentialed paths directly to the inner handler.
 	outerCORS := allow.CORS(svcHandler)
+	routed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if p == "/refresh" || p == "/logout" {
+			svcHandler.ServeHTTP(w, r)
+			return
+		}
+		outerCORS.ServeHTTP(w, r)
+	})
+	// Serve h2c (HTTP/2 cleartext) in addition to HTTP/1.1: the node->AS gRPC mint client dials
+	// HTTP/2, and the dev-relaxed lane (NODE_GITHUB_MINT_DEV_NODE_ID) uses plain HTTP with no TLS
+	// ALPN to negotiate it. h2c.NewHandler still serves HTTP/1.1 requests (browser OAuth) unchanged.
+	// The enforced/prod lane negotiates HTTP/2 over mTLS ALPN and does not rely on this.
 	srv := &http.Server{
-		Addr: addr,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			p := r.URL.Path
-			if p == "/refresh" || p == "/logout" {
-				svcHandler.ServeHTTP(w, r)
-				return
-			}
-			outerCORS.ServeHTTP(w, r)
-		}),
+		Addr:    addr,
+		Handler: h2c.NewHandler(routed, &http2.Server{}),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

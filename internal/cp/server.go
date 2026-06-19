@@ -935,10 +935,28 @@ func validateSubmittedStartupSecrets(required []string, got []*nodev1.SealedSecr
 	return nil
 }
 
+// ensureOwner lazily provisions the owner row for an authenticated identity the first time it
+// creates a spawn. With dev-token auth the owner is pre-seeded; with real AS-session auth the
+// accountID (a UUID minted by the AS at first login) has never been seen by the CP, and
+// spawns.owner_id is a NOT-NULL FK to owners(id). The AS issues identities but does not provision
+// CP owner rows, so the CP creates them on first authenticated touch. Idempotent: existing rows
+// (e.g. seeded dev owners, or a returning account) are left untouched, preserving their metadata.
+func (s *Server) ensureOwner(ctx context.Context, owner string) error {
+	if _, err := s.st.Owners().Get(ctx, owner); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	return s.st.Owners().Upsert(ctx, store.Owner{ID: owner, CreatedAt: time.Now().Unix()})
+}
+
 func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.CreateSpawnRequest]) (*connect.Response[cpv1.CreateSpawnResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+	if err := s.ensureOwner(ctx, owner); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("ensure owner: %w", err))
 	}
 	if err := s.checkSpawnQuota(ctx, owner); err != nil {
 		return nil, err

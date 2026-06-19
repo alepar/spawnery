@@ -159,3 +159,35 @@ leak into the enforced/prod path.
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from
 the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+### 2026-06-19 — T8 live verification (the `dev-github` lane had never booted)
+
+Ran the full path live for the first time. The github mount works **end-to-end from both clients**:
+spawnctl (clone ✓, agent commit ✓, suspend→`spawnctl resume`→commit survives ✓, `create_if_missing` ✓)
+and web (created a spawn with a github-mount field → repo created/cloned into the mount ✓).
+
+The shakedown surfaced a long tail of lane-wiring + cross-component gaps that the build-tagged e2e
+(mTLS, in-harness keys, no userns-remap, no vite proxy) never exercised. Fixes landed on this branch:
+
+- **CP↔AS↔node identity:** CP now validates AS sessions (`CP_AS_SESSION_PUBKEYS`) + lazily creates the
+  owner row (`Server.ensureOwner`); `spawnery-ca node` re-mints the dev node identity under the real
+  accountID; `CP_DEV_OWNER` pins the dev-token owner. (CP-owner == node-owner == AS-account == `gh:` link.)
+- **Intent-token chain:** `CP_DEV_AS_KEY` + `NODE_AS_PUBKEYS` wire the session/aud=node token signing
+  ↔ verification (was unset everywhere → `TOKEN_INVALID: unknown key_id`).
+- **AS serves h2c** (cmd/authsvc) so the dev-relaxed node→AS gRPC mint client (HTTP/2 cleartext) connects.
+- **Node cred key:** strip the `.stage` staging suffix so the at-provision render (`repo`) and the
+  userns-remap Prepare lookup (`repo.stage`) agree.
+- **Empty-repo init:** a no-`seed` mount no longer seeds the whole app dir; empty repos get a valid
+  `--allow-empty` initial commit gated on `info.Empty`; example app gained the `repo/` mountpoint dir.
+- **Clients:** `spawnctl --mount` comma-split (`DisableSliceFlagSeparator`); a new **`spawnctl resume`**
+  (no in-place resume existed); pinned login port (`SPAWNCTL_LOGIN_PORT`) for remote/tunnel; dropped the
+  bogus `appRef` client gate in both spawnctl and web (id≠ref for seeded apps → intent never submitted).
+- **Web lane:** `web-github` recipe (`VITE_AUTH_ENABLED=1` so the SPA signs intents); AS login callback
+  via the vite proxy origin (`AS_GITHUB_REDIRECT_URI` override) to fix the flow-cookie host mismatch;
+  vite `/ca` → `/ca/` proxy rule (was swallowing the SPA `/callback` route).
+
+**Filed follow-ups (beads under epic sp-m859 "MVP gaps"):** `spawnctl exec` non-TTY mode; github mount
+agent **push** (Approach 2 renders node-only creds, so the agent can't push — only the node-side clone);
+**web sessions blank** under enforced node + intent flow (terminal WS bind sends no session-open intent →
+`MISSING_INTENT` NACK — the first *prod*-affecting gap); plus a P2 empty-repo re-mount churn (empty commit
+per mount of a content-less repo). `create_if_missing` requires the App installed with Contents (and works).
