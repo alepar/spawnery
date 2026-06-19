@@ -47,7 +47,7 @@ NOT** set `shareProcessNamespace`).
 
 | Lane | Agent raw-socket sniff of shared netns |
 |---|---|
-| Docker rootless + userns-remap (self-hosted/dev) | **maybe** — default caps incl `CAP_NET_RAW`, but in a *user* namespace that cap is scoped to namespace-owned devices (spike S3) |
+| Docker rootless + userns-remap (self-hosted/dev) | **YES** — spike S3 (2026-06-19) confirmed it: a userns-remapped container (default caps incl `CAP_NET_RAW`, `NET_ADMIN` dropped) joined to another's netns read a plaintext secret straight off the shared loopback via AF_PACKET/tcpdump |
 | Docker rootful / CapDropAll | no |
 | containerd/CRI + runsc (cloud) | no — gVisor disables raw sockets absent `runsc --net-raw` (unset) |
 
@@ -161,7 +161,7 @@ a single multi-hour exchange exceeding it is a surfaced error, not corruption). 
 (one linked account); no per-repo routing.
 
 **Control transport (T1), lane-aware** — selected by `UsernsMode`/`ContainerRuntime` (+ S3):
-- **agent can sniff (userns-remap, pending S3):** a **pathname unix-domain socket on a node↔sidecar-only
+- **agent can sniff (userns-remap — confirmed by S3, so the UDS is required here, not optional):** a **pathname unix-domain socket on a node↔sidecar-only
   bind mount** (host→sidecar). Off the netns, invisible to the agent (different mount ns). The node
   creates the **dir `0711`** and **socket `0666`** owned by the host node uid, so the userns-remapped
   sidecar can traverse + connect (a `0700` dir would reproduce the §1.1 traverse-denied bug). **Pathname
@@ -214,9 +214,9 @@ the proxy listens on loopback in the pod netns in every lane.
 ## Section 3 — Boundary review (sp-jg7x, follow-up)
 
 sp-jg7x proves per lane: mount-ns + PID-ns isolation (no FS read / no ptrace; CRI pods don't enable
-shared-PID); **spike S3** — whether the userns-remap agent's `CAP_NET_RAW` can actually sniff the shared
-netns (decides §2.4's transport: UDS if it can, TCP+bearer everywhere if it can't — a simplification);
-and that the agent cannot reach the control socket/listener or extract the real token / model key /
+shared-PID); **spike S3 — resolved 2026-06-19: the userns-remap agent CAN sniff the shared netns** (so
+the UDS transport stays mandatory there; sp-jg7x still confirms runsc/CapDropAll cannot sniff); and that
+the agent cannot reach the control socket/listener or extract the real token / model key /
 **CA private key**. Follow-up, not a merge gate — T1 (§2.4) and strict TLS (§2.3) ship now.
 
 ## Section 4 — Containment reconciliation
@@ -261,8 +261,12 @@ push/gh suite runs in the docker-userns-remap and runsc lanes.
   HTTP/2, with `Authorization` overwrite? *Test:* prototype on a vetted MITM lib; run `git push` (large
   pack) + `gh pr create` + `git lfs push` through it against real github. *Kill:* a surface can't be
   carried → node-side `git http-backend` (git) / thin API reverse proxy (gh) for that surface.
-- **S3 — userns-remap raw-socket sniffability (in sp-jg7x, do early):** can the userns-remapped agent
-  AF_PACKET-sniff the shared netns? *Kill:* if not → drop the UDS, use TCP+bearer in all lanes.
+- **S3 — userns-remap raw-socket sniffability — RESOLVED (2026-06-19): the agent CAN sniff.** A
+  userns-remapped container (default caps incl `CAP_NET_RAW`, `NET_ADMIN` dropped) joined to another's
+  netns read a plaintext secret off the shared loopback via tcpdump/AF_PACKET. So the UDS confidential
+  transport **is required** in the userns-remap lane (no TCP-everywhere simplification), and the
+  pre-existing cleartext control endpoint **is** agent-exposed today. (sp-jg7x still pins runsc + the
+  other lanes.)
 - **S1 — upstream TLS pinning (optional hardening).**
 
 ## Implementation sketch (files)
