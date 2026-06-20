@@ -33,7 +33,12 @@ from the CLI, and fail-fast validation at startup.
   schema. (Researched and rejected — see "Approach selection".)
 - No dynamic/hot reload. Config loads once at startup. **Accepted consequence:** rotating a
   compromised credential requires restarting the consuming process (see "Accepted limitations").
-- No new secret store. Config *references* secrets; it does not custody them (§3).
+- No new secret *server*, and **no reuse of the per-spawn HPKE owner-sealed user-secret system**
+  for infra secrets — that system is owner-online-gated, per-device-keyed, and CP-blind, built to
+  deliver *user* secrets to a spawn with a ceremony; infra startup secrets must resolve
+  **unattended at process boot with no owner online**, a different shape (§3). Config *references*
+  infra secrets and resolves them at load through pluggable backends (`env`/`file`/`sops` in v1;
+  Vault/cloud managers slot in later behind the same interface).
 - **Out of framework scope** (§1.1): per-spawn dynamic config injected into pod containers
   (sidecar/agent), and incidental OS/runtime env reads in library code. This framework owns the
   **startup configuration of long-lived processes and CLIs**, nothing else.
@@ -64,7 +69,9 @@ of *this* problem is layering/precedence/merge, koanf's core competency.
 internal/config/
   load.go        # Load[T](svc, opts) → bootstrap env → layered koanf → resolve refs → decode → validate
   embed.go       # //go:embed config/*.yaml  (baked-in committed defaults)
-  resolve.go     # ${scheme:arg} reference resolution on the raw map (registry of resolvers)
+  resolve.go     # ${scheme:arg} dispatch on the raw map → Resolver registry
+  resolvers.go   # the Resolver interface + env/file resolvers
+  sops.go        # ${sops:key} — in-process SOPS+age decrypt, decrypt-once cache
   secret.go      # type Secret string — always renders *** in String/Marshal/Format
   envmap.go      # per-binary explicit env-name → dotted-key tables
   setflag.go     # --set key=value → confmap provider
@@ -75,15 +82,19 @@ config/                       # repo-root, committed, AND //go:embed-ed into bin
   common.yaml   common.staging.yaml   common.prod.yaml
   cp.yaml       cp.prod.yaml   (cp.dev.yaml etc. only if a delta exists)
   spawnlet.yaml ...
+  secrets.dev.sops.yaml  secrets.staging.sops.yaml  secrets.prod.sops.yaml   # SOPS+age-encrypted
 ```
 
 **Distribution / runtime discovery (closes the "where do prod files come from" gap).** The
-committed `config/` tree is **`//go:embed`-ed into every binary**. A binary therefore *always*
-has its full baseline regardless of CWD or container layout — there is no path where it silently
-runs on bare Go defaults. For ops to change a value **without a rebuild**, an optional external
-directory `SPAWNERY_CONFIG_DIR` may hold same-named files; if set, each present external file is
+committed `config/` tree — including the **SOPS-encrypted** `secrets.<env>.sops.yaml` files — is
+**`//go:embed`-ed into every binary**. A binary therefore *always* has its full baseline
+regardless of CWD or container layout — there is no path where it silently runs on bare Go
+defaults. For ops to change a value **without a rebuild**, an optional external directory
+`SPAWNERY_CONFIG_DIR` may hold same-named files; if set, each present external file is
 **deep-merged over its embedded counterpart** (so ops can drop a single `cp.prod.yaml` override).
-Embedded files are required to exist (build-time guarantee); external files are all optional.
+Embedded files are required to exist (build-time guarantee); external files are all optional. The
+secrets files are safe to embed because they are ciphertext; the **age identity that decrypts
+them is never embedded or committed** — it is delivered out-of-band per §3.
 
 **Per-binary structs embed `Common`** (koanf `,squash`), so `common.yaml` and `<svc>.yaml`
 decode into one typed value. Keep `common.yaml` small — only genuinely cross-process values.
@@ -167,40 +178,95 @@ for that env.
   (`prod ` , `production`) is **fatal**, never a silent no-op.
 - `--env` is consumed in the bootstrap; it is **not** also a layer-7 `--set`/curated flag.
 
-## 3. Secret references
+## 3. Secret references & the SOPS+age backend
 
-Config files are committed and **never contain secret values**. A string value may be a reference
-`${scheme:arg}` resolved by a registry keyed on scheme:
+Config files are committed and **never contain plaintext secret values**. A string value may be a
+reference `${scheme:arg}` resolved by a registry of pluggable **Resolvers**, where the **scheme
+selects the backend**:
 
-- **`${env:NAME}`** — environment variable `NAME`. (v1)
-- **`${file:/path}`** — file contents, trimmed. (v1)
-- **`${secret:id}`** — a **registered resolver interface with no concrete backend in v1**;
-  using it is a clear fatal error. Reserved for a future infra secret store; **not** wired to the
-  owner-sealed per-spawn user-secret system (a different axis).
+```go
+// Resolver turns the arg of a ${scheme:arg} reference into cleartext.
+// Registered by scheme; the scheme prefix selects the backend.
+type Resolver interface {
+    Scheme() string                     // "env", "file", "sops", … "vault"/"awssm" later
+    Resolve(arg string) (string, error) // fail-closed: the loader panics on a non-nil error
+}
+```
+
+v1 ships three resolvers; more (Vault, AWS/GCP/Azure managers) slot in later by implementing the
+same interface. (koanf's `vault/v2` and `parameterstore` providers exist but integrate secret
+stores as *config sources*, not `${…}` token resolvers, so we own this layer regardless — modeled
+on `DevLabFoundry/configmanager`'s prefix-selects-backend idiom.)
+
+- **`${env:NAME}`** — environment variable `NAME`.
+- **`${file:/path}`** — file contents, trimmed.
+- **`${sops:dotted.key}`** — looked up in the decrypted `secrets.<env>.sops.yaml` (below).
 
 **Ordering: references resolve on the merged *raw koanf map*, BEFORE decode** (corrected from the
-prior post-decode ordering, which couldn't put `${env:PORT}` into an int and destroyed
-redaction provenance). References are only valid in **string-typed leaves**; a reference in a
-non-string field is a config error with the key path. Resolution runs after all layers merge and
-before `Decode`, so decode/validation see real values.
+prior post-decode ordering, which couldn't put `${env:PORT}` into an int and destroyed redaction
+provenance). References are only valid in **string-typed leaves**; a reference in a non-string
+field is a config error naming the key. Resolution runs after all layers merge and before
+`Decode`, so decode/validation see real values.
 
-**Failure semantics (fail-closed):** an unset `${env:NAME}` or a missing/unreadable
-`${file:/path}` is a **fatal error** naming the key — never a silent empty string. A missing
-credential stops startup, it doesn't quietly become `""`.
+**Failure semantics (fail-closed):** an unset `${env:NAME}`, a missing/unreadable `${file:}`, a
+`${sops:}` key absent from the decrypted map, an undecryptable secrets file, or an unknown scheme
+is a **fatal error** naming the key — never a silent empty string. (Note: this is *deliberately
+unlike* the Azure Key Vault reference idiom, which fails **open** by passing the literal token
+through. Our resolver layer enforces fail-closed itself, independent of any backend.)
+
+### 3.1 The SOPS+age backend (the v1 `${sops:}` resolver)
+
+**Why SOPS+age** (deep-researched, primary-sourced): a maintained, stable in-process Go decrypt
+API (`github.com/getsops/sops/v3/decrypt`) decrypts at load with **no sidecar/init-container and
+no mandatory cloud dependency**; age is SOPS's officially-recommended key type; and cloud KMS
+(AWS/GCP/Azure) drops into the *same encrypted file* as an additional recipient when a node has
+it. Accepted trade-off: single-decrypt-key blast radius + manual rotation, bounded by
+**per-environment age recipients**.
+
+**The secrets file.** `config/secrets.<env>.sops.yaml` is a committed, SOPS+age-encrypted map of
+`id → value` (the values are ciphertext; the structure is cleartext). `${sops:store.dsn}` looks
+up `store.dsn` in the decrypted map for the active env.
+
+**Resolution at startup** (operator-controlled hosts only — see 3.2):
+1. Locate the **age identity** (secret-zero) via `SOPS_AGE_KEY_FILE` — a perms-`0600` file, or a
+   systemd `LoadCredential` on the CP host, or a cloud-KMS recipient on cloud nodes.
+2. `decrypt.Data(embeddedSecretsFileForEnv)` **once** → cleartext map, **cached in-process** for
+   the process lifetime (never re-decrypt per reference).
+3. `${sops:store.dsn}` → lookup in that map; the value lands in a `config.Secret` field.
+4. Missing key / undecryptable file / absent id → **panic at startup** (fail-closed).
+
+**Secret-zero delivery (no cloud required).** The age identity is the *one* out-of-band secret;
+everything else is the committed ciphertext. Delivery options, operator's choice: a perms-`0600`
+key file referenced by `SOPS_AGE_KEY_FILE`; a systemd credential (`LoadCredential=`, AES256-GCM at
+rest, no env/child-leak) on a systemd CP host; or a cloud-KMS recipient on cloud nodes (the KMS
+unwraps, no age file shipped). It is **never embedded, committed, or placed in a config file**.
+
+**Rotation / blast radius.** Each env's file is encrypted to that env's age recipient(s) — a
+compromised dev key does not expose prod. Rotation = `sops updatekeys` (re-wrap the data key to a
+new recipient) on the affected file; per-value rotation is editing that value and re-encrypting.
+
+### 3.2 Trust boundary: infra secrets never reach third-party self-hosted nodes
+
+`${sops:}` is for **operator-controlled processes** — the CP, AS, and cloud nodes the operator
+runs. Shipping the age identity to an untrusted third-party node would hand its operator all
+plaintext. A **third-party self-hosted node holds only its *own* credentials** (node identity key,
+enrollment token), already provisioned through the existing node-enrollment path and read via
+`${file:}`/`${env:}` — **not** via `${sops:}`. Operator infra secrets stay on operator hosts.
+
+### 3.3 Redaction & transport caveats
 
 **Redaction is type-level, not provenance-tracked.** Secret-bearing fields are declared as
 `config.Secret` (a `string` newtype) whose `String()`, `MarshalJSON()`, `MarshalYAML()`,
-`GoString()`, and `Format()` **always render `***`**. This is robust against `fmt %+v`,
-error-wrapping, panics, and third-party loggers — the failure mode a dump-path-only redaction
-misses. No per-field provenance bookkeeping is needed.
+`GoString()`, and `Format()` **always render `***`** — robust against `fmt %+v`, error-wrapping,
+panics, and third-party loggers (the failure mode a dump-path-only redaction misses). No per-field
+provenance bookkeeping needed.
 
-**Transport caveats (documented, not solved):**
-- `${env:}` secrets remain readable via `/proc/<pid>/environ`, core dumps, and child-process
-  inheritance (spawnlet launches pods). **`${file:}` is preferred for real secrets**; the two
+- `${env:}` secrets remain readable via `/proc/<pid>/environ`, core dumps, and child inheritance
+  (spawnlet launches pods). **`${file:}`/`${sops:}` are preferred for real secrets**; the
   resolvers are *not* security-equivalent.
 - **Secrets must never be passed on argv** (`--set`, `--store-dsn`): argv leaks via `ps`,
-  `/proc/<pid>/cmdline`, and shell history. The framework docs state this; secret-bearing keys
-  are resolved from `${file:}`/env, not flags.
+  `/proc/<pid>/cmdline`, and shell history. Secret-bearing keys are resolved from
+  `${sops:}`/`${file:}`/env, never flags.
 
 ## 4. Validation
 
@@ -272,6 +338,10 @@ Hermetic, table-driven, **no network, no filesystem dependence**:
   var; optional `*.<env>.yaml` absent is fine.
 - **References:** `${env:}`/`${file:}` resolve on the map pre-decode; unset/missing is fatal;
   reference in a non-string leaf errors; unknown scheme errors.
+- **SOPS backend:** a fixture `secrets.test.sops.yaml` encrypted to a **throwaway test age key**
+  decrypts in-process via `decrypt.Data`, resolves `${sops:k}`, and is decrypted only once
+  (cache); an absent key, undecryptable file, or missing id is fatal. (Test age key is for
+  fixtures only — never a real recipient.)
 - **Redaction:** `config.Secret` renders `***` under `%v`, `%+v`, `%#v`, JSON, and YAML.
 - **Validation:** required/enum/range/cross-field failures each produce a dotted-key-path error;
   `Common.Validate()` is actually invoked when a binary defines its own `Validate()`.
@@ -295,16 +365,27 @@ test (not real data roots), the suite stays hermetic. Embedded-FS loading needs 
   deep-merge over their embedded counterparts as layers 1–4? *Cheapest test:* embed a base, point
   the dir at a one-key override, assert the merge. *Kill criteria:* if embed/external ordering is
   awkward, fall back to "external dir, if set, fully replaces the embedded file set."
+- **S4 — SOPS in-process decrypt of an embedded file.** *Question:* does
+  `decrypt.Data(embeddedBytes, "yaml")` from `getsops/sops/v3/decrypt`, with the age identity at
+  `SOPS_AGE_KEY_FILE`, decrypt an `//go:embed`-ed `secrets.*.sops.yaml` in-process and yield the
+  cleartext map? *Cheapest test:* `sops -e` a 2-key fixture to a throwaway age recipient, embed it,
+  decrypt in a unit test. *Kill criteria:* if `decrypt.Data` needs filesystem/CLI access or chokes
+  on embedded bytes, write the embedded ciphertext to a temp file and use `decrypt.File`, or shell
+  to the `sops` binary as a fallback.
 
 ## Accepted limitations
 
 - **No hot reload → credential rotation requires a process restart.** A rotated OAuth secret /
   signing PEM / DB password / model key is only picked up on restart of each consumer. Accepted
   for v1; revisit if rotation cadence demands it (koanf has watch providers).
-- **`${secret:}` is an interface only** — no infra secret backend ships in v1; `${env:}`/`${file:}`
-  cover every infra-process secret in use today.
-- **`${env:}` secrets remain process-environment-exposed** (§3); `${file:}` is the recommended
-  path for sensitive values.
+- **Backends shipping in v1: `env`, `file`, `sops`.** Vault and the cloud secret managers are not
+  implemented; they slot in later behind the `Resolver` interface (§3). The koanf
+  `vault/v2`/`parameterstore` providers exist but resolve config *sources*, not `${…}` tokens.
+- **`${env:}` secrets remain process-environment-exposed** (§3); `${sops:}`/`${file:}` are the
+  recommended paths for sensitive values.
+- **No in-memory secret zeroing in v1.** Decrypted secrets live as ordinary Go strings/`Secret`
+  values for the process lifetime; an enclave/zeroing layer (e.g. `awnumar/memguard`) is noted as
+  future hardening, not v1 scope.
 
 ## Adversarial review (roast)
 
