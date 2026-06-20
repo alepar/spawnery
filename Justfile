@@ -5,6 +5,11 @@ addr         := "127.0.0.1:9090"
 addr_cp      := "127.0.0.1:8080"
 addr_cp_node := "127.0.0.1:8081"   # CP mTLS node listener (enforced mode)
 addr_as      := "127.0.0.1:8090"
+# Web origin the BROWSER uses to reach the dev SPA (vite). For LAN/remote access without an SSH
+# tunnel this is the box's domain; override via DEV_WEB_ORIGIN. It is the AS's single canonical SPA
+# origin and must be a registered GitHub App callback host (login: <origin>/oauth/callback, link:
+# <origin>/github/link/callback). Also add the host to vite `allowedHosts` (web/vite.config.ts).
+dev_web_origin := env_var_or_default("DEV_WEB_ORIGIN", "http://blacky.dayton:5173")
 free         := "openai/gpt-oss-120b:free"
 data_root    := repo / ".envs/dev/data"
 devca        := repo / ".envs/dev/dev-ca"
@@ -156,11 +161,11 @@ authsvc-github:
     AS_GITHUB_TOKEN_ENC_KEY="$(printf %s 'spawnery-dev-github-mount-enck32' | base64)" \
     GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in .env (GitHub App client_id)}" \
     GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in .env}" \
-    AS_GITHUB_REDIRECT_URI=${AS_GITHUB_REDIRECT_URI:-http://{{addr_as}}/oauth/callback} \
-    AS_GITHUB_LINK_REDIRECT_URI=http://{{addr_as}}/github/link/callback \
-    AS_REDIRECT_URIS=http://127.0.0.1/cb,http://localhost:5173/callback \
-    AS_SPA_ORIGINS=http://localhost:5173 \
-    AS_ALLOWED_ORIGINS=http://localhost:5173 \
+    AS_GITHUB_REDIRECT_URI=${AS_GITHUB_REDIRECT_URI:-{{dev_web_origin}}/oauth/callback} \
+    AS_GITHUB_LINK_REDIRECT_URI=${AS_GITHUB_LINK_REDIRECT_URI:-{{dev_web_origin}}/github/link/callback} \
+    AS_REDIRECT_URIS=http://127.0.0.1/cb,{{dev_web_origin}}/callback,http://localhost:5173/callback \
+    AS_SPA_ORIGINS={{dev_web_origin}} \
+    AS_ALLOWED_ORIGINS={{dev_web_origin}} \
     AS_CP_URL=http://{{addr_cp}} \
     AS_CP_RPC_SECRET=dev-as-cp-secret \
     AS_DEV_RELAX_NODE_AUTH=1 \

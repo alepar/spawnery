@@ -26,15 +26,28 @@ export default defineConfig({
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
   server: {
     host: true,
+    // LAN/remote access without an SSH tunnel: vite (dev) otherwise rejects Host headers it
+    // doesn't recognize ("Blocked request. This host is not allowed."). Allow loopback + the box's
+    // LAN domain; override/extend via VITE_ALLOWED_HOSTS (comma-separated) for other hostnames.
+    allowedHosts: [
+      "localhost",
+      "127.0.0.1",
+      "blacky.dayton",
+      ...(process.env.VITE_ALLOWED_HOSTS?.split(",").map((h) => h.trim()).filter(Boolean) ?? []),
+    ],
     proxy: {
       "/cp.v1.SpawnService": { target: "http://127.0.0.1:8080", changeOrigin: true },
       "/ws": { target: "http://127.0.0.1:8080", ws: true, changeOrigin: true },
-      // AS routes: proxy /oauth, /refresh, /logout, /ca to the AS dev origin.
+      // AS routes: proxy /oauth, /refresh, /logout, /ca, /github to the AS dev origin.
       // When VITE_AS_ORIGIN is unset (dev without AS), these 404 gracefully.
       // Same-origin proxy so HttpOnly cookie + credentialed CORS work in dev (AM2).
       "/oauth": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
       "/refresh": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
       "/logout": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
+      // The GitHub LINK flow lives on the AS under /github/link/* (+ /github/links). The SPA's own
+      // "@/github" is a source-module alias, NOT a browser route, so proxying all /github is safe —
+      // it carries the OAuth link callback (/github/link/callback) and the link API to the AS.
+      "/github": { target: process.env.VITE_AS_ORIGIN ?? "http://127.0.0.1:8090", changeOrigin: true },
       // NOTE trailing slash: vite proxies by PREFIX, so a bare "/ca" also swallows the SPA's
       // "/callback" auth-return route (it starts with "/ca") and 404s it from the AS. The AS
       // endpoint is "/ca/root", so scope the rule to "/ca/".
