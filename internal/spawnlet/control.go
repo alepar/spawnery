@@ -20,3 +20,10 @@ const SidecarGetTokenAddrEnv = "SIDECAR_GETTOKEN_ADDR"
 
 // SidecarGetTokenBearerEnv is the sidecar env var (TCP lane) for the per-spawn bearer token.
 const SidecarGetTokenBearerEnv = "SIDECAR_GETTOKEN_BEARER"
+
+// SidecarSpawnIDEnv is the sidecar env var carrying THIS spawn's id, which the sidecar puts in its
+// GetSpawnCA/GetToken requests to the node credential server (internal/sidecar reads
+// getenv("SIDECAR_SPAWN_ID")). Unset → the sidecar requests spawn id "", so the node mints a CA/token
+// for the WRONG (empty) spawn — the CA the proxy presents won't match the agent's trusted git-env CA
+// ("certificate signer not trusted") and token resolution fails. MUST be injected for github spawns.
+const SidecarSpawnIDEnv = "SIDECAR_SPAWN_ID"

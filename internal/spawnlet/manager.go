@@ -1188,6 +1188,9 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		// which port to bind. Constant offset from SidecarPort (inference=+0, control=+1,
 		// GetToken-TCP=+2, MITM proxy=+3). Injected unconditionally alongside the control vars.
 		sidecarControlEnv = append(sidecarControlEnv, SidecarProxyAddrEnv+"="+proxyAddr(m.cfg.SidecarPort))
+		// The sidecar tags its GetSpawnCA/GetToken requests with this spawn id; without it the node
+		// mints for spawn "" → CA/token mismatch with the agent's git-env CA (signer-not-trusted).
+		sidecarControlEnv = append(sidecarControlEnv, SidecarSpawnIDEnv+"="+id)
 
 		udsLane := m.cfg.UsernsMode == "remap"
 		getTokenPort := m.cfg.SidecarPort + 2

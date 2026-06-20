@@ -14,3 +14,28 @@ func TestSidecarProxyAddrEnvName(t *testing.T) {
 			SidecarProxyAddrEnv, wantSidecarReads)
 	}
 }
+
+// TestSidecarEnvNamesMatchSidecarReads pins every sidecar control env var NAME the node injects to
+// exactly what internal/sidecar reads. Divergence (or a missing inject) silently breaks the github
+// path: SIDECAR_SPAWN_ID empty → wrong CA/token (signer-not-trusted); GETTOKEN_* wrong → no token.
+func TestSidecarEnvNamesMatchSidecarReads(t *testing.T) {
+	want := map[string]string{
+		"proxy-addr":      "SIDECAR_GITHUB_PROXY_ADDR",
+		"spawn-id":        "SIDECAR_SPAWN_ID",
+		"gettoken-uds":    "SIDECAR_GETTOKEN_UDS",
+		"gettoken-addr":   "SIDECAR_GETTOKEN_ADDR",
+		"gettoken-bearer": "SIDECAR_GETTOKEN_BEARER",
+	}
+	got := map[string]string{
+		"proxy-addr":      SidecarProxyAddrEnv,
+		"spawn-id":        SidecarSpawnIDEnv,
+		"gettoken-uds":    SidecarGetTokenUDSEnv,
+		"gettoken-addr":   SidecarGetTokenAddrEnv,
+		"gettoken-bearer": SidecarGetTokenBearerEnv,
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("%s env name = %q, sidecar reads %q", k, got[k], w)
+		}
+	}
+}
