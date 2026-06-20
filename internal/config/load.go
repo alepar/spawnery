@@ -115,5 +115,8 @@ func Load[T any](svc string, opts Options) (*T, error) {
 	if err := decodeInto(k, &out); err != nil {
 		return nil, fmt.Errorf("decoding config for %q (env %s): %w", svc, env, err)
 	}
+	if err := validateConfig(&out); err != nil {
+		return nil, fmt.Errorf("config for %q (env %s): %w", svc, env, err)
+	}
 	return &out, nil
 }
