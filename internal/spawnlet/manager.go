@@ -47,6 +47,10 @@ type ManagerConfig struct {
 	// StartSpawn.artifacts here at create/resume time. Default DataRoot/artifacts. Production should
 	// point this at a tmpfs (memory-backed) so transient payload bytes do not accumulate on durable disk.
 	ArtifactsRoot string
+	// GitEnvRoot is the per-node root for per-spawn WRITABLE git-env dirs (sp-7amh). Each spawn gets a
+	// subdir here, chowned to the agent's mapped uid and bind-mounted at GitEnvMountPath, holding the
+	// agent-owned GIT_CONFIG_GLOBAL. Default DataRoot/git-env. Production should point this at a tmpfs.
+	GitEnvRoot string
 	// GitHubCredentialsRoot is a node-only tmpfs root for short-lived access tokens used by storage
 	// backends. It is never bind-mounted into the agent; agent-render credentials use SecretsRoot.
 	GitHubCredentialsRoot string
@@ -122,6 +126,9 @@ type Manager struct {
 	// Always set (NewManagerWithBackend defaults ArtifactsRoot); bind-mounted into the agent at
 	// ArtifactsMountPath; sensitive artifacts are routed to secrets by Materialize.
 	artifacts ArtifactStager
+	// gitEnv manages per-spawn WRITABLE git-env dirs (sp-7amh). Always set; bind-mounted at
+	// GitEnvMountPath so the agent owns GIT_CONFIG_GLOBAL and can run `git config --global`.
+	gitEnv GitEnv
 	// githubCreds stores node-storage GitHub access tokens in a node-only tmpfs root. This root must
 	// not be SecretInjector.DirFor(spawnID), because that path is bind-mounted into the agent.
 	githubCreds GitHubCredentialStore
@@ -239,6 +246,9 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 	if cfg.ArtifactsRoot == "" {
 		cfg.ArtifactsRoot = filepath.Join(cfg.DataRoot, "artifacts")
 	}
+	if cfg.GitEnvRoot == "" {
+		cfg.GitEnvRoot = filepath.Join(cfg.DataRoot, "git-env")
+	}
 	if cfg.GitHubCredentialsRoot == "" {
 		cfg.GitHubCredentialsRoot = filepath.Join(cfg.DataRoot, "github-creds")
 	}
@@ -256,6 +266,7 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		fw:              fw,
 		secrets:         SecretInjector{Root: cfg.SecretsRoot},
 		artifacts:       ArtifactStager{Root: cfg.ArtifactsRoot},
+		gitEnv:          GitEnv{Root: cfg.GitEnvRoot},
 		githubCreds:     GitHubCredentialStore{Root: cfg.GitHubCredentialsRoot},
 		deltaState:      &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
 	}
@@ -1028,6 +1039,9 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		if aerr := m.artifacts.Remove(id); aerr != nil {
 			log.Printf("artifacts dir cleanup for %s: %v", id, aerr)
 		}
+		if geerr := m.gitEnv.Remove(id); geerr != nil {
+			log.Printf("git-env dir cleanup for %s: %v", id, geerr)
+		}
 		if gerr := m.githubCreds.Remove(id); gerr != nil {
 			log.Printf("github credential cleanup for %s: %v", id, gerr)
 		}
@@ -1044,6 +1058,18 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		return nil, fmt.Errorf("prepare artifacts: %w", err)
 	}
 	mounts = append(mounts, runtime.Mount{HostPath: m.artifacts.DirFor(id), ContainerPath: ArtifactsMountPath})
+
+	// Writable agent-owned git-env (sp-7amh, design §1.1): a per-spawn dir chowned to the agent's mapped
+	// uid (mirrors storage chown) so the agent owns GIT_CONFIG_GLOBAL and can `git config --global`. A
+	// SIBLING of the read-only secrets mount. Re-prepared idempotently on every create/resume.
+	gitEnvDir, err := m.gitEnv.Prepare(id, m.agentRootUID())
+	if err != nil {
+		finalizeAll()
+		cleanupSpawnDirs()
+		return nil, fmt.Errorf("prepare git-env: %w", err)
+	}
+	mounts = append(mounts, runtime.Mount{HostPath: gitEnvDir, ContainerPath: GitEnvMountPath})
+
 	cleanupPreStoreFailure := func(h *runtime.PodHandle, floorIP string) {
 		cleanupCtx := context.WithoutCancel(ctx)
 		if h != nil {
@@ -1206,7 +1232,12 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			"SPAWN_MODEL=" + model,
 			"SPAWN_SESSION_TITLE=" + sessionTitle,
 			"GH_CONFIG_DIR=" + SecretsMountPath + "/github/gh",
-			"GIT_CONFIG_GLOBAL=" + SecretsMountPath + "/github/gitconfig",
+			// GIT_CONFIG_GLOBAL points at the writable agent-owned git-env dir (sp-7amh §1.1),
+			// not the read-only secrets tmpfs. The three hardening vars below keep git non-interactive.
+			"GIT_CONFIG_GLOBAL=" + GitEnvMountPath + "/" + GitConfigName,
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_ASKPASS=/bin/false",
 		},
 		Mounts:      mounts,
 		Resources:   res,
@@ -1815,6 +1846,9 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 	if aerr := m.artifacts.Remove(id); aerr != nil {
 		log.Printf("artifacts dir cleanup for %s: %v", id, aerr)
 	}
+	if geerr := m.gitEnv.Remove(id); geerr != nil {
+		log.Printf("git-env dir cleanup for %s: %v", id, geerr)
+	}
 	if gerr := m.githubCreds.Remove(id); gerr != nil {
 		log.Printf("github credential cleanup for %s: %v", id, gerr)
 	}
@@ -1856,6 +1890,9 @@ func (m *Manager) CleanupSpawnTransient(spawnID string) {
 	}
 	if err := m.artifacts.Remove(spawnID); err != nil {
 		log.Printf("artifacts dir cleanup for %s: %v", spawnID, err)
+	}
+	if err := m.gitEnv.Remove(spawnID); err != nil {
+		log.Printf("git-env dir cleanup for %s: %v", spawnID, err)
 	}
 	if err := m.githubCreds.Remove(spawnID); err != nil {
 		log.Printf("github credential cleanup for %s: %v", spawnID, err)
