@@ -40,6 +40,10 @@ func main() {
 		log.Printf("sidecar control endpoint disabled (set SIDECAR_CONTROL_TOKEN and SIDECAR_CONTROL_ADDR to enable)")
 	}
 
+	// GitHub MITM forward proxy (sp-n7iy.4): enabled when SIDECAR_GITHUB_PROXY_ADDR is set and a
+	// control transport is configured. Disabled ⇒ log notice and skip (inference proxy unchanged).
+	sidecar.StartGitHubProxy(os.Getenv)
+
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
