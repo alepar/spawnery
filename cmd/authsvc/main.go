@@ -280,6 +280,13 @@ func buildService() (*authsvc.Service, error) {
 		log.Printf("authsvc: GitHub mint authorization/fanout wired to CP %s", cpURL)
 	}
 
+	// CP→AS link-status endpoint: enabled when AS_CP_RPC_SECRET is set. The CP sends this secret
+	// in the X-Spawnery-AS-Secret header to authenticate link-status queries.
+	if secret := strings.TrimSpace(os.Getenv("AS_CP_RPC_SECRET")); secret != "" {
+		opts = append(opts, authsvc.WithCPRPCSecret(secret))
+		log.Printf("authsvc: CP→AS link-status endpoint enabled (POST /internal/github/link-status)")
+	}
+
 	if os.Getenv("AS_DEV_RELAX_NODE_AUTH") == "1" {
 		log.Printf("authsvc: WARNING — AS_DEV_RELAX_NODE_AUTH=1: trusting %q header as node identity (DEV-ONLY, NOT for production)", "X-Spawnery-Dev-Node-Id")
 		opts = append(opts, authsvc.WithDevNodeIdentityHeader("X-Spawnery-Dev-Node-Id"))

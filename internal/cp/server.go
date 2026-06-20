@@ -128,6 +128,12 @@ type Server struct {
 	// It is populated only from owner/AS-sealed token deliveries; CP stores no plaintext token material.
 	githubLinks *githubLinkIndex
 
+	// linkChecker is the CP→AS GitHub link-status client. When non-nil, CreateSpawn calls it before
+	// persisting a spawn whose app declares a github: mount — failing closed if the owner has no live
+	// link (CodeFailedPrecondition) or the AS is unreachable (CodeUnavailable). nil = no preflight
+	// (non-github lanes, hermetic tests without an AS).
+	linkChecker asLinkChecker
+
 	// ForkSpawn seams. The materializer is intentionally narrow and currently defaults to
 	// Unimplemented; downstream fork tasks install real source-preserving capture/seeding. The
 	// footprint estimator is fail-closed when nil because CP cannot infer fork disk headroom yet.
@@ -690,6 +696,17 @@ func (s *Server) SetDevASKey(priv ed25519.PrivateKey, keyID string) {
 // SetReauthInterval overrides the in-band reauth deadline (default 15 min).
 func (s *Server) SetReauthInterval(d time.Duration) { s.reauthInterval = d }
 
+// SetASLinkChecker installs the CP→AS GitHub link-status checker used by the CreateSpawn preflight.
+// asURL is the AS base URL (e.g. "http://127.0.0.1:8090"); secret is CP_AS_RPC_SECRET. Both must
+// be non-empty — the method is a no-op when either is empty. Call from cmd/spawnery_cp/main.go
+// when CP_AS_URL is configured; non-github lanes leave the checker nil (preflight skipped).
+func (s *Server) SetASLinkChecker(asURL, secret string) {
+	if asURL == "" || secret == "" {
+		return
+	}
+	s.linkChecker = newHTTPASLinkChecker(asURL, secret, nil)
+}
+
 // checkSpawnQuota returns ResourceExhausted if the owner is at/over the per-owner spawn cap.
 func (s *Server) checkSpawnQuota(ctx context.Context, owner string) error {
 	if s.maxSpawnsPerOwner <= 0 {
@@ -1008,6 +1025,27 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
+
+	// GitHub link preflight: before persisting the spawn, verify the owner has an active GitHub
+	// link on the AS. Runs only when a github: mount is present AND the checker is configured.
+	// Fail-closed: a non-nil error from the checker (AS unreachable / non-200) produces
+	// CodeUnavailable rather than silently allowing a spawn that will fail deep in provisioning.
+	if s.linkChecker != nil && mountsHaveGitHubBackend(mounts) {
+		linkStatus, cerr := s.linkChecker.CheckLinkStatus(ctx, owner)
+		switch {
+		case cerr != nil:
+			return nil, connect.NewError(connect.CodeUnavailable,
+				fmt.Errorf("couldn't verify your GitHub link (auth service unavailable) — try again."))
+		case linkStatus == gitHubLinkStatusNone:
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				fmt.Errorf("GitHub account not linked — link your GitHub account in Settings before creating a spawn that uses a github mount."))
+		case linkStatus == gitHubLinkStatusRelinkRequired:
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				fmt.Errorf("GitHub link needs re-authorization — re-link GitHub in Settings."))
+		}
+		// gitHubLinkStatusActive: proceed.
+	}
+
 	var manifestArtifacts []*cpv1.ArtifactSpec
 	if ver.Manifest != "" {
 		var m cpv1.AppManifest
