@@ -22,8 +22,11 @@ const dummyGitHubToken = "x-spawnery-proxy-dummy"
 const sidecarProxyPortOffset = 3
 
 // SidecarProxyAddrEnv is the sidecar env var carrying the loopback proxy address for the MITM
-// forward proxy (sp-n7iy.4 consumer). The node injects this so the sidecar knows which port to bind.
-const SidecarProxyAddrEnv = "SIDECAR_PROXY_ADDR"
+// forward proxy. The node injects this so the sidecar knows which port to bind. The NAME MUST match
+// exactly what the sidecar reads — cmd/sidecar/main.go → internal/sidecar.StartGitHubProxy reads
+// getenv("SIDECAR_GITHUB_PROXY_ADDR"); a divergence here silently disables the proxy
+// ("sidecar github proxy disabled"). (Cross-task contract: sp-n7iy.5 set this, sp-n7iy.4 reads it.)
+const SidecarProxyAddrEnv = "SIDECAR_GITHUB_PROXY_ADDR"
 
 // SpawnCACertName is the filename of the per-spawn CA public certificate in the git-env dir.
 const SpawnCACertName = "spawn-ca.crt"
