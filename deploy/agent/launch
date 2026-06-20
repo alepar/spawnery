@@ -122,9 +122,42 @@ has_jsonl_files() {
   [ -n "$(find "$_dir" -type f -name '*.jsonl' -size +0c -print -quit 2>/dev/null)" ]
 }
 
+# install_spawn_ca <git-env-dir>
+# Best-effort: copy spawn-ca.crt from the git-env dir into the system trust store and run the
+# updater. Primary CA trust is via env vars (GIT_SSL_CAINFO, SSL_CERT_FILE, etc.) set by the node;
+# this is a belt-and-suspenders install for tools that ignore env vars (e.g. some Go binaries that
+# read the system pool at startup). Never fails launch: every step is guarded with || true.
+# SPAWNERY_CA_ANCHOR_DIR overrides the default anchor dir (test seam).
+install_spawn_ca() {
+  _gitenv_dir="$1"
+  _cert="$_gitenv_dir/spawn-ca.crt"
+  [ -f "$_cert" ] || return 0
+  if command -v update-ca-certificates >/dev/null 2>&1; then
+    _anchor="${SPAWNERY_CA_ANCHOR_DIR:-/usr/local/share/ca-certificates}/spawnery"
+    mkdir -p "$_anchor" 2>/dev/null || true
+    cp -f "$_cert" "$_anchor/spawnery-spawn.crt" 2>/dev/null || true
+    update-ca-certificates 2>/dev/null || true
+  elif command -v update-ca-trust >/dev/null 2>&1; then
+    _anchor="${SPAWNERY_CA_ANCHOR_DIR:-/etc/pki/ca-trust/source/anchors}"
+    mkdir -p "$_anchor" 2>/dev/null || true
+    cp -f "$_cert" "$_anchor/spawnery-spawn.crt" 2>/dev/null || true
+    update-ca-trust 2>/dev/null || true
+  fi
+  return 0
+}
+
 if [ "${SPAWNERY_LAUNCH_SOURCE_ONLY:-0}" = 1 ]; then
   return 0 2>/dev/null || exit 0
 fi
+
+# Best-effort system-trust install of the per-spawn CA (sp-n7iy.5). Runs before the agent exec so
+# system-trust-dependent tools (some Go binaries) see the CA at startup. Primary trust is via env
+# vars set by the node; this is belt-and-suspenders. Non-github spawns skip (spawn-ca.crt absent).
+_git_env_dir="${GIT_CONFIG_GLOBAL%/*}"
+if [ -n "$_git_env_dir" ] && [ -f "$_git_env_dir/spawn-ca.crt" ]; then
+  install_spawn_ca "$_git_env_dir"
+fi
+unset _git_env_dir
 
 case "$RUNNABLE" in
   ""|opencode-served)

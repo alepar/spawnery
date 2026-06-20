@@ -67,11 +67,12 @@ func sidecarEnvVal(env []string, key string) string {
 func TestManagerGetTokenUDSLane(t *testing.T) {
 	fb := &fakePodBackend{}
 	mock := &mockGitHubControlServer{}
+	overrideSidecarReadyProbe(t, nil) // sp-n7iy.5: probe added; stub so test doesn't dial 10.0.0.5
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
-		AgentImage:  "a",
+		AgentImage:   "a",
 		SidecarImage: "s",
-		DataRoot:    t.TempDir(),
-		UsernsMode:  "remap",
+		DataRoot:     t.TempDir(),
+		UsernsMode:   "remap",
 	})
 	m.SetGitHubControlServer(mock)
 
@@ -136,6 +137,7 @@ func TestManagerGetTokenUDSLane(t *testing.T) {
 func TestManagerGetTokenTCPLane(t *testing.T) {
 	fb := &fakePodBackend{}
 	mock := &mockGitHubControlServer{}
+	overrideSidecarReadyProbe(t, nil) // sp-n7iy.5: probe added; stub so test doesn't dial 10.0.0.5
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage:       "a",
 		SidecarImage:     "s",
@@ -219,11 +221,12 @@ func TestManagerGetTokenNoServer(t *testing.T) {
 func TestManagerStopCallsGhControlStop(t *testing.T) {
 	fb := &fakePodBackend{}
 	mock := &mockGitHubControlServer{}
+	overrideSidecarReadyProbe(t, nil) // sp-n7iy.5: probe added; stub so test doesn't dial 10.0.0.5
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
-		AgentImage:  "a",
+		AgentImage:   "a",
 		SidecarImage: "s",
-		DataRoot:    t.TempDir(),
-		UsernsMode:  "remap",
+		DataRoot:     t.TempDir(),
+		UsernsMode:   "remap",
 	})
 	m.SetGitHubControlServer(mock)
 
