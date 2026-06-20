@@ -72,3 +72,91 @@ func TestLauncherWiresResumeAfterJSONLRepair(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallSpawnCAWithUpdater verifies that install_spawn_ca copies spawn-ca.crt to the
+// Debian anchor dir and invokes update-ca-certificates when the latter is on PATH.
+func TestInstallSpawnCAWithUpdater(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a fake git-env dir with spawn-ca.crt.
+	gitEnvDir := filepath.Join(dir, "git-env")
+	if err := os.MkdirAll(gitEnvDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	certContent := "-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----\n"
+	if err := os.WriteFile(filepath.Join(gitEnvDir, "spawn-ca.crt"), []byte(certContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a fake update-ca-certificates that records its invocation.
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invocationFile := filepath.Join(dir, "updater-called")
+	fakeUpdater := "#!/bin/sh\ntouch " + invocationFile + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "update-ca-certificates"), []byte(fakeUpdater), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// SPAWNERY_CA_ANCHOR_DIR redirects the anchor dir to a temp path (test seam).
+	anchorBase := filepath.Join(dir, "ca-anchors")
+	if err := os.MkdirAll(anchorBase, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("sh", "-c", "set --; . ./launch; install_spawn_ca \"$GITENV_DIR\"")
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPAWNERY_LAUNCH_SOURCE_ONLY=1",
+		"GITENV_DIR="+gitEnvDir,
+		"SPAWNERY_CA_ANCHOR_DIR="+anchorBase,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install_spawn_ca failed: %v\n%s", err, out)
+	}
+
+	// The cert must have been copied to <anchorBase>/spawnery/spawnery-spawn.crt.
+	copied, err := os.ReadFile(filepath.Join(anchorBase, "spawnery", "spawnery-spawn.crt"))
+	if err != nil {
+		t.Fatalf("cert not copied to anchor dir: %v", err)
+	}
+	if string(copied) != certContent {
+		t.Errorf("copied cert = %q, want %q", copied, certContent)
+	}
+
+	// update-ca-certificates must have been invoked.
+	if _, err := os.Stat(invocationFile); err != nil {
+		t.Fatal("update-ca-certificates was not called")
+	}
+}
+
+// TestInstallSpawnCANoUpdater verifies that install_spawn_ca exits 0 (best-effort) when no
+// CA updater is present on PATH.
+func TestInstallSpawnCANoUpdater(t *testing.T) {
+	dir := t.TempDir()
+
+	gitEnvDir := filepath.Join(dir, "git-env")
+	if err := os.MkdirAll(gitEnvDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitEnvDir, "spawn-ca.crt"), []byte("FAKE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty bin dir — no update-ca-certificates / update-ca-trust.
+	binDir := filepath.Join(dir, "empty-bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("sh", "-c", "set --; . ./launch; install_spawn_ca \"$GITENV_DIR\"")
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir, // no system path so system updaters are hidden
+		"SPAWNERY_LAUNCH_SOURCE_ONLY=1",
+		"GITENV_DIR="+gitEnvDir,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install_spawn_ca should exit 0 even without an updater: %v\n%s", err, out)
+	}
+}

@@ -1169,8 +1169,16 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		// The Bearer and Network are set here; Address and PodIP are set after StartPod.
 		getTokenTransport = ControlTransport{SpawnID: id}
 		getTokenBearer    string
+		// gitProxyEnv holds agent env vars for the MITM proxy + CA + dummy cred wiring (sp-n7iy.5).
+		// Non-nil only when ghControl != nil; nil means the spawn has no proxy wiring.
+		gitProxyEnv []string
 	)
 	if m.ghControl != nil {
+		// sp-n7iy.5: inject the MITM proxy address into the sidecar env so sp-n7iy.4 knows
+		// which port to bind. Constant offset from SidecarPort (inference=+0, control=+1,
+		// GetToken-TCP=+2, MITM proxy=+3). Injected unconditionally alongside the control vars.
+		sidecarControlEnv = append(sidecarControlEnv, SidecarProxyAddrEnv+"="+proxyAddr(m.cfg.SidecarPort))
+
 		udsLane := m.cfg.UsernsMode == "remap"
 		getTokenPort := m.cfg.SidecarPort + 2
 		if udsLane {
@@ -1268,6 +1276,22 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 				return nil, fmt.Errorf("github control server serve: %w", serveErr)
 			}
 		}
+	}
+
+	// sp-n7iy.5: write proxy gitconfig + CA cert/bundle into git-env; build agent proxy env.
+	// Runs after Serve (CA is stable once the control server is up) and before the egress floor.
+	// Fail-closed: any error tears the pod down. Non-github spawns skip (gitProxyEnv stays nil).
+	if m.ghControl != nil {
+		caPEM, caErr := m.ghControl.SpawnCACert(id)
+		if caErr != nil {
+			cleanupPreStoreFailure(h, "")
+			return nil, fmt.Errorf("spawn CA cert for %s: %w", id, caErr)
+		}
+		if renderErr := renderGitProxy(gitEnvDir, proxyAddr(m.cfg.SidecarPort), caPEM); renderErr != nil {
+			cleanupPreStoreFailure(h, "")
+			return nil, fmt.Errorf("render git proxy for %s: %w", id, renderErr)
+		}
+		gitProxyEnv = agentGitProxyEnv(proxyAddr(m.cfg.SidecarPort))
 	}
 
 	// Egress floor: applied after the pod IP exists, before the untrusted agent starts (fail-closed).
@@ -1369,11 +1393,22 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		}
 	}
 
+	// sp-n7iy.5: sidecar-readiness gate — probe the sidecar's control listener before the agent
+	// starts, so the proxy is bound and ready when the first git/gh call lands (§2.6).
+	// Gated on ghControl != nil && PodIP known; empty PodIP mirrors controlURL's empty-PodIP guard.
+	// Fail-closed: probe failure tears the pod down.
+	if m.ghControl != nil && h.PodIP != "" {
+		if probeErr := sidecarReadyProbe(ctx, h.PodIP, m.cfg.SidecarPort+1); probeErr != nil {
+			cleanupPreStoreFailure(h, floorIP)
+			return nil, fmt.Errorf("sidecar readiness gate: %w", probeErr)
+		}
+	}
+
 	// Phase 2: the untrusted agent, into the existing pod.
 	if err := m.pod.StartAgent(ctx, h, runtime.AgentSpec{
 		Image: launchImage,
 		Cmd:   agentCmd,
-		Env: []string{
+		Env: append([]string{
 			"OPENAI_BASE_URL=http://" + addr + "/v1",
 			"SPAWN_MODEL=" + model,
 			"SPAWN_SESSION_TITLE=" + sessionTitle,
@@ -1384,7 +1419,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			"GIT_CONFIG_NOSYSTEM=1",
 			"GIT_TERMINAL_PROMPT=0",
 			"GIT_ASKPASS=/bin/false",
-		},
+		}, gitProxyEnv...),
 		Mounts:      mounts,
 		Resources:   res,
 		Runtime:     m.cfg.ContainerRuntime,
