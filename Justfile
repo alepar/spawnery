@@ -175,6 +175,7 @@ authsvc-github:
     GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in .env}" \
     AS_GITHUB_REDIRECT_URI=${AS_GITHUB_REDIRECT_URI:-{{dev_web_origin}}/oauth/callback} \
     AS_GITHUB_LINK_REDIRECT_URI=${AS_GITHUB_LINK_REDIRECT_URI:-{{dev_web_origin}}/github/link/callback} \
+    AS_GITHUB_POST_REDEEM_REDIRECT=${AS_GITHUB_POST_REDEEM_REDIRECT:-{{dev_web_origin}}/settings} \
     AS_REDIRECT_URIS=http://127.0.0.1/cb,{{dev_web_origin}}/callback,http://localhost:5173/callback \
     AS_SPA_ORIGINS={{dev_web_origin}} \
     AS_ALLOWED_ORIGINS={{dev_web_origin}} \
