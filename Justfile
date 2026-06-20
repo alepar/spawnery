@@ -9,7 +9,7 @@ addr_as      := "127.0.0.1:8090"
 # tunnel this is the box's domain; override via DEV_WEB_ORIGIN. It is the AS's single canonical SPA
 # origin and must be a registered GitHub App callback host (login: <origin>/oauth/callback, link:
 # <origin>/github/link/callback). Also add the host to vite `allowedHosts` (web/vite.config.ts).
-dev_web_origin := env_var_or_default("DEV_WEB_ORIGIN", "http://blacky.dayton:5173")
+dev_web_origin := env_var_or_default("DEV_WEB_ORIGIN", "https://blacky.dayton:5173")
 free         := "openai/gpt-oss-120b:free"
 data_root    := repo / ".envs/dev/data"
 devca        := repo / ".envs/dev/dev-ca"
@@ -82,7 +82,19 @@ web-github:
 # .env. For the plain non-auth stack (no GitHub/mTLS), use `just dev-plain`.
 dev: garage
     @test -f {{devca}}/root.pem || just gen-dev-ca
+    @test -f {{repo}}/.envs/dev/web-tls/cert.pem || just gen-web-tls
     mprocs --config {{repo}}/mprocs-github.yaml
+
+# Self-signed TLS cert for the dev web server (vite). Needed for a SECURE CONTEXT so the WebCrypto
+# auth flow (crypto.subtle) works when the SPA is served on a LAN host over HTTPS without an SSH
+# tunnel (http://localhost is a secure context; http://<lan-host> is not). SANs: blacky.dayton +
+# localhost + 127.0.0.1. Browser shows a one-time "proceed anyway" warning (self-signed).
+gen-web-tls:
+    @mkdir -p {{repo}}/.envs/dev/web-tls
+    openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout {{repo}}/.envs/dev/web-tls/key.pem -out {{repo}}/.envs/dev/web-tls/cert.pem -days 3650 \
+      -subj "/CN=blacky.dayton" \
+      -addext "subjectAltName=DNS:blacky.dayton,DNS:localhost,IP:127.0.0.1"
 
 # plain non-auth dev stack (no GitHub/mTLS) — the previous `just dev`.
 dev-plain: garage

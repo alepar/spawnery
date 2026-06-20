@@ -3,8 +3,22 @@ import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
+import fs from "fs";
 import { sriHeadersPlugin } from "./build/sri-headers-plugin";
 import { createHeadersMiddleware } from "./e2e/preview-headers";
+
+// Dev HTTPS: the Web Crypto auth flow (crypto.subtle) requires a SECURE CONTEXT. http://localhost is
+// one, but a LAN host over plain http (e.g. http://blacky.dayton:5173 for tunnel-free access) is not,
+// so crypto.subtle is undefined and login key-gen throws. Serve over HTTPS when a dev cert exists at
+// .envs/dev/web-tls (generate via `just gen-web-tls`); otherwise plain HTTP (localhost stays fine).
+const devTlsDir = process.env.VITE_TLS_DIR ?? path.resolve(__dirname, "../.envs/dev/web-tls");
+const devHttps =
+  fs.existsSync(path.join(devTlsDir, "cert.pem")) && fs.existsSync(path.join(devTlsDir, "key.pem"))
+    ? {
+        cert: fs.readFileSync(path.join(devTlsDir, "cert.pem")),
+        key: fs.readFileSync(path.join(devTlsDir, "key.pem")),
+      }
+    : undefined;
 
 export default defineConfig({
   plugins: [
@@ -26,6 +40,7 @@ export default defineConfig({
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
   server: {
     host: true,
+    https: devHttps,
     // LAN/remote access without an SSH tunnel: vite (dev) otherwise rejects Host headers it
     // doesn't recognize ("Blocked request. This host is not allowed."). Allow loopback + the box's
     // LAN domain; override/extend via VITE_ALLOWED_HOSTS (comma-separated) for other hostnames.
