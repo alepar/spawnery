@@ -137,17 +137,28 @@ different continuity stories. mosh's UDP data plane goes **straight to the node*
 so a CP restart is invisible to a live mosh session; the web chat relay goes *through* the CP, so a
 CP restart drops it (→ reconnect + replay below). Keep them separate.
 
-- **mosh terminals do NOT auto-survive a node restart — corrected.** The earlier claim that
-  persisting port+key lets mosh "restore connectivity automatically" is **false**: mosh has **no
-  server-restart resume** by design. The AES-OCB nonce counter and terminal framebuffer are
-  process-local; relaunching `mosh-server` on the same port with a persisted key would reuse nonces
-  under one key — which mosh deliberately refuses (Keith Winstein, mosh-devel:
-  `https://mailman.mit.edu/pipermail/mosh-devel/2012-September/000307.html`). mosh roaming recovers
-  a *client* IP change, not a dead *server* process. **Therefore:** a node restart kills active mosh
-  sessions; the client must **re-attach** (cheap — re-runs the SSH→mosh handshake). The deep spec
-  states this plainly; ORR-5 rolling-deploy planning must not promise mosh continuity. Whether the
-  in-container tmux session survives a spawnlet restart to make re-attach seamless is part of the
-  node-restart spike (S7).
+- **mosh CAN survive a spawnlet-daemon restart — re-examined (roast A, then code-verified).** The
+  hard limit is narrow: you cannot resurrect a *dead* `mosh-server` (the AES-OCB nonce counter +
+  terminal framebuffer are process-local; relaunching on the same port with a saved key = nonce
+  reuse, which mosh refuses — Winstein, mosh-devel:
+  `https://mailman.mit.edu/pipermail/mosh-devel/2012-September/000307.html`). The spec's *original*
+  "reopen the same port with the saved key" wording described exactly that broken path. **But the
+  process that matters here usually does not die.** Verified: `mosh-server` runs on the host, binds
+  its *own* ephemeral UDP port (the spawnlet is **not** in the UDP datapath — `terminal.go:30`), and
+  `mosh-server new` **daemonizes**, so it is already detached from the spawnlet; its child
+  `docker exec`s into the agent container (`terminal.go:105-111,182`). A **spawnlet redeploy
+  therefore need not touch the live mosh flow** — same host:port, key/nonce/terminal state intact,
+  roaming covers any blip. What breaks it today is **our teardown, not the protocol**:
+  `gracefulStopAll` reaps the agent container on SIGTERM (`manager.go:744`), and there is **no
+  node-local session table**, so the restarted spawnlet forgets the orphaned `mosh-server` and
+  `ReapOrphans` (`manager.go:696`) may reap/collide it. **So mosh survives a daemon restart given:**
+  (1) **adopt-in-place** — a redeploy reconciles running pods from durable state instead of reaping
+  them (the same capability the on-demand router/pump + adopt path needs anyway); (2) **don't
+  signal-kill the detached `mosh-server`** on shutdown; (3) a **node-local session table** (the
+  process-local sqlite — now correctly justified: not to resume a dead server, but to **re-adopt the
+  live one**, avoid port collisions, and let a *dropped* client reattach to the *same* session). It
+  dies for real only on **pod recreate / host reboot / `mosh-server` kill** → re-attach to a fresh
+  session (tmux-in-container keeps scrollback if the pod survives). Scoped in **spike S3**.
 - **Process-local state stays out of shared Postgres.** The principle holds — any genuinely
   per-process node state (not mosh session continuity, which is unrecoverable) belongs in a
   process-local store, not Postgres. This is a design principle, no longer justified by the (false)
@@ -184,12 +195,19 @@ failover/actuation/throughput gaps the roadmap had left unspiked.
   ownership**, which changes on every CP restart/rolling deploy (commodity LB stickiness is
   static/hash and never consults the live DB map — roast B). Evaluate: app-level reconnect hint vs.
   ownership-aware front-door (control-only) vs. sticky-by-key (likely rejected by (b)).
-- **S3 — Replay fidelity across a NODE restart + buffer retention** (reframed — roast G). A *CP*
-  restart is transparent (node-side pump). The real hazards: the pump log is **bounded**
-  (`defaultMaxLog=2000`) so an outage exceeding the window forces a **hard reset not a replay**; and
-  a **node/spawnlet restart** recreates the pump at `seq=0` and loses the log + transcript. Decide
-  the retention policy / durable transcript and the acceptable degradation (a surfaced reset is fine;
-  a silent one is not).
+- **S3 — Node/spawnlet-restart continuity** (reframed — roast G; expanded after mosh re-exam). A
+  *CP* restart is transparent (node-side pump); a *node/spawnlet* restart is the real event. Two
+  independent sub-questions: **(a) web chat replay** — the pump log is **bounded**
+  (`defaultMaxLog=2000`), so an outage past the window forces a **hard reset not a replay**, and a
+  spawnlet restart recreates the pump at `seq=0` losing the log + transcript unless adopt-in-place
+  rebuilds it or the transcript is made durable; decide retention + acceptable (surfaced, not silent)
+  degradation. **(b) mosh survival** — `mosh-server` is daemonized and off the spawnlet datapath, so
+  a daemon redeploy can be transparent *if* the deploy path **adopts pods in place** (does not reap
+  the agent container), **does not signal-kill** the detached `mosh-server`, and a **node-local
+  session table** lets the restarted spawnlet re-adopt the orphan instead of reaping/colliding it
+  (`manager.go:696,744`; no terminal registry today — verified). Kill criterion for (b): if a
+  spawnlet redeploy cannot be made to leave a live `mosh-server` + its pod untouched, mosh continuity
+  across deploys is off the table and clients re-attach.
 - **S4 — Placement race + reservation lost-update** (roast I). Verify the slot reservation prevents
   two CPs overfilling a node **given that the node full-overwrites its `capacity` every ~5s**: the
   reservation must live in a **separate `reserved_slots` column / reservations row** so a heartbeat
@@ -286,3 +304,13 @@ used.*
   the live path); §6 ORR-2 noted claim-release-on-drain (roast H, partially refuted). Binding deltas
   carried into the `sp-haj5.4` epic notes. These resolve in the ORR-4 **deep design spec**, which
   re-roasts before implementation.
+- **2026-06-20 — mosh continuity re-examined (roast A partially walked back).** Code verification
+  showed the roast's "node restart kills mosh, re-attach only" conclusion was too pessimistic for the
+  *spawnlet-daemon* restart case: `mosh-server` is daemonized and off the spawnlet UDP datapath
+  (`terminal.go:30,182`), so a redeploy can be transparent **if** the deploy path adopts pods in
+  place, doesn't signal-kill the detached server, and keeps a node-local session table to re-adopt
+  the orphan (today `gracefulStopAll`/`ReapOrphans` defeat this — `manager.go:696,744`). §5.4 and
+  spike S3 updated accordingly; mosh dies for real only on pod-recreate / host-reboot / server-kill.
+  The nonce-reuse limit (can't resurrect a *dead* server) stands. Net: mosh continuity across
+  rolling deploys is achievable and cheap-ish, contingent on adopt-in-place — which the node deploy
+  story (ORR-5) needs regardless.
