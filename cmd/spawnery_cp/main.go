@@ -9,8 +9,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
@@ -55,7 +57,8 @@ func main() {
 	rt := router.New()
 	sched := scheduler.New(reg, rt, 60*time.Second)
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	// --- Auth mode ---
 	// CP_AUTH_MODE: "dev" (default) | "prod".
@@ -283,7 +286,29 @@ func main() {
 
 	addr := env("CP_LISTEN", "127.0.0.1:8080")
 	log.Printf("cp listening on %s (node-auth mode=%s)", addr, mode)
-	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(allow.CORS(mux), &http2.Server{})))
+	httpSrv := &http.Server{Addr: addr, Handler: h2c.NewHandler(allow.CORS(mux), &http2.Server{})}
+	serveErr := make(chan error, 1)
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serveErr <- err
+		}
+	}()
+
+	grace := envDuration("CP_SHUTDOWN_GRACE", 30*time.Second)
+	select {
+	case err := <-serveErr:
+		log.Fatalf("cp: listener: %v", err)
+	case <-ctx.Done():
+		stop() // restore default signal handler so a second signal force-quits
+		sdCtx, cancel := context.WithTimeout(context.Background(), grace)
+		defer cancel()
+		if err := srv.Shutdown(sdCtx); err != nil {
+			log.Printf("cp: drain Attach streams: %v", err)
+		}
+		if err := httpSrv.Shutdown(sdCtx); err != nil {
+			log.Printf("cp: drain HTTP: %v", err)
+		}
+	}
 }
 
 // serveNodeTLS runs the NodeService over mTLS on its own listener.
