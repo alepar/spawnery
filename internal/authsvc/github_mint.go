@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -137,6 +138,8 @@ func (s *Service) MintGitHubAccessToken(ctx context.Context, req *connect.Reques
 				TokenType:           tokenTypeOrBearer(link.TokenType),
 				RepositoryId:        msg.GetRepositoryId(),
 				Refreshed:           false,
+				Login:               link.Login,
+				UserId:              githubUserID(link.GithubUserID),
 			}), nil
 		}
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("github link reference does not match current delivery"))
@@ -150,6 +153,8 @@ func (s *Service) MintGitHubAccessToken(ctx context.Context, req *connect.Reques
 			TokenType:           tokenTypeOrBearer(link.TokenType),
 			RepositoryId:        msg.GetRepositoryId(),
 			Refreshed:           false,
+			Login:               link.Login,
+			UserId:              githubUserID(link.GithubUserID),
 		}), nil
 	}
 
@@ -238,6 +243,8 @@ func mintRefreshedResponse(msg *authv1.MintGitHubAccessTokenRequest, rotated sto
 		TokenType:           tokenTypeOrBearer(rotated.TokenType),
 		RepositoryId:        msg.GetRepositoryId(),
 		Refreshed:           true,
+		Login:               rotated.Login,
+		UserId:              githubUserID(rotated.GithubUserID),
 	})
 }
 
@@ -246,6 +253,16 @@ func tokenTypeOrBearer(t string) string {
 		return "bearer"
 	}
 	return t
+}
+
+// githubUserID parses the store's string GitHub user id into the int64 wire field. Best-effort:
+// empty / non-numeric (org/app-installation links, §1.2 fallback) yields 0 and never fails the mint.
+func githubUserID(s string) int64 {
+	id, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
 }
 
 func githubAccessDeliveryID(secretID string, version uint64) string {

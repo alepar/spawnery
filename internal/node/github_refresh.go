@@ -147,17 +147,28 @@ func githubInitialMintRequestID(spawnID, secretID string, generation uint64) str
 	return fmt.Sprintf("node-initial-mint-%s-%s-g%d", spawnID, secretID, generation)
 }
 
+// MintInitialResult is the outcome of an at-provision INITIAL mint: the access token + its precise
+// expiry, plus the linked GitHub identity (login + numeric user id) from the AS mint response
+// (design §1.3), consumed by the §1.2 git-identity render (sp-m859.1).
+type MintInitialResult struct {
+	Token               string
+	AccessExpiresAtUnix int64
+	Login               string
+	UserID              int64
+}
+
 // MintInitial performs the synchronous at-provision INITIAL mint for a github mount. It presents the
 // node identity (carried by r.client) and an initial link-ref (secret_id only — the AS resolves the
 // link's current version/delivery_id, T1). Unlike the proactive Tick path it does NOT mutate refresh
 // scheduling state: the caller renders the returned token, then calls Note to begin proactive refresh.
-// Returns the access token and its precise expiry (0 = unknown). A FailedPrecondition/NotFound from the
+// Returns MintInitialResult carrying the access token, its precise expiry (0 = unknown), and the
+// linked GitHub identity (Login/UserID from the AS response). A FailedPrecondition/NotFound from the
 // AS (broken/absent link) is surfaced as a clear "link your GitHub account first" error so the spawn
 // fails with an actionable message (spec §'Create-time initial token delivery' step 5). nil-safe: a nil
 // refresher or nil client means the dev lane lacks the mint channel — an explicit error, never a token.
-func (r *githubRefresher) MintInitial(ctx context.Context, spawnID string, generation uint64, secretID, repositoryID string) (string, int64, error) {
+func (r *githubRefresher) MintInitial(ctx context.Context, spawnID string, generation uint64, secretID, repositoryID string) (MintInitialResult, error) {
 	if r == nil || r.client == nil {
-		return "", 0, fmt.Errorf("github mint client unavailable (node->AS mint channel not configured)")
+		return MintInitialResult{}, fmt.Errorf("github mint client unavailable (node->AS mint channel not configured)")
 	}
 	cctx, cancel := context.WithTimeout(ctx, refreshMintTimeout)
 	defer cancel()
@@ -172,11 +183,16 @@ func (r *githubRefresher) MintInitial(ctx context.Context, spawnID string, gener
 	}))
 	if err != nil {
 		if code := connect.CodeOf(err); code == connect.CodeFailedPrecondition || code == connect.CodeNotFound {
-			return "", 0, fmt.Errorf("link your GitHub account first: %w", err)
+			return MintInitialResult{}, fmt.Errorf("link your GitHub account first: %w", err)
 		}
-		return "", 0, err
+		return MintInitialResult{}, err
 	}
-	return resp.Msg.GetAccessToken(), resp.Msg.GetAccessExpiresAtUnix(), nil
+	return MintInitialResult{
+		Token:               resp.Msg.GetAccessToken(),
+		AccessExpiresAtUnix: resp.Msg.GetAccessExpiresAtUnix(),
+		Login:               resp.Msg.GetLogin(),
+		UserID:              resp.Msg.GetUserId(),
+	}, nil
 }
 
 // Tick attempts a mint for every due entry at `now`. Each attempt marks the entry in-flight and sets

@@ -219,6 +219,26 @@ func TestRefresherResumeNearExpiryFiresPromptly(t *testing.T) {
 	}
 }
 
+// TestMintInitialReturnsLoginAndUserID verifies that MintInitial threads Login and UserID from the AS
+// response through MintInitialResult (design §1.3 — consumed by sp-m859.1's git-identity render).
+func TestMintInitialReturnsLoginAndUserID(t *testing.T) {
+	fake := &fakeMintClient{resp: &authv1.MintGitHubAccessTokenResponse{
+		AccessToken:         "ghu_x",
+		AccessExpiresAtUnix: 1770000000 + 8*3600,
+		Login:               "alice",
+		UserId:              123456,
+	}}
+	r := newGitHubRefresher(fake)
+	got, err := r.MintInitial(context.Background(), "sp1", 5, "gh:octo", "42")
+	if err != nil {
+		t.Fatalf("MintInitial: %v", err)
+	}
+	if got.Token != "ghu_x" || got.AccessExpiresAtUnix != 1770000000+8*3600 ||
+		got.Login != "alice" || got.UserID != 123456 {
+		t.Fatalf("MintInitialResult = %+v", got)
+	}
+}
+
 // Models §16.4 resume-after-expiry: the access token is dead but the node still authorizes its first
 // refresh by node identity (link_ref), never a bearer token. We force the entry due immediately by
 // rewinding refreshAt via a fresh Note at an already-elapsed clock.
