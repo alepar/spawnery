@@ -1,12 +1,21 @@
 package main
 
 import (
+	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"spawnery/internal/sidecar"
 )
+
+// shutdownGrace is deliberately longer than authsvc's 10s because in-flight streaming inference
+// requests (/v1/messages) can be long-lived. Promote to an env knob only if ops later need it.
+const shutdownGrace = 30 * time.Second
 
 func main() {
 	upstream := getenv("SIDECAR_UPSTREAM", "https://openrouter.ai/api")
@@ -33,13 +42,15 @@ func main() {
 	}
 	mux.Handle("/", h)
 
+	proxySrv := &http.Server{Addr: addr, Handler: mux}
+	servers := []*http.Server{proxySrv}
+
 	// Control server: a second listener on the pod IP (not loopback) so the node can set the
 	// override. Started only when both a token and an address are configured.
 	if controlToken != "" && controlAddr != "" {
-		go func() {
-			log.Printf("sidecar control listening on %s", controlAddr)
-			log.Fatal(http.ListenAndServe(controlAddr, sidecar.NewControlHandler(ov, controlToken, inflight)))
-		}()
+		log.Printf("sidecar control listening on %s", controlAddr)
+		controlSrv := &http.Server{Addr: controlAddr, Handler: sidecar.NewControlHandler(ov, controlToken, inflight)}
+		servers = append(servers, controlSrv)
 	} else {
 		log.Printf("sidecar control endpoint disabled (set SIDECAR_CONTROL_TOKEN and SIDECAR_CONTROL_ADDR to enable)")
 	}
@@ -48,7 +59,65 @@ func main() {
 	// control transport is configured. Disabled ⇒ log notice and skip (inference proxy unchanged).
 	sidecar.StartGitHubProxy(os.Getenv)
 
-	log.Fatal(http.ListenAndServe(addr, mux))
+	lns, err := bindAll(servers...)
+	if err != nil {
+		log.Fatalf("sidecar: bind failed: %v", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := serveAll(ctx, shutdownGrace, servers, lns); err != nil {
+		log.Fatalf("sidecar: %v", err)
+	}
+}
+
+// bindAll opens a TCP listener for each server. On the first error it closes any already-bound
+// listeners and returns the error (fail-fast, mirrors spawnlet's synchronous bind-then-fatal).
+func bindAll(servers ...*http.Server) ([]net.Listener, error) {
+	lns := make([]net.Listener, 0, len(servers))
+	for _, s := range servers {
+		ln, err := net.Listen("tcp", s.Addr)
+		if err != nil {
+			for _, open := range lns {
+				open.Close()
+			}
+			return nil, err
+		}
+		lns = append(lns, ln)
+	}
+	return lns, nil
+}
+
+// serveAll launches each server on its pre-bound listener and blocks until ctx is cancelled or a
+// server returns a non-ErrServerClosed error. On ctx cancellation it calls Shutdown on every
+// server with a deadline of grace, then returns the first Shutdown error (nil on clean drain).
+func serveAll(ctx context.Context, grace time.Duration, servers []*http.Server, lns []net.Listener) error {
+	errc := make(chan error, len(servers))
+	for i, s := range servers {
+		go func(srv *http.Server, ln net.Listener) {
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				errc <- err
+			}
+		}(s, lns[i])
+	}
+
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+
+	sd, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+
+	var firstErr error
+	for _, s := range servers {
+		if err := s.Shutdown(sd); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func getenv(k, def string) string {
