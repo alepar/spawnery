@@ -69,9 +69,16 @@ BUCKET_ID="$(printf '%s' "$BUCKET_JSON" | grep -oE '"id": *"[^"]+"' | head -1 | 
 admin -X POST "${ADMIN_ENDPOINT}/v1/bucket/allow" \
   -d "{\"bucketId\":\"${BUCKET_ID}\",\"accessKeyId\":\"${ACCESS_KEY_ID}\",\"permissions\":{\"read\":true,\"write\":true,\"owner\":true}}" >/dev/null
 
-# Persist the creds where `just node` can pick them up (gitignored; dev only). Uses the
-# spawnlet's JOURNAL_* env names directly so the recipe can source the file as-is.
-CREDS="$DIR/dev-creds.env"
+# Persist the creds where `just node`/`just node-github` can pick them up (gitignored; dev only).
+# Defaults to .envs/dev/garage-creds.env in the repo root; overridable via GARAGE_CREDS_PATH.
+# Uses the spawnlet's JOURNAL_* env names directly so the recipe can source the file as-is.
+if [ -n "${GARAGE_CREDS_PATH:-}" ]; then
+  CREDS="$GARAGE_CREDS_PATH"
+else
+  # Infer repo root as two levels up from deploy/garage/
+  CREDS="$(cd "$DIR/../.." && pwd)/.envs/dev/garage-creds.env"
+fi
+mkdir -p "$(dirname "$CREDS")"
 cat > "$CREDS" <<EOF
 JOURNAL_BACKEND=s3
 JOURNAL_S3_ENDPOINT=${S3_ENDPOINT}
@@ -84,7 +91,7 @@ JOURNAL_GARAGE_ADMIN_ENDPOINT=${ADMIN_ENDPOINT}
 JOURNAL_GARAGE_ADMIN_TOKEN=${ADMIN_TOKEN}
 EOF
 chmod 600 "$CREDS"
-echo ">> wrote $CREDS (sourced automatically by 'just node')"
+echo ">> wrote $CREDS (sourced automatically by 'just node' and 'just node-github')"
 
 cat <<EOF
 

@@ -6,8 +6,8 @@ addr_cp      := "127.0.0.1:8080"
 addr_cp_node := "127.0.0.1:8081"   # CP mTLS node listener (enforced mode)
 addr_as      := "127.0.0.1:8090"
 free         := "openai/gpt-oss-120b:free"
-data_root    := repo / ".spawns"
-devca        := repo / ".dev-ca"
+data_root    := repo / ".envs/dev/data"
+devca        := repo / ".envs/dev/dev-ca"
 
 # list recipes
 default:
@@ -43,7 +43,7 @@ authsvc:
 # Without it, spawnlet probes the daemon, logs a warning, and FALLS BACK to cap-drop=ALL (apt fails).
 node agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
-    set -a; [ -f {{repo}}/deploy/garage/dev-creds.env ] && . {{repo}}/deploy/garage/dev-creds.env; set +a; \
+    set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
@@ -114,6 +114,7 @@ cp-enforced:
 # auth service loaded with the persistent dev CA (issues real certs; mints enrollment + session tokens).
 authsvc-enforced:
     @make bin/authsvc
+    @mkdir -p {{data_root}}
     AS_LISTEN={{addr_as}} \
     AS_DB_DSN="file:{{data_root}}/authsvc.db?_pragma=foreign_keys(1)" \
     AS_ROOT_CA_PEM={{devca}}/root.pem \
@@ -145,6 +146,7 @@ dev-enforced:
 # AS_DEV_RELAX_NODE_AUTH=1 header trust is DEV-ONLY (containment d) and MUST NOT be used in prod.
 authsvc-github:
     @make bin/authsvc
+    @mkdir -p {{data_root}}
     AS_LISTEN={{addr_as}} \
     AS_DB_DSN="file:{{data_root}}/authsvc.db?_pragma=foreign_keys(1)" \
     AS_ROOT_CA_PEM={{devca}}/root.pem \
@@ -171,7 +173,9 @@ authsvc-github:
 cp-github:
     @make bin/spawnery_cp
     @test -f {{devca}}/session-pub.pem || just gen-dev-ca
+    @mkdir -p {{repo}}/.envs/dev
     CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=${CP_DEV_OWNER:-alice} CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    CP_STORE_DSN="file:{{repo}}/.envs/dev/cp.db?_pragma=busy_timeout(5000)" \
     CP_AS_SESSION_PUBKEYS={{devca}}/session-pub.pem \
     NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \
     CP_NODE_ROOT_CA={{devca}}/root.pem \
@@ -181,16 +185,18 @@ cp-github:
     CP_AS_RPC_SECRET=dev-as-cp-secret \
     {{repo}}/bin/spawnery_cp
 
-# Node for the github lane: enforced mTLS to CP + journaled mounts (sources dev-creds.env) + D3
-# relaxed AS mint (plain HTTP, NODE_GITHUB_MINT_DEV_NODE_ID header). DEV-ONLY relaxation.
+# Node for the github lane: cloud-class (multi-tenant — no account-ID match needed) + enforced
+# mTLS to CP + journaled mounts (sources garage-creds.env) + D3 relaxed AS mint (plain HTTP,
+# NODE_GITHUB_MINT_DEV_NODE_ID header). EGRESS_FLOOR_FORCE_OFF=1 because the rootless dev
+# node cannot run iptables; cloud class would otherwise force the floor on. DEV-ONLY relaxations.
 node-github agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
-    set -a; [ -f {{repo}}/deploy/garage/dev-creds.env ] && . {{repo}}/deploy/garage/dev-creds.env; set +a; \
+    set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_AUTH_MODE=enforced \
-    CP_NODE_ADDR=https://{{addr_cp_node}} NODE_ID=node-1 NODE_ID_DIR={{devca}}/node \
-    NODE_CLASS=self-hosted EGRESS_ENFORCE=false \
+    CP_NODE_ADDR=https://{{addr_cp_node}} NODE_ID=node-1 NODE_ID_DIR={{devca}}/node-cloud \
+    NODE_CLASS=cloud EGRESS_FLOOR_FORCE_OFF=1 \
     NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
     USERNS_MODE=remap DELTA_CAPTURE=1 \
     AS_URL=http://{{addr_as}} \
@@ -219,16 +225,16 @@ test-e2e:
     make images
     go test -tags e2e ./... -count=1 -v
 
-# output the Garage S3 env vars for the journaler from deploy/garage/dev-creds.env.
+# output the Garage S3 env vars for the journaler from .envs/dev/garage-creds.env.
 # Pipe into `export $(just test-garage-env | tr -d " ")` before running e2e tests.
 test-garage-env:
-    @[ -f {{repo}}/deploy/garage/dev-creds.env ] && cat {{repo}}/deploy/garage/dev-creds.env || true
+    @[ -f {{repo}}/.envs/dev/garage-creds.env ] && cat {{repo}}/.envs/dev/garage-creds.env || true
 
 # suspend/resume lifecycle e2e (sp-u53.7.9): real CP + real node + real Docker pods.
 # Sources deploy/garage/dev-creds.env for the S3 journal; FAILS (not skips) if Garage is down.
 test-e2e-lifecycle:
     make images
-    @set -a; [ -f {{repo}}/deploy/garage/dev-creds.env ] && . {{repo}}/deploy/garage/dev-creds.env; set +a; \
+    @set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
     go test -tags e2e -run TestSuspendResumeLifecycleE2E -v -count=1 -timeout 5m ./internal/cp/
 
 # Real node-mTLS -> AS GitHub mint/refresh leg (sp-v40s.19). The node-identity + refresher wiring

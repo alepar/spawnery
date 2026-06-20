@@ -75,6 +75,12 @@ type ManagerConfig struct {
 	EgressEnforce    bool   // self-hosted opt-out switch; ignored on cloud
 	EgressAllowCIDRs []string
 
+	// EgressFloorForceOff bypasses the egress floor entirely — neither applied nor checked.
+	// DEV-ONLY: this flag MUST NOT be set in production. It exists so the rootless dev node
+	// can run under NODE_CLASS=cloud (multi-tenant placement) without kernel iptables access.
+	// Mirrors AS_DEV_RELAX_NODE_AUTH in its danger level and usage pattern.
+	EgressFloorForceOff bool
+
 	MemLimitMB       int64   // memory limit in MiB; default 1024
 	CPULimit         float64 // CPU cores; default 1.0
 	PidsLimit        int64   // max pids per container; default 256
@@ -379,7 +385,11 @@ func scrubPathsIncludeTmp(paths []string) bool {
 
 // egressEnforced reports whether the egress floor must be applied: cloud nodes always enforce
 // (non-disableable); self-hosted honors the operator's EgressEnforce choice.
+// EgressFloorForceOff overrides both — DEV-ONLY, see ManagerConfig.EgressFloorForceOff.
 func (m *Manager) egressEnforced() bool {
+	if m.cfg.EgressFloorForceOff {
+		return false // DEV-ONLY override; MUST NOT be set in production
+	}
 	return m.cfg.NodeClass == "cloud" || m.cfg.EgressEnforce
 }
 

@@ -7,6 +7,7 @@ cp.db*
 
 /bin/
 /.spawns/
+/.envs/
 # stray root-level build outputs (use /bin/ instead)
 /spawnlet
 /spawnctl
