@@ -9,6 +9,7 @@ were already made in one of these docs.
 > live in `docs/superpowers/plans/` and are **not** indexed here.
 
 ## System & scope
+- [Production / Operational Readiness (ORR) Roadmap](2026-06-20-production-readiness-orr-roadmap-design.md) — beta-production gap analysis + cut line + workstream decomposition (umbrella epic ORR); the decided horizontally-scalable CP architecture (node-affinity + redirect, registry→Postgres, on-demand router/pump, replay-from-last-seen) closing `sp-9um`. status: draft; tags: prod-readiness,ha,multi-cp,observability,deploy.
 - [High-Level System Design](2026-05-26-spawnery-system-design.md) — the whole-platform architecture; every decision tagged MVP-now vs deferred (the master doc).
 - [Demo MVP Scope](2026-05-28-spawnery-demo-mvp-scope.md) — the reduced "demo" cut: what ships vs what's deferred (the locked scope overlay other docs reference).
 - [Demo Experiment Design](2026-05-29-spawnery-demo-experiment-design.md) — the demo framed as a retention experiment (hypothesis, cohort, metrics).
