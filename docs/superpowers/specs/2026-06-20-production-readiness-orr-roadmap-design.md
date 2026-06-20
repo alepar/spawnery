@@ -106,40 +106,121 @@ Chosen answer (vs. CP→CP forwarding mesh, vs. a shared message bus):
   client's session is routed/redirected to the CP that owns its spawn's node, so the **live relay
   stays CP-local** and the existing router/pump code is reused unchanged. This is the faithful
   realization of "each CP serves its slice of clients" — the slice is defined by node-ownership.
+  **Caveat (roast B):** sharding at *node* granularity is **not bandwidth-aware and has no
+  rebalancing primitive** — a single hot node concentrates all its sessions' ciphertext on one CP
+  and can recreate the driver-#1 saturation cliff. Bounding per-CP relay bandwidth (and whether any
+  node→CP migration is needed) is **spike S5**, not a solved property.
 - **Router/pump instantiated on-demand.** A CP (re)binds a spawn's route from durable state + the
   node's (re)connect; it never relies on a pre-existing in-memory route. Restart-safe by
-  construction.
+  construction. **Open (roast D):** this covers *client-originated* relay, but **CP-*originated*
+  node commands** — provisioning a new spawn on any node, drain, idle-reap-across-owners,
+  reschedule — still need the node's in-memory Attach `Sender`, which may live on a peer CP. A
+  global DB view yields no Send channel. How background commands actuate a peer-owned node is
+  **spike S8** (the deepest open question; the CP→CP mesh was rejected, so an alternative is owed).
 - **Scheduler off the DB registry**, with a **slot-reservation/claim** to resolve placement races
-  (extends the existing `status_seq` CAS pattern with a capacity-decrement transaction).
-- **Pending-op channels stay valid:** under affinity, the CP that owns the node is the CP that
-  serves the spawn's requests (post-redirect), so waiter and node stream are co-located. Cross-CP
-  completions fall back to the DB claim/lease + `status_seq`, already in place.
+  (extends the existing `status_seq` CAS pattern). **Note (roast I):** the reservation must write a
+  **separate `reserved_slots` column**, not the node-reported `capacity` field (which the node
+  full-overwrites every ~5s and would clobber the reservation — a lost update); effective free =
+  reported − reserved. See S4.
+- **Pending-op channels:** under affinity, the CP that owns the node serves the spawn's requests
+  (post-redirect), so waiter and node stream are usually co-located. **Correction (roast F):** the
+  earlier claim that "cross-CP completions already fall back to the DB claim/lease" **overstated the
+  code** — only `SuspendComplete` (+ the `SetModel` reconcile loop) has a DB-backed late-delivery
+  path today; `Resume`/`Fork`/journal-key completions deliver **only to in-memory waiters on the
+  initiating CP**. Ops whose ownership moves mid-flight (a deploy mid-resume) need DB-backed
+  reconciliation added — scoped in the deep spec, not assumed present.
 
 ### 5.4 Restart / deploy continuity
-- **Process-local state in a process-local sqlite, NOT shared Postgres.** Mosh port assignments /
-  session keys persist locally so a node restart reopens the **same ports** and mosh restores
-  connectivity automatically. Keeping this out of Postgres avoids polluting shared state with
-  per-process data.
+
+**Scope note (roast A):** a **CP** restart and a **node/spawnlet** restart are different events with
+different continuity stories. mosh's UDP data plane goes **straight to the node** (`terminal.go:30`),
+so a CP restart is invisible to a live mosh session; the web chat relay goes *through* the CP, so a
+CP restart drops it (→ reconnect + replay below). Keep them separate.
+
+- **mosh terminals do NOT auto-survive a node restart — corrected.** The earlier claim that
+  persisting port+key lets mosh "restore connectivity automatically" is **false**: mosh has **no
+  server-restart resume** by design. The AES-OCB nonce counter and terminal framebuffer are
+  process-local; relaunching `mosh-server` on the same port with a persisted key would reuse nonces
+  under one key — which mosh deliberately refuses (Keith Winstein, mosh-devel:
+  `https://mailman.mit.edu/pipermail/mosh-devel/2012-September/000307.html`). mosh roaming recovers
+  a *client* IP change, not a dead *server* process. **Therefore:** a node restart kills active mosh
+  sessions; the client must **re-attach** (cheap — re-runs the SSH→mosh handshake). The deep spec
+  states this plainly; ORR-5 rolling-deploy planning must not promise mosh continuity. Whether the
+  in-container tmux session survives a spawnlet restart to make re-attach seamless is part of the
+  node-restart spike (S7).
+- **Process-local state stays out of shared Postgres.** The principle holds — any genuinely
+  per-process node state (not mosh session continuity, which is unrecoverable) belongs in a
+  process-local store, not Postgres. This is a design principle, no longer justified by the (false)
+  mosh-port-reuse example.
 - **Client reconnect.** spawnctl `attach` and the web UI handle reconnect; on reconnect they are
-  routed to the (possibly new) owning CP.
-- **Web chat replay-from-last-seen.** On WS reconnect the web client requests replay from the last
-  frame it saw (not a blind full replay), giving continuity identical to any WS drop. This builds
-  on the existing **node-relay transcript replay** (`2026-06-02-node-relay-transcript-replay-design.md`)
-  and the **per-spawn pump** (`2026-06-03-spawn-pump-multiclient-design.md`), both of which are
-  **node-side** and therefore survive a CP restart — the new CP rebinds the route and the node
-  replays.
+  routed to the (possibly new) owning CP. The redirect mechanism itself is **spike S2** (browser
+  WebSockets cannot follow a 307 — it must be an app-level reconnect hint, not an HTTP redirect).
+- **Web chat replay-from-last-seen (bounded — roast G).** On WS reconnect the web client requests
+  replay from the last frame it saw. This builds on the **node-relay transcript replay**
+  (`2026-06-02-node-relay-transcript-replay-design.md`) and the **per-spawn pump**
+  (`2026-06-03-spawn-pump-multiclient-design.md`), both **node-side**, so a **CP** restart is
+  transparent (new CP rebinds, node replays). **Two limits to design for:** (1) the pump's frame log
+  is **bounded** (`pump.go` `defaultMaxLog=2000`, oldest trimmed) — if a deploy outage exceeds the
+  buffer, the client falls past `base` and gets a **hard reset, not a replay**; "continuity
+  identical to a WS drop" only holds *within* the buffer window. (2) a **node** restart recreates the
+  pump at `seq=0` and loses the log + in-memory transcript entirely, breaking last-seen replay. Both
+  are **spike S3** (reframed around node restart + buffer retention), not assumed solved.
 
 ### 5.5 Open spikes (gate implementation — resolve in the deep spec)
-- **S1 — Registry write/heartbeat load.** Every node heartbeating into Postgres (~5s) × node count:
-  confirm write volume + a liveness-window query plan are fine at beta scale; pick upsert cadence.
-- **S2 — Redirect handshake over streaming transports.** WebSocket / Connect streams don't 307
-  cleanly. Confirm the exact mechanism: LB-level sticky routing by a spawn/owner key, vs. a
-  CP-issued "reconnect to CP-B" hint the client acts on, vs. a thin stateless front-door proxy.
-  This is the load-bearing unknown.
-- **S3 — Replay-from-last-seen fidelity** across a CP restart: frame sequence numbering must be
-  stable/monotonic and node-anchored so "last seen" is meaningful after the route is rebound.
-- **S4 — Placement race** under concurrent schedulers: verify the slot-reservation claim prevents
-  two CPs overfilling one node.
+
+Expanded after the 2026-06-20 roast (REVISE, 15 confirmed). S1–S4 sharpened; S5–S9 added for the
+failover/actuation/throughput gaps the roadmap had left unspiked.
+
+- **S1 — Registry write/heartbeat load + read load.** Node heartbeats into Postgres (~5s) × node
+  count *plus* per-active-spawn claim heartbeats/`status_seq` bumps, *plus* a synchronized
+  deploy **reconnect-storm of discovery-map reads**. Confirm steady write volume, the liveness-window
+  query plan, and that a reconnect storm doesn't saturate connections/latency. (Postgres is now on
+  the live attach path — see S9.)
+- **S2 — Redirect mechanism over streaming transports.** WebSocket/Connect streams don't 307
+  cleanly, and **browser WebSockets cannot follow an HTTP redirect at all** — so the mechanism must
+  be an **app-level reconnect hint**, not a redirect. Constraints the chosen mechanism MUST meet:
+  (a) **must not byte-relay** session traffic (a relaying front-door reinstates the single-choke
+  bottleneck + SPOF that multi-CP exists to remove — roast B); (b) **must follow dynamic node→CP
+  ownership**, which changes on every CP restart/rolling deploy (commodity LB stickiness is
+  static/hash and never consults the live DB map — roast B). Evaluate: app-level reconnect hint vs.
+  ownership-aware front-door (control-only) vs. sticky-by-key (likely rejected by (b)).
+- **S3 — Replay fidelity across a NODE restart + buffer retention** (reframed — roast G). A *CP*
+  restart is transparent (node-side pump). The real hazards: the pump log is **bounded**
+  (`defaultMaxLog=2000`) so an outage exceeding the window forces a **hard reset not a replay**; and
+  a **node/spawnlet restart** recreates the pump at `seq=0` and loses the log + transcript. Decide
+  the retention policy / durable transcript and the acceptable degradation (a surfaced reset is fine;
+  a silent one is not).
+- **S4 — Placement race + reservation lost-update** (roast I). Verify the slot reservation prevents
+  two CPs overfilling a node **given that the node full-overwrites its `capacity` every ~5s**: the
+  reservation must live in a **separate `reserved_slots` column / reservations row** so a heartbeat
+  can't clobber it; effective free = reported − reserved.
+- **S5 — Per-CP relay-bandwidth bound + hot-node skew** (roast B). Does node-ownership affinity
+  bound per-CP relay bandwidth, or can a hot node/owner hot-spot one CP? Cheapest test: back-of-
+  envelope at beta scale (max nodes/CP × spawns/node × per-session ciphertext rate vs a CP's
+  NIC/conn budget) + a one-node-saturated skew scenario. Kill criterion: if a realistic skew
+  saturates a CP, affinity needs a rebalancing/migration primitive before it counts as solving
+  driver #1.
+- **S6 — CP-failover convergence** (roast C). When an owning CP dies/drains, what reassigns its
+  nodes' `owning-CP` and forces attached clients off it, and **within what window**? Today nothing
+  does until each node's TCP Attach times out (tens of seconds) and re-registers; clients redirected
+  in that window hit the dead CP. Prototype: 2 CP + 1 node, kill CP-A with a client attached; measure
+  time-to-reachability on CP-B and whether nodes re-home without CP-A's participation.
+- **S7 — Node-ownership fence + liveness attribution** (roast C). (a) The `owning-CP` field needs a
+  **CAS/lease fence** (mirror the spawn claim lease) or two CPs can both accept a node's Attach
+  during a flap and last-writer-wins flaps the route. (b) Node liveness is **CP-proxied** (remote
+  spawnlets have no DB creds), so a dead *CP* makes its *healthy* nodes' rows go stale — ORR-6
+  auto-reschedule must distinguish "node died" from "node's CP died" or it will **double-run spawns**
+  on nodes that are about to re-attach.
+- **S8 — Cross-CP node actuation for CP-originated commands** (roast D). Enumerate every
+  node-directed call site (`scheduler` `Sender.Send(StartSpawn)`, `router` `node.Send`, idle-reap,
+  drain, reschedule); classify client-redirectable vs CP-background-originated. For background ones,
+  decide the transport to a peer-owned node: constrain placement to the scheduling CP's own nodes,
+  vs. a minimal **control-only** CP→CP channel, vs. schedule-then-handoff. (The full CP→CP byte mesh
+  stays rejected; this is control-plane only.)
+- **S9 — Postgres on the live path** (roast E). Multi-CP promotes Postgres from durable store to a
+  **live-attach/redirect/schedule dependency**, while §3 defers Postgres HA as the accepted SPOF.
+  Decide: in-CP cached discovery map with invalidation vs. accept-and-document the dependency; bound
+  the blast radius of a Postgres blip on new attaches/redirects/scheduling.
 
 ## 6. Workstream decomposition (beads sub-epics under ORR)
 
@@ -150,7 +231,11 @@ Each references this roadmap. IDs assigned at creation.
    probe); minimal alerting hooks. *No blockers; foundational — start first.*
 2. **ORR · CP reliability** — `signal.NotifyContext` + graceful shutdown on CP (drain in-flight
    RPC/Attach) and sidecar; `recover()` in long-running goroutines; remove the bare
-   `panic()` in `internal/sidecar/proxy.go`. *Cheap, high-value; deploy prerequisite.*
+   `panic()` in `internal/sidecar/proxy.go`. *Cheap, high-value; deploy prerequisite.* **Note (roast
+   H, partially refuted):** graceful op-completion already releases the spawn claim (`withClaim` →
+   `defer claim.Release()` with `context.WithoutCancel`); the residual is an **ungraceful** CP death
+   mid-op, which holds the claim for the 30s lease TTL and blocks the new owning CP. Graceful
+   shutdown should drain/await in-flight claimed ops; document the ungraceful-death window.
 3. **ORR · Prod Postgres + store durability/DR** — Postgres as the prod CP store (already
    supported); backup/PITR; documented restore runbook; prod Garage with real (rotated) secrets,
    not the well-known dev token. *Keystone — blocks multi-CP.*
@@ -187,3 +272,17 @@ Postgres)** next as the keystone, then the **ORR-4 deep spec + spikes** before a
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged
 from the assumptions above — append a dated note here, whether or not a formal debugging skill was
 used.*
+
+- **2026-06-20 — roast (REVISE) folded in.** Adversarial review (9 lenses, 3 domains; 72 raw → 20
+  distinct → 15 confirmed, all major-gate, 0 unresolved escalations; same-family Claude panel). The
+  affinity+redirect topology held; the roadmap had **oversold three continuity promises and left the
+  failover/actuation/throughput unknowns unspiked**. Revisions applied this commit: §5.4 mosh
+  continuity claim **corrected to false** (mosh has no server-restart resume; node restart kills the
+  session, client re-attaches — Winstein, mosh-devel) and CP-vs-node restart scoped apart; §5.3
+  corrected the overstated "cross-CP completions already fall back to DB" claim (only SuspendComplete
+  + SetModel-reconcile exist), flagged node-granularity affinity as not bandwidth-aware, and moved the
+  slot reservation to a separate column; §5.5 spikes expanded S1–S4 and **added S5–S9** (bandwidth
+  bound, failover convergence, ownership fence + liveness attribution, cross-CP actuation, Postgres on
+  the live path); §6 ORR-2 noted claim-release-on-drain (roast H, partially refuted). Binding deltas
+  carried into the `sp-haj5.4` epic notes. These resolve in the ORR-4 **deep design spec**, which
+  re-roasts before implementation.
