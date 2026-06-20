@@ -3,6 +3,9 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net"
@@ -34,28 +37,54 @@ func udsClient(sockPath string) *http.Client {
 	}}
 }
 
+// parseCA is a test helper that PEM-decodes and x509-parses a CA certificate, failing the test
+// with a descriptive message if either step fails.
+func parseCA(t *testing.T, certPEM []byte) *x509.Certificate {
+	t.Helper()
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("SpawnCACert: PEM decode returned nil (not a valid PEM block)")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("SpawnCACert: x509.ParseCertificate: %v", err)
+	}
+	return cert
+}
+
 // TestGitHubControlServerCAStability verifies that SpawnCACert returns the same CA on repeated
 // calls for the same spawnID (generated once, stable across calls for the lifetime of the server).
+// Also verifies the generated cert is a proper ECDSA-P256 CA (IsCA=true, correct key type).
 func TestGitHubControlServerCAStability(t *testing.T) {
 	s, _ := newTestControlServer(&fakeMintClient{})
 
-	cert1, err := s.SpawnCACert("sp-1")
+	cert1PEM, err := s.SpawnCACert("sp-1")
 	if err != nil {
 		t.Fatalf("first SpawnCACert: %v", err)
 	}
-	cert2, err := s.SpawnCACert("sp-1")
+	cert2PEM, err := s.SpawnCACert("sp-1")
 	if err != nil {
 		t.Fatalf("second SpawnCACert: %v", err)
 	}
-	if !bytes.Equal(cert1, cert2) {
+	if !bytes.Equal(cert1PEM, cert2PEM) {
 		t.Fatal("SpawnCACert returned different certificates for the same spawn on two calls")
 	}
+
+	// Parse the certificate and verify its properties (spec §2.5 + TDD step 3).
+	cert := parseCA(t, cert1PEM)
+	if !cert.IsCA {
+		t.Fatal("SpawnCACert: certificate IsCA=false, want true")
+	}
+	if _, ok := cert.PublicKey.(*ecdsa.PublicKey); !ok {
+		t.Fatalf("SpawnCACert: public key type %T, want *ecdsa.PublicKey (ECDSA P-256)", cert.PublicKey)
+	}
+
 	// Different spawns get different CAs.
-	cert3, err := s.SpawnCACert("sp-2")
+	cert3PEM, err := s.SpawnCACert("sp-2")
 	if err != nil {
 		t.Fatalf("other spawn SpawnCACert: %v", err)
 	}
-	if bytes.Equal(cert1, cert3) {
+	if bytes.Equal(cert1PEM, cert3PEM) {
 		t.Fatal("different spawns must not share a CA")
 	}
 }
@@ -181,7 +210,8 @@ func TestGitHubControlServerUDSNotLinked(t *testing.T) {
 }
 
 // TestGitHubControlServerSpawnCARoundTrip verifies the full UDS GetSpawnCA path: the server
-// returns a protojson SpawnCADelivery with both cert and key PEM blocks.
+// returns a protojson SpawnCADelivery with both cert and key PEM blocks, and the returned cert
+// matches what SpawnCACert(spawnID) returns (re-delivery stability guarantee, §2.5).
 func TestGitHubControlServerSpawnCARoundTrip(t *testing.T) {
 	s, _ := newTestControlServer(&fakeMintClient{})
 
@@ -221,6 +251,16 @@ func TestGitHubControlServerSpawnCARoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(string(caResp.GetCaKeyPem()), "EC PRIVATE KEY") {
 		t.Fatalf("CaKeyPem does not look like PEM EC key: %.80s", caResp.GetCaKeyPem())
+	}
+
+	// Verify that the returned cert is identical to what SpawnCACert returns (§2.5 re-delivery
+	// stability: the sidecar can call SpawnCA again on an app-restart and get the same CA).
+	directCertPEM, err := s.SpawnCACert("sp-1")
+	if err != nil {
+		t.Fatalf("SpawnCACert after round-trip: %v", err)
+	}
+	if !bytes.Equal(caResp.GetCaCertPem(), directCertPEM) {
+		t.Fatal("SpawnCADelivery cert does not match SpawnCACert; re-delivery stability broken")
 	}
 }
 
