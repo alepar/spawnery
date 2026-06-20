@@ -11,6 +11,7 @@ require (
 	github.com/containerd/platforms v1.0.0-rc.4
 	github.com/creack/pty v1.1.24
 	github.com/docker/docker v28.5.2+incompatible
+	github.com/elazarl/goproxy v1.8.4
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/go-containerregistry v0.21.6
 	github.com/google/uuid v1.6.0
@@ -19,7 +20,9 @@ require (
 	github.com/minio/minio-go/v7 v7.1.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
+	github.com/pelletier/go-toml/v2 v2.3.1
 	github.com/pressly/goose/v3 v3.27.1
+	github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/uptrace/bun v1.2.18
 	github.com/uptrace/bun/dialect/pgdialect v1.2.18
@@ -60,7 +63,6 @@ require (
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/edsrzf/mmap-go v1.2.0 // indirect
-	github.com/elazarl/goproxy v1.8.4 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -101,7 +103,6 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/opencontainers/runtime-spec v1.3.0 // indirect
 	github.com/opencontainers/selinux v1.13.1 // indirect
-	github.com/pelletier/go-toml/v2 v2.3.1 // indirect
 	github.com/petar/GoLLRB v0.0.0-20210522233825-ae3b015fd3e9 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -114,7 +115,6 @@ require (
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd // indirect
 	github.com/tinylib/msgp v1.6.1 // indirect
 	github.com/tmthrgd/go-hex v0.0.0-20190904060850-447a3041c3bc // indirect
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
