@@ -1212,13 +1212,12 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 					SidecarGetTokenBearerEnv+"="+getTokenBearer,
 				)
 				getTokenTransport.Address = listenAddr
-			} else {
-				// No listen IP configured: inject bearer only; addr injected later (best-effort;
-				// TCP GetToken will not work without the addr, but we don't fail the spawn).
-				sidecarControlEnv = append(sidecarControlEnv,
-					SidecarGetTokenBearerEnv+"="+getTokenBearer,
-				)
 			}
+			// No GetTokenListenIP: SIDECAR_GETTOKEN_ADDR is not injected (container env is static
+			// post-start; it cannot be back-filled). TCP GetToken will not work without it.
+			// We do not fail the spawn; operators must set GETTOKEN_LISTEN_IP for TCP lanes.
+			// Serve is still called below (binding on the fallback PodIP-derived addr) so the
+			// control server is ready if the sidecar learns the addr via an out-of-band mechanism.
 		}
 	}
 

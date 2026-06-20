@@ -124,7 +124,7 @@ type attacher struct {
 	githubRefresh *githubRefresher // process-lived; created in Run, shared across reconnects
 	// ghControl is the per-spawn GitHub credential control server (sp-n7iy.3). Created alongside
 	// githubRefresh in Run and injected into the Manager via SetGitHubControlServer. Shared across
-	// CP reconnects (the per-spawn listeners survive a CP disconnect). nil when GitHubMint is unset.
+	// CP reconnects (the per-spawn listeners survive a CP disconnect). nil when cfg.GitHubMint is nil.
 	ghControl *githubControlServer
 }
 
@@ -151,11 +151,14 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	secretReplay := newSecretDeliveryReplay()
 	githubRefresh := newGitHubRefresher(cfg.GitHubMint)
 	go githubRefresh.run(ctx)
-	// Create the GitHub credential control server and inject it into the Manager. It is
-	// process-lived (like githubRefresh): per-spawn listeners survive CP reconnects.
-	// mgr.SetGitHubControlServer is nil-safe when ghControl is nil (GitHubMint not configured).
-	ghControl := newGitHubControlServer(githubRefresh)
-	mgr.SetGitHubControlServer(ghControl)
+	// Create the GitHub credential control server only when a mint client is configured.
+	// It is process-lived (like githubRefresh): per-spawn listeners survive CP reconnects.
+	// When GitHubMint is nil the field stays nil and the Manager omits all control-server logic.
+	var ghControl *githubControlServer
+	if cfg.GitHubMint != nil {
+		ghControl = newGitHubControlServer(githubRefresh)
+		mgr.SetGitHubControlServer(ghControl)
+	}
 	for {
 		start := time.Now()
 		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, githubRefresh, ghControl)

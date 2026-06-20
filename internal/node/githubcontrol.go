@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -299,11 +300,11 @@ func statusForGetToken(err error) (int, string) {
 }
 
 func isNotLinkedOrNotFound(err error) bool {
-	return err == ErrGitHubNotLinked || err == ErrGitHubRelinkRequired
+	return errors.Is(err, ErrGitHubNotLinked) || errors.Is(err, ErrGitHubRelinkRequired)
 }
 
 func isMintRateLimited(err error) bool {
-	return err == ErrGitHubMintRateLimited
+	return errors.Is(err, ErrGitHubMintRateLimited)
 }
 
 // isListenerClosed reports whether err is the expected "use of closed network connection" error
