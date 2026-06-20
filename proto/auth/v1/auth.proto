@@ -39,6 +39,8 @@ message MintGitHubAccessTokenResponse {
   string token_type              = 6; // normally "bearer"; preserved for GitHub parity.
   string repository_id           = 7; // echoes audit metadata; access token remains installation-selection-scoped.
   bool   refreshed               = 8; // true when this request rotated the shared link token.
+  string login                   = 9;  // GitHub login/handle of the linked identity; render fact for git [user].name (§1.2/§1.3).
+  int64  user_id                 = 10; // GitHub numeric user id; render fact for noreply email <id>+<login>@users.noreply.github.com.
 }
 
 // SessionTokenBody is the AS-signed access-token payload (auth-identity design §3).
