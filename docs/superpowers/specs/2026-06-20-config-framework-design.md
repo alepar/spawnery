@@ -149,9 +149,13 @@ for keys already present in the map (closes the layer-0-vs-flag-default conflict
 YAML emits typed ints/bools; `MergeStrict`'s `reflect.TypeOf` equality would hard-fail every
 typed env override at startup (verified against koanf `maps.go`). Instead: layers merge
 permissively, and **type coercion happens once at `Decode` with `mapstructure` `WeaklyTypedInput:
-true`** (string→int/bool/duration). A genuinely uncoercible value (`"abc"` into an int) surfaces
-as a **decode error naming the dotted key path** — fail-fast, but at decode, not merge. (Spike S1
-pins this behavior before we build on it.)
+true`** (string→int/bool). A genuinely uncoercible value (`"abc"` into an int) surfaces as a
+**decode error naming the dotted key path** — fail-fast, but at decode, not merge. **(Spike S1 —
+PASS.)** Caveat from the spike: `WeaklyTypedInput` does **not** cover `string→time.Duration` on
+its own — the single decode path must wire a `mapstructure` **DecodeHook chain** including
+`StringToTimeDurationHookFunc` (plus slice-split / `TextUnmarshaler` hooks as field types
+require), and when supplying a custom `DecoderConfig` you must set `Result`/`Tag` yourself (koanf
+does not backfill them).
 
 **Merge rules:** nested maps deep-merge recursively; **scalars and lists are *replaced*, not
 concatenated** (koanf default — the intended semantics for `egress.allow_cidrs`-style lists). A
@@ -227,13 +231,24 @@ it. Accepted trade-off: single-decrypt-key blast radius + manual rotation, bound
 `id → value` (the values are ciphertext; the structure is cleartext). `${sops:store.dsn}` looks
 up `store.dsn` in the decrypted map for the active env.
 
-**Resolution at startup** (operator-controlled hosts only — see 3.2):
-1. Locate the **age identity** (secret-zero) via `SOPS_AGE_KEY_FILE` — a perms-`0600` file, or a
-   systemd `LoadCredential` on the CP host, or a cloud-KMS recipient on cloud nodes.
-2. `decrypt.Data(embeddedSecretsFileForEnv)` **once** → cleartext map, **cached in-process** for
-   the process lifetime (never re-decrypt per reference).
+**Resolution at startup** (operator-controlled hosts only — see 3.2). **(Spike S4 — PASS:
+`decrypt.Data` decrypts raw `//go:embed`-ed bytes in-process; no temp file, no `sops` CLI at
+runtime.)**
+1. Locate the **age identity** (secret-zero) via `SOPS_AGE_KEY_FILE` (a path) — or `SOPS_AGE_KEY`
+   (literal key contents, also honored by sops; handy for a systemd-credential or cloud-delivered
+   value). `decrypt.Data` reads the env var itself; there is **no in-API way to pass age key
+   bytes**, so the framework must ensure one of these env vars is set (materialize a
+   `LoadCredential`/KMS-delivered key to a path or into `SOPS_AGE_KEY`) before calling decrypt.
+2. `decrypt.Data(embeddedSecretsBytesForEnv, "yaml")` **once** → cleartext map, **cached
+   in-process** for the process lifetime (never re-decrypt per reference).
 3. `${sops:store.dsn}` → lookup in that map; the value lands in a `config.Secret` field.
 4. Missing key / undecryptable file / absent id → **panic at startup** (fail-closed).
+
+**Dev/ops note:** *decrypting* at runtime needs only the Go library (zero CLI dependency), but
+*authoring/editing* a `secrets.*.sops.yaml` needs the `sops` CLI (+ `age-keygen`). Neither is
+preinstalled in the `dev-spawnery` distrobox — add them (`go install
+github.com/getsops/sops/v3/cmd/sops@latest`, `filippo.io/age/cmd/age-keygen`) via a `just`/setup
+target so secret-editing is reproducible.
 
 **Secret-zero delivery (no cloud required).** The age identity is the *one* out-of-band secret;
 everything else is the committed ciphertext. Delivery options, operator's choice: a perms-`0600`
@@ -294,13 +309,23 @@ provenance bookkeeping needed.
   at decode (so `--set listen=:8080` stays `":8080"`, dodging YAML-scalar mis-coercion of
   `:8080`/`yes`/`null`). **Scalar-only in v1**; lists/maps are set via files (keeps the provider
   trivial and predictable).
-- **Curated named flags** for hot params (`--listen`, `--store-dsn`, …) bound through
-  **`cliflagv3`** (the repo's flag lib), at layer 6. cliflagv3's explicit-vs-default
-  (`Context.IsSet`) gives "explicit flag beats files, unset default does not" — *because* layer 0
-  loaded every key. Flag-name→key remapping is part of the binding (spike S2 confirms the
-  remapped-and-absent case).
-- **Precedence is defined:** when both `--set store.dsn=x` and `--store-dsn y` are given, **`--set`
-  wins** (layer 7 > layer 6).
+- **Curated named flags** for hot params bound through **`cliflagv3`** (the repo's flag lib), at
+  layer 6. cliflagv3's explicit-vs-default (`cmd.IsSet`) gives "explicit flag beats files, unset
+  default does not override" — *because* layer 0 loaded every key. **(Spike S2 — PASS.)** Three
+  wiring facts the spike pinned, which the implementation MUST honor:
+  - **No name→key remap hook.** The koanf key *is* `flag.Names()[0]`. To land on dotted key
+    `store.dsn`, either **name the urfave flag `store.dsn`** (users type `--store.dsn`) or
+    post-transform the provider's map. A friendly `--store-dsn` would yield key `store-dsn`, not
+    `store.dsn` — so curated flags are **named with their dotted key** (chosen approach), or
+    bound manually via a `confmap` built from `cmd.IsSet`. (Corrects the earlier draft, which
+    assumed free `--store-dsn → store.dsn` remapping.)
+  - **Root command must be named `"global"`** — cliflagv3 otherwise prepends the command name to
+    every key path (special-cased to skip only for `"global"`).
+  - **Load after parse.** `cmd.IsSet` is only meaningful post-parse, so the cliflag `Load()` runs
+    inside the command's `Action` (servers) / root `Before` after parse (CLIs), and the
+    provider's `Config.KeyMap` must point at the **already-file-loaded** koanf instance.
+- **Precedence is defined:** when both `--set store.dsn=x` and a curated `--store.dsn y` are given,
+  **`--set` wins** (layer 7 > layer 6).
 
 ## 6. Env-var mapping & backward compatibility
 
@@ -349,29 +374,36 @@ Hermetic, table-driven, **no network, no filesystem dependence**:
 Because validation is format-only and `${file:}` is exercised via temp files supplied by the
 test (not real data roots), the suite stays hermetic. Embedded-FS loading needs no disk.
 
-## Spikes (run first, before building on the load-bearing assumptions)
+## Spikes — ALL PASS (2026-06-20, `dev-spawnery` distrobox, Go 1.26)
 
-- **S1 — koanf merge + WeaklyTypedInput coercion.** *Question:* with no `StrictMerge`, does a
-  string env/`--set` value over a typed YAML leaf merge cleanly and decode (string→int/bool/
-  duration) via mapstructure `WeaklyTypedInput`? *Cheapest test:* ~30-line Go: load `{port:8080}`
-  YAML, then `PORT=9090` env, then `--set timeout=5s`, decode into a struct. *Kill criteria:* if
-  merge or decode errors on type, revisit the coercion strategy (per-key typed env transform).
-- **S2 — cliflagv3 explicit-vs-default with key remapping.** *Question:* given curated flags whose
-  names remap to dotted keys, does an explicitly-set `--flag` override a file value while an unset
-  flag's default does **not**, with layer-0 defaults present? *Cheapest test:* ~30-line harness,
-  one set + two unset remapped flags, assert the merged map. *Kill criteria:* if an unset default
-  clobbers the file value, bind curated flags via a manual `confmap` from `Context.IsSet` instead.
-- **S3 — embed + external-dir deep-merge.** *Question:* do `$SPAWNERY_CONFIG_DIR` files
-  deep-merge over their embedded counterparts as layers 1–4? *Cheapest test:* embed a base, point
-  the dir at a one-key override, assert the merge. *Kill criteria:* if embed/external ordering is
-  awkward, fall back to "external dir, if set, fully replaces the embedded file set."
-- **S4 — SOPS in-process decrypt of an embedded file.** *Question:* does
-  `decrypt.Data(embeddedBytes, "yaml")` from `getsops/sops/v3/decrypt`, with the age identity at
-  `SOPS_AGE_KEY_FILE`, decrypt an `//go:embed`-ed `secrets.*.sops.yaml` in-process and yield the
-  cleartext map? *Cheapest test:* `sops -e` a 2-key fixture to a throwaway age recipient, embed it,
-  decrypt in a unit test. *Kill criteria:* if `decrypt.Data` needs filesystem/CLI access or chokes
-  on embedded bytes, write the embedded ciphertext to a temp file and use `decrypt.File`, or shell
-  to the `sops` binary as a fallback.
+The four spikes ran green; no kill criterion triggered. The load-bearing library behaviors hold;
+the gotchas each surfaced are folded into §2/§3.1/§5 above and are the binding implementation
+notes.
+
+- **S1 — koanf merge + WeaklyTypedInput coercion. PASS.** String env (`APP_PORT=9090`) + confmap
+  (`timeout=5s`) over typed YAML merged with no `StrictMerge` and decoded (`Port==9090`,
+  `Timeout==5s`); `APP_PORT=abc` produced a hard key-path decode error, not a silent zero.
+  *Gotcha → §2:* `string→time.Duration` needs `StringToTimeDurationHookFunc`; custom
+  `DecoderConfig` must set `Result`/`Tag`.
+- **S2 — cliflagv3 explicit-vs-default. PASS.** Unset remapped flag's default did **not** clobber
+  the file value; explicit `--store.dsn=x` did override. *Gotchas → §5:* no name→key remap (key =
+  `flag.Names()[0]`, so name flags with dotted keys); root command must be `"global"`; load after
+  parse with `Config.KeyMap` = the file-loaded koanf instance.
+- **S3 — embed + external-dir deep-merge. PASS.** Sparse external layer over `//go:embed` base
+  deep-merged nested maps (`nested.x` survived, `nested.y` overridden) and **replaced** lists.
+- **S4 — SOPS in-process decrypt of an embedded file. PASS.** `decrypt.Data` decrypted raw
+  `//go:embed`-ed ciphertext in-process with the age key at `SOPS_AGE_KEY_FILE`; no temp file, no
+  `sops` CLI at runtime. *Gotcha → §3.1:* key delivered via `SOPS_AGE_KEY_FILE`/`SOPS_AGE_KEY` env
+  (no in-API key-bytes path); `sops`/`age-keygen` not preinstalled in the distrobox.
+
+### Pinned dependencies (resolved during the spikes)
+
+`github.com/knadh/koanf/v2 v2.3.5`; providers `cliflagv3 v1.1.1`, `env/v2 v2.0.0`,
+`confmap v1.0.0`, `file v1.2.1`, `rawbytes v1.0.0`; parser `parsers/yaml v1.1.0`;
+**`providers/structs v1.0.0`** (note: there is **no** `structs/v2` — pin the v1 import path for
+the layer-0 defaults provider); `github.com/urfave/cli/v3 v3.10.0`;
+`github.com/go-viper/mapstructure/v2 v2.5.0` (the maintained fork koanf uses);
+`github.com/getsops/sops/v3 v3.13.1`; `filippo.io/age v1.3.1`. Re-pin at implementation.
 
 ## Accepted limitations
 
