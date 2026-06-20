@@ -67,6 +67,7 @@ func (d *DockerPodBackend) StartPod(ctx context.Context, spec PodSpec) (*PodHand
 	sidecarID, err := d.rt.StartContainer(ctx, ContainerSpec{
 		Image:       spec.SidecarImage,
 		Env:         spec.SidecarEnv,
+		Mounts:      spec.SidecarMounts,
 		MemoryBytes: spec.Resources.MemoryBytes,
 		NanoCPUs:    spec.Resources.NanoCPUs,
 		PidsLimit:   spec.Resources.PidsLimit,

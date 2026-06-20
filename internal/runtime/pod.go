@@ -27,9 +27,12 @@ type PodSpec struct {
 	ID           string // spawn id
 	SidecarImage string
 	SidecarEnv   []string
-	Resources    Resources
-	Runtime      string            // OCI runtime; "" = default, e.g. "runsc"
-	Labels       map[string]string // applied to the sandbox + sidecar (managed/spawn-id/generation/node-id)
+	// SidecarMounts are node->sidecar-only bind mounts (e.g. the GetToken UDS dir in the
+	// userns-remap lane). They are NOT surfaced to the agent container.
+	SidecarMounts []Mount
+	Resources     Resources
+	Runtime       string            // OCI runtime; "" = default, e.g. "runsc"
+	Labels        map[string]string // applied to the sandbox + sidecar (managed/spawn-id/generation/node-id)
 }
 
 // AgentSpec describes the agent container (started by StartAgent into the existing pod).

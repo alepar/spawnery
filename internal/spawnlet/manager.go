@@ -54,6 +54,18 @@ type ManagerConfig struct {
 	// GitHubCredentialsRoot is a node-only tmpfs root for short-lived access tokens used by storage
 	// backends. It is never bind-mounted into the agent; agent-render credentials use SecretsRoot.
 	GitHubCredentialsRoot string
+	// ControlRoot is the per-node root under which per-spawn control dirs are created for the UDS
+	// lane (UsernsModeRemap). Each spawn gets a subdir created 0711 with a gettoken.sock socket
+	// 0666; this dir is bind-mounted into the sidecar at SidecarControlMountPath. Default
+	// DataRoot/control. In the TCP lane this dir is not created.
+	ControlRoot string
+	// GetTokenListenIP is the IP address the node binds for the per-spawn GetToken TCP listener
+	// (non-userns-remap / runsc lanes). It must be reachable from within the spawn's pod network,
+	// typically the Docker bridge gateway (e.g., 172.17.0.1) on the node's bridge interface.
+	// Empty string means the TCP-lane SIDECAR_GETTOKEN_ADDR env var is not injected (the sidecar
+	// cannot fetch tokens without it). Set by cmd/spawnlet from GETTOKEN_LISTEN_IP.
+	// Unit tests inject a synthetic address here.
+	GetTokenListenIP string
 	GitHubRepos           storage.GitHubRepoService
 	GitHubGitRunner       storage.GitRunner
 	SidecarPort           int // default 8080
@@ -132,6 +144,11 @@ type Manager struct {
 	// githubCreds stores node-storage GitHub access tokens in a node-only tmpfs root. This root must
 	// not be SecretInjector.DirFor(spawnID), because that path is bind-mounted into the agent.
 	githubCreds GitHubCredentialStore
+	// ghControl is the optional node-side GitHub credential control server (sp-n7iy.3). When set,
+	// CreateWithSelection wires the per-spawn GetToken/SpawnCA HTTP listener and passes the
+	// SIDECAR_GETTOKEN_* env vars to the sidecar. Nil = no control server (dev/insecure lane);
+	// the sidecar env omits the vars, and the proxy cannot fetch tokens.
+	ghControl GitHubControlServer
 
 	// watchersMu guards sp.journalWatchers on each Spawn against concurrent access from
 	// SnapshotForSuspend (which uses store.Get, leaving the spawn in the store) and
@@ -171,6 +188,33 @@ type Manager struct {
 	forkGenerationHoldRequired bool
 }
 
+// ControlTransport describes how the sidecar should reach the node's per-spawn GetToken/SpawnCA
+// HTTP server. Network is "unix" (UDS lane) or "tcp" (TCP lane). Address is the UDS socket
+// path (host-side) or "host:port". Bearer and PodIP are set for the TCP lane only.
+type ControlTransport struct {
+	SpawnID string
+	Network string // "unix" | "tcp"
+	Address string // UDS host socket path | "host:port"
+	Bearer  string // tcp lane: per-spawn bearer token (in sidecar env, withheld from agent)
+	PodIP   string // tcp lane: expected source pod IP (checked by the server)
+}
+
+// GitHubControlServer is the node-side interface for the per-spawn credential control server.
+// It is implemented by *node.githubControlServer and injected into the Manager via
+// SetGitHubControlServer. Nil-safe: if not set the manager omits SIDECAR_GETTOKEN_* env vars.
+type GitHubControlServer interface {
+	// Serve starts the HTTP server for spawnID on the given transport. Called after StartPod
+	// (so PodIP is known). Returns an error if the listener cannot be bound; the caller
+	// should fail-close the pod.
+	Serve(t ControlTransport) error
+	// Stop closes the spawn's listener and purges its CA. Called on stop/suspend.
+	Stop(spawnID string)
+	// SpawnCACert returns the PEM-encoded public certificate for spawnID's CA (generated
+	// lazily on first call, stable across calls for the same spawn). Used by sp-n7iy.5 to
+	// write the cert into the agent-visible git-env before StartAgent.
+	SpawnCACert(spawnID string) ([]byte, error)
+}
+
 // JournalKeyReceiver injects an owner-delivered Kopia repo password into the
 // journaler's owner-sealed custody and lets the resume path wait for it before
 // restore (transient-tier §4). *journal.Manager satisfies it; the spawnlet holds
@@ -208,6 +252,13 @@ func (m *Manager) DeliverJournalKey(spawnID string, gen uint64, password string)
 		return fmt.Errorf("journal key delivery: no owner-sealed journaler configured")
 	}
 	return m.journalKeys.DeliverKey(spawnID, gen, password)
+}
+
+// SetGitHubControlServer installs the per-spawn GitHub credential control server (sp-n7iy.3).
+// Call before CreateWithSelection to enable SIDECAR_GETTOKEN_* env injection and control listener
+// setup. nil-safe field: not calling this leaves the manager in "no control server" mode.
+func (m *Manager) SetGitHubControlServer(s GitHubControlServer) {
+	m.ghControl = s
 }
 
 // NewManager builds a Manager on the Docker/runc path: the Docker pod backend + the DOCKER-USER
@@ -251,6 +302,9 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 	}
 	if cfg.GitHubCredentialsRoot == "" {
 		cfg.GitHubCredentialsRoot = filepath.Join(cfg.DataRoot, "github-creds")
+	}
+	if cfg.ControlRoot == "" {
+		cfg.ControlRoot = filepath.Join(cfg.DataRoot, "control")
 	}
 	if cfg.DeltaSquashDepth == 0 {
 		cfg.DeltaSquashDepth = 16
@@ -1045,6 +1099,12 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		if gerr := m.githubCreds.Remove(id); gerr != nil {
 			log.Printf("github credential cleanup for %s: %v", id, gerr)
 		}
+		// Control server cleanup (sp-n7iy.3): close the GetToken listener + CA and remove
+		// the UDS dir (no-op for TCP lane or when no control server is installed).
+		if m.ghControl != nil {
+			m.ghControl.Stop(id)
+		}
+		_ = os.RemoveAll(m.controlDirFor(id))
 	}
 	mounts = append(mounts, runtime.Mount{HostPath: secretsDir, ContainerPath: SecretsMountPath})
 
@@ -1099,19 +1159,85 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	controlPort := m.cfg.SidecarPort + 1
 	controlAddr := fmt.Sprintf("0.0.0.0:%d", controlPort)
 
+	// GitHub control server env + mounts (sp-n7iy.3): prepare the lane-aware GetToken transport
+	// BEFORE StartPod so the env vars are visible to the sidecar at container start.
+	// Lane predicate: userns-remap (S3: agent can sniff netns) → UDS; everything else → TCP.
+	var (
+		sidecarControlEnv  []string
+		sidecarControlMnts []runtime.Mount
+		// getTokenTransport is fully populated after StartPod (PodIP needed for TCP auth).
+		// The Bearer and Network are set here; Address and PodIP are set after StartPod.
+		getTokenTransport = ControlTransport{SpawnID: id}
+		getTokenBearer    string
+	)
+	if m.ghControl != nil {
+		udsLane := m.cfg.UsernsMode == "remap"
+		getTokenPort := m.cfg.SidecarPort + 2
+		if udsLane {
+			// UDS lane: create the host control dir 0711 and arrange the bind-mount into the sidecar.
+			controlDir := m.controlDirFor(id)
+			if err := os.MkdirAll(controlDir, 0o711); err != nil {
+				finalizeAll()
+				cleanupSpawnDirs()
+				return nil, fmt.Errorf("prepare control dir: %w", err)
+			}
+			// Explicit chmod: MkdirAll is masked by umask; 0711 must be exact for the mount-point
+			// traversal guarantee (the userns-remapped sidecar can cd into it; 0700 would block it).
+			if err := os.Chmod(controlDir, 0o711); err != nil {
+				finalizeAll()
+				cleanupSpawnDirs()
+				return nil, fmt.Errorf("chmod control dir: %w", err)
+			}
+			hostSockPath := filepath.Join(controlDir, SidecarControlSocketName)
+			sidecarControlEnv = append(sidecarControlEnv,
+				SidecarGetTokenUDSEnv+"="+filepath.Join(SidecarControlMountPath, SidecarControlSocketName),
+			)
+			sidecarControlMnts = append(sidecarControlMnts, runtime.Mount{
+				HostPath:      controlDir,
+				ContainerPath: SidecarControlMountPath,
+			})
+			getTokenTransport.Network = "unix"
+			getTokenTransport.Address = hostSockPath
+		} else {
+			// TCP lane: generate a per-spawn bearer. Address is filled in after StartPod (PodIP
+			// needed for auth); the listen addr comes from cfg.GetTokenListenIP.
+			getTokenBearer = newControlToken()
+			getTokenTransport.Network = "tcp"
+			getTokenTransport.Bearer = getTokenBearer
+			// Port is fixed (SidecarPort+2). Address (host:port) is set after StartPod.
+			if m.cfg.GetTokenListenIP != "" {
+				listenAddr := net.JoinHostPort(m.cfg.GetTokenListenIP, strconv.Itoa(getTokenPort))
+				sidecarControlEnv = append(sidecarControlEnv,
+					SidecarGetTokenAddrEnv+"="+listenAddr,
+					SidecarGetTokenBearerEnv+"="+getTokenBearer,
+				)
+				getTokenTransport.Address = listenAddr
+			} else {
+				// No listen IP configured: inject bearer only; addr injected later (best-effort;
+				// TCP GetToken will not work without the addr, but we don't fail the spawn).
+				sidecarControlEnv = append(sidecarControlEnv,
+					SidecarGetTokenBearerEnv+"="+getTokenBearer,
+				)
+			}
+		}
+	}
+
 	// Phase 1: sandbox + sidecar (the trusted, key-holding container).
+	sidecarEnv := []string{
+		"OPENROUTER_API_KEY=" + m.cfg.OpenRouterKey,
+		"SIDECAR_ADDR=" + addr,
+		"SIDECAR_CONTROL_TOKEN=" + controlToken,
+		"SIDECAR_CONTROL_ADDR=" + controlAddr,
+	}
+	sidecarEnv = append(sidecarEnv, sidecarControlEnv...)
 	h, err := m.pod.StartPod(ctx, runtime.PodSpec{
-		ID:           id,
-		SidecarImage: m.cfg.SidecarImage,
-		SidecarEnv: []string{
-			"OPENROUTER_API_KEY=" + m.cfg.OpenRouterKey,
-			"SIDECAR_ADDR=" + addr,
-			"SIDECAR_CONTROL_TOKEN=" + controlToken,
-			"SIDECAR_CONTROL_ADDR=" + controlAddr,
-		},
-		Resources: res,
-		Runtime:   m.cfg.ContainerRuntime,
-		Labels:    labels,
+		ID:            id,
+		SidecarImage:  m.cfg.SidecarImage,
+		SidecarEnv:    sidecarEnv,
+		SidecarMounts: sidecarControlMnts,
+		Resources:     res,
+		Runtime:       m.cfg.ContainerRuntime,
+		Labels:        labels,
 	})
 	if err != nil {
 		cleanupPreStoreFailure(nil, "")
@@ -1122,6 +1248,27 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	controlURL := ""
 	if h.PodIP != "" {
 		controlURL = "http://" + net.JoinHostPort(h.PodIP, strconv.Itoa(controlPort)) + "/control/model"
+	}
+
+	// GitHub control server: start the per-spawn listener after StartPod (PodIP now known for
+	// TCP auth). Fail-closed: a Serve error tears the pod down via cleanupPreStoreFailure.
+	if m.ghControl != nil {
+		// Finalize the TCP transport address/PodIP now that we have h.PodIP.
+		if getTokenTransport.Network == "tcp" {
+			getTokenTransport.PodIP = h.PodIP
+			if getTokenTransport.Address == "" && h.PodIP != "" {
+				// Fallback: no GetTokenListenIP in config; derive addr from PodIP. This is not
+				// necessarily reachable from within the pod, but allows the Serve call to bind.
+				getTokenPort := m.cfg.SidecarPort + 2
+				getTokenTransport.Address = net.JoinHostPort(h.PodIP, strconv.Itoa(getTokenPort))
+			}
+		}
+		if getTokenTransport.Address != "" {
+			if serveErr := m.ghControl.Serve(getTokenTransport); serveErr != nil {
+				cleanupPreStoreFailure(h, "")
+				return nil, fmt.Errorf("github control server serve: %w", serveErr)
+			}
+		}
 	}
 
 	// Egress floor: applied after the pod IP exists, before the untrusted agent starts (fail-closed).
@@ -1852,6 +1999,11 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 	if gerr := m.githubCreds.Remove(id); gerr != nil {
 		log.Printf("github credential cleanup for %s: %v", id, gerr)
 	}
+	// Control server cleanup (sp-n7iy.3): close the GetToken listener + CA, then remove the UDS dir.
+	if m.ghControl != nil {
+		m.ghControl.Stop(id)
+	}
+	_ = os.RemoveAll(m.controlDirFor(id))
 
 	// GC path (Delete only): release the delta image and purge durable state files.
 	// Stop and Suspend leave the delta image in place for same-node restart-resume.
@@ -1897,6 +2049,17 @@ func (m *Manager) CleanupSpawnTransient(spawnID string) {
 	if err := m.githubCreds.Remove(spawnID); err != nil {
 		log.Printf("github credential cleanup for %s: %v", spawnID, err)
 	}
+	if m.ghControl != nil {
+		m.ghControl.Stop(spawnID)
+	}
+	_ = os.RemoveAll(m.controlDirFor(spawnID))
+}
+
+// controlDirFor returns the host-side per-spawn control directory under ControlRoot. Used for the
+// UDS lane to create/remove the dir holding the GetToken socket. For the TCP lane this dir is
+// never created, so os.RemoveAll on the returned path is a no-op.
+func (m *Manager) controlDirFor(spawnID string) string {
+	return filepath.Join(m.cfg.ControlRoot, spawnID)
 }
 
 // RenderGitHubAgentCredential renders the agent-facing exact-repo GitHub helper/config into the

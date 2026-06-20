@@ -122,6 +122,10 @@ type attacher struct {
 
 	secretReplay  *secretDeliveryReplay
 	githubRefresh *githubRefresher // process-lived; created in Run, shared across reconnects
+	// ghControl is the per-spawn GitHub credential control server (sp-n7iy.3). Created alongside
+	// githubRefresh in Run and injected into the Manager via SetGitHubControlServer. Shared across
+	// CP reconnects (the per-spawn listeners survive a CP disconnect). nil when GitHubMint is unset.
+	ghControl *githubControlServer
 }
 
 // pendingClient is a client attach that arrived before its session's pump/relay was registered (the
@@ -147,9 +151,14 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	secretReplay := newSecretDeliveryReplay()
 	githubRefresh := newGitHubRefresher(cfg.GitHubMint)
 	go githubRefresh.run(ctx)
+	// Create the GitHub credential control server and inject it into the Manager. It is
+	// process-lived (like githubRefresh): per-spawn listeners survive CP reconnects.
+	// mgr.SetGitHubControlServer is nil-safe when ghControl is nil (GitHubMint not configured).
+	ghControl := newGitHubControlServer(githubRefresh)
+	mgr.SetGitHubControlServer(ghControl)
 	for {
 		start := time.Now()
-		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, githubRefresh)
+		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, githubRefresh, ghControl)
 		if ctx.Err() != nil {
 			return ctx.Err() // clean shutdown
 		}
@@ -184,7 +193,7 @@ func registerMessage(cfg Config, running []*nodev1.RunningSpawn, signedSubKey []
 // runOnce serves a single CP connection: dial + Register + heartbeat + receive loop. It returns when
 // the connection ends (stream error) or ctx is cancelled. Everything connection-scoped (heartbeat,
 // pump sessions) is tied to connCtx so it stops cleanly when the connection ends.
-func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, secretReplay *secretDeliveryReplay, githubRefresh *githubRefresher) error {
+func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, secretReplay *secretDeliveryReplay, githubRefresh *githubRefresher, ghControl *githubControlServer) error {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -199,6 +208,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		pending:       map[sessionKey][]pendingClient{},
 		secretReplay:  secretReplay,
 		githubRefresh: githubRefresh,
+		ghControl:     ghControl,
 	}
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)
@@ -818,7 +828,11 @@ func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
 		logErr("stopSpawn "+spawnID, err)
 	}
 	a.releaseSlot()
-	a.githubRefresh.Forget(spawnID)
+	if a.ghControl != nil {
+		a.ghControl.Stop(spawnID)
+	} else {
+		a.githubRefresh.Forget(spawnID)
+	}
 	a.status(spawnID, nodev1.SpawnPhase_STOPPED, "")
 }
 
@@ -905,14 +919,22 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 		// Sessions were already reaped above; release the capacity slot before returning so
 		// the node does not permanently hold a slot for a spawn that is no longer tracked.
 		a.releaseSlot()
-		a.githubRefresh.Forget(spawnID)
+		if a.ghControl != nil {
+			a.ghControl.Stop(spawnID)
+		} else {
+			a.githubRefresh.Forget(spawnID)
+		}
 		a.status(spawnID, nodev1.SpawnPhase_ERROR, err.Error())
 		return
 	}
 
 	// Step 3: success — markers from gate, rootfs artifacts from finish.
 	a.releaseSlot()
-	a.githubRefresh.Forget(spawnID)
+	if a.ghControl != nil {
+		a.ghControl.Stop(spawnID)
+	} else {
+		a.githubRefresh.Forget(spawnID)
+	}
 	mm := make([]*nodev1.MountMarker, 0, len(gate.MountMarkers))
 	for name, marker := range gate.MountMarkers {
 		mm = append(mm, &nodev1.MountMarker{Name: name, Marker: marker})
