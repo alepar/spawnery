@@ -43,6 +43,12 @@ func (s *Service) Handler() http.Handler {
 	}
 	mux.Handle(authv1connect.NewAuthServiceHandler(s))
 
+	// CP→AS internal link-status endpoint: registered only when the shared secret is configured.
+	// Server-to-server only — not CORS/SPA-exposed. Requires X-Spawnery-AS-Secret header.
+	if s.cpRPCSecret != "" {
+		mux.HandleFunc("POST /internal/github/link-status", s.serveGitHubLinkStatus)
+	}
+
 	if s.githubLinkExchanger != nil {
 		ghNoop := func(http.ResponseWriter, *http.Request) {}
 		mux.HandleFunc("POST /github/link/start", s.ghLinkCORSBearerSimple(s.serveGitHubLinkStart))

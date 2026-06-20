@@ -60,6 +60,11 @@ type Service struct {
 	githubLinkStates         map[string]githubLinkState  // keyed by OAuth state param
 	githubLinkFlows          map[string]*githubLinkFlow  // keyed by flow_id
 
+	// cpRPCSecret is the AS↔CP shared secret for the CP→AS link-status endpoint. When non-empty
+	// the POST /internal/github/link-status route is registered and enforces this secret via
+	// X-Spawnery-AS-Secret (constant-time compare). Set via WithCPRPCSecret; empty = route dormant.
+	cpRPCSecret string
+
 	devNodeIdentityHeader string // DEV-ONLY (D3): trusts this header as node-id when set; never set in prod
 
 	mu     sync.Mutex
@@ -163,6 +168,14 @@ func WithGitHubMinting(st store.Store, provider GitHubProvider) Option {
 
 func WithNodeIdentityExtractor(extract NodeIdentityExtractor) Option {
 	return func(s *Service) { s.nodeIdentityExtractor = extract }
+}
+
+// WithCPRPCSecret enables the CP→AS link-status internal endpoint by setting the shared secret the
+// CP must present in the X-Spawnery-AS-Secret header. When set, POST /internal/github/link-status
+// is registered in Handler(). Matches the AS_CP_RPC_SECRET environment variable; must equal
+// CP_AS_RPC_SECRET on the CP side.
+func WithCPRPCSecret(secret string) Option {
+	return func(s *Service) { s.cpRPCSecret = secret }
 }
 
 // WithDevNodeIdentityHeader trusts an inbound HTTP header as the node identity, BYPASSING mTLS

@@ -200,6 +200,7 @@ cp-github:
     CP_DEV_INTENT_ENABLED=1 \
     CP_DEV_AS_KEY={{devca}}/session-key.pem \
     CP_AS_RPC_SECRET=dev-as-cp-secret \
+    CP_AS_URL=http://{{addr_as}} \
     {{repo}}/bin/spawnery_cp
 
 # Node for the github lane: cloud-class (multi-tenant — no account-ID match needed) + enforced

@@ -225,6 +225,13 @@ func main() {
 		}
 	}
 
+	// CP→AS GitHub link-status preflight: gated on CP_AS_URL; also uses the existing CP_AS_RPC_SECRET.
+	// When set, CreateSpawn checks the owner's GitHub link state before persisting a github:-mount spawn.
+	if asURL := strings.TrimSpace(env("CP_AS_URL", "")); asURL != "" {
+		srv.SetASLinkChecker(asURL, env("CP_AS_RPC_SECRET", ""))
+		log.Printf("cp: GitHub link preflight checker wired to AS %s", asURL)
+	}
+
 	srv.StartReconciler(ctx) // background loop: drive model_applied=false spawns to convergence (sp-bp9w.7)
 
 	// Browser-origin allowlist for CORS + the WS upgrade ([WM18]). Empty = dev mode
