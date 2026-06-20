@@ -314,3 +314,25 @@ used.*
   The nonce-reuse limit (can't resurrect a *dead* server) stands. Net: mosh continuity across
   rolling deploys is achievable and cheap-ish, contingent on adopt-in-place — which the node deploy
   story (ORR-5) needs regardless.
+- **2026-06-20 — gating spikes S5/S6/S8 resolved; affinity+redirect validated, no structural
+  redesign.** The three highest-risk multi-CP unknowns came back favorable (full findings in the
+  `sp-haj5.4.5/.6/.8` bead notes; the spikes are closed):
+  - **S5 (bandwidth) — PASS, ~50× headroom at beta.** Correction to driver #1: the model inference
+    stream never crosses the CP (provider→in-pod sidecar→agent, in the pod netns) and mosh is
+    node-direct; the CP relay carries only web-chat ACP frames for *attached* clients (~5–20 KB/s).
+    Worst-case fully-skewed single CP ≈ 40–80 Mbit/s. **No rebalancing primitive needed for beta**;
+    add a per-CP relayed-bytes guardrail metric (ORR-1) and file migration as a metric-gated
+    follow-up. Net: **driver #2 (HA/restart-survival), not bandwidth, is what justifies multi-CP.**
+  - **S6 (failover) — feasible, bounded, but needs active mechanisms.** Load-bearing find: http2
+    keepalive PINGs are off on both ends, so black-hole CP death detects via TCP retransmission
+    (minutes), not "tens of seconds." Fix is layered: graceful drain = active ownership-release +
+    stream close (<2s); ungraceful = http2 `ReadIdleTimeout`/`PingTimeout` (~10–15s) + a CP-liveness
+    lease so readers never redirect to a corpse. The http2 keepalive one-liner is a cheap general
+    reliability win — **candidate to fold into ORR-2.** Depends on S7's ownership fence.
+  - **S8 (cross-CP actuation) — feasible, residual smaller than feared.** Invariant: keep `Sender`
+    CP-local (`Sender != nil` ⇔ ownership). Background DB-scan loops get an ownership filter (no new
+    transport, co-locates waiters, sidesteps roast F); only synchronous foreign ops (new-spawn
+    placement, cross-node fork transfer) need a minimal **control-only `ActuateOnNode` (cmd+ack, not
+    bytes)** — does not recreate the bandwidth choke. Evaluator-suspend + orphan-reap are co-located
+    by construction (spec/roast were wrong). Remaining spikes S1/S2/S3/S4/S7/S9 resolve in the deep
+    spec (`sp-haj5.4.10`).
