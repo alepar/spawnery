@@ -33,6 +33,8 @@ type Options struct {
 	FlagProvider koanf.Provider
 	// Sets are the raw --set key=value strings (layer 7).
 	Sets []string
+	// Resolvers are extra ${scheme:arg} backends (e.g. sops) beyond the built-in env/file ones.
+	Resolvers []Resolver
 }
 
 // Load builds the typed config T for the named service by layering, in precedence order:
@@ -94,6 +96,19 @@ func Load[T any](svc string, opts Options) (*T, error) {
 		if err := k.Load(confmap.Provider(sets, "."), nil); err != nil {
 			return nil, fmt.Errorf("loading --set layer: %w", err)
 		}
+	}
+
+	// Resolve ${scheme:arg} references on the merged map, before decode, so a resolved value is
+	// coerced to the field type like any other.
+	resolvers := map[string]Resolver{
+		"env":  newEnvResolver(getenv),
+		"file": newFileResolver(),
+	}
+	for _, r := range opts.Resolvers {
+		resolvers[r.Scheme()] = r
+	}
+	if err := resolveRefs(k, resolvers); err != nil {
+		return nil, err
 	}
 
 	var out T
