@@ -71,7 +71,16 @@ web-github:
 # both, in mprocs panes (one Ctrl-C). Depends on `garage` so the transient-tier journal is
 # backed before the node starts (compose runs detached + bootstrap writes dev-creds.env, which
 # `just node` sources) — without it, journaled mounts silently fail to persist on suspend.
+# Full dev stack in mprocs: CP + AS (GitHub OAuth/link) + node (github-mount, MITM proxy) + web +
+# garage (journaled mounts). This is the mode where `gh` login/linking and git pushes work
+# end-to-end. Generates the dev CA if missing. Requires GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET in
+# .env. For the plain non-auth stack (no GitHub/mTLS), use `just dev-plain`.
 dev: garage
+    @test -f {{devca}}/root.pem || just gen-dev-ca
+    mprocs --config {{repo}}/mprocs-github.yaml
+
+# plain non-auth dev stack (no GitHub/mTLS) — the previous `just dev`.
+dev-plain: garage
     mprocs
 
 # full A4 signing path in dev: CP + node with intent flow enabled (CP_DEV_INTENT_ENABLED=1).
@@ -190,12 +199,8 @@ node-github agent="agent": (_images agent)
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
     {{repo}}/bin/spawnlet
 
-# Full github-mount dev stack in mprocs: real GitHub App link + AS-custodial minted token + journaled
-# mounts. Requires GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET in .env and (for web link) the App's
-# callback registered; otherwise use `spawnctl` device/loopback link (spec S1).
-dev-github: garage
-    @test -f {{devca}}/root.pem || just gen-dev-ca
-    mprocs --config {{repo}}/mprocs-github.yaml
+# alias — the github-mount stack is now the default `just dev`.
+dev-github: dev
 
 # one-shot spawnctl against the running spawnlet
 spawnctl prompt="What is the secret word?" model=free:
