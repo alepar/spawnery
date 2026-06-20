@@ -166,9 +166,14 @@ type Server struct {
 	// shutdownOnce ensures shutdownCh is closed exactly once.
 	// shutdownCh is the wind-down signal observed by every runNode receive loop.
 	// nodeWG tracks active runNode loops; Shutdown waits on it.
+	// nodeMu guards nodeShutdown and the nodeWG.Add/Wait boundary: runNode holds nodeMu while
+	// checking nodeShutdown and calling Add(1), so Add can never race with Wait (which is called
+	// only after nodeShutdown is set to true under nodeMu).
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{}
 	nodeWG       sync.WaitGroup
+	nodeMu       sync.Mutex
+	nodeShutdown bool
 }
 
 const (
@@ -335,7 +340,15 @@ type recvResult struct {
 
 // runNode is the receive loop, split out so it is unit-testable without gRPC.
 func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv func() (*nodev1.NodeMessage, error)) error {
+	// Guard Add against a concurrent Wait in Shutdown. nodeMu ensures that once nodeShutdown
+	// is set true (under nodeMu in Shutdown, before Wait), no further Add(1) can occur.
+	s.nodeMu.Lock()
+	if s.nodeShutdown {
+		s.nodeMu.Unlock()
+		return connect.NewError(connect.CodeUnavailable, errors.New("control plane shutting down"))
+	}
 	s.nodeWG.Add(1)
+	s.nodeMu.Unlock()
 	defer s.nodeWG.Done()
 
 	var nodeID string
@@ -525,6 +538,12 @@ func mountMarkersToMap(markers []*nodev1.MountMarker) map[string]string {
 // the Attach streams; httpSrv.Shutdown stops the listener and drains in-flight unary RPCs.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
+	// Set nodeShutdown under nodeMu before calling Wait. Any runNode that calls Add(1) after
+	// this point will see nodeShutdown=true and bail early; any that already called Add(1) is
+	// already counted in the WaitGroup, so Wait is safe.
+	s.nodeMu.Lock()
+	s.nodeShutdown = true
+	s.nodeMu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		s.nodeWG.Wait()

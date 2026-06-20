@@ -274,9 +274,15 @@ func main() {
 	// on a dedicated listener and their identity is the verified client cert (see internal/cp/nodeauth).
 	mode := nodeauth.Mode(env("NODE_AUTH_MODE", string(nodeauth.ModeInsecure)))
 	nodePath, nodeHandler := nodev1connect.NewNodeServiceHandler(srv, connect.WithInterceptors(rpclog.RecoverInterceptor("cp"), rpclog.Interceptor("cp")))
+	var nodeTLSSrv *http.Server // non-nil only in enforced mode; shut down alongside httpSrv
 	if mode == nodeauth.ModeEnforced {
+		var tlsErr error
+		nodeTLSSrv, tlsErr = buildNodeTLSServer(env("CP_NODE_LISTEN", "127.0.0.1:8081"), nodePath, nodeHandler)
+		if tlsErr != nil {
+			log.Fatalf("cp: build node mTLS listener: %v", tlsErr)
+		}
 		go func() {
-			if err := serveNodeTLS(env("CP_NODE_LISTEN", "127.0.0.1:8081"), nodePath, nodeHandler); err != nil {
+			if err := nodeTLSSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("cp: node mTLS listener: %v", err)
 			}
 		}()
@@ -305,28 +311,34 @@ func main() {
 		if err := srv.Shutdown(sdCtx); err != nil {
 			log.Printf("cp: drain Attach streams: %v", err)
 		}
+		if nodeTLSSrv != nil {
+			if err := nodeTLSSrv.Shutdown(sdCtx); err != nil {
+				log.Printf("cp: drain node TLS HTTP: %v", err)
+			}
+		}
 		if err := httpSrv.Shutdown(sdCtx); err != nil {
 			log.Printf("cp: drain HTTP: %v", err)
 		}
 	}
 }
 
-// serveNodeTLS runs the NodeService over mTLS on its own listener.
-func serveNodeTLS(addr, nodePath string, nodeHandler http.Handler) error {
+// buildNodeTLSServer configures and returns the NodeService mTLS http.Server without starting it.
+// The caller is responsible for calling ListenAndServeTLS and Shutdown.
+func buildNodeTLSServer(addr, nodePath string, nodeHandler http.Handler) (*http.Server, error) {
 	rootPEM, err := os.ReadFile(env("CP_NODE_ROOT_CA", "/etc/spawnery/cp/node-root-ca.pem"))
 	if err != nil {
-		return fmt.Errorf("read pinned root CA: %w", err)
+		return nil, fmt.Errorf("read pinned root CA: %w", err)
 	}
 	root, err := pki.ParseCertPEM(rootPEM)
 	if err != nil {
-		return fmt.Errorf("parse pinned root CA: %w", err)
+		return nil, fmt.Errorf("parse pinned root CA: %w", err)
 	}
 	serverCert, err := tls.LoadX509KeyPair(
 		env("CP_NODE_TLS_CERT", "/etc/spawnery/cp/server.pem"),
 		env("CP_NODE_TLS_KEY", "/etc/spawnery/cp/server-key.pem"),
 	)
 	if err != nil {
-		return fmt.Errorf("load CP server cert: %w", err)
+		return nil, fmt.Errorf("load CP server cert: %w", err)
 	}
 	nodeMux := http.NewServeMux()
 	nodeMux.Handle(nodePath, nodeHandler)
@@ -341,10 +353,10 @@ func serveNodeTLS(addr, nodePath string, nodeHandler http.Handler) error {
 		},
 	}
 	if err := http2.ConfigureServer(server, &http2.Server{}); err != nil {
-		return fmt.Errorf("configure http2: %w", err)
+		return nil, fmt.Errorf("configure http2: %w", err)
 	}
 	log.Printf("cp: node mTLS listener on %s", addr)
-	return server.ListenAndServeTLS("", "")
+	return server, nil
 }
 
 // loadKeySet parses comma-separated PEM file paths into an ordered token.KeySet.
