@@ -1,0 +1,37 @@
+syntax = "proto3";
+package sidecar.v1;
+option go_package = "spawnery/gen/sidecar/v1;sidecarv1";
+
+// Node<->sidecar PRIVATE control messages for the GitHub MITM forward proxy (design §2.4/§2.5).
+// They ride the lane-aware confidential control transport (a node<->sidecar UDS where the agent
+// can sniff the shared netns per spike S3, else a bearer + source-pod-IP-gated node TCP listener)
+// wired by sp-n7iy.3/.5. This is NOT a CP-facing contract: no service is defined here on purpose
+// so the transport (and its framing/auth) stays the consumer's choice; the existing node<->sidecar
+// control channel is hand-rolled, not Connect.
+
+// Sidecar -> node: pull the real GitHub user-to-server access token for this spawn. The node
+// resolves the spawn's link from durable mount bindings and mints a fresh token when the current
+// one has less than min_remaining_seconds of life left, so it cannot expire mid-exchange (§2.4).
+message GetTokenRequest {
+  string spawn_id              = 1;
+  int64  min_remaining_seconds = 2; // small buffer (~300s), NOT near-headroom (§2.4, roast r4).
+}
+
+// node -> sidecar: the real access token plus its absolute expiry. The proxy caches it and honors
+// min_remaining_seconds itself. Node/AS failures (AS down, NotFound, revoked, rate-limited) surface
+// as transport-level errors mapped by sp-n7iy.3, not as a field on this response.
+message GetTokenResponse {
+  string token                  = 1;
+  int64  access_expires_at_unix = 2;
+}
+
+// Sidecar -> node: pull the node-generated per-spawn CA on sidecar (re)start (§2.5). The node owns
+// CA generation; the public cert is ALSO written into the agent-visible git-env by the node.
+message GetSpawnCARequest { string spawn_id = 1; }
+
+// node -> sidecar: the per-spawn CA for JIT leaf-cert signing. The PRIVATE key co-resides only in
+// the sidecar (never the agent, sp-jg7x); the cert lets the sidecar present the full chain (§2.5).
+message SpawnCADelivery {
+  bytes ca_cert_pem = 1; // PEM-encoded ECDSA P-256 CA certificate.
+  bytes ca_key_pem  = 2; // PEM-encoded ECDSA P-256 CA private key (sidecar-only).
+}

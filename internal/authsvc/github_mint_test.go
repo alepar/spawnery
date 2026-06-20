@@ -596,3 +596,108 @@ func TestMintGitHubAccessTokenLostRotationSurfacesTerminalRelink(t *testing.T) {
 		t.Fatalf("provider calls = %d, want 1 (no re-call once relink-marked)", provider.calls)
 	}
 }
+
+// TestMintGitHubAccessTokenCarriesLoginAndUserID verifies that the cached (non-rotating) path
+// propagates Login and UserId from the stored link onto the response (§1.3).
+func TestMintGitHubAccessTokenCarriesLoginAndUserID(t *testing.T) {
+	now := time.Unix(1770000000, 0)
+	st := store.NewTestStore(t)
+	// Far-future expiry → cached (non-rotating) path; provider must NOT be called.
+	seedGitHubLink(t, st, now.Add(8*time.Hour).Unix())
+	provider := &testGitHubMintProvider{}
+	svc := newMintAS(t,
+		WithClock(func() time.Time { return now }),
+		WithGitHubMinting(st, provider),
+		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "node-1", true }),
+		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(context.Context, GitHubMintAuthorization) error { return nil })),
+	)
+	resp, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(mintReq()))
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if resp.Msg.GetRefreshed() {
+		t.Fatalf("expected cached path (no rotation)")
+	}
+	if resp.Msg.GetLogin() != "alice" || resp.Msg.GetUserId() != 123456 {
+		t.Fatalf("identity not propagated: login=%q id=%d", resp.Msg.GetLogin(), resp.Msg.GetUserId())
+	}
+}
+
+// TestMintGitHubAccessTokenRotatedPathCarriesLoginAndUserID verifies that the rotated path also
+// propagates Login and UserId (Rotate uses Returning("*") so identity survives rotation unchanged).
+func TestMintGitHubAccessTokenRotatedPathCarriesLoginAndUserID(t *testing.T) {
+	now := time.Unix(1770000000, 0)
+	st := store.NewTestStore(t)
+	// Near-expiry → rotation path.
+	seedGitHubLink(t, st, now.Add(time.Minute).Unix())
+	provider := &testGitHubMintProvider{
+		wantRefresh: "ghr_old",
+		next: GitHubUserToken{
+			AccessToken:          "ghu_rotated",
+			AccessExpiresAtUnix:  now.Add(8 * time.Hour).Unix(),
+			RefreshToken:         "ghr_rotated",
+			RefreshExpiresAtUnix: now.Add(180 * 24 * time.Hour).Unix(),
+			TokenType:            "bearer",
+		},
+	}
+	svc := newMintAS(t,
+		WithClock(func() time.Time { return now }),
+		WithGitHubMinting(st, provider),
+		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "node-1", true }),
+		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(context.Context, GitHubMintAuthorization) error { return nil })),
+		WithGitHubAccessTokenFanout(GitHubAccessTokenFanoutFunc(func(context.Context, GitHubAccessTokenFanout) error { return nil })),
+	)
+	resp, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(mintReq()))
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if !resp.Msg.GetRefreshed() {
+		t.Fatalf("expected rotation path (refreshed=true)")
+	}
+	if resp.Msg.GetLogin() != "alice" || resp.Msg.GetUserId() != 123456 {
+		t.Fatalf("identity not propagated on rotated path: login=%q id=%d", resp.Msg.GetLogin(), resp.Msg.GetUserId())
+	}
+}
+
+// TestMintGitHubAccessTokenEmptyUserIDBestEffort verifies that an empty/non-numeric GithubUserID
+// yields UserId=0 and Login still set; the mint succeeds (best-effort, never fails).
+func TestMintGitHubAccessTokenEmptyUserIDBestEffort(t *testing.T) {
+	now := time.Unix(1770000000, 0)
+	st := store.NewTestStore(t)
+	// Seed a link with no numeric user id (org/app-installation link scenario).
+	if err := st.GitHubLinks().Upsert(context.Background(), store.GitHubLink{
+		SecretID:             "gh-main",
+		AccountID:            "acct-1",
+		Host:                 "github.com",
+		Login:                "orgbot",
+		GithubUserID:         "", // empty — org/app link
+		AppClientID:          "Iv1.spawnerytest",
+		RefreshToken:         "ghr_old",
+		RefreshExpiresAtUnix: 2200000000,
+		AccessToken:          "ghu_current",
+		AccessExpiresAtUnix:  now.Add(8 * time.Hour).Unix(), // far future → cached path
+		TokenType:            "bearer",
+		Version:              11,
+		DeliveryID:           "delivery-sp1-gen3-gh-main-v11",
+		UpdatedAt:            1770000000,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	provider := &testGitHubMintProvider{}
+	svc := newMintAS(t,
+		WithClock(func() time.Time { return now }),
+		WithGitHubMinting(st, provider),
+		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "node-1", true }),
+		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(context.Context, GitHubMintAuthorization) error { return nil })),
+	)
+	resp, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(mintReq()))
+	if err != nil {
+		t.Fatalf("mint with empty user id: %v", err)
+	}
+	if resp.Msg.GetLogin() != "orgbot" {
+		t.Fatalf("login = %q, want orgbot", resp.Msg.GetLogin())
+	}
+	if resp.Msg.GetUserId() != 0 {
+		t.Fatalf("user_id = %d, want 0 for empty GithubUserID", resp.Msg.GetUserId())
+	}
+}
