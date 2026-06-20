@@ -2103,6 +2103,14 @@ func (m *Manager) RenderGitHubAgentCredential(spawnID string, req githubcred.Ren
 	return githubcred.Render(m.secrets.DirFor(spawnID), req)
 }
 
+// RenderGitHubIdentity seeds the [user] commit identity into the spawn's agent-owned git-env global
+// gitconfig (design §1.2), so agent commits carry the linked GitHub author. Best-effort: the caller
+// (mint-at-provision) logs any error and MUST NOT fail provisioning.
+func (m *Manager) RenderGitHubIdentity(spawnID, login string, userID int64) error {
+	id := githubcred.ResolveIdentity(login, userID)
+	return githubcred.RenderIdentity(filepath.Join(m.gitEnv.DirFor(spawnID), GitConfigName), id)
+}
+
 func (m *Manager) MountBindings(spawnID string) ([]MountBinding, bool) {
 	sp, ok := m.store.Get(spawnID)
 	if !ok {
