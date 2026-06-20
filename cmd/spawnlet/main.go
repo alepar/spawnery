@@ -43,10 +43,13 @@ func main() {
 		OpenRouterKey: os.Getenv("OPENROUTER_API_KEY"),
 		DataRoot:      env("DATA_ROOT", "/var/lib/spawnlet/spawns"),
 
-		NodeID:           env("NODE_ID", "node-1"),
-		NodeClass:        env("NODE_CLASS", "cloud"),
-		EgressEnforce:    getenvBool("EGRESS_ENFORCE", true),
-		EgressAllowCIDRs: splitCSV(os.Getenv("EGRESS_ALLOW_CIDRS")),
+		NodeID:              env("NODE_ID", "node-1"),
+		NodeClass:           env("NODE_CLASS", "cloud"),
+		EgressEnforce:       getenvBool("EGRESS_ENFORCE", true),
+		EgressAllowCIDRs:    splitCSV(os.Getenv("EGRESS_ALLOW_CIDRS")),
+		// EgressFloorForceOff: DEV-ONLY override — disables the egress floor even for cloud
+		// nodes where it is otherwise non-negotiable. MUST NOT be set in production.
+		EgressFloorForceOff: getenvBool("EGRESS_FLOOR_FORCE_OFF", false),
 
 		MemLimitMB:       getenvInt64("MEM_LIMIT_MB", 1024),
 		CPULimit:         getenvFloat("CPU_LIMIT", 1.0),

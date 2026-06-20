@@ -113,3 +113,38 @@ func TestCreateEmptyIPSucceedsWhenNotEnforced(t *testing.T) {
 		t.Fatalf("non-enforcing spawn with no pod IP should succeed: %v", err)
 	}
 }
+
+// EgressFloorForceOff suppresses the floor entirely, even for a cloud node where enforcement is
+// otherwise mandatory. This is the DEV-ONLY override used by node-github / just dev.
+func TestEgressFloorForceOffCloud(t *testing.T) {
+	rt := runtime.NewFake()
+	m := NewManager(rt, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+		NodeClass: "cloud", EgressFloorForceOff: true,
+	})
+	fa := &fakeApplier{}
+	m.fw = fa
+	if _, err := m.Create(context.Background(), "spawn-ffo", "../../examples/secret-app", "model", "", "", 0); err != nil {
+		t.Fatalf("Create with EgressFloorForceOff=true should succeed on cloud: %v", err)
+	}
+	if fa.applied {
+		t.Fatal("firewall MUST NOT be applied when EgressFloorForceOff is set")
+	}
+}
+
+// EgressFloorForceOff=false leaves cloud-always-enforces intact.
+func TestEgressFloorForceOffFalseCloudStillEnforces(t *testing.T) {
+	rt := runtime.NewFake()
+	m := NewManager(rt, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+		NodeClass: "cloud", EgressFloorForceOff: false,
+	})
+	fa := &fakeApplier{failApply: true}
+	m.fw = fa
+	if _, err := m.Create(context.Background(), "spawn-ffo2", "../../examples/secret-app", "model", "", "", 0); err == nil {
+		t.Fatal("cloud node must fail-closed (firewall forced) when EgressFloorForceOff is false")
+	}
+	if !fa.applied {
+		t.Fatal("cloud node must apply the firewall when EgressFloorForceOff is false")
+	}
+}

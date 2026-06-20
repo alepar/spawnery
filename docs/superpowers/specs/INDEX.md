@@ -128,6 +128,7 @@ were already made in one of these docs.
 - [Spawnlet Slice](2026-05-29-spawnlet-slice-design.md) — the first end-to-end node (spawnlet) vertical slice.
 - [CP Mediation Slice](2026-05-30-cp-mediation-slice-design.md) — control plane relaying between the web client and spawnlet.
 - [Make/Just Dev-Stack](2026-05-30-make-just-dev-stack-design.md) — the `make` + `just` build/codegen/images + dev-run recipe ecosystem.
+- [Dev-Env Ergonomics: Persisted State + Multi-Tenant Dev Node](2026-06-20-dev-env-ergonomics-design.md) — stop matching the dev node's startup params to the randomized AS account id every run: (A) consolidate all repo-persisted dev state under a single gitignored `.envs/dev/` (so `authsvc.db` + the GitHub link survive — no re-OAuth/re-link; `rm -rf .envs/dev` resets); (B) run the dev node as **cloud class** (multi-tenant by construction — `gen-dev-ca` mints a cloud node identity, `NODE_OWNER` unset) so any logged-in account's spawns place with no id matching; (C) a default-off `EGRESS_FLOOR_FORCE_OFF` override so cloud's mandatory floor is a no-op in the rootless dev node (same floor-off posture dev has today; prod invariant "cloud always enforces" preserved). Dev-ergonomics only; prod identity model unchanged. status: draft; tags: dev,justfile,node-class,egress,identity.
 
 ## Eval
 - [Eval Harness MVP](2026-06-03-eval-harness-mvp-design.md) — creator-private "Test Your App" measurement slice (roles = spawns, judge = E8 scanner).

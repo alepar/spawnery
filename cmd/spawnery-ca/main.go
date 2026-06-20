@@ -29,7 +29,7 @@ func main() {
 		if err := genDev(dir); err != nil {
 			log.Fatalf("spawnery-ca: %v", err)
 		}
-		log.Printf("spawnery-ca: dev CA written to %s (root.pem, self-hosted-intermediate.*, cp-server.*, node/, session-key.pem, session-pub.pem)", dir)
+		log.Printf("spawnery-ca: dev CA written to %s (root.pem, self-hosted-intermediate.*, cloud-intermediate.*, cp-server.*, node/, node-cloud/, session-key.pem, session-pub.pem)", dir)
 	case len(os.Args) == 5 && os.Args[1] == "node":
 		// Re-mint ONLY the node identity (dir/node) under a given owner, reusing the existing
 		// intermediate — so a dev node can be re-owned (e.g. to a real AS accountID) without
@@ -99,14 +99,27 @@ func genDev(dir string) error {
 	if err != nil {
 		return fmt.Errorf("intermediate: %w", err)
 	}
+	// Cloud intermediate + cloud node identity. The cloud node is multi-tenant (no owner
+	// match at placement); it chains to the same root so CP_NODE_ROOT_CA accepts it.
+	cloud, err := root.NewIntermediate(pki.ClassCloud)
+	if err != nil {
+		return fmt.Errorf("cloud intermediate: %w", err)
+	}
 	cpSrv, err := root.IssueServer("cp-node-listener", []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")}, year)
 	if err != nil {
 		return fmt.Errorf("cp server cert: %w", err)
 	}
 	// Pre-provisioned dev node identity: node-1 owned by "alice" (matches CP_DEV_TOKENS=dev-token=alice).
+	// Used by node-enforced / dev-enforced (self-hosted lane).
 	node, err := selfHosted.IssueNode("node-1", "alice", pki.ClassSelfHosted, year)
 	if err != nil {
 		return fmt.Errorf("node cert: %w", err)
+	}
+	// Cloud dev node identity: node-1 owned by "spawnery-system" (multi-tenant — no owner
+	// check at placement; any logged-in user's spawns land here). Used by node-github / just dev.
+	cloudNode, err := cloud.IssueNode("node-1", "spawnery-system", pki.ClassCloud, year)
+	if err != nil {
+		return fmt.Errorf("cloud node cert: %w", err)
 	}
 
 	rootKey, err := pki.MarshalKeyPEM(root.Key)
@@ -117,11 +130,19 @@ func genDev(dir string) error {
 	if err != nil {
 		return err
 	}
+	cloudKey, err := pki.MarshalKeyPEM(cloud.Key)
+	if err != nil {
+		return err
+	}
 	cpKey, err := pki.MarshalKeyPEM(cpSrv.Key)
 	if err != nil {
 		return err
 	}
 	nodeKey, err := pki.MarshalKeyPEM(node.Key)
+	if err != nil {
+		return err
+	}
+	cloudNodeKey, err := pki.MarshalKeyPEM(cloudNode.Key)
 	if err != nil {
 		return err
 	}
@@ -134,6 +155,8 @@ func genDev(dir string) error {
 		{"root-key.pem", rootKey},
 		{"self-hosted-intermediate.pem", pki.MarshalCertPEM(selfHosted.Cert)},
 		{"self-hosted-intermediate-key.pem", shKey},
+		{"cloud-intermediate.pem", pki.MarshalCertPEM(cloud.Cert)},
+		{"cloud-intermediate-key.pem", cloudKey},
 		{"cp-server.pem", pki.MarshalCertPEM(cpSrv.Cert)},
 		{"cp-server-key.pem", cpKey},
 	}
@@ -143,10 +166,20 @@ func genDev(dir string) error {
 		}
 	}
 
+	// Self-hosted node identity (node-enforced / dev-enforced lane).
 	if err := nodeid.Save(filepath.Join(dir, "node"), nodeid.Identity{
 		CertPEM:  pki.MarshalCertPEM(node.Cert),
 		ChainPEM: pki.MarshalCertPEM(selfHosted.Cert),
 		KeyPEM:   nodeKey,
+		RootPEM:  pki.MarshalCertPEM(root.Cert),
+	}); err != nil {
+		return err
+	}
+	// Cloud node identity (node-github / just dev lane).
+	if err := nodeid.Save(filepath.Join(dir, "node-cloud"), nodeid.Identity{
+		CertPEM:  pki.MarshalCertPEM(cloudNode.Cert),
+		ChainPEM: pki.MarshalCertPEM(cloud.Cert),
+		KeyPEM:   cloudNodeKey,
 		RootPEM:  pki.MarshalCertPEM(root.Cert),
 	}); err != nil {
 		return err
