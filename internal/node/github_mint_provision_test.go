@@ -13,17 +13,21 @@ import (
 
 	authv1 "spawnery/gen/auth/v1"
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/spawnlet"
 	"spawnery/internal/storage"
 )
 
 // happy path: node mints (initial link-ref: secret_id only), renders into the NODE-ONLY cred root,
-// passes repository_id as audit only, and Notes the link for the refresher.
+// passes repository_id as audit only, Notes the link for the refresher, and seeds the git-env gitconfig
+// with the linked identity (sp-m859.1 §1.2).
 func TestMintGitHubMountAtProvision_RendersNodeTokenAndNotes(t *testing.T) {
 	const nodeID, spawnID, gen = "node-1", "sp1", uint64(5)
 	a, _, secretsRoot := secretTestRig(t, nodeID, spawnID, gen)
 	fake := &fakeMintClient{resp: &authv1.MintGitHubAccessTokenResponse{
 		AccessToken:         "ghu_minted_token",
 		AccessExpiresAtUnix: time.Now().Add(8 * time.Hour).Unix(),
+		Login:               "octocat",
+		UserId:              583231,
 	}}
 	a.githubRefresh = newGitHubRefresher(fake)
 
@@ -71,6 +75,17 @@ func TestMintGitHubMountAtProvision_RendersNodeTokenAndNotes(t *testing.T) {
 	a.githubRefresh.mu.Unlock()
 	if noteState == nil || noteState["gh:octo"] == nil {
 		t.Fatalf("expected refresher to have Noted gh:octo for %s", spawnID)
+	}
+
+	// 5) IDENTITY (sp-m859.1 §1.2): git-env gitconfig seeded from the mint's Login/UserId.
+	dataRoot := filepath.Dir(secretsRoot)
+	gitconfigPath := filepath.Join(dataRoot, "git-env", spawnID, spawnlet.GitConfigName)
+	gcBytes, err := os.ReadFile(gitconfigPath)
+	if err != nil {
+		t.Fatalf("read git-env gitconfig: %v", err)
+	}
+	if !strings.Contains(string(gcBytes), "583231+octocat@users.noreply.github.com") {
+		t.Errorf("git-env gitconfig missing canonical email: %q", string(gcBytes))
 	}
 }
 
