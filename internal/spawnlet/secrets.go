@@ -92,3 +92,4 @@ func safeRel(target string) (string, error) {
 	}
 	return clean, nil
 }
+
