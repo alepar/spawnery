@@ -546,19 +546,21 @@ func (a *attacher) mintGitHubMountsAtProvision(ctx context.Context, spawnID stri
 		if !ok {
 			return fmt.Errorf("github mint mount %q: invalid backend uri %q (want github:owner/repo)", m.GetName(), m.GetBackendUri())
 		}
-		token, accessExpiresAtUnix, err := a.githubRefresh.MintInitial(ctx, spawnID, generation, ref.GetSecretId(), m.GetRepositoryId())
+		mint, err := a.githubRefresh.MintInitial(ctx, spawnID, generation, ref.GetSecretId(), m.GetRepositoryId())
 		if err != nil {
 			return fmt.Errorf("github mount %q: mint access token: %w", m.GetName(), err)
 		}
 		// Node-only render (containment b): NEVER RenderGitHubAgentCredential here. Host/Login take
-		// their safe defaults (github.com / x-access-token) — the mint response carries no login.
+		// their safe defaults (github.com / x-access-token) — do NOT feed mint.Login into AccessToken
+		// (that field is the git basic-auth username, always "x-access-token", not the commit identity).
+		// mint.Login / mint.UserID are consumed by sp-m859.1 (§1.2 git-identity render), not here.
 		// Note: unlike the delivery path's zeroBytes(pt), Go string values are immutable — zeroing
 		// the local variable is a no-op at the bytes level and is correctly flagged by the linter.
 		// The token goes out of scope at the end of the loop body; that is the defense-in-depth bound.
 		_, rerr := a.mgr.RenderGitHubNodeCredential(spawnID, m.GetName(), githubcred.RenderRequest{
 			Owner:       owner,
 			Repo:        repo,
-			AccessToken: token,
+			AccessToken: mint.Token,
 		})
 		if rerr != nil {
 			return fmt.Errorf("github mount %q: render node credential: %w", m.GetName(), rerr)
@@ -570,7 +572,7 @@ func (a *attacher) mintGitHubMountsAtProvision(ctx context.Context, spawnID stri
 			Generation:          generation,
 			SecretID:            ref.GetSecretId(),
 			RepositoryID:        m.GetRepositoryId(),
-			AccessExpiresAtUnix: accessExpiresAtUnix,
+			AccessExpiresAtUnix: mint.AccessExpiresAtUnix,
 		})
 	}
 	return nil
