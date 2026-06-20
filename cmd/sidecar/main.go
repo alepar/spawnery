@@ -27,7 +27,11 @@ func main() {
 	// the transparent OpenAI passthrough (opencode/goose).
 	mux := http.NewServeMux()
 	mux.Handle("/v1/messages", sidecar.NewMessagesHandler(upstream, key, ov, inflight))
-	mux.Handle("/", sidecar.NewHandler(upstream, key, ov, inflight))
+	h, err := sidecar.NewHandler(upstream, key, ov, inflight)
+	if err != nil {
+		log.Fatalf("sidecar: invalid SIDECAR_UPSTREAM %q: %v", upstream, err)
+	}
+	mux.Handle("/", h)
 
 	// Control server: a second listener on the pod IP (not loopback) so the node can set the
 	// override. Started only when both a token and an address are configured.
