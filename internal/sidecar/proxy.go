@@ -3,6 +3,7 @@ package sidecar
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -15,10 +16,10 @@ import (
 // NewHandler proxies requests to upstream, injecting the bearer key. When ov holds a
 // model override, the top-level "model" of each request body is rewritten to it; when
 // unset the request body is forwarded byte-identical (zero overhead).
-func NewHandler(upstream, key string, ov *Override, trackers ...*Inflight) http.Handler {
+func NewHandler(upstream, key string, ov *Override, trackers ...*Inflight) (http.Handler, error) {
 	defaultTarget, err := url.Parse(upstream)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("parse upstream %q: %w", upstream, err)
 	}
 	inflight := firstInflight(trackers)
 	rp := &httputil.ReverseProxy{}
@@ -78,7 +79,7 @@ func NewHandler(upstream, key string, ov *Override, trackers ...*Inflight) http.
 		inflight.Begin()
 		defer inflight.End()
 		rp.ServeHTTP(w, r)
-	})
+	}), nil
 }
 
 func rewriteProxyRequest(r *http.Request, target *url.URL) {

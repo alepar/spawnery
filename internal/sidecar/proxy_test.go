@@ -12,6 +12,29 @@ import (
 	"testing"
 )
 
+// mustHandler is a test helper that constructs a NewHandler and fatals on error.
+func mustHandler(t *testing.T, upstream, key string, ov *Override, trackers ...*Inflight) http.Handler {
+	t.Helper()
+	h, err := NewHandler(upstream, key, ov, trackers...)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	return h
+}
+
+func TestNewHandlerBadUpstream(t *testing.T) {
+	// url.Parse rejects control characters; \x7f (DEL) reliably triggers
+	// "net/url: invalid control character in URL".
+	badURL := "http://\x7f"
+	h, err := NewHandler(badURL, "k", &Override{})
+	if err == nil {
+		t.Fatal("expected error for control-character URL, got nil")
+	}
+	if h != nil {
+		t.Fatal("expected nil handler on error, got non-nil")
+	}
+}
+
 func TestProxyInjectsKeyAndRewritesUpstream(t *testing.T) {
 	var gotAuth, gotPath string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -21,7 +44,7 @@ func TestProxyInjectsKeyAndRewritesUpstream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := NewHandler(upstream.URL, "secret-key", &Override{})
+	h := mustHandler(t, upstream.URL, "secret-key", &Override{})
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -50,7 +73,7 @@ func TestProxyPassesThroughUpstreamErrorBody(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := httptest.NewServer(NewHandler(upstream.URL, "k", &Override{}))
+	srv := httptest.NewServer(mustHandler(t, upstream.URL, "k", &Override{}))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"x"}`))
@@ -84,7 +107,7 @@ func TestProxyRedactsCredentialFromUpstreamError(t *testing.T) {
 	if err := ov.SetCredentials(upstream.URL, "byok-key"); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(NewHandler("http://default.invalid", "default-key", ov))
+	srv := httptest.NewServer(mustHandler(t, "http://default.invalid", "default-key", ov))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"x"}`))
@@ -114,7 +137,7 @@ func TestProxyOverrideUnsetByteIdentical(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := httptest.NewServer(NewHandler(upstream.URL, "k", &Override{}))
+	srv := httptest.NewServer(mustHandler(t, upstream.URL, "k", &Override{}))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(sent))
@@ -140,7 +163,7 @@ func TestProxyOverrideSetRewritesModel(t *testing.T) {
 
 	ov := &Override{}
 	ov.Set("override/model")
-	srv := httptest.NewServer(NewHandler(upstream.URL, "k", ov))
+	srv := httptest.NewServer(mustHandler(t, upstream.URL, "k", ov))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json",
@@ -182,7 +205,7 @@ func TestProxyOverrideAppliesToResponsesAPI(t *testing.T) {
 
 	ov := &Override{}
 	ov.Set("override/model")
-	srv := httptest.NewServer(NewHandler(upstream.URL, "k", ov))
+	srv := httptest.NewServer(mustHandler(t, upstream.URL, "k", ov))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/responses", "application/json",
@@ -228,7 +251,7 @@ func TestProxyStreamingPassthroughAfterRewrite(t *testing.T) {
 
 	ov := &Override{}
 	ov.Set("override/model")
-	srv := httptest.NewServer(NewHandler(upstream.URL, "k", ov))
+	srv := httptest.NewServer(mustHandler(t, upstream.URL, "k", ov))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json",
@@ -263,7 +286,7 @@ func TestProxyCredentialsOverrideAppliesPerRequest(t *testing.T) {
 	if err := ov.SetCredentials(overrideUpstream.URL, "byok-key"); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(NewHandler(defaultUpstream.URL, "default-key", ov))
+	srv := httptest.NewServer(mustHandler(t, defaultUpstream.URL, "default-key", ov))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json",
@@ -295,7 +318,7 @@ func TestProxyTracksInflightUntilResponseCompletes(t *testing.T) {
 	defer upstream.Close()
 
 	inflight := NewInflight()
-	srv := httptest.NewServer(NewHandler(upstream.URL, "k", &Override{}, inflight))
+	srv := httptest.NewServer(mustHandler(t, upstream.URL, "k", &Override{}, inflight))
 	defer srv.Close()
 
 	var wg sync.WaitGroup
