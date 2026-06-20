@@ -23,8 +23,9 @@ func TestRecoverInterceptor_Unary_Panic(t *testing.T) {
 	interceptor := rpclog.RecoverInterceptor("test")
 
 	var buf bytes.Buffer
+	orig := log.Writer()
 	log.SetOutput(&buf)
-	defer log.SetOutput(nil) // restore to stderr
+	defer log.SetOutput(orig)
 
 	panicHandler := connect.UnaryFunc(func(_ context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
 		panic("boom")
@@ -55,8 +56,9 @@ func TestRecoverInterceptor_Streaming_Panic(t *testing.T) {
 	interceptor := rpclog.RecoverInterceptor("test")
 
 	var buf bytes.Buffer
+	orig := log.Writer()
 	log.SetOutput(&buf)
-	defer log.SetOutput(nil)
+	defer log.SetOutput(orig)
 
 	panicHandler := connect.StreamingHandlerFunc(func(_ context.Context, _ connect.StreamingHandlerConn) error {
 		panic("stream-boom")
