@@ -23,6 +23,7 @@ default:
 # spawnlet, foreground. agent = agent (opencode, default) | stub
 spawnlet agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
+    SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
     DATA_ROOT={{data_root}} SPAWNLET_ADDR={{addr}} \
@@ -49,6 +50,7 @@ authsvc:
 node agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
+    SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
@@ -143,6 +145,7 @@ authsvc-enforced:
 # node with enforced auth: pre-provisioned identity from .dev-ca/node, mTLS to the CP node listener.
 node-enforced agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
+    SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     CP_ADDR=http://{{addr_cp}} NODE_AUTH_MODE=enforced \
     CP_NODE_ADDR=https://{{addr_cp_node}} NODE_ID=node-1 NODE_ID_DIR={{devca}}/node \
@@ -209,6 +212,7 @@ cp-github:
 node-github agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
+    SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_AUTH_MODE=enforced \

@@ -5,13 +5,123 @@ import (
 	"strings"
 	"testing"
 
+	configfiles "spawnery/config"
+	"spawnery/internal/config"
 	"spawnery/internal/spawnlet"
 )
+
+// loadSpawnletTest is a test helper that calls config.Load[Spawnlet] with an injected getenv map
+// and optional --set overrides, bypassing SPAWNERY_ENV and the real process environment.
+func loadSpawnletTest(t *testing.T, env string, getenv map[string]string, sets ...string) (*Spawnlet, error) {
+	t.Helper()
+	return config.Load[Spawnlet]("spawnlet", config.Options{
+		Args:       []string{"--env=" + env},
+		Getenv:     func(k string) (string, bool) { v, ok := getenv[k]; return v, ok },
+		Embedded:   configfiles.FS,
+		SecretsFS:  configfiles.FS,
+		EnvAliases: spawnletEnvAliases,
+		Sets:       sets,
+	})
+}
+
+// --- config-framework tests -----------------------------------------------
+
+func TestSpawnletConfig_Defaults(t *testing.T) {
+	cfg, err := loadSpawnletTest(t, "dev", nil)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.AgentImage != "spawnery/stubagent:dev" {
+		t.Errorf("AgentImage = %q", cfg.AgentImage)
+	}
+	if cfg.DataRoot != "/var/lib/spawnlet/spawns" {
+		t.Errorf("DataRoot = %q", cfg.DataRoot)
+	}
+	if cfg.Node.ID != "node-1" || cfg.Node.Class != "cloud" {
+		t.Errorf("Node = %s/%s", cfg.Node.ID, cfg.Node.Class)
+	}
+	if !cfg.Egress.Enforce {
+		t.Error("Egress.Enforce should default to true")
+	}
+	if cfg.Limits.MemMB != 1024 || cfg.Limits.CPU != 1.0 || cfg.Limits.Pids != 256 {
+		t.Errorf("Limits = %d/%f/%d", cfg.Limits.MemMB, cfg.Limits.CPU, cfg.Limits.Pids)
+	}
+	if cfg.CRI.Endpoint != "unix:///run/containerd/containerd.sock" {
+		t.Errorf("CRI.Endpoint = %q", cfg.CRI.Endpoint)
+	}
+	if cfg.Journal.Backend != "" {
+		t.Errorf("Journal.Backend should default to empty (disabled), got %q", cfg.Journal.Backend)
+	}
+	if cfg.Journal.S3.Region != "garage" {
+		t.Errorf("Journal.S3.Region = %q, want garage", cfg.Journal.S3.Region)
+	}
+	if cfg.Node.AuthMode != "insecure" {
+		t.Errorf("Node.AuthMode = %q, want insecure", cfg.Node.AuthMode)
+	}
+	if cfg.CP.Addr != "" {
+		t.Errorf("CP.Addr should default to empty (standalone mode), got %q", cfg.CP.Addr)
+	}
+}
+
+func TestSpawnletConfig_EnvAliasOverride(t *testing.T) {
+	cfg, err := loadSpawnletTest(t, "dev", map[string]string{
+		"NODE_ID":        "node-prod-1",
+		"NODE_CLASS":     "self-hosted",
+		"MEM_LIMIT_MB":   "2048",
+		"EGRESS_ENFORCE": "false",
+		"CP_ADDR":        "http://cp.example.com:8080",
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Node.ID != "node-prod-1" {
+		t.Errorf("Node.ID = %q (NODE_ID alias should win over file)", cfg.Node.ID)
+	}
+	if cfg.Node.Class != "self-hosted" {
+		t.Errorf("Node.Class = %q", cfg.Node.Class)
+	}
+	if cfg.Limits.MemMB != 2048 {
+		t.Errorf("Limits.MemMB = %d, want 2048 (string env coerced to int64)", cfg.Limits.MemMB)
+	}
+	if cfg.Egress.Enforce {
+		t.Error("Egress.Enforce should be false when EGRESS_ENFORCE=false")
+	}
+	if cfg.CP.Addr != "http://cp.example.com:8080" {
+		t.Errorf("CP.Addr = %q", cfg.CP.Addr)
+	}
+}
+
+func TestSpawnletConfig_SetOverride(t *testing.T) {
+	cfg, err := loadSpawnletTest(t, "dev", nil, "node.auth_mode=enforced", "limits.pids=512")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Node.AuthMode != "enforced" {
+		t.Errorf("Node.AuthMode = %q, want enforced (--set)", cfg.Node.AuthMode)
+	}
+	if cfg.Limits.Pids != 512 {
+		t.Errorf("Limits.Pids = %d, want 512 (--set)", cfg.Limits.Pids)
+	}
+}
+
+func TestSpawnletConfig_CSVAgentBinaries(t *testing.T) {
+	cfg, err := loadSpawnletTest(t, "dev", map[string]string{
+		"AGENT_BINARIES": "opencode,goose,claude-code",
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.AgentBinaries) != 3 || cfg.AgentBinaries[0] != "opencode" {
+		t.Errorf("AgentBinaries = %v, want [opencode goose claude-code]", cfg.AgentBinaries)
+	}
+}
+
+// --- buildManager / applyUsernsProbe tests --------------------------------
 
 func TestBuildManagerRunscPath(t *testing.T) {
 	m, err := buildManager(spawnlet.ManagerConfig{
 		ContainerRuntime: "runsc", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
-	})
+	}, "", "", nil)
 	if err != nil {
 		t.Fatalf("runsc buildManager: %v", err)
 	}
@@ -23,7 +133,7 @@ func TestBuildManagerRunscPath(t *testing.T) {
 func TestBuildManagerDockerDefault(t *testing.T) {
 	m, err := buildManager(spawnlet.ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
-	})
+	}, "", "", nil)
 	if err != nil {
 		t.Fatalf("docker buildManager: %v", err)
 	}
@@ -65,6 +175,10 @@ func TestApplyUsernsProbe(t *testing.T) {
 	}
 }
 
+// --- configureJournal tests -----------------------------------------------
+// These tests set env vars via t.Setenv because configureJournal reads JOURNAL_*
+// directly from the process environment (see its doc-comment for the rationale).
+
 func TestConfigureJournalS3WithGarageAdminDoesNotRequireStaticBucketCredentials(t *testing.T) {
 	t.Setenv("JOURNAL_BACKEND", "s3")
 	t.Setenv("JOURNAL_S3_ENDPOINT", "http://127.0.0.1:3900")
@@ -74,7 +188,7 @@ func TestConfigureJournalS3WithGarageAdminDoesNotRequireStaticBucketCredentials(
 
 	m, err := buildManager(spawnlet.ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
-	})
+	}, "", "", nil)
 	if err != nil {
 		t.Fatalf("build manager: %v", err)
 	}
@@ -85,6 +199,10 @@ func TestConfigureJournalS3WithGarageAdminDoesNotRequireStaticBucketCredentials(
 		t.Fatal("nil manager")
 	}
 }
+
+// --- nodeGitHubMint tests -------------------------------------------------
+// These tests set env vars via t.Setenv because nodeGitHubMint reads env vars
+// directly from the process environment (see its doc-comment for the rationale).
 
 func TestNodeGitHubMint_RelaxedDevClient(t *testing.T) {
 	t.Setenv("NODE_GITHUB_MINT_DEV_NODE_ID", "node-1")
@@ -119,7 +237,7 @@ func TestConfigureJournalS3FailsClosedWithoutGarageAdmin(t *testing.T) {
 
 	m, err := buildManager(spawnlet.ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
-	})
+	}, "", "", nil)
 	if err != nil {
 		t.Fatalf("build manager: %v", err)
 	}
