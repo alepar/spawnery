@@ -176,11 +176,8 @@ authsvc-github:
     AS_GITHUB_TOKEN_ENC_KEY="$(printf %s 'spawnery-dev-github-mount-enck32' | base64)" \
     GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in .env (GitHub App client_id)}" \
     GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in .env}" \
-    AS_GITHUB_REDIRECT_URI=${AS_GITHUB_REDIRECT_URI:-{{dev_web_origin}}/oauth/callback} \
-    AS_GITHUB_LINK_REDIRECT_URI=${AS_GITHUB_LINK_REDIRECT_URI:-{{dev_web_origin}}/github/link/callback} \
+    AS_PUBLIC_URL={{dev_web_origin}} \
     AS_REDIRECT_URIS=http://127.0.0.1/cb,{{dev_web_origin}}/callback,http://localhost:5173/callback \
-    AS_SPA_ORIGINS={{dev_web_origin}} \
-    AS_ALLOWED_ORIGINS={{dev_web_origin}} \
     AS_CP_URL=http://{{addr_cp}} \
     AS_CP_RPC_SECRET=dev-as-cp-secret \
     AS_DEV_RELAX_NODE_AUTH=1 \

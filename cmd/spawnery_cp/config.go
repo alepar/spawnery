@@ -57,6 +57,14 @@ type CP struct {
 // DevMode reports whether the CP runs in dev (permissive) auth mode.
 func (c CP) DevMode() bool { return c.Auth.Mode != "prod" }
 
+// derive fills origin/callback fields from Common.PublicURL when they are left empty. An explicit
+// value always wins; an empty PublicURL leaves the field at its own default (dev-permissive CORS).
+func (c *CP) derive() {
+	if c.PublicURL != "" && c.AllowedOrigins == "" {
+		c.AllowedOrigins = c.PublicURL
+	}
+}
+
 // Validate runs cross-field checks beyond the struct tags.
 func (c CP) Validate() error {
 	if err := c.Common.Validate(); err != nil { // explicit: method promotion would shadow it
@@ -75,6 +83,7 @@ func (c CP) Validate() error {
 // deployments keep working unchanged (the env layer sits above the files). New knobs are reached
 // via these names or CLI --set.
 var cpEnvAliases = map[string]string{
+	"CP_PUBLIC_URL":               "public_url",
 	"CP_LISTEN":                   "listen",
 	"CP_ALLOWED_ORIGINS":          "allowed_origins",
 	"CP_STORE_DRIVER":             "store.driver",

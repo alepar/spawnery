@@ -63,6 +63,39 @@ type AS struct {
 	DevRelaxNodeAuth bool `koanf:"dev_relax_node_auth"`
 }
 
+// derive fills origin/callback/redirect fields from Common.PublicURL when they are left empty. An
+// explicit value always wins; the GitHub callback URLs derive only when GitHub is configured
+// (client_id set), so a deployment without GitHub never silently activates the link flow.
+func (c *AS) derive() {
+	o := c.PublicURL
+	if o == "" {
+		return
+	}
+	if c.AllowedOrigins == "" {
+		c.AllowedOrigins = o
+	}
+	if c.SPAOrigins == "" {
+		c.SPAOrigins = o
+	}
+	if c.RedirectURIs == "" {
+		// The SPA post-login callback (derived) plus the spawnctl loopback login redirect, which
+		// the AS port-relaxes (RFC 8252 §7.3) — without it, CLI login would have no registered
+		// loopback and break. Path /cb matches cmd/spawnctl/login.go.
+		c.RedirectURIs = o + "/callback,http://127.0.0.1/cb"
+	}
+	if c.VerificationURI == "" {
+		c.VerificationURI = o + "/device/verify"
+	}
+	if c.GitHub.ClientID != "" {
+		if c.GitHub.RedirectURI == "" {
+			c.GitHub.RedirectURI = o + "/oauth/callback"
+		}
+		if c.GitHub.LinkRedirectURI == "" {
+			c.GitHub.LinkRedirectURI = o + "/github/link/callback"
+		}
+	}
+}
+
 // Validate runs cross-field checks beyond the struct tags.
 func (c AS) Validate() error {
 	if err := c.Common.Validate(); err != nil {
@@ -93,6 +126,7 @@ func (c AS) Validate() error {
 // asEnvAliases maps existing AS_* and bare GITHUB_* environment variable names to dotted config
 // keys, so current deployments keep working unchanged (the env layer sits above the files).
 var asEnvAliases = map[string]string{
+	"AS_PUBLIC_URL":                  "public_url",
 	"AS_DEV":                         "dev",
 	"AS_FAKE_GITHUB":                 "fake_github",
 	"AS_LISTEN":                      "listen",

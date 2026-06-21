@@ -104,7 +104,7 @@ func loadConfig() (*AS, error) {
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return nil, err
 	}
-	return config.Load[AS]("authsvc", config.Options{
+	cfg, err := config.Load[AS]("authsvc", config.Options{
 		Args:        os.Args[1:],
 		Embedded:    configfiles.FS,
 		SecretsFS:   configfiles.FS,
@@ -112,6 +112,11 @@ func loadConfig() (*AS, error) {
 		EnvAliases:  asEnvAliases,
 		Sets:        []string(sets),
 	})
+	if err != nil {
+		return nil, err
+	}
+	cfg.derive()
+	return cfg, nil
 }
 
 func main() {
