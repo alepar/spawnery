@@ -13,9 +13,9 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
