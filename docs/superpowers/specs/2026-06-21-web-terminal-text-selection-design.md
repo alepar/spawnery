@@ -79,20 +79,42 @@ Mac-only effect (the option is read only inside the `isMac` branch); harmless on
 export async function writeClipboard(text: string): Promise<boolean>
 ```
 Implementation: if `window.isSecureContext && navigator.clipboard`, `await
-navigator.clipboard.writeText(text)`; on absence/throw, create an off-screen `<textarea>`, set its
-value, `select()`, `document.execCommand('copy')`, remove it; return whether either path succeeded.
+navigator.clipboard.writeText(text)`; on absence/throw, create an **off-screen** `<textarea>`
+(positioned via `position:fixed` + `opacity:0` / off-viewport coords — **never `display:none`**,
+which makes `execCommand('copy')` a no-op because the textarea must be rendered and selectable),
+set its value, `select()`, `document.execCommand('copy')`, remove it; return whether either path
+succeeded.
+
+> **Focus caveat (the helper does not own this):** the `execCommand` path moves DOM focus to the
+> temporary textarea. Focus restoration is the *caller's* responsibility (see §3) — the helper
+> stays focus-agnostic.
 
 ### 3. Copy-on-select wiring
-Attach a `mouseup` listener to the host element (registered/disposed inside the existing
-spawnId-keyed effect, alongside the other listeners). On mouseup, if `term.hasSelection()`, read
-`term.getSelection()` and `void writeClipboard(sel)`; on success, trigger the "Copied" flash.
-Using `mouseup` (not `onSelectionChange`) copies once per completed drag and avoids clobbering the
+Bind the `mouseup` listener on **`document`** (not the host `<div>`), registered/disposed inside
+the existing spawnId-keyed effect alongside the other listeners. **Document-level is required:**
+xterm.js itself finalizes drag-selection on a document-level mouseup (its `SelectionService`
+registers mousemove/mouseup on `ownerDocument`) precisely so a drag that *releases outside the
+terminal* — past the top/side edge, over the hint badge, into a sibling panel — still completes. A
+host-bound listener silently misses those (very common) gestures: the selection appears but copy
+never fires. The handler is gated on `term.hasSelection()` so unrelated document clicks are ignored.
+
+On mouseup with a selection: capture `const prevFocus = document.activeElement`, read
+`term.getSelection()`, `await writeClipboard(sel)`; **then restore focus** — if the secure path was
+taken, focus never left; if the `execCommand` fallback ran, focus is on `<body>`, so call
+`term.focus()` (or restore `prevFocus` when it was inside the terminal) so keystrokes keep reaching
+the TUI. **This focus restore is load-bearing on the plain-HTTP LAN path** (the spec's primary
+case), where the fallback is the *only* path. On success, trigger the "Copied" flash. Using
+`mouseup` (not `onSelectionChange`) copies once per completed drag and avoids clobbering the
 clipboard mid-drag.
 
 ### 4. Quiet hint + flash
 Wrap the bare host `<div>` in a `relative` container and add an absolutely-positioned corner badge:
-- Platform detection: `const isMac = /Mac|iPhone|iPad/.test(navigator.platform) ||
-  navigator.userAgent.includes("Macintosh")`.
+- Platform detection — **derive from the same signal xterm's gate uses** so the badge can't
+  advertise a gesture the selection code won't honor. xterm's internal `isMac` is
+  `navigator.userAgentData?.platform === 'macOS'` falling back to a `Macintosh` userAgent test, so
+  the badge uses the same: `const isMac = navigator.userAgentData?.platform === "macOS" ||
+  /Mac/.test(navigator.userAgent)`. (Residual minor: a spoofed/edge UA mismatches the gate, but
+  both detectors now read the same source, so they move together.)
 - Text: `isMac ? "⌥ drag to select" : "Shift+drag to select"`.
 - On a successful copy, swap the text to `"Copied"` for ~1.2s (a ref-tracked timeout, cleared on
   unmount), then revert.
@@ -105,6 +127,11 @@ Wrap the bare host `<div>` in a `relative` container and add an absolutely-posit
   elsewhere yields the selected text. Works on both localhost/HTTPS **and** a plain-HTTP LAN IP
   (fallback path).
 - **Linux:** `Shift+drag` selects and copies (it already selected; copy-on-select is the new part).
+- **Drag released outside the terminal:** a selection that starts inside the terminal and ends with
+  the button released *outside* the host div (past an edge, over the badge, in a sibling panel)
+  still copies — verifying the document-level mouseup binding (roast finding #1).
+- **Focus survives a LAN copy:** on a plain-HTTP LAN IP, copy-on-select then immediately type —
+  keystrokes still reach the TUI (focus restored after the `execCommand` fallback; roast finding #2).
 - Wheel scrolling through tmux scrollback is unchanged.
 - The hint is visible but unobtrusive and shows the correct platform gesture; it flashes "Copied"
   on copy.
