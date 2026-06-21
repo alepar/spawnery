@@ -3,7 +3,6 @@ package cp
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -14,6 +13,7 @@ import (
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/telemetry"
+	slogctx "spawnery/internal/log"
 	"spawnery/internal/weborigin"
 )
 
@@ -84,9 +84,12 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 			sessionID = "0" // default to session #0 (backward compat with single-session clients)
 		}
 
-		// Per-session context for revocation cancellation.
+		// Per-session context for revocation cancellation; enriched with correlation IDs so all
+		// logging within the session includes spawn_id and session_id automatically.
 		sessCtx, sessCancel := context.WithCancel(ctx)
 		defer sessCancel()
+		sessCtx = slogctx.WithSpawnID(sessCtx, bind.SpawnID)
+		sessCtx = slogctx.WithSessionID(sessCtx, sessionID)
 
 		// Track current session registration; swapped on token rotation to release the old id promptly.
 		var (
@@ -111,12 +114,13 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 			if merr := proto.Unmarshal(bind.SignedIntent, &si); merr == nil {
 				sessionEnv = s.mintSessionEnv(owner, &authv1.AuthEnvelope{Intent: &si})
 			} else {
-				log.Printf("ws: bind frame signedIntent unmarshal failed: %v", merr)
+				slogctx.FromContext(sessCtx).Warn("ws: bind frame signedIntent unmarshal failed", "err", merr)
 			}
 		}
 		cs := wsClient{conn: conn, ctx: sessCtx}
 		done, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, owner, sessionEnv, cs, bind.Cursor)
 		if err != nil {
+			slogctx.FromContext(sessCtx).Error("ws: session attach failed", "err", err)
 			conn.Close(websocket.StatusInternalError, "attach failed")
 			return
 		}
@@ -169,7 +173,7 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 								recvErr <- struct{}{}
 								return
 							}
-							log.Printf("ws reauth failed (dev-tolerant): %v", verr)
+							slogctx.FromContext(sessCtx).Warn("ws reauth failed (dev-tolerant)", "err", verr)
 						} else {
 							// Re-register under new token_id; release old so only one id is active.
 							if s.sessions != nil && newID.TokenID != "" && newID.TokenID != identity.TokenID {

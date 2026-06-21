@@ -3,11 +3,12 @@ package rpclog
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"runtime/debug"
 
 	"connectrpc.com/connect"
+
+	slogctx "spawnery/internal/log"
 )
 
 // RecoverInterceptor returns a Connect interceptor that recovers from handler panics, converts
@@ -30,7 +31,7 @@ func (r *recoverInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc
 				if rec == http.ErrAbortHandler {
 					panic(rec) //nolint:forbidigo // intentional re-panic for net/http abort semantics
 				}
-				slog.Error("rpc-panic",
+				slogctx.FromContext(ctx).Error("rpc-panic",
 					"component", r.component,
 					"procedure", req.Spec().Procedure,
 					"panic", fmt.Sprintf("%v", rec),
@@ -55,7 +56,7 @@ func (r *recoverInterceptor) WrapStreamingHandler(next connect.StreamingHandlerF
 				if rec == http.ErrAbortHandler {
 					panic(rec) //nolint:forbidigo // intentional re-panic for net/http abort semantics
 				}
-				slog.Error("rpc-panic",
+				slogctx.FromContext(ctx).Error("rpc-panic",
 					"component", r.component,
 					"procedure", conn.Spec().Procedure+" (stream)",
 					"panic", fmt.Sprintf("%v", rec),

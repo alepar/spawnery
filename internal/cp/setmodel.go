@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +15,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/store"
+	slogctx "spawnery/internal/log"
 )
 
 // defaultSetModelPushTimeout bounds the inline best-effort SetModel push: a single attempt waiting
@@ -84,6 +84,7 @@ func (s *Server) SetSpawnModel(ctx context.Context, req *connect.Request[cpv1.Se
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("model must not be empty"))
 	}
 	spawnID := req.Msg.SpawnId
+	ctx = slogctx.WithSpawnID(ctx, spawnID)
 
 	unlock := s.locks.Lock(spawnID)
 	defer unlock()
@@ -95,6 +96,8 @@ func (s *Server) SetSpawnModel(ctx context.Context, req *connect.Request[cpv1.Se
 	if sp.OwnerID != owner {
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
 	}
+
+	slogctx.FromContext(ctx).Info("SetSpawnModel: changing model", "old_model", sp.Model, "new_model", model)
 
 	// Durable source of truth: write model + model_applied=false in one atomic store update.
 	if err := s.st.Spawns().SetModel(ctx, spawnID, model); err != nil {
@@ -122,7 +125,7 @@ func (s *Server) pushModel(ctx context.Context, spawnID, model string) bool {
 		// and the reconciler — which scans model_applied=false — would never fix it). Record the
 		// failure and report applied=false so the reconciler retries.
 		if merr := s.st.Spawns().MarkModelApplyFailed(storeCtx, spawnID, fmt.Sprintf("check live pod: %v", err)); merr != nil {
-			log.Printf("SetSpawnModel %s: MarkModelApplyFailed (live check error): %v", spawnID, merr)
+			slogctx.FromContext(ctx).Error("SetSpawnModel: MarkModelApplyFailed (live check error)", "err", merr)
 		}
 		return false
 	}
@@ -130,7 +133,7 @@ func (s *Server) pushModel(ctx context.Context, spawnID, model string) bool {
 		// No running pod (suspended/stopped/terminal) — nothing to diverge. Resume/recreate bakes the
 		// DB model into the fresh pod, so treat as already applied.
 		if merr := s.st.Spawns().MarkModelApplied(storeCtx, spawnID); merr != nil {
-			log.Printf("SetSpawnModel %s: MarkModelApplied (no live pod): %v", spawnID, merr)
+			slogctx.FromContext(ctx).Error("SetSpawnModel: MarkModelApplied (no live pod)", "err", merr)
 		}
 		return true
 	}
@@ -139,7 +142,7 @@ func (s *Server) pushModel(ctx context.Context, spawnID, model string) bool {
 		// Pod is running but its node is not currently connected (unreachable). Can't push now; leave
 		// model_applied=false so the reconciler re-pushes on reconnect.
 		if merr := s.st.Spawns().MarkModelApplyFailed(storeCtx, spawnID, "no connected node hosting spawn"); merr != nil {
-			log.Printf("SetSpawnModel %s: MarkModelApplyFailed (no node): %v", spawnID, merr)
+			slogctx.FromContext(ctx).Error("SetSpawnModel: MarkModelApplyFailed (no node)", "err", merr)
 		}
 		return false
 	}
@@ -155,7 +158,7 @@ func (s *Server) pushModel(ctx context.Context, spawnID, model string) bool {
 		SpawnId: spawnID, Generation: uint64(c.Generation), Model: model, RequestId: requestID,
 	}}}); err != nil {
 		if merr := s.st.Spawns().MarkModelApplyFailed(storeCtx, spawnID, fmt.Sprintf("push send failed: %v", err)); merr != nil {
-			log.Printf("SetSpawnModel %s: MarkModelApplyFailed (send): %v", spawnID, merr)
+			slogctx.FromContext(ctx).Error("SetSpawnModel: MarkModelApplyFailed (send)", "err", merr)
 		}
 		return false
 	}
@@ -166,7 +169,7 @@ func (s *Server) pushModel(ctx context.Context, spawnID, model string) bool {
 	case res := <-ch:
 		if res.GetOk() {
 			if merr := s.st.Spawns().MarkModelApplied(storeCtx, spawnID); merr != nil {
-				log.Printf("SetSpawnModel %s: MarkModelApplied (ack ok): %v", spawnID, merr)
+				slogctx.FromContext(ctx).Error("SetSpawnModel: MarkModelApplied (ack ok)", "err", merr)
 				return false
 			}
 			return true
@@ -176,12 +179,12 @@ func (s *Server) pushModel(ctx context.Context, spawnID, model string) bool {
 			detail = "node reported failure"
 		}
 		if merr := s.st.Spawns().MarkModelApplyFailed(storeCtx, spawnID, detail); merr != nil {
-			log.Printf("SetSpawnModel %s: MarkModelApplyFailed (ack not-ok): %v", spawnID, merr)
+			slogctx.FromContext(ctx).Error("SetSpawnModel: MarkModelApplyFailed (ack not-ok)", "err", merr)
 		}
 		return false
 	case <-wait.Done():
 		if merr := s.st.Spawns().MarkModelApplyFailed(storeCtx, spawnID, "timeout waiting for node ack"); merr != nil {
-			log.Printf("SetSpawnModel %s: MarkModelApplyFailed (timeout): %v", spawnID, merr)
+			slogctx.FromContext(ctx).Error("SetSpawnModel: MarkModelApplyFailed (timeout)", "err", merr)
 		}
 		return false
 	}

@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 
 	"spawnery/internal/authsvc/token"
+	slogctx "spawnery/internal/log"
 )
 
 // Sentinel errors for machine-readable caller dispatch.
@@ -108,6 +109,7 @@ type ownerKey struct{}
 func WithIdentity(ctx context.Context, id Identity) context.Context {
 	ctx = context.WithValue(ctx, identityKey{}, id)
 	ctx = context.WithValue(ctx, ownerKey{}, id.Owner)
+	ctx = slogctx.WithOwnerID(ctx, id.Owner)
 	return ctx
 }
 
