@@ -5,6 +5,7 @@ import (
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/cp/cpmetrics"
 )
 
 type fakeSender struct{ sent []*nodev1.CPMessage }
@@ -136,6 +137,45 @@ func TestPickForImage(t *testing.T) {
 	}
 	if n := r.PickFor(Placement{}); n == nil {
 		t.Fatalf("empty placement should still pick a node")
+	}
+}
+
+// TestMetricsSnapshot verifies that MetricsSnapshot tallies node count and free slots per class.
+func TestMetricsSnapshot(t *testing.T) {
+	r := New()
+	r.Add(&Node{ID: "c1", Class: "cloud", Free: 3})
+	r.Add(&Node{ID: "c2", Class: "cloud", Free: 5})
+	r.Add(&Node{ID: "sh1", Class: "self-hosted", Free: 2})
+
+	snap := r.MetricsSnapshot()
+
+	want := map[string]cpmetrics.NodeClassStat{
+		"cloud":       {Nodes: 2, FreeSlots: 8},
+		"self-hosted": {Nodes: 1, FreeSlots: 2},
+	}
+	for class, ws := range want {
+		gs, ok := snap[class]
+		if !ok {
+			t.Errorf("class %q missing from snapshot", class)
+			continue
+		}
+		if gs.Nodes != ws.Nodes || gs.FreeSlots != ws.FreeSlots {
+			t.Errorf("class %q: got {Nodes:%d FreeSlots:%d}, want {Nodes:%d FreeSlots:%d}",
+				class, gs.Nodes, gs.FreeSlots, ws.Nodes, ws.FreeSlots)
+		}
+	}
+	if len(snap) != len(want) {
+		t.Errorf("snapshot has %d classes, want %d", len(snap), len(want))
+	}
+}
+
+// TestMetricsSnapshotDefaultClass verifies that nodes with no Class set are bucketed as "default".
+func TestMetricsSnapshotDefaultClass(t *testing.T) {
+	r := New()
+	r.Add(&Node{ID: "n1", Class: "", Free: 4})
+	snap := r.MetricsSnapshot()
+	if s, ok := snap["default"]; !ok || s.Nodes != 1 || s.FreeSlots != 4 {
+		t.Errorf("empty-class node should appear as 'default': %+v", snap)
 	}
 }
 

@@ -158,6 +158,10 @@ type SpawnRepo interface {
 	// calling here — this method guards only on status to keep the store layer simple.
 	ReconcileSuspendedAfterError(ctx context.Context, id string) error
 
+	// CountByStatus returns the number of non-deleted spawns per status.
+	// Deleted rows are excluded (soft-delete; the set is unbounded and not meaningful for gauges).
+	CountByStatus(ctx context.Context) (map[Status]int, error)
+
 	// ListLiveByProfileIDs returns non-deleted spawns whose profile_id is in the given set,
 	// ordered by id ASC (deterministic). Returns nil, nil when profileIDs is empty (no query).
 	// Used by the kill-switch (sp-nrzf.3.9) to find spawns to terminate on catalog revoke.

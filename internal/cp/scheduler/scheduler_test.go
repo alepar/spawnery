@@ -9,6 +9,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
+	"spawnery/internal/metrics"
 )
 
 type fakeSender struct {
@@ -306,6 +307,109 @@ func TestProvisionThreadsArtifacts(t *testing.T) {
 	}
 	if got.Artifacts[1].Id != "s1" || !got.Artifacts[1].Sensitive || got.Artifacts[1].EnvVarName != "TOK" {
 		t.Fatalf("s1 wrong: %+v", got.Artifacts[1])
+	}
+}
+
+// counterDelta snaps a labeled counter's value, runs f, and returns the delta.
+// Reads from metrics.Registry (where cpmetrics registers on init).
+// Counters accumulate across all tests in the binary, so we always use deltas.
+func counterDelta(t *testing.T, metricName, labelKey, labelVal string, f func()) float64 {
+	t.Helper()
+	before := gatherLabeledValue(t, metricName, labelKey, labelVal)
+	f()
+	after := gatherLabeledValue(t, metricName, labelKey, labelVal)
+	return after - before
+}
+
+func gatherLabeledValue(t *testing.T, metricName, labelKey, labelVal string) float64 {
+	t.Helper()
+	mfs, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != metricName {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == labelKey && lp.GetValue() == labelVal {
+					if c := m.GetCounter(); c != nil {
+						return c.GetValue()
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// TestProvisionSuccessCounterDelta verifies PlacementSuccess is incremented exactly once on a
+// successful Provision (ACTIVE path), and that PickNodeID does NOT increment it.
+// Not parallel: uses process-global counters.
+func TestProvisionSuccessCounterDelta(t *testing.T) {
+	reg := registry.New()
+	rt := router.New()
+	s := New(reg, rt, 2*time.Second)
+
+	send := &fakeSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: send, Max: 1, Free: 1})
+
+	go func() {
+		for {
+			if m := send.first(); m != nil {
+				s.OnStatus(m.GetStart().GetSpawnId(), nodev1.SpawnPhase_ACTIVE, "")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	delta := counterDelta(t, "spawnery_cp_placements_total", "result", "success", func() {
+		if _, err := s.Provision(context.Background(), "sp-metric-ok", "ref", "m", "", "", "", "", 1,
+			registry.Placement{}, nil, nil, "", nil, nil, nil); err != nil {
+			t.Fatalf("Provision: %v", err)
+		}
+	})
+	if delta != 1 {
+		t.Errorf("success counter delta = %v, want 1", delta)
+	}
+}
+
+// TestProvisionNoCapacityCounterDelta verifies PlacementNoCapacity is incremented on the
+// ResourceExhausted path, and that success counter is NOT incremented.
+// Not parallel: uses process-global counters.
+func TestProvisionNoCapacityCounterDelta(t *testing.T) {
+	s := New(registry.New(), router.New(), time.Second)
+
+	noCapDelta := counterDelta(t, "spawnery_cp_placements_total", "result", "no_capacity", func() {
+		_, _ = s.Provision(context.Background(), "sp-nc", "ref", "m", "", "", "", "", 1, registry.Placement{}, nil, nil, "", nil, nil, nil)
+	})
+	if noCapDelta != 1 {
+		t.Errorf("no_capacity counter delta = %v, want 1", noCapDelta)
+	}
+}
+
+// TestPickNodeIDDoesNotCountPlacement verifies PickNodeID (pre-pick) does not bump any
+// placement counter — only Provision (committal) does.
+// Not parallel: uses process-global counters.
+func TestPickNodeIDDoesNotCountPlacement(t *testing.T) {
+	reg := registry.New()
+	reg.Add(&registry.Node{ID: "n1", Sender: &fakeSender{}, Free: 5})
+	s := New(reg, router.New(), time.Second)
+
+	beforeSuccess := gatherLabeledValue(t, "spawnery_cp_placements_total", "result", "success")
+	beforeNoCapacity := gatherLabeledValue(t, "spawnery_cp_placements_total", "result", "no_capacity")
+
+	if _, err := s.PickNodeID(registry.Placement{}); err != nil {
+		t.Fatalf("PickNodeID: %v", err)
+	}
+
+	afterSuccess := gatherLabeledValue(t, "spawnery_cp_placements_total", "result", "success")
+	afterNoCapacity := gatherLabeledValue(t, "spawnery_cp_placements_total", "result", "no_capacity")
+
+	if afterSuccess != beforeSuccess || afterNoCapacity != beforeNoCapacity {
+		t.Error("PickNodeID must not bump any placement counter (it is a non-committal pre-pick)")
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 
 	authv1 "spawnery/gen/auth/v1"
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/cp/cpmetrics"
 	"spawnery/internal/cp/registry"
 )
 
@@ -137,6 +138,8 @@ func (r *Router) FromClient(spawnID, sessionID, clientID string, data []byte) er
 	if !ok {
 		return fmt.Errorf("unknown spawn: %s", spawnID)
 	}
+	// Count outside the lock: prometheus counters are concurrency-safe.
+	cpmetrics.RelayFromClient(len(data))
 	return rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Frame{Frame: &nodev1.Frame{SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Data: data}}})
 }
 
@@ -150,6 +153,9 @@ func (r *Router) FromNode(spawnID, sessionID, clientID string, data []byte) {
 	}
 	r.mu.Unlock()
 	if c != nil {
+		// Count only delivered frames (c != nil). Frames dropped for a detached client are
+		// intentionally uncounted — we track relayed throughput, not drops.
+		cpmetrics.RelayFromNode(len(data))
 		_ = c.Send(data)
 	}
 }
