@@ -438,3 +438,38 @@ explicit. Three spikes (S1–S3) gate the remaining empirical unknowns.
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged
 from the assumptions above — append a dated note here, whether or not a formal debugging skill
 was used.*
+
+**2026-06-20 — spikes S1–S4 all PASS**; gotchas folded into §2/§3.1/§5 and deps pinned (see the
+Spikes section). Core loader, resolvers (env/file/sops), redaction, and validation implemented
+test-first in `internal/config` (sp-0sqa.3/.4/.5/.6).
+
+**2026-06-21 — CP pilot (sp-0sqa.7) landed; deviations from this spec, now the canonical pattern
+for the rollout tasks (.8/.9/.10):**
+- **Per-binary schema lives with the binary** (`cmd/spawnery_cp/config.go`), not centralized in
+  `internal/config` as §1 sketched. `internal/config` holds the generic engine + the shared
+  `Common` type only. Cleaner Go layout; each binary owns its schema, alias table, and flags.
+- **Defaults live in the committed base YAML** (`config/cp.yaml`), not a separate in-code
+  `Defaults` struct. The embedded base file is guaranteed present, so it is the authoritative
+  floor; `Options.Defaults` (the layer-0 `structs.Provider`) stays available but unused here.
+- **The embed co-locates with the files**: `config/embed.go` (`package configfiles`,
+  `//go:embed *.yaml`) exposes the `embed.FS`; binaries pass it as `Options.Embedded` and
+  `Options.SecretsFS`. (`//go:embed` cannot reach a parent dir, so the embed must sit in `config/`.)
+- **`Options.SecretsFS`** was added: when set, `Load` auto-registers the `${sops:}` resolver from
+  `secrets.<env>.sops.yaml` for the active env (absent file = no sops, no error).
+- **Server binaries use stdlib `flag`** for `--env`/`--config-dir`/`--set`, NOT `cliflagv3`.
+  cliflagv3 is for the urfave/cli/v3 CLIs (the `.10` rollout); the CP is not a urfave app, so
+  curated named flags were not added — every knob is reachable via env alias or `--set`.
+- **`Common` is empty for now** (with a no-op `Validate`); fields get promoted into it when a
+  second binary genuinely shares them. `config/common.yaml` is `{}`.
+- **Justfile**: dev CP recipes keep their dev-specific `CP_*` exports (they work via the alias
+  table — the backward-compat story in action) and only add `SPAWNERY_ENV=dev` (the loader is
+  fail-closed). No env-export removal was needed because none of those values moved into a
+  committed file (they are dev-instance-specific).
+- **Prod `${sops:}` demo**: `config/secrets.prod.sops.yaml` ships as committed ciphertext; the
+  decrypt key is gitignored (`config/*.key`) and operator-supplied via `SOPS_AGE_KEY_FILE`.
+  Verified live: prod boot decrypts `store.dsn` then fails validation on missing pubkeys; without
+  the key it fails closed on decrypt.
+- **Minor behavior change**: env vars that were parsed by the old `getenvBool` accepted `yes`;
+  the framework's weak-typed bool decode accepts `1/true/0/false` but not `yes`. Low risk; noted.
+- **Follow-up filed**: `sp-0sqa.12` — `getsops/sops/v3` pulls cloud-KMS SDKs into every binary
+  linking `internal/config`; consider a build-tag/seam if binary size matters.
