@@ -175,6 +175,15 @@ type Server struct {
 	nodeWG       sync.WaitGroup
 	nodeMu       sync.Mutex
 	nodeShutdown bool
+
+	// claimMu guards claimDraining and the claimWG.Add/Wait boundary: withClaim holds claimMu
+	// while checking claimDraining and calling Add(1), so Add can never race with Wait (which is
+	// called only after claimDraining is set to true under claimMu in Shutdown).
+	// claimWG tracks active withClaim ops; Shutdown waits on it after nodeWG drains.
+	// claimDraining gates new claims — callers receive CodeUnavailable while draining.
+	claimMu       sync.Mutex
+	claimDraining bool
+	claimWG       sync.WaitGroup
 }
 
 const (
@@ -318,7 +327,19 @@ func (s *Server) acquireClaim(ctx context.Context, id string) (*spawnClaim, erro
 }
 
 // withClaim acquires the DB claim for spawn id, runs fn under it, then releases the claim.
+// During graceful shutdown (claimDraining=true) it returns CodeUnavailable without taking a
+// lease, so no new claimed work starts after drain begins. Active ops are tracked in claimWG;
+// Shutdown waits on it after nodeWG drains to ensure no spawn stays claimed by the exited CP.
 func (s *Server) withClaim(ctx context.Context, id string, fn func(claimCtx context.Context, leaseID string) error) error {
+	s.claimMu.Lock()
+	if s.claimDraining {
+		s.claimMu.Unlock()
+		return connect.NewError(connect.CodeUnavailable, errors.New("control plane shutting down"))
+	}
+	s.claimWG.Add(1)
+	s.claimMu.Unlock()
+	defer s.claimWG.Done() // outermost defer (registered first, runs last — after claim.Release)
+
 	claim, err := s.acquireClaim(ctx, id)
 	if err != nil {
 		return err
@@ -554,11 +575,20 @@ func mountMarkersToMap(markers []*nodev1.MountMarker) map[string]string {
 }
 
 // Shutdown signals all active Attach (runNode) loops to wind down and waits for them to exit,
-// bounded by ctx. It is idempotent — safe to call multiple times. Returns nil on clean drain,
-// ctx.Err() if the deadline is exceeded before all loops exit.
+// then awaits all in-flight withClaim ops so no spawn stays claimed by the exited CP, bounded
+// by ctx. It is idempotent — safe to call multiple times. Returns nil on clean drain, ctx.Err()
+// if the deadline is exceeded.
+//
+// Drain order: nodeWG first (stops node-message-driven claim creation such as late-suspend
+// reconcile), then claimWG (awaits any in-flight SuspendSpawn/ResumeSpawn that already holds a
+// lease). New claims are rejected with CodeUnavailable from the moment claimDraining is set.
+//
+// Ungraceful death (kill -9 / crash) cannot run this drain path; the DB lease TTL (30s) is the
+// fallback: the next owning CP waits at most one TTL before the stale claim expires and the
+// spawn becomes claimable again.
 //
 // Call order in main: srv.Shutdown(sdCtx) then httpSrv.Shutdown(sdCtx). srv.Shutdown drains
-// the Attach streams; httpSrv.Shutdown stops the listener and drains in-flight unary RPCs.
+// node streams and claim ops; httpSrv.Shutdown stops the listener and drains in-flight unary RPCs.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
 	// Set nodeShutdown under nodeMu before calling Wait. Any runNode that calls Add(1) after
@@ -567,9 +597,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.nodeMu.Lock()
 	s.nodeShutdown = true
 	s.nodeMu.Unlock()
+	// Set claimDraining under claimMu before waiting. Any withClaim that calls Add(1) after
+	// this point will see claimDraining=true and return CodeUnavailable; any that already called
+	// Add(1) is counted in claimWG, so Wait is safe.
+	s.claimMu.Lock()
+	s.claimDraining = true
+	s.claimMu.Unlock()
 	done := make(chan struct{})
 	go func() {
-		s.nodeWG.Wait()
+		s.nodeWG.Wait()  // drain node streams first to stop node-driven claim creation
+		s.claimWG.Wait() // then drain in-flight claims
 		close(done)
 	}()
 	select {
