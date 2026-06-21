@@ -148,7 +148,7 @@ func main() {
 	// Standalone mode (unchanged): inbound spawn.v1 server + /ws.
 	srv := spawnlet.NewServer(mgr)
 	mux := http.NewServeMux()
-	mux.Handle(spawnv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(rpclog.Interceptor("node"))))
+	mux.Handle(spawnv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(metrics.RPCInterceptor(), rpclog.Interceptor("node"))))
 	mux.HandleFunc("/ws/session", srv.HandleWS)
 	mux.HandleFunc("/terminal", srv.HandleTerminal)
 	mux.HandleFunc("/exec", srv.HandleExec)
