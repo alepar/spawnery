@@ -5,10 +5,11 @@ package rpclog
 
 import (
 	"context"
-	"log/slog"
 	"runtime/debug"
 
 	"connectrpc.com/connect"
+
+	slogctx "spawnery/internal/log"
 )
 
 // Interceptor returns a Connect interceptor that logs errors returned by unary and streaming
@@ -30,7 +31,7 @@ func (i *interceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
 		resp, err := next(ctx, req)
 		if err != nil {
-			i.logErr(req.Spec().Procedure, "", err)
+			i.logErr(ctx, req.Spec().Procedure, "", err)
 		}
 		return resp, err
 	}
@@ -45,14 +46,14 @@ func (i *interceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) co
 	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
 		err := next(ctx, conn)
 		if err != nil {
-			i.logErr(conn.Spec().Procedure, " (stream)", err)
+			i.logErr(ctx, conn.Spec().Procedure, " (stream)", err)
 		}
 		return err
 	}
 }
 
-func (i *interceptor) logErr(procedure, kind string, err error) {
-	slog.Error("rpc-error",
+func (i *interceptor) logErr(ctx context.Context, procedure, kind string, err error) {
+	slogctx.FromContext(ctx).Error("rpc-error",
 		"component", i.component,
 		"procedure", procedure+kind,
 		"code", connect.CodeOf(err).String(),
