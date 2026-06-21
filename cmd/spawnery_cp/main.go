@@ -30,6 +30,7 @@ import (
 	"spawnery/internal/cp/scheduler"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
+	"spawnery/internal/h2keepalive"
 	"spawnery/internal/health"
 	applog "spawnery/internal/log"
 	"spawnery/internal/metrics"
@@ -299,7 +300,9 @@ func main() {
 
 	addr := env("CP_LISTEN", "127.0.0.1:8080")
 	log.Printf("cp listening on %s (node-auth mode=%s)", addr, mode)
-	httpSrv := &http.Server{Addr: addr, Handler: h2c.NewHandler(allow.CORS(mux), &http2.Server{})}
+	h2Srv := &http2.Server{}
+	h2keepalive.ConfigureServer(h2Srv)
+	httpSrv := &http.Server{Addr: addr, Handler: h2c.NewHandler(allow.CORS(mux), h2Srv)}
 	serveErr := make(chan error, 1)
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -359,7 +362,9 @@ func buildNodeTLSServer(addr, nodePath string, nodeHandler http.Handler) (*http.
 			NextProtos:   []string{"h2", "http/1.1"},
 		},
 	}
-	if err := http2.ConfigureServer(server, &http2.Server{}); err != nil {
+	nodeTLSH2Srv := &http2.Server{}
+	h2keepalive.ConfigureServer(nodeTLSH2Srv)
+	if err := http2.ConfigureServer(server, nodeTLSH2Srv); err != nil {
 		return nil, fmt.Errorf("configure http2: %w", err)
 	}
 	log.Printf("cp: node mTLS listener on %s", addr)

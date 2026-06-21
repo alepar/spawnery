@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 
 	"golang.org/x/net/http2"
+
+	"spawnery/internal/h2keepalive"
 )
 
 // Identity is a node's on-disk mTLS material (all PEM).
@@ -83,13 +85,13 @@ func (id Identity) MTLSClient() (*http.Client, error) {
 	if !pool.AppendCertsFromPEM(id.RootPEM) {
 		return nil, errors.New("nodeid: no usable certificate in pinned root PEM")
 	}
-	return &http.Client{
-		Transport: &http2.Transport{
-			TLSClientConfig: &tls.Config{
-				Certificates: []tls.Certificate{cert},
-				RootCAs:      pool,
-				MinVersion:   tls.VersionTLS12,
-			},
+	tr := &http2.Transport{
+		TLSClientConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			RootCAs:      pool,
+			MinVersion:   tls.VersionTLS12,
 		},
-	}, nil
+	}
+	h2keepalive.ConfigureTransport(tr)
+	return &http.Client{Transport: tr}, nil
 }
