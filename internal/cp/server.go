@@ -369,10 +369,13 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 		}
 	}()
 
+	// quit is closed when runNode returns (for any reason), signalling the pump goroutine to exit.
+	quit := make(chan struct{})
+	defer close(quit)
+
 	// Pump goroutine: calls recv() (which may block) and forwards results to recvCh.
-	// It is not tracked by nodeWG — it may remain blocked in recv() after runNode returns,
-	// and unblocks when httpSrv.Shutdown closes the underlying HTTP/2 connection (bounded,
-	// self-resolving transient; see sp-haj5.2.1 risk notes).
+	// It exits on shutdownCh (global shutdown), quit (any runNode return — displacement, duplicate
+	// rejection, normal teardown), or after forwarding a non-nil error.
 	recvCh := make(chan recvResult, 1)
 	go func() {
 		for {
@@ -380,6 +383,8 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			select {
 			case recvCh <- recvResult{msg: msg, err: err}:
 			case <-s.shutdownCh:
+				return
+			case <-quit:
 				return
 			}
 			if err != nil {
