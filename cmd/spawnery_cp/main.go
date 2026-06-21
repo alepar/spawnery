@@ -31,6 +31,7 @@ import (
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 	"spawnery/internal/health"
+	applog "spawnery/internal/log"
 	"spawnery/internal/metrics"
 	"spawnery/internal/pki"
 	"spawnery/internal/rpclog"
@@ -56,6 +57,7 @@ func storeConfigFromEnv(get func(string) string) (store.Config, error) {
 }
 
 func main() {
+	applog.Init(os.Getenv)
 	reg := registry.New()
 	rt := router.New()
 	sched := scheduler.New(reg, rt, 60*time.Second)

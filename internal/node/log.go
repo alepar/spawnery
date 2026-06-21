@@ -1,7 +1,7 @@
 package node
 
 import (
-	"log"
+	"log/slog"
 	"runtime/debug"
 )
 
@@ -9,5 +9,5 @@ import (
 // APIs) at warn level with a stack trace, so node-side failures that would otherwise be swallowed
 // are diagnosable. `what` is a short context string (e.g. "openSession attach <spawnId>").
 func logErr(what string, err error) {
-	log.Printf("warn: %s: %v\n%s", what, err, debug.Stack())
+	slog.Warn(what, "err", err, "stack", string(debug.Stack()))
 }

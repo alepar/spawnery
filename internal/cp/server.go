@@ -8,7 +8,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -282,7 +282,7 @@ func (s *Server) acquireClaim(ctx context.Context, id string) (*spawnClaim, erro
 					return
 				}
 				if herr != nil {
-					log.Printf("withClaim %s: heartbeat error: %v", id, herr)
+					slog.Warn("withClaim: heartbeat error", "spawn", id, "err", herr)
 				}
 			}
 		}
@@ -417,7 +417,8 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			// fields are ignored. insecure mode (no identity on ctx) falls back to them (dev/test).
 			if id, ok := nodeauth.IdentityFromContext(ctx); ok {
 				if m.Register.NodeId != "" && m.Register.NodeId != id.NodeID {
-					log.Printf("node %s: self-asserted node_id %q != verified identity; using verified", id.NodeID, m.Register.NodeId)
+					slog.Warn("node: self-asserted node_id != verified identity; using verified",
+						"node", id.NodeID, "asserted", m.Register.NodeId)
 				}
 				nodeID, nodeClass, nodeOwner = id.NodeID, id.Class, id.AccountID
 			}
@@ -430,11 +431,13 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			tok, accepted := s.reg.Register(&registry.Node{ID: nodeID, Sender: sender, Max: m.Register.MaxSpawns, Free: m.Register.MaxSpawns, Images: m.Register.AgentImages, Class: nodeClass, Owner: nodeOwner})
 			if !accepted {
 				// A live node already holds this id: reject the duplicate rather than corrupt routing.
-				log.Printf("rejecting registration for node id=%s: another node with that id is still alive", nodeID)
+				slog.Warn("rejecting registration: node id already alive", "node", nodeID)
 				return connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("node id %q is already registered and alive", nodeID))
 			}
 			token = tok
-			log.Printf("node connected: id=%s class=%s owner=%q max_spawns=%d images=%v", nodeID, nodeClass, nodeOwner, m.Register.MaxSpawns, m.Register.AgentImages)
+			slog.Info("node connected",
+				"id", nodeID, "class", nodeClass, "owner", nodeOwner,
+				"max_spawns", m.Register.MaxSpawns, "images", m.Register.AgentImages)
 			// Cache the node's published sub-key + relayed cert chain (sp-2ckv.4). The chain is the
 			// mTLS-verified peer chain (empty in insecure mode); the sub-key is the node's published JSON.
 			certChain, _ := nodeauth.CertChainFromContext(ctx)
@@ -462,7 +465,8 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 				// or if the store call fails (e.g. spawn deleted before ACTIVE lands).
 				if dg := m.Status.BaseImageDigest; dg != "" {
 					if err := s.st.Spawns().SetBaseImageDigest(ctx, m.Status.SpawnId, dg); err != nil {
-						log.Printf("spawn %s: persist base_image_digest %q: %v (non-fatal)", m.Status.SpawnId, dg, err)
+						slog.Warn("spawn: persist base_image_digest failed (non-fatal)",
+							"spawn", m.Status.SpawnId, "digest", dg, "err", err)
 					}
 				}
 			}
@@ -607,10 +611,11 @@ func (s *Server) reconcileInventory(ctx context.Context, nodeID string, sender r
 				if _, err := s.st.Spawns().MarkForkingLost(ctx, c.SpawnID, sp.StatusSeq); errors.Is(err, store.ErrConflict) {
 					continue
 				} else if err != nil {
-					log.Printf("node %s inventory: mark forking spawn %s lost: %v", nodeID, c.SpawnID, err)
+					slog.Error("node inventory: mark forking spawn lost failed",
+						"node", nodeID, "spawn", c.SpawnID, "err", err)
 					continue
 				}
-				log.Printf("node %s inventory: forking spawn %s not reported -> error", nodeID, c.SpawnID)
+				slog.Info("node inventory: forking spawn not reported -> error", "node", nodeID, "spawn", c.SpawnID)
 				continue
 			}
 			if sp.Status == store.Suspending || sp.Status == store.Resuming {
@@ -629,7 +634,7 @@ func (s *Server) reconcileInventory(ctx context.Context, nodeID string, sender r
 		s.rt.Drop(id)
 	}
 	if n, err := s.st.Spawns().MarkUnreachable(ctx, lost); err == nil && n > 0 {
-		log.Printf("node %s inventory: %d active spawn(s) not reported -> unreachable", nodeID, n)
+		slog.Info("node inventory: active spawns not reported -> unreachable", "node", nodeID, "count", n)
 	}
 }
 
@@ -664,10 +669,10 @@ func (s *Server) adoptOrStop(ctx context.Context, nodeID string, sender registry
 		case errors.Is(aerr, store.ErrConflict):
 			matched = false
 		case aerr != nil:
-			log.Printf("node %s inventory: Adopt spawn %s gen %d: %v", nodeID, id, gen, aerr)
+			slog.Error("node inventory: adopt spawn failed", "node", nodeID, "spawn", id, "gen", gen, "err", aerr)
 			return
 		default:
-			log.Printf("node %s inventory: adopted spawn %s gen %d", nodeID, id, gen)
+			slog.Info("node inventory: adopted spawn", "node", nodeID, "spawn", id, "gen", gen)
 		}
 	}
 	if !matched {
@@ -694,9 +699,9 @@ func (s *Server) adoptOrStop(ctx context.Context, nodeID string, sender registry
 	if sp, gerr := s.st.Spawns().Get(ctx, id); gerr == nil && sp.Status == store.Unreachable {
 		switch rerr := s.st.Spawns().MarkReachable(ctx, id, gen); {
 		case rerr == nil:
-			log.Printf("node %s inventory: spawn %s reachable again -> active", nodeID, id)
+			slog.Info("node inventory: spawn reachable again -> active", "node", nodeID, "spawn", id)
 		case !errors.Is(rerr, store.ErrConflict):
-			log.Printf("node %s inventory: MarkReachable spawn %s gen %d: %v", nodeID, id, gen, rerr)
+			slog.Error("node inventory: MarkReachable failed", "node", nodeID, "spawn", id, "gen", gen, "err", rerr)
 		}
 	}
 	// After a fresh bind, evaluate the spawn's reported metrics (§6). Skip when disabled.
@@ -718,7 +723,7 @@ func (s *Server) upsertAgentCatalog(ctx context.Context, images, binaries []stri
 		if err := s.st.WithTx(ctx, func(tx store.Store) error {
 			return tx.AgentImages().Upsert(ctx, store.AgentImage{Image: img, CreatedAt: now}, binaries)
 		}); err != nil {
-			log.Printf("register: upsert agent image %q: %v", img, err)
+			slog.Error("register: upsert agent image failed", "image", img, "err", err)
 		}
 	}
 }
@@ -1141,7 +1146,7 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 		if uerr := protojson.Unmarshal([]byte(ver.Manifest), &m); uerr == nil {
 			manifestArtifacts = m.Artifacts
 		} else {
-			log.Printf("CreateSpawn %s: manifest parse for artifacts: %v", appID, uerr) // non-fatal
+			slog.Warn("CreateSpawn: manifest parse for artifacts (non-fatal)", "app", appID, "err", uerr)
 		}
 	}
 	// Profile assembly (sp-nrzf.3.8 §8/§9): when a profile is selected, load + authorize it,
@@ -1247,9 +1252,9 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 	placement.Image = sp.Image
 	mounts, merr := s.st.Spawns().GetMounts(ctx, spawnID)
 	if merr != nil {
-		log.Printf("provisionSpawn %s: GetMounts: %v", spawnID, merr)
+		slog.Error("provisionSpawn: GetMounts failed", "spawn", spawnID, "err", merr)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-			log.Printf("provisionSpawn %s: SetError after GetMounts failure also failed: %v", spawnID, serr)
+			slog.Error("provisionSpawn: SetError after GetMounts failure also failed", "spawn", spawnID, "err", serr)
 		}
 		return
 	}
@@ -1264,33 +1269,33 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		var aerr error
 		arts, aerr = s.st.Spawns().GetArtifacts(ctx, spawnID)
 		if aerr != nil {
-			log.Printf("provisionSpawn %s: GetArtifacts: %v", spawnID, aerr)
+			slog.Error("provisionSpawn: GetArtifacts failed", "spawn", spawnID, "err", aerr)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-				log.Printf("provisionSpawn %s: SetError after GetArtifacts failure also failed: %v", spawnID, serr)
+				slog.Error("provisionSpawn: SetError after GetArtifacts failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
 		}
 		requiredSecretIDs = startupSecretIDsForSpawn(arts, mounts)
 		if err := s.ensureStartupSecretsExist(ctx, ownerID, requiredSecretIDs); err != nil {
-			log.Printf("provisionSpawn %s: validate startup secret catalog: %v", spawnID, err)
+			slog.Error("provisionSpawn: validate startup secret catalog failed", "spawn", spawnID, "err", err)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-				log.Printf("provisionSpawn %s: SetError after startup secret catalog validation failure also failed: %v", spawnID, serr)
+				slog.Error("provisionSpawn: SetError after startup secret catalog validation failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
 		}
 		if err := s.validateGitHubMountCredentialType(ctx, ownerID, mounts); err != nil {
-			log.Printf("provisionSpawn %s: validate github mount credential type: %v", spawnID, err)
+			slog.Error("provisionSpawn: validate github mount credential type failed", "spawn", spawnID, "err", err)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-				log.Printf("provisionSpawn %s: SetError after github mount credential type validation failure also failed: %v", spawnID, serr)
+				slog.Error("provisionSpawn: SetError after github mount credential type validation failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
 		}
 		// Two-phase A4 sign-after-resolve [AC1]: pick node, register pending intent, await client.
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
-			log.Printf("provisionSpawn %s: PickNodeID failed: %v", spawnID, pickErr)
+			slog.Error("provisionSpawn: PickNodeID failed", "spawn", spawnID, "err", pickErr)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-				log.Printf("provisionSpawn %s: SetError after PickNodeID failure also failed: %v", spawnID, serr)
+				slog.Error("provisionSpawn: SetError after PickNodeID failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
 		}
@@ -1300,23 +1305,23 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		submission, awaitErr := s.pendingIntents.await(ctx, ch)
 		err = awaitErr
 		if err != nil {
-			log.Printf("provisionSpawn %s: await SignedIntent: %v", spawnID, err)
+			slog.Error("provisionSpawn: await SignedIntent failed", "spawn", spawnID, "err", err)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-				log.Printf("provisionSpawn %s: SetError after await failure also failed: %v", spawnID, serr)
+				slog.Error("provisionSpawn: SetError after await failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
 		}
 		if err := validateSubmittedStartupSecrets(requiredSecretIDs, submission.Secrets); err != nil {
-			log.Printf("provisionSpawn %s: validate startup secrets: %v", spawnID, err)
+			slog.Error("provisionSpawn: validate startup secrets failed", "spawn", spawnID, "err", err)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-				log.Printf("provisionSpawn %s: SetError after startup secret validation failure also failed: %v", spawnID, serr)
+				slog.Error("provisionSpawn: SetError after startup secret validation failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
 		}
 		if err := s.ensureStartupSecretsExist(ctx, ownerID, requiredSecretIDs); err != nil {
-			log.Printf("provisionSpawn %s: recheck startup secret catalog: %v", spawnID, err)
+			slog.Error("provisionSpawn: recheck startup secret catalog failed", "spawn", spawnID, "err", err)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-				log.Printf("provisionSpawn %s: SetError after startup secret catalog recheck failure also failed: %v", spawnID, serr)
+				slog.Error("provisionSpawn: SetError after startup secret catalog recheck failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
 		}
@@ -1329,9 +1334,9 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		// Provision/StartSpawn window (before the node acks ACTIVE), so both the index entry and the
 		// container node_id must be set now. No-op if the spawn has no gh: mint mount.
 		if err := s.prepareGitHubMintProvision(ctx, spawnID, 1, targetNodeID, mounts); err != nil {
-			log.Printf("provisionSpawn %s: prepare github mint provision: %v", spawnID, err)
+			slog.Error("provisionSpawn: prepare github mint provision failed", "spawn", spawnID, "err", err)
 			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-				log.Printf("provisionSpawn %s: SetError after prepare github mint provision also failed: %v", spawnID, serr)
+				slog.Error("provisionSpawn: SetError after prepare github mint provision also failed", "spawn", spawnID, "err", serr)
 			}
 			return
 		}
@@ -1343,14 +1348,14 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		var aerr error
 		arts, aerr = s.st.Spawns().GetArtifacts(ctx, spawnID)
 		if aerr != nil {
-			log.Printf("provisionSpawn %s: GetArtifacts: %v", spawnID, aerr)
+			slog.Warn("provisionSpawn: GetArtifacts non-fatal", "spawn", spawnID, "err", aerr)
 		}
 	}
 	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, storeToNodeArtifacts(arts), secrets)
 	if err != nil {
-		log.Printf("provisionSpawn %s: provision failed: %v", spawnID, err)
+		slog.Error("provisionSpawn: Provision failed", "spawn", spawnID, "err", err)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-			log.Printf("provisionSpawn %s: SetError after provision failure also failed: %v", spawnID, serr)
+			slog.Error("provisionSpawn: SetError after provision failure also failed", "spawn", spawnID, "err", serr)
 		}
 		return
 	}
@@ -1358,14 +1363,14 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		s.rt.StopOnNode(spawnID)
 		s.rt.Drop(spawnID)
 		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
-			log.Printf("provisionSpawn %s: SetError after SetActive failure also failed: %v", spawnID, serr)
+			slog.Error("provisionSpawn: SetError after SetActive failure also failed", "spawn", spawnID, "err", serr)
 		}
 		return
 	}
 	// Fresh pod started with spawns.model -> the running model matches the record. Converge the flag
 	// (store.Create already sets it true for new spawns; idempotent here).
 	if merr := s.st.Spawns().MarkModelApplied(ctx, spawnID); merr != nil {
-		log.Printf("provisionSpawn %s: MarkModelApplied after provision: %v", spawnID, merr)
+		slog.Warn("provisionSpawn: MarkModelApplied non-fatal", "spawn", spawnID, "err", merr)
 	}
 	s.githubLinks.noteNodeSecrets(spawnID, secrets)
 }
@@ -1437,7 +1442,7 @@ func (s *Server) terminateSpawn(ctx context.Context, spawnID, reason string) err
 	if err := s.st.Spawns().MarkDeleted(ctx, spawnID, time.Now().Unix()); err != nil {
 		return fmt.Errorf("terminateSpawn %s: mark deleted: %w", spawnID, err)
 	}
-	log.Printf("kill-switch: terminated spawn %s (owner=%s reason=%s)", spawnID, sp.OwnerID, reason)
+	slog.Info("kill-switch: terminated spawn", "spawn", spawnID, "owner", sp.OwnerID, "reason", reason)
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	return nil
 }
@@ -1498,7 +1503,7 @@ func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.Sub
 	if nodeTok == "" && s.devASKey != nil && req.Msg.Intent != nil && len(req.Msg.Intent.SpkiDer) > 0 {
 		minted, mintErr := token.MintNode(s.devASKey, s.devASKeyID, owner, req.Msg.Intent.SpkiDer, s.now())
 		if mintErr != nil {
-			log.Printf("SubmitIntent %s: dev AS mint failed: %v (node token empty)", req.Msg.SpawnId, mintErr)
+			slog.Warn("SubmitIntent: dev AS mint failed (node token empty)", "spawn", req.Msg.SpawnId, "err", mintErr)
 		} else {
 			nodeTok = minted
 		}
@@ -1529,7 +1534,7 @@ func (s *Server) mintSessionEnv(owner string, sa *authv1.AuthEnvelope) *authv1.A
 	if nodeTok == "" && s.devASKey != nil && len(sa.Intent.SpkiDer) > 0 {
 		minted, err := token.MintNode(s.devASKey, s.devASKeyID, owner, sa.Intent.SpkiDer, s.now())
 		if err != nil {
-			log.Printf("mintSessionEnv: dev AS mint failed: %v", err)
+			slog.Warn("mintSessionEnv: dev AS mint failed", "err", err)
 		} else {
 			nodeTok = minted
 		}
@@ -1750,7 +1755,7 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 							recvErr <- connect.NewError(connect.CodePermissionDenied, fmt.Errorf("reauth failed"))
 							return
 						}
-						log.Printf("session reauth failed (dev-tolerant): %v", verr)
+						slog.Warn("session reauth failed (dev-tolerant)", "err", verr)
 					} else {
 						// Re-register under new token_id; release old so only one id is active.
 						if s.sessions != nil && newID.TokenID != "" && newID.TokenID != identity.TokenID {

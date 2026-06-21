@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -145,7 +145,7 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	// Reap pods leaked by a previous node process before serving — the in-mem store is empty at
 	// startup, so every spawnery-managed pod the runtime still has is an orphan.
 	if err := mgr.ReapOrphans(ctx); err != nil {
-		log.Printf("node: reap orphans at startup: %v", err)
+		slog.Warn("node: reap orphans at startup", "err", err)
 	}
 	const minBackoff, maxBackoff = time.Second, 30 * time.Second
 	backoff := minBackoff
@@ -169,7 +169,7 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 		if time.Since(start) > maxBackoff {
 			backoff = minBackoff // the connection was healthy for a while; reset
 		}
-		log.Printf("node: CP connection ended (%v); reconnecting in %s", err, backoff)
+		slog.Warn("node: CP connection ended", "err", err, "reconnect_in", backoff)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -222,7 +222,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 	}}); err != nil {
 		return err
 	}
-	log.Printf("node: connected to CP at %s (id=%s class=%s)", cfg.CPURL, cfg.NodeID, cfg.NodeClass)
+	slog.Info("node: connected to CP", "url", cfg.CPURL, "id", cfg.NodeID, "class", cfg.NodeClass)
 	safego.Go("node.heartbeat-loop", func() { a.heartbeatLoop(connCtx) })
 
 	for {
@@ -385,8 +385,8 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 				AssertedOwner: m.Open.GetAssertedOwner(),
 			}
 			if nack, detail := a.verifier.VerifyOpen(m.Open.GetAuth(), fields); nack != "" {
-				log.Printf("SessionOpen %s/%s: intent NACK %s: %s (client not attached)",
-					spawnID, sid(m.Open.GetSessionId()), nack, detail)
+				slog.Warn("SessionOpen: intent NACK (client not attached)",
+					"spawn", spawnID, "session", sid(m.Open.GetSessionId()), "nack", nack, "detail", detail)
 				return // enforced: drop the open; verify-and-log never returns a nack
 			}
 		}
@@ -492,7 +492,7 @@ func (a *attacher) staleGen(spawnID string, gen uint64) bool {
 	}
 	live, ok := a.mgr.SpawnGeneration(spawnID)
 	if ok && gen < live {
-		log.Printf("fencing stale message for spawn=%s gen=%d (live gen=%d)", spawnID, gen, live)
+		slog.Info("fencing stale message", "spawn", spawnID, "gen", gen, "live_gen", live)
 		return true
 	}
 	return false
@@ -641,7 +641,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			AssertedOwner: st.GetAssertedOwner(),
 		}
 		if nack, detail := a.verifier.VerifyStart(st.GetAuth(), fields); nack != "" {
-			log.Printf("startSpawn %s: intent NACK %s: %s", st.SpawnId, nack, detail)
+			slog.Warn("startSpawn: intent NACK", "spawn", st.SpawnId, "nack", nack, "detail", detail)
 			a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, string(nack)+": "+detail)
 			return
 		}
@@ -1109,13 +1109,13 @@ func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int6
 			}
 		}
 		a.mu.Unlock()
-		log.Printf("warn: attachClient: no pump for %s/%s", spawnID, sessionID)
+		slog.Warn("attachClient: no pump", "spawn", spawnID, "session", sessionID)
 		return
 	}
 	a.mu.Unlock()
 	if relay != nil {
 		if err := relay.attach(context.Background(), clientID); err != nil {
-			log.Printf("tmux attach %s/%s/%s: %v", spawnID, sessionID, clientID, err)
+			slog.Warn("tmux attach failed", "spawn", spawnID, "session", sessionID, "client", clientID, "err", err)
 		}
 		return
 	}
@@ -1191,11 +1191,11 @@ func (a *attacher) createSession(ctx context.Context, m *nodev1.CreateSession) {
 	forkBarrierActive := a.forkBarrierActiveOrPendingLocked(m.SpawnId)
 	a.mu.Unlock()
 	if reg == nil {
-		log.Printf("warn: CreateSession for unknown spawn %s", m.SpawnId)
+		slog.Warn("CreateSession for unknown spawn", "spawn", m.SpawnId)
 		return
 	}
 	if forkBarrierActive {
-		log.Printf("rejecting session for %s: fork turn-boundary barrier active", m.SpawnId)
+		slog.Warn("rejecting session: fork turn-boundary barrier active", "spawn", m.SpawnId)
 		a.sessionStatus(m.SpawnId, "", nodev1.SessionState_SESSION_STATE_ERROR, "fork turn-boundary barrier active")
 		return
 	}
@@ -1206,7 +1206,7 @@ func (a *attacher) createSession(ctx context.Context, m *nodev1.CreateSession) {
 	if m.Transport == nodev1.SessionTransport_SESSION_TRANSPORT_ACP {
 		port, ok := reg.allocPort(id)
 		if !ok {
-			log.Printf("rejecting acp session for %s: port pool exhausted", m.SpawnId)
+			slog.Warn("rejecting acp session: port pool exhausted", "spawn", m.SpawnId)
 			a.sessionStatus(m.SpawnId, "", nodev1.SessionState_SESSION_STATE_ERROR, "acp port pool exhausted")
 			return
 		}
@@ -1265,7 +1265,7 @@ func (a *attacher) launchSession(ctx context.Context, spawnID string, e *session
 		a.mu.Unlock()
 		for _, pc := range pend {
 			if err := relay.attach(context.Background(), pc.clientID); err != nil {
-				log.Printf("tmux attach %s/%s/%s: %v", spawnID, e.id, pc.clientID, err)
+				slog.Warn("tmux attach failed", "spawn", spawnID, "session", e.id, "client", pc.clientID, "err", err)
 			}
 		}
 		reg.setState(e.id, nodev1.SessionState_SESSION_STATE_ACTIVE)
@@ -1363,7 +1363,7 @@ func (a *attacher) closeSession(ctx context.Context, m *nodev1.CloseSession) {
 		return
 	}
 	if e.pinned {
-		log.Printf("ignoring CloseSession for pinned session %s/%s", m.SpawnId, m.SessionId)
+		slog.Info("ignoring CloseSession for pinned session", "spawn", m.SpawnId, "session", m.SessionId)
 		return
 	}
 

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	applog "spawnery/internal/log"
 	"spawnery/internal/metrics"
 	"spawnery/internal/safego"
 	"spawnery/internal/sidecar"
@@ -20,6 +21,7 @@ import (
 const shutdownGrace = 30 * time.Second
 
 func main() {
+	applog.Init(os.Getenv)
 	upstream := getenv("SIDECAR_UPSTREAM", "https://openrouter.ai/api")
 	key := os.Getenv("OPENROUTER_API_KEY")
 	addr := getenv("SIDECAR_ADDR", "127.0.0.1:8080")

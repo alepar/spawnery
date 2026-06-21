@@ -7,9 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -78,7 +79,7 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 			hostname := hostOnly(host)
 			leaf, err := cfg.CA.leafFor(hostname)
 			if err != nil {
-				log.Printf("githubproxy: leafFor %s: %v — falling back to plain tunnel", hostname, err)
+				slog.Warn("githubproxy: leafFor failed, falling back to plain tunnel", "host", hostname, "err", err)
 				return goproxy.OkConnect, host
 			}
 			tlsCfg := &tls.Config{
@@ -118,7 +119,7 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 			if errors.As(err, &ctrlErr) {
 				body = fmt.Sprintf("github proxy: GetToken %d: %s", ctrlErr.StatusCode, strings.TrimSpace(ctrlErr.Body))
 			}
-			log.Printf("githubproxy: %s", body)
+			slog.Warn("githubproxy: GetToken failed", "detail", body)
 			resp := &http.Response{
 				StatusCode: http.StatusBadGateway,
 				Status:     "502 Bad Gateway",
@@ -157,7 +158,7 @@ func ServeGitHubProxy(ln net.Listener, cfg GitHubProxyConfig) {
 	srv := &http.Server{Handler: h}
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("githubproxy: serve: %v", err)
+			slog.Error("githubproxy: serve error", "err", err)
 		}
 	}()
 }
@@ -167,26 +168,27 @@ func ServeGitHubProxy(ln net.Listener, cfg GitHubProxyConfig) {
 // bounded retry, parses it, and starts serving the GitHub MITM proxy in a background goroutine.
 // When the proxy is disabled (SIDECAR_GITHUB_PROXY_ADDR unset or no control transport) it logs
 // a notice and returns — inference proxy continues unaffected (back-compat).
-// On unrecoverable startup errors it calls log.Fatalf.
+// On unrecoverable startup errors it logs at Error level and calls os.Exit(1).
 func StartGitHubProxy(getenv func(string) string) {
 	proxyAddr := getenv("SIDECAR_GITHUB_PROXY_ADDR")
 	if proxyAddr == "" {
-		log.Printf("sidecar github proxy disabled (set SIDECAR_GITHUB_PROXY_ADDR + a SIDECAR_GETTOKEN_* transport to enable)")
+		slog.Info("sidecar github proxy disabled (set SIDECAR_GITHUB_PROXY_ADDR + a SIDECAR_GETTOKEN_* transport to enable)")
 		return
 	}
 
 	ctrlCfg, ok := ControlTransportFromEnv(getenv)
 	if !ok {
-		log.Printf("sidecar github proxy disabled (SIDECAR_GITHUB_PROXY_ADDR set but no SIDECAR_GETTOKEN_UDS or SIDECAR_GETTOKEN_ADDR)")
+		slog.Info("sidecar github proxy disabled (SIDECAR_GITHUB_PROXY_ADDR set but no SIDECAR_GETTOKEN_UDS or SIDECAR_GETTOKEN_ADDR)")
 		return
 	}
 
 	// Bind the listener first: claim the port before the agent starts (prevents port-squatting §2.6).
 	ln, err := ListenAndServeGitHubProxy(proxyAddr)
 	if err != nil {
-		log.Fatalf("sidecar github proxy: %v", err)
+		slog.Error("sidecar github proxy bind failed", "err", err)
+		os.Exit(1)
 	}
-	log.Printf("sidecar github proxy listener bound on %s", proxyAddr)
+	slog.Info("sidecar github proxy listener bound", "addr", proxyAddr)
 
 	ctrl := newGitHubControl(ctrlCfg)
 
@@ -200,20 +202,22 @@ func StartGitHubProxy(getenv func(string) string) {
 		if fetchErr == nil {
 			ca, err = parseSpawnCA(delivery.GetCaCertPem(), delivery.GetCaKeyPem())
 			if err != nil {
-				log.Fatalf("sidecar github proxy: parse CA: %v", err)
+				slog.Error("sidecar github proxy: parse CA failed", "err", err)
+				os.Exit(1)
 			}
 			break
 		}
 		if attempt == maxRetries-1 {
-			log.Fatalf("sidecar github proxy: FetchCA failed after %d attempts: %v", maxRetries, fetchErr)
+			slog.Error("sidecar github proxy: FetchCA failed", "attempts", maxRetries, "err", fetchErr)
+			os.Exit(1)
 		}
 		backoff := time.Duration(attempt+1) * 500 * time.Millisecond
-		log.Printf("sidecar github proxy: FetchCA attempt %d/%d: %v; retrying in %v", attempt+1, maxRetries, fetchErr, backoff)
+		slog.Warn("sidecar github proxy: FetchCA attempt failed", "attempt", attempt+1, "max", maxRetries, "err", fetchErr, "retry_in", backoff)
 		time.Sleep(backoff)
 	}
 
 	ServeGitHubProxy(ln, GitHubProxyConfig{CA: ca, Control: ctrl})
-	log.Printf("sidecar github proxy serving on %s", proxyAddr)
+	slog.Info("sidecar github proxy serving", "addr", proxyAddr)
 }
 
 // ControlTransportFromEnv builds a ControlConfig from environment variables (UDS or TCP lane).

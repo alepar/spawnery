@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log"
-	"os"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -862,9 +861,10 @@ func TestReconcileInventoryAdoptStoreErrorDoesNotStop(t *testing.T) {
 	// Report from n2 -> the rebind path hits the failing Adopt.
 	sender := &capSender{}
 	var logs bytes.Buffer
-	log.SetOutput(&logs)
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	s.reconcileInventory(ctx, "n2", sender, []*nodev1.RunningSpawn{{SpawnId: id, Generation: 1}})
-	log.SetOutput(os.Stderr)
+	slog.SetDefault(prev)
 
 	if got := sender.stops(); len(got) != 0 {
 		t.Fatalf("Adopt store error must not stop the reported pod, got %v", got)
@@ -878,7 +878,7 @@ func TestReconcileInventoryAdoptStoreErrorDoesNotStop(t *testing.T) {
 	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Unreachable {
 		t.Fatalf("spawn must stay unreachable, got %v", sp.Status)
 	}
-	if !strings.Contains(logs.String(), "Adopt spawn "+id) {
+	if !strings.Contains(logs.String(), "adopt spawn failed") {
 		t.Fatalf("Adopt store error must be logged, got %q", logs.String())
 	}
 }
@@ -905,9 +905,10 @@ func TestReconcileInventoryMarkReachableStoreErrorLogged(t *testing.T) {
 
 	sender := &capSender{}
 	var logs bytes.Buffer
-	log.SetOutput(&logs)
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	s.reconcileInventory(ctx, "n1", sender, []*nodev1.RunningSpawn{{SpawnId: id, Generation: 1}})
-	log.SetOutput(os.Stderr)
+	slog.SetDefault(prev)
 
 	if got := sender.stops(); len(got) != 0 {
 		t.Fatalf("MarkReachable store error must not stop the reported pod, got %v", got)
@@ -918,7 +919,7 @@ func TestReconcileInventoryMarkReachableStoreErrorLogged(t *testing.T) {
 	if sp, _ := s.st.Spawns().Get(ctx, id); sp.Status != store.Unreachable {
 		t.Fatalf("failed flip must leave the spawn unreachable, got %v", sp.Status)
 	}
-	if !strings.Contains(logs.String(), "MarkReachable spawn "+id) {
+	if !strings.Contains(logs.String(), "MarkReachable failed") {
 		t.Fatalf("MarkReachable store error must be logged, got %q", logs.String())
 	}
 }

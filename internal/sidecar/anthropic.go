@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -486,7 +486,7 @@ func streamOpenAIToAnthropic(w io.Writer, r io.Reader) error {
 		var chunk openAIStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			// Skip malformed chunks rather than aborting the whole turn.
-			log.Printf("warn: sidecar: skip malformed openai stream chunk: %v", err)
+			slog.Warn("sidecar: skip malformed openai stream chunk", "err", err)
 			continue
 		}
 		if chunk.Usage != nil {
@@ -580,7 +580,7 @@ func streamOpenAIToAnthropic(w io.Writer, r io.Reader) error {
 	}
 	if err := sc.Err(); err != nil {
 		// We've emitted partial events; close out gracefully so claude doesn't hang.
-		log.Printf("warn: sidecar: error reading openai stream: %v", err)
+		slog.Warn("sidecar: error reading openai stream", "err", err)
 	}
 
 	// Close any open blocks (text first, then tools in first-seen order).
@@ -618,7 +618,7 @@ func streamOpenAIToAnthropic(w io.Writer, r io.Reader) error {
 func writeEvent(w io.Writer, event string, payload any) {
 	b, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("warn: sidecar: marshal SSE event %s: %v", event, err)
+		slog.Warn("sidecar: marshal SSE event failed", "event", event, "err", err)
 		return
 	}
 	var buf bytes.Buffer
@@ -657,7 +657,7 @@ func NewMessagesHandler(upstream, key string, ov *Override, trackers ...*Infligh
 		}
 		oaiBody, stream, err := anthropicToOpenAI(body)
 		if err != nil {
-			log.Printf("warn: sidecar: /v1/messages translate request: %v", err)
+			slog.Warn("sidecar: /v1/messages translate request failed", "err", err)
 			writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "translate request: "+err.Error())
 			return
 		}
@@ -670,7 +670,7 @@ func NewMessagesHandler(upstream, key string, ov *Override, trackers ...*Infligh
 			if patched, perr := patchModelJSON(oaiBody, m); perr == nil {
 				oaiBody = patched
 			} else {
-				log.Printf("warn: sidecar: /v1/messages model override skipped: %v", perr)
+				slog.Warn("sidecar: /v1/messages model override skipped", "err", perr)
 			}
 		}
 
@@ -695,7 +695,7 @@ func NewMessagesHandler(upstream, key string, ov *Override, trackers ...*Infligh
 		defer inflight.End()
 		resp, err := client.Do(upReq)
 		if err != nil {
-			log.Printf("warn: sidecar: /v1/messages upstream request failed: %v", err)
+			slog.Warn("sidecar: /v1/messages upstream request failed", "err", err)
 			writeAnthropicError(w, http.StatusBadGateway, "api_error", "upstream request failed: "+err.Error())
 			return
 		}
@@ -704,7 +704,7 @@ func NewMessagesHandler(upstream, key string, ov *Override, trackers ...*Infligh
 		if resp.StatusCode >= 400 {
 			b, _ := io.ReadAll(resp.Body)
 			snippet := strings.TrimSpace(redactCredentialEcho(string(b), creds.Key))
-			log.Printf("warn: sidecar: /v1/messages upstream -> %d: %s", resp.StatusCode, truncateStr(snippet, 512))
+			slog.Warn("sidecar: /v1/messages upstream error", "status", resp.StatusCode, "body", truncateStr(snippet, 512))
 			// Pass the upstream error through as an Anthropic-shaped error.
 			writeAnthropicError(w, resp.StatusCode, "api_error", snippet)
 			return
@@ -719,7 +719,7 @@ func NewMessagesHandler(upstream, key string, ov *Override, trackers ...*Infligh
 				f.Flush()
 			}
 			if err := streamOpenAIToAnthropic(w, resp.Body); err != nil {
-				log.Printf("warn: sidecar: /v1/messages stream translation error: %v", err)
+				slog.Warn("sidecar: /v1/messages stream translation error", "err", err)
 			}
 			return
 		}
@@ -731,7 +731,7 @@ func NewMessagesHandler(upstream, key string, ov *Override, trackers ...*Infligh
 		}
 		anthBody, err := openAIToAnthropic(b)
 		if err != nil {
-			log.Printf("warn: sidecar: /v1/messages translate response: %v", err)
+			slog.Warn("sidecar: /v1/messages translate response failed", "err", err)
 			writeAnthropicError(w, http.StatusBadGateway, "api_error", "translate response: "+err.Error())
 			return
 		}

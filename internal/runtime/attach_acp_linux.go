@@ -3,7 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"runtime"
@@ -81,7 +81,7 @@ func dialOnce(netnsPath, sock string) (net.Conn, error) {
 	// leaked mis-namespaced thread is diagnosable.
 	defer func() {
 		if err := unix.Setns(int(orig.Fd()), unix.CLONE_NEWNET); err != nil {
-			log.Printf("AttachACP: failed to restore netns on thread: %v", err)
+			slog.Error("AttachACP: failed to restore netns on thread", "err", err)
 		}
 	}()
 

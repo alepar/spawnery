@@ -3,7 +3,7 @@ package rpclog
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"runtime/debug"
 
@@ -30,7 +30,12 @@ func (r *recoverInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc
 				if rec == http.ErrAbortHandler {
 					panic(rec) //nolint:forbidigo // intentional re-panic for net/http abort semantics
 				}
-				log.Printf("rpc-panic [%s] %s: %v\n%s", r.component, req.Spec().Procedure, rec, debug.Stack())
+				slog.Error("rpc-panic",
+					"component", r.component,
+					"procedure", req.Spec().Procedure,
+					"panic", fmt.Sprintf("%v", rec),
+					"stack", string(debug.Stack()),
+				)
 				err = connect.NewError(connect.CodeInternal, fmt.Errorf("panic: %v", rec))
 			}
 		}()
@@ -50,7 +55,12 @@ func (r *recoverInterceptor) WrapStreamingHandler(next connect.StreamingHandlerF
 				if rec == http.ErrAbortHandler {
 					panic(rec) //nolint:forbidigo // intentional re-panic for net/http abort semantics
 				}
-				log.Printf("rpc-panic [%s] %s (stream): %v\n%s", r.component, conn.Spec().Procedure, rec, debug.Stack())
+				slog.Error("rpc-panic",
+					"component", r.component,
+					"procedure", conn.Spec().Procedure+" (stream)",
+					"panic", fmt.Sprintf("%v", rec),
+					"stack", string(debug.Stack()),
+				)
 				err = connect.NewError(connect.CodeInternal, fmt.Errorf("panic: %v", rec))
 			}
 		}()

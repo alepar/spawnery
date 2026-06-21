@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -46,7 +46,8 @@ func NewHandler(upstream, key string, ov *Override, trackers ...*Inflight) (http
 		b, rerr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if rerr != nil {
-			log.Printf("warn: sidecar: upstream %s %s -> %d (body read error: %v)", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, rerr)
+			slog.Warn("sidecar: upstream error body read failed",
+				"method", resp.Request.Method, "path", resp.Request.URL.Path, "status", resp.StatusCode, "err", rerr)
 			resp.Body = io.NopCloser(bytes.NewReader(nil))
 			return nil
 		}
@@ -58,12 +59,13 @@ func NewHandler(upstream, key string, ov *Override, trackers ...*Inflight) (http
 		if len(snippet) > 512 {
 			snippet = snippet[:512] + "…"
 		}
-		log.Printf("warn: sidecar: upstream %s %s -> %d: %s", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, snippet)
+		slog.Warn("sidecar: upstream error",
+			"method", resp.Request.Method, "path", resp.Request.URL.Path, "status", resp.StatusCode, "body", snippet)
 		return nil
 	}
 	// Log (and 502) when upstream is unreachable (DNS/connection failure) rather than a non-2xx body.
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("warn: sidecar: upstream request %s %s failed: %v", r.Method, r.URL.Path, err)
+		slog.Warn("sidecar: upstream request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 		w.WriteHeader(http.StatusBadGateway)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +73,7 @@ func NewHandler(upstream, key string, ov *Override, trackers ...*Inflight) (http
 			if err := rewriteRequestModel(r, m); err != nil {
 				// The body was already consumed/closed; forwarding now would send a
 				// truncated request upstream. Fail the request instead.
-				log.Printf("warn: sidecar: read request body for model override: %v", err)
+				slog.Warn("sidecar: read request body for model override failed", "err", err)
 				w.WriteHeader(http.StatusBadGateway)
 				return
 			}
