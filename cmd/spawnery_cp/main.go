@@ -30,6 +30,7 @@ import (
 	"spawnery/internal/cp/scheduler"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
+	"spawnery/internal/health"
 	"spawnery/internal/metrics"
 	"spawnery/internal/pki"
 	"spawnery/internal/rpclog"
@@ -271,6 +272,7 @@ func main() {
 	mux.Handle(cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(rpclog.RecoverInterceptor("cp"), rpclog.Interceptor("cp"), cpAuthInterceptor)))
 	mux.HandleFunc("/ws/session", srv.HandleWS(verifier, allow))
 	mux.Handle("/metrics", metrics.Handler())
+	health.Register(mux, st.Ping)
 
 	// Node-auth mode (sp-ova). insecure (dev/test default): nodes share the main h2c listener with no
 	// auth — identity falls back to the self-asserted Register fields. enforced: nodes connect over mTLS

@@ -24,6 +24,7 @@ import (
 	"spawnery/gen/spawn/v1/spawnv1connect"
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/token"
+	"spawnery/internal/health"
 	"spawnery/internal/metrics"
 	"spawnery/internal/node"
 	"spawnery/internal/node/nodeid"
@@ -108,6 +109,7 @@ func main() {
 			tmux := http.NewServeMux()
 			tmux.HandleFunc("/terminal", tsrv.HandleTerminal)
 			tmux.HandleFunc("/exec", tsrv.HandleExec)
+			health.Register(tmux, mgr.Ping)
 			log.Printf("spawnlet terminal endpoint on %s (spawnctl attach -addr http://%s)", taddr, taddr)
 			go func() {
 				if err := http.Serve(ln, tmux); err != nil {
@@ -148,6 +150,7 @@ func main() {
 	mux.HandleFunc("/terminal", srv.HandleTerminal)
 	mux.HandleFunc("/exec", srv.HandleExec)
 	mux.Handle("/metrics", metrics.Handler())
+	health.Register(mux, mgr.Ping)
 	addr := env("SPAWNLET_ADDR", "127.0.0.1:9090")
 	log.Printf("spawnlet listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{})))

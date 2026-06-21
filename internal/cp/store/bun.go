@@ -12,6 +12,11 @@ type bunStore struct {
 	closer *bun.DB // non-nil only for the top-level store (so WithTx children don't close the pool)
 }
 
+func (s *bunStore) Ping(ctx context.Context) error {
+	var one int
+	return s.db.NewSelect().ColumnExpr("1").Scan(ctx, &one)
+}
+
 func (s *bunStore) Close() error {
 	if s.closer != nil {
 		return s.closer.Close()

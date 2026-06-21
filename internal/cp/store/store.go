@@ -260,5 +260,7 @@ type Store interface {
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error
+	// Ping checks the underlying DB pool is reachable (SELECT 1). Used by /readyz.
+	Ping(ctx context.Context) error
 	Close() error
 }

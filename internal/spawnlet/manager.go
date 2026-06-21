@@ -1710,6 +1710,11 @@ func (m *Manager) PreflightRuntime(ctx context.Context) error {
 	return m.pod.Preflight(ctx)
 }
 
+// Ping checks the container runtime is reachable. Used by /readyz.
+func (m *Manager) Ping(ctx context.Context) error {
+	return m.pod.Ping(ctx)
+}
+
 func (m *Manager) Stop(ctx context.Context, id string) error {
 	// Claim atomically removes the spawn from the store so a concurrent quota-watchdog
 	// Stop or CP-driven Delete cannot race into a double-teardown.
