@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,39 +41,36 @@ import (
 
 func main() {
 	applog.Init(os.Getenv)
-	cfg := spawnlet.ManagerConfig{
-		AgentImage:    env("AGENT_IMAGE", "spawnery/stubagent:dev"),
-		SidecarImage:  env("SIDECAR_IMAGE", "spawnery/sidecar:dev"),
-		OpenRouterKey: os.Getenv("OPENROUTER_API_KEY"),
-		DataRoot:      env("DATA_ROOT", "/var/lib/spawnlet/spawns"),
-
-		NodeID:              env("NODE_ID", "node-1"),
-		NodeClass:           env("NODE_CLASS", "cloud"),
-		EgressEnforce:       getenvBool("EGRESS_ENFORCE", true),
-		EgressAllowCIDRs:    splitCSV(os.Getenv("EGRESS_ALLOW_CIDRS")),
-		// EgressFloorForceOff: DEV-ONLY override — disables the egress floor even for cloud
-		// nodes where it is otherwise non-negotiable. MUST NOT be set in production.
-		EgressFloorForceOff: getenvBool("EGRESS_FLOOR_FORCE_OFF", false),
-
-		MemLimitMB:       getenvInt64("MEM_LIMIT_MB", 1024),
-		CPULimit:         getenvFloat("CPU_LIMIT", 1.0),
-		PidsLimit:        getenvInt64("PIDS_LIMIT", 256),
-		ContainerRuntime: os.Getenv("CONTAINER_RUNTIME"),
-		DeltaCapture:     getenvBool("DELTA_CAPTURE", false),
-		// Delta tuning (spec §3/§7). Zero/empty → the manager applies its defaults
-		// (squash depth 16; scrub /var/cache/apt,/var/lib/apt/lists,/tmp).
-		// Quota thresholds are now evaluated CP-side (§6 transition-coordination-design):
-		// set EVALUATOR_QUOTA_SUSPEND_MB on the CP, not here.
-		DeltaSquashDepth: int(getenvInt64("DELTA_SQUASH_DEPTH", 0)),
-		DeltaScrubPaths:  splitCSV(os.Getenv("DELTA_SCRUB_PATHS")),
-		AdvertiseIP:      env("NODE_ADVERTISE_IP", "127.0.0.1"),
-		UsernsMode:       env("USERNS_MODE", "off"),
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("spawnlet: config: %v", err)
 	}
-	mgr, err := buildManager(cfg)
+
+	managerCfg := spawnlet.ManagerConfig{
+		AgentImage:          cfg.AgentImage,
+		SidecarImage:        cfg.SidecarImage,
+		OpenRouterKey:       string(cfg.OpenRouterKey),
+		DataRoot:            cfg.DataRoot,
+		NodeID:              cfg.Node.ID,
+		NodeClass:           cfg.Node.Class,
+		EgressEnforce:       cfg.Egress.Enforce,
+		EgressAllowCIDRs:    cfg.Egress.AllowCIDRs,
+		EgressFloorForceOff: cfg.Egress.FloorForceOff,
+		MemLimitMB:          cfg.Limits.MemMB,
+		CPULimit:            cfg.Limits.CPU,
+		PidsLimit:           cfg.Limits.Pids,
+		ContainerRuntime:    cfg.ContainerRuntime,
+		DeltaCapture:        cfg.Delta.Capture,
+		DeltaSquashDepth:    cfg.Delta.SquashDepth,
+		DeltaScrubPaths:     cfg.Delta.ScrubPaths,
+		AdvertiseIP:         cfg.Node.AdvertiseIP,
+		UsernsMode:          cfg.UsernsMode,
+	}
+	mgr, err := buildManager(managerCfg, cfg.CRI.Endpoint, cfg.CRI.RuntimeHandler, cfg.PodDNS)
 	if err != nil {
 		log.Fatalf("manager init: %v", err)
 	}
-	if err := configureJournal(mgr, cfg.DataRoot); err != nil {
+	if err := configureJournal(mgr, cfg); err != nil {
 		log.Fatalf("journal init: %v", err)
 	}
 	// SIGTERM/SIGINT cancels ctx; the node's serve loop returns and we gracefully reap our pods
@@ -84,21 +80,21 @@ func main() {
 	if err := mgr.PreflightRuntime(ctx); err != nil {
 		log.Fatalf("container runtime preflight failed: %v", err)
 	}
-	if cpURL := os.Getenv("CP_ADDR"); cpURL != "" {
+	if cfg.CP.Addr != "" {
 		// CP-attached mode: dial the CP, no inbound listener.
-		cfg := node.Config{
-			NodeID:        env("NODE_ID", "node-1"),
-			CPURL:         cpURL,
+		nodeCfg := node.Config{
+			NodeID:        cfg.Node.ID,
+			CPURL:         cfg.CP.Addr,
 			MaxSpawns:     4,
-			AgentImage:    env("AGENT_IMAGE", "spawnery/stubagent:dev"),
-			AgentBinaries: splitCSV(os.Getenv("AGENT_BINARIES")),
-			NodeClass:     env("NODE_CLASS", "cloud"),
-			NodeOwner:     env("NODE_OWNER", ""),
+			AgentImage:    cfg.AgentImage,
+			AgentBinaries: cfg.AgentBinaries,
+			NodeClass:     cfg.Node.Class,
+			NodeOwner:     cfg.Node.Owner,
 		}
 		// Terminal control plane (around CP for now): a small inbound listener so `spawnctl tmux`
 		// can ask this node to start a mosh-backed terminal session for a spawn. The mosh UDP data
 		// plane goes straight to this node. (CP-routed terminal control is sp-wsu.2.)
-		if taddr := env("NODE_TERMINAL_ADDR", "127.0.0.1:9092"); taddr != "" {
+		if taddr := cfg.Node.TerminalAddr; taddr != "" {
 			// Bind synchronously and FAIL FAST: a port-in-use here almost always means another
 			// spawnlet is already running. Two nodes with the same NODE_ID corrupt the CP's routing
 			// (it keys nodes by id) and flip spawns to UNREACHABLE — so refuse to start a duplicate.
@@ -106,7 +102,7 @@ func main() {
 			if err != nil {
 				log.Fatalf("terminal port %s is already in use — another spawnlet is likely running; "+
 					"stop it first (e.g. `pkill -f bin/spawnlet`) so this node doesn't duplicate id %q "+
-					"and corrupt CP routing: %v", taddr, cfg.NodeID, err)
+					"and corrupt CP routing: %v", taddr, cfg.Node.ID, err)
 			}
 			tsrv := spawnlet.NewServer(mgr)
 			tmux := http.NewServeMux()
@@ -122,22 +118,22 @@ func main() {
 		}
 		// Node-auth mode (sp-ova). insecure: h2c to CP_ADDR. enforced: mTLS to the CP node listener
 		// presenting the enrolled cert (loaded from disk, or enrolled on first boot via the AS).
-		httpc, dialURL, err := nodeCPClient(cpURL, cfg.NodeID)
+		httpc, dialURL, err := nodeCPClient(cfg, cfg.CP.Addr, cfg.Node.ID)
 		if err != nil {
 			log.Fatalf("node: identity/transport setup: %v", err)
 		}
-		cfg.CPURL = dialURL
-		cfg.NodeRootPEM = nodeRootPEM()
+		nodeCfg.CPURL = dialURL
+		nodeCfg.NodeRootPEM = nodeRootPEM(cfg)
 		// Owner-sealed secrets (sp-2ckv.4): in enforced mode build the HPKE sub-key holder signed by the
 		// node's cert key, so the node can publish a sub-key and unseal delivered secrets. Best-effort:
 		// insecure mode (no cert) and a key-parse failure both leave SubKeys nil (no sub-key published).
-		if sk := nodeSubKeys(cfg.NodeID); sk != nil {
-			cfg.SubKeys = sk
+		if sk := nodeSubKeys(cfg, cfg.Node.ID); sk != nil {
+			nodeCfg.SubKeys = sk
 		}
-		cfg.Verifier = buildIntentVerifier(cfg.NodeID, cfg.NodeOwner)
-		cfg.GitHubMint = nodeGitHubMint()
-		log.Printf("spawnlet attaching to CP at %s as %s", cfg.CPURL, cfg.NodeID)
-		err = node.Run(ctx, mgr, httpc, cfg) // returns when ctx is cancelled (signal) or on fatal error
+		nodeCfg.Verifier = buildIntentVerifier(cfg, cfg.Node.ID, cfg.Node.Owner)
+		nodeCfg.GitHubMint = nodeGitHubMint(cfg)
+		log.Printf("spawnlet attaching to CP at %s as %s", nodeCfg.CPURL, cfg.Node.ID)
+		err = node.Run(ctx, mgr, httpc, nodeCfg) // returns when ctx is cancelled (signal) or on fatal error
 		gracefulStopAll(mgr)
 		if err != nil && ctx.Err() == nil {
 			log.Fatalf("node: %v", err)
@@ -154,7 +150,7 @@ func main() {
 	mux.HandleFunc("/exec", srv.HandleExec)
 	mux.Handle("/metrics", metrics.Handler())
 	health.Register(mux, mgr.Ping)
-	addr := env("SPAWNLET_ADDR", "127.0.0.1:9090")
+	addr := cfg.SpawnletAddr
 	log.Printf("spawnlet listening on %s", addr)
 	spawnletH2Srv := &http2.Server{}
 	h2keepalive.ConfigureServer(spawnletH2Srv)
@@ -171,20 +167,31 @@ func gracefulStopAll(mgr *spawnlet.Manager) {
 	}
 }
 
-// buildManager selects the pod backend + egress floor by CONTAINER_RUNTIME: runsc -> a containerd
+// buildManager selects the pod backend + egress floor by ContainerRuntime: "runsc" -> a containerd
 // CRI pod backend + the SPAWNLET-EGRESS floor; anything else -> the Docker backend + DOCKER-USER.
+// criEndpoint and criRtHandler are only used in the "runsc" lane; empty strings use lane defaults.
+// podDNS overrides the pod resolv.conf in the CRI lane (nil/empty = inherit host resolver).
+//
 // configureJournal wires the transient-tier node-local journaler onto the
 // manager when JOURNAL_BACKEND is set (filesystem|s3). It is OFF by default:
 // with the env unset, journaling is disabled and every mount stays scratch-only
 // (the guarded seam in the manager leaves existing behavior unchanged). Custody
 // is node-local — the repo password is generated + sealed under a node key on
 // this box; the CP never holds it (transient-tier §4).
-func configureJournal(m *spawnlet.Manager, dataRoot string) error {
-	kind := journal.BackendKind(os.Getenv("JOURNAL_BACKEND"))
+//
+// configureJournal is driven by the typed cfg.Journal config (populated by the YAML layers, the
+// JOURNAL_* env aliases, and --set alike), not by reading the environment directly — so
+// `--set journal.backend=...` and SPAWNERY_CONFIG_DIR overrides take effect.
+func configureJournal(m *spawnlet.Manager, cfg *Spawnlet) error {
+	j := cfg.Journal
+	kind := journal.BackendKind(j.Backend)
 	if kind == "" {
 		return nil // journaling disabled (default)
 	}
-	root := env("JOURNAL_ROOT", filepath.Join(dataRoot, "journal"))
+	root := j.Root
+	if root == "" {
+		root = filepath.Join(cfg.DataRoot, "journal")
+	}
 
 	var backend journal.BlobBackend
 	var generationBackends journal.GenerationBackendProvider
@@ -192,29 +199,34 @@ func configureJournal(m *spawnlet.Manager, dataRoot string) error {
 	switch kind {
 	case journal.BackendFilesystem:
 		var err error
-		backend, err = journal.NewBackend(journal.BackendConfig{Kind: kind, FilesystemRoot: env("JOURNAL_FS_ROOT", filepath.Join(root, "blobs"))})
+		fsRoot := j.FSRoot
+		if fsRoot == "" {
+			fsRoot = filepath.Join(root, "blobs")
+		}
+		backend, err = journal.NewBackend(journal.BackendConfig{Kind: kind, FilesystemRoot: fsRoot})
 		if err != nil {
 			return err
 		}
 	case journal.BackendS3:
-		s3Endpoint := os.Getenv("JOURNAL_S3_ENDPOINT")
-		if s3Endpoint == "" {
-			return fmt.Errorf("journal s3: JOURNAL_S3_ENDPOINT is required")
+		if j.S3.Endpoint == "" {
+			return fmt.Errorf("journal s3: journal.s3.endpoint is required")
 		}
-		adminEndpoint := os.Getenv("JOURNAL_GARAGE_ADMIN_ENDPOINT")
-		adminToken := os.Getenv("JOURNAL_GARAGE_ADMIN_TOKEN")
-		if adminEndpoint == "" || adminToken == "" {
-			return fmt.Errorf("journal s3: JOURNAL_GARAGE_ADMIN_ENDPOINT and JOURNAL_GARAGE_ADMIN_TOKEN are required for generation-keyed journaling")
+		if j.S3.GarageAdminEndpoint == "" || string(j.S3.GarageAdminToken) == "" {
+			return fmt.Errorf("journal s3: journal.s3.garage_admin_endpoint and journal.s3.garage_admin_token are required for generation-keyed journaling")
 		}
-		admin, err := journal.NewGarageAdmin(adminEndpoint, adminToken, &http.Client{Timeout: 15 * time.Second})
+		admin, err := journal.NewGarageAdmin(j.S3.GarageAdminEndpoint, string(j.S3.GarageAdminToken), &http.Client{Timeout: 15 * time.Second})
 		if err != nil {
 			return fmt.Errorf("journal genkey admin: %w", err)
 		}
+		region := j.S3.Region
+		if region == "" {
+			region = "garage"
+		}
 		gkm, err = journal.NewGenerationKeyManager(journal.GenerationKeyConfig{
 			Admin:      admin,
-			S3Endpoint: strings.TrimPrefix(strings.TrimPrefix(s3Endpoint, "https://"), "http://"),
-			Region:     env("JOURNAL_S3_REGION", "garage"),
-			DisableTLS: getenvBool("JOURNAL_S3_DISABLE_TLS", false),
+			S3Endpoint: strings.TrimPrefix(strings.TrimPrefix(j.S3.Endpoint, "https://"), "http://"),
+			Region:     region,
+			DisableTLS: j.S3.DisableTLS,
 		})
 		if err != nil {
 			return fmt.Errorf("journal genkey: %w", err)
@@ -224,7 +236,10 @@ func configureJournal(m *spawnlet.Manager, dataRoot string) error {
 		return fmt.Errorf("unknown JOURNAL_BACKEND %q (want filesystem|s3)", kind)
 	}
 
-	keyfile := env("JOURNAL_NODE_KEY", filepath.Join(root, "node.key"))
+	keyfile := j.NodeKey
+	if keyfile == "" {
+		keyfile = filepath.Join(root, "node.key")
+	}
 	if err := journal.GenerateNodeKeyfile(keyfile); err != nil {
 		return fmt.Errorf("node key: %w", err)
 	}
@@ -256,7 +271,7 @@ func configureJournal(m *spawnlet.Manager, dataRoot string) error {
 	return nil
 }
 
-func buildManager(cfg spawnlet.ManagerConfig) (*spawnlet.Manager, error) {
+func buildManager(cfg spawnlet.ManagerConfig, criEndpoint, criRtHandler string, podDNS []string) (*spawnlet.Manager, error) {
 	// Warn early on unrecognised USERNS_MODE values (e.g. 'Remap', 'enabled'): they silently
 	// degrade to cap-drop=ALL, which is safe but almost certainly not the operator's intent.
 	switch cfg.UsernsMode {
@@ -266,20 +281,23 @@ func buildManager(cfg spawnlet.ManagerConfig) (*spawnlet.Manager, error) {
 		log.Printf("WARNING: unrecognized USERNS_MODE=%q (want remap|native|off) — treating as off (cap-drop=ALL)", cfg.UsernsMode)
 	}
 	if cfg.ContainerRuntime == "runsc" {
-		endpoint := env("CRI_ENDPOINT", "unix:///run/containerd/containerd.sock")
-		client, err := cri.Dial(endpoint)
+		if criEndpoint == "" {
+			criEndpoint = "unix:///run/containerd/containerd.sock"
+		}
+		if criRtHandler == "" {
+			criRtHandler = "runsc"
+		}
+		client, err := cri.Dial(criEndpoint)
 		if err != nil {
 			return nil, err
 		}
-		backend := cri.NewCRIPodBackend(client, env("CRI_RUNTIME_HANDLER", "runsc"))
-		// POD_DNS (comma-separated) overrides the pod resolv.conf. Needed on hosts where /etc/resolv.conf
+		backend := cri.NewCRIPodBackend(client, criRtHandler)
+		// podDNS overrides the pod resolv.conf. Needed on hosts where /etc/resolv.conf
 		// is the systemd-resolved 127.0.0.53 stub (unreachable from inside the pod); without a kubelet
 		// the node must supply pod DNS itself.
-		if v := os.Getenv("POD_DNS"); v != "" {
-			for _, s := range strings.Split(v, ",") {
-				if s = strings.TrimSpace(s); s != "" {
-					backend.DNSServers = append(backend.DNSServers, s)
-				}
+		for _, s := range podDNS {
+			if s = strings.TrimSpace(s); s != "" {
+				backend.DNSServers = append(backend.DNSServers, s)
 			}
 		}
 		return spawnlet.NewManagerWithBackend(backend, firewall.NewCNIFloorApplier(), cfg), nil
@@ -327,20 +345,21 @@ func applyUsernsProbe(base uint32, active bool, probeErr error) (mode string, re
 }
 
 // h2cClient mirrors cmd/spawnctl's: cleartext HTTP/2 for the CP dial.
-// nodeCPClient selects the node->CP transport by NODE_AUTH_MODE. insecure (default): the h2c client to
-// CP_ADDR. enforced: load the node's mTLS identity from NODE_ID_DIR (or enroll once via AS_URL +
-// ENROLL_TOKEN, pinning NODE_ROOT_CA), and return an mTLS client targeting CP_NODE_ADDR.
+// nodeCPClient selects the node->CP transport by cfg.Node.AuthMode. insecure (default): the h2c
+// client to insecureURL. enforced: load the node's mTLS identity from cfg.Node.IDDir (or enroll
+// once via cfg.ASURL + cfg.EnrollToken, pinning cfg.Node.RootCA), and return an mTLS client
+// targeting cfg.CP.NodeAddr.
 //
 // Enrollment uses a fingerprint-bound token (owner-sealed-secrets design §5): the node generates and
 // persists its keypair FIRST, then logs the key's SPKI fingerprint. The operator gives that fingerprint
 // to the account owner, who mints a token bound to it (IssueBoundEnrollmentToken) over the pinned AS
 // connection and hands it back as ENROLL_TOKEN. The node redeems with the SAME key, so a token a
 // compromised CP observed cannot be redeemed with a substituted key.
-func nodeCPClient(insecureURL, nodeID string) (*http.Client, string, error) {
-	if env("NODE_AUTH_MODE", "insecure") != "enforced" {
+func nodeCPClient(cfg *Spawnlet, insecureURL, nodeID string) (*http.Client, string, error) {
+	if cfg.Node.AuthMode != "enforced" {
 		return h2cClient(), insecureURL, nil
 	}
-	dir := env("NODE_ID_DIR", "/var/lib/spawnlet/identity")
+	dir := cfg.Node.IDDir
 	id, err := nodeid.Load(dir)
 	if err != nil {
 		// Generate/persist the node key up front so its fingerprint is stable across runs.
@@ -352,17 +371,21 @@ func nodeCPClient(insecureURL, nodeID string) (*http.Client, string, error) {
 		if ferr != nil {
 			return nil, "", fmt.Errorf("enforced mode: node key fingerprint: %w", ferr)
 		}
-		asURL, token := os.Getenv("AS_URL"), os.Getenv("ENROLL_TOKEN")
-		if asURL == "" || token == "" {
+		asURL, enrollToken := cfg.ASURL, string(cfg.EnrollToken)
+		if asURL == "" || enrollToken == "" {
 			log.Printf("spawnlet node public-key fingerprint: %s", fp)
 			log.Printf("spawnlet: mint a fingerprint-bound enrollment token for the above fingerprint, then set AS_URL + ENROLL_TOKEN")
 			return nil, "", fmt.Errorf("enforced mode: no identity in %s and AS_URL/ENROLL_TOKEN unset: %w", dir, err)
 		}
-		rootPEM, rerr := os.ReadFile(env("NODE_ROOT_CA", filepath.Join(dir, "root.pem")))
+		rootCAPath := cfg.Node.RootCA
+		if rootCAPath == "" {
+			rootCAPath = filepath.Join(dir, "root.pem")
+		}
+		rootPEM, rerr := os.ReadFile(rootCAPath)
 		if rerr != nil {
 			return nil, "", fmt.Errorf("enforced mode: pinned NODE_ROOT_CA required for enrollment: %w", rerr)
 		}
-		res, eerr := authsvc.RunEnrollWithKey(context.Background(), asURL, token, nodeID, key)
+		res, eerr := authsvc.RunEnrollWithKey(context.Background(), asURL, enrollToken, nodeID, key)
 		if eerr != nil {
 			return nil, "", fmt.Errorf("enroll: %w", eerr)
 		}
@@ -376,7 +399,7 @@ func nodeCPClient(insecureURL, nodeID string) (*http.Client, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	return client, env("CP_NODE_ADDR", "https://127.0.0.1:8081"), nil
+	return client, cfg.CP.NodeAddr, nil
 }
 
 // nodeSubKeys builds the node's HPKE sub-key holder from its enrolled cert key (sp-2ckv.4 §1), so the
@@ -384,11 +407,11 @@ func nodeCPClient(insecureURL, nodeID string) (*http.Client, string, error) {
 // mode (no identity) or if the on-disk key cannot be loaded/parsed — the node then publishes no sub-key
 // and rejects SecretDelivery. The sub-key is signed by the SAME key as the node leaf cert (the RFC 9345
 // delegated-credential pattern), so a sealing client verifies it chains to the pinned roots.
-func nodeSubKeys(nodeID string) *subkey.Node {
-	if env("NODE_AUTH_MODE", "insecure") != "enforced" {
+func nodeSubKeys(cfg *Spawnlet, nodeID string) *subkey.Node {
+	if cfg.Node.AuthMode != "enforced" {
 		return nil
 	}
-	dir := env("NODE_ID_DIR", "/var/lib/spawnlet/identity")
+	dir := cfg.Node.IDDir
 	id, err := nodeid.Load(dir)
 	if err != nil {
 		log.Printf("subkey: no identity in %s, publishing no HPKE sub-key: %v", dir, err)
@@ -402,12 +425,12 @@ func nodeSubKeys(nodeID string) *subkey.Node {
 	return subkey.NewNode(key, nodeID, 0)
 }
 
-func nodeRootPEM() []byte {
-	if env("NODE_AUTH_MODE", "insecure") != "enforced" {
+func nodeRootPEM(cfg *Spawnlet) []byte {
+	if cfg.Node.AuthMode != "enforced" {
 		return nil
 	}
-	dir := env("NODE_ID_DIR", "/var/lib/spawnlet/identity")
-	path := os.Getenv("NODE_ROOT_CA")
+	dir := cfg.Node.IDDir
+	path := cfg.Node.RootCA
 	if path == "" {
 		path = filepath.Join(dir, "root.pem")
 	}
@@ -427,11 +450,14 @@ func nodeRootPEM() []byte {
 //  1. D3 dev-github lane: NODE_GITHUB_MINT_DEV_NODE_ID set → plain HTTP h2c client with the
 //     dev header identity. Works in any NODE_AUTH_MODE (no mTLS required). DEV-ONLY.
 //  2. Enforced/prod lane: NODE_AUTH_MODE=enforced + AS_URL + loaded mTLS identity → mTLS client.
-func nodeGitHubMint() node.GitHubMintClient {
-	asURL := os.Getenv("AS_URL")
+//
+// nodeGitHubMint is driven by the typed cfg.Node config (populated by the node.* YAML, the
+// NODE_*/AS_URL env aliases, and --set alike), not by reading the environment directly.
+func nodeGitHubMint(cfg *Spawnlet) node.GitHubMintClient {
+	asURL := cfg.ASURL
 	// D3 dev-github lane: relaxed node->AS over plain HTTP with a header identity (NOT mTLS). The
 	// secure mTLS leg is proven by TestGitHubE2E_* and is the enforced/prod path below.
-	if devNodeID := strings.TrimSpace(os.Getenv("NODE_GITHUB_MINT_DEV_NODE_ID")); devNodeID != "" {
+	if devNodeID := strings.TrimSpace(cfg.Node.GitHubMintDevID); devNodeID != "" {
 		if asURL == "" {
 			log.Printf("github mint: NODE_GITHUB_MINT_DEV_NODE_ID set but AS_URL empty — relaxed mint disabled")
 			return nil
@@ -440,13 +466,13 @@ func nodeGitHubMint() node.GitHubMintClient {
 		return authv1connect.NewAuthServiceClient(h2cClient(), asURL,
 			connect.WithInterceptors(devNodeIDInterceptor{nodeID: devNodeID}))
 	}
-	if env("NODE_AUTH_MODE", "insecure") != "enforced" {
+	if cfg.Node.AuthMode != "enforced" {
 		return nil
 	}
 	if asURL == "" {
 		return nil
 	}
-	dir := env("NODE_ID_DIR", "/var/lib/spawnlet/identity")
+	dir := cfg.Node.IDDir
 	id, err := nodeid.Load(dir)
 	if err != nil {
 		log.Printf("github refresh disabled: no identity in %s: %v", dir, err)
@@ -481,27 +507,27 @@ func (i devNodeIDInterceptor) WrapStreamingHandler(next connect.StreamingHandler
 	return next
 }
 
-// buildIntentVerifier builds the A4 IntentVerifier from the environment [AC1][AM12].
+// buildIntentVerifier builds the A4 IntentVerifier from the config [AC1][AM12].
 //
-// NODE_AUTH_MODE=insecure (default): AuthModeVerifyLog — the full verification chain runs but
+// cfg.Node.AuthMode=insecure (default): AuthModeVerifyLog — the full verification chain runs but
 // failures are logged rather than enforced. This satisfies AM12 (dev/prod parity via verify-and-log).
-// NODE_AUTH_MODE=enforced: AuthModeEnforced — failures block execution and return NACK codes.
+// cfg.Node.AuthMode=enforced: AuthModeEnforced — failures block execution and return NACK codes.
 //
-// NODE_AS_PUBKEYS (comma-separated PEM file paths): the AS session signing public keys the node
+// cfg.Node.ASPubkeys (comma-separated PEM file paths): the AS session signing public keys the node
 // uses to verify the aud=node access token. In insecure mode an empty key set is valid (the token
 // step fails with ErrUnknownKey which is logged but not enforced). In enforced mode, the AS public
 // keys must be configured here.
 //
-// NODE_OWNER: if non-empty AND NODE_AUTH_MODE=enforced, enables the self-hosted owner check
-// (the token's account_id must equal NODE_OWNER).
-func buildIntentVerifier(nodeID, nodeOwner string) *node.IntentVerifier {
-	enforced := env("NODE_AUTH_MODE", "insecure") == "enforced"
+// nodeOwner: if non-empty AND cfg.Node.AuthMode=enforced, enables the self-hosted owner check
+// (the token's account_id must equal nodeOwner).
+func buildIntentVerifier(cfg *Spawnlet, nodeID, nodeOwner string) *node.IntentVerifier {
+	enforced := cfg.Node.AuthMode == "enforced"
 	authMode := node.AuthModeVerifyLog
 	if enforced {
 		authMode = node.AuthModeEnforced
 	}
 
-	ks, err := loadNodeKeySet(env("NODE_AS_PUBKEYS", ""))
+	ks, err := loadNodeKeySet(cfg.Node.ASPubkeys)
 	if err != nil {
 		log.Printf("buildIntentVerifier: load AS pubkeys: %v (verification will log token failures)", err)
 	} else if len(ks) > 0 {
@@ -519,7 +545,7 @@ func loadNodeKeySet(s string) (token.KeySet, error) {
 		return token.KeySet{}, nil
 	}
 	var pubs []ed25519.PublicKey
-	for _, p := range splitCSV(s) {
+	for _, p := range strings.Split(s, ",") {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
@@ -548,42 +574,5 @@ func h2cClient() *http.Client {
 	return &http.Client{Transport: tr}
 }
 
-func env(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-
-func getenvBool(k string, def bool) bool {
-	v := os.Getenv(k)
-	if v == "" {
-		return def
-	}
-	return v == "1" || v == "true" || v == "TRUE"
-}
-
-func splitCSV(s string) []string {
-	if s == "" {
-		return nil
-	}
-	return strings.Split(s, ",")
-}
-
-func getenvInt64(k string, def int64) int64 {
-	if v := os.Getenv(k); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return n
-		}
-	}
-	return def
-}
-
-func getenvFloat(k string, def float64) float64 {
-	if v := os.Getenv(k); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f
-		}
-	}
-	return def
-}
+// (the env/getenvBool helpers were removed — configureJournal and nodeGitHubMint now read the
+// typed config, not the process environment.)

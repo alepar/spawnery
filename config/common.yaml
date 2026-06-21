@@ -1,0 +1,6 @@
+# Cross-process shared configuration (the `Common` layer), merged under every binary's config.
+
+# The canonical origin the app is served at (scheme://host[:port], no path). When set, each binary
+# DERIVES its CORS origins and OAuth/redirect callback URLs from it (empty fields are filled; an
+# explicit field always wins). Empty = each derived field keeps its own default (dev-permissive CORS).
+public_url: ""

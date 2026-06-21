@@ -13,12 +13,12 @@ import (
 
 // fakeProfileClient is a canned profileClient that records each request.
 type fakeProfileClient struct {
-	createResp     *cpv1.CreateProfileResponse
-	getResp        *cpv1.GetProfileResponse
-	listResp       *cpv1.ListProfilesResponse
-	updateResp     *cpv1.UpdateProfileResponse
-	addEntryResp   *cpv1.AddProfileEntryResponse
-	addSecretResp  *cpv1.AddProfileSecretRefResponse
+	createResp    *cpv1.CreateProfileResponse
+	getResp       *cpv1.GetProfileResponse
+	listResp      *cpv1.ListProfilesResponse
+	updateResp    *cpv1.UpdateProfileResponse
+	addEntryResp  *cpv1.AddProfileEntryResponse
+	addSecretResp *cpv1.AddProfileSecretRefResponse
 
 	gotCreate       *cpv1.CreateProfileRequest
 	gotGet          *cpv1.GetProfileRequest

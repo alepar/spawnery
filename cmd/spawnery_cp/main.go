@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,9 +18,11 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
+	configfiles "spawnery/config"
 	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/gen/node/v1/nodev1connect"
 	"spawnery/internal/authsvc/token"
+	"spawnery/internal/config"
 	"spawnery/internal/cp"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/nodeauth"
@@ -42,23 +43,30 @@ import (
 
 const sqliteDefaultDSN = "file:cp.db?_pragma=busy_timeout(5000)"
 
-func storeConfigFromEnv(get func(string) string) (store.Config, error) {
-	driver := get("CP_STORE_DRIVER")
-	if driver == "" {
-		driver = "sqlite"
+func loadConfig() (*CP, error) {
+	configDir, sets := config.StdFlags("spawnery_cp", os.Args[1:])
+	cfg, err := config.Load[CP]("cp", config.Options{
+		Args:        os.Args[1:],
+		Embedded:    configfiles.FS,
+		SecretsFS:   configfiles.FS,
+		ExternalDir: configDir,
+		EnvAliases:  cpEnvAliases,
+		Sets:        sets,
+	})
+	if err != nil {
+		return nil, err
 	}
-	dsn := get("CP_STORE_DSN")
-	if dsn == "" {
-		dsn = sqliteDefaultDSN
-	}
-	if driver == "postgres" && (dsn == "" || dsn == sqliteDefaultDSN) {
-		return store.Config{}, fmt.Errorf("CP_STORE_DRIVER=postgres requires CP_STORE_DSN (a postgres DSN)")
-	}
-	return store.Config{Driver: driver, DSN: dsn}, nil
+	cfg.derive()
+	return cfg, nil
 }
 
 func main() {
 	applog.Init(os.Getenv)
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("cp: config: %v", err)
+	}
+
 	reg := registry.New()
 	rt := router.New()
 	sched := scheduler.New(reg, rt, 60*time.Second)
@@ -67,19 +75,17 @@ func main() {
 	defer stop()
 
 	// --- Auth mode ---
-	// CP_AUTH_MODE: "dev" (default) | "prod".
-	// IMPORTANT: default is "dev" — a misconfigured prod is permissive.
-	// Prod REQUIRES CP_AS_SESSION_PUBKEYS; dev tokens are ignored in prod.
-	authMode := env("CP_AUTH_MODE", "dev")
-	devMode := authMode != "prod"
+	// auth.mode: "dev" (default) | "prod". Default is "dev" — a misconfigured prod is permissive.
+	// Prod REQUIRES auth.as_session_pubkeys; dev tokens are ignored in prod.
+	devMode := cfg.DevMode()
 	if !devMode {
-		log.Printf("cp: auth mode=prod (CP_DEV_TOKENS ignored)")
+		log.Printf("cp: auth mode=prod (dev tokens ignored)")
 	} else {
-		log.Printf("cp: auth mode=dev (CP_DEV_TOKENS active; NOT FOR PRODUCTION)")
+		log.Printf("cp: auth mode=dev (dev tokens active; NOT FOR PRODUCTION)")
 	}
 
-	// --- AS session pubkeys (CP_AS_SESSION_PUBKEYS = comma-separated PEM file paths) ---
-	ks, err := loadKeySet(env("CP_AS_SESSION_PUBKEYS", ""))
+	// --- AS session pubkeys (auth.as_session_pubkeys = comma-separated PEM file paths) ---
+	ks, err := loadKeySet(cfg.Auth.ASSessionPubkeys)
 	if err != nil {
 		log.Fatalf("cp: load AS pubkeys: %v", err)
 	}
@@ -87,7 +93,7 @@ func main() {
 		log.Printf("cp: loaded %d AS session pubkey(s)", len(ks))
 	}
 	if !devMode && len(ks) == 0 {
-		log.Fatalf("cp: CP_AUTH_MODE=prod requires CP_AS_SESSION_PUBKEYS (no keys loaded)")
+		log.Fatalf("cp: auth.mode=prod requires auth.as_session_pubkeys (no keys loaded)")
 	}
 
 	// --- Revocation + session registries ---
@@ -97,7 +103,7 @@ func main() {
 	// --- Dev tokens (honored only in dev mode) ---
 	devTokens := map[string]string{}
 	if devMode {
-		devTokens = parseTokens(env("CP_DEV_TOKENS", "dev-token=dev"))
+		devTokens = parseTokens(cfg.Auth.DevTokens)
 	}
 
 	// --- Verifier ---
@@ -108,11 +114,7 @@ func main() {
 		Revoked:   revreg,
 	})
 
-	storeCfg, err := storeConfigFromEnv(os.Getenv)
-	if err != nil {
-		log.Fatalf("store config: %v", err)
-	}
-	st, err := store.Open(ctx, storeCfg)
+	st, err := store.Open(ctx, store.Config{Driver: cfg.Store.Driver, DSN: string(cfg.Store.DSN)})
 	if err != nil {
 		log.Fatalf("store open: %v", err)
 	}
@@ -155,7 +157,7 @@ func main() {
 	}
 
 	var tel telemetry.Sink = telemetry.NopSink{}
-	if p := env("CP_TELEMETRY", "telemetry/events.jsonl"); p != "" {
+	if p := cfg.Telemetry; p != "" {
 		if err := os.MkdirAll(dir(p), 0o755); err == nil {
 			if js, err := telemetry.NewJSONLSink(p); err == nil {
 				tel = js
@@ -167,25 +169,20 @@ func main() {
 	}
 
 	srv := cp.NewServer(reg, rt, sched, st, tel)
-	srv.SetMaxSpawnsPerOwner(envInt("CP_MAX_SPAWNS_PER_OWNER", 5))
+	srv.SetMaxSpawnsPerOwner(cfg.MaxSpawnsPerOwner)
 	srv.SetSessionRegistry(sessions)
 	srv.SetVerify(verifier.Verify)
 	srv.SetDevMode(devMode)
 	// CP-side metric evaluators (§6 transition-coordination-design): disabled by default.
-	// Set EVALUATOR_QUOTA_SUSPEND_MB > 0 and/or EVALUATOR_IDLE_ENABLED=1 to activate.
-	// Idle timeouts default to 15m (detached) / 60m (attached) when set to 0 by the env.
-	if quotaMB := int64(envInt("EVALUATOR_QUOTA_SUSPEND_MB", 0)); quotaMB > 0 {
-		idleDetached := envDuration("EVALUATOR_IDLE_DETACHED", 15*time.Minute)
-		idleAttached := envDuration("EVALUATOR_IDLE_ATTACHED", 60*time.Minute)
-		srv.SetEvaluatorPolicy(idleDetached, idleAttached, quotaMB)
-		log.Printf("evaluator: enabled quota=%dMiB idle_detached=%s idle_attached=%s", quotaMB, idleDetached, idleAttached)
-	} else if getenvBool("EVALUATOR_IDLE_ENABLED") {
-		idleDetached := envDuration("EVALUATOR_IDLE_DETACHED", 15*time.Minute)
-		idleAttached := envDuration("EVALUATOR_IDLE_ATTACHED", 60*time.Minute)
-		srv.SetEvaluatorPolicy(idleDetached, idleAttached, 0)
-		log.Printf("evaluator: idle-only enabled detached=%s attached=%s", idleDetached, idleAttached)
+	// evaluator.quota_suspend_mb > 0 and/or evaluator.idle_enabled activate them.
+	if quotaMB := cfg.Evaluator.QuotaSuspendMB; quotaMB > 0 {
+		srv.SetEvaluatorPolicy(cfg.Evaluator.IdleDetached, cfg.Evaluator.IdleAttached, quotaMB)
+		log.Printf("evaluator: enabled quota=%dMiB idle_detached=%s idle_attached=%s", quotaMB, cfg.Evaluator.IdleDetached, cfg.Evaluator.IdleAttached)
+	} else if cfg.Evaluator.IdleEnabled {
+		srv.SetEvaluatorPolicy(cfg.Evaluator.IdleDetached, cfg.Evaluator.IdleAttached, 0)
+		log.Printf("evaluator: idle-only enabled detached=%s attached=%s", cfg.Evaluator.IdleDetached, cfg.Evaluator.IdleAttached)
 	}
-	if ri := envDuration("CP_SESSION_REAUTH_INTERVAL", 0); ri > 0 {
+	if ri := cfg.Auth.SessionReauthInterval; ri > 0 {
 		srv.SetReauthInterval(ri)
 	}
 
@@ -193,7 +190,7 @@ func main() {
 	// Prod mode: intent flow always active; clients obtain node tokens from the real AS.
 	// Dev mode: intent flow is OFF by default — the web SPA does not yet implement
 	// GetPendingIntent/SubmitIntent (A5). The dev AS key is always provisioned so spawnctl's
-	// pollAndSign works when opted in. Set CP_DEV_INTENT_ENABLED=1 to enable the two-phase
+	// pollAndSign works when opted in. Set auth.dev_intent_enabled=true to enable the two-phase
 	// flow in dev; without it web-initiated spawns proceed with a nil env and the node runs
 	// in verify-and-log mode.
 	if !devMode {
@@ -202,14 +199,14 @@ func main() {
 		var devASPriv ed25519.PrivateKey
 		var devASKeyID string
 		var devASErr error
-		if p := env("CP_DEV_AS_KEY", ""); p != "" {
+		if p := cfg.Auth.DevASKey; p != "" {
 			var pemBytes []byte
 			pemBytes, devASErr = os.ReadFile(p)
 			if devASErr == nil {
 				devASPriv, devASKeyID, devASErr = token.LoadSigningKey(pemBytes)
 			}
 			if devASErr != nil {
-				log.Fatalf("cp: load CP_DEV_AS_KEY: %v", devASErr)
+				log.Fatalf("cp: load auth.dev_as_key: %v", devASErr)
 			}
 			log.Printf("cp: loaded dev AS key from %s (id=%s) [AM12]", p, devASKeyID)
 		} else {
@@ -224,20 +221,19 @@ func main() {
 			log.Printf("cp: using ephemeral dev AS key (id=%s) [AM12]", devASKeyID)
 		}
 		srv.SetDevASKey(devASPriv, devASKeyID)
-		// CP_DEV_INTENT_ENABLED=1: opt into the two-phase sign flow in dev mode.
-		// Default off until the web client implements GetPendingIntent/SubmitIntent (A5).
-		if env("CP_DEV_INTENT_ENABLED", "") == "1" {
+		// auth.dev_intent_enabled: opt into the two-phase sign flow in dev mode.
+		if cfg.Auth.DevIntentEnabled {
 			srv.SetIntentEnabled(true)
-			log.Printf("cp: dev intent flow enabled (CP_DEV_INTENT_ENABLED=1) [AM12]")
+			log.Printf("cp: dev intent flow enabled (auth.dev_intent_enabled=true) [AM12]")
 		} else {
-			log.Printf("cp: dev intent flow off (set CP_DEV_INTENT_ENABLED=1 to enable; web spawns proceed without signing) [AM12]")
+			log.Printf("cp: dev intent flow off (set auth.dev_intent_enabled=true to enable; web spawns proceed without signing) [AM12]")
 		}
 	}
 
 	// CP→AS GitHub link-status preflight: gated on CP_AS_URL; also uses the existing CP_AS_RPC_SECRET.
 	// When set, CreateSpawn checks the owner's GitHub link state before persisting a github:-mount spawn.
-	if asURL := strings.TrimSpace(env("CP_AS_URL", "")); asURL != "" {
-		srv.SetASLinkChecker(asURL, env("CP_AS_RPC_SECRET", ""))
+	if asURL := strings.TrimSpace(cfg.Auth.ASURL); asURL != "" {
+		srv.SetASLinkChecker(asURL, string(cfg.Auth.ASRPCSecret))
 		log.Printf("cp: GitHub link preflight checker wired to AS %s", asURL)
 	}
 
@@ -245,15 +241,15 @@ func main() {
 
 	// Browser-origin allowlist for CORS + the WS upgrade ([WM18]). Empty = dev mode
 	// (localhost-only origins); production sets the exact canonical SPA origin(s).
-	allow := weborigin.FromEnv(env("CP_ALLOWED_ORIGINS", ""))
+	allow := weborigin.FromEnv(cfg.AllowedOrigins)
 	if allow.Dev() {
-		log.Printf("cp: CP_ALLOWED_ORIGINS unset — dev mode, allowing loopback + private-network (LAN) browser origins only")
+		log.Printf("cp: allowed_origins unset — dev mode, allowing loopback + private-network (LAN) browser origins only")
 	}
 
 	// Start revocation feed poller if configured.
-	if feedURL := env("CP_AS_REVOCATION_URL", ""); feedURL != "" {
-		bearer := env("CP_AS_CP_SECRET", "")
-		interval := envDuration("CP_REVOCATION_POLL_INTERVAL", 30*time.Second)
+	if feedURL := cfg.Auth.ASRevocationURL; feedURL != "" {
+		bearer := string(cfg.Auth.ASCPSecret)
+		interval := cfg.Auth.RevocationPollInterval
 		poller := auth.NewFeedPoller(http.DefaultClient, feedURL, bearer, ks, revreg, interval)
 		safego.Go("cp.revocation-poller", func() { poller.Run(ctx) })
 		log.Printf("cp: revocation feed poller started (url=%s interval=%s)", feedURL, interval)
@@ -261,7 +257,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	cpAuthInterceptor := verifier.Interceptor()
-	if asSecret := env("CP_AS_RPC_SECRET", ""); asSecret != "" {
+	if asSecret := string(cfg.Auth.ASRPCSecret); asSecret != "" {
 		cpAuthInterceptor = auth.NewServiceScopedInterceptor(
 			verifier,
 			auth.ServiceSecretHeader,
@@ -280,12 +276,12 @@ func main() {
 	// Node-auth mode (sp-ova). insecure (dev/test default): nodes share the main h2c listener with no
 	// auth — identity falls back to the self-asserted Register fields. enforced: nodes connect over mTLS
 	// on a dedicated listener and their identity is the verified client cert (see internal/cp/nodeauth).
-	mode := nodeauth.Mode(env("NODE_AUTH_MODE", string(nodeauth.ModeInsecure)))
+	mode := nodeauth.Mode(cfg.Node.AuthMode)
 	nodePath, nodeHandler := nodev1connect.NewNodeServiceHandler(srv, connect.WithInterceptors(rpclog.CorrelationInterceptor(), metrics.RPCInterceptor(), rpclog.RecoverInterceptor("cp"), rpclog.Interceptor("cp")))
 	var nodeTLSSrv *http.Server // non-nil only in enforced mode; shut down alongside httpSrv
 	if mode == nodeauth.ModeEnforced {
 		var tlsErr error
-		nodeTLSSrv, tlsErr = buildNodeTLSServer(env("CP_NODE_LISTEN", "127.0.0.1:8081"), nodePath, nodeHandler)
+		nodeTLSSrv, tlsErr = buildNodeTLSServer(cfg.Node.Listen, nodePath, nodeHandler, cfg.Node.RootCA, cfg.Node.TLSCert, cfg.Node.TLSKey)
 		if tlsErr != nil {
 			log.Fatalf("cp: build node mTLS listener: %v", tlsErr)
 		}
@@ -298,7 +294,7 @@ func main() {
 		mux.Handle(nodePath, nodeHandler)
 	}
 
-	addr := env("CP_LISTEN", "127.0.0.1:8080")
+	addr := cfg.Listen
 	log.Printf("cp listening on %s (node-auth mode=%s)", addr, mode)
 	h2Srv := &http2.Server{}
 	h2keepalive.ConfigureServer(h2Srv)
@@ -310,7 +306,7 @@ func main() {
 		}
 	}()
 
-	grace := envDuration("CP_SHUTDOWN_GRACE", 30*time.Second)
+	grace := cfg.ShutdownGrace
 	select {
 	case err := <-serveErr:
 		log.Fatalf("cp: listener: %v", err)
@@ -334,8 +330,8 @@ func main() {
 
 // buildNodeTLSServer configures and returns the NodeService mTLS http.Server without starting it.
 // The caller is responsible for calling ListenAndServeTLS and Shutdown.
-func buildNodeTLSServer(addr, nodePath string, nodeHandler http.Handler) (*http.Server, error) {
-	rootPEM, err := os.ReadFile(env("CP_NODE_ROOT_CA", "/etc/spawnery/cp/node-root-ca.pem"))
+func buildNodeTLSServer(addr, nodePath string, nodeHandler http.Handler, rootCAPath, certPath, keyPath string) (*http.Server, error) {
+	rootPEM, err := os.ReadFile(rootCAPath)
 	if err != nil {
 		return nil, fmt.Errorf("read pinned root CA: %w", err)
 	}
@@ -343,10 +339,7 @@ func buildNodeTLSServer(addr, nodePath string, nodeHandler http.Handler) (*http.
 	if err != nil {
 		return nil, fmt.Errorf("parse pinned root CA: %w", err)
 	}
-	serverCert, err := tls.LoadX509KeyPair(
-		env("CP_NODE_TLS_CERT", "/etc/spawnery/cp/server.pem"),
-		env("CP_NODE_TLS_KEY", "/etc/spawnery/cp/server-key.pem"),
-	)
+	serverCert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("load CP server cert: %w", err)
 	}
@@ -407,36 +400,6 @@ func dir(p string) string {
 		return p[:i]
 	}
 	return "."
-}
-
-func env(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-
-func envInt(k string, def int) int {
-	if v := os.Getenv(k); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
-}
-
-func envDuration(k string, def time.Duration) time.Duration {
-	if v := os.Getenv(k); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return def
-}
-
-func getenvBool(k string) bool {
-	v := os.Getenv(k)
-	return v == "1" || v == "true" || v == "yes"
 }
 
 func splitTrim(s, sep string) []string {

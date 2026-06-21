@@ -1,0 +1,8 @@
+# spawnctl base config. spawnctl is a flag-driven CLI; this file provides per-environment-
+# overridable defaults for the handful of root flags that benefit from YAML-layer defaulting.
+# Every value here is overridable via the corresponding CLI flag.
+
+# Spawnlet address for standalone mode (--addr). Default targets a local dev spawnlet.
+addr: "http://127.0.0.1:9090"
+# Control-plane address (--cp). Empty = standalone mode (no CP).
+cp: ""

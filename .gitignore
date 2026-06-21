@@ -48,3 +48,7 @@ cp.db*
 .claude/worktrees/
 .superpowers/
 deploy/garage/dev-creds.env
+
+# Throwaway/operator-supplied SOPS age private keys (never committed; ciphertext lives in config/secrets.*.sops.yaml)
+config/*.key
+config/**/*.key

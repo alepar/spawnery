@@ -82,8 +82,8 @@ type bearerSource interface {
 
 type cpBearerSource struct{ ts *cpTokenSource }
 
-func (b cpBearerSource) token(ctx context.Context) (string, error)  { return b.ts.Token(ctx) }
-func (b cpBearerSource) refresh(ctx context.Context) error          { return b.ts.OnUnauthenticated(ctx) }
+func (b cpBearerSource) token(ctx context.Context) (string, error) { return b.ts.Token(ctx) }
+func (b cpBearerSource) refresh(ctx context.Context) error         { return b.ts.OnUnauthenticated(ctx) }
 
 func newBearerSource(dir, tokenFlag string, hc *http.Client) bearerSource {
 	return cpBearerSource{ts: buildTokenSource(dir, tokenFlag, hc)}

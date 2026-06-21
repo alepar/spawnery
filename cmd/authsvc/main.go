@@ -68,41 +68,68 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 	"os"
-	"os/signal"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
+	configfiles "spawnery/config"
 	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/githubfake"
 	"spawnery/internal/authsvc/store"
 	"spawnery/internal/authsvc/token"
+	"spawnery/internal/config"
 	"spawnery/internal/pki"
 	"spawnery/internal/weborigin"
+
+	"os/signal"
+	"syscall"
 )
 
+// devInMemoryDSN is the in-memory SQLite DSN used in dev mode when no AS_DB_DSN is set.
+// Must match the value in config/authsvc.dev.yaml.
+const devInMemoryDSN = "file:authsvc-dev?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+
+func loadConfig() (*AS, error) {
+	configDir, sets := config.StdFlags("authsvc", os.Args[1:])
+	cfg, err := config.Load[AS]("authsvc", config.Options{
+		Args:        os.Args[1:],
+		Embedded:    configfiles.FS,
+		SecretsFS:   configfiles.FS,
+		ExternalDir: configDir,
+		EnvAliases:  asEnvAliases,
+		Sets:        sets,
+	})
+	if err != nil {
+		return nil, err
+	}
+	cfg.derive()
+	return cfg, nil
+}
+
 func main() {
-	svc, err := buildService()
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("authsvc: config: %v", err)
+	}
+
+	svc, err := buildService(cfg)
 	if err != nil {
 		log.Fatalf("authsvc: %v", err)
 	}
 
 	// Browser-origin allowlist, same mechanism as the CP's ([WL6]): every device-set RPC is a
 	// browser->AS call. Empty = dev mode (localhost origins only).
-	allow := weborigin.FromEnv(env("AS_ALLOWED_ORIGINS", ""))
+	allow := weborigin.FromEnv(cfg.AllowedOrigins)
 	if allow.Dev() {
 		log.Printf("authsvc: AS_ALLOWED_ORIGINS unset — dev mode, allowing loopback + private-network (LAN) browser origins only")
 	}
 
-	addr := env("AS_LISTEN", "127.0.0.1:8090")
+	addr := cfg.Listen
 	svcHandler := svc.Handler()
 	// /refresh and /logout own their CORS via corsCredentialed, which supplies
 	// Access-Control-Allow-Credentials and the X-PoP-* allowed headers required by AM2/AM5.
@@ -143,15 +170,15 @@ func main() {
 }
 
 // buildService loads the AS's material and returns a fully-wired Service.
-// AS_DEV=1 bootstraps an ephemeral in-memory CA + fake GitHub (for `just dev`; NOT production).
-func buildService() (*authsvc.Service, error) {
+// AS_DEV=1 (cfg.Dev=true) bootstraps an ephemeral in-memory CA + fake GitHub (for `just dev`; NOT production).
+func buildService(cfg *AS) (*authsvc.Service, error) {
 	var (
 		root  *pki.CA
 		inter *pki.CA
 		err   error
 	)
 
-	if os.Getenv("AS_DEV") == "1" {
+	if cfg.Dev {
 		log.Printf("authsvc: DEV MODE — ephemeral in-memory CA (do NOT use in production)")
 		root, err = pki.NewRootCA("Spawnery Dev Root")
 		if err != nil {
@@ -162,7 +189,7 @@ func buildService() (*authsvc.Service, error) {
 			return nil, err
 		}
 	} else {
-		rc, ie := buildProductionCA()
+		rc, ie := buildProductionCA(cfg)
 		if ie != nil {
 			return nil, ie
 		}
@@ -170,31 +197,27 @@ func buildService() (*authsvc.Service, error) {
 	}
 
 	// Session signing key.
-	sigKey, err := loadOrGenerateSigningKey()
+	sigKey, err := loadOrGenerateSigningKey(cfg)
 	if err != nil {
 		return nil, err
 	}
-	nextPubs, err := loadNextPubs()
+	nextPubs, err := loadNextPubs(cfg.Session.KeyNextPEM)
 	if err != nil {
 		return nil, err
 	}
 
 	// Identity store. Dev mode defaults to an ephemeral in-memory DB, matching the dev CA and
 	// dev session key — the prod default path is root-owned and must not be a dev dependency.
-	defaultDSN := "file:/var/lib/authsvc/identity.db?_pragma=foreign_keys(1)"
-	if os.Getenv("AS_DEV") == "1" {
-		defaultDSN = "file:authsvc-dev?mode=memory&cache=shared&_pragma=foreign_keys(1)"
-	}
-	dsn := env("AS_DB_DSN", defaultDSN)
-	if os.Getenv("AS_DEV") == "1" && dsn == defaultDSN {
+	dsn := cfg.DB.DSN
+	if cfg.Dev && dsn == devInMemoryDSN {
 		log.Printf("authsvc: DEV — ephemeral in-memory identity store (set AS_DB_DSN to persist)")
 	}
-	tokenCipher, err := loadGitHubTokenCipher()
+	tokenCipher, err := loadGitHubTokenCipher(cfg)
 	if err != nil {
 		return nil, err
 	}
 	idStore, err := store.Open(context.Background(), store.Config{
-		Driver:      env("AS_DB_DRIVER", "sqlite"),
+		Driver:      cfg.DB.Driver,
 		DSN:         dsn,
 		TokenCipher: tokenCipher,
 	})
@@ -206,55 +229,47 @@ func buildService() (*authsvc.Service, error) {
 	// `just dev` boots with zero GitHub setup (matching the header doc); real creds win.
 	var ghProvider authsvc.GitHubProvider
 	var ghAppClientID string
-	if os.Getenv("AS_FAKE_GITHUB") == "1" || (os.Getenv("AS_DEV") == "1" && os.Getenv("GITHUB_CLIENT_ID") == "") {
+	if cfg.FakeGithub || (cfg.Dev && cfg.GitHub.ClientID == "") {
 		log.Printf("authsvc: using in-process fake GitHub (dev/CI only)")
 		fake := githubfake.New()
 		ghProvider = authsvc.NewGitHubProvider(fake.URL(), fake.URL(), fake.ClientID, fake.ClientSecret)
 		ghAppClientID = fake.ClientID
 	} else {
-		ghAppClientID = mustEnv("GITHUB_CLIENT_ID")
+		ghAppClientID = cfg.GitHub.ClientID
 		ghProvider = authsvc.NewGitHubProvider(
-			env("GITHUB_WEB_URL", "https://github.com"),
-			env("GITHUB_API_URL", "https://api.github.com"),
+			cfg.GitHub.WebURL,
+			cfg.GitHub.APIURL,
 			ghAppClientID,
-			mustEnv("GITHUB_CLIENT_SECRET"),
+			string(cfg.GitHub.ClientSecret),
 		)
 	}
 
 	// Registration flag.
-	regEnabled := true
-	if v := os.Getenv("REGISTRATION_ENABLED"); v == "false" || v == "0" {
-		regEnabled = false
-	}
+	regEnabled := cfg.RegistrationEnabled
 
 	// Max families.
-	maxFamilies := 20
-	if v := os.Getenv("AS_MAX_FAMILIES"); v != "" {
-		if n, e := strconv.Atoi(v); e == nil && n > 0 {
-			maxFamilies = n
-		}
-	}
+	maxFamilies := cfg.MaxFamilies
 
 	// SPA origins + redirect URIs.
-	spaOrigin := env("AS_SPA_ORIGINS", "")
+	spaOrigin := cfg.SPAOrigins
 	// Take the first origin as the primary (credentialed CORS; single-origin per AM2).
 	if idx := strings.IndexByte(spaOrigin, ','); idx >= 0 {
 		spaOrigin = spaOrigin[:idx]
 	}
-	redirectURIs := splitCSV(env("AS_REDIRECT_URIS", ""))
+	redirectURIs := splitCSV(cfg.RedirectURIs)
 
 	idp, err := authsvc.NewIdP(authsvc.IdPConfig{
 		Store:               idStore,
 		GitHub:              ghProvider,
 		SigningKey:          sigKey,
 		NextPubKeys:         nextPubs,
-		GitHubRedirectURI:   env("AS_GITHUB_REDIRECT_URI", ""),
+		GitHubRedirectURI:   cfg.GitHub.RedirectURI,
 		SPAOrigin:           spaOrigin,
 		RedirectURIs:        redirectURIs,
-		VerificationURI:     env("AS_VERIFICATION_URI", ""),
+		VerificationURI:     cfg.VerificationURI,
 		RegistrationEnabled: regEnabled,
 		MaxFamilies:         maxFamilies,
-		CPSecret:            os.Getenv("AS_CP_SECRET"),
+		CPSecret:            string(cfg.CP.Secret),
 	})
 	if err != nil {
 		return nil, err
@@ -266,11 +281,11 @@ func buildService() (*authsvc.Service, error) {
 		authsvc.WithNodeRevocations(idStore.NodeRevocations()),
 		authsvc.WithGitHubMinting(idStore, ghProvider),
 	}
-	if cpURL := strings.TrimSpace(os.Getenv("AS_CP_URL")); cpURL != "" {
+	if cpURL := strings.TrimSpace(cfg.CP.URL); cpURL != "" {
 		cpClient := cpv1connect.NewSpawnServiceClient(http.DefaultClient, cpURL,
 			connect.WithInterceptors(staticHeaderInterceptor{
 				name:  "X-Spawnery-AS-Secret",
-				value: os.Getenv("AS_CP_RPC_SECRET"),
+				value: string(cfg.CP.RPCSecret),
 			}),
 		)
 		opts = append(opts,
@@ -280,22 +295,22 @@ func buildService() (*authsvc.Service, error) {
 		log.Printf("authsvc: GitHub mint authorization/fanout wired to CP %s", cpURL)
 	}
 
-	// CP→AS link-status endpoint: enabled when AS_CP_RPC_SECRET is set. The CP sends this secret
+	// CP→AS link-status endpoint: enabled when cp.rpc_secret is set. The CP sends this secret
 	// in the X-Spawnery-AS-Secret header to authenticate link-status queries.
-	if secret := strings.TrimSpace(os.Getenv("AS_CP_RPC_SECRET")); secret != "" {
+	if secret := strings.TrimSpace(string(cfg.CP.RPCSecret)); secret != "" {
 		opts = append(opts, authsvc.WithCPRPCSecret(secret))
 		log.Printf("authsvc: CP→AS link-status endpoint enabled (POST /internal/github/link-status)")
 	}
 
-	if os.Getenv("AS_DEV_RELAX_NODE_AUTH") == "1" {
+	if cfg.DevRelaxNodeAuth {
 		log.Printf("authsvc: WARNING — AS_DEV_RELAX_NODE_AUTH=1: trusting %q header as node identity (DEV-ONLY, NOT for production)", "X-Spawnery-Dev-Node-Id")
 		opts = append(opts, authsvc.WithDevNodeIdentityHeader("X-Spawnery-Dev-Node-Id"))
 	}
 
-	// GitHub link bootstrap flow. Active only when AS_GITHUB_LINK_REDIRECT_URI is set — a
-	// distinct callback from the login /oauth/callback (AS_GITHUB_REDIRECT_URI).  Non-GitHub
-	// lanes leave this unset and the /github/link/* handlers remain dormant.
-	if linkRedirect := strings.TrimSpace(os.Getenv("AS_GITHUB_LINK_REDIRECT_URI")); linkRedirect != "" {
+	// GitHub link bootstrap flow. Active only when github.link_redirect_uri is set — a distinct
+	// callback from the login /oauth/callback (github.redirect_uri). Non-GitHub lanes leave this
+	// unset and the /github/link/* handlers remain dormant.
+	if linkRedirect := strings.TrimSpace(cfg.GitHub.LinkRedirectURI); linkRedirect != "" {
 		exchanger, ok := ghProvider.(authsvc.GitHubLinkExchanger)
 		if !ok {
 			return nil, fmt.Errorf("authsvc: github provider does not implement GitHubLinkExchanger")
@@ -305,8 +320,8 @@ func buildService() (*authsvc.Service, error) {
 			Store:              idStore,
 			AppClientID:        ghAppClientID,
 			RedirectURI:        linkRedirect,
-			PostRedeemRedirect: env("AS_GITHUB_POST_REDEEM_REDIRECT", ""),
-			DefaultHost:        env("GITHUB_DEFAULT_HOST", "github.com"),
+			PostRedeemRedirect: cfg.GitHub.PostRedeemRedirect,
+			DefaultHost:        cfg.GitHub.DefaultHost,
 			AccountFromReq:     authsvc.SessionBearerAccount(idp.KeySet(), time.Now),
 			SPAOrigin:          spaOrigin,
 		}))
@@ -349,16 +364,28 @@ type productionCA struct {
 	inter *pki.CA
 }
 
-func buildProductionCA() (*productionCA, error) {
-	rootCert, err := pki.ParseCertPEM(mustRead("AS_ROOT_CA_PEM", "/etc/spawnery/as/root-ca.pem"))
+func buildProductionCA(cfg *AS) (*productionCA, error) {
+	rootCertBytes, err := os.ReadFile(cfg.CA.RootPEM)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: read ca.root_pem (%s): %w", cfg.CA.RootPEM, err)
+	}
+	rootCert, err := pki.ParseCertPEM(rootCertBytes)
 	if err != nil {
 		return nil, err
 	}
-	interCert, err := pki.ParseCertPEM(mustRead("AS_INTERMEDIATE_CERT_PEM", "/etc/spawnery/as/self-hosted-intermediate.pem"))
+	interCertBytes, err := os.ReadFile(cfg.CA.IntermediateCert)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: read ca.intermediate_cert (%s): %w", cfg.CA.IntermediateCert, err)
+	}
+	interCert, err := pki.ParseCertPEM(interCertBytes)
 	if err != nil {
 		return nil, err
 	}
-	interKey, err := pki.ParseKeyPEM(mustRead("AS_INTERMEDIATE_KEY_PEM", "/etc/spawnery/as/self-hosted-intermediate-key.pem"))
+	interKeyBytes, err := os.ReadFile(cfg.CA.IntermediateKey)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: read ca.intermediate_key (%s): %w", cfg.CA.IntermediateKey, err)
+	}
+	interKey, err := pki.ParseKeyPEM(interKeyBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -368,10 +395,10 @@ func buildProductionCA() (*productionCA, error) {
 	}, nil
 }
 
-func loadOrGenerateSigningKey() (ed25519.PrivateKey, error) {
-	path := os.Getenv("AS_SESSION_KEY_PEM")
+func loadOrGenerateSigningKey(cfg *AS) (ed25519.PrivateKey, error) {
+	path := cfg.Session.KeyPEM
 	if path == "" {
-		if os.Getenv("AS_DEV") == "1" {
+		if cfg.Dev {
 			_, k, err := ed25519.GenerateKey(nil)
 			if err != nil {
 				return nil, err
@@ -379,9 +406,8 @@ func loadOrGenerateSigningKey() (ed25519.PrivateKey, error) {
 			log.Printf("authsvc: DEV — generated ephemeral session signing key")
 			return k, nil
 		}
-		// Production: a missing session key is a fatal misconfiguration [AM13]. An ephemeral key
-		// mints tokens the CP's pinned key-set cannot verify and that do not survive a restart.
-		return nil, fmt.Errorf("AS_SESSION_KEY_PEM is required in production (set AS_DEV=1 for development)")
+		// Validate() ensures this cannot happen in production.
+		return nil, fmt.Errorf("session.key_pem is required in production (set dev=true for development)")
 	}
 	pemBytes, err := os.ReadFile(path)
 	if err != nil {
@@ -391,8 +417,7 @@ func loadOrGenerateSigningKey() (ed25519.PrivateKey, error) {
 	return k, err
 }
 
-func loadNextPubs() ([]ed25519.PublicKey, error) {
-	path := os.Getenv("AS_SESSION_KEY_NEXT_PEM")
+func loadNextPubs(path string) ([]ed25519.PublicKey, error) {
 	if path == "" {
 		return nil, nil
 	}
@@ -410,22 +435,22 @@ func loadNextPubs() ([]ed25519.PublicKey, error) {
 // loadGitHubTokenCipher builds the at-rest cipher for AS-custodial github tokens
 // (§16.2 / MAJOR-2). The key is held OUTSIDE the DB. Precedence:
 //
-//	AS_GITHUB_TOKEN_ENC_KEY      (standard-base64 32-byte key), else
-//	AS_GITHUB_TOKEN_ENC_KEY_FILE (path to a file holding the base64 key), else
-//	AS_DEV=1                     -> ephemeral random key (in-memory DB; data is ephemeral), else
-//	error (fail-closed: prod must provide a key).
-func loadGitHubTokenCipher() (store.TokenCipher, error) {
-	if b64 := strings.TrimSpace(os.Getenv("AS_GITHUB_TOKEN_ENC_KEY")); b64 != "" {
+//	github.token_enc_key      (standard-base64 32-byte key), else
+//	github.token_enc_key_file (path to a file holding the base64 key), else
+//	dev=true                  -> ephemeral random key (in-memory DB; data is ephemeral), else
+//	error (fail-closed: prod must provide a key; Validate() enforces this).
+func loadGitHubTokenCipher(cfg *AS) (store.TokenCipher, error) {
+	if b64 := strings.TrimSpace(string(cfg.GitHub.TokenEncKey)); b64 != "" {
 		return store.ParseTokenCipherKey(b64)
 	}
-	if path := strings.TrimSpace(os.Getenv("AS_GITHUB_TOKEN_ENC_KEY_FILE")); path != "" {
+	if path := strings.TrimSpace(cfg.GitHub.TokenEncKeyFile); path != "" {
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("authsvc: reading AS_GITHUB_TOKEN_ENC_KEY_FILE: %w", err)
+			return nil, fmt.Errorf("authsvc: reading github.token_enc_key_file: %w", err)
 		}
 		return store.ParseTokenCipherKey(strings.TrimSpace(string(raw)))
 	}
-	if os.Getenv("AS_DEV") == "1" {
+	if cfg.Dev {
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
 			return nil, err
@@ -433,31 +458,8 @@ func loadGitHubTokenCipher() (store.TokenCipher, error) {
 		log.Printf("authsvc: DEV — ephemeral in-memory github token encryption key (set AS_GITHUB_TOKEN_ENC_KEY to persist)")
 		return store.NewAESGCMTokenCipher(key)
 	}
-	return nil, fmt.Errorf("authsvc: AS_GITHUB_TOKEN_ENC_KEY (or _FILE) is required for at-rest github token encryption")
-}
-
-func mustRead(envKey, def string) []byte {
-	path := env(envKey, def)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		log.Fatalf("authsvc: read %s (%s): %v", envKey, path, err)
-	}
-	return b
-}
-
-func mustEnv(k string) string {
-	v := os.Getenv(k)
-	if v == "" {
-		log.Fatalf("authsvc: required env var %s not set", k)
-	}
-	return v
-}
-
-func env(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
+	// Validate() ensures this cannot happen in production.
+	return nil, fmt.Errorf("authsvc: github.token_enc_key (or github.token_enc_key_file) is required for at-rest github token encryption")
 }
 
 func splitCSV(s string) []string {

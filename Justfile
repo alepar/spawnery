@@ -23,6 +23,7 @@ default:
 # spawnlet, foreground. agent = agent (opencode, default) | stub
 spawnlet agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
+    SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
     DATA_ROOT={{data_root}} SPAWNLET_ADDR={{addr}} \
@@ -32,12 +33,12 @@ spawnlet agent="agent": (_images agent)
 # control plane (foreground)
 cp:
     @make bin/spawnery_cp
-    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/spawnery_cp
+    SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/spawnery_cp
 
 # auth service (foreground; dev = ephemeral in-memory CA, not for production)
 authsvc:
     @make bin/authsvc
-    AS_DEV=1 AS_LISTEN={{addr_as}} {{repo}}/bin/authsvc
+    SPAWNERY_ENV=dev AS_DEV=1 AS_LISTEN={{addr_as}} {{repo}}/bin/authsvc
 
 # spawnlet attached to the CP — root-free dev node (self-hosted + egress floor off). `just node stub` = echo agent.
 # Sources deploy/garage/dev-creds.env when present (written by `just garage`), enabling the
@@ -49,6 +50,7 @@ authsvc:
 node agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
+    SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
@@ -107,7 +109,7 @@ dev-plain: garage
 # When ready: `just cp-intent` in one pane, `just node` in another, `spawnctl create ...` from CLI.
 cp-intent:
     @make bin/spawnery_cp
-    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
     CP_DEV_INTENT_ENABLED=1 \
     {{repo}}/bin/spawnery_cp
 
@@ -122,7 +124,7 @@ gen-dev-ca:
 # control plane with enforced node auth: mTLS node listener on a second port; clients still use :8080.
 cp-enforced:
     @make bin/spawnery_cp
-    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
     NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \
     CP_NODE_ROOT_CA={{devca}}/root.pem \
     CP_NODE_TLS_CERT={{devca}}/cp-server.pem CP_NODE_TLS_KEY={{devca}}/cp-server-key.pem \
@@ -132,7 +134,7 @@ cp-enforced:
 authsvc-enforced:
     @make bin/authsvc
     @mkdir -p {{data_root}}
-    AS_LISTEN={{addr_as}} \
+    SPAWNERY_ENV=dev AS_LISTEN={{addr_as}} \
     AS_DB_DSN="file:{{data_root}}/authsvc.db?_pragma=foreign_keys(1)" \
     AS_ROOT_CA_PEM={{devca}}/root.pem \
     AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
@@ -143,6 +145,7 @@ authsvc-enforced:
 # node with enforced auth: pre-provisioned identity from .dev-ca/node, mTLS to the CP node listener.
 node-enforced agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
+    SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     CP_ADDR=http://{{addr_cp}} NODE_AUTH_MODE=enforced \
     CP_NODE_ADDR=https://{{addr_cp_node}} NODE_ID=node-1 NODE_ID_DIR={{devca}}/node \
@@ -164,7 +167,7 @@ dev-enforced:
 authsvc-github:
     @make bin/authsvc
     @mkdir -p {{data_root}}
-    AS_LISTEN={{addr_as}} \
+    SPAWNERY_ENV=dev AS_LISTEN={{addr_as}} \
     AS_DB_DSN="file:{{data_root}}/authsvc.db?_pragma=foreign_keys(1)" \
     AS_ROOT_CA_PEM={{devca}}/root.pem \
     AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
@@ -173,12 +176,10 @@ authsvc-github:
     AS_GITHUB_TOKEN_ENC_KEY="$(printf %s 'spawnery-dev-github-mount-enck32' | base64)" \
     GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in .env (GitHub App client_id)}" \
     GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in .env}" \
-    AS_GITHUB_REDIRECT_URI=${AS_GITHUB_REDIRECT_URI:-{{dev_web_origin}}/oauth/callback} \
+    AS_PUBLIC_URL={{dev_web_origin}} \
     AS_GITHUB_LINK_REDIRECT_URI=${AS_GITHUB_LINK_REDIRECT_URI:-{{dev_web_origin}}/github/link/callback} \
     AS_GITHUB_POST_REDEEM_REDIRECT=${AS_GITHUB_POST_REDEEM_REDIRECT:-{{dev_web_origin}}/settings} \
     AS_REDIRECT_URIS=http://127.0.0.1/cb,{{dev_web_origin}}/callback,http://localhost:5173/callback \
-    AS_SPA_ORIGINS={{dev_web_origin}} \
-    AS_ALLOWED_ORIGINS={{dev_web_origin}} \
     AS_CP_URL=http://{{addr_cp}} \
     AS_CP_RPC_SECRET=dev-as-cp-secret \
     AS_DEV_RELAX_NODE_AUTH=1 \
@@ -192,7 +193,7 @@ cp-github:
     @make bin/spawnery_cp
     @test -f {{devca}}/session-pub.pem || just gen-dev-ca
     @mkdir -p {{repo}}/.envs/dev
-    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=${CP_DEV_OWNER:-alice} CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=${CP_DEV_OWNER:-alice} CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
     CP_STORE_DSN="file:{{repo}}/.envs/dev/cp.db?_pragma=busy_timeout(5000)" \
     CP_AS_SESSION_PUBKEYS={{devca}}/session-pub.pem \
     NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \
@@ -212,6 +213,7 @@ cp-github:
 node-github agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
+    SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_AUTH_MODE=enforced \
@@ -231,7 +233,7 @@ dev-github: dev
 # one-shot spawnctl against the running spawnlet
 spawnctl prompt="What is the secret word?" model=free:
     @make bin/spawnctl
-    printf '%s\n' "{{prompt}}" | {{repo}}/bin/spawnctl -addr http://{{addr}} -app {{repo}}/examples/secret-app -model {{model}}
+    printf '%s\n' "{{prompt}}" | SPAWNERY_ENV=dev {{repo}}/bin/spawnctl -addr http://{{addr}} -app {{repo}}/examples/secret-app -model {{model}}
 
 # --- tests (actions) -----------------------------------------------------
 

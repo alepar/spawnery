@@ -1,0 +1,5 @@
+# Auth-service dev-environment overrides. Loaded on top of authsvc.yaml when SPAWNERY_ENV=dev.
+# The in-memory DSN is the dev default; individual recipes that use persistent storage (e.g.
+# authsvc-enforced) override it via AS_DB_DSN (the env alias table wins over the file layer).
+db:
+  dsn: "file:authsvc-dev?mode=memory&cache=shared&_pragma=foreign_keys(1)"
