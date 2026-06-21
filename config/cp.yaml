@@ -1,0 +1,40 @@
+# Control-plane base config (shared across all environments; dev-oriented defaults).
+# Per-environment deltas live in cp.<env>.yaml and deep-merge on top. Every value here is
+# overridable by env vars (the CP_*/NODE_*/EVALUATOR_* alias table) and CLI --set.
+
+listen: "127.0.0.1:8080"
+# Browser-origin allowlist for CORS + WS upgrade. Empty = dev (loopback + private-network only).
+allowed_origins: ""
+
+store:
+  driver: sqlite               # sqlite | postgres
+  dsn: "file:cp.db?_pragma=busy_timeout(5000)"
+
+auth:
+  mode: dev                    # dev | prod  (prod requires auth.as_session_pubkeys)
+  dev_tokens: "dev-token=dev"  # "name=token,..." — honored only in dev mode
+  as_session_pubkeys: ""       # CSV of PEM file paths (required in prod)
+  dev_as_key: ""               # PEM path for a stable dev AS signing key (optional; else ephemeral)
+  dev_intent_enabled: false    # opt into the two-phase intent sign flow in dev
+  session_reauth_interval: 0s  # 0 disables periodic session re-auth
+  as_rpc_secret: ""            # AS↔CP GitHub-coordination RPC bearer (enables service-scoped auth)
+  as_revocation_url: ""        # AS revocation feed URL (empty disables the poller)
+  as_cp_secret: ""             # bearer for the revocation feed
+  revocation_poll_interval: 30s
+
+telemetry: "telemetry/events.jsonl"   # JSONL sink path; empty disables
+
+max_spawns_per_owner: 5
+
+evaluator:                     # CP-side metric evaluators (disabled by default)
+  quota_suspend_mb: 0          # >0 enables quota-based suspend
+  idle_enabled: false          # enable idle-only evaluation
+  idle_detached: 15m
+  idle_attached: 60m
+
+node:
+  auth_mode: insecure          # insecure | enforced (enforced = mTLS on a dedicated listener)
+  listen: "127.0.0.1:8081"
+  root_ca: "/etc/spawnery/cp/node-root-ca.pem"
+  tls_cert: "/etc/spawnery/cp/server.pem"
+  tls_key: "/etc/spawnery/cp/server-key.pem"

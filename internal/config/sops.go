@@ -28,6 +28,10 @@ func newSopsResolver(ciphertext []byte) *sopsResolver {
 	return &sopsResolver{ciphertext: ciphertext}
 }
 
+// NewSopsResolver builds a ${sops:} resolver over a SOPS-encrypted YAML document (e.g. an
+// //go:embed'd secrets file), for binaries that wire the resolver explicitly.
+func NewSopsResolver(ciphertext []byte) Resolver { return newSopsResolver(ciphertext) }
+
 func (*sopsResolver) Scheme() string { return "sops" }
 
 func (r *sopsResolver) Resolve(key string) (string, error) {

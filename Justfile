@@ -32,7 +32,7 @@ spawnlet agent="agent": (_images agent)
 # control plane (foreground)
 cp:
     @make bin/spawnery_cp
-    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/spawnery_cp
+    SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/spawnery_cp
 
 # auth service (foreground; dev = ephemeral in-memory CA, not for production)
 authsvc:
@@ -107,7 +107,7 @@ dev-plain: garage
 # When ready: `just cp-intent` in one pane, `just node` in another, `spawnctl create ...` from CLI.
 cp-intent:
     @make bin/spawnery_cp
-    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
     CP_DEV_INTENT_ENABLED=1 \
     {{repo}}/bin/spawnery_cp
 
@@ -122,7 +122,7 @@ gen-dev-ca:
 # control plane with enforced node auth: mTLS node listener on a second port; clients still use :8080.
 cp-enforced:
     @make bin/spawnery_cp
-    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
     NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \
     CP_NODE_ROOT_CA={{devca}}/root.pem \
     CP_NODE_TLS_CERT={{devca}}/cp-server.pem CP_NODE_TLS_KEY={{devca}}/cp-server-key.pem \
@@ -191,7 +191,7 @@ cp-github:
     @make bin/spawnery_cp
     @test -f {{devca}}/session-pub.pem || just gen-dev-ca
     @mkdir -p {{repo}}/.envs/dev
-    CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=${CP_DEV_OWNER:-alice} CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=${CP_DEV_OWNER:-alice} CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
     CP_STORE_DSN="file:{{repo}}/.envs/dev/cp.db?_pragma=busy_timeout(5000)" \
     CP_AS_SESSION_PUBKEYS={{devca}}/session-pub.pem \
     NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \

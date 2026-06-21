@@ -1,0 +1,3 @@
+# Cross-process shared configuration (the `Common` layer), merged under every binary's config.
+# Intentionally minimal today — shared knobs are promoted here as binaries roll onto the framework.
+{}

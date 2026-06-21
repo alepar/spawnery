@@ -5,6 +5,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -23,6 +24,9 @@ type Options struct {
 	Getenv func(string) (string, bool)
 	// Embedded is the //go:embed'd config file tree (common.yaml, <svc>.yaml, *.<env>.yaml).
 	Embedded fs.FS
+	// SecretsFS, if set, is searched for secrets.<env>.sops.yaml; when present that file is wired
+	// as the ${sops:} resolver for the active env (typically the same embed.FS as Embedded).
+	SecretsFS fs.FS
 	// ExternalDir is an optional on-disk override dir; defaults to $SPAWNERY_CONFIG_DIR.
 	ExternalDir string
 	// Defaults is an optional pointer to a struct of in-code defaults (layer 0).
@@ -103,6 +107,16 @@ func Load[T any](svc string, opts Options) (*T, error) {
 	resolvers := map[string]Resolver{
 		"env":  newEnvResolver(getenv),
 		"file": newFileResolver(),
+	}
+	if opts.SecretsFS != nil {
+		name := "secrets." + env + ".sops.yaml"
+		b, err := fs.ReadFile(opts.SecretsFS, name)
+		switch {
+		case err == nil:
+			resolvers["sops"] = newSopsResolver(b)
+		case !errors.Is(err, fs.ErrNotExist):
+			return nil, fmt.Errorf("reading %s: %w", name, err)
+		}
 	}
 	for _, r := range opts.Resolvers {
 		resolvers[r.Scheme()] = r

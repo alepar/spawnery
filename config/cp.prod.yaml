@@ -1,0 +1,13 @@
+# Control-plane production overrides — deep-merged on top of cp.yaml when SPAWNERY_ENV=prod.
+# Thin by design: only the values that differ from the base. Secret values are ${sops:} references
+# resolved from secrets.prod.sops.yaml at startup (age key via SOPS_AGE_KEY_FILE).
+
+auth:
+  mode: prod                   # dev tokens ignored; auth.as_session_pubkeys required
+
+store:
+  driver: postgres
+  dsn: "${sops:store.dsn}"     # real DSN (with password) lives encrypted in secrets.prod.sops.yaml
+
+node:
+  auth_mode: enforced          # nodes connect over mTLS on the dedicated node listener
