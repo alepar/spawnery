@@ -130,6 +130,36 @@ func (r *githubRefresher) Note(e githubRefreshEntry) {
 	st.backoffDur = 0
 }
 
+// Invalidate advances the version-gate pointer for a delivered rotation signal and clears the
+// stale cached token so the next GetToken re-mints lazily (sp-v40s.22.1). It does NOT trigger
+// an eager pull; clearing lastMintAt removes the rate-limit floor so GetToken can mint immediately.
+// nil-safe.
+func (r *githubRefresher) Invalidate(spawnID, secretID string, version uint64, deliveryID string, accessExpiresAtUnix int64) {
+	if r == nil || spawnID == "" || secretID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st := r.lookupLocked(spawnID, secretID)
+	if st == nil {
+		return
+	}
+	st.entry.Version = version
+	st.entry.DeliveryID = deliveryID
+	if accessExpiresAtUnix > 0 {
+		st.entry.AccessExpiresAtUnix = accessExpiresAtUnix
+	}
+	// Lazy-invalidate: drop the cached (dead) token so GetToken re-mints on next call.
+	st.token = ""
+	st.tokenExpiryUnix = 0
+	// Clear the rate-limit floor so the next GetToken call is not blocked by minMintInterval.
+	st.lastMintAt = time.Time{}
+	// Reschedule proactive refresh relative to the new expiry (mirrors Note scheduling).
+	if accessExpiresAtUnix > 0 {
+		st.refreshAt = time.Unix(accessExpiresAtUnix, 0).Add(-nodeRefreshLead)
+	}
+}
+
 // Forget drops all link state for a spawn (stop/suspend). nil-safe.
 func (r *githubRefresher) Forget(spawnID string) {
 	if r == nil {

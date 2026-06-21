@@ -263,8 +263,7 @@ func main() {
 			auth.ServiceSecretHeader,
 			asSecret,
 			cpv1connect.SpawnServiceAuthorizeGitHubMintProcedure,
-			cpv1connect.SpawnServiceGetGitHubLinkTargetsProcedure,
-			cpv1connect.SpawnServiceFanoutGitHubSealedAccessTokenProcedure,
+			cpv1connect.SpawnServiceSignalGitHubTokenRotatedProcedure,
 		)
 		log.Printf("cp: AS GitHub coordination RPC secret enabled")
 	}

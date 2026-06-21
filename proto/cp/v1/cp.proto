@@ -29,10 +29,10 @@ service SpawnService {
   rpc GetSpawnNodeKey(GetSpawnNodeKeyRequest) returns (GetSpawnNodeKeyResponse);
   rpc DeliverSecrets(DeliverSecretsRequest)   returns (DeliverSecretsResponse);
   // GitHub access-token refresh coordination (sp-v40s.9): AS asks CP to confirm a node hosts the
-  // spawn/link and to fan out AS-sealed access tokens. CP remains ciphertext-only.
+  // spawn/link (AuthorizeGitHubMint) and to signal a token rotation to hosting nodes (SignalGitHubTokenRotated).
+  // CP is token-free: the signal carries only link-level metadata; nodes re-mint lazily on the next GetToken.
   rpc AuthorizeGitHubMint(AuthorizeGitHubMintRequest) returns (AuthorizeGitHubMintResponse);
-  rpc GetGitHubLinkTargets(GetGitHubLinkTargetsRequest) returns (GetGitHubLinkTargetsResponse);
-  rpc FanoutGitHubSealedAccessToken(FanoutGitHubSealedAccessTokenRequest) returns (FanoutGitHubSealedAccessTokenResponse);
+  rpc SignalGitHubTokenRotated(SignalGitHubTokenRotatedRequest) returns (SignalGitHubTokenRotatedResponse);
   // Data-only local<->cloud migration (sp-u53.5.3): claim-guarded suspend on the source node ->
   // resume with a placement override on the target. The owner client re-delivers the owner-sealed
   // journal key to the target via DeliverSecrets so the journaled mounts restore there.
@@ -415,27 +415,16 @@ message AuthorizeGitHubMintRequest {
 }
 message AuthorizeGitHubMintResponse {}
 
-message GitHubLinkTarget {
-  string spawn_id        = 1;
-  string node_id         = 2;
-  uint64 generation      = 3;
-  bytes  signed_subkey   = 4;
-  bytes  node_cert_chain = 5;
-  repeated SealedSecret secret_templates = 6; // clear routing metadata only; sealed bytes are stripped.
+// SignalGitHubTokenRotated is the token-free AS→CP rotation heads-up (sp-v40s.22.1).
+// The CP fans the signal out to hosting nodes as a CPMessage.github_token_rotated; nodes
+// advance their version-gate pointer and lazy-invalidate the stale cached token.
+message SignalGitHubTokenRotatedRequest {
+  string secret_id              = 1;
+  uint64 version                = 2;
+  string delivery_id            = 3;
+  int64  access_expires_at_unix = 4; // non-secret; lets nodes reschedule proactive refresh
 }
-message GetGitHubLinkTargetsRequest  { string secret_id = 1; }
-message GetGitHubLinkTargetsResponse { repeated GitHubLinkTarget targets = 1; }
-
-message GitHubSealedAccessTokenDelivery {
-  string spawn_id = 1;
-  uint64 generation = 2;
-  repeated SealedSecret secrets = 3;
-}
-message FanoutGitHubSealedAccessTokenRequest {
-  string secret_id = 1;
-  repeated GitHubSealedAccessTokenDelivery deliveries = 2;
-}
-message FanoutGitHubSealedAccessTokenResponse {}
+message SignalGitHubTokenRotatedResponse {}
 
 // MigrateSpawn picks the resume target either by exact node id (target_node_id) or, when that is
 // empty, by node CLASS (target_class, e.g. "cloud"). Tenancy still applies: a self-hosted target

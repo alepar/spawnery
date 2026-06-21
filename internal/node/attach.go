@@ -466,6 +466,13 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		a.releaseForkTurnBoundary(m.ReleaseForkTurnBoundary)
 	case *nodev1.CPMessage_FailedForkCleanup:
 		go a.failedForkCleanup(ctx, m.FailedForkCleanup)
+	case *nodev1.CPMessage_GithubTokenRotated:
+		sig := m.GithubTokenRotated
+		if a.staleGen(sig.SpawnId, sig.Generation) {
+			return // stale generation: drop (matches Stop/Suspend/SecretDelivery fence discipline)
+		}
+		// Cheap locked-map update; inline (no goroutine needed).
+		a.githubRefresh.Invalidate(sig.SpawnId, sig.SecretId, sig.Version, sig.DeliveryId, sig.AccessExpiresAtUnix)
 	case *nodev1.CPMessage_SecretDelivery:
 		if a.staleGen(m.SecretDelivery.SpawnId, m.SecretDelivery.Generation) {
 			return // stale generation: a newer pod exists; the owner re-seals to the current episode. Drop.

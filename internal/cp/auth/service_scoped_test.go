@@ -23,6 +23,11 @@ func (h *serviceScopedHandler) AuthorizeGitHubMint(context.Context, *connect.Req
 	return connect.NewResponse(&cpv1.AuthorizeGitHubMintResponse{}), nil
 }
 
+func (h *serviceScopedHandler) SignalGitHubTokenRotated(context.Context, *connect.Request[cpv1.SignalGitHubTokenRotatedRequest]) (*connect.Response[cpv1.SignalGitHubTokenRotatedResponse], error) {
+	h.called = true
+	return connect.NewResponse(&cpv1.SignalGitHubTokenRotatedResponse{}), nil
+}
+
 func (h *serviceScopedHandler) ListSpawns(context.Context, *connect.Request[cpv1.ListSpawnsRequest]) (*connect.Response[cpv1.ListSpawnsResponse], error) {
 	h.called = true
 	return connect.NewResponse(&cpv1.ListSpawnsResponse{}), nil
@@ -36,8 +41,7 @@ func TestServiceScopedInterceptorAllowsOnlyConfiguredProcedures(t *testing.T) {
 		auth.ServiceSecretHeader,
 		"as-secret",
 		cpv1connect.SpawnServiceAuthorizeGitHubMintProcedure,
-		cpv1connect.SpawnServiceGetGitHubLinkTargetsProcedure,
-		cpv1connect.SpawnServiceFanoutGitHubSealedAccessTokenProcedure,
+		cpv1connect.SpawnServiceSignalGitHubTokenRotatedProcedure,
 	)))
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)

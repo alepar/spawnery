@@ -290,7 +290,7 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 		)
 		opts = append(opts,
 			authsvc.WithGitHubMintAuthorizer(authsvc.NewCPGitHubMintAuthorizer(cpClient)),
-			authsvc.WithGitHubAccessTokenFanout(authsvc.NewCPGitHubAccessTokenFanout(cpClient, pki.MarshalCertPEM(root.Cert), time.Now)),
+			authsvc.WithGitHubTokenRotatedNotifier(authsvc.NewCPGitHubTokenRotatedNotifier(cpClient)),
 		)
 		log.Printf("authsvc: GitHub mint authorization/fanout wired to CP %s", cpURL)
 	}

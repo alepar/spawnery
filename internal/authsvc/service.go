@@ -44,7 +44,7 @@ type Service struct {
 	githubMintProvider    GitHubProvider
 	nodeIdentityExtractor NodeIdentityExtractor
 	githubMintAuthorizer  GitHubMintAuthorizer
-	githubTokenFanout     GitHubAccessTokenFanoutNotifier
+	githubTokenSignal     GitHubTokenRotatedNotifier
 	githubMintLocksMu     sync.Mutex
 	githubMintLocks       map[string]*sync.Mutex
 
@@ -104,25 +104,21 @@ func (f GitHubMintAuthorizerFunc) AuthorizeGitHubMint(ctx context.Context, req G
 	return f(ctx, req)
 }
 
-type GitHubAccessTokenFanout struct {
+type GitHubTokenRotatedSignal struct {
 	SecretID            string
-	AccountID           string
 	Version             uint64
 	DeliveryID          string
-	RepositoryID        string
-	AccessToken         string
 	AccessExpiresAtUnix int64
-	TokenType           string
 }
 
-type GitHubAccessTokenFanoutNotifier interface {
-	FanoutGitHubAccessToken(context.Context, GitHubAccessTokenFanout) error
+type GitHubTokenRotatedNotifier interface {
+	SignalGitHubTokenRotated(context.Context, GitHubTokenRotatedSignal) error
 }
 
-type GitHubAccessTokenFanoutFunc func(context.Context, GitHubAccessTokenFanout) error
+type GitHubTokenRotatedNotifierFunc func(context.Context, GitHubTokenRotatedSignal) error
 
-func (f GitHubAccessTokenFanoutFunc) FanoutGitHubAccessToken(ctx context.Context, req GitHubAccessTokenFanout) error {
-	return f(ctx, req)
+func (f GitHubTokenRotatedNotifierFunc) SignalGitHubTokenRotated(ctx context.Context, sig GitHubTokenRotatedSignal) error {
+	return f(ctx, sig)
 }
 
 // WithClock overrides the time source (tests).
@@ -190,8 +186,8 @@ func WithGitHubMintAuthorizer(authz GitHubMintAuthorizer) Option {
 	return func(s *Service) { s.githubMintAuthorizer = authz }
 }
 
-func WithGitHubAccessTokenFanout(fanout GitHubAccessTokenFanoutNotifier) Option {
-	return func(s *Service) { s.githubTokenFanout = fanout }
+func WithGitHubTokenRotatedNotifier(notifier GitHubTokenRotatedNotifier) Option {
+	return func(s *Service) { s.githubTokenSignal = notifier }
 }
 
 // GitHubLinkConfig configures the owner-driven GitHub App link-bootstrap flow (spec r2 §5-§6).
