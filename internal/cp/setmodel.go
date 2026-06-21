@@ -97,6 +97,8 @@ func (s *Server) SetSpawnModel(ctx context.Context, req *connect.Request[cpv1.Se
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
 	}
 
+	slogctx.FromContext(ctx).Info("SetSpawnModel: changing model", "old_model", sp.Model, "new_model", model)
+
 	// Durable source of truth: write model + model_applied=false in one atomic store update.
 	if err := s.st.Spawns().SetModel(ctx, spawnID, model); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
