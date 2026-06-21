@@ -7,6 +7,7 @@ import (
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/cp/cpmetrics"
 )
 
 // NodeSender is the CP->node side of a node's Attach stream (concurrency-safe).
@@ -200,6 +201,26 @@ type TargetInfo struct {
 	Class  string
 	Owner  string
 	Online bool
+}
+
+// MetricsSnapshot returns a per-class count of attached nodes and their total free slots.
+// It implements cpmetrics.RegistrySource so the metrics collector can read a consistent
+// snapshot under the lock without importing this package from cpmetrics (no cycle).
+func (r *Registry) MetricsSnapshot() map[string]cpmetrics.NodeClassStat {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]cpmetrics.NodeClassStat)
+	for _, n := range r.m {
+		class := n.Class
+		if class == "" {
+			class = "default"
+		}
+		s := out[class]
+		s.Nodes++
+		s.FreeSlots += uint64(n.Free)
+		out[class] = s
+	}
+	return out
 }
 
 // EligibleTargets returns info for every node that is tenancy-eligible for owner (their own

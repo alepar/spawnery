@@ -62,6 +62,30 @@ func (r *spawnRepo) Create(ctx context.Context, s Spawn, mounts []Mount) error {
 	return nil
 }
 
+// CountByStatus returns the number of non-deleted spawns per status, for metrics gauges.
+// Deleted rows are excluded: they are soft-deleted and their count is unbounded.
+func (r *spawnRepo) CountByStatus(ctx context.Context) (map[Status]int, error) {
+	type row struct {
+		Status Status `bun:"status"`
+		Count  int    `bun:"count"`
+	}
+	var rows []row
+	err := r.db.NewSelect().
+		TableExpr("spawns").
+		ColumnExpr("status, COUNT(*) AS count").
+		Where("status <> ?", Deleted).
+		GroupExpr("status").
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[Status]int, len(rows))
+	for _, ro := range rows {
+		out[ro.Status] = ro.Count
+	}
+	return out, nil
+}
+
 func (r *spawnRepo) Get(ctx context.Context, id string) (Spawn, error) {
 	var s Spawn
 	err := r.db.NewSelect().Model(&s).

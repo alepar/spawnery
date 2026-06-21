@@ -25,6 +25,7 @@ import (
 	"spawnery/internal/agentcaps"
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/cp/auth"
+	"spawnery/internal/cp/cpmetrics"
 	"spawnery/internal/cp/journalkeys"
 	"spawnery/internal/cp/lock"
 	"spawnery/internal/cp/nodeauth"
@@ -215,6 +216,19 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		devMode: true}
 	s.forkMaterializer = newSameNodeForkMaterializer(s, defaultForkMaterializeTimeout)
 	s.failedForkResources = &nodeFailedForkResources{s: s}
+	// Wire cpmetrics sources (idempotent; last-writer-wins — safe across repeated NewServer in tests).
+	cpmetrics.SetRegistrySource(reg)
+	cpmetrics.SetSpawnStatusSource(func(ctx context.Context) (map[string]int, error) {
+		m, err := st.Spawns().CountByStatus(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]int, len(m))
+		for k, v := range m {
+			out[string(k)] = v
+		}
+		return out, nil
+	})
 	return s
 }
 

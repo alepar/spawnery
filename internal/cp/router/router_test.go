@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/metrics"
 )
 
 type mcNode struct {
@@ -296,6 +297,115 @@ func TestPerSessionClientRouting(t *testing.T) {
 	r.FromNode("sp1", "0", "shared", []byte("still-0"))
 	if s0.count() != 2 {
 		t.Fatalf("session #0 must survive session #1 detach, got %d", s0.count())
+	}
+}
+
+// gatherCounterValue reads a single labeled counter value from metrics.Registry.
+// Returns 0 if the metric/label is not found (counter was never incremented).
+func gatherCounterValue(t *testing.T, metricName, labelKey, labelVal string) float64 {
+	t.Helper()
+	mfs, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != metricName {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == labelKey && lp.GetValue() == labelVal {
+					if c := m.GetCounter(); c != nil {
+						return c.GetValue()
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// TestFromClientRelayMetrics verifies that a successful FromClient bumps relay_bytes and relay_frames.
+// Not parallel: uses process-global counters; asserts deltas.
+func TestFromClientRelayMetrics(t *testing.T) {
+	r := New()
+	node := &mcNode{}
+	r.Bind("sp-m", "n1", node)
+
+	payload := []byte("hello-relay")
+	beforeBytes := gatherCounterValue(t, "spawnery_cp_relay_bytes_total", "direction", "from_client")
+	beforeFrames := gatherCounterValue(t, "spawnery_cp_relay_frames_total", "direction", "from_client")
+
+	if err := r.FromClient("sp-m", "0", "c1", payload); err != nil {
+		t.Fatalf("FromClient: %v", err)
+	}
+
+	afterBytes := gatherCounterValue(t, "spawnery_cp_relay_bytes_total", "direction", "from_client")
+	afterFrames := gatherCounterValue(t, "spawnery_cp_relay_frames_total", "direction", "from_client")
+
+	if d := afterBytes - beforeBytes; d != float64(len(payload)) {
+		t.Errorf("relay_bytes_total{from_client} delta = %v, want %d", d, len(payload))
+	}
+	if d := afterFrames - beforeFrames; d != 1 {
+		t.Errorf("relay_frames_total{from_client} delta = %v, want 1", d)
+	}
+}
+
+// TestFromNodeRelayMetrics verifies that FromNode bumps relay metrics only when client is attached.
+// Not parallel: uses process-global counters; asserts deltas.
+func TestFromNodeRelayMetrics(t *testing.T) {
+	r := New()
+	node := &mcNode{}
+	r.Bind("sp-n", "n1", node)
+	c := &mcClient{}
+	r.AttachClient("sp-n", "0", "c1", "", nil, c, 0)
+
+	payload := []byte("from-node-data")
+	beforeBytes := gatherCounterValue(t, "spawnery_cp_relay_bytes_total", "direction", "from_node")
+	beforeFrames := gatherCounterValue(t, "spawnery_cp_relay_frames_total", "direction", "from_node")
+
+	// Attached client: should count.
+	r.FromNode("sp-n", "0", "c1", payload)
+
+	afterBytes := gatherCounterValue(t, "spawnery_cp_relay_bytes_total", "direction", "from_node")
+	afterFrames := gatherCounterValue(t, "spawnery_cp_relay_frames_total", "direction", "from_node")
+
+	if d := afterBytes - beforeBytes; d != float64(len(payload)) {
+		t.Errorf("relay_bytes_total{from_node} delta (attached) = %v, want %d", d, len(payload))
+	}
+	if d := afterFrames - beforeFrames; d != 1 {
+		t.Errorf("relay_frames_total{from_node} delta (attached) = %v, want 1", d)
+	}
+
+	// Detached client: frame dropped, counters must NOT increment.
+	r.DetachClient("sp-n", "0", "c1")
+	beforeDetachedBytes := gatherCounterValue(t, "spawnery_cp_relay_bytes_total", "direction", "from_node")
+	beforeDetachedFrames := gatherCounterValue(t, "spawnery_cp_relay_frames_total", "direction", "from_node")
+
+	r.FromNode("sp-n", "0", "c1", payload) // dropped: client detached
+
+	afterDetachedBytes := gatherCounterValue(t, "spawnery_cp_relay_bytes_total", "direction", "from_node")
+	afterDetachedFrames := gatherCounterValue(t, "spawnery_cp_relay_frames_total", "direction", "from_node")
+
+	if afterDetachedBytes != beforeDetachedBytes || afterDetachedFrames != beforeDetachedFrames {
+		t.Error("relay counters must NOT increment for dropped frames (detached client)")
+	}
+}
+
+// TestFromClientUnknownSpawnDoesNotCount verifies that an error on FromClient (unknown spawn)
+// does not increment relay counters.
+func TestFromClientUnknownSpawnDoesNotCount(t *testing.T) {
+	r := New()
+	beforeBytes := gatherCounterValue(t, "spawnery_cp_relay_bytes_total", "direction", "from_client")
+	beforeFrames := gatherCounterValue(t, "spawnery_cp_relay_frames_total", "direction", "from_client")
+
+	_ = r.FromClient("ghost-spawn", "0", "c1", []byte("nope"))
+
+	afterBytes := gatherCounterValue(t, "spawnery_cp_relay_bytes_total", "direction", "from_client")
+	afterFrames := gatherCounterValue(t, "spawnery_cp_relay_frames_total", "direction", "from_client")
+
+	if afterBytes != beforeBytes || afterFrames != beforeFrames {
+		t.Error("relay counters must NOT increment when FromClient returns an error (unknown spawn)")
 	}
 }
 

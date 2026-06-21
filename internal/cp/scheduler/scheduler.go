@@ -12,6 +12,7 @@ import (
 
 	authv1 "spawnery/gen/auth/v1"
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/cp/cpmetrics"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
 )
@@ -83,6 +84,7 @@ func (s *Scheduler) PickNodeID(placement registry.Placement) (string, error) {
 func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement, env *authv1.AuthEnvelope, mounts []*nodev1.MountBinding, baseImageDigest string, rootfs *RootfsRestore, artifacts []*nodev1.ArtifactSpec, secrets []*nodev1.SealedSecret) (string, error) {
 	n := s.reg.PickFor(placement)
 	if n == nil {
+		cpmetrics.PlacementNoCapacity()
 		return "", connect.NewError(connect.CodeResourceExhausted, errors.New("no eligible node with capacity"))
 	}
 	ch := make(chan spawnResult, 1)
@@ -125,6 +127,7 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 			return "", connect.NewError(connect.CodeFailedPrecondition, errors.New(detail))
 		}
 		s.rt.Bind(id, n.ID, n.Sender)
+		cpmetrics.PlacementSuccess() // count only after Bind: the placement is committed and ACTIVE
 		return n.ID, nil
 	case <-time.After(s.timeout):
 		return "", connect.NewError(connect.CodeDeadlineExceeded, errors.New("spawn start timed out"))
