@@ -65,7 +65,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -96,21 +95,14 @@ import (
 const devInMemoryDSN = "file:authsvc-dev?mode=memory&cache=shared&_pragma=foreign_keys(1)"
 
 func loadConfig() (*AS, error) {
-	fs := flag.NewFlagSet("authsvc", flag.ExitOnError)
-	var sets multiFlag
-	_ = fs.String("env", "", "environment dev|staging|prod (overrides SPAWNERY_ENV)")
-	configDir := fs.String("config-dir", "", "external config override dir (overrides SPAWNERY_CONFIG_DIR)")
-	fs.Var(&sets, "set", "override a config key: key.path=value (repeatable)")
-	if err := fs.Parse(os.Args[1:]); err != nil {
-		return nil, err
-	}
+	configDir, sets := config.StdFlags("authsvc", os.Args[1:])
 	cfg, err := config.Load[AS]("authsvc", config.Options{
 		Args:        os.Args[1:],
 		Embedded:    configfiles.FS,
 		SecretsFS:   configfiles.FS,
-		ExternalDir: *configDir,
+		ExternalDir: configDir,
 		EnvAliases:  asEnvAliases,
-		Sets:        []string(sets),
+		Sets:        sets,
 	})
 	if err != nil {
 		return nil, err

@@ -56,11 +56,14 @@ func validateConfig(v any) error {
 	return nil
 }
 
-// keyPath strips the root struct name from a validator namespace, leaving the dotted key path
-// relative to the binary's config (e.g. "CP.store.dsn" -> "store.dsn").
+// keyPath turns a validator namespace into the dotted koanf key. validator prepends the root
+// struct name and any embedded (squashed) struct names — all Go identifiers, which are capitalized
+// — whereas koanf keys are lowercase by convention. So drop the leading capitalized segments,
+// leaving the key (e.g. "CP.store.dsn" -> "store.dsn", "CP.Common.public_url" -> "public_url").
 func keyPath(namespace string) string {
-	if i := strings.IndexByte(namespace, '.'); i >= 0 {
-		return namespace[i+1:]
+	parts := strings.Split(namespace, ".")
+	for len(parts) > 1 && parts[0] != "" && parts[0][0] >= 'A' && parts[0][0] <= 'Z' {
+		parts = parts[1:]
 	}
-	return namespace
+	return strings.Join(parts, ".")
 }

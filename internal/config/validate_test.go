@@ -85,6 +85,30 @@ func (c svc) Validate() error {
 	return nil
 }
 
+// A struct-tag failure on a squashed embedded field must report the bare dotted koanf key, not
+// the Go type/field name validator prepends (e.g. "region", not "EmbCommon.region").
+type EmbCommon struct {
+	Region string `koanf:"region" validate:"required"`
+}
+
+type EmbOuter struct {
+	EmbCommon `koanf:",squash"`
+	Name      string `koanf:"name"`
+}
+
+func TestValidateConfig_SquashedFieldKeyPath(t *testing.T) {
+	err := validateConfig(&EmbOuter{Name: "x"}) // region empty → required fails
+	if err == nil {
+		t.Fatal("expected validation error for missing region")
+	}
+	if !strings.Contains(err.Error(), "region") {
+		t.Errorf("error %q should name the key 'region'", err.Error())
+	}
+	if strings.Contains(err.Error(), "EmbCommon") || strings.Contains(err.Error(), "Region") {
+		t.Errorf("error %q leaked the Go type/field name", err.Error())
+	}
+}
+
 func TestValidateConfig_EmbeddedValidateCalledExplicitly(t *testing.T) {
 	if err := validateConfig(&svc{cmn: cmn{Region: "banned"}, Name: "x"}); err == nil || !strings.Contains(err.Error(), "region banned") {
 		t.Fatalf("expected embedded Common.Validate to run via explicit call, got %v", err)

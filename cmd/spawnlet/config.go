@@ -1,9 +1,7 @@
 package main
 
 import (
-	"flag"
 	"os"
-	"strings"
 
 	configfiles "spawnery/config"
 	"spawnery/internal/config"
@@ -136,30 +134,14 @@ var spawnletEnvAliases = map[string]string{
 	"JOURNAL_S3_DISABLE_TLS":        "journal.s3.disable_tls",
 }
 
-// multiFlag is a repeatable string flag (used for --set key=value).
-type multiFlag []string
-
-func (m *multiFlag) String() string { return strings.Join(*m, ",") }
-func (m *multiFlag) Set(v string) error {
-	*m = append(*m, v)
-	return nil
-}
-
 func loadConfig() (*Spawnlet, error) {
-	fs := flag.NewFlagSet("spawnlet", flag.ExitOnError)
-	var sets multiFlag
-	_ = fs.String("env", "", "environment dev|staging|prod (overrides SPAWNERY_ENV)")
-	configDir := fs.String("config-dir", "", "external config override dir (overrides SPAWNERY_CONFIG_DIR)")
-	fs.Var(&sets, "set", "override a config key: key.path=value (repeatable)")
-	if err := fs.Parse(os.Args[1:]); err != nil {
-		return nil, err
-	}
+	configDir, sets := config.StdFlags("spawnlet", os.Args[1:])
 	return config.Load[Spawnlet]("spawnlet", config.Options{
 		Args:        os.Args[1:],
 		Embedded:    configfiles.FS,
 		SecretsFS:   configfiles.FS,
-		ExternalDir: *configDir,
+		ExternalDir: configDir,
 		EnvAliases:  spawnletEnvAliases,
-		Sets:        []string(sets),
+		Sets:        sets,
 	})
 }

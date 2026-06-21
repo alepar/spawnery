@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -38,21 +37,14 @@ import (
 const sqliteDefaultDSN = "file:cp.db?_pragma=busy_timeout(5000)"
 
 func loadConfig() (*CP, error) {
-	fs := flag.NewFlagSet("spawnery_cp", flag.ExitOnError)
-	var sets multiFlag
-	_ = fs.String("env", "", "environment dev|staging|prod (overrides SPAWNERY_ENV)")
-	configDir := fs.String("config-dir", "", "external config override dir (overrides SPAWNERY_CONFIG_DIR)")
-	fs.Var(&sets, "set", "override a config key: key.path=value (repeatable)")
-	if err := fs.Parse(os.Args[1:]); err != nil {
-		return nil, err
-	}
+	configDir, sets := config.StdFlags("spawnery_cp", os.Args[1:])
 	cfg, err := config.Load[CP]("cp", config.Options{
 		Args:        os.Args[1:],
 		Embedded:    configfiles.FS,
 		SecretsFS:   configfiles.FS,
-		ExternalDir: *configDir,
+		ExternalDir: configDir,
 		EnvAliases:  cpEnvAliases,
-		Sets:        []string(sets),
+		Sets:        sets,
 	})
 	if err != nil {
 		return nil, err

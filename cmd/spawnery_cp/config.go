@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"spawnery/internal/config"
@@ -109,13 +108,4 @@ var cpEnvAliases = map[string]string{
 	"CP_NODE_ROOT_CA":             "node.root_ca",
 	"CP_NODE_TLS_CERT":            "node.tls_cert",
 	"CP_NODE_TLS_KEY":             "node.tls_key",
-}
-
-// multiFlag is a repeatable string flag (used for --set key=value).
-type multiFlag []string
-
-func (m *multiFlag) String() string { return strings.Join(*m, ",") }
-func (m *multiFlag) Set(v string) error {
-	*m = append(*m, v)
-	return nil
 }
