@@ -30,9 +30,9 @@ func (n *cpGitHubTokenRotatedNotifier) SignalGitHubTokenRotated(ctx context.Cont
 		return fmt.Errorf("github signal cp client is not configured")
 	}
 	_, err := n.cp.SignalGitHubTokenRotated(ctx, connect.NewRequest(&cpv1.SignalGitHubTokenRotatedRequest{
-		SecretId:           sig.SecretID,
-		Version:            sig.Version,
-		DeliveryId:         sig.DeliveryID,
+		SecretId:            sig.SecretID,
+		Version:             sig.Version,
+		DeliveryId:          sig.DeliveryID,
 		AccessExpiresAtUnix: sig.AccessExpiresAtUnix,
 	}))
 	return err
