@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"spawnery/internal/safego"
 	"spawnery/internal/sidecar"
 )
 
@@ -95,11 +96,13 @@ func bindAll(servers ...*http.Server) ([]net.Listener, error) {
 func serveAll(ctx context.Context, grace time.Duration, servers []*http.Server, lns []net.Listener) error {
 	errc := make(chan error, len(servers))
 	for i, s := range servers {
-		go func(srv *http.Server, ln net.Listener) {
-			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-				errc <- err
+		safego.Go("sidecar.serve", func(srv *http.Server, ln net.Listener) func() {
+			return func() {
+				if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+					errc <- err
+				}
 			}
-		}(s, lns[i])
+		}(s, lns[i]))
 	}
 
 	select {

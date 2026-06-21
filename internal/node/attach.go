@@ -25,6 +25,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/gen/node/v1/nodev1connect"
 	"spawnery/internal/agentcaps"
+	"spawnery/internal/safego"
 	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
 )
@@ -150,7 +151,7 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	backoff := minBackoff
 	secretReplay := newSecretDeliveryReplay()
 	githubRefresh := newGitHubRefresher(cfg.GitHubMint)
-	go githubRefresh.run(ctx)
+	safego.Go("node.github-refresh", func() { githubRefresh.run(ctx) })
 	// Create the GitHub credential control server only when a mint client is configured.
 	// It is process-lived (like githubRefresh): per-spawn listeners survive CP reconnects.
 	// When GitHubMint is nil the field stays nil and the Manager omits all control-server logic.
@@ -222,7 +223,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		return err
 	}
 	log.Printf("node: connected to CP at %s (id=%s class=%s)", cfg.CPURL, cfg.NodeID, cfg.NodeClass)
-	go a.heartbeatLoop(connCtx)
+	safego.Go("node.heartbeat-loop", func() { a.heartbeatLoop(connCtx) })
 
 	for {
 		msg, err := a.stream.Receive()
@@ -297,14 +298,16 @@ func (a *attacher) heartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			a.mu.Lock()
-			active := a.active
-			a.mu.Unlock()
-			free := a.cfg.MaxSpawns - active
-			_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Heartbeat{Heartbeat: &nodev1.Heartbeat{
-				ActiveSpawns: active, FreeSlots: free, Running: a.runningSpawns(ctx),
-				SignedSubkey: a.rotatedSubKey(time.Now()), // re-publish only when the sub-key just rotated
-			}}})
+			safego.Run("node.heartbeat-tick", func() {
+				a.mu.Lock()
+				active := a.active
+				a.mu.Unlock()
+				free := a.cfg.MaxSpawns - active
+				_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Heartbeat{Heartbeat: &nodev1.Heartbeat{
+					ActiveSpawns: active, FreeSlots: free, Running: a.runningSpawns(ctx),
+					SignedSubkey: a.rotatedSubKey(time.Now()), // re-publish only when the sub-key just rotated
+				}}})
+			})
 		}
 	}
 }
@@ -361,7 +364,7 @@ func (a *attacher) emitRoster(spawnID string) {
 func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 	switch m := msg.Msg.(type) {
 	case *nodev1.CPMessage_Start:
-		go a.startSpawn(ctx, m.Start)
+		safego.Go("node.start-spawn", func() { a.startSpawn(ctx, m.Start) })
 	case *nodev1.CPMessage_Stop:
 		if a.staleGen(m.Stop.SpawnId, m.Stop.Generation) {
 			return

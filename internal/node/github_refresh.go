@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 
 	authv1 "spawnery/gen/auth/v1"
+	"spawnery/internal/safego"
 )
 
 // ErrGitHubNotLinked is returned by GetToken when the spawn has no GitHub link registered.
@@ -451,7 +452,7 @@ func (r *githubRefresher) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			r.Tick(ctx, r.now())
+			safego.Run("node.github-refresh-tick", func() { r.Tick(ctx, r.now()) })
 		}
 	}
 }
