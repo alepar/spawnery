@@ -469,7 +469,39 @@ for the rollout tasks (.8/.9/.10):**
   decrypt key is gitignored (`config/*.key`) and operator-supplied via `SOPS_AGE_KEY_FILE`.
   Verified live: prod boot decrypts `store.dsn` then fails validation on missing pubkeys; without
   the key it fails closed on decrypt.
-- **Minor behavior change**: env vars that were parsed by the old `getenvBool` accepted `yes`;
-  the framework's weak-typed bool decode accepts `1/true/0/false` but not `yes`. Low risk; noted.
+- **Behavior change — strict bools (kept deliberately; decided 2026-06-21).** The old per-binary
+  `getenvBool` helpers tolerated `yes`/`no`/arbitrary strings; the framework decodes bools strictly
+  via `strconv.ParseBool`, accepting only `1/0/t/f/true/false` (case-insensitive). Consequences a
+  deployment must know: a bool env var set to `yes`/`no`/`on`/`off` (e.g. `EVALUATOR_IDLE_ENABLED=yes`,
+  `REGISTRATION_ENABLED=no`) is now an **uncoercible value that fails the process at startup**, not a
+  silently-tolerated one; and `CP_DEV_INTENT_ENABLED=true` now *enables* (the old code keyed on the
+  exact string `"1"`, so `true` was ignored). Use `1`/`0`/`true`/`false` for all bool env vars/`--set`
+  values. (A lenient bool decode hook was considered and declined in favor of strictness.)
 - **Follow-up filed**: `sp-0sqa.12` — `getsops/sops/v3` pulls cloud-KMS SDKs into every binary
   linking `internal/config`; consider a build-tag/seam if binary size matters.
+
+**2026-06-21 — adversarial code review (4 finder angles + verification); fixes applied:**
+- **Reference resolution hardened (security):** `${...}` references now resolve on the **committed
+  config (defaults + files) ONLY, before** the env/flag/`--set` layers. Those lower-trust layers are
+  literal-only overrides — an env var or `--set` value can no longer be turned into a `${file:}`
+  arbitrary-file-read / `${env:}` cross-read / `${sops:}` decrypt primitive.
+- **spawnlet journal/mint un-leaked:** `configureJournal`/`nodeGitHubMint` now read the typed
+  `cfg.Journal`/`cfg.Node` (not `os.Getenv`), so `journal.*`/`node.*` via YAML/`--set`/external dir
+  actually take effect (they were silently env-only); their tests build config; the `env`/`getenvBool`
+  helpers are gone.
+- **GitHub link flow no longer auto-derived:** `github.link_redirect_uri` is **not** derived from
+  `public_url` (deriving it silently activated the `/github/link/*` flow on a prod AS that configured
+  GitHub but never opted in). It stays an explicit `AS_GITHUB_LINK_REDIRECT_URI`. `github.redirect_uri`
+  (OAuth login) is still derived.
+- **CLIs not fail-closed on env:** `Options.DefaultEnv` lets a client CLI (spawnctl) default to `dev`
+  when neither `--env` nor `SPAWNERY_ENV` is set; servers leave it empty and stay fail-closed.
+- **Smaller fixes:** a set-but-empty env var is treated as unset (no clobbering defaults); `${...}`
+  inside YAML **list** elements now resolves (koanf flattens lists to one leaf, so they were skipped);
+  `--env=`/trailing `--env` are explicit-invalid (fail-closed), not silently ignored.
+- **Accepted/noted, not changed:** the `store.Open` error can still surface a Postgres DSN in logs
+  once `string()`-unwrapped (pre-existing; `Secret` can't protect past the unwrap); the derived
+  `127.0.0.1/cb` loopback redirect is added even for web-only deployments (RFC-8252-standard, PKCE-
+  bound); validator namespaces mislabel squashed `Common` fields as `Common.<key>` (latent — no
+  `Common` field has a validate tag yet); `multiFlag`/flag-parse boilerplate is duplicated across the
+  three server binaries (cleanup); `.gitignore config/*.key` is non-recursive (a key under a `config/`
+  subdir would not be ignored).

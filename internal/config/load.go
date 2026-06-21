@@ -80,6 +80,30 @@ func Load[T any](svc string, opts Options) (*T, error) {
 		}
 	}
 
+	// Resolve ${scheme:arg} references on the COMMITTED CONFIG (defaults + files) only, BEFORE the
+	// env/flag/--set layers. This keeps those lower-trust layers literal-only overrides — an env
+	// var or --set value cannot be turned into a ${file:}/${env:}/${sops:} read primitive.
+	resolvers := map[string]Resolver{
+		"env":  newEnvResolver(getenv),
+		"file": newFileResolver(),
+	}
+	if opts.SecretsFS != nil {
+		name := "secrets." + env + ".sops.yaml"
+		b, err := fs.ReadFile(opts.SecretsFS, name)
+		switch {
+		case err == nil:
+			resolvers["sops"] = newSopsResolver(b)
+		case !errors.Is(err, fs.ErrNotExist):
+			return nil, fmt.Errorf("reading %s: %w", name, err)
+		}
+	}
+	for _, r := range opts.Resolvers {
+		resolvers[r.Scheme()] = r
+	}
+	if err := resolveRefs(k, resolvers); err != nil {
+		return nil, err
+	}
+
 	// Layer 5: explicitly-aliased env vars that are set.
 	if len(opts.EnvAliases) > 0 {
 		if err := k.Load(confmap.Provider(buildEnvLayer(opts.EnvAliases, getenv), "."), nil); err != nil {
@@ -103,29 +127,6 @@ func Load[T any](svc string, opts Options) (*T, error) {
 		if err := k.Load(confmap.Provider(sets, "."), nil); err != nil {
 			return nil, fmt.Errorf("loading --set layer: %w", err)
 		}
-	}
-
-	// Resolve ${scheme:arg} references on the merged map, before decode, so a resolved value is
-	// coerced to the field type like any other.
-	resolvers := map[string]Resolver{
-		"env":  newEnvResolver(getenv),
-		"file": newFileResolver(),
-	}
-	if opts.SecretsFS != nil {
-		name := "secrets." + env + ".sops.yaml"
-		b, err := fs.ReadFile(opts.SecretsFS, name)
-		switch {
-		case err == nil:
-			resolvers["sops"] = newSopsResolver(b)
-		case !errors.Is(err, fs.ErrNotExist):
-			return nil, fmt.Errorf("reading %s: %w", name, err)
-		}
-	}
-	for _, r := range opts.Resolvers {
-		resolvers[r.Scheme()] = r
-	}
-	if err := resolveRefs(k, resolvers); err != nil {
-		return nil, err
 	}
 
 	var out T

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"testing"
 	"testing/fstest"
 )
@@ -31,6 +32,29 @@ func TestLoad_ResolvesReferenceIntoRedactedSecret(t *testing.T) {
 	}
 	if got := fmt.Sprintf("%v", cfg.Token); got != "***" {
 		t.Errorf("Token render = %q, want *** (redacted)", got)
+	}
+}
+
+func TestLoad_EnvLayerValueIsNotReferenceResolved(t *testing.T) {
+	// Security: ${...} references resolve only from committed config files, never from env/--set
+	// values. An env-supplied reference must stay LITERAL (no arbitrary-file-read via env).
+	dir := t.TempDir()
+	secretFile := dir + "/should-not-read"
+	if err := os.WriteFile(secretFile, []byte("LEAKED"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ref := "${file:" + secretFile + "}"
+	cfg, err := Load[secretCP]("cp", Options{
+		Args:       []string{"--env=dev"},
+		Getenv:     envFrom(map[string]string{"TOK": ref}),
+		Embedded:   secretFS("token: plainfilevalue"),
+		EnvAliases: map[string]string{"TOK": "token"},
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if string(cfg.Token) != ref {
+		t.Errorf("env-supplied reference was resolved (value=%q) — env/--set must be literal-only", string(cfg.Token))
 	}
 }
 
