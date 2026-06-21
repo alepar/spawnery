@@ -38,7 +38,7 @@ cp:
 # auth service (foreground; dev = ephemeral in-memory CA, not for production)
 authsvc:
     @make bin/authsvc
-    AS_DEV=1 AS_LISTEN={{addr_as}} {{repo}}/bin/authsvc
+    SPAWNERY_ENV=dev AS_DEV=1 AS_LISTEN={{addr_as}} {{repo}}/bin/authsvc
 
 # spawnlet attached to the CP — root-free dev node (self-hosted + egress floor off). `just node stub` = echo agent.
 # Sources deploy/garage/dev-creds.env when present (written by `just garage`), enabling the
@@ -134,7 +134,7 @@ cp-enforced:
 authsvc-enforced:
     @make bin/authsvc
     @mkdir -p {{data_root}}
-    AS_LISTEN={{addr_as}} \
+    SPAWNERY_ENV=dev AS_LISTEN={{addr_as}} \
     AS_DB_DSN="file:{{data_root}}/authsvc.db?_pragma=foreign_keys(1)" \
     AS_ROOT_CA_PEM={{devca}}/root.pem \
     AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
@@ -167,7 +167,7 @@ dev-enforced:
 authsvc-github:
     @make bin/authsvc
     @mkdir -p {{data_root}}
-    AS_LISTEN={{addr_as}} \
+    SPAWNERY_ENV=dev AS_LISTEN={{addr_as}} \
     AS_DB_DSN="file:{{data_root}}/authsvc.db?_pragma=foreign_keys(1)" \
     AS_ROOT_CA_PEM={{devca}}/root.pem \
     AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \

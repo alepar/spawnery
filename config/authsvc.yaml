@@ -1,0 +1,47 @@
+# Auth-service base config (prod-safe defaults; dev-oriented knobs live in authsvc.dev.yaml).
+# Per-environment deltas live in authsvc.<env>.yaml and deep-merge on top. Every value here is
+# overridable by env vars (the AS_*/GITHUB_* alias table) and CLI --set.
+
+dev: false          # true = ephemeral in-memory CA + fake GitHub (dev/CI only; NOT for production)
+fake_github: false  # true = in-process fake GitHub provider (dev/CI; implies no real client creds)
+listen: "127.0.0.1:8090"
+allowed_origins: ""  # browser-origin allowlist for CORS; empty = dev (loopback + private-network only)
+
+ca:
+  root_pem: "/etc/spawnery/as/root-ca.pem"
+  intermediate_cert: "/etc/spawnery/as/self-hosted-intermediate.pem"
+  intermediate_key: "/etc/spawnery/as/self-hosted-intermediate-key.pem"
+
+session:
+  key_pem: ""       # required in production; generated ephemerally when dev=true
+  key_next_pem: ""  # next-rotation public key path (optional)
+
+db:
+  driver: sqlite
+  dsn: "file:/var/lib/authsvc/identity.db?_pragma=foreign_keys(1)"
+
+github:
+  token_enc_key: ""       # standard-base64 32-byte key for at-rest github token encryption (Secret)
+  token_enc_key_file: ""  # alternative: path to a file holding the base64 key
+  client_id: ""           # GitHub App client_id (required unless fake_github=true)
+  client_secret: ""       # GitHub App client_secret (Secret; required unless fake_github=true)
+  web_url: "https://github.com"
+  api_url: "https://api.github.com"
+  redirect_uri: ""              # AS's /oauth/callback URL as registered at the GitHub App
+  link_redirect_uri: ""         # AS's /github/link/callback URL (activates the link flow when set)
+  post_redeem_redirect: ""      # SPA page to land on after a successful link callback (optional)
+  default_host: "github.com"   # default git host for new links
+
+spa_origins: ""       # SPA origin for credentialed CORS (single canonical origin per AM2)
+redirect_uris: ""     # comma-separated registered client redirect_uri allowlist
+verification_uri: ""  # device-grant user confirmation URL (SPA's /device/verify page)
+
+registration_enabled: true  # allow new user registration
+max_families: 20            # concurrent refresh-family cap per account
+
+cp:
+  url: ""          # CP base URL for GitHub mint authorization/fanout (empty disables)
+  rpc_secret: ""   # AS->CP scoped bearer secret for GitHub coordination RPCs (Secret)
+  secret: ""       # shared bearer secret for GET /revocations (server-to-server; Secret)
+
+dev_relax_node_auth: false  # DEV-ONLY (D3): trust X-Spawnery-Dev-Node-Id header as node identity
