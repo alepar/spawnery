@@ -24,6 +24,7 @@ import (
 	"spawnery/gen/spawn/v1/spawnv1connect"
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/token"
+	"spawnery/internal/h2keepalive"
 	"spawnery/internal/health"
 	applog "spawnery/internal/log"
 	"spawnery/internal/metrics"
@@ -155,7 +156,9 @@ func main() {
 	health.Register(mux, mgr.Ping)
 	addr := env("SPAWNLET_ADDR", "127.0.0.1:9090")
 	log.Printf("spawnlet listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{})))
+	spawnletH2Srv := &http2.Server{}
+	h2keepalive.ConfigureServer(spawnletH2Srv)
+	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(mux, spawnletH2Srv)))
 }
 
 // gracefulStopAll tears down every spawn this node still runs, on a fresh (signal-independent) context
@@ -535,12 +538,14 @@ func loadNodeKeySet(s string) (token.KeySet, error) {
 }
 
 func h2cClient() *http.Client {
-	return &http.Client{Transport: &http2.Transport{
+	tr := &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
-	}}
+	}
+	h2keepalive.ConfigureTransport(tr)
+	return &http.Client{Transport: tr}
 }
 
 func env(k, def string) string {
