@@ -39,23 +39,39 @@ func parseRef(s string) (scheme, arg string, ok bool) {
 func resolveRefs(k *koanf.Koanf, resolvers map[string]Resolver) error {
 	overrides := map[string]any{}
 	for key, val := range k.All() {
-		s, ok := val.(string)
-		if !ok {
-			continue
+		switch v := val.(type) {
+		case string:
+			resolved, ok, err := resolveValue(key, v, resolvers)
+			if err != nil {
+				return err
+			}
+			if ok {
+				overrides[key] = resolved
+			}
+		case []any:
+			// koanf flattens a list into a single leaf, so list elements (e.g. a list of
+			// ${sops:...} secrets) must be walked here rather than via k.All() keys.
+			out := make([]any, len(v))
+			changed := false
+			for i, el := range v {
+				out[i] = el
+				s, ok := el.(string)
+				if !ok {
+					continue
+				}
+				resolved, ok, err := resolveValue(key, s, resolvers)
+				if err != nil {
+					return err
+				}
+				if ok {
+					out[i] = resolved
+					changed = true
+				}
+			}
+			if changed {
+				overrides[key] = out
+			}
 		}
-		scheme, arg, isRef := parseRef(s)
-		if !isRef {
-			continue
-		}
-		r, ok := resolvers[scheme]
-		if !ok {
-			return fmt.Errorf("config key %q: unknown reference scheme %q in %q", key, scheme, s)
-		}
-		resolved, err := r.Resolve(arg)
-		if err != nil {
-			return fmt.Errorf("config key %q: resolving ${%s:%s}: %w", key, scheme, arg, err)
-		}
-		overrides[key] = resolved
 	}
 	if len(overrides) > 0 {
 		if err := k.Load(confmap.Provider(overrides, "."), nil); err != nil {
@@ -63,4 +79,23 @@ func resolveRefs(k *koanf.Koanf, resolvers map[string]Resolver) error {
 		}
 	}
 	return nil
+}
+
+// resolveValue resolves a single string value if it is a whole-value ${scheme:arg} reference.
+// Returns (resolved, true, nil) when it was a reference, (\"\", false, nil) when it was not, and a
+// fail-closed error on an unknown scheme or a resolver failure.
+func resolveValue(key, s string, resolvers map[string]Resolver) (string, bool, error) {
+	scheme, arg, isRef := parseRef(s)
+	if !isRef {
+		return "", false, nil
+	}
+	r, ok := resolvers[scheme]
+	if !ok {
+		return "", false, fmt.Errorf("config key %q: unknown reference scheme %q in %q", key, scheme, s)
+	}
+	resolved, err := r.Resolve(arg)
+	if err != nil {
+		return "", false, fmt.Errorf("config key %q: resolving ${%s:%s}: %w", key, scheme, arg, err)
+	}
+	return resolved, true, nil
 }

@@ -25,7 +25,7 @@ func TestASDerive(t *testing.T) {
 		t.Errorf("github callbacks should NOT derive without client_id: %q / %q", c.GitHub.RedirectURI, c.GitHub.LinkRedirectURI)
 	}
 
-	// public_url + GitHub configured: callbacks derive too.
+	// public_url + GitHub configured: the OAuth login callback derives...
 	c2 := &AS{}
 	c2.PublicURL = o
 	c2.GitHub.ClientID = "cid"
@@ -33,8 +33,9 @@ func TestASDerive(t *testing.T) {
 	if c2.GitHub.RedirectURI != o+"/oauth/callback" {
 		t.Errorf("github.redirect_uri = %q, want %q", c2.GitHub.RedirectURI, o+"/oauth/callback")
 	}
-	if c2.GitHub.LinkRedirectURI != o+"/github/link/callback" {
-		t.Errorf("github.link_redirect_uri = %q, want %q", c2.GitHub.LinkRedirectURI, o+"/github/link/callback")
+	// ...but link_redirect_uri must NOT derive (it would silently activate the link flow).
+	if c2.GitHub.LinkRedirectURI != "" {
+		t.Errorf("github.link_redirect_uri = %q, want empty (must stay an explicit opt-in)", c2.GitHub.LinkRedirectURI)
 	}
 
 	// explicit values win over derivation.

@@ -26,6 +26,15 @@ func TestBuildEnvLayer(t *testing.T) {
 	}
 }
 
+func TestBuildEnvLayer_EmptyValueIsSkipped(t *testing.T) {
+	// A set-but-empty env var (e.g. FOO= from an unset shell var) must be treated as unset, so it
+	// does not clobber a lower layer's default with "".
+	got := buildEnvLayer(map[string]string{"CP_LISTEN": "listen"}, envFrom(map[string]string{"CP_LISTEN": ""}))
+	if _, present := got["listen"]; present {
+		t.Errorf("empty-valued env var should be skipped, got %v", got["listen"])
+	}
+}
+
 func TestBuildEnvLayer_Empty(t *testing.T) {
 	got := buildEnvLayer(map[string]string{"CP_X": "x"}, envFrom(nil))
 	if len(got) != 0 {

@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/v2"
 )
 
 func TestParseRef(t *testing.T) {
@@ -84,6 +87,39 @@ func TestResolveRefs(t *testing.T) {
 	}
 	if got := k.String("plain"); got != "untouched" {
 		t.Errorf("plain = %q, want untouched", got)
+	}
+}
+
+func TestResolveRefs_ResolvesListElements(t *testing.T) {
+	k := koanf.New(".")
+	if err := k.Load(confmap.Provider(map[string]any{
+		"origins": []any{"${env:A}", "literal", "${env:B}"},
+	}, "."), nil); err != nil {
+		t.Fatal(err)
+	}
+	resolvers := map[string]Resolver{
+		"env": newEnvResolver(envFrom(map[string]string{"A": "https://a.example", "B": "https://b.example"})),
+	}
+	if err := resolveRefs(k, resolvers); err != nil {
+		t.Fatalf("resolveRefs: %v", err)
+	}
+	got := k.Strings("origins")
+	want := []string{"https://a.example", "literal", "https://b.example"}
+	if len(got) != len(want) {
+		t.Fatalf("origins = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("origins[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestResolveRefs_ListElementResolverErrorIsFatal(t *testing.T) {
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]any{"x": []any{"${env:MISSING}"}}, "."), nil)
+	if err := resolveRefs(k, map[string]Resolver{"env": newEnvResolver(envFrom(nil))}); err == nil {
+		t.Fatal("expected fatal error for unresolvable ref in a list element")
 	}
 }
 

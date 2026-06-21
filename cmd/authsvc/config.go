@@ -86,14 +86,13 @@ func (c *AS) derive() {
 	if c.VerificationURI == "" {
 		c.VerificationURI = o + "/device/verify"
 	}
-	if c.GitHub.ClientID != "" {
-		if c.GitHub.RedirectURI == "" {
-			c.GitHub.RedirectURI = o + "/oauth/callback"
-		}
-		if c.GitHub.LinkRedirectURI == "" {
-			c.GitHub.LinkRedirectURI = o + "/github/link/callback"
-		}
+	if c.GitHub.ClientID != "" && c.GitHub.RedirectURI == "" {
+		c.GitHub.RedirectURI = o + "/oauth/callback"
 	}
+	// github.link_redirect_uri is intentionally NOT derived: a non-empty value ACTIVATES the
+	// /github/link/* bootstrap flow, so it must stay an explicit operator opt-in (set
+	// AS_GITHUB_LINK_REDIRECT_URI). Deriving it would silently enable that surface on any prod AS
+	// that configured GitHub but never asked for the link flow.
 }
 
 // Validate runs cross-field checks beyond the struct tags.

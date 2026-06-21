@@ -177,6 +177,7 @@ authsvc-github:
     GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in .env (GitHub App client_id)}" \
     GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in .env}" \
     AS_PUBLIC_URL={{dev_web_origin}} \
+    AS_GITHUB_LINK_REDIRECT_URI=${AS_GITHUB_LINK_REDIRECT_URI:-{{dev_web_origin}}/github/link/callback} \
     AS_REDIRECT_URIS=http://127.0.0.1/cb,{{dev_web_origin}}/callback,http://localhost:5173/callback \
     AS_CP_URL=http://{{addr_cp}} \
     AS_CP_RPC_SECRET=dev-as-cp-secret \

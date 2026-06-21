@@ -176,23 +176,24 @@ func TestApplyUsernsProbe(t *testing.T) {
 }
 
 // --- configureJournal tests -----------------------------------------------
-// These tests set env vars via t.Setenv because configureJournal reads JOURNAL_*
-// directly from the process environment (see its doc-comment for the rationale).
+// These build a typed config; configureJournal is driven by cfg.Journal, not the environment.
 
 func TestConfigureJournalS3WithGarageAdminDoesNotRequireStaticBucketCredentials(t *testing.T) {
-	t.Setenv("JOURNAL_BACKEND", "s3")
-	t.Setenv("JOURNAL_S3_ENDPOINT", "http://127.0.0.1:3900")
-	t.Setenv("JOURNAL_GARAGE_ADMIN_ENDPOINT", "http://127.0.0.1:3903")
-	t.Setenv("JOURNAL_GARAGE_ADMIN_TOKEN", "test-token")
-	t.Setenv("JOURNAL_S3_DISABLE_TLS", "true")
+	cfg := &Spawnlet{}
+	cfg.DataRoot = t.TempDir()
+	cfg.Journal.Backend = "s3"
+	cfg.Journal.S3.Endpoint = "http://127.0.0.1:3900"
+	cfg.Journal.S3.GarageAdminEndpoint = "http://127.0.0.1:3903"
+	cfg.Journal.S3.GarageAdminToken = "test-token"
+	cfg.Journal.S3.DisableTLS = true
 
 	m, err := buildManager(spawnlet.ManagerConfig{
-		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+		AgentImage: "a", SidecarImage: "s", DataRoot: cfg.DataRoot,
 	}, "", "", nil)
 	if err != nil {
 		t.Fatalf("build manager: %v", err)
 	}
-	if err := configureJournal(m, t.TempDir()); err != nil {
+	if err := configureJournal(m, cfg); err != nil {
 		t.Fatalf("configure generation-keyed s3 journal: %v", err)
 	}
 	if m == nil {
@@ -201,51 +202,55 @@ func TestConfigureJournalS3WithGarageAdminDoesNotRequireStaticBucketCredentials(
 }
 
 // --- nodeGitHubMint tests -------------------------------------------------
-// These tests set env vars via t.Setenv because nodeGitHubMint reads env vars
-// directly from the process environment (see its doc-comment for the rationale).
+// These build a typed config; nodeGitHubMint is driven by cfg.Node, not the environment.
 
 func TestNodeGitHubMint_RelaxedDevClient(t *testing.T) {
-	t.Setenv("NODE_GITHUB_MINT_DEV_NODE_ID", "node-1")
-	t.Setenv("AS_URL", "http://127.0.0.1:8090")
-	t.Setenv("NODE_AUTH_MODE", "insecure") // relaxed path must NOT require enforced mode
-	if got := nodeGitHubMint(); got == nil {
-		t.Fatal("relaxed dev mint client must be non-nil when NODE_GITHUB_MINT_DEV_NODE_ID + AS_URL are set")
+	cfg := &Spawnlet{}
+	cfg.Node.GitHubMintDevID = "node-1"
+	cfg.ASURL = "http://127.0.0.1:8090"
+	cfg.Node.AuthMode = "insecure" // relaxed path must NOT require enforced mode
+	if got := nodeGitHubMint(cfg); got == nil {
+		t.Fatal("relaxed dev mint client must be non-nil when github_mint_dev_id + as_url are set")
 	}
 }
 
 func TestNodeGitHubMint_RelaxedRequiresASURL(t *testing.T) {
-	t.Setenv("NODE_GITHUB_MINT_DEV_NODE_ID", "node-1")
-	t.Setenv("AS_URL", "")
-	if got := nodeGitHubMint(); got != nil {
-		t.Fatal("relaxed dev mint must be nil without AS_URL")
+	cfg := &Spawnlet{}
+	cfg.Node.GitHubMintDevID = "node-1"
+	cfg.ASURL = ""
+	if got := nodeGitHubMint(cfg); got != nil {
+		t.Fatal("relaxed dev mint must be nil without as_url")
 	}
 }
 
 func TestNodeGitHubMint_DisabledByDefault(t *testing.T) {
-	t.Setenv("NODE_GITHUB_MINT_DEV_NODE_ID", "")
-	t.Setenv("NODE_AUTH_MODE", "insecure")
-	t.Setenv("AS_URL", "http://127.0.0.1:8090")
-	if got := nodeGitHubMint(); got != nil {
-		t.Fatal("without dev env and in insecure mode, mint client must be nil (unchanged behavior)")
+	cfg := &Spawnlet{}
+	cfg.Node.GitHubMintDevID = ""
+	cfg.Node.AuthMode = "insecure"
+	cfg.ASURL = "http://127.0.0.1:8090"
+	if got := nodeGitHubMint(cfg); got != nil {
+		t.Fatal("without dev id and in insecure mode, mint client must be nil (unchanged behavior)")
 	}
 }
 
 func TestConfigureJournalS3FailsClosedWithoutGarageAdmin(t *testing.T) {
-	t.Setenv("JOURNAL_BACKEND", "s3")
-	t.Setenv("JOURNAL_S3_ENDPOINT", "http://127.0.0.1:3900")
-	t.Setenv("JOURNAL_S3_DISABLE_TLS", "true")
+	cfg := &Spawnlet{}
+	cfg.DataRoot = t.TempDir()
+	cfg.Journal.Backend = "s3"
+	cfg.Journal.S3.Endpoint = "http://127.0.0.1:3900"
+	cfg.Journal.S3.DisableTLS = true
 
 	m, err := buildManager(spawnlet.ManagerConfig{
-		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+		AgentImage: "a", SidecarImage: "s", DataRoot: cfg.DataRoot,
 	}, "", "", nil)
 	if err != nil {
 		t.Fatalf("build manager: %v", err)
 	}
-	err = configureJournal(m, t.TempDir())
+	err = configureJournal(m, cfg)
 	if err == nil {
 		t.Fatalf("configure journal = nil, want s3 generation-key manager requirement error")
 	}
-	if !strings.Contains(err.Error(), "JOURNAL_GARAGE_ADMIN_ENDPOINT") {
+	if !strings.Contains(err.Error(), "garage_admin_endpoint") {
 		t.Fatalf("error = %v, want Garage admin requirement", err)
 	}
 }

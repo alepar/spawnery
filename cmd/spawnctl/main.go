@@ -91,6 +91,9 @@ func rootAction(ctx context.Context, c *cli.Command) error {
 		SecretsFS:    configfiles.FS,
 		EnvAliases:   spawnctlEnvAliases,
 		FlagProvider: confmap.Provider(overrides, "."),
+		// spawnctl is a client CLI, not a server: default to dev when no env is set rather than
+		// fail closed, so `spawnctl create`/`-register` work without SPAWNERY_ENV.
+		DefaultEnv: "dev",
 	})
 	if err != nil {
 		return fmt.Errorf("config: %w", err)

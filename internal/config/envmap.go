@@ -10,7 +10,9 @@ package config
 func buildEnvLayer(aliases map[string]string, getenv func(string) (string, bool)) map[string]any {
 	out := make(map[string]any)
 	for envName, key := range aliases {
-		if v, ok := getenv(envName); ok {
+		// A set-but-empty value is treated as unset (matching the legacy os.Getenv helpers), so it
+		// never clobbers a lower layer's default with "".
+		if v, ok := getenv(envName); ok && v != "" {
 			out[key] = v
 		}
 	}

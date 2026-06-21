@@ -65,7 +65,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("manager init: %v", err)
 	}
-	if err := configureJournal(mgr, cfg.DataRoot); err != nil {
+	if err := configureJournal(mgr, cfg); err != nil {
 		log.Fatalf("journal init: %v", err)
 	}
 	// SIGTERM/SIGINT cancels ctx; the node's serve loop returns and we gracefully reap our pods
@@ -125,7 +125,7 @@ func main() {
 			nodeCfg.SubKeys = sk
 		}
 		nodeCfg.Verifier = buildIntentVerifier(cfg, cfg.Node.ID, cfg.Node.Owner)
-		nodeCfg.GitHubMint = nodeGitHubMint()
+		nodeCfg.GitHubMint = nodeGitHubMint(cfg)
 		log.Printf("spawnlet attaching to CP at %s as %s", nodeCfg.CPURL, cfg.Node.ID)
 		err = node.Run(ctx, mgr, httpc, nodeCfg) // returns when ctx is cancelled (signal) or on fatal error
 		gracefulStopAll(mgr)
@@ -169,16 +169,19 @@ func gracefulStopAll(mgr *spawnlet.Manager) {
 // is node-local — the repo password is generated + sealed under a node key on
 // this box; the CP never holds it (transient-tier §4).
 //
-// Note: configureJournal reads JOURNAL_* directly from the process environment so that
-// existing tests (which use t.Setenv) continue to work. A --set journal.backend override
-// does not propagate into configureJournal; use the JOURNAL_BACKEND env var (which also
-// populates cfg.Journal.Backend via the alias table).
-func configureJournal(m *spawnlet.Manager, dataRoot string) error {
-	kind := journal.BackendKind(os.Getenv("JOURNAL_BACKEND"))
+// configureJournal is driven by the typed cfg.Journal config (populated by the YAML layers, the
+// JOURNAL_* env aliases, and --set alike), not by reading the environment directly — so
+// `--set journal.backend=...` and SPAWNERY_CONFIG_DIR overrides take effect.
+func configureJournal(m *spawnlet.Manager, cfg *Spawnlet) error {
+	j := cfg.Journal
+	kind := journal.BackendKind(j.Backend)
 	if kind == "" {
 		return nil // journaling disabled (default)
 	}
-	root := env("JOURNAL_ROOT", filepath.Join(dataRoot, "journal"))
+	root := j.Root
+	if root == "" {
+		root = filepath.Join(cfg.DataRoot, "journal")
+	}
 
 	var backend journal.BlobBackend
 	var generationBackends journal.GenerationBackendProvider
@@ -186,29 +189,34 @@ func configureJournal(m *spawnlet.Manager, dataRoot string) error {
 	switch kind {
 	case journal.BackendFilesystem:
 		var err error
-		backend, err = journal.NewBackend(journal.BackendConfig{Kind: kind, FilesystemRoot: env("JOURNAL_FS_ROOT", filepath.Join(root, "blobs"))})
+		fsRoot := j.FSRoot
+		if fsRoot == "" {
+			fsRoot = filepath.Join(root, "blobs")
+		}
+		backend, err = journal.NewBackend(journal.BackendConfig{Kind: kind, FilesystemRoot: fsRoot})
 		if err != nil {
 			return err
 		}
 	case journal.BackendS3:
-		s3Endpoint := os.Getenv("JOURNAL_S3_ENDPOINT")
-		if s3Endpoint == "" {
-			return fmt.Errorf("journal s3: JOURNAL_S3_ENDPOINT is required")
+		if j.S3.Endpoint == "" {
+			return fmt.Errorf("journal s3: journal.s3.endpoint is required")
 		}
-		adminEndpoint := os.Getenv("JOURNAL_GARAGE_ADMIN_ENDPOINT")
-		adminToken := os.Getenv("JOURNAL_GARAGE_ADMIN_TOKEN")
-		if adminEndpoint == "" || adminToken == "" {
-			return fmt.Errorf("journal s3: JOURNAL_GARAGE_ADMIN_ENDPOINT and JOURNAL_GARAGE_ADMIN_TOKEN are required for generation-keyed journaling")
+		if j.S3.GarageAdminEndpoint == "" || string(j.S3.GarageAdminToken) == "" {
+			return fmt.Errorf("journal s3: journal.s3.garage_admin_endpoint and journal.s3.garage_admin_token are required for generation-keyed journaling")
 		}
-		admin, err := journal.NewGarageAdmin(adminEndpoint, adminToken, &http.Client{Timeout: 15 * time.Second})
+		admin, err := journal.NewGarageAdmin(j.S3.GarageAdminEndpoint, string(j.S3.GarageAdminToken), &http.Client{Timeout: 15 * time.Second})
 		if err != nil {
 			return fmt.Errorf("journal genkey admin: %w", err)
 		}
+		region := j.S3.Region
+		if region == "" {
+			region = "garage"
+		}
 		gkm, err = journal.NewGenerationKeyManager(journal.GenerationKeyConfig{
 			Admin:      admin,
-			S3Endpoint: strings.TrimPrefix(strings.TrimPrefix(s3Endpoint, "https://"), "http://"),
-			Region:     env("JOURNAL_S3_REGION", "garage"),
-			DisableTLS: getenvBool("JOURNAL_S3_DISABLE_TLS", false),
+			S3Endpoint: strings.TrimPrefix(strings.TrimPrefix(j.S3.Endpoint, "https://"), "http://"),
+			Region:     region,
+			DisableTLS: j.S3.DisableTLS,
 		})
 		if err != nil {
 			return fmt.Errorf("journal genkey: %w", err)
@@ -218,7 +226,10 @@ func configureJournal(m *spawnlet.Manager, dataRoot string) error {
 		return fmt.Errorf("unknown JOURNAL_BACKEND %q (want filesystem|s3)", kind)
 	}
 
-	keyfile := env("JOURNAL_NODE_KEY", filepath.Join(root, "node.key"))
+	keyfile := j.NodeKey
+	if keyfile == "" {
+		keyfile = filepath.Join(root, "node.key")
+	}
 	if err := journal.GenerateNodeKeyfile(keyfile); err != nil {
 		return fmt.Errorf("node key: %w", err)
 	}
@@ -430,13 +441,13 @@ func nodeRootPEM(cfg *Spawnlet) []byte {
 //     dev header identity. Works in any NODE_AUTH_MODE (no mTLS required). DEV-ONLY.
 //  2. Enforced/prod lane: NODE_AUTH_MODE=enforced + AS_URL + loaded mTLS identity → mTLS client.
 //
-// Note: nodeGitHubMint reads NODE_GITHUB_MINT_DEV_NODE_ID, AS_URL, NODE_AUTH_MODE, and NODE_ID_DIR
-// directly from the process environment so that existing tests (which use t.Setenv) continue to work.
-func nodeGitHubMint() node.GitHubMintClient {
-	asURL := os.Getenv("AS_URL")
+// nodeGitHubMint is driven by the typed cfg.Node config (populated by the node.* YAML, the
+// NODE_*/AS_URL env aliases, and --set alike), not by reading the environment directly.
+func nodeGitHubMint(cfg *Spawnlet) node.GitHubMintClient {
+	asURL := cfg.ASURL
 	// D3 dev-github lane: relaxed node->AS over plain HTTP with a header identity (NOT mTLS). The
 	// secure mTLS leg is proven by TestGitHubE2E_* and is the enforced/prod path below.
-	if devNodeID := strings.TrimSpace(os.Getenv("NODE_GITHUB_MINT_DEV_NODE_ID")); devNodeID != "" {
+	if devNodeID := strings.TrimSpace(cfg.Node.GitHubMintDevID); devNodeID != "" {
 		if asURL == "" {
 			log.Printf("github mint: NODE_GITHUB_MINT_DEV_NODE_ID set but AS_URL empty — relaxed mint disabled")
 			return nil
@@ -445,13 +456,13 @@ func nodeGitHubMint() node.GitHubMintClient {
 		return authv1connect.NewAuthServiceClient(h2cClient(), asURL,
 			connect.WithInterceptors(devNodeIDInterceptor{nodeID: devNodeID}))
 	}
-	if env("NODE_AUTH_MODE", "insecure") != "enforced" {
+	if cfg.Node.AuthMode != "enforced" {
 		return nil
 	}
 	if asURL == "" {
 		return nil
 	}
-	dir := env("NODE_ID_DIR", "/var/lib/spawnlet/identity")
+	dir := cfg.Node.IDDir
 	id, err := nodeid.Load(dir)
 	if err != nil {
 		log.Printf("github refresh disabled: no identity in %s: %v", dir, err)
@@ -551,20 +562,5 @@ func h2cClient() *http.Client {
 	}}
 }
 
-// env returns the value of the named environment variable, or def if it is unset or empty.
-// Used by configureJournal and nodeGitHubMint, which read JOURNAL_*/NODE_AUTH_MODE/NODE_ID_DIR
-// directly from the process environment (see their doc-comments for the rationale).
-func env(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-
-func getenvBool(k string, def bool) bool {
-	v := os.Getenv(k)
-	if v == "" {
-		return def
-	}
-	return v == "1" || v == "true" || v == "TRUE"
-}
+// (the env/getenvBool helpers were removed — configureJournal and nodeGitHubMint now read the
+// typed config, not the process environment.)

@@ -39,6 +39,9 @@ type Options struct {
 	Sets []string
 	// Resolvers are extra ${scheme:arg} backends (e.g. sops) beyond the built-in env/file ones.
 	Resolvers []Resolver
+	// DefaultEnv, if set, is the environment used when neither --env nor SPAWNERY_ENV is set.
+	// Servers leave it empty (fail-closed); a client CLI sets it (e.g. "dev") to stay usable.
+	DefaultEnv string
 }
 
 // Load builds the typed config T for the named service by layering, in precedence order:
@@ -56,7 +59,7 @@ func Load[T any](svc string, opts Options) (*T, error) {
 		}
 	}
 
-	env, err := resolveEnv(opts.Args, getenv)
+	env, err := resolveEnv(opts.Args, getenv, opts.DefaultEnv)
 	if err != nil {
 		return nil, err
 	}
