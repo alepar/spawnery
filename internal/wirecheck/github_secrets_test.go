@@ -301,9 +301,9 @@ func TestA4SecretAttachmentProtoSurface(t *testing.T) {
 	requireNoField(t, &cpv1.SignalGitHubTokenRotatedRequest{}, "access_token")
 
 	sigReq := &cpv1.SignalGitHubTokenRotatedRequest{
-		SecretId:           "gh-main",
-		Version:            12,
-		DeliveryId:         "github-access-gh-main-v12",
+		SecretId:            "gh-main",
+		Version:             12,
+		DeliveryId:          "github-access-gh-main-v12",
 		AccessExpiresAtUnix: 1893420000,
 	}
 	sigBytes, err := proto.Marshal(sigReq)
