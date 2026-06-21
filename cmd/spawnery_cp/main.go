@@ -32,6 +32,7 @@ import (
 	"spawnery/internal/cp/telemetry"
 	"spawnery/internal/pki"
 	"spawnery/internal/rpclog"
+	"spawnery/internal/safego"
 	"spawnery/internal/weborigin"
 )
 
@@ -249,7 +250,7 @@ func main() {
 		bearer := env("CP_AS_CP_SECRET", "")
 		interval := envDuration("CP_REVOCATION_POLL_INTERVAL", 30*time.Second)
 		poller := auth.NewFeedPoller(http.DefaultClient, feedURL, bearer, ks, revreg, interval)
-		go poller.Run(ctx)
+		safego.Go("cp.revocation-poller", func() { poller.Run(ctx) })
 		log.Printf("cp: revocation feed poller started (url=%s interval=%s)", feedURL, interval)
 	}
 
@@ -281,11 +282,11 @@ func main() {
 		if tlsErr != nil {
 			log.Fatalf("cp: build node mTLS listener: %v", tlsErr)
 		}
-		go func() {
+		safego.Go("cp.node-mtls-listener", func() {
 			if err := nodeTLSSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("cp: node mTLS listener: %v", err)
 			}
-		}()
+		})
 	} else {
 		mux.Handle(nodePath, nodeHandler)
 	}

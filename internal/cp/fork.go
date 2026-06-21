@@ -19,6 +19,7 @@ import (
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/intent"
+	"spawnery/internal/safego"
 )
 
 const forkHeadroomMultiplier = int64(3)
@@ -537,14 +538,14 @@ func (s *Server) forkSpawnClaimed(ctx context.Context, owner, sourceID, targetNo
 	materializeDone := make(chan struct{})
 	sourceReleased := make(chan struct{})
 	var sourceReleasedOnce sync.Once
-	go func() {
+	safego.Go("cp.fork-materialize-watch", func() {
 		select {
 		case <-claimCtx.Done():
 			cancelMaterialize()
 		case <-sourceReleased:
 		case <-materializeDone:
 		}
-	}()
+	})
 	defer func() {
 		close(materializeDone)
 		cancelMaterialize()
