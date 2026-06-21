@@ -161,6 +161,19 @@ type Server struct {
 	// a map from spawn id to struct{} (present = driver already running). Guarded by evaluatorMu.
 	evaluatorMu       sync.Mutex
 	evaluatorInFlight map[string]struct{}
+
+	// Graceful shutdown (sp-haj5.2.1).
+	// shutdownOnce ensures shutdownCh is closed exactly once.
+	// shutdownCh is the wind-down signal observed by every runNode receive loop.
+	// nodeWG tracks active runNode loops; Shutdown waits on it.
+	// nodeMu guards nodeShutdown and the nodeWG.Add/Wait boundary: runNode holds nodeMu while
+	// checking nodeShutdown and calling Add(1), so Add can never race with Wait (which is called
+	// only after nodeShutdown is set to true under nodeMu).
+	shutdownOnce sync.Once
+	shutdownCh   chan struct{}
+	nodeWG       sync.WaitGroup
+	nodeMu       sync.Mutex
+	nodeShutdown bool
 }
 
 const (
@@ -177,6 +190,7 @@ var _ cpv1connect.SpawnServiceHandler = (*Server)(nil)
 
 func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Scheduler, st store.Store, tel telemetry.Sink) *Server {
 	s := &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
+		shutdownCh: make(chan struct{}),
 		cpID: uuid.NewString(), claimTTL: defaultClaimTTL,
 		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout, suspendStallWindow: defaultSuspendStallWindow,
@@ -318,8 +332,25 @@ func (s *Server) Attach(ctx context.Context, stream *connect.BidiStream[nodev1.N
 	return s.runNode(ctx, sender, stream.Receive)
 }
 
+// recvResult carries a single recv() outcome from the pump goroutine to the main loop.
+type recvResult struct {
+	msg *nodev1.NodeMessage
+	err error
+}
+
 // runNode is the receive loop, split out so it is unit-testable without gRPC.
 func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv func() (*nodev1.NodeMessage, error)) error {
+	// Guard Add against a concurrent Wait in Shutdown. nodeMu ensures that once nodeShutdown
+	// is set true (under nodeMu in Shutdown, before Wait), no further Add(1) can occur.
+	s.nodeMu.Lock()
+	if s.nodeShutdown {
+		s.nodeMu.Unlock()
+		return connect.NewError(connect.CodeUnavailable, errors.New("control plane shutting down"))
+	}
+	s.nodeWG.Add(1)
+	s.nodeMu.Unlock()
+	defer s.nodeWG.Done()
+
 	var nodeID string
 	var nodeClass string
 	var token uint64 // this connection's registry token (0 until accepted); guards teardown
@@ -337,11 +368,42 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			_ = s.tel.Emit(telemetry.Event{Kind: "session_end", NodeID: nodeID, SpawnID: id, Timestamp: time.Now().UTC()})
 		}
 	}()
+
+	// quit is closed when runNode returns (for any reason), signalling the pump goroutine to exit.
+	quit := make(chan struct{})
+	defer close(quit)
+
+	// Pump goroutine: calls recv() (which may block) and forwards results to recvCh.
+	// It exits on shutdownCh (global shutdown), quit (any runNode return — displacement, duplicate
+	// rejection, normal teardown), or after forwarding a non-nil error.
+	recvCh := make(chan recvResult, 1)
+	go func() {
+		for {
+			msg, err := recv()
+			select {
+			case recvCh <- recvResult{msg: msg, err: err}:
+			case <-s.shutdownCh:
+				return
+			case <-quit:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	for {
-		msg, err := recv()
-		if err != nil {
+		var r recvResult
+		select {
+		case <-s.shutdownCh:
+			return nil // wind-down signal: clean EOF to the node
+		case r = <-recvCh:
+		}
+		if r.err != nil {
 			return nil // stream closed
 		}
+		msg := r.msg
 		// If a newer connection has taken over this node id (we were displaced), stop serving.
 		if token != 0 && !s.reg.IsCurrent(nodeID, token) {
 			return nil
@@ -471,6 +533,33 @@ func mountMarkersToMap(markers []*nodev1.MountMarker) map[string]string {
 		m[mk.GetName()] = mk.GetMarker()
 	}
 	return m
+}
+
+// Shutdown signals all active Attach (runNode) loops to wind down and waits for them to exit,
+// bounded by ctx. It is idempotent — safe to call multiple times. Returns nil on clean drain,
+// ctx.Err() if the deadline is exceeded before all loops exit.
+//
+// Call order in main: srv.Shutdown(sdCtx) then httpSrv.Shutdown(sdCtx). srv.Shutdown drains
+// the Attach streams; httpSrv.Shutdown stops the listener and drains in-flight unary RPCs.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
+	// Set nodeShutdown under nodeMu before calling Wait. Any runNode that calls Add(1) after
+	// this point will see nodeShutdown=true and bail early; any that already called Add(1) is
+	// already counted in the WaitGroup, so Wait is safe.
+	s.nodeMu.Lock()
+	s.nodeShutdown = true
+	s.nodeMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		s.nodeWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // reconcileInventory diffs the node's reported running inventory against the store (state/DAO
