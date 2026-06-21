@@ -37,37 +37,6 @@ import (
 // Ensure cpv1connect.SpawnServiceClient satisfies the narrow intentClient interface.
 var _ intentClient = (cpv1connect.SpawnServiceClient)(nil)
 
-// cfgContextKey is the typed context key for the loaded *SpawnctlCfg.
-type cfgContextKey struct{}
-
-// loadSpawnctlConfig is the urfave/cli/v3 root Before hook: it runs after global flag parse and
-// before any subcommand dispatch. It loads the layered config (YAML base → env aliases → explicit
-// flag overrides) and stores *SpawnctlCfg in the context for use by rootAction.
-//
-// Only explicitly-set flags contribute to the flag-override layer; unset flags use the YAML default
-// rather than the urfave-flag default, which is the same value but makes YAML the authoritative
-// floor (so spawnctl.<env>.yaml can change defaults without a rebuild).
-func loadSpawnctlConfig(ctx context.Context, cmd *cli.Command) (context.Context, error) {
-	overrides := map[string]any{}
-	if cmd.IsSet("addr") {
-		overrides["addr"] = cmd.String("addr")
-	}
-	if cmd.IsSet("cp") {
-		overrides["cp"] = cmd.String("cp")
-	}
-	cfg, err := config.Load[SpawnctlCfg]("spawnctl", config.Options{
-		Args:         os.Args[1:],
-		Embedded:     configfiles.FS,
-		SecretsFS:    configfiles.FS,
-		EnvAliases:   spawnctlEnvAliases,
-		FlagProvider: confmap.Provider(overrides, "."),
-	})
-	if err != nil {
-		return ctx, fmt.Errorf("spawnctl: config: %w", err)
-	}
-	return context.WithValue(ctx, cfgContextKey{}, cfg), nil
-}
-
 func main() {
 	cmd := &cli.Command{
 		Name:  "spawnctl",
@@ -77,8 +46,8 @@ func main() {
 		// The --mount value embeds a comma (name=backend_uri,create); disable the slice-flag comma
 		// separator so the ",create" option is not mis-split into a second mount binding.
 		DisableSliceFlagSeparator: true,
-		Before:                    loadSpawnctlConfig,
 		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "env", Usage: "environment dev|staging|prod (overrides SPAWNERY_ENV)", Hidden: true},
 			&cli.StringFlag{Name: "addr", Value: "http://127.0.0.1:9090", Usage: "spawnlet address (standalone)"},
 			&cli.StringFlag{Name: "app", Value: "examples/secret-app", Usage: "app definition dir"},
 			&cli.StringFlag{Name: "model", Value: "anthropic/claude-3.5-sonnet", Usage: "OpenRouter model"},
@@ -102,8 +71,30 @@ func main() {
 // rootAction is the default (no-subcommand) behavior: register, CP-create, or standalone-create.
 // addr and cp come from the loaded SpawnctlCfg (YAML default → explicit flag override), giving
 // spawnctl.<env>.yaml the ability to change these defaults without a rebuild.
+//
+// Config loading is intentionally scoped to rootAction: only this action uses addr/cp from the
+// config layer; the 14 subcommands (exec/shell/attach/list/…) are flag-driven and must not
+// require SPAWNERY_ENV to be set.
 func rootAction(ctx context.Context, c *cli.Command) error {
-	cfg := ctx.Value(cfgContextKey{}).(*SpawnctlCfg)
+	// Only explicitly-set flags contribute to the flag-override layer; unset flags fall through to
+	// the YAML default so spawnctl.<env>.yaml can change defaults without a rebuild.
+	overrides := map[string]any{}
+	if c.IsSet("addr") {
+		overrides["addr"] = c.String("addr")
+	}
+	if c.IsSet("cp") {
+		overrides["cp"] = c.String("cp")
+	}
+	cfg, err := config.Load[SpawnctlCfg]("spawnctl", config.Options{
+		Args:         os.Args[1:],
+		Embedded:     configfiles.FS,
+		SecretsFS:    configfiles.FS,
+		EnvAliases:   spawnctlEnvAliases,
+		FlagProvider: confmap.Provider(overrides, "."),
+	})
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
 	configDir, _ := defaultConfigDir()
 	httpCl := h2cClient()
 	if c.Bool("register") {
