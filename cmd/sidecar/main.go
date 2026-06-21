@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"spawnery/internal/metrics"
 	"spawnery/internal/safego"
 	"spawnery/internal/sidecar"
 )
@@ -36,6 +37,7 @@ func main() {
 	// /v1/messages is the Anthropic Messages API converter (Claude Code); everything else is
 	// the transparent OpenAI passthrough (opencode/goose).
 	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler())
 	mux.Handle("/v1/messages", sidecar.NewMessagesHandler(upstream, key, ov, inflight))
 	h, err := sidecar.NewHandler(upstream, key, ov, inflight)
 	if err != nil {
