@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { writeClipboard } from "@/term/clipboard";
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
 import { getAccessToken, authEnabled, useSessionStore } from "@/auth/session";
 import { buildSessionBindFrame } from "@/auth/sessionBind";
@@ -15,6 +16,16 @@ import { fontById } from "@/term/fonts";
 const CLIENT_ID = (typeof crypto !== "undefined" && crypto.randomUUID)
   ? crypto.randomUUID()
   : `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+// Mirror xterm's own platform check so the hint advertises the gesture the selection gate actually
+// honors: with tmux `mouse on`, xterm only force-selects under a modifier — Option on Mac, Shift
+// elsewhere (xterm's `shouldForceSelection` is `isMac ? altKey : shiftKey`). Deriving IS_MAC from
+// the same signal xterm uses (userAgentData.platform, falling back to the UA string) keeps the
+// badge and the gate in agreement.
+const IS_MAC = typeof navigator !== "undefined" &&
+  ((navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform === "macOS" ||
+    /Mac/.test(navigator.userAgent));
+const SELECT_HINT = IS_MAC ? "⌥ drag to select" : "Shift+drag to select";
 
 /**
  * Derive the primary font family (for `document.fonts.load`) from a fonts.ts stack:
@@ -61,11 +72,20 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
   // run would only re-do that (and fire a redundant resize before the socket opens).
   const liveInitRef = useRef(false);
 
+  // Copy-on-select feedback: the hint badge flips to "Copied" briefly after a successful copy.
+  const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
 
-    const term = new Terminal({ convertEol: false, cursorBlink: true });
+    // macOptionClickForcesSelection: tmux `mouse on` (scrollback) puts xterm in mouse-events mode,
+    // which suppresses native drag-selection. xterm restores selection only under a force-selection
+    // modifier — and on Mac that modifier is Option, gated by THIS option (Shift is ignored on Mac).
+    // Without it there is no working selection gesture on macOS. Harmless off-Mac (the option is read
+    // only inside xterm's isMac branch; Linux/Windows already force-select on Shift).
+    const term = new Terminal({ convertEol: false, cursorBlink: true, macOptionClickForcesSelection: true });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
@@ -122,6 +142,28 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     const ro = new ResizeObserver(() => safeFit());
     ro.observe(host);
 
+    // Copy-on-select. xterm renders selection on its own canvas (the browser's Cmd/Ctrl+C won't
+    // grab it), so we copy on drag-end. Bound on `document`, NOT `host`: xterm finalizes a drag on
+    // a document-level mouseup, so a selection released OUTSIDE the terminal (past an edge, over the
+    // hint badge, into a sibling panel) still completes — a host-bound listener would silently miss
+    // those copies. Gated on hasSelection() so unrelated document clicks are ignored.
+    const onDocMouseUp = () => {
+      if (!term.hasSelection()) return;
+      const sel = term.getSelection();
+      if (!sel) return;
+      const prevFocus = document.activeElement;
+      void writeClipboard(sel).then((ok) => {
+        if (!ok || termRef.current !== term) return; // failed, or unmounted/spawn-switched mid-copy
+        // The execCommand fallback (plain-HTTP LAN) moves focus to a temp textarea; restore it so
+        // keystrokes keep reaching the TUI. The secure Clipboard API path never moves focus.
+        if (document.activeElement !== prevFocus) term.focus();
+        setCopied(true);
+        if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+        copiedTimerRef.current = window.setTimeout(() => setCopied(false), 1200);
+      });
+    };
+    document.addEventListener("mouseup", onDocMouseUp);
+
     // In-band reauth: ~15min interval matches ws.go defaultReauthInterval.
     // Sends a text reauth frame so the CP resets the 15min expiry deadline.
     // Use a best-effort send (errors ignored — socket reconnects will re-handshake).
@@ -146,6 +188,8 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
       closing = true; // intentional teardown -> suppress the close-driven onDown "reconnecting"
       if (reauthInterval) clearInterval(reauthInterval);
       if (unsubSession) unsubSession();
+      document.removeEventListener("mouseup", onDocMouseUp);
+      if (copiedTimerRef.current !== null) { clearTimeout(copiedTimerRef.current); copiedTimerRef.current = null; }
       ro.disconnect();
       onData.dispose();
       onResize.dispose();
@@ -203,5 +247,18 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     return () => { cancelled = true; };
   }, [settings, appDark]);
 
-  return <div data-testid="terminal-view" ref={hostRef} className="h-full w-full" />;
+  return (
+    <div className="relative h-full w-full">
+      <div data-testid="terminal-view" ref={hostRef} className="h-full w-full" />
+      {/* Discoverability: the selection gesture is invisible and platform-specific (tmux mouse mode
+          means a modifier is required). pointer-events-none so it never blocks the terminal. */}
+      <div
+        aria-hidden
+        data-testid="terminal-select-hint"
+        className="pointer-events-none absolute bottom-1 right-2 select-none rounded border border-border bg-muted/80 px-1.5 py-0.5 text-[10px] text-muted-foreground"
+      >
+        {copied ? "Copied" : SELECT_HINT}
+      </div>
+    </div>
+  );
 }
