@@ -1,0 +1,62 @@
+# Spawnlet (node agent) base config. Per-environment deltas in spawnlet.<env>.yaml.
+# Defaults are dev-oriented; production overrides come from env vars (the alias table)
+# or an external config dir ($SPAWNERY_CONFIG_DIR).
+
+agent_image:       "spawnery/stubagent:dev"
+sidecar_image:     "spawnery/sidecar:dev"
+openrouter_api_key: ""
+data_root:         "/var/lib/spawnlet/spawns"
+spawnlet_addr:     "127.0.0.1:9090"   # standalone-mode listener
+agent_binaries:    []                  # binary names available in the agent image (CSV via env)
+container_runtime: ""                  # "" = Docker (default); "runsc" = CRI/gVisor lane
+userns_mode:       "off"              # off | remap | native
+as_url:            ""                  # AuthService URL (enforced mode / GitHub mint)
+enroll_token:      ""                  # enrollment token (first-boot only; cleared after enroll)
+pod_dns:           []                  # pod resolv.conf override (CRI/runsc lane; [] = host)
+
+node:
+  id:              "node-1"
+  class:           "cloud"            # cloud | self-hosted
+  owner:           ""                 # account ID for self-hosted single-tenant nodes
+  advertise_ip:    "127.0.0.1"       # IP the CP tells clients to use for this node
+  terminal_addr:   "127.0.0.1:9092"  # node-local terminal/exec endpoint (spawnctl attach)
+  auth_mode:       "insecure"        # insecure (h2c) | enforced (mTLS)
+  id_dir:          "/var/lib/spawnlet/identity"  # enrolled cert + key dir
+  root_ca:         ""                 # pinned root CA PEM path (default: <id_dir>/root.pem)
+  as_pubkeys:      ""                 # CSV of AS session public-key PEM paths
+  github_mint_dev_id: ""             # DEV-ONLY: relaxed node identity for AS GitHub-mint
+
+cp:
+  addr:      ""                        # CP URL; empty = standalone mode (no CP dial)
+  node_addr: "https://127.0.0.1:8081" # CP mTLS node listener (enforced mode)
+
+egress:
+  enforce:         true  # enforce the egress floor (set false for self-hosted dev nodes)
+  allow_cidrs:     []    # additional CIDRs the floor permits (CSV)
+  floor_force_off: false # DEV-ONLY: disable egress floor even for cloud-class nodes
+
+limits:
+  mem_mb: 1024
+  cpu:    1.0
+  pids:   256
+
+delta:
+  capture:      false  # enable delta-capture (image layer diffing)
+  squash_depth: 0      # 0 → manager default (16)
+  scrub_paths:  []     # paths to scrub from the delta (CSV; [] → manager default)
+
+cri:
+  endpoint:        "unix:///run/containerd/containerd.sock"
+  runtime_handler: "runsc"
+
+journal:
+  backend:  ""  # "" = disabled; filesystem | s3
+  root:     ""  # journal root dir (default: <data_root>/journal)
+  fs_root:  ""  # filesystem-backend blob dir (default: <journal.root>/blobs)
+  node_key: ""  # node key path (default: <journal.root>/node.key)
+  s3:
+    endpoint:              ""
+    garage_admin_endpoint: ""
+    garage_admin_token:    ""
+    region:                "garage"
+    disable_tls:           false
