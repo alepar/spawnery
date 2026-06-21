@@ -25,6 +25,7 @@ import (
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/health"
+	applog "spawnery/internal/log"
 	"spawnery/internal/metrics"
 	"spawnery/internal/node"
 	"spawnery/internal/node/nodeid"
@@ -39,6 +40,7 @@ import (
 )
 
 func main() {
+	applog.Init(os.Getenv)
 	cfg := spawnlet.ManagerConfig{
 		AgentImage:    env("AGENT_IMAGE", "spawnery/stubagent:dev"),
 		SidecarImage:  env("SIDECAR_IMAGE", "spawnery/sidecar:dev"),

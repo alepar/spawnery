@@ -3,7 +3,7 @@ package rpclog_test
 import (
 	"bytes"
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -23,9 +23,9 @@ func TestRecoverInterceptor_Unary_Panic(t *testing.T) {
 	interceptor := rpclog.RecoverInterceptor("test")
 
 	var buf bytes.Buffer
-	orig := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(orig)
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
 
 	panicHandler := connect.UnaryFunc(func(_ context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
 		panic("boom")
@@ -56,9 +56,9 @@ func TestRecoverInterceptor_Streaming_Panic(t *testing.T) {
 	interceptor := rpclog.RecoverInterceptor("test")
 
 	var buf bytes.Buffer
-	orig := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(orig)
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
 
 	panicHandler := connect.StreamingHandlerFunc(func(_ context.Context, _ connect.StreamingHandlerConn) error {
 		panic("stream-boom")

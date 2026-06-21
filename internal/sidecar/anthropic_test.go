@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -301,9 +301,9 @@ func TestMessagesHandlerCredentialsOverrideAppliesPerRequest(t *testing.T) {
 func TestMessagesHandlerRedactsCredentialFromUpstreamError(t *testing.T) {
 	const upstreamBody = `{"error":{"message":"provider echoed Bearer byok-key and byok-key"}}`
 	var logs bytes.Buffer
-	prevLog := log.Writer()
-	log.SetOutput(&logs)
-	defer log.SetOutput(prevLog)
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)

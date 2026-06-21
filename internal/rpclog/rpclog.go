@@ -5,7 +5,7 @@ package rpclog
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"runtime/debug"
 
 	"connectrpc.com/connect"
@@ -52,6 +52,11 @@ func (i *interceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) co
 }
 
 func (i *interceptor) logErr(procedure, kind string, err error) {
-	log.Printf("rpc-error [%s] %s%s: code=%s err=%v\n%s",
-		i.component, procedure, kind, connect.CodeOf(err), err, debug.Stack())
+	slog.Error("rpc-error",
+		"component", i.component,
+		"procedure", procedure+kind,
+		"code", connect.CodeOf(err).String(),
+		"err", err,
+		"stack", string(debug.Stack()),
+	)
 }
