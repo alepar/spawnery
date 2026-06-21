@@ -362,10 +362,10 @@ type approveResult struct {
 func approveDevice(dir, payloadJSON, deviceName string) (*approveResult, error) {
 	// Parse the enrollment payload.
 	var payload struct {
-		X25519Pub string `json:"x25519Pub"` // base64
-		SignPub   string `json:"signPub"`   // base64
+		X25519Pub  string `json:"x25519Pub"` // base64
+		SignPub    string `json:"signPub"`   // base64
 		DeviceName string `json:"deviceName"`
-		ExpiresAt string `json:"expiresAt"`
+		ExpiresAt  string `json:"expiresAt"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		return nil, fmt.Errorf("parse enrollment payload: %w", err)

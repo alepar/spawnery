@@ -125,13 +125,13 @@ func applyCmd() *cli.Command {
 			env := osEnviron()
 			reg := agentinstall.NewRegistry(env)
 			opts := agentinstall.Options{
-				HomeDir:          env.Home(),
-				SecretsDir:       secretsDir,
-				ArtifactsDir:     artifactsDir,
+				HomeDir:           env.Home(),
+				SecretsDir:        secretsDir,
+				ArtifactsDir:      artifactsDir,
 				SecretWaitTimeout: cmd.Duration("secret-wait-timeout"),
-				ProfileID:        cmd.String("profile-id"),
-				ProfileVersion:   cmd.String("profile-version"),
-				ManagedIndexPath: filepath.Join(env.Home(), ".spawnery", "managed.json"),
+				ProfileID:         cmd.String("profile-id"),
+				ProfileVersion:    cmd.String("profile-version"),
+				ManagedIndexPath:  filepath.Join(env.Home(), ".spawnery", "managed.json"),
 			}
 
 			result := agentinstall.ApplyFiltered(reg, m, opts, env, agentFilter)

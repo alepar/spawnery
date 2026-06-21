@@ -18,21 +18,55 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/knadh/koanf/providers/confmap"
 	"github.com/urfave/cli/v3"
 	"golang.org/x/net/http2"
 
+	configfiles "spawnery/config"
 	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 	spawnv1 "spawnery/gen/spawn/v1"
 	"spawnery/gen/spawn/v1/spawnv1connect"
 	"spawnery/internal/acp"
+	"spawnery/internal/config"
 	"spawnery/internal/intent"
 	"spawnery/internal/manifest"
 )
 
 // Ensure cpv1connect.SpawnServiceClient satisfies the narrow intentClient interface.
 var _ intentClient = (cpv1connect.SpawnServiceClient)(nil)
+
+// cfgContextKey is the typed context key for the loaded *SpawnctlCfg.
+type cfgContextKey struct{}
+
+// loadSpawnctlConfig is the urfave/cli/v3 root Before hook: it runs after global flag parse and
+// before any subcommand dispatch. It loads the layered config (YAML base → env aliases → explicit
+// flag overrides) and stores *SpawnctlCfg in the context for use by rootAction.
+//
+// Only explicitly-set flags contribute to the flag-override layer; unset flags use the YAML default
+// rather than the urfave-flag default, which is the same value but makes YAML the authoritative
+// floor (so spawnctl.<env>.yaml can change defaults without a rebuild).
+func loadSpawnctlConfig(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+	overrides := map[string]any{}
+	if cmd.IsSet("addr") {
+		overrides["addr"] = cmd.String("addr")
+	}
+	if cmd.IsSet("cp") {
+		overrides["cp"] = cmd.String("cp")
+	}
+	cfg, err := config.Load[SpawnctlCfg]("spawnctl", config.Options{
+		Args:         os.Args[1:],
+		Embedded:     configfiles.FS,
+		SecretsFS:    configfiles.FS,
+		EnvAliases:   spawnctlEnvAliases,
+		FlagProvider: confmap.Provider(overrides, "."),
+	})
+	if err != nil {
+		return ctx, fmt.Errorf("spawnctl: config: %w", err)
+	}
+	return context.WithValue(ctx, cfgContextKey{}, cfg), nil
+}
 
 func main() {
 	cmd := &cli.Command{
@@ -43,6 +77,7 @@ func main() {
 		// The --mount value embeds a comma (name=backend_uri,create); disable the slice-flag comma
 		// separator so the ",create" option is not mis-split into a second mount binding.
 		DisableSliceFlagSeparator: true,
+		Before:                    loadSpawnctlConfig,
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "addr", Value: "http://127.0.0.1:9090", Usage: "spawnlet address (standalone)"},
 			&cli.StringFlag{Name: "app", Value: "examples/secret-app", Usage: "app definition dir"},
@@ -65,30 +100,33 @@ func main() {
 }
 
 // rootAction is the default (no-subcommand) behavior: register, CP-create, or standalone-create.
+// addr and cp come from the loaded SpawnctlCfg (YAML default → explicit flag override), giving
+// spawnctl.<env>.yaml the ability to change these defaults without a rebuild.
 func rootAction(ctx context.Context, c *cli.Command) error {
+	cfg := ctx.Value(cfgContextKey{}).(*SpawnctlCfg)
 	configDir, _ := defaultConfigDir()
 	httpCl := h2cClient()
 	if c.Bool("register") {
-		if c.String("cp") == "" {
+		if cfg.CP == "" {
 			return cli.Exit("-register requires -cp", 2)
 		}
 		src := buildTokenSource(configDir, c.String("token"), httpCl)
-		runRegister(ctx, c.String("cp"), c.String("app"), c.String("version"), c.String("ref"), src)
+		runRegister(ctx, cfg.CP, c.String("app"), c.String("version"), c.String("ref"), src)
 		return nil
 	}
-	if c.String("cp") != "" {
+	if cfg.CP != "" {
 		mounts, err := parseMountFlags(c.StringSlice("mount"))
 		if err != nil {
 			return cli.Exit(err.Error(), 2)
 		}
 		src := buildTokenSource(configDir, c.String("token"), httpCl)
-		runCP(ctx, c.String("cp"), c.String("app-id"), c.String("model"), c.String("profile"), mounts, src)
+		runCP(ctx, cfg.CP, c.String("app-id"), c.String("model"), c.String("profile"), mounts, src)
 		return nil
 	}
 	if len(c.StringSlice("mount")) > 0 {
 		return cli.Exit("--mount requires -cp (standalone/register mode has no mount bindings)", 2)
 	}
-	runStandalone(ctx, c.String("addr"), c.String("app"), c.String("model"))
+	runStandalone(ctx, cfg.Addr, c.String("app"), c.String("model"))
 	return nil
 }
 
