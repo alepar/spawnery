@@ -232,7 +232,7 @@ dev-github: dev
 # one-shot spawnctl against the running spawnlet
 spawnctl prompt="What is the secret word?" model=free:
     @make bin/spawnctl
-    printf '%s\n' "{{prompt}}" | {{repo}}/bin/spawnctl -addr http://{{addr}} -app {{repo}}/examples/secret-app -model {{model}}
+    printf '%s\n' "{{prompt}}" | SPAWNERY_ENV=dev {{repo}}/bin/spawnctl -addr http://{{addr}} -app {{repo}}/examples/secret-app -model {{model}}
 
 # --- tests (actions) -----------------------------------------------------
 

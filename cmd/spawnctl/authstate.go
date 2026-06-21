@@ -33,8 +33,8 @@ import (
 )
 
 const (
-	authStateFile   = "auth.json"
-	authLockFile    = "auth.json.lock"
+	authStateFile    = "auth.json"
+	authLockFile     = "auth.json.lock"
 	refreshPoPDomain = "spawnery/refresh-pop/v1" // frozen per AS idp.go:47
 	// refreshWindow: proactive refresh when this close to expiry (plus jitter).
 	refreshWindow = 2 * time.Minute

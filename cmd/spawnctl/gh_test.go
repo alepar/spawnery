@@ -382,7 +382,7 @@ type stubBearer struct {
 }
 
 func (s stubBearer) token(context.Context) (string, error) { return s.tok, nil }
-func (s stubBearer) refresh(context.Context) error          { return nil }
+func (s stubBearer) refresh(context.Context) error         { return nil }
 
 // countingBearer records refresh calls and rotates the token on refresh.
 type countingBearer struct {
@@ -461,8 +461,8 @@ func TestSelectDeviceFlow(t *testing.T) {
 	}{
 		{device: true, browser: true, want: true},
 		{noBrowser: true, browser: true, want: true},
-		{browser: true, want: false},  // browser reachable, no flags → loopback
-		{browser: false, want: true},  // headless → device
+		{browser: true, want: false}, // browser reachable, no flags → loopback
+		{browser: false, want: true}, // headless → device
 	}
 	for _, tc := range cases {
 		if got := selectDeviceFlow(tc.device, tc.noBrowser, tc.browser); got != tc.want {

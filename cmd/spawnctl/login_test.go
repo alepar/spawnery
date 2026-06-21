@@ -77,7 +77,7 @@ func buildTestAS(t *testing.T, fake *githubfake.Fake, nowFn func() time.Time) (*
 	cfg := authsvc.IdPConfig{
 		Store:               st,
 		GitHub:              authsvc.NewGitHubProvider(fake.URL(), fake.URL(), fake.ClientID, fake.ClientSecret),
-		SigningKey:           sigKey,
+		SigningKey:          sigKey,
 		GitHubRedirectURI:   srv.URL + "/oauth/callback",
 		SPAOrigin:           "http://localhost:3000",
 		RedirectURIs:        []string{"http://localhost:3000/callback", "http://127.0.0.1:8000/cb"},
@@ -677,7 +677,9 @@ func TestLogout(t *testing.T) {
 		b, _ := io.ReadAll(refreshResp.Body)
 		t.Fatalf("post-logout /refresh: want 401, got %d: %s", refreshResp.StatusCode, b)
 	}
-	var errBody struct{ Error string `json:"error"` }
+	var errBody struct {
+		Error string `json:"error"`
+	}
 	_ = json.NewDecoder(refreshResp.Body).Decode(&errBody)
 	if errBody.Error != "token_revoked" {
 		t.Fatalf("post-logout /refresh: want token_revoked, got %q", errBody.Error)
