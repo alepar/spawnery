@@ -133,9 +133,8 @@ func spawnHasGitHubMintMount(mounts []store.Mount) bool {
 // seedGitHubMintLinks pre-seeds the in-memory github-link index for every gh: mint link-ref mount
 // so authorizeGitHubMint admits the hosting node's at-provision JIT mint, which races INSIDE the
 // blocking Provision/StartSpawn window (the node mints before acking ACTIVE). The entry needs no
-// SealedSecret template — has(secretID, spawnID) is all authorizeGitHubMint consults. Proactive-refresh
-// fanout (which needs templates) is out of scope for the live-dev demo (D3); a token never transits
-// the CP.
+// SealedSecret template — has(secretID, spawnID) is all authorizeGitHubMint consults. A token
+// never transits the CP.
 func (s *Server) seedGitHubMintLinks(spawnID string, mounts []store.Mount) {
 	for _, m := range mounts {
 		if strings.HasPrefix(m.BackendURI, "github:") && isGitHubMintLinkRef(m.CredentialSecretID) {

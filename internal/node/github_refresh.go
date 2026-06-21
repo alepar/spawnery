@@ -47,7 +47,7 @@ const (
 	defaultAccessLifetime  = 8 * time.Hour
 	nodeRefreshLead        = 8 * time.Minute // < AS 10m lead so the AS rotates on our call
 	defaultRefreshInterval = defaultAccessLifetime - nodeRefreshLead
-	refreshInFlightGrace   = 2 * time.Minute  // wait for the sealed fanout to arrive before re-minting
+	refreshInFlightGrace   = 2 * time.Minute  // wait for the rotation signal (Invalidate) before re-minting
 	refreshBackoffBase     = 30 * time.Second // exponential, capped
 	refreshBackoffMax      = 5 * time.Minute
 	refreshMintTimeout     = 30 * time.Second
@@ -253,7 +253,7 @@ func (r *githubRefresher) MintInitial(ctx context.Context, spawnID string, gener
 }
 
 // Tick attempts a mint for every due entry at `now`. Each attempt marks the entry in-flight and sets
-// a grace floor so the node waits for the sealed fanout (which re-Notes the new version) instead of
+// a grace floor so the node waits for the rotation signal (which calls Invalidate) instead of
 // hammering the AS. On success the mint RESPONSE's access_expires_at_unix refines refreshAt; on
 // failure an exponential backoff floor is set. nil-safe; a nil client makes Tick a no-op.
 func (r *githubRefresher) Tick(ctx context.Context, now time.Time) {
@@ -327,15 +327,14 @@ func (r *githubRefresher) succeedAttempt(e githubRefreshEntry, now time.Time, ac
 	st.inFlight = false
 	st.backoffDur = 0
 	// Keep the in-flight grace nextAttempt set by beginAttempt: the AS either rotated the token
-	// (a sealed fanout is incoming, re-minting before Note arrives is redundant) or confirmed the
-	// token is still valid (no fanout, but hammering again immediately wastes AS quota). The fanout
-	// delivery (or the next proactive window) will call Note, resetting nextAttempt.
+	// (a rotation signal is incoming, calling Invalidate — re-minting before it arrives is redundant)
+	// or confirmed the token is still valid (no rotation, but hammering again immediately wastes AS quota).
 	if accessExpiresAtUnix > 0 {
 		// Precise correction: schedule the next refresh just inside the AS rotate window.
 		st.refreshAt = time.Unix(accessExpiresAtUnix, 0).Add(-nodeRefreshLead)
 	}
 	// else: keep the receipt-relative refreshAt set by Note (or the in-flight grace governs until the
-	// sealed fanout re-Notes a new version).
+	// rotation signal calls Invalidate, rescheduling the next refresh).
 }
 
 func (r *githubRefresher) lookupLocked(spawnID, secretID string) *refreshState {

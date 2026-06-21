@@ -104,7 +104,7 @@ func (s *Service) MintGitHubAccessToken(ctx context.Context, req *connect.Reques
 			Version:              link.PendingVersion,
 			DeliveryID:           githubAccessDeliveryID(link.SecretID, link.PendingVersion),
 			UpdatedAt:            s.now().Unix(),
-		}, msg.GetRepositoryId())
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -192,7 +192,7 @@ func (s *Service) MintGitHubAccessToken(ctx context.Context, req *connect.Reques
 		Version:              nextVersion,
 		DeliveryID:           githubAccessDeliveryID(link.SecretID, nextVersion),
 		UpdatedAt:            now.Unix(),
-	}, msg.GetRepositoryId())
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +208,7 @@ func relinkRequiredError(secretID string) error {
 
 // commitGitHubRotation promotes a rotation to the live tuple (Rotate clears any pending stage) and
 // signals hosting nodes to lazy-invalidate their cached token (CP relays a token-free heads-up only).
-func (s *Service) commitGitHubRotation(ctx context.Context, secretID string, rot store.GitHubTokenRotation, repositoryID string) (store.GitHubLink, error) {
+func (s *Service) commitGitHubRotation(ctx context.Context, secretID string, rot store.GitHubTokenRotation) (store.GitHubLink, error) {
 	rotated, err := s.githubMintStore.GitHubLinks().Rotate(ctx, secretID, rot)
 	if errors.Is(err, store.ErrNotFound) {
 		return store.GitHubLink{}, connect.NewError(connect.CodeNotFound, fmt.Errorf("github link not found"))
