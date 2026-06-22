@@ -86,6 +86,39 @@ func buildControlServer(t *testing.T, token string, expiresAtUnix int64, certPEM
 	return httptest.NewServer(mux)
 }
 
+// buildErrorOnForceControlServer returns a test HTTP server that returns normalToken for normal
+// gettoken calls (force_refresh=false) but responds with 503 when force_refresh=true, simulating
+// a token-service failure mid-retry. forceCalls is incremented for each force_refresh=true call.
+func buildErrorOnForceControlServer(t *testing.T, normalToken string, expiry int64, certPEM, keyPEM []byte, normalCalls, forceCalls *int32) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/control/gettoken", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+		var req sidecarv1.GetTokenRequest
+		_ = protojson.Unmarshal(body, &req)
+
+		if req.GetForceRefresh() {
+			atomic.AddInt32(forceCalls, 1)
+			http.Error(w, "token service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		atomic.AddInt32(normalCalls, 1)
+		resp := &sidecarv1.GetTokenResponse{Token: normalToken, AccessExpiresAtUnix: expiry}
+		out, _ := protojson.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(out)
+	})
+	mux.HandleFunc("/control/spawnca", func(w http.ResponseWriter, r *http.Request) {
+		resp := &sidecarv1.SpawnCADelivery{CaCertPem: certPEM, CaKeyPem: keyPEM}
+		out, _ := protojson.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(out)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func TestGitHubControl_TCP_FetchToken(t *testing.T) {
 	var calls int32
 	expiry := time.Now().Add(8 * time.Hour).Unix()

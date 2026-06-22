@@ -449,8 +449,7 @@ func TestGitHubProxy_401Retry(t *testing.T) {
 	})
 
 	var normalCalls, forceCalls int32
-	ctrl, ca, _, proxySrv := build401ProxyFixture(t, deadToken, freshToken, &normalCalls, &forceCalls, upstreamFn)
-	_ = ctrl
+	_, ca, _, proxySrv := build401ProxyFixture(t, deadToken, freshToken, &normalCalls, &forceCalls, upstreamFn)
 
 	client := &http.Client{Transport: mitmClientTransport(t, proxySrv.URL, ca, "api.github.com")}
 
@@ -566,6 +565,118 @@ func TestGitHubProxy_401Retry_POSTBody(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&forceCalls); n != 1 {
 		t.Errorf("control saw %d force_refresh=true calls, want 1", n)
+	}
+}
+
+// TestGitHubProxy_401Retry_OverCapBody verifies that a POST whose body exceeds maxRetryBodyBytes
+// (4MiB) is streamed once without retrying: a 401 from upstream passes through as-is, the
+// upstream sees exactly one request, the control server sees zero force_refresh=true calls, and
+// the upstream receives the full body (correct byte count via MultiReader reconstruction).
+func TestGitHubProxy_401Retry_OverCapBody(t *testing.T) {
+	const deadToken = "dead-token"
+	const freshToken = "fresh-token-unused"
+
+	// Body just over the 4MiB retryable cap.
+	const bodySize = (4 << 20) + 1024
+	bodyData := make([]byte, bodySize)
+	for i := range bodyData {
+		bodyData[i] = byte(i % 251)
+	}
+
+	var upstreamRequests int32
+	var upstreamReceivedBytes int64
+	upstreamFn := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamRequests, 1)
+		n, _ := io.Copy(io.Discard, r.Body)
+		atomic.AddInt64(&upstreamReceivedBytes, n)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+
+	var normalCalls, forceCalls int32
+	_, ca, _, proxySrv := build401ProxyFixture(t, deadToken, freshToken, &normalCalls, &forceCalls, upstreamFn)
+
+	client := &http.Client{Transport: mitmClientTransport(t, proxySrv.URL, ca, "api.github.com")}
+
+	req, _ := http.NewRequest(http.MethodPost, "https://api.github.com/upload", bytes.NewReader(bodyData))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("client request: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	// 401 must pass through as-is (no retry on over-cap body).
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 passthrough, got %d", resp.StatusCode)
+	}
+	// Upstream must see exactly one request (no retry).
+	if n := atomic.LoadInt32(&upstreamRequests); n != 1 {
+		t.Errorf("upstream saw %d requests, want 1 (no retry on over-cap body)", n)
+	}
+	// Control server must see zero force_refresh=true calls.
+	if n := atomic.LoadInt32(&forceCalls); n != 0 {
+		t.Errorf("control server saw %d force_refresh=true calls, want 0", n)
+	}
+	// Upstream must receive the full body (correct byte count via MultiReader reconstruction).
+	if got := atomic.LoadInt64(&upstreamReceivedBytes); got != int64(bodySize) {
+		t.Errorf("upstream received %d bytes, want %d (full body via MultiReader)", got, int64(bodySize))
+	}
+}
+
+// TestGitHubProxy_401Retry_ForceTokenFailure verifies that if ForceToken errors during the
+// 401 retry path, the client receives a 502 diagnostic and the upstream saw exactly one request
+// (no replay after the force failure).
+func TestGitHubProxy_401Retry_ForceTokenFailure(t *testing.T) {
+	const deadToken = "dead-token"
+
+	expiry := time.Now().Add(8 * time.Hour).Unix()
+	certPEM, keyPEM := makeTestCA(t)
+	ca, err := parseSpawnCA(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("parseSpawnCA: %v", err)
+	}
+
+	var normalCalls, forceCalls int32
+	controlSrv := buildErrorOnForceControlServer(t, deadToken, expiry, certPEM, keyPEM, &normalCalls, &forceCalls)
+	ctrl := newGitHubControl(ControlConfig{
+		Network: "tcp",
+		Address: controlSrv.Listener.Addr().String(),
+		SpawnID: "test-spawn",
+	})
+
+	// Upstream: always 401 (dead token is never valid).
+	var upstreamRequests int32
+	upstreamSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamRequests, 1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(upstreamSrv.Close)
+
+	upstreamTr := upstreamTransportFor(upstreamSrv, upstreamSrv.Listener.Addr().String())
+	proxy := newGitHubProxy(GitHubProxyConfig{CA: ca, Control: ctrl, UpstreamTransport: upstreamTr})
+	proxySrv := httptest.NewServer(proxy)
+	t.Cleanup(proxySrv.Close)
+
+	client := &http.Client{Transport: mitmClientTransport(t, proxySrv.URL, ca, "api.github.com")}
+
+	req, _ := http.NewRequest(http.MethodGet, "https://api.github.com/user", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("client request: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	// Must receive a 502 diagnostic (ForceToken failure → proxyErrResp).
+	if resp.StatusCode != http.StatusBadGateway {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 502, got %d (body: %s)", resp.StatusCode, body)
+	}
+	// Upstream saw exactly one request (no replay after force failure).
+	if n := atomic.LoadInt32(&upstreamRequests); n != 1 {
+		t.Errorf("upstream saw %d requests, want 1 (no replay after force failure)", n)
+	}
+	// Control server saw exactly one force_refresh=true call (the failed force attempt).
+	if n := atomic.LoadInt32(&forceCalls); n != 1 {
+		t.Errorf("control server saw %d force_refresh=true calls, want 1", n)
 	}
 }
 

@@ -149,7 +149,7 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 			if errors.As(err, &ctrlErr) {
 				diagBody = fmt.Sprintf("github proxy: GetToken %d: %s", ctrlErr.StatusCode, strings.TrimSpace(ctrlErr.Body))
 			}
-			slog.Warn("githubproxy: GetToken failed", "detail", diagBody)
+			slog.Warn("githubproxy: GetToken failed", "host", host, "action", action, "detail", diagBody)
 			return req, proxyErrResp(req, diagBody)
 		}
 
@@ -180,6 +180,8 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 			r2.Header.Del("Accept-Encoding")
 			r2.Header.Del("Proxy-Connection")
 			r2.Header.Del("Connection")
+			r2.Header.Del("Proxy-Authorization")
+			r2.Header.Del("Proxy-Authenticate")
 
 			if retryable {
 				if bodyBytes != nil {
@@ -194,7 +196,11 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 				}
 			} else {
 				r2.Body = bodyForSingleAttempt
-				r2.ContentLength = -1 // unknown: the body is a multi-reader stream
+				if req.ContentLength >= 0 {
+					r2.ContentLength = req.ContentLength // MultiReader yields exactly req.ContentLength bytes
+				} else {
+					r2.ContentLength = -1 // unknown: the body is a multi-reader stream
+				}
 			}
 
 			return upstream.RoundTrip(r2)
@@ -204,7 +210,7 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 		resp, err := attempt(tok)
 		if err != nil {
 			diagBody := "github proxy: upstream error: " + err.Error()
-			slog.Warn("githubproxy: upstream round-trip failed", "err", err)
+			slog.Warn("githubproxy: upstream round-trip failed", "host", host, "action", action, "err", err)
 			return req, proxyErrResp(req, diagBody)
 		}
 
@@ -217,13 +223,13 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 
 			tok2, ferr := cfg.Control.ForceToken(req.Context())
 			if ferr != nil {
-				slog.Warn("githubproxy: ForceToken failed during 401 retry", "err", ferr)
+				slog.Warn("githubproxy: ForceToken failed during 401 retry", "host", host, "err", ferr)
 				return req, proxyErrResp(req, "github proxy: ForceToken failed: "+ferr.Error())
 			}
 
 			resp2, err2 := attempt(tok2)
 			if err2 != nil {
-				slog.Warn("githubproxy: upstream round-trip (retry) failed", "err", err2)
+				slog.Warn("githubproxy: upstream round-trip (retry) failed", "host", host, "err", err2)
 				return req, proxyErrResp(req, "github proxy: upstream retry error: "+err2.Error())
 			}
 			// Return the second response as-is: even another 401 (grant revoked) is passed through.
