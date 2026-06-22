@@ -680,7 +680,24 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		a.stepStatus(st.SpawnId, steps, key, "", nodev1.SpawnPhase_STARTING)
 	}
 	emitErr := func(err error) {
-		a.stepStatus(st.SpawnId, steps, current, err.Error(), nodev1.SpawnPhase_ERROR)
+		// Send the ERROR status directly rather than delegating to stepStatus.
+		// stepStatus is gated on FindMilestone — if current is not in steps (future
+		// catalog drift), it no-ops and swallows the error entirely. The CP contract
+		// requires step_total>0 on any provisioning ERROR SpawnStatus so it can
+		// attribute the failure to the correct step. len(steps) is always >0 because
+		// the unconditional milestones (authorize, prepare-mounts, create-pod, etc.)
+		// are present for every spawn, so StepTotal>0 is guaranteed regardless of
+		// whether current happens to appear in steps.
+		idx, m, _ := spawnlet.FindMilestone(steps, current)
+		_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{
+			SpawnId:   st.SpawnId,
+			Phase:     nodev1.SpawnPhase_ERROR,
+			Detail:    err.Error(),
+			StepTotal: uint32(len(steps)),
+			StepKey:   current,
+			StepIndex: uint32(idx),
+			StepLabel: m.Label,
+		}}})
 	}
 
 	// A4 intent verification [AC1][AM12]. Verify BEFORE creating the container so a

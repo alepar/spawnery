@@ -3,11 +3,14 @@ package node
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/runtime"
 	"spawnery/internal/spawnlet"
+	"spawnery/internal/storage/journal"
 )
 
 // --- helpers ---
@@ -191,4 +194,122 @@ func catalogKeys(ms []spawnlet.Milestone) []string {
 		out[i] = m.Key
 	}
 	return out
+}
+
+// --- Fix 2: mint-credentials failure attribution ---
+
+// TestStepFailureAttributesMintCredentials asserts that when mintGitHubMountsAtProvision
+// fails (no mint channel configured), the terminal ERROR SpawnStatus carries
+// StepKey=="mint-credentials" and StepTotal>0. Mirrors the create-pod and prepare-mounts
+// failure tests above.
+func TestStepFailureAttributesMintCredentials(t *testing.T) {
+	// A mount with a non-empty GithubMintRef.SecretId causes MintCredentials=true,
+	// which adds mint-credentials to the applicable subset and emits emitStep before
+	// mintGitHubMountsAtProvision is called.
+	mounts := []*nodev1.MountBinding{{
+		Name:          "main",
+		BackendUri:    "github:octo/demo",
+		GithubMintRef: &nodev1.GitHubMintRef{SecretId: "gh:octo"},
+	}}
+
+	be := &scriptedPodBackend{script: scriptGoose}
+	fs := &fakeCPStream{}
+	a := newAttacher(newGooseManager(t, be), fs)
+	// nil mint client: MintInitial returns "github mint client unavailable" — causes the
+	// mintGitHubMountsAtProvision call in startSpawn to fail and hit emitErr.
+	a.githubRefresh = newGitHubRefresher(nil)
+
+	a.startSpawn(context.Background(), &nodev1.StartSpawn{
+		SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m", Mounts: mounts,
+	})
+
+	// Must end with ERROR.
+	if got := lastPhase(fs.phasesFor("sp1")); got != nodev1.SpawnPhase_ERROR {
+		t.Fatalf("terminal phase = %v, want ERROR", got)
+	}
+
+	// Find the ERROR step status (StepTotal>0).
+	var errStep *nodev1.SpawnStatus
+	for _, s := range fs.stepStatusesFor("sp1") {
+		if s.Phase == nodev1.SpawnPhase_ERROR {
+			errStep = s
+			break
+		}
+	}
+	if errStep == nil {
+		t.Fatal("no ERROR step status emitted (StepTotal=0 on mint-credentials error)")
+	}
+	if errStep.StepKey != spawnlet.MilestoneMintCredentials {
+		t.Errorf("error step key = %q, want %q", errStep.StepKey, spawnlet.MilestoneMintCredentials)
+	}
+	if errStep.StepTotal == 0 {
+		t.Error("error step StepTotal=0, want >0")
+	}
+}
+
+// --- Fix 3: non-fatal restore-snapshot stays ACTIVE ---
+
+// restoreFailJournal wraps fakeNodeJournal and overrides RestoreGeneration to always fail,
+// exercising the non-fatal journal-restore fallback path (manager.go ~1075-1089).
+type restoreFailJournal struct {
+	fakeNodeJournal
+}
+
+func (f *restoreFailJournal) RestoreGeneration(_ context.Context, _ string, _ uint64, _ string, _ journal.ManifestID, _ string) error {
+	return fmt.Errorf("restore boom: simulated disk failure")
+}
+
+// TestNonFatalRestoreSnapshotDoesNotErrorStaysActive verifies the non-fatal restore path:
+// when journal.RestoreGeneration fails during provision, the node (a) still emits a
+// restore-snapshot STARTING step, (b) does NOT emit an ERROR SpawnStatus attributed to
+// restore-snapshot, and (c) the spawn still reaches ACTIVE (falls back to the seeded dir).
+func TestNonFatalRestoreSnapshotDoesNotErrorStaysActive(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+
+	// stateDir holds the journal-state JSON that makes HasJournalPins("sp1") return true.
+	// journalRecord format (internal/spawnlet/journalstate.go): {"generation":N,"manifests":{...}}.
+	stateDir := t.TempDir()
+	stateFile := filepath.Join(stateDir, "sp1.json")
+	if err := os.WriteFile(stateFile, []byte(`{"generation":1,"manifests":{"main":"manifest-abc"}}`), 0o600); err != nil {
+		t.Fatalf("write journal state: %v", err)
+	}
+
+	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
+		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
+	})
+	// restoreFailJournal makes RestoreGeneration fail; the manager logs and falls back to seed.
+	mgr.SetJournal(&restoreFailJournal{}, stateDir)
+
+	fs := &fakeCPStream{}
+	a := newAttacher(mgr, fs)
+	// writeNodeJournalApp has a node-local durability mount named "main", so the journal seam
+	// engages and the restore path runs (HasJournalPins is true, manifest pin found for "main").
+	a.startSpawn(context.Background(), &nodev1.StartSpawn{
+		SpawnId: "sp1", AppRef: writeNodeJournalApp(t), Model: "m", Generation: 1,
+	})
+	defer a.stopSpawn(context.Background(), "sp1")
+
+	// (c) spawn must reach ACTIVE despite the restore failure (non-fatal fallback).
+	if got := lastPhase(fs.phasesFor("sp1")); got != nodev1.SpawnPhase_ACTIVE {
+		t.Fatalf("terminal phase = %v, want ACTIVE (restore failure is non-fatal)", got)
+	}
+
+	// (a) restore-snapshot STARTING step must have been emitted.
+	var gotRestoreStarting bool
+	for _, s := range fs.stepStatusesFor("sp1") {
+		if s.Phase == nodev1.SpawnPhase_STARTING && s.StepKey == spawnlet.MilestoneRestoreSnapshot {
+			gotRestoreStarting = true
+			break
+		}
+	}
+	if !gotRestoreStarting {
+		t.Fatal("restore-snapshot STARTING step not emitted")
+	}
+
+	// (b) no ERROR status attributed to restore-snapshot — it is non-fatal.
+	for _, s := range fs.stepStatusesFor("sp1") {
+		if s.Phase == nodev1.SpawnPhase_ERROR && s.StepKey == spawnlet.MilestoneRestoreSnapshot {
+			t.Fatalf("got ERROR with StepKey=%q: restore failure must be non-fatal, not ERROR", s.StepKey)
+		}
+	}
 }
