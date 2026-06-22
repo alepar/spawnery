@@ -85,8 +85,17 @@ type bytesFetcher func(ctx context.Context, url string) ([]byte, error)
 // per-spawn dir is bind-mounted into the agent at ArtifactsMountPath. Root should be a tmpfs in
 // production; non-sensitive artifact bytes live here (world-/agent-readable per their declared mode).
 type ArtifactStager struct {
-	Root    string
-	fetcher bytesFetcher // nil => defaultFetcher
+	Root        string
+	fetcher     bytesFetcher // nil => defaultFetcher
+	maxTarBytes int64        // max decoded tar size; 0 => maxPlainTarBytes (50 MiB)
+}
+
+// tarCap returns the effective decoded-tar size cap, applying the default when the field is unset.
+func (a ArtifactStager) tarCap() int64 {
+	if a.maxTarBytes > 0 {
+		return a.maxTarBytes
+	}
+	return maxPlainTarBytes
 }
 
 // DirFor returns the per-spawn host staging dir (the bind-mount source for ArtifactsMountPath).
@@ -200,14 +209,15 @@ func (a ArtifactStager) fetchObjectTar(ctx context.Context, art Artifact) ([]byt
 	}
 	defer dec.Close()
 
-	// Bounded read: cap at maxPlainTarBytes+1 so we can distinguish exact-size vs oversize.
-	lr := &io.LimitedReader{R: dec, N: int64(maxPlainTarBytes) + 1}
+	// Bounded read: cap at tarCap()+1 so we can distinguish exact-size vs oversize.
+	cap := a.tarCap()
+	lr := &io.LimitedReader{R: dec, N: cap + 1}
 	plain, err := io.ReadAll(lr)
 	if err != nil {
 		return nil, retryFetch("skill object: read error", err)
 	}
-	if int64(len(plain)) > int64(maxPlainTarBytes) {
-		return nil, terminalFetch(fmt.Sprintf("skill object too large (> %d bytes)", maxPlainTarBytes), nil)
+	if int64(len(plain)) > cap {
+		return nil, terminalFetch(fmt.Sprintf("skill object too large (> %d bytes)", cap), nil)
 	}
 
 	// Integrity gate: sha256 over the decoded plain tar bytes.
@@ -243,9 +253,15 @@ var defaultFetcher bytesFetcher = func(ctx context.Context, url string) ([]byte,
 	default:
 		return nil, retryFetch(fmt.Sprintf("skill object fetch: HTTP %d", resp.StatusCode), nil)
 	}
-	body, err := io.ReadAll(resp.Body)
+	// Bound the compressed read: a legitimate payload that decompresses to <= maxPlainTarBytes
+	// cannot have a compressed body larger than maxPlainTarBytes, so this caps peak memory end-to-end.
+	clr := &io.LimitedReader{R: resp.Body, N: maxPlainTarBytes + 1}
+	body, err := io.ReadAll(clr)
 	if err != nil {
 		return nil, retryFetch("skill object: read response body", err)
+	}
+	if int64(len(body)) > maxPlainTarBytes {
+		return nil, terminalFetch(fmt.Sprintf("skill object compressed body too large (> %d bytes)", maxPlainTarBytes), nil)
 	}
 	return body, nil
 }

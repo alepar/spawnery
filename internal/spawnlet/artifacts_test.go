@@ -7,8 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -364,10 +362,11 @@ func TestByRef_ConnectionError(t *testing.T) {
 	}
 }
 
-// TestByRef_OversizeBomb verifies that a tar.zst whose decoded size exceeds maxPlainTarBytes
-// returns a terminal FetchError before any unpack, without buffering the full payload.
+// TestByRef_OversizeBomb verifies that a tar.zst whose decoded size exceeds the stager's cap
+// returns a terminal FetchError before any unpack. The cap is injected via ArtifactStager.maxTarBytes
+// so the production fetchObjectTar path is exercised directly (no logic copy).
 func TestByRef_OversizeBomb(t *testing.T) {
-	// Inject a small test cap so the test doesn't need a 50 MiB payload.
+	// Inject a small cap so the test does not need a 50 MiB payload.
 	const testCap = 1024
 
 	// Build a plain tar slightly over the test cap.
@@ -394,37 +393,22 @@ func TestByRef_OversizeBomb(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Use a fetcher that injects the small cap via a custom fetchObjectTar call.
-	oversized := false
-	st := ArtifactStager{
-		Root: t.TempDir(),
-		fetcher: func(ctx context.Context, url string) ([]byte, error) {
-			// Fetch raw bytes directly (no classification needed here — we test the zstd decoder path).
-			resp, err := http.Get(url) //nolint:noctx
-			if err != nil {
-				return nil, retryFetch("test: fetch", err)
-			}
-			defer resp.Body.Close() //nolint:errcheck
-			return io.ReadAll(resp.Body)
-		},
-	}
-
-	// Override fetchObjectTar by intercepting at the zstd decode stage via a custom stager.
-	// Since fetchObjectTar is a method and we need to test the LimitedReader, we call it directly
-	// with a temporarily patched maxPlainTarBytes via a helper that mimics it with a smaller cap.
 	sum := sha256.Sum256(plain)
 	hexSum := hex.EncodeToString(sum[:])
 
-	art := Artifact{
+	// ArtifactStager with a small cap drives the real fetchObjectTar LimitedReader path.
+	st := ArtifactStager{
+		Root:        t.TempDir(),
+		maxTarBytes: testCap,
+	}
+	sec := SecretInjector{Root: t.TempDir()}
+	err := st.Materialize(context.Background(), "sp1", []Artifact{{
 		ID:           "bomb",
 		ContentType:  ArtifactTar,
 		DestPath:     "payloads/skill",
 		PresignedURL: srv.URL + "/obj",
 		Sha256:       hexSum,
-	}
-
-	// Call the internal oversize check path via a wrapper that uses a small cap.
-	err := oversizeCheck(context.Background(), st, testCap, art, SecretInjector{Root: t.TempDir()})
+	}}, sec)
 	if err == nil {
 		t.Fatal("expected oversize error")
 	}
@@ -435,36 +419,6 @@ func TestByRef_OversizeBomb(t *testing.T) {
 	if !fe.Terminal {
 		t.Fatalf("oversize should be Terminal, got Terminal=false")
 	}
-	_ = oversized // used
-}
-
-// oversizeCheck exercises the oversize branch with a custom byte cap.
-// It replicates fetchObjectTar with a caller-supplied cap so the test does not need a 50 MiB payload.
-func oversizeCheck(ctx context.Context, st ArtifactStager, cap int, art Artifact, _ SecretInjector) error {
-	fetch := st.fetcher
-	if fetch == nil {
-		fetch = defaultFetcher
-	}
-	raw, err := fetch(ctx, art.PresignedURL)
-	if err != nil {
-		return err
-	}
-	dec, err := zstd.NewReader(bytes.NewReader(raw))
-	if err != nil {
-		return terminalFetch("skill object: invalid zstd stream", err)
-	}
-	defer dec.Close()
-
-	lr := &io.LimitedReader{R: dec, N: int64(cap) + 1}
-	plain, err := io.ReadAll(lr)
-	if err != nil {
-		return retryFetch("skill object: read error", err)
-	}
-	if int64(len(plain)) > int64(cap) {
-		return terminalFetch(fmt.Sprintf("skill object too large (> %d bytes)", cap), nil)
-	}
-	_ = plain
-	return nil
 }
 
 // TestByRef_MalformedZstd verifies that a response that is not valid zstd returns an error without panicking.
