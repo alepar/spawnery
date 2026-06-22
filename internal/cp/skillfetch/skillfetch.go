@@ -369,4 +369,3 @@ func safeRelPath(p string) (string, error) {
 	}
 	return p, nil
 }
-

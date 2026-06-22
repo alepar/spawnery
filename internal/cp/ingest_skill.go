@@ -89,6 +89,12 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 		if errors.As(err, &rl) {
 			return nil, connect.NewError(connect.CodeResourceExhausted, fmt.Errorf("GitHub rate limit: %w", err))
 		}
+		var upstream *skillfetch.ErrUpstreamFailed
+		if errors.As(err, &upstream) {
+			return nil, connect.NewError(connect.CodeUnavailable, err)
+		}
+		// Genuine bad-input errors: no SKILL.md, unsafe path, invalid name, size/file cap,
+		// disallowed redirect host, GitHub 4xx (bad repo/ref/credentials).
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 

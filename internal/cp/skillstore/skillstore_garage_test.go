@@ -19,9 +19,10 @@ import (
 // against a live dev Garage instance (started via `just garage`).
 //
 // Requires environment:
-//   JOURNAL_S3_ENDPOINT    — S3 endpoint host:port (e.g. 127.0.0.1:3900)
-//   JOURNAL_S3_REGION      — region (default "garage")
-//   JOURNAL_S3_DISABLE_TLS — "true" for plain HTTP
+//
+//	JOURNAL_S3_ENDPOINT    — S3 endpoint host:port (e.g. 127.0.0.1:3900)
+//	JOURNAL_S3_REGION      — region (default "garage")
+//	JOURNAL_S3_DISABLE_TLS — "true" for plain HTTP
 //
 // Access credentials are taken from the standard JOURNAL_* env vars used by the spawnlet.
 //

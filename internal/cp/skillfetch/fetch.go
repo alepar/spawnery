@@ -16,8 +16,8 @@ import (
 // allowedHosts is the set of hostnames permitted for fetching GitHub tarballs.
 // Each redirect hop must have its target host in this set (§4.9).
 var allowedHosts = map[string]bool{
-	"github.com":         true,
-	"api.github.com":     true,
+	"github.com":          true,
+	"api.github.com":      true,
 	"codeload.github.com": true,
 }
 
@@ -35,6 +35,16 @@ func (e *ErrRateLimit) Error() string {
 	return "GitHub rate limit exceeded"
 }
 
+// ErrUpstreamFailed is returned for transient upstream failures — DNS / connection errors and
+// GitHub 5xx responses — that are not caused by bad input. Callers should map this to Unavailable
+// (retryable), not InvalidArgument (non-retryable).
+type ErrUpstreamFailed struct {
+	Cause error
+}
+
+func (e *ErrUpstreamFailed) Error() string { return e.Cause.Error() }
+func (e *ErrUpstreamFailed) Unwrap() error { return e.Cause }
+
 // secureClient is an HTTP client with per-hop host allowlisting and IP-range blocking.
 type secureClient struct {
 	client *http.Client
@@ -45,7 +55,7 @@ type secureClient struct {
 //   - resolves the target host and rejects private/loopback/link-local/metadata IPs
 func newSecureClient() *secureClient {
 	transport := &http.Transport{
-		DialContext: blockedDialContext(),
+		DialContext:           blockedDialContext(),
 		TLSHandshakeTimeout:   30 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		MaxIdleConns:          10,
@@ -83,27 +93,32 @@ func blockedDialContext() func(ctx context.Context, network, addr string) (net.C
 		if err != nil {
 			return nil, fmt.Errorf("resolve %q: %w", host, err)
 		}
+		// Pick the first IP that passes the block check and dial it directly.
+		// Dialling by hostname would trigger a second DNS resolution (TOCTOU),
+		// rendering the IP-range check ineffective.
 		for _, ip := range ips {
 			if isBlockedIP(ip.IP) {
 				return nil, fmt.Errorf("host %q resolves to blocked IP %s (SSRF protection: loopback/private/link-local/metadata ranges rejected)", host, ip.IP)
 			}
+			// Dial the validated IP directly — not the hostname — to avoid TOCTOU.
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
 		}
-		return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
+		return nil, fmt.Errorf("no usable addresses for host %q", host)
 	}
 }
 
 // isBlockedIP returns true for IPs in private/loopback/link-local/CGNAT/metadata ranges.
 func isBlockedIP(ip net.IP) bool {
 	blocked := []string{
-		"127.0.0.0/8",      // loopback
-		"10.0.0.0/8",       // RFC1918
-		"172.16.0.0/12",    // RFC1918
-		"192.168.0.0/16",   // RFC1918
-		"169.254.0.0/16",   // link-local + metadata (169.254.169.254)
-		"100.64.0.0/10",    // CGNAT (RFC6598)
-		"fc00::/7",         // IPv6 ULA
-		"fe80::/10",        // IPv6 link-local
-		"::1/128",          // IPv6 loopback
+		"127.0.0.0/8",    // loopback
+		"10.0.0.0/8",     // RFC1918
+		"172.16.0.0/12",  // RFC1918
+		"192.168.0.0/16", // RFC1918
+		"169.254.0.0/16", // link-local + metadata (169.254.169.254)
+		"100.64.0.0/10",  // CGNAT (RFC6598)
+		"fc00::/7",       // IPv6 ULA
+		"fe80::/10",      // IPv6 link-local
+		"::1/128",        // IPv6 loopback
 	}
 	for _, cidr := range blocked {
 		_, network, err := net.ParseCIDR(cidr)
@@ -133,11 +148,12 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		// Wrap redirect errors for actionable messaging
+		// Transport failures (DNS, timeout, connection refused, TLS) are transient upstream errors.
+		inner := err
 		if ue, ok := err.(*url.Error); ok {
-			return nil, fmt.Errorf("fetch %s: %w", redactURL(rawURL), ue.Err)
+			inner = ue.Err
 		}
-		return nil, fmt.Errorf("fetch %s: %w", redactURL(rawURL), err)
+		return nil, &ErrUpstreamFailed{Cause: fmt.Errorf("fetch %s: %w", redactURL(rawURL), inner)}
 	}
 	defer resp.Body.Close()
 
@@ -148,6 +164,10 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 		retryAfter := resp.Header.Get("Retry-After")
 		return nil, &ErrRateLimit{RetryAfter: retryAfter}
 	default:
+		if resp.StatusCode >= 500 {
+			// GitHub server-side error — transient upstream failure, not bad client input.
+			return nil, &ErrUpstreamFailed{Cause: fmt.Errorf("GitHub returned HTTP %d for %s", resp.StatusCode, redactURL(rawURL))}
+		}
 		return nil, fmt.Errorf("GitHub returned HTTP %d for %s", resp.StatusCode, redactURL(rawURL))
 	}
 

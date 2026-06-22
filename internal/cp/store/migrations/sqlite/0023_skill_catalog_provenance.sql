@@ -9,4 +9,8 @@ CREATE UNIQUE INDEX idx_customization_catalog_owner_sha
 
 -- +goose Down
 DROP INDEX idx_customization_catalog_owner_sha;
--- SQLite pre-3.35 cannot DROP COLUMN; Down drops the index only — acceptable for additive migrations.
+ALTER TABLE customization_catalog DROP COLUMN size;
+ALTER TABLE customization_catalog DROP COLUMN sha256;
+ALTER TABLE customization_catalog DROP COLUMN source_subdir;
+ALTER TABLE customization_catalog DROP COLUMN source_ref;
+ALTER TABLE customization_catalog DROP COLUMN source_url;
