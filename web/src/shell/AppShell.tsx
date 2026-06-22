@@ -1,6 +1,7 @@
 import { Toaster } from "@/components/ui/sonner";
 import { Sidebar, type SpawnActions } from "./Sidebar";
 import { SpawnTabs } from "@/sessions/SpawnTabs";
+import { ProvisioningPane } from "@/sessions/ProvisioningPane";
 import { TemplatesView } from "@/views/TemplatesView";
 import { SettingsView } from "@/views/SettingsView";
 import { ProfilesView } from "@/views/ProfilesView";
@@ -43,10 +44,13 @@ export function AppShell({ onSpawnApp, spawns = [], activeId, actions, nav, navi
         </header>
         <main className="flex-1 overflow-hidden">
           {/* SpawnTabs stays mounted whenever a spawn is active (keyed on spawnId, so a spawn switch
-              remounts it) and is hidden when off the spawn view, preserving background keep-alive. */}
+              remounts it) and is hidden when off the spawn view, preserving background keep-alive.
+              While a spawn is starting or errored, ProvisioningPane replaces SpawnTabs (no sessions yet). */}
           {activeId && (
-            <div className="h-full" style={{ display: view === "chat" ? "block" : "none" }}>
-              <SpawnTabs key={activeId} spawnId={activeId} />
+            <div className="h-full overflow-auto" style={{ display: view === "chat" ? "block" : "none" }}>
+              {activeSpawn && (activeSpawn.status === "starting" || activeSpawn.status === "error")
+                ? <ProvisioningPane spawn={activeSpawn} />
+                : <SpawnTabs key={activeId} spawnId={activeId} />}
             </div>
           )}
           {view === "templates" && <TemplatesView nav={nav} navigate={navigate} onSpawn={onSpawnApp} />}

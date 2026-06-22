@@ -28,6 +28,13 @@ export interface SpawnView {
   transitionPhase: string;
   parentSpawnId?: string;
   forkedAt?: number;
+  // Live provisioning progress (ephemeral; populated only while status==="starting"). sp-m859.3.
+  provisionStep?: number;
+  provisionTotal?: number;
+  provisionStepLabel?: string;
+  // Persisted terminal failure (non-empty only for status==="error"). sp-m859.3.
+  errorStep?: string;
+  errorDetail?: string;
 }
 
 // statusFromProto maps the Connect-JSON enum NAME (e.g. "SPAWN_STATUS_ACTIVE") to a short status.
@@ -101,7 +108,7 @@ export async function createSpawn(
 }
 
 export async function listSpawns(): Promise<SpawnView[]> {
-  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; generation?: string | number; mode?: string; model?: string; modelApplied?: boolean; journalKeyDeliveryPending?: boolean; transitionPhase?: string; parentSpawnId?: string; forkedAt?: string | number }> }>(
+  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; generation?: string | number; mode?: string; model?: string; modelApplied?: boolean; journalKeyDeliveryPending?: boolean; transitionPhase?: string; parentSpawnId?: string; forkedAt?: string | number; provisionStep?: number; provisionTotal?: number; provisionStepLabel?: string; errorStep?: string; errorDetail?: string }> }>(
     "ListSpawns", {},
   );
   return (r.spawns ?? []).map((s) => ({
@@ -117,6 +124,11 @@ export async function listSpawns(): Promise<SpawnView[]> {
     transitionPhase: s.transitionPhase ?? "",
     parentSpawnId: s.parentSpawnId ?? "",
     forkedAt: s.forkedAt ? Number(s.forkedAt) : 0,
+    provisionStep: s.provisionStep ?? 0,
+    provisionTotal: s.provisionTotal ?? 0,
+    provisionStepLabel: s.provisionStepLabel ?? "",
+    errorStep: s.errorStep ?? "",
+    errorDetail: s.errorDetail ?? "",
   }));
 }
 
