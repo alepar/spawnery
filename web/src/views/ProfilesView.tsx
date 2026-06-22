@@ -2,6 +2,16 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
   listProfiles,
   createProfile,
   getProfile,
@@ -10,6 +20,8 @@ import {
   addProfileEntry,
   removeProfileEntry,
   listCatalogEntries,
+  ingestSkillFromURL,
+  connectErrorMessage,
   KIND_LABEL,
   kindToCapKind,
   type ProfileSummary,
@@ -73,12 +85,21 @@ export function ProfilesView() {
   const [catalogEntries, setCatalogEntries] = useState<CatalogEntrySummary[]>([]);
   const [showAddCatalog, setShowAddCatalog] = useState(false);
   const [showAddCustom, setShowAddCustom] = useState(false);
-  // SKILL is excluded: the CP validates custom inline SKILL entries as a tar archive,
-  // which a plain textarea cannot produce. Use catalog-ref for skills instead.
+  // SKILL is excluded from the custom form: the CP validates custom inline SKILL entries
+  // as a tar archive, which a plain textarea cannot produce. Skills get the URL ingest path.
   const [customKind, setCustomKind] = useState<ProfileEntryKind>("PROFILE_ENTRY_KIND_MCP");
   const [customName, setCustomName] = useState("");
   const [customInline, setCustomInline] = useState("");
   const [addingEntry, setAddingEntry] = useState(false);
+
+  // Add skill from URL dialog state
+  const [showAddSkill, setShowAddSkill] = useState(false);
+  const [skillUrl, setSkillUrl] = useState("");
+  const [skillRef, setSkillRef] = useState("");
+  const [skillSubdir, setSkillSubdir] = useState("");
+  const [skillName, setSkillName] = useState("");
+  const [skillDescription, setSkillDescription] = useState("");
+  const [ingestingSkill, setIngestingSkill] = useState(false);
 
   const refreshList = async () => {
     setLoadingList(true);
@@ -280,6 +301,46 @@ export function ProfilesView() {
     }
   };
 
+  const handleIngestSkill = async () => {
+    if (!profile || !skillUrl.trim()) return;
+    setIngestingSkill(true);
+    try {
+      const r = await ingestSkillFromURL({
+        url: skillUrl.trim(),
+        ref: skillRef.trim() || undefined,
+        subdir: skillSubdir.trim() || undefined,
+        name: skillName.trim() || undefined,
+        description: skillDescription.trim() || undefined,
+      });
+      toast.success("Skill ingested");
+      // Refresh catalog to get the authoritative entry (name/kind come from the catalog row).
+      const refreshed = await listCatalogEntries();
+      setCatalogEntries(refreshed);
+      // Close and reset dialog.
+      setShowAddSkill(false);
+      setSkillUrl("");
+      setSkillRef("");
+      setSkillSubdir("");
+      setSkillName("");
+      setSkillDescription("");
+      // Find the freshly-ingested catalog entry and attach it to the profile.
+      const entry = refreshed.find((e) => e.catalogId === r.catalogId);
+      if (entry) {
+        // If already in the profile, skip to avoid duplicate attach.
+        const alreadyAttached = profile.entries.some((pe) => pe.catalogId === r.catalogId);
+        if (alreadyAttached) {
+          toast.success("Skill is already in this profile");
+        } else {
+          await handleAddCatalogEntry(entry);
+        }
+      }
+    } catch (e: unknown) {
+      toast.error(connectErrorMessage(e));
+    } finally {
+      setIngestingSkill(false);
+    }
+  };
+
   return (
     <div data-testid="profiles" className="flex h-full">
       {/* Left panel: profile list */}
@@ -456,6 +517,14 @@ export function ProfilesView() {
               >
                 Add custom
               </Button>
+              <Button
+                data-testid="add-skill-url-btn"
+                size="sm"
+                variant="outline"
+                onClick={() => setShowAddSkill(true)}
+              >
+                Add skill from URL
+              </Button>
             </div>
 
             {/* Catalog picker */}
@@ -498,7 +567,7 @@ export function ProfilesView() {
                   className="rounded border border-input bg-background px-2 py-1 text-sm"
                 >
                   {/* SKILL is omitted: CP validates custom inline Skills as a tar archive,
-                      which a free-text textarea cannot produce. Use "Add from catalog" for Skills. */}
+                      which a free-text textarea cannot produce. Use "Add skill from URL" for Skills. */}
                   <option value="PROFILE_ENTRY_KIND_MCP">MCP</option>
                   <option value="PROFILE_ENTRY_KIND_CONFIG">Config</option>
                   <option value="PROFILE_ENTRY_KIND_PLUGIN">Plugin</option>
@@ -528,6 +597,91 @@ export function ProfilesView() {
                 </Button>
               </div>
             )}
+
+            {/* Add skill from URL dialog */}
+            <Dialog open={showAddSkill} onOpenChange={(open) => {
+              if (!open) {
+                setShowAddSkill(false);
+                setSkillUrl("");
+                setSkillRef("");
+                setSkillSubdir("");
+                setSkillName("");
+                setSkillDescription("");
+              }
+            }}>
+              <DialogContent data-testid="add-skill-dialog">
+                <DialogHeader>
+                  <DialogTitle>Add skill from GitHub URL</DialogTitle>
+                  <DialogDescription>
+                    Enter the GitHub repository URL for the skill. The repository must contain a SKILL.md file.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="flex flex-col gap-3">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-sm font-medium" htmlFor="skill-url-input">URL <span className="text-destructive">*</span></label>
+                    <Input
+                      id="skill-url-input"
+                      data-testid="skill-url-input"
+                      placeholder="https://github.com/owner/repo"
+                      value={skillUrl}
+                      onChange={(e) => setSkillUrl(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-sm font-medium" htmlFor="skill-ref-input">Ref (branch / tag / commit)</label>
+                    <Input
+                      id="skill-ref-input"
+                      data-testid="skill-ref-input"
+                      placeholder="main"
+                      value={skillRef}
+                      onChange={(e) => setSkillRef(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-sm font-medium" htmlFor="skill-subdir-input">Subdirectory</label>
+                    <Input
+                      id="skill-subdir-input"
+                      data-testid="skill-subdir-input"
+                      placeholder="skills/my-skill"
+                      value={skillSubdir}
+                      onChange={(e) => setSkillSubdir(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-sm font-medium" htmlFor="skill-name-input">Name override</label>
+                    <Input
+                      id="skill-name-input"
+                      data-testid="skill-name-input"
+                      placeholder="Derived from SKILL.md if blank"
+                      value={skillName}
+                      onChange={(e) => setSkillName(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-sm font-medium" htmlFor="skill-description-input">Description override</label>
+                    <Input
+                      id="skill-description-input"
+                      data-testid="skill-description-input"
+                      placeholder="Derived from SKILL.md if blank"
+                      value={skillDescription}
+                      onChange={(e) => setSkillDescription(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <DialogFooter>
+                  <DialogClose asChild>
+                    <Button variant="outline" type="button">Cancel</Button>
+                  </DialogClose>
+                  <Button
+                    data-testid="skill-ingest-submit"
+                    disabled={!skillUrl.trim() || ingestingSkill}
+                    onClick={handleIngestSkill}
+                  >
+                    {ingestingSkill ? "Ingesting…" : "Ingest skill"}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
           </div>
         )}
       </div>

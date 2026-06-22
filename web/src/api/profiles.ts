@@ -167,3 +167,48 @@ export async function getCatalogEntry(catalogId: string): Promise<CustomizationC
   const r = await unary<{ entry: CustomizationCatalogEntry }>("GetCatalogEntry", { catalogId });
   return r.entry;
 }
+
+// --- Skill URL ingest API -----------------------------------------------------
+
+export interface IngestSkillFromURLInput {
+  url: string;
+  ref?: string;
+  subdir?: string;
+  name?: string;
+  description?: string;
+}
+
+/**
+ * Ingest a skill from a GitHub URL into the catalog.
+ * Optional fields are omitted when empty to match proto "unset" semantics.
+ */
+export async function ingestSkillFromURL(input: IngestSkillFromURLInput): Promise<{ catalogId: string }> {
+  const body: Record<string, string> = { url: input.url };
+  if (input.ref)         body.ref         = input.ref;
+  if (input.subdir)      body.subdir      = input.subdir;
+  if (input.name)        body.name        = input.name;
+  if (input.description) body.description = input.description;
+  return unary<{ catalogId: string }>("IngestSkillFromURL", body);
+}
+
+/**
+ * Extract the actionable server message from a Connect-JSON error thrown by `unary`.
+ *
+ * `unary` throws `Error("<method> failed: <status> <bodyText>")` where bodyText is
+ * `{"code":"...","message":"..."}`. We parse the trailing JSON and return `.message`.
+ * Falls back to the raw Error.message when the body is not valid JSON.
+ */
+export function connectErrorMessage(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  // Find the last '{...}' in the string — that's the Connect-JSON error body.
+  const match = raw.match(/(\{.*\})\s*$/);
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[1]) as { message?: string };
+      if (parsed.message) return parsed.message;
+    } catch {
+      // not valid JSON — fall through
+    }
+  }
+  return raw;
+}
