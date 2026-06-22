@@ -151,6 +151,10 @@ type Mount struct {
 // Artifact is one content-agnostic delivery unit persisted per spawn (mirrors the wire ArtifactSpec).
 // Sensitive artifacts are stored metadata-only (Inline is nil); their values ride the existing
 // DeliverSecrets/SealedSecret path keyed by EnvVarName.
+//
+// By-ref skills (sp-nrzf.3.14.5): ObjectKey != "" discriminates the by-ref path.
+// ObjectKey is the Garage object key (skills/<sha256>.tar.zst); ObjectSHA256 is the hex
+// sha256 of the canonical plain tar (integrity identity). Inline is nil for by-ref artifacts.
 type Artifact struct {
 	bun.BaseModel   `bun:"table:spawn_artifacts,alias:art"`
 	SpawnID         string `bun:"spawn_id,pk"`
@@ -162,6 +166,10 @@ type Artifact struct {
 	Mode            uint32 `bun:"mode,notnull"`
 	Sensitive       bool   `bun:"sensitive,notnull"`
 	EnvVarName      string `bun:"env_var_name,notnull"`
+	// By-ref delivery (non-sensitive skill payloads only; added sp-nrzf.3.14.5).
+	// ObjectKey != "" => by-ref; Inline is nil in that case.
+	ObjectKey    string `bun:"object_key,notnull"`
+	ObjectSHA256 string `bun:"object_sha256,notnull"`
 }
 
 type TransferSetStatus string

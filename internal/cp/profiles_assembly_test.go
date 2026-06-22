@@ -602,6 +602,220 @@ func TestAssemble_PluginEntry(t *testing.T) {
 	}
 }
 
+// TestAssemble_ByRef_URLSkill: a catalog skill entry with SHA256 set (Content nil) produces
+// a by-ref payload ArtifactSpec (Objectref populated, Inline empty) and an inline manifest.
+func TestAssemble_ByRef_URLSkill(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	// Insert a URL-ingested skill entry directly into the catalog store.
+	sha := "aabbccdd1122334455667788991100aabbccdd1122334455667788991100aabb"
+	size := int64(4096)
+	sourceURL := "https://github.com/example/my-skill"
+	if err := s.st.CustomizationCatalog().CreateSkill(aliceCtx(), store.CustomizationCatalogEntry{
+		CatalogID:   "url-skill-1",
+		CreatorID:   "alice",
+		Kind:        string(store.ProfileEntrySkill),
+		Name:        "my-url-skill",
+		Description: "ingested from github",
+		Listed:      true,
+		CreatedAt:   1,
+		UpdatedAt:   1,
+		Content:     nil, // by-ref: no inline bytes
+		SourceURL:   &sourceURL,
+		SHA256:      &sha,
+		Size:        &size,
+	}); err != nil {
+		t.Fatalf("CreateSkill: %v", err)
+	}
+
+	profileID := createProfile(t, s)
+	_, _ = addEntry(t, s, profileID, 1, &cpv1.ProfileEntry{
+		Kind:      cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+		Name:      "my-url-skill",
+		Source:    cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF,
+		CatalogId: "url-skill-1",
+	})
+
+	p, entries := loadProfile(t, s, profileID)
+	got, err := s.assembleProfileArtifacts(context.Background(), p, entries)
+	if err != nil {
+		t.Fatalf("assembleProfileArtifacts: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 specs (manifest + skill TAR), got %d: %v", len(got), got)
+	}
+
+	// Manifest spec must still be inline BYTES.
+	ms := findManifestSpec(got)
+	if ms == nil {
+		t.Fatal("no manifest spec in result")
+	}
+	if ms.ContentType != cpv1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_BYTES {
+		t.Errorf("manifest ContentType = %v, want BYTES", ms.ContentType)
+	}
+	if len(ms.Inline) == 0 {
+		t.Error("manifest Inline is empty")
+	}
+	if ms.Objectref != nil {
+		t.Error("manifest must not have objectref")
+	}
+
+	// Find the TAR payload spec.
+	var tarSpec *cpv1.ArtifactSpec
+	for _, s := range got {
+		if s.ContentType == cpv1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_TAR {
+			tarSpec = s
+			break
+		}
+	}
+	if tarSpec == nil {
+		t.Fatal("no TAR payload spec in result")
+	}
+	// By-ref: Inline must be empty, Objectref must be set.
+	if len(tarSpec.Inline) != 0 {
+		t.Errorf("by-ref TAR spec Inline should be empty, got %d bytes", len(tarSpec.Inline))
+	}
+	if tarSpec.Objectref == nil {
+		t.Fatal("by-ref TAR spec must have Objectref")
+	}
+	wantKey := "skills/" + sha + ".tar.zst"
+	if tarSpec.Objectref.ObjectKey != wantKey {
+		t.Errorf("ObjectKey = %q, want %q", tarSpec.Objectref.ObjectKey, wantKey)
+	}
+	if tarSpec.Objectref.Sha256 != sha {
+		t.Errorf("Sha256 = %q, want %q", tarSpec.Objectref.Sha256, sha)
+	}
+	if tarSpec.Objectref.PresignedUrl != "" {
+		t.Error("PresignedUrl should be empty at assembly time (filled at start)")
+	}
+
+	// Manifest Artifact.Skill.Dir and Payload must still match the payload dest path.
+	m := unmarshalManifest(t, ms.Inline)
+	if len(m.Artifacts) != 1 || m.Artifacts[0].Kind != spec.KindSkill {
+		t.Fatalf("expected 1 skill artifact in manifest, got %v", m.Artifacts)
+	}
+	a := m.Artifacts[0]
+	expectedDir := tarSpec.DestPath
+	if a.Skill == nil || a.Skill.Dir != expectedDir {
+		t.Errorf("Skill.Dir = %q, want %q", func() string {
+			if a.Skill != nil {
+				return a.Skill.Dir
+			}
+			return "<nil>"
+		}(), expectedDir)
+	}
+	if a.Payload != expectedDir {
+		t.Errorf("Artifact.Payload = %q, want %q", a.Payload, expectedDir)
+	}
+}
+
+// TestAssemble_InlineSkill_Preserved: a catalog skill with Content (no SHA256) still uses
+// the inline delivery path — regression guard for the legacy catalog skill branch.
+func TestAssemble_InlineSkill_Preserved(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	// Create an inline catalog skill (no SHA256 = legacy inline path).
+	if err := s.st.CustomizationCatalog().Create(aliceCtx(), store.CustomizationCatalogEntry{
+		CatalogID:   "inline-skill-1",
+		CreatorID:   "alice",
+		Kind:        string(store.ProfileEntrySkill),
+		Name:        "inline-skill",
+		Description: "classic inline",
+		Listed:      true,
+		CreatedAt:   1,
+		UpdatedAt:   1,
+		Content:     validSkillTar(),
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	profileID := createProfile(t, s)
+	_, _ = addEntry(t, s, profileID, 1, &cpv1.ProfileEntry{
+		Kind:      cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+		Name:      "inline-skill",
+		Source:    cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF,
+		CatalogId: "inline-skill-1",
+	})
+
+	p, entries := loadProfile(t, s, profileID)
+	got, err := s.assembleProfileArtifacts(context.Background(), p, entries)
+	if err != nil {
+		t.Fatalf("assembleProfileArtifacts: %v", err)
+	}
+	// Should be inline — no objectref.
+	var tarSpec *cpv1.ArtifactSpec
+	for _, s := range got {
+		if s.ContentType == cpv1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_TAR {
+			tarSpec = s
+			break
+		}
+	}
+	if tarSpec == nil {
+		t.Fatal("no TAR payload spec in result")
+	}
+	if tarSpec.Objectref != nil {
+		t.Error("inline skill spec must not have Objectref")
+	}
+	if len(tarSpec.Inline) == 0 {
+		t.Error("inline skill spec must have Inline content")
+	}
+}
+
+// TestAssemble_DuplicateSkillDirName: two skill entries sharing Name in one profile
+// → CodeInvalidArgument.
+func TestAssemble_DuplicateSkillDirName(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	profileID := createProfile(t, s)
+	_, ver := addEntry(t, s, profileID, 1, &cpv1.ProfileEntry{
+		Kind:         cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+		Name:         "same-name",
+		Source:       cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CUSTOM,
+		CustomInline: validSkillTar(),
+	})
+	_, _ = addEntry(t, s, profileID, ver, &cpv1.ProfileEntry{
+		Kind:         cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+		Name:         "same-name", // duplicate!
+		Source:       cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CUSTOM,
+		CustomInline: validSkillTar(),
+	})
+
+	p, entries := loadProfile(t, s, profileID)
+	_, err := s.assembleProfileArtifacts(context.Background(), p, entries)
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("want CodeInvalidArgument for duplicate skill dir name, got %v", err)
+	}
+}
+
+// TestAssemble_DistinctSkillDirNames: two skill entries with different names → no error.
+func TestAssemble_DistinctSkillDirNames(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	profileID := createProfile(t, s)
+	_, ver := addEntry(t, s, profileID, 1, &cpv1.ProfileEntry{
+		Kind:         cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+		Name:         "skill-a",
+		Source:       cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CUSTOM,
+		CustomInline: validSkillTar(),
+	})
+	_, _ = addEntry(t, s, profileID, ver, &cpv1.ProfileEntry{
+		Kind:         cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+		Name:         "skill-b",
+		Source:       cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CUSTOM,
+		CustomInline: validSkillTar(),
+	})
+
+	p, entries := loadProfile(t, s, profileID)
+	got, err := s.assembleProfileArtifacts(context.Background(), p, entries)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// 1 manifest + 2 TAR payloads.
+	if len(got) != 3 {
+		t.Fatalf("want 3 specs, got %d", len(got))
+	}
+}
+
 // TestAssemble_spec_LoadManifest: end-to-end: write specs to temp dir, use
 // spec.LoadManifest to verify the output is spec-compatible.
 func TestAssemble_spec_LoadManifest(t *testing.T) {

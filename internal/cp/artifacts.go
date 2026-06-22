@@ -1,7 +1,9 @@
 package cp
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"path"
 	"strings"
 
@@ -76,6 +78,39 @@ func validateAndMergeArtifacts(manifest, owner []*cpv1.ArtifactSpec) ([]store.Ar
 				return nil, connect.NewError(connect.CodeInvalidArgument,
 					fmt.Errorf("artifact %q: sensitive artifact requires env_var_name", a.Id))
 			}
+			if a.GetObjectref() != nil {
+				return nil, connect.NewError(connect.CodeInvalidArgument,
+					fmt.Errorf("artifact %q: sensitive artifacts may not use by-ref delivery", a.Id))
+			}
+		} else if a.GetObjectref() != nil {
+			// By-ref delivery (sp-nrzf.3.14.5): non-sensitive skill payload stored in Garage.
+			ref := a.GetObjectref()
+			if strings.TrimSpace(ref.ObjectKey) == "" {
+				return nil, connect.NewError(connect.CodeInvalidArgument,
+					fmt.Errorf("artifact %q: by-ref objectref requires object_key", a.Id))
+			}
+			if strings.TrimSpace(ref.Sha256) == "" {
+				return nil, connect.NewError(connect.CodeInvalidArgument,
+					fmt.Errorf("artifact %q: by-ref objectref requires sha256", a.Id))
+			}
+			if len(a.Inline) > 0 {
+				return nil, connect.NewError(connect.CodeInvalidArgument,
+					fmt.Errorf("artifact %q: objectref and inline are mutually exclusive", a.Id))
+			}
+			// By-ref bytes are not counted toward total (they live in Garage, not in the message).
+			out = append(out, store.Artifact{
+				ArtifactID:      a.Id,
+				Inline:          nil,
+				ContentType:     int32(a.ContentType),
+				TargetContainer: int32(target),
+				DestPath:        a.DestPath,
+				Mode:            a.Mode,
+				Sensitive:       false,
+				EnvVarName:      "",
+				ObjectKey:       ref.ObjectKey,
+				ObjectSHA256:    ref.Sha256,
+			})
+			continue
 		} else {
 			if len(a.Inline) == 0 {
 				return nil, connect.NewError(connect.CodeInvalidArgument,
@@ -123,13 +158,15 @@ func confineDestPath(p string) error {
 // storeToNodeArtifacts converts persisted artifacts to the node wire form for StartSpawn.
 // Sensitive artifacts are relayed metadata-only (empty inline) — their values arrive via
 // the separate SealedSecret/DeliverSecrets channel keyed by env_var_name.
+// By-ref artifacts (ObjectKey != "") populate Objectref; PresignedUrl is left empty here
+// and filled by presignNodeArtifacts before the node RPC.
 func storeToNodeArtifacts(in []store.Artifact) []*nodev1.ArtifactSpec {
 	if len(in) == 0 {
 		return nil
 	}
 	out := make([]*nodev1.ArtifactSpec, len(in))
 	for i, a := range in {
-		out[i] = &nodev1.ArtifactSpec{
+		spec := &nodev1.ArtifactSpec{
 			Id:              a.ArtifactID,
 			Inline:          append([]byte(nil), a.Inline...),
 			ContentType:     nodev1.ArtifactContentType(a.ContentType),
@@ -139,6 +176,54 @@ func storeToNodeArtifacts(in []store.Artifact) []*nodev1.ArtifactSpec {
 			Sensitive:       a.Sensitive,
 			EnvVarName:      a.EnvVarName,
 		}
+		if a.ObjectKey != "" {
+			spec.Objectref = &nodev1.ObjectRef{
+				ObjectKey: a.ObjectKey,
+				Sha256:    a.ObjectSHA256,
+				// PresignedUrl left empty; presignNodeArtifacts fills it at start.
+			}
+		}
+		out[i] = spec
 	}
 	return out
+}
+
+// presignNodeArtifacts fills PresignedUrl on every by-ref spec in specs.
+// Returns CodeFailedPrecondition if any by-ref spec is present but skillStore is nil
+// (Garage not configured). Returns CodeUnavailable if PresignedGet fails (signs an HMAC
+// offline, so this indicates a config error rather than a live Garage connection failure).
+// Redact presigned URLs from logs — they are short-lived bearer capabilities.
+//
+// NOTE(sp-nrzf.3.14.2 S4): spike S4 may later gate by-ref materialize to first-create only
+// (resume/fork skip it when journal snapshot captures skill files). Until then, this is called
+// on every start unconditionally.
+func (s *Server) presignNodeArtifacts(ctx context.Context, specs []*nodev1.ArtifactSpec) error {
+	for _, spec := range specs {
+		if spec.Objectref == nil {
+			continue
+		}
+		if s.skillStore == nil {
+			return connect.NewError(connect.CodeFailedPrecondition,
+				fmt.Errorf("spawn has by-ref skill artifacts but Garage skill storage is not configured"))
+		}
+		u, err := s.skillStore.PresignedGet(ctx, spec.Objectref.Sha256)
+		if err != nil {
+			return connect.NewError(connect.CodeUnavailable,
+				fmt.Errorf("presign skill object %q: %w", spec.Objectref.ObjectKey, err))
+		}
+		spec.Objectref.PresignedUrl = u
+		slog.Debug("presignNodeArtifacts: presigned URL set", "artifact", spec.Id, "key", spec.Objectref.ObjectKey)
+	}
+	return nil
+}
+
+// nodeArtifactsForStart converts persisted artifacts to node wire form and presigns
+// any by-ref specs. It is the single call site for all four start paths
+// (CreateSpawn/ResumeSpawn/RecreateSpawn/ForkSpawn).
+func (s *Server) nodeArtifactsForStart(ctx context.Context, arts []store.Artifact) ([]*nodev1.ArtifactSpec, error) {
+	out := storeToNodeArtifacts(arts)
+	if err := s.presignNodeArtifacts(ctx, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
