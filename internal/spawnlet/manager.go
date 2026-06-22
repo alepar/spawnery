@@ -66,9 +66,9 @@ type ManagerConfig struct {
 	// cannot fetch tokens without it). Set by cmd/spawnlet from GETTOKEN_LISTEN_IP.
 	// Unit tests inject a synthetic address here.
 	GetTokenListenIP string
-	GitHubRepos           storage.GitHubRepoService
-	GitHubGitRunner       storage.GitRunner
-	SidecarPort           int // default 8080
+	GitHubRepos      storage.GitHubRepoService
+	GitHubGitRunner  storage.GitRunner
+	SidecarPort      int // default 8080
 
 	NodeID           string // this node's id (stamped on container labels for reconcile); "" standalone
 	NodeClass        string // "cloud" (always enforces) or "self-hosted" (honors EgressEnforce)
@@ -394,6 +394,25 @@ func (m *Manager) egressEnforced() bool {
 }
 
 func (m *Manager) Store() *Store { return m.store }
+
+// EgressEnforced reports whether the egress floor is currently enforced.
+// Used by the node (attach.go) to compute ProvisionFlags.SetupNetwork.
+func (m *Manager) EgressEnforced() bool { return m.egressEnforced() }
+
+// GitHubControlEnabled reports whether the GitHub credential control server is installed.
+// Used by the node (attach.go) to compute ProvisionFlags.SetupNetwork.
+func (m *Manager) GitHubControlEnabled() bool { return m.ghControl != nil }
+
+// HasJournalPins reports whether spawnID has a durable journal record with at least one
+// mount manifest pinned — i.e., a same-node resume will attempt to restore journal state.
+// Used by the node (attach.go) to compute ProvisionFlags.RestoreSnapshot.
+func (m *Manager) HasJournalPins(id string) bool {
+	if m.journal == nil || m.journalState == nil {
+		return false
+	}
+	rec, ok, err := m.journalState.Load(id)
+	return err == nil && ok && len(rec.Manifests) > 0
+}
 
 // RemapBase returns the userns-remap base UID learned at startup from the Docker daemon probe
 // (spec §2). Returns 0 when USERNS_MODE is not "remap" or the probe found no active remap.
@@ -774,10 +793,11 @@ type AgentSelection struct {
 	// that local image is absent.
 	RootfsArtifactsLocalOnly bool
 	// ProgressFunc is an optional callback invoked at phase boundaries during CreateWithSelection
-	// (specifically once per rootfs artifact during restoreRootfsArtifacts) so that callers
-	// (attach.go startSpawn) can relay resume progress to the CP stall detector (sp-u53.7.2).
-	// nil = no-op. Only the resume path (RootfsArtifacts non-empty) produces useful events.
-	ProgressFunc func(phase, detail string)
+	// so that callers (attach.go startSpawn) can relay resume progress to the CP stall detector
+	// (sp-u53.7.2) and emit provisioning milestone events (sp-m859.3). stepKey identifies the
+	// milestone in the catalog; empty = phase-only event with no milestone index update.
+	// nil = no-op.
+	ProgressFunc func(phase, detail, stepKey string)
 	// Artifacts are the per-spawn create-time artifacts re-threaded on every StartSpawn (including
 	// resume). Non-sensitive artifacts are materialized into the staging tmpfs at ArtifactsMountPath;
 	// sensitive+inline artifacts are routed to the secrets tmpfs. Converted from proto by the node.
@@ -785,6 +805,13 @@ type AgentSelection struct {
 	// BeforeStartAgent runs after the sidecar pod and pre-agent prep complete, immediately before the
 	// untrusted agent starts. It can stage spawn-local secrets before the spawn is visible in the store.
 	BeforeStartAgent func(context.Context, PreAgentContext) error
+}
+
+// progress is a nil-safe helper that calls sel.ProgressFunc when set.
+func (sel AgentSelection) progress(phase, detail, stepKey string) {
+	if sel.ProgressFunc != nil {
+		sel.ProgressFunc(phase, detail, stepKey)
+	}
 }
 
 type PreAgentContext struct {
@@ -857,6 +884,10 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		// the node just names the runnable. (Replaces the old spawn-tmux + agentcaps.Launch prepend.)
 		agentCmd = []string{sel.RunnableID}
 	}
+
+	// Provisioning milestone: prepare-mounts (sp-m859.3). Emitted here (before manifest.Parse)
+	// so it fires at the start of the mount/storage preparation phase.
+	sel.progress("preparing_mounts", "preparing mounts", MilestonePrepareMounts)
 
 	if abs, err := filepath.Abs(appPath); err == nil {
 		appPath = abs
@@ -1020,6 +1051,11 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			// remains TODO(phase②) and rides the StartSpawn protocol.)
 			if haveJournalRecord {
 				if pin, ok := jrec.Manifests[mt.Name]; ok {
+					// Provisioning milestone: restore-snapshot (journal path, sp-m859.3).
+					// Non-fatal: a restore failure falls back to the seeded dir. Emitting
+					// "running" here so a sidecar-probe failure later attributes to start-agent,
+					// not restore-snapshot (catalog-order vs code-order limitation, documented).
+					sel.progress("restoring_snapshot", "restoring "+mt.Name, MilestoneRestoreSnapshot)
 					restore := true
 					// Owner-sealed resume: the repo password is custodied by the owner,
 					// not this node — wait (bounded) for it to be delivered over the
@@ -1086,6 +1122,10 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			SELinuxRelabelShared: rootMaterialize,
 		})
 	}
+
+	// Provisioning milestone: create-pod (sp-m859.3). Emitted before secrets/artifacts/git-env
+	// preparation so it fires at the start of the pod-creation phase.
+	sel.progress("creating_pod", "creating pod", MilestoneCreatePod)
 
 	// Owner-sealed secrets tmpfs (design §6): a per-spawn dir under SecretsRoot, bind-mounted into the
 	// agent at SecretsMountPath. The node writes unsealed plaintext here on SecretDelivery; the agent
@@ -1270,6 +1310,12 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		controlURL = "http://" + net.JoinHostPort(h.PodIP, strconv.Itoa(controlPort)) + "/control/model"
 	}
 
+	// Provisioning milestone: setup-network (sp-m859.3). Emitted before ghControl.Serve and the
+	// egress floor, guarded so it only appears in the subset when network setup is applicable.
+	if m.ghControl != nil || m.egressEnforced() {
+		sel.progress("setup_network", "configuring network", MilestoneSetupNetwork)
+	}
+
 	// GitHub control server: start the per-spawn listener after StartPod (PodIP now known for
 	// TCP auth). Fail-closed: a Serve error tears the pod down via cleanupPreStoreFailure.
 	if m.ghControl != nil {
@@ -1366,6 +1412,10 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			}
 			launchImage = existingImage
 		} else {
+			// Provisioning milestone: restore-snapshot (rootfs artifact path, sp-m859.3). Emitted
+			// before the artifact restore so a cross-node resume shows the milestone running.
+			// Note: this emits AFTER setup-network (catalog-order vs code-order skew, documented).
+			sel.progress("restoring_rootfs", "restoring rootfs", MilestoneRestoreSnapshot)
 			// Pass sel.ProgressFunc so each artifact emits a resume progress event (sp-u53.7.2):
 			// a large delta being fetched+imported can exceed the stall window without resets.
 			if err := m.restoreRootfsArtifacts(ctx, id, sel.RootfsSourceGeneration, baseRef, rootfsArtifacts, sel.ProgressFunc); err != nil {
@@ -1375,12 +1425,10 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			launchImage = deltaRef
 		}
 	}
-	// Emit a resume progress event before potentially-slow image pull so the CP stall detector
-	// does not fire on a cold-image node (sp-u53.7.2 C). Byte-level intra-pull granularity is a
-	// tracked follow-up.
-	if sel.ProgressFunc != nil {
-		sel.ProgressFunc("pulling_image", "ensuring base image is available")
-	}
+	// Emit a resume/milestone progress event before potentially-slow image pull so the CP stall
+	// detector does not fire on a cold-image node (sp-u53.7.2 C) and the provisioning step
+	// advances. Byte-level intra-pull granularity is a tracked follow-up.
+	sel.progress("pulling_image", "ensuring base image is available", MilestonePullImage)
 	// Launch image: delta tag if already present locally (same-node resume), else base.
 	if launchImage == "" {
 		var eerr error
@@ -1390,6 +1438,11 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			return nil, fmt.Errorf("ensure launch image: %w", eerr)
 		}
 	}
+	// Provisioning milestone: start-agent (sp-m859.3). Emitted before BeforeStartAgent so it
+	// fires at the start of the agent-start phase. Note: a sidecar-probe failure below
+	// attributes to start-agent (catalog-order vs code-order skew, documented).
+	sel.progress("starting_agent", "starting agent", MilestoneStartAgent)
+
 	if sel.BeforeStartAgent != nil {
 		preAgent := PreAgentContext{
 			SpawnID:      id,
@@ -1644,7 +1697,7 @@ func (m *Manager) rootfsArtifactsForMigrationGeneration(ctx context.Context, sp 
 	return out, nil
 }
 
-func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceGeneration uint64, baseRef string, artifacts []RootfsArtifact, progress func(phase, detail string)) error {
+func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceGeneration uint64, baseRef string, artifacts []RootfsArtifact, progress func(phase, detail, stepKey string)) error {
 	if m.journal == nil {
 		return fmt.Errorf("rootfs artifact restore for %s: no journaler configured", id)
 	}
@@ -1660,7 +1713,7 @@ func (m *Manager) restoreRootfsArtifacts(ctx context.Context, id string, sourceG
 	for i, art := range artifacts {
 		// Emit per-artifact progress so the CP stall timer resets between artifacts.
 		if progress != nil {
-			progress("restore_rootfs", fmt.Sprintf("restoring rootfs artifact %d/%d (id=%s)", i+1, len(artifacts), art.ArtifactID))
+			progress("restore_rootfs", fmt.Sprintf("restoring rootfs artifact %d/%d (id=%s)", i+1, len(artifacts), art.ArtifactID), MilestoneRestoreSnapshot)
 		}
 		var payload bytes.Buffer
 		desc, err := m.journal.GetArtifact(ctx, id, sourceGeneration, art.ArtifactID, &payload)

@@ -316,6 +316,45 @@ func (a *attacher) status(spawnID string, ph nodev1.SpawnPhase, detail string) {
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{SpawnId: spawnID, Phase: ph, Detail: detail}}})
 }
 
+// stepStatus emits a provisioning milestone status (sp-m859.3). key identifies the milestone
+// in the catalog; if key is not found in steps, the call is a no-op (safe against catalog drift).
+// StepIndex is 1-based; StepTotal is len(steps). Phase is either STARTING (running) or ERROR.
+func (a *attacher) stepStatus(spawnID string, steps []spawnlet.Milestone, key, detail string, ph nodev1.SpawnPhase) {
+	idx, m, ok := spawnlet.FindMilestone(steps, key)
+	if !ok {
+		return
+	}
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{
+		SpawnId:   spawnID,
+		Phase:     ph,
+		Detail:    detail,
+		StepIndex: uint32(idx),
+		StepTotal: uint32(len(steps)),
+		StepKey:   key,
+		StepLabel: m.Label,
+	}}})
+}
+
+// hasGitHubMint reports whether any mount has a non-empty GithubMintRef (JIT-mint link-ref).
+func hasGitHubMint(mounts []*nodev1.MountBinding) bool {
+	for _, m := range mounts {
+		if ref := m.GetGithubMintRef(); ref != nil && ref.GetSecretId() != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasGitHubTokenSecret reports whether any secret is of type SECRET_TYPE_GITHUB_TOKEN.
+func hasGitHubTokenSecret(secrets []*nodev1.SealedSecret) bool {
+	for _, s := range secrets {
+		if s.GetType() == nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN {
+			return true
+		}
+	}
+	return false
+}
+
 // statusActive reports the ACTIVE transition. It carries the spawn's resolved base-image
 // digest so the CP can pin it on the spawn row (SetBaseImageDigest) — the digest's only
 // report-back path; without it cross-node resume pinning is inert (spec §4).
@@ -623,9 +662,48 @@ func rootfsArtifactsToProto(in []spawnlet.RootfsArtifact) []*nodev1.RootfsArtifa
 func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.status(st.SpawnId, nodev1.SpawnPhase_STARTING, "")
 
+	// Provisioning milestone tracking (sp-m859.3): compute which milestones apply, then emit
+	// each step "running" right before its fatal work so the CP can surface progress + attribute
+	// failures to the correct step. current tracks the last-started milestone key; emitErr emits
+	// ERROR with step_total>0 so the CP's in-memory map can attribute the failure (contract: the
+	// ERROR SpawnStatus carries step_total>0 AND the failing step_key).
+	flags := spawnlet.ProvisionFlags{
+		MintCredentials: hasGitHubMint(st.GetMounts()) || hasGitHubTokenSecret(st.GetSecrets()),
+		RestoreSnapshot: len(st.GetRootfsArtifacts()) > 0 || a.mgr.HasJournalPins(st.SpawnId),
+		SetupNetwork:    a.mgr.GitHubControlEnabled() || a.mgr.EgressEnforced(),
+		AwaitReady:      st.Mode != string(agentcaps.ModeTmux),
+	}
+	steps := spawnlet.ApplicableMilestones(flags)
+	current := spawnlet.MilestoneAuthorize
+	emitStep := func(key string) {
+		current = key
+		a.stepStatus(st.SpawnId, steps, key, "", nodev1.SpawnPhase_STARTING)
+	}
+	emitErr := func(err error) {
+		// Send the ERROR status directly rather than delegating to stepStatus.
+		// stepStatus is gated on FindMilestone — if current is not in steps (future
+		// catalog drift), it no-ops and swallows the error entirely. The CP contract
+		// requires step_total>0 on any provisioning ERROR SpawnStatus so it can
+		// attribute the failure to the correct step. len(steps) is always >0 because
+		// the unconditional milestones (authorize, prepare-mounts, create-pod, etc.)
+		// are present for every spawn, so StepTotal>0 is guaranteed regardless of
+		// whether current happens to appear in steps.
+		idx, m, _ := spawnlet.FindMilestone(steps, current)
+		_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{
+			SpawnId:   st.SpawnId,
+			Phase:     nodev1.SpawnPhase_ERROR,
+			Detail:    err.Error(),
+			StepTotal: uint32(len(steps)),
+			StepKey:   current,
+			StepIndex: uint32(idx),
+			StepLabel: m.Label,
+		}}})
+	}
+
 	// A4 intent verification [AC1][AM12]. Verify BEFORE creating the container so a
 	// forged/replayed StartSpawn is rejected at the gate. In verify-and-log mode (NODE_AUTH_MODE=insecure)
 	// failures are logged but execution proceeds; in enforced mode a NACK returns ERROR status.
+	emitStep(spawnlet.MilestoneAuthorize)
 	if a.verifier != nil {
 		mounts := make([]*authv1.MountRef, 0, len(st.GetMounts()))
 		for _, m := range st.GetMounts() {
@@ -649,16 +727,44 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		}
 		if nack, detail := a.verifier.VerifyStart(st.GetAuth(), fields); nack != "" {
 			slog.Warn("startSpawn: intent NACK", "spawn", st.SpawnId, "nack", nack, "detail", detail)
-			a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, string(nack)+": "+detail)
+			nackErr := fmt.Errorf("%s: %s", nack, detail)
+			emitErr(nackErr)
 			return
 		}
 	}
 
 	// Emit resume progress at key phase boundaries so the CP stall detector can reset (sp-u53.7.2).
 	// The CP's resumeWaiters drops these if no waiter is registered (fresh creates have no waiter).
-	// ProgressFunc is wired into AgentSelection so restoreRootfsArtifacts can emit per-artifact
-	// progress — a large rootfs delta can exceed the 30s stall window without these resets.
+	// ProgressFunc is wired into AgentSelection so manager.go milestones and restoreRootfsArtifacts
+	// can emit per-step progress — a large rootfs delta can exceed the 30s stall window without these.
 	a.resumeProgress(st.SpawnId, st.Generation, "starting", "creating containers")
+
+	// Mint-at-provision (live-dev Approach 2): render node-storage tokens for github mounts that carry
+	// a JIT-mint link-ref, BEFORE CreateWithSelection runs storage.GitHub.Prepare.
+	if flags.MintCredentials {
+		emitStep(spawnlet.MilestoneMintCredentials)
+	}
+	if err := a.mintGitHubMountsAtProvision(ctx, st.SpawnId, st.Generation, st.GetMounts()); err != nil {
+		_ = a.mgr.RemoveGitHubNodeCredentials(st.SpawnId)
+		a.mgr.CleanupSpawnTransient(st.SpawnId)
+		logErr("startSpawn "+st.SpawnId+": github mint-at-provision", err)
+		emitErr(err)
+		return
+	}
+	secrets := st.GetSecrets()
+	if len(secrets) > 0 {
+		consumedGitHub, err := a.consumeStartupGitHubSecrets(ctx, st.SpawnId, st.Generation, secrets, st.GetMounts())
+		if err != nil {
+			logErr("startSpawn "+st.SpawnId+": github startup secrets", err)
+			emitErr(err)
+			return
+		}
+		secrets = filterConsumedStartupSecrets(secrets, consumedGitHub)
+	}
+	// Build the AgentSelection and optionally wire BeforeStartAgent for startup secrets.
+	// Defensively set current to prepare-mounts so that a CreateWithSelection failure before the
+	// manager emits its own milestone progress attributes the error to the right step.
+	current = spawnlet.MilestonePrepareMounts
 	sel := spawnlet.AgentSelection{
 		Image:                    st.Image,
 		RunnableID:               st.RunnableId,
@@ -669,34 +775,19 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		RootfsArtifacts:          rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
 		RootfsArtifactsLocalOnly: st.GetRootfsArtifactsLocalOnly(),
 		Artifacts:                artifactsFromProto(st.GetArtifacts()),
-		ProgressFunc: func(phase, detail string) {
+		ProgressFunc: func(phase, detail, stepKey string) {
 			a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
+			if stepKey != "" {
+				current = stepKey
+				a.stepStatus(st.SpawnId, steps, stepKey, detail, nodev1.SpawnPhase_STARTING)
+			}
 		},
-	}
-	// Mint-at-provision (live-dev Approach 2): render node-storage tokens for github mounts that carry
-	// a JIT-mint link-ref, BEFORE CreateWithSelection runs storage.GitHub.Prepare.
-	if err := a.mintGitHubMountsAtProvision(ctx, st.SpawnId, st.Generation, st.GetMounts()); err != nil {
-		_ = a.mgr.RemoveGitHubNodeCredentials(st.SpawnId)
-		a.mgr.CleanupSpawnTransient(st.SpawnId)
-		logErr("startSpawn "+st.SpawnId+": github mint-at-provision", err)
-		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
-		return
-	}
-	secrets := st.GetSecrets()
-	if len(secrets) > 0 {
-		consumedGitHub, err := a.consumeStartupGitHubSecrets(ctx, st.SpawnId, st.Generation, secrets, st.GetMounts())
-		if err != nil {
-			logErr("startSpawn "+st.SpawnId+": github startup secrets", err)
-			a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
-			return
-		}
-		secrets = filterConsumedStartupSecrets(secrets, consumedGitHub)
 	}
 	if len(secrets) > 0 {
 		routes, err := startupSecretRoutesFromProto(st.GetArtifacts())
 		if err != nil {
 			logErr("startSpawn "+st.SpawnId+": startup secret routes", err)
-			a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
+			emitErr(err)
 			return
 		}
 		sel.BeforeStartAgent = func(ctx context.Context, pc spawnlet.PreAgentContext) error {
@@ -708,7 +799,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	if err != nil {
 		a.mgr.CleanupSpawnTransient(st.SpawnId)
 		logErr("startSpawn "+st.SpawnId, err)
-		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
+		emitErr(err)
 		return
 	}
 	a.resumeProgress(st.SpawnId, st.Generation, "containers_ready", "containers created")
@@ -738,7 +829,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	if err != nil {
 		logErr("startSpawn attach "+st.SpawnId, err)
 		_ = a.mgr.Stop(ctx, st.SpawnId)
-		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
+		emitErr(err)
 		return
 	}
 	p := newPump(att.Stdin, att.Stdout)
@@ -763,6 +854,9 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	a.applyForkBarrierLocked(st.SpawnId, p)
 	a.pumps[zeroKey(st.SpawnId)] = p
 	a.mu.Unlock()
+	if flags.AwaitReady {
+		emitStep(spawnlet.MilestoneAwaitReady)
+	}
 	a.resumeProgress(st.SpawnId, st.Generation, "attaching", "awaiting agent ACP readiness")
 	if err := p.start(ctx, readyTimeout); err != nil {
 		logErr("startSpawn "+st.SpawnId+": agent not ready", err)
@@ -771,7 +865,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		delete(a.pumps, zeroKey(st.SpawnId))
 		a.mu.Unlock()
 		_ = a.mgr.Stop(ctx, st.SpawnId)
-		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, err.Error())
+		emitErr(err)
 		return
 	}
 	a.mu.Lock()
