@@ -132,8 +132,10 @@ export async function renameSpawn(spawnId: string, name: string): Promise<void> 
 export async function suspendSpawn(spawnId: string): Promise<void> {
   await unary<Record<string, never>>("SuspendSpawn", { spawnId });
 }
+// ResumeSpawn blocks at the CP awaiting the client's SignedIntent (unlike the async CreateSpawn),
+// so pollAndSign MUST run concurrently with the RPC — kicking it off after the await would deadlock
+// (CP waits for the intent, client waits for the RPC). Mirrors cmd/spawnctl/resume.go.
 export async function resumeSpawn(spawnId: string): Promise<void> {
-  await unary<Record<string, never>>("ResumeSpawn", { spawnId });
   if (authEnabled()) {
     const { getOrCreateSessionKey } = await import("@/auth/keypair");
     const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
@@ -143,10 +145,11 @@ export async function resumeSpawn(spawnId: string): Promise<void> {
       .catch((e: unknown) => console.error("intent sign failed:", e))
       .finally(() => clearPendedOp(spawnId));
   }
+  await unary<Record<string, never>>("ResumeSpawn", { spawnId });
 }
 // recreateSpawn re-provisions a fresh container; the recovery path for unreachable/error spawns.
 export async function recreateSpawn(spawnId: string): Promise<void> {
-  await unary<Record<string, never>>("RecreateSpawn", { spawnId });
+  // RecreateSpawn blocks at the CP awaiting the SignedIntent (see resumeSpawn): sign concurrently.
   if (authEnabled()) {
     const { getOrCreateSessionKey } = await import("@/auth/keypair");
     const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
@@ -156,10 +159,11 @@ export async function recreateSpawn(spawnId: string): Promise<void> {
       .catch((e: unknown) => console.error("intent sign failed:", e))
       .finally(() => clearPendedOp(spawnId));
   }
+  await unary<Record<string, never>>("RecreateSpawn", { spawnId });
 }
 // migrateSpawn moves a spawn to a new node; requires node-verified intent (DOMAIN_MIGRATE_SPAWN).
 export async function migrateSpawn(spawnId: string): Promise<void> {
-  await unary<Record<string, never>>("MigrateSpawn", { spawnId });
+  // MigrateSpawn blocks at the CP awaiting the SignedIntent (see resumeSpawn): sign concurrently.
   if (authEnabled()) {
     const { getOrCreateSessionKey } = await import("@/auth/keypair");
     const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
@@ -169,6 +173,7 @@ export async function migrateSpawn(spawnId: string): Promise<void> {
       .catch((e: unknown) => console.error("intent sign failed:", e))
       .finally(() => clearPendedOp(spawnId));
   }
+  await unary<Record<string, never>>("MigrateSpawn", { spawnId });
 }
 // UI "Stop" = DeleteSpawn (soft-delete; drops from the list). Legacy stopSpawn kept for non-UI callers.
 export async function deleteSpawn(spawnId: string): Promise<void> {
