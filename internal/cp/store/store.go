@@ -250,6 +250,13 @@ type CustomizationCatalogRepo interface {
 	SetListed(ctx context.Context, catalogID string, listed bool) error
 	// Delete removes an entry. ErrNotFound when absent.
 	Delete(ctx context.Context, catalogID string) error
+	// GetByCreatorSHA returns the entry for (creatorID, sha256hex). ErrNotFound when absent.
+	// Used for idempotency: a re-ingest of the same content returns the existing catalog_id.
+	GetByCreatorSHA(ctx context.Context, creatorID, sha256hex string) (CustomizationCatalogEntry, error)
+	// CreateSkill inserts a URL-ingested skill entry with provenance fields populated.
+	// Maps a driver unique-constraint violation on (creator_id, sha256) to ErrConflict.
+	// Returns ErrConflict when the same (creator_id, sha256) already exists (concurrent ingest race).
+	CreateSkill(ctx context.Context, e CustomizationCatalogEntry) error
 }
 
 type Store interface {

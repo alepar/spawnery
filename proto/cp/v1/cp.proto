@@ -77,6 +77,12 @@ service SpawnService {
   rpc UpdateCatalogEntry(UpdateCatalogEntryRequest)     returns (UpdateCatalogEntryResponse);
   rpc DeleteCatalogEntry(DeleteCatalogEntryRequest)     returns (DeleteCatalogEntryResponse);
   rpc SetCatalogListing(SetCatalogListingRequest)       returns (SetCatalogListingResponse);
+  // IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
+  // SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
+  // content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
+  // Idempotent on (creator, sha256): returns the existing catalog_id on conflict.
+  // Requires Garage to be configured; returns FailedPrecondition when not.
+  rpc IngestSkillFromURL(IngestSkillFromURLRequest) returns (IngestSkillFromURLResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -727,3 +733,13 @@ message DeleteCatalogEntryResponse {}
 
 message SetCatalogListingRequest  { string catalog_id = 1; bool listed = 2; }
 message SetCatalogListingResponse {}
+
+// IngestSkillFromURLRequest ingests a skill from a GitHub repo URL.
+message IngestSkillFromURLRequest {
+  string url         = 1; // required; owner/repo or https://github.com/owner/repo (no /tree/ or /blob/ deep paths)
+  string ref         = 2; // optional branch/tag/commit; empty => repo default branch
+  string subdir      = 3; // optional path to descend before requiring SKILL.md
+  string name        = 4; // optional; defaults from SKILL.md frontmatter name, sanitized to one path segment
+  string description = 5; // optional
+}
+message IngestSkillFromURLResponse { string catalog_id = 1; }
