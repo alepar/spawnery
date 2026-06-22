@@ -121,7 +121,7 @@ func TestMintGitHubAccessTokenRotatesCustodialRefreshAndReturnsOnlyAccess(t *tes
 	}
 
 	var authz GitHubMintAuthorization
-	var fanout GitHubAccessTokenFanout
+	var signal GitHubTokenRotatedSignal
 	svc := newMintAS(t,
 		WithClock(func() time.Time { return now }),
 		WithGitHubMinting(st, provider),
@@ -130,8 +130,8 @@ func TestMintGitHubAccessTokenRotatesCustodialRefreshAndReturnsOnlyAccess(t *tes
 			authz = got
 			return nil
 		})),
-		WithGitHubAccessTokenFanout(GitHubAccessTokenFanoutFunc(func(_ context.Context, got GitHubAccessTokenFanout) error {
-			fanout = got
+		WithGitHubTokenRotatedNotifier(GitHubTokenRotatedNotifierFunc(func(_ context.Context, got GitHubTokenRotatedSignal) error {
+			signal = got
 			return nil
 		})),
 	)
@@ -149,9 +149,8 @@ func TestMintGitHubAccessTokenRotatesCustodialRefreshAndReturnsOnlyAccess(t *tes
 	if authz.NodeID != "node-1" || authz.SpawnID != "sp1" || authz.SecretID != "gh-main" || authz.Generation != 3 || authz.Version != 11 {
 		t.Fatalf("authz request = %+v", authz)
 	}
-	if fanout.SecretID != "gh-main" || fanout.Version != 12 || fanout.DeliveryID != "github-access-gh-main-v12" ||
-		fanout.AccessToken != "ghu_rotated" || fanout.RepositoryID != "987" {
-		t.Fatalf("fanout request = %+v", fanout)
+	if signal.SecretID != "gh-main" || signal.Version != 12 || signal.DeliveryID != "github-access-gh-main-v12" {
+		t.Fatalf("signal fields = %+v", signal)
 	}
 	got, err := st.GitHubLinks().Get(context.Background(), "gh-main")
 	if err != nil {
@@ -163,7 +162,9 @@ func TestMintGitHubAccessTokenRotatesCustodialRefreshAndReturnsOnlyAccess(t *tes
 	}
 }
 
-func TestMintGitHubAccessTokenRetryAfterFanoutFailureUsesCurrentFreshToken(t *testing.T) {
+// TestMintGitHubAccessTokenSignalFailureDoesNotSurfaceCodeUnavailable verifies that a failing
+// rotation signal does not deny the caller its token (best-effort semantics per sp-v40s.22.1).
+func TestMintGitHubAccessTokenSignalFailureDoesNotSurfaceCodeUnavailable(t *testing.T) {
 	now := time.Unix(1770000000, 0)
 	st := store.NewTestStore(t)
 	seedGitHubLink(t, st, now.Add(time.Minute).Unix())
@@ -178,8 +179,8 @@ func TestMintGitHubAccessTokenRetryAfterFanoutFailureUsesCurrentFreshToken(t *te
 		},
 	}
 
-	fanoutCalls := 0
-	var fanouts []GitHubAccessTokenFanout
+	signalCalls := 0
+	var signals []GitHubTokenRotatedSignal
 	svc := newMintAS(t,
 		WithClock(func() time.Time { return now }),
 		WithGitHubMinting(st, provider),
@@ -187,46 +188,52 @@ func TestMintGitHubAccessTokenRetryAfterFanoutFailureUsesCurrentFreshToken(t *te
 		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(context.Context, GitHubMintAuthorization) error {
 			return nil
 		})),
-		WithGitHubAccessTokenFanout(GitHubAccessTokenFanoutFunc(func(_ context.Context, got GitHubAccessTokenFanout) error {
-			fanoutCalls++
-			fanouts = append(fanouts, got)
-			if fanoutCalls == 1 {
-				return errors.New("cp fanout unavailable")
+		WithGitHubTokenRotatedNotifier(GitHubTokenRotatedNotifierFunc(func(_ context.Context, got GitHubTokenRotatedSignal) error {
+			signalCalls++
+			signals = append(signals, got)
+			if signalCalls == 1 {
+				return errors.New("cp signal unavailable") // best-effort: must NOT fail the mint
 			}
 			return nil
 		})),
 	)
 
-	_, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(mintReq()))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("initial mint code = %v err=%v", connect.CodeOf(err), err)
+	// First mint: rotates v11→v12; signal fails but mint must succeed (no CodeUnavailable).
+	resp, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(mintReq()))
+	if err != nil {
+		t.Fatalf("mint must succeed even when signal fails: %v", err)
+	}
+	if resp.Msg.GetAccessToken() != "ghu_rotated" || !resp.Msg.GetRefreshed() {
+		t.Fatalf("first mint response = %+v", resp.Msg)
 	}
 	got, err := st.GitHubLinks().Get(context.Background(), "gh-main")
 	if err != nil {
-		t.Fatalf("get link after failed fanout: %v", err)
+		t.Fatalf("get link after signal failure: %v", err)
 	}
 	if got.RefreshToken != "ghr_rotated" || got.AccessToken != "ghu_rotated" ||
 		got.Version != 12 || got.DeliveryID != "github-access-gh-main-v12" {
-		t.Fatalf("AS did not persist rotated link before fanout failure: %+v", got)
+		t.Fatalf("AS did not persist rotated link: %+v", got)
 	}
 
-	resp, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(mintReq()))
+	// Second mint with stale v11 ref → stale-ref re-signal path → best-effort signal, cached token returned.
+	resp2, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(mintReq()))
 	if err != nil {
 		t.Fatalf("retry mint with stale link_ref: %v", err)
 	}
-	if resp.Msg.GetAccessToken() != "ghu_rotated" || resp.Msg.GetRefreshed() {
-		t.Fatalf("retry response = %+v", resp.Msg)
+	if resp2.Msg.GetAccessToken() != "ghu_rotated" || resp2.Msg.GetRefreshed() {
+		t.Fatalf("retry response = %+v", resp2.Msg)
 	}
 	if provider.calls != 1 {
 		t.Fatalf("provider calls = %d, want 1", provider.calls)
 	}
-	if len(fanouts) != 2 {
-		t.Fatalf("fanouts = %d, want 2", len(fanouts))
+	if signalCalls != 2 {
+		t.Fatalf("signal calls = %d, want 2", signalCalls)
 	}
-	retryFanout := fanouts[1]
-	if retryFanout.SecretID != "gh-main" || retryFanout.Version != 12 || retryFanout.DeliveryID != "github-access-gh-main-v12" ||
-		retryFanout.AccessToken != "ghu_rotated" || retryFanout.RepositoryID != "987" {
-		t.Fatalf("retry fanout request = %+v", retryFanout)
+	// Signals carry routing fields only — no access_token field (containment invariant c).
+	for _, sig := range signals {
+		if sig.SecretID != "gh-main" || sig.Version != 12 || sig.DeliveryID != "github-access-gh-main-v12" {
+			t.Fatalf("signal fields = %+v", sig)
+		}
 	}
 }
 
@@ -319,7 +326,7 @@ func TestMintGitHubAccessTokenRecoversStagedRotationAfterCommitFailure(t *testin
 		WithGitHubMinting(st, provider),
 		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "node-1", true }),
 		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(context.Context, GitHubMintAuthorization) error { return nil })),
-		WithGitHubAccessTokenFanout(GitHubAccessTokenFanoutFunc(func(context.Context, GitHubAccessTokenFanout) error { return nil })),
+		WithGitHubTokenRotatedNotifier(GitHubTokenRotatedNotifierFunc(func(context.Context, GitHubTokenRotatedSignal) error { return nil })),
 	)
 
 	// First attempt: GitHub rotates, stage succeeds, commit fails -> error, but pending staged.
@@ -376,7 +383,7 @@ func TestMintGitHubAccessTokenInitialRefReturnsCurrentFreshToken(t *testing.T) {
 	provider := &testGitHubMintProvider{}             // must NOT be called
 
 	var authz GitHubMintAuthorization
-	var fanout GitHubAccessTokenFanout
+	var signal GitHubTokenRotatedSignal
 	svc := newMintAS(t,
 		WithClock(func() time.Time { return now }),
 		WithGitHubMinting(st, provider),
@@ -385,8 +392,8 @@ func TestMintGitHubAccessTokenInitialRefReturnsCurrentFreshToken(t *testing.T) {
 			authz = got
 			return nil
 		})),
-		WithGitHubAccessTokenFanout(GitHubAccessTokenFanoutFunc(func(_ context.Context, got GitHubAccessTokenFanout) error {
-			fanout = got
+		WithGitHubTokenRotatedNotifier(GitHubTokenRotatedNotifierFunc(func(_ context.Context, got GitHubTokenRotatedSignal) error {
+			signal = got
 			return nil
 		})),
 	)
@@ -416,8 +423,8 @@ func TestMintGitHubAccessTokenInitialRefReturnsCurrentFreshToken(t *testing.T) {
 	if authz.Version != 0 || authz.DeliveryID != "" {
 		t.Fatalf("authz version/deliveryID = %d/%q, want 0/empty (bare initial ref)", authz.Version, authz.DeliveryID)
 	}
-	// Fanout is not called for a fresh dedup (no new delivery).
-	_ = fanout // nothing fanout'd for a fresh token
+	// Signal is not called for a fresh dedup (no new delivery).
+	_ = signal // nothing signalled for a fresh token
 }
 
 func TestMintGitHubAccessTokenInitialRefRefreshesWhenStale(t *testing.T) {
@@ -439,7 +446,7 @@ func TestMintGitHubAccessTokenInitialRefRefreshesWhenStale(t *testing.T) {
 		WithGitHubMinting(st, provider),
 		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "node-1", true }),
 		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(context.Context, GitHubMintAuthorization) error { return nil })),
-		WithGitHubAccessTokenFanout(GitHubAccessTokenFanoutFunc(func(context.Context, GitHubAccessTokenFanout) error { return nil })),
+		WithGitHubTokenRotatedNotifier(GitHubTokenRotatedNotifierFunc(func(context.Context, GitHubTokenRotatedSignal) error { return nil })),
 	)
 
 	resp, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(initialMintReq()))
@@ -645,7 +652,7 @@ func TestMintGitHubAccessTokenRotatedPathCarriesLoginAndUserID(t *testing.T) {
 		WithGitHubMinting(st, provider),
 		WithNodeIdentityExtractor(func(context.Context) (string, bool) { return "node-1", true }),
 		WithGitHubMintAuthorizer(GitHubMintAuthorizerFunc(func(context.Context, GitHubMintAuthorization) error { return nil })),
-		WithGitHubAccessTokenFanout(GitHubAccessTokenFanoutFunc(func(context.Context, GitHubAccessTokenFanout) error { return nil })),
+		WithGitHubTokenRotatedNotifier(GitHubTokenRotatedNotifierFunc(func(context.Context, GitHubTokenRotatedSignal) error { return nil })),
 	)
 	resp, err := svc.MintGitHubAccessToken(context.Background(), connect.NewRequest(mintReq()))
 	if err != nil {

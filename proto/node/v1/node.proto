@@ -57,7 +57,19 @@ message CPMessage {
     ForkTransferExport           fork_transfer_export  = 18;            // CP -> node: source-side cross-node fork transfer export
     ForkTransferImport           fork_transfer_import  = 19;            // CP -> node: target-side cross-node fork transfer import
     CancelForkTransfer           cancel_fork_transfer  = 20;            // CP -> node: cancel in-flight cross-node fork transfer work
+    GitHubTokenRotatedSignal     github_token_rotated  = 21;            // CP -> node: token-free rotation heads-up (lazy invalidate + repull)
   }
+}
+
+// GitHubTokenRotatedSignal is the CP→node fanout of a token-free rotation notification (sp-v40s.22.1).
+// The node advances its version-gate pointer and clears the stale cached token; the next GetToken re-mints.
+message GitHubTokenRotatedSignal {
+  string spawn_id               = 1;
+  uint64 generation             = 2;
+  string secret_id              = 3;
+  uint64 version                = 4;
+  string delivery_id            = 5;
+  int64  access_expires_at_unix = 6;
 }
 
 enum SecretType {

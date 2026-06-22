@@ -64,9 +64,9 @@ func newGitHubControl(cfg ControlConfig) *githubControl {
 		},
 	}
 	return &githubControl{
-		cfg:   cfg,
+		cfg:    cfg,
 		client: &http.Client{Transport: transport},
-		nowFn: time.Now,
+		nowFn:  time.Now,
 	}
 }
 
@@ -84,7 +84,7 @@ func (c *githubControl) Token(ctx context.Context) (string, error) {
 
 	// Fetch outside the lock so concurrent callers in different goroutines don't all block on
 	// the same slow mint; only the first one's result wins (re-check under lock on return).
-	tok, exp, err := c.FetchToken(ctx)
+	tok, exp, err := c.FetchToken(ctx, false)
 	if err != nil {
 		return "", err
 	}
@@ -96,12 +96,15 @@ func (c *githubControl) Token(ctx context.Context) (string, error) {
 	return tok, nil
 }
 
-// FetchToken fetches a fresh token from the node, bypassing the cache. It always sends
+// FetchToken fetches a fresh token from the node, bypassing the sidecar cache. It always sends
 // MinRemainingSeconds=minRemainingSeconds so the node mints a fresh token when needed.
-func (c *githubControl) FetchToken(ctx context.Context) (token string, expiresAtUnix int64, _ error) {
+// When forceRefresh is true, ForceRefresh=true is set on the request so the node also bypasses
+// its own token-cache and mint-rate floor (Phase 2 straggler backstop).
+func (c *githubControl) FetchToken(ctx context.Context, forceRefresh bool) (token string, expiresAtUnix int64, _ error) {
 	req := &sidecarv1.GetTokenRequest{
 		SpawnId:             c.cfg.SpawnID,
 		MinRemainingSeconds: minRemainingSeconds,
+		ForceRefresh:        forceRefresh,
 	}
 	body, err := protojson.Marshal(req)
 	if err != nil {
@@ -118,6 +121,21 @@ func (c *githubControl) FetchToken(ctx context.Context) (token string, expiresAt
 		return "", 0, fmt.Errorf("FetchToken: unmarshal response: %w", err)
 	}
 	return result.GetToken(), result.GetAccessExpiresAtUnix(), nil
+}
+
+// ForceToken bypasses the sidecar 5-min cache and forces the node to re-pull a fresh token
+// (piercing the node token-cache + 10s mint floor). Overwrites the cached (dead) token on
+// success. Used by the sidecar proxy's 401-retry backstop (Phase 2).
+func (c *githubControl) ForceToken(ctx context.Context) (string, error) {
+	tok, exp, err := c.FetchToken(ctx, true)
+	if err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cachedToken = tok
+	c.cachedExpiry = exp
+	return tok, nil
 }
 
 // FetchCA fetches the per-spawn CA cert and private key from the node.

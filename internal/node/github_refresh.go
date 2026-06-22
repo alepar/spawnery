@@ -47,7 +47,7 @@ const (
 	defaultAccessLifetime  = 8 * time.Hour
 	nodeRefreshLead        = 8 * time.Minute // < AS 10m lead so the AS rotates on our call
 	defaultRefreshInterval = defaultAccessLifetime - nodeRefreshLead
-	refreshInFlightGrace   = 2 * time.Minute  // wait for the sealed fanout to arrive before re-minting
+	refreshInFlightGrace   = 2 * time.Minute  // wait for the rotation signal (Invalidate) before re-minting
 	refreshBackoffBase     = 30 * time.Second // exponential, capped
 	refreshBackoffMax      = 5 * time.Minute
 	refreshMintTimeout     = 30 * time.Second
@@ -128,6 +128,36 @@ func (r *githubRefresher) Note(e githubRefreshEntry) {
 	st.nextAttempt = time.Time{}
 	st.inFlight = false
 	st.backoffDur = 0
+}
+
+// Invalidate advances the version-gate pointer for a delivered rotation signal and clears the
+// stale cached token so the next GetToken re-mints lazily (sp-v40s.22.1). It does NOT trigger
+// an eager pull; clearing lastMintAt removes the rate-limit floor so GetToken can mint immediately.
+// nil-safe.
+func (r *githubRefresher) Invalidate(spawnID, secretID string, version uint64, deliveryID string, accessExpiresAtUnix int64) {
+	if r == nil || spawnID == "" || secretID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st := r.lookupLocked(spawnID, secretID)
+	if st == nil {
+		return
+	}
+	st.entry.Version = version
+	st.entry.DeliveryID = deliveryID
+	if accessExpiresAtUnix > 0 {
+		st.entry.AccessExpiresAtUnix = accessExpiresAtUnix
+	}
+	// Lazy-invalidate: drop the cached (dead) token so GetToken re-mints on next call.
+	st.token = ""
+	st.tokenExpiryUnix = 0
+	// Clear the rate-limit floor so the next GetToken call is not blocked by minMintInterval.
+	st.lastMintAt = time.Time{}
+	// Reschedule proactive refresh relative to the new expiry (mirrors Note scheduling).
+	if accessExpiresAtUnix > 0 {
+		st.refreshAt = time.Unix(accessExpiresAtUnix, 0).Add(-nodeRefreshLead)
+	}
 }
 
 // Forget drops all link state for a spawn (stop/suspend). nil-safe.
@@ -223,7 +253,7 @@ func (r *githubRefresher) MintInitial(ctx context.Context, spawnID string, gener
 }
 
 // Tick attempts a mint for every due entry at `now`. Each attempt marks the entry in-flight and sets
-// a grace floor so the node waits for the sealed fanout (which re-Notes the new version) instead of
+// a grace floor so the node waits for the rotation signal (which calls Invalidate) instead of
 // hammering the AS. On success the mint RESPONSE's access_expires_at_unix refines refreshAt; on
 // failure an exponential backoff floor is set. nil-safe; a nil client makes Tick a no-op.
 func (r *githubRefresher) Tick(ctx context.Context, now time.Time) {
@@ -297,15 +327,14 @@ func (r *githubRefresher) succeedAttempt(e githubRefreshEntry, now time.Time, ac
 	st.inFlight = false
 	st.backoffDur = 0
 	// Keep the in-flight grace nextAttempt set by beginAttempt: the AS either rotated the token
-	// (a sealed fanout is incoming, re-minting before Note arrives is redundant) or confirmed the
-	// token is still valid (no fanout, but hammering again immediately wastes AS quota). The fanout
-	// delivery (or the next proactive window) will call Note, resetting nextAttempt.
+	// (a rotation signal is incoming, calling Invalidate — re-minting before it arrives is redundant)
+	// or confirmed the token is still valid (no rotation, but hammering again immediately wastes AS quota).
 	if accessExpiresAtUnix > 0 {
 		// Precise correction: schedule the next refresh just inside the AS rotate window.
 		st.refreshAt = time.Unix(accessExpiresAtUnix, 0).Add(-nodeRefreshLead)
 	}
 	// else: keep the receipt-relative refreshAt set by Note (or the in-flight grace governs until the
-	// sealed fanout re-Notes a new version).
+	// rotation signal calls Invalidate, rescheduling the next refresh).
 }
 
 func (r *githubRefresher) lookupLocked(spawnID, secretID string) *refreshState {
@@ -371,7 +400,9 @@ func (r *githubRefresher) mintNow(ctx context.Context, e githubRefreshEntry) (to
 // it mints a fresh one (subject to per-spawn rate-limiting). The returned expiryUnix is the
 // token's expiry as a Unix timestamp (0 = unknown). Thread-safe. nil-safe (nil refresher or
 // nil client → ErrGitHubNotLinked / wrapped error).
-func (r *githubRefresher) GetToken(ctx context.Context, spawnID string, minRemainingSeconds int64) (string, int64, error) {
+// When force is true, the cached token and mint-rate floor are bypassed unconditionally — the
+// sidecar 401-retry backstop (Phase 2) uses this to recover from a stale-token straggler.
+func (r *githubRefresher) GetToken(ctx context.Context, spawnID string, minRemainingSeconds int64, force bool) (string, int64, error) {
 	if r == nil {
 		return "", 0, ErrGitHubNotLinked
 	}
@@ -389,6 +420,15 @@ func (r *githubRefresher) GetToken(ctx context.Context, spawnID string, minRemai
 		e = s.entry
 		st = s
 		break
+	}
+
+	// Force-refresh: clear the cached token and mint-rate floor so the checks below both miss
+	// and we go straight to mintNow. Does NOT advance Version/DeliveryID — the straggler's
+	// link pointer is still valid; only the token is stale.
+	if force {
+		st.token = ""
+		st.tokenExpiryUnix = 0
+		st.lastMintAt = time.Time{}
 	}
 
 	now := r.now()

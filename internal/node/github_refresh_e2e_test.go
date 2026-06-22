@@ -54,21 +54,21 @@ func (c *capturedAuthz) snapshot() (authsvc.GitHubMintAuthorization, int) {
 	return c.last, c.hits
 }
 
-// capturedFanout records the LAST CP-coordinated fanout the AS performed. The struct carries the
-// rotated ACCESS token only (it has no refresh-token field at all — compile-time containment).
-type capturedFanout struct {
+// capturedSignal records the LAST CP-coordinated rotation signal the AS emitted. The struct carries
+// only link-level metadata (no token field at all — compile-time token-free containment invariant).
+type capturedSignal struct {
 	mu   sync.Mutex
-	last authsvc.GitHubAccessTokenFanout
+	last authsvc.GitHubTokenRotatedSignal
 	hits int
 }
 
-func (c *capturedFanout) record(f authsvc.GitHubAccessTokenFanout) {
+func (c *capturedSignal) record(s authsvc.GitHubTokenRotatedSignal) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.last, c.hits = f, c.hits+1
+	c.last, c.hits = s, c.hits+1
 }
 
-func (c *capturedFanout) snapshot() (authsvc.GitHubAccessTokenFanout, int) {
+func (c *capturedSignal) snapshot() (authsvc.GitHubTokenRotatedSignal, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.last, c.hits
@@ -81,7 +81,7 @@ type mintWire struct {
 	nodeClient authv1connect.AuthServiceClient // presents the node cert (mTLS)
 	noCert     authv1connect.AuthServiceClient // no client cert
 	authz      *capturedAuthz
-	fanout     *capturedFanout
+	signal     *capturedSignal
 }
 
 // newMintWire stands up the AS over an mTLS httptest server with the given (real or fake) GitHub
@@ -114,15 +114,15 @@ func newMintWire(t *testing.T, provider authsvc.GitHubProvider) *mintWire {
 
 	st := store.NewTestStore(t)
 	authz := &capturedAuthz{}
-	fanout := &capturedFanout{}
+	signal := &capturedSignal{}
 	as := authsvc.New(root.Cert, selfHosted,
 		authsvc.WithGitHubMinting(st, provider),
 		authsvc.WithGitHubMintAuthorizer(authsvc.GitHubMintAuthorizerFunc(func(_ context.Context, a authsvc.GitHubMintAuthorization) error {
 			authz.record(a)
 			return nil
 		})),
-		authsvc.WithGitHubAccessTokenFanout(authsvc.GitHubAccessTokenFanoutFunc(func(_ context.Context, f authsvc.GitHubAccessTokenFanout) error {
-			fanout.record(f)
+		authsvc.WithGitHubTokenRotatedNotifier(authsvc.GitHubTokenRotatedNotifierFunc(func(_ context.Context, s authsvc.GitHubTokenRotatedSignal) error {
+			signal.record(s)
 			return nil
 		})),
 	)
@@ -158,7 +158,7 @@ func newMintWire(t *testing.T, provider authsvc.GitHubProvider) *mintWire {
 		nodeClient: authv1connect.NewAuthServiceClient(mtlsHTTP, ts.URL),
 		noCert:     authv1connect.NewAuthServiceClient(ts.Client(), ts.URL),
 		authz:      authz,
-		fanout:     fanout,
+		signal:     signal,
 	}
 }
 
@@ -288,14 +288,14 @@ func TestGitHubE2E_Rotation(t *testing.T) {
 		t.Fatalf("authZ NodeID = %q hits=%d, want %q from the presented client cert", authz.NodeID, authzHits, e2eNodeID)
 	}
 
-	// CP-coordinated fanout (invariant c spirit): the AS fanned out the rotated ACCESS token; the
-	// fanout struct has no refresh-token field, and its access token is not the rotated refresh token.
-	fanout, fanoutHits := mw.fanout.snapshot()
-	if fanoutHits == 0 || fanout.SecretID != e2eSecretID || fanout.Version != 2 || fanout.AccessToken != resp.Msg.GetAccessToken() {
-		t.Fatalf("fanout = %+v hits=%d, want secret %q version 2 access=%q", fanout, fanoutHits, e2eSecretID, resp.Msg.GetAccessToken())
+	// CP-coordinated signal (invariant c spirit, sp-v40s.22.1): the AS emitted a token-free rotation
+	// signal; the signal struct has no token field at all (compile-time containment).
+	sig, sigHits := mw.signal.snapshot()
+	if sigHits == 0 || sig.SecretID != e2eSecretID || sig.Version != 2 {
+		t.Fatalf("signal = %+v hits=%d, want secret %q version 2", sig, sigHits, e2eSecretID)
 	}
-	if fanout.AccessToken == link.RefreshToken {
-		t.Fatalf("CONTAINMENT VIOLATION: fanout carried the refresh token, not the access token")
+	if sig.DeliveryID == "" {
+		t.Fatalf("signal delivery_id must be non-empty")
 	}
 
 	t.Logf("ROTATED: re-seed GITHUB_E2E_REFRESH_TOKEN=%s for the next run (single-use)", link.RefreshToken)

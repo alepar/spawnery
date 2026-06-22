@@ -2,9 +2,6 @@ package cp
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -12,7 +9,6 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/authsvc"
-	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
 )
 
@@ -54,212 +50,20 @@ func TestAuthorizeGitHubMintRPCConfirmsIndexedHostedNode(t *testing.T) {
 	}
 }
 
-func TestGitHubLinkTargetsReturnPublishedNodeKeys(t *testing.T) {
-	s, reg, _ := newTestServer(t)
-	reg.Add(&registry.Node{ID: "node-1", Sender: &capSender{}})
-	createActiveSpawn(t, s, "alice", "sp1", "node-1")
-	s.githubLinks.noteCPSecrets("sp1", []*cpv1.SealedSecret{{
-		SecretId:   "gh-main",
-		Sealed:     []byte("old-ciphertext"),
-		Type:       cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN,
-		Version:    11,
-		DeliveryId: "delivery-old",
-		Usages: []cpv1.SecretUsage{
-			cpv1.SecretUsage_SECRET_USAGE_NODE_STORAGE,
-			cpv1.SecretUsage_SECRET_USAGE_AGENT_RENDER,
-		},
-		MountNames: []string{"main"},
-		Render: &cpv1.SecretRenderSpec{
-			Profile: "gh-and-git-helper-v1",
-		},
-		GithubToken: &cpv1.GitHubTokenClearMetadata{
-			Host:                "github.com",
-			Login:               "alice",
-			AppClientId:         "Iv1.app",
-			AccessExpiresAtUnix: 1893420000,
-		},
-	}})
-	s.nodeKeys.put("node-1", []byte("signed-subkey"), []byte("cert-chain"))
-
-	targets, err := s.githubLinkTargets(context.Background(), "gh-main")
-	if err != nil {
-		t.Fatalf("targets: %v", err)
+// githubTokenRotateds returns all GitHubTokenRotatedSignal messages delivered by this sender.
+func (c *capSender) githubTokenRotateds() []*nodev1.GitHubTokenRotatedSignal {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []*nodev1.GitHubTokenRotatedSignal
+	for _, m := range c.sent {
+		if sig := m.GetGithubTokenRotated(); sig != nil {
+			out = append(out, sig)
+		}
 	}
-	if len(targets) != 1 {
-		t.Fatalf("targets len=%d want 1: %+v", len(targets), targets)
-	}
-	if targets[0].SpawnID != "sp1" || targets[0].NodeID != "node-1" || targets[0].Generation != 1 ||
-		string(targets[0].SignedSubkey) != "signed-subkey" || string(targets[0].NodeCertChain) != "cert-chain" {
-		t.Fatalf("target = %+v", targets[0])
-	}
-	if len(targets[0].SecretTemplates) != 1 {
-		t.Fatalf("secret templates = %+v, want 1", targets[0].SecretTemplates)
-	}
-	tmpl := targets[0].SecretTemplates[0]
-	if len(tmpl.GetSealed()) != 0 {
-		t.Fatalf("secret template leaked sealed ciphertext: %q", tmpl.GetSealed())
-	}
-	if tmpl.GetSecretId() != "gh-main" || tmpl.GetVersion() != 11 || tmpl.GetDeliveryId() != "delivery-old" ||
-		len(tmpl.GetUsages()) != 2 || tmpl.GetMountNames()[0] != "main" ||
-		tmpl.GetGithubToken().GetHost() != "github.com" ||
-		tmpl.GetGithubToken().GetAccessExpiresAtUnix() != 1893420000 {
-		t.Fatalf("secret template lost routing metadata: %+v", tmpl)
-	}
+	return out
 }
 
-func TestGitHubLinkTargetsRPCReturnsPublishedNodeKeys(t *testing.T) {
-	s, reg, _ := newTestServer(t)
-	reg.Add(&registry.Node{ID: "node-1", Sender: &capSender{}})
-	createActiveSpawn(t, s, "alice", "sp1", "node-1")
-	s.githubLinks.note("sp1", "gh-main")
-	s.nodeKeys.put("node-1", []byte("signed-subkey"), []byte("cert-chain"))
-
-	resp, err := s.GetGitHubLinkTargets(context.Background(), connect.NewRequest(&cpv1.GetGitHubLinkTargetsRequest{SecretId: "gh-main"}))
-	if err != nil {
-		t.Fatalf("GetGitHubLinkTargets RPC: %v", err)
-	}
-	targets := resp.Msg.GetTargets()
-	if len(targets) != 1 || targets[0].GetSpawnId() != "sp1" || targets[0].GetNodeId() != "node-1" ||
-		string(targets[0].GetSignedSubkey()) != "signed-subkey" || string(targets[0].GetNodeCertChain()) != "cert-chain" {
-		t.Fatalf("targets = %+v", targets)
-	}
-}
-
-func TestGitHubLinkTargetsIndexesResumeAndRecreateStartupSecrets(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		spawnID string
-		seed    func(*testing.T, *Server, string, string)
-		call    func(context.Context, *Server, string) error
-	}{
-		{
-			name:    "resume",
-			spawnID: "sp-gh-resume",
-			seed:    seedSuspendedSpawn,
-			call: func(ctx context.Context, s *Server, spawnID string) error {
-				_, err := s.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{
-					SpawnId:           spawnID,
-					AttachedSecretIds: []string{"gh-main"},
-				}))
-				return err
-			},
-		},
-		{
-			name:    "recreate",
-			spawnID: "sp-gh-recreate",
-			seed: func(t *testing.T, s *Server, spawnID, owner string) {
-				seedErroredSpawn(t, s, spawnID, owner)
-				addIntentStartupSecretArtifact(t, s, spawnID, "gh-main")
-			},
-			call: func(ctx context.Context, s *Server, spawnID string) error {
-				_, err := s.RecreateSpawn(ctx, connect.NewRequest(&cpv1.RecreateSpawnRequest{SpawnId: spawnID}))
-				return err
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, _, stopACK := intentTestServer(t)
-			defer stopACK()
-			createIntentCatalogSecret(t, s, "alice", "gh-main", cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT, "github/token", "GITHUB_TOKEN")
-			s.nodeKeys.put("n-intent", []byte("signed-subkey"), []byte("cert-chain"))
-			tc.seed(t, s, tc.spawnID, "alice")
-
-			sessionKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-			errCh := make(chan error, 1)
-			goSubmitIntentWithSecrets(context.Background(), s, tc.spawnID, "alice", sessionKey, []*cpv1.SealedSecret{intentThreadingCPSecret()}, errCh)
-
-			ownerCtx := auth.WithOwner(context.Background(), "alice")
-			if err := tc.call(ownerCtx, s, tc.spawnID); err != nil {
-				t.Fatalf("%s: %v", tc.name, err)
-			}
-			if submitErr := <-errCh; submitErr != nil {
-				t.Fatalf("SubmitIntent error: %v", submitErr)
-			}
-
-			resp, err := s.GetGitHubLinkTargets(context.Background(), connect.NewRequest(&cpv1.GetGitHubLinkTargetsRequest{SecretId: "gh-main"}))
-			if err != nil {
-				t.Fatalf("GetGitHubLinkTargets: %v", err)
-			}
-			targets := resp.Msg.GetTargets()
-			if len(targets) != 1 {
-				t.Fatalf("targets len=%d want 1: %+v", len(targets), targets)
-			}
-			target := targets[0]
-			if target.GetSpawnId() != tc.spawnID || target.GetNodeId() != "n-intent" || target.GetGeneration() != 2 ||
-				string(target.GetSignedSubkey()) != "signed-subkey" || string(target.GetNodeCertChain()) != "cert-chain" {
-				t.Fatalf("target = %+v", target)
-			}
-			templates := target.GetSecretTemplates()
-			if len(templates) != 1 || templates[0].GetSecretId() != "gh-main" ||
-				templates[0].GetType() != cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN || len(templates[0].GetSealed()) != 0 {
-				t.Fatalf("secret templates = %+v", templates)
-			}
-		})
-	}
-}
-
-func TestGitHubLinkTargetsSkipsDisconnectedAndSubkeylessSiblings(t *testing.T) {
-	s, reg, _ := newTestServer(t)
-	// node-1: connected + published subkey -> a valid target.
-	reg.Add(&registry.Node{ID: "node-1", Sender: &capSender{}})
-	createActiveSpawn(t, s, "alice", "sp1", "node-1")
-	s.githubLinks.note("sp1", "gh-main")
-	s.nodeKeys.put("node-1", []byte("signed-subkey"), []byte("cert-chain"))
-
-	// node-2: hosts a spawn on the link but is NOT connected (absent from registry),
-	// yet still has a stale cached subkey. Must be skipped, not abort the call.
-	createActiveSpawn(t, s, "alice", "sp2", "node-2")
-	s.githubLinks.note("sp2", "gh-main")
-	s.nodeKeys.put("node-2", []byte("stale-subkey"), []byte("stale-chain"))
-
-	// node-3: connected but never published a subkey. Must be skipped.
-	reg.Add(&registry.Node{ID: "node-3", Sender: &capSender{}})
-	createActiveSpawn(t, s, "alice", "sp3", "node-3")
-	s.githubLinks.note("sp3", "gh-main")
-
-	targets, err := s.githubLinkTargets(context.Background(), "gh-main")
-	if err != nil {
-		t.Fatalf("githubLinkTargets must not error on disconnected/subkeyless siblings: %v", err)
-	}
-	if len(targets) != 1 {
-		t.Fatalf("targets len=%d want 1 (only node-1): %+v", len(targets), targets)
-	}
-	if targets[0].SpawnID != "sp1" || targets[0].NodeID != "node-1" {
-		t.Fatalf("unexpected surviving target: %+v", targets[0])
-	}
-}
-
-func TestFanoutGitHubSealedAccessTokenSkipsDisconnectedSiblingAndDeliversToConnected(t *testing.T) {
-	s, reg, _ := newTestServer(t)
-	// node-1 connected (the requesting node), node-2 disconnected (absent from registry).
-	sender1 := &capSender{}
-	reg.Add(&registry.Node{ID: "node-1", Sender: sender1})
-	createActiveSpawn(t, s, "alice", "sp1", "node-1")
-	createActiveSpawn(t, s, "alice", "sp2", "node-2")
-	s.githubLinks.note("sp1", "gh-main")
-	s.githubLinks.note("sp2", "gh-main")
-
-	secret1 := &cpv1.SealedSecret{
-		SecretId: "gh-main", Type: cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN,
-		Version: 12, DeliveryId: "delivery-sp1-gh-main-v12", Sealed: []byte("sealed-for-node-1"),
-		Usages: []cpv1.SecretUsage{cpv1.SecretUsage_SECRET_USAGE_AGENT_RENDER},
-	}
-
-	// Deliveries cover ONLY sp1 (node-2 was skipped during sealing because it is disconnected).
-	err := s.fanoutGitHubSealedAccessToken(context.Background(), "gh-main", []GitHubSealedAccessTokenDelivery{
-		{SpawnID: "sp1", Generation: 1, Secrets: []*cpv1.SealedSecret{secret1}},
-	})
-	if err != nil {
-		t.Fatalf("fanout must succeed despite disconnected sibling sp2/node-2: %v", err)
-	}
-	got1 := sender1.secretDeliveries()
-	if len(got1) != 1 || got1[0].GetSpawnId() != "sp1" ||
-		string(got1[0].GetSecrets()[0].GetSealed()) != "sealed-for-node-1" {
-		t.Fatalf("requesting node did not receive its sealed token: %+v", got1)
-	}
-}
-
-func TestFanoutGitHubSealedAccessTokenRelaysOpaqueSecretsToIndexedLiveSpawns(t *testing.T) {
+func TestSignalGitHubTokenRotatedRelaysToIndexedLiveSpawns(t *testing.T) {
 	s, reg, _ := newTestServer(t)
 	sender1 := &capSender{}
 	sender2 := &capSender{}
@@ -270,70 +74,54 @@ func TestFanoutGitHubSealedAccessTokenRelaysOpaqueSecretsToIndexedLiveSpawns(t *
 	s.githubLinks.note("sp1", "gh-main")
 	s.githubLinks.note("sp2", "gh-main")
 
-	secret1 := &cpv1.SealedSecret{
-		SecretId:   "gh-main",
-		Type:       cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN,
-		Version:    12,
-		DeliveryId: "delivery-sp1-gh-main-v12",
-		Sealed:     []byte("sealed-for-node-1"),
-		Usages:     []cpv1.SecretUsage{cpv1.SecretUsage_SECRET_USAGE_AGENT_RENDER},
-	}
-	secret2 := &cpv1.SealedSecret{
-		SecretId:   "gh-main",
-		Type:       cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN,
-		Version:    12,
-		DeliveryId: "delivery-sp2-gh-main-v12",
-		Sealed:     []byte("sealed-for-node-2"),
-		Usages:     []cpv1.SecretUsage{cpv1.SecretUsage_SECRET_USAGE_AGENT_RENDER},
+	// node-3: disconnected — should be skipped without aborting the call.
+	createActiveSpawn(t, s, "alice", "sp3", "node-3")
+	s.githubLinks.note("sp3", "gh-main")
+
+	err := s.signalGitHubTokenRotated(context.Background(), "gh-main", 12, "github-access-gh-main-v12", 1893420000)
+	if err != nil {
+		t.Fatalf("signalGitHubTokenRotated: %v", err)
 	}
 
-	err := s.fanoutGitHubSealedAccessToken(context.Background(), "gh-main", []GitHubSealedAccessTokenDelivery{
-		{SpawnID: "sp1", Generation: 1, Secrets: []*cpv1.SealedSecret{secret1}},
-		{SpawnID: "sp2", Generation: 1, Secrets: []*cpv1.SealedSecret{secret2}},
-	})
-	if err != nil {
-		t.Fatalf("fanout: %v", err)
+	sigs1 := sender1.githubTokenRotateds()
+	sigs2 := sender2.githubTokenRotateds()
+	if len(sigs1) != 1 {
+		t.Fatalf("sender1 signals = %d, want 1: %+v", len(sigs1), sigs1)
 	}
-	got1 := sender1.secretDeliveries()
-	got2 := sender2.secretDeliveries()
-	if len(got1) != 1 || got1[0].GetSpawnId() != "sp1" || len(got1[0].GetSecrets()) != 1 {
-		t.Fatalf("sender1 deliveries = %+v", got1)
+	if len(sigs2) != 1 {
+		t.Fatalf("sender2 signals = %d, want 1: %+v", len(sigs2), sigs2)
 	}
-	if len(got2) != 1 || got2[0].GetSpawnId() != "sp2" || len(got2[0].GetSecrets()) != 1 {
-		t.Fatalf("sender2 deliveries = %+v", got2)
+	sig1 := sigs1[0]
+	if sig1.GetSpawnId() != "sp1" || sig1.GetSecretId() != "gh-main" ||
+		sig1.GetVersion() != 12 || sig1.GetDeliveryId() != "github-access-gh-main-v12" ||
+		sig1.GetAccessExpiresAtUnix() != 1893420000 {
+		t.Fatalf("sig1 = %+v", sig1)
 	}
-	if string(got1[0].GetSecrets()[0].GetSealed()) != "sealed-for-node-1" ||
-		string(got2[0].GetSecrets()[0].GetSealed()) != "sealed-for-node-2" {
-		t.Fatalf("sealed payloads not relayed opaquely: %q %q",
-			got1[0].GetSecrets()[0].GetSealed(), got2[0].GetSecrets()[0].GetSealed())
+	// Generation must be stamped from the live generation (1 for sp1).
+	if sig1.GetGeneration() != 1 {
+		t.Fatalf("sig1 generation = %d, want 1 (live)", sig1.GetGeneration())
 	}
-	if got1[0].GetSecrets()[0].GetType() != nodev1.SecretType_SECRET_TYPE_GITHUB_TOKEN {
-		t.Fatalf("secret type = %v", got1[0].GetSecrets()[0].GetType())
+	sig2 := sigs2[0]
+	if sig2.GetSpawnId() != "sp2" || sig2.GetGeneration() != 1 {
+		t.Fatalf("sig2 = %+v", sig2)
 	}
 }
 
-func TestFanoutGitHubSealedAccessTokenRPCRelaysOpaqueSecrets(t *testing.T) {
+func TestSignalGitHubTokenRotatedRPCRelaysSignal(t *testing.T) {
 	s, reg, _ := newTestServer(t)
 	sender := &capSender{}
 	reg.Add(&registry.Node{ID: "node-1", Sender: sender})
 	createActiveSpawn(t, s, "alice", "sp1", "node-1")
 	s.githubLinks.note("sp1", "gh-main")
 
-	_, err := s.FanoutGitHubSealedAccessToken(context.Background(), connect.NewRequest(&cpv1.FanoutGitHubSealedAccessTokenRequest{
-		SecretId: "gh-main",
-		Deliveries: []*cpv1.GitHubSealedAccessTokenDelivery{{
-			SpawnId: "sp1", Generation: 1,
-			Secrets: []*cpv1.SealedSecret{{
-				SecretId: "gh-main", Type: cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN,
-				Version: 12, DeliveryId: "delivery-sp1-gh-main-v12", Sealed: []byte("sealed"),
-			}},
-		}},
+	_, err := s.SignalGitHubTokenRotated(context.Background(), connect.NewRequest(&cpv1.SignalGitHubTokenRotatedRequest{
+		SecretId: "gh-main", Version: 12, DeliveryId: "github-access-gh-main-v12", AccessExpiresAtUnix: 1893420000,
 	}))
 	if err != nil {
-		t.Fatalf("FanoutGitHubSealedAccessToken RPC: %v", err)
+		t.Fatalf("SignalGitHubTokenRotated RPC: %v", err)
 	}
-	got := sender.secretDeliveries()
-	if len(got) != 1 || string(got[0].GetSecrets()[0].GetSealed()) != "sealed" {
-		t.Fatalf("deliveries = %+v", got)
+	sigs := sender.githubTokenRotateds()
+	if len(sigs) != 1 || sigs[0].GetSpawnId() != "sp1" || sigs[0].GetSecretId() != "gh-main" || sigs[0].GetVersion() != 12 {
+		t.Fatalf("signals = %+v", sigs)
 	}
 }

@@ -204,6 +204,30 @@ prior "task 1 = proto, task 2 = AS" order left master red at the task-1 merge). 
 
 ## Post-Implementation Notes
 
+**2026-06-22 — Changes vs. original design (epic sp-v40s.22, implemented; branch `feat/sp-v40s.22-fanout-signal`).**
+Implemented as specified across both phases; both per-task reviews (spec + quality) and a final
+whole-epic review passed, gates green (`make gen`, `go test -race ./...`, golangci-lint 0).
+Concrete deltas the implementation settled that the spec left open:
+- **Two RPCs collapsed into one.** With no sealing the AS no longer needs per-target data, so
+  `GetGitHubLinkTargets` + `FanoutGitHubSealedAccessToken` were replaced by a single
+  `SignalGitHubTokenRotated(secret_id, version, delivery_id, access_expires_at_unix)` (AS→CP).
+- **New CP→node carrier.** Added a `GitHubTokenRotatedSignal` message + `github_token_rotated`
+  variant (tag 21) on the `proto/node/v1` `CPMessage` oneof; the CP relays it per hosting spawn
+  with live generation over the existing Attach substrate.
+- **`internal/authsvc/github_fanout.go` survived** as a thin token-free notifier (kept the
+  CP-client seam) rather than being deleted.
+- **Version-gate feeder unchanged in code:** the node `Invalidate` advances the same
+  `(version, delivery_id)` fields with the same values the sealed delivery used, so the AS gate
+  (`github_mint.go`) matched without modification.
+- **Phase 2 force path needed a new `force_refresh` bool** on `proto/sidecar/v1` `GetTokenRequest`
+  — a large `min_remaining` alone is defeated by the node's 10s `minMintInterval` floor, so the
+  forced re-pull clears `st.token`/`st.lastMintAt` to pierce both the sidecar 5-min cache and the
+  node floor. No AS `force_refresh` (the AS already holds the rotated token).
+- **Bounded straggler self-heal (by design):** after a Phase 2 force re-pull a straggler caches the
+  new token but keeps its old `(version, delivery_id)`; its next proactive refresh re-presents the
+  stale tuple and takes the AS stale-older + re-signal path (at most one redundant mint) until a
+  signal lands and advances the pointer. Self-healing on reconnect; intended, not a defect.
+
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged
 from the assumptions above — append a dated note here, whether or not a formal debugging skill was
 used.*

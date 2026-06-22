@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -103,7 +104,7 @@ func (s *Service) MintGitHubAccessToken(ctx context.Context, req *connect.Reques
 			Version:              link.PendingVersion,
 			DeliveryID:           githubAccessDeliveryID(link.SecretID, link.PendingVersion),
 			UpdatedAt:            s.now().Unix(),
-		}, msg.GetRepositoryId())
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -117,18 +118,16 @@ func (s *Service) MintGitHubAccessToken(ctx context.Context, req *connect.Reques
 	// link's CURRENT tuple. The node renders whatever current access token we return.
 	if !initialRef && (link.Version != ref.GetVersion() || link.DeliveryID != ref.GetDeliveryId()) {
 		if ref.GetVersion() < link.Version && link.AccessToken != "" && link.AccessExpiresAtUnix > now.Add(githubMintRefreshLead).Unix() {
-			if s.githubTokenFanout != nil {
-				if err := s.githubTokenFanout.FanoutGitHubAccessToken(ctx, GitHubAccessTokenFanout{
+			if s.githubTokenSignal != nil {
+				// Best-effort re-signal: the node's cached version is stale; nudge it to invalidate and
+				// re-mint. A signal failure MUST NOT deny the requesting node its current token.
+				if err := s.githubTokenSignal.SignalGitHubTokenRotated(ctx, GitHubTokenRotatedSignal{
 					SecretID:            link.SecretID,
-					AccountID:           link.AccountID,
 					Version:             link.Version,
 					DeliveryID:          link.DeliveryID,
-					RepositoryID:        msg.GetRepositoryId(),
-					AccessToken:         link.AccessToken,
 					AccessExpiresAtUnix: link.AccessExpiresAtUnix,
-					TokenType:           tokenTypeOrBearer(link.TokenType),
 				}); err != nil {
-					return nil, connect.NewError(connect.CodeUnavailable, err)
+					log.Printf("github mint: best-effort re-signal for %s v%d failed: %v (continuing)", link.SecretID, link.Version, err)
 				}
 			}
 			return connect.NewResponse(&authv1.MintGitHubAccessTokenResponse{
@@ -193,7 +192,7 @@ func (s *Service) MintGitHubAccessToken(ctx context.Context, req *connect.Reques
 		Version:              nextVersion,
 		DeliveryID:           githubAccessDeliveryID(link.SecretID, nextVersion),
 		UpdatedAt:            now.Unix(),
-	}, msg.GetRepositoryId())
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -208,8 +207,8 @@ func relinkRequiredError(secretID string) error {
 }
 
 // commitGitHubRotation promotes a rotation to the live tuple (Rotate clears any pending stage) and
-// fans the new shared access token out to currently-hosting nodes (CP relays sealed bytes only).
-func (s *Service) commitGitHubRotation(ctx context.Context, secretID string, rot store.GitHubTokenRotation, repositoryID string) (store.GitHubLink, error) {
+// signals hosting nodes to lazy-invalidate their cached token (CP relays a token-free heads-up only).
+func (s *Service) commitGitHubRotation(ctx context.Context, secretID string, rot store.GitHubTokenRotation) (store.GitHubLink, error) {
 	rotated, err := s.githubMintStore.GitHubLinks().Rotate(ctx, secretID, rot)
 	if errors.Is(err, store.ErrNotFound) {
 		return store.GitHubLink{}, connect.NewError(connect.CodeNotFound, fmt.Errorf("github link not found"))
@@ -217,18 +216,15 @@ func (s *Service) commitGitHubRotation(ctx context.Context, secretID string, rot
 	if err != nil {
 		return store.GitHubLink{}, connect.NewError(connect.CodeInternal, err)
 	}
-	if s.githubTokenFanout != nil {
-		if err := s.githubTokenFanout.FanoutGitHubAccessToken(ctx, GitHubAccessTokenFanout{
+	if s.githubTokenSignal != nil {
+		// Best-effort signal: a signal failure MUST NOT deny the requesting node its rotated token.
+		if err := s.githubTokenSignal.SignalGitHubTokenRotated(ctx, GitHubTokenRotatedSignal{
 			SecretID:            rotated.SecretID,
-			AccountID:           rotated.AccountID,
 			Version:             rotated.Version,
 			DeliveryID:          rotated.DeliveryID,
-			RepositoryID:        repositoryID,
-			AccessToken:         rotated.AccessToken,
 			AccessExpiresAtUnix: rotated.AccessExpiresAtUnix,
-			TokenType:           tokenTypeOrBearer(rotated.TokenType),
 		}); err != nil {
-			return store.GitHubLink{}, connect.NewError(connect.CodeUnavailable, err)
+			log.Printf("github mint: best-effort rotation signal for %s v%d failed: %v (continuing)", rotated.SecretID, rotated.Version, err)
 		}
 	}
 	return rotated, nil

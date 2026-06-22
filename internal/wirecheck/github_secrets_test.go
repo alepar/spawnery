@@ -293,17 +293,30 @@ func TestA4SecretAttachmentProtoSurface(t *testing.T) {
 		t.Fatalf("GetPendingIntentResponse.Generation = %d want 7", resp.GetGeneration())
 	}
 
-	requireFieldNumber(t, &cpv1.GitHubLinkTarget{}, "secret_templates", 6)
-	target := &cpv1.GitHubLinkTarget{
-		SpawnId:         "sp1",
-		NodeId:          "node-1",
-		Generation:      3,
-		SignedSubkey:    []byte(`{"hpke_pub":"pub","node_id":"node-1"}`),
-		NodeCertChain:   []byte("cert-chain"),
-		SecretTemplates: []*cpv1.SealedSecret{{SecretId: "gh-main", Type: cpv1.SecretType_SECRET_TYPE_GITHUB_TOKEN}},
+	// SignalGitHubTokenRotated wire surface (sp-v40s.22.1): token-free AS→CP rotation heads-up.
+	requireFieldNumber(t, &cpv1.SignalGitHubTokenRotatedRequest{}, "secret_id", 1)
+	requireFieldNumber(t, &cpv1.SignalGitHubTokenRotatedRequest{}, "version", 2)
+	requireFieldNumber(t, &cpv1.SignalGitHubTokenRotatedRequest{}, "delivery_id", 3)
+	requireFieldNumber(t, &cpv1.SignalGitHubTokenRotatedRequest{}, "access_expires_at_unix", 4)
+	requireNoField(t, &cpv1.SignalGitHubTokenRotatedRequest{}, "access_token")
+
+	sigReq := &cpv1.SignalGitHubTokenRotatedRequest{
+		SecretId:            "gh-main",
+		Version:             12,
+		DeliveryId:          "github-access-gh-main-v12",
+		AccessExpiresAtUnix: 1893420000,
 	}
-	if len(target.GetSecretTemplates()) != 1 || target.GetSecretTemplates()[0].GetSecretId() != "gh-main" {
-		t.Fatalf("GitHubLinkTarget.SecretTemplates lost routing template: %+v", target.GetSecretTemplates())
+	sigBytes, err := proto.Marshal(sigReq)
+	if err != nil {
+		t.Fatalf("marshal SignalGitHubTokenRotatedRequest: %v", err)
+	}
+	var gotSig cpv1.SignalGitHubTokenRotatedRequest
+	if err := proto.Unmarshal(sigBytes, &gotSig); err != nil {
+		t.Fatalf("unmarshal SignalGitHubTokenRotatedRequest: %v", err)
+	}
+	if gotSig.GetSecretId() != "gh-main" || gotSig.GetVersion() != 12 ||
+		gotSig.GetDeliveryId() != "github-access-gh-main-v12" || gotSig.GetAccessExpiresAtUnix() != 1893420000 {
+		t.Fatalf("SignalGitHubTokenRotatedRequest round-trip lost fields: %+v", &gotSig)
 	}
 }
 

@@ -1,6 +1,7 @@
 package sidecar
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -56,6 +57,23 @@ func applyGitHubAuth(h http.Header, action ghAction, token string) {
 	}
 }
 
+// proxyErrResp builds a 502 Bad Gateway response with a plain-text diagnostic body.
+// The caller MUST return this as the second value from a DoFunc so goproxy streams it.
+func proxyErrResp(req *http.Request, body string) *http.Response {
+	resp := &http.Response{
+		StatusCode: http.StatusBadGateway,
+		Status:     "502 Bad Gateway",
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body + "\n")),
+		Request:    req,
+	}
+	resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	return resp
+}
+
 // newGitHubProxy builds a goproxy-based forward proxy that:
 //   - MITMs GitHub inject hosts (github.com, api.github.com, etc.) using per-spawn JIT leaf
 //     certs from cfg.CA and overwrites Authorization with the real token from cfg.Control;
@@ -100,7 +118,18 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 		}
 	}))
 
-	// OnRequest DoFunc: rewrite Authorization on the decrypted MITM leg.
+	// maxRetryBodyBytes is the maximum request body size that the proxy will buffer for a
+	// potential 401-retry replay. Requests with larger bodies are streamed once (not retried).
+	const maxRetryBodyBytes = 4 << 20
+
+	// OnRequest DoFunc: perform the upstream round-trip ourselves (short-circuiting goproxy's own
+	// RoundTrip) so we can inspect the response status and retry on 401 with a force-refreshed
+	// token. When DoFunc returns a non-nil *http.Response, goproxy skips its own round-trip and
+	// streams our response to the client — so we own the full request/response lifecycle here.
+	//
+	// NOTE: because we short-circuit, goproxy will NOT call RemoveProxyHeaders for us.
+	// Before each RoundTrip we MUST set req.RequestURI = "" (else stdlib errors "RequestURI can't
+	// be set in client requests") and strip hop-by-hop proxy headers.
 	proxy.OnRequest().DoFunc(func(req *http.Request, _ *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		host := req.Host
 		if host == "" {
@@ -108,36 +137,106 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 		}
 		action := classifyGitHubHost(host)
 		if action == actionTunnel {
-			// Not a MITM target — pass through (also covers non-GitHub hosts on plain HTTP).
+			// Not a MITM target — pass through (goproxy handles tunnel/plain-HTTP).
 			return req, nil
 		}
 
+		// --- initial token ---
 		tok, err := cfg.Control.Token(req.Context())
 		if err != nil {
-			body := "github proxy: GetToken failed"
+			diagBody := "github proxy: GetToken failed"
 			var ctrlErr *ControlTokenError
 			if errors.As(err, &ctrlErr) {
-				body = fmt.Sprintf("github proxy: GetToken %d: %s", ctrlErr.StatusCode, strings.TrimSpace(ctrlErr.Body))
+				diagBody = fmt.Sprintf("github proxy: GetToken %d: %s", ctrlErr.StatusCode, strings.TrimSpace(ctrlErr.Body))
 			}
-			slog.Warn("githubproxy: GetToken failed", "detail", body)
-			resp := &http.Response{
-				StatusCode: http.StatusBadGateway,
-				Status:     "502 Bad Gateway",
-				Proto:      "HTTP/1.1",
-				ProtoMajor: 1,
-				ProtoMinor: 1,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(body + "\n")),
-				Request:    req,
-			}
-			resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
-			return req, resp
+			slog.Warn("githubproxy: GetToken failed", "host", host, "action", action, "detail", diagBody)
+			return req, proxyErrResp(req, diagBody)
 		}
 
-		// Clone the request so we don't mutate the shared header map.
-		req2 := req.Clone(req.Context())
-		applyGitHubAuth(req2.Header, action, tok)
-		return req2, nil
+		// --- buffer request body for potential 401-retry replay ---
+		var bodyBytes []byte // non-nil iff body was fully buffered (retryable)
+		retryable := true
+		var bodyForSingleAttempt io.ReadCloser // used only when not retryable
+
+		if req.Body != nil && req.Body != http.NoBody {
+			data, readErr := io.ReadAll(io.LimitReader(req.Body, int64(maxRetryBodyBytes)+1))
+			if readErr != nil || int64(len(data)) > int64(maxRetryBodyBytes) {
+				// Body too large or unreadable — stream once, no retry.
+				retryable = false
+				bodyForSingleAttempt = io.NopCloser(io.MultiReader(bytes.NewReader(data), req.Body))
+			} else {
+				bodyBytes = data
+			}
+		}
+
+		// attempt performs one upstream round-trip: clone req, apply auth, strip proxy headers,
+		// set body, and call RoundTrip. The upstream transport is captured in the outer closure.
+		attempt := func(token string) (*http.Response, error) {
+			r2 := req.Clone(req.Context())
+			applyGitHubAuth(r2.Header, action, token)
+			// Mandatory: stdlib transport errors if RequestURI is non-empty on a client request.
+			r2.RequestURI = ""
+			// Strip hop-by-hop / proxy headers that goproxy's RemoveProxyHeaders would normally drop.
+			r2.Header.Del("Accept-Encoding")
+			r2.Header.Del("Proxy-Connection")
+			r2.Header.Del("Connection")
+			r2.Header.Del("Proxy-Authorization")
+			r2.Header.Del("Proxy-Authenticate")
+
+			if retryable {
+				if bodyBytes != nil {
+					r2.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+					r2.ContentLength = int64(len(bodyBytes))
+					r2.GetBody = func() (io.ReadCloser, error) {
+						return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+					}
+				} else {
+					r2.Body = nil
+					r2.ContentLength = 0
+				}
+			} else {
+				r2.Body = bodyForSingleAttempt
+				if req.ContentLength >= 0 {
+					r2.ContentLength = req.ContentLength // MultiReader yields exactly req.ContentLength bytes
+				} else {
+					r2.ContentLength = -1 // unknown: the body is a multi-reader stream
+				}
+			}
+
+			return upstream.RoundTrip(r2)
+		}
+
+		// --- first attempt ---
+		resp, err := attempt(tok)
+		if err != nil {
+			diagBody := "github proxy: upstream error: " + err.Error()
+			slog.Warn("githubproxy: upstream round-trip failed", "host", host, "action", action, "err", err)
+			return req, proxyErrResp(req, diagBody)
+		}
+
+		// --- 401 backstop: force a fresh token and replay exactly once ---
+		if resp.StatusCode == http.StatusUnauthorized && retryable {
+			// Drain and release the intermediate response before re-minting — must not leak
+			// the upstream connection. Only the final response body is left open for goproxy.
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close() //nolint:errcheck
+
+			tok2, ferr := cfg.Control.ForceToken(req.Context())
+			if ferr != nil {
+				slog.Warn("githubproxy: ForceToken failed during 401 retry", "host", host, "err", ferr)
+				return req, proxyErrResp(req, "github proxy: ForceToken failed: "+ferr.Error())
+			}
+
+			resp2, err2 := attempt(tok2)
+			if err2 != nil {
+				slog.Warn("githubproxy: upstream round-trip (retry) failed", "host", host, "err", err2)
+				return req, proxyErrResp(req, "github proxy: upstream retry error: "+err2.Error())
+			}
+			// Return the second response as-is: even another 401 (grant revoked) is passed through.
+			return req, resp2
+		}
+
+		return req, resp
 	})
 
 	return proxy
