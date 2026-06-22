@@ -448,11 +448,40 @@ func (s defaultGitHubRepoService) do(ctx context.Context, method, path, token st
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("github api %s %s: status %d: %s", method, path, resp.StatusCode, bytes.TrimSpace(b))
+		return fmt.Errorf("github api %s %s: status %d: %s%s", method, path, resp.StatusCode, bytes.TrimSpace(b), githubErrorDiag(resp.Header, token))
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// githubErrorDiag extracts GitHub's permission-diagnostic response headers so a failed call is
+// actionable instead of opaque. On a 403 "Resource not accessible by integration",
+// X-Accepted-GitHub-Permissions states exactly which App/token permission GitHub required (e.g.
+// "administration=write") — invaluable when the granted-installation permissions lag the App's
+// registered set. token-type is the non-secret 4-char prefix (ghu_=user-to-server,
+// ghs_=installation, gho_=oauth) — it never includes the secret. Returns "" when no diag is present.
+func githubErrorDiag(h http.Header, token string) string {
+	var parts []string
+	if v := h.Get("X-Accepted-GitHub-Permissions"); v != "" {
+		parts = append(parts, "accepted-permissions="+v)
+	}
+	if v := h.Get("X-Accepted-Oauth-Scopes"); v != "" {
+		parts = append(parts, "accepted-oauth-scopes="+v)
+	}
+	if v := h.Get("X-Oauth-Scopes"); v != "" {
+		parts = append(parts, "oauth-scopes="+v)
+	}
+	if v := h.Get("X-Github-Request-Id"); v != "" {
+		parts = append(parts, "request-id="+v)
+	}
+	if len(token) >= 4 {
+		parts = append(parts, "token-type="+token[:4])
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " [" + strings.Join(parts, " ") + "]"
 }
