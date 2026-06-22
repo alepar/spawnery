@@ -894,7 +894,12 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 		if provisionArts == nil {
 			provisionArts, _ = s.st.Spawns().GetArtifacts(provCtx, id)
 		}
-		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(provisionArts), secrets)
+		nodeArts, presignErr := s.nodeArtifactsForStart(provCtx, provisionArts)
+		if presignErr != nil {
+			provCh <- provisionResult{"", presignErr}
+			return
+		}
+		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, schedulerRootfsRestore(rootfs), nodeArts, secrets)
 		provCh <- provisionResult{n, e}
 	}()
 
@@ -1315,7 +1320,14 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	if arts == nil {
 		arts, _ = s.st.Spawns().GetArtifacts(ctx, req.Msg.SpawnId)
 	}
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, nil, storeToNodeArtifacts(arts), secrets)
+	nodeArts, presignErr := s.nodeArtifactsForStart(ctx, arts)
+	if presignErr != nil {
+		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", presignErr.Error()); serr != nil {
+			log.Printf("RecreateSpawn %s: SetError after presign failure also failed: %v", req.Msg.SpawnId, serr)
+		}
+		return nil, presignErr
+	}
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, nil, nodeArts, secrets)
 	if err != nil {
 		var step string
 		if st, ok := s.provisioning.get(req.Msg.SpawnId); ok {

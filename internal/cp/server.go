@@ -1226,6 +1226,16 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 			slog.Warn("CreateSpawn: manifest parse for artifacts (non-fatal)", "app", appID, "err", uerr)
 		}
 	}
+	// Reject client-supplied objectref: by-ref delivery is CP-assembly-only (sp-nrzf.3.14.5).
+	// Accepting an arbitrary object_key from an untrusted client would let them hand the CP a
+	// key to presign within the skills bucket.
+	for _, a := range req.Msg.Artifacts {
+		if a.GetObjectref() != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("artifact %q: client-supplied objectref is not permitted; by-ref delivery is CP-assembly-only", a.Id))
+		}
+	}
+
 	// Profile assembly (sp-nrzf.3.8 §8/§9): when a profile is selected, load + authorize it,
 	// assemble its non-secret entries into ArtifactSpecs, and fold them into the owner layer
 	// BEFORE the per-spawn request artifacts so precedence is app-manifest < profile < request.
@@ -1429,7 +1439,15 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 			slog.Warn("provisionSpawn: GetArtifacts non-fatal", "spawn", spawnID, "err", aerr)
 		}
 	}
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, storeToNodeArtifacts(arts), secrets)
+	nodeArts, presignErr := s.nodeArtifactsForStart(ctx, arts)
+	if presignErr != nil {
+		slog.Error("provisionSpawn: presign artifacts failed", "spawn", spawnID, "err", presignErr)
+		if serr := s.st.Spawns().SetError(ctx, spawnID, "", presignErr.Error()); serr != nil {
+			slog.Error("provisionSpawn: SetError after presign failure also failed", "spawn", spawnID, "err", serr)
+		}
+		return
+	}
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, nodeArts, secrets)
 	if err != nil {
 		slog.Error("provisionSpawn: Provision failed", "spawn", spawnID, "err", err)
 		var step string

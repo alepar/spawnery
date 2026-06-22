@@ -40,7 +40,7 @@ func TestSchemaDriftSqlite(t *testing.T) {
 	check("spawns", "id", "owner_id", "name", "app_id", "app_version", "app_ref", "pinned", "model", "image", "runnable_id", "mode", "status", "recovered", "created_at", "last_used_at", "suspended_at", "deleted_at", "status_seq", "claim_holder", "claim_lease_id", "claim_deadline", "fork_capture_deadline", "parent_spawn_id", "forked_at")
 	check("spawn_containers", "spawn_id", "generation", "node_id", "phase", "started_at", "ended_at")
 	check("spawn_mounts", "spawn_id", "name", "backend_uri", "credential_secret_id", "create_if_missing", "repository_id", "persist_marker")
-	check("spawn_artifacts", "spawn_id", "artifact_id", "inline", "content_type", "target_container", "dest_path", "mode", "sensitive", "env_var_name")
+	check("spawn_artifacts", "spawn_id", "artifact_id", "inline", "content_type", "target_container", "dest_path", "mode", "sensitive", "env_var_name", "object_key", "object_sha256")
 	check("migration_transfer_sets", "id", "kind", "spawn_id", "source_spawn_id", "fork_spawn_id", "source_generation", "target_generation", "source_node_id", "target_node_id", "base_image_digest", "mount_manifest_pins", "rootfs_artifact_pins", "transfer_key_ciphertext_metadata", "transfer_key_status", "status", "created_at", "updated_at")
 }
 

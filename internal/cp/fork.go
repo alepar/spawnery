@@ -271,8 +271,12 @@ func (s *Server) startFork(ctx context.Context, owner, sourceID string, fork sto
 		secrets = submission.Secrets
 	}
 	rootfs := &rootfsRestorePins{SourceGeneration: targetGeneration, Pins: rootfsPins, LocalOnly: rootfsLocalOnly}
+	nodeArts, presignErr := s.nodeArtifactsForStart(ctx, artifacts)
+	if presignErr != nil {
+		return "", presignErr
+	}
 	return s.sched.Provision(ctx, fork.ID, fork.AppRef, fork.Model, fork.Name, fork.AppID, fork.RunnableID, fork.Mode,
-		targetGeneration, placement, env, storeToNodeMounts(mounts), fork.BaseImageDigest, schedulerRootfsRestore(rootfs), storeToNodeArtifacts(artifacts), secrets)
+		targetGeneration, placement, env, storeToNodeMounts(mounts), fork.BaseImageDigest, schedulerRootfsRestore(rootfs), nodeArts, secrets)
 }
 
 func (s *Server) ForkSpawn(ctx context.Context, req *connect.Request[cpv1.ForkSpawnRequest]) (*connect.Response[cpv1.ForkSpawnResponse], error) {

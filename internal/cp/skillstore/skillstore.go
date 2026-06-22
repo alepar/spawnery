@@ -108,6 +108,13 @@ func New(cfg Config) (SkillStore, error) {
 }
 
 func (s *garageSkillStore) objectKey(sha256hex string) string {
+	return ObjectKey(sha256hex)
+}
+
+// ObjectKey returns the Garage object key for the given sha256hex.
+// Use this wherever a key must be constructed outside the skillstore package
+// to keep the format consistent (and avoid drift with the internal objectKey method).
+func ObjectKey(sha256hex string) string {
 	return objectPrefix + sha256hex + ".tar.zst"
 }
 

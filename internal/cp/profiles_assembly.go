@@ -15,13 +15,17 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/internal/agentinstall"
 	"spawnery/internal/agentinstall/spec"
+	"spawnery/internal/cp/skillstore"
 	"spawnery/internal/cp/store"
 )
 
 // resolvedEntry pairs a profile entry with its resolved content bytes.
+// For URL-ingested skills (by-ref delivery), sha256 is the hex sha256 of the canonical
+// plain tar and content is nil. For inline skills, sha256 is empty and content holds bytes.
 type resolvedEntry struct {
 	entry   store.ProfileEntry
 	content []byte
+	sha256  string // non-empty => by-ref skill (catalog entry with SHA256 provenance)
 }
 
 // assembleProfileArtifacts resolves a profile's non-secret entries into wire ArtifactSpecs:
@@ -40,10 +44,23 @@ func (s *Server) assembleProfileArtifacts(ctx context.Context, _ store.Profile, 
 		targetNames[name] = true
 	}
 
-	// Resolve content per entry.
+	// Resolve content per entry and collect skill dir names for duplicate detection.
 	items := make([]resolvedEntry, 0, len(entries))
+	skillDirNames := make(map[string]bool)
 	for _, entry := range entries {
+		// Duplicate skill directory name check (sp-nrzf.3.14.5 §4.10).
+		// The entry.Name becomes ~/.claude/skills/<Name>/ on disk; two skills sharing a name
+		// in one profile would silently overwrite/merge at install.
+		if entry.Kind == store.ProfileEntrySkill {
+			if skillDirNames[entry.Name] {
+				return nil, connect.NewError(connect.CodeInvalidArgument,
+					fmt.Errorf("profile has duplicate skill directory name %q", entry.Name))
+			}
+			skillDirNames[entry.Name] = true
+		}
+
 		var content []byte
+		var sha256 string
 		switch entry.SourceKind {
 		case store.ProfileSourceCatalog:
 			ce, err := s.st.CustomizationCatalog().Get(ctx, entry.CatalogID)
@@ -54,14 +71,20 @@ func (s *Server) assembleProfileArtifacts(ctx context.Context, _ store.Profile, 
 				}
 				return nil, connect.NewError(connect.CodeInternal, err)
 			}
-			content = ce.Content
+			// URL-ingested skills carry SHA256 provenance (sp-nrzf.3.14.4); Content is nil.
+			// Inline catalog entries carry Content; SHA256 is nil.
+			if ce.SHA256 != nil && *ce.SHA256 != "" {
+				sha256 = *ce.SHA256
+			} else {
+				content = ce.Content
+			}
 		case store.ProfileSourceCustom:
 			content = entry.CustomInline
 		default:
 			return nil, connect.NewError(connect.CodeInternal,
 				fmt.Errorf("entry %q: unknown source kind %q", entry.Name, entry.SourceKind))
 		}
-		items = append(items, resolvedEntry{entry: entry, content: content})
+		items = append(items, resolvedEntry{entry: entry, content: content, sha256: sha256})
 	}
 
 	manifest, payloadSpecs, err := buildManifestAndPayloads(items, targetNames)
@@ -121,19 +144,36 @@ func buildManifestAndPayloads(items []resolvedEntry, targetNames map[string]bool
 
 		switch entry.Kind {
 		case store.ProfileEntrySkill:
-			if err := validateSkillTar(content, entry.Name); err != nil {
-				return spec.Manifest{}, nil, err
-			}
 			payloadPath := "payloads/" + entry.EntryID
 			a.Skill = &spec.SkillPayload{Dir: payloadPath}
 			a.Payload = payloadPath
-			payloadSpecs = append(payloadSpecs, &cpv1.ArtifactSpec{
-				Id:              entry.EntryID,
-				Inline:          content,
-				ContentType:     cpv1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_TAR,
-				TargetContainer: cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT,
-				DestPath:        payloadPath,
-			})
+			if item.sha256 != "" {
+				// By-ref delivery path: URL-ingested skill stored in Garage (sp-nrzf.3.14.5).
+				// Skip validateSkillTar — validation was done at ingest time.
+				// PresignedUrl is left empty here; the CP fills it at StartSpawn via presignNodeArtifacts.
+				payloadSpecs = append(payloadSpecs, &cpv1.ArtifactSpec{
+					Id:              entry.EntryID,
+					ContentType:     cpv1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_TAR,
+					TargetContainer: cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT,
+					DestPath:        payloadPath,
+					Objectref: &cpv1.ObjectRef{
+						ObjectKey: skillstore.ObjectKey(item.sha256),
+						Sha256:    item.sha256,
+					},
+				})
+			} else {
+				// Inline delivery path: legacy catalog skill with Content bytes, or custom inline.
+				if err := validateSkillTar(content, entry.Name); err != nil {
+					return spec.Manifest{}, nil, err
+				}
+				payloadSpecs = append(payloadSpecs, &cpv1.ArtifactSpec{
+					Id:              entry.EntryID,
+					Inline:          content,
+					ContentType:     cpv1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_TAR,
+					TargetContainer: cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT,
+					DestPath:        payloadPath,
+				})
+			}
 
 		case store.ProfileEntryMCP:
 			var payload spec.MCPPayload
