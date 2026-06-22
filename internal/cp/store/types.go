@@ -120,6 +120,10 @@ type Spawn struct {
 	ForkCaptureDeadline *int64  `bun:"fork_capture_deadline"`
 	ParentSpawnID       *string `bun:"parent_spawn_id"`
 	ForkedAt            *int64  `bun:"forked_at"`
+	// ErrorStep/ErrorDetail persist the terminal provisioning failure (sp-m859.3): the failing
+	// milestone key and the full (truncated) node error. Empty for non-errored / pre-feature rows.
+	ErrorStep   string `bun:"error_step,notnull"`
+	ErrorDetail string `bun:"error_detail,notnull"`
 }
 
 // Container is the running episode. spawn:container = 1-to-0..1 (uniq_live_container on ended_at IS NULL).

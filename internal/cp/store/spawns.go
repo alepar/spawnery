@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/uptrace/bun"
 )
@@ -364,10 +365,17 @@ func (r *spawnRepo) RevertSuspended(ctx context.Context, id string, gen int64) e
 	return r.endLiveContainer(ctx, id, PhaseStopped, ts)
 }
 
-func (r *spawnRepo) SetError(ctx context.Context, id string) error {
+const maxErrorDetailBytes = 8 << 10 // 8 KiB
+
+func (r *spawnRepo) SetError(ctx context.Context, id, errorStep, errorDetail string) error {
+	if len(errorDetail) > maxErrorDetailBytes {
+		errorDetail = strings.ToValidUTF8(errorDetail[:maxErrorDetailBytes], "")
+	}
 	// Includes Resuming (sp-u53.7.5: failed resume can bail from Resuming status).
 	if err := r.guardStatus(ctx, id, []Status{Starting, Active, Suspending, Resuming, Unreachable}, func(q *bun.UpdateQuery) *bun.UpdateQuery {
-		return q.Set("status = ?", Errored)
+		return q.Set("status = ?", Errored).
+			Set("error_step = ?", errorStep).
+			Set("error_detail = ?", errorDetail)
 	}); err != nil {
 		return err
 	}

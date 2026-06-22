@@ -259,6 +259,45 @@ func (w *resumeWaiters) lastProgress(spawnID string) (phase, detail string) {
 	return phase, detail
 }
 
+// provisioningProgress holds the latest milestone progress for in-flight STARTING spawns (sp-m859.3).
+// Ephemeral and in-memory: lost on CP restart by design (the node will re-emit milestones on reconnect
+// once Task B lands). Keyed by spawnID. Symmetric in spirit to suspendWaiters/resumeWaiters but simpler:
+// no channel, no generation fence — just a last-known step snapshot updated by the status handler.
+type provisioningProgress struct {
+	mu sync.Mutex
+	m  map[string]provisionStep
+}
+
+type provisionStep struct {
+	index uint32
+	total uint32
+	key   string
+	label string
+}
+
+func newProvisioningProgress() *provisioningProgress {
+	return &provisioningProgress{m: map[string]provisionStep{}}
+}
+
+func (p *provisioningProgress) set(spawnID string, st provisionStep) {
+	p.mu.Lock()
+	p.m[spawnID] = st
+	p.mu.Unlock()
+}
+
+func (p *provisioningProgress) get(spawnID string) (provisionStep, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st, ok := p.m[spawnID]
+	return st, ok
+}
+
+func (p *provisioningProgress) clear(spawnID string) {
+	p.mu.Lock()
+	delete(p.m, spawnID)
+	p.mu.Unlock()
+}
+
 // maxSpawnNameRunes caps a spawn display name (rune count). Shared by RenameSpawn (and any future
 // name validation).
 const maxSpawnNameRunes = 80
@@ -473,7 +512,7 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 			// reconcileLateSuspend will flip Errored→Suspended if the node eventually finishes (sp-iuo1).
 			persistAccumulatedMarkers("stall")
 			s.rt.Drop(id)
-			if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+			if serr := s.st.Spawns().SetError(storeCtx, id, "", ""); serr != nil {
 				log.Printf("suspendLocked %s: SetError after stall also failed: %v", id, serr)
 			}
 			return nil, connect.NewError(connect.CodeDeadlineExceeded,
@@ -494,7 +533,7 @@ func (s *Server) suspendLocked(ctx context.Context, owner, id string, captureRoo
 			default:
 			}
 			s.rt.Drop(id)
-			if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+			if serr := s.st.Spawns().SetError(storeCtx, id, "", ""); serr != nil {
 				log.Printf("suspendLocked %s: SetError after suspend timeout also failed: %v", id, serr)
 			}
 			return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node suspend"))
@@ -541,7 +580,7 @@ func (s *Server) handleSuspendReply(storeCtx context.Context, owner, id string, 
 	s.rt.Drop(id)
 	if err := s.st.Spawns().SetSuspended(storeCtx, id, gen); err != nil {
 		// Pod torn down but couldn't record 'suspended'. Compensate to terminal 'error'.
-		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+		if serr := s.st.Spawns().SetError(storeCtx, id, "", ""); serr != nil {
 			log.Printf("suspendLocked %s: SetError after SetSuspended failure also failed: %v", id, serr)
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -930,7 +969,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 func (s *Server) failResume(ctx context.Context, id string, gen int64, revert bool, stage string) {
 	storeCtx := context.WithoutCancel(ctx)
 	if !revert {
-		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+		if serr := s.st.Spawns().SetError(storeCtx, id, "", ""); serr != nil {
 			log.Printf("resumeLocked %s: SetError after %s failure also failed: %v", id, stage, serr)
 		}
 		return
@@ -940,7 +979,7 @@ func (s *Server) failResume(ctx context.Context, id string, gen int64, revert bo
 	if rerr := s.st.Spawns().RevertSuspended(storeCtx, id, gen); rerr != nil {
 		// Couldn't roll back to suspended — fall back to 'error' (still a defined, recreate-able state).
 		log.Printf("MigrateSpawn %s: RevertSuspended after %s failure failed: %v; falling back to error", id, stage, rerr)
-		if serr := s.st.Spawns().SetError(storeCtx, id); serr != nil {
+		if serr := s.st.Spawns().SetError(storeCtx, id, "", ""); serr != nil {
 			log.Printf("MigrateSpawn %s: SetError fallback also failed: %v", id, serr)
 		}
 	}
@@ -1185,7 +1224,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	var secrets []*nodev1.SealedSecret
 	mounts, mountsErr := s.st.Spawns().GetMounts(ctx, req.Msg.SpawnId)
 	if mountsErr != nil {
-		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after GetMounts failure also failed: %v", req.Msg.SpawnId, serr)
 		}
 		return nil, connect.NewError(connect.CodeInternal, mountsErr)
@@ -1196,27 +1235,27 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 		var aerr error
 		arts, aerr = s.st.Spawns().GetArtifacts(ctx, req.Msg.SpawnId)
 		if aerr != nil {
-			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after GetArtifacts failure also failed: %v", req.Msg.SpawnId, serr)
 			}
 			return nil, connect.NewError(connect.CodeInternal, aerr)
 		}
 		requiredSecretIDs = startupSecretIDsForSpawn(arts, mounts)
 		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
-			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after startup secret catalog validation failure also failed: %v", req.Msg.SpawnId, serr)
 			}
 			return nil, err
 		}
 		if err := s.validateGitHubMountCredentialType(ctx, owner, mounts); err != nil {
-			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after github mount credential type validation failure also failed: %v", req.Msg.SpawnId, serr)
 			}
 			return nil, err
 		}
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
-			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after PickNodeID failure also failed: %v", req.Msg.SpawnId, serr)
 			}
 			return nil, pickErr
@@ -1226,19 +1265,19 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 		defer s.pendingIntents.cleanup(req.Msg.SpawnId)
 		submission, awaitErr := s.pendingIntents.await(ctx, ch)
 		if awaitErr != nil {
-			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after await failure also failed: %v", req.Msg.SpawnId, serr)
 			}
 			return nil, connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("await SignedIntent: %w", awaitErr))
 		}
 		if err := validateSubmittedStartupSecrets(requiredSecretIDs, submission.Secrets); err != nil {
-			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after startup secret validation failure also failed: %v", req.Msg.SpawnId, serr)
 			}
 			return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 		}
 		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
-			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after startup secret catalog recheck failure also failed: %v", req.Msg.SpawnId, serr)
 			}
 			return nil, err
@@ -1251,7 +1290,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 		// Provision/StartSpawn window (before the node acks ACTIVE), so both the index entry and the
 		// container node_id must be set now. No-op if the spawn has no gh: mint mount.
 		if err := s.prepareGitHubMintProvision(ctx, req.Msg.SpawnId, uint64(gen), targetNodeID, mounts); err != nil {
-			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
 				log.Printf("RecreateSpawn %s: SetError after prepare github mint provision also failed: %v", req.Msg.SpawnId, serr)
 			}
 			return nil, connect.NewError(connect.CodeInternal, err)
@@ -1263,7 +1302,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	}
 	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, nil, storeToNodeArtifacts(arts), secrets)
 	if err != nil {
-		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
 		}
 		return nil, err
@@ -1271,7 +1310,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	if err := s.st.Spawns().SetActive(ctx, req.Msg.SpawnId, nodeID, gen); err != nil {
 		s.rt.StopOnNode(req.Msg.SpawnId)
 		s.rt.Drop(req.Msg.SpawnId)
-		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId); serr != nil {
+		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after SetActive failure also failed: %v", req.Msg.SpawnId, serr)
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -1306,11 +1345,17 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 		// Populate live transition phase/detail for Suspending/Resuming spawns (sp-u53.7.2).
 		// These come from the in-flight waiters and are not persisted — empty on CP restart.
 		var transPhase, transDetail string
+		var provStep, provTotal uint32
+		var provLabel string
 		switch sp.Status {
 		case store.Suspending:
 			transPhase, transDetail = s.suspends.lastProgress(sp.ID)
 		case store.Resuming:
 			transPhase, transDetail = s.resumes.lastProgress(sp.ID)
+		case store.Starting:
+			if st, ok := s.provisioning.get(sp.ID); ok {
+				provStep, provTotal, provLabel = st.index, st.total, st.label
+			}
 		}
 		out[i] = &cpv1.SpawnSummary{
 			SpawnId: sp.ID, AppId: sp.AppID, AppVersion: sp.AppVersion, Model: sp.Model,
@@ -1318,6 +1363,8 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 			Name: sp.Name, Mode: sp.Mode, ModelApplied: sp.ModelApplied,
 			Generation: gen, JournalKeyDeliveryPending: s.deliveryPending.isPending(sp.ID),
 			TransitionPhase: transPhase, TransitionDetail: transDetail,
+			ProvisionStep: provStep, ProvisionTotal: provTotal, ProvisionStepLabel: provLabel,
+			ErrorStep: sp.ErrorStep, ErrorDetail: sp.ErrorDetail,
 		}
 		if sp.ParentSpawnID != nil {
 			out[i].ParentSpawnId = *sp.ParentSpawnID

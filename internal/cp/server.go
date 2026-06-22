@@ -72,6 +72,10 @@ type Server struct {
 	resumeTimeout     time.Duration  // generous absolute backstop for resume; overridable in tests
 	resumeStallWindow time.Duration  // per-transition stall window (operative bound); overridable in tests
 
+	// provisioning tracks live milestone progress for STARTING spawns (sp-m859.3). Ephemeral:
+	// lost on CP restart. Updated by the node status handler; read by ListSpawns + provisionSpawn.
+	provisioning *provisioningProgress
+
 	// upgradeWaiters correlates UpgradeToOwnerSealed requests with SealJournalKeyToOwnerResponse
 	// messages from the node (sp-8dkp §4). Keyed by per-request request_id.
 	upgradeWaiters *upgradeWaiters
@@ -201,10 +205,11 @@ var _ cpv1connect.SpawnServiceHandler = (*Server)(nil)
 func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Scheduler, st store.Store, tel telemetry.Sink) *Server {
 	s := &Server{reg: reg, rt: rt, sched: sched, st: st, tel: tel, locks: lock.New(),
 		shutdownCh: make(chan struct{}),
-		cpID: uuid.NewString(), claimTTL: defaultClaimTTL,
+		cpID:       uuid.NewString(), claimTTL: defaultClaimTTL,
 		models: newModelWaiters(), setModelTimeout: defaultSetModelPushTimeout,
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout, suspendStallWindow: defaultSuspendStallWindow,
 		resumes: newResumeWaiters(), resumeTimeout: defaultResumeTimeout, resumeStallWindow: defaultResumeStallWindow,
+		provisioning:      newProvisioningProgress(),
 		upgradeWaiters:    newUpgradeWaiters(),
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
@@ -487,8 +492,21 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			}
 			s.reconcileInventory(ctx, nodeID, sender, m.Heartbeat.Running)
 		case *nodev1.NodeMessage_Status:
+			// Ephemeral provisioning milestone progress (sp-m859.3). Update BEFORE OnStatus so a
+			// Provision goroutine unblocked by OnStatus's channel send observes the latest step.
+			// step_total>0 gates real milestone events so a plain STARTING/ERROR doesn't clobber.
+			if m.Status.StepTotal > 0 &&
+				(m.Status.Phase == nodev1.SpawnPhase_STARTING || m.Status.Phase == nodev1.SpawnPhase_ERROR) {
+				s.provisioning.set(m.Status.SpawnId, provisionStep{
+					index: m.Status.StepIndex,
+					total: m.Status.StepTotal,
+					key:   m.Status.StepKey,
+					label: m.Status.StepLabel,
+				})
+			}
 			s.sched.OnStatus(m.Status.SpawnId, m.Status.Phase, m.Status.Detail)
 			if m.Status.Phase == nodev1.SpawnPhase_ACTIVE {
+				s.provisioning.clear(m.Status.SpawnId)
 				var owner string
 				if sp, err := s.st.Spawns().Get(ctx, m.Status.SpawnId); err == nil {
 					owner = sp.OwnerID
@@ -1296,6 +1314,7 @@ func (s *Server) CreateSpawn(ctx context.Context, req *connect.Request[cpv1.Crea
 func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, model string, placement registry.Placement) {
 	unlock := s.locks.Lock(spawnID)
 	defer unlock()
+	defer s.provisioning.clear(spawnID)
 	sp, err := s.st.Spawns().Get(ctx, spawnID)
 	if err != nil || sp.Status != store.Starting {
 		return // stopped/deleted in the lock gap, or already advanced
@@ -1304,7 +1323,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 	mounts, merr := s.st.Spawns().GetMounts(ctx, spawnID)
 	if merr != nil {
 		slog.Error("provisionSpawn: GetMounts failed", "spawn", spawnID, "err", merr)
-		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+		if serr := s.st.Spawns().SetError(ctx, spawnID, "", merr.Error()); serr != nil {
 			slog.Error("provisionSpawn: SetError after GetMounts failure also failed", "spawn", spawnID, "err", serr)
 		}
 		return
@@ -1321,7 +1340,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		arts, aerr = s.st.Spawns().GetArtifacts(ctx, spawnID)
 		if aerr != nil {
 			slog.Error("provisionSpawn: GetArtifacts failed", "spawn", spawnID, "err", aerr)
-			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, spawnID, "", aerr.Error()); serr != nil {
 				slog.Error("provisionSpawn: SetError after GetArtifacts failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
@@ -1329,14 +1348,14 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		requiredSecretIDs = startupSecretIDsForSpawn(arts, mounts)
 		if err := s.ensureStartupSecretsExist(ctx, ownerID, requiredSecretIDs); err != nil {
 			slog.Error("provisionSpawn: validate startup secret catalog failed", "spawn", spawnID, "err", err)
-			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, spawnID, "", err.Error()); serr != nil {
 				slog.Error("provisionSpawn: SetError after startup secret catalog validation failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
 		}
 		if err := s.validateGitHubMountCredentialType(ctx, ownerID, mounts); err != nil {
 			slog.Error("provisionSpawn: validate github mount credential type failed", "spawn", spawnID, "err", err)
-			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, spawnID, "", err.Error()); serr != nil {
 				slog.Error("provisionSpawn: SetError after github mount credential type validation failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
@@ -1345,7 +1364,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
 			slog.Error("provisionSpawn: PickNodeID failed", "spawn", spawnID, "err", pickErr)
-			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, spawnID, "", pickErr.Error()); serr != nil {
 				slog.Error("provisionSpawn: SetError after PickNodeID failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
@@ -1357,21 +1376,21 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		err = awaitErr
 		if err != nil {
 			slog.Error("provisionSpawn: await SignedIntent failed", "spawn", spawnID, "err", err)
-			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, spawnID, "", err.Error()); serr != nil {
 				slog.Error("provisionSpawn: SetError after await failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
 		}
 		if err := validateSubmittedStartupSecrets(requiredSecretIDs, submission.Secrets); err != nil {
 			slog.Error("provisionSpawn: validate startup secrets failed", "spawn", spawnID, "err", err)
-			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, spawnID, "", err.Error()); serr != nil {
 				slog.Error("provisionSpawn: SetError after startup secret validation failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
 		}
 		if err := s.ensureStartupSecretsExist(ctx, ownerID, requiredSecretIDs); err != nil {
 			slog.Error("provisionSpawn: recheck startup secret catalog failed", "spawn", spawnID, "err", err)
-			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, spawnID, "", err.Error()); serr != nil {
 				slog.Error("provisionSpawn: SetError after startup secret catalog recheck failure also failed", "spawn", spawnID, "err", serr)
 			}
 			return
@@ -1386,7 +1405,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		// container node_id must be set now. No-op if the spawn has no gh: mint mount.
 		if err := s.prepareGitHubMintProvision(ctx, spawnID, 1, targetNodeID, mounts); err != nil {
 			slog.Error("provisionSpawn: prepare github mint provision failed", "spawn", spawnID, "err", err)
-			if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+			if serr := s.st.Spawns().SetError(ctx, spawnID, "", err.Error()); serr != nil {
 				slog.Error("provisionSpawn: SetError after prepare github mint provision also failed", "spawn", spawnID, "err", serr)
 			}
 			return
@@ -1405,7 +1424,11 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, storeToNodeArtifacts(arts), secrets)
 	if err != nil {
 		slog.Error("provisionSpawn: Provision failed", "spawn", spawnID, "err", err)
-		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+		var step string
+		if st, ok := s.provisioning.get(spawnID); ok {
+			step = st.key
+		}
+		if serr := s.st.Spawns().SetError(ctx, spawnID, step, err.Error()); serr != nil {
 			slog.Error("provisionSpawn: SetError after provision failure also failed", "spawn", spawnID, "err", serr)
 		}
 		return
@@ -1413,7 +1436,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 	if err := s.st.Spawns().SetActive(ctx, spawnID, nodeID, 1); err != nil {
 		s.rt.StopOnNode(spawnID)
 		s.rt.Drop(spawnID)
-		if serr := s.st.Spawns().SetError(ctx, spawnID); serr != nil {
+		if serr := s.st.Spawns().SetError(ctx, spawnID, "", ""); serr != nil {
 			slog.Error("provisionSpawn: SetError after SetActive failure also failed", "spawn", spawnID, "err", serr)
 		}
 		return

@@ -218,7 +218,18 @@ message Heartbeat   { uint32 active_spawns = 1; uint32 free_slots = 2; uint32 cp
 // base_image_digest (field 5): the content-addressable base-image digest resolved by the node
 // at create time (spec §4). Non-empty only when phase=ACTIVE on the initial create, so the CP
 // can record it for cross-node resume. Empty on phase transitions that have no new digest.
-message SpawnStatus { string spawn_id = 1; SpawnPhase phase = 2; string detail = 3; uint64 generation = 4; string base_image_digest = 5; }
+message SpawnStatus {
+  string spawn_id = 1;
+  SpawnPhase phase = 2;
+  string detail = 3;
+  uint64 generation = 4;
+  string base_image_digest = 5;
+  // Provisioning milestone progress (sp-m859.3). step_total>0 marks a real milestone event.
+  uint32 step_index = 6;
+  uint32 step_total = 7;
+  string step_key   = 8;  // milestone key (e.g. "create-pod"); on ERROR = the failing step
+  string step_label = 9;
+}
 // auth (field 20): the client's signed intent + aud=node access token (A4). The node verifies
 // the full chain: AS sig on token -> aud=node -> owner match -> SPKI/cnf match -> intent sig
 // -> field-by-field correspondence -> freshness -> jti uniqueness. In verify-and-log mode

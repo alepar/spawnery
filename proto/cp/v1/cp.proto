@@ -183,6 +183,13 @@ message SpawnSummary {
   string transition_detail = 14;
   string parent_spawn_id = 15; // source spawn id when this row was created by ForkSpawn
   int64  forked_at       = 16; // unix seconds when the fork row was minted
+  // Live provisioning progress (ephemeral, in-memory; empty unless status=STARTING). sp-m859.3.
+  uint32 provision_step       = 17;
+  uint32 provision_total      = 18;
+  string provision_step_label = 19;
+  // Persisted terminal failure (survives CP restart; non-empty only for ERROR spawns). sp-m859.3.
+  string error_step   = 20;
+  string error_detail = 21;
 }
 // Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
 message ListSpawnsRequest  {}

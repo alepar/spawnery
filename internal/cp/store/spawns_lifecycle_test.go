@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -122,12 +123,58 @@ func TestErrorEndsLiveContainer(t *testing.T) {
 	seedAppAndOwner(t, st)
 	ctx := context.Background()
 	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp1"), nil) })
-	inTx(t, st, func(tx Store) error { return tx.Spawns().SetError(ctx, "sp1") })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetError(ctx, "sp1", "", "") })
 	if s, _ := st.Spawns().Get(ctx, "sp1"); s.Status != Errored {
 		t.Fatalf("status=%v want error", s.Status)
 	}
 	if _, ok, _ := st.Spawns().LiveContainer(ctx, "sp1"); ok {
 		t.Fatal("SetError must end the live container")
+	}
+}
+
+// TestSetErrorPersistsAndTruncatesDetail verifies SetError stores the step+detail and truncates
+// oversized details to ≤8 KiB (sp-m859.3).
+func TestSetErrorPersistsAndTruncatesDetail(t *testing.T) {
+	st := NewTestStore(t)
+	seedAppAndOwner(t, st)
+	ctx := context.Background()
+
+	// Build a detail string longer than maxErrorDetailBytes (8192).
+	long := make([]byte, 9000)
+	for i := range long {
+		long[i] = 'x'
+	}
+	longDetail := string(long)
+
+	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp1"), nil) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetError(ctx, "sp1", "create-pod", longDetail) })
+
+	sp, err := st.Spawns().Get(ctx, "sp1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if sp.Status != Errored {
+		t.Fatalf("status=%v want Errored", sp.Status)
+	}
+	if sp.ErrorStep != "create-pod" {
+		t.Fatalf("error_step=%q want create-pod", sp.ErrorStep)
+	}
+	if len(sp.ErrorDetail) > maxErrorDetailBytes {
+		t.Fatalf("error_detail len=%d want ≤%d", len(sp.ErrorDetail), maxErrorDetailBytes)
+	}
+	if !strings.HasPrefix(longDetail, sp.ErrorDetail) {
+		t.Fatalf("error_detail must be a prefix of the original")
+	}
+
+	// ("","") leaves both fields empty but spawn is still Errored.
+	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp2"), nil) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetError(ctx, "sp2", "", "") })
+	sp2, _ := st.Spawns().Get(ctx, "sp2")
+	if sp2.Status != Errored {
+		t.Fatalf("sp2 status=%v want Errored", sp2.Status)
+	}
+	if sp2.ErrorStep != "" || sp2.ErrorDetail != "" {
+		t.Fatalf("sp2 error fields non-empty: step=%q detail=%q", sp2.ErrorStep, sp2.ErrorDetail)
 	}
 }
 

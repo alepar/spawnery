@@ -275,7 +275,7 @@ func seedErroredSpawn(t *testing.T, s *Server, id, owner string) {
 	if err := s.st.WithTx(ctx, func(tx store.Store) error { return tx.Spawns().Create(ctx, sp, nil) }); err != nil {
 		t.Fatalf("seed spawn %s: %v", id, err)
 	}
-	if err := s.st.Spawns().SetError(ctx, id); err != nil {
+	if err := s.st.Spawns().SetError(ctx, id, "", ""); err != nil {
 		t.Fatalf("SetError %s: %v", id, err)
 	}
 }

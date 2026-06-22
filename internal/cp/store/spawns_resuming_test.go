@@ -147,7 +147,7 @@ func TestSetErrorFromResuming(t *testing.T) {
 	})
 	setResuming(t, st, "sp1")
 
-	if err := st.Spawns().SetError(ctx, "sp1"); err != nil {
+	if err := st.Spawns().SetError(ctx, "sp1", "", ""); err != nil {
 		t.Fatalf("SetError from Resuming: %v", err)
 	}
 	if sp, _ := st.Spawns().Get(ctx, "sp1"); sp.Status != Errored {

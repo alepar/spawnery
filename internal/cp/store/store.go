@@ -85,7 +85,7 @@ type SpawnRepo interface {
 	// whose resume-on-target failed rolls BACK to suspended (gen-fenced), ending the target container
 	// row so the prior suspend's markers stay the recoverable state. starting -> suspended.
 	RevertSuspended(ctx context.Context, id string, gen int64) error
-	SetError(ctx context.Context, id string) error
+	SetError(ctx context.Context, id, errorStep, errorDetail string) error
 	EndContainer(ctx context.Context, id string, gen int64, p Phase) error
 	MarkUnreachable(ctx context.Context, ids []string) (int, error)
 	MarkBootUnreachable(ctx context.Context) (int, error)
