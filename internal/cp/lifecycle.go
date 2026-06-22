@@ -805,11 +805,11 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	// Resuming and skip this spawn during the provision round-trip.
 	freshSP, err := s.st.Spawns().Get(ctx, id)
 	if err != nil {
-		s.failResume(ctx, id, gen, revertOnFail, "Get-for-Resuming")
+		s.failResume(ctx, id, gen, revertOnFail, "Get-for-Resuming", nil)
 		return "", connect.NewError(connect.CodeInternal, err)
 	}
 	if _, err := s.st.Spawns().TransitionClaimed(ctx, id, leaseID, freshSP.StatusSeq, gen, store.Resuming); err != nil {
-		s.failResume(ctx, id, gen, revertOnFail, "Starting→Resuming")
+		s.failResume(ctx, id, gen, revertOnFail, "Starting→Resuming", nil)
 		return "", connect.NewError(connect.CodeInternal, fmt.Errorf("Starting→Resuming: %w", err))
 	}
 
@@ -819,7 +819,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	var secrets []*nodev1.SealedSecret
 	mounts, mountsErr := s.st.Spawns().GetMounts(ctx, id)
 	if mountsErr != nil {
-		s.failResume(ctx, id, gen, revertOnFail, "GetMounts")
+		s.failResume(ctx, id, gen, revertOnFail, "GetMounts", nil)
 		return "", connect.NewError(connect.CodeInternal, mountsErr)
 	}
 	var arts []store.Artifact
@@ -828,21 +828,21 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 		var aerr error
 		arts, aerr = s.st.Spawns().GetArtifacts(ctx, id)
 		if aerr != nil {
-			s.failResume(ctx, id, gen, revertOnFail, "GetArtifacts")
+			s.failResume(ctx, id, gen, revertOnFail, "GetArtifacts", nil)
 			return "", connect.NewError(connect.CodeInternal, aerr)
 		}
 		requiredSecretIDs = startupSecretIDsForSpawn(arts, mounts)
 		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
-			s.failResume(ctx, id, gen, revertOnFail, "validate startup secret catalog")
+			s.failResume(ctx, id, gen, revertOnFail, "validate startup secret catalog", nil)
 			return "", err
 		}
 		if err := s.validateGitHubMountCredentialType(ctx, owner, mounts); err != nil {
-			s.failResume(ctx, id, gen, revertOnFail, "validate github mount credential type")
+			s.failResume(ctx, id, gen, revertOnFail, "validate github mount credential type", nil)
 			return "", err
 		}
 		targetNodeID, pickErr := s.sched.PickNodeID(placement)
 		if pickErr != nil {
-			s.failResume(ctx, id, gen, revertOnFail, "PickNodeID")
+			s.failResume(ctx, id, gen, revertOnFail, "PickNodeID", nil)
 			return "", pickErr
 		}
 		pi := buildPendingIntent(op, id, uint64(gen), targetNodeID, sp.Image, sp.AppRef, sp.Model, "", mounts, requiredSecretIDs)
@@ -851,15 +851,15 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 		submission, awaitErr := s.pendingIntents.await(ctx, ch)
 		err = awaitErr
 		if err != nil {
-			s.failResume(ctx, id, gen, revertOnFail, "await SignedIntent")
+			s.failResume(ctx, id, gen, revertOnFail, "await SignedIntent", nil)
 			return "", connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("await SignedIntent: %w", err))
 		}
 		if err := validateSubmittedStartupSecrets(requiredSecretIDs, submission.Secrets); err != nil {
-			s.failResume(ctx, id, gen, revertOnFail, "validate startup secrets")
+			s.failResume(ctx, id, gen, revertOnFail, "validate startup secrets", nil)
 			return "", connect.NewError(connect.CodeFailedPrecondition, err)
 		}
 		if err := s.ensureStartupSecretsExist(ctx, owner, requiredSecretIDs); err != nil {
-			s.failResume(ctx, id, gen, revertOnFail, "recheck startup secret catalog")
+			s.failResume(ctx, id, gen, revertOnFail, "recheck startup secret catalog", nil)
 			return "", err
 		}
 		env = submission.Env
@@ -870,7 +870,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 		// Provision/StartSpawn window (before the node acks ACTIVE), so both the index entry and the
 		// container node_id must be set now. No-op if the spawn has no gh: mint mount.
 		if err := s.prepareGitHubMintProvision(ctx, id, uint64(gen), targetNodeID, mounts); err != nil {
-			s.failResume(ctx, id, gen, revertOnFail, "prepare github mint provision")
+			s.failResume(ctx, id, gen, revertOnFail, "prepare github mint provision", nil)
 			return "", connect.NewError(connect.CodeInternal, err)
 		}
 	}
@@ -911,7 +911,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 		select {
 		case res := <-provCh:
 			if res.err != nil {
-				s.failResume(storeCtx, id, gen, revertOnFail, "provision")
+				s.failResume(storeCtx, id, gen, revertOnFail, "provision", res.err)
 				return "", res.err
 			}
 			nodeID := res.nodeID
@@ -919,7 +919,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 			if err := s.st.Spawns().SetActive(storeCtx, id, nodeID, gen); err != nil {
 				s.rt.StopOnNode(id)
 				s.rt.Drop(id)
-				s.failResume(storeCtx, id, gen, revertOnFail, "SetActive")
+				s.failResume(storeCtx, id, gen, revertOnFail, "SetActive", nil)
 				return "", connect.NewError(connect.CodeInternal, err)
 			}
 			// Fresh container started with spawns.model -> mark applied.
@@ -944,7 +944,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 			// move the spawn to a defined state (error or reverted to suspended on migration).
 			provCancel()
 			s.rt.Drop(id)
-			s.failResume(storeCtx, id, gen, revertOnFail, "resume stall")
+			s.failResume(storeCtx, id, gen, revertOnFail, "resume stall", nil)
 			return "", connect.NewError(connect.CodeDeadlineExceeded,
 				fmt.Errorf("resume stalled (no progress for %s)", s.resumeStallWindow))
 
@@ -957,7 +957,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 			// Absolute backstop expired.
 			provCancel()
 			s.rt.Drop(id)
-			s.failResume(storeCtx, id, gen, revertOnFail, "resume timeout")
+			s.failResume(storeCtx, id, gen, revertOnFail, "resume timeout", nil)
 			return "", connect.NewError(connect.CodeDeadlineExceeded, fmt.Errorf("timed out awaiting node resume"))
 		}
 	}
@@ -967,10 +967,23 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 // starting/resuming episode BACK to 'suspended' (RevertSuspended accepts Starting and Resuming,
 // sp-u53.7.5) and cleans the target artifacts. For a plain resume (revert=false) it goes to terminal
 // 'error'. Uses a detached store ctx so cleanup survives a client disconnect.
-func (s *Server) failResume(ctx context.Context, id string, gen int64, revert bool, stage string) {
+// provErr is the originating error, if available (non-nil for node Provision failures). Its message is
+// persisted as the error detail; for pre-Provision failures provErr is nil and detail stays empty.
+// The error step is read from the in-memory provisioning map: non-empty only when a node milestone was
+// emitted during the current Provision round-trip (pre-Provision failures leave it empty, which is the
+// same as the prior behaviour).
+func (s *Server) failResume(ctx context.Context, id string, gen int64, revert bool, stage string, provErr error) {
 	storeCtx := context.WithoutCancel(ctx)
 	if !revert {
-		if serr := s.st.Spawns().SetError(storeCtx, id, "", ""); serr != nil {
+		var step string
+		if st, ok := s.provisioning.get(id); ok {
+			step = st.key
+		}
+		detail := ""
+		if provErr != nil {
+			detail = provErr.Error()
+		}
+		if serr := s.st.Spawns().SetError(storeCtx, id, step, detail); serr != nil {
 			log.Printf("resumeLocked %s: SetError after %s failure also failed: %v", id, stage, serr)
 		}
 		return
@@ -1304,7 +1317,11 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	}
 	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, nil, storeToNodeArtifacts(arts), secrets)
 	if err != nil {
-		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", err.Error()); serr != nil {
+		var step string
+		if st, ok := s.provisioning.get(req.Msg.SpawnId); ok {
+			step = st.key
+		}
+		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, step, err.Error()); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
 		}
 		return nil, err

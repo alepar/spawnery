@@ -2,6 +2,7 @@ package cp
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
+	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/store"
 )
 
@@ -247,5 +249,151 @@ func TestListSpawnsErrorFieldsFromStore(t *testing.T) {
 	}
 	if sp.ErrorStep != "my-step" || sp.ErrorDetail != "my-detail" {
 		t.Fatalf("store fields: step=%q detail=%q", sp.ErrorStep, sp.ErrorDetail)
+	}
+}
+
+// startErrorer registers a node and drives provision failures: it watches for StartSpawn messages,
+// and for each new one it (a) seeds the provisioning map with the given milestone key (simulating
+// a node milestone that arrived just before failure), then (b) signals ERROR to make Provision
+// return. Returns a stop func.
+func startErrorer(t *testing.T, s *Server, reg *registry.Registry, milestoneKey string) func() {
+	t.Helper()
+	sender := &capSender{}
+	reg.Add(&registry.Node{ID: "n1", Sender: sender, Max: 10, Free: 10})
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		handled := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			sender.mu.Lock()
+			var newStarts []*nodev1.StartSpawn
+			for _, m := range sender.sent {
+				if st := m.GetStart(); st != nil {
+					newStarts = append(newStarts, st)
+				}
+			}
+			sender.mu.Unlock()
+			for handled < len(newStarts) {
+				st := newStarts[handled]
+				handled++
+				// Seed the provisioning map (simulates a milestone arriving from the node).
+				s.provisioning.set(st.GetSpawnId(), provisionStep{index: 1, total: 3, key: milestoneKey, label: "test milestone"})
+				s.sched.OnStatus(st.GetSpawnId(), nodev1.SpawnPhase_ERROR, "node provisioning failed")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	return func() { close(stop); wg.Wait() }
+}
+
+// TestRecreateSpawnProvisionFailureAttributesStep verifies that when RecreateSpawn's node
+// Provision call fails after a milestone has been emitted, the persisted ErrorStep matches
+// the last milestone key (sp-m859.3.5).
+func TestRecreateSpawnProvisionFailureAttributesStep(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	// Use startAcker to get the spawn to Active first.
+	stopAck := startAcker(t, s, reg)
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id)
+	stopAck()
+
+	// Mark unreachable so RecreateSpawn is permitted.
+	if _, err := s.st.Spawns().MarkUnreachable(ctx, []string{id}); err != nil {
+		t.Fatalf("MarkUnreachable: %v", err)
+	}
+
+	// Reset node n1 — remove it so startErrorer can re-add a fresh capSender.
+	reg.Remove("n1")
+
+	const wantStep = "pull-image"
+	stopErr := startErrorer(t, s, reg, wantStep)
+	defer stopErr()
+
+	// RecreateSpawn is synchronous: it blocks until Provision completes (ERROR → failure).
+	_, rerr := s.RecreateSpawn(ctx, connect.NewRequest(&cpv1.RecreateSpawnRequest{SpawnId: id}))
+	if rerr == nil {
+		t.Fatal("RecreateSpawn: want error, got nil")
+	}
+
+	sp, err := s.st.Spawns().Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get after RecreateSpawn failure: %v", err)
+	}
+	if sp.Status != store.Errored {
+		t.Fatalf("status=%v want Errored", sp.Status)
+	}
+	if sp.ErrorStep != wantStep {
+		t.Fatalf("ErrorStep=%q want %q", sp.ErrorStep, wantStep)
+	}
+	if sp.ErrorDetail == "" {
+		t.Fatalf("ErrorDetail empty; want the provision error message")
+	}
+}
+
+// TestResumeSpawnProvisionFailureAttributesStep verifies that when ResumeSpawn's node Provision
+// call fails after a milestone has been emitted, the persisted ErrorStep matches the last
+// milestone key (sp-m859.3.5).
+func TestResumeSpawnProvisionFailureAttributesStep(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	// Use startAcker for the initial create + suspend cycle.
+	stopAck := startAcker(t, s, reg)
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id)
+
+	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("SuspendSpawn: %v", err)
+	}
+	stopAck()
+
+	sp, _ := s.st.Spawns().Get(ctx, id)
+	if sp.Status != store.Suspended {
+		t.Fatalf("status=%v want Suspended before resume", sp.Status)
+	}
+
+	// Reset node n1 so startErrorer adds a fresh capSender.
+	reg.Remove("n1")
+
+	const wantStep = "restore-data"
+	stopErr := startErrorer(t, s, reg, wantStep)
+	defer stopErr()
+
+	// ResumeSpawn is synchronous in the test (Provision is run in a goroutine inside resumeLocked,
+	// but ResumeSpawn itself blocks until Provision completes).
+	_, rerr := s.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id}))
+	if rerr == nil {
+		t.Fatal("ResumeSpawn: want error, got nil")
+	}
+
+	sp, err = s.st.Spawns().Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get after ResumeSpawn failure: %v", err)
+	}
+	if sp.Status != store.Errored {
+		t.Fatalf("status=%v want Errored", sp.Status)
+	}
+	if sp.ErrorStep != wantStep {
+		t.Fatalf("ErrorStep=%q want %q", sp.ErrorStep, wantStep)
+	}
+	if sp.ErrorDetail == "" {
+		t.Fatalf("ErrorDetail empty; want the provision error message")
 	}
 }
