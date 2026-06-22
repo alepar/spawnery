@@ -93,17 +93,19 @@ func blockedDialContext() func(ctx context.Context, network, addr string) (net.C
 		if err != nil {
 			return nil, fmt.Errorf("resolve %q: %w", host, err)
 		}
-		// Pick the first IP that passes the block check and dial it directly.
-		// Dialling by hostname would trigger a second DNS resolution (TOCTOU),
-		// rendering the IP-range check ineffective.
+		// Reject if ANY resolved IP is blocked (a multi-record response must not
+		// let a blocked address slip through), then pin-dial the first validated
+		// IP directly — dialling by hostname would re-resolve (TOCTOU), rendering
+		// the IP-range check ineffective.
 		for _, ip := range ips {
 			if isBlockedIP(ip.IP) {
 				return nil, fmt.Errorf("host %q resolves to blocked IP %s (SSRF protection: loopback/private/link-local/metadata ranges rejected)", host, ip.IP)
 			}
-			// Dial the validated IP directly — not the hostname — to avoid TOCTOU.
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
 		}
-		return nil, fmt.Errorf("no usable addresses for host %q", host)
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("no usable addresses for host %q", host)
+		}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
 	}
 }
 
