@@ -1456,9 +1456,29 @@ func TestForkSpawnMaterializerFailureWithoutResourcesLeavesFailedForkForRetry(t 
 	}
 }
 
+func TestForkSpawnDefaultServerHasFootprintEstimator(t *testing.T) {
+	// Regression: production NewServer must wire a non-nil fork-footprint estimator so the
+	// headroom preflight does not fail closed with errForkFootprintUnknown. The interim estimator
+	// reports 0 (no disk guard yet); forkHeadroomBytes must therefore return (0, nil).
+	s, _, _ := newTestServer(t)
+	if s.forkFootprintEstimator == nil {
+		t.Fatal("production server left forkFootprintEstimator nil; forking fails closed")
+	}
+	got, err := s.forkHeadroomBytes(context.Background(), store.Spawn{}, store.Container{})
+	if err != nil {
+		t.Fatalf("forkHeadroomBytes on default server: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("forkHeadroomBytes = %d, want 0 (interim zero-footprint estimator)", got)
+	}
+}
+
 func TestForkSpawnRejectsUnknownFootprintBeforeCreatingFork(t *testing.T) {
 	s, reg, rt := newTestServer(t)
 	seedForkSource(t, s, reg, rt, "sp-source", "alice", "node-1", &capSender{})
+	// Explicitly drop the estimator to exercise the fail-closed nil guard; production wires a
+	// non-nil estimator (see TestForkSpawnDefaultServerHasFootprintEstimator).
+	s.forkFootprintEstimator = nil
 	mat := &recordingForkMaterializer{nodeID: "node-1", err: errors.New("must not be called")}
 	s.forkMaterializer = mat
 

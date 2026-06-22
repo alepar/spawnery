@@ -55,6 +55,18 @@ type forkFootprintEstimator interface {
 	ForkFootprintBytes(context.Context, store.Spawn, store.Container) (int64, error)
 }
 
+// zeroForkFootprint is the interim production fork-footprint estimator. CP cannot yet measure a
+// source spawn's on-disk footprint — no node→CP disk-usage signal exists and store.Container has
+// no size field — so it reports 0. That makes requiredForkHeadroomBytes return 0 and
+// checkForkDiskHeadroom a no-op, which unblocks forking at the cost of the disk-headroom guard.
+// Replace with a real estimator once node-side footprint reporting lands (fork track, sp-li7h.3).
+// The nil-estimator fail-closed path in forkHeadroomBytes remains as defense in depth.
+type zeroForkFootprint struct{}
+
+func (zeroForkFootprint) ForkFootprintBytes(context.Context, store.Spawn, store.Container) (int64, error) {
+	return 0, nil
+}
+
 type unimplementedForkMaterializer struct{}
 
 func (unimplementedForkMaterializer) MaterializeFork(context.Context, forkMaterializeRequest) (forkMaterializeResult, error) {

@@ -147,9 +147,9 @@ type Server struct {
 	skillFetcher skillfetch.Fetcher
 	skillStore   skillstore.SkillStore
 
-	// ForkSpawn seams. The materializer is intentionally narrow and currently defaults to
-	// Unimplemented; downstream fork tasks install real source-preserving capture/seeding. The
-	// footprint estimator is fail-closed when nil because CP cannot infer fork disk headroom yet.
+	// ForkSpawn seams. NewServer wires the same-node materializer and an interim zero-footprint
+	// estimator (zeroForkFootprint); the estimator is fail-closed when nil because CP cannot yet
+	// infer a source spawn's disk footprint, so the interim estimator disables the headroom guard.
 	forkMaterializer       forkMaterializer
 	forkFootprintEstimator forkFootprintEstimator
 	forks                  *forkWaiters
@@ -237,6 +237,10 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
 		devMode: true}
 	s.forkMaterializer = newSameNodeForkMaterializer(s, defaultForkMaterializeTimeout)
+	// Interim zero-footprint estimator: CP cannot yet measure a source spawn's disk footprint,
+	// so headroom enforcement is disabled (see zeroForkFootprint). Without this, forking fails
+	// closed with errForkFootprintUnknown.
+	s.forkFootprintEstimator = zeroForkFootprint{}
 	s.failedForkResources = &nodeFailedForkResources{s: s}
 	// Wire cpmetrics sources (idempotent; last-writer-wins — safe across repeated NewServer in tests).
 	cpmetrics.SetRegistrySource(reg)
