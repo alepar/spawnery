@@ -61,7 +61,7 @@ func main() {
 			&cli.StringSliceFlag{Name: "mount", Usage: "mount binding name=backend_uri[,create] (repeatable; e.g. repo=github:owner/repo,create) — CP mode only"},
 		},
 		Action:   rootAction,
-		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), setModelCmd(), keyCmd(), moveCmd(), resumeCmd(), forkCmd(), loginCmd(), logoutCmd(), profileCmd(), catalogCmd(), ghCmd()},
+		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), statusCmd(), setModelCmd(), keyCmd(), moveCmd(), resumeCmd(), forkCmd(), loginCmd(), logoutCmd(), profileCmd(), catalogCmd(), ghCmd()},
 	}
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		log.Fatal(err)
@@ -251,8 +251,11 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 
 	// CreateSpawn is async: the CP binds the spawn to its node only once the node reports ACTIVE.
 	// Wait for that before attaching, else the session races provisioning and gets "unknown spawn".
-	spawnGen := waitActiveCP(ctx, client, id)
+	spawnGen, err := waitActiveCP(ctx, client, id, os.Stdout)
 	cancelPoll()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// A4 session-open signing [AC1][AM12]: build a signed intent with the live episode generation
 	// so the node can verify correspondence. A fresh ephemeral key is used; the CP mints the
@@ -310,29 +313,35 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 }
 
 // waitActiveCP polls ListSpawns until the spawn is ACTIVE (router-bound), failing fast on a terminal
-// status. Returns the spawn's live episode generation for use in A4 session-open signing [AM11].
+// status. Prints provisioning step transitions to w (deduped: only changed lines). Returns the
+// spawn's live episode generation for use in A4 session-open signing [AM11].
 // CreateSpawn returns in 'starting' and provisions asynchronously on the node.
-func waitActiveCP(ctx context.Context, client cpv1connect.SpawnServiceClient, id string) uint64 {
+func waitActiveCP(ctx context.Context, client cpv1connect.SpawnServiceClient, id string, w io.Writer) (uint64, error) {
 	deadline := time.Now().Add(60 * time.Second)
+	var lastLine string
 	for {
-		ls, err := client.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
-		if err != nil {
-			log.Fatalf("listSpawns: %v", err)
+		ls, lsErr := client.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+		if lsErr != nil {
+			return 0, fmt.Errorf("listSpawns: %w", lsErr)
 		}
 		for _, sp := range ls.Msg.Spawns {
 			if sp.SpawnId != id {
 				continue
 			}
+			if line, changed := nextProgressLine(lastLine, sp); changed {
+				fmt.Fprintln(w, line)
+				lastLine = line
+			}
 			switch sp.Status {
 			case cpv1.SpawnStatus_SPAWN_STATUS_ACTIVE:
-				return sp.Generation
+				return sp.Generation, nil
 			case cpv1.SpawnStatus_SPAWN_STATUS_ERROR, cpv1.SpawnStatus_SPAWN_STATUS_DELETED,
 				cpv1.SpawnStatus_SPAWN_STATUS_UNREACHABLE:
-				log.Fatalf("spawn %s reached terminal status %v before active", id, sp.Status)
+				return 0, errors.New(provisionFailure(sp)) //nolint:goerr113
 			}
 		}
 		if time.Now().After(deadline) {
-			log.Fatalf("spawn %s did not reach ACTIVE within 60s", id)
+			return 0, fmt.Errorf("spawn %s did not reach ACTIVE within 60s", id)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
