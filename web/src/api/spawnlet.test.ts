@@ -35,8 +35,8 @@ describe("listSpawns", () => {
     const out = await listSpawns();
     expect(calls[0].url).toContain("/cp.v1.SpawnService/ListSpawns");
     expect(out).toEqual([
-      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", generation: 0n, mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
-      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", generation: 0n, mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
+      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", generation: 0n, mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0, provisionStep: 0, provisionTotal: 0, provisionStepLabel: "", errorStep: "", errorDetail: "" },
+      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", generation: 0n, mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0, provisionStep: 0, provisionTotal: 0, provisionStepLabel: "", errorStep: "", errorDetail: "" },
     ]);
   });
   it("maps fork lineage fields from ListSpawns", async () => {
@@ -82,6 +82,20 @@ describe("listSpawns", () => {
   it("tolerates a missing spawns array", async () => {
     mockFetch({});
     expect(await listSpawns()).toEqual([]);
+  });
+  it("maps provisioning-progress and failure fields", async () => {
+    mockFetch({ spawns: [
+      { spawnId: "p", appId: "a", status: "SPAWN_STATUS_STARTING", provisionStep: 3, provisionTotal: 7, provisionStepLabel: "cloning repo" },
+      { spawnId: "e", appId: "a", status: "SPAWN_STATUS_ERROR", errorStep: "prepare-mounts", errorDetail: "403 [accepted-permissions=administration=write]" },
+    ]});
+    const out = await listSpawns();
+    expect(out[0]).toMatchObject({ provisionStep: 3, provisionTotal: 7, provisionStepLabel: "cloning repo" });
+    expect(out[1]).toMatchObject({ errorStep: "prepare-mounts", errorDetail: expect.stringContaining("accepted-permissions") });
+  });
+  it("defaults provisioning fields to 0/'' when absent", async () => {
+    mockFetch({ spawns: [{ spawnId: "x", appId: "a", status: "SPAWN_STATUS_ACTIVE" }] });
+    const out = await listSpawns();
+    expect(out[0]).toMatchObject({ provisionStep: 0, provisionTotal: 0, provisionStepLabel: "", errorStep: "", errorDetail: "" });
   });
 });
 
