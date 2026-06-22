@@ -27,13 +27,14 @@ export function ProvisioningPane({ spawn }: { spawn: SpawnView }) {
   const total = spawn.provisionTotal ?? 0;
   const cur = spawn.provisionStep ?? 0;
   const doneCount = Math.max(0, cur - 1);
+  const shownStep = Math.min(cur, total);
   return (
     <div data-testid="provisioning-pane" data-state="starting" className="mx-auto max-w-[70ch] px-4 py-6">
       <div className="rounded-md border border-border bg-muted/40 p-4">
         <div className="mb-2 text-sm font-semibold">Provisioning…</div>
         {total > 0 && (
           <div data-testid="provisioning-steps" className="mb-3 flex gap-1">
-            {Array.from({ length: total }, (_, i) => {
+            {Array.from({ length: Math.min(total, 50) }, (_, i) => {
               const state = i < doneCount ? "done" : i === doneCount ? "running" : "pending";
               return <span key={i} data-testid="provisioning-step" data-state={state}
                 className={cn("h-1.5 flex-1 rounded-full",
@@ -44,7 +45,7 @@ export function ProvisioningPane({ spawn }: { spawn: SpawnView }) {
           </div>
         )}
         <div data-testid="provisioning-label" className="text-sm text-muted-foreground">
-          {total > 0 ? `Step ${cur} of ${total}` : "Starting…"}
+          {total > 0 ? `Step ${shownStep} of ${total}` : "Starting…"}
           {spawn.provisionStepLabel ? `: ${spawn.provisionStepLabel}` : ""}
         </div>
       </div>

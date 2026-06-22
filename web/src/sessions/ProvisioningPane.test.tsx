@@ -44,6 +44,17 @@ describe("ProvisioningPane", () => {
     expect(screen.getByTestId("provisioning-error-detail")).toHaveTextContent("accepted-permissions=administration=write");
   });
 
+  it("clamps label to total when cur > total, shows all segments as done", () => {
+    render(<ProvisioningPane spawn={{ ...base, status: "starting", provisionStep: 8, provisionTotal: 7 }} />);
+    const label = screen.getByTestId("provisioning-label");
+    expect(label).not.toHaveTextContent("Step 8 of 7");
+    expect(label).toHaveTextContent("Step 7 of 7");
+    const segs = screen.getAllByTestId("provisioning-step");
+    expect(segs).toHaveLength(7);
+    expect(segs.filter(s => s.dataset.state === "done")).toHaveLength(7);
+    expect(segs.filter(s => s.dataset.state === "running")).toHaveLength(0);
+  });
+
   it("renders error pane without step or detail when fields are absent", () => {
     render(<ProvisioningPane spawn={{ ...base, status: "error", errorStep: "", errorDetail: "" }} />);
     expect(screen.getByTestId("provisioning-pane")).toHaveAttribute("data-state", "error");
