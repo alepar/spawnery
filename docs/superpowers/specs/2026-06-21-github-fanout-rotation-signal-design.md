@@ -1,6 +1,6 @@
 # Convert GitHub proactive fanout to a rotation heads-up signal; nodes pull from AS
 
-**Status:** draft · **Date:** 2026-06-21 · Decided via brainstorm (resumed + roast-revised).
+**Status:** implemented (epic sp-v40s.22, 2026-06-22) · **Date:** 2026-06-21 · Decided via brainstorm (resumed + roast-revised).
 
 Fixes the github-mount spawn provisioning failure AND simplifies GitHub-token delivery by turning
 the round-3 proactive **token fanout** (which seals and delivers token bytes per target, requiring
