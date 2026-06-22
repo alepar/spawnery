@@ -64,7 +64,7 @@ func provisionFailure(s *cpv1.SpawnSummary) string {
 	case detail != "":
 		return "✗ failed: " + detail
 	default:
-		return "✗ failed"
+		return "✗ failed (" + strings.TrimPrefix(s.GetStatus().String(), "SPAWN_STATUS_") + ")"
 	}
 }
 

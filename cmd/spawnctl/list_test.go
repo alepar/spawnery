@@ -60,9 +60,9 @@ func TestProvisionFailure(t *testing.T) {
 			want: "✗ failed at authorize",
 		},
 		{
-			name: "both empty",
-			s:    &cpv1.SpawnSummary{},
-			want: "✗ failed",
+			name: "both empty - DELETED status includes status name",
+			s:    &cpv1.SpawnSummary{Status: cpv1.SpawnStatus_SPAWN_STATUS_DELETED},
+			want: "✗ failed (DELETED)",
 		},
 	}
 	for _, tt := range tests {

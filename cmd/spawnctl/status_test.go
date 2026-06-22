@@ -23,8 +23,14 @@ func TestRenderStatusShowsFullError(t *testing.T) {
 	if !strings.Contains(out, "ERROR") {
 		t.Errorf("output missing ERROR status:\n%s", out)
 	}
-	if !strings.Contains(out, "authorize") {
-		t.Errorf("output missing failed step 'authorize':\n%s", out)
+	if !strings.Contains(out, "✗ failed at authorize") {
+		t.Errorf("output missing step-only headline '✗ failed at authorize':\n%s", out)
+	}
+	// Detail must not be inlined into the headline — it appears as a separate block below.
+	headline := "✗ failed at authorize"
+	headlineIdx := strings.Index(out, headline)
+	if headlineIdx >= 0 && strings.Contains(out[headlineIdx:headlineIdx+len(headline)], errorDetail) {
+		t.Errorf("errorDetail should not be inlined in the headline:\n%s", out)
 	}
 	if !strings.Contains(out, errorDetail) {
 		t.Errorf("output missing full errorDetail (no truncation):\n%s", out)

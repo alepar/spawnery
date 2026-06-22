@@ -42,12 +42,21 @@ func statusCmd() *cli.Command {
 	}
 }
 
-// renderStatus prints a detailed status block for a single spawn. On ERROR it also prints the
-// provisionFailure headline and the full error_detail verbatim (multi-line safe, no truncation).
+// provisionFailureHeadline returns a one-line failure headline containing only the step, without
+// inlining the detail. Used by renderStatus, which prints the full detail block separately.
+func provisionFailureHeadline(s *cpv1.SpawnSummary) string {
+	if step := s.GetErrorStep(); step != "" {
+		return "✗ failed at " + step
+	}
+	return "✗ failed"
+}
+
+// renderStatus prints a detailed status block for a single spawn. On ERROR it prints a step-only
+// headline followed by the full error_detail verbatim (multi-line safe, no truncation, no duplication).
 func renderStatus(s *cpv1.SpawnSummary, w io.Writer) {
 	fmt.Fprintf(w, "status: %s\n", spawnStatus(s))
 	if s.GetStatus() == cpv1.SpawnStatus_SPAWN_STATUS_ERROR {
-		fmt.Fprintln(w, provisionFailure(s))
+		fmt.Fprintln(w, provisionFailureHeadline(s))
 		if detail := s.GetErrorDetail(); detail != "" {
 			fmt.Fprintln(w, detail)
 		}

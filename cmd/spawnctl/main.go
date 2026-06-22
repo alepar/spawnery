@@ -337,7 +337,7 @@ func waitActiveCP(ctx context.Context, client cpv1connect.SpawnServiceClient, id
 				return sp.Generation, nil
 			case cpv1.SpawnStatus_SPAWN_STATUS_ERROR, cpv1.SpawnStatus_SPAWN_STATUS_DELETED,
 				cpv1.SpawnStatus_SPAWN_STATUS_UNREACHABLE:
-				return 0, fmt.Errorf("%s", provisionFailure(sp)) //nolint:goerr113
+				return 0, errors.New(provisionFailure(sp)) //nolint:goerr113
 			}
 		}
 		if time.Now().After(deadline) {
