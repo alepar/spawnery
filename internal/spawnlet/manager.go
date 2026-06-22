@@ -600,6 +600,24 @@ func (m *Manager) TmuxAttachArgv(containerID, session string) []string {
 	return execArgv(ExecPrefixFor(m.cfg.ContainerRuntime), containerID, []string{"tmux", "attach", "-t", session})
 }
 
+// TmuxHasSession runs `tmux has-session -t session` non-interactively in agentID's container and
+// reports whether the named tmux session exists. Returns (true, nil) when exit 0, (false, nil) when
+// tmux exits non-zero (session absent — the normal "not yet created" case), and (false, err) when the
+// exec itself cannot be started (daemon unreachable, binary missing, etc.). Used by the node to gate
+// tmux-mode spawns ACTIVE until the in-container session is present (sp-m859.4).
+func (m *Manager) TmuxHasSession(ctx context.Context, agentID, session string) (bool, error) {
+	argv := execArgv(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime), agentID, []string{"tmux", "has-session", "-t", session})
+	err := exec.CommandContext(ctx, argv[0], argv[1:]...).Run()
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return false, nil // tmux has-session exits non-zero when the session does not exist
+	}
+	return false, fmt.Errorf("tmux has-session: %w", err)
+}
+
 // TmuxAttachArgvFor resolves spawnID's agent container and returns the argv to `exec -it <container>
 // tmux attach -t <session>` — the per-(spawn,session) mosh relay attach for an additional session
 // (sp-npxq.3). Like TmuxAttachArgv but spawn-id keyed (the node holds the spawn id, not the Spawn).

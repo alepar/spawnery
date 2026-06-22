@@ -1,10 +1,12 @@
 package node
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -77,6 +79,52 @@ func TestTmuxRelayForkBarrierBlocksInputUntilRelease(t *testing.T) {
 	assertPipeData(t, readFile, "blocked")
 	relay.fromClient("c1", append([]byte{tmuxOpInput}, []byte("after")...))
 	assertPipeData(t, readFile, "after")
+}
+
+// TestTmuxRelayAttachRetriesOnHasSessionFalse verifies the relay's defense-in-depth attach retry
+// (sp-m859.4 Part 2): when hasSession returns false initially and then true, attach() waits and
+// retries rather than immediately racing the real `tmux attach`. The test uses execArgv=["true"]
+// so pty.Start succeeds quickly (the "true" process exits immediately), proving the retry loop
+// actually ran the has-session check multiple times before falling through to the exec.
+func TestTmuxRelayAttachRetriesOnHasSessionFalse(t *testing.T) {
+	var calls atomic.Int32
+	relay := newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
+	relay.withHasSession(func(ctx context.Context) (bool, error) {
+		n := calls.Add(1)
+		return n >= 3, nil // false, false, true
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := relay.attach(ctx, "c1"); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if got := calls.Load(); got < 3 {
+		t.Fatalf("hasSession called %d times, want >= 3 (retry loop must poll)", got)
+	}
+}
+
+// TestTmuxRelayAttachHasSessionContextCancelFallsThrough verifies that a context cancellation during
+// the has-session retry poll causes the loop to exit (fall-through to the real attach) without
+// hanging, rather than waiting the full tmuxAttachRetryTimeout.
+func TestTmuxRelayAttachHasSessionContextCancelFallsThrough(t *testing.T) {
+	relay := newTmuxRelay([]string{"true"}, func(string, []byte) error { return nil })
+	relay.withHasSession(func(ctx context.Context) (bool, error) {
+		return false, nil // always absent
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel almost immediately so the retry loop doesn't spin the full 3s timeout.
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+
+	start := time.Now()
+	// attach() falls through after ctx cancel — pty.Start("true") will still run but "true" exits
+	// instantly. The test just verifies we don't block for tmuxAttachRetryTimeout (3s).
+	_ = relay.attach(ctx, "c1")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("attach blocked for %s after context cancel; want < 2s", elapsed)
+	}
 }
 
 func assertNoPipeData(t *testing.T, f *os.File) {

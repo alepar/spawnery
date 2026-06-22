@@ -18,6 +18,16 @@ const (
 	tmuxOpResize byte = 0x01 // rest = ASCII "<cols> <rows>"
 )
 
+// tmuxAttachRetryTimeout / tmuxAttachRetryInterval bound the relay's defense-in-depth has-session
+// poll inside attach(): if the session is momentarily absent (residual race after the Part 1 gate, or
+// a session restart), we retry briefly rather than forwarding "no sessions" to the client PTY and
+// dying. After the timeout we fall through to the real attach — whatever tmux says becomes the
+// client's problem, but we never hang forever (sp-m859.4).
+const (
+	tmuxAttachRetryTimeout  = 3 * time.Second
+	tmuxAttachRetryInterval = 150 * time.Millisecond
+)
+
 // parseClientFrame splits a client→node tmux frame into (opcode, inputData, cols, rows). An empty
 // frame is treated as a no-op input.
 func parseClientFrame(b []byte) (kind byte, data []byte, cols, rows uint16) {
@@ -41,8 +51,9 @@ func parseClientFrame(b []byte) (kind byte, data []byte, cols, rows uint16) {
 // tmuxRelay brokers terminal clients for one tmux-mode spawn. There is no shared backing process
 // (tmux in the container is the shared state); each attached client gets its own `tmux attach` PTY.
 type tmuxRelay struct {
-	execArgv []string // full argv to attach: <execprefix> <container> tmux attach -t spawn
-	send     func(clientID string, data []byte) error
+	execArgv   []string // full argv to attach: <execprefix> <container> tmux attach -t spawn
+	send       func(clientID string, data []byte) error
+	hasSession func(ctx context.Context) (bool, error) // optional; if set, attach() polls before pty.Start
 
 	mu            sync.Mutex
 	clients       map[string]*tmuxClient
@@ -69,6 +80,13 @@ func newTmuxRelay(attachArgv []string, send func(clientID string, data []byte) e
 		lastActivity:  time.Now(),
 		outputDrained: outputDrained,
 	}
+}
+
+// withHasSession attaches a has-session check to the relay (sp-m859.4): attach() polls this function
+// before calling pty.Start, retrying briefly if the session is absent. Returns r for chaining.
+func (r *tmuxRelay) withHasSession(fn func(ctx context.Context) (bool, error)) *tmuxRelay {
+	r.hasSession = fn
+	return r
 }
 
 // markActive refreshes the idle clock. Callers must NOT already hold mu.
@@ -153,7 +171,28 @@ func (r *tmuxRelay) releaseForkBarrier(match func(forkIngressBarrier) bool) {
 }
 
 // attach starts a `tmux attach` PTY for clientID and pumps its output back via send.
+// Defense-in-depth (sp-m859.4): if hasSession is set, poll it briefly before pty.Start so the relay
+// never forwards "no sessions" to the client PTY on a transient race. The poll is bounded by
+// tmuxAttachRetryTimeout; if the session still isn't present after that we fall through and let tmux
+// itself respond — we never hang indefinitely.
 func (r *tmuxRelay) attach(ctx context.Context, clientID string) error {
+	if r.hasSession != nil {
+		deadline := time.Now().Add(tmuxAttachRetryTimeout)
+		for {
+			ok, _ := r.hasSession(ctx)
+			if ok {
+				break // session present: proceed to pty.Start
+			}
+			if ctx.Err() != nil || time.Now().After(deadline) {
+				break // bounded: fall through to the real attach regardless
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(tmuxAttachRetryInterval):
+			}
+			// After waking: loop to re-check hasSession; ctx.Err() above catches cancellation.
+		}
+	}
 	cmd := exec.CommandContext(ctx, r.execArgv[0], r.execArgv[1:]...)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {

@@ -127,6 +127,11 @@ type attacher struct {
 	// githubRefresh in Run and injected into the Manager via SetGitHubControlServer. Shared across
 	// CP reconnects (the per-spawn listeners survive a CP disconnect). nil when cfg.GitHubMint is nil.
 	ghControl *githubControlServer
+
+	// tmuxHasSessionFn checks whether a named tmux session exists in a container (sp-m859.4). Set to
+	// mgr.TmuxHasSession in runOnce; tests inject a fake to avoid docker. nil falls back to
+	// mgr.TmuxHasSession so it is safe to leave unset in simple unit-test helpers.
+	tmuxHasSessionFn func(ctx context.Context, agentID, session string) (bool, error)
 }
 
 // pendingClient is a client attach that arrived before its session's pump/relay was registered (the
@@ -203,16 +208,17 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
-		verifier:      cfg.Verifier,
-		ctrlHTTP:      &http.Client{Timeout: controlPostTimeout},
-		sx:            &realSessionExec{mgr: mgr},
-		pumps:         map[sessionKey]*Pump{},
-		tmuxRelays:    map[sessionKey]*tmuxRelay{},
-		sessions:      map[string]*sessionRegistry{},
-		pending:       map[sessionKey][]pendingClient{},
-		secretReplay:  secretReplay,
-		githubRefresh: githubRefresh,
-		ghControl:     ghControl,
+		verifier:         cfg.Verifier,
+		ctrlHTTP:         &http.Client{Timeout: controlPostTimeout},
+		sx:               &realSessionExec{mgr: mgr},
+		pumps:            map[sessionKey]*Pump{},
+		tmuxRelays:       map[sessionKey]*tmuxRelay{},
+		sessions:         map[string]*sessionRegistry{},
+		pending:          map[sessionKey][]pendingClient{},
+		secretReplay:     secretReplay,
+		githubRefresh:    githubRefresh,
+		ghControl:        ghControl,
+		tmuxHasSessionFn: mgr.TmuxHasSession,
 	}
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)
@@ -677,7 +683,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		MintCredentials: hasGitHubMint(st.GetMounts()) || hasGitHubTokenSecret(st.GetSecrets()),
 		RestoreSnapshot: len(st.GetRootfsArtifacts()) > 0 || a.mgr.HasJournalPins(st.SpawnId),
 		SetupNetwork:    a.mgr.GitHubControlEnabled() || a.mgr.EgressEnforced(),
-		AwaitReady:      st.Mode != string(agentcaps.ModeTmux),
+		AwaitReady:      true,
 	}
 	steps := spawnlet.ApplicableMilestones(flags)
 	current := spawnlet.MilestoneAuthorize
@@ -810,12 +816,54 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	}
 	a.resumeProgress(st.SpawnId, st.Generation, "containers_ready", "containers created")
 	// tmux-mode spawns: register a raw-PTY relay per client (no ACP handshake, no Pump).
-	// Goes ACTIVE immediately after the relay is registered.
+	// Poll `tmux has-session -t spawn` until the session exists before going ACTIVE (sp-m859.4):
+	// the launcher creates the tmux session asynchronously in the background, so without this gate
+	// the first client attach races the session creation — tmux prints "no sessions" and the
+	// terminal dies. Goes ACTIVE only once the session is confirmed present.
 	if st.Mode == string(agentcaps.ModeTmux) {
-		relay := newTmuxRelay(a.mgr.TmuxAttachArgv(sp.AgentID, "spawn"), func(clientID string, data []byte) error {
+		emitStep(spawnlet.MilestoneAwaitReady)
+		a.resumeProgress(st.SpawnId, st.Generation, "attaching", "awaiting tmux session 'spawn'")
+
+		hasSession := a.tmuxHasSessionFn
+		if hasSession == nil {
+			hasSession = func(ctx context.Context, agentID, session string) (bool, error) {
+				return a.mgr.TmuxHasSession(ctx, agentID, session)
+			}
+		}
+		agentID := sp.AgentID
+		readyDeadline := time.Now().Add(readyTimeout)
+		for {
+			ok, err := hasSession(ctx, agentID, "spawn")
+			if ok {
+				break // session exists — proceed to ACTIVE
+			}
+			if err != nil {
+				slog.Warn("startSpawn: tmux has-session error", "spawn", st.SpawnId, "err", err)
+			}
+			if ctx.Err() != nil {
+				logErr("startSpawn "+st.SpawnId+": tmux session not ready", ctx.Err())
+				_ = a.mgr.Stop(ctx, st.SpawnId)
+				emitErr(fmt.Errorf("tmux session 'spawn' not ready: %w", ctx.Err()))
+				return
+			}
+			if time.Now().After(readyDeadline) {
+				logErr("startSpawn "+st.SpawnId+": tmux session not ready", fmt.Errorf("timeout after %s", readyTimeout))
+				_ = a.mgr.Stop(ctx, st.SpawnId)
+				emitErr(fmt.Errorf("tmux session 'spawn' not ready within %s", readyTimeout))
+				return
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(150 * time.Millisecond):
+			}
+		}
+
+		relay := newTmuxRelay(a.mgr.TmuxAttachArgv(agentID, "spawn"), func(clientID string, data []byte) error {
 			return a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Frame{Frame: &nodev1.Frame{
 				SpawnId: st.SpawnId, SessionId: SessionZeroID, ClientId: clientID, Data: data,
 			}}})
+		}).withHasSession(func(ctx context.Context) (bool, error) {
+			return hasSession(ctx, agentID, "spawn")
 		})
 		a.mu.Lock()
 		a.tmuxRelays[zeroKey(st.SpawnId)] = relay
