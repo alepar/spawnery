@@ -1167,7 +1167,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		cleanupSpawnDirs()
 		return nil, fmt.Errorf("prepare artifacts: %w", err)
 	}
-	mounts = append(mounts, runtime.Mount{HostPath: m.artifacts.DirFor(id), ContainerPath: ArtifactsMountPath})
+	mounts = append(mounts, runtime.Mount{HostPath: m.artifacts.DirFor(id), ContainerPath: ArtifactsMountPath, SELinuxRelabelShared: true})
 
 	// Writable agent-owned git-env (sp-7amh, design §1.1): a per-spawn dir chowned to the agent's mapped
 	// uid (mirrors storage chown) so the agent owns GIT_CONFIG_GLOBAL and can `git config --global`. A

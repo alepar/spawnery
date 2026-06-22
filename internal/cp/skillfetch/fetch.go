@@ -211,10 +211,14 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 			return nil, fmt.Errorf("compressed tarball exceeds wire cap (%d bytes)", WireCapBytes)
 		}
 
-		// Reject non-regular entries
+		// Reject non-regular entries; silently skip PAX metadata headers.
 		switch hdr.Typeflag {
 		case tar.TypeReg, tar.TypeRegA, tar.TypeDir:
 			// allowed
+		case tar.TypeXHeader, tar.TypeXGlobalHeader:
+			// PAX extended headers — metadata only, no data; skip silently.
+			// GitHub tarballs routinely include a pax_global_header entry.
+			continue
 		case tar.TypeSymlink, tar.TypeLink:
 			return nil, fmt.Errorf("symlink/hardlink entries are not allowed (entry %q)", hdr.Name)
 		default:
