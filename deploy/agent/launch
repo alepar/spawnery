@@ -189,10 +189,30 @@ case "$RUNNABLE" in
     SIDECAR_OAI="${OPENAI_BASE_URL:-http://127.0.0.1:8080/v1}"
     export OPENAI_BASE_URL="${OPENAI_BASE_URL:-$SIDECAR_OAI}"
     export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-unused-sidecar-injects-real-key}"
-    export HERMES_INFERENCE_PROVIDER="${HERMES_INFERENCE_PROVIDER:-custom}"
-    export HERMES_BASE_URL="${HERMES_BASE_URL:-$SIDECAR_OAI}"
-    export HERMES_API_KEY="${HERMES_API_KEY:-sk-unused-sidecar-injects-real-key}"
-    export HERMES_INFERENCE_MODEL="${HERMES_INFERENCE_MODEL:-${SPAWN_MODEL:-openai/gpt-4o-mini}}"
+    # The hermes-agent 0.15.2 ACP adapter resolves its inference provider from
+    # ~/.hermes/config.yaml — NOT the HERMES_* env vars (those drive the TUI/oneshot path).
+    # Without a configured provider, session/new fails ("No LLM provider configured"), which
+    # aborts acpmux's eager handshake so it never binds the ACP port (sp-055b). Write the
+    # config at launch (base_url + model are per-spawn runtime values): point the custom
+    # provider at the in-pod sidecar, which injects the real OpenRouter key.
+    export HERMES_HOME="${HERMES_HOME:-/root/.hermes}"
+    mkdir -p "$HERMES_HOME"
+    chmod 700 "$HERMES_HOME" 2>/dev/null || true
+    cat > "$HERMES_HOME/config.yaml" <<EOF
+model:
+  provider: custom
+  default: ${SPAWN_MODEL:-openai/gpt-4o-mini}
+  base_url: ${SIDECAR_OAI}
+  api_key: ${HERMES_API_KEY:-sk-unused-sidecar-injects-real-key}
+EOF
+    # Hermes lazy-pip-installs optional provider deps (e.g. boto3) at startup; under the
+    # per-pod egress floor that fetch hangs/fails and stalls the eager handshake, so disable it.
+    # (The other half — hermes' browser-tool bootstrap downloading Node.js + agent-browser +
+    # Chromium to STDOUT, which corrupts acpmux's JSON-RPC channel — is neutralized by baking
+    # Node into the image: with `npx` present hermes resolves the browser CLI without the
+    # download and, lacking Chromium, simply does not advertise browser tools. See sp-055b and
+    # the Dockerfile's node install.)
+    export HERMES_DISABLE_LAZY_INSTALLS=1
     exec /usr/local/bin/acpmux hermes acp
     ;;
   opencode-tui)
