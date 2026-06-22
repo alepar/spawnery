@@ -53,6 +53,33 @@ type CP struct {
 		TLSCert  string `koanf:"tls_cert"`
 		TLSKey   string `koanf:"tls_key"`
 	} `koanf:"node"`
+
+	// Skills configures the Garage-backed skill object store for IngestSkillFromURL (sp-nrzf.3.14.4).
+	// When endpoint is empty, URL skill ingest returns FailedPrecondition (no Garage configured).
+	// The S3 key needs PutObject/GetObject/presign on the existing bucket — NOT CreateBucket
+	// (the dev journal key is Forbidden for MakeBucket; provision the bucket out-of-band).
+	Skills struct {
+		// Endpoint is the S3 host:port for CP-internal access (PutObject/StatObject).
+		// Reuses JOURNAL_S3_ENDPOINT when empty in practice, but is a separate config knob
+		// to allow an explicit override.
+		Endpoint config.Secret `koanf:"endpoint"`
+		// NodeEndpoint is the S3 host:port for presigned GET URLs served to nodes.
+		// Defaults to endpoint when empty (dev; S2 cross-netns is task .7).
+		NodeEndpoint string `koanf:"node_endpoint"`
+		// AccessKeyID and SecretAccessKey are the S3 credentials.
+		AccessKeyID     config.Secret `koanf:"access_key_id"`
+		SecretAccessKey config.Secret `koanf:"secret_access_key"`
+		// Region is the S3 region label (Garage default "garage").
+		Region string `koanf:"region"`
+		// DisableTLS uses plain HTTP (dev Garage). Never set in production.
+		DisableTLS bool `koanf:"disable_tls"`
+		// Bucket is the pre-provisioned skills bucket name (default "spawnery-skills").
+		Bucket string `koanf:"bucket"`
+		// GitHubToken is an optional Bearer token for authenticated GitHub API access.
+		GitHubToken config.Secret `koanf:"github_token"`
+		// ZstdLevel is the zstd compression level (1–19; 0 = default ~3).
+		ZstdLevel int `koanf:"zstd_level"`
+	} `koanf:"skills"`
 }
 
 // DevMode reports whether the CP runs in dev (permissive) auth mode.
@@ -112,4 +139,14 @@ var cpEnvAliases = map[string]string{
 	"CP_NODE_ROOT_CA":             "node.root_ca",
 	"CP_NODE_TLS_CERT":            "node.tls_cert",
 	"CP_NODE_TLS_KEY":             "node.tls_key",
+	// Skills / Garage ingest (sp-nrzf.3.14.4)
+	"SKILLS_S3_ENDPOINT":      "skills.endpoint",
+	"SKILLS_S3_NODE_ENDPOINT": "skills.node_endpoint",
+	"SKILLS_S3_ACCESS_KEY":    "skills.access_key_id",
+	"SKILLS_S3_SECRET_KEY":    "skills.secret_access_key",
+	"SKILLS_S3_REGION":        "skills.region",
+	"SKILLS_S3_DISABLE_TLS":   "skills.disable_tls",
+	"SKILLS_BUCKET":           "skills.bucket",
+	"SKILLS_GITHUB_TOKEN":     "skills.github_token",
+	"SKILLS_ZSTD_LEVEL":       "skills.zstd_level",
 }

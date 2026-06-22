@@ -40,3 +40,18 @@ node:
   root_ca: "/etc/spawnery/cp/node-root-ca.pem"
   tls_cert: "/etc/spawnery/cp/server.pem"
   tls_key: "/etc/spawnery/cp/server-key.pem"
+
+# Skills Garage store (sp-nrzf.3.14.4). Empty endpoint disables URL skill ingest (FailedPrecondition).
+# The bucket must be pre-provisioned out-of-band — the CP's S3 key is Forbidden for MakeBucket.
+# Set SKILLS_S3_ENDPOINT (or skills.endpoint) to enable; credentials via SKILLS_S3_ACCESS_KEY /
+# SKILLS_S3_SECRET_KEY (or reuse JOURNAL_S3_* values for the dev setup).
+skills:
+  endpoint: ""           # S3 host:port for CP-internal access; empty = ingest disabled
+  node_endpoint: ""      # S3 host:port for presigned URLs served to nodes; defaults to endpoint
+  access_key_id: ""      # S3 access key
+  secret_access_key: ""  # S3 secret key
+  region: "garage"       # S3 region label (Garage default)
+  disable_tls: false     # true = plain HTTP (dev Garage only)
+  bucket: "spawnery-skills"  # pre-provisioned skills bucket name
+  github_token: ""       # optional GitHub Bearer token (raises rate limit 60→5000/hr per IP)
+  zstd_level: 3          # zstd compression level 1–19 (3 = fast, good ratio)

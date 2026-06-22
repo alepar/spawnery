@@ -176,6 +176,9 @@ const (
 	// SpawnServiceSetCatalogListingProcedure is the fully-qualified name of the SpawnService's
 	// SetCatalogListing RPC.
 	SpawnServiceSetCatalogListingProcedure = "/cp.v1.SpawnService/SetCatalogListing"
+	// SpawnServiceIngestSkillFromURLProcedure is the fully-qualified name of the SpawnService's
+	// IngestSkillFromURL RPC.
+	SpawnServiceIngestSkillFromURLProcedure = "/cp.v1.SpawnService/IngestSkillFromURL"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -252,6 +255,12 @@ type SpawnServiceClient interface {
 	UpdateCatalogEntry(context.Context, *connect.Request[v1.UpdateCatalogEntryRequest]) (*connect.Response[v1.UpdateCatalogEntryResponse], error)
 	DeleteCatalogEntry(context.Context, *connect.Request[v1.DeleteCatalogEntryRequest]) (*connect.Response[v1.DeleteCatalogEntryResponse], error)
 	SetCatalogListing(context.Context, *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error)
+	// IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
+	// SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
+	// content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
+	// Idempotent on (creator, sha256): returns the existing catalog_id on conflict.
+	// Requires Garage to be configured; returns FailedPrecondition when not.
+	IngestSkillFromURL(context.Context, *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -571,6 +580,12 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("SetCatalogListing")),
 			connect.WithClientOptions(opts...),
 		),
+		ingestSkillFromURL: connect.NewClient[v1.IngestSkillFromURLRequest, v1.IngestSkillFromURLResponse](
+			httpClient,
+			baseURL+SpawnServiceIngestSkillFromURLProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("IngestSkillFromURL")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -627,6 +642,7 @@ type spawnServiceClient struct {
 	updateCatalogEntry       *connect.Client[v1.UpdateCatalogEntryRequest, v1.UpdateCatalogEntryResponse]
 	deleteCatalogEntry       *connect.Client[v1.DeleteCatalogEntryRequest, v1.DeleteCatalogEntryResponse]
 	setCatalogListing        *connect.Client[v1.SetCatalogListingRequest, v1.SetCatalogListingResponse]
+	ingestSkillFromURL       *connect.Client[v1.IngestSkillFromURLRequest, v1.IngestSkillFromURLResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -884,6 +900,11 @@ func (c *spawnServiceClient) SetCatalogListing(ctx context.Context, req *connect
 	return c.setCatalogListing.CallUnary(ctx, req)
 }
 
+// IngestSkillFromURL calls cp.v1.SpawnService.IngestSkillFromURL.
+func (c *spawnServiceClient) IngestSkillFromURL(ctx context.Context, req *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error) {
+	return c.ingestSkillFromURL.CallUnary(ctx, req)
+}
+
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -958,6 +979,12 @@ type SpawnServiceHandler interface {
 	UpdateCatalogEntry(context.Context, *connect.Request[v1.UpdateCatalogEntryRequest]) (*connect.Response[v1.UpdateCatalogEntryResponse], error)
 	DeleteCatalogEntry(context.Context, *connect.Request[v1.DeleteCatalogEntryRequest]) (*connect.Response[v1.DeleteCatalogEntryResponse], error)
 	SetCatalogListing(context.Context, *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error)
+	// IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
+	// SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
+	// content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
+	// Idempotent on (creator, sha256): returns the existing catalog_id on conflict.
+	// Requires Garage to be configured; returns FailedPrecondition when not.
+	IngestSkillFromURL(context.Context, *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1273,6 +1300,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("SetCatalogListing")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceIngestSkillFromURLHandler := connect.NewUnaryHandler(
+		SpawnServiceIngestSkillFromURLProcedure,
+		svc.IngestSkillFromURL,
+		connect.WithSchema(spawnServiceMethods.ByName("IngestSkillFromURL")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
@@ -1377,6 +1410,8 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceDeleteCatalogEntryHandler.ServeHTTP(w, r)
 		case SpawnServiceSetCatalogListingProcedure:
 			spawnServiceSetCatalogListingHandler.ServeHTTP(w, r)
+		case SpawnServiceIngestSkillFromURLProcedure:
+			spawnServiceIngestSkillFromURLHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1588,4 +1623,8 @@ func (UnimplementedSpawnServiceHandler) DeleteCatalogEntry(context.Context, *con
 
 func (UnimplementedSpawnServiceHandler) SetCatalogListing(context.Context, *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.SetCatalogListing is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) IngestSkillFromURL(context.Context, *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.IngestSkillFromURL is not implemented"))
 }

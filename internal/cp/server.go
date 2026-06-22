@@ -32,6 +32,8 @@ import (
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/scheduler"
+	"spawnery/internal/cp/skillfetch"
+	"spawnery/internal/cp/skillstore"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 	"spawnery/internal/intent"
@@ -138,6 +140,12 @@ type Server struct {
 	// link (CodeFailedPrecondition) or the AS is unreachable (CodeUnavailable). nil = no preflight
 	// (non-github lanes, hermetic tests without an AS).
 	linkChecker asLinkChecker
+
+	// skillFetcher and skillStore are the seams for IngestSkillFromURL (sp-nrzf.3.14.4).
+	// Both default to nil; unconfigured => IngestSkillFromURL returns FailedPrecondition.
+	// cmd/spawnery_cp wires these via SetSkillIngest when Garage is configured.
+	skillFetcher skillfetch.Fetcher
+	skillStore   skillstore.SkillStore
 
 	// ForkSpawn seams. The materializer is intentionally narrow and currently defaults to
 	// Unimplemented; downstream fork tasks install real source-preserving capture/seeding. The

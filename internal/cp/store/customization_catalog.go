@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 
 	"github.com/uptrace/bun"
 )
@@ -85,4 +86,40 @@ func (r *customizationCatalogRepo) Delete(ctx context.Context, catalogID string)
 		return ErrNotFound
 	}
 	return nil
+}
+
+// GetByCreatorSHA returns the entry for (creatorID, sha256hex). ErrNotFound when absent.
+func (r *customizationCatalogRepo) GetByCreatorSHA(ctx context.Context, creatorID, sha256hex string) (CustomizationCatalogEntry, error) {
+	var e CustomizationCatalogEntry
+	err := r.db.NewSelect().Model(&e).
+		Where("creator_id = ? AND sha256 = ?", creatorID, sha256hex).
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CustomizationCatalogEntry{}, ErrNotFound
+	}
+	return e, err
+}
+
+// CreateSkill inserts a URL-ingested skill entry. Maps a unique-constraint violation on
+// (creator_id, sha256) to ErrConflict.
+func (r *customizationCatalogRepo) CreateSkill(ctx context.Context, e CustomizationCatalogEntry) error {
+	_, err := r.db.NewInsert().Model(&e).Exec(ctx)
+	if err != nil && isUniqueViolation(err) {
+		return ErrConflict
+	}
+	return err
+}
+
+// isUniqueViolation reports whether err is a unique-constraint violation from the SQLite or
+// Postgres driver. There is no cross-driver sentinel; we inspect the error message.
+// SQLite: "UNIQUE constraint failed: ..." (modernc/mattn drivers)
+// Postgres: SQLSTATE 23505 "duplicate key value violates unique constraint"
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") || // SQLite
+		strings.Contains(msg, "duplicate key value violates unique constraint") || // Postgres
+		strings.Contains(msg, "23505") // Postgres SQLSTATE in some driver wrappers
 }

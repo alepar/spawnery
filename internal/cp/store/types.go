@@ -329,15 +329,26 @@ type ProfileSecret struct {
 // CustomizationCatalogEntry is one curated customization item in the catalog.
 // Any authenticated owner may create entries they own (creator_id); writes (Update/Delete/SetListed)
 // are creator-only; List returns only listed=true entries (globally readable).
+//
+// Provenance fields (source_url, source_ref, source_subdir, sha256, size) are nullable and only set
+// for URL-ingested skills (sp-nrzf.3.14.4). Inline entries carry nil for all provenance columns.
+// The unique index (creator_id, sha256) enforces idempotent ingest — NULL sha256 rows are treated
+// as distinct under both SQLite and Postgres unique-index NULL semantics.
 type CustomizationCatalogEntry struct {
 	bun.BaseModel `bun:"table:customization_catalog,alias:cc"`
-	CatalogID     string `bun:"catalog_id,pk"`
-	CreatorID     string `bun:"creator_id,notnull"`
-	Kind          string `bun:"kind,notnull"` // skill|mcp|config|plugin (ProfileEntryKind string)
-	Name          string `bun:"name,notnull"`
-	Description   string `bun:"description,notnull"`
-	Content       []byte `bun:"content"` // curated inline content (BLOB/bytea)
-	Listed        bool   `bun:"listed,notnull"`
-	CreatedAt     int64  `bun:"created_at,notnull"`
-	UpdatedAt     int64  `bun:"updated_at,notnull"`
+	CatalogID     string  `bun:"catalog_id,pk"`
+	CreatorID     string  `bun:"creator_id,notnull"`
+	Kind          string  `bun:"kind,notnull"` // skill|mcp|config|plugin (ProfileEntryKind string)
+	Name          string  `bun:"name,notnull"`
+	Description   string  `bun:"description,notnull"`
+	Content       []byte  `bun:"content"`          // curated inline content (BLOB/bytea); nil for URL skills
+	Listed        bool    `bun:"listed,notnull"`
+	CreatedAt     int64   `bun:"created_at,notnull"`
+	UpdatedAt     int64   `bun:"updated_at,notnull"`
+	// Provenance (sp-nrzf.3.14.4): set for URL-ingested skills; nil for inline entries.
+	SourceURL    *string `bun:"source_url"`
+	SourceRef    *string `bun:"source_ref"`
+	SourceSubdir *string `bun:"source_subdir"`
+	SHA256       *string `bun:"sha256"` // hex sha256 of the canonical plain tar (content identity)
+	Size         *int64  `bun:"size"`   // plain tar size in bytes
 }

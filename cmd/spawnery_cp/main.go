@@ -29,6 +29,8 @@ import (
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/scheduler"
+	"spawnery/internal/cp/skillfetch"
+	"spawnery/internal/cp/skillstore"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 	"spawnery/internal/h2keepalive"
@@ -235,6 +237,32 @@ func main() {
 	if asURL := strings.TrimSpace(cfg.Auth.ASURL); asURL != "" {
 		srv.SetASLinkChecker(asURL, string(cfg.Auth.ASRPCSecret))
 		log.Printf("cp: GitHub link preflight checker wired to AS %s", asURL)
+	}
+
+	// URL skill ingest (sp-nrzf.3.14.4): wire Garage skill store + fetcher when configured.
+	// skills.endpoint empty => IngestSkillFromURL returns FailedPrecondition (no Garage configured).
+	// The S3 bucket (default "spawnery-skills") must be pre-provisioned out-of-band —
+	// the CP's journal key is Forbidden for MakeBucket (spike S1 finding).
+	if ep := strings.TrimSpace(string(cfg.Skills.Endpoint)); ep != "" {
+		ssCfg := skillstore.Config{
+			Endpoint:        ep,
+			NodeEndpoint:    cfg.Skills.NodeEndpoint,
+			AccessKeyID:     string(cfg.Skills.AccessKeyID),
+			SecretAccessKey: string(cfg.Skills.SecretAccessKey),
+			Region:          cfg.Skills.Region,
+			DisableTLS:      cfg.Skills.DisableTLS,
+			Bucket:          cfg.Skills.Bucket,
+		}
+		ss, err := skillstore.New(ssCfg)
+		if err != nil {
+			log.Fatalf("cp: build skill store: %v", err)
+		}
+		fetcher := skillfetch.New(skillfetch.Config{
+			GitHubToken: string(cfg.Skills.GitHubToken),
+			ZstdLevel:   cfg.Skills.ZstdLevel,
+		})
+		srv.SetSkillIngest(fetcher, ss)
+		log.Printf("cp: skill ingest wired (endpoint=%s bucket=%s)", ep, ssCfg.Bucket)
 	}
 
 	srv.StartReconciler(ctx) // background loop: drive model_applied=false spawns to convergence (sp-bp9w.7)
