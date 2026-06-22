@@ -1122,7 +1122,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	// ArtifactsRoot, bind-mounted at ArtifactsMountPath. Re-applied idempotently on every create/resume
 	// (artifacts are create-time-declared but durable across the spawn's life). Sensitive artifacts are
 	// routed to the secrets tmpfs (0600) by Materialize, never landed here.
-	if err := m.artifacts.Materialize(id, sel.Artifacts, m.secrets); err != nil {
+	if err := m.artifacts.Materialize(ctx, id, sel.Artifacts, m.secrets); err != nil {
 		finalizeAll()
 		cleanupSpawnDirs()
 		return nil, fmt.Errorf("prepare artifacts: %w", err)

@@ -124,19 +124,31 @@ enum ArtifactTarget {
   ARTIFACT_TARGET_SIDECAR     = 2;
 }
 
+// ObjectRef points an ArtifactSpec at a content-addressed object in the skills bucket instead of
+// carrying inline bytes (non-sensitive payloads only). object_key + sha256 are the durable identity
+// persisted on the spawn row; presigned_url is a short-lived (~30m TTL) GET URL the CP mints at
+// StartSpawn and is NOT persisted. A non-nil objectref selects the by-ref materialize path.
+message ObjectRef {
+  string object_key    = 1; // content-addressed key, e.g. skills/<sha256>.tar.zst
+  string sha256        = 2; // hex sha256 of the PLAIN (uncompressed) tar — identity + integrity
+  string presigned_url = 3; // CP-minted short-lived GET URL; transient, redact from logs
+}
+
 // ArtifactSpec is a content-agnostic delivery unit: raw bytes landed into a pod container
-// at a confined dest path. Inline-only for MVP (by-ref deferred; reject oversize at CreateSpawn).
+// at a confined dest path. Inline delivery and by-ref delivery (via objectref) are both
+// supported for non-sensitive payloads; sensitive=true requires inline (E2E SealedSecret relay).
 // sensitive=true routes the payload through the E2E SealedSecret relay (CP stays
 // ciphertext-blind); env_var_name binds a sensitive MCP secret value to its target env var name.
 message ArtifactSpec {
   string              id               = 1;
-  bytes               inline           = 2;  // inline content; by-ref dropped from MVP
+  bytes               inline           = 2;  // inline content (mutually exclusive with objectref)
   ArtifactContentType content_type     = 3;
   ArtifactTarget      target_container = 4;
   string              dest_path        = 5;  // path-confined under staging/agent-config root
   uint32              mode             = 6;  // unix mode for BYTES (TAR carries per-file modes)
   bool                sensitive        = 7;
   string              env_var_name     = 8;  // sensitive MCP secret -> env var binding
+  ObjectRef           objectref        = 9;  // by-ref delivery (non-sensitive skill payloads only); presence => by-ref, absent => inline
 }
 
 // name (optional): human-readable spawn label; empty => the server assigns a default

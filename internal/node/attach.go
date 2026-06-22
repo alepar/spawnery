@@ -542,7 +542,7 @@ func artifactsFromProto(in []*nodev1.ArtifactSpec) []spawnlet.Artifact {
 		if a.GetContentType() == nodev1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_TAR {
 			ct = spawnlet.ArtifactTar
 		}
-		out = append(out, spawnlet.Artifact{
+		art := spawnlet.Artifact{
 			ID:          a.GetId(),
 			Inline:      a.GetInline(),
 			ContentType: ct,
@@ -550,7 +550,13 @@ func artifactsFromProto(in []*nodev1.ArtifactSpec) []spawnlet.Artifact {
 			Mode:        a.GetMode(),
 			Sensitive:   a.GetSensitive(),
 			EnvVarName:  a.GetEnvVarName(),
-		})
+		}
+		if ref := a.GetObjectref(); ref != nil {
+			art.ObjectKey = ref.GetObjectKey()
+			art.Sha256 = ref.GetSha256()
+			art.PresignedURL = ref.GetPresignedUrl()
+		}
+		out = append(out, art)
 	}
 	return out
 }
