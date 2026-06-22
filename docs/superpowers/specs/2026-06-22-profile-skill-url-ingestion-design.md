@@ -120,6 +120,13 @@ already uses.
 > §6.2 task is scoped accordingly. The node→Garage leg (journal restore) is genuinely proven, but
 > see spike **S2** — it does not prove the *presign-from-CP* path.
 
+> **Bucket provisioning (spike S1 finding, 2026-06-22).** The skills bucket is **not** created by the
+> CP via S3 `CreateBucket`: the dev journal key returns `Forbidden` on `MakeBucket`. Provision it
+> out-of-band — via the **Garage admin API** (the journal already carries `JOURNAL_GARAGE_ADMIN_*`
+> for bucket minting) or a dedicated createBucket-capable key, or pre-create it once at deploy /
+> `just garage`. The CP's runtime S3 key needs only `PutObject` / `GetObject` / presign on the
+> existing bucket, which S1 confirmed works.
+
 **Discarded:** keeping the `content BLOB` inline (the pre-change design) — simplest and Garage-free,
 but caps skills at 1 MiB and bloats the relational store. A **hybrid** (inline under 1 MiB, Garage
 above) was rejected to avoid two delivery code paths; URL skills commit fully to Garage.
@@ -341,10 +348,12 @@ A new epic extending `sp-nrzf.3` (profiles) and `sp-l5sx` (substrate), with chil
    node presigned-GET → zstd-decode → sha256-verify → unpack (`internal/spawnlet`). Proto-touching:
    serialize.
 2. **CP Garage skill store + `skillfetch` + RPC + catalog migration** — *gated on spikes S1/S2/S3.*
-   The CP-side minio client is **net-new** (the CP has never spoken S3). `skillfetch` pkg
-   (per-hop-allowlisted streaming fetch + GitHub token/rate-limit + canonical repack + zstd); minio-go
-   skill store (Put-if-absent + `AbortMultipartUpload` on error + presign against the node-reachable
-   host); `IngestSkillFromURL` RPC (idempotent on `(owner,sha256)`); catalog schema migration
+   The CP-side minio client is **net-new** (the CP has never spoken S3; S1 confirmed Put/presign work
+   with the journal-style key but **not** `MakeBucket` — provision the bucket out-of-band via the
+   admin API / deploy, §4.3). `skillfetch` pkg (per-hop-allowlisted streaming fetch + GitHub
+   token/rate-limit + canonical repack + zstd); minio-go skill store (Put-if-absent +
+   `AbortMultipartUpload` on error + presign against the node-reachable host); `IngestSkillFromURL`
+   RPC (idempotent on `(owner,sha256)`); catalog schema migration
    (`source_url/source_ref/source_subdir/sha256/size` + unique `(owner,sha256)`, sqlite + pg).
    Proto-touching: serialize.
 3. **CP assembly: emit by-ref skill payloads** — `profiles_assembly.go` emits `ObjectRef` specs for
@@ -358,19 +367,25 @@ A new epic extending `sp-nrzf.3` (profiles) and `sp-l5sx` (substrate), with chil
 The roast (2026-06-22, **REVISE** — 0 blockers, 13 majors confirmed 3/3) surfaced load-bearing
 assumptions to de-risk *before* building. Each is cheap and decisive:
 
-- **S1 — CP can drive Garage S3 at all (kills the feasibility unknown).** The CP has never spoken
-  S3. Write ~30 lines: build a `minio.Client` from `JOURNAL_S3_*` against `just garage`,
-  `MakeBucket(spawnery-skills)` + `PutObject` a small object. *Kill criteria:* can't construct a
-  working client → the §6.2 scope and the whole Garage approach need rethink.
-- **S2 — CP-presigned GET is node-usable.** `cl.PresignedGetObject(bucket, key, 30m, nil)`, then
-  plain `http.Get` the URL from a separate process **with no creds**, against the **node-reachable**
-  Garage address (not the CP's internal endpoint). *Kill criteria:* `403 SignatureDoesNotMatch` /
-  host unroutable → CP must presign against a separate node-facing hostname (path-style, fixed
+- **S1 — CP can drive Garage S3 at all (kills the feasibility unknown). ✅ DONE 2026-06-22 — PASS,
+  with a finding.** A spike built a `minio.Client` from `JOURNAL_S3_*` against the running dev Garage
+  and confirmed `PutObject` + `PresignedGetObject` + a **no-creds `http.Get`** round-trip (200, sha
+  match). The CP *can* drive Garage S3. **Finding:** `MakeBucket` returned **`Forbidden` — the dev
+  journal access key is not allowed to create buckets.** So the skills bucket must be **provisioned
+  out-of-band**, not via CP `CreateBucket` with the journal key (see §4.3 / §6.2).
+- **S2 — CP-presigned GET is node-usable. ⚠️ PARTIAL — still open.** S1 proved the presign *mechanism*
+  works, but the GET ran in the **same host netns** with the URL host `127.0.0.1:3900`. The
+  load-bearing question — signature validity + routability from a *separate node netns* against the
+  **node-reachable** Garage address (not the CP's internal endpoint) — is **unproven**; run it on the
+  e2e lane (presign on the CP, GET from the node netns). *Kill criteria:* `403 SignatureDoesNotMatch`
+  / host unroutable → CP must presign against a separate node-facing hostname (path-style, fixed
   region); if unfixable, fall back to node-held read creds.
-- **S3 — deterministic repack.** Repack the same extracted skill dir twice via the planned code;
-  `diff` the two `sha256`. Then repack two commits with a byte-identical tree. *Kill criteria:*
-  hashes differ → the canonicalization in §4.5 (zero mtime/uid/gid, sorted entries) is mandatory
-  before ship, else dedup + the unique `(owner,sha256)` constraint are fiction.
+- **S3 — deterministic repack. ✅ DONE 2026-06-22 — PASS.** A spike repacked the example skill tree
+  twice via the planned canonical packer → **identical sha256** (`0e8fdbf8…`), and the hash was
+  **unchanged after perturbing an mtime**; the naive (mtime-preserving) packer demonstrably diverged.
+  Canonicalization (§4.5: zero mtime/uid/gid, normalized mode, sorted entries) makes the repack
+  deterministic — confirmed mandatory; without it dedup + the unique `(owner,sha256)` constraint are
+  fiction.
 - **S4 — does resume need Garage?** Suspend then resume a URL-skill spawn with Garage **stopped**.
   *Kill criteria:* it resumes with the skill present → gate by-ref materialize to first-create only
   (§5); it does not → keep the resume dependency and the §4.6 TTL/re-presign protocol must cover
@@ -387,3 +402,12 @@ should run first.
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from
 the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+- **2026-06-22 — spikes S1 + S3 run (pre-implementation).** S3 PASS: canonical repack (zero
+  mtime/uid/gid, normalized mode, sorted entries) is byte-deterministic and mtime/order-independent;
+  the naive mtime-preserving packer diverges — §4.5 canonicalization confirmed mandatory. S1 PASS
+  with a finding: a CP-side `minio.Client` from `JOURNAL_S3_*` does `PutObject` + `PresignedGetObject`
+  + a no-creds GET round-trip against dev Garage, but `MakeBucket` is `Forbidden` for the journal key
+  → the skills bucket is provisioned out-of-band (admin API / deploy), not by CP `CreateBucket`
+  (§4.3). S2 (presign reachability/signature-validity from a *separate node netns* against the
+  node-facing Garage host) remains open for the e2e lane — S1 exercised only same-host loopback.
