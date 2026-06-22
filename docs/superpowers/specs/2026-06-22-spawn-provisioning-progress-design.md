@@ -1,6 +1,6 @@
 # Spawn provisioning progress + failure surfacing (web + spawnctl)
 
-**Status:** draft · **Date:** 2026-06-22 · Decided via brainstorm.
+**Status:** implemented (epic sp-m859.3, 2026-06-22) · **Date:** 2026-06-22 · Decided via brainstorm.
 
 When a spawn is created, show **which provisioning step is running and how many are done of the
 total** (clone repos, mint credentials, create pod, restore snapshot, pull image, start agent, …),
@@ -139,6 +139,30 @@ provisioning and knows the config). Adding/reordering a milestone is a one-place
 4. Clients: spawnctl, then web (independent files; can parallelize once 1-3 land).
 
 ## Post-Implementation Notes
+
+**2026-06-22 — Implemented (epic sp-m859.3; branch `feat/sp-m859.3-provisioning-progress`).** All
+four tasks (A foundation, B node, C spawnctl, D web) landed through plan → implement → spec-review →
+quality-review → fix loops; final whole-epic review = READY TO MERGE; full gate green (`make gen`,
+`go test -race ./...`, golangci-lint 0, vitest, eslint, tsc). Deltas the implementation settled:
+- **No `step_state` on the wire.** The spec mentioned a `{running,done}` step state; the implemented
+  contract carries only `step_index/step_total/step_key/step_label` on node `SpawnStatus`. State is
+  inferred CP-/client-side (`<k` done / `=k` running / `>k` pending; cleared on ACTIVE). Consistent
+  across producer (B), CP (A), and renderers (C/D).
+- **Failure attribution is map-sourced, not scheduler-threaded.** The node emits the failing
+  `step_key` with `step_total>0` on the ERROR `SpawnStatus`; the CP status handler updates an
+  in-memory `provisioningProgress` map **before** `OnStatus` unblocks `Provision`, and
+  `provisionSpawn` reads the map to persist `error_step`/`error_detail` via `SetError`. No scheduler
+  signature change. `emitErr` was hardened to always send `step_total=len(steps)>0` even if the
+  current key isn't found, so the attribution contract can't silently drop.
+- **Coarse catalog vs code order:** for cross-node rootfs resume, `restore-snapshot` emits after
+  `setup-network` (transient non-monotonic index); a sidecar-ready-probe failure attributes to
+  `start-agent`. Failure attribution is always to a plausible in-flight milestone with
+  `step_total>0`; only the transient display index is affected. Accepted coarse-grained limitation.
+- **Web can't render a fully-named checklist** (server sends only the current step + k/N; the
+  catalog lives only on the node) — the detail pane shows N unlabeled segments + "Step k of N:
+  {current label}".
+- **Follow-up (sp-m859.3.5):** recreate/resume/fork failure paths persist the detail but not the
+  failing step (`error_step=""`); clients degrade gracefully. Scoped out of the create-path spec.
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged
 from the assumptions above — append a dated note here, whether or not a formal debugging skill was
