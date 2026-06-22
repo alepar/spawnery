@@ -195,6 +195,38 @@ for (const d of drivers) {
   standalone oracle within the spike budget, OAuth phases are descoped to dev-token-only targets and
   real-OAuth coverage is re-planned as a product change to the auth service.
 
+  **RESULT (2026-06-22, sp-tq0t.1 — GREEN, kill criteria NOT triggered).** Real-OAuth coverage is
+  buildable headlessly. Findings (code-grounded):
+  - The auth-relevant key is the **session key** (ECDSA P-256, non-extractable, IndexedDB
+    `spawnery-auth`); the X25519 device-set keys are owner-sealed-secrets and irrelevant here. The
+    refresh **PoP** is bespoke but fully specified (`web/src/auth/pop.ts`: domain
+    `spawnery/refresh-pop/v1` ‖ sha256(refresh_token) ‖ be64(ts) ‖ nonce, ECDSA-P256 P1363) and
+    **already reproduced in Go** by `spawnctl` (`cmd/spawnctl/authstate.go`) — so it is portable to a
+    Node oracle. Access-token TTL = 15 min; `/refresh` is gated on the non-extractable key + an
+    HttpOnly refresh cookie.
+  - **The binding point is open:** `GET /oauth/authorize?session_pubkey=<b64 SPKI>` binds a refresh
+    family to a caller-supplied key. The Auth Service supports **`AS_FAKE_GITHUB=1`** (an in-process
+    fake IdP the team **already uses** for its auth e2e suite — `web/playwright.auth.config.ts` +
+    `web/e2e/global-setup-auth.ts`), which runs the *real* auth/token/PoP code paths but stubs the
+    GitHub login page.
+  - **Chosen approach — (b) for the oracle + (a) for the browser, both against an `AS_FAKE_GITHUB`
+    target:** the Node `apiDriver` generates its own P-256 session key, drives `/oauth/authorize` →
+    `/oauth/callback` over HTTP (fake IdP auto-redirects), captures the access token + refresh cookie,
+    and refreshes autonomously with the reproduced PoP — **fully headless, no browser, no
+    github.com**. The `webDriver` uses a **persistent Playwright context** (no `storageState`
+    round-trip; the non-extractable key lives in the context's IndexedDB for the run), reusing the
+    existing auth e2e setup as ~90% reference.
+  - **(c) dev-token** (`CP_DEV_TOKENS`, default in any non-`prod` CP) remains the zero-cost path for
+    scenarios that only need a CP bearer and don't exercise the AS/PoP path. It is silently disabled
+    at `auth.mode=prod`.
+  - **The only RED path is automating *real* github.com** (2FA/bot-detection/ToS) — universally
+    avoided; the `AS_FAKE_GITHUB` design already encodes that decision.
+  - **Carried constraint → Phase 7 / GH prereq (sp-tq0t.10/.11):** `AS_FAKE_GITHUB` gives auth but
+    **cannot mint a *real* GitHub token** for repo mount/push. Phase-7 real-GitHub scenarios therefore
+    need a target wired to a **real** GitHub OAuth app + test org (the provisioning prereq), which is
+    incompatible with `AS_FAKE_GITHUB` on the *same* instance. Resolve in the GH-prereq task: either a
+    dedicated real-GitHub target for Phase 7, or a fake-link path for non-push GitHub coverage.
+
 ## Scope & phasing
 
 | Phase | Coverage | Surfaces | Agent cost |
@@ -223,8 +255,11 @@ Phase 0 (incl. Spike S1) + Phase 1 is the MVP that proves the framework end to e
 
 ## Risks / open questions
 
-- **Spike S1 is the gating risk** — if headless OAuth+PoP proves infeasible, OAuth phases descope to
-  dev-token targets (see S1 kill criteria).
+- ~~**Spike S1 is the gating risk** — if headless OAuth+PoP proves infeasible, OAuth phases descope to
+  dev-token targets.~~ **RESOLVED 2026-06-22 (GREEN)** — headless OAuth+PoP is buildable against an
+  `AS_FAKE_GITHUB` target (oracle reproduces the PoP in Node; browser uses a persistent context). See
+  the S1 Result block under Spikes. New carried constraint: Phase-7 *real*-GitHub needs a real-GitHub
+  target, incompatible with `AS_FAKE_GITHUB` on the same instance (tracked on sp-tq0t.10).
 - **Real-agent flake / cost**: side-effect polling with generous timeouts under the wall-clock cap;
   bounded retries (2) for *infra* flake only; `@agent` failures do not auto-retry.
 - **Garage dependency** for Phase 3 on the target — if a target lacks it, those tests fail loudly.
@@ -236,6 +271,14 @@ Phase 0 (incl. Spike S1) + Phase 1 is the MVP that proves the framework end to e
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from
 the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
 
+- **2026-06-22 (Spike S1 resolved — GREEN):** investigated the live auth path (session key = ECDSA
+  P-256 non-extractable; bespoke refresh PoP already reproduced in Go by `spawnctl`;
+  `/oauth/authorize?session_pubkey=…` binds a caller key; `AS_FAKE_GITHUB` runs real auth code with a
+  stubbed IdP and is already used by the auth e2e suite). Verdict: headless OAuth+PoP buildable —
+  oracle reproduces PoP in Node + drives the fake-IdP code flow over HTTP; browser uses a persistent
+  Playwright context. dev-token (`CP_DEV_TOKENS`, non-prod default) stays the zero-cost CP-only path.
+  Only real-github.com automation is RED. Carried constraint logged for Phase 7 (real-GitHub vs
+  `AS_FAKE_GITHUB`). Spike bead sp-tq0t.1 closed; OAuthPoP task sp-tq0t.3 updated with the approach.
 - **2026-06-22 (roast r1):** `superpowers:roast` returned BLOCK. Inflated count (same-family panel
   confirmed 80/83) but several distinct findings verified against code and folded in: auth model
   (non-extractable-key PoP) breaks `storageState` reuse and dev-token header-injection → added
