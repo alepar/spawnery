@@ -233,6 +233,7 @@ func (s *Server) restoreForkingSourceAfterUnpause(ctx context.Context, sourceID,
 }
 
 func (s *Server) startFork(ctx context.Context, owner, sourceID string, fork store.Spawn, nodeID string, targetGeneration uint64, rootfsPins []store.RootfsArtifactPin, rootfsLocalOnly bool) (string, error) {
+	defer s.provisioning.clear(fork.ID)
 	placement := registry.Placement{Owner: owner, Image: fork.Image, TargetNodeID: nodeID}
 	artifacts, err := s.st.Spawns().GetArtifacts(ctx, fork.ID)
 	if err != nil {

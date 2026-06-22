@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func liveGen(t *testing.T, st Store, id string) int64 {
@@ -175,6 +176,47 @@ func TestSetErrorPersistsAndTruncatesDetail(t *testing.T) {
 	}
 	if sp2.ErrorStep != "" || sp2.ErrorDetail != "" {
 		t.Fatalf("sp2 error fields non-empty: step=%q detail=%q", sp2.ErrorStep, sp2.ErrorDetail)
+	}
+}
+
+// TestSetErrorTruncatesAtRuneBoundary verifies that when a multi-byte rune straddles the
+// 8192-byte cap boundary, the truncation drops the partial rune rather than storing invalid UTF-8
+// (sp-m859.3). Exercises the byte-cap-then-ToValidUTF8 order in SetError.
+func TestSetErrorTruncatesAtRuneBoundary(t *testing.T) {
+	st := NewTestStore(t)
+	seedAppAndOwner(t, st)
+	ctx := context.Background()
+
+	// Construct a string where the 8192-byte boundary falls mid-rune.
+	// 'é' (U+00E9) encodes as 2 bytes (0xC3 0xA9).
+	// 8191 ASCII bytes followed by 'é' (2 bytes) = 8193 bytes total.
+	// The byte-cap slices at [:8192], landing after the first byte of 'é' — an incomplete rune.
+	// ToValidUTF8 must strip that partial rune, yielding exactly 8191 bytes of valid UTF-8.
+	detail := strings.Repeat("x", 8191) + "é"
+	if len(detail) != 8193 {
+		t.Fatalf("test setup: expected 8193 bytes, got %d", len(detail))
+	}
+
+	inTx(t, st, func(tx Store) error { return tx.Spawns().Create(ctx, newSpawn("sp-rune"), nil) })
+	inTx(t, st, func(tx Store) error { return tx.Spawns().SetError(ctx, "sp-rune", "rune-test", detail) })
+
+	sp, err := st.Spawns().Get(ctx, "sp-rune")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	got := sp.ErrorDetail
+	if len(got) > maxErrorDetailBytes {
+		t.Fatalf("error_detail len=%d want ≤%d", len(got), maxErrorDetailBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("error_detail is not valid UTF-8 after truncation")
+	}
+	if !strings.HasPrefix(detail, got) {
+		t.Fatalf("error_detail %q is not a prefix of the input", got)
+	}
+	// The partial rune must have been dropped: result is 8191 bytes (not 8192).
+	if len(got) != 8191 {
+		t.Fatalf("error_detail len=%d want 8191 (partial rune dropped)", len(got))
 	}
 }
 

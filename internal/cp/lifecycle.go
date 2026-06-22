@@ -799,6 +799,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 	}); err != nil {
 		return "", connect.NewError(connect.CodeInternal, err)
 	}
+	defer s.provisioning.clear(id)
 
 	// Transition Starting→Resuming under the held claim (lease+seq+gen fenced). Sweepers now read
 	// Resuming and skip this spawn during the provision round-trip.
@@ -1217,6 +1218,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	}); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
+	defer s.provisioning.clear(req.Msg.SpawnId)
 	placement.Image = sp.Image
 
 	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
@@ -1302,7 +1304,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 	}
 	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, nil, storeToNodeArtifacts(arts), secrets)
 	if err != nil {
-		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", ""); serr != nil {
+		if serr := s.st.Spawns().SetError(ctx, req.Msg.SpawnId, "", err.Error()); serr != nil {
 			log.Printf("RecreateSpawn %s: SetError after provision failure also failed: %v", req.Msg.SpawnId, serr)
 		}
 		return nil, err
