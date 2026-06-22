@@ -366,10 +366,13 @@ func TestCPTmuxSuspendResumeWithRootfsDelta(t *testing.T) {
 	t.Log("tmux rootfs-delta suspend→resume verified")
 }
 
-// waitActiveTmux polls ListSpawns until the spawn reaches ACTIVE, with a 60s timeout for container boot.
-func waitActiveTmux(ctx context.Context, t *testing.T, cl cpv1connect.SpawnServiceClient, id string) {
+// waitActiveWithTimeout polls ListSpawns until the spawn reaches ACTIVE or budget expires.
+// The budget should account for the full boot path: container pull (if not cached), tmux startup,
+// and any artifact materialization the lane requires. Callers with heavier boot paths (e.g.
+// presigned tarball fetch + apply-artifacts.sh) must pass a larger budget than plain tmux.
+func waitActiveWithTimeout(ctx context.Context, t *testing.T, cl cpv1connect.SpawnServiceClient, id string, budget time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(budget)
 	for {
 		ls, err := cl.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
 		if err != nil {
@@ -388,10 +391,18 @@ func waitActiveTmux(ctx context.Context, t *testing.T, cl cpv1connect.SpawnServi
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("spawn %s did not reach ACTIVE within 60s", id)
+			t.Fatalf("spawn %s did not reach ACTIVE within %s", id, budget)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// waitActiveTmux polls ListSpawns until the spawn reaches ACTIVE, with a 60s timeout for container boot.
+// The 60s budget covers plain tmux boot (no artifact materialization). Use waitActiveWithTimeout
+// directly when the boot path includes extra work (e.g. presigned tarball fetch).
+func waitActiveTmux(ctx context.Context, t *testing.T, cl cpv1connect.SpawnServiceClient, id string) {
+	t.Helper()
+	waitActiveWithTimeout(ctx, t, cl, id, 60*time.Second)
 }
 
 func splitLines(s string) []string {

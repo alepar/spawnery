@@ -486,9 +486,11 @@ func TestCPSkillIngestE2E(t *testing.T) {
 	})
 
 	// ── Phase 5: Wait for ACTIVE ──────────────────────────────────────────────────────────────
-	// Container boot + tmux startup + artifact materialization: allow 120s.
-	t.Log("phase 5: waiting for ACTIVE (120s budget)")
-	waitActiveTmux(ctx, t, cl, spawnID)
+	// Container boot + tmux startup + artifact materialization (presigned tarball fetch from
+	// Garage + apply-artifacts.sh): allow 120s. The skill path is strictly slower than plain
+	// tmux; 60s (waitActiveTmux's budget) is not sufficient here.
+	t.Log("phase 5: waiting for ACTIVE (120s budget, skill artifact path)")
+	waitActiveWithTimeout(ctx, t, cl, spawnID, 120*time.Second)
 	t.Logf("phase 5: spawn %s is ACTIVE", spawnID)
 
 	// ── Phase 6: Assert SKILL.md is present in the agent container ────────────────────────────
@@ -739,8 +741,7 @@ func runS4DeltaCapture(t *testing.T, parentCtx context.Context, stk skillIngestS
 		Url: skillURL,
 	}))
 	if err != nil {
-		t.Logf("S4-delta: IngestSkillFromURL: %v (non-fatal — using stk catalog if available)", err)
-		return fmt.Sprintf("SKIP — second ingest failed: %v", err)
+		t.Fatalf("S4-delta: IngestSkillFromURL: %v", err)
 	}
 	catalogID := ingestResp.Msg.CatalogId
 
@@ -749,8 +750,7 @@ func runS4DeltaCapture(t *testing.T, parentCtx context.Context, stk skillIngestS
 		Name: "skill-s4-delta",
 	}))
 	if err != nil {
-		t.Logf("S4-delta: CreateProfile: %v", err)
-		return fmt.Sprintf("SKIP — CreateProfile failed: %v", err)
+		t.Fatalf("S4-delta: CreateProfile: %v", err)
 	}
 	deltaProfileID := profResp.Msg.ProfileId
 
@@ -765,8 +765,7 @@ func runS4DeltaCapture(t *testing.T, parentCtx context.Context, stk skillIngestS
 		},
 	}))
 	if err != nil {
-		t.Logf("S4-delta: AddProfileEntry: %v", err)
-		return fmt.Sprintf("SKIP — AddProfileEntry failed: %v", err)
+		t.Fatalf("S4-delta: AddProfileEntry: %v", err)
 	}
 
 	cs, err := cl.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
@@ -777,8 +776,7 @@ func runS4DeltaCapture(t *testing.T, parentCtx context.Context, stk skillIngestS
 		ProfileId:  deltaProfileID,
 	}))
 	if err != nil {
-		t.Logf("S4-delta: CreateSpawn: %v", err)
-		return fmt.Sprintf("SKIP — CreateSpawn failed: %v", err)
+		t.Fatalf("S4-delta: CreateSpawn: %v", err)
 	}
 	deltaSpawnID := cs.Msg.SpawnId
 	t.Logf("S4-delta: spawn created %s (DeltaCapture=true)", deltaSpawnID)
@@ -789,7 +787,7 @@ func runS4DeltaCapture(t *testing.T, parentCtx context.Context, stk skillIngestS
 		time.Sleep(2 * time.Second)
 	})
 
-	waitActiveTmux(ctx, t, cl, deltaSpawnID)
+	waitActiveWithTimeout(ctx, t, cl, deltaSpawnID, 120*time.Second)
 	t.Logf("S4-delta: spawn %s is ACTIVE", deltaSpawnID)
 
 	gen := findSpawnGeneration(ctx, t, cl, deltaSpawnID)
@@ -797,7 +795,12 @@ func runS4DeltaCapture(t *testing.T, parentCtx context.Context, stk skillIngestS
 	skillMDPath := fmt.Sprintf("/root/.claude/skills/%s/SKILL.md", skillName)
 	content := dockerOutputNoFail(ctx, t, ac, skillMDPath)
 	if content == "" {
-		return fmt.Sprintf("SKIP — SKILL.md not present before suspend (delta capture wouldn't help); likely artifact staging issue")
+		installed, _ := exec.CommandContext(ctx, "docker", "exec", ac,
+			"find", "/root/.claude/skills", "-name", "SKILL.md", "-o", "-type", "d").CombinedOutput()
+		t.Fatalf("S4-delta: SKILL.md not found at %s in agent container %s before suspend — "+
+			"artifact materialization failed on the delta path (delta capture cannot bake what isn't there)\n"+
+			"Installed skills tree:\n%s",
+			skillMDPath, ac, string(installed))
 	}
 	t.Logf("S4-delta: SKILL.md present before suspend (%d bytes)", len(content))
 
