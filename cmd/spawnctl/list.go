@@ -35,7 +35,45 @@ func spawnStatus(s *cpv1.SpawnSummary) string {
 	if phase := s.GetTransitionPhase(); phase != "" {
 		return base + ":" + phase
 	}
+	// Append the failed step for ERROR spawns so the table column carries triage context.
+	if s.GetStatus() == cpv1.SpawnStatus_SPAWN_STATUS_ERROR && s.GetErrorStep() != "" {
+		return base + ":" + s.GetErrorStep()
+	}
 	return base
+}
+
+// provisionProgress returns "[step/total] label" when provisioning is in progress, or "" when
+// ProvisionTotal is 0 (no live progress data — CP restart cleared it, or not yet populated).
+func provisionProgress(s *cpv1.SpawnSummary) string {
+	if s.GetProvisionTotal() == 0 {
+		return ""
+	}
+	return fmt.Sprintf("[%d/%d] %s", s.GetProvisionStep(), s.GetProvisionTotal(), s.GetProvisionStepLabel())
+}
+
+// provisionFailure returns a human-readable failure headline for a terminal error status.
+// Full detail is included inline; multi-line detail is preserved verbatim.
+func provisionFailure(s *cpv1.SpawnSummary) string {
+	step := s.GetErrorStep()
+	detail := s.GetErrorDetail()
+	switch {
+	case step != "" && detail != "":
+		return "✗ failed at " + step + ": " + detail
+	case step != "":
+		return "✗ failed at " + step
+	case detail != "":
+		return "✗ failed: " + detail
+	default:
+		return "✗ failed"
+	}
+}
+
+// nextProgressLine computes the next progress line from s and whether it changed from prev.
+// Returns ("", false) when ProvisionTotal is 0 (no live progress). Callers use this to dedupe
+// poll-loop output: identical consecutive steps are printed only once.
+func nextProgressLine(prev string, s *cpv1.SpawnSummary) (line string, changed bool) {
+	line = provisionProgress(s)
+	return line, line != "" && line != prev
 }
 
 func spawnName(s *cpv1.SpawnSummary) string {
