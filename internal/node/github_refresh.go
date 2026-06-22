@@ -400,7 +400,9 @@ func (r *githubRefresher) mintNow(ctx context.Context, e githubRefreshEntry) (to
 // it mints a fresh one (subject to per-spawn rate-limiting). The returned expiryUnix is the
 // token's expiry as a Unix timestamp (0 = unknown). Thread-safe. nil-safe (nil refresher or
 // nil client → ErrGitHubNotLinked / wrapped error).
-func (r *githubRefresher) GetToken(ctx context.Context, spawnID string, minRemainingSeconds int64) (string, int64, error) {
+// When force is true, the cached token and mint-rate floor are bypassed unconditionally — the
+// sidecar 401-retry backstop (Phase 2) uses this to recover from a stale-token straggler.
+func (r *githubRefresher) GetToken(ctx context.Context, spawnID string, minRemainingSeconds int64, force bool) (string, int64, error) {
 	if r == nil {
 		return "", 0, ErrGitHubNotLinked
 	}
@@ -418,6 +420,15 @@ func (r *githubRefresher) GetToken(ctx context.Context, spawnID string, minRemai
 		e = s.entry
 		st = s
 		break
+	}
+
+	// Force-refresh: clear the cached token and mint-rate floor so the checks below both miss
+	// and we go straight to mintNow. Does NOT advance Version/DeliveryID — the straggler's
+	// link pointer is still valid; only the token is stale.
+	if force {
+		st.token = ""
+		st.tokenExpiryUnix = 0
+		st.lastMintAt = time.Time{}
 	}
 
 	now := r.now()

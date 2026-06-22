@@ -75,7 +75,7 @@ func TestInvalidateClearsTokenAndNextGetTokenPresentsNewVersion(t *testing.T) {
 	seedEntry(r, "sp1", "sec-1", "initial-token", bigExpiry, base)
 
 	// Sanity: GetToken must return the cached token without calling the mint client.
-	tok, _, err := r.GetToken(context.Background(), "sp1", 300)
+	tok, _, err := r.GetToken(context.Background(), "sp1", 300, false)
 	if err != nil {
 		t.Fatalf("GetToken (cache hit): unexpected error: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestInvalidateClearsTokenAndNextGetTokenPresentsNewVersion(t *testing.T) {
 	// Step 3b: GetToken must re-mint and present the NEW (v2, "d-2") in the LinkRef.
 	// The version-gating fake returns PermissionDenied for any other tuple, so an arg-order
 	// swap in Invalidate would surface here as ErrGitHubRelinkRequired rather than a token.
-	tok, exp, err := r.GetToken(context.Background(), "sp1", 300)
+	tok, exp, err := r.GetToken(context.Background(), "sp1", 300, false)
 	if err != nil {
 		t.Fatalf("GetToken after Invalidate: %v — version-gate may have rejected a wrong (version, delivery_id) tuple", err)
 	}

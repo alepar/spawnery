@@ -45,7 +45,7 @@ func TestGetTokenCacheHit(t *testing.T) {
 	// Seed with a token that expires in 1h (300s buffer → cache hit).
 	seedEntry(r, "s1", "sec-1", "cached-token", base.Add(1*time.Hour).Unix(), base)
 
-	tok, exp, err := r.GetToken(context.Background(), "s1", 300)
+	tok, exp, err := r.GetToken(context.Background(), "s1", 300, false)
 	if err != nil {
 		t.Fatalf("GetToken cache-hit: unexpected error: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestGetTokenStaleMints(t *testing.T) {
 	// Cached token expires in 100s; minRemainingSeconds=300 → stale.
 	seedEntry(r, "s1", "sec-1", "old-token", base.Add(100*time.Second).Unix(), base)
 
-	tok, exp, err := r.GetToken(context.Background(), "s1", 300)
+	tok, exp, err := r.GetToken(context.Background(), "s1", 300, false)
 	if err != nil {
 		t.Fatalf("stale mint: unexpected error: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestGetTokenNoLink(t *testing.T) {
 	fake := &fakeMintClient{}
 	r := newGitHubRefresher(fake)
 
-	_, _, err := r.GetToken(context.Background(), "no-such-spawn", 300)
+	_, _, err := r.GetToken(context.Background(), "no-such-spawn", 300, false)
 	if !errors.Is(err, ErrGitHubNotLinked) {
 		t.Fatalf("want ErrGitHubNotLinked, got %v", err)
 	}
@@ -124,7 +124,7 @@ func TestGetTokenRelinkRequired(t *testing.T) {
 
 	r.Note(githubRefreshEntry{SpawnID: "s1", Generation: 1, SecretID: "sec-1", Version: 1, DeliveryID: "d-1"})
 
-	_, _, err := r.GetToken(context.Background(), "s1", 300)
+	_, _, err := r.GetToken(context.Background(), "s1", 300, false)
 	if !errors.Is(err, ErrGitHubRelinkRequired) {
 		t.Fatalf("want ErrGitHubRelinkRequired, got %v", err)
 	}
@@ -149,7 +149,7 @@ func TestGetTokenRateLimited(t *testing.T) {
 	r.Note(githubRefreshEntry{SpawnID: "s1", Generation: 1, SecretID: "sec-1", Version: 1, DeliveryID: "d-1"})
 
 	// First call: stale → mints (lastMintAt = base).
-	_, _, _ = r.GetToken(context.Background(), "s1", 300)
+	_, _, _ = r.GetToken(context.Background(), "s1", 300, false)
 	if n := len(fake.calls()); n != 1 {
 		t.Fatalf("first call: want 1 mint, got %d", n)
 	}
@@ -158,7 +158,7 @@ func TestGetTokenRateLimited(t *testing.T) {
 	clock = base.Add(1 * time.Second)
 
 	// Second call: stale again (no usable life) AND rate-limited.
-	_, _, err := r.GetToken(context.Background(), "s1", 300)
+	_, _, err := r.GetToken(context.Background(), "s1", 300, false)
 	if !errors.Is(err, ErrGitHubMintRateLimited) {
 		t.Fatalf("want ErrGitHubMintRateLimited, got %v", err)
 	}
@@ -187,13 +187,13 @@ func TestGetTokenFreshRequestIDs(t *testing.T) {
 	r.Note(githubRefreshEntry{SpawnID: "s1", Generation: 1, SecretID: "sec-1", Version: 1, DeliveryID: "d-1"})
 
 	// First call: stale → mint.
-	_, _, _ = r.GetToken(context.Background(), "s1", 300)
+	_, _, _ = r.GetToken(context.Background(), "s1", 300, false)
 
 	// Advance clock past the rate-limit window.
 	clock = base.Add(minMintInterval + 1*time.Second)
 
 	// Second call: stale again → second mint.
-	_, _, _ = r.GetToken(context.Background(), "s1", 300)
+	_, _, _ = r.GetToken(context.Background(), "s1", 300, false)
 
 	calls := fake.calls()
 	if len(calls) != 2 {
@@ -201,5 +201,52 @@ func TestGetTokenFreshRequestIDs(t *testing.T) {
 	}
 	if calls[0].GetRequestId() == calls[1].GetRequestId() {
 		t.Fatalf("both mints used the same request id %q; they must be distinct", calls[0].GetRequestId())
+	}
+}
+
+// TestGetTokenForceBypassesCacheAndFloor verifies that force=true clears the cached token and
+// the mint-rate floor so GetToken mints a fresh token even when the cache is warm and the floor
+// has not yet elapsed. This is the node-side precondition for the sidecar 401-retry backstop
+// (Phase 2): the straggler stale-token is evicted before the retry mint.
+func TestGetTokenForceBypassesCacheAndFloor(t *testing.T) {
+	base := time.Unix(1_900_000_000, 0)
+	newExpiry := base.Add(8 * time.Hour).Unix()
+	fake := freshFakeMintClient("forced-fresh-token", newExpiry)
+	r := newGitHubRefresher(fake)
+	r.now = func() time.Time { return base }
+
+	// Seed with a token that is well within the cache window (8h remaining) and
+	// set lastMintAt = now (inside the 10s floor) to simulate a recent mint attempt.
+	seedEntry(r, "s1", "sec-1", "stale-dead-token", base.Add(8*time.Hour).Unix(), base)
+	r.mu.Lock()
+	r.states["s1"]["sec-1"].lastMintAt = base // floor: 0s elapsed, minMintInterval=10s
+	r.mu.Unlock()
+
+	// Confirm that a normal (force=false) call returns the cache-hit token (not a fresh mint).
+	tokNormal, _, errNormal := r.GetToken(context.Background(), "s1", 300, false)
+	if errNormal != nil {
+		t.Fatalf("normal GetToken: unexpected error: %v", errNormal)
+	}
+	if tokNormal != "stale-dead-token" {
+		t.Fatalf("normal GetToken: want stale-dead-token, got %q", tokNormal)
+	}
+	if n := len(fake.calls()); n != 0 {
+		t.Fatalf("normal GetToken: mint client called %d times, want 0", n)
+	}
+
+	// Now call with force=true — must mint fresh even though cache is warm and floor is active.
+	tok, exp, err := r.GetToken(context.Background(), "s1", 300, true)
+	if err != nil {
+		t.Fatalf("force GetToken: unexpected error: %v", err)
+	}
+	if tok != "forced-fresh-token" {
+		t.Fatalf("force GetToken: want forced-fresh-token, got %q", tok)
+	}
+	if exp != newExpiry {
+		t.Fatalf("force GetToken: expiry mismatch: got %d, want %d", exp, newExpiry)
+	}
+	// Exactly one mint call (for the force path).
+	if n := len(fake.calls()); n != 1 {
+		t.Fatalf("force GetToken: want 1 mint call, got %d", n)
 	}
 }

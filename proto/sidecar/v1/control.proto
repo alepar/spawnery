@@ -15,6 +15,7 @@ option go_package = "spawnery/gen/sidecar/v1;sidecarv1";
 message GetTokenRequest {
   string spawn_id              = 1;
   int64  min_remaining_seconds = 2; // small buffer (~300s), NOT near-headroom (§2.4, roast r4).
+  bool   force_refresh         = 3; // straggler 401-retry backstop: bypass node token-cache + 10s mint floor (Phase 2).
 }
 
 // node -> sidecar: the real access token plus its absolute expiry. The proxy caches it and honors

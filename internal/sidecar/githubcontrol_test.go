@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,40 @@ import (
 
 	sidecarv1 "spawnery/gen/sidecar/v1"
 )
+
+// buildRotatingControlServer returns a test HTTP server for 401-retry tests. On each gettoken
+// request it returns normalToken when force_refresh=false, or forceToken when force_refresh=true.
+// It increments *normalCalls or *forceCalls accordingly. certPEM/keyPEM are served on /control/spawnca.
+func buildRotatingControlServer(t *testing.T, normalToken, forceToken string, expiry int64, certPEM, keyPEM []byte, normalCalls, forceCalls *int32) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/control/gettoken", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+		var req sidecarv1.GetTokenRequest
+		_ = protojson.Unmarshal(body, &req)
+
+		tok := normalToken
+		if req.GetForceRefresh() {
+			atomic.AddInt32(forceCalls, 1)
+			tok = forceToken
+		} else {
+			atomic.AddInt32(normalCalls, 1)
+		}
+		resp := &sidecarv1.GetTokenResponse{Token: tok, AccessExpiresAtUnix: expiry}
+		out, _ := protojson.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(out)
+	})
+	mux.HandleFunc("/control/spawnca", func(w http.ResponseWriter, r *http.Request) {
+		resp := &sidecarv1.SpawnCADelivery{CaCertPem: certPEM, CaKeyPem: keyPEM}
+		out, _ := protojson.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(out)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
 
 // buildControlServer returns a test HTTP server that handles /control/gettoken and /control/spawnca.
 // It increments *getTokenCalls on each gettoken request.
@@ -79,7 +114,7 @@ func TestGitHubControl_TCP_FetchToken(t *testing.T) {
 	})
 
 	ctrl := newGitHubControl(cfg)
-	tok, exp, err := ctrl.FetchToken(context.Background())
+	tok, exp, err := ctrl.FetchToken(context.Background(), false)
 	if err != nil {
 		t.Fatalf("FetchToken: %v", err)
 	}
@@ -136,7 +171,7 @@ func TestGitHubControl_UDS_FetchToken(t *testing.T) {
 	}
 	ctrl := newGitHubControl(cfg)
 
-	tok, _, err := ctrl.FetchToken(context.Background())
+	tok, _, err := ctrl.FetchToken(context.Background(), false)
 	if err != nil {
 		t.Fatalf("UDS FetchToken: %v", err)
 	}
@@ -259,7 +294,7 @@ func TestGitHubControl_ErrorMapping(t *testing.T) {
 			}
 			ctrl := newGitHubControl(cfg)
 
-			_, _, err := ctrl.FetchToken(context.Background())
+			_, _, err := ctrl.FetchToken(context.Background(), false)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}

@@ -38,7 +38,7 @@ type githubControlServer struct {
 	refresher *githubRefresher
 
 	mu        sync.Mutex
-	cas       map[string]caPair      // spawnID -> CA pair
+	cas       map[string]caPair       // spawnID -> CA pair
 	listeners map[string]net.Listener // spawnID -> active listener
 }
 
@@ -223,7 +223,7 @@ func (s *githubControlServer) handleGetToken(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	tok, exp, err := s.refresher.GetToken(r.Context(), req.GetSpawnId(), req.GetMinRemainingSeconds())
+	tok, exp, err := s.refresher.GetToken(r.Context(), req.GetSpawnId(), req.GetMinRemainingSeconds(), req.GetForceRefresh())
 	if err != nil {
 		status, msg := statusForGetToken(err)
 		http.Error(w, msg, status)
