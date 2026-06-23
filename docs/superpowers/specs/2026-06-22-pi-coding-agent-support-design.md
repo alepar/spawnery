@@ -1,7 +1,7 @@
 # pi coding agent support (TUI + rich-web ACP, model via sidecar)
 
 **Date:** 2026-06-22
-**Status:** Approved — ready for implementation (Spike S1 gates the launch-case details)
+**Status:** Approved — ready for implementation. **Spike S1 GREEN (2026-06-23, pinned binary v0.80.2)** — the launch-case details below and the Dockerfile section have been updated with S1's confirmed results; see Post-Implementation Notes for the full findings. Only Tier C (end-to-end through the real sidecar in a live pod) remains, and the mechanism is fully de-risked.
 
 ## Summary
 
@@ -52,7 +52,7 @@ GitHub Releases, and npm. The integration-relevant findings:
 
 - **What/license:** MIT, TypeScript, invoked as `pi`; npm
   `@earendil-works/pi-coding-agent`. Built by Earendil Works (Armin Ronacher's
-  org). Latest v0.79.10 — releases ~daily, so **pin a version**.
+  org). Pin `PI_VERSION` (S1 ran against **v0.80.2**) — releases ~daily.
 - **Modes:** default (no flags) is the interactive **TUI** (drivable under tmux
   like Codex). Also `-p`/`--print` (headless), `--mode json`, and
   **`--mode rpc`** — a *pi-specific* line-delimited-JSON (LF-only) protocol over
@@ -67,11 +67,16 @@ GitHub Releases, and npm. The integration-relevant findings:
 - **Auth:** plain API key (env / config / `--api-key`) or OAuth. A dummy key +
   sidecar injection works (any string accepted in `models.json`; `--api-key`
   overrides env).
-- **Distribution:** prebuilt **glibc-dynamic** Linux `x64`/`arm64` archives
-  (`pi-linux-{x64,arm64}.tar.gz`, ~116MB self-contained ELF bundling its JS
-  runtime) with `SHA256SUMS`. **Not** musl-static. Our agent image is already
-  glibc (goose installs the `-linux-gnu` build), so the binary drops in — **no
-  Node runtime needed**.
+- **Distribution (corrected by S1):** prebuilt **glibc-dynamic** Linux
+  `x64`/`arm64` archives (`pi-linux-{x64,arm64}.tar.gz`) with `SHA256SUMS`. **Not**
+  musl-static, and **not a single self-contained binary** — the tarball extracts
+  to a *directory* (`pi` ELF ~116MB + `photon_rs_bg.wasm` + `theme/` +
+  `export-html/` + `node_modules/` + bundled `docs/`). The `pi` ELF resolves its
+  siblings via its own real path, so a symlink onto `PATH` works. Install pattern:
+  unpack the whole dir (e.g. `/usr/local/share/pi`) + symlink `/usr/local/bin/pi`.
+  Our agent image is already glibc (goose installs `-linux-gnu`), so **no Node
+  runtime is needed**. pi also wants `ripgrep` + `fd` present (it skips the
+  download under `PI_OFFLINE`); install both.
 
 ## Phasing
 
@@ -91,15 +96,14 @@ Mirrors the Codex integration. No web/sidecar/proto changes.
 
 ```go
 "pi": {
-    {ID: "pi-tui", Mode: ModeTmux, Launch: []string{"pi"}, Resume: <S1>, Relay: RelayRawPTY, Label: "pi · terminal"},
+    {ID: "pi-tui", Mode: ModeTmux, Launch: []string{"pi"}, Resume: []string{"pi", "--continue"}, Relay: RelayRawPTY, Label: "pi · terminal"},
 },
 ```
 
 `Known("pi")` becomes true and the runnable auto-expands into the web
-`runnable-select` dropdown via `ListAgentImages`. The exact `Resume` args
-(Codex uses `resume --last`, Claude `--continue`) are an **S1 output** — pi has
-client-side sessions (`--session-dir` / `switch_session`); confirm the TUI's
-resume flag empirically.
+`runnable-select` dropdown via `ListAgentImages`. **`Resume` = `pi --continue`**
+(S1-confirmed: a fresh `pi --continue` process reloads the prior session, exactly
+like `claude-tui`). Sessions persist under `~/.pi/agent/sessions/` by default.
 
 ### 2. Dispatcher — `deploy/agent/launch`
 
@@ -108,42 +112,56 @@ generate `~/.pi/agent/models.json` at runtime defining a `spawnery` custom
 provider pointed at the sidecar, then `start_tmux … -- pi`:
 
 ```jsonc
-// ~/.pi/agent/models.json  (PI_HOME default ~/.pi → /root/.pi)
+// $HOME/.pi/agent/models.json  (HOME-derived; HOME=/root → /root/.pi/agent/. No PI_HOME env var.)
 {
   "providers": {
     "spawnery": {
       "baseUrl": "<OPENAI_BASE_URL>",        // already = http://<sidecar>:8080/v1
-      "apiKey":  "sk-unused-sidecar-injects-real-key",
-      "api":     "openai-completions",        // sidecar speaks Chat Completions
-      "models":  [ { "id": "<SPAWN_MODEL>", "contextWindow": <CTX>, "maxTokens": <MAX> } ]
+      "apiKey":  "sk-unused-sidecar-injects-real-key",  // S1: sent as Bearer; sidecar replaces it
+      "api":     "openai-completions",        // S1: hits POST <baseUrl>/chat/completions, store:false, stateless
+      "models":  [ { "id": "<SPAWN_MODEL>", "name": "Spawnery", "contextWindow": 128000, "maxTokens": 16384 } ]
     }
   }
 }
 ```
 
-Then launch pi pinned to that provider/model (e.g.
-`pi --provider spawnery --model spawnery/<SPAWN_MODEL>` — **exact flag/value form
-is an S1 output**), forwarding `PI_HOME` (and any dummy-key env) through
-`start_tmux`'s explicit env list so the tmux-launched process inherits them.
-Mirror the env-with-default idiom (`export PI_HOME="${PI_HOME:-/root/.pi}"`).
-Model switching inside pi's own picker satisfies "switchable models, like Codex."
+S1-confirmed details (folded in):
 
-The exact `models.json` schema (top-level shape, field names, whether a `models`
-catalog is required vs. discovered) is **load-bearing** — verify against pi's
-`custom-provider.md` / `models.md` for the **pinned** version during S1.
+- **Config path is `$HOME/.pi/agent/` (HOME-derived) — there is NO `PI_HOME` env
+  var.** With `HOME=/root` the file is `/root/.pi/agent/models.json`.
+- Launch: **`pi --provider spawnery --model spawnery/<SPAWN_MODEL> -a`**. The
+  `-a`/`--approve` is **required** — `pi-tui` runs the *interactive* TUI, which
+  otherwise asks for project trust on a project with `.pi`/`.agents` resources;
+  `-a` settles it non-interactively. (Non-interactive `-p`/`--mode json/rpc` never
+  prompt, but the tmux TUI is interactive.)
+- Export **`PI_OFFLINE=1`** (suppresses startup network ops behind the egress
+  floor — the analog of Codex's autoupdater/telemetry disables).
+- Only model `id` is required per model for `openai-completions`; a dummy `apiKey`
+  literal is accepted (the Ollama precedent). `--model` pattern is `provider/id`.
+- Forward `HOME`/`PI_OFFLINE` through `start_tmux`'s explicit env list so the
+  tmux-launched process inherits them. The model is switchable in pi's own picker.
 
 ### 3. Dockerfile — `deploy/agent/Dockerfile`
 
-Install the pinned pi **glibc** binary from GitHub releases, SHA256-verified,
-with a `pi --version` check — mirroring the goose tarball approach. No Node.js.
+Install the pinned pi **glibc directory dist** from GitHub releases,
+SHA256-verified, symlinked onto `PATH`, with a `pi --version` check. No Node.js.
+Also install `ripgrep` + `fd` (pi uses them; mirrors pi's own Docker recipe which
+installs `ripgrep`). S1-corrected: the tarball is a **directory**, not a single
+binary, so unpack the whole dir and symlink.
 
 ```dockerfile
-ARG PI_VERSION=v0.79.10
+ARG PI_VERSION=v0.80.2
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; case "$arch" in amd64) a=x64;; arm64) a=arm64;; esac; \
-    curl -fsSL -o /tmp/pi.tgz "https://github.com/earendil-works/pi/releases/download/${PI_VERSION}/pi-linux-${a}.tar.gz"; \
-    # verify against the release SHA256SUMS, extract the self-contained `pi` ELF to /usr/local/bin, chmod, then:
+    curl -fsSL -o /tmp/pi.tgz   "https://github.com/earendil-works/pi/releases/download/${PI_VERSION}/pi-linux-${a}.tar.gz"; \
+    curl -fsSL -o /tmp/pi.sums  "https://github.com/earendil-works/pi/releases/download/${PI_VERSION}/SHA256SUMS"; \
+    (cd /tmp && grep "pi-linux-${a}.tar.gz" pi.sums | sha256sum -c -); \
+    mkdir -p /usr/local/share/pi; \
+    tar -xzf /tmp/pi.tgz -C /usr/local/share/pi --strip-components=1; \
+    ln -sf /usr/local/share/pi/pi /usr/local/bin/pi; \
+    rm /tmp/pi.tgz /tmp/pi.sums; \
     pi --version
+# (ripgrep + fd-find installed via the image's apt layer alongside the other agent deps)
 ```
 
 ### 4. Node binary advertisement — `Justfile`
@@ -232,27 +250,36 @@ pi (TUI or --mode rpc)
 `…/api` (no `/v1`) — identical to existing `/v1/chat/completions` traffic. **Zero
 sidecar/proxy/proto changes**, both phases.
 
-## Spike S1 (pre-implementation verification, manual, in a pod)
+## Spike S1 — DONE, GREEN (2026-06-23, pinned binary v0.80.2)
 
-Mirrors the Codex spike. Run against the **pinned** pi binary; outputs feed the
-launch-case details above.
+Run locally against the real pinned binary with a logging OpenAI-compatible stub
+server + a live tmux session (no pod needed except the real-sidecar end-to-end,
+which is Tier C below). Full findings + the captured artifacts are in
+Post-Implementation Notes; the launch-case/Dockerfile sections above already
+incorporate them. Results:
 
-1. **TUI under tmux + resume.** Confirm `pi` runs cleanly in a detached tmux
-   session non-interactively (no first-run OAuth/trust prompt blocking it with an
-   API-key provider), and capture the **resume flag/command** for the registry
-   `Resume` field.
-2. **`openai-completions` round-trips the sidecar.** Confirm pi with
-   `api: openai-completions` + `baseUrl=<sidecar>/v1` reaches the model and that
-   pi sends **full conversation history each turn** (no server-side response-store
-   dependency). Capture the exact `models.json` schema and the launch flag form
-   (`--provider`/`--model`) that pins our provider.
-3. **`--mode rpc` semantics.** Confirm the documented event/command shapes and the
-   `agent_end` turn-complete signal against the pinned binary, so the `piadapter`
-   translation table is built on observed reality, not just docs (pi ships ~daily).
+1. **TUI under tmux + resume — GREEN.** The interactive TUI launches cleanly in a
+   detached tmux session with **no blocking trust/login/welcome prompt** when
+   passed `-a`/`--approve`; an interactive prompt round-trips to the endpoint.
+   **Resume flag = `--continue`** (a fresh `pi --continue` process reloaded prior
+   session history — mirrors `claude-tui`).
+2. **`openai-completions` round-trips — GREEN, fully stateless.** pi posts to
+   `<baseUrl>/chat/completions` with `Authorization: Bearer <dummy>` (sidecar
+   replaces it), `store: false`, and **resends the full conversation history each
+   turn** (verified across a 2-turn rpc session and a `--continue` resume). No
+   server-side state. Declarative `~/.pi/agent/models.json` schema confirmed.
+3. **`--mode rpc` semantics — GREEN.** Per-turn lifecycle observed:
+   `response`(ack) → `agent_start` → `turn_start` → `message_start`/`message_end`
+   (user echo) → `message_start` → `message_update`* (deltas) → `message_end` →
+   `turn_end` → **`agent_end`** (the ready-for-next-prompt signal). Matches the
+   documented spec — the `piadapter` translation table is grounded in observed
+   reality.
 
-If S1 surfaces that the TUI cannot be driven non-interactively under tmux, fall
-back Phase 1 to driving `--mode rpc` behind the Phase-2 adapter (the rich-web
-path), and reconsider whether a separate tmux runnable is worthwhile.
+**Tier C (the only remaining check):** end-to-end through the *real* sidecar in a
+live pod. The mechanism is fully de-risked (wire shape, statelessness, dummy-key
+Bearer, trust, resume all confirmed); Tier C is a confirmation, not a gate. The
+fallback contemplated here (drive `--mode rpc` instead of the TUI) is **not
+needed** — the TUI drives cleanly under tmux.
 
 ## Out of scope
 
@@ -295,3 +322,40 @@ path), and reconsider whether a separate tmux runnable is worthwhile.
 *As this design is implemented and iterated on — bug fixes, adjustments, anything
 that diverged from the assumptions above — append a dated note here, whether or
 not a formal debugging skill was used.*
+
+### 2026-06-23 — Spike S1 executed, GREEN (sp-2aaw.1 closed)
+
+Ran S1 locally against the real pinned binary (latest **v0.80.2**; spec had pinned
+v0.79.10 — bumped) using a logging OpenAI-compatible stub server + a live tmux
+session. No pod required; only Tier C (real sidecar end-to-end) is unrun and is a
+confirmation, not a gate. Everything verified GREEN. Divergences from the original
+assumptions, all folded into the sections above:
+
+- **Distribution is a directory, not a single binary.** `pi-linux-x64.tar.gz`
+  extracts to a dir: the `pi` ELF (~116MB, glibc-dynamic) + `photon_rs_bg.wasm` +
+  `theme/` + `export-html/` + `node_modules/` + bundled `docs/`. The ELF resolves
+  siblings via its own real path, so the Dockerfile installs the whole dir to
+  `/usr/local/share/pi` and symlinks `/usr/local/bin/pi`. SHA256SUMS verified.
+- **No `PI_HOME` env var.** Config is HOME-derived at `~/.pi/agent/` (so
+  `/root/.pi/agent/` with `HOME=/root`). The spec's earlier `PI_HOME` references
+  were wrong and have been corrected.
+- **`pi-tui` must pass `-a`/`--approve`** to avoid the interactive project-trust
+  prompt (the TUI is interactive; `-p`/`--mode json`/`--mode rpc` never prompt).
+  Also export **`PI_OFFLINE=1`** to suppress startup network ops behind the egress
+  floor. Resume = **`pi --continue`** (verified).
+- **Wire confirmed:** `POST <baseUrl>/chat/completions`, `stream:true`,
+  `Authorization: Bearer <dummy>` (sidecar injects the real key), `store:false`,
+  and **full conversation history resent each turn** (stateless — verified on a
+  2-turn rpc session and a `--continue` resume). The design's "simplest wire path,
+  no Responses API" holds.
+- **`--mode rpc` lifecycle confirmed** (per turn): `response` → `agent_start` →
+  `turn_start` → `message_start`/`message_end` (user echo) → `message_start` →
+  `message_update`* → `message_end` → `turn_end` → `agent_end` (ready signal).
+  This is the ground truth for the Phase-2 `piadapter` translation table.
+- **Install `ripgrep` + `fd`** in the agent image (pi uses them; it skips the
+  auto-download under `PI_OFFLINE`). pi's own Docker recipe installs `ripgrep`.
+- **Minor:** tmux `extended-keys` off triggers a cosmetic warning about modified
+  Enter keys; harmless (set `extended-keys on` if it bites).
+
+S1 scratch artifacts (stub, rpc-event capture, request log) lived under
+`/tmp/pi-spike/` during the spike; not committed.
