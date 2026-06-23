@@ -25,7 +25,7 @@ spawnlet agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev \
-    AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
+    AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes,pi" } }}" \
     DATA_ROOT={{data_root}} SPAWNLET_ADDR={{addr}} \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
     {{repo}}/bin/spawnlet
@@ -52,7 +52,7 @@ node agent="agent": (_images agent)
     set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
     SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
-    AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
+    AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes,pi" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
     NODE_CLASS=self-hosted NODE_OWNER=alice EGRESS_ENFORCE=false \
     NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
@@ -215,7 +215,7 @@ node-github agent="agent": (_images agent)
     set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
     SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
-    AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes" } }}" \
+    AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes,pi" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_AUTH_MODE=enforced \
     CP_NODE_ADDR=https://{{addr_cp_node}} NODE_ID=node-1 NODE_ID_DIR={{devca}}/node-cloud \
     NODE_CLASS=cloud EGRESS_FLOOR_FORCE_OFF=1 \
