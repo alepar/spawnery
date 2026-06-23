@@ -111,6 +111,23 @@ RUN set -eux; \
     ln -sf /opt/hermes/venv/bin/hermes /usr/local/bin/hermes; \
     hermes acp --check
 
+# pi (Earendil Works) — TypeScript TUI/rpc agent (pi-tui launcher case). Prebuilt glibc-dynamic
+# Linux dist. NB: the tarball extracts to a DIRECTORY (the `pi` ELF + photon_rs_bg.wasm + theme/ +
+# export-html/ + node_modules/ + bundled docs/), NOT a single binary — the ELF resolves its
+# siblings via its own real path, so install the whole tree and symlink onto PATH. No Node runtime
+# needed (the image base is glibc). SHA256-verified. ripgrep + fd already installed above.
+ARG PI_VERSION=v0.80.2
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; case "$arch" in amd64) a=x64;; arm64) a=arm64;; *) echo "unsupported arch $arch" >&2; exit 1;; esac; \
+    curl -fsSL -o /tmp/pi.tgz   "https://github.com/earendil-works/pi/releases/download/${PI_VERSION}/pi-linux-${a}.tar.gz"; \
+    curl -fsSL -o /tmp/pi.sums  "https://github.com/earendil-works/pi/releases/download/${PI_VERSION}/SHA256SUMS"; \
+    (cd /tmp && grep "pi-linux-${a}.tar.gz" pi.sums | sha256sum -c -); \
+    mkdir -p /usr/local/share/pi; \
+    tar -xzf /tmp/pi.tgz -C /usr/local/share/pi --strip-components=1; \
+    ln -sf /usr/local/share/pi/pi /usr/local/bin/pi; \
+    rm /tmp/pi.tgz /tmp/pi.sums; \
+    pi --version
+
 # Pre-run the one-time SQLite migration + models.json fetch at build time (network available here),
 # so a fresh container is ready in seconds instead of doing a multi-minute first-run migration.
 RUN sh -c 'opencode serve --port 4096 --hostname 127.0.0.1 >/tmp/m.log 2>&1 & P=$!; \
