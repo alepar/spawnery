@@ -48,7 +48,7 @@ func TestLookup(t *testing.T) {
 }
 
 func TestKnown(t *testing.T) {
-	for _, b := range []string{"goose", "opencode", "claude-code", "codex", "hermes"} {
+	for _, b := range []string{"goose", "opencode", "claude-code", "codex", "hermes", "pi"} {
 		if !Known(b) {
 			t.Fatalf("%q should be known", b)
 		}
@@ -167,6 +167,35 @@ func TestRegistryInvariants(t *testing.T) {
 				t.Fatalf("%s/%s: tmux runnable must have a Launch argv", binary, r.ID)
 			}
 		}
+	}
+}
+
+func TestPiTuiRunnable(t *testing.T) {
+	r, ok := Lookup("pi", "pi-tui")
+	if !ok {
+		t.Fatalf("pi/pi-tui should resolve")
+	}
+	if r.Mode != ModeTmux || r.Relay != RelayRawPTY {
+		t.Fatalf("pi-tui = mode %q relay %q, want %q / %q", r.Mode, r.Relay, ModeTmux, RelayRawPTY)
+	}
+	if len(r.Launch) == 0 {
+		t.Fatalf("pi-tui needs a Launch argv")
+	}
+	if got, want := r.Resume, []string{"pi", "--continue"}; !sameStrings(got, want) {
+		t.Fatalf("pi-tui Resume = %v, want %v", got, want)
+	}
+}
+
+func TestPiAcpRunnable(t *testing.T) {
+	r, ok := Lookup("pi", "pi-acp")
+	if !ok {
+		t.Fatalf("pi/pi-acp should resolve")
+	}
+	if r.Mode != ModeACP || r.Relay != RelayPump {
+		t.Fatalf("pi-acp = mode %q relay %q, want %q / %q", r.Mode, r.Relay, ModeACP, RelayPump)
+	}
+	if len(r.Launch) == 0 {
+		t.Fatalf("pi-acp needs a Launch argv")
 	}
 }
 

@@ -54,6 +54,32 @@ EOF
   export SPAWN_MODEL="spawnery/${MODEL_ID}"
 }
 
+# setup_pi_provider generates ~/.pi/agent/models.json routing pi (TUI or --mode rpc) through the
+# sidecar's OpenAI-compatible endpoint: a custom "spawnery" provider (api=openai-completions ->
+# POST <baseUrl>/chat/completions, Bearer dummy; the sidecar injects the real OpenRouter key) with
+# the spawn's model wired as the single model id. Config is HOME-derived at $HOME/.pi/agent/ (no
+# PI_HOME env var). Shared by pi-tui (this task) and pi-acp (sp-2aaw.4). Exports SPAWN_MODEL as the
+# "spawnery/<id>" selector for pi's --model flag.
+setup_pi_provider() {
+  SIDECAR_BASE="${OPENAI_BASE_URL:-http://127.0.0.1:8080/v1}"
+  MODEL_ID="${SPAWN_MODEL:-openai/gpt-4o-mini}"
+  PI_CONFIG_DIR="${HOME:-/root}/.pi/agent"
+  mkdir -p "$PI_CONFIG_DIR"
+  cat > "$PI_CONFIG_DIR/models.json" <<EOF
+{
+  "providers": {
+    "spawnery": {
+      "baseUrl": "${SIDECAR_BASE}",
+      "apiKey": "sk-unused-sidecar-injects-real-key",
+      "api": "openai-completions",
+      "models": [ { "id": "${MODEL_ID}", "name": "Spawnery", "contextWindow": 128000, "maxTokens": 16384 } ]
+    }
+  }
+}
+EOF
+  export SPAWN_MODEL="spawnery/${MODEL_ID}"
+}
+
 # start_tmux NAME... -- <inner-argv...> — create a detached transparent-tmux session named
 # $TMUX_SESSION running the runnable, forwarding the named env vars explicitly via -e (so an
 # exec session that joins session #0's already-running tmux server still gets the exact env).
@@ -355,6 +381,46 @@ EOF
       set -- "$@" resume --last
     fi
     start_tmux TERM CODEX_HOME CODEX_SPAWNERY_KEY -- "$@"
+    ;;
+  pi-tui)
+    export TERM="${TERM:-xterm-256color}"
+    # pi reads ~/.pi/agent/models.json (HOME-derived; no PI_HOME). The spawnery custom provider
+    # (api=openai-completions) routes /chat/completions through the sidecar, which injects the real
+    # OpenRouter key. Model is per-spawn (SPAWN_MODEL) and switchable in pi's own picker.
+    setup_pi_provider
+    # PI_OFFLINE suppresses startup network ops behind the egress floor and skips pi's ripgrep/fd
+    # auto-download (both are baked into the image).
+    export PI_OFFLINE="${PI_OFFLINE:-1}"
+    apply-artifacts "$RUNNABLE" || true
+    # -a/--approve settles the interactive project-trust prompt non-interactively (the tmux TUI is
+    # interactive, unlike pi's headless -p/--mode rpc surfaces). --model is "provider/id".
+    set -- pi --provider spawnery --model "$SPAWN_MODEL" -a
+    # Conditional resume (mirrors claude-tui): pi --continue reloads the prior session, but only
+    # append it when a prior session exists so a brand-new spawn does not fail on an empty store.
+    # pi persists sessions under ~/.pi/agent/sessions/ (verified S1: --continue reloads).
+    PI_SESSIONS_DIR="${HOME:-/root}/.pi/agent/sessions"
+    if [ -d "$PI_SESSIONS_DIR" ] && [ -n "$(find "$PI_SESSIONS_DIR" -type f -print -quit 2>/dev/null)" ]; then
+      set -- "$@" --continue
+    fi
+    start_tmux TERM HOME PI_OFFLINE SPAWN_MODEL -- "$@"
+    ;;
+  pi-acp)
+    # pi rich-web: the in-pod pi-adapter (deploy/agent/pi-adapter) spawns `pi --mode rpc` and
+    # translates its JSONL event stream to ACP; the node dials ACP_LISTEN and runs a Pump (same
+    # shape as goose-acp/hermes-acp). Reuses the exact pi-tui provider config (models.json) so the
+    # model rides the sidecar's openai-completions path; the sidecar injects the real OpenRouter key.
+    export ACP_LISTEN="tcp://0.0.0.0:${ACP_PORT}"
+    # PI_OFFLINE suppresses startup network ops behind the egress floor and skips pi's ripgrep/fd
+    # auto-download (both are baked into the image).
+    export PI_OFFLINE="${PI_OFFLINE:-1}"
+    setup_pi_provider
+    apply-artifacts "$RUNNABLE" || true
+    export PI_DIR="${PI_DIR:-/app}"
+    # setup_pi_provider re-exports SPAWN_MODEL in "spawnery/<id>" form for pi-tui's --model flag,
+    # but pi-adapter wants the BARE id (piadapter.New prepends the "spawnery/" provider). Strip the
+    # leading "spawnery/" so the adapter does not double-prefix to "spawnery/spawnery/<id>".
+    export SPAWN_MODEL="${SPAWN_MODEL#spawnery/}"
+    exec /usr/local/bin/pi-adapter
     ;;
   shell)
     # Built-in synthetic runnable: a plain login-ish bash shell, transparent-tmux wrapped so it

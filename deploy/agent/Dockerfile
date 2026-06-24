@@ -32,6 +32,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
  && CGO_ENABLED=0 go build -o /acpmux ./deploy/agent/acpmux \
  && CGO_ENABLED=0 go build -o /acpdial ./deploy/agent/acpdial \
  && CGO_ENABLED=0 go build -o /agentinstall ./cmd/agentinstall \
+ && CGO_ENABLED=0 go build -o /pi-adapter ./deploy/agent/pi-adapter \
  && CGO_ENABLED=0 go build -o /spawnery-test-mcp ./deploy/agent/testmcp
 
 FROM debian:stable
@@ -111,6 +112,23 @@ RUN set -eux; \
     ln -sf /opt/hermes/venv/bin/hermes /usr/local/bin/hermes; \
     hermes acp --check
 
+# pi (Earendil Works) — TypeScript TUI/rpc agent (pi-tui launcher case). Prebuilt glibc-dynamic
+# Linux dist. NB: the tarball extracts to a DIRECTORY (the `pi` ELF + photon_rs_bg.wasm + theme/ +
+# export-html/ + node_modules/ + bundled docs/), NOT a single binary — the ELF resolves its
+# siblings via its own real path, so install the whole tree and symlink onto PATH. No Node runtime
+# needed (the image base is glibc). SHA256-verified. ripgrep + fd already installed above.
+ARG PI_VERSION=v0.80.2
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; case "$arch" in amd64) a=x64;; arm64) a=arm64;; *) echo "unsupported arch $arch" >&2; exit 1;; esac; \
+    curl -fsSL -o "/tmp/pi-linux-${a}.tar.gz" "https://github.com/earendil-works/pi/releases/download/${PI_VERSION}/pi-linux-${a}.tar.gz"; \
+    curl -fsSL -o /tmp/pi.sums  "https://github.com/earendil-works/pi/releases/download/${PI_VERSION}/SHA256SUMS"; \
+    (cd /tmp && grep "pi-linux-${a}.tar.gz" pi.sums | sha256sum -c -); \
+    mkdir -p /usr/local/share/pi; \
+    tar -xzf "/tmp/pi-linux-${a}.tar.gz" -C /usr/local/share/pi --strip-components=1; \
+    ln -sf /usr/local/share/pi/pi /usr/local/bin/pi; \
+    rm "/tmp/pi-linux-${a}.tar.gz" /tmp/pi.sums; \
+    pi --version
+
 # Node.js (provides `npx`) for the hermes-acp runnable. hermes 0.15.2 probes browser-tool
 # availability at session/new; with NO node on PATH it lazy-downloads Node + agent-browser +
 # Chromium and streams the installer progress to STDOUT — which is acpmux's ACP JSON-RPC
@@ -148,6 +166,7 @@ COPY --from=gobuild /acpexec /usr/local/bin/acpexec
 COPY --from=gobuild /acpmux /usr/local/bin/acpmux
 COPY --from=gobuild /acpdial /usr/local/bin/acpdial
 COPY --from=gobuild /agentinstall /usr/local/bin/agentinstall
+COPY --from=gobuild /pi-adapter /usr/local/bin/pi-adapter
 COPY --from=gobuild /spawnery-test-mcp /usr/local/bin/spawnery-test-mcp
 COPY deploy/agent/entrypoint.sh /entrypoint.sh
 COPY deploy/agent/launch /usr/local/bin/launcher
