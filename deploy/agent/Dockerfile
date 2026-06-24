@@ -129,6 +129,25 @@ RUN set -eux; \
     rm "/tmp/pi-linux-${a}.tar.gz" /tmp/pi.sums; \
     pi --version
 
+# Node.js (provides `npx`) for the hermes-acp runnable. hermes 0.15.2 probes browser-tool
+# availability at session/new; with NO node on PATH it lazy-downloads Node + agent-browser +
+# Chromium and streams the installer progress to STDOUT — which is acpmux's ACP JSON-RPC
+# channel, corrupting it so the handshake never completes and acpmux never binds :7000
+# (sp-055b). With `npx` present hermes resolves its browser CLI WITHOUT that download; lacking
+# a Chromium build it then simply does not advertise browser tools — the right posture for an
+# egress-floored spawn (the runtime download would hang anyway). Node version matches hermes'
+# own bootstrap target.
+ARG NODE_VERSION=22.23.0
+RUN set -eux; \
+    curl -fsSL -o /tmp/node.tar.gz \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz"; \
+    tar -xzf /tmp/node.tar.gz -C /opt; \
+    rm /tmp/node.tar.gz; \
+    for b in node npx npm; do \
+      ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/$b" "/usr/local/bin/$b"; \
+    done; \
+    node --version; npx --version
+
 # Pre-run the one-time SQLite migration + models.json fetch at build time (network available here),
 # so a fresh container is ready in seconds instead of doing a multi-minute first-run migration.
 RUN sh -c 'opencode serve --port 4096 --hostname 127.0.0.1 >/tmp/m.log 2>&1 & P=$!; \
