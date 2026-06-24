@@ -15,8 +15,8 @@ import (
 // subprocess (in-memory pipes). It mirrors the ocadapter test harness.
 type testHarness struct {
 	in    io.Writer      // node -> adapter (write ACP requests here)
-	lines chan string     // adapter -> node (ACP responses/notifications)
-	cmds  chan string     // adapter -> pi stdin (commands adapter sent to pi)
+	lines chan string    // adapter -> node (ACP responses/notifications)
+	cmds  chan string    // adapter -> pi stdin (commands adapter sent to pi)
 	piOut *io.PipeWriter // pi stdout write end (test emits events here)
 }
 

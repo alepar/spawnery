@@ -80,8 +80,8 @@ type Adapter struct {
 	hasInflight bool
 	turnErr     *PiError
 	turnUsage   *PiUsage
-	sentTool   map[string]bool            // toolCallId -> true once tool_call creation emitted
-	toolInputs map[string]json.RawMessage  // toolCallId -> rawInput stored at start
+	sentTool    map[string]bool            // toolCallId -> true once tool_call creation emitted
+	toolInputs  map[string]json.RawMessage // toolCallId -> rawInput stored at start
 }
 
 // New creates an Adapter that will spawn the pi binary (default "pi") to serve
@@ -209,7 +209,7 @@ func (a *Adapter) pumpLoop(srv *acp.Server, piOut io.ReadCloser) {
 	defer piOut.Close()
 
 	sc := bufio.NewScanner(piOut)
-	sc.Split(bufio.ScanLines)                               // LF-only split; never splits on U+2028/U+2029
+	sc.Split(bufio.ScanLines)                         // LF-only split; never splits on U+2028/U+2029
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // allow large pi events (tool output, file reads)
 
 	for sc.Scan() {
@@ -305,7 +305,7 @@ func (a *Adapter) onEvent(srv *acp.Server, e Event) {
 		a.turnUsage = e.Usage
 		a.mu.Unlock()
 
-	case "extension_error":
+	case "error", "extension_error":
 		a.mu.Lock()
 		a.turnErr = &PiError{Name: e.Name, Message: e.Message}
 		a.mu.Unlock()
