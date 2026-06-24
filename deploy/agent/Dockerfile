@@ -32,6 +32,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
  && CGO_ENABLED=0 go build -o /acpmux ./deploy/agent/acpmux \
  && CGO_ENABLED=0 go build -o /acpdial ./deploy/agent/acpdial \
  && CGO_ENABLED=0 go build -o /agentinstall ./cmd/agentinstall \
+ && CGO_ENABLED=0 go build -o /pi-adapter ./deploy/agent/pi-adapter \
  && CGO_ENABLED=0 go build -o /spawnery-test-mcp ./deploy/agent/testmcp
 
 FROM debian:stable
@@ -146,6 +147,7 @@ COPY --from=gobuild /acpexec /usr/local/bin/acpexec
 COPY --from=gobuild /acpmux /usr/local/bin/acpmux
 COPY --from=gobuild /acpdial /usr/local/bin/acpdial
 COPY --from=gobuild /agentinstall /usr/local/bin/agentinstall
+COPY --from=gobuild /pi-adapter /usr/local/bin/pi-adapter
 COPY --from=gobuild /spawnery-test-mcp /usr/local/bin/spawnery-test-mcp
 COPY deploy/agent/entrypoint.sh /entrypoint.sh
 COPY deploy/agent/launch /usr/local/bin/launcher
