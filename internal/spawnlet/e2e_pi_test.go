@@ -51,11 +51,11 @@ func TestEndToEndPiACP(t *testing.T) {
 	}
 
 	mgr := spawnlet.NewManager(rt, spawnlet.ManagerConfig{
-		AgentImage:   "spawnery/agent:dev", // unified image; build with: make images
-		SidecarImage: "spawnery/sidecar:dev",
+		AgentImage:    "spawnery/agent:dev", // unified image; build with: make images
+		SidecarImage:  "spawnery/sidecar:dev",
 		OpenRouterKey: key,
-		DataRoot:     t.TempDir(),
-		DeltaCapture: true, // Suspend captures spawnery/delta:<id> for the resume leg
+		DataRoot:      t.TempDir(),
+		DeltaCapture:  true, // Suspend captures spawnery/delta:<id> for the resume leg
 	})
 
 	srv := spawnlet.NewServer(mgr)
