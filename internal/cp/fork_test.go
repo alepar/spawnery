@@ -1371,7 +1371,7 @@ func TestForkSpawnMaterializerFailureUnwindsFork(t *testing.T) {
 	if !sawUnpause(sourceSender, "sp-source") {
 		t.Fatal("failed fork cleanup must unpause source before restoring it active")
 	}
-	wantPrefixes := []string{"revoke-key:", "empty-bucket:spawnery-spawn-", "drop-bucket:spawnery-spawn-", "release-delta:", "delete-row:"}
+	wantPrefixes := []string{"revoke-key:", "empty-bucket:spawnery-spawn-", "release-delta:", "delete-row:"}
 	if len(res.ops) != len(wantPrefixes) {
 		t.Fatalf("unwind ops=%v want prefixes %v", res.ops, wantPrefixes)
 	}

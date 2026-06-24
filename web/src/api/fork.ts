@@ -5,6 +5,8 @@ import {
   type MigrationTarget,
   type OwnerSealedDeliveryResult,
 } from "./migration";
+import { authEnabled, useSessionStore } from "@/auth/session";
+import { pollAndSign, registerPendedOp, clearPendedOp } from "@/auth/intent";
 import type { DeviceKeys } from "@/keys/device";
 
 export class ForkError extends Error {
@@ -56,6 +58,22 @@ export async function runFork(
   }
 
   onProgress?.("forking");
+
+  // ForkSpawn blocks at the CP awaiting the client's SignedIntent for the fork-spawn op. The CP
+  // registers the pending intent under the SOURCE spawn id, so pollAndSign MUST run concurrently
+  // with the RPC (kicking it off after the await would deadlock — CP waits for the intent, client
+  // waits for the RPC). Mirrors createSpawn/resumeSpawn in spawnlet.ts. The tuple's spawnId is the
+  // CP-minted fork id, which we can't know yet; _validateTuple skips the spawnId check for fork.
+  if (authEnabled()) {
+    const { getOrCreateSessionKey } = await import("@/auth/keypair");
+    const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
+    const pended = { op: "fork-spawn", spawnId: sourceID };
+    registerPendedOp(pended);
+    pollAndSign({ spawnId: sourceID, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
+      .catch((e: unknown) => console.error("fork intent sign failed:", e))
+      .finally(() => clearPendedOp(sourceID));
+  }
+
   let forkSpawnId: string;
   let resolvedNodeId: string;
   let transferSetId: string;

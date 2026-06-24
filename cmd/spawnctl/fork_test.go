@@ -28,8 +28,9 @@ type fakeForkClient struct {
 	forkErr    error
 	deliverErr error
 
-	gotFork           *cpv1.ForkSpawnRequest
-	gotJournalSpawnID string
+	gotFork              *cpv1.ForkSpawnRequest
+	gotIntentPollSpawnID string
+	gotJournalSpawnID    string
 	gotNodeKeySpawnID string
 	gotDelivery       *cpv1.DeliverSecretsRequest
 }
@@ -44,6 +45,17 @@ func (f *fakeForkClient) ForkSpawn(_ context.Context, req *connect.Request[cpv1.
 		NodeId:        f.nodeID,
 		TransferSetId: f.transferID,
 	}), nil
+}
+
+func (f *fakeForkClient) GetPendingIntent(_ context.Context, req *connect.Request[cpv1.GetPendingIntentRequest]) (*connect.Response[cpv1.GetPendingIntentResponse], error) {
+	f.gotIntentPollSpawnID = req.Msg.SpawnId
+	// Never report ready: the concurrent pollAndSign goroutine keeps polling until ForkSpawn
+	// returns and its context is cancelled. Tests only assert the source id is the poll key.
+	return connect.NewResponse(&cpv1.GetPendingIntentResponse{Ready: false}), nil
+}
+
+func (f *fakeForkClient) SubmitIntent(_ context.Context, _ *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
+	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil
 }
 
 func (f *fakeForkClient) GetJournalKeyCiphertext(_ context.Context, req *connect.Request[cpv1.GetJournalKeyCiphertextRequest]) (*connect.Response[cpv1.GetJournalKeyCiphertextResponse], error) {

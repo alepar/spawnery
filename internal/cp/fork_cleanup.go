@@ -194,9 +194,12 @@ func (s *Server) unwindFailedFork(ctx context.Context, cfg failedForkUnwind) err
 	if err := cfg.Resources.EmptyForkBucket(ctx, nodeID, cfg.ForkID, cfg.Bucket); err != nil {
 		return err
 	}
-	if err := cfg.Resources.DropForkBucket(ctx, nodeID, cfg.ForkID, cfg.Bucket); err != nil {
-		return err
-	}
+	// Deliberately do NOT drop the (now-empty) Garage bucket. These buckets are minted via the
+	// Garage admin API with a global alias; an S3 DeleteBucket is treated as an unalias and is
+	// rejected when it's the only alias ("please delete it instead of just unaliasing"), which used
+	// to wedge the unwind and strand the fork forever in the reconciler. Normal spawn deletion also
+	// leaves the bucket behind, so leaving an empty bucket shell here is consistent and reclaims the
+	// actual data via EmptyForkBucket above. System-wide bucket GC is a separate follow-up.
 	if err := cfg.Resources.ReleaseForkDelta(ctx, nodeID, cfg.ForkID); err != nil {
 		return err
 	}

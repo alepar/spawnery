@@ -329,4 +329,42 @@ describe("pollAndSign — AM1 never-sign-unpended", () => {
     expect(jti.length).toBe(32); // 16 bytes hex
     expect(calls.find(([m]) => m === "SubmitIntent")).toBeTruthy();
   });
+
+  it("fork-spawn: signs the CP-minted fork id and submits keyed by the source id", async () => {
+    const store = new MemoryKeyStore();
+    const kp = await getOrCreateSessionKey(store);
+
+    // The client pends/polls under the SOURCE id; the CP tuple carries the fresh fork id. The
+    // spawnId equality check must be skipped for fork-spawn (the client can't know the fork id).
+    const pended: PendedOp = { op: "fork-spawn", spawnId: "src-1" };
+
+    const calls: Array<[string, any]> = [];
+    const unaryMock = vi.fn().mockImplementation((method: string, body: any) => {
+      calls.push([method, body]);
+      if (method === "GetPendingIntent") {
+        return Promise.resolve({
+          ready: true,
+          pending: {
+            op: "fork-spawn", spawnId: "fork-9", generation: "1",
+            targetNodeId: "node-1", image: "", appRef: "", model: "", dataRef: "",
+          },
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    const jti = await pollAndSign({
+      spawnId: "src-1",
+      pended,
+      privateKey: kp.privateKey,
+      publicKey: kp.publicKey,
+      unaryFn: unaryMock,
+    });
+
+    expect(typeof jti).toBe("string");
+    // Poll + submit are keyed by the source id, not the fork id.
+    expect(calls.find(([m]) => m === "GetPendingIntent")?.[1]).toEqual({ spawnId: "src-1" });
+    const submit = calls.find(([m]) => m === "SubmitIntent");
+    expect(submit?.[1].spawnId).toBe("src-1");
+  });
 });

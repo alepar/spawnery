@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 
 type forkClient interface {
 	ForkSpawn(context.Context, *connect.Request[cpv1.ForkSpawnRequest]) (*connect.Response[cpv1.ForkSpawnResponse], error)
+	intentClient
 	ownerSealedDeliveryClient
 }
 
@@ -42,6 +45,8 @@ func runFork(ctx context.Context, client forkClient, dev *seal.Device, spawnID, 
 	if err != nil {
 		return err
 	}
+	// The CP registers the fork's pending intent under the source spawn id; poll/submit are keyed by it.
+	sourceID := strings.TrimSpace(spawnID)
 
 	fmt.Fprintf(out, "fork %s\n", spawnID)
 	switch {
@@ -52,6 +57,19 @@ func runFork(ctx context.Context, client forkClient, dev *seal.Device, spawnID, 
 	default:
 		fmt.Fprintln(out, "  target same node")
 	}
+
+	// ForkSpawn blocks at the CP awaiting the client's SignedIntent for the fork-spawn op (the CP
+	// registers the pending intent under the SOURCE spawn id), so pollAndSign MUST run concurrently
+	// with the RPC — kicking it off after the await would deadlock. Unlike resume/migrate we do NOT
+	// use provisionWithIntent: its retry-once-on-NACK would issue a second ForkSpawn and create a
+	// duplicate fork. A single attempt is correct here; a STALE NACK just surfaces for a manual retry.
+	pollCtx, cancelPoll := context.WithCancel(ctx)
+	defer cancelPoll()
+	go func() {
+		if err := pollAndSign(pollCtx, client, sourceID, intentParams{}); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("fork %s: pollAndSign: %v", sourceID, err)
+		}
+	}()
 
 	resp, err := client.ForkSpawn(ctx, connect.NewRequest(req))
 	if err != nil {

@@ -16,6 +16,7 @@ export const DOMAIN_CREATE_SPAWN = "spawnery/intent/create-spawn/v1";
 export const DOMAIN_RESUME_SPAWN = "spawnery/intent/resume-spawn/v1";
 export const DOMAIN_RECREATE_SPAWN = "spawnery/intent/recreate-spawn/v1";
 export const DOMAIN_MIGRATE_SPAWN = "spawnery/intent/migrate-spawn/v1";
+export const DOMAIN_FORK_SPAWN = "spawnery/intent/fork-spawn/v1";
 export const DOMAIN_SESSION_OPEN = "spawnery/intent/session-open/v1";
 
 export function domainForOp(op: string): string {
@@ -24,6 +25,7 @@ export function domainForOp(op: string): string {
     case "resume-spawn":   return DOMAIN_RESUME_SPAWN;
     case "recreate-spawn": return DOMAIN_RECREATE_SPAWN;
     case "migrate-spawn":  return DOMAIN_MIGRATE_SPAWN;
+    case "fork-spawn":     return DOMAIN_FORK_SPAWN;
     case "session-open":   return DOMAIN_SESSION_OPEN;
     default:               return `spawnery/intent/${op}/v1`;
   }
@@ -331,8 +333,11 @@ function _validateTuple(pending: PendingIntentProto, pended: PendedOp): void {
   if (pending.op !== pended.op) {
     throw new Error(`intent: op mismatch: CP says "${pending.op}", locally pended "${pended.op}"`);
   }
-  // spawnId must match.
-  if (pending.spawnId !== pended.spawnId) {
+  // spawnId must match — except for fork-spawn. ForkSpawn is synchronous and the CP mints the
+  // fork's id, so the client cannot know it before the (blocking) RPC returns; poll/submit are
+  // keyed by the source id while the tuple's spawnId is the fresh fork id. There is nothing the
+  // client can compare it against, so the equality check is skipped for this op.
+  if (pended.op !== "fork-spawn" && pending.spawnId !== pended.spawnId) {
     throw new Error(`intent: spawnId mismatch`);
   }
   // For create-spawn: appRef, model must match.

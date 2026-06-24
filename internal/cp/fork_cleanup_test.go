@@ -97,10 +97,11 @@ func TestUnwindFailedForkOrderingAndRowLast(t *testing.T) {
 		t.Fatalf("unwindFailedFork: %v", err)
 	}
 
+	// Note: no "drop-bucket" — unwind deliberately leaves the empty Garage bucket (admin-aliased
+	// buckets can't be S3-dropped; consistent with normal spawn delete). See unwindFailedFork.
 	want := []string{
 		"revoke-key:fork-1",
 		"empty-bucket:spawnery-spawn-fork-1",
-		"drop-bucket:spawnery-spawn-fork-1",
 		"release-delta:fork-1",
 		"delete-row:fork-1",
 	}
@@ -190,7 +191,6 @@ func TestSweepFailedForksIsIdempotent(t *testing.T) {
 	want := []string{
 		"revoke-key:fork-sweep",
 		"empty-bucket:spawnery-spawn-fork-sweep",
-		"drop-bucket:spawnery-spawn-fork-sweep",
 		"release-delta:fork-sweep",
 		"delete-row:fork-sweep",
 	}
@@ -303,7 +303,6 @@ func TestSweepFailedForksReclaimsStaleRestoringForks(t *testing.T) {
 	want := []string{
 		"revoke-key:fork-stale-restoring",
 		"empty-bucket:spawnery-spawn-fork-stale-restoring",
-		"drop-bucket:spawnery-spawn-fork-stale-restoring",
 		"release-delta:fork-stale-restoring",
 		"delete-row:fork-stale-restoring",
 	}
@@ -431,7 +430,6 @@ func TestSweepFailedForksCleansForkWithoutLiveContainer(t *testing.T) {
 	want := []string{
 		"revoke-key:fork-no-live",
 		"empty-bucket:spawnery-spawn-fork-no-live",
-		"drop-bucket:spawnery-spawn-fork-no-live",
 		"release-delta:fork-no-live",
 		"delete-row:fork-no-live",
 	}
@@ -516,7 +514,6 @@ func TestSweepFailedForksUsesDefaultNodeResources(t *testing.T) {
 	wantOps := []nodev1.FailedForkCleanupOp{
 		nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_REVOKE_GENERATION,
 		nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_EMPTY_BUCKET,
-		nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_DROP_BUCKET,
 		nodev1.FailedForkCleanupOp_FAILED_FORK_CLEANUP_OP_RELEASE_DELTA,
 	}
 	if got := sender.cleanupOps(); len(got) != len(wantOps) {
@@ -588,7 +585,6 @@ func TestStartReconcilerSweepsFailedForks(t *testing.T) {
 	want := []string{
 		"revoke-key:fork-reconcile",
 		"empty-bucket:spawnery-spawn-fork-reconcile",
-		"drop-bucket:spawnery-spawn-fork-reconcile",
 		"release-delta:fork-reconcile",
 		"delete-row:fork-reconcile",
 	}
@@ -634,7 +630,6 @@ func TestReconcileTickSweepsFailedForksPeriodically(t *testing.T) {
 	want := []string{
 		"revoke-key:fork-periodic",
 		"empty-bucket:spawnery-spawn-fork-periodic",
-		"drop-bucket:spawnery-spawn-fork-periodic",
 		"release-delta:fork-periodic",
 		"delete-row:fork-periodic",
 	}
