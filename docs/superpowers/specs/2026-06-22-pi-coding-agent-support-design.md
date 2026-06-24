@@ -323,6 +323,32 @@ needed** — the TUI drives cleanly under tmux.
 that diverged from the assumptions above — append a dated note here, whether or
 not a formal debugging skill was used.*
 
+### Changes vs. original design (2026-06-24 — epic sp-2aaw IMPLEMENTED)
+
+All three tasks landed on `feat/sp-2aaw-pi-agent` (integrated with master). Net
+deltas from the design as written:
+
+- **Phase-2 `RelayOcadapter` wrinkle resolved the spec-sanctioned way:** `pi-acp`
+  is **`ModeACP` + `RelayPump`** (identical fields to `goose-acp`/`hermes-acp`);
+  `RelayOcadapter` was left untouched. The node ACP dispatch is registry-driven
+  with no agent-name hardcoding that excludes pi, so pi gets the same `Pump`
+  treatment as the proven goose/hermes path.
+- **`pi-acp` execs `pi-adapter` directly (no `acpmux`)** — it follows the
+  `acpadapter`/opencode-served direct-exec model rather than the
+  `acpmux <agent> acp` model of its RelayPump siblings. Functionally equivalent
+  (the node `Pump` only needs a TCP ACP endpoint). Consequence: `pi --mode rpc` is
+  stateless and the process *is* the session, so a mid-spawn node re-dial starts a
+  fresh pi and loses in-memory history; resume re-reads from disk. Acceptable for
+  shipped behavior.
+- **Node 22 is now in the image** (from the concurrent `sp-055b` hermes-acp fix
+  merged in), so pi *could* use the npm path — but we kept the pinned glibc
+  directory-dist + symlink (no new dependency on Node for pi).
+- **Follow-ups filed:** `sp-2aaw.5` (Tier C live-pod end-to-end — the build-tagged
+  `TestEndToEndPiACP` needs Docker + image + `OPENROUTER_API_KEY`, unrun in the
+  build sandbox) and `sp-2aaw.6` (`fd-find` installs as `fdfind` on Debian, not
+  `fd`; ripgrep is pi's primary search tool so low-risk — verify in Tier C).
+- Profiles/`agentinstall` emitter for pi remains out of scope as designed.
+
 ### 2026-06-23 — Spike S1 executed, GREEN (sp-2aaw.1 closed)
 
 Ran S1 locally against the real pinned binary (latest **v0.80.2**; spec had pinned
