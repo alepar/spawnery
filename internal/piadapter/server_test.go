@@ -31,8 +31,8 @@ func newHarness(t *testing.T) *testHarness {
 	piStdinR, piStdinW := io.Pipe()   // adapter writes commands; test reads
 	piStdoutR, piStdoutW := io.Pipe() // test writes events; adapter reads
 
-	fakeLaunch := launchFunc(func(_, _ string) (io.WriteCloser, io.ReadCloser, error) {
-		return piStdinW, piStdoutR, nil
+	fakeLaunch := launchFunc(func(_, _ string) (io.WriteCloser, io.ReadCloser, func(), error) {
+		return piStdinW, piStdoutR, func() {}, nil
 	})
 
 	a := New("test-model", "/app", withLaunch(fakeLaunch))

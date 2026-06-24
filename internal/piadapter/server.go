@@ -12,14 +12,15 @@ import (
 	"spawnery/internal/acp"
 )
 
-// launchFunc creates a pi --mode rpc subprocess and returns its stdin/stdout.
-// The adapter owns the process for the life of the connection.
-type launchFunc func(model, dir string) (piIn io.WriteCloser, piOut io.ReadCloser, err error)
+// launchFunc creates a pi --mode rpc subprocess and returns its stdin/stdout
+// plus a stop function that terminates and reaps the child. The adapter owns
+// the process for the life of the connection.
+type launchFunc func(model, dir string) (piIn io.WriteCloser, piOut io.ReadCloser, stop func(), err error)
 
 // realLaunch returns a launchFunc that runs the real pi binary.
 func realLaunch(bin string) launchFunc {
-	return func(model, dir string) (io.WriteCloser, io.ReadCloser, error) {
-		args := []string{"--mode", "rpc", "--provider", "spawnery", "--approve"}
+	return func(model, dir string) (io.WriteCloser, io.ReadCloser, func(), error) {
+		args := []string{"--mode", "rpc", "--provider", "spawnery"}
 		if model != "" {
 			args = append(args, "--model", "spawnery/"+model)
 		}
@@ -29,19 +30,24 @@ func realLaunch(bin string) launchFunc {
 		}
 		stdin, err := cmd.StdinPipe()
 		if err != nil {
-			return nil, nil, fmt.Errorf("pi stdin pipe: %w", err)
+			return nil, nil, nil, fmt.Errorf("pi stdin pipe: %w", err)
 		}
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			stdin.Close()
-			return nil, nil, fmt.Errorf("pi stdout pipe: %w", err)
+			return nil, nil, nil, fmt.Errorf("pi stdout pipe: %w", err)
 		}
 		if err := cmd.Start(); err != nil {
 			stdin.Close()
 			stdout.Close()
-			return nil, nil, fmt.Errorf("start pi: %w", err)
+			return nil, nil, nil, fmt.Errorf("start pi: %w", err)
 		}
-		return stdin, stdout, nil
+		stop := func() {
+			_ = stdin.Close()
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		return stdin, stdout, stop, nil
 	}
 }
 
@@ -104,11 +110,11 @@ func New(model, dir string, opts ...Option) *Adapter {
 func (a *Adapter) Serve(r io.Reader, w io.Writer) error {
 	srv := acp.NewServer(r, w)
 
-	piIn, piOut, err := a.launch(a.model, a.dir)
+	piIn, piOut, stop, err := a.launch(a.model, a.dir)
 	if err != nil {
 		return fmt.Errorf("launch pi: %w", err)
 	}
-	defer piIn.Close()
+	defer stop()
 
 	a.mu.Lock()
 	a.piIn = piIn
@@ -203,7 +209,8 @@ func (a *Adapter) pumpLoop(srv *acp.Server, piOut io.ReadCloser) {
 	defer piOut.Close()
 
 	sc := bufio.NewScanner(piOut)
-	sc.Split(bufio.ScanLines) // LF-only split; never splits on U+2028/U+2029
+	sc.Split(bufio.ScanLines)                               // LF-only split; never splits on U+2028/U+2029
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // allow large pi events (tool output, file reads)
 
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -219,15 +226,20 @@ func (a *Adapter) pumpLoop(srv *acp.Server, piOut io.ReadCloser) {
 
 	// pi's stdout closed (process exited or pipe broken). End any in-flight turn
 	// with a structured error so the node doesn't hang waiting for a response.
+	scanErr := sc.Err()
 	a.mu.Lock()
 	id := a.inflightID
 	has := a.hasInflight
 	a.hasInflight = false
 	a.mu.Unlock()
 	if has {
+		msg := "pi process exited unexpectedly"
+		if scanErr != nil {
+			msg = "pi output scan error: " + scanErr.Error()
+		}
 		_ = srv.Respond(id, map[string]any{
 			"stopReason": "end_turn",
-			"error":      &ACPError{Message: "pi process exited unexpectedly"},
+			"error":      &ACPError{Message: msg},
 		})
 	}
 }
