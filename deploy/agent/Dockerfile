@@ -120,13 +120,13 @@ RUN set -eux; \
 ARG PI_VERSION=v0.80.2
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; case "$arch" in amd64) a=x64;; arm64) a=arm64;; *) echo "unsupported arch $arch" >&2; exit 1;; esac; \
-    curl -fsSL -o /tmp/pi.tgz   "https://github.com/earendil-works/pi/releases/download/${PI_VERSION}/pi-linux-${a}.tar.gz"; \
+    curl -fsSL -o "/tmp/pi-linux-${a}.tar.gz" "https://github.com/earendil-works/pi/releases/download/${PI_VERSION}/pi-linux-${a}.tar.gz"; \
     curl -fsSL -o /tmp/pi.sums  "https://github.com/earendil-works/pi/releases/download/${PI_VERSION}/SHA256SUMS"; \
     (cd /tmp && grep "pi-linux-${a}.tar.gz" pi.sums | sha256sum -c -); \
     mkdir -p /usr/local/share/pi; \
-    tar -xzf /tmp/pi.tgz -C /usr/local/share/pi --strip-components=1; \
+    tar -xzf "/tmp/pi-linux-${a}.tar.gz" -C /usr/local/share/pi --strip-components=1; \
     ln -sf /usr/local/share/pi/pi /usr/local/bin/pi; \
-    rm /tmp/pi.tgz /tmp/pi.sums; \
+    rm "/tmp/pi-linux-${a}.tar.gz" /tmp/pi.sums; \
     pi --version
 
 # Pre-run the one-time SQLite migration + models.json fetch at build time (network available here),
