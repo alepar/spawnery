@@ -13,6 +13,7 @@ cp.db*
 /spawnctl
 /sidecar
 /stubagent
+/spawnery_cp
 *.test
 *.out
 .env
@@ -33,6 +34,9 @@ cp.db*
 
 # local dev-lane process logs (just-launched components write here)
 /.logs/
+
+# local dev state (operator-supplied; not part of the tracked tree)
+/.local/
 
 # Syncthing conflict artifacts in the externally-synced .beads dir (not source of truth)
 .beads/*.sync-conflict-*

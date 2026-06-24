@@ -138,6 +138,11 @@ just setup          # one-time: mprocs, web deps, playwright chromium
 
 `.env` with `OPENROUTER_API_KEY` is auto-loaded by Just; container images need Docker/Podman.
 
+**Keep compiled one-off binaries in `/bin/`.** Never leave a build output (`go build` of a
+`cmd/` target, an ad-hoc `spawnery_cp`/`spawnlet`/`spawnctl`, etc.) at the repo root — `make`
+already targets `/bin/`, and root-level binaries are gitignored as stray outputs. If you build by
+hand, use `go build -o bin/<name> ./cmd/<name>` (or just run `make`).
+
 **Run test commands inside a spawn:** `spawnctl exec` runs a command non-interactively in a running
 spawn's agent container, streaming stdout/stderr and exiting with the command's own exit code (so it is
 scriptable — no mosh/TTY). Use it to run a spawn's tests, e.g.
