@@ -54,6 +54,7 @@ var registry = map[string][]Runnable{
 	},
 	"pi": {
 		{ID: "pi-tui", Mode: ModeTmux, Launch: []string{"pi"}, Resume: []string{"pi", "--continue"}, Relay: RelayRawPTY, Label: "pi · terminal"},
+		{ID: "pi-acp", Mode: ModeACP, Launch: []string{"pi", "--mode", "rpc"}, Relay: RelayPump, Label: "pi · rich web"},
 	},
 	"hermes": {
 		{ID: "hermes-acp", Mode: ModeACP, Launch: []string{"hermes", "acp"}, Relay: RelayPump, Label: "Hermes · rich web"},
