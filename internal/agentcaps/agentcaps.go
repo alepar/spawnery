@@ -52,6 +52,9 @@ var registry = map[string][]Runnable{
 	"codex": {
 		{ID: "codex-tui", Mode: ModeTmux, Launch: []string{"codex"}, Resume: []string{"codex", "resume", "--last"}, Relay: RelayRawPTY, Label: "Codex · terminal"},
 	},
+	"pi": {
+		{ID: "pi-tui", Mode: ModeTmux, Launch: []string{"pi"}, Resume: []string{"pi", "--continue"}, Relay: RelayRawPTY, Label: "pi · terminal"},
+	},
 	"hermes": {
 		{ID: "hermes-acp", Mode: ModeACP, Launch: []string{"hermes", "acp"}, Relay: RelayPump, Label: "Hermes · rich web"},
 	},
