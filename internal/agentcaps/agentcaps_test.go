@@ -186,6 +186,19 @@ func TestPiTuiRunnable(t *testing.T) {
 	}
 }
 
+func TestPiAcpRunnable(t *testing.T) {
+	r, ok := Lookup("pi", "pi-acp")
+	if !ok {
+		t.Fatalf("pi/pi-acp should resolve")
+	}
+	if r.Mode != ModeACP || r.Relay != RelayPump {
+		t.Fatalf("pi-acp = mode %q relay %q, want %q / %q", r.Mode, r.Relay, ModeACP, RelayPump)
+	}
+	if len(r.Launch) == 0 {
+		t.Fatalf("pi-acp needs a Launch argv")
+	}
+}
+
 func sameStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
