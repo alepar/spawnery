@@ -149,10 +149,13 @@ for (const d of drivers) {
 
 ### Isolation, namespacing, safety
 
-- **Test-identity pool:** the suite requires a **pre-provisioned pool of test owners** (a documented
-  prerequisite — under OAuth these are real accounts, tied to Spike S1). Pool size ≥ max Playwright
-  workers; a **stable `parallelIndex → identity` map** assigns one owner per worker; owners are
-  **never shared across workers**.
+- **Test-identity pool:** the suite requires a **pool of N distinct test owners** (≥ max Playwright
+  workers), a **stable `parallelIndex → identity` map** assigning one owner per worker, **never shared
+  across workers**. **dev-token mode** supplies this trivially — `CP_DEV_TOKENS` maps N distinct
+  tokens→owners (`internal/cp/auth/auth.go`). **OAuth mode cannot** today: `AS_FAKE_GITHUB` serves a
+  single process-global user (r2 finding — see Prerequisites), so multi-owner OAuth needs the
+  reachable-multi-user test-IdP change (T2). Until T2 lands, tenancy/pool scenarios run in dev-token
+  mode; OAuth mode is exercised as a **single-owner auth-path lane**.
 - All artifacts namespaced `acc-<runId>-<worker>-…`.
 - **Cleanup is two-layer:** (1) in-process **teardown sweeper** deletes the run namespace even on
   test failure; (2) a **pre-run sweep** deletes stale `acc-*` artifacts older than a TTL (covers
@@ -221,11 +224,39 @@ for (const d of drivers) {
     at `auth.mode=prod`.
   - **The only RED path is automating *real* github.com** (2FA/bot-detection/ToS) — universally
     avoided; the `AS_FAKE_GITHUB` design already encodes that decision.
+  - **REMOTE caveat (r2 — verified against code):** the chosen approach is proven only **co-located**
+    with the target. Two spawnery limitations block a truly arms-length (`https://`-from-another-host)
+    suite, and the user chose to **fix both in v1**: **(T1)** `spawnctl` is **h2c-only** — `h2cClient`
+    (`cmd/spawnctl/main.go:420`) sets `AllowHTTP:true` and a `DialTLSContext` that returns a plain TCP
+    conn, so it can't complete a TLS handshake with any `https://` CP; needs a TLS client mode.
+    **(T2)** `AS_FAKE_GITHUB` is **single-user + loopback-bound** — `internal/authsvc/githubfake` runs
+    an `httptest` server on `127.0.0.1:<rand>` with one `user` field mutated only by an in-process
+    `SetUser`, and the AS 302-redirects the user-agent there (`oauth.go:152`); so a remote client can
+    neither reach the redirect nor select N distinct owners. Needs a network-reachable, multi-user
+    test-IdP surface (an HTTP user-selector on `githubfake`, or a separate reachable test IdP). Both
+    are tracked as blocking prerequisites (sp-tq0t.12 / sp-tq0t.13). Until they land, run
+    co-located/tunneled with dev-token multi-owner.
   - **Carried constraint → Phase 7 / GH prereq (sp-tq0t.10/.11):** `AS_FAKE_GITHUB` gives auth but
     **cannot mint a *real* GitHub token** for repo mount/push. Phase-7 real-GitHub scenarios therefore
     need a target wired to a **real** GitHub OAuth app + test org (the provisioning prereq), which is
     incompatible with `AS_FAKE_GITHUB` on the *same* instance. Resolve in the GH-prereq task: either a
     dedicated real-GitHub target for Phase 7, or a fake-link path for non-push GitHub coverage.
+
+## Prerequisites (product changes for arms-length-remote — v1, from r2 roast)
+
+The r2 roast confirmed (against code) that the arms-length-remote premise ("point at any `https://`
+URL from another host") needs two spawnery product changes. The user chose to invest in both for v1;
+they **block** the phases noted. Until they land, the suite runs co-located/tunneled in dev-token mode.
+
+- **T1 — `spawnctl` TLS client (sp-tq0t.12, blocks Phase 0 cli arm).** Add a TLS mode to the spawnctl
+  Connect client so `-cp https://…` completes a real handshake (today `h2cClient` is cleartext-only,
+  `cmd/spawnctl/main.go:420`). Scheme-driven: `https` → TLS transport, `http` → existing h2c. Files:
+  `cmd/spawnctl/`.
+- **T2 — reachable multi-user test IdP (sp-tq0t.13, blocks OAuthPoP + OAuth-mode tenancy).** Give a
+  test target a **network-reachable** IdP that can issue **N distinct** owners headlessly — either an
+  HTTP user-selector on `githubfake` (bind non-loopback + a `login_hint`/user param, concurrency-safe,
+  not process-global `SetUser`) or a separate reachable test IdP. Files: `internal/authsvc/githubfake/`,
+  `cmd/authsvc/`.
 
 ## Scope & phasing
 
@@ -271,6 +302,15 @@ Phase 0 (incl. Spike S1) + Phase 1 is the MVP that proves the framework end to e
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from
 the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
 
+- **2026-06-22 (roast r2 — Fable critics / Sonnet judges — BLOCK → folded):** 91 confirmed but 2
+  distinct new blockers (rest were restatements / r1 re-raises). Both verified against code and both
+  hit the arms-length-remote premise: **(1)** `spawnctl` is h2c-only (`main.go:420`) → cli arm can't
+  reach an `https://` CP; **(2)** `AS_FAKE_GITHUB` is single-user + loopback-`httptest`-bound
+  (`githubfake.go`, `oauth.go:152`) → a remote suite can't reach the fake's redirect or get N distinct
+  OAuth owners (so my S1 GREEN held only *co-located*). User chose to invest: added prerequisites
+  **T1** (spawnctl TLS, sp-tq0t.12) and **T2** (reachable multi-user test IdP, sp-tq0t.13); reframed
+  the identity pool (dev-token gives N owners; OAuth multi-owner needs T2); OAuth mode is a
+  single-owner auth lane until T2. Re-roast capped at 2 iterations — not re-running.
 - **2026-06-22 (Spike S1 resolved — GREEN):** investigated the live auth path (session key = ECDSA
   P-256 non-extractable; bespoke refresh PoP already reproduced in Go by `spawnctl`;
   `/oauth/authorize?session_pubkey=…` binds a caller key; `AS_FAKE_GITHUB` runs real auth code with a
