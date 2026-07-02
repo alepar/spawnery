@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -21,12 +24,21 @@ func noRedirect() *http.Client {
 
 func authorizeCode(t *testing.T, f *Fake, challenge string) string {
 	t.Helper()
+	return authorizeCodeHint(t, f, challenge, "")
+}
+
+// authorizeCodeHint is authorizeCode with an optional login_hint (empty = no hint, back-compat).
+func authorizeCodeHint(t *testing.T, f *Fake, challenge, loginHint string) string {
+	t.Helper()
 	q := url.Values{
 		"client_id":             {f.ClientID},
 		"redirect_uri":          {"http://client.example/cb"},
 		"state":                 {"st"},
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
+	}
+	if loginHint != "" {
+		q.Set("login_hint", loginHint)
 	}
 	resp, err := noRedirect().Get(f.URL() + "/login/oauth/authorize?" + q.Encode())
 	if err != nil {
@@ -41,6 +53,32 @@ func authorizeCode(t *testing.T, f *Fake, challenge string) string {
 		t.Fatalf("state not echoed: %s", loc)
 	}
 	return loc.Query().Get("code")
+}
+
+// userFor drives authorize(login_hint)->exchange->GET /user and returns the resulting user.
+func userFor(t *testing.T, f *Fake, loginHint string) User {
+	t.Helper()
+	verifier := "verifier-" + loginHint + "-of-sufficient-length-000000"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	code := authorizeCodeHint(t, f, challenge, loginHint)
+	out := exchange(t, f, code, f.ClientSecret, verifier)
+	tok := out["access_token"]
+	if tok == "" {
+		t.Fatalf("no access_token for hint %q: %v", loginHint, out)
+	}
+	req, _ := http.NewRequest(http.MethodGet, f.URL()+"/user", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var u User
+	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
+		t.Fatal(err)
+	}
+	return u
 }
 
 func exchange(t *testing.T, f *Fake, code, secret, verifier string) map[string]string {
@@ -368,5 +406,168 @@ func TestFakeDeleteTokenInvalidatesAccessButNotRefresh(t *testing.T) {
 	dresp2.Body.Close()
 	if dresp2.StatusCode != http.StatusNotFound {
 		t.Fatalf("idempotent delete token status = %d, want 404", dresp2.StatusCode)
+	}
+}
+
+// --- login_hint multi-user selection ---------------------------------------------------------
+
+func TestLoginHintSelectsUser(t *testing.T) {
+	f := New()
+	defer f.Close()
+
+	u := userFor(t, f, "alice")
+	wantID := DeriveUserID("alice")
+	if u.ID != wantID || u.Login != "alice" {
+		t.Fatalf("user = %+v, want {%d alice}", u, wantID)
+	}
+}
+
+func TestLoginHintNoHintUsesDefaultUser(t *testing.T) {
+	f := New()
+	defer f.Close()
+	f.SetUser(555, "carol")
+
+	u := userFor(t, f, "")
+	if u.ID != 555 || u.Login != "carol" {
+		t.Fatalf("user = %+v, want default {555 carol}", u)
+	}
+}
+
+func TestLoginHintSeededUserViaAddUser(t *testing.T) {
+	f := New()
+	defer f.Close()
+	f.AddUser(999999, "dave")
+
+	u := userFor(t, f, "dave")
+	if u.ID != 999999 || u.Login != "dave" {
+		t.Fatalf("user = %+v, want seeded {999999 dave}", u)
+	}
+	// Default user (octocat) must be unaffected by AddUser.
+	def := userFor(t, f, "")
+	if def.ID != 1000001 || def.Login != "octocat" {
+		t.Fatalf("default user = %+v, want unchanged octocat", def)
+	}
+}
+
+func TestLoginHintDeterministicAndDistinct(t *testing.T) {
+	f := New()
+	defer f.Close()
+
+	alice1 := userFor(t, f, "alice")
+	bob := userFor(t, f, "bob")
+	alice2 := userFor(t, f, "alice")
+
+	if alice1.ID == bob.ID {
+		t.Fatalf("distinct logins collided: alice=%d bob=%d", alice1.ID, bob.ID)
+	}
+	if alice1.ID != alice2.ID || alice1.Login != alice2.Login {
+		t.Fatalf("same login yielded different users across flows: %+v vs %+v", alice1, alice2)
+	}
+
+	// No-hint flow is still the octocat default, untouched by auto-registration.
+	def := userFor(t, f, "")
+	if def.ID != 1000001 || def.Login != "octocat" {
+		t.Fatalf("default user = %+v, want unchanged octocat", def)
+	}
+}
+
+// TestLoginHintConcurrent drives N goroutines, each doing authorize(login_hint=user_i)->exchange->
+// GET /user in parallel. Every token must resolve to its own owner id with no cross-talk — the
+// acceptance criterion that selection is race-free and not routed through a process-global
+// mutable "current user" (run under -race).
+func TestLoginHintConcurrent(t *testing.T) {
+	f := New()
+	defer f.Close()
+
+	const n = 20
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			login := fmt.Sprintf("worker%d", i)
+			u := userFor(t, f, login)
+			want := DeriveUserID(login)
+			if u.ID != want || u.Login != login {
+				errs[i] = fmt.Errorf("worker %d: got %+v, want {%d %s}", i, u, want, login)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// --- reachable bind + advertised base URL -----------------------------------------------------
+
+// TestNewWithOptionsReachableBind exercises the *capability* NewWithOptions provides — an
+// arbitrary bind Addr plus an explicit advertised BaseURL — using 127.0.0.1:0 (a real
+// non-loopback bind isn't available/needed in a hermetic unit test). Operators pass
+// "0.0.0.0:<port>" + a routable BaseURL in staging; here we bind loopback-ephemeral, read back the
+// actual port, and set BaseURL explicitly to prove URL() and every endpoint honor it.
+func TestNewWithOptionsReachableBind(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	base := "http://" + addr
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close probe listener: %v", err)
+	}
+
+	f := NewWithOptions(Options{Addr: addr, BaseURL: base})
+	defer f.Close()
+
+	if f.URL() != base {
+		t.Fatalf("URL() = %q, want %q", f.URL(), base)
+	}
+
+	u := userFor(t, f, "erin")
+	wantID := DeriveUserID("erin")
+	if u.ID != wantID || u.Login != "erin" {
+		t.Fatalf("user over reachable bind = %+v, want {%d erin}", u, wantID)
+	}
+}
+
+func TestNewWithOptionsRequiresBaseURL(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic: Addr set without BaseURL")
+		}
+	}()
+	NewWithOptions(Options{Addr: "127.0.0.1:0"})
+}
+
+func TestNewWithOptionsSeedsUsersAndDefault(t *testing.T) {
+	seed := []User{{ID: 111, Login: "primary"}, {ID: 222, Login: "secondary"}}
+	f := NewWithOptions(Options{Users: seed})
+	defer f.Close()
+
+	def := userFor(t, f, "")
+	if def.ID != 111 || def.Login != "primary" {
+		t.Fatalf("default user = %+v, want Users[0]", def)
+	}
+	sec := userFor(t, f, "secondary")
+	if sec.ID != 222 || sec.Login != "secondary" {
+		t.Fatalf("seeded user = %+v, want {222 secondary}", sec)
+	}
+}
+
+// TestNewBackCompat pins New()'s exact historical behavior: loopback bind, default user octocat
+// (1000001), no login_hint required.
+func TestNewBackCompat(t *testing.T) {
+	f := New()
+	defer f.Close()
+	if f.URL() != f.Srv.URL {
+		t.Fatalf("URL() = %q, want the loopback httptest URL %q", f.URL(), f.Srv.URL)
+	}
+	u := userFor(t, f, "")
+	if u.ID != 1000001 || u.Login != "octocat" {
+		t.Fatalf("default user = %+v, want {1000001 octocat}", u)
 	}
 }
