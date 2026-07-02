@@ -19,7 +19,7 @@ import (
 
 // listSpawns fetches the caller's spawns from the CP (the token source scopes them to the owner).
 func listSpawns(cpAddr string, src *cpTokenSource) []*cpv1.SpawnSummary {
-	client := cpv1connect.NewSpawnServiceClient(h2cClient(), cpAddr,
+	client := cpv1connect.NewSpawnServiceClient(connectClient(), cpAddr,
 		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 	resp, err := client.ListSpawns(context.Background(), connect.NewRequest(&cpv1.ListSpawnsRequest{}))
 	if err != nil {
@@ -99,7 +99,7 @@ func listCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			src := buildTokenSource(dir, c.String("token"), h2cClient())
+			src := buildTokenSource(dir, c.String("token"), connectClient())
 			sums := listSpawns(c.String("cp"), src)
 			if len(sums) == 0 {
 				fmt.Fprintln(os.Stderr, "no spawns")
