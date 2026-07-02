@@ -62,4 +62,20 @@ describe("loadTargetConfig", () => {
     const env = { ...baseEnv, ACC_AUTH_MODE: "bogus" };
     expect(() => loadTargetConfig(env as unknown as NodeJS.ProcessEnv)).toThrow(/ACC_AUTH_MODE/);
   });
+
+  it("accepts oauth-pop as a valid ACC_AUTH_MODE", () => {
+    const env = { ...baseEnv, ACC_AUTH_MODE: "oauth-pop" };
+    expect(loadTargetConfig(env as unknown as NodeJS.ProcessEnv).authMode).toBe("oauth-pop");
+  });
+
+  it("defaults asOrigin to webOrigin (same-origin, mirrors the SPA's dev-proxy default)", () => {
+    const cfg = loadTargetConfig(baseEnv as unknown as NodeJS.ProcessEnv);
+    expect(cfg.asOrigin).toBe(cfg.webOrigin);
+  });
+
+  it("honors an explicit ACC_AS_ORIGIN override", () => {
+    const env = { ...baseEnv, ACC_AS_ORIGIN: "https://as.blacky.dayton:8090" };
+    const cfg = loadTargetConfig(env as unknown as NodeJS.ProcessEnv);
+    expect(cfg.asOrigin).toBe("https://as.blacky.dayton:8090");
+  });
 });

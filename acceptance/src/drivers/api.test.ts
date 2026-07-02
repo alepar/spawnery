@@ -96,6 +96,23 @@ describe("ApiDriver.findSpawn", () => {
   });
 });
 
+describe("ApiDriver token source", () => {
+  it("accepts an async token-provider function and calls it fresh per request", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => new Response(JSON.stringify({}), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const tokens = ["first", "second"];
+    const getToken = vi.fn(async () => tokens.shift()!);
+
+    const driver = new ApiDriver("https://cp.example", getToken);
+    await driver.listSpawns();
+    await driver.listSpawns();
+
+    expect(getToken).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][1].headers["Authorization"]).toBe("Bearer first");
+    expect(fetchMock.mock.calls[1][1].headers["Authorization"]).toBe("Bearer second");
+  });
+});
+
 describe("ApiDriver.createSpawn / deleteSpawn / stopSpawn", () => {
   it("createSpawn posts the request and returns spawnId", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ spawnId: "new-1" }), { status: 200 }));

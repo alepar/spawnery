@@ -30,11 +30,11 @@ export class DevTokenAuth implements AuthStrategy {
     );
   }
 
-  cliArgs(identity: Identity): string[] {
+  async cliArgs(identity: Identity): Promise<string[]> {
     return ["-token", identity.token];
   }
 
-  oracleToken(identity: Identity): string {
+  async oracleToken(identity: Identity): Promise<string> {
     return identity.token;
   }
 }

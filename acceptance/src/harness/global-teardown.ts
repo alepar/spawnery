@@ -19,7 +19,7 @@ export default async function globalTeardown(): Promise<void> {
     return;
   }
   const auth = new DevTokenAuth();
-  const api = new ApiDriver(cfg.cpEndpoint, auth.oracleToken(cfg.identityPool[0]));
+  const api = new ApiDriver(cfg.cpEndpoint, await auth.oracleToken(cfg.identityPool[0]));
   try {
     await teardownSweep(api, cfg.runId);
   } catch (e) {
