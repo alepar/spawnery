@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { buildArgs, parseListTable, CliDriver } from "./cli";
+import { buildArgs, buildExecArgs, parseListTable, CliDriver } from "./cli";
 import type { Identity } from "../fixtures/identity-pool";
 import type { DriverCtx } from "./types";
 
@@ -8,7 +8,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 const identity: Identity = { token: "tok-123", owner: "acc-owner-1" };
-const cfg = { cpEndpoint: "https://cp.example", spawnctlBin: "spawnctl" };
+const cfg = { cpEndpoint: "https://cp.example", spawnctlBin: "spawnctl", nodeAddr: "http://node.example:9092" };
 
 describe("buildArgs", () => {
   it("puts -cp/-token as leading root flags for the no-subcommand create form", () => {
@@ -26,6 +26,34 @@ describe("buildArgs", () => {
   it("keeps positional args before the trailing -cp/-token for a subcommand", () => {
     const argv = buildArgs(cfg, identity, "set-model", ["s1", "some-model"]);
     expect(argv).toEqual(["set-model", "s1", "some-model", "-cp", "https://cp.example", "-token", "tok-123"]);
+  });
+});
+
+describe("buildExecArgs", () => {
+  it("targets the node (-addr), not the CP, with -spawn and a -- terminator before the command", () => {
+    const argv = buildExecArgs(cfg, identity, "s1", ["cat", "/workspace/marker.txt"]);
+    expect(argv).toEqual([
+      "exec",
+      "-spawn",
+      "s1",
+      "-addr",
+      "http://node.example:9092",
+      "-cp",
+      "https://cp.example",
+      "-token",
+      "tok-123",
+      "--",
+      "cat",
+      "/workspace/marker.txt",
+    ]);
+  });
+
+  it("places -cp/-token after the subcommand and -- strictly before the inner command", () => {
+    const argv = buildExecArgs(cfg, identity, "s1", ["sh", "-c", "exit 3"]);
+    const dashDash = argv.indexOf("--");
+    expect(dashDash).toBeGreaterThan(argv.indexOf("-spawn"));
+    expect(dashDash).toBeGreaterThan(argv.indexOf("-token"));
+    expect(argv.slice(dashDash + 1)).toEqual(["sh", "-c", "exit 3"]);
   });
 });
 
@@ -146,5 +174,39 @@ describe("CliDriver — subprocess-backed verbs (execFile mocked)", () => {
 
     const driver = new CliDriver(cfg);
     await expect(driver.waitActive(ctx, "s1", { timeoutMs: 5000, pollMs: 1 })).rejects.toThrow(/terminal status ERROR/);
+  });
+
+  it("exec resolves {code:0} on a clean run, without throwing", async () => {
+    const cp = await import("node:child_process");
+    vi.mocked(cp.execFile).mockImplementation(((_bin: string, _args: string[], cb: (...a: unknown[]) => void) => {
+      cb(null, "hello\n", "");
+    }) as unknown as typeof cp.execFile);
+
+    const driver = new CliDriver(cfg);
+    await expect(driver.exec(ctx, "s1", ["printf", "hello"])).resolves.toEqual({ code: 0, stdout: "hello\n", stderr: "" });
+  });
+
+  it("exec resolves a non-zero code (from the propagated inner command exit) without throwing", async () => {
+    const cp = await import("node:child_process");
+    vi.mocked(cp.execFile).mockImplementation(((_bin: string, _args: string[], cb: (...a: unknown[]) => void) => {
+      cb(Object.assign(new Error("Command failed"), { code: 3 }), "partial out", "some err");
+    }) as unknown as typeof cp.execFile);
+
+    const driver = new CliDriver(cfg);
+    await expect(driver.exec(ctx, "s1", ["sh", "-c", "exit 3"])).resolves.toEqual({
+      code: 3,
+      stdout: "partial out",
+      stderr: "some err",
+    });
+  });
+
+  it("exec rejects a transport failure that carries no numeric exit code (e.g. ENOENT)", async () => {
+    const cp = await import("node:child_process");
+    vi.mocked(cp.execFile).mockImplementation(((_bin: string, _args: string[], cb: (...a: unknown[]) => void) => {
+      cb(Object.assign(new Error("spawn spawnctl ENOENT"), { code: "ENOENT" }), "", "");
+    }) as unknown as typeof cp.execFile);
+
+    const driver = new CliDriver(cfg);
+    await expect(driver.exec(ctx, "s1", ["true"])).rejects.toThrow(/ENOENT/);
   });
 });

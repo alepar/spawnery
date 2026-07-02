@@ -26,8 +26,9 @@ export interface TargetConfig {
   targetRef: string;
   buildRef: string;
   spawnctlBin: string;
-  /** nodeAddr is the node's terminal/exec endpoint (spawnctl exec -addr). Only Phase-5 injection
-   * observation needs it; co-located/tunneled dev default assumes the CP and node run together. */
+  /** nodeAddr is the node's terminal/exec endpoint (spawnctl exec -addr / `spawnctl exec`/attach/shell
+   * dial this directly, not the CP). Only Phase-5 injection observation and @agent `exec` scenarios
+   * need it; co-located/tunneled dev default assumes the CP and node run together. */
   nodeAddr: string;
   /** seedSkillAppId is a registered app whose agent installs skills (claude or codex), needed only
    * by tests/customization/injection.spec.ts to observe profile-attached skill materialization.
@@ -38,6 +39,10 @@ export interface TargetConfig {
   wallclockMs: number;
   staleTtlMs: number;
   runId?: string;
+  /** Pinned model for @agent scenarios (sp-tq0t.5+). Absent = @agent scenarios precondition-throw. */
+  agentModel?: string;
+  /** App id of a real coding-agent app on the target, for @agent scenarios. Same absence rule as agentModel. */
+  agentAppId?: string;
 }
 
 const REQUIRED_VARS = ["ACC_WEB_ORIGIN", "ACC_CP_ENDPOINT", "ACC_IDENTITY_POOL", "ACC_TARGET_REF", "ACC_BUILD_REF"] as const;
@@ -92,5 +97,7 @@ export function loadTargetConfig(env: NodeJS.ProcessEnv = process.env): TargetCo
     wallclockMs: Number(env.ACC_WALLCLOCK_MS ?? "1800000"),
     staleTtlMs: Number(env.ACC_STALE_TTL_MS ?? "3600000"),
     runId: env.ACC_RUN_ID || undefined,
+    agentModel: env.ACC_AGENT_MODEL || undefined,
+    agentAppId: env.ACC_AGENT_APP_ID || undefined,
   };
 }

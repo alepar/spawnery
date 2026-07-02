@@ -54,6 +54,33 @@ per-run token budget + wall-clock cap (`ACC_TOKEN_BUDGET` / `ACC_WALLCLOCK_MS`) 
 `fixtures/budget.ts`'s `CostLedger`, with a kill-switch that aborts the run when exceeded.
 `@agent` failures never auto-retry (masks regressions and multiplies cost).
 
+**Caveat — the ledger is per-worker, not run-global.** The `ledger` fixture is worker-scoped
+(`harness/test.ts`), so `ACC_TOKEN_BUDGET`/`ACC_WALLCLOCK_MS` are enforced per Playwright worker
+process, not as one shared run-wide total — a run with N workers can burn up to N× the budget
+before any single worker's check() trips. A true global kill-switch needs cross-worker shared
+state (a file/IPC ledger) Playwright workers don't have out of the box; tracked as a follow-up
+hardening bead.
+
+## Phase 2 — sessions (`@agent` prompt/transcript, exec)
+
+`tests/sessions/` adds the first `@agent` scenarios: a prompt sent through the web session view,
+asserted structurally against the RENDERED transcript (test ids, turn roles — **never** agent
+prose, since a real LLM's wording isn't a stable assertion target), transcript persistence across
+a full page reload, and the agent's real side effect (a file it was prompted to write) read back
+**fresh** via `spawnctl exec`. A sibling `exec-exitcode.spec.ts` proves plain exit-code
+propagation + stdout capture with no LLM involved.
+
+Preconditions beyond the base `.env.*` vars (see `.env.example`):
+- `ACC_AGENT_APP_ID` — a real coding-agent app registered on the target.
+- `ACC_AGENT_MODEL` — a pinned, cheap model (attributable cost, never "whatever the app
+  defaults to").
+- `ACC_NODE_ADDR` — the node's terminal endpoint reachable from wherever the suite runs. `exec`
+  (like `attach`/`shell`) dials the node **directly**, bypassing the CP entirely.
+- Missing `ACC_AGENT_APP_ID`/`ACC_AGENT_MODEL` makes the `@agent` scenario (and the
+  `exec-exitcode` spec, which reuses the agent app as its guaranteed-present spawn source) fail
+  loudly with a precondition error — never a silent skip.
+- `@agent` describe-blocks set `retries: 0` — see Cost ceiling above.
+
 ## Ownership & SLO
 
 Owner: the spawnery team (see CODEOWNERS once GH scenarios land). This suite runs on a schedule
