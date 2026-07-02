@@ -1,0 +1,2 @@
+Scenario specs land here starting with Phase 1 (sp-tq0t.4). Import `test`/`expect` from
+../src/harness/test.ts rather than @playwright/test directly.
