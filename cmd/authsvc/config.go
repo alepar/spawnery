@@ -17,6 +17,14 @@ type AS struct {
 	Listen         string `koanf:"listen" validate:"required,hostname_port"`
 	AllowedOrigins string `koanf:"allowed_origins"`
 
+	// Reachable, multi-user fake GitHub (T2, sp-tq0t.13): opt-in fields for a black-box acceptance
+	// suite that needs to reach the fake's browser-facing authorize redirect from another host and
+	// obtain N distinct OAuth owners. All empty (the default) = today's behavior exactly: loopback
+	// bind, single default user.
+	FakeGitHubAddr    string `koanf:"fake_github_addr"`     // bind addr for reachable mode, e.g. "0.0.0.0:9099"
+	FakeGitHubBaseURL string `koanf:"fake_github_base_url"` // advertised base URL; required when Addr is set
+	FakeGitHubUsers   string `koanf:"fake_github_users"`    // "alice:2000001,bob" or "alice,bob" (id derived when omitted)
+
 	CA struct {
 		RootPEM          string `koanf:"root_pem"`
 		IntermediateCert string `koanf:"intermediate_cert"`
@@ -127,6 +135,9 @@ var asEnvAliases = map[string]string{
 	"AS_PUBLIC_URL":                  "public_url",
 	"AS_DEV":                         "dev",
 	"AS_FAKE_GITHUB":                 "fake_github",
+	"AS_FAKE_GITHUB_ADDR":            "fake_github_addr",
+	"AS_FAKE_GITHUB_BASE_URL":        "fake_github_base_url",
+	"AS_FAKE_GITHUB_USERS":           "fake_github_users",
 	"AS_LISTEN":                      "listen",
 	"AS_ALLOWED_ORIGINS":             "allowed_origins",
 	"AS_ROOT_CA_PEM":                 "ca.root_pem",
