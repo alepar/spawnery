@@ -81,6 +81,7 @@ export class CliDriver implements SpawnDriver {
   async createSpawn(ctx: DriverCtx, opts: CreateSpawnOpts): Promise<SpawnId> {
     const args = ["-app-id", opts.appId];
     if (opts.model) args.push("-model", opts.model);
+    if (opts.profileId) args.push("-profile", opts.profileId);
     const { stdout } = await this.run(ctx.identity, "", args);
     const m = /^spawn:\s*(\S+)/m.exec(stdout);
     if (!m) throw new Error(`cliDriver: could not parse spawn id from create output:\n${stdout}`);

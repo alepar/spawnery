@@ -80,6 +80,33 @@ describe("CliDriver — subprocess-backed verbs (execFile mocked)", () => {
     expect(id).toBe("acc-spawn-1");
   });
 
+  it("createSpawn includes -profile <id> in argv when opts.profileId is set", async () => {
+    const cp = await import("node:child_process");
+    let seenArgs: string[] = [];
+    vi.mocked(cp.execFile).mockImplementation(((_bin: string, args: string[], cb: (...a: unknown[]) => void) => {
+      seenArgs = args;
+      cb(null, "spawn: acc-spawn-1\n", "");
+    }) as unknown as typeof cp.execFile);
+
+    const driver = new CliDriver(cfg);
+    await driver.createSpawn(ctx, { appId: "acc/app", profileId: "prof-1" });
+    expect(seenArgs).toContain("-profile");
+    expect(seenArgs[seenArgs.indexOf("-profile") + 1]).toBe("prof-1");
+  });
+
+  it("createSpawn omits -profile when opts.profileId is not set", async () => {
+    const cp = await import("node:child_process");
+    let seenArgs: string[] = [];
+    vi.mocked(cp.execFile).mockImplementation(((_bin: string, args: string[], cb: (...a: unknown[]) => void) => {
+      seenArgs = args;
+      cb(null, "spawn: acc-spawn-1\n", "");
+    }) as unknown as typeof cp.execFile);
+
+    const driver = new CliDriver(cfg);
+    await driver.createSpawn(ctx, { appId: "acc/app" });
+    expect(seenArgs).not.toContain("-profile");
+  });
+
   it("createSpawn throws when the spawn id can't be parsed", async () => {
     const cp = await import("node:child_process");
     vi.mocked(cp.execFile).mockImplementation(((_bin: string, _args: string[], cb: (...a: unknown[]) => void) => {

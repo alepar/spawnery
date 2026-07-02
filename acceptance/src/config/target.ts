@@ -26,6 +26,14 @@ export interface TargetConfig {
   targetRef: string;
   buildRef: string;
   spawnctlBin: string;
+  /** nodeAddr is the node's terminal/exec endpoint (spawnctl exec -addr). Only Phase-5 injection
+   * observation needs it; co-located/tunneled dev default assumes the CP and node run together. */
+  nodeAddr: string;
+  /** seedSkillAppId is a registered app whose agent installs skills (claude or codex), needed only
+   * by tests/customization/injection.spec.ts to observe profile-attached skill materialization.
+   * No default — unlike nodeAddr, there's no safe assumption for "which app"; the scenario fails
+   * loud (never skips) when this is unset. */
+  seedSkillAppId?: string;
   tokenBudget: number;
   wallclockMs: number;
   staleTtlMs: number;
@@ -78,6 +86,8 @@ export function loadTargetConfig(env: NodeJS.ProcessEnv = process.env): TargetCo
     targetRef: env.ACC_TARGET_REF!,
     buildRef: env.ACC_BUILD_REF!,
     spawnctlBin: env.ACC_SPAWNCTL_BIN ?? "spawnctl",
+    nodeAddr: env.ACC_NODE_ADDR ?? "http://127.0.0.1:9092",
+    seedSkillAppId: env.ACC_SEED_SKILL_APP_ID || undefined,
     tokenBudget: Number(env.ACC_TOKEN_BUDGET ?? "200000"),
     wallclockMs: Number(env.ACC_WALLCLOCK_MS ?? "1800000"),
     staleTtlMs: Number(env.ACC_STALE_TTL_MS ?? "3600000"),
