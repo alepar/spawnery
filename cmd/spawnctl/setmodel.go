@@ -25,7 +25,7 @@ func formatSetModelResult(model string, applied bool) string {
 // it applied to the live agent. Mirrors list.go's listSpawns: builds the gRPC client with the token
 // source interceptor and log.Fatalf on RPC error.
 func setSpawnModel(cpAddr string, src *cpTokenSource, spawnID, model string) (string, bool) {
-	client := cpv1connect.NewSpawnServiceClient(h2cClient(), cpAddr,
+	client := cpv1connect.NewSpawnServiceClient(connectClient(), cpAddr,
 		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 	resp, err := client.SetSpawnModel(context.Background(), connect.NewRequest(&cpv1.SetSpawnModelRequest{
 		SpawnId: spawnID,
@@ -58,7 +58,7 @@ func setModelCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			src := buildTokenSource(dir, c.String("token"), h2cClient())
+			src := buildTokenSource(dir, c.String("token"), connectClient())
 			model, applied := setSpawnModel(c.String("cp"), src, args.Get(0), args.Get(1))
 			fmt.Println(formatSetModelResult(model, applied))
 			return nil

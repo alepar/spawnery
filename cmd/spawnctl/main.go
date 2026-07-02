@@ -99,7 +99,7 @@ func rootAction(ctx context.Context, c *cli.Command) error {
 		return fmt.Errorf("config: %w", err)
 	}
 	configDir, _ := defaultConfigDir()
-	httpCl := h2cClient()
+	httpCl := connectClient()
 	if c.Bool("register") {
 		if cfg.CP == "" {
 			return cli.Exit("-register requires -cp", 2)
@@ -156,7 +156,7 @@ func runRegister(ctx context.Context, cpAddr, appDir, version, ref string, src *
 	if err != nil {
 		log.Fatalf("manifest: %v", err)
 	}
-	client := cpv1connect.NewSpawnServiceClient(h2cClient(), cpAddr,
+	client := cpv1connect.NewSpawnServiceClient(connectClient(), cpAddr,
 		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 	resp, err := client.RegisterAppVersion(ctx, connect.NewRequest(&cpv1.RegisterAppVersionRequest{Manifest: pm, Version: version, Ref: ref}))
 	if err != nil {
@@ -167,7 +167,7 @@ func runRegister(ctx context.Context, cpAddr, appDir, version, ref string, src *
 
 // runStandalone drives a spawnlet directly via the spawn.v1 service (CP-less).
 func runStandalone(ctx context.Context, addr, appPath, model string) {
-	client := spawnv1connect.NewSpawnServiceClient(h2cClient(), addr, connect.WithGRPC())
+	client := spawnv1connect.NewSpawnServiceClient(connectClient(), addr, connect.WithGRPC())
 
 	cs, err := client.CreateSpawn(ctx, connect.NewRequest(&spawnv1.CreateSpawnRequest{
 		AppPath: appPath,
@@ -215,7 +215,7 @@ func runStandalone(ctx context.Context, addr, appPath, model string) {
 
 // runCP drives the agent through the control plane via the cp.v1 service.
 func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*cpv1.MountBinding, src *cpTokenSource) {
-	client := cpv1connect.NewSpawnServiceClient(h2cClient(), addr,
+	client := cpv1connect.NewSpawnServiceClient(connectClient(), addr,
 		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 
 	cs, err := client.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
@@ -417,17 +417,40 @@ func driveACP(pr io.Reader, sendW io.Writer) {
 	}
 }
 
-// h2cClient returns an *http.Client configured for cleartext HTTP/2 (h2c).
-// This is required for Connect bidi streaming without TLS.
-func h2cClient() *http.Client {
-	return &http.Client{
-		Transport: &http2.Transport{
+// connectClient returns an *http.Client for Connect RPCs (and the token-refresh POST)
+// whose transport is chosen per-request by URL scheme: https -> real TLS + HTTP/2
+// handshake, http -> cleartext HTTP/2 (h2c). This lets -cp target an https:// CP while
+// http:// keeps working for local/dev. Both sub-transports speak HTTP/2, as required by
+// connect.WithGRPC().
+func connectClient() *http.Client {
+	return &http.Client{Transport: newSchemeTransport(nil)}
+}
+
+// newSchemeTransport builds the scheme-dispatching RoundTripper. tlsConf is nil in
+// production (system roots / standard verification); tests inject a cert pool.
+func newSchemeTransport(tlsConf *tls.Config) *schemeTransport {
+	return &schemeTransport{
+		h2c: &http2.Transport{
 			AllowHTTP: true,
 			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, network, addr)
 			},
 		},
+		tls: &http2.Transport{TLSClientConfig: tlsConf},
 	}
+}
+
+// schemeTransport routes each request to the h2c or TLS HTTP/2 transport by URL scheme.
+type schemeTransport struct {
+	h2c *http2.Transport
+	tls *http2.Transport
+}
+
+func (t *schemeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme == "https" {
+		return t.tls.RoundTrip(req)
+	}
+	return t.h2c.RoundTrip(req)
 }
 
 // tokenSourceInterceptor builds a Connect interceptor backed by a cpTokenSource.

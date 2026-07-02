@@ -29,7 +29,7 @@ func statusCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			src := buildTokenSource(dir, c.String("token"), h2cClient())
+			src := buildTokenSource(dir, c.String("token"), connectClient())
 			sums := listSpawns(c.String("cp"), src)
 			for _, s := range sums {
 				if s.GetSpawnId() == spawnID {

@@ -37,7 +37,7 @@ func resolveSpawn(c *cli.Command) string {
 	if err != nil {
 		log.Fatalf("resolveSpawn: config dir: %v", err)
 	}
-	src := buildTokenSource(dir, c.String("token"), h2cClient())
+	src := buildTokenSource(dir, c.String("token"), connectClient())
 	id := chooseSpawn(c.String("cp"), src)
 	if id == "" {
 		log.Fatal("no spawn selected")
