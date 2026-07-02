@@ -133,6 +133,9 @@ func newFake(o Options) (*Fake, error) {
 	for _, u := range o.Users {
 		users[u.Login] = u
 	}
+	// Seed defaultUser into users keyed by its login so login_hint=<defaultLogin> resolves to the
+	// stable default id (1000001 for octocat) instead of auto-registering via DeriveUserID.
+	users[defaultUser.Login] = defaultUser
 
 	f := &Fake{
 		ClientID:     "fake-client-id",
@@ -179,11 +182,14 @@ func (f *Fake) URL() string {
 	return f.Srv.URL
 }
 
-// SetUser sets the default user — who authorize logs in as when login_hint is empty.
+// SetUser sets the default user — who authorize logs in as when login_hint is empty — and
+// re-seeds it into the login registry so login_hint=<login> resolves to the same id instead of
+// auto-registering via DeriveUserID.
 func (f *Fake) SetUser(id int64, login string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.defaultUser = User{ID: id, Login: login}
+	f.users[login] = f.defaultUser
 }
 
 // AddUser seeds an explicit login->user mapping for login_hint selection, without touching the
