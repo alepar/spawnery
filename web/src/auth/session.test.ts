@@ -2,7 +2,7 @@
  * Tests for session store bootstrap.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useSessionStore, authEnabled, DEV_TOKEN, RTH_STORAGE_KEY } from "./session";
 import { MemoryKeyStore } from "./keystore";
 import { ProtoWriter } from "./protobuf";
@@ -44,6 +44,12 @@ describe("bootstrap — dev mode (auth disabled)", () => {
 });
 
 describe("getAccessToken", () => {
+  const DEV_TOKEN_OVERRIDE_KEY = "spawnery-dev-token";
+
+  afterEach(() => {
+    localStorage.removeItem(DEV_TOKEN_OVERRIDE_KEY);
+  });
+
   it("returns DEV_TOKEN in dev mode", () => {
     if (authEnabled()) return; // skip if auth is configured
     expect(useSessionStore.getState().getAccessToken()).toBe(DEV_TOKEN);
@@ -53,6 +59,18 @@ describe("getAccessToken", () => {
     if (!authEnabled()) return; // skip in dev mode
     useSessionStore.setState({ accessToken: "test-token" });
     expect(useSessionStore.getState().getAccessToken()).toBe("test-token");
+  });
+
+  it("returns the localStorage override in dev mode when set (acceptance-suite webDriver seam)", () => {
+    if (authEnabled()) return; // skip if auth is configured
+    localStorage.setItem(DEV_TOKEN_OVERRIDE_KEY, "acc-worker-token");
+    expect(useSessionStore.getState().getAccessToken()).toBe("acc-worker-token");
+  });
+
+  it("falls back to DEV_TOKEN in dev mode when the override is unset", () => {
+    if (authEnabled()) return; // skip if auth is configured
+    expect(localStorage.getItem(DEV_TOKEN_OVERRIDE_KEY)).toBeNull();
+    expect(useSessionStore.getState().getAccessToken()).toBe(DEV_TOKEN);
   });
 });
 

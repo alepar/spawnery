@@ -1,0 +1,73 @@
+# Live-instance acceptance suite (sp-tq0t). Scheduled (cron) + on-demand ONLY — this is
+# synthetic-monitoring-style acceptance testing against an already-running instance, not a PR
+# gate (too slow/costly with a real agent; see the design doc's "CI cadence & artifacts").
+#
+# Owner: the spawnery team. Pass-rate SLO / triage path: acceptance/README.md.
+#
+# The `npm test`/typecheck/lint steps are hermetic and always run. The live `test:accept` step
+# only runs once a target is provisioned (vars.ACCEPTANCE_ENABLED == 'true' + the ACC_* secrets
+# below) — until then it no-ops rather than failing every scheduled run against nothing.
+name: acceptance
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # nightly, 06:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  acceptance:
+    name: Acceptance — lint, type-check, unit test, (live scenarios if a target is configured)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: acceptance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: acceptance/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: TypeScript type-check
+        run: npm run typecheck
+
+      - name: Vitest (hermetic unit tests — no target required)
+        run: npm test
+
+      - name: Install Playwright browsers
+        if: vars.ACCEPTANCE_ENABLED == 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Live acceptance scenarios
+        if: vars.ACCEPTANCE_ENABLED == 'true'
+        env:
+          ACC_WEB_ORIGIN: ${{ vars.ACC_WEB_ORIGIN }}
+          ACC_CP_ENDPOINT: ${{ vars.ACC_CP_ENDPOINT }}
+          ACC_ENV: ${{ vars.ACC_ENV }}
+          ACC_AUTH_MODE: ${{ vars.ACC_AUTH_MODE }}
+          ACC_IDENTITY_POOL: ${{ secrets.ACC_IDENTITY_POOL }}
+          ACC_NONPROD_HOSTS: ${{ vars.ACC_NONPROD_HOSTS }}
+          ACC_TARGET_REF: ${{ vars.ACC_TARGET_REF }}
+          ACC_BUILD_REF: ${{ vars.ACC_BUILD_REF }}
+          ACC_SPAWNCTL_BIN: ${{ vars.ACC_SPAWNCTL_BIN }}
+          ACC_TOKEN_BUDGET: ${{ vars.ACC_TOKEN_BUDGET }}
+          ACC_WALLCLOCK_MS: ${{ vars.ACC_WALLCLOCK_MS }}
+          ACC_STALE_TTL_MS: ${{ vars.ACC_STALE_TTL_MS }}
+        run: npm run test:accept
+
+      # Redacted (see fixtures/redact.ts) before upload; sensitive material never lands here.
+      - name: Upload Playwright report
+        if: always() && vars.ACCEPTANCE_ENABLED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-playwright-report
+          path: acceptance/playwright-report/
+          retention-days: 14

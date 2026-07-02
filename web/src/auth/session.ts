@@ -22,6 +22,16 @@ import { getFlowMarker } from "@/github/flow";
 // Access the dev token through the env var (same source as connect.ts).
 export const DEV_TOKEN: string = import.meta.env.VITE_AUTH_TOKEN ?? "";
 
+// Dev-mode-only override key: lets the acceptance suite's webDriver (acceptance/src/auth/devtoken.ts)
+// give each Playwright worker its own dev-token identity via page.addInitScript, without requiring
+// a distinct build per worker. Only consulted when auth is disabled (!authEnabled()); auth-enabled
+// targets are untouched — they use OAuthPoPAuth instead.
+const DEV_TOKEN_OVERRIDE_KEY = "spawnery-dev-token";
+
+function _loadDevTokenOverride(): string {
+  try { return localStorage.getItem(DEV_TOKEN_OVERRIDE_KEY) ?? ""; } catch { return ""; }
+}
+
 // Key used to persist refresh_token_hash across cold reloads. The hash alone does not
 // allow refreshing (HttpOnly cookie + session key are also required), so localStorage
 // exposure is safe [AM2/AM5].
@@ -173,7 +183,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   getAccessToken() {
     const s = get();
-    if (!authEnabled()) return DEV_TOKEN;
+    if (!authEnabled()) return _loadDevTokenOverride() || DEV_TOKEN;
     return s.accessToken;
   },
 
