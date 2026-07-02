@@ -51,7 +51,7 @@ export function seedAppId(): string {
   return process.env.ACC_SEED_APP_ID ?? "spawnery/secret-app";
 }
 
-export const test = base.extend<Record<string, never>, MarketWorkerFixtures>({
+export const test = base.extend<Record<never, never>, MarketWorkerFixtures>({
   market: [
     async ({ target, auth, identity }, use) => {
       await use({
