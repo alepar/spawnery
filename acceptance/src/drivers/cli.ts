@@ -48,8 +48,13 @@ function execFileWithCode(bin: string, args: string[]): Promise<{ code: number; 
 export interface CliConfig {
   cpEndpoint: string;
   spawnctlBin: string;
-  nodeAddr: string;
+  /** Node terminal endpoint for `spawnctl exec` (-addr) — optional because most CliDriver verbs
+   * (create/list/set-model/...) dial the CP, not the node; only exec() needs it. Defaults to the
+   * co-located node terminal endpoint, mirroring TargetConfig.nodeAddr's default. */
+  nodeAddr?: string;
 }
+
+const DEFAULT_NODE_ADDR = "http://127.0.0.1:9092";
 
 /**
  * buildExecArgs builds the argv for `spawnctl exec`, which dials the NODE directly (-addr), not
@@ -59,7 +64,19 @@ export interface CliConfig {
  * `--` terminates flag parsing so the inner command's own flags aren't swallowed by spawnctl.
  */
 export function buildExecArgs(cfg: CliConfig, identity: Identity, id: SpawnId, cmd: string[]): string[] {
-  return ["exec", "-spawn", id, "-addr", cfg.nodeAddr, "-cp", cfg.cpEndpoint, "-token", identity.token, "--", ...cmd];
+  return [
+    "exec",
+    "-spawn",
+    id,
+    "-addr",
+    cfg.nodeAddr ?? DEFAULT_NODE_ADDR,
+    "-cp",
+    cfg.cpEndpoint,
+    "-token",
+    identity.token,
+    "--",
+    ...cmd,
+  ];
 }
 
 /**

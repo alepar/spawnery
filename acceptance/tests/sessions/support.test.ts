@@ -49,6 +49,7 @@ describe("agentAppId / agentModel", () => {
   const base: TargetConfig = {
     webOrigin: "https://blacky.dayton",
     cpEndpoint: "https://blacky.dayton",
+    asOrigin: "https://blacky.dayton",
     env: "dev",
     targetHost: "blacky.dayton",
     authMode: "dev-token",
