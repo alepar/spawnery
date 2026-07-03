@@ -21,9 +21,62 @@ function execFileP(bin: string, args: string[]): Promise<{ stdout: string; stder
   });
 }
 
+/**
+ * execFileWithCode: like execFileP, but a non-zero exit is a RESULT, not a rejection — `spawnctl
+ * exec` propagates the inner command's exit code via its own process exit code (execcmd.go /
+ * terminalcmd.go's runExec), and Node's execFile reports that as an `Error` carrying a numeric
+ * `.code`. Only a transport/spawn failure (no numeric code, e.g. ENOENT — spawnctl itself
+ * couldn't run) is a genuine rejection.
+ */
+function execFileWithCode(bin: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFileCb(bin, args, (err, stdout, stderr) => {
+      if (err) {
+        const code = (err as NodeJS.ErrnoException & { code?: unknown }).code;
+        if (typeof code === "number") {
+          resolve({ code, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? "" });
+          return;
+        }
+        reject(err);
+        return;
+      }
+      resolve({ code: 0, stdout: stdout.toString(), stderr: stderr.toString() });
+    });
+  });
+}
+
 export interface CliConfig {
   cpEndpoint: string;
   spawnctlBin: string;
+  /** Node terminal endpoint for `spawnctl exec` (-addr) — optional because most CliDriver verbs
+   * (create/list/set-model/...) dial the CP, not the node; only exec() needs it. Defaults to the
+   * co-located node terminal endpoint, mirroring TargetConfig.nodeAddr's default. */
+  nodeAddr?: string;
+}
+
+const DEFAULT_NODE_ADDR = "http://127.0.0.1:9092";
+
+/**
+ * buildExecArgs builds the argv for `spawnctl exec`, which dials the NODE directly (-addr), not
+ * the CP — the mosh/exec data plane bypasses the control plane entirely (execcmd.go/
+ * terminalcmd.go). -cp/-token are exec's own local flags (used only if it ever needs to resolve a
+ * spawn interactively) and, per buildArgs' convention, are placed after the subcommand name.
+ * `--` terminates flag parsing so the inner command's own flags aren't swallowed by spawnctl.
+ */
+export function buildExecArgs(cfg: CliConfig, identity: Identity, id: SpawnId, cmd: string[]): string[] {
+  return [
+    "exec",
+    "-spawn",
+    id,
+    "-addr",
+    cfg.nodeAddr ?? DEFAULT_NODE_ADDR,
+    "-cp",
+    cfg.cpEndpoint,
+    "-token",
+    identity.token,
+    "--",
+    ...cmd,
+  ];
 }
 
 /**
@@ -146,5 +199,15 @@ export class CliDriver implements SpawnDriver {
   async list(ctx: DriverCtx): Promise<{ spawnId: SpawnId; status: SpawnStatus; name: string }[]> {
     const { stdout } = await this.run(ctx.identity, "list", []);
     return parseListTable(stdout);
+  }
+
+  /**
+   * exec runs `cmd` non-interactively in the spawn's agent container via `spawnctl exec` and
+   * returns its exit code + captured stdout/stderr — a NON-throwing result even for a non-zero
+   * exit (that's the thing under test: exit-code propagation). CliDriver-only: web has no exec
+   * surface, so this is not part of the SpawnDriver interface.
+   */
+  async exec(ctx: DriverCtx, id: SpawnId, cmd: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+    return execFileWithCode(this.cfg.spawnctlBin, buildExecArgs(this.cfg, ctx.identity, id, cmd));
   }
 }

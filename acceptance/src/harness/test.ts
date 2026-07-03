@@ -10,6 +10,7 @@ import { loadTargetConfig, type TargetConfig } from "../config/target";
 import { identityForWorker, type Identity } from "../fixtures/identity-pool";
 import { nsName } from "../fixtures/namespace";
 import { teardownSweep } from "../fixtures/sweep";
+import { CostLedger } from "../fixtures/budget";
 import { guardMutation } from "./guardrail";
 import { ApiDriver, type SpawnSummary } from "../drivers/api";
 import { WebDriver } from "../drivers/web";
@@ -27,6 +28,8 @@ interface WorkerFixtures {
   api: ApiDriver;
   web: WebDriver;
   cli: CliDriver;
+  /** ledger: per-worker CostLedger for @agent scenarios to feed usage into + check() against. */
+  ledger: CostLedger;
   /** teardownSweeper is an auto, worker-scoped fixture: no test consumes it directly. */
   teardownSweeper: void;
 }
@@ -98,7 +101,14 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
 
   cli: [
     async ({ target }, use) => {
-      await use(new CliDriver({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }));
+      await use(new CliDriver({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin, nodeAddr: target.nodeAddr }));
+    },
+    { scope: "worker" },
+  ],
+
+  ledger: [
+    async ({ target }, use) => {
+      await use(new CostLedger(target.tokenBudget, target.wallclockMs));
     },
     { scope: "worker" },
   ],

@@ -100,4 +100,17 @@ describe("loadTargetConfig", () => {
     const cfg = loadTargetConfig(env as unknown as NodeJS.ProcessEnv);
     expect(cfg.seedSkillAppId).toBe("spawnery/secret-app");
   });
+
+  it("leaves agentModel/agentAppId undefined when unset, and does not throw (agent vars are optional)", () => {
+    const cfg = loadTargetConfig(baseEnv as unknown as NodeJS.ProcessEnv);
+    expect(cfg.agentModel).toBeUndefined();
+    expect(cfg.agentAppId).toBeUndefined();
+  });
+
+  it("parses agentModel/agentAppId when present", () => {
+    const env = { ...baseEnv, ACC_AGENT_MODEL: "cheap/model", ACC_AGENT_APP_ID: "acc/agent-app" };
+    const cfg = loadTargetConfig(env as unknown as NodeJS.ProcessEnv);
+    expect(cfg.agentModel).toBe("cheap/model");
+    expect(cfg.agentAppId).toBe("acc/agent-app");
+  });
 });
