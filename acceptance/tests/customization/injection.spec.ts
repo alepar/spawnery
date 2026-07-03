@@ -1,0 +1,73 @@
+/**
+ * Phase 5 — profile-attach injection: attach a profile (custom skill entry) at spawn-create,
+ * observe materialization inside the running spawn via `spawnctl exec` (the only Phase-5 surface
+ * that needs the NODE directly reachable, not proxied through the CP — see target.nodeAddr).
+ *
+ * Preconditions (fail loud, never skip — design's "every dep-gated scenario fails loud, not a
+ * skip"): a reachable node (target.nodeAddr) and a registered seed app whose agent installs skills
+ * (target.seedSkillAppId; claude installs to `.claude/skills`, codex to `.codex/skills` —
+ * internal/agentinstall/{claude,codex}.go). Both are documented in .env.example.
+ *
+ * Secret injection is explicitly out of scope (see secrets.spec.ts) — this observes a non-secret
+ * skill entry instead, asserting a FRESH per-run marker (never mere file existence, which would
+ * pass on a stale artifact from a prior run).
+ */
+
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test, expect } from "../../src/harness/test";
+import { ProfileCli, execInSpawn, buildSkillTar } from "../../src/drivers/customization";
+
+test(
+  "injection: a profile-attached custom skill entry materializes in the spawn (observed via spawnctl exec)",
+  { tag: "@mutating" },
+  async ({ target, identity, api, cli, ctx, ns }) => {
+    if (!target.seedSkillAppId) {
+      throw new Error(
+        "ACC_SEED_SKILL_APP_ID is unset — injection.spec.ts needs a registered app whose agent installs skills " +
+          "(claude or codex); see acceptance/.env.example.",
+      );
+    }
+
+    const profileCli = new ProfileCli({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }, identity);
+    const cliCfg = { cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin };
+
+    let profileId: string | undefined;
+    let spawnId: string | undefined;
+    let tmpDir: string | undefined;
+
+    try {
+      profileId = await profileCli.create(ns("prof-inject"));
+
+      const entryName = ns("accskill");
+      const marker = `MARKER=${ns("inject")}-${Date.now()}`;
+      tmpDir = mkdtempSync(join(tmpdir(), "acc-injection-"));
+      const tarPath = join(tmpDir, "skill.tar");
+      writeFileSync(tarPath, buildSkillTar(marker));
+      await profileCli.entryAddCustom(profileId, { kind: "skill", name: entryName, customFilePath: tarPath });
+
+      spawnId = await cli.createSpawn(ctx, { appId: target.seedSkillAppId, profileId });
+      await cli.waitActive(ctx, spawnId);
+
+      // Cross-check: the spawn is ACTIVE via the oracle too.
+      const oracleSpawn = await api.findSpawn(spawnId);
+      expect(oracleSpawn?.status).toBe("ACTIVE");
+
+      // Observe materialization: agent-agnostic via the `*skills/*` glob (claude: .claude/skills,
+      // codex: .codex/skills — internal/agentinstall/{claude,codex}.go).
+      const result = await execInSpawn(cliCfg, identity, target.nodeAddr, spawnId, [
+        "sh",
+        "-lc",
+        `find "$HOME" -path "*skills/${entryName}/SKILL.md" -exec cat {} +`,
+      ]);
+
+      expect(result.code, `exec exited ${result.code}; stderr:\n${result.stderr}\nstdout:\n${result.stdout}`).toBe(0);
+      expect(result.stdout).toContain(marker);
+    } finally {
+      if (spawnId) await api.deleteSpawn(spawnId).catch(() => {});
+      if (profileId) await profileCli.delete(profileId).catch(() => {});
+      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+    }
+  },
+);

@@ -40,6 +40,90 @@ export interface CreateSpawnApiRequest {
   profileId?: string;
 }
 
+// --- Customization: profiles, catalog entries, secrets (sp-tq0t.8) ---
+// Field names are the Connect-JSON camelCase of proto/cp/v1 (Profile/ProfileSummary/ProfileEntry,
+// CustomizationCatalogEntry/CatalogEntrySummary, Secret/SecretSummary). Enums serialize as strings
+// (e.g. "PROFILE_ENTRY_KIND_SKILL", "USER_SECRET_TYPE_GENERIC_KV", "ARTIFACT_TARGET_AGENT").
+
+export interface ProfileSummary {
+  profileId: string;
+  name: string;
+  version: number;
+  updatedAt: string;
+}
+
+export interface ProfileEntry {
+  entryId: string;
+  kind: string;
+  name: string;
+  source: string;
+  catalogId?: string;
+  customInline?: string; // base64 (proto bytes)
+  targets?: string[];
+  mcpSecretRefs?: string[];
+}
+
+export interface Profile {
+  profileId: string;
+  name: string;
+  version: number;
+  updatedAt: string;
+  // Connect-JSON omits empty repeated fields entirely — normalized to [] by getProfile below so
+  // scenario assertions never have to guard against undefined.
+  entries: ProfileEntry[];
+  secretIds: string[];
+}
+
+export interface CatalogEntrySummary {
+  catalogId: string;
+  kind: string;
+  name: string;
+  description: string;
+}
+
+export interface CatalogEntry {
+  catalogId: string;
+  creatorId: string;
+  kind: string;
+  name: string;
+  description: string;
+  content?: string; // base64 (proto bytes)
+  // Connect-JSON omits a false bool — normalized by getCatalogEntry below.
+  listed: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SecretSummary {
+  secretId: string;
+  type: string;
+  name: string;
+  provider?: string;
+  targetContainer: string;
+  envVarName?: string;
+  destPath?: string;
+  version: number;
+  devicesetEpoch: number;
+  updatedAt: string;
+}
+
+export interface SecretDetail extends SecretSummary {
+  envelope?: string; // base64 (proto bytes)
+  createdAt: string;
+}
+
+export interface SecretWrite {
+  secretId: string;
+  type: string;
+  name: string;
+  provider?: string;
+  targetContainer: string;
+  envVarName?: string;
+  destPath?: string;
+  devicesetEpoch?: number;
+  envelope: string; // base64 (proto bytes)
+}
+
 function stripStatusPrefix(wire: string): SpawnStatus {
   return wire.replace(/^SPAWN_STATUS_/, "") as SpawnStatus;
 }
@@ -119,5 +203,50 @@ export class ApiDriver {
 
   async stopSpawn(spawnId: string): Promise<void> {
     await this.call("StopSpawn", { spawnId });
+  }
+
+  // --- Profiles (oracle reads; cross-check for the cli-primary ProfileCli) ---
+
+  async listProfiles(): Promise<ProfileSummary[]> {
+    const resp = await this.call<{ profiles?: ProfileSummary[] }>("ListProfiles", {});
+    return resp.profiles ?? [];
+  }
+
+  async getProfile(profileId: string): Promise<Profile> {
+    const resp = await this.call<{ profile: Profile }>("GetProfile", { profileId });
+    return { ...resp.profile, entries: resp.profile.entries ?? [], secretIds: resp.profile.secretIds ?? [] };
+  }
+
+  // --- Catalog entries (oracle reads; cross-check for the cli-primary CatalogCli) ---
+
+  async listCatalogEntries(): Promise<CatalogEntrySummary[]> {
+    const resp = await this.call<{ entries?: CatalogEntrySummary[] }>("ListCatalogEntries", {});
+    return resp.entries ?? [];
+  }
+
+  async getCatalogEntry(catalogId: string): Promise<CatalogEntry> {
+    const resp = await this.call<{ entry: CatalogEntry }>("GetCatalogEntry", { catalogId });
+    return { ...resp.entry, listed: resp.entry.listed ?? false };
+  }
+
+  // --- Secrets (oracle-only: spawnctl has no `secret` subcommand — CLI parity gap, sp-tq0t) ---
+
+  async createSecret(write: SecretWrite): Promise<SecretDetail> {
+    const resp = await this.call<{ secret: SecretDetail }>("CreateSecret", { secret: write });
+    return resp.secret;
+  }
+
+  async listSecrets(): Promise<SecretSummary[]> {
+    const resp = await this.call<{ secrets?: SecretSummary[] }>("ListSecrets", {});
+    return resp.secrets ?? [];
+  }
+
+  async getSecret(secretId: string): Promise<SecretDetail> {
+    const resp = await this.call<{ secret: SecretDetail }>("GetSecret", { secretId });
+    return resp.secret;
+  }
+
+  async deleteSecret(secretId: string): Promise<void> {
+    await this.call("DeleteSecret", { secretId });
   }
 }

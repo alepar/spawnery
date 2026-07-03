@@ -78,4 +78,26 @@ describe("loadTargetConfig", () => {
     const cfg = loadTargetConfig(env as unknown as NodeJS.ProcessEnv);
     expect(cfg.asOrigin).toBe("https://as.blacky.dayton:8090");
   });
+
+  it("defaults nodeAddr to the co-located node terminal endpoint", () => {
+    const cfg = loadTargetConfig(baseEnv as unknown as NodeJS.ProcessEnv);
+    expect(cfg.nodeAddr).toBe("http://127.0.0.1:9092");
+  });
+
+  it("overrides nodeAddr from ACC_NODE_ADDR", () => {
+    const env = { ...baseEnv, ACC_NODE_ADDR: "https://node.example:9092" };
+    const cfg = loadTargetConfig(env as unknown as NodeJS.ProcessEnv);
+    expect(cfg.nodeAddr).toBe("https://node.example:9092");
+  });
+
+  it("leaves seedSkillAppId undefined when ACC_SEED_SKILL_APP_ID is unset (no safe default)", () => {
+    const cfg = loadTargetConfig(baseEnv as unknown as NodeJS.ProcessEnv);
+    expect(cfg.seedSkillAppId).toBeUndefined();
+  });
+
+  it("sets seedSkillAppId from ACC_SEED_SKILL_APP_ID", () => {
+    const env = { ...baseEnv, ACC_SEED_SKILL_APP_ID: "spawnery/secret-app" };
+    const cfg = loadTargetConfig(env as unknown as NodeJS.ProcessEnv);
+    expect(cfg.seedSkillAppId).toBe("spawnery/secret-app");
+  });
 });

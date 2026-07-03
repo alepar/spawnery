@@ -26,6 +26,8 @@ export interface CreateSpawnOpts {
   appId: string;
   model?: string;
   name?: string;
+  /** profileId attaches a customization profile at spawn-create (sp-tq0t.8). */
+  profileId?: string;
 }
 
 export interface ForkOpts {
