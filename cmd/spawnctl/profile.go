@@ -97,8 +97,8 @@ func newCPClient(c *cli.Command) (cpv1connect.SpawnServiceClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	src := buildTokenSource(dir, c.String("token"), h2cClient())
-	return cpv1connect.NewSpawnServiceClient(h2cClient(), c.String("cp"),
+	src := buildTokenSource(dir, c.String("token"), connectClient())
+	return cpv1connect.NewSpawnServiceClient(connectClient(), c.String("cp"),
 		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src))), nil
 }
 

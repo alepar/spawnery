@@ -12,6 +12,13 @@
 //	AS_LISTEN               Address to listen on (default: 127.0.0.1:8090)
 //	AS_DEV                  "1" = ephemeral in-memory CA + fake GitHub + dev session key (NOT for production)
 //	AS_FAKE_GITHUB          "1" = use in-process fake GitHub provider (dev/CI; implies no real client creds)
+//	AS_FAKE_GITHUB_ADDR     Bind addr for a reachable fake GitHub, e.g. "0.0.0.0:9099" (default: loopback-random,
+//	                        matching AS_FAKE_GITHUB=1's historical behavior). Requires AS_FAKE_GITHUB_BASE_URL.
+//	AS_FAKE_GITHUB_BASE_URL Base URL advertised for every fake GitHub endpoint (authorize/token/user), used for
+//	                        both AS->fake calls and the browser-facing redirect. Required when AS_FAKE_GITHUB_ADDR
+//	                        is set.
+//	AS_FAKE_GITHUB_USERS    Comma-separated seed users for the fake's login_hint selection: "login[:id],...".
+//	                        The id derives (githubfake.DeriveUserID) when omitted. First entry is the default user.
 //
 //	CA / PKI material (required unless AS_DEV=1):
 //	  AS_ROOT_CA_PEM                 Path to Root CA cert PEM (default: /etc/spawnery/as/root-ca.pem)
@@ -69,6 +76,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -230,8 +238,20 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 	var ghProvider authsvc.GitHubProvider
 	var ghAppClientID string
 	if cfg.FakeGithub || (cfg.Dev && cfg.GitHub.ClientID == "") {
-		log.Printf("authsvc: using in-process fake GitHub (dev/CI only)")
-		fake := githubfake.New()
+		seedUsers, err := parseFakeGitHubUsers(cfg.FakeGitHubUsers)
+		if err != nil {
+			return nil, fmt.Errorf("authsvc: %w", err)
+		}
+		fake := githubfake.NewWithOptions(githubfake.Options{
+			Addr:    cfg.FakeGitHubAddr,
+			BaseURL: cfg.FakeGitHubBaseURL,
+			Users:   seedUsers,
+		})
+		if cfg.FakeGitHubAddr != "" {
+			log.Printf("authsvc: using in-process fake GitHub (dev/CI only), reachable at %s", fake.URL())
+		} else {
+			log.Printf("authsvc: using in-process fake GitHub (dev/CI only)")
+		}
 		ghProvider = authsvc.NewGitHubProvider(fake.URL(), fake.URL(), fake.ClientID, fake.ClientSecret)
 		ghAppClientID = fake.ClientID
 	} else {
@@ -474,4 +494,29 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// parseFakeGitHubUsers parses AS_FAKE_GITHUB_USERS ("login[:id],login[:id],...") into seed users
+// for githubfake.Options.Users. An omitted id derives via githubfake.DeriveUserID — the same
+// derivation the fake itself uses to auto-register an unseeded login_hint — so seeding here and
+// auto-registration there always agree on one id for a given login.
+func parseFakeGitHubUsers(csv string) ([]githubfake.User, error) {
+	var users []githubfake.User
+	for _, entry := range splitCSV(csv) {
+		login, idStr, hasID := strings.Cut(entry, ":")
+		login = strings.TrimSpace(login)
+		if login == "" {
+			return nil, fmt.Errorf("fake_github_users: empty login in %q", entry)
+		}
+		id := githubfake.DeriveUserID(login)
+		if hasID {
+			parsed, err := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("fake_github_users: bad id for login %q: %w", login, err)
+			}
+			id = parsed
+		}
+		users = append(users, githubfake.User{ID: id, Login: login})
+	}
+	return users, nil
 }

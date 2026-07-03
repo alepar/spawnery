@@ -126,8 +126,8 @@ func forkCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			src := buildTokenSource(dir, c.String("token"), h2cClient())
-			client := cpv1connect.NewSpawnServiceClient(h2cClient(), c.String("cp"),
+			src := buildTokenSource(dir, c.String("token"), connectClient())
+			client := cpv1connect.NewSpawnServiceClient(connectClient(), c.String("cp"),
 				connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 			if err := runFork(ctx, client, dev, spawnID, c.String("node"), c.String("class"), c.String("name"), c.Writer, time.Now()); err != nil {
 				return cli.Exit("fork failed: "+err.Error(), 1)

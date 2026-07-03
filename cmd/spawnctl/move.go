@@ -276,8 +276,8 @@ func moveCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			src := buildTokenSource(dir, c.String("token"), h2cClient())
-			client := cpv1connect.NewSpawnServiceClient(h2cClient(), c.String("cp"),
+			src := buildTokenSource(dir, c.String("token"), connectClient())
+			client := cpv1connect.NewSpawnServiceClient(connectClient(), c.String("cp"),
 				connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 			// Pass client as both moveClient and intentClient — cpv1connect.SpawnServiceClient
 			// satisfies both interfaces.

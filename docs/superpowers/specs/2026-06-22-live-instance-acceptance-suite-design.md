@@ -302,6 +302,27 @@ Phase 0 (incl. Spike S1) + Phase 1 is the MVP that proves the framework end to e
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from
 the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
 
+### Changes vs. original design (2026-07-02/03 — implemented via autonomous coordinator, epic sp-tq0t)
+
+10 of 13 tasks landed on `epic/sp-tq0t` (Phases 0–6 + OAuth strategy + T1 + T2), two-stage reviewed,
+all gates green (go test -race exit 0, golangci-lint 0, acceptance vitest 230/230, tsc clean).
+**Deferred (open):** `sp-tq0t.10` (provision real GitHub org/OAuth app/bot — external, not codeable)
+and Phase 7 `sp-tq0t.11`, both gated on that prereq. Notable deltas from the spec's assumptions:
+- **T1** shipped as `schemeTransport` in `cmd/spawnctl` (`https`→TLS+ALPN-h2, `http`→h2c; back-compat
+  preserved, with a regression-witness test that the old h2c-only client couldn't reach `https`).
+- **T2** shipped as `githubfake.NewWithOptions` + `login_hint`/`AddUser`/exported `DeriveUserID`
+  (`2_000_000 + fnv32`), `Options{}` zero-value ≡ `New()`, reachable bind via
+  `AS_FAKE_GITHUB_ADDR/_BASE_URL/_USERS` (no proto/gen changes; callers untouched).
+- Harness converged on a single fixture seam (`acceptance/src/harness/test.ts`) with the
+  `toContainSpawn` oracle matcher; CI (`.github/workflows/acceptance.yml`) runs hermetic gates always
+  and gates live Playwright behind `ACCEPTANCE_ENABLED`.
+- The Playwright scenarios (`acceptance/tests/**`) are **hermetically unit-tested only** so far (the
+  230 vitest cases cover harness/drivers/fixtures/oracle/auth); end-to-end validation against a live
+  target is deferred to a first smoke run — inherent to a synthetic-monitoring suite.
+- **Follow-up:** wire the optional `ACC_*` agent/injection env vars (`ACC_AS_ORIGIN`, `ACC_NODE_ADDR`,
+  `ACC_SEED_SKILL_APP_ID`, `ACC_AGENT_MODEL`, `ACC_AGENT_APP_ID`) into the CI live step before enabling
+  the `@agent`/injection phases.
+
 - **2026-06-22 (roast r2 — Fable critics / Sonnet judges — BLOCK → folded):** 91 confirmed but 2
   distinct new blockers (rest were restatements / r1 re-raises). Both verified against code and both
   hit the arms-length-remote premise: **(1)** `spawnctl` is h2c-only (`main.go:420`) → cli arm can't
