@@ -15,6 +15,7 @@ import { ApiDriver, type SpawnSummary } from "../drivers/api";
 import { WebDriver } from "../drivers/web";
 import { CliDriver } from "../drivers/cli";
 import { DevTokenAuth } from "../auth/devtoken";
+import { OAuthPoPAuth } from "../auth/oauthpop";
 import type { AuthStrategy } from "../auth/types";
 import type { DriverCtx, SpawnStatus } from "../drivers/types";
 
@@ -37,10 +38,9 @@ interface TestFixtures {
   guardrail: void;
 }
 
-function selectAuth(mode: TargetConfig["authMode"]): AuthStrategy {
-  if (mode === "dev-token") return new DevTokenAuth();
-  // OAuthPoPAuth lands in sp-tq0t.3; fail loudly rather than silently falling back to dev-token.
-  throw new Error(`auth mode ${JSON.stringify(mode)} is not implemented yet (see sp-tq0t.3)`);
+function selectAuth(target: TargetConfig): AuthStrategy {
+  if (target.authMode === "dev-token") return new DevTokenAuth();
+  return new OAuthPoPAuth({ asOrigin: target.asOrigin, webOrigin: target.webOrigin });
 }
 
 export const test = base.extend<TestFixtures, WorkerFixtures>({
@@ -73,14 +73,17 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
 
   auth: [
     async ({ target }, use) => {
-      await use(selectAuth(target.authMode));
+      await use(selectAuth(target));
     },
     { scope: "worker" },
   ],
 
   api: [
+    // A token-provider function, not a resolved string: OAuthPoPAuth's bearer expires (15 min)
+    // and must be re-fetched (proactively refreshed) on a run that outlives that TTL — see
+    // drivers/api.ts's TokenSource and auth/oauthpop.ts.
     async ({ target, auth, identity }, use) => {
-      await use(new ApiDriver(target.cpEndpoint, auth.oracleToken(identity)));
+      await use(new ApiDriver(target.cpEndpoint, () => auth.oracleToken(identity)));
     },
     { scope: "worker" },
   ],
@@ -112,8 +115,9 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     { scope: "worker", auto: true },
   ],
 
-  // Seed the dev-token localStorage override BEFORE the SPA boots (auth.seedWeb uses
-  // page.addInitScript), by wrapping Playwright's own `page` fixture.
+  // Prime auth BEFORE the test body runs, by wrapping Playwright's own `page` fixture:
+  // DevTokenAuth seeds a localStorage override via page.addInitScript; OAuthPoPAuth drives the
+  // real login button + fake-IdP round-trip (auth/oauthpop.ts).
   page: async ({ page, auth, identity }, use) => {
     await auth.seedWeb(page, identity);
     await use(page);

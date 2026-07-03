@@ -3,6 +3,11 @@
  * fetch, no @connectrpc/@bufbuild codegen — web/ has no such dep either). This is the
  * surface-agnostic cross-check oracle, NOT the sole source of truth (design §API oracle). It
  * reads spawn status via ListSpawns — there is no GetSpawn RPC.
+ *
+ * The token may be a static string (DevTokenAuth) or an async provider (OAuthPoPAuth,
+ * auth/oauthpop.ts) that is called fresh before every request — a run can span longer than the
+ * AS's 15-minute access-token TTL (design §NFRs' cost/wall-clock cap defaults to 30 min), so a
+ * token captured once at driver-construction time would go stale mid-run.
  */
 
 import type { SpawnStatus } from "./types";
@@ -39,19 +44,28 @@ function stripStatusPrefix(wire: string): SpawnStatus {
   return wire.replace(/^SPAWN_STATUS_/, "") as SpawnStatus;
 }
 
+/** TokenSource is a static bearer (dev-token) or an async provider called fresh per request
+ * (OAuth-PoP, whose token expires and must be proactively refreshed — see auth/oauthpop.ts). */
+export type TokenSource = string | (() => Promise<string>);
+
 export class ApiDriver {
   constructor(
     private readonly cpEndpoint: string,
-    private readonly token: string,
+    private readonly tokenSource: TokenSource,
   ) {}
 
+  private resolveToken(): Promise<string> {
+    return typeof this.tokenSource === "string" ? Promise.resolve(this.tokenSource) : this.tokenSource();
+  }
+
   private async call<T>(method: string, body: unknown): Promise<T> {
+    const token = await this.resolveToken();
     const res = await fetch(`${this.cpEndpoint}/cp.v1.SpawnService/${method}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Connect-Protocol-Version": "1",
-        Authorization: `Bearer ${this.token}`,
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify(body),
     });

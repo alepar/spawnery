@@ -14,6 +14,10 @@ export type AuthMode = "dev-token" | "oauth-pop";
 export interface TargetConfig {
   webOrigin: string;
   cpEndpoint: string;
+  /** Auth Service base URL (OAuthPoPAuth's authorize/refresh target). Defaults to webOrigin,
+   * mirroring the SPA's own default same-origin-via-dev-proxy behavior (web/src/config/endpoints.ts's
+   * AS_ORIGIN — empty means "proxied through the web origin"). */
+  asOrigin: string;
   env: string;
   targetHost: string;
   authMode: AuthMode;
@@ -65,6 +69,7 @@ export function loadTargetConfig(env: NodeJS.ProcessEnv = process.env): TargetCo
   return {
     webOrigin,
     cpEndpoint,
+    asOrigin: env.ACC_AS_ORIGIN || webOrigin,
     env: env.ACC_ENV ?? "dev",
     targetHost,
     authMode,

@@ -21,8 +21,10 @@ export default async function globalSetup(): Promise<void> {
   assertVersionPin(cfg.targetRef, cfg.buildRef);
 
   if (cfg.authMode !== "dev-token") {
-    // OAuthPoPAuth lands in sp-tq0t.3; fail loudly rather than silently falling back to dev-token.
-    throw new Error(`auth mode ${JSON.stringify(cfg.authMode)} is not implemented yet (see sp-tq0t.3)`);
+    // OAuthPoPAuth (sp-tq0t.3) is fully wired into the per-worker `auth`/`api` fixtures
+    // (harness/test.ts) that scenarios use. This ONE global, pre-worker step is out of scope for
+    // that task: fail loudly rather than silently reaching for dev-token or skipping the gate.
+    throw new Error(`auth mode ${JSON.stringify(cfg.authMode)} is not supported for global setup/sweep — use dev-token`);
   }
   if (cfg.identityPool.length === 0) {
     throw new Error("ACC_IDENTITY_POOL is empty — global setup needs at least one identity for preflight/sweep");
@@ -31,7 +33,7 @@ export default async function globalSetup(): Promise<void> {
   // any pool identity works; the first one is used as this run's "system" credential.
   const auth = new DevTokenAuth();
   const systemIdentity = cfg.identityPool[0];
-  const api = new ApiDriver(cfg.cpEndpoint, auth.oracleToken(systemIdentity));
+  const api = new ApiDriver(cfg.cpEndpoint, await auth.oracleToken(systemIdentity));
 
   await runPreflight(cfg, api);
 
