@@ -26,7 +26,7 @@ mkdir -p "$WORK/payload/bin" "$WORK/payload/config"
 dbox() { distrobox enter --root dev-spawnery -- bash -lc "cd '$REPO_ROOT' && $*"; }
 dbox "make build bin/spawnery_cp && cp -f bin/{spawnery_cp,authsvc,spawnlet,spawnctl,spawnery-ca} '$WORK/payload/bin/'"
 dbox "make images && docker save spawnery/sidecar:dev spawnery/agent:dev -o '$WORK/payload/images.tar'" || warn "image build failed"
-dbox "cd web && npm ci && npm run build" && cp -rf "$REPO_ROOT/web/dist" "$WORK/payload/web-dist" || warn "web build failed"
+dbox "cd web && npm ci && VITE_CP_ORIGIN=https://placeholder.e2e.test VITE_AS_ORIGIN=https://placeholder.e2e.test npm run build" && cp -rf "$REPO_ROOT/web/dist" "$WORK/payload/web-dist" || warn "web build failed (non-fatal; roll.sh rebuilds per run)"
 cp -rf "$REPO_ROOT/config/." "$WORK/payload/config/"
 cp -f "$E2E_DIR/provision/provision.sh" "$E2E_DIR/provision/gen-pki.sh" "$WORK/payload/"
 
@@ -53,7 +53,7 @@ iso_make "$SEED_ISO" "$WORK/user-data" "$WORK/meta-data"
 
 log "booting build VM…"
 virsh_ destroy "$BUILD_RUNID" 2>/dev/null || true; virsh_ undefine "$BUILD_RUNID" 2>/dev/null || true
-virt-install --name "$BUILD_RUNID" --memory "$BUILD_MEM_MB" --vcpus 4 --import \
+virt-install --connect "$LIBVIRT_URI" --name "$BUILD_RUNID" --memory "$BUILD_MEM_MB" --vcpus 4 --import \
   --disk "path=$OUT,format=qcow2,bus=virtio" --disk "path=$SEED_ISO,device=cdrom" \
   --os-variant fedora-unknown --network network="$E2E_NET" --graphics none --noautoconsole --transient
 IP="$(vm_ip "$BUILD_RUNID")" || die "build VM got no IP"

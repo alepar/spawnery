@@ -26,6 +26,7 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; done
 
 export E2E_RUNID="$(gen_runid)"
+WEB_ORIGIN="https://$(vm_hostname)"    # prod web build pins CSP/connect-src to this origin
 RD="$(run_dir)"; mkdir -p "$RD"
 STAGE="$RD/stage"; mkdir -p "$STAGE/bin" "$STAGE/config"
 log "=== e2e-vm run  runid=$E2E_RUNID  profile=$PROFILE ==="
@@ -43,7 +44,7 @@ if [ "$BUILD" = 1 ]; then
   dbox "make build bin/spawnery_cp && cp -f bin/spawnery_cp bin/authsvc bin/spawnlet bin/spawnctl '$STAGE/bin/'"
   dbox "make images && docker save spawnery/sidecar:dev spawnery/agent:dev -o '$STAGE/images.tar'" \
     || warn "image build/save failed — sidecar/agent will be STALE (baked) this run"
-  dbox "cd web && npm ci && npm run build && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'" \
+  dbox "cd web && npm ci && VITE_CP_ORIGIN='$WEB_ORIGIN' VITE_AS_ORIGIN='$WEB_ORIGIN' npm run build && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'" \
     || warn "web build failed — SPA will be STALE this run"
   cp -rf "$REPO_ROOT/config/." "$STAGE/config/" 2>/dev/null || true
 else
