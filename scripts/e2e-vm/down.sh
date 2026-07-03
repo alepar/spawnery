@@ -32,5 +32,5 @@ fi
 virsh_ destroy "$DOM" 2>/dev/null || true
 virsh_ undefine "$DOM" --nvram 2>/dev/null || true
 host_resolve_del
-rm -f "$(overlay_path)" "$RD/seed.iso" 2>/dev/null || true
+rm -rf "$(img_dir)" 2>/dev/null || true    # overlay + seed.iso + console.log (pool dir)
 log "destroyed $DOM (artifacts kept in $ART)"

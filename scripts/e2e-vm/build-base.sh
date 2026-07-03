@@ -13,9 +13,9 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-: "${OUT:=/var/lib/libvirt/images/spawnery-golden.qcow2}"
-: "${FEDORA_IMG_URL:=https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.5.x86_64.qcow2}"
-: "${FEDORA_IMG_SHA256:=}"     # REQUIRED for reproducibility — pin the checksum
+: "${OUT:=/var/lib/libvirt/images/spawnery-e2e/golden.qcow2}"   # pool path (qemu-accessible)
+: "${FEDORA_IMG_URL:=https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2}"
+: "${FEDORA_IMG_SHA256:=28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f}"     # REQUIRED for reproducibility — pin the checksum
 : "${BUILD_MEM_MB:=6144}"
 : "${DISK_GB:=40}"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
@@ -24,7 +24,7 @@ BUILD_RUNID="golden-build-$$"
 log "staging build payload (binaries + images + web + config + provisioner)…"
 mkdir -p "$WORK/payload/bin" "$WORK/payload/config"
 dbox() { distrobox enter --root dev-spawnery -- bash -lc "cd '$REPO_ROOT' && $*"; }
-dbox "make build && cp -f bin/{spawnery_cp,authsvc,spawnlet,spawnctl,spawnery-ca} '$WORK/payload/bin/'"
+dbox "make build bin/spawnery_cp && cp -f bin/{spawnery_cp,authsvc,spawnlet,spawnctl,spawnery-ca} '$WORK/payload/bin/'"
 dbox "make images && docker save spawnery/sidecar:dev spawnery/agent:dev -o '$WORK/payload/images.tar'" || warn "image build failed"
 dbox "cd web && npm ci && npm run build" && cp -rf "$REPO_ROOT/web/dist" "$WORK/payload/web-dist" || warn "web build failed"
 cp -rf "$REPO_ROOT/config/." "$WORK/payload/config/"
@@ -48,13 +48,13 @@ users: [ { name: build, sudo: "ALL=(ALL) NOPASSWD:ALL", ssh_authorized_keys: [ "
 growpart: { mode: auto, devices: ['/'] }
 EOF
 printf 'instance-id: %s\nlocal-hostname: golden-build\n' "$BUILD_RUNID" >"$WORK/meta-data"
-genisoimage -quiet -o "$WORK/seed.iso" -volid cidata -joliet -rock "$WORK/user-data" "$WORK/meta-data" \
-  || cloud-localds "$WORK/seed.iso" "$WORK/user-data" "$WORK/meta-data"
+mkdir -p "$E2E_IMG_ROOT"; SEED_ISO="$E2E_IMG_ROOT/golden-build-seed.iso"   # pool path
+iso_make "$SEED_ISO" "$WORK/user-data" "$WORK/meta-data"
 
 log "booting build VM…"
 virsh_ destroy "$BUILD_RUNID" 2>/dev/null || true; virsh_ undefine "$BUILD_RUNID" 2>/dev/null || true
 virt-install --name "$BUILD_RUNID" --memory "$BUILD_MEM_MB" --vcpus 4 --import \
-  --disk "path=$OUT,format=qcow2,bus=virtio" --disk "path=$WORK/seed.iso,device=cdrom" \
+  --disk "path=$OUT,format=qcow2,bus=virtio" --disk "path=$SEED_ISO,device=cdrom" \
   --os-variant fedora-unknown --network network="$E2E_NET" --graphics none --noautoconsole --transient
 IP="$(vm_ip "$BUILD_RUNID")" || die "build VM got no IP"
 wait_tcp "$IP" 22 300 || die "build VM ssh never came up"
@@ -65,8 +65,9 @@ E2E_SSH_USER=build vm_scp "$WORK/payload/." "$IP" 'payload/'
 E2E_SSH_USER=build vm_ssh "$IP" 'chmod +x ~/payload/provision.sh ~/payload/gen-pki.sh && PAYLOAD=$HOME/payload sudo -E ~/payload/provision.sh'
 
 log "pulling CA cert out for host trust…"
-E2E_SSH_USER=build vm_scp "$IP:ca.crt" "" "$WORK/ca.crt" 2>/dev/null \
-  && cp -f "$WORK/ca.crt" "${OUT%.qcow2}-ca.crt" || warn "could not fetch ca.crt (check gen-pki output)"
+scp -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  -i "$E2E_SSH_KEY" "build@$IP:ca.crt" "${OUT%.qcow2}-ca.crt" 2>/dev/null \
+  || warn "could not fetch ca.crt (check gen-pki output)"
 
 log "clean shutdown + finalize golden…"
 E2E_SSH_USER=build vm_ssh "$IP" 'sudo cloud-init clean --logs && sudo shutdown -h now' || true

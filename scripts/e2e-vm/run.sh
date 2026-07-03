@@ -40,7 +40,7 @@ dbox() { distrobox enter --root dev-spawnery -- bash -lc "cd '$REPO_ROOT' && $*"
 # ---- 0. build fresh code (per-run staging so concurrent branches never clobber each other) ----
 if [ "$BUILD" = 1 ]; then
   log "0/3 building fresh binaries + images + web …"
-  dbox "make build && cp -f bin/spawnery_cp bin/authsvc bin/spawnlet bin/spawnctl '$STAGE/bin/'"
+  dbox "make build bin/spawnery_cp && cp -f bin/spawnery_cp bin/authsvc bin/spawnlet bin/spawnctl '$STAGE/bin/'"
   dbox "make images && docker save spawnery/sidecar:dev spawnery/agent:dev -o '$STAGE/images.tar'" \
     || warn "image build/save failed — sidecar/agent will be STALE (baked) this run"
   dbox "cd web && npm ci && npm run build && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'" \

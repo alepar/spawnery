@@ -16,6 +16,9 @@ set -euo pipefail
 : "${E2E_VM_VCPUS:=4}"
 : "${E2E_HOSTS_MODE:=nss}"                    # nss (nss-libvirt, no sudo) | hosts (/etc/hosts + flock + sudo)
 : "${E2E_STATE_ROOT:=${XDG_STATE_HOME:-$HOME/.local/state}/spawnery-e2e}"
+# Under qemu:///system, disk images + seed ISOs the qemu process reads/writes must live in a
+# libvirt-accessible pool path (NOT $HOME). Logs/artifacts/staging stay under E2E_STATE_ROOT.
+: "${E2E_IMG_ROOT:=/var/lib/libvirt/images/spawnery-e2e}"
 : "${E2E_SSH_USER:=spawnery}"                # cloud-init user baked into the golden image
 : "${E2E_SSH_KEY:=$HOME/.ssh/spawnery_e2e}"  # private key whose pubkey the golden image trusts
 : "${GOLDEN_IMAGE:=}"                         # REQUIRED: path to the golden qcow2 (built by build-base.sh)
@@ -46,8 +49,18 @@ gen_runid() {
 _need_runid() { [ -n "${E2E_RUNID:-}" ] || die "E2E_RUNID unset (call gen_runid / set it first)"; }
 vm_domain()   { _need_runid; printf 'spawnery-e2e-%s' "$E2E_RUNID"; }
 vm_hostname() { _need_runid; printf '%s.%s' "$E2E_RUNID" "$E2E_DOMAIN_SUFFIX"; }
-run_dir()     { _need_runid; printf '%s/%s' "$E2E_STATE_ROOT" "$E2E_RUNID"; }
-overlay_path(){ printf '%s/overlay.qcow2' "$(run_dir)"; }
+run_dir()     { _need_runid; printf '%s/%s' "$E2E_STATE_ROOT" "$E2E_RUNID"; }   # $HOME: logs/artifacts/stage
+img_dir()     { _need_runid; printf '%s/%s' "$E2E_IMG_ROOT" "$E2E_RUNID"; }     # pool: qemu-read/write disks
+overlay_path(){ printf '%s/overlay.qcow2' "$(img_dir)"; }
+
+# build a cloud-init NoCloud seed ISO (label MUST be cidata) with whatever builder is present
+iso_make() {
+  local out="$1"; shift
+  if   command -v xorrisofs  >/dev/null; then xorrisofs  -quiet -o "$out" -V cidata -J -r "$@"
+  elif command -v mkisofs    >/dev/null; then mkisofs    -quiet -o "$out" -V cidata -J -r "$@"
+  elif command -v genisoimage>/dev/null; then genisoimage -quiet -o "$out" -V cidata -J -r "$@"
+  else die "no ISO builder found (need xorriso/genisoimage)"; fi
+}
 
 virsh_() { virsh -c "$LIBVIRT_URI" "$@"; }
 

@@ -17,8 +17,9 @@ esac; done
 [ -n "$GOLDEN_IMAGE" ] || die "GOLDEN_IMAGE unset (build it with build-base.sh)"
 [ -f "$GOLDEN_IMAGE" ] || die "GOLDEN_IMAGE not found: $GOLDEN_IMAGE"
 : "${E2E_RUNID:=$(gen_runid)}"; export E2E_RUNID
-DOM="$(vm_domain)"; HOST="$(vm_hostname)"; RD="$(run_dir)"; OVL="$(overlay_path)"
+DOM="$(vm_domain)"; HOST="$(vm_hostname)"; RD="$(run_dir)"; IMG="$(img_dir)"; OVL="$(overlay_path)"
 mkdir -p "$RD/artifacts"
+mkdir -p "$IMG" && chmod 0777 "$IMG"   # qemu (system mode) writes overlay/seed/console here
 log "runid=$E2E_RUNID domain=$DOM hostname=$HOST profile=$PROFILE"
 
 # ---- per-run overlay on the golden image (golden stays read-only) ----
@@ -50,13 +51,11 @@ write_files:
 runcmd:
   - [ systemctl, restart, chronyd ]     # correct clock on cold boot (belt-and-suspenders)
 EOF
-SEED_ISO="$RD/seed.iso"
-genisoimage -quiet -output "$SEED_ISO" -volid cidata -joliet -rock \
-  "$SEED_DIR/user-data" "$SEED_DIR/meta-data" 2>/dev/null \
-  || cloud-localds "$SEED_ISO" "$SEED_DIR/user-data" "$SEED_DIR/meta-data"
+SEED_ISO="$IMG/seed.iso"
+iso_make "$SEED_ISO" "$SEED_DIR/user-data" "$SEED_DIR/meta-data"
 
 # ---- render + define + start the transient domain ----
-CONSOLE_LOG="$RD/artifacts/console.log"
+CONSOLE_LOG="$IMG/console.log"
 sed -e "s#@@DOMAIN@@#$DOM#g" -e "s#@@MEM_MB@@#$E2E_VM_MEM_MB#g" -e "s#@@VCPUS@@#$E2E_VM_VCPUS#g" \
     -e "s#@@OVERLAY@@#$OVL#g" -e "s#@@SEED_ISO@@#$SEED_ISO#g" -e "s#@@NET@@#$E2E_NET#g" \
     -e "s#@@CONSOLE_LOG@@#$CONSOLE_LOG#g" \
