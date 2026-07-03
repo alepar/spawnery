@@ -6,8 +6,9 @@ Spin up a **disposable libvirt/QEMU VM** running the whole spawnery stack in **p
 
 > **STATUS: first-draft orchestration, NOT yet validated on a host.** These scripts were written
 > without a live libvirt/KVM host to test against (a sandbox has no `/dev/kvm`/root). Expect to
-> iterate on the host. The **golden-image builder (`build-base.sh`) is not written yet** — it's the
-> remaining prerequisite (task `sp-te3y.1`); everything here assumes a golden qcow2 already exists.
+> iterate on the host. The **golden-image builder (`build-base.sh`) is now a first draft too** — the
+> system provisioning (containerd/runsc/CNI/pg/Caddy/PKI) is concrete, but the spawnery **systemd env
+> must be reconciled with the `Justfile`** on the host (search `RECONCILE` in `provision/provision.sh`).
 
 ## The one command
 
@@ -43,7 +44,7 @@ covers every run.
    (or use `qemu:///system` with polkit).
 2. **NAT network** `spawnery-e2e`:
    ```bash
-   virsh net-define <(scripts/e2e-vm/templates/net.xml)   # TODO: ship this template
+   virsh net-define scripts/e2e-vm/templates/net.xml
    virsh net-start spawnery-e2e && virsh net-autostart spawnery-e2e
    ```
 3. **Host name resolution** (choose one):
@@ -66,7 +67,10 @@ covers every run.
 | `down.sh` | collect artifacts, destroy the domain + overlay |
 | `run.sh` | the 0–3 orchestrator (build → up → roll → test → down) |
 | `templates/domain.xml.tmpl` | transient libvirt domain (NAT iface, per-run overlay, guest-agent, serial log) |
-| `build-base.sh` | **TODO (`sp-te3y.1`)** — golden-image builder (containerd/runsc/CNI/pg/Caddy/PKI/units) |
+| `build-base.sh` | golden-image builder — live-provision a Fedora image, run `provision/provision.sh`, shut down → golden qcow2 |
+| `provision/provision.sh` | in-guest installer (pinned containerd 2.2.3/runsc-20260525.0/CNI + pg + Caddy + PKI + units + image import) |
+| `provision/gen-pki.sh` | throwaway CA + AS session key + CP mTLS + `*.e2e.test` wildcard cert |
+| `templates/net.xml` | the `spawnery-e2e` NAT network (one-time `virsh net-define`) |
 
 ## Env knobs (see `lib.sh`)
 
@@ -75,9 +79,10 @@ covers every run.
 
 ## Known gaps / next
 
-- `build-base.sh` + the guest provisioning (cloud-init, `/etc/runsc/runsc.toml` systrap, containerd
-  config, CNI conflist, Caddyfile + wildcard cert, systemd units, image import) — the big host piece.
-- `templates/net.xml` for the NAT network.
+- **RECONCILE the spawnery systemd env** (`provision/provision.sh` `/etc/spawnery/env.d/common.env`)
+  with the `Justfile` `authsvc-github`/`cp-github`/`node-github` recipes — the exact var set (esp.
+  `AS_GITHUB_TOKEN_ENC_KEY`, RPC secrets, `AS_FAKE_GITHUB*` / `GITHUB_CLIENT_ID`) is the single source.
+- Verify `spawnery-ca dev`'s actual output filenames vs what `gen-pki.sh` / `common.env` reference.
 - `node-list` in `roll.sh` assumes a `spawnctl node-list` verb for the mTLS-registration gate — verify
   the actual CP node-list surface.
 - `github` profile needs the real-GitHub seeded-`storageState` suite auth path (`sp-te3y.7`) +

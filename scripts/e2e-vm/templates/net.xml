@@ -1,0 +1,14 @@
+<!-- One-time: the NAT network the e2e VMs attach to (routable per-VM IP model).
+     virsh net-define scripts/e2e-vm/templates/net.xml
+     virsh net-start spawnery-e2e && virsh net-autostart spawnery-e2e
+     With nss-libvirt installed, guests are resolvable on the host as <hostname>.<domain>. -->
+<network>
+  <name>spawnery-e2e</name>
+  <forward mode="nat"/>
+  <bridge name="spawnery-br0" stp="on" delay="0"/>
+  <domain name="e2e.test" localOnly="yes"/>
+  <dns enable="yes"/>
+  <ip address="192.168.242.1" netmask="255.255.255.0">
+    <dhcp><range start="192.168.242.10" end="192.168.242.240"/></dhcp>
+  </ip>
+</network>
