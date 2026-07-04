@@ -58,6 +58,7 @@ func main() {
 			&cli.StringFlag{Name: "version", Value: "1.0.0", Usage: "app version to register (with -register)"},
 			&cli.StringFlag{Name: "ref", Usage: "immutable app ref creator/app@sha (with -register)"},
 			&cli.StringFlag{Name: "profile", Usage: "customization profile id to apply at create (CP mode)"},
+			&cli.BoolFlag{Name: "detach", Usage: "create the spawn, wait for ACTIVE, print its id, and exit WITHOUT attaching (scriptable; the spawn keeps running instead of being stopped on detach)"},
 			&cli.StringSliceFlag{Name: "mount", Usage: "mount binding name=backend_uri[,create] (repeatable; e.g. repo=github:owner/repo,create) — CP mode only"},
 		},
 		Action:   rootAction,
@@ -114,7 +115,7 @@ func rootAction(ctx context.Context, c *cli.Command) error {
 			return cli.Exit(err.Error(), 2)
 		}
 		src := buildTokenSource(configDir, c.String("token"), httpCl)
-		runCP(ctx, cfg.CP, c.String("app-id"), c.String("model"), c.String("profile"), mounts, src)
+		runCP(ctx, cfg.CP, c.String("app-id"), c.String("model"), c.String("profile"), mounts, src, c.Bool("detach"))
 		return nil
 	}
 	if len(c.StringSlice("mount")) > 0 {
@@ -214,7 +215,7 @@ func runStandalone(ctx context.Context, addr, appPath, model string) {
 }
 
 // runCP drives the agent through the control plane via the cp.v1 service.
-func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*cpv1.MountBinding, src *cpTokenSource) {
+func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*cpv1.MountBinding, src *cpTokenSource, detach bool) {
 	client := cpv1connect.NewSpawnServiceClient(connectClient(), addr,
 		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
 
@@ -255,6 +256,15 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 	cancelPoll()
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// -detach: the spawn is ACTIVE and (if the CP runs the intent flow) its create intent is signed.
+	// Return WITHOUT opening an interactive session — so we skip the StopSpawn that a normal detach
+	// (stdin EOF) issues, and the spawn keeps running. This is the scriptable create path (CI, the
+	// acceptance suite): `spawnctl -cp ... -detach` prints `spawn: <id>` and exits 0, spawn persists.
+	if detach {
+		fmt.Println("detached; spawn active:", id)
+		return
 	}
 
 	// A4 session-open signing [AC1][AM12]: build a signed intent with the live episode generation
