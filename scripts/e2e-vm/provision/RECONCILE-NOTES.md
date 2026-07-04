@@ -18,10 +18,15 @@ containerd. AS `/healthz` OK. These are the fixes that got there — **fold into
 3. **Caddy runs as user `caddy`** → the wildcard key must be readable: `chmod 644 wildcard.{crt,key}`.
 4. **`SPAWNERY_ENV=prod` resolves `cp.prod.yaml`'s `${sops:store.dsn}` regardless of env override** →
    patch `/etc/spawnery/config/cp.prod.yaml` to a literal DSN (no `${sops:}`).
-5. **Postgres store is NOT compiled into the prod binary** — the `pgx` driver is imported only under
-   `//go:build pgtest` (a test). `store open: sql: unknown driver "pgx"`. Matches the ORR roadmap
-   (prod-Postgres is a future workstream). **→ use `sqlite`** (`cp.prod.yaml` store.driver=sqlite +
-   `file:/var/lib/spawnery/cp.db`). This REVISES the design's "Postgres in-VM" decision.
+5. **Postgres store** — the `pgx` driver was imported only under `//go:build pgtest`, so prod binaries
+   failed `store open: sql: unknown driver "pgx"`. **FIXED in master (`23cce42`): pgx registered
+   unguarded in `internal/cp/store/open.go`**, so postgres works in prod builds. Harness uses
+   **postgres** (cp.prod.yaml store.driver=postgres + a literal DSN, `${sops:}` patched out).
+   TWO postgres provisioning steps required: (a) `postgresql-setup --initdb`; **(b) set
+   `pg_hba.conf` local TCP (127.0.0.1/32, ::1/128) to `scram-sha-256`** (default is `ident`, which
+   ignores the password → `FATAL: Ident authentication failed`), and `ALTER USER spawnery PASSWORD
+   'spawnery'` under `password_encryption=scram-sha-256`, then `systemctl reload postgresql`.
+   Validated: CP comes up on real Postgres in prod mode with the fixed binary.
 6. **`AS_GITHUB_TOKEN_ENC_KEY` must decode to exactly 32 bytes** (AES-256) — use a 32-char key
    base64'd. `fake_github=true` is NOT dev-gated, so prod + fake-GitHub is valid.
 7. **CP seeds demo apps from relative `examples/secret-app`** (opened relative to CWD). systemd runs
