@@ -55,19 +55,17 @@ SEED_ISO="$IMG/seed.iso"
 iso_make "$SEED_ISO" "$SEED_DIR/user-data" "$SEED_DIR/meta-data"
 
 # ---- render + define + start the transient domain ----
-CONSOLE_LOG="$IMG/console.log"
 sed -e "s#@@DOMAIN@@#$DOM#g" -e "s#@@MEM_MB@@#$E2E_VM_MEM_MB#g" -e "s#@@VCPUS@@#$E2E_VM_VCPUS#g" \
     -e "s#@@OVERLAY@@#$OVL#g" -e "s#@@SEED_ISO@@#$SEED_ISO#g" -e "s#@@NET@@#$E2E_NET#g" \
-    -e "s#@@CONSOLE_LOG@@#$CONSOLE_LOG#g" \
     "$E2E_DIR/templates/domain.xml.tmpl" > "$RD/domain.xml"
 virsh_ create "$RD/domain.xml" >/dev/null || die "virsh create failed (is '$E2E_NET' defined + active?)"
 log "domain started; waiting for DHCP lease…"
 
-IP="$(vm_ip "$DOM")" || { warn "no lease; see $CONSOLE_LOG"; die "VM did not get an IP"; }
+IP="$(vm_ip "$DOM")" || die "VM did not get an IP (virsh console $DOM to inspect)"
 log "VM IP: $IP"
 host_resolve_add "$HOST" "$IP"
 
-wait_tcp "$IP" 22 180 || die "SSH never came up on $IP; see $CONSOLE_LOG"
+wait_tcp "$IP" 22 180 || die "SSH never came up on $IP (virsh console $DOM)"
 log "SSH up on $IP"
 
 cat >"$RD/acc.env" <<EOF

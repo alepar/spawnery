@@ -33,11 +33,14 @@ if [ -d "$STAGE/web-dist" ]; then
   vm_scp "$STAGE/web-dist/." "$IP" 'incoming/web/'
 fi
 
-# 4. atomic swap + restart the stack (order matters: AS -> CP -> node -> web)
+# 4. atomic swap + restart the stack (order matters: AS -> CP -> node -> caddy)
+# Re-copying config/ re-introduces cp.prod.yaml's ${sops:store.dsn} ref (pristine config ships it),
+# so re-patch the literal throwaway DSN right after the config copy, every roll.
 vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/* /usr/local/bin/ \
   && ( [ -d ~/incoming/config ] && sudo cp -rf ~/incoming/config/* /etc/spawnery/config/ || true ) \
+  && ( [ -f /etc/spawnery/config/cp.prod.yaml ] && sudo sed -i '"'"'s#\${sops:store.dsn}#postgres://spawnery:spawnery@127.0.0.1:5432/spawnery?sslmode=disable#'"'"' /etc/spawnery/config/cp.prod.yaml || true ) \
   && ( [ -d ~/incoming/web ] && sudo rsync -a --delete ~/incoming/web/ /var/www/spawnery/ || true ) \
-  && sudo systemctl restart spawnery-authsvc spawnery-cp spawnery-node spawnery-web caddy'
+  && sudo systemctl restart spawnery-authsvc spawnery-cp spawnery-node caddy'
 
 # ---- wait app-ready — gate ALL the pieces (roast gap), not just AS /healthz ----
 log "waiting for app-ready …"

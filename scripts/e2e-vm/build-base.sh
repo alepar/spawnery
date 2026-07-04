@@ -28,6 +28,8 @@ dbox "make build bin/spawnery_cp && cp -f bin/{spawnery_cp,authsvc,spawnlet,spaw
 dbox "make images && docker save spawnery/sidecar:dev spawnery/agent:dev -o '$WORK/payload/images.tar'" || warn "image build failed"
 dbox "cd web && npm ci && VITE_CP_ORIGIN=https://placeholder.e2e.test VITE_AS_ORIGIN=https://placeholder.e2e.test npm run build" && cp -rf "$REPO_ROOT/web/dist" "$WORK/payload/web-dist" || warn "web build failed (non-fatal; roll.sh rebuilds per run)"
 cp -rf "$REPO_ROOT/config/." "$WORK/payload/config/"
+cp -rf "$REPO_ROOT/examples" "$WORK/payload/examples"
+mkdir -p "$WORK/payload/env" && cp -f "$E2E_DIR/provision/env/"*.env "$WORK/payload/env/"
 cp -f "$E2E_DIR/provision/provision.sh" "$E2E_DIR/provision/gen-pki.sh" "$WORK/payload/"
 
 log "fetching Fedora cloud image…"

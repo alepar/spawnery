@@ -6,9 +6,12 @@
 # Self-contained: writes every host config (runsc/containerd/CNI/Caddy/systemd/PKI) via heredocs.
 # Pinned versions come from the exploration of PROVISIONING.md + the runsc notes.
 #
-# STATUS: first draft — the SYSTEM provisioning (containerd/runsc/CNI/pg/caddy/PKI) is concrete;
-# the spawnery SYSTEMD ENV must be reconciled against the Justfile *-github/*-enforced recipes
-# (the single source) on the host — search for "RECONCILE" below.
+# This fold bakes in the findings from a full live reconcile of the stack in a VM (see
+# provision/RECONCILE-NOTES.md): binaries+examples install before PKI generation (spawnery-ca must
+# be on PATH), Postgres switched to scram-sha-256 local auth, cp.prod.yaml's ${sops:} store DSN
+# patched to the throwaway local Postgres, the captured env (env/common.env + env/profile.*.env)
+# installed as per-boot-rendered templates, and systemd units pointed at /opt/spawnery with no
+# separate spawnery-web unit (Caddy already serves the web root + reverse-proxies CP/AS).
 set -euo pipefail
 
 # ---- pinned versions (verify/bump on the host; these mirror the runsc-node-provisioning notes) ----
@@ -20,7 +23,7 @@ POD_CIDR="${POD_CIDR:-10.234.0.0/16}"          # avoid Podman's 10.88.0.0/16
 POD_DNS="${POD_DNS:-1.1.1.1,8.8.8.8}"          # systemd-resolved's 127.0.0.53 is unreachable in-pod
 WILDCARD_DOMAIN="${WILDCARD_DOMAIN:-e2e.test}" # cert covers *.e2e.test
 
-PAYLOAD="${PAYLOAD:-/home/build/payload}"      # scp'd by build-base.sh: bin/ images.tar config/ web-dist/ spawnery-ca
+PAYLOAD="${PAYLOAD:-/home/build/payload}"      # scp'd by build-base.sh: bin/ images.tar config/ examples/ env/ web-dist/ spawnery-ca
 log(){ printf '\033[36m[provision]\033[0m %s\n' "$*"; }
 
 log "installing base packages…"
@@ -118,21 +121,37 @@ fi
 log "initializing Postgres…"
 sudo postgresql-setup --initdb || true
 sudo systemctl enable --now postgresql
-sudo -u postgres psql -c "CREATE USER spawnery WITH PASSWORD 'spawnery';" || true
-sudo -u postgres psql -c "CREATE DATABASE spawnery OWNER spawnery;" || true
+
+log "switching Postgres local TCP auth to scram-sha-256…"
+PGHBA=$(sudo -u postgres psql -tAc 'SHOW hba_file' 2>/dev/null || echo /var/lib/pgsql/data/pg_hba.conf)
+sudo sed -i -E 's#^(host\s+all\s+all\s+127\.0\.0\.1/32\s+).*#\1scram-sha-256#' "$PGHBA"
+sudo sed -i -E 's#^(host\s+all\s+all\s+::1/128\s+).*#\1scram-sha-256#' "$PGHBA"
+sudo -u postgres psql -c "ALTER SYSTEM SET password_encryption='scram-sha-256';" || true
+sudo systemctl restart postgresql
+sudo -u postgres psql -c "CREATE USER spawnery WITH PASSWORD 'spawnery';" 2>/dev/null \
+  || sudo -u postgres psql -c "ALTER USER spawnery WITH PASSWORD 'spawnery';"
+sudo -u postgres psql -c "CREATE DATABASE spawnery OWNER spawnery;" 2>/dev/null || true
+sudo systemctl reload postgresql || sudo systemctl restart postgresql
+
+# ---- spawnery binaries + config + examples (BEFORE PKI: spawnery-ca must be on PATH for gen-pki.sh) ----
+log "installing spawnery binaries + config + examples…"
+sudo install -m0755 "$PAYLOAD"/bin/* /usr/local/bin/
+sudo mkdir -p /etc/spawnery/config /opt/spawnery /var/www/spawnery /var/lib/spawnlet
+sudo cp -rf "$PAYLOAD"/config/* /etc/spawnery/config/ 2>/dev/null || true
+[ -d "$PAYLOAD/examples" ] && sudo cp -rf "$PAYLOAD/examples" /opt/spawnery/
+[ -d "$PAYLOAD/web-dist" ] && sudo rsync -a "$PAYLOAD/web-dist/" /var/www/spawnery/
 
 # ---- PKI: throwaway CA + AS session key + node/CP mTLS + the *.e2e.test wildcard cert ----
 log "generating throwaway PKI + wildcard cert…"
 sudo mkdir -p /etc/spawnery/pki
-sudo bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"   # writes ca.crt, session-key/pub, node/cp certs, wildcard.{crt,key}
+sudo bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"   # writes root.pem/ca.crt, session-key/pub, node/cp certs, wildcard.{crt,key}
+sudo chmod 644 /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key   # caddy runs as user 'caddy'
 sudo cp /etc/spawnery/pki/ca.crt /home/build/ca.crt   # build-base.sh pulls this out for host trust
 
-# ---- spawnery binaries + config (baseline; roll.sh replaces per run) ----
-log "installing spawnery binaries + config…"
-sudo install -m0755 "$PAYLOAD"/bin/* /usr/local/bin/
-sudo mkdir -p /etc/spawnery/config /var/www/spawnery /var/lib/spawnlet
-sudo cp -rf "$PAYLOAD"/config/* /etc/spawnery/config/ 2>/dev/null || true
-[ -d "$PAYLOAD/web-dist" ] && sudo rsync -a "$PAYLOAD/web-dist/" /var/www/spawnery/
+# ---- cp.prod.yaml: patch the ${sops:} store DSN to the throwaway local Postgres (baseline; roll.sh
+#      re-applies this after every config re-copy, since a fresh config/ ships the sops ref again) ----
+sudo sed -i 's#\${sops:store.dsn}#postgres://spawnery:spawnery@127.0.0.1:5432/spawnery?sslmode=disable#' \
+  /etc/spawnery/config/cp.prod.yaml || true
 
 # ---- Caddy: TLS :443 wildcard cert, route to web/CP/AS ----
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
@@ -148,71 +167,94 @@ sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 EOF
 sudo systemctl enable caddy
 
-# ---- spawnery env (RECONCILE with Justfile *-github/*-enforced) + systemd units ----
-# The prod delta: SPAWNERY_ENV=prod, but override the ${sops:} store DSN to the local throwaway pg
-# (do NOT ship the real secrets.prod.sops.yaml / age key).
-log "writing spawnery env + systemd units (RECONCILE env with the Justfile)…"
-sudo mkdir -p /etc/spawnery/env.d
-sudo tee /etc/spawnery/env.d/common.env >/dev/null <<EOF
-SPAWNERY_ENV=prod
-SPAWNERY_CONFIG_DIR=/etc/spawnery/config
-# store: real prod path (postgres) but throwaway local DSN, overriding the \${sops:} ref
-CP_STORE_DRIVER=postgres
-CP_STORE_DSN=postgres://spawnery:spawnery@127.0.0.1:5432/spawnery?sslmode=disable
-# PKI (throwaway)
-AS_SESSION_KEY_PEM=/etc/spawnery/pki/session-key.pem
-CP_AS_SESSION_PUBKEYS=/etc/spawnery/pki/session-pub.pem
-CP_NODE_ROOT_CA=/etc/spawnery/pki/ca.crt
-CP_NODE_TLS_CERT=/etc/spawnery/pki/cp-node.crt
-CP_NODE_TLS_KEY=/etc/spawnery/pki/cp-node.key
-NODE_AS_PUBKEYS=/etc/spawnery/pki/session-pub.pem
-# listeners
-AS_LISTEN=127.0.0.1:8090
-CP_LISTEN=127.0.0.1:8080
-CP_NODE_LISTEN=127.0.0.1:8081
-NODE_AUTH_MODE=enforced
-NODE_CLASS=cloud
-EGRESS_ENFORCE=true
-CONTAINER_RUNTIME=runsc
-USERNS_MODE=native
-POD_DNS=${POD_DNS}
-# RECONCILE: AS_ROOT_CA_PEM, AS_INTERMEDIATE_*, AS_GITHUB_TOKEN_ENC_KEY, AS_CP_RPC_SECRET/CP_AS_RPC_SECRET,
-# CP_ADDR/CP_NODE_ADDR, NODE_ID_DIR, GITHUB_CLIENT_ID/SECRET (github profile), AS_FAKE_GITHUB* (fake
-# profile) — copy the exact set from the Justfile authsvc-github/cp-github/node-github recipes.
+# ---- spawnery env: install the reconciled env as per-boot-rendered TEMPLATES ----
+# env/common.env + env/profile.*.env (captured verbatim off the live reconcile) carry @@HOST@@/@@IP@@
+# placeholders; spawnery-render-env.sh renders them into /etc/spawnery/env.d/{common,profile}.env on
+# every boot, once the per-run hostname/profile are known (cloud-init has already written
+# /etc/spawnery-e2e/{profile,web_origin} and set the VM hostname by the time this unit runs).
+log "installing env templates + per-boot render unit…"
+sudo mkdir -p /etc/spawnery/env.d /var/lib/spawnery /var/www/spawnery /var/lib/spawnlet
+sudo cp -f "$PAYLOAD"/env/common.env /etc/spawnery/env.d/common.env.tmpl
+for p in "$PAYLOAD"/env/profile.*.env; do [ -f "$p" ] && sudo cp -f "$p" "/etc/spawnery/env.d/$(basename "$p").tmpl"; done
+
+sudo tee /usr/local/bin/spawnery-render-env.sh >/dev/null <<'RENDER_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+HOST="$(hostname -f 2>/dev/null || hostname)"
+IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+[ -n "${IP:-}" ] || IP="$(hostname -I | awk '{print $1}')"
+PROFILE="$(cat /etc/spawnery-e2e/profile 2>/dev/null || echo fake)"
+sed -e "s#@@HOST@@#$HOST#g" -e "s#@@IP@@#$IP#g" /etc/spawnery/env.d/common.env.tmpl > /etc/spawnery/env.d/common.env
+TMPL="/etc/spawnery/env.d/profile.$PROFILE.env.tmpl"
+[ -f "$TMPL" ] || { echo "no env template for profile=$PROFILE ($TMPL)" >&2; exit 1; }
+sed -e "s#@@HOST@@#$HOST#g" -e "s#@@IP@@#$IP#g" "$TMPL" > /etc/spawnery/env.d/profile.env
+RENDER_EOF
+sudo chmod 0755 /usr/local/bin/spawnery-render-env.sh
+
+sudo tee /etc/systemd/system/spawnery-render-env.service >/dev/null <<'EOF'
+[Unit]
+Description=render per-boot spawnery env (HOST/IP/profile substitution)
+After=cloud-init.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/spawnery-render-env.sh
+[Install]
+WantedBy=multi-user.target
 EOF
 
-# auth profile (fake|github) is written per-run to /etc/spawnery-e2e/profile by up.sh's cloud-init;
-# a drop-in reads it. github profile additionally needs GITHUB_CLIENT_ID/SECRET; fake needs AS_FAKE_GITHUB*.
+# ---- spawnery systemd units (authsvc/cp/node) — no separate spawnery-web: Caddy already serves the
+#      web root and reverse-proxies the CP/AS routes (see Caddyfile above) ----
+log "writing spawnery systemd units…"
 sudo tee /etc/systemd/system/spawnery-authsvc.service >/dev/null <<'EOF'
 [Unit]
 Description=spawnery auth service
-After=postgresql.service network-online.target
+After=spawnery-render-env.service postgresql.service network-online.target
+Requires=spawnery-render-env.service
 [Service]
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
+WorkingDirectory=/opt/spawnery
 ExecStart=/usr/local/bin/authsvc
 Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
-for svc in cp node web; do
-  bin=spawnery_cp; [ "$svc" = node ] && bin=spawnlet; [ "$svc" = web ] && bin=""
-  sudo tee /etc/systemd/system/spawnery-$svc.service >/dev/null <<EOF
+
+sudo tee /etc/systemd/system/spawnery-cp.service >/dev/null <<'EOF'
 [Unit]
-Description=spawnery $svc
-After=spawnery-authsvc.service containerd.service postgresql.service
+Description=spawnery control plane
+After=spawnery-render-env.service spawnery-authsvc.service containerd.service postgresql.service
+Requires=spawnery-render-env.service
 [Service]
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
-$( [ "$svc" = web ] && echo 'ExecStart=/usr/bin/caddy file-server --root /var/www/spawnery' || echo "ExecStart=/usr/local/bin/$bin" )
+WorkingDirectory=/opt/spawnery
+ExecStart=/usr/local/bin/spawnery_cp
 Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
-done
+
+sudo tee /etc/systemd/system/spawnery-node.service >/dev/null <<'EOF'
+[Unit]
+Description=spawnery node (spawnlet)
+After=spawnery-render-env.service spawnery-cp.service containerd.service
+Requires=spawnery-render-env.service
+[Service]
+EnvironmentFile=/etc/spawnery/env.d/common.env
+EnvironmentFile=-/etc/spawnery/env.d/profile.env
+WorkingDirectory=/opt/spawnery
+ExecStart=/usr/local/bin/spawnlet
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+EOF
+
 sudo systemctl daemon-reload
-sudo systemctl enable spawnery-authsvc spawnery-cp spawnery-node caddy
+sudo systemctl enable spawnery-render-env spawnery-authsvc spawnery-cp spawnery-node caddy
 
 # ---- self-check (best-effort) + clean shutdown handled by build-base.sh ----
 log "provision complete. runsc: $(runsc --version | head -1). containerd: $(/usr/local/bin/containerd --version)"
-log "REMINDER: reconcile /etc/spawnery/env.d/common.env with the Justfile before first real run."
+log "REMINDER: env templates installed at /etc/spawnery/env.d/*.tmpl; spawnery-render-env renders them (HOST/IP/profile) on every boot before the spawnery services start."

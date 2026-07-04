@@ -34,15 +34,14 @@ die()  { printf '\033[31m[e2e-vm %(%H:%M:%S)T ERR]\033[0m %s\n' -1 "$*" >&2; exi
 # Derive a short, DNS/libvirt-safe run id from the branch + short sha + a nonce, so concurrent
 # runs (even from the same branch) never collide.
 gen_runid() {
-  local branch sha nonce
+  local branch sha rnd
   branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
+  branch="$(printf '%s' "$branch" | tr '[:upper:]/_.' '[:lower:]---' | tr -cd 'a-z0-9-')"
+  branch="${branch: -12}"                     # last 12 chars keeps hostnames short + valid
   sha="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
-  nonce="$$-${RANDOM}"
-  # lowercase, keep [a-z0-9-], collapse, truncate the branch part to keep the label short (<=63)
-  local slug
-  slug="$(printf '%s-%s-%s' "$branch" "$sha" "$nonce" | tr '[:upper:]/_.' '[:lower:]----' \
-          | tr -cd 'a-z0-9-' | sed 's/-\+/-/g; s/^-//; s/-$//')"
-  printf '%s' "${slug:0:40}"
+  rnd="$(printf '%04x' "$RANDOM")$(printf '%03x' $((RANDOM % 4096)))"   # unique per run
+  # collapse dashes and strip leading/trailing (trailing '-' is an invalid hostname label)
+  printf '%s-%s-%s' "$branch" "$sha" "$rnd" | sed 's/-\+/-/g; s/^-//; s/-$//'
 }
 
 # ---- per-run derived names (require E2E_RUNID set) ----

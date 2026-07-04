@@ -32,8 +32,8 @@
       <source network="@@NET@@"/>
       <model type="virtio"/>
     </interface>
-    <serial type="file"><source path="@@CONSOLE_LOG@@"/><target port="0"/></serial>
-    <console type="file"><source path="@@CONSOLE_LOG@@"/><target type="serial" port="0"/></console>
+    <serial type="pty"><target port="0"/></serial>
+    <console type="pty"><target type="serial" port="0"/></console>
     <channel type="unix">
       <target type="virtio" name="org.qemu.guest_agent.0"/>
     </channel>
