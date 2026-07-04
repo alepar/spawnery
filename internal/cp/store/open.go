@@ -10,6 +10,7 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/dialect/sqlitedialect"
+	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver in every build (postgres store)
 	_ "modernc.org/sqlite"
 )
 
