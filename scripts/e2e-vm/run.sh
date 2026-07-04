@@ -70,6 +70,7 @@ source "$RD/acc.env"
 export ACC_AUTH_MODE=dev-token
 export ACC_IDENTITY_POOL="devtoken1=acc-owner-1,devtoken2=acc-owner-2,devtoken3=acc-owner-3"
 export ACC_TEST_APP_ID=spawnery/secret-app ACC_LIFECYCLE_APP=spawnery/secret-app ACC_AGENT_APP_ID=spawnery/secret-app
+export ACC_APP_ID=spawnery/secret-app   # tenancy specs' generic app id
 export ACC_TEST_MODEL=openai/gpt-4o-mini ACC_AGENT_MODEL=openai/gpt-4o-mini
 export ACC_SPAWN_ACTIVE_TIMEOUT_MS=240000
 [ -f "${GOLDEN_IMAGE%.qcow2}-ca.crt" ] && export NODE_EXTRA_CA_CERTS="${GOLDEN_IMAGE%.qcow2}-ca.crt"
