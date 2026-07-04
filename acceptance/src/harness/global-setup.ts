@@ -14,24 +14,24 @@ import { preRunSweep } from "../fixtures/sweep";
 import { newRunId } from "../fixtures/namespace";
 import { ApiDriver } from "../drivers/api";
 import { DevTokenAuth } from "../auth/devtoken";
+import { OAuthPoPAuth } from "../auth/oauthpop";
+import type { AuthStrategy } from "../auth/types";
 
 export default async function globalSetup(): Promise<void> {
   const cfg = loadTargetConfig();
 
   assertVersionPin(cfg.targetRef, cfg.buildRef);
 
-  if (cfg.authMode !== "dev-token") {
-    // OAuthPoPAuth (sp-tq0t.3) is fully wired into the per-worker `auth`/`api` fixtures
-    // (harness/test.ts) that scenarios use. This ONE global, pre-worker step is out of scope for
-    // that task: fail loudly rather than silently reaching for dev-token or skipping the gate.
-    throw new Error(`auth mode ${JSON.stringify(cfg.authMode)} is not supported for global setup/sweep — use dev-token`);
-  }
   if (cfg.identityPool.length === 0) {
     throw new Error("ACC_IDENTITY_POOL is empty — global setup needs at least one identity for preflight/sweep");
   }
   // Preflight/sweep are owner-agnostic (ListApps/ListSpawns scope by the caller's own owner), so
-  // any pool identity works; the first one is used as this run's "system" credential.
-  const auth = new DevTokenAuth();
+  // any pool identity works; the first one is used as this run's "system" credential. Mirror
+  // test.ts's selectAuth so the global gate works in whichever auth mode the scenarios use.
+  const auth: AuthStrategy =
+    cfg.authMode === "dev-token"
+      ? new DevTokenAuth()
+      : new OAuthPoPAuth({ asOrigin: cfg.asOrigin, webOrigin: cfg.webOrigin });
   const systemIdentity = cfg.identityPool[0];
   const api = new ApiDriver(cfg.cpEndpoint, await auth.oracleToken(systemIdentity));
 

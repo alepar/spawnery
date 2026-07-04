@@ -67,7 +67,11 @@ export async function waitActiveApi(
   id: SpawnId,
   opts: { timeoutMs?: number; pollMs?: number } = {},
 ): Promise<void> {
-  const timeoutMs = opts.timeoutMs ?? 90_000;
+  // Real targets (a runsc pod on a VM) take ~1-2min to reach ACTIVE — far longer than the hermetic
+  // stub. Default stays 90s (stub); ACC_SPAWN_ACTIVE_TIMEOUT_MS raises it for real-node targets.
+  const timeoutMs =
+    opts.timeoutMs ??
+    (process.env.ACC_SPAWN_ACTIVE_TIMEOUT_MS ? Number(process.env.ACC_SPAWN_ACTIVE_TIMEOUT_MS) : 90_000);
   const pollMs = opts.pollMs ?? 1500;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
