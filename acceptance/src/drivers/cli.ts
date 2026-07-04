@@ -4,7 +4,7 @@
  * surfacing the CLI parity gap as visible red (design §Coverage / §Dual-surface).
  */
 
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, spawn as spawnChild } from "node:child_process";
 import type { CreateSpawnOpts, DriverCtx, ForkOpts, SpawnDriver, SpawnId, SpawnStatus } from "./types";
 import type { Identity } from "../fixtures/identity-pool";
 
@@ -132,13 +132,61 @@ export class CliDriver implements SpawnDriver {
   }
 
   async createSpawn(ctx: DriverCtx, opts: CreateSpawnOpts): Promise<SpawnId> {
-    const args = ["-app-id", opts.appId];
-    if (opts.model) args.push("-model", opts.model);
-    if (opts.profileId) args.push("-profile", opts.profileId);
-    const { stdout } = await this.run(ctx.identity, "", args);
-    const m = /^spawn:\s*(\S+)/m.exec(stdout);
-    if (!m) throw new Error(`cliDriver: could not parse spawn id from create output:\n${stdout}`);
-    return m[1];
+    const extra = ["-app-id", opts.appId];
+    if (opts.model) extra.push("-model", opts.model);
+    if (opts.profileId) extra.push("-profile", opts.profileId);
+    const args = buildArgs(this.cfg, ctx.identity, "", extra);
+    // spawnctl's root-action create ATTACHES (interactive driveFrames loop). We must NOT execFile
+    // it (that leaves stdin open → it blocks on prompts forever). Instead run it with a CLOSED
+    // stdin: it provisions the spawn to ACTIVE, prints "ready. type prompts:", reads EOF, and exits
+    // cleanly (exit 0). The spawn keeps running server-side; we detach by letting the client exit.
+    const timeoutMs = Number(process.env.ACC_SPAWN_ACTIVE_TIMEOUT_MS) || 240_000;
+    return await new Promise<SpawnId>((resolve, reject) => {
+      // stdin is an OPEN pipe we never write to: spawnctl provisions the spawn all the way to
+      // ACTIVE and prints "ready. type prompts:" (it only reads stdin AFTER that). We watch stdout,
+      // and once ACTIVE we end() stdin → spawnctl's prompt-read hits EOF and it exits cleanly, the
+      // spawn staying alive server-side. (A closed stdin from the start makes it exit BEFORE
+      // provisioning — the spawn never persists.)
+      const child = spawnChild(this.cfg.spawnctlBin, args, { stdio: ["pipe", "pipe", "pipe"] });
+      let out = "";
+      let settled = false;
+      const finish = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          child.stdin?.end();
+        } catch {
+          /* already closed */
+        }
+        fn();
+      };
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(() => reject(new Error(`cliDriver createSpawn timed out after ${timeoutMs}ms:\n${out}`)));
+      }, timeoutMs);
+      const onData = (d: Buffer): void => {
+        out += d.toString();
+        if (/ERROR:|failed at/i.test(out)) {
+          child.kill("SIGTERM");
+          finish(() => reject(new Error(`cliDriver createSpawn: provisioning failed:\n${out}`)));
+          return;
+        }
+        if (/ready\.\s*type prompts:/i.test(out)) {
+          const m = /^spawn:\s*(\S+)/m.exec(out);
+          if (m) finish(() => resolve(m[1])); // ACTIVE; finish() ends stdin so spawnctl exits, spawn persists
+        }
+      };
+      child.stdout.on("data", onData);
+      child.stderr.on("data", onData);
+      child.on("error", (e) => finish(() => reject(e)));
+      child.on("close", () => {
+        // Fallback: process exited before we saw "ready" (e.g. a non-attaching build).
+        const m = /^spawn:\s*(\S+)/m.exec(out);
+        if (m) finish(() => resolve(m[1]));
+        else finish(() => reject(new Error(`cliDriver: could not parse spawn id from create output:\n${out}`)));
+      });
+    });
   }
 
   async rename(_ctx: DriverCtx, _id: SpawnId, _name: string): Promise<void> {
