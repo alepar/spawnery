@@ -19,6 +19,7 @@ CONTAINERD_VER="${CONTAINERD_VER:-2.2.3}"
 RUNSC_RELEASE="${RUNSC_RELEASE:-20260525.0}"
 CNI_PLUGINS_VER="${CNI_PLUGINS_VER:-1.5.1}"
 RUNC_VER="${RUNC_VER:-1.2.4}"
+CRICTL_VER="${CRICTL_VER:-v1.32.0}"            # cri-tools; the runsc/CRI lane's `spawnctl exec` shells out to crictl
 POD_CIDR="${POD_CIDR:-10.234.0.0/16}"          # avoid Podman's 10.88.0.0/16
 POD_DNS="${POD_DNS:-1.1.1.1,8.8.8.8}"          # systemd-resolved's 127.0.0.53 is unreachable in-pod
 WILDCARD_DOMAIN="${WILDCARD_DOMAIN:-e2e.test}" # cert covers *.e2e.test
@@ -51,6 +52,19 @@ log "installing CNI plugins ${CNI_PLUGINS_VER}…"
 sudo mkdir -p /opt/cni/bin
 curl -fsSL "https://github.com/containernetworking/plugins/releases/download/v${CNI_PLUGINS_VER}/cni-plugins-linux-amd64-v${CNI_PLUGINS_VER}.tgz" \
   | sudo tar -C /opt/cni/bin -xz
+
+# ---- crictl (cri-tools) — the runsc/CRI lane's non-interactive `spawnctl exec` shells out to
+# `crictl exec` (internal/spawnlet/terminal.go). Without it the node NACKs exec ("crictl: not found
+# in $PATH"). /etc/crictl.yaml points it at containerd's CRI socket (crictl exec carries no endpoint
+# flag). Installed to /usr/local/bin (on the systemd default PATH so the node unit finds it). ----
+log "installing crictl ${CRICTL_VER}…"
+curl -fsSL "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VER}/crictl-${CRICTL_VER}-linux-amd64.tar.gz" \
+  | sudo tar -C /usr/local/bin -xz
+sudo tee /etc/crictl.yaml >/dev/null <<'EOF'
+runtime-endpoint: unix:///run/containerd/containerd.sock
+image-endpoint: unix:///run/containerd/containerd.sock
+timeout: 10
+EOF
 
 # ---- /etc/runsc/runsc.toml — overlay2=none (delta capture) + systrap (no /dev/kvm, VM-safe) ----
 sudo mkdir -p /etc/runsc
