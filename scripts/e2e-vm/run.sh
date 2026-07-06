@@ -83,12 +83,15 @@ export ACC_SPAWNCTL_BIN="$STAGE/bin/spawnctl"     # cliDriver shells out to the 
 export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report"   # per-run output — concurrency-safe
 export PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results"
 GREP_ARGS=(); [ -n "$GREP" ] && GREP_ARGS=(-g "$GREP")
-# VM lane: --retries=0. Spawns are per-owner-quota-limited and creation is slow, so a retry doesn't
-# mask a flake — it just spawns MORE, exhausting the quota and cascading every later @mutating test
-# into failure. Workers default to the playwright config; lower ACC_WORKERS if the egress-floor
-# iptables lock contends under concurrency (see the fork xtables.lock bug).
+# VM lane knobs:
+# --retries=0: spawns are per-owner-quota-limited + slow to create, so a retry doesn't mask a flake —
+#   it spawns MORE, exhausts the quota, and cascades later @mutating tests to red.
+# --workers=<pool size>: each worker needs its own identity from ACC_IDENTITY_POOL; Playwright
+#   otherwise defaults to CPU-count workers, and every worker past the pool size (default 3) dies at
+#   "identity pool has N entries but worker parallelIndex=… needs one". Cap workers to the pool.
+WORKERS="$(awk -F, 'NF{print NF}' <<<"${ACC_IDENTITY_POOL:-x}")"; WORKERS="${WORKERS:-1}"
 ( cd "$REPO_ROOT/acceptance" && npm ci >/dev/null 2>&1 || true
-  npm run test:accept -- --retries=0 "${GREP_ARGS[@]}" )
+  npm run test:accept -- --retries=0 --workers="$WORKERS" "${GREP_ARGS[@]}" )
 rc=$?
 log "acceptance suite exit=$rc  (report: $RD/artifacts/pw-report)"
 exit $rc
