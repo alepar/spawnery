@@ -1,0 +1,10 @@
+# TS codegen for the SDK. Run from the repo root: `buf generate --template sdk/ts/buf.gen.yaml`
+# (input defaults to ".", using the root buf.yaml module). protobuf-es v2 generates message
+# types AND service descriptors — connect-es v2 `createClient` consumes them, so no separate
+# protoc-gen-connect-es is needed. Output is the SDK's private generated tree.
+version: v2
+plugins:
+  - local: sdk/ts/node_modules/.bin/protoc-gen-es
+    out: sdk/ts/src/gen
+    opt:
+      - target=ts

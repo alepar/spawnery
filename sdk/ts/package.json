@@ -1,0 +1,24 @@
+{
+  "name": "@spawnery/client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Spawnery client SDK (Connect transport + A4 intent signing), environment-neutral (browser + Node).",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "gen": "buf generate --template buf.gen.yaml",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.2.3",
+    "@connectrpc/connect": "^2.0.0",
+    "@connectrpc/connect-web": "^2.0.0"
+  },
+  "devDependencies": {
+    "@bufbuild/protoc-gen-es": "^2.2.3",
+    "tsx": "^4.23.0",
+    "typescript": "^5.6.3"
+  }
+}
