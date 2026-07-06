@@ -18,7 +18,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 : "${FEDORA_IMG_SHA256:=28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f}"     # REQUIRED for reproducibility — pin the checksum
 : "${BUILD_MEM_MB:=6144}"
 : "${DISK_GB:=40}"
-WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+WORK="$(mktemp -d)"
+GOLDEN_TMP="${OUT}.building"   # build here; move onto $OUT only on success so a failed build never destroys the golden
+trap 'rm -rf "$WORK" "$GOLDEN_TMP" 2>/dev/null || true' EXIT
 BUILD_RUNID="golden-build-$$"
 
 log "staging build payload (binaries + images + web + config + provisioner)…"
@@ -44,8 +46,9 @@ if [ -n "$FEDORA_IMG_SHA256" ]; then echo "$FEDORA_IMG_SHA256  $IMG" | sha256sum
   warn "FEDORA_IMG_SHA256 unset — NOT reproducible; pin it."; fi
 
 log "creating golden disk (resize to ${DISK_GB}G)…"
-cp -f "$IMG" "$OUT"
-qemu-img resize "$OUT" "${DISK_GB}G"
+mkdir -p "$(dirname "$OUT")"
+cp -f "$IMG" "$GOLDEN_TMP"
+qemu-img resize "$GOLDEN_TMP" "${DISK_GB}G"
 
 # bootstrap cloud-init: a build user with our ssh key + grow the rootfs
 PUB="$(cat "${E2E_SSH_KEY}.pub")"
@@ -56,12 +59,14 @@ growpart: { mode: auto, devices: ['/'] }
 EOF
 printf 'instance-id: %s\nlocal-hostname: golden-build\n' "$BUILD_RUNID" >"$WORK/meta-data"
 mkdir -p "$E2E_IMG_ROOT"; SEED_ISO="$E2E_IMG_ROOT/golden-build-seed.iso"   # pool path
+sudo rm -f "$SEED_ISO"   # a prior build leaves this qemu-owned (the build VM opened it); alepar then
+                          # can't overwrite it and xorriso fails "permission denied". Clean it first.
 iso_make "$SEED_ISO" "$WORK/user-data" "$WORK/meta-data"
 
 log "booting build VM…"
 virsh_ destroy "$BUILD_RUNID" 2>/dev/null || true; virsh_ undefine "$BUILD_RUNID" 2>/dev/null || true
 virt-install --connect "$LIBVIRT_URI" --name "$BUILD_RUNID" --memory "$BUILD_MEM_MB" --vcpus 4 --import \
-  --disk "path=$OUT,format=qcow2,bus=virtio" --disk "path=$SEED_ISO,device=cdrom" \
+  --disk "path=$GOLDEN_TMP,format=qcow2,bus=virtio" --disk "path=$SEED_ISO,device=cdrom" \
   --os-variant fedora-unknown --network network="$E2E_NET" --graphics none --noautoconsole --transient
 IP="$(vm_ip "$BUILD_RUNID")" || die "build VM got no IP"
 wait_tcp "$IP" 22 300 || die "build VM ssh never came up"
@@ -84,6 +89,9 @@ E2E_SSH_USER=build vm_ssh "$IP" 'sudo cloud-init clean --logs && sudo shutdown -
 for i in $(seq 1 60); do virsh_ domstate "$BUILD_RUNID" 2>/dev/null | grep -q 'shut off' && break; sleep 2; done
 virsh_ destroy "$BUILD_RUNID" 2>/dev/null || true
 
+# atomically publish: the fully-provisioned temp disk becomes the golden only now (the EXIT trap
+# would otherwise remove GOLDEN_TMP, so this mv is what preserves it on success).
+mv -f "$GOLDEN_TMP" "$OUT"
 log "GOLDEN READY: $OUT"
 [ -f "${OUT%.qcow2}-ca.crt" ] && log "install CA in host trust: sudo cp '${OUT%.qcow2}-ca.crt' /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust"
 log "then: GOLDEN_IMAGE='$OUT' scripts/e2e-vm/run.sh --profile fake"
