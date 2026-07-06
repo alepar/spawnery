@@ -10,14 +10,23 @@
 
 import { createClient } from "@connectrpc/connect";
 import { createTransport, cpv1, type AuthProvider } from "@spawnery/client";
-import { getAccessToken } from "@/auth/session";
+import { getAccessToken, useSessionStore } from "@/auth/session";
 import { CP_ORIGIN } from "@/config/endpoints";
 import { tryRefresh } from "./connect";
 
 const auth: AuthProvider = {
   getBearer: async () => getAccessToken(),
   refresh: async () => {
-    await tryRefresh();
+    const refreshed = await tryRefresh();
+    if (!refreshed) {
+      // Mirrors unary()'s (api/connect.ts) generic-expiry handling: route to login-required,
+      // unless tryRefresh already set a more specific status (cnf-mismatch/key-lost) that
+      // drives distinct recovery UX in LoginView (spec §5) and must not be clobbered.
+      const s = useSessionStore.getState();
+      if (s.status !== "cnf-mismatch" && s.status !== "key-lost") {
+        s.setStatus("login-required");
+      }
+    }
   },
 };
 

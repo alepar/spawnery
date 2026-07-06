@@ -60,6 +60,21 @@ jobs:
         working-directory: .
         run: npm ci
 
+      # client-sdk epic: web imports @spawnery/client, whose entry point (sdk/ts/src/index.ts)
+      # imports its generated Connect/protobuf code (sdk/ts/src/gen/**). That dir is gitignored
+      # (sdk/ts/.gitignore: src/gen/) and produced only by `buf generate` (sdk/ts/package.json's
+      # `gen` script). Without this, the production build fails on a fresh checkout with
+      # "Cannot find module './gen/...'".
+      - name: Install buf (TS SDK codegen)
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/buf" "https://github.com/bufbuild/buf/releases/download/v1.71.0/buf-$(uname -s)-$(uname -m)"
+          chmod +x "$RUNNER_TEMP/buf"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Generate TS SDK codegen (sdk/ts/src/gen)
+        working-directory: .
+        run: npm --prefix sdk/ts run gen
+
       # Build with pinned origins from the release environment.
       # VITE_CP_ORIGIN and VITE_AS_ORIGIN are set in the GitHub Environment secrets.
       # VITE_AUTH_TOKEN is the bearer token baked into the bundle; the literal "dev-token"
