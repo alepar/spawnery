@@ -17,7 +17,7 @@
   "scripts": {
     "gen": "cd ../.. && buf generate --template sdk/ts/buf.gen.yaml",
     "build": "tsc",
-    "test": "node --import tsx --test spike/**/*.test.ts"
+    "test": "bash -c 'shopt -s globstar; node --import tsx --test src/**/*.test.ts'"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.2.3",
