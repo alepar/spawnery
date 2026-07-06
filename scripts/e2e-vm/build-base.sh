@@ -25,7 +25,12 @@ log "staging build payload (binaries + images + web + config + provisioner)…"
 mkdir -p "$WORK/payload/bin" "$WORK/payload/config"
 dbox() { distrobox enter --root dev-spawnery -- bash -lc "cd '$REPO_ROOT' && $*"; }
 dbox "make build bin/spawnery_cp && cp -f bin/{spawnery_cp,authsvc,spawnlet,spawnctl,spawnery-ca} '$WORK/payload/bin/'"
-dbox "make images && docker save spawnery/sidecar:dev spawnery/agent:dev -o '$WORK/payload/images.tar'" || warn "image build failed"
+# Images: docker runs on the HOST here, not in the dev-spawnery distrobox (the distrobox user can't
+# reach /var/run/docker.sock, owned by group 985). Build on the host if `make` is present, then save
+# the (host-side) images into the payload for containerd import during provisioning.
+command -v make >/dev/null 2>&1 && make images || warn "no host make — using pre-built spawnery/{sidecar,agent} images"
+docker save spawnery/sidecar:dev spawnery/agent:dev -o "$WORK/payload/images.tar" \
+  || warn "docker save failed (build the images first: make images) — golden will lack baked images"
 dbox "cd web && npm ci && VITE_CP_ORIGIN=https://placeholder.e2e.test VITE_AS_ORIGIN=https://placeholder.e2e.test npm run build" && cp -rf "$REPO_ROOT/web/dist" "$WORK/payload/web-dist" || warn "web build failed (non-fatal; roll.sh rebuilds per run)"
 cp -rf "$REPO_ROOT/config/." "$WORK/payload/config/"
 cp -rf "$REPO_ROOT/examples" "$WORK/payload/examples"

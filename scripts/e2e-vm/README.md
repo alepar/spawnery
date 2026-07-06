@@ -4,11 +4,11 @@ Spin up a **disposable libvirt/QEMU VM** running the whole spawnery stack in **p
 (runsc/systrap node + CP + AS + web), roll the branch's fresh code in, and run the real
 `acceptance/` suite against it. Design: `docs/superpowers/specs/2026-07-03-prod-stack-vm-e2e-harness-design.md`.
 
-> **STATUS: first-draft orchestration, NOT yet validated on a host.** These scripts were written
-> without a live libvirt/KVM host to test against (a sandbox has no `/dev/kvm`/root). Expect to
-> iterate on the host. The **golden-image builder (`build-base.sh`) is now a first draft too** — the
-> system provisioning (containerd/runsc/CNI/pg/Caddy/PKI) is concrete, but the spawnery **systemd env
-> must be reconciled with the `Justfile`** on the host (search `RECONCILE` in `provision/provision.sh`).
+> **STATUS: validated on a host.** The full stack was brought up live and the `acceptance/` suite run
+> against it; the reconcile is folded into `provision/provision.sh` (see `provision/RECONCILE-NOTES.md`).
+> **See [`docs/e2e-vm-testing.md`](../../docs/e2e-vm-testing.md) for the how-to** (run, deploy fresh
+> binaries, rebuild the golden, coverage). NOTE: docker runs on the **host** here, not the distrobox —
+> `build-base.sh`/`run.sh` save images host-side.
 
 ## The one command
 

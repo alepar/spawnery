@@ -42,8 +42,10 @@ dbox() { distrobox enter --root dev-spawnery -- bash -lc "cd '$REPO_ROOT' && $*"
 if [ "$BUILD" = 1 ]; then
   log "0/3 building fresh binaries + images + web …"
   dbox "make build bin/spawnery_cp && cp -f bin/spawnery_cp bin/authsvc bin/spawnlet bin/spawnctl '$STAGE/bin/'"
-  dbox "make images && docker save spawnery/sidecar:dev spawnery/agent:dev -o '$STAGE/images.tar'" \
-    || warn "image build/save failed — sidecar/agent will be STALE (baked) this run"
+  # docker runs on the HOST, not the distrobox (socket group 985 unreachable inside) — build+save here.
+  command -v make >/dev/null 2>&1 && make images || warn "no host make — using pre-built spawnery/{sidecar,agent} images"
+  docker save spawnery/sidecar:dev spawnery/agent:dev -o "$STAGE/images.tar" \
+    || warn "docker save failed — sidecar/agent will be STALE (baked) this run"
   dbox "cd web && npm ci && VITE_CP_ORIGIN='$WEB_ORIGIN' VITE_AS_ORIGIN='$WEB_ORIGIN' npm run build && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'" \
     || warn "web build failed — SPA will be STALE this run"
   cp -rf "$REPO_ROOT/config/." "$STAGE/config/" 2>/dev/null || true

@@ -138,6 +138,14 @@ just setup          # one-time: mprocs, web deps, playwright chromium
 
 `.env` with `OPENROUTER_API_KEY` is auto-loaded by Just; container images need Docker/Podman.
 
+**Real end-to-end testing against a prod-stack VM:** the highest-fidelity lane runs the whole stack
+in **prod mode** (runsc/gVisor node under enforced auth + CP + AS + web + Postgres + Caddy TLS) in a
+disposable libvirt VM and points the `acceptance/` suite at it — exercising real A4 intent-signing,
+mTLS node registration, and runsc isolation. One command:
+`GOLDEN_IMAGE=… scripts/e2e-vm/run.sh --profile fake`. See **[docs/e2e-vm-testing.md](docs/e2e-vm-testing.md)**
+for how to run it, deploy fresh binaries to a running VM, rebuild the golden image, and what the suite
+verifies (`scripts/e2e-vm/README.md` has per-script detail).
+
 **Keep compiled one-off binaries in `/bin/`.** Never leave a build output (`go build` of a
 `cmd/` target, an ad-hoc `spawnery_cp`/`spawnlet`/`spawnctl`, etc.) at the repo root — `make`
 already targets `/bin/`, and root-level binaries are gitignored as stray outputs. If you build by
