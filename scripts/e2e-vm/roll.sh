@@ -43,13 +43,22 @@ vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/* /usr/local/bin/ \
   && sudo systemctl restart spawnery-authsvc spawnery-cp spawnery-node caddy'
 
 # ---- wait app-ready — gate ALL the pieces (roast gap), not just AS /healthz ----
+# AS and CP bind 127.0.0.1 (Caddy fronts them on :443), so probe localhost INSIDE the VM over ssh —
+# a wait_tcp on the external IP only ever sees Caddy's :443, never 8090/8080.
 log "waiting for app-ready …"
-# (a) AS health
-wait_tcp "$IP" 8090 60 && vm_ssh "$IP" 'curl -fsS http://127.0.0.1:8090/healthz >/dev/null' \
-  || die "AS /healthz not ready"
-# (b) CP up — in prod auth mode an anonymous Connect call returns Unauthenticated over HTTP 200/401;
-#     treat "HTTP responds at all" as up (liveness), not a 2xx.
-wait_tcp "$IP" 8080 60 || die "CP :8080 not listening"
+# (a) AS /healthz (127.0.0.1:8090)
+for i in $(seq 1 60); do
+  vm_ssh "$IP" 'curl -fsS --max-time 3 http://127.0.0.1:8090/healthz >/dev/null 2>&1' && break
+  [ "$i" = 60 ] && die "AS /healthz not ready"
+  sleep 1
+done
+# (b) CP listening on 127.0.0.1:8080 (prod auth returns Unauthenticated to anon calls — this is a
+#     liveness gate, not a 2xx check; node-list below proves it actually serves).
+for i in $(seq 1 60); do
+  vm_ssh "$IP" 'ss -ltn 2>/dev/null | grep -q 127.0.0.1:8080' && break
+  [ "$i" = 60 ] && die "CP :8080 not listening"
+  sleep 1
+done
 # (c) node re-registered with the CP over enforced mTLS — poll a CP-side node list via spawnctl on the guest
 for i in $(seq 1 60); do
   if vm_ssh "$IP" 'spawnctl -cp http://127.0.0.1:8080 node-list 2>/dev/null | grep -q .'; then break; fi
