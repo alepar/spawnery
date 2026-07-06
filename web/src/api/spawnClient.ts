@@ -14,7 +14,9 @@ import { getAccessToken, useSessionStore } from "@/auth/session";
 import { CP_ORIGIN } from "@/config/endpoints";
 import { tryRefresh } from "./connect";
 
-const auth: AuthProvider = {
+// Exported for unit testing the login-required parity with unary() (api/connect.ts);
+// not otherwise consumed outside this module.
+export const auth: AuthProvider = {
   getBearer: async () => getAccessToken(),
   refresh: async () => {
     const refreshed = await tryRefresh();
