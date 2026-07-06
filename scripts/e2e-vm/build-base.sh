@@ -72,9 +72,12 @@ E2E_SSH_USER=build vm_scp "$WORK/payload/." "$IP" 'payload/'
 E2E_SSH_USER=build vm_ssh "$IP" 'chmod +x ~/payload/provision.sh ~/payload/gen-pki.sh && PAYLOAD=$HOME/payload sudo -E ~/payload/provision.sh'
 
 log "pulling CA cert out for host trust…"
-scp -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  -i "$E2E_SSH_KEY" "build@$IP:ca.crt" "${OUT%.qcow2}-ca.crt" 2>/dev/null \
-  || warn "could not fetch ca.crt (check gen-pki output)"
+# Read the root CA directly over ssh+sudo (robust — no dependency on the /home/build/ca.crt copy or
+# scp perms/timing). The build user has NOPASSWD sudo (cloud-init).
+ssh -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  -i "$E2E_SSH_KEY" "build@$IP" 'sudo cat /etc/spawnery/pki/root.pem' > "${OUT%.qcow2}-ca.crt" 2>/dev/null
+if [ -s "${OUT%.qcow2}-ca.crt" ]; then log "CA written to ${OUT%.qcow2}-ca.crt"; else
+  rm -f "${OUT%.qcow2}-ca.crt"; warn "could not fetch CA (check gen-pki output)"; fi
 
 log "clean shutdown + finalize golden…"
 E2E_SSH_USER=build vm_ssh "$IP" 'sudo cloud-init clean --logs && sudo shutdown -h now' || true
