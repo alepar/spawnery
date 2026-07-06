@@ -10,8 +10,12 @@ bin/%: $(GO_SRCS) | bin
 
 # Proto codegen — stamp keyed on .proto sources + buf config.
 gen: .make/gen
-.make/gen: $(shell find proto -name '*.proto') buf.gen.yaml buf.yaml | .make
-	buf generate && touch $@
+.make/gen: $(shell find proto -name '*.proto') buf.gen.yaml sdk/ts/buf.gen.yaml buf.yaml | .make
+	buf generate
+	@if [ -x sdk/ts/node_modules/.bin/protoc-gen-es ]; then \
+		echo "[gen] TS (protoc-gen-es) -> sdk/ts/src/gen"; buf generate --template sdk/ts/buf.gen.yaml; \
+	else echo "[gen] skip TS SDK codegen (run: npm install -w @spawnery/client)"; fi
+	touch $@
 
 # Image stamps — rebuild an image only when its build context changes. Each image's deploy/
 # assets (launcher, entrypoints, configs) are COPY'd into it, so they are stamp deps too —

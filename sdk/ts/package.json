@@ -4,12 +4,20 @@
   "private": true,
   "type": "module",
   "description": "Spawnery client SDK (Connect transport + A4 intent signing), environment-neutral (browser + Node).",
-  "engines": {
-    "node": ">=20"
+  "engines": { "node": ">=20" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
+  "files": ["dist"],
   "scripts": {
-    "gen": "buf generate --template buf.gen.yaml",
-    "test": "node --test"
+    "gen": "cd ../.. && buf generate --template sdk/ts/buf.gen.yaml",
+    "build": "tsc",
+    "test": "node --import tsx --test spike/**/*.test.ts"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.2.3",
