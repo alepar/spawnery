@@ -153,8 +153,11 @@ function b64ToBytes(s: string): Uint8Array {
 }
 
 /** enumToWire converts a protobuf-es numeric enum value back to its full wire name (protobuf-es
- * strips the enum's own SCREAMING_SNAKE prefix off member names — see cpv1.SpawnStatus — so this
- * re-adds it), matching the old Connect-JSON ApiDriver's string enums exactly. */
+ * strips the enum's own SCREAMING_SNAKE prefix off member names — see cpv1.ProfileEntryKind — so
+ * this re-adds it), matching the old Connect-JSON ApiDriver's string enums exactly. NOTE:
+ * SpawnStatus is the one enum that must NOT go through this — the driver's SpawnStatus type
+ * (drivers/types.ts) and every comparison site expect the bare, unprefixed member name (matching
+ * the old driver's stripStatusPrefix), so toSpawnSummary indexes cpv1.SpawnStatus directly. */
 function enumToWire(enumObj: Record<number, string>, prefix: string, value: number): string {
   return `${prefix}_${enumObj[value]}`;
 }
@@ -175,7 +178,7 @@ function toSpawnSummary(s: cpv1.SpawnSummary): SpawnSummary {
     appId: s.appId,
     appVersion: s.appVersion,
     model: s.model,
-    status: enumToWire(cpv1.SpawnStatus, "SPAWN_STATUS", s.status) as SpawnStatus,
+    status: cpv1.SpawnStatus[s.status] as SpawnStatus,
     createdAt: String(s.createdAt),
     lastUsedAt: String(s.lastUsedAt),
     name: s.name,
