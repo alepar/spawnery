@@ -5,11 +5,9 @@ import (
 	"fmt"
 	"log"
 
-	"connectrpc.com/connect"
 	"github.com/urfave/cli/v3"
 
-	cpv1 "spawnery/gen/cp/v1"
-	"spawnery/gen/cp/v1/cpv1connect"
+	"spawnery/internal/client"
 )
 
 // formatSetModelResult renders the CP's SetSpawnModel response: the active model plus whether the
@@ -25,16 +23,12 @@ func formatSetModelResult(model string, applied bool) string {
 // it applied to the live agent. Mirrors list.go's listSpawns: builds the gRPC client with the token
 // source interceptor and log.Fatalf on RPC error.
 func setSpawnModel(cpAddr string, src *cpTokenSource, spawnID, model string) (string, bool) {
-	client := cpv1connect.NewSpawnServiceClient(connectClient(), cpAddr,
-		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
-	resp, err := client.SetSpawnModel(context.Background(), connect.NewRequest(&cpv1.SetSpawnModelRequest{
-		SpawnId: spawnID,
-		Model:   model,
-	}))
+	sdk := client.New(cpAddr, src, nil)
+	activeModel, applied, err := sdk.SetModel(context.Background(), spawnID, model)
 	if err != nil {
 		log.Fatalf("set model: %v", err)
 	}
-	return resp.Msg.GetModel(), resp.Msg.GetApplied()
+	return activeModel, applied
 }
 
 // setModelCmd sets the inference model of a running spawn: persists it on the CP and (best-effort)

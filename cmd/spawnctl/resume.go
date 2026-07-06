@@ -1,19 +1,17 @@
 // resume.go — `spawnctl resume <spawn-id>`: resume a suspended spawn in place.
 //
 // Resume is async + intent-gated exactly like create: the CP blocks ResumeSpawn until the client
-// submits a signed intent (A4 two-phase sign-after-resolve [AC1][AM12]). provisionWithIntent runs
-// pollAndSign concurrently with the blocking RPC. Unlike `move`, this stays on the same node and
-// requires no owner-sealed keys — it restores the spawn's mounts from the node-local journal.
+// submits a signed intent (A4 two-phase sign-after-resolve [AC1][AM12]). internal/client's Resume
+// runs pollAndSign concurrently with the blocking RPC. Unlike `move`, this stays on the same node
+// and requires no owner-sealed keys — it restores the spawn's mounts from the node-local journal.
 package main
 
 import (
 	"context"
 	"fmt"
+	"log"
 
-	"connectrpc.com/connect"
-
-	cpv1 "spawnery/gen/cp/v1"
-	"spawnery/gen/cp/v1/cpv1connect"
+	"spawnery/internal/client"
 
 	"github.com/urfave/cli/v3"
 )
@@ -38,14 +36,12 @@ func resumeCmd() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 			src := buildTokenSource(dir, c.String("token"), connectClient())
-			client := cpv1connect.NewSpawnServiceClient(connectClient(), c.String("cp"),
-				connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
-			// ResumeSpawn blocks at the CP awaiting the signed intent; provisionWithIntent drives
-			// pollAndSign concurrently and retries once on a retryable NACK.
-			if err := provisionWithIntent(ctx, client, spawnID, intentParams{}, func(rpcCtx context.Context) error {
-				_, rpcErr := client.ResumeSpawn(rpcCtx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: spawnID}))
-				return rpcErr
-			}); err != nil {
+			sdk := client.New(c.String("cp"), src, nil, client.WithWarnHandler(func(err error) {
+				log.Printf("%v", err)
+			}))
+			// ResumeSpawn blocks at the CP awaiting the signed intent; Resume drives pollAndSign
+			// concurrently and retries once on a retryable NACK.
+			if err := sdk.Resume(ctx, spawnID); err != nil {
 				return cli.Exit("resume failed: "+err.Error(), 1)
 			}
 			fmt.Fprintf(c.Writer, "resumed %s\n", spawnID)

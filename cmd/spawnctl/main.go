@@ -3,9 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -15,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"time"
 
 	"connectrpc.com/connect"
 	"github.com/knadh/koanf/providers/confmap"
@@ -23,19 +19,15 @@ import (
 	"golang.org/x/net/http2"
 
 	configfiles "spawnery/config"
-	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 	spawnv1 "spawnery/gen/spawn/v1"
 	"spawnery/gen/spawn/v1/spawnv1connect"
 	"spawnery/internal/acp"
+	"spawnery/internal/client"
 	"spawnery/internal/config"
-	"spawnery/internal/intent"
 	"spawnery/internal/manifest"
 )
-
-// Ensure cpv1connect.SpawnServiceClient satisfies the narrow intentClient interface.
-var _ intentClient = (cpv1connect.SpawnServiceClient)(nil)
 
 func main() {
 	cmd := &cli.Command{
@@ -216,26 +208,26 @@ func runStandalone(ctx context.Context, addr, appPath, model string) {
 
 // runCP drives the agent through the control plane via the cp.v1 service.
 func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*cpv1.MountBinding, src *cpTokenSource, detach bool) {
-	client := cpv1connect.NewSpawnServiceClient(connectClient(), addr,
-		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
+	cli := client.New(addr, src, nil, client.WithWarnHandler(func(err error) {
+		log.Printf("%v", err)
+	}))
 
-	cs, err := client.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
+	id, err := cli.CreateSpawn(ctx, &cpv1.CreateSpawnRequest{
 		AppId:     appID,
 		Model:     model,
 		ProfileId: profileID,
 		Mounts:    mounts,
-	}))
+	})
 	if err != nil {
 		log.Fatalf("createSpawn: %v", err)
 	}
-	id := cs.Msg.SpawnId
 	fmt.Println("spawn:", id)
 
 	// A4 two-phase sign-after-resolve [AC1][AM12]: start the poll-and-sign loop concurrently with
-	// waitActiveCP. The CP blocks the spawn in 'starting' until the client submits a signed intent;
-	// pollAndSign polls until the CP registers the pending intent, then builds and submits it.
-	// If the CP does not have the intent flow enabled (old CP or intentEnabled=false), pollAndSign
-	// polls until its context is cancelled when waitActiveCP returns — the spawn becomes active
+	// WaitActive. The CP blocks the spawn in 'starting' until the client submits a signed intent;
+	// SignProvision polls until the CP registers the pending intent, then builds and submits it.
+	// If the CP does not have the intent flow enabled (old CP or intentEnabled=false), it
+	// polls until its context is cancelled when WaitActive returns — the spawn becomes active
 	// without it and the context.Canceled error is suppressed.
 	pollCtx, cancelPoll := context.WithCancel(ctx)
 	defer cancelPoll()
@@ -245,16 +237,27 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 		// apps). The client cannot validate a ref it never specified, so the AM1 app_ref gate is
 		// skipped; the model correspondence check still runs, and the signed intent carries the
 		// CP-resolved app_ref verbatim.
-		if err := pollAndSign(pollCtx, client, id, intentParams{Model: model}); err != nil && !errors.Is(err, context.Canceled) {
+		if err := cli.SignProvision(pollCtx, id, client.IntentParams{Model: model}); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("pollAndSign: %v (spawn may still become active if CP intent flow is disabled)", err)
 		}
 	}()
 
 	// CreateSpawn is async: the CP binds the spawn to its node only once the node reports ACTIVE.
 	// Wait for that before attaching, else the session races provisioning and gets "unknown spawn".
-	spawnGen, err := waitActiveCP(ctx, client, id, os.Stdout)
+	var lastLine string
+	onPoll := func(sp *cpv1.SpawnSummary) {
+		if line, changed := nextProgressLine(lastLine, sp); changed {
+			fmt.Fprintln(os.Stdout, line)
+			lastLine = line
+		}
+	}
+	spawnGen, err := cli.WaitActive(ctx, id, onPoll)
 	cancelPoll()
 	if err != nil {
+		var te *client.TerminalError
+		if errors.As(err, &te) {
+			log.Fatal(provisionFailure(te.Summary))
+		}
 		log.Fatal(err)
 	}
 
@@ -271,90 +274,25 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 	// so the node can verify correspondence. A fresh ephemeral key is used; the CP mints the
 	// aud=node token in dev mode when access_token is empty.
 	bindFrame := &cpv1.Frame{SpawnId: id}
-	if sessionKey, skErr := ecdsa.GenerateKey(elliptic.P256(), rand.Reader); skErr == nil {
-		var jtiBytes [16]byte
-		if _, rErr := rand.Read(jtiBytes[:]); rErr == nil {
-			body := &authv1.IntentBody{
-				Jti:        fmt.Sprintf("%x", jtiBytes),
-				IssuedAt:   time.Now().Unix(),
-				SpawnId:    id,
-				Generation: spawnGen,
-				SessionId:  "0",
-				Op:         string(intent.OpSessionOpen),
-			}
-			if si, bErr := intent.Build(intent.OpSessionOpen, body, sessionKey); bErr == nil {
-				bindFrame.SessionAuth = &authv1.AuthEnvelope{Intent: si}
-			}
-		}
+	if env, err := client.BuildSessionOpenIntent(id, spawnGen); err == nil {
+		bindFrame.SessionAuth = env
+	} else {
+		log.Printf("bind: session-open intent: %v (proceeding without session auth)", err)
 	}
 
-	stream := client.Session(ctx)
+	stream := cli.Session(ctx)
 	if err := stream.Send(bindFrame); err != nil { // bind frame (carries the spawn id + session-open auth)
 		log.Fatalf("bind: %v", err)
 	}
 
-	pr, pw := io.Pipe()
-	go func() {
-		for {
-			f, err := stream.Receive()
-			if err != nil {
-				pw.CloseWithError(err)
-				return
-			}
-			if _, werr := pw.Write(f.Data); werr != nil {
-				return
-			}
-		}
-	}()
-
-	sendW := writerFunc(func(b []byte) (int, error) {
-		if err := stream.Send(&cpv1.Frame{SpawnId: id, Data: b}); err != nil {
-			return 0, err
-		}
-		return len(b), nil
-	})
+	pr, sendW := cli.SessionStream(stream, id)
 
 	// The CP relays the frame protocol (not raw ACP): the node's pump does the ACP handshake and
 	// exposes {"kind":"prompt"} in / user|agent|turn frames out. Drive it like the web client.
 	driveFrames(pr, sendW)
 
 	_ = stream.CloseRequest()
-	_, _ = client.StopSpawn(ctx, connect.NewRequest(&cpv1.StopSpawnRequest{SpawnId: id}))
-}
-
-// waitActiveCP polls ListSpawns until the spawn is ACTIVE (router-bound), failing fast on a terminal
-// status. Prints provisioning step transitions to w (deduped: only changed lines). Returns the
-// spawn's live episode generation for use in A4 session-open signing [AM11].
-// CreateSpawn returns in 'starting' and provisions asynchronously on the node.
-func waitActiveCP(ctx context.Context, client cpv1connect.SpawnServiceClient, id string, w io.Writer) (uint64, error) {
-	deadline := time.Now().Add(60 * time.Second)
-	var lastLine string
-	for {
-		ls, lsErr := client.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
-		if lsErr != nil {
-			return 0, fmt.Errorf("listSpawns: %w", lsErr)
-		}
-		for _, sp := range ls.Msg.Spawns {
-			if sp.SpawnId != id {
-				continue
-			}
-			if line, changed := nextProgressLine(lastLine, sp); changed {
-				fmt.Fprintln(w, line)
-				lastLine = line
-			}
-			switch sp.Status {
-			case cpv1.SpawnStatus_SPAWN_STATUS_ACTIVE:
-				return sp.Generation, nil
-			case cpv1.SpawnStatus_SPAWN_STATUS_ERROR, cpv1.SpawnStatus_SPAWN_STATUS_DELETED,
-				cpv1.SpawnStatus_SPAWN_STATUS_UNREACHABLE:
-				return 0, errors.New(provisionFailure(sp)) //nolint:goerr113
-			}
-		}
-		if time.Now().After(deadline) {
-			return 0, fmt.Errorf("spawn %s did not reach ACTIVE within 60s", id)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	_ = cli.Stop(ctx, id)
 }
 
 // driveFrames is the CP-lane interactive loop over the frame protocol: it sends each stdin line as a

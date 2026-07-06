@@ -11,21 +11,19 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"connectrpc.com/connect"
 	"github.com/urfave/cli/v3"
 	cpv1 "spawnery/gen/cp/v1"
-	"spawnery/gen/cp/v1/cpv1connect"
+	"spawnery/internal/client"
 )
 
 // listSpawns fetches the caller's spawns from the CP (the token source scopes them to the owner).
 func listSpawns(cpAddr string, src *cpTokenSource) []*cpv1.SpawnSummary {
-	client := cpv1connect.NewSpawnServiceClient(connectClient(), cpAddr,
-		connect.WithGRPC(), connect.WithInterceptors(tokenSourceInterceptor(src)))
-	resp, err := client.ListSpawns(context.Background(), connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+	sdk := client.New(cpAddr, src, nil)
+	sums, err := sdk.List(context.Background())
 	if err != nil {
 		log.Fatalf("list spawns: %v", err)
 	}
-	return resp.Msg.GetSpawns()
+	return sums
 }
 
 func spawnStatus(s *cpv1.SpawnSummary) string {
