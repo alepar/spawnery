@@ -2,7 +2,8 @@
  * Session access-token wire format (auth-identity design §3 [MC1]).
  *
  * Wire: base64url(body_bytes) "." base64url(sig_bytes) — RawURLEncoding (no padding).
- * Body = proto3 SessionTokenBody. The SPA only READS the body; the AS signs it (Ed25519).
+ * Body = proto3 SessionTokenBody, decoded with protobuf-es (via @spawnery/client's generated
+ * gen/auth/v1/auth_pb). The SPA only READS the body; the AS signs it (Ed25519).
  * The SPA does NOT verify the Ed25519 sig — the CP verifies on every RPC (MC2).
  *
  * Fields read by the SPA:
@@ -12,27 +13,10 @@
  *   f7 session_key_hash (bytes)   — cnf check against local SPKI
  */
 
-import { readFields } from "./protobuf";
+import { fromBinary } from "@bufbuild/protobuf";
+import { authv1, toBase64Url, fromBase64Url } from "@spawnery/client";
 
-// ── Base64url helpers (unpadded, RawURLEncoding) ──────────────────────────────
-
-/** Decode a RawURLEncoding base64url string to Uint8Array (no padding required). */
-export function fromBase64Url(s: string): Uint8Array {
-  // Normalize: replace URL-safe chars and add padding.
-  const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-  const bin = atob(padded);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-/** Encode bytes to RawURLEncoding base64url (no padding). */
-export function toBase64Url(bytes: Uint8Array): string {
-  let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
-}
+export { toBase64Url, fromBase64Url };
 
 // ── Wire parsing ──────────────────────────────────────────────────────────────
 
@@ -65,32 +49,16 @@ export interface SessionTokenBodyDecoded {
 
 /**
  * decodeSessionTokenBody parses the proto3 body bytes into the fields the SPA uses.
- * Unrecognized fields are ignored.
+ * Unrecognized fields are ignored (protobuf-es fromBinary default behavior).
  */
 export function decodeSessionTokenBody(bodyBytes: Uint8Array): SessionTokenBodyDecoded {
-  const fields = readFields(bodyBytes);
-  let accountId = "";
-  let handle = "";
-  let expiresAt = 0n;
-  let sessionKeyHash = new Uint8Array(0);
-
-  for (const f of fields) {
-    switch (f.fieldNumber) {
-      case 1: // account_id (string)
-        if (f.bytes) accountId = new TextDecoder().decode(f.bytes);
-        break;
-      case 2: // handle (string)
-        if (f.bytes) handle = new TextDecoder().decode(f.bytes);
-        break;
-      case 6: // expires_at (int64)
-        if (f.varint !== undefined) expiresAt = f.varint;
-        break;
-      case 7: // session_key_hash (bytes)
-        if (f.bytes) sessionKeyHash = f.bytes.slice();
-        break;
-    }
-  }
-  return { accountId, handle, expiresAt, sessionKeyHash };
+  const body = fromBinary(authv1.SessionTokenBodySchema, bodyBytes);
+  return {
+    accountId: body.accountId,
+    handle: body.handle,
+    expiresAt: body.expiresAt,
+    sessionKeyHash: body.sessionKeyHash,
+  };
 }
 
 /** parseAccessToken is a convenience wrapper over parseTokenWire + decodeSessionTokenBody. */

@@ -13,17 +13,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { refreshAccessToken, computeRefreshDelay } from "./refresh";
 import { MemoryKeyStore } from "./keystore";
 import { getOrCreateSessionKey, exportSpkiDer, sessionKeyHash } from "./keypair";
-import { ProtoWriter } from "./protobuf";
+import { create, toBinary } from "@bufbuild/protobuf";
+import { authv1 } from "@spawnery/client";
 import { toBase64Url } from "./token";
 
 // Build a minimal wire token with a given session_key_hash
 function buildWireToken(spkiHash: Uint8Array, expiresAt: bigint): string {
-  const w = new ProtoWriter();
-  w.writeBytes(1, "account-123");
-  w.writeBytes(2, "handle");
-  w.writeVarint(6, expiresAt);
-  w.writeBytes(7, spkiHash);
-  const body = w.finish();
+  const body = toBinary(authv1.SessionTokenBodySchema, create(authv1.SessionTokenBodySchema, {
+    accountId: "account-123",
+    handle: "handle",
+    expiresAt,
+    sessionKeyHash: spkiHash,
+  }));
   const fakeSig = new Uint8Array(64);
   return toBase64Url(body) + "." + toBase64Url(fakeSig);
 }

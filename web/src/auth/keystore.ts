@@ -1,6 +1,10 @@
 /**
  * KeyStore abstraction for the session keypair (ECDSA P-256, non-extractable).
  *
+ * The KeyStore/SessionKeyPair interfaces are defined by @spawnery/client (the SDK signs with
+ * whatever keypair a KeyStore hands it); the concrete IndexedDB and in-memory implementations
+ * are browser/test-side concerns that stay here.
+ *
  * Keeps the session key in a SEPARATE object store from the device key
  * (internal/keys/device.ts uses "spawnery-device-keys"). This way a session-key
  * rotation never touches device keys and vice versa.
@@ -8,23 +12,14 @@
  * The in-memory implementation is exported so unit tests never touch real IndexedDB
  * (structured-clone of non-extractable CryptoKey is unreliable in Node; keep fakes).
  */
+import type { KeyStore, SessionKeyPair } from "@spawnery/client";
+export type { KeyStore, SessionKeyPair } from "@spawnery/client";
 
 const IDB_DB_NAME = "spawnery-auth";
 const IDB_STORE = "session-key";
 const IDB_VERSION = 1;
 const KEY_PRIVATE = "private";
 const KEY_PUBLIC = "public";
-
-export interface SessionKeyPair {
-  privateKey: CryptoKey;
-  publicKey: CryptoKey;
-}
-
-export interface KeyStore {
-  get(): Promise<SessionKeyPair | null>;
-  put(kp: SessionKeyPair): Promise<void>;
-  delete(): Promise<void>;
-}
 
 // ── IndexedDB implementation ──────────────────────────────────────────────────
 

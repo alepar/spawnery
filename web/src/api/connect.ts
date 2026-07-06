@@ -20,14 +20,14 @@ export async function unary<T>(method: string, body: unknown): Promise<T> {
 
   // On 401 in auth-enabled mode: try one silent refresh + retry.
   if (res.status === 401 && authEnabled()) {
-    const refreshed = await _tryRefresh();
+    const refreshed = await tryRefresh();
     if (refreshed) {
       const newToken = getAccessToken();
       const retryRes = await _doUnary(method, body, newToken);
       if (!retryRes.ok) throw new Error(`${method} failed: ${retryRes.status} ${await retryRes.text()}`);
       return (await retryRes.json()) as T;
     }
-    // Refresh failed → set login-required, but only if _tryRefresh hasn't already set a
+    // Refresh failed → set login-required, but only if tryRefresh hasn't already set a
     // more specific status (cnf-mismatch or key-lost). Those drive distinct recovery UX
     // in LoginView (spec §5) and must not be clobbered by the generic catch-all.
     const s = useSessionStore.getState();
@@ -53,8 +53,12 @@ async function _doUnary(method: string, body: unknown, token: string): Promise<R
   });
 }
 
-/** Try a silent refresh; returns true on success, false on failure. */
-async function _tryRefresh(): Promise<boolean> {
+/**
+ * Try a silent refresh; returns true on success, false on failure.
+ * Exported so spawnClient.ts's AuthProvider.refresh (for the generated SpawnService client)
+ * shares this logic rather than duplicating it.
+ */
+export async function tryRefresh(): Promise<boolean> {
   try {
     const session = useSessionStore.getState();
     const store = session.keyStore;

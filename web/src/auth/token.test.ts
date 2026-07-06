@@ -8,7 +8,8 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { ProtoWriter } from "./protobuf";
+import { create, toBinary } from "@bufbuild/protobuf";
+import { authv1 } from "@spawnery/client";
 import { parseTokenWire, decodeSessionTokenBody, parseAccessToken, fromBase64Url, toBase64Url } from "./token";
 
 // Build a fixture token body (no real sig needed — SPA never verifies sig).
@@ -18,12 +19,13 @@ function buildTokenBody(opts: {
   expiresAt?: bigint;
   sessionKeyHash?: Uint8Array;
 }): Uint8Array {
-  const w = new ProtoWriter();
-  if (opts.accountId) w.writeBytes(1, opts.accountId);
-  if (opts.handle) w.writeBytes(2, opts.handle);
-  if (opts.expiresAt !== undefined) w.writeVarint(6, opts.expiresAt);
-  if (opts.sessionKeyHash) w.writeBytes(7, opts.sessionKeyHash);
-  return w.finish();
+  const body = create(authv1.SessionTokenBodySchema, {
+    accountId: opts.accountId ?? "",
+    handle: opts.handle ?? "",
+    expiresAt: opts.expiresAt ?? 0n,
+    sessionKeyHash: opts.sessionKeyHash ?? new Uint8Array(0),
+  });
+  return toBinary(authv1.SessionTokenBodySchema, body);
 }
 
 function makeWireToken(bodyBytes: Uint8Array): string {

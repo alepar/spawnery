@@ -5,8 +5,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useSessionStore, authEnabled, DEV_TOKEN, RTH_STORAGE_KEY } from "./session";
 import { MemoryKeyStore } from "./keystore";
-import { ProtoWriter } from "./protobuf";
+import { create, toBinary } from "@bufbuild/protobuf";
+import { authv1 } from "@spawnery/client";
 import { toBase64Url } from "./token";
+
+// Build a fixture SessionTokenBody wire token (no real sig needed — SPA never verifies sig).
+function buildTokenBodyBytes(opts: { accountId: string; handle: string; expiresAt: bigint }): Uint8Array {
+  return toBinary(authv1.SessionTokenBodySchema, create(authv1.SessionTokenBodySchema, opts));
+}
 
 // Reset zustand state and localStorage between tests
 beforeEach(() => {
@@ -77,11 +83,7 @@ describe("getAccessToken", () => {
 describe("setToken", () => {
   it("sets status to authed and parses account info", () => {
     // Build a minimal wire token with known account_id and handle.
-    const w = new ProtoWriter();
-    w.writeBytes(1, "acc-test");
-    w.writeBytes(2, "testuser");
-    w.writeVarint(6, 1800000000n);
-    const body = w.finish();
+    const body = buildTokenBodyBytes({ accountId: "acc-test", handle: "testuser", expiresAt: 1800000000n });
     const wire = toBase64Url(body) + "." + toBase64Url(new Uint8Array(64));
 
     useSessionStore.getState().setToken(wire, "rth123");
@@ -120,11 +122,7 @@ describe("proactive refresh — timer is wired", () => {
       // Build a token expiring ~15 min from fake-now so computeRefreshDelay returns > 0.
       const nowSec = Math.floor(Date.now() / 1000);
       const expiresAt = BigInt(nowSec + 15 * 60);
-      const w = new ProtoWriter();
-      w.writeBytes(1, "acc");
-      w.writeBytes(2, "h");
-      w.writeVarint(6, expiresAt);
-      const body = w.finish();
+      const body = buildTokenBodyBytes({ accountId: "acc", handle: "h", expiresAt });
       const wire = toBase64Url(body) + "." + toBase64Url(new Uint8Array(64));
 
       useSessionStore.getState().setToken(wire, "rth-abc");

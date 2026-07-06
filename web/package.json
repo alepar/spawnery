@@ -13,6 +13,10 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@bufbuild/protobuf": "^2.2.3",
+    "@connectrpc/connect": "^2.0.0",
+    "@connectrpc/connect-web": "^2.0.0",
+    "@spawnery/client": "*",
     "@fontsource/cascadia-code": "^5.2.3",
     "@fontsource/fira-code": "^5.2.7",
     "@fontsource/ibm-plex-mono": "^5.2.7",

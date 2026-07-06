@@ -37,7 +37,15 @@ export default defineConfig({
       },
     },
   ],
-  resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+      // Alias-to-source (not the built dist/, which is gitignored and unbuilt in a fresh
+      // checkout): Vite resolves the SDK's .js-suffixed relative imports to their .ts sources.
+      // Only prerequisite is `make gen` having emitted sdk/ts/src/gen.
+      "@spawnery/client": path.resolve(__dirname, "../sdk/ts/src/index.ts"),
+    },
+  },
   server: {
     host: true,
     https: devHttps,
