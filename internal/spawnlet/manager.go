@@ -650,38 +650,80 @@ func (m *Manager) ExecRun(ctx context.Context, spawnID string, inner []string) e
 // the given writers as they arrive, and returns the inner command's exit code. It is the user-facing
 // `spawnctl exec` path (sp-8v39). Unlike ExecRun (buffered, error-on-nonzero), a non-zero command exit
 // is returned as exitCode with a nil error; err is reserved for failures to LAUNCH the exec — an
-// unknown spawn / no agent container, or the runtime CLI (docker/crictl) failing to start. Both
-// `docker exec` and `crictl exec` propagate the inner process's exit code as their own and demux
-// stdout/stderr when no TTY is requested (the non-interactive prefix omits -it), so this is a thin
-// wrapper. NOTE: cancelling ctx kills the docker/crictl client, which may leave the in-container
-// process orphaned until the spawn stops (documented limitation).
+// unknown spawn / no agent container, or the runtime CLI (docker/crictl) failing to start. `docker
+// exec` propagates the inner exit code and demuxes stdout/stderr natively; `crictl exec` (runsc/CRI
+// lane) demuxes but does NOT propagate the code (see runExecStream's parseCrictlExit). NOTE:
+// cancelling ctx kills the docker/crictl client, which may leave the in-container process orphaned
+// until the spawn stops (documented limitation).
 func (m *Manager) ExecStream(ctx context.Context, spawnID string, inner []string, stdout, stderr io.Writer) (int, error) {
 	sp, ok := m.store.Get(spawnID)
 	if !ok || sp.AgentID == "" {
 		return 1, fmt.Errorf("spawn %s has no agent container", spawnID)
 	}
-	argv := execArgv(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime), sp.AgentID, inner)
-	return runExecStream(ctx, argv, stdout, stderr)
+	prefix := ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime)
+	argv := execArgv(prefix, sp.AgentID, inner)
+	return runExecStream(ctx, argv, stdout, stderr, len(prefix) > 0 && prefix[0] == "crictl")
 }
 
 // runExecStream runs argv to completion, streaming its stdout/stderr to the given writers, and returns
 // the process's exit code. A non-zero exit is returned as the code with a nil error; err is reserved
 // for a failure to START the process (e.g. the runtime CLI is missing). Split out from ExecStream (the
 // container-resolution wrapper) so the exit-code/stream-demux logic is testable without a container.
-func runExecStream(ctx context.Context, argv []string, stdout, stderr io.Writer) (int, error) {
+//
+// parseCrictlExit: on the runsc/CRI lane the runtime CLI is `crictl`, which — unlike `docker exec` —
+// does NOT propagate the inner process's exit code as its own. It exits 1 for ANY non-zero inner
+// status and reports the real code only in a stderr line "command terminated with exit code N". When
+// set, we tee stderr and parse that line so `spawnctl exec` still propagates the true code.
+func runExecStream(ctx context.Context, argv []string, stdout, stderr io.Writer, parseCrictlExit bool) (int, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.Stdout = stdout
+	var errTail *bytes.Buffer
+	if parseCrictlExit {
+		errTail = &bytes.Buffer{}
+		cmd.Stderr = io.MultiWriter(stderr, errTail)
+	} else {
+		cmd.Stderr = stderr
+	}
 	if err := cmd.Start(); err != nil {
 		return 1, fmt.Errorf("exec %v: %w", argv, err)
 	}
 	if err := cmd.Wait(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
+			if parseCrictlExit {
+				if code, ok := parseCrictlExitCode(errTail.Bytes()); ok {
+					return code, nil // crictl's real inner exit code, parsed from its stderr line
+				}
+			}
 			return ee.ExitCode(), nil // command ran to completion with a non-zero status
 		}
 		return 1, fmt.Errorf("exec %v: %w", argv, err)
 	}
 	return 0, nil
+}
+
+// parseCrictlExitCode extracts N from crictl exec's "command terminated with exit code N" stderr line
+// — the only place cri-tools surfaces a non-zero inner exit code (it always exits 1 itself). Returns
+// (0, false) when the line is absent (so the caller falls back to crictl's own exit code).
+func parseCrictlExitCode(stderr []byte) (int, bool) {
+	const marker = "command terminated with exit code "
+	i := bytes.LastIndex(stderr, []byte(marker))
+	if i < 0 {
+		return 0, false
+	}
+	rest := stderr[i+len(marker):]
+	j := 0
+	for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+		j++
+	}
+	if j == 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(string(rest[:j]))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // AttachACPPort dials an additional acp session's in-pod ACP endpoint at podIP:port (sp-npxq.3),
