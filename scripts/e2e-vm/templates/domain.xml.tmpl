@@ -1,0 +1,45 @@
+<!-- Transient libvirt domain for one e2e run. Rendered by up.sh (envsubst).
+     Routable per-VM IP model: attached to the @@NET@@ NAT network so the guest gets its own
+     DHCP IP reachable from the host (and, with nss-libvirt, resolvable as <hostname>).
+     Backed by a per-run qcow2 overlay on the golden image, so state reverts every run. -->
+<domain type="kvm">
+  <name>@@DOMAIN@@</name>
+  <memory unit="MiB">@@MEM_MB@@</memory>
+  <vcpu>@@VCPUS@@</vcpu>
+  <os>
+    <type arch="x86_64" machine="q35">hvm</type>
+    <boot dev="hd"/>
+  </os>
+  <features><acpi/><apic/></features>
+  <cpu mode="host-passthrough"/>
+  <clock offset="utc"/>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <!-- per-run overlay (backing = golden); libvirt won't touch the golden image -->
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2"/>
+      <source file="@@OVERLAY@@"/>
+      <target dev="vda" bus="virtio"/>
+    </disk>
+    <!-- cloud-init seed (hostname + ssh key + per-run bootstrap), rendered per run -->
+    <disk type="file" device="cdrom">
+      <driver name="qemu" type="raw"/>
+      <source file="@@SEED_ISO@@"/>
+      <target dev="sda" bus="sata"/>
+      <readonly/>
+    </disk>
+    <interface type="network">
+      <source network="@@NET@@"/>
+      <model type="virtio"/>
+    </interface>
+    <serial type="pty"><target port="0"/></serial>
+    <console type="pty"><target type="serial" port="0"/></console>
+    <channel type="unix">
+      <target type="virtio" name="org.qemu.guest_agent.0"/>
+    </channel>
+    <graphics type="vnc" port="-1" autoport="yes"/>
+    <video><model type="virtio"/></video>
+    <memballoon model="virtio"/>
+    <rng model="virtio"><backend model="random">/dev/urandom</backend></rng>
+  </devices>
+</domain>
