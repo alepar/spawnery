@@ -302,6 +302,10 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 		authsvc.WithGitHubMinting(idStore, ghProvider),
 	}
 	if cpURL := strings.TrimSpace(cfg.CP.URL); cpURL != "" {
+		// Not internal/client (sp-lan2.5): the Go SDK forces gRPC + Bearer-token auth, but this
+		// server-to-server client speaks Connect protocol with a static X-Spawnery-AS-Secret
+		// header for RPCs (AuthorizeGitHubMint, SignalGitHubTokenRotated) off the SDK's curated
+		// surface. See docs/superpowers/specs/2026-07-06-client-sdk-signing-design.md follow-ups.
 		cpClient := cpv1connect.NewSpawnServiceClient(http.DefaultClient, cpURL,
 			connect.WithInterceptors(staticHeaderInterceptor{
 				name:  "X-Spawnery-AS-Secret",

@@ -95,3 +95,37 @@ merge-back), per CLAUDE.md.
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from
 the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+**2026-07-06 (sp-lan2.5, T4 e2e/authsvc):** "e2e tests + authsvc adopt `internal/client`" only
+holds for a narrow subset. Converted to the SDK: `internal/cp/e2e_test.go`
+(`TestCPEndToEndStub`) and `internal/cp/devstack_e2e_test.go` (`TestDevStackSpawnE2E`) — both
+self-contained, using only `CreateSpawn`/`WaitActive`/`List`/`Session`/`Stop`. Left raw, with
+evidence:
+- The other ~7 e2e-tagged CP test files (`fork`, `skill_ingest`, `tmux`, `profile_mcp_loadproof`,
+  `acp`, `lifecycle`, `datafs_perms`) call RPCs off the SDK's curated surface (`CreateProfile`,
+  `ForkSpawn`+response, `DeliverSecrets`, `GetSpawnNodeKey`, …) or share the raw-typed helper web
+  (`waitActive`, `findSpawnGeneration`, `h2cClient`) with tests that need those RPCs — converting
+  one entangled file would force duplicate SDK-typed helper variants instead of reducing them.
+- `cmd/authsvc/main.go`'s CP client authenticates with a static `X-Spawnery-AS-Secret` header over
+  plain Connect (not gRPC+Bearer) and calls `AuthorizeGitHubMint`/`SignalGitHubTokenRotated`, which
+  aren't on the SDK's curated surface. `client.New` forces gRPC+Bearer — adopting it would change
+  the wire protocol and break AS→CP auth. Left unchanged (one-line comment added in-code).
+- `internal/cp/intent_threading_test.go`'s `goSubmitIntent` web is a white-box helper in package
+  `cp` driving `*Server` directly (deterministic test JTI, `Secrets`/`onReady` hooks, a fake
+  `NodeAccessToken`); the SDK's `pollAndSign` is unexported and has none of those hooks. Left
+  unchanged (one-line comment added in-code).
+
+Follow-ups needed to close the gap (not filed as bd issues from this worktree — no Dolt DB here;
+file from the main repo):
+1. Export a `client.PollAndSign` core (+ `SubmitOption`s for secrets/onReady/JTI override) so
+   `goSubmitIntent` can delegate instead of re-implementing.
+2. Give the SDK a server-to-server constructor (static-header auth, Connect protocol) and expose
+   `AuthorizeGitHubMint`/`SignalGitHubTokenRotated` for authsvc to adopt.
+3. Expose the SDK's transport/dial seam (or a `NewFromRPC(cpv1connect.SpawnServiceClient)`
+   constructor) so the raw-RPC e2e tests can drop `h2cClient`/`bearer` while keeping raw RPC
+   access.
+
+Verification run (in `dev-spawnery`): `CGO_ENABLED=1 go test -race ./internal/cp/... ./cmd/authsvc/...`
+green; `CGO_ENABLED=1 go test -tags e2e -run 'NONE' ./internal/cp/...` compiles clean (e2e bodies
+not executed — no Docker/images provisioned in this lane); `golangci-lint run` (untagged and
+`--build-tags e2e`) = 0 issues; `gofmt -l` clean.

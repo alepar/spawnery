@@ -72,6 +72,10 @@ func intentTestServer(t *testing.T) (*Server, *capSender, func()) {
 
 // goSubmitIntent launches a goroutine that polls GetPendingIntent until ready, then builds
 // and submits a SignedIntent. The submitter uses the given session key. Errors land in errCh.
+//
+// Not internal/client (sp-lan2.5): this is a white-box helper in package cp driving *Server
+// directly (deterministic test JTI, secrets/onReady hooks, a fake NodeAccessToken) — the SDK's
+// pollAndSign is unexported and has no equivalent hooks. See the design doc's follow-ups.
 func goSubmitIntent(ctx context.Context, s *Server, spawnID, owner string, sessionKey *ecdsa.PrivateKey, errCh chan<- error) {
 	goSubmitIntentWithSecrets(ctx, s, spawnID, owner, sessionKey, nil, errCh)
 }

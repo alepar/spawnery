@@ -24,12 +24,13 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/gen/node/v1/nodev1connect"
+	sdkclient "spawnery/internal/client"
 	"spawnery/internal/cp"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
-	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/router"
 	"spawnery/internal/cp/scheduler"
+	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 	"spawnery/internal/node"
 	"spawnery/internal/runtime"
@@ -106,25 +107,26 @@ func TestCPEndToEndStub(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// --- client ---
-	cl := cpv1connect.NewSpawnServiceClient(h2cClient(), cpSrv.URL, connect.WithGRPC(),
-		connect.WithInterceptors(bearer("dev-token")))
+	// --- client (drives the CP through the Go SDK, integration-testing its transport +
+	// lifecycle cores against a live CP: New, CreateSpawn, WaitActive, List, Session, Stop) ---
+	sdkc := sdkclient.New(cpSrv.URL, staticToken("dev-token"), nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cs, err := cl.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "x"}))
+	id, err := sdkc.CreateSpawn(ctx, &cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "x"})
 	if err != nil {
 		t.Fatalf("createSpawn: %v", err)
 	}
-	id := cs.Msg.SpawnId
-	defer cl.StopSpawn(context.Background(), connect.NewRequest(&cpv1.StopSpawnRequest{SpawnId: id}))
+	defer sdkc.Stop(context.Background(), id)
 
 	// CreateSpawn is async (returns in 'starting'); the CP only binds the spawn to its node once the
 	// node reports ACTIVE. Mirror the real client, which gates on the spawn's status going active
 	// before opening a session — otherwise the attach races provisioning and gets "unknown spawn".
-	waitActive(ctx, t, cl, id)
+	if _, err := sdkc.WaitActive(ctx, id, nil); err != nil {
+		t.Fatalf("waitActive: %v", err)
+	}
 
-	stream := cl.Session(ctx)
+	stream := sdkc.Session(ctx)
 	if err := stream.Send(&cpv1.Frame{SpawnId: id}); err != nil { // bind frame
 		t.Fatal(err)
 	}
@@ -188,11 +190,11 @@ func TestCPEndToEndStub(t *testing.T) {
 	// end-to-end with a second echo turn.
 	stillActive := time.Now().Add(7 * time.Second)
 	for time.Now().Before(stillActive) {
-		ls, err := cl.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+		sums, err := sdkc.List(ctx)
 		if err != nil {
 			t.Fatalf("listSpawns: %v", err)
 		}
-		for _, sp := range ls.Msg.Spawns {
+		for _, sp := range sums {
 			if sp.SpawnId == id && sp.Status != cpv1.SpawnStatus_SPAWN_STATUS_ACTIVE {
 				t.Fatalf("spawn left ACTIVE during heartbeat reconcile window: %v", sp.Status)
 			}
@@ -293,3 +295,10 @@ func (b bearerIntc) WrapStreamingClient(next connect.StreamingClientFunc) connec
 func (b bearerIntc) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
 	return next
 }
+
+// staticToken is a constant-token sdkclient.TokenSource for tests driving the CP through the Go
+// SDK (spawnery/internal/client) with a fixed dev bearer token — there is no refresh to perform.
+type staticToken string
+
+func (s staticToken) Token(context.Context) (string, error)   { return string(s), nil }
+func (s staticToken) OnUnauthenticated(context.Context) error { return nil }

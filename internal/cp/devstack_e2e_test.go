@@ -20,6 +20,7 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/gen/node/v1/nodev1connect"
+	sdkclient "spawnery/internal/client"
 	"spawnery/internal/cp"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
@@ -180,20 +181,20 @@ func TestDevStackSpawnE2E(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// --- the assertion: a dev-token spawn places onto the dev-shaped node ---
-	cl := cpv1connect.NewSpawnServiceClient(h2cClient(), cpSrv.URL, connect.WithGRPC(),
-		connect.WithInterceptors(bearer(token)))
+	// --- the assertion: a dev-token spawn places onto the dev-shaped node (via the Go SDK) ---
+	sdkc := sdkclient.New(cpSrv.URL, staticToken(token), nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cs, err := cl.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "x"}))
+	id, err := sdkc.CreateSpawn(ctx, &cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "x"})
 	if err != nil {
 		t.Fatalf("CreateSpawn as %s (owner %s) against the Justfile-shaped node (class=%s owner=%s): %v\n"+
 			"resource_exhausted here usually means a placement/tenancy rule and the dev recipes drifted apart (sp-uo4m class)",
 			token, owner, nodeEnv["NODE_CLASS"], nodeEnv["NODE_OWNER"], err)
 	}
-	id := cs.Msg.SpawnId
-	defer cl.StopSpawn(context.Background(), connect.NewRequest(&cpv1.StopSpawnRequest{SpawnId: id}))
+	defer sdkc.Stop(context.Background(), id)
 
-	waitActive(ctx, t, cl, id)
+	if _, err := sdkc.WaitActive(ctx, id, nil); err != nil {
+		t.Fatalf("waitActive: %v", err)
+	}
 }
