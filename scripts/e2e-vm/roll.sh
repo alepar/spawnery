@@ -59,10 +59,11 @@ for i in $(seq 1 60); do
   [ "$i" = 60 ] && die "CP :8080 not listening"
   sleep 1
 done
-# (c) node re-registered with the CP over enforced mTLS — poll a CP-side node list via spawnctl on the guest
+# (c) node re-registered with the CP over enforced mTLS — spawnctl has no node-list verb, so check the
+#     CP journal: it logs `msg="node connected" id=node-1 ...` on a successful mTLS registration.
 for i in $(seq 1 60); do
-  if vm_ssh "$IP" 'spawnctl -cp http://127.0.0.1:8080 node-list 2>/dev/null | grep -q .'; then break; fi
-  [ "$i" = 60 ] && warn "node never appeared in CP node-list (mTLS registration?) — continuing, tests will surface it"
+  if vm_ssh "$IP" 'sudo journalctl -u spawnery-cp --no-pager 2>/dev/null | grep -q "node connected"'; then break; fi
+  [ "$i" = 60 ] && warn "node never registered (no 'node connected' in the CP journal — mTLS?) — tests will surface it"
   sleep 2
 done
 # (d) Caddy TLS + web serving
