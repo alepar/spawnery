@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { selectStale } from "./sweep";
 import { newRunId, nsName } from "./namespace";
-import type { SpawnSummary } from "../drivers/api";
+import type { SpawnSummary } from "../drivers/oracle";
 
 function summary(name: string, createdAtSec = 0): SpawnSummary {
   return {

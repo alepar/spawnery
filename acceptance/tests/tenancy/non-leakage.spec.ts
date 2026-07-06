@@ -10,7 +10,7 @@
  */
 
 import { test, expect } from "../../src/harness/test";
-import { ApiDriver } from "../../src/drivers/api";
+import { AcceptanceClient } from "../../src/drivers/oracle";
 import { CliDriver } from "../../src/drivers/cli";
 import { loadTenancyConfig } from "../../src/scenarios/tenancy";
 import type { DriverCtx } from "../../src/drivers/types";
@@ -18,8 +18,8 @@ import type { DriverCtx } from "../../src/drivers/types";
 test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({ target, ns }) => {
   const cfg = loadTenancyConfig();
 
-  const apiA = new ApiDriver(target.cpEndpoint, cfg.a.token);
-  const apiB = new ApiDriver(target.cpEndpoint, cfg.b.token);
+  const apiA = new AcceptanceClient({ baseUrl: target.cpEndpoint, bearer: cfg.a.token });
+  const apiB = new AcceptanceClient({ baseUrl: target.cpEndpoint, bearer: cfg.b.token });
   const cli = new CliDriver({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin });
   const ctxA: DriverCtx = { identity: cfg.a, ns, api: apiA };
   const ctxB: DriverCtx = { identity: cfg.b, ns, api: apiB };

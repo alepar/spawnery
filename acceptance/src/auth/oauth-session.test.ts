@@ -5,7 +5,7 @@ import {
   ACCESS_TOKEN_TTL_MS,
   type OAuthSessionState,
 } from "./oauth-session";
-import { toBase64Url } from "./pop";
+import { toBase64Url } from "@spawnery/client";
 
 afterEach(() => {
   vi.unstubAllGlobals();

@@ -34,6 +34,8 @@ export {
 
 export { buildPoP, POP_DOMAIN, type PoPHeaders } from "./signing/pop.js";
 
+export { DEV_TOKEN_OVERRIDE_KEY } from "./dev.js";
+
 export { signP1363, exportSpkiDer, sessionKeyHash, keyCanSign } from "./keys/crypto.js";
 export { derToP1363, p1363ToDer } from "./keys/der.js";
 export { hkdfExpand } from "./keys/hkdf.js";

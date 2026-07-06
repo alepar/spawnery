@@ -9,12 +9,13 @@
  * web/src/auth/session.ts.
  */
 
+import { DEV_TOKEN_OVERRIDE_KEY } from "@spawnery/client";
+import type { KeyStore } from "@spawnery/client";
 import type { Identity } from "../fixtures/identity-pool";
 import type { AuthStrategy } from "./types";
+import { NodeMemoryKeyStore } from "./keystore";
 
-// Must match web/src/auth/session.ts's DEV_TOKEN_OVERRIDE_KEY exactly — the two packages are
-// independent (acceptance/ is not a dependency of web/), so the key is duplicated, not imported.
-export const DEV_TOKEN_OVERRIDE_KEY = "spawnery-dev-token";
+export { DEV_TOKEN_OVERRIDE_KEY };
 
 interface PageLike {
   addInitScript(fn: (arg: [string, string]) => void, arg: [string, string]): Promise<void>;
@@ -36,5 +37,11 @@ export class DevTokenAuth implements AuthStrategy {
 
   async oracleToken(identity: Identity): Promise<string> {
     return identity.token;
+  }
+
+  /** A fresh key per identity — the dev CP mints the node token from the intent's own SPKI, so no
+   * separate key registration is needed (unlike OAuth-PoP's cnf-bound session key). */
+  async sessionKeyStore(_identity: Identity): Promise<KeyStore> {
+    return new NodeMemoryKeyStore();
   }
 }

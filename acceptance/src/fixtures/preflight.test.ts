@@ -1,7 +1,14 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { classifyPreflight, runPreflight, TargetDownError } from "./preflight";
-import { ApiDriver } from "../drivers/api";
+import type { AppSummary } from "../drivers/oracle";
 import type { TargetConfig } from "../config/target";
+
+// runPreflight's `api` param is narrowed to Pick<AcceptanceClient, "listApps"> — stubbing that one
+// method directly is simpler and more robust than routing a real AcceptanceClient (whose SDK
+// transport runs on connect-web's own fetch-framing, not a bare Response mock) through vi.stubGlobal.
+function stubApi(listApps: () => Promise<AppSummary[]>) {
+  return { listApps: vi.fn(listApps) };
+}
 
 describe("classifyPreflight", () => {
   it("is ok only when both web and cp are reachable", () => {
@@ -24,14 +31,8 @@ describe("runPreflight", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("resolves when both the web GET and the ListApps RPC succeed", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation((url: string) => {
-        if (url === cfg.webOrigin) return Promise.resolve(new Response("", { status: 200 }));
-        return Promise.resolve(new Response(JSON.stringify({ apps: [] }), { status: 200 }));
-      }),
-    );
-    const api = new ApiDriver(cfg.cpEndpoint, "tok");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 200 })));
+    const api = stubApi(() => Promise.resolve([]));
     await expect(runPreflight(cfg, api)).resolves.toBeUndefined();
   });
 
@@ -40,19 +41,13 @@ describe("runPreflight", () => {
       "fetch",
       vi.fn().mockRejectedValue(new Error("ECONNREFUSED")),
     );
-    const api = new ApiDriver(cfg.cpEndpoint, "tok");
+    const api = stubApi(() => Promise.resolve([]));
     await expect(runPreflight(cfg, api)).rejects.toThrow(TargetDownError);
   });
 
   it("throws TargetDownError when the ListApps RPC fails", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation((url: string) => {
-        if (url === cfg.webOrigin) return Promise.resolve(new Response("", { status: 200 }));
-        return Promise.resolve(new Response("boom", { status: 500 }));
-      }),
-    );
-    const api = new ApiDriver(cfg.cpEndpoint, "tok");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 200 })));
+    const api = stubApi(() => Promise.reject(new Error("boom")));
     await expect(runPreflight(cfg, api)).rejects.toThrow(TargetDownError);
   });
 });

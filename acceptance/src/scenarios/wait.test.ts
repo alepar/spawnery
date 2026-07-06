@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { waitForStatus, GARAGE_HINT, type StatusOracle } from "./wait";
-import type { SpawnSummary } from "../drivers/api";
+import type { SpawnSummary } from "../drivers/oracle";
 
 function summary(status: SpawnSummary["status"]): SpawnSummary {
   return {

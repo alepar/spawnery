@@ -18,9 +18,11 @@
  *   rewrite (sp-tq0t.13 bead notes).
  */
 
+import type { KeyStore } from "@spawnery/client";
 import type { Identity } from "../fixtures/identity-pool";
 import type { AuthStrategy } from "./types";
 import { establishOAuthSession, refreshOAuthSession, type OAuthSessionState } from "./oauth-session";
+import { keyPairKeyStore } from "./keystore";
 
 // Proactive refresh margin: refresh once within this long of expiry rather than waiting for a 401.
 // Mirrors web/src/auth/refresh.ts's REFRESH_MARGIN_MS and cmd/spawnctl/authstate.go's refreshWindow.
@@ -115,5 +117,13 @@ export class OAuthPoPAuth implements AuthStrategy {
   async oracleToken(identity: Identity): Promise<string> {
     const session = await this.sessionFor(identity);
     return session.accessToken;
+  }
+
+  /** Returns the session's own cnf-bound key (the same keypair that signs PoP refreshes) — the
+   * CP binds the intent to the session pubkey posted at authorize time (oauth-session.ts's
+   * session_pubkey), so signing with any other key would fail verification. */
+  async sessionKeyStore(identity: Identity): Promise<KeyStore> {
+    const session = await this.sessionFor(identity);
+    return keyPairKeyStore({ privateKey: session.privateKey, publicKey: session.publicKey });
   }
 }

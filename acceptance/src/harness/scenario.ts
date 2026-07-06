@@ -7,7 +7,7 @@
 import { test as base, expect } from "./test";
 import { SpawnRegistry } from "./spawn-registry";
 import type { DriverCtx } from "../drivers/types";
-import type { ApiDriver } from "../drivers/api";
+import type { AcceptanceClient } from "../drivers/oracle";
 import type { Identity } from "../fixtures/identity-pool";
 
 interface ScenarioFixtures {
@@ -33,6 +33,6 @@ export function requireEnv(name: string, env: NodeJS.ProcessEnv = process.env): 
 }
 
 /** cliCtx builds a page-less DriverCtx for cli scenarios (avoids launching a browser). */
-export function cliCtx(parts: { identity: Identity; ns: (b: string) => string; api: ApiDriver }): DriverCtx {
+export function cliCtx(parts: { identity: Identity; ns: (b: string) => string; api: AcceptanceClient }): DriverCtx {
   return { identity: parts.identity, ns: parts.ns, api: parts.api };
 }

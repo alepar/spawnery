@@ -5,10 +5,10 @@
  * diagnostic hint pointing at the likely-missing dependency (design §Risks).
  */
 
-import type { ApiDriver, SpawnSummary } from "../drivers/api";
+import type { AcceptanceClient, SpawnSummary } from "../drivers/oracle";
 import type { SpawnStatus } from "../drivers/types";
 
-export type StatusOracle = Pick<ApiDriver, "findSpawn">;
+export type StatusOracle = Pick<AcceptanceClient, "findSpawn">;
 
 export interface WaitOpts {
   timeoutMs?: number;

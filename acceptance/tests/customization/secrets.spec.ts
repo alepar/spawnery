@@ -17,6 +17,7 @@
  * cleaned up explicitly here.
  */
 
+import { ConnectError, Code } from "@spawnery/client";
 import { test, expect } from "../../src/harness/test";
 import { dummyAtRestEnvelope } from "../../src/drivers/customization";
 
@@ -76,7 +77,14 @@ test("secrets: createSecret rejects an envelope whose at_rest AAD owner doesn't 
     envelope: dummyAtRestEnvelope("acc-not-the-real-owner", secretId),
   };
 
-  await expect(api.createSecret(write)).rejects.toThrow(/CreateSecret failed: 400/);
+  let err: unknown;
+  try {
+    await api.createSecret(write);
+  } catch (e) {
+    err = e;
+  }
+  expect(err).toBeInstanceOf(ConnectError);
+  expect((err as ConnectError).code).toBe(Code.InvalidArgument);
 
   // Best-effort: if the CP somehow accepted it, don't leak the row into the next run.
   await api.deleteSecret(secretId).catch(() => {});

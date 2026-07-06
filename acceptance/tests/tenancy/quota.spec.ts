@@ -13,8 +13,8 @@
  */
 
 import { test, expect } from "../../src/harness/test";
-import { ApiDriver } from "../../src/drivers/api";
-import { loadTenancyConfig, rawCreateSpawn, isResourceExhausted } from "../../src/scenarios/tenancy";
+import { AcceptanceClient } from "../../src/drivers/oracle";
+import { loadTenancyConfig, isResourceExhausted } from "../../src/scenarios/tenancy";
 
 test.describe("quota (known-cap owner only)", () => {
   test.describe.configure({ retries: 0 });
@@ -23,7 +23,7 @@ test.describe("quota (known-cap owner only)", () => {
     const cfg = loadTenancyConfig();
     test.skip(!cfg.quota, "ACC_QUOTA_CAP unset/<=0 — quota only runs on a known-cap target");
     const q = cfg.quota!;
-    const apiQ = new ApiDriver(target.cpEndpoint, q.identity.token);
+    const apiQ = new AcceptanceClient({ baseUrl: target.cpEndpoint, bearer: q.identity.token });
 
     // Sweep the dedicated owner clean — a deterministic count requires starting from zero, and
     // this owner is dedicated to the quota test (never shared with a worker), so deleting
@@ -40,14 +40,13 @@ test.describe("quota (known-cap owner only)", () => {
       }
       expect(await apiQ.listSpawns()).toHaveLength(q.cap);
 
-      const res = await rawCreateSpawn(target.cpEndpoint, q.identity.token, {
-        appId: cfg.appId,
-        model: cfg.model,
-        name: ns("quota-overflow"),
-      });
-      expect(isResourceExhausted(res), `expected 429 resource_exhausted, got status=${res.status} code=${res.code} message=${res.message}`).toBe(
-        true,
-      );
+      let overflowErr: unknown;
+      try {
+        await apiQ.createSpawn({ appId: cfg.appId, model: cfg.model, name: ns("quota-overflow") });
+      } catch (e) {
+        overflowErr = e;
+      }
+      expect(isResourceExhausted(overflowErr), `expected a ResourceExhausted ConnectError, got ${String(overflowErr)}`).toBe(true);
     } finally {
       await Promise.all(created.map((id) => apiQ.deleteSpawn(id).catch(() => {})));
       // Defensive: if the N+1 create unexpectedly succeeded, it leaked a spawn — find and delete it.

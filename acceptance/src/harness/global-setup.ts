@@ -12,7 +12,7 @@ import { assertVersionPin } from "../config/version";
 import { runPreflight } from "../fixtures/preflight";
 import { preRunSweep } from "../fixtures/sweep";
 import { newRunId } from "../fixtures/namespace";
-import { ApiDriver } from "../drivers/api";
+import { AcceptanceClient } from "../drivers/oracle";
 import { DevTokenAuth } from "../auth/devtoken";
 import { OAuthPoPAuth } from "../auth/oauthpop";
 import type { AuthStrategy } from "../auth/types";
@@ -33,7 +33,11 @@ export default async function globalSetup(): Promise<void> {
       ? new DevTokenAuth()
       : new OAuthPoPAuth({ asOrigin: cfg.asOrigin, webOrigin: cfg.webOrigin });
   const systemIdentity = cfg.identityPool[0];
-  const api = new ApiDriver(cfg.cpEndpoint, await auth.oracleToken(systemIdentity));
+  const api = new AcceptanceClient({
+    baseUrl: cfg.cpEndpoint,
+    bearer: await auth.oracleToken(systemIdentity),
+    keyStore: await auth.sessionKeyStore(systemIdentity),
+  });
 
   await runPreflight(cfg, api);
 

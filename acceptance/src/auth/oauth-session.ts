@@ -25,7 +25,7 @@
  * read the Set-Cookie response headers directly.
  */
 
-import { buildPoP, fromBase64Url } from "./pop";
+import { buildPoP, fromBase64Url } from "@spawnery/client";
 
 /** ACCESS_TOKEN_TTL_MS mirrors the AS's fixed 15-minute access-token TTL (Spike S1 result). Not
  * parsed from the token body — cmd/spawnctl/authstate.go's accessTokenTTLClient does the same. */

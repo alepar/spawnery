@@ -1,4 +1,4 @@
-import type { ApiDriver } from "../drivers/api";
+import type { AcceptanceClient } from "../drivers/oracle";
 
 /**
  * SpawnRegistry: per-test tracker for spawns a scenario creates so they are reliably deleted at
@@ -7,7 +7,7 @@ import type { ApiDriver } from "../drivers/api";
  */
 export class SpawnRegistry {
   private readonly ids = new Set<string>();
-  constructor(private readonly api: Pick<ApiDriver, "deleteSpawn">) {}
+  constructor(private readonly api: Pick<AcceptanceClient, "deleteSpawn">) {}
 
   /** track records a created spawn id for end-of-test cleanup (idempotent). */
   track(id: string): string {

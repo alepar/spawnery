@@ -4,7 +4,7 @@
  * FAILING calls — never a skip — surfacing the CLI parity gap as visible red (design §Coverage).
  */
 
-import type { ApiDriver } from "./api";
+import type { AcceptanceClient } from "./oracle";
 import type { Identity } from "../fixtures/identity-pool";
 
 export type SpawnId = string;
@@ -44,7 +44,7 @@ export interface ForkOpts {
 export interface DriverCtx {
   identity: Identity;
   ns: (base: string) => string;
-  api: ApiDriver;
+  api: AcceptanceClient;
   page?: unknown; // playwright Page; typed `unknown` here to avoid a hard @playwright/test dep in non-web drivers
 }
 

@@ -1,8 +1,10 @@
 /**
- * Phase 6 (tenancy) support: env-var config loading for the non-leakage/quota specs, a
- * Connect-JSON error classifier, and a raw CreateSpawn caller used to observe the N+1 rejection
- * (ApiDriver.createSpawn throws on !ok and discards the body — the quota spec needs the parsed
- * error, so it bypasses ApiDriver here rather than widening its error type for one caller).
+ * Phase 6 (tenancy) support: env-var config loading for the non-leakage/quota specs and the
+ * ResourceExhausted classifier the quota spec asserts on. AcceptanceClient.createSpawn now goes
+ * through @spawnery/client, which throws a structured ConnectError on a non-2xx RPC — so the
+ * N+1 rejection is observed via a try/catch around AcceptanceClient.createSpawn itself, rather
+ * than a raw fetch bypassing it (the old ApiDriver.createSpawn threw a plain Error and discarded
+ * the parsed body, forcing a bypass; that's no longer true here).
  *
  * Per the design's tenancy scenario: A sees A, not B; quota (ResourceExhausted at N+1) runs ONLY
  * on a target with a known non-zero per-owner cap (internal/cp/server.go's checkSpawnQuota
@@ -10,8 +12,8 @@
  * discover it) — see the phase README for the env vars this loader reads.
  */
 
+import { ConnectError, Code } from "@spawnery/client";
 import { parseIdentityPool, type Identity } from "../fixtures/identity-pool";
-import type { CreateSpawnApiRequest } from "../drivers/api";
 
 export interface TenancyConfig {
   appId: string;
@@ -68,42 +70,8 @@ function resolveIdentity(env: NodeJS.ProcessEnv, varName: string, poolIndex: num
   return pool[poolIndex];
 }
 
-/** classifyConnectError pulls code/message out of a parsed Connect-JSON error body (defensive against a non-object body). */
-export function classifyConnectError(_status: number, body: unknown): { code?: string; message?: string } {
-  if (typeof body !== "object" || body === null) return {};
-  const b = body as Record<string, unknown>;
-  const code = typeof b.code === "string" ? b.code : undefined;
-  const message = typeof b.message === "string" ? b.message : undefined;
-  return { ...(code !== undefined ? { code } : {}), ...(message !== undefined ? { message } : {}) };
-}
-
-/** isResourceExhausted reports whether a rawCreateSpawn result is the N+1 ResourceExhausted rejection. */
-export function isResourceExhausted(r: { status: number; code?: string }): boolean {
-  return r.status === 429 && r.code === "resource_exhausted";
-}
-
-/**
- * rawCreateSpawn POSTs CreateSpawn directly (mirroring ApiDriver.call's headers) and returns the
- * parsed status/code/message instead of throwing on !ok — the quota spec needs to observe and
- * assert on the N+1 rejection, not just know it happened.
- */
-export async function rawCreateSpawn(
-  cpEndpoint: string,
-  token: string,
-  req: CreateSpawnApiRequest,
-): Promise<{ status: number; code?: string; message?: string }> {
-  const res = await fetch(`${cpEndpoint}/cp.v1.SpawnService/CreateSpawn`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Connect-Protocol-Version": "1",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(req),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    return { status: res.status, ...classifyConnectError(res.status, body) };
-  }
-  return { status: res.status };
+/** isResourceExhausted reports whether e is the N+1 ResourceExhausted rejection (HTTP 429), as
+ * thrown by AcceptanceClient.createSpawn (a structured ConnectError, not a raw fetch error). */
+export function isResourceExhausted(e: unknown): boolean {
+  return e instanceof ConnectError && e.code === Code.ResourceExhausted;
 }

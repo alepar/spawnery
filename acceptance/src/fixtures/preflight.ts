@@ -5,7 +5,7 @@
  * owner-agnostic RPC (ListApps) plus a GET on the web origin.
  */
 
-import type { ApiDriver } from "../drivers/api";
+import type { AcceptanceClient } from "../drivers/oracle";
 import type { TargetConfig } from "../config/target";
 
 export class TargetDownError extends Error {
@@ -20,7 +20,7 @@ export function classifyPreflight(result: { webOk: boolean; cpOk: boolean }): "o
 }
 
 /** runPreflight probes the target; throws TargetDownError (distinct from an assertion error) on failure. */
-export async function runPreflight(cfg: TargetConfig, api: ApiDriver): Promise<void> {
+export async function runPreflight(cfg: TargetConfig, api: Pick<AcceptanceClient, "listApps">): Promise<void> {
   let webOk = false;
   try {
     const res = await fetch(cfg.webOrigin);

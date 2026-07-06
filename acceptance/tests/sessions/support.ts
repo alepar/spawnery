@@ -5,7 +5,7 @@
  * thin-wrapping helpers, unit-tested in support.test.ts.
  */
 
-import type { ApiDriver } from "../../src/drivers/api";
+import type { AcceptanceClient } from "../../src/drivers/oracle";
 import type { SpawnId } from "../../src/drivers/types";
 import type { SessionPage } from "../../src/drivers/session";
 import type { CostLedger } from "../../src/fixtures/budget";
@@ -63,7 +63,7 @@ export async function recordAgentCost(page: SessionPage, ledger: CostLedger, est
  * (naming the last-seen status either way).
  */
 export async function waitActiveApi(
-  api: ApiDriver,
+  api: AcceptanceClient,
   id: SpawnId,
   opts: { timeoutMs?: number; pollMs?: number } = {},
 ): Promise<void> {

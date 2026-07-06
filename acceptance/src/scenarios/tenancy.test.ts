@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { loadTenancyConfig, classifyConnectError, isResourceExhausted } from "./tenancy";
+import { ConnectError, Code } from "@spawnery/client";
+import { loadTenancyConfig, isResourceExhausted } from "./tenancy";
 
 function baseEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
@@ -87,33 +88,21 @@ describe("loadTenancyConfig", () => {
   });
 });
 
-describe("classifyConnectError", () => {
-  it("pulls code/message from a Connect-JSON error body", () => {
-    const got = classifyConnectError(429, { code: "resource_exhausted", message: "spawn limit reached (3)" });
-    expect(got).toEqual({ code: "resource_exhausted", message: "spawn limit reached (3)" });
-  });
-
-  it("returns an empty object for a non-object body", () => {
-    expect(classifyConnectError(429, "not json")).toEqual({});
-    expect(classifyConnectError(429, null)).toEqual({});
-    expect(classifyConnectError(429, undefined)).toEqual({});
-  });
-});
-
 describe("isResourceExhausted", () => {
-  it("is true for status 429 + code resource_exhausted", () => {
-    expect(isResourceExhausted({ status: 429, code: "resource_exhausted" })).toBe(true);
+  it("is true for a ConnectError with code ResourceExhausted", () => {
+    expect(isResourceExhausted(new ConnectError("spawn limit reached (3)", Code.ResourceExhausted))).toBe(true);
   });
 
-  it("is false for status 403", () => {
-    expect(isResourceExhausted({ status: 403, code: "resource_exhausted" })).toBe(false);
+  it("is false for a ConnectError with a different code", () => {
+    expect(isResourceExhausted(new ConnectError("nope", Code.PermissionDenied))).toBe(false);
   });
 
-  it("is false for status 200 with no code", () => {
-    expect(isResourceExhausted({ status: 200 })).toBe(false);
+  it("is false for a plain Error", () => {
+    expect(isResourceExhausted(new Error("boom"))).toBe(false);
   });
 
-  it("is false for status 429 with a different code", () => {
-    expect(isResourceExhausted({ status: 429, code: "permission_denied" })).toBe(false);
+  it("is false for a non-error value", () => {
+    expect(isResourceExhausted(undefined)).toBe(false);
+    expect(isResourceExhausted(null)).toBe(false);
   });
 });

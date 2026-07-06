@@ -8,7 +8,7 @@
 
 import { loadTargetConfig } from "../config/target";
 import { teardownSweep } from "../fixtures/sweep";
-import { ApiDriver } from "../drivers/api";
+import { AcceptanceClient } from "../drivers/oracle";
 import { DevTokenAuth } from "../auth/devtoken";
 
 export default async function globalTeardown(): Promise<void> {
@@ -19,7 +19,12 @@ export default async function globalTeardown(): Promise<void> {
     return;
   }
   const auth = new DevTokenAuth();
-  const api = new ApiDriver(cfg.cpEndpoint, await auth.oracleToken(cfg.identityPool[0]));
+  const systemIdentity = cfg.identityPool[0];
+  const api = new AcceptanceClient({
+    baseUrl: cfg.cpEndpoint,
+    bearer: await auth.oracleToken(systemIdentity),
+    keyStore: await auth.sessionKeyStore(systemIdentity),
+  });
   try {
     await teardownSweep(api, cfg.runId);
   } catch (e) {

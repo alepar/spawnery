@@ -136,8 +136,8 @@ export class SpawnClient {
     await this.client.stopSpawn({ spawnId });
   }
 
-  async listApps() {
-    return this.client.listApps({});
+  async listApps(query = "") {
+    return this.client.listApps({ query });
   }
 
   // ── Customization: profiles ────────────────────────────────────────────────

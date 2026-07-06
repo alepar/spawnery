@@ -12,7 +12,7 @@ import { nsName } from "../fixtures/namespace";
 import { teardownSweep } from "../fixtures/sweep";
 import { CostLedger } from "../fixtures/budget";
 import { guardMutation } from "./guardrail";
-import { ApiDriver, type SpawnSummary } from "../drivers/api";
+import { AcceptanceClient, type SpawnSummary } from "../drivers/oracle";
 import { WebDriver } from "../drivers/web";
 import { CliDriver } from "../drivers/cli";
 import { DevTokenAuth } from "../auth/devtoken";
@@ -25,7 +25,7 @@ interface WorkerFixtures {
   runId: string;
   identity: Identity;
   auth: AuthStrategy;
-  api: ApiDriver;
+  api: AcceptanceClient;
   web: WebDriver;
   cli: CliDriver;
   /** ledger: per-worker CostLedger for @agent scenarios to feed usage into + check() against. */
@@ -84,9 +84,11 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
   api: [
     // A token-provider function, not a resolved string: OAuthPoPAuth's bearer expires (15 min)
     // and must be re-fetched (proactively refreshed) on a run that outlives that TTL — see
-    // drivers/api.ts's TokenSource and auth/oauthpop.ts.
+    // drivers/oracle.ts's TokenSource and auth/oauthpop.ts. keyStore is the identity's signing
+    // key (fresh for dev-token; the cnf-bound session key for OAuth-PoP — see auth/types.ts).
     async ({ target, auth, identity }, use) => {
-      await use(new ApiDriver(target.cpEndpoint, () => auth.oracleToken(identity)));
+      const keyStore = await auth.sessionKeyStore(identity);
+      await use(new AcceptanceClient({ baseUrl: target.cpEndpoint, bearer: () => auth.oracleToken(identity), keyStore }));
     },
     { scope: "worker" },
   ],

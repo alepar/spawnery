@@ -6,7 +6,7 @@
  */
 
 import { isAccArtifact, runIdOf, runTimestamp } from "./namespace";
-import type { ApiDriver, SpawnSummary } from "../drivers/api";
+import type { AcceptanceClient, SpawnSummary } from "../drivers/oracle";
 
 /**
  * selectStale (pure): given a list of spawn summaries, picks the ones this suite should sweep.
@@ -28,7 +28,7 @@ export function selectStale(summaries: SpawnSummary[], now: number, ttlMs: numbe
 }
 
 /** preRunSweep best-effort deletes stale acc-* spawns; logs (doesn't fail the run) on a single delete error. */
-export async function preRunSweep(api: ApiDriver, ttlMs: number, now: number = Date.now()): Promise<void> {
+export async function preRunSweep(api: AcceptanceClient, ttlMs: number, now: number = Date.now()): Promise<void> {
   const summaries = await api.listSpawns();
   const stale = selectStale(summaries, now, ttlMs);
   for (const s of stale) {
@@ -41,7 +41,7 @@ export async function preRunSweep(api: ApiDriver, ttlMs: number, now: number = D
 }
 
 /** teardownSweep deletes every spawn belonging to this run's namespace, even after a test failure. */
-export async function teardownSweep(api: ApiDriver, runId: string): Promise<void> {
+export async function teardownSweep(api: AcceptanceClient, runId: string): Promise<void> {
   const summaries = await api.listSpawns();
   const mine = selectStale(summaries, Date.now(), 0, runId);
   for (const s of mine) {
