@@ -21,12 +21,14 @@ type fakeSpawnClient struct {
 	listQueue [][]*cpv1.SpawnSummary // ListSpawns pops one entry per call; last entry repeats
 
 	resumeErr    error
+	suspendErr   error
 	setModelResp *cpv1.SetSpawnModelResponse
 	setModelErr  error
 	deleteErr    error
 	stopErr      error
 
 	gotResume    *cpv1.ResumeSpawnRequest
+	gotSuspend   *cpv1.SuspendSpawnRequest
 	gotSetModel  *cpv1.SetSpawnModelRequest
 	gotDelete    *cpv1.DeleteSpawnRequest
 	gotStop      *cpv1.StopSpawnRequest
@@ -63,6 +65,14 @@ func (f *fakeSpawnClient) ResumeSpawn(_ context.Context, req *connect.Request[cp
 		return nil, f.resumeErr
 	}
 	return connect.NewResponse(&cpv1.ResumeSpawnResponse{}), nil
+}
+
+func (f *fakeSpawnClient) SuspendSpawn(_ context.Context, req *connect.Request[cpv1.SuspendSpawnRequest]) (*connect.Response[cpv1.SuspendSpawnResponse], error) {
+	f.gotSuspend = req.Msg
+	if f.suspendErr != nil {
+		return nil, f.suspendErr
+	}
+	return connect.NewResponse(&cpv1.SuspendSpawnResponse{}), nil
 }
 
 func (f *fakeSpawnClient) SetSpawnModel(_ context.Context, req *connect.Request[cpv1.SetSpawnModelRequest]) (*connect.Response[cpv1.SetSpawnModelResponse], error) {
@@ -192,6 +202,23 @@ func TestResumePropagatesRPCError(t *testing.T) {
 	f := &fakeSpawnClient{pendingReady: true, resumeErr: fmt.Errorf("no capacity")}
 	err := resumeSpawn(context.Background(), f, "sp-1", nil)
 	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestSuspendCallsSuspendSpawn(t *testing.T) {
+	f := &fakeSpawnClient{}
+	if err := suspendSpawn(context.Background(), f, "sp-1"); err != nil {
+		t.Fatalf("suspendSpawn: %v", err)
+	}
+	if f.gotSuspend == nil || f.gotSuspend.SpawnId != "sp-1" {
+		t.Fatalf("SuspendSpawn req = %+v", f.gotSuspend)
+	}
+}
+
+func TestSuspendPropagatesRPCError(t *testing.T) {
+	f := &fakeSpawnClient{suspendErr: fmt.Errorf("no capacity")}
+	if err := suspendSpawn(context.Background(), f, "sp-1"); err == nil {
 		t.Fatal("expected error")
 	}
 }
