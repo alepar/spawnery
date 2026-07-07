@@ -147,6 +147,78 @@ sudo -u postgres psql -c "CREATE USER spawnery WITH PASSWORD 'spawnery';" 2>/dev
 sudo -u postgres psql -c "CREATE DATABASE spawnery OWNER spawnery;" 2>/dev/null || true
 sudo systemctl reload postgresql || sudo systemctl restart postgresql
 
+# ---- Garage (S3) — the transient-tier journal store (Kopia). WITHOUT this the journaler is OFF and
+# suspend/resume + fork cannot move a spawn's workspace. Native single-node binary + well-known DEV
+# secrets (mirrors deploy/garage/); a per-boot oneshot mints the bucket+key into journal.env. ----
+GARAGE_VER="${GARAGE_VER:-v1.0.1}"
+log "installing garage ${GARAGE_VER} (journal store)…"
+curl -fsSL -o /tmp/garage "https://garagehq.deuxfleurs.fr/_releases/${GARAGE_VER}/x86_64-unknown-linux-musl/garage"
+sudo install -m0755 /tmp/garage /usr/local/bin/garage
+sudo mkdir -p /var/lib/garage/meta /var/lib/garage/data /var/lib/spawnlet/journal
+sudo tee /etc/garage.toml >/dev/null <<'EOF'
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+replication_factor = 1
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret = "7642aaf5cbe9ae49eec221853099829d9e05f82f8e1dff2b36f5e4a7b1d63e3c"
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "127.0.0.1:3900"
+root_domain = ".s3.garage.localhost"
+[admin]
+api_bind_addr = "127.0.0.1:3903"
+admin_token = "e8a6bb74d9331b884614a992c640234faa408f543fd31ec9"
+EOF
+sudo tee /etc/systemd/system/garage.service >/dev/null <<'EOF'
+[Unit]
+Description=Garage S3 (spawnery journal store)
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/garage -c /etc/garage.toml server
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+EOF
+# per-boot bootstrap: apply the single-node layout, mint bucket + access key, write journal.env
+# (adapted from deploy/garage/bootstrap.sh; native garage CLI + admin API).
+sudo tee /usr/local/bin/spawnery-garage-bootstrap.sh >/dev/null <<'BOOT'
+#!/usr/bin/env bash
+set -euo pipefail
+ADMIN=http://127.0.0.1:3903; TOKEN=e8a6bb74d9331b884614a992c640234faa408f543fd31ec9; BUCKET=spawnery-journal
+G(){ garage -c /etc/garage.toml "$@"; }
+for _ in $(seq 1 60); do G status >/dev/null 2>&1 && break; sleep 1; done
+NID="$(G node id -q | cut -d@ -f1)"; SID="${NID:0:16}"
+if ! G layout show 2>/dev/null | grep -q "$SID"; then
+  G layout assign -z dc1 -c 1G "$NID"
+  CUR="$(G layout show 2>/dev/null | grep -oE 'version: [0-9]+' | grep -oE '[0-9]+' | tail -1)"
+  G layout apply --version "$(( ${CUR:-0} + 1 ))"
+fi
+A(){ curl -fsS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+KJ=""; for _ in $(seq 1 20); do KJ="$(A -X POST "$ADMIN/v1/key" -d "{\"name\":\"${BUCKET}-key\"}" 2>/dev/null)" && [ -n "$KJ" ] && break; sleep 1; done
+AK="$(printf '%s' "$KJ" | grep -oE '"accessKeyId": *"[^"]+"' | head -1 | cut -d'"' -f4)"
+SK="$(printf '%s' "$KJ" | grep -oE '"secretAccessKey": *"[^"]+"' | head -1 | cut -d'"' -f4)"
+A -X POST "$ADMIN/v1/bucket" -d "{\"globalAlias\":\"$BUCKET\"}" >/dev/null 2>&1 || true
+BID="$(A "$ADMIN/v1/bucket?globalAlias=$BUCKET" | grep -oE '"id": *"[^"]+"' | head -1 | cut -d'"' -f4)"
+A -X POST "$ADMIN/v1/bucket/allow" -d "{\"bucketId\":\"$BID\",\"accessKeyId\":\"$AK\",\"permissions\":{\"read\":true,\"write\":true,\"owner\":true}}" >/dev/null
+mkdir -p /etc/spawnery/env.d
+printf 'JOURNAL_S3_ACCESS_KEY=%s\nJOURNAL_S3_SECRET_KEY=%s\n' "$AK" "$SK" > /etc/spawnery/env.d/journal.env
+BOOT
+sudo chmod 0755 /usr/local/bin/spawnery-garage-bootstrap.sh
+sudo tee /etc/systemd/system/spawnery-garage-bootstrap.service >/dev/null <<'EOF'
+[Unit]
+Description=bootstrap garage layout+bucket+key -> /etc/spawnery/env.d/journal.env
+After=garage.service
+Requires=garage.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/spawnery-garage-bootstrap.sh
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # ---- spawnery binaries + config + examples (BEFORE PKI: spawnery-ca must be on PATH for gen-pki.sh) ----
 log "installing spawnery binaries + config + examples…"
 sudo install -m0755 "$PAYLOAD"/bin/* /usr/local/bin/
@@ -254,11 +326,12 @@ EOF
 sudo tee /etc/systemd/system/spawnery-node.service >/dev/null <<'EOF'
 [Unit]
 Description=spawnery node (spawnlet)
-After=spawnery-render-env.service spawnery-cp.service containerd.service
-Requires=spawnery-render-env.service
+After=spawnery-render-env.service spawnery-cp.service containerd.service spawnery-garage-bootstrap.service
+Requires=spawnery-render-env.service spawnery-garage-bootstrap.service
 [Service]
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
+EnvironmentFile=-/etc/spawnery/env.d/journal.env
 WorkingDirectory=/opt/spawnery
 ExecStart=/usr/local/bin/spawnlet
 Restart=on-failure
@@ -267,7 +340,7 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable spawnery-render-env spawnery-authsvc spawnery-cp spawnery-node caddy
+sudo systemctl enable garage spawnery-garage-bootstrap spawnery-render-env spawnery-authsvc spawnery-cp spawnery-node caddy
 
 # ---- self-check (best-effort) + clean shutdown handled by build-base.sh ----
 log "provision complete. runsc: $(runsc --version | head -1). containerd: $(/usr/local/bin/containerd --version)"
