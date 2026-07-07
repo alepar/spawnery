@@ -1,6 +1,6 @@
 /**
  * cliDriver: a spawnctl subprocess wrapper implementing the full SpawnDriver interface.
- * spawnctl currently lacks rename/suspend/stop/delete — those are STUBS that FAIL (never skip),
+ * spawnctl currently lacks rename/stop/delete — those are STUBS that FAIL (never skip),
  * surfacing the CLI parity gap as visible red (design §Coverage / §Dual-surface).
  */
 
@@ -154,8 +154,8 @@ export class CliDriver implements SpawnDriver {
     await this.run(ctx.identity, "set-model", [id, model]);
   }
 
-  async suspend(_ctx: DriverCtx, _id: SpawnId): Promise<void> {
-    throw parityGap("suspend");
+  async suspend(ctx: DriverCtx, id: SpawnId): Promise<void> {
+    await this.run(ctx.identity, "suspend", [id]);
   }
 
   async resume(ctx: DriverCtx, id: SpawnId): Promise<void> {

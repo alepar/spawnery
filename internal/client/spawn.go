@@ -24,6 +24,7 @@ type spawnClient interface {
 	CreateSpawn(context.Context, *connect.Request[cpv1.CreateSpawnRequest]) (*connect.Response[cpv1.CreateSpawnResponse], error)
 	ListSpawns(context.Context, *connect.Request[cpv1.ListSpawnsRequest]) (*connect.Response[cpv1.ListSpawnsResponse], error)
 	ResumeSpawn(context.Context, *connect.Request[cpv1.ResumeSpawnRequest]) (*connect.Response[cpv1.ResumeSpawnResponse], error)
+	SuspendSpawn(context.Context, *connect.Request[cpv1.SuspendSpawnRequest]) (*connect.Response[cpv1.SuspendSpawnResponse], error)
 	SetSpawnModel(context.Context, *connect.Request[cpv1.SetSpawnModelRequest]) (*connect.Response[cpv1.SetSpawnModelResponse], error)
 	DeleteSpawn(context.Context, *connect.Request[cpv1.DeleteSpawnRequest]) (*connect.Response[cpv1.DeleteSpawnResponse], error)
 	StopSpawn(context.Context, *connect.Request[cpv1.StopSpawnRequest]) (*connect.Response[cpv1.StopSpawnResponse], error)
@@ -112,6 +113,19 @@ func resumeSpawn(ctx context.Context, rpc spawnClient, id string, warn func(erro
 		_, err := rpc.ResumeSpawn(rpcCtx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id}))
 		return err
 	}, warn)
+}
+
+// Suspend suspends a running spawn in place: the CP snapshots its mounts to the journal and tears
+// down the pod. Unlike Resume, SuspendSpawn needs no signed intent — it is a plain RPC call.
+func (c *Client) Suspend(ctx context.Context, id string) error {
+	return suspendSpawn(ctx, c.rpc, id)
+}
+
+func suspendSpawn(ctx context.Context, rpc spawnClient, id string) error {
+	if _, err := rpc.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); err != nil {
+		return fmt.Errorf("suspend: %w", err)
+	}
+	return nil
 }
 
 // SetModel sets the inference model of a running spawn: persists it on the CP and (best-effort)
