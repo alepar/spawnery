@@ -65,6 +65,7 @@ func (e *containerdEngine) Close() error { return nil }
 // of the produced delta blob; a zero value means the diff was empty.
 // On any error a best-effort lease deletion is attempted to prevent orphaned blobs.
 func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseRef, leaseID string) (string, int64, error) {
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	leaseMgr := e.client.LeasesService()
 
 	// Create the lease (idempotent: ignore AlreadyExists).
@@ -193,6 +194,7 @@ func (e *containerdEngine) assembleDeltaImage(ctx context.Context, name, baseRef
 // k8s.io namespace). Used by the suspend gate to quiesce agent writes before the final snapshot
 // (spec §3). Thin wrapper: LoadContainer → Task → Pause.
 func (e *containerdEngine) Pause(ctx context.Context, key string) error {
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	c, err := e.client.LoadContainer(ctx, key)
 	if err != nil {
 		return fmt.Errorf("load container %s: %w", key, err)
@@ -209,6 +211,7 @@ func (e *containerdEngine) Pause(ctx context.Context, key string) error {
 
 // Resume resumes the containerd task for the container identified by key.
 func (e *containerdEngine) Resume(ctx context.Context, key string) error {
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	c, err := e.client.LoadContainer(ctx, key)
 	if err != nil {
 		return fmt.Errorf("load container %s: %w", key, err)
@@ -253,6 +256,7 @@ func (e *containerdEngine) Release(ctx context.Context, name, leaseID string) er
 // writable delta crosses the wire, reassembled on the target by AssembleOnBase. The blob is the
 // gzip layer tar produced by CreateDiff, shipped as-is.
 func (e *containerdEngine) ExportTopLayer(ctx context.Context, name string, w io.Writer) error {
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	cs := e.client.ContentStore()
 	img, err := e.client.ImageService().Get(ctx, name)
 	if err != nil {
@@ -294,6 +298,7 @@ func (e *containerdEngine) ExportTopLayer(ctx context.Context, name string, w io
 // base must already be present on the target (CP-pinned by digest). The blob is the gzip layer tar
 // from ExportTopLayer; assembleDeltaImage recomputes its uncompressed diffID for the config.
 func (e *containerdEngine) AssembleOnBase(ctx context.Context, baseRef, newTag, leaseID string, r io.Reader) error {
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	if baseRef != "" {
 		if _, err := e.client.ImageService().Get(ctx, baseRef); err != nil {
 			return fmt.Errorf("get base image %s: %w", baseRef, err)
