@@ -17,6 +17,7 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	pkgrootfs "github.com/containerd/containerd/v2/pkg/rootfs"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
@@ -34,6 +35,10 @@ const defaultSnapshotter = "overlayfs"
 // containerdEngine builds OCI delta images using the native containerd APIs over the shared
 // CRI gRPC connection. It implements deltaEngine. Raw containerd calls are kept thin here;
 // all orchestration (ordering, guard, lease naming) is in delta.go and unit-tested there.
+// containerdNamespace is the CRI containerd namespace (kubelet/crictl use "k8s.io"); the delta
+// image + lease records live here, so every raw ImageService/LeasesService op must carry it in ctx.
+const containerdNamespace = "k8s.io"
+
 type containerdEngine struct {
 	client *ctrclient.Client
 }
@@ -42,7 +47,7 @@ type containerdEngine struct {
 // No new dial is performed; the containerd client is multiplexed on top of the same socket.
 // NewWithConn does no I/O, so this constructor is I/O-free (safe for lazy-init).
 func newContainerdEngine(conn *grpc.ClientConn) (deltaEngine, error) {
-	c, err := ctrclient.NewWithConn(conn, ctrclient.WithDefaultNamespace("k8s.io"))
+	c, err := ctrclient.NewWithConn(conn, ctrclient.WithDefaultNamespace(containerdNamespace))
 	if err != nil {
 		return nil, fmt.Errorf("containerd client from conn: %w", err)
 	}
@@ -221,6 +226,10 @@ func (e *containerdEngine) Resume(ctx context.Context, key string) error {
 // Release deletes the per-spawn image record and its pinning lease so the GC can reclaim the
 // blobs. Ignores NotFound so a double-Release is safe.
 func (e *containerdEngine) Release(ctx context.Context, name, leaseID string) error {
+	// The raw ImageService()/LeasesService() ops read the namespace from ctx (the client's
+	// WithDefaultNamespace only applies to the client's own convenience methods), and callers such
+	// as the fork unwind pass a bare context — without this the deletes fail "namespace is required".
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	var errParts []string
 
 	imgSvc := e.client.ImageService()

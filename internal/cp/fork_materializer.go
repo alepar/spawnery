@@ -429,6 +429,7 @@ func (m *sameNodeForkMaterializer) MaterializeForkWithSourceRestored(ctx context
 		return forkMaterializeResult{}, ctx.Err()
 	default:
 	}
+	var pendingComplete *nodev1.ForkSameNodeComplete
 	for {
 		select {
 		case <-ctx.Done():
@@ -441,16 +442,17 @@ func (m *sameNodeForkMaterializer) MaterializeForkWithSourceRestored(ctx context
 			if err := handleSourceRestored(msg); err != nil {
 				return forkMaterializeResult{}, err
 			}
+			if pendingComplete != nil {
+				return forkResultFromComplete(pendingComplete, req)
+			}
 		case msg := <-ch:
+			// SourceRestored and Complete arrive over the same node stream (restored first) but land
+			// on separate channels, so this select can pick Complete first. Rather than fail the
+			// fork, stash Complete and keep waiting for the (always-sent) SourceRestored; ctx/timer
+			// still bound the wait if it never arrives.
 			if !sourceRestored {
-				select {
-				case restored := <-restoredCh:
-					if err := handleSourceRestored(restored); err != nil {
-						return forkMaterializeResult{}, err
-					}
-				default:
-					return forkMaterializeResult{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("same-node fork completed before source-restored acknowledgement"))
-				}
+				pendingComplete = msg
+				continue
 			}
 			return forkResultFromComplete(msg, req)
 		}
@@ -505,6 +507,7 @@ func (m *sameNodeForkMaterializer) materializeCrossNodeForkWithSourceRestored(ct
 	timer := time.NewTimer(m.timeout)
 	defer timer.Stop()
 	sourceRestored := false
+	var pendingImported *nodev1.ForkTransferImported
 	for {
 		select {
 		case <-ctx.Done():
@@ -529,6 +532,10 @@ func (m *sameNodeForkMaterializer) materializeCrossNodeForkWithSourceRestored(ct
 				}
 			}
 			sourceRestored = true
+			// import may have arrived before the restored ack (separate channels); return it now.
+			if pendingImported != nil {
+				return forkResultFromImported(pendingImported, req)
+			}
 		case msg := <-exportedCh:
 			if msg.GetError() != "" {
 				cancel()
@@ -554,9 +561,11 @@ func (m *sameNodeForkMaterializer) materializeCrossNodeForkWithSourceRestored(ct
 				return forkMaterializeResult{}, connect.NewError(connect.CodeUnavailable, fmt.Errorf("send fork transfer import to node %q: %w", req.TargetNodeID, err))
 			}
 		case msg := <-importedCh:
+			// Import and source-restored arrive on separate channels; if import wins the select,
+			// stash it and wait for the (always-sent) restored ack rather than failing.
 			if !sourceRestored {
-				cancel()
-				return forkMaterializeResult{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("cross-node fork completed before source-restored acknowledgement"))
+				pendingImported = msg
+				continue
 			}
 			return forkResultFromImported(msg, req)
 		}
