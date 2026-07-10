@@ -219,6 +219,104 @@ ExecStart=/usr/local/bin/spawnery-garage-bootstrap.sh
 WantedBy=multi-user.target
 EOF
 
+# ---- Gitea (local GitHub-compatible git host) — backs the github: storage-mount lane so the
+# acceptance suite can prove a `github:` mount survives suspend/resume WITHOUT reaching github.com.
+# Native single-node binary + sqlite; a per-boot oneshot creates an admin + access token + seed repo
+# and writes the node github-override env into /etc/spawnery/env.d/gitea.env (mirrors the garage
+# bootstrap). The node clones over http from 127.0.0.1 under GITHUB_ALLOW_INSECURE_HOST. ----
+GITEA_VER="${GITEA_VER:-1.22.6}"
+GITEA_PORT="${GITEA_PORT:-3000}"
+GITEA_ADMIN_USER="${GITEA_ADMIN_USER:-spawnery}"
+GITEA_ADMIN_PASS="${GITEA_ADMIN_PASS:-spawnery-e2e-pass}"
+log "installing gitea ${GITEA_VER} (local git host)…"
+curl -fsSL -o /tmp/gitea "https://dl.gitea.com/gitea/${GITEA_VER}/gitea-${GITEA_VER}-linux-amd64"
+sudo install -m0755 /tmp/gitea /usr/local/bin/gitea
+id gitea >/dev/null 2>&1 || sudo useradd --system --shell /bin/bash --home-dir /var/lib/gitea --create-home gitea
+sudo mkdir -p /var/lib/gitea/custom /var/lib/gitea/data /var/lib/gitea/log /etc/gitea
+# Generate the two required secrets with the gitea binary (INSTALL_LOCK=true skips the web installer).
+GITEA_SECRET_KEY="$(gitea generate secret SECRET_KEY)"
+GITEA_INTERNAL_TOKEN="$(gitea generate secret INTERNAL_TOKEN)"
+sudo tee /etc/gitea/app.ini >/dev/null <<EOF
+APP_NAME = Spawnery E2E Gitea
+RUN_USER = gitea
+RUN_MODE = prod
+WORK_PATH = /var/lib/gitea
+[server]
+PROTOCOL = http
+HTTP_ADDR = 127.0.0.1
+HTTP_PORT = ${GITEA_PORT}
+DOMAIN = 127.0.0.1
+ROOT_URL = http://127.0.0.1:${GITEA_PORT}/
+DISABLE_SSH = true
+OFFLINE_MODE = true
+[database]
+DB_TYPE = sqlite3
+PATH = /var/lib/gitea/data/gitea.db
+[security]
+INSTALL_LOCK = true
+SECRET_KEY = ${GITEA_SECRET_KEY}
+INTERNAL_TOKEN = ${GITEA_INTERNAL_TOKEN}
+[service]
+DISABLE_REGISTRATION = true
+[repository]
+DEFAULT_BRANCH = main
+[log]
+ROOT_PATH = /var/lib/gitea/log
+LEVEL = warn
+EOF
+sudo chown -R gitea:gitea /var/lib/gitea /etc/gitea
+sudo chmod 640 /etc/gitea/app.ini
+sudo tee /etc/systemd/system/gitea.service >/dev/null <<'EOF'
+[Unit]
+Description=Gitea (spawnery e2e local git host)
+After=network.target
+[Service]
+User=gitea
+Group=gitea
+WorkingDirectory=/var/lib/gitea
+Environment=GITEA_WORK_DIR=/var/lib/gitea
+ExecStart=/usr/local/bin/gitea web --config /etc/gitea/app.ini
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+EOF
+# per-boot bootstrap: create the admin (idempotent), mint a fresh access token + seed repo, and write
+# the node github-override env fragment. The token name is unique per boot to avoid a name clash on
+# reboot; the fragment is what wires GITHUB_STATIC_TOKEN etc. into the node unit below.
+sudo tee /usr/local/bin/spawnery-gitea-bootstrap.sh >/dev/null <<BOOT
+#!/usr/bin/env bash
+set -euo pipefail
+CFG=/etc/gitea/app.ini; U='${GITEA_ADMIN_USER}'; P='${GITEA_ADMIN_PASS}'; PORT='${GITEA_PORT}'
+G(){ sudo -u gitea GITEA_WORK_DIR=/var/lib/gitea gitea --config "\$CFG" "\$@"; }
+for _ in \$(seq 1 60); do curl -fsS "http://127.0.0.1:\$PORT/api/healthz" >/dev/null 2>&1 && break; sleep 1; done
+G admin user create --username "\$U" --password "\$P" --email "\$U@e2e.test" --admin --must-change-password=false 2>/dev/null || true
+TOKEN="\$(G admin user generate-access-token -u "\$U" --scopes 'write:repository,write:user' -t "e2e-\$(date +%s%N)" --raw 2>/dev/null | tail -1)"
+# Seed a repo so a manual github:${GITEA_ADMIN_USER}/seed bind works without create; the acceptance
+# suite instead creates unique per-run repos via create_if_missing.
+curl -fsS -X POST -H "Authorization: token \$TOKEN" -H 'Content-Type: application/json' \
+  "http://127.0.0.1:\$PORT/api/v1/user/repos" -d '{"name":"seed","auto_init":true,"private":true}' >/dev/null 2>&1 || true
+mkdir -p /etc/spawnery/env.d
+cat > /etc/spawnery/env.d/gitea.env <<ENV
+GITHUB_API_BASE_URL=http://127.0.0.1:\$PORT/api/v1
+GITHUB_HOST=127.0.0.1:\$PORT
+GITHUB_ALLOW_INSECURE_HOST=1
+GITHUB_STATIC_TOKEN=\$TOKEN
+ENV
+BOOT
+sudo chmod 0755 /usr/local/bin/spawnery-gitea-bootstrap.sh
+sudo tee /etc/systemd/system/spawnery-gitea-bootstrap.service >/dev/null <<'EOF'
+[Unit]
+Description=bootstrap gitea admin+token+seed repo -> /etc/spawnery/env.d/gitea.env
+After=gitea.service
+Requires=gitea.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/spawnery-gitea-bootstrap.sh
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # ---- spawnery binaries + config + examples (BEFORE PKI: spawnery-ca must be on PATH for gen-pki.sh) ----
 log "installing spawnery binaries + config + examples…"
 sudo install -m0755 "$PAYLOAD"/bin/* /usr/local/bin/
@@ -326,12 +424,13 @@ EOF
 sudo tee /etc/systemd/system/spawnery-node.service >/dev/null <<'EOF'
 [Unit]
 Description=spawnery node (spawnlet)
-After=spawnery-render-env.service spawnery-cp.service containerd.service spawnery-garage-bootstrap.service
-Requires=spawnery-render-env.service spawnery-garage-bootstrap.service
+After=spawnery-render-env.service spawnery-cp.service containerd.service spawnery-garage-bootstrap.service spawnery-gitea-bootstrap.service
+Requires=spawnery-render-env.service spawnery-garage-bootstrap.service spawnery-gitea-bootstrap.service
 [Service]
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
 EnvironmentFile=-/etc/spawnery/env.d/journal.env
+EnvironmentFile=-/etc/spawnery/env.d/gitea.env
 WorkingDirectory=/opt/spawnery
 ExecStart=/usr/local/bin/spawnlet
 Restart=on-failure
@@ -340,7 +439,7 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable garage spawnery-garage-bootstrap spawnery-render-env spawnery-authsvc spawnery-cp spawnery-node caddy
+sudo systemctl enable garage spawnery-garage-bootstrap gitea spawnery-gitea-bootstrap spawnery-render-env spawnery-authsvc spawnery-cp spawnery-node caddy
 
 # ---- self-check (best-effort) + clean shutdown handled by build-base.sh ----
 log "provision complete. runsc: $(runsc --version | head -1). containerd: $(/usr/local/bin/containerd --version)"
