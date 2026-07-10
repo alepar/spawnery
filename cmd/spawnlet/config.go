@@ -43,6 +43,18 @@ type Spawnlet struct {
 		NodeAddr string `koanf:"node_addr"`
 	} `koanf:"cp"`
 
+	// GitHub points github: storage mounts at a non-github.com git host (e.g. a local Gitea) with a
+	// static access token, bypassing the AS mint. All fields empty/false = production default
+	// (github.com, secure, AS-minted). This is a DEV/TEST knob for the e2e-vm Gitea lane — see
+	// scripts/e2e-vm/provision (gitea.env). A StaticToken (or StaticTokenFile) enables the lane.
+	GitHub struct {
+		APIBaseURL        string        `koanf:"api_base_url"`        // defaultGitHubRepoService.BaseURL, e.g. http://127.0.0.1:3000/api/v1
+		Host              string        `koanf:"host"`                // mount host, must match the clone_url host (e.g. 127.0.0.1:3000)
+		AllowInsecureHost bool          `koanf:"allow_insecure_host"` // permit http + non-github.com host
+		StaticToken       config.Secret `koanf:"static_token"`        // Gitea PAT (basic-auth password for clone)
+		StaticTokenFile   string        `koanf:"static_token_file"`   // alternative: read the PAT from this file
+	} `koanf:"github"`
+
 	Egress struct {
 		Enforce       bool     `koanf:"enforce"`
 		AllowCIDRs    []string `koanf:"allow_cidrs"`
@@ -112,6 +124,11 @@ var spawnletEnvAliases = map[string]string{
 	"NODE_GITHUB_MINT_DEV_NODE_ID":  "node.github_mint_dev_id",
 	"CP_ADDR":                       "cp.addr",
 	"CP_NODE_ADDR":                  "cp.node_addr",
+	"GITHUB_API_BASE_URL":           "github.api_base_url",
+	"GITHUB_HOST":                   "github.host",
+	"GITHUB_ALLOW_INSECURE_HOST":    "github.allow_insecure_host",
+	"GITHUB_STATIC_TOKEN":           "github.static_token",
+	"GITHUB_STATIC_TOKEN_FILE":      "github.static_token_file",
 	"EGRESS_ENFORCE":                "egress.enforce",
 	"EGRESS_ALLOW_CIDRS":            "egress.allow_cidrs",
 	"EGRESS_FLOOR_FORCE_OFF":        "egress.floor_force_off",

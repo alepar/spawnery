@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	configfiles "spawnery/config"
 	"spawnery/internal/config"
 	"spawnery/internal/spawnlet"
+	"spawnery/internal/storage"
 )
 
 // loadSpawnletTest is a test helper that calls config.Load[Spawnlet] with an injected getenv map
@@ -113,6 +117,149 @@ func TestSpawnletConfig_CSVAgentBinaries(t *testing.T) {
 	}
 	if len(cfg.AgentBinaries) != 3 || cfg.AgentBinaries[0] != "opencode" {
 		t.Errorf("AgentBinaries = %v, want [opencode goose claude-code]", cfg.AgentBinaries)
+	}
+}
+
+func TestSpawnletConfig_GitHubOverrideEnvAliases(t *testing.T) {
+	cfg, err := loadSpawnletTest(t, "dev", map[string]string{
+		"GITHUB_API_BASE_URL":        "http://127.0.0.1:3000/api/v1",
+		"GITHUB_HOST":                "127.0.0.1:3000",
+		"GITHUB_ALLOW_INSECURE_HOST": "true",
+		"GITHUB_STATIC_TOKEN":        "gitea-pat-abc",
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.GitHub.APIBaseURL != "http://127.0.0.1:3000/api/v1" {
+		t.Errorf("GitHub.APIBaseURL = %q", cfg.GitHub.APIBaseURL)
+	}
+	if cfg.GitHub.Host != "127.0.0.1:3000" {
+		t.Errorf("GitHub.Host = %q", cfg.GitHub.Host)
+	}
+	if !cfg.GitHub.AllowInsecureHost {
+		t.Error("GitHub.AllowInsecureHost = false, want true")
+	}
+	if string(cfg.GitHub.StaticToken) != "gitea-pat-abc" {
+		t.Errorf("GitHub.StaticToken not resolved (redaction is display-only)")
+	}
+}
+
+// TestSpawnletConfig_GitHubOverrideAbsentDefault pins that the github override is OFF by default:
+// no env, no static token, secure. This is the production-parity invariant.
+func TestSpawnletConfig_GitHubOverrideAbsentDefault(t *testing.T) {
+	cfg, err := loadSpawnletTest(t, "dev", nil)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.GitHub.Host != "" || cfg.GitHub.APIBaseURL != "" || cfg.GitHub.AllowInsecureHost || string(cfg.GitHub.StaticToken) != "" {
+		t.Errorf("github override should be empty by default, got %+v", cfg.GitHub)
+	}
+}
+
+// --- configureGitHubOverride tests ----------------------------------------
+
+// TestConfigureGitHubOverride_AbsentIsNoOp is the production-default guarantee: with no GitHub
+// config, managerCfg carries no host override, no repo service, and no static credentials.
+func TestConfigureGitHubOverride_AbsentIsNoOp(t *testing.T) {
+	cfg := &Spawnlet{}
+	cfg.DataRoot = t.TempDir()
+	var mc spawnlet.ManagerConfig
+	if err := configureGitHubOverride(&mc, cfg); err != nil {
+		t.Fatalf("configureGitHubOverride: %v", err)
+	}
+	if mc.GitHubHost != "" || mc.GitHubAllowInsecureHost || mc.GitHubRepos != nil || mc.GitHubStaticCredentials != nil {
+		t.Fatalf("expected no-op, got %+v", mc)
+	}
+}
+
+// TestConfigureGitHubOverride_StaticToken wires the full Gitea lane: repo service targeted at the
+// API base, host override + insecure flag set, and a static credential provider backed by a rendered
+// credential-helper on disk.
+func TestConfigureGitHubOverride_StaticToken(t *testing.T) {
+	cfg := &Spawnlet{}
+	cfg.DataRoot = t.TempDir()
+	cfg.GitHub.APIBaseURL = "http://127.0.0.1:3000/api/v1"
+	cfg.GitHub.Host = "127.0.0.1:3000"
+	cfg.GitHub.AllowInsecureHost = true
+	cfg.GitHub.StaticToken = "gitea-pat-abc"
+
+	var mc spawnlet.ManagerConfig
+	if err := configureGitHubOverride(&mc, cfg); err != nil {
+		t.Fatalf("configureGitHubOverride: %v", err)
+	}
+	if mc.GitHubHost != "127.0.0.1:3000" || !mc.GitHubAllowInsecureHost {
+		t.Errorf("host override = %q insecure=%v, want 127.0.0.1:3000 true", mc.GitHubHost, mc.GitHubAllowInsecureHost)
+	}
+	if mc.GitHubRepos == nil {
+		t.Error("GitHubRepos = nil, want a repo service for the API base")
+	}
+	if mc.GitHubStaticCredentials == nil {
+		t.Fatal("GitHubStaticCredentials = nil, want a static provider")
+	}
+	cred, err := mc.GitHubStaticCredentials.TokenForGitHubMount(context.Background(), "s", "repo", storage.GitHubConfig{})
+	if err != nil {
+		t.Fatalf("TokenForGitHubMount: %v", err)
+	}
+	tok, err := cred.Token()
+	if err != nil || tok != "gitea-pat-abc" {
+		t.Fatalf("Token = %q, %v, want gitea-pat-abc", tok, err)
+	}
+	// The rendered helper must exist, be executable, and reproduce the token via a sibling token file.
+	info, err := os.Stat(cred.CredentialHelperPath)
+	if err != nil {
+		t.Fatalf("stat helper: %v", err)
+	}
+	if info.Mode().Perm()&0o100 == 0 {
+		t.Errorf("helper is not executable (mode %v)", info.Mode())
+	}
+	tokBytes, err := os.ReadFile(filepath.Join(cfg.DataRoot, "github-static", "token"))
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if strings.TrimSpace(string(tokBytes)) != "gitea-pat-abc" {
+		t.Errorf("token file = %q, want gitea-pat-abc", strings.TrimSpace(string(tokBytes)))
+	}
+}
+
+// TestConfigureGitHubOverride_StaticTokenFromFile resolves the PAT from GITHUB_STATIC_TOKEN_FILE.
+func TestConfigureGitHubOverride_StaticTokenFromFile(t *testing.T) {
+	cfg := &Spawnlet{}
+	cfg.DataRoot = t.TempDir()
+	tokFile := filepath.Join(t.TempDir(), "pat")
+	if err := os.WriteFile(tokFile, []byte("file-pat-123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.GitHub.StaticTokenFile = tokFile
+
+	var mc spawnlet.ManagerConfig
+	if err := configureGitHubOverride(&mc, cfg); err != nil {
+		t.Fatalf("configureGitHubOverride: %v", err)
+	}
+	if mc.GitHubStaticCredentials == nil {
+		t.Fatal("GitHubStaticCredentials = nil, want provider from token file")
+	}
+	cred, _ := mc.GitHubStaticCredentials.TokenForGitHubMount(context.Background(), "s", "repo", storage.GitHubConfig{})
+	if tok, _ := cred.Token(); tok != "file-pat-123" {
+		t.Errorf("Token = %q, want file-pat-123 (trimmed)", tok)
+	}
+}
+
+// TestConfigureGitHubOverride_HostOnlyNoStatic covers a host override WITHOUT a static token (e.g. a
+// self-hosted GitHub still using the AS mint): the host applies, but no static provider is installed.
+func TestConfigureGitHubOverride_HostOnlyNoStatic(t *testing.T) {
+	cfg := &Spawnlet{}
+	cfg.DataRoot = t.TempDir()
+	cfg.GitHub.Host = "ghe.internal"
+
+	var mc spawnlet.ManagerConfig
+	if err := configureGitHubOverride(&mc, cfg); err != nil {
+		t.Fatalf("configureGitHubOverride: %v", err)
+	}
+	if mc.GitHubHost != "ghe.internal" {
+		t.Errorf("GitHubHost = %q, want ghe.internal", mc.GitHubHost)
+	}
+	if mc.GitHubStaticCredentials != nil {
+		t.Error("GitHubStaticCredentials should be nil without a static token")
 	}
 }
 

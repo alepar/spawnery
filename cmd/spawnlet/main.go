@@ -23,6 +23,7 @@ import (
 	"spawnery/gen/spawn/v1/spawnv1connect"
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/token"
+	"spawnery/internal/config"
 	"spawnery/internal/h2keepalive"
 	"spawnery/internal/health"
 	applog "spawnery/internal/log"
@@ -36,6 +37,7 @@ import (
 	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/spawnlet/firewall"
+	"spawnery/internal/storage"
 	"spawnery/internal/storage/journal"
 )
 
@@ -65,6 +67,9 @@ func main() {
 		DeltaScrubPaths:     cfg.Delta.ScrubPaths,
 		AdvertiseIP:         cfg.Node.AdvertiseIP,
 		UsernsMode:          cfg.UsernsMode,
+	}
+	if err := configureGitHubOverride(&managerCfg, cfg); err != nil {
+		log.Fatalf("github override: %v", err)
 	}
 	mgr, err := buildManager(managerCfg, cfg.CRI.Endpoint, cfg.CRI.RuntimeHandler, cfg.PodDNS)
 	if err != nil {
@@ -342,6 +347,87 @@ func applyUsernsProbe(base uint32, active bool, probeErr error) (mode string, re
 		return "off", 0
 	}
 	return "remap", base
+}
+
+// configureGitHubOverride wires the node's non-github.com git-host lane onto managerCfg from the
+// GITHUB_* config (DEV/TEST only; the e2e-vm Gitea lane). With no GitHub config set it is a no-op —
+// github: mounts keep the production default (github.com, AS-minted, secure).
+//
+// When a static token is configured (GITHUB_STATIC_TOKEN or GITHUB_STATIC_TOKEN_FILE) it:
+//   - points the repo service at GITHUB_API_BASE_URL (Gitea's /api/v1),
+//   - sets the mount Host + AllowInsecureHost so http clone URLs validate,
+//   - renders a git credential-helper (echoing the PAT) and installs a StaticGitHubCredentials
+//     provider so the node clones without any AS mint.
+//
+// GITHUB_HOST/GITHUB_ALLOW_INSECURE_HOST may also be set WITHOUT a static token (e.g. a self-hosted
+// GitHub Enterprise still using the AS mint); the host override applies either way.
+func configureGitHubOverride(managerCfg *spawnlet.ManagerConfig, cfg *Spawnlet) error {
+	g := cfg.GitHub
+	managerCfg.GitHubHost = strings.TrimSpace(g.Host)
+	managerCfg.GitHubAllowInsecureHost = g.AllowInsecureHost
+
+	if base := strings.TrimSpace(g.APIBaseURL); base != "" {
+		managerCfg.GitHubRepos = storage.NewDefaultGitHubRepoService(base)
+	}
+
+	token, err := githubStaticToken(g.StaticToken, g.StaticTokenFile)
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		return nil // no static-token lane; host override (if any) still applied above
+	}
+	helperPath, err := writeGitHubStaticCredentialHelper(cfg.DataRoot, token)
+	if err != nil {
+		return err
+	}
+	managerCfg.GitHubStaticCredentials = storage.StaticGitHubCredentials{
+		AccessToken:          token,
+		CredentialHelperPath: helperPath,
+	}
+	log.Printf("github: STATIC-TOKEN lane enabled (host=%q, api=%q, insecure=%v) — DEV/TEST ONLY, no AS mint",
+		managerCfg.GitHubHost, strings.TrimSpace(g.APIBaseURL), managerCfg.GitHubAllowInsecureHost)
+	return nil
+}
+
+// githubStaticToken resolves the static PAT from the inline secret or a file path (inline wins).
+func githubStaticToken(inline config.Secret, file string) (string, error) {
+	if t := strings.TrimSpace(string(inline)); t != "" {
+		return t, nil
+	}
+	if file = strings.TrimSpace(file); file != "" {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("read GITHUB_STATIC_TOKEN_FILE %s: %w", file, err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return "", nil
+}
+
+// writeGitHubStaticCredentialHelper writes a 0600 token file plus an executable git
+// credential-helper that cats it and echoes basic-auth for any clone. Both live under
+// DataRoot/github-static (node-only, never bind-mounted into the agent), mode 0700 dir. The helper
+// reads the token from a file rather than embedding it, so the secret is not baked into the
+// executable. Mirrors the github_e2e lane's writeCredHelper — appropriate only for a local git
+// server under AllowInsecureHost.
+func writeGitHubStaticCredentialHelper(dataRoot, token string) (string, error) {
+	dir := filepath.Join(dataRoot, "github-static")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	tokenPath := filepath.Join(dir, "token")
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	helperPath := filepath.Join(dir, "git-credential-static")
+	// Gitea accepts the PAT as the basic-auth password with any username. The helper ignores stdin
+	// and unconditionally echoes the credential — correct for a single-token dev git host.
+	script := fmt.Sprintf("#!/bin/sh\ntoken=$(cat %q)\nprintf 'username=git\\npassword=%%s\\n' \"$token\"\n", tokenPath)
+	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
+		return "", err
+	}
+	return helperPath, nil
 }
 
 // h2cClient mirrors cmd/spawnctl's: cleartext HTTP/2 for the CP dial.
