@@ -29,7 +29,7 @@ log(){ printf '\033[36m[provision]\033[0m %s\n' "$*"; }
 
 log "installing base packages…"
 sudo dnf -y install curl tar iptables-legacy postgresql-server postgresql caddy chrony \
-  qemu-guest-agent cloud-init rsync jq openssl containernetworking-plugins || true
+  qemu-guest-agent cloud-init rsync jq openssl containernetworking-plugins git || true
 sudo systemctl enable --now chronyd qemu-guest-agent
 
 # ---- containerd (pinned) ----
@@ -425,7 +425,11 @@ sudo tee /etc/systemd/system/spawnery-node.service >/dev/null <<'EOF'
 [Unit]
 Description=spawnery node (spawnlet)
 After=spawnery-render-env.service spawnery-cp.service containerd.service spawnery-garage-bootstrap.service spawnery-gitea-bootstrap.service
-Requires=spawnery-render-env.service spawnery-garage-bootstrap.service spawnery-gitea-bootstrap.service
+Requires=spawnery-render-env.service spawnery-garage-bootstrap.service
+# Gitea is a test-only git host: order after its bootstrap and consume its env fragment (optional
+# EnvironmentFile below), but Wants= not Requires= so a Gitea failure only breaks git-mount tests,
+# not the whole node (suspend/fork/etc. must stay up).
+Wants=spawnery-gitea-bootstrap.service
 [Service]
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
