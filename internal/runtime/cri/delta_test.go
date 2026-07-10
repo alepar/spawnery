@@ -264,10 +264,7 @@ func TestCaptureDeltaHappyPath(t *testing.T) {
 	}
 }
 
-// Source-preserving fork capture (targetSpawnID != source): captures the source's snapshot as the
-// fork's delta image WITHOUT stopping/removing the source container — the caller has already Pause()d
-// it (snapshot quiesced) and will unpause it, so both source and fork stay active.
-func TestCaptureDeltaAsForkPreservesSource(t *testing.T) {
+func TestCaptureDeltaAsRejectsForkBeforeStoppingSource(t *testing.T) {
 	fakeEng := &fakeDeltaEngine{
 		captureRef:       runtime.DeltaTag("sp-fork"),
 		captureDeltaSize: 1024,
@@ -275,22 +272,20 @@ func TestCaptureDeltaAsForkPreservesSource(t *testing.T) {
 	c, f := newFakeCRI(t)
 	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
 
-	ref, err := b.CaptureDeltaAs(context.Background(), &runtime.PodHandle{
+	_, err := b.CaptureDeltaAs(context.Background(), &runtime.PodHandle{
 		AgentID: "ctr-source", SpawnID: "sp-source", BaseImageRef: "base:v1",
 	}, "sp-fork")
-	if err != nil {
-		t.Fatalf("source-preserving fork CaptureDeltaAs: %v", err)
+	if err == nil {
+		t.Fatal("CaptureDeltaAs must reject fork capture in the CRI lane")
 	}
-	if ref != runtime.DeltaTag("sp-fork") {
-		t.Fatalf("ref = %q, want %q", ref, runtime.DeltaTag("sp-fork"))
+	if !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("CaptureDeltaAs error = %v, want unsupported", err)
 	}
-	// The source container must NOT be stopped or removed (it stays paused for the caller to unpause).
 	if len(f.stopped) != 0 || len(f.removedContainers) != 0 {
 		t.Fatalf("fork CaptureDeltaAs must not stop/remove source: stopped=%v removed=%v", f.stopped, f.removedContainers)
 	}
-	// It must still capture the source's snapshot (keyed by the source container id) as the fork image.
-	if fakeEng.captureKey != "ctr-source" {
-		t.Fatalf("fork CaptureDeltaAs captureKey = %q, want %q", fakeEng.captureKey, "ctr-source")
+	if fakeEng.captureKey != "" {
+		t.Fatalf("fork CaptureDeltaAs must not capture after rejecting: captureKey=%q", fakeEng.captureKey)
 	}
 }
 
