@@ -234,9 +234,11 @@ func main() {
 
 	// CP→AS GitHub link-status preflight: gated on CP_AS_URL; also uses the existing CP_AS_RPC_SECRET.
 	// When set, CreateSpawn checks the owner's GitHub link state before persisting a github:-mount spawn.
-	if asURL := strings.TrimSpace(cfg.Auth.ASURL); asURL != "" {
+	if asURL := strings.TrimSpace(cfg.Auth.ASURL); asURL != "" && !cfg.Auth.GitHubLinkPreflightDisabled {
 		srv.SetASLinkChecker(asURL, string(cfg.Auth.ASRPCSecret))
 		log.Printf("cp: GitHub link preflight checker wired to AS %s", asURL)
+	} else if cfg.Auth.GitHubLinkPreflightDisabled {
+		log.Printf("cp: GitHub link preflight DISABLED (auth.github_link_preflight_disabled=true) — static-token git-host dev lane")
 	}
 
 	// URL skill ingest (sp-nrzf.3.14.4): wire Garage skill store + fetcher when configured.
