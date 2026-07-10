@@ -14,9 +14,9 @@ export function newMarker(runId: string, spawnId: string): string {
   return `${runId}-${spawnId}-${time}-${rand}`;
 }
 
-/** markerPath: the workspace file the marker lives in, namespaced by runId under the mounted workspace. */
+/** markerPath: the marker file, in the journaled node-local workspace mount (/app/data), namespaced by runId. */
 export function markerPath(runId: string): string {
-  return `/app/.acc-marker-${runId}`;
+  return `/app/data/.acc-marker-${runId}`;
 }
 
 /** writeMarker: writes `marker` to markerPath(runId) inside the spawn's agent container. */

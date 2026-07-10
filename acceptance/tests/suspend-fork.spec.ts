@@ -18,33 +18,30 @@ import { waitForStatus, GARAGE_HINT } from "../src/scenarios/wait";
 // Spawnable seed app id, a documented target precondition (see .env.example).
 const appId = process.env.ACC_TEST_APP_ID ?? "opencode";
 
-test("suspend/resume preserves per-run marker · web", { tag: "@mutating" }, async ({ ctx, web, api, runId, target }) => {
-  const cfg = execConfigFromTarget(target);
+// suspend/resume across BOTH surfaces: the marker survives a full suspend (workspace → journal,
+// pod torn down) + resume (journal → new pod). Proves the Garage journal moves the workspace.
+// spawnctl gained a `suspend` verb (sp-6ag5.2), so cli is no longer a parity gap.
+for (const surface of ["web", "cli"] as const) {
+  test(`suspend/resume preserves per-run marker · ${surface}`, { tag: "@mutating" }, async ({ ctx, web, cli, api, runId, target }) => {
+    const driver = surface === "web" ? web : cli;
+    const cfg = execConfigFromTarget(target);
 
-  const id = await web.createSpawn(ctx, { appId });
-  await web.waitActive(ctx, id);
+    const id = await driver.createSpawn(ctx, { appId });
+    await driver.waitActive(ctx, id);
 
-  const marker = newMarker(runId, id);
-  await writeMarker(cfg, id, runId, marker);
+    const marker = newMarker(runId, id);
+    await writeMarker(cfg, id, runId, marker);
 
-  await web.suspend(ctx, id);
-  await waitForStatus(api, id, "SUSPENDED", { timeoutHint: GARAGE_HINT });
+    await driver.suspend(ctx, id);
+    await waitForStatus(api, id, "SUSPENDED", { timeoutHint: GARAGE_HINT });
 
-  await web.resume(ctx, id);
-  await web.waitActive(ctx, id);
-  expect(await api.listSpawns()).toContainSpawn(id, { status: "ACTIVE" });
+    await driver.resume(ctx, id);
+    await driver.waitActive(ctx, id);
+    expect(await api.listSpawns()).toContainSpawn(id, { status: "ACTIVE" });
 
-  assertFreshMarker(await readMarker(cfg, id, runId), marker);
-});
-
-test("cli suspend is a known parity gap (expected fail) · cli", { tag: "@mutating" }, async ({ ctx, cli }) => {
-  // spawnctl has no `suspend` verb (CliDriver stub throws parityGap). Tracked as product debt —
-  // when spawnctl gains suspend this test starts PASSING, Playwright flags "unexpected pass",
-  // and that is the signal to update this row and drop test.fail(). See the follow-up bead filed
-  // alongside this task (spawnctl suspend cli parity gap).
-  test.fail();
-  await cli.suspend(ctx, "sp-nonexistent"); // throws synchronously → satisfies test.fail()
-});
+    assertFreshMarker(await readMarker(cfg, id, runId), marker);
+  });
+}
 
 for (const surface of ["web", "cli"] as const) {
   test(`fork inherits per-run marker · ${surface}`, { tag: "@mutating" }, async ({ ctx, web, cli, api, ns, runId, target }) => {

@@ -15,7 +15,7 @@ describe("newMarker", () => {
 
 describe("markerPath", () => {
   it("is namespaced by runId under the mounted workspace", () => {
-    expect(markerPath("r1")).toBe("/app/.acc-marker-r1");
+    expect(markerPath("r1")).toBe("/app/data/.acc-marker-r1");
   });
 });
 

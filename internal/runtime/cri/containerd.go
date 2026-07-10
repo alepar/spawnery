@@ -17,6 +17,7 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	pkgrootfs "github.com/containerd/containerd/v2/pkg/rootfs"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
@@ -34,6 +35,10 @@ const defaultSnapshotter = "overlayfs"
 // containerdEngine builds OCI delta images using the native containerd APIs over the shared
 // CRI gRPC connection. It implements deltaEngine. Raw containerd calls are kept thin here;
 // all orchestration (ordering, guard, lease naming) is in delta.go and unit-tested there.
+// containerdNamespace is the CRI containerd namespace (kubelet/crictl use "k8s.io"); the delta
+// image + lease records live here, so every raw ImageService/LeasesService op must carry it in ctx.
+const containerdNamespace = "k8s.io"
+
 type containerdEngine struct {
 	client *ctrclient.Client
 }
@@ -42,7 +47,7 @@ type containerdEngine struct {
 // No new dial is performed; the containerd client is multiplexed on top of the same socket.
 // NewWithConn does no I/O, so this constructor is I/O-free (safe for lazy-init).
 func newContainerdEngine(conn *grpc.ClientConn) (deltaEngine, error) {
-	c, err := ctrclient.NewWithConn(conn, ctrclient.WithDefaultNamespace("k8s.io"))
+	c, err := ctrclient.NewWithConn(conn, ctrclient.WithDefaultNamespace(containerdNamespace))
 	if err != nil {
 		return nil, fmt.Errorf("containerd client from conn: %w", err)
 	}
@@ -60,6 +65,7 @@ func (e *containerdEngine) Close() error { return nil }
 // of the produced delta blob; a zero value means the diff was empty.
 // On any error a best-effort lease deletion is attempted to prevent orphaned blobs.
 func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseRef, leaseID string) (string, int64, error) {
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	leaseMgr := e.client.LeasesService()
 
 	// Create the lease (idempotent: ignore AlreadyExists).
@@ -188,6 +194,7 @@ func (e *containerdEngine) assembleDeltaImage(ctx context.Context, name, baseRef
 // k8s.io namespace). Used by the suspend gate to quiesce agent writes before the final snapshot
 // (spec §3). Thin wrapper: LoadContainer → Task → Pause.
 func (e *containerdEngine) Pause(ctx context.Context, key string) error {
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	c, err := e.client.LoadContainer(ctx, key)
 	if err != nil {
 		return fmt.Errorf("load container %s: %w", key, err)
@@ -204,6 +211,7 @@ func (e *containerdEngine) Pause(ctx context.Context, key string) error {
 
 // Resume resumes the containerd task for the container identified by key.
 func (e *containerdEngine) Resume(ctx context.Context, key string) error {
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	c, err := e.client.LoadContainer(ctx, key)
 	if err != nil {
 		return fmt.Errorf("load container %s: %w", key, err)
@@ -221,6 +229,10 @@ func (e *containerdEngine) Resume(ctx context.Context, key string) error {
 // Release deletes the per-spawn image record and its pinning lease so the GC can reclaim the
 // blobs. Ignores NotFound so a double-Release is safe.
 func (e *containerdEngine) Release(ctx context.Context, name, leaseID string) error {
+	// The raw ImageService()/LeasesService() ops read the namespace from ctx (the client's
+	// WithDefaultNamespace only applies to the client's own convenience methods), and callers such
+	// as the fork unwind pass a bare context — without this the deletes fail "namespace is required".
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	var errParts []string
 
 	imgSvc := e.client.ImageService()
@@ -244,6 +256,7 @@ func (e *containerdEngine) Release(ctx context.Context, name, leaseID string) er
 // writable delta crosses the wire, reassembled on the target by AssembleOnBase. The blob is the
 // gzip layer tar produced by CreateDiff, shipped as-is.
 func (e *containerdEngine) ExportTopLayer(ctx context.Context, name string, w io.Writer) error {
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	cs := e.client.ContentStore()
 	img, err := e.client.ImageService().Get(ctx, name)
 	if err != nil {
@@ -285,6 +298,7 @@ func (e *containerdEngine) ExportTopLayer(ctx context.Context, name string, w io
 // base must already be present on the target (CP-pinned by digest). The blob is the gzip layer tar
 // from ExportTopLayer; assembleDeltaImage recomputes its uncompressed diffID for the config.
 func (e *containerdEngine) AssembleOnBase(ctx context.Context, baseRef, newTag, leaseID string, r io.Reader) error {
+	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	if baseRef != "" {
 		if _, err := e.client.ImageService().Get(ctx, baseRef); err != nil {
 			return fmt.Errorf("get base image %s: %w", baseRef, err)
