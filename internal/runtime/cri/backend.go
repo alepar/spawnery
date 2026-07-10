@@ -84,6 +84,14 @@ func (b *CRIPodBackend) StartPod(ctx context.Context, spec runtime.PodSpec) (*ru
 		sandboxCfg.DnsConfig = &runtimeapi.DNSConfig{Servers: b.DNSServers}
 	}
 	sb, err := b.c.runtime.RunPodSandbox(ctx, &runtimeapi.RunPodSandboxRequest{Config: sandboxCfg, RuntimeHandler: b.runtimeHandler})
+	if err != nil && isSandboxNameReserved(err) {
+		// A prior teardown left a stale sandbox under this deterministic name (e.g. a suspend whose
+		// RemovePodSandbox was cut short by the criStopTimeout while the gofer held a bind mount). The
+		// container that held the mount is gone by now, so reap the orphan and retry once so a resume
+		// can re-create the pod under the same name.
+		b.reapStaleSandbox(ctx, spec.ID)
+		sb, err = b.c.runtime.RunPodSandbox(ctx, &runtimeapi.RunPodSandboxRequest{Config: sandboxCfg, RuntimeHandler: b.runtimeHandler})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("run pod sandbox: %w", err)
 	}
@@ -149,6 +157,37 @@ func (b *CRIPodBackend) pullImage(ctx context.Context, image string) error {
 		return fmt.Errorf("pull image %s: %w", image, err)
 	}
 	return nil
+}
+
+// isSandboxNameReserved reports whether a RunPodSandbox error is the CRI "name already taken by a
+// still-present sandbox" precondition (a leftover from a prior wedged/incomplete teardown).
+func isSandboxNameReserved(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "reserve sandbox name") ||
+		strings.Contains(msg, "is reserved for") ||
+		strings.Contains(msg, "already in use") ||
+		strings.Contains(msg, "already exists")
+}
+
+// reapStaleSandbox best-effort stops+removes any pod sandbox whose metadata name/uid matches name
+// (the spawn id, set deterministically in StartPod). Used to clear an orphan a prior wedged teardown
+// left behind so a resume can re-create the pod under the same name. Each removal is bounded by
+// criStopTimeout so this cannot itself hang the resume.
+func (b *CRIPodBackend) reapStaleSandbox(ctx context.Context, name string) {
+	resp, err := b.c.runtime.ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{})
+	if err != nil {
+		return
+	}
+	for _, sb := range resp.GetItems() {
+		md := sb.GetMetadata()
+		if md.GetName() != name && md.GetUid() != name {
+			continue
+		}
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), criStopTimeout)
+		_, _ = b.c.runtime.StopPodSandbox(rctx, &runtimeapi.StopPodSandboxRequest{PodSandboxId: sb.GetId()})
+		_, _ = b.c.runtime.RemovePodSandbox(rctx, &runtimeapi.RemovePodSandboxRequest{PodSandboxId: sb.GetId()})
+		cancel()
+	}
 }
 
 func (b *CRIPodBackend) removeSandbox(ctx context.Context, sandboxID string) {
