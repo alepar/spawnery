@@ -126,14 +126,21 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 	for _, w := range m.takeWatchers(sp) {
 		w.Stop()
 	}
+	h := m.podHandleForSpawn(sp)
+	h.SpawnID = sp.ID
+	h.BaseImageRef = sp.LaunchImageRef
+	if h.BaseImageRef == "" {
+		h.BaseImageRef = sp.BaseImageDigest
+	}
+
 	sourceRestored := false
 	restoreSource := func() error {
 		if sourceRestored {
 			return nil
 		}
 		cleanupCtx := context.WithoutCancel(ctx)
-		if err := m.UnpauseIfPaused(cleanupCtx, sp.ID, int64(sp.Generation)); err != nil {
-			return fmt.Errorf("unpause source %s: %w", sp.ID, err)
+		if err := m.restoreForkSource(cleanupCtx, sp, h, req.ForkSpawnID); err != nil {
+			return err
 		}
 		if err := m.journal.Close(cleanupCtx, sp.ID); err != nil {
 			return fmt.Errorf("close source journal %s before watcher restart: %w", sp.ID, err)
@@ -148,12 +155,6 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 		}
 	}()
 
-	h := m.podHandleForSpawn(sp)
-	h.SpawnID = sp.ID
-	h.BaseImageRef = sp.LaunchImageRef
-	if h.BaseImageRef == "" {
-		h.BaseImageRef = sp.BaseImageDigest
-	}
 	if err := m.pod.Pause(ctx, h); err != nil {
 		return ForkSameNodeResult{}, fmt.Errorf("fork same-node: pause source %s: %w", sp.ID, err)
 	}
@@ -404,14 +405,37 @@ func (m *Manager) UnpauseIfPaused(ctx context.Context, spawnID string, generatio
 		return nil
 	}
 	if err := m.pod.Unpause(context.WithoutCancel(ctx), m.podHandleForSpawn(sp)); err != nil {
-		msg := strings.ToLower(err.Error())
-		if strings.Contains(msg, "not paused") || strings.Contains(msg, "is not paused") ||
-			strings.Contains(msg, "already running") {
+		if sourceAlreadyRunning(err) {
 			return nil
 		}
 		return err
 	}
 	return nil
+}
+
+// restoreForkSource returns the fork source to a running state and persists a re-launched agent id.
+// The Docker lane unpauses the still-live source; the CRI lane re-launches the agent it stopped+
+// removed for the snapshot diff, from the captured fork delta (m.pod.RestoreForkedSource). A "not
+// paused" error means the source was never paused (an early-failure cleanup) and is tolerated.
+func (m *Manager) restoreForkSource(ctx context.Context, sp *Spawn, h *runtime.PodHandle, forkID string) error {
+	if err := m.pod.RestoreForkedSource(ctx, h, runtime.DeltaTag(forkID)); err != nil && !sourceAlreadyRunning(err) {
+		return fmt.Errorf("restore source %s: %w", sp.ID, err)
+	}
+	// A CRI re-launch assigns a fresh agent container id; persist it so attach/exec/stop on the source
+	// find the new container. Docker keeps the same id (no-op).
+	if h.AgentID != "" && h.AgentID != sp.AgentID {
+		sp.AgentID = h.AgentID
+		m.store.Put(sp)
+	}
+	return nil
+}
+
+// sourceAlreadyRunning reports whether err from a source-restore means the source was not paused
+// (i.e. already running) — a tolerable outcome on an early-failure cleanup path.
+func sourceAlreadyRunning(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not paused") || strings.Contains(msg, "is not paused") ||
+		strings.Contains(msg, "already running")
 }
 
 func (m *Manager) podHandleForSpawn(sp *Spawn) *runtime.PodHandle {

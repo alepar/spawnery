@@ -126,14 +126,21 @@ func (m *Manager) ForkTransferExport(ctx context.Context, req ForkTransferExport
 	for _, w := range m.takeWatchers(sp) {
 		w.Stop()
 	}
+	h := m.podHandleForSpawn(sp)
+	h.SpawnID = sp.ID
+	h.BaseImageRef = sp.LaunchImageRef
+	if h.BaseImageRef == "" {
+		h.BaseImageRef = sp.BaseImageDigest
+	}
+
 	sourceRestored := false
 	restoreSource := func() error {
 		if sourceRestored {
 			return nil
 		}
 		cleanupCtx := context.WithoutCancel(ctx)
-		if err := m.UnpauseIfPaused(cleanupCtx, sp.ID, int64(sp.Generation)); err != nil {
-			return fmt.Errorf("unpause source %s: %w", sp.ID, err)
+		if err := m.restoreForkSource(cleanupCtx, sp, h, req.ForkSpawnID); err != nil {
+			return err
 		}
 		if err := m.journal.Close(cleanupCtx, sp.ID); err != nil {
 			return fmt.Errorf("close source journal %s before watcher restart: %w", sp.ID, err)
@@ -148,12 +155,6 @@ func (m *Manager) ForkTransferExport(ctx context.Context, req ForkTransferExport
 		}
 	}()
 
-	h := m.podHandleForSpawn(sp)
-	h.SpawnID = sp.ID
-	h.BaseImageRef = sp.LaunchImageRef
-	if h.BaseImageRef == "" {
-		h.BaseImageRef = sp.BaseImageDigest
-	}
 	if err := m.pod.Pause(ctx, h); err != nil {
 		return ForkTransferExportResult{}, fmt.Errorf("fork transfer export: pause source %s: %w", sp.ID, err)
 	}

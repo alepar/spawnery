@@ -52,6 +52,17 @@ func (b *recordingForkBackend) Unpause(ctx context.Context, h *runtime.PodHandle
 	return b.fakePodBackend.Unpause(ctx, h)
 }
 
+// RestoreForkedSource is the source-restore path the fork flow now uses (Docker-lane: unpause). It
+// records the same op label as Unpause and honors unpauseErr so the capture-failure test still
+// exercises a failing restore.
+func (b *recordingForkBackend) RestoreForkedSource(ctx context.Context, h *runtime.PodHandle, deltaRef string) error {
+	b.rec.add("unpause-agent:" + h.SpawnID)
+	if b.unpauseErr != nil {
+		return b.unpauseErr
+	}
+	return b.fakePodBackend.RestoreForkedSource(ctx, h, deltaRef)
+}
+
 func (b *recordingForkBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle, targetSpawnID string) (string, error) {
 	b.rec.add("capture-rootfs-as:" + targetSpawnID)
 	return b.fakePodBackend.CaptureDeltaAs(ctx, h, targetSpawnID)

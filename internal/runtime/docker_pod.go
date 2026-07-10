@@ -298,6 +298,13 @@ func (d *DockerPodBackend) Unpause(ctx context.Context, h *PodHandle) error {
 	return d.rt.UnpauseContainer(ctx, h.AgentID)
 }
 
+// RestoreForkedSource returns the source to running after CaptureDeltaAs. The Docker lane commits the
+// writable layer while the container keeps running (CommitContainerPreserving), so the source is only
+// paused → unpause it. deltaRef is unused (no re-launch needed, the container never went away).
+func (d *DockerPodBackend) RestoreForkedSource(ctx context.Context, h *PodHandle, _ string) error {
+	return d.Unpause(ctx, h)
+}
+
 var _ PodBackend = (*DockerPodBackend)(nil)
 
 func (d *DockerPodBackend) ImportDelta(ctx context.Context, spawnID, baseRef string, r io.Reader) (string, error) {

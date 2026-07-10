@@ -104,9 +104,6 @@ func (b *CRIPodBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) 
 }
 
 func (b *CRIPodBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle, targetSpawnID string) (string, error) {
-	if targetSpawnID != h.SpawnID {
-		return "", fmt.Errorf("cri source-preserving fork capture from %s as %s is unsupported", h.SpawnID, targetSpawnID)
-	}
 	eng, err := b.engine()
 	if err != nil {
 		return "", fmt.Errorf("cri delta engine: %w", err)
@@ -118,7 +115,14 @@ func (b *CRIPodBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle
 	name := runtime.DeltaTag(targetSpawnID)
 	leaseID := deltaLeaseID(targetSpawnID)
 
-	// Stop the container (not remove) so its snapshot is quiesced before diff.
+	// Both suspend and fork Pause the agent task before capture. StopContainer must deliver a signal,
+	// which a frozen task cannot receive, so resume it first (best-effort — a running task is fine).
+	_ = eng.Resume(ctx, h.AgentID)
+
+	// Stop the container so its snapshot is quiesced/released before the diff. containerd's CreateDiff
+	// cannot diff a snapshot still held by a running (or merely paused) task — the stop is what frees
+	// it, which is also why a source-preserving fork must RE-LAUNCH the source (RestoreForkedSource),
+	// not unpause it: the task is gone after this.
 	if _, err := b.c.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{ContainerId: h.AgentID}); err != nil {
 		return "", fmt.Errorf("cri capture stop %s: %w", h.AgentID, err)
 	}
@@ -137,11 +141,40 @@ func (b *CRIPodBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle
 			targetSpawnID, deltaSize)
 	}
 
-	// Best-effort remove after capture is pinned. Mirrors the docker lane's best-effort Stop.
-	// The subsequent Manager Stop→removeSandbox reaps any leftover if this fails.
+	// Remove the stopped source container and clear the handle's agent id. The empty AgentID is the
+	// signal RestoreForkedSource reads to re-launch (rather than unpause) the source on a fork; on the
+	// suspend path the pod is torn down next and Stop tolerates the empty id.
 	_, _ = b.c.runtime.RemoveContainer(ctx, &runtimeapi.RemoveContainerRequest{ContainerId: h.AgentID})
+	h.AgentID = ""
 
 	return ref, nil
+}
+
+// RestoreForkedSource re-launches the source agent container after a source-preserving CaptureDeltaAs
+// stopped+removed it (h.AgentID cleared), recreating it in the still-live pod sandbox from deltaRef
+// (the just-captured delta image; falls back to h.BaseImageRef if the delta is absent, e.g. a failed
+// capture). The source resumes from its snapshot: the live agent process restarts, filesystem
+// preserved. If h.AgentID is still set the source was paused but never captured (an early-failure
+// cleanup path) → unpause it instead.
+func (b *CRIPodBackend) RestoreForkedSource(ctx context.Context, h *runtime.PodHandle, deltaRef string) error {
+	if h.AgentID != "" {
+		return b.Unpause(ctx, h)
+	}
+	b.mu.Lock()
+	spec, ok := b.agentSpecs[h.SandboxID]
+	b.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("cri restore forked source: no cached agent spec for sandbox %s (spawnlet restarted?)", h.SandboxID)
+	}
+	imageRef, err := b.EnsureImage(ctx, h.BaseImageRef, deltaRef)
+	if err != nil {
+		return fmt.Errorf("cri restore forked source: ensure image: %w", err)
+	}
+	spec.Image = imageRef
+	if err := b.StartAgent(ctx, h, spec); err != nil {
+		return fmt.Errorf("cri restore forked source: relaunch agent: %w", err)
+	}
+	return nil
 }
 
 // ReleaseDelta drops the per-spawn delta image and its pinning lease (GC).

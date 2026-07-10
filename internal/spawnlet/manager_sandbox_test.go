@@ -129,6 +129,14 @@ func (f *fakePodBackend) Unpause(_ context.Context, _ *runtime.PodHandle) error 
 	return nil
 }
 
+// RestoreForkedSource models the Docker-like default: the source stayed live, so restoring it is an
+// unpause. Fork-specific tests use recordingForkBackend to assert the delta ref / re-launch path.
+func (f *fakePodBackend) RestoreForkedSource(_ context.Context, _ *runtime.PodHandle, _ string) error {
+	f.paused = false
+	f.unpauseCount++
+	return nil
+}
+
 // DeltaSize implements the optional deltaSizer interface used by CheckQuotas.
 // It is defined on fakePodBackend so tests can enable it by setting deltaSizeMB > 0.
 // The interface assertion in CheckQuotas will succeed for any *fakePodBackend because

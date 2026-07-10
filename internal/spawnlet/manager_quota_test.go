@@ -73,6 +73,9 @@ func (n *noSizeFakeBackend) Pause(ctx context.Context, h *runtime.PodHandle) err
 func (n *noSizeFakeBackend) Unpause(ctx context.Context, h *runtime.PodHandle) error {
 	return n.inner.Unpause(ctx, h)
 }
+func (n *noSizeFakeBackend) RestoreForkedSource(ctx context.Context, h *runtime.PodHandle, deltaRef string) error {
+	return n.inner.RestoreForkedSource(ctx, h, deltaRef)
+}
 
 // Compile-time assertion: *noSizeFakeBackend must satisfy PodBackend but NOT deltaSizer.
 var _ runtime.PodBackend = (*noSizeFakeBackend)(nil)
