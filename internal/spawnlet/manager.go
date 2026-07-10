@@ -1668,17 +1668,55 @@ func (m *Manager) setWatchers(sp *Spawn, ws []*journal.Watcher) {
 	m.watchersMu.Unlock()
 }
 
+// snapshotHeartbeatInterval paces the in-progress heartbeat emitted while a single mount's
+// FinalSnapshot runs. It must stay well under the CP suspend stall window (defaultSuspendStallWindow,
+// 30s) so a slow single-mount snapshot never trips the stall detector between the coarse per-mount
+// "snapshot"/"snapshot_done" boundaries.
+const snapshotHeartbeatInterval = 10 * time.Second
+
+// finalSnapshotHeartbeat runs FinalSnapshot for one mount while emitting a wall-clock progress
+// heartbeat every snapshotHeartbeatInterval. A large single mount (e.g. a github .git with many
+// small objects) can take longer than the CP stall window with no per-mount boundary event in
+// between; the heartbeat keeps the CP stall timer reset until byte-level Kopia progress exists.
+// The heartbeat goroutine is always stopped and drained before returning (no stray events).
+func (m *Manager) finalSnapshotHeartbeat(ctx context.Context, id string, gen uint64, mt journal.Mount, progress SuspendProgressFunc) (map[string]journal.ManifestID, error) {
+	if progress == nil {
+		return m.journal.FinalSnapshot(ctx, id, gen, []journal.Mount{mt})
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(snapshotHeartbeatInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				progress("snapshotting", "journaling mount "+mt.Name+" (in progress)", nil)
+			}
+		}
+	}()
+	ids, err := m.journal.FinalSnapshot(ctx, id, gen, []journal.Mount{mt})
+	close(stop)
+	wg.Wait()
+	return ids, err
+}
+
 // snapshotJournal takes the final per-mount journal snapshot, stringifies the resulting manifest
 // ids into a markers map, and persists them to journalState (for same-node resume without CP
 // protocol). The caller is responsible for the `m.journal != nil && len(sp.JournalMounts) > 0`
 // guard. journal.Close is intentionally NOT called here — it stays in teardown so FinishSuspend
 // (snapshot=false) still closes the repo.
 //
-// progress (optional, nil-safe) is called ONCE PER JOURNALED MOUNT before its FinalSnapshot so the
-// CP stall detector can reset its timer between mounts (sp-u53.7.2 AC: large-but-advancing snapshot
-// must not false-time-out). Byte-level intra-mount granularity (a journal.FinalSnapshot progress
-// hook on the Kopia scan path) is a follow-up — open a bead scoped to internal/storage/journal
-// for byte-level callbacks. This coarse per-mount level already meets the bead's AC.
+// progress (optional, nil-safe) fires a "snapshot" event before each mount's FinalSnapshot and a
+// "snapshot_done" after, and finalSnapshotHeartbeat emits an in-progress heartbeat WHILE a single
+// mount snapshots — so both a many-small-mounts suspend and one slow mount keep the CP stall
+// detector's timer reset (sp-u53.7.2 AC: large-but-advancing snapshot must not false-time-out).
+// Byte-level intra-mount granularity (a journal.FinalSnapshot progress hook on the Kopia scan path)
+// remains a finer follow-up, but the wall-clock heartbeat already covers the stall window.
 func (m *Manager) snapshotJournal(ctx context.Context, sp *Spawn, progress SuspendProgressFunc) (map[string]string, error) {
 	id := sp.ID
 	// Snapshot each journaled mount individually so progress fires per mount. Calling
@@ -1690,7 +1728,7 @@ func (m *Manager) snapshotJournal(ctx context.Context, sp *Spawn, progress Suspe
 			// Pre-start signal: resets the CP stall timer before the potentially slow FinalSnapshot.
 			progress("snapshot", "journaling mount "+mt.Name, nil)
 		}
-		ids, err := m.journal.FinalSnapshot(ctx, id, sp.Generation, []journal.Mount{mt})
+		ids, err := m.finalSnapshotHeartbeat(ctx, id, sp.Generation, mt, progress)
 		if err != nil {
 			return nil, err
 		}

@@ -41,6 +41,10 @@ function giteaRepoName(runId: string): string {
 }
 
 test("github mount survives suspend/resume · cli", { tag: "@mutating" }, async ({ ctx, cli, api, runId, target }) => {
+  // The full flow — create + clone-in from Gitea + commit + a Garage suspend/resume round-trip — is
+  // well past Playwright's 30s default on the VM lane (marker-only suspend-fork just fits; the clone
+  // pushes this over). Match the slow-lane budget (cf. ACC_SPAWN_ACTIVE_TIMEOUT_MS=240s).
+  test.setTimeout(240_000);
   const cfg = execConfigFromTarget(target);
 
   // 1. Create a spawn on the seeded github-slot app, binding the slot to a fresh Gitea repo
