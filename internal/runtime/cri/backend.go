@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"spawnery/internal/runtime"
 
@@ -283,11 +284,26 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 	return nil
 }
 
+// criStopTimeout bounds the whole teardown (all StopContainer + StopPodSandbox/RemovePodSandbox
+// calls share this one deadline). It must stay under the CP suspend stall window (30s) so a wedged
+// stop fails the teardown fast enough for suspend to still complete rather than trip the detector.
+const criStopTimeout = 20 * time.Second
+
 // Stop tears down the agent + sidecar, then stops and removes the pod sandbox. Best-effort; empty
 // ids are skipped (e.g. agent never started on the fail-closed floor path).
 func (b *CRIPodBackend) Stop(ctx context.Context, h *runtime.PodHandle) error {
-	ctx = context.WithoutCancel(ctx)
+	// Best-effort teardown, but BOUNDED. WithoutCancel detaches from a possibly-cancelled caller ctx;
+	// the timeout then caps a wedged CRI call so teardown can never hang suspend/stop forever. Without
+	// this a paused agent task (StopContainer cannot signal a frozen gVisor task) or a bind mount the
+	// gofer can't release (StopPodSandbox) blocks indefinitely and trips the CP suspend stall window.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), criStopTimeout)
+	defer cancel()
 	if h.AgentID != "" {
+		// Resume a possibly-paused agent first so StopContainer's signal is delivered (mirrors the
+		// resume-before-stop in the delta-capture path).
+		if eng, err := b.engine(); err == nil {
+			_ = eng.Resume(ctx, h.AgentID)
+		}
 		_, _ = b.c.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{ContainerId: h.AgentID})
 	}
 	if h.SidecarID != "" {
