@@ -104,9 +104,6 @@ func (b *CRIPodBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) 
 }
 
 func (b *CRIPodBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle, targetSpawnID string) (string, error) {
-	if targetSpawnID != h.SpawnID {
-		return "", fmt.Errorf("cri source-preserving fork capture from %s as %s is unsupported", h.SpawnID, targetSpawnID)
-	}
 	eng, err := b.engine()
 	if err != nil {
 		return "", fmt.Errorf("cri delta engine: %w", err)
@@ -118,9 +115,16 @@ func (b *CRIPodBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle
 	name := runtime.DeltaTag(targetSpawnID)
 	leaseID := deltaLeaseID(targetSpawnID)
 
-	// Stop the container (not remove) so its snapshot is quiesced before diff.
-	if _, err := b.c.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{ContainerId: h.AgentID}); err != nil {
-		return "", fmt.Errorf("cri capture stop %s: %w", h.AgentID, err)
+	// Source-preserving fork capture (targetSpawnID != source): the source container must stay alive
+	// (both source and fork end active). The caller has already Pause()d the source, so its snapshot
+	// is quiesced (writes frozen) and diffable in place — we must NOT stop/remove it (that destroys
+	// the task the caller unpauses). For a self-capture (suspend/artifact, target==source) the spawn
+	// is going away, so we stop-to-quiesce then remove as before.
+	sourcePreserving := targetSpawnID != h.SpawnID
+	if !sourcePreserving {
+		if _, err := b.c.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{ContainerId: h.AgentID}); err != nil {
+			return "", fmt.Errorf("cri capture stop %s: %w", h.AgentID, err)
+		}
 	}
 
 	ref, deltaSize, err := eng.Capture(ctx, h.AgentID, name, h.BaseImageRef, leaseID)
@@ -137,9 +141,11 @@ func (b *CRIPodBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle
 			targetSpawnID, deltaSize)
 	}
 
-	// Best-effort remove after capture is pinned. Mirrors the docker lane's best-effort Stop.
-	// The subsequent Manager Stop→removeSandbox reaps any leftover if this fails.
-	_, _ = b.c.runtime.RemoveContainer(ctx, &runtimeapi.RemoveContainerRequest{ContainerId: h.AgentID})
+	// Best-effort remove after capture is pinned — ONLY for a self-capture (the spawn is going away).
+	// A source-preserving fork leaves the source container in place (paused) for the caller to unpause.
+	if !sourcePreserving {
+		_, _ = b.c.runtime.RemoveContainer(ctx, &runtimeapi.RemoveContainerRequest{ContainerId: h.AgentID})
+	}
 
 	return ref, nil
 }

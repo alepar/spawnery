@@ -21,6 +21,7 @@ import (
 	pkgrootfs "github.com/containerd/containerd/v2/pkg/rootfs"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
+	"github.com/distribution/reference"
 	digest "github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -58,6 +59,23 @@ func newContainerdEngine(conn *grpc.ClientConn) (deltaEngine, error) {
 // gRPC connection which is owned and closed by cri.Client. Calling c.client.Close() would
 // close the shared conn and break all subsequent CRI calls on the backend.
 func (e *containerdEngine) Close() error { return nil }
+
+// getImage resolves an image record by ref, tolerating short registry refs. containerd stores
+// registry images normalized ("docker.io/spawnery/agent:dev"), so a raw Get of a short base ref
+// like "spawnery/agent:dev" (what the CRI launch path accepts) returns NotFound; retry normalized.
+// Local delta tags ("spawnery/delta:<id>") are found by the first Get and left untouched.
+func (e *containerdEngine) getImage(ctx context.Context, ref string) (images.Image, error) {
+	img, err := e.client.ImageService().Get(ctx, ref)
+	if err == nil || !errdefs.IsNotFound(err) {
+		return img, err
+	}
+	if named, nerr := reference.ParseDockerRef(ref); nerr == nil && named.String() != ref {
+		if img2, err2 := e.client.ImageService().Get(ctx, named.String()); err2 == nil {
+			return img2, nil
+		}
+	}
+	return img, err
+}
 
 // Capture diffs the rw snapshot for snapshotKey (== the CRI container id, k8s.io ns) against
 // its parent chain, assembles a new image `name` (base layers + delta layer) pinned by lease
@@ -110,7 +128,7 @@ func (e *containerdEngine) Capture(ctx context.Context, snapshotKey, name, baseR
 // AssembleOnBase (delta blob shipped from another node, sp-ei4.1.14).
 func (e *containerdEngine) assembleDeltaImage(ctx context.Context, name, baseRef string, deltaDesc ocispec.Descriptor, diffID digest.Digest) error {
 	cs := e.client.ContentStore()
-	baseImg, err := e.client.ImageService().Get(ctx, baseRef)
+	baseImg, err := e.getImage(ctx, baseRef)
 	if err != nil {
 		return fmt.Errorf("get base image %s: %w", baseRef, err)
 	}
@@ -300,7 +318,7 @@ func (e *containerdEngine) ExportTopLayer(ctx context.Context, name string, w io
 func (e *containerdEngine) AssembleOnBase(ctx context.Context, baseRef, newTag, leaseID string, r io.Reader) error {
 	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	if baseRef != "" {
-		if _, err := e.client.ImageService().Get(ctx, baseRef); err != nil {
+		if _, err := e.getImage(ctx, baseRef); err != nil {
 			return fmt.Errorf("get base image %s: %w", baseRef, err)
 		}
 	}
