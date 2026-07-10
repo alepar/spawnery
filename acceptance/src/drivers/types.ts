@@ -22,12 +22,23 @@ export type SpawnStatus =
   | "DELETED"
   | "RESUMING";
 
+/** MountBinding binds a declared mount slot to a backend at spawn-create (spawnctl --mount / CreateSpawnRequest.mounts). */
+export interface MountBinding {
+  name: string;
+  /** backendUri, e.g. "github:owner/repo" for a github slot (the CP derives the gh: credential). */
+  backendUri: string;
+  /** create requests create_if_missing (spawnctl `--mount name=uri,create`). */
+  create?: boolean;
+}
+
 export interface CreateSpawnOpts {
   appId: string;
   model?: string;
   name?: string;
   /** profileId attaches a customization profile at spawn-create (sp-tq0t.8). */
   profileId?: string;
+  /** mounts binds declared slots (e.g. a github slot) to a backend URI at create. CLI/CP mode only. */
+  mounts?: MountBinding[];
 }
 
 export interface ForkOpts {

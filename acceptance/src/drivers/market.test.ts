@@ -58,6 +58,14 @@ describe("spawneryYaml", () => {
     expect(yaml).toContain("tags:");
     expect(yaml).toContain("  - acc");
   });
+
+  it("emits durability + github for a github-slot mount", () => {
+    const yaml = spawneryYaml({ ...spec, mounts: [{ name: "repo", path: "repo", durability: "node-local", github: true }] });
+    expect(yaml).toContain("- name: repo");
+    expect(yaml).toContain("durability: node-local");
+    expect(yaml).toContain("github: true");
+    expect(yaml).not.toContain("seed:");
+  });
 });
 
 describe("marketCliArgs", () => {

@@ -41,6 +41,10 @@ export interface MountSpec {
   name: string;
   path: string;
   seed?: string;
+  /** durability declares the mount's journal class ("node-local"/"owner-sealed"); a github slot must be journaled. */
+  durability?: string;
+  /** github marks this mount a GitHub SLOT — the user binds owner/repo at create (spawneryapp.yml `github: true`). */
+  github?: boolean;
 }
 
 export interface RegisterSpec {
@@ -86,6 +90,8 @@ export function spawneryYaml(spec: RegisterSpec): string {
       lines.push(`    - name: ${m.name}`);
       lines.push(`      path: ${m.path}`);
       if (m.seed) lines.push(`      seed: ${m.seed}`);
+      if (m.durability) lines.push(`      durability: ${m.durability}`);
+      if (m.github) lines.push(`      github: true`);
     }
   }
   lines.push("visibility: open");

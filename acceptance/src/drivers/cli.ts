@@ -139,6 +139,10 @@ export class CliDriver implements SpawnDriver {
     const extra = ["-app-id", opts.appId, "-detach"];
     if (opts.model) extra.push("-model", opts.model);
     if (opts.profileId) extra.push("-profile", opts.profileId);
+    for (const m of opts.mounts ?? []) {
+      // spawnctl --mount name=backend_uri[,create] (mountflag.go). CP derives the gh: credential.
+      extra.push("-mount", `${m.name}=${m.backendUri}${m.create ? ",create" : ""}`);
+    }
     const args = buildArgs(this.cfg, ctx.identity, "", extra);
     const { stdout } = await execFileP(this.cfg.spawnctlBin, args);
     const m = /^spawn:\s*(\S+)/m.exec(stdout);
