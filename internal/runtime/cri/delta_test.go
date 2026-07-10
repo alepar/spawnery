@@ -264,7 +264,11 @@ func TestCaptureDeltaHappyPath(t *testing.T) {
 	}
 }
 
-func TestCaptureDeltaAsRejectsForkBeforeStoppingSource(t *testing.T) {
+// TestCaptureDeltaAsForkStopsCapturesRemovesClearsAgent verifies the source-preserving fork capture
+// on CRI: it resumes (best-effort) then stops the source, diffs its snapshot into the FORK's delta
+// tag, removes the source container, and clears h.AgentID (the signal RestoreForkedSource reads to
+// re-launch rather than unpause).
+func TestCaptureDeltaAsForkStopsCapturesRemovesClearsAgent(t *testing.T) {
 	fakeEng := &fakeDeltaEngine{
 		captureRef:       runtime.DeltaTag("sp-fork"),
 		captureDeltaSize: 1024,
@@ -272,20 +276,62 @@ func TestCaptureDeltaAsRejectsForkBeforeStoppingSource(t *testing.T) {
 	c, f := newFakeCRI(t)
 	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
 
-	_, err := b.CaptureDeltaAs(context.Background(), &runtime.PodHandle{
-		AgentID: "ctr-source", SpawnID: "sp-source", BaseImageRef: "base:v1",
-	}, "sp-fork")
-	if err == nil {
-		t.Fatal("CaptureDeltaAs must reject fork capture in the CRI lane")
+	h := &runtime.PodHandle{AgentID: "ctr-source", SpawnID: "sp-source", BaseImageRef: "base:v1"}
+	ref, err := b.CaptureDeltaAs(context.Background(), h, "sp-fork")
+	if err != nil {
+		t.Fatalf("CaptureDeltaAs (fork): %v", err)
 	}
-	if !strings.Contains(err.Error(), "unsupported") {
-		t.Fatalf("CaptureDeltaAs error = %v, want unsupported", err)
+	if ref != runtime.DeltaTag("sp-fork") {
+		t.Errorf("ref = %q, want %q", ref, runtime.DeltaTag("sp-fork"))
 	}
-	if len(f.stopped) != 0 || len(f.removedContainers) != 0 {
-		t.Fatalf("fork CaptureDeltaAs must not stop/remove source: stopped=%v removed=%v", f.stopped, f.removedContainers)
+	// Best-effort resume before stop (the source was paused by the manager) then stop+remove source.
+	if fakeEng.resumeKey != "ctr-source" {
+		t.Errorf("expected resume-before-stop of ctr-source, got resumeKey=%q", fakeEng.resumeKey)
 	}
-	if fakeEng.captureKey != "" {
-		t.Fatalf("fork CaptureDeltaAs must not capture after rejecting: captureKey=%q", fakeEng.captureKey)
+	if len(f.stopped) != 1 || f.stopped[0] != "ctr-source" {
+		t.Errorf("StopContainer: got %v, want [ctr-source]", f.stopped)
+	}
+	if len(f.removedContainers) != 1 || f.removedContainers[0] != "ctr-source" {
+		t.Errorf("RemoveContainer: got %v, want [ctr-source]", f.removedContainers)
+	}
+	// The source snapshot (ctr-source) is diffed into the FORK's delta tag.
+	if fakeEng.captureKey != "ctr-source" {
+		t.Errorf("Capture snapshotKey = %q, want ctr-source", fakeEng.captureKey)
+	}
+	if fakeEng.captureName != runtime.DeltaTag("sp-fork") {
+		t.Errorf("Capture name = %q, want %q", fakeEng.captureName, runtime.DeltaTag("sp-fork"))
+	}
+	if h.AgentID != "" {
+		t.Errorf("h.AgentID = %q, want cleared after fork capture", h.AgentID)
+	}
+}
+
+// TestRestoreForkedSourceUnpauseBranch verifies that when the source was paused but not captured
+// (h.AgentID still set — an early-failure path), RestoreForkedSource unpauses rather than re-launches.
+func TestRestoreForkedSourceUnpauseBranch(t *testing.T) {
+	fakeEng := &fakeDeltaEngine{}
+	c, _ := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
+
+	h := &runtime.PodHandle{AgentID: "ctr-source", SpawnID: "sp-source"}
+	if err := b.RestoreForkedSource(context.Background(), h, runtime.DeltaTag("sp-fork")); err != nil {
+		t.Fatalf("RestoreForkedSource (unpause branch): %v", err)
+	}
+	if fakeEng.resumeKey != "ctr-source" {
+		t.Errorf("expected unpause of ctr-source, got resumeKey=%q", fakeEng.resumeKey)
+	}
+}
+
+// TestRestoreForkedSourceNoCachedSpec verifies the re-launch branch (h.AgentID cleared by capture)
+// fails clearly when the agent spec cache was lost (e.g. spawnlet restart).
+func TestRestoreForkedSourceNoCachedSpec(t *testing.T) {
+	c, _ := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(&fakeDeltaEngine{}))
+
+	h := &runtime.PodHandle{AgentID: "", SpawnID: "sp-source", SandboxID: "sb-1", BaseImageRef: "base:v1"}
+	err := b.RestoreForkedSource(context.Background(), h, runtime.DeltaTag("sp-fork"))
+	if err == nil || !strings.Contains(err.Error(), "no cached agent spec") {
+		t.Fatalf("expected no-cached-agent-spec error, got %v", err)
 	}
 }
 

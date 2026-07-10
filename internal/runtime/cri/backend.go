@@ -33,6 +33,12 @@ type CRIPodBackend struct {
 
 	mu          sync.Mutex
 	sandboxCfgs map[string]*runtimeapi.PodSandboxConfig // sandboxID -> config (CreateContainer needs it)
+	// agentSpecs caches the AgentSpec last used to launch each sandbox's agent, so a source-preserving
+	// fork can re-launch the source agent (RestoreForkedSource) after CaptureDeltaAs removed it. Like
+	// sandboxCfgs this is in-memory only: it is populated by StartAgent in this process, so it is
+	// present for a fork of a live, same-process source but lost across a spawnlet restart (same
+	// limitation as sandboxCfgs — a restart drops the sandbox handle too).
+	agentSpecs map[string]runtime.AgentSpec // sandboxID -> last agent spec
 
 	// delta is the engine used by CaptureDelta/ReleaseDelta. Nil until first use (lazy-built from
 	// the shared CRI conn) or injected via WithDeltaEngine (tests).
@@ -44,7 +50,12 @@ type CRIPodBackend struct {
 // NewCRIPodBackend builds a backend over a Client, running pods under runtimeHandler.
 // Optional opts (e.g. WithDeltaEngine) configure the backend; production callers pass none.
 func NewCRIPodBackend(c *Client, runtimeHandler string, opts ...Option) *CRIPodBackend {
-	b := &CRIPodBackend{c: c, runtimeHandler: runtimeHandler, sandboxCfgs: map[string]*runtimeapi.PodSandboxConfig{}}
+	b := &CRIPodBackend{
+		c:              c,
+		runtimeHandler: runtimeHandler,
+		sandboxCfgs:    map[string]*runtimeapi.PodSandboxConfig{},
+		agentSpecs:     map[string]runtime.AgentSpec{},
+	}
 	for _, o := range opts {
 		o(b)
 	}
@@ -155,6 +166,7 @@ func (b *CRIPodBackend) removeSandbox(ctx context.Context, sandboxID string) {
 	_, _ = b.c.runtime.RemovePodSandbox(ctx, &runtimeapi.RemovePodSandboxRequest{PodSandboxId: sandboxID})
 	b.mu.Lock()
 	delete(b.sandboxCfgs, sandboxID)
+	delete(b.agentSpecs, sandboxID)
 	b.mu.Unlock()
 }
 
@@ -280,6 +292,11 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 		return fmt.Errorf("agent: %w", err)
 	}
 	h.AgentID = agentID
+	// Cache the spec so a source-preserving fork can re-launch this agent after CaptureDeltaAs
+	// removes it (RestoreForkedSource). Keyed by sandbox, so a re-launch reuses the same pod.
+	b.mu.Lock()
+	b.agentSpecs[h.SandboxID] = spec
+	b.mu.Unlock()
 	return nil
 }
 
