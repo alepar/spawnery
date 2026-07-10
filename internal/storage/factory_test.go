@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -101,5 +102,72 @@ func TestSchemeResolverResolveBindingFieldPassthrough(t *testing.T) {
 	}
 	if gh.Config.Host != "github.com" {
 		t.Errorf("Config.Host = %q, want %q", gh.Config.Host, "github.com")
+	}
+}
+
+// TestSchemeResolverGitHubProductionDefault pins the production default: with no host override, a
+// resolved github mount targets github.com with AllowInsecureHost=false (secure, https-only). This
+// is the invariant the new node config must never weaken unless explicitly configured.
+func TestSchemeResolverGitHubProductionDefault(t *testing.T) {
+	t.Parallel()
+
+	resolver := NewSchemeResolver(t.TempDir())
+	backend, err := resolver.Resolve("github:octo-org/demo")
+	if err != nil {
+		t.Fatalf("Resolve(github): %v", err)
+	}
+	gh := backend.(*GitHub)
+	if gh.Config.Host != "github.com" {
+		t.Errorf("Config.Host = %q, want github.com", gh.Config.Host)
+	}
+	if gh.Config.AllowInsecureHost {
+		t.Error("Config.AllowInsecureHost = true, want false (production default must be secure)")
+	}
+}
+
+// TestSchemeResolverGitHubHostOverride verifies SetGitHubHostOverride flips the resolved mount to a
+// local git host with insecure (http) clone URLs allowed — the Gitea lane. Only an explicit override
+// does this; the owner/repo still come from the backend URI.
+func TestSchemeResolverGitHubHostOverride(t *testing.T) {
+	t.Parallel()
+
+	resolver := NewSchemeResolver(t.TempDir())
+	resolver.SetGitHubHostOverride("127.0.0.1:3000", true)
+	backend, err := resolver.Resolve("github:octo-org/demo")
+	if err != nil {
+		t.Fatalf("Resolve(github): %v", err)
+	}
+	gh := backend.(*GitHub)
+	if gh.Config.Host != "127.0.0.1:3000" {
+		t.Errorf("Config.Host = %q, want 127.0.0.1:3000", gh.Config.Host)
+	}
+	if !gh.Config.AllowInsecureHost {
+		t.Error("Config.AllowInsecureHost = false, want true after override")
+	}
+	// owner/repo are unaffected by the host override.
+	if gh.Config.Owner != "octo-org" || gh.Config.Repo != "demo" {
+		t.Errorf("owner/repo = %q/%q, want octo-org/demo", gh.Config.Owner, gh.Config.Repo)
+	}
+}
+
+// TestStaticGitHubCredentials verifies the fixed-token provider echoes its token + helper path for
+// any mount (the AS-mint bypass used by the Gitea lane).
+func TestStaticGitHubCredentials(t *testing.T) {
+	t.Parallel()
+
+	p := StaticGitHubCredentials{AccessToken: "gitea-pat-xyz", CredentialHelperPath: "/n/git-credential-static"}
+	cred, err := p.TokenForGitHubMount(context.Background(), "spawn-1", "repo", GitHubConfig{})
+	if err != nil {
+		t.Fatalf("TokenForGitHubMount: %v", err)
+	}
+	tok, err := cred.Token()
+	if err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if tok != "gitea-pat-xyz" {
+		t.Errorf("Token = %q, want gitea-pat-xyz", tok)
+	}
+	if cred.CredentialHelperPath != "/n/git-credential-static" {
+		t.Errorf("CredentialHelperPath = %q, want /n/git-credential-static", cred.CredentialHelperPath)
 	}
 }

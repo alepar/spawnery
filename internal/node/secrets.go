@@ -537,6 +537,12 @@ func (a *attacher) noteGitHubRefresh(spawnID string, generation uint64, sec *nod
 // for the agent's git push; storage.Prepare itself skips clone on resume but the helper still needs
 // the token file). nil refresher (dev lane without the mint channel) makes any descriptor an error.
 func (a *attacher) mintGitHubMountsAtProvision(ctx context.Context, spawnID string, generation uint64, mounts []*nodev1.MountBinding) error {
+	// Static-token lane (local Gitea): the storage-level static credential provider supplies the
+	// clone token directly, so there is no AS mint to perform. Skip entirely — the CP still stamps a
+	// gh: mint link-ref on github slots, but this node never talks to the AS for it.
+	if a.mgr.GitHubStaticCredentialsEnabled() {
+		return nil
+	}
 	for _, m := range mounts {
 		ref := m.GetGithubMintRef()
 		if ref == nil || ref.GetSecretId() == "" {

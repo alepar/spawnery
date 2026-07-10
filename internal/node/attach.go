@@ -680,7 +680,9 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	// ERROR with step_total>0 so the CP's in-memory map can attribute the failure (contract: the
 	// ERROR SpawnStatus carries step_total>0 AND the failing step_key).
 	flags := spawnlet.ProvisionFlags{
-		MintCredentials: hasGitHubMint(st.GetMounts()) || hasGitHubTokenSecret(st.GetSecrets()),
+		// Static-token lane performs no AS mint (mintGitHubMountsAtProvision returns early), so don't
+		// advertise the mint-credentials milestone for it.
+		MintCredentials: !a.mgr.GitHubStaticCredentialsEnabled() && (hasGitHubMint(st.GetMounts()) || hasGitHubTokenSecret(st.GetSecrets())),
 		RestoreSnapshot: len(st.GetRootfsArtifacts()) > 0 || a.mgr.HasJournalPins(st.SpawnId),
 		SetupNetwork:    a.mgr.GitHubControlEnabled() || a.mgr.EgressEnforced(),
 		AwaitReady:      true,

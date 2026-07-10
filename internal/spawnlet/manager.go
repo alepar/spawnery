@@ -70,6 +70,17 @@ type ManagerConfig struct {
 	GitHubGitRunner  storage.GitRunner
 	SidecarPort      int // default 8080
 
+	// GitHubHost / GitHubAllowInsecureHost point github: mounts at a non-github.com git host (e.g. a
+	// local Gitea) via SchemeResolver.SetGitHubHostOverride. Empty host preserves the production
+	// default (github.com, secure). Set by cmd/spawnlet from GITHUB_HOST / GITHUB_ALLOW_INSECURE_HOST.
+	GitHubHost              string
+	GitHubAllowInsecureHost bool
+	// GitHubStaticCredentials, when non-nil, replaces the Manager's own AS-mint-backed credential
+	// provider with a fixed-token provider (e.g. a Gitea PAT). This bypasses the AS mint entirely;
+	// the node skips mint-at-provision for github mounts (GitHubStaticCredentialsEnabled). Set by
+	// cmd/spawnlet from GITHUB_STATIC_TOKEN. Production leaves this nil.
+	GitHubStaticCredentials storage.GitHubCredentialProvider
+
 	NodeID           string // this node's id (stamped on container labels for reconcile); "" standalone
 	NodeClass        string // "cloud" (always enforces) or "self-hosted" (honors EgressEnforce)
 	EgressEnforce    bool   // self-hosted opt-out switch; ignored on cloud
@@ -331,8 +342,15 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		deltaState:      &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
 	}
 	if resolver, ok := m.backendResolver.(*storage.SchemeResolver); ok {
-		resolver.SetGitHubCredentials(m)
+		// Static-token lane (local Gitea): a fixed-token provider replaces the AS-mint-backed
+		// Manager provider. Otherwise the Manager itself resolves per-mount node-rendered tokens.
+		if cfg.GitHubStaticCredentials != nil {
+			resolver.SetGitHubCredentials(cfg.GitHubStaticCredentials)
+		} else {
+			resolver.SetGitHubCredentials(m)
+		}
 		resolver.SetGitHubServices(cfg.GitHubRepos, cfg.GitHubGitRunner)
+		resolver.SetGitHubHostOverride(cfg.GitHubHost, cfg.GitHubAllowInsecureHost)
 	}
 	m.forkSyncFn = func(ctx context.Context) error {
 		return exec.CommandContext(ctx, "sync").Run()
@@ -402,6 +420,11 @@ func (m *Manager) EgressEnforced() bool { return m.egressEnforced() }
 // GitHubControlEnabled reports whether the GitHub credential control server is installed.
 // Used by the node (attach.go) to compute ProvisionFlags.SetupNetwork.
 func (m *Manager) GitHubControlEnabled() bool { return m.ghControl != nil }
+
+// GitHubStaticCredentialsEnabled reports whether this node resolves github: mount tokens from a
+// fixed static provider (GITHUB_STATIC_TOKEN) instead of the AS mint. When true the node skips
+// mint-at-provision — the static provider supplies the clone token directly (local-Gitea lane).
+func (m *Manager) GitHubStaticCredentialsEnabled() bool { return m.cfg.GitHubStaticCredentials != nil }
 
 // HasJournalPins reports whether spawnID has a durable journal record with at least one
 // mount manifest pinned — i.e., a same-node resume will attempt to restore journal state.

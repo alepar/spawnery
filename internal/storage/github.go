@@ -60,6 +60,19 @@ type GitHubCredentialProvider interface {
 	TokenForGitHubMount(ctx context.Context, spawnID, mountName string, cfg GitHubConfig) (GitHubCredential, error)
 }
 
+// StaticGitHubCredentials is a GitHubCredentialProvider that returns a fixed access token and a
+// pre-written git credential-helper path for every mount. It bypasses the AS mint entirely and is
+// intended ONLY for a local git host (e.g. Gitea) under GitHubConfig.AllowInsecureHost — the same
+// role staticGiteaCreds plays in the github_e2e lane. Production (github.com) never uses this.
+type StaticGitHubCredentials struct {
+	AccessToken          string
+	CredentialHelperPath string
+}
+
+func (c StaticGitHubCredentials) TokenForGitHubMount(_ context.Context, _, _ string, _ GitHubConfig) (GitHubCredential, error) {
+	return GitHubCredential{AccessToken: c.AccessToken, CredentialHelperPath: c.CredentialHelperPath}, nil
+}
+
 type GitHubRepoInfo struct {
 	CloneURL string
 	Empty    bool
@@ -380,6 +393,13 @@ func (g *GitHub) Finalize(_ context.Context, hostDir string) error {
 type defaultGitHubRepoService struct {
 	Client  *http.Client
 	BaseURL string
+}
+
+// NewDefaultGitHubRepoService returns the default REST-backed GitHubRepoService pointed at baseURL
+// (e.g. https://api.github.com or a local Gitea's http://host/api/v1). An empty baseURL defaults to
+// the public GitHub API. Exported so the node (cmd/spawnlet) can target a non-github.com API host.
+func NewDefaultGitHubRepoService(baseURL string) GitHubRepoService {
+	return defaultGitHubRepoService{Client: http.DefaultClient, BaseURL: baseURL}
 }
 
 func (s defaultGitHubRepoService) Get(ctx context.Context, cfg GitHubConfig, token string) (GitHubRepoInfo, error) {
