@@ -44,8 +44,10 @@ Two latent bugs surfaced and were fixed at the same time: the assembled delta im
 **non-canonical ref** while CRI normalises its lookups.
 
 **So this design no longer needs:** a durable launch spec (nothing re-launches), the sqlite node DB
-(its whole rationale was atomicity *across an identity swap*), `EnsureRunning` (no stale ids), or
-restart re-adoption (see §8).
+(its whole rationale was atomicity *across an identity swap*), or `EnsureRunning` (no stale ids).
+
+**Restart re-adoption is a separate concern and is REINSTATED — see §8.** v2 originally cut it too,
+on a factual error about how bad a spawnlet restart actually is. It is bad.
 
 ## 3. Primitives
 
