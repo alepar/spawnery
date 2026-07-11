@@ -171,6 +171,9 @@ func (f *scriptedPodBackend) ImportDelta(_ context.Context, spawnID, baseRef str
 // Pause/Unpause stubs — not exercised in node lifecycle tests (drift fix after sp-ei4.1.15.2).
 func (f *scriptedPodBackend) Pause(context.Context, *runtime.PodHandle) error   { return nil }
 func (f *scriptedPodBackend) Unpause(context.Context, *runtime.PodHandle) error { return nil }
+func (f *scriptedPodBackend) RestoreForkedSource(context.Context, *runtime.PodHandle, string) error {
+	return nil
+}
 
 func (f *scriptedPodBackend) wasStopped() bool {
 	f.mu.Lock()

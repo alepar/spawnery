@@ -60,10 +60,23 @@ func newContainerdEngine(conn *grpc.ClientConn) (deltaEngine, error) {
 // close the shared conn and break all subsequent CRI calls on the backend.
 func (e *containerdEngine) Close() error { return nil }
 
+// normRef returns the canonical docker reference for a short ref ("spawnery/delta:x" ->
+// "docker.io/spawnery/delta:x"). CRI's ImageStatus NORMALISES the ref it is queried with and resolves
+// it against its own store, so an image RECORD created under a non-canonical name is unreachable from
+// CRI even though the raw ImageService can Get it by exact name. That mismatch is why a fork's delta
+// was readable by ExportTopLayer yet invisible to EnsureImage ("missing local delta image"): delta
+// records are now written under the canonical name — the same form the base images carry
+// ("docker.io/spawnery/agent:dev"), which is exactly why those resolved and ours did not.
+func normRef(ref string) string {
+	if named, err := reference.ParseDockerRef(ref); err == nil {
+		return named.String()
+	}
+	return ref
+}
+
 // getImage resolves an image record by ref, tolerating short registry refs. containerd stores
 // registry images normalized ("docker.io/spawnery/agent:dev"), so a raw Get of a short base ref
 // like "spawnery/agent:dev" (what the CRI launch path accepts) returns NotFound; retry normalized.
-// Local delta tags ("spawnery/delta:<id>") are found by the first Get and left untouched.
 func (e *containerdEngine) getImage(ctx context.Context, ref string) (images.Image, error) {
 	img, err := e.client.ImageService().Get(ctx, ref)
 	if err == nil || !errdefs.IsNotFound(err) {
@@ -192,7 +205,7 @@ func (e *containerdEngine) assembleDeltaImage(ctx context.Context, name, baseRef
 
 	// Create or update the image record so the CRI image service can resolve it.
 	imgRecord := images.Image{
-		Name:   name,
+		Name:   normRef(name),
 		Target: newMfstDesc,
 		Labels: map[string]string{"io.cri-containerd.image": "managed"},
 	}
@@ -204,6 +217,15 @@ func (e *containerdEngine) assembleDeltaImage(ctx context.Context, name, baseRef
 		if _, err := imgSvc.Update(ctx, imgRecord); err != nil {
 			return fmt.Errorf("update image record %s: %w", name, err)
 		}
+	}
+
+	// Unpack the assembled image into the snapshotter. The image RECORD alone is not enough: CRI only
+	// surfaces (and can only create containers from) images whose snapshot chain has been materialised.
+	// Without this the delta is readable through containerd's ImageService (ExportTopLayer works) but
+	// invisible to CRI's ImageStatus, so EnsureImage silently falls back to the base image and a fork's
+	// local-only start fails with "missing local delta image".
+	if err := ctrclient.NewImage(e.client, imgRecord).Unpack(ctx, defaultSnapshotter); err != nil {
+		return fmt.Errorf("unpack delta image %s: %w", name, err)
 	}
 	return nil
 }
@@ -254,8 +276,10 @@ func (e *containerdEngine) Release(ctx context.Context, name, leaseID string) er
 	var errParts []string
 
 	imgSvc := e.client.ImageService()
-	if err := imgSvc.Delete(ctx, name); err != nil && !errdefs.IsNotFound(err) {
-		errParts = append(errParts, fmt.Sprintf("delete image %s: %v", name, err))
+	for _, n := range dedupRefs(normRef(name), name) {
+		if err := imgSvc.Delete(ctx, n); err != nil && !errdefs.IsNotFound(err) {
+			errParts = append(errParts, fmt.Sprintf("delete image %s: %v", n, err))
+		}
 	}
 
 	leaseMgr := e.client.LeasesService()
@@ -276,7 +300,7 @@ func (e *containerdEngine) Release(ctx context.Context, name, leaseID string) er
 func (e *containerdEngine) ExportTopLayer(ctx context.Context, name string, w io.Writer) error {
 	ctx = namespaces.WithNamespace(ctx, containerdNamespace)
 	cs := e.client.ContentStore()
-	img, err := e.client.ImageService().Get(ctx, name)
+	img, err := e.getImage(ctx, name)
 	if err != nil {
 		return fmt.Errorf("get image %s: %w", name, err)
 	}
@@ -361,4 +385,13 @@ func (e *containerdEngine) AssembleOnBase(ctx context.Context, baseRef, newTag, 
 		return err
 	}
 	return nil
+}
+
+// dedupRefs returns the distinct refs among a and b (a delta image is recorded under its canonical
+// name; older records may still carry the raw name, so Release removes both).
+func dedupRefs(a, b string) []string {
+	if a == b {
+		return []string{a}
+	}
+	return []string{a, b}
 }
