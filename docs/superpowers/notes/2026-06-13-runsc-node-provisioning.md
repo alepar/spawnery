@@ -9,8 +9,16 @@
 | Component   | Version                    | Notes                                              |
 |-------------|----------------------------|----------------------------------------------------|
 | containerd  | 2.2.3                      | Hard pin — validate upgrades against spike checklist |
-| runsc       | release-20260525.0         | Hard pin — validate upgrades against spike checklist |
+| runsc       | release-20260601.0         | Hard **floor** — see below; do NOT go below this |
 | kernel      | 7.0.8-200.fc44.x86_64      | Spike host only (Fedora workstation); not a cloud-node requirement |
+
+**runsc release-20260601.0 is a hard minimum, not merely "verified-good".** It is the first
+release carrying the gVisor containerd-shim pause/resume fix (commit 55b3fd17, gVisor
+[#12647](https://github.com/google/gvisor/issues/12647) / #13305, 2026-05-28). On earlier
+builds — including the previously-pinned release-20260525.0 — `task pause` corrupts the
+shim/ttrpc Status: the task reports PID 0 / UNKNOWN, resume fails with `no running task
+found`, and sandbox teardown wedges. That breaks **suspend/resume and fork** outright. The
+live pin is `RUNSC_RELEASE` in `scripts/e2e-vm/provision/provision.sh`.
 
 **containerd and runsc are the real version pins** for cloud-node provisioning. The kernel
 entry records the spike environment; cloud nodes will run a different kernel (e.g. Ubuntu
@@ -51,14 +59,17 @@ Add a dedicated runsc runtime handler to containerd's config (path varies by dis
 The corresponding `/etc/runsc/runsc.toml` must contain:
 
 ```toml
-[runsc]
+[runsc_config]
+platform = "systrap"
+network = "sandbox"
 overlay2 = "none"
 ```
 
-**Implementer note:** verify the exact TOML stanza name and the containerd 2.x plugin block
-path against the installed containerd 2.2.3 + runsc release-20260525.0 release notes before
-deploying — config syntax has changed between 1.x and 2.x, and the `overlay2` key name should
-be confirmed against `runsc --help` or the release docs rather than trusted from memory.
+The stanza is `[runsc_config]` — **not** `[runsc]`. `platform = "systrap"` needs no `/dev/kvm`
+(so it works under nested virt, e.g. the e2e VM). `network = "sandbox"` (netstack) is required:
+`hostinet` bypasses the sandbox netstack and with it the egress floor, so it is spike-only and
+must never reach production. This block is written verbatim by
+`scripts/e2e-vm/provision/provision.sh`, which is the authoritative copy.
 
 ## CRI `dns_config` is Required
 
@@ -101,14 +112,14 @@ sentry, not from a kernel mapping.
 
 Additionally, KEP-127 is **broken with runsc** at the verified version pairing: the gofer
 cannot `setns` into a pinned user namespace (`invalid argument`; multithreaded Go process cannot
-join a userns at this containerd 2.2.3 + runsc release-20260525.0 combination — spike 3 result
+join a userns at this containerd 2.2.3 + runsc release-20260601.0 combination — spike 3 result
 2). Do not provision for KEP-127 on runsc nodes.
 
 ## Summary Checklist for Node Operators
 
-- [ ] containerd 2.2.3 + runsc release-20260525.0 installed
+- [ ] containerd 2.2.3 + runsc release-20260601.0 installed
 - [ ] containerd runtime handler `runsc` configured pointing at `/etc/runsc/runsc.toml`
-- [ ] `/etc/runsc/runsc.toml` contains `overlay2 = "none"` (verify key name against runsc docs)
+- [ ] `/etc/runsc/runsc.toml` has `[runsc_config]` with `overlay2 = "none"`, `platform = "systrap"`, `network = "sandbox"`
 - [ ] CNI bridge plugin configured (e.g. flannel or a simple bridge CNI conf); hostinet NOT used
 - [ ] spawnlet `CRIPodBackend.DNSServers` set to a reachable RFC1918 DNS resolver
 - [ ] Kernel user namespaces NOT required; no KEP-127 configuration needed for runsc

@@ -110,9 +110,14 @@ and uses the `CRI_RUNTIME_HANDLER` (default `runsc`).
 2. **`overlay2 = "none"` is MANDATORY** in `/etc/runsc/runsc.toml`:
 
    ```toml
-   [runsc]
+   [runsc_config]
+   platform = "systrap"
+   network = "sandbox"
    overlay2 = "none"
    ```
+
+   The stanza is `[runsc_config]`, not `[runsc]`. `network = "sandbox"` is required — `hostinet`
+   bypasses the sandbox netstack and with it the egress floor.
 
    The default (`root:self`) hides container writes in a sentry-private filestore the host
    snapshotter can't see — delta capture would record garbage. `=none` routes writes to the host
@@ -122,8 +127,13 @@ and uses the `CRI_RUNTIME_HANDLER` (default `runsc`).
    unreachable from inside the pod, and there's no kubelet to supply DNS), set
    `POD_DNS=1.1.1.1,8.8.8.8` (or your resolver) so spawns can resolve names.
 
-4. **Version pins (verified-good floor):** containerd **2.2.3**, runsc **release-20260525.0**.
-   Validate any upgrade against the spike checklist in the runsc note before deploying.
+4. **Version pins:** containerd **2.2.3**, runsc **release-20260601.0** — the runsc pin is a hard
+   **minimum**, not just a verified-good floor. It is the first release with the gVisor
+   containerd-shim pause/resume fix (gVisor #12647/#13305); on anything older (including the
+   previously-documented release-20260525.0) `task pause` corrupts the shim status, resume fails
+   with `no running task found`, teardown wedges, and **suspend/resume and fork are broken**. The
+   live pin is `RUNSC_RELEASE` in `scripts/e2e-vm/provision/provision.sh`. Validate any upgrade
+   against the spike checklist in the runsc note before deploying.
 
 Run with:
 

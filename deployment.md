@@ -123,13 +123,25 @@ needed any more — rules go on the host chain).
 
 **CRI/runsc pods — additional host prerequisites (the `CONTAINER_RUNTIME=runsc` path):**
 
-- **containerd** with the CRI plugin, plus the **`runsc` runtime handler** registered. In
+- **containerd** (2.x) with the CRI plugin, plus the **`runsc` runtime handler** registered. In
   `/etc/containerd/config.toml`:
   ```toml
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  version = 3
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]
     runtime_type = "io.containerd.runsc.v1"
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc.options]
+      TypeUrl = "io.containerd.runsc.v1.options"
+      ConfigPath = "/etc/runsc/runsc.toml"
   ```
-  then restart containerd. (`containerd-shim-runsc-v1` + `runsc` must be on `PATH`.)
+  then restart containerd. (`containerd-shim-runsc-v1` + `runsc` must be on `PATH`.) Note the
+  plugin path is the containerd **2.x** one (`io.containerd.cri.v1.runtime`); the 1.x
+  `io.containerd.grpc.v1.cri` path is not what the node ships against.
+- **`/etc/runsc/runsc.toml`** with `[runsc_config]` → `platform = "systrap"`,
+  `network = "sandbox"`, `overlay2 = "none"`. `overlay2 = "none"` is **mandatory** — the default
+  sentry-private overlay hides container writes from the host snapshotter and delta capture
+  records garbage. See [PROVISIONING.md](PROVISIONING.md).
+- **runsc ≥ release-20260601.0.** Older builds corrupt `task pause` (gVisor #12647/#13305),
+  which breaks suspend/resume and fork.
 - **CNI** for pod-sandbox networking: the reference plugins (`bridge`, `host-local`, `loopback`,
   `firewall`, `portmap`) in `/opt/cni/bin/`, and a conflist at `/etc/cni/net.d/` (e.g. a `bridge` +
   `firewall` + `portmap` chain). Without CNI, `RunPodSandbox` fails.

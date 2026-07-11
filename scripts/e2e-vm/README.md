@@ -68,7 +68,7 @@ covers every run.
 | `run.sh` | the 0–3 orchestrator (build → up → roll → test → down) |
 | `templates/domain.xml.tmpl` | transient libvirt domain (NAT iface, per-run overlay, guest-agent, serial log) |
 | `build-base.sh` | golden-image builder — live-provision a Fedora image, run `provision/provision.sh`, shut down → golden qcow2 |
-| `provision/provision.sh` | in-guest installer (pinned containerd 2.2.3/runsc-20260525.0/CNI + pg + Caddy + PKI + units + image import) |
+| `provision/provision.sh` | in-guest installer (pinned containerd 2.2.3/runsc-20260601.0/CNI + pg + Caddy + PKI + units + image import) |
 | `provision/gen-pki.sh` | throwaway CA + AS session key + CP mTLS + `*.e2e.test` wildcard cert |
 | `templates/net.xml` | the `spawnery-e2e` NAT network (one-time `virsh net-define`) |
 

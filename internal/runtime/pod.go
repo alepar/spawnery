@@ -124,12 +124,10 @@ type PodBackend interface {
 	// Unpause resumes a previously-paused agent container.
 	Unpause(ctx context.Context, h *PodHandle) error
 	// RestoreForkedSource returns the source agent to a running state after a source-preserving
-	// CaptureDeltaAs. The Docker lane commits while the container keeps running, so the source is
-	// merely paused → this unpauses it (deltaRef ignored). The CRI/runsc lane cannot diff a running
-	// container's snapshot, so CaptureDeltaAs stops+removes the source agent and clears h.AgentID →
-	// this re-launches it in the surviving pod sandbox from deltaRef (the just-captured delta image,
-	// falling back to h.BaseImageRef if absent), assigning a fresh h.AgentID. On the early-failure
-	// path (source paused but never captured, h.AgentID still set) it behaves like Unpause and may
-	// return a tolerable "not paused" error when the source was never paused.
+	// CaptureDeltaAs. Both lanes capture without stopping the source — Docker via a preserving
+	// commit, CRI via CreateDiff on the live container — so the source is only ever paused, and
+	// restoring it is an Unpause. deltaRef is unused (kept so the signature survives a lane that
+	// ever needs to re-launch). On the early-failure path (source never paused) it may return a
+	// tolerable "not paused" error.
 	RestoreForkedSource(ctx context.Context, h *PodHandle, deltaRef string) error
 }
