@@ -16,7 +16,11 @@ set -euo pipefail
 
 # ---- pinned versions (verify/bump on the host; these mirror the runsc-node-provisioning notes) ----
 CONTAINERD_VER="${CONTAINERD_VER:-2.2.3}"
-RUNSC_RELEASE="${RUNSC_RELEASE:-20260525.0}"
+# 20260601.0 is the first release containing the gVisor containerd-shim pause/resume fix (commit
+# 55b3fd17, gVisor #12647/#13305, 2026-05-28). Earlier builds (incl. the prior 20260525.0 pin) have a
+# regression where `task pause` corrupts the shim/ttrpc Status → the task goes PID 0/UNKNOWN, resume
+# fails "no running task found", and sandbox teardown wedges — which broke suspend/resume + fork.
+RUNSC_RELEASE="${RUNSC_RELEASE:-20260601.0}"
 CNI_PLUGINS_VER="${CNI_PLUGINS_VER:-1.5.1}"
 RUNC_VER="${RUNC_VER:-1.2.4}"
 CRICTL_VER="${CRICTL_VER:-v1.32.0}"            # cri-tools; the runsc/CRI lane's `spawnctl exec` shells out to crictl
