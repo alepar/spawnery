@@ -1,203 +1,176 @@
 # Container Runtime Abstraction — one fork() for every runtime
 
-**Status:** draft · **Date:** 2026-07-11 · **Epic:** (bd epic created at handoff)
+**Status:** draft (v2 — rewritten after the premise spike + roast BLOCK) · **Date:** 2026-07-11
+
+> **v1 was built on a false premise and was BLOCKed by roast (38 confirmed findings, 6 blockers).**
+> A spike then killed the premise outright. This v2 is much smaller as a result. §2 records what died
+> and why, so nobody resurrects it.
 
 ## 1. Problem
 
 Spawnery runs spawns on two container lanes — **Docker/runc** (`DockerPodBackend`) and
-**CRI/containerd + runsc** (`CRIPodBackend`) — behind a `runtime.PodBackend` interface. That
-interface abstracts the *mechanics* (start/stop/attach) but **not the semantics that matter for
-lifecycle operations**, so `internal/spawnlet/manager_fork.go` (and the suspend/resume/migrate paths)
-are riddled with lane-specific branching, and the lanes diverge in ways that leak upward.
+**CRI/containerd + runsc** (`CRIPodBackend`) — behind `runtime.PodBackend`. That interface abstracts
+the *mechanics* (start/stop/attach) but not the *semantics* of the lifecycle operations, so
+`manager_fork.go`, the suspend gate, resume and migrate carry lane-specific knowledge, and the
+fork/suspend logic is reachable only via e2e — which is why real bugs survived in it for months.
 
-The divergence is one specific, load-bearing asymmetry:
+**Goal:** one runtime-agnostic implementation of fork / suspend / resume / migrate, composed from
+primitives that hide every lane difference, and that is **hermetically testable**.
 
-| | capture mechanism | does the source survive it? |
-|---|---|---|
-| **Docker/runc** | `docker commit` (commit-while-running) | **yes** — container never stops |
-| **CRI/runsc** | stop container → containerd `CreateDiff` | **no** — must stop, then **re-launch** |
+## 2. The premise that died (read this before proposing a redesign)
 
-On CRI, **the source's container identity changes underneath the orchestration**. Every lane-specific
-branch, the fragile in-memory `agentSpecs` cache, and the stale-`AgentID` recovery bug all trace back
-to that single fact.
+v1's entire complexity — an *identity swap*, a durable launch spec, a new-`Handle` contract,
+`ErrSourceDown` rollback, a sqlite node DB — existed to serve one claimed asymmetry:
 
-Three concrete defects motivated this design (all observed on the prod-stack VM):
+> *"Docker can commit a running container; CRI must stop → CreateDiff → re-launch, so on CRI the
+> source's container identity changes underneath you."*
 
-- **(a) Stale-identity recovery.** The CP crash-recovery path sends `UnpauseIfPaused`, which unpauses
-  a stored `AgentID` that no longer exists after a capture → `load container …: not found`.
-- **(b) Fragile launch spec.** Re-launching the source needs its `AgentSpec`; it lived in an
-  **in-memory map** (`agentSpecs`, keyed by sandbox id) which is lost on any spawnlet restart and
-  failed in practice (`no cached agent spec for sandbox …`).
-- **(c) Orchestration-level `Pause`.** `manager_fork.go` calls `m.pod.Pause` for spec-§3 quiescence.
-  A gVisor containerd-shim regression (gVisor
-  [#12647](https://github.com/google/gvisor/issues/12647), fixed by `55b3fd17`, first shipped in
-  `release-20260601.0`) made `task pause` corrupt the task **and the sandbox** — task → `PID 0 /
-  UNKNOWN`, resume → `no running task found`, sandbox teardown → wedged. That single upstream bug was
-  the root cause of *both* the fork `StartContainer` hang **and** the M4 suspend
-  `RemovePodSandbox` wedge. It reached us **only because the orchestration calls `Pause` at all.**
+**That is false.** Spike (2026-07-11, runsc `release-20260601.0`, `overlay2=none`, systrap):
+`rootfs.CreateDiff` of a **RUNNING** container, of a **PAUSED** container, and of a **STOPPED** one
+each produced a **byte-identical layer** (same digest `sha256:bffee207…`, same size), with the
+container's writes present, and the task still `RUNNING` afterwards.
 
-**Goal:** one runtime-agnostic implementation of `fork()` / `suspend()` / `resume()` / `migrate()`,
-composed from primitives whose contracts hide every lane difference — and which structurally cannot
-reproduce defects (a)–(c).
+`CreateDiff` never required a stopped container. The belief was an artifact of gVisor
+[#12647](https://github.com/google/gvisor/issues/12647) corrupting `task pause` — the
+`no running task found` it produced was the *pause bug*, not evidence a stop was mandatory.
 
-## 2. Prior art this builds on (not re-litigated)
+**Consequence: the lanes are symmetric.** Both capture-while-live. `CaptureDeltaAs` now mirrors
+Docker's `CommitContainerPreserving` exactly (committed on master; fork·cli verified green, source
+stays ACTIVE and never restarts). Deleted with it: the identity swap, the source re-launch, the
+in-memory `agentSpecs` cache, the stale-`AgentID` hazard, and the runsc "source restarts" UX caveat.
 
-- **`2026-06-12-writable-rootfs-survival-design.md` (sp-ei4.1.3)** already established:
-  *"One portable artifact across lanes: an OCI layer tar. **Lane-specific capture code, lane-agnostic
-  artifact**."* The **data** boundary is therefore already abstracted — both lanes emit the same OCI
-  layer tar. What was never abstracted is the **control flow**. This design supplies that half.
-  It also fixed the per-lane mechanisms (Docker userns-remap + `docker commit`; runsc `overlay2=none`
-  + containerd `DiffService`) — we keep them as *implementation details*, now hidden.
-- **`2026-05-27-spawnery-e1-runtime-core-design.md` (E1 §7)** defined the pluggable isolation-backend
-  seam. This design *raises* that seam from mechanics to semantics; it does not replace the idea.
+Two latent bugs surfaced and were fixed at the same time: the assembled delta image was never
+**unpacked** into the snapshotter (CRI only surfaces unpacked images), and it was recorded under a
+**non-canonical ref** while CRI normalises its lookups.
 
-## 3. The primitive set
+**So this design no longer needs:** a durable launch spec (nothing re-launches), the sqlite node DB
+(its whole rationale was atomicity *across an identity swap*), `EnsureRunning` (no stale ids), or
+restart re-adoption (see §8).
+
+## 3. Primitives
 
 ```go
-// internal/runtime
 type Runtime interface {
     Create(ctx, spawn SpawnRef, spec PodSpec) (Handle, error)
-    Destroy(ctx, spawn SpawnRef) error
+    Destroy(ctx, spawn SpawnRef, h Handle) error
 
-    // Contract-based: defined by POSTCONDITION, not mechanism.
-    SnapshotLive(ctx, spawn SpawnRef, whileQuiesced func(context.Context) error) (Artifact, Handle, error)
-    SnapshotFinal(ctx, spawn SpawnRef, whileQuiesced func(context.Context) error) (Artifact, error)
+    // FORK: one-shot. Captures the rootfs delta; the spawn KEEPS RUNNING, same container, same Handle.
+    SnapshotPreserving(ctx, spawn SpawnRef, h Handle, whileQuiesced Hook) (Artifact, error)
 
-    Materialize(ctx, spawn SpawnRef, spec PodSpec, art Artifact) (Handle, error)
+    // SUSPEND / MIGRATE: two-phase, because the real suspend is a CP-GATED protocol (roast-confirmed):
+    // Begin quiesces + runs the hook (mount journal) and RETURNS STILL QUIESCED, so the CP gate can
+    // decide and the node can reap ACP sessions / relay per-mount progress.
+    BeginFinal(ctx, spawn SpawnRef, h Handle, whileQuiesced Hook) (Token, error)
+    FinishFinal(ctx, tok Token, scrubPaths []string) (Artifact, error) // scrub → capture → teardown
+    AbortFinal(ctx, tok Token) error                                   // un-quiesce, spawn keeps running
 
-    Export(ctx, art Artifact, w io.Writer) error
-    Import(ctx, r io.Reader) (Artifact, error)
-
-    ListManaged(ctx) ([]ManagedPod, error) // labels carry spawnID + generation
+    Materialize(ctx, spawn SpawnRef, spec PodSpec, chain ArtifactChain) (Handle, error)
+    Export(ctx, Artifact, io.Writer) error
+    Import(ctx, io.Reader, desc ArtifactDesc) (Artifact, error) // desc pins the CP's ContentDigest
+    ListManaged(ctx) ([]ManagedPod, error)
 }
 ```
 
-**Contracts (the whole point):**
+`Pause`/`Unpause` are **not** on the interface. Quiescence is reachable only *inside* the snapshot
+primitives — so the orchestration structurally cannot call a pause, and a repeat of #12647 could not
+reach it. But see §5: what quiescence actually guarantees is narrower than v1 claimed.
 
-- `SnapshotLive` — **postcondition: the spawn is still RUNNING.** The runtime may swap the agent
-  container's identity to satisfy this; it therefore returns a **new `Handle`** *explicitly*. Callers
-  must persist it. (Explicit return, not in-place mutation — this is what kills defect (a).)
-- `SnapshotFinal` — **postcondition: the spawn is torn down**, artifact captured.
-- `whileQuiesced` runs **inside the runtime's own quiesced window**, so the journal can snapshot
-  mounts at an instant consistent with the rootfs delta — *without* `Pause` being on the interface.
-- **`Pause`/`Unpause` are NOT primitives.** Quiescence is an internal detail of the snapshot
-  primitives. The orchestration structurally *cannot* call pause → defect (c) becomes unreachable.
+**The scrub has a home.** The live delta scrub (`exec rm -rf <DeltaScrubPaths>` inside the agent)
+requires a *running* agent, so it is a step of `FinishFinal` — un-quiesce → scrub → capture → teardown —
+not something the caller does around a snapshot. (roast: it had no home in v1.)
 
-### 3.1 Lane implementations
-
-| | `SnapshotLive` | `SnapshotFinal` |
-|---|---|---|
-| **Docker** | `pause` → `whileQuiesced()` → `commit` (in-place) → `unpause`; Handle unchanged | `stop` → `whileQuiesced()` → `commit` → teardown |
-| **CRI/runsc** | `stop agent` → `whileQuiesced()` → `CreateDiff` → **re-launch agent from the durable launch spec** (sandbox + sidecar survive) → **new Handle** | `stop` → `whileQuiesced()` → `CreateDiff` → teardown |
-
-Docker keeps its zero-downtime capture. CRI's identity swap is **contained inside the impl**.
-
-### 3.2 Composition — every op, zero lane branches
+## 4. Composition — every op, zero lane branches
 
 | op | composition |
 |---|---|
 | create | `Create(spec)` |
-| suspend | `SnapshotFinal(hook: journal mounts)` → persist artifact |
-| resume | `Materialize(spec, artifact)` |
-| **fork** | `SnapshotLive(source, hook: journal mounts)` → `Materialize(fork, spec, artifact)` |
-| migrate | `SnapshotFinal` → `Export` → ship → `Import` → `Materialize` |
+| **fork (same-node)** | `SnapshotPreserving(source, hook: journal mounts)` → `Materialize(fork, spec, chain+art)` |
+| **fork (cross-node)** | `SnapshotPreserving(source, hook)` → `Export` → ship → `Import(desc)` → `Materialize` on target |
+| suspend | `BeginFinal(hook)` → *CP gate* → `FinishFinal(scrub)` → persist artifact |
+| resume | `Materialize(spec, chain)` |
+| migrate | `BeginFinal(hook)` → **artifact durable** → `FinishFinal` → `Export` → ship → `Import` → `Materialize` |
 
-## 4. Node-durable state — sqlite
+Cross-node fork (`manager_fork_transfer.go`, ~300 lines) is a **first-class row**, not an omission —
+roast caught v1 silently dropping it.
 
-The node today persists only `journalState` (mount manifest pins) and `deltaState` (delta depth) as
-per-spawn JSON files. The `Spawn` record itself is an **in-memory map**; on restart it is empty and
-`ReapOrphans` **destroys every running pod**.
+## 5. Quiescence: what the hook actually guarantees (honest)
 
-**Decision: one transactional node-state DB** — `modernc.org/sqlite` (**pure-Go, already vendored**
-via authsvc; the spawnlet stays **cgo-free**), replacing the two JSON stores.
+v1 claimed `whileQuiesced` gives a window in which the journaled mounts have no writers. **That is
+false and roast confirmed it:** `docker pause` freezes the *agent container's* cgroup only. The
+**sidecar is not paused**, and **spawnlet-side writers touch the same host dirs** (`storage.Backend`
+Prepare/Finalize, the GitHub backend's `RunGit(hostDir)`, gitenv/credential rendering, the journal).
 
-**Why sqlite, not a third JSON file:** during an identity swap the node must update *together* the
-launch spec, the new artifact pointer, and the spawn's container ids. Across loose files a crash
-between writes leaves precisely the inconsistent half-state this design exists to eliminate. One
-transaction makes recovery deterministic.
+**The contract is therefore:** `whileQuiesced` guarantees **the agent is not writing**. It does *not*
+make the mount globally quiescent. Excluding the *other* writers is the **orchestration's** job (§7's
+per-spawn op lock), not the runtime's. The runtime must not pretend otherwise — a hook that silently
+under-delivers consistency is worse than one whose limits are stated.
 
-**What is persisted:**
+## 6. Artifact is a CHAIN, not a value
 
-| record | purpose | secrets? |
-|---|---|---|
-| **launch spec** (`AgentSpec`) | re-launch the agent (CRI swap) / `Materialize` on recovery | **none** — sidecar env (which holds the model API key) is *never* persisted; the sidecar survives a relaunch, and full pod create/resume still receives its spec from the CP |
-| **artifact pointer** | rootfs delta ref + journal mount pins (today's delta/journal state) | none |
+Roast: the real rootfs state is an **ordered chain** — `RootfsArtifacts` (with `Sequence`),
+`DeltaDepth`, `BaseImageDigest`, `LaunchImageRef` (which, not the base, is what the moby#47065
+layer-count guard compares against), plus gap/duplicate validation, the portable-history check, a
+squash-at-depth heuristic, and chain inheritance on fork. A singular `Artifact` cannot express this.
 
-**Not persisted:** container ids — the runtime's **labels already carry spawn id + generation**
-(that's how `ListManaged` works), so ids are derivable and must not be duplicated.
+So: `Artifact` is one link; **`ArtifactChain`** is what `Materialize` takes and what a fork inherits.
+Chain policy (depth, squash, portability) stays **orchestration-level** — the runtime does not own it.
+`Import` takes an `ArtifactDesc` so the CP-pinned `ContentDigest` is verified at the one boundary
+where bytes from another node's untrusted agent rootfs enter this node's image store.
 
-### 4.1 Restart re-adoption (replaces reap-everything)
+## 7. Concurrency, durability, fencing
 
-With a durable launch spec + artifact pointer, a restarted spawnlet can **re-adopt** running pods
-instead of destroying them:
+- **Per-spawn op lock.** Nothing today excludes `Create`/`Destroy`/snapshot/reconcile/attach from
+  racing on one spawn. A single-writer lock per spawn is required, and it is also what excludes the
+  spawnlet-side mount writers during a `whileQuiesced` window (§5).
+- **Durable-before-destructive.** `FinishFinal` must not tear the pod down until the artifact is
+  **durable** (journal ack / fsynced + pointer committed). Migrate must not destroy the source until
+  the artifact has *left the node*. (roast blocker: v1 could lose a spawn entirely on a crash between
+  capture and persistence.)
+- **Migrate fencing.** The source must be fenced (generation bump) before the target materialises, or
+  a partitioned source and a live target both write the same journal generation.
 
-```
-for pod := range rt.ListManaged():        // labels: spawnID, generation
-    spec, art, ok := nodeDB.Load(pod.SpawnID)
-    if !ok || pod.Generation < nodeDB.Generation(pod.SpawnID):  // stale/unknown
-        rt.Destroy(pod)                   // genuine orphan — reap
-    else:
-        mgr.ReAdopt(pod, spec, art)       // rebuild Spawn record, re-attach pumps/relays
-```
+## 8. Explicitly cut (and why)
 
-A node restart/upgrade **no longer destroys every running spawn.** Requires **generation fencing**
-(never adopt a generation older than the node's record) and **pump/relay re-attach**. `ReapOrphans`
-narrows to: reap only pods with no record or a stale generation.
+- **sqlite node DB** — its sole justification was atomic writes *across the identity swap*. No swap ⇒
+  no cross-record transaction ⇒ no need. Roast also showed v1's own rationale contradicted its state
+  table. Keep the existing per-spawn JSON stores.
+- **Durable launch spec** — existed only to re-launch the source. Nothing re-launches.
+- **`EnsureRunning`** — existed to repair a stale `AgentID`. Ids no longer change.
+- **Restart re-adoption** — roast-confirmed **scope creep on an overstated harm**: `ReapOrphans`
+  already does *capture-before-reap*, so a spawnlet restart costs a resume cycle and the live session,
+  **not the work**. It also needed CP-consulting fencing (node-local fencing ⇒ split-brain) and pump
+  re-attach over a raw byte stream with no framing/replay. Not worth it here; file separately if ever.
 
-## 5. Error handling & recovery contract
+## 9. Testing — what actually proves "one fork() everywhere"
 
-- **`SnapshotLive` owns its rollback.** On any failure it must restore the source to RUNNING, or
-  return typed **`ErrSourceDown`** stating it could not. No implicit half-states.
-- **`EnsureRunning(spawn)` replaces `UnpauseIfPaused`.** The CP's crash-recovery no longer unpauses a
-  stale `AgentID`; the node re-establishes liveness from the **durable launch spec + last artifact**
-  via `Materialize`. Runtime-agnostic, no stale ids, no pause. **Fixes defect (a).**
-- **Reconciler hardening.** In `Server.reconcileInventory`, move the **claim/lease check *before*** the
-  `store.Forking` branch, so an in-flight *leased* fork is never `rt.Drop()`-ed + `MarkForkingLost`-ed
-  on a transient unreport. `MarkForkingLost` then fires only for a genuinely abandoned fork
-  (lease expired) — its actual intent.
-  *Note:* investigation showed the reconciler was a **consequence** of the failed restore, not its
-  cause (the source stays in the node's in-memory store during a fork, so it stays reported). This is
-  hardening, not the root fix — recorded honestly so nobody designs against a misdiagnosis.
+1. **`fakeRuntime`** implementing the primitives ⇒ fork/suspend/resume/migrate become **hermetically
+   unit-testable** (no Docker, no containerd). This is the single biggest win: that logic is currently
+   e2e-only, which is precisely why these bugs lived so long.
+2. **Shared runtime contract suite** — postcondition tests both impls must pass under their lane tag:
+   `SnapshotPreserving` leaves the spawn **running and addressable** (container-level *and*
+   agent-ready — roast: a container-running assertion can pass on a spawn no client can talk to);
+   `whileQuiesced` runs with the agent genuinely not writing **during** the hook (not "after");
+   `BeginFinal` leaves it quiesced and `AbortFinal` restores it; `FinishFinal` scrubs then tears down;
+   `Materialize(chain)` reproduces the rootfs; artifact is durable before teardown.
+3. **Cross-lane `Export`/`Import`** cannot run under a single lane tag. Use a **golden artifact
+   fixture** (a checked-in layer captured on each lane) so the portable-artifact claim inherited from
+   sp-ei4.1.3 is actually tested, rather than asserted.
 
-## 6. Testing — what actually guarantees "one fork() everywhere"
+## 10. Migration
 
-1. **`fakeRuntime`** implementing the 6 primitives → the entire fork/suspend/resume/migrate
-   orchestration becomes **hermetically unit-testable** (no Docker, no containerd). Today that logic
-   is reachable only via e2e, which is why these bugs survived so long.
-2. **A shared runtime *contract* suite** — one table of postcondition tests that **both** impls must
-   pass, run under each lane's build tag (`e2e`, `cri_delta_e2e`):
-   - `SnapshotLive` leaves the spawn **running** and returns a Handle that actually addresses it
-   - `SnapshotLive` on failure restores the source, or reports `ErrSourceDown`
-   - `whileQuiesced` runs with the agent genuinely quiesced (no writes land after it returns)
-   - `Materialize(art)` reproduces the captured rootfs + mounts
-   - `SnapshotFinal` tears the pod down
-   - `Export`/`Import` round-trips across lanes (Docker↔runsc), per sp-ei4.1.3's portable-artifact rule
-
-   **This suite is the mechanism that proves a lane honors the contract — and it is exactly the test
-   that would have caught the gVisor pause regression on day one.**
-
-## 7. Migration (incremental, no big-bang)
-
-1. `Runtime` interface + `Artifact`/`Handle`/`SpawnRef` types + sqlite node-state store (migrate the
-   two JSON stores into it).
-2. Wrap the existing backends as `DockerRuntime` / `CRIRuntime` — behavior-preserving.
-3. Rewrite the orchestration onto the primitives; **delete every lane branch and every
-   orchestration-level `Pause`**.
-4. CP: `EnsureRunning` recovery + reconciler lease ordering.
-5. Restart re-adoption (generation fencing + pump re-attach); narrow `ReapOrphans`.
-6. `fakeRuntime` + contract suite; delete the old fork/pause/capture surface from `PodBackend`.
-
-## 8. Trade-offs & non-goals
-
-- **On runsc, a fork still restarts the source's agent** (filesystem preserved; live tmux/ACP session
-  drops — "resume semantics"). Accepted previously. The abstraction does not remove this; it
-  **contains** it so it stops leaking into the orchestration.
-- **Not a goal:** a third runtime (CRI+runc) today — but the seam makes it additive.
-- **Not a goal:** changing the artifact format. sp-ei4.1.3's OCI-layer-tar stays the wire.
-- The runsc pause bug is fixed upstream (pin bumped to `release-20260601.0`); removing `Pause` from
-  the interface is **defense in depth**, not a workaround for a live bug.
+1. `Runtime` interface + `Artifact`/`ArtifactChain`/`Handle`/`Token` types.
+2. Wrap the (now symmetric) backends as `DockerRuntime` / `CRIRuntime` — behaviour-preserving.
+3. Per-spawn op lock (§7).
+4. Rewrite orchestration onto the primitives; delete lane branches; move the scrub into `FinishFinal`.
+5. `fakeRuntime` + contract suite + golden cross-lane fixture; delete the old capture/pause surface.
 
 ## Post-Implementation Notes
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from
 the assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+- **2026-07-11 — premise spike + fork fixed on master (before this design ships).** `CreateDiff` works
+  on a live/paused container (§2). The CRI lane now preserves the source; `fork·cli` is green, source
+  stays ACTIVE and never restarts. Also fixed: delta image not unpacked into the snapshotter; delta
+  recorded under a non-canonical ref. These landed as small fixes to the existing `PodBackend`, so
+  this design is now a *refactor for testability and uniformity*, not a bug fix.
