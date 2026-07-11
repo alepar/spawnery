@@ -264,11 +264,12 @@ func TestCaptureDeltaHappyPath(t *testing.T) {
 	}
 }
 
-// TestCaptureDeltaAsForkStopsCapturesRemovesClearsAgent verifies the source-preserving fork capture
-// on CRI: it resumes (best-effort) then stops the source, diffs its snapshot into the FORK's delta
-// tag, removes the source container, and clears h.AgentID (the signal RestoreForkedSource reads to
-// re-launch rather than unpause).
-func TestCaptureDeltaAsForkStopsCapturesRemovesClearsAgent(t *testing.T) {
+// TestCaptureDeltaAsForkPreservesSource verifies the source-preserving fork capture on CRI: the
+// source's snapshot is diffed LIVE into the FORK's delta tag, and the source container is NOT
+// stopped, NOT removed, and keeps its agent id — exactly like the Docker lane's
+// CommitContainerPreserving. (Spike-verified: containerd CreateDiff of a running/paused container
+// yields a byte-identical layer to diffing it stopped.)
+func TestCaptureDeltaAsForkPreservesSource(t *testing.T) {
 	fakeEng := &fakeDeltaEngine{
 		captureRef:       runtime.DeltaTag("sp-fork"),
 		captureDeltaSize: 1024,
@@ -284,54 +285,42 @@ func TestCaptureDeltaAsForkStopsCapturesRemovesClearsAgent(t *testing.T) {
 	if ref != runtime.DeltaTag("sp-fork") {
 		t.Errorf("ref = %q, want %q", ref, runtime.DeltaTag("sp-fork"))
 	}
-	// Best-effort resume before stop (the source was paused by the manager) then stop+remove source.
-	if fakeEng.resumeKey != "ctr-source" {
-		t.Errorf("expected resume-before-stop of ctr-source, got resumeKey=%q", fakeEng.resumeKey)
-	}
-	if len(f.stopped) != 1 || f.stopped[0] != "ctr-source" {
-		t.Errorf("StopContainer: got %v, want [ctr-source]", f.stopped)
-	}
-	if len(f.removedContainers) != 1 || f.removedContainers[0] != "ctr-source" {
-		t.Errorf("RemoveContainer: got %v, want [ctr-source]", f.removedContainers)
-	}
-	// The source snapshot (ctr-source) is diffed into the FORK's delta tag.
+	// The source snapshot (ctr-source) is diffed into the FORK's delta tag...
 	if fakeEng.captureKey != "ctr-source" {
 		t.Errorf("Capture snapshotKey = %q, want ctr-source", fakeEng.captureKey)
 	}
 	if fakeEng.captureName != runtime.DeltaTag("sp-fork") {
 		t.Errorf("Capture name = %q, want %q", fakeEng.captureName, runtime.DeltaTag("sp-fork"))
 	}
-	if h.AgentID != "" {
-		t.Errorf("h.AgentID = %q, want cleared after fork capture", h.AgentID)
+	// ...while the SOURCE is left completely intact: not stopped, not removed, id preserved, and not
+	// resumed (the manager's pause is released by RestoreForkedSource, not here).
+	if len(f.stopped) != 0 {
+		t.Errorf("fork capture must NOT stop the source: stopped=%v", f.stopped)
+	}
+	if len(f.removedContainers) != 0 {
+		t.Errorf("fork capture must NOT remove the source: removed=%v", f.removedContainers)
+	}
+	if h.AgentID != "ctr-source" {
+		t.Errorf("h.AgentID = %q, want preserved (ctr-source)", h.AgentID)
+	}
+	if fakeEng.resumeKey != "" {
+		t.Errorf("fork capture must not resume the source (no stop to prepare for), got resumeKey=%q", fakeEng.resumeKey)
 	}
 }
 
-// TestRestoreForkedSourceUnpauseBranch verifies that when the source was paused but not captured
-// (h.AgentID still set — an early-failure path), RestoreForkedSource unpauses rather than re-launches.
-func TestRestoreForkedSourceUnpauseBranch(t *testing.T) {
+// TestRestoreForkedSourceUnpauses verifies RestoreForkedSource simply unpauses the source: the fork
+// capture never stopped it, so there is nothing to re-launch (identical to the Docker lane).
+func TestRestoreForkedSourceUnpauses(t *testing.T) {
 	fakeEng := &fakeDeltaEngine{}
 	c, _ := newFakeCRI(t)
 	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
 
 	h := &runtime.PodHandle{AgentID: "ctr-source", SpawnID: "sp-source"}
 	if err := b.RestoreForkedSource(context.Background(), h, runtime.DeltaTag("sp-fork")); err != nil {
-		t.Fatalf("RestoreForkedSource (unpause branch): %v", err)
+		t.Fatalf("RestoreForkedSource: %v", err)
 	}
 	if fakeEng.resumeKey != "ctr-source" {
 		t.Errorf("expected unpause of ctr-source, got resumeKey=%q", fakeEng.resumeKey)
-	}
-}
-
-// TestRestoreForkedSourceNoCachedSpec verifies the re-launch branch (h.AgentID cleared by capture)
-// fails clearly when the agent spec cache was lost (e.g. spawnlet restart).
-func TestRestoreForkedSourceNoCachedSpec(t *testing.T) {
-	c, _ := newFakeCRI(t)
-	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(&fakeDeltaEngine{}))
-
-	h := &runtime.PodHandle{AgentID: "", SpawnID: "sp-source", SandboxID: "sb-1", BaseImageRef: "base:v1"}
-	err := b.RestoreForkedSource(context.Background(), h, runtime.DeltaTag("sp-fork"))
-	if err == nil || !strings.Contains(err.Error(), "no cached agent spec") {
-		t.Fatalf("expected no-cached-agent-spec error, got %v", err)
 	}
 }
 
