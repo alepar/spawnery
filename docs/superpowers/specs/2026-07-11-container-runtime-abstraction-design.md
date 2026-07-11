@@ -129,17 +129,70 @@ where bytes from another node's untrusted agent rootfs enter this node's image s
 - **Migrate fencing.** The source must be fenced (generation bump) before the target materialises, or
   a partitioned source and a live target both write the same journal generation.
 
-## 8. Explicitly cut (and why)
+## 8. Restart re-adoption — REINSTATED (v2 corrected a factual error)
+
+> **v1 (and the roast that confirmed it) got this wrong.** v1 claimed a spawnlet restart "costs a
+> resume cycle and the live session, not the work", and cut re-adoption as scope creep on an
+> overstated harm. **The harm was understated, not overstated.**
+
+**What actually happens today** (code-verified):
+
+1. `ReapOrphans` runs **once at spawnlet process startup, before the node connects to the CP**
+   (`node.Run()`). The in-mem store is empty then, so **every** managed pod is an "orphan":
+   best-effort `CaptureDelta` (work preserved) → **`Stop` — the pod is destroyed**.
+2. The node reports an **empty inventory**.
+3. CP `reconcileInventory`: those spawns are `PhaseActive` but unreported → `rt.Drop()` +
+   **`MarkUnreachable`**.
+4. **Nothing auto-recovers them.** The only route back to Active is `adoptOrStop` flipping
+   `Unreachable→Active` *when a node reports the spawn as running* — which can never happen, because
+   the pod was destroyed.
+
+So a spawnlet restart/upgrade **destroys every spawn on the node and leaves them Unreachable until a
+human resumes them.** The work survives in a delta; the spawn does not.
+
+**Two of the roast's objections to re-adoption are stale or misplaced:**
+
+- **Fencing is already CP-side and correct.** `adoptOrStop` fences on generation: *gen matches + live
+  row → adopt (flip Unreachable→Active); gen behind live → `StopSpawn(stale_gen)`.* The node must
+  therefore **not** fence locally (v1 did — that is what made it split-brain-prone). It **reports what
+  it is running**; the **CP adjudicates**. The machinery exists and is untouched by this design.
+- **Re-attach is a plain TCP re-dial on BOTH lanes** — `AttachTCP(podIP:acpPort)` in *both*
+  `docker_pod.go` and `cri/backend.go`. The roast's "raw byte pump / Docker stdio hijack with no
+  replay" rests on **stale code**: the stdio hijack is gone. An in-flight ACP turn may still be lost,
+  which is a *session* concern, not a *spawn-liveness* one.
+
+**Design.** On startup the node does **not** blanket-reap:
+
+```
+for pod := range rt.ListManaged():             // labels: spawnID, generation
+    spawn, err := rebuildSpawn(pod)            // see below
+    if err != nil: rt.Destroy(pod)             // cannot re-adopt -> reap (as today)
+    else:          mgr.ReAdopt(spawn); redialACP(spawn)   // then REPORT it to the CP
+// the CP's adoptOrStop then adopts (gen matches) or orders StopSpawn (gen stale)
+```
+
+`rebuildSpawn` needs no new at-rest secret and no new durable store:
+
+| field | recovered from |
+|---|---|
+| container ids, generation | runtime **labels** (`ListManaged`) |
+| PodIP / NetnsPath | runtime status (`PodSandboxStatus` / `ContainerIP`+`ContainerPID`) |
+| **ControlToken** (per-pod sidecar bearer **secret**) | the **sidecar container's env** — the node sets `SIDECAR_CONTROL_TOKEN=…` at start, so **the runtime already stores it**; read it back rather than persist it |
+| mounts / journal pins / delta depth | the existing per-spawn JSON stores |
+
+**Load-bearing assumption (spike before building):** that the sidecar's env is readable back on
+**both** lanes (Docker `inspect` → `Config.Env`; CRI `ContainerStatus(verbose)` → OCI spec env).
+*Cheapest test:* start a pod on each lane, restart nothing, read `SIDECAR_CONTROL_TOKEN` back through
+the runtime API. *Kill criteria:* if CRI does not expose it, re-adoption needs the token persisted
+(secret at rest) — which changes the security posture and must be re-decided.
+
+## 8b. Explicitly cut (and why)
 
 - **sqlite node DB** — its sole justification was atomic writes *across the identity swap*. No swap ⇒
   no cross-record transaction ⇒ no need. Roast also showed v1's own rationale contradicted its state
   table. Keep the existing per-spawn JSON stores.
 - **Durable launch spec** — existed only to re-launch the source. Nothing re-launches.
 - **`EnsureRunning`** — existed to repair a stale `AgentID`. Ids no longer change.
-- **Restart re-adoption** — roast-confirmed **scope creep on an overstated harm**: `ReapOrphans`
-  already does *capture-before-reap*, so a spawnlet restart costs a resume cycle and the live session,
-  **not the work**. It also needed CP-consulting fencing (node-local fencing ⇒ split-brain) and pump
-  re-attach over a raw byte stream with no framing/replay. Not worth it here; file separately if ever.
 
 ## 9. Testing — what actually proves "one fork() everywhere"
 
@@ -162,7 +215,9 @@ where bytes from another node's untrusted agent rootfs enter this node's image s
 2. Wrap the (now symmetric) backends as `DockerRuntime` / `CRIRuntime` — behaviour-preserving.
 3. Per-spawn op lock (§7).
 4. Rewrite orchestration onto the primitives; delete lane branches; move the scrub into `FinishFinal`.
-5. `fakeRuntime` + contract suite + golden cross-lane fixture; delete the old capture/pause surface.
+5. Restart re-adoption (§8): rebuild-from-runtime + report; CP adjudicates. Narrow `ReapOrphans` to
+   "cannot rebuild" / CP-disowned pods only.
+6. `fakeRuntime` + contract suite + golden cross-lane fixture; delete the old capture/pause surface.
 
 ## Post-Implementation Notes
 
