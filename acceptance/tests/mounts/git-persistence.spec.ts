@@ -40,12 +40,7 @@ function giteaRepoName(runId: string): string {
   return `acc-gitmount-${runId}-${rand}`.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
 }
 
-// BLOCKED on sp-6ag5.7: create + clone-from-Gitea + commit + suspend all work (the mount journals
-// to Garage, manifest written), but RESUME fails — the suspended github-mount spawn's pod sandbox
-// cannot be torn down on runsc (RemovePodSandbox wedges releasing the .git gofer bind mount), so it
-// orphans and resume can't re-create the pod under the same name. Node-local mounts are unaffected.
-// fixme (not skip) so it stays visible and flips to a pass once the gVisor teardown wall is fixed.
-test.fixme("github mount survives suspend/resume · cli", { tag: "@mutating" }, async ({ ctx, cli, api, runId, target }) => {
+test("github mount survives suspend/resume · cli", { tag: "@mutating" }, async ({ ctx, cli, api, runId, target }) => {
   // The full flow — create + clone-in from Gitea + commit + a Garage suspend/resume round-trip — is
   // well past Playwright's 30s default on the VM lane (marker-only suspend-fork just fits; the clone
   // pushes this over). Match the slow-lane budget (cf. ACC_SPAWN_ACTIVE_TIMEOUT_MS=240s).
