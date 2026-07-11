@@ -126,8 +126,7 @@ type PodBackend interface {
 	// RestoreForkedSource returns the source agent to a running state after a source-preserving
 	// CaptureDeltaAs. Both lanes capture without stopping the source — Docker via a preserving
 	// commit, CRI via CreateDiff on the live container — so the source is only ever paused, and
-	// restoring it is an Unpause. deltaRef is unused (kept so the signature survives a lane that
-	// ever needs to re-launch). On the early-failure path (source never paused) it may return a
+	// restoring it is an Unpause. On the early-failure path (source never paused) it may return a
 	// tolerable "not paused" error.
-	RestoreForkedSource(ctx context.Context, h *PodHandle, deltaRef string) error
+	RestoreForkedSource(ctx context.Context, h *PodHandle) error
 }

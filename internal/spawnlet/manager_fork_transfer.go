@@ -139,7 +139,7 @@ func (m *Manager) ForkTransferExport(ctx context.Context, req ForkTransferExport
 			return nil
 		}
 		cleanupCtx := context.WithoutCancel(ctx)
-		if err := m.restoreForkSource(cleanupCtx, sp, h, req.ForkSpawnID); err != nil {
+		if err := m.restoreForkSource(cleanupCtx, sp, h); err != nil {
 			return err
 		}
 		if err := m.journal.Close(cleanupCtx, sp.ID); err != nil {

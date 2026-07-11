@@ -139,7 +139,7 @@ func (m *Manager) ForkSameNode(ctx context.Context, req ForkSameNodeRequest) (Fo
 			return nil
 		}
 		cleanupCtx := context.WithoutCancel(ctx)
-		if err := m.restoreForkSource(cleanupCtx, sp, h, req.ForkSpawnID); err != nil {
+		if err := m.restoreForkSource(cleanupCtx, sp, h); err != nil {
 			return err
 		}
 		if err := m.journal.Close(cleanupCtx, sp.ID); err != nil {
@@ -413,19 +413,12 @@ func (m *Manager) UnpauseIfPaused(ctx context.Context, spawnID string, generatio
 	return nil
 }
 
-// restoreForkSource returns the fork source to a running state and persists a re-launched agent id.
-// The Docker lane unpauses the still-live source; the CRI lane re-launches the agent it stopped+
-// removed for the snapshot diff, from the captured fork delta (m.pod.RestoreForkedSource). A "not
-// paused" error means the source was never paused (an early-failure cleanup) and is tolerated.
-func (m *Manager) restoreForkSource(ctx context.Context, sp *Spawn, h *runtime.PodHandle, forkID string) error {
-	if err := m.pod.RestoreForkedSource(ctx, h, runtime.DeltaTag(forkID)); err != nil && !sourceAlreadyRunning(err) {
+// restoreForkSource returns the fork source to a running state. Both lanes capture the fork's delta
+// without stopping the source, so this is an unpause and the source keeps its agent container id. A
+// "not paused" error means the source was never paused (an early-failure cleanup) and is tolerated.
+func (m *Manager) restoreForkSource(ctx context.Context, sp *Spawn, h *runtime.PodHandle) error {
+	if err := m.pod.RestoreForkedSource(ctx, h); err != nil && !sourceAlreadyRunning(err) {
 		return fmt.Errorf("restore source %s: %w", sp.ID, err)
-	}
-	// A CRI re-launch assigns a fresh agent container id; persist it so attach/exec/stop on the source
-	// find the new container. Docker keeps the same id (no-op).
-	if h.AgentID != "" && h.AgentID != sp.AgentID {
-		sp.AgentID = h.AgentID
-		m.store.Put(sp)
 	}
 	return nil
 }

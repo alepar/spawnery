@@ -165,10 +165,9 @@ func (b *CRIPodBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle
 
 // RestoreForkedSource returns the source to running after a source-preserving CaptureDeltaAs. Since
 // the fork capture no longer stops or removes the source container (CreateDiff diffs it live), this
-// is just an unpause of the agent the manager paused to quiesce — identical to the Docker lane.
-// deltaRef is unused: the source keeps its OWN container and writable layer and is never rebased onto
-// the fork's delta.
-func (b *CRIPodBackend) RestoreForkedSource(ctx context.Context, h *runtime.PodHandle, _ string) error {
+// is just an unpause of the agent the manager paused to quiesce — identical to the Docker lane. The
+// source keeps its OWN container and writable layer and is never rebased onto the fork's delta.
+func (b *CRIPodBackend) RestoreForkedSource(ctx context.Context, h *runtime.PodHandle) error {
 	return b.Unpause(ctx, h)
 }
 

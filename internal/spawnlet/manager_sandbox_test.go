@@ -131,7 +131,7 @@ func (f *fakePodBackend) Unpause(_ context.Context, _ *runtime.PodHandle) error 
 
 // RestoreForkedSource models the Docker-like default: the source stayed live, so restoring it is an
 // unpause. Fork-specific tests use recordingForkBackend to assert the delta ref / re-launch path.
-func (f *fakePodBackend) RestoreForkedSource(_ context.Context, _ *runtime.PodHandle, _ string) error {
+func (f *fakePodBackend) RestoreForkedSource(_ context.Context, _ *runtime.PodHandle) error {
 	f.paused = false
 	f.unpauseCount++
 	return nil

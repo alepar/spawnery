@@ -316,7 +316,7 @@ func TestRestoreForkedSourceUnpauses(t *testing.T) {
 	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
 
 	h := &runtime.PodHandle{AgentID: "ctr-source", SpawnID: "sp-source"}
-	if err := b.RestoreForkedSource(context.Background(), h, runtime.DeltaTag("sp-fork")); err != nil {
+	if err := b.RestoreForkedSource(context.Background(), h); err != nil {
 		t.Fatalf("RestoreForkedSource: %v", err)
 	}
 	if fakeEng.resumeKey != "ctr-source" {
