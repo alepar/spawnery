@@ -1864,10 +1864,10 @@ func (*DeleteSpawnResponse) Descriptor() ([]byte, []int) {
 
 // reauth_token: a TEXT control message carrying a new AS-signed token for in-band re-presentation
 // (~15 min, aligned with access-token TTL). Non-empty reauth_token is consumed by the recv loop
-// and NEVER forwarded to FromClient. Client sides land in A3/A5; CP is tolerant in dev mode.
+// and NEVER forwarded to FromClient.
 // session_auth (field 4): A4 session-open AuthEnvelope, carried only on the first (bind) frame
-// [AC1]. The CP mints the aud=node token from the intent's SPKI DER in dev mode when
-// access_token is empty [AM12]. Subsequent data frames must not set this field.
+// [AC1]. It must contain the AS-issued aud=node token and signed intent. Subsequent data frames
+// must not set this field.
 type Frame struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache

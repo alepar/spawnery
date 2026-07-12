@@ -47,13 +47,13 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 			return
 		}
 		var bind struct {
-			SpawnID      string `json:"spawnId"`
-			Token        string `json:"token"`
-			ClientID     string `json:"clientId"`
-			SessionID    string `json:"sessionId"` // empty => session #0
-			Cursor       int64  `json:"cursor"`
-			// signedIntent (A4): raw proto.Marshal(SignedIntent) bytes, base64-encoded [AC1][AM12].
-			// If present the CP mints a dev aud=node token and threads the envelope into SessionOpen.
+			SpawnID         string `json:"spawnId"`
+			Token           string `json:"token"`
+			NodeAccessToken string `json:"nodeAccessToken"`
+			ClientID        string `json:"clientId"`
+			SessionID       string `json:"sessionId"` // empty => session #0
+			Cursor          int64  `json:"cursor"`
+			// signedIntent: raw proto.Marshal(SignedIntent) bytes, base64-encoded.
 			SignedIntent []byte `json:"signedIntent,omitempty"`
 		}
 		if err := json.Unmarshal(first, &bind); err != nil {
@@ -83,6 +83,20 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 		if sessionID == "" {
 			sessionID = "0" // default to session #0 (backward compat with single-session clients)
 		}
+		if bind.NodeAccessToken == "" {
+			conn.Close(websocket.StatusPolicyViolation, "nodeAccessToken required")
+			return
+		}
+		if len(bind.SignedIntent) == 0 {
+			conn.Close(websocket.StatusPolicyViolation, "signedIntent required")
+			return
+		}
+		var signedIntent authv1.SignedIntent
+		if err := proto.Unmarshal(bind.SignedIntent, &signedIntent); err != nil {
+			conn.Close(websocket.StatusUnsupportedData, "malformed signedIntent")
+			return
+		}
+		sessionEnv := &authv1.AuthEnvelope{AccessToken: bind.NodeAccessToken, Intent: &signedIntent}
 
 		// Per-session context for revocation cancellation; enriched with correlation IDs so all
 		// logging within the session includes spawn_id and session_id automatically.
@@ -107,16 +121,6 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 			}
 		}()
 
-		// A4: build session-open AuthEnvelope from the client-supplied SignedIntent bytes [AC1][AM12].
-		var sessionEnv *authv1.AuthEnvelope
-		if len(bind.SignedIntent) > 0 {
-			var si authv1.SignedIntent
-			if merr := proto.Unmarshal(bind.SignedIntent, &si); merr == nil {
-				sessionEnv = s.mintSessionEnv(owner, &authv1.AuthEnvelope{Intent: &si})
-			} else {
-				slogctx.FromContext(sessCtx).Warn("ws: bind frame signedIntent unmarshal failed", "err", merr)
-			}
-		}
 		cs := wsClient{conn: conn, ctx: sessCtx}
 		done, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, owner, sessionEnv, cs, bind.Cursor)
 		if err != nil {

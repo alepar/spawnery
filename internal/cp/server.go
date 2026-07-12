@@ -1606,15 +1606,6 @@ func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.Sub
 	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil
 }
 
-// mintSessionEnv preserves a client-supplied session-open envelope for the node ingress.
-// Public ingress validation is applied by the Connect and WebSocket handlers.
-func (s *Server) mintSessionEnv(_ string, sa *authv1.AuthEnvelope) *authv1.AuthEnvelope {
-	if sa == nil || sa.Intent == nil {
-		return nil
-	}
-	return &authv1.AuthEnvelope{AccessToken: sa.AccessToken, Intent: sa.Intent}
-}
-
 // buildPendingIntent constructs the cp.v1.PendingIntent from the committed provision tuple.
 // mounts comes from the store's mount list for the spawn (may be nil for CreateSpawn).
 func buildPendingIntent(op intent.Op, spawnID string, gen uint64, targetNodeID, image, appRef, model, dataRef string, mounts []store.Mount, attachedSecretIDs []string) *cpv1.PendingIntent {
@@ -1752,6 +1743,10 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	if owner != sp.OwnerID {
 		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
 	}
+	sessionEnv := first.GetSessionAuth()
+	if sessionEnv == nil || sessionEnv.GetAccessToken() == "" || sessionEnv.GetIntent() == nil {
+		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session_auth with node access token and signed intent required"))
+	}
 
 	// Per-session context for revocation cancellation.
 	sessCtx, sessCancel := context.WithCancel(ctx)
@@ -1791,11 +1786,6 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 
 	clientID := uuid.Must(uuid.NewV7()).String()
 	cs := &clientStream{stream: stream, spawnID: spawnID}
-	// A4: thread session-open AuthEnvelope from the bind frame into SessionOpen [AC1].
-	var sessionEnv *authv1.AuthEnvelope
-	if sa := first.GetSessionAuth(); sa != nil {
-		sessionEnv = s.mintSessionEnv(owner, sa)
-	}
 	// cursor 0: the cp.v1 Session-RPC transport has no resume cursor (only the WS bind does).
 	// session "0": this transport has no per-session selector yet (web uses the WS bind for that).
 	done, err := s.rt.AttachClient(spawnID, "0", clientID, sp.OwnerID, sessionEnv, cs, 0)

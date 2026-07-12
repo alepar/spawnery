@@ -95,8 +95,8 @@ func (r *Router) Attached(spawnID string) bool {
 }
 
 // AttachClient registers a client by id and tells the node to open the relay for it (carrying cursor).
-// env is the A4 AuthEnvelope (token + SignedIntent) to thread into SessionOpen [AC1]; nil is
-// allowed in dev/insecure mode where the node will verify-and-log-not-enforce.
+// env is the A4 AuthEnvelope (token + SignedIntent) to thread into SessionOpen [AC1]. Public CP
+// ingress validates its structural presence; low-level router tests may still pass nil.
 // assertedOwner is the CP-asserted spawn owner threaded into the node's owner-binding check.
 func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string, env *authv1.AuthEnvelope, c ClientSender, cursor int64) (<-chan struct{}, error) {
 	r.mu.Lock()
