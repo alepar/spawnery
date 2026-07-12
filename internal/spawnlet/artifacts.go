@@ -6,14 +6,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,8 +100,13 @@ type Artifact struct {
 // FetchError is the typed error returned by fetchObjectTar. Terminal=true means the artifact
 // cannot be retrieved without operator intervention (wrong object, hash mismatch, size exceeded);
 // Terminal=false means the error is transient and the caller may retry (network, 5xx, etc.).
+// Expired=true is a distinguished sub-case of a non-Terminal failure: the S3 error Code+Message
+// identify an expired presigned URL (never inferred from the bare HTTP status — see
+// classifyS3Error), which fetchWithRetry may recover from via a RepresignFunc before falling back
+// to Terminal.
 type FetchError struct {
 	Terminal bool
+	Expired  bool
 	msg      string
 	err      error
 }
@@ -112,15 +120,75 @@ func (e *FetchError) Error() string {
 
 func (e *FetchError) Unwrap() error { return e.err }
 
+// Message returns e's user-facing message ALONE, never e.err (which may wrap a *url.Error carrying
+// the presigned URL's query string). This is the only safe way to surface a FetchError outside the
+// node — see SafeErrorMessage, which callers should use instead of .Error()/.Unwrap() on any error
+// that might contain a *FetchError.
+func (e *FetchError) Message() string { return e.msg }
+
 func terminalFetch(msg string, err error) *FetchError {
 	return &FetchError{Terminal: true, msg: msg, err: err}
 }
 func retryFetch(msg string, err error) *FetchError {
 	return &FetchError{Terminal: false, msg: msg, err: err}
 }
+func expiredFetch(msg string) *FetchError {
+	return &FetchError{Terminal: false, Expired: true, msg: msg}
+}
+
+// SafeErrorMessage formats err for exposure outside the node — a spawn error that manager.go returns
+// is persisted by the CP to the DB and rendered in the web UI. If err's chain contains a *FetchError,
+// the returned string is built from its .Message() ALONE, never .Error()/.Unwrap(): a FetchError's
+// wrapped cause can be a *url.Error embedding the full presigned URL, including the X-Amz-Signature
+// query (sp-mwco.4.2 — this is the boundary that closes that leak). Falls back to err.Error() when no
+// FetchError is found in the chain (redactURLErr is still defence in depth at construction time, but
+// this is the enforcement point).
+func SafeErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	var fe *FetchError
+	if errors.As(err, &fe) {
+		return fe.Message()
+	}
+	return err.Error()
+}
+
+// redactURLErr returns a copy of err with any embedded *url.Error's URL rewritten to drop its query
+// string (where a presigned GET's X-Amz-Signature lives), or "<redacted>" if the URL fails to
+// re-parse. err that does not wrap a *url.Error (including nil) passes through unchanged. Applied at
+// every retryFetch/terminalFetch call site in defaultFetcher as defence in depth alongside
+// SafeErrorMessage, so even a raw FetchError.Error() (bypassing SafeErrorMessage) cannot leak a
+// presigned URL's signature.
+func redactURLErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var uerr *url.Error
+	if !errors.As(err, &uerr) {
+		return err
+	}
+	redacted := *uerr
+	if u, perr := url.Parse(uerr.URL); perr == nil {
+		u.RawQuery = ""
+		u.Fragment = ""
+		redacted.URL = u.String()
+	} else {
+		redacted.URL = "<redacted>"
+	}
+	return &redacted
+}
 
 // bytesFetcher abstracts the HTTP GET for by-ref artifacts (injectable in tests).
 type bytesFetcher func(ctx context.Context, url string) ([]byte, error)
+
+// RepresignFunc mints fresh presigned GET URLs for the given object keys, returning a map from
+// ObjectKey to the new PresignedURL. Supplied by internal/node over the Attach stream (sp-mwco.4.3:
+// key-scoped to the spawn's own artifacts, fenced, denylist-consulted); nil in production until that
+// task lands, in which case an expired presign is Terminal instead of recovered. An error, or a
+// result map missing a requested key, is treated as re-presign being unavailable (Terminal — no
+// retry loop).
+type RepresignFunc func(ctx context.Context, objectKeys []string) (map[string]string, error)
 
 // ArtifactStager owns a per-node root of per-spawn staging dirs (parallel to SecretInjector). The
 // per-spawn dir is bind-mounted into the agent at ArtifactsMountPath. Root should be a tmpfs in
@@ -186,8 +254,11 @@ func (a ArtifactStager) Remove(spawnID string) error {
 // the budget by summing per-artifact timeouts. progress (optional, nil-safe) fires once per completed
 // by-ref artifact plus a wall-clock heartbeat while fetches are in flight, always from Materialize's
 // own goroutine (collected off a channel — see materializeByRef), so the CP's no-progress stall timer
-// keeps resetting across a whole bundle, not just at the start/end of Materialize.
-func (a ArtifactStager) Materialize(ctx context.Context, spawnID string, artifacts []Artifact, secrets SecretInjector, progress func(phase, detail, stepKey string)) error {
+// keeps resetting across a whole bundle, not just at the start/end of Materialize. represign
+// (optional, nil-safe) mints a fresh presigned URL for a by-ref artifact whose GET failed because the
+// presign expired (detected from the parsed S3 error Code, not the HTTP status — see
+// classifyS3Error); nil means an expired presign is Terminal instead of recovered.
+func (a ArtifactStager) Materialize(ctx context.Context, spawnID string, artifacts []Artifact, secrets SecretInjector, progress func(phase, detail, stepKey string), represign RepresignFunc) error {
 	dir := a.DirFor(spawnID)
 	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("artifacts: reset staging dir: %w", err)
@@ -226,7 +297,7 @@ func (a ArtifactStager) Materialize(ctx context.Context, spawnID string, artifac
 	if len(byRef) == 0 {
 		return nil
 	}
-	if err := a.materializeByRef(ctx, dir, byRef, progress); err != nil {
+	if err := a.materializeByRef(ctx, dir, byRef, progress, represign); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("artifacts: staging deadline (%s) exceeded materializing %d by-ref artifact(s): %w",
 				a.effectiveStagingBudget(), len(byRef), err)
@@ -288,7 +359,7 @@ type byRefResult struct {
 // loop ran on this goroutine before the collector loop began, a bundle bigger than the concurrency
 // limit would see zero progress() calls until the ENTIRE bundle had been dispatched (i.e. until most
 // of it had already finished) — silently reintroducing the stall-window gap this task exists to close.
-func (a ArtifactStager) materializeByRef(ctx context.Context, stageDir string, artifacts []Artifact, progress func(phase, detail, stepKey string)) error {
+func (a ArtifactStager) materializeByRef(ctx context.Context, stageDir string, artifacts []Artifact, progress func(phase, detail, stepKey string), represign RepresignFunc) error {
 	total := len(artifacts)
 	results := make(chan byRefResult, total)
 	sem := make(chan struct{}, stagingFetchConcurrency)
@@ -305,7 +376,7 @@ func (a ArtifactStager) materializeByRef(ctx context.Context, stageDir string, a
 			go func(art Artifact) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				err := a.stageByRef(workCtx, stageDir, art)
+				err := a.stageByRef(workCtx, stageDir, art, represign)
 				if err != nil {
 					once.Do(func() {
 						firstErr = fmt.Errorf("artifacts: stage %q: %w", art.ID, err)
@@ -347,8 +418,9 @@ func (a ArtifactStager) materializeByRef(ctx context.Context, stageDir string, a
 }
 
 // stageByRef stages a single by-ref artifact: a node-local sha-keyed cache hit skips the GET
-// entirely; a miss fetches (with retry), verifies, caches (best-effort), and unpacks.
-func (a ArtifactStager) stageByRef(ctx context.Context, stageDir string, art Artifact) error {
+// entirely; a miss fetches (with retry and, on an expired presign, one re-presign round), verifies,
+// caches (best-effort), and unpacks.
+func (a ArtifactStager) stageByRef(ctx context.Context, stageDir string, art Artifact, represign RepresignFunc) error {
 	dest, err := destPathFor(stageDir, art)
 	if err != nil {
 		return err
@@ -356,7 +428,7 @@ func (a ArtifactStager) stageByRef(ctx context.Context, stageDir string, art Art
 	if plain, ok := a.cacheLoad(art); ok {
 		return unpackTar(dest, plain)
 	}
-	plain, err := a.fetchWithRetry(ctx, art)
+	plain, err := a.fetchWithRetry(ctx, art, represign)
 	if err != nil {
 		return err
 	}
@@ -368,18 +440,47 @@ func (a ArtifactStager) stageByRef(ctx context.Context, stageDir string, art Art
 // returns immediately (no retry — the object is unrecoverable without operator intervention).
 // Retryable failures back off with doubling jittered delays (base effectiveRetryBase), aborting
 // early without sleeping if the remaining aggregate budget is shorter than the next delay.
-func (a ArtifactStager) fetchWithRetry(ctx context.Context, art Artifact) ([]byte, error) {
+//
+// An Expired *FetchError (the parsed S3 error Code identifies an expired presign — see
+// classifyS3Error, never the bare HTTP status) is handled separately from the retry budget: if
+// represign is non-nil and this artifact has not already been re-presigned, fetchWithRetry calls it
+// ONCE with art.ObjectKey, swaps in the returned URL (a local copy — Artifact is passed by value),
+// and retries WITHOUT consuming a retry attempt. A second expiry after that one re-presign round, a
+// nil represign, a represign error, or a result missing this artifact's key, all convert to Terminal
+// — there is no loop and no retry-budget burn either way.
+func (a ArtifactStager) fetchWithRetry(ctx context.Context, art Artifact, represign RepresignFunc) ([]byte, error) {
 	base := a.effectiveRetryBase()
-	for attempt := 1; attempt <= retryAttempts; attempt++ {
+	represigned := false
+	attempt := 1
+	for {
 		plain, err := a.fetchObjectTar(ctx, art)
 		if err == nil {
 			return plain, nil
 		}
 		var fe *FetchError
+		if errors.As(err, &fe) && fe.Expired {
+			if represigned {
+				return nil, terminalFetch("presigned URL expired again after re-presign", nil)
+			}
+			if represign == nil {
+				return nil, terminalFetch("presigned URL expired: re-presign unavailable", nil)
+			}
+			urls, rerr := represign(ctx, []string{art.ObjectKey})
+			if rerr != nil {
+				return nil, terminalFetch("presigned URL expired: re-presign unavailable", nil)
+			}
+			newURL, ok := urls[art.ObjectKey]
+			if !ok || newURL == "" {
+				return nil, terminalFetch("presigned URL expired: re-presign unavailable", nil)
+			}
+			art.PresignedURL = newURL
+			represigned = true
+			continue // one re-presign round; does not consume a retry attempt
+		}
 		if errors.As(err, &fe) && fe.Terminal {
 			return nil, err
 		}
-		if attempt == retryAttempts {
+		if attempt >= retryAttempts {
 			break
 		}
 		delay := backoffDelay(base, attempt)
@@ -393,6 +494,7 @@ func (a ArtifactStager) fetchWithRetry(ctx context.Context, art Artifact) ([]byt
 			return nil, retryFetch(fmt.Sprintf("Garage unreachable after %d attempt(s)", attempt), nil)
 		case <-timer.C:
 		}
+		attempt++
 	}
 	return nil, retryFetch(fmt.Sprintf("Garage unreachable after %d attempts", retryAttempts), nil)
 }
@@ -510,8 +612,13 @@ func (a ArtifactStager) pruneCache(incoming int64) {
 // plain tar bytes against art.Sha256, and returns the verified plain tar bytes ready for unpackTar.
 // A *FetchError is returned:
 //   - transport/DNS/timeout errors -> Terminal=false ("Garage unreachable")
-//   - HTTP 404               -> Terminal=true  ("skill object missing")
-//   - other non-2xx (incl. 403/5xx) -> Terminal=false (retryable; future re-presign can hook in)
+//   - non-2xx -> classified by the parsed S3 error Code/Message, not the bare HTTP status; see
+//     classifyS3Error. An expired presign (Code InvalidRequest/"too old", or AccessDenied with
+//     expiry wording) -> Expired=true, Terminal=false (fetchWithRetry may recover via re-presign).
+//     A signature/config fault (AccessDenied without expiry wording, SignatureDoesNotMatch,
+//     InvalidAccessKeyId, or an unparseable 403) -> Terminal=true (retrying will not help). 404 /
+//     NoSuchKey -> Terminal=true ("skill object missing"). 5xx -> Terminal=false (retryable). Any
+//     other 4xx -> Terminal=true (config-fault class).
 //   - plain tar exceeds cap  -> Terminal=true  ("skill object too large")
 //   - sha256 mismatch        -> Terminal=true  ("sha256 mismatch")
 func (a ArtifactStager) fetchObjectTar(ctx context.Context, art Artifact) ([]byte, error) {
@@ -555,38 +662,111 @@ func (a ArtifactStager) fetchObjectTar(ctx context.Context, art Artifact) ([]byt
 	return plain, nil
 }
 
-// defaultFetcher is the production HTTP GET implementation. It applies a per-request timeout and
-// classifies transport vs HTTP-status errors per the §4.6 error taxonomy.
+// maxS3ErrorBodyBytes bounds the non-2xx response body read in defaultFetcher before XML-decoding
+// it. A real S3/Garage error body is well under 1 KiB; this just stops a hostile or broken endpoint
+// from streaming an unbounded body into memory on the error path.
+const maxS3ErrorBodyBytes = 64 << 10 // 64 KiB
+
+// s3ErrorXML is the minimal shape of an S3-compatible error response body.
+type s3ErrorXML struct {
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
+}
+
+// defaultFetcher is the production HTTP GET implementation. It applies a per-request timeout,
+// redacts any *url.Error's query string at construction (defence in depth — see redactURLErr), and
+// classifies non-2xx responses by the parsed S3 error Code/Message via classifyS3Error, never the
+// bare HTTP status.
 var defaultFetcher bytesFetcher = func(ctx context.Context, url string) ([]byte, error) {
 	client := &http.Client{Timeout: fetchTimeout}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, terminalFetch("skill object: bad presigned URL", err)
+		return nil, terminalFetch("skill object: bad presigned URL", redactURLErr(err))
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, retryFetch("Garage unreachable", err)
+		return nil, retryFetch("Garage unreachable", redactURLErr(err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
-	switch {
-	case resp.StatusCode == http.StatusOK:
-		// proceed
-	case resp.StatusCode == http.StatusNotFound:
-		return nil, terminalFetch("skill object missing (404)", nil)
-	default:
-		return nil, retryFetch(fmt.Sprintf("skill object fetch: HTTP %d", resp.StatusCode), nil)
+	if resp.StatusCode != http.StatusOK {
+		lr := &io.LimitedReader{R: resp.Body, N: maxS3ErrorBodyBytes}
+		errBody, _ := io.ReadAll(lr) // best-effort; an unparseable/empty body falls back to status-only
+		var parsed s3ErrorXML
+		_ = xml.Unmarshal(errBody, &parsed) // best-effort; parsed stays zero-valued on failure
+		return nil, classifyS3Error(resp.StatusCode, parsed.Code, parsed.Message)
 	}
 	// Bound the compressed read: a legitimate payload that decompresses to <= maxPlainTarBytes
 	// cannot have a compressed body larger than maxPlainTarBytes, so this caps peak memory end-to-end.
 	clr := &io.LimitedReader{R: resp.Body, N: maxPlainTarBytes + 1}
 	body, err := io.ReadAll(clr)
 	if err != nil {
-		return nil, retryFetch("skill object: read response body", err)
+		return nil, retryFetch("skill object: read response body", redactURLErr(err))
 	}
 	if int64(len(body)) > maxPlainTarBytes {
 		return nil, terminalFetch(fmt.Sprintf("skill object compressed body too large (> %d bytes)", maxPlainTarBytes), nil)
 	}
 	return body, nil
+}
+
+// accessDeniedFetch builds the Terminal message for a signature/config-fault class of error (a
+// non-expiry AccessDenied, SignatureDoesNotMatch, InvalidAccessKeyId, or an unparseable bare 403):
+// these are persistent faults (clock skew, a proxy rewriting Host, an endpoint mismatch, or a stale
+// Garage key) that retrying will not fix, so they must never be misreported as "Garage unreachable"
+// after burning the retry budget.
+func accessDeniedFetch(status int, code string) *FetchError {
+	label := fmt.Sprintf("HTTP %d", status)
+	if code != "" {
+		label = fmt.Sprintf("HTTP %d, %s", status, code)
+	}
+	return terminalFetch(fmt.Sprintf(
+		"skill object fetch denied (%s): likely clock skew, endpoint/Host mismatch, or a stale Garage key -- retrying will not help",
+		label), nil)
+}
+
+// classifyS3Error maps a non-2xx S3-compatible response to a *FetchError per the §4.2 taxonomy,
+// triggering on the parsed error Code/Message — NEVER the bare HTTP status. Spike-verified against a
+// live dev Garage (docs/superpowers/specs/2026-07-12-skill-delivery-hardening-design.md
+// Post-Implementation Notes): an expired presign is 400/InvalidRequest/"...Date is too old", while a
+// signature fault is 403/AccessDenied/"...Invalid signature" — only the Code+Message distinguish an
+// expired-but-recoverable presign from a persistent signature/config fault that retrying (or even
+// re-presigning) cannot fix. code/msg are "" when the body was empty, non-XML, or absent.
+func classifyS3Error(status int, code, msg string) *FetchError {
+	expiryWorded := func(s string) bool {
+		l := strings.ToLower(s)
+		return strings.Contains(l, "too old") || strings.Contains(l, "expired")
+	}
+
+	switch code {
+	case "InvalidRequest", "ExpiredToken":
+		if expiryWorded(msg) || code == "ExpiredToken" {
+			return expiredFetch("presigned URL expired")
+		}
+	case "AccessDenied":
+		if expiryWorded(msg) {
+			return expiredFetch("presigned URL expired")
+		}
+		return accessDeniedFetch(status, code)
+	case "SignatureDoesNotMatch", "InvalidAccessKeyId":
+		return accessDeniedFetch(status, code)
+	case "NoSuchKey":
+		return terminalFetch("skill object missing (404)", nil)
+	}
+
+	switch {
+	case status == http.StatusNotFound:
+		return terminalFetch("skill object missing (404)", nil)
+	case status == http.StatusForbidden:
+		return accessDeniedFetch(status, code) // unparseable/garbage body -> status-only fallback
+	case status >= 500:
+		return retryFetch(fmt.Sprintf("Garage unavailable (HTTP %d)", status), nil)
+	case status >= 400:
+		if code != "" {
+			return terminalFetch(fmt.Sprintf("skill object fetch: HTTP %d (%s)", status, code), nil)
+		}
+		return terminalFetch(fmt.Sprintf("skill object fetch: HTTP %d", status), nil)
+	default:
+		return retryFetch(fmt.Sprintf("skill object fetch: HTTP %d", status), nil)
+	}
 }
 
 // unpackTar extracts a tar blob into root, confining every entry under root and preserving per-file

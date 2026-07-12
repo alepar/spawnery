@@ -885,6 +885,10 @@ type AgentSelection struct {
 	// resume). Non-sensitive artifacts are materialized into the staging tmpfs at ArtifactsMountPath;
 	// sensitive+inline artifacts are routed to the secrets tmpfs. Converted from proto by the node.
 	Artifacts []Artifact
+	// RepresignFunc mints a fresh presigned URL for a by-ref artifact whose GET failed because the
+	// presign expired (sp-mwco.4.2; set by internal/node over the Attach stream — sp-mwco.4.3).
+	// nil ⇒ an expired presign is Terminal instead of recovered.
+	RepresignFunc RepresignFunc
 	// BeforeStartAgent runs after the sidecar pod and pre-agent prep complete, immediately before the
 	// untrusted agent starts. It can stage spawn-local secrets before the spawn is visible in the store.
 	BeforeStartAgent func(context.Context, PreAgentContext) error
@@ -1245,10 +1249,14 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	// ArtifactsRoot, bind-mounted at ArtifactsMountPath. Re-applied idempotently on every create/resume
 	// (artifacts are create-time-declared but durable across the spawn's life). Sensitive artifacts are
 	// routed to the secrets tmpfs (0600) by Materialize, never landed here.
-	if err := m.artifacts.Materialize(ctx, id, sel.Artifacts, m.secrets, sel.ProgressFunc); err != nil {
+	if err := m.artifacts.Materialize(ctx, id, sel.Artifacts, m.secrets, sel.ProgressFunc, sel.RepresignFunc); err != nil {
 		finalizeAll()
 		cleanupSpawnDirs()
-		return nil, fmt.Errorf("prepare artifacts: %w", err)
+		// %s of the SAFE message, not %w of the raw chain: err may wrap a *FetchError whose cause is
+		// a *url.Error carrying the presigned URL's X-Amz-Signature query. This return value is what
+		// internal/node's attach.go stringifies into SpawnStatus.Detail, which the CP persists to the
+		// DB and renders in the web UI (sp-mwco.4.2) — it must never carry the presigned URL.
+		return nil, fmt.Errorf("prepare artifacts: %s", SafeErrorMessage(err))
 	}
 	mounts = append(mounts, runtime.Mount{HostPath: m.artifacts.DirFor(id), ContainerPath: ArtifactsMountPath, SELinuxRelabelShared: true})
 
