@@ -312,10 +312,17 @@ TOKEN="\$(G admin user generate-access-token -u "\$U" --scopes 'write:repository
 curl -fsS -X POST -H "Authorization: token \$TOKEN" -H 'Content-Type: application/json' \
   "http://127.0.0.1:\$PORT/api/v1/user/repos" -d '{"name":"seed","auto_init":true,"private":true}' >/dev/null 2>&1 || true
 mkdir -p /etc/spawnery/env.d
+# sp-wwtc: Gitea now sits behind Caddy as a TLS github.com, so the node runs the PRODUCTION-shaped
+# config — https + a real github.com host, and NO GITHUB_ALLOW_INSECURE_HOST. That relaxation existed
+# only to let the node clone over plain http from 127.0.0.1; dropping it means the e2e lane now
+# exercises the same secure path production does (validateGitHubCloneURL enforces https + host match),
+# instead of the insecure branch. The node reaches github.com via /etc/hosts and verifies Caddy's cert
+# against the golden CA in the VM's trust store (both installed above).
+# The API goes through the same TLS front (Gitea serves its API at /api/v1 on that host).
+# Gitea's own ROOT_URL is https://github.com/, so the clone_url it returns matches GITHUB_HOST.
 cat > /etc/spawnery/env.d/gitea.env <<ENV
-GITHUB_API_BASE_URL=http://127.0.0.1:\$PORT/api/v1
-GITHUB_HOST=127.0.0.1:\$PORT
-GITHUB_ALLOW_INSECURE_HOST=1
+GITHUB_API_BASE_URL=https://github.com/api/v1
+GITHUB_HOST=github.com
 GITHUB_STATIC_TOKEN=\$TOKEN
 AS_FAKE_GITHUB_TOKEN=\$TOKEN
 ENV
