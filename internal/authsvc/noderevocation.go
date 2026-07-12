@@ -27,6 +27,7 @@ func (s *Service) RevokeNodeCertificate(ctx context.Context, nodeID string, issu
 	now := s.now().UTC().Truncate(time.Second)
 	issuerHex := issuerSerial.Text(16)
 	var committedNumber *big.Int
+	s.nodeCRLMutationMu.Lock()
 	err := s.nodeRevocationStore.WithTx(ctx, func(tx store.Store) error {
 		repo := tx.NodeRevocations()
 		inserted, err := repo.Revoke(ctx, store.NodeRevocation{
@@ -49,6 +50,7 @@ func (s *Service) RevokeNodeCertificate(ctx context.Context, nodeID string, issu
 		committedNumber, err = s.issueNodeCRL(ctx, repo, issuerHex, now)
 		return err
 	})
+	s.nodeCRLMutationMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -100,6 +102,7 @@ func (s *Service) ReconcileLegacyNodeRevocations(ctx context.Context, certificat
 	}
 	issuerHex := s.intermediate.Cert.SerialNumber.Text(16)
 	var committedNumber *big.Int
+	s.nodeCRLMutationMu.Lock()
 	err = s.nodeRevocationStore.WithTx(ctx, func(tx store.Store) error {
 		repo := tx.NodeRevocations()
 		currentLegacy, err := repo.ListLegacy(ctx)
@@ -121,6 +124,7 @@ func (s *Service) ReconcileLegacyNodeRevocations(ctx context.Context, certificat
 		committedNumber, err = s.issueNodeCRL(ctx, repo, issuerHex, now)
 		return err
 	})
+	s.nodeCRLMutationMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -128,6 +132,80 @@ func (s *Service) ReconcileLegacyNodeRevocations(ctx context.Context, certificat
 		s.nodeCRLCommitted(new(big.Int).Set(committedNumber))
 	}
 	return s.publishCurrentNodeCRL(ctx)
+}
+
+// EnsureCurrentNodeCRL creates the initial empty self-hosted CRL, renews a committed CRL before
+// expiry, or republishes a still-current checkpoint. Issuance and the full revoked set are committed
+// atomically; publication rereads that durable outbox and never publishes an older checkpoint.
+func (s *Service) EnsureCurrentNodeCRL(ctx context.Context, renewBefore time.Duration) error {
+	if s == nil || s.intermediate == nil || s.intermediate.Cert == nil || s.nodeRevocationStore == nil || s.nodeCRLSink == nil {
+		return errors.New("authsvc: node certificate revocation is not configured")
+	}
+	if renewBefore < 0 || renewBefore >= nodeCRLValidity {
+		return fmt.Errorf("authsvc: node CRL renew-before must be in [0, %s)", nodeCRLValidity)
+	}
+	now := s.now().UTC().Truncate(time.Second)
+	issuerHex := s.intermediate.Cert.SerialNumber.Text(16)
+	var committedNumber *big.Int
+	s.nodeCRLMutationMu.Lock()
+	err := s.nodeRevocationStore.WithTx(ctx, func(tx store.Store) error {
+		repo := tx.NodeRevocations()
+		current, err := repo.GetCRL(ctx, issuerHex)
+		if errors.Is(err, store.ErrNotFound) {
+			committedNumber, err = s.issueNodeCRL(ctx, repo, issuerHex, now)
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		list, err := pki.ParseCRLPEM(current.PEM)
+		if err != nil {
+			return fmt.Errorf("authsvc: parse persisted node CRL: %w", err)
+		}
+		if err := list.CheckSignatureFrom(s.intermediate.Cert); err != nil {
+			return fmt.Errorf("authsvc: verify persisted node CRL signature: %w", err)
+		}
+		if list.Number == nil || list.Number.Sign() <= 0 || list.Number.String() != current.Number {
+			return errors.New("authsvc: persisted node CRL number does not match its checkpoint")
+		}
+		if !list.NextUpdate.After(now.Add(renewBefore)) {
+			committedNumber, err = s.issueNodeCRL(ctx, repo, issuerHex, now)
+			return err
+		}
+		committedNumber = new(big.Int).Set(list.Number)
+		return nil
+	})
+	s.nodeCRLMutationMu.Unlock()
+	if err != nil {
+		return err
+	}
+	if s.nodeCRLCommitted != nil {
+		s.nodeCRLCommitted(new(big.Int).Set(committedNumber))
+	}
+	return s.publishCurrentNodeCRL(ctx)
+}
+
+// RunNodeCRLRenewal maintains the self-hosted CRL until ctx is cancelled. Failures are reported and
+// retried on the next bounded interval; the last durable checkpoint remains the publication source.
+func (s *Service) RunNodeCRLRenewal(ctx context.Context, interval, renewBefore time.Duration, report func(error)) {
+	if interval <= 0 {
+		if report != nil {
+			report(errors.New("authsvc: node CRL renewal interval must be positive"))
+		}
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.EnsureCurrentNodeCRL(ctx, renewBefore); err != nil && ctx.Err() == nil && report != nil {
+				report(err)
+			}
+		}
+	}
 }
 
 func (s *Service) issueNodeCRL(ctx context.Context, repo store.NodeRevocationRepo, issuerHex string, now time.Time) (*big.Int, error) {
@@ -173,7 +251,7 @@ func (s *Service) RecoverNodeCRLPublication(ctx context.Context) error {
 	if s == nil || s.intermediate == nil || s.intermediate.Cert == nil || s.nodeRevocationStore == nil || s.nodeCRLSink == nil {
 		return errors.New("authsvc: node certificate revocation is not configured")
 	}
-	return s.publishCurrentNodeCRL(ctx)
+	return s.EnsureCurrentNodeCRL(ctx, 0)
 }
 
 func (s *Service) publishCurrentNodeCRL(ctx context.Context) error {

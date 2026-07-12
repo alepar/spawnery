@@ -27,6 +27,8 @@ ca:
   intermediate_cert: "/etc/spawnery/as/self-hosted-intermediate.pem"
   intermediate_key: "/etc/spawnery/as/self-hosted-intermediate-key.pem"
   revocation_crl: "/var/lib/authsvc/self-hosted.crl"
+  revocation_renew_interval: 1h
+  revocation_renew_before: 6h
   legacy_revocation_certificates: "" # one-time node-id=/path/to/leaf.pem mappings for pre-CRL rows
 
 signing:

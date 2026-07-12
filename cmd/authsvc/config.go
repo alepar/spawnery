@@ -7,6 +7,12 @@ import (
 	"spawnery/internal/config"
 )
 
+const (
+	defaultNodeCRLRenewInterval = time.Hour
+	defaultNodeCRLRenewBefore   = 6 * time.Hour
+	selfHostedNodeCRLValidity   = 24 * time.Hour
+)
+
 // AS is the auth-service configuration schema. Documented defaults live in config/authsvc.yaml;
 // per-environment deltas in config/authsvc.<env>.yaml. Every field is overridable via the
 // asEnvAliases env vars and CLI --set.
@@ -29,12 +35,14 @@ type AS struct {
 	FakeGitHubUsers   string `koanf:"fake_github_users"`    // "alice:2000001,bob" or "alice,bob" (id derived when omitted)
 
 	CA struct {
-		TrustDomain                  string `koanf:"trust_domain" validate:"required"`
-		RootPEM                      string `koanf:"root_pem"`
-		IntermediateCert             string `koanf:"intermediate_cert"`
-		IntermediateKey              string `koanf:"intermediate_key"`
-		RevocationCRL                string `koanf:"revocation_crl"`
-		LegacyRevocationCertificates string `koanf:"legacy_revocation_certificates"`
+		TrustDomain                  string        `koanf:"trust_domain" validate:"required"`
+		RootPEM                      string        `koanf:"root_pem"`
+		IntermediateCert             string        `koanf:"intermediate_cert"`
+		IntermediateKey              string        `koanf:"intermediate_key"`
+		RevocationCRL                string        `koanf:"revocation_crl"`
+		RevocationRenewInterval      time.Duration `koanf:"revocation_renew_interval"`
+		RevocationRenewBefore        time.Duration `koanf:"revocation_renew_before"`
+		LegacyRevocationCertificates string        `koanf:"legacy_revocation_certificates"`
 	} `koanf:"ca"`
 
 	Signing ASAuthSigning `koanf:"signing"`
@@ -187,6 +195,13 @@ func (c AS) Validate() error {
 	if c.Internal.RevocationCRLs != "" && c.Internal.RevocationURLs != "" {
 		return fmt.Errorf("configure exactly one of internal.revocation_crls or internal.revocation_urls")
 	}
+	renewInterval, renewBefore := c.nodeCRLRenewalSettings()
+	if renewBefore <= 0 || renewBefore >= selfHostedNodeCRLValidity {
+		return fmt.Errorf("ca.revocation_renew_before must be between 0 and %s", selfHostedNodeCRLValidity)
+	}
+	if renewInterval <= 0 || renewInterval > renewBefore {
+		return fmt.Errorf("ca.revocation_renew_interval must be positive and no greater than ca.revocation_renew_before")
+	}
 	// Real GitHub requires client credentials unless fake_github=true or dev mode with no client_id
 	// (dev fallback to in-process fake).
 	useFakeGitHub := c.FakeGithub || (c.Dev && c.GitHub.ClientID == "")
@@ -199,6 +214,18 @@ func (c AS) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (c AS) nodeCRLRenewalSettings() (time.Duration, time.Duration) {
+	interval := c.CA.RevocationRenewInterval
+	if interval == 0 {
+		interval = defaultNodeCRLRenewInterval
+	}
+	renewBefore := c.CA.RevocationRenewBefore
+	if renewBefore == 0 {
+		renewBefore = defaultNodeCRLRenewBefore
+	}
+	return interval, renewBefore
 }
 
 // asEnvAliases maps existing AS_* and bare GITHUB_* environment variable names to dotted config
@@ -223,6 +250,8 @@ var asEnvAliases = map[string]string{
 	"AS_INTERNAL_REVOCATION_CRLS":             "internal.revocation_crls",
 	"AS_INTERNAL_REVOCATION_URLS":             "internal.revocation_urls",
 	"AS_INTERNAL_REVOCATION_REFRESH_INTERVAL": "internal.revocation_refresh_interval",
+	"AS_NODE_CRL_RENEW_INTERVAL":              "ca.revocation_renew_interval",
+	"AS_NODE_CRL_RENEW_BEFORE":                "ca.revocation_renew_before",
 	"AS_ALLOWED_ORIGINS":                      "allowed_origins",
 	"AS_ROOT_CA_PEM":                          "ca.root_pem",
 	"AS_TRUST_DOMAIN":                         "ca.trust_domain",

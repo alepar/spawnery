@@ -112,6 +112,7 @@ type Service struct {
 
 	nodeRevocationStore store.Store
 	nodeCRLSink         func([]byte) error
+	nodeCRLMutationMu   sync.Mutex
 	nodeCRLPublishMu    sync.Mutex
 	nodeCRLCommitted    func(*big.Int)
 

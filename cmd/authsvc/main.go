@@ -24,6 +24,9 @@
 //	  AS_ROOT_CA_PEM                 Path to Root CA cert PEM (default: /etc/spawnery/as/root-ca.pem)
 //	  AS_INTERMEDIATE_CERT_PEM       Path to self-hosted intermediate cert PEM
 //	  AS_INTERMEDIATE_KEY_PEM        Path to self-hosted intermediate key PEM
+//	  AS_SELF_HOSTED_REVOCATION_CRL  Atomic publication path for the self-hosted issuer CRL
+//	  AS_NODE_CRL_RENEW_INTERVAL     Renewal check interval (default: 1h)
+//	  AS_NODE_CRL_RENEW_BEFORE       Renew this far before expiry (default: 6h)
 //
 //	Certified auth-artifact signing credentials:
 //	  AS_AUTH_SIGNING_ENVIRONMENT        Environment trust-domain label (for example, prod)
@@ -127,6 +130,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("authsvc: config: %v", err)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	certificateRevocations := pki.CertificateRevocationChecker(failClosedCertificateRevocations)
 	var (
@@ -139,6 +144,9 @@ func main() {
 		certificateRefresher *mtls.CRLRefresher
 	)
 	if cfg.Internal.Listen != "" {
+		if err := prepareSelfHostedCRL(ctx, cfg, time.Now); err != nil {
+			log.Fatalf("authsvc: self-hosted CRL startup preflight: %v", err)
+		}
 		certificateState, certificateRefresher, err = loadCertificateRevocations(cfg.Internal, time.Now)
 		if err != nil {
 			log.Fatalf("authsvc: %v", err)
@@ -220,8 +228,6 @@ func main() {
 		}
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-ctx.Done()
 		sd, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -235,6 +241,17 @@ func main() {
 	if certificateRefresher != nil {
 		go certificateRefresher.Run(ctx)
 	}
+	var nodeCRLRenewalDone chan struct{}
+	if cfg.Internal.Listen != "" {
+		renewInterval, renewBefore := cfg.nodeCRLRenewalSettings()
+		nodeCRLRenewalDone = make(chan struct{})
+		go func() {
+			defer close(nodeCRLRenewalDone)
+			svc.RunNodeCRLRenewal(ctx, renewInterval, renewBefore, func(err error) {
+				log.Printf("authsvc: self-hosted CRL renewal: %v", err)
+			})
+		}()
+	}
 	errors := make(chan error, 2)
 	go func() { errors <- publicServer.ListenAndServe() }()
 	if internalServer != nil {
@@ -245,6 +262,87 @@ func main() {
 	if serveErr := <-errors; serveErr != nil && serveErr != http.ErrServerClosed {
 		log.Fatalf("authsvc: %v", serveErr)
 	}
+	stop()
+	if nodeCRLRenewalDone != nil {
+		<-nodeCRLRenewalDone
+	}
+}
+
+// prepareSelfHostedCRL creates or renews the AS-owned self-hosted CRL before the internal
+// revocation state opens. Other issuer/source pairs remain untouched.
+func prepareSelfHostedCRL(ctx context.Context, cfg *AS, now func() time.Time) error {
+	if cfg == nil {
+		return errors.New("authsvc: nil configuration")
+	}
+	sinkPath := strings.TrimSpace(cfg.CA.RevocationCRL)
+	if sinkPath == "" {
+		return errors.New("authsvc: self-hosted node CRL sink ca.revocation_crl is required")
+	}
+	if strings.TrimSpace(cfg.Internal.RevocationURLs) != "" {
+		return errors.New("authsvc: self-hosted CRL startup requires file-based internal.revocation_crls")
+	}
+	issuerPaths := splitCSV(cfg.Internal.RevocationIssuers)
+	crlPaths := splitCSV(cfg.Internal.RevocationCRLs)
+	if len(issuerPaths) == 0 || len(issuerPaths) != len(crlPaths) {
+		return errors.New("authsvc: internal revocation issuers and CRL files must be configured one-to-one")
+	}
+	ca, err := buildProductionCA(cfg)
+	if err != nil {
+		return err
+	}
+	foundSelfHosted := false
+	for i, issuerPath := range issuerPaths {
+		raw, err := os.ReadFile(issuerPath)
+		if err != nil {
+			return fmt.Errorf("authsvc: read revocation issuer %s: %w", issuerPath, err)
+		}
+		issuer, err := pki.ParseCertPEM(raw)
+		if err != nil {
+			return fmt.Errorf("authsvc: parse revocation issuer %s: %w", issuerPath, err)
+		}
+		if bytes.Equal(issuer.Raw, ca.inter.Cert.Raw) {
+			foundSelfHosted = true
+			if filepath.Clean(crlPaths[i]) != filepath.Clean(sinkPath) {
+				return fmt.Errorf("authsvc: self-hosted revocation issuer source %s must match ca.revocation_crl %s", crlPaths[i], sinkPath)
+			}
+		}
+	}
+	if !foundSelfHosted {
+		return errors.New("authsvc: internal.revocation_issuers is missing the self-hosted revocation issuer")
+	}
+	tokenCipher, err := loadGitHubTokenCipher(cfg)
+	if err != nil {
+		return err
+	}
+	st, err := store.Open(ctx, store.Config{Driver: cfg.DB.Driver, DSN: cfg.DB.DSN, TokenCipher: tokenCipher})
+	if err != nil {
+		return fmt.Errorf("authsvc: open identity store for self-hosted CRL preflight: %w", err)
+	}
+	defer st.Close()
+	svc := authsvc.New(ca.root.Cert, ca.inter,
+		authsvc.WithTrustDomain(cfg.CA.TrustDomain),
+		authsvc.WithClock(now),
+		authsvc.WithCertificateRevocations(failClosedCertificateRevocations),
+		authsvc.WithNodeRevocationStore(st, nodeCRLFileSink(sinkPath)),
+	)
+	legacyCertificates, err := loadLegacyRevocationCertificates(cfg.CA.LegacyRevocationCertificates)
+	if err != nil {
+		return err
+	}
+	legacy, err := st.NodeRevocations().ListLegacy(ctx)
+	if err != nil {
+		return err
+	}
+	if len(legacy) != 0 || len(legacyCertificates) != 0 {
+		if err := svc.ReconcileLegacyNodeRevocations(ctx, legacyCertificates); err != nil {
+			return fmt.Errorf("authsvc: reconcile legacy node revocations: %w", err)
+		}
+	}
+	_, renewBefore := cfg.nodeCRLRenewalSettings()
+	if err := svc.EnsureCurrentNodeCRL(ctx, renewBefore); err != nil {
+		return fmt.Errorf("authsvc: ensure current self-hosted CRL: %w", err)
+	}
+	return nil
 }
 
 // buildService loads the AS's material and returns a fully-wired Service.
