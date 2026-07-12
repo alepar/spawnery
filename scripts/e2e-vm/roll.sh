@@ -17,9 +17,10 @@ IP="$E2E_VM_IP"; HOST="$E2E_VM_HOST"
 log "rolling fresh code into $IP …"
 
 # 1. host Go binaries -> /usr/local/bin (staging area first, then atomic move via ssh)
-vm_ssh "$IP" 'mkdir -p ~/incoming/bin ~/incoming/config'
+vm_ssh "$IP" 'mkdir -p ~/incoming/bin ~/incoming/config ~/incoming/provision/env'
 vm_scp "$STAGE/bin/." "$IP" 'incoming/bin/'
 [ -d "$STAGE/config" ] && vm_scp "$STAGE/config/." "$IP" 'incoming/config/'
+[ -d "$STAGE/provision" ] && vm_scp "$STAGE/provision/." "$IP" 'incoming/provision/'
 
 # 2. fresh sidecar/agent images -> containerd k8s.io namespace (product code lives inside pods)
 if [ -f "$STAGE/images.tar" ]; then
@@ -33,7 +34,26 @@ if [ -d "$STAGE/web-dist" ]; then
   vm_scp "$STAGE/web-dist/." "$IP" 'incoming/web/'
 fi
 
-# 4. atomic swap + restart the stack (order matters: AS -> CP -> node -> caddy)
+# 4. Reconcile the branch's PKI/env topology, then atomically swap + restart the stack.
+# Preserve the golden Caddy cert: host trust is intentionally anchored to that baked TLS CA, while
+# the internal Spawnery root is regenerated per disposable VM run.
+vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spawnery-ca \
+  && sudo env SPAWNERY_OFFLINE_PKI_DIR=/var/lib/spawnery-offline SPAWNERY_PRESERVE_WILDCARD=1 bash ~/incoming/provision/gen-pki.sh /etc/spawnery/pki e2e.test \
+  && sudo chmod 0644 /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key \
+  && ( id authsvc >/dev/null 2>&1 || sudo useradd --system --home-dir /var/lib/spawnery --shell /usr/sbin/nologin authsvc ) \
+  && sudo install -d -o authsvc -g authsvc -m0700 /etc/spawnery/authsvc /var/lib/spawnery \
+  && sudo cp -rf /etc/spawnery/pki/authsvc/. /etc/spawnery/authsvc/ \
+  && sudo chown -R authsvc:authsvc /etc/spawnery/authsvc /var/lib/spawnery \
+  && sudo rm -rf /etc/spawnery/pki/authsvc \
+  && sudo cp -f ~/incoming/provision/env/common.env /etc/spawnery/env.d/common.env.tmpl \
+  && sudo cp -f ~/incoming/provision/env/profile.*.env /etc/spawnery/env.d/ \
+  && sudo sh -c '\''for f in /etc/spawnery/env.d/profile.*.env; do mv -f "$f" "$f.tmpl"; done'\'' \
+  && sudo install -d /etc/systemd/system/spawnery-authsvc.service.d \
+  && printf '\''[Service]\nUser=authsvc\nGroup=authsvc\n'\'' | sudo tee /etc/systemd/system/spawnery-authsvc.service.d/user.conf >/dev/null \
+  && sudo systemctl daemon-reload \
+  && sudo systemctl restart spawnery-render-env'
+
+# 5. atomic swap + restart the stack (order matters: AS -> CP -> node -> caddy)
 # Re-copying config/ re-introduces cp.prod.yaml's ${sops:store.dsn} ref (pristine config ships it),
 # so re-patch the literal throwaway DSN right after the config copy, every roll.
 vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/* /usr/local/bin/ \

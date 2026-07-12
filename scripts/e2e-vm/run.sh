@@ -28,7 +28,7 @@ esac; done
 export E2E_RUNID="$(gen_runid)"
 WEB_ORIGIN="https://$(vm_hostname)"    # prod web build pins CSP/connect-src to this origin
 RD="$(run_dir)"; mkdir -p "$RD"
-STAGE="$RD/stage"; mkdir -p "$STAGE/bin" "$STAGE/config"
+STAGE="$RD/stage"; mkdir -p "$STAGE/bin" "$STAGE/config" "$STAGE/provision/env"
 log "=== e2e-vm run  runid=$E2E_RUNID  profile=$PROFILE ==="
 
 # teardown on ANY exit (success, failure, Ctrl-C) unless --keep
@@ -41,7 +41,7 @@ dbox() { distrobox enter --root dev-spawnery -- bash -lc "cd '$REPO_ROOT' && $*"
 # ---- 0. build fresh code (per-run staging so concurrent branches never clobber each other) ----
 if [ "$BUILD" = 1 ]; then
   log "0/3 building fresh binaries + images + web …"
-  dbox "make build bin/spawnery_cp && cp -f bin/spawnery_cp bin/authsvc bin/spawnlet bin/spawnctl '$STAGE/bin/'"
+  dbox "make build bin/spawnery_cp && cp -f bin/spawnery_cp bin/authsvc bin/spawnlet bin/spawnctl bin/spawnery-ca '$STAGE/bin/'"
   # docker runs on the HOST, not the distrobox (socket group 985 unreachable inside) — build+save here.
   command -v make >/dev/null 2>&1 && make images || warn "no host make — using pre-built spawnery/{sidecar,agent} images"
   docker save spawnery/sidecar:dev spawnery/agent:dev -o "$STAGE/images.tar" \
@@ -49,6 +49,8 @@ if [ "$BUILD" = 1 ]; then
   dbox "cd web && npm ci && VITE_CP_ORIGIN='$WEB_ORIGIN' VITE_AS_ORIGIN='$WEB_ORIGIN' npm run build && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'" \
     || warn "web build failed — SPA will be STALE this run"
   cp -rf "$REPO_ROOT/config/." "$STAGE/config/" 2>/dev/null || true
+  cp -f "$REPO_ROOT/scripts/e2e-vm/provision/gen-pki.sh" "$STAGE/provision/"
+  cp -f "$REPO_ROOT/scripts/e2e-vm/provision/env/"*.env "$STAGE/provision/env/"
 else
   log "0/3 --no-build: staging existing $REPO_ROOT/bin"
   cp -f "$REPO_ROOT"/bin/{spawnery_cp,authsvc,spawnlet,spawnctl} "$STAGE/bin/" 2>/dev/null || die "no prebuilt bin/ — drop --no-build"
@@ -80,6 +82,7 @@ export ACC_TEST_MODEL=openai/gpt-4o-mini ACC_AGENT_MODEL=openai/gpt-4o-mini
 export ACC_SPAWN_ACTIVE_TIMEOUT_MS=240000
 [ -f "${GOLDEN_IMAGE%.qcow2}-ca.crt" ] && export NODE_EXTRA_CA_CERTS="${GOLDEN_IMAGE%.qcow2}-ca.crt"
 export ACC_SPAWNCTL_BIN="$STAGE/bin/spawnctl"     # cliDriver shells out to the fresh spawnctl
+export ACC_E2E_VM_IP="$E2E_VM_IP" ACC_E2E_SSH_KEY="$E2E_SSH_KEY" ACC_E2E_SSH_USER="$E2E_SSH_USER"
 export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report"   # per-run output — concurrency-safe
 export PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results"
 GREP_ARGS=(); [ -n "$GREP" ] && GREP_ARGS=(-g "$GREP")

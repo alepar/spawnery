@@ -29,6 +29,9 @@ func TestIssueAuthArtifactSignerProfile(t *testing.T) {
 	if issuer.Cert.PublicKeyAlgorithm != x509.ECDSA || !pki.HasPolicy(issuer.Cert, pki.AuthSigningIntermediatePolicyOID) {
 		t.Fatalf("intermediate profile = algorithm %v policies %v", issuer.Cert.PublicKeyAlgorithm, issuer.Cert.Policies)
 	}
+	if issuer.Cert.KeyUsage&(x509.KeyUsageCertSign|x509.KeyUsageDigitalSignature) != x509.KeyUsageCertSign|x509.KeyUsageDigitalSignature {
+		t.Fatalf("intermediate key usage = %v", issuer.Cert.KeyUsage)
+	}
 	if signer.Cert.PublicKeyAlgorithm != x509.Ed25519 {
 		t.Fatalf("leaf algorithm = %v, want Ed25519", signer.Cert.PublicKeyAlgorithm)
 	}

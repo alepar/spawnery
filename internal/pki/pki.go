@@ -151,7 +151,7 @@ func (ca *CA) NewAuthSigningIntermediate(environment string) (*CA, error) {
 		Subject:               pkix.Name{CommonName: "Spawnery " + environment + " Auth Signing Intermediate"},
 		NotBefore:             time.Now().Add(-time.Minute),
 		NotAfter:              time.Now().Add(5 * 365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 		MaxPathLen:            0,
