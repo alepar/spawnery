@@ -299,19 +299,16 @@ type ForkResult struct {
 // issue a second ForkSpawn and create a duplicate fork. A single attempt is correct here; a STALE
 // NACK just surfaces for the caller to retry manually.
 func (c *Client) Fork(ctx context.Context, dev *seal.Device, req *cpv1.ForkSpawnRequest, out io.Writer, now time.Time, opts MoveOptions) (ForkResult, error) {
-	return forkSpawnAuthorized(ctx, c.rpc, c.nodeCredentials, c.targetTrust, dev, req, out, now, opts, c.warn)
+	return forkSpawnAuthorized(ctx, c.rpc, c.nodeCredentials, c.targetTrust, dev, req, out, now, opts)
 }
 
-func forkSpawn(ctx context.Context, client forkClient, dev *seal.Device, req *cpv1.ForkSpawnRequest, out io.Writer, now time.Time, opts MoveOptions, warn func(error)) (ForkResult, error) {
-	return forkSpawnAuthorized(ctx, client, nil, TargetTrust{}, dev, req, out, now, opts, warn)
+func forkSpawn(ctx context.Context, client forkClient, dev *seal.Device, req *cpv1.ForkSpawnRequest, out io.Writer, now time.Time, opts MoveOptions, _ func(error)) (ForkResult, error) {
+	return forkSpawnAuthorized(ctx, client, nil, TargetTrust{}, dev, req, out, now, opts)
 }
 
-func forkSpawnAuthorized(ctx context.Context, client forkClient, credentials NodeCredentialSource, trust TargetTrust, dev *seal.Device, req *cpv1.ForkSpawnRequest, out io.Writer, now time.Time, opts MoveOptions, warn func(error)) (ForkResult, error) {
+func forkSpawnAuthorized(ctx context.Context, client forkClient, credentials NodeCredentialSource, trust TargetTrust, dev *seal.Device, req *cpv1.ForkSpawnRequest, out io.Writer, now time.Time, opts MoveOptions) (ForkResult, error) {
 	if out == nil {
 		out = io.Discard
-	}
-	if warn == nil {
-		warn = func(error) {}
 	}
 	// The CP registers the fork's pending intent under the source spawn id; poll/submit are keyed by it.
 	sourceID := strings.TrimSpace(req.SpawnId)
