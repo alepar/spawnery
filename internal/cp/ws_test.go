@@ -2,8 +2,7 @@ package cp
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/token"
@@ -21,43 +21,32 @@ import (
 
 // helpers for WS tests
 
-func genWSKey(t *testing.T) ed25519.PrivateKey {
-	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return priv
+type wsSigner struct {
+	credential *token.SigningCredential
+	verifier   *token.Verifier
 }
 
-func wsKeySet(t *testing.T, privs ...ed25519.PrivateKey) token.KeySet {
+func genWSKey(t *testing.T) wsSigner {
 	t.Helper()
-	pubs := make([]ed25519.PublicKey, len(privs))
-	for i, p := range privs {
-		pubs[i] = p.Public().(ed25519.PublicKey)
-	}
-	ks, err := token.NewKeySet(pubs...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ks
+	credential, verifier := cpArtifactFixture(t, time.Now())
+	return wsSigner{credential: credential, verifier: verifier}
 }
 
-func wsMintToken(t *testing.T, priv ed25519.PrivateKey, accountID, tokenID, audience string, now time.Time) string {
+func wsMintToken(t *testing.T, signer wsSigner, accountID, tokenID, audience string, now time.Time) string {
 	t.Helper()
-	kid, err := token.KeyID(priv.Public().(ed25519.PublicKey))
-	if err != nil {
-		t.Fatal(err)
-	}
 	body := &authv1.SessionTokenBody{
 		AccountId: accountID,
 		Audience:  audience,
 		TokenId:   tokenID,
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(15 * time.Minute).Unix(),
-		KeyId:     kid,
+		KeyId:     hex.EncodeToString(signer.credential.KeyID[:]),
 	}
-	wire, err := token.Mint(body, priv)
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := signer.credential.Sign(token.ArtifactTypeSession, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,16 +54,15 @@ func wsMintToken(t *testing.T, priv ed25519.PrivateKey, accountID, tokenID, audi
 }
 
 // newWSTestServer builds a test Server+verifier and returns an httptest.Server serving /ws/session.
-func newWSTestServer(t *testing.T, priv ed25519.PrivateKey, devMode bool, devTokens map[string]string) (*Server, *auth.Verifier, *auth.SessionRegistry, *httptest.Server) {
+func newWSTestServer(t *testing.T, signer wsSigner, devMode bool, devTokens map[string]string) (*Server, *auth.Verifier, *auth.SessionRegistry, *httptest.Server) {
 	t.Helper()
 	s, _, _ := newTestServer(t)
 
 	sessions := auth.NewSessionRegistry()
 	revreg := auth.NewRevocationRegistry(sessions)
 
-	ks := wsKeySet(t, priv)
 	v := auth.NewVerifier(auth.VerifierConfig{
-		Keys:      ks,
+		Artifacts: signer.verifier,
 		DevTokens: devTokens,
 		DevMode:   devMode,
 		Revoked:   revreg,

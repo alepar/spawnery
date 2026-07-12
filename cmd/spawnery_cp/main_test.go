@@ -1,12 +1,25 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	configfiles "spawnery/config"
+	authv1 "spawnery/gen/auth/v1"
+	"spawnery/internal/authsvc/token"
 	"spawnery/internal/config"
+	"spawnery/internal/pki"
 )
 
 func loadCPTest(t *testing.T, env string, getenv map[string]string, sets ...string) (*CP, error) {
@@ -79,10 +92,173 @@ func TestCPConfig_SetOverride(t *testing.T) {
 	}
 }
 
-func TestCPConfig_ProdModeRequiresPubkeys(t *testing.T) {
-	_, err := loadCPTest(t, "dev", nil, "auth.mode=prod") // prod mode, no as_session_pubkeys
-	if err == nil || !strings.Contains(err.Error(), "as_session_pubkeys") {
-		t.Fatalf("expected as_session_pubkeys validation error, got %v", err)
+func TestCPConfig_ProdModeRequiresRootArtifactTrust(t *testing.T) {
+	tests := []struct {
+		name string
+		sets []string
+		want string
+	}{
+		{name: "all missing", sets: []string{"auth.mode=prod"}, want: "auth.environment"},
+		{name: "root missing", sets: []string{"auth.mode=prod", "auth.environment=prod"}, want: "auth.root_ca"},
+		{name: "state missing", sets: []string{"auth.mode=prod", "auth.environment=prod", "auth.root_ca=/root.pem"}, want: "auth.signer_revocation_state"},
+		{name: "legacy raw key does not count", sets: []string{"auth.mode=prod", "auth.as_session_" + "pubkeys=/as.pub"}, want: "auth.environment"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadCPTest(t, "dev", nil, tt.sets...)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %s validation error, got %v", tt.want, err)
+			}
+		})
+	}
+
+	if _, err := loadCPTest(t, "dev", nil,
+		"auth.mode=prod",
+		"auth.environment=prod",
+		"auth.root_ca=/root.pem",
+		"auth.signer_revocation_state=/state/revocations.json",
+	); err != nil {
+		t.Fatalf("valid root-only production config: %v", err)
+	}
+}
+
+func TestCPConfig_ArtifactTrustEnvAliases(t *testing.T) {
+	cfg, err := loadCPTest(t, "dev", map[string]string{
+		"CP_AUTH_ENVIRONMENT":                 "prod",
+		"CP_AUTH_ROOT_CA":                     "/root.pem",
+		"CP_AUTH_SIGNER_REVOCATION_STATEMENT": "/statement",
+		"CP_AUTH_SIGNER_REVOCATION_STATE":     "/state",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Auth.Environment != "prod" || cfg.Auth.RootCA != "/root.pem" ||
+		cfg.Auth.SignerRevocationStatement != "/statement" || cfg.Auth.SignerRevocationState != "/state" {
+		t.Fatalf("artifact trust aliases were not applied: %+v", cfg.Auth)
+	}
+}
+
+func TestLoadArtifactVerifierGenerationZeroAndStoreLifetime(t *testing.T) {
+	root, err := pki.NewRootCA("CP artifact test root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	rootPath := filepath.Join(dir, "root.pem")
+	statePath := filepath.Join(dir, "state", "signer-revocations.json")
+	if err := os.WriteFile(rootPath, pki.MarshalCertPEM(root.Cert), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := CP{}
+	cfg.Auth.Environment = "prod"
+	cfg.Auth.RootCA = rootPath
+	cfg.Auth.SignerRevocationState = statePath
+	verifier, store, err := loadArtifactVerifier(cfg, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verifier == nil || store == nil || store.Generation() != 0 {
+		t.Fatalf("verifier=%v store=%v", verifier, store)
+	}
+	if _, _, err := loadArtifactVerifier(cfg, time.Now()); err == nil {
+		t.Fatal("second store owner should be rejected")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, reopened, err := loadArtifactVerifier(cfg, time.Now())
+	if err != nil {
+		t.Fatalf("reopen after Close: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadArtifactVerifierRejectsMalformedRoot(t *testing.T) {
+	dir := t.TempDir()
+	rootPath := filepath.Join(dir, "root.pem")
+	if err := os.WriteFile(rootPath, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := CP{}
+	cfg.Auth.Environment = "prod"
+	cfg.Auth.RootCA = rootPath
+	cfg.Auth.SignerRevocationState = filepath.Join(dir, "state")
+	if _, _, err := loadArtifactVerifier(cfg, time.Now()); err == nil || !strings.Contains(err.Error(), "parse root") {
+		t.Fatalf("expected malformed root rejection, got %v", err)
+	}
+}
+
+func TestParseSingleRootCertificateRejectsMultipleCertificates(t *testing.T) {
+	root, err := pki.NewRootCA("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pem := pki.MarshalCertPEM(root.Cert)
+	if _, err := parseSingleRootCertificate(append(append([]byte(nil), pem...), pem...)); err == nil {
+		t.Fatal("accepted multiple root certificates")
+	}
+}
+
+func TestLoadArtifactVerifierRejectsWrongEnvironmentAndRollbackStatement(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	root, err := pki.NewRootCA("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intermediateKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "auth signing"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour),
+		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature, BasicConstraintsValid: true, IsCA: true,
+		Policies: []x509.OID{pki.AuthSigningIntermediatePolicyOID},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, root.Cert, &intermediateKey.PublicKey, root.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intermediate, _ := x509.ParseCertificate(der)
+	sign := func(environment string, generation uint64) string {
+		payload, err := proto.Marshal(&authv1.SignerRevocationStatement{Environment: environment, Generation: generation, IssuedAt: now.Unix()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire, err := token.SignSignerRevocationStatement(intermediate, intermediateKey, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wire
+	}
+	dir := t.TempDir()
+	rootPath, statePath, statementPath := filepath.Join(dir, "root.pem"), filepath.Join(dir, "state", "revocations.json"), filepath.Join(dir, "statement")
+	if err := os.WriteFile(rootPath, pki.MarshalCertPEM(root.Cert), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := CP{}
+	cfg.Auth.Environment, cfg.Auth.RootCA, cfg.Auth.SignerRevocationState, cfg.Auth.SignerRevocationStatement = "prod", rootPath, statePath, statementPath
+	if err := os.WriteFile(statementPath, []byte(sign("staging", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadArtifactVerifier(cfg, now); err == nil {
+		t.Fatal("accepted wrong-environment statement")
+	}
+
+	if err := os.WriteFile(statementPath, []byte(sign("prod", 2)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, store, err := loadArtifactVerifier(cfg, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statementPath, []byte(sign("prod", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadArtifactVerifier(cfg, now); err == nil {
+		t.Fatal("accepted deployed statement rollback")
 	}
 }
 

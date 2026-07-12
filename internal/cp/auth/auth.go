@@ -1,5 +1,4 @@
-// Package auth provides the CP's identity seam: offline Ed25519 verification of A1's
-// AS-signed SessionTokenBody, with a dev-token fallback for local development.
+// Package auth provides the CP's root-anchored identity verification seam.
 package auth
 
 import (
@@ -9,6 +8,9 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
+
+	authv1 "spawnery/gen/auth/v1"
 
 	"spawnery/internal/authsvc/token"
 	slogctx "spawnery/internal/log"
@@ -27,23 +29,22 @@ type Identity struct {
 	ExpiresAt time.Time
 }
 
-// Verifier authenticates tokens. It tries AS verification first, then falls back to
-// dev tokens when devMode is true. Prod (devMode false) = AS tokens only.
+// Verifier authenticates certified session artifacts and exact opaque development tokens.
 type Verifier struct {
-	keys    token.KeySet
-	dev     map[string]string // token -> owner (dev mode only)
-	devMode bool
-	now     func() time.Time
-	revoked *RevocationRegistry
+	artifacts *token.Verifier
+	dev       map[string]string // token -> owner (dev mode only)
+	devMode   bool
+	now       func() time.Time
+	revoked   *RevocationRegistry
 }
 
 // VerifierConfig holds constructor parameters.
 type VerifierConfig struct {
-	Keys    token.KeySet
+	Artifacts *token.Verifier
 	DevTokens map[string]string // nil/empty = no dev tokens
-	DevMode bool
-	Now     func() time.Time // nil = time.Now
-	Revoked *RevocationRegistry
+	DevMode   bool
+	Now       func() time.Time // nil = time.Now
+	Revoked   *RevocationRegistry
 }
 
 // NewVerifier builds a Verifier from cfg.
@@ -60,18 +61,23 @@ func NewVerifier(cfg VerifierConfig) *Verifier {
 	if revoked == nil {
 		revoked = NewRevocationRegistry(nil)
 	}
-	return &Verifier{keys: cfg.Keys, dev: dev, devMode: cfg.DevMode, now: now, revoked: revoked}
+	return &Verifier{artifacts: cfg.Artifacts, dev: dev, devMode: cfg.DevMode, now: now, revoked: revoked}
 }
 
 // Verify authenticates wire token and returns the caller's Identity.
-// Order: AS verify (signature + aud=="cp" + revocation check); if the token parse/signature/key/expiry
-// check fails AND devMode is on, fall back to the dev-token map (TokenID empty).
-// A valid AS token with wrong audience is always refused (ErrWrongAudience), never falls back.
+// The artifact envelope is authenticated before its payload is parsed or acted on.
 func (v *Verifier) Verify(wire string) (Identity, error) {
-	// AS path — attempted whenever there are keys OR we're in prod mode (no keys = only dev tokens).
-	if len(v.keys) > 0 {
-		body, err := token.Verify(wire, v.keys, v.now())
+	if v.artifacts != nil {
+		now := v.now()
+		payload, err := v.artifacts.Verify(wire, token.ArtifactTypeSession, now)
 		if err == nil {
+			var body authv1.SessionTokenBody
+			if err := (proto.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(payload, &body); err != nil || len(body.ProtoReflect().GetUnknown()) != 0 {
+				return Identity{}, connect.NewError(connect.CodeUnauthenticated, errUnauth)
+			}
+			if !now.Before(time.Unix(body.ExpiresAt, 0)) || time.Unix(body.IssuedAt, 0).After(now.Add(time.Minute)) {
+				return Identity{}, connect.NewError(connect.CodeUnauthenticated, errUnauth)
+			}
 			// Audience check: the caller's job per token.Verify doc [MC2].
 			// A valid AS token with wrong aud is always refused — NOT a dev-token candidate.
 			if body.Audience != "cp" {
@@ -82,12 +88,9 @@ func (v *Verifier) Verify(wire string) (Identity, error) {
 				return Identity{}, ErrRevoked
 			}
 			return Identity{
-				Owner:     body.AccountId,
-				TokenID:   body.TokenId,
-				ExpiresAt: time.Unix(body.ExpiresAt, 0),
+				Owner: body.AccountId, TokenID: body.TokenId, ExpiresAt: time.Unix(body.ExpiresAt, 0),
 			}, nil
 		}
-		// AS verify failed (bad sig/expired/unknown key) — fall through to dev tokens in dev mode.
 	}
 
 	// Dev fallback: only when devMode is on.
@@ -167,4 +170,3 @@ var errUnauth = connectError("missing or invalid auth token")
 type connectError string
 
 func (e connectError) Error() string { return string(e) }
-

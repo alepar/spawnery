@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"spawnery/internal/authsvc/token"
 )
@@ -12,18 +13,18 @@ import (
 // RevocationRegistry is a persistent (in-process) set of revoked token_ids and account_ids.
 // Verify consults it; Apply verifies a signed feed entry and marks the relevant tokens/accounts.
 type RevocationRegistry struct {
-	mu            sync.RWMutex
-	revokedTokens  map[string]struct{}
+	mu              sync.RWMutex
+	revokedTokens   map[string]struct{}
 	revokedAccounts map[string]struct{}
-	sessions      *SessionRegistry // may be nil; if set, fan-out cancels live sessions
+	sessions        *SessionRegistry // may be nil; if set, fan-out cancels live sessions
 }
 
 // NewRevocationRegistry builds an empty registry. sessions may be nil (tests that don't need fan-out).
 func NewRevocationRegistry(sessions *SessionRegistry) *RevocationRegistry {
 	return &RevocationRegistry{
-		revokedTokens:  make(map[string]struct{}),
+		revokedTokens:   make(map[string]struct{}),
 		revokedAccounts: make(map[string]struct{}),
-		sessions:      sessions,
+		sessions:        sessions,
 	}
 }
 
@@ -69,26 +70,23 @@ type SignedFeedEntry struct {
 // and fans out cancels to any attached SessionRegistry.
 // Raw-bytes discipline: acts on the JSON parsed from the VERIFIED sig body bytes, not the
 // unsigned top-level dup fields (WM9).
-// Entry has no key_id — iterate ks (tiny set, at most 2 keys during rotation overlap).
-func (r *RevocationRegistry) Apply(entry SignedFeedEntry, ks token.KeySet) error {
-	var bodyBytes []byte
-	var verified bool
-	for _, k := range ks {
-		b, err := token.VerifyArtifact(token.RevocationDomainPrefix, entry.Sig, k.Pub)
-		if err == nil {
-			bodyBytes = b
-			verified = true
-			break
-		}
+// The shared root verifier selects and validates the envelope's certified signer.
+func (r *RevocationRegistry) Apply(entry SignedFeedEntry, artifacts *token.Verifier, now time.Time) error {
+	if artifacts == nil {
+		return fmt.Errorf("revocation: artifact verifier is not configured")
 	}
-	if !verified {
-		return fmt.Errorf("revocation: signature verification failed")
+	bodyBytes, err := artifacts.Verify(entry.Sig, token.ArtifactTypeRevocation, now)
+	if err != nil {
+		return fmt.Errorf("revocation: artifact verification failed: %w", err)
 	}
 
 	// Parse the VERIFIED body bytes — not the top-level unsigned fields.
 	var body feedEntry
 	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		return fmt.Errorf("revocation: body parse: %w", err)
+	}
+	if body.Seq != entry.Seq {
+		return fmt.Errorf("revocation: verified sequence %d does not match feed sequence %d", body.Seq, entry.Seq)
 	}
 
 	// Parse token_ids JSON array.

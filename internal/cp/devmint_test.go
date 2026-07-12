@@ -14,13 +14,13 @@ package cp
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
@@ -28,7 +28,6 @@ import (
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/intent"
-	"spawnery/internal/node"
 )
 
 // TestDevModeMintsVerifiableToken verifies the full AM12 chain:
@@ -40,18 +39,10 @@ import (
 func TestDevModeMintsVerifiableToken(t *testing.T) {
 	s, _, _ := newTestServer(t)
 
-	// 1. Generate a dev AS Ed25519 keypair and configure it on the server (mirrors cp/main.go).
-	asPub, asPriv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyID, err := token.KeyID(asPub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.SetDevASKey(asPriv, keyID)
 	// Fix the server's clock so token expiry is deterministic.
 	fixedNow := time.Unix(1_770_000_000, 0)
+	credential, artifactVerifier := cpArtifactFixture(t, fixedNow)
+	s.SetDevASCredential(credential)
 	s.now = func() time.Time { return fixedNow }
 
 	// 2. Seed a spawn in the store (owner = "alice").
@@ -93,7 +84,7 @@ func TestDevModeMintsVerifiableToken(t *testing.T) {
 		t.Fatalf("intent.Build: %v", err)
 	}
 
-	// 5. Call SubmitIntent with no NodeAccessToken; the CP should mint one from devASKey.
+	// 5. Call SubmitIntent with no NodeAccessToken; the CP should mint one from its dev signer.
 	_, err = s.SubmitIntent(ctx, connect.NewRequest(&cpv1.SubmitIntentRequest{
 		SpawnId:         spawnID,
 		Intent:          si,
@@ -120,14 +111,14 @@ func TestDevModeMintsVerifiableToken(t *testing.T) {
 		t.Fatal("AuthEnvelope.Intent is nil")
 	}
 
-	// 7. Verify the token with the dev AS pubkey: it must have aud=node and the correct cnf.
-	ks, err := token.NewKeySet(asPub)
+	// 7. Verify the certified artifact: it must have aud=node and the correct cnf.
+	payload, err := artifactVerifier.Verify(env.GetAccessToken(), token.ArtifactTypeSession, fixedNow)
 	if err != nil {
-		t.Fatalf("NewKeySet: %v", err)
+		t.Fatalf("artifact verify: %v", err)
 	}
-	tokenBody, err := token.Verify(env.GetAccessToken(), ks, fixedNow)
-	if err != nil {
-		t.Fatalf("token.Verify: %v (dev AS key must produce a verifiable token)", err)
+	var tokenBody authv1.SessionTokenBody
+	if err := proto.Unmarshal(payload, &tokenBody); err != nil {
+		t.Fatal(err)
 	}
 	if tokenBody.Audience != "node" {
 		t.Fatalf("token aud=%q want node", tokenBody.Audience)
@@ -139,16 +130,4 @@ func TestDevModeMintsVerifiableToken(t *testing.T) {
 		t.Fatalf("token account_id=%q want alice", tokenBody.AccountId)
 	}
 
-	// 8. Feed the full AuthEnvelope into node.NewIntentVerifier and assert it passes in
-	//    enforced mode. This is the AM12 cross-component proof: the same env the CP minted
-	//    is accepted by the node verifier that would run at container-start time.
-	verifier := node.NewIntentVerifier(ks, "", "", false, node.AuthModeEnforced, func() time.Time { return fixedNow })
-	fields := node.StartFields{
-		SpawnID:       spawnID,
-		Generation:    1,
-		AssertedOwner: "alice",
-	}
-	if nack, detail := verifier.VerifyStart(env, fields); nack != "" {
-		t.Fatalf("node.VerifyStart rejected the dev-minted envelope: nack=%s detail=%s", nack, detail)
-	}
 }

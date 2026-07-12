@@ -3,7 +3,7 @@
 # resolved from secrets.prod.sops.yaml at startup (age key via SOPS_AGE_KEY_FILE).
 
 auth:
-  mode: prod                   # dev tokens ignored; auth.as_session_pubkeys required
+  mode: prod                   # dev tokens ignored; root artifact trust required
 
 store:
   driver: postgres
