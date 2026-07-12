@@ -127,15 +127,17 @@ Details the earlier draft omitted:
   §4.2's node-side contract. (The spec keeps it, parallel + memoized.)
 - It gets its **own timeout** and a **transport-vs-missing** error split — a Garage brownout must
   report `Unavailable`, not mass-report "skill object missing".
-- **Interaction with §4.5:** the gate is skipped exactly when re-materialize is skipped.
+- **Interaction with §4.5:** §4.5's resume-gating spike was answered KILLED — re-materialize is
+  never skipped, on resume or otherwise, so this gate applies uniformly on every start including
+  resume.
 
-### 4.5 Resume gating (`sp-nrzf.3.14.8`) — spike-gated, not chosen
+### 4.5 Resume gating (`sp-nrzf.3.14.8`) — SPIKE ANSWERED: KILLED, not implemented
 
 The earlier draft *chose* to skip by-ref re-materialize on a delta-image resume. Demoted to
-**spike-gated**, because it rests on an unrun assumption and, if implemented naively, **breaks every
-resume**:
+spike-gated (below), because it rested on an unrun assumption and, if implemented naively, **breaks
+every resume**:
 
-- The premise "a resume's delta image contains the agent home" comes from parent-spec spike **S4,
+- The premise "a resume's delta image contains the agent home" came from parent-spec spike **S4,
   which was never run** — and `sp-mwco.2` simultaneously moves the install target to
   `~/.agents/skills`, which may not be in the delta at all.
 - Naive gating breaks the staging/manifest contract: `Materialize` wipes and recreates staging every
@@ -144,12 +146,55 @@ resume**:
   payload dirs that were never fetched → `StatusFailed` ("skill source directory does not exist") for
   **every skill, on every resume**. Worse, `installSkillTree`'s unconditional `RemoveAll(dest)` would
   **delete the delta-image copy** it was supposed to reuse.
-- Therefore, if the spike says gating is viable, it must suppress **the manifest artifact and the
-  apply phase together** (or skip the staging wipe), state whether the decision is CP- or node-side,
-  and reconcile stale skill trees already baked into existing delta images.
-- **Spike:** create → suspend → **stop Garage** → resume → `ls` the install path + read
-  `apply-report.json`. Kill criterion: skill absent, or home not in the delta → gating is unsound;
-  by-ref materialize stays on every start and re-presign (§4.3) becomes load-bearing.
+- Therefore, if the spike said gating was viable, it would have needed to suppress **the manifest
+  artifact and the apply phase together** (or skip the staging wipe), state whether the decision is
+  CP- or node-side, and reconcile stale skill trees already baked into existing delta images.
+
+**The spike ran (sp-mwco.2.2) and the kill criterion fired.** Two probes, both at the real
+same-node-resume mechanism (`Manager.Suspend` + same-spawn-ID `CreateWithSelection`, `EnsureImage`
+preferring `DeltaTag(id)` — a strictly stronger probe than the CP+Garage variant originally sketched,
+since it needs no CP/Garage at all):
+
+| Probe | Outcome |
+|---|---|
+| D1 image-level (`CaptureDeltaAs`, the fork primitive — does not stop the source) | both `~/.claude/skills` and `~/.agents/skills` captured intact in the delta image, mode 0700, content byte-identical |
+| D2 lifecycle, `DeltaCapture=true` | BOTH trees survive the suspend+relaunch cycle |
+| D2 lifecycle, `DeltaCapture=false` (**verified production default**) | **NEITHER tree survives** |
+
+`DeltaCapture=false` is the production default: `cmd/spawnlet/config.go` registers **no default** for
+`delta.capture` (only the `DELTA_CAPTURE` env binding), nothing under `deploy/` sets it, and only
+`Justfile:59` / `Justfile:223` (dev recipes) opt in. `internal/spawnlet/manager.go:1606` / `:2108` gate
+capture on `m.cfg.DeltaCapture`.
+
+**Conclusion: gating is unsound on the arm production actually runs, per the kill criterion this
+section already specified. No gating code was written.** By-ref `Materialize` runs on **every** start
+— first-create and resume alike, unconditionally, exactly as it does today (`internal/spawnlet/
+artifacts.go:341`/`:1261` in `manager.go`). §4.3's re-presign is load-bearing, as predicted. What
+*does* make a same-node resume survive a Garage brownout is **not** gating but §4.1's node-local
+sha-keyed cache (`ArtifactStager.CacheDir`, wired at `manager.go:348`, node-local and per-spawn-
+independent, so it survives suspend/resume and a spawnlet restart): `stageByRef` tries `cacheLoad`
+first and skips the GET entirely on a hit. The residual Garage dependency on resume therefore moved
+**CP-side** — `statSkillObjects` (§4.4) re-stats and re-presigns on every start; only a sha already
+memoized in `s.skillPresent` from an earlier stat on a warm CP tolerates a transport failure. It did
+not vanish.
+
+Tests: `internal/spawnlet/artifacts_resume_test.go` (`TestMaterialize_ResumeReStagesEveryByRefArtifact`
+pins the anti-gating invariant — verified to go red under a scratch naive gate;
+`TestMaterialize_ResumeServedFromShaCacheWhenFetchFails` pins the cache-not-gating survival property)
+and `internal/cp/artifacts_resume_test.go` (`TestNodeArtifactsForStart_StatsAndPresignsOnEveryCall`,
+`TestStatSkillObjects_MemoizedShaSurvivesTransportFailure`).
+
+If a node ever opts into `DeltaCapture=true`, gating becomes conditionally viable again, but would
+still need to separately close the three items above (manifest-as-inline-artifact, `installSkillTree`'s
+unconditional `RemoveAll`, the staging-dir wipe) — none of which this bead touched, since the premise
+for needing them (gating being live) did not hold. Do not treat `DeltaCapture=true` as the target
+state to design for; nothing under `deploy/` sets it today.
+
+**Original spike (recorded here for history):** create → suspend → **stop Garage** → resume → `ls`
+the install path + read `apply-report.json`. Kill criterion: skill absent, or home not in the delta →
+gating is unsound; by-ref materialize stays on every start and re-presign (§4.3) becomes load-bearing.
+This is exactly the result the sp-mwco.2.2 D1/D2 probes above produced on the production
+(`DeltaCapture=false`) arm.
 
 ### 4.6 Config surface for caps
 
@@ -268,3 +313,29 @@ used.*
   running `GOLDEN_IMAGE=… scripts/e2e-vm/run.sh --profile fake` (or the local dev-stack fallback) and
   recording the observed max is filed as **bd `sp-mwco.4.6.1`**, a child of this bead, so it isn't
   silently lost.
+- **2026-07-12 — sp-mwco.4.5: resume gating spike-answered, KILLED, no gating code shipped.** The
+  sp-mwco.2.2 fork/suspend delta spike (D1 image-level + D2 lifecycle-level, same-node-resume
+  mechanism) hit §4.5's own kill criterion on the production (`DeltaCapture=false`) arm — neither
+  `~/.claude/skills` nor `~/.agents/skills` survives a suspend+relaunch without delta capture, and
+  nothing in `deploy/` turns delta capture on. §4.5 was rewritten in place to record the D1/D2 result
+  table and the conclusion (by-ref `Materialize` runs on every start; §4.1's node sha-cache, not
+  gating, is what lets a same-node resume survive a Garage brownout; the residual Garage dependency on
+  resume moved CP-side to `statSkillObjects`); §4.4's now-dangling "interaction with §4.5" bullet was
+  reconciled to match. `internal/cp/lifecycle.go` and `internal/spawnlet/manager.go` are **untouched**
+  — there was no gating code to add. Regression guards for the invariants naive gating would have
+  broken landed as new tests: `internal/spawnlet/artifacts_resume_test.go`
+  (`TestMaterialize_ResumeReStagesEveryByRefArtifact`, verified to go red under a scratch
+  early-return-on-existing-staging-dir gate before being reverted;
+  `TestMaterialize_ResumeServedFromShaCacheWhenFetchFails`) and `internal/cp/artifacts_resume_test.go`
+  (`TestNodeArtifactsForStart_StatsAndPresignsOnEveryCall`,
+  `TestStatSkillObjects_MemoizedShaSurvivesTransportFailure`).
+
+  Two follow-ups surfaced by this work, **not filed as beads here** (the coordinator files them):
+  (a) `DeltaCapture` has no registered default anywhere under `deploy/` — worth an explicit decision
+  on whether silently discarding all agent-home state (not just skills) across every suspend/resume on
+  every production node is intentional, or whether `deploy/` should set `delta.capture=true` and pay
+  the resulting capture-time/storage cost; (b) resume-with-Garage-down is still blocked CP-side by
+  `statSkillObjects` on a COLD CP (nothing memoized yet) even when every node already has the objects
+  cached locally — worth considering persisting the present-sha set across CP restarts, or downgrading
+  a transport-only stat failure to a warning on the resume path specifically, given the node's 404
+  backstop (§4.4's own fallback reasoning) already exists as a second line of defense.
