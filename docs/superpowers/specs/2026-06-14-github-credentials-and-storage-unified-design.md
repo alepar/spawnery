@@ -90,8 +90,8 @@ Production GitHub-token handling is blocked until the generic secret-delivery fl
   delivery-id-once.
 - `sp-7h6.1.9` folds owner-online delivery into the A4 intent round-trip.
 - `sp-7h6.1.4` renders and injects secrets for the node/agent/sidecar consumers described here.
-- `sp-7h6.1.11` replaces the no-op node revocation checker before real user tokens are sealed to
-  nodes in production.
+- `sp-7h6.1.11` requires current, signed issuer CRLs and exact node-leaf serial checks before real
+  user tokens are sealed to nodes in production.
 
 Backend mechanics may be built and tested earlier behind local/static-token seams, but no
 production GitHub user-token path ships before these gates. Section 14 records the resolved spike
@@ -322,7 +322,7 @@ resume/recreate and prevents cross-generation opens.
 - **Partial secret delivery** (a referenced secret is unsealable at start): the in-container
   `secretwait` times out and the spawn **fails closed with a typed error**; the per-spawn secrets
   tmpfs is wiped.
-- **AS unavailable** at mint time (or for the node-revocation check): **fail closed** -- the spawn
+- **AS unavailable** at mint time: **fail closed** -- the spawn
   cannot obtain/refresh a token and surfaces a typed, retryable error rather than proceeding.
 - **Owner-offline mid-run** no longer forces capability loss, because the node self-refreshes via the
   AS API. An `Errored` start/resume caused by a transient mint/AS failure is **re-drivable** once the

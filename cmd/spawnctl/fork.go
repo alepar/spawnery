@@ -87,7 +87,7 @@ func forkCmd() *cli.Command {
 				fmt.Fprintln(c.Writer, "  target same node")
 			}
 
-			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths, time.Now)
+			opts, err := loadMoveOptions(dir, c.String("token"), rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths, time.Now)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}

@@ -102,7 +102,7 @@ func (m *Manager) ForkTransferExport(ctx context.Context, req ForkTransferExport
 		return ForkTransferExportResult{}, fmt.Errorf("fork transfer export: generate transfer key: %w", err)
 	}
 	defer zeroBytes(transferKey)
-	sealedKey, _, err := subkey.SealTransferKeyForNode(transferKey, leafPEM, chainPEM, req.NodeRootPEM, signed, expect, m.cfg.CertificateRevocations, subkey.AllowAll{}, seal.InFlightAAD{
+	sealedKey, _, err := subkey.SealTransferKeyForNode(transferKey, leafPEM, chainPEM, req.NodeRootPEM, signed, expect, m.cfg.CertificateRevocations, seal.InFlightAAD{
 		SpawnID:    req.ForkSpawnID,
 		Generation: targetGen,
 		DeliveryID: req.TransferSetID,

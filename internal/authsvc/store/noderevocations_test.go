@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestNodeRevocationsRevokeAndListSorted(t *testing.T) {
+func TestNodeRevocationsRevokeAndListByIssuer(t *testing.T) {
 	st := NewTestStore(t)
 	ctx := ctxT()
 
@@ -22,30 +22,14 @@ func TestNodeRevocationsRevokeAndListSorted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	revoked, err := st.NodeRevocations().IsRevoked(ctx, "node-a")
+	rows, err := st.NodeRevocations().ListByIssuer(ctx, "aa")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !revoked {
-		t.Fatal("node-a should be revoked")
+	if got := []string{rows[0].LeafSerial, rows[1].LeafSerial}; !reflect.DeepEqual(got, []string{"bb", "cc"}) {
+		t.Fatalf("sorted leaf serials = %v", got)
 	}
-
-	revoked, err = st.NodeRevocations().IsRevoked(ctx, "node-z")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if revoked {
-		t.Fatal("node-z should not be revoked")
-	}
-
-	rows, err := st.NodeRevocations().List(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := []string{rows[0].NodeID, rows[1].NodeID}; !reflect.DeepEqual(got, []string{"node-a", "node-b"}) {
-		t.Fatalf("sorted node ids = %v", got)
-	}
-	if rows[0].IssuerSerial != "aa" || rows[0].LeafSerial != "cc" {
+	if rows[0].IssuerSerial != "aa" || rows[0].NodeID != "node-b" {
 		t.Fatalf("certificate identity not stored: %+v", rows[0])
 	}
 }
@@ -77,10 +61,6 @@ func TestNodeRevocationMigrationUpgradesLegacyRowsWithoutCertificateAuthority(t 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	legacy, err := st.NodeRevocations().Get(ctxT(), "legacy-node")
-	if err != nil || legacy.IssuerSerial != "" || legacy.LeafSerial != "" {
-		t.Fatalf("legacy row = %+v, %v", legacy, err)
-	}
 	legacyRows, err := st.NodeRevocations().ListLegacy(ctxT())
 	if err != nil || len(legacyRows) != 1 || legacyRows[0].NodeID != "legacy-node" {
 		t.Fatalf("legacy reconciliation inventory = %+v, %v", legacyRows, err)
@@ -116,7 +96,7 @@ func TestNodeRevocationsRevokeIsIdempotentUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, err := st.NodeRevocations().List(ctx)
+	rows, err := st.NodeRevocations().ListByIssuer(ctx, "aa")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,11 +3,9 @@ package authsvc
 import (
 	"context"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
-	"net/http"
 	"time"
 
 	"spawnery/internal/authsvc/store"
@@ -192,25 +190,4 @@ func (s *Service) publishCurrentNodeCRL(ctx context.Context) error {
 		return fmt.Errorf("authsvc: publish node CRL %s: %w", current.Number, err)
 	}
 	return nil
-}
-
-func (s *Service) serveNodeRevocations(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
-	rows, err := s.nodeRevocations.List(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "node revocations unavailable")
-		return
-	}
-	ids := make([]string, 0, len(rows))
-	for _, row := range rows {
-		ids = append(ids, row.NodeID)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(struct {
-		RevokedNodeIDs []string `json:"revoked_node_ids"`
-		GeneratedAt    int64    `json:"generated_at"`
-	}{
-		RevokedNodeIDs: ids,
-		GeneratedAt:    s.now().Unix(),
-	})
 }

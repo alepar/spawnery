@@ -21,7 +21,7 @@ func TestPublicHandlerDoesNotExposeInternalRoutes(t *testing.T) {
 	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
 	svc := authsvc.New(root.Cert, inter)
 
-	for _, path := range []string{"/enroll", "/node-revocations", "/revocations", "/internal/github/link-status", "/auth.v1.AuthService/MintGitHubAccessToken"} {
+	for _, path := range []string{"/enroll", "/revocations", "/internal/github/link-status", "/auth.v1.AuthService/MintGitHubAccessToken"} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
 		rec := httptest.NewRecorder()
 		svc.PublicHandler().ServeHTTP(rec, req)
@@ -44,7 +44,7 @@ func TestInternalHandlerAnonymousOnlyReachesEnroll(t *testing.T) {
 		t.Fatalf("anonymous enrollment was rejected before handler: %d", enroll.Code)
 	}
 
-	for _, path := range []string{"/node-revocations", "/revocations", "/internal/github/link-status", "/auth.v1.AuthService/MintGitHubAccessToken", "/healthz"} {
+	for _, path := range []string{"/revocations", "/internal/github/link-status", "/auth.v1.AuthService/MintGitHubAccessToken", "/healthz"} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != http.StatusForbidden {

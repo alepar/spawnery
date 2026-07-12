@@ -64,7 +64,7 @@ func TestLoadMoveOptionsSuppliesCurrentCertificateRevocations(t *testing.T) {
 	statePath := filepath.Join(dir, "revocations", "state.json")
 	current := now
 	clock := func() time.Time { return current }
-	opts, err := loadMoveOptions(dir, "dev-token", "", rootPath, "prod.spawnery.internal", statePath, []string{issuerPath}, []string{crlPath}, clock)
+	opts, err := loadMoveOptions(dir, "dev-token", rootPath, "prod.spawnery.internal", statePath, []string{issuerPath}, []string{crlPath}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestLoadMoveOptionsSuppliesCurrentCertificateRevocations(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts.CloseCertificateRevocations = nil
-	reloaded, err := loadMoveOptions(dir, "dev-token", "", rootPath, "prod.spawnery.internal", statePath, []string{issuerPath}, nil, clock)
+	reloaded, err := loadMoveOptions(dir, "dev-token", rootPath, "prod.spawnery.internal", statePath, []string{issuerPath}, nil, clock)
 	if err != nil {
 		t.Fatalf("reload persisted current CRL: %v", err)
 	}
@@ -106,10 +106,10 @@ func TestLoadMoveOptionsFailsClosedWithoutOrWithStaleCRLState(t *testing.T) {
 	rootPath := writeMovePKIFile(t, dir, "root.pem", pki.MarshalCertPEM(root.Cert))
 	issuerPath := writeMovePKIFile(t, dir, "issuer.pem", pki.MarshalCertPEM(issuer.Cert))
 	clock := func() time.Time { return now }
-	if _, err := loadMoveOptions(dir, "dev-token", "", rootPath, "prod.spawnery.internal", "", nil, nil, clock); err == nil {
+	if _, err := loadMoveOptions(dir, "dev-token", rootPath, "prod.spawnery.internal", "", nil, nil, clock); err == nil {
 		t.Fatal("production options accepted missing revocation state")
 	}
-	if opts, err := loadMoveOptions(dir, "dev-token", "", rootPath, "prod.spawnery.internal", filepath.Join(dir, "empty-state", "state.json"), []string{issuerPath}, nil, clock); err == nil {
+	if opts, err := loadMoveOptions(dir, "dev-token", rootPath, "prod.spawnery.internal", filepath.Join(dir, "empty-state", "state.json"), []string{issuerPath}, nil, clock); err == nil {
 		if opts.CloseCertificateRevocations != nil {
 			_ = opts.CloseCertificateRevocations()
 		}
@@ -120,13 +120,13 @@ func TestLoadMoveOptionsFailsClosedWithoutOrWithStaleCRLState(t *testing.T) {
 		t.Fatal(err)
 	}
 	crlPath := writeMovePKIFile(t, dir, "stale.crl", pki.MarshalCRLPEM(list))
-	if _, err := loadMoveOptions(dir, "dev-token", "", rootPath, "prod.spawnery.internal", filepath.Join(dir, "stale-state", "state.json"), []string{issuerPath}, []string{crlPath}, func() time.Time { return now.Add(time.Minute) }); err == nil {
+	if _, err := loadMoveOptions(dir, "dev-token", rootPath, "prod.spawnery.internal", filepath.Join(dir, "stale-state", "state.json"), []string{issuerPath}, []string{crlPath}, func() time.Time { return now.Add(time.Minute) }); err == nil {
 		t.Fatal("stale CRL accepted")
 	}
 }
 
 func TestLoadMoveOptionsExplicitCompatibilityModeHasNoCertificateChecker(t *testing.T) {
-	opts, err := loadMoveOptions(t.TempDir(), "dev-token", "", "", "", "", nil, nil, time.Now)
+	opts, err := loadMoveOptions(t.TempDir(), "dev-token", "", "", "", nil, nil, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}

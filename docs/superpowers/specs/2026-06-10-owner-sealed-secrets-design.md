@@ -64,15 +64,14 @@ authority, not a key escrow.
   unexpired sub-key private halves (max 2 concurrent)** and selects by key-ID / trial-`Open` so a
   rotation mid-delivery doesn't fail opaquely `[roast m2]`.
 - **Revocation ≠ expiry `[roast M12]`:** validity alone does not revoke — a compromised node
-  re-signs fresh sub-keys with its own cert key indefinitely. So sealing clients additionally
-  consult an **AS-published, client-checked node revocation/deny-list** (or short-lived signed
-  allow-list) at delivery step 2; an owner can mark a node revoked in the AS registry and clients
-  **refuse to seal** past it. Specify the node leaf-cert lifetime; document that **secret rotation
-  must be paired with node revocation** to be effective.
+  re-signs fresh sub-keys with its own cert key indefinitely. Sealing clients therefore require a
+  current, signed CRL for the node certificate's issuer and check the exact issuer+leaf serial at
+  delivery step 2. Revocation is certificate-scoped: rotating a node certificate does not revoke
+  its unlisted sibling even when both certificates carry the same NodeID.
 
 **Verification chain (closes `sp-gtm` for secrets):** client pins Root CA + AS pubkeys (shipped,
 `sp-9wd`) → verifies node cert chain + SAN against expected `(accountId | cloud, class)` →
-**checks the node is not on the AS revocation list** → verifies sub-key signature + expiry → only
+**checks the node leaf against the issuer's signed CRL** → verifies sub-key signature + expiry → only
 then seals. A compromised CP can relay keys but cannot mint trust (Tailnet Lock property).
 
 **Device-set registry — hash-chained, owner-signed `[roast M4]`:** device pubkeys (X25519 +

@@ -6,10 +6,8 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"math/big"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -215,7 +213,7 @@ func issueProdNode(t *testing.T, nodeID, accountID string) prodNodeFix {
 	}
 }
 
-func TestMigrateRejectsRevokedNodeBeforeDelivery(t *testing.T) {
+func TestMigrateRejectsRevokedCertificateBeforeDelivery(t *testing.T) {
 	mn, _ := seal.NewMnemonic()
 	dev, _ := seal.DeviceFromMnemonic(mn, "")
 	env, err := journalkey.SealToOwner("repo-pw-123", []seal.X25519PubKey{dev.X25519PubKey()},
@@ -245,21 +243,14 @@ func TestMigrateRejectsRevokedNodeBeforeDelivery(t *testing.T) {
 		notAfter:      sk.NotAfter,
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"revoked_node_ids": []string{fx.nodeID}})
-	}))
-	defer srv.Close()
-
 	var out bytes.Buffer
 	err = migrateSpawn(context.Background(), client, dev, "sp1", fx.nodeID, &out, now, MoveOptions{
 		AccountID:              "alice",
 		RootPEM:                fx.rootPEM,
 		TrustDomain:            pki.DefaultTrustDomain,
-		RevocationURL:          srv.URL + "/node-revocations",
-		RevocationClient:       srv.Client(),
-		CertificateRevocations: allowNoCertificateRevocations,
+		CertificateRevocations: func(_, _ *big.Int) bool { return true },
 	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "node is revoked") {
+	if err == nil || !strings.Contains(err.Error(), "certificate is revoked") {
 		t.Fatalf("err = %v", err)
 	}
 	if client.gotDelivery != nil {
@@ -300,18 +291,11 @@ func TestMigrateRejectsMismatchedVerifiedNodeBeforeDelivery(t *testing.T) {
 		notAfter:       sk.NotAfter,
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"revoked_node_ids": []string{}})
-	}))
-	defer srv.Close()
-
 	var out bytes.Buffer
 	err = migrateSpawn(context.Background(), client, dev, "sp1", "node-b", &out, now, MoveOptions{
 		AccountID:              "alice",
 		RootPEM:                fx.rootPEM,
 		TrustDomain:            pki.DefaultTrustDomain,
-		RevocationURL:          srv.URL + "/node-revocations",
-		RevocationClient:       srv.Client(),
 		CertificateRevocations: allowNoCertificateRevocations,
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "verified node \"node-c\" does not match resolved node \"node-b\"") {
@@ -353,71 +337,6 @@ func TestMigrateRejectsMissingCertChainWhenRootConfigured(t *testing.T) {
 	}
 	if client.gotDelivery != nil {
 		t.Fatal("DeliverSecrets must not be called when a pinned root is configured but CP omits the node cert chain")
-	}
-}
-
-func TestMigrateRefetchesNodeRevocationsForEachProductionSeal(t *testing.T) {
-	mn, _ := seal.NewMnemonic()
-	dev, _ := seal.DeviceFromMnemonic(mn, "")
-	env, err := journalkey.SealToOwner("repo-pw-123", []seal.X25519PubKey{dev.X25519PubKey()},
-		seal.AtRestAAD{AccountID: "alice", SecretID: journalkey.SecretID("main"), Version: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ct, _ := json.Marshal(env)
-
-	fx := issueProdNode(t, "node-b", "alice")
-	nodePub, _, err := seal.NodeKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	sk, err := subkey.Sign(fx.key, fx.nodeID, nodePub, now, now.Add(subkey.DefaultValidity))
-	if err != nil {
-		t.Fatal(err)
-	}
-	skJSON, _ := json.Marshal(sk)
-
-	client := &fakeMoveClient{
-		entries: []*cpv1.JournalKeyCiphertext{
-			{Mount: "main", Ciphertext: ct},
-			{Mount: "aux", Ciphertext: ct},
-		},
-		nodeID:        fx.nodeID,
-		nodePub:       sk.HPKEPub,
-		nodeCertChain: fx.chainPEM,
-		signedSubkey:  skJSON,
-		gen:           7,
-		notAfter:      sk.NotAfter,
-	}
-
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if calls.Add(1) == 1 {
-			_ = json.NewEncoder(w).Encode(map[string]any{"revoked_node_ids": []string{}})
-			return
-		}
-		http.Error(w, "down", http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-
-	var out bytes.Buffer
-	err = migrateSpawn(context.Background(), client, dev, "sp1", fx.nodeID, &out, now, MoveOptions{
-		AccountID:              "alice",
-		RootPEM:                fx.rootPEM,
-		TrustDomain:            pki.DefaultTrustDomain,
-		RevocationURL:          srv.URL + "/node-revocations",
-		RevocationClient:       srv.Client(),
-		CertificateRevocations: allowNoCertificateRevocations,
-	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "503") {
-		t.Fatalf("err = %v", err)
-	}
-	if client.gotDelivery != nil {
-		t.Fatal("DeliverSecrets must not be called after revocation check becomes unavailable")
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("revocation calls = %d, want 2", got)
 	}
 }
 

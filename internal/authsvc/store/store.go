@@ -98,9 +98,6 @@ type DeviceSetRepo interface {
 
 type NodeRevocationRepo interface {
 	Revoke(ctx context.Context, revocation NodeRevocation) (bool, error)
-	Get(ctx context.Context, nodeID string) (NodeRevocation, error)
-	IsRevoked(ctx context.Context, nodeID string) (bool, error)
-	List(ctx context.Context) ([]NodeRevocation, error)
 	ListByIssuer(ctx context.Context, issuerSerial string) ([]NodeRevocation, error)
 	ListLegacy(ctx context.Context) ([]NodeRevocation, error)
 	ReconcileLegacy(ctx context.Context, nodeID, issuerSerial, leafSerial string) error

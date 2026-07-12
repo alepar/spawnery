@@ -8,19 +8,18 @@ import (
 )
 
 const (
-	operationEnroll          = "authsvc.enroll"
-	operationNodeRevocations = "authsvc.node-revocations"
-	operationCredentialMint  = "authsvc.credential-mint"
-	operationRevocations     = "authsvc.revocations"
-	operationGitHubLink      = "authsvc.github-link-status"
+	operationEnroll         = "authsvc.enroll"
+	operationCredentialMint = "authsvc.credential-mint"
+	operationRevocations    = "authsvc.revocations"
+	operationGitHubLink     = "authsvc.github-link-status"
 )
 
 // DefaultInternalPolicy is the complete AS internal route/principal matrix.
 func DefaultInternalPolicy() mtls.Policy {
 	return mtls.Policy{
 		"anonymous":        {operationEnroll: {}},
-		"node:cloud":       {operationNodeRevocations: {}, operationCredentialMint: {}},
-		"node:self-hosted": {operationNodeRevocations: {}, operationCredentialMint: {}},
+		"node:cloud":       {operationCredentialMint: {}},
+		"node:self-hosted": {operationCredentialMint: {}},
 		"service:cp":       {operationRevocations: {}, operationGitHubLink: {}},
 	}
 }
@@ -84,9 +83,6 @@ func (s *Service) PublicHandler() http.Handler {
 func (s *Service) InternalHandler(policy mtls.Policy) http.Handler {
 	_, credentialMint := authv1connect.NewAuthServiceHandler(s)
 	routes := internalRouteHandlers{enroll: http.HandlerFunc(s.enrollHandler), credentialMint: credentialMint, githubLink: http.HandlerFunc(s.serveGitHubLinkStatus)}
-	if s.nodeRevocations != nil {
-		routes.nodeRevocations = http.HandlerFunc(s.serveNodeRevocations)
-	}
 	if s.idp != nil {
 		routes.revocations = http.HandlerFunc(s.idp.serveRevocations)
 	}
@@ -94,20 +90,16 @@ func (s *Service) InternalHandler(policy mtls.Policy) http.Handler {
 }
 
 type internalRouteHandlers struct {
-	enroll          http.Handler
-	nodeRevocations http.Handler
-	credentialMint  http.Handler
-	revocations     http.Handler
-	githubLink      http.Handler
+	enroll         http.Handler
+	credentialMint http.Handler
+	revocations    http.Handler
+	githubLink     http.Handler
 }
 
 func internalHandler(policy mtls.Policy, routes internalRouteHandlers) http.Handler {
 	mux := http.NewServeMux()
 	if routes.enroll != nil {
 		mux.Handle("POST /enroll", routes.enroll)
-	}
-	if routes.nodeRevocations != nil {
-		mux.Handle("GET /node-revocations", routes.nodeRevocations)
 	}
 	if routes.credentialMint != nil {
 		mux.Handle(authv1connect.AuthServiceMintGitHubAccessTokenProcedure, routes.credentialMint)
@@ -123,8 +115,6 @@ func internalHandler(policy mtls.Policy, routes internalRouteHandlers) http.Hand
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/enroll":
 			return operationEnroll
-		case r.Method == http.MethodGet && r.URL.Path == "/node-revocations":
-			return operationNodeRevocations
 		case r.Method == http.MethodPost && r.URL.Path == authv1connect.AuthServiceMintGitHubAccessTokenProcedure:
 			return operationCredentialMint
 		case r.Method == http.MethodGet && r.URL.Path == "/revocations":

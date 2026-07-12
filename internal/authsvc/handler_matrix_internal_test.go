@@ -41,13 +41,12 @@ func TestInternalHandlerCompletePrincipalRouteMatrix(t *testing.T) {
 		})
 	}
 	handler := mtls.PrincipalMiddleware(verifier, internalHandler(DefaultInternalPolicy(), internalRouteHandlers{
-		enroll: count("enroll"), nodeRevocations: count("node"), credentialMint: count("mint"),
+		enroll: count("enroll"), credentialMint: count("mint"),
 		revocations: count("revocations"), githubLink: count("link"),
 	}))
 
 	type route struct{ method, path, counter string }
 	enroll := route{http.MethodPost, "/enroll", "enroll"}
-	nodeRevocations := route{http.MethodGet, "/node-revocations", "node"}
 	mint := route{http.MethodPost, authv1connect.AuthServiceMintGitHubAccessTokenProcedure, "mint"}
 	revocations := route{http.MethodGet, "/revocations", "revocations"}
 	link := route{http.MethodPost, "/internal/github/link-status", "link"}
@@ -60,18 +59,15 @@ func TestInternalHandlerCompletePrincipalRouteMatrix(t *testing.T) {
 		want  int
 	}{
 		{"anonymous enroll", nil, enroll, http.StatusNoContent},
-		{"anonymous node denied", nil, nodeRevocations, http.StatusForbidden},
 		{"anonymous mint denied", nil, mint, http.StatusForbidden},
 		{"anonymous revocations denied", nil, revocations, http.StatusForbidden},
 		{"anonymous link denied", nil, link, http.StatusForbidden},
 		{"anonymous unknown denied", nil, unknown, http.StatusForbidden},
-		{"cloud node revocations", cloud, nodeRevocations, http.StatusNoContent},
 		{"cloud mint", cloud, mint, http.StatusNoContent},
 		{"cloud enroll denied", cloud, enroll, http.StatusForbidden},
 		{"cloud CP revocations denied", cloud, revocations, http.StatusForbidden},
 		{"cloud link denied", cloud, link, http.StatusForbidden},
 		{"cloud unknown denied", cloud, unknown, http.StatusForbidden},
-		{"self-hosted node revocations", selfHosted, nodeRevocations, http.StatusNoContent},
 		{"self-hosted mint", selfHosted, mint, http.StatusNoContent},
 		{"self-hosted enroll denied", selfHosted, enroll, http.StatusForbidden},
 		{"self-hosted CP revocations denied", selfHosted, revocations, http.StatusForbidden},
@@ -80,11 +76,9 @@ func TestInternalHandlerCompletePrincipalRouteMatrix(t *testing.T) {
 		{"CP revocations", cp, revocations, http.StatusNoContent},
 		{"CP link", cp, link, http.StatusNoContent},
 		{"CP enroll denied", cp, enroll, http.StatusForbidden},
-		{"CP node denied", cp, nodeRevocations, http.StatusForbidden},
 		{"CP mint denied", cp, mint, http.StatusForbidden},
 		{"CP unknown denied", cp, unknown, http.StatusForbidden},
 		{"authsvc enroll denied", authsvcPeer, enroll, http.StatusForbidden},
-		{"authsvc node denied", authsvcPeer, nodeRevocations, http.StatusForbidden},
 		{"authsvc mint denied", authsvcPeer, mint, http.StatusForbidden},
 		{"authsvc revocations denied", authsvcPeer, revocations, http.StatusForbidden},
 		{"authsvc link denied", authsvcPeer, link, http.StatusForbidden},

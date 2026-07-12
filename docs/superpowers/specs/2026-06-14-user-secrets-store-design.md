@@ -58,7 +58,7 @@ provisioning is split to its own epic (`sp-v40s`, §5).
 3. **Owner-online delivery folded into the A4 round-trip** (the deadlock fix) — §6.
 4. **BYOK → sidecar** consumption (the sidecar can't read secrets today) — §7.
 5. **In-flight replay guards + a live journal-key delivery bug fix** — §8.
-6. **A real node-revocation checker** (currently a no-op) — §9.
+6. **Fail-closed node certificate CRL verification** — §9.
 
 ### Custody invariant (locked)
 
@@ -204,15 +204,12 @@ generation, so the in-memory window is sound; an intra-generation spawnlet resta
 documented as the residual (re-delivery bumps generation on resume). Prerequisite for
 secure delivery (.3/.4/.9).
 
-## 9. Wire a Real Node-Revocation Checker (sp-7h6.1.11)
+## 9. Enforce Node Certificate CRLs (sp-7h6.1.11)
 
-`subkey.VerifyNodeForSealing` defaults to `AllowAll` (`verify.go:42`, `IsRevoked`→`false`);
-no real checker is injected (Go or web), so a **known-revoked node can currently receive
-owner secrets** — a no-op in the "verified" chain this epic relies on. Implement a
-`RevocationChecker` backed by an **AS-published node-revocation list** (new AS endpoint), wire
-it into every `VerifyNodeForSealing` call site (Go) and `verifyNodeForSealing` (web). Shared
-with the broader owner-sealed posture; owned here because user secrets are the first
-production consumer.
+`subkey.VerifyNodeForSealing` must receive fail-closed certificate revocation state and verify the
+exact issuer+leaf serial before sealing. The AS issues signed CRLs; clients validate signatures,
+freshness, and monotonic CRL numbers. NodeID is not a revocation key: a revoked old leaf and an
+unrevoked rotated leaf carrying the same NodeID remain independent.
 
 ## 10. Surfaces: CLI (strong path) + Web (sp-7h6.1.6, sp-7h6.1.10)
 
@@ -276,6 +273,6 @@ caught the journal-key AAD bug.**
 | **sp-7h6.1.8 — in-flight replay guards + proto fields + journal-key bug fix** | §8 |
 | **sp-7h6.1.9 — A4-folded delivery wiring (GetPendingIntent node key, SubmitIntent secrets, StartSpawn thread, gap inject)** | §6 |
 | **sp-7h6.1.10 — spawnctl secrets CLI** | §10 |
-| **sp-7h6.1.11 — real node-revocation checker + AS endpoint** | §9 |
+| **sp-7h6.1.11 — fail-closed node certificate CRLs** | §9 |
 | sp-7h6.1.6 — web UI | §10 |
 | sp-7h6.1.5 — GitHub token → **MOVED to sp-v40s** | §5 |

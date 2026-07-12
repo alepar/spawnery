@@ -40,15 +40,6 @@ func (r *nodeRevocationRepo) Revoke(ctx context.Context, row NodeRevocation) (bo
 	return false, err
 }
 
-func (r *nodeRevocationRepo) Get(ctx context.Context, nodeID string) (NodeRevocation, error) {
-	var row NodeRevocation
-	err := r.db.NewSelect().Model(&row).Where("node_id = ?", nodeID).OrderExpr("revoked_at ASC, id ASC").Limit(1).Scan(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return NodeRevocation{}, ErrNotFound
-	}
-	return row, err
-}
-
 func (r *nodeRevocationRepo) getCertificate(ctx context.Context, issuerSerial, leafSerial string) (NodeRevocation, error) {
 	var row NodeRevocation
 	err := r.db.NewSelect().Model(&row).
@@ -59,29 +50,6 @@ func (r *nodeRevocationRepo) getCertificate(ctx context.Context, issuerSerial, l
 		return NodeRevocation{}, ErrNotFound
 	}
 	return row, err
-}
-
-func (r *nodeRevocationRepo) IsRevoked(ctx context.Context, nodeID string) (bool, error) {
-	var row NodeRevocation
-	err := r.db.NewSelect().Model(&row).
-		Where("node_id = ?", nodeID).
-		Limit(1).
-		Scan(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func (r *nodeRevocationRepo) List(ctx context.Context) ([]NodeRevocation, error) {
-	var rows []NodeRevocation
-	err := r.db.NewSelect().Model(&rows).
-		OrderExpr("node_id ASC").
-		Scan(ctx)
-	return rows, err
 }
 
 func (r *nodeRevocationRepo) ListByIssuer(ctx context.Context, issuerSerial string) ([]NodeRevocation, error) {
