@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
+	"spawnery/internal/pki"
 )
 
 const maxSignerRevocationFutureSkew = 60 * time.Second
@@ -207,7 +208,7 @@ func validateRevocationIntermediateProfile(intermediate *x509.Certificate) error
 	if intermediate == nil || len(intermediate.Raw) == 0 || !intermediate.IsCA || !intermediate.BasicConstraintsValid {
 		return errors.New("token: signer-revocation authority must be a CA")
 	}
-	if !hasPolicy(intermediate, AuthSigningIntermediatePolicyOID) {
+	if !pki.HasPolicy(intermediate, pki.AuthSigningIntermediatePolicyOID) {
 		return errors.New("token: signer-revocation authority lacks auth-signing intermediate policy")
 	}
 	requiredUsage := x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature
