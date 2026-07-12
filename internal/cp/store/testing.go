@@ -37,13 +37,3 @@ func ExpireClaim(ctx context.Context, st Store, id string) error {
 		Where("id = ?", id).Exec(ctx)
 	return err
 }
-
-// DeleteBundleForTest deletes a skill_bundle row directly. SkillBundleRepo has no Delete method
-// yet (safe delete + the reference check is sp-mwco.3.3's job); this exists solely to exercise
-// the ON DELETE CASCADE to skill_bundle_version and skill_bundle_member. Test-only helper;
-// production code must not use this.
-func DeleteBundleForTest(ctx context.Context, st Store, bundleID string) error {
-	db := st.(*bunStore).db
-	_, err := db.NewDelete().Model((*SkillBundle)(nil)).Where("bundle_id = ?", bundleID).Exec(ctx)
-	return err
-}

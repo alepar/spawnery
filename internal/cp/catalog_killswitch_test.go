@@ -143,9 +143,10 @@ func TestDeleteCatalogEntry_KillSwitch_TerminatesAffectedSpawn(t *testing.T) {
 	spawnID := "sp-ks-1"
 	makeSpawnForKS(t, s, spawnID, "alice", pfID)
 
-	// Alice deletes the catalog entry — the kill-switch must terminate the spawn.
+	// Alice deletes the catalog entry — it's referenced, so this requires force=true
+	// (sp-mwco.3.3 §4.3); the kill-switch must still terminate the spawn.
 	if _, err := s.DeleteCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.DeleteCatalogEntryRequest{
-		CatalogId: catID,
+		CatalogId: catID, Force: true,
 	})); err != nil {
 		t.Fatalf("DeleteCatalogEntry: %v", err)
 	}
@@ -194,9 +195,10 @@ func TestDeleteCatalogEntry_KillSwitch_CrossOwner(t *testing.T) {
 	bobSpawnID := "sp-bob-ks"
 	makeSpawnForKS(t, s, bobSpawnID, "bob", pfID)
 
-	// Alice deletes the entry → Bob's spawn must be terminated.
+	// Alice deletes the entry (force=true — it's referenced by bob's profile) → bob's spawn must
+	// be terminated.
 	if _, err := s.DeleteCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.DeleteCatalogEntryRequest{
-		CatalogId: catID,
+		CatalogId: catID, Force: true,
 	})); err != nil {
 		t.Fatalf("DeleteCatalogEntry: %v", err)
 	}
@@ -226,8 +228,9 @@ func TestDeleteCatalogEntry_KillSwitch_AlreadyDeletedSpawnUntouched(t *testing.T
 	// Live spawn — should be terminated.
 	makeSpawnForKS(t, s, "sp-live", "alice", pfID)
 
+	// Referenced by pfID (both the dead and the live spawn's profile) — force=true.
 	if _, err := s.DeleteCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.DeleteCatalogEntryRequest{
-		CatalogId: catID,
+		CatalogId: catID, Force: true,
 	})); err != nil {
 		t.Fatalf("DeleteCatalogEntry: %v", err)
 	}

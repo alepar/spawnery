@@ -86,6 +86,13 @@ service SpawnService {
   // PublishBundle lists every member of every version of a bundle — not just the latest, since a
   // profile may pin an older version and must still be able to resolve it.
   rpc PublishBundle(PublishBundleRequest) returns (PublishBundleResponse);
+  // DeleteBundle / DeleteBundleVersion (sp-mwco.3.3 §4.3): creator-only, reference-checked delete
+  // for bundles/versions. A version or bundle referenced by a bundle_ref profile entry is
+  // rejected with FailedPrecondition (counts-only message) unless force=true. DeleteBundle
+  // cascades to its versions and their members but does NOT delete the member catalog rows
+  // (content-identity dedup — a row may be shared across bundles/versions).
+  rpc DeleteBundle(DeleteBundleRequest) returns (DeleteBundleResponse);
+  rpc DeleteBundleVersion(DeleteBundleVersionRequest) returns (DeleteBundleVersionResponse);
   // IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
   // SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
   // content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
@@ -769,7 +776,10 @@ message ListCatalogEntriesResponse { repeated CatalogEntrySummary entries = 1; }
 message UpdateCatalogEntryRequest  { string catalog_id = 1; string name = 2; string description = 3; bytes content = 4; }
 message UpdateCatalogEntryResponse {}
 
-message DeleteCatalogEntryRequest  { string catalog_id = 1; }
+// DeleteCatalogEntryRequest.force overrides the profile-reference check (never the
+// bundle-membership check — a catalog entry that is a bundle-version member is rejected outright,
+// force or not; delete the bundle version instead). See DeleteCatalogEntry's doc comment.
+message DeleteCatalogEntryRequest  { string catalog_id = 1; bool force = 2; }
 message DeleteCatalogEntryResponse {}
 
 // SetCatalogListingRequest.confirm gates listed=false (unlist) when the entry is referenced
@@ -801,6 +811,16 @@ message UnpublishCatalogEntryResponse {
 
 message PublishBundleRequest  { string bundle_id = 1; }
 message PublishBundleResponse {}
+
+// DeleteBundleRequest.force overrides the bundle-ref reference check (a profile pinning any
+// version of this bundle). Creator-only; see the service doc comment.
+message DeleteBundleRequest  { string bundle_id = 1; bool force = 2; }
+message DeleteBundleResponse {}
+
+// DeleteBundleVersionRequest.force overrides the bundle-ref reference check (a profile pinned to
+// this specific version). Creator-only; see the service doc comment.
+message DeleteBundleVersionRequest  { string version_id = 1; bool force = 2; }
+message DeleteBundleVersionResponse {}
 
 // IngestSkillFromURLRequest ingests a skill from a GitHub repo URL.
 message IngestSkillFromURLRequest {

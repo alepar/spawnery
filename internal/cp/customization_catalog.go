@@ -130,11 +130,30 @@ func (s *Server) UpdateCatalogEntry(ctx context.Context, req *connect.Request[cp
 
 // --- DeleteCatalogEntry -------------------------------------------------------
 
+// DeleteCatalogEntry deletes a catalog entry, guarded by a reference check run under an exclusive
+// lock (sp-mwco.3.3 §3):
+//
+//  1. A catalog entry that is a member of any bundle version (SkillBundles().MemberVersionIDs) is
+//     rejected outright — force does NOT override this, since forcing would orphan a live bundle
+//     version. Delete the bundle version instead.
+//  2. Otherwise, an entry referenced by any profile (Profiles().CountRefsByCatalogRef) is rejected
+//     with FailedPrecondition unless force=true. The message carries COUNTS ONLY — never a
+//     profile id, name, or owner id: the catalog is global and refs span tenants, so naming them
+//     would be a cross-tenant disclosure.
+//
+// Both checks and the delete itself run inside one WithTx, with CustomizationCatalog().LockRow
+// taken first: LockRow is the mutex AddProfileEntry also takes on the same catalog_id before
+// inserting a CATALOG_REF entry, so the two calls serialize instead of racing. That closes the
+// only path that could create a fresh dangling ref — force=true still creates one deliberately,
+// and profile-assembly keeps failing loud on a dangling ref as defense in depth.
 func (s *Server) DeleteCatalogEntry(ctx context.Context, req *connect.Request[cpv1.DeleteCatalogEntryRequest]) (*connect.Response[cpv1.DeleteCatalogEntryResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
 	}
+	// Fast-path pre-tx check: cheap existence + creator check before opening a transaction for the
+	// common "wrong owner" / "already gone" cases. The in-tx re-check below (under the lock) is
+	// authoritative.
 	e, err := s.st.CustomizationCatalog().Get(ctx, req.Msg.CatalogId)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
@@ -145,18 +164,60 @@ func (s *Server) DeleteCatalogEntry(ctx context.Context, req *connect.Request[cp
 	if e.CreatorID != owner {
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not the creator of %q", req.Msg.CatalogId))
 	}
-	// Resolve affected spawns BEFORE deleting — no FK cascade from catalog→profile_entries,
-	// so the entries survive the catalog delete, but capturing first is belt-and-suspenders.
-	affected, killErr := s.resolveAffectedSpawns(ctx, req.Msg.CatalogId)
-	if killErr != nil {
-		log.Printf("kill-switch: resolve for catalog %s failed: %v (delete proceeds)", req.Msg.CatalogId, killErr)
-	}
-	if err := s.st.CustomizationCatalog().Delete(ctx, req.Msg.CatalogId); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
+
+	var affected []store.Spawn
+	txErr := s.st.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.CustomizationCatalog().LockRow(ctx, req.Msg.CatalogId); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
+			}
+			return err
 		}
-		return nil, connect.NewError(connect.CodeInternal, err)
+		e, err := tx.CustomizationCatalog().Get(ctx, req.Msg.CatalogId)
+		if err != nil {
+			return err
+		}
+		if e.CreatorID != owner {
+			return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not the creator of %q", req.Msg.CatalogId))
+		}
+
+		versionIDs, err := tx.SkillBundles().MemberVersionIDs(ctx, req.Msg.CatalogId)
+		if err != nil {
+			return err
+		}
+		if len(versionIDs) > 0 {
+			return refusedByBundleMembership(req.Msg.CatalogId, len(versionIDs))
+		}
+
+		profiles, owners, err := tx.Profiles().CountRefsByCatalogRef(ctx, req.Msg.CatalogId)
+		if err != nil {
+			return err
+		}
+		if profiles > 0 && !req.Msg.Force {
+			return refusedByProfileRefs(fmt.Sprintf("catalog entry %s", req.Msg.CatalogId), profiles, owners)
+		}
+
+		// Resolve affected spawns in-tx (read-consistent with the delete below), then delete.
+		profileIDs, err := tx.Profiles().ListProfileIDsByCatalogRef(ctx, req.Msg.CatalogId)
+		if err != nil {
+			return err
+		}
+		affected, err = tx.Spawns().ListLiveByProfileIDs(ctx, profileIDs)
+		if err != nil {
+			return err
+		}
+		return tx.CustomizationCatalog().Delete(ctx, req.Msg.CatalogId)
+	})
+	if txErr != nil {
+		var cerr *connect.Error
+		if errors.As(txErr, &cerr) {
+			return nil, cerr
+		}
+		return nil, connect.NewError(connect.CodeInternal, txErr)
 	}
+
+	// Kill-switch AFTER commit — never inside the tx: it terminates spawns over the network and
+	// writes rows on a best-effort basis, and must not hold the delete's lock hostage.
 	s.killSwitchForCatalog(ctx, req.Msg.CatalogId, affected)
 	return connect.NewResponse(&cpv1.DeleteCatalogEntryResponse{}), nil
 }

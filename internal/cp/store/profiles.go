@@ -253,6 +253,85 @@ func (r *profileRepo) CountRefsByCatalogRef(ctx context.Context, catalogID strin
 	return row.Profiles, row.Owners, nil
 }
 
+// ListProfileIDsByBundleRef returns the distinct profile_ids of profiles that contain at least
+// one bundle_ref entry pinned to the given bundleID. Empty slice (not error) when none match.
+func (r *profileRepo) ListProfileIDsByBundleRef(ctx context.Context, bundleID string) ([]string, error) {
+	var ids []string
+	err := r.db.NewSelect().
+		TableExpr("profile_entries").
+		ColumnExpr("DISTINCT profile_id").
+		Where("source_kind = ? AND bundle_id = ?", string(ProfileSourceBundle), bundleID).
+		Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// ListProfileIDsByBundleVersionRef returns the distinct profile_ids of profiles that contain at
+// least one bundle_ref entry pinned to the given versionID. Empty slice (not error) when none
+// match.
+func (r *profileRepo) ListProfileIDsByBundleVersionRef(ctx context.Context, versionID string) ([]string, error) {
+	var ids []string
+	err := r.db.NewSelect().
+		TableExpr("profile_entries").
+		ColumnExpr("DISTINCT profile_id").
+		Where("source_kind = ? AND version_id = ?", string(ProfileSourceBundle), versionID).
+		Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// CountBundleRefs returns the number of distinct profiles, and the number of distinct owners of
+// those profiles, that contain a bundle_ref entry pinned to bundleID. Zero refs returns
+// (0, 0, nil) — never an error. Mirrors CountRefsByCatalogRef's shape.
+func (r *profileRepo) CountBundleRefs(ctx context.Context, bundleID string) (int, int, error) {
+	var row struct {
+		Profiles int `bun:"profiles"`
+		Owners   int `bun:"owners"`
+	}
+	err := r.db.NewSelect().
+		TableExpr("profile_entries AS pe").
+		Join("JOIN profiles AS pf ON pf.profile_id = pe.profile_id").
+		ColumnExpr("COUNT(DISTINCT pe.profile_id) AS profiles").
+		ColumnExpr("COUNT(DISTINCT pf.owner_id) AS owners").
+		Where("pe.source_kind = ? AND pe.bundle_id = ?", string(ProfileSourceBundle), bundleID).
+		Scan(ctx, &row)
+	if err != nil {
+		return 0, 0, err
+	}
+	return row.Profiles, row.Owners, nil
+}
+
+// CountBundleVersionRefs returns the number of distinct profiles, and the number of distinct
+// owners of those profiles, that contain a bundle_ref entry pinned to versionID. Zero refs
+// returns (0, 0, nil) — never an error.
+func (r *profileRepo) CountBundleVersionRefs(ctx context.Context, versionID string) (int, int, error) {
+	var row struct {
+		Profiles int `bun:"profiles"`
+		Owners   int `bun:"owners"`
+	}
+	err := r.db.NewSelect().
+		TableExpr("profile_entries AS pe").
+		Join("JOIN profiles AS pf ON pf.profile_id = pe.profile_id").
+		ColumnExpr("COUNT(DISTINCT pe.profile_id) AS profiles").
+		ColumnExpr("COUNT(DISTINCT pf.owner_id) AS owners").
+		Where("pe.source_kind = ? AND pe.version_id = ?", string(ProfileSourceBundle), versionID).
+		Scan(ctx, &row)
+	if err != nil {
+		return 0, 0, err
+	}
+	return row.Profiles, row.Owners, nil
+}
+
 // casUpdate is a convenience wrapper around casUpdateDB using r.db.
 func (r *profileRepo) casUpdate(ctx context.Context, profileID string, expectedVersion uint64, now int64, extra func(*bun.UpdateQuery) *bun.UpdateQuery) (uint64, error) {
 	return casUpdateDB(ctx, r.db, profileID, expectedVersion, now, extra)
