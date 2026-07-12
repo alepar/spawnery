@@ -329,15 +329,15 @@ sudo cp -rf "$PAYLOAD"/config/* /etc/spawnery/config/ 2>/dev/null || true
 [ -d "$PAYLOAD/examples" ] && sudo cp -rf "$PAYLOAD/examples" /opt/spawnery/
 [ -d "$PAYLOAD/web-dist" ] && sudo rsync -a "$PAYLOAD/web-dist/" /var/www/spawnery/
 
-# ---- PKI: throwaway CA + AS session key + node/CP mTLS + the *.e2e.test wildcard cert ----
+# ---- PKI: throwaway CA + certified auth signers + service/node mTLS + wildcard cert ----
 log "generating throwaway PKI + wildcard cert…"
 sudo mkdir -p /etc/spawnery/pki
-sudo bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"   # writes root.pem/ca.crt, session-key/pub, node/cp certs, wildcard.{crt,key}
+sudo bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"
 sudo chmod 644 /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key   # caddy runs as user 'caddy'
 sudo cp /etc/spawnery/pki/ca.crt /home/build/ca.crt   # build-base.sh pulls this out for host trust
 sudo install -d -m0700 /etc/spawnery/authsvc /etc/spawnery/cp \
   /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations \
-  /var/lib/spawnlet/certificate-revocations
+  /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations
 sudo cp -rf /etc/spawnery/pki/authsvc/. /etc/spawnery/authsvc/
 sudo cp -rf /etc/spawnery/pki/cp/. /etc/spawnery/cp/
 sudo chmod 0600 /etc/spawnery/authsvc/* /etc/spawnery/cp/*
