@@ -81,6 +81,22 @@ type ManagerConfig struct {
 	// cmd/spawnlet from GITHUB_STATIC_TOKEN. Production leaves this nil.
 	GitHubStaticCredentials storage.GitHubCredentialProvider
 
+	// SidecarCABundleFile, when set, is a HOST path to a merged CA bundle (system roots + an extra
+	// trusted CA) bind-mounted read-only into the SIDECAR container (at SidecarCABundleMountPath),
+	// with SSL_CERT_FILE (SidecarCABundleFileEnv) pointed at the mounted copy. Go's
+	// x509.SystemCertPool honours SSL_CERT_FILE — but it REPLACES rather than appends, so the file
+	// at this path must already be a merge (system roots + the extra CA), not the extra CA alone,
+	// or the sidecar loses its real roots.
+	//
+	// DEV/TEST-ONLY (sp-wwtc.3): this is how the e2e-vm profile lets the sidecar's STRICT upstream
+	// transport (newDefaultUpstreamTransport — InsecureSkipVerify stays off, unmodified) verify the
+	// VM's golden CA when it MITMs github.com (fronting Gitea over real TLS) — without weakening
+	// upstream verification and without baking a test CA into the production sidecar image (the
+	// bundle lives on the node host and is only mounted when this is set). Empty (default): no
+	// mount, no env override — the sidecar image's own system roots are used untouched. Set by
+	// cmd/spawnlet from SIDECAR_CA_BUNDLE_FILE.
+	SidecarCABundleFile string
+
 	NodeID           string // this node's id (stamped on container labels for reconcile); "" standalone
 	NodeClass        string // "cloud" (always enforces) or "self-hosted" (honors EgressEnforce)
 	EgressEnforce    bool   // self-hosted opt-out switch; ignored on cloud
@@ -1386,6 +1402,19 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		"SIDECAR_CONTROL_ADDR=" + controlAddr,
 	}
 	sidecarEnv = append(sidecarEnv, sidecarControlEnv...)
+
+	// Sidecar upstream CA trust override (sp-wwtc.3): DEV/TEST-ONLY, see ManagerConfig doc. Mount
+	// the containing directory (never the file's original host directory verbatim — that may hold
+	// unrelated/sensitive siblings) read-only, and point SSL_CERT_FILE at the mounted copy.
+	if m.cfg.SidecarCABundleFile != "" {
+		bundleName := filepath.Base(m.cfg.SidecarCABundleFile)
+		sidecarControlMnts = append(sidecarControlMnts, runtime.Mount{
+			HostPath:      filepath.Dir(m.cfg.SidecarCABundleFile),
+			ContainerPath: SidecarCABundleMountPath,
+			ReadOnly:      true,
+		})
+		sidecarEnv = append(sidecarEnv, SidecarCABundleFileEnv+"="+SidecarCABundleMountPath+"/"+bundleName)
+	}
 	h, err := m.pod.StartPod(ctx, runtime.PodSpec{
 		ID:            id,
 		SidecarImage:  m.cfg.SidecarImage,

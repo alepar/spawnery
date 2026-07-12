@@ -24,6 +24,11 @@ type Spawnlet struct {
 	ASURL            string        `koanf:"as_url"`
 	EnrollToken      config.Secret `koanf:"enroll_token"`
 	PodDNS           []string      `koanf:"pod_dns"`
+	// SidecarCABundleFile is a DEV/TEST-ONLY knob (sp-wwtc.3): a host path to a merged CA bundle
+	// (system roots + an extra trusted CA) bind-mounted into the sidecar with SSL_CERT_FILE pointed
+	// at it. See spawnlet.ManagerConfig.SidecarCABundleFile for the full rationale. Empty (default,
+	// production) = no mount, no override.
+	SidecarCABundleFile string `koanf:"sidecar_ca_bundle_file"`
 
 	Node struct {
 		ID              string `koanf:"id"`
@@ -112,6 +117,7 @@ var spawnletEnvAliases = map[string]string{
 	"AS_URL":                        "as_url",
 	"ENROLL_TOKEN":                  "enroll_token",
 	"POD_DNS":                       "pod_dns",
+	"SIDECAR_CA_BUNDLE_FILE":        "sidecar_ca_bundle_file",
 	"NODE_ID":                       "node.id",
 	"NODE_CLASS":                    "node.class",
 	"NODE_OWNER":                    "node.owner",

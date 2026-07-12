@@ -33,7 +33,7 @@ log(){ printf '\033[36m[provision]\033[0m %s\n' "$*"; }
 
 log "installing base packages…"
 sudo dnf -y install curl tar iptables-legacy postgresql-server postgresql caddy chrony \
-  qemu-guest-agent cloud-init rsync jq openssl containernetworking-plugins git || true
+  qemu-guest-agent cloud-init rsync jq openssl containernetworking-plugins git dnsmasq || true
 sudo systemctl enable --now chronyd qemu-guest-agent
 
 # ---- containerd (pinned) ----
@@ -250,7 +250,10 @@ PROTOCOL = http
 HTTP_ADDR = 127.0.0.1
 HTTP_PORT = ${GITEA_PORT}
 DOMAIN = 127.0.0.1
-ROOT_URL = http://127.0.0.1:${GITEA_PORT}/
+# github.com, not the loopback: sp-wwtc.1 fronts Gitea with a github.com-SAN cert (Caddy
+# reverse-proxies it), so Gitea's OWN generated URLs (clone_url, etc.) must say github.com too —
+# Gitea itself stays plain HTTP on loopback and never learns TLS; Caddy is what terminates it.
+ROOT_URL = https://github.com/
 DISABLE_SSH = true
 OFFLINE_MODE = true
 [database]
@@ -287,6 +290,15 @@ EOF
 # per-boot bootstrap: create the admin (idempotent), mint a fresh access token + seed repo, and write
 # the node github-override env fragment. The token name is unique per boot to avoid a name clash on
 # reboot; the fragment is what wires GITHUB_STATIC_TOKEN etc. into the node unit below.
+#
+# sp-wwtc.4: the SAME token is ALSO published as AS_FAKE_GITHUB_TOKEN, consumed by authsvc (below).
+# The sidecar's GitHub MITM proxy injects `Authorization: Basic base64("x-access-token:"+token)` at
+# github.com using whatever token the AS's fake-GitHub OAuth flow hands out — a real, non-optional
+# production code path, not a stub to bypass — so for Gitea to actually ACCEPT that injected
+# credential, the fake's minted token has to equal a Gitea PAT Gitea will accept. Gitea mints its PAT
+# itself and won't let a caller choose its value, so the token has to flow gitea -> AS, not the other
+# way: this bootstrap mints the real Gitea PAT first, and authsvc's AS_FAKE_GITHUB_TOKEN (below) makes
+# the fake hand back that SAME string.
 sudo tee /usr/local/bin/spawnery-gitea-bootstrap.sh >/dev/null <<BOOT
 #!/usr/bin/env bash
 set -euo pipefail
@@ -305,6 +317,7 @@ GITHUB_API_BASE_URL=http://127.0.0.1:\$PORT/api/v1
 GITHUB_HOST=127.0.0.1:\$PORT
 GITHUB_ALLOW_INSECURE_HOST=1
 GITHUB_STATIC_TOKEN=\$TOKEN
+AS_FAKE_GITHUB_TOKEN=\$TOKEN
 ENV
 BOOT
 sudo chmod 0755 /usr/local/bin/spawnery-gitea-bootstrap.sh
@@ -329,19 +342,39 @@ sudo cp -rf "$PAYLOAD"/config/* /etc/spawnery/config/ 2>/dev/null || true
 [ -d "$PAYLOAD/examples" ] && sudo cp -rf "$PAYLOAD/examples" /opt/spawnery/
 [ -d "$PAYLOAD/web-dist" ] && sudo rsync -a "$PAYLOAD/web-dist/" /var/www/spawnery/
 
-# ---- PKI: throwaway CA + AS session key + node/CP mTLS + the *.e2e.test wildcard cert ----
+# ---- PKI: throwaway CA + AS session key + node/CP mTLS + the *.e2e.test wildcard cert + the
+#      github.com/codeload.github.com cert (sp-wwtc.1) ----
 log "generating throwaway PKI + wildcard cert…"
 sudo mkdir -p /etc/spawnery/pki
-sudo bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"   # writes root.pem/ca.crt, session-key/pub, node/cp certs, wildcard.{crt,key}
+sudo bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"   # writes root.pem/ca.crt, session-key/pub, node/cp certs, wildcard.{crt,key}, github.{crt,key}
 sudo chmod 644 /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key   # caddy runs as user 'caddy'
+sudo chmod 644 /etc/spawnery/pki/github.crt /etc/spawnery/pki/github.key      # caddy runs as user 'caddy'
 sudo cp /etc/spawnery/pki/ca.crt /home/build/ca.crt   # build-base.sh pulls this out for host trust
+
+# ---- sidecar upstream CA trust bundle (sp-wwtc.3): system roots + the golden CA, MERGED (SSL_CERT_FILE
+# REPLACES rather than appends — see cmd/spawnlet SIDECAR_CA_BUNDLE_FILE doc), in its OWN directory
+# (never /etc/spawnery/pki itself — that dir also holds host PKI private keys, and this bundle is
+# bind-mounted into the sidecar container; internal/spawnlet.SidecarCABundleMountPath). e2e/VM profile
+# ONLY (profile.fake.env); the production sidecar image never sees this file. ----
+log "building sidecar upstream CA trust bundle (system roots + golden CA)…"
+sudo mkdir -p /etc/spawnery/sidecar-ca-bundle
+SYS_CA_BUNDLE=""
+for p in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem; do
+  [ -f "$p" ] && SYS_CA_BUNDLE="$p" && break
+done
+[ -n "$SYS_CA_BUNDLE" ] || { echo "ERR: no system CA bundle found (tried the usual Fedora/Debian paths) for the sidecar trust merge" >&2; exit 1; }
+sudo bash -c "cat '$SYS_CA_BUNDLE' /etc/spawnery/pki/root.pem > /etc/spawnery/sidecar-ca-bundle/ca-bundle.crt"
+sudo chmod 644 /etc/spawnery/sidecar-ca-bundle/ca-bundle.crt
 
 # ---- cp.prod.yaml: patch the ${sops:} store DSN to the throwaway local Postgres (baseline; roll.sh
 #      re-applies this after every config re-copy, since a fresh config/ ships the sops ref again) ----
 sudo sed -i 's#\${sops:store.dsn}#postgres://spawnery:spawnery@127.0.0.1:5432/spawnery?sslmode=disable#' \
   /etc/spawnery/config/cp.prod.yaml || true
 
-# ---- Caddy: TLS :443 wildcard cert, route to web/CP/AS ----
+# ---- Caddy: TLS :443 wildcard cert, route to web/CP/AS; a HOST-MATCHED site block for
+#      github.com/codeload.github.com (sp-wwtc.1) fronts Gitea over real TLS so the sidecar's GitHub
+#      MITM proxy intercepts it exactly as it does in production. Gitea itself stays plain HTTP on
+#      loopback (127.0.0.1:3000) — this reverse_proxy is what terminates TLS for it. ----
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 :443 {
   tls /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key
@@ -351,6 +384,11 @@ sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
   reverse_proxy @as 127.0.0.1:8090
   root * /var/www/spawnery
   file_server
+}
+
+github.com, codeload.github.com {
+  tls /etc/spawnery/pki/github.crt /etc/spawnery/pki/github.key
+  reverse_proxy 127.0.0.1:3000
 }
 EOF
 sudo systemctl enable caddy
@@ -364,6 +402,38 @@ log "installing env templates + per-boot render unit…"
 sudo mkdir -p /etc/spawnery/env.d /var/lib/spawnery /var/www/spawnery /var/lib/spawnlet
 sudo cp -f "$PAYLOAD"/env/common.env /etc/spawnery/env.d/common.env.tmpl
 for p in "$PAYLOAD"/env/profile.*.env; do [ -f "$p" ] && sudo cp -f "$p" "/etc/spawnery/env.d/$(basename "$p").tmpl"; done
+
+# ---- github.com DNS, from inside the pod netns (sp-wwtc.2) ----
+# The CNI bridge/host-local IPAM combo (the "spawnery" conflist above) assigns the bridge's gateway
+# address deterministically as POD_CIDR's first host address (host-local's default when no explicit
+# "gateway" is set: network address + 1) — e.g. 10.234.0.1 for the default 10.234.0.0/16. That address
+# is on THIS host (the VM), reachable from every pod via its default route, and is what Caddy's :443
+# already listens on (Caddy binds all interfaces) — so it doubles as "the VM's IP" for in-pod DNS.
+GITHUB_DNS_ADDR="$(printf '%s' "$POD_CIDR" | cut -d/ -f1 | awk -F. '{print $1"."$2"."$3".1"}')"
+log "installing dnsmasq (github.com/codeload.github.com -> ${GITHUB_DNS_ADDR}, else forward to ${POD_DNS})…"
+sudo mkdir -p /etc/dnsmasq.d
+sudo tee /etc/dnsmasq.d/spawnery-github.conf >/dev/null <<EOF
+# Answers ONLY github.com/codeload.github.com (exact names, no subdomain matching — host-record is
+# exact-match, unlike address=/domain/) with the VM's address; everything else is forwarded to the
+# same public resolvers POD_DNS used before this bead (no-resolv: never fall back to the host's own
+# /etc/resolv.conf / systemd-resolved stub).
+port=53
+bind-dynamic
+interface=spawnery-cni0
+no-resolv
+no-hosts
+host-record=github.com,${GITHUB_DNS_ADDR}
+host-record=codeload.github.com,${GITHUB_DNS_ADDR}
+$(printf '%s' "$POD_DNS" | tr ',' '\n' | sed 's/^/server=/')
+EOF
+sudo systemctl enable dnsmasq
+
+# Point the node's PodSpec.DNSServers (internal/runtime/cri/backend.go) at dnsmasq instead of the
+# public resolvers directly, so github.com/codeload.github.com resolve in-pod without touching
+# anything else's resolution (dnsmasq forwards everything else to the SAME POD_DNS servers). The
+# template was just installed above (common.env.tmpl), so patch it in place; the per-boot render
+# (spawnery-render-env.sh) copies this value through verbatim like every other non-@@…@@ line.
+sudo sed -i "s#^POD_DNS=.*#POD_DNS=${GITHUB_DNS_ADDR}#" /etc/spawnery/env.d/common.env.tmpl
 
 sudo tee /usr/local/bin/spawnery-render-env.sh >/dev/null <<'RENDER_EOF'
 #!/usr/bin/env bash
@@ -398,11 +468,16 @@ log "writing spawnery systemd units…"
 sudo tee /etc/systemd/system/spawnery-authsvc.service >/dev/null <<'EOF'
 [Unit]
 Description=spawnery auth service
-After=spawnery-render-env.service postgresql.service network-online.target
+After=spawnery-render-env.service postgresql.service network-online.target spawnery-gitea-bootstrap.service
 Requires=spawnery-render-env.service
+# Gitea is a test-only git host: order after its bootstrap and consume its AS_FAKE_GITHUB_TOKEN
+# fragment (sp-wwtc.4) via the optional EnvironmentFile below, but Wants= not Requires= so a Gitea
+# failure degrades to AS's normal random-token fake GitHub rather than blocking AS entirely.
+Wants=spawnery-gitea-bootstrap.service
 [Service]
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
+EnvironmentFile=-/etc/spawnery/env.d/gitea.env
 WorkingDirectory=/opt/spawnery
 ExecStart=/usr/local/bin/authsvc
 Restart=on-failure

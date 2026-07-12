@@ -19,6 +19,10 @@
 //	                        is set.
 //	AS_FAKE_GITHUB_USERS    Comma-separated seed users for the fake's login_hint selection: "login[:id],...".
 //	                        The id derives (githubfake.DeriveUserID) when omitted. First entry is the default user.
+//	AS_FAKE_GITHUB_TOKEN    DEV/TEST-ONLY: makes the fake issue this EXACT string as every minted access token
+//	                        instead of a random one (githubfake.Options.FixedToken). The e2e-vm lane (sp-wwtc.4)
+//	                        sets this to a pre-minted Gitea PAT so the sidecar's GitHub MITM credential
+//	                        injection lands a token Gitea actually accepts. Empty (default): random tokens.
 //
 //	CA / PKI material (required unless AS_DEV=1):
 //	  AS_ROOT_CA_PEM                 Path to Root CA cert PEM (default: /etc/spawnery/as/root-ca.pem)
@@ -243,9 +247,10 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 			return nil, fmt.Errorf("authsvc: %w", err)
 		}
 		fake := githubfake.NewWithOptions(githubfake.Options{
-			Addr:    cfg.FakeGitHubAddr,
-			BaseURL: cfg.FakeGitHubBaseURL,
-			Users:   seedUsers,
+			Addr:       cfg.FakeGitHubAddr,
+			BaseURL:    cfg.FakeGitHubBaseURL,
+			Users:      seedUsers,
+			FixedToken: cfg.FakeGitHubToken,
 		})
 		if cfg.FakeGitHubAddr != "" {
 			log.Printf("authsvc: using in-process fake GitHub (dev/CI only), reachable at %s", fake.URL())

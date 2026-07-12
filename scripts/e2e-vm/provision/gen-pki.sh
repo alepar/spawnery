@@ -35,5 +35,27 @@ EOF
 openssl req -newkey rsa:2048 -nodes -keyout wildcard.key -out wildcard.csr -config wildcard.cnf 2>/dev/null
 openssl x509 -req -in wildcard.csr -CA root.pem -CAkey root-key.pem -CAcreateserial \
   -out wildcard.crt -days 3650 -extensions v3 -extfile wildcard.cnf 2>/dev/null
+
+# 3. github.com + codeload.github.com cert for Caddy (sp-wwtc.1): fronts Gitea as a REAL github.com
+# so the sidecar's GitHub MITM proxy (internal/sidecar/githubhost.go — exact-match "github.com" /
+# "codeload.github.com") intercepts it exactly as it does in production. Signed by the SAME root CA
+# as the wildcard, so the one CA in host trust (and the sidecar's merged SSL_CERT_FILE bundle,
+# sp-wwtc.3) validates everything. codeload.github.com is mapped too even though plain git
+# smart-HTTP only needs github.com — it's one extra SAN, and a surprise failure there would be
+# baffling to debug (design §4.2).
+cat > github.cnf <<EOF
+[req]
+distinguished_name=dn
+req_extensions=v3
+prompt=no
+[dn]
+CN=github.com
+[v3]
+subjectAltName=DNS:github.com,DNS:codeload.github.com
+EOF
+openssl req -newkey rsa:2048 -nodes -keyout github.key -out github.csr -config github.cnf 2>/dev/null
+openssl x509 -req -in github.csr -CA root.pem -CAkey root-key.pem -CAcreateserial \
+  -out github.crt -days 3650 -extensions v3 -extfile github.cnf 2>/dev/null
+
 chmod 600 ./*key* 2>/dev/null || true
-echo "PKI written to $PKI (root.pem/ca.crt = host-trust anchor; wildcard.{crt,key} = Caddy TLS for *.$DOMAIN)"
+echo "PKI written to $PKI (root.pem/ca.crt = host-trust anchor; wildcard.{crt,key} = Caddy TLS for *.$DOMAIN; github.{crt,key} = Caddy TLS for github.com/codeload.github.com)"

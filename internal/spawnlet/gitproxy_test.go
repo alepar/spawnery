@@ -337,6 +337,83 @@ func TestManagerAgentProxyEnv(t *testing.T) {
 	}
 }
 
+// TestManagerSidecarCABundleEnv pins the sp-wwtc.3 wiring: when ManagerConfig.SidecarCABundleFile
+// is set, the sidecar gets a read-only mount of the bundle's containing directory at
+// SidecarCABundleMountPath AND an SSL_CERT_FILE env var pointing at the mounted copy.
+func TestManagerSidecarCABundleEnv(t *testing.T) {
+	fb := fakeBackend(t)
+	overrideSidecarReadyProbe(t, nil)
+
+	bundleDir := t.TempDir()
+	bundlePath := filepath.Join(bundleDir, "ca-bundle.crt")
+	if err := os.WriteFile(bundlePath, []byte("fake-merged-bundle"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage:          "a",
+		SidecarImage:        "s",
+		DataRoot:            t.TempDir(),
+		UsernsMode:          "remap",
+		SidecarPort:         8080,
+		SidecarCABundleFile: bundlePath,
+	})
+
+	if _, err := m.Create(context.Background(), "sp-ca-bundle", writeApp(t), "model", "", "", 0); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	wantEnv := SidecarCABundleMountPath + "/ca-bundle.crt"
+	got := sidecarEnvVal(fb.PodSpec("sp-ca-bundle").SidecarEnv, SidecarCABundleFileEnv)
+	if got != wantEnv {
+		t.Errorf("%s in sidecar env = %q, want %q", SidecarCABundleFileEnv, got, wantEnv)
+	}
+
+	var found bool
+	for _, mn := range fb.PodSpec("sp-ca-bundle").SidecarMounts {
+		if mn.ContainerPath == SidecarCABundleMountPath {
+			found = true
+			if mn.HostPath != bundleDir {
+				t.Errorf("mount HostPath = %q, want %q", mn.HostPath, bundleDir)
+			}
+			if !mn.ReadOnly {
+				t.Error("sidecar CA bundle mount must be ReadOnly")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no SidecarMount with ContainerPath=%s; mounts=%v", SidecarCABundleMountPath, fb.PodSpec("sp-ca-bundle").SidecarMounts)
+	}
+}
+
+// TestManagerSidecarCABundleEnvAbsentByDefault pins the production default: an empty
+// SidecarCABundleFile means no mount and no SSL_CERT_FILE override at all.
+func TestManagerSidecarCABundleEnvAbsentByDefault(t *testing.T) {
+	fb := fakeBackend(t)
+	overrideSidecarReadyProbe(t, nil)
+
+	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
+		AgentImage:   "a",
+		SidecarImage: "s",
+		DataRoot:     t.TempDir(),
+		UsernsMode:   "remap",
+		SidecarPort:  8080,
+	})
+
+	if _, err := m.Create(context.Background(), "sp-no-ca-bundle", writeApp(t), "model", "", "", 0); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if got := sidecarEnvVal(fb.PodSpec("sp-no-ca-bundle").SidecarEnv, SidecarCABundleFileEnv); got != "" {
+		t.Errorf("%s must be absent by default; got %q", SidecarCABundleFileEnv, got)
+	}
+	for _, mn := range fb.PodSpec("sp-no-ca-bundle").SidecarMounts {
+		if mn.ContainerPath == SidecarCABundleMountPath {
+			t.Fatalf("unexpected sidecar CA bundle mount by default: %v", mn)
+		}
+	}
+}
+
 func TestManagerReadinessCalled(t *testing.T) {
 	fb := fakeBackend(t)
 	mock := &mockGitHubControlServer{}

@@ -24,6 +24,13 @@ type AS struct {
 	FakeGitHubAddr    string `koanf:"fake_github_addr"`     // bind addr for reachable mode, e.g. "0.0.0.0:9099"
 	FakeGitHubBaseURL string `koanf:"fake_github_base_url"` // advertised base URL; required when Addr is set
 	FakeGitHubUsers   string `koanf:"fake_github_users"`    // "alice:2000001,bob" or "alice,bob" (id derived when omitted)
+	// FakeGitHubToken, when set, makes the fake issue this EXACT string as every minted access
+	// token instead of a random one (githubfake.Options.FixedToken). DEV/TEST-ONLY: the e2e-vm
+	// lane (sp-wwtc.4) sets this to a Gitea PAT it minted at provision time, so the sidecar's
+	// GitHub MITM proxy injection (Authorization: Basic base64("x-access-token:"+token)) — the real,
+	// non-optional production injection path — lands a credential Gitea actually accepts. Empty
+	// (the default) preserves the historical random-token behavior everywhere else.
+	FakeGitHubToken string `koanf:"fake_github_token"`
 
 	CA struct {
 		RootPEM          string `koanf:"root_pem"`
@@ -138,6 +145,7 @@ var asEnvAliases = map[string]string{
 	"AS_FAKE_GITHUB_ADDR":            "fake_github_addr",
 	"AS_FAKE_GITHUB_BASE_URL":        "fake_github_base_url",
 	"AS_FAKE_GITHUB_USERS":           "fake_github_users",
+	"AS_FAKE_GITHUB_TOKEN":           "fake_github_token",
 	"AS_LISTEN":                      "listen",
 	"AS_ALLOWED_ORIGINS":             "allowed_origins",
 	"AS_ROOT_CA_PEM":                 "ca.root_pem",

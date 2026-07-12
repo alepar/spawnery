@@ -34,3 +34,16 @@ const SidecarGetTokenBearerEnv = "SIDECAR_GETTOKEN_BEARER"
 // for the WRONG (empty) spawn — the CA the proxy presents won't match the agent's trusted git-env CA
 // ("certificate signer not trusted") and token resolution fails. MUST be injected for github spawns.
 const SidecarSpawnIDEnv = "SIDECAR_SPAWN_ID"
+
+// SidecarCABundleMountPath is the container DIRECTORY where a node-provided merged CA bundle (system
+// roots + an extra trusted CA) is bind-mounted into the SIDECAR, read-only, when
+// ManagerConfig.SidecarCABundleFile is set (sp-wwtc.3). It is its OWN directory — never
+// /etc/spawnery/pki, which also holds host PKI private keys the sidecar must never see.
+const SidecarCABundleMountPath = "/run/spawnery/sidecar-ca-bundle"
+
+// SidecarCABundleFileEnv is the sidecar env var pointing Go's x509.SystemCertPool at the merged CA
+// bundle (SSL_CERT_FILE REPLACES the pool rather than appending — the mounted file must already be a
+// system-roots+extra-CA merge, not the extra CA alone). Only injected when
+// ManagerConfig.SidecarCABundleFile is set; empty/unset leaves the sidecar's own image system roots
+// untouched (the production default — see ManagerConfig.SidecarCABundleFile).
+const SidecarCABundleFileEnv = "SSL_CERT_FILE"
