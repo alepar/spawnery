@@ -18,8 +18,9 @@
 //   - AgentSpec.Cmd maps to CRI `Command`, which overrides the image ENTRYPOINT (the Docker lane's maps
 //     to Config.Cmd, which overrides CMD and keeps ENTRYPOINT). This arm drives Cmd=nil, so both lanes
 //     fall through to the image's own entrypoint and the divergence is not exercised.
-//   - ListManaged reports SandboxID only (no per-container ids); Docker reports SidecarID+AgentID. The
-//     contract asserts "at least one id is set" for exactly this reason.
+//   - ListManaged reports SidecarID+AgentID+PodIP on both lanes (sp-2tx8.3.1); CRI additionally reports
+//     SandboxID, which Docker has no analogue for and leaves empty. The contract asserts the ids and the
+//     IP round-trip; SandboxID is not asserted.
 //   - The zero-layer guard is NOT a layer count here: CaptureDeltaAs rejects a capture whose delta layer
 //     is empty (deltaSize <= 0) and releases the half-made image. ArmZeroLayerCapture below forces that
 //     condition through the deltaEngine seam.

@@ -110,7 +110,7 @@ func (b *CRIPodBackend) StartPod(ctx context.Context, spec runtime.PodSpec) (*ru
 		Metadata: &runtimeapi.ContainerMetadata{Name: "sidecar"},
 		Image:    &runtimeapi.ImageSpec{Image: spec.SidecarImage},
 		Envs:     toKeyValues(spec.SidecarEnv),
-		Labels:   spec.Labels,
+		Labels:   runtime.WithRole(spec.Labels, runtime.RoleSidecar),
 		Linux:    linuxContainer(spec.Resources, runtime.CapDefaultSet),
 	})
 	if err != nil {
@@ -317,7 +317,7 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 			"TMUX_TMPDIR=/dev/shm",
 		}, spec.Env...)),
 		Mounts: toCRIMounts(spec.Mounts),
-		Labels: spec.Labels,
+		Labels: runtime.WithRole(spec.Labels, runtime.RoleAgent),
 		Linux:  lc,
 	})
 	if err != nil {
@@ -369,8 +369,14 @@ func (b *CRIPodBackend) Attach(ctx context.Context, h *runtime.PodHandle) (*runt
 	return runtime.AttachTCP(ctx, net.JoinHostPort(h.PodIP, strconv.Itoa(acpPort)))
 }
 
-// ListManaged returns every spawnery-managed pod sandbox (by label), so the Manager can reap
-// orphans and reconcile. Reaping a CRI pod is RemovePodSandbox(SandboxID) (removes its containers).
+// ListManaged returns every spawnery-managed pod sandbox (by label) WITH the ids and the pod IP a
+// restarted node needs to re-adopt it: the sidecar id, the agent id, the sandbox id and the pod IP
+// (SE3 design §4.5). Listing sandboxes alone is not enough — the Manager cannot name, capture, pause,
+// tear down or re-floor a pod it only knows a sandbox id for.
+//
+// A CRI API error is returned, NOT swallowed: reconcile treats "cannot rebuild" as reap-with-capture,
+// so a transient CRI blip must never be laundered into a destructive decision. An empty pod IP from a
+// SUCCESSFUL status (a NOT_READY sandbox) is information, and is reported as such.
 func (b *CRIPodBackend) ListManaged(ctx context.Context) ([]runtime.ManagedPod, error) {
 	resp, err := b.c.runtime.ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{
 		Filter: &runtimeapi.PodSandboxFilter{LabelSelector: map[string]string{runtime.LabelManaged: "true"}},
@@ -386,9 +392,82 @@ func (b *CRIPodBackend) ListManaged(ctx context.Context) ([]runtime.ManagedPod, 
 			continue
 		}
 		gen, _ := strconv.ParseUint(l[runtime.LabelGeneration], 10, 64)
-		out = append(out, runtime.ManagedPod{SpawnID: sid, Generation: gen, NodeID: l[runtime.LabelNodeID], SandboxID: sb.GetId()})
+		mp := runtime.ManagedPod{
+			SpawnID:    sid,
+			Generation: gen,
+			NodeID:     l[runtime.LabelNodeID],
+			SandboxID:  sb.GetId(),
+		}
+		if err := b.fillContainers(ctx, &mp); err != nil {
+			return nil, fmt.Errorf("list containers of sandbox %s (spawn %s): %w", mp.SandboxID, sid, err)
+		}
+		st, err := b.c.runtime.PodSandboxStatus(ctx, &runtimeapi.PodSandboxStatusRequest{PodSandboxId: mp.SandboxID})
+		if err != nil {
+			return nil, fmt.Errorf("pod sandbox status %s (spawn %s): %w", mp.SandboxID, sid, err)
+		}
+		mp.PodIP = st.GetStatus().GetNetwork().GetIp()
+		out = append(out, mp)
 	}
 	return out, nil
+}
+
+// fillContainers sets mp.SidecarID/AgentID from the sandbox's containers.
+func (b *CRIPodBackend) fillContainers(ctx context.Context, mp *runtime.ManagedPod) error {
+	resp, err := b.c.runtime.ListContainers(ctx, &runtimeapi.ListContainersRequest{
+		Filter: &runtimeapi.ContainerFilter{PodSandboxId: mp.SandboxID},
+	})
+	if err != nil {
+		return err
+	}
+	var sidecar, agent *runtimeapi.Container
+	for _, c := range resp.GetContainers() {
+		switch containerRole(c) {
+		case runtime.RoleSidecar:
+			sidecar = preferred(sidecar, c)
+		case runtime.RoleAgent:
+			agent = preferred(agent, c)
+		}
+	}
+	if sidecar != nil {
+		mp.SidecarID = sidecar.GetId()
+	}
+	if agent != nil {
+		mp.AgentID = agent.GetId()
+	}
+	return nil
+}
+
+// containerRole resolves a CRI container's role from the spawnery.role label, falling back to its CRI
+// Metadata.Name. The fallback is load-bearing for re-adoption: the pods that survive a node UPGRADE were
+// created by the previous binary, which did not stamp the role label — those are exactly the pods this
+// exists to save. StartPod/StartAgent have always named the containers "sidecar"/"agent".
+func containerRole(c *runtimeapi.Container) string {
+	if r := c.GetLabels()[runtime.LabelRole]; r != "" {
+		return r
+	}
+	return c.GetMetadata().GetName()
+}
+
+// preferred picks the container a pod should be ADDRESSED by for a role: a RUNNING one beats a
+// non-running one, and between two equally-running ones the newer wins. A sandbox can legitimately hold
+// a crashed predecessor containerd has not GC'd — re-adopting THAT id would pause/capture/tear down a
+// dead container and leave the live one unmanaged.
+func preferred(cur, cand *runtimeapi.Container) *runtimeapi.Container {
+	if cur == nil {
+		return cand
+	}
+	curRunning := cur.GetState() == runtimeapi.ContainerState_CONTAINER_RUNNING
+	candRunning := cand.GetState() == runtimeapi.ContainerState_CONTAINER_RUNNING
+	if curRunning != candRunning {
+		if candRunning {
+			return cand
+		}
+		return cur
+	}
+	if cand.GetCreatedAt() > cur.GetCreatedAt() {
+		return cand
+	}
+	return cur
 }
 
 var _ runtime.PodBackend = (*CRIPodBackend)(nil)

@@ -12,8 +12,28 @@ const (
 	LabelSpawnID    = "spawnery.spawn-id"   // the spawn id
 	LabelGeneration = "spawnery.generation" // the spawn's generation (decimal uint64), for fencing
 	LabelNodeID     = "spawnery.node-id"    // the node that created it
-	LabelRole       = "spawnery.role"       // "sidecar" | "agent" (Docker lane: groups the pod's containers)
+	LabelRole       = "spawnery.role"       // "sidecar" | "agent" (both lanes: groups a pod's containers)
 )
+
+// Container roles, stamped into LabelRole on both lanes so a pod's containers are distinguishable
+// when a restarted node reconciles what it finds (the CRI sandbox's containers, the Docker pod's
+// containers). Pods created before the CRI lane stamped this label are resolved by their CRI
+// container Metadata.Name, which uses these same two strings.
+const (
+	RoleSidecar = "sidecar"
+	RoleAgent   = "agent"
+)
+
+// WithRole returns a copy of base with the spawnery.role label set (so a pod's sidecar and agent are
+// distinguishable when reconciling). nil base => a labels map with just the role.
+func WithRole(base map[string]string, role string) map[string]string {
+	out := make(map[string]string, len(base)+1)
+	for k, v := range base {
+		out[k] = v
+	}
+	out[LabelRole] = role
+	return out
+}
 
 // Resources are the per-container cgroup limits applied to both pod containers.
 type Resources struct {
@@ -52,15 +72,24 @@ type AgentSpec struct {
 	Labels      map[string]string // applied to the agent container
 }
 
-// ManagedPod is one spawnery-managed pod the backend currently sees running (from its labels), used
-// for orphan reconciliation. SpawnID/Generation come from the labels; the *ID fields drive teardown.
+// ManagedPod is one spawnery-managed pod the backend currently sees running (from its labels). The
+// Manager reaps orphans, fences stale generations AND re-adopts survivors from this — so it must carry
+// everything needed to rebuild a PodHandle: the container ids to address, and the pod IP the egress
+// floor is scoped to and the ACP re-dial targets (SE3 design §4.5).
+//
+// SpawnID/Generation/NodeID come from the labels. BOTH lanes populate SidecarID, AgentID and PodIP;
+// SandboxID is CRI-only (the Docker lane has no sandbox and leaves it empty). AgentID is empty for a
+// pod whose agent was never started (StartPod succeeded, StartAgent did not) — that is a pod to reap,
+// not to adopt. PodIP is empty when the pod has no network (a stopped Docker pod, a NOT_READY CRI
+// sandbox).
 type ManagedPod struct {
 	SpawnID    string
 	Generation uint64
 	NodeID     string
-	SidecarID  string // Docker backend
-	AgentID    string // Docker backend
-	SandboxID  string // CRI backend
+	SidecarID  string // both lanes
+	AgentID    string // both lanes ("" if the agent was never started)
+	SandboxID  string // CRI lane only
+	PodIP      string // both lanes ("" when the pod has no network)
 }
 
 // PodHandle identifies a running pod. PodIP (for the egress floor) and NetnsPath (for the ACP
@@ -90,8 +119,10 @@ type PodBackend interface {
 	// Attach returns the agent's ACP stdio stream. Docker backend = Docker stdio attach (no root);
 	// CRI backend = the in-pod UDS via AttachACP (Linux + CAP_SYS_ADMIN).
 	Attach(ctx context.Context, h *PodHandle) (*AttachedStream, error)
-	// ListManaged returns every spawnery-managed pod the backend currently sees (from its labels), so
-	// the Manager can reap orphans on startup and report a running inventory to the CP.
+	// ListManaged returns every spawnery-managed pod the backend currently sees (from its labels), with
+	// the sidecar id, the agent id and the pod IP — so the Manager can reap orphans, report a running
+	// inventory to the CP, and RE-ADOPT the survivors of a spawnlet restart (which needs to name the
+	// containers and re-scope the egress floor). Contract-pinned by podbackendtest on both lanes.
 	ListManaged(ctx context.Context) ([]ManagedPod, error)
 
 	// ResolveImageDigest returns the content-addressable digest of ref (Docker: RepoDigests[0],

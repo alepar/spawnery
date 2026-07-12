@@ -16,7 +16,8 @@
 //     through to the image's own entrypoint and the divergence is not exercised by the contract.
 //   - Docker's Stop stops but does not remove; stopped pods therefore linger in ListManaged. The
 //     contract does not assert their disappearance; this Env force-removes them in cleanup.
-//   - Docker's ListManaged reports SidecarID+AgentID and no SandboxID (CRI reports only SandboxID).
+//   - Docker's ListManaged reports SidecarID+AgentID+PodIP and no SandboxID (it has no sandbox);
+//     the CRI lane additionally reports SandboxID.
 package runtime_test
 
 import (
