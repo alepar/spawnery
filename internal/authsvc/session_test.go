@@ -32,7 +32,7 @@ func TestMintAccessPair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decode := func(wire string) authv1.SessionTokenBody {
+	decode := func(wire string) *authv1.SessionTokenBody {
 		t.Helper()
 		payload, err := verifier.Verify(wire, token.ArtifactTypeSession, now)
 		if err != nil {
@@ -42,7 +42,7 @@ func TestMintAccessPair(t *testing.T) {
 		if err := proto.Unmarshal(payload, &body); err != nil {
 			t.Fatal(err)
 		}
-		return body
+		return &body
 	}
 	cpBody := decode(pair.CPWire)
 	nodeBody := decode(pair.NodeWire)
@@ -56,9 +56,9 @@ func TestMintAccessPair(t *testing.T) {
 	if pair.CPTokenID != cpBody.GetTokenId() || pair.NodeTokenID != nodeBody.GetTokenId() {
 		t.Fatalf("pair ids = %q, %q; bodies = %q, %q", pair.CPTokenID, pair.NodeTokenID, cpBody.GetTokenId(), nodeBody.GetTokenId())
 	}
-	for name, body := range map[string]authv1.SessionTokenBody{"cp": cpBody, "node": nodeBody} {
+	for name, body := range map[string]*authv1.SessionTokenBody{"cp": cpBody, "node": nodeBody} {
 		if body.GetAccountId() != "acct-1" || body.GetHandle() != "alice" || body.GetFamilyId() != "family-1" {
-			t.Fatalf("%s identity claims = %+v", name, &body)
+			t.Fatalf("%s identity claims = %+v", name, body)
 		}
 		if body.GetIssuedAt() != now.Unix() || body.GetExpiresAt() != now.Add(15*time.Minute).Unix() {
 			t.Fatalf("%s timestamps = %d, %d", name, body.GetIssuedAt(), body.GetExpiresAt())
@@ -69,7 +69,7 @@ func TestMintAccessPair(t *testing.T) {
 	}
 	if cpBody.GetIssuedAt() != nodeBody.GetIssuedAt() || cpBody.GetExpiresAt() != nodeBody.GetExpiresAt() ||
 		cpBody.GetKeyId() != nodeBody.GetKeyId() || !bytes.Equal(cpBody.GetSessionKeyHash(), nodeBody.GetSessionKeyHash()) {
-		t.Fatalf("pair claims diverged: cp=%+v node=%+v", &cpBody, &nodeBody)
+		t.Fatalf("pair claims diverged: cp=%+v node=%+v", cpBody, nodeBody)
 	}
 	if pair.IssuedAt != cpBody.GetIssuedAt() || pair.ExpiresAt != cpBody.GetExpiresAt() {
 		t.Fatalf("pair timestamps = %d, %d", pair.IssuedAt, pair.ExpiresAt)
