@@ -329,6 +329,15 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 	if len(cfg.DeltaScrubPaths) == 0 {
 		cfg.DeltaScrubPaths = []string{"/var/cache/apt", "/var/lib/apt/lists", "/tmp"}
 	}
+	// agentUID mirrors (*Manager).agentRootUID(), computed here since Manager doesn't exist yet:
+	// the ArtifactStager needs it at construction to chown its report/ subdir (sp-mwco.2.7).
+	agentUID := -1
+	switch cfg.UsernsMode {
+	case "remap":
+		agentUID = int(cfg.UsernsRemapBase)
+	case "native":
+		agentUID = 0
+	}
 	m := &Manager{
 		pod:             pod,
 		cfg:             cfg,
@@ -336,7 +345,7 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		backendResolver: storage.NewSchemeResolverWithGitHub(cfg.DataRoot, nil),
 		fw:              fw,
 		secrets:         SecretInjector{Root: cfg.SecretsRoot},
-		artifacts:       ArtifactStager{Root: cfg.ArtifactsRoot, CacheDir: filepath.Join(cfg.DataRoot, "artifact-cache")},
+		artifacts:       ArtifactStager{Root: cfg.ArtifactsRoot, CacheDir: filepath.Join(cfg.DataRoot, "artifact-cache"), AgentUID: agentUID},
 		gitEnv:          GitEnv{Root: cfg.GitEnvRoot},
 		githubCreds:     GitHubCredentialStore{Root: cfg.GitHubCredentialsRoot},
 		deltaState:      &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},

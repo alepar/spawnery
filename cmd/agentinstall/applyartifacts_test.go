@@ -107,10 +107,15 @@ func TestApplyArtifacts_ClaudeTUIWritesConfig(t *testing.T) {
 		t.Errorf("test-mcp not found in .claude.json mcpServers: %+v", root)
 	}
 
-	// apply-report.json should have been written.
-	report := filepath.Join(artifactsDir, "apply-report.json")
-	if _, err := os.Stat(report); err != nil {
-		t.Errorf("apply-report.json not written: %v", err)
+	// apply-report.json should have been written by the CLI itself (agentinstall --report),
+	// under the reserved report/ subdir spawnlet's ArtifactStager makes agent-writable.
+	report := filepath.Join(artifactsDir, "report", "apply-report.json")
+	data, err = os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("apply-report.json not written: %v", err)
+	}
+	if !strings.Contains(string(data), `"outcome":"ok"`) {
+		t.Errorf("expected outcome ok in report, got: %s", data)
 	}
 }
 
@@ -145,6 +150,11 @@ func TestApplyArtifacts_NoOpRunnable(t *testing.T) {
 	claudeJSON := filepath.Join(home, ".claude.json")
 	if _, err := os.Stat(claudeJSON); !os.IsNotExist(err) {
 		t.Errorf("unexpected write to ~/.claude.json for goose-tui no-op: err=%v", err)
+	}
+	// No report either — agentinstall was never invoked.
+	report := filepath.Join(artifactsDir, "report", "apply-report.json")
+	if _, err := os.Stat(report); !os.IsNotExist(err) {
+		t.Errorf("unexpected apply-report.json for no-op runnable: err=%v", err)
 	}
 }
 
@@ -182,6 +192,11 @@ func TestApplyArtifacts_OldImageGuard(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(err) {
 		t.Errorf("unexpected write to ~/.claude.json when guard fired: err=%v", err)
 	}
+	// No report either — agentinstall was never invoked.
+	report := filepath.Join(artifactsDir, "report", "apply-report.json")
+	if _, err := os.Stat(report); !os.IsNotExist(err) {
+		t.Errorf("unexpected apply-report.json when guard fired: err=%v", err)
+	}
 }
 
 // TestApplyArtifacts_NoManifest verifies that the helper exits 0 silently when there is no
@@ -204,6 +219,62 @@ func TestApplyArtifacts_NoManifest(t *testing.T) {
 	out, code := runHelper(t, helper, "claude-tui", env)
 	if code != 0 {
 		t.Fatalf("expected exit 0 for missing manifest, got %d\noutput:\n%s", code, out)
+	}
+	// No report either — agentinstall was never invoked (early-exit before dispatch).
+	report := filepath.Join(artifactsDir, "report", "apply-report.json")
+	if _, err := os.Stat(report); !os.IsNotExist(err) {
+		t.Errorf("unexpected apply-report.json for missing manifest: err=%v", err)
+	}
+}
+
+// TestApplyArtifacts_PropagatesNonZeroExit verifies that a manifest whose only artifact fails to
+// apply (a bogus emitter mapping means the artifact will be reported skipped/failed, not that
+// the shell wrapper swallows it to 0) makes apply-artifacts.sh itself exit non-zero — the
+// "always exit 0" contract is gone; the exit code is now agentinstall's own (propagated).
+func TestApplyArtifacts_PropagatesNonZeroExit(t *testing.T) {
+	helper := helperScript(t)
+	home := t.TempDir()
+	binDir := t.TempDir()
+	buildAgentinstallToDir(t, binDir)
+
+	artifactsDir := t.TempDir()
+	skillDir := filepath.Join(artifactsDir, "payloads", "s1")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# s1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Two members of the same bundle_ref group; s2's payload dir is missing, so it fails to
+	// apply — the all-or-nothing bundle contract makes this bundle_failed (exit 3).
+	manifest := `{"artifacts":[
+		{"kind":"skill","name":"s1","targets":["claude"],"bundle":"b1","skill":{"dir":"payloads/s1"}},
+		{"kind":"skill","name":"s2","targets":["claude"],"bundle":"b1","skill":{"dir":"payloads/missing"}}
+	]}`
+	if err := os.WriteFile(filepath.Join(artifactsDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin",
+		"SPAWNERY_ARTIFACTS_DIR=" + artifactsDir,
+		"SPAWNERY_SECRETS_DIR=" + t.TempDir(),
+		"SECRET_WAIT_TIMEOUT=1s",
+	}
+
+	out, code := runHelper(t, helper, "claude-tui", env)
+	if code != 3 {
+		t.Fatalf("expected exit 3 (bundle_failed) propagated from agentinstall, got %d\noutput:\n%s", code, out)
+	}
+
+	report := filepath.Join(artifactsDir, "report", "apply-report.json")
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("apply-report.json not written: %v", err)
+	}
+	if !strings.Contains(string(data), `"outcome":"bundle_failed"`) {
+		t.Errorf("expected bundle_failed outcome in report, got: %s", data)
 	}
 }
 
@@ -266,5 +337,209 @@ func TestApplyArtifacts_SecretWaitRoundTrip(t *testing.T) {
 	}
 	if fi.Mode().Perm() != 0o600 {
 		t.Errorf("perm: got %o, want 0600", fi.Mode().Perm())
+	}
+}
+
+// --- `agentinstall apply --report` exit-code + envelope contract -----------------------------
+//
+// These exercise the CLI binary directly (not through apply-artifacts.sh) since the --report
+// exit-code contract (0/2/3/1) is a CLI concern the shell wrapper simply propagates.
+
+// applyReportEnvelope is a minimal decode of the apply-report.json schema for assertions.
+type applyReportEnvelope struct {
+	Schema  int    `json:"schema"`
+	Agent   string `json:"agent"`
+	Outcome string `json:"outcome"`
+	Error   string `json:"error"`
+	Bundles []struct {
+		Bundle   string `json:"bundle"`
+		Targeted int    `json:"targeted"`
+		Applied  int    `json:"applied"`
+		Failed   int    `json:"failed"`
+		Skipped  int    `json:"skipped"`
+	} `json:"bundles"`
+	Reports []struct {
+		Agent  string `json:"agent"`
+		Kind   string `json:"kind"`
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		Bundle string `json:"bundle"`
+	} `json:"reports"`
+}
+
+func runApply(t *testing.T, bin, home string, args ...string) (string, int) {
+	t.Helper()
+	full := append([]string{"apply"}, args...)
+	cmd := exec.Command(bin, full...)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.CombinedOutput()
+	code := 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else {
+			t.Fatalf("run apply: %v", err)
+		}
+	}
+	return string(out), code
+}
+
+func readApplyReport(t *testing.T, path string) applyReportEnvelope {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read report %s: %v", path, err)
+	}
+	var env applyReportEnvelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("parse report %s: %v\ncontent: %s", path, err, data)
+	}
+	return env
+}
+
+// TestApplyReport_AllApplied_ExitZero verifies a fully-applied manifest writes outcome=ok and
+// exits 0 with --report set.
+func TestApplyReport_AllApplied_ExitZero(t *testing.T) {
+	binDir := t.TempDir()
+	bin := buildAgentinstallToDir(t, binDir)
+	home := t.TempDir()
+
+	stagingDir := t.TempDir()
+	manifest := `{"artifacts":[{"kind":"mcp","name":"m1","targets":["claude"],"mcp":{"http":{"url":"http://localhost:9999"}}}]}`
+	if err := os.WriteFile(filepath.Join(stagingDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(stagingDir, "report", "apply-report.json")
+
+	_, code := runApply(t, bin, home, "--artifacts", stagingDir, "--agent", "claude", "--report", reportPath)
+	if code != 0 {
+		t.Fatalf("exit code: got %d want 0", code)
+	}
+	env := readApplyReport(t, reportPath)
+	if env.Outcome != "ok" || env.Schema != 1 {
+		t.Errorf("envelope: %+v", env)
+	}
+}
+
+// TestApplyReport_BundleMemberFailed_ExitThree verifies a manifest with a bundle whose member
+// targets an unregistered agent (producing a skipped entry) writes outcome=bundle_failed and
+// exits 3 (the all-or-nothing bundle contract).
+func TestApplyReport_BundleMemberFailed_ExitThree(t *testing.T) {
+	binDir := t.TempDir()
+	bin := buildAgentinstallToDir(t, binDir)
+	home := t.TempDir()
+
+	stagingDir := t.TempDir()
+	skillDir := filepath.Join(stagingDir, "payloads", "s1")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# s1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// s1 applies for claude; s2 is the same bundle_ref group but its payload dir does not
+	// exist (only payloads/s1 was created below) — a real per-member install failure inside
+	// one bundle_ref group, tripping the all-or-nothing verdict.
+	manifest := `{"artifacts":[
+		{"kind":"skill","name":"s1","targets":["claude"],"bundle":"b1","skill":{"dir":"payloads/s1"}},
+		{"kind":"skill","name":"s2","targets":["claude"],"bundle":"b1","skill":{"dir":"payloads/missing"}}
+	]}`
+	if err := os.WriteFile(filepath.Join(stagingDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// s2's payload dir is intentionally missing (only payloads/s1 was created), so InstallSkill
+	// fails for it — a real per-member failure inside one bundle_ref group.
+	reportPath := filepath.Join(stagingDir, "report", "apply-report.json")
+
+	_, code := runApply(t, bin, home, "--artifacts", stagingDir, "--agent", "claude", "--report", reportPath)
+	if code != 3 {
+		t.Fatalf("exit code: got %d want 3", code)
+	}
+	env := readApplyReport(t, reportPath)
+	if env.Outcome != "bundle_failed" {
+		t.Fatalf("outcome: got %q want bundle_failed; envelope: %+v", env.Outcome, env)
+	}
+	if len(env.Bundles) != 1 || env.Bundles[0].Bundle != "b1" || env.Bundles[0].Targeted != 2 || env.Bundles[0].Applied != 1 {
+		t.Fatalf("bundle rollup: %+v", env.Bundles)
+	}
+}
+
+// TestApplyReport_ManifestLoadError_ExitOne verifies a missing manifest.json writes
+// outcome=error to the report and exits 1.
+func TestApplyReport_ManifestLoadError_ExitOne(t *testing.T) {
+	binDir := t.TempDir()
+	bin := buildAgentinstallToDir(t, binDir)
+	home := t.TempDir()
+
+	stagingDir := t.TempDir() // no manifest.json
+	reportPath := filepath.Join(stagingDir, "report", "apply-report.json")
+
+	_, code := runApply(t, bin, home, "--artifacts", stagingDir, "--agent", "claude", "--report", reportPath)
+	if code != 1 {
+		t.Fatalf("exit code: got %d want 1", code)
+	}
+	env := readApplyReport(t, reportPath)
+	if env.Outcome != "error" || env.Error == "" {
+		t.Fatalf("envelope: %+v", env)
+	}
+}
+
+// TestApplyReport_WrittenAtomically verifies the report dir contains exactly the final file (no
+// leftover .tmp artifacts from the atomic write).
+func TestApplyReport_WrittenAtomically(t *testing.T) {
+	binDir := t.TempDir()
+	bin := buildAgentinstallToDir(t, binDir)
+	home := t.TempDir()
+
+	stagingDir := t.TempDir()
+	manifest := `{"artifacts":[{"kind":"mcp","name":"m1","targets":["claude"],"mcp":{"http":{"url":"http://localhost:9999"}}}]}`
+	if err := os.WriteFile(filepath.Join(stagingDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reportDir := filepath.Join(stagingDir, "report")
+	reportPath := filepath.Join(reportDir, "apply-report.json")
+
+	if _, code := runApply(t, bin, home, "--artifacts", stagingDir, "--agent", "claude", "--report", reportPath); code != 0 {
+		t.Fatalf("exit code: got %d want 0", code)
+	}
+	entries, err := os.ReadDir(reportDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "apply-report.json" {
+		t.Fatalf("report dir should contain exactly apply-report.json, got %v", entries)
+	}
+}
+
+// TestApplyWithoutReport_Unchanged is a regression guard: omitting --report must leave stdout
+// and exit code exactly as before this task (always 0, no report file written).
+func TestApplyWithoutReport_Unchanged(t *testing.T) {
+	binDir := t.TempDir()
+	bin := buildAgentinstallToDir(t, binDir)
+	home := t.TempDir()
+
+	stagingDir := t.TempDir()
+	manifest := `{"artifacts":[{"kind":"mcp","name":"m1","targets":["claude"],"mcp":{"http":{"url":"http://localhost:9999"}}}]}`
+	if err := os.WriteFile(filepath.Join(stagingDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := runApply(t, bin, home, "--artifacts", stagingDir, "--agent", "claude")
+	if code != 0 {
+		t.Fatalf("exit code: got %d want 0", code)
+	}
+	var result struct {
+		Reports []struct {
+			Status string `json:"status"`
+		} `json:"reports"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &result); err != nil {
+		t.Fatalf("stdout not the plain Result JSON: %v\noutput: %s", err, out)
+	}
+	if len(result.Reports) != 1 || result.Reports[0].Status != "applied" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(stagingDir, "apply-report.json")); !os.IsNotExist(err) {
+		t.Errorf("no --report flag should not write a report file: err=%v", err)
 	}
 }

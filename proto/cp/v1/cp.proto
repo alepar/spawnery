@@ -208,6 +208,31 @@ message SpawnSummary {
   // Persisted terminal failure (survives CP restart; non-empty only for ERROR spawns). sp-m859.3.
   string error_step   = 20;
   string error_detail = 21;
+  // skill_installs (field 22): per-skill install status from the node's latest SkillInstallReport
+  // (sp-mwco.2.7). Ephemeral, in-memory (mirrors provision_step*) — empty on CP restart; the
+  // fatal all-or-nothing-bundle-failure case survives restart anyway via error_step/error_detail.
+  repeated SkillInstall skill_installs = 22;
+}
+
+// SkillInstallStatus mirrors node.v1.SkillInstallStatus (this proto does not import node.proto;
+// the CP server converts at the boundary).
+enum SkillInstallStatus {
+  SKILL_INSTALL_STATUS_UNSPECIFIED = 0;
+  SKILL_INSTALL_STATUS_APPLIED     = 1;
+  SKILL_INSTALL_STATUS_SKIPPED     = 2;
+  SKILL_INSTALL_STATUS_FAILED      = 3;
+  SKILL_INSTALL_STATUS_UNKNOWN     = 4;
+}
+
+// SkillInstall is the per (artifact x agent) install outcome surfaced on SpawnSummary, mirroring
+// node.v1.SkillInstallEntry.
+message SkillInstall {
+  string agent  = 1;
+  string kind   = 2;
+  string name   = 3;
+  SkillInstallStatus status = 4;
+  string reason = 5;
+  string bundle = 6; // bundle_ref group id, or "" for a standalone artifact
 }
 // Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
 message ListSpawnsRequest  {}

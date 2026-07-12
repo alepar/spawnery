@@ -51,12 +51,20 @@ func TestApplicableMilestones(t *testing.T) {
 			},
 		},
 		{
+			name:  "install-skills (spawn carries artifacts)",
+			flags: ProvisionFlags{InstallSkills: true},
+			wantKeys: []string{
+				MilestoneAuthorize, MilestonePrepareMounts,
+				MilestoneCreatePod, MilestonePullImage, MilestoneStartAgent, MilestoneInstallSkills,
+			},
+		},
+		{
 			name:  "all flags set (full catalog)",
-			flags: ProvisionFlags{MintCredentials: true, RestoreSnapshot: true, SetupNetwork: true, AwaitReady: true},
+			flags: ProvisionFlags{MintCredentials: true, RestoreSnapshot: true, SetupNetwork: true, AwaitReady: true, InstallSkills: true},
 			wantKeys: []string{
 				MilestoneAuthorize, MilestoneMintCredentials, MilestonePrepareMounts,
 				MilestoneRestoreSnapshot, MilestoneCreatePod, MilestoneSetupNetwork,
-				MilestonePullImage, MilestoneStartAgent, MilestoneAwaitReady,
+				MilestonePullImage, MilestoneStartAgent, MilestoneInstallSkills, MilestoneAwaitReady,
 			},
 		},
 	}

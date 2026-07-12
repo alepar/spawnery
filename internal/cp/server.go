@@ -78,6 +78,11 @@ type Server struct {
 	// lost on CP restart. Updated by the node status handler; read by ListSpawns + provisionSpawn.
 	provisioning *provisioningProgress
 
+	// skillInstalls tracks the latest per-spawn skill-install report (sp-mwco.2.7). Ephemeral,
+	// generation-fenced; see skillInstalls doc comment for how its clearing differs from
+	// provisioning's.
+	skillInstalls *skillInstalls
+
 	// upgradeWaiters correlates UpgradeToOwnerSealed requests with SealJournalKeyToOwnerResponse
 	// messages from the node (sp-8dkp §4). Keyed by per-request request_id.
 	upgradeWaiters *upgradeWaiters
@@ -218,6 +223,7 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout, suspendStallWindow: defaultSuspendStallWindow,
 		resumes: newResumeWaiters(), resumeTimeout: defaultResumeTimeout, resumeStallWindow: defaultResumeStallWindow,
 		provisioning:      newProvisioningProgress(),
+		skillInstalls:     newSkillInstalls(),
 		upgradeWaiters:    newUpgradeWaiters(),
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
@@ -587,7 +593,43 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 				Phase:      m.ResumeProgress.GetPhase(),
 				Detail:     m.ResumeProgress.GetDetail(),
 			})
+		case *nodev1.NodeMessage_SkillInstallReport:
+			// Per-skill install status (sp-mwco.2.7): generation-fenced (skillInstalls.set drops
+			// a report older than the currently-recorded generation for this spawn).
+			s.skillInstalls.set(m.SkillInstallReport.GetSpawnId(), m.SkillInstallReport.GetGeneration(),
+				skillInstallEntriesFromProto(m.SkillInstallReport.GetEntries()))
 		}
+	}
+}
+
+// skillInstallEntriesFromProto converts the wire SkillInstallEntry slice to the CP's internal
+// representation.
+func skillInstallEntriesFromProto(in []*nodev1.SkillInstallEntry) []skillInstallEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]skillInstallEntry, 0, len(in))
+	for _, e := range in {
+		out = append(out, skillInstallEntry{
+			Agent: e.GetAgent(), Kind: e.GetKind(), Name: e.GetName(),
+			Status: skillInstallStatusFromProto(e.GetStatus()), Reason: e.GetReason(), Bundle: e.GetBundle(),
+		})
+	}
+	return out
+}
+
+// skillInstallStatusFromProto maps the wire SkillInstallStatus enum to its lowercase string form
+// (mirrors internal/agentinstall/spec.Status / spawnlet.StatusUnknown).
+func skillInstallStatusFromProto(st nodev1.SkillInstallStatus) string {
+	switch st {
+	case nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_APPLIED:
+		return "applied"
+	case nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_SKIPPED:
+		return "skipped"
+	case nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_FAILED:
+		return "failed"
+	default:
+		return "unknown"
 	}
 }
 
@@ -1341,6 +1383,10 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 	if err != nil || sp.Status != store.Starting {
 		return // stopped/deleted in the lock gap, or already advanced
 	}
+	// Eager (not deferred) — see resumeLocked's comment: skillInstalls stays visible past
+	// ACTIVE, so clearing it at function-return would wipe this episode's own report right
+	// after the node sends it.
+	s.skillInstalls.clear(spawnID)
 	placement.Image = sp.Image
 	mounts, merr := s.st.Spawns().GetMounts(ctx, spawnID)
 	if merr != nil {
@@ -1525,6 +1571,7 @@ func (s *Server) stop(ctx context.Context, owner, spawnID string) error {
 	if err := s.st.Spawns().MarkDeleted(ctx, spawnID, time.Now().Unix()); err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
+	s.skillInstalls.clear(spawnID) // sp-mwco.2.7: no map leak past a deleted/stopped spawn
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	return nil
 }
@@ -1546,6 +1593,7 @@ func (s *Server) terminateSpawn(ctx context.Context, spawnID, reason string) err
 	if err := s.st.Spawns().MarkDeleted(ctx, spawnID, time.Now().Unix()); err != nil {
 		return fmt.Errorf("terminateSpawn %s: mark deleted: %w", spawnID, err)
 	}
+	s.skillInstalls.clear(spawnID) // sp-mwco.2.7: no map leak past a deleted/stopped spawn
 	slog.Info("kill-switch: terminated spawn", "spawn", spawnID, "owner", sp.OwnerID, "reason", reason)
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	return nil

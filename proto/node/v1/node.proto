@@ -33,6 +33,7 @@ message NodeMessage {
     ForkSourceRestored            fork_source_restored = 16; // node -> CP: fork source is unpaused/restored; seed may still run
     ForkTransferExported          fork_transfer_exported = 17; // node -> CP: source-side cross-node fork transfer payload export
     ForkTransferImported          fork_transfer_imported = 18; // node -> CP: target-side cross-node fork transfer import complete
+    SkillInstallReport            skill_install_report  = 19; // node -> CP: apply-report envelope from the agent container's `agentinstall apply --report` (sp-mwco.2.7)
   }
 }
 message CPMessage {
@@ -189,6 +190,50 @@ message ArtifactSpec {
   string              env_var_name     = 8;  // sensitive MCP secret -> env var binding
   ObjectRef           objectref        = 9;  // by-ref delivery (non-sensitive skill payloads only); presence => by-ref, absent => inline
 }
+// SkillInstallOutcome mirrors internal/agentinstall/spec.Outcome (the apply-report envelope's
+// top-level verdict): ok/warn/bundle_failed/error. UNSPECIFIED covers the "no apply-report ever
+// arrived" case (spawnlet's EvaluateApplyReport still sends entries, just with no envelope-level
+// verdict to report).
+enum SkillInstallOutcome {
+  SKILL_INSTALL_OUTCOME_UNSPECIFIED    = 0;
+  SKILL_INSTALL_OUTCOME_OK             = 1;
+  SKILL_INSTALL_OUTCOME_WARN           = 2;
+  SKILL_INSTALL_OUTCOME_BUNDLE_FAILED  = 3;
+  SKILL_INSTALL_OUTCOME_ERROR          = 4;
+}
+
+// SkillInstallStatus mirrors internal/agentinstall/spec.Status, plus UNKNOWN for an entry
+// synthesized because no apply-report arrived to confirm the real per-skill outcome.
+enum SkillInstallStatus {
+  SKILL_INSTALL_STATUS_UNSPECIFIED = 0;
+  SKILL_INSTALL_STATUS_APPLIED     = 1;
+  SKILL_INSTALL_STATUS_SKIPPED     = 2;
+  SKILL_INSTALL_STATUS_FAILED      = 3;
+  SKILL_INSTALL_STATUS_UNKNOWN     = 4;
+}
+
+// SkillInstallEntry is the per (artifact x agent) install outcome, mirroring
+// internal/spawnlet.InstallEntry.
+message SkillInstallEntry {
+  string agent  = 1;
+  string kind   = 2;
+  string name   = 3;
+  SkillInstallStatus status = 4;
+  string reason = 5;
+  string bundle = 6; // bundle_ref group id, or "" for a standalone artifact
+}
+
+// SkillInstallReport is the node's report of the agent container's `agentinstall apply --report`
+// result (sp-mwco.2.7): sent once per start (including the fatal all-or-nothing-bundle-failure
+// case, sent BEFORE the ERROR SpawnStatus so the CP has the detail behind the failure). generation
+// fences a late report from a superseded episode.
+message SkillInstallReport {
+  string spawn_id             = 1;
+  uint64 generation           = 2;
+  SkillInstallOutcome outcome = 3;
+  repeated SkillInstallEntry entries = 4;
+}
+
 // Per-mount suspend marker reported back after a clean suspend (node -> CP).
 message MountMarker  { string name = 1; string marker = 2; }
 // Rootfs delta artifact pinned by the CP for migration restore. The artifact is keyed by

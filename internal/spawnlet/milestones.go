@@ -10,6 +10,7 @@ const (
 	MilestoneSetupNetwork    = "setup-network"
 	MilestonePullImage       = "pull-image"
 	MilestoneStartAgent      = "start-agent"
+	MilestoneInstallSkills   = "install-skills"
 	MilestoneAwaitReady      = "await-ready"
 )
 
@@ -22,6 +23,10 @@ type ProvisionFlags struct {
 	RestoreSnapshot bool
 	SetupNetwork    bool
 	AwaitReady      bool
+	// InstallSkills gates the install-skills milestone: true iff the spawn carries >=1 artifact
+	// (sp-mwco.2.7). The node waits for the agent container's apply-report envelope here and
+	// enforces the all-or-nothing bundle contract before the spawn can reach ACTIVE.
+	InstallSkills bool
 }
 
 // fullCatalog is the ordered list of all possible milestones. Order matches the
@@ -41,6 +46,7 @@ var fullCatalog = []struct {
 	{Milestone{MilestoneSetupNetwork, "Set up network"}, func(f ProvisionFlags) bool { return f.SetupNetwork }},
 	{Milestone{MilestonePullImage, "Pull image"}, func(ProvisionFlags) bool { return true }},
 	{Milestone{MilestoneStartAgent, "Start agent"}, func(ProvisionFlags) bool { return true }},
+	{Milestone{MilestoneInstallSkills, "Install skills"}, func(f ProvisionFlags) bool { return f.InstallSkills }},
 	{Milestone{MilestoneAwaitReady, "Await agent ready"}, func(f ProvisionFlags) bool { return f.AwaitReady }},
 }
 
