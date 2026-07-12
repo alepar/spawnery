@@ -34,11 +34,12 @@ func TestSignerRevocationStatementRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if statement.Generation != 7 || statement.Environment != "prod" || statement.RevokedSerials[0] != "a" || statement.RevokedSerials[1] != "ff" {
+	serials := statement.RevokedSerials()
+	if statement.Generation() != 7 || statement.Environment() != "prod" || serials[0] != "a" || serials[1] != "ff" {
 		t.Fatalf("unexpected statement: %#v", statement)
 	}
-	if !statement.IssuedAt.Equal(now) || !statement.MinimumSignerNotBefore.Equal(now.Add(-time.Hour)) {
-		t.Fatalf("unexpected statement times: issued=%v minimum=%v", statement.IssuedAt, statement.MinimumSignerNotBefore)
+	if !statement.IssuedAt().Equal(now) || !statement.MinimumSignerNotBefore().Equal(now.Add(-time.Hour)) {
+		t.Fatalf("unexpected statement times: issued=%v minimum=%v", statement.IssuedAt(), statement.MinimumSignerNotBefore())
 	}
 }
 
@@ -74,6 +75,34 @@ func TestSignerRevocationStatementRejectsUnauthorizedOrMalformedInput(t *testing
 		}
 		if _, err := ParseSignerRevocationStatement(wire, node.root, "prod", now); err == nil {
 			t.Fatal("node intermediate authorized statement")
+		}
+	})
+	t.Run("intermediate missing digital signature usage", func(t *testing.T) {
+		candidate := newCertTestPKI(t, func(o *certTestOptions) {
+			o.intermediateUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign
+		})
+		payload := mustRevocationPayload(t, valid)
+		if _, err := SignSignerRevocationStatement(candidate.intermediate, candidate.intermediateKey, payload); err == nil {
+			t.Fatal("intermediate without digital-signature usage signed statement")
+		}
+		domain, _ := artifactDomain(ArtifactTypeSignerRevocation)
+		digest := sha256.Sum256(appendDomainPayload(domain, payload))
+		signature, err := ecdsa.SignASN1(rand.Reader, candidate.intermediateKey, digest[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		spki, err := x509.MarshalPKIXPublicKey(candidate.intermediate.PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyID := sha256.Sum256(spki)
+		envelope := &authv1.SignedAuthArtifact{
+			ArtifactType: ArtifactTypeSignerRevocation,
+			Payload:      payload, Signature: signature,
+			SignerChain: [][]byte{candidate.intermediate.Raw}, KeyId: keyID[:],
+		}
+		if _, err := ParseSignerRevocationStatement(mustEncodeArtifact(t, envelope), candidate.root, "prod", now); err == nil {
+			t.Fatal("intermediate without digital-signature usage verified statement")
 		}
 	})
 	t.Run("future issued at", func(t *testing.T) {
@@ -173,7 +202,7 @@ func TestSignerRevocationStateMonotonicAndRejectsSigners(t *testing.T) {
 		t.Fatal(err)
 	}
 	spkiHash := sha256.Sum256(spki)
-	state, err := NewSignerRevocationState("prod")
+	state, err := NewSignerRevocationState(pki.root, "prod")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +254,7 @@ func TestSignerRevocationStateMonotonicAndRejectsSigners(t *testing.T) {
 func TestArtifactCacheInvalidatedBySignerRevocation(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	pki := newCertTestPKI(t, nil)
-	state, _ := NewSignerRevocationState("prod")
+	state, _ := NewSignerRevocationState(pki.root, "prod")
 	verifier, _ := NewVerifier(pki.root, "prod", state)
 	credential, _ := NewSigningCredential(pki.leafEd25519Priv, pki.chain, pki.root, "prod", now)
 	wire, _ := credential.Sign(ArtifactTypeSession, []byte("session-token-id-is-not-signer-state"))
@@ -273,14 +302,63 @@ func mustParseRevocation(t *testing.T, pki certTestPKI, statement *authv1.Signer
 }
 
 func TestSignerRevocationStateRejectsInvalidEnvironmentAndNil(t *testing.T) {
-	if _, err := NewSignerRevocationState(""); err == nil {
+	pki := newCertTestPKI(t, nil)
+	if _, err := NewSignerRevocationState(pki.root, ""); err == nil {
 		t.Fatal("empty environment accepted")
 	}
-	state, _ := NewSignerRevocationState("prod")
+	if _, err := NewSignerRevocationState(nil, "prod"); err == nil {
+		t.Fatal("nil root accepted")
+	}
+	state, _ := NewSignerRevocationState(pki.root, "prod")
 	if err := state.Apply(nil); err == nil {
 		t.Fatal("nil statement accepted")
 	}
 	if err := state.RejectSigner(&x509.Certificate{SerialNumber: big.NewInt(1)}); err != nil {
 		t.Fatalf("empty state rejected signer: %v", err)
+	}
+}
+
+func TestSignerRevocationStatementAccessorsReturnDefensiveCopies(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	spki, err := x509.MarshalPKIXPublicKey(pki.leaf.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(spki)
+	statement := mustParseRevocation(t, pki, &authv1.SignerRevocationStatement{
+		Environment: "prod", Generation: 1, IssuedAt: now.Unix(),
+		RevokedSerials: [][]byte{pki.leaf.SerialNumber.Bytes()}, RevokedSpkiSha256: [][]byte{hash[:]},
+	})
+	serials := statement.RevokedSerials()
+	hashes := statement.RevokedSPKISHA256()
+	serials[0] = "1"
+	hashes[0][0] ^= 1
+	if statement.RevokedSerials()[0] != pki.leaf.SerialNumber.Text(16) || statement.RevokedSPKISHA256()[0] != hash {
+		t.Fatal("accessor mutation changed authenticated statement")
+	}
+	state, _ := NewSignerRevocationState(pki.root, "prod")
+	if err := state.Apply(statement); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(state.RejectSigner(pki.leaf), ErrSignerRevoked) {
+		t.Fatal("accessor mutation changed applied revocation")
+	}
+}
+
+func TestSignerRevocationStateRejectsStatementFromDifferentRoot(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	trusted := newCertTestPKI(t, nil)
+	other := newCertTestPKI(t, nil)
+	statement := mustParseRevocation(t, other, &authv1.SignerRevocationStatement{Environment: "prod", Generation: 1, IssuedAt: now.Unix()})
+	state, err := NewSignerRevocationState(trusted.root, "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Apply(statement); err == nil {
+		t.Fatal("statement verified under a different root was applied")
+	}
+	if state.Generation() != 0 {
+		t.Fatal("wrong-root statement changed state")
 	}
 }

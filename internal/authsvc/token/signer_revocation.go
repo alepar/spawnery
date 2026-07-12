@@ -29,17 +29,64 @@ var (
 	ErrRevocationEquivocation = errors.New("token: signer revocation equivocation")
 )
 
-// SignerRevocationStatement is an authenticated, normalized offline revocation statement.
-type SignerRevocationStatement struct {
-	Environment            string
-	Generation             uint64
-	IssuedAt               time.Time
-	RevokedSerials         []string
-	RevokedSPKISHA256      [][sha256.Size]byte
-	MinimumSignerNotBefore time.Time
+type canonicalSignerRevocation struct {
+	environment            string
+	generation             uint64
+	issuedAt               time.Time
+	revokedSerials         []string
+	revokedSPKISHA256      [][sha256.Size]byte
+	minimumSignerNotBefore time.Time
 
-	wire   string
-	digest [sha256.Size]byte
+	wire     string
+	digest   [sha256.Size]byte
+	rootHash [sha256.Size]byte
+}
+
+// SignerRevocationStatement is an opaque, authenticated offline revocation statement.
+type SignerRevocationStatement struct {
+	canonical canonicalSignerRevocation
+}
+
+func (statement *SignerRevocationStatement) Environment() string {
+	if statement == nil {
+		return ""
+	}
+	return statement.canonical.environment
+}
+
+func (statement *SignerRevocationStatement) Generation() uint64 {
+	if statement == nil {
+		return 0
+	}
+	return statement.canonical.generation
+}
+
+func (statement *SignerRevocationStatement) IssuedAt() time.Time {
+	if statement == nil {
+		return time.Time{}
+	}
+	return statement.canonical.issuedAt
+}
+
+func (statement *SignerRevocationStatement) RevokedSerials() []string {
+	if statement == nil {
+		return nil
+	}
+	return append([]string(nil), statement.canonical.revokedSerials...)
+}
+
+func (statement *SignerRevocationStatement) RevokedSPKISHA256() [][sha256.Size]byte {
+	if statement == nil {
+		return nil
+	}
+	return append([][sha256.Size]byte(nil), statement.canonical.revokedSPKISHA256...)
+}
+
+func (statement *SignerRevocationStatement) MinimumSignerNotBefore() time.Time {
+	if statement == nil {
+		return time.Time{}
+	}
+	return statement.canonical.minimumSignerNotBefore
 }
 
 // SignSignerRevocationStatement signs exact protobuf payload bytes with the offline auth-signing
@@ -135,8 +182,9 @@ func ParseSignerRevocationStatement(wire string, root *x509.Certificate, environ
 	if err != nil {
 		return nil, err
 	}
-	statement.wire = wire
-	statement.digest = sha256.Sum256(raw)
+	statement.canonical.wire = wire
+	statement.canonical.digest = sha256.Sum256(raw)
+	statement.canonical.rootHash = sha256.Sum256(root.Raw)
 	return statement, nil
 }
 
@@ -162,7 +210,8 @@ func validateRevocationIntermediateProfile(intermediate *x509.Certificate) error
 	if !hasPolicy(intermediate, AuthSigningIntermediatePolicyOID) {
 		return errors.New("token: signer-revocation authority lacks auth-signing intermediate policy")
 	}
-	if intermediate.KeyUsage&x509.KeyUsageCertSign == 0 || len(intermediate.ExtKeyUsage) != 0 || len(intermediate.UnknownExtKeyUsage) != 0 {
+	requiredUsage := x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature
+	if intermediate.KeyUsage&requiredUsage != requiredUsage || len(intermediate.ExtKeyUsage) != 0 || len(intermediate.UnknownExtKeyUsage) != 0 {
 		return errors.New("token: signer-revocation authority has invalid key usage")
 	}
 	publicKey, ok := intermediate.PublicKey.(*ecdsa.PublicKey)
@@ -210,10 +259,10 @@ func normalizeRevocationPayload(payload *authv1.SignerRevocationStatement, envir
 	if payload.MinimumSignerNotBefore != 0 {
 		minimum = time.Unix(payload.MinimumSignerNotBefore, 0)
 	}
-	return &SignerRevocationStatement{
-		Environment: payload.Environment, Generation: payload.Generation, IssuedAt: issuedAt,
-		RevokedSerials: serials, RevokedSPKISHA256: spkiHashes, MinimumSignerNotBefore: minimum,
-	}, nil
+	return &SignerRevocationStatement{canonical: canonicalSignerRevocation{
+		environment: payload.Environment, generation: payload.Generation, issuedAt: issuedAt,
+		revokedSerials: serials, revokedSPKISHA256: spkiHashes, minimumSignerNotBefore: minimum,
+	}}, nil
 }
 
 func appendDomainPayload(domain string, payload []byte) []byte {
@@ -231,6 +280,7 @@ func publicKeysEqual(left, right any) bool {
 type signerRevocationSnapshot struct {
 	generation             uint64
 	digest                 [sha256.Size]byte
+	rootHash               [sha256.Size]byte
 	wire                   string
 	revokedSerials         map[string]struct{}
 	revokedSPKISHA256      map[[sha256.Size]byte]struct{}
@@ -241,14 +291,15 @@ type signerRevocationSnapshot struct {
 type SignerRevocationState struct {
 	mu          sync.RWMutex
 	environment string
+	rootHash    [sha256.Size]byte
 	snapshot    signerRevocationSnapshot
 }
 
-func NewSignerRevocationState(environment string) (*SignerRevocationState, error) {
-	if environment == "" {
-		return nil, errors.New("token: missing signer-revocation environment")
+func NewSignerRevocationState(root *x509.Certificate, environment string) (*SignerRevocationState, error) {
+	if root == nil || len(root.Raw) == 0 || !root.IsCA || environment == "" {
+		return nil, errors.New("token: invalid signer-revocation state configuration")
 	}
-	return &SignerRevocationState{environment: environment}, nil
+	return &SignerRevocationState{environment: environment, rootHash: sha256.Sum256(root.Raw)}, nil
 }
 
 func (state *SignerRevocationState) Generation() uint64 {
@@ -261,17 +312,17 @@ func (state *SignerRevocationState) Generation() uint64 {
 }
 
 func (state *SignerRevocationState) Apply(statement *SignerRevocationStatement) error {
-	if state == nil || statement == nil || statement.Environment != state.environment || statement.Generation == 0 || statement.wire == "" {
+	if state == nil || statement == nil || statement.canonical.environment != state.environment || statement.canonical.rootHash != state.rootHash || statement.canonical.generation == 0 || statement.canonical.wire == "" {
 		return ErrMalformed
 	}
 	candidate := snapshotFromStatement(statement)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if statement.Generation < state.snapshot.generation {
+	if statement.canonical.generation < state.snapshot.generation {
 		return ErrRevocationRollback
 	}
-	if statement.Generation == state.snapshot.generation {
-		if statement.digest == state.snapshot.digest {
+	if statement.canonical.generation == state.snapshot.generation {
+		if statement.canonical.digest == state.snapshot.digest {
 			return nil
 		}
 		return ErrRevocationEquivocation
@@ -281,16 +332,16 @@ func (state *SignerRevocationState) Apply(statement *SignerRevocationStatement) 
 }
 
 func (state *SignerRevocationState) prepare(statement *SignerRevocationStatement) (signerRevocationSnapshot, bool, error) {
-	if state == nil || statement == nil || statement.Environment != state.environment || statement.Generation == 0 || statement.wire == "" {
+	if state == nil || statement == nil || statement.canonical.environment != state.environment || statement.canonical.rootHash != state.rootHash || statement.canonical.generation == 0 || statement.canonical.wire == "" {
 		return signerRevocationSnapshot{}, false, ErrMalformed
 	}
 	state.mu.RLock()
 	defer state.mu.RUnlock()
-	if statement.Generation < state.snapshot.generation {
+	if statement.canonical.generation < state.snapshot.generation {
 		return signerRevocationSnapshot{}, false, ErrRevocationRollback
 	}
-	if statement.Generation == state.snapshot.generation {
-		if statement.digest == state.snapshot.digest {
+	if statement.canonical.generation == state.snapshot.generation {
+		if statement.canonical.digest == state.snapshot.digest {
 			return signerRevocationSnapshot{}, false, nil
 		}
 		return signerRevocationSnapshot{}, false, ErrRevocationEquivocation
@@ -332,16 +383,16 @@ func (state *SignerRevocationState) RejectSigner(leaf *x509.Certificate) error {
 }
 
 func snapshotFromStatement(statement *SignerRevocationStatement) signerRevocationSnapshot {
-	serials := make(map[string]struct{}, len(statement.RevokedSerials))
-	for _, serial := range statement.RevokedSerials {
+	serials := make(map[string]struct{}, len(statement.canonical.revokedSerials))
+	for _, serial := range statement.canonical.revokedSerials {
 		serials[serial] = struct{}{}
 	}
-	spkiHashes := make(map[[sha256.Size]byte]struct{}, len(statement.RevokedSPKISHA256))
-	for _, hash := range statement.RevokedSPKISHA256 {
+	spkiHashes := make(map[[sha256.Size]byte]struct{}, len(statement.canonical.revokedSPKISHA256))
+	for _, hash := range statement.canonical.revokedSPKISHA256 {
 		spkiHashes[hash] = struct{}{}
 	}
 	return signerRevocationSnapshot{
-		generation: statement.Generation, digest: statement.digest, wire: statement.wire,
-		revokedSerials: serials, revokedSPKISHA256: spkiHashes, minimumSignerNotBefore: statement.MinimumSignerNotBefore,
+		generation: statement.canonical.generation, digest: statement.canonical.digest, rootHash: statement.canonical.rootHash, wire: statement.canonical.wire,
+		revokedSerials: serials, revokedSPKISHA256: spkiHashes, minimumSignerNotBefore: statement.canonical.minimumSignerNotBefore,
 	}
 }

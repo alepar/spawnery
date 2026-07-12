@@ -19,6 +19,7 @@ import (
 type certTestOptions struct {
 	environment          string
 	intermediatePolicies []x509.OID
+	intermediateUsage    x509.KeyUsage
 	leafPolicies         []x509.OID
 	leafURIs             []string
 	leafUsage            x509.KeyUsage
@@ -45,6 +46,7 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 	opts := certTestOptions{
 		environment:          "prod",
 		intermediatePolicies: []x509.OID{pki.AuthSigningIntermediatePolicyOID},
+		intermediateUsage:    x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
 		leafPolicies:         []x509.OID{pki.AuthArtifactSignerPolicyOID},
 		leafURIs:             []string{"spiffe://prod.spawnery.internal/signer/auth-artifact/signer-1"},
 		leafUsage:            x509.KeyUsageDigitalSignature,
@@ -86,7 +88,7 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 		Subject:               pkix.Name{CommonName: "Spawnery auth signing intermediate"},
 		NotBefore:             now.Add(-12 * time.Hour),
 		NotAfter:              now.Add(opts.intermediateLifetime),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		KeyUsage:              opts.intermediateUsage,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 		MaxPathLen:            0,

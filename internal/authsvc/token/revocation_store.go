@@ -45,7 +45,7 @@ func OpenSignerRevocationStore(path string, root *x509.Certificate, environment 
 	if err := ensurePrivateDirectory(dir); err != nil {
 		return nil, err
 	}
-	state, err := NewSignerRevocationState(environment)
+	state, err := NewSignerRevocationState(root, environment)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func (store *SignerRevocationStore) LoadAndApply(path string, now time.Time) err
 
 func (store *SignerRevocationStore) persist(statement *SignerRevocationStatement) error {
 	record := persistedSignerRevocation{
-		Version: signerRevocationStoreVersion, Envelope: statement.wire, SHA256: hex.EncodeToString(statement.digest[:]),
+		Version: signerRevocationStoreVersion, Envelope: statement.canonical.wire, SHA256: hex.EncodeToString(statement.canonical.digest[:]),
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
