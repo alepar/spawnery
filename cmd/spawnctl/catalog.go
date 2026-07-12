@@ -24,6 +24,7 @@ type catalogClient interface {
 	UpdateCatalogEntry(context.Context, *connect.Request[cpv1.UpdateCatalogEntryRequest]) (*connect.Response[cpv1.UpdateCatalogEntryResponse], error)
 	DeleteCatalogEntry(context.Context, *connect.Request[cpv1.DeleteCatalogEntryRequest]) (*connect.Response[cpv1.DeleteCatalogEntryResponse], error)
 	SetCatalogListing(context.Context, *connect.Request[cpv1.SetCatalogListingRequest]) (*connect.Response[cpv1.SetCatalogListingResponse], error)
+	IngestSkillFromURL(context.Context, *connect.Request[cpv1.IngestSkillFromURLRequest]) (*connect.Response[cpv1.IngestSkillFromURLResponse], error)
 }
 
 // Ensure the concrete generated client satisfies the interface.
@@ -44,6 +45,15 @@ type catalogUpdateParams struct {
 	Name        string
 	Description string
 	Content     []byte
+}
+
+// catalogIngestParams holds the parsed flags for `catalog ingest`.
+type catalogIngestParams struct {
+	URL         string
+	Ref         string
+	Subdir      string
+	Name        string
+	Description string
 }
 
 // ---- runCatalog* functions (testable: take narrow interface + io.Writer) ----
@@ -137,6 +147,21 @@ func runCatalogSetListing(ctx context.Context, c catalogClient, out io.Writer, c
 	return nil
 }
 
+func runCatalogIngest(ctx context.Context, c catalogClient, out io.Writer, p catalogIngestParams) error {
+	resp, err := c.IngestSkillFromURL(ctx, connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
+		Url:         p.URL,
+		Ref:         p.Ref,
+		Subdir:      p.Subdir,
+		Name:        p.Name,
+		Description: p.Description,
+	}))
+	if err != nil {
+		return fmt.Errorf("ingest catalog entry: %w", err)
+	}
+	fmt.Fprintf(out, "ingested catalog entry %s\n", resp.Msg.GetCatalogId())
+	return nil
+}
+
 // ---- CLI wiring ----
 
 func catalogCmd() *cli.Command {
@@ -145,6 +170,7 @@ func catalogCmd() *cli.Command {
 		Usage: "manage curated catalog entries (CRUD, listing)",
 		Commands: []*cli.Command{
 			catalogCreateCmd(),
+			catalogIngestCmd(),
 			catalogListCmd(),
 			catalogShowCmd(),
 			catalogUpdateCmd(),
@@ -288,6 +314,40 @@ func catalogDeleteCmd() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 			if err := runCatalogDelete(ctx, client, c.Writer, c.Args().Get(0)); err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			return nil
+		},
+	}
+}
+
+func catalogIngestCmd() *cli.Command {
+	return &cli.Command{
+		Name:      "ingest",
+		Usage:     "ingest a skill from a GitHub repo URL",
+		ArgsUsage: "<url>",
+		Flags: append(cpGroupFlags(),
+			&cli.StringFlag{Name: "ref", Usage: "branch/tag/commit (default: repo default branch)"},
+			&cli.StringFlag{Name: "subdir", Usage: "path to descend before requiring SKILL.md"},
+			&cli.StringFlag{Name: "name", Usage: "override name (default: SKILL.md frontmatter)"},
+			&cli.StringFlag{Name: "description", Usage: "entry description"},
+		),
+		Action: func(ctx context.Context, c *cli.Command) error {
+			if c.Args().Len() != 1 {
+				return cli.Exit("usage: spawnctl catalog ingest <url> [--ref --subdir --name --description]", 2)
+			}
+			client, err := newCPClient(c)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			p := catalogIngestParams{
+				URL:         c.Args().Get(0),
+				Ref:         c.String("ref"),
+				Subdir:      c.String("subdir"),
+				Name:        c.String("name"),
+				Description: c.String("description"),
+			}
+			if err := runCatalogIngest(ctx, client, c.Writer, p); err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
 			return nil

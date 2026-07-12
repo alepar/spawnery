@@ -366,3 +366,11 @@ func (f *FakeSkillStore) Calls() []string {
 	defer f.mu.Unlock()
 	return append([]string(nil), f.calls...)
 }
+
+// Remove deletes the object for sha256hex, simulating a lost Garage object.
+func (f *FakeSkillStore) Remove(sha256hex string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objects, sha256hex)
+	delete(f.tags, sha256hex)
+}

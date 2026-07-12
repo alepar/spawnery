@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -16,11 +17,14 @@ type fakeCatalogClient struct {
 	createResp *cpv1.CreateCatalogEntryResponse
 	getResp    *cpv1.GetCatalogEntryResponse
 	listResp   *cpv1.ListCatalogEntriesResponse
+	ingestResp *cpv1.IngestSkillFromURLResponse
+	ingestErr  error
 
 	gotCreate  *cpv1.CreateCatalogEntryRequest
 	gotUpdate  *cpv1.UpdateCatalogEntryRequest
 	gotDelete  *cpv1.DeleteCatalogEntryRequest
 	gotListing *cpv1.SetCatalogListingRequest
+	gotIngest  *cpv1.IngestSkillFromURLRequest
 }
 
 func (f *fakeCatalogClient) CreateCatalogEntry(_ context.Context, r *connect.Request[cpv1.CreateCatalogEntryRequest]) (*connect.Response[cpv1.CreateCatalogEntryResponse], error) {
@@ -49,6 +53,14 @@ func (f *fakeCatalogClient) DeleteCatalogEntry(_ context.Context, r *connect.Req
 func (f *fakeCatalogClient) SetCatalogListing(_ context.Context, r *connect.Request[cpv1.SetCatalogListingRequest]) (*connect.Response[cpv1.SetCatalogListingResponse], error) {
 	f.gotListing = r.Msg
 	return connect.NewResponse(&cpv1.SetCatalogListingResponse{}), nil
+}
+
+func (f *fakeCatalogClient) IngestSkillFromURL(_ context.Context, r *connect.Request[cpv1.IngestSkillFromURLRequest]) (*connect.Response[cpv1.IngestSkillFromURLResponse], error) {
+	f.gotIngest = r.Msg
+	if f.ingestErr != nil {
+		return nil, f.ingestErr
+	}
+	return connect.NewResponse(f.ingestResp), nil
 }
 
 // ---- create ----
@@ -143,6 +155,41 @@ func TestRunCatalogSetListing(t *testing.T) {
 	}
 	if f.gotListing.GetCatalogId() != "cat-1" || !f.gotListing.GetListed() {
 		t.Fatalf("listing req = %+v", f.gotListing)
+	}
+}
+
+// ---- ingest ----
+
+func TestRunCatalogIngest(t *testing.T) {
+	f := &fakeCatalogClient{ingestResp: &cpv1.IngestSkillFromURLResponse{CatalogId: "cat-9"}}
+	var out bytes.Buffer
+	p := catalogIngestParams{
+		URL:         "owner/repo",
+		Ref:         "v1.2.3",
+		Subdir:      "skills/foo",
+		Name:        "my-skill",
+		Description: "a skill",
+	}
+	if err := runCatalogIngest(context.Background(), f, &out, p); err != nil {
+		t.Fatal(err)
+	}
+	if f.gotIngest.GetUrl() != "owner/repo" || f.gotIngest.GetRef() != "v1.2.3" ||
+		f.gotIngest.GetSubdir() != "skills/foo" || f.gotIngest.GetName() != "my-skill" ||
+		f.gotIngest.GetDescription() != "a skill" {
+		t.Fatalf("ingest req = %+v", f.gotIngest)
+	}
+	if !strings.Contains(out.String(), "cat-9") {
+		t.Fatalf("output missing id: %q", out.String())
+	}
+}
+
+func TestRunCatalogIngest_ErrorPropagates(t *testing.T) {
+	f := &fakeCatalogClient{ingestErr: errors.New("boom")}
+	var out bytes.Buffer
+	p := catalogIngestParams{URL: "owner/repo"}
+	err := runCatalogIngest(context.Background(), f, &out, p)
+	if err == nil {
+		t.Fatal("expected error to propagate")
 	}
 }
 

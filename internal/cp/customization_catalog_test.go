@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 
 	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/internal/cp/skillfetch"
+	"spawnery/internal/cp/skillstore"
 	"spawnery/internal/cp/store"
 )
 
@@ -297,6 +299,94 @@ func TestUpdateCatalogEntry_InvalidContent(t *testing.T) {
 	}))
 	if connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Errorf("expected InvalidArgument for empty content on update, got %v", err)
+	}
+}
+
+func TestUpdateCatalogEntry_URLIngestedRowRejected(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	result := makeCannedResult("url-skill")
+	fakeStore := skillstore.NewFakeSkillStore()
+	s.SetSkillIngest(&fakeFetcher{result: result}, fakeStore, skillfetch.DefaultPlainTarCapBytes)
+
+	ingestResp, err := s.IngestSkillFromURL(aliceCtx(), connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
+		Url: "testowner/testrepo",
+	}))
+	if err != nil {
+		t.Fatalf("IngestSkillFromURL: %v", err)
+	}
+	catID := ingestResp.Msg.CatalogId
+
+	_, err = s.UpdateCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.UpdateCatalogEntryRequest{
+		CatalogId:   catID,
+		Name:        "renamed",
+		Description: "new desc",
+		Content:     []byte("new content"),
+	}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("expected FailedPrecondition for URL-ingested row, got %v", err)
+	}
+
+	gr, gerr := s.GetCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.GetCatalogEntryRequest{CatalogId: catID}))
+	if gerr != nil {
+		t.Fatalf("GetCatalogEntry: %v", gerr)
+	}
+	if gr.Msg.Entry.Name != "url-skill" {
+		t.Errorf("name changed despite rejected update: got %q", gr.Msg.Entry.Name)
+	}
+	// The bundle ingest path (sp-mwco.1.4) seeds Description from the discovered member, so the
+	// baseline here is the ingest-time description -- what matters is that the rejected update did
+	// not overwrite it with "new desc".
+	if gr.Msg.Entry.Description != "test description" {
+		t.Errorf("description changed despite rejected update: got %q", gr.Msg.Entry.Description)
+	}
+	if len(gr.Msg.Entry.Content) != 0 {
+		t.Errorf("content changed despite rejected update: got %q", gr.Msg.Entry.Content)
+	}
+}
+
+func TestUpdateCatalogEntry_InlineRowStillUpdatable(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "inline-skill")
+
+	_, err := s.UpdateCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.UpdateCatalogEntryRequest{
+		CatalogId:   catID,
+		Name:        "inline-renamed",
+		Description: "inline new desc",
+		Content:     []byte("inline new content"),
+	}))
+	if err != nil {
+		t.Fatalf("UpdateCatalogEntry on inline row: %v", err)
+	}
+
+	gr, gerr := s.GetCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.GetCatalogEntryRequest{CatalogId: catID}))
+	if gerr != nil {
+		t.Fatalf("GetCatalogEntry: %v", gerr)
+	}
+	if gr.Msg.Entry.Name != "inline-renamed" {
+		t.Errorf("expected inline row to update, got name %q", gr.Msg.Entry.Name)
+	}
+}
+
+func TestUpdateCatalogEntry_URLIngestedRow_NonCreator_PermissionDenied(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	result := makeCannedResult("url-skill-2")
+	fakeStore := skillstore.NewFakeSkillStore()
+	s.SetSkillIngest(&fakeFetcher{result: result}, fakeStore, skillfetch.DefaultPlainTarCapBytes)
+
+	ingestResp, err := s.IngestSkillFromURL(aliceCtx(), connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
+		Url: "testowner/testrepo",
+	}))
+	if err != nil {
+		t.Fatalf("IngestSkillFromURL: %v", err)
+	}
+	catID := ingestResp.Msg.CatalogId
+
+	_, err = s.UpdateCatalogEntry(bobCtx(), connect.NewRequest(&cpv1.UpdateCatalogEntryRequest{
+		CatalogId: catID, Name: "hijacked", Content: []byte("bad"),
+	}))
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("expected PermissionDenied (ownership checked before immutability), got %v", err)
 	}
 }
 
