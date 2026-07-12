@@ -257,7 +257,7 @@ func TestIngestSkillFromURL_StoresPutAndCatalogRow(t *testing.T) {
 	if entry.SHA256 == nil || *entry.SHA256 != result.PlainTarSHA256 {
 		t.Fatalf("sha256 not stored: got %v", entry.SHA256)
 	}
-	if entry.SourceURL == nil {
+	if entry.SourceURL == "" {
 		t.Fatal("source_url not stored")
 	}
 	if entry.Size == nil || *entry.Size != result.PlainSize {
@@ -354,7 +354,7 @@ func TestCreateSkill_GetByCreatorSHA_RoundTrip(t *testing.T) {
 		UpdatedAt:   time.Now().Unix(),
 		SHA256:      &sha,
 		Size:        &size,
-		SourceURL:   &srcURL,
+		SourceURL:   srcURL,
 	}
 	if err := s.st.CustomizationCatalog().CreateSkill(context.Background(), entry); err != nil {
 		t.Fatalf("CreateSkill: %v", err)

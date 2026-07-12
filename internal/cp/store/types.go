@@ -338,25 +338,76 @@ type ProfileSecret struct {
 // Any authenticated owner may create entries they own (creator_id); writes (Update/Delete/SetListed)
 // are creator-only; List returns only listed=true entries (globally readable).
 //
-// Provenance fields (source_url, source_ref, source_subdir, sha256, size) are nullable and only set
-// for URL-ingested skills (sp-nrzf.3.14.4). Inline entries carry nil for all provenance columns.
-// The unique index (creator_id, sha256) enforces idempotent ingest — NULL sha256 rows are treated
-// as distinct under both SQLite and Postgres unique-index NULL semantics.
+// Provenance string fields (source_url, source_ref, source_subdir) are NOT NULL DEFAULT '' (empty
+// for inline entries) — sp-mwco.1.3 turned these NOT NULL because NULLs are distinct in a unique
+// index and never `=` in a predicate, so a NULL-bearing provenance key would silently never match
+// on re-ingest. sha256/size stay nullable: inline/curated entries have no content identity, and a
+// NOT NULL DEFAULT '' sha256 would collapse every inline row of one creator onto the same
+// (creator_id, '') key in idx_customization_catalog_owner_sha. The unique index (creator_id,
+// sha256) enforces idempotent URL ingest — NULL sha256 rows are treated as distinct under both
+// SQLite and Postgres unique-index NULL semantics.
 type CustomizationCatalogEntry struct {
 	bun.BaseModel `bun:"table:customization_catalog,alias:cc"`
-	CatalogID     string  `bun:"catalog_id,pk"`
-	CreatorID     string  `bun:"creator_id,notnull"`
-	Kind          string  `bun:"kind,notnull"` // skill|mcp|config|plugin (ProfileEntryKind string)
-	Name          string  `bun:"name,notnull"`
-	Description   string  `bun:"description,notnull"`
-	Content       []byte  `bun:"content"`          // curated inline content (BLOB/bytea); nil for URL skills
-	Listed        bool    `bun:"listed,notnull"`
-	CreatedAt     int64   `bun:"created_at,notnull"`
-	UpdatedAt     int64   `bun:"updated_at,notnull"`
-	// Provenance (sp-nrzf.3.14.4): set for URL-ingested skills; nil for inline entries.
-	SourceURL    *string `bun:"source_url"`
-	SourceRef    *string `bun:"source_ref"`
-	SourceSubdir *string `bun:"source_subdir"`
-	SHA256       *string `bun:"sha256"` // hex sha256 of the canonical plain tar (content identity)
-	Size         *int64  `bun:"size"`   // plain tar size in bytes
+	CatalogID     string `bun:"catalog_id,pk"`
+	CreatorID     string `bun:"creator_id,notnull"`
+	Kind          string `bun:"kind,notnull"` // skill|mcp|config|plugin (ProfileEntryKind string)
+	Name          string `bun:"name,notnull"`
+	Description   string `bun:"description,notnull"`
+	Content       []byte `bun:"content"` // curated inline content (BLOB/bytea); nil for URL skills
+	Listed        bool   `bun:"listed,notnull"`
+	CreatedAt     int64  `bun:"created_at,notnull"`
+	UpdatedAt     int64  `bun:"updated_at,notnull"`
+	// Provenance (sp-nrzf.3.14.4): set for URL-ingested skills; '' for inline entries.
+	SourceURL    string  `bun:"source_url,notnull"`
+	SourceRef    string  `bun:"source_ref,notnull"`
+	SourceSubdir string  `bun:"source_subdir,notnull"`
+	SHA256       *string `bun:"sha256"` // hex sha256 of the canonical plain tar (content identity); nil = no content identity
+	Size         *int64  `bun:"size"`   // plain tar size in bytes; nil = no content identity
+	// BundleMember is a KIND flag (sp-mwco.1.3), distinct from Listed: Listed=false means revoked
+	// (drives the kill-switch). Set at row creation only — a content-identity hit (GetByCreatorSHA
+	// dedup) must NEVER mutate Listed, Name, SourceSubdir, or BundleMember on an existing row.
+	BundleMember bool   `bun:"bundle_member,notnull"`
+	SourceCommit string `bun:"source_commit,notnull"` // tarball wrapper commit sha; '' = pre-feature/unknown
+}
+
+// --- Skill Bundles (sp-mwco.1.3) -------------------------------------------
+
+// SkillBundle is one ingested repo/ref/subdir. Unique on (creator_id, source_url, source_ref,
+// source_subdir) — the re-paste idempotency key; source_ref/source_subdir are NOT NULL DEFAULT ''
+// for the same NULL-distinctness reason as CustomizationCatalogEntry's provenance columns.
+type SkillBundle struct {
+	bun.BaseModel `bun:"table:skill_bundle,alias:sb"`
+	BundleID      string `bun:"bundle_id,pk"`
+	CreatorID     string `bun:"creator_id,notnull"`
+	Name          string `bun:"name,notnull"`
+	SourceURL     string `bun:"source_url,notnull"`
+	SourceRef     string `bun:"source_ref,notnull"`
+	SourceSubdir  string `bun:"source_subdir,notnull"`
+	ETag          string `bun:"etag,notnull"` // §4.8 conditional refetch
+	CreatedAt     int64  `bun:"created_at,notnull"`
+	UpdatedAt     int64  `bun:"updated_at,notnull"`
+}
+
+// SkillBundleVersion is one version cut of a bundle. Unique on (bundle_id, seq) — seq is
+// monotonic per bundle; allocation (MAX(seq)+1) is the repo caller's job inside a tx, and the
+// unique index turns a lost allocation race into a conflict rather than a duplicate seq.
+type SkillBundleVersion struct {
+	bun.BaseModel `bun:"table:skill_bundle_version,alias:sbv"`
+	VersionID     string `bun:"version_id,pk"`
+	BundleID      string `bun:"bundle_id,notnull"`
+	Seq           int64  `bun:"seq,notnull"`
+	SourceCommit  string `bun:"source_commit,notnull"` // '' = pre-feature/unknown
+	CreatedAt     int64  `bun:"created_at,notnull"`
+}
+
+// SkillBundleMember is one member (catalog row) of a bundle version. Primary key
+// (version_id, source_subdir): the member's repo directory is its stable identity — catalog_id
+// alone would let two byte-identical skill dirs collapse and would make an upstream rename
+// undetectable. No FK on catalog_id (see skill_bundles.go for why).
+type SkillBundleMember struct {
+	bun.BaseModel `bun:"table:skill_bundle_member,alias:sbm"`
+	VersionID     string `bun:"version_id,pk"`
+	SourceSubdir  string `bun:"source_subdir,pk"`
+	CatalogID     string `bun:"catalog_id,notnull"`
+	Position      int    `bun:"position,notnull"`
 }

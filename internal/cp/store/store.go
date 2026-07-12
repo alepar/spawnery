@@ -259,6 +259,39 @@ type CustomizationCatalogRepo interface {
 	CreateSkill(ctx context.Context, e CustomizationCatalogEntry) error
 }
 
+// SkillBundleRepo manages skill bundles: a bundle is one ingested repo/ref/subdir, cut into
+// versions whose members are customization_catalog rows tagged bundle_member=true.
+type SkillBundleRepo interface {
+	// Create inserts a new bundle. Maps a unique-constraint violation on
+	// (creator_id, source_url, source_ref, source_subdir) to ErrConflict.
+	Create(ctx context.Context, b SkillBundle) error
+	// Get returns the bundle for bundleID. ErrNotFound when absent.
+	Get(ctx context.Context, bundleID string) (SkillBundle, error)
+	// GetByKey returns the bundle for (creatorID, url, ref, subdir) — the re-paste lookup.
+	// ErrNotFound when absent.
+	GetByKey(ctx context.Context, creatorID, url, ref, subdir string) (SkillBundle, error)
+	// ListByCreator returns all bundles for the given creator, ordered by name ASC.
+	ListByCreator(ctx context.Context, creatorID string) ([]SkillBundle, error)
+	// CreateVersion inserts a version and its members atomically. seq is assumed already set by
+	// the caller. Maps a unique-constraint violation — on (bundle_id, seq) or on a duplicate
+	// member source_subdir within the version — to ErrConflict.
+	CreateVersion(ctx context.Context, v SkillBundleVersion, members []SkillBundleMember) error
+	// LatestVersion returns the version with the highest seq for bundleID. ErrNotFound when the
+	// bundle has no versions.
+	LatestVersion(ctx context.Context, bundleID string) (SkillBundleVersion, error)
+	// GetVersion returns the version for versionID. ErrNotFound when absent.
+	GetVersion(ctx context.Context, versionID string) (SkillBundleVersion, error)
+	// ListVersions returns all versions of bundleID, ordered by seq ASC.
+	ListVersions(ctx context.Context, bundleID string) ([]SkillBundleVersion, error)
+	// Members returns the members of versionID, ordered by position ASC.
+	Members(ctx context.Context, versionID string) ([]SkillBundleMember, error)
+	// MemberVersionIDs returns every version_id referencing catalogID as a member — the
+	// kill-switch (sp-mwco.1.6) and delete reference-check (sp-mwco.3.3) query.
+	MemberVersionIDs(ctx context.Context, catalogID string) ([]string, error)
+	// SetETag updates the bundle's conditional-refetch etag (§4.8). ErrNotFound when absent.
+	SetETag(ctx context.Context, bundleID, etag string, now int64) error
+}
+
 type Store interface {
 	Owners() OwnerRepo
 	Apps() AppRepo
@@ -268,6 +301,7 @@ type Store interface {
 	Secrets() SecretRepo
 	Profiles() ProfileRepo
 	CustomizationCatalog() CustomizationCatalogRepo
+	SkillBundles() SkillBundleRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error

@@ -152,11 +152,14 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 		Listed:       true,
 		CreatedAt:    now,
 		UpdatedAt:    now,
-		SourceURL:    &sourceURL,
-		SourceRef:    nullableString(sourceRef),
-		SourceSubdir: nullableString(sourceSubdir),
+		SourceURL:    sourceURL,
+		SourceRef:    sourceRef,
+		SourceSubdir: sourceSubdir,
 		SHA256:       &sha256val,
 		Size:         &size,
+		// BundleMember/SourceCommit: this task lands the columns only (sp-mwco.1.3). Bundle
+		// creation and commit-sha parsing are sp-mwco.1.4/1.2 — this standalone-skill path stays
+		// bundle_member=false, source_commit='' until those land.
 	}
 
 	if err := s.st.CustomizationCatalog().CreateSkill(ctx, e); err != nil {
@@ -176,14 +179,6 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 	_ = s.skillStore.PutIfAbsent(ctx, result.PlainTarSHA256, nil, tags) // no-op body, tags-only update is out of scope
 
 	return connect.NewResponse(&cpv1.IngestSkillFromURLResponse{CatalogId: catalogID}), nil
-}
-
-// nullableString returns nil for empty strings (maps to NULL in the DB).
-func nullableString(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
 }
 
 // SetSkillIngest wires the skill fetcher and skill store into the server.
