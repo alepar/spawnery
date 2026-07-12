@@ -217,7 +217,7 @@ and AS. It never uses the enrollment token again.
 | Caller principal | Target | Allowed operations |
 |---|---|---|
 | cloud or self-hosted node | CP | attach, register/inventory, heartbeat, lifecycle/session responses |
-| cloud or self-hosted node | AS | node revocation query, node-scoped credential mint/refresh |
+| cloud or self-hosted node | AS | node-scoped credential mint/refresh |
 | CP service | AS | revocation feed, GitHub link status, other explicitly registered policy queries |
 | AS service | CP | GitHub mint authorization, token-rotation notification |
 | AS service | CP node operations | reject |

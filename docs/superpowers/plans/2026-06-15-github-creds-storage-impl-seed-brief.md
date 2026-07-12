@@ -92,7 +92,7 @@ token mint + exact curl calls + how to read the result).
 **Secret-delivery floor (`sp-7h6.1.*`) -- production prerequisites (Spec Section 2):**
 - `sp-vd5w` first (live bug: cross-node owner-sealed delivery / InFlightAAD).
 - `sp-7h6.1.8` replay guards + proto; `sp-7h6.1.9` A4-folded owner-online delivery;
-  `sp-7h6.1.4` inject; `sp-7h6.1.11` real node-revocation checker (replace AllowAll no-op);
+  `sp-7h6.1.4` inject; `sp-7h6.1.11` fail-closed issuer CRLs + exact leaf-serial checks;
   `sp-7h6.1.1` data model + CRUD.
 - `sp-7h6.1.5` (under `sp-v40s`) raw GitHub token injection.
 

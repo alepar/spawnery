@@ -334,7 +334,7 @@ func TestForkTransferImportOpensSealedKeyAndEmitsForkOwnedPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SealForkTransferPayload: %v", err)
 	}
-	sealedKey, _, err := subkey.SealTransferKeyForNode(key, targetFx.leaf, targetFx.chain, targetFx.root, published, subkey.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, allowNoCertificateRevocations, subkey.AllowAll{}, seal.InFlightAAD{
+	sealedKey, _, err := subkey.SealTransferKeyForNode(key, targetFx.leaf, targetFx.chain, targetFx.root, published, subkey.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, allowNoCertificateRevocations, seal.InFlightAAD{
 		SpawnID:    "sp-fork",
 		Generation: 1,
 		DeliveryID: "ts-1",

@@ -111,7 +111,7 @@ func TestCPInternalHandlerPrincipalRouteMatrix(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	h := buildInternalHandler(verifier, spawnHandler, nodeHandler)
+	h := buildInternalHandler(verifier, mtls.NewConnectionRegistry(), spawnHandler, nodeHandler)
 	chain := func(leaf *pki.Leaf) *tls.ConnectionState {
 		return &tls.ConnectionState{HandshakeComplete: true, Version: tls.VersionTLS13, PeerCertificates: []*x509.Certificate{leaf.Cert, leaf.Chain[0]}}
 	}
@@ -230,11 +230,14 @@ func TestCPInternalRuntimeRefreshesSignedCRLsAndFailsClosedAtStartup(t *testing.
 	if err := os.WriteFile(cfg.Internal.RevocationCRLs[0], pki.MarshalCRLPEM(updated), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	liveCtx, liveCancel := context.WithCancel(t.Context())
+	release := runtime.connections.Register(mtls.PeerCertificate{IssuerSerial: serviceIssuer.Cert.SerialNumber, LeafSerial: leaf.SerialNumber}, liveCancel)
+	defer release()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		refreshCertificateRevocations(ctx, runtime.revocations, cfg.Internal.RevocationCRLs, time.Millisecond)
+		runtime.refresher.RunEvery(ctx, time.Millisecond)
 	}()
 	deadline := time.Now().Add(time.Second)
 	for !runtime.revocations.IsRevoked(serviceIssuer.Cert.SerialNumber, leaf.SerialNumber) {
@@ -242,6 +245,19 @@ func TestCPInternalRuntimeRefreshesSignedCRLsAndFailsClosedAtStartup(t *testing.
 			t.Fatal("refreshed CRL was not published")
 		}
 		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-liveCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("accepted CP CRL did not cancel matching live connection")
+	}
+	reached := false
+	request := httptest.NewRequest(http.MethodPost, "/internal", nil)
+	request.TLS = &tls.ConnectionState{HandshakeComplete: true, Version: tls.VersionTLS13, PeerCertificates: []*x509.Certificate{leaf, serviceIssuer.Cert}}
+	recorder := httptest.NewRecorder()
+	mtls.PrincipalMiddleware(runtime.verifier, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true })).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized || reached {
+		t.Fatalf("fresh revoked handshake context status=%d reached=%v", recorder.Code, reached)
 	}
 	cancel()
 	<-done

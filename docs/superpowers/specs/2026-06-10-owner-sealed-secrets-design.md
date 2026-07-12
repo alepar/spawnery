@@ -64,15 +64,15 @@ authority, not a key escrow.
   unexpired sub-key private halves (max 2 concurrent)** and selects by key-ID / trial-`Open` so a
   rotation mid-delivery doesn't fail opaquely `[roast m2]`.
 - **Revocation ≠ expiry `[roast M12]`:** validity alone does not revoke — a compromised node
-  re-signs fresh sub-keys with its own cert key indefinitely. So sealing clients additionally
-  consult an **AS-published, client-checked node revocation/deny-list** (or short-lived signed
-  allow-list) at delivery step 2; an owner can mark a node revoked in the AS registry and clients
-  **refuse to seal** past it. Specify the node leaf-cert lifetime; document that **secret rotation
-  must be paired with node revocation** to be effective.
+  re-signs fresh sub-keys with its own cert key indefinitely. Native sealing clients require a
+  current, signed CRL and check the exact issuer+leaf serial. Browser migration relies on the live
+  CP/node mTLS path's issuer+leaf CRL enforcement before key retrieval and delivery; it does not
+  invent a NodeID denylist. Revocation is certificate-scoped, so rotating a node certificate does
+  not revoke an unlisted sibling carrying the same NodeID.
 
 **Verification chain (closes `sp-gtm` for secrets):** client pins Root CA + AS pubkeys (shipped,
-`sp-9wd`) → verifies node cert chain + SAN against expected `(accountId | cloud, class)` →
-**checks the node is not on the AS revocation list** → verifies sub-key signature + expiry → only
+`sp-9wd`) → the live service path enforces the node leaf against its issuer's signed CRL → the
+client verifies node cert chain + SAN against expected `(accountId | cloud, class)` → verifies sub-key signature + expiry → only
 then seals. A compromised CP can relay keys but cannot mint trust (Tailnet Lock property).
 
 **Device-set registry — hash-chained, owner-signed `[roast M4]`:** device pubkeys (X25519 +
@@ -108,8 +108,8 @@ attacker. (Amend sp-ova §9's AS-compromise row accordingly.)
 
 1. Owner's client fetches the target node's cert + signed HPKE sub-key (relayed by the
    untrusted CP).
-2. Client verifies: pinned chain → SAN matches expected `(accountId, class)` → **node not on the
-   AS revocation list** (§1, M12) → sub-key signature → sub-key unexpired.
+2. The live CP/node path enforces issuer+leaf CRLs. The client verifies: pinned chain → SAN matches
+   expected `(accountId, class)` → sub-key signature → sub-key unexpired.
 3. Client unseals the DEK and **re-seals the secret to the node sub-key via single-shot HPKE
    `Seal` with AAD `(spawnId, generation, nodeId, notAfter, version)`** `[roast M11]` plus a
    node-issued **one-time `deliveryId`** in the AAD.
@@ -266,7 +266,7 @@ sharing · Ed25519-in-WebCrypto reliance (revisit ~2027).
 |---|---|---|
 | S.1 | Custody root | Per-device **non-extractable X25519 + ECDSA-P256 signing** keypairs (`[M4]`); BIP-39 recovery virtual device; Argon2id fallback; **PRF deferred Tier-2** |
 | S.2 | Sealing primitive | **HPKE everywhere** (RFC 9180, DHKEM-X25519); **fresh DEK per write** (`[M2]`); recipient DHKEM on the **non-extractable** key via native WebCrypto, refuse extractable (`[M15]`) |
-| S.3 | Node encryption key | Cert-signed HPKE sub-key (72 h, **retain 2 concurrent** `[m2]`); **+ AS revocation-list check** (revocation ≠ expiry, `[M12]`); rejected RFC 8410 / CSR dual-key |
+| S.3 | Node encryption key | Cert-signed HPKE sub-key (72 h, **retain 2 concurrent** `[m2]`); issuer+leaf CRLs enforced by native clients and the browser's live service path, never by NodeID; rejected RFC 8410 / CSR dual-key |
 | S.4 | Context binding | In-flight AAD `(spawnId, generation, nodeId, notAfter, **version**)` **+ one-time `deliveryId`**; node enforces clock + version-monotonic + delivery-once (`[M11]`); at-rest `(accountId, secretId, version)` |
 | S.5 | Trust registries | Device set at the AS = **hash-chained, member-signed log** (genesis co-signed device₁+recovery); AS stores≠authors; clients verify+pin before every seal (`[M4]`) |
 | S.6 | Enrollment | Fingerprint-bound `(accountId, class, fingerprint, expiry, single-use)` tokens, direct node→AS — amends sp-ova §3.1 |

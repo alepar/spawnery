@@ -22,6 +22,7 @@ import (
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/config"
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/storage"
@@ -39,6 +40,55 @@ func loadSpawnletTest(t *testing.T, env string, getenv map[string]string, sets .
 		EnvAliases: spawnletEnvAliases,
 		Sets:       sets,
 	})
+}
+
+func TestSpawnletCertificateCRLClosesMatchingLiveConnection(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := pki.NewRootCA("root")
+	issuer, _ := root.NewIntermediate(pki.IssuerService, "prod.spawnery.internal")
+	dir := t.TempDir()
+	rootPath := filepath.Join(dir, "root.pem")
+	issuerPath := filepath.Join(dir, "issuer.pem")
+	crlPath := filepath.Join(dir, "issuer.crl")
+	initial, _ := issuer.CreateCRL(big.NewInt(1), nil, now, now.Add(time.Hour))
+	for path, data := range map[string][]byte{rootPath: pki.MarshalCertPEM(root.Cert), issuerPath: pki.MarshalCertPEM(issuer.Cert), crlPath: pki.MarshalCRLPEM(initial)} {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &Spawnlet{}
+	cfg.Node.AuthMode = "enforced"
+	cfg.Node.RootCA = rootPath
+	cfg.Node.TrustDomain = "prod.spawnery.internal"
+	cfg.Node.CertificateRevocationState = filepath.Join(dir, "state", "certificates.json")
+	cfg.Node.CertificateRevocationIssuers = issuerPath
+	cfg.Node.CertificateRevocationCRLs = crlPath
+	runtime, err := loadNodeCertificateRevocations(cfg, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		runtime.unsubscribe()
+		_ = runtime.state.Close()
+	})
+	live, cancelLive := context.WithCancel(t.Context())
+	release := runtime.connections.Register(mtls.PeerCertificate{IssuerSerial: issuer.Cert.SerialNumber, LeafSerial: big.NewInt(77)}, cancelLive)
+	t.Cleanup(release)
+	updated, _ := issuer.CreateCRL(big.NewInt(2), []x509.RevocationListEntry{{SerialNumber: big.NewInt(77), RevocationTime: now}}, now, now.Add(time.Hour))
+	if err := os.WriteFile(crlPath, pki.MarshalCRLPEM(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.state.IsRevoked(issuer.Cert.SerialNumber, big.NewInt(77)) {
+		t.Fatal("spawnlet fresh verification did not reject revoked serial")
+	}
+	select {
+	case <-live.Done():
+	case <-time.After(time.Second):
+		t.Fatal("spawnlet accepted CRL did not close matching live connection")
+	}
 }
 
 // --- config-framework tests -----------------------------------------------

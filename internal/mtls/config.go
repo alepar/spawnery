@@ -191,7 +191,39 @@ func validateServerIdentity(identity tls.Certificate) error {
 }
 
 func (v *PeerVerifier) verifyPresented(chain []*x509.Certificate, usage x509.ExtKeyUsage) (pki.Principal, error) {
-	return verifyPresentedPrincipal(chain, v.root, v.trustDomain, v.currentTime, v.isRevoked, usage)
+	principal, _, err := v.verifyPresentedPeer(chain, usage)
+	return principal, err
+}
+
+func (v *PeerVerifier) verifyPresentedPeer(chain []*x509.Certificate, usage x509.ExtKeyUsage) (pki.Principal, PeerCertificate, error) {
+	if len(chain) < 2 {
+		return pki.Principal{}, PeerCertificate{}, errors.New("mtls: peer certificate has no intermediate")
+	}
+	intermediatePool := x509.NewCertPool()
+	for _, certificate := range chain[1:] {
+		if certificate == nil {
+			return pki.Principal{}, PeerCertificate{}, errors.New("mtls: nil peer intermediate certificate")
+		}
+		intermediatePool.AddCert(certificate)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(v.root)
+	verified, err := chain[0].Verify(x509.VerifyOptions{
+		Roots: roots, Intermediates: intermediatePool, CurrentTime: v.currentTime(), KeyUsages: []x509.ExtKeyUsage{usage},
+	})
+	if err != nil {
+		return pki.Principal{}, PeerCertificate{}, fmt.Errorf("mtls: verify peer certificate path: %w", err)
+	}
+	for _, candidate := range verified {
+		if len(candidate) != 3 || !candidate[2].Equal(v.root) {
+			continue
+		}
+		principal, verifyErr := verifyPresentedPrincipal([]*x509.Certificate{candidate[0], candidate[1]}, v.root, v.trustDomain, v.currentTime, v.isRevoked, usage)
+		if verifyErr == nil {
+			return principal, PeerCertificate{IssuerSerial: new(big.Int).Set(candidate[1].SerialNumber), LeafSerial: new(big.Int).Set(candidate[0].SerialNumber)}, nil
+		}
+	}
+	return pki.Principal{}, PeerCertificate{}, errors.New("mtls: no verified peer chain has a permitted issuer")
 }
 
 func verifyConnectionPrincipal(state tls.ConnectionState, root *x509.Certificate, trustDomain string, currentTime func() time.Time, isRevoked func(issuer, serial *big.Int) bool, usage x509.ExtKeyUsage) (pki.Principal, error) {

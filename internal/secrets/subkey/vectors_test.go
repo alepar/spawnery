@@ -195,7 +195,7 @@ func verifySubKeyVectors(t *testing.T) {
 	notBefore, _ := time.Parse(time.RFC3339Nano, v.NotBefore)
 	verifyAt := notBefore.Add(time.Hour)
 
-	// Verify using VerifyNodeForSealing (leaf + chain + root + sk + expect + revoked + now).
+	// Verify using VerifyNodeForSealing (leaf + chain + root + sk + expect + certificate revocations + now).
 	trustHPKE, id, err := subkey.VerifyNodeForSealing(
 		[]byte(v.LeafPEM),
 		[]byte(v.IntermediatePEM),
@@ -203,7 +203,6 @@ func verifySubKeyVectors(t *testing.T) {
 		sk,
 		subkey.Expectation{TrustDomain: "prod.spawnery.internal", Tenancy: pki.ClassSelfHosted, AccountID: "alice"},
 		allowNoCertificateRevocations,
-		nil,      // AllowAll node-id revocation
 		verifyAt, // within sub-key validity window
 	)
 	if err != nil {

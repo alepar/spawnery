@@ -20,9 +20,7 @@ import { authEnabled, useSessionStore } from "@/auth/session";
 import { pollAndSign, registerPendedOp, clearPendedOp } from "@/auth/intent";
 import { openEnvelope, hpkeSeal } from "@/keys/hpke";
 import type { Envelope } from "@/keys/hpke";
-import { asNodeRevocationChecker } from "@/keys/nodeRevocation";
 import { verifyNodeForSealing } from "@/keys/subkey";
-import type { RevocationChecker } from "@/keys/subkey";
 import type { DeviceKeys } from "@/keys/device";
 import { fromBase64, toBase64, encodeFields } from "@/keys/encoding";
 import { PINNED_TRUST_DOMAIN } from "@/config/trustAnchors";
@@ -325,7 +323,6 @@ export async function deliverOwnerSealedJournalKeys(
   rootPEM: string,
   now: Date,
   onProgress?: (step: "verifying-node" | "resealing" | "delivering") => void,
-  revocationChecker?: RevocationChecker,
 ): Promise<OwnerSealedDeliveryResult> {
   if (entries.length === 0) {
     return { journalKeysDelivered: 0 };
@@ -351,16 +348,16 @@ export async function deliverOwnerSealedJournalKeys(
   const accountId = tenancy === "self-hosted"
     ? (useSessionStore.getState().account?.accountId ?? "")
     : undefined;
-  const checker = revocationChecker ?? asNodeRevocationChecker();
   let hpkePub: Uint8Array;
   try {
+    // Certificate revocation is enforced on the live CP/node mTLS path by issuer+leaf CRLs.
+    // The browser retains its independent pinned-root, SAN, issuer-policy, and sub-key checks.
     const verified = await verifyNodeForSealing(
       nk.nodeCertChain,
       rootPEM,
       nk.signedSubkey,
       { trustDomain: PINNED_TRUST_DOMAIN, tenancy, accountId },
       now,
-      checker,
     );
     if (verified.identity.nodeId !== resolvedNodeId) {
       throw new Error(`verified node ${JSON.stringify(verified.identity.nodeId)} does not match resolved node ${JSON.stringify(resolvedNodeId)}`);
@@ -411,7 +408,7 @@ export async function deliverOwnerSealedJournalKeys(
  *   2. Drive MigrateSpawn (suspend source → resume on target); intent flow is
  *      launched concurrently via the A4 pollAndSign path.
  *   3. Fetch the target node's key material + PKI-verify via verifyNodeForSealing
- *      (including AS revocation check if revocationChecker is supplied).
+ *      (live issuer+leaf revocation is enforced by the CP/node mTLS path).
  *   4. Unseal each journal key with this device key, re-seal to the target node.
  *   5. Deliver the resealed ciphertext to the CP (which relays to the node).
  *
@@ -426,7 +423,6 @@ export async function deliverOwnerSealedJournalKeys(
  * deviceKeys: the caller must load and pass the device X25519 keypair.
  * rootPEM: pinned Root CA PEM embedded in the web bundle (empty = dev/insecure mode).
  * now: injectable for testing; use new Date() in production.
- * revocationChecker: optional checker override; default is the AS checker with no cache.
  * onProgress: optional per-step callback for UI progress updates.
  * spawnStatusAfterFail: injectable for testing — resolves to current spawn status after
  *   a migrate-leg failure so the "suspend" vs "resume" leg tag can be set correctly.
@@ -438,7 +434,6 @@ export async function runMigrate(
   rootPEM:    string,
   now:        Date,
   onProgress?: (p: MigrateProgress) => void,
-  revocationChecker?: RevocationChecker,
   spawnStatusAfterFail?: (id: string) => Promise<string>,
 ): Promise<MigrateResult> {
   const targetNodeId  = target.class === "cloud" ? "" : target.nodeId;
@@ -505,7 +500,6 @@ export async function runMigrate(
       rootPEM,
       now,
       (step) => onProgress?.({ step, resolvedNodeId }),
-      revocationChecker,
     );
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

@@ -10,6 +10,7 @@ import (
 )
 
 type principalContextKey struct{}
+type verifiedPeerContextKey struct{}
 
 // PrincipalMiddleware verifies a completed internal TLS connection's optional client certificate
 // and attaches its typed principal to the request context. A completed connection without a client
@@ -24,14 +25,20 @@ func PrincipalMiddleware(verifier *PeerVerifier, next http.Handler) http.Handler
 			next.ServeHTTP(w, r)
 			return
 		}
-		principal, err := verifier.verifyPresented(r.TLS.PeerCertificates, x509.ExtKeyUsageClientAuth)
+		principal, peer, err := verifier.verifyPresentedPeer(r.TLS.PeerCertificates, x509.ExtKeyUsageClientAuth)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
+		ctx = context.WithValue(ctx, verifiedPeerContextKey{}, peer)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func VerifiedPeerFromContext(ctx context.Context) (PeerCertificate, bool) {
+	peer, ok := ctx.Value(verifiedPeerContextKey{}).(PeerCertificate)
+	return peer, ok
 }
 
 // PrincipalFromContext returns the verified Spawnery principal attached to ctx.

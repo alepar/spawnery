@@ -31,6 +31,7 @@ func TestASValidateSigning(t *testing.T) {
 		cfg.Signing.CurrentKeyPEM = "current-key.pem"
 		cfg.Signing.CurrentChainPEM = "current-chain.pem"
 		cfg.CA.TrustDomain = "prod.spawnery.internal"
+		cfg.CA.RevocationCRL = "self-hosted.crl"
 		cfg.Internal = ASInternalTLS{
 			Listen: "127.0.0.1:8091", TrustDomain: "prod.spawnery.internal", RootCA: "root.pem",
 			Cert: "authsvc.pem", Chain: "service.pem", Key: "authsvc-key.pem", ServerName: "authsvc.internal",
@@ -52,6 +53,11 @@ func TestASValidateSigning(t *testing.T) {
 		{"missing current chain", func(c *AS) { c.Signing.CurrentChainPEM = "" }, "signing.current_chain_pem"},
 		{"next key without chain", func(c *AS) { c.Signing.NextKeyPEM = "next-key.pem" }, "signing.next_key_pem and signing.next_chain_pem"},
 		{"next chain without key", func(c *AS) { c.Signing.NextChainPEM = "next-chain.pem" }, "signing.next_key_pem and signing.next_chain_pem"},
+		{"renew before exceeds validity", func(c *AS) { c.CA.RevocationRenewBefore = 24 * time.Hour }, "ca.revocation_renew_before"},
+		{"renew interval exceeds window", func(c *AS) {
+			c.CA.RevocationRenewInterval = 7 * time.Hour
+			c.CA.RevocationRenewBefore = 6 * time.Hour
+		}, "ca.revocation_renew_interval"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := base()

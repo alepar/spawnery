@@ -26,7 +26,6 @@ func TestSealTransferKeyForVerifiedNode(t *testing.T) {
 		published,
 		subkey.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"},
 		allowNoCertificateRevocations,
-		subkey.AllowAll{},
 		seal.InFlightAAD{SpawnID: "sp-fork", Generation: 1, DeliveryID: "ts-1"},
 		now,
 	)
@@ -55,7 +54,6 @@ func TestSealTransferKeyForNodeRejectsWrongRoot(t *testing.T) {
 		published,
 		subkey.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"},
 		allowNoCertificateRevocations,
-		subkey.AllowAll{},
 		seal.InFlightAAD{SpawnID: "sp-fork", Generation: 1, DeliveryID: "ts-1"},
 		now,
 	)
@@ -76,7 +74,6 @@ func TestSealTransferKeyForNodeRequiresPinnedRoot(t *testing.T) {
 		published,
 		subkey.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"},
 		allowNoCertificateRevocations,
-		subkey.AllowAll{},
 		seal.InFlightAAD{SpawnID: "sp-fork", Generation: 1, DeliveryID: "ts-1"},
 		now,
 	)

@@ -30,6 +30,10 @@ func TestPrincipalMiddlewarePropagatesVerifiedPrincipal(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("principal = %+v, want %+v", got, want)
 		}
+		peer, ok := VerifiedPeerFromContext(r.Context())
+		if !ok || peer.IssuerSerial.Cmp(f.selfHostCA.Cert.SerialNumber) != 0 || peer.LeafSerial.Cmp(f.selfHosted.Cert.SerialNumber) != 0 {
+			t.Fatalf("verified peer = %+v, present=%v", peer, ok)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	req := requestWithPeer("/node", f.selfHosted)
@@ -38,6 +42,36 @@ func TestPrincipalMiddlewarePropagatesVerifiedPrincipal(t *testing.T) {
 	PrincipalMiddleware(newPeerVerifier(t, f, nil), next).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}
+
+func TestPrincipalMiddlewareUsesCanonicalVerifiedIssuerWithReorderedExtras(t *testing.T) {
+	t.Parallel()
+	f := newTLSFixture(t)
+	reached := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		peer, ok := VerifiedPeerFromContext(r.Context())
+		if !ok || peer.IssuerSerial.Cmp(f.selfHostCA.Cert.SerialNumber) != 0 {
+			t.Fatalf("verified issuer = %+v, present=%v", peer, ok)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	req := requestWithPeer("/node", f.selfHosted)
+	req.TLS.PeerCertificates = []*x509.Certificate{f.selfHosted.Cert, f.cloudCA.Cert, f.selfHostCA.Cert}
+	rec := httptest.NewRecorder()
+	PrincipalMiddleware(newPeerVerifier(t, f, nil), next).ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent || !reached {
+		t.Fatalf("status=%d reached=%v", rec.Code, reached)
+	}
+
+	missing := requestWithPeer("/node", f.selfHosted)
+	missing.TLS.PeerCertificates = []*x509.Certificate{f.selfHosted.Cert, f.cloudCA.Cert}
+	rec = httptest.NewRecorder()
+	reached = false
+	PrincipalMiddleware(newPeerVerifier(t, f, nil), next).ServeHTTP(rec, missing)
+	if rec.Code != http.StatusUnauthorized || reached {
+		t.Fatalf("missing issuer status=%d reached=%v", rec.Code, reached)
 	}
 }
 

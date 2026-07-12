@@ -110,7 +110,11 @@ type Service struct {
 
 	deviceSet *deviceSetHandler // device-set registry; nil until WithDeviceSet is called
 
-	nodeRevocations store.NodeRevocationRepo
+	nodeRevocationStore store.Store
+	nodeCRLSink         func([]byte) error
+	nodeCRLMutationMu   sync.Mutex
+	nodeCRLPublishMu    sync.Mutex
+	nodeCRLCommitted    func(*big.Int)
 
 	githubMintStore       store.Store
 	githubMintProvider    GitHubProvider
@@ -242,9 +246,11 @@ func WithDeviceSet(st store.DeviceSetRepo, spaOrigin string, accountFromReq Acco
 	}
 }
 
-// WithNodeRevocations attaches the AS-published node deny-list store.
-func WithNodeRevocations(st store.NodeRevocationRepo) Option {
-	return func(s *Service) { s.nodeRevocations = st }
+func WithNodeRevocationStore(st store.Store, sink func([]byte) error) Option {
+	return func(s *Service) {
+		s.nodeRevocationStore = st
+		s.nodeCRLSink = sink
+	}
 }
 
 func WithGitHubMinting(st store.Store, provider GitHubProvider) Option {

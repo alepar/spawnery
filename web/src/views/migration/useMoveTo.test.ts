@@ -208,9 +208,9 @@ describe("useMoveTo per-leg error states (WM3)", () => {
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([ENTRY]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("owner-sealed");
     vi.mocked(deviceMod.loadDeviceKeys).mockResolvedValue(FAKE_KEYS);
-    // Simulate delivery failure — including the revoked-node case (delivery leg, WM8).
+    // Simulate certificate rejection on the live delivery path.
     vi.mocked(migrationMod.runMigrate).mockRejectedValue(
-      new MigrateError("Node verification failed: node is on the AS revocation deny-list", "delivery"),
+      new MigrateError("Node verification failed: certificate is revoked", "delivery"),
     );
 
     const { result } = renderHook(() => useMoveTo());
@@ -219,7 +219,7 @@ describe("useMoveTo per-leg error states (WM3)", () => {
     await act(async () => { result.current.confirm(); });
 
     expect(result.current.state.phase).toBe("delivery-pending");
-    expect(result.current.state.errorMsg).toContain("revocation deny-list");
+    expect(result.current.state.errorMsg).toContain("certificate is revoked");
   });
 
   it("network error → reconnecting phase", async () => {

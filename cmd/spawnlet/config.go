@@ -45,6 +45,7 @@ type Spawnlet struct {
 		CertificateRevocationState   string        `koanf:"certificate_revocation_state"`
 		CertificateRevocationIssuers string        `koanf:"certificate_revocation_issuers"`
 		CertificateRevocationCRLs    string        `koanf:"certificate_revocation_crls"`
+		CertificateRevocationURLs    string        `koanf:"certificate_revocation_urls"`
 		CertificateRevocationRefresh time.Duration `koanf:"certificate_revocation_refresh_interval"`
 	} `koanf:"node"`
 
@@ -131,8 +132,11 @@ func (s Spawnlet) Validate() error {
 	if s.ASURL != "" && s.ASServerName == "" {
 		return fmt.Errorf("as_server_name is required when as_url is configured in enforced mode")
 	}
-	if s.Node.CertificateRevocationState == "" || s.Node.CertificateRevocationIssuers == "" || s.Node.CertificateRevocationCRLs == "" {
-		return fmt.Errorf("node certificate revocation state, issuers, and CRLs are required in enforced mode")
+	if s.Node.CertificateRevocationState == "" || s.Node.CertificateRevocationIssuers == "" || s.Node.CertificateRevocationCRLs == "" && s.Node.CertificateRevocationURLs == "" {
+		return fmt.Errorf("node certificate revocation state, issuers, and CRL sources are required in enforced mode")
+	}
+	if s.Node.CertificateRevocationCRLs != "" && s.Node.CertificateRevocationURLs != "" {
+		return fmt.Errorf("configure exactly one node certificate CRL source channel")
 	}
 	return nil
 }
@@ -168,6 +172,7 @@ var spawnletEnvAliases = map[string]string{
 	"NODE_CERTIFICATE_REVOCATION_STATE":   "node.certificate_revocation_state",
 	"NODE_CERTIFICATE_REVOCATION_ISSUERS": "node.certificate_revocation_issuers",
 	"NODE_CERTIFICATE_REVOCATION_CRLS":    "node.certificate_revocation_crls",
+	"NODE_CERTIFICATE_REVOCATION_URLS":    "node.certificate_revocation_urls",
 	"NODE_CERTIFICATE_REVOCATION_REFRESH_INTERVAL": "node.certificate_revocation_refresh_interval",
 	"CP_ADDR":                       "cp.addr",
 	"CP_NODE_ADDR":                  "cp.node_addr",

@@ -55,6 +55,7 @@ type CP struct {
 		RevocationState           string        `koanf:"revocation_state"`
 		RevocationIssuers         []string      `koanf:"revocation_issuers"`
 		RevocationCRLs            []string      `koanf:"revocation_crls"`
+		RevocationURLs            []string      `koanf:"revocation_urls"`
 		RevocationRefreshInterval time.Duration `koanf:"revocation_refresh_interval"`
 	} `koanf:"internal"`
 
@@ -108,6 +109,7 @@ func (c *CP) derive() {
 	}
 	c.Internal.RevocationIssuers = splitPathList(c.Internal.RevocationIssuers)
 	c.Internal.RevocationCRLs = splitPathList(c.Internal.RevocationCRLs)
+	c.Internal.RevocationURLs = splitPathList(c.Internal.RevocationURLs)
 }
 
 func splitPathList(values []string) []string {
@@ -169,8 +171,8 @@ func (c CP) Validate() error {
 		if len(c.Internal.RevocationIssuers) == 0 {
 			return fmt.Errorf("auth.mode=prod requires internal.revocation_issuers")
 		}
-		if len(c.Internal.RevocationCRLs) == 0 {
-			return fmt.Errorf("auth.mode=prod requires internal.revocation_crls")
+		if len(c.Internal.RevocationCRLs) == 0 && len(c.Internal.RevocationURLs) == 0 {
+			return fmt.Errorf("auth.mode=prod requires internal.revocation_crls or internal.revocation_urls")
 		}
 	}
 	if (c.Auth.ASURL != "" || c.Auth.ASRevocationURL != "") && c.Internal.ServerName == "" {
@@ -179,7 +181,7 @@ func (c CP) Validate() error {
 	internalConfigured := c.Auth.Mode == "prod" || c.Auth.ASURL != "" || c.Auth.ASRevocationURL != "" ||
 		c.Internal.Listen != "" || c.Internal.TrustDomain != "" || c.Internal.RootCA != "" ||
 		c.Internal.Cert != "" || c.Internal.Chain != "" || c.Internal.Key != "" ||
-		c.Internal.RevocationState != "" || len(c.Internal.RevocationIssuers) != 0 || len(c.Internal.RevocationCRLs) != 0
+		c.Internal.RevocationState != "" || len(c.Internal.RevocationIssuers) != 0 || len(c.Internal.RevocationCRLs) != 0 || len(c.Internal.RevocationURLs) != 0
 	if internalConfigured && c.Auth.Mode != "prod" {
 		for _, required := range []struct{ name, value string }{
 			{"internal.listen", c.Internal.Listen},
@@ -194,9 +196,18 @@ func (c CP) Validate() error {
 				return fmt.Errorf("internal mTLS configuration requires %s", required.name)
 			}
 		}
-		if len(c.Internal.RevocationIssuers) == 0 || len(c.Internal.RevocationCRLs) == 0 {
-			return fmt.Errorf("internal mTLS configuration requires internal.revocation_issuers and internal.revocation_crls")
+		if len(c.Internal.RevocationIssuers) == 0 || len(c.Internal.RevocationCRLs) == 0 && len(c.Internal.RevocationURLs) == 0 {
+			return fmt.Errorf("internal mTLS configuration requires internal.revocation_issuers and a CRL source")
 		}
+	}
+	if len(c.Internal.RevocationCRLs) != 0 && len(c.Internal.RevocationCRLs) != len(c.Internal.RevocationIssuers) {
+		return fmt.Errorf("internal.revocation_crls must match internal.revocation_issuers")
+	}
+	if len(c.Internal.RevocationURLs) != 0 && len(c.Internal.RevocationURLs) != len(c.Internal.RevocationIssuers) {
+		return fmt.Errorf("internal.revocation_urls must match internal.revocation_issuers")
+	}
+	if len(c.Internal.RevocationCRLs) != 0 && len(c.Internal.RevocationURLs) != 0 {
+		return fmt.Errorf("configure exactly one of internal.revocation_crls or internal.revocation_urls")
 	}
 	if c.Store.Driver == "postgres" && (c.Store.DSN == "" || string(c.Store.DSN) == sqliteDefaultDSN) {
 		return fmt.Errorf("store.driver=postgres requires store.dsn (a postgres DSN)")
@@ -253,6 +264,7 @@ var cpEnvAliases = map[string]string{
 	"CP_INTERNAL_REVOCATION_STATE":        "internal.revocation_state",
 	"CP_INTERNAL_REVOCATION_ISSUERS":      "internal.revocation_issuers",
 	"CP_INTERNAL_REVOCATION_CRLS":         "internal.revocation_crls",
+	"CP_INTERNAL_REVOCATION_URLS":         "internal.revocation_urls",
 	"CP_INTERNAL_REVOCATION_REFRESH":      "internal.revocation_refresh_interval",
 	"CP_TELEMETRY":                        "telemetry",
 	"CP_MAX_SPAWNS_PER_OWNER":             "max_spawns_per_owner",

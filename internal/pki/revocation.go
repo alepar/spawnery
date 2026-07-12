@@ -60,6 +60,16 @@ type revocationSnapshot struct {
 	failClosed bool
 }
 
+type RevocationUpdate struct {
+	IssuerSerial *big.Int
+	NewlyRevoked []*big.Int
+}
+
+type revocationSubscriber struct {
+	active   atomic.Bool
+	callback func(RevocationUpdate)
+}
+
 // RevocationState owns a durable monotonic CRL checkpoint and publishes immutable reader snapshots.
 type RevocationState struct {
 	mu           sync.Mutex
@@ -72,6 +82,8 @@ type RevocationState struct {
 	poisoned     error
 	beforeRename func() error
 	afterRename  func() error
+	nextSubID    uint64
+	subscribers  map[uint64]*revocationSubscriber
 }
 
 // OpenRevocationState opens and revalidates the persisted CRLs for the configured trusted issuers.
@@ -123,7 +135,7 @@ func OpenRevocationState(path string, issuers []*x509.Certificate, now func() ti
 			_ = releaseRevocationStateLock(lockFile)
 		}
 	}()
-	state := &RevocationState{path: path, issuers: trusted, now: now, lockFile: lockFile}
+	state := &RevocationState{path: path, issuers: trusted, now: now, lockFile: lockFile, subscribers: make(map[uint64]*revocationSubscriber)}
 	initial := &revocationSnapshot{issuers: make(map[string]issuerRevocationSnapshot)}
 	record, err := readPersistedRevocationState(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -154,10 +166,41 @@ func (state *RevocationState) Close() error {
 		return nil
 	}
 	state.closed = true
+	for id, subscriber := range state.subscribers {
+		subscriber.active.Store(false)
+		delete(state.subscribers, id)
+	}
 	state.publishFailClosed(state.snapshot.Load())
 	err := releaseRevocationStateLock(state.lockFile)
 	state.lockFile = nil
 	return err
+}
+
+// SubscribeRevocations registers a non-blocking notification delivered after a CRL is durably
+// applied. The returned function prevents future delivery; an already running callback may finish.
+func (state *RevocationState) SubscribeRevocations(callback func(RevocationUpdate)) func() {
+	if state == nil || callback == nil {
+		return func() {}
+	}
+	state.mu.Lock()
+	if state.closed {
+		state.mu.Unlock()
+		return func() {}
+	}
+	state.nextSubID++
+	id := state.nextSubID
+	subscriber := &revocationSubscriber{callback: callback}
+	subscriber.active.Store(true)
+	state.subscribers[id] = subscriber
+	state.mu.Unlock()
+	return func() {
+		state.mu.Lock()
+		if current, ok := state.subscribers[id]; ok {
+			current.active.Store(false)
+			delete(state.subscribers, id)
+		}
+		state.mu.Unlock()
+	}
 }
 
 // ApplyPEM verifies and durably applies a newer CRL before publishing it to readers.
@@ -170,19 +213,22 @@ func (state *RevocationState) ApplyPEM(data []byte) error {
 		return err
 	}
 	state.mu.Lock()
-	defer state.mu.Unlock()
 	if err := state.mutationErrorLocked(); err != nil {
+		state.mu.Unlock()
 		return err
 	}
 	currentTime := state.now()
 	if currentTime.IsZero() {
+		state.mu.Unlock()
 		return errors.New("pki: revocation state clock returned zero time")
 	}
 	issuerSerial, issuer, err := state.issuerForCRL(list)
 	if err != nil {
+		state.mu.Unlock()
 		return err
 	}
 	if err := VerifyCRL(list, issuer, currentTime); err != nil {
+		state.mu.Unlock()
 		return err
 	}
 	candidateEntry := snapshotFromCRL(list)
@@ -190,14 +236,18 @@ func (state *RevocationState) ApplyPEM(data []byte) error {
 	if existing, ok := current.issuers[issuerSerial]; ok {
 		switch list.Number.Cmp(existing.number) {
 		case -1:
+			state.mu.Unlock()
 			return ErrCRLRollback
 		case 0:
 			if candidateEntry.digest == existing.digest {
+				state.mu.Unlock()
 				return nil
 			}
+			state.mu.Unlock()
 			return ErrCRLConflict
 		}
 	}
+	newlyRevoked := newlyRevokedSerials(current.issuers[issuerSerial], candidateEntry)
 	candidate := cloneRevocationSnapshot(current)
 	candidate.issuers[issuerSerial] = candidateEntry
 	renamed := false
@@ -208,11 +258,61 @@ func (state *RevocationState) ApplyPEM(data []byte) error {
 		if renamed {
 			state.poisoned = fmt.Errorf("%w: %w", ErrRevocationStatePoisoned, err)
 			state.publishFailClosed(candidate)
+			state.mu.Unlock()
 			return state.poisoned
 		}
+		state.mu.Unlock()
 		return err
 	}
+	subscribers := state.revocationSubscribersLocked()
+	state.mu.Unlock()
+	if len(newlyRevoked) != 0 {
+		publishRevocationUpdate(subscribers, RevocationUpdate{IssuerSerial: new(big.Int).Set(issuer.SerialNumber), NewlyRevoked: newlyRevoked})
+	}
 	return nil
+}
+
+func newlyRevokedSerials(current, candidate issuerRevocationSnapshot) []*big.Int {
+	serials := make([]string, 0, len(candidate.revoked))
+	for serial := range candidate.revoked {
+		if _, existed := current.revoked[serial]; !existed {
+			serials = append(serials, serial)
+		}
+	}
+	sort.Strings(serials)
+	result := make([]*big.Int, 0, len(serials))
+	for _, serial := range serials {
+		value, ok := new(big.Int).SetString(serial, 16)
+		if ok {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func (state *RevocationState) revocationSubscribersLocked() []*revocationSubscriber {
+	result := make([]*revocationSubscriber, 0, len(state.subscribers))
+	for _, subscriber := range state.subscribers {
+		result = append(result, subscriber)
+	}
+	return result
+}
+
+func publishRevocationUpdate(subscribers []*revocationSubscriber, update RevocationUpdate) {
+	for _, subscriber := range subscribers {
+		issuer := new(big.Int).Set(update.IssuerSerial)
+		serials := make([]*big.Int, len(update.NewlyRevoked))
+		for index, serial := range update.NewlyRevoked {
+			serials[index] = new(big.Int).Set(serial)
+		}
+		go func(subscriber *revocationSubscriber) {
+			if !subscriber.active.Load() {
+				return
+			}
+			defer func() { _ = recover() }()
+			subscriber.callback(RevocationUpdate{IssuerSerial: issuer, NewlyRevoked: serials})
+		}(subscriber)
+	}
 }
 
 // IsRevoked reports membership in the latest current CRL for issuer. Missing, stale, closed, and
@@ -299,7 +399,7 @@ func (state *RevocationState) restore(record *persistedRevocationState, now time
 		if serial != persisted.IssuerSerial || matched != issuer {
 			return nil, errors.New("pki: persisted CRL issuer serial mismatch")
 		}
-		if err := VerifyCRL(list, issuer, now); err != nil {
+		if err := verifyCRL(list, issuer, now, true); err != nil {
 			return nil, fmt.Errorf("pki: verify persisted CRL: %w", err)
 		}
 		snapshot.issuers[serial] = snapshotFromCRL(list)

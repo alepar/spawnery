@@ -68,7 +68,7 @@ func moveCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths, time.Now)
+			opts, err := loadMoveOptions(dir, c.String("token"), rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths, time.Now)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
@@ -93,7 +93,7 @@ func moveCmd() *cli.Command {
 	}
 }
 
-func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath, trustDomain, crlStatePath string, issuerPaths, crlPaths []string, clock func() time.Time) (client.MoveOptions, error) {
+func loadMoveOptions(dir, tokenFlag, rootCAPath, trustDomain, crlStatePath string, issuerPaths, crlPaths []string, clock func() time.Time) (client.MoveOptions, error) {
 	if err := validateMovePKIFlags(rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths); err != nil {
 		return client.MoveOptions{}, err
 	}
@@ -155,16 +155,6 @@ func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath, trustDomain, crlStatePa
 		}
 		opts.CertificateRevocations = state.IsRevoked
 		opts.CloseCertificateRevocations = state.Close
-	}
-	asURL := strings.TrimRight(asFlag, "/")
-	if asURL == "" {
-		state, err := loadState(dir)
-		if err == nil && state != nil {
-			asURL = strings.TrimRight(state.ASURL, "/")
-		}
-	}
-	if asURL != "" {
-		opts.RevocationURL = asURL + "/node-revocations"
 	}
 	return opts, nil
 }

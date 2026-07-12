@@ -32,6 +32,7 @@ node:
   certificate_revocation_state: ""   # durable monotonic issuer-CRL state
   certificate_revocation_issuers: "" # comma-separated trusted role-bearing issuer certs
   certificate_revocation_crls: ""    # matching deployment-provided current CRLs
+  certificate_revocation_urls: ""    # matching untrusted HTTP CRL endpoints
   certificate_revocation_refresh_interval: 5s
 
 cp:

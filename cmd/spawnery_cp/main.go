@@ -242,10 +242,11 @@ func main() {
 		log.Fatalf("cp: load internal mTLS: %v", err)
 	}
 	if internalRuntime != nil {
+		defer internalRuntime.unsubscribe()
 		defer internalRuntime.revocations.Close()
-		if len(cfg.Internal.RevocationCRLs) > 0 {
+		if internalRuntime.refresher != nil {
 			safego.Go("cp.certificate-revocation-reloader", func() {
-				refreshCertificateRevocations(ctx, internalRuntime.revocations, cfg.Internal.RevocationCRLs, cfg.Internal.RevocationRefreshInterval)
+				internalRuntime.refresher.Run(ctx)
 			})
 		}
 	}
@@ -313,7 +314,7 @@ func main() {
 	devNodePath := ""
 	if internalRuntime != nil {
 		_, internalSpawnHandler := cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(rpclog.CorrelationInterceptor(), metrics.RPCInterceptor(), rpclog.RecoverInterceptor("cp"), rpclog.Interceptor("cp")))
-		internalSrv, err = buildInternalTLSServer(cfg.Internal.Listen, internalRuntime.tlsConfig, buildInternalHandler(internalRuntime.verifier, internalSpawnHandler, nodeHandler))
+		internalSrv, err = buildInternalTLSServer(cfg.Internal.Listen, internalRuntime.tlsConfig, buildInternalHandler(internalRuntime.verifier, internalRuntime.connections, internalSpawnHandler, nodeHandler))
 		if err != nil {
 			log.Fatalf("cp: build internal mTLS listener: %v", err)
 		}
@@ -368,6 +369,9 @@ type internalRuntime struct {
 	tlsConfig   *tls.Config
 	client      *http.Client
 	revocations *pki.RevocationState
+	connections *mtls.ConnectionRegistry
+	unsubscribe func()
+	refresher   *mtls.CRLRefresher
 }
 
 func loadInternalRuntime(cfg CP, now func() time.Time) (*internalRuntime, error) {
@@ -433,6 +437,10 @@ func loadInternalRuntime(cfg CP, now func() time.Time) (*internalRuntime, error)
 		}
 		issuers = append(issuers, issuer)
 	}
+	sources, err := mtls.BuildCRLSources(issuers, cfg.Internal.RevocationCRLs, cfg.Internal.RevocationURLs)
+	if err != nil {
+		return nil, err
+	}
 	state, err := pki.OpenRevocationState(cfg.Internal.RevocationState, issuers, now)
 	if err != nil {
 		return nil, fmt.Errorf("open certificate revocation state: %w", err)
@@ -443,14 +451,17 @@ func loadInternalRuntime(cfg CP, now func() time.Time) (*internalRuntime, error)
 			_ = state.Close()
 		}
 	}()
-	if err := applyCertificateRevocations(state, cfg.Internal.RevocationCRLs); err != nil {
-		return nil, err
+	refresher := mtls.NewCRLRefresher(http.DefaultClient, sources, state, cfg.Internal.RevocationRefreshInterval)
+	if err := refresher.Refresh(context.Background()); err != nil {
+		return nil, fmt.Errorf("refresh certificate revocations: %w", err)
 	}
 	for _, issuer := range issuers {
 		if _, ok := state.HighestNumber(issuer.SerialNumber); !ok {
 			return nil, fmt.Errorf("certificate revocation state has no current CRL for issuer %s", issuer.SerialNumber.Text(16))
 		}
 	}
+	connections := mtls.NewConnectionRegistry()
+	unsubscribe := mtls.SubscribeConnectionRegistry(state, connections)
 	identityLeaf, err := x509.ParseCertificate(identity.Certificate[0])
 	if err != nil {
 		return nil, fmt.Errorf("parse CP identity leaf: %w", err)
@@ -488,12 +499,12 @@ func loadInternalRuntime(cfg CP, now func() time.Time) (*internalRuntime, error)
 			return nil, clientErr
 		}
 		client = &http.Client{
-			Transport:     &http.Transport{TLSClientConfig: clientTLS, ForceAttemptHTTP2: true},
+			Transport:     &http.Transport{TLSClientConfig: clientTLS, ForceAttemptHTTP2: true, DialTLSContext: mtls.DialTLSContext(clientTLS, connections)},
 			CheckRedirect: checkInternalRedirect,
 		}
 	}
 	closeOnError = false
-	return &internalRuntime{verifier: verifier, tlsConfig: serverTLS, client: client, revocations: state}, nil
+	return &internalRuntime{verifier: verifier, tlsConfig: serverTLS, client: client, revocations: state, connections: connections, unsubscribe: unsubscribe, refresher: refresher}, nil
 }
 
 func checkInternalRedirect(req *http.Request, via []*http.Request) error {
@@ -508,37 +519,6 @@ func checkInternalRedirect(req *http.Request, via []*http.Request) error {
 		return fmt.Errorf("internal redirect crosses origin from %s://%s to %s://%s", origin.Scheme, origin.Host, req.URL.Scheme, req.URL.Host)
 	}
 	return nil
-}
-
-func applyCertificateRevocations(state *pki.RevocationState, paths []string) error {
-	for _, path := range paths {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read certificate CRL %s: %w", path, err)
-		}
-		if err := state.ApplyPEM(raw); err != nil {
-			return fmt.Errorf("apply certificate CRL %s: %w", path, err)
-		}
-	}
-	return nil
-}
-
-func refreshCertificateRevocations(ctx context.Context, state *pki.RevocationState, paths []string, interval time.Duration) {
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := applyCertificateRevocations(state, paths); err != nil {
-				log.Printf("cp: refresh certificate revocations: %v", err)
-			}
-		}
-	}
 }
 
 func buildPublicHandler(srv *cp.Server, verifier *auth.Verifier, allow weborigin.Allowlist, ready func(context.Context) error, devNodePath string, devNodeHandler http.Handler) http.Handler {
@@ -561,7 +541,7 @@ func mountInsecureDevNodeRoute(mux *http.ServeMux, enabled bool, nodePath string
 	}
 }
 
-func buildInternalHandler(verifier *mtls.PeerVerifier, spawnHandler, nodeHandler http.Handler) http.Handler {
+func buildInternalHandler(verifier *mtls.PeerVerifier, connections *mtls.ConnectionRegistry, spawnHandler, nodeHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/"+cpv1connect.SpawnServiceName+"/", spawnHandler)
 	mux.Handle(nodev1connect.NodeServiceAttachProcedure, nodeHandler)
@@ -581,7 +561,7 @@ func buildInternalHandler(verifier *mtls.PeerVerifier, spawnHandler, nodeHandler
 		}
 		mux.ServeHTTP(w, r)
 	})
-	return mtls.PrincipalMiddleware(verifier, policy.HTTPMiddleware(func(r *http.Request) string { return r.URL.Path }, bridge))
+	return mtls.PrincipalMiddleware(verifier, mtls.ConnectionRegistryMiddleware(connections, policy.HTTPMiddleware(func(r *http.Request) string { return r.URL.Path }, bridge)))
 }
 
 func peerCertChainPEM(state *tls.ConnectionState) []byte {

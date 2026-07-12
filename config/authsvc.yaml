@@ -18,6 +18,7 @@ internal:
   revocation_state: ""
   revocation_issuers: ""
   revocation_crls: ""
+  revocation_urls: ""
   revocation_refresh_interval: 5s
 
 ca:
@@ -25,6 +26,10 @@ ca:
   root_pem: "/etc/spawnery/as/root-ca.pem"
   intermediate_cert: "/etc/spawnery/as/self-hosted-intermediate.pem"
   intermediate_key: "/etc/spawnery/as/self-hosted-intermediate-key.pem"
+  revocation_crl: "/var/lib/authsvc/self-hosted.crl"
+  revocation_renew_interval: 1h
+  revocation_renew_before: 6h
+  legacy_revocation_certificates: "" # one-time node-id=/path/to/leaf.pem mappings for pre-CRL rows
 
 signing:
   environment: ""         # required in production, e.g. prod
