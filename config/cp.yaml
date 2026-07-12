@@ -37,6 +37,7 @@ evaluator:                     # CP-side metric evaluators (disabled by default)
 node:
   auth_mode: insecure          # insecure | enforced (enforced = mTLS on a dedicated listener)
   listen: "127.0.0.1:8081"
+  trust_domain: "dev.spawnery.internal"
   root_ca: "/etc/spawnery/cp/node-root-ca.pem"
   tls_cert: "/etc/spawnery/cp/server.pem"
   tls_key: "/etc/spawnery/cp/server-key.pem"

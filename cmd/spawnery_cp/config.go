@@ -52,11 +52,12 @@ type CP struct {
 	} `koanf:"evaluator"`
 
 	Node struct {
-		AuthMode string `koanf:"auth_mode" validate:"oneof=insecure enforced"`
-		Listen   string `koanf:"listen" validate:"required,hostname_port"`
-		RootCA   string `koanf:"root_ca"`
-		TLSCert  string `koanf:"tls_cert"`
-		TLSKey   string `koanf:"tls_key"`
+		AuthMode    string `koanf:"auth_mode" validate:"oneof=insecure enforced"`
+		Listen      string `koanf:"listen" validate:"required,hostname_port"`
+		TrustDomain string `koanf:"trust_domain" validate:"required"`
+		RootCA      string `koanf:"root_ca"`
+		TLSCert     string `koanf:"tls_cert"`
+		TLSKey      string `koanf:"tls_key"`
 	} `koanf:"node"`
 
 	// Skills configures the Garage-backed skill object store for IngestSkillFromURL (sp-nrzf.3.14.4).
@@ -142,6 +143,7 @@ var cpEnvAliases = map[string]string{
 	"EVALUATOR_IDLE_ATTACHED":           "evaluator.idle_attached",
 	"NODE_AUTH_MODE":                    "node.auth_mode",
 	"CP_NODE_LISTEN":                    "node.listen",
+	"CP_NODE_TRUST_DOMAIN":              "node.trust_domain",
 	"CP_NODE_ROOT_CA":                   "node.root_ca",
 	"CP_NODE_TLS_CERT":                  "node.tls_cert",
 	"CP_NODE_TLS_KEY":                   "node.tls_key",

@@ -26,6 +26,7 @@ type AS struct {
 	FakeGitHubUsers   string `koanf:"fake_github_users"`    // "alice:2000001,bob" or "alice,bob" (id derived when omitted)
 
 	CA struct {
+		TrustDomain      string `koanf:"trust_domain" validate:"required"`
 		RootPEM          string `koanf:"root_pem"`
 		IntermediateCert string `koanf:"intermediate_cert"`
 		IntermediateKey  string `koanf:"intermediate_key"`
@@ -141,6 +142,7 @@ var asEnvAliases = map[string]string{
 	"AS_LISTEN":                      "listen",
 	"AS_ALLOWED_ORIGINS":             "allowed_origins",
 	"AS_ROOT_CA_PEM":                 "ca.root_pem",
+	"AS_TRUST_DOMAIN":                "ca.trust_domain",
 	"AS_INTERMEDIATE_CERT_PEM":       "ca.intermediate_cert",
 	"AS_INTERMEDIATE_KEY_PEM":        "ca.intermediate_key",
 	"AS_SESSION_KEY_PEM":             "session.key_pem",

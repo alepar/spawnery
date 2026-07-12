@@ -8,6 +8,19 @@ import (
 	"spawnery/internal/pki"
 )
 
+func TestIssueSelfHostedNodeUsesConfiguredTrustDomain(t *testing.T) {
+	root, _ := pki.NewRootCA("root")
+	intermediate, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, "prod.spawnery.internal")
+	service := authsvc.New(root.Cert, intermediate, authsvc.WithTrustDomain("prod.spawnery.internal"))
+	leaf, err := service.IssueSelfHostedNode("n", "a", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := leaf.Cert.URIs[0].String(); got != "spiffe://prod.spawnery.internal/node/self-hosted/a/n" {
+		t.Fatalf("URI SAN = %q", got)
+	}
+}
+
 // The AS holds the self-hosted intermediate and issues node certs that verify against the root it
 // publishes for pinning — and they are always class=self-hosted, bound to the given account.
 func TestServiceIssuesVerifiableSelfHostedCert(t *testing.T) {

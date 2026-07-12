@@ -11,3 +11,4 @@ store:
 
 node:
   auth_mode: enforced          # nodes connect over mTLS on the dedicated node listener
+  trust_domain: "prod.spawnery.internal"

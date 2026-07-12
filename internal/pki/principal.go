@@ -2,6 +2,7 @@ package pki
 
 import (
 	"crypto/x509"
+	"encoding/asn1"
 	"errors"
 	"fmt"
 	"math/big"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"time"
 )
+
+var subjectAltNameOID = asn1.ObjectIdentifier{2, 5, 29, 17}
 
 const (
 	KindService = "service"
@@ -79,8 +82,8 @@ func VerifyPrincipal(leaf *x509.Certificate, intermediates []*x509.Certificate, 
 	if err != nil {
 		return Principal{}, err
 	}
-	if principal.Kind == KindNode && (len(leaf.DNSNames) != 0 || len(leaf.IPAddresses) != 0) {
-		return Principal{}, errors.New("pki: node leaf must not contain DNS or IP SANs")
+	if err := validateRawSubjectAltName(leaf, principal); err != nil {
+		return Principal{}, err
 	}
 	for _, chain := range chains {
 		if len(chain) != 3 || !chain[len(chain)-1].Equal(opts.Root) {
@@ -97,6 +100,63 @@ func VerifyPrincipal(leaf *x509.Certificate, intermediates []*x509.Certificate, 
 		return principal, nil
 	}
 	return Principal{}, errors.New("pki: no verified chain has a permitted issuer role")
+}
+
+func validateRawSubjectAltName(leaf *x509.Certificate, principal Principal) error {
+	var value []byte
+	count := 0
+	for _, extension := range leaf.Extensions {
+		if extension.Id.Equal(subjectAltNameOID) {
+			count++
+			value = extension.Value
+		}
+	}
+	if count != 1 {
+		return fmt.Errorf("pki: subjectAltName extension count is %d, want 1", count)
+	}
+	var sequence asn1.RawValue
+	rest, err := asn1.Unmarshal(value, &sequence)
+	if err != nil || len(rest) != 0 || sequence.Class != 0 || sequence.Tag != asn1.TagSequence || !sequence.IsCompound {
+		return errors.New("pki: malformed subjectAltName extension")
+	}
+	uriCount := 0
+	for names := sequence.Bytes; len(names) > 0; {
+		var name asn1.RawValue
+		names, err = asn1.Unmarshal(names, &name)
+		if err != nil || name.Class != 2 || name.IsCompound {
+			return errors.New("pki: malformed GeneralName")
+		}
+		switch name.Tag {
+		case 6: // uniformResourceIdentifier
+			uriCount++
+			if uriCount > 1 || len(leaf.URIs) != 1 || string(name.Bytes) != leaf.URIs[0].String() {
+				return errors.New("pki: raw URI SAN does not match the parsed SPIFFE ID")
+			}
+		case 2: // dNSName
+			if principal.Kind != KindService || len(name.Bytes) == 0 || !isASCII(name.Bytes) {
+				return errors.New("pki: DNS SAN is permitted only on service leaves")
+			}
+		case 7: // iPAddress
+			if principal.Kind != KindService || len(name.Bytes) != 4 && len(name.Bytes) != 16 {
+				return errors.New("pki: IP SAN is permitted only on service leaves")
+			}
+		default:
+			return fmt.Errorf("pki: unsupported GeneralName tag %d", name.Tag)
+		}
+	}
+	if uriCount != 1 {
+		return fmt.Errorf("pki: raw URI SAN count is %d, want 1", uriCount)
+	}
+	return nil
+}
+
+func isASCII(value []byte) bool {
+	for _, b := range value {
+		if b > 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func validateLeafProfile(leaf *x509.Certificate) error {

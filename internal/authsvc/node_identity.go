@@ -43,8 +43,6 @@ func nodeIdentityMiddleware(root *x509.Certificate, next http.Handler, trustDoma
 			trustDomain := pki.DefaultTrustDomain
 			if len(trustDomains) == 1 {
 				trustDomain = trustDomains[0]
-			} else if len(trustDomains) == 0 && len(leaf.URIs) == 1 {
-				trustDomain = leaf.URIs[0].Host
 			}
 			if id, err := pki.VerifyPrincipal(leaf, intermediates, pki.VerifyOptions{
 				Root:        root,

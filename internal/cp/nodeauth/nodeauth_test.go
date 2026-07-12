@@ -102,6 +102,16 @@ func TestDeriveIdentityRejectsForgedCloud(t *testing.T) {
 	}
 }
 
+func TestDeriveIdentityRejectsConfiguredTrustDomainMismatch(t *testing.T) {
+	root, _ := pki.NewRootCA("R")
+	issuer, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, "staging.spawnery.internal")
+	leaf, _ := issuer.IssueNode("n", "a", pki.RoleSelfHosted, "staging.spawnery.internal", time.Now().Add(time.Hour))
+	state := &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf.Cert, issuer.Cert}}
+	if _, err := nodeauth.DeriveIdentity(state, root.Cert, time.Now(), "prod.spawnery.internal"); err == nil {
+		t.Fatal("same-root leaf from the wrong configured trust domain was accepted")
+	}
+}
+
 // Identity round-trips through the request context (how the middleware hands it to the Attach handler).
 func TestIdentityContext(t *testing.T) {
 	want := pki.Principal{Kind: pki.KindNode, Role: pki.ClassCloud, NodeID: "n", AccountID: "a"}

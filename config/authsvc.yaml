@@ -8,6 +8,7 @@ listen: "127.0.0.1:8090"
 allowed_origins: ""  # browser-origin allowlist for CORS; empty = dev (loopback + private-network only)
 
 ca:
+  trust_domain: "prod.spawnery.internal"
   root_pem: "/etc/spawnery/as/root-ca.pem"
   intermediate_cert: "/etc/spawnery/as/self-hosted-intermediate.pem"
   intermediate_key: "/etc/spawnery/as/self-hosted-intermediate-key.pem"

@@ -28,6 +28,7 @@ const (
 type Service struct {
 	root         *x509.Certificate
 	intermediate *pki.CA // self-hosted intermediate (holds the signing key)
+	trustDomain  string
 
 	now       func() time.Time
 	enrollTTL time.Duration
@@ -57,8 +58,8 @@ type Service struct {
 	githubLinkAccountFromReq AccountFromRequest
 	githubLinkSPAOrigin      string // exact Origin the SPA is served from; "" disables enforcement
 	githubLinkMu             sync.Mutex
-	githubLinkStates         map[string]githubLinkState  // keyed by OAuth state param
-	githubLinkFlows          map[string]*githubLinkFlow  // keyed by flow_id
+	githubLinkStates         map[string]githubLinkState // keyed by OAuth state param
+	githubLinkFlows          map[string]*githubLinkFlow // keyed by flow_id
 
 	// cpRPCSecret is the AS↔CP shared secret for the CP→AS link-status endpoint. When non-empty
 	// the POST /internal/github/link-status route is registered and enforces this secret via
@@ -126,6 +127,11 @@ func WithClock(now func() time.Time) Option { return func(s *Service) { s.now = 
 
 // WithEnrollTokenTTL overrides the enrollment-token lifetime.
 func WithEnrollTokenTTL(d time.Duration) Option { return func(s *Service) { s.enrollTTL = d } }
+
+// WithTrustDomain selects the environment SPIFFE trust domain for issuance and peer verification.
+func WithTrustDomain(trustDomain string) Option {
+	return func(s *Service) { s.trustDomain = trustDomain }
+}
 
 // WithSessionKey sets the session-signing key (production loads a persisted key; default generates one).
 func WithSessionKey(k ed25519.PrivateKey) Option { return func(s *Service) { s.sessionKey = k } }
@@ -226,6 +232,7 @@ func New(root *x509.Certificate, selfHostedIntermediate *pki.CA, opts ...Option)
 	s := &Service{
 		root:                  root,
 		intermediate:          selfHostedIntermediate,
+		trustDomain:           pki.DefaultTrustDomain,
 		now:                   time.Now,
 		enrollTTL:             defaultEnrollTTL,
 		tokens:                map[string]enrollToken{},
@@ -270,7 +277,7 @@ func Load(rootPEM, interCertPEM, interKeyPEM []byte) (*Service, error) {
 // IssueSelfHostedNode issues a self-hosted node certificate bound to accountID. The class is always
 // self-hosted — the AS has no cloud intermediate to sign anything else.
 func (s *Service) IssueSelfHostedNode(nodeID, accountID string, notAfter time.Time) (*pki.Node, error) {
-	return s.intermediate.IssueNode(nodeID, accountID, pki.ClassSelfHosted, notAfter)
+	return s.intermediate.IssueNode(nodeID, accountID, pki.ClassSelfHosted, s.trustDomain, notAfter)
 }
 
 // RootCAPEM returns the Root CA certificate clients/CP/nodes pin as their trust anchor.

@@ -54,7 +54,7 @@ func DeriveIdentity(state *tls.ConnectionState, root *x509.Certificate, now time
 	}
 	leaf := state.PeerCertificates[0]
 	intermediates := state.PeerCertificates[1:]
-	trustDomain, err := selectedTrustDomain(leaf, trustDomains)
+	trustDomain, err := selectedTrustDomain(trustDomains)
 	if err != nil {
 		return pki.Principal{}, err
 	}
@@ -88,17 +88,14 @@ func IdentityFromContext(ctx context.Context) (pki.Principal, bool) {
 	return id, ok
 }
 
-func selectedTrustDomain(leaf *x509.Certificate, configured []string) (string, error) {
+func selectedTrustDomain(configured []string) (string, error) {
 	if len(configured) > 1 {
 		return "", errors.New("nodeauth: expected at most one trust domain")
 	}
 	if len(configured) == 1 {
 		return configured[0], nil
 	}
-	if len(leaf.URIs) != 1 {
-		return "", errors.New("nodeauth: client certificate must contain exactly one URI SAN")
-	}
-	return leaf.URIs[0].Host, nil
+	return pki.DefaultTrustDomain, nil
 }
 
 // WithCertChain stashes the node's verified leaf+chain PEM on the context (enforced mode only).

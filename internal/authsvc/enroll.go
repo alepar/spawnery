@@ -104,7 +104,7 @@ func (s *Service) Enroll(token string, csrDER []byte, nodeID string) (certPEM, c
 	accountID, class := et.accountID, et.class
 	s.mu.Unlock()
 
-	cert, chain, err := s.intermediate.SignCSR(csrDER, nodeID, accountID, class, s.now().Add(nodeCertTTL))
+	cert, chain, err := s.intermediate.SignNodeCSR(csrDER, nodeID, accountID, class, s.trustDomain, s.now().Add(nodeCertTTL))
 	if err != nil {
 		return nil, nil, err
 	}

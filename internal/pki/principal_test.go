@@ -232,6 +232,7 @@ func TestVerifyPrincipalRejectsIssuerPathMismatch(t *testing.T) {
 		service    bool
 	}{
 		{name: "service issuer to cloud", issuerRole: IssuerService, leafRole: RoleCloud},
+		{name: "service issuer to self-hosted", issuerRole: IssuerService, leafRole: RoleSelfHosted},
 		{name: "cloud issuer to service", issuerRole: IssuerCloudNode, leafRole: RoleCP, service: true},
 		{name: "cloud issuer to self-hosted", issuerRole: IssuerCloudNode, leafRole: RoleSelfHosted},
 		{name: "self-hosted issuer to service", issuerRole: IssuerSelfHostedNode, leafRole: RoleAuthService, service: true},
@@ -251,6 +252,63 @@ func TestVerifyPrincipalRejectsIssuerPathMismatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVerifyPrincipalRejectsUnsupportedGeneralNames(t *testing.T) {
+	now := time.Now()
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerSelfHostedNode, "prod.spawnery.internal")
+	material, _ := issuer.IssueNode("n1", "acct-1", RoleSelfHosted, "prod.spawnery.internal", now.Add(time.Hour))
+	tests := []struct {
+		name       string
+		extensions func(*x509.Certificate) []pkix.Extension
+	}{
+		{name: "otherName", extensions: replaceSANWithRawNames(asn1.RawValue{Class: 2, Tag: 0, IsCompound: true, Bytes: []byte{0x30, 0x00}})},
+		{name: "rfc822Name", extensions: replaceSANWithRawNames(asn1.RawValue{Class: 2, Tag: 1, Bytes: []byte("a@example.com")})},
+		{name: "directoryName", extensions: replaceSANWithRawNames(asn1.RawValue{Class: 2, Tag: 4, IsCompound: true, Bytes: []byte{0x30, 0x00}})},
+		{name: "registeredID", extensions: replaceSANWithRawNames(asn1.RawValue{Class: 2, Tag: 8, Bytes: []byte{42, 3}})},
+		{name: "malformed", extensions: func(cert *x509.Certificate) []pkix.Extension {
+			return replaceSANExtension(cert.Extensions, pkix.Extension{Id: subjectAltNameOID, Value: []byte{0x30, 0x02, 0x86}})
+		}},
+		{name: "duplicate extension", extensions: func(cert *x509.Certificate) []pkix.Extension {
+			for _, extension := range cert.Extensions {
+				if extension.Id.Equal(subjectAltNameOID) {
+					return append(append([]pkix.Extension(nil), cert.Extensions...), extension)
+				}
+			}
+			return cert.Extensions
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			leaf := *material.Cert
+			leaf.Extensions = tt.extensions(material.Cert)
+			if _, err := VerifyPrincipal(&leaf, material.Chain, verifyOptions(root.Cert, now)); err == nil {
+				t.Fatal("unsupported GeneralName accepted")
+			}
+		})
+	}
+}
+
+func replaceSANWithRawNames(names ...asn1.RawValue) func(*x509.Certificate) []pkix.Extension {
+	return func(cert *x509.Certificate) []pkix.Extension {
+		value, err := asn1.Marshal(names)
+		if err != nil {
+			panic(err)
+		}
+		return replaceSANExtension(cert.Extensions, pkix.Extension{Id: subjectAltNameOID, Value: value})
+	}
+}
+
+func replaceSANExtension(extensions []pkix.Extension, replacement pkix.Extension) []pkix.Extension {
+	result := append([]pkix.Extension(nil), extensions...)
+	for i := range result {
+		if result[i].Id.Equal(subjectAltNameOID) {
+			result[i] = replacement
+			return result
+		}
+	}
+	return append(result, replacement)
 }
 
 func TestVerifyPrincipalRejectsMissingOrUnknownIssuerRole(t *testing.T) {

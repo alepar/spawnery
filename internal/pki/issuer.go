@@ -60,5 +60,11 @@ func IssuerRoleFromCertificate(cert *x509.Certificate) (IssuerRole, error) {
 	if err != nil || len(rest) != 0 {
 		return "", errors.New("pki: malformed issuer role extension")
 	}
-	return normalizeIssuerRole(IssuerRole(encoded))
+	role := IssuerRole(encoded)
+	switch role {
+	case IssuerService, IssuerCloudNode, IssuerSelfHostedNode:
+		return role, nil
+	default:
+		return "", fmt.Errorf("pki: unsupported encoded issuer role %q", encoded)
+	}
 }

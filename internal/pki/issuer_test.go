@@ -65,6 +65,8 @@ func TestIssuerRoleFromCertificateRejectsInvalidPolicies(t *testing.T) {
 		{name: "duplicate", extensions: []pkix.Extension{{Id: issuerRoleOID, Value: valid}, {Id: issuerRoleOID, Value: valid}}},
 		{name: "malformed", extensions: []pkix.Extension{{Id: issuerRoleOID, Value: []byte("not DER")}}},
 		{name: "unknown", extensions: []pkix.Extension{{Id: issuerRoleOID, Value: unknown}}},
+		{name: "legacy cloud", extensions: []pkix.Extension{{Id: issuerRoleOID, Value: mustMarshalASN1String(t, ClassCloud)}}},
+		{name: "legacy self-hosted", extensions: []pkix.Extension{{Id: issuerRoleOID, Value: mustMarshalASN1String(t, ClassSelfHosted)}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -73,6 +75,15 @@ func TestIssuerRoleFromCertificateRejectsInvalidPolicies(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustMarshalASN1String(t *testing.T, value string) []byte {
+	t.Helper()
+	encoded, err := asn1.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func TestNewIntermediateRejectsUnknownRole(t *testing.T) {

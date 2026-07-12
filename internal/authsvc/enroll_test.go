@@ -55,6 +55,31 @@ func TestEnrollIssuesAccountBoundCert(t *testing.T) {
 	}
 }
 
+func TestEnrollUsesConfiguredTrustDomain(t *testing.T) {
+	root, _ := pki.NewRootCA("root")
+	intermediate, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, "prod.spawnery.internal")
+	service := authsvc.New(root.Cert, intermediate, authsvc.WithTrustDomain("prod.spawnery.internal"))
+	token, err := service.IssueEnrollmentToken("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, _, err := pki.NewNodeCSR()
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, _, err := service.Enroll(token, csr, "node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := pki.ParseCertPEM(certPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cert.URIs[0].String(); got != "spiffe://prod.spawnery.internal/node/self-hosted/acct/node" {
+		t.Fatalf("URI SAN = %q", got)
+	}
+}
+
 // A token is single-use: a second redemption fails.
 func TestEnrollTokenSingleUse(t *testing.T) {
 	s := newAS(t)

@@ -192,7 +192,7 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 		if err != nil {
 			return nil, err
 		}
-		inter, err = root.NewIntermediate(pki.ClassSelfHosted)
+		inter, err = root.NewIntermediate(pki.ClassSelfHosted, cfg.CA.TrustDomain)
 		if err != nil {
 			return nil, err
 		}
@@ -296,6 +296,7 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 	}
 
 	opts := []authsvc.Option{
+		authsvc.WithTrustDomain(cfg.CA.TrustDomain),
 		authsvc.WithSessionKey(sigKey),
 		authsvc.WithIdP(idp),
 		authsvc.WithNodeRevocations(idStore.NodeRevocations()),
