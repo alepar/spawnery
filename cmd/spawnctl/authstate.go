@@ -225,13 +225,13 @@ func doRefresh(ctx context.Context, dir string, s *authState, httpClient *http.C
 	}
 
 	var body struct {
-		AccessToken string `json:"access_token"`
+		CPAccessToken string `json:"cp_access_token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return fmt.Errorf("doRefresh: decode response: %w", err)
 	}
-	if body.AccessToken == "" {
-		return fmt.Errorf("doRefresh: empty access_token in response")
+	if body.CPAccessToken == "" {
+		return fmt.Errorf("doRefresh: empty cp_access_token in response")
 	}
 
 	// New refresh token arrives in Set-Cookie (the AS rotates it).
@@ -240,7 +240,7 @@ func doRefresh(ctx context.Context, dir string, s *authState, httpClient *http.C
 			s.RefreshToken = c.Value
 		}
 	}
-	s.AccessToken = body.AccessToken
+	s.AccessToken = body.CPAccessToken
 	s.AccessExpiresAt = time.Now().Add(accessTokenTTLClient).Unix()
 
 	return saveState(dir, s)

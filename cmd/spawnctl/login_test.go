@@ -396,7 +396,7 @@ func TestConcurrentRefreshSingleFlight(t *testing.T) {
 
 	// Poll for tokens.
 	var tokenOut struct {
-		AccessToken  string `json:"access_token"`
+		AccessToken  string `json:"cp_access_token"`
 		RefreshToken string `json:"refresh_token"`
 	}
 	for i := 0; i < 20; i++ {
@@ -539,7 +539,7 @@ func TestConcurrentRefreshFileLock(t *testing.T) {
 	}
 
 	var tokenOut struct {
-		AccessToken  string `json:"access_token"`
+		AccessToken  string `json:"cp_access_token"`
 		RefreshToken string `json:"refresh_token"`
 	}
 	for i := 0; i < 20; i++ {
@@ -869,7 +869,8 @@ func seedLoginTestFamilyWithSPKI(t *testing.T, st store.Store, accountID string,
 		FamilyID:          "fam-" + accountID,
 		ClientKind:        store.ClientCLI,
 		SessionPubkeySPKI: spkiDER,
-		AccessTokenID:     "tok-" + accountID,
+		CPAccessTokenID:   "cp-" + accountID,
+		NodeAccessTokenID: "node-" + accountID,
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),
