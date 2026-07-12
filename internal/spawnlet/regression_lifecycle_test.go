@@ -1,20 +1,39 @@
 package spawnlet
 
-// regression_lifecycle_test.go: the SE1 §4.6 regression tests. Each one pins a bug that shipped to
-// master and was found by a human running a VM, not by a test:
+// regression_lifecycle_test.go: the SE1 §4.6 hermetic regression tests.
 //
-//	R1 fork preserves its source          — the CRI stop→capture→re-launch fork destroyed it.
-//	R2 the fork's artifact inherits the source's content at capture time.
-//	R4 a captured delta is LAUNCHABLE     — the delta image was never unpacked / recorded non-canonically.
-//	R5 resume replays the delta.
+// WHICH LAYER THESE PIN — read this before trusting, extending, or citing this file.
+//
+// These tests drive the REAL Manager orchestration (internal/spawnlet/manager*.go) against the FAKE
+// backend internal/runtime/fakepod. They therefore pin exactly ONE layer: the MANAGER'S SEQUENCING —
+// who gets paused, what gets captured, when, from which state, and what happens on each failure arm.
+//
+// They do NOT — and BY CONSTRUCTION CANNOT — pin any behaviour inside a real backend
+// (internal/runtime/docker*.go, internal/runtime/cri/). A fake-backed test never executes a line of
+// that code. Backend behaviour is pinned by the PodBackend contract suite
+// (internal/runtime/podbackendtest), whose lane arms run the same table against the REAL backends:
+// Docker under `e2e`, CRI/runsc under `cri_delta_e2e` (`just test-cri-contract`). SE1 spec §4.4, §4.6.
+//
+// This distinction was got WRONG here once already, and the error is recorded rather than quietly
+// edited away. The first draft of this header claimed R1 pinned "the CRI stop→capture→re-launch fork
+// bug". It does not and cannot: that bug lives in internal/runtime/cri/delta.go, and reverting it
+// leaves every test in THIS file green — the epic's final review did exactly that and watched all six
+// pass. Its real pin is caseCaptureAsPreservesSource on the cri_delta_e2e contract arm (verified
+// 2026-07-12: reverting `preserveSource` in cri/delta.go turns that case, and two others, red).
+//
+// The tests themselves are sound — only their descriptions were wrong. Reverting the Manager's deferred
+// restoreSource() in manager_fork.go does turn R6a red. But a test that names a bug it cannot see buys
+// false confidence, and false confidence is how that bug survived for weeks. If you add a test here,
+// name the layer it pins.
+//
+//	R1 fork preserves its source  — Manager fork sequence: pause → CaptureDeltaAs → restore, same container.
+//	R2 the fork's artifact carries the source's content as of the capture instant (Manager capture ordering).
+//	R4 a captured delta is launchable and EnsureImage returns it (Manager's launch-image selection).
+//	R5 resume replays the delta (Manager's resume path picks the delta, not the base).
 //	R6 failure arms: capture fails → source restored; StartAgent fails → pod rolled back, not leaked.
 //
 // (R3, the torn-suspend regression, is SE2's — it cannot pass until SE2's fix (sp-2tx8.2.1) lands, since
 // teardown still unconditionally unpauses before the rootfs capture. See sp-2tx8.1.5's bead notes.)
-//
-// All of them drive the REAL Manager orchestration against internal/runtime/fakepod, so they run in
-// milliseconds with no Docker. What they do NOT cover: durability, containerd ref normalisation,
-// snapshotter unpacking, gVisor quirks — those stay with the e2e/VM lanes (SE1 spec §4.4).
 
 import (
 	"context"
@@ -44,8 +63,14 @@ func newRegressionManager(t *testing.T, j *fakeJournal, opts ...fakepod.Option) 
 	return m, b
 }
 
-// R1: a fork must NOT destroy its source. After ForkSameNode the source agent is RUNNING (restored
-// from the fork pause), it is the SAME container (not re-launched), and its content is untouched.
+// R1 pins the MANAGER's fork sequence: ForkSameNode must pause the source, CaptureDeltaAs onto the
+// target's tag, and restore the source to RUNNING — leaving the SAME source container alive (not
+// re-launched) with its content untouched.
+//
+// It does NOT pin the CRI backend's fork, which once did stop → capture → remove and so destroyed the
+// very spawn it forked from. That bug lives in internal/runtime/cri/delta.go; a fakepod-backed test
+// never runs that code. Its pin is caseCaptureAsPreservesSource on the cri_delta_e2e contract arm.
+// See the file header.
 func TestRegressionForkPreservesSource(t *testing.T) {
 	ctx := context.Background()
 	m, b := newRegressionManager(t, newFakeJournal("manifest-1"))
@@ -85,8 +110,10 @@ func TestRegressionForkPreservesSource(t *testing.T) {
 	}
 }
 
-// R2: the fork's artifact inherits the SOURCE's content as of the capture instant — and nothing the
-// source writes afterwards.
+// R2 pins the MANAGER's capture ORDERING: the artifact must carry the source's content as of the
+// capture instant, and nothing the source writes after the fork returns. Whether a real backend's diff
+// is byte-faithful to the layer it claims to capture is a BACKEND property — pinned by
+// caseCaptureArtifactInheritsContent on the contract lane arms, not here.
 func TestRegressionForkArtifactInheritsSourceContent(t *testing.T) {
 	ctx := context.Background()
 	m, b := newRegressionManager(t, newFakeJournal("manifest-1"))
@@ -118,10 +145,15 @@ func TestRegressionForkArtifactInheritsSourceContent(t *testing.T) {
 	}
 }
 
-// R4: after a suspend capture, the delta image exists, is LAUNCHABLE, and EnsureImage returns it.
-// The shipped bugs in this class: the assembled delta image was never Unpacked into the snapshotter
-// (so CRI could not launch it), and it was recorded under a non-canonical ref. The fake models the
-// launchability half; the ref/snapshotter half stays with the CRI e2e lane (SE1 §4.4).
+// R4 pins the MANAGER's launch-image SELECTION: after a suspend capture, the Manager asks EnsureImage
+// for the delta and gets the delta; and when the delta is not launchable, it falls back to the base
+// image rather than launching from a broken one.
+//
+// The shipped bugs in this class were BACKEND bugs — the assembled delta image was never Unpacked into
+// the snapshotter, and it was recorded under a non-canonical ref while CRI normalises lookups. Neither
+// is visible from here: fakepod models launchability as a single bit, so this test pins the Manager's
+// REACTION to that bit, not a backend's ability to set it correctly. Those are pinned by
+// caseEnsureImageLaunchableAfterCapture on the contract lane arms (e2e, cri_delta_e2e).
 func TestRegressionCapturedDeltaIsLaunchable(t *testing.T) {
 	ctx := context.Background()
 	m, b := newRegressionManager(t, nil)
@@ -164,9 +196,13 @@ func TestRegressionCapturedDeltaIsLaunchable(t *testing.T) {
 	}
 }
 
-// R5: a same-node resume launches from the captured delta and the resumed agent SEES the writes.
-// (fakepod's StartAgent replays the launch image's content into the agent's rootfs — so "the spawn
-// resumed from an empty base image" is a visible failure, not a silent one.)
+// R5 pins the MANAGER's resume path: a same-node resume Create must launch from the CAPTURED DELTA
+// (LaunchImageRef = DeltaTag) and not silently fall back to the base image.
+//
+// That the resumed rootfs then carries the writes is fakepod replaying the launch image's content into
+// the agent's rootfs — it makes "resumed from an empty base" a visible failure rather than a silent
+// one, but it pins the Manager's image CHOICE, not any real snapshotter's replay fidelity. That stays
+// with the contract lane arms.
 func TestRegressionResumeReplaysDelta(t *testing.T) {
 	ctx := context.Background()
 	m, b := newRegressionManager(t, nil)
@@ -197,9 +233,12 @@ func TestRegressionResumeReplaysDelta(t *testing.T) {
 	}
 }
 
-// R6a: failure arm — when the fork's CaptureDeltaAs fails, the fork errors AND the source is restored
-// to running (the deferred restore must fire, not be skipped on the error path). A source left paused
-// forever is a hung user spawn.
+// R6a pins the MANAGER's fork FAILURE ARM: when CaptureDeltaAs fails, ForkSameNode must error AND the
+// source must come back to running — the deferred restore has to fire on the error path, not be skipped.
+// A source left paused forever is a hung user spawn.
+//
+// This is the test that proves the hermetic layer is not vacuous: neutering the deferred restoreSource()
+// in manager_fork.go turns it red. That is a Manager bug, and this is the layer that sees it.
 func TestRegressionForkCaptureFailureRestoresSource(t *testing.T) {
 	ctx := context.Background()
 	m, b := newRegressionManager(t, newFakeJournal("manifest-1"))
@@ -235,9 +274,12 @@ func TestRegressionForkCaptureFailureRestoresSource(t *testing.T) {
 	}
 }
 
-// R6b: failure arm — when StartAgent fails, Create must tear the half-built pod down (sandbox +
-// sidecar removed, nothing left in ListManaged, nothing in the store). A leaked sandbox holds a netns,
-// an IP and an egress floor forever.
+// R6b pins the MANAGER's create ROLLBACK: when StartAgent fails, Create must tear the half-built pod
+// down — sandbox and sidecar removed, nothing left in ListManaged, nothing left in the store. A leaked
+// sandbox holds a netns, an IP and an egress floor forever.
+//
+// The rollback SEQUENCE is the Manager's, so it is pinned here. Whether a given backend's Remove
+// actually reclaims the netns/IP is a backend property, and stays with the contract lane arms.
 func TestRegressionStartAgentFailureRollsBackPod(t *testing.T) {
 	ctx := context.Background()
 	m, b := newRegressionManager(t, nil, fakepod.WithFailOn(fakepod.OpStartAgent, errors.New("boom")))
