@@ -1,6 +1,33 @@
 # Container Runtime Abstraction — one fork() for every runtime
 
-**Status:** draft (v2 — rewritten after the premise spike + roast BLOCK) · **Date:** 2026-07-11
+**Status: SUPERSEDED — do not implement.** · **Date:** 2026-07-11
+
+> ## Why this spec is dead
+>
+> **v2 was roasted and came back BLOCK — 11 confirmed blockers, 28 majors, after v1 had already been
+> BLOCKed (38 findings, 6 blockers).** Two BLOCKs in two iterations is the roast cap; the verdict was
+> escalated rather than looped again, and the design was **decomposed** instead of revised a third time.
+>
+> The roast established that this spec was bundling four separable problems and that two of its
+> "design" findings were in fact **live bugs in shipped code**. Superseded by epic **`sp-2tx8`**:
+>
+> | | |
+> |---|---|
+> | `sp-2tx8.1` (SE1) | [Fake PodBackend + contract suite](2026-07-12-fake-podbackend-contract-suite-design.md) — no interface change; the harness that would have caught all of this |
+> | `sp-2tx8.2` (SE2) | [Suspend torn-snapshot fix](2026-07-12-suspend-torn-snapshot-fix-design.md) — a real bug this spec faithfully reproduced |
+> | `sp-2tx8.3` (SE3) | Restart re-adoption — its own feature epic |
+> | `sp-2tx8.4` (SE4) | The interface refactor, **last**, once SE1–SE3 expose the real seams |
+>
+> **What is still worth reading here:** §2's record of the premise that died (containerd `CreateDiff`
+> never needed a stopped container — the belief was an artifact of the gVisor #12647 pause bug) and the
+> spike that killed it. That evidence is load-bearing and is cited by the successor specs.
+>
+> **What is wrong here** (see `sp-2tx8.4`'s bead for the full list any future attempt must respect): §8's
+> re-adoption is dead on arrival because `gracefulStopAll` on SIGTERM — not `ReapOrphans` — destroys the
+> pods on the *graceful* restart path; §3's `FinishFinal` un-quiesces for the scrub and so breaks the
+> consistency it exists to provide; the one-shot `Create` collapses the `StartPod`→`StartAgent` seam that
+> the egress floor depends on; the `Begin`/`Finish` token has no lifecycle; and §8's recovery table is
+> factually wrong about what CRI's `ListManaged` and the per-spawn JSON stores actually hold.
 
 > **v1 was built on a false premise and was BLOCKed by roast (38 confirmed findings, 6 blockers).**
 > A spike then killed the premise outright. This v2 is much smaller as a result. §2 records what died
