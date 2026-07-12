@@ -186,13 +186,13 @@ describe("ProfilesView", () => {
     );
   });
 
-  it("CapabilityPreview renders no-op badge for opencode (skill is no-op)", async () => {
+  it("CapabilityPreview renders supported badge for opencode (skill is supported, sp-mwco.2.5)", async () => {
     render(<ProfilesView />);
     await waitFor(() => screen.getByTestId("profile-item-p1"));
     await userEvent.click(screen.getByTestId("profile-item-p1"));
     await waitFor(() => screen.getByTestId("cap-preview-e1"));
     const opencodeBadge = screen.getByTestId("cap-badge-e1-opencode");
-    expect(opencodeBadge.getAttribute("data-status")).toBe("no-op");
+    expect(opencodeBadge.getAttribute("data-status")).toBe("supported");
   });
 
   // --- Add skill from URL dialog ---

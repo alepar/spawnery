@@ -35,10 +35,12 @@ func (e opencodeEmitter) InstallSkill(a Artifact, opts Options) Report {
 	return installSkill(e.layout, a, opts)
 }
 
-// Capabilities returns the support matrix for opencode: skill=no-op, mcp+config+instructions=supported, plugin=best-effort.
+// Capabilities returns the support matrix for opencode: skill=supported (native,
+// file-level AND behavioral read confirmed with zero extra config — sp-mwco.2.2 spike),
+// mcp+config+instructions=supported, plugin=best-effort.
 func (e opencodeEmitter) Capabilities() map[Kind]CapabilityStatus {
 	return map[Kind]CapabilityStatus{
-		KindSkill:            CapStatusNoOp,
+		KindSkill:            CapStatusSupported,
 		KindMCP:              CapStatusSupported,
 		KindConfig:           CapStatusSupported,
 		KindPlugin:           CapStatusBestEffort,
