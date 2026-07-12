@@ -584,7 +584,7 @@ export type SPIFFEPrincipal =
   | { trustDomain: string; kind: "node"; role: "cloud" | "self-hosted"; accountId: string; nodeId: string };
 
 export function parseSPIFFEPrincipal(raw: string, trustDomain: string): SPIFFEPrincipal {
-  if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(trustDomain) || trustDomain.includes("..")) {
+  if (!/^[a-z0-9._-]+$/.test(trustDomain)) {
     throw new Error("x509: configured trust domain is not canonical");
   }
   const prefix = `spiffe://${trustDomain}/`;

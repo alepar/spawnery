@@ -49,6 +49,16 @@ describe("parseSPIFFEPrincipal canonical encoding", () => {
   });
 
   it.each([
+    "prod_env.spawnery.internal",
+    "_prod..spawnery-",
+  ])("accepts the same SPIFFE trust-domain characters as Go: %s", (domain) => {
+    expect(parseSPIFFEPrincipal(
+      `spiffe://${domain}/node/self-hosted/alice/node1`,
+      domain,
+    )).toMatchObject({ trustDomain: domain, kind: "node" });
+  });
+
+  it.each([
     `SPIFFE://${trustDomain}/node/self-hosted/alice/node1`,
     "spiffe://PROD.spawnery.internal/node/self-hosted/alice/node1",
     `spiffe://${trustDomain}:443/node/self-hosted/alice/node1`,
@@ -64,10 +74,16 @@ describe("parseSPIFFEPrincipal canonical encoding", () => {
     expect(() => parseSPIFFEPrincipal(raw, trustDomain)).toThrow();
   });
 
-  it("rejects a non-canonical configured trust domain", () => {
+  it.each([
+    "PROD.spawnery.internal",
+    "prod.spawnery.internal:443",
+    "alice@prod.spawnery.internal",
+    "prod.spawnery.internal/path",
+    "prod%2espawnery.internal",
+  ])("rejects an uppercase or authority-delimited configured trust domain: %s", (domain) => {
     expect(() => parseSPIFFEPrincipal(
-      "spiffe://PROD.spawnery.internal/node/self-hosted/alice/node1",
-      "PROD.spawnery.internal",
+      `spiffe://${domain}/node/self-hosted/alice/node1`,
+      domain,
     )).toThrow("trust domain is not canonical");
   });
 });
