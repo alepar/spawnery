@@ -19,7 +19,7 @@ import (
 	"spawnery/internal/pki"
 )
 
-func enrollmentTokenService(t *testing.T) (*authsvc.Service, string) {
+func enrollmentTokenService(t *testing.T) (*authsvc.Service, string, string) {
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
 	root, err := pki.NewRootCA("enrollment root")
@@ -38,20 +38,23 @@ func enrollmentTokenService(t *testing.T) (*authsvc.Service, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := proto.Marshal(&authv1.SessionTokenBody{
-		KeyId: hex.EncodeToString(signer.KeyID[:]), AccountId: "acct-owner", Audience: "cp",
-		IssuedAt: now.Unix(), ExpiresAt: now.Add(15 * time.Minute).Unix(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	session, err := signer.Sign(token.ArtifactTypeSession, payload)
-	if err != nil {
-		t.Fatal(err)
+	mintSession := func(audience string) string {
+		payload, err := proto.Marshal(&authv1.SessionTokenBody{
+			KeyId: hex.EncodeToString(signer.KeyID[:]), AccountId: "acct-owner", Audience: audience,
+			IssuedAt: now.Unix(), ExpiresAt: now.Add(15 * time.Minute).Unix(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		session, err := signer.Sign(token.ArtifactTypeSession, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return session
 	}
 	svc := authsvc.New(root.Cert, intermediate,
-		authsvc.WithEnrollmentTokenIssuance(authsvc.SessionBearerAccount(verifier, func() time.Time { return now })))
-	return svc, session
+		authsvc.WithEnrollmentTokenIssuance(authsvc.EnrollmentSessionAccount(verifier, func() time.Time { return now })))
+	return svc, mintSession(token.AudienceCP), mintSession("node")
 }
 
 func issueEnrollmentToken(t *testing.T, handler http.Handler, bearer, fingerprint string) *httptest.ResponseRecorder {
@@ -70,12 +73,16 @@ func issueEnrollmentToken(t *testing.T, handler http.Handler, bearer, fingerprin
 }
 
 func TestPublicEnrollmentTokenIssuanceRequiresAuthenticatedOwner(t *testing.T) {
-	svc, ownerSession := enrollmentTokenService(t)
+	svc, ownerSession, nodeSession := enrollmentTokenService(t)
 	_, fingerprint, _ := boundKey(t)
 
 	anonymous := issueEnrollmentToken(t, svc.PublicHandler(), "", fingerprint)
 	if anonymous.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous issuance status = %d, want 401", anonymous.Code)
+	}
+	nodeAudience := issueEnrollmentToken(t, svc.PublicHandler(), nodeSession, fingerprint)
+	if nodeAudience.Code != http.StatusUnauthorized {
+		t.Fatalf("aud=node issuance status = %d, want 401", nodeAudience.Code)
 	}
 
 	authenticated := issueEnrollmentToken(t, svc.PublicHandler(), ownerSession, fingerprint)
@@ -91,7 +98,7 @@ func TestPublicEnrollmentTokenIssuanceRequiresAuthenticatedOwner(t *testing.T) {
 }
 
 func TestInternalEnrollmentBootstrapsOnlyWithPubliclyIssuedBoundToken(t *testing.T) {
-	svc, ownerSession := enrollmentTokenService(t)
+	svc, ownerSession, _ := enrollmentTokenService(t)
 	_, fingerprint, boundCSR := boundKey(t)
 	_, _, substitutedCSR := boundKey(t)
 

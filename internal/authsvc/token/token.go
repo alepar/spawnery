@@ -30,6 +30,9 @@ const (
 	RevocationDomainPrefix = "spawnery/revocation/v1"
 )
 
+// AudienceCP identifies session artifacts intended for control-plane authorization.
+const AudienceCP = "cp"
+
 // Errors are sentinel so verifiers can map them to machine-readable codes.
 var (
 	ErrMalformed  = errors.New("token: malformed wire format")
