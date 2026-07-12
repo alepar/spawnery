@@ -261,10 +261,15 @@ func main() {
 			log.Fatalf("cp: build skill store: %v", err)
 		}
 		fetcher := skillfetch.New(skillfetch.Config{
-			GitHubToken: string(cfg.Skills.GitHubToken),
-			ZstdLevel:   cfg.Skills.ZstdLevel,
+			GitHubToken:          string(cfg.Skills.GitHubToken),
+			ZstdLevel:            cfg.Skills.ZstdLevel,
+			WireCapBytes:         cfg.Skills.WireCapBytes,
+			DecompressedCapBytes: cfg.Skills.DecompressedCapBytes,
+			PlainTarCapBytes:     cfg.Skills.PlainTarCapBytes,
+			FileCountCap:         cfg.Skills.FileCountCap,
+			HTTPTimeout:          cfg.Skills.HTTPTimeout,
 		})
-		srv.SetSkillIngest(fetcher, ss)
+		srv.SetSkillIngest(fetcher, ss, cfg.Skills.PlainTarCapBytes)
 		log.Printf("cp: skill ingest wired (endpoint=%s bucket=%s)", ep, ssCfg.Bucket)
 	}
 

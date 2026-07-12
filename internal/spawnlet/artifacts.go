@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -106,6 +107,14 @@ type Artifact struct {
 	ObjectKey    string // content-addressed key, e.g. skills/<sha256>.tar.zst; durable identity
 	Sha256       string // hex sha256 of the PLAIN (uncompressed) tar; integrity gate
 	PresignedURL string // CP-minted short-lived GET URL; transient, redact from logs
+
+	// MaxPlainTarBytes is the CP-stamped effective decoded-tar cap for this artifact (sp-mwco.4.6),
+	// carried on the wire so a CP-side cap raise (bounded by the CP's own memory budget + ingest
+	// semaphore) takes effect without redeploying every self-hosted node. 0 => node default
+	// (ArtifactStager.tarCap(), an older CP or an inline/non-skill artifact). The node uses this
+	// verbatim when set — no local min() against a node-local ceiling, which would recreate the
+	// two-sources-of-truth split this field exists to kill.
+	MaxPlainTarBytes int64
 }
 
 // FetchError is the typed error returned by fetchObjectTar. Terminal=true means the artifact
@@ -190,8 +199,12 @@ func redactURLErr(err error) error {
 	return &redacted
 }
 
-// bytesFetcher abstracts the HTTP GET for by-ref artifacts (injectable in tests).
-type bytesFetcher func(ctx context.Context, url string) ([]byte, error)
+// bytesFetcher abstracts the HTTP GET for by-ref artifacts (injectable in tests). capBytes is the
+// effective cap for THIS fetch (art.MaxPlainTarBytes if set, else the stager default — see
+// ArtifactStager.capFor) and bounds the fetcher's own read of the compressed wire body; it is an
+// explicit parameter (not a closure over stager state) so defaultFetcher cannot silently fall back
+// to a hardcoded const (sp-mwco.4.6).
+type bytesFetcher func(ctx context.Context, url string, capBytes int64) ([]byte, error)
 
 // RepresignFunc mints fresh presigned GET URLs for the given object keys, returning a map from
 // ObjectKey to the new PresignedURL. Supplied by internal/node over the Attach stream (sp-mwco.4.3:
@@ -228,6 +241,17 @@ func (a ArtifactStager) tarCap() int64 {
 		return a.maxTarBytes
 	}
 	return maxPlainTarBytes
+}
+
+// capFor returns the effective decoded-tar size cap for art: the CP-stamped wire cap
+// (art.MaxPlainTarBytes) when set, else the stager default (tarCap()). The node obeys the wire
+// cap verbatim — no local min() against tarCap() — so a CP-side raise takes effect on this node
+// without a redeploy (sp-mwco.4.6 D3).
+func (a ArtifactStager) capFor(art Artifact) int64 {
+	if art.MaxPlainTarBytes > 0 {
+		return art.MaxPlainTarBytes
+	}
+	return a.tarCap()
 }
 
 // effectiveStagingBudget returns the aggregate staging deadline, applying the default when unset.
@@ -424,6 +448,7 @@ type byRefResult struct {
 // limit would see zero progress() calls until the ENTIRE bundle had been dispatched (i.e. until most
 // of it had already finished) — silently reintroducing the stall-window gap this task exists to close.
 func (a ArtifactStager) materializeByRef(ctx context.Context, stageDir string, artifacts []Artifact, progress func(phase, detail, stepKey string), represign RepresignFunc) error {
+	start := time.Now()
 	total := len(artifacts)
 	results := make(chan byRefResult, total)
 	sem := make(chan struct{}, stagingFetchConcurrency)
@@ -469,6 +494,18 @@ func (a ArtifactStager) materializeByRef(ctx context.Context, stageDir string, a
 			completed++
 			if r.err == nil && progress != nil {
 				progress("staging_artifacts", fmt.Sprintf("staged %s (%d/%d)", r.art.ID, completed, total), "")
+			}
+			if completed == total {
+				// The StartSpawn -> last-by-ref-GET duration (sp-mwco.4.6 §4.8, S5): staging begins
+				// on the StartSpawn RPC, and this is the moment the LAST artifact's fetch settled
+				// (success or failure). This is what the presign TTL headroom must be measured against
+				// — not the first artifact's GET, since all by-ref URLs are minted together at
+				// StartSpawn and the last one waits out the whole bundle's fetch fan-out.
+				elapsed := time.Since(start)
+				if progress != nil {
+					progress("staging_artifacts", fmt.Sprintf("staged all %d artifacts in %s", total, elapsed), "")
+				}
+				slog.Info("artifacts: by-ref staging complete", "count", total, "elapsed", elapsed)
 			}
 		case <-heartbeat.C:
 			if progress != nil {
@@ -691,7 +728,8 @@ func (a ArtifactStager) fetchObjectTar(ctx context.Context, art Artifact) ([]byt
 		fetch = defaultFetcher
 	}
 
-	raw, err := fetch(ctx, art.PresignedURL)
+	capBytes := a.capFor(art)
+	raw, err := fetch(ctx, art.PresignedURL, capBytes)
 	if err != nil {
 		return nil, err // already a *FetchError from defaultFetcher or test stub
 	}
@@ -703,15 +741,14 @@ func (a ArtifactStager) fetchObjectTar(ctx context.Context, art Artifact) ([]byt
 	}
 	defer dec.Close()
 
-	// Bounded read: cap at tarCap()+1 so we can distinguish exact-size vs oversize.
-	cap := a.tarCap()
-	lr := &io.LimitedReader{R: dec, N: cap + 1}
+	// Bounded read: cap at capBytes+1 so we can distinguish exact-size vs oversize.
+	lr := &io.LimitedReader{R: dec, N: capBytes + 1}
 	plain, err := io.ReadAll(lr)
 	if err != nil {
 		return nil, retryFetch("skill object: read error", err)
 	}
-	if int64(len(plain)) > cap {
-		return nil, terminalFetch(fmt.Sprintf("skill object too large (> %d bytes)", cap), nil)
+	if int64(len(plain)) > capBytes {
+		return nil, terminalFetch(fmt.Sprintf("skill object too large (> %d bytes)", capBytes), nil)
 	}
 
 	// Integrity gate: sha256 over the decoded plain tar bytes.
@@ -740,8 +777,11 @@ type s3ErrorXML struct {
 // defaultFetcher is the production HTTP GET implementation. It applies a per-request timeout,
 // redacts any *url.Error's query string at construction (defence in depth — see redactURLErr), and
 // classifies non-2xx responses by the parsed S3 error Code/Message via classifyS3Error, never the
-// bare HTTP status.
-var defaultFetcher bytesFetcher = func(ctx context.Context, url string) ([]byte, error) {
+// bare HTTP status. capBytes bounds the compressed wire body it reads — it is the caller's
+// (fetchObjectTar's) effective cap, NOT a package const: the earlier version bounded this read
+// against the hardcoded maxPlainTarBytes const regardless of any CP-raised wire cap, which meant a
+// CP-side raise silently died at this gate on every already-deployed node (sp-mwco.4.6).
+var defaultFetcher bytesFetcher = func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
 	client := &http.Client{Timeout: fetchTimeout}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -759,15 +799,15 @@ var defaultFetcher bytesFetcher = func(ctx context.Context, url string) ([]byte,
 		_ = xml.Unmarshal(errBody, &parsed) // best-effort; parsed stays zero-valued on failure
 		return nil, classifyS3Error(resp.StatusCode, parsed.Code, parsed.Message)
 	}
-	// Bound the compressed read: a legitimate payload that decompresses to <= maxPlainTarBytes
-	// cannot have a compressed body larger than maxPlainTarBytes, so this caps peak memory end-to-end.
-	clr := &io.LimitedReader{R: resp.Body, N: maxPlainTarBytes + 1}
+	// Bound the compressed read: a legitimate payload that decompresses to <= capBytes cannot have
+	// a compressed body larger than capBytes, so this caps peak memory end-to-end.
+	clr := &io.LimitedReader{R: resp.Body, N: capBytes + 1}
 	body, err := io.ReadAll(clr)
 	if err != nil {
 		return nil, retryFetch("skill object: read response body", redactURLErr(err))
 	}
-	if int64(len(body)) > maxPlainTarBytes {
-		return nil, terminalFetch(fmt.Sprintf("skill object compressed body too large (> %d bytes)", maxPlainTarBytes), nil)
+	if int64(len(body)) > capBytes {
+		return nil, terminalFetch(fmt.Sprintf("skill object compressed body too large (> %d bytes)", capBytes), nil)
 	}
 	return body, nil
 }

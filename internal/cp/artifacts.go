@@ -158,9 +158,11 @@ func confineDestPath(p string) error {
 // storeToNodeArtifacts converts persisted artifacts to the node wire form for StartSpawn.
 // Sensitive artifacts are relayed metadata-only (empty inline) — their values arrive via
 // the separate SealedSecret/DeliverSecrets channel keyed by env_var_name.
-// By-ref artifacts (ObjectKey != "") populate Objectref; PresignedUrl is left empty here
-// and filled by presignNodeArtifacts before the node RPC.
-func storeToNodeArtifacts(in []store.Artifact) []*nodev1.ArtifactSpec {
+// By-ref artifacts (ObjectKey != "") populate Objectref, stamped with plainTarCap
+// (MaxPlainTarBytes — sp-mwco.4.6: the CP is the single source of truth for the node's
+// decoded-tar cap; the node uses this verbatim); PresignedUrl is left empty here and filled by
+// presignNodeArtifacts before the node RPC. Inline specs never get an Objectref.
+func storeToNodeArtifacts(in []store.Artifact, plainTarCap int64) []*nodev1.ArtifactSpec {
 	if len(in) == 0 {
 		return nil
 	}
@@ -178,8 +180,9 @@ func storeToNodeArtifacts(in []store.Artifact) []*nodev1.ArtifactSpec {
 		}
 		if a.ObjectKey != "" {
 			spec.Objectref = &nodev1.ObjectRef{
-				ObjectKey: a.ObjectKey,
-				Sha256:    a.ObjectSHA256,
+				ObjectKey:        a.ObjectKey,
+				Sha256:           a.ObjectSHA256,
+				MaxPlainTarBytes: plainTarCap,
 				// PresignedUrl left empty; presignNodeArtifacts fills it at start.
 			}
 		}
@@ -221,7 +224,7 @@ func (s *Server) presignNodeArtifacts(ctx context.Context, specs []*nodev1.Artif
 // any by-ref specs. It is the single call site for all four start paths
 // (CreateSpawn/ResumeSpawn/RecreateSpawn/ForkSpawn).
 func (s *Server) nodeArtifactsForStart(ctx context.Context, arts []store.Artifact) ([]*nodev1.ArtifactSpec, error) {
-	out := storeToNodeArtifacts(arts)
+	out := storeToNodeArtifacts(arts, s.effectiveSkillPlainTarCap())
 	if err := s.presignNodeArtifacts(ctx, out); err != nil {
 		return nil, err
 	}

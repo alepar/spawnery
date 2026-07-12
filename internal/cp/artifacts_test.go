@@ -13,6 +13,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
+	"spawnery/internal/cp/skillfetch"
 	"spawnery/internal/cp/skillstore"
 	"spawnery/internal/cp/store"
 )
@@ -283,7 +284,7 @@ func TestStoreToNodeArtifacts_ByRef(t *testing.T) {
 			ObjectKey: "skills/" + sha + ".tar.zst", ObjectSHA256: sha},
 		{ArtifactID: "inline1", Inline: []byte("hi"), ContentType: 1, TargetContainer: 1, DestPath: "skills/x"},
 	}
-	out := storeToNodeArtifacts(arts)
+	out := storeToNodeArtifacts(arts, skillfetch.DefaultPlainTarCapBytes)
 	if len(out) != 2 {
 		t.Fatalf("want 2, got %d", len(out))
 	}
@@ -302,6 +303,46 @@ func TestStoreToNodeArtifacts_ByRef(t *testing.T) {
 	}
 	if out[1].Objectref != nil {
 		t.Error("inline artifact must not have Objectref")
+	}
+}
+
+// TestNodeArtifactsCarryPlainTarCap pins sp-mwco.4.6: nodeArtifactsForStart stamps the Server's
+// effective skill plain-tar cap onto every by-ref ObjectRef.MaxPlainTarBytes, and leaves inline
+// specs' Objectref nil (no cap to carry — there is no by-ref fetch to bound).
+func TestNodeArtifactsCarryPlainTarCap(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	s.skillPlainTarCap = 12345
+
+	sha := strings.Repeat("a", 64)
+	arts := []store.Artifact{
+		{ArtifactID: "br1", ContentType: 2, TargetContainer: 1, DestPath: "payloads/e1",
+			ObjectKey: "skills/" + sha + ".tar.zst", ObjectSHA256: sha},
+		{ArtifactID: "inline1", Inline: []byte("hi"), ContentType: 1, TargetContainer: 1, DestPath: "skills/x"},
+	}
+	out := storeToNodeArtifacts(arts, s.effectiveSkillPlainTarCap())
+	if out[0].Objectref == nil || out[0].Objectref.MaxPlainTarBytes != 12345 {
+		t.Fatalf("by-ref MaxPlainTarBytes = %+v, want 12345", out[0].Objectref)
+	}
+	if out[1].Objectref != nil {
+		t.Fatal("inline artifact must not have Objectref")
+	}
+}
+
+// TestNodeArtifactsCapDefaultsWhenUnset: the seam unset (SetSkillIngest never called, or called
+// with 0) must still stamp a non-zero cap — skillfetch.DefaultPlainTarCapBytes — never 0. A live
+// CP always states its cap explicitly on the wire.
+func TestNodeArtifactsCapDefaultsWhenUnset(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	// s.skillPlainTarCap left at its zero value.
+
+	sha := strings.Repeat("b", 64)
+	arts := []store.Artifact{
+		{ArtifactID: "br1", ContentType: 2, TargetContainer: 1, DestPath: "payloads/e1",
+			ObjectKey: "skills/" + sha + ".tar.zst", ObjectSHA256: sha},
+	}
+	out := storeToNodeArtifacts(arts, s.effectiveSkillPlainTarCap())
+	if out[0].Objectref == nil || out[0].Objectref.MaxPlainTarBytes != skillfetch.DefaultPlainTarCapBytes {
+		t.Fatalf("by-ref MaxPlainTarBytes = %+v, want default %d", out[0].Objectref, skillfetch.DefaultPlainTarCapBytes)
 	}
 }
 

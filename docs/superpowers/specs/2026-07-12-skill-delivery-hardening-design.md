@@ -186,6 +186,18 @@ an N-member bundle, cold image cache"**, run it in the VM e2e lane, record the n
 assert TTL headroom against *that*. §4.1's parallel fetch shrinks it; §4.3's re-presign is the
 backstop.
 
+**Implementation status (sp-mwco.4.6):** the node now emits the exact StartSpawn → last-GET
+duration as `slog.Info("artifacts: by-ref staging complete", "count", N, "elapsed", d)` from
+`materializeByRef` (`internal/spawnlet/artifacts.go`), and
+`acceptance/tests/customization/skill-staging-s5.spec.ts` measures the create → ACTIVE upper bound
+(an upper bound on StartSpawn → last-GET: ACTIVE also waits out post-staging agent-install/health
+work) over R=5 iterations on a configurable K-member bundle, asserting `max < PresignTTL/3`. **The
+VM-lane run itself has not been executed** — it needs a provisioned e2e VM with real GitHub egress
+(see `docs/e2e-vm-testing.md`) plus a curated set of small public GitHub skill repos
+(`ACC_SKILL_SOURCE_REPOS`), neither of which was available in this implementation session. See the
+dated Post-Implementation note below; running the VM lane and recording the actual measured number
+is tracked as a follow-up, not fabricated here.
+
 ### 4.9 Testing
 
 Hermetic: taxonomy consumption (retryable exhaust / expired-code → re-presign → success /
@@ -233,3 +245,24 @@ used.*
   Note Garage's `AccessDenied` message for a bad signature carries no "expired"/"too old" wording —
   the classifier's expiry markers (`InvalidRequest`+"too old", or `AccessDenied`+"expired") do not
   collide with the tampered-signature case. `classifyS3Error` (artifacts.go) implements this table.
+- **2026-07-12 — sp-mwco.4.6 implemented §4.6/§4.7/§4.8.** (a) `WireCapBytes`/`DecompressedCapBytes`/
+  `PlainTarCapBytes`/`FileCountCap`/`HTTPTimeout` moved from `skillfetch` package consts to
+  `skills.*` config (koanf + `SKILLS_*` env aliases), defaults unchanged. `defaultFetcher` (the
+  actual §2.4 roast finding) now takes an explicit `capBytes` parameter instead of closing over the
+  hardcoded const. The effective plain-tar cap is carried on the wire via a new
+  `node.v1.ObjectRef.max_plain_tar_bytes` field, stamped by the CP at `nodeArtifactsForStart` time
+  (`Server.effectiveSkillPlainTarCap`) and consumed verbatim by the node (`ArtifactStager.capFor`) —
+  no local min() against the node's own default, so a CP-side raise takes effect without a node
+  redeploy. (b) Confirmed and pinned: the host allowlist (`fetch.go`'s `allowedHosts`) stays a code
+  constant; `TestConfigCannotAddFetchOriginatingHost` (skillfetch/caps_test.go) asserts origination
+  is fixed by `ParseRepoURL`/`tarballURL`, not by anything in `Config`. (c) `ingestQuota.allow` now
+  returns the remaining window; the rejection message reads `retry after ~Nm`. (d) Node
+  instrumentation for the corrected S5 metric landed (`materializeByRef`'s
+  `"artifacts: by-ref staging complete"` slog line, elapsed since the first by-ref fetch dispatched
+  — i.e. since StartSpawn began staging) plus an acceptance spec
+  (`skill-staging-s5.spec.ts`) that measures create → ACTIVE (an upper bound) over 5 iterations on a
+  configurable K-member bundle and asserts headroom against `PresignTTL/3`. **The VM-lane run was
+  NOT executed in this implementation session** (no provisioned e2e VM + real GitHub egress + curated
+  skill-repo fixture list available); §4.8's "record the number here" is therefore still open —
+  running `GOLDEN_IMAGE=… scripts/e2e-vm/run.sh --profile fake` (or the local dev-stack fallback) and
+  recording the observed max is a follow-up, tracked so this gap isn't silently lost.

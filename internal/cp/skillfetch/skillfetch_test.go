@@ -158,9 +158,15 @@ func buildGzipTarball(t *testing.T, wrapperDir string, files map[string]string) 
 	return buf.Bytes()
 }
 
-// plainHTTPClient returns a simple http.Client (no SSRF protection) for use against local test servers.
+// plainHTTPClient returns a simple http.Client (no SSRF protection) for use against local test
+// servers, with default caps so existing size/count assertions are unaffected.
 func plainHTTPClient() *secureClient {
-	return &secureClient{client: &http.Client{}}
+	return &secureClient{
+		client:    &http.Client{},
+		wireCap:   DefaultWireCapBytes,
+		decompCap: DefaultDecompressedCapBytes,
+		fileCap:   DefaultFileCountCap,
+	}
 }
 
 func TestFetch_HappyPath(t *testing.T) {
@@ -597,7 +603,13 @@ func TestSSRF_DisallowedRedirect(t *testing.T) {
 	}))
 	defer redirSrv.Close()
 
-	c := newSecureClient()
+	c := newSecureClient(Config{
+		WireCapBytes:         DefaultWireCapBytes,
+		DecompressedCapBytes: DefaultDecompressedCapBytes,
+		PlainTarCapBytes:     DefaultPlainTarCapBytes,
+		FileCountCap:         DefaultFileCountCap,
+		HTTPTimeout:          DefaultHTTPTimeout,
+	})
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, redirSrv.URL, nil)
 	// The CheckRedirect should reject the redirect to 127.0.0.1 (not in allowedHosts)
 	_, err := c.client.Do(req)

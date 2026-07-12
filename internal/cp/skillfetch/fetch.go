@@ -15,6 +15,14 @@ import (
 
 // allowedHosts is the set of hostnames permitted for fetching GitHub tarballs.
 // Each redirect hop must have its target host in this set (§4.9).
+//
+// This is a CODE CONSTANT, deliberately not config-surfaced (§4.6(b)). It cannot widen where a
+// fetch may *originate* — that is pinned by ParseRepoURL (rejects any host != github.com) and
+// tarballURL (hardcodes https://api.github.com/...) — so as a config knob it would be inert for
+// its only plausible purpose ("let me ingest from host X") while being a pure security downgrade
+// for its actual scope: the set of hosts a GitHub redirect chain is permitted to leave GitHub for.
+// Here, ADDITION is the risk, not omission — an append-only config knob defends the wrong failure
+// mode. See caps_test.go TestConfigCannotAddFetchOriginatingHost.
 var allowedHosts = map[string]bool{
 	"github.com":          true,
 	"api.github.com":      true,
@@ -47,13 +55,18 @@ func (e *ErrUpstreamFailed) Unwrap() error { return e.Cause }
 
 // secureClient is an HTTP client with per-hop host allowlisting and IP-range blocking.
 type secureClient struct {
-	client *http.Client
+	client    *http.Client
+	wireCap   int64 // max compressed body size; see Config.WireCapBytes
+	decompCap int64 // max decompressed size; see Config.DecompressedCapBytes
+	fileCap   int   // max tar entry count; see Config.FileCountCap
 }
 
 // newSecureClient creates a secure HTTP client that:
 //   - validates each redirect hop's host against the allowlist
 //   - resolves the target host and rejects private/loopback/link-local/metadata IPs
-func newSecureClient() *secureClient {
+//
+// cfg's caps and timeout are assumed already defaulted (New fills zeros before calling this).
+func newSecureClient(cfg Config) *secureClient {
 	transport := &http.Transport{
 		DialContext:           blockedDialContext(),
 		TLSHandshakeTimeout:   30 * time.Second,
@@ -62,7 +75,7 @@ func newSecureClient() *secureClient {
 	}
 	c := &http.Client{
 		Transport: transport,
-		Timeout:   HTTPTimeout,
+		Timeout:   cfg.HTTPTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxRedirects {
 				return fmt.Errorf("too many redirects (max %d)", maxRedirects)
@@ -74,7 +87,12 @@ func newSecureClient() *secureClient {
 			return nil
 		},
 	}
-	return &secureClient{client: c}
+	return &secureClient{
+		client:    c,
+		wireCap:   cfg.WireCapBytes,
+		decompCap: cfg.DecompressedCapBytes,
+		fileCap:   cfg.FileCountCap,
+	}
 }
 
 // blockedDialContext returns a DialContext that resolves the target address and rejects
@@ -203,7 +221,7 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 	}
 
 	// Wire cap on compressed body
-	wireReader := &io.LimitedReader{R: resp.Body, N: WireCapBytes + 1}
+	wireReader := &io.LimitedReader{R: resp.Body, N: s.wireCap + 1}
 
 	// gzip decode
 	gz, err := gzip.NewReader(wireReader)
@@ -213,7 +231,7 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 	defer gz.Close()
 
 	// Decompressed size cap (enforced streaming, before any parse)
-	decompReader := &io.LimitedReader{R: gz, N: DecompressedCapBytes + 1}
+	decompReader := &io.LimitedReader{R: gz, N: s.decompCap + 1}
 
 	tr := tar.NewReader(decompReader)
 
@@ -234,11 +252,11 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 
 		// Check decompressed cap
 		if decompReader.N <= 0 {
-			return nil, nil, fmt.Errorf("decompressed tarball exceeds cap (%d bytes)", DecompressedCapBytes)
+			return nil, nil, fmt.Errorf("decompressed tarball exceeds cap (%d bytes)", s.decompCap)
 		}
 		// Check wire cap
 		if wireReader.N <= 0 {
-			return nil, nil, fmt.Errorf("compressed tarball exceeds wire cap (%d bytes)", WireCapBytes)
+			return nil, nil, fmt.Errorf("compressed tarball exceeds wire cap (%d bytes)", s.wireCap)
 		}
 
 		// Classify the entry type. Non-regular entries (symlink, hardlink, device, fifo, and
@@ -302,8 +320,8 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 		entryName = cleaned
 
 		fileCount++
-		if fileCount > FileCountCap {
-			return nil, nil, fmt.Errorf("too many files in tarball (max %d)", FileCountCap)
+		if fileCount > s.fileCap {
+			return nil, nil, fmt.Errorf("too many files in tarball (max %d)", s.fileCap)
 		}
 
 		if skipKind != "" {
@@ -321,7 +339,7 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 		}
 
 		// Read file content with per-file cap (same decompressed budget)
-		content, err := io.ReadAll(io.LimitReader(tr, DecompressedCapBytes))
+		content, err := io.ReadAll(io.LimitReader(tr, s.decompCap))
 		if err != nil {
 			return nil, nil, fmt.Errorf("read entry %q: %w", hdr.Name, err)
 		}
