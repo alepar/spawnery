@@ -144,9 +144,11 @@ func TestOAuthHappyPath(t *testing.T) {
 	if !strings.HasPrefix(location, "http://localhost:3000/callback") {
 		t.Fatalf("callback: unexpected redirect to %q", location)
 	}
-	// Should carry access_token + original state.
-	if extractQueryParam(location, "access_token") == "" {
-		t.Fatalf("callback: no access_token in %q", location)
+	if extractQueryParam(location, "cp_access_token") == "" || extractQueryParam(location, "node_access_token") == "" {
+		t.Fatalf("callback: paired credentials missing in %q", location)
+	}
+	if extractQueryParam(location, "access_token") != "" {
+		t.Fatalf("callback: legacy access_token present in %q", location)
 	}
 	if extractQueryParam(location, "state") != "client-state-abc" {
 		t.Fatalf("callback: state not echoed in %q", location)
@@ -230,7 +232,7 @@ func TestOAuthForgedCallback(t *testing.T) {
 	}
 	// Should redirect with error (not success).
 	location := cbResp.Header.Get("Location")
-	if cbResp.StatusCode == http.StatusFound && extractQueryParam(location, "access_token") != "" {
+	if cbResp.StatusCode == http.StatusFound && extractQueryParam(location, "cp_access_token") != "" {
 		t.Fatal("forged callback succeeded with access_token")
 	}
 }
@@ -270,7 +272,7 @@ func TestOAuthCodeInjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	location := cbResp.Header.Get("Location")
-	if cbResp.StatusCode == http.StatusFound && extractQueryParam(location, "access_token") != "" {
+	if cbResp.StatusCode == http.StatusFound && extractQueryParam(location, "cp_access_token") != "" {
 		t.Fatal("code injection succeeded with wrong flow cookie")
 	}
 }
@@ -379,7 +381,7 @@ func TestOAuthCallbackNoPubkeyRejected(t *testing.T) {
 	if cbResp.StatusCode != http.StatusFound || extractQueryParam(location, "error") != "invalid_request" {
 		t.Fatalf("want 302 invalid_request redirect, got %d %q", cbResp.StatusCode, location)
 	}
-	if extractQueryParam(location, "access_token") != "" {
+	if extractQueryParam(location, "cp_access_token") != "" || extractQueryParam(location, "node_access_token") != "" {
 		t.Fatal("callback without pubkey must not return access_token")
 	}
 }
@@ -401,7 +403,7 @@ func TestOAuthCallbackNonP256PubkeyRejected(t *testing.T) {
 	if resp.StatusCode != http.StatusFound || extractQueryParam(location, "error") != "invalid_request" {
 		t.Fatalf("non-P256 pubkey: want 302 invalid_request redirect, got %d %q", resp.StatusCode, location)
 	}
-	if extractQueryParam(location, "access_token") != "" {
+	if extractQueryParam(location, "cp_access_token") != "" || extractQueryParam(location, "node_access_token") != "" {
 		t.Fatal("non-P256 pubkey: callback must not return access_token")
 	}
 }
@@ -430,9 +432,11 @@ func TestOAuthLoopbackDeliversRefreshToken(t *testing.T) {
 	if refreshToken == "" {
 		t.Fatalf("loopback: refresh_token must be in query, got location %q", location)
 	}
-	accessToken := extractQueryParam(location, "access_token")
-	if accessToken == "" {
-		t.Fatalf("loopback: access_token missing from location %q", location)
+	if extractQueryParam(location, "cp_access_token") == "" || extractQueryParam(location, "node_access_token") == "" {
+		t.Fatalf("loopback: paired credentials missing from location %q", location)
+	}
+	if extractQueryParam(location, "access_token") != "" {
+		t.Fatalf("loopback: legacy access_token present in location %q", location)
 	}
 	// ClientKind must be "cli" for the loopback family.
 	row, err := st.RefreshSessions().Get(context.Background(), sha256Hex(refreshToken))

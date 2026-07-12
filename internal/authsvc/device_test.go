@@ -73,7 +73,9 @@ func TestDeviceGrantHappy(t *testing.T) {
 	pollResp, _ := client.Post(srv.URL+"/device/token",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"device_code": {authOut.DeviceCode}}.Encode()))
-	var pollOut struct{ Error string `json:"error"` }
+	var pollOut struct {
+		Error string `json:"error"`
+	}
 	body, _ = io.ReadAll(pollResp.Body)
 	_ = json.Unmarshal(body, &pollOut)
 	if pollOut.Error != "authorization_pending" {
@@ -91,7 +93,8 @@ func TestDeviceGrantHappy(t *testing.T) {
 		FamilyID:          "browser-fam",
 		ClientKind:        store.ClientWeb,
 		SessionPubkeySPKI: browser_spki,
-		AccessTokenID:     "browser-tok",
+		CPAccessTokenID:   "browser-cp",
+		NodeAccessTokenID: "browser-node",
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),
@@ -122,15 +125,17 @@ func TestDeviceGrantHappy(t *testing.T) {
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"device_code": {authOut.DeviceCode}}.Encode()))
 	var tokenOut struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		Error        string `json:"error"`
+		CPAccessToken   string `json:"cp_access_token"`
+		NodeAccessToken string `json:"node_access_token"`
+		AccessToken     string `json:"access_token"`
+		RefreshToken    string `json:"refresh_token"`
+		Error           string `json:"error"`
 	}
 	body, _ = io.ReadAll(pollResp2.Body)
 	if err := json.Unmarshal(body, &tokenOut); err != nil {
 		t.Fatalf("parse token response: %v: %s", err, body)
 	}
-	if tokenOut.AccessToken == "" || tokenOut.RefreshToken == "" {
+	if tokenOut.CPAccessToken == "" || tokenOut.NodeAccessToken == "" || tokenOut.RefreshToken == "" || tokenOut.AccessToken != "" {
 		t.Fatalf("missing tokens: %s", body)
 	}
 
@@ -158,14 +163,18 @@ func TestDeviceGrantPollBeforeApproval(t *testing.T) {
 	authResp, _ := client.Post(srv.URL+"/device/authorize",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"session_pubkey": {spkiB64(spkiDER)}}.Encode()))
-	var authOut struct{ DeviceCode string `json:"device_code"` }
+	var authOut struct {
+		DeviceCode string `json:"device_code"`
+	}
 	body, _ := io.ReadAll(authResp.Body)
 	_ = json.Unmarshal(body, &authOut)
 
 	pollResp, _ := client.Post(srv.URL+"/device/token",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"device_code": {authOut.DeviceCode}}.Encode()))
-	var out struct{ Error string `json:"error"` }
+	var out struct {
+		Error string `json:"error"`
+	}
 	body, _ = io.ReadAll(pollResp.Body)
 	_ = json.Unmarshal(body, &out)
 	if out.Error != "authorization_pending" {
@@ -185,7 +194,9 @@ func TestDeviceGrantExpired(t *testing.T) {
 	authResp, _ := client.Post(srv.URL+"/device/authorize",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"session_pubkey": {spkiB64(spkiDER)}}.Encode()))
-	var authOut struct{ DeviceCode string `json:"device_code"` }
+	var authOut struct {
+		DeviceCode string `json:"device_code"`
+	}
 	body, _ := io.ReadAll(authResp.Body)
 	_ = json.Unmarshal(body, &authOut)
 
@@ -195,7 +206,9 @@ func TestDeviceGrantExpired(t *testing.T) {
 	pollResp, _ := client.Post(srv.URL+"/device/token",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"device_code": {authOut.DeviceCode}}.Encode()))
-	var out struct{ Error string `json:"error"` }
+	var out struct {
+		Error string `json:"error"`
+	}
 	body, _ = io.ReadAll(pollResp.Body)
 	_ = json.Unmarshal(body, &out)
 	if out.Error != "expired_token" {
@@ -239,7 +252,8 @@ func TestDeviceGrantPerCodeLockout(t *testing.T) {
 		FamilyID:          "lockout-fam",
 		ClientKind:        store.ClientWeb,
 		SessionPubkeySPKI: browser_spki,
-		AccessTokenID:     "lockout-tok",
+		CPAccessTokenID:   "lockout-cp",
+		NodeAccessTokenID: "lockout-node",
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),
@@ -264,7 +278,9 @@ func TestDeviceGrantPerCodeLockout(t *testing.T) {
 	verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, _ := verifyClient.Do(verifyReq)
 	body, _ = io.ReadAll(resp.Body)
-	var out struct{ Error string `json:"error"` }
+	var out struct {
+		Error string `json:"error"`
+	}
 	_ = json.Unmarshal(body, &out)
 	if out.Error != "access_denied" {
 		t.Fatalf("per-code lockout: want access_denied after %d attempts, got %q (body: %s)",
@@ -291,7 +307,8 @@ func TestDeviceGrantUserCodeRateLimit(t *testing.T) {
 		FamilyID:          "rl-fam",
 		ClientKind:        store.ClientWeb,
 		SessionPubkeySPKI: browser_spki,
-		AccessTokenID:     "rl-tok",
+		CPAccessTokenID:   "rl-cp",
+		NodeAccessTokenID: "rl-node",
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),
