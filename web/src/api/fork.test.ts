@@ -92,7 +92,6 @@ describe("runFork", () => {
       "root",
       new Date("2026-06-15T00:00:00Z"),
       expect.any(Function),
-      undefined,
     );
   });
 
@@ -140,7 +139,6 @@ describe("runFork", () => {
       "root",
       new Date("2026-06-15T00:00:00Z"),
       expect.any(Function),
-      undefined,
     );
     expect(res.journalKeysDelivered).toBe(1);
   });
@@ -189,7 +187,6 @@ describe("runFork", () => {
       DEVICE_KEYS,
       "root",
       new Date("2026-06-15T00:00:00Z"),
-      undefined,
       undefined,
     );
     expect(res).toEqual({ journalKeysDelivered: 1 });
