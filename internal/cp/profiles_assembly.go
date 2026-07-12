@@ -240,6 +240,9 @@ func buildManifestAndPayloads(items []resolvedItem, targetNames map[string]bool)
 			Kind:    spec.Kind(entry.Kind),
 			Targets: targets,
 		}
+		if entry.SourceKind == store.ProfileSourceBundle {
+			a.Bundle = entry.EntryID
+		}
 
 		switch entry.Kind {
 		case store.ProfileEntrySkill:
