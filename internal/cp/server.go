@@ -492,14 +492,13 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			// Cache the node's published sub-key + relayed cert chain (sp-2ckv.4). The chain is the
 			// mTLS-verified peer chain (empty in insecure mode); the sub-key is the node's published JSON.
 			certChain, _ := nodeauth.CertChainFromContext(ctx)
-			s.nodeKeys.put(nodeID, m.Register.SignedSubkey, certChain)
+			s.nodeKeys.put(nodeID, nodeClass, nodeOwner, m.Register.SignedSubkey, certChain)
 			s.reconcileInventory(ctx, nodeID, sender, m.Register.Running) // a returning node reports what it still runs
 			s.upsertAgentCatalog(ctx, m.Register.AgentImages, m.Register.Binaries)
 		case *nodev1.NodeMessage_Heartbeat:
 			s.reg.Heartbeat(nodeID, token, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
 			if len(m.Heartbeat.SignedSubkey) > 0 {
-				certChain, _ := nodeauth.CertChainFromContext(ctx)
-				s.nodeKeys.put(nodeID, m.Heartbeat.SignedSubkey, certChain) // sub-key rotated -> refresh cache
+				s.nodeKeys.updateSubkey(nodeID, m.Heartbeat.SignedSubkey)
 			}
 			s.reconcileInventory(ctx, nodeID, sender, m.Heartbeat.Running)
 		case *nodev1.NodeMessage_Status:
@@ -1576,11 +1575,16 @@ func (s *Server) GetPendingIntent(ctx context.Context, req *connect.Request[cpv1
 	pi, ready := s.pendingIntents.get(req.Msg.SpawnId)
 	resp := &cpv1.GetPendingIntentResponse{Pending: pi, Ready: ready}
 	if ready {
-		if entry, ok := s.pendingIntentNodeKey(pi); ok {
-			resp.NodeCertChain = append([]byte(nil), entry.certChain...)
-			resp.SignedSubkey = append([]byte(nil), entry.subkey...)
-			resp.Generation = pi.GetGeneration()
+		entry, ok := s.pendingIntentNodeKey(pi)
+		if !ok {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("target node has not published verifiable identity metadata"))
 		}
+		resp.NodeCertChain = append([]byte(nil), entry.certChain...)
+		resp.SignedSubkey = append([]byte(nil), entry.subkey...)
+		resp.Generation = pi.GetGeneration()
+		resp.TargetNodeId = entry.nodeID
+		resp.TargetNodeClass = entry.nodeClass
+		resp.TargetNodeAccountId = entry.accountID
 	}
 	return connect.NewResponse(resp), nil
 }

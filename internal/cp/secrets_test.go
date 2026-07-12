@@ -14,8 +14,10 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
+	"spawnery/internal/cp/nodeauth"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/store"
+	"spawnery/internal/pki"
 	"spawnery/internal/secrets/journalkey"
 )
 
@@ -100,10 +102,14 @@ func (c *capSender) secretDeliveries() []*nodev1.SecretDelivery {
 func TestGetSpawnNodeKeyReturnsPublishedSubKey(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	subkeyJSON := []byte(`{"hpke_pub":"AAAA","node_id":"n1","not_after":"2099-01-01T00:00:00Z"}`)
+	certChain := []byte("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nintermediate\n-----END CERTIFICATE-----\n")
 
 	in := make(chan *nodev1.NodeMessage, 2)
-	go s.runNode(context.Background(), &capSender{}, recvFromChan(in))
-	in <- &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{Register: &nodev1.Register{NodeId: "n1", MaxSpawns: 1, SignedSubkey: subkeyJSON}}}
+	nodeCtx := nodeauth.WithIdentity(context.Background(), pki.Principal{Kind: pki.KindNode, Role: pki.ClassCloud, NodeID: "n1", AccountID: "system"})
+	nodeCtx = nodeauth.WithCertChain(nodeCtx, certChain)
+	go s.runNode(nodeCtx, &capSender{}, recvFromChan(in))
+	// Contradictory self-asserted values must not replace the authenticated principal.
+	in <- &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{Register: &nodev1.Register{NodeId: "fake", MaxSpawns: 1, NodeClass: "self-hosted", NodeOwner: "mallory", SignedSubkey: subkeyJSON}}}
 	// Wait for the Register to land the sub-key in the cache.
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -125,8 +131,15 @@ func TestGetSpawnNodeKeyReturnsPublishedSubKey(t *testing.T) {
 	if !bytes.Equal(resp.Msg.SignedSubkey, subkeyJSON) {
 		t.Fatalf("SignedSubkey = %q, want %q", resp.Msg.SignedSubkey, subkeyJSON)
 	}
+	if !bytes.Equal(resp.Msg.NodeCertChain, certChain) {
+		t.Fatalf("NodeCertChain = %q, want leaf-first PEM %q", resp.Msg.NodeCertChain, certChain)
+	}
 	if resp.Msg.Generation != 1 {
 		t.Fatalf("Generation = %d, want 1", resp.Msg.Generation)
+	}
+	if resp.Msg.TargetNodeId != "n1" || resp.Msg.TargetNodeClass != "cloud" || resp.Msg.TargetNodeAccountId != "system" {
+		t.Fatalf("target identity = (%q, %q, %q), want (n1, cloud, system)",
+			resp.Msg.TargetNodeId, resp.Msg.TargetNodeClass, resp.Msg.TargetNodeAccountId)
 	}
 	close(in)
 }
@@ -135,7 +148,7 @@ func TestGetPendingIntentReturnsTargetNodeSubKey(t *testing.T) {
 	s, _, stopACK := intentTestServer(t)
 	defer stopACK()
 	subkeyJSON := []byte(`{"hpke_pub":"AAAA","node_id":"n-intent","not_after":"2099-01-01T00:00:00Z"}`)
-	s.nodeKeys.put("n-intent", subkeyJSON, []byte("cert-chain"))
+	s.nodeKeys.put("n-intent", "self-hosted", "alice", subkeyJSON, []byte("cert-chain"))
 
 	ctx := auth.WithOwner(context.Background(), "alice")
 	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
@@ -162,6 +175,10 @@ func TestGetPendingIntentReturnsTargetNodeSubKey(t *testing.T) {
 			if got.Msg.GetGeneration() != pending.GetGeneration() {
 				t.Fatalf("Generation = %d, want pending generation %d", got.Msg.GetGeneration(), pending.GetGeneration())
 			}
+			if got.Msg.GetTargetNodeId() != "n-intent" || got.Msg.GetTargetNodeClass() != "self-hosted" || got.Msg.GetTargetNodeAccountId() != "alice" {
+				t.Fatalf("target identity = (%q, %q, %q), want (n-intent, self-hosted, alice)",
+					got.Msg.GetTargetNodeId(), got.Msg.GetTargetNodeClass(), got.Msg.GetTargetNodeAccountId())
+			}
 			break
 		}
 		if time.Now().After(deadline) {
@@ -182,7 +199,7 @@ func TestGetSpawnNodeKeyReturnsPendingForkTargetSubKey(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	subkeyJSON := []byte(`{"hpke_pub":"BBBB","node_id":"node-2","not_after":"2099-01-01T00:00:00Z"}`)
 	certChain := []byte("node-2-cert-chain")
-	s.nodeKeys.put("node-2", subkeyJSON, certChain)
+	s.nodeKeys.put("node-2", "cloud", "system", subkeyJSON, certChain)
 	createPendingFork(t, s, "alice", "sp-source", "sp-fork", "node-1", "node-2", 9, 1)
 
 	ctx := auth.WithOwner(context.Background(), "alice")

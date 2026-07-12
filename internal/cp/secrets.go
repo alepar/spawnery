@@ -27,6 +27,9 @@ type nodeKeyCache struct {
 }
 
 type nodeKeyEntry struct {
+	nodeID    string
+	nodeClass string
+	accountID string
 	subkey    []byte // JSON subkey.SignedSubKey (opaque to the CP)
 	certChain []byte // node leaf+chain PEM (empty in insecure mode)
 }
@@ -35,14 +38,31 @@ func newNodeKeyCache() *nodeKeyCache { return &nodeKeyCache{m: map[string]nodeKe
 
 // put records nodeID's sub-key + cert chain. A delivery with no sub-key (an insecure/dev node that
 // publishes none) is ignored — it must not wipe a previously cached real sub-key.
-func (c *nodeKeyCache) put(nodeID string, subkey, certChain []byte) {
+func (c *nodeKeyCache) put(nodeID, nodeClass, accountID string, subkey, certChain []byte) {
 	if len(subkey) == 0 {
 		return
 	}
 	c.mu.Lock()
 	c.m[nodeID] = nodeKeyEntry{
+		nodeID:    nodeID,
+		nodeClass: nodeClass,
+		accountID: accountID,
 		subkey:    append([]byte(nil), subkey...),
 		certChain: append([]byte(nil), certChain...),
+	}
+	c.mu.Unlock()
+}
+
+// updateSubkey rotates only the opaque subkey bytes. Identity and certificate material remain the
+// effective values captured atomically when the authenticated node registered.
+func (c *nodeKeyCache) updateSubkey(nodeID string, subkey []byte) {
+	if len(subkey) == 0 {
+		return
+	}
+	c.mu.Lock()
+	if e, ok := c.m[nodeID]; ok {
+		e.subkey = append([]byte(nil), subkey...)
+		c.m[nodeID] = e
 	}
 	c.mu.Unlock()
 }
@@ -188,9 +208,12 @@ func (s *Server) GetSpawnNodeKey(ctx context.Context, req *connect.Request[cpv1.
 		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("hosting node has not published an HPKE sub-key"))
 	}
 	return connect.NewResponse(&cpv1.GetSpawnNodeKeyResponse{
-		NodeCertChain: entry.certChain,
-		SignedSubkey:  entry.subkey,
-		Generation:    target.generation,
+		NodeCertChain:       append([]byte(nil), entry.certChain...),
+		SignedSubkey:        append([]byte(nil), entry.subkey...),
+		Generation:          target.generation,
+		TargetNodeId:        entry.nodeID,
+		TargetNodeClass:     entry.nodeClass,
+		TargetNodeAccountId: entry.accountID,
 	}), nil
 }
 

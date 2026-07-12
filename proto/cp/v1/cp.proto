@@ -421,7 +421,14 @@ message SealedSecret {
 // any other episode. node_cert_chain is the node's leaf+chain PEM (captured from the node's mTLS to the
 // CP; empty in insecure/dev mode, where verification is relaxed). signed_subkey is the JSON SignedSubKey.
 message GetSpawnNodeKeyRequest  { string spawn_id = 1; }
-message GetSpawnNodeKeyResponse { bytes node_cert_chain = 1; bytes signed_subkey = 2; uint64 generation = 3; }
+message GetSpawnNodeKeyResponse {
+  bytes  node_cert_chain       = 1;
+  bytes  signed_subkey         = 2;
+  uint64 generation            = 3;
+  string target_node_id        = 4;
+  string target_node_class     = 5;
+  string target_node_account_id = 6;
+}
 
 // DeliverSecrets hands the CP owner-sealed ciphertext to relay to the spawn's live node (ciphertext-only;
 // the CP stores nothing in plaintext and never unseals). The CP stamps the live generation and forwards
@@ -511,6 +518,9 @@ message GetPendingIntentResponse {
   bytes node_cert_chain = 3;
   bytes signed_subkey = 4;
   uint64 generation = 5;
+  string target_node_id = 6;
+  string target_node_class = 7;
+  string target_node_account_id = 8;
 }
 
 // SubmitIntent delivers the client's signed intent to unblock the pending provision.

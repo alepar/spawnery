@@ -16,11 +16,13 @@ func TestRegisterPrefersVerifiedIdentity(t *testing.T) {
 	in := make(chan *nodev1.NodeMessage, 4)
 	ctx := nodeauth.WithIdentity(context.Background(),
 		pki.Principal{Kind: pki.KindNode, Role: pki.ClassSelfHosted, NodeID: "realnode", AccountID: "alice"})
+	certChain := []byte("leaf-first-pem")
+	ctx = nodeauth.WithCertChain(ctx, certChain)
 	go s.runNode(ctx, &capSender{}, recvFromChan(in))
 
 	// The node LIES: claims cloud class, owner bob, a different node id.
 	in <- &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Register{Register: &nodev1.Register{
-		NodeId: "fakenode", MaxSpawns: 1, NodeClass: "cloud", NodeOwner: "bob",
+		NodeId: "fakenode", MaxSpawns: 1, NodeClass: "cloud", NodeOwner: "bob", SignedSubkey: []byte("opaque-subkey"),
 	}}}
 
 	// The CP records the VERIFIED identity, not the lie.
@@ -32,6 +34,10 @@ func TestRegisterPrefersVerifiedIdentity(t *testing.T) {
 	// The self-asserted node id must never have been registered.
 	if _, ok := reg.Get("fakenode"); ok {
 		t.Fatal("self-asserted node_id must be ignored when authenticated")
+	}
+	entry, ok := s.nodeKeys.get("realnode")
+	if !ok || entry.nodeID != "realnode" || entry.nodeClass != pki.ClassSelfHosted || entry.accountID != "alice" || string(entry.certChain) != string(certChain) {
+		t.Fatalf("cached effective identity = %+v (ok=%v)", entry, ok)
 	}
 	close(in)
 }
