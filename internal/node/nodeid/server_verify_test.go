@@ -2,6 +2,7 @@ package nodeid_test
 
 import (
 	"crypto/tls"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -36,12 +37,16 @@ func TestMTLSClientVerifiesServerAgainstPinnedRoot(t *testing.T) {
 	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
 	node, _ := inter.IssueNode("n", "a", pki.ClassSelfHosted, time.Now().Add(time.Hour))
 	keyPEM, _ := pki.MarshalKeyPEM(node.Key)
-	client, err := nodeid.Identity{
+	identity := nodeid.Identity{
 		CertPEM:  pki.MarshalCertPEM(node.Cert),
 		ChainPEM: pki.MarshalCertPEM(inter.Cert),
 		KeyPEM:   keyPEM,
 		RootPEM:  pki.MarshalCertPEM(root.Cert), // the node pins THIS root
-	}.MTLSClient()
+	}
+	client, err := identity.MTLSClient(nodeid.ClientOptions{
+		TrustDomain: pki.DefaultTrustDomain, ServerName: "localhost", ExpectedServiceRole: pki.RoleCP,
+		IsRevoked: func(*big.Int, *big.Int) bool { return false },
+	})
 	if err != nil {
 		t.Fatalf("MTLSClient: %v", err)
 	}
@@ -50,7 +55,8 @@ func TestMTLSClientVerifiesServerAgainstPinnedRoot(t *testing.T) {
 	hour := time.Now().Add(time.Hour)
 
 	// Good CP: server cert from the SAME (pinned) root -> the node trusts it.
-	goodSrv, _ := root.IssueServer("cp", []string{"localhost"}, ips, hour)
+	serviceIssuer, _ := root.NewIntermediate(pki.IssuerService, pki.DefaultTrustDomain)
+	goodSrv, _ := serviceIssuer.IssueService(pki.RoleCP, "cp-1", pki.DefaultTrustDomain, []string{"localhost"}, ips, hour)
 	good := tlsServer(t, goodSrv)
 	defer good.Close()
 	resp, err := client.Get(good.URL)
@@ -61,7 +67,8 @@ func TestMTLSClientVerifiesServerAgainstPinnedRoot(t *testing.T) {
 
 	// Bad CP: server cert from a DIFFERENT root -> the node must reject the connection.
 	otherRoot, _ := pki.NewRootCA("Other Root")
-	badSrv, _ := otherRoot.IssueServer("cp", []string{"localhost"}, ips, hour)
+	otherServiceIssuer, _ := otherRoot.NewIntermediate(pki.IssuerService, pki.DefaultTrustDomain)
+	badSrv, _ := otherServiceIssuer.IssueService(pki.RoleCP, "cp-2", pki.DefaultTrustDomain, []string{"localhost"}, ips, hour)
 	bad := tlsServer(t, badSrv)
 	defer bad.Close()
 	if _, err := client.Get(bad.URL); err == nil {

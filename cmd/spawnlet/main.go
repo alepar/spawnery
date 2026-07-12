@@ -125,7 +125,19 @@ func main() {
 		}
 		// Node-auth mode (sp-ova). insecure: h2c to CP_ADDR. enforced: mTLS to the CP node listener
 		// presenting the enrolled cert (loaded from disk, or enrolled on first boot via the AS).
-		httpc, dialURL, err := nodeCPClient(cfg, cfg.CP.Addr, cfg.Node.ID)
+		certificateRevocations, err := loadNodeCertificateRevocations(cfg, time.Now)
+		if err != nil {
+			log.Fatalf("node: certificate revocation setup: %v", err)
+		}
+		if certificateRevocations != nil {
+			go certificateRevocations.watch(ctx, cfg.Node.CertificateRevocationRefresh)
+			defer func() {
+				if err := certificateRevocations.state.Close(); err != nil {
+					log.Printf("node: certificate revocation close: %v", err)
+				}
+			}()
+		}
+		httpc, dialURL, err := nodeCPClient(cfg, cfg.CP.Addr, cfg.Node.ID, certificateRevocations)
 		if err != nil {
 			log.Fatalf("node: identity/transport setup: %v", err)
 		}
@@ -163,7 +175,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("node: intent verifier setup: %v", err)
 		}
-		nodeCfg.GitHubMint = nodeGitHubMint(cfg)
+		nodeCfg.GitHubMint = nodeGitHubMint(cfg, certificateRevocations)
 		log.Printf("spawnlet attaching to CP at %s as %s", nodeCfg.CPURL, cfg.Node.ID)
 		err = node.Run(ctx, mgr, httpc, nodeCfg) // returns when ctx is cancelled (signal) or on fatal error
 		gracefulStopAll(mgr)
@@ -468,9 +480,12 @@ func writeGitHubStaticCredentialHelper(dataRoot, token string) (string, error) {
 // to the account owner, who mints a token bound to it (IssueBoundEnrollmentToken) over the pinned AS
 // connection and hands it back as ENROLL_TOKEN. The node redeems with the SAME key, so a token a
 // compromised CP observed cannot be redeemed with a substituted key.
-func nodeCPClient(cfg *Spawnlet, insecureURL, nodeID string) (*http.Client, string, error) {
+func nodeCPClient(cfg *Spawnlet, insecureURL, nodeID string, revocations *nodeCertificateRevocations) (*http.Client, string, error) {
 	if cfg.Node.AuthMode != "enforced" {
 		return h2cClient(), insecureURL, nil
+	}
+	if revocations == nil || revocations.state == nil {
+		return nil, "", errors.New("enforced mode: certificate revocation state is required")
 	}
 	dir := cfg.Node.IDDir
 	id, err := nodeid.Load(dir)
@@ -498,7 +513,13 @@ func nodeCPClient(cfg *Spawnlet, insecureURL, nodeID string) (*http.Client, stri
 		if rerr != nil {
 			return nil, "", fmt.Errorf("enforced mode: pinned NODE_ROOT_CA required for enrollment: %w", rerr)
 		}
-		res, eerr := authsvc.RunEnrollWithKey(context.Background(), asURL, enrollToken, nodeID, key)
+		root, rerr := pki.ParseCertPEM(rootPEM)
+		if rerr != nil {
+			return nil, "", fmt.Errorf("enforced mode: parse pinned root for enrollment: %w", rerr)
+		}
+		res, eerr := authsvc.RunEnrollWithKey(context.Background(), asURL, enrollToken, nodeID, key, authsvc.EnrollTransport{
+			Root: root, TrustDomain: cfg.Node.TrustDomain, ServerName: cfg.ASServerName, IsRevoked: revocations.state.IsRevoked,
+		})
 		if eerr != nil {
 			return nil, "", fmt.Errorf("enroll: %w", eerr)
 		}
@@ -508,7 +529,10 @@ func nodeCPClient(cfg *Spawnlet, insecureURL, nodeID string) (*http.Client, stri
 		}
 		log.Printf("spawnlet enrolled with AS %s (fingerprint %s); identity stored in %s", asURL, fp, dir)
 	}
-	client, err := id.MTLSClient()
+	client, err := id.MTLSClient(nodeid.ClientOptions{
+		TrustDomain: cfg.Node.TrustDomain, ServerName: cfg.CP.ServerName,
+		ExpectedServiceRole: pki.RoleCP, IsRevoked: revocations.state.IsRevoked,
+	})
 	if err != nil {
 		return nil, "", err
 	}
@@ -559,30 +583,20 @@ func nodeRootPEM(cfg *Spawnlet) []byte {
 // (design §16.4). Returns nil when mint is disabled — proactive refresh is then off (spawns run
 // on their delivered token until it lapses).
 //
-// Two paths:
-//  1. D3 dev-github lane: NODE_GITHUB_MINT_DEV_NODE_ID set → plain HTTP h2c client with the
-//     dev header identity. Works in any NODE_AUTH_MODE (no mTLS required). DEV-ONLY.
-//  2. Enforced/prod lane: NODE_AUTH_MODE=enforced + AS_URL + loaded mTLS identity → mTLS client.
+// Enforced mode requires AS_URL plus the enrolled node identity and live certificate revocations.
 //
 // nodeGitHubMint is driven by the typed cfg.Node config (populated by the node.* YAML, the
 // NODE_*/AS_URL env aliases, and --set alike), not by reading the environment directly.
-func nodeGitHubMint(cfg *Spawnlet) node.GitHubMintClient {
+func nodeGitHubMint(cfg *Spawnlet, revocations *nodeCertificateRevocations) node.GitHubMintClient {
 	asURL := cfg.ASURL
-	// D3 dev-github lane: relaxed node->AS over plain HTTP with a header identity (NOT mTLS). The
-	// secure mTLS leg is proven by TestGitHubE2E_* and is the enforced/prod path below.
-	if devNodeID := strings.TrimSpace(cfg.Node.GitHubMintDevID); devNodeID != "" {
-		if asURL == "" {
-			log.Printf("github mint: NODE_GITHUB_MINT_DEV_NODE_ID set but AS_URL empty — relaxed mint disabled")
-			return nil
-		}
-		log.Printf("github mint: DEV RELAXED node->AS (plain HTTP, header identity %q) — NOT for production", devNodeID)
-		return authv1connect.NewAuthServiceClient(h2cClient(), asURL,
-			connect.WithInterceptors(devNodeIDInterceptor{nodeID: devNodeID}))
-	}
 	if cfg.Node.AuthMode != "enforced" {
 		return nil
 	}
 	if asURL == "" {
+		return nil
+	}
+	if revocations == nil || revocations.state == nil {
+		log.Printf("github refresh disabled: certificate revocation state unavailable")
 		return nil
 	}
 	dir := cfg.Node.IDDir
@@ -591,33 +605,15 @@ func nodeGitHubMint(cfg *Spawnlet) node.GitHubMintClient {
 		log.Printf("github refresh disabled: no identity in %s: %v", dir, err)
 		return nil
 	}
-	client, err := id.MTLSClient()
+	client, err := id.MTLSClient(nodeid.ClientOptions{
+		TrustDomain: cfg.Node.TrustDomain, ServerName: cfg.ASServerName,
+		ExpectedServiceRole: pki.RoleAuthService, IsRevoked: revocations.state.IsRevoked,
+	})
 	if err != nil {
 		log.Printf("github refresh disabled: mTLS client: %v", err)
 		return nil
 	}
 	return authv1connect.NewAuthServiceClient(client, asURL)
-}
-
-// devNodeIDInterceptor injects the D3 dev relaxed node-identity header on every call to the AS.
-// DEV-ONLY — used solely by the dev-github lane (NODE_GITHUB_MINT_DEV_NODE_ID); NOT for production.
-type devNodeIDInterceptor struct{ nodeID string }
-
-func (i devNodeIDInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		req.Header().Set("X-Spawnery-Dev-Node-Id", i.nodeID)
-		return next(ctx, req)
-	}
-}
-func (i devNodeIDInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
-		conn := next(ctx, spec)
-		conn.RequestHeader().Set("X-Spawnery-Dev-Node-Id", i.nodeID)
-		return conn
-	}
-}
-func (i devNodeIDInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return next
 }
 
 // buildIntentVerifier builds the A4 IntentVerifier from the config [AC1][AM12].
