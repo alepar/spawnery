@@ -45,8 +45,8 @@ vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spaw
   && sudo cp -rf /etc/spawnery/pki/cp/. /etc/spawnery/cp/ \
   && sudo cp -f /etc/spawnery/pki/node-cloud/{cert.pem,chain.pem,key.pem,root.pem} /etc/spawnery/node/ \
   && sudo cp -f /etc/spawnery/pki/{service-intermediate.pem,cloud-intermediate.pem,self-hosted-intermediate.pem,service.crl.pem,cloud-node.crl.pem,self-hosted-node.crl.pem} /etc/spawnery/node/ \
-  && sudo chmod 0600 /etc/spawnery/authsvc/* /etc/spawnery/cp/* /etc/spawnery/node/* \
-  && sudo rm -rf /etc/spawnery/pki/* \
+  && sudo find /etc/spawnery/authsvc /etc/spawnery/cp /etc/spawnery/node -type f -exec chmod 0600 {} + \
+  && sudo find /etc/spawnery/pki -mindepth 1 -delete \
   && sudo rm -rf /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations \
   && sudo install -d -m0700 /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations \
   && sudo cp -f ~/incoming/provision/env/common.env /etc/spawnery/env.d/common.env.tmpl \
