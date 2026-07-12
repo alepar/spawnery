@@ -156,6 +156,44 @@ func caseEnsureImageLaunchableAfterCapture(t *testing.T, e *Env) {
 	closeStream(s)
 }
 
+// caseCaptureDeltaOnPausedAgent is SE2's backend-side pin (sp-2tx8.2.1). The suspend gate PAUSES the agent
+// to snapshot the journaled mounts and never unpauses it, so a self-capture must work on a FROZEN agent and
+// the artifact must carry exactly the content the agent had at the pause instant. A lane that quietly
+// resumes the container to capture it (the CRI lane used to) reopens the window between the two halves of
+// the suspend artifact — a torn snapshot, invisible from the Manager.
+func caseCaptureDeltaOnPausedAgent(t *testing.T, e *Env) {
+	ctx := t.Context()
+	id := uniqueSpawnID(t)
+	want := []byte("frozen-at-the-pause")
+
+	h := startPod(ctx, t, e, id, e.BaseImage, 1)
+	if err := e.Write(ctx, h, e.RootfsFile, want); err != nil {
+		t.Fatalf("write to the agent: %v", err)
+	}
+	if err := e.Backend.Pause(ctx, h); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+
+	releaseDelta(ctx, t, e, id)
+	ref, err := e.Backend.CaptureDelta(ctx, h)
+	if err != nil {
+		t.Fatalf("CaptureDelta on a PAUSED agent: %v — the suspend gate never releases the pause, so this "+
+			"is the ONLY state a suspend capture ever sees", err)
+	}
+	if wantRef := runtime.DeltaTag(id); ref != wantRef {
+		t.Fatalf("CaptureDelta ref = %q, want %q", ref, wantRef)
+	}
+
+	got, err := e.ReadArtifact(ctx, ref, e.RootfsFile)
+	if err != nil {
+		t.Fatalf("read %s out of the captured delta %s: %v", e.RootfsFile, ref, err)
+	}
+	if !bytes.Equal(bytes.TrimSpace(got), want) {
+		t.Fatalf("delta %s captured from the paused agent holds %q at %s, want %q",
+			ref, got, e.RootfsFile, want)
+	}
+}
+
 // caseCaptureLayerCountGuard: a commit that adds no layer (moby#47065) yields a delta image that
 // silently drops the agent's writes. The backend must refuse it rather than hand back an image that
 // looks fine and is empty.
