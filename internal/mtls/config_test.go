@@ -84,6 +84,7 @@ func TestClientTLSAcceptsNamedExpectedServiceAndCallerCertificate(t *testing.T) 
 		ServerName:          "cp.internal",
 		ExpectedServiceRole: pki.RoleCP,
 		CurrentTime:         func() time.Time { return f.now },
+		IsRevoked:           func(*big.Int, *big.Int) bool { return false },
 	})
 	if err != nil {
 		t.Fatalf("ClientConfig: %v", err)
@@ -176,6 +177,7 @@ func TestClientTLSRejectsInvalidPeer(t *testing.T) {
 				ServerName:          "cp.internal",
 				ExpectedServiceRole: pki.RoleCP,
 				CurrentTime:         func() time.Time { return f.now },
+				IsRevoked:           func(*big.Int, *big.Int) bool { return false },
 			}
 			serverIdentity, serverRoot := tt.configure(t, f, &opts)
 			clientConfig, err := ClientConfig(opts)
@@ -201,6 +203,7 @@ func TestClientTLSRejectsMissingCallerCertificate(t *testing.T) {
 		ServerName:          "cp.internal",
 		ExpectedServiceRole: pki.RoleCP,
 		CurrentTime:         func() time.Time { return f.now },
+		IsRevoked:           func(*big.Int, *big.Int) bool { return false },
 	})
 	if err != nil {
 		t.Fatalf("ClientConfig: %v", err)
@@ -278,6 +281,7 @@ func TestServerTLSOptionalAcceptsMissingCertificate(t *testing.T) {
 		ServerName:          "as.internal",
 		ExpectedServiceRole: pki.RoleAuthService,
 		CurrentTime:         func() time.Time { return f.now },
+		IsRevoked:           func(*big.Int, *big.Int) bool { return false },
 	})
 	if err != nil {
 		t.Fatalf("ClientConfig: %v", err)
@@ -465,6 +469,7 @@ func internalClientConfig(t *testing.T, f *tlsFixture, identity *pki.Leaf) *tls.
 		ServerName:          "cp.internal",
 		ExpectedServiceRole: pki.RoleCP,
 		CurrentTime:         func() time.Time { return f.now },
+		IsRevoked:           func(*big.Int, *big.Int) bool { return false },
 	}
 	if identity != nil {
 		opts.Identity = tlsCertificate(t, identity)

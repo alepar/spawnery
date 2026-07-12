@@ -132,6 +132,9 @@ func loadInternalTLSConfig(cfg ASInternalTLS, state *pki.RevocationState) (*tls.
 	if err != nil {
 		return nil, nil, nil, tls.Certificate{}, fmt.Errorf("authsvc: load internal identity: %w", err)
 	}
+	if err := validateInternalServerName(identity, cfg.ServerName); err != nil {
+		return nil, nil, nil, tls.Certificate{}, err
+	}
 	leaf, err := x509.ParseCertificate(identity.Certificate[0])
 	if err != nil {
 		return nil, nil, nil, tls.Certificate{}, fmt.Errorf("authsvc: parse internal identity leaf: %w", err)
@@ -167,6 +170,23 @@ func loadInternalTLSConfig(cfg ASInternalTLS, state *pki.RevocationState) (*tls.
 		return nil, nil, nil, tls.Certificate{}, err
 	}
 	return tlsConfig, verifier, root, identity, nil
+}
+
+func validateInternalServerName(identity tls.Certificate, serverName string) error {
+	if serverName == "" {
+		return errors.New("authsvc: internal server name is required")
+	}
+	if len(identity.Certificate) == 0 {
+		return errors.New("authsvc: internal identity leaf is required")
+	}
+	leaf, err := x509.ParseCertificate(identity.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("authsvc: parse internal identity leaf: %w", err)
+	}
+	if err := leaf.VerifyHostname(serverName); err != nil {
+		return fmt.Errorf("authsvc: internal identity does not serve %q: %w", serverName, err)
+	}
+	return nil
 }
 
 func newInternalClient(root *x509.Certificate, identity tls.Certificate, trustDomain, serverName, expectedRole string, state *pki.RevocationState) (*http.Client, error) {

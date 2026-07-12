@@ -26,6 +26,23 @@ func TestNewInternalHTTPServerUsesDirectTLSAndHTTP2(t *testing.T) {
 	}
 }
 
+func TestValidateInternalServerNameRequiresLeafHostname(t *testing.T) {
+	now := time.Now().UTC()
+	root, _ := pki.NewRootCA("root")
+	issuer, _ := root.NewIntermediate(pki.IssuerService, "prod.spawnery.internal")
+	leaf, _ := issuer.IssueService(pki.RoleAuthService, "as-1", "prod.spawnery.internal", []string{"authsvc.internal"}, nil, now.Add(time.Hour))
+	identity, _ := leaf.TLSCertificate()
+
+	if err := validateInternalServerName(identity, "authsvc.internal"); err != nil {
+		t.Fatalf("valid server name: %v", err)
+	}
+	for _, name := range []string{"", "wrong.internal"} {
+		if err := validateInternalServerName(identity, name); err == nil {
+			t.Fatalf("server name %q accepted", name)
+		}
+	}
+}
+
 func TestLoadCertificateRevocationsRequiresCurrentConfiguredCRL(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	root, _ := pki.NewRootCA("root")

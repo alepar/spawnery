@@ -79,16 +79,42 @@ func (s *Service) PublicHandler() http.Handler {
 
 // InternalHandler returns direct-TLS routes protected by the supplied principal policy.
 func (s *Service) InternalHandler(policy mtls.Policy) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /enroll", s.enrollHandler)
+	_, credentialMint := authv1connect.NewAuthServiceHandler(s)
+	routes := internalRouteHandlers{enroll: http.HandlerFunc(s.enrollHandler), credentialMint: credentialMint, githubLink: http.HandlerFunc(s.serveGitHubLinkStatus)}
 	if s.nodeRevocations != nil {
-		mux.HandleFunc("GET /node-revocations", s.serveNodeRevocations)
+		routes.nodeRevocations = http.HandlerFunc(s.serveNodeRevocations)
 	}
-	mux.Handle(authv1connect.NewAuthServiceHandler(s))
 	if s.idp != nil {
-		mux.HandleFunc("GET /revocations", s.idp.serveRevocations)
+		routes.revocations = http.HandlerFunc(s.idp.serveRevocations)
 	}
-	mux.HandleFunc("POST /internal/github/link-status", s.serveGitHubLinkStatus)
+	return internalHandler(policy, routes)
+}
+
+type internalRouteHandlers struct {
+	enroll          http.Handler
+	nodeRevocations http.Handler
+	credentialMint  http.Handler
+	revocations     http.Handler
+	githubLink      http.Handler
+}
+
+func internalHandler(policy mtls.Policy, routes internalRouteHandlers) http.Handler {
+	mux := http.NewServeMux()
+	if routes.enroll != nil {
+		mux.Handle("POST /enroll", routes.enroll)
+	}
+	if routes.nodeRevocations != nil {
+		mux.Handle("GET /node-revocations", routes.nodeRevocations)
+	}
+	if routes.credentialMint != nil {
+		mux.Handle(authv1connect.AuthServiceMintGitHubAccessTokenProcedure, routes.credentialMint)
+	}
+	if routes.revocations != nil {
+		mux.Handle("GET /revocations", routes.revocations)
+	}
+	if routes.githubLink != nil {
+		mux.Handle("POST /internal/github/link-status", routes.githubLink)
+	}
 
 	operation := func(r *http.Request) string {
 		switch {
