@@ -95,6 +95,19 @@ func main() {
 	if signerRevocations != nil {
 		defer signerRevocations.Close()
 	}
+	if signerRevocations != nil && cfg.Auth.SignerRevocationStatement != "" {
+		reloadCtx, cancelReload := context.WithCancel(ctx)
+		reloadDone := make(chan struct{})
+		reloader := newSignerRevocationReloader(signerRevocations, cfg.Auth.SignerRevocationStatement)
+		safego.Go("cp.signer-revocation-reloader", func() {
+			defer close(reloadDone)
+			reloader.Run(reloadCtx)
+		})
+		defer func() {
+			cancelReload()
+			<-reloadDone
+		}()
+	}
 
 	// --- Revocation + session registries ---
 	sessions := auth.NewSessionRegistry()
