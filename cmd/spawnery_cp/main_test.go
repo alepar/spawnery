@@ -277,20 +277,7 @@ func TestCPInternalClientPresentsCPAndRequiresAuthServiceRole(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = runtime.revocations.Close() })
 	serve := func(role string, reached *bool) *httptest.Server {
-		leaf, issueErr := serviceIssuer.IssueService(role, "peer-1", cfg.Internal.TrustDomain, []string{cfg.Internal.ServerName}, nil, time.Now().Add(time.Hour))
-		if issueErr != nil {
-			t.Fatal(issueErr)
-		}
-		identity, _ := leaf.TLSCertificate()
-		peerVerifier, verifyErr := mtls.NewPeerVerifier(mtls.PeerVerifierOptions{Root: root.Cert, TrustDomain: cfg.Internal.TrustDomain, CurrentTime: time.Now, IsRevoked: runtime.revocations.IsRevoked})
-		if verifyErr != nil {
-			t.Fatal(verifyErr)
-		}
-		serverTLS, configErr := mtls.ServerConfig(mtls.ServerOptions{Verifier: peerVerifier, Identity: identity, ClientMode: mtls.RequireClientCertificate})
-		if configErr != nil {
-			t.Fatal(configErr)
-		}
-		ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return newCPPeerTLSServer(t, cfg, root, serviceIssuer, runtime, role, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			*reached = true
 			if len(r.TLS.PeerCertificates) == 0 || len(r.TLS.PeerCertificates[0].URIs) != 1 || r.TLS.PeerCertificates[0].URIs[0].Path != "/service/cp/cp-1" {
 				t.Errorf("CP client identity was not presented: %+v", r.TLS.PeerCertificates)
@@ -300,10 +287,6 @@ func TestCPInternalClientPresentsCPAndRequiresAuthServiceRole(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusNoContent)
 		}))
-		ts.TLS = serverTLS
-		ts.StartTLS()
-		t.Cleanup(ts.Close)
-		return ts
 	}
 
 	var authsvcReached bool
@@ -325,6 +308,92 @@ func TestCPInternalClientPresentsCPAndRequiresAuthServiceRole(t *testing.T) {
 	if wrongRoleReached {
 		t.Fatal("wrong-role AS server reached its handler")
 	}
+}
+
+func TestCPInternalClientRedirectPolicy(t *testing.T) {
+	cfg, root, serviceIssuer, _ := writeCPInternalFixture(t)
+	runtime, err := loadInternalRuntime(cfg, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.revocations.Close() })
+
+	t.Run("rejects https downgrade before target", func(t *testing.T) {
+		targetReached := false
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			targetReached = true
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		t.Cleanup(target.Close)
+		source := newCPPeerTLSServer(t, cfg, root, serviceIssuer, runtime, pki.RoleAuthService, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+		}))
+		if _, err := runtime.client.Get(source.URL); err == nil {
+			t.Fatal("HTTPS-to-HTTP redirect was followed")
+		}
+		if targetReached {
+			t.Fatal("HTTP redirect target handler executed")
+		}
+	})
+
+	t.Run("rejects cross origin https before target", func(t *testing.T) {
+		targetReached := false
+		target := newCPPeerTLSServer(t, cfg, root, serviceIssuer, runtime, pki.RoleAuthService, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			targetReached = true
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		source := newCPPeerTLSServer(t, cfg, root, serviceIssuer, runtime, pki.RoleAuthService, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+		}))
+		if _, err := runtime.client.Get(source.URL); err == nil {
+			t.Fatal("cross-origin HTTPS redirect was followed")
+		}
+		if targetReached {
+			t.Fatal("cross-origin redirect target handler executed")
+		}
+	})
+
+	t.Run("allows same origin https", func(t *testing.T) {
+		targetReached := false
+		server := newCPPeerTLSServer(t, cfg, root, serviceIssuer, runtime, pki.RoleAuthService, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/start" {
+				http.Redirect(w, r, "/target", http.StatusTemporaryRedirect)
+				return
+			}
+			targetReached = true
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		resp, err := runtime.client.Get(server.URL + "/start")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent || !targetReached {
+			t.Fatalf("status=%d target reached=%v", resp.StatusCode, targetReached)
+		}
+	})
+}
+
+func newCPPeerTLSServer(t *testing.T, cfg CP, root, serviceIssuer *pki.CA, runtime *internalRuntime, role string, handler http.Handler) *httptest.Server {
+	t.Helper()
+	leaf, err := serviceIssuer.IssueService(role, "peer-1", cfg.Internal.TrustDomain, []string{cfg.Internal.ServerName}, nil, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := leaf.TLSCertificate()
+	verifier, err := mtls.NewPeerVerifier(mtls.PeerVerifierOptions{Root: root.Cert, TrustDomain: cfg.Internal.TrustDomain, CurrentTime: time.Now, IsRevoked: runtime.revocations.IsRevoked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverTLS, err := mtls.ServerConfig(mtls.ServerOptions{Verifier: verifier, Identity: identity, ClientMode: mtls.RequireClientCertificate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(handler)
+	server.TLS = serverTLS
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return server
 }
 
 func writeCPInternalFixture(t *testing.T) (CP, *pki.CA, *pki.CA, *pki.CA) {
@@ -559,6 +628,15 @@ func TestCPConfig_ASInternalURLRequiresServerName(t *testing.T) {
 		_, err := loadCPTest(t, "dev", nil, key+"=https://authsvc.internal")
 		if err == nil || !strings.Contains(err.Error(), "internal.server_name") {
 			t.Fatalf("%s without server name: %v", key, err)
+		}
+	}
+}
+
+func TestCPConfig_ASInternalURLsRequireHTTPS(t *testing.T) {
+	for _, key := range []string{"auth.as_url", "auth.as_revocation_url"} {
+		_, err := loadCPTest(t, "dev", nil, key+"=http://authsvc.internal", "internal.server_name=authsvc.internal")
+		if err == nil || !strings.Contains(err.Error(), key+" must use https") {
+			t.Fatalf("%s accepted plain HTTP or returned wrong error: %v", key, err)
 		}
 	}
 }

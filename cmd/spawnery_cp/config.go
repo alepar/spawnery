@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	"spawnery/internal/config"
@@ -123,6 +125,14 @@ func (c CP) Validate() error {
 			return fmt.Errorf("internal.insecure_dev_node_on_public requires a loopback-only public listen address")
 		}
 	}
+	for _, endpoint := range []struct{ name, value string }{
+		{"auth.as_url", c.Auth.ASURL},
+		{"auth.as_revocation_url", c.Auth.ASRevocationURL},
+	} {
+		if err := validateInternalHTTPSURL(endpoint.name, endpoint.value); err != nil {
+			return err
+		}
+	}
 	if c.Auth.Mode == "prod" {
 		for _, required := range []struct{ name, value string }{
 			{"auth.environment", c.Auth.Environment},
@@ -180,6 +190,17 @@ func (c CP) Validate() error {
 	}
 	if c.Store.Driver == "postgres" && (c.Store.DSN == "" || string(c.Store.DSN) == sqliteDefaultDSN) {
 		return fmt.Errorf("store.driver=postgres requires store.dsn (a postgres DSN)")
+	}
+	return nil
+}
+
+func validateInternalHTTPSURL(name, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("%s must use https with an absolute host", name)
 	}
 	return nil
 }

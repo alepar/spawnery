@@ -487,10 +487,27 @@ func loadInternalRuntime(cfg CP, now func() time.Time) (*internalRuntime, error)
 		if clientErr != nil {
 			return nil, clientErr
 		}
-		client = &http.Client{Transport: &http.Transport{TLSClientConfig: clientTLS, ForceAttemptHTTP2: true}}
+		client = &http.Client{
+			Transport:     &http.Transport{TLSClientConfig: clientTLS, ForceAttemptHTTP2: true},
+			CheckRedirect: checkInternalRedirect,
+		}
 	}
 	closeOnError = false
 	return &internalRuntime{verifier: verifier, tlsConfig: serverTLS, client: client, revocations: state}, nil
+}
+
+func checkInternalRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return errors.New("internal redirect has no originating request")
+	}
+	origin := via[0].URL
+	if !strings.EqualFold(req.URL.Scheme, "https") || req.URL.User != nil {
+		return errors.New("internal redirect requires https without userinfo")
+	}
+	if !strings.EqualFold(origin.Scheme, req.URL.Scheme) || !strings.EqualFold(origin.Host, req.URL.Host) {
+		return fmt.Errorf("internal redirect crosses origin from %s://%s to %s://%s", origin.Scheme, origin.Host, req.URL.Scheme, req.URL.Host)
+	}
+	return nil
 }
 
 func applyCertificateRevocations(state *pki.RevocationState, paths []string) error {
