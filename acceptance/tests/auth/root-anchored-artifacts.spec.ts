@@ -36,6 +36,11 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
   await expectCPRejected(cfg, nodeToken);
 
   const createdSpawnIds: string[] = [];
+  const cleanup = cpClient(cfg, cfg.devToken);
+  const removeTerminal = async (spawnId: string) => {
+    await cleanup.deleteSpawn({ spawnId });
+    createdSpawnIds.splice(createdSpawnIds.indexOf(spawnId), 1);
+  };
   try {
     const accepted = await submitSpawn(cfg, nodeToken, keyPair, "accepted");
     createdSpawnIds.push(accepted.spawnId);
@@ -44,6 +49,7 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
     createdSpawnIds.push(wrongAudience.spawnId);
     expect(wrongAudience.status).toBe("ERROR");
     expect(wrongAudience.errorDetail).toContain("WRONG_AUDIENCE");
+    await removeTerminal(wrongAudience.spawnId);
 
     const legacy = `${Buffer.from("legacy").toString("base64url")}.${Buffer.alloc(64).toString("base64url")}`;
     await expectCPRejected(cfg, legacy);
@@ -51,6 +57,7 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
     createdSpawnIds.push(legacySpawn.spawnId);
     expect(legacySpawn.status).toBe("ERROR");
     expect(legacySpawn.errorDetail).toContain("TOKEN_INVALID");
+    await removeTerminal(legacySpawn.spawnId);
 
     const nodeLeaf = await nodeLeafArtifact(cfg, "node", spki);
     await expectCPRejected(cfg, nodeLeaf);
@@ -58,6 +65,7 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
     createdSpawnIds.push(nodeLeafSpawn.spawnId);
     expect(nodeLeafSpawn.status).toBe("ERROR");
     expect(nodeLeafSpawn.errorDetail).toContain("TOKEN_INVALID");
+    await removeTerminal(nodeLeafSpawn.spawnId);
 
     await deployCurrentRevocation(cfg, 1);
     await expectCPRejected(cfg, session.accessToken);
@@ -65,6 +73,7 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
     createdSpawnIds.push(revokedSpawn.spawnId);
     expect(revokedSpawn.status).toBe("ERROR");
     expect(revokedSpawn.errorDetail).toContain("TOKEN_INVALID");
+    await removeTerminal(revokedSpawn.spawnId);
 
     const nextCP = await mintVMToken(cfg, "next", "cp", spki);
     await expect(cpClient(cfg, nextCP).listSpawns({})).resolves.toBeDefined();
@@ -73,7 +82,6 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
     createdSpawnIds.push(replacement.spawnId);
     expect(replacement.status).toBe("ACTIVE");
   } finally {
-    const cleanup = cpClient(cfg, cfg.devToken);
     await Promise.all(createdSpawnIds.map((spawnId) => cleanup.deleteSpawn({ spawnId }).catch(() => {})));
   }
 });
