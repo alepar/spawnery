@@ -89,6 +89,11 @@ func TestFetcherHonoursConfiguredFileCountCap(t *testing.T) {
 	if !strings.Contains(err.Error(), "too many files") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	// The file-count cap is the BINDING cap for multi-skill repos (~100 skills x ~100 files hits
+	// it first) — the error must name itself and suggest subdir scoping (bead sp-mwco.1.4).
+	if !strings.Contains(err.Error(), "subdir") {
+		t.Fatalf("error does not suggest subdir scoping: %v", err)
+	}
 
 	c2 := capsClient(DefaultWireCapBytes, DefaultDecompressedCapBytes, DefaultFileCountCap)
 	_, err = c2.fetchAndUnpack(context.Background(), srv.URL, "", "")

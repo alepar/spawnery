@@ -354,7 +354,10 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 
 		fileCount++
 		if fileCount > s.fileCap {
-			return unpackResult{}, fmt.Errorf("too many files in tarball (max %d)", s.fileCap)
+			return unpackResult{}, fmt.Errorf(
+				"too many files in tarball: exceeds the %d-entry file-count cap (this is the binding "+
+					"cap for multi-skill repos — it is hit long before the size caps); scope the ingest "+
+					"to a skills directory with subdir", s.fileCap)
 		}
 
 		if skipKind != "" {

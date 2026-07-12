@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -11,6 +12,12 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 )
+
+// ErrNoSkills is returned (wrapped) by discoverSkills/assembleBundle/FetchBundle when the fetched
+// tree contains no SKILL.md anywhere. The CP handler detects this via errors.Is to distinguish
+// the layout-change branch (§4.5: a re-ingest that no longer discovers a member set) from a
+// first-ever ingest of a skill-less repo — a string match on the error text would be fragile.
+var ErrNoSkills = errors.New("no SKILL.md found anywhere in the fetched tree")
 
 // BundleResult is the output of a successful FetchBundle call: every skill discovered in the
 // fetched repo (or subdir), each independently repacked (§4.2).
@@ -69,7 +76,7 @@ func discoverSkills(entries []tarEntry) ([]skillRoot, []string, error) {
 		}
 	}
 	if len(allRoots) == 0 {
-		return nil, nil, fmt.Errorf("no SKILL.md found anywhere in the fetched tree")
+		return nil, nil, ErrNoSkills
 	}
 	sort.Strings(allRoots)
 

@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -193,6 +194,25 @@ func TestDiscoverSkills_NoneFound_Error(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "SKILL.md") {
 		t.Fatalf("error should name what's missing: %v", err)
+	}
+	if !errors.Is(err, ErrNoSkills) {
+		t.Fatalf("expected errors.Is(err, ErrNoSkills), got: %v", err)
+	}
+}
+
+// TestAssembleBundle_NoSkills_WrapsErrNoSkills pins that assembleBundle (and therefore
+// FetchBundle) propagate discoverSkills' ErrNoSkills detectably via errors.Is — the CP handler's
+// layout-change branch (§4.5) depends on this, not on string-matching the error text.
+func TestAssembleBundle_NoSkills_WrapsErrNoSkills(t *testing.T) {
+	unpacked := unpackResult{entries: []tarEntry{
+		{path: "README.md", content: []byte("just a readme")},
+	}}
+	_, err := testFetcher(0).assembleBundle(RepoRef{Owner: "o", Repo: "r"}, "", unpacked)
+	if err == nil {
+		t.Fatal("expected error when no SKILL.md exists anywhere")
+	}
+	if !errors.Is(err, ErrNoSkills) {
+		t.Fatalf("expected errors.Is(err, ErrNoSkills), got: %v", err)
 	}
 }
 
