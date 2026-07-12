@@ -18,6 +18,7 @@ const (
 	OpStop               Op = "stop"
 	OpAttach             Op = "attach"
 	OpListManaged        Op = "listmanaged"
+	OpContainerEnv       Op = "containerenv"
 	OpResolveImageDigest Op = "resolvedigest"
 	OpEnsureImage        Op = "ensureimage"
 	OpCaptureDelta       Op = "capture"

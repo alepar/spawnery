@@ -84,6 +84,13 @@ type Config struct {
 	// set; nil in insecure/dev or when AS_URL is unset — then proactive refresh is disabled and spawns
 	// run on their delivered token until it lapses.
 	GitHubMint GitHubMintClient
+
+	// SpawnCARoot is a node-private directory (mode 0700, never bind-mounted into an agent) holding
+	// each spawn's persisted MITM CA keypair (sp-2tx8.3.5) — what lets a restarted node re-serve the
+	// SAME CA a still-running spawn's agent already trusts. Empty means memory-only: the CA does not
+	// survive a spawnlet restart (Run logs a Warn once when GitHubMint is also configured, since that
+	// combination silently degrades re-adoption's GitHub control plane).
+	SpawnCARoot string
 }
 
 // cpStream is the subset of the Connect bidi stream the attacher uses. *connect.BidiStreamForClient
@@ -165,7 +172,10 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	// When GitHubMint is nil the field stays nil and the Manager omits all control-server logic.
 	var ghControl *githubControlServer
 	if cfg.GitHubMint != nil {
-		ghControl = newGitHubControlServer(githubRefresh)
+		if cfg.SpawnCARoot == "" {
+			slog.Warn("node: SpawnCARoot is unset; per-spawn MITM CAs are memory-only and will NOT survive a spawnlet restart")
+		}
+		ghControl = newGitHubControlServer(githubRefresh, caStore{dir: cfg.SpawnCARoot})
 		mgr.SetGitHubControlServer(ghControl)
 	}
 	for {

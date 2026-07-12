@@ -1382,7 +1382,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	sidecarEnv := []string{
 		"OPENROUTER_API_KEY=" + m.cfg.OpenRouterKey,
 		"SIDECAR_ADDR=" + addr,
-		"SIDECAR_CONTROL_TOKEN=" + controlToken,
+		SidecarControlTokenEnv + "=" + controlToken,
 		"SIDECAR_CONTROL_ADDR=" + controlAddr,
 	}
 	sidecarEnv = append(sidecarEnv, sidecarControlEnv...)

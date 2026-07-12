@@ -131,6 +131,11 @@ func (d *DockerPodBackend) Attach(ctx context.Context, h *PodHandle) (*AttachedS
 	return AttachTCP(ctx, net.JoinHostPort(h.PodIP, strconv.Itoa(d.port())))
 }
 
+// ContainerEnv delegates to the underlying ContainerRuntime.
+func (d *DockerPodBackend) ContainerEnv(ctx context.Context, id string) ([]string, error) {
+	return d.rt.ContainerEnv(ctx, id)
+}
+
 // ListManaged groups all spawnery-managed containers by spawn id into ManagedPods (sidecar + agent by
 // role label), reading the generation/node-id off the labels and the pod IP off the netns-owning
 // sidecar. The ids and the IP are what a restarted node re-adopts the pod with (SE3 §4.5).

@@ -36,17 +36,21 @@ type caPair struct {
 // CA store and drives the lane-aware HTTP control server (UDS or TCP) for GetToken + GetSpawnCA.
 type githubControlServer struct {
 	refresher *githubRefresher
+	cas       caStore // on-disk CA persistence (sp-2tx8.3.5); zero value = memory-only
 
 	mu        sync.Mutex
-	cas       map[string]caPair       // spawnID -> CA pair
+	cache     map[string]caPair       // spawnID -> CA pair (memoizes cas.Load / generateCA)
 	listeners map[string]net.Listener // spawnID -> active listener
 }
 
-// newGitHubControlServer creates a githubControlServer backed by the given refresher.
-func newGitHubControlServer(r *githubRefresher) *githubControlServer {
+// newGitHubControlServer creates a githubControlServer backed by the given refresher and the given
+// on-disk CA store. store's zero value (caStore{}) makes the CA memory-only, as before this bead —
+// it will not survive a restart, but nothing errors.
+func newGitHubControlServer(r *githubRefresher, store caStore) *githubControlServer {
 	return &githubControlServer{
 		refresher: r,
-		cas:       make(map[string]caPair),
+		cas:       store,
+		cache:     make(map[string]caPair),
 		listeners: make(map[string]net.Listener),
 	}
 }
@@ -64,16 +68,32 @@ func (s *githubControlServer) SpawnCACert(spawnID string) ([]byte, error) {
 	return pair.certPEM, nil
 }
 
-// caForLocked returns (or generates) the CA pair for spawnID. Caller must hold s.mu.
+// caForLocked returns the CA pair for spawnID: a memory hit first, then a disk load (a restarted
+// node reunited with a still-running spawn — logged at Info, this is the whole point of the disk
+// store), and only then a fresh generation (logged at Warn — a legacy pod that predates persistence,
+// or a spawn whose CA was never minted; see D2 in the bead's design). A fresh generation is
+// persisted before it is memoized: an unpersisted CA defeats the point of this store, so a Save
+// failure is returned rather than swallowed. Caller must hold s.mu.
 func (s *githubControlServer) caForLocked(spawnID string) (caPair, error) {
-	if p, ok := s.cas[spawnID]; ok {
+	if p, ok := s.cache[spawnID]; ok {
+		return p, nil
+	}
+	if p, ok, err := s.cas.Load(spawnID); err != nil {
+		return caPair{}, fmt.Errorf("load persisted CA for %s: %w", spawnID, err)
+	} else if ok {
+		log.Printf("github control: loaded persisted CA for spawn %s", spawnID)
+		s.cache[spawnID] = p
 		return p, nil
 	}
 	p, err := generateCA(spawnID)
 	if err != nil {
 		return caPair{}, fmt.Errorf("generate per-spawn CA for %s: %w", spawnID, err)
 	}
-	s.cas[spawnID] = p
+	if err := s.cas.Save(spawnID, p); err != nil {
+		return caPair{}, fmt.Errorf("persist per-spawn CA for %s: %w", spawnID, err)
+	}
+	log.Printf("github control: generated a new CA for spawn %s (no persisted CA found)", spawnID)
+	s.cache[spawnID] = p
 	return p, nil
 }
 
@@ -135,6 +155,15 @@ func (s *githubControlServer) Serve(t spawnlet.ControlTransport) error {
 		mux.HandleFunc("/control/spawnca", s.handleGetSpawnCA)
 	}
 
+	if t.Network == "unix" {
+		// A prior process (this spawn re-adopted after a node restart) left its socket file behind
+		// on a graceful shutdown — net.Listen on an existing path fails EADDRINUSE. Remove it first;
+		// ErrNotExist means there was nothing to clean up.
+		if err := os.Remove(t.Address); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("github control server: remove stale socket %s: %w", t.Address, err)
+		}
+	}
+
 	ln, err := net.Listen(t.Network, t.Address)
 	if err != nil {
 		return fmt.Errorf("github control server %s %s: listen: %w", t.Network, t.Address, err)
@@ -168,7 +197,11 @@ func (s *githubControlServer) Serve(t spawnlet.ControlTransport) error {
 	return nil
 }
 
-// Stop closes the spawn's listener and purges its CA. Also calls Forget on the refresher so the
+// Stop closes the spawn's listener and purges its CA — both the memory cache and the persisted
+// on-disk pair, since Stop means the spawn itself is gone (stop/suspend/delete; see the call sites
+// in cleanupSpawnDirs/teardown/CleanupSpawnTransient), not merely that this node process is exiting.
+// A graceful restart does NOT call Stop (see DetachAll) — that asymmetry is what lets the CA survive
+// a spawnlet restart while still dying with the spawn. Also calls Forget on the refresher so the
 // proactive-refresh entry is removed (callers that previously called Forget directly may switch to
 // Stop-only to avoid the double-Forget; Forget is idempotent).
 func (s *githubControlServer) Stop(spawnID string) {
@@ -177,8 +210,12 @@ func (s *githubControlServer) Stop(spawnID string) {
 		_ = ln.Close()
 		delete(s.listeners, spawnID)
 	}
-	delete(s.cas, spawnID)
+	delete(s.cache, spawnID)
 	s.mu.Unlock()
+
+	if err := s.cas.Remove(spawnID); err != nil {
+		log.Printf("github control: remove persisted CA for spawn %s: %v", spawnID, err)
+	}
 
 	if s.refresher != nil {
 		s.refresher.Forget(spawnID)

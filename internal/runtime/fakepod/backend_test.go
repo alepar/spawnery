@@ -153,6 +153,59 @@ func TestFailOnInjectsErrors(t *testing.T) {
 	}
 }
 
+func TestContainerEnv(t *testing.T) {
+	ctx := context.Background()
+	b := fakepod.New()
+	t.Cleanup(b.Close)
+
+	h, err := b.StartPod(ctx, runtime.PodSpec{
+		ID:           "sp1",
+		SidecarImage: "sidecar:test",
+		SidecarEnv:   []string{"SIDECAR_CONTROL_TOKEN=tok"},
+	})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	if err := b.StartAgent(ctx, h, runtime.AgentSpec{
+		Image: "agent:base",
+		Env:   []string{"HTTPS_PROXY=http://sidecar:8081"},
+	}); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	sidecarEnv, err := b.ContainerEnv(ctx, h.SidecarID)
+	if err != nil {
+		t.Fatalf("ContainerEnv(sidecar): %v", err)
+	}
+	if len(sidecarEnv) != 1 || sidecarEnv[0] != "SIDECAR_CONTROL_TOKEN=tok" {
+		t.Fatalf("sidecar env = %v, want [SIDECAR_CONTROL_TOKEN=tok]", sidecarEnv)
+	}
+
+	agentEnv, err := b.ContainerEnv(ctx, h.AgentID)
+	if err != nil {
+		t.Fatalf("ContainerEnv(agent): %v", err)
+	}
+	if len(agentEnv) != 1 || agentEnv[0] != "HTTPS_PROXY=http://sidecar:8081" {
+		t.Fatalf("agent env = %v, want [HTTPS_PROXY=http://sidecar:8081]", agentEnv)
+	}
+
+	if _, err := b.ContainerEnv(ctx, "does-not-exist"); err == nil {
+		t.Fatal("ContainerEnv on unknown id: want error")
+	}
+}
+
+func TestContainerEnvFault(t *testing.T) {
+	ctx := context.Background()
+	boom := errors.New("boom")
+	b := fakepod.New(fakepod.WithFailOn(fakepod.OpContainerEnv, boom))
+	t.Cleanup(b.Close)
+	h := startPod(t, b, "sp1")
+
+	if _, err := b.ContainerEnv(ctx, h.SidecarID); !errors.Is(err, boom) {
+		t.Fatalf("ContainerEnv err = %v, want %v", err, boom)
+	}
+}
+
 func TestOpsLog(t *testing.T) {
 	ctx := context.Background()
 	b := fakepod.New()

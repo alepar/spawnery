@@ -588,6 +588,34 @@ func (a *attacher) mintGitHubMountsAtProvision(ctx context.Context, spawnID stri
 	return nil
 }
 
+// noteGitHubLinksFromMounts re-registers the spawn's GitHub link(s) with the proactive refresher
+// from the CP's re-delivered mount table (sp-2tx8.3.5 D5) — the refresher's state is in-memory and
+// died with the previous node process, so without this an adopted spawn's GetToken returns
+// ErrGitHubNotLinked and git-over-HTTPS in the agent 403s. Unlike mintGitHubMountsAtProvision it does
+// NOT mint and does NOT render a credential: the access token is minted lazily on the first
+// GetToken, and the node-only credential file under GitHubCredentialsRoot survived the restart on
+// disk (it may be stale; the proactive refresher picks it up on its normal cadence — see the bead's
+// "known gap" note). Best-effort by construction: it returns nothing, so a link that cannot be noted
+// degrades the adopted spawn to "no in-agent GitHub token", never a reap.
+func (a *attacher) noteGitHubLinksFromMounts(spawnID string, generation uint64, mounts []*nodev1.MountBinding) {
+	if a.githubRefresh == nil || a.mgr.GitHubStaticCredentialsEnabled() {
+		return
+	}
+	for _, m := range mounts {
+		ref := m.GetGithubMintRef()
+		if ref == nil || ref.GetSecretId() == "" {
+			continue
+		}
+		a.githubRefresh.Note(githubRefreshEntry{
+			SpawnID:      spawnID,
+			Generation:   generation,
+			SecretID:     ref.GetSecretId(),
+			RepositoryID: m.GetRepositoryId(),
+			// AccessExpiresAtUnix left zero: no cached token, so the first GetToken mints.
+		})
+	}
+}
+
 func (a *attacher) nodeMountBindings(spawnID string) ([]*nodev1.MountBinding, error) {
 	bindings, ok := a.mgr.MountBindings(spawnID)
 	if !ok {

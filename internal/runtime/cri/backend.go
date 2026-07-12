@@ -222,6 +222,54 @@ func netnsPathFromInfo(info map[string]string) (string, error) {
 	return fmt.Sprintf("/proc/%d/ns/net", v.Pid), nil
 }
 
+// ContainerEnv returns id's environment, exactly as it was started with — read back via
+// ContainerStatus(Verbose) since the CRI API has no dedicated "inspect env" call. Re-adoption uses
+// this to recover the per-pod secrets minted by a previous node process that live only in the
+// still-running sidecar's env.
+func (b *CRIPodBackend) ContainerEnv(ctx context.Context, id string) ([]string, error) {
+	resp, err := b.c.runtime.ContainerStatus(ctx, &runtimeapi.ContainerStatusRequest{ContainerId: id, Verbose: true})
+	if err != nil {
+		return nil, fmt.Errorf("container status %s: %w", id, err)
+	}
+	return envFromContainerInfo(resp.GetInfo())
+}
+
+// envFromContainerInfo extracts the container's env from CRI verbose Info as K=V strings. It tries
+// containerd's config.envs shape first (the CRI ContainerConfig.Envs, echoed back verbatim), falling
+// back to the OCI runtimeSpec.process.env shape (["K=V"]) — the same "containerd-specific verbose-Info
+// contract" caveat netnsPathFromInfo already documents; validated against real containerd by the
+// cri_delta_e2e contract arm.
+func envFromContainerInfo(info map[string]string) ([]string, error) {
+	raw, ok := info["info"]
+	if !ok {
+		return nil, fmt.Errorf("container status missing verbose info")
+	}
+	var v struct {
+		Config struct {
+			Envs []struct {
+				Key   string `json:"key"`
+				Value string `json:"value"`
+			} `json:"envs"`
+		} `json:"config"`
+		RuntimeSpec struct {
+			Process struct {
+				Env []string `json:"env"`
+			} `json:"process"`
+		} `json:"runtimeSpec"`
+	}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return nil, fmt.Errorf("parse container info: %w", err)
+	}
+	if len(v.Config.Envs) > 0 {
+		out := make([]string, 0, len(v.Config.Envs))
+		for _, e := range v.Config.Envs {
+			out = append(out, e.Key+"="+e.Value)
+		}
+		return out, nil
+	}
+	return append([]string(nil), v.RuntimeSpec.Process.Env...), nil
+}
+
 func toKeyValues(env []string) []*runtimeapi.KeyValue {
 	out := make([]*runtimeapi.KeyValue, 0, len(env))
 	for _, e := range env {
