@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,42 @@ type publicAuthTestHandler struct {
 	cpv1connect.UnimplementedSpawnServiceHandler
 	listCalls      int
 	authorizeCalls int
+}
+
+type recordingIntentEnabler struct{ values []bool }
+
+func (r *recordingIntentEnabler) SetIntentEnabled(v bool) { r.values = append(r.values, v) }
+
+func TestIntentFlowHasNoRuntimeDevelopmentBypass(t *testing.T) {
+	var devConfigFields []string
+	authType := reflect.TypeOf(CP{}.Auth)
+	for i := 0; i < authType.NumField(); i++ {
+		field := authType.Field(i)
+		if strings.Contains(strings.ToLower(field.Name), "intent") || strings.Contains(field.Tag.Get("koanf"), "intent") {
+			devConfigFields = append(devConfigFields, field.Name)
+		}
+	}
+	if len(devConfigFields) != 0 {
+		t.Fatalf("runtime intent bypass fields remain: %v", devConfigFields)
+	}
+	if _, ok := cpEnvAliases["CP_DEV_"+"INTENT_ENABLED"]; ok {
+		t.Fatal("removed development intent environment alias remains")
+	}
+	raw, err := configfiles.FS.ReadFile("cp.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "dev_"+"intent_enabled") {
+		t.Fatal("removed development intent setting remains in embedded cp.yaml")
+	}
+
+	for _, mode := range []string{"dev", "prod"} {
+		recorder := &recordingIntentEnabler{}
+		enableIntentFlow(recorder)
+		if len(recorder.values) != 1 || !recorder.values[0] {
+			t.Fatalf("%s startup intent enable calls = %v, want [true]", mode, recorder.values)
+		}
+	}
 }
 
 func (h *publicAuthTestHandler) ListSpawns(context.Context, *connect.Request[cpv1.ListSpawnsRequest]) (*connect.Response[cpv1.ListSpawnsResponse], error) {

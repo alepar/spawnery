@@ -2,12 +2,21 @@ package cp
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	connect "connectrpc.com/connect"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+	"google.golang.org/protobuf/proto"
+	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/gen/cp/v1/cpv1connect"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
@@ -60,6 +69,103 @@ func (c *capSender) starts() []*nodev1.StartSpawn {
 		}
 	}
 	return out
+}
+
+func (c *capSender) sessionOpens() []*nodev1.SessionOpen {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []*nodev1.SessionOpen
+	for _, m := range c.sent {
+		if open := m.GetOpen(); open != nil {
+			out = append(out, open)
+		}
+	}
+	return out
+}
+
+func TestSessionRequiresAndPreservesNodeAuthorization(t *testing.T) {
+	tests := []struct {
+		name string
+		auth *authv1.AuthEnvelope
+	}{
+		{name: "missing envelope"},
+		{name: "missing node token", auth: &authv1.AuthEnvelope{Intent: &authv1.SignedIntent{Domain: "opaque"}}},
+		{name: "missing intent", auth: &authv1.AuthEnvelope{AccessToken: "as-issued-node-token"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _, rt := newTestServer(t)
+			seedSpawn(t, context.Background(), s, "alice")
+			sender := &capSender{}
+			rt.Bind("sp-ws-alice", "n1", sender)
+			_, handler := cpv1connect.NewSpawnServiceHandler(s)
+			wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				r = r.WithContext(auth.WithOwner(r.Context(), "alice"))
+				handler.ServeHTTP(w, r)
+			})
+			ts := httptest.NewServer(h2c.NewHandler(wrapped, &http2.Server{}))
+			defer ts.Close()
+			client := cpv1connect.NewSpawnServiceClient(sessionH2CClient(), ts.URL, connect.WithGRPC())
+			streamCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			stream := client.Session(streamCtx)
+			if err := stream.Send(&cpv1.Frame{SpawnId: "sp-ws-alice", SessionAuth: tt.auth}); err != nil {
+				t.Fatal(err)
+			}
+			_ = stream.CloseRequest()
+			_, err := stream.Receive()
+			if connect.CodeOf(err) != connect.CodeInvalidArgument {
+				t.Fatalf("Session error = %v (code %v), want InvalidArgument", err, connect.CodeOf(err))
+			}
+			if len(sender.sessionOpens()) != 0 {
+				t.Fatal("SessionOpen emitted for incomplete authorization")
+			}
+		})
+	}
+
+	s, _, rt := newTestServer(t)
+	seedSpawn(t, context.Background(), s, "alice")
+	sender := &capSender{}
+	rt.Bind("sp-ws-alice", "n1", sender)
+	_, handler := cpv1connect.NewSpawnServiceHandler(s)
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(auth.WithOwner(r.Context(), "alice"))
+		handler.ServeHTTP(w, r)
+	})
+	ts := httptest.NewServer(h2c.NewHandler(wrapped, &http2.Server{}))
+	defer ts.Close()
+	client := cpv1connect.NewSpawnServiceClient(sessionH2CClient(), ts.URL, connect.WithGRPC())
+	si := &authv1.SignedIntent{Domain: "opaque", Body: []byte("exact-body")}
+	si.ProtoReflect().SetUnknown([]byte{0xa0, 0x06, 0x2a})
+	want, _ := proto.MarshalOptions{Deterministic: true}.Marshal(si)
+	streamCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	stream := client.Session(streamCtx)
+	if err := stream.Send(&cpv1.Frame{SpawnId: "sp-ws-alice", SessionAuth: &authv1.AuthEnvelope{AccessToken: "exact-node-token", Intent: si}}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if opens := sender.sessionOpens(); len(opens) > 0 {
+			got, _ := proto.MarshalOptions{Deterministic: true}.Marshal(opens[0].GetAuth().GetIntent())
+			if opens[0].GetAuth().GetAccessToken() != "exact-node-token" || string(got) != string(want) {
+				t.Fatalf("SessionOpen authorization changed: token=%q intent=%x", opens[0].GetAuth().GetAccessToken(), got)
+			}
+			_ = stream.CloseRequest()
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("SessionOpen not emitted")
+}
+
+func sessionH2CClient() *http.Client {
+	return &http.Client{Transport: &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
+	}}
 }
 
 // stops returns every StopSpawn this sender has been asked to deliver (reconcile orphan arm).

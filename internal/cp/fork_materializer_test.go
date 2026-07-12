@@ -79,7 +79,7 @@ func TestForkMaterializerSendsForkSameNodeAndReturnsPins(t *testing.T) {
 
 func TestForkMaterializerCrossNodeRelaysTargetKeyMaterialAndReturnsTargetPins(t *testing.T) {
 	s, reg, _ := newTestServer(t)
-	s.nodeKeys.put("node-2", []byte("signed-subkey"), []byte("leaf-chain"))
+	s.nodeKeys.put("node-2", 0, "cloud", "system", []byte("signed-subkey"), []byte("leaf-chain"))
 	sourceSender := &capSender{}
 	targetSender := &capSender{}
 	reg.Add(registryNode("node-1", sourceSender))

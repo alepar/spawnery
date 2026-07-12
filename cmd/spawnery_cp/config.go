@@ -31,7 +31,6 @@ type CP struct {
 		RootCA                    string `koanf:"root_ca"`
 		SignerRevocationStatement string `koanf:"signer_revocation_statement"`
 		SignerRevocationState     string `koanf:"signer_revocation_state"`
-		DevIntentEnabled          bool   `koanf:"dev_intent_enabled"`
 		// GitHubLinkPreflightDisabled turns off the CreateSpawn owner-github-link preflight even when
 		// an AS URL is configured. For the static-token git-host dev lane (local Gitea): mounts there
 		// use a single node-static token, not a per-owner AS mint, so an owner "GitHub link" is
@@ -246,7 +245,6 @@ var cpEnvAliases = map[string]string{
 	"CP_AUTH_ROOT_CA":                     "auth.root_ca",
 	"CP_AUTH_SIGNER_REVOCATION_STATEMENT": "auth.signer_revocation_statement",
 	"CP_AUTH_SIGNER_REVOCATION_STATE":     "auth.signer_revocation_state",
-	"CP_DEV_INTENT_ENABLED":               "auth.dev_intent_enabled",
 	"CP_GITHUB_LINK_PREFLIGHT_DISABLED":   "auth.github_link_preflight_disabled",
 	"CP_SESSION_REAUTH_INTERVAL":          "auth.session_reauth_interval",
 	"CP_AS_URL":                           "auth.as_url",

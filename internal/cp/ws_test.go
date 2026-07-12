@@ -80,6 +80,18 @@ func newWSTestServer(t *testing.T, signer wsSigner, devMode bool, devTokens map[
 // dial connects to the ws test server and sends the bind frame. Returns the connection.
 func dialAndBind(t *testing.T, ts *httptest.Server, spawnID, tokenWire, clientID string) *websocket.Conn {
 	t.Helper()
+	siBytes, err := proto.Marshal(&authv1.SignedIntent{Domain: "opaque", Body: []byte("exact-body")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dialAndBindFrame(t, ts, map[string]interface{}{
+		"spawnId": spawnID, "token": tokenWire, "clientId": clientID,
+		"nodeAccessToken": "as-issued-node-token", "signedIntent": siBytes,
+	})
+}
+
+func dialAndBindFrame(t *testing.T, ts *httptest.Server, bind map[string]interface{}) *websocket.Conn {
+	t.Helper()
 	ctx := context.Background()
 	wsURL := "ws" + ts.URL[len("http"):] + ""
 
@@ -87,16 +99,70 @@ func dialAndBind(t *testing.T, ts *httptest.Server, spawnID, tokenWire, clientID
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	bind := map[string]interface{}{
-		"spawnId":  spawnID,
-		"token":    tokenWire,
-		"clientId": clientID,
-	}
 	if err := wsjson.Write(ctx, conn, bind); err != nil {
 		conn.CloseNow()
 		t.Fatalf("send bind: %v", err)
 	}
 	return conn
+}
+
+func TestHandleWSRequiresAndPreservesNodeAuthorization(t *testing.T) {
+	priv := genWSKey(t)
+	now := time.Now()
+	s, _, _, ts := newWSTestServer(t, priv, false, nil)
+	spawnID := seedSpawn(t, context.Background(), s, "acct-auth")
+	sender := &capSender{}
+	s.rt.Bind(spawnID, "n1", sender)
+	cpToken := wsMintToken(t, priv, "acct-auth", "cp-token-id", "cp", now)
+	si := &authv1.SignedIntent{Domain: "opaque", Body: []byte("exact-body")}
+	si.ProtoReflect().SetUnknown([]byte{0xa0, 0x06, 0x2a})
+	siBytes, _ := proto.Marshal(si)
+
+	invalid := []struct {
+		name string
+		bind map[string]interface{}
+	}{
+		{name: "missing node token", bind: map[string]interface{}{"spawnId": spawnID, "token": cpToken, "clientId": "c1", "signedIntent": siBytes}},
+		{name: "missing intent", bind: map[string]interface{}{"spawnId": spawnID, "token": cpToken, "clientId": "c1", "nodeAccessToken": "node-token"}},
+		{name: "malformed intent", bind: map[string]interface{}{"spawnId": spawnID, "token": cpToken, "clientId": "c1", "nodeAccessToken": "node-token", "signedIntent": []byte{0xff}}},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := dialAndBindFrame(t, ts, tt.bind)
+			defer conn.CloseNow()
+			readCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			_, _, err := conn.Read(readCtx)
+			if err == nil {
+				t.Fatal("expected authorization bind rejection")
+			}
+			if websocket.CloseStatus(err) == -1 {
+				t.Fatalf("connection stayed open for incomplete authorization: %v", err)
+			}
+		})
+	}
+	if len(sender.sessionOpens()) != 0 {
+		t.Fatal("SessionOpen emitted for incomplete WebSocket authorization")
+	}
+
+	conn := dialAndBindFrame(t, ts, map[string]interface{}{
+		"spawnId": spawnID, "token": cpToken, "clientId": "valid",
+		"nodeAccessToken": "exact-node-token", "signedIntent": siBytes,
+	})
+	defer conn.CloseNow()
+	deadline := time.Now().Add(time.Second)
+	want, _ := proto.MarshalOptions{Deterministic: true}.Marshal(si)
+	for time.Now().Before(deadline) {
+		if opens := sender.sessionOpens(); len(opens) > 0 {
+			got, _ := proto.MarshalOptions{Deterministic: true}.Marshal(opens[0].GetAuth().GetIntent())
+			if opens[0].GetAuth().GetAccessToken() != "exact-node-token" || string(got) != string(want) {
+				t.Fatalf("WebSocket SessionOpen authorization changed: token=%q intent=%x", opens[0].GetAuth().GetAccessToken(), got)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("WebSocket SessionOpen not emitted")
 }
 
 func TestHandleWS_ValidASTokenBindAttaches(t *testing.T) {
