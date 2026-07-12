@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,13 @@ func TestLogoutRevokesFamily(t *testing.T) {
 	for _, ev := range evs {
 		if ev.FamilyID == famID {
 			found = true
+			var ids []string
+			if err := json.Unmarshal([]byte(ev.TokenIDs), &ids); err != nil {
+				t.Fatal(err)
+			}
+			if want := []string{row.CPAccessTokenID, row.NodeAccessTokenID}; !reflect.DeepEqual(ids, want) {
+				t.Fatalf("revocation token ids = %v, want %v", ids, want)
+			}
 		}
 	}
 	if !found {

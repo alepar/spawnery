@@ -142,9 +142,8 @@ func TestHandlerFullVertical(t *testing.T) {
 		t.Fatalf("callback: want 302, got %d: %s", cbResp.StatusCode, body)
 	}
 	location := cbResp.Header.Get("Location")
-	accessToken := urlQP(location, "access_token")
-	if accessToken == "" {
-		t.Fatalf("no access_token in callback redirect: %q", location)
+	if urlQP(location, "cp_access_token") == "" || urlQP(location, "node_access_token") == "" || urlQP(location, "access_token") != "" {
+		t.Fatalf("paired credentials missing or legacy field present in callback redirect: %q", location)
 	}
 	refreshCookieVal := ""
 	for _, c := range cbResp.Cookies() {
@@ -173,12 +172,14 @@ func TestHandlerFullVertical(t *testing.T) {
 		t.Fatalf("refresh: want 200, got %d: %s", refreshResp.StatusCode, body)
 	}
 	var refreshOut struct {
-		AccessToken string `json:"access_token"`
+		CPAccessToken   string `json:"cp_access_token"`
+		NodeAccessToken string `json:"node_access_token"`
+		AccessToken     string `json:"access_token"`
 	}
 	body2, _ := io.ReadAll(refreshResp.Body)
 	_ = json.Unmarshal(body2, &refreshOut)
-	if refreshOut.AccessToken == "" {
-		t.Fatalf("refresh: no access_token in response: %s", body2)
+	if refreshOut.CPAccessToken == "" || refreshOut.NodeAccessToken == "" || refreshOut.AccessToken != "" {
+		t.Fatalf("refresh: paired credentials missing or legacy field present: %s", body2)
 	}
 	newRefreshVal := ""
 	for _, c := range refreshResp.Cookies() {

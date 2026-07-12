@@ -22,7 +22,8 @@ func seedFamily(t *testing.T, st store.Store, accountID string, spkiDER []byte, 
 		FamilyID:          famID,
 		ClientKind:        store.ClientWeb,
 		SessionPubkeySPKI: spkiDER,
-		AccessTokenID:     "tok-" + accountID,
+		CPAccessTokenID:   "cp-" + accountID,
+		NodeAccessTokenID: "node-" + accountID,
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),
@@ -55,12 +56,12 @@ func TestRefreshHappyPath(t *testing.T) {
 
 	nonce := make([]byte, 16)
 	proof := buildPoP(t, sessKey, rawToken, now.Unix(), nonce)
-	access, newRefresh, err := idp.handleRefresh(context.Background(), rawToken, proof, now)
+	cpAccess, nodeAccess, newRefresh, err := idp.handleRefresh(context.Background(), rawToken, proof, now)
 	if err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
-	if access == "" || newRefresh == "" {
-		t.Fatal("empty access or refresh token")
+	if cpAccess == "" || nodeAccess == "" || newRefresh == "" {
+		t.Fatal("empty paired access or refresh token")
 	}
 	// Old token should now be superseded.
 	old, _ := st.RefreshSessions().Get(context.Background(), sha256Hex(rawToken))
@@ -81,8 +82,8 @@ func TestRefreshGrace(t *testing.T) {
 	rawToken, _ := seedFamily(t, st, "acct-1", spkiDER, now)
 
 	type result struct {
-		access, refresh string
-		err             error
+		cpAccess, nodeAccess, refresh string
+		err                           error
 	}
 	results := make([]result, 2)
 	var wg sync.WaitGroup
@@ -93,8 +94,8 @@ func TestRefreshGrace(t *testing.T) {
 			defer wg.Done()
 			nonce := make([]byte, 16)
 			proof := buildPoP(t, sessKey, rawToken, now.Unix(), nonce)
-			a, r, err := idp.handleRefresh(context.Background(), rawToken, proof, now)
-			results[i] = result{a, r, err}
+			cp, node, r, err := idp.handleRefresh(context.Background(), rawToken, proof, now)
+			results[i] = result{cp, node, r, err}
 		}()
 	}
 	wg.Wait()
@@ -107,9 +108,8 @@ func TestRefreshGrace(t *testing.T) {
 	}
 	// If both succeeded, they must return the SAME successor pair.
 	if results[0].err == nil && results[1].err == nil {
-		if results[0].access != results[1].access || results[0].refresh != results[1].refresh {
-			t.Fatalf("concurrent refresh returned different successors:\n  [0] a=%q r=%q\n  [1] a=%q r=%q",
-				results[0].access, results[0].refresh, results[1].access, results[1].refresh)
+		if results[0].cpAccess != results[1].cpAccess || results[0].nodeAccess != results[1].nodeAccess || results[0].refresh != results[1].refresh {
+			t.Fatalf("concurrent refresh returned different successors: [0]=%+v [1]=%+v", results[0], results[1])
 		}
 	}
 }
@@ -127,7 +127,7 @@ func TestRefreshLostResponseRetry(t *testing.T) {
 	nonce := make([]byte, 16)
 	// First refresh.
 	proof1 := buildPoP(t, sessKey, rawToken, now.Unix(), nonce)
-	access1, refresh1, err := idp.handleRefresh(context.Background(), rawToken, proof1, now)
+	cp1, node1, refresh1, err := idp.handleRefresh(context.Background(), rawToken, proof1, now)
 	if err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
@@ -136,18 +136,17 @@ func TestRefreshLostResponseRetry(t *testing.T) {
 	replayTime := now.Add(30 * time.Second)
 	idp.now = func() time.Time { return replayTime }
 	proof2 := buildPoP(t, sessKey, rawToken, replayTime.Unix(), nonce)
-	access2, refresh2, err := idp.handleRefresh(context.Background(), rawToken, proof2, replayTime)
+	cp2, node2, refresh2, err := idp.handleRefresh(context.Background(), rawToken, proof2, replayTime)
 	if err != nil {
 		t.Fatalf("retry within grace: %v", err)
 	}
-	if access1 != access2 || refresh1 != refresh2 {
-		t.Fatalf("grace retry returned different pair:\n  first: a=%q r=%q\n  retry: a=%q r=%q",
-			access1, refresh1, access2, refresh2)
+	if cp1 != cp2 || node1 != node2 || refresh1 != refresh2 {
+		t.Fatalf("grace retry returned different tuple: first=%q/%q/%q retry=%q/%q/%q", cp1, node1, refresh1, cp2, node2, refresh2)
 	}
 	// New refresh token should still work (was not consumed by the retry).
 	idp.now = func() time.Time { return replayTime }
 	proof3 := buildPoP(t, sessKey, refresh1, replayTime.Unix(), nonce)
-	_, _, err = idp.handleRefresh(context.Background(), refresh1, proof3, replayTime)
+	_, _, _, err = idp.handleRefresh(context.Background(), refresh1, proof3, replayTime)
 	if err != nil {
 		t.Fatalf("using successor after grace retry: %v", err)
 	}
@@ -166,7 +165,7 @@ func TestRefreshReuseOutsideGrace(t *testing.T) {
 
 	nonce := make([]byte, 16)
 	proof := buildPoP(t, sessKey, rawToken, now.Unix(), nonce)
-	_, _, err := idp.handleRefresh(context.Background(), rawToken, proof, now)
+	_, _, _, err := idp.handleRefresh(context.Background(), rawToken, proof, now)
 	if err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
@@ -175,7 +174,7 @@ func TestRefreshReuseOutsideGrace(t *testing.T) {
 	staleTime := now.Add(46 * time.Second)
 	idp.cfg.Now = func() time.Time { return staleTime }
 	proof2 := buildPoP(t, sessKey, rawToken, staleTime.Unix(), nonce)
-	_, _, err = idp.handleRefresh(context.Background(), rawToken, proof2, staleTime)
+	_, _, _, err = idp.handleRefresh(context.Background(), rawToken, proof2, staleTime)
 	if !errors.Is(err, ErrFamilyRevoked) {
 		t.Fatalf("want ErrFamilyRevoked after grace, got %v", err)
 	}
@@ -194,7 +193,7 @@ func TestRefreshPoPRequired(t *testing.T) {
 
 	// Empty PoP — no sig.
 	emptyProof := PoPProof{Timestamp: now.Unix(), Nonce: make([]byte, 16)}
-	_, _, err := idp.handleRefresh(context.Background(), rawToken, emptyProof, now)
+	_, _, _, err := idp.handleRefresh(context.Background(), rawToken, emptyProof, now)
 	if err == nil {
 		t.Fatal("expected error with missing PoP sig")
 	}
@@ -218,7 +217,8 @@ func TestRefreshFamilyMaxAge(t *testing.T) {
 		FamilyID:          "old-fam",
 		ClientKind:        store.ClientWeb,
 		SessionPubkeySPKI: spkiDER,
-		AccessTokenID:     "tok-old",
+		CPAccessTokenID:   "cp-old",
+		NodeAccessTokenID: "node-old",
 		CreatedAt:         oldFamilyTime.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),
@@ -230,7 +230,7 @@ func TestRefreshFamilyMaxAge(t *testing.T) {
 
 	nonce := make([]byte, 16)
 	proof := buildPoP(t, sessKey, rawToken, now.Unix(), nonce)
-	_, _, err := idp.handleRefresh(context.Background(), rawToken, proof, now)
+	_, _, _, err := idp.handleRefresh(context.Background(), rawToken, proof, now)
 	// ErrFamilyRevoked is also acceptable (max age triggers revoke); any non-nil error passes.
 	if err == nil {
 		t.Fatal("expected error for 91d family, got nil")
