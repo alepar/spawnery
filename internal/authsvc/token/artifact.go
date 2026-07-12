@@ -49,6 +49,13 @@ func artifactDomain(artifactType string) (string, error) {
 	}
 }
 
+func onlineArtifactDomain(artifactType string) (string, error) {
+	if artifactType == ArtifactTypeSignerRevocation {
+		return "", errors.New("token: signer-revocation artifacts require offline intermediate authority")
+	}
+	return artifactDomain(artifactType)
+}
+
 // SigningCredential binds one Ed25519 private key to its purpose-constrained, leaf-first chain.
 type SigningCredential struct {
 	PrivateKey ed25519.PrivateKey
@@ -136,7 +143,7 @@ func (credential *SigningCredential) Sign(artifactType string, payload []byte) (
 	if credential == nil || len(credential.PrivateKey) != ed25519.PrivateKeySize || len(credential.Chain) == 0 {
 		return "", errors.New("token: invalid signing credential")
 	}
-	domain, err := artifactDomain(artifactType)
+	domain, err := onlineArtifactDomain(artifactType)
 	if err != nil {
 		return "", err
 	}
@@ -177,7 +184,7 @@ func (verifier *Verifier) Verify(wire, expectedType string, now time.Time) ([]by
 	if verifier == nil || verifier.root == nil || len(wire) == 0 || len(wire) > maxEncodedArtifactSize {
 		return nil, ErrMalformed
 	}
-	if _, err := artifactDomain(expectedType); err != nil {
+	if _, err := onlineArtifactDomain(expectedType); err != nil {
 		return nil, ErrMalformed
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(wire)
@@ -188,7 +195,7 @@ func (verifier *Verifier) Verify(wire, expectedType string, now time.Time) ([]by
 	if err := (proto.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(raw, &envelope); err != nil || len(envelope.ProtoReflect().GetUnknown()) != 0 {
 		return nil, ErrMalformed
 	}
-	domain, err := artifactDomain(envelope.ArtifactType)
+	domain, err := onlineArtifactDomain(envelope.ArtifactType)
 	if err != nil || envelope.ArtifactType != expectedType || len(envelope.Payload) == 0 || len(envelope.Payload) > maxArtifactPayloadSize ||
 		len(envelope.Signature) != ed25519.SignatureSize || len(envelope.SignerChain) < 1 || len(envelope.SignerChain) > 4 || len(envelope.KeyId) != sha256.Size {
 		return nil, ErrMalformed

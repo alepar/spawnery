@@ -30,6 +30,8 @@ type certTestOptions struct {
 	leafECDSA            bool
 	leafExpired          bool
 	useNodeIntermediate  bool
+	intermediateLifetime time.Duration
+	leafLifetime         time.Duration
 }
 
 type certTestPKI struct {
@@ -54,6 +56,12 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 		mutate(&opts)
 	}
 	now := time.Unix(1_800_000_000, 0)
+	if opts.intermediateLifetime == 0 {
+		opts.intermediateLifetime = 180 * 24 * time.Hour
+	}
+	if opts.leafLifetime == 0 {
+		opts.leafLifetime = 90 * 24 * time.Hour
+	}
 
 	rootKey := mustP256Key(t)
 	rootTemplate := &x509.Certificate{
@@ -77,7 +85,7 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 		SerialNumber:          big.NewInt(2),
 		Subject:               pkix.Name{CommonName: "Spawnery auth signing intermediate"},
 		NotBefore:             now.Add(-12 * time.Hour),
-		NotAfter:              now.Add(180 * 24 * time.Hour),
+		NotAfter:              now.Add(opts.intermediateLifetime),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
@@ -99,7 +107,7 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 		}
 		leafPublic = leafEdPriv.Public()
 	}
-	leafNotAfter := now.Add(90 * 24 * time.Hour)
+	leafNotAfter := now.Add(opts.leafLifetime)
 	if opts.leafExpired {
 		leafNotAfter = now.Add(-time.Hour)
 	}
