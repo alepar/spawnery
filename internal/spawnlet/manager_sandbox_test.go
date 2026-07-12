@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/fakepod"
 )
 
 func TestManagerThreadsSandboxID(t *testing.T) {
@@ -26,4 +27,20 @@ func TestManagerThreadsSandboxID(t *testing.T) {
 	if h == nil || h.SandboxID != "spx-sandbox" {
 		t.Fatalf("Stop handle SandboxID = %+v, want spx-sandbox", h)
 	}
+}
+
+// captureHookBackend wraps the shared fakepod.Backend to run captureHook at the top of
+// CaptureDelta. Lets a test observe host state AT CAPTURE TIME — the mount host dirs are removed
+// by Scratch.Finalize later in teardown, so a post-Suspend assertion about mount contents would
+// always fail (sp-2tx8.2.2).
+type captureHookBackend struct {
+	*fakepod.Backend
+	captureHook func()
+}
+
+func (b *captureHookBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) (string, error) {
+	if b.captureHook != nil {
+		b.captureHook()
+	}
+	return b.Backend.CaptureDelta(ctx, h)
 }

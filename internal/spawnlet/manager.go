@@ -124,6 +124,10 @@ type ManagerConfig struct {
 	// ["/var/cache/apt", "/var/lib/apt/lists", "/tmp"]. When /tmp is scrubbed,
 	// the default scrub recreates it with mode 1777 before CaptureDelta so tmux can
 	// create its socket directory after resume.
+	// Paths that overlap one of the spawn's mounts (at, under, or containing a container-side bind
+	// target) are SKIPPED and logged at WARN — scrubbing them would delete the spawn's persistent
+	// mounted data, and since the scrub runs before the mount snapshot the deletion would be captured
+	// as authoritative (scrubguard.go, spec 2026-07-12-suspend-torn-snapshot-fix-design.md §4.2).
 	DeltaScrubPaths []string
 }
 
@@ -1631,7 +1635,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 
 	sp := &Spawn{
 		ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
-		MountDirs: mountDirs, MountBindings: append([]MountBinding(nil), sel.Mounts...), MountFinalizers: mountFinalizers, JournalMounts: journalMounts, journalWatchers: watchers,
+		MountDirs: mountDirs, MountBindings: append([]MountBinding(nil), sel.Mounts...), MountFinalizers: mountFinalizers, JournalMounts: journalMounts, MountTargets: mountTargetsOf(mounts), journalWatchers: watchers,
 		FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID,
 		Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL,
 		BaseImageDigest: baseDigest,
@@ -2121,16 +2125,11 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 		// capture/stop are cleaner on a running one. Harmless no-op (ignored error) on the non-gate
 		// paths (Stop/Delete, crash-survival reconcile) where the container was never paused.
 		_ = m.pod.Unpause(ctx, h)
-		// Live capture-time scrub: `rm -rf <paths>` in the agent container BEFORE commit so the
-		// committed layer does not include apt caches, /tmp noise, etc. Best-effort, non-fatal.
-		if len(m.cfg.DeltaScrubPaths) > 0 && m.scrubFn != nil {
-			// Pass sp.AgentID directly: the spawn has already been removed from the store
-			// by Claim above, so passing the spawn id and re-looking-up via ExecRun would
-			// always fail with "spawn X has no agent container".
-			if serr := m.scrubFn(ctx, sp.AgentID, m.cfg.DeltaScrubPaths); serr != nil {
-				log.Printf("delta scrub for %s: %v (non-fatal; proceeding with capture)", id, serr)
-			}
-		}
+		// Live capture-time scrub: `rm -rf <paths>` in the agent container so the committed layer does
+		// not include apt caches, /tmp noise, etc. Best-effort, non-fatal — and mount-guarded: a scrub
+		// path at or under one of this spawn's mounts is skipped (scrubguard.go, spec §4.2), because it
+		// would delete the user's persistent data and the snapshot would then record the deletion.
+		m.runDeltaScrub(ctx, sp)
 		if progress != nil {
 			progress("capture", "committing rootfs delta", nil)
 		}
