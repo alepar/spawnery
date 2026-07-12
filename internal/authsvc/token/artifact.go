@@ -7,16 +7,25 @@ import (
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/asn1"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	authv1 "spawnery/gen/auth/v1"
 )
 
 const (
 	ArtifactTypeSession          = "session-token"
 	ArtifactTypeRevocation       = "revocation-entry"
 	ArtifactTypeSignerRevocation = "signer-revocation"
+
+	maxArtifactPayloadSize     = 64 * 1024
+	maxArtifactCertificateSize = 16 * 1024
+	maxEncodedArtifactSize     = 128 * 1024
 )
 
 var (
@@ -44,6 +53,19 @@ type SigningCredential struct {
 	KeyID      [32]byte
 }
 
+// SignerRevocationView is the verifier's independently authorized signer-revocation state.
+type SignerRevocationView interface {
+	Generation() uint64
+	RejectSigner(*x509.Certificate) error
+}
+
+// Verifier validates self-describing artifacts against one environment root.
+type Verifier struct {
+	root        *x509.Certificate
+	environment string
+	revocations SignerRevocationView
+}
+
 type validatedSigner struct {
 	leaf      *x509.Certificate
 	publicKey ed25519.PublicKey
@@ -65,6 +87,112 @@ func NewSigningCredential(priv ed25519.PrivateKey, chain []*x509.Certificate, ro
 		Chain:      append([]*x509.Certificate(nil), chain...),
 		KeyID:      validated.keyID,
 	}, nil
+}
+
+// NewVerifier constructs a strict root-anchored artifact verifier.
+func NewVerifier(root *x509.Certificate, environment string, revocations SignerRevocationView) (*Verifier, error) {
+	if root == nil || len(root.Raw) == 0 || !root.IsCA {
+		return nil, errors.New("token: invalid verification root")
+	}
+	if environment == "" {
+		return nil, errors.New("token: missing environment")
+	}
+	return &Verifier{root: root, environment: environment, revocations: revocations}, nil
+}
+
+// Sign signs domain || exact payload bytes and returns one unpadded base64url protobuf envelope.
+func (credential *SigningCredential) Sign(artifactType string, payload []byte) (string, error) {
+	if credential == nil || len(credential.PrivateKey) != ed25519.PrivateKeySize || len(credential.Chain) == 0 {
+		return "", errors.New("token: invalid signing credential")
+	}
+	domain, err := artifactDomain(artifactType)
+	if err != nil {
+		return "", err
+	}
+	if len(payload) == 0 || len(payload) > maxArtifactPayloadSize {
+		return "", errors.New("token: artifact payload size is invalid")
+	}
+	message := make([]byte, 0, len(domain)+len(payload))
+	message = append(message, domain...)
+	message = append(message, payload...)
+	chain := make([][]byte, len(credential.Chain))
+	for i, cert := range credential.Chain {
+		if cert == nil || len(cert.Raw) == 0 || len(cert.Raw) > maxArtifactCertificateSize {
+			return "", errors.New("token: signer certificate size is invalid")
+		}
+		chain[i] = append([]byte(nil), cert.Raw...)
+	}
+	envelope := &authv1.SignedAuthArtifact{
+		ArtifactType: artifactType,
+		Payload:      append([]byte(nil), payload...),
+		Signature:    ed25519.Sign(credential.PrivateKey, message),
+		SignerChain:  chain,
+		KeyId:        append([]byte(nil), credential.KeyID[:]...),
+	}
+	raw, err := proto.Marshal(envelope)
+	if err != nil {
+		return "", fmt.Errorf("token: marshal artifact: %w", err)
+	}
+	wire := base64.RawURLEncoding.EncodeToString(raw)
+	if len(wire) > maxEncodedArtifactSize {
+		return "", errors.New("token: encoded artifact is too large")
+	}
+	return wire, nil
+}
+
+// Verify returns exact payload bytes only after chain, purpose, revocation, key ID, and signature
+// validation succeeds. Payload semantics are deliberately enforced by callers after this step.
+func (verifier *Verifier) Verify(wire, expectedType string, now time.Time) ([]byte, error) {
+	if verifier == nil || verifier.root == nil || len(wire) == 0 || len(wire) > maxEncodedArtifactSize {
+		return nil, ErrMalformed
+	}
+	if _, err := artifactDomain(expectedType); err != nil {
+		return nil, ErrMalformed
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(wire)
+	if err != nil {
+		return nil, ErrMalformed
+	}
+	var envelope authv1.SignedAuthArtifact
+	if err := (proto.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(raw, &envelope); err != nil || len(envelope.ProtoReflect().GetUnknown()) != 0 {
+		return nil, ErrMalformed
+	}
+	domain, err := artifactDomain(envelope.ArtifactType)
+	if err != nil || envelope.ArtifactType != expectedType || len(envelope.Payload) == 0 || len(envelope.Payload) > maxArtifactPayloadSize ||
+		len(envelope.Signature) != ed25519.SignatureSize || len(envelope.SignerChain) < 1 || len(envelope.SignerChain) > 4 || len(envelope.KeyId) != sha256.Size {
+		return nil, ErrMalformed
+	}
+
+	chain := make([]*x509.Certificate, len(envelope.SignerChain))
+	for i, der := range envelope.SignerChain {
+		if len(der) == 0 || len(der) > maxArtifactCertificateSize {
+			return nil, ErrMalformed
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			return nil, ErrMalformed
+		}
+		chain[i] = cert
+	}
+	validated, err := validateSignerChain(chain, verifier.root, verifier.environment, now)
+	if err != nil {
+		return nil, fmt.Errorf("token: reject signer chain: %w", err)
+	}
+	if verifier.revocations != nil {
+		if err := verifier.revocations.RejectSigner(validated.leaf); err != nil {
+			return nil, fmt.Errorf("token: signer revoked: %w", err)
+		}
+	}
+	if subtle.ConstantTimeCompare(envelope.KeyId, validated.keyID[:]) != 1 {
+		return nil, ErrUnknownKey
+	}
+	message := make([]byte, 0, len(domain)+len(envelope.Payload))
+	message = append(message, domain...)
+	message = append(message, envelope.Payload...)
+	if !ed25519.Verify(validated.publicKey, message, envelope.Signature) {
+		return nil, ErrSignature
+	}
+	return append([]byte(nil), envelope.Payload...), nil
 }
 
 func validateSignerChain(chain []*x509.Certificate, root *x509.Certificate, environment string, now time.Time) (*validatedSigner, error) {

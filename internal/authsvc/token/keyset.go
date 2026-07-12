@@ -13,6 +13,7 @@ type Key struct {
 // KeySet is the small ORDERED set of AS session pubkeys a verifier pins (current first, then
 // next) [AM4]. Rotation: pre-publish next key to configs -> overlap window (both valid) -> AS
 // switches signing -> retire old. Retiring a key from the set refuses every token it signed.
+// Deprecated: certificate-envelope verifiers trust an environment root through Verifier.
 type KeySet []Key
 
 // NewKeySet derives key_ids for the given public keys, preserving order and dropping

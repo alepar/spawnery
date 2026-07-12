@@ -8,6 +8,8 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/base64"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,4 +139,187 @@ func TestSignerProfileRejectsInvalidCertificates(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSigningCredentialSignUsesExactPayloadAndDomain(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	credential, err := NewSigningCredential(pki.leafEd25519Priv, pki.chain, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte{0x00, 0xff, 0x01, 0x80, 0x00}
+
+	for _, artifactType := range []string{ArtifactTypeSession, ArtifactTypeRevocation} {
+		t.Run(artifactType, func(t *testing.T) {
+			wire, err := credential.Sign(artifactType, payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope := mustDecodeArtifact(t, wire)
+			domain, err := artifactDomain(artifactType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			message := append([]byte(domain), payload...)
+			if !ed25519.Verify(pki.leaf.PublicKey.(ed25519.PublicKey), message, envelope.Signature) {
+				t.Fatal("signature does not cover domain and exact payload bytes")
+			}
+			if !bytes.Equal(envelope.Payload, payload) || envelope.ArtifactType != artifactType {
+				t.Fatalf("envelope changed signed data: %+v", envelope)
+			}
+		})
+	}
+	if _, err := credential.Sign("caller-selected-domain", payload); err == nil {
+		t.Fatal("unknown artifact type accepted")
+	}
+	if _, err := credential.Sign(ArtifactTypeSession, bytes.Repeat([]byte{1}, maxArtifactPayloadSize+1)); err == nil {
+		t.Fatal("oversized payload accepted")
+	}
+}
+
+func TestVerifierVerifySignedArtifact(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	credential, err := NewSigningCredential(pki.leafEd25519Priv, pki.chain, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := NewVerifier(pki.root, "prod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, artifactType := range []string{ArtifactTypeSession, ArtifactTypeRevocation} {
+		payload := []byte("exact payload for " + artifactType)
+		wire, err := credential.Sign(artifactType, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := verifier.Verify(wire, artifactType, now)
+		if err != nil {
+			t.Fatalf("verify %s: %v", artifactType, err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("payload mismatch: got %x want %x", got, payload)
+		}
+	}
+}
+
+func TestVerifierRejectsArtifactSubstitution(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	credential, _ := NewSigningCredential(pki.leafEd25519Priv, pki.chain, pki.root, "prod", now)
+	verifier, _ := NewVerifier(pki.root, "prod", nil)
+	wire, _ := credential.Sign(ArtifactTypeSession, []byte("payload"))
+	original := mustDecodeArtifact(t, wire)
+	other := newCertTestPKI(t, nil)
+
+	tests := []struct {
+		name     string
+		expected string
+		mutate   func(*authv1.SignedAuthArtifact)
+	}{
+		{name: "expected type", expected: ArtifactTypeRevocation},
+		{name: "artifact type", expected: ArtifactTypeRevocation, mutate: func(a *authv1.SignedAuthArtifact) { a.ArtifactType = ArtifactTypeRevocation }},
+		{name: "payload", mutate: func(a *authv1.SignedAuthArtifact) { a.Payload[0] ^= 1 }},
+		{name: "signature", mutate: func(a *authv1.SignedAuthArtifact) { a.Signature[0] ^= 1 }},
+		{name: "leaf", mutate: func(a *authv1.SignedAuthArtifact) { a.SignerChain[0] = other.leaf.Raw }},
+		{name: "intermediate", mutate: func(a *authv1.SignedAuthArtifact) { a.SignerChain[1] = other.intermediate.Raw }},
+		{name: "key ID", mutate: func(a *authv1.SignedAuthArtifact) { a.KeyId[0] ^= 1 }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := proto.Clone(original).(*authv1.SignedAuthArtifact)
+			if tc.mutate != nil {
+				tc.mutate(candidate)
+			}
+			expected := tc.expected
+			if expected == "" {
+				expected = ArtifactTypeSession
+			}
+			if _, err := verifier.Verify(mustEncodeArtifact(t, candidate), expected, now); err == nil {
+				t.Fatal("substituted artifact verified")
+			}
+		})
+	}
+}
+
+func TestVerifierRejectsMalformedArtifacts(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	credential, _ := NewSigningCredential(pki.leafEd25519Priv, pki.chain, pki.root, "prod", now)
+	verifier, _ := NewVerifier(pki.root, "prod", nil)
+	wire, _ := credential.Sign(ArtifactTypeSession, []byte("payload"))
+	original := mustDecodeArtifact(t, wire)
+
+	mutations := []struct {
+		name   string
+		mutate func(*authv1.SignedAuthArtifact)
+	}{
+		{name: "missing type", mutate: func(a *authv1.SignedAuthArtifact) { a.ArtifactType = "" }},
+		{name: "missing payload", mutate: func(a *authv1.SignedAuthArtifact) { a.Payload = nil }},
+		{name: "missing signature", mutate: func(a *authv1.SignedAuthArtifact) { a.Signature = nil }},
+		{name: "missing chain", mutate: func(a *authv1.SignedAuthArtifact) { a.SignerChain = nil }},
+		{name: "missing key ID", mutate: func(a *authv1.SignedAuthArtifact) { a.KeyId = nil }},
+		{name: "root included", mutate: func(a *authv1.SignedAuthArtifact) { a.SignerChain = append(a.SignerChain, pki.root.Raw) }},
+		{name: "too many certificates", mutate: func(a *authv1.SignedAuthArtifact) {
+			a.SignerChain = append(a.SignerChain, a.SignerChain[1], a.SignerChain[1], a.SignerChain[1])
+		}},
+		{name: "duplicate certificate", mutate: func(a *authv1.SignedAuthArtifact) { a.SignerChain = append(a.SignerChain, a.SignerChain[1]) }},
+		{name: "short signature", mutate: func(a *authv1.SignedAuthArtifact) { a.Signature = a.Signature[:63] }},
+		{name: "oversized payload", mutate: func(a *authv1.SignedAuthArtifact) { a.Payload = bytes.Repeat([]byte{1}, maxArtifactPayloadSize+1) }},
+		{name: "oversized certificate", mutate: func(a *authv1.SignedAuthArtifact) {
+			a.SignerChain[0] = bytes.Repeat([]byte{1}, maxArtifactCertificateSize+1)
+		}},
+	}
+	for _, tc := range mutations {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := proto.Clone(original).(*authv1.SignedAuthArtifact)
+			tc.mutate(candidate)
+			if _, err := verifier.Verify(mustEncodeArtifact(t, candidate), ArtifactTypeSession, now); err == nil {
+				t.Fatal("malformed artifact verified")
+			}
+		})
+	}
+
+	unknownFieldRaw, err := proto.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownFieldRaw = append(unknownFieldRaw, 0x9a, 0x06, 0x00)
+	legacy := SignArtifact(DomainPrefix, []byte("legacy"), pki.leafEd25519Priv)
+	for _, candidate := range []string{
+		"",
+		"!!!",
+		base64.RawURLEncoding.EncodeToString([]byte{0xff}),
+		base64.RawURLEncoding.EncodeToString(unknownFieldRaw),
+		legacy,
+		strings.Repeat("A", maxEncodedArtifactSize+1),
+	} {
+		if _, err := verifier.Verify(candidate, ArtifactTypeSession, now); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("malformed %q: want ErrMalformed, got %v", candidate[:min(len(candidate), 32)], err)
+		}
+	}
+}
+
+func mustDecodeArtifact(t *testing.T, wire string) *authv1.SignedAuthArtifact {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artifact authv1.SignedAuthArtifact
+	if err := proto.Unmarshal(raw, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	return &artifact
+}
+
+func mustEncodeArtifact(t *testing.T, artifact *authv1.SignedAuthArtifact) string {
+	t.Helper()
+	raw, err := proto.Marshal(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
 }

@@ -44,6 +44,7 @@ const issuedAtSkew = 60 * time.Second
 
 // Mint signs body with priv and returns the wire form:
 // base64url(body) "." base64url(ed25519(DomainPrefix || body)) — RawURLEncoding, unpadded [MC1].
+// Deprecated: use SigningCredential.Sign with ArtifactTypeSession.
 func Mint(body *authv1.SessionTokenBody, priv ed25519.PrivateKey) (string, error) {
 	bodyBytes, err := proto.Marshal(body)
 	if err != nil {
@@ -54,6 +55,7 @@ func Mint(body *authv1.SessionTokenBody, priv ed25519.PrivateKey) (string, error
 
 // SignArtifact signs raw body bytes under a domain prefix and returns the two-part wire string.
 // Shared by session tokens and revocation entries (same key, distinct domains [MC1]).
+// Deprecated: use SigningCredential.Sign with a registered artifact type.
 func SignArtifact(domain string, bodyBytes []byte, priv ed25519.PrivateKey) string {
 	msg := make([]byte, 0, len(domain)+len(bodyBytes))
 	msg = append(msg, domain...)
@@ -65,6 +67,7 @@ func SignArtifact(domain string, bodyBytes []byte, priv ed25519.PrivateKey) stri
 // VerifyArtifact splits wire, verifies sig over (domain || EXACT received body bytes) against
 // pub, and returns the body bytes. Verification always runs over the raw received bytes —
 // never a re-serialization (WM9 discipline).
+// Deprecated: use Verifier.Verify with a registered artifact type.
 func VerifyArtifact(domain, wire string, pub ed25519.PublicKey) ([]byte, error) {
 	bodyB64, sigB64, ok := strings.Cut(wire, ".")
 	if !ok {
@@ -92,6 +95,7 @@ func VerifyArtifact(domain, wire string, pub ed25519.PublicKey) ([]byte, error) 
 // checked over the exact received body bytes — a forged key_id only selects a key that will
 // then fail verification. Audience checking is the CALLER's job (the CP enforces aud=="cp",
 // nodes aud=="node" [MC2]); the body is returned as-is.
+// Deprecated: use Verifier.Verify, then parse and validate SessionTokenBody.
 func Verify(wire string, ks KeySet, now time.Time) (*authv1.SessionTokenBody, error) {
 	bodyB64, _, ok := strings.Cut(wire, ".")
 	if !ok {
