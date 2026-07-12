@@ -111,6 +111,46 @@ func TestReadoptAdoptsMatchingGeneration(t *testing.T) {
 	}
 }
 
+// A pod whose spawn has an owner-sealed journaled mount must be adopted with
+// journal_key_delivery_pending=true, and the CP must mark the spawn delivery-pending (GetSpawn surfaces
+// it; it is what arms the owner's re-delivery over the migrate key-travel path).
+func TestReadoptAdoptSetsJournalKeyDeliveryPending(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	activeSpawnWithRoute(t, s, reg, rt, "sp1", "alice", &capSender{})
+	sealKey(t, s, "sp1", "main")
+
+	d := report(t, s, "n1", &capSender{}, &nodev1.ObservedPod{SpawnId: "sp1", Generation: 1})
+	dec := decisionFor(t, d, "sp1")
+	if dec.GetVerdict() != nodev1.ReadoptVerdict_READOPT_VERDICT_ADOPT {
+		t.Fatalf("verdict = %v, want ADOPT", dec.GetVerdict())
+	}
+	if !dec.GetAdopt().GetJournalKeyDeliveryPending() {
+		t.Error("adopt spec journal_key_delivery_pending = false, want true (spawn has an owner-sealed mount)")
+	}
+	if !s.deliveryPending.isPending("sp1") {
+		t.Error("CP did not mark the spawn delivery-pending; the web UI's re-delivery prompt would never fire")
+	}
+}
+
+// A pod whose spawn has NO owner-sealed mount (ephemeral/node-local only) must not be flagged for
+// delivery: node-local custody survives the restart under node.key, and there is nothing to re-deliver.
+func TestReadoptAdoptLeavesJournalKeyDeliveryPendingFalse(t *testing.T) {
+	s, reg, rt := newTestServer(t)
+	activeSpawnWithRoute(t, s, reg, rt, "sp1", "alice", &capSender{})
+
+	d := report(t, s, "n1", &capSender{}, &nodev1.ObservedPod{SpawnId: "sp1", Generation: 1})
+	dec := decisionFor(t, d, "sp1")
+	if dec.GetVerdict() != nodev1.ReadoptVerdict_READOPT_VERDICT_ADOPT {
+		t.Fatalf("verdict = %v, want ADOPT", dec.GetVerdict())
+	}
+	if dec.GetAdopt().GetJournalKeyDeliveryPending() {
+		t.Error("adopt spec journal_key_delivery_pending = true, want false (no owner-sealed mount)")
+	}
+	if s.deliveryPending.isPending("sp1") {
+		t.Error("CP marked the spawn delivery-pending with no owner-sealed mount")
+	}
+}
+
 // A pod whose generation is behind the live row is a superseded episode (the CP re-created the spawn):
 // REAP, exactly as adoptOrStop's orphan arm would.
 func TestReadoptReapsStaleGeneration(t *testing.T) {
@@ -203,6 +243,30 @@ func TestReadoptDefersOnTransientStatus(t *testing.T) {
 	d := report(t, s, "n1", &capSender{}, &nodev1.ObservedPod{SpawnId: "sp1", Generation: 1})
 	if got := decisionFor(t, d, "sp1").GetVerdict(); got != nodev1.ReadoptVerdict_READOPT_VERDICT_DEFER {
 		t.Fatalf("suspending spawn: verdict = %v, want DEFER (a driver owns it)", got)
+	}
+}
+
+// A spawn with an active (unexpired) claim is mid-flight under some other driver even though its
+// status is still Active (e.g. SetSpawnModel, or a Recreate that has not yet flipped status): DEFER.
+// Distinct from the transient-status check above — this is the "live claim" arm of design decision 2.
+func TestReadoptDefersOnLiveClaim(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	makeSpawn(t, s, "sp1", "alice")
+	setActive(t, s, "sp1", "n1", 1)
+	ctx := context.Background()
+	sp, err := s.st.Spawns().Get(ctx, "sp1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	now := time.Now()
+	if _, err := s.st.Spawns().Acquire(ctx, "sp1", "some-driver", "lease-1",
+		now.UnixNano(), now.Add(time.Minute).UnixNano(), sp.StatusSeq); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	d := report(t, s, "n1", &capSender{}, &nodev1.ObservedPod{SpawnId: "sp1", Generation: 1})
+	if got := decisionFor(t, d, "sp1").GetVerdict(); got != nodev1.ReadoptVerdict_READOPT_VERDICT_DEFER {
+		t.Fatalf("live-claimed spawn: verdict = %v, want DEFER (another driver owns it)", got)
 	}
 }
 
