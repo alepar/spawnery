@@ -295,6 +295,7 @@ type ProfileSourceKind string
 const (
 	ProfileSourceCatalog ProfileSourceKind = "catalog_ref"
 	ProfileSourceCustom  ProfileSourceKind = "custom"
+	ProfileSourceBundle  ProfileSourceKind = "bundle_ref"
 )
 
 // Profile is the owner-scoped customization container with a version-CAS column.
@@ -316,12 +317,17 @@ type ProfileEntry struct {
 	Kind           ProfileEntryKind  `bun:"kind,notnull"`
 	Name           string            `bun:"name,notnull"`
 	SourceKind     ProfileSourceKind `bun:"source_kind,notnull"`
-	CatalogID      string            `bun:"catalog_id,notnull"`
+	CatalogID      string            `bun:"catalog_id,notnull"` // '' for bundle_ref entries (see BundleID/VersionID)
 	CustomInline   []byte            `bun:"custom_inline"`
 	TargetsJSON    string            `bun:"targets,notnull"`         // JSON []string, default ["all"]
 	SecretRefsJSON string            `bun:"mcp_secret_refs,notnull"` // JSON []string env-var names
 	Targets        []string          `bun:"-"`                       // decoded in repo
 	MCPSecretRefs  []string          `bun:"-"`                       // decoded in repo
+	// BundleID/VersionID pin a bundle_ref entry to a skill_bundle + skill_bundle_version
+	// (sp-mwco.1.5); '' for catalog_ref/custom entries. CatalogID stays '' for bundle_ref
+	// entries — the pin is the version, resolved to N members at assembly time.
+	BundleID  string `bun:"bundle_id,notnull"`
+	VersionID string `bun:"version_id,notnull"`
 }
 
 // ProfileSecret holds a reference from a Profile to a secret (schema-only;
@@ -338,12 +344,12 @@ type ProfileSecret struct {
 // Any authenticated owner may create entries they own (creator_id); writes (Update/Delete/SetListed)
 // are creator-only; List returns only listed=true entries (globally readable).
 //
-// Provenance string fields (source_url, source_ref, source_subdir) are NOT NULL DEFAULT '' (empty
+// Provenance string fields (source_url, source_ref, source_subdir) are NOT NULL DEFAULT ” (empty
 // for inline entries) — sp-mwco.1.3 turned these NOT NULL because NULLs are distinct in a unique
 // index and never `=` in a predicate, so a NULL-bearing provenance key would silently never match
 // on re-ingest. sha256/size stay nullable: inline/curated entries have no content identity, and a
-// NOT NULL DEFAULT '' sha256 would collapse every inline row of one creator onto the same
-// (creator_id, '') key in idx_customization_catalog_owner_sha. The unique index (creator_id,
+// NOT NULL DEFAULT ” sha256 would collapse every inline row of one creator onto the same
+// (creator_id, ”) key in idx_customization_catalog_owner_sha. The unique index (creator_id,
 // sha256) enforces idempotent URL ingest — NULL sha256 rows are treated as distinct under both
 // SQLite and Postgres unique-index NULL semantics.
 type CustomizationCatalogEntry struct {
@@ -373,7 +379,7 @@ type CustomizationCatalogEntry struct {
 // --- Skill Bundles (sp-mwco.1.3) -------------------------------------------
 
 // SkillBundle is one ingested repo/ref/subdir. Unique on (creator_id, source_url, source_ref,
-// source_subdir) — the re-paste idempotency key; source_ref/source_subdir are NOT NULL DEFAULT ''
+// source_subdir) — the re-paste idempotency key; source_ref/source_subdir are NOT NULL DEFAULT ”
 // for the same NULL-distinctness reason as CustomizationCatalogEntry's provenance columns.
 type SkillBundle struct {
 	bun.BaseModel `bun:"table:skill_bundle,alias:sb"`
