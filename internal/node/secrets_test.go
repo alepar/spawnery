@@ -41,7 +41,7 @@ func secretTestRig(t *testing.T, nodeID, spawnID string, gen uint64) (*attacher,
 	}
 
 	dataRoot := t.TempDir()
-	mgr := spawnlet.NewManagerWithBackend(&scriptedPodBackend{}, noopApplier{}, spawnlet.ManagerConfig{
+	mgr := spawnlet.NewManagerWithBackend(fakeBackend(t), noopApplier{}, spawnlet.ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot,
 	})
 	// Put the spawn in the manager's store + create its secrets dir (Create does both).
@@ -154,7 +154,7 @@ func TestSecretDeliveryWrongContextRejected(t *testing.T) {
 
 // A node with no sub-key holder (insecure/dev mode) drops the delivery rather than panicking.
 func TestSecretDeliveryNoHolderDropped(t *testing.T) {
-	mgr := spawnlet.NewManagerWithBackend(&scriptedPodBackend{}, noopApplier{}, spawnlet.ManagerConfig{
+	mgr := spawnlet.NewManagerWithBackend(fakeBackend(t), noopApplier{}, spawnlet.ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
 	if _, err := mgr.Create(context.Background(), "sp1", writeNodeApp(t), "m", "n", "app", 1); err != nil {

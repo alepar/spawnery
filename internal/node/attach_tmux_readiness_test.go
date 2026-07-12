@@ -8,6 +8,7 @@ import (
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/agentcaps"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/spawnlet"
 )
 
@@ -16,7 +17,7 @@ import (
 // await-ready milestone before polling.
 func TestStartSpawnTmuxReadinessGateGoesActiveOnlyAfterHasSessionTrue(t *testing.T) {
 	var calls atomic.Int32
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 
@@ -73,7 +74,7 @@ func TestStartSpawnTmuxReadinessGateGoesActiveOnlyAfterHasSessionTrue(t *testing
 // TestStartSpawnTmuxReadinessGateContextCancelErrors verifies that when the context is cancelled
 // before has-session returns true, startSpawn emits ERROR (not ACTIVE) and does not register a relay.
 func TestStartSpawnTmuxReadinessGateContextCancelErrors(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 

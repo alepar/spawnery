@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/storage/journal"
 )
 
@@ -34,14 +35,14 @@ func (r *forkOpRecorder) snapshot() []string {
 }
 
 type recordingForkBackend struct {
-	fakePodBackend
+	*fakepod.Backend
 	rec        *forkOpRecorder
 	unpauseErr error
 }
 
 func (b *recordingForkBackend) Pause(ctx context.Context, h *runtime.PodHandle) error {
 	b.rec.add("pause-agent:" + h.SpawnID)
-	return b.fakePodBackend.Pause(ctx, h)
+	return b.Backend.Pause(ctx, h)
 }
 
 func (b *recordingForkBackend) Unpause(ctx context.Context, h *runtime.PodHandle) error {
@@ -49,7 +50,7 @@ func (b *recordingForkBackend) Unpause(ctx context.Context, h *runtime.PodHandle
 	if b.unpauseErr != nil {
 		return b.unpauseErr
 	}
-	return b.fakePodBackend.Unpause(ctx, h)
+	return b.Backend.Unpause(ctx, h)
 }
 
 // RestoreForkedSource is the source-restore path the fork flow now uses (Docker-lane: unpause). It
@@ -60,12 +61,12 @@ func (b *recordingForkBackend) RestoreForkedSource(ctx context.Context, h *runti
 	if b.unpauseErr != nil {
 		return b.unpauseErr
 	}
-	return b.fakePodBackend.RestoreForkedSource(ctx, h)
+	return b.Backend.RestoreForkedSource(ctx, h)
 }
 
 func (b *recordingForkBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle, targetSpawnID string) (string, error) {
 	b.rec.add("capture-rootfs-as:" + targetSpawnID)
-	return b.fakePodBackend.CaptureDeltaAs(ctx, h, targetSpawnID)
+	return b.Backend.CaptureDeltaAs(ctx, h, targetSpawnID)
 }
 
 func (b *recordingForkBackend) ExportDelta(ctx context.Context, spawnID string, w io.Writer) error {
@@ -241,7 +242,7 @@ func (j *recordingForkJournal) waitCloseHold(ctx context.Context, spawnID string
 
 func newForkTestManager(t *testing.T, rec *forkOpRecorder, j *recordingForkJournal) (*Manager, *recordingForkBackend) {
 	t.Helper()
-	fb := &recordingForkBackend{rec: rec}
+	fb := &recordingForkBackend{Backend: fakeBackend(t), rec: rec}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		NodeID: "node-1", AgentImage: "agent:base", SidecarImage: "sidecar:base",
 		DataRoot: t.TempDir(), DeltaCapture: true,
@@ -258,11 +259,22 @@ func forkArtifactKey(spawnID string, generation uint64, artifactID string) strin
 	return fmt.Sprintf("%s/%d/%s", spawnID, generation, artifactID)
 }
 
-func putForkSource(t *testing.T, m *Manager, sourceID string, generation uint64) {
+// putForkSource fabricates a live source spawn: a real pod on the fake backend (so the fork flow's
+// Pause/CaptureDeltaAs/Unpause calls resolve a real handle, not just a store record) plus the Spawn
+// record the fork flow reads mounts/image metadata from.
+func putForkSource(t *testing.T, m *Manager, fb *recordingForkBackend, sourceID string, generation uint64) {
 	t.Helper()
+	ctx := context.Background()
+	h, err := fb.StartPod(ctx, runtime.PodSpec{ID: sourceID, SidecarImage: "sidecar:base"})
+	if err != nil {
+		t.Fatalf("StartPod(source): %v", err)
+	}
+	if err := fb.StartAgent(ctx, h, runtime.AgentSpec{Image: "agent:base"}); err != nil {
+		t.Fatalf("StartAgent(source): %v", err)
+	}
 	srcDir := t.TempDir()
 	m.store.Put(&Spawn{
-		ID: sourceID, Generation: generation, AgentID: "ag-source", SidecarID: "sc-source",
+		ID: sourceID, Generation: generation, AgentID: h.AgentID, SidecarID: h.SidecarID,
 		BaseImageDigest: "agent@sha256:base", LaunchImageRef: "agent:base",
 		JournalMounts: []journal.Mount{{Name: "work", HostDir: srcDir, Class: journal.NodeLocal}},
 	})
@@ -272,8 +284,8 @@ func TestForkSameNodeCapturesMountsAndRootfsUnderOnePause(t *testing.T) {
 	ctx := context.Background()
 	rec := &forkOpRecorder{}
 	j := &recordingForkJournal{rec: rec}
-	m, _ := newForkTestManager(t, rec, j)
-	putForkSource(t, m, "sp-source", 9)
+	m, fb := newForkTestManager(t, rec, j)
+	putForkSource(t, m, fb, "sp-source", 9)
 
 	res, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
 		SourceSpawnID:    "sp-source",
@@ -334,8 +346,8 @@ func TestForkSameNodeCopiesInheritedRootfsArtifactChainAsForkOwned(t *testing.T)
 			forkArtifactKey("sp-source", 9, inherited.ArtifactID): inherited,
 		},
 	}
-	m, _ := newForkTestManager(t, rec, j)
-	putForkSource(t, m, "sp-source", 9)
+	m, fb := newForkTestManager(t, rec, j)
+	putForkSource(t, m, fb, "sp-source", 9)
 	src, ok := m.store.Get("sp-source")
 	if !ok {
 		t.Fatal("missing source")
@@ -398,8 +410,8 @@ func TestForkSameNodeCopiesInheritedRootfsArtifactChainInSequenceOrder(t *testin
 			forkArtifactKey("sp-source", 9, seq2.ArtifactID): seq2,
 		},
 	}
-	m, _ := newForkTestManager(t, rec, j)
-	putForkSource(t, m, "sp-source", 9)
+	m, fb := newForkTestManager(t, rec, j)
+	putForkSource(t, m, fb, "sp-source", 9)
 	src, ok := m.store.Get("sp-source")
 	if !ok {
 		t.Fatal("missing source")
@@ -441,8 +453,8 @@ func TestForkSameNodeFailsClosedWithUnexportedLocalRootfsHistory(t *testing.T) {
 		Format:          journal.ArtifactFormatOCILayout,
 	}
 	j := &recordingForkJournal{rec: rec}
-	m, _ := newForkTestManager(t, rec, j)
-	putForkSource(t, m, "sp-source", 9)
+	m, fb := newForkTestManager(t, rec, j)
+	putForkSource(t, m, fb, "sp-source", 9)
 	src, ok := m.store.Get("sp-source")
 	if !ok {
 		t.Fatal("missing source")
@@ -471,8 +483,8 @@ func TestForkSameNodeHoldsSourceJournalAfterSourceRestored(t *testing.T) {
 	ctx := context.Background()
 	rec := &forkOpRecorder{}
 	j := &recordingForkJournal{rec: rec}
-	m, _ := newForkTestManager(t, rec, j)
-	putForkSource(t, m, "sp-source", 9)
+	m, fb := newForkTestManager(t, rec, j)
+	putForkSource(t, m, fb, "sp-source", 9)
 	closeDone := make(chan struct{})
 
 	_, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
@@ -507,9 +519,9 @@ func TestForkSameNodeFailsClosedWhenRequiredGenerationHoldIsUnwired(t *testing.T
 	ctx := context.Background()
 	rec := &forkOpRecorder{}
 	j := &recordingForkJournal{rec: rec}
-	m, _ := newForkTestManager(t, rec, j)
+	m, fb := newForkTestManager(t, rec, j)
 	m.forkGenerationHoldRequired = true
-	putForkSource(t, m, "sp-source", 9)
+	putForkSource(t, m, fb, "sp-source", 9)
 
 	_, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
 		SourceSpawnID:    "sp-source",
@@ -532,7 +544,7 @@ func TestForkUnpauseIfPausedToleratesAlreadyRunning(t *testing.T) {
 	j := &recordingForkJournal{rec: rec}
 	m, fb := newForkTestManager(t, rec, j)
 	fb.unpauseErr = fmt.Errorf("container is not paused")
-	putForkSource(t, m, "sp-source", 9)
+	putForkSource(t, m, fb, "sp-source", 9)
 
 	if err := m.UnpauseIfPaused(ctx, "sp-source", 9); err != nil {
 		t.Fatalf("UnpauseIfPaused: %v", err)
@@ -544,7 +556,7 @@ func TestForkCaptureFailureUnpausesAndRestartsWatchers(t *testing.T) {
 	rec := &forkOpRecorder{}
 	j := &recordingForkJournal{rec: rec, finalErr: fmt.Errorf("snapshot failed"), finalErrOnCall: 1}
 	m, fb := newForkTestManager(t, rec, j)
-	putForkSource(t, m, "sp-source", 9)
+	putForkSource(t, m, fb, "sp-source", 9)
 
 	_, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
 		SourceSpawnID:    "sp-source",
@@ -555,7 +567,7 @@ func TestForkCaptureFailureUnpausesAndRestartsWatchers(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "snapshot failed") {
 		t.Fatalf("ForkSameNode error = %v, want snapshot failed", err)
 	}
-	if fb.unpauseCount == 0 {
+	if fb.UnpauseCount() == 0 {
 		t.Fatal("failure must unpause the source")
 	}
 	if _, ok := m.store.Get("sp-source"); !ok {
@@ -577,7 +589,7 @@ func TestForkSameNodeHonorsCancellationDuringCaptureAndRestoresSource(t *testing
 		cancel()
 		return nil
 	}
-	putForkSource(t, m, "sp-source", 9)
+	putForkSource(t, m, fb, "sp-source", 9)
 
 	_, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
 		SourceSpawnID:    "sp-source",
@@ -599,7 +611,7 @@ func TestForkSameNodeHonorsCancellationDuringCaptureAndRestoresSource(t *testing
 			t.Fatalf("canceled fork must stop before %q, ops=%v", forbidden, ops)
 		}
 	}
-	if fb.unpauseCount == 0 {
+	if fb.UnpauseCount() == 0 {
 		t.Fatalf("canceled fork must still unpause source, ops=%v", ops)
 	}
 	if indexOfForkOp(ops, "close-journal:sp-source") == -1 {
@@ -614,8 +626,8 @@ func TestForkSameNodeWarmSnapshotDoesNotDisableSourceJournaling(t *testing.T) {
 	ctx := context.Background()
 	rec := &forkOpRecorder{}
 	j := &recordingForkJournal{rec: rec, suspended: map[string]bool{}}
-	m, _ := newForkTestManager(t, rec, j)
-	putForkSource(t, m, "sp-source", 9)
+	m, fb := newForkTestManager(t, rec, j)
+	putForkSource(t, m, fb, "sp-source", 9)
 
 	_, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
 		SourceSpawnID:    "sp-source",
@@ -712,7 +724,7 @@ func TestForkSameNodeGenerationHoldAllowsWarmSnapshotToEstablishKey(t *testing.T
 	ctx := context.Background()
 	rec := &forkOpRecorder{}
 	j := &recordingForkJournal{rec: rec}
-	m, _ := newForkTestManager(t, rec, j)
+	m, fb := newForkTestManager(t, rec, j)
 	g, err := journal.NewGenerationKeyManager(journal.GenerationKeyConfig{
 		Admin:      newSpawnletFakeGenKeyAdmin(),
 		S3Endpoint: "127.0.0.1:3900",
@@ -721,7 +733,7 @@ func TestForkSameNodeGenerationHoldAllowsWarmSnapshotToEstablishKey(t *testing.T
 		t.Fatal(err)
 	}
 	m.SetGenerationKeyManager(g)
-	putForkSource(t, m, "sp-source", 9)
+	putForkSource(t, m, fb, "sp-source", 9)
 
 	res, err := m.ForkSameNode(ctx, ForkSameNodeRequest{
 		SourceSpawnID:    "sp-source",
@@ -753,10 +765,10 @@ func TestForkSameNodeReleasesGenerationHoldOnSuccessAndFailure(t *testing.T) {
 			ctx := context.Background()
 			rec := &forkOpRecorder{}
 			j := &recordingForkJournal{rec: rec, finalErr: tc.finalErr}
-			m, _ := newForkTestManager(t, rec, j)
+			m, fb := newForkTestManager(t, rec, j)
 			holds := &fakeGenerationHolds{}
 			m.forkGenerationHold = holds.HoldGeneration
-			putForkSource(t, m, "sp-source", 9)
+			putForkSource(t, m, fb, "sp-source", 9)
 
 			_, _ = m.ForkSameNode(ctx, ForkSameNodeRequest{
 				SourceSpawnID:    "sp-source",

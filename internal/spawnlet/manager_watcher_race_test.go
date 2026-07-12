@@ -36,7 +36,7 @@ func TestSnapshotForSuspendRaceVsStop(t *testing.T) {
 	const iterations = 200
 	for i := 0; i < iterations; i++ {
 		fj := newFakeJournal("manifest-race")
-		fb := &fakePodBackend{}
+		fb := fakeBackend(t)
 		m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 			AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 		})

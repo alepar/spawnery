@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/storage"
 )
 
@@ -50,19 +51,19 @@ func (m *fakeRootMaterializer) MaterializeRootOwned(_ context.Context, spec runt
 }
 
 type countingPodBackend struct {
-	fakePodBackend
+	*fakepod.Backend
 	startPodCalls   int
 	startAgentCalls int
 }
 
 func (b *countingPodBackend) StartPod(ctx context.Context, spec runtime.PodSpec) (*runtime.PodHandle, error) {
 	b.startPodCalls++
-	return b.fakePodBackend.StartPod(ctx, spec)
+	return b.Backend.StartPod(ctx, spec)
 }
 
 func (b *countingPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, spec runtime.AgentSpec) error {
 	b.startAgentCalls++
-	return b.fakePodBackend.StartAgent(ctx, h, spec)
+	return b.Backend.StartAgent(ctx, h, spec)
 }
 
 type recordingBackend struct {
@@ -124,7 +125,7 @@ func writeMountBindingAppWithDurability(t *testing.T, durability map[string]stri
 }
 
 func TestCreateWithSelectionRejectsUnsupportedMountBackendBeforePodStart(t *testing.T) {
-	fb := &countingPodBackend{}
+	fb := &countingPodBackend{Backend: fakeBackend(t)}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -141,7 +142,7 @@ func TestCreateWithSelectionRejectsUnsupportedMountBackendBeforePodStart(t *test
 }
 
 func TestCreateWithSelectionRejectsGithubMountWithoutJournaledDurabilityBeforePrepare(t *testing.T) {
-	fb := &countingPodBackend{}
+	fb := &countingPodBackend{Backend: fakeBackend(t)}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -171,7 +172,7 @@ func TestCreateWithSelectionRejectsGithubMountWithoutJournaledDurabilityBeforePr
 }
 
 func TestCreateWithSelectionRejectsBindingForUnknownManifestMount(t *testing.T) {
-	fb := &countingPodBackend{}
+	fb := &countingPodBackend{Backend: fakeBackend(t)}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -191,7 +192,7 @@ func TestCreateWithSelectionRejectsBindingForUnknownManifestMount(t *testing.T) 
 }
 
 func TestStopFinalizesEachMountThroughPreparingBackend(t *testing.T) {
-	fb := &countingPodBackend{}
+	fb := &countingPodBackend{Backend: fakeBackend(t)}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -225,7 +226,7 @@ func TestStopFinalizesEachMountThroughPreparingBackend(t *testing.T) {
 }
 
 func TestRootMaterializeScratchMountUsesDistinctPreparedDir(t *testing.T) {
-	fb := &countingPodBackend{}
+	fb := &countingPodBackend{Backend: fakeBackend(t)}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), UsernsMode: "remap",
 	})
@@ -255,7 +256,7 @@ func TestRootMaterializeScratchMountUsesDistinctPreparedDir(t *testing.T) {
 }
 
 func TestRootMaterializeUsesResolvedBackendForMountPrepareAndFinalize(t *testing.T) {
-	fb := &countingPodBackend{}
+	fb := &countingPodBackend{Backend: fakeBackend(t)}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), UsernsMode: "remap",
 	})
@@ -289,7 +290,7 @@ func TestRootMaterializeUsesResolvedBackendForMountPrepareAndFinalize(t *testing
 }
 
 func TestCreateWithSelectionUnboundMountDefaultsToScratch(t *testing.T) {
-	fb := &countingPodBackend{}
+	fb := &countingPodBackend{Backend: fakeBackend(t)}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -333,7 +334,7 @@ func TestCreateWithSelectionUnboundMountDefaultsToScratch(t *testing.T) {
 }
 
 func TestSuspendReturnsErrorWhenMountFinalizeFails(t *testing.T) {
-	fb := &countingPodBackend{}
+	fb := &countingPodBackend{Backend: fakeBackend(t)}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})

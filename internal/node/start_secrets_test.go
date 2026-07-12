@@ -12,13 +12,14 @@ import (
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/storage"
 )
 
 type startAgentCheckBackend struct {
-	scriptedPodBackend
+	*fakepod.Backend
 	check func()
 
 	mu              sync.Mutex
@@ -32,7 +33,7 @@ func (b *startAgentCheckBackend) StartAgent(ctx context.Context, h *runtime.PodH
 	b.mu.Lock()
 	b.startAgentCalls++
 	b.mu.Unlock()
-	return b.scriptedPodBackend.StartAgent(ctx, h, spec)
+	return b.Backend.StartAgent(ctx, h, spec)
 }
 
 func (b *startAgentCheckBackend) agentCalls() int {
@@ -42,7 +43,7 @@ func (b *startAgentCheckBackend) agentCalls() int {
 }
 
 type startPodCountBackend struct {
-	scriptedPodBackend
+	*fakepod.Backend
 
 	mu            sync.Mutex
 	startPodCalls int
@@ -52,7 +53,7 @@ func (b *startPodCountBackend) StartPod(ctx context.Context, spec runtime.PodSpe
 	b.mu.Lock()
 	b.startPodCalls++
 	b.mu.Unlock()
-	return b.scriptedPodBackend.StartPod(ctx, spec)
+	return b.Backend.StartPod(ctx, spec)
 }
 
 func (b *startPodCountBackend) podCalls() int {
@@ -113,7 +114,7 @@ func startupSecretHolder(t *testing.T, nodeID string) *subkey.Node {
 func TestConsumeStartupSecretsRollsBackBatchOnLaterFailure(t *testing.T) {
 	const nodeID, spawnID, gen = "node-1", "sp-start-rollback", uint64(11)
 	holder := startupSecretHolder(t, nodeID)
-	a := startupSecretAttacher(t, &scriptedPodBackend{}, &fakeCPStream{}, nodeID, holder, t.TempDir())
+	a := startupSecretAttacher(t, fakeBackend(t), &fakeCPStream{}, nodeID, holder, t.TempDir())
 	first := sealSecret(t, holder, spawnID, gen, "legacy/first", "FIRST_TOKEN", 1, "startup-first-1", []byte("first"))
 	second := sealSecret(t, holder, spawnID, gen, "", "SECOND_TOKEN", 1, "startup-second-1", []byte("second"))
 	routes := map[string]startupSecretRoute{
@@ -145,7 +146,7 @@ func TestConsumeStartupSecretsRollsBackBatchOnLaterFailure(t *testing.T) {
 func TestConsumeStartupSecretsDoesNotConsumeBeforeBatchOpenSucceeds(t *testing.T) {
 	const nodeID, spawnID, gen = "node-1", "sp-start-open-first", uint64(14)
 	holder := startupSecretHolder(t, nodeID)
-	a := startupSecretAttacher(t, &scriptedPodBackend{}, &fakeCPStream{}, nodeID, holder, t.TempDir())
+	a := startupSecretAttacher(t, fakeBackend(t), &fakeCPStream{}, nodeID, holder, t.TempDir())
 	first := sealSecret(t, holder, spawnID, gen, "legacy/first", "FIRST_TOKEN", 1, "startup-open-first-1", []byte("first"))
 	badSecond := &nodev1.SealedSecret{
 		SecretId:   "SECOND_TOKEN",
@@ -193,7 +194,7 @@ func TestConsumeStartupSecretsRejectsDuplicateSecretIDsBeforeOpening(t *testing.
 			const nodeID, gen = "node-1", uint64(15)
 			spawnID := "sp-start-duplicate-" + tt.name
 			holder := startupSecretHolder(t, nodeID)
-			a := startupSecretAttacher(t, &scriptedPodBackend{}, &fakeCPStream{}, nodeID, holder, t.TempDir())
+			a := startupSecretAttacher(t, fakeBackend(t), &fakeCPStream{}, nodeID, holder, t.TempDir())
 			first := sealSecret(t, holder, spawnID, gen, "legacy/first", tt.secretID, 1, "startup-dup-secret-first-"+tt.name, []byte("first"))
 			second := sealSecret(t, holder, spawnID, gen, "legacy/second", tt.secretID, 1, "startup-dup-secret-second-"+tt.name, []byte("second"))
 
@@ -226,7 +227,7 @@ func TestConsumeStartupSecretsRejectsDuplicateSecretIDsBeforeOpening(t *testing.
 func TestStartSpawnRejectsDuplicateStartupSecretRoutes(t *testing.T) {
 	const nodeID, spawnID, gen = "node-1", "sp-start-dup-route", uint64(13)
 	holder := startupSecretHolder(t, nodeID)
-	be := &startPodCountBackend{}
+	be := &startPodCountBackend{Backend: fakeBackend(t)}
 	fs := &fakeCPStream{}
 	a := startupSecretAttacher(t, be, fs, nodeID, holder, t.TempDir())
 	sec := sealSecret(t, holder, spawnID, gen, "github/token", "GITHUB_TOKEN", 1, "startup-dup-route-1", []byte("token"))
@@ -276,7 +277,7 @@ func TestStartSpawnInjectsAgentSecretBeforeStartAgent(t *testing.T) {
 	holder := startupSecretHolder(t, nodeID)
 	dataRoot := t.TempDir()
 	secretPath := filepath.Join(dataRoot, "secrets", spawnID, "github", "token")
-	be := &startAgentCheckBackend{scriptedPodBackend: scriptedPodBackend{script: scriptGoose}}
+	be := &startAgentCheckBackend{Backend: fakeBackend(t, fakepod.WithAttachScript(scriptGoose))}
 	be.check = func() {
 		got, err := os.ReadFile(secretPath)
 		if err != nil {
@@ -313,7 +314,7 @@ func TestStartSpawnRendersGitHubAgentHelperBeforeStartAgent(t *testing.T) {
 	holder := startupSecretHolder(t, nodeID)
 	dataRoot := t.TempDir()
 	secretRoot := filepath.Join(dataRoot, "secrets", spawnID)
-	be := &startAgentCheckBackend{scriptedPodBackend: scriptedPodBackend{script: scriptGoose}}
+	be := &startAgentCheckBackend{Backend: fakeBackend(t, fakepod.WithAttachScript(scriptGoose))}
 	be.check = func() {
 		helper := filepath.Join(secretRoot, "github", "git-credential-spawnery")
 		for _, path := range []string{
@@ -377,7 +378,7 @@ func TestStartSpawnDoesNotInjectNodeStorageOnlyGitHubSecretIntoAgentTmpfs(t *tes
 	holder := startupSecretHolder(t, nodeID)
 	dataRoot := t.TempDir()
 	secretRoot := filepath.Join(dataRoot, "secrets", spawnID)
-	be := &startAgentCheckBackend{scriptedPodBackend: scriptedPodBackend{script: scriptGoose}}
+	be := &startAgentCheckBackend{Backend: fakeBackend(t, fakepod.WithAttachScript(scriptGoose))}
 	be.check = func() {
 		if _, err := os.Stat(filepath.Join(secretRoot, "github", "token")); !os.IsNotExist(err) {
 			t.Fatalf("node-storage only GitHub secret landed in agent tmpfs, stat err=%v", err)
@@ -412,7 +413,7 @@ func TestStartSpawnPostsSidecarSecretRetriesUntilControlReady(t *testing.T) {
 	holder := startupSecretHolder(t, nodeID)
 	dataRoot := t.TempDir()
 	doer := &flakySidecarCredentialsDoer{failures: 1}
-	be := &startAgentCheckBackend{scriptedPodBackend: scriptedPodBackend{script: scriptGoose}}
+	be := &startAgentCheckBackend{Backend: fakeBackend(t, fakepod.WithAttachScript(scriptGoose))}
 	be.check = func() {
 		if got := doer.calls(); got != 2 {
 			t.Fatalf("sidecar credential POST calls before StartAgent = %d, want 2", got)
@@ -449,7 +450,7 @@ func TestStartSpawnPostsSidecarSecretBeforeStartAgent(t *testing.T) {
 	holder := startupSecretHolder(t, nodeID)
 	dataRoot := t.TempDir()
 	doer := stubDoerOK()
-	be := &startAgentCheckBackend{scriptedPodBackend: scriptedPodBackend{script: scriptGoose}}
+	be := &startAgentCheckBackend{Backend: fakeBackend(t, fakepod.WithAttachScript(scriptGoose))}
 	be.check = func() {
 		if doer.calls != 1 {
 			t.Fatalf("sidecar credential POST calls before StartAgent = %d, want 1", doer.calls)
@@ -498,7 +499,7 @@ func TestStartSpawnSecretFailureStopsBeforeAgent(t *testing.T) {
 	const nodeID, spawnID = "node-1", "sp-start-fail"
 	holder := startupSecretHolder(t, nodeID)
 	dataRoot := t.TempDir()
-	be := &startAgentCheckBackend{scriptedPodBackend: scriptedPodBackend{script: scriptGoose}}
+	be := &startAgentCheckBackend{Backend: fakeBackend(t, fakepod.WithAttachScript(scriptGoose))}
 	fs := &fakeCPStream{}
 	a := startupSecretAttacher(t, be, fs, nodeID, holder, dataRoot)
 
@@ -516,7 +517,7 @@ func TestStartSpawnSecretFailureStopsBeforeAgent(t *testing.T) {
 	if be.agentCalls() != 0 {
 		t.Fatalf("StartAgent calls = %d, want 0", be.agentCalls())
 	}
-	if !be.wasStopped() {
+	if be.LastStopHandle() == nil {
 		t.Fatal("startup secret failure must stop the sidecar pod")
 	}
 	if _, ok := a.mgr.Store().Get(spawnID); ok {

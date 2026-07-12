@@ -9,6 +9,7 @@ import (
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/storage/journal"
 )
@@ -28,8 +29,8 @@ func (f *fakeCPStream) stepStatusesFor(spawnID string) []*nodev1.SpawnStatus {
 	return out
 }
 
-// startPodFailBackend is a scriptedPodBackend variant whose StartPod always returns an error.
-type startPodFailBackend struct{ scriptedPodBackend }
+// startPodFailBackend is a fakepod.Backend variant whose StartPod always returns an error.
+type startPodFailBackend struct{ *fakepod.Backend }
 
 func (f *startPodFailBackend) StartPod(context.Context, runtime.PodSpec) (*runtime.PodHandle, error) {
 	return nil, fmt.Errorf("startpod boom")
@@ -41,7 +42,7 @@ func (f *startPodFailBackend) StartPod(context.Context, runtime.PodSpec) (*runti
 // (monotonically increasing StepIndex, constant StepTotal=N, correct StepKey/Label), followed
 // by an ACTIVE terminal status — for a basic ACP spawn with no GitHub/resume/egress.
 func TestStepEmissionHappyPath(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
@@ -95,7 +96,7 @@ func TestStepEmissionHappyPath(t *testing.T) {
 // (StepTotal>0, StepKey=create-pod, Phase=ERROR). The create-pod milestone is emitted inside
 // CreateWithSelection before StartPod, so current=create-pod when the error is returned.
 func TestStepFailureAttributesCreatePod(t *testing.T) {
-	be := &startPodFailBackend{}
+	be := &startPodFailBackend{Backend: fakeBackend(t)}
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
@@ -127,7 +128,7 @@ func TestStepFailureAttributesCreatePod(t *testing.T) {
 // TestStepFailureAttributesPrepareMounts asserts that a failure during manifest parsing (which
 // occurs inside CreateWithSelection after prepare-mounts is emitted) attributes to prepare-mounts.
 func TestStepFailureAttributesPrepareMounts(t *testing.T) {
-	mgr := newGooseManager(t, &scriptedPodBackend{script: scriptGoose})
+	mgr := newGooseManager(t, fakeBackend(t, fakepod.WithAttachScript(scriptGoose)))
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	// A bogus AppRef causes manifest.Parse to fail inside CreateWithSelection, AFTER the
@@ -159,7 +160,7 @@ func TestStepFailureAttributesPrepareMounts(t *testing.T) {
 // TestStepSubsetMatchesCatalog asserts that the emitted STARTING step keys for a basic ACP
 // spawn match exactly the ApplicableMilestones output — no extra steps, no missing steps.
 func TestStepSubsetMatchesCatalog(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
@@ -212,7 +213,7 @@ func TestStepFailureAttributesMintCredentials(t *testing.T) {
 		GithubMintRef: &nodev1.GitHubMintRef{SecretId: "gh:octo"},
 	}}
 
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	// nil mint client: MintInitial returns "github mint client unavailable" — causes the
@@ -264,7 +265,7 @@ func (f *restoreFailJournal) RestoreGeneration(_ context.Context, _ string, _ ui
 // restore-snapshot STARTING step, (b) does NOT emit an ERROR SpawnStatus attributed to
 // restore-snapshot, and (c) the spawn still reaches ACTIVE (falls back to the seeded dir).
 func TestNonFatalRestoreSnapshotDoesNotErrorStaysActive(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 
 	// stateDir holds the journal-state JSON that makes HasJournalPins("sp1") return true.
 	// journalRecord format (internal/spawnlet/journalstate.go): {"generation":N,"manifests":{...}}.

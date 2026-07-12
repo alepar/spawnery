@@ -16,7 +16,7 @@ import (
 // SQ1: DeltaDepth increments on each successful Suspend.
 func TestDeltaDepthIncrements(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	dataDir := t.TempDir()
 	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: dataDir,
@@ -52,7 +52,7 @@ func TestDeltaDepthIncrements(t *testing.T) {
 // SQ2: DeltaDepth persists across a simulated node restart (Create reloads depth from deltaState).
 func TestDeltaDepthResumesContinuation(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	dataDir := t.TempDir()
 
 	newMgr := func() *Manager {
@@ -102,7 +102,7 @@ func TestDeltaDepthResumesContinuation(t *testing.T) {
 // SQ3: SQUASH-NEEDED callback fires at DeltaSquashDepth threshold.
 func TestSquashNeededCallbackFires(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	dataDir := t.TempDir()
 
 	var squashCalls []string
@@ -140,7 +140,7 @@ func TestSquashNeededCallbackFires(t *testing.T) {
 // SQ4: SQUASH-NEEDED does NOT fire when depth stays below threshold.
 func TestSquashNeededNotFiredBelowThreshold(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 
 	var squashCalls int
 	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{

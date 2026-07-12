@@ -18,7 +18,7 @@ func envVal(env []string, key string) (string, bool) {
 }
 
 func TestCreateWiresControlTokenAndAddr(t *testing.T) {
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -33,7 +33,7 @@ func TestCreateWiresControlTokenAndAddr(t *testing.T) {
 	}
 
 	// SidecarEnv must carry both control vars, with the token matching the Spawn record.
-	tok, ok := envVal(fb.podSpec.SidecarEnv, "SIDECAR_CONTROL_TOKEN")
+	tok, ok := envVal(fb.PodSpec("spz").SidecarEnv, "SIDECAR_CONTROL_TOKEN")
 	if !ok {
 		t.Fatal("SIDECAR_CONTROL_TOKEN not in SidecarEnv")
 	}
@@ -41,7 +41,7 @@ func TestCreateWiresControlTokenAndAddr(t *testing.T) {
 		t.Fatalf("env token %q != Spawn.ControlToken %q", tok, sp.ControlToken)
 	}
 
-	addr, ok := envVal(fb.podSpec.SidecarEnv, "SIDECAR_CONTROL_ADDR")
+	addr, ok := envVal(fb.PodSpec("spz").SidecarEnv, "SIDECAR_CONTROL_ADDR")
 	if !ok {
 		t.Fatal("SIDECAR_CONTROL_ADDR not in SidecarEnv")
 	}
@@ -57,7 +57,7 @@ func TestCreateWiresControlTokenAndAddr(t *testing.T) {
 }
 
 func TestCreateControlTokenUniquePerSpawn(t *testing.T) {
-	m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
+	m := NewManagerWithBackend(fakeBackend(t), &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
 

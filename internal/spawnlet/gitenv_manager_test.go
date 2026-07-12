@@ -18,7 +18,7 @@ func TestCreateThreadsGitEnvMountAndEnv(t *testing.T) {
 	m := NewManager(runtime.NewFake(), ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot,
 	})
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m.pod = fb
 
 	spawnID := "sp-gitenv"
@@ -30,7 +30,7 @@ func TestCreateThreadsGitEnvMountAndEnv(t *testing.T) {
 	// (a) git-env bind-mount: correct ContainerPath and HostPath, and the host dir exists.
 	wantHostPath := filepath.Join(dataRoot, "git-env", spawnID)
 	var foundMount bool
-	for _, mt := range fb.agentSpec.Mounts {
+	for _, mt := range fb.AgentSpec(spawnID).Mounts {
 		if mt.ContainerPath == GitEnvMountPath {
 			if mt.HostPath != wantHostPath {
 				t.Fatalf("git-env mount HostPath = %q, want %q", mt.HostPath, wantHostPath)
@@ -40,15 +40,15 @@ func TestCreateThreadsGitEnvMountAndEnv(t *testing.T) {
 		}
 	}
 	if !foundMount {
-		t.Fatalf("GitEnvMountPath %q not found in agent mounts: %+v", GitEnvMountPath, fb.agentSpec.Mounts)
+		t.Fatalf("GitEnvMountPath %q not found in agent mounts: %+v", GitEnvMountPath, fb.AgentSpec(spawnID).Mounts)
 	}
 	if _, err := os.Stat(wantHostPath); err != nil {
 		t.Fatalf("git-env host dir %s does not exist: %v", wantHostPath, err)
 	}
 
 	// (b) agent env contains the four git env vars.
-	envSet := make(map[string]string, len(fb.agentSpec.Env))
-	for _, kv := range fb.agentSpec.Env {
+	envSet := make(map[string]string, len(fb.AgentSpec(spawnID).Env))
+	for _, kv := range fb.AgentSpec(spawnID).Env {
 		if i := strings.IndexByte(kv, '='); i >= 0 {
 			envSet[kv[:i]] = kv[i+1:]
 		}
