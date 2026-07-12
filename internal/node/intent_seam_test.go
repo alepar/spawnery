@@ -41,7 +41,7 @@ func (f *fakeCPStream) lastErrorDetail(spawnID string) string {
 
 // newEnforcedAttacher builds an attacher with an enforced IntentVerifier (selfHosted=false,
 // nodeOwner="", so only assertedOwner is validated). The verifier uses a fixed clock.
-func newEnforcedAttacher(t *testing.T, mgr *spawnlet.Manager, fs cpStream, ks token.KeySet, mode AuthMode, fixedNow time.Time) *attacher {
+func newEnforcedAttacher(t *testing.T, mgr *spawnlet.Manager, fs cpStream, ks *token.Verifier, mode AuthMode, fixedNow time.Time) *attacher {
 	t.Helper()
 	a := newAttacher(mgr, fs)
 	a.verifier = NewIntentVerifier(ks, "", "", false, mode, func() time.Time { return fixedNow })

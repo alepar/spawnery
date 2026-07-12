@@ -2,14 +2,27 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	configfiles "spawnery/config"
+	authv1 "spawnery/gen/auth/v1"
+	"spawnery/internal/authsvc/token"
 	"spawnery/internal/config"
+	"spawnery/internal/pki"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/storage"
 )
@@ -96,7 +109,7 @@ func TestSpawnletConfig_EnvAliasOverride(t *testing.T) {
 }
 
 func TestSpawnletConfig_SetOverride(t *testing.T) {
-	cfg, err := loadSpawnletTest(t, "dev", nil, "node.auth_mode=enforced", "limits.pids=512")
+	cfg, err := loadSpawnletTest(t, "dev", nil, "node.auth_mode=enforced", "node.signer_revocation_state=/tmp/spawnlet-test-state", "limits.pids=512")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -106,6 +119,263 @@ func TestSpawnletConfig_SetOverride(t *testing.T) {
 	if cfg.Limits.Pids != 512 {
 		t.Errorf("Limits.Pids = %d, want 512 (--set)", cfg.Limits.Pids)
 	}
+}
+
+func TestSpawnletConfig_EnforcedArtifactTrustRequirements(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sets []string
+		want string
+	}{
+		{name: "environment", sets: []string{"node.environment="}, want: "node.environment"},
+		{name: "root", sets: []string{"node.id_dir=", "node.root_ca="}, want: "node.root_ca"},
+		{name: "state", sets: nil, want: "node.signer_revocation_state"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sets := append([]string{"node.auth_mode=enforced"}, tc.sets...)
+			_, err := loadSpawnletTest(t, "dev", nil, sets...)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSpawnletConfig_RejectsUnknownAuthMode(t *testing.T) {
+	for _, mode := range []string{"enforcd", "", "production"} {
+		t.Run(mode, func(t *testing.T) {
+			_, err := loadSpawnletTest(t, "dev", nil, "node.auth_mode="+mode)
+			if err == nil || !strings.Contains(err.Error(), "node.auth_mode") {
+				t.Fatalf("mode %q error = %v, want closed-enum rejection", mode, err)
+			}
+		})
+	}
+}
+
+func TestBuildIntentVerifierRejectsUnknownAuthMode(t *testing.T) {
+	cfg := &Spawnlet{}
+	cfg.Node.AuthMode = "enforcd"
+	if _, err := buildIntentVerifier(cfg, nil, "node-1", ""); err == nil {
+		t.Fatal("auth mode typo selected verify-log instead of failing closed")
+	}
+}
+
+func TestSpawnletConfig_ArtifactTrustAliasesAndRemovedRawKeys(t *testing.T) {
+	cfg, err := loadSpawnletTest(t, "dev", map[string]string{
+		"NODE_AUTH_ENVIRONMENT":            "prod",
+		"NODE_SIGNER_REVOCATION_STATEMENT": "/deployment/revocations",
+		"NODE_SIGNER_REVOCATION_STATE":     "/state/revocations",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Node.Environment != "prod" || cfg.Node.SignerRevocationStatement != "/deployment/revocations" || cfg.Node.SignerRevocationState != "/state/revocations" {
+		t.Fatalf("artifact trust aliases not loaded: %+v", cfg.Node)
+	}
+	legacyAlias := strings.Join([]string{"NODE", "AS", "PUBKEYS"}, "_")
+	if _, exists := spawnletEnvAliases[legacyAlias]; exists {
+		t.Fatalf("legacy raw-key alias %q remains trusted", legacyAlias)
+	}
+}
+
+func TestArtifactTrustIdentityDirectoryRootDefaultForAllNodeClasses(t *testing.T) {
+	now := time.Now()
+	root, err := pki.NewRootCA("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, class := range []string{"cloud", "self-hosted"} {
+		t.Run(class, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "root.pem"), pki.MarshalCertPEM(root.Cert), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &Spawnlet{}
+			cfg.Node.Class = class
+			cfg.Node.IDDir = dir
+			cfg.Node.Environment = "prod"
+			cfg.Node.SignerRevocationState = filepath.Join(dir, "revocations", "state.json")
+			trust, err := loadArtifactVerifier(cfg, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := trust.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestArtifactTrustLiveReloadIsMonotonicAndCancelled(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	root, err := pki.NewRootCA("test root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intermediateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intermediateTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "auth signing"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true, IsCA: true, MaxPathLen: 0, MaxPathLenZero: true,
+		Policies: []x509.OID{pki.AuthSigningIntermediatePolicyOID},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, intermediateTemplate, root.Cert, &intermediateKey.PublicKey, root.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intermediate, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	rootPath := filepath.Join(dir, "root.pem")
+	statementPath := filepath.Join(dir, "statement")
+	if err := os.WriteFile(rootPath, pki.MarshalCertPEM(root.Cert), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeStatement := func(generation uint64, issuedAt time.Time) {
+		t.Helper()
+		payload, err := proto.Marshal(&authv1.SignerRevocationStatement{Environment: "prod", Generation: generation, IssuedAt: issuedAt.Unix()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire, err := token.SignSignerRevocationStatement(intermediate, intermediateKey, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(statementPath, []byte(wire+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeStatement(1, now)
+	cfg := &Spawnlet{}
+	cfg.Node.Environment = "prod"
+	cfg.Node.RootCA = rootPath
+	cfg.Node.SignerRevocationStatement = statementPath
+	cfg.Node.SignerRevocationState = filepath.Join(dir, "state", "revocations.json")
+	trust, err := loadArtifactVerifier(cfg, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := trust.revocations.Generation(); got != 1 {
+		t.Fatalf("initial generation = %d, want 1", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	errorsSeen := make(chan error, 4)
+	done := trust.watch(ctx, 5*time.Millisecond, func() time.Time { return now }, func(err error) { errorsSeen <- err })
+	writeStatement(2, now)
+	waitForGeneration(t, trust.revocations, 2)
+	writeStatement(1, now.Add(-time.Second))
+	select {
+	case <-errorsSeen:
+	case <-time.After(time.Second):
+		t.Fatal("rollback did not surface an operational error")
+	}
+	if got := trust.revocations.Generation(); got != 2 {
+		t.Fatalf("generation after rollback = %d, want 2", got)
+	}
+	if err := os.WriteFile(statementPath, []byte("malformed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-errorsSeen:
+	case <-time.After(time.Second):
+		t.Fatal("malformed replacement did not surface an operational error")
+	}
+	if got := trust.revocations.Generation(); got != 2 {
+		t.Fatalf("generation after malformed replacement = %d, want 2", got)
+	}
+	cancel()
+	<-done
+	writeStatement(3, now)
+	time.Sleep(30 * time.Millisecond)
+	if got := trust.revocations.Generation(); got != 2 {
+		t.Fatalf("generation after cancellation = %d, want 2", got)
+	}
+	if err := trust.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Node.SignerRevocationStatement = ""
+	reopened, err := loadArtifactVerifier(cfg, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.revocations.Generation(); got != 2 {
+		t.Fatalf("generation after restart = %d, want 2", got)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Node.SignerRevocationStatement = statementPath
+	writeStatement(1, now.Add(-time.Second))
+	if _, err := loadArtifactVerifier(cfg, now); err == nil {
+		t.Fatal("startup accepted rollback statement")
+	}
+	if err := os.WriteFile(statementPath, []byte("malformed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadArtifactVerifier(cfg, now); err == nil {
+		t.Fatal("startup accepted malformed statement")
+	}
+}
+
+func TestArtifactTrustShutdownIsBoundedWithBlockedLoader(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var closes atomic.Int32
+	trust := &artifactTrust{
+		statementPath: "configured",
+		reload: func(context.Context, time.Time) error {
+			close(started)
+			<-release
+			return nil
+		},
+		closeStore: func() error { closes.Add(1); return nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := trust.watch(ctx, time.Millisecond, time.Now, nil)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("reload did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(50 * time.Millisecond):
+		close(release)
+		t.Fatal("watch shutdown waited for blocked loader")
+	}
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelClose()
+	if err := trust.CloseContext(closeCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked reload close error = %v, want deadline", err)
+	}
+	if got := closes.Load(); got != 0 {
+		t.Fatalf("store close called %d times during active reload", got)
+	}
+	close(release)
+	finalCtx, cancelFinal := context.WithTimeout(context.Background(), time.Second)
+	defer cancelFinal()
+	if err := trust.CloseContext(finalCtx); err != nil {
+		t.Fatalf("close after reload returned: %v", err)
+	}
+}
+
+func waitForGeneration(t *testing.T, store *token.SignerRevocationStore, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if store.Generation() == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("generation = %d, want %d", store.Generation(), want)
 }
 
 func TestSpawnletConfig_CSVAgentBinaries(t *testing.T) {
