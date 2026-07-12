@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -46,13 +47,15 @@ type CA struct {
 	Key  *ecdsa.PrivateKey
 }
 
-// Node is an issued node identity: its leaf cert + key, and the intermediate chain to present for
-// verification against the Root.
-type Node struct {
+// Leaf is issued identity material: a leaf certificate and private key plus its presented chain.
+type Leaf struct {
 	Cert  *x509.Certificate
 	Key   *ecdsa.PrivateKey
 	Chain []*x509.Certificate
 }
+
+// Node is retained as a compatibility alias while callers migrate to identity-neutral Leaf.
+type Node = Leaf
 
 func newSerial() (*big.Int, error) {
 	return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
@@ -136,36 +139,84 @@ func (ca *CA) NewIntermediate(role IssuerRole, trustDomains ...string) (*CA, err
 	return finishCA(tmpl, ca.Cert, key.Public(), key, ca.Key)
 }
 
-// IssueNode issues a node leaf certificate from this (intermediate) CA, with the identity encoded in
-// the SAN. The chain to present is this CA's cert.
-func (ca *CA) IssueNode(nodeID, accountID, class string, notAfter time.Time) (*Node, error) {
+// IssueNode issues a node X.509-SVID. The fourth argument accepts either trustDomain followed by
+// notAfter, or a legacy notAfter value which selects DefaultTrustDomain.
+func (ca *CA) IssueNode(nodeID, accountID, role string, trustDomainOrNotAfter any, notAfterValues ...time.Time) (*Leaf, error) {
+	trustDomain, notAfter, err := issuanceWindow(trustDomainOrNotAfter, notAfterValues)
+	if err != nil {
+		return nil, err
+	}
+	id, err := NodeID(trustDomain, role, accountID, nodeID)
+	if err != nil {
+		return nil, err
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
+	leaf, err := ca.issueLeaf(key.Public(), id, nil, nil, notAfter)
+	if err != nil {
+		return nil, err
+	}
+	return &Leaf{Cert: leaf, Key: key, Chain: []*x509.Certificate{ca.Cert}}, nil
+}
+
+// IssueService issues a service X.509-SVID with optional endpoint DNS and IP SANs.
+func (ca *CA) IssueService(role, instanceID, trustDomain string, dns []string, ips []net.IP, notAfter time.Time) (*Leaf, error) {
+	id, err := ServiceID(trustDomain, role, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	leaf, err := ca.issueLeaf(key.Public(), id, dns, ips, notAfter)
+	if err != nil {
+		return nil, err
+	}
+	return &Leaf{Cert: leaf, Key: key, Chain: []*x509.Certificate{ca.Cert}}, nil
+}
+
+func (ca *CA) issueLeaf(publicKey any, id *url.URL, dns []string, ips []net.IP, notAfter time.Time) (*x509.Certificate, error) {
 	serial, err := newSerial()
 	if err != nil {
 		return nil, err
 	}
-	san := nodeSAN(nodeID, accountID, class)
 	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: san},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     notAfter,
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{san},
+		SerialNumber:          serial,
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		DNSNames:              dns,
+		IPAddresses:           ips,
+		URIs:                  []*url.URL{id},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, key.Public(), ca.Key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, publicKey, ca.Key)
 	if err != nil {
 		return nil, err
 	}
-	leaf, err := x509.ParseCertificate(der)
-	if err != nil {
-		return nil, err
+	return x509.ParseCertificate(der)
+}
+
+func issuanceWindow(trustDomainOrNotAfter any, notAfterValues []time.Time) (string, time.Time, error) {
+	switch value := trustDomainOrNotAfter.(type) {
+	case string:
+		if len(notAfterValues) != 1 {
+			return "", time.Time{}, errors.New("pki: trust domain requires one notAfter value")
+		}
+		return value, notAfterValues[0], nil
+	case time.Time:
+		if len(notAfterValues) != 0 {
+			return "", time.Time{}, errors.New("pki: unexpected additional notAfter value")
+		}
+		return DefaultTrustDomain, value, nil
+	default:
+		return "", time.Time{}, fmt.Errorf("pki: issuance argument is %T, want trust domain or time.Time", trustDomainOrNotAfter)
 	}
-	return &Node{Cert: leaf, Key: key, Chain: []*x509.Certificate{ca.Cert}}, nil
 }
 
 // finishCA creates a CA cert from tmpl signed by parent (signerKey), parses it, and returns the CA.

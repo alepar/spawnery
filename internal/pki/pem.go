@@ -50,7 +50,7 @@ func ParseKeyPEM(b []byte) (*ecdsa.PrivateKey, error) {
 }
 
 // TLSCertificate builds an mTLS identity (leaf + intermediate chain + private key) for dial/serve.
-func (n *Node) TLSCertificate() (tls.Certificate, error) {
+func (n *Leaf) TLSCertificate() (tls.Certificate, error) {
 	if n.Key == nil {
 		return tls.Certificate{}, errors.New("pki: node has no private key")
 	}
