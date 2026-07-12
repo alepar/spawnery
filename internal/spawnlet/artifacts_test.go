@@ -441,8 +441,10 @@ func TestByRef_ConnectionError(t *testing.T) {
 	srv.Close()
 
 	st := ArtifactStager{
-		Root:    t.TempDir(),
-		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) { return defaultFetcher(ctx, url, capBytes) },
+		Root: t.TempDir(),
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
 	}
 	sec := SecretInjector{Root: t.TempDir()}
 	err := st.Materialize(context.Background(), "sp1", []Artifact{{
@@ -532,8 +534,10 @@ func TestByRef_MalformedZstd(t *testing.T) {
 	defer srv.Close()
 
 	st := ArtifactStager{
-		Root:    t.TempDir(),
-		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) { return defaultFetcher(ctx, url, capBytes) },
+		Root: t.TempDir(),
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
 	}
 	sec := SecretInjector{Root: t.TempDir()}
 	err := st.Materialize(context.Background(), "sp1", []Artifact{{
