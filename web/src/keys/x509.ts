@@ -5,12 +5,12 @@
  *   - TBSCertificate bytes (signed portion, for chain verification)
  *   - Signature bytes (ECDSA-ASN.1, converted to P1363 for SubtleCrypto)
  *   - SubjectPublicKeyInfo (raw SPKI bytes for SubtleCrypto.importKey)
- *   - SubjectAltName DNS name (node identity extraction)
+ *   - SubjectAltName GeneralNames and certificatePolicies
  *
  * Our node cert profile:
  *   - ECDSA-SHA256 signature algorithm
  *   - P-256 (secp256r1) EC key
- *   - DNS SAN = <nodeId>.<accountId>.<class>.nodes.spawnery.internal
+ *   - exactly one SPIFFE URI SAN
  *
  * Design: docs/superpowers/specs/2026-06-10-owner-sealed-secrets-design.md §1
  */
@@ -26,6 +26,8 @@ const TAG_OCTET_STR = 0x04;
 const TAG_BOOLEAN   = 0x01;
 const TAG_CONTEXT_3 = 0xa3; // [3] EXPLICIT Extensions
 const TAG_CONTEXT_2 = 0x82; // [2] dNSName in GeneralName CHOICE
+const TAG_CONTEXT_6 = 0x86; // [6] uniformResourceIdentifier
+const TAG_CONTEXT_7 = 0x87; // [7] iPAddress
 const TAG_UTCTIME   = 0x17; // UTCTime
 const TAG_GENTIME   = 0x18; // GeneralizedTime
 
@@ -37,8 +39,16 @@ const SAN_OID               = new Uint8Array([0x55, 0x1d, 0x11]);
 const BASIC_CONSTRAINTS_OID = new Uint8Array([0x55, 0x1d, 0x13]);
 /** KeyUsage OID 2.5.29.15 in DER: 55 1d 0f. */
 const KEY_USAGE_OID         = new Uint8Array([0x55, 0x1d, 0x0f]);
-/** NameConstraints OID 2.5.29.30 in DER: 55 1d 1e. */
-const NAME_CONSTRAINTS_OID  = new Uint8Array([0x55, 0x1d, 0x1e]);
+/** ExtendedKeyUsage OID 2.5.29.37. */
+const EXT_KEY_USAGE_OID     = new Uint8Array([0x55, 0x1d, 0x25]);
+/** CertificatePolicies OID 2.5.29.32. */
+const CERT_POLICIES_OID     = new Uint8Array([0x55, 0x1d, 0x20]);
+
+const CLIENT_AUTH_OID = "1.3.6.1.5.5.7.3.2";
+const SERVER_AUTH_OID = "1.3.6.1.5.5.7.3.1";
+const SERVICE_ISSUER_POLICY = "2.25.252512432928806341888652597142698706330";
+const CLOUD_NODE_ISSUER_POLICY = "2.25.272377079450377973232136459441396509550";
+const SELF_HOSTED_NODE_ISSUER_POLICY = "2.25.13905568351287903487917266049020976148";
 
 // ── DER TLV reader ────────────────────────────────────────────────────────────
 
@@ -109,18 +119,21 @@ export interface ParsedCert {
   sigDER: Uint8Array;
   /** SubjectPublicKeyInfo TLV bytes (for SubtleCrypto.importKey("spki", ...)). */
   spkiBytes: Uint8Array;
-  /** First DNS SAN, if present; empty string otherwise. */
-  sanDNS: string;
+  sanURIs: string[];
+  sanDNS: string[];
+  sanIPs: string[];
   /** Certificate validity start (notBefore). */
   notBefore: Date;
   /** Certificate validity end (notAfter). */
   notAfter: Date;
   /** basicConstraints cA=TRUE: this cert is a CA and may sign other certs. */
   isCA: boolean;
+  hasBasicConstraints: boolean;
+  digitalSignatureOnly: boolean;
   /** keyUsage has keyCertSign bit set. */
   certSignKeyUsage: boolean;
-  /** nameConstraints permittedSubtrees dNSNames (empty = no constraint). */
-  permittedDNSDomains: string[];
+  extendedKeyUsages: string[];
+  policies: string[];
 }
 
 /**
@@ -159,20 +172,25 @@ export function parseCertDER(der: Uint8Array): ParsedCert {
   if (sigChild.val[0] !== 0) throw new Error("x509: signature BIT STRING has non-zero unused bits");
   const sigDER = sigChild.val.subarray(1);
 
-  const { spkiBytes, sanDNS, notBefore, notAfter, isCA, certSignKeyUsage, permittedDNSDomains } =
+  const { spkiBytes, sanURIs, sanDNS, sanIPs, notBefore, notAfter, isCA, hasBasicConstraints, digitalSignatureOnly, certSignKeyUsage, extendedKeyUsages, policies } =
     parseTBS(tbsChild.val, outer.val);
 
-  return { tbsBytes, sigDER, spkiBytes, sanDNS, notBefore, notAfter, isCA, certSignKeyUsage, permittedDNSDomains };
+  return { tbsBytes, sigDER, spkiBytes, sanURIs, sanDNS, sanIPs, notBefore, notAfter, isCA, hasBasicConstraints, digitalSignatureOnly, certSignKeyUsage, extendedKeyUsages, policies };
 }
 
 interface TBSFields {
   spkiBytes:           Uint8Array;
-  sanDNS:              string;
+  sanURIs:             string[];
+  sanDNS:              string[];
+  sanIPs:              string[];
   notBefore:           Date;
   notAfter:            Date;
   isCA:                boolean;
+  hasBasicConstraints: boolean;
+  digitalSignatureOnly: boolean;
   certSignKeyUsage:    boolean;
-  permittedDNSDomains: string[];
+  extendedKeyUsages:   string[];
+  policies:            string[];
 }
 
 /**
@@ -206,20 +224,22 @@ function parseTBS(tbsVal: Uint8Array, certVal: Uint8Array): TBSFields {
   const { notBefore, notAfter } = _parseValidity(items[validityIdx].val);
 
   // Parse all relevant extensions.
-  let sanDNS = "";
+  let sanURIs: string[] = [];
+  let sanDNS: string[] = [];
+  let sanIPs: string[] = [];
   let isCA = false;
+  let hasBasicConstraints = false;
+  let digitalSignatureOnly = false;
   let certSignKeyUsage = false;
-  let permittedDNSDomains: string[] = [];
+  let extendedKeyUsages: string[] = [];
+  let policies: string[] = [];
   if (extsIdx >= 0) {
     const exts = _parseExtensions(items[extsIdx].val);
-    sanDNS             = exts.sanDNS;
-    isCA               = exts.isCA;
-    certSignKeyUsage   = exts.certSignKeyUsage;
-    permittedDNSDomains = exts.permittedDNSDomains;
+    ({ sanURIs, sanDNS, sanIPs, isCA, hasBasicConstraints, digitalSignatureOnly, certSignKeyUsage, extendedKeyUsages, policies } = exts);
   }
 
   void certVal;
-  return { spkiBytes, sanDNS, notBefore, notAfter, isCA, certSignKeyUsage, permittedDNSDomains };
+  return { spkiBytes, sanURIs, sanDNS, sanIPs, notBefore, notAfter, isCA, hasBasicConstraints, digitalSignatureOnly, certSignKeyUsage, extendedKeyUsages, policies };
 }
 
 // ── Time parsing ──────────────────────────────────────────────────────────────
@@ -263,10 +283,15 @@ function _parseDERTime(tlv: TLV): Date {
 // ── Extension parsing ─────────────────────────────────────────────────────────
 
 interface _ParsedExtensions {
-  sanDNS:             string;
+  sanURIs:            string[];
+  sanDNS:             string[];
+  sanIPs:             string[];
   isCA:               boolean;
+  hasBasicConstraints: boolean;
+  digitalSignatureOnly: boolean;
   certSignKeyUsage:   boolean;
-  permittedDNSDomains: string[];
+  extendedKeyUsages:  string[];
+  policies:           string[];
 }
 
 /**
@@ -277,10 +302,17 @@ function _parseExtensions(extsBody: Uint8Array): _ParsedExtensions {
   const extsList = readTLV(extsBody, 0);
   if (extsList.tag !== TAG_SEQUENCE) throw new Error("x509: extensions outer is not a SEQUENCE");
 
-  let sanDNS = "";
+  const sanURIs: string[] = [];
+  const sanDNS: string[] = [];
+  const sanIPs: string[] = [];
   let isCA = false;
+  let hasBasicConstraints = false;
+  let digitalSignatureOnly = false;
   let certSignKeyUsage = false;
-  let permittedDNSDomains: string[] = [];
+  let extendedKeyUsages: string[] = [];
+  let policies: string[] = [];
+  let sanCount = 0;
+  const seenExtensions = new Set<string>();
 
   for (const ext of iterSeq(extsList.val)) {
     if (ext.tag !== TAG_SEQUENCE) continue;
@@ -288,29 +320,46 @@ function _parseExtensions(extsBody: Uint8Array): _ParsedExtensions {
     if (extChildren.length < 2) continue;
     if (extChildren[0].tag !== TAG_OID) continue;
     const oidBytes = extChildren[0].val;
+    const extensionKey = Array.from(oidBytes).join(".");
+    if (seenExtensions.has(extensionKey)) throw new Error("x509: duplicate certificate extension");
+    seenExtensions.add(extensionKey);
     // Last element is OCTET STRING containing the extension value.
     const valChild = extChildren[extChildren.length - 1];
     if (valChild.tag !== TAG_OCTET_STR) continue;
     const octVal = valChild.val;
 
     if (bytesEqual(oidBytes, SAN_OID)) {
+      sanCount++;
+      if (sanCount !== 1) throw new Error("x509: duplicate subjectAltName extension");
       const gnames = readTLV(octVal, 0);
-      if (gnames.tag !== TAG_SEQUENCE) continue;
+      if (gnames.tag !== TAG_SEQUENCE || gnames.next !== octVal.length) throw new Error("x509: malformed subjectAltName extension");
       for (const gn of iterSeq(gnames.val)) {
-        if (gn.tag === TAG_CONTEXT_2 && sanDNS === "") {
-          sanDNS = new TextDecoder("ascii").decode(gn.val);
+        if (gn.tag === TAG_CONTEXT_6) sanURIs.push(new TextDecoder("ascii").decode(gn.val));
+        else if (gn.tag === TAG_CONTEXT_2) {
+          const dns = new TextDecoder("ascii").decode(gn.val);
+          if (sanDNS.some((value) => value.toLowerCase() === dns.toLowerCase())) throw new Error("x509: duplicate DNS GeneralName");
+          sanDNS.push(dns);
+        } else if (gn.tag === TAG_CONTEXT_7) {
+          const ip = Array.from(gn.val).join(".");
+          if (sanIPs.includes(ip)) throw new Error("x509: duplicate IP GeneralName");
+          sanIPs.push(ip);
         }
+        else throw new Error(`x509: unsupported GeneralName tag 0x${gn.tag.toString(16)}`);
       }
     } else if (bytesEqual(oidBytes, BASIC_CONSTRAINTS_OID)) {
+      hasBasicConstraints = true;
       isCA = _parseIsCA(octVal);
     } else if (bytesEqual(oidBytes, KEY_USAGE_OID)) {
       certSignKeyUsage = _parseCertSignKeyUsage(octVal);
-    } else if (bytesEqual(oidBytes, NAME_CONSTRAINTS_OID)) {
-      permittedDNSDomains = _parsePermittedDNSDomains(octVal);
+      digitalSignatureOnly = _parseDigitalSignatureOnly(octVal);
+    } else if (bytesEqual(oidBytes, EXT_KEY_USAGE_OID)) {
+      extendedKeyUsages = _parseOIDSequence(octVal);
+    } else if (bytesEqual(oidBytes, CERT_POLICIES_OID)) {
+      policies = _parseCertificatePolicies(octVal);
     }
   }
 
-  return { sanDNS, isCA, certSignKeyUsage, permittedDNSDomains };
+  return { sanURIs, sanDNS, sanIPs, isCA, hasBasicConstraints, digitalSignatureOnly, certSignKeyUsage, extendedKeyUsages, policies };
 }
 
 /** Parse BasicConstraints OCTET STRING value; returns true iff cA=TRUE. */
@@ -335,28 +384,48 @@ function _parseCertSignKeyUsage(octVal: Uint8Array): boolean {
   return (bs.val[1] & 0x04) !== 0;
 }
 
-/**
- * Parse NameConstraints OCTET STRING value; returns the permitted DNS subtrees.
- * RFC 5280: permittedSubtrees [0] IMPLICIT GeneralSubtrees; dNSName [2] IA5String.
- */
-function _parsePermittedDNSDomains(octVal: Uint8Array): string[] {
-  // NameConstraints ::= SEQUENCE { [0] permittedSubtrees, [1] excludedSubtrees }
-  const nc = readTLV(octVal, 0);
-  if (nc.tag !== TAG_SEQUENCE) return [];
-  const permitted: string[] = [];
-  for (const item of iterSeq(nc.val)) {
-    if (item.tag !== 0xa0) continue; // [0] IMPLICIT on SEQUENCE OF GeneralSubtree
-    // item.val is the content of the GeneralSubtrees (no outer SEQUENCE TLV, IMPLICIT tag)
-    for (const subtree of iterSeq(item.val)) {
-      if (subtree.tag !== TAG_SEQUENCE) continue;
-      if (subtree.val.length === 0) continue;
-      const base = readTLV(subtree.val, 0);
-      if (base.tag === TAG_CONTEXT_2) { // [2] dNSName
-        permitted.push(new TextDecoder("ascii").decode(base.val));
-      }
+function _parseDigitalSignatureOnly(octVal: Uint8Array): boolean {
+  const bs = readTLV(octVal, 0);
+  if (bs.tag !== TAG_BIT_STR || bs.val.length < 2 || bs.val[0] > 7 || bs.val[1] !== 0x80) return false;
+  for (let i = 2; i < bs.val.length; i++) if (bs.val[i] !== 0) return false;
+  return true;
+}
+
+function _parseOIDSequence(octVal: Uint8Array): string[] {
+  const seq = readTLV(octVal, 0);
+  if (seq.tag !== TAG_SEQUENCE || seq.next !== octVal.length) throw new Error("x509: malformed OID sequence");
+  return [...iterSeq(seq.val)].map((item) => {
+    if (item.tag !== TAG_OID) throw new Error("x509: expected OID");
+    return _decodeOID(item.val);
+  });
+}
+
+function _parseCertificatePolicies(octVal: Uint8Array): string[] {
+  const seq = readTLV(octVal, 0);
+  if (seq.tag !== TAG_SEQUENCE || seq.next !== octVal.length) throw new Error("x509: malformed certificatePolicies");
+  return [...iterSeq(seq.val)].map((info) => {
+    if (info.tag !== TAG_SEQUENCE) throw new Error("x509: malformed PolicyInformation");
+    const fields = [...iterSeq(info.val)];
+    if (fields.length === 0 || fields[0].tag !== TAG_OID) throw new Error("x509: policy lacks OID");
+    return _decodeOID(fields[0].val);
+  });
+}
+
+function _decodeOID(value: Uint8Array): string {
+  const arcs: bigint[] = [];
+  let current = 0n;
+  for (const b of value) {
+    current = (current << 7n) | BigInt(b & 0x7f);
+    if ((b & 0x80) === 0) {
+      arcs.push(current);
+      current = 0n;
     }
   }
-  return permitted;
+  if (current !== 0n || arcs.length === 0) throw new Error("x509: malformed OID");
+  const first = arcs.shift()!;
+  const firstArc = first < 40n ? 0n : first < 80n ? 1n : 2n;
+  const secondArc = first - firstArc * 40n;
+  return [firstArc, secondArc, ...arcs].map(String).join(".");
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -402,14 +471,12 @@ async function verifyCertSig(cert: ParsedCert, issuerSPKI: Uint8Array): Promise<
  * rootPEM is the client-pinned Root CA PEM (embedded in the web bundle).
  * now is the reference time for validity checks (injectable for testing).
  *
- * Enforced on top of signature verification (mirrors crypto/x509 behaviour):
- *   (a) nameConstraints — issuer's permittedDNSDomains must cover the signed cert's SAN
- *   (b) basicConstraints CA:TRUE + keyUsage keyCertSign on every issuing cert
- *   (c) notBefore/notAfter validity window on every cert in the chain
+ * Enforces the Spawnery X.509-SVID profile and issuer policy after signature validation.
  *
  * Returns the verified leaf ParsedCert on success, or throws on any failure.
  */
-export async function verifyCertChain(chain: string, rootPEM: string, now: Date): Promise<ParsedCert> {
+export async function verifyCertChain(chain: string, rootPEM: string, now: Date, trustDomain: string): Promise<ParsedCert> {
+  if (!trustDomain) throw new Error("x509: configured trust domain is required");
   const chainDERs = pemToDerList(chain);
   const rootDERs  = pemToDerList(rootPEM);
   if (rootDERs.length === 0) throw new Error("x509: empty pinned root PEM");
@@ -417,6 +484,7 @@ export async function verifyCertChain(chain: string, rootPEM: string, now: Date)
 
   const root   = parseCertDER(rootDERs[0]);
   const parsed = chainDERs.map(parseCertDER);
+  if (parsed.length !== 2) throw new Error("x509: chain must contain leaf and one signing intermediate");
 
   // Verify root is self-signed, is a CA, has certSign usage, and is within validity.
   await verifyCertSig(root, root.spkiBytes);
@@ -444,18 +512,36 @@ export async function verifyCertChain(chain: string, rootPEM: string, now: Date)
     // (c) Validity window.
     _checkValidity(parsed[i], now, `chain[${i}]`);
 
-    // (a) Name constraints: issuer's permittedDNSDomains must cover the signed cert's SAN.
-    if (issuerCert.permittedDNSDomains.length > 0 && parsed[i].sanDNS) {
-      if (!_dnsInPermitted(parsed[i].sanDNS, issuerCert.permittedDNSDomains)) {
-        throw new Error(
-          `x509: cert SAN ${JSON.stringify(parsed[i].sanDNS)} violates issuer name constraints ` +
-          `[${issuerCert.permittedDNSDomains.join(", ")}]`,
-        );
-      }
-    }
   }
 
-  return parsed[0]; // leaf
+  const leaf = parsed[0];
+  const issuer = parsed[1];
+  if (issuer.sanURIs.length !== 1 || issuer.sanURIs[0] !== `spiffe://${trustDomain}`) {
+    throw new Error("x509: signing intermediate URI SAN does not match configured trust domain");
+  }
+  if (issuer.policies.length !== 1) throw new Error("x509: signing intermediate must contain exactly one issuer policy");
+  if (!leaf.hasBasicConstraints || leaf.isCA || !leaf.digitalSignatureOnly) {
+    throw new Error("x509: leaf violates basicConstraints or DigitalSignature-only profile");
+  }
+  if (leaf.extendedKeyUsages.length !== 2 || !leaf.extendedKeyUsages.includes(CLIENT_AUTH_OID) || !leaf.extendedKeyUsages.includes(SERVER_AUTH_OID)) {
+    throw new Error("x509: leaf must contain exactly ClientAuth and ServerAuth EKUs");
+  }
+  if (leaf.sanURIs.length !== 1) throw new Error("x509: leaf must contain exactly one URI SAN");
+  const principal = parseSPIFFEPrincipal(leaf.sanURIs[0], trustDomain);
+  if (principal.kind === "node" && (leaf.sanDNS.length !== 0 || leaf.sanIPs.length !== 0)) {
+    throw new Error("x509: node leaf must not contain DNS or IP SANs");
+  }
+  const policy = issuer.policies[0];
+  const permitted = policy === SERVICE_ISSUER_POLICY
+    ? principal.kind === "service"
+    : policy === CLOUD_NODE_ISSUER_POLICY
+      ? principal.kind === "node" && principal.role === "cloud"
+      : policy === SELF_HOSTED_NODE_ISSUER_POLICY
+        ? principal.kind === "node" && principal.role === "self-hosted"
+        : false;
+  if (!permitted) throw new Error("x509: issuer policy does not permit SPIFFE principal path");
+
+  return leaf;
 }
 
 function _checkValidity(cert: ParsedCert, now: Date, label: string): void {
@@ -465,11 +551,6 @@ function _checkValidity(cert: ParsedCert, now: Date, label: string): void {
   if (now >= cert.notAfter) {
     throw new Error(`x509: ${label} cert has expired (notAfter=${cert.notAfter.toISOString()})`);
   }
-}
-
-/** Returns true if san equals or is a subdomain of any entry in the permitted list. */
-function _dnsInPermitted(san: string, permitted: string[]): boolean {
-  return permitted.some((domain) => san === domain || san.endsWith("." + domain));
 }
 
 /**
@@ -486,18 +567,26 @@ export async function importCertPubKey(cert: ParsedCert): Promise<CryptoKey> {
   );
 }
 
-/**
- * Parse the node identity from a verified leaf cert's SAN DNS name.
- * SAN format: <nodeId>.<accountId>.<class>.nodes.spawnery.internal
- */
-export function parseSANIdentity(sanDNS: string): { nodeId: string; accountId: string; nodeClass: string } {
-  const suffix = ".nodes.spawnery.internal";
-  if (!sanDNS.endsWith(suffix)) throw new Error(`x509: SAN ${JSON.stringify(sanDNS)} does not end with ${suffix}`);
-  const prefix = sanDNS.slice(0, -suffix.length);
-  const parts = prefix.split(".");
-  if (parts.length < 3) throw new Error(`x509: SAN prefix ${JSON.stringify(prefix)} needs at least 3 dot-segments`);
-  const nodeClass = parts[parts.length - 1];
-  const accountId = parts[parts.length - 2];
-  const nodeId    = parts.slice(0, parts.length - 2).join(".");
-  return { nodeId, accountId, nodeClass };
+export type SPIFFEPrincipal =
+  | { trustDomain: string; kind: "service"; role: "cp" | "authsvc"; instanceId: string }
+  | { trustDomain: string; kind: "node"; role: "cloud" | "self-hosted"; accountId: string; nodeId: string };
+
+export function parseSPIFFEPrincipal(raw: string, trustDomain: string): SPIFFEPrincipal {
+  if (raw.includes("%")) throw new Error("x509: percent-encoded SPIFFE IDs are forbidden");
+  let uri: URL;
+  try { uri = new URL(raw); } catch { throw new Error("x509: malformed SPIFFE URI SAN"); }
+  if (uri.protocol !== "spiffe:" || uri.host !== trustDomain || uri.username || uri.password || uri.search || uri.hash) {
+    throw new Error("x509: SPIFFE URI SAN does not match configured trust domain");
+  }
+  const segments = uri.pathname.slice(1).split("/");
+  if (segments.some((s) => !/^[A-Za-z0-9._-]+$/.test(s) || s === "." || s === "..")) {
+    throw new Error("x509: invalid SPIFFE path segment");
+  }
+  if (segments.length === 3 && segments[0] === "service" && (segments[1] === "cp" || segments[1] === "authsvc")) {
+    return { trustDomain, kind: "service", role: segments[1], instanceId: segments[2] };
+  }
+  if (segments.length === 4 && segments[0] === "node" && (segments[1] === "cloud" || segments[1] === "self-hosted")) {
+    return { trustDomain, kind: "node", role: segments[1], accountId: segments[2], nodeId: segments[3] };
+  }
+  throw new Error("x509: unsupported SPIFFE principal path");
 }

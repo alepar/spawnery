@@ -25,6 +25,7 @@ import { verifyNodeForSealing } from "@/keys/subkey";
 import type { RevocationChecker } from "@/keys/subkey";
 import type { DeviceKeys } from "@/keys/device";
 import { fromBase64, toBase64, encodeFields } from "@/keys/encoding";
+import { PINNED_TRUST_DOMAIN } from "@/config/trustAnchors";
 
 // ── Typed migration errors ────────────────────────────────────────────────────
 
@@ -357,7 +358,7 @@ export async function deliverOwnerSealedJournalKeys(
       nk.nodeCertChain,
       rootPEM,
       nk.signedSubkey,
-      { tenancy, accountId },
+      { trustDomain: PINNED_TRUST_DOMAIN, tenancy, accountId },
       now,
       checker,
     );
