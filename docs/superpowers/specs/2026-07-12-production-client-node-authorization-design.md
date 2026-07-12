@@ -1,8 +1,8 @@
 # Production Client-to-Node Authorization
 
-**Date:** 2026-07-12  
-**Beads:** `sp-dvke.3` under `sp-dvke`  
-**Status:** draft, collaboratively approved  
+**Date:** 2026-07-12
+**Beads:** `sp-dvke.3` under `sp-dvke`
+**Status:** draft, collaboratively approved
 **Builds on:** [Auth & Identity](2026-06-11-auth-identity-design.md),
 [Unified Root for AS Authorization Signing](2026-07-12-unified-root-as-auth-signing-design.md), and
 [Unified Service mTLS](2026-07-12-unified-service-mtls-design.md)

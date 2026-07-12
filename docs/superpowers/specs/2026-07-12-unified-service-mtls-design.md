@@ -1,8 +1,8 @@
 # Unified mTLS for the Control Plane, Auth Service, and Spawnlets
 
-**Date:** 2026-07-12  
-**Beads:** `sp-dvke.2` under `sp-dvke`  
-**Status:** draft, collaboratively approved  
+**Date:** 2026-07-12
+**Beads:** `sp-dvke.2` under `sp-dvke`
+**Status:** draft, collaboratively approved
 **Builds on:** [Node Auth & Unified Identity](2026-06-05-node-auth-unified-identity-design.md),
 [Auth & Identity](2026-06-11-auth-identity-design.md), and
 [Unified Root for AS Authorization Signing](2026-07-12-unified-root-as-auth-signing-design.md)
