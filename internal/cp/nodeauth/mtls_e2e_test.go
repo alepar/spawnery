@@ -29,7 +29,7 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 	otherInter, _ := otherRoot.NewIntermediate(pki.ClassSelfHosted)
 
 	var mu sync.Mutex
-	var lastID pki.Identity
+	var lastID pki.Principal
 	var reached bool
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -73,12 +73,12 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 
 	// 1) valid self-hosted -> accepted, identity derived from the cert.
 	good, _ := selfHosted.IssueNode("n1", "alice", pki.ClassSelfHosted, hour)
-	if code := do(good); code != http.StatusOK || !reached || lastID.AccountID != "alice" || lastID.Class != pki.ClassSelfHosted {
+	if code := do(good); code != http.StatusOK || !reached || lastID.AccountID != "alice" || lastID.Role != pki.ClassSelfHosted {
 		t.Fatalf("valid self-hosted: code=%d reached=%v id=%+v", code, reached, lastID)
 	}
 	// 2) valid cloud -> accepted.
 	cnode, _ := cloud.IssueNode("c1", "spawnery-system", pki.ClassCloud, hour)
-	if code := do(cnode); code != http.StatusOK || lastID.Class != pki.ClassCloud {
+	if code := do(cnode); code != http.StatusOK || lastID.Role != pki.ClassCloud {
 		t.Fatalf("valid cloud: code=%d id=%+v", code, lastID)
 	}
 	// 3) forged cloud (self-hosted intermediate, cloud SAN) -> rejected by name constraints.

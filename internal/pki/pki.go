@@ -1,8 +1,4 @@
-// Package pki implements Spawnery's node-identity certificate authority: a Root CA, name-constrained
-// per-class intermediates (cloud / self-hosted), node-leaf issuance, and verification that derives a
-// node's identity from its certificate SAN. Class is enforced by RFC 5280 name constraints — a
-// self-hosted intermediate is cryptographically incapable of signing a cloud-subtree leaf that
-// validates (see docs/superpowers/specs/2026-06-05-node-auth-unified-identity-design.md §4).
+// Package pki implements Spawnery's SPIFFE X.509-SVID authority and typed principal verification.
 package pki
 
 import (
@@ -16,13 +12,8 @@ import (
 	"math/big"
 	"net"
 	"net/url"
-	"strings"
 	"time"
 )
-
-// Domain is the DNS suffix under which every node identity lives. A node's SAN is
-// <nodeId>.<accountId>.<class>.<Domain>; the per-class subtree is <class>.<Domain>.
-const Domain = "nodes.spawnery.internal"
 
 // DefaultTrustDomain is retained for compatibility with callers that have not yet been wired to an
 // environment-specific trust domain.
@@ -61,12 +52,6 @@ func newSerial() (*big.Int, error) {
 	return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 }
 
-func classSubtree(class string) string { return class + "." + Domain }
-
-func nodeSAN(nodeID, accountID, class string) string {
-	return nodeID + "." + accountID + "." + class + "." + Domain
-}
-
 // NewRootCA generates a self-signed Root CA.
 func NewRootCA(commonName string) (*CA, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -89,8 +74,7 @@ func NewRootCA(commonName string) (*CA, error) {
 	return finishCA(tmpl, tmpl, key.Public(), key, key)
 }
 
-// NewIntermediate issues an intermediate CA signed by this CA, name-constrained to the given class's
-// subtree so it can only sign leaves under <class>.Domain.
+// NewIntermediate issues a non-delegating, role-bearing intermediate signed by this CA.
 func (ca *CA) NewIntermediate(role IssuerRole, trustDomains ...string) (*CA, error) {
 	role, err := normalizeIssuerRole(role)
 	if err != nil {
@@ -232,38 +216,23 @@ func finishCA(tmpl, parent *x509.Certificate, pub any, ownKey, signerKey *ecdsa.
 	return &CA{Cert: cert, Key: ownKey}, nil
 }
 
-// Verify validates leaf against the pinned root (enforcing name constraints + expiry at now) and
-// returns the identity read from the verified leaf's SAN.
+// Verify is the compatibility node verifier. It delegates to VerifyPrincipal and does not parse a
+// second identity format.
 func Verify(leaf *x509.Certificate, intermediates []*x509.Certificate, root *x509.Certificate, now time.Time) (Identity, error) {
-	roots := x509.NewCertPool()
-	roots.AddCert(root)
-	inter := x509.NewCertPool()
-	for _, c := range intermediates {
-		inter.AddCert(c)
+	if leaf == nil || len(leaf.URIs) != 1 {
+		return Identity{}, errors.New("pki: leaf must contain exactly one URI SAN")
 	}
-	if _, err := leaf.Verify(x509.VerifyOptions{
-		Roots:         roots,
-		Intermediates: inter,
-		CurrentTime:   now,
-		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-	}); err != nil {
+	principal, err := VerifyPrincipal(leaf, intermediates, VerifyOptions{
+		Root:        root,
+		TrustDomain: leaf.URIs[0].Host,
+		CurrentTime: now,
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	})
+	if err != nil {
 		return Identity{}, err
 	}
-	return identityFromSAN(leaf)
-}
-
-func identityFromSAN(leaf *x509.Certificate) (Identity, error) {
-	if len(leaf.DNSNames) == 0 {
-		return Identity{}, errors.New("certificate has no DNS SAN")
+	if principal.Kind != KindNode {
+		return Identity{}, errors.New("pki: principal is not a node")
 	}
-	san := leaf.DNSNames[0]
-	head, ok := strings.CutSuffix(san, "."+Domain)
-	if !ok {
-		return Identity{}, fmt.Errorf("SAN %q not under %q", san, Domain)
-	}
-	parts := strings.Split(head, ".")
-	if len(parts) != 3 {
-		return Identity{}, fmt.Errorf("SAN %q: want <nodeId>.<accountId>.<class>.%s", san, Domain)
-	}
-	return Identity{NodeID: parts[0], AccountID: parts[1], Class: parts[2]}, nil
+	return Identity{NodeID: principal.NodeID, AccountID: principal.AccountID, Class: principal.Role}, nil
 }

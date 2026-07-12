@@ -1,10 +1,13 @@
 package pki
 
 import (
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const (
@@ -25,6 +28,110 @@ type Principal struct {
 	InstanceID  string
 	AccountID   string
 	NodeID      string
+}
+
+// VerifyOptions configures strict Spawnery X.509-SVID verification.
+type VerifyOptions struct {
+	Root        *x509.Certificate
+	TrustDomain string
+	CurrentTime time.Time
+	KeyUsages   []x509.ExtKeyUsage
+	IsRevoked   func(issuer, serial *big.Int) bool
+}
+
+// VerifyPrincipal validates leaf to Root and returns its typed Spawnery principal.
+func VerifyPrincipal(leaf *x509.Certificate, intermediates []*x509.Certificate, opts VerifyOptions) (Principal, error) {
+	if leaf == nil {
+		return Principal{}, errors.New("pki: nil leaf certificate")
+	}
+	if opts.Root == nil {
+		return Principal{}, errors.New("pki: nil root certificate")
+	}
+	if err := validateTrustDomain(opts.TrustDomain); err != nil {
+		return Principal{}, err
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(opts.Root)
+	intermediatePool := x509.NewCertPool()
+	for _, cert := range intermediates {
+		if cert == nil {
+			return Principal{}, errors.New("pki: nil intermediate certificate")
+		}
+		intermediatePool.AddCert(cert)
+	}
+	keyUsages := opts.KeyUsages
+	if len(keyUsages) == 0 {
+		keyUsages = []x509.ExtKeyUsage{x509.ExtKeyUsageAny}
+	}
+	chains, err := leaf.Verify(x509.VerifyOptions{
+		Roots:         roots,
+		Intermediates: intermediatePool,
+		CurrentTime:   opts.CurrentTime,
+		KeyUsages:     keyUsages,
+	})
+	if err != nil {
+		return Principal{}, fmt.Errorf("pki: certificate path validation: %w", err)
+	}
+	if err := validateLeafProfile(leaf); err != nil {
+		return Principal{}, err
+	}
+	principal, err := ParsePrincipal(leaf.URIs[0], opts.TrustDomain)
+	if err != nil {
+		return Principal{}, err
+	}
+	for _, chain := range chains {
+		if len(chain) != 3 || !chain[len(chain)-1].Equal(opts.Root) {
+			continue
+		}
+		issuer := chain[1]
+		issuerRole, err := IssuerRoleFromCertificate(issuer)
+		if err != nil || !issuerPermitsPrincipal(issuerRole, principal) {
+			continue
+		}
+		if opts.IsRevoked != nil && opts.IsRevoked(issuer.SerialNumber, leaf.SerialNumber) {
+			return Principal{}, errors.New("pki: certificate is revoked")
+		}
+		return principal, nil
+	}
+	return Principal{}, errors.New("pki: no verified chain has a permitted issuer role")
+}
+
+func validateLeafProfile(leaf *x509.Certificate) error {
+	if leaf.IsCA || !leaf.BasicConstraintsValid {
+		return errors.New("pki: leaf must carry a CA=false basic constraint")
+	}
+	if leaf.KeyUsage != x509.KeyUsageDigitalSignature {
+		return fmt.Errorf("pki: leaf key usage is %v, want DigitalSignature only", leaf.KeyUsage)
+	}
+	if len(leaf.ExtKeyUsage) != 2 || !hasExtKeyUsage(leaf.ExtKeyUsage, x509.ExtKeyUsageClientAuth) || !hasExtKeyUsage(leaf.ExtKeyUsage, x509.ExtKeyUsageServerAuth) || len(leaf.UnknownExtKeyUsage) != 0 {
+		return errors.New("pki: leaf must carry exactly ClientAuth and ServerAuth EKUs")
+	}
+	if len(leaf.URIs) != 1 {
+		return fmt.Errorf("pki: leaf URI SAN count is %d, want 1", len(leaf.URIs))
+	}
+	return nil
+}
+
+func hasExtKeyUsage(usages []x509.ExtKeyUsage, want x509.ExtKeyUsage) bool {
+	for _, usage := range usages {
+		if usage == want {
+			return true
+		}
+	}
+	return false
+}
+
+func issuerPermitsPrincipal(role IssuerRole, principal Principal) bool {
+	switch role {
+	case IssuerService:
+		return principal.Kind == KindService && isServiceRole(principal.Role)
+	case IssuerCloudNode:
+		return principal.Kind == KindNode && principal.Role == RoleCloud
+	case IssuerSelfHostedNode:
+		return principal.Kind == KindNode && principal.Role == RoleSelfHosted
+	default:
+		return false
+	}
 }
 
 // ParsePrincipal parses a canonical Spawnery SPIFFE ID in trustDomain.

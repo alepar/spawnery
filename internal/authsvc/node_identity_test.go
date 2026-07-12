@@ -45,7 +45,7 @@ func TestDevNodeIdentityMiddleware_DoesNotOverrideExistingIdentity(t *testing.T)
 	// Outer mw pre-seeds a "real" (TLS-equivalent) identity; dev mw (inner) must NOT clobber it.
 	inner := devNodeIdentityMiddleware("X-Spawnery-Dev-Node-Id", nodeIDProbe(&seen, &ok))
 	outer := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r = r.WithContext(withNodeIdentity(r.Context(), pki.Identity{NodeID: "real-node"}))
+		r = r.WithContext(withNodeIdentity(r.Context(), pki.Principal{Kind: pki.KindNode, NodeID: "real-node"}))
 		inner.ServeHTTP(w, r)
 	})
 	req := httptest.NewRequest(http.MethodPost, "/x", nil)
