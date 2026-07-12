@@ -2,6 +2,7 @@ package mtls
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -85,6 +86,48 @@ func TestConnectionRegistryRejectsInvalidPeer(t *testing.T) {
 	registry.Register(PeerCertificate{}, func() { calls.Add(1) })
 	if calls.Load() != 1 {
 		t.Fatal("invalid peer was retained instead of cancelled fail closed")
+	}
+}
+
+func TestConnectionRegistryRejectsRegistrationAfterRevokeTombstone(t *testing.T) {
+	registry := NewConnectionRegistry()
+	issuer := big.NewInt(10)
+	revoked := big.NewInt(20)
+	sibling := big.NewInt(21)
+	registry.Revoke(issuer, []*big.Int{revoked})
+
+	revokedContext, cancelRevoked := context.WithCancel(t.Context())
+	releaseRevoked := registry.Register(PeerCertificate{IssuerSerial: issuer, LeafSerial: revoked}, cancelRevoked)
+	releaseRevoked()
+	select {
+	case <-revokedContext.Done():
+	default:
+		t.Fatal("registration after revoke was not cancelled by tombstone")
+	}
+
+	siblingContext, cancelSibling := context.WithCancel(t.Context())
+	releaseSibling := registry.Register(PeerCertificate{IssuerSerial: issuer, LeafSerial: sibling}, cancelSibling)
+	t.Cleanup(releaseSibling)
+	select {
+	case <-siblingContext.Done():
+		t.Fatal("revoked tombstone cancelled sibling")
+	default:
+	}
+}
+
+func TestConnectionRegistryMiddlewareRevocationBetweenVerifyAndRegister(t *testing.T) {
+	registry := NewConnectionRegistry()
+	peer := PeerCertificate{IssuerSerial: big.NewInt(10), LeafSerial: big.NewInt(20)}
+	registry.Revoke(peer.IssuerSerial, []*big.Int{peer.LeafSerial})
+	handlerReached := make(chan error, 1)
+	handler := ConnectionRegistryMiddleware(registry, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		handlerReached <- r.Context().Err()
+	}))
+	req := httptest.NewRequest(http.MethodPost, "https://internal/stream", nil)
+	req = req.WithContext(context.WithValue(req.Context(), verifiedPeerContextKey{}, peer))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if err := <-handlerReached; !errors.Is(err, context.Canceled) {
+		t.Fatalf("handler context after verify/register gap = %v", err)
 	}
 }
 

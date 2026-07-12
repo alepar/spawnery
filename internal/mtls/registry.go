@@ -27,10 +27,11 @@ type ConnectionRegistry struct {
 	mu          sync.Mutex
 	nextID      uint64
 	connections map[connectionKey]map[uint64]context.CancelFunc
+	revoked     map[connectionKey]struct{}
 }
 
 func NewConnectionRegistry() *ConnectionRegistry {
-	return &ConnectionRegistry{connections: make(map[connectionKey]map[uint64]context.CancelFunc)}
+	return &ConnectionRegistry{connections: make(map[connectionKey]map[uint64]context.CancelFunc), revoked: make(map[connectionKey]struct{})}
 }
 
 func (r *ConnectionRegistry) Register(peer PeerCertificate, cancel context.CancelFunc) func() {
@@ -45,6 +46,14 @@ func (r *ConnectionRegistry) Register(peer PeerCertificate, cancel context.Cance
 	r.mu.Lock()
 	if r.connections == nil {
 		r.connections = make(map[connectionKey]map[uint64]context.CancelFunc)
+	}
+	if r.revoked == nil {
+		r.revoked = make(map[connectionKey]struct{})
+	}
+	if _, isRevoked := r.revoked[key]; isRevoked {
+		r.mu.Unlock()
+		cancelSafely(cancel)
+		return func() {}
 	}
 	r.nextID++
 	id := r.nextID
@@ -74,11 +83,15 @@ func (r *ConnectionRegistry) Revoke(issuerSerial *big.Int, serials []*big.Int) {
 	issuer := issuerSerial.Text(16)
 	var callbacks []context.CancelFunc
 	r.mu.Lock()
+	if r.revoked == nil {
+		r.revoked = make(map[connectionKey]struct{})
+	}
 	for _, serial := range serials {
 		if serial == nil || serial.Sign() <= 0 {
 			continue
 		}
 		key := connectionKey{issuer: issuer, leaf: serial.Text(16)}
+		r.revoked[key] = struct{}{}
 		for _, cancel := range r.connections[key] {
 			callbacks = append(callbacks, cancel)
 		}
