@@ -21,6 +21,12 @@ type Backend interface {
 	// the Docker lane, 0 on the runsc/native lane); -1 means unknown/degraded, in which
 	// case the backend keeps the world-writable fallback.
 	Prepare(ctx context.Context, spawnID, mountName, seedDir string, agentUID int) (hostDir string, err error)
+	// HostDir returns the host dir this backend WOULD prepare for (spawnID, mountName) — the same path
+	// Prepare returns — WITHOUT any side effect: no seeding, no chown, no clone, no network. It is how a
+	// restarted node re-adopting a running pod (SE3 §4.2) locates the mount dirs that are already bind-
+	// mounted into the live agent: calling Prepare there would re-seed (scratch) or re-clone (github)
+	// a directory the agent is actively writing to.
+	HostDir(spawnID, mountName string) string
 	// Finalize runs at teardown.
 	Finalize(ctx context.Context, hostDir string) error
 }
@@ -38,8 +44,13 @@ type Scratch struct{ Root string }
 
 func NewScratch(root string) *Scratch { return &Scratch{Root: root} }
 
+// HostDir is the scratch layout: <root>/<spawnID>/<mountName>. Pure; see Backend.HostDir.
+func (s *Scratch) HostDir(spawnID, mountName string) string {
+	return filepath.Join(s.Root, spawnID, mountName)
+}
+
 func (s *Scratch) Prepare(_ context.Context, spawnID, mountName, seedDir string, agentUID int) (string, error) {
-	hostDir := filepath.Join(s.Root, spawnID, mountName)
+	hostDir := s.HostDir(spawnID, mountName)
 	if err := os.MkdirAll(hostDir, 0o755); err != nil {
 		return "", err
 	}

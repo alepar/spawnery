@@ -149,6 +149,11 @@ func validateRepositoryID(cfg GitHubConfig, info GitHubRepoInfo) error {
 	return nil
 }
 
+// HostDir is the github layout: <root>/github/<spawnID>/<mountName>. Pure; see Backend.HostDir.
+func (g *GitHub) HostDir(spawnID, mountName string) string {
+	return filepath.Join(g.Root, "github", spawnID, mountName)
+}
+
 func (g *GitHub) Prepare(ctx context.Context, spawnID, mountName, seedDir string, agentUID int) (string, error) {
 	cfg := g.Config
 	if cfg.MountName == "" {
@@ -158,7 +163,7 @@ func (g *GitHub) Prepare(ctx context.Context, spawnID, mountName, seedDir string
 		return "", fmt.Errorf("github unsupported host %q", cfg.Host)
 	}
 
-	hostDir := filepath.Join(g.Root, "github", spawnID, mountName)
+	hostDir := g.HostDir(spawnID, mountName)
 
 	if g.restorePending {
 		// Resume (spec §16.7): a journal restore will repopulate hostDir; the journal is authoritative.

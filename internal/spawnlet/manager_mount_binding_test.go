@@ -74,12 +74,16 @@ type recordingBackend struct {
 }
 
 func (b *recordingBackend) Prepare(_ context.Context, spawnID, mountName, seedDir string, agentUID int) (string, error) {
-	hostDir := filepath.Join(b.root, spawnID, mountName)
+	hostDir := b.HostDir(spawnID, mountName)
 	if err := os.MkdirAll(hostDir, 0o755); err != nil {
 		return "", err
 	}
 	b.prepared = append(b.prepared, hostDir)
 	return hostDir, nil
+}
+
+func (b *recordingBackend) HostDir(spawnID, mountName string) string {
+	return filepath.Join(b.root, spawnID, mountName)
 }
 
 func (b *recordingBackend) Finalize(_ context.Context, hostDir string) error {
