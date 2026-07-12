@@ -23,6 +23,7 @@ type Spawnlet struct {
 	AgentBinaries    []string      `koanf:"agent_binaries"`
 	ContainerRuntime string        `koanf:"container_runtime"`
 	UsernsMode       string        `koanf:"userns_mode"`
+	GetTokenListenIP string        `koanf:"gettoken_listen_ip"`
 	ASURL            string        `koanf:"as_url"`
 	ASServerName     string        `koanf:"as_server_name"`
 	EnrollToken      config.Secret `koanf:"enroll_token"`
@@ -147,6 +148,7 @@ var spawnletEnvAliases = map[string]string{
 	"AGENT_BINARIES":                      "agent_binaries",
 	"CONTAINER_RUNTIME":                   "container_runtime",
 	"USERNS_MODE":                         "userns_mode",
+	"GETTOKEN_LISTEN_IP":                  "gettoken_listen_ip",
 	"AS_URL":                              "as_url",
 	"AS_SERVER_NAME":                      "as_server_name",
 	"ENROLL_TOKEN":                        "enroll_token",
