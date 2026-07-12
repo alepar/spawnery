@@ -176,3 +176,34 @@ Full-system quiescence is SE4's problem, not this bug's.
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the
 assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+### 2026-07-12 — sp-2tx8.2.1 (the ordering fix)
+
+Landed as designed: the scrub moved into `SnapshotForSuspend` before the `Pause` (via a new
+`Manager.scrubForCapture` seam, also used by the legacy non-gate `Suspend`/`SuspendForMigration` paths, which
+never pause), and `teardown`'s `Unpause` is gone. `teardown` no longer scrubs at all.
+
+One thing the spec did not account for: §4.1's claim that "both lanes support capture-while-paused" is true of
+the *primitives* but was **not** true of the CRI lane's shipped `CaptureDelta`, which resumed and stopped the
+container before calling `CreateDiff`. Removing the Manager's `Unpause` alone would therefore have left the
+runsc lane still tearing its snapshot — inside the backend, where the Manager cannot see it. `cri/delta.go`'s
+self-capture arm now takes the diff FIRST (on the paused container) and only then resumes/stops/removes; a
+post-diff stop failure no longer discards a good capture. The Docker lane needed no change: its
+`CommitContainer` stops-then-commits, and with the container paused the stop is an immediate kill, so the
+committed layer is the frozen instant — which is what the doc comment claimed all along.
+
+New pins: R3 (`TestRegressionSuspendSnapshotIsNotTorn`, hermetic, fakepod — fails against the pre-fix
+Manager), `TestFinishSuspendCapturesOnPausedAgent` (FS7, inverted — it used to pin the bug),
+`TestGateScrubsBeforePause` (SC6), `TestCaptureDeltaDiffsThePausedContainer` (CRI unit), and the
+`capture_delta_on_paused_agent` contract case on all three lane arms.
+
+One transcription defect fixed in R3 itself: the test as drafted started the background `AgentWriter` and
+called `SnapshotForSuspend` immediately, racing the writer's first 200µs tick against `Pause` — on this
+machine `Pause` consistently won, so the mount-snapshot half was always empty and the test never observed a
+tear either way. Added the same "wait for the first tick" idiom `writer_test.go` already uses elsewhere in
+the package, so the test deterministically exercises the invariant it is meant to pin.
+
+Not run from this worktree: the Docker `e2e` contract arm (no Docker daemon reachable in the implementer's
+sandbox — `docker.sock`: permission denied, no systemd). `go test -race ./...` and `golangci-lint run ./...`
+were both run and are clean; the Docker/`cri_delta_e2e` contract arms, `garage_e2e`, and the VM acceptance
+`git-persistence` scenario remain the merge integrator's gate per the plan.
