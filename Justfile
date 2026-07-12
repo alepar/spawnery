@@ -34,16 +34,28 @@ spawnlet agent="agent": (_images agent)
 # control plane (foreground)
 cp:
     @make bin/spawnery_cp
+    @test -f {{devca}}/root.pem || just gen-dev-ca
+    @install -d -m700 {{repo}}/.envs/dev/revocations/cp-plain-signers
     SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    CP_AUTH_ENVIRONMENT=dev CP_AUTH_ROOT_CA={{devca}}/root.pem \
+    CP_AUTH_SIGNER_REVOCATION_STATE={{repo}}/.envs/dev/revocations/cp-plain-signers/state.json \
     CP_INSECURE_DEV_NODE_ON_PUBLIC=true \
     {{repo}}/bin/spawnery_cp
 
 # auth service (foreground; dev = ephemeral in-memory CA, not for production)
 authsvc:
     @make bin/authsvc
-    SPAWNERY_ENV=dev AS_DEV=1 AS_LISTEN={{addr_as}} {{repo}}/bin/authsvc
+    @test -f {{devca}}/root.pem || just gen-dev-ca
+    SPAWNERY_ENV=dev AS_DEV=1 AS_LISTEN={{addr_as}} \
+    AS_ROOT_CA_PEM={{devca}}/root.pem \
+    AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
+    AS_INTERMEDIATE_KEY_PEM={{devca}}/self-hosted-intermediate-key.pem \
+    AS_AUTH_SIGNING_ENVIRONMENT=dev AS_AUTH_SIGNING_ROOT_PEM={{devca}}/root.pem \
+    AS_AUTH_SIGNING_CURRENT_KEY_PEM={{devca}}/auth-signer-current-key.pem AS_AUTH_SIGNING_CURRENT_CHAIN_PEM={{devca}}/auth-signer-current-chain.pem \
+    AS_AUTH_SIGNING_NEXT_KEY_PEM={{devca}}/auth-signer-next-key.pem AS_AUTH_SIGNING_NEXT_CHAIN_PEM={{devca}}/auth-signer-next-chain.pem \
+    {{repo}}/bin/authsvc
 
-# spawnlet attached to the CP — root-free dev node (self-hosted + egress floor off). `just node stub` = echo agent.
+# spawnlet attached to the CP — h2c transport with root-anchored client authorization. `just node stub` = echo agent.
 # Sources deploy/garage/dev-creds.env when present (written by `just garage`), enabling the
 # transient-tier s3 journal against the dev Garage; without it journaling stays off.
 # USERNS_MODE=remap (writable-rootfs, sp-ei4.1) gives the agent the default cap set so apt/useradd/
@@ -51,12 +63,16 @@ authsvc:
 #   echo '{"userns-remap":"default"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
 # Without it, spawnlet probes the daemon, logs a warning, and FALLS BACK to cap-drop=ALL (apt fails).
 node agent="agent": (_images agent)
+    @test -f {{devca}}/root.pem || just gen-dev-ca
+    @install -d -m700 {{repo}}/.envs/dev/revocations/node-plain-signers
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
     SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes,pi" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
+    NODE_ROOT_CA={{devca}}/root.pem NODE_AUTH_ENVIRONMENT=dev \
+    NODE_SIGNER_REVOCATION_STATE={{repo}}/.envs/dev/revocations/node-plain-signers/state.json \
     NODE_CLASS=self-hosted NODE_OWNER=alice EGRESS_ENFORCE=false \
     NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
     USERNS_MODE=remap DELTA_CAPTURE=1 \

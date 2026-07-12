@@ -81,11 +81,52 @@ type Spawn struct {
 }
 
 type Store struct {
-	mu sync.Mutex
-	m  map[string]*Spawn
+	mu           sync.Mutex
+	m            map[string]*Spawn
+	reservations map[string]ownerReservation
 }
 
-func NewStore() *Store { return &Store{m: map[string]*Spawn{}} }
+type ownerReservation struct {
+	owner      string
+	generation uint64
+}
+
+func NewStore() *Store {
+	return &Store{m: map[string]*Spawn{}, reservations: map[string]ownerReservation{}}
+}
+
+func (s *Store) ReserveOwner(id, owner string, generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id == "" || owner == "" || s.m[id] != nil {
+		return false
+	}
+	if _, exists := s.reservations[id]; exists {
+		return false
+	}
+	s.reservations[id] = ownerReservation{owner: owner, generation: generation}
+	return true
+}
+
+func (s *Store) ReleaseOwner(id, owner string, generation uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reservations[id] == (ownerReservation{owner: owner, generation: generation}) {
+		delete(s.reservations, id)
+	}
+}
+
+func (s *Store) CommitOwner(sp *Spawn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	want := ownerReservation{owner: sp.OwnerID, generation: sp.Generation}
+	if s.m[sp.ID] != nil || s.reservations[sp.ID] != want {
+		return false
+	}
+	delete(s.reservations, sp.ID)
+	s.m[sp.ID] = sp
+	return true
+}
 
 func (s *Store) Put(sp *Spawn) { s.mu.Lock(); s.m[sp.ID] = sp; s.mu.Unlock() }
 func (s *Store) Get(id string) (*Spawn, bool) {

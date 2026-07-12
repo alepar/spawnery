@@ -967,7 +967,21 @@ func (m *Manager) CreateAuthorizedWithSelection(ctx context.Context, id, appPath
 	if ownerID == "" {
 		return nil, fmt.Errorf("authorized spawn owner is empty")
 	}
-	return m.createWithSelection(ctx, id, appPath, model, name, appID, generation, ownerID, sel)
+	if !m.store.ReserveOwner(id, ownerID, generation) {
+		return nil, fmt.Errorf("spawn %q is already reserved or live", id)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			m.store.ReleaseOwner(id, ownerID, generation)
+		}
+	}()
+	sp, err := m.createWithSelection(ctx, id, appPath, model, name, appID, generation, ownerID, sel)
+	if err != nil {
+		return nil, err
+	}
+	committed = true
+	return sp, nil
 }
 
 func (m *Manager) createWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, sel AgentSelection) (*Spawn, error) {
@@ -1628,7 +1642,17 @@ func (m *Manager) createWithSelection(ctx context.Context, id, appPath, model, n
 		DeltaDepth:      deltaDepth,
 		RootfsArtifacts: cloneRootfsArtifacts(rootfsArtifacts),
 	}
-	m.store.Put(sp)
+	if ownerID != "" {
+		if !m.store.CommitOwner(sp) {
+			for _, watcher := range watchers {
+				watcher.Stop()
+			}
+			cleanupPreStoreFailure(h, floorIP)
+			return nil, fmt.Errorf("spawn %q ownership reservation was lost", id)
+		}
+	} else {
+		m.store.Put(sp)
+	}
 	return sp, nil
 }
 

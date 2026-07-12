@@ -532,7 +532,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 		case *nodev1.NodeMessage_SessionAuthClosed:
 			s.rt.SessionAuthClosed(
 				m.SessionAuthClosed.GetSpawnId(), m.SessionAuthClosed.GetSessionId(), m.SessionAuthClosed.GetClientId(),
-				nodeID, m.SessionAuthClosed.GetGeneration(),
+				nodeID, m.SessionAuthClosed.GetGeneration(), m.SessionAuthClosed.GetAttachmentId(),
 			)
 		case *nodev1.NodeMessage_Roster:
 			s.rt.UpdateRoster(m.Roster.SpawnId, nodeID, m.Roster.Sessions) // node-authoritative session set; CP mirrors
@@ -1857,7 +1857,7 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 					recvErr <- connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session_reauth requires node access token and signed intent"))
 					return
 				}
-				if rerr := s.rt.ReauthenticateClient(spawnID, "0", clientID, generation, sp.OwnerID, env); rerr != nil {
+				if rerr := s.rt.ReauthenticateClient(spawnID, "0", clientID, lease, generation, sp.OwnerID, env); rerr != nil {
 					recvErr <- rerr
 					return
 				}

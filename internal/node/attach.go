@@ -427,6 +427,10 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		var verifiedAuth Authorization
 		if a.verifier != nil {
 			spawnID := m.Open.GetSpawnId()
+			if m.Open.GetAttachmentId() == "" {
+				a.rejectSessionOpen(m.Open, "attachment incarnation is required")
+				return
+			}
 			owner, gen, ok := a.mgr.SpawnOwnerGeneration(spawnID)
 			if !ok || owner == "" || gen != m.Open.GetGeneration() || owner != m.Open.GetAssertedOwner() {
 				slog.Warn("SessionOpen: live ownership mismatch", "spawn", spawnID)
@@ -458,7 +462,10 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			a.auths.register(key, sessionAuthRecord{
 				accountID: verifiedAuth.AccountID, tokenID: verifiedAuth.TokenID, expiresAt: verifiedAuth.ExpiresAt,
 				sessionKeyHash: verifiedAuth.SessionKeyHash, generation: m.Open.GetGeneration(), nodeID: a.cfg.NodeID,
-			}, func(reason string) { a.closeClientAuthorization(key, m.Open.GetGeneration(), reason) })
+				attachmentID: m.Open.GetAttachmentId(),
+			}, func(reason string) {
+				a.closeClientAuthorization(key, m.Open.GetGeneration(), reason, m.Open.GetAttachmentId())
+			})
 		}
 		if !a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor) {
 			if a.auths != nil {
@@ -467,8 +474,10 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			a.rejectSessionOpen(m.Open, "session attachment unavailable")
 		}
 	case *nodev1.CPMessage_Close:
-		if a.auths != nil {
-			a.auths.remove(sessionAuthKey{spawnID: m.Close.GetSpawnId(), sessionID: sid(m.Close.GetSessionId()), clientID: m.Close.GetClientId()})
+		if a.auths != nil && m.Close.GetAttachmentId() != "" {
+			if !a.auths.removeIfAttachment(sessionAuthKey{spawnID: m.Close.GetSpawnId(), sessionID: sid(m.Close.GetSessionId()), clientID: m.Close.GetClientId()}, m.Close.GetAttachmentId()) {
+				return
+			}
 		}
 		a.detachClient(m.Close.SpawnId, sid(m.Close.SessionId), m.Close.ClientId)
 	case *nodev1.CPMessage_SessionReauth:
@@ -576,7 +585,7 @@ func (a *attacher) rejectSessionOpen(open *nodev1.SessionOpen, reason string) {
 	}
 	a.closeClientAuthorization(sessionAuthKey{
 		spawnID: open.GetSpawnId(), sessionID: sid(open.GetSessionId()), clientID: open.GetClientId(),
-	}, open.GetGeneration(), reason)
+	}, open.GetGeneration(), reason, open.GetAttachmentId())
 }
 
 // staleGen reports whether a control message carrying generation gen targets a superseded container
@@ -962,6 +971,9 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		}
 		a.mu.Unlock()
 		if mine {
+			if a.auths != nil {
+				a.auths.removeSpawn(st.SpawnId)
+			}
 			_ = a.mgr.Stop(context.WithoutCancel(ctx), st.SpawnId) // reclaim the crashed container
 		}
 	}
@@ -1131,6 +1143,9 @@ func (a *attacher) suspendSpawn(ctx context.Context, m *nodev1.Suspend) {
 	}
 
 	// Reap sessions then finish suspend teardown.
+	if a.auths != nil {
+		a.auths.removeSpawn(spawnID)
+	}
 	ps, relays := a.reapSessions(spawnID)
 	for _, p := range ps {
 		p.stop()
@@ -1390,19 +1405,24 @@ func (a *attacher) detachClient(spawnID, sessionID, clientID string) {
 	}
 }
 
-func (a *attacher) closeClientAuthorization(key sessionAuthKey, generation uint64, reason string) {
+func (a *attacher) closeClientAuthorization(key sessionAuthKey, generation uint64, reason string, attachmentIDs ...string) {
+	attachmentID := ""
+	if len(attachmentIDs) == 1 {
+		attachmentID = attachmentIDs[0]
+	}
 	a.detachClient(key.spawnID, key.sessionID, key.clientID)
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SessionAuthClosed{SessionAuthClosed: &nodev1.SessionAuthClosed{
 		SpawnId: key.spawnID, Generation: generation, SessionId: key.sessionID, ClientId: key.clientID, Reason: reason,
+		AttachmentId: attachmentID,
 	}}})
 }
 
-func (a *attacher) rejectClientAuthorization(key sessionAuthKey, generation uint64, reason string) {
+func (a *attacher) rejectClientAuthorization(key sessionAuthKey, generation uint64, reason string, attachmentIDs ...string) {
 	if a.auths != nil && a.auths.contains(key) {
 		a.auths.close(key, reason)
 		return
 	}
-	a.closeClientAuthorization(key, generation, reason)
+	a.closeClientAuthorization(key, generation, reason, attachmentIDs...)
 }
 
 func (a *attacher) reauthenticateClient(msg *nodev1.SessionReauth) {
@@ -1410,21 +1430,31 @@ func (a *attacher) reauthenticateClient(msg *nodev1.SessionReauth) {
 		return
 	}
 	key := sessionAuthKey{spawnID: msg.GetSpawnId(), sessionID: sid(msg.GetSessionId()), clientID: msg.GetClientId()}
+	if a.auths != nil {
+		if currentAttachment, exists := a.auths.attachment(key); exists && currentAttachment != msg.GetAttachmentId() {
+			return
+		}
+	}
 	owner, generation, ok := a.mgr.SpawnOwnerGeneration(msg.GetSpawnId())
 	if !ok || owner == "" || generation != msg.GetGeneration() || owner != msg.GetAssertedOwner() || a.verifier == nil || a.auths == nil {
-		a.rejectClientAuthorization(key, msg.GetGeneration(), "session reauthentication ownership mismatch")
+		a.rejectClientAuthorization(key, msg.GetGeneration(), "session reauthentication ownership mismatch", msg.GetAttachmentId())
+		return
+	}
+	if msg.GetAttachmentId() == "" {
+		a.rejectClientAuthorization(key, generation, "session reauthentication attachment incarnation missing", msg.GetAttachmentId())
 		return
 	}
 	auth, nack, detail := a.verifier.VerifyReauth(msg.GetAuth(), ReauthFields{
 		SpawnID: msg.GetSpawnId(), Generation: generation, SessionID: key.sessionID, AssertedOwner: msg.GetAssertedOwner(),
 	})
 	if nack != "" {
-		a.rejectClientAuthorization(key, generation, fmt.Sprintf("%s: %s", nack, detail))
+		a.rejectClientAuthorization(key, generation, fmt.Sprintf("%s: %s", nack, detail), msg.GetAttachmentId())
 		return
 	}
 	if !a.auths.replace(key, sessionAuthRecord{
 		accountID: auth.AccountID, tokenID: auth.TokenID, expiresAt: auth.ExpiresAt,
 		sessionKeyHash: auth.SessionKeyHash, generation: generation, nodeID: a.cfg.NodeID,
+		attachmentID: msg.GetAttachmentId(),
 	}, owner) {
 		return
 	}
@@ -1542,8 +1572,8 @@ func (a *attacher) launchSession(ctx context.Context, spawnID string, e *session
 }
 
 // launchACPSession launches an additional acp session: start the tmux-wrapped acp launcher on the
-// reserved port, dial it, run an Nth Pump, then flip ACTIVE. The session-N Pump has NO exitFn (server
-// death does not reclaim the container — reap is on explicit close only, plan decision 7).
+// reserved port, dial it, run an Nth Pump, then flip ACTIVE. A session-N pump exit removes only that
+// session's attachment authorization; it does not reclaim the shared spawn container.
 func (a *attacher) launchACPSession(ctx context.Context, spawnID string, reg *sessionRegistry, e *sessionEntry) {
 	port, _ := strconv.Atoi(e.endpoint)
 	tmuxName := acpTmuxName(e.id)
@@ -1557,15 +1587,26 @@ func (a *attacher) launchACPSession(ctx context.Context, spawnID string, reg *se
 		a.failSession(spawnID, reg, e, "dial acp: "+err.Error())
 		return
 	}
+	k := sessionKey{spawnID, e.id}
 	p := newPump(att.Stdin, att.Stdout)
 	p.closeFn = att.Close
+	p.exitFn = func() {
+		a.mu.Lock()
+		mine := a.pumps[k] == p
+		if mine {
+			delete(a.pumps, k)
+		}
+		a.mu.Unlock()
+		if mine && a.auths != nil {
+			a.auths.removeSession(spawnID, e.id)
+		}
+	}
 	if err := p.start(ctx, readyTimeout); err != nil {
 		p.stop()
 		_ = a.sx.KillTmux(ctx, spawnID, tmuxName)
 		a.failSession(spawnID, reg, e, "acp not ready: "+err.Error())
 		return
 	}
-	k := sessionKey{spawnID, e.id}
 	a.mu.Lock()
 	_, live := reg.get(e.id)
 	if !live { // closed mid-launch: undo
@@ -1629,6 +1670,9 @@ func (a *attacher) closeSession(ctx context.Context, m *nodev1.CloseSession) {
 	if e.pinned {
 		slog.Info("ignoring CloseSession for pinned session", "spawn", m.SpawnId, "session", m.SessionId)
 		return
+	}
+	if a.auths != nil {
+		a.auths.removeSession(m.SpawnId, m.SessionId)
 	}
 
 	// Remove the registry entry FIRST — before the pump/relay teardown — but inside the SAME a.mu section

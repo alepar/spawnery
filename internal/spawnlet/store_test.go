@@ -1,6 +1,10 @@
 package spawnlet
 
-import "testing"
+import (
+	"sync"
+	"sync/atomic"
+	"testing"
+)
 
 func TestStorePutGetDelete(t *testing.T) {
 	s := NewStore()
@@ -12,6 +16,29 @@ func TestStorePutGetDelete(t *testing.T) {
 	s.Delete("a")
 	if _, ok := s.Get("a"); ok {
 		t.Fatal("expected deleted")
+	}
+}
+
+func TestStoreOwnerReservationAllowsOneConcurrentCreator(t *testing.T) {
+	s := NewStore()
+	var winners atomic.Int32
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, owner := range []string{"alice", "mallory"} {
+		owner := owner
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if s.ReserveOwner("sp-1", owner, 7) {
+				winners.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if winners.Load() != 1 {
+		t.Fatalf("reservation winners = %d", winners.Load())
 	}
 }
 

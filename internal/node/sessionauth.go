@@ -19,6 +19,7 @@ type sessionAuthRecord struct {
 	sessionKeyHash []byte
 	generation     uint64
 	nodeID         string
+	attachmentID   string
 }
 
 type liveSessionAuth struct {
@@ -53,7 +54,7 @@ func (r *sessionAuthRegistry) register(key sessionAuthKey, record sessionAuthRec
 	}
 	live := &liveSessionAuth{record: cloneSessionAuthRecord(record), close: closeFn}
 	r.records[key] = live
-	live.timer = r.after(record.expiresAt.Sub(r.now()), func() { r.expire(key, record.tokenID) })
+	live.timer = r.after(record.expiresAt.Sub(r.now()), func() { r.expire(key, live) })
 	r.mu.Unlock()
 }
 
@@ -64,7 +65,8 @@ func (r *sessionAuthRegistry) replace(key sessionAuthKey, next sessionAuthRecord
 	valid := current != nil && now.Before(current.record.expiresAt) && now.Before(next.expiresAt) &&
 		current.record.accountID == next.accountID && next.accountID == liveOwner &&
 		bytes.Equal(current.record.sessionKeyHash, next.sessionKeyHash) &&
-		current.record.generation == next.generation && current.record.nodeID == next.nodeID
+		current.record.generation == next.generation && current.record.nodeID == next.nodeID &&
+		current.record.attachmentID == next.attachmentID
 	if !valid {
 		closeFn := r.removeLocked(key)
 		r.mu.Unlock()
@@ -74,8 +76,9 @@ func (r *sessionAuthRegistry) replace(key sessionAuthKey, next sessionAuthRecord
 		return false
 	}
 	current.timer.Stop()
-	current.record = cloneSessionAuthRecord(next)
-	current.timer = r.after(next.expiresAt.Sub(now), func() { r.expire(key, next.tokenID) })
+	replacement := &liveSessionAuth{record: cloneSessionAuthRecord(next), close: current.close}
+	r.records[key] = replacement
+	replacement.timer = r.after(next.expiresAt.Sub(now), func() { r.expire(key, replacement) })
 	r.mu.Unlock()
 	return true
 }
@@ -95,10 +98,31 @@ func (r *sessionAuthRegistry) remove(key sessionAuthKey) {
 	r.mu.Unlock()
 }
 
+func (r *sessionAuthRegistry) removeIfAttachment(key sessionAuthKey, attachmentID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current := r.records[key]
+	if current == nil || attachmentID == "" || current.record.attachmentID != attachmentID {
+		return false
+	}
+	_ = r.removeLocked(key)
+	return true
+}
+
 func (r *sessionAuthRegistry) removeSpawn(spawnID string) {
 	r.mu.Lock()
 	for key := range r.records {
 		if key.spawnID == spawnID {
+			_ = r.removeLocked(key)
+		}
+	}
+	r.mu.Unlock()
+}
+
+func (r *sessionAuthRegistry) removeSession(spawnID, sessionID string) {
+	r.mu.Lock()
+	for key := range r.records {
+		if key.spawnID == spawnID && key.sessionID == sessionID {
 			_ = r.removeLocked(key)
 		}
 	}
@@ -120,10 +144,20 @@ func (r *sessionAuthRegistry) contains(key sessionAuthKey) bool {
 	return ok
 }
 
-func (r *sessionAuthRegistry) expire(key sessionAuthKey, tokenID string) {
+func (r *sessionAuthRegistry) attachment(key sessionAuthKey) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current := r.records[key]
+	if current == nil {
+		return "", false
+	}
+	return current.record.attachmentID, true
+}
+
+func (r *sessionAuthRegistry) expire(key sessionAuthKey, expected *liveSessionAuth) {
 	r.mu.Lock()
 	current := r.records[key]
-	if current == nil || current.record.tokenID != tokenID {
+	if current != expected {
 		r.mu.Unlock()
 		return
 	}

@@ -34,6 +34,33 @@ func TestSessionAuthReauthCannotReplaceExpiredRecordBeforeDelayedTimerRuns(t *te
 	}
 }
 
+func TestSessionAuthOldTimerCannotCloseSameTokenReplacement(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	var timers []*heldTimer
+	r := newSessionAuthRegistryWithClock(func() time.Time { return now }, func(_ time.Duration, callback func()) sessionAuthTimer {
+		timer := &heldTimer{callback: callback}
+		timers = append(timers, timer)
+		return timer
+	})
+	key := sessionAuthKey{spawnID: "sp", sessionID: "s", clientID: "c"}
+	var closed atomic.Int32
+	record := sessionAuthRecord{accountID: "alice", tokenID: "same-token", expiresAt: now.Add(time.Minute), sessionKeyHash: []byte("key"), generation: 1, nodeID: "node"}
+	r.register(key, record, func(string) { closed.Add(1) })
+	next := record
+	next.expiresAt = now.Add(2 * time.Minute)
+	if !r.replace(key, next, "alice") {
+		t.Fatal("same-token replacement rejected")
+	}
+	timers[0].callback()
+	if closed.Load() != 0 || !r.contains(key) {
+		t.Fatalf("old timer closed replacement: close=%d present=%v", closed.Load(), r.contains(key))
+	}
+	timers[1].callback()
+	if closed.Load() != 1 || r.contains(key) {
+		t.Fatalf("current timer close=%d present=%v", closed.Load(), r.contains(key))
+	}
+}
+
 func TestSessionAuthReauthCancelsOldDeadline(t *testing.T) {
 	r := newSessionAuthRegistry()
 	key := sessionAuthKey{spawnID: "sp", sessionID: "s", clientID: "c"}

@@ -5,10 +5,46 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"spawnery/internal/runtime"
 )
+
+func TestConcurrentAuthorizedCreateReservesBeforeResources(t *testing.T) {
+	fake := runtime.NewFake()
+	m := NewManager(fake, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
+	app := writeApp(t)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, owner := range []string{"alice", "mallory"} {
+		owner := owner
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := m.CreateAuthorizedWithSelection(context.Background(), "same-spawn", app, "model", "", "", 1, owner, AgentSelection{})
+			results <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	var successes int
+	for err := range results {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 || len(fake.Started) != 2 {
+		t.Fatalf("successes=%d started_resources=%d", successes, len(fake.Started))
+	}
+	owner, generation, ok := m.SpawnOwnerGeneration("same-spawn")
+	if !ok || generation != 1 || owner == "" {
+		t.Fatalf("installed owner=%q generation=%d ok=%v", owner, generation, ok)
+	}
+}
 
 func TestExecRunAndAttachHelpersResolveContainer(t *testing.T) {
 	m := NewManager(runtime.NewFake(), ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})

@@ -217,21 +217,23 @@ func TestSessionOpenRejectionEmitsAddressedAuthClosed(t *testing.T) {
 
 	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
 		SpawnId: "sp-open-reject", Generation: 0, SessionId: "session-7", ClientId: "client-9",
-		AssertedOwner: "mallory",
+		AssertedOwner: "mallory", AttachmentId: "attachment-9",
 	}}})
 	closed := fs.lastSessionAuthClosed()
 	if closed == nil || closed.GetSpawnId() != "sp-open-reject" || closed.GetGeneration() != 0 ||
 		closed.GetSessionId() != "session-7" || closed.GetClientId() != "client-9" ||
+		closed.GetAttachmentId() != "attachment-9" ||
 		closed.GetReason() != "live spawn ownership or generation mismatch" {
 		t.Fatalf("SessionAuthClosed = %+v", closed)
 	}
 
 	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
 		SpawnId: "sp-open-reject", Generation: 0, SessionId: "session-8", ClientId: "client-10",
-		AssertedOwner: "alice",
+		AssertedOwner: "alice", AttachmentId: "attachment-10",
 	}}})
 	closed = fs.lastSessionAuthClosed()
 	if closed == nil || closed.GetSessionId() != "session-8" || closed.GetClientId() != "client-10" ||
+		closed.GetAttachmentId() != "attachment-10" ||
 		closed.GetReason() != "MISSING_INTENT: no auth envelope" {
 		t.Fatalf("verification SessionAuthClosed = %+v", closed)
 	}

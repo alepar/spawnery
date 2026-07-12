@@ -185,7 +185,7 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 							recvErr <- struct{}{}
 							return
 						}
-						if err := s.rt.ReauthenticateClient(bind.SpawnID, sessionID, bind.ClientID, generation, owner, &authv1.AuthEnvelope{AccessToken: ctrl.NodeAccessToken, Intent: &signed}); err != nil {
+						if err := s.rt.ReauthenticateClient(bind.SpawnID, sessionID, bind.ClientID, lease, generation, owner, &authv1.AuthEnvelope{AccessToken: ctrl.NodeAccessToken, Intent: &signed}); err != nil {
 							conn.Close(websocket.StatusPolicyViolation, "node reauth failed")
 							recvErr <- struct{}{}
 							return

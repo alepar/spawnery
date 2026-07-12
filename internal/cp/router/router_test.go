@@ -27,10 +27,22 @@ func TestDelayedSupersededDetachPreservesReplacementAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.SessionAuthClosed("sp1", "0", "same", "node-1", 7, oldLease.id)
+	select {
+	case <-newDone:
+		t.Fatal("old node attachment incarnation closed replacement")
+	default:
+	}
 	select {
 	case <-oldDone:
 	default:
 		t.Fatal("replacement did not end superseded handler")
+	}
+	if err := r.ReauthenticateClient("sp1", "0", "same", oldLease, 7, "alice", &authv1.AuthEnvelope{AccessToken: "old"}); err == nil {
+		t.Fatal("superseded handler reauthenticated replacement")
+	}
+	if node.sent[len(node.sent)-1].GetSessionReauth() != nil {
+		t.Fatal("superseded reauth reached node")
 	}
 
 	r.DetachClient("sp1", "0", "same", oldLease)
@@ -58,7 +70,7 @@ func TestNodeReauthRelayAndAddressedClose(t *testing.T) {
 	r := New()
 	node := &mcNode{}
 	r.Bind("sp1", "node-1", node)
-	aDone, _, err := r.AttachClient("sp1", "0", "a", "alice", nil, &mcClient{}, 0, 7)
+	aDone, aLease, err := r.AttachClient("sp1", "0", "a", "alice", nil, &mcClient{}, 0, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,26 +79,26 @@ func TestNodeReauthRelayAndAddressedClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := &authv1.AuthEnvelope{AccessToken: "opaque", Intent: &authv1.SignedIntent{Body: []byte("exact")}}
-	if err := r.ReauthenticateClient("sp1", "0", "a", 7, "alice", env); err != nil {
+	if err := r.ReauthenticateClient("sp1", "0", "a", aLease, 7, "alice", env); err != nil {
 		t.Fatal(err)
 	}
 	got := node.sent[len(node.sent)-1].GetSessionReauth()
 	if got == nil || got.GetAuth() != env || got.GetGeneration() != 7 || got.GetAssertedOwner() != "alice" {
 		t.Fatalf("reauth relay = %+v", got)
 	}
-	r.SessionAuthClosed("sp1", "0", "a", "foreign-node", 7)
+	r.SessionAuthClosed("sp1", "0", "a", "foreign-node", 7, aLease.id)
 	select {
 	case <-aDone:
 		t.Fatal("foreign node closed attachment")
 	default:
 	}
-	r.SessionAuthClosed("sp1", "0", "a", "node-1", 6)
+	r.SessionAuthClosed("sp1", "0", "a", "node-1", 6, aLease.id)
 	select {
 	case <-aDone:
 		t.Fatal("old generation closed newer attachment")
 	default:
 	}
-	r.SessionAuthClosed("sp1", "0", "a", "node-1", 7)
+	r.SessionAuthClosed("sp1", "0", "a", "node-1", 7, aLease.id)
 	select {
 	case <-aDone:
 	default:

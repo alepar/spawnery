@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"testing"
+	"time"
 
 	nodev1 "spawnery/gen/node/v1"
 )
@@ -16,6 +17,8 @@ func TestStopFencesStaleGeneration(t *testing.T) {
 	ctx := context.Background()
 
 	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m", Generation: 5})
+	authKey := sessionAuthKey{spawnID: "sp1", sessionID: "0", clientID: "client"}
+	a.auths.register(authKey, sessionAuthRecord{expiresAt: time.Now().Add(time.Hour)}, func(string) {})
 	if a.pumps[zeroKey("sp1")] == nil {
 		t.Fatal("spawn not started")
 	}
@@ -34,6 +37,9 @@ func TestStopFencesStaleGeneration(t *testing.T) {
 
 	// Current Stop (gen 5 == live 5): tears down.
 	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_Stop{Stop: &nodev1.StopSpawn{SpawnId: "sp1", Generation: 5}}})
+	if a.auths.contains(authKey) {
+		t.Fatal("Stop retained attachment authorization")
+	}
 	if !be.wasStopped() {
 		t.Fatal("matching-generation Stop must tear down the spawn")
 	}

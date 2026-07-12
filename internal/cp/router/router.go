@@ -4,6 +4,8 @@
 package router
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sync"
 
@@ -19,7 +21,7 @@ type ClientSender interface{ Send([]byte) error }
 
 // AttachmentLease uniquely identifies one incarnation of an addressed client attachment.
 // A superseded handler cannot detach its replacement with an older lease.
-type AttachmentLease struct{ id uint64 }
+type AttachmentLease struct{ id string }
 
 type route struct {
 	nodeID string
@@ -57,10 +59,9 @@ type pendingRoster struct {
 }
 
 type Router struct {
-	mu        sync.Mutex
-	m         map[string]*route         // spawn_id -> route
-	pending   map[string]*pendingRoster // rosters that arrived before Bind (node-emits-then-Bind race)
-	nextLease uint64
+	mu      sync.Mutex
+	m       map[string]*route         // spawn_id -> route
+	pending map[string]*pendingRoster // rosters that arrived before Bind (node-emits-then-Bind race)
 }
 
 func New() *Router {
@@ -115,6 +116,11 @@ func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string
 	if len(generations) == 1 {
 		generation = generations[0]
 	}
+	var leaseBytes [16]byte
+	if _, err := rand.Read(leaseBytes[:]); err != nil {
+		return nil, AttachmentLease{}, fmt.Errorf("create attachment lease: %w", err)
+	}
+	lease := AttachmentLease{id: hex.EncodeToString(leaseBytes[:])}
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	if !ok {
@@ -126,11 +132,6 @@ func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string
 		close(old)
 	}
 	done := make(chan struct{})
-	r.nextLease++
-	if r.nextLease == 0 {
-		r.nextLease++
-	}
-	lease := AttachmentLease{id: r.nextLease}
 	rt.clients[key] = c
 	rt.clientDone[key] = done
 	rt.clientGenerations[key] = generation
@@ -139,7 +140,7 @@ func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string
 	r.mu.Unlock()
 	return done, lease, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
 		SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Cursor: cursor,
-		Generation: generation, Auth: env,
+		Generation: generation, Auth: env, AttachmentId: lease.id,
 		AssertedOwner: assertedOwner,
 	}}})
 }
@@ -149,10 +150,12 @@ func (r *Router) DetachClient(spawnID, sessionID, clientID string, lease Attachm
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	var wasPresent bool
+	var generation uint64
 	if ok {
 		key := ck(sessionID, clientID)
-		if lease.id != 0 && rt.clientLeases[key] == lease {
+		if lease.id != "" && rt.clientLeases[key] == lease {
 			_, wasPresent = rt.clients[key]
+			generation = rt.clientGenerations[key]
 			delete(rt.clients, key)
 			delete(rt.clientDone, key)
 			delete(rt.clientGenerations, key)
@@ -161,15 +164,19 @@ func (r *Router) DetachClient(spawnID, sessionID, clientID string, lease Attachm
 	}
 	r.mu.Unlock()
 	if wasPresent {
-		_ = rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Close{Close: &nodev1.SessionClose{SpawnId: spawnID, SessionId: sessionID, ClientId: clientID}}})
+		_ = rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Close{Close: &nodev1.SessionClose{
+			SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Generation: generation, AttachmentId: lease.id,
+		}}})
 	}
 }
 
-func (r *Router) ReauthenticateClient(spawnID, sessionID, clientID string, generation uint64, assertedOwner string, env *authv1.AuthEnvelope) error {
+func (r *Router) ReauthenticateClient(spawnID, sessionID, clientID string, lease AttachmentLease, generation uint64, assertedOwner string, env *authv1.AuthEnvelope) error {
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	if ok {
-		_, ok = rt.clients[ck(sessionID, clientID)]
+		key := ck(sessionID, clientID)
+		_, ok = rt.clients[key]
+		ok = ok && lease.id != "" && rt.clientLeases[key] == lease
 	}
 	r.mu.Unlock()
 	if !ok {
@@ -177,15 +184,15 @@ func (r *Router) ReauthenticateClient(spawnID, sessionID, clientID string, gener
 	}
 	return rt.node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_SessionReauth{SessionReauth: &nodev1.SessionReauth{
 		SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Generation: generation,
-		AssertedOwner: assertedOwner, Auth: env,
+		AssertedOwner: assertedOwner, Auth: env, AttachmentId: lease.id,
 	}}})
 }
 
-func (r *Router) SessionAuthClosed(spawnID, sessionID, clientID, nodeID string, generation uint64) {
+func (r *Router) SessionAuthClosed(spawnID, sessionID, clientID, nodeID string, generation uint64, attachmentID string) {
 	r.mu.Lock()
 	if rt := r.m[spawnID]; rt != nil {
 		key := ck(sessionID, clientID)
-		if rt.nodeID != nodeID || rt.clientGenerations[key] != generation {
+		if rt.nodeID != nodeID || rt.clientGenerations[key] != generation || rt.clientLeases[key].id != attachmentID {
 			r.mu.Unlock()
 			return
 		}
