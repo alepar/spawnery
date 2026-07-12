@@ -7,8 +7,9 @@ import (
 	"spawnery/internal/runtime"
 )
 
-// StopAll tears down every spawn the Manager tracks (graceful node shutdown), so a SIGTERM'd node
-// doesn't leak its running pods. Covers sp-8hf item 4.
+// StopAll tears down every spawn the Manager tracks — the destructive bulk path. NOTE: since SE3
+// (sp-2tx8.3.2) this is NOT what a SIGTERM'd node runs; process shutdown goes through DetachAll and
+// leaves the pods running. This test pins that StopAll itself still destroys.
 func TestStopAllTearsDownEverySpawn(t *testing.T) {
 	rt := runtime.NewFake()
 	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), NodeID: "n"})
