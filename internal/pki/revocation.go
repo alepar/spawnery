@@ -39,10 +39,11 @@ type persistedIssuerRevocation struct {
 }
 
 type issuerRevocationSnapshot struct {
-	number  *big.Int
-	digest  [sha256.Size]byte
-	revoked map[string]struct{}
-	pem     string
+	number     *big.Int
+	nextUpdate time.Time
+	digest     [sha256.Size]byte
+	revoked    map[string]struct{}
+	pem        string
 }
 
 type revocationSnapshot struct {
@@ -193,10 +194,11 @@ func (state *RevocationState) ApplyPEM(data []byte) error {
 	return nil
 }
 
-// IsRevoked reports membership in the latest CRL for issuer. A closed or poisoned view fails closed.
+// IsRevoked reports membership in the latest current CRL for issuer. Missing, stale, closed, and
+// poisoned snapshots fail closed because this bool callback cannot otherwise establish non-revocation.
 func (state *RevocationState) IsRevoked(issuer, serial *big.Int) bool {
 	if state == nil || issuer == nil || serial == nil || issuer.Sign() <= 0 || serial.Sign() <= 0 {
-		return false
+		return true
 	}
 	snapshot := state.snapshot.Load()
 	if snapshot == nil {
@@ -207,7 +209,11 @@ func (state *RevocationState) IsRevoked(issuer, serial *big.Int) bool {
 	}
 	entry, ok := snapshot.issuers[issuer.Text(16)]
 	if !ok {
-		return false
+		return true
+	}
+	now := state.now()
+	if now.IsZero() || !entry.nextUpdate.After(now) {
+		return true
 	}
 	_, revoked := entry.revoked[serial.Text(16)]
 	return revoked
@@ -287,7 +293,7 @@ func snapshotFromCRL(list *x509.RevocationList) issuerRevocationSnapshot {
 		revoked[entry.SerialNumber.Text(16)] = struct{}{}
 	}
 	return issuerRevocationSnapshot{
-		number: new(big.Int).Set(list.Number), digest: sha256.Sum256(list.Raw), revoked: revoked, pem: string(MarshalCRLPEM(list)),
+		number: new(big.Int).Set(list.Number), nextUpdate: list.NextUpdate, digest: sha256.Sum256(list.Raw), revoked: revoked, pem: string(MarshalCRLPEM(list)),
 	}
 }
 

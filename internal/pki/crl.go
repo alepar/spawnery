@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -12,6 +13,11 @@ import (
 )
 
 const crlPEMType = "X509 CRL"
+
+var (
+	authorityKeyIdentifierOID = asn1.ObjectIdentifier{2, 5, 29, 35}
+	crlNumberOID              = asn1.ObjectIdentifier{2, 5, 29, 20}
+)
 
 // CreateCRL creates a signed, numbered CRL for a Spawnery role-bearing intermediate.
 func (ca *CA) CreateCRL(number *big.Int, revoked []x509.RevocationListEntry, now, nextUpdate time.Time) (*x509.RevocationList, error) {
@@ -70,6 +76,9 @@ func VerifyCRL(list *x509.RevocationList, issuer *x509.Certificate, now time.Tim
 	if err := list.CheckSignatureFrom(issuer); err != nil {
 		return fmt.Errorf("pki: verify CRL signature: %w", err)
 	}
+	if err := validateCRLExtensions(list); err != nil {
+		return err
+	}
 	if list.Number == nil || list.Number.Sign() <= 0 {
 		return errors.New("pki: CRL number must be positive")
 	}
@@ -101,7 +110,6 @@ func MarshalCRLPEM(list *x509.RevocationList) []byte {
 
 // ParseCRLPEM parses exactly one X509 CRL PEM block.
 func ParseCRLPEM(data []byte) (*x509.RevocationList, error) {
-	data = bytes.TrimSpace(data)
 	if !bytes.HasPrefix(data, []byte("-----BEGIN "+crlPEMType+"-----")) {
 		return nil, errors.New("pki: no canonical X509 CRL PEM block")
 	}
@@ -109,12 +117,15 @@ func ParseCRLPEM(data []byte) (*x509.RevocationList, error) {
 	if block == nil || block.Type != crlPEMType || len(block.Headers) != 0 {
 		return nil, errors.New("pki: no canonical X509 CRL PEM block")
 	}
-	if len(bytes.TrimSpace(rest)) != 0 {
+	if len(rest) != 0 {
 		return nil, errors.New("pki: trailing data after X509 CRL PEM block")
 	}
 	list, err := x509.ParseRevocationList(block.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("pki: parse CRL: %w", err)
+	}
+	if !bytes.Equal(data, MarshalCRLPEM(list)) {
+		return nil, errors.New("pki: non-canonical X509 CRL PEM encoding")
 	}
 	return list, nil
 }
@@ -148,6 +159,9 @@ func validateCRLIssuer(issuer *x509.Certificate) error {
 func validateRevocationEntries(entries []x509.RevocationListEntry, thisUpdate time.Time) error {
 	serials := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
+		if entry.ReasonCode != 0 || len(entry.Extensions) != 0 || len(entry.ExtraExtensions) != 0 {
+			return errors.New("pki: CRL entry extensions are unsupported")
+		}
 		if entry.SerialNumber == nil || entry.SerialNumber.Sign() <= 0 {
 			return errors.New("pki: revoked certificate serial must be positive")
 		}
@@ -159,6 +173,37 @@ func validateRevocationEntries(entries []x509.RevocationListEntry, thisUpdate ti
 		if entry.RevocationTime.IsZero() || entry.RevocationTime.After(thisUpdate) {
 			return fmt.Errorf("pki: invalid revocation time for serial %s", serial)
 		}
+	}
+	return nil
+}
+
+func validateCRLExtensions(list *x509.RevocationList) error {
+	if len(list.Extensions) != 2 {
+		return fmt.Errorf("pki: CRL extension count is %d, want 2", len(list.Extensions))
+	}
+	seenAuthorityKeyID := false
+	seenNumber := false
+	for _, extension := range list.Extensions {
+		if extension.Critical {
+			return fmt.Errorf("pki: critical CRL extension %s is unsupported", extension.Id.String())
+		}
+		switch {
+		case extension.Id.Equal(authorityKeyIdentifierOID):
+			if seenAuthorityKeyID {
+				return errors.New("pki: duplicate CRL authority key identifier")
+			}
+			seenAuthorityKeyID = true
+		case extension.Id.Equal(crlNumberOID):
+			if seenNumber {
+				return errors.New("pki: duplicate CRL number")
+			}
+			seenNumber = true
+		default:
+			return fmt.Errorf("pki: unsupported CRL extension %s", extension.Id.String())
+		}
+	}
+	if !seenAuthorityKeyID || !seenNumber {
+		return errors.New("pki: CRL lacks required extensions")
 	}
 	return nil
 }

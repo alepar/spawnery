@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -27,8 +28,8 @@ func TestRevocationStatePersistsReloadsAndScopesSerialsByIssuer(t *testing.T) {
 	if err := state.ApplyPEM(mustCRLPEM(t, service, 1, now, serial1)); err != nil {
 		t.Fatal(err)
 	}
-	if !state.IsRevoked(service.Cert.SerialNumber, serial1) || state.IsRevoked(cloud.Cert.SerialNumber, serial1) {
-		t.Fatal("revocation was not scoped to its issuer")
+	if !state.IsRevoked(service.Cert.SerialNumber, serial1) || !state.IsRevoked(cloud.Cert.SerialNumber, serial1) {
+		t.Fatal("revocation was not scoped or missing issuer snapshot did not fail closed")
 	}
 	if err := state.ApplyPEM(mustCRLPEM(t, service, 2, now, serial2)); err != nil {
 		t.Fatal(err)
@@ -63,6 +64,48 @@ func TestRevocationStatePersistsReloadsAndScopesSerialsByIssuer(t *testing.T) {
 	t.Cleanup(func() { _ = reopened.Close() })
 	if reopened.IsRevoked(service.Cert.SerialNumber, serial1) || !reopened.IsRevoked(service.Cert.SerialNumber, serial2) || !reopened.IsRevoked(cloud.Cert.SerialNumber, serial1) {
 		t.Fatal("reloaded revoked serial set is incorrect")
+	}
+}
+
+func TestRevocationStateFailsClosedWhenSnapshotExpiresAndRecoversOnRefresh(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	var clock atomic.Int64
+	clock.Store(base.Unix())
+	now := func() time.Time { return time.Unix(clock.Load(), 0).UTC() }
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	state, err := OpenRevocationState(filepath.Join(t.TempDir(), "revocations", "state.json"), []*x509.Certificate{issuer.Cert}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	unlisted := big.NewInt(900)
+	if !state.IsRevoked(issuer.Cert.SerialNumber, unlisted) {
+		t.Fatal("missing CRL snapshot did not fail closed")
+	}
+	first, err := issuer.CreateCRL(big.NewInt(1), nil, base, base.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ApplyPEM(MarshalCRLPEM(first)); err != nil {
+		t.Fatal(err)
+	}
+	if state.IsRevoked(issuer.Cert.SerialNumber, unlisted) {
+		t.Fatal("current CRL rejected an unlisted serial")
+	}
+	clock.Store(base.Add(time.Minute).Unix())
+	if !state.IsRevoked(issuer.Cert.SerialNumber, unlisted) {
+		t.Fatal("expired CRL snapshot did not fail closed at NextUpdate")
+	}
+	fresh, err := issuer.CreateCRL(big.NewInt(2), nil, base.Add(time.Minute), base.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ApplyPEM(MarshalCRLPEM(fresh)); err != nil {
+		t.Fatal(err)
+	}
+	if state.IsRevoked(issuer.Cert.SerialNumber, unlisted) {
+		t.Fatal("fresh higher CRL did not restore normal lookup")
 	}
 }
 

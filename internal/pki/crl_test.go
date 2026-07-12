@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/base64"
 	"encoding/pem"
 	"math/big"
 	"testing"
@@ -127,15 +130,77 @@ func TestCRLRejectsInvalidEntriesAndPEM(t *testing.T) {
 	}
 	good := MarshalCRLPEM(list)
 	for name, data := range map[string][]byte{
-		"garbage":        []byte("not pem"),
-		"wrong type":     pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: list.Raw}),
-		"leading bytes":  append([]byte("junk\n"), good...),
-		"trailing bytes": append(append([]byte(nil), good...), []byte("junk")...),
-		"second block":   append(append([]byte(nil), good...), good...),
+		"garbage":             []byte("not pem"),
+		"wrong type":          pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: list.Raw}),
+		"leading bytes":       append([]byte("junk\n"), good...),
+		"leading whitespace":  append([]byte("\n"), good...),
+		"trailing bytes":      append(append([]byte(nil), good...), []byte("junk")...),
+		"trailing whitespace": append(append([]byte(nil), good...), '\n'),
+		"CRLF":                bytes.ReplaceAll(good, []byte("\n"), []byte("\r\n")),
+		"alternate wrapping":  nonCanonicalCRLPEM(list.Raw),
+		"second block":        append(append([]byte(nil), good...), good...),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ParseCRLPEM(data); err == nil {
 				t.Fatal("invalid CRL PEM accepted")
+			}
+		})
+	}
+}
+
+func nonCanonicalCRLPEM(der []byte) []byte {
+	encoded := base64.StdEncoding.EncodeToString(der)
+	return []byte("-----BEGIN X509 CRL-----\n" + encoded + "\n-----END X509 CRL-----\n")
+}
+
+func TestCRLRejectsUnsupportedListAndEntryExtensions(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	valid := mustCreateRawCRL(t, issuer, big.NewInt(1), now, now.Add(time.Hour), nil)
+	if len(valid.Extensions) != 2 {
+		t.Fatalf("standard CRL extension count = %d, want 2", len(valid.Extensions))
+	}
+	for _, tt := range []struct {
+		name     string
+		oid      asn1.ObjectIdentifier
+		critical bool
+		value    []byte
+	}{
+		{name: "issuing distribution point", oid: []int{2, 5, 29, 28}, critical: true, value: []byte{0x30, 0x00}},
+		{name: "indirect CRL", oid: []int{2, 5, 29, 28}, critical: true, value: []byte{0x30, 0x03, 0x84, 0x01, 0xff}},
+		{name: "delta CRL indicator", oid: []int{2, 5, 29, 27}, critical: true, value: []byte{0x02, 0x01, 0x01}},
+		{name: "unknown critical", oid: []int{1, 2, 3, 4}, critical: true, value: []byte{0x05, 0x00}},
+		{name: "unknown noncritical", oid: []int{1, 2, 3, 5}, value: []byte{0x05, 0x00}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			list := mustCreateRawCRLWithExtensions(t, issuer, now, []pkix.Extension{{
+				Id: tt.oid, Critical: tt.critical, Value: tt.value,
+			}}, nil)
+			if err := VerifyCRL(list, issuer.Cert, now); err == nil {
+				t.Fatal("unsupported CRL extension accepted")
+			}
+		})
+	}
+
+	for name, entry := range map[string]x509.RevocationListEntry{
+		"reason code": {
+			SerialNumber: big.NewInt(1), RevocationTime: now.Add(-time.Minute), ReasonCode: 1,
+		},
+		"unknown entry extension": {
+			SerialNumber: big.NewInt(1), RevocationTime: now.Add(-time.Minute),
+			ExtraExtensions: []pkix.Extension{{Id: []int{1, 2, 3, 6}, Value: []byte{0x05, 0x00}}},
+		},
+	} {
+		t.Run(name+" create", func(t *testing.T) {
+			if _, err := issuer.CreateCRL(big.NewInt(1), []x509.RevocationListEntry{entry}, now, now.Add(time.Hour)); err == nil {
+				t.Fatal("unsupported entry extension created")
+			}
+		})
+		t.Run(name+" verify", func(t *testing.T) {
+			list := mustCreateRawCRLWithExtensions(t, issuer, now, nil, []x509.RevocationListEntry{entry})
+			if err := VerifyCRL(list, issuer.Cert, now); err == nil {
+				t.Fatal("unsupported entry extension verified")
 			}
 		})
 	}
@@ -152,6 +217,22 @@ func mustCreateRawCRL(t *testing.T, issuer *CA, number *big.Int, thisUpdate, nex
 	list, err := x509.ParseRevocationList(der)
 	if err != nil {
 		t.Fatalf("parse raw CRL: %v", err)
+	}
+	return list
+}
+
+func mustCreateRawCRLWithExtensions(t *testing.T, issuer *CA, now time.Time, extensions []pkix.Extension, entries []x509.RevocationListEntry) *x509.RevocationList {
+	t.Helper()
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number: big.NewInt(1), ThisUpdate: now, NextUpdate: now.Add(time.Hour),
+		RevokedCertificateEntries: entries, ExtraExtensions: extensions,
+	}, issuer.Cert, issuer.Key)
+	if err != nil {
+		t.Fatalf("create extended raw CRL: %v", err)
+	}
+	list, err := x509.ParseRevocationList(der)
+	if err != nil {
+		t.Fatalf("parse extended raw CRL: %v", err)
 	}
 	return list
 }
