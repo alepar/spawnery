@@ -100,6 +100,13 @@ func principalID(trustDomain string, segments ...string) (*url.URL, error) {
 	return id, nil
 }
 
+func principalIDForTrustDomain(trustDomain string) (*url.URL, error) {
+	if err := validateTrustDomain(trustDomain); err != nil {
+		return nil, err
+	}
+	return &url.URL{Scheme: "spiffe", Host: trustDomain}, nil
+}
+
 func validateTrustDomain(trustDomain string) error {
 	if trustDomain == "" || strings.ToLower(trustDomain) != trustDomain || strings.ContainsAny(trustDomain, "/:@%") || strings.HasPrefix(trustDomain, ".") || strings.HasSuffix(trustDomain, ".") {
 		return fmt.Errorf("pki: invalid trust domain %q", trustDomain)

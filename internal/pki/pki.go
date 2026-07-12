@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -21,6 +22,10 @@ import (
 // Domain is the DNS suffix under which every node identity lives. A node's SAN is
 // <nodeId>.<accountId>.<class>.<Domain>; the per-class subtree is <class>.<Domain>.
 const Domain = "nodes.spawnery.internal"
+
+// DefaultTrustDomain is retained for compatibility with callers that have not yet been wired to an
+// environment-specific trust domain.
+const DefaultTrustDomain = "dev.spawnery.internal"
 
 const (
 	ClassCloud      = "cloud"
@@ -83,7 +88,26 @@ func NewRootCA(commonName string) (*CA, error) {
 
 // NewIntermediate issues an intermediate CA signed by this CA, name-constrained to the given class's
 // subtree so it can only sign leaves under <class>.Domain.
-func (ca *CA) NewIntermediate(class string) (*CA, error) {
+func (ca *CA) NewIntermediate(role IssuerRole, trustDomains ...string) (*CA, error) {
+	role, err := normalizeIssuerRole(role)
+	if err != nil {
+		return nil, err
+	}
+	trustDomain := DefaultTrustDomain
+	if len(trustDomains) > 1 {
+		return nil, errors.New("pki: expected at most one trust domain")
+	}
+	if len(trustDomains) == 1 {
+		trustDomain = trustDomains[0]
+	}
+	rootID, err := principalIDForTrustDomain(trustDomain)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := marshalIssuerRole(role)
+	if err != nil {
+		return nil, err
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -94,7 +118,7 @@ func (ca *CA) NewIntermediate(class string) (*CA, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "Spawnery " + class + " Intermediate"},
+		Subject:               pkix.Name{CommonName: "Spawnery " + string(role) + " Intermediate"},
 		NotBefore:             time.Now().Add(-time.Minute),
 		NotAfter:              time.Now().Add(5 * 365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -102,7 +126,12 @@ func (ca *CA) NewIntermediate(class string) (*CA, error) {
 		IsCA:                  true,
 		MaxPathLen:            0,
 		MaxPathLenZero:        true,
-		PermittedDNSDomains:   []string{classSubtree(class)},
+		URIs:                  []*url.URL{rootID},
+		ExtraExtensions: []pkix.Extension{{
+			Id:       issuerRoleOID,
+			Critical: false,
+			Value:    policy,
+		}},
 	}
 	return finishCA(tmpl, ca.Cert, key.Public(), key, ca.Key)
 }
