@@ -158,9 +158,13 @@ func (r *Router) ReauthenticateClient(spawnID, sessionID, clientID string, gener
 	}}})
 }
 
-func (r *Router) SessionAuthClosed(spawnID, sessionID, clientID string) {
+func (r *Router) SessionAuthClosed(spawnID, sessionID, clientID string, nodeIDs ...string) {
 	r.mu.Lock()
 	if rt := r.m[spawnID]; rt != nil {
+		if len(nodeIDs) == 1 && rt.nodeID != nodeIDs[0] {
+			r.mu.Unlock()
+			return
+		}
 		key := ck(sessionID, clientID)
 		if done := rt.clientDone[key]; done != nil {
 			close(done)

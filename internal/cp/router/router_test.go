@@ -34,6 +34,12 @@ func TestNodeReauthRelayAndAddressedClose(t *testing.T) {
 	if got == nil || got.GetAuth() != env || got.GetGeneration() != 7 || got.GetAssertedOwner() != "alice" {
 		t.Fatalf("reauth relay = %+v", got)
 	}
+	r.SessionAuthClosed("sp1", "0", "a", "foreign-node")
+	select {
+	case <-aDone:
+		t.Fatal("foreign node closed attachment")
+	default:
+	}
 	r.SessionAuthClosed("sp1", "0", "a")
 	select {
 	case <-aDone:
