@@ -11,6 +11,7 @@ package main
 //   sig     = ECDSA P-256, P1363 raw 64-byte r||s
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -30,6 +31,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	authv1 "spawnery/gen/auth/v1"
+	clientpkg "spawnery/internal/client"
 )
 
 const (
@@ -38,8 +44,12 @@ const (
 	refreshPoPDomain = "spawnery/refresh-pop/v1" // frozen per AS idp.go:47
 	// refreshWindow: proactive refresh when this close to expiry (plus jitter).
 	refreshWindow = 2 * time.Minute
-	// accessTokenTTL mirrors the AS's 15-min TTL; used to set access_expires_at at mint time.
-	accessTokenTTLClient = 15 * time.Minute
+	logoutTimeout = 2 * time.Second
+)
+
+var (
+	removeAuthStateFile = os.Remove
+	errAuthStateClear   = errors.New("clear local auth state")
 )
 
 // authState is the JSON-serialised state stored at <configDir>/auth.json.
@@ -47,7 +57,8 @@ type authState struct {
 	ASURL              string `json:"as_url"`
 	AccountID          string `json:"account_id,omitempty"`
 	Handle             string `json:"handle,omitempty"`
-	AccessToken        string `json:"access_token"`
+	CPAccessToken      string `json:"cp_access_token"`
+	NodeAccessToken    string `json:"node_access_token"`
 	AccessExpiresAt    int64  `json:"access_expires_at"` // unix seconds
 	RefreshToken       string `json:"refresh_token"`
 	SessionKeyPKCS8PEM string `json:"session_key_pkcs8_pem"`
@@ -143,7 +154,56 @@ func parseSessionKey(pemStr string) (*ecdsa.PrivateKey, error) {
 	if !ok {
 		return nil, errors.New("authstate: session key is not ECDSA")
 	}
+	if ec.Curve != elliptic.P256() {
+		return nil, errors.New("authstate: session key is not P-256")
+	}
 	return ec, nil
+}
+
+func parseSessionTokenBody(wire string) (*authv1.SessionTokenBody, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(wire)
+	if err != nil {
+		return nil, fmt.Errorf("decode token envelope: %w", err)
+	}
+	var artifact authv1.SignedAuthArtifact
+	if err := proto.Unmarshal(raw, &artifact); err != nil || artifact.GetArtifactType() != "session-token" {
+		return nil, errors.New("invalid session-token envelope")
+	}
+	var body authv1.SessionTokenBody
+	if err := proto.Unmarshal(artifact.GetPayload(), &body); err != nil {
+		return nil, fmt.Errorf("decode session-token body: %w", err)
+	}
+	return &body, nil
+}
+
+func validateCredentialPair(cpWire, nodeWire string, key *ecdsa.PrivateKey) (int64, error) {
+	if cpWire == "" || nodeWire == "" || key == nil {
+		return 0, errors.New("credential pair and session key are required")
+	}
+	cpBody, err := parseSessionTokenBody(cpWire)
+	if err != nil {
+		return 0, fmt.Errorf("cp access token: %w", err)
+	}
+	nodeBody, err := parseSessionTokenBody(nodeWire)
+	if err != nil {
+		return 0, fmt.Errorf("node access token: %w", err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		return 0, fmt.Errorf("marshal session key: %w", err)
+	}
+	keyHash := sha256.Sum256(spki)
+	if cpBody.GetAudience() != "cp" || nodeBody.GetAudience() != "node" ||
+		cpBody.GetAccountId() == "" || cpBody.GetFamilyId() == "" || cpBody.GetKeyId() == "" || cpBody.GetIssuedAt() <= 0 ||
+		cpBody.GetTokenId() == "" || nodeBody.GetTokenId() == "" || cpBody.GetTokenId() == nodeBody.GetTokenId() ||
+		cpBody.GetAccountId() != nodeBody.GetAccountId() || cpBody.GetFamilyId() != nodeBody.GetFamilyId() ||
+		cpBody.GetKeyId() != nodeBody.GetKeyId() || cpBody.GetIssuedAt() != nodeBody.GetIssuedAt() ||
+		cpBody.GetExpiresAt() != nodeBody.GetExpiresAt() || cpBody.GetExpiresAt() <= cpBody.GetIssuedAt() ||
+		!bytes.Equal(cpBody.GetSessionKeyHash(), nodeBody.GetSessionKeyHash()) ||
+		!bytes.Equal(cpBody.GetSessionKeyHash(), keyHash[:]) {
+		return 0, errors.New("access token pair does not describe one key-bound login session")
+	}
+	return cpBody.GetExpiresAt(), nil
 }
 
 // signRefreshPoP builds and signs the PoP proof for /refresh per the frozen wire contract.
@@ -187,7 +247,7 @@ func signRefreshPoP(rawRefresh string, key *ecdsa.PrivateKey) (tsStr, nonceB64, 
 func doRefresh(ctx context.Context, dir string, s *authState, httpClient *http.Client) error {
 	key, err := parseSessionKey(s.SessionKeyPKCS8PEM)
 	if err != nil {
-		return fmt.Errorf("doRefresh: %w", err)
+		return invalidateLostAuthState(ctx, dir, s, httpClient, err)
 	}
 
 	tsStr, nonceB64, sigB64, err := signRefreshPoP(s.RefreshToken, key)
@@ -215,9 +275,9 @@ func doRefresh(ctx context.Context, dir string, s *authState, httpClient *http.C
 			Error string `json:"error"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&body)
-		// Wipe local state — token is revoked or expired on the AS.
-		_ = os.Remove(authStatePath(dir))
-		_ = os.Remove(authLockPath(dir))
+		if err := clearAuthState(dir); err != nil {
+			return fmt.Errorf("session expired (%s), but local credentials could not be cleared: %w", body.Error, err)
+		}
 		return fmt.Errorf("session expired (%s): please run 'spawnctl login' again", body.Error)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -225,25 +285,41 @@ func doRefresh(ctx context.Context, dir string, s *authState, httpClient *http.C
 	}
 
 	var body struct {
-		CPAccessToken string `json:"cp_access_token"`
+		CPAccessToken   string `json:"cp_access_token"`
+		NodeAccessToken string `json:"node_access_token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return fmt.Errorf("doRefresh: decode response: %w", err)
 	}
-	if body.CPAccessToken == "" {
-		return fmt.Errorf("doRefresh: empty cp_access_token in response")
+	if body.CPAccessToken == "" || body.NodeAccessToken == "" {
+		return fmt.Errorf("doRefresh: incomplete access token pair in response")
 	}
 
 	// New refresh token arrives in Set-Cookie (the AS rotates it).
+	newRefresh := ""
 	for _, c := range resp.Cookies() {
 		if c.Name == "refresh_token" && c.Value != "" {
-			s.RefreshToken = c.Value
+			newRefresh = c.Value
 		}
 	}
-	s.AccessToken = body.CPAccessToken
-	s.AccessExpiresAt = time.Now().Add(accessTokenTTLClient).Unix()
+	if newRefresh == "" {
+		return errors.New("doRefresh: missing rotated refresh token")
+	}
+	expiresAt, err := validateCredentialPair(body.CPAccessToken, body.NodeAccessToken, key)
+	if err != nil {
+		return fmt.Errorf("doRefresh: %w", err)
+	}
+	next := *s
+	next.CPAccessToken = body.CPAccessToken
+	next.NodeAccessToken = body.NodeAccessToken
+	next.RefreshToken = newRefresh
+	next.AccessExpiresAt = expiresAt
 
-	return saveState(dir, s)
+	if err := saveState(dir, &next); err != nil {
+		return err
+	}
+	*s = next
+	return nil
 }
 
 // cpTokenSource provides the bearer token for CP calls with transparent refresh.
@@ -276,7 +352,7 @@ func (ts *cpTokenSource) tokenLocked(ctx context.Context) (string, error) {
 		if err != nil {
 			return err
 		}
-		if s == nil || s.AccessToken == "" {
+		if s == nil || s.CPAccessToken == "" {
 			return fmt.Errorf("not logged in — run 'spawnctl login' first")
 		}
 
@@ -285,13 +361,19 @@ func (ts *cpTokenSource) tokenLocked(ctx context.Context) (string, error) {
 		threshold := s.AccessExpiresAt - int64(refreshWindow.Seconds()) - jitterSec
 		if time.Now().Unix() >= threshold {
 			if err := doRefresh(ctx, ts.dir, s, ts.httpClient); err != nil {
+				if errors.Is(err, errAuthStateClear) {
+					return err
+				}
+				if _, statErr := os.Stat(authStatePath(ts.dir)); errors.Is(statErr, os.ErrNotExist) {
+					return err
+				}
 				// Refresh failed — still return the (possibly expired) token and let the server
 				// produce a 401 so the caller can decide (transparent retry via OnUnauthenticated).
-				result = s.AccessToken
+				result = s.CPAccessToken
 				return nil //nolint:nilerr
 			}
 		}
-		result = s.AccessToken
+		result = s.CPAccessToken
 		return nil
 	})
 	return result, err
@@ -316,6 +398,87 @@ func (ts *cpTokenSource) OnUnauthenticated(ctx context.Context) error {
 	})
 }
 
+// NodeCredentials returns the current aud=node token and the persistent login signer. Static CP
+// tokens intentionally cannot authorize a node operation.
+func (ts *cpTokenSource) NodeCredentials(ctx context.Context) (clientpkg.NodeCredentials, error) {
+	if ts.staticToken != "" {
+		return clientpkg.NodeCredentials{}, errors.New("node authorization requires 'spawnctl login'")
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	var result clientpkg.NodeCredentials
+	err := withFileLock(ts.dir, func() error {
+		s, err := loadState(ts.dir)
+		if err != nil || s == nil {
+			return errors.New("not logged in - run 'spawnctl login' first")
+		}
+		key, err := parseSessionKey(s.SessionKeyPKCS8PEM)
+		if err != nil {
+			return ts.invalidateLostKey(ctx, s, err)
+		}
+		if _, err := validateCredentialPair(s.CPAccessToken, s.NodeAccessToken, key); err != nil {
+			return ts.invalidateLostKey(ctx, s, err)
+		}
+		if time.Now().Unix() >= s.AccessExpiresAt-int64(refreshWindow.Seconds()) {
+			client := ts.httpClient
+			if client == nil {
+				client = http.DefaultClient
+			}
+			if err := doRefresh(ctx, ts.dir, s, client); err != nil {
+				return err
+			}
+		}
+		signer, err := clientpkg.NewECDSASessionSigner(key)
+		if err != nil {
+			return ts.invalidateLostKey(ctx, s, err)
+		}
+		if _, err := signer.SignP1363("spawnery/session-key-check/v1", nil); err != nil {
+			return ts.invalidateLostKey(ctx, s, err)
+		}
+		result = clientpkg.NodeCredentials{AccessToken: s.NodeAccessToken, Signer: signer}
+		return nil
+	})
+	return result, err
+}
+
+func (ts *cpTokenSource) invalidateLostKey(ctx context.Context, s *authState, cause error) error {
+	return invalidateLostAuthState(ctx, ts.dir, s, ts.httpClient, cause)
+}
+
+func invalidateLostAuthState(ctx context.Context, dir string, s *authState, httpClient *http.Client, cause error) error {
+	if err := clearAuthState(dir); err != nil {
+		return fmt.Errorf("session key unusable (%v), and local credentials could not be cleared: %w", cause, err)
+	}
+	bestEffortRemoteLogout(ctx, s, httpClient)
+	return fmt.Errorf("session key unusable: %v; please run 'spawnctl login' again", cause)
+}
+
+func clearAuthState(dir string) error {
+	if err := removeAuthStateFile(authStatePath(dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %v", errAuthStateClear, err)
+	}
+	return nil
+}
+
+func bestEffortRemoteLogout(ctx context.Context, s *authState, httpClient *http.Client) {
+	if s == nil || s.ASURL == "" || s.RefreshToken == "" {
+		return
+	}
+	client := httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	remoteCtx, cancel := context.WithTimeout(ctx, logoutTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(remoteCtx, http.MethodPost, s.ASURL+"/logout", nil)
+	if err == nil {
+		req.AddCookie(&http.Cookie{Name: "logout_session", Value: s.RefreshToken})
+		if resp, err := client.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}
+}
+
 // buildTokenSource constructs a cpTokenSource from flag/env/state with the defined precedence.
 // tokenFlag is the value of the -token flag; envToken is from SPAWNERY_TOKEN/CP_DEV_TOKEN.
 // When neither is explicitly set (flag at default "dev-token", no env), it falls back to
@@ -337,7 +500,7 @@ func buildTokenSource(dir, tokenFlag string, httpClient *http.Client) *cpTokenSo
 
 	// 3. Auth state (auth.json exists and has tokens).
 	s, err := loadState(dir)
-	if err == nil && s != nil && s.AccessToken != "" {
+	if err == nil && s != nil && s.CPAccessToken != "" && s.NodeAccessToken != "" {
 		return &cpTokenSource{dir: dir, httpClient: httpClient}
 	}
 

@@ -74,8 +74,19 @@ func forkCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
+			opts, err := loadMoveOptions(dir, c.String("token"), rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths, time.Now)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			if opts.CloseCertificateRevocations != nil {
+				defer func() { _ = opts.CloseCertificateRevocations() }()
+			}
+			trust, err := targetTrustFromMoveOptions(opts)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
 			src := buildTokenSource(dir, c.String("token"), connectClient())
-			sdk := client.New(c.String("cp"), src, nil)
+			sdk := client.New(c.String("cp"), src, nil, client.WithNodeAuthorization(src, trust))
 
 			fmt.Fprintf(c.Writer, "fork %s\n", spawnID)
 			switch {
@@ -85,14 +96,6 @@ func forkCmd() *cli.Command {
 				fmt.Fprintf(c.Writer, "  target class %s\n", req.TargetClass)
 			default:
 				fmt.Fprintln(c.Writer, "  target same node")
-			}
-
-			opts, err := loadMoveOptions(dir, c.String("token"), rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths, time.Now)
-			if err != nil {
-				return cli.Exit(err.Error(), 1)
-			}
-			if opts.CloseCertificateRevocations != nil {
-				defer func() { _ = opts.CloseCertificateRevocations() }()
 			}
 			if _, err := sdk.Fork(ctx, dev, req, c.Writer, time.Now(), opts); err != nil {
 				return cli.Exit("fork failed: "+err.Error(), 1)

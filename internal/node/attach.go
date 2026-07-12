@@ -741,6 +741,9 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			Mounts:        mounts,
 			AssertedOwner: st.GetAssertedOwner(),
 		}
+		for _, secret := range st.GetSecrets() {
+			fields.AttachedSecretIDs = append(fields.AttachedSecretIDs, secret.GetSecretId())
+		}
 		if nack, detail := a.verifier.VerifyStart(st.GetAuth(), fields); nack != "" {
 			slog.Warn("startSpawn: intent NACK", "spawn", st.SpawnId, "nack", nack, "detail", detail)
 			nackErr := fmt.Errorf("%s: %s", nack, detail)

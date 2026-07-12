@@ -27,18 +27,32 @@ type TokenSource interface {
 // Client wraps cpv1connect.SpawnServiceClient with the A4 intent-signing protocol and lifecycle
 // helpers. Construct with New.
 type Client struct {
-	rpc  cpv1connect.SpawnServiceClient
-	warn func(error)
+	rpc             cpv1connect.SpawnServiceClient
+	warn            func(error)
+	nodeCredentials NodeCredentialSource
+	targetTrust     TargetTrust
 }
 
 // Option configures a Client at construction time.
 type Option func(*Client)
 
-// WithWarnHandler sets the callback used to surface non-fatal, best-effort errors (e.g. a
-// pollAndSign failure in a fire-and-forget goroutine) that the absorbed spawnctl code used to
-// log.Printf directly. Defaults to a no-op.
+// WithWarnHandler sets the callback used to surface non-fatal retry notices. Defaults to a no-op.
 func WithWarnHandler(fn func(error)) Option {
 	return func(c *Client) { c.warn = fn }
+}
+
+// WithNodeAuthorization enables methods that construct authorization for verified nodes.
+func WithNodeAuthorization(source NodeCredentialSource, trust TargetTrust) Option {
+	return func(c *Client) {
+		c.nodeCredentials = source
+		c.targetTrust = trust
+	}
+}
+
+// PreflightNodeAuthorization validates the current node credentials without retaining a snapshot.
+func (c *Client) PreflightNodeAuthorization(ctx context.Context) error {
+	_, err := prepareNodeAuthorization(ctx, c.nodeCredentials, c.targetTrust)
+	return err
 }
 
 // New builds a Client against endpoint (e.g. "http://127.0.0.1:8080" or an https:// CP), using ts

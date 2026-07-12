@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/knadh/koanf/providers/confmap"
@@ -26,6 +28,7 @@ import (
 	"spawnery/internal/acp"
 	"spawnery/internal/client"
 	"spawnery/internal/config"
+	"spawnery/internal/intent"
 	"spawnery/internal/manifest"
 )
 
@@ -52,6 +55,11 @@ func main() {
 			&cli.StringFlag{Name: "profile", Usage: "customization profile id to apply at create (CP mode)"},
 			&cli.BoolFlag{Name: "detach", Usage: "create the spawn, wait for ACTIVE, print its id, and exit WITHOUT attaching (scriptable; the spawn keeps running instead of being stopped on detach)"},
 			&cli.StringSliceFlag{Name: "mount", Usage: "mount binding name=backend_uri[,create] (repeatable; e.g. repo=github:owner/repo,create) — CP mode only"},
+			&cli.StringFlag{Name: "root-ca", Usage: "path to the pinned Root CA PEM for node verification"},
+			&cli.StringFlag{Name: "trust-domain", Usage: "expected SPIFFE trust domain"},
+			&cli.StringFlag{Name: "crl-state", Usage: "persistent certificate revocation checkpoint"},
+			&cli.StringSliceFlag{Name: "crl-issuer", Usage: "trusted issuing-intermediate PEM (repeatable)"},
+			&cli.StringSliceFlag{Name: "crl", Usage: "current signed CRL PEM (repeatable)"},
 		},
 		Action:   rootAction,
 		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), statusCmd(), setModelCmd(), keyCmd(), moveCmd(), resumeCmd(), suspendCmd(), forkCmd(), loginCmd(), logoutCmd(), profileCmd(), catalogCmd(), ghCmd()},
@@ -107,7 +115,18 @@ func rootAction(ctx context.Context, c *cli.Command) error {
 			return cli.Exit(err.Error(), 2)
 		}
 		src := buildTokenSource(configDir, c.String("token"), httpCl)
-		runCP(ctx, cfg.CP, c.String("app-id"), c.String("model"), c.String("profile"), mounts, src, c.Bool("detach"))
+		opts, err := loadMoveOptions(configDir, c.String("token"), strings.TrimSpace(c.String("root-ca")), strings.TrimSpace(c.String("trust-domain")), strings.TrimSpace(c.String("crl-state")), c.StringSlice("crl-issuer"), c.StringSlice("crl"), time.Now)
+		if err != nil {
+			return cli.Exit(err.Error(), 1)
+		}
+		if opts.CloseCertificateRevocations != nil {
+			defer func() { _ = opts.CloseCertificateRevocations() }()
+		}
+		trust, err := targetTrustFromMoveOptions(opts)
+		if err != nil {
+			return cli.Exit(err.Error(), 1)
+		}
+		runCP(ctx, cfg.CP, c.String("app-id"), c.String("model"), c.String("profile"), mounts, src, trust, c.Bool("detach"))
 		return nil
 	}
 	if len(c.StringSlice("mount")) > 0 {
@@ -207,8 +226,8 @@ func runStandalone(ctx context.Context, addr, appPath, model string) {
 }
 
 // runCP drives the agent through the control plane via the cp.v1 service.
-func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*cpv1.MountBinding, src *cpTokenSource, detach bool) {
-	cli := client.New(addr, src, nil, client.WithWarnHandler(func(err error) {
+func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*cpv1.MountBinding, src *cpTokenSource, trust client.TargetTrust, detach bool) {
+	cli := client.New(addr, src, nil, client.WithNodeAuthorization(src, trust), client.WithWarnHandler(func(err error) {
 		log.Printf("%v", err)
 	}))
 
@@ -223,24 +242,19 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 	}
 	fmt.Println("spawn:", id)
 
-	// A4 two-phase sign-after-resolve [AC1][AM12]: start the poll-and-sign loop concurrently with
-	// WaitActive. The CP blocks the spawn in 'starting' until the client submits a signed intent;
-	// SignProvision polls until the CP registers the pending intent, then builds and submits it.
-	// If the CP does not have the intent flow enabled (old CP or intentEnabled=false), it
-	// polls until its context is cancelled when WaitActive returns — the spawn becomes active
-	// without it and the context.Canceled error is suppressed.
+	// A4 two-phase sign-after-resolve [AC1][AM12]: run authorization concurrently with WaitActive.
+	// A signing or target-verification failure is fatal immediately rather than degrading into a
+	// warning while WaitActive sits behind the CP's pending intent.
 	pollCtx, cancelPoll := context.WithCancel(ctx)
 	defer cancelPoll()
-	go func() {
+	authorize := func(authCtx context.Context) error {
 		// AppRef is intentionally left empty: in CP create mode the user supplies an app *id*
 		// (--app-id), not the immutable app_ref the CP resolves it to (id != ref for catalog/seed
 		// apps). The client cannot validate a ref it never specified, so the AM1 app_ref gate is
 		// skipped; the model correspondence check still runs, and the signed intent carries the
 		// CP-resolved app_ref verbatim.
-		if err := cli.SignProvision(pollCtx, id, client.IntentParams{Model: model}); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("pollAndSign: %v", err)
-		}
-	}()
+		return cli.SignProvision(authCtx, id, client.IntentParams{Op: intent.OpCreateSpawn, Model: model, Mounts: mounts, AttachedSecretIDs: []string{}})
+	}
 
 	// CreateSpawn is async: the CP binds the spawn to its node only once the node reports ACTIVE.
 	// Wait for that before attaching, else the session races provisioning and gets "unknown spawn".
@@ -251,14 +265,16 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 			lastLine = line
 		}
 	}
-	spawnGen, err := cli.WaitActive(ctx, id, onPoll)
+	spawnGen, err := awaitCreateAuthorization(pollCtx, authorize, func(waitCtx context.Context) (uint64, error) {
+		return cli.WaitActive(waitCtx, id, onPoll)
+	})
 	cancelPoll()
 	if err != nil {
 		var te *client.TerminalError
 		if errors.As(err, &te) {
 			log.Fatal(provisionFailure(te.Summary))
 		}
-		log.Fatal(err)
+		log.Fatalf("authorize create: %v", err)
 	}
 
 	// -detach: the spawn is ACTIVE and (if the CP runs the intent flow) its create intent is signed.
@@ -270,14 +286,11 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 		return
 	}
 
-	// A4 session-open signing is staged until paired node-credential custody lands in sp-dvke.3.3.
-	bindFrame := &cpv1.Frame{SpawnId: id}
-	if env, err := client.BuildSessionOpenIntent(id, spawnGen); err == nil {
-		bindFrame.SessionAuth = env
-	} else {
-		log.Printf("bind: session-open intent: %v (session bind will fail closed)", err)
+	env, err := cli.BuildSessionOpenIntent(ctx, id, spawnGen, "0")
+	if err != nil {
+		log.Fatalf("bind: session-open authorization: %v", err)
 	}
-
+	bindFrame := &cpv1.Frame{SpawnId: id, SessionAuth: env}
 	stream := cli.Session(ctx)
 	if err := stream.Send(bindFrame); err != nil { // bind frame (carries the spawn id + session-open auth)
 		log.Fatalf("bind: %v", err)
@@ -291,6 +304,52 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 
 	_ = stream.CloseRequest()
 	_ = cli.Stop(ctx, id)
+}
+
+func awaitCreateAuthorization(ctx context.Context, authorize func(context.Context) error, waitActive func(context.Context) (uint64, error)) (uint64, error) {
+	operationCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	authCh := make(chan error, 1)
+	type waitResult struct {
+		generation uint64
+		err        error
+	}
+	waitCh := make(chan waitResult, 1)
+	go func() { authCh <- authorize(operationCtx) }()
+	go func() {
+		generation, err := waitActive(operationCtx)
+		waitCh <- waitResult{generation: generation, err: err}
+	}()
+	authDone, waitDone := false, false
+	var generation uint64
+	var firstErr error
+	ctxDone := ctx.Done()
+	for !authDone || !waitDone {
+		select {
+		case err := <-authCh:
+			if err != nil && firstErr == nil {
+				firstErr = err
+				cancel()
+			}
+			authDone = true
+			authCh = nil
+		case result := <-waitCh:
+			if result.err != nil && firstErr == nil {
+				firstErr = result.err
+				cancel()
+			}
+			generation = result.generation
+			waitDone = true
+			waitCh = nil
+		case <-ctxDone:
+			if firstErr == nil {
+				firstErr = ctx.Err()
+			}
+			cancel()
+			ctxDone = nil
+		}
+	}
+	return generation, firstErr
 }
 
 // driveFrames is the CP-lane interactive loop over the frame protocol: it sends each stdin line as a
