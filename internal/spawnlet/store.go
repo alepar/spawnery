@@ -30,6 +30,15 @@ type Spawn struct {
 	// mounts of this spawn, so Stop can take the final suspend snapshot. Empty
 	// for scratch-only spawns (the guard that leaves existing behavior unchanged).
 	JournalMounts []journal.Mount
+	// MountTargets records the CONTAINER-side path of every bind mounted into the AGENT: "/app",
+	// each declared mount at "/app/<path>", and the secrets/artifacts/git-env dirs under
+	// /run/spawnery. This is the only place the container-side mount table survives past Create —
+	// MountDirs/MountFinalizers are host paths and MountBindings/JournalMounts are names — and
+	// DeltaScrubPaths are container-side paths, so the delta-scrub guard (scrubguard.go) needs it
+	// to tell "rm -rf /app/repo/node_modules" (deletes the user's mounted data) from "rm -rf /tmp".
+	// Empty on a Spawn not built by Create: the guard treats an unknown mount table as fail-safe
+	// (scrub nothing) rather than assuming there is nothing to protect.
+	MountTargets []string
 	// journalWatchers are the per-journaled-mount continuous file watchers driving
 	// RequestSnapshot for the lifetime of the spawn (design §2). Started on Create,
 	// stopped first thing in teardown. nil for scratch-only spawns / when no
