@@ -11,7 +11,6 @@ var errForcedStoreFailure = errors.New("forced store failure")
 
 type storeFaults struct {
 	failInsert       bool
-	failSupersede    bool
 	failOldestFamily bool
 	failRevoke       bool
 	failAppend       bool
@@ -46,13 +45,6 @@ func (r *failingRefreshSessions) Insert(ctx context.Context, session store.Refre
 		return errForcedStoreFailure
 	}
 	return r.RefreshSessionRepo.Insert(ctx, session)
-}
-
-func (r *failingRefreshSessions) Supersede(ctx context.Context, predecessorHash string, successor store.RefreshSession, cache string, now int64) error {
-	if r.faults.failSupersede {
-		return errForcedStoreFailure
-	}
-	return r.RefreshSessionRepo.Supersede(ctx, predecessorHash, successor, cache, now)
 }
 
 func (r *failingRefreshSessions) OldestFamily(ctx context.Context, accountID string) (string, error) {

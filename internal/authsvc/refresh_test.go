@@ -2,11 +2,13 @@ package authsvc
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -47,13 +49,30 @@ func TestRefreshSupersedeFailureExposesNoTupleAndRetrySucceeds(t *testing.T) {
 	fake := githubfake.New()
 	defer fake.Close()
 	now := time.Unix(1770000000, 0)
-	faults := &storeFaults{failSupersede: true}
+	dsn := "file:" + filepath.Join(t.TempDir(), "authsvc.db")
+	realStore, err := store.Open(context.Background(), store.Config{Driver: "sqlite", DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = realStore.Close() })
 	idp, st, _ := newTestIdP(t, fake, now, func(cfg *IdPConfig) {
-		cfg.Store = &failingStore{Store: cfg.Store, faults: faults}
+		cfg.Store = realStore
 	})
 	sessKey, spkiDER := newTestP256(t)
 	seedUser(t, st, "acct-refresh-atomic", 74001, now)
-	rawToken, _ := seedFamily(t, st, "acct-refresh-atomic", spkiDER, now)
+	seededAt := now.Add(-time.Minute)
+	rawToken, _ := seedFamily(t, st, "acct-refresh-atomic", spkiDER, seededAt)
+
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TRIGGER fail_refresh_successor_insert
+		BEFORE INSERT ON refresh_sessions
+		BEGIN SELECT RAISE(ABORT, 'forced successor insert failure'); END`); err != nil {
+		t.Fatal(err)
+	}
 
 	request := func() *httptest.ResponseRecorder {
 		proof := buildPoP(t, sessKey, rawToken, now.Unix(), make([]byte, 16))
@@ -76,11 +95,17 @@ func TestRefreshSupersedeFailureExposesNoTupleAndRetrySucceeds(t *testing.T) {
 		}
 	}
 	predecessor, err := st.RefreshSessions().Get(context.Background(), sha256Hex(rawToken))
-	if err != nil || predecessor.SupersededBy != "" {
+	if err != nil || predecessor.SupersededBy != "" || predecessor.SupersededAt != 0 || predecessor.SuccessorCache != "" || predecessor.LastUsedAt != seededAt.Unix() {
 		t.Fatalf("predecessor after failed refresh = %+v, err=%v", predecessor, err)
 	}
+	var rowCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM refresh_sessions`).Scan(&rowCount); err != nil || rowCount != 1 {
+		t.Fatalf("refresh rows after failed successor insert = %d, err=%v", rowCount, err)
+	}
 
-	faults.failSupersede = false
+	if _, err := db.Exec(`DROP TRIGGER fail_refresh_successor_insert`); err != nil {
+		t.Fatal(err)
+	}
 	rec = request()
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "cp_access_token") || !strings.Contains(rec.Body.String(), "node_access_token") {
 		t.Fatalf("refresh retry status/body = %d %s", rec.Code, rec.Body.String())
