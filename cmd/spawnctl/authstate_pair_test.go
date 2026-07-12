@@ -5,6 +5,10 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,5 +156,123 @@ func TestTokenRefreshKeyLossDoesNotReturnStaleCPToken(t *testing.T) {
 	token, err := src.Token(context.Background())
 	if err == nil || token != "" || !strings.Contains(err.Error(), "login") {
 		t.Fatalf("Token = %q, %v; want empty login-required error", token, err)
+	}
+}
+
+func TestLogoutKeepsPersistentLockAndClearsBeforeRemote(t *testing.T) {
+	dir := t.TempDir()
+	requestStarted := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(requestStarted)
+		time.Sleep(100 * time.Millisecond)
+	}))
+	defer srv.Close()
+	if err := saveState(dir, &authState{ASURL: srv.URL, RefreshToken: "refresh"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- doLogout(ctx, dir) }()
+	<-requestStarted
+	if _, err := os.Stat(authStatePath(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("auth state still exists while remote logout is blocked: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("doLogout: %v", err)
+	}
+	if _, err := os.Stat(authLockPath(dir)); err != nil {
+		t.Fatalf("persistent lock missing after logout: %v", err)
+	}
+}
+
+func TestLogoutSurfacesLocalRemovalFailureBeforeRemote(t *testing.T) {
+	dir := t.TempDir()
+	remoteCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { remoteCalls++ }))
+	defer srv.Close()
+	if err := saveState(dir, &authState{ASURL: srv.URL, RefreshToken: "refresh"}); err != nil {
+		t.Fatal(err)
+	}
+	previous := removeAuthStateFile
+	removeAuthStateFile = func(string) error { return errors.New("remove failed") }
+	t.Cleanup(func() { removeAuthStateFile = previous })
+	if err := doLogout(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "remove failed") {
+		t.Fatalf("doLogout error = %v", err)
+	}
+	if remoteCalls != 0 {
+		t.Fatalf("remote logout called %d times before local clear", remoteCalls)
+	}
+}
+
+func TestRefreshUnauthorizedSurfacesLocalRemovalFailure(t *testing.T) {
+	dir := t.TempDir()
+	key, _ := generateSessionKey()
+	keyPEM, _ := marshalSessionKey(key)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprint(w, `{"error":"invalid_token"}`)
+	}))
+	defer srv.Close()
+	state := &authState{ASURL: srv.URL, RefreshToken: "refresh", SessionKeyPKCS8PEM: keyPEM}
+	previous := removeAuthStateFile
+	removeAuthStateFile = func(string) error { return errors.New("remove failed") }
+	t.Cleanup(func() { removeAuthStateFile = previous })
+	if err := doRefresh(context.Background(), dir, state, srv.Client()); err == nil || !strings.Contains(err.Error(), "remove failed") {
+		t.Fatalf("doRefresh error = %v", err)
+	}
+}
+
+func TestConcurrentRefreshAndLogoutCannotResurrectCredentialsOrSplitLock(t *testing.T) {
+	dir := t.TempDir()
+	key, _ := generateSessionKey()
+	keyPEM, _ := marshalSessionKey(key)
+	spkiB64, _ := sessionPubkeySPKIB64(key)
+	spki, _ := base64.StdEncoding.DecodeString(spkiB64)
+	hash := sha256.Sum256(spki)
+	cpToken, nodeToken, _ := testCredentialPair(t, hash[:])
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/refresh":
+			close(refreshStarted)
+			<-releaseRefresh
+			http.SetCookie(w, &http.Cookie{Name: "refresh_token", Value: "refresh-next"})
+			_, _ = fmt.Fprintf(w, `{"cp_access_token":%q,"node_access_token":%q}`, cpToken, nodeToken)
+		case "/logout":
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+	if err := saveState(dir, &authState{ASURL: srv.URL, CPAccessToken: cpToken, NodeAccessToken: nodeToken, AccessExpiresAt: time.Now().Unix(), RefreshToken: "refresh-old", SessionKeyPKCS8PEM: keyPEM}); err != nil {
+		t.Fatal(err)
+	}
+	source := &cpTokenSource{dir: dir, httpClient: srv.Client()}
+	refreshDone := make(chan error, 1)
+	go func() { _, err := source.Token(context.Background()); refreshDone <- err }()
+	<-refreshStarted
+	before, err := os.Stat(authLockPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logoutDone := make(chan error, 1)
+	go func() { logoutDone <- doLogout(context.Background(), dir) }()
+	close(releaseRefresh)
+	if err := <-refreshDone; err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if err := <-logoutDone; err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if _, err := os.Stat(authStatePath(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("credentials resurrected after logout: %v", err)
+	}
+	after, err := os.Stat(authLockPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("logout replaced the persistent lock inode")
 	}
 }

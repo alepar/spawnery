@@ -18,6 +18,7 @@ package node
 import (
 	"fmt"
 	"log"
+	"slices"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -93,14 +94,15 @@ func NewIntentVerifier(artifacts *token.Verifier, nodeOwner, nodeID string, self
 // StartFields is the subset of a StartSpawn's execution fields the verifier compares
 // against the signed IntentBody for field-by-field correspondence [AC1].
 type StartFields struct {
-	SpawnID       string
-	Generation    uint64
-	AppRef        string
-	Image         string
-	Model         string
-	DataRef       string
-	Mounts        []*authv1.MountRef
-	AssertedOwner string
+	SpawnID           string
+	Generation        uint64
+	AppRef            string
+	Image             string
+	Model             string
+	DataRef           string
+	Mounts            []*authv1.MountRef
+	AttachedSecretIDs []string
+	AssertedOwner     string
 }
 
 // OpenFields is the subset of a SessionOpen the verifier compares for correspondence.
@@ -277,7 +279,25 @@ func (v *IntentVerifier) checkStartCorrespondence(body *authv1.IntentBody, field
 				m.Name, m.BackendUri, m.CredentialSecretId, m.CreateIfMissing, m.RepositoryId)
 		}
 	}
+	if !slices.Equal(canonicalStringSet(body.GetAttachedSecretIds()), canonicalStringSet(fields.AttachedSecretIDs)) {
+		return NACKCorrespondence, fmt.Sprintf("attached_secret_ids: intent=%v exec=%v", body.GetAttachedSecretIds(), fields.AttachedSecretIDs)
+	}
 	return "", ""
+}
+
+func canonicalStringSet(values []string) []string {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value != "" {
+			set[value] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(set))
+	for value := range set {
+		result = append(result, value)
+	}
+	slices.Sort(result)
+	return result
 }
 
 // checkOpenCorrespondence implements step 6 for SessionOpen [AC1][AM11].

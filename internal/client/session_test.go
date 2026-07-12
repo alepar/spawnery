@@ -67,25 +67,21 @@ func TestBuildSessionOpenIntentUsesResolvedTargetNodeTokenAndPersistentKey(t *te
 }
 
 func TestBuildSessionOpenIntentRejectsStaleGenerationBeforeCredentials(t *testing.T) {
-	called := false
-	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
-		called = true
-		return NodeCredentials{}, nil
-	})
+	fx := issueProdNode(t, "node-1", "alice")
+	source, trust := testSessionAuthorization(t, fx)
 	rpc := &fakeSessionTargetClient{response: &cpv1.GetSpawnNodeKeyResponse{Generation: 6}}
-	_, err := buildSessionOpenIntent(context.Background(), rpc, source, TargetTrust{}, "sp-1", 7, "0")
+	_, err := buildSessionOpenIntent(context.Background(), rpc, source, trust, "sp-1", 7, "0")
 	if err == nil || !strings.Contains(err.Error(), "generation") {
 		t.Fatalf("error = %v", err)
-	}
-	if called {
-		t.Fatal("credentials loaded before generation validation")
 	}
 }
 
 func TestBuildSessionOpenIntentPropagatesRPCAndSignerErrors(t *testing.T) {
 	t.Run("CP lookup", func(t *testing.T) {
+		fx := issueProdNode(t, "node-1", "alice")
+		source, trust := testSessionAuthorization(t, fx)
 		rpc := &fakeSessionTargetClient{err: errors.New("lookup failed")}
-		_, err := buildSessionOpenIntent(context.Background(), rpc, nil, TargetTrust{}, "sp-1", 7, "0")
+		_, err := buildSessionOpenIntent(context.Background(), rpc, source, trust, "sp-1", 7, "0")
 		if err == nil || !strings.Contains(err.Error(), "lookup failed") {
 			t.Fatalf("error = %v", err)
 		}
@@ -98,11 +94,11 @@ func TestBuildSessionOpenIntentPropagatesRPCAndSignerErrors(t *testing.T) {
 			TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
 		}}
 		source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
-			return NodeCredentials{AccessToken: "node-token", Signer: failingSessionSigner{}}, nil
+			return NodeCredentials{AccessToken: "node-token", Signer: signOnlyFailer{}}, nil
 		})
 		trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: "dev.spawnery.internal", AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
 		_, err := buildSessionOpenIntent(context.Background(), rpc, source, trust, "sp-1", 7, "0")
-		if err == nil || !strings.Contains(err.Error(), "sign failed") {
+		if err == nil || !strings.Contains(err.Error(), "fork sign failed") {
 			t.Fatalf("error = %v", err)
 		}
 	})
@@ -115,12 +111,13 @@ func TestBuildSessionOpenIntentRejectsTargetAndTrustSubstitutionBeforeCredential
 		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
 	}
 	for _, tc := range []struct {
-		name   string
-		mutate func(*cpv1.GetSpawnNodeKeyResponse, *TargetTrust)
+		name              string
+		expectCredentials bool
+		mutate            func(*cpv1.GetSpawnNodeKeyResponse, *TargetTrust)
 	}{
-		{name: "node id", mutate: func(r *cpv1.GetSpawnNodeKeyResponse, _ *TargetTrust) { r.TargetNodeId = "other" }},
-		{name: "account", mutate: func(r *cpv1.GetSpawnNodeKeyResponse, _ *TargetTrust) { r.TargetNodeAccountId = "mallory" }},
-		{name: "class", mutate: func(r *cpv1.GetSpawnNodeKeyResponse, trust *TargetTrust) {
+		{name: "node id", expectCredentials: true, mutate: func(r *cpv1.GetSpawnNodeKeyResponse, _ *TargetTrust) { r.TargetNodeId = "other" }},
+		{name: "account", expectCredentials: true, mutate: func(r *cpv1.GetSpawnNodeKeyResponse, _ *TargetTrust) { r.TargetNodeAccountId = "mallory" }},
+		{name: "class", expectCredentials: true, mutate: func(r *cpv1.GetSpawnNodeKeyResponse, trust *TargetTrust) {
 			r.TargetNodeClass, r.TargetNodeAccountId, trust.CloudAccountID = pki.ClassCloud, "spawnery-system", "spawnery-system"
 		}},
 		{name: "missing trust", mutate: func(_ *cpv1.GetSpawnNodeKeyResponse, trust *TargetTrust) { *trust = TargetTrust{} }},
@@ -130,15 +127,42 @@ func TestBuildSessionOpenIntentRejectsTargetAndTrustSubstitutionBeforeCredential
 			trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
 			tc.mutate(response, &trust)
 			called := false
-			source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) { called = true; return NodeCredentials{}, nil })
+			key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			baseSigner, _ := NewECDSASessionSigner(key)
+			signer := &trackingSessionSigner{SessionSigner: baseSigner}
+			source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+				called = true
+				return NodeCredentials{AccessToken: "node-token", Signer: signer}, nil
+			})
 			if _, err := buildSessionOpenIntent(context.Background(), &fakeSessionTargetClient{response: response}, source, trust, "sp-1", 7, "0"); err == nil {
 				t.Fatal("substituted target accepted")
 			}
-			if called {
-				t.Fatal("credentials loaded before target rejection")
+			if called != tc.expectCredentials || signer.signs != 0 {
+				t.Fatalf("credential preflight=%v signs=%d", called, signer.signs)
 			}
 		})
 	}
+}
+
+type trackingSessionSigner struct {
+	SessionSigner
+	signs int
+}
+
+func (s *trackingSessionSigner) SignP1363(domain string, body []byte) ([]byte, error) {
+	s.signs++
+	return s.SessionSigner.SignP1363(domain, body)
+}
+
+func testSessionAuthorization(t *testing.T, fx prodNodeFix) (NodeCredentialSource, TargetTrust) {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	signer, _ := NewECDSASessionSigner(key)
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		return NodeCredentials{AccessToken: "node-token", Signer: signer}, nil
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+	return source, trust
 }
 
 func TestBuildSessionOpenIntentRejectsMissingCredentials(t *testing.T) {
@@ -147,5 +171,8 @@ func TestBuildSessionOpenIntentRejectsMissingCredentials(t *testing.T) {
 	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
 	if _, err := buildSessionOpenIntent(context.Background(), rpc, nil, trust, "sp-1", 7, "0"); err == nil {
 		t.Fatal("session open accepted missing credentials")
+	}
+	if rpc.calls != 0 {
+		t.Fatalf("GetSpawnNodeKey called %d times before credential preflight", rpc.calls)
 	}
 }

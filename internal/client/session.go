@@ -27,6 +27,10 @@ func buildSessionOpenIntent(ctx context.Context, rpc sessionTargetClient, source
 	if spawnID == "" || sessionID == "" {
 		return nil, errors.New("session open requires spawn and session ids")
 	}
+	prepared, err := prepareNodeAuthorization(ctx, source, trust)
+	if err != nil {
+		return nil, err
+	}
 	response, err := rpc.GetSpawnNodeKey(ctx, connect.NewRequest(&cpv1.GetSpawnNodeKeyRequest{SpawnId: spawnID}))
 	if err != nil {
 		return nil, fmt.Errorf("session open %s: GetSpawnNodeKey: %w", spawnID, err)
@@ -37,10 +41,7 @@ func buildSessionOpenIntent(ctx context.Context, rpc sessionTargetClient, source
 	if _, err := verifyResolvedTarget(response.Msg.GetNodeCertChain(), response.Msg.GetTargetNodeId(), response.Msg.GetTargetNodeClass(), response.Msg.GetTargetNodeAccountId(), trust); err != nil {
 		return nil, fmt.Errorf("session open %s: verify target: %w", spawnID, err)
 	}
-	if source == nil {
-		return nil, errors.New("session open requires node login credentials")
-	}
-	credentials, err := source.NodeCredentials(ctx)
+	credentials, err := prepared.NodeCredentials(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("session open %s: node credentials: %w", spawnID, err)
 	}

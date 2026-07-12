@@ -155,6 +155,21 @@ func TestCorrespondenceSubstitutedImageRefused(t *testing.T) {
 	}
 }
 
+func TestCorrespondenceSubstitutedAttachedSecretSetRefused(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+	now := time.Unix(1_770_000_000, 0)
+	body := goodStartBody("sp-1", "node-1", 1, now)
+	body.AttachedSecretIds = []string{"manifest-secret", "selected-secret"}
+	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, intent.OpCreateSpawn)
+	fields := goodStartFields("sp-1", "node-1", 1)
+	fields.AttachedSecretIDs = []string{"manifest-secret", "substituted-secret"}
+	v := makeVerifier(t, ks, "alice", "node-1", false, func() time.Time { return now })
+	if nack, _ := v.VerifyStart(env, fields); nack != NACKCorrespondence {
+		t.Fatalf("substituted attached secrets: got %q, want %q", nack, NACKCorrespondence)
+	}
+}
+
 // Substituted target_node_id (different node) must be refused.
 func TestCorrespondenceSubstitutedTargetRefused(t *testing.T) {
 	asPriv, ks := genASKey(t)

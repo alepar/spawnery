@@ -106,6 +106,13 @@ func migrateSpawn(ctx context.Context, client moveClient, dev *seal.Device, spaw
 }
 
 func migrateSpawnAuthorized(ctx context.Context, client moveClient, credentials NodeCredentialSource, trust TargetTrust, dev *seal.Device, spawnID, target string, out io.Writer, now time.Time, opts MoveOptions, warn func(error), authorize bool) error {
+	if authorize {
+		prepared, err := prepareNodeAuthorization(ctx, credentials, trust)
+		if err != nil {
+			return err
+		}
+		credentials = prepared
+	}
 	if out == nil {
 		out = io.Discard
 	}
@@ -317,6 +324,11 @@ func forkSpawn(ctx context.Context, client forkClient, dev *seal.Device, req *cp
 }
 
 func forkSpawnAuthorized(ctx context.Context, client forkClient, credentials NodeCredentialSource, trust TargetTrust, dev *seal.Device, req *cpv1.ForkSpawnRequest, out io.Writer, now time.Time, opts MoveOptions) (ForkResult, error) {
+	prepared, err := prepareNodeAuthorization(ctx, credentials, trust)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	credentials = prepared
 	if out == nil {
 		out = io.Discard
 	}
@@ -341,26 +353,37 @@ func forkSpawnAuthorized(ctx context.Context, client forkClient, credentials Nod
 	}()
 	var resp *connect.Response[cpv1.ForkSpawnResponse]
 	authDone, rpcDone := false, false
+	var firstErr error
+	ctxDone := ctx.Done()
 	for !authDone || !rpcDone {
 		select {
 		case signErr := <-signCh:
-			if signErr != nil && !errors.Is(signErr, context.Canceled) {
-				return ForkResult{}, fmt.Errorf("fork %s authorization: %w", sourceID, signErr)
+			if signErr != nil && firstErr == nil {
+				firstErr = fmt.Errorf("fork %s authorization: %w", sourceID, signErr)
+				cancelOperation()
 			}
 			authDone = true
 			signCh = nil
 		case result := <-rpcCh:
-			if result.err != nil {
-				return ForkResult{}, fmt.Errorf("fork: %w", result.err)
+			if result.err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("fork: %w", result.err)
+				cancelOperation()
 			}
 			resp = result.resp
 			rpcDone = true
 			rpcCh = nil
-		case <-ctx.Done():
-			return ForkResult{}, ctx.Err()
+		case <-ctxDone:
+			if firstErr == nil {
+				firstErr = ctx.Err()
+			}
+			cancelOperation()
+			ctxDone = nil
 		}
 	}
 	cancelOperation()
+	if firstErr != nil {
+		return ForkResult{}, firstErr
+	}
 	return finishFork(ctx, client, dev, req, resp, out, now, opts)
 }
 

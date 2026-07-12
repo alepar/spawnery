@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +29,22 @@ func TestCreateWaitsForLateAuthorizationFailureAfterActive(t *testing.T) {
 	}
 	if time.Since(started) < 20*time.Millisecond {
 		t.Fatal("create returned before authorization completed")
+	}
+}
+
+func TestCreateAuthorizationErrorCancelsAndDrainsDelayedWaitPeer(t *testing.T) {
+	started := time.Now()
+	_, err := awaitCreateAuthorization(context.Background(), func(context.Context) error {
+		return errors.New("authorization failed")
+	}, func(context.Context) (uint64, error) {
+		time.Sleep(30 * time.Millisecond)
+		return 0, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "authorization failed") {
+		t.Fatalf("error = %v", err)
+	}
+	if time.Since(started) < 25*time.Millisecond {
+		t.Fatal("create returned before delayed wait peer drained")
 	}
 }
 

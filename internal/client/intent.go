@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"connectrpc.com/connect"
@@ -184,12 +185,28 @@ func intentBodyFromPending(pi *cpv1.PendingIntent, op intent.Op) (*authv1.Intent
 		Generation: pi.GetGeneration(), TargetNodeId: pi.GetTargetNodeId(), Op: string(op),
 		AppRef: pi.GetAppRef(), Image: pi.GetImage(), Model: pi.GetModel(), DataRef: pi.GetDataRef(),
 	}
+	body.AttachedSecretIds = canonicalStringSet(pi.GetAttachedSecretIds())
 	for _, mount := range pi.GetMounts() {
 		if mount != nil {
 			body.Mounts = append(body.Mounts, &authv1.MountRef{Name: mount.GetName(), BackendUri: mount.GetBackendUri(), CredentialSecretId: mount.GetCredentialSecretId(), CreateIfMissing: mount.GetCreateIfMissing(), RepositoryId: mount.GetRepositoryId()})
 		}
 	}
 	return body, nil
+}
+
+func canonicalStringSet(values []string) []string {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value != "" {
+			set[value] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(set))
+	for value := range set {
+		result = append(result, value)
+	}
+	slices.Sort(result)
+	return result
 }
 
 func provisionWithIntent(ctx context.Context, ic intentClient, credentials NodeCredentialSource, trust TargetTrust, spawnID string, params IntentParams, doRPC func(context.Context) error, warn func(error)) error {
@@ -204,25 +221,33 @@ func provisionWithIntent(ctx context.Context, ic intentClient, credentials NodeC
 		go func() { signCh <- pollAndSign(attemptCtx, ic, credentials, trust, spawnID, params) }()
 		go func() { rpcCh <- doRPC(attemptCtx) }()
 		signDone, rpcDone := false, false
+		var firstErr error
+		ctxDone := ctx.Done()
 		for !signDone || !rpcDone {
 			select {
 			case err := <-signCh:
-				if err != nil && !errors.Is(err, context.Canceled) {
-					return fmt.Errorf("provisionWithIntent %s: pollAndSign: %w", spawnID, err)
+				if err != nil && firstErr == nil {
+					firstErr = fmt.Errorf("provisionWithIntent %s: pollAndSign: %w", spawnID, err)
+					cancel()
 				}
 				signDone = true
 				signCh = nil
 			case err := <-rpcCh:
-				if err != nil {
-					return err
+				if err != nil && firstErr == nil {
+					firstErr = err
+					cancel()
 				}
 				rpcDone = true
 				rpcCh = nil
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-ctxDone:
+				if firstErr == nil {
+					firstErr = ctx.Err()
+				}
+				cancel()
+				ctxDone = nil
 			}
 		}
-		return nil
+		return firstErr
 	}
 	err := attempt()
 	if err == nil {
@@ -237,5 +262,9 @@ func provisionWithIntent(ctx context.Context, ic intentClient, credentials NodeC
 }
 
 func (c *Client) SignProvision(ctx context.Context, spawnID string, p IntentParams) error {
-	return pollAndSign(ctx, c.rpc, c.nodeCredentials, c.targetTrust, spawnID, p)
+	prepared, err := prepareNodeAuthorization(ctx, c.nodeCredentials, c.targetTrust)
+	if err != nil {
+		return err
+	}
+	return pollAndSign(ctx, c.rpc, prepared, c.targetTrust, spawnID, p)
 }

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -33,6 +34,12 @@ type NodeCredentialSource interface {
 	NodeCredentials(context.Context) (NodeCredentials, error)
 }
 
+type fixedNodeCredentialSource struct{ credentials NodeCredentials }
+
+func (s fixedNodeCredentialSource) NodeCredentials(context.Context) (NodeCredentials, error) {
+	return s.credentials, nil
+}
+
 // TargetTrust pins the environment and account policy used to verify a resolved node.
 type TargetTrust struct {
 	RootPEM                []byte
@@ -41,6 +48,26 @@ type TargetTrust struct {
 	CloudAccountID         string
 	CertificateRevocations pki.CertificateRevocationChecker
 	Now                    func() time.Time
+}
+
+func prepareNodeAuthorization(ctx context.Context, source NodeCredentialSource, trust TargetTrust) (NodeCredentialSource, error) {
+	if source == nil {
+		return nil, errors.New("client: node authorization requires login credentials")
+	}
+	if len(trust.RootPEM) == 0 || trust.TrustDomain == "" || trust.AccountID == "" || trust.CertificateRevocations == nil {
+		return nil, errors.New("client: node authorization requires pinned root, trust domain, accounts, and revocation state")
+	}
+	credentials, err := source.NodeCredentials(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("client: node credentials: %w", err)
+	}
+	if credentials.AccessToken == "" || credentials.Signer == nil {
+		return nil, errors.New("client: incomplete node credentials")
+	}
+	if _, err := credentials.Signer.PublicSPKIDER(); err != nil {
+		return nil, fmt.Errorf("client: session signer: %w", err)
+	}
+	return fixedNodeCredentialSource{credentials: credentials}, nil
 }
 
 // ECDSASessionSigner adapts a persistent P-256 private key to SessionSigner.

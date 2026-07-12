@@ -49,7 +49,20 @@ var ErrSpawnNotFound = errors.New("client: spawn not found")
 // spawn returns in 'starting' and provisions on the node — call WaitActive to block until it is
 // ready (and, if the CP requires it, run SignProvision concurrently to sign the create intent).
 func (c *Client) CreateSpawn(ctx context.Context, req *cpv1.CreateSpawnRequest) (string, error) {
-	return createSpawn(ctx, c.rpc, req)
+	id, prepared, err := createSpawnAuthorized(ctx, c.rpc, c.nodeCredentials, c.targetTrust, req)
+	if err == nil {
+		c.nodeCredentials = prepared
+	}
+	return id, err
+}
+
+func createSpawnAuthorized(ctx context.Context, rpc spawnClient, credentials NodeCredentialSource, trust TargetTrust, req *cpv1.CreateSpawnRequest) (string, NodeCredentialSource, error) {
+	prepared, err := prepareNodeAuthorization(ctx, credentials, trust)
+	if err != nil {
+		return "", nil, err
+	}
+	id, err := createSpawn(ctx, rpc, req)
+	return id, prepared, err
 }
 
 func createSpawn(ctx context.Context, rpc spawnClient, req *cpv1.CreateSpawnRequest) (string, error) {
@@ -115,7 +128,11 @@ func resumeSpawn(ctx context.Context, rpc spawnClient, id string, _ func(error))
 }
 
 func resumeSpawnAuthorized(ctx context.Context, rpc spawnClient, credentials NodeCredentialSource, trust TargetTrust, id string, warn func(error)) error {
-	return provisionWithIntent(ctx, rpc, credentials, trust, id, IntentParams{Op: intent.OpResumeSpawn}, func(rpcCtx context.Context) error {
+	prepared, err := prepareNodeAuthorization(ctx, credentials, trust)
+	if err != nil {
+		return err
+	}
+	return provisionWithIntent(ctx, rpc, prepared, trust, id, IntentParams{Op: intent.OpResumeSpawn}, func(rpcCtx context.Context) error {
 		_, err := rpc.ResumeSpawn(rpcCtx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id}))
 		return err
 	}, warn)

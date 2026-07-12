@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"math/big"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -107,6 +108,27 @@ func TestProvisionWithIntentReturnsSigningErrorPromptly(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("signing error propagation took %s", elapsed)
+	}
+}
+
+func TestProvisionWithIntentCancelsAndDrainsDelayedRPCPeer(t *testing.T) {
+	fx := issueProdNode(t, "node-1", "alice")
+	pending := &cpv1.PendingIntent{Op: string(intent.OpResumeSpawn), SpawnId: "sp-1", Generation: 7, TargetNodeId: "node-1"}
+	ic := &fakeIntentClient{response: &cpv1.GetPendingIntentResponse{Ready: true, Pending: pending, Generation: 7, TargetNodeId: "node-1", TargetNodeClass: pki.ClassSelfHosted, TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM}}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		return NodeCredentials{AccessToken: "node-token", Signer: failingSessionSigner{}}, nil
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+	started := time.Now()
+	err := provisionWithIntent(context.Background(), ic, source, trust, "sp-1", IntentParams{Op: intent.OpResumeSpawn}, func(context.Context) error {
+		time.Sleep(30 * time.Millisecond)
+		return nil
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "sign failed") {
+		t.Fatalf("error = %v", err)
+	}
+	if time.Since(started) < 25*time.Millisecond {
+		t.Fatal("provision returned before delayed RPC peer drained")
 	}
 }
 
@@ -258,6 +280,17 @@ func TestCreateExplicitSecretsAreSubsetOfResolvedStartupSecrets(t *testing.T) {
 	}
 	if _, _, err := validatePendingIntent(response, "sp-1", IntentParams{Op: intent.OpCreateSpawn, AttachedSecretIDs: []string{"substituted-secret"}}); err == nil {
 		t.Fatal("missing caller-selected secret accepted")
+	}
+}
+
+func TestIntentBodyBindsCompleteResolvedSecretSet(t *testing.T) {
+	pi := &cpv1.PendingIntent{Op: string(intent.OpCreateSpawn), AttachedSecretIds: []string{"selected-secret", "manifest-secret", "selected-secret"}}
+	body, err := intentBodyFromPending(pi, intent.OpCreateSpawn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := body.GetAttachedSecretIds(), []string{"manifest-secret", "selected-secret"}; !slices.Equal(got, want) {
+		t.Fatalf("signed secret set = %v, want canonical %v", got, want)
 	}
 }
 

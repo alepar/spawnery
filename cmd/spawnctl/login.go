@@ -364,32 +364,18 @@ func loginDevice(ctx context.Context, dir, asURL string, w io.Writer) error {
 // --- logout ---
 
 func doLogout(ctx context.Context, dir string) error {
-	s, err := loadState(dir)
-	if err != nil {
-		return fmt.Errorf("load state: %w", err)
-	}
-	if s == nil {
-		return nil // already logged out
-	}
-
-	// Best-effort AS call: revoke the family.
-	// /logout reads the logout_session mirror cookie (Path=/logout); the refresh_token cookie
-	// lives at Path=/refresh and would not be sent by a browser. The CLI bypasses the browser
-	// cookie jar so we set logout_session directly, matching what the AS handler reads.
-	if s.ASURL != "" && s.RefreshToken != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.ASURL+"/logout", nil)
-		if err == nil {
-			req.AddCookie(&http.Cookie{Name: "logout_session", Value: s.RefreshToken})
-			resp, err := http.DefaultClient.Do(req)
-			if err == nil {
-				resp.Body.Close()
-			}
+	var state *authState
+	if err := withFileLock(dir, func() error {
+		loaded, err := loadState(dir)
+		if err != nil {
+			return fmt.Errorf("load state: %w", err)
 		}
+		state = loaded
+		return clearAuthState(dir)
+	}); err != nil {
+		return err
 	}
-
-	// Wipe local state regardless of AS response.
-	_ = os.Remove(authStatePath(dir))
-	_ = os.Remove(authLockPath(dir))
+	bestEffortRemoteLogout(ctx, state, http.DefaultClient)
 	return nil
 }
 

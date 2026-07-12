@@ -44,6 +44,12 @@ const (
 	refreshPoPDomain = "spawnery/refresh-pop/v1" // frozen per AS idp.go:47
 	// refreshWindow: proactive refresh when this close to expiry (plus jitter).
 	refreshWindow = 2 * time.Minute
+	logoutTimeout = 2 * time.Second
+)
+
+var (
+	removeAuthStateFile = os.Remove
+	errAuthStateClear   = errors.New("clear local auth state")
 )
 
 // authState is the JSON-serialised state stored at <configDir>/auth.json.
@@ -269,8 +275,9 @@ func doRefresh(ctx context.Context, dir string, s *authState, httpClient *http.C
 			Error string `json:"error"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&body)
-		// Wipe local state — token is revoked or expired on the AS.
-		_ = os.Remove(authStatePath(dir))
+		if err := clearAuthState(dir); err != nil {
+			return fmt.Errorf("session expired (%s), but local credentials could not be cleared: %w", body.Error, err)
+		}
 		return fmt.Errorf("session expired (%s): please run 'spawnctl login' again", body.Error)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -354,6 +361,9 @@ func (ts *cpTokenSource) tokenLocked(ctx context.Context) (string, error) {
 		threshold := s.AccessExpiresAt - int64(refreshWindow.Seconds()) - jitterSec
 		if time.Now().Unix() >= threshold {
 			if err := doRefresh(ctx, ts.dir, s, ts.httpClient); err != nil {
+				if errors.Is(err, errAuthStateClear) {
+					return err
+				}
 				if _, statErr := os.Stat(authStatePath(ts.dir)); errors.Is(statErr, os.ErrNotExist) {
 					return err
 				}
@@ -436,23 +446,37 @@ func (ts *cpTokenSource) invalidateLostKey(ctx context.Context, s *authState, ca
 }
 
 func invalidateLostAuthState(ctx context.Context, dir string, s *authState, httpClient *http.Client, cause error) error {
+	if err := clearAuthState(dir); err != nil {
+		return fmt.Errorf("session key unusable (%v), and local credentials could not be cleared: %w", cause, err)
+	}
+	bestEffortRemoteLogout(ctx, s, httpClient)
+	return fmt.Errorf("session key unusable: %v; please run 'spawnctl login' again", cause)
+}
+
+func clearAuthState(dir string) error {
+	if err := removeAuthStateFile(authStatePath(dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %v", errAuthStateClear, err)
+	}
+	return nil
+}
+
+func bestEffortRemoteLogout(ctx context.Context, s *authState, httpClient *http.Client) {
+	if s == nil || s.ASURL == "" || s.RefreshToken == "" {
+		return
+	}
 	client := httpClient
 	if client == nil {
 		client = http.DefaultClient
 	}
-	if s.ASURL != "" && s.RefreshToken != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.ASURL+"/logout", nil)
-		if err == nil {
-			req.AddCookie(&http.Cookie{Name: "logout_session", Value: s.RefreshToken})
-			if resp, err := client.Do(req); err == nil {
-				resp.Body.Close()
-			}
+	remoteCtx, cancel := context.WithTimeout(ctx, logoutTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(remoteCtx, http.MethodPost, s.ASURL+"/logout", nil)
+	if err == nil {
+		req.AddCookie(&http.Cookie{Name: "logout_session", Value: s.RefreshToken})
+		if resp, err := client.Do(req); err == nil {
+			resp.Body.Close()
 		}
 	}
-	if err := os.Remove(authStatePath(dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("session key unusable (%v), and clearing auth state: %w", cause, err)
-	}
-	return fmt.Errorf("session key unusable: %v; please run 'spawnctl login' again", cause)
 }
 
 // buildTokenSource constructs a cpTokenSource from flag/env/state with the defined precedence.

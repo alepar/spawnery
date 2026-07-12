@@ -131,6 +131,7 @@ message IntentBody {
   string data_ref       = 10; // resume/recreate/migrate: mount data reference
   string session_id     = 11; // session-open: session being opened
   repeated MountRef mounts = 12; // create/resume: mount bindings
+  repeated string attached_secret_ids = 13; // canonical complete startup secret-id set
 }
 
 // SignedIntent carries a client-signed per-operation intent [AC1][AM11].

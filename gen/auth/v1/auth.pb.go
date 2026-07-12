@@ -735,18 +735,19 @@ type IntentBody struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Jti          string      `protobuf:"bytes,1,opt,name=jti,proto3" json:"jti,omitempty"`                            // unique intent id (UUID); node caches to detect replay
-	IssuedAt     int64       `protobuf:"varint,2,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"` // unix seconds; node enforces freshness window ±skew
-	SpawnId      string      `protobuf:"bytes,3,opt,name=spawn_id,json=spawnId,proto3" json:"spawn_id,omitempty"`
-	Generation   uint64      `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`                          // CP-committed episode generation
-	TargetNodeId string      `protobuf:"bytes,5,opt,name=target_node_id,json=targetNodeId,proto3" json:"target_node_id,omitempty"` // explicit target binding; node refuses if != self
-	Op           string      `protobuf:"bytes,6,opt,name=op,proto3" json:"op,omitempty"`                                           // mirrors domain suffix (e.g. "create-spawn")
-	AppRef       string      `protobuf:"bytes,7,opt,name=app_ref,json=appRef,proto3" json:"app_ref,omitempty"`                     // create: immutable app ref
-	Image        string      `protobuf:"bytes,8,opt,name=image,proto3" json:"image,omitempty"`                                     // create: agent container image digest/ref
-	Model        string      `protobuf:"bytes,9,opt,name=model,proto3" json:"model,omitempty"`                                     // create: model
-	DataRef      string      `protobuf:"bytes,10,opt,name=data_ref,json=dataRef,proto3" json:"data_ref,omitempty"`                 // resume/recreate/migrate: mount data reference
-	SessionId    string      `protobuf:"bytes,11,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`           // session-open: session being opened
-	Mounts       []*MountRef `protobuf:"bytes,12,rep,name=mounts,proto3" json:"mounts,omitempty"`                                  // create/resume: mount bindings
+	Jti               string      `protobuf:"bytes,1,opt,name=jti,proto3" json:"jti,omitempty"`                            // unique intent id (UUID); node caches to detect replay
+	IssuedAt          int64       `protobuf:"varint,2,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"` // unix seconds; node enforces freshness window ±skew
+	SpawnId           string      `protobuf:"bytes,3,opt,name=spawn_id,json=spawnId,proto3" json:"spawn_id,omitempty"`
+	Generation        uint64      `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`                                          // CP-committed episode generation
+	TargetNodeId      string      `protobuf:"bytes,5,opt,name=target_node_id,json=targetNodeId,proto3" json:"target_node_id,omitempty"`                 // explicit target binding; node refuses if != self
+	Op                string      `protobuf:"bytes,6,opt,name=op,proto3" json:"op,omitempty"`                                                           // mirrors domain suffix (e.g. "create-spawn")
+	AppRef            string      `protobuf:"bytes,7,opt,name=app_ref,json=appRef,proto3" json:"app_ref,omitempty"`                                     // create: immutable app ref
+	Image             string      `protobuf:"bytes,8,opt,name=image,proto3" json:"image,omitempty"`                                                     // create: agent container image digest/ref
+	Model             string      `protobuf:"bytes,9,opt,name=model,proto3" json:"model,omitempty"`                                                     // create: model
+	DataRef           string      `protobuf:"bytes,10,opt,name=data_ref,json=dataRef,proto3" json:"data_ref,omitempty"`                                 // resume/recreate/migrate: mount data reference
+	SessionId         string      `protobuf:"bytes,11,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`                           // session-open: session being opened
+	Mounts            []*MountRef `protobuf:"bytes,12,rep,name=mounts,proto3" json:"mounts,omitempty"`                                                  // create/resume: mount bindings
+	AttachedSecretIds []string    `protobuf:"bytes,13,rep,name=attached_secret_ids,json=attachedSecretIds,proto3" json:"attached_secret_ids,omitempty"` // canonical complete startup secret-id set
 }
 
 func (x *IntentBody) Reset() {
@@ -861,6 +862,13 @@ func (x *IntentBody) GetSessionId() string {
 func (x *IntentBody) GetMounts() []*MountRef {
 	if x != nil {
 		return x.Mounts
+	}
+	return nil
+}
+
+func (x *IntentBody) GetAttachedSecretIds() []string {
+	if x != nil {
+		return x.AttachedSecretIds
 	}
 	return nil
 }
@@ -1112,7 +1120,7 @@ var file_auth_v1_auth_proto_rawDesc = []byte{
 	0x04, 0x20, 0x01, 0x28, 0x08, 0x52, 0x0f, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65, 0x49, 0x66, 0x4d,
 	0x69, 0x73, 0x73, 0x69, 0x6e, 0x67, 0x12, 0x23, 0x0a, 0x0d, 0x72, 0x65, 0x70, 0x6f, 0x73, 0x69,
 	0x74, 0x6f, 0x72, 0x79, 0x5f, 0x69, 0x64, 0x18, 0x05, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0c, 0x72,
-	0x65, 0x70, 0x6f, 0x73, 0x69, 0x74, 0x6f, 0x72, 0x79, 0x49, 0x64, 0x22, 0xd6, 0x02, 0x0a, 0x0a,
+	0x65, 0x70, 0x6f, 0x73, 0x69, 0x74, 0x6f, 0x72, 0x79, 0x49, 0x64, 0x22, 0x86, 0x03, 0x0a, 0x0a,
 	0x49, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x42, 0x6f, 0x64, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x6a, 0x74,
 	0x69, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x6a, 0x74, 0x69, 0x12, 0x1b, 0x0a, 0x09,
 	0x69, 0x73, 0x73, 0x75, 0x65, 0x64, 0x5f, 0x61, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x03, 0x52,
@@ -1134,7 +1142,10 @@ var file_auth_v1_auth_proto_rawDesc = []byte{
 	0x73, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x49, 0x64, 0x12, 0x29, 0x0a, 0x06, 0x6d, 0x6f, 0x75,
 	0x6e, 0x74, 0x73, 0x18, 0x0c, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x11, 0x2e, 0x61, 0x75, 0x74, 0x68,
 	0x2e, 0x76, 0x31, 0x2e, 0x4d, 0x6f, 0x75, 0x6e, 0x74, 0x52, 0x65, 0x66, 0x52, 0x06, 0x6d, 0x6f,
-	0x75, 0x6e, 0x74, 0x73, 0x22, 0x67, 0x0a, 0x0c, 0x53, 0x69, 0x67, 0x6e, 0x65, 0x64, 0x49, 0x6e,
+	0x75, 0x6e, 0x74, 0x73, 0x12, 0x2e, 0x0a, 0x13, 0x61, 0x74, 0x74, 0x61, 0x63, 0x68, 0x65, 0x64,
+	0x5f, 0x73, 0x65, 0x63, 0x72, 0x65, 0x74, 0x5f, 0x69, 0x64, 0x73, 0x18, 0x0d, 0x20, 0x03, 0x28,
+	0x09, 0x52, 0x11, 0x61, 0x74, 0x74, 0x61, 0x63, 0x68, 0x65, 0x64, 0x53, 0x65, 0x63, 0x72, 0x65,
+	0x74, 0x49, 0x64, 0x73, 0x22, 0x67, 0x0a, 0x0c, 0x53, 0x69, 0x67, 0x6e, 0x65, 0x64, 0x49, 0x6e,
 	0x74, 0x65, 0x6e, 0x74, 0x12, 0x16, 0x0a, 0x06, 0x64, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x18, 0x01,
 	0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x64, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x12, 0x12, 0x0a, 0x04,
 	0x62, 0x6f, 0x64, 0x79, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x04, 0x62, 0x6f, 0x64, 0x79,

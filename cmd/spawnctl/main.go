@@ -230,6 +230,9 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 	cli := client.New(addr, src, nil, client.WithNodeAuthorization(src, trust), client.WithWarnHandler(func(err error) {
 		log.Printf("%v", err)
 	}))
+	if err := cli.PreflightNodeAuthorization(ctx); err != nil {
+		log.Fatalf("authorize create: %v", err)
+	}
 
 	id, err := cli.CreateSpawn(ctx, &cpv1.CreateSpawnRequest{
 		AppId:     appID,
@@ -322,26 +325,34 @@ func awaitCreateAuthorization(ctx context.Context, authorize func(context.Contex
 	}()
 	authDone, waitDone := false, false
 	var generation uint64
+	var firstErr error
+	ctxDone := ctx.Done()
 	for !authDone || !waitDone {
 		select {
 		case err := <-authCh:
-			if err != nil {
-				return 0, err
+			if err != nil && firstErr == nil {
+				firstErr = err
+				cancel()
 			}
 			authDone = true
 			authCh = nil
 		case result := <-waitCh:
-			if result.err != nil {
-				return 0, result.err
+			if result.err != nil && firstErr == nil {
+				firstErr = result.err
+				cancel()
 			}
 			generation = result.generation
 			waitDone = true
 			waitCh = nil
-		case <-ctx.Done():
-			return 0, ctx.Err()
+		case <-ctxDone:
+			if firstErr == nil {
+				firstErr = ctx.Err()
+			}
+			cancel()
+			ctxDone = nil
 		}
 	}
-	return generation, nil
+	return generation, firstErr
 }
 
 // driveFrames is the CP-lane interactive loop over the frame protocol: it sends each stdin line as a

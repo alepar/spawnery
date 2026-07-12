@@ -49,6 +49,15 @@ func WithNodeAuthorization(source NodeCredentialSource, trust TargetTrust) Optio
 	}
 }
 
+// PreflightNodeAuthorization validates and loads node credentials before a mutating CP call.
+func (c *Client) PreflightNodeAuthorization(ctx context.Context) error {
+	prepared, err := prepareNodeAuthorization(ctx, c.nodeCredentials, c.targetTrust)
+	if err == nil {
+		c.nodeCredentials = prepared
+	}
+	return err
+}
+
 // New builds a Client against endpoint (e.g. "http://127.0.0.1:8080" or an https:// CP), using ts
 // for bearer-token auth and tlsConf for the TLS leg (nil selects system roots / standard
 // verification).
