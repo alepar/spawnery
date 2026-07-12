@@ -106,6 +106,16 @@ func (c *CP) derive() {
 	if c.PublicURL != "" && c.AllowedOrigins == "" {
 		c.AllowedOrigins = c.PublicURL
 	}
+	c.Internal.RevocationIssuers = splitPathList(c.Internal.RevocationIssuers)
+	c.Internal.RevocationCRLs = splitPathList(c.Internal.RevocationCRLs)
+}
+
+func splitPathList(values []string) []string {
+	var paths []string
+	for _, value := range values {
+		paths = append(paths, splitTrim(value, ",")...)
+	}
+	return paths
 }
 
 // Validate runs cross-field checks beyond the struct tags.
