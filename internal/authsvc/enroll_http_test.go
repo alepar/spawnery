@@ -2,9 +2,14 @@ package authsvc_test
 
 import (
 	"context"
-	"crypto/ecdsa"
+	"crypto/tls"
 	"crypto/x509"
+	"math/big"
+	"net"
+	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,46 +18,47 @@ import (
 	"spawnery/internal/pki"
 )
 
-// Full enrollment vertical: the node-side client generates a keypair+CSR, POSTs the token+CSR to the AS
-// /enroll endpoint, and gets back a self-hosted cert+chain bound to the token's account and the node's
-// own key — verifiable against the AS root.
-func TestEnrollHTTPRoundTrip(t *testing.T) {
-	s := newAS(t)
-	tok, _ := s.IssueEnrollmentToken("acct-Z")
-	srv := httptest.NewServer(s.InternalHandler(mtls.Policy{"anonymous": {"authsvc.enroll": {}}}))
-	defer srv.Close()
+func TestRunEnrollWithKeyTLSAuthenticatesServerBeforeSendingCredentials(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := pki.NewRootCA("root")
+	serviceIssuer, _ := root.NewIntermediate(pki.IssuerService, "prod.spawnery.internal")
+	asLeaf, _ := serviceIssuer.IssueService(pki.RoleAuthService, "as-1", "prod.spawnery.internal", []string{"authsvc.internal"}, []net.IP{net.ParseIP("127.0.0.1")}, now.Add(time.Hour))
+	asTLS, _ := asLeaf.TLSCertificate()
+	crl, _ := serviceIssuer.CreateCRL(big.NewInt(1), nil, now.Add(-time.Minute), now.Add(time.Hour))
+	state, err := pki.OpenRevocationState(filepath.Join(t.TempDir(), "revocations", "state.json"), []*x509.Certificate{serviceIssuer.Cert}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.ApplyPEM(pki.MarshalCRLPEM(crl)); err != nil {
+		t.Fatal(err)
+	}
 
-	res, err := authsvc.RunEnroll(context.Background(), srv.URL, tok, "node-q")
-	if err != nil {
-		t.Fatalf("RunEnroll: %v", err)
-	}
-	cert, err := pki.ParseCertPEM(res.CertPEM)
-	if err != nil {
-		t.Fatalf("parse cert: %v", err)
-	}
-	inter, _ := pki.ParseCertPEM(res.ChainPEM)
-	root, _ := pki.ParseCertPEM(s.RootCAPEM())
-	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now(), allowNoCertificateRevocations)
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-	if id.NodeID != "node-q" || id.AccountID != "acct-Z" || id.Class != pki.ClassSelfHosted {
-		t.Fatalf("identity = %+v", id)
-	}
-	key, err := pki.ParseKeyPEM(res.KeyPEM)
-	if err != nil {
-		t.Fatalf("parse key: %v", err)
-	}
-	if !cert.PublicKey.(*ecdsa.PublicKey).Equal(key.Public()) {
-		t.Fatal("returned key does not match the issued cert")
-	}
-}
+	svc := newAS(t)
+	key, _ := pki.NewNodeKey()
+	fp, _ := pki.PublicKeyFingerprint(key.Public())
+	token, _ := svc.IssueBoundEnrollmentToken("acct", pki.ClassSelfHosted, fp)
+	var requests atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		svc.InternalHandler(mtls.Policy{"anonymous": {"authsvc.enroll": {}}}).ServeHTTP(w, r)
+	})
+	server := httptest.NewUnstartedServer(handler)
+	server.EnableHTTP2 = true
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{asTLS}, MinVersion: tls.VersionTLS13}
+	server.StartTLS()
+	defer server.Close()
 
-func TestEnrollHTTPRejectsBadToken(t *testing.T) {
-	s := newAS(t)
-	srv := httptest.NewServer(s.InternalHandler(mtls.Policy{"anonymous": {"authsvc.enroll": {}}}))
-	defer srv.Close()
-	if _, err := authsvc.RunEnroll(context.Background(), srv.URL, "bad-token", "n"); err == nil {
-		t.Fatal("a bad token must fail enrollment over HTTP")
+	transport := authsvc.EnrollTransport{Root: root.Cert, TrustDomain: "prod.spawnery.internal", ServerName: "authsvc.internal", IsRevoked: state.IsRevoked}
+	if _, err := authsvc.RunEnrollWithKey(context.Background(), server.URL, token, "node-1", key, transport); err != nil {
+		t.Fatalf("pinned enrollment: %v", err)
+	}
+	before := requests.Load()
+	transport.ServerName = "wrong.internal"
+	if _, err := authsvc.RunEnrollWithKey(context.Background(), server.URL, token, "node-1", key, transport); err == nil {
+		t.Fatal("wrong AS server name was accepted")
+	}
+	if requests.Load() != before {
+		t.Fatal("credentials were sent to a server rejected during TLS authentication")
 	}
 }
