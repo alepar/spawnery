@@ -81,9 +81,22 @@ func TestNodeRevocationMigrationUpgradesLegacyRowsWithoutCertificateAuthority(t 
 	if err != nil || legacy.IssuerSerial != "" || legacy.LeafSerial != "" {
 		t.Fatalf("legacy row = %+v, %v", legacy, err)
 	}
+	legacyRows, err := st.NodeRevocations().ListLegacy(ctxT())
+	if err != nil || len(legacyRows) != 1 || legacyRows[0].NodeID != "legacy-node" {
+		t.Fatalf("legacy reconciliation inventory = %+v, %v", legacyRows, err)
+	}
+	if err := st.WithTx(ctxT(), func(tx Store) error {
+		return tx.NodeRevocations().ReconcileLegacy(ctxT(), "legacy-node", "aa", "bb")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	legacyRows, err = st.NodeRevocations().ListLegacy(ctxT())
+	if err != nil || len(legacyRows) != 0 {
+		t.Fatalf("reconciled legacy rows = %+v, %v", legacyRows, err)
+	}
 	rows, err := st.NodeRevocations().ListByIssuer(ctxT(), "aa")
-	if err != nil || len(rows) != 0 {
-		t.Fatalf("legacy row entered certificate authority view: %+v, %v", rows, err)
+	if err != nil || len(rows) != 1 || rows[0].LeafSerial != "bb" {
+		t.Fatalf("reconciled certificate authority view: %+v, %v", rows, err)
 	}
 	if _, err := st.NodeRevocations().GetCRL(ctxT(), "aa"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("legacy row synthesized CRL checkpoint: %v", err)

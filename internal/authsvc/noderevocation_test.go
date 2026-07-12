@@ -3,11 +3,15 @@ package authsvc_test
 import (
 	"context"
 	"crypto/x509"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -136,6 +140,105 @@ func TestNodeRevocationIssuesMonotonicSelfHostedCRL(t *testing.T) {
 	secondCRL := parsePublishedCRL(t, <-published, issuer.Cert, now)
 	if secondCRL.Number.Cmp(big.NewInt(2)) != 0 || !containsCRLSerial(secondCRL, first.Cert.SerialNumber) || !containsCRLSerial(secondCRL, sibling.Cert.SerialNumber) {
 		t.Fatalf("second CRL = %+v", secondCRL)
+	}
+}
+
+func TestNodeCRLPublicationRetriesCommittedStateWithoutRenumbering(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := pki.NewRootCA("root")
+	issuer, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, "prod.spawnery.internal")
+	st := store.NewTestStore(t)
+	var attempts atomic.Int32
+	published := make(chan []byte, 2)
+	sink := func(pem []byte) error {
+		if attempts.Add(1) == 1 {
+			return errors.New("sink unavailable")
+		}
+		published <- append([]byte(nil), pem...)
+		return nil
+	}
+	svc := authsvc.New(root.Cert, issuer, authsvc.WithClock(func() time.Time { return now }), authsvc.WithNodeRevocationStore(st, sink))
+	leaf, err := svc.IssueSelfHostedNode("node-a", "acct", now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RevokeNodeCertificate(t.Context(), "node-a", issuer.Cert.SerialNumber, leaf.Cert.SerialNumber, "lost"); err == nil {
+		t.Fatal("sink failure did not surface")
+	}
+	checkpoint, err := st.NodeRevocations().GetCRL(t.Context(), issuer.Cert.SerialNumber.Text(16))
+	if err != nil || checkpoint.Number != "1" {
+		t.Fatalf("committed checkpoint = %+v, %v", checkpoint, err)
+	}
+	if err := svc.RevokeNodeCertificate(t.Context(), "node-a", issuer.Cert.SerialNumber, leaf.Cert.SerialNumber, "lost"); err != nil {
+		t.Fatalf("idempotent publication retry: %v", err)
+	}
+	list := parsePublishedCRL(t, <-published, issuer.Cert, now)
+	if list.Number.Cmp(big.NewInt(1)) != 0 {
+		t.Fatalf("retry renumbered CRL to %s", list.Number)
+	}
+
+	restarted := authsvc.New(root.Cert, issuer, authsvc.WithClock(func() time.Time { return now }), authsvc.WithNodeRevocationStore(st, func(pem []byte) error {
+		published <- append([]byte(nil), pem...)
+		return nil
+	}))
+	if err := restarted.RecoverNodeCRLPublication(t.Context()); err != nil {
+		t.Fatalf("restart publication recovery: %v", err)
+	}
+	if list := parsePublishedCRL(t, <-published, issuer.Cert, now); list.Number.Cmp(big.NewInt(1)) != 0 {
+		t.Fatalf("restart published CRL %s", list.Number)
+	}
+}
+
+func TestLegacyNodeRevocationRequiresExactVerifiedCertificateMapping(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := pki.NewRootCA("root")
+	issuer, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, "prod.spawnery.internal")
+	correct, _ := issuer.IssueNode("legacy-node", "acct", pki.RoleSelfHosted, "prod.spawnery.internal", now.Add(time.Hour))
+	wrong, _ := issuer.IssueNode("other-node", "acct", pki.RoleSelfHosted, "prod.spawnery.internal", now.Add(time.Hour))
+	dsn := "file:" + filepath.Join(t.TempDir(), "identity.db")
+	initial, err := store.Open(t.Context(), store.Config{Driver: "sqlite", DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initial.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO node_revocations (node_id, reason, revoked_at) VALUES ('legacy-node', 'lost', ?)`, now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(t.Context(), store.Config{Driver: "sqlite", DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	published := make(chan []byte, 1)
+	svc := authsvc.New(root.Cert, issuer, authsvc.WithTrustDomain("prod.spawnery.internal"), authsvc.WithClock(func() time.Time { return now }), authsvc.WithNodeRevocationStore(st, func(pem []byte) error {
+		published <- append([]byte(nil), pem...)
+		return nil
+	}))
+	if err := svc.ReconcileLegacyNodeRevocations(t.Context(), nil); err == nil {
+		t.Fatal("missing legacy mapping accepted")
+	}
+	if err := svc.ReconcileLegacyNodeRevocations(t.Context(), map[string]*x509.Certificate{"legacy-node": wrong.Cert}); err == nil {
+		t.Fatal("wrong-node legacy mapping accepted")
+	}
+	if err := svc.ReconcileLegacyNodeRevocations(t.Context(), map[string]*x509.Certificate{"legacy-node": correct.Cert}); err != nil {
+		t.Fatalf("valid legacy mapping: %v", err)
+	}
+	list := parsePublishedCRL(t, <-published, issuer.Cert, now)
+	if !containsCRLSerial(list, correct.Cert.SerialNumber) {
+		t.Fatal("reconciled legacy certificate missing from CRL")
+	}
+	legacy, err := st.NodeRevocations().ListLegacy(t.Context())
+	if err != nil || len(legacy) != 0 {
+		t.Fatalf("legacy rows after reconciliation = %+v, %v", legacy, err)
 	}
 }
 

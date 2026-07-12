@@ -425,7 +425,38 @@ func buildService(cfg *AS, certificateRevocations pki.CertificateRevocationCheck
 	if err := service.Validate(); err != nil {
 		return nil, err
 	}
+	legacyCertificates, err := loadLegacyRevocationCertificates(cfg.CA.LegacyRevocationCertificates)
+	if err != nil {
+		return nil, err
+	}
+	if err := service.ReconcileLegacyNodeRevocations(context.Background(), legacyCertificates); err != nil {
+		return nil, fmt.Errorf("authsvc: reconcile legacy node revocations: %w", err)
+	}
 	return service, nil
+}
+
+func loadLegacyRevocationCertificates(value string) (map[string]*x509.Certificate, error) {
+	result := make(map[string]*x509.Certificate)
+	for _, entry := range splitCSV(value) {
+		nodeID, path, ok := strings.Cut(entry, "=")
+		nodeID, path = strings.TrimSpace(nodeID), strings.TrimSpace(path)
+		if !ok || nodeID == "" || path == "" {
+			return nil, fmt.Errorf("authsvc: invalid legacy node revocation certificate mapping %q", entry)
+		}
+		if _, duplicate := result[nodeID]; duplicate {
+			return nil, fmt.Errorf("authsvc: duplicate legacy node revocation certificate mapping for %s", nodeID)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("authsvc: read legacy node revocation certificate %s: %w", path, err)
+		}
+		certificate, err := pki.ParseCertPEM(raw)
+		if err != nil {
+			return nil, fmt.Errorf("authsvc: parse legacy node revocation certificate %s: %w", path, err)
+		}
+		result[nodeID] = certificate
+	}
+	return result, nil
 }
 
 func nodeCRLFileSink(path string) func([]byte) error {

@@ -113,6 +113,8 @@ type Service struct {
 	nodeRevocations     store.NodeRevocationRepo
 	nodeRevocationStore store.Store
 	nodeCRLSink         func([]byte) error
+	nodeCRLPublishMu    sync.Mutex
+	nodeCRLCommitted    func(*big.Int)
 
 	githubMintStore       store.Store
 	githubMintProvider    GitHubProvider

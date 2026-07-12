@@ -29,11 +29,12 @@ type AS struct {
 	FakeGitHubUsers   string `koanf:"fake_github_users"`    // "alice:2000001,bob" or "alice,bob" (id derived when omitted)
 
 	CA struct {
-		TrustDomain      string `koanf:"trust_domain" validate:"required"`
-		RootPEM          string `koanf:"root_pem"`
-		IntermediateCert string `koanf:"intermediate_cert"`
-		IntermediateKey  string `koanf:"intermediate_key"`
-		RevocationCRL    string `koanf:"revocation_crl"`
+		TrustDomain                  string `koanf:"trust_domain" validate:"required"`
+		RootPEM                      string `koanf:"root_pem"`
+		IntermediateCert             string `koanf:"intermediate_cert"`
+		IntermediateKey              string `koanf:"intermediate_key"`
+		RevocationCRL                string `koanf:"revocation_crl"`
+		LegacyRevocationCertificates string `koanf:"legacy_revocation_certificates"`
 	} `koanf:"ca"`
 
 	Signing ASAuthSigning `koanf:"signing"`
@@ -228,6 +229,7 @@ var asEnvAliases = map[string]string{
 	"AS_INTERMEDIATE_CERT_PEM":                "ca.intermediate_cert",
 	"AS_INTERMEDIATE_KEY_PEM":                 "ca.intermediate_key",
 	"AS_SELF_HOSTED_REVOCATION_CRL":           "ca.revocation_crl",
+	"AS_LEGACY_NODE_REVOCATION_CERTIFICATES":  "ca.legacy_revocation_certificates",
 	"AS_AUTH_SIGNING_ENVIRONMENT":             "signing.environment",
 	"AS_AUTH_SIGNING_ROOT_PEM":                "signing.root_pem",
 	"AS_AUTH_SIGNING_CURRENT_KEY_PEM":         "signing.current_key_pem",

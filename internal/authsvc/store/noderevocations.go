@@ -93,6 +93,37 @@ func (r *nodeRevocationRepo) ListByIssuer(ctx context.Context, issuerSerial stri
 	return rows, err
 }
 
+func (r *nodeRevocationRepo) ListLegacy(ctx context.Context) ([]NodeRevocation, error) {
+	var rows []NodeRevocation
+	err := r.db.NewSelect().Model(&rows).
+		Where("issuer_serial = '' OR leaf_serial = ''").
+		OrderExpr("node_id ASC, id ASC").
+		Scan(ctx)
+	return rows, err
+}
+
+func (r *nodeRevocationRepo) ReconcileLegacy(ctx context.Context, nodeID, issuerSerial, leafSerial string) error {
+	if nodeID == "" || issuerSerial == "" || leafSerial == "" {
+		return errors.New("authsvc/store: invalid legacy node revocation reconciliation")
+	}
+	result, err := r.db.NewUpdate().Model((*NodeRevocation)(nil)).
+		Set("issuer_serial = ?", issuerSerial).
+		Set("leaf_serial = ?", leafSerial).
+		Where("node_id = ? AND issuer_serial = '' AND leaf_serial = ''", nodeID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return fmt.Errorf("authsvc/store: legacy node revocation %s matched %d rows", nodeID, updated)
+	}
+	return nil
+}
+
 func (r *nodeRevocationRepo) GetCRL(ctx context.Context, issuerSerial string) (NodeRevocationCRL, error) {
 	var row NodeRevocationCRL
 	err := r.db.NewSelect().Model(&row).Where("issuer_serial = ?", issuerSerial).Limit(1).Scan(ctx)
