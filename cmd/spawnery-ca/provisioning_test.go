@@ -89,6 +89,38 @@ func TestProductionAndDefaultDevProvisionInternalMTLS(t *testing.T) {
 	}
 }
 
+func TestPlainDevRecipesShareAuthorizationTrust(t *testing.T) {
+	justfile := readRepoFile(t, "../../Justfile")
+	for recipe, required := range map[string][]string{
+		"cp": {
+			"test -f {{devca}}/root.pem || just gen-dev-ca",
+			"CP_AUTH_ENVIRONMENT=dev",
+			"CP_AUTH_ROOT_CA={{devca}}/root.pem",
+			"CP_AUTH_SIGNER_REVOCATION_STATE={{repo}}/.envs/dev/revocations/cp-plain-signers/state.json",
+		},
+		"authsvc": {
+			"test -f {{devca}}/root.pem || just gen-dev-ca",
+			"AS_AUTH_SIGNING_ENVIRONMENT=dev",
+			"AS_AUTH_SIGNING_ROOT_PEM={{devca}}/root.pem",
+			"AS_AUTH_SIGNING_CURRENT_KEY_PEM={{devca}}/auth-signer-current-key.pem",
+			"AS_AUTH_SIGNING_CURRENT_CHAIN_PEM={{devca}}/auth-signer-current-chain.pem",
+		},
+		"node": {
+			"test -f {{devca}}/root.pem || just gen-dev-ca",
+			"NODE_ROOT_CA={{devca}}/root.pem",
+			"NODE_AUTH_ENVIRONMENT=dev",
+			"NODE_SIGNER_REVOCATION_STATE={{repo}}/.envs/dev/revocations/node-plain-signers/state.json",
+		},
+	} {
+		body := justfileRecipeBody(t, justfile, recipe)
+		for _, value := range required {
+			if !strings.Contains(body, value) {
+				t.Errorf("Justfile %s recipe missing %q", recipe, value)
+			}
+		}
+	}
+}
+
 func TestProductionSystemdIsolatesPrivatePKI(t *testing.T) {
 	provision := readRepoFile(t, "../../scripts/e2e-vm/provision/provision.sh")
 	for _, expected := range []string{
@@ -281,4 +313,27 @@ func readRepoFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+func justfileRecipeBody(t *testing.T, justfile, recipe string) string {
+	t.Helper()
+	lines := strings.Split(justfile, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, recipe+":") || strings.HasPrefix(line, recipe+" ") {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("Justfile recipe %s not found", recipe)
+	}
+	var body []string
+	for _, line := range lines[start:] {
+		if line != "" && line[0] != ' ' && line[0] != '\t' {
+			break
+		}
+		body = append(body, line)
+	}
+	return strings.Join(body, "\n")
 }

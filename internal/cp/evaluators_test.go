@@ -108,10 +108,11 @@ func TestEvaluatorIdleAttachedWithinBudgetNoOp(t *testing.T) {
 
 	// Attach a client so rt.Attached("sp1") == true.
 	cl := &capClient{}
-	if _, err := rt.AttachClient("sp1", "0", "c1", "alice", nil, cl, 0); err != nil {
+	_, lease, err := rt.AttachClient("sp1", "0", "c1", "alice", nil, cl, 0)
+	if err != nil {
 		t.Fatalf("AttachClient: %v", err)
 	}
-	defer rt.DetachClient("sp1", "0", "c1")
+	defer rt.DetachClient("sp1", "0", "c1", lease)
 
 	lastActivity := time.Now().Add(-10 * time.Minute).UnixMilli()
 	rs := runningSpawnMsg("sp1", 0, lastActivity)

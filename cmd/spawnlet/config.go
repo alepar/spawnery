@@ -112,19 +112,23 @@ func (s Spawnlet) Validate() error {
 	}
 	switch s.Node.AuthMode {
 	case "insecure":
-		return nil
 	case "enforced":
 	default:
 		return fmt.Errorf("node.auth_mode must be one of insecure or enforced")
 	}
-	if s.Node.Environment == "" {
-		return fmt.Errorf("node.environment is required in enforced mode")
+	if s.Node.AuthMode == "enforced" || s.CP.Addr != "" {
+		if s.Node.Environment == "" {
+			return fmt.Errorf("node.environment is required for client authorization")
+		}
+		if s.Node.RootCA == "" && s.Node.IDDir == "" {
+			return fmt.Errorf("node.root_ca or node.id_dir is required for client authorization")
+		}
+		if s.Node.SignerRevocationState == "" {
+			return fmt.Errorf("node.signer_revocation_state is required for client authorization")
+		}
 	}
-	if s.Node.RootCA == "" && s.Node.IDDir == "" {
-		return fmt.Errorf("node.root_ca or node.id_dir is required in enforced mode")
-	}
-	if s.Node.SignerRevocationState == "" {
-		return fmt.Errorf("node.signer_revocation_state is required in enforced mode")
+	if s.Node.AuthMode == "insecure" {
+		return nil
 	}
 	if s.CP.ServerName == "" {
 		return fmt.Errorf("cp.server_name is required in enforced mode")

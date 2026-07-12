@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/spawnlet"
@@ -179,6 +180,8 @@ func TestSuspendEmitsMarkersAndSuspended(t *testing.T) {
 	if got := lastPhase(fs.phasesFor("sp1")); got != nodev1.SpawnPhase_ACTIVE {
 		t.Fatalf("phase before suspend = %v, want ACTIVE", got)
 	}
+	authKey := sessionAuthKey{spawnID: "sp1", sessionID: "0", clientID: "client"}
+	a.auths.register(authKey, sessionAuthRecord{expiresAt: time.Now().Add(time.Hour)}, func(string) {})
 
 	a.handle(ctx, &nodev1.CPMessage{Msg: &nodev1.CPMessage_Suspend{Suspend: &nodev1.Suspend{SpawnId: "sp1", Generation: 2}}})
 
@@ -202,6 +205,9 @@ func TestSuspendEmitsMarkersAndSuspended(t *testing.T) {
 	}
 	if _, live := mgr.SpawnGeneration("sp1"); live {
 		t.Fatal("suspended spawn must be dropped from the manager store")
+	}
+	if a.auths.contains(authKey) {
+		t.Fatal("suspend retained attachment authorization")
 	}
 }
 

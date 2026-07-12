@@ -68,6 +68,7 @@ const (
 	DomainMigrateSpawn  = "spawnery/intent/migrate-spawn/v1"
 	DomainForkSpawn     = "spawnery/intent/fork-spawn/v1"
 	DomainSessionOpen   = "spawnery/intent/session-open/v1"
+	DomainSessionReauth = "spawnery/intent/session-reauth/v1"
 )
 
 // Op identifies which lifecycle operation an intent covers.
@@ -80,6 +81,7 @@ const (
 	OpMigrateSpawn  Op = "migrate-spawn"
 	OpForkSpawn     Op = "fork-spawn"
 	OpSessionOpen   Op = "session-open"
+	OpSessionReauth Op = "session-reauth"
 )
 
 // DomainFor returns the domain-separation tag for op.
@@ -97,6 +99,8 @@ func DomainFor(op Op) string {
 		return DomainForkSpawn
 	case OpSessionOpen:
 		return DomainSessionOpen
+	case OpSessionReauth:
+		return DomainSessionReauth
 	default:
 		return "spawnery/intent/" + string(op) + "/v1"
 	}

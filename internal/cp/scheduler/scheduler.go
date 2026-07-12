@@ -15,6 +15,7 @@ import (
 	"spawnery/internal/cp/cpmetrics"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
+	"spawnery/internal/intent"
 )
 
 // spawnResult carries both the phase and the machine-readable NACK detail so callers can
@@ -81,7 +82,7 @@ func (s *Scheduler) PickNodeID(placement registry.Placement) (string, error) {
 // mounts are the persisted per-mount backend bindings to thread into StartSpawn; nil/empty means
 // the spawn has no bound mounts.
 // baseImageDigest is threaded to the node for cross-node resume (sp-ei4.1.10); empty on fresh create.
-func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement, env *authv1.AuthEnvelope, mounts []*nodev1.MountBinding, baseImageDigest string, rootfs *RootfsRestore, artifacts []*nodev1.ArtifactSpec, secrets []*nodev1.SealedSecret) (string, error) {
+func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appID, runnable, mode string, gen uint64, placement registry.Placement, env *authv1.AuthEnvelope, mounts []*nodev1.MountBinding, baseImageDigest string, rootfs *RootfsRestore, artifacts []*nodev1.ArtifactSpec, secrets []*nodev1.SealedSecret, operations ...intent.Op) (string, error) {
 	n := s.reg.PickFor(placement)
 	if n == nil {
 		cpmetrics.PlacementNoCapacity()
@@ -97,6 +98,9 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 		SpawnId: id, AppRef: appRef, Model: model, Name: name, AppId: appID,
 		Image: placement.Image, RunnableId: runnable, Mode: mode, Generation: gen,
 		Auth: env, AssertedOwner: placement.Owner, BaseImageDigest: baseImageDigest,
+	}
+	if len(operations) == 1 {
+		start.IntentOp = string(operations[0])
 	}
 	if len(mounts) > 0 {
 		start.Mounts = mounts

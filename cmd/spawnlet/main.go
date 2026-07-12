@@ -147,10 +147,7 @@ func main() {
 		nodeCfg.NodeRootPEM = nodeRootPEM(cfg)
 		artifactTrust, err := loadArtifactVerifier(cfg, time.Now())
 		if err != nil {
-			if cfg.Node.AuthMode == "enforced" {
-				log.Fatalf("node: artifact trust setup: %v", err)
-			}
-			log.Printf("node: artifact trust unavailable in insecure mode: %v", err)
+			log.Fatalf("node: artifact trust setup: %v", err)
 		}
 		if artifactTrust != nil {
 			reloadCtx, cancelReload := context.WithCancel(ctx)
@@ -620,35 +617,26 @@ func nodeGitHubMint(cfg *Spawnlet, revocations *nodeCertificateRevocations) node
 	return authv1connect.NewAuthServiceClient(client, asURL)
 }
 
-// buildIntentVerifier builds the A4 IntentVerifier from the config [AC1][AM12].
-//
-// cfg.Node.AuthMode=insecure (default): AuthModeVerifyLog — the full verification chain runs but
-// failures are logged rather than enforced. This satisfies AM12 (dev/prod parity via verify-and-log).
-// cfg.Node.AuthMode=enforced: AuthModeEnforced — failures block execution and return NACK codes.
+// buildIntentVerifier builds the mandatory A4 IntentVerifier. AuthMode selects only the CP transport;
+// both h2c and service-mTLS modes use the same root-anchored, fail-closed authorization verifier.
 //
 // Artifact trust is rooted exclusively in cfg.Node.RootCA (or <id_dir>/root.pem) and the persisted
-// signer-revocation store. In insecure mode unavailable trust logs token failures but does not block.
+// signer-revocation store.
 //
-// nodeOwner: if non-empty AND cfg.Node.AuthMode=enforced, enables the self-hosted owner check
+// nodeOwner: if non-empty, enables the self-hosted owner check
 // (the token's account_id must equal nodeOwner).
 func buildIntentVerifier(cfg *Spawnlet, trust *artifactTrust, nodeID, nodeOwner string) (*node.IntentVerifier, error) {
-	var authMode node.AuthMode
 	switch cfg.Node.AuthMode {
 	case "insecure":
-		authMode = node.AuthModeVerifyLog
 	case "enforced":
-		authMode = node.AuthModeEnforced
 	default:
 		return nil, fmt.Errorf("unknown node auth mode %q", cfg.Node.AuthMode)
 	}
-
-	var artifacts *token.Verifier
-	if trust != nil {
-		artifacts = trust.verifier
+	if trust == nil || trust.verifier == nil {
+		return nil, fmt.Errorf("root-anchored artifact trust is required")
 	}
-
-	selfHosted := authMode == node.AuthModeEnforced && nodeOwner != ""
-	return node.NewIntentVerifier(artifacts, nodeOwner, nodeID, selfHosted, authMode, nil), nil
+	selfHosted := nodeOwner != ""
+	return node.NewIntentVerifier(trust.verifier, nodeOwner, nodeID, selfHosted, nil), nil
 }
 
 type artifactTrust struct {

@@ -16,6 +16,7 @@ type MountFinalizer struct {
 
 type Spawn struct {
 	ID         string
+	OwnerID    string
 	Generation uint64 // CP-assigned generation (0 standalone); labels the pod for reconcile/fencing
 	SidecarID  string
 	AgentID    string
@@ -80,11 +81,62 @@ type Spawn struct {
 }
 
 type Store struct {
-	mu sync.Mutex
-	m  map[string]*Spawn
+	mu           sync.Mutex
+	m            map[string]*Spawn
+	reservations map[string]*OwnerReservation
 }
 
-func NewStore() *Store { return &Store{m: map[string]*Spawn{}} }
+// OwnerReservation is an opaque, single-use claim on one spawn incarnation.
+// Pointer identity prevents delayed cleanup from releasing a later claim with the same fields.
+type OwnerReservation struct {
+	id         string
+	owner      string
+	generation uint64
+}
+
+func NewStore() *Store {
+	return &Store{m: map[string]*Spawn{}, reservations: map[string]*OwnerReservation{}}
+}
+
+func (s *Store) ReserveOwner(id, owner string, generation uint64) (*OwnerReservation, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id == "" || owner == "" || s.m[id] != nil {
+		return nil, false
+	}
+	if _, exists := s.reservations[id]; exists {
+		return nil, false
+	}
+	reservation := &OwnerReservation{id: id, owner: owner, generation: generation}
+	s.reservations[id] = reservation
+	return reservation, true
+}
+
+func (s *Store) ReleaseOwner(reservation *OwnerReservation) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if reservation != nil && s.reservations[reservation.id] == reservation {
+		delete(s.reservations, reservation.id)
+	}
+}
+
+func (s *Store) OwnsReservation(reservation *OwnerReservation) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return reservation != nil && s.reservations[reservation.id] == reservation
+}
+
+func (s *Store) CommitOwner(reservation *OwnerReservation, sp *Spawn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if reservation == nil || sp == nil || reservation.id != sp.ID || reservation.owner != sp.OwnerID ||
+		reservation.generation != sp.Generation || s.m[sp.ID] != nil || s.reservations[sp.ID] != reservation {
+		return false
+	}
+	delete(s.reservations, sp.ID)
+	s.m[sp.ID] = sp
+	return true
+}
 
 func (s *Store) Put(sp *Spawn) { s.mu.Lock(); s.m[sp.ID] = sp; s.mu.Unlock() }
 func (s *Store) Get(id string) (*Spawn, bool) {
@@ -92,6 +144,15 @@ func (s *Store) Get(id string) (*Spawn, bool) {
 	defer s.mu.Unlock()
 	sp, ok := s.m[id]
 	return sp, ok
+}
+func (s *Store) OwnerGeneration(id string) (string, uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sp, ok := s.m[id]
+	if !ok {
+		return "", 0, false
+	}
+	return sp.OwnerID, sp.Generation, true
 }
 func (s *Store) Delete(id string) { s.mu.Lock(); delete(s.m, id); s.mu.Unlock() }
 

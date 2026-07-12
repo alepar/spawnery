@@ -899,7 +899,7 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 			provCh <- provisionResult{"", presignErr}
 			return
 		}
-		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, schedulerRootfsRestore(rootfs), nodeArts, secrets)
+		n, e := s.sched.Provision(provCtx, id, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, schedulerRootfsRestore(rootfs), nodeArts, secrets, op)
 		provCh <- provisionResult{n, e}
 	}()
 
@@ -1327,7 +1327,7 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 		}
 		return nil, presignErr
 	}
-	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, nil, nodeArts, secrets)
+	nodeID, err := s.sched.Provision(ctx, req.Msg.SpawnId, sp.AppRef, sp.Model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, uint64(gen), placement, env, storeToNodeMounts(mounts), sp.BaseImageDigest, nil, nodeArts, secrets, intent.OpRecreateSpawn)
 	if err != nil {
 		var step string
 		if st, ok := s.provisioning.get(req.Msg.SpawnId); ok {

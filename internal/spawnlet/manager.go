@@ -786,6 +786,10 @@ func (m *Manager) SpawnGeneration(id string) (uint64, bool) {
 	return sp.Generation, true
 }
 
+func (m *Manager) SpawnOwnerGeneration(id string) (string, uint64, bool) {
+	return m.store.OwnerGeneration(id)
+}
+
 // RunningInventory returns the spawns this node currently manages (id + generation), for the CP
 // reconcile carried on Register/Heartbeat.
 func (m *Manager) RunningInventory() []runtime.ManagedPod {
@@ -956,6 +960,49 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID st
 // dispatcher entrypoint (entrypoint.sh) resolves the actual launch (serve+adapter, tmux-wrapped
 // TUI, etc.) — the node just names the runnable. No selection leaves Cmd nil (image default).
 func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, sel AgentSelection) (*Spawn, error) {
+	return m.createWithSelection(ctx, id, appPath, model, name, appID, generation, "", sel)
+}
+
+func (m *Manager) CreateAuthorizedWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, sel AgentSelection) (*Spawn, error) {
+	reservation, err := m.ReserveAuthorizedSpawn(id, ownerID, generation)
+	if err != nil {
+		return nil, err
+	}
+	defer m.ReleaseAuthorizedSpawn(reservation)
+	return m.CreateReservedWithSelection(ctx, reservation, appPath, model, name, appID, sel)
+}
+
+func (m *Manager) ReserveAuthorizedSpawn(id, ownerID string, generation uint64) (*OwnerReservation, error) {
+	if ownerID == "" {
+		return nil, fmt.Errorf("authorized spawn owner is empty")
+	}
+	reservation, ok := m.store.ReserveOwner(id, ownerID, generation)
+	if !ok {
+		return nil, fmt.Errorf("spawn %q is already reserved or live", id)
+	}
+	return reservation, nil
+}
+
+func (m *Manager) ReleaseAuthorizedSpawn(reservation *OwnerReservation) {
+	m.store.ReleaseOwner(reservation)
+}
+
+func (m *Manager) OwnsAuthorizedSpawn(reservation *OwnerReservation) bool {
+	return m.store.OwnsReservation(reservation)
+}
+
+func (m *Manager) CreateReservedWithSelection(ctx context.Context, reservation *OwnerReservation, appPath, model, name, appID string, sel AgentSelection) (*Spawn, error) {
+	if !m.store.OwnsReservation(reservation) {
+		return nil, fmt.Errorf("authorized spawn reservation is not current")
+	}
+	return m.createWithReservation(ctx, reservation.id, appPath, model, name, appID, reservation.generation, reservation.owner, reservation, sel)
+}
+
+func (m *Manager) createWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, sel AgentSelection) (*Spawn, error) {
+	return m.createWithReservation(ctx, id, appPath, model, name, appID, generation, ownerID, nil, sel)
+}
+
+func (m *Manager) createWithReservation(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, reservation *OwnerReservation, sel AgentSelection) (*Spawn, error) {
 	agentImage := m.cfg.AgentImage
 	if sel.Image != "" {
 		agentImage = sel.Image
@@ -1604,7 +1651,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	}
 
 	sp := &Spawn{
-		ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
+		ID: id, OwnerID: ownerID, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
 		MountDirs: mountDirs, MountBindings: append([]MountBinding(nil), sel.Mounts...), MountFinalizers: mountFinalizers, JournalMounts: journalMounts, journalWatchers: watchers,
 		FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID,
 		Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL,
@@ -1613,7 +1660,17 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		DeltaDepth:      deltaDepth,
 		RootfsArtifacts: cloneRootfsArtifacts(rootfsArtifacts),
 	}
-	m.store.Put(sp)
+	if ownerID != "" {
+		if !m.store.CommitOwner(reservation, sp) {
+			for _, watcher := range watchers {
+				watcher.Stop()
+			}
+			cleanupPreStoreFailure(h, floorIP)
+			return nil, fmt.Errorf("spawn %q ownership reservation was lost", id)
+		}
+	} else {
+		m.store.Put(sp)
+	}
 	return sp, nil
 }
 

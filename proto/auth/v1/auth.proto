@@ -117,7 +117,7 @@ message MountRef {
 // correspondence check compares exactly the fields it is about to execute.
 //
 // Domain tags: spawnery/intent/<op>/v1 for op ∈ {create-spawn, resume-spawn,
-// recreate-spawn, migrate-spawn, session-open}.
+// recreate-spawn, migrate-spawn, session-open, session-reauth}.
 message IntentBody {
   string jti            = 1;  // unique intent id (UUID); node caches to detect replay
   int64  issued_at      = 2;  // unix seconds; node enforces freshness window ±skew
@@ -132,6 +132,7 @@ message IntentBody {
   string session_id     = 11; // session-open: session being opened
   repeated MountRef mounts = 12; // create/resume: mount bindings
   repeated string attached_secret_ids = 13; // canonical complete startup secret-id set
+  string new_token_id = 14; // session-reauth: verified replacement node-token id
 }
 
 // SignedIntent carries a client-signed per-operation intent [AC1][AM11].

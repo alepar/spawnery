@@ -132,11 +132,12 @@ func TestSpawnletConfig_Defaults(t *testing.T) {
 
 func TestSpawnletConfig_EnvAliasOverride(t *testing.T) {
 	cfg, err := loadSpawnletTest(t, "dev", map[string]string{
-		"NODE_ID":        "node-prod-1",
-		"NODE_CLASS":     "self-hosted",
-		"MEM_LIMIT_MB":   "2048",
-		"EGRESS_ENFORCE": "false",
-		"CP_ADDR":        "http://cp.example.com:8080",
+		"NODE_ID":                      "node-prod-1",
+		"NODE_CLASS":                   "self-hosted",
+		"NODE_SIGNER_REVOCATION_STATE": "/tmp/spawnlet-test-signer-state",
+		"MEM_LIMIT_MB":                  "2048",
+		"EGRESS_ENFORCE":                "false",
+		"CP_ADDR":                       "http://cp.example.com:8080",
 	})
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -194,6 +195,26 @@ func TestSpawnletConfig_EnforcedArtifactTrustRequirements(t *testing.T) {
 	}
 }
 
+func TestSpawnletConfig_AttachedInsecureNodeRequiresArtifactTrust(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sets []string
+		want string
+	}{
+		{name: "environment", sets: []string{"node.environment="}, want: "node.environment"},
+		{name: "root", sets: []string{"node.id_dir=", "node.root_ca="}, want: "node.root_ca"},
+		{name: "state", sets: nil, want: "node.signer_revocation_state"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sets := append([]string{"cp.addr=http://127.0.0.1:8080"}, tc.sets...)
+			_, err := loadSpawnletTest(t, "dev", nil, sets...)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestSpawnletConfig_RejectsUnknownAuthMode(t *testing.T) {
 	for _, mode := range []string{"enforcd", "", "production"} {
 		t.Run(mode, func(t *testing.T) {
@@ -210,6 +231,16 @@ func TestBuildIntentVerifierRejectsUnknownAuthMode(t *testing.T) {
 	cfg.Node.AuthMode = "enforcd"
 	if _, err := buildIntentVerifier(cfg, nil, "node-1", ""); err == nil {
 		t.Fatal("auth mode typo selected verify-log instead of failing closed")
+	}
+}
+
+func TestBuildIntentVerifierRequiresTrustInEveryTransportMode(t *testing.T) {
+	for _, mode := range []string{"insecure", "enforced"} {
+		cfg := &Spawnlet{}
+		cfg.Node.AuthMode = mode
+		if _, err := buildIntentVerifier(cfg, nil, "node-1", ""); err == nil {
+			t.Fatalf("%s mode accepted missing artifact trust", mode)
+		}
 	}
 }
 
