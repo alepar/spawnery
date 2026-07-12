@@ -29,19 +29,14 @@ import {
   type ResolvedTargetVerifier,
 } from "./signing/intent.js";
 
-export type SpawnClientOptions = {
-  transport: Transport;
-  keyStore?: undefined;
-  getNodeAccessToken?: undefined;
-  verifyTarget?: undefined;
-} | {
+export interface SpawnClientOptions {
   transport: Transport;
   /** Load-only persistent key storage. SpawnClient never creates a replacement key. */
-  keyStore: KeyStore;
+  keyStore?: KeyStore;
   /** Explicit node-audience credential provider, separate from the CP transport bearer. */
-  getNodeAccessToken: () => Promise<string>;
-  verifyTarget: ResolvedTargetVerifier;
-};
+  getNodeAccessToken?: () => Promise<string>;
+  verifyTarget?: ResolvedTargetVerifier;
+}
 
 export interface ForkOptions {
   targetNodeId?: string;
@@ -69,7 +64,13 @@ export class SpawnClient {
    */
   private signConcurrently(spawnId: string, pended: PendedOp): void {
     if (!this.keyStore) return;
-    void Promise.all([this.keyStore.get(), this.getNodeAccessToken!()])
+    if (!this.getNodeAccessToken || !this.verifyTarget) {
+      console.error("intent sign failed: SpawnClient requires node authorization and target verification");
+      return;
+    }
+    const getNodeAccessToken = this.getNodeAccessToken;
+    const verifyTarget = this.verifyTarget;
+    void Promise.all([this.keyStore.get(), getNodeAccessToken()])
       .then(([kp, nodeAccessToken]) => {
         if (!kp) throw new Error("SpawnClient: no session keypair in KeyStore; create one first");
         if (!nodeAccessToken) throw new Error("SpawnClient: missing node access token");
@@ -80,7 +81,7 @@ export class SpawnClient {
           pended,
           signer: new WebCryptoSessionSigner(kp.privateKey, kp.publicKey),
           nodeAccessToken,
-          verifyTarget: this.verifyTarget!,
+          verifyTarget,
         });
       })
       .catch((e: unknown) => console.error("intent sign failed:", e))
