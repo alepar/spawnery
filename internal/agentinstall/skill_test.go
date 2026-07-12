@@ -494,32 +494,37 @@ func TestInstallSkill_SignalsSkippedSymlinks(t *testing.T) {
 	}
 }
 
-func TestInstallSkillNoOpAgentsUnchanged(t *testing.T) {
-	// opencode and goose must remain permanent no-ops; guard against regression.
-	home := t.TempDir()
-	artifacts := t.TempDir()
-	stageSkillTree(t, artifacts, "payloads/my-skill")
+func TestInstallSkillCanonicalOnlyAgentsApplyToCanonicalDirOnly(t *testing.T) {
+	// opencode, goose, and hermes install to the canonical dir only (no native
+	// SkillPath copy) — guard against a native-copy regression.
+	for _, agent := range []string{"opencode", "goose", "hermes"} {
+		agent := agent
+		t.Run(agent, func(t *testing.T) {
+			home := t.TempDir()
+			artifacts := t.TempDir()
+			stageSkillTree(t, artifacts, "payloads/my-skill")
 
-	tests := []struct {
-		agent  string
-		reason string
-	}{
-		{"opencode", "opencode skills layout unconfirmed (S6)"},
-		{"goose", "deferred"},
-	}
-
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.agent, func(t *testing.T) {
-			r, all := applySkill(home, artifacts, tc.agent, "my-skill", "payloads/my-skill")
+			r, all := applySkill(home, artifacts, agent, "my-skill", "payloads/my-skill")
 			if len(all) != 1 {
 				t.Fatalf("expected 1 report, got %d", len(all))
 			}
-			if r.Status != agentinstall.StatusSkipped {
-				t.Errorf("expected skipped, got %q (reason: %q)", r.Status, r.Reason)
+			if r.Status != agentinstall.StatusApplied {
+				t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
 			}
-			if r.Reason != tc.reason {
-				t.Errorf("reason: got %q want %q", r.Reason, tc.reason)
+
+			env := agentinstall.MapEnviron{"HOME": home}
+			reg := agentinstall.NewRegistry(env)
+			e, ok := reg.Lookup(agent)
+			if !ok {
+				t.Fatalf("agent %q not in registry", agent)
+			}
+			if lay := e.Layout(); lay.SkillPath != "" {
+				t.Fatalf("agent %q: expected empty SkillPath (canonical-only), got %q", agent, lay.SkillPath)
+			}
+
+			dest := filepath.Join(agentinstall.CanonicalSkillsDir(home), "my-skill", "SKILL.md")
+			if _, err := os.Stat(dest); err != nil {
+				t.Errorf("canonical copy missing at %s: %v", dest, err)
 			}
 		})
 	}

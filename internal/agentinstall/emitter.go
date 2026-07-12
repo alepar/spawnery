@@ -27,7 +27,15 @@ type AgentLayout struct {
 	Name string
 	// ConfigRoot is the agent's primary configuration directory (existence indicates "detected").
 	ConfigRoot string
-	// SkillPath is the directory where skill subdirectories are installed.
+	// SkillPath is an ADDITIONAL agent-native skill dir that must receive a REAL COPY
+	// (never a symlink) of the canonical skill install. Every skill installs once into
+	// the canonical dir (agentinstall.CanonicalSkillsDir(homeDir) = ~/.agents/skills),
+	// which is home-derived and identical for every agent — it is NOT a layout field.
+	// Empty means canonical-only: the agent reads ~/.agents/skills natively with no
+	// extra glue (opencode, goose, hermes — hermes needs a config.yaml upsert instead,
+	// see hermes.go). Currently non-empty for claude (~/.claude/skills — claude-code
+	// does not read ~/.agents/skills: #31005/#38051/#25367) and codex (legacy compat
+	// copy at <codexHome>/skills, kept pending sp-9e6q).
 	SkillPath string
 	// MCPPath is the file where MCP server entries are written.
 	MCPPath string

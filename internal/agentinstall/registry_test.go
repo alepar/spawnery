@@ -83,6 +83,8 @@ func TestRegistryLayouts(t *testing.T) {
 	t.Run("opencode", func(t *testing.T) {
 		l := lm["opencode"]
 		assertPath(t, "ConfigRoot", l.ConfigRoot, filepath.Join(home, ".config", "opencode"))
+		// Canonical-only: opencode has no native skill copy (sp-mwco.2.2 spike).
+		assertPath(t, "SkillPath", l.SkillPath, "")
 		assertPath(t, "MCPPath", l.MCPPath, filepath.Join(home, ".config", "opencode", "opencode.json"))
 		assertFormat(t, "MCPFormat", l.MCPFormat, agentinstall.FormatJSONC)
 		assertPath(t, "ConfigPath", l.ConfigPath, filepath.Join(home, ".config", "opencode", "opencode.json"))
@@ -92,7 +94,10 @@ func TestRegistryLayouts(t *testing.T) {
 	t.Run("hermes", func(t *testing.T) {
 		l := lm["hermes"]
 		assertPath(t, "ConfigRoot", l.ConfigRoot, filepath.Join(home, ".hermes"))
-		assertPath(t, "SkillPath", l.SkillPath, filepath.Join(home, ".agents", "skills"))
+		// Canonical-only: ~/.agents/skills is the implicit canonical dir, not a
+		// hermes-specific native copy; hermes reads it via a config.yaml upsert
+		// (sp-mwco.2.5), not a second copy.
+		assertPath(t, "SkillPath", l.SkillPath, "")
 		assertPath(t, "MCPPath", l.MCPPath, filepath.Join(home, ".hermes", "config.yaml"))
 		assertFormat(t, "MCPFormat", l.MCPFormat, agentinstall.FormatYAML)
 		assertPath(t, "ConfigPath", l.ConfigPath, filepath.Join(home, ".hermes", "config.yaml"))
@@ -102,11 +107,38 @@ func TestRegistryLayouts(t *testing.T) {
 	t.Run("goose", func(t *testing.T) {
 		l := lm["goose"]
 		assertPath(t, "ConfigRoot", l.ConfigRoot, filepath.Join(home, ".config", "goose"))
+		// Canonical-only: goose has no native skill copy (sp-mwco.2.2 spike).
+		assertPath(t, "SkillPath", l.SkillPath, "")
 		assertPath(t, "MCPPath", l.MCPPath, filepath.Join(home, ".config", "goose", "config.yaml"))
 		assertFormat(t, "MCPFormat", l.MCPFormat, agentinstall.FormatYAML)
 		assertPath(t, "ConfigPath", l.ConfigPath, filepath.Join(home, ".config", "goose", "config.yaml"))
 		assertFormat(t, "ConfigFormat", l.ConfigFormat, agentinstall.FormatYAML)
 	})
+}
+
+// TestRegistrySkillPathCanonicalVsNativeCopy locks D1's semantics: claude/codex keep a
+// real native-copy SkillPath (in addition to the canonical dir), opencode/hermes/goose
+// stay canonical-only (SkillPath == "").
+func TestRegistrySkillPathCanonicalVsNativeCopy(t *testing.T) {
+	home := "/home/testuser"
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+	lm := make(map[string]agentinstall.AgentLayout)
+	for _, l := range reg.Layouts() {
+		lm[l.Name] = l
+	}
+
+	for _, name := range []string{"claude", "codex"} {
+		if lm[name].SkillPath == "" {
+			t.Errorf("%s: SkillPath should be non-empty (native copy target)", name)
+		}
+	}
+
+	for _, name := range []string{"opencode", "hermes", "goose"} {
+		if lm[name].SkillPath != "" {
+			t.Errorf("%s: SkillPath should be empty (canonical-only), got %q", name, lm[name].SkillPath)
+		}
+	}
 }
 
 func TestRegistryLayoutsWithCodexHome(t *testing.T) {

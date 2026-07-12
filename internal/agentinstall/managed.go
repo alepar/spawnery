@@ -26,24 +26,36 @@ type ManagedIndex struct {
 
 // provenanceEntries derives managed.json entries for one APPLIED (artifact × agent) pair.
 // It should only be called for StatusApplied reports.
-func provenanceEntries(layout AgentLayout, a Artifact, profileID, profileVersion string) []ManagedEntry {
+func provenanceEntries(layout AgentLayout, a Artifact, opts Options) []ManagedEntry {
 	base := func(kind Kind) ManagedEntry {
 		return ManagedEntry{
 			Kind:           kind,
 			Agent:          layout.Name,
 			Name:           a.Name,
-			ProfileID:      profileID,
-			ProfileVersion: profileVersion,
+			ProfileID:      opts.ProfileID,
+			ProfileVersion: opts.ProfileVersion,
 		}
 	}
 
 	var out []ManagedEntry
 	switch a.Kind {
 	case KindSkill:
-		e := base(KindSkill)
-		e.File = filepath.Join(layout.SkillPath, a.Name)
-		e.NativePath = e.File
-		out = append(out, e)
+		// Every applied skill has a canonical row; agents with a real native copy
+		// (layout.SkillPath != "") additionally get a distinct-NativeKey row so
+		// WriteManagedIndex's upsert key doesn't collide the two.
+		canonical := base(KindSkill)
+		canonical.NativeKey = "skills.canonical"
+		canonical.File = filepath.Join(CanonicalSkillsDir(opts.HomeDir), a.Name)
+		canonical.NativePath = canonical.File
+		out = append(out, canonical)
+
+		if layout.SkillPath != "" {
+			native := base(KindSkill)
+			native.NativeKey = "skills." + layout.Name
+			native.File = filepath.Join(layout.SkillPath, a.Name)
+			native.NativePath = native.File
+			out = append(out, native)
+		}
 
 	case KindMCP:
 		e := base(KindMCP)

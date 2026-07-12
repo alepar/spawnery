@@ -144,10 +144,22 @@ func TestDispatchAllDetected(t *testing.T) {
 	}
 }
 
-func TestDispatchOpencodeSkillPermanentNoOp(t *testing.T) {
+// TestDispatchOpencodeSkillCanonicalOnly verifies opencode's skill install lands in
+// the canonical ~/.agents/skills dir (opencode needs no per-agent glue beyond the
+// canonical phase — sp-mwco.2.2 spike).
+func TestDispatchOpencodeSkillCanonicalOnly(t *testing.T) {
 	home := t.TempDir()
+	artifacts := t.TempDir()
 	env := agentinstall.MapEnviron{"HOME": home}
 	reg := agentinstall.NewRegistry(env)
+
+	skillDir := filepath.Join(artifacts, "payloads", "my-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# my-skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	m := agentinstall.Manifest{
 		Artifacts: []agentinstall.Artifact{
@@ -159,24 +171,36 @@ func TestDispatchOpencodeSkillPermanentNoOp(t *testing.T) {
 			},
 		},
 	}
-	result := agentinstall.Apply(reg, m, agentinstall.Options{HomeDir: home}, env)
+	result := agentinstall.Apply(reg, m, agentinstall.Options{HomeDir: home, ArtifactsDir: artifacts}, env)
 
 	if len(result.Reports) != 1 {
 		t.Fatalf("expected 1 report, got %d", len(result.Reports))
 	}
 	r := result.Reports[0]
-	if r.Status != agentinstall.StatusSkipped {
-		t.Errorf("expected skipped, got %q", r.Status)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
 	}
-	if r.Reason != "opencode skills layout unconfirmed (S6)" {
-		t.Errorf("unexpected reason: %q", r.Reason)
+	dest := filepath.Join(agentinstall.CanonicalSkillsDir(home), "my-skill", "SKILL.md")
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("canonical copy missing at %s: %v", dest, err)
 	}
 }
 
-func TestDispatchGooseSkillPermanentNoOp(t *testing.T) {
+// TestDispatchGooseSkillCanonicalOnly mirrors TestDispatchOpencodeSkillCanonicalOnly
+// for goose.
+func TestDispatchGooseSkillCanonicalOnly(t *testing.T) {
 	home := t.TempDir()
+	artifacts := t.TempDir()
 	env := agentinstall.MapEnviron{"HOME": home}
 	reg := agentinstall.NewRegistry(env)
+
+	skillDir := filepath.Join(artifacts, "payloads", "my-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# my-skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	m := agentinstall.Manifest{
 		Artifacts: []agentinstall.Artifact{
@@ -188,24 +212,36 @@ func TestDispatchGooseSkillPermanentNoOp(t *testing.T) {
 			},
 		},
 	}
-	result := agentinstall.Apply(reg, m, agentinstall.Options{HomeDir: home}, env)
+	result := agentinstall.Apply(reg, m, agentinstall.Options{HomeDir: home, ArtifactsDir: artifacts}, env)
 
 	if len(result.Reports) != 1 {
 		t.Fatalf("expected 1 report, got %d", len(result.Reports))
 	}
 	r := result.Reports[0]
-	if r.Status != agentinstall.StatusSkipped {
-		t.Errorf("expected skipped, got %q", r.Status)
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
 	}
-	if r.Reason != "deferred" {
-		t.Errorf("unexpected reason: %q", r.Reason)
+	dest := filepath.Join(agentinstall.CanonicalSkillsDir(home), "my-skill", "SKILL.md")
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("canonical copy missing at %s: %v", dest, err)
 	}
 }
 
-func TestDispatchHermesAllDeferred(t *testing.T) {
+// TestDispatchHermesSkillCanonicalOnlyMCPConfigDeferred verifies hermes's skill
+// install applies (canonical-only), while MCP and config remain deferred to sp-mofj.
+func TestDispatchHermesSkillCanonicalOnlyMCPConfigDeferred(t *testing.T) {
 	home := t.TempDir()
+	artifacts := t.TempDir()
 	env := agentinstall.MapEnviron{"HOME": home}
 	reg := agentinstall.NewRegistry(env)
+
+	skillDir := filepath.Join(artifacts, "payloads", "test")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, kind := range []agentinstall.Kind{agentinstall.KindSkill, agentinstall.KindMCP, agentinstall.KindConfig} {
 		var a agentinstall.Artifact
@@ -222,12 +258,24 @@ func TestDispatchHermesAllDeferred(t *testing.T) {
 		}
 
 		m := agentinstall.Manifest{Artifacts: []agentinstall.Artifact{a}}
-		result := agentinstall.Apply(reg, m, agentinstall.Options{HomeDir: home}, env)
+		result := agentinstall.Apply(reg, m, agentinstall.Options{HomeDir: home, ArtifactsDir: artifacts}, env)
 
 		if len(result.Reports) != 1 {
 			t.Fatalf("kind=%s: expected 1 report, got %d", kind, len(result.Reports))
 		}
 		r := result.Reports[0]
+
+		if kind == agentinstall.KindSkill {
+			if r.Status != agentinstall.StatusApplied {
+				t.Errorf("kind=%s: expected applied, got %q (reason: %q)", kind, r.Status, r.Reason)
+			}
+			dest := filepath.Join(agentinstall.CanonicalSkillsDir(home), "test", "SKILL.md")
+			if _, err := os.Stat(dest); err != nil {
+				t.Errorf("canonical copy missing at %s: %v", dest, err)
+			}
+			continue
+		}
+
 		if r.Status != agentinstall.StatusSkipped {
 			t.Errorf("kind=%s: expected skipped, got %q", kind, r.Status)
 		}

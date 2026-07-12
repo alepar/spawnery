@@ -33,7 +33,7 @@ func Apply(reg Registry, m Manifest, opts Options, env Environ) Result {
 			default:
 				report = dispatchArtifact(target.emitter, artifact, opts)
 				if report.Status == StatusApplied {
-					prov = append(prov, provenanceEntries(target.emitter.Layout(), artifact, opts.ProfileID, opts.ProfileVersion)...)
+					prov = append(prov, provenanceEntries(target.emitter.Layout(), artifact, opts)...)
 				}
 			}
 			reports = append(reports, report)
@@ -143,7 +143,7 @@ func ApplyFiltered(reg Registry, m Manifest, opts Options, env Environ, agentFil
 
 		report := dispatchArtifact(emitter, artifact, opts)
 		if report.Status == StatusApplied {
-			prov = append(prov, provenanceEntries(emitter.Layout(), artifact, opts.ProfileID, opts.ProfileVersion)...)
+			prov = append(prov, provenanceEntries(emitter.Layout(), artifact, opts)...)
 		}
 		reports = append(reports, report)
 	}
@@ -179,6 +179,12 @@ func artifactTargetsAgent(targets []string, agent string) bool {
 func dispatchArtifact(e Emitter, a Artifact, opts Options) Report {
 	switch a.Kind {
 	case KindSkill:
+		// The canonical ~/.agents/skills copy is written from inside the emitter's
+		// InstallSkill (installSkill, skill.go), which only runs here — i.e. only for
+		// an agent the artifact actually targets. Apply/ApplyFiltered already resolve
+		// targets before reaching dispatchArtifact, so the canonical phase honors
+		// Targets by construction: no separate pod-level "which agents may run" set
+		// is needed.
 		return e.InstallSkill(a, opts)
 	case KindMCP:
 		report := e.InstallMCP(a, opts)

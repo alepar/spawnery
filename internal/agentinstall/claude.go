@@ -27,9 +27,13 @@ func newClaudeEmitter(homeDir string) claudeEmitter {
 	}
 }
 
-// InstallSkill installs a skill directory tree into ~/.claude/skills/<name>/.
+// InstallSkill installs a skill into the canonical ~/.agents/skills/<name>/ dir and
+// copies it into ~/.claude/skills/<name>/ — a REAL COPY, never a symlink: claude-code
+// does not read ~/.agents/skills (#31005), and a symlinked ~/.claude/skills stops
+// user-level skills from loading at all (#38051) or fails per-skill-dir with "Unknown
+// skill" (#25367).
 func (e claudeEmitter) InstallSkill(a Artifact, opts Options) Report {
-	return installSkillTree(e.layout, a, opts)
+	return installSkill(e.layout, a, opts)
 }
 
 // Capabilities returns the full support matrix for claude: all kinds fully supported.
