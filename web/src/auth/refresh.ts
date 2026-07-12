@@ -11,7 +11,7 @@
 import { asHttpUrl } from "@/config/endpoints";
 import { buildPoP } from "./pop";
 import { keyCanSign } from "./keypair";
-import { parseAccessToken } from "./token";
+import { validateAccessTokenPair } from "./token";
 import { bytesEqual } from "@/keys/encoding";
 import { CNF_MISMATCH, type NackCode } from "./errors";
 
@@ -39,7 +39,7 @@ export interface RefreshDeps {
 }
 
 export type RefreshResult =
-  | { kind: "ok"; accessToken: string; refreshTokenHash: string; expiresAt: bigint }
+  | { kind: "ok"; cpAccessToken: string; nodeAccessToken: string; refreshTokenHash: string; expiresAt: bigint }
   | { kind: "cnf-mismatch" }
   | { kind: "revoked" }
   | { kind: "key-missing" }
@@ -60,6 +60,7 @@ export type RefreshResult =
  * (refresh.go:111-121) returns the same rotated token to whichever arrives second.
  */
 let _inflight: Promise<RefreshResult> | null = null;
+let _inflightKey: CryptoKey | null = null;
 
 /**
  * refreshAccessToken performs a single /refresh round-trip with PoP.
@@ -76,16 +77,20 @@ export async function refreshAccessToken(deps: RefreshDeps): Promise<RefreshResu
 
   // True single-flight: latecomers reuse the first caller's promise so they receive
   // the same rotated token rather than each re-signing a PoP over a stale hash.
-  if (_inflight) return _inflight;
+  if (_inflight && _inflightKey === deps.privateKey) return _inflight;
 
   // acquireLock is only provided by tests (e.g. a serialising mock that proves _inflight
   // short-circuits before the lock is even invoked).  Production never injects a lock.
   const lockFn = deps.acquireLock ?? null;
 
-  const p = lockFn
-    ? (lockFn(REFRESH_LOCK_NAME, () => _doRefresh(deps)) as Promise<RefreshResult>).finally(() => { _inflight = null; })
-    : _doRefresh(deps).finally(() => { _inflight = null; });
+  const base = lockFn
+    ? lockFn(REFRESH_LOCK_NAME, () => _doRefresh(deps)) as Promise<RefreshResult>
+    : _doRefresh(deps);
+  const p = base.finally(() => {
+    if (_inflight === p) { _inflight = null; _inflightKey = null; }
+  });
   _inflight = p;
+  _inflightKey = deps.privateKey;
   return p;
 }
 
@@ -121,35 +126,39 @@ async function _doRefresh(deps: RefreshDeps): Promise<RefreshResult> {
     return { kind: "error", message: `refresh ${res.status}: ${body}` };
   }
 
-  let json: { access_token?: string; refresh_token_hash?: string };
+  let json: { cp_access_token?: string; node_access_token?: string; refresh_token_hash?: string };
   try {
     json = await res.json() as typeof json;
   } catch {
     return { kind: "error", message: "refresh: invalid JSON response" };
   }
 
-  if (!json.access_token) {
-    return { kind: "error", message: "refresh: missing access_token in response" };
+  if (!json.cp_access_token || !json.node_access_token || !json.refresh_token_hash) {
+    return { kind: "error", message: "refresh: incomplete credential pair in response" };
   }
 
   // Decode the new token and verify cnf claim (session_key_hash must match local SPKI hash).
-  let decoded;
+  let validated;
   try {
-    decoded = parseAccessToken(json.access_token);
+    validated = validateAccessTokenPair({
+      cpAccessToken: json.cp_access_token,
+      nodeAccessToken: json.node_access_token,
+    });
   } catch (e) {
     return { kind: "error", message: `refresh: malformed token: ${e}` };
   }
 
   // cnf check: session_key_hash in the token must equal sha256(localSpki).
-  if (decoded.sessionKeyHash.length > 0 && !bytesEqual(decoded.sessionKeyHash, deps.localSpkiHash)) {
+  if (!bytesEqual(validated.cp.sessionKeyHash, deps.localSpkiHash)) {
     return { kind: "cnf-mismatch" };
   }
 
   return {
     kind: "ok",
-    accessToken: json.access_token,
-    refreshTokenHash: json.refresh_token_hash ?? "",
-    expiresAt: decoded.expiresAt,
+    cpAccessToken: json.cp_access_token,
+    nodeAccessToken: json.node_access_token,
+    refreshTokenHash: json.refresh_token_hash,
+    expiresAt: validated.expiresAt,
   };
 }
 

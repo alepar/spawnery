@@ -1,8 +1,7 @@
 import { unary } from "./connect";
 export { DEV_TOKEN } from "./connect";
 import { authEnabled } from "@/auth/session";
-import { useSessionStore } from "@/auth/session";
-import { pollAndSign, registerPendedOp, clearPendedOp } from "@/auth/intent";
+import { pollAndSign, registerPendedOp, clearPendedOp, requireSessionSigningKeys } from "@/auth/intent";
 
 export type SpawnStatus =
   | "starting" | "active" | "suspending" | "suspended" | "resuming" | "unreachable" | "error" | "unknown";
@@ -90,15 +89,12 @@ export async function createSpawn(
   const spawnId = r.spawnId;
   // In auth-enabled mode, kick off the intent signing concurrently (the CP blocks on it).
   if (authEnabled()) {
-    const session = useSessionStore.getState();
-    const store = session.keyStore;
-    const { getOrCreateSessionKey } = await import("@/auth/keypair");
-    const kp = await getOrCreateSessionKey(store);
+    const kp = await requireSessionSigningKeys();
     // appRef is intentionally omitted: the user picks an app *id*, not the immutable app_ref the
     // CP resolves it to (id != ref for catalog/seed apps), so validating against a ref we never
     // supplied would always mismatch and block the spawn. pollAndSign skips the appRef check when
     // it's undefined; the model check still runs and the signed intent uses the CP-resolved appRef.
-    const pended = { op: "create-spawn", spawnId, model, mounts };
+    const pended = { op: "create-spawn", spawnId, model, image, mounts };
     registerPendedOp(pended);
     pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
       .catch((e: unknown) => console.error("intent sign failed:", e))
@@ -149,8 +145,7 @@ export async function suspendSpawn(spawnId: string): Promise<void> {
 // (CP waits for the intent, client waits for the RPC). Mirrors cmd/spawnctl/resume.go.
 export async function resumeSpawn(spawnId: string): Promise<void> {
   if (authEnabled()) {
-    const { getOrCreateSessionKey } = await import("@/auth/keypair");
-    const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
+    const kp = await requireSessionSigningKeys();
     const pended = { op: "resume-spawn", spawnId };
     registerPendedOp(pended);
     pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
@@ -163,8 +158,7 @@ export async function resumeSpawn(spawnId: string): Promise<void> {
 export async function recreateSpawn(spawnId: string): Promise<void> {
   // RecreateSpawn blocks at the CP awaiting the SignedIntent (see resumeSpawn): sign concurrently.
   if (authEnabled()) {
-    const { getOrCreateSessionKey } = await import("@/auth/keypair");
-    const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
+    const kp = await requireSessionSigningKeys();
     const pended = { op: "recreate-spawn", spawnId };
     registerPendedOp(pended);
     pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
@@ -177,8 +171,7 @@ export async function recreateSpawn(spawnId: string): Promise<void> {
 export async function migrateSpawn(spawnId: string): Promise<void> {
   // MigrateSpawn blocks at the CP awaiting the SignedIntent (see resumeSpawn): sign concurrently.
   if (authEnabled()) {
-    const { getOrCreateSessionKey } = await import("@/auth/keypair");
-    const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
+    const kp = await requireSessionSigningKeys();
     const pended = { op: "migrate-spawn", spawnId };
     registerPendedOp(pended);
     pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })

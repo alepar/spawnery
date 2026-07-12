@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // ── Module mocks (hoisted) ───────────────────────────────────────────────────
 
 vi.mock("@/config/endpoints", () => ({
+  AS_ORIGIN: "https://as.example.com",
   CP_ORIGIN: "https://cp.example.com",
   cpHttpUrl: (path: string) => `/cp${path}`,
 }));
@@ -29,7 +30,8 @@ beforeEach(() => {
   const store = new MemoryKeyStore();
   useSessionStore.setState({
     status: "authed",
-    accessToken: "tok",
+    cpAccessToken: "cp-token",
+    nodeAccessToken: "node-token",
     refreshTokenHash: "rth",
     account: null,
     callbackErrorCode: null,
@@ -40,6 +42,10 @@ beforeEach(() => {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe("spawnClient's AuthProvider.refresh", () => {
+  it("provides only the CP token to the generated CP transport", async () => {
+    await expect(auth.getBearer()).resolves.toBe("cp-token");
+  });
+
   it("sets status=login-required on a generic refresh failure", async () => {
     vi.mocked(tryRefresh).mockResolvedValue(false);
 

@@ -22,22 +22,15 @@ vi.mock("@/auth/intent", () => ({
   pollAndSign: hoisted.pollAndSign,
   registerPendedOp: vi.fn(),
   clearPendedOp: vi.fn(),
+  requireSessionSigningKeys: vi.fn(async () => ({
+    privateKey: {} as CryptoKey,
+    publicKey: {} as CryptoKey,
+  })),
 }));
 vi.mock("@/auth/session", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/auth/session")>();
   return { ...actual, authEnabled: () => true };
 });
-vi.mock("@/auth/keypair", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/auth/keypair")>();
-  return {
-    ...actual,
-    getOrCreateSessionKey: vi.fn(async () => ({
-      privateKey: {} as CryptoKey,
-      publicKey: {} as CryptoKey,
-    })),
-  };
-});
-
 import { resumeSpawn } from "./spawnlet";
 
 afterEach(() => {

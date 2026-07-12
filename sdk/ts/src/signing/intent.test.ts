@@ -6,8 +6,19 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { buildIntentBodyBytes, buildSignedIntent } from "./intent.js";
+import { create, fromBinary } from "@bufbuild/protobuf";
+import {
+  buildIntentBodyBytes,
+  buildSignedIntent,
+  buildSessionReauthSignedIntentB64,
+  pollAndSign,
+} from "./intent.js";
+import type { SessionSigner } from "./sessionSigner.js";
+import { WebCryptoSessionSigner } from "./sessionSigner.js";
 import { sessionKeyHash } from "../keys/crypto.js";
+import { fromBase64 } from "../keys/encoding.js";
+import { IntentBodySchema, SignedIntentSchema } from "../gen/auth/v1/auth_pb.js";
+import { GetPendingIntentResponseSchema, PendingIntentSchema } from "../gen/cp/v1/cp_pb.js";
 
 const toHex = (u: Uint8Array): string => Buffer.from(u).toString("hex");
 const fromHex = (s: string): Uint8Array => new Uint8Array(Buffer.from(s, "hex"));
@@ -45,6 +56,186 @@ test("buildIntentBodyBytes matches the committed golden vector (no mounts)", () 
     mounts: [],
   });
   assert.equal(toHex(bytes), vectors.body_bytes_hex);
+});
+
+test("buildSessionReauthSignedIntentB64 signs the verified session tuple and replacement token ID", async () => {
+  const pair = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"],
+  ) as CryptoKeyPair;
+  const signer = new WebCryptoSessionSigner(pair.privateKey, pair.publicKey);
+  const encoded = await buildSessionReauthSignedIntentB64({
+    spawnId: "sp-1",
+    generation: 7n,
+    targetNodeId: "node-1",
+    sessionId: "session-2",
+    newTokenId: "node-token-next",
+  }, signer);
+  const signed = fromBinary(SignedIntentSchema, fromBase64(encoded));
+  const body = fromBinary(IntentBodySchema, signed.body);
+  assert.equal(signed.domain, "spawnery/intent/session-reauth/v1");
+  assert.deepEqual({
+    spawnId: body.spawnId,
+    generation: body.generation,
+    targetNodeId: body.targetNodeId,
+    op: body.op,
+    sessionId: body.sessionId,
+    newTokenId: body.newTokenId,
+  }, {
+    spawnId: "sp-1",
+    generation: 7n,
+    targetNodeId: "node-1",
+    op: "session-reauth",
+    sessionId: "session-2",
+    newTokenId: "node-token-next",
+  });
+  const message = new Uint8Array(new TextEncoder().encode(signed.domain).length + signed.body.length);
+  message.set(new TextEncoder().encode(signed.domain));
+  message.set(signed.body, new TextEncoder().encode(signed.domain).length);
+  assert.equal(await crypto.subtle.verify(
+    { name: "ECDSA", hash: "SHA-256" }, pair.publicKey, signed.sig, message,
+  ), true);
+});
+
+test("pollAndSign verifies typed target metadata before signing and submits only the node token", async () => {
+  const calls: string[] = [];
+  const signer: SessionSigner = {
+    publicSPKIDER: async () => new Uint8Array([1, 2, 3]),
+    signP1363: async () => { calls.push("sign"); return new Uint8Array(64); },
+  };
+  let submitted: Record<string, unknown> | undefined;
+  const pending = {
+    op: "create-spawn", spawnId: "sp-1", generation: 7n, targetNodeId: "node-1",
+    appRef: "app@sha256:1", image: "image@sha256:2", model: "m", dataRef: "",
+    mounts: [{ name: "work", backendUri: "scratch://", credentialSecretId: "secret-1", createIfMissing: true, repositoryId: "repo-1" }],
+    attachedSecretIds: ["secret-1"], targetNodeClass: "self-hosted",
+  };
+  const client = {
+    getPendingIntent: async () => ({
+      ready: true, pending, nodeCertChain: new Uint8Array([9]), generation: 7n,
+      targetNodeId: "node-1", targetNodeClass: "self-hosted", targetNodeAccountId: "acct-1",
+    }),
+    submitIntent: async (request: Record<string, unknown>) => { submitted = request; return {}; },
+  };
+  await pollAndSign({
+    client: client as never,
+    spawnId: "sp-1",
+    pended: { ...pending },
+    signer,
+    nodeAccessToken: "node-token",
+    verifyTarget: async (target) => {
+      calls.push("verify");
+      assert.equal(target.targetNodeId, "node-1");
+      assert.equal(target.targetNodeClass, "self-hosted");
+      assert.equal(target.targetNodeAccountId, "acct-1");
+      assert.deepEqual(target.nodeCertChain, new Uint8Array([9]));
+    },
+    maxAttempts: 1,
+  });
+  assert.deepEqual(calls, ["verify", "sign"]);
+  assert.equal(submitted?.nodeAccessToken, "node-token");
+});
+
+test("pollAndSign rejects target or locally-pended substitutions before signing or submitting", async (t) => {
+  const basePending = {
+    op: "create-spawn", spawnId: "sp-1", generation: 7n, targetNodeId: "node-1",
+    appRef: "app@sha256:1", image: "image@sha256:2", model: "m", dataRef: "data-1",
+    mounts: [{ name: "work", backendUri: "scratch://", credentialSecretId: "secret-1", createIfMissing: true, repositoryId: "repo-1" }],
+    attachedSecretIds: ["secret-1"], targetNodeClass: "self-hosted",
+  };
+  const mutations: Array<[string, (response: Record<string, unknown>, pending: Record<string, unknown>) => void]> = [
+    ["response generation", (r) => { r.generation = 8n; }],
+    ["response target", (r) => { r.targetNodeId = "node-2"; }],
+    ["response class", (r) => { r.targetNodeClass = "cloud"; }],
+    ["operation", (_r, p) => { p.op = "resume-spawn"; }],
+    ["spawn", (_r, p) => { p.spawnId = "sp-2"; }],
+    ["generation", (_r, p) => { p.generation = 8n; }],
+    ["target", (_r, p) => { p.targetNodeId = "node-2"; }],
+    ["app", (_r, p) => { p.appRef = "other"; }],
+    ["image", (_r, p) => { p.image = "other"; }],
+    ["model", (_r, p) => { p.model = "other"; }],
+    ["data ref", (_r, p) => { p.dataRef = "other"; }],
+    ["mount", (_r, p) => { p.mounts = [{ ...basePending.mounts[0], backendUri: "other" }]; }],
+    ["attached secrets", (_r, p) => { p.attachedSecretIds = ["other"]; }],
+  ];
+  for (const [name, mutate] of mutations) {
+    await t.test(name, async () => {
+      let signed = false;
+      let submitted = false;
+      const response: Record<string, unknown> = {
+        ready: true, pending: structuredClone(basePending), nodeCertChain: new Uint8Array([9]),
+        generation: 7n, targetNodeId: "node-1", targetNodeClass: "self-hosted", targetNodeAccountId: "acct-1",
+      };
+      mutate(response, response.pending as Record<string, unknown>);
+      await assert.rejects(pollAndSign({
+        client: {
+          getPendingIntent: async () => response,
+          submitIntent: async () => { submitted = true; return {}; },
+        } as never,
+        spawnId: "sp-1",
+        pended: structuredClone(basePending),
+        signer: {
+          publicSPKIDER: async () => new Uint8Array([1]),
+          signP1363: async () => { signed = true; return new Uint8Array(64); },
+        },
+        nodeAccessToken: "node-token",
+        verifyTarget: async () => {},
+        maxAttempts: 1,
+      }));
+      assert.equal(signed, false);
+      assert.equal(submitted, false);
+    });
+  }
+});
+
+test("pollAndSign validates resolved classes outside the generated PendingIntent wire tuple", async (t) => {
+  for (const op of ["fork-spawn", "migrate-spawn"]) {
+    await t.test(op, async (t) => {
+      const pending = create(PendingIntentSchema, {
+        op,
+        spawnId: op === "fork-spawn" ? "fork-1" : "sp-1",
+        generation: 7n,
+        targetNodeId: "node-1",
+      });
+      const run = async (targetNodeClass: string) => {
+        let submitted = false;
+        const response = create(GetPendingIntentResponseSchema, {
+          ready: true,
+          pending,
+          nodeCertChain: new Uint8Array([9]),
+          generation: 7n,
+          targetNodeId: "node-1",
+          targetNodeClass,
+          targetNodeAccountId: "acct-1",
+        });
+        const result = pollAndSign({
+          client: {
+            getPendingIntent: async () => response,
+            submitIntent: async () => { submitted = true; return {}; },
+          } as never,
+          spawnId: "sp-1",
+          pended: { op, spawnId: "sp-1", targetNodeClass: "cloud" },
+          signer: {
+            publicSPKIDER: async () => new Uint8Array([1]),
+            signP1363: async () => new Uint8Array(64),
+          },
+          nodeAccessToken: "node-token",
+          verifyTarget: async () => {},
+          maxAttempts: 1,
+        });
+        return { result, submitted: () => submitted };
+      };
+      await t.test("accepts matching response class", async () => {
+        const accepted = await run("cloud");
+        await accepted.result;
+        assert.equal(accepted.submitted(), true);
+      });
+      await t.test("rejects substituted response class", async () => {
+        const rejected = await run("compromised");
+        await assert.rejects(rejected.result, /response target class mismatch/);
+        assert.equal(rejected.submitted(), false);
+      });
+    });
+  }
 });
 
 test("buildIntentBodyBytes matches the golden vector with repeated MountRef", () => {
@@ -100,7 +291,7 @@ test("buildSignedIntent produces a verifiable ECDSA-P256 signature (self-consist
     mounts: [],
   });
 
-  const signed = await buildSignedIntent("create-spawn", bodyBytes, pair.privateKey, spki);
+  const signed = await buildSignedIntent("create-spawn", bodyBytes, new WebCryptoSessionSigner(pair.privateKey, pair.publicKey));
   assert.equal(signed.domain, "spawnery/intent/create-spawn/v1");
   assert.deepEqual(signed.body, bodyBytes);
 

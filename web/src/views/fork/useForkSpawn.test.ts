@@ -30,6 +30,8 @@ vi.mock("@/keys/device", () => ({
 
 vi.mock("@/config/trustAnchors", () => ({
   PINNED_ROOT_CA_PEM: "",
+  PINNED_TRUST_DOMAIN: "prod.spawnery.internal",
+  PINNED_CLOUD_ACCOUNT_ID: "cloud-system",
 }));
 
 const CURRENT_TARGET: MigrationTarget = {

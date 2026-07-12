@@ -9,7 +9,7 @@ import {
   buildSignedIntent,
   cpv1,
   createTransport,
-  exportSpkiDer,
+  WebCryptoSessionSigner,
   toBase64Url,
 } from "@spawnery/client";
 import { establishOAuthSession } from "../../src/auth/oauth-session";
@@ -142,7 +142,6 @@ export async function submitSpawn(
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   if (!pending) throw new Error(`pending intent not ready for ${spawnId}`);
-  const spki = await exportSpkiDer(keyPair.publicKey);
   const bodyBytes = buildIntentBodyBytes({
     jti: createHash("sha256").update(`${spawnId}-${suffix}`).digest("hex").slice(0, 32),
     issuedAt: Math.floor(Date.now() / 1000),
@@ -157,7 +156,11 @@ export async function submitSpawn(
     sessionId: "",
     mounts: pending.mounts,
   });
-  const intent = await buildSignedIntent(pending.op, bodyBytes, keyPair.privateKey, spki);
+  const intent = await buildSignedIntent(
+    pending.op,
+    bodyBytes,
+    new WebCryptoSessionSigner(keyPair.privateKey, keyPair.publicKey),
+  );
   await client.submitIntent({ spawnId, intent, nodeAccessToken: nodeToken });
 
   let status = "UNSPECIFIED";

@@ -22,6 +22,7 @@ import {
   pollAndSign as sdkPollAndSign,
   type IntentFields,
   type PendedOp,
+  WebCryptoSessionSigner,
   DOMAIN_CREATE_SPAWN,
   DOMAIN_RESUME_SPAWN,
   DOMAIN_RECREATE_SPAWN,
@@ -30,6 +31,10 @@ import {
   DOMAIN_SESSION_OPEN,
 } from "@spawnery/client";
 import { spawnServiceClient } from "@/api/spawnClient";
+import { getNodeAccessToken, useSessionStore } from "./session";
+import { verifyResolvedTarget } from "./target";
+import { keyCanSign, loadSessionKey } from "./keypair";
+import type { SessionKeyPair } from "./keystore";
 
 export {
   domainForOp,
@@ -64,5 +69,27 @@ export interface PollAndSignDeps {
  * Returns the generated jti on success, throws on validation failure.
  */
 export function pollAndSign(deps: PollAndSignDeps): Promise<string> {
-  return sdkPollAndSign({ client: spawnServiceClient, ...deps });
+  const accountId = useSessionStore.getState().account?.accountId ?? "";
+  const nodeAccessToken = getNodeAccessToken();
+  if (!accountId) return Promise.reject(new Error("intent: logged-in account is missing"));
+  if (!nodeAccessToken) return Promise.reject(new Error("intent: node access token is missing"));
+  const { privateKey, publicKey, ...rest } = deps;
+  return sdkPollAndSign({
+    client: spawnServiceClient,
+    ...rest,
+    signer: new WebCryptoSessionSigner(privateKey, publicKey),
+    nodeAccessToken,
+    verifyTarget: (target) => verifyResolvedTarget(target, accountId),
+  });
+}
+
+/** Load and positively check the existing login key; never creates an operation key. */
+export async function requireSessionSigningKeys(): Promise<SessionKeyPair> {
+  const session = useSessionStore.getState();
+  const keys = await loadSessionKey(session.keyStore);
+  if (!keys || !await keyCanSign(keys.privateKey)) {
+    await useSessionStore.getState().recoverKeyLoss();
+    throw new Error("intent: persistent session key is unavailable");
+  }
+  return keys;
 }

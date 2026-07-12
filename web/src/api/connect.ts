@@ -62,10 +62,16 @@ export async function tryRefresh(): Promise<boolean> {
   try {
     const session = useSessionStore.getState();
     const store = session.keyStore;
+    const epoch = session.authEpoch;
+    const current = () => {
+      const state = useSessionStore.getState();
+      return state.authEpoch === epoch && state.status === "authed" && state.keyStore === store;
+    };
     const kp = await loadSessionKey(store);
+    if (!current()) return false;
     if (!kp) {
       // Key missing (ITP/storage eviction): route to key-lost rather than minting a fresh keypair.
-      session.setStatus("key-lost");
+      await session.recoverKeyLoss();
       return false;
     }
     const spki = await exportSpkiDer(kp.publicKey);
@@ -81,15 +87,19 @@ export async function tryRefresh(): Promise<boolean> {
       localSpkiHash: spkiHash,
       refreshTokenHash: rth,
     });
+    if (!current()) return false;
 
     if (result.kind === "ok") {
-      session.setToken(result.accessToken, result.refreshTokenHash);
+      session.setTokens({
+        cpAccessToken: result.cpAccessToken,
+        nodeAccessToken: result.nodeAccessToken,
+      }, result.refreshTokenHash);
       return true;
     }
     if (result.kind === "cnf-mismatch") {
       session.setStatus("cnf-mismatch");
     } else if (result.kind === "revoked" || result.kind === "key-missing") {
-      session.setStatus("key-lost");
+      await session.recoverKeyLoss();
     }
     return false;
   } catch {

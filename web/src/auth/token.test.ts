@@ -2,19 +2,32 @@ import { createHash } from "node:crypto";
 import { describe, it, expect } from "vitest";
 import { create, toBinary } from "@bufbuild/protobuf";
 import { authv1 } from "@spawnery/client";
-import { parseTokenWire, decodeSessionTokenBody, parseAccessToken, fromBase64Url, toBase64Url } from "./token";
+import {
+  parseTokenWire,
+  decodeSessionTokenBody,
+  parseAccessToken,
+  validateAccessTokenPair,
+  fromBase64Url,
+  toBase64Url,
+} from "./token";
 
 function buildTokenBody(opts: {
   accountId?: string;
   handle?: string;
   expiresAt?: bigint;
   sessionKeyHash?: Uint8Array;
+  tokenId?: string;
+  audience?: string;
+  familyId?: string;
 }): Uint8Array {
   return toBinary(authv1.SessionTokenBodySchema, create(authv1.SessionTokenBodySchema, {
     accountId: opts.accountId ?? "",
     handle: opts.handle ?? "",
     expiresAt: opts.expiresAt ?? 0n,
     sessionKeyHash: opts.sessionKeyHash ?? new Uint8Array(0),
+    tokenId: opts.tokenId ?? "",
+    audience: opts.audience ?? "",
+    familyId: opts.familyId ?? "",
   }));
 }
 
@@ -70,6 +83,73 @@ describe("parseAccessToken", () => {
     expect(dec.handle).toBe("bob");
     expect(dec.expiresAt).toBe(1800000000n);
     expect(Array.from(dec.bodyBytes)).toEqual(Array.from(body));
+  });
+
+  it("exposes the audience, token ID, family ID, account, expiry, and session key hash", () => {
+    const hash = new Uint8Array(32).fill(0x42);
+    const body = buildTokenBody({
+      accountId: "acct-1",
+      tokenId: "token-1",
+      audience: "node",
+      familyId: "family-1",
+      expiresAt: 1800000000n,
+      sessionKeyHash: hash,
+    });
+    const decoded = parseAccessToken(makeWireToken(body));
+    expect(decoded).toMatchObject({
+      accountId: "acct-1",
+      tokenId: "token-1",
+      audience: "node",
+      familyId: "family-1",
+      expiresAt: 1800000000n,
+    });
+    expect(decoded.sessionKeyHash).toEqual(hash);
+  });
+});
+
+describe("validateAccessTokenPair", () => {
+  const hash = new Uint8Array(32).fill(0x33);
+  const token = (audience: string, overrides: Parameters<typeof buildTokenBody>[0] = {}) =>
+    makeWireToken(buildTokenBody({
+      accountId: "acct-1",
+      tokenId: `${audience}-token`,
+      audience,
+      familyId: "family-1",
+      expiresAt: 1800000000n,
+      sessionKeyHash: hash,
+      ...overrides,
+    }));
+
+  it("accepts a complete aligned CP/node pair bound to the local key", () => {
+    const validated = validateAccessTokenPair({
+      cpAccessToken: token("cp"),
+      nodeAccessToken: token("node"),
+    }, hash);
+    expect(validated.expiresAt).toBe(1800000000n);
+    expect(validated.accountId).toBe("acct-1");
+  });
+
+  it.each([
+    ["audience", token("node"), token("node")],
+    ["account", token("cp"), token("node", { accountId: "acct-2" })],
+    ["family", token("cp"), token("node", { familyId: "family-2" })],
+    ["expiry", token("cp"), token("node", { expiresAt: 1800000001n })],
+    ["session key", token("cp"), token("node", { sessionKeyHash: new Uint8Array(32).fill(0x44) })],
+    ["local session key", token("cp"), token("node")],
+  ])("rejects a mismatched %s", (name, cpAccessToken, nodeAccessToken) => {
+    const localHash = name === "local session key" ? new Uint8Array(32).fill(0x55) : hash;
+    expect(() => validateAccessTokenPair({ cpAccessToken, nodeAccessToken }, localHash)).toThrow();
+  });
+
+  it("rejects missing identity and duplicate token IDs", () => {
+    expect(() => validateAccessTokenPair({
+      cpAccessToken: token("cp", { familyId: "" }),
+      nodeAccessToken: token("node", { familyId: "" }),
+    }, hash)).toThrow();
+    expect(() => validateAccessTokenPair({
+      cpAccessToken: token("cp", { tokenId: "same" }),
+      nodeAccessToken: token("node", { tokenId: "same" }),
+    }, hash)).toThrow();
   });
 });
 

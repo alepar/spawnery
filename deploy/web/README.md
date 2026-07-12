@@ -88,12 +88,13 @@ The bundle includes placeholder trust anchors in `web/src/config/trustAnchors.ts
 export const PINNED_ROOT_CA_PEM: string = `-----BEGIN CERTIFICATE-----
 PLACEHOLDER-TRUST-ANCHOR-ROOT-CA
 -----END CERTIFICATE-----`;
+export const PINNED_CLOUD_ACCOUNT_ID = "PLACEHOLDER-CLOUD-SYSTEM-ACCOUNT-ID";
 
 ```
 
 **Before the first production release:**
 1. Obtain the sp-ova Root CA certificate PEM from the node-auth PKI setup.
-2. Replace the PLACEHOLDER value in `web/src/config/trustAnchors.ts`.
+2. Replace both PLACEHOLDER values in `web/src/config/trustAnchors.ts` with the root and cloud system account.
 3. The pre-sign forbidden-value scan in `web-release.yml` will FAIL if PLACEHOLDER
    markers survive into the signed dist/, preventing accidental shipment.
 

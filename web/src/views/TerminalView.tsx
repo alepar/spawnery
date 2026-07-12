@@ -6,6 +6,7 @@ import { writeClipboard } from "@/term/clipboard";
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
 import { getAccessToken, authEnabled, useSessionStore } from "@/auth/session";
 import { buildSessionBindFrame } from "@/auth/sessionBind";
+import { buildNodeReauthControl, type VerifiedSessionAuthorization } from "@/auth/sessionReauth";
 import { cpWsUrl } from "@/config/endpoints";
 import { encodeInput, encodeResize } from "@/term/wire";
 import { BacklogTracker } from "@/term/backlog";
@@ -67,6 +68,7 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const sockRef = useRef<ReconnectingSocket | null>(null);
+  const sendRef = useRef<(data: string | Uint8Array, coalesceKey?: string) => void>(() => {});
   // The live-update effect skips its first run: the spawnId effect already applied the initial
   // settings and handles the initial fit/resize on socket open, so the first [settings,appDark]
   // run would only re-do that (and fire a redundant resize before the socket opens).
@@ -109,18 +111,79 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     // async "reconnecting" would land AFTER selectSpawn already set the next spawn's dot and clobber
     // it (onConn isn't spawn-scoped). Guard the down callback so an intentional close stays silent.
     let closing = false;
+    let attachmentSequence = 0;
+    let nodeReauthSequence = 0;
+    let authorization: VerifiedSessionAuthorization | null = null;
+    let bound = false;
+    let binding = false;
+    let pendingPairReauth = false;
+    let pendingSends: Array<{ data: string | Uint8Array; key?: string }> = [];
+    let pendingBytes = 0;
+    const clearPendingSends = () => { pendingSends = []; pendingBytes = 0; };
+    const sendSize = (data: string | Uint8Array) => typeof data === "string" ? new TextEncoder().encode(data).byteLength : data.byteLength;
+    const sendWhenBound = (data: string | Uint8Array, key?: string) => {
+      if (bound) { sock.send(data); return; }
+      if (!binding) return;
+      if (key) {
+        const replaced = pendingSends.find((item) => item.key === key);
+        if (replaced) pendingBytes -= sendSize(replaced.data);
+        pendingSends = pendingSends.filter((item) => item.key !== key);
+      }
+      const size = sendSize(data);
+      const countLimit = key ? 256 : 255; // reserve one slot for the required initial resize
+      const byteLimit = key ? 1024 * 1024 : 1024 * 1024 - 64;
+      if (pendingSends.length >= countLimit || pendingBytes + size > byteLimit) return;
+      pendingSends.push({ data, key });
+      pendingBytes += size;
+    };
+    sendRef.current = sendWhenBound;
 
     onConnRef.current?.("connecting");
     const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
       onOpen: async () => {
+        const openSequence = ++attachmentSequence;
+        nodeReauthSequence++;
+        authorization = null;
+        bound = false;
+        binding = true;
+        clearPendingSends();
+        pendingPairReauth = false;
         // Bind frame MUST be the first message (ws.go reads it as the session-open). It carries the
         // session-open SignedIntent the enforced node requires (else MISSING_INTENT NACK -> blank).
-        sock.send(JSON.stringify(await buildSessionBindFrame(spawnId, sessionId, CLIENT_ID, 0)));
-        safeFit();
-        sock.send(encodeResize(term.cols, term.rows));
-        onConnRef.current?.("connected");
+        try {
+          const built = await buildSessionBindFrame(spawnId, sessionId, CLIENT_ID, 0, openSequence);
+          if (closing || openSequence !== attachmentSequence) return;
+          const { authorization: verified, ...frame } = built;
+          if (authEnabled() && !verified) throw new Error("session bind: authorization context missing");
+          authorization = verified ?? null;
+          sock.send(JSON.stringify(frame));
+          sendWhenBound(encodeResize(term.cols, term.rows), "resize");
+          bound = true;
+          binding = false;
+          for (const pending of pendingSends) sock.send(pending.data);
+          clearPendingSends();
+          if (pendingPairReauth) {
+            pendingPairReauth = false;
+            const latest = useSessionStore.getState();
+            if (latest.cpAccessToken && latest.nodeAccessToken) {
+              sendReauth(latest.cpAccessToken);
+              sendNodeReauth(latest.nodeAccessToken);
+            }
+          }
+          safeFit();
+          onConnRef.current?.("connected");
+        } catch {
+          binding = false;
+          clearPendingSends();
+          if (!closing && openSequence === attachmentSequence) sock.close();
+        }
       },
-      onDown: () => { if (!closing) onConnRef.current?.("reconnecting"); },
+      onDown: () => {
+        bound = false;
+        binding = false;
+        clearPendingSends();
+        if (!closing) onConnRef.current?.("reconnecting");
+      },
       onMessage: (data: ArrayBuffer | string) => {
         const bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
         const n = bytes.length;
@@ -137,8 +200,8 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     sock.binaryType = "arraybuffer";
     sockRef.current = sock;
 
-    const onData = term.onData((d) => sock.send(encodeInput(d)));
-    const onResize = term.onResize(({ cols, rows }) => sock.send(encodeResize(cols, rows)));
+    const onData = term.onData((d) => sendWhenBound(encodeInput(d)));
+    const onResize = term.onResize(({ cols, rows }) => sendWhenBound(encodeResize(cols, rows), "resize"));
     const ro = new ResizeObserver(() => safeFit());
     ro.observe(host);
 
@@ -166,10 +229,25 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
 
     // In-band reauth: ~15min interval matches ws.go defaultReauthInterval.
     // Sends a text reauth frame so the CP resets the 15min expiry deadline.
-    // Use a best-effort send (errors ignored — socket reconnects will re-handshake).
+    // Any failed control send closes this attachment so reconnect performs a fresh authorized bind.
     const REAUTH_INTERVAL_MS = 14 * 60 * 1000; // 14 min (slightly under 15)
     const sendReauth = (token: string) => {
-      try { sockRef.current?.send(JSON.stringify({ type: "reauth", token })); } catch { /* socket closing */ }
+      if (!bound) return;
+      try { sock.send(JSON.stringify({ type: "reauth", token })); } catch { sock.close(); }
+    };
+    const sendNodeReauth = (nodeAccessToken: string) => {
+      if (!bound) return;
+      const verified = authorization;
+      if (!verified) return;
+      const reauthSequence = ++nodeReauthSequence;
+      void buildNodeReauthControl(verified, nodeAccessToken).then((control) => {
+        if (closing || reauthSequence !== nodeReauthSequence ||
+            verified.attachmentSequence !== attachmentSequence) return;
+        sock.send(JSON.stringify(control));
+      }).catch(() => {
+        if (!closing && reauthSequence === nodeReauthSequence &&
+            verified.attachmentSequence === attachmentSequence) sock.close();
+      });
     };
     const reauthInterval = authEnabled()
       ? setInterval(() => sendReauth(getAccessToken()), REAUTH_INTERVAL_MS)
@@ -178,14 +256,28 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     // Subscribe to token changes (fresh token after a silent refresh) → push reauth immediately.
     const unsubSession = authEnabled()
       ? useSessionStore.subscribe((state, prev) => {
-          if (state.accessToken !== prev.accessToken && state.accessToken) {
-            sendReauth(state.accessToken);
+          const cpChanged = state.cpAccessToken !== prev.cpAccessToken && !!state.cpAccessToken;
+          const nodeChanged = state.nodeAccessToken !== prev.nodeAccessToken && !!state.nodeAccessToken;
+          if (!bound && (cpChanged || nodeChanged)) {
+            pendingPairReauth = true;
+            return;
+          }
+          if (cpChanged) {
+            sendReauth(state.cpAccessToken);
+          }
+          if (nodeChanged) {
+            sendNodeReauth(state.nodeAccessToken);
           }
         })
       : null;
 
     return () => {
       closing = true; // intentional teardown -> suppress the close-driven onDown "reconnecting"
+      sendRef.current = () => {};
+      binding = false;
+      clearPendingSends();
+      attachmentSequence++;
+      nodeReauthSequence++;
       if (reauthInterval) clearInterval(reauthInterval);
       if (unsubSession) unsubSession();
       document.removeEventListener("mouseup", onDocMouseUp);
@@ -232,7 +324,7 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
       if (cancelled || termRef.current !== term) return; // unmounted / spawn switched mid-await
       fit.fit();
       term.refresh(0, term.rows - 1);
-      sockRef.current?.send(encodeResize(term.cols, term.rows));
+      sendRef.current(encodeResize(term.cols, term.rows), "resize");
     };
 
     const family = primaryFamily(fontById(settings.fontFamily).stack);

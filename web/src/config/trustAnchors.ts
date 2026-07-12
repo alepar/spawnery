@@ -17,3 +17,6 @@ PLACEHOLDER-TRUST-ANCHOR-ROOT-CA
 
 /** SPIFFE trust domain paired with PINNED_ROOT_CA_PEM. Stamped per release environment. */
 export const PINNED_TRUST_DOMAIN = "prod.spawnery.internal";
+
+/** Root-authorized system account used by cloud node SPIFFE identities. Stamped per release. */
+export const PINNED_CLOUD_ACCOUNT_ID = "PLACEHOLDER-CLOUD-SYSTEM-ACCOUNT-ID";
