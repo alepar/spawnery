@@ -1420,6 +1420,10 @@ func (a *attacher) detachClient(spawnID, sessionID, clientID string) {
 	if a.auths != nil {
 		a.auths.remove(sessionAuthKey{spawnID: spawnID, sessionID: sessionID, clientID: clientID})
 	}
+	a.detachClientTransport(spawnID, sessionID, clientID)
+}
+
+func (a *attacher) detachClientTransport(spawnID, sessionID, clientID string) {
 	k := sessionKey{spawnID, sessionID}
 	a.mu.Lock()
 	relay := a.tmuxRelays[k]
@@ -1440,7 +1444,13 @@ func (a *attacher) closeClientAuthorization(key sessionAuthKey, generation uint6
 	if len(attachmentIDs) == 1 {
 		attachmentID = attachmentIDs[0]
 	}
-	a.detachClient(key.spawnID, key.sessionID, key.clientID)
+	if attachmentID != "" && a.auths != nil {
+		a.auths.closeAttachment(key, attachmentID, func() {
+			a.detachClientTransport(key.spawnID, key.sessionID, key.clientID)
+		})
+	} else {
+		a.detachClient(key.spawnID, key.sessionID, key.clientID)
+	}
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SessionAuthClosed{SessionAuthClosed: &nodev1.SessionAuthClosed{
 		SpawnId: key.spawnID, Generation: generation, SessionId: key.sessionID, ClientId: key.clientID, Reason: reason,
 		AttachmentId: attachmentID,

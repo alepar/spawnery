@@ -132,6 +132,23 @@ func (r *sessionAuthRegistry) removeIfAttachment(key sessionAuthKey, attachmentI
 	return true
 }
 
+// closeAttachment serializes transport teardown with attachment registration. If a newer
+// incarnation is already present, teardown is skipped; otherwise registration waits until the old
+// transport has been detached and can then install cleanly.
+func (r *sessionAuthRegistry) closeAttachment(key sessionAuthKey, attachmentID string, detach func()) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current := r.records[key]
+	if current != nil {
+		if attachmentID == "" || current.record.attachmentID != attachmentID {
+			return false
+		}
+		_ = r.removeLocked(key)
+	}
+	detach()
+	return true
+}
+
 func (r *sessionAuthRegistry) removeSpawn(spawnID string) {
 	r.mu.Lock()
 	for key := range r.records {

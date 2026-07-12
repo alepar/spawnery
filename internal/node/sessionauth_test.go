@@ -1,10 +1,80 @@
 package node
 
 import (
+	"io"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestExpiredAttachmentCloseCannotDetachReplacement(t *testing.T) {
+	a := newAttacher(nil, &fakeCPStream{})
+	key := sessionAuthKey{spawnID: "sp", sessionID: "s", clientID: "client"}
+	pump := newPump(io.Discard, strings.NewReader(""))
+	a.pumps[sessionKey{spawnID: "sp", sessionID: "s"}] = pump
+	oldSender := &capSender{}
+	if !a.attachClient("sp", "s", "client", 0) {
+		t.Fatal("old client did not attach")
+	}
+	// Replace the production sender with one observable by this test.
+	pump.attachClient("client", 0, oldSender.send)
+
+	closeEntered := make(chan struct{})
+	releaseClose := make(chan struct{})
+	old := sessionAuthRecord{expiresAt: time.Now().Add(time.Hour), attachmentID: "old", attachmentSequence: 1}
+	a.auths.register(key, old, func(reason string) {
+		close(closeEntered)
+		<-releaseClose
+		a.closeClientAuthorization(key, 1, reason, "old")
+	})
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		a.auths.close(key, "expired")
+	}()
+	<-closeEntered
+
+	newSender := &capSender{}
+	replacement := old
+	replacement.attachmentID = "new"
+	replacement.attachmentSequence = 2
+	a.auths.register(key, replacement, func(string) {})
+	if !a.attachClient("sp", "s", "client", 0) {
+		t.Fatal("replacement client did not attach")
+	}
+	pump.attachClient("client", 0, newSender.send)
+	close(releaseClose)
+	<-closeDone
+
+	if attachment, ok := a.auths.attachment(key); !ok || attachment != "new" {
+		t.Fatalf("replacement auth = %q/%v", attachment, ok)
+	}
+	if !pump.attached() {
+		t.Fatal("expired attachment detached replacement transport")
+	}
+	pump.appendFrames([]Frame{{Kind: "agent", Text: "still-live"}})
+	newSender.waitLen(t, 1)
+	if got := newSender.frames()[0].Text; got != "still-live" {
+		t.Fatalf("replacement frame = %q", got)
+	}
+	pump.detachClient("client")
+}
+
+func TestCurrentAttachmentCloseStillDetachesTransport(t *testing.T) {
+	a := newAttacher(nil, &fakeCPStream{})
+	key := sessionAuthKey{spawnID: "sp", sessionID: "s", clientID: "client"}
+	pump := newPump(io.Discard, strings.NewReader(""))
+	a.pumps[sessionKey{spawnID: "sp", sessionID: "s"}] = pump
+	pump.attachClient("client", 0, (&capSender{}).send)
+	a.auths.register(key, sessionAuthRecord{
+		expiresAt: time.Now().Add(time.Hour), attachmentID: "current", attachmentSequence: 1,
+	}, func(reason string) { a.closeClientAuthorization(key, 1, reason, "current") })
+	a.auths.close(key, "expired")
+	if a.auths.contains(key) || pump.attached() {
+		t.Fatalf("current close left auth=%v transport=%v", a.auths.contains(key), pump.attached())
+	}
+}
 
 type heldTimer struct{ callback func() }
 
