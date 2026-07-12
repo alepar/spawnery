@@ -80,8 +80,10 @@ export ACC_TEST_MODEL=openai/gpt-4o-mini ACC_AGENT_MODEL=openai/gpt-4o-mini
 export ACC_SPAWN_ACTIVE_TIMEOUT_MS=240000
 [ -f "${GOLDEN_IMAGE%.qcow2}-ca.crt" ] && export NODE_EXTRA_CA_CERTS="${GOLDEN_IMAGE%.qcow2}-ca.crt"
 export ACC_SPAWNCTL_BIN="$STAGE/bin/spawnctl"     # cliDriver shells out to the fresh spawnctl
-export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report"   # per-run output — concurrency-safe
-export PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results"
+# The node-admin seam for the @noderestart scenario (SE3, sp-2tx8.3.6): the acceptance suite provisions
+# nothing and cannot reach into the VM, so it is handed an opaque host command that restarts the spawnlet —
+# the documented upgrade path. Same ssh flags as lib.sh's vm_ssh.
+export ACC_NODE_RESTART_CMD="ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i $E2E_SSH_KEY $E2E_SSH_USER@$E2E_VM_IP sudo systemctl restart spawnery-node"
 GREP_ARGS=(); [ -n "$GREP" ] && GREP_ARGS=(-g "$GREP")
 # VM lane knobs:
 # --retries=0: spawns are per-owner-quota-limited + slow to create, so a retry doesn't mask a flake —
@@ -90,8 +92,31 @@ GREP_ARGS=(); [ -n "$GREP" ] && GREP_ARGS=(-g "$GREP")
 #   otherwise defaults to CPU-count workers, and every worker past the pool size (default 3) dies at
 #   "identity pool has N entries but worker parallelIndex=… needs one". Cap workers to the pool.
 WORKERS="$(awk -F, 'NF{print NF}' <<<"${ACC_IDENTITY_POOL:-x}")"; WORKERS="${WORKERS:-1}"
-( cd "$REPO_ROOT/acceptance" && npm ci >/dev/null 2>&1 || true
-  npm run test:accept -- --retries=0 --workers="$WORKERS" "${GREP_ARGS[@]}" )
-rc=$?
-log "acceptance suite exit=$rc  (report: $RD/artifacts/pw-report)"
+cd "$REPO_ROOT/acceptance"
+npm ci >/dev/null 2>&1 || true
+
+if [ -n "$GREP" ]; then
+  # An explicit --grep: run exactly what was asked for, one pass, serial-safe worker count.
+  # `&& rc=0 || rc=$?` (not `; rc=$?`) — under `set -e` a plain `cmd; rc=$?` never reaches the
+  # assignment when cmd fails, since the failure aborts the script right there.
+  export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report" PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results"
+  npm run test:accept -- --retries=0 --workers="$WORKERS" "${GREP_ARGS[@]}" && rc=0 || rc=$?
+  log "acceptance suite exit=$rc  (report: $RD/artifacts/pw-report)"
+  exit $rc
+fi
+
+# Pass 1: the parallel suite, WITHOUT @noderestart — restarting the node mid-run would disturb every other
+# worker's spawn (that is the scenario's whole point), so it cannot share a pass with them.
+# `&& rc=0 || rc=$?`, not `; rc=$?`: under `set -e` a failing pass 1 would otherwise abort the script
+# right here and pass 2 (@noderestart) would never run — exactly the case this two-pass split exists for.
+export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report" PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results"
+npm run test:accept -- --retries=0 --workers="$WORKERS" --grep-invert "@noderestart" && rc=0 || rc=$?
+
+# Pass 2: @noderestart alone, serially (one worker), even if pass 1 failed — a restart regression is
+# exactly the thing we do not want hidden behind an unrelated red test.
+export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report-noderestart" PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results-noderestart"
+npm run test:accept -- --retries=0 --workers=1 -g "@noderestart" && rrc=0 || rrc=$?
+[ "$rc" = 0 ] && rc=$rrc
+
+log "acceptance suite exit=$rc  (reports: $RD/artifacts/pw-report, $RD/artifacts/pw-report-noderestart)"
 exit $rc

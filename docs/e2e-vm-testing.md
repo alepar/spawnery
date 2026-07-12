@@ -145,6 +145,13 @@ Scenario coverage (`acceptance/tests/`):
 | `customization/` | profiles, catalog, and **secrets** CRUD (secrets is the api-only surface), and a profile-attached spawn (injection). |
 | `marketplace/` | app-version register, browse, listing, and **spawn-from-a-market-app**. |
 
+The suite also verifies the restart itself: `tests/lifecycle/node-restart.spec.ts` (`@noderestart`, run by
+`run.sh` in its own serial pass) creates a spawn, leaves a marker file and a long-running process inside the
+agent, then runs `sudo systemctl restart spawnery-node` over ssh (`ACC_NODE_RESTART_CMD`) and asserts the
+spawn returns to ACTIVE with no operator action, the file and the process survived, and git-over-HTTPS still
+works inside the agent (the per-spawn MITM CA did not change under it). That is SE3's acceptance criteria,
+end to end — `docs/superpowers/specs/2026-07-12-spawnlet-restart-readoption-design.md` §6.
+
 Because the target is the prod-mode stack, passing these also transitively verifies: **A4
 intent-signing** end-to-end (create/resume/fork), **enforced mTLS** node registration, **runsc/gVisor**
 pod isolation, the **Postgres** CP store, **Caddy TLS** at a fixed hostname, and dev-token (or, when
