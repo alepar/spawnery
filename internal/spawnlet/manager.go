@@ -843,14 +843,42 @@ func (m *Manager) ReapOrphans(ctx context.Context) error {
 	return nil
 }
 
-// StopAll tears down every spawn this Manager tracks, for graceful node shutdown — a SIGTERM'd node
-// reaps its own pods instead of leaving orphans for the next process's reap-on-startup. Returns the
-// number of spawns it stopped.
+// StopAll tears down every spawn this Manager tracks — the DESTRUCTIVE bulk path. It is NOT the
+// process-shutdown path any more: a SIGTERM'd node calls DetachAll and leaves its pods running for
+// the next process to re-adopt (SE3 §4.1). Keep this for an explicit drain/destroy-everything caller.
+// Returns the number of spawns it stopped.
 func (m *Manager) StopAll(ctx context.Context) int {
 	sps := m.store.List()
 	for _, sp := range sps {
 		if err := m.Stop(ctx, sp.ID); err != nil {
 			log.Printf("stopAll: stop %s: %v", sp.ID, err)
+		}
+	}
+	return len(sps)
+}
+
+// DetachAll relinquishes supervision of every spawn this Manager tracks WITHOUT touching the pods:
+// the containers keep running so the next spawnlet process can re-adopt them (SE3 §4.1). It is the
+// PROCESS-SHUTDOWN path (SIGTERM / `systemctl restart` — the documented upgrade path); the
+// spawn-deletion path (Stop/StopAll/teardown) is unchanged and still destroys.
+//
+// It stops each spawn's continuous journal watchers so no snapshot is left racing process exit, and
+// deliberately does NOT: call pod.Stop, run the mount finalizers, or clear the node's delta/journal
+// state stores — those records are what re-adoption (sp-2tx8.3.4) reads back. The in-memory store is
+// left as-is: the process is exiting, and mutating it buys nothing.
+//
+// Consequence to accept (spec §4.1): if this node never comes back, its pods run unsupervised. They
+// are labelled, so a future spawnlet on this machine reconciles them and the CP sees the spawns as
+// Unreachable — strictly better than today, where a restart destroys them unconditionally.
+//
+// Returns the number of spawns left running.
+func (m *Manager) DetachAll() int {
+	sps := m.store.List()
+	for _, sp := range sps {
+		// takeWatchers clears sp.journalWatchers under watchersMu; Stop() blocks until the watcher
+		// goroutine exits and MUST be called outside that lock (see takeWatchers' contract).
+		for _, w := range m.takeWatchers(sp) {
+			w.Stop()
 		}
 	}
 	return len(sps)

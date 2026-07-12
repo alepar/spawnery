@@ -220,6 +220,21 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		ghControl:        ghControl,
 		tmuxHasSessionFn: mgr.TmuxHasSession,
 	}
+
+	// Process shutdown (SIGTERM) — NOT a CP blip: detach from the spawns (close pumps/sessions) and leave
+	// every pod running for the next spawnlet to re-adopt (SE3 §4.1). On a plain connection drop we keep
+	// the pumps: Run reconnects.
+	//
+	// Note this closure captures ctx (the caller's), not connCtx — connCtx is always cancelled by its own
+	// defer cancel() above, so testing that one would detach on every CP disconnect too.
+	defer func() {
+		if ctx.Err() != nil {
+			if n := a.detachAll(); n > 0 {
+				slog.Info("node: shutting down — detached from running spawns (pods left running)", "pumps", n)
+			}
+		}
+	}()
+
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)
 
@@ -238,6 +253,45 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		}
 		a.handle(connCtx, msg)
 	}
+}
+
+// detachAll is the PROCESS-SHUTDOWN path (SE3 §4.1): the node closes its pumps, tmux relays and session
+// registries and returns — with every pod STILL RUNNING, so the next spawnlet process can re-adopt them.
+// It is called only when the process is going away (ctx cancelled), never on a CP disconnect: a reconnect
+// keeps its pumps.
+//
+// Pumps MUST be closed via Pump.stop(): stop() marks the pump stopped before closing the agent conn, which
+// is what suppresses exitFn — and session-0's exitFn calls mgr.Stop, i.e. it DESTROYS THE POD. Closing the
+// conn any other way would reclaim the container we are trying to preserve.
+//
+// Nothing is done to the in-container ACP/session servers: the agent is the ACP server and the node merely
+// dials it, so it survives the node's death and just sees a client disconnect. Lingering session servers are
+// reaped at re-adopt (§4.6). The CP stream needs no explicit close — runOnce's connCtx cancel ends it.
+//
+// Returns the number of pumps it closed.
+func (a *attacher) detachAll() int {
+	a.mu.Lock()
+	pumps := make([]*Pump, 0, len(a.pumps))
+	for k, p := range a.pumps {
+		pumps = append(pumps, p)
+		delete(a.pumps, k)
+	}
+	relays := make([]*tmuxRelay, 0, len(a.tmuxRelays))
+	for k, r := range a.tmuxRelays {
+		relays = append(relays, r)
+		delete(a.tmuxRelays, k)
+	}
+	a.sessions = map[string]*sessionRegistry{}
+	a.pending = map[sessionKey][]pendingClient{}
+	a.mu.Unlock()
+
+	for _, p := range pumps {
+		p.stop() // marks stopped first => exitFn (mgr.Stop!) does NOT fire
+	}
+	for _, r := range relays {
+		r.stop()
+	}
+	return len(pumps)
 }
 
 // runningSpawns maps the Manager's live inventory to proto RunningSpawn (all ACTIVE — the Manager
