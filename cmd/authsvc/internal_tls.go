@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"os"
@@ -85,6 +86,7 @@ func refreshCertificateCRLs(ctx context.Context, state *pki.RevocationState, pat
 		case <-ticker.C:
 			if err := applyCertificateCRLs(state, paths); err != nil {
 				// IsRevoked remains fail-closed when the last accepted CRL becomes stale.
+				log.Printf("authsvc: certificate revocation refresh failed: %v", err)
 				continue
 			}
 		}

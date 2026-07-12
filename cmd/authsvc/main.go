@@ -147,6 +147,16 @@ func main() {
 		if err != nil {
 			log.Fatalf("authsvc: %v", err)
 		}
+		if !cfg.Dev {
+			caRootPEM, readErr := os.ReadFile(cfg.CA.RootPEM)
+			if readErr != nil {
+				log.Fatalf("authsvc: read CA root for internal identity comparison: %v", readErr)
+			}
+			caRoot, parseErr := pki.ParseCertPEM(caRootPEM)
+			if parseErr != nil || !bytes.Equal(caRoot.Raw, root.Raw) {
+				log.Fatalf("authsvc: internal.root_ca must match ca.root_pem")
+			}
+		}
 		if cfg.CP.URL != "" {
 			cpHTTPClient, err = newInternalClient(root, identity, cfg.Internal.TrustDomain, cfg.CP.ServerName, pki.RoleCP, certificateState)
 			if err != nil {

@@ -58,6 +58,7 @@ func TestLoadCertificateRevocationsRequiresCurrentConfiguredCRL(t *testing.T) {
 	}
 
 	cfg.Internal.RevocationCRLs = filepath.Join(dir, "missing.crl")
+	cfg.Internal.RevocationState = filepath.Join(dir, "missing-state", "certificates.json")
 	if _, err := loadCertificateRevocations(cfg.Internal, func() time.Time { return now }); err == nil {
 		t.Fatal("missing configured CRL did not fail startup")
 	}
