@@ -19,8 +19,12 @@ import (
 )
 
 const (
-	revocationStateVersion = 1
-	maxRevocationStateSize = 16 << 20
+	revocationStateVersion     = 1
+	supportedIssuerRoleCount   = 3
+	maxIssuerSerialHexSize     = 40
+	maxCRLPEMJSONSize          = maxCRLPEMSize + maxCRLPEMNewlineCount
+	maxPersistedIssuerJSONSize = len(`{"issuer_serial":"`) + maxIssuerSerialHexSize + len(`","crl_pem":"`) + maxCRLPEMJSONSize + len(`"}`)
+	maxRevocationStateSize     = len(`{"version":1,"issuers":[`) + supportedIssuerRoleCount*maxPersistedIssuerJSONSize + supportedIssuerRoleCount - 1 + len("]}\n")
 )
 
 var (
@@ -469,7 +473,7 @@ func readPersistedRevocationState(path string) (*persistedRevocationState, error
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 		return nil, errors.New("pki: persisted revocation state must be a regular 0600 file")
 	}
-	if info.Size() > maxRevocationStateSize {
+	if info.Size() > int64(maxRevocationStateSize) {
 		return nil, ErrRevocationStateTooLarge
 	}
 	raw, err := os.ReadFile(path)

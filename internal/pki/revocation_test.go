@@ -3,6 +3,7 @@ package pki
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -494,6 +495,93 @@ func TestRevocationStateSizeLimitBeforeReadAndRename(t *testing.T) {
 	if _, err := readPersistedRevocationState(path); !errors.Is(err, ErrRevocationStateTooLarge) {
 		t.Fatalf("oversized persisted state error = %v", err)
 	}
+}
+
+func TestRevocationStatePersistsMaximumCRLsForEveryIssuerRole(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := NewRootCA("root")
+	roles := []IssuerRole{IssuerService, IssuerCloudNode, IssuerSelfHostedNode}
+	issuers := make([]*CA, 0, len(roles))
+	certificates := make([]*x509.Certificate, 0, len(roles))
+	for _, role := range roles {
+		issuer, err := root.NewIntermediate(role, "prod.spawnery.internal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		issuers = append(issuers, issuer)
+		certificates = append(certificates, issuer.Cert)
+	}
+	path := filepath.Join(t.TempDir(), "revocations", "state.json")
+	state, err := OpenRevocationState(path, certificates, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, issuer := range issuers {
+		if err := state.ApplyPEM(mustNearMaximumCRLPEM(t, issuer, int64(index+1), now)); err != nil {
+			_ = state.Close()
+			t.Fatalf("apply %s CRL: %v", roles[index], err)
+		}
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() <= 16<<20 {
+		t.Fatalf("three-role boundary fixture is only %d bytes", info.Size())
+	}
+	reopened, err := OpenRevocationState(path, certificates, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("reopen three-role boundary state: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	for index, issuer := range issuers {
+		if number, ok := reopened.HighestNumber(issuer.Cert.SerialNumber); !ok || number.Cmp(big.NewInt(int64(index+1))) != 0 {
+			t.Fatalf("reopened %s CRL number = %v, %v", roles[index], number, ok)
+		}
+	}
+}
+
+func mustNearMaximumCRLPEM(t *testing.T, issuer *CA, number int64, now time.Time) []byte {
+	t.Helper()
+	const maximumEntries = 110_000
+	entries := make([]x509.RevocationListEntry, maximumEntries)
+	serialBase := new(big.Int).Lsh(big.NewInt(1), 152)
+	for index := range entries {
+		entries[index] = x509.RevocationListEntry{
+			SerialNumber:   new(big.Int).Add(serialBase, big.NewInt(int64(index+1))),
+			RevocationTime: now.Add(-time.Minute),
+		}
+	}
+	var der []byte
+	low, high := 0, len(entries)+1
+	for low+1 < high {
+		count := low + (high-low)/2
+		candidate, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			Number:                    big.NewInt(number),
+			ThisUpdate:                now,
+			NextUpdate:                now.Add(time.Hour),
+			RevokedCertificateEntries: entries[:count],
+		}, issuer.Cert, issuer.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(candidate) <= maxCRLDERSize {
+			low, der = count, candidate
+		} else {
+			high = count
+		}
+	}
+	if len(der) <= maxCRLDERSize-128 || len(der) > maxCRLDERSize {
+		t.Fatalf("near-maximum CRL DER length = %d", len(der))
+	}
+	list, err := x509.ParseRevocationList(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return MarshalCRLPEM(list)
 }
 
 func mustCRLPEM(t *testing.T, issuer *CA, number int64, now time.Time, serials ...*big.Int) []byte {

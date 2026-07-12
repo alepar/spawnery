@@ -58,6 +58,14 @@ func forkCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 2)
 			}
+			rootCAPath := strings.TrimSpace(c.String("root-ca"))
+			trustDomain := strings.TrimSpace(c.String("trust-domain"))
+			crlStatePath := strings.TrimSpace(c.String("crl-state"))
+			issuerPaths := c.StringSlice("crl-issuer")
+			crlPaths := c.StringSlice("crl")
+			if err := validateMovePKIFlags(rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths); err != nil {
+				return cli.Exit(err.Error(), 2)
+			}
 			dir, err := resolveDir(c)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
@@ -79,7 +87,7 @@ func forkCmd() *cli.Command {
 				fmt.Fprintln(c.Writer, "  target same node")
 			}
 
-			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), strings.TrimSpace(c.String("root-ca")), strings.TrimSpace(c.String("trust-domain")), strings.TrimSpace(c.String("crl-state")), c.StringSlice("crl-issuer"), c.StringSlice("crl"), time.Now)
+			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths, time.Now)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}

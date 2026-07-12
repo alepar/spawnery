@@ -1,15 +1,52 @@
 package main
 
 import (
+	"context"
 	"crypto/x509"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/urfave/cli/v3"
+
 	"spawnery/internal/pki"
 )
+
+func TestMoveAndForkRejectIncompleteProductionIdentityBeforeDeviceOrRPC(t *testing.T) {
+	root, _ := pki.NewRootCA("root")
+	dir := t.TempDir()
+	rootPath := writeMovePKIFile(t, dir, "root.pem", pki.MarshalCertPEM(root.Cert))
+	for _, command := range []struct {
+		name string
+		new  func() *cli.Command
+		args []string
+	}{
+		{name: "move", new: moveCmd, args: []string{"spawn-id", "cloud"}},
+		{name: "fork", new: forkCmd, args: []string{"spawn-id"}},
+	} {
+		for _, identity := range []struct {
+			name  string
+			flags []string
+		}{
+			{name: "root without trust domain", flags: []string{"--root-ca", rootPath}},
+			{name: "trust domain without root", flags: []string{"--trust-domain", "prod.spawnery.internal"}},
+		} {
+			t.Run(command.name+"/"+identity.name, func(t *testing.T) {
+				args := append([]string{command.name, "--config-dir", filepath.Join(dir, "missing-device")}, identity.flags...)
+				args = append(args, command.args...)
+				cmd := command.new()
+				cmd.ExitErrHandler = func(context.Context, *cli.Command, error) {}
+				err := cmd.Run(context.Background(), args)
+				if err == nil || !strings.Contains(err.Error(), "--root-ca and --trust-domain must be provided together") {
+					t.Fatalf("incomplete production identity error = %v", err)
+				}
+			})
+		}
+	}
+}
 
 func TestLoadMoveOptionsSuppliesCurrentCertificateRevocations(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)

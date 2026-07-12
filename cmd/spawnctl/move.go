@@ -56,11 +56,19 @@ func moveCmd() *cli.Command {
 			if target == "" {
 				return cli.Exit("a target node id (or \"cloud\") is required", 2)
 			}
+			rootCAPath := strings.TrimSpace(c.String("root-ca"))
+			trustDomain := strings.TrimSpace(c.String("trust-domain"))
+			crlStatePath := strings.TrimSpace(c.String("crl-state"))
+			issuerPaths := c.StringSlice("crl-issuer")
+			crlPaths := c.StringSlice("crl")
+			if err := validateMovePKIFlags(rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths); err != nil {
+				return cli.Exit(err.Error(), 2)
+			}
 			dir, err := resolveDir(c)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), strings.TrimSpace(c.String("root-ca")), strings.TrimSpace(c.String("trust-domain")), strings.TrimSpace(c.String("crl-state")), c.StringSlice("crl-issuer"), c.StringSlice("crl"), time.Now)
+			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths, time.Now)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
@@ -86,6 +94,9 @@ func moveCmd() *cli.Command {
 }
 
 func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath, trustDomain, crlStatePath string, issuerPaths, crlPaths []string, clock func() time.Time) (client.MoveOptions, error) {
+	if err := validateMovePKIFlags(rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths); err != nil {
+		return client.MoveOptions{}, err
+	}
 	if clock == nil {
 		return client.MoveOptions{}, errors.New("move options require a clock")
 	}
@@ -100,9 +111,6 @@ func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath, trustDomain, crlStatePa
 			return client.MoveOptions{}, fmt.Errorf("read root CA PEM: %w", err)
 		}
 		opts.RootPEM = rootPEM
-		if crlStatePath == "" || len(issuerPaths) == 0 {
-			return client.MoveOptions{}, errors.New("production node verification requires --crl-state and at least one --crl-issuer")
-		}
 		root, err := pki.ParseCertPEM(rootPEM)
 		if err != nil {
 			return client.MoveOptions{}, fmt.Errorf("parse root CA PEM: %w", err)
@@ -147,8 +155,6 @@ func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath, trustDomain, crlStatePa
 		}
 		opts.CertificateRevocations = state.IsRevoked
 		opts.CloseCertificateRevocations = state.Close
-	} else if crlStatePath != "" || len(issuerPaths) != 0 || len(crlPaths) != 0 {
-		return client.MoveOptions{}, errors.New("certificate revocation flags require --root-ca")
 	}
 	asURL := strings.TrimRight(asFlag, "/")
 	if asURL == "" {
@@ -161,6 +167,22 @@ func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath, trustDomain, crlStatePa
 		opts.RevocationURL = asURL + "/node-revocations"
 	}
 	return opts, nil
+}
+
+func validateMovePKIFlags(rootCAPath, trustDomain, crlStatePath string, issuerPaths, crlPaths []string) error {
+	if (rootCAPath == "") != (trustDomain == "") {
+		return errors.New("--root-ca and --trust-domain must be provided together")
+	}
+	if rootCAPath == "" {
+		if crlStatePath != "" || len(issuerPaths) != 0 || len(crlPaths) != 0 {
+			return errors.New("certificate revocation flags require --root-ca and --trust-domain")
+		}
+		return nil
+	}
+	if crlStatePath == "" || len(issuerPaths) == 0 {
+		return errors.New("production node verification requires --crl-state and at least one --crl-issuer")
+	}
+	return nil
 }
 
 func resolveMoveAccountID(dir, tokenFlag string) string {

@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/asn1"
-	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -14,11 +13,13 @@ import (
 )
 
 const (
-	crlPEMType    = "X509 CRL"
-	maxCRLDERSize = 4 << 20
+	crlPEMType            = "X509 CRL"
+	maxCRLDERSize         = 4 << 20
+	maxCRLBase64Size      = ((maxCRLDERSize + 2) / 3) * 4
+	maxCRLBase64LineCount = (maxCRLBase64Size + 63) / 64
+	maxCRLPEMNewlineCount = maxCRLBase64LineCount + 2
+	maxCRLPEMSize         = len("-----BEGIN X509 CRL-----\n") + maxCRLBase64Size + maxCRLBase64LineCount + len("-----END X509 CRL-----\n")
 )
-
-var maxCRLPEMSize = canonicalCRLPEMSize(maxCRLDERSize)
 
 var ErrCRLTooLarge = errors.New("pki: CRL exceeds size limit")
 
@@ -153,12 +154,6 @@ func ParseCRLPEM(data []byte) (*x509.RevocationList, error) {
 		return nil, errors.New("pki: non-canonical X509 CRL PEM encoding")
 	}
 	return list, nil
-}
-
-func canonicalCRLPEMSize(derSize int) int {
-	encoded := base64.StdEncoding.EncodedLen(derSize)
-	lines := (encoded + 63) / 64
-	return len("-----BEGIN X509 CRL-----\n") + encoded + lines + len("-----END X509 CRL-----\n")
 }
 
 func validateCRLIssuer(issuer *x509.Certificate) error {
