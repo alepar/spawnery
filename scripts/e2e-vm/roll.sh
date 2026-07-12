@@ -35,22 +35,23 @@ if [ -d "$STAGE/web-dist" ]; then
 fi
 
 # 4. Reconcile the branch's PKI/env topology, then atomically swap + restart the stack.
-# Preserve the golden Caddy cert: host trust is intentionally anchored to that baked TLS CA, while
-# the internal Spawnery root is regenerated per disposable VM run.
+# Preserve the golden Caddy certificate in its isolated directory while rotating the internal root
+# and rebuilding every workload-specific runtime bundle from the branch's current ceremony tool.
 vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spawnery-ca \
-  && sudo env SPAWNERY_OFFLINE_PKI_DIR=/var/lib/spawnery-offline SPAWNERY_PRESERVE_WILDCARD=1 bash ~/incoming/provision/gen-pki.sh /etc/spawnery/pki e2e.test \
-  && sudo chmod 0644 /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key \
-  && ( id authsvc >/dev/null 2>&1 || sudo useradd --system --home-dir /var/lib/spawnery --shell /usr/sbin/nologin authsvc ) \
-  && sudo install -d -o authsvc -g authsvc -m0700 /etc/spawnery/authsvc /var/lib/spawnery \
+  && sudo rm -rf /etc/spawnery/pki /etc/spawnery/authsvc /etc/spawnery/cp /etc/spawnery/node \
+  && sudo install -d -m0700 /etc/spawnery/pki /etc/spawnery/authsvc /etc/spawnery/cp /etc/spawnery/node /var/lib/spawnery-offline \
+  && sudo env SPAWNERY_OFFLINE_PKI_DIR=/var/lib/spawnery-offline bash ~/incoming/provision/gen-pki.sh /etc/spawnery/pki e2e.test \
   && sudo cp -rf /etc/spawnery/pki/authsvc/. /etc/spawnery/authsvc/ \
-  && sudo chown -R authsvc:authsvc /etc/spawnery/authsvc /var/lib/spawnery \
-  && sudo rm -rf /etc/spawnery/pki/authsvc \
+  && sudo cp -rf /etc/spawnery/pki/cp/. /etc/spawnery/cp/ \
+  && sudo cp -f /etc/spawnery/pki/node-cloud/{cert.pem,chain.pem,key.pem,root.pem} /etc/spawnery/node/ \
+  && sudo cp -f /etc/spawnery/pki/{service-intermediate.pem,cloud-intermediate.pem,self-hosted-intermediate.pem,service.crl.pem,cloud-node.crl.pem,self-hosted-node.crl.pem} /etc/spawnery/node/ \
+  && sudo chmod 0600 /etc/spawnery/authsvc/* /etc/spawnery/cp/* /etc/spawnery/node/* \
+  && sudo rm -rf /etc/spawnery/pki/* \
+  && sudo rm -rf /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations \
+  && sudo install -d -m0700 /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations \
   && sudo cp -f ~/incoming/provision/env/common.env /etc/spawnery/env.d/common.env.tmpl \
   && sudo cp -f ~/incoming/provision/env/profile.*.env /etc/spawnery/env.d/ \
   && sudo sh -c '\''for f in /etc/spawnery/env.d/profile.*.env; do mv -f "$f" "$f.tmpl"; done'\'' \
-  && sudo install -d /etc/systemd/system/spawnery-authsvc.service.d \
-  && printf '\''[Service]\nUser=authsvc\nGroup=authsvc\n'\'' | sudo tee /etc/systemd/system/spawnery-authsvc.service.d/user.conf >/dev/null \
-  && sudo systemctl daemon-reload \
   && sudo systemctl restart spawnery-render-env'
 
 # 5. atomic swap + restart the stack (order matters: AS -> CP -> node -> caddy)

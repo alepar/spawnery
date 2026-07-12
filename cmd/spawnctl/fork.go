@@ -92,7 +92,7 @@ func forkCmd() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 			if opts.CloseCertificateRevocations != nil {
-				defer opts.CloseCertificateRevocations()
+				defer func() { _ = opts.CloseCertificateRevocations() }()
 			}
 			if _, err := sdk.Fork(ctx, dev, req, c.Writer, time.Now(), opts); err != nil {
 				return cli.Exit("fork failed: "+err.Error(), 1)

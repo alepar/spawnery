@@ -87,7 +87,7 @@ export async function mintVMToken(
 ): Promise<string> {
   const base = "/etc/spawnery/authsvc";
   return ssh(cfg,
-    `sudo -u authsvc /usr/local/bin/spawnery-ca auth-token ${base}/root.pem ${base}/auth-signer-${signer}-key.pem ${base}/auth-signer-${signer}-chain.pem dev ${audience} ${cfg.owner} ${Buffer.from(spki).toString("base64")}`,
+    `sudo /usr/local/bin/spawnery-ca auth-token ${base}/root.pem ${base}/auth-signer-${signer}-key.pem ${base}/auth-signer-${signer}-chain.pem prod ${audience} ${cfg.owner} ${Buffer.from(spki).toString("base64")}`,
   );
 }
 
@@ -160,7 +160,7 @@ export async function submitSpawn(
 }
 
 export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node", spki: Uint8Array): Promise<string> {
-  const read = async (name: string) => Buffer.from(await ssh(cfg, `sudo base64 -w0 /etc/spawnery/pki/node-cloud/${name}`), "base64");
+  const read = async (name: string) => Buffer.from(await ssh(cfg, `sudo base64 -w0 /etc/spawnery/node/${name}`), "base64");
   const keyPEM = await read("key.pem");
   const certPEM = await read("cert.pem");
   const chainPEM = await read("chain.pem");
@@ -187,7 +187,7 @@ export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node
 
 export async function deployCurrentRevocation(cfg: VMAuthConfig, generation: number): Promise<void> {
   const wire = await ssh(cfg,
-    `sudo /usr/local/bin/spawnery-ca signer-revocation /var/lib/spawnery-offline/auth-signing-intermediate.pem /var/lib/spawnery-offline/auth-signing-intermediate-key.pem /etc/spawnery/authsvc/auth-signer-current-chain.pem dev ${generation}`,
+    `sudo /usr/local/bin/spawnery-ca signer-revocation /var/lib/spawnery-offline/auth-signing-intermediate.pem /var/lib/spawnery-offline/auth-signing-intermediate-key.pem /etc/spawnery/authsvc/auth-signer-current-chain.pem prod ${generation}`,
   );
   await ssh(cfg, `sudo sh -c 'printf "%s\\n" "${wire}" > /etc/spawnery/signer-revocations.artifact; grep -q ^CP_AUTH_SIGNER_REVOCATION_STATEMENT= /etc/spawnery/env.d/common.env || printf "%s\\n" "CP_AUTH_SIGNER_REVOCATION_STATEMENT=/etc/spawnery/signer-revocations.artifact" >> /etc/spawnery/env.d/common.env; grep -q ^NODE_SIGNER_REVOCATION_STATEMENT= /etc/spawnery/env.d/common.env || printf "%s\\n" "NODE_SIGNER_REVOCATION_STATEMENT=/etc/spawnery/signer-revocations.artifact" >> /etc/spawnery/env.d/common.env; systemctl restart spawnery-cp spawnery-node'`);
   for (let i = 0; i < 60; i++) {

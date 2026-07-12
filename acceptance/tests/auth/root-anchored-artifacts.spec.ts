@@ -18,8 +18,8 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
   test.setTimeout(8 * 60_000);
   const cfg = loadVMAuthConfig();
   const env = await ssh(cfg, "sudo cat /etc/spawnery/env.d/common.env");
-  expect(env).toContain("CP_AUTH_ROOT_CA=/etc/spawnery/pki/root.pem");
-  expect(env).toContain("NODE_ROOT_CA=/etc/spawnery/pki/root.pem");
+  expect(env).toContain("CP_AUTH_ROOT_CA=/etc/spawnery/cp/root.pem");
+  expect(env).toContain("NODE_ROOT_CA=/etc/spawnery/node/root.pem");
   expect(env).not.toMatch(/CP_AS_SESSION_PUBKEYS|NODE_AS_PUBKEYS|AS_SESSION_KEY_PEM|auth-signing-intermediate-key/);
   expect(await ssh(cfg, "sudo find /etc/spawnery -type f \\( -name '*session-pub*' -o -name 'auth-signing-intermediate-key.pem' \\)"), "no raw signer pin or offline issuer key in runtime tree").toBe("");
 
