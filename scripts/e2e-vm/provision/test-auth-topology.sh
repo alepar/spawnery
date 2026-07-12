@@ -40,4 +40,9 @@ if rg -n "$offline_runtime" "$HERE/env"/*.env; then
   exit 1
 fi
 
+if rg -n '^NODE_(ID_DIR|ROOT_CA|CERTIFICATE_REVOCATION_(ISSUERS|CRLS))=/etc/spawnery/pki' "$common"; then
+  echo "node runtime still references shared PKI staging" >&2
+  exit 1
+fi
+
 echo "auth signing runtime topology is root-anchored and leaf-only"

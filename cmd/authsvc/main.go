@@ -377,6 +377,7 @@ func buildService(cfg *AS, certificateRevocations pki.CertificateRevocationCheck
 		authsvc.WithTrustDomain(cfg.CA.TrustDomain),
 		authsvc.WithCertificateRevocations(certificateRevocations),
 		authsvc.WithIdP(idp),
+		authsvc.WithEnrollmentTokenIssuance(authsvc.SessionBearerAccount(artifactVerifier, time.Now)),
 		authsvc.WithNodeRevocations(idStore.NodeRevocations()),
 		authsvc.WithGitHubMinting(idStore, ghProvider),
 	}

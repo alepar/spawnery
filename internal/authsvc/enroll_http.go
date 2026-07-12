@@ -30,6 +30,39 @@ type enrollResp struct {
 	ChainPEM string `json:"chain_pem"`
 }
 
+type enrollmentTokenReq struct {
+	Class       string `json:"class"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+type enrollmentTokenResp struct {
+	Token string `json:"token"`
+}
+
+func (s *Service) enrollmentTokenHandler(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := s.enrollmentAccountFromReq(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req enrollmentTokenReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	token, err := s.IssueBoundEnrollmentToken(accountID, req.Class, req.Fingerprint)
+	if err != nil {
+		if errors.Is(err, ErrUnsignableClass) || req.Fingerprint == "" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "token issuance failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(enrollmentTokenResp{Token: token})
+}
+
 // enrollHandler redeems a node's enrollment token + CSR and returns the issued cert + chain.
 func (s *Service) enrollHandler(w http.ResponseWriter, r *http.Request) {
 	var req enrollReq

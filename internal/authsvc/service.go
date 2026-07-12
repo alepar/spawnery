@@ -105,7 +105,8 @@ type Service struct {
 	now       func() time.Time
 	enrollTTL time.Duration
 
-	idp *IdP // identity core (A1: OAuth, refresh, device grant); nil until WithIdP is called
+	idp                      *IdP // identity core (A1: OAuth, refresh, device grant); nil until WithIdP is called
+	enrollmentAccountFromReq AccountFromRequest
 
 	deviceSet *deviceSetHandler // device-set registry; nil until WithDeviceSet is called
 
@@ -218,6 +219,12 @@ func (s *Service) Validate() error {
 // WithIdP attaches the identity core (OAuth, refresh, device grant) to the Service. Call after
 // constructing a *IdP with NewIdP; the IdP's routes are registered in Handler().
 func WithIdP(idp *IdP) Option { return func(s *Service) { s.idp = idp } }
+
+// WithEnrollmentTokenIssuance enables authenticated public issuance of fingerprint-bound node
+// enrollment tokens. The extractor must verify the caller's AS session and return its account ID.
+func WithEnrollmentTokenIssuance(accountFromReq AccountFromRequest) Option {
+	return func(s *Service) { s.enrollmentAccountFromReq = accountFromReq }
+}
 
 // WithDeviceSet attaches the device-set registry to the Service.
 //

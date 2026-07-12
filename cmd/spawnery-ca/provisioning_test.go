@@ -106,22 +106,27 @@ func TestProductionSystemdIsolatesPrivatePKI(t *testing.T) {
 	}{
 		{
 			unit:         "spawnery-authsvc.service",
-			inaccessible: "InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/cp /etc/spawnery/pki",
+			inaccessible: "InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/caddy /etc/spawnery/cp /etc/spawnery/node /etc/spawnery/pki",
 			readOnly:     "ReadOnlyPaths=/etc/spawnery/authsvc",
 		},
 		{
 			unit:         "spawnery-cp.service",
-			inaccessible: "InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/pki",
+			inaccessible: "InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/node /etc/spawnery/pki",
 			readOnly:     "ReadOnlyPaths=/etc/spawnery/cp",
 		},
 		{
 			unit:         "spawnery-node.service",
-			inaccessible: "InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/cp",
-			readOnly:     "ReadOnlyPaths=/etc/spawnery/pki",
+			inaccessible: "InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/cp /etc/spawnery/pki",
+			readOnly:     "ReadOnlyPaths=/etc/spawnery/node",
 		},
 	} {
 		unit := systemdUnitBody(t, provision, test.unit)
-		for _, expected := range []string{test.inaccessible, test.readOnly} {
+		for _, expected := range []string{
+			test.inaccessible,
+			test.readOnly,
+			"NoNewPrivileges=yes",
+			"CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE",
+		} {
 			if !strings.Contains(unit, expected) {
 				t.Errorf("%s missing %q", test.unit, expected)
 			}
@@ -138,6 +143,64 @@ func TestProductionSystemdIsolatesPrivatePKI(t *testing.T) {
 	} {
 		if strings.Contains(common, forbidden) {
 			t.Errorf("runtime environment references offline key material %q", forbidden)
+		}
+	}
+}
+
+func TestProductionNodeRuntimeBundleIsAllowListed(t *testing.T) {
+	provision := readRepoFile(t, "../../scripts/e2e-vm/provision/provision.sh")
+	common := readRepoFile(t, "../../scripts/e2e-vm/provision/env/common.env")
+	for _, expected := range []string{
+		"sudo install -d -m0700 /etc/spawnery/node",
+		"/etc/spawnery/pki/node-cloud/{cert.pem,chain.pem,key.pem,root.pem}",
+		"service-intermediate.pem,cloud-intermediate.pem,self-hosted-intermediate.pem,service.crl.pem,cloud-node.crl.pem,self-hosted-node.crl.pem",
+		"sudo install -d -m0750 -o root -g caddy /etc/spawnery/caddy",
+		"tls /etc/spawnery/caddy/wildcard.crt /etc/spawnery/caddy/wildcard.key",
+		"sudo rm -rf /etc/spawnery/pki/*",
+	} {
+		if !strings.Contains(provision, expected) {
+			t.Errorf("production provisioning missing node/caddy custody step %q", expected)
+		}
+	}
+	for _, expected := range []string{
+		"NODE_ID_DIR=/etc/spawnery/node",
+		"NODE_ROOT_CA=/etc/spawnery/node/root.pem",
+		"NODE_CERTIFICATE_REVOCATION_ISSUERS=/etc/spawnery/node/service-intermediate.pem,/etc/spawnery/node/cloud-intermediate.pem,/etc/spawnery/node/self-hosted-intermediate.pem",
+		"NODE_CERTIFICATE_REVOCATION_CRLS=/etc/spawnery/node/service.crl.pem,/etc/spawnery/node/cloud-node.crl.pem,/etc/spawnery/node/self-hosted-node.crl.pem",
+	} {
+		if !strings.Contains(common, expected) {
+			t.Errorf("common.env missing node-only runtime path %q", expected)
+		}
+	}
+	for _, forbidden := range []string{
+		"NODE_ID_DIR=/etc/spawnery/pki",
+		"NODE_ROOT_CA=/etc/spawnery/pki",
+		"NODE_CERTIFICATE_REVOCATION_ISSUERS=/etc/spawnery/pki",
+		"NODE_CERTIFICATE_REVOCATION_CRLS=/etc/spawnery/pki",
+	} {
+		if strings.Contains(common, forbidden) {
+			t.Errorf("node runtime still references shared staging: %q", forbidden)
+		}
+	}
+	for _, line := range strings.Split(provision, "\n") {
+		if !strings.Contains(line, "cp ") || !strings.Contains(line, "/etc/spawnery/node/") {
+			continue
+		}
+		for _, forbidden := range []string{
+			"authsvc-service",
+			"cp-service",
+			"self-hosted-intermediate-key",
+			"auth-signer",
+			"wildcard",
+			"root-key",
+			"service-intermediate-key",
+			"cloud-intermediate-key",
+			"/etc/spawnery/pki/. ",
+			"/etc/spawnery/pki/node/",
+		} {
+			if strings.Contains(line, forbidden) {
+				t.Errorf("node runtime copy exposes forbidden peer/ceremony material %q: %s", forbidden, line)
+			}
 		}
 	}
 }

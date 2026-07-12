@@ -39,6 +39,9 @@ func (s *Service) PublicHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/x-pem-file")
 		_, _ = w.Write(s.RootCAPEM())
 	})
+	if s.enrollmentAccountFromReq != nil {
+		mux.HandleFunc("POST /enrollment-tokens", s.enrollmentTokenHandler)
+	}
 
 	if s.githubLinkExchanger != nil {
 		ghNoop := func(http.ResponseWriter, *http.Request) {}
