@@ -173,6 +173,38 @@ func TestOAuthHappyPath(t *testing.T) {
 	}
 }
 
+func TestOAuthCallbackSessionInsertFailureExposesNoCredentials(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	fake.SetUser(42002, "atomic-oauth")
+	now := time.Unix(1770000000, 0)
+	faults := &storeFaults{failInsert: true}
+	srv, _, st := testAS(t, fake, now, func(cfg *IdPConfig) {
+		cfg.Store = &failingStore{Store: cfg.Store, faults: faults}
+	})
+
+	resp := triggerCallback(t, srv, fake)
+	location := resp.Header.Get("Location")
+	if resp.StatusCode != http.StatusFound || extractQueryParam(location, "error") != "server_error" {
+		t.Fatalf("callback failure status/location = %d %q", resp.StatusCode, location)
+	}
+	if extractQueryParam(location, "cp_access_token") != "" || extractQueryParam(location, "node_access_token") != "" {
+		t.Fatalf("failed callback exposed credentials: %q", location)
+	}
+	for _, cookie := range resp.Cookies() {
+		if (cookie.Name == "refresh_token" || cookie.Name == logoutSessionCookieName || cookie.Name == deviceSessionCookieName) && cookie.Value != "" {
+			t.Fatalf("failed callback exposed %s cookie", cookie.Name)
+		}
+	}
+	user, err := st.Users().GetBySub(context.Background(), 42002)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if families, err := st.RefreshSessions().CountFamilies(context.Background(), user.AccountID); err != nil || families != 0 {
+		t.Fatalf("families after failed callback = %d, err=%v", families, err)
+	}
+}
+
 // TestOAuthRegistrationClosed: unknown sub + REGISTRATION_ENABLED=false → structured error redirect.
 func TestOAuthRegistrationClosed(t *testing.T) {
 	fake := githubfake.New()

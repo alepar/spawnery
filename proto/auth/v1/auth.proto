@@ -52,9 +52,8 @@ message SessionTokenBody {
   string account_id = 1;
   string handle = 2; // display-only; nothing keys or authorizes on it [AM9]
   string token_id = 3;
-  // "cp" | "node" [MC2] — split: node-relayed tokens are aud=node, REJECTED by the CP
-  // interceptor; aud=cp never leaves CP-bound use. A1 mints "cp" only; "node"-audience
-  // minting is A4's flow — do not mint node tokens here.
+  // "cp" | "node" [MC2] — node-relayed tokens are aud=node and REJECTED by the CP
+  // interceptor; aud=cp never leaves CP-bound use. The AS mints both audiences as one pair.
   string audience = 4;
   int64 issued_at = 5;
   int64 expires_at = 6;

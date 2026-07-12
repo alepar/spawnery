@@ -202,7 +202,7 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 
 	const workers = 8
 	const iterations = 25
-	sessions := make(chan string, workers*iterations*2+2)
+	pairs := make(chan accessPair, workers*iterations+1)
 	revocations := make(chan string, workers*iterations+1)
 	errs := make(chan error, workers*iterations*2+3)
 	start := make(chan struct{})
@@ -219,8 +219,7 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 					errs <- err
 					continue
 				}
-				sessions <- pair.CPWire
-				sessions <- pair.NodeWire
+				pairs <- pair
 				select {
 				case issued <- struct{}{}:
 				default:
@@ -243,8 +242,7 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 	if err != nil {
 		errs <- err
 	} else {
-		sessions <- postRotationPair.CPWire
-		sessions <- postRotationPair.NodeWire
+		pairs <- postRotationPair
 	}
 	postRotationRevocation, err := idp.signRevocationEntry(store.RevocationEvent{Seq: workers*iterations + 1, AccountID: "acct"})
 	if err != nil {
@@ -253,7 +251,7 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 		revocations <- postRotationRevocation.Sig
 	}
 	wg.Wait()
-	close(sessions)
+	close(pairs)
 	close(revocations)
 	close(errs)
 	for err := range errs {
@@ -262,7 +260,8 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 		}
 	}
 	seenSessionSigner := make(map[string]bool)
-	for wire := range sessions {
+	keyID := func(wire string) string {
+		t.Helper()
 		payload, err := verifier.Verify(wire, token.ArtifactTypeSession, now)
 		if err != nil {
 			t.Fatal(err)
@@ -282,7 +281,15 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 		if body.GetKeyId() != hex.EncodeToString(envelope.GetKeyId()) {
 			t.Fatalf("payload key_id %q does not match envelope key_id %x", body.GetKeyId(), envelope.GetKeyId())
 		}
-		seenSessionSigner[body.GetKeyId()] = true
+		return body.GetKeyId()
+	}
+	for pair := range pairs {
+		cpKeyID := keyID(pair.CPWire)
+		nodeKeyID := keyID(pair.NodeWire)
+		if cpKeyID != nodeKeyID {
+			t.Fatalf("access pair crossed signer activation: cp=%q node=%q", cpKeyID, nodeKeyID)
+		}
+		seenSessionSigner[cpKeyID] = true
 	}
 	for name, signer := range map[string]*token.SigningCredential{"current": current, "next": next} {
 		if !seenSessionSigner[hex.EncodeToString(signer.KeyID[:])] {

@@ -278,9 +278,8 @@ type SessionTokenBody struct {
 	AccountId string `protobuf:"bytes,1,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
 	Handle    string `protobuf:"bytes,2,opt,name=handle,proto3" json:"handle,omitempty"` // display-only; nothing keys or authorizes on it [AM9]
 	TokenId   string `protobuf:"bytes,3,opt,name=token_id,json=tokenId,proto3" json:"token_id,omitempty"`
-	// "cp" | "node" [MC2] — split: node-relayed tokens are aud=node, REJECTED by the CP
-	// interceptor; aud=cp never leaves CP-bound use. A1 mints "cp" only; "node"-audience
-	// minting is A4's flow — do not mint node tokens here.
+	// "cp" | "node" [MC2] — node-relayed tokens are aud=node and REJECTED by the CP
+	// interceptor; aud=cp never leaves CP-bound use. The AS mints both audiences as one pair.
 	Audience  string `protobuf:"bytes,4,opt,name=audience,proto3" json:"audience,omitempty"`
 	IssuedAt  int64  `protobuf:"varint,5,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
 	ExpiresAt int64  `protobuf:"varint,6,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`

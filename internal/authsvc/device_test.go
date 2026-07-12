@@ -151,6 +151,53 @@ func TestDeviceGrantHappy(t *testing.T) {
 	_ = idp
 }
 
+func TestDeviceTokenSessionInsertFailureRollsBackRedeem(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	faults := &storeFaults{failInsert: true}
+	srv, _, st := testAS(t, fake, now, func(cfg *IdPConfig) {
+		cfg.Store = &failingStore{Store: cfg.Store, faults: faults}
+	})
+	seedUser(t, st, "acct-device-atomic", 73001, now)
+	_, spkiDER := newTestP256(t)
+	rawCode := "atomic-device-code"
+	if err := st.DeviceGrants().Create(context.Background(), store.DeviceGrant{
+		DeviceCodeHash: sha256Hex(rawCode), UserCode: "ATOM-IC01", SessionPubkeySPKI: spkiDER,
+		ClientKind: store.ClientCLI, Status: store.GrantApproved, AccountID: "acct-device-atomic",
+		CreatedAt: now.Unix(), ExpiresAt: now.Add(userCodeTTL).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	poll := func() (*http.Response, []byte) {
+		resp, err := http.PostForm(srv.URL+"/device/token", url.Values{"device_code": {rawCode}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, body
+	}
+	resp, body := poll()
+	if resp.StatusCode != http.StatusInternalServerError || strings.Contains(string(body), "cp_access_token") || strings.Contains(string(body), "node_access_token") {
+		t.Fatalf("failed device redemption status/body = %d %s", resp.StatusCode, body)
+	}
+	grant, err := st.DeviceGrants().Get(context.Background(), sha256Hex(rawCode))
+	if err != nil || grant.Status != store.GrantApproved {
+		t.Fatalf("grant after failed insert = %+v, err=%v", grant, err)
+	}
+	if families, err := st.RefreshSessions().CountFamilies(context.Background(), grant.AccountID); err != nil || families != 0 {
+		t.Fatalf("families after failed device redemption = %d, err=%v", families, err)
+	}
+
+	faults.failInsert = false
+	resp, body = poll()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "cp_access_token") || !strings.Contains(string(body), "node_access_token") {
+		t.Fatalf("device retry status/body = %d %s", resp.StatusCode, body)
+	}
+}
+
 // TestDeviceGrantPollBeforeApproval: already tested in happy path; explicit version here.
 func TestDeviceGrantPollBeforeApproval(t *testing.T) {
 	fake := githubfake.New()

@@ -178,9 +178,8 @@ export type SessionTokenBody = Message<"auth.v1.SessionTokenBody"> & {
   tokenId: string;
 
   /**
-   * "cp" | "node" [MC2] — split: node-relayed tokens are aud=node, REJECTED by the CP
-   * interceptor; aud=cp never leaves CP-bound use. A1 mints "cp" only; "node"-audience
-   * minting is A4's flow — do not mint node tokens here.
+   * "cp" | "node" [MC2] — node-relayed tokens are aud=node and REJECTED by the CP
+   * interceptor; aud=cp never leaves CP-bound use. The AS mints both audiences as one pair.
    *
    * @generated from field: string audience = 4;
    */

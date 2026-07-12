@@ -2,10 +2,15 @@ package authsvc
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +41,50 @@ func seedFamily(t *testing.T, st store.Store, accountID string, spkiDER []byte, 
 		t.Fatal(err)
 	}
 	return rawToken, famID
+}
+
+func TestRefreshSupersedeFailureExposesNoTupleAndRetrySucceeds(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	faults := &storeFaults{failSupersede: true}
+	idp, st, _ := newTestIdP(t, fake, now, func(cfg *IdPConfig) {
+		cfg.Store = &failingStore{Store: cfg.Store, faults: faults}
+	})
+	sessKey, spkiDER := newTestP256(t)
+	seedUser(t, st, "acct-refresh-atomic", 74001, now)
+	rawToken, _ := seedFamily(t, st, "acct-refresh-atomic", spkiDER, now)
+
+	request := func() *httptest.ResponseRecorder {
+		proof := buildPoP(t, sessKey, rawToken, now.Unix(), make([]byte, 16))
+		req := httptest.NewRequest(http.MethodPost, "/refresh", nil)
+		req.AddCookie(&http.Cookie{Name: "refresh_token", Value: rawToken})
+		req.Header.Set("X-PoP-Timestamp", strconv.FormatInt(proof.Timestamp, 10))
+		req.Header.Set("X-PoP-Nonce", base64.RawURLEncoding.EncodeToString(proof.Nonce))
+		req.Header.Set("X-PoP-Sig", base64.RawURLEncoding.EncodeToString(proof.Sig))
+		rec := httptest.NewRecorder()
+		idp.serveRefresh(rec, req)
+		return rec
+	}
+	rec := request()
+	if rec.Code == http.StatusOK || strings.Contains(rec.Body.String(), "cp_access_token") || strings.Contains(rec.Body.String(), "node_access_token") {
+		t.Fatalf("failed refresh status/body = %d %s", rec.Code, rec.Body.String())
+	}
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == "refresh_token" && cookie.Value != "" {
+			t.Fatalf("failed refresh exposed successor cookie %q", cookie.Value)
+		}
+	}
+	predecessor, err := st.RefreshSessions().Get(context.Background(), sha256Hex(rawToken))
+	if err != nil || predecessor.SupersededBy != "" {
+		t.Fatalf("predecessor after failed refresh = %+v, err=%v", predecessor, err)
+	}
+
+	faults.failSupersede = false
+	rec = request()
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "cp_access_token") || !strings.Contains(rec.Body.String(), "node_access_token") {
+		t.Fatalf("refresh retry status/body = %d %s", rec.Code, rec.Body.String())
+	}
 }
 
 // seedUser creates a user in the store.
@@ -105,15 +154,12 @@ func TestRefreshGrace(t *testing.T) {
 
 	// Both must succeed (one rotates, the other gets the grace replay).
 	for i, res := range results {
-		if res.err != nil && !errors.Is(res.err, ErrFamilyRevoked) {
+		if res.err != nil {
 			t.Fatalf("result[%d]: %v", i, res.err)
 		}
 	}
-	// If both succeeded, they must return the SAME successor pair.
-	if results[0].err == nil && results[1].err == nil {
-		if results[0].cpAccess != results[1].cpAccess || results[0].nodeAccess != results[1].nodeAccess || results[0].refresh != results[1].refresh {
-			t.Fatalf("concurrent refresh returned different successors: [0]=%+v [1]=%+v", results[0], results[1])
-		}
+	if results[0].cpAccess != results[1].cpAccess || results[0].nodeAccess != results[1].nodeAccess || results[0].refresh != results[1].refresh {
+		t.Fatalf("concurrent refresh returned different successors: [0]=%+v [1]=%+v", results[0], results[1])
 	}
 }
 
