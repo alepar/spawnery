@@ -162,21 +162,40 @@ maintained type instead of a hand-forwarded 17-method copy that must be updated 
 
 ### 4.6 The tests this unlocks (the actual deliverable)
 
-The fake is not the deliverable; the tests are. At minimum, each of this session's bugs gets a regression
-test that fails against the pre-fix code:
+The fake is not the deliverable; the tests are.
+
+**First, the distinction this section originally got wrong** *(corrected 2026-07-12, after the epic's final
+review reverted the real bug and watched the hermetic tests stay green)*. There are **two** kinds of test
+here and they pin **different layers**:
+
+- **Hermetic tests over `fakepod`** pin the **Manager's orchestration** — the sequencing of pause, capture,
+  restore, teardown, and the failure arms. They run in the default suite, in milliseconds.
+- **Contract-suite lane arms** (`RunContract` against Docker under `e2e` and CRI under `cri_delta_e2e`) pin
+  **backend behaviour**. They are the *only* thing that can catch a bug living inside a lane.
+
+The original draft of this section claimed the hermetic fork test "would have caught the CRI fork bug." **It
+would not, and it cannot** — that bug lived in `internal/runtime/cri/delta.go`, and a fake-backed test never
+executes that code. §4.4 of this same spec says exactly that ("a fake by construction cannot have these"), so
+the spec contradicted itself, and the claim was believed rather than checked. That is precisely the failure
+mode this epic exists to end, so it is recorded here rather than quietly edited away.
+
+**The hermetic regression tests (over `fakepod`)** — each pins Manager orchestration:
 
 1. **fork preserves its source** — after `CaptureDeltaAs`, the source agent is `running`, not removed, and
-   its content is unchanged. *(Would have caught the CRI fork bug.)*
+   its content is unchanged. *(Pins the Manager's fork sequence — NOT the CRI backend bug; see below.)*
 2. **fork's artifact inherits the source's content** — the fork's rootfs contains what the source had at
    capture time.
 3. **suspend is not torn** — with a background agent writer running, the rootfs artifact and the mount
    snapshot reflect the same instant. *(This is SE2's regression test; it is why §4.2's content model
-   exists.)*
-4. **a captured delta is launchable** — `EnsureImage(base, DeltaTag(id))` returns the delta after a
-   capture. *(The image-visibility class.)*
+   exists. It cannot pass until SE2's fix lands, so it arrives with SE2, not with SE1.)*
+4. **a captured delta is launchable** — `EnsureImage(base, DeltaTag(id))` returns the delta after a capture.
 5. **resume replays the delta** — a spawn resumed from a captured delta sees the writes.
 6. **failure arms** — capture fails → the source is restored to running; `StartAgent` fails → the pod is
    rolled back, not leaked.
+
+**The contract case that actually pins the CRI fork bug** is `caseCaptureAsPreservesSource`, running under
+the **`cri_delta_e2e`** arm. Reverting `preserveSource` in `internal/runtime/cri/delta.go` must turn *that*
+case red. Nothing in the hermetic suite can substitute for it.
 
 ## 5. Acceptance criteria
 
@@ -185,8 +204,15 @@ test that fails against the pre-fix code:
 - `RunContract` passes against the Docker backend under `e2e` and the CRI backend under `cri_delta_e2e`.
 - `fakePodBackend`, `noSizeFakeBackend`, and `scriptedPodBackend` are **deleted**; their tests pass on
   `fakepod`.
-- The six regression tests in §4.6 exist. Tests 1–3 **fail** when reverted against the pre-fix code
-  (verified by actually reverting, not by assertion).
+- The §4.6 hermetic regression tests exist and pin **Manager orchestration**. Each must **fail** when the
+  Manager-side behaviour it pins is reverted — **verified by actually reverting, not by assertion**. (Test 3
+  lands with SE2, since it cannot pass until SE2's fix does.)
+- **The CRI fork bug is pinned where it actually lives:** reverting `preserveSource` in
+  `internal/runtime/cri/delta.go` turns `caseCaptureAsPreservesSource` **red on the `cri_delta_e2e` arm** —
+  demonstrated by running it, not argued. A hermetic test staying green under that revert is **expected and
+  correct**, not a defect; claiming otherwise is the error §4.6 records.
+- Every regression test's comment states **which layer it pins**. A test that names a bug it cannot see is
+  worse than no test, because it buys false confidence — which is how these bugs survived in the first place.
 - `golangci-lint run ./...` = 0 issues.
 
 ## 6. Out of scope
