@@ -2,7 +2,10 @@ package authsvc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -178,7 +181,28 @@ func TestRefreshReuseOutsideGrace(t *testing.T) {
 	if !errors.Is(err, ErrFamilyRevoked) {
 		t.Fatalf("want ErrFamilyRevoked after grace, got %v", err)
 	}
-	_ = st
+	row, err := st.RefreshSessions().Get(context.Background(), sha256Hex(rawToken))
+	if err != nil || !row.Revoked {
+		t.Fatalf("reused family was not durably revoked: row=%+v err=%v", row, err)
+	}
+	successor, err := st.RefreshSessions().Get(context.Background(), row.SupersededBy)
+	if err != nil || !successor.Revoked {
+		t.Fatalf("successor was not durably revoked: row=%+v err=%v", successor, err)
+	}
+	events, err := st.Revocations().Since(context.Background(), 0)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("reuse revocation events = %+v, err=%v", events, err)
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(events[0].TokenIDs), &ids); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{row.CPAccessTokenID, row.NodeAccessTokenID, successor.CPAccessTokenID, successor.NodeAccessTokenID}
+	sort.Strings(ids)
+	sort.Strings(want)
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("reuse revocation token ids = %v, want %v", ids, want)
+	}
 }
 
 // TestRefreshPoPRequired: missing PoP headers → refused [AM5].

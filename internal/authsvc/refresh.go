@@ -79,6 +79,7 @@ func (i *IdP) handleRefresh(ctx context.Context, rawToken string, proof PoPProof
 	tokenHash := sha256Hex(rawToken)
 
 	var outCPAccess, outNodeAccess, outRefresh string
+	var reuseRevoked bool
 	err = i.store.WithTx(ctx, func(tx store.Store) error {
 		row, err := tx.RefreshSessions().Get(ctx, tokenHash)
 		if errors.Is(err, store.ErrNotFound) {
@@ -127,7 +128,8 @@ func (i *IdP) handleRefresh(ctx context.Context, rawToken string, proof PoPProof
 			if err := appendRevocation(ctx, tx, row.AccountID, row.FamilyID, liveIDs, now); err != nil {
 				return err
 			}
-			return ErrFamilyRevoked
+			reuseRevoked = true
+			return nil
 		}
 
 		// Fresh token — rotate (pass tx so all ops use the same connection [R5]).
@@ -142,6 +144,9 @@ func (i *IdP) handleRefresh(ctx context.Context, rawToken string, proof PoPProof
 	})
 	if err != nil {
 		return "", "", "", err
+	}
+	if reuseRevoked {
+		return "", "", "", ErrFamilyRevoked
 	}
 	return outCPAccess, outNodeAccess, outRefresh, nil
 }
