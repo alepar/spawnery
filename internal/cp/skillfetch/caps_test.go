@@ -49,7 +49,7 @@ func TestFetcherHonoursConfiguredWireCap(t *testing.T) {
 	defer srv.Close()
 
 	c := capsClient(256, DefaultDecompressedCapBytes, DefaultFileCountCap)
-	_, _, err := c.fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, err := c.fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error: compressed tarball should exceed the configured wire cap")
 	}
@@ -59,7 +59,7 @@ func TestFetcherHonoursConfiguredWireCap(t *testing.T) {
 
 	// Raising the cap above the fixture's size must succeed.
 	c2 := capsClient(DefaultWireCapBytes, DefaultDecompressedCapBytes, DefaultFileCountCap)
-	_, _, err = c2.fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, err = c2.fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error with default wire cap: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestFetcherHonoursConfiguredFileCountCap(t *testing.T) {
 
 	// 4 entries (SKILL.md + a.md + b.md + c.md); cap of 2 must reject.
 	c := capsClient(DefaultWireCapBytes, DefaultDecompressedCapBytes, 2)
-	_, _, err := c.fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, err := c.fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error: file count should exceed the configured cap")
 	}
@@ -91,7 +91,7 @@ func TestFetcherHonoursConfiguredFileCountCap(t *testing.T) {
 	}
 
 	c2 := capsClient(DefaultWireCapBytes, DefaultDecompressedCapBytes, DefaultFileCountCap)
-	_, _, err = c2.fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, err = c2.fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error with default file count cap: %v", err)
 	}

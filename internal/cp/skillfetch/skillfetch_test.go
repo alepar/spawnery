@@ -182,10 +182,11 @@ func TestFetch_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	unpacked, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	entries := unpacked.entries
 
 	found := false
 	for _, e := range entries {
@@ -224,7 +225,7 @@ func TestFetch_GitHub429(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error for 429")
 	}
@@ -243,7 +244,7 @@ func TestFetch_NonOKStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error for 404")
 	}
@@ -277,10 +278,11 @@ func TestFetch_SymlinkSkipped(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, skipped, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	unpacked, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	entries, skipped := unpacked.entries, unpacked.skipped
 
 	var foundSkillMD, foundAgentsMD bool
 	for _, e := range entries {
@@ -322,10 +324,11 @@ func TestFetch_HardlinkSkipped(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, skipped, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	unpacked, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	entries, skipped := unpacked.entries, unpacked.skipped
 	for _, e := range entries {
 		if e.path == "hardlinked" {
 			t.Fatal("hardlinked entry should not appear in unpacked entries")
@@ -353,10 +356,11 @@ func TestFetch_DeviceAndFifoSkipped(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, skipped, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	unpacked, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	entries, skipped := unpacked.entries, unpacked.skipped
 	if len(entries) != 0 {
 		t.Fatalf("expected no entries, got: %+v", entries)
 	}
@@ -398,10 +402,11 @@ func TestFetch_SkippedEntryOutsideSubdirNotReported(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, skipped, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "skills/nested")
+	unpacked, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "skills/nested")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	entries, skipped := unpacked.entries, unpacked.skipped
 	if len(skipped) != 0 {
 		t.Fatalf("expected no skipped entries when the symlink is outside the requested subdir, got: %+v", skipped)
 	}
@@ -436,7 +441,7 @@ func TestFetch_AbsolutePathRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error for absolute path entry")
 	}
@@ -462,7 +467,7 @@ func TestFetch_DotDotEscapeRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error for path traversal entry")
 	}
@@ -487,7 +492,7 @@ func TestFetch_SymlinkWithEscapePathRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error for symlink entry whose name escapes via ..")
 	}
@@ -508,10 +513,11 @@ func TestFetch_SubdirDescent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "skills/nested")
+	unpacked, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "skills/nested")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	entries := unpacked.entries
 
 	var foundSkillMD bool
 	for _, e := range entries {
@@ -563,14 +569,16 @@ func TestFetch_SkippedEntryDoesNotAffectSHA(t *testing.T) {
 	}))
 	defer srvWithout.Close()
 
-	entriesWith, skippedWith, err := plainHTTPClient().fetchAndUnpack(context.Background(), srvWith.URL, "", "")
+	unpackedWith, err := plainHTTPClient().fetchAndUnpack(context.Background(), srvWith.URL, "", "")
 	if err != nil {
 		t.Fatalf("fetch with symlink: %v", err)
 	}
-	entriesWithout, skippedWithout, err := plainHTTPClient().fetchAndUnpack(context.Background(), srvWithout.URL, "", "")
+	entriesWith, skippedWith := unpackedWith.entries, unpackedWith.skipped
+	unpackedWithout, err := plainHTTPClient().fetchAndUnpack(context.Background(), srvWithout.URL, "", "")
 	if err != nil {
 		t.Fatalf("fetch without symlink: %v", err)
 	}
+	entriesWithout, skippedWithout := unpackedWithout.entries, unpackedWithout.skipped
 
 	tarWith, err := canonicalRepack(entriesWith)
 	if err != nil {
@@ -786,10 +794,11 @@ func TestFetch_FrontmatterUsedAsDefaultName(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	unpacked, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err != nil {
 		t.Fatalf("fetchAndUnpack: %v", err)
 	}
+	entries := unpacked.entries
 
 	var skillContent []byte
 	for _, e := range entries {

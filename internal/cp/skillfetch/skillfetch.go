@@ -18,9 +18,11 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/klauspost/compress/zstd"
 	"gopkg.in/yaml.v3"
@@ -72,11 +74,22 @@ type Result struct {
 	// skipped, not fetched. Each element is formatted "<path> (<kind>)", e.g. "AGENTS.md (symlink)".
 	// nil when nothing was skipped.
 	SkippedEntries []string
+	// SourceCommit is the commit sha recovered from the GitHub tarball wrapper dir
+	// (owner-repo-<sha>/), or "" when the wrapper isn't GitHub-shaped (§4.9 commit pinning).
+	SourceCommit string
 }
 
 // Fetcher fetches a GitHub skill and returns a Result.
 type Fetcher interface {
 	Fetch(ctx context.Context, ref RepoRef, gitRef, subdir, requestedName, description string) (Result, error)
+}
+
+// BundleFetcher fetches a GitHub repo tarball and discovers/repacks every skill in it (§4.2).
+// Declared separately from Fetcher (rather than adding a method to it) so existing Fetcher
+// implementations — notably internal/cp's fakeFetcher test double — are unaffected; *fetcher
+// satisfies both.
+type BundleFetcher interface {
+	FetchBundle(ctx context.Context, ref RepoRef, gitRef, subdir string) (BundleResult, error)
 }
 
 // Config holds the runtime parameters for the fetcher.
@@ -204,7 +217,8 @@ func tarballURL(owner, repo, ref string) string {
 
 // skillFrontmatter holds the parsed SKILL.md YAML front matter.
 type skillFrontmatter struct {
-	Name string `yaml:"name"`
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
 }
 
 // parseSkillMD parses the YAML front matter from SKILL.md content.
@@ -242,11 +256,94 @@ func validateName(name string) error {
 
 // sanitizeName converts a repo name (or frontmatter name) into a clean single path segment:
 // lowercase, spaces/underscores to hyphens, strip leading/trailing hyphens.
+//
+// Charset and length caps on name are explicitly deferred to sp-mwco.2.4 (agentinstall name-squat
+// guard work) — not forgotten here, just out of this task's scope.
 func sanitizeName(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	name = strings.NewReplacer(" ", "-", "_", "-").Replace(name)
 	name = strings.Trim(name, "-.")
 	return name
+}
+
+// maxDescriptionBytes caps a sanitized SKILL.md frontmatter description at 1 KiB (§4.9): Claude
+// loads every installed skill's description into the system prompt at startup, so an unbounded,
+// attacker-controlled description is a direct prompt-injection surface.
+const maxDescriptionBytes = 1024
+
+var (
+	// tagMarkupRe strips XML/HTML-ish tag markup (e.g. "<system>", "</tool_use>").
+	tagMarkupRe = regexp.MustCompile(`<[^>]*>`)
+	// whitespaceRunRe collapses any run of whitespace (including newlines) to a single space.
+	whitespaceRunRe = regexp.MustCompile(`\s+`)
+)
+
+// roleMarkerPatterns neutralizes reserved/role words and turn delimiters that a frontmatter
+// description could use to inject a fake conversation turn once loaded into the system prompt
+// (§4.9). This is defence-in-depth string scrubbing — a small, table-driven set of patterns — not
+// a parser; it doesn't attempt to catch every possible injection technique.
+var roleMarkerPatterns = []*regexp.Regexp{
+	// "Human:", "Assistant:", "System:", "User:" (case-insensitive, standalone or leading).
+	regexp.MustCompile(`(?i)\b(?:human|assistant|system|user)\s*:\s*`),
+	// Llama/Mistral-style turn delimiters: "[INST]", "[/INST]", "[SYS]", "[/SYS]".
+	regexp.MustCompile(`(?i)\[/?(?:inst|sys)\]`),
+	// Alpaca/Vicuna-style "### Instruction:" section delimiters.
+	regexp.MustCompile(`#{3,}\s*`),
+}
+
+// sanitizeDescription bounds and cleans an untrusted SKILL.md frontmatter description before it
+// is ever persisted or shown to an agent (§4.9):
+//  1. strip XML/tag markup
+//  2. drop control characters (nothing below 0x20 survives — this becomes one line in a system prompt)
+//  3. neutralize reserved/role markers and turn delimiters
+//  4. collapse whitespace runs and trim
+//  5. truncate to maxDescriptionBytes on a rune boundary
+func sanitizeDescription(raw string) string {
+	s := tagMarkupRe.ReplaceAllString(raw, "")
+	s = stripControlChars(s)
+	for _, re := range roleMarkerPatterns {
+		s = re.ReplaceAllString(s, "")
+	}
+	s = strings.TrimSpace(whitespaceRunRe.ReplaceAllString(s, " "))
+	return truncateRuneBoundary(s, maxDescriptionBytes)
+}
+
+// stripControlChars drops every rune below 0x20 (control characters) so nothing below 0x20
+// survives, as required by §4.9. Whitespace-shaped control chars (tab/newline/CR/VT/FF) are
+// replaced with a plain space rather than deleted outright — otherwise "line one\nline two"
+// would collapse into the word-glued "line oneline two" once the newline vanishes, defeating the
+// "reads as one line" goal step 4's whitespace-collapse is there to serve. Other control chars
+// (e.g. NUL, BEL) carry no separating meaning and are dropped with no replacement.
+func stripControlChars(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 0x20 {
+			switch r {
+			case '\t', '\n', '\r', '\v', '\f':
+				b.WriteByte(' ')
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// truncateRuneBoundary truncates s to at most maxBytes bytes without splitting a multi-byte rune.
+func truncateRuneBoundary(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	b := s[:maxBytes]
+	for len(b) > 0 {
+		r, size := utf8.DecodeLastRuneInString(b)
+		if r != utf8.RuneError || size != 1 {
+			break
+		}
+		b = b[:len(b)-1]
+	}
+	return b
 }
 
 // tarEntry is a normalized file entry for the canonical repack.
@@ -262,12 +359,13 @@ func (f *fetcher) Fetch(ctx context.Context, ref RepoRef, gitRef, subdir, reques
 	rawURL := tarballURL(ref.Owner, ref.Repo, gitRef)
 
 	// Download and unpack into in-memory entries
-	entries, skipped, err := f.client.fetchAndUnpack(ctx, rawURL, f.cfg.GitHubToken, subdir)
+	unpacked, err := f.client.fetchAndUnpack(ctx, rawURL, f.cfg.GitHubToken, subdir)
 	if err != nil {
 		return Result{}, err
 	}
+	entries := unpacked.entries
 	var skippedEntries []string
-	for _, se := range skipped {
+	for _, se := range unpacked.skipped {
 		skippedEntries = append(skippedEntries, fmt.Sprintf("%s (%s)", se.path, se.kind))
 	}
 
@@ -352,6 +450,7 @@ func (f *fetcher) Fetch(ctx context.Context, ref RepoRef, gitRef, subdir, reques
 		CompressedBytes: compressed,
 		PlainSize:       int64(len(plainTar)),
 		SkippedEntries:  skippedEntries,
+		SourceCommit:    unpacked.sourceCommit,
 	}, nil
 }
 
