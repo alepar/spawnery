@@ -1,16 +1,17 @@
 package spawnlet
 
-// manager_reconcile_capture_test.go: tests for capture-before-reap in ReapOrphans (spec §4).
+// manager_reconcile_capture_test.go: tests for capture-before-reap in ReapPod (spec §4), fed by
+// UntrackedPods (the discovery half ReapOrphans used to do in one loop — see adopt.go).
 //
 // Test matrix:
-//   R1: DeltaCapture=true → CaptureDelta happens BEFORE pod.Stop for orphaned agent.
-//   R2: DeltaCapture=false → no CaptureDelta on orphan reap.
-//   R3: Foreign-NodeID orphan is skipped entirely (neither captured nor stopped).
-//   R4: In-store spawn is not treated as orphan (not captured, not stopped).
+//   R1: DeltaCapture=true → CaptureDelta happens BEFORE pod.Stop for a reaped agent.
+//   R2: DeltaCapture=false → no CaptureDelta on reap.
+//   R3: Foreign-NodeID pod is skipped entirely (not even reported by UntrackedPods).
+//   R4: In-store spawn is not reported by UntrackedPods (not captured, not stopped).
 //
 // R1/R2 reap a REAL fakepod pod (m.Create + m.store.Delete): fakepod's Stop on an unknown handle is
-// a silent no-op that records nothing, unlike the old fake, so the orphan must actually exist on the
-// backend — a node restart, not a fabricated handle. R3/R4 assert nothing happens, so the scripted
+// a silent no-op that records nothing, unlike the old fake, so the reaped pod must actually exist on
+// the backend — a node restart, not a fabricated handle. R3/R4 assert nothing happens, so the scripted
 // ListManaged override (a pod the backend never heard of) keeps their intent sharp.
 
 import (
@@ -31,8 +32,8 @@ func opsIndex(ops []string, op string) int {
 	return -1
 }
 
-// R1: ReapOrphans with DeltaCapture=true calls CaptureDelta before pod.Stop.
-func TestReapOrphansCaptureBefore_Stop(t *testing.T) {
+// R1: ReapPod with DeltaCapture=true calls CaptureDelta before pod.Stop.
+func TestReapPodCaptureBefore_Stop(t *testing.T) {
 	ctx := context.Background()
 	fb := fakeBackend(t)
 	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
@@ -47,12 +48,19 @@ func TestReapOrphansCaptureBefore_Stop(t *testing.T) {
 	}
 	m.store.Delete("orphan-1")
 
-	if err := m.ReapOrphans(ctx); err != nil {
-		t.Fatalf("ReapOrphans: %v", err)
+	pods, err := m.UntrackedPods(ctx)
+	if err != nil {
+		t.Fatalf("UntrackedPods: %v", err)
+	}
+	if len(pods) != 1 || pods[0].SpawnID != "orphan-1" {
+		t.Fatalf("UntrackedPods = %+v, want orphan-1", pods)
+	}
+	if err := m.ReapPod(ctx, pods[0]); err != nil {
+		t.Fatalf("ReapPod: %v", err)
 	}
 
 	if lastOf(fb.CapturedRefs()) == "" {
-		t.Fatal("CaptureDelta was not called for orphaned pod with DeltaCapture=true")
+		t.Fatal("CaptureDelta was not called for reaped pod with DeltaCapture=true")
 	}
 	ops := lifecycleOps(fb)
 	captureIdx := opsIndex(ops, "capture:orphan-1")
@@ -68,8 +76,8 @@ func TestReapOrphansCaptureBefore_Stop(t *testing.T) {
 	}
 }
 
-// R2: DeltaCapture=false → no CaptureDelta on orphan reap.
-func TestReapOrphansNoCapture_WhenDisabled(t *testing.T) {
+// R2: DeltaCapture=false → no CaptureDelta on reap.
+func TestReapPodNoCapture_WhenDisabled(t *testing.T) {
 	ctx := context.Background()
 	fb := fakeBackend(t)
 	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
@@ -82,8 +90,15 @@ func TestReapOrphansNoCapture_WhenDisabled(t *testing.T) {
 	}
 	m.store.Delete("orphan-2")
 
-	if err := m.ReapOrphans(ctx); err != nil {
-		t.Fatalf("ReapOrphans: %v", err)
+	pods, err := m.UntrackedPods(ctx)
+	if err != nil {
+		t.Fatalf("UntrackedPods: %v", err)
+	}
+	if len(pods) != 1 || pods[0].SpawnID != "orphan-2" {
+		t.Fatalf("UntrackedPods = %+v, want orphan-2", pods)
+	}
+	if err := m.ReapPod(ctx, pods[0]); err != nil {
+		t.Fatalf("ReapPod: %v", err)
 	}
 
 	if lastOf(fb.CapturedRefs()) != "" {
@@ -94,8 +109,8 @@ func TestReapOrphansNoCapture_WhenDisabled(t *testing.T) {
 	}
 }
 
-// R3: Foreign-NodeID orphan is skipped (neither captured nor stopped).
-func TestReapOrphansForeignNodeSkipped(t *testing.T) {
+// R3: Foreign-NodeID pod is not even reported by UntrackedPods (neither captured nor stopped).
+func TestUntrackedPodsForeignNodeSkipped(t *testing.T) {
 	ctx := context.Background()
 	fb := fakeBackend(t, fakepod.WithListManaged([]runtime.ManagedPod{
 		{SpawnID: "foreign-spawn", AgentID: "ag-foreign", NodeID: "other-node", Generation: 1},
@@ -106,10 +121,13 @@ func TestReapOrphansForeignNodeSkipped(t *testing.T) {
 		DeltaCapture: true,
 	})
 
-	if err := m.ReapOrphans(ctx); err != nil {
-		t.Fatalf("ReapOrphans: %v", err)
+	pods, err := m.UntrackedPods(ctx)
+	if err != nil {
+		t.Fatalf("UntrackedPods: %v", err)
 	}
-
+	if len(pods) != 0 {
+		t.Fatalf("must NOT report foreign node's pod: %+v", pods)
+	}
 	if lastOf(fb.CapturedRefs()) != "" {
 		t.Fatalf("must NOT capture foreign node's pod; capturedRef=%q", lastOf(fb.CapturedRefs()))
 	}
@@ -118,8 +136,8 @@ func TestReapOrphansForeignNodeSkipped(t *testing.T) {
 	}
 }
 
-// R4: A spawn that is still in the store is not treated as orphan.
-func TestReapOrphansSkipsLiveSpawn(t *testing.T) {
+// R4: A spawn that is still in the store is not reported by UntrackedPods.
+func TestUntrackedPodsSkipsLiveSpawn(t *testing.T) {
 	ctx := context.Background()
 	fb := fakeBackend(t, fakepod.WithListManaged([]runtime.ManagedPod{
 		{SpawnID: "live-spawn", AgentID: "ag-live", NodeID: "node-9", Generation: 1},
@@ -132,10 +150,13 @@ func TestReapOrphansSkipsLiveSpawn(t *testing.T) {
 	// Insert into store to simulate a live spawn.
 	m.store.Put(&Spawn{ID: "live-spawn", AgentID: "ag-live"})
 
-	if err := m.ReapOrphans(ctx); err != nil {
-		t.Fatalf("ReapOrphans: %v", err)
+	pods, err := m.UntrackedPods(ctx)
+	if err != nil {
+		t.Fatalf("UntrackedPods: %v", err)
 	}
-
+	if len(pods) != 0 {
+		t.Fatalf("must NOT report a still-live spawn: %+v", pods)
+	}
 	if lastOf(fb.CapturedRefs()) != "" {
 		t.Fatalf("must NOT capture a still-live spawn; capturedRef=%q", lastOf(fb.CapturedRefs()))
 	}
