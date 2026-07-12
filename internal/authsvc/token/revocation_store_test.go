@@ -39,11 +39,14 @@ func TestSignerRevocationStorePersistsAndReloads(t *testing.T) {
 	if dirInfo.Mode().Perm() != 0o700 {
 		t.Fatalf("state directory mode = %o", dirInfo.Mode().Perm())
 	}
-
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := OpenSignerRevocationStore(path, pki.root, "prod", now)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = reopened.Close() })
 	if reopened.Generation() != 1 {
 		t.Fatalf("reopened generation = %d", reopened.Generation())
 	}
@@ -114,6 +117,9 @@ func TestSignerRevocationStoreRevalidatesOnOpen(t *testing.T) {
 	if err := store.Apply(statement); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	other := newCertTestPKI(t, nil)
 	if _, err := OpenSignerRevocationStore(path, other.root, "prod", now); err == nil {
 		t.Fatal("persisted envelope trusted under wrong root")
@@ -121,6 +127,11 @@ func TestSignerRevocationStoreRevalidatesOnOpen(t *testing.T) {
 	if _, err := OpenSignerRevocationStore(path, pki.root, "staging", now); err == nil {
 		t.Fatal("persisted envelope trusted in wrong environment")
 	}
+	reopened, err := OpenSignerRevocationStore(path, pki.root, "prod", now)
+	if err != nil {
+		t.Fatalf("failed open leaked ownership lock: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
 }
 
 func TestSignerRevocationStoreAtomicFailurePreservesOldGeneration(t *testing.T) {
@@ -140,10 +151,14 @@ func TestSignerRevocationStoreAtomicFailurePreservesOldGeneration(t *testing.T) 
 	if store.Generation() != 1 {
 		t.Fatalf("memory advanced after failed persistence: %d", store.Generation())
 	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := OpenSignerRevocationStore(path, pki.root, "prod", now)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = reopened.Close() })
 	if reopened.Generation() != 1 {
 		t.Fatalf("disk advanced after failed persistence: %d", reopened.Generation())
 	}
@@ -156,6 +171,7 @@ func TestSignerRevocationStoreLoadAndApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	configuredPath := filepath.Join(t.TempDir(), "configured.statement")
 	if err := store.LoadAndApply(configuredPath, now); err != nil {
 		t.Fatalf("absent initial statement: %v", err)
@@ -187,5 +203,111 @@ func TestSignerRevocationStoreLoadAndApply(t *testing.T) {
 	}
 	if store.Generation() != 1 {
 		t.Fatal("corrupt reload changed state")
+	}
+}
+
+func TestSignerRevocationStoreExclusiveOwnershipAndStaleWriter(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	path := filepath.Join(t.TempDir(), "revocations", "state.json")
+	owner, err := OpenSignerRevocationStore(path, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenSignerRevocationStore(path, pki.root, "prod", now); !errors.Is(err, ErrSignerRevocationStoreLocked) {
+		t.Fatalf("second independent store error = %v, want lock contention", err)
+	}
+	first := mustParseRevocation(t, pki, &authv1.SignerRevocationStatement{Environment: "prod", Generation: 1, IssuedAt: now.Unix()})
+	if err := owner.Apply(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+
+	nextOwner, err := OpenSignerRevocationStore(path, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = nextOwner.Close() })
+	second := mustParseRevocation(t, pki, &authv1.SignerRevocationStatement{Environment: "prod", Generation: 2, IssuedAt: now.Unix()})
+	if err := nextOwner.Apply(second); err != nil {
+		t.Fatal(err)
+	}
+	alternativeSecond := mustParseRevocation(t, pki, &authv1.SignerRevocationStatement{Environment: "prod", Generation: 2, IssuedAt: now.Add(time.Second).Unix()})
+	third := mustParseRevocation(t, pki, &authv1.SignerRevocationStatement{Environment: "prod", Generation: 3, IssuedAt: now.Unix()})
+	for _, stale := range []*SignerRevocationStatement{alternativeSecond, third} {
+		if err := owner.Apply(stale); err == nil {
+			t.Fatal("closed stale owner overwrote the active owner's state")
+		}
+	}
+	if nextOwner.Generation() != 2 {
+		t.Fatalf("active owner generation = %d, want 2", nextOwner.Generation())
+	}
+}
+
+func TestSignerRevocationStorePostRenameFailurePoisonsAtAdvancedFloor(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	path := filepath.Join(t.TempDir(), "revocations", "state.json")
+	store, err := OpenSignerRevocationStore(path, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	first := mustParseRevocation(t, pki, &authv1.SignerRevocationStatement{Environment: "prod", Generation: 1, IssuedAt: now.Unix()})
+	third := mustParseRevocation(t, pki, &authv1.SignerRevocationStatement{Environment: "prod", Generation: 3, IssuedAt: now.Unix()})
+	if err := store.Apply(first); err != nil {
+		t.Fatal(err)
+	}
+	store.afterRename = func() error { return errors.New("injected directory sync failure") }
+	if err := store.Apply(third); err == nil {
+		t.Fatal("post-rename persistence failure ignored")
+	}
+	if store.Generation() != 3 {
+		t.Fatalf("live floor after rename = %d, want 3", store.Generation())
+	}
+
+	record, err := readPersistedSignerRevocation(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable, err := ParseSignerRevocationStatement(record.Envelope, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if durable.Generation() != 3 {
+		t.Fatalf("renamed state generation = %d, want 3", durable.Generation())
+	}
+	second := mustParseRevocation(t, pki, &authv1.SignerRevocationStatement{Environment: "prod", Generation: 2, IssuedAt: now.Unix()})
+	alternativeThird := mustParseRevocation(t, pki, &authv1.SignerRevocationStatement{Environment: "prod", Generation: 3, IssuedAt: now.Add(time.Second).Unix()})
+	fourthWire := mustSignRevocation(t, pki, &authv1.SignerRevocationStatement{Environment: "prod", Generation: 4, IssuedAt: now.Unix()})
+	configuredPath := filepath.Join(t.TempDir(), "configured.statement")
+	if err := os.WriteFile(configuredPath, []byte(fourthWire), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, apply := range map[string]func() error{
+		"rollback":     func() error { return store.Apply(second) },
+		"equivocation": func() error { return store.Apply(alternativeThird) },
+		"reload":       func() error { return store.LoadAndApply(configuredPath, now) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := apply(); err == nil {
+				t.Fatal("poisoned store accepted mutation")
+			}
+		})
+	}
+	if store.Generation() != 3 {
+		t.Fatal("poisoned mutation changed live floor")
+	}
+	after, err := readPersistedSignerRevocation(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.SHA256 != record.SHA256 {
+		t.Fatal("poisoned mutation changed renamed durable state")
 	}
 }

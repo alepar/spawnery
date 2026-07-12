@@ -14,10 +14,17 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const signerRevocationStoreVersion = 1
+
+var (
+	ErrSignerRevocationStoreLocked   = errors.New("token: signer-revocation store is already open")
+	ErrSignerRevocationStoreClosed   = errors.New("token: signer-revocation store is closed")
+	ErrSignerRevocationStorePoisoned = errors.New("token: signer-revocation store persistence is ambiguous")
+)
 
 type persistedSignerRevocation struct {
 	Version  int    `json:"version"`
@@ -32,7 +39,11 @@ type SignerRevocationStore struct {
 	root         *x509.Certificate
 	environment  string
 	state        *SignerRevocationState
+	lockFile     *os.File
+	closed       bool
+	poisoned     error
 	beforeRename func() error
+	afterRename  func() error
 }
 
 // OpenSignerRevocationStore opens and cryptographically revalidates persisted state. A missing file
@@ -45,13 +56,24 @@ func OpenSignerRevocationStore(path string, root *x509.Certificate, environment 
 	if err := ensurePrivateDirectory(dir); err != nil {
 		return nil, err
 	}
+	lockFile, err := acquireSignerRevocationStoreLock(path + ".lock")
+	if err != nil {
+		return nil, err
+	}
+	releaseLock := true
+	defer func() {
+		if releaseLock {
+			_ = releaseSignerRevocationStoreLock(lockFile)
+		}
+	}()
 	state, err := NewSignerRevocationState(root, environment)
 	if err != nil {
 		return nil, err
 	}
-	store := &SignerRevocationStore{path: path, root: root, environment: environment, state: state}
+	store := &SignerRevocationStore{path: path, root: root, environment: environment, state: state, lockFile: lockFile}
 	record, err := readPersistedSignerRevocation(path)
 	if errors.Is(err, os.ErrNotExist) {
+		releaseLock = false
 		return store, nil
 	}
 	if err != nil {
@@ -64,7 +86,24 @@ func OpenSignerRevocationStore(path string, root *x509.Certificate, environment 
 	if err := state.Apply(statement); err != nil {
 		return nil, fmt.Errorf("token: restore signer revocation state: %w", err)
 	}
+	releaseLock = false
 	return store, nil
+}
+
+// Close releases exclusive ownership of the persisted state path. It is idempotent.
+func (store *SignerRevocationStore) Close() error {
+	if store == nil {
+		return nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.closed {
+		return nil
+	}
+	store.closed = true
+	err := releaseSignerRevocationStoreLock(store.lockFile)
+	store.lockFile = nil
+	return err
 }
 
 func (store *SignerRevocationStore) Generation() uint64 {
@@ -88,15 +127,25 @@ func (store *SignerRevocationStore) Apply(statement *SignerRevocationStatement) 
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if err := store.mutationErrorLocked(); err != nil {
+		return err
+	}
 
 	candidate, changed, err := store.state.prepare(statement)
 	if err != nil || !changed {
 		return err
 	}
-	if err := store.persist(statement); err != nil {
+	renamed := false
+	if err := store.persist(statement, func() {
+		store.state.publish(candidate)
+		renamed = true
+	}); err != nil {
+		if renamed {
+			store.poisoned = fmt.Errorf("%w: %w", ErrSignerRevocationStorePoisoned, err)
+			return store.poisoned
+		}
 		return err
 	}
-	store.state.publish(candidate)
 	return nil
 }
 
@@ -105,6 +154,9 @@ func (store *SignerRevocationStore) Apply(statement *SignerRevocationStatement) 
 func (store *SignerRevocationStore) LoadAndApply(path string, now time.Time) error {
 	if store == nil || path == "" {
 		return errors.New("token: invalid signer-revocation statement path")
+	}
+	if err := store.mutationError(); err != nil {
+		return err
 	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -124,7 +176,7 @@ func (store *SignerRevocationStore) LoadAndApply(path string, now time.Time) err
 	return store.Apply(statement)
 }
 
-func (store *SignerRevocationStore) persist(statement *SignerRevocationStatement) error {
+func (store *SignerRevocationStore) persist(statement *SignerRevocationStatement, renamed func()) error {
 	record := persistedSignerRevocation{
 		Version: signerRevocationStoreVersion, Envelope: statement.canonical.wire, SHA256: hex.EncodeToString(statement.canonical.digest[:]),
 	}
@@ -167,6 +219,12 @@ func (store *SignerRevocationStore) persist(statement *SignerRevocationStatement
 		return fmt.Errorf("token: replace signer-revocation state: %w", err)
 	}
 	removeTemporary = false
+	renamed()
+	if store.afterRename != nil {
+		if err := store.afterRename(); err != nil {
+			return fmt.Errorf("token: sync signer-revocation directory: %w", err)
+		}
+	}
 	directory, err := os.Open(dir)
 	if err != nil {
 		return fmt.Errorf("token: open signer-revocation directory for sync: %w", err)
@@ -174,6 +232,65 @@ func (store *SignerRevocationStore) persist(statement *SignerRevocationStatement
 	defer directory.Close()
 	if err := directory.Sync(); err != nil {
 		return fmt.Errorf("token: sync signer-revocation directory: %w", err)
+	}
+	return nil
+}
+
+func (store *SignerRevocationStore) mutationError() error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.mutationErrorLocked()
+}
+
+func (store *SignerRevocationStore) mutationErrorLocked() error {
+	if store.closed {
+		return ErrSignerRevocationStoreClosed
+	}
+	if store.poisoned != nil {
+		return store.poisoned
+	}
+	return nil
+}
+
+func acquireSignerRevocationStoreLock(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("token: open signer-revocation lock: %w", err)
+	}
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = file.Close()
+		}
+	}()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("token: stat signer-revocation lock: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return nil, errors.New("token: signer-revocation lock must be a regular 0600 file")
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, ErrSignerRevocationStoreLocked
+		}
+		return nil, fmt.Errorf("token: lock signer-revocation store: %w", err)
+	}
+	closeOnError = false
+	return file, nil
+}
+
+func releaseSignerRevocationStoreLock(file *os.File) error {
+	if file == nil {
+		return nil
+	}
+	unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	closeErr := file.Close()
+	if unlockErr != nil {
+		return fmt.Errorf("token: unlock signer-revocation store: %w", unlockErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("token: close signer-revocation lock: %w", closeErr)
 	}
 	return nil
 }
