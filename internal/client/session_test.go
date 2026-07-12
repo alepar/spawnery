@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/internal/intent"
@@ -105,4 +106,46 @@ func TestBuildSessionOpenIntentPropagatesRPCAndSignerErrors(t *testing.T) {
 			t.Fatalf("error = %v", err)
 		}
 	})
+}
+
+func TestBuildSessionOpenIntentRejectsTargetAndTrustSubstitutionBeforeCredentials(t *testing.T) {
+	fx := issueProdNode(t, "node-1", "alice")
+	base := &cpv1.GetSpawnNodeKeyResponse{
+		Generation: 7, TargetNodeId: "node-1", TargetNodeClass: pki.ClassSelfHosted,
+		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*cpv1.GetSpawnNodeKeyResponse, *TargetTrust)
+	}{
+		{name: "node id", mutate: func(r *cpv1.GetSpawnNodeKeyResponse, _ *TargetTrust) { r.TargetNodeId = "other" }},
+		{name: "account", mutate: func(r *cpv1.GetSpawnNodeKeyResponse, _ *TargetTrust) { r.TargetNodeAccountId = "mallory" }},
+		{name: "class", mutate: func(r *cpv1.GetSpawnNodeKeyResponse, trust *TargetTrust) {
+			r.TargetNodeClass, r.TargetNodeAccountId, trust.CloudAccountID = pki.ClassCloud, "spawnery-system", "spawnery-system"
+		}},
+		{name: "missing trust", mutate: func(_ *cpv1.GetSpawnNodeKeyResponse, trust *TargetTrust) { *trust = TargetTrust{} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := proto.Clone(base).(*cpv1.GetSpawnNodeKeyResponse)
+			trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+			tc.mutate(response, &trust)
+			called := false
+			source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) { called = true; return NodeCredentials{}, nil })
+			if _, err := buildSessionOpenIntent(context.Background(), &fakeSessionTargetClient{response: response}, source, trust, "sp-1", 7, "0"); err == nil {
+				t.Fatal("substituted target accepted")
+			}
+			if called {
+				t.Fatal("credentials loaded before target rejection")
+			}
+		})
+	}
+}
+
+func TestBuildSessionOpenIntentRejectsMissingCredentials(t *testing.T) {
+	fx := issueProdNode(t, "node-1", "alice")
+	rpc := &fakeSessionTargetClient{response: &cpv1.GetSpawnNodeKeyResponse{Generation: 7, TargetNodeId: "node-1", TargetNodeClass: pki.ClassSelfHosted, TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM}}
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+	if _, err := buildSessionOpenIntent(context.Background(), rpc, nil, trust, "sp-1", 7, "0"); err == nil {
+		t.Fatal("session open accepted missing credentials")
+	}
 }

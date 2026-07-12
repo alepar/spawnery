@@ -137,6 +137,15 @@ func TestPollAndSignRejectsUntrustedTargetBeforeCredentialsOrSubmit(t *testing.T
 		{name: "revoked certificate", mutate: func(_ *cpv1.GetPendingIntentResponse, trust *TargetTrust) {
 			trust.CertificateRevocations = func(_, _ *big.Int) bool { return true }
 		}},
+		{name: "invalid root", mutate: func(_ *cpv1.GetPendingIntentResponse, trust *TargetTrust) { trust.RootPEM = []byte("invalid") }},
+		{name: "wrong trust domain", mutate: func(_ *cpv1.GetPendingIntentResponse, trust *TargetTrust) {
+			trust.TrustDomain = "other.spawnery.internal"
+		}},
+		{name: "typed class mismatch", mutate: func(r *cpv1.GetPendingIntentResponse, trust *TargetTrust) {
+			r.TargetNodeClass, r.TargetNodeAccountId = pki.ClassCloud, "spawnery-system"
+			trust.CloudAccountID = "spawnery-system"
+		}},
+		{name: "missing trust", mutate: func(_ *cpv1.GetPendingIntentResponse, trust *TargetTrust) { *trust = TargetTrust{} }},
 		{name: "missing chain", mutate: func(r *cpv1.GetPendingIntentResponse, _ *TargetTrust) { r.NodeCertChain = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -231,6 +240,128 @@ func TestCreateImageAndAttachedSecretSubstitutionRejected(t *testing.T) {
 			}
 			if ic.submitted {
 				t.Fatal("substituted create tuple was submitted")
+			}
+		})
+	}
+}
+
+func TestCreateExplicitSecretsAreSubsetOfResolvedStartupSecrets(t *testing.T) {
+	response := &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 1, TargetNodeId: "node-1",
+		Pending: &cpv1.PendingIntent{
+			Op: string(intent.OpCreateSpawn), SpawnId: "sp-1", Generation: 1, TargetNodeId: "node-1",
+			AttachedSecretIds: []string{"manifest-secret", "mount-credential", "explicit-secret"},
+		},
+	}
+	if _, _, err := validatePendingIntent(response, "sp-1", IntentParams{Op: intent.OpCreateSpawn, AttachedSecretIDs: []string{"explicit-secret"}}); err != nil {
+		t.Fatalf("resolved startup secret superset rejected: %v", err)
+	}
+	if _, _, err := validatePendingIntent(response, "sp-1", IntentParams{Op: intent.OpCreateSpawn, AttachedSecretIDs: []string{"substituted-secret"}}); err == nil {
+		t.Fatal("missing caller-selected secret accepted")
+	}
+}
+
+func TestPendingAndResponseTupleSubstitutionsRejected(t *testing.T) {
+	base := &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 7, TargetNodeId: "node-1",
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpResumeSpawn), SpawnId: "sp-1", Generation: 7, TargetNodeId: "node-1"},
+	}
+	for _, tc := range []struct {
+		name   string
+		params IntentParams
+		mutate func(*cpv1.GetPendingIntentResponse)
+	}{
+		{name: "operation", params: IntentParams{Op: intent.OpMigrateSpawn}, mutate: func(*cpv1.GetPendingIntentResponse) {}},
+		{name: "spawn", params: IntentParams{Op: intent.OpResumeSpawn}, mutate: func(r *cpv1.GetPendingIntentResponse) { r.Pending.SpawnId = "other" }},
+		{name: "generation", params: IntentParams{Op: intent.OpResumeSpawn}, mutate: func(r *cpv1.GetPendingIntentResponse) { r.Generation++ }},
+		{name: "target", params: IntentParams{Op: intent.OpResumeSpawn}, mutate: func(r *cpv1.GetPendingIntentResponse) { r.TargetNodeId = "other" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := proto.Clone(base).(*cpv1.GetPendingIntentResponse)
+			tc.mutate(response)
+			if _, _, err := validatePendingIntent(response, "sp-1", tc.params); err == nil {
+				t.Fatal("substituted tuple accepted")
+			}
+		})
+	}
+}
+
+func TestPollAndSignMissingCredentialsFailsBeforeSubmit(t *testing.T) {
+	fx := issueProdNode(t, "node-1", "alice")
+	pending := &cpv1.PendingIntent{Op: string(intent.OpResumeSpawn), SpawnId: "sp-1", Generation: 7, TargetNodeId: "node-1"}
+	ic := &fakeIntentClient{response: &cpv1.GetPendingIntentResponse{Ready: true, Pending: pending, Generation: 7, TargetNodeId: "node-1", TargetNodeClass: pki.ClassSelfHosted, TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM}}
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+	if err := pollAndSign(context.Background(), ic, nil, trust, "sp-1", IntentParams{Op: intent.OpResumeSpawn}); err == nil {
+		t.Fatal("missing credentials accepted")
+	}
+	if ic.submitted {
+		t.Fatal("SubmitIntent called without credentials")
+	}
+}
+
+func TestCloudTargetRequiresCertifiedSystemAccount(t *testing.T) {
+	fx := issueProdNodeClass(t, "cloud-1", "spawnery-system", pki.ClassCloud)
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CloudAccountID: "spawnery-system", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+	if _, err := verifyResolvedTarget(fx.chainPEM, "cloud-1", pki.ClassCloud, "spawnery-system", trust); err != nil {
+		t.Fatalf("certified cloud system account rejected: %v", err)
+	}
+	if _, err := verifyResolvedTarget(fx.chainPEM, "cloud-1", pki.ClassCloud, "other-system", trust); err == nil {
+		t.Fatal("foreign cloud account accepted")
+	}
+}
+
+func TestResolvedTargetRejectsExpiredAndNonNodeCertificates(t *testing.T) {
+	now := time.Now()
+	root, err := pki.NewRootCA("test-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeIssuer, err := root.NewIntermediate(pki.ClassSelfHosted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired, err := nodeIssuer.IssueNode("node-1", "alice", pki.ClassSelfHosted, now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceIssuer, err := root.NewIntermediate(pki.IssuerService, pki.DefaultTrustDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := serviceIssuer.IssueService(pki.RoleCP, "cp-1", pki.DefaultTrustDomain, nil, nil, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust := TargetTrust{RootPEM: pki.MarshalCertPEM(root.Cert), TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: func() time.Time { return now }}
+	for _, tc := range []struct {
+		name  string
+		chain []byte
+	}{
+		{name: "expired", chain: append(pki.MarshalCertPEM(expired.Cert), pki.MarshalCertPEM(nodeIssuer.Cert)...)},
+		{name: "non-node", chain: append(pki.MarshalCertPEM(service.Cert), pki.MarshalCertPEM(serviceIssuer.Cert)...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := verifyResolvedTarget(tc.chain, "node-1", pki.ClassSelfHosted, "alice", trust); err == nil {
+				t.Fatal("invalid target certificate accepted")
+			}
+		})
+	}
+}
+
+func TestProvisionWithIntentWaitsForLateAuthorizationFailureAfterRPCSuccess(t *testing.T) {
+	fx := issueProdNode(t, "node-1", "alice")
+	pending := &cpv1.PendingIntent{Op: string(intent.OpResumeSpawn), SpawnId: "sp-1", Generation: 7, TargetNodeId: "node-1"}
+	ic := &fakeIntentClient{response: &cpv1.GetPendingIntentResponse{Ready: true, Pending: pending, Generation: 7, TargetNodeId: "node-1", TargetNodeClass: pki.ClassSelfHosted, TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM}}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		time.Sleep(25 * time.Millisecond)
+		return NodeCredentials{}, errors.New("late authorization failure")
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: "dev.spawnery.internal", AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+	for _, operation := range []string{"resume", "move"} {
+		t.Run(operation, func(t *testing.T) {
+			err := provisionWithIntent(context.Background(), ic, source, trust, "sp-1", IntentParams{Op: intent.OpResumeSpawn}, func(context.Context) error { return nil }, nil)
+			if err == nil || !strings.Contains(err.Error(), "late authorization failure") {
+				t.Fatalf("error = %v", err)
 			}
 		})
 	}

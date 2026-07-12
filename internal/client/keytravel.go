@@ -98,14 +98,14 @@ func migrateTarget(spawnID, target string) *cpv1.MigrateSpawnRequest {
 // the CP leaves the spawn in a defined state (resumed on the source's data, back to suspended on
 // a failed target), so the user's data is never lost.
 func (c *Client) Migrate(ctx context.Context, dev *seal.Device, spawnID, target string, out io.Writer, now time.Time, opts MoveOptions) error {
-	return migrateSpawnAuthorized(ctx, c.rpc, c.nodeCredentials, c.targetTrust, dev, spawnID, target, out, now, opts, c.warn)
+	return migrateSpawnAuthorized(ctx, c.rpc, c.nodeCredentials, c.targetTrust, dev, spawnID, target, out, now, opts, c.warn, true)
 }
 
 func migrateSpawn(ctx context.Context, client moveClient, dev *seal.Device, spawnID, target string, out io.Writer, now time.Time, opts MoveOptions, warn func(error)) error {
-	return migrateSpawnAuthorized(ctx, client, nil, TargetTrust{}, dev, spawnID, target, out, now, opts, warn)
+	return migrateSpawnAuthorized(ctx, client, nil, TargetTrust{}, dev, spawnID, target, out, now, opts, warn, false)
 }
 
-func migrateSpawnAuthorized(ctx context.Context, client moveClient, credentials NodeCredentialSource, trust TargetTrust, dev *seal.Device, spawnID, target string, out io.Writer, now time.Time, opts MoveOptions, warn func(error)) error {
+func migrateSpawnAuthorized(ctx context.Context, client moveClient, credentials NodeCredentialSource, trust TargetTrust, dev *seal.Device, spawnID, target string, out io.Writer, now time.Time, opts MoveOptions, warn func(error), authorize bool) error {
 	if out == nil {
 		out = io.Discard
 	}
@@ -135,11 +135,17 @@ func migrateSpawnAuthorized(ctx context.Context, client moveClient, credentials 
 		params.TargetClass = pki.ClassCloud
 	}
 	var mr *connect.Response[cpv1.MigrateSpawnResponse]
-	migrateErr := provisionWithIntent(ctx, client, credentials, trust, spawnID, params, func(rpcCtx context.Context) error {
+	doMigrate := func(rpcCtx context.Context) error {
 		var rpcErr error
 		mr, rpcErr = client.MigrateSpawn(rpcCtx, connect.NewRequest(migrateTarget(spawnID, target)))
 		return rpcErr
-	}, warn)
+	}
+	var migrateErr error
+	if authorize {
+		migrateErr = provisionWithIntent(ctx, client, credentials, trust, spawnID, params, doMigrate, warn)
+	} else {
+		migrateErr = doMigrate(ctx)
+	}
 	if migrateErr != nil {
 		return fmt.Errorf("migrate: %w (your data is safe — resume on the source)", migrateErr)
 	}
@@ -303,7 +309,11 @@ func (c *Client) Fork(ctx context.Context, dev *seal.Device, req *cpv1.ForkSpawn
 }
 
 func forkSpawn(ctx context.Context, client forkClient, dev *seal.Device, req *cpv1.ForkSpawnRequest, out io.Writer, now time.Time, opts MoveOptions, _ func(error)) (ForkResult, error) {
-	return forkSpawnAuthorized(ctx, client, nil, TargetTrust{}, dev, req, out, now, opts)
+	resp, err := client.ForkSpawn(ctx, connect.NewRequest(req))
+	if err != nil {
+		return ForkResult{}, fmt.Errorf("fork: %w", err)
+	}
+	return finishFork(ctx, client, dev, req, resp, out, now, opts)
 }
 
 func forkSpawnAuthorized(ctx context.Context, client forkClient, credentials NodeCredentialSource, trust TargetTrust, dev *seal.Device, req *cpv1.ForkSpawnRequest, out io.Writer, now time.Time, opts MoveOptions) (ForkResult, error) {
@@ -330,23 +340,34 @@ func forkSpawnAuthorized(ctx context.Context, client forkClient, credentials Nod
 		rpcCh <- forkResponse{resp: resp, err: err}
 	}()
 	var resp *connect.Response[cpv1.ForkSpawnResponse]
-	for resp == nil {
+	authDone, rpcDone := false, false
+	for !authDone || !rpcDone {
 		select {
 		case signErr := <-signCh:
 			if signErr != nil && !errors.Is(signErr, context.Canceled) {
 				return ForkResult{}, fmt.Errorf("fork %s authorization: %w", sourceID, signErr)
 			}
+			authDone = true
 			signCh = nil
 		case result := <-rpcCh:
 			if result.err != nil {
 				return ForkResult{}, fmt.Errorf("fork: %w", result.err)
 			}
 			resp = result.resp
+			rpcDone = true
+			rpcCh = nil
 		case <-ctx.Done():
 			return ForkResult{}, ctx.Err()
 		}
 	}
 	cancelOperation()
+	return finishFork(ctx, client, dev, req, resp, out, now, opts)
+}
+
+func finishFork(ctx context.Context, client forkClient, dev *seal.Device, req *cpv1.ForkSpawnRequest, resp *connect.Response[cpv1.ForkSpawnResponse], out io.Writer, now time.Time, opts MoveOptions) (ForkResult, error) {
+	if out == nil {
+		out = io.Discard
+	}
 	forkID := resp.Msg.ForkSpawnId
 	fmt.Fprintf(out, "  fork %s active on node %s\n", forkID, resp.Msg.NodeId)
 	if resp.Msg.TransferSetId != "" {

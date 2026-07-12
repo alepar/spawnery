@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"strings"
 	"testing"
@@ -14,6 +16,7 @@ import (
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/internal/intent"
 	"spawnery/internal/pki"
 	"spawnery/internal/secrets/journalkey"
 	"spawnery/internal/secrets/seal"
@@ -191,17 +194,21 @@ type prodNodeFix struct {
 }
 
 func issueProdNode(t *testing.T, nodeID, accountID string) prodNodeFix {
+	return issueProdNodeClass(t, nodeID, accountID, pki.ClassSelfHosted)
+}
+
+func issueProdNodeClass(t *testing.T, nodeID, accountID string, class pki.IssuerRole) prodNodeFix {
 	t.Helper()
 
 	root, err := pki.NewRootCA("test-root")
 	if err != nil {
 		t.Fatal(err)
 	}
-	inter, err := root.NewIntermediate(pki.ClassSelfHosted)
+	inter, err := root.NewIntermediate(class)
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := inter.IssueNode(nodeID, accountID, pki.ClassSelfHosted, time.Now().Add(365*24*time.Hour))
+	node, err := inter.IssueNode(nodeID, accountID, string(class), time.Now().Add(365*24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,6 +365,38 @@ type fakeForkClient struct {
 	gotJournalSpawnID    string
 	gotNodeKeySpawnID    string
 	gotDelivery          *cpv1.DeliverSecretsRequest
+}
+
+type readyForkClient struct {
+	*fakeForkClient
+	pending *cpv1.GetPendingIntentResponse
+}
+
+func (f *readyForkClient) GetPendingIntent(_ context.Context, req *connect.Request[cpv1.GetPendingIntentRequest]) (*connect.Response[cpv1.GetPendingIntentResponse], error) {
+	f.gotIntentPollSpawnID = req.Msg.SpawnId
+	return connect.NewResponse(f.pending), nil
+}
+
+func TestForkWaitsForLateAuthorizationFailureAfterRPCSuccess(t *testing.T) {
+	fx := issueProdNode(t, "node-a", "alice")
+	base := &fakeForkClient{forkID: "fork-1", nodeID: "node-a"}
+	client := &readyForkClient{fakeForkClient: base, pending: &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 7, TargetNodeId: "node-a", TargetNodeClass: pki.ClassSelfHosted,
+		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "source-1", Generation: 7, TargetNodeId: "node-a"},
+	}}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		time.Sleep(25 * time.Millisecond)
+		return NodeCredentials{}, errors.New("late fork authorization failure")
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+	_, err := forkSpawnAuthorized(context.Background(), client, source, trust, testForkDevice(t), &cpv1.ForkSpawnRequest{SpawnId: "source-1"}, io.Discard, time.Now(), MoveOptions{})
+	if err == nil || !strings.Contains(err.Error(), "late fork authorization failure") {
+		t.Fatalf("error = %v", err)
+	}
+	if base.gotJournalSpawnID != "" {
+		t.Fatal("fork continued to journal delivery before authorization completed")
+	}
 }
 
 func (f *fakeForkClient) ForkSpawn(_ context.Context, req *connect.Request[cpv1.ForkSpawnRequest]) (*connect.Response[cpv1.ForkSpawnResponse], error) {

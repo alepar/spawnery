@@ -4,14 +4,32 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
+
+func TestCreateWaitsForLateAuthorizationFailureAfterActive(t *testing.T) {
+	started := time.Now()
+	_, err := awaitCreateAuthorization(context.Background(), func(context.Context) error {
+		time.Sleep(25 * time.Millisecond)
+		return errors.New("late create authorization failure")
+	}, func(context.Context) (uint64, error) {
+		return 7, nil
+	})
+	if err == nil || err.Error() != "late create authorization failure" {
+		t.Fatalf("error = %v", err)
+	}
+	if time.Since(started) < 20*time.Millisecond {
+		t.Fatal("create returned before authorization completed")
+	}
+}
 
 func okHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })

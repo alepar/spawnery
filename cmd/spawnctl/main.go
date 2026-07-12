@@ -247,15 +247,14 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 	// warning while WaitActive sits behind the CP's pending intent.
 	pollCtx, cancelPoll := context.WithCancel(ctx)
 	defer cancelPoll()
-	signCh := make(chan error, 1)
-	go func() {
+	authorize := func(authCtx context.Context) error {
 		// AppRef is intentionally left empty: in CP create mode the user supplies an app *id*
 		// (--app-id), not the immutable app_ref the CP resolves it to (id != ref for catalog/seed
 		// apps). The client cannot validate a ref it never specified, so the AM1 app_ref gate is
 		// skipped; the model correspondence check still runs, and the signed intent carries the
 		// CP-resolved app_ref verbatim.
-		signCh <- cli.SignProvision(pollCtx, id, client.IntentParams{Op: intent.OpCreateSpawn, Model: model, Mounts: mounts, AttachedSecretIDs: []string{}})
-	}()
+		return cli.SignProvision(authCtx, id, client.IntentParams{Op: intent.OpCreateSpawn, Model: model, Mounts: mounts, AttachedSecretIDs: []string{}})
+	}
 
 	// CreateSpawn is async: the CP binds the spawn to its node only once the node reports ACTIVE.
 	// Wait for that before attaching, else the session races provisioning and gets "unknown spawn".
@@ -266,39 +265,17 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 			lastLine = line
 		}
 	}
-	type waitResult struct {
-		generation uint64
-		err        error
-	}
-	waitCh := make(chan waitResult, 1)
-	go func() {
-		generation, err := cli.WaitActive(pollCtx, id, onPoll)
-		waitCh <- waitResult{generation: generation, err: err}
-	}()
-	var spawnGen uint64
-	provisioned := false
-	for !provisioned {
-		select {
-		case signErr := <-signCh:
-			if signErr != nil && !errors.Is(signErr, context.Canceled) {
-				log.Fatalf("authorize create: %v", signErr)
-			}
-			signCh = nil
-		case result := <-waitCh:
-			if result.err != nil {
-				var te *client.TerminalError
-				if errors.As(result.err, &te) {
-					log.Fatal(provisionFailure(te.Summary))
-				}
-				log.Fatal(result.err)
-			}
-			spawnGen = result.generation
-			provisioned = true
-		case <-ctx.Done():
-			log.Fatal(ctx.Err())
-		}
-	}
+	spawnGen, err := awaitCreateAuthorization(pollCtx, authorize, func(waitCtx context.Context) (uint64, error) {
+		return cli.WaitActive(waitCtx, id, onPoll)
+	})
 	cancelPoll()
+	if err != nil {
+		var te *client.TerminalError
+		if errors.As(err, &te) {
+			log.Fatal(provisionFailure(te.Summary))
+		}
+		log.Fatalf("authorize create: %v", err)
+	}
 
 	// -detach: the spawn is ACTIVE and (if the CP runs the intent flow) its create intent is signed.
 	// Return WITHOUT opening an interactive session — so we skip the StopSpawn that a normal detach
@@ -327,6 +304,44 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 
 	_ = stream.CloseRequest()
 	_ = cli.Stop(ctx, id)
+}
+
+func awaitCreateAuthorization(ctx context.Context, authorize func(context.Context) error, waitActive func(context.Context) (uint64, error)) (uint64, error) {
+	operationCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	authCh := make(chan error, 1)
+	type waitResult struct {
+		generation uint64
+		err        error
+	}
+	waitCh := make(chan waitResult, 1)
+	go func() { authCh <- authorize(operationCtx) }()
+	go func() {
+		generation, err := waitActive(operationCtx)
+		waitCh <- waitResult{generation: generation, err: err}
+	}()
+	authDone, waitDone := false, false
+	var generation uint64
+	for !authDone || !waitDone {
+		select {
+		case err := <-authCh:
+			if err != nil {
+				return 0, err
+			}
+			authDone = true
+			authCh = nil
+		case result := <-waitCh:
+			if result.err != nil {
+				return 0, result.err
+			}
+			generation = result.generation
+			waitDone = true
+			waitCh = nil
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	return generation, nil
 }
 
 // driveFrames is the CP-lane interactive loop over the frame protocol: it sends each stdin line as a

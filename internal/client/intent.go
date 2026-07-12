@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"connectrpc.com/connect"
@@ -117,8 +116,8 @@ func validatePendingIntent(response *cpv1.GetPendingIntentResponse, spawnID stri
 	if params.Image != "" && pi.GetImage() != params.Image {
 		return nil, "", fmt.Errorf("AM1: image %q does not match requested %q", pi.GetImage(), params.Image)
 	}
-	if params.AttachedSecretIDs != nil && !slices.Equal(pi.GetAttachedSecretIds(), params.AttachedSecretIDs) {
-		return nil, "", fmt.Errorf("AM1: attached_secret_ids %v do not match requested %v", pi.GetAttachedSecretIds(), params.AttachedSecretIDs)
+	if params.AttachedSecretIDs != nil && !containsAllStrings(pi.GetAttachedSecretIds(), params.AttachedSecretIDs) {
+		return nil, "", fmt.Errorf("AM1: resolved attached_secret_ids %v omit caller-selected %v", pi.GetAttachedSecretIds(), params.AttachedSecretIDs)
 	}
 	if params.TargetNodeID != "" && pi.GetTargetNodeId() != params.TargetNodeID {
 		return nil, "", fmt.Errorf("AM1: target_node_id %q does not match requested %q", pi.GetTargetNodeId(), params.TargetNodeID)
@@ -136,6 +135,19 @@ func validatePendingIntent(response *cpv1.GetPendingIntentResponse, spawnID stri
 		return nil, "", errors.New("mounts do not match requested mounts")
 	}
 	return pi, op, nil
+}
+
+func containsAllStrings(resolved, expected []string) bool {
+	set := make(map[string]struct{}, len(resolved))
+	for _, value := range resolved {
+		set[value] = struct{}{}
+	}
+	for _, value := range expected {
+		if _, ok := set[value]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func mountBindingsEqual(a, b []*cpv1.MountBinding) bool {
@@ -179,19 +191,26 @@ func provisionWithIntent(ctx context.Context, ic intentClient, credentials NodeC
 		rpcCh := make(chan error, 1)
 		go func() { signCh <- pollAndSign(attemptCtx, ic, credentials, trust, spawnID, params) }()
 		go func() { rpcCh <- doRPC(attemptCtx) }()
-		for {
+		signDone, rpcDone := false, false
+		for !signDone || !rpcDone {
 			select {
 			case err := <-signCh:
 				if err != nil && !errors.Is(err, context.Canceled) {
 					return fmt.Errorf("provisionWithIntent %s: pollAndSign: %w", spawnID, err)
 				}
+				signDone = true
 				signCh = nil
 			case err := <-rpcCh:
-				return err
+				if err != nil {
+					return err
+				}
+				rpcDone = true
+				rpcCh = nil
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 		}
+		return nil
 	}
 	err := attempt()
 	if err == nil {

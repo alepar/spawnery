@@ -109,8 +109,9 @@ func (c *Client) Resume(ctx context.Context, id string) error {
 	return resumeSpawnAuthorized(ctx, c.rpc, c.nodeCredentials, c.targetTrust, id, c.warn)
 }
 
-func resumeSpawn(ctx context.Context, rpc spawnClient, id string, warn func(error)) error {
-	return resumeSpawnAuthorized(ctx, rpc, nil, TargetTrust{}, id, warn)
+func resumeSpawn(ctx context.Context, rpc spawnClient, id string, _ func(error)) error {
+	_, err := rpc.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id}))
+	return err
 }
 
 func resumeSpawnAuthorized(ctx context.Context, rpc spawnClient, credentials NodeCredentialSource, trust TargetTrust, id string, warn func(error)) error {
