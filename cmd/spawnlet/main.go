@@ -67,6 +67,7 @@ func main() {
 		DeltaScrubPaths:     cfg.Delta.ScrubPaths,
 		AdvertiseIP:         cfg.Node.AdvertiseIP,
 		UsernsMode:          cfg.UsernsMode,
+		SidecarCABundleFile: cfg.SidecarCABundleFile,
 	}
 	if err := configureGitHubOverride(&managerCfg, cfg); err != nil {
 		log.Fatalf("github override: %v", err)

@@ -75,6 +75,20 @@ type Options struct {
 	// and what an authorize call with no login_hint resolves to); if empty, the default user is
 	// octocat (1000001), matching New().
 	Users []User
+	// FixedToken, when set, makes every exchange (code->token AND refresh_token grant) issue this
+	// EXACT literal string as the access token, instead of a random "gho_"/"ghu_" one. Empty (the
+	// default) preserves the historical random-token behavior.
+	//
+	// This exists for the e2e-vm lane (sp-wwtc.4): the sidecar's GitHub MITM proxy injects
+	// `Authorization: Basic base64("x-access-token:"+token)` at github.com using whatever token
+	// this fake hands the AS — which is the REAL production injection path, not optional. For that
+	// injected credential to mean anything against the VM's fake github.com (Gitea behind TLS), the
+	// token value must equal a Gitea PAT Gitea will actually accept — which Gitea mints itself and
+	// will not let a caller choose. So the VM profile runs it the other way: Gitea mints its PAT
+	// first (provision-time bootstrap), and FixedToken makes this fake hand back that SAME string,
+	// so the credential the sidecar injects is a real, valid Gitea PAT. All call sites that don't
+	// set FixedToken (production AS_FAKE_GITHUB=1 dev/CI use, every other test) are unaffected.
+	FixedToken string
 }
 
 // Fake is the in-process GitHub. authorize resolves the logging-in user from the request's
@@ -94,7 +108,8 @@ type Fake struct {
 	tokens      map[string]User
 	refresh     map[string]refreshGrant
 
-	baseURL string // advertised base URL; "" means derive from Srv.URL
+	baseURL    string // advertised base URL; "" means derive from Srv.URL
+	fixedToken string // Options.FixedToken; "" = random tokens (historical behavior)
 }
 
 // New starts the fake with registered confidential-client credentials: loopback bind, default
@@ -143,6 +158,7 @@ func newFake(o Options) (*Fake, error) {
 		defaultUser:  defaultUser,
 		users:        users,
 		baseURL:      o.BaseURL,
+		fixedToken:   o.FixedToken,
 		codes:        map[string]*issuedCode{},
 		tokens:       map[string]User{},
 		refresh:      map[string]refreshGrant{},
@@ -304,6 +320,9 @@ func (f *Fake) exchange(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	tok := "gho_" + randHex()
+	if f.fixedToken != "" {
+		tok = f.fixedToken
+	}
 	refreshTok := "ghr_" + randHex()
 	f.tokens[tok] = c.user
 	f.refresh[refreshTok] = refreshGrant{user: c.user, access: tok}
@@ -328,6 +347,9 @@ func (f *Fake) refreshAccessToken(w http.ResponseWriter, r *http.Request) {
 	delete(f.refresh, oldRefresh)
 	delete(f.tokens, grant.access)
 	nextAccess := "ghu_" + randHex()
+	if f.fixedToken != "" {
+		nextAccess = f.fixedToken
+	}
 	nextRefresh := "ghr_" + randHex()
 	f.tokens[nextAccess] = grant.user
 	f.refresh[nextRefresh] = refreshGrant{user: grant.user, access: nextAccess}
