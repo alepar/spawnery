@@ -270,9 +270,6 @@ func TestLogoutRejectsRefreshTokenAtLogoutPath(t *testing.T) {
 	}
 }
 
-// TestRevocationsFeedGatedByCPSecret: when IdPConfig.CPSecret is set, GET /revocations must
-// reject requests without the bearer token (401) and accept those with the correct secret.
-// Verifies that the env wiring in cmd/authsvc/main.go actually gates the endpoint.
 func TestRevocationsFeedHandlerDoesNotInspectBearerSecrets(t *testing.T) {
 	fake := githubfake.New()
 	defer fake.Close()
