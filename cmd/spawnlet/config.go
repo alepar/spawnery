@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	configfiles "spawnery/config"
 	"spawnery/internal/config"
@@ -23,28 +24,33 @@ type Spawnlet struct {
 	ContainerRuntime string        `koanf:"container_runtime"`
 	UsernsMode       string        `koanf:"userns_mode"`
 	ASURL            string        `koanf:"as_url"`
+	ASServerName     string        `koanf:"as_server_name"`
 	EnrollToken      config.Secret `koanf:"enroll_token"`
 	PodDNS           []string      `koanf:"pod_dns"`
 
 	Node struct {
-		ID                        string `koanf:"id"`
-		Class                     string `koanf:"class"`
-		Owner                     string `koanf:"owner"`
-		AdvertiseIP               string `koanf:"advertise_ip"`
-		TerminalAddr              string `koanf:"terminal_addr"`
-		AuthMode                  string `koanf:"auth_mode"`
-		IDDir                     string `koanf:"id_dir"`
-		RootCA                    string `koanf:"root_ca"`
-		TrustDomain               string `koanf:"trust_domain"`
-		Environment               string `koanf:"environment"`
-		SignerRevocationStatement string `koanf:"signer_revocation_statement"`
-		SignerRevocationState     string `koanf:"signer_revocation_state"`
-		GitHubMintDevID           string `koanf:"github_mint_dev_id"`
+		ID                           string        `koanf:"id"`
+		Class                        string        `koanf:"class"`
+		Owner                        string        `koanf:"owner"`
+		AdvertiseIP                  string        `koanf:"advertise_ip"`
+		TerminalAddr                 string        `koanf:"terminal_addr"`
+		AuthMode                     string        `koanf:"auth_mode"`
+		IDDir                        string        `koanf:"id_dir"`
+		RootCA                       string        `koanf:"root_ca"`
+		TrustDomain                  string        `koanf:"trust_domain"`
+		Environment                  string        `koanf:"environment"`
+		SignerRevocationStatement    string        `koanf:"signer_revocation_statement"`
+		SignerRevocationState        string        `koanf:"signer_revocation_state"`
+		CertificateRevocationState   string        `koanf:"certificate_revocation_state"`
+		CertificateRevocationIssuers string        `koanf:"certificate_revocation_issuers"`
+		CertificateRevocationCRLs    string        `koanf:"certificate_revocation_crls"`
+		CertificateRevocationRefresh time.Duration `koanf:"certificate_revocation_refresh_interval"`
 	} `koanf:"node"`
 
 	CP struct {
-		Addr     string `koanf:"addr"`
-		NodeAddr string `koanf:"node_addr"`
+		Addr       string `koanf:"addr"`
+		NodeAddr   string `koanf:"node_addr"`
+		ServerName string `koanf:"server_name"`
 	} `koanf:"cp"`
 
 	// GitHub points github: storage mounts at a non-github.com git host (e.g. a local Gitea) with a
@@ -118,63 +124,77 @@ func (s Spawnlet) Validate() error {
 	if s.Node.SignerRevocationState == "" {
 		return fmt.Errorf("node.signer_revocation_state is required in enforced mode")
 	}
+	if s.CP.ServerName == "" {
+		return fmt.Errorf("cp.server_name is required in enforced mode")
+	}
+	if s.ASURL != "" && s.ASServerName == "" {
+		return fmt.Errorf("as_server_name is required when as_url is configured in enforced mode")
+	}
+	if s.Node.CertificateRevocationState == "" || s.Node.CertificateRevocationIssuers == "" || s.Node.CertificateRevocationCRLs == "" {
+		return fmt.Errorf("node certificate revocation state, issuers, and CRLs are required in enforced mode")
+	}
 	return nil
 }
 
 // spawnletEnvAliases maps legacy environment variable names to dotted config keys so existing
 // deployments keep working unchanged (the env layer sits above the files).
 var spawnletEnvAliases = map[string]string{
-	"AGENT_IMAGE":                      "agent_image",
-	"SIDECAR_IMAGE":                    "sidecar_image",
-	"OPENROUTER_API_KEY":               "openrouter_api_key",
-	"DATA_ROOT":                        "data_root",
-	"SPAWNLET_ADDR":                    "spawnlet_addr",
-	"AGENT_BINARIES":                   "agent_binaries",
-	"CONTAINER_RUNTIME":                "container_runtime",
-	"USERNS_MODE":                      "userns_mode",
-	"AS_URL":                           "as_url",
-	"ENROLL_TOKEN":                     "enroll_token",
-	"POD_DNS":                          "pod_dns",
-	"NODE_ID":                          "node.id",
-	"NODE_CLASS":                       "node.class",
-	"NODE_OWNER":                       "node.owner",
-	"NODE_ADVERTISE_IP":                "node.advertise_ip",
-	"NODE_TERMINAL_ADDR":               "node.terminal_addr",
-	"NODE_AUTH_MODE":                   "node.auth_mode",
-	"NODE_ID_DIR":                      "node.id_dir",
-	"NODE_ROOT_CA":                     "node.root_ca",
-	"NODE_TRUST_DOMAIN":                "node.trust_domain",
-	"NODE_AUTH_ENVIRONMENT":            "node.environment",
-	"NODE_SIGNER_REVOCATION_STATEMENT": "node.signer_revocation_statement",
-	"NODE_SIGNER_REVOCATION_STATE":     "node.signer_revocation_state",
-	"NODE_GITHUB_MINT_DEV_NODE_ID":     "node.github_mint_dev_id",
-	"CP_ADDR":                          "cp.addr",
-	"CP_NODE_ADDR":                     "cp.node_addr",
-	"GITHUB_API_BASE_URL":              "github.api_base_url",
-	"GITHUB_HOST":                      "github.host",
-	"GITHUB_ALLOW_INSECURE_HOST":       "github.allow_insecure_host",
-	"GITHUB_STATIC_TOKEN":              "github.static_token",
-	"GITHUB_STATIC_TOKEN_FILE":         "github.static_token_file",
-	"EGRESS_ENFORCE":                   "egress.enforce",
-	"EGRESS_ALLOW_CIDRS":               "egress.allow_cidrs",
-	"EGRESS_FLOOR_FORCE_OFF":           "egress.floor_force_off",
-	"MEM_LIMIT_MB":                     "limits.mem_mb",
-	"CPU_LIMIT":                        "limits.cpu",
-	"PIDS_LIMIT":                       "limits.pids",
-	"DELTA_CAPTURE":                    "delta.capture",
-	"DELTA_SQUASH_DEPTH":               "delta.squash_depth",
-	"DELTA_SCRUB_PATHS":                "delta.scrub_paths",
-	"CRI_ENDPOINT":                     "cri.endpoint",
-	"CRI_RUNTIME_HANDLER":              "cri.runtime_handler",
-	"JOURNAL_BACKEND":                  "journal.backend",
-	"JOURNAL_ROOT":                     "journal.root",
-	"JOURNAL_FS_ROOT":                  "journal.fs_root",
-	"JOURNAL_NODE_KEY":                 "journal.node_key",
-	"JOURNAL_S3_ENDPOINT":              "journal.s3.endpoint",
-	"JOURNAL_GARAGE_ADMIN_ENDPOINT":    "journal.s3.garage_admin_endpoint",
-	"JOURNAL_GARAGE_ADMIN_TOKEN":       "journal.s3.garage_admin_token",
-	"JOURNAL_S3_REGION":                "journal.s3.region",
-	"JOURNAL_S3_DISABLE_TLS":           "journal.s3.disable_tls",
+	"AGENT_IMAGE":                         "agent_image",
+	"SIDECAR_IMAGE":                       "sidecar_image",
+	"OPENROUTER_API_KEY":                  "openrouter_api_key",
+	"DATA_ROOT":                           "data_root",
+	"SPAWNLET_ADDR":                       "spawnlet_addr",
+	"AGENT_BINARIES":                      "agent_binaries",
+	"CONTAINER_RUNTIME":                   "container_runtime",
+	"USERNS_MODE":                         "userns_mode",
+	"AS_URL":                              "as_url",
+	"AS_SERVER_NAME":                      "as_server_name",
+	"ENROLL_TOKEN":                        "enroll_token",
+	"POD_DNS":                             "pod_dns",
+	"NODE_ID":                             "node.id",
+	"NODE_CLASS":                          "node.class",
+	"NODE_OWNER":                          "node.owner",
+	"NODE_ADVERTISE_IP":                   "node.advertise_ip",
+	"NODE_TERMINAL_ADDR":                  "node.terminal_addr",
+	"NODE_AUTH_MODE":                      "node.auth_mode",
+	"NODE_ID_DIR":                         "node.id_dir",
+	"NODE_ROOT_CA":                        "node.root_ca",
+	"NODE_TRUST_DOMAIN":                   "node.trust_domain",
+	"NODE_AUTH_ENVIRONMENT":               "node.environment",
+	"NODE_SIGNER_REVOCATION_STATEMENT":    "node.signer_revocation_statement",
+	"NODE_SIGNER_REVOCATION_STATE":        "node.signer_revocation_state",
+	"NODE_CERTIFICATE_REVOCATION_STATE":   "node.certificate_revocation_state",
+	"NODE_CERTIFICATE_REVOCATION_ISSUERS": "node.certificate_revocation_issuers",
+	"NODE_CERTIFICATE_REVOCATION_CRLS":    "node.certificate_revocation_crls",
+	"NODE_CERTIFICATE_REVOCATION_REFRESH_INTERVAL": "node.certificate_revocation_refresh_interval",
+	"CP_ADDR":                       "cp.addr",
+	"CP_NODE_ADDR":                  "cp.node_addr",
+	"CP_SERVER_NAME":                "cp.server_name",
+	"GITHUB_API_BASE_URL":           "github.api_base_url",
+	"GITHUB_HOST":                   "github.host",
+	"GITHUB_ALLOW_INSECURE_HOST":    "github.allow_insecure_host",
+	"GITHUB_STATIC_TOKEN":           "github.static_token",
+	"GITHUB_STATIC_TOKEN_FILE":      "github.static_token_file",
+	"EGRESS_ENFORCE":                "egress.enforce",
+	"EGRESS_ALLOW_CIDRS":            "egress.allow_cidrs",
+	"EGRESS_FLOOR_FORCE_OFF":        "egress.floor_force_off",
+	"MEM_LIMIT_MB":                  "limits.mem_mb",
+	"CPU_LIMIT":                     "limits.cpu",
+	"PIDS_LIMIT":                    "limits.pids",
+	"DELTA_CAPTURE":                 "delta.capture",
+	"DELTA_SQUASH_DEPTH":            "delta.squash_depth",
+	"DELTA_SCRUB_PATHS":             "delta.scrub_paths",
+	"CRI_ENDPOINT":                  "cri.endpoint",
+	"CRI_RUNTIME_HANDLER":           "cri.runtime_handler",
+	"JOURNAL_BACKEND":               "journal.backend",
+	"JOURNAL_ROOT":                  "journal.root",
+	"JOURNAL_FS_ROOT":               "journal.fs_root",
+	"JOURNAL_NODE_KEY":              "journal.node_key",
+	"JOURNAL_S3_ENDPOINT":           "journal.s3.endpoint",
+	"JOURNAL_GARAGE_ADMIN_ENDPOINT": "journal.s3.garage_admin_endpoint",
+	"JOURNAL_GARAGE_ADMIN_TOKEN":    "journal.s3.garage_admin_token",
+	"JOURNAL_S3_REGION":             "journal.s3.region",
+	"JOURNAL_S3_DISABLE_TLS":        "journal.s3.disable_tls",
 }
 
 func loadConfig() (*Spawnlet, error) {

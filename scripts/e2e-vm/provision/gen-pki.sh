@@ -49,8 +49,9 @@ cp -f root.pem service-intermediate.pem cloud-intermediate.pem self-hosted-inter
 chmod 700 authsvc cp
 chmod 600 authsvc/* cp/*
 
-# Root and issuer keys remain ceremony-only. The AS retains only its online self-hosted node issuer
-# key in its private runtime bundle; CP and spawnlet never receive issuer keys.
+# Root, service, cloud, and auth-signing issuer keys remain ceremony-only. The self-hosted issuer
+# key is the intentional exception: authsvc retains it online solely to issue enrolled node SVIDs.
+# CP and spawnlet never receive issuer keys.
 OFFLINE="${SPAWNERY_OFFLINE_PKI_DIR:-$PKI/offline}"
 mkdir -p "$OFFLINE"
 chmod 700 "$OFFLINE"

@@ -109,7 +109,10 @@ func TestSpawnletConfig_EnvAliasOverride(t *testing.T) {
 }
 
 func TestSpawnletConfig_SetOverride(t *testing.T) {
-	cfg, err := loadSpawnletTest(t, "dev", nil, "node.auth_mode=enforced", "node.signer_revocation_state=/tmp/spawnlet-test-state", "limits.pids=512")
+	cfg, err := loadSpawnletTest(t, "dev", nil,
+		"node.auth_mode=enforced", "node.signer_revocation_state=/tmp/spawnlet-test-state",
+		"node.certificate_revocation_state=/tmp/cert-state", "node.certificate_revocation_issuers=/tmp/issuer.pem",
+		"node.certificate_revocation_crls=/tmp/issuer.crl", "cp.server_name=cp.internal", "limits.pids=512")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -618,35 +621,12 @@ func TestConfigureJournalS3WithGarageAdminDoesNotRequireStaticBucketCredentials(
 	}
 }
 
-// --- nodeGitHubMint tests -------------------------------------------------
-// These build a typed config; nodeGitHubMint is driven by cfg.Node, not the environment.
-
-func TestNodeGitHubMint_RelaxedDevClient(t *testing.T) {
-	cfg := &Spawnlet{}
-	cfg.Node.GitHubMintDevID = "node-1"
-	cfg.ASURL = "http://127.0.0.1:8090"
-	cfg.Node.AuthMode = "insecure" // relaxed path must NOT require enforced mode
-	if got := nodeGitHubMint(cfg); got == nil {
-		t.Fatal("relaxed dev mint client must be non-nil when github_mint_dev_id + as_url are set")
-	}
-}
-
-func TestNodeGitHubMint_RelaxedRequiresASURL(t *testing.T) {
-	cfg := &Spawnlet{}
-	cfg.Node.GitHubMintDevID = "node-1"
-	cfg.ASURL = ""
-	if got := nodeGitHubMint(cfg); got != nil {
-		t.Fatal("relaxed dev mint must be nil without as_url")
-	}
-}
-
 func TestNodeGitHubMint_DisabledByDefault(t *testing.T) {
 	cfg := &Spawnlet{}
-	cfg.Node.GitHubMintDevID = ""
 	cfg.Node.AuthMode = "insecure"
 	cfg.ASURL = "http://127.0.0.1:8090"
-	if got := nodeGitHubMint(cfg); got != nil {
-		t.Fatal("without dev id and in insecure mode, mint client must be nil (unchanged behavior)")
+	if got := nodeGitHubMint(cfg, nil); got != nil {
+		t.Fatal("insecure mode must not construct a production-capable AS client")
 	}
 }
 

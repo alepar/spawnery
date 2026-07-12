@@ -11,9 +11,47 @@ import (
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/githubfake"
 	"spawnery/internal/authsvc/store"
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 	"spawnery/internal/weborigin"
 )
+
+func TestPublicHandlerDoesNotExposeInternalRoutes(t *testing.T) {
+	root, _ := pki.NewRootCA("R")
+	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
+	svc := authsvc.New(root.Cert, inter)
+
+	for _, path := range []string{"/enroll", "/node-revocations", "/revocations", "/internal/github/link-status", "/auth.v1.AuthService/MintGitHubAccessToken"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
+		rec := httptest.NewRecorder()
+		svc.PublicHandler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("POST %s status = %d, want 404", path, rec.Code)
+		}
+	}
+}
+
+func TestInternalHandlerAnonymousOnlyReachesEnroll(t *testing.T) {
+	root, _ := pki.NewRootCA("R")
+	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
+	svc := authsvc.New(root.Cert, inter)
+	policy := mtls.Policy{"anonymous": {"authsvc.enroll": {}}}
+	handler := svc.InternalHandler(policy)
+
+	enroll := httptest.NewRecorder()
+	handler.ServeHTTP(enroll, httptest.NewRequest(http.MethodPost, "/enroll", strings.NewReader("{}")))
+	if enroll.Code == http.StatusForbidden || enroll.Code == http.StatusNotFound {
+		t.Fatalf("anonymous enrollment was rejected before handler: %d", enroll.Code)
+	}
+
+	for _, path := range []string{"/node-revocations", "/revocations", "/internal/github/link-status", "/auth.v1.AuthService/MintGitHubAccessToken", "/healthz"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("anonymous GET %s status = %d, want 403", path, rec.Code)
+		}
+	}
+}
 
 // TestHandlerOuterCORSPreservesCredentialedPreflight is a regression test for [WL6] AS CORS.
 //

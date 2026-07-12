@@ -91,7 +91,7 @@ type ManagerConfig struct {
 	// EgressFloorForceOff bypasses the egress floor entirely — neither applied nor checked.
 	// DEV-ONLY: this flag MUST NOT be set in production. It exists so the rootless dev node
 	// can run under NODE_CLASS=cloud (multi-tenant placement) without kernel iptables access.
-	// Mirrors AS_DEV_RELAX_NODE_AUTH in its danger level and usage pattern.
+	// Treat this as an explicit local-development security bypass.
 	EgressFloorForceOff bool
 
 	MemLimitMB       int64   // memory limit in MiB; default 1024

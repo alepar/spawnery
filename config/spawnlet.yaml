@@ -11,6 +11,7 @@ agent_binaries:    []                  # binary names available in the agent ima
 container_runtime: ""                  # "" = Docker (default); "runsc" = CRI/gVisor lane
 userns_mode:       "off"              # off | remap | native
 as_url:            ""                  # AuthService URL (enforced mode / GitHub mint)
+as_server_name:    ""                  # expected AuthService internal TLS DNS name
 enroll_token:      ""                  # enrollment token (first-boot only; cleared after enroll)
 pod_dns:           []                  # pod resolv.conf override (CRI/runsc lane; [] = host)
 
@@ -27,11 +28,15 @@ node:
   environment:     "dev"              # auth-artifact signer environment (root trust domain prefix)
   signer_revocation_statement: ""     # optional deployment-provided monotonic statement
   signer_revocation_state: ""         # required persisted state path in enforced mode
-  github_mint_dev_id: ""             # DEV-ONLY: relaxed node identity for AS GitHub-mint
+  certificate_revocation_state: ""   # durable monotonic issuer-CRL state
+  certificate_revocation_issuers: "" # comma-separated trusted role-bearing issuer certs
+  certificate_revocation_crls: ""    # matching deployment-provided current CRLs
+  certificate_revocation_refresh_interval: 5s
 
 cp:
   addr:      ""                        # CP URL; empty = standalone mode (no CP dial)
   node_addr: "https://127.0.0.1:8081" # CP mTLS node listener (enforced mode)
+  server_name: ""                     # expected CP internal TLS DNS name
 
 egress:
   enforce:         true  # enforce the egress floor (set false for self-hosted dev nodes)

@@ -50,6 +50,28 @@ func SessionBearerAccount(verifier *token.Verifier, now func() time.Time) Accoun
 	})
 }
 
+// EnrollmentSessionAccount extracts the account from a certified AS session intended for the
+// control plane. Node-audience artifacts are credentials delivered to nodes and cannot authorize
+// issuance of another node's enrollment token.
+func EnrollmentSessionAccount(verifier *token.Verifier, now func() time.Time) AccountFromRequest {
+	if now == nil {
+		now = time.Now
+	}
+	return BearerTokenAccount(func(tok string) (string, bool) {
+		current := now()
+		payload, err := verifier.Verify(tok, token.ArtifactTypeSession, current)
+		if err != nil {
+			return "", false
+		}
+		var body authv1.SessionTokenBody
+		if err := proto.Unmarshal(payload, &body); err != nil || body.GetAccountId() == "" ||
+			body.GetAudience() != token.AudienceCP || token.ValidateSessionBody(&body, current) != nil {
+			return "", false
+		}
+		return body.GetAccountId(), true
+	})
+}
+
 // BearerTokenAccount extracts the account ID from the Authorization header via a
 // caller-supplied lookup function (e.g. JWT parsing).  The lookup receives the
 // raw token string (after stripping "Bearer ") and returns the account ID.

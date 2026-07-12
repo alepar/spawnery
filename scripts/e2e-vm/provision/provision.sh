@@ -329,16 +329,26 @@ sudo cp -rf "$PAYLOAD"/config/* /etc/spawnery/config/ 2>/dev/null || true
 [ -d "$PAYLOAD/examples" ] && sudo cp -rf "$PAYLOAD/examples" /opt/spawnery/
 [ -d "$PAYLOAD/web-dist" ] && sudo rsync -a "$PAYLOAD/web-dist/" /var/www/spawnery/
 
-# ---- PKI: throwaway CA + AS session key + node/CP mTLS + the *.e2e.test wildcard cert ----
+# ---- PKI: throwaway CA + certified auth signers + service/node mTLS + wildcard cert ----
 log "generating throwaway PKI + wildcard cert…"
 sudo mkdir -p /etc/spawnery/pki
-sudo bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"   # writes root.pem/ca.crt, session-key/pub, node/cp certs, wildcard.{crt,key}
-sudo chmod 644 /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key   # caddy runs as user 'caddy'
+sudo install -d -m0700 -o root -g root /var/lib/spawnery-offline
+sudo env SPAWNERY_OFFLINE_PKI_DIR=/var/lib/spawnery-offline \
+  bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"
 sudo cp /etc/spawnery/pki/ca.crt /home/build/ca.crt   # build-base.sh pulls this out for host trust
-sudo install -d -m0700 /etc/spawnery/cp /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations
+sudo install -d -m0700 /etc/spawnery/authsvc /etc/spawnery/cp \
+  /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations \
+  /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations
+sudo install -d -m0700 /etc/spawnery/node
+sudo cp -rf /etc/spawnery/pki/authsvc/. /etc/spawnery/authsvc/
 sudo cp -rf /etc/spawnery/pki/cp/. /etc/spawnery/cp/
-sudo chmod 0600 /etc/spawnery/cp/*
-sudo rm -rf /etc/spawnery/pki/cp
+sudo cp -f /etc/spawnery/pki/node-cloud/{cert.pem,chain.pem,key.pem,root.pem} /etc/spawnery/node/
+sudo cp -f /etc/spawnery/pki/{service-intermediate.pem,cloud-intermediate.pem,self-hosted-intermediate.pem,service.crl.pem,cloud-node.crl.pem,self-hosted-node.crl.pem} /etc/spawnery/node/
+sudo chmod 0600 /etc/spawnery/authsvc/* /etc/spawnery/cp/* /etc/spawnery/node/*
+sudo install -d -m0750 -o root -g caddy /etc/spawnery/caddy
+sudo install -m0644 -o root -g caddy /etc/spawnery/pki/wildcard.crt /etc/spawnery/caddy/wildcard.crt
+sudo install -m0640 -o root -g caddy /etc/spawnery/pki/wildcard.key /etc/spawnery/caddy/wildcard.key
+sudo rm -rf /etc/spawnery/pki/*
 
 # ---- cp.prod.yaml: patch the ${sops:} store DSN to the throwaway local Postgres (baseline; roll.sh
 #      re-applies this after every config re-copy, since a fresh config/ ships the sops ref again) ----
@@ -348,9 +358,9 @@ sudo sed -i 's#\${sops:store.dsn}#postgres://spawnery:spawnery@127.0.0.1:5432/sp
 # ---- Caddy: TLS :443 wildcard cert, route to web/CP/AS ----
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 :443 {
-  tls /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key
+  tls /etc/spawnery/caddy/wildcard.crt /etc/spawnery/caddy/wildcard.key
   @cp   path /cp.v1.* /ws*
-  @as   path /oauth* /refresh* /logout* /github* /device* /ca/*
+  @as   path /oauth* /refresh* /logout* /github* /device* /ca/* /enrollment-tokens
   reverse_proxy @cp 127.0.0.1:8080
   reverse_proxy @as 127.0.0.1:8090
   root * /var/www/spawnery
@@ -408,6 +418,10 @@ Requires=spawnery-render-env.service
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
 WorkingDirectory=/opt/spawnery
+InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/caddy /etc/spawnery/cp /etc/spawnery/node /etc/spawnery/pki
+ReadOnlyPaths=/etc/spawnery/authsvc
+NoNewPrivileges=yes
+CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE
 ExecStart=/usr/local/bin/authsvc
 Restart=on-failure
 [Install]
@@ -423,6 +437,10 @@ Requires=spawnery-render-env.service
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
 WorkingDirectory=/opt/spawnery
+InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/node /etc/spawnery/pki
+ReadOnlyPaths=/etc/spawnery/cp
+NoNewPrivileges=yes
+CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE
 ExecStart=/usr/local/bin/spawnery_cp
 Restart=on-failure
 [Install]
@@ -444,6 +462,10 @@ EnvironmentFile=-/etc/spawnery/env.d/profile.env
 EnvironmentFile=-/etc/spawnery/env.d/journal.env
 EnvironmentFile=-/etc/spawnery/env.d/gitea.env
 WorkingDirectory=/opt/spawnery
+InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/cp /etc/spawnery/pki
+ReadOnlyPaths=/etc/spawnery/node
+NoNewPrivileges=yes
+CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE
 ExecStart=/usr/local/bin/spawnlet
 Restart=on-failure
 [Install]

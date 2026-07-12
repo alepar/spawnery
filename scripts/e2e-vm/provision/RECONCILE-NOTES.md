@@ -10,9 +10,9 @@ containerd. AS `/healthz` OK. These are the fixes that got there — **fold into
 1. **`virt-install` defaulted to `qemu:///session`** → couldn't see the system-mode network. Fixed
    in `build-base.sh` (`--connect "$LIBVIRT_URI"`).
 2. **PKI must come from `spawnery-ca dev`, not the openssl fallback.** `spawnery-ca dev <dir>` writes
-   `root.pem`/`root-key.pem`, `self-hosted-intermediate.*`, `cloud-intermediate.*`, `cp-server.*`,
-   `node/`, `node-cloud/`, `session-key.pem`, `session-pub.pem` — exactly what the AS/CP/node env
-   references. The openssl fallback lacks intermediates + node identities. **→ install the binaries
+   the role intermediates, service SVIDs, certified auth signers, current CRLs, and the identities in
+   `node/` and `node-cloud/` that the AS/CP/node env references. The openssl fallback lacks those
+   artifacts. **→ install the binaries
    in `provision.sh` BEFORE `gen-pki`** so `spawnery-ca` is on PATH; sign the Caddy `*.e2e.test`
    wildcard with `root.pem`/`root-key.pem` (single host-trust anchor).
 3. **Caddy runs as user `caddy`** → the wildcard key must be readable: `chmod 644 wildcard.{crt,key}`.

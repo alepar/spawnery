@@ -229,8 +229,8 @@ with the auth service and stores its identity under `NODE_ID_DIR` (`/var/lib/spa
 
 | Side | Key env |
 |------|---------|
-| CP | `NODE_AUTH_MODE=enforced`, `CP_NODE_LISTEN`, `CP_NODE_ROOT_CA`, `CP_NODE_TLS_CERT`, `CP_NODE_TLS_KEY`, `CP_AS_SESSION_PUBKEYS`, `CP_AS_REVOCATION_URL` |
-| Node | `NODE_AUTH_MODE=enforced`, `CP_NODE_ADDR` (`https://…:8081`), `NODE_ID_DIR`, `NODE_ROOT_CA`, `NODE_AS_PUBKEYS`, `AS_URL` + `ENROLL_TOKEN` (first-enrollment) |
+| CP | `NODE_AUTH_MODE=enforced`, `CP_INTERNAL_LISTEN`, `CP_INTERNAL_ROOT_CA`, `CP_INTERNAL_TLS_CERT`, `CP_INTERNAL_TLS_CHAIN`, `CP_INTERNAL_TLS_KEY`, `CP_AUTH_ROOT_CA`, `CP_AUTH_SIGNER_REVOCATION_STATE`, `CP_AS_REVOCATION_URL` |
+| Node | `NODE_AUTH_MODE=enforced`, `CP_NODE_ADDR` (`https://…:8081`), `CP_SERVER_NAME`, `NODE_ID_DIR`, `NODE_ROOT_CA`, `NODE_AUTH_ENVIRONMENT`, `NODE_SIGNER_REVOCATION_STATE`, `AS_URL` + `ENROLL_TOKEN` (first enrollment) |
 
 Dev scaffolding: `just gen-dev-ca`, then `just cp-enforced` / `just authsvc-enforced` /
 `just node-enforced` (or `just dev-enforced` for the lot). See the Justfile recipes for the exact
@@ -279,7 +279,7 @@ regardless.
 | `JOURNAL_BACKEND` | _(off)_ | `s3` \| `filesystem`; see [journal](#storage-journal-transient-tier-optional). |
 | `JOURNAL_*` | — | S3 endpoint/bucket/keys/region/prefix/TLS + `JOURNAL_ROOT`/`JOURNAL_NODE_KEY`. |
 | `NODE_AUTH_MODE` | `insecure` | `enforced` enables node↔CP mTLS. |
-| `CP_NODE_ADDR` / `NODE_ID_DIR` / `NODE_ROOT_CA` / `NODE_AS_PUBKEYS` / `AS_URL` / `ENROLL_TOKEN` | — | Enforced-mode node identity. |
+| `CP_NODE_ADDR` / `CP_SERVER_NAME` / `NODE_ID_DIR` / `NODE_ROOT_CA` / `NODE_AUTH_ENVIRONMENT` / `NODE_SIGNER_REVOCATION_STATE` / `AS_URL` / `ENROLL_TOKEN` | — | Enforced-mode node identity and artifact trust. |
 
 ### Control plane (`spawnery_cp`)
 
@@ -291,8 +291,8 @@ regardless.
 | `CP_ALLOWED_ORIGINS` | — | CORS allowlist for the SPA. |
 | `CP_TELEMETRY` | `telemetry/events.jsonl` | Event log path. |
 | `NODE_AUTH_MODE` | `insecure` | `enforced` turns on the node mTLS listener. |
-| `CP_NODE_LISTEN` / `CP_NODE_ROOT_CA` / `CP_NODE_TLS_CERT` / `CP_NODE_TLS_KEY` | — | Node-facing TLS (enforced). |
-| `CP_AS_SESSION_PUBKEYS` / `CP_AS_REVOCATION_URL` / `CP_AS_CP_SECRET` | — | AS token verification + revocation feed. |
+| `CP_INTERNAL_LISTEN` / `CP_INTERNAL_ROOT_CA` / `CP_INTERNAL_TLS_CERT` / `CP_INTERNAL_TLS_CHAIN` / `CP_INTERNAL_TLS_KEY` | — | Internal service and node TLS (enforced). |
+| `CP_AUTH_ENVIRONMENT` / `CP_AUTH_ROOT_CA` / `CP_AUTH_SIGNER_REVOCATION_STATE` / `CP_AS_REVOCATION_URL` | — | Certified AS artifact verification + revocation feed. |
 
 > Store driver (sqlite/postgres) config is read via `storeConfigFromEnv` — see
 > [`docs/superpowers/specs/2026-06-01-cp-store-driver-sp-ylw.md`](docs/superpowers/specs/2026-06-01-cp-store-driver-sp-ylw.md).
