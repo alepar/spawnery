@@ -18,6 +18,7 @@ internal:
   revocation_state: ""
   revocation_issuers: ""
   revocation_crls: ""
+  revocation_refresh_interval: 5s
 
 ca:
   trust_domain: "prod.spawnery.internal"

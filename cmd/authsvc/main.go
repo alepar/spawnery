@@ -61,15 +61,8 @@
 //	Access controls:
 //	  REGISTRATION_ENABLED           "true"/"1" = allow new user registration (default: true)
 //	  AS_MAX_FAMILIES                Concurrent refresh-family cap per account (default: 20)
-//	  AS_CP_SECRET                   Shared bearer secret for GET /revocations (server-to-server; the CP
-//	                                 must supply "Authorization: Bearer <secret>"). Required in production;
-//	                                 leave unset only in AS_DEV. Without it the revocation feed (account
-//	                                 UUIDs + session-revocation timing) is served unauthenticated.
-//	  AS_CP_URL                      CP base URL for GitHub mint authorization/fanout.
-//	  AS_CP_RPC_SECRET               Scoped AS->CP secret for GitHub coordination RPCs; must match
-//	                                 CP_AS_RPC_SECRET on the CP.
-//	  AS_DEV_RELAX_NODE_AUTH         "1" = DEV-ONLY (D3): trust the X-Spawnery-Dev-Node-Id header as the
-//	                                 node identity for GitHub mint, bypassing node mTLS. NEVER set in prod.
+//	  AS_CP_URL                      CP internal URL for GitHub mint authorization/fanout.
+//	  AS_CP_SERVER_NAME              Expected CP internal TLS DNS name.
 package main
 
 import (
@@ -77,8 +70,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -87,7 +82,6 @@ import (
 	"strings"
 	"time"
 
-	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
@@ -98,6 +92,7 @@ import (
 	"spawnery/internal/authsvc/store"
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/config"
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 	"spawnery/internal/weborigin"
 
@@ -132,7 +127,35 @@ func main() {
 		log.Fatalf("authsvc: config: %v", err)
 	}
 
-	svc, err := buildService(cfg)
+	certificateRevocations := pki.CertificateRevocationChecker(failClosedCertificateRevocations)
+	var (
+		certificateState *pki.RevocationState
+		internalTLS      *tls.Config
+		internalVerifier *mtls.PeerVerifier
+		cpHTTPClient     *http.Client
+	)
+	if cfg.Internal.Listen != "" {
+		certificateState, err = loadCertificateRevocations(cfg.Internal, time.Now)
+		if err != nil {
+			log.Fatalf("authsvc: %v", err)
+		}
+		defer func() { _ = certificateState.Close() }()
+		certificateRevocations = certificateState.IsRevoked
+		var root *x509.Certificate
+		var identity tls.Certificate
+		internalTLS, internalVerifier, root, identity, err = loadInternalTLSConfig(cfg.Internal, certificateState)
+		if err != nil {
+			log.Fatalf("authsvc: %v", err)
+		}
+		if cfg.CP.URL != "" {
+			cpHTTPClient, err = newInternalClient(root, identity, cfg.Internal.TrustDomain, cfg.CP.ServerName, pki.RoleCP, certificateState)
+			if err != nil {
+				log.Fatalf("authsvc: CP mTLS client: %v", err)
+			}
+		}
+	}
+
+	svc, err := buildService(cfg, certificateRevocations, cpHTTPClient)
 	if err != nil {
 		log.Fatalf("authsvc: %v", err)
 	}
@@ -160,13 +183,19 @@ func main() {
 		}
 		outerCORS.ServeHTTP(w, r)
 	})
-	// Serve h2c (HTTP/2 cleartext) in addition to HTTP/1.1: the node->AS gRPC mint client dials
-	// HTTP/2, and the dev-relaxed lane (NODE_GITHUB_MINT_DEV_NODE_ID) uses plain HTTP with no TLS
-	// ALPN to negotiate it. h2c.NewHandler still serves HTTP/1.1 requests (browser OAuth) unchanged.
-	// The enforced/prod lane negotiates HTTP/2 over mTLS ALPN and does not rely on this.
-	srv := &http.Server{
+	// The public compatibility listener retains h2c for local tooling; internal traffic uses the
+	// separate direct TLS listener below.
+	publicServer := &http.Server{
 		Addr:    addr,
 		Handler: h2c.NewHandler(routed, &http2.Server{}),
+	}
+	var internalServer *http.Server
+	if cfg.Internal.Listen != "" {
+		internalHandler := mtls.PrincipalMiddleware(internalVerifier, svc.InternalHandler(authsvc.DefaultInternalPolicy()))
+		internalServer, err = newInternalHTTPServer(cfg.Internal.Listen, internalHandler, internalTLS)
+		if err != nil {
+			log.Fatalf("authsvc: %v", err)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -175,18 +204,30 @@ func main() {
 		<-ctx.Done()
 		sd, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(sd)
+		_ = publicServer.Shutdown(sd)
+		if internalServer != nil {
+			_ = internalServer.Shutdown(sd)
+		}
 	}()
 
-	log.Printf("authsvc listening on %s", addr)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("authsvc: %v", err)
+	if certificateState != nil {
+		go refreshCertificateCRLs(ctx, certificateState, splitCSV(cfg.Internal.RevocationCRLs), cfg.Internal.RevocationRefreshInterval)
+	}
+	errors := make(chan error, 2)
+	go func() { errors <- publicServer.ListenAndServe() }()
+	if internalServer != nil {
+		go func() { errors <- internalServer.ListenAndServeTLS("", "") }()
+		log.Printf("authsvc internal mTLS listening on %s", cfg.Internal.Listen)
+	}
+	log.Printf("authsvc public listening on %s", addr)
+	if serveErr := <-errors; serveErr != nil && serveErr != http.ErrServerClosed {
+		log.Fatalf("authsvc: %v", serveErr)
 	}
 }
 
 // buildService loads the AS's material and returns a fully-wired Service.
 // AS_DEV=1 (cfg.Dev=true) bootstraps an ephemeral in-memory CA + fake GitHub (for `just dev`; NOT production).
-func buildService(cfg *AS) (*authsvc.Service, error) {
+func buildService(cfg *AS, certificateRevocations pki.CertificateRevocationChecker, cpHTTPClient *http.Client) (*authsvc.Service, error) {
 	var (
 		root  *pki.CA
 		inter *pki.CA
@@ -320,12 +361,16 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 
 	opts := []authsvc.Option{
 		authsvc.WithTrustDomain(cfg.CA.TrustDomain),
+		authsvc.WithCertificateRevocations(certificateRevocations),
 		authsvc.WithIdP(idp),
 		authsvc.WithNodeRevocations(idStore.NodeRevocations()),
 		authsvc.WithGitHubMinting(idStore, ghProvider),
 	}
 	if cpURL := strings.TrimSpace(cfg.CP.URL); cpURL != "" {
-		cpClient := cpv1connect.NewSpawnServiceClient(http.DefaultClient, cpURL)
+		if cpHTTPClient == nil {
+			return nil, errors.New("authsvc: CP URL requires internal mTLS client")
+		}
+		cpClient := cpv1connect.NewSpawnServiceClient(cpHTTPClient, cpURL)
 		opts = append(opts,
 			authsvc.WithGitHubMintAuthorizer(authsvc.NewCPGitHubMintAuthorizer(cpClient)),
 			authsvc.WithGitHubTokenRotatedNotifier(authsvc.NewCPGitHubTokenRotatedNotifier(cpClient)),
@@ -359,34 +404,6 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 		return nil, err
 	}
 	return service, nil
-}
-
-type staticHeaderInterceptor struct {
-	name  string
-	value string
-}
-
-func (i staticHeaderInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		if i.name != "" && i.value != "" {
-			req.Header().Set(i.name, i.value)
-		}
-		return next(ctx, req)
-	}
-}
-
-func (i staticHeaderInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
-		conn := next(ctx, spec)
-		if i.name != "" && i.value != "" {
-			conn.RequestHeader().Set(i.name, i.value)
-		}
-		return conn
-	}
-}
-
-func (i staticHeaderInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return next
 }
 
 type productionCA struct {
