@@ -15,6 +15,7 @@ import (
 	"net"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"spawnery/internal/manifest"
 	"spawnery/internal/runtime"
@@ -139,10 +140,15 @@ type AdoptSpec struct {
 // Any failure rolls back everything it did and returns an error, and the CALLER then capture-before-reaps
 // the pod (ReapPod). There is no half-adopted state: a spawn is fully rebuilt or it is gone.
 //
-// TODO(sp-2tx8.3.5): ControlToken is left EMPTY (it lives in the still-running sidecar's env and must be
-// read back from there) and the per-spawn GitHub control listener is NOT re-served (its MITM CA is
-// regenerated-on-miss today, so re-serving it would hand the agent a CA it does not trust). Until 3.5 lands,
-// an adopted spawn cannot SetModel and cannot mint GitHub tokens in-agent. Both are 3.5's scope.
+// The sidecar never stopped, so its per-pod secrets (SIDECAR_CONTROL_TOKEN, and — when a GitHub control
+// server is configured — the GetToken transport) are read back from ITS OWN env (m.pod.ContainerEnv),
+// never re-derived from the current node config: a node whose config changed across the restart must not
+// silently move a running pod onto a lane its sidecar was never told about (sp-2tx8.3.5 design D3). A
+// missing control token is fail-closed (no control plane recoverable at all); a missing GetToken transport
+// is not — a spawn created before the control server existed, or a TCP lane with no GETTOKEN_LISTEN_IP,
+// legitimately has no transport to re-serve, and Adopt still succeeds. The per-spawn MITM CA is persisted
+// on the node (internal/node's caStore) precisely so this re-Serve hands the agent's already-cached trust
+// bundle a CA it still recognizes, instead of the old regenerate-on-miss behaviour.
 func (m *Manager) Adopt(ctx context.Context, mp runtime.ManagedPod, spec AdoptSpec) (sp *Spawn, err error) {
 	id := mp.SpawnID
 	if spec.Generation != 0 && spec.Generation != mp.Generation {
@@ -198,6 +204,71 @@ func (m *Manager) Adopt(ctx context.Context, mp runtime.ManagedPod, spec AdoptSp
 		}
 	}()
 
+	// The sidecar never stopped: the per-pod secrets a previous node process minted are still in its
+	// env. Read it back (fail-closed: no env at all => no control plane, and the caller
+	// capture-before-reaps). This also carries the model API key; envMap/env are never logged.
+	sidecarEnv, err := m.pod.ContainerEnv(ctx, mp.SidecarID)
+	if err != nil {
+		return nil, fmt.Errorf("adopt %s: read sidecar env: %w", id, err)
+	}
+	em := envMap(sidecarEnv)
+
+	controlToken := em[SidecarControlTokenEnv]
+	if controlToken == "" {
+		return nil, fmt.Errorf("adopt %s: sidecar env has no %s (fail-closed: cannot recover the /control/model bearer)", id, SidecarControlTokenEnv)
+	}
+
+	if m.ghControl != nil {
+		// gitEnvDir survived the restart; Prepare is idempotent/non-destructive here — it just
+		// re-asserts ownership.
+		gitEnvDir, gerr := m.gitEnv.Prepare(id, m.agentRootUID())
+		if gerr != nil {
+			return nil, fmt.Errorf("adopt %s: prepare git-env: %w", id, gerr)
+		}
+		// A disk read for a pod this process did not create (sp-2tx8.3.5 §5): the CA the agent's
+		// cached trust bundle already trusts, not a fresh (untrusted) one.
+		caPEM, caErr := m.ghControl.SpawnCACert(id)
+		if caErr != nil {
+			return nil, fmt.Errorf("adopt %s: spawn CA cert: %w", id, caErr)
+		}
+		// Idempotent: rewrites spawn-ca.crt/ca-bundle.crt, leaves gitconfig alone if present. This is
+		// what heals a pod that predates CA persistence (D2): a fresh CA generated above is rendered
+		// into the trust bundle new agent processes will read.
+		if rerr := renderGitProxy(gitEnvDir, proxyAddr(m.cfg.SidecarPort), caPEM); rerr != nil {
+			return nil, fmt.Errorf("adopt %s: render git proxy: %w", id, rerr)
+		}
+
+		// The GetToken transport is reconstructed from the SIDECAR'S OWN ENV (D3), never re-derived
+		// from this node's current config — see the Adopt doc comment.
+		var transport ControlTransport
+		switch {
+		case em[SidecarGetTokenUDSEnv] != "":
+			transport = ControlTransport{
+				SpawnID: id, Network: "unix",
+				Address: filepath.Join(m.controlDirFor(id), SidecarControlSocketName),
+			}
+		case em[SidecarGetTokenAddrEnv] != "":
+			transport = ControlTransport{
+				SpawnID: id, Network: "tcp",
+				Address: em[SidecarGetTokenAddrEnv],
+				Bearer:  em[SidecarGetTokenBearerEnv],
+				PodIP:   mp.PodIP,
+			}
+		default:
+			// Not a failure: a spawn created before the control server existed, or a TCP lane with no
+			// GETTOKEN_LISTEN_IP configured at create time, legitimately has no transport to re-serve.
+			// Unlike CreateWithSelection (which falls back to a PodIP-derived address), Adopt does not
+			// invent one here: at adopt time, an address the sidecar was never told about is a
+			// listener nobody in the pod can dial.
+			log.Printf("adopt %s: sidecar env has no GetToken transport; skipping github control re-serve", id)
+		}
+		if transport.Network != "" {
+			if serveErr := m.ghControl.Serve(transport); serveErr != nil {
+				return nil, fmt.Errorf("adopt %s: github control server serve: %w", id, serveErr)
+			}
+		}
+	}
+
 	// Delta chain depth continues from the durable node-local record (it survived the restart).
 	var deltaDepth int
 	if m.cfg.DeltaCapture {
@@ -237,7 +308,7 @@ func (m *Manager) Adopt(ctx context.Context, mp runtime.ManagedPod, spec AdoptSp
 		Status:          "ready",
 		Mode:            spec.Mode,
 		ControlURL:      controlURL,
-		// ControlToken: TODO(sp-2tx8.3.5) — read back from the sidecar's env.
+		ControlToken:    controlToken,
 		BaseImageDigest: spec.BaseImageDigest,
 		LaunchImageRef:  baseRef,
 		DeltaDepth:      deltaDepth,
@@ -349,4 +420,21 @@ func (m *Manager) DetachSpawn(id string) []*journal.Watcher {
 		return nil
 	}
 	return m.takeWatchers(sp)
+}
+
+// envMap parses K=V container env entries into a map; a malformed entry (no "=") is skipped and the
+// FIRST occurrence of a duplicate key wins. Adopt uses this to read the per-pod secrets a previous
+// node process minted back out of the still-running sidecar's own env.
+func envMap(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, e := range env {
+		k, v, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		if _, exists := out[k]; !exists {
+			out[k] = v
+		}
+	}
+	return out
 }

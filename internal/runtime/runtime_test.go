@@ -22,6 +22,26 @@ func TestFakeRecordsStartAndStop(t *testing.T) {
 	}
 }
 
+func TestFakeContainerEnv(t *testing.T) {
+	f := NewFake()
+	id, err := f.StartContainer(context.Background(), ContainerSpec{Image: "img", Env: []string{"A=1", "B=2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env, err := f.ContainerEnv(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(env) != 2 || env[0] != "A=1" || env[1] != "B=2" {
+		t.Fatalf("env = %v, want [A=1 B=2]", env)
+	}
+
+	if _, err := f.ContainerEnv(context.Background(), "does-not-exist"); err == nil {
+		t.Fatal("want error for unknown container id")
+	}
+}
+
 func TestDockerDaemonBaseReferenceForBareImageID(t *testing.T) {
 	const id = "sha256:fd391429fd7f342759418f0f3e552e0107c4e81e4124658b7752f9492f517ecc"
 

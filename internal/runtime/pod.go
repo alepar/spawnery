@@ -125,6 +125,13 @@ type PodBackend interface {
 	// containers and re-scope the egress floor). Contract-pinned by podbackendtest on both lanes.
 	ListManaged(ctx context.Context) ([]ManagedPod, error)
 
+	// ContainerEnv returns the named container's environment as K=V strings, exactly as it was
+	// started with. Both lanes; contract-pinned by podbackendtest. Used by re-adoption to read the
+	// per-pod secrets (SIDECAR_CONTROL_TOKEN, SIDECAR_GETTOKEN_*) back from a sidecar the current
+	// process did not start. The slice may carry the model API key — callers must extract the keys
+	// they need and MUST NOT log or forward it.
+	ContainerEnv(ctx context.Context, id string) ([]string, error)
+
 	// ResolveImageDigest returns the content-addressable digest of ref (Docker: RepoDigests[0],
 	// fallback Id). Used by Manager.Create to pin the base image digest (spec §4).
 	ResolveImageDigest(ctx context.Context, ref string) (digest string, err error)

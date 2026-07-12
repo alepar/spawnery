@@ -164,6 +164,27 @@ func startPod(ctx context.Context, t *testing.T, e *Env, spawnID, imageRef strin
 	return h
 }
 
+// startPodWithEnv is startPod with extra K=V entries appended to the sidecar's env — so the contract
+// can prove ContainerEnv reads back what the pod was STARTED with (the whole point: a restarted node
+// recovers the per-pod secrets from the sidecar it did not start).
+func startPodWithEnv(ctx context.Context, t *testing.T, e *Env, spawnID, imageRef string, generation uint64, extraSidecarEnv []string) *runtime.PodHandle {
+	t.Helper()
+	labels := Labels(spawnID, e.NodeID, generation)
+	spec := e.PodSpec(spawnID, labels)
+	spec.SidecarEnv = append(append([]string(nil), spec.SidecarEnv...), extraSidecarEnv...)
+	h, err := e.Backend.StartPod(ctx, spec)
+	if err != nil {
+		t.Fatalf("StartPod(%s): %v", spawnID, err)
+	}
+	h.SpawnID = spawnID
+	h.BaseImageRef = e.BaseImage
+	t.Cleanup(func() { _ = e.Backend.Stop(context.WithoutCancel(ctx), h) })
+	if err := e.Backend.StartAgent(ctx, h, e.AgentSpec(spawnID, imageRef, labels)); err != nil {
+		t.Fatalf("StartAgent(%s, image=%s): %v", spawnID, imageRef, err)
+	}
+	return h
+}
+
 // closeStream closes an AttachedStream if it carries a Close func.
 func closeStream(s *runtime.AttachedStream) {
 	if s != nil && s.Close != nil {

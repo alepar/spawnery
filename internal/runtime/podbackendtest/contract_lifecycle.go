@@ -211,6 +211,46 @@ func caseListManagedRoundTripsLabels(t *testing.T, e *Env) {
 	}
 }
 
+// caseSidecarEnvReadable: re-adoption reads the per-pod secrets a previous node process minted
+// (SIDECAR_CONTROL_TOKEN et al.) back out of the still-running sidecar's own env — ContainerEnv is
+// the seam that makes that possible, and it must work on every lane, not just the fake (SE3 design
+// §4.4/§4.5).
+func caseSidecarEnvReadable(t *testing.T, e *Env) {
+	ctx := t.Context()
+	id := uniqueSpawnID(t)
+	token := "SPAWNERY_CONTRACT_TOKEN=" + id
+	startPodWithEnv(ctx, t, e, id, e.BaseImage, 1, []string{token})
+
+	pods, err := e.Backend.ListManaged(ctx)
+	if err != nil {
+		t.Fatalf("ListManaged: %v", err)
+	}
+	mp, ok := findManaged(pods, id)
+	if !ok {
+		t.Fatalf("ListManaged does not report pod %s", id)
+	}
+
+	env, err := e.Backend.ContainerEnv(ctx, mp.SidecarID)
+	if err != nil {
+		t.Fatalf("ContainerEnv(%s): %v", mp.SidecarID, err)
+	}
+	found := false
+	for _, kv := range env {
+		if kv == token {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("ContainerEnv(sidecar) = %v, want it to contain %q "+
+			"(re-adoption reads SIDECAR_CONTROL_TOKEN back exactly this way)", env, token)
+	}
+
+	if _, err := e.Backend.ContainerEnv(ctx, "does-not-exist-"+id); err == nil {
+		t.Fatal("ContainerEnv on an unknown container id: want error")
+	}
+}
+
 // caseStopIsIdempotent: Stop is the ONE method that must never error. It is called on every failure
 // path, twice, and on handles whose containers may already be gone.
 func caseStopIsIdempotent(t *testing.T, e *Env) {

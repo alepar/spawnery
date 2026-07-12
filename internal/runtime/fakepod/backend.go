@@ -244,6 +244,34 @@ func (b *Backend) ListManaged(_ context.Context) ([]runtime.ManagedPod, error) {
 	return out, nil
 }
 
+// ContainerEnv returns the environment the named container (sidecar or agent) was started with, read
+// back from the recorded spec — exactly what re-adoption needs to recover the per-pod secrets
+// (SIDECAR_CONTROL_TOKEN, SIDECAR_GETTOKEN_*) a previous process minted and that live only in the
+// still-running sidecar's env. A sandbox container has no env of its own; it returns an empty slice.
+func (b *Backend) ContainerEnv(_ context.Context, id string) ([]string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	p, ok := b.byContainer[id]
+	if !ok {
+		return nil, fmt.Errorf("fakepod: ContainerEnv: unknown container %q", id)
+	}
+	if ferr := b.fault(OpContainerEnv, p.spawnID); ferr != nil {
+		return nil, ferr
+	}
+	c := p.container(id)
+	if c == nil {
+		return nil, fmt.Errorf("fakepod: ContainerEnv: unknown container %q", id)
+	}
+	switch c.role {
+	case "sidecar":
+		return append([]string(nil), p.podSpec.SidecarEnv...), nil
+	case "agent":
+		return append([]string(nil), p.agentSpec.Env...), nil
+	default:
+		return []string{}, nil
+	}
+}
+
 // ErrNotPaused is returned by Unpause / RestoreForkedSource when the agent is not paused. Both real
 // backends return a tolerable "not paused" error there (see the PodBackend doc) and the suspend
 // teardown ignores it — so callers can errors.Is against it rather than string-matching.

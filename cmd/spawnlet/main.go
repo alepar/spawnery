@@ -137,6 +137,7 @@ func main() {
 		}
 		nodeCfg.Verifier = buildIntentVerifier(cfg, cfg.Node.ID, cfg.Node.Owner)
 		nodeCfg.GitHubMint = nodeGitHubMint(cfg)
+		nodeCfg.SpawnCARoot = filepath.Join(cfg.DataRoot, "spawn-ca")
 		log.Printf("spawnlet attaching to CP at %s as %s", nodeCfg.CPURL, cfg.Node.ID)
 		err = node.Run(ctx, mgr, httpc, nodeCfg) // returns when ctx is cancelled (signal) or on fatal error
 		gracefulDetachAll(mgr)

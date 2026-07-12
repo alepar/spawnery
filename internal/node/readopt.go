@@ -223,6 +223,9 @@ func (a *attacher) adoptPod(ctx context.Context, mp runtime.ManagedPod, ad *node
 	if err != nil {
 		return err
 	}
+	// Re-register the spawn's GitHub link(s) with the proactive refresher (sp-2tx8.3.5 D5): the
+	// refresher's state is in-memory and died with the previous process. Best-effort by construction.
+	a.noteGitHubLinksFromMounts(sp.ID, mp.Generation, st.GetMounts())
 	// From here on, a failure must remove the spawn from the store again (mgr.Stop would TEAR THE POD DOWN
 	// through teardown — running the mount finalizers — which is not what a rebuild failure means: the
 	// caller's ReapPod captures first and does not finalize, and also removes the egress floor Adopt

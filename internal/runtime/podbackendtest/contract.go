@@ -32,6 +32,7 @@ func contractCases() []contractCase {
 		{name: "exec_on_paused_fails", missingHook: needExec, run: caseExecOnPausedFails},
 		{name: "list_managed_round_trips_labels", missingHook: noHooks, run: caseListManagedRoundTripsLabels},
 		{name: "stop_is_idempotent", missingHook: noHooks, run: caseStopIsIdempotent},
+		{name: "sidecar_env_readable_after_start", missingHook: noHooks, run: caseSidecarEnvReadable},
 
 		// --- image / capture (contract_image.go) ---
 		{name: "capture_as_preserves_source", missingHook: needWrite, run: caseCaptureAsPreservesSource},

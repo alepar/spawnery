@@ -12,6 +12,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -213,6 +214,83 @@ func TestReconcileRebuildFailureFallsBackToReap(t *testing.T) {
 	a.mu.Unlock()
 	if pumps != 0 {
 		t.Fatalf("a failed rebuild left %d pump(s) registered", pumps)
+	}
+}
+
+// adoptPod re-registers the spawn's GitHub link(s) with the proactive refresher from the CP's
+// re-delivered mount table (sp-2tx8.3.5 D5) — the refresher's state is in-memory and died with the
+// previous process, so without this an adopted spawn's GetToken returns ErrGitHubNotLinked.
+func TestAdoptPodReRegistersGitHubLink(t *testing.T) {
+	ctx := context.Background()
+	be := fakepod.New(fakepod.WithAttachScript(scriptGoose))
+	t.Cleanup(be.Close)
+	dataRoot := t.TempDir()
+	app := writeNodeApp(t)
+
+	first := restartedNode(t, be, dataRoot, &fakeCPStream{})
+	if _, err := first.mgr.Create(ctx, "sp1", app, "model", "", "", 1); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	fs := &fakeCPStream{}
+	a := restartedNode(t, be, dataRoot, fs)
+	a.githubRefresh = newGitHubRefresher(freshFakeMintClient("tok", time.Now().Add(2*time.Hour).Unix()))
+
+	pods, err := a.mgr.UntrackedPods(ctx)
+	if err != nil || len(pods) != 1 {
+		t.Fatalf("UntrackedPods = %+v, %v", pods, err)
+	}
+
+	// Before adopt: no link registered (as if the process just started).
+	if _, _, err := a.githubRefresh.GetToken(ctx, "sp1", 300, false); err == nil {
+		t.Fatal("setup: expected ErrGitHubNotLinked before adopt")
+	}
+
+	if err := a.adoptPod(ctx, pods[0], &nodev1.AdoptSpawn{Spec: &nodev1.StartSpawn{
+		SpawnId: "sp1", AppRef: app, Model: "model", Generation: 1,
+		Mounts: []*nodev1.MountBinding{
+			{Name: "main", RepositoryId: "owner/repo", GithubMintRef: &nodev1.GitHubMintRef{SecretId: "gh:owner"}},
+		},
+	}}); err != nil {
+		t.Fatalf("adoptPod: %v", err)
+	}
+
+	if _, _, err := a.githubRefresh.GetToken(ctx, "sp1", 300, false); err != nil {
+		t.Fatalf("GetToken after adopt: %v (the link was not re-registered)", err)
+	}
+}
+
+// A mount with no mint ref has nothing to re-register; adoptPod must not fail or fabricate a link.
+func TestAdoptPodNoMintRefNotesNothing(t *testing.T) {
+	ctx := context.Background()
+	be := fakepod.New(fakepod.WithAttachScript(scriptGoose))
+	t.Cleanup(be.Close)
+	dataRoot := t.TempDir()
+	app := writeNodeApp(t)
+
+	first := restartedNode(t, be, dataRoot, &fakeCPStream{})
+	if _, err := first.mgr.Create(ctx, "sp1", app, "model", "", "", 1); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	fs := &fakeCPStream{}
+	a := restartedNode(t, be, dataRoot, fs)
+	a.githubRefresh = newGitHubRefresher(freshFakeMintClient("tok", time.Now().Add(2*time.Hour).Unix()))
+
+	pods, err := a.mgr.UntrackedPods(ctx)
+	if err != nil || len(pods) != 1 {
+		t.Fatalf("UntrackedPods = %+v, %v", pods, err)
+	}
+
+	if err := a.adoptPod(ctx, pods[0], &nodev1.AdoptSpawn{Spec: &nodev1.StartSpawn{
+		SpawnId: "sp1", AppRef: app, Model: "model", Generation: 1,
+		Mounts: []*nodev1.MountBinding{{Name: "main"}}, // no GithubMintRef
+	}}); err != nil {
+		t.Fatalf("adoptPod: %v", err)
+	}
+
+	if _, _, err := a.githubRefresh.GetToken(ctx, "sp1", 300, false); !errors.Is(err, ErrGitHubNotLinked) {
+		t.Fatalf("GetToken after adopt with no mint ref: err = %v, want ErrGitHubNotLinked", err)
 	}
 }
 

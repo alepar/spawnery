@@ -489,3 +489,82 @@ func TestCRIListManagedFailsOnListContainersError(t *testing.T) {
 		t.Fatal("ListManaged must fail when ListContainers errors, not report a partially-known pod")
 	}
 }
+
+func TestEnvFromContainerInfoConfigEnvs(t *testing.T) {
+	info := map[string]string{"info": `{"config":{"envs":[{"key":"A","value":"1"},{"key":"B","value":"2"}]}}`}
+	env, err := envFromContainerInfo(info)
+	if err != nil {
+		t.Fatalf("envFromContainerInfo: %v", err)
+	}
+	if len(env) != 2 || env[0] != "A=1" || env[1] != "B=2" {
+		t.Fatalf("env = %v, want [A=1 B=2]", env)
+	}
+}
+
+func TestEnvFromContainerInfoRuntimeSpecFallback(t *testing.T) {
+	info := map[string]string{"info": `{"config":{},"runtimeSpec":{"process":{"env":["A=1","B=2"]}}}`}
+	env, err := envFromContainerInfo(info)
+	if err != nil {
+		t.Fatalf("envFromContainerInfo: %v", err)
+	}
+	if len(env) != 2 || env[0] != "A=1" || env[1] != "B=2" {
+		t.Fatalf("env = %v, want [A=1 B=2]", env)
+	}
+}
+
+func TestEnvFromContainerInfoMissingInfo(t *testing.T) {
+	if _, err := envFromContainerInfo(map[string]string{}); err == nil {
+		t.Fatal("envFromContainerInfo: want error for missing info key")
+	}
+}
+
+func TestEnvFromContainerInfoUnparseableJSON(t *testing.T) {
+	if _, err := envFromContainerInfo(map[string]string{"info": "not json"}); err == nil {
+		t.Fatal("envFromContainerInfo: want error for unparseable info")
+	}
+}
+
+func TestCRIContainerEnvRoundTrips(t *testing.T) {
+	c, _ := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+
+	h, err := b.StartPod(ctx, runtime.PodSpec{
+		ID:           "spawn-7",
+		SidecarImage: "s",
+		SidecarEnv:   []string{"SIDECAR_CONTROL_TOKEN=tok", "OPENROUTER_API_KEY=k"},
+	})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+
+	env, err := b.ContainerEnv(ctx, h.SidecarID)
+	if err != nil {
+		t.Fatalf("ContainerEnv: %v", err)
+	}
+	want := map[string]bool{"SIDECAR_CONTROL_TOKEN=tok": true, "OPENROUTER_API_KEY=k": true}
+	if len(env) != len(want) {
+		t.Fatalf("env = %v, want %v", env, want)
+	}
+	for _, e := range env {
+		if !want[e] {
+			t.Fatalf("unexpected env entry %q (got %v)", e, env)
+		}
+	}
+}
+
+func TestCRIContainerEnvFailsOnContainerStatusError(t *testing.T) {
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+
+	h, err := b.StartPod(ctx, runtime.PodSpec{ID: "spawn-7", SidecarImage: "s"})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	f.failContainerStatus = true
+
+	if _, err := b.ContainerEnv(ctx, h.SidecarID); err == nil {
+		t.Fatal("ContainerEnv must fail (not return an empty env) when ContainerStatus errors")
+	}
+}
