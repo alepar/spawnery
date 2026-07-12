@@ -15,7 +15,7 @@ func TestManagerSuspendReturnsMarkers(t *testing.T) {
 	stateDir := t.TempDir()
 	app := writeJournalApp(t)
 	fj := newFakeJournal("manifest-abc")
-	m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
+	m := NewManagerWithBackend(fakeBackend(t), &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
 	m.SetJournal(fj, stateDir)
@@ -51,7 +51,7 @@ func TestManagerSuspendReturnsMarkers(t *testing.T) {
 // nothing to persist — but still tears down cleanly.
 func TestManagerSuspendScratchOnlyNoMarkers(t *testing.T) {
 	ctx := context.Background()
-	m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
+	m := NewManagerWithBackend(fakeBackend(t), &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
 	sp, err := m.Create(ctx, "sps", writeApp(t), "model", "", "", 1)

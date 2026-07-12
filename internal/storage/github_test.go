@@ -9,6 +9,16 @@ import (
 	"testing"
 )
 
+// The github backend's HostDir must agree with the dir Prepare returns (SE3 re-adoption locates the
+// live clone without re-cloning it).
+func TestGitHubHostDirMatchesPrepareLayout(t *testing.T) {
+	root := t.TempDir()
+	gh := NewGitHub(root, GitHubConfig{})
+	if got, want := gh.HostDir("sp1", "repo"), filepath.Join(root, "github", "sp1", "repo"); got != want {
+		t.Fatalf("HostDir = %q, want %q (must match Prepare's layout)", got, want)
+	}
+}
+
 type testGitHubCreds struct{}
 
 func (testGitHubCreds) TokenForGitHubMount(context.Context, string, string, GitHubConfig) (GitHubCredential, error) {

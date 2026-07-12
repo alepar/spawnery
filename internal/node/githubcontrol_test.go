@@ -22,10 +22,16 @@ import (
 	"spawnery/internal/spawnlet"
 )
 
-// newTestControlServer creates a githubControlServer with a fake refresher.
+// newTestControlServer creates a githubControlServer with a fake refresher and a memory-only CA
+// store (dir == ""). Use newTestControlServerWithCADir for tests that need the CA to persist.
 func newTestControlServer(fake *fakeMintClient) (*githubControlServer, *githubRefresher) {
+	return newTestControlServerWithCADir(fake, "")
+}
+
+// newTestControlServerWithCADir is newTestControlServer with an explicit on-disk CA store dir.
+func newTestControlServerWithCADir(fake *fakeMintClient, caDir string) (*githubControlServer, *githubRefresher) {
 	r := newGitHubRefresher(fake)
-	return newGitHubControlServer(r), r
+	return newGitHubControlServer(r, caStore{dir: caDir}), r
 }
 
 // udsClient builds an http.Client that dials the given Unix socket.
@@ -346,4 +352,89 @@ func TestGitHubControlServerTCPWrongIPRejected(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 for unexpected source IP", resp.StatusCode)
 	}
+}
+
+// TestGitHubControlServerCAPersistsAcrossRestart is the bug this bead exists to fix: two
+// githubControlServers over the SAME caStore dir (simulating a spawnlet restart — the process
+// died, a new one starts, the spawn's agent is still running and still trusts the old cert) must
+// return byte-identical CAs for the same spawn.
+func TestGitHubControlServerCAPersistsAcrossRestart(t *testing.T) {
+	caDir := t.TempDir()
+
+	s1, _ := newTestControlServerWithCADir(&fakeMintClient{}, caDir)
+	cert1, err := s1.SpawnCACert("sp-1")
+	if err != nil {
+		t.Fatalf("server 1 SpawnCACert: %v", err)
+	}
+
+	// A fresh server, as if the node process restarted, over the SAME on-disk store.
+	s2, _ := newTestControlServerWithCADir(&fakeMintClient{}, caDir)
+	cert2, err := s2.SpawnCACert("sp-1")
+	if err != nil {
+		t.Fatalf("server 2 SpawnCACert: %v", err)
+	}
+
+	if !bytes.Equal(cert1, cert2) {
+		t.Fatal("SpawnCACert across a restart (same caStore dir) returned different certs — " +
+			"the agent's cached trust bundle would now fail to verify the MITM proxy")
+	}
+}
+
+// TestGitHubControlServerStopRemovesPersistedCA verifies Stop purges the on-disk keypair too, not
+// just the memory cache: a subsequent SpawnCACert (even via a later "restart") must mint fresh.
+func TestGitHubControlServerStopRemovesPersistedCA(t *testing.T) {
+	caDir := t.TempDir()
+	s, _ := newTestControlServerWithCADir(&fakeMintClient{}, caDir)
+
+	cert1, err := s.SpawnCACert("sp-1")
+	if err != nil {
+		t.Fatalf("SpawnCACert: %v", err)
+	}
+	s.Stop("sp-1")
+
+	spawnDir := filepath.Join(caDir, "sp-1")
+	if _, err := os.Stat(spawnDir); !os.IsNotExist(err) {
+		t.Fatalf("Stop must remove the on-disk CA dir %s, stat err = %v", spawnDir, err)
+	}
+
+	// A "restart" (fresh server, same dir) now mints a DIFFERENT CA, because Stop removed the old one.
+	s2, _ := newTestControlServerWithCADir(&fakeMintClient{}, caDir)
+	cert2, err := s2.SpawnCACert("sp-1")
+	if err != nil {
+		t.Fatalf("post-stop SpawnCACert: %v", err)
+	}
+	if bytes.Equal(cert1, cert2) {
+		t.Fatal("after Stop removed the persisted CA, a fresh server must mint a new one")
+	}
+}
+
+// TestGitHubControlServerServeOverStaleUDSSocket verifies Serve succeeds when a UDS path already
+// holds a stale socket file — the file a previous process's listener left behind on disk (its
+// deferred Close/removal never ran) after gracefulDetachAll left the pod running. Without the
+// unlink-before-Listen fix this fails EADDRINUSE, and every re-adopt on the UDS lane would fail to
+// bind its control server.
+func TestGitHubControlServerServeOverStaleUDSSocket(t *testing.T) {
+	s, _ := newTestControlServer(&fakeMintClient{})
+
+	sockDir := t.TempDir()
+	sockPath := filepath.Join(sockDir, "gettoken.sock")
+
+	// Simulate the stale socket file a prior process's net.Listen("unix", ...) created and never
+	// cleaned up (a plain regular file suffices to trigger Listen's EADDRINUSE — the fix must not
+	// rely on it being a real socket).
+	if err := os.WriteFile(sockPath, []byte{}, 0o666); err != nil {
+		t.Fatalf("seed stale socket file: %v", err)
+	}
+
+	if err := s.Serve(spawnlet.ControlTransport{SpawnID: "sp-1", Network: "unix", Address: sockPath}); err != nil {
+		t.Fatalf("Serve over a stale socket file: %v", err)
+	}
+	defer s.Stop("sp-1")
+
+	// Confirm the listener actually works: dial it.
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial the re-served socket: %v", err)
+	}
+	_ = conn.Close()
 }

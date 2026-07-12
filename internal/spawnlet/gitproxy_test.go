@@ -261,7 +261,7 @@ func overrideSidecarReadyProbe(t *testing.T, retErr error) (*string, *int) {
 }
 
 func TestManagerSidecarProxyEnv(t *testing.T) {
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	mock := &mockGitHubControlServer{}
 	overrideSidecarReadyProbe(t, nil)
 
@@ -279,14 +279,14 @@ func TestManagerSidecarProxyEnv(t *testing.T) {
 	}
 
 	wantProxyAddr := proxyAddr(8080) // "127.0.0.1:8083"
-	got := sidecarEnvVal(fb.podSpec.SidecarEnv, SidecarProxyAddrEnv)
+	got := sidecarEnvVal(fb.PodSpec("sp-proxy-env").SidecarEnv, SidecarProxyAddrEnv)
 	if got != wantProxyAddr {
 		t.Errorf("SIDECAR_PROXY_ADDR in sidecar env = %q, want %q", got, wantProxyAddr)
 	}
 }
 
 func TestManagerAgentProxyEnv(t *testing.T) {
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	mock := &mockGitHubControlServer{}
 	overrideSidecarReadyProbe(t, nil)
 
@@ -304,7 +304,7 @@ func TestManagerAgentProxyEnv(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	agentEnv := gitProxyEnvMap(fb.agentSpec.Env)
+	agentEnv := gitProxyEnvMap(fb.AgentSpec("sp-agent-env").Env)
 
 	wantProxyURL := "http://" + proxyAddr(8080)
 	for _, key := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
@@ -338,7 +338,7 @@ func TestManagerAgentProxyEnv(t *testing.T) {
 }
 
 func TestManagerReadinessCalled(t *testing.T) {
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	mock := &mockGitHubControlServer{}
 
 	var probePodIP string
@@ -349,7 +349,7 @@ func TestManagerReadinessCalled(t *testing.T) {
 	sidecarReadyProbe = func(_ context.Context, ip string, p int) error {
 		probePodIP, probePort = ip, p
 		// At probe time, agentSpec.Image is still "" (StartAgent not yet called).
-		probeCalledBeforeAgent = fb.agentSpec.Image == ""
+		probeCalledBeforeAgent = fb.AgentSpec("sp-probe").Image == ""
 		return nil
 	}
 	t.Cleanup(func() { sidecarReadyProbe = orig })
@@ -367,7 +367,7 @@ func TestManagerReadinessCalled(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// fakePodBackend.StartPod returns PodIP="10.0.0.5"; control port = SidecarPort+1 = 8081.
+	// fakepod.StartPod returns PodIP="10.0.0.5"; control port = SidecarPort+1 = 8081.
 	if probePodIP != "10.0.0.5" {
 		t.Errorf("probe podIP = %q, want 10.0.0.5", probePodIP)
 	}
@@ -380,7 +380,7 @@ func TestManagerReadinessCalled(t *testing.T) {
 }
 
 func TestManagerNoGHControlNoop(t *testing.T) {
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 
 	orig := sidecarReadyProbe
 	sidecarReadyProbe = func(_ context.Context, _ string, _ int) error {
@@ -402,11 +402,11 @@ func TestManagerNoGHControlNoop(t *testing.T) {
 	}
 
 	// No SIDECAR_PROXY_ADDR in sidecar env.
-	if got := sidecarEnvVal(fb.podSpec.SidecarEnv, SidecarProxyAddrEnv); got != "" {
+	if got := sidecarEnvVal(fb.PodSpec("sp-noop").SidecarEnv, SidecarProxyAddrEnv); got != "" {
 		t.Errorf("SIDECAR_PROXY_ADDR must be absent without ghControl; got %q", got)
 	}
 	// No proxy/CA vars in agent env.
-	agentEnv := gitProxyEnvMap(fb.agentSpec.Env)
+	agentEnv := gitProxyEnvMap(fb.AgentSpec("sp-noop").Env)
 	for _, key := range []string{"HTTPS_PROXY", "GH_TOKEN", "GIT_SSL_CAINFO"} {
 		if val, ok := agentEnv[key]; ok {
 			t.Errorf("agent env %s must be absent without ghControl; got %q", key, val)
@@ -415,7 +415,7 @@ func TestManagerNoGHControlNoop(t *testing.T) {
 }
 
 func TestManagerReadinessFailureFailClosed(t *testing.T) {
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	mock := &mockGitHubControlServer{}
 
 	orig := sidecarReadyProbe
@@ -440,11 +440,11 @@ func TestManagerReadinessFailureFailClosed(t *testing.T) {
 		t.Errorf("error should mention sidecar readiness gate; got: %v", err)
 	}
 	// StartAgent must NOT have been called (agentSpec remains zero).
-	if fb.agentSpec.Image != "" {
+	if fb.AgentSpec("sp-fail").Image != "" {
 		t.Error("StartAgent must not be called when readiness probe fails")
 	}
 	// Pod must have been stopped (fail-closed).
-	if fb.stopped == nil {
+	if fb.LastStopHandle() == nil {
 		t.Error("pod.Stop must be called when readiness probe fails")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/spawnlet"
 )
 
@@ -41,7 +42,7 @@ func TestMountBindingsFromProtoMapsAllFiveFieldsAndSkipsNil(t *testing.T) {
 
 func TestStartSpawnThreadsMountBindingsIntoCreate(t *testing.T) {
 	fs := &fakeCPStream{}
-	mgr := newGooseManager(t, &scriptedPodBackend{script: scriptGooseDieOnPrompt})
+	mgr := newGooseManager(t, fakeBackend(t, fakepod.WithAttachScript(scriptGooseDieOnPrompt)))
 	a := newAttacher(mgr, fs)
 
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{

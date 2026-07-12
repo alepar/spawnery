@@ -8,8 +8,9 @@ import (
 )
 
 // TestCreateLabelsInventoryAndReap covers sp-8hf: Create stamps managed/spawn-id/generation/node-id
-// labels on both pod containers; RunningInventory reflects the live spawn; ReapOrphans keeps a
-// spawn that's still in the store and reaps one that isn't (a leftover from a previous node process).
+// labels on both pod containers; RunningInventory reflects the live spawn; UntrackedPods reports a
+// spawn that's still in the store as untracked-nothing, and reports one that isn't (a leftover from a
+// previous node process) so ReapPod can destroy it.
 func TestCreateLabelsInventoryAndReap(t *testing.T) {
 	rt := runtime.NewFake()
 	m := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), NodeID: "node-9"})
@@ -45,20 +46,31 @@ func TestCreateLabelsInventoryAndReap(t *testing.T) {
 		t.Fatalf("RunningInventory = %+v", inv)
 	}
 
-	// ReapOrphans with the spawn still tracked stops nothing.
+	// A pod this Manager still tracks is NOT untracked, and nothing is destroyed on its own authority.
 	stoppedBefore := len(rt.Stopped)
-	if err := m.ReapOrphans(ctx); err != nil {
-		t.Fatalf("ReapOrphans: %v", err)
+	pods, err := m.UntrackedPods(ctx)
+	if err != nil {
+		t.Fatalf("UntrackedPods: %v", err)
+	}
+	if len(pods) != 0 {
+		t.Fatalf("UntrackedPods = %+v, want none (the spawn is still tracked)", pods)
 	}
 	if len(rt.Stopped) != stoppedBefore {
-		t.Fatalf("ReapOrphans stopped a still-managed spawn (stopped=%v)", rt.Stopped)
+		t.Fatalf("UntrackedPods must not stop anything (stopped=%v)", rt.Stopped)
 	}
 
 	// Simulate a node restart: the in-mem store forgets the spawn, but the runtime still has the
-	// containers -> ReapOrphans must reap both.
+	// containers -> the pod is untracked, and ReapPod destroys BOTH containers.
 	m.store.Delete("spawn-A")
-	if err := m.ReapOrphans(ctx); err != nil {
-		t.Fatalf("ReapOrphans (orphan): %v", err)
+	pods, err = m.UntrackedPods(ctx)
+	if err != nil {
+		t.Fatalf("UntrackedPods (after restart): %v", err)
+	}
+	if len(pods) != 1 || pods[0].SpawnID != "spawn-A" || pods[0].Generation != 7 {
+		t.Fatalf("UntrackedPods = %+v, want spawn-A gen 7", pods)
+	}
+	if err := m.ReapPod(ctx, pods[0]); err != nil {
+		t.Fatalf("ReapPod: %v", err)
 	}
 	stopped := 0
 	for id := range rt.Stopped {
@@ -67,18 +79,15 @@ func TestCreateLabelsInventoryAndReap(t *testing.T) {
 		}
 	}
 	if stopped != 2 {
-		t.Fatalf("ReapOrphans should have reaped both containers; stopped=%v", rt.Stopped)
-	}
-	// A second pass is a no-op (they're gone from the inventory now).
-	if err := m.ReapOrphans(ctx); err != nil {
-		t.Fatalf("ReapOrphans (second pass): %v", err)
+		t.Fatalf("ReapPod should have reaped both containers; stopped=%v", rt.Stopped)
 	}
 }
 
-// TestReapOrphansScopedToNodeID covers the shared-daemon hazard (sp-5v03 fallout): a second
-// spawnlet on the same Docker daemon (dev stack + e2e run, multi-node host) must NOT reap
-// another node's live pods — only pods carrying its own node-id label (or none, pre-label).
-func TestReapOrphansScopedToNodeID(t *testing.T) {
+// TestUntrackedPodsScopedToNodeID covers the shared-daemon hazard (sp-5v03 fallout): a second spawnlet
+// on the same Docker daemon (dev stack + e2e run, multi-node host) must not even SEE another node's
+// pods as reconcilable — they are not its business to adopt OR reap (SE3 §4.3). Only pods carrying its
+// own node-id label (or none, pre-label) are reported.
+func TestUntrackedPodsScopedToNodeID(t *testing.T) {
 	rt := runtime.NewFake()
 	ctx := context.Background()
 
@@ -87,30 +96,28 @@ func TestReapOrphansScopedToNodeID(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// A different node's manager (empty store) sharing the same runtime: spawn-A is not in ITS
-	// store, but it is node-9's pod — reap must skip it.
+	// A different node's manager (empty store) sharing the same runtime: spawn-A is node-9's pod.
 	m2 := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), NodeID: "node-other"})
-	if err := m2.ReapOrphans(ctx); err != nil {
-		t.Fatalf("ReapOrphans: %v", err)
+	pods, err := m2.UntrackedPods(ctx)
+	if err != nil {
+		t.Fatalf("UntrackedPods: %v", err)
+	}
+	if len(pods) != 0 {
+		t.Fatalf("a foreign node reported node-9's pod as its own: %+v", pods)
 	}
 	for id, stopped := range rt.Stopped {
 		if stopped {
-			t.Fatalf("a foreign node reaped node-9's container %s", id)
+			t.Fatalf("a foreign node stopped node-9's container %s", id)
 		}
 	}
 
-	// node-9's own restarted manager (empty store, same node id) DOES reap it.
+	// node-9's own restarted manager (empty store, same node id) DOES see it.
 	m3 := NewManager(rt, ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), NodeID: "node-9"})
-	if err := m3.ReapOrphans(ctx); err != nil {
-		t.Fatalf("ReapOrphans (own restart): %v", err)
+	pods, err = m3.UntrackedPods(ctx)
+	if err != nil {
+		t.Fatalf("UntrackedPods (own restart): %v", err)
 	}
-	stopped := 0
-	for _, s := range rt.Stopped {
-		if s {
-			stopped++
-		}
-	}
-	if stopped != 2 {
-		t.Fatalf("restarted node-9 should reap its own 2 containers; stopped=%v", rt.Stopped)
+	if len(pods) != 1 || pods[0].SpawnID != "spawn-A" {
+		t.Fatalf("restarted node-9 should see its own pod; got %+v", pods)
 	}
 }

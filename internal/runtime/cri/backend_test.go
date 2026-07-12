@@ -330,3 +330,241 @@ func TestStartPodLabelsAndListManaged(t *testing.T) {
 		t.Fatalf("ListManaged after Stop = %+v", mps)
 	}
 }
+
+// TestCRIListManagedReportsIDsAndPodIP pins what re-adoption reads: the sidecar id, the agent id, the
+// sandbox id and the pod IP (SE3 §4.5).
+func TestCRIListManagedReportsIDsAndPodIP(t *testing.T) {
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+	labels := map[string]string{
+		runtime.LabelManaged: "true", runtime.LabelSpawnID: "spawn-7",
+		runtime.LabelGeneration: "3", runtime.LabelNodeID: "node-2",
+	}
+	h, err := b.StartPod(ctx, runtime.PodSpec{ID: "spawn-7", SidecarImage: "s", Labels: labels})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	if err := b.StartAgent(ctx, h, runtime.AgentSpec{Image: "a", Labels: labels}); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	mps, err := b.ListManaged(ctx)
+	if err != nil {
+		t.Fatalf("ListManaged: %v", err)
+	}
+	if len(mps) != 1 {
+		t.Fatalf("ListManaged = %d pods, want 1", len(mps))
+	}
+	mp := mps[0]
+	if mp.SandboxID != f.sandboxID {
+		t.Errorf("SandboxID = %q, want %q", mp.SandboxID, f.sandboxID)
+	}
+	if mp.SidecarID != h.SidecarID {
+		t.Errorf("SidecarID = %q, want %q", mp.SidecarID, h.SidecarID)
+	}
+	if mp.AgentID != h.AgentID {
+		t.Errorf("AgentID = %q, want %q", mp.AgentID, h.AgentID)
+	}
+	if mp.PodIP != f.podIP {
+		t.Errorf("PodIP = %q, want %q", mp.PodIP, f.podIP)
+	}
+	if mp.Generation != 3 || mp.NodeID != "node-2" {
+		t.Errorf("Generation/NodeID = %d/%q, want 3/node-2", mp.Generation, mp.NodeID)
+	}
+}
+
+// TestCRIListManagedResolvesLegacyPodWithoutRoleLabels: a pod created by an OLDER node binary has
+// containers with NO spawnery.role label — exactly the pods re-adoption exists to save after a node
+// UPGRADE. Role must still resolve via the CRI container Metadata.Name.
+func TestCRIListManagedResolvesLegacyPodWithoutRoleLabels(t *testing.T) {
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+	labels := map[string]string{
+		runtime.LabelManaged: "true", runtime.LabelSpawnID: "spawn-legacy",
+		runtime.LabelGeneration: "1", runtime.LabelNodeID: "node-2",
+	}
+	// RunPodSandbox to register the sandbox's labels, but discard the sidecar StartPod created (it
+	// stamps the role label — Task 5's own change) and inject containers directly with NO role label,
+	// to model the pre-sp-2tx8.3.1 binary that never stamped spawnery.role.
+	if _, err := b.StartPod(ctx, runtime.PodSpec{ID: "spawn-legacy", SidecarImage: "s", Labels: labels}); err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	f.mu.Lock()
+	f.containers = nil
+	f.mu.Unlock()
+	sidecarID := f.addContainer(f.sandboxID, "sidecar", map[string]string{runtime.LabelSpawnID: "spawn-legacy"}, runtimeapi.ContainerState_CONTAINER_RUNNING)
+	agentID := f.addContainer(f.sandboxID, "agent", map[string]string{runtime.LabelSpawnID: "spawn-legacy"}, runtimeapi.ContainerState_CONTAINER_RUNNING)
+
+	mps, err := b.ListManaged(ctx)
+	if err != nil {
+		t.Fatalf("ListManaged: %v", err)
+	}
+	if len(mps) != 1 {
+		t.Fatalf("ListManaged = %d pods, want 1", len(mps))
+	}
+	mp := mps[0]
+	if mp.SidecarID != sidecarID {
+		t.Errorf("SidecarID = %q, want %q (resolved via Metadata.Name fallback)", mp.SidecarID, sidecarID)
+	}
+	if mp.AgentID != agentID {
+		t.Errorf("AgentID = %q, want %q (resolved via Metadata.Name fallback)", mp.AgentID, agentID)
+	}
+}
+
+// TestCRIListManagedPrefersRunningAgent: a sandbox can legitimately hold a crashed predecessor
+// containerd has not GC'd, alongside its running replacement. ListManaged must report the RUNNING
+// container's id — addressing the dead predecessor would tear down the wrong container.
+func TestCRIListManagedPrefersRunningAgent(t *testing.T) {
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+	labels := map[string]string{
+		runtime.LabelManaged: "true", runtime.LabelSpawnID: "spawn-crash",
+		runtime.LabelGeneration: "1", runtime.LabelNodeID: "node-2",
+	}
+	h, err := b.StartPod(ctx, runtime.PodSpec{ID: "spawn-crash", SidecarImage: "s", Labels: labels})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	// An EXITED predecessor agent, created before the running one.
+	deadAgentID := f.addContainer(f.sandboxID, "agent", runtime.WithRole(labels, runtime.RoleAgent), runtimeapi.ContainerState_CONTAINER_EXITED)
+	if err := b.StartAgent(ctx, h, runtime.AgentSpec{Image: "a", Labels: labels}); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	mps, err := b.ListManaged(ctx)
+	if err != nil {
+		t.Fatalf("ListManaged: %v", err)
+	}
+	if len(mps) != 1 {
+		t.Fatalf("ListManaged = %d pods, want 1", len(mps))
+	}
+	if mps[0].AgentID != h.AgentID {
+		t.Errorf("AgentID = %q, want %q (the RUNNING agent, not the exited predecessor %q)",
+			mps[0].AgentID, h.AgentID, deadAgentID)
+	}
+	if mps[0].AgentID == deadAgentID {
+		t.Fatal("AgentID resolved to the exited predecessor")
+	}
+}
+
+// TestCRIListManagedFailsOnSandboxStatusError: a swallowed PodSandboxStatus error here becomes "no pod
+// IP" and then a destroyed spawn at reconcile time (spec §4.3) — it must fail the whole call instead.
+func TestCRIListManagedFailsOnSandboxStatusError(t *testing.T) {
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+	labels := map[string]string{
+		runtime.LabelManaged: "true", runtime.LabelSpawnID: "spawn-7",
+		runtime.LabelGeneration: "1", runtime.LabelNodeID: "node-2",
+	}
+	if _, err := b.StartPod(ctx, runtime.PodSpec{ID: "spawn-7", SidecarImage: "s", Labels: labels}); err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	f.failSandboxStatus = true
+
+	if _, err := b.ListManaged(ctx); err == nil {
+		t.Fatal("ListManaged must fail when PodSandboxStatus errors, not report a partially-known pod")
+	}
+}
+
+// TestCRIListManagedFailsOnListContainersError: same rationale as the sandbox-status case — a
+// transient CRI blip must never be laundered into "this pod has no containers".
+func TestCRIListManagedFailsOnListContainersError(t *testing.T) {
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+	labels := map[string]string{
+		runtime.LabelManaged: "true", runtime.LabelSpawnID: "spawn-7",
+		runtime.LabelGeneration: "1", runtime.LabelNodeID: "node-2",
+	}
+	if _, err := b.StartPod(ctx, runtime.PodSpec{ID: "spawn-7", SidecarImage: "s", Labels: labels}); err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	f.failListCtrs = true
+
+	if _, err := b.ListManaged(ctx); err == nil {
+		t.Fatal("ListManaged must fail when ListContainers errors, not report a partially-known pod")
+	}
+}
+
+func TestEnvFromContainerInfoConfigEnvs(t *testing.T) {
+	info := map[string]string{"info": `{"config":{"envs":[{"key":"A","value":"1"},{"key":"B","value":"2"}]}}`}
+	env, err := envFromContainerInfo(info)
+	if err != nil {
+		t.Fatalf("envFromContainerInfo: %v", err)
+	}
+	if len(env) != 2 || env[0] != "A=1" || env[1] != "B=2" {
+		t.Fatalf("env = %v, want [A=1 B=2]", env)
+	}
+}
+
+func TestEnvFromContainerInfoRuntimeSpecFallback(t *testing.T) {
+	info := map[string]string{"info": `{"config":{},"runtimeSpec":{"process":{"env":["A=1","B=2"]}}}`}
+	env, err := envFromContainerInfo(info)
+	if err != nil {
+		t.Fatalf("envFromContainerInfo: %v", err)
+	}
+	if len(env) != 2 || env[0] != "A=1" || env[1] != "B=2" {
+		t.Fatalf("env = %v, want [A=1 B=2]", env)
+	}
+}
+
+func TestEnvFromContainerInfoMissingInfo(t *testing.T) {
+	if _, err := envFromContainerInfo(map[string]string{}); err == nil {
+		t.Fatal("envFromContainerInfo: want error for missing info key")
+	}
+}
+
+func TestEnvFromContainerInfoUnparseableJSON(t *testing.T) {
+	if _, err := envFromContainerInfo(map[string]string{"info": "not json"}); err == nil {
+		t.Fatal("envFromContainerInfo: want error for unparseable info")
+	}
+}
+
+func TestCRIContainerEnvRoundTrips(t *testing.T) {
+	c, _ := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+
+	h, err := b.StartPod(ctx, runtime.PodSpec{
+		ID:           "spawn-7",
+		SidecarImage: "s",
+		SidecarEnv:   []string{"SIDECAR_CONTROL_TOKEN=tok", "OPENROUTER_API_KEY=k"},
+	})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+
+	env, err := b.ContainerEnv(ctx, h.SidecarID)
+	if err != nil {
+		t.Fatalf("ContainerEnv: %v", err)
+	}
+	want := map[string]bool{"SIDECAR_CONTROL_TOKEN=tok": true, "OPENROUTER_API_KEY=k": true}
+	if len(env) != len(want) {
+		t.Fatalf("env = %v, want %v", env, want)
+	}
+	for _, e := range env {
+		if !want[e] {
+			t.Fatalf("unexpected env entry %q (got %v)", e, env)
+		}
+	}
+}
+
+func TestCRIContainerEnvFailsOnContainerStatusError(t *testing.T) {
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+
+	h, err := b.StartPod(ctx, runtime.PodSpec{ID: "spawn-7", SidecarImage: "s"})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	f.failContainerStatus = true
+
+	if _, err := b.ContainerEnv(ctx, h.SidecarID); err == nil {
+		t.Fatal("ContainerEnv must fail (not return an empty env) when ContainerStatus errors")
+	}
+}

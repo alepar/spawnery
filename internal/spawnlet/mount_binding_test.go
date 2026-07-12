@@ -17,6 +17,7 @@ type fakeRestoreAware struct {
 func (f *fakeRestoreAware) Prepare(context.Context, string, string, string, int) (string, error) {
 	return "", nil
 }
+func (f *fakeRestoreAware) HostDir(string, string) string          { return "" }
 func (f *fakeRestoreAware) Finalize(context.Context, string) error { return nil }
 func (f *fakeRestoreAware) SetRestorePending(p bool)               { f.pending, f.pendingOK = p, true }
 

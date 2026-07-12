@@ -9,11 +9,12 @@ import (
 	"testing"
 
 	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/spawnlet/firewall"
 )
 
 type preAgentBackend struct {
-	fakePodBackend
+	*fakepod.Backend
 	startAgentCalls int
 	secretPath      string
 	secretPlaintext []byte
@@ -33,11 +34,11 @@ func (b *preAgentBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, 
 	if b.startAgentErr != nil {
 		return b.startAgentErr
 	}
-	return b.fakePodBackend.StartAgent(ctx, h, spec)
+	return b.Backend.StartAgent(ctx, h, spec)
 }
 
 func TestCreateWithSelectionRunsBeforeStartAgentAfterStartPod(t *testing.T) {
-	fb := &preAgentBackend{}
+	fb := &preAgentBackend{Backend: fakeBackend(t)}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -88,7 +89,7 @@ func TestCreateWithSelectionRunsBeforeStartAgentAfterStartPod(t *testing.T) {
 
 func TestCreateWithSelectionBeforeStartAgentFailureStopsPodAndSkipsAgent(t *testing.T) {
 	hookErr := errors.New("pre-agent failed")
-	fb := &preAgentBackend{}
+	fb := &preAgentBackend{Backend: fakeBackend(t)}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -104,11 +105,11 @@ func TestCreateWithSelectionBeforeStartAgentFailureStopsPodAndSkipsAgent(t *test
 	if fb.startAgentCalls != 0 {
 		t.Fatalf("StartAgent calls = %d, want 0", fb.startAgentCalls)
 	}
-	if fb.stopped == nil {
+	if fb.LastStopHandle() == nil {
 		t.Fatal("Stop was not called")
 	}
-	if fb.stopped.SidecarID != "sc" {
-		t.Fatalf("stopped SidecarID = %q, want sc", fb.stopped.SidecarID)
+	if got := fb.LastStopHandle().SidecarID; got != "sp-preagent-fail-sidecar" {
+		t.Fatalf("stopped SidecarID = %q, want sp-preagent-fail-sidecar", got)
 	}
 	if _, ok := m.store.Get("sp-preagent-fail"); ok {
 		t.Fatal("failed pre-agent spawn was stored")
@@ -117,7 +118,7 @@ func TestCreateWithSelectionBeforeStartAgentFailureStopsPodAndSkipsAgent(t *test
 
 func TestCreateWithSelectionBeforeStartAgentFailureCleanupRemovesSecretAndArtifactDirs(t *testing.T) {
 	hookErr := errors.New("pre-agent failed")
-	fb := &preAgentBackend{}
+	fb := &preAgentBackend{Backend: fakeBackend(t)}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -136,7 +137,7 @@ func TestCreateWithSelectionBeforeStartAgentFailureCleanupRemovesSecretAndArtifa
 	if fb.startAgentCalls != 0 {
 		t.Fatalf("StartAgent calls = %d, want 0", fb.startAgentCalls)
 	}
-	if fb.stopped == nil {
+	if fb.LastStopHandle() == nil {
 		t.Fatal("Stop was not called")
 	}
 	assertMissingDir(t, m.secrets.DirFor("sp-preagent-cleanup"))
@@ -148,7 +149,7 @@ func TestCreateWithSelectionBeforeStartAgentFailureCleanupRemovesSecretAndArtifa
 
 func TestCreateWithSelectionStartAgentFailureCleanupRemovesSecretAndArtifactDirs(t *testing.T) {
 	startErr := errors.New("agent failed")
-	fb := &preAgentBackend{startAgentErr: startErr}
+	fb := &preAgentBackend{Backend: fakeBackend(t), startAgentErr: startErr}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -169,7 +170,7 @@ func TestCreateWithSelectionStartAgentFailureCleanupRemovesSecretAndArtifactDirs
 	if fb.startAgentCalls != 1 {
 		t.Fatalf("StartAgent calls = %d, want 1", fb.startAgentCalls)
 	}
-	if fb.stopped == nil {
+	if fb.LastStopHandle() == nil {
 		t.Fatal("Stop was not called")
 	}
 	assertMissingDir(t, m.secrets.DirFor("sp-startagent-cleanup"))
@@ -181,7 +182,7 @@ func TestCreateWithSelectionStartAgentFailureCleanupRemovesSecretAndArtifactDirs
 
 func TestCreateWithSelectionBeforeStartAgentFailureRemovesFloor(t *testing.T) {
 	hookErr := errors.New("pre-agent failed")
-	fb := &preAgentBackend{}
+	fb := &preAgentBackend{Backend: fakeBackend(t)}
 	fa := &fakeApplier{}
 	m := NewManagerWithBackend(fb, fa, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), EgressEnforce: true,
@@ -207,7 +208,7 @@ func TestCreateWithSelectionBeforeStartAgentFailureRemovesFloor(t *testing.T) {
 	if fb.startAgentCalls != 0 {
 		t.Fatalf("StartAgent calls = %d, want 0", fb.startAgentCalls)
 	}
-	if fb.stopped == nil {
+	if fb.LastStopHandle() == nil {
 		t.Fatal("Stop was not called")
 	}
 }
@@ -232,7 +233,7 @@ func (a *contextCheckingApplier) Remove(ctx context.Context, _ []firewall.Rule) 
 
 func TestCreateWithSelectionPreAgentFailureCleanupIgnoresCanceledCreateContext(t *testing.T) {
 	hookErr := errors.New("pre-agent failed")
-	fb := &preAgentBackend{}
+	fb := &preAgentBackend{Backend: fakeBackend(t)}
 	fa := &contextCheckingApplier{}
 	m := NewManagerWithBackend(fb, fa, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), EgressEnforce: true,
@@ -256,7 +257,7 @@ func TestCreateWithSelectionPreAgentFailureCleanupIgnoresCanceledCreateContext(t
 	if fa.removeCanceled {
 		t.Fatal("egress floor cleanup used the canceled create context")
 	}
-	if fb.stopped == nil {
+	if fb.LastStopHandle() == nil {
 		t.Fatal("Stop was not called")
 	}
 	if fb.startAgentCalls != 0 {

@@ -235,6 +235,18 @@ func (d *Docker) ContainerIP(ctx context.Context, id string) (string, error) {
 	return ip, nil
 }
 
+// ContainerEnv returns the container's environment exactly as it was started with (Config.Env).
+func (d *Docker) ContainerEnv(ctx context.Context, id string) ([]string, error) {
+	j, err := d.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if j.Config == nil {
+		return nil, fmt.Errorf("container %s has no config", id)
+	}
+	return j.Config.Env, nil
+}
+
 func (d *Docker) ListByLabel(ctx context.Context, key, value string) ([]ContainerSummary, error) {
 	cs, err := d.cli.ContainerList(ctx, container.ListOptions{
 		All:     true,

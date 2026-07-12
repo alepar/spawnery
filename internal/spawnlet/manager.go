@@ -118,12 +118,17 @@ type ManagerConfig struct {
 	DeltaSquashDepth int
 
 	// DeltaScrubPaths are path prefixes (absolute) exec-scrubbed from the agent
-	// container via `rm -rf` BEFORE each CaptureDelta commit (live Docker-lane
-	// capture-time scrub; best-effort, non-fatal).  The deltamerge package
+	// container via `rm -rf` before a suspend capture — on the gate path, BEFORE the
+	// agent is paused (an exec cannot enter a paused container); see scrubForCapture.
+	// Best-effort, non-fatal.  The deltamerge package
 	// applies the same filter during squash.  Default:
 	// ["/var/cache/apt", "/var/lib/apt/lists", "/tmp"]. When /tmp is scrubbed,
 	// the default scrub recreates it with mode 1777 before CaptureDelta so tmux can
 	// create its socket directory after resume.
+	// Paths that overlap one of the spawn's mounts (at, under, or containing a container-side bind
+	// target) are SKIPPED and logged at WARN — scrubbing them would delete the spawn's persistent
+	// mounted data, and since the scrub runs before the mount snapshot the deletion would be captured
+	// as authoritative (scrubguard.go, spec 2026-07-12-suspend-torn-snapshot-fix-design.md §4.2).
 	DeltaScrubPaths []string
 }
 
@@ -180,11 +185,11 @@ type Manager struct {
 	// a resumed spawn continues counting from where it left off.
 	deltaState *deltaStateStore
 
-	// scrubFn is called BEFORE each CaptureDelta commit to remove noisy paths from the
-	// agent container's writable layer (live capture-time scrub, Docker lane).  Default
-	// (set by NewManagerWithBackend) execs `rm -rf <paths>` directly against the agentID
-	// container without routing through ExecRun/store-lookup — the spawn has already been
-	// claimed from the store (removed) by the time teardown calls scrubFn.
+	// scrubFn removes noisy paths from the agent container's writable layer before a suspend capture
+	// (see scrubForCapture — it runs while the agent is still RUNNING, and on the gate path BEFORE the
+	// Pause).  Default (set by NewManagerWithBackend) execs `rm -rf <paths>` directly against the agentID
+	// container without routing through ExecRun/store-lookup: on the non-gate paths the spawn has already
+	// been claimed from the store (removed), so an ExecRun lookup would always fail.
 	// Injected as a seam in tests so the hermetic unit tests do not shell out to Docker.
 	scrubFn func(ctx context.Context, agentID string, paths []string) error
 
@@ -390,6 +395,34 @@ func defaultScrubCommands(paths []string) [][]string {
 		)
 	}
 	return commands
+}
+
+// scrubForCapture runs the best-effort layer-hygiene scrub (`rm -rf <DeltaScrubPaths>`, via an exec in
+// the agent container) so a captured delta does not carry apt caches and /tmp noise.
+//
+// It MUST run while the agent is still RUNNING: the scrub is an exec, and an exec cannot enter a paused
+// container ("container is paused"). It therefore runs BEFORE the suspend gate's Pause — never after it.
+// It used to live in teardown, which forced an Unpause between the mount snapshot and the rootfs capture
+// and produced a TORN snapshot (sp-2tx8.2.1, spec §4.1). The scrub's guarantee is best-effort hygiene and
+// it can tolerate a race (a live process recreating /tmp/x before the pause costs a few bytes of layer);
+// the snapshot's guarantee is consistency and it can tolerate none. The tolerant operation goes outside
+// the quiesced window; the intolerant one stays strictly inside it.
+//
+// Accepted side effect (spec §4.4): an ABORTED suspend (the gate's journal snapshot fails, the spawn keeps
+// running) now leaves the scrub paths already cleaned. DeltaScrubPaths are disposable by definition (/tmp,
+// package caches) — a successful suspend/resume wipes them anyway — so a certain torn snapshot is not worth
+// trading for an unlikely, harmless /tmp clean.
+//
+// Non-fatal by contract: a scrub failure is logged and the suspend proceeds with a fatter delta layer.
+func (m *Manager) scrubForCapture(ctx context.Context, sp *Spawn) {
+	if !m.cfg.DeltaCapture || m.scrubFn == nil || len(m.cfg.DeltaScrubPaths) == 0 || sp.AgentID == "" {
+		return
+	}
+	// Delegate to the MOUNT-GUARDED scrub (sp-2tx8.2.2, scrubguard.go): a configured scrub path that
+	// overlaps one of this spawn's mounts is skipped and logged, never deleted. That guard is what makes
+	// running the scrub before the mount snapshot safe — without it this reorder would rm -rf the user's
+	// persistent data and then snapshot the deletion as authoritative.
+	m.runDeltaScrub(ctx, sp)
 }
 
 func scrubPathsIncludeTmp(paths []string) bool {
@@ -795,62 +828,42 @@ func (m *Manager) RunningInventory() []runtime.ManagedPod {
 	return out
 }
 
-// ReapOrphans tears down every spawnery-managed pod the runtime still has that this Manager is NOT
-// tracking — leftovers from a previous node process (the in-mem store is empty after a restart). Call
-// it at startup so a crashed/restarted node doesn't leak pods.
-//
-// Scoped by the spawnery.node-id label: pods created by a DIFFERENT node id are left alone — two
-// spawnlets sharing one Docker daemon (dev stack + an e2e run, or multi-node-on-one-host) must not
-// reap each other's live pods. Unlabeled pods (pre-label versions) are still reaped.
-//
-// Crash-survival (spec §4): when DeltaCapture is enabled, a CaptureDelta is attempted on the
-// orphaned agent container BEFORE pod.Stop, so the spawn's work is preserved for a future resume.
-// This is best-effort and non-fatal — a capture failure just means the next resume starts from the
-// last known-good delta (or the base image if none existed).
-//
-// moby#47065 note: the moby layer-count guard in CaptureDelta requires the BaseImageRef of the
-// launch image to compare against.  Orphan reaping does not have the Spawn record (the in-mem store
-// was wiped on restart), so BaseImageRef is empty and the guard degrades to rejecting only truly
-// zero-layer commits.
-func (m *Manager) ReapOrphans(ctx context.Context) error {
-	managed, err := m.pod.ListManaged(ctx)
-	if err != nil {
-		return err
-	}
-	for _, mp := range managed {
-		if mp.NodeID != "" && mp.NodeID != m.cfg.NodeID {
-			continue // another node's pod (shared daemon) — not ours to reap
-		}
-		if _, live := m.store.Get(mp.SpawnID); live {
-			continue // still ours
-		}
-		log.Printf("reaping orphaned pod spawn=%s gen=%d (not in store; node restart)", mp.SpawnID, mp.Generation)
-
-		// Capture-before-reap (spec §4 crash-survival): commit the agent's writable layer to
-		// the delta tag BEFORE stopping so a future same-node resume picks up where it crashed.
-		// Best-effort: non-fatal, logged.
-		if m.cfg.DeltaCapture && mp.AgentID != "" {
-			h := &runtime.PodHandle{SpawnID: mp.SpawnID, AgentID: mp.AgentID}
-			if ref, cerr := m.pod.CaptureDelta(ctx, h); cerr != nil {
-				log.Printf("capture-before-reap spawn=%s: %v (non-fatal; delta may be stale)", mp.SpawnID, cerr)
-			} else {
-				log.Printf("capture-before-reap spawn=%s ref=%s", mp.SpawnID, ref)
-			}
-		}
-
-		_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: mp.SidecarID, AgentID: mp.AgentID, SandboxID: mp.SandboxID})
-	}
-	return nil
-}
-
-// StopAll tears down every spawn this Manager tracks, for graceful node shutdown — a SIGTERM'd node
-// reaps its own pods instead of leaving orphans for the next process's reap-on-startup. Returns the
-// number of spawns it stopped.
+// StopAll tears down every spawn this Manager tracks — the DESTRUCTIVE bulk path. It is NOT the
+// process-shutdown path any more: a SIGTERM'd node calls DetachAll and leaves its pods running for
+// the next process to re-adopt (SE3 §4.1). Keep this for an explicit drain/destroy-everything caller.
+// Returns the number of spawns it stopped.
 func (m *Manager) StopAll(ctx context.Context) int {
 	sps := m.store.List()
 	for _, sp := range sps {
 		if err := m.Stop(ctx, sp.ID); err != nil {
 			log.Printf("stopAll: stop %s: %v", sp.ID, err)
+		}
+	}
+	return len(sps)
+}
+
+// DetachAll relinquishes supervision of every spawn this Manager tracks WITHOUT touching the pods:
+// the containers keep running so the next spawnlet process can re-adopt them (SE3 §4.1). It is the
+// PROCESS-SHUTDOWN path (SIGTERM / `systemctl restart` — the documented upgrade path); the
+// spawn-deletion path (Stop/StopAll/teardown) is unchanged and still destroys.
+//
+// It stops each spawn's continuous journal watchers so no snapshot is left racing process exit, and
+// deliberately does NOT: call pod.Stop, run the mount finalizers, or clear the node's delta/journal
+// state stores — those records are what re-adoption (sp-2tx8.3.4) reads back. The in-memory store is
+// left as-is: the process is exiting, and mutating it buys nothing.
+//
+// Consequence to accept (spec §4.1): if this node never comes back, its pods run unsupervised. They
+// are labelled, so a future spawnlet on this machine reconciles them and the CP sees the spawns as
+// Unreachable — strictly better than today, where a restart destroys them unconditionally.
+//
+// Returns the number of spawns left running.
+func (m *Manager) DetachAll() int {
+	sps := m.store.List()
+	for _, sp := range sps {
+		// takeWatchers clears sp.journalWatchers under watchersMu; Stop() blocks until the watcher
+		// goroutine exits and MUST be called outside that lock (see takeWatchers' contract).
+		for _, w := range m.takeWatchers(sp) {
+			w.Stop()
 		}
 	}
 	return len(sps)
@@ -1369,7 +1382,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	sidecarEnv := []string{
 		"OPENROUTER_API_KEY=" + m.cfg.OpenRouterKey,
 		"SIDECAR_ADDR=" + addr,
-		"SIDECAR_CONTROL_TOKEN=" + controlToken,
+		SidecarControlTokenEnv + "=" + controlToken,
 		"SIDECAR_CONTROL_ADDR=" + controlAddr,
 	}
 	sidecarEnv = append(sidecarEnv, sidecarControlEnv...)
@@ -1603,7 +1616,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 
 	sp := &Spawn{
 		ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
-		MountDirs: mountDirs, MountBindings: append([]MountBinding(nil), sel.Mounts...), MountFinalizers: mountFinalizers, JournalMounts: journalMounts, journalWatchers: watchers,
+		MountDirs: mountDirs, MountBindings: append([]MountBinding(nil), sel.Mounts...), MountFinalizers: mountFinalizers, JournalMounts: journalMounts, MountTargets: mountTargetsOf(mounts), journalWatchers: watchers,
 		FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID,
 		Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL,
 		BaseImageDigest: baseDigest,
@@ -1916,6 +1929,9 @@ func (m *Manager) Suspend(ctx context.Context, id string) (map[string]string, er
 	}
 	// snapshot=true: best-effort final journal snapshot, never blocks teardown (fail-closed is suspend-gate-only).
 	// progress=nil: Suspend is the legacy single-step path (no SnapshotForSuspend gate); no caller to relay to.
+	// The scrub is a live-container exec (see scrubForCapture) and this path never pauses, so it runs
+	// here, before teardown — teardown itself no longer scrubs and no longer unpauses.
+	m.scrubForCapture(ctx, sp)
 	res, err := m.teardown(ctx, sp, true, false, false, true, nil)
 	return res.MountMarkers, err
 }
@@ -1927,6 +1943,8 @@ func (m *Manager) SuspendForMigration(ctx context.Context, id string, captureRoo
 	}
 	// snapshot=true: best-effort final journal snapshot, never blocks teardown (fail-closed is suspend-gate-only).
 	// progress=nil: SuspendForMigration is the migration path; no CP stall-detector relay needed.
+	// Non-gate path: the agent is live and never paused, so scrub here (teardown no longer does).
+	m.scrubForCapture(ctx, sp)
 	return m.teardown(ctx, sp, true, false, captureRootfsArtifact, true, nil)
 }
 
@@ -1971,6 +1989,15 @@ func (m *Manager) SnapshotForSuspend(ctx context.Context, id string, progress Su
 		SidecarID: sp.SidecarID,
 		SandboxID: sp.SandboxID,
 	}
+	// Layer-hygiene scrub — BEFORE the pause, while the agent is still live and an exec can enter it
+	// (spec §4.1). After this point nothing may unpause the agent: everything that lands in the suspend
+	// artifact (the journal/mount snapshot below AND the rootfs delta captured by FinishSuspend, across
+	// the CP gate) is captured from this one frozen instant.
+	if progress != nil {
+		progress("gate", "scrubbing delta paths", nil)
+	}
+	m.scrubForCapture(ctx, sp)
+
 	if progress != nil {
 		progress("gate", "pausing agent", nil)
 	}
@@ -2001,11 +2028,11 @@ func (m *Manager) SnapshotForSuspend(ctx context.Context, id string, progress Su
 	return result, nil
 }
 
-// FinishSuspend completes the suspend teardown started by SnapshotForSuspend (spec §4): it
-// claims the spawn from the store, captures the rootfs delta (on the paused container — commit
-// works on paused containers), stops the pod, removes the egress floor, finalizes mount dirs,
-// and closes the journal repo. The journal snapshot was already taken by SnapshotForSuspend, so
-// FinishSuspend passes snapshot=false to teardown.
+// FinishSuspend completes the suspend teardown started by SnapshotForSuspend (spec §4): it claims the
+// spawn from the store, captures the rootfs delta ON THE STILL-PAUSED CONTAINER — the gate's Pause is
+// never released, so the rootfs and the journal/mount snapshot come from the same frozen instant — then
+// stops the pod, removes the egress floor, finalizes mount dirs, and closes the journal repo. The journal
+// snapshot was already taken by SnapshotForSuspend, so FinishSuspend passes snapshot=false to teardown.
 //
 // The returned SuspendResult carries RootfsArtifacts (when captureRootfsArtifact=true and
 // DeltaCapture is enabled). MountMarkers is intentionally empty — the node already holds them
@@ -2049,7 +2076,9 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 // snapshot (empty when journaling is off / the spawn has no journaled mounts) so Suspend can hand
 // them to the CP; Stop and Delete discard them.
 //
-//   - capture=true (Suspend path): trigger the rootfs delta capture BEFORE pod.Stop (live container).
+//   - capture=true (Suspend path): trigger the rootfs delta capture BEFORE pod.Stop. On the gate path the
+//     container is PAUSED and stays that way (see the capture block); on the legacy Suspend/
+//     SuspendForMigration paths it is live. teardown never scrubs and never unpauses.
 //   - gc=true (Delete path): release the delta image after pod.Stop and purge durable state files.
 //     (Stop and Suspend both have gc=false — the delta image must survive for same-node restart-resume.)
 //   - snapshot=true: take a final journal snapshot + persist node-local state (best-effort, non-fatal).
@@ -2086,23 +2115,19 @@ func (m *Manager) teardown(ctx context.Context, sp *Spawn, capture, gc, captureR
 			// correctly detect a zero-layer commit on the 2nd+ suspend (spec §3 validation).
 			BaseImageRef: sp.LaunchImageRef,
 		}
-		// The suspend gate (SnapshotForSuspend) leaves the agent PAUSED for journal-snapshot
-		// quiescence; sessions are already reaped by the time FinishSuspend calls teardown, so the
-		// agent has no driver. Unpause it (best-effort) before the live-container rootfs ops below:
-		// the scrub `docker exec` CANNOT run on a paused container ("container is paused"), and
-		// capture/stop are cleaner on a running one. Harmless no-op (ignored error) on the non-gate
-		// paths (Stop/Delete, crash-survival reconcile) where the container was never paused.
-		_ = m.pod.Unpause(ctx, h)
-		// Live capture-time scrub: `rm -rf <paths>` in the agent container BEFORE commit so the
-		// committed layer does not include apt caches, /tmp noise, etc. Best-effort, non-fatal.
-		if len(m.cfg.DeltaScrubPaths) > 0 && m.scrubFn != nil {
-			// Pass sp.AgentID directly: the spawn has already been removed from the store
-			// by Claim above, so passing the spawn id and re-looking-up via ExecRun would
-			// always fail with "spawn X has no agent container".
-			if serr := m.scrubFn(ctx, sp.AgentID, m.cfg.DeltaScrubPaths); serr != nil {
-				log.Printf("delta scrub for %s: %v (non-fatal; proceeding with capture)", id, serr)
-			}
-		}
+		// NO UNPAUSE HERE — DELIBERATELY (sp-2tx8.2.1, spec §4.1/§4.5). On the gate path the agent is
+		// PAUSED (SnapshotForSuspend froze it for the journal/mount snapshot and left it frozen), and the
+		// rootfs delta below MUST be captured from that same frozen instant: unpause it and any agent
+		// process still running (build, LSP, git, editor autosave) writes into the rootfs but not into the
+		// already-taken mount snapshot — a torn artifact. Both lanes capture a paused agent: Docker commits
+		// one (Pause:false on an already-frozen container), and containerd's CreateDiff is byte-identical
+		// across RUNNING/PAUSED/STOPPED (spike-proven; the CRI lane's own resume happens AFTER its diff).
+		//
+		// The scrub therefore does NOT live here any more: it is an exec, an exec cannot enter a paused
+		// container, and that is exactly how the unpause got here in the first place. It now runs in
+		// SnapshotForSuspend before the Pause (gate path) and in Suspend/SuspendForMigration before this
+		// call (non-gate paths, never paused). If you need an exec in this path, put it BEFORE the Pause —
+		// do NOT reintroduce an Unpause here.
 		if progress != nil {
 			progress("capture", "committing rootfs delta", nil)
 		}

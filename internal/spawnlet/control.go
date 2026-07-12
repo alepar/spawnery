@@ -10,6 +10,13 @@ const SidecarControlMountPath = "/run/spawnery/control"
 // SidecarControlMountPath + "/" + SidecarControlSocketName.
 const SidecarControlSocketName = "gettoken.sock"
 
+// SidecarControlTokenEnv is the sidecar env var carrying the per-pod bearer for the sidecar's
+// /control/model endpoint (the runtime model-switch control plane, sp-bp9w). The sidecar container
+// never stops across a spawnlet restart, so re-adoption reads this back out of the still-running
+// sidecar's own env (internal/runtime.PodBackend.ContainerEnv) rather than minting a new one — a
+// fresh token here would not match what the sidecar is actually enforcing.
+const SidecarControlTokenEnv = "SIDECAR_CONTROL_TOKEN"
+
 // SidecarGetTokenUDSEnv is the sidecar env var (userns-remap lane) pointing at the GetToken UDS
 // socket path inside the sidecar container.
 const SidecarGetTokenUDSEnv = "SIDECAR_GETTOKEN_UDS"

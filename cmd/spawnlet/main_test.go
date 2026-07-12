@@ -10,7 +10,9 @@ import (
 
 	configfiles "spawnery/config"
 	"spawnery/internal/config"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/spawnlet"
+	"spawnery/internal/spawnlet/firewall"
 	"spawnery/internal/storage"
 )
 
@@ -401,3 +403,38 @@ func TestConfigureJournalS3FailsClosedWithoutGarageAdmin(t *testing.T) {
 		t.Fatalf("error = %v, want Garage admin requirement", err)
 	}
 }
+
+// --- gracefulDetachAll tests -----------------------------------------------
+
+// gracefulDetachAll is the SIGTERM path (SE3 §4.1): it must leave every pod RUNNING. This test guards
+// the exact call site — a regression back to mgr.StopAll here destroys every spawn on a `systemctl
+// restart`, the documented upgrade path.
+func TestGracefulDetachAllLeavesPodsRunning(t *testing.T) {
+	ctx := context.Background()
+	be := fakepod.New()
+	t.Cleanup(be.Close)
+	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(), NodeID: "n1",
+	})
+	if _, err := mgr.Create(ctx, "sp-x", "../../examples/secret-app", "model", "", "", 0); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	gracefulDetachAll(mgr)
+
+	for _, role := range []string{"sandbox", "sidecar", "agent"} {
+		if got := be.State("sp-x", role); got != fakepod.StateRunning {
+			t.Fatalf("after gracefulDetachAll, sp-x/%s = %v, want %v", role, got, fakepod.StateRunning)
+		}
+	}
+	if h := be.LastStopHandle(); h != nil {
+		t.Fatalf("gracefulDetachAll must not stop pods, got pod.Stop(%+v)", h)
+	}
+}
+
+// noopApplier is a firewall.Applier stand-in — egress is not enforced in this test (NodeClass unset,
+// EgressEnforce false) but the Manager needs a non-nil applier.
+type noopApplier struct{}
+
+func (noopApplier) Apply(context.Context, []firewall.Rule) error  { return nil }
+func (noopApplier) Remove(context.Context, []firewall.Rule) error { return nil }

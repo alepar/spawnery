@@ -26,7 +26,7 @@ func noScrub(m *Manager) *Manager {
 // G1: Delete triggers ReleaseDelta + removes spawn from store.
 func TestDeleteReleasesGC(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	dataDir := t.TempDir()
 	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: dataDir,
@@ -44,8 +44,8 @@ func TestDeleteReleasesGC(t *testing.T) {
 	}
 
 	// ReleaseDelta must have been called.
-	if fb.releasedSpawn != id {
-		t.Fatalf("ReleaseDelta not called with id=%s; got releasedSpawn=%q", id, fb.releasedSpawn)
+	if lastOf(fb.ReleasedSpawns()) != id {
+		t.Fatalf("ReleaseDelta not called with id=%s; got releasedSpawn=%q", id, lastOf(fb.ReleasedSpawns()))
 	}
 	// Spawn must be removed from store.
 	if _, live := m.Store().Get(id); live {
@@ -56,7 +56,7 @@ func TestDeleteReleasesGC(t *testing.T) {
 // G2: Suspend does NOT call ReleaseDelta.
 func TestSuspendDoesNotGC(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -71,15 +71,15 @@ func TestSuspendDoesNotGC(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	if fb.releasedSpawn != "" {
-		t.Fatalf("ReleaseDelta must NOT be called on Suspend; got releasedSpawn=%q", fb.releasedSpawn)
+	if lastOf(fb.ReleasedSpawns()) != "" {
+		t.Fatalf("ReleaseDelta must NOT be called on Suspend; got releasedSpawn=%q", lastOf(fb.ReleasedSpawns()))
 	}
 }
 
 // G3: Stop does NOT call ReleaseDelta.
 func TestStopDoesNotGC(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -94,15 +94,15 @@ func TestStopDoesNotGC(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	if fb.releasedSpawn != "" {
-		t.Fatalf("ReleaseDelta must NOT be called on Stop; got releasedSpawn=%q", fb.releasedSpawn)
+	if lastOf(fb.ReleasedSpawns()) != "" {
+		t.Fatalf("ReleaseDelta must NOT be called on Stop; got releasedSpawn=%q", lastOf(fb.ReleasedSpawns()))
 	}
 }
 
 // G4: Suspend creates the delta state file; Delete purges it.
 func TestDeletePurgesDeltaStateFile(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	dataDir := t.TempDir()
 	m := noScrub(NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: dataDir,

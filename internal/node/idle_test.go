@@ -8,6 +8,7 @@ import (
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/runtime/fakepod"
 )
 
 // The pump tracks last-relay-activity (a frame in EITHER direction refreshes it) and whether any
@@ -54,7 +55,7 @@ func TestPumpTracksActivityAndAttached(t *testing.T) {
 // reports a non-zero LastActivityUnixMs (epoch-ms) and the backend delta size, so the CP
 // evaluator can make quota and idle decisions.
 func TestRunningSpawnsPopulatesMetrics(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	a := newAttacher(newGooseManager(t, be), &fakeCPStream{})
 	ctx := context.Background()
 
@@ -100,7 +101,7 @@ func TestRunningSpawnsPopulatesMetrics(t *testing.T) {
 	}
 
 	// DeltaSizeBytes is 0 when the fake backend does not have a delta (no DeltaSize configured
-	// in the fake that scriptedPodBackend uses) — just assert it doesn't error (field present).
+	// in the fakepod-backed fake) — just assert it doesn't error (field present).
 	_ = rs.GetDeltaSizeBytes()
 }
 

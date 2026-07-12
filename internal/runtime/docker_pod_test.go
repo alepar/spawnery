@@ -79,6 +79,52 @@ func TestDockerPodBackendStartPodStartAgentStop(t *testing.T) {
 	}
 }
 
+// TestDockerListManagedReportsIDsAndPodIP pins what re-adoption reads: both container ids and the pod
+// IP (SE3 §4.5). Without them a restarted node cannot name or re-floor the pod it is adopting.
+func TestDockerListManagedReportsIDsAndPodIP(t *testing.T) {
+	f := NewFake()
+	b := NewDockerPodBackend(f, "", "smoke")
+	ctx := context.Background()
+
+	labels := map[string]string{
+		LabelManaged:    "true",
+		LabelSpawnID:    "sp1",
+		LabelGeneration: "7",
+		LabelNodeID:     "node-a",
+	}
+	h, err := b.StartPod(ctx, PodSpec{ID: "sp1", SidecarImage: "s", Labels: labels, Resources: Resources{}})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	if err := b.StartAgent(ctx, h, AgentSpec{Image: "a", Labels: labels, Resources: Resources{}}); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	pods, err := b.ListManaged(ctx)
+	if err != nil {
+		t.Fatalf("ListManaged: %v", err)
+	}
+	if len(pods) != 1 {
+		t.Fatalf("ListManaged = %d pods, want 1", len(pods))
+	}
+	p := pods[0]
+	if p.SidecarID != h.SidecarID {
+		t.Errorf("SidecarID = %q, want %q", p.SidecarID, h.SidecarID)
+	}
+	if p.AgentID != h.AgentID {
+		t.Errorf("AgentID = %q, want %q", p.AgentID, h.AgentID)
+	}
+	if p.PodIP != "172.17.0.99" {
+		t.Errorf("PodIP = %q, want 172.17.0.99", p.PodIP)
+	}
+	if p.SandboxID != "" {
+		t.Errorf("SandboxID = %q, want empty (Docker has no sandbox)", p.SandboxID)
+	}
+	if p.Generation != 7 || p.NodeID != "node-a" {
+		t.Errorf("Generation/NodeID = %d/%q, want 7/node-a", p.Generation, p.NodeID)
+	}
+}
+
 func TestDockerPodBackendStopSkipsEmptyAgentID(t *testing.T) {
 	f := NewFake()
 	b := NewDockerPodBackend(f, "", "smoke")

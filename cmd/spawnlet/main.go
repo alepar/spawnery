@@ -78,8 +78,8 @@ func main() {
 	if err := configureJournal(mgr, cfg); err != nil {
 		log.Fatalf("journal init: %v", err)
 	}
-	// SIGTERM/SIGINT cancels ctx; the node's serve loop returns and we gracefully reap our pods
-	// (graceful teardown on shutdown complements reap-on-startup — see sp-8hf).
+	// SIGTERM/SIGINT cancels ctx; the node's serve loop returns and we DETACH from our pods — they keep
+	// running so the next spawnlet process re-adopts them (SE3 §4.1). We no longer reap on shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := mgr.PreflightRuntime(ctx); err != nil {
@@ -137,9 +137,10 @@ func main() {
 		}
 		nodeCfg.Verifier = buildIntentVerifier(cfg, cfg.Node.ID, cfg.Node.Owner)
 		nodeCfg.GitHubMint = nodeGitHubMint(cfg)
+		nodeCfg.SpawnCARoot = filepath.Join(cfg.DataRoot, "spawn-ca")
 		log.Printf("spawnlet attaching to CP at %s as %s", nodeCfg.CPURL, cfg.Node.ID)
 		err = node.Run(ctx, mgr, httpc, nodeCfg) // returns when ctx is cancelled (signal) or on fatal error
-		gracefulStopAll(mgr)
+		gracefulDetachAll(mgr)
 		if err != nil && ctx.Err() == nil {
 			log.Fatalf("node: %v", err)
 		}
@@ -162,13 +163,16 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(mux, spawnletH2Srv)))
 }
 
-// gracefulStopAll tears down every spawn this node still runs, on a fresh (signal-independent) context
-// with a bounded deadline so a slow runtime can't hang shutdown forever.
-func gracefulStopAll(mgr *spawnlet.Manager) {
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if n := mgr.StopAll(shutdownCtx); n > 0 {
-		log.Printf("graceful shutdown: stopped %d running spawn(s)", n)
+// gracefulDetachAll is the process-shutdown path (SE3 §4.1). The node RELINQUISHES its spawns and exits
+// WITH THE PODS STILL RUNNING, so a `systemctl restart` (the documented upgrade path) no longer destroys
+// every spawn on the box; the next spawnlet process re-adopts them. It stops the per-spawn journal
+// watchers and touches nothing in the runtime.
+//
+// The node's pumps/sessions are already closed by node.Run's shutdown detach before it returns, so no
+// pump exitFn can fire (and reclaim a container) while this runs.
+func gracefulDetachAll(mgr *spawnlet.Manager) {
+	if n := mgr.DetachAll(); n > 0 {
+		log.Printf("graceful shutdown: detached from %d running spawn(s) — pods left running for re-adoption", n)
 	}
 }
 
