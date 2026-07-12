@@ -87,6 +87,10 @@ sqlite3 /data/authsvc/identity.db "PRAGMA integrity_check;"
 The certified auth-artifact signer key is **the most sensitive secret the AS holds**. Its compromise lets
 an attacker mint arbitrary session tokens valid at every CP and node until rotation completes.
 
+Authsvc also holds the self-hosted node intermediate key online because enrollment must issue node
+SVIDs. This is an intentional exception to offline issuer custody. The authsvc systemd mount
+namespace may read `/etc/spawnery/authsvc`; CP and spawnlet must not be able to access that bundle.
+
 ### Key file permissions
 
 ```sh

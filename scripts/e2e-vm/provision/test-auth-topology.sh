@@ -34,8 +34,9 @@ do
   }
 done
 
-if rg -n 'auth-signing-intermediate-key' "$common" "$HERE/env"/*.env "$HERE/provision.sh"; then
-  echo "offline auth-signing intermediate key is exposed to runtime provisioning" >&2
+offline_runtime='(/var/lib/spawnery-offline|root-key\.pem|service-intermediate-key\.pem|cloud-intermediate-key\.pem|auth-signing-intermediate-key\.pem)'
+if rg -n "$offline_runtime" "$HERE/env"/*.env; then
+  echo "offline ceremony key material is exposed through a service environment" >&2
   exit 1
 fi
 

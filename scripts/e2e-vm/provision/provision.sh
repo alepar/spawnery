@@ -332,7 +332,9 @@ sudo cp -rf "$PAYLOAD"/config/* /etc/spawnery/config/ 2>/dev/null || true
 # ---- PKI: throwaway CA + certified auth signers + service/node mTLS + wildcard cert ----
 log "generating throwaway PKI + wildcard cert…"
 sudo mkdir -p /etc/spawnery/pki
-sudo bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"
+sudo install -d -m0700 -o root -g root /var/lib/spawnery-offline
+sudo env SPAWNERY_OFFLINE_PKI_DIR=/var/lib/spawnery-offline \
+  bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"
 sudo chmod 644 /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key   # caddy runs as user 'caddy'
 sudo cp /etc/spawnery/pki/ca.crt /home/build/ca.crt   # build-base.sh pulls this out for host trust
 sudo install -d -m0700 /etc/spawnery/authsvc /etc/spawnery/cp \
@@ -411,6 +413,8 @@ Requires=spawnery-render-env.service
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
 WorkingDirectory=/opt/spawnery
+InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/cp /etc/spawnery/pki
+ReadOnlyPaths=/etc/spawnery/authsvc
 ExecStart=/usr/local/bin/authsvc
 Restart=on-failure
 [Install]
@@ -426,6 +430,8 @@ Requires=spawnery-render-env.service
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
 WorkingDirectory=/opt/spawnery
+InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/pki
+ReadOnlyPaths=/etc/spawnery/cp
 ExecStart=/usr/local/bin/spawnery_cp
 Restart=on-failure
 [Install]
@@ -447,6 +453,8 @@ EnvironmentFile=-/etc/spawnery/env.d/profile.env
 EnvironmentFile=-/etc/spawnery/env.d/journal.env
 EnvironmentFile=-/etc/spawnery/env.d/gitea.env
 WorkingDirectory=/opt/spawnery
+InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/cp
+ReadOnlyPaths=/etc/spawnery/pki
 ExecStart=/usr/local/bin/spawnlet
 Restart=on-failure
 [Install]
