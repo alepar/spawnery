@@ -24,7 +24,9 @@ node:
   id_dir:          "/var/lib/spawnlet/identity"  # enrolled cert + key dir
   root_ca:         ""                 # pinned root CA PEM path (default: <id_dir>/root.pem)
   trust_domain:    "dev.spawnery.internal" # expected SPIFFE trust domain; override in staging/prod
-  as_pubkeys:      ""                 # CSV of AS session public-key PEM paths
+  environment:     "dev"              # auth-artifact signer environment (root trust domain prefix)
+  signer_revocation_statement: ""     # optional deployment-provided monotonic statement
+  signer_revocation_state: ""         # required persisted state path in enforced mode
   github_mint_dev_id: ""             # DEV-ONLY: relaxed node identity for AS GitHub-mint
 
 cp:

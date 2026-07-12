@@ -4,6 +4,7 @@ package node
 // All tests are hermetic (in-memory key set, fake clock, no network).
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -31,21 +32,18 @@ func genECDSA(t *testing.T) *ecdsa.PrivateKey {
 	return k
 }
 
-func genASKey(t *testing.T) (ed25519.PrivateKey, token.KeySet) {
+type testArtifactSigner struct{ *token.SigningCredential }
+
+func (s testArtifactSigner) Public() crypto.PublicKey { return s.PrivateKey.Public() }
+
+func genASKey(t *testing.T) (testArtifactSigner, *token.Verifier) {
 	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ks, err := token.NewKeySet(priv.Public().(ed25519.PublicKey))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return priv, ks
+	fixture := newArtifactFixture(t, time.Unix(1_770_000_000, 0), "prod")
+	return testArtifactSigner{fixture.credential}, fixture.verifier
 }
 
 // mintNodeToken mints an aud=node token for the given session key and account.
-func mintNodeToken(t *testing.T, asPriv ed25519.PrivateKey, ks token.KeySet, sessionKey *ecdsa.PrivateKey, accountID string, now time.Time) string {
+func mintNodeToken(t *testing.T, asPriv testArtifactSigner, _ *token.Verifier, sessionKey *ecdsa.PrivateKey, accountID string, now time.Time) string {
 	t.Helper()
 	spki, err := x509.MarshalPKIXPublicKey(&sessionKey.PublicKey)
 	if err != nil {
@@ -64,14 +62,23 @@ func mintNodeToken(t *testing.T, asPriv ed25519.PrivateKey, ks token.KeySet, ses
 		SessionKeyHash: token.SessionKeyHash(spki),
 		KeyId:          keyID,
 	}
-	wire, err := token.Mint(body, asPriv)
+	return mintSessionBody(t, asPriv, body)
+}
+
+func mintSessionBody(t *testing.T, signer testArtifactSigner, body *authv1.SessionTokenBody) string {
+	t.Helper()
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := signer.Sign(token.ArtifactTypeSession, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return wire
 }
 
-func buildIntentEnvelope(t *testing.T, asPriv ed25519.PrivateKey, ks token.KeySet, sessionKey *ecdsa.PrivateKey, accountID string, now time.Time, body *authv1.IntentBody, op intent.Op) *authv1.AuthEnvelope {
+func buildIntentEnvelope(t *testing.T, asPriv testArtifactSigner, ks *token.Verifier, sessionKey *ecdsa.PrivateKey, accountID string, now time.Time, body *authv1.IntentBody, op intent.Op) *authv1.AuthEnvelope {
 	t.Helper()
 	nodeToken := mintNodeToken(t, asPriv, ks, sessionKey, accountID, now)
 	si, err := intent.Build(op, body, sessionKey)
@@ -81,7 +88,7 @@ func buildIntentEnvelope(t *testing.T, asPriv ed25519.PrivateKey, ks token.KeySe
 	return &authv1.AuthEnvelope{AccessToken: nodeToken, Intent: si}
 }
 
-func makeVerifier(t *testing.T, ks token.KeySet, nodeOwner, nodeID string, selfHosted bool, now func() time.Time) *IntentVerifier {
+func makeVerifier(t *testing.T, ks *token.Verifier, nodeOwner, nodeID string, selfHosted bool, now func() time.Time) *IntentVerifier {
 	t.Helper()
 	return NewIntentVerifier(ks, nodeOwner, nodeID, selfHosted, AuthModeEnforced, now)
 }
@@ -213,7 +220,7 @@ func TestCrossRestartJTIRefused(t *testing.T) {
 
 	// Build verifier with jtiCache seeded at processStart (cross-restart test).
 	v := &IntentVerifier{
-		keySet:     ks,
+		artifacts:  ks,
 		nodeOwner:  "alice",
 		nodeID:     "node-1",
 		selfHosted: false,
@@ -413,7 +420,7 @@ func TestCNFMismatch(t *testing.T) {
 		SessionKeyHash: cnfHash[:],
 		KeyId:          keyID,
 	}
-	nodeTok, _ := token.Mint(tokenBody, asPriv)
+	nodeTok := mintSessionBody(t, asPriv, tokenBody)
 
 	// Sign the intent with differentKey (SPKI won't match token's cnf).
 	body := goodStartBody("sp-1", "node-1", 1, now)
@@ -447,7 +454,7 @@ func TestWrongAudienceRefused(t *testing.T) {
 		SessionKeyHash: token.SessionKeyHash(spki),
 		KeyId:          keyID,
 	}
-	cpTok, _ := token.Mint(tokenBody, asPriv)
+	cpTok := mintSessionBody(t, asPriv, tokenBody)
 
 	body := goodStartBody("sp-1", "node-1", 1, now)
 	si, _ := intent.Build(intent.OpCreateSpawn, body, sessionKey)
@@ -548,7 +555,7 @@ func TestVerifyOpenHappyPath(t *testing.T) {
 		SessionKeyHash: token.SessionKeyHash(spki),
 		KeyId:          keyID,
 	}
-	nodeTok, _ := token.Mint(tokenBody, asPriv)
+	nodeTok := mintSessionBody(t, asPriv, tokenBody)
 	si, _ := intent.Build(intent.OpSessionOpen, body, sessionKey)
 	env := &authv1.AuthEnvelope{AccessToken: nodeTok, Intent: si}
 

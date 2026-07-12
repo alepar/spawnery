@@ -20,6 +20,8 @@ import (
 	"log"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/intent"
@@ -61,7 +63,7 @@ const (
 
 // IntentVerifier implements the A4 node-side verification chain.
 type IntentVerifier struct {
-	keySet     token.KeySet
+	artifacts  *token.Verifier
 	nodeOwner  string // for self-hosted owner enforcement
 	nodeID     string // the node's own id; target_node_id must match this
 	selfHosted bool
@@ -70,15 +72,15 @@ type IntentVerifier struct {
 	jtiCache   *intent.JTICache
 }
 
-// NewIntentVerifier constructs a verifier. keySet is the pinned AS session pubkey set
-// (operator-provisioned, never TOFU). nodeOwner is the declared node owner; selfHosted
+// NewIntentVerifier constructs a verifier. artifacts is rooted in the environment CA and validates
+// certified session-token artifacts. nodeOwner is the declared node owner; selfHosted
 // enables the extra owner==NodeOwner enforcement. nodeID is this node's own id.
-func NewIntentVerifier(keySet token.KeySet, nodeOwner, nodeID string, selfHosted bool, mode AuthMode, now func() time.Time) *IntentVerifier {
+func NewIntentVerifier(artifacts *token.Verifier, nodeOwner, nodeID string, selfHosted bool, mode AuthMode, now func() time.Time) *IntentVerifier {
 	if now == nil {
 		now = time.Now
 	}
 	return &IntentVerifier{
-		keySet:     keySet,
+		artifacts:  artifacts,
 		nodeOwner:  nodeOwner,
 		nodeID:     nodeID,
 		selfHosted: selfHosted,
@@ -155,8 +157,15 @@ func (v *IntentVerifier) doVerify(
 
 	// Step 1: AS Ed25519 sig on token + expiry.
 	now := v.now()
-	body, err := token.Verify(env.AccessToken, v.keySet, now)
+	payload, err := v.artifacts.Verify(env.AccessToken, token.ArtifactTypeSession, now)
 	if err != nil {
+		return NACKTokenInvalid, err.Error()
+	}
+	var body authv1.SessionTokenBody
+	if err := proto.Unmarshal(payload, &body); err != nil {
+		return NACKTokenInvalid, "session token unmarshal: " + err.Error()
+	}
+	if err := token.ValidateSessionBody(&body, now); err != nil {
 		return NACKTokenInvalid, err.Error()
 	}
 

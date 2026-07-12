@@ -1,11 +1,11 @@
 package cp
 
-// devmint_test.go: cross-component test that the dev AS key path in SubmitIntent mints a
+// devmint_test.go: cross-component test that the certified dev AS path in SubmitIntent mints a
 // token that the node's IntentVerifier accepts end-to-end [AM12].
 //
 // This is the "AM12 cross-component vector": it exercises the full chain from a
 // client calling SubmitIntent (with empty NodeAccessToken) through the CP's dev-AS token
-// minting, to the node's NewIntentVerifier accepting the resulting envelope.
+// minting, to the root-only node verifier accepting the resulting envelope.
 //
 // The test does NOT require a running node or any network connections. It wires the CP and
 // node packages together in-process using their production code paths and test-injectable
@@ -28,14 +28,14 @@ import (
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/store"
 	"spawnery/internal/intent"
+	"spawnery/internal/node"
 )
 
 // TestDevModeMintsVerifiableToken verifies the full AM12 chain:
 //  1. The CP mints a cnf-bearing aud=node token from the intent's SPKI DER in SubmitIntent
 //     when the client omits NodeAccessToken and a dev AS key is configured.
-//  2. The minted token passes token.Verify with the dev AS pubkey.
-//  3. The resulting AuthEnvelope passes node.NewIntentVerifier.VerifyStart in enforced mode,
-//     proving the boot-generated dev keypair drives the full A4 verification chain.
+//  2. The minted certified artifact verifies from the environment root.
+//  3. The resulting AuthEnvelope passes node.NewIntentVerifier in enforced mode.
 func TestDevModeMintsVerifiableToken(t *testing.T) {
 	s, _, _ := newTestServer(t)
 
@@ -130,4 +130,14 @@ func TestDevModeMintsVerifiableToken(t *testing.T) {
 		t.Fatalf("token account_id=%q want alice", tokenBody.AccountId)
 	}
 
+	// 8. The same certified envelope must pass the production node intent chain.
+	verifier := node.NewIntentVerifier(artifactVerifier, "", "", false, node.AuthModeEnforced, func() time.Time { return fixedNow })
+	fields := node.StartFields{
+		SpawnID:       spawnID,
+		Generation:    1,
+		AssertedOwner: "alice",
+	}
+	if nack, detail := verifier.VerifyStart(env, fields); nack != "" {
+		t.Fatalf("node.VerifyStart rejected certified dev envelope: nack=%s detail=%s", nack, detail)
+	}
 }

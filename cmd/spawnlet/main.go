@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -130,13 +130,31 @@ func main() {
 		}
 		nodeCfg.CPURL = dialURL
 		nodeCfg.NodeRootPEM = nodeRootPEM(cfg)
+		artifactTrust, err := loadArtifactVerifier(cfg, time.Now())
+		if err != nil {
+			if cfg.Node.AuthMode == "enforced" {
+				log.Fatalf("node: artifact trust setup: %v", err)
+			}
+			log.Printf("node: artifact trust unavailable in insecure mode: %v", err)
+		}
+		if artifactTrust != nil {
+			defer artifactTrust.Close()
+			reloadCtx, cancelReload := context.WithCancel(ctx)
+			reloadDone := artifactTrust.watch(reloadCtx, time.Second, time.Now, func(err error) {
+				log.Printf("node: signer-revocation reload failed: %v", err)
+			})
+			defer func() {
+				cancelReload()
+				<-reloadDone
+			}()
+		}
 		// Owner-sealed secrets (sp-2ckv.4): in enforced mode build the HPKE sub-key holder signed by the
 		// node's cert key, so the node can publish a sub-key and unseal delivered secrets. Best-effort:
 		// insecure mode (no cert) and a key-parse failure both leave SubKeys nil (no sub-key published).
 		if sk := nodeSubKeys(cfg, cfg.Node.ID); sk != nil {
 			nodeCfg.SubKeys = sk
 		}
-		nodeCfg.Verifier = buildIntentVerifier(cfg, cfg.Node.ID, cfg.Node.Owner)
+		nodeCfg.Verifier = buildIntentVerifier(cfg, artifactTrust, cfg.Node.ID, cfg.Node.Owner)
 		nodeCfg.GitHubMint = nodeGitHubMint(cfg)
 		log.Printf("spawnlet attaching to CP at %s as %s", nodeCfg.CPURL, cfg.Node.ID)
 		err = node.Run(ctx, mgr, httpc, nodeCfg) // returns when ctx is cancelled (signal) or on fatal error
@@ -600,54 +618,101 @@ func (i devNodeIDInterceptor) WrapStreamingHandler(next connect.StreamingHandler
 // failures are logged rather than enforced. This satisfies AM12 (dev/prod parity via verify-and-log).
 // cfg.Node.AuthMode=enforced: AuthModeEnforced — failures block execution and return NACK codes.
 //
-// cfg.Node.ASPubkeys (comma-separated PEM file paths): the AS session signing public keys the node
-// uses to verify the aud=node access token. In insecure mode an empty key set is valid (the token
-// step fails with ErrUnknownKey which is logged but not enforced). In enforced mode, the AS public
-// keys must be configured here.
+// Artifact trust is rooted exclusively in cfg.Node.RootCA (or <id_dir>/root.pem) and the persisted
+// signer-revocation store. In insecure mode unavailable trust logs token failures but does not block.
 //
 // nodeOwner: if non-empty AND cfg.Node.AuthMode=enforced, enables the self-hosted owner check
 // (the token's account_id must equal nodeOwner).
-func buildIntentVerifier(cfg *Spawnlet, nodeID, nodeOwner string) *node.IntentVerifier {
+func buildIntentVerifier(cfg *Spawnlet, trust *artifactTrust, nodeID, nodeOwner string) *node.IntentVerifier {
 	enforced := cfg.Node.AuthMode == "enforced"
 	authMode := node.AuthModeVerifyLog
 	if enforced {
 		authMode = node.AuthModeEnforced
 	}
 
-	ks, err := loadNodeKeySet(cfg.Node.ASPubkeys)
-	if err != nil {
-		log.Printf("buildIntentVerifier: load AS pubkeys: %v (verification will log token failures)", err)
-	} else if len(ks) > 0 {
-		log.Printf("node: loaded %d AS pubkey(s) for intent verification", len(ks))
+	var artifacts *token.Verifier
+	if trust != nil {
+		artifacts = trust.verifier
 	}
 
 	selfHosted := enforced && nodeOwner != ""
-	return node.NewIntentVerifier(ks, nodeOwner, nodeID, selfHosted, authMode, nil)
+	return node.NewIntentVerifier(artifacts, nodeOwner, nodeID, selfHosted, authMode, nil)
 }
 
-// loadNodeKeySet parses comma-separated PEM file paths into a token.KeySet.
-// Empty s returns an empty KeySet (valid in insecure mode — token step logs ErrUnknownKey).
-func loadNodeKeySet(s string) (token.KeySet, error) {
-	if s == "" {
-		return token.KeySet{}, nil
+type artifactTrust struct {
+	verifier      *token.Verifier
+	revocations   *token.SignerRevocationStore
+	statementPath string
+}
+
+func loadArtifactVerifier(cfg *Spawnlet, now time.Time) (*artifactTrust, error) {
+	rootPath := cfg.Node.RootCA
+	if rootPath == "" && cfg.Node.IDDir != "" {
+		rootPath = filepath.Join(cfg.Node.IDDir, "root.pem")
 	}
-	var pubs []ed25519.PublicKey
-	for _, p := range strings.Split(s, ",") {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		pemBytes, err := os.ReadFile(p)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", p, err)
-		}
-		pub, err := token.ParsePublicKeyPEM(pemBytes)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", p, err)
-		}
-		pubs = append(pubs, pub)
+	if rootPath == "" || cfg.Node.Environment == "" || cfg.Node.SignerRevocationState == "" {
+		return nil, errors.New("root, environment, and signer-revocation state are required")
 	}
-	return token.NewKeySet(pubs...)
+	rootPEM, err := os.ReadFile(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("read environment root: %w", err)
+	}
+	root, err := pki.ParseCertPEM(rootPEM)
+	if err != nil {
+		return nil, fmt.Errorf("parse environment root: %w", err)
+	}
+	store, err := token.OpenSignerRevocationStore(cfg.Node.SignerRevocationState, root, cfg.Node.Environment, now)
+	if err != nil {
+		return nil, fmt.Errorf("open signer-revocation state: %w", err)
+	}
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = store.Close()
+		}
+	}()
+	if cfg.Node.SignerRevocationStatement != "" {
+		if err := store.LoadAndApply(cfg.Node.SignerRevocationStatement, now); err != nil {
+			return nil, fmt.Errorf("apply signer-revocation statement: %w", err)
+		}
+	}
+	verifier, err := token.NewVerifier(root, cfg.Node.Environment, store)
+	if err != nil {
+		return nil, fmt.Errorf("create artifact verifier: %w", err)
+	}
+	closeOnError = false
+	return &artifactTrust{verifier: verifier, revocations: store, statementPath: cfg.Node.SignerRevocationStatement}, nil
+}
+
+func (trust *artifactTrust) Close() error {
+	if trust == nil {
+		return nil
+	}
+	return trust.revocations.Close()
+}
+
+func (trust *artifactTrust) watch(ctx context.Context, interval time.Duration, now func() time.Time, report func(error)) <-chan struct{} {
+	done := make(chan struct{})
+	if trust == nil || trust.statementPath == "" {
+		close(done)
+		return done
+	}
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := trust.revocations.LoadAndApply(trust.statementPath, now()); err != nil && report != nil {
+					report(err)
+				}
+			}
+		}
+	}()
+	return done
 }
 
 func h2cClient() *http.Client {

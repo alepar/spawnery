@@ -116,13 +116,25 @@ func Verify(wire string, ks KeySet, now time.Time) (*authv1.SessionTokenBody, er
 	if _, err := VerifyArtifact(DomainPrefix, wire, pub); err != nil {
 		return nil, err
 	}
-	if !now.Before(time.Unix(body.ExpiresAt, 0)) {
-		return nil, ErrExpired
-	}
-	if time.Unix(body.IssuedAt, 0).After(now.Add(issuedAtSkew)) {
-		return nil, ErrNotYet
+	if err := ValidateSessionBody(&body, now); err != nil {
+		return nil, err
 	}
 	return &body, nil
+}
+
+// ValidateSessionBody enforces the clock semantics shared by legacy and certified session tokens.
+// Callers must authenticate the exact serialized payload before parsing and invoking this helper.
+func ValidateSessionBody(body *authv1.SessionTokenBody, now time.Time) error {
+	if body == nil {
+		return ErrMalformed
+	}
+	if !now.Before(time.Unix(body.ExpiresAt, 0)) {
+		return ErrExpired
+	}
+	if time.Unix(body.IssuedAt, 0).After(now.Add(issuedAtSkew)) {
+		return ErrNotYet
+	}
+	return nil
 }
 
 // SessionKeyHash is SHA-256 over the DER SPKI exactly as x509.MarshalPKIXPublicKey /
