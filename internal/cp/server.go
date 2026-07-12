@@ -164,6 +164,13 @@ type Server struct {
 	// its cap on the wire, never 0.
 	skillPlainTarCap int64
 
+	// skillPresent memoizes shas the HEAD-before-presign gate (sp-mwco.4.4, artifacts.go
+	// statSkillObjects) has confirmed present in the skill store: sha256hex -> struct{}.
+	// POSITIVE ONLY — objects are immutable and content-addressed, so "present" is forever
+	// true, but a missing object may become present later (a later ingest), so a miss must
+	// NEVER be cached. Zero-value sync.Map is ready to use; no constructor wiring needed.
+	skillPresent sync.Map
+
 	// ForkSpawn seams. NewServer wires the same-node materializer and an interim zero-footprint
 	// estimator (zeroForkFootprint); the estimator is fail-closed when nil because CP cannot yet
 	// infer a source spawn's disk footprint, so the interim estimator disables the headroom guard.
