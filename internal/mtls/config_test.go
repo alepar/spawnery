@@ -211,6 +211,193 @@ func TestClientTLSRejectsMissingCallerCertificate(t *testing.T) {
 	}
 }
 
+func TestServerTLSRequiredAcceptsEveryValidPrincipal(t *testing.T) {
+	t.Parallel()
+	f := newTLSFixture(t)
+	serverConfig, err := ServerConfig(ServerOptions{
+		Root:        f.root.Cert,
+		TrustDomain: testTrustDomain,
+		Identity:    tlsCertificate(t, f.cp),
+		ClientMode:  RequireClientCertificate,
+		CurrentTime: func() time.Time { return f.now },
+	})
+	if err != nil {
+		t.Fatalf("ServerConfig: %v", err)
+	}
+	clients := map[string]*pki.Leaf{
+		"CP service":       f.cp,
+		"auth service":     f.authsvc,
+		"cloud node":       f.cloud,
+		"self-hosted node": f.selfHosted,
+	}
+	for name, identity := range clients {
+		identity := identity
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			clientConfig := internalClientConfig(t, f, identity)
+			clientErr, serverErr := handshake(clientConfig, serverConfig)
+			if clientErr != nil || serverErr != nil {
+				t.Fatalf("handshake errors: client=%v server=%v", clientErr, serverErr)
+			}
+		})
+	}
+}
+
+func TestServerTLSRequiredRejectsMissingCertificate(t *testing.T) {
+	t.Parallel()
+	f := newTLSFixture(t)
+	serverConfig, err := ServerConfig(ServerOptions{
+		Root:        f.root.Cert,
+		TrustDomain: testTrustDomain,
+		Identity:    tlsCertificate(t, f.cp),
+		ClientMode:  RequireClientCertificate,
+		CurrentTime: func() time.Time { return f.now },
+	})
+	if err != nil {
+		t.Fatalf("ServerConfig: %v", err)
+	}
+	clientConfig := internalClientConfig(t, f, nil)
+
+	clientErr, serverErr := handshake(clientConfig, serverConfig)
+	if clientErr == nil && serverErr == nil {
+		t.Fatal("required mode accepted a missing client certificate")
+	}
+}
+
+func TestServerTLSOptionalAcceptsMissingCertificate(t *testing.T) {
+	t.Parallel()
+	f := newTLSFixture(t)
+	serverConfig, err := ServerConfig(ServerOptions{
+		Root:        f.root.Cert,
+		TrustDomain: testTrustDomain,
+		Identity:    tlsCertificate(t, f.authsvc),
+		ClientMode:  VerifyClientCertificateIfGiven,
+		CurrentTime: func() time.Time { return f.now },
+	})
+	if err != nil {
+		t.Fatalf("ServerConfig: %v", err)
+	}
+	clientConfig, err := ClientConfig(ClientOptions{
+		Root:                f.root.Cert,
+		TrustDomain:         testTrustDomain,
+		ServerName:          "as.internal",
+		ExpectedServiceRole: pki.RoleAuthService,
+		CurrentTime:         func() time.Time { return f.now },
+	})
+	if err != nil {
+		t.Fatalf("ClientConfig: %v", err)
+	}
+
+	clientErr, serverErr := handshake(clientConfig, serverConfig)
+	if clientErr != nil || serverErr != nil {
+		t.Fatalf("handshake errors: client=%v server=%v", clientErr, serverErr)
+	}
+}
+
+func TestServerTLSOptionalAcceptsEveryValidPrincipal(t *testing.T) {
+	t.Parallel()
+	f := newTLSFixture(t)
+	serverConfig, err := ServerConfig(ServerOptions{
+		Root:        f.root.Cert,
+		TrustDomain: testTrustDomain,
+		Identity:    tlsCertificate(t, f.cp),
+		ClientMode:  VerifyClientCertificateIfGiven,
+		CurrentTime: func() time.Time { return f.now },
+	})
+	if err != nil {
+		t.Fatalf("ServerConfig: %v", err)
+	}
+	clients := map[string]*pki.Leaf{
+		"CP service":       f.cp,
+		"auth service":     f.authsvc,
+		"cloud node":       f.cloud,
+		"self-hosted node": f.selfHosted,
+	}
+	for name, identity := range clients {
+		identity := identity
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			clientConfig := internalClientConfig(t, f, identity)
+			clientErr, serverErr := handshake(clientConfig, serverConfig)
+			if clientErr != nil || serverErr != nil {
+				t.Fatalf("handshake errors: client=%v server=%v", clientErr, serverErr)
+			}
+		})
+	}
+}
+
+func TestServerTLSOptionalRejectsInvalidPresentedCertificate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		configure func(*testing.T, *tlsFixture) (*pki.Leaf, func() time.Time, func(*big.Int, *big.Int) bool)
+	}{
+		{
+			name: "wrong root",
+			configure: func(t *testing.T, f *tlsFixture) (*pki.Leaf, func() time.Time, func(*big.Int, *big.Int) bool) {
+				return newTLSFixture(t).selfHosted, func() time.Time { return f.now }, nil
+			},
+		},
+		{
+			name: "expired",
+			configure: func(_ *testing.T, f *tlsFixture) (*pki.Leaf, func() time.Time, func(*big.Int, *big.Int) bool) {
+				return f.selfHosted, func() time.Time { return f.now.Add(2 * time.Hour) }, nil
+			},
+		},
+		{
+			name: "revoked",
+			configure: func(_ *testing.T, f *tlsFixture) (*pki.Leaf, func() time.Time, func(*big.Int, *big.Int) bool) {
+				return f.selfHosted, func() time.Time { return f.now }, func(_, serial *big.Int) bool {
+					return serial.Cmp(f.selfHosted.Cert.SerialNumber) == 0
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newTLSFixture(t)
+			identity, currentTime, isRevoked := tt.configure(t, f)
+			serverConfig, err := ServerConfig(ServerOptions{
+				Root:        f.root.Cert,
+				TrustDomain: testTrustDomain,
+				Identity:    tlsCertificate(t, f.cp),
+				ClientMode:  VerifyClientCertificateIfGiven,
+				CurrentTime: currentTime,
+				IsRevoked:   isRevoked,
+			})
+			if err != nil {
+				t.Fatalf("ServerConfig: %v", err)
+			}
+			clientConfig := internalClientConfig(t, f, identity)
+
+			clientErr, serverErr := handshake(clientConfig, serverConfig)
+			if clientErr == nil && serverErr == nil {
+				t.Fatal("optional mode accepted an invalid presented certificate")
+			}
+		})
+	}
+}
+
+func internalClientConfig(t *testing.T, f *tlsFixture, identity *pki.Leaf) *tls.Config {
+	t.Helper()
+	opts := ClientOptions{
+		Root:                f.root.Cert,
+		TrustDomain:         testTrustDomain,
+		ServerName:          "cp.internal",
+		ExpectedServiceRole: pki.RoleCP,
+		CurrentTime:         func() time.Time { return f.now },
+	}
+	if identity != nil {
+		opts.Identity = tlsCertificate(t, identity)
+	}
+	config, err := ClientConfig(opts)
+	if err != nil {
+		t.Fatalf("ClientConfig: %v", err)
+	}
+	return config
+}
+
 func standardServerConfig(t *testing.T, root *x509.Certificate, identity *pki.Leaf) *tls.Config {
 	t.Helper()
 	pool := x509.NewCertPool()
