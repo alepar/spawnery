@@ -351,3 +351,38 @@ used.*
   - **The new emitters stay inert until `sp-mwco.2.6`** wires the runnable→emitter table into
     `apply-artifacts.sh` (today its shell `case` maps goose/hermes/pi to `EMITTER=""` → exit 0); this
     task registers and verifies the emitters, it does not wire them into the launcher's dispatch.
+
+- **2026-07-12 — placement matrix + all-or-nothing e2e landed (`sp-mwco.2.9`).**
+  - **`spec.Artifact.Bundle` gap closed.** `buildManifestAndPayloads` (`internal/cp/profiles_assembly.go`)
+    never set `Artifact.Bundle`, despite the field's doc comment claiming it was "populated at
+    profile assembly (sp-mwco.1.5)" — `sp-mwco.1.5` landed assembly *before* `sp-mwco.2.7` introduced
+    the field, and nobody wired it after. `manifestHasBundle()` was therefore always false in
+    production, so the §4.5 all-or-nothing contract (`EvaluateApplyReport` / `BuildApplyReport`
+    rollups) never fired — a partially-installed bundle would have looked like a clean success. Fixed
+    with a 3-line change: `a.Bundle = entry.EntryID` for `SourceKind == store.ProfileSourceBundle`
+    entries, guarded by a new hermetic test
+    (`internal/cp/profiles_assembly_bundlemark_test.go`).
+  - **Claude's behavioral probe deliberately replaced with a file-level probe**
+    (`internal/cp/skill_placement_e2e_test.go`'s `TestCPSkillPlacementMatrixE2E`): `sp-o5t3` (the
+    sidecar's Anthropic↔OpenAI tool-call-pairing bug, filed by the §4.1 spike above) makes a true
+    token-recital behavioral probe for claude deterministically red, independent of whether the skill
+    was actually read. Claude instead gets placement (hard, model-free) + the LLM "list your skills"
+    file-level probe the spike proved works; the test fails loud (naming `sp-o5t3`) rather than
+    silently recording a false negative if the bug's signature shows up. Follow-up tracked as
+    `sp-zrdg`: re-enable claude's behavioral assertion once `sp-o5t3` lands.
+  - **codex stays placement-only** in the same matrix, per `sp-9e6q` (still open — codex-cli 0.137.0
+    cannot complete any model turn via the current sidecar+OpenRouter routing). `sp-zrdg` also tracks
+    adding codex to the behavioral/file-level assertions once `sp-9e6q` lands.
+  - **All six agents get a hard, model-free placement assertion** (`docker exec … test -f`), derived
+    at test time from the production `agentinstall` registry + `agentcaps` runnable/binary vocabulary
+    (`internal/cp/skill_paths_e2e_test.go`'s `expectedSkillDirs`) rather than hardcoded — a future
+    emitter change breaks the test loudly instead of drifting silently. opencode and goose
+    additionally get a genuine behavioral probe (a per-run `TOKEN-<nonce>` recited from the probe
+    skill's body); hermes additionally gets its `skills.external_dirs` config.yaml check.
+  - **The all-or-nothing e2e** (`TestCPSkillBundleAllOrNothingE2E`) builds a synthetic bundle with one
+    good member and one deliberately-broken member (a by-ref tar with no `SKILL.md` — the CP-side
+    `validateSkillTar` is skipped for by-ref delivery by design, so the break survives assembly and
+    fails exactly where `installSkill` on the node is supposed to catch it) and asserts the whole
+    spawn reaches `ERROR`, with `error_detail` naming the bundle/tally and `skill_installs` reporting
+    the applied/failed split; a both-good control bundle reaches `ACTIVE` to guard against a
+    false-positive "it errored for an unrelated reason."
