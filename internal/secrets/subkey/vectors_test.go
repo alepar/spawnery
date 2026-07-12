@@ -202,7 +202,8 @@ func verifySubKeyVectors(t *testing.T) {
 		[]byte(v.RootPEM),
 		sk,
 		subkey.Expectation{TrustDomain: "prod.spawnery.internal", Tenancy: pki.ClassSelfHosted, AccountID: "alice"},
-		nil,      // AllowAll revocation
+		allowNoCertificateRevocations,
+		nil,      // AllowAll node-id revocation
 		verifyAt, // within sub-key validity window
 	)
 	if err != nil {

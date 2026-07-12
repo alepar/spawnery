@@ -64,9 +64,9 @@ var ErrRevoked = errors.New("subkey: node is revoked (on the AS deny-list)")
 // compromised CP can relay keys but cannot mint trust: it holds no CA key, so a
 // forged/foreign cert fails (1); it cannot forge the cert-key signature, so a
 // swapped sub-key fails (4).
-func VerifyNodeForSealing(leafPEM, chainPEM, rootPEM []byte, sk SignedSubKey, expect Expectation, revoked RevocationChecker, now time.Time) (trustedHPKEPub []byte, id pki.Identity, err error) {
+func VerifyNodeForSealing(leafPEM, chainPEM, rootPEM []byte, sk SignedSubKey, expect Expectation, certificateRevocations pki.CertificateRevocationChecker, revoked RevocationChecker, now time.Time) (trustedHPKEPub []byte, id pki.Identity, err error) {
 	// (1) chain to pinned root + SAN/tenancy match.
-	id, err = clientverify.VerifyHost(leafPEM, chainPEM, rootPEM, expect, now)
+	id, err = clientverify.VerifyHost(leafPEM, chainPEM, rootPEM, expect, certificateRevocations, now)
 	if err != nil {
 		return nil, pki.Identity{}, err
 	}
@@ -119,8 +119,8 @@ func VerifyNodeForSealing(leafPEM, chainPEM, rootPEM []byte, sk SignedSubKey, ex
 // cryptographically bound to the node and sub-key that were actually verified.
 // The caller supplies the rest of the context (SpawnID, Generation, Version, and
 // the node-issued one-time DeliveryID).
-func SealForNode(env *seal.Envelope, deviceX25519Priv []byte, leafPEM, chainPEM, rootPEM []byte, sk SignedSubKey, expect Expectation, revoked RevocationChecker, aad seal.InFlightAAD, now time.Time) (*seal.NodeSealed, error) {
-	hpkePub, id, err := VerifyNodeForSealing(leafPEM, chainPEM, rootPEM, sk, expect, revoked, now)
+func SealForNode(env *seal.Envelope, deviceX25519Priv []byte, leafPEM, chainPEM, rootPEM []byte, sk SignedSubKey, expect Expectation, certificateRevocations pki.CertificateRevocationChecker, revoked RevocationChecker, aad seal.InFlightAAD, now time.Time) (*seal.NodeSealed, error) {
+	hpkePub, id, err := VerifyNodeForSealing(leafPEM, chainPEM, rootPEM, sk, expect, certificateRevocations, revoked, now)
 	if err != nil {
 		return nil, err
 	}

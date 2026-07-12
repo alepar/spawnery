@@ -39,7 +39,7 @@ func TestPEMRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Verify(gotCert, []*x509.Certificate{inter.Cert}, rootCert, DefaultTrustDomain, time.Now()); err != nil {
+	if _, err := Verify(gotCert, []*x509.Certificate{inter.Cert}, rootCert, DefaultTrustDomain, time.Now(), allowNoCertificateRevocations); err != nil {
 		t.Fatalf("reloaded cert failed verify: %v", err)
 	}
 }

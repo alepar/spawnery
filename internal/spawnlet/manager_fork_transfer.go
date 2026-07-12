@@ -93,13 +93,16 @@ func (m *Manager) ForkTransferExport(ctx context.Context, req ForkTransferExport
 	if err != nil {
 		return ForkTransferExportResult{}, err
 	}
+	if m.cfg.CertificateRevocations == nil {
+		return ForkTransferExportResult{}, errors.New("fork transfer export: certificate revocation state is required")
+	}
 
 	transferKey := make([]byte, 32)
 	if _, err := rand.Read(transferKey); err != nil {
 		return ForkTransferExportResult{}, fmt.Errorf("fork transfer export: generate transfer key: %w", err)
 	}
 	defer zeroBytes(transferKey)
-	sealedKey, _, err := subkey.SealTransferKeyForNode(transferKey, leafPEM, chainPEM, req.NodeRootPEM, signed, expect, subkey.AllowAll{}, seal.InFlightAAD{
+	sealedKey, _, err := subkey.SealTransferKeyForNode(transferKey, leafPEM, chainPEM, req.NodeRootPEM, signed, expect, m.cfg.CertificateRevocations, subkey.AllowAll{}, seal.InFlightAAD{
 		SpawnID:    req.ForkSpawnID,
 		Generation: targetGen,
 		DeliveryID: req.TransferSetID,

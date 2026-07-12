@@ -121,7 +121,7 @@ func TestVerifyNodeForSealingHappyPath(t *testing.T) {
 	fx := issue(t, "n1", "alice", pki.ClassSelfHosted)
 	now := time.Now()
 	sk, _ := mintSubKey(t, fx, now, subkey.DefaultValidity)
-	pub, id, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, fx.root, sk, selfHosted("alice"), subkey.AllowAll{}, now)
+	pub, id, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, fx.root, sk, selfHosted("alice"), allowNoCertificateRevocations, subkey.AllowAll{}, now)
 	if err != nil {
 		t.Fatalf("VerifyNodeForSealing: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestVerifyNodeForSealingRejectsExpiredSubKey(t *testing.T) {
 	fx := issue(t, "n1", "alice", pki.ClassSelfHosted)
 	now := time.Now()
 	sk, _ := mintSubKey(t, fx, now.Add(-2*time.Hour), time.Hour) // expired an hour ago
-	_, _, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, fx.root, sk, selfHosted("alice"), subkey.AllowAll{}, now)
+	_, _, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, fx.root, sk, selfHosted("alice"), allowNoCertificateRevocations, subkey.AllowAll{}, now)
 	if !errors.Is(err, subkey.ErrExpired) {
 		t.Fatalf("want ErrExpired, got %v", err)
 	}
@@ -150,7 +150,7 @@ func TestVerifyNodeForSealingRejectsWrongNodeCert(t *testing.T) {
 	pub, _, _ := seal.NodeKeyPair()
 	// Sub-key claims n1, signed by n2's cert key, presented with n1's real cert.
 	sk, _ := subkey.Sign(attacker.key, "n1", pub, now, now.Add(subkey.DefaultValidity))
-	_, _, err := subkey.VerifyNodeForSealing(victim.leaf, victim.chain, victim.root, sk, selfHosted("alice"), subkey.AllowAll{}, now)
+	_, _, err := subkey.VerifyNodeForSealing(victim.leaf, victim.chain, victim.root, sk, selfHosted("alice"), allowNoCertificateRevocations, subkey.AllowAll{}, now)
 	if !errors.Is(err, subkey.ErrBadSig) {
 		t.Fatalf("want ErrBadSig, got %v", err)
 	}
@@ -161,7 +161,7 @@ func TestVerifyNodeForSealingRejectsWrongSAN(t *testing.T) {
 	fx := issue(t, "n1", "attacker", pki.ClassSelfHosted)
 	now := time.Now()
 	sk, _ := mintSubKey(t, fx, now, subkey.DefaultValidity)
-	_, _, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, fx.root, sk, selfHosted("alice"), subkey.AllowAll{}, now)
+	_, _, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, fx.root, sk, selfHosted("alice"), allowNoCertificateRevocations, subkey.AllowAll{}, now)
 	if err == nil {
 		t.Fatal("a node bound to another account must be rejected")
 	}
@@ -172,7 +172,7 @@ func TestVerifyNodeForSealingRejectsUntrustedRoot(t *testing.T) {
 	other := issue(t, "n9", "alice", pki.ClassSelfHosted) // a DIFFERENT, unpinned root
 	now := time.Now()
 	sk, _ := mintSubKey(t, fx, now, subkey.DefaultValidity)
-	_, _, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, other.root, sk, selfHosted("alice"), subkey.AllowAll{}, now)
+	_, _, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, other.root, sk, selfHosted("alice"), allowNoCertificateRevocations, subkey.AllowAll{}, now)
 	if err == nil {
 		t.Fatal("a chain that does not reach the pinned root must be rejected")
 	}
@@ -183,7 +183,7 @@ func TestVerifyNodeForSealingRejectsRevokedNode(t *testing.T) {
 	now := time.Now()
 	sk, _ := mintSubKey(t, fx, now, subkey.DefaultValidity)
 	revoked := denyList{"n1": true}
-	_, _, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, fx.root, sk, selfHosted("alice"), revoked, now)
+	_, _, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, fx.root, sk, selfHosted("alice"), allowNoCertificateRevocations, revoked, now)
 	if !errors.Is(err, subkey.ErrRevoked) {
 		t.Fatalf("want ErrRevoked, got %v", err)
 	}
@@ -193,7 +193,7 @@ func TestVerifyNodeForSealingFailsClosedOnCheckerError(t *testing.T) {
 	fx := issue(t, "n1", "alice", pki.ClassSelfHosted)
 	now := time.Now()
 	sk, _ := mintSubKey(t, fx, now, subkey.DefaultValidity)
-	_, _, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, fx.root, sk, selfHosted("alice"), errChecker{}, now)
+	_, _, err := subkey.VerifyNodeForSealing(fx.leaf, fx.chain, fx.root, sk, selfHosted("alice"), allowNoCertificateRevocations, errChecker{}, now)
 	if err == nil {
 		t.Fatal("a revocation-check error must fail closed (refuse to seal)")
 	}
@@ -225,7 +225,7 @@ func TestFullRoundTrip(t *testing.T) {
 
 	// Client verifies the node and re-seals the payload to it.
 	baseAAD := seal.InFlightAAD{SpawnID: "sp-1", Generation: 3, Version: 7, DeliveryID: "d-abc"}
-	sealed, err := subkey.SealForNode(env, devPriv, fx.leaf, fx.chain, fx.root, published, selfHosted("alice"), subkey.AllowAll{}, baseAAD, now)
+	sealed, err := subkey.SealForNode(env, devPriv, fx.leaf, fx.chain, fx.root, published, selfHosted("alice"), allowNoCertificateRevocations, subkey.AllowAll{}, baseAAD, now)
 	if err != nil {
 		t.Fatalf("SealForNode: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestTwoConcurrentSubKeySelection(t *testing.T) {
 	base := seal.InFlightAAD{SpawnID: "sp", Generation: 1, Version: 1, DeliveryID: "d1"}
 
 	// Sealed to the OLD sub-key — opens.
-	sealedOld, err := subkey.SealForNode(env, devPriv, fx.leaf, fx.chain, fx.root, sk1, selfHosted("alice"), subkey.AllowAll{}, base, now)
+	sealedOld, err := subkey.SealForNode(env, devPriv, fx.leaf, fx.chain, fx.root, sk1, selfHosted("alice"), allowNoCertificateRevocations, subkey.AllowAll{}, base, now)
 	if err != nil {
 		t.Fatalf("SealForNode old: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestTwoConcurrentSubKeySelection(t *testing.T) {
 
 	// Sealed to the NEW sub-key — also opens.
 	base.DeliveryID = "d2"
-	sealedNew, err := subkey.SealForNode(env, devPriv, fx.leaf, fx.chain, fx.root, sk2, selfHosted("alice"), subkey.AllowAll{}, base, now)
+	sealedNew, err := subkey.SealForNode(env, devPriv, fx.leaf, fx.chain, fx.root, sk2, selfHosted("alice"), allowNoCertificateRevocations, subkey.AllowAll{}, base, now)
 	if err != nil {
 		t.Fatalf("SealForNode new: %v", err)
 	}

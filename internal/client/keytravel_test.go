@@ -252,11 +252,12 @@ func TestMigrateRejectsRevokedNodeBeforeDelivery(t *testing.T) {
 
 	var out bytes.Buffer
 	err = migrateSpawn(context.Background(), client, dev, "sp1", fx.nodeID, &out, now, MoveOptions{
-		AccountID:        "alice",
-		RootPEM:          fx.rootPEM,
-		TrustDomain:      pki.DefaultTrustDomain,
-		RevocationURL:    srv.URL + "/node-revocations",
-		RevocationClient: srv.Client(),
+		AccountID:              "alice",
+		RootPEM:                fx.rootPEM,
+		TrustDomain:            pki.DefaultTrustDomain,
+		RevocationURL:          srv.URL + "/node-revocations",
+		RevocationClient:       srv.Client(),
+		CertificateRevocations: allowNoCertificateRevocations,
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "node is revoked") {
 		t.Fatalf("err = %v", err)
@@ -306,11 +307,12 @@ func TestMigrateRejectsMismatchedVerifiedNodeBeforeDelivery(t *testing.T) {
 
 	var out bytes.Buffer
 	err = migrateSpawn(context.Background(), client, dev, "sp1", "node-b", &out, now, MoveOptions{
-		AccountID:        "alice",
-		RootPEM:          fx.rootPEM,
-		TrustDomain:      pki.DefaultTrustDomain,
-		RevocationURL:    srv.URL + "/node-revocations",
-		RevocationClient: srv.Client(),
+		AccountID:              "alice",
+		RootPEM:                fx.rootPEM,
+		TrustDomain:            pki.DefaultTrustDomain,
+		RevocationURL:          srv.URL + "/node-revocations",
+		RevocationClient:       srv.Client(),
+		CertificateRevocations: allowNoCertificateRevocations,
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "verified node \"node-c\" does not match resolved node \"node-b\"") {
 		t.Fatalf("err = %v", err)
@@ -401,11 +403,12 @@ func TestMigrateRefetchesNodeRevocationsForEachProductionSeal(t *testing.T) {
 
 	var out bytes.Buffer
 	err = migrateSpawn(context.Background(), client, dev, "sp1", fx.nodeID, &out, now, MoveOptions{
-		AccountID:        "alice",
-		RootPEM:          fx.rootPEM,
-		TrustDomain:      pki.DefaultTrustDomain,
-		RevocationURL:    srv.URL + "/node-revocations",
-		RevocationClient: srv.Client(),
+		AccountID:              "alice",
+		RootPEM:                fx.rootPEM,
+		TrustDomain:            pki.DefaultTrustDomain,
+		RevocationURL:          srv.URL + "/node-revocations",
+		RevocationClient:       srv.Client(),
+		CertificateRevocations: allowNoCertificateRevocations,
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("err = %v", err)

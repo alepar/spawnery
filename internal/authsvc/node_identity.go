@@ -35,7 +35,7 @@ func devNodeIdentityMiddleware(header string, next http.Handler) http.Handler {
 	})
 }
 
-func nodeIdentityMiddleware(root *x509.Certificate, next http.Handler, trustDomains ...string) http.Handler {
+func nodeIdentityMiddleware(root *x509.Certificate, revoked pki.CertificateRevocationChecker, next http.Handler, trustDomains ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if root != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 			leaf := r.TLS.PeerCertificates[0]
@@ -49,6 +49,7 @@ func nodeIdentityMiddleware(root *x509.Certificate, next http.Handler, trustDoma
 				TrustDomain: trustDomain,
 				CurrentTime: time.Now(),
 				KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				IsRevoked:   revoked,
 			}); err == nil && id.Kind == pki.KindNode {
 				r = r.WithContext(withNodeIdentity(r.Context(), id))
 			}

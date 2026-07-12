@@ -314,7 +314,9 @@ func main() {
 	var nodeTLSSrv *http.Server // non-nil only in enforced mode; shut down alongside httpSrv
 	if mode == nodeauth.ModeEnforced {
 		var tlsErr error
-		nodeTLSSrv, tlsErr = buildNodeTLSServer(cfg.Node.Listen, nodePath, nodeHandler, cfg.Node.TrustDomain, cfg.Node.RootCA, cfg.Node.TLSCert, cfg.Node.TLSKey)
+		// The CRL distribution slice wires this dependency before enforced mTLS can start.
+		var certificateRevocations pki.CertificateRevocationChecker
+		nodeTLSSrv, tlsErr = buildNodeTLSServer(cfg.Node.Listen, nodePath, nodeHandler, certificateRevocations, cfg.Node.TrustDomain, cfg.Node.RootCA, cfg.Node.TLSCert, cfg.Node.TLSKey)
 		if tlsErr != nil {
 			log.Fatalf("cp: build node mTLS listener: %v", tlsErr)
 		}
@@ -363,7 +365,10 @@ func main() {
 
 // buildNodeTLSServer configures and returns the NodeService mTLS http.Server without starting it.
 // The caller is responsible for calling ListenAndServeTLS and Shutdown.
-func buildNodeTLSServer(addr, nodePath string, nodeHandler http.Handler, trustDomain, rootCAPath, certPath, keyPath string) (*http.Server, error) {
+func buildNodeTLSServer(addr, nodePath string, nodeHandler http.Handler, revoked pki.CertificateRevocationChecker, trustDomain, rootCAPath, certPath, keyPath string) (*http.Server, error) {
+	if revoked == nil {
+		return nil, errors.New("build node TLS server: certificate revocation state is required")
+	}
 	rootPEM, err := os.ReadFile(rootCAPath)
 	if err != nil {
 		return nil, fmt.Errorf("read pinned root CA: %w", err)
@@ -378,9 +383,13 @@ func buildNodeTLSServer(addr, nodePath string, nodeHandler http.Handler, trustDo
 	}
 	nodeMux := http.NewServeMux()
 	nodeMux.Handle(nodePath, nodeHandler)
+	verifiedHandler, err := nodeauth.Middleware(nodeauth.ModeEnforced, root, revoked, nodeMux, trustDomain)
+	if err != nil {
+		return nil, err
+	}
 	server := &http.Server{
 		Addr:    addr,
-		Handler: nodeauth.Middleware(nodeauth.ModeEnforced, root, nodeMux, trustDomain),
+		Handler: verifiedHandler,
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{serverCert},
 			ClientAuth:   tls.RequireAnyClientCert,

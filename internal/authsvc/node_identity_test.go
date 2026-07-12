@@ -17,7 +17,7 @@ func TestNodeIdentityMiddlewareRejectsConfiguredTrustDomainMismatch(t *testing.T
 	leaf, _ := issuer.IssueNode("n", "a", pki.RoleSelfHosted, "staging.spawnery.internal", time.Now().Add(time.Hour))
 	var seen string
 	var ok bool
-	h := nodeIdentityMiddleware(root.Cert, nodeIDProbe(&seen, &ok), "prod.spawnery.internal")
+	h := nodeIdentityMiddleware(root.Cert, allowNoCertificateRevocations, nodeIDProbe(&seen, &ok), "prod.spawnery.internal")
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf.Cert, issuer.Cert}}
 	h.ServeHTTP(httptest.NewRecorder(), req)
@@ -80,7 +80,7 @@ func TestHandler_IgnoresDevHeaderWhenOptionUnset(t *testing.T) {
 	var seen string
 	var ok bool
 	// nodeIdentityMiddleware with nil root: only acts on r.TLS peer certs (nil → no identity set).
-	h := nodeIdentityMiddleware(nil, nodeIDProbe(&seen, &ok))
+	h := nodeIdentityMiddleware(nil, allowNoCertificateRevocations, nodeIDProbe(&seen, &ok))
 	req := httptest.NewRequest(http.MethodPost, "/x", nil)
 	req.Header.Set("X-Spawnery-Dev-Node-Id", "hacker-node")
 	h.ServeHTTP(httptest.NewRecorder(), req)

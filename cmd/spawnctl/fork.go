@@ -42,6 +42,9 @@ func forkCmd() *cli.Command {
 			&cli.StringFlag{Name: "root-ca", Usage: "path to the pinned Root CA PEM for production node verification"},
 			&cli.StringFlag{Name: "trust-domain", Usage: "expected SPIFFE trust domain for production node verification"},
 			&cli.StringFlag{Name: "as", Usage: "Auth Service origin for node revocation checks; defaults to the stored login AS URL"},
+			&cli.StringFlag{Name: "crl-state", Usage: "persistent certificate revocation checkpoint (required with --root-ca)"},
+			&cli.StringSliceFlag{Name: "crl-issuer", Usage: "trusted issuing-intermediate PEM (repeatable; required with --root-ca)"},
+			&cli.StringSliceFlag{Name: "crl", Usage: "current signed CRL PEM to apply before verification (repeatable)"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if c.Args().Len() != 1 {
@@ -53,6 +56,14 @@ func forkCmd() *cli.Command {
 			}
 			req, err := forkTarget(spawnID, c.String("node"), c.String("class"), c.String("name"))
 			if err != nil {
+				return cli.Exit(err.Error(), 2)
+			}
+			rootCAPath := strings.TrimSpace(c.String("root-ca"))
+			trustDomain := strings.TrimSpace(c.String("trust-domain"))
+			crlStatePath := strings.TrimSpace(c.String("crl-state"))
+			issuerPaths := c.StringSlice("crl-issuer")
+			crlPaths := c.StringSlice("crl")
+			if err := validateMovePKIFlags(rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths); err != nil {
 				return cli.Exit(err.Error(), 2)
 			}
 			dir, err := resolveDir(c)
@@ -76,9 +87,12 @@ func forkCmd() *cli.Command {
 				fmt.Fprintln(c.Writer, "  target same node")
 			}
 
-			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), strings.TrimSpace(c.String("root-ca")), strings.TrimSpace(c.String("trust-domain")))
+			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths, time.Now)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
+			}
+			if opts.CloseCertificateRevocations != nil {
+				defer opts.CloseCertificateRevocations()
 			}
 			if _, err := sdk.Fork(ctx, dev, req, c.Writer, time.Now(), opts); err != nil {
 				return cli.Exit("fork failed: "+err.Error(), 1)

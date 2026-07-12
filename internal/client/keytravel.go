@@ -30,6 +30,7 @@ import (
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/internal/clientverify"
+	"spawnery/internal/pki"
 	"spawnery/internal/secrets/journalkey"
 	"spawnery/internal/secrets/seal"
 	"spawnery/internal/secrets/subkey"
@@ -73,11 +74,13 @@ var _ forkClient = (cpv1connect.SpawnServiceClient)(nil)
 // node verification. Loading these from auth.json/env/flags is a CLI concern and stays in
 // spawnctl; Migrate/Fork take a ready MoveOptions.
 type MoveOptions struct {
-	AccountID        string
-	TrustDomain      string
-	RootPEM          []byte
-	RevocationURL    string
-	RevocationClient *http.Client
+	AccountID                   string
+	TrustDomain                 string
+	RootPEM                     []byte
+	RevocationURL               string
+	RevocationClient            *http.Client
+	CertificateRevocations      pki.CertificateRevocationChecker
+	CloseCertificateRevocations func() error
 }
 
 // migrateTarget maps a <target> token onto a MigrateSpawnRequest's node/class fields.
@@ -171,6 +174,9 @@ func deliverOwnerSealedJournalKeys(ctx context.Context, client ownerSealedDelive
 	var revoked subkey.RevocationChecker = subkey.AllowAll{}
 	var expect subkey.Expectation
 	if len(nk.Msg.NodeCertChain) != 0 {
+		if opts.CertificateRevocations == nil {
+			return 0, errors.New("production node verification requires certificate revocation state")
+		}
 		if strings.TrimSpace(opts.RevocationURL) == "" {
 			return 0, errors.New("production node verification requires an Auth Service URL for node revocation checks")
 		}
@@ -186,7 +192,7 @@ func deliverOwnerSealedJournalKeys(ctx context.Context, client ownerSealedDelive
 	for _, e := range entries {
 		version := nk.Msg.Generation
 		deliveryID := genDeliveryID()
-		sealedJSON, rerr := resealJournalKey(e.Ciphertext, dev, sk, nk.Msg.NodeCertChain, opts.RootPEM, expect, revoked, expectedNodeID, spawnID, nk.Msg.Generation, version, deliveryID, now)
+		sealedJSON, rerr := resealJournalKey(e.Ciphertext, dev, sk, nk.Msg.NodeCertChain, opts.RootPEM, expect, opts.CertificateRevocations, revoked, expectedNodeID, spawnID, nk.Msg.Generation, version, deliveryID, now)
 		if rerr != nil {
 			return 0, fmt.Errorf("reseal journal key for mount %q: %w", e.Mount, rerr)
 		}
@@ -211,7 +217,7 @@ func deliverOwnerSealedJournalKeys(ctx context.Context, client ownerSealedDelive
 // seal.NodeSealed the CP relays. When the CP relayed a node cert chain (enforced/prod mode), the
 // chain+sub-key are PKI-verified, revocation-checked, and compared against the CP-resolved node id;
 // in dev/insecure mode the chain is empty and the relayed sub-key's HPKE pubkey is used directly.
-func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKey, certChain []byte, rootPEM []byte, expect subkey.Expectation, revoked subkey.RevocationChecker, expectedNodeID string, spawnID string, generation uint64, version uint64, deliveryID string, now time.Time) ([]byte, error) {
+func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKey, certChain []byte, rootPEM []byte, expect subkey.Expectation, certificateRevocations pki.CertificateRevocationChecker, revoked subkey.RevocationChecker, expectedNodeID string, spawnID string, generation uint64, version uint64, deliveryID string, now time.Time) ([]byte, error) {
 	var env seal.Envelope
 	if err := json.Unmarshal(ciphertext, &env); err != nil {
 		return nil, fmt.Errorf("ciphertext is not a valid owner-sealed envelope: %w", err)
@@ -241,7 +247,7 @@ func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKe
 	if err != nil {
 		return nil, err
 	}
-	hpkePub, id, err := subkey.VerifyNodeForSealing(leafPEM, chainPEM, rootPEM, sk, expect, revoked, now)
+	hpkePub, id, err := subkey.VerifyNodeForSealing(leafPEM, chainPEM, rootPEM, sk, expect, certificateRevocations, revoked, now)
 	if err != nil {
 		return nil, err
 	}

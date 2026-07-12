@@ -28,10 +28,13 @@ const (
 // Middleware authenticates node connections before they reach the handler. In enforced mode it derives
 // the identity from the client cert (401 if absent/invalid) and stashes it on the request context; in
 // insecure mode it passes through with no identity.
-func Middleware(mode Mode, root *x509.Certificate, next http.Handler, trustDomains ...string) http.Handler {
+func Middleware(mode Mode, root *x509.Certificate, revoked pki.CertificateRevocationChecker, next http.Handler, trustDomains ...string) (http.Handler, error) {
+	if mode == ModeEnforced && revoked == nil {
+		return nil, errors.New("nodeauth: certificate revocation checker is required in enforced mode")
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if mode == ModeEnforced {
-			id, err := DeriveIdentity(r.TLS, root, time.Now(), trustDomains...)
+			id, err := DeriveIdentity(r.TLS, root, revoked, time.Now(), trustDomains...)
 			if err != nil {
 				http.Error(w, "node authentication required", http.StatusUnauthorized)
 				return
@@ -43,12 +46,12 @@ func Middleware(mode Mode, root *x509.Certificate, next http.Handler, trustDomai
 			r = r.WithContext(ctx)
 		}
 		next.ServeHTTP(w, r)
-	})
+	}), nil
 }
 
 // DeriveIdentity verifies the TLS peer's client certificate chain against the pinned root and returns
 // the node identity from its SAN. It rejects connections with no client certificate.
-func DeriveIdentity(state *tls.ConnectionState, root *x509.Certificate, now time.Time, trustDomains ...string) (pki.Principal, error) {
+func DeriveIdentity(state *tls.ConnectionState, root *x509.Certificate, revoked pki.CertificateRevocationChecker, now time.Time, trustDomains ...string) (pki.Principal, error) {
 	if state == nil || len(state.PeerCertificates) == 0 {
 		return pki.Principal{}, errors.New("nodeauth: no client certificate")
 	}
@@ -63,6 +66,7 @@ func DeriveIdentity(state *tls.ConnectionState, root *x509.Certificate, now time
 		TrustDomain: trustDomain,
 		CurrentTime: now,
 		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		IsRevoked:   revoked,
 	})
 	if err != nil {
 		return pki.Principal{}, err
