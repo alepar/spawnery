@@ -104,7 +104,7 @@ func TestMaterialize_ProgressEventsPerByRefArtifact(t *testing.T) {
 		arts = append(arts, fx.art)
 	}
 	rec := &recordingProgress{t: t}
-	if err := st.Materialize(context.Background(), "sp1", arts, sec, rec.fn); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", arts, sec, rec.fn, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	if rec.count() < 3 {
@@ -142,7 +142,7 @@ func TestMaterialize_HeartbeatWhileFetchInFlight(t *testing.T) {
 	rec := &recordingProgress{t: t}
 
 	art := Artifact{ID: "slow", ContentType: ArtifactTar, DestPath: "payloads/slow", PresignedURL: srv.URL + "/obj", Sha256: hexSum}
-	if err := st.Materialize(context.Background(), "sp1", []Artifact{art}, sec, rec.fn); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", []Artifact{art}, sec, rec.fn, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 
@@ -185,7 +185,7 @@ func TestMaterialize_AggregateDeadlineAppliesOnce(t *testing.T) {
 	}
 
 	start := time.Now()
-	err := st.Materialize(context.Background(), "sp1", arts, sec, nil)
+	err := st.Materialize(context.Background(), "sp1", arts, sec, nil, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -221,7 +221,7 @@ func TestMaterialize_ParentDeadlineStillWins(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := st.Materialize(ctx, "sp1", []Artifact{art}, sec, nil)
+	err := st.Materialize(ctx, "sp1", []Artifact{art}, sec, nil, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -263,7 +263,7 @@ func TestMaterialize_ParallelFetchBounded(t *testing.T) {
 
 	st := ArtifactStager{Root: t.TempDir(), fetcher: func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) }}
 	sec := SecretInjector{Root: t.TempDir()}
-	if err := st.Materialize(context.Background(), "sp1", arts, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", arts, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 
@@ -301,7 +301,7 @@ func TestMaterialize_TerminalFailureCancelsRest(t *testing.T) {
 	sec := SecretInjector{Root: t.TempDir()}
 
 	start := time.Now()
-	err := st.Materialize(context.Background(), "sp1", arts, sec, nil)
+	err := st.Materialize(context.Background(), "sp1", arts, sec, nil, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -348,7 +348,7 @@ func TestFetchWithRetry_SucceedsAfterTransientFailures(t *testing.T) {
 	sec := SecretInjector{Root: t.TempDir()}
 	art := Artifact{ID: "a", ContentType: ArtifactTar, DestPath: "payloads/a", PresignedURL: srv.URL + "/obj", Sha256: hexSum}
 
-	if err := st.Materialize(context.Background(), "sp1", []Artifact{art}, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", []Artifact{art}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	if got := atomic.LoadInt32(&gets); got != 3 {
@@ -373,7 +373,7 @@ func TestFetchWithRetry_ExhaustsAfterAttempts(t *testing.T) {
 	presigned := srv.URL + "/obj?X-Amz-Signature=super-secret-query-value"
 	art := Artifact{ID: "a", ContentType: ArtifactTar, DestPath: "payloads/a", PresignedURL: presigned, Sha256: "ignored"}
 
-	err := st.Materialize(context.Background(), "sp1", []Artifact{art}, sec, nil)
+	err := st.Materialize(context.Background(), "sp1", []Artifact{art}, sec, nil, nil)
 	if err == nil {
 		t.Fatal("expected retry exhaustion error")
 	}
@@ -411,7 +411,7 @@ func TestFetchWithRetry_TerminalShortCircuits(t *testing.T) {
 	sec := SecretInjector{Root: t.TempDir()}
 	art := Artifact{ID: "a", ContentType: ArtifactTar, DestPath: "payloads/a", PresignedURL: srv.URL + "/obj", Sha256: "ignored"}
 
-	err := st.Materialize(context.Background(), "sp1", []Artifact{art}, sec, nil)
+	err := st.Materialize(context.Background(), "sp1", []Artifact{art}, sec, nil, nil)
 	if err == nil {
 		t.Fatal("expected 404 error")
 	}
@@ -446,10 +446,10 @@ func TestCache_HitSkipsGet(t *testing.T) {
 	sec := SecretInjector{Root: t.TempDir()}
 	art := Artifact{ID: "a", ContentType: ArtifactTar, DestPath: "payloads/a", PresignedURL: srv.URL + "/obj", Sha256: hexSum}
 
-	if err := st.Materialize(context.Background(), "spawnA", []Artifact{art}, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "spawnA", []Artifact{art}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize spawnA: %v", err)
 	}
-	if err := st.Materialize(context.Background(), "spawnB", []Artifact{art}, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "spawnB", []Artifact{art}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize spawnB: %v", err)
 	}
 
@@ -490,7 +490,7 @@ func TestCache_CorruptEntryRefetches(t *testing.T) {
 	sec := SecretInjector{Root: t.TempDir()}
 	art := Artifact{ID: "a", ContentType: ArtifactTar, DestPath: "payloads/a", PresignedURL: srv.URL + "/obj", Sha256: hexSum}
 
-	if err := st.Materialize(context.Background(), "spawnA", []Artifact{art}, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "spawnA", []Artifact{art}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize spawnA: %v", err)
 	}
 	// Corrupt the cache entry.
@@ -499,7 +499,7 @@ func TestCache_CorruptEntryRefetches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := st.Materialize(context.Background(), "spawnB", []Artifact{art}, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "spawnB", []Artifact{art}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize spawnB (after corruption): %v", err)
 	}
 	if got := atomic.LoadInt32(&gets); got != 2 {
@@ -535,10 +535,10 @@ func TestCache_EmptyShaNeverCached(t *testing.T) {
 	// No Sha256 set: nothing to key the cache on.
 	art := Artifact{ID: "a", ContentType: ArtifactTar, DestPath: "payloads/a", PresignedURL: srv.URL + "/obj"}
 
-	if err := st.Materialize(context.Background(), "spawnA", []Artifact{art}, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "spawnA", []Artifact{art}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize spawnA: %v", err)
 	}
-	if err := st.Materialize(context.Background(), "spawnB", []Artifact{art}, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "spawnB", []Artifact{art}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize spawnB: %v", err)
 	}
 	if got := atomic.LoadInt32(&gets); got != 2 {
@@ -639,7 +639,7 @@ func TestMaterialize_BundleScaleAcceptance(t *testing.T) {
 	}
 
 	start := time.Now()
-	if err := st.Materialize(context.Background(), "sp-bundle", arts, sec, wrapped); err != nil {
+	if err := st.Materialize(context.Background(), "sp-bundle", arts, sec, wrapped, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 

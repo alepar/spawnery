@@ -219,3 +219,17 @@ used.*
   demoted to spike-gated (§4.5); the config allowlist is inert and a security downgrade — dropped
   (§4.6); S5 measured the first GET instead of the last (§4.8); node-side content-addressed cache
   added (§4.1).
+
+- **2026-07-12 — sp-mwco.4.2 Phase 0 spike results** (live dev Garage, `internal/cp/skillstore/presign_expiry_spike_test.go`,
+  build tag `garage_e2e`). Confirms expiry is cleanly distinguishable from a signature/config fault by
+  the parsed S3 error `Code`+`Message` (never the bare HTTP status):
+
+  | Case | HTTP | Code | Message |
+  |---|---|---|---|
+  | Expired presign (1s TTL, slept 2s) | 400 | `InvalidRequest` | `Bad request: Date is too old` |
+  | Tampered `X-Amz-Signature` (fresh presign) | 403 | `AccessDenied` | `Forbidden: Invalid signature` |
+  | Nonexistent key (fresh presign) | 404 | `NoSuchKey` | `Key not found` |
+
+  Note Garage's `AccessDenied` message for a bad signature carries no "expired"/"too old" wording —
+  the classifier's expiry markers (`InvalidRequest`+"too old", or `AccessDenied`+"expired") do not
+  collide with the tampered-signature case. `classifyS3Error` (artifacts.go) implements this table.
