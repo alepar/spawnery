@@ -1,116 +1,221 @@
-# Skill Delivery Hardening — Re-Presign, Live Error Taxonomy, Config Surface
+# Skill Delivery Hardening — Re-Presign, Live Error Taxonomy, Staging Budget, Config Surface
 
-**Date:** 2026-07-12
-**Status:** draft
-**Epic:** `sp-mwco.4` *(Mode B one-shot spec — decisions made solo from the 2026-07-11 audit; review before implementation)*
+**Date:** 2026-07-12 (revised 2026-07-12 after roast BLOCK)
+**Status:** draft (roasted → BLOCK → revised)
+**Epic:** `sp-mwco.4`
 **Extends:** [Profile Skill Ingestion from a GitHub URL](2026-06-22-profile-skill-url-ingestion-design.md) §4.6/§4.9/§4.11
+**Siblings:** [Skill Bundles](2026-07-12-skill-bundles-design.md) (`sp-mwco.1`) — bundles are what break the current staging budget
 
 ## 1. Problem
 
-The parent spec mandated four pieces that shipped incomplete. (a) The node→CP **re-presign RPC**
-does not exist — the 30-minute presign TTL is the only defense against expiry on a cold start, and
-spike S5 (cold-start StartSpawn→first-GET latency) never ran, so that TTL is unvalidated.
-(b) The node's **error taxonomy is built but dead**: `spawnlet/artifacts.go` correctly classifies
-404 → terminal `skill object missing` vs transport → retryable `Garage unreachable` vs 403/5xx →
-retryable, but nothing consumes `FetchError.Terminal` — no retry happens on retryable, no clean
-terminal fail on terminal; both bubble up as a generic create failure. (c) The **size caps and
-host allowlist are hardcoded** package consts despite §4.11 listing them as config-surfaced.
-(d) The per-owner ingest **quota has no backoff guidance**. Related: `sp-nrzf.3.14.8` (resume
-hard-depends on Garage even with a delta image) belongs to this hardening theme.
+The parent spec mandated four pieces that shipped incomplete, and bundles (`sp-mwco.1`) turn two of
+them from latent debt into **happy-path failures**:
 
-## 2. Main challenges
+- The node→CP **re-presign RPC** does not exist; the 30-minute TTL is the only defense against
+  expiry, and spike S5 (cold-start latency) never ran.
+- The node's **error taxonomy is built but dead**: `spawnlet/artifacts.go` classifies 404 → terminal,
+  transport → retryable, 403/5xx → retryable, but **nothing consumes `FetchError.Terminal`** — no
+  retry, no clean terminal failure; everything bubbles up as a generic create error.
+- **Size caps and the host allowlist are hardcoded** despite §4.11 promising a config surface.
+- The ingest quota has no backoff guidance.
+- `sp-nrzf.3.14.8` (resume hard-depends on Garage even with a delta image) belongs to this theme.
 
-The node↔CP channel is a single `Attach` bidi stream (`proto/node/v1/node.proto`) — re-presign
-must ride it without a new dialing surface. Retry logic must respect the CP-side suspend/create
-stall windows (a node retrying for minutes while the CP's 30s stall window expires helps nobody).
+## 2. What the roast changed
+
+Three of this spec's original claims were **false**, and one mechanism was **dead on arrival**:
+
+1. **"Backoff ceiling well under the CP stall window" was wrong three ways.** It counted only ~13 s
+   of sleeps while ignoring the **5-minute per-attempt HTTP timeout** (`spawnlet/artifacts.go:30`)
+   → ~15 min *per artifact*; `Materialize` is a **serial** loop with **no aggregate deadline** → ×N
+   members; and **no progress event is emitted inside staging**, so the CP's 30 s no-progress stall
+   timer never resets. With a 20-member bundle this breaks the **happy path**, not just the retry
+   path.
+2. **Re-presign on "403 and only 403" is dead on the exact failure it exists to fix.** Garage returns
+   **400 / `InvalidRequest` ("Date is too old")** for an *expired* presign; 403 (`AccessDenied` /
+   `SignatureDoesNotMatch`) means clock skew, proxy Host rewriting, or endpoint mismatch — a
+   *persistent config fault* that would burn the retry budget and then misreport "Garage
+   unreachable".
+3. **"Hook it where the placeholder comment sits (artifacts.go:191)"** — line 191 is inside a **doc
+   comment**, in a package that deliberately holds no stream handle and imports no proto.
+4. **"node-side `maxPlainTarBytes` follows via the existing spawnlet config path"** is false:
+   `defaultFetcher` (a package func, not a method) bounds the compressed body against the
+   **hardcoded const**, never `tarCap()` — a hidden 50 MiB gate would survive any config raise.
 
 ## 3. Key decisions
 
-Re-presign becomes a message pair on the existing Attach stream. The node consumes its own
-taxonomy: bounded in-node retries for retryable, immediate clean failure for terminal, re-presign
-on 403. Caps/allowlist move into the skills config block with current values as defaults. S5 runs
-in the VM e2e lane and its measurement is recorded here. `sp-nrzf.3.14.8` is folded into this
-epic.
+The staging budget (deadline + progress events + parallel fetch + a node-side content-addressed
+cache) is now the **first** piece, because bundles break it. Re-presign triggers on the **parsed S3
+error code**, not an HTTP status, and is **key-scoped to the spawn's own artifacts** (it is otherwise
+a cross-tenant presign oracle). The resume-gating fold is **demoted to spike-gated**.
 
-## 4. Decision points, by section
+## 4. Design
 
-### 4.1 Re-presign over the Attach stream
+### 4.1 Staging budget: deadline, progress, parallelism, cache *(blocker fix — bundles break the happy path)*
 
-**Chosen:** two new messages on the existing node↔CP Attach stream:
-`RepresignArtifactsRequest{spawn_id, object_keys[]}` (node→CP) and
-`RepresignArtifactsResponse{object_key → presigned_url}` (CP→node). CP handler re-presigns via the
-existing `skillStore.PresignedGet` (same TTL, same node-endpoint client) after checking the spawn
-belongs to that node (generation-fenced like other node messages). The node hooks it exactly where
-the placeholder comment sits (`artifacts.go:191`): on `403` — and only 403 — request fresh URLs
-once, then resume the bounded retry loop. **Discarded:** a new unary CP RPC callable by nodes
-(nodes deliberately have no CP-facing unary auth surface; the stream already carries fenced
-node-scoped messages); persisting longer-lived URLs (bearer-capability lifetime creep, rejected in
-the parent spec).
+- **Per-attempt HTTP timeout** reduced to fit the budget (from 5 min) and stated explicitly.
+- **Aggregate staging deadline** across all artifacts of a spawn (not per-artifact), enforced in
+  `Materialize`.
+- **A progress event per artifact**, emitted from inside `Materialize`. This is the load-bearing
+  one: without it the CP's no-progress stall timer fires regardless of how the retries are tuned.
+- **Parallel fetch** (bounded, e.g. 4 concurrent) instead of the serial loop — a 20-member bundle is
+  20 serial GETs today.
+- **Node-local sha-keyed artifact cache.** Object keys are immutable content hashes, so caching is
+  trivially correct. `Materialize` currently wipes staging and re-downloads **every** artifact on
+  **every** start; bundles multiply per-spawn Garage reads 20–60×. Cache hits also make a Garage
+  brownout survivable for a re-start of the same content.
+- **Retry budget** (after the above): retryable → 3 jittered attempts within the aggregate deadline;
+  terminal → immediate.
 
-### 4.2 Consume the taxonomy (make `FetchError.Terminal` load-bearing)
+### 4.2 Consume the taxonomy — and trigger re-presign on the S3 error code, not the status
 
-**Chosen:** in the node's materialize path: **retryable** (connection refused/reset, 5xx) → up to
-3 attempts with jittered backoff (~1s/3s/9s, ceiling well under the CP stall window); **403** →
-one re-presign round (§4.1) then the retry budget; **terminal** (404, sha mismatch, over-cap) →
-fail immediately, no retries. `manager.go` stops wrapping generically: a terminal artifact error
-fails the create/resume with the taxonomy's message surfaced to the spawn error (user-visible
-"skill object missing (404): skills/<sha>.tar.zst"), and a retryable exhaustion surfaces as
-"Garage unreachable after 3 attempts". Hermetic tests fake the fetcher and assert the branch
-behavior — the audit showed the flag is set correctly; only consumption is new. **Discarded:**
-CP-driven retries (the CP can't distinguish node-side transport errors; the node owns the fetch);
-unbounded retry (wedges create under the stall window).
+`FetchError.Terminal` becomes load-bearing (it is set correctly today; only consumption is new):
 
-### 4.3 Optional CP-side HEAD before presign
+- **Expired presign** — detected by parsing the **S3 error `Code` from the XML body**
+  (`InvalidRequest` / "Date is too old"), *not* by HTTP status → one re-presign round (§4.3), then
+  the retry budget.
+- **`AccessDenied` / `SignatureDoesNotMatch` (403)** → **terminal**, with a distinct message naming
+  the likely cause (clock skew / endpoint or Host mismatch). Retrying a config fault is pointless.
+- **404 / sha mismatch / over-cap** → terminal, immediate clean failure, user-visible message.
+- **Transport (connection refused/reset, 5xx)** → retryable within the budget; exhaustion surfaces
+  as "Garage unreachable after N attempts".
 
-**Chosen (cheap, included):** `StatObject` per distinct object key at StartSpawn presign time,
-failing the start with `FailedPrecondition "skill object missing"` before scheduling the node —
-the parent spec deferred this "unless free"; with the minio client and keys already in hand it is
-one call per skill, and it converts a late node-side terminal failure into an early, clearer CP
-error. Bounded: skipped when a spawn has >8 by-ref artifacts (bundles) to avoid serial HEAD storms
-— the node-side 404 contract (§4.2) remains the backstop. **Discarded:** always-HEAD (latency
-scales with bundle size for an error that is rare).
+**Spike (gates this section):** with `just garage`, presign with a 1 s TTL, sleep, `curl -i`; repeat
+with a mangled signature. Record the exact status + XML `Code` for each. Kill criterion: if expiry is
+not distinguishable from a signature fault by code, the trigger must be redesigned.
 
-### 4.4 Config surface for caps + allowlist
+**Do not leak the presigned URL into the spawn error.** `url.Error.Error()` embeds the full URL
+including `X-Amz-Signature`, and the chain `manager.go:1251 → attach.go:709 → server.go:1461
+SetError` **persists it to the DB and the web UI** — a 30-minute bearer capability in plain sight.
+The user-facing message is formatted from `FetchError.msg` **alone**, never `.Error()`/`Unwrap()`.
+*(This may already be a live bug in shipped code — file it separately.)*
 
-**Chosen:** move `WireCapBytes`, `DecompressedCapBytes`, `PlainTarCapBytes`, `FileCountCap`,
-`HTTPTimeout`, and the fetch host allowlist from consts/vars (`skillfetch.go:29-40`,
-`fetch.go:18-22`) into the `skills.*` config block (koanf + env, matching the existing
-`SKILLS_*` names), defaults = current values. The allowlist stays append-only semantics-wise:
-config *extends* known-good GitHub hosts rather than replacing them, so a typo cannot silently
-disable SSRF containment. Node-side `maxPlainTarBytes` follows via the existing spawnlet config
-path so the two ends agree. **Discarded:** replacing the allowlist wholesale from config
-(footgun); leaving caps hardcoded (spec debt, and bundles change the size calculus).
+### 4.3 Re-presign over the Attach stream
 
-### 4.5 Quota backoff
+Message pair on the existing node↔CP Attach stream:
+`RepresignArtifactsRequest{request_id, spawn_id, generation, object_keys[]}` (node→CP) and
+`RepresignArtifactsResponse{request_id, object_key → presigned_url}` (CP→node).
 
-**Chosen:** the quota rejection message gains the window reset time (`retry after ~Nm`), mirroring
-the GitHub 429 handling; the in-memory counter is otherwise unchanged. **Discarded:** token-bucket
-smoothing / persistent quota state (no evidence MVP needs it).
+Details the earlier draft omitted:
 
-### 4.6 S5 measurement + `sp-nrzf.3.14.8`
+- This would be the **first node-initiated request/response** on Attach (every existing node→CP
+  variant is an unsolicited event or an ack). It therefore needs: `request_id` + `generation` on
+  both messages (the "generation-fenced" claim was made without carrying a generation), a node-side
+  **pending-request map**, a CP-side spawn→node ownership resolver, a **response timeout**, and
+  defined behavior on **Attach reconnect mid-fetch**.
+- **Key-scoping (security, one line, do not omit):** the CP **intersects the requested `object_keys`
+  with the spawn's persisted artifact rows** and rejects any key not in that set. Without it, the
+  only check is "does the spawn belong to this node" — and since the skills bucket is one global
+  content-addressed namespace with **guessable keys** (anyone who can fetch the same public repo
+  reproduces the sha), any untrusted self-hosted node with one live spawn could have the CP mint
+  30-minute bearer GETs for **arbitrary** skill objects.
+- `object_keys[]` length and call rate are bounded.
+- The **denylist from `sp-mwco.3` §4.2 is consulted here too** — a revoked sha is never re-presigned.
+- The node-side seam is a real cross-layer callback + response demux (the package holds no stream
+  handle today), not a one-line hook at a comment.
 
-**Chosen:** run S5 in the VM e2e lane (cold image cache: StartSpawn→first Garage GET, p99),
-record the number in this spec's notes, and assert TTL headroom (>10× p99) in the lane test.
-Fold `sp-nrzf.3.14.8` here: when a resume has a delta image containing the agent home, skip
-re-materialize of by-ref skill artifacts (first-create-only gating per parent spec §5/S4) — with
-the re-presign RPC as the fallback when gating is off. **Discarded:** raising the TTL blindly
-(the re-presign RPC is the correct long-tail fix).
+### 4.4 CP-side HEAD before presign
 
-### 4.7 Testing
+`StatObject` per **distinct** object key at StartSpawn, failing early with `FailedPrecondition
+"skill object missing"` rather than letting the node discover it.
 
-Hermetic: taxonomy consumption branches (retryable exhaust / 403→re-presign→success / terminal
-immediate); re-presign handler fencing (wrong node/generation rejected); config plumb-through
-(caps + allowlist extension); HEAD-gate skip at >8 refs. E2e (existing lanes): 403-expiry
-simulation (presign with 1s TTL override, node recovers via re-presign); VM lane S5 measurement.
+- **`StatObject` is not on the `SkillStore` interface** (`PutIfAbsent` + `PresignedGet` only) — the
+  interface and its fake must change. It was costed as "free"; it is not.
+- **No `>8` carve-out.** The earlier draft switched the gate off above 8 by-ref artifacts — i.e. for
+  every bundle, the flagship case. If the node-side 404 backstop is adequate for bundles it is
+  adequate for 1–8. Objects are immutable and content-addressed, so make the HEADs **parallel** and
+  memoize a "known-present" sha set; then apply the gate uniformly, or drop it entirely and rely on
+  §4.2's node-side contract. (The spec keeps it, parallel + memoized.)
+- It gets its **own timeout** and a **transport-vs-missing** error split — a Garage brownout must
+  report `Unavailable`, not mass-report "skill object missing".
+- **Interaction with §4.5:** the gate is skipped exactly when re-materialize is skipped.
+
+### 4.5 Resume gating (`sp-nrzf.3.14.8`) — spike-gated, not chosen
+
+The earlier draft *chose* to skip by-ref re-materialize on a delta-image resume. Demoted to
+**spike-gated**, because it rests on an unrun assumption and, if implemented naively, **breaks every
+resume**:
+
+- The premise "a resume's delta image contains the agent home" comes from parent-spec spike **S4,
+  which was never run** — and `sp-mwco.2` simultaneously moves the install target to
+  `~/.agents/skills`, which may not be in the delta at all.
+- Naive gating breaks the staging/manifest contract: `Materialize` wipes and recreates staging every
+  start, `manifest.json` is an **inline** artifact still delivered every start, and the launcher
+  re-runs `apply-artifacts` every launch → a gated resume hands `agentinstall` a manifest listing
+  payload dirs that were never fetched → `StatusFailed` ("skill source directory does not exist") for
+  **every skill, on every resume**. Worse, `installSkillTree`'s unconditional `RemoveAll(dest)` would
+  **delete the delta-image copy** it was supposed to reuse.
+- Therefore, if the spike says gating is viable, it must suppress **the manifest artifact and the
+  apply phase together** (or skip the staging wipe), state whether the decision is CP- or node-side,
+  and reconcile stale skill trees already baked into existing delta images.
+- **Spike:** create → suspend → **stop Garage** → resume → `ls` the install path + read
+  `apply-report.json`. Kill criterion: skill absent, or home not in the delta → gating is unsound;
+  by-ref materialize stays on every start and re-presign (§4.3) becomes load-bearing.
+
+### 4.6 Config surface for caps
+
+Move `WireCapBytes`, `DecompressedCapBytes`, `PlainTarCapBytes`, `FileCountCap`, `HTTPTimeout` into
+the `skills.*` config block (koanf + env, `SKILLS_*`), defaults = current values.
+
+- **Fix `defaultFetcher`** to consult `tarCap()` rather than the hardcoded const (§2.4), or the
+  node keeps a hidden 50 MiB gate.
+- **The cap must be on the wire.** Otherwise it is two independently-deployed sources of truth: raise
+  it CP-side (as bundles invite) without redeploying every self-hosted node and ingest succeeds while
+  the node fetch fails terminally. Carry the effective cap in the `ArtifactSpec`, or have the node
+  advertise its cap at registration and the CP refuse to schedule above it.
+- Any cap raise is bounded by `sp-mwco.1` §4.2's CP memory budget (~3× decompressed per in-flight
+  ingest) and its concurrent-ingest semaphore.
+
+**The host allowlist is NOT config-surfaced** (reversing the earlier draft). It cannot enable ingest
+from a new host at all — `ParseRepoURL` rejects non-github.com and `tarballURL` is hardcoded — so it
+only widens the set of hosts a **redirect chain may leave GitHub for**. As a config knob it is inert
+for its stated purpose and a pure security downgrade (the "append-only, so a typo can't disable
+containment" rationale defends the wrong failure mode: here **addition** is the risk). It stays a
+code constant. A test asserts a config-added host cannot originate a fetch.
+
+### 4.7 Quota backoff
+
+The quota rejection message gains the window reset time (`retry after ~Nm`), mirroring the GitHub 429
+handling. Note `sp-mwco.1` §4.8 adds the **CP-wide** refetch budget that the per-owner quota does not
+provide.
+
+### 4.8 S5 — measure the right thing
+
+The presign TTL must cover the **last** artifact's GET, not the first: all URLs are minted at
+StartSpawn and (today) fetched serially. Restate S5 as **"StartSpawn → *last* artifact GET, p99, on
+an N-member bundle, cold image cache"**, run it in the VM e2e lane, record the number here, and
+assert TTL headroom against *that*. §4.1's parallel fetch shrinks it; §4.3's re-presign is the
+backstop.
+
+### 4.9 Testing
+
+Hermetic: taxonomy consumption (retryable exhaust / expired-code → re-presign → success /
+`AccessDenied` terminal / 404 terminal); re-presign fencing (wrong node, wrong generation, **key not
+in the spawn's artifact set** → rejected); denylist blocks re-presign; presigned URL absent from the
+spawn error string; aggregate deadline + per-artifact progress events; cache hit skips the GET; config
+plumb-through incl. the wire cap; allowlist cannot originate a fetch. E2e: 1 s-TTL expiry recovered
+via re-presign; VM-lane S5 on a bundle.
 
 ## 5. Out of scope
 
-GC/refcounting of Garage objects; by-ref for sensitive artifacts; non-GitHub hosts (the allowlist
-extension mechanism exists, but vetting new hosts is a product decision); log-scrubbing middleware
-for presigned URLs (today's by-omission redaction stands; noted as accepted risk).
+Garage object GC (revocation is `sp-mwco.3`'s denylist); by-ref for sensitive artifacts; non-GitHub
+hosts; a general log-scrubbing middleware (§4.2 fixes the specific leak that reaches the DB/UI).
 
 ## Post-Implementation Notes
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged
 from the assumptions above — append a dated note here, whether or not a formal debugging skill was
 used.*
+
+- **2026-07-12 — roasted (BLOCK) and revised.** Blockers: the retry/timeout math was wrong by ~60×
+  and emits no progress events, so bundles break the **happy path** (§4.1); re-presign triggered on
+  403 while Garage returns **400/`InvalidRequest`** for an expired presign — dead on arrival (§4.2).
+  False claims corrected: "hook at artifacts.go:191" (a doc comment, in a package with no stream
+  handle) (§4.3); "node-side cap follows via config" (`defaultFetcher` uses the const) (§4.6);
+  "StatObject is free" (not on the `SkillStore` interface) (§4.4). Majors folded: re-presign is a
+  **cross-tenant presign oracle** without key-scoping to the spawn's own artifacts (§4.3);
+  re-presign needs `request_id`/`generation`/pending-map/timeout/reconnect semantics (§4.3); the
+  presigned URL **leaks into the persisted spawn error and the web UI** (§4.2); the HEAD gate was
+  switched off exactly where needed (§4.4); resume gating would break **every** resume and is
+  demoted to spike-gated (§4.5); the config allowlist is inert and a security downgrade — dropped
+  (§4.6); S5 measured the first GET instead of the last (§4.8); node-side content-addressed cache
+  added (§4.1).
