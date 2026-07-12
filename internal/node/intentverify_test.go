@@ -83,11 +83,12 @@ func buildIntentEnvelope(t *testing.T, asPriv testArtifactSigner, ks *token.Veri
 
 func makeVerifier(t *testing.T, ks *token.Verifier, nodeOwner, nodeID string, selfHosted bool, now func() time.Time) *IntentVerifier {
 	t.Helper()
-	return NewIntentVerifier(ks, nodeOwner, nodeID, selfHosted, AuthModeEnforced, now)
+	return NewIntentVerifier(ks, nodeOwner, nodeID, selfHosted, now)
 }
 
 func goodStartFields(spawnID, nodeID string, gen uint64) StartFields {
 	return StartFields{
+		Op:            intent.OpCreateSpawn,
 		SpawnID:       spawnID,
 		Generation:    gen,
 		AppRef:        "app/ref@sha256:abc",
@@ -126,7 +127,7 @@ func TestVerifyStartHappyPath(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.AssertedOwner = "alice"
 
-	nack, detail := v.VerifyStart(env, fields)
+	_, nack, detail := v.VerifyStart(env, fields)
 	if nack != "" {
 		t.Fatalf("expected success, got nack=%s detail=%s", nack, detail)
 	}
@@ -149,7 +150,7 @@ func TestCorrespondenceSubstitutedImageRefused(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.Image = "malicious@sha256:evil" // CP substituted image
 
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKCorrespondence {
 		t.Fatalf("substituted image: want NACKCorrespondence, got %q", nack)
 	}
@@ -165,7 +166,7 @@ func TestCorrespondenceSubstitutedAttachedSecretSetRefused(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.AttachedSecretIDs = []string{"manifest-secret", "substituted-secret"}
 	v := makeVerifier(t, ks, "alice", "node-1", false, func() time.Time { return now })
-	if nack, _ := v.VerifyStart(env, fields); nack != NACKCorrespondence {
+	if _, nack, _ := v.VerifyStart(env, fields); nack != NACKCorrespondence {
 		t.Fatalf("substituted attached secrets: got %q, want %q", nack, NACKCorrespondence)
 	}
 }
@@ -183,7 +184,7 @@ func TestCorrespondenceSubstitutedTargetRefused(t *testing.T) {
 	v := makeVerifier(t, ks, "alice", "node-different", false, clock) // but verifier is on node-different
 	fields := goodStartFields("sp-1", "node-different", 1)
 
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKCorrespondence {
 		t.Fatalf("substituted target: want NACKCorrespondence, got %q", nack)
 	}
@@ -203,7 +204,7 @@ func TestCorrespondenceSubstitutedGenerationRefused(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.Generation = 2 // CP claims a different generation
 
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKCorrespondence {
 		t.Fatalf("substituted generation: want NACKCorrespondence, got %q", nack)
 	}
@@ -232,13 +233,12 @@ func TestCrossRestartJTIRefused(t *testing.T) {
 		nodeOwner:  "alice",
 		nodeID:     "node-1",
 		selfHosted: false,
-		mode:       AuthModeEnforced,
 		now:        clock,
 		jtiCache:   intent.NewJTICache(func() time.Time { return processStart }),
 	}
 
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, detail := v.VerifyStart(env, fields)
+	_, nack, detail := v.VerifyStart(env, fields)
 	if nack != NACKReplay && nack != NACKStale {
 		// Either REPLAY (jti predates process start) or STALE (too old) is acceptable —
 		// the freshness check (step 7) runs before jticache (step 8) when the age is large.
@@ -261,12 +261,12 @@ func TestDuplicateJTIRefused(t *testing.T) {
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 
 	// First admission must succeed.
-	if nack, detail := v.VerifyStart(env, fields); nack != "" {
+	if _, nack, detail := v.VerifyStart(env, fields); nack != "" {
 		t.Fatalf("first: want success, got %s: %s", nack, detail)
 	}
 
 	// Second admission of same jti must be refused.
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKReplay {
 		t.Fatalf("duplicate jti: want NACKReplay, got %q", nack)
 	}
@@ -287,7 +287,7 @@ func TestSkewRejectionReturnsNodeTime(t *testing.T) {
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, detail := v.VerifyStart(env, fields)
+	_, nack, detail := v.VerifyStart(env, fields)
 	if nack != NACKSkew {
 		t.Fatalf("future intent beyond SkewBudget: want NACKSkew, got %q", nack)
 	}
@@ -314,7 +314,7 @@ func TestFutureIntentWithinSkewBudgetAccepted(t *testing.T) {
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, detail := v.VerifyStart(env, fields)
+	_, nack, detail := v.VerifyStart(env, fields)
 	if nack != "" {
 		t.Fatalf("future intent within SkewBudget: want success, got nack=%s detail=%s", nack, detail)
 	}
@@ -336,7 +336,7 @@ func TestFutureIntentBeyondSkewBudgetRejected(t *testing.T) {
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKSkew {
 		t.Fatalf("future intent beyond SkewBudget: want NACKSkew, got %q", nack)
 	}
@@ -357,7 +357,7 @@ func TestEnforcedCloudModeRejectsEmptyAssertedOwner(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.AssertedOwner = "" // no asserted owner from CP
 
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKOwnerMismatch {
 		t.Fatalf("empty asserted_owner in enforced cloud mode: want NACKOwnerMismatch, got %q", nack)
 	}
@@ -378,32 +378,9 @@ func TestSelfHostedToleratesEmptyAssertedOwner(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.AssertedOwner = "" // intentionally empty
 
-	nack, detail := v.VerifyStart(env, fields)
+	_, nack, detail := v.VerifyStart(env, fields)
 	if nack != "" {
 		t.Fatalf("empty asserted_owner in self-hosted mode: want success, got nack=%s detail=%s", nack, detail)
-	}
-}
-
-// Insecure (verify-and-log) mode must log the failure but NOT enforce it [AM12].
-func TestInsecureModeLogsNotEnforces(t *testing.T) {
-	asPriv, ks := genASKey(t)
-	sessionKey := genECDSA(t)
-	now := time.Unix(1_770_000_000, 0)
-	clock := func() time.Time { return now }
-
-	// Use a WRONG image in correspondence so verification would fail in enforced mode.
-	body := goodStartBody("sp-1", "node-1", 1, now)
-	body.Image = "img@sha256:signed"
-	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, intent.OpCreateSpawn)
-
-	v := NewIntentVerifier(ks, "alice", "node-1", false, AuthModeVerifyLog, clock)
-	fields := goodStartFields("sp-1", "node-1", 1)
-	fields.Image = "img@sha256:SUBSTITUTED" // correspondence mismatch
-
-	// In verify-and-log mode: no NACK returned even though correspondence fails.
-	nack, _ := v.VerifyStart(env, fields)
-	if nack != "" {
-		t.Fatalf("verify-and-log mode must not return NACK, got %q", nack)
 	}
 }
 
@@ -436,7 +413,7 @@ func TestCNFMismatch(t *testing.T) {
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKCNFMismatch {
 		t.Fatalf("CNF mismatch: want NACKCNFMismatch, got %q", nack)
 	}
@@ -468,7 +445,7 @@ func TestWrongAudienceRefused(t *testing.T) {
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKWrongAudience {
 		t.Fatalf("wrong aud: want NACKWrongAudience, got %q", nack)
 	}
@@ -488,13 +465,13 @@ func TestSelfHostedOwnerEnforcement(t *testing.T) {
 	// Self-hosted verifier also owned by alice -> should pass.
 	v := makeVerifier(t, ks, "alice", "node-1", true, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	if nack, _ := v.VerifyStart(env, fields); nack != "" {
+	if _, nack, _ := v.VerifyStart(env, fields); nack != "" {
 		t.Fatalf("self-hosted same-owner: want success, got %q", nack)
 	}
 
 	// Self-hosted verifier owned by bob but token says alice -> should fail.
 	v2 := makeVerifier(t, ks, "bob", "node-1", true, clock)
-	nack, _ := v2.VerifyStart(env, fields)
+	_, nack, _ := v2.VerifyStart(env, fields)
 	if nack != NACKOwnerMismatch {
 		t.Fatalf("self-hosted different-owner: want NACKOwnerMismatch, got %q", nack)
 	}
@@ -517,7 +494,7 @@ func TestCorrespondenceSignedNonEmptyExecEmptyRefused(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.Image = "" // CP sends empty — previously would skip the check, now must fail
 
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKCorrespondence {
 		t.Fatalf("signed non-empty vs exec empty: want NACKCorrespondence, got %q", nack)
 	}
@@ -528,7 +505,7 @@ func TestNilEnvelopeEnforcedMode(t *testing.T) {
 	_, ks := genASKey(t)
 	clock := func() time.Time { return time.Unix(1_770_000_000, 0) }
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
-	nack, _ := v.VerifyStart(nil, goodStartFields("sp-1", "node-1", 1))
+	_, nack, _ := v.VerifyStart(nil, goodStartFields("sp-1", "node-1", 1))
 	if nack != NACKMissingIntent {
 		t.Fatalf("nil envelope enforced: want NACKMissingIntent, got %q", nack)
 	}
@@ -566,9 +543,65 @@ func TestVerifyOpenHappyPath(t *testing.T) {
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := OpenFields{SpawnID: "sp-1", Generation: 1, SessionID: "sess-a", AssertedOwner: "alice"}
-	nack, detail := v.VerifyOpen(env, fields)
+	auth, nack, detail := v.VerifyOpen(env, fields)
 	if nack != "" {
 		t.Fatalf("open happy path: want success, got nack=%s detail=%s", nack, detail)
+	}
+	if auth.AccountID != "alice" || auth.TokenID != "tok-open" || !auth.ExpiresAt.Equal(now.Add(15*time.Minute)) || len(auth.SessionKeyHash) != sha256.Size {
+		t.Fatalf("authorization = %+v", auth)
+	}
+}
+
+func TestVerifyReauthRequiresReplacementTokenID(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+	now := time.Unix(1_770_000_000, 0)
+	body := &authv1.IntentBody{
+		Jti: "jti-reauth", IssuedAt: now.Unix(), SpawnId: "sp-1", Generation: 1,
+		TargetNodeId: "node-1", Op: string(intent.OpSessionReauth), SessionId: "sess-a",
+		NewTokenId: "wrong-token",
+	}
+	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, intent.OpSessionReauth)
+	v := makeVerifier(t, ks, "alice", "node-1", false, func() time.Time { return now })
+	_, nack, _ := v.VerifyReauth(env, ReauthFields{SpawnID: "sp-1", Generation: 1, SessionID: "sess-a", AssertedOwner: "alice"})
+	if nack != NACKCorrespondence {
+		t.Fatalf("replacement token mismatch = %q", nack)
+	}
+}
+
+func TestVerifyStartRejectsWrongOperationDomain(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+	now := time.Unix(1_770_000_000, 0)
+	body := goodStartBody("sp-1", "node-1", 1, now)
+	body.Op = string(intent.OpResumeSpawn)
+	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, intent.OpResumeSpawn)
+	v := makeVerifier(t, ks, "alice", "node-1", false, func() time.Time { return now })
+	_, nack, _ := v.VerifyStart(env, goodStartFields("sp-1", "node-1", 1))
+	if nack != NACKCorrespondence {
+		t.Fatalf("wrong operation = %q", nack)
+	}
+}
+
+func TestVerifyStartAcceptsExactLifecycleOperation(t *testing.T) {
+	for _, op := range []intent.Op{
+		intent.OpCreateSpawn, intent.OpResumeSpawn, intent.OpRecreateSpawn,
+		intent.OpMigrateSpawn, intent.OpForkSpawn,
+	} {
+		t.Run(string(op), func(t *testing.T) {
+			asPriv, ks := genASKey(t)
+			sessionKey := genECDSA(t)
+			now := time.Unix(1_770_000_000, 0)
+			body := goodStartBody("sp-1", "node-1", 1, now)
+			body.Op = string(op)
+			env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, op)
+			fields := goodStartFields("sp-1", "node-1", 1)
+			fields.Op = op
+			auth, nack, detail := makeVerifier(t, ks, "alice", "node-1", false, func() time.Time { return now }).VerifyStart(env, fields)
+			if nack != "" || auth.AccountID != "alice" {
+				t.Fatalf("authorization=%+v nack=%s detail=%s", auth, nack, detail)
+			}
+		})
 	}
 }
 

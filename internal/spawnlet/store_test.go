@@ -14,3 +14,12 @@ func TestStorePutGetDelete(t *testing.T) {
 		t.Fatal("expected deleted")
 	}
 }
+
+func TestStoreOwnerGenerationSnapshot(t *testing.T) {
+	s := NewStore()
+	s.Put(&Spawn{ID: "sp-1", OwnerID: "alice", Generation: 7})
+	owner, generation, ok := s.OwnerGeneration("sp-1")
+	if !ok || owner != "alice" || generation != 7 {
+		t.Fatalf("snapshot = %q/%d/%v", owner, generation, ok)
+	}
+}

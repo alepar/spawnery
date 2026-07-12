@@ -213,6 +213,16 @@ func TestBuildIntentVerifierRejectsUnknownAuthMode(t *testing.T) {
 	}
 }
 
+func TestBuildIntentVerifierRequiresTrustInEveryTransportMode(t *testing.T) {
+	for _, mode := range []string{"insecure", "enforced"} {
+		cfg := &Spawnlet{}
+		cfg.Node.AuthMode = mode
+		if _, err := buildIntentVerifier(cfg, nil, "node-1", ""); err == nil {
+			t.Fatalf("%s mode accepted missing artifact trust", mode)
+		}
+	}
+}
+
 func TestSpawnletConfig_ArtifactTrustAliasesAndRemovedRawKeys(t *testing.T) {
 	cfg, err := loadSpawnletTest(t, "dev", map[string]string{
 		"NODE_AUTH_ENVIRONMENT":            "prod",

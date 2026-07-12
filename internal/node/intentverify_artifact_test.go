@@ -1,7 +1,6 @@
 package node
 
 import (
-	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -12,7 +11,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"errors"
-	"log"
 	"math/big"
 	"net/url"
 	"os"
@@ -120,8 +118,8 @@ func mintArtifactSession(t *testing.T, fixture artifactFixture, body *authv1.Ses
 func TestIntentVerifierRejectsLegacyTokenBeforeIntentState(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	fixture := newArtifactFixture(t, now, "prod")
-	v := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, AuthModeEnforced, func() time.Time { return now })
-	nack, _ := v.VerifyStart(&authv1.AuthEnvelope{AccessToken: "legacy.signature"}, goodStartFields("sp-1", "node-1", 1))
+	v := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, func() time.Time { return now })
+	_, nack, _ := v.VerifyStart(&authv1.AuthEnvelope{AccessToken: "legacy.signature"}, goodStartFields("sp-1", "node-1", 1))
 	if nack != NACKTokenInvalid {
 		t.Fatalf("legacy token: got %q, want %q", nack, NACKTokenInvalid)
 	}
@@ -149,13 +147,13 @@ func TestIntentVerifierRevocationGenerationInvalidatesCachedSigner(t *testing.T)
 		t.Fatal(err)
 	}
 	env, fields := certifiedIntent(t, fixture, now, "jti-revoked")
-	v := NewIntentVerifier(artifacts, "alice", "node-1", false, AuthModeEnforced, func() time.Time { return now })
-	if nack, detail := v.VerifyStart(env, fields); nack != "" {
+	v := NewIntentVerifier(artifacts, "alice", "node-1", false, func() time.Time { return now })
+	if _, nack, detail := v.VerifyStart(env, fields); nack != "" {
 		t.Fatalf("initial verify: %s %s", nack, detail)
 	}
 	revocations.revoked.Store(true)
 	revocations.generation.Store(1)
-	if nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
+	if _, nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
 		t.Fatalf("after revocation: got %q, want %q", nack, NACKTokenInvalid)
 	}
 }
@@ -175,8 +173,8 @@ func TestIntentVerifierRealStoreRevocationPersistsAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	env, fields := certifiedIntent(t, fixture, now, "jti-real-store")
-	v := NewIntentVerifier(artifacts, "alice", "node-1", false, AuthModeEnforced, func() time.Time { return now })
-	if nack, detail := v.VerifyStart(env, fields); nack != "" {
+	v := NewIntentVerifier(artifacts, "alice", "node-1", false, func() time.Time { return now })
+	if _, nack, detail := v.VerifyStart(env, fields); nack != "" {
 		t.Fatalf("initial cached verification: %s %s", nack, detail)
 	}
 	spki, err := x509.MarshalPKIXPublicKey(fixture.leaf.PublicKey)
@@ -205,7 +203,7 @@ func TestIntentVerifierRealStoreRevocationPersistsAcrossRestart(t *testing.T) {
 	if err := store.LoadAndApply(statementPath, now); err != nil {
 		t.Fatal(err)
 	}
-	if nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
+	if _, nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
 		t.Fatalf("live revoked cached signer: got %q, want %q", nack, NACKTokenInvalid)
 	}
 	writeRevocationStatement(1, now.Add(-time.Second))
@@ -238,8 +236,8 @@ func TestIntentVerifierRealStoreRevocationPersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted := NewIntentVerifier(restartedArtifacts, "alice", "node-1", false, AuthModeEnforced, func() time.Time { return now })
-	if nack, _ := restarted.VerifyStart(env, fields); nack != NACKTokenInvalid {
+	restarted := NewIntentVerifier(restartedArtifacts, "alice", "node-1", false, func() time.Time { return now })
+	if _, nack, _ := restarted.VerifyStart(env, fields); nack != NACKTokenInvalid {
 		t.Fatalf("persisted revoked signer after restart: got %q, want %q", nack, NACKTokenInvalid)
 	}
 }
@@ -259,8 +257,8 @@ func TestIntentVerifierRejectsExpiredCertifiedSessionBeforeIntent(t *testing.T) 
 	}
 	body.ExpiresAt = now.Unix()
 	env.AccessToken = mintArtifactSession(t, fixture, &body)
-	v := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, AuthModeEnforced, func() time.Time { return now })
-	if nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
+	v := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, func() time.Time { return now })
+	if _, nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
 		t.Fatalf("expired certified session: got %q, want %q", nack, NACKTokenInvalid)
 	}
 }
@@ -306,13 +304,13 @@ func TestIntentVerifierCertifiedArtifactFailuresPrecedeIntentState(t *testing.T)
 		{name: "legacy two part", artifacts: fixture.verifier, wire: "legacy.signature"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			v := NewIntentVerifier(tc.artifacts, "alice", "node-1", false, AuthModeEnforced, func() time.Time { return now })
+			v := NewIntentVerifier(tc.artifacts, "alice", "node-1", false, func() time.Time { return now })
 			invalid := proto.Clone(valid).(*authv1.AuthEnvelope)
 			invalid.AccessToken = tc.wire
-			if nack, _ := v.VerifyStart(invalid, fields); nack != NACKTokenInvalid {
+			if _, nack, _ := v.VerifyStart(invalid, fields); nack != NACKTokenInvalid {
 				t.Fatalf("invalid artifact: got %q, want %q", nack, NACKTokenInvalid)
 			}
-			if nack, detail := v.VerifyStart(valid, fields); nack != "" {
+			if _, nack, detail := v.VerifyStart(valid, fields); nack != "" {
 				t.Fatalf("valid intent after artifact failure: %s %s", nack, detail)
 			}
 		})
@@ -335,23 +333,6 @@ func replacementArtifactLeaf(t *testing.T, fixture artifactFixture, now time.Tim
 		mutate(template)
 	}
 	return mustArtifactCert(t, template, fixture.intermediate, public, fixture.intermediateKey)
-}
-
-func TestIntentVerifierVerifyLogDoesNotLogCertificateMaterial(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	fixture := newArtifactFixture(t, now, "prod")
-	var output bytes.Buffer
-	old := log.Writer()
-	log.SetOutput(&output)
-	defer log.SetOutput(old)
-	v := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, AuthModeVerifyLog, func() time.Time { return now })
-	if nack, _ := v.VerifyStart(&authv1.AuthEnvelope{AccessToken: "invalid"}, goodStartFields("sp-1", "node-1", 1)); nack != "" {
-		t.Fatalf("verify-log returned %q", nack)
-	}
-	logged := output.String()
-	if !strings.Contains(logged, string(NACKTokenInvalid)) || strings.Contains(logged, "CERTIFICATE") || strings.Contains(logged, base64.RawURLEncoding.EncodeToString(fixture.leaf.Raw)) {
-		t.Fatalf("unsafe or missing verify-log output: %q", logged)
-	}
 }
 
 func certifiedIntent(t *testing.T, fixture artifactFixture, now time.Time, jti string) (*authv1.AuthEnvelope, StartFields) {

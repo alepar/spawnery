@@ -13,7 +13,7 @@ import (
 
 func TestRunRetriesUntilContextCancelled(t *testing.T) {
 	mgr := spawnlet.NewManager(runtime.NewFake(), spawnlet.ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
-	cfg := Config{NodeID: "node-1", CPURL: "http://127.0.0.1:1", MaxSpawns: 1} // :1 = unreachable
+	cfg := Config{NodeID: "node-1", CPURL: "http://127.0.0.1:1", MaxSpawns: 1, Verifier: &IntentVerifier{}} // :1 = unreachable
 
 	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 	defer cancel()
@@ -30,5 +30,12 @@ func TestRunRetriesUntilContextCancelled(t *testing.T) {
 	// It should have stuck around until ~the ctx deadline (retrying), not returned at t≈0.
 	if elapsed < 500*time.Millisecond {
 		t.Fatalf("Run returned after %s — looks like it exited on the first failure instead of retrying", elapsed)
+	}
+}
+
+func TestRunRejectsMissingIntentVerifier(t *testing.T) {
+	mgr := spawnlet.NewManager(runtime.NewFake(), spawnlet.ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
+	if err := Run(context.Background(), mgr, http.DefaultClient, Config{}); err == nil {
+		t.Fatal("Run accepted a nil intent verifier")
 	}
 }

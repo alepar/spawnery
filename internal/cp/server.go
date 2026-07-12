@@ -529,6 +529,8 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			}
 		case *nodev1.NodeMessage_Frame:
 			s.rt.FromNode(m.Frame.SpawnId, m.Frame.SessionId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected
+		case *nodev1.NodeMessage_SessionAuthClosed:
+			s.rt.SessionAuthClosed(m.SessionAuthClosed.GetSpawnId(), m.SessionAuthClosed.GetSessionId(), m.SessionAuthClosed.GetClientId())
 		case *nodev1.NodeMessage_Roster:
 			s.rt.UpdateRoster(m.Roster.SpawnId, nodeID, m.Roster.Sessions) // node-authoritative session set; CP mirrors
 		case *nodev1.NodeMessage_SessionStatus:
@@ -1433,7 +1435,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		}
 		return
 	}
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, nodeArts, secrets)
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, nodeArts, secrets, intent.OpCreateSpawn)
 	if err != nil {
 		slog.Error("provisionSpawn: Provision failed", "spawn", spawnID, "err", err)
 		var step string
@@ -1740,6 +1742,11 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	if owner != sp.OwnerID {
 		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
 	}
+	container, live, err := s.st.Spawns().LiveContainer(ctx, spawnID)
+	if err != nil || !live {
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn has no live episode"))
+	}
+	generation := uint64(container.Generation)
 	sessionEnv := first.GetSessionAuth()
 	if sessionEnv == nil || sessionEnv.GetAccessToken() == "" || sessionEnv.GetIntent() == nil {
 		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session_auth with node access token and signed intent required"))
@@ -1785,7 +1792,7 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	cs := &clientStream{stream: stream, spawnID: spawnID}
 	// cursor 0: the cp.v1 Session-RPC transport has no resume cursor (only the WS bind does).
 	// session "0": this transport has no per-session selector yet (web uses the WS bind for that).
-	done, err := s.rt.AttachClient(spawnID, "0", clientID, sp.OwnerID, sessionEnv, cs, 0)
+	done, err := s.rt.AttachClient(spawnID, "0", clientID, sp.OwnerID, sessionEnv, cs, 0, generation)
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
@@ -1839,6 +1846,17 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 						}
 						identity = newID
 					}
+				}
+				continue
+			}
+			if env := f.GetSessionReauth(); env != nil {
+				if env.GetAccessToken() == "" || env.GetIntent() == nil {
+					recvErr <- connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session_reauth requires node access token and signed intent"))
+					return
+				}
+				if rerr := s.rt.ReauthenticateClient(spawnID, "0", clientID, generation, sp.OwnerID, env); rerr != nil {
+					recvErr <- rerr
+					return
 				}
 				continue
 			}

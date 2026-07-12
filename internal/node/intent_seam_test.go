@@ -7,11 +7,10 @@ package node
 //   (a) a StartSpawn with nil Auth → SpawnPhase_ERROR with MISSING_INTENT (no container)
 //   (b) a StartSpawn with a substituted image → ERROR with CORRESPONDENCE (no container)
 //   (c) a valid matching envelope → SpawnPhase_ACTIVE (container created, agent handshakes)
-//   (d) same forged StartSpawn under AuthModeVerifyLog → proceeds to ACTIVE (log-not-enforce)
 //
 // Tests (a)/(b) verify the gate is actually wired: the verifier runs BEFORE mgr.CreateWithSelection
 // so a.active == 0 proves no container was created.
-// Tests (c)/(d) exercise the full lifecycle using scriptedPodBackend + scriptGoose.
+// Test (c) exercises the full lifecycle using scriptedPodBackend + scriptGoose.
 
 import (
 	"context"
@@ -41,10 +40,10 @@ func (f *fakeCPStream) lastErrorDetail(spawnID string) string {
 
 // newEnforcedAttacher builds an attacher with an enforced IntentVerifier (selfHosted=false,
 // nodeOwner="", so only assertedOwner is validated). The verifier uses a fixed clock.
-func newEnforcedAttacher(t *testing.T, mgr *spawnlet.Manager, fs cpStream, ks *token.Verifier, mode AuthMode, fixedNow time.Time) *attacher {
+func newEnforcedAttacher(t *testing.T, mgr *spawnlet.Manager, fs cpStream, ks *token.Verifier, fixedNow time.Time) *attacher {
 	t.Helper()
 	a := newAttacher(mgr, fs)
-	a.verifier = NewIntentVerifier(ks, "", "", false, mode, func() time.Time { return fixedNow })
+	a.verifier = NewIntentVerifier(ks, "", "", false, func() time.Time { return fixedNow })
 	return a
 }
 
@@ -60,7 +59,7 @@ func TestIntentSeam_NilAuthBlocked(t *testing.T) {
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
 	fs := &fakeCPStream{}
-	a := newEnforcedAttacher(t, mgr, fs, ks, AuthModeEnforced, fixedNow)
+	a := newEnforcedAttacher(t, mgr, fs, ks, fixedNow)
 
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{
 		SpawnId:       "sp-nil-auth",
@@ -68,6 +67,7 @@ func TestIntentSeam_NilAuthBlocked(t *testing.T) {
 		Model:         "m",
 		AssertedOwner: "alice",
 		Auth:          nil,
+		IntentOp:      string(intent.OpCreateSpawn),
 	})
 
 	phases := fs.phasesFor("sp-nil-auth")
@@ -110,7 +110,7 @@ func TestIntentSeam_ImageSubstitutionBlocked(t *testing.T) {
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
 	fs := &fakeCPStream{}
-	a := newEnforcedAttacher(t, mgr, fs, ks, AuthModeEnforced, fixedNow)
+	a := newEnforcedAttacher(t, mgr, fs, ks, fixedNow)
 
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{
 		SpawnId:       "sp-subst-img",
@@ -119,6 +119,7 @@ func TestIntentSeam_ImageSubstitutionBlocked(t *testing.T) {
 		Model:         "m",
 		AssertedOwner: "alice",
 		Auth:          env,
+		IntentOp:      string(intent.OpCreateSpawn),
 	})
 
 	phases := fs.phasesFor("sp-subst-img")
@@ -156,12 +157,14 @@ func TestIntentSeam_ValidEnvelopeActive(t *testing.T) {
 		Generation:   0,
 		TargetNodeId: "",
 		Op:           string(intent.OpCreateSpawn),
+		AppRef:       appDir,
+		Model:        "m",
 	}
 	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", fixedNow, body, intent.OpCreateSpawn)
 
 	be := &scriptedPodBackend{script: scriptGoose}
 	fs := &fakeCPStream{}
-	a := newEnforcedAttacher(t, newGooseManager(t, be), fs, ks, AuthModeEnforced, fixedNow)
+	a := newEnforcedAttacher(t, newGooseManager(t, be), fs, ks, fixedNow)
 
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{
 		SpawnId:       "sp-valid-seam",
@@ -169,59 +172,15 @@ func TestIntentSeam_ValidEnvelopeActive(t *testing.T) {
 		Model:         "m",
 		AssertedOwner: "alice",
 		Auth:          env,
+		IntentOp:      string(intent.OpCreateSpawn),
 	})
 	defer a.stopSpawn(context.Background(), "sp-valid-seam")
 
 	if got := lastPhase(fs.phasesFor("sp-valid-seam")); got != nodev1.SpawnPhase_ACTIVE {
 		t.Fatalf("final phase = %v, want ACTIVE for valid matching envelope", got)
 	}
-}
-
-// ---- (d) forged envelope under AuthModeVerifyLog → ACTIVE ---------------------------
-
-// TestIntentSeam_VerifyLogModeProceedsOnForged: a StartSpawn with a mismatched signed
-// intent (image mismatch = CORRESPONDENCE) under AuthModeVerifyLog must still proceed
-// to ACTIVE (the failure is logged, not enforced). This proves the mode switch is
-// observed at the seam, not just at the unit-verifier level.
-func TestIntentSeam_VerifyLogModeProceedsOnForged(t *testing.T) {
-	asPriv, ks := genASKey(t)
-	sessionKey := genECDSA(t)
-	fixedNow := time.Unix(1_770_000_000, 0)
-	appDir := writeNodeApp(t)
-
-	// Sign with a specific (wrong) image so correspondence would fail in enforced mode.
-	body := &authv1.IntentBody{
-		Jti:          "jti-verifylog-seam",
-		IssuedAt:     fixedNow.Unix(),
-		SpawnId:      "sp-verifylog-seam",
-		Generation:   0,
-		TargetNodeId: "",
-		Op:           string(intent.OpCreateSpawn),
-		Image:        "signed-img@sha256:def", // signed with a specific image
-	}
-	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", fixedNow, body, intent.OpCreateSpawn)
-
-	be := &scriptedPodBackend{script: scriptGoose}
-	fs := &fakeCPStream{}
-	// AuthModeVerifyLog: failures are logged but not enforced.
-	a := newEnforcedAttacher(t, newGooseManager(t, be), fs, ks, AuthModeVerifyLog, fixedNow)
-
-	a.startSpawn(context.Background(), &nodev1.StartSpawn{
-		SpawnId:       "sp-verifylog-seam",
-		AppRef:        appDir,
-		Image:         "different-img@sha256:evil", // mismatch — would fail in enforced mode
-		Model:         "m",
-		AssertedOwner: "alice",
-		Auth:          env,
-	})
-	defer a.stopSpawn(context.Background(), "sp-verifylog-seam")
-
-	// In VerifyLog mode: ACTIVE despite the correspondence mismatch.
-	if got := lastPhase(fs.phasesFor("sp-verifylog-seam")); got != nodev1.SpawnPhase_ACTIVE {
-		t.Fatalf("final phase = %v, want ACTIVE in verify-and-log mode (mismatch must not block)", got)
-	}
-	// No ERROR status must have been emitted (the log path suppresses NACK returns).
-	if hasPhase(fs.phasesFor("sp-verifylog-seam"), nodev1.SpawnPhase_ERROR) {
-		t.Fatal("verify-and-log must not emit ERROR status for a correspondence mismatch")
+	owner, generation, ok := a.mgr.SpawnOwnerGeneration("sp-valid-seam")
+	if !ok || owner != "alice" || generation != 0 {
+		t.Fatalf("live owner snapshot = %q/%d/%v", owner, generation, ok)
 	}
 }

@@ -16,6 +16,7 @@ type MountFinalizer struct {
 
 type Spawn struct {
 	ID         string
+	OwnerID    string
 	Generation uint64 // CP-assigned generation (0 standalone); labels the pod for reconcile/fencing
 	SidecarID  string
 	AgentID    string
@@ -92,6 +93,15 @@ func (s *Store) Get(id string) (*Spawn, bool) {
 	defer s.mu.Unlock()
 	sp, ok := s.m[id]
 	return sp, ok
+}
+func (s *Store) OwnerGeneration(id string) (string, uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sp, ok := s.m[id]
+	if !ok {
+		return "", 0, false
+	}
+	return sp.OwnerID, sp.Generation, true
 }
 func (s *Store) Delete(id string) { s.mu.Lock(); delete(s.m, id); s.mu.Unlock() }
 

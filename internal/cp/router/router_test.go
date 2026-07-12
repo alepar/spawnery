@@ -4,6 +4,7 @@ import (
 	"sync"
 	"testing"
 
+	authv1 "spawnery/gen/auth/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/metrics"
 )
@@ -11,6 +12,39 @@ import (
 type mcNode struct {
 	mu   sync.Mutex
 	sent []*nodev1.CPMessage
+}
+
+func TestNodeReauthRelayAndAddressedClose(t *testing.T) {
+	r := New()
+	node := &mcNode{}
+	r.Bind("sp1", "node-1", node)
+	aDone, err := r.AttachClient("sp1", "0", "a", "alice", nil, &mcClient{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bDone, err := r.AttachClient("sp1", "0", "b", "alice", nil, &mcClient{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := &authv1.AuthEnvelope{AccessToken: "opaque", Intent: &authv1.SignedIntent{Body: []byte("exact")}}
+	if err := r.ReauthenticateClient("sp1", "0", "a", 7, "alice", env); err != nil {
+		t.Fatal(err)
+	}
+	got := node.sent[len(node.sent)-1].GetSessionReauth()
+	if got == nil || got.GetAuth() != env || got.GetGeneration() != 7 || got.GetAssertedOwner() != "alice" {
+		t.Fatalf("reauth relay = %+v", got)
+	}
+	r.SessionAuthClosed("sp1", "0", "a")
+	select {
+	case <-aDone:
+	default:
+		t.Fatal("addressed client not closed")
+	}
+	select {
+	case <-bDone:
+		t.Fatal("sibling client closed")
+	default:
+	}
 }
 
 func (n *mcNode) Send(m *nodev1.CPMessage) error {

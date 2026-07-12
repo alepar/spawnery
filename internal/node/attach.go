@@ -25,6 +25,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/gen/node/v1/nodev1connect"
 	"spawnery/internal/agentcaps"
+	"spawnery/internal/intent"
 	"spawnery/internal/safego"
 	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
@@ -75,10 +76,7 @@ type Config struct {
 	// NodeTrustDomain is the configured SPIFFE trust domain for target-node verification.
 	NodeTrustDomain string
 
-	// Verifier is the A4 intent verifier for StartSpawn and SessionOpen [AC1][AM12].
-	// nil = skip verification (dev/insecure default until the verifier is explicitly configured).
-	// Set via NewIntentVerifier with AuthModeVerifyLog for NODE_AUTH_MODE=insecure (verify-and-log)
-	// or AuthModeEnforced for NODE_AUTH_MODE=enforced.
+	// Verifier is the mandatory A4 intent verifier for StartSpawn and SessionOpen.
 	Verifier *IntentVerifier
 
 	// GitHubMint is the AS AuthService client used for proactive GitHub access-token refresh
@@ -100,7 +98,8 @@ type attacher struct {
 	mgr      *spawnlet.Manager
 	httpc    connect.HTTPClient
 	sx       sessionExec     // container-exec boundary for additional-session launch/reap (sp-npxq.3)
-	verifier *IntentVerifier // A4 intent verifier; nil = skip (tests + insecure mode without explicit verifier)
+	verifier *IntentVerifier // mandatory in Run; nil only in low-level unit fixtures
+	auths    *sessionAuthRegistry
 
 	ctrlHTTP httpDoer // POSTs SetModel to the per-pod sidecar control endpoint (injectable for tests)
 
@@ -149,6 +148,9 @@ type pendingClient struct {
 // waits for the CP at startup and reconnects after a disconnect (re-registering each time; the CP
 // reconciles a returning node). The Manager + its running spawns persist across reconnects.
 func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config) error {
+	if cfg.Verifier == nil {
+		return fmt.Errorf("node intent verifier is required")
+	}
 	// Reap pods leaked by a previous node process before serving — the in-mem store is empty at
 	// startup, so every spawnery-managed pod the runtime still has is an orphan.
 	if err := mgr.ReapOrphans(ctx); err != nil {
@@ -211,6 +213,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
 		verifier:         cfg.Verifier,
+		auths:            newSessionAuthRegistry(),
 		ctrlHTTP:         &http.Client{Timeout: controlPostTimeout},
 		sx:               &realSessionExec{mgr: mgr},
 		pumps:            map[sessionKey]*Pump{},
@@ -222,6 +225,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		ghControl:        ghControl,
 		tmuxHasSessionFn: mgr.TmuxHasSession,
 	}
+	defer a.auths.clear()
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)
 
@@ -418,28 +422,51 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		}
 		a.stopSpawn(ctx, m.Stop.SpawnId)
 	case *nodev1.CPMessage_Open:
-		// A4 SessionOpen verification [AC1][AM12]. Run BEFORE attaching the client so a forged/replayed
-		// open is blocked in enforced mode. In verify-and-log mode (NODE_AUTH_MODE=insecure) failures are
-		// logged but the attach proceeds. Generation is read from the live spawn (mgr.SpawnGeneration) so
+		// Run A4 SessionOpen verification before attaching the client. Generation is read from the live spawn so
 		// the verifier can check correspondence even if the CP omits it from the SessionOpen wire message.
+		var verifiedAuth Authorization
 		if a.verifier != nil {
 			spawnID := m.Open.GetSpawnId()
-			gen, _ := a.mgr.SpawnGeneration(spawnID)
+			owner, gen, ok := a.mgr.SpawnOwnerGeneration(spawnID)
+			if !ok || owner == "" || gen != m.Open.GetGeneration() || owner != m.Open.GetAssertedOwner() {
+				slog.Warn("SessionOpen: live ownership mismatch", "spawn", spawnID)
+				return
+			}
 			fields := OpenFields{
 				SpawnID:       spawnID,
 				Generation:    gen,
 				SessionID:     sid(m.Open.GetSessionId()),
 				AssertedOwner: m.Open.GetAssertedOwner(),
 			}
-			if nack, detail := a.verifier.VerifyOpen(m.Open.GetAuth(), fields); nack != "" {
+			auth, nack, detail := a.verifier.VerifyOpen(m.Open.GetAuth(), fields)
+			if nack != "" {
 				slog.Warn("SessionOpen: intent NACK (client not attached)",
 					"spawn", spawnID, "session", sid(m.Open.GetSessionId()), "nack", nack, "detail", detail)
-				return // enforced: drop the open; verify-and-log never returns a nack
+				return
 			}
+			if auth.AccountID != owner {
+				slog.Warn("SessionOpen: token owner does not own live spawn", "spawn", spawnID)
+				return
+			}
+			verifiedAuth = auth
 		}
-		a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor)
+		if a.auths != nil && verifiedAuth.AccountID != "" {
+			key := sessionAuthKey{spawnID: m.Open.GetSpawnId(), sessionID: sid(m.Open.GetSessionId()), clientID: m.Open.GetClientId()}
+			a.auths.register(key, sessionAuthRecord{
+				accountID: verifiedAuth.AccountID, tokenID: verifiedAuth.TokenID, expiresAt: verifiedAuth.ExpiresAt,
+				sessionKeyHash: verifiedAuth.SessionKeyHash, generation: m.Open.GetGeneration(), nodeID: a.cfg.NodeID,
+			}, func(reason string) { a.closeClientAuthorization(key, m.Open.GetGeneration(), reason) })
+		}
+		if !a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor) && a.auths != nil {
+			a.auths.remove(sessionAuthKey{spawnID: m.Open.GetSpawnId(), sessionID: sid(m.Open.GetSessionId()), clientID: m.Open.GetClientId()})
+		}
 	case *nodev1.CPMessage_Close:
+		if a.auths != nil {
+			a.auths.remove(sessionAuthKey{spawnID: m.Close.GetSpawnId(), sessionID: sid(m.Close.GetSessionId()), clientID: m.Close.GetClientId()})
+		}
 		a.detachClient(m.Close.SpawnId, sid(m.Close.SessionId), m.Close.ClientId)
+	case *nodev1.CPMessage_SessionReauth:
+		a.reauthenticateClient(m.SessionReauth)
 	case *nodev1.CPMessage_Frame:
 		a.fromClient(m.Frame.SpawnId, sid(m.Frame.SessionId), m.Frame.ClientId, m.Frame.Data)
 	case *nodev1.CPMessage_CreateSession:
@@ -716,10 +743,10 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		}}})
 	}
 
-	// A4 intent verification [AC1][AM12]. Verify BEFORE creating the container so a
-	// forged/replayed StartSpawn is rejected at the gate. In verify-and-log mode (NODE_AUTH_MODE=insecure)
-	// failures are logged but execution proceeds; in enforced mode a NACK returns ERROR status.
+	// Verify before any credential mint, secret consumption, mount preparation, or pod allocation.
 	emitStep(spawnlet.MilestoneAuthorize)
+	var verifiedAuth Authorization
+	verified := false
 	if a.verifier != nil {
 		mounts := make([]*authv1.MountRef, 0, len(st.GetMounts()))
 		for _, m := range st.GetMounts() {
@@ -732,6 +759,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			})
 		}
 		fields := StartFields{
+			Op:            intent.Op(st.GetIntentOp()),
 			SpawnID:       st.GetSpawnId(),
 			Generation:    st.GetGeneration(),
 			AppRef:        st.GetAppRef(),
@@ -744,12 +772,18 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		for _, secret := range st.GetSecrets() {
 			fields.AttachedSecretIDs = append(fields.AttachedSecretIDs, secret.GetSecretId())
 		}
-		if nack, detail := a.verifier.VerifyStart(st.GetAuth(), fields); nack != "" {
+		auth, nack, detail := a.verifier.VerifyStart(st.GetAuth(), fields)
+		if nack != "" {
 			slog.Warn("startSpawn: intent NACK", "spawn", st.SpawnId, "nack", nack, "detail", detail)
 			nackErr := fmt.Errorf("%s: %s", nack, detail)
 			emitErr(nackErr)
 			return
 		}
+		if owner, _, ok := a.mgr.SpawnOwnerGeneration(st.GetSpawnId()); ok && owner != "" && owner != auth.AccountID {
+			emitErr(fmt.Errorf("%s: verified account does not own live spawn", NACKOwnerMismatch))
+			return
+		}
+		verifiedAuth, verified = auth, true
 	}
 
 	// Emit resume progress at key phase boundaries so the CP stall detector can reset (sp-u53.7.2).
@@ -813,8 +847,13 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			return a.consumeStartupSecrets(ctx, pc.SpawnID, pc.Generation, secrets, st.GetMounts(), routes, pc.InjectSecret, pc.ControlURL, pc.ControlToken)
 		}
 	}
-	sp, err := a.mgr.CreateWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation,
-		sel)
+	var sp *spawnlet.Spawn
+	var err error
+	if verified {
+		sp, err = a.mgr.CreateAuthorizedWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation, verifiedAuth.AccountID, sel)
+	} else {
+		sp, err = a.mgr.CreateWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation, sel)
+	}
 	if err != nil {
 		a.mgr.CleanupSpawnTransient(st.SpawnId)
 		logErr("startSpawn "+st.SpawnId, err)
@@ -985,6 +1024,9 @@ func (a *attacher) releaseSlot() {
 }
 
 func (a *attacher) stopSpawn(ctx context.Context, spawnID string) {
+	if a.auths != nil {
+		a.auths.removeSpawn(spawnID)
+	}
 	ps, relays := a.reapSessions(spawnID)
 	for _, p := range ps {
 		p.stop()
@@ -1249,7 +1291,7 @@ func (a *attacher) frameSenderFor(spawnID, sessionID, clientID string) frameSend
 	}
 }
 
-func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int64) {
+func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int64) bool {
 	k := sessionKey{spawnID, sessionID}
 	a.mu.Lock()
 	relay := a.tmuxRelays[k]
@@ -1267,21 +1309,23 @@ func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int6
 				}
 				a.pending[k] = append(a.pending[k], pendingClient{clientID: clientID, cursor: cursor})
 				a.mu.Unlock()
-				return
+				return true
 			}
 		}
 		a.mu.Unlock()
 		slog.Warn("attachClient: no pump", "spawn", spawnID, "session", sessionID)
-		return
+		return false
 	}
 	a.mu.Unlock()
 	if relay != nil {
 		if err := relay.attach(context.Background(), clientID); err != nil {
 			slog.Warn("tmux attach failed", "spawn", spawnID, "session", sessionID, "client", clientID, "err", err)
+			return false
 		}
-		return
+		return true
 	}
 	p.attachClient(clientID, cursor, a.frameSenderFor(spawnID, sessionID, clientID))
+	return true
 }
 
 // takePending removes and returns the queued attaches for key k. Caller MUST hold a.mu. Callers bind the
@@ -1313,6 +1357,9 @@ func (a *attacher) removePending(k sessionKey, clientID string) {
 }
 
 func (a *attacher) detachClient(spawnID, sessionID, clientID string) {
+	if a.auths != nil {
+		a.auths.remove(sessionAuthKey{spawnID: spawnID, sessionID: sessionID, clientID: clientID})
+	}
 	k := sessionKey{spawnID, sessionID}
 	a.mu.Lock()
 	relay := a.tmuxRelays[k]
@@ -1325,6 +1372,46 @@ func (a *attacher) detachClient(spawnID, sessionID, clientID string) {
 	}
 	if p != nil {
 		p.detachClient(clientID)
+	}
+}
+
+func (a *attacher) closeClientAuthorization(key sessionAuthKey, generation uint64, reason string) {
+	a.detachClient(key.spawnID, key.sessionID, key.clientID)
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SessionAuthClosed{SessionAuthClosed: &nodev1.SessionAuthClosed{
+		SpawnId: key.spawnID, Generation: generation, SessionId: key.sessionID, ClientId: key.clientID, Reason: reason,
+	}}})
+}
+
+func (a *attacher) rejectClientAuthorization(key sessionAuthKey, generation uint64, reason string) {
+	if a.auths != nil && a.auths.contains(key) {
+		a.auths.close(key, reason)
+		return
+	}
+	a.closeClientAuthorization(key, generation, reason)
+}
+
+func (a *attacher) reauthenticateClient(msg *nodev1.SessionReauth) {
+	if msg == nil {
+		return
+	}
+	key := sessionAuthKey{spawnID: msg.GetSpawnId(), sessionID: sid(msg.GetSessionId()), clientID: msg.GetClientId()}
+	owner, generation, ok := a.mgr.SpawnOwnerGeneration(msg.GetSpawnId())
+	if !ok || owner == "" || generation != msg.GetGeneration() || owner != msg.GetAssertedOwner() || a.verifier == nil || a.auths == nil {
+		a.rejectClientAuthorization(key, msg.GetGeneration(), "session reauthentication ownership mismatch")
+		return
+	}
+	auth, nack, detail := a.verifier.VerifyReauth(msg.GetAuth(), ReauthFields{
+		SpawnID: msg.GetSpawnId(), Generation: generation, SessionID: key.sessionID, AssertedOwner: msg.GetAssertedOwner(),
+	})
+	if nack != "" {
+		a.rejectClientAuthorization(key, generation, fmt.Sprintf("%s: %s", nack, detail))
+		return
+	}
+	if !a.auths.replace(key, sessionAuthRecord{
+		accountID: auth.AccountID, tokenID: auth.TokenID, expiresAt: auth.ExpiresAt,
+		sessionKeyHash: auth.SessionKeyHash, generation: generation, nodeID: a.cfg.NodeID,
+	}, owner) {
+		return
 	}
 }
 

@@ -786,6 +786,10 @@ func (m *Manager) SpawnGeneration(id string) (uint64, bool) {
 	return sp.Generation, true
 }
 
+func (m *Manager) SpawnOwnerGeneration(id string) (string, uint64, bool) {
+	return m.store.OwnerGeneration(id)
+}
+
 // RunningInventory returns the spawns this node currently manages (id + generation), for the CP
 // reconcile carried on Register/Heartbeat.
 func (m *Manager) RunningInventory() []runtime.ManagedPod {
@@ -956,6 +960,17 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID st
 // dispatcher entrypoint (entrypoint.sh) resolves the actual launch (serve+adapter, tmux-wrapped
 // TUI, etc.) — the node just names the runnable. No selection leaves Cmd nil (image default).
 func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, sel AgentSelection) (*Spawn, error) {
+	return m.createWithSelection(ctx, id, appPath, model, name, appID, generation, "", sel)
+}
+
+func (m *Manager) CreateAuthorizedWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, sel AgentSelection) (*Spawn, error) {
+	if ownerID == "" {
+		return nil, fmt.Errorf("authorized spawn owner is empty")
+	}
+	return m.createWithSelection(ctx, id, appPath, model, name, appID, generation, ownerID, sel)
+}
+
+func (m *Manager) createWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, sel AgentSelection) (*Spawn, error) {
 	agentImage := m.cfg.AgentImage
 	if sel.Image != "" {
 		agentImage = sel.Image
@@ -1604,7 +1619,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	}
 
 	sp := &Spawn{
-		ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
+		ID: id, OwnerID: ownerID, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
 		MountDirs: mountDirs, MountBindings: append([]MountBinding(nil), sel.Mounts...), MountFinalizers: mountFinalizers, JournalMounts: journalMounts, journalWatchers: watchers,
 		FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID,
 		Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL,
