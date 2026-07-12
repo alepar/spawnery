@@ -2,15 +2,19 @@ package cp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
 	"strings"
+	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/cp/skillstore"
 	"spawnery/internal/cp/store"
 )
 
@@ -21,6 +25,15 @@ const (
 	maxArtifactInlineBytes = 1 << 20 // 1 MiB per artifact
 	maxArtifactsTotalBytes = 3 << 20 // 3 MiB total
 )
+
+// skillStatParallelism bounds the number of concurrent StatObject calls the HEAD-before-presign
+// gate (statSkillObjects) issues at once.
+const skillStatParallelism = 8
+
+// skillStatTimeout bounds the aggregate wall time of one statSkillObjects call, across every
+// distinct sha it checks. A package var (not a const) so tests can shrink it; production code
+// must never override it.
+var skillStatTimeout = 10 * time.Second
 
 // validateAndMergeArtifacts merges publisher manifest-declared defaults with owner-supplied
 // per-spawn artifacts (owner overrides by id), validates the union, and returns store rows.
@@ -191,7 +204,10 @@ func storeToNodeArtifacts(in []store.Artifact, plainTarCap int64) []*nodev1.Arti
 	return out
 }
 
-// presignNodeArtifacts fills PresignedUrl on every by-ref spec in specs.
+// presignNodeArtifacts fills PresignedUrl on every by-ref spec in specs. Called by
+// nodeArtifactsForStart AFTER statSkillObjects, so by the time this runs every by-ref sha has
+// already been confirmed present (or memoized present from an earlier gate pass) — a presign
+// failure here is therefore a live Garage/config fault, not a missing-object condition.
 // Returns CodeFailedPrecondition if any by-ref spec is present but skillStore is nil
 // (Garage not configured). Returns CodeUnavailable if PresignedGet fails (signs an HMAC
 // offline, so this indicates a config error rather than a live Garage connection failure).
@@ -220,11 +236,127 @@ func (s *Server) presignNodeArtifacts(ctx context.Context, specs []*nodev1.Artif
 	return nil
 }
 
-// nodeArtifactsForStart converts persisted artifacts to node wire form and presigns
-// any by-ref specs. It is the single call site for all four start paths
-// (CreateSpawn/ResumeSpawn/RecreateSpawn/ForkSpawn).
+// statSkillObjects is the HEAD-before-presign gate (sp-mwco.4.4): before a spawn start hands
+// by-ref artifacts to a node, it confirms every DISTINCT referenced object actually exists in
+// the skill store, failing fast (FailedPrecondition) rather than letting the node discover a
+// 404 mid-provisioning. Applied UNIFORMLY to every by-ref spec on the spawn — no size carve-out
+// (a bundle, the flagship multi-artifact case, is exactly where this matters most).
+//
+// StatObject calls run in a bounded parallel pool (skillStatParallelism in-flight) over
+// distinct shas only — a bundle may reuse one payload sha across several artifacts, so it is
+// HEAD'd once. Confirmed-present shas are memoized in s.skillPresent (POSITIVE ONLY: objects
+// are immutable and content-addressed, so "present" never goes stale, but "missing" must never
+// be cached — a later ingest can make an object present that wasn't a moment ago).
+//
+// Error split, transport WINS over missing (this is the acceptance property — a Garage
+// brownout must never mass-report "skill object missing"): if ANY stat returns a
+// transport/timeout error, the whole gate fails CodeUnavailable; only when EVERY failing stat
+// is skillstore.ErrObjectMissing does it fail CodeFailedPrecondition, naming the first missing
+// object key (and the total missing count, if more than one). Neither message embeds a
+// presigned URL or signature (sp-mwco.4.2's leak rule).
+//
+// Skipped when there are no by-ref specs, and when s.skillStore is nil — the nil-store
+// precondition ("Garage skill storage is not configured") is reported by presignNodeArtifacts,
+// which runs immediately after this gate; statSkillObjects must not pre-empt that error with a
+// nil-deref or a different code.
+func (s *Server) statSkillObjects(ctx context.Context, specs []*nodev1.ArtifactSpec) error {
+	if s.skillStore == nil {
+		return nil
+	}
+
+	// Distinct shas only, skipping any already memoized present.
+	keyBySha := make(map[string]string)
+	for _, spec := range specs {
+		if spec.Objectref == nil {
+			continue
+		}
+		sha := spec.Objectref.Sha256
+		if _, known := s.skillPresent.Load(sha); known {
+			continue
+		}
+		if _, seen := keyBySha[sha]; !seen {
+			keyBySha[sha] = spec.Objectref.ObjectKey
+		}
+	}
+	if len(keyBySha) == 0 {
+		return nil
+	}
+
+	statCtx, cancel := context.WithTimeout(ctx, skillStatTimeout)
+	defer cancel()
+
+	type statResult struct {
+		sha string
+		key string
+		err error
+	}
+	results := make(chan statResult, len(keyBySha))
+	sem := make(chan struct{}, skillStatParallelism)
+	var wg sync.WaitGroup
+	for sha, key := range keyBySha {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(sha, key string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results <- statResult{sha: sha, key: key, err: s.skillStore.StatObject(statCtx, sha)}
+		}(sha, key)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var (
+		transportErr error
+		missingCount int
+		firstMissing string
+	)
+	for res := range results {
+		switch {
+		case res.err == nil:
+			s.skillPresent.Store(res.sha, struct{}{})
+		case errors.Is(res.err, skillstore.ErrObjectMissing):
+			missingCount++
+			if firstMissing == "" {
+				firstMissing = res.key
+			}
+		default:
+			if transportErr == nil {
+				transportErr = res.err
+			}
+		}
+	}
+
+	if transportErr != nil {
+		slog.Warn("statSkillObjects: skill object storage unavailable",
+			"distinct_shas", len(keyBySha), "missing_count", missingCount)
+		return connect.NewError(connect.CodeUnavailable,
+			fmt.Errorf("skill object storage unavailable: %w", transportErr))
+	}
+	if missingCount > 0 {
+		slog.Debug("statSkillObjects: skill object missing",
+			"missing_count", missingCount, "first_missing_key", firstMissing)
+		if missingCount > 1 {
+			return connect.NewError(connect.CodeFailedPrecondition,
+				fmt.Errorf("skill object missing: %s (and %d more)", firstMissing, missingCount-1))
+		}
+		return connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("skill object missing: %s", firstMissing))
+	}
+	return nil
+}
+
+// nodeArtifactsForStart converts persisted artifacts to node wire form, runs the
+// HEAD-before-presign gate (statSkillObjects), and presigns any by-ref specs. It is the single
+// call site for all four start paths (CreateSpawn/ResumeSpawn/RecreateSpawn/ForkSpawn) — the
+// gate therefore runs on every start, and is skipped exactly where re-materialize would be
+// skipped (sp-mwco.4.5, not yet implemented).
 func (s *Server) nodeArtifactsForStart(ctx context.Context, arts []store.Artifact) ([]*nodev1.ArtifactSpec, error) {
 	out := storeToNodeArtifacts(arts, s.effectiveSkillPlainTarCap())
+	if err := s.statSkillObjects(ctx, out); err != nil {
+		return nil, err
+	}
 	if err := s.presignNodeArtifacts(ctx, out); err != nil {
 		return nil, err
 	}

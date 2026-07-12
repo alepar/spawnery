@@ -5,6 +5,9 @@
 //
 // Object key scheme: skills/<sha256hex>.tar.zst (global content-addressed dedup).
 // PutIfAbsent guards with a StatObject check; if the object already exists it is a no-op.
+// StatObject is also exposed on the interface directly — the CP-side HEAD-before-presign gate
+// (internal/cp/artifacts.go, sp-mwco.4.4) uses it to fail a start early with a definitive
+// "object missing" signal (ErrObjectMissing), distinct from a transport/config fault.
 // Incomplete multipart uploads (minio-go auto-MPU above ~16 MiB) are cleaned via
 // RemoveIncompleteUpload on PutObject error to prevent Garage MPU part leaks (§4.13).
 package skillstore
@@ -12,9 +15,11 @@ package skillstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -30,6 +35,11 @@ const (
 	objectPrefix = "skills/"
 )
 
+// ErrObjectMissing is the sentinel StatObject returns when the object is DEFINITIVELY absent
+// (HTTP 404 with S3 code NoSuchKey/NotFound). Any other StatObject error is a transport/auth/
+// config fault, not a missing-object signal — callers MUST use errors.Is to distinguish them.
+var ErrObjectMissing = errors.New("skillstore: object missing")
+
 // SkillStore is the interface for content-addressed skill object storage.
 // Implementations must be safe for concurrent use.
 type SkillStore interface {
@@ -40,6 +50,10 @@ type SkillStore interface {
 	// PresignedGet returns a time-limited GET URL for the given sha256hex key.
 	// The URL is presigned against the node-reachable endpoint.
 	PresignedGet(ctx context.Context, sha256hex string) (string, error)
+	// StatObject checks whether skills/<sha256hex>.tar.zst exists.
+	// Returns nil if present; an error satisfying errors.Is(err, ErrObjectMissing) if
+	// DEFINITIVELY absent; any other error indicates a transport/auth/config fault.
+	StatObject(ctx context.Context, sha256hex string) error
 }
 
 // Config holds the parameters for constructing a garageSkillStore.
@@ -125,14 +139,14 @@ func (s *garageSkillStore) PutIfAbsent(ctx context.Context, sha256hex string, co
 	key := s.objectKey(sha256hex)
 
 	// Guard: if the object already exists, skip (cross-user dedup).
-	_, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
-	if err == nil {
+	if err := s.statKey(ctx, key); err != nil {
+		if !errors.Is(err, ErrObjectMissing) {
+			return err
+		}
+		// ErrObjectMissing — fall through to PutObject.
+	} else {
 		// Object exists — no-op
 		return nil
-	}
-	resp := minio.ToErrorResponse(err)
-	if resp.Code != "NoSuchKey" && resp.StatusCode != 404 {
-		return fmt.Errorf("skillstore: stat object %q: %w", key, err)
 	}
 
 	// Convert tags map to URL-encoded string
@@ -152,7 +166,7 @@ func (s *garageSkillStore) PutIfAbsent(ctx context.Context, sha256hex string, co
 		opts.UserTags = tags
 	}
 
-	_, err = s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(compressed), int64(len(compressed)), opts)
+	_, err := s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(compressed), int64(len(compressed)), opts)
 	if err != nil {
 		// Best-effort cleanup of any dangling incomplete MPU parts.
 		// minio-go auto-MPU fires at ~16 MiB; a ~50 MiB incompressible tar will trigger it.
@@ -161,6 +175,32 @@ func (s *garageSkillStore) PutIfAbsent(ctx context.Context, sha256hex string, co
 		return fmt.Errorf("skillstore: put object %q: %w", key, err)
 	}
 	return nil
+}
+
+// StatObject checks whether skills/<sha256hex>.tar.zst exists.
+// Returns nil if present; ErrObjectMissing (wrapped) if DEFINITIVELY absent; any other error
+// (including NoSuchBucket, a config fault masquerading as a 404) is a transport/auth/config fault.
+func (s *garageSkillStore) StatObject(ctx context.Context, sha256hex string) error {
+	return s.statKey(ctx, s.objectKey(sha256hex))
+}
+
+// statKey is the shared classify-and-stat helper used by both StatObject and PutIfAbsent's
+// existence guard. NoSuchBucket is also an HTTP 404 in S3 semantics but indicates a config
+// fault (wrong/missing bucket), NOT a missing object — it must NOT be classified as
+// ErrObjectMissing.
+func (s *garageSkillStore) statKey(ctx context.Context, key string) error {
+	_, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+	if err == nil {
+		return nil
+	}
+	resp := minio.ToErrorResponse(err)
+	if resp.Code == "NoSuchBucket" {
+		return fmt.Errorf("skillstore: stat object %q: %w", key, err)
+	}
+	if resp.Code == "NoSuchKey" || resp.StatusCode == 404 {
+		return fmt.Errorf("%w: %q: %v", ErrObjectMissing, key, err)
+	}
+	return fmt.Errorf("skillstore: stat object %q: %w", key, err)
 }
 
 // PresignedGet returns a time-limited GET URL for skills/<sha256hex>.tar.zst,
@@ -184,11 +224,19 @@ func stripScheme(endpoint string) string {
 
 // --- Fake (in-memory) SkillStore for tests ---
 
-// FakeSkillStore is an in-memory SkillStore for hermetic unit tests.
+// FakeSkillStore is an in-memory SkillStore for hermetic unit tests. Safe for concurrent use
+// (the sp-mwco.4.4 HEAD-before-presign gate stats distinct shas in parallel).
 type FakeSkillStore struct {
+	// StatHook, if set, is called by StatObject BEFORE the presence check and its error (if
+	// non-nil) is returned as-is — i.e. NOT wrapped in ErrObjectMissing, simulating a
+	// transport/timeout fault. Tests use it to inject brownouts, count concurrent in-flight
+	// calls, or block on ctx.Done() to simulate a hang past the caller's deadline.
+	StatHook func(ctx context.Context, sha256hex string) error
+
+	mu      sync.Mutex
 	objects map[string][]byte
 	tags    map[string]map[string]string
-	Calls   []string // records PutIfAbsent/PresignedGet calls
+	calls   []string // records PutIfAbsent/PresignedGet/StatObject calls
 }
 
 // NewFakeSkillStore returns a ready FakeSkillStore.
@@ -200,7 +248,9 @@ func NewFakeSkillStore() *FakeSkillStore {
 }
 
 func (f *FakeSkillStore) PutIfAbsent(_ context.Context, sha256hex string, compressed []byte, tags map[string]string) error {
-	f.Calls = append(f.Calls, "put:"+sha256hex)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "put:"+sha256hex)
 	if _, ok := f.objects[sha256hex]; ok {
 		return nil // no-op, already exists
 	}
@@ -210,20 +260,55 @@ func (f *FakeSkillStore) PutIfAbsent(_ context.Context, sha256hex string, compre
 }
 
 func (f *FakeSkillStore) PresignedGet(_ context.Context, sha256hex string) (string, error) {
-	f.Calls = append(f.Calls, "presign:"+sha256hex)
-	if _, ok := f.objects[sha256hex]; !ok {
+	f.mu.Lock()
+	f.calls = append(f.calls, "presign:"+sha256hex)
+	_, ok := f.objects[sha256hex]
+	f.mu.Unlock()
+	if !ok {
 		return "", fmt.Errorf("fake: object %q not found", sha256hex)
 	}
 	return "https://fake-garage/skills/" + sha256hex + ".tar.zst?sig=fake", nil
 }
 
+// StatObject reports presence of sha256hex. If StatHook is set, it is called first and any
+// non-nil error is returned verbatim (a transport fault, NOT ErrObjectMissing). Otherwise
+// returns nil if present, or ErrObjectMissing (wrapped) if absent.
+func (f *FakeSkillStore) StatObject(ctx context.Context, sha256hex string) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, "stat:"+sha256hex)
+	hook := f.StatHook
+	_, ok := f.objects[sha256hex]
+	f.mu.Unlock()
+
+	if hook != nil {
+		if err := hook(ctx, sha256hex); err != nil {
+			return err
+		}
+	}
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrObjectMissing, sha256hex)
+	}
+	return nil
+}
+
 // Has reports whether the fake store contains an object for sha256hex.
 func (f *FakeSkillStore) Has(sha256hex string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	_, ok := f.objects[sha256hex]
 	return ok
 }
 
 // Tags returns the tags recorded for sha256hex.
 func (f *FakeSkillStore) Tags(sha256hex string) map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.tags[sha256hex]
+}
+
+// Calls returns a snapshot of the recorded PutIfAbsent/PresignedGet/StatObject calls, in order.
+func (f *FakeSkillStore) Calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
 }
