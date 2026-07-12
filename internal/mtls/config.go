@@ -172,13 +172,9 @@ func validateServerIdentity(identity tls.Certificate) error {
 	if !ok || signer == nil {
 		return errors.New("mtls: server identity requires a usable private key")
 	}
-	leaf := identity.Leaf
-	if leaf == nil {
-		var err error
-		leaf, err = x509.ParseCertificate(identity.Certificate[0])
-		if err != nil {
-			return fmt.Errorf("mtls: parse server identity leaf: %w", err)
-		}
+	leaf, err := x509.ParseCertificate(identity.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("mtls: parse server identity leaf: %w", err)
 	}
 	leafPublic, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
 	if err != nil {

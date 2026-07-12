@@ -425,6 +425,21 @@ func TestServerTLSRejectsIdentityWithoutPrivateKey(t *testing.T) {
 	}
 }
 
+func TestServerTLSRejectsLeafThatDoesNotMatchServedCertificate(t *testing.T) {
+	t.Parallel()
+	f := newTLSFixture(t)
+	identity := tlsCertificate(t, f.authsvc)
+	identity.Certificate[0] = f.cp.Cert.Raw
+	_, err := ServerConfig(ServerOptions{
+		Verifier:   newPeerVerifier(t, f, nil),
+		Identity:   identity,
+		ClientMode: RequireClientCertificate,
+	})
+	if err == nil || !strings.Contains(err.Error(), "private key does not match") {
+		t.Fatalf("ServerConfig error = %v, want served-certificate key mismatch", err)
+	}
+}
+
 func newPeerVerifier(t *testing.T, f *tlsFixture, isRevoked func(*big.Int, *big.Int) bool) *PeerVerifier {
 	t.Helper()
 	if isRevoked == nil {
