@@ -156,8 +156,17 @@ func (s *Server) resolveBundleEntry(ctx context.Context, entry store.ProfileEntr
 			fmt.Errorf("entry %q: pinned bundle version has no members", entry.Name))
 	}
 
+	excludeSet := make(map[string]bool, len(entry.ExcludeSubdirs))
+	for _, subdir := range entry.ExcludeSubdirs {
+		excludeSet[subdir] = true
+	}
+
 	items := make([]resolvedItem, 0, len(members))
 	for _, m := range members {
+		// Excluded members (sp-mwco.1.8 §4.4) emit no artifact and no manifest entry.
+		if excludeSet[m.SourceSubdir] {
+			continue
+		}
 		ce, err := s.st.CustomizationCatalog().Get(ctx, m.CatalogID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
@@ -179,13 +188,20 @@ func (s *Server) resolveBundleEntry(ctx context.Context, entry store.ProfileEntr
 			sha256:     sha256,
 		})
 	}
+	if len(items) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("entry %q: all bundle members excluded", entry.Name))
+	}
 	return items, nil
 }
 
-// memberDirName returns the on-disk skill directory name for a bundle member. Today it is simply
-// the member's own catalog Name (post-rename-override, this is the on-disk skill dir); this is
-// the single seam sp-mwco.1.8 extends with the per-member rename override.
-func memberDirName(_ store.ProfileEntry, _ store.SkillBundleMember, ce store.CustomizationCatalogEntry) string {
+// memberDirName returns the on-disk skill directory name for a bundle member: the member's
+// per-member rename override (entry.RenameSubdirs[m.SourceSubdir]) if set, else the member's own
+// catalog Name (sp-mwco.1.8 §4.4).
+func memberDirName(entry store.ProfileEntry, m store.SkillBundleMember, ce store.CustomizationCatalogEntry) string {
+	if name, ok := entry.RenameSubdirs[m.SourceSubdir]; ok {
+		return name
+	}
 	return ce.Name
 }
 
