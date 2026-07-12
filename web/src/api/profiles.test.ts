@@ -174,12 +174,64 @@ describe("profiles api", () => {
     expect(await listCatalogEntries()).toEqual([]);
   });
 
+  it("listCatalogEntries provenance survives the unary decode", async () => {
+    const f = mockFetch({
+      entries: [{
+        catalogId: "c1",
+        kind: "PROFILE_ENTRY_KIND_SKILL",
+        name: "Skill1",
+        sourceUrl: "https://github.com/obra/superpowers",
+        sourceRef: "main",
+        sourceSubdir: "skills/x",
+        sourceCommit: "1111111111111111111111111111111111aaaa",
+        sha256: "2222222222222222222222222222222222222222222222222222222222bbbb",
+        size: "4096",
+        bundleMember: true,
+      }],
+    });
+    vi.stubGlobal("fetch", f);
+    const entries = await listCatalogEntries();
+    expect(entries[0].sourceUrl).toBe("https://github.com/obra/superpowers");
+    expect(entries[0].sourceRef).toBe("main");
+    expect(entries[0].sourceSubdir).toBe("skills/x");
+    expect(entries[0].sourceCommit).toBe("1111111111111111111111111111111111aaaa");
+    expect(entries[0].sha256).toBe("2222222222222222222222222222222222222222222222222222222222bbbb");
+    expect(entries[0].size).toBe("4096");
+    expect(entries[0].bundleMember).toBe(true);
+  });
+
   it("getCatalogEntry POSTs GetCatalogEntry with catalogId", async () => {
     const f = mockFetch({ entry: { catalogId: "c1", kind: "PROFILE_ENTRY_KIND_MCP", name: "My MCP", content: "..." } });
     vi.stubGlobal("fetch", f);
     const entry = await getCatalogEntry("c1");
     expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ catalogId: "c1" });
     expect(entry.catalogId).toBe("c1");
+  });
+
+  it("getCatalogEntry provenance survives the unary decode", async () => {
+    const f = mockFetch({
+      entry: {
+        catalogId: "c1",
+        kind: "PROFILE_ENTRY_KIND_SKILL",
+        name: "Skill1",
+        sourceUrl: "https://github.com/obra/superpowers",
+        sourceRef: "main",
+        sourceSubdir: "skills/x",
+        sourceCommit: "1111111111111111111111111111111111aaaa",
+        sha256: "2222222222222222222222222222222222222222222222222222222222bbbb",
+        size: "4096",
+        bundleMember: true,
+      },
+    });
+    vi.stubGlobal("fetch", f);
+    const entry = await getCatalogEntry("c1");
+    expect(entry.sourceUrl).toBe("https://github.com/obra/superpowers");
+    expect(entry.sourceRef).toBe("main");
+    expect(entry.sourceSubdir).toBe("skills/x");
+    expect(entry.sourceCommit).toBe("1111111111111111111111111111111111aaaa");
+    expect(entry.sha256).toBe("2222222222222222222222222222222222222222222222222222222222bbbb");
+    expect(entry.size).toBe("4096");
+    expect(entry.bundleMember).toBe(true);
   });
 
   it("deleteCatalogEntry POSTs DeleteCatalogEntry with force defaulting to false", async () => {

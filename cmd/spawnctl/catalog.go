@@ -82,12 +82,22 @@ func runCatalogList(ctx context.Context, c catalogClient, out io.Writer) error {
 		return fmt.Errorf("list catalog entries: %w", err)
 	}
 	w := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "CATALOG ID\tKIND\tNAME\tDESCRIPTION")
+	fmt.Fprintln(w, "CATALOG ID\tKIND\tNAME\tDESCRIPTION\tSOURCE\tCOMMIT")
 	for _, e := range resp.Msg.GetEntries() {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			e.GetCatalogId(), profileEntryKindLabel(e.GetKind()), e.GetName(), e.GetDescription())
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			e.GetCatalogId(), profileEntryKindLabel(e.GetKind()), e.GetName(), e.GetDescription(),
+			e.GetSourceUrl(), shortHash(e.GetSourceCommit()))
 	}
 	return w.Flush()
+}
+
+// shortHash renders a git-style short form of a hash/commit: the first 12 characters, or the
+// whole string when it's already shorter. "" stays "".
+func shortHash(s string) string {
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
 }
 
 func runCatalogShow(ctx context.Context, c catalogClient, out io.Writer, catalogID string) error {
@@ -104,6 +114,27 @@ func runCatalogShow(ctx context.Context, c catalogClient, out io.Writer, catalog
 	fmt.Fprintf(out, "Listed:      %v\n", e.GetListed())
 	fmt.Fprintf(out, "Created:     %s\n", time.Unix(e.GetCreatedAt(), 0).Format(time.RFC3339))
 	fmt.Fprintf(out, "Updated:     %s\n", time.Unix(e.GetUpdatedAt(), 0).Format(time.RFC3339))
+	if e.GetSourceUrl() != "" {
+		fmt.Fprintf(out, "Source:      %s\n", e.GetSourceUrl())
+	}
+	if e.GetSourceRef() != "" {
+		fmt.Fprintf(out, "Source ref:  %s\n", e.GetSourceRef())
+	}
+	if e.GetSourceSubdir() != "" {
+		fmt.Fprintf(out, "Source subdir: %s\n", e.GetSourceSubdir())
+	}
+	if e.GetSourceCommit() != "" {
+		fmt.Fprintf(out, "Source commit: %s\n", e.GetSourceCommit())
+	}
+	if e.GetSha256() != "" {
+		fmt.Fprintf(out, "Content SHA-256: %s\n", e.GetSha256())
+	}
+	if e.GetSize() != 0 {
+		fmt.Fprintf(out, "Size:        %d\n", e.GetSize())
+	}
+	if e.GetBundleMember() {
+		fmt.Fprintf(out, "Bundle member: %v\n", e.GetBundleMember())
+	}
 	if len(e.GetContent()) > 0 {
 		fmt.Fprintln(out, "\nContent:")
 		_, _ = out.Write(e.GetContent())

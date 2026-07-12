@@ -118,6 +118,112 @@ func TestRunCatalogShow(t *testing.T) {
 	}
 }
 
+// TestRunCatalogShowProvenance verifies catalog show prints the seven provenance fields for a
+// URL-ingested entry, with the content hash and the upstream commit under distinct labels
+// (sp-mwco.3.1 D2 — the anti-mislabel regression test), and prints none of them for an inline
+// entry.
+func TestRunCatalogShowProvenance(t *testing.T) {
+	f := &fakeCatalogClient{getResp: &cpv1.GetCatalogEntryResponse{
+		Entry: &cpv1.CustomizationCatalogEntry{
+			CatalogId:    "cat-42",
+			Kind:         cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+			Name:         "prov-skill",
+			Description:  "a url-ingested skill",
+			Listed:       true,
+			SourceUrl:    "https://github.com/obra/superpowers",
+			SourceRef:    "main",
+			SourceSubdir: "skills/x",
+			SourceCommit: "1111111111111111111111111111111111aaaa",
+			Sha256:       "2222222222222222222222222222222222222222222222222222222222bbbb",
+			Size:         4096,
+			BundleMember: true,
+		},
+	}}
+	var out bytes.Buffer
+	if err := runCatalogShow(context.Background(), f, &out, "cat-42"); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	for _, want := range []string{
+		"Source:", "https://github.com/obra/superpowers",
+		"Source ref:", "main",
+		"Source subdir:", "skills/x",
+		"Source commit:", "1111111111111111111111111111111111aaaa",
+		"Content SHA-256:", "2222222222222222222222222222222222222222222222222222222222bbbb",
+		"Size:", "4096",
+		"Bundle member: true",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("show output missing %q; got:\n%s", want, s)
+		}
+	}
+}
+
+func TestRunCatalogShowProvenance_InlineEntryOmitsIt(t *testing.T) {
+	f := &fakeCatalogClient{getResp: &cpv1.GetCatalogEntryResponse{
+		Entry: &cpv1.CustomizationCatalogEntry{
+			CatalogId:   "cat-inline",
+			Kind:        cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_CONFIG,
+			Name:        "cfg-tool",
+			Description: "a config",
+			Content:     []byte("some content"),
+			Listed:      true,
+		},
+	}}
+	var out bytes.Buffer
+	if err := runCatalogShow(context.Background(), f, &out, "cat-inline"); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	if strings.Contains(s, "Content SHA-256") {
+		t.Errorf("show output should not contain Content SHA-256 for inline entry: %q", s)
+	}
+	if strings.Contains(s, "Source:") {
+		t.Errorf("show output should not contain Source: for inline entry: %q", s)
+	}
+}
+
+// TestRunCatalogListProvenance verifies catalog list gains SOURCE and COMMIT columns, with the
+// commit shortened to 12 chars, and inline rows leave both blank.
+func TestRunCatalogListProvenance(t *testing.T) {
+	f := &fakeCatalogClient{listResp: &cpv1.ListCatalogEntriesResponse{Entries: []*cpv1.CatalogEntrySummary{
+		{
+			CatalogId:    "cat-1",
+			Kind:         cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+			Name:         "s",
+			Description:  "d",
+			SourceUrl:    "https://github.com/obra/superpowers",
+			SourceCommit: "1111111111111111111111111111111111aaaa",
+		},
+		{
+			CatalogId:   "cat-2",
+			Kind:        cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_CONFIG,
+			Name:        "inline",
+			Description: "d2",
+		},
+	}}}
+	var out bytes.Buffer
+	if err := runCatalogList(context.Background(), f, &out); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "SOURCE") || !strings.Contains(s, "COMMIT") {
+		t.Fatalf("list header missing SOURCE/COMMIT columns: %q", s)
+	}
+	if !strings.Contains(s, "cat-1") || !strings.Contains(s, "skill") {
+		t.Fatalf("list output = %q", s)
+	}
+	if !strings.Contains(s, "https://github.com/obra/superpowers") {
+		t.Fatalf("list output missing source url: %q", s)
+	}
+	if strings.Contains(s, "1111111111111111111111111111111111aaaa") {
+		t.Fatalf("list output should show the commit shortened to 12 chars, not the full 40: %q", s)
+	}
+	if !strings.Contains(s, "111111111111") {
+		t.Fatalf("list output missing shortened (12-char) commit: %q", s)
+	}
+}
+
 // ---- update ----
 
 func TestRunCatalogUpdate(t *testing.T) {

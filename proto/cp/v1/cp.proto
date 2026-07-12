@@ -773,6 +773,15 @@ message CustomizationCatalogEntry {
   bool             listed       = 7;
   int64            created_at   = 8;
   int64            updated_at   = 9;
+
+  // Provenance (sp-mwco.3.1). Empty/zero for inline (non-URL) entries.
+  string source_url    = 10; // resolvable https URL of the source repo (server-normalized)
+  string source_ref    = 11; // branch/tag/commit ref requested at ingest; "" => repo default branch
+  string source_subdir = 12; // path within the repo; "" at repo root
+  string source_commit = 13; // upstream git commit the content came from (identity for updates)
+  string sha256        = 14; // hex sha256 of the canonical plain tar — CONTENT hash, NOT a git commit
+  int64  size          = 15; // plain tar size in bytes
+  bool   bundle_member = 16; // true => row is a member of a skill bundle, not a standalone skill
 }
 
 // CatalogEntrySummary is the lightweight list view (omits content).
@@ -781,6 +790,15 @@ message CatalogEntrySummary {
   ProfileEntryKind kind        = 2;
   string           name        = 3;
   string           description = 4;
+
+  // Provenance (sp-mwco.3.1). Empty/zero for inline (non-URL) entries.
+  string source_url    = 5;  // resolvable https URL of the source repo (server-normalized)
+  string source_ref    = 6;  // branch/tag/commit ref requested at ingest; "" => repo default branch
+  string source_subdir = 7;  // path within the repo; "" at repo root
+  string source_commit = 8;  // upstream git commit the content came from (identity for updates)
+  string sha256        = 9;  // hex sha256 of the canonical plain tar — CONTENT hash, NOT a git commit
+  int64  size          = 10; // plain tar size in bytes
+  bool   bundle_member = 11; // true => row is a member of a skill bundle, not a standalone skill
 }
 
 message CreateCatalogEntryRequest  { ProfileEntryKind kind = 1; string name = 2; string description = 3; bytes content = 4; }

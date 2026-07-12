@@ -62,6 +62,14 @@ export interface CatalogEntrySummary {
   kind: ProfileEntryKind;
   name: string;
   description?: string;
+  // Provenance (sp-mwco.3.1). Empty/absent for inline (non-URL) entries.
+  sourceUrl?: string;
+  sourceRef?: string;
+  sourceSubdir?: string;
+  sourceCommit?: string;
+  sha256?: string;
+  size?: string; // proto-JSON encodes int64 as a string
+  bundleMember?: boolean;
 }
 
 export interface CustomizationCatalogEntry {
@@ -74,6 +82,14 @@ export interface CustomizationCatalogEntry {
   listed?: boolean;
   createdAt?: string;
   updatedAt?: string;
+  // Provenance (sp-mwco.3.1). Empty/absent for inline (non-URL) entries.
+  sourceUrl?: string;
+  sourceRef?: string;
+  sourceSubdir?: string;
+  sourceCommit?: string;
+  sha256?: string;
+  size?: string; // proto-JSON encodes int64 as a string
+  bundleMember?: boolean;
 }
 
 // --- Display helpers ---------------------------------------------------------
