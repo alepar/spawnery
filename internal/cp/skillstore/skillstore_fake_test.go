@@ -57,6 +57,39 @@ func TestFakeSkillStore_StatObject_HookTransportError(t *testing.T) {
 	}
 }
 
+// TestFakeSkillStore_Get_RoundTrip verifies Get returns the exact bytes a prior PutIfAbsent
+// stored.
+func TestFakeSkillStore_Get_RoundTrip(t *testing.T) {
+	fake := skillstore.NewFakeSkillStore()
+	sha := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	want := []byte("compressed-tar-bytes")
+	if err := fake.PutIfAbsent(context.Background(), sha, want, nil); err != nil {
+		t.Fatalf("PutIfAbsent: %v", err)
+	}
+
+	got, err := fake.Get(context.Background(), sha)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("Get = %q, want %q", got, want)
+	}
+}
+
+// TestFakeSkillStore_Get_Absent verifies Get returns ErrObjectMissing for an unknown sha.
+func TestFakeSkillStore_Get_Absent(t *testing.T) {
+	fake := skillstore.NewFakeSkillStore()
+	sha := "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+	_, err := fake.Get(context.Background(), sha)
+	if err == nil {
+		t.Fatal("Get(absent) = nil error, want ErrObjectMissing")
+	}
+	if !errors.Is(err, skillstore.ErrObjectMissing) {
+		t.Fatalf("Get(absent) = %v, want errors.Is(..., ErrObjectMissing)", err)
+	}
+}
+
 // TestFakeSkillStore_StatObject_RecordsCalls verifies StatObject records "stat:<sha>" in Calls.
 func TestFakeSkillStore_StatObject_RecordsCalls(t *testing.T) {
 	fake := skillstore.NewFakeSkillStore()

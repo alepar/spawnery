@@ -107,88 +107,132 @@ func refLabel(ref string) string {
 	return ref
 }
 
-// IngestSkillFromURL fetches every skill discovered in a GitHub repo (or subdir) — a
-// bundle-of-one for a single-skill repo, more for a superpowers-style multi-skill repo — repacks
-// each independently, and writes/updates a skill_bundle + version cut. Idempotent: an unchanged
-// re-fetch (same member set, same content) cuts no new version (§4.2/§4.3).
-func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cpv1.IngestSkillFromURLRequest]) (*connect.Response[cpv1.IngestSkillFromURLResponse], error) {
-	owner, ok := auth.OwnerFromContext(ctx)
-	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
-	}
+// ingestOutcome is the shared result of ingestBundle (sp-mwco.1.7 D2), mapped to the wire
+// response by each of its two callers: IngestSkillFromURL and ReingestBundle.
+type ingestOutcome struct {
+	BundleID      string
+	VersionID     string // the version now current: freshly cut if Changed, else the existing/latest one
+	FromVersionID string // the version compared against; "" on a first-ever cut
+	Changed       bool
+	// NotModified is true iff the upstream fetch short-circuited on a 304 (§4.8): no fetch body
+	// was read, no repack, no Garage put, no DB write. Only BundleID/VersionID/FromVersionID are
+	// meaningful alongside it (Changed is always false).
+	NotModified      bool
+	MemberCatalogIDs []string // position order
+	Warnings         []string
+	SkippedEntries   []string
+	AddedSubdirs     []string
+	UpdatedSubdirs   []string
+	RemovedSubdirs   []string
+}
 
-	// Check seams: both fetcher and store must be wired
+// ingestBundle is the shared ingest core (sp-mwco.1.7 D2): fetch -> cap -> materialize -> bundle
+// upsert -> version cut. IngestSkillFromURL calls it with etag="" (always an unconditional
+// fetch); ReingestBundle calls it with the bundle's stored ETag (§4.8 conditional refetch). Both
+// entry points map the returned ingestOutcome to their own wire response.
+//
+// Per-owner quota and (for ReingestBundle) the CP-wide refetch budget are the CALLER's job — they
+// are entry-point-specific gating decisions, not part of the shared fetch/materialize/cut core.
+func (s *Server) ingestBundle(ctx context.Context, owner string, repoRef skillfetch.RepoRef, gitRef, subdir, reqName, reqDesc, etag string) (ingestOutcome, error) {
 	if s.skillFetcher == nil || s.skillStore == nil {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("URL skill ingest requires Garage; configure skills.* in the CP config"))
+		return ingestOutcome{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("URL skill ingest requires Garage; configure skills.* in the CP config"))
 	}
 	bf, ok := s.skillFetcher.(skillfetch.BundleFetcher)
 	if !ok {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("skill ingest fetcher does not support bundles"))
+		return ingestOutcome{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("skill ingest fetcher does not support bundles"))
 	}
 
-	// Per-user ingest quota
-	if allowed, retryAfter := globalIngestQuota.allow(owner, time.Now()); !allowed {
-		mins := int(retryAfter.Round(time.Minute) / time.Minute)
-		return nil, connect.NewError(connect.CodeResourceExhausted,
-			fmt.Errorf("ingest rate limit exceeded (max %d per hour); retry after ~%dm", ingestQuotaMax, mins))
-	}
-
-	rawURL := req.Msg.Url
-	ref := req.Msg.Ref
-	subdir := req.Msg.Subdir
-	requestedName := req.Msg.Name
-	description := req.Msg.Description
-
-	// Parse the repo URL
-	repoRef, err := skillfetch.ParseRepoURL(rawURL)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, err)
-	}
 	sourceURL := repoRef.Owner + "/" + repoRef.Repo
 
-	// Acquire the CP-wide ingest concurrency slot across the fetch+repack only — that's where the
-	// memory hog lives; holding it across the Garage puts/DB writes below would needlessly
-	// serialize I/O that doesn't need bounding.
+	// Acquire the CP-wide ingest concurrency slot BEFORE any I/O (including the bundle lookup
+	// below) — this must stay the FIRST ctx-cancellation checkpoint, exactly as sp-mwco.1.4 landed
+	// it: a caller with an already-canceled ctx must observe CodeCanceled here, not a wrapped
+	// "context canceled" from an earlier DB read misclassified as CodeInternal (see
+	// TestIngestBundle_Semaphore_CtxCanceled_DoesNotLeakSlot — a wrong code there skips the test's
+	// gate cleanup and permanently exhausts the package-level ingestSem for every later test).
 	release, err := acquireIngestSlot(ctx)
 	if err != nil {
-		return nil, err
+		return ingestOutcome{}, err
 	}
+
+	// Look up the existing bundle (if any). Feeds three things below: the §4.8 etag guard, the
+	// §4.5 layout-change branch, and the bundle fetch-or-create step (avoids a second lookup).
+	existingBundle, bundleErr := s.st.SkillBundles().GetByKey(ctx, owner, sourceURL, gitRef, subdir)
+	if bundleErr != nil && !errors.Is(bundleErr, store.ErrNotFound) {
+		release()
+		return ingestOutcome{}, connect.NewError(connect.CodeInternal, fmt.Errorf("check existing bundle: %w", bundleErr))
+	}
+	bundleExists := bundleErr == nil
+
+	var existingLatest store.SkillBundleVersion
+	hasLatest := false
+	if bundleExists {
+		lv, lvErr := s.st.SkillBundles().LatestVersion(ctx, existingBundle.BundleID)
+		switch {
+		case lvErr == nil:
+			existingLatest, hasLatest = lv, true
+		case errors.Is(lvErr, store.ErrNotFound):
+			// §4.8 guard: a version-less bundle can't sanely receive a 304 ("up to date" with no
+			// pinned version to report) — fall back to an unconditional fetch.
+			etag = ""
+		default:
+			release()
+			return ingestOutcome{}, connect.NewError(connect.CodeInternal, fmt.Errorf("check latest version: %w", lvErr))
+		}
+	} else {
+		etag = "" // no bundle yet; nothing to compare against
+	}
+
 	var res skillfetch.BundleResult
+	var notModified bool
 	var fetchErr error
 	func() {
 		defer release()
-		res, fetchErr = bf.FetchBundle(ctx, repoRef, ref, subdir)
+		if cbf, ok := s.skillFetcher.(skillfetch.ConditionalBundleFetcher); ok {
+			res, notModified, fetchErr = cbf.FetchBundleConditional(ctx, repoRef, gitRef, subdir, etag)
+		} else {
+			// Degrades to an unconditional refetch — never an error (§4.8 D3). The caller pays for
+			// a full fetch, exactly as if GitHub itself had ignored If-None-Match.
+			res, fetchErr = bf.FetchBundle(ctx, repoRef, gitRef, subdir)
+		}
 	}()
 
 	if fetchErr != nil {
 		var rl *skillfetch.ErrRateLimit
 		if errors.As(fetchErr, &rl) {
-			return nil, connect.NewError(connect.CodeResourceExhausted, fmt.Errorf("GitHub rate limit: %w", fetchErr))
+			return ingestOutcome{}, connect.NewError(connect.CodeResourceExhausted, fmt.Errorf("GitHub rate limit: %w", fetchErr))
 		}
 		var upstream *skillfetch.ErrUpstreamFailed
 		if errors.As(fetchErr, &upstream) {
-			return nil, connect.NewError(connect.CodeUnavailable, fetchErr)
+			return ingestOutcome{}, connect.NewError(connect.CodeUnavailable, fetchErr)
 		}
 		if errors.Is(fetchErr, skillfetch.ErrNoSkills) {
 			// §4.5: a re-ingest that no longer discovers a member set fails loud and leaves the
 			// pin intact — it never silently converts/deletes the bundle. Only applies when the
 			// bundle already exists; a first-ever ingest of a skill-less repo is a plain bad input.
-			if _, getErr := s.st.SkillBundles().GetByKey(ctx, owner, sourceURL, ref, subdir); getErr == nil {
-				return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf(
-					"upstream layout changed: no SKILL.md found at %s; the pinned version is unchanged", refLabel(ref)))
-			} else if !errors.Is(getErr, store.ErrNotFound) {
-				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("check existing bundle: %w", getErr))
+			if bundleExists {
+				return ingestOutcome{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf(
+					"upstream layout changed: no SKILL.md found at %s; the pinned version is unchanged", refLabel(gitRef)))
 			}
 		}
 		// Genuine bad-input errors: no SKILL.md, unsafe path, invalid name, size/file cap,
 		// duplicate member, disallowed redirect host, GitHub 4xx (bad repo/ref/credentials).
-		return nil, connect.NewError(connect.CodeInvalidArgument, fetchErr)
+		return ingestOutcome{}, connect.NewError(connect.CodeInvalidArgument, fetchErr)
+	}
+
+	if notModified {
+		out := ingestOutcome{BundleID: existingBundle.BundleID, NotModified: true}
+		if hasLatest {
+			out.VersionID = existingLatest.VersionID
+			out.FromVersionID = existingLatest.VersionID
+		}
+		return out, nil
 	}
 
 	// Member cap, BEFORE any Garage put or DB write (sp-mwco.1.4): uploading first would leave
 	// never-GC'd Garage objects and then fail every CreateSpawn that resolves this bundle.
 	if len(res.Members) > maxBundleMembers {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf(
+		return ingestOutcome{}, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf(
 			"bundle has %d skills; max %d per bundle (a spawn is capped at %d artifacts including its manifest) — narrow the ingest with subdir",
 			len(res.Members), maxBundleMembers, maxArtifactsPerSpawn))
 	}
@@ -207,7 +251,7 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 			owner, sourceURL, len(res.SkippedEntries), strings.Join(skippedList, ", "), truncated)
 	}
 
-	if len(res.Members) > 1 && (requestedName != "" || description != "") {
+	if len(res.Members) > 1 && (reqName != "" || reqDesc != "") {
 		log.Printf("ingest_skill: owner=%s repo=%s: %d members discovered; ignoring the request name/description overrides (they would name the bundle, not a specific member)",
 			owner, sourceURL, len(res.Members))
 	}
@@ -225,7 +269,7 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 			"owner":  owner,
 		}
 		if err := s.skillStore.PutIfAbsent(ctx, m.PlainTarSHA256, m.CompressedBytes, tags); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("store skill object for member %q: %w", memberLabel(m.Dir), err))
+			return ingestOutcome{}, connect.NewError(connect.CodeInternal, fmt.Errorf("store skill object for member %q: %w", memberLabel(m.Dir), err))
 		}
 
 		name := m.Name
@@ -233,11 +277,11 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 		if len(res.Members) == 1 {
 			// Bundle-of-one from a single-skill repo: preserve today's UX of letting the request
 			// name/description override the discovered ones.
-			if requestedName != "" {
-				name = requestedName
+			if reqName != "" {
+				name = reqName
 			}
-			if description != "" {
-				desc = description
+			if reqDesc != "" {
+				desc = reqDesc
 			}
 		}
 
@@ -262,7 +306,7 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 				CreatedAt:    now,
 				UpdatedAt:    now,
 				SourceURL:    sourceURL,
-				SourceRef:    ref,
+				SourceRef:    gitRef,
 				SourceSubdir: m.Dir,
 				SHA256:       &sha256val,
 				Size:         &sizeVal,
@@ -271,19 +315,19 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 			}
 			if err := s.st.CustomizationCatalog().CreateSkill(ctx, entry); err != nil {
 				if !errors.Is(err, store.ErrConflict) {
-					return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create catalog entry for member %q: %w", memberLabel(m.Dir), err))
+					return ingestOutcome{}, connect.NewError(connect.CodeInternal, fmt.Errorf("create catalog entry for member %q: %w", memberLabel(m.Dir), err))
 				}
 				// Lost a concurrent-ingest race; re-select and use the winner.
 				winner, gerr := s.st.CustomizationCatalog().GetByCreatorSHA(ctx, owner, m.PlainTarSHA256)
 				if gerr != nil {
-					return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("re-select member %q after conflict: %w", memberLabel(m.Dir), gerr))
+					return ingestOutcome{}, connect.NewError(connect.CodeInternal, fmt.Errorf("re-select member %q after conflict: %w", memberLabel(m.Dir), gerr))
 				}
 				catalogID = winner.CatalogID
 			} else {
 				catalogID = newID
 			}
 		default:
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("check existing member %q: %w", memberLabel(m.Dir), err))
+			return ingestOutcome{}, connect.NewError(connect.CodeInternal, fmt.Errorf("check existing member %q: %w", memberLabel(m.Dir), err))
 		}
 
 		// Best-effort catalog_id tag update (no-op body, tags-only update is out of scope).
@@ -294,12 +338,9 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 	}
 
 	// Bundle row: fetch-or-create for (owner, source_url, ref, subdir), also outside any tx.
-	bundle, err := s.st.SkillBundles().GetByKey(ctx, owner, sourceURL, ref, subdir)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("check existing bundle: %w", err))
-		}
-		bundleName := requestedName
+	bundle := existingBundle
+	if !bundleExists {
+		bundleName := reqName
 		if bundleName == "" {
 			bundleName = repoRef.Repo
 		}
@@ -308,7 +349,7 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 			CreatorID:    owner,
 			Name:         bundleName,
 			SourceURL:    sourceURL,
-			SourceRef:    ref,
+			SourceRef:    gitRef,
 			SourceSubdir: subdir,
 			ETag:         "",
 			CreatedAt:    now,
@@ -316,13 +357,14 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 		}
 		if cerr := s.st.SkillBundles().Create(ctx, newBundle); cerr != nil {
 			if !errors.Is(cerr, store.ErrConflict) {
-				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create bundle: %w", cerr))
+				return ingestOutcome{}, connect.NewError(connect.CodeInternal, fmt.Errorf("create bundle: %w", cerr))
 			}
 			// Lost a concurrent first-ingest race; re-select.
-			bundle, err = s.st.SkillBundles().GetByKey(ctx, owner, sourceURL, ref, subdir)
-			if err != nil {
-				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("re-select bundle after conflict: %w", err))
+			reselected, gerr := s.st.SkillBundles().GetByKey(ctx, owner, sourceURL, gitRef, subdir)
+			if gerr != nil {
+				return ingestOutcome{}, connect.NewError(connect.CodeInternal, fmt.Errorf("re-select bundle after conflict: %w", gerr))
 			}
+			bundle = reselected
 		} else {
 			bundle = newBundle
 		}
@@ -330,23 +372,32 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 
 	// Version cut, inside a tx that locks the bundle row — serializes concurrent re-ingests of the
 	// same bundle so the compare-then-cut decision and seq allocation are race-free.
-	var responseCatalogID string
+	out := ingestOutcome{
+		BundleID:       bundle.BundleID,
+		Warnings:       res.Warnings,
+		SkippedEntries: res.SkippedEntries,
+	}
+	if hasLatest {
+		out.FromVersionID = existingLatest.VersionID
+	}
 	txErr := s.st.WithTx(ctx, func(tx store.Store) error {
 		if err := tx.SkillBundles().LockBundle(ctx, bundle.BundleID); err != nil {
 			return err
 		}
 
 		newBySubdir := make(map[string]string, len(res.Members))
+		newOrder := make([]string, 0, len(res.Members)) // position order, for deterministic added/removed lists
 		for _, m := range res.Members {
 			newBySubdir[m.Dir] = m.PlainTarSHA256
+			newOrder = append(newOrder, m.Dir)
 		}
 
 		latest, err := tx.SkillBundles().LatestVersion(ctx, bundle.BundleID)
-		changed := false
+		var added, updated, removed []string
 		seq := int64(1)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
-			changed = true
+			added = append([]string(nil), newOrder...)
 		case err != nil:
 			return err
 		default:
@@ -355,35 +406,51 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 			if merr != nil {
 				return merr
 			}
-			if len(oldMembers) != len(newBySubdir) {
-				changed = true
-			} else {
-				for _, om := range oldMembers {
-					newSha, ok := newBySubdir[om.SourceSubdir]
-					if !ok {
-						changed = true
-						break
-					}
-					// Compare content sha, NOT catalog_id identity: a deleted-then-recreated
-					// catalog row for byte-identical content gets a fresh catalog_id, and
-					// catalog_id-identity comparison would report a phantom change. Never compare
-					// created_at/updated_at either — a revert A->B->A dedups back onto the
-					// ORIGINAL A row, whose created_at predates the reverting version, so any
-					// created_at-based comparison would report "changed" forever (§4.3).
-					oldEntry, gerr := tx.CustomizationCatalog().Get(ctx, om.CatalogID)
-					if gerr != nil {
-						return gerr
-					}
-					if oldEntry.SHA256 == nil || *oldEntry.SHA256 != newSha {
-						changed = true
-						break
-					}
+			// Compare content sha, NOT catalog_id identity: a deleted-then-recreated catalog row
+			// for byte-identical content gets a fresh catalog_id, and catalog_id-identity
+			// comparison would report a phantom change. Never compare created_at/updated_at
+			// either — a revert A->B->A dedups back onto the ORIGINAL A row, whose created_at
+			// predates the reverting version, so any created_at-based comparison would report
+			// "changed" forever (§4.3).
+			oldBySubdir := make(map[string]string, len(oldMembers))
+			for _, om := range oldMembers {
+				oldEntry, gerr := tx.CustomizationCatalog().Get(ctx, om.CatalogID)
+				if gerr != nil {
+					return gerr
+				}
+				oldSha := ""
+				if oldEntry.SHA256 != nil {
+					oldSha = *oldEntry.SHA256
+				}
+				oldBySubdir[om.SourceSubdir] = oldSha
+			}
+			for _, dir := range newOrder {
+				oldSha, ok := oldBySubdir[dir]
+				if !ok {
+					added = append(added, dir)
+				} else if oldSha != newBySubdir[dir] {
+					updated = append(updated, dir)
+				}
+			}
+			for _, om := range oldMembers {
+				if _, ok := newBySubdir[om.SourceSubdir]; !ok {
+					removed = append(removed, om.SourceSubdir)
 				}
 			}
 		}
+		changed := len(added) > 0 || len(updated) > 0 || len(removed) > 0
+
+		out.Changed = changed
+		out.AddedSubdirs = added
+		out.UpdatedSubdirs = updated
+		out.RemovedSubdirs = removed
+		out.MemberCatalogIDs = make([]string, len(materialized))
+		for i, m := range materialized {
+			out.MemberCatalogIDs[i] = m.CatalogID
+		}
 
 		if !changed {
-			responseCatalogID = materialized[0].CatalogID
+			out.VersionID = latest.VersionID
 			return nil
 		}
 
@@ -406,22 +473,72 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 		if err := tx.SkillBundles().CreateVersion(ctx, v, members); err != nil {
 			return err
 		}
-		responseCatalogID = materialized[0].CatalogID
+		out.VersionID = versionID
 		return nil
 	})
 	if txErr != nil {
 		var ce *connect.Error
 		if errors.As(txErr, &ce) {
-			return nil, txErr
+			return ingestOutcome{}, txErr
 		}
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("version cut: %w", txErr))
+		return ingestOutcome{}, connect.NewError(connect.CodeInternal, fmt.Errorf("version cut: %w", txErr))
 	}
 
-	// TODO(sp-mwco.1.7): the response should also carry bundle_id, version_id, members, and
-	// warnings — today's IngestSkillFromURLResponse only has catalog_id (the proto surface lands
-	// with the ReingestBundle/GetBundleDiff RPCs). For a single-skill repo (bundle-of-one, the
-	// overwhelmingly common case) this is exactly today's behaviour.
-	return connect.NewResponse(&cpv1.IngestSkillFromURLResponse{CatalogId: responseCatalogID}), nil
+	// §4.8: persist the fresh ETag AFTER the version-cut tx succeeds — best-effort; a lost ETag
+	// only costs one extra full fetch next time, not a correctness problem.
+	if serr := s.st.SkillBundles().SetETag(ctx, bundle.BundleID, res.ETag, now); serr != nil {
+		log.Printf("ingest_skill: owner=%s bundle=%s: failed to persist etag: %v", owner, bundle.BundleID, serr)
+	}
+
+	return out, nil
+}
+
+// IngestSkillFromURL fetches every skill discovered in a GitHub repo (or subdir) — a
+// bundle-of-one for a single-skill repo, more for a superpowers-style multi-skill repo — repacks
+// each independently, and writes/updates a skill_bundle + version cut. Idempotent: an unchanged
+// re-fetch (same member set, same content) cuts no new version (§4.2/§4.3).
+func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cpv1.IngestSkillFromURLRequest]) (*connect.Response[cpv1.IngestSkillFromURLResponse], error) {
+	owner, ok := auth.OwnerFromContext(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
+
+	// Per-user ingest quota.
+	if allowed, retryAfter := globalIngestQuota.allow(owner, time.Now()); !allowed {
+		mins := int(retryAfter.Round(time.Minute) / time.Minute)
+		return nil, connect.NewError(connect.CodeResourceExhausted,
+			fmt.Errorf("ingest rate limit exceeded (max %d per hour); retry after ~%dm", ingestQuotaMax, mins))
+	}
+
+	rawURL := req.Msg.Url
+	ref := req.Msg.Ref
+	subdir := req.Msg.Subdir
+	requestedName := req.Msg.Name
+	description := req.Msg.Description
+
+	repoRef, err := skillfetch.ParseRepoURL(rawURL)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
+	out, err := s.ingestBundle(ctx, owner, repoRef, ref, subdir, requestedName, description, "")
+	if err != nil {
+		return nil, err
+	}
+
+	catalogID := ""
+	if len(out.MemberCatalogIDs) > 0 {
+		catalogID = out.MemberCatalogIDs[0]
+	}
+	return connect.NewResponse(&cpv1.IngestSkillFromURLResponse{
+		CatalogId:        catalogID,
+		BundleId:         out.BundleID,
+		VersionId:        out.VersionID,
+		MemberCatalogIds: out.MemberCatalogIDs,
+		SkippedEntries:   out.SkippedEntries,
+		Warnings:         out.Warnings,
+		Changed:          out.Changed,
+	}), nil
 }
 
 // SetSkillIngest wires the skill fetcher and skill store into the server, plus the effective

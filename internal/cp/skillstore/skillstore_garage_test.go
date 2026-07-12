@@ -101,6 +101,24 @@ func TestGarageSkillStore_PutIfAbsentAndPresign(t *testing.T) {
 		t.Fatalf("StatObject (random sha %s): want errors.Is(..., ErrObjectMissing), got %v", randomSha, err)
 	}
 
+	// Get: a present sha returns the exact bytes stored.
+	got, err := store.Get(ctx, sha)
+	if err != nil {
+		t.Fatalf("Get (present): %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("Get (present) content mismatch: got %d bytes, want %d", len(got), len(content))
+	}
+
+	// Get: a random, never-written sha reports ErrObjectMissing.
+	_, err = store.Get(ctx, randomSha)
+	if err == nil {
+		t.Fatalf("Get (random sha %s): want ErrObjectMissing, got nil", randomSha)
+	}
+	if !errors.Is(err, skillstore.ErrObjectMissing) {
+		t.Fatalf("Get (random sha %s): want errors.Is(..., ErrObjectMissing), got %v", randomSha, err)
+	}
+
 	// Presign and GET
 	presignedURL, err := store.PresignedGet(ctx, sha)
 	if err != nil {
