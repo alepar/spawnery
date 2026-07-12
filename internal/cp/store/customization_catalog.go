@@ -34,6 +34,18 @@ func (r *customizationCatalogRepo) List(ctx context.Context) ([]CustomizationCat
 	return out, err
 }
 
+// ListVisibleTo returns every entry visible to ownerID — listed=true entries (global) UNION
+// ownerID's own entries (including unlisted) — ordered by name ASC. This is the tenant-scoped
+// visibility rule (sp-mwco.3.4 §4.6 D2): "listed OR mine". Backs ListCatalogEntries.
+func (r *customizationCatalogRepo) ListVisibleTo(ctx context.Context, ownerID string) ([]CustomizationCatalogEntry, error) {
+	var out []CustomizationCatalogEntry
+	err := r.db.NewSelect().Model(&out).
+		Where("listed = ? OR creator_id = ?", true, ownerID).
+		Order("name ASC").
+		Scan(ctx)
+	return out, err
+}
+
 // ListByCreator returns all entries for the given creator (including unlisted), ordered by name ASC.
 func (r *customizationCatalogRepo) ListByCreator(ctx context.Context, creatorID string) ([]CustomizationCatalogEntry, error) {
 	var out []CustomizationCatalogEntry

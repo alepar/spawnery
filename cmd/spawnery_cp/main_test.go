@@ -38,6 +38,9 @@ func TestCPConfig_Defaults(t *testing.T) {
 	if cfg.MaxSpawnsPerOwner != 5 {
 		t.Errorf("MaxSpawnsPerOwner = %d, want 5", cfg.MaxSpawnsPerOwner)
 	}
+	if cfg.AdminOwners != "" {
+		t.Errorf("AdminOwners = %q, want empty (nobody is admin by default)", cfg.AdminOwners)
+	}
 	if cfg.Evaluator.IdleDetached != 15*time.Minute || cfg.Evaluator.IdleAttached != 60*time.Minute {
 		t.Errorf("evaluator idle defaults = %s/%s", cfg.Evaluator.IdleDetached, cfg.Evaluator.IdleAttached)
 	}
@@ -54,6 +57,7 @@ func TestCPConfig_EnvAliasOverride(t *testing.T) {
 		"CP_LISTEN":               "0.0.0.0:9000",
 		"CP_MAX_SPAWNS_PER_OWNER": "9",
 		"EVALUATOR_IDLE_DETACHED": "5m",
+		"CP_ADMIN_OWNERS":         "alice,bob",
 	})
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -66,6 +70,9 @@ func TestCPConfig_EnvAliasOverride(t *testing.T) {
 	}
 	if cfg.Evaluator.IdleDetached != 5*time.Minute {
 		t.Errorf("IdleDetached = %s, want 5m", cfg.Evaluator.IdleDetached)
+	}
+	if cfg.AdminOwners != "alice,bob" {
+		t.Errorf("AdminOwners = %q, want %q", cfg.AdminOwners, "alice,bob")
 	}
 }
 

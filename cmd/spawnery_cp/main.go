@@ -172,6 +172,7 @@ func main() {
 
 	srv := cp.NewServer(reg, rt, sched, st, tel)
 	srv.SetMaxSpawnsPerOwner(cfg.MaxSpawnsPerOwner)
+	srv.SetAdminOwners(splitTrim(cfg.AdminOwners, ","))
 	srv.SetSessionRegistry(sessions)
 	srv.SetVerify(verifier.Verify)
 	srv.SetDevMode(devMode)

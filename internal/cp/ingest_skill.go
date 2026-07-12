@@ -149,7 +149,9 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 		Name:         result.Name,
 		Description:  description,
 		Content:      nil, // URL skills: no inline content
-		Listed:       true,
+		// Unlisted by default (sp-mwco.3.4 §4.6 D1): a skill pasted from a random GitHub repo is
+		// creator-visible only until an admin PublishCatalogEntry's it onto the global catalog.
+		Listed:       false,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 		SourceURL:    sourceURL,

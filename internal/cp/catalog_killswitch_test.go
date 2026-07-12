@@ -216,10 +216,11 @@ func TestSetCatalogListing_KillSwitch_DelistTerminates(t *testing.T) {
 	spawnID := "sp-delist-ks"
 	makeSpawnForKS(t, s, spawnID, "alice", pfID)
 
-	// Delist — kill-switch fires.
+	// Delist — kill-switch fires. Confirm:true since the entry is referenced (§4.6 D5 guard).
 	if _, err := s.SetCatalogListing(aliceCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
 		CatalogId: catID,
 		Listed:    false,
+		Confirm:   true,
 	})); err != nil {
 		t.Fatalf("SetCatalogListing false: %v", err)
 	}
@@ -233,6 +234,7 @@ func TestSetCatalogListing_KillSwitch_DelistTerminates(t *testing.T) {
 // NOT trigger the kill-switch.
 func TestSetCatalogListing_KillSwitch_RelistNoKill(t *testing.T) {
 	s, _, _ := newTestServer(t)
+	s.SetAdminOwners([]string{"admin"}) // relisting requires admin (§4.6 D4)
 
 	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "my-skill")
 
@@ -243,10 +245,12 @@ func TestSetCatalogListing_KillSwitch_RelistNoKill(t *testing.T) {
 	spawnID := "sp-relist-ks"
 	makeSpawnForKS(t, s, spawnID, "alice", pfID)
 
-	// First delist to make it not-listed, then relist — relist must NOT kill.
+	// First delist (creator, confirmed — the entry is referenced) to make it not-listed, then
+	// relist as admin — relist must NOT kill.
 	if _, err := s.SetCatalogListing(aliceCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
 		CatalogId: catID,
 		Listed:    false,
+		Confirm:   true,
 	})); err != nil {
 		t.Fatalf("SetCatalogListing false: %v", err)
 	}
@@ -255,8 +259,8 @@ func TestSetCatalogListing_KillSwitch_RelistNoKill(t *testing.T) {
 	spawnID2 := "sp-relist-ks2"
 	makeSpawnForKS(t, s, spawnID2, "alice", pfID)
 
-	// Relist — must NOT kill sp-relist-ks2.
-	if _, err := s.SetCatalogListing(aliceCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
+	// Relist (admin) — must NOT kill sp-relist-ks2.
+	if _, err := s.SetCatalogListing(adminCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
 		CatalogId: catID,
 		Listed:    true,
 	})); err != nil {

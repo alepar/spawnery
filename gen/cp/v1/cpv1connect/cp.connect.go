@@ -176,6 +176,15 @@ const (
 	// SpawnServiceSetCatalogListingProcedure is the fully-qualified name of the SpawnService's
 	// SetCatalogListing RPC.
 	SpawnServiceSetCatalogListingProcedure = "/cp.v1.SpawnService/SetCatalogListing"
+	// SpawnServicePublishCatalogEntryProcedure is the fully-qualified name of the SpawnService's
+	// PublishCatalogEntry RPC.
+	SpawnServicePublishCatalogEntryProcedure = "/cp.v1.SpawnService/PublishCatalogEntry"
+	// SpawnServiceUnpublishCatalogEntryProcedure is the fully-qualified name of the SpawnService's
+	// UnpublishCatalogEntry RPC.
+	SpawnServiceUnpublishCatalogEntryProcedure = "/cp.v1.SpawnService/UnpublishCatalogEntry"
+	// SpawnServicePublishBundleProcedure is the fully-qualified name of the SpawnService's
+	// PublishBundle RPC.
+	SpawnServicePublishBundleProcedure = "/cp.v1.SpawnService/PublishBundle"
 	// SpawnServiceIngestSkillFromURLProcedure is the fully-qualified name of the SpawnService's
 	// IngestSkillFromURL RPC.
 	SpawnServiceIngestSkillFromURLProcedure = "/cp.v1.SpawnService/IngestSkillFromURL"
@@ -255,6 +264,15 @@ type SpawnServiceClient interface {
 	UpdateCatalogEntry(context.Context, *connect.Request[v1.UpdateCatalogEntryRequest]) (*connect.Response[v1.UpdateCatalogEntryResponse], error)
 	DeleteCatalogEntry(context.Context, *connect.Request[v1.DeleteCatalogEntryRequest]) (*connect.Response[v1.DeleteCatalogEntryResponse], error)
 	SetCatalogListing(context.Context, *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error)
+	// Admin-only catalog publish/unpublish (sp-mwco.3.4 — listing policy §4.6). New rows (both
+	// inline and URL-ingested) are created unlisted (creator-visible only); these RPCs are the
+	// sole door onto the global catalog. Unpublish shares SetCatalogListing(listed=false)'s
+	// guarded-unlist semantics (reference-count confirmation + kill-switch), gated to admins.
+	PublishCatalogEntry(context.Context, *connect.Request[v1.PublishCatalogEntryRequest]) (*connect.Response[v1.PublishCatalogEntryResponse], error)
+	UnpublishCatalogEntry(context.Context, *connect.Request[v1.UnpublishCatalogEntryRequest]) (*connect.Response[v1.UnpublishCatalogEntryResponse], error)
+	// PublishBundle lists every member of every version of a bundle — not just the latest, since a
+	// profile may pin an older version and must still be able to resolve it.
+	PublishBundle(context.Context, *connect.Request[v1.PublishBundleRequest]) (*connect.Response[v1.PublishBundleResponse], error)
 	// IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
 	// SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
 	// content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
@@ -580,6 +598,24 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("SetCatalogListing")),
 			connect.WithClientOptions(opts...),
 		),
+		publishCatalogEntry: connect.NewClient[v1.PublishCatalogEntryRequest, v1.PublishCatalogEntryResponse](
+			httpClient,
+			baseURL+SpawnServicePublishCatalogEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("PublishCatalogEntry")),
+			connect.WithClientOptions(opts...),
+		),
+		unpublishCatalogEntry: connect.NewClient[v1.UnpublishCatalogEntryRequest, v1.UnpublishCatalogEntryResponse](
+			httpClient,
+			baseURL+SpawnServiceUnpublishCatalogEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("UnpublishCatalogEntry")),
+			connect.WithClientOptions(opts...),
+		),
+		publishBundle: connect.NewClient[v1.PublishBundleRequest, v1.PublishBundleResponse](
+			httpClient,
+			baseURL+SpawnServicePublishBundleProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("PublishBundle")),
+			connect.WithClientOptions(opts...),
+		),
 		ingestSkillFromURL: connect.NewClient[v1.IngestSkillFromURLRequest, v1.IngestSkillFromURLResponse](
 			httpClient,
 			baseURL+SpawnServiceIngestSkillFromURLProcedure,
@@ -642,6 +678,9 @@ type spawnServiceClient struct {
 	updateCatalogEntry       *connect.Client[v1.UpdateCatalogEntryRequest, v1.UpdateCatalogEntryResponse]
 	deleteCatalogEntry       *connect.Client[v1.DeleteCatalogEntryRequest, v1.DeleteCatalogEntryResponse]
 	setCatalogListing        *connect.Client[v1.SetCatalogListingRequest, v1.SetCatalogListingResponse]
+	publishCatalogEntry      *connect.Client[v1.PublishCatalogEntryRequest, v1.PublishCatalogEntryResponse]
+	unpublishCatalogEntry    *connect.Client[v1.UnpublishCatalogEntryRequest, v1.UnpublishCatalogEntryResponse]
+	publishBundle            *connect.Client[v1.PublishBundleRequest, v1.PublishBundleResponse]
 	ingestSkillFromURL       *connect.Client[v1.IngestSkillFromURLRequest, v1.IngestSkillFromURLResponse]
 }
 
@@ -900,6 +939,21 @@ func (c *spawnServiceClient) SetCatalogListing(ctx context.Context, req *connect
 	return c.setCatalogListing.CallUnary(ctx, req)
 }
 
+// PublishCatalogEntry calls cp.v1.SpawnService.PublishCatalogEntry.
+func (c *spawnServiceClient) PublishCatalogEntry(ctx context.Context, req *connect.Request[v1.PublishCatalogEntryRequest]) (*connect.Response[v1.PublishCatalogEntryResponse], error) {
+	return c.publishCatalogEntry.CallUnary(ctx, req)
+}
+
+// UnpublishCatalogEntry calls cp.v1.SpawnService.UnpublishCatalogEntry.
+func (c *spawnServiceClient) UnpublishCatalogEntry(ctx context.Context, req *connect.Request[v1.UnpublishCatalogEntryRequest]) (*connect.Response[v1.UnpublishCatalogEntryResponse], error) {
+	return c.unpublishCatalogEntry.CallUnary(ctx, req)
+}
+
+// PublishBundle calls cp.v1.SpawnService.PublishBundle.
+func (c *spawnServiceClient) PublishBundle(ctx context.Context, req *connect.Request[v1.PublishBundleRequest]) (*connect.Response[v1.PublishBundleResponse], error) {
+	return c.publishBundle.CallUnary(ctx, req)
+}
+
 // IngestSkillFromURL calls cp.v1.SpawnService.IngestSkillFromURL.
 func (c *spawnServiceClient) IngestSkillFromURL(ctx context.Context, req *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error) {
 	return c.ingestSkillFromURL.CallUnary(ctx, req)
@@ -979,6 +1033,15 @@ type SpawnServiceHandler interface {
 	UpdateCatalogEntry(context.Context, *connect.Request[v1.UpdateCatalogEntryRequest]) (*connect.Response[v1.UpdateCatalogEntryResponse], error)
 	DeleteCatalogEntry(context.Context, *connect.Request[v1.DeleteCatalogEntryRequest]) (*connect.Response[v1.DeleteCatalogEntryResponse], error)
 	SetCatalogListing(context.Context, *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error)
+	// Admin-only catalog publish/unpublish (sp-mwco.3.4 — listing policy §4.6). New rows (both
+	// inline and URL-ingested) are created unlisted (creator-visible only); these RPCs are the
+	// sole door onto the global catalog. Unpublish shares SetCatalogListing(listed=false)'s
+	// guarded-unlist semantics (reference-count confirmation + kill-switch), gated to admins.
+	PublishCatalogEntry(context.Context, *connect.Request[v1.PublishCatalogEntryRequest]) (*connect.Response[v1.PublishCatalogEntryResponse], error)
+	UnpublishCatalogEntry(context.Context, *connect.Request[v1.UnpublishCatalogEntryRequest]) (*connect.Response[v1.UnpublishCatalogEntryResponse], error)
+	// PublishBundle lists every member of every version of a bundle — not just the latest, since a
+	// profile may pin an older version and must still be able to resolve it.
+	PublishBundle(context.Context, *connect.Request[v1.PublishBundleRequest]) (*connect.Response[v1.PublishBundleResponse], error)
 	// IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
 	// SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
 	// content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
@@ -1300,6 +1363,24 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("SetCatalogListing")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServicePublishCatalogEntryHandler := connect.NewUnaryHandler(
+		SpawnServicePublishCatalogEntryProcedure,
+		svc.PublishCatalogEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("PublishCatalogEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceUnpublishCatalogEntryHandler := connect.NewUnaryHandler(
+		SpawnServiceUnpublishCatalogEntryProcedure,
+		svc.UnpublishCatalogEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("UnpublishCatalogEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServicePublishBundleHandler := connect.NewUnaryHandler(
+		SpawnServicePublishBundleProcedure,
+		svc.PublishBundle,
+		connect.WithSchema(spawnServiceMethods.ByName("PublishBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
 	spawnServiceIngestSkillFromURLHandler := connect.NewUnaryHandler(
 		SpawnServiceIngestSkillFromURLProcedure,
 		svc.IngestSkillFromURL,
@@ -1410,6 +1491,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceDeleteCatalogEntryHandler.ServeHTTP(w, r)
 		case SpawnServiceSetCatalogListingProcedure:
 			spawnServiceSetCatalogListingHandler.ServeHTTP(w, r)
+		case SpawnServicePublishCatalogEntryProcedure:
+			spawnServicePublishCatalogEntryHandler.ServeHTTP(w, r)
+		case SpawnServiceUnpublishCatalogEntryProcedure:
+			spawnServiceUnpublishCatalogEntryHandler.ServeHTTP(w, r)
+		case SpawnServicePublishBundleProcedure:
+			spawnServicePublishBundleHandler.ServeHTTP(w, r)
 		case SpawnServiceIngestSkillFromURLProcedure:
 			spawnServiceIngestSkillFromURLHandler.ServeHTTP(w, r)
 		default:
@@ -1623,6 +1710,18 @@ func (UnimplementedSpawnServiceHandler) DeleteCatalogEntry(context.Context, *con
 
 func (UnimplementedSpawnServiceHandler) SetCatalogListing(context.Context, *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.SetCatalogListing is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) PublishCatalogEntry(context.Context, *connect.Request[v1.PublishCatalogEntryRequest]) (*connect.Response[v1.PublishCatalogEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.PublishCatalogEntry is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) UnpublishCatalogEntry(context.Context, *connect.Request[v1.UnpublishCatalogEntryRequest]) (*connect.Response[v1.UnpublishCatalogEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.UnpublishCatalogEntry is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) PublishBundle(context.Context, *connect.Request[v1.PublishBundleRequest]) (*connect.Response[v1.PublishBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.PublishBundle is not implemented"))
 }
 
 func (UnimplementedSpawnServiceHandler) IngestSkillFromURL(context.Context, *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error) {

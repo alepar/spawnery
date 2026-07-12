@@ -96,6 +96,12 @@ type Server struct {
 
 	maxSpawnsPerOwner int
 
+	// adminOwners is the fail-closed allowlist of account ids permitted to publish catalog entries
+	// to the global catalog (PublishCatalogEntry/PublishBundle) and to (re)list via the legacy
+	// SetCatalogListing(listed=true) verb (sp-mwco.3.4 §4.6 D3). nil/empty means nobody is an
+	// admin — publish is simply unavailable. dev mode does NOT imply admin.
+	adminOwners map[string]struct{}
+
 	// nodeKeys caches each node's published HPKE sub-key + relayed cert chain (sp-2ckv.4), refreshed on
 	// Register/Heartbeat. GetSpawnNodeKey serves it to owner clients; the CP relays — never unseals.
 	nodeKeys *nodeKeyCache
@@ -865,6 +871,21 @@ func lookupRunnable(bins []string, id string) (agentcaps.Runnable, bool) {
 
 // SetMaxSpawnsPerOwner sets the per-owner concurrent-spawn cap (0 = unlimited).
 func (s *Server) SetMaxSpawnsPerOwner(n int) { s.maxSpawnsPerOwner = n }
+
+// SetAdminOwners configures the allowlist of account ids permitted to publish catalog entries to
+// the global catalog (sp-mwco.3.4 §4.6 D3). Fails closed: a nil/empty slice (the default) means
+// nobody is an admin. Blank entries are ignored.
+func (s *Server) SetAdminOwners(owners []string) {
+	m := make(map[string]struct{}, len(owners))
+	for _, o := range owners {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			continue
+		}
+		m[o] = struct{}{}
+	}
+	s.adminOwners = m
+}
 
 // SetEvaluatorPolicy enables CP-side metric evaluators and configures their policy thresholds.
 // When enabled, per-spawn metrics reported on every heartbeat are evaluated against the given

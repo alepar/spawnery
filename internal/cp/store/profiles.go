@@ -210,6 +210,27 @@ func (r *profileRepo) ListProfileIDsByCatalogRef(ctx context.Context, catalogID 
 	return ids, nil
 }
 
+// CountRefsByCatalogRef returns the number of distinct profiles, and the number of distinct
+// owners of those profiles, that contain a catalog_ref entry pointing to catalogID. Zero refs
+// returns (0, 0, nil) — never an error.
+func (r *profileRepo) CountRefsByCatalogRef(ctx context.Context, catalogID string) (int, int, error) {
+	var row struct {
+		Profiles int `bun:"profiles"`
+		Owners   int `bun:"owners"`
+	}
+	err := r.db.NewSelect().
+		TableExpr("profile_entries AS pe").
+		Join("JOIN profiles AS pf ON pf.profile_id = pe.profile_id").
+		ColumnExpr("COUNT(DISTINCT pe.profile_id) AS profiles").
+		ColumnExpr("COUNT(DISTINCT pf.owner_id) AS owners").
+		Where("pe.source_kind = ? AND pe.catalog_id = ?", string(ProfileSourceCatalog), catalogID).
+		Scan(ctx, &row)
+	if err != nil {
+		return 0, 0, err
+	}
+	return row.Profiles, row.Owners, nil
+}
+
 // casUpdate is a convenience wrapper around casUpdateDB using r.db.
 func (r *profileRepo) casUpdate(ctx context.Context, profileID string, expectedVersion uint64, now int64, extra func(*bun.UpdateQuery) *bun.UpdateQuery) (uint64, error) {
 	return casUpdateDB(ctx, r.db, profileID, expectedVersion, now, extra)

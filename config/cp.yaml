@@ -28,6 +28,8 @@ telemetry: "telemetry/events.jsonl"   # JSONL sink path; empty disables
 max_spawns_per_owner: 5
 shutdown_grace: 30s            # graceful-shutdown drain timeout on SIGTERM/SIGINT
 
+admin_owners: ""  # comma-separated account ids allowed to publish to the global catalog; empty = nobody
+
 evaluator:                     # CP-side metric evaluators (disabled by default)
   quota_suspend_mb: 0          # >0 enables quota-based suspend
   idle_enabled: false          # enable idle-only evaluation
