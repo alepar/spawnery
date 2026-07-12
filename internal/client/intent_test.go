@@ -261,6 +261,34 @@ func TestCreateExplicitSecretsAreSubsetOfResolvedStartupSecrets(t *testing.T) {
 	}
 }
 
+func TestCreateExplicitMountsConstrainResolvedMountSubset(t *testing.T) {
+	resolved := []*cpv1.MountBinding{
+		{Name: "manifest-data", BackendUri: "scratch://manifest"},
+		{Name: "repo", BackendUri: "github://owner/repo", CredentialSecretId: "gh:owner", RepositoryId: "owner/repo", CreateIfMissing: true},
+	}
+	response := &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 1, TargetNodeId: "node-1",
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpCreateSpawn), SpawnId: "sp-1", Generation: 1, TargetNodeId: "node-1", Mounts: resolved},
+	}
+	for _, tc := range []struct {
+		name    string
+		mounts  []*cpv1.MountBinding
+		wantErr bool
+	}{
+		{name: "partial set and derived credential", mounts: []*cpv1.MountBinding{{Name: "repo", BackendUri: "github://owner/repo", RepositoryId: "owner/repo", CreateIfMissing: true}}},
+		{name: "missing selected mount", mounts: []*cpv1.MountBinding{{Name: "missing", BackendUri: "scratch://missing"}}, wantErr: true},
+		{name: "substituted backend", mounts: []*cpv1.MountBinding{{Name: "repo", BackendUri: "github://attacker/repo", RepositoryId: "owner/repo", CreateIfMissing: true}}, wantErr: true},
+		{name: "wrong known credential", mounts: []*cpv1.MountBinding{{Name: "repo", BackendUri: "github://owner/repo", CredentialSecretId: "gh:other", RepositoryId: "owner/repo", CreateIfMissing: true}}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := validatePendingIntent(response, "sp-1", IntentParams{Op: intent.OpCreateSpawn, Mounts: tc.mounts})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestPendingAndResponseTupleSubstitutionsRejected(t *testing.T) {
 	base := &cpv1.GetPendingIntentResponse{
 		Ready: true, Generation: 7, TargetNodeId: "node-1",

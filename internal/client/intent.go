@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
@@ -131,7 +130,7 @@ func validatePendingIntent(response *cpv1.GetPendingIntentResponse, spawnID stri
 	if params.TargetClass != "" && response.GetTargetNodeClass() != params.TargetClass {
 		return nil, "", fmt.Errorf("target_node_class %q does not match requested %q", response.GetTargetNodeClass(), params.TargetClass)
 	}
-	if params.Mounts != nil && !mountBindingsEqual(pi.GetMounts(), params.Mounts) {
+	if params.Mounts != nil && !mountBindingsContain(pi.GetMounts(), params.Mounts) {
 		return nil, "", errors.New("mounts do not match requested mounts")
 	}
 	return pi, op, nil
@@ -150,12 +149,25 @@ func containsAllStrings(resolved, expected []string) bool {
 	return true
 }
 
-func mountBindingsEqual(a, b []*cpv1.MountBinding) bool {
-	if len(a) != len(b) {
-		return false
+func mountBindingsContain(resolved, selected []*cpv1.MountBinding) bool {
+	byName := make(map[string]*cpv1.MountBinding, len(resolved))
+	for _, mount := range resolved {
+		if mount == nil || mount.GetName() == "" {
+			return false
+		}
+		if _, duplicate := byName[mount.GetName()]; duplicate {
+			return false
+		}
+		byName[mount.GetName()] = mount
 	}
-	for i := range a {
-		if !proto.Equal(a[i], b[i]) {
+	for _, want := range selected {
+		if want == nil || want.GetName() == "" {
+			return false
+		}
+		got := byName[want.GetName()]
+		if got == nil || got.GetBackendUri() != want.GetBackendUri() ||
+			got.GetCreateIfMissing() != want.GetCreateIfMissing() || got.GetRepositoryId() != want.GetRepositoryId() ||
+			(want.GetCredentialSecretId() != "" && got.GetCredentialSecretId() != want.GetCredentialSecretId()) {
 			return false
 		}
 	}
