@@ -97,9 +97,13 @@ type DeviceSetRepo interface {
 }
 
 type NodeRevocationRepo interface {
-	Revoke(ctx context.Context, nodeID, reason string, revokedAt int64) error
+	Revoke(ctx context.Context, revocation NodeRevocation) (bool, error)
+	Get(ctx context.Context, nodeID string) (NodeRevocation, error)
 	IsRevoked(ctx context.Context, nodeID string) (bool, error)
 	List(ctx context.Context) ([]NodeRevocation, error)
+	ListByIssuer(ctx context.Context, issuerSerial string) ([]NodeRevocation, error)
+	GetCRL(ctx context.Context, issuerSerial string) (NodeRevocationCRL, error)
+	PutCRL(ctx context.Context, crl NodeRevocationCRL) error
 }
 
 type GitHubLinkRepo interface {

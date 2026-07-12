@@ -102,8 +102,17 @@ type DeviceSetEntry struct {
 type NodeRevocation struct {
 	bun.BaseModel `bun:"table:node_revocations,alias:nr"`
 	NodeID        string `bun:"node_id,pk"`
+	IssuerSerial  string `bun:"issuer_serial,notnull"`
+	LeafSerial    string `bun:"leaf_serial,notnull"`
 	Reason        string `bun:"reason,notnull"`
 	RevokedAt     int64  `bun:"revoked_at,notnull"`
+}
+
+type NodeRevocationCRL struct {
+	bun.BaseModel `bun:"table:node_revocation_crls,alias:nrc"`
+	IssuerSerial  string `bun:"issuer_serial,pk"`
+	Number        string `bun:"number,notnull"`
+	PEM           []byte `bun:"pem,notnull"`
 }
 
 type GitHubLink struct {
