@@ -386,3 +386,16 @@ used.*
     spawn reaches `ERROR`, with `error_detail` naming the bundle/tally and `skill_installs` reporting
     the applied/failed split; a both-good control bundle reaches `ACTIVE` to guard against a
     false-positive "it errored for an unrelated reason."
+
+- **2026-07-12 — §4.6's hard prerequisite satisfied (`sp-mwco.1.11`).** §4.6 called `sp-mwco.1`
+  §4.9's description sanitization a hard prerequisite for the canonical dir — six harnesses ×
+  unbounded attacker-controlled descriptions is exactly the amplification this epic creates — but
+  what actually shipped for §4.9 only sanitized the catalog row, not the installed `SKILL.md` any
+  harness reads (full account in `2026-07-12-skill-bundles-design.md`'s Post-Implementation Notes,
+  same date). Closed by `sp-mwco.1.11`: `agentinstall.installTreeAt` rewrites the staged
+  `SKILL.md`'s frontmatter (description capped/stripped, `name` pinned+capped) immediately before
+  the atomic rename into the canonical dir. Because every one of the six harnesses reads from a
+  directory `installTreeAt` writes — canonical-only (opencode, goose, hermes, pi) or canonical +
+  native copy (claude, codex) — a single install-time rewrite point covers all of them; no
+  per-harness sanitization work was needed. Content-trust items still open, unchanged by this task:
+  per-agent skill enable/disable and provenance-surfaced-to-the-agent (`sp-mwco.2.8`).
