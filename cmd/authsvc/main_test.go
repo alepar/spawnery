@@ -257,6 +257,24 @@ func TestLoadSigningCredentials(t *testing.T) {
 		}
 	})
 
+	t.Run("malformed begin prefix on root", func(t *testing.T) {
+		path := writePrefixedTestFile(t, current.rootPath, []byte("-----BEGIN JUNK\n"))
+		cfg := signingConfigFor(current)
+		cfg.RootPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("root after malformed BEGIN prefix was accepted")
+		}
+	})
+
+	t.Run("malformed begin prefix on signer chain", func(t *testing.T) {
+		path := writePrefixedTestFile(t, current.chainPath, []byte("-----BEGIN JUNK\n"))
+		cfg := signingConfigFor(current)
+		cfg.CurrentChainPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("signer chain after malformed BEGIN prefix was accepted")
+		}
+	})
+
 	t.Run("wrong intermediate purpose", func(t *testing.T) {
 		wrong := writeWrongPurposeFixture(t, current, now)
 		cfg := signingConfigFor(current)

@@ -484,7 +484,7 @@ func parseCertificatePEM(raw []byte) (*x509.Certificate, error) {
 func parseCertificateChainPEM(raw []byte) ([]*x509.Certificate, error) {
 	var certificates []*x509.Certificate
 	for len(raw) > 0 {
-		if !bytes.HasPrefix(raw, []byte("-----BEGIN ")) {
+		if !bytes.HasPrefix(raw, []byte("-----BEGIN CERTIFICATE-----")) {
 			if len(certificates) > 0 {
 				return nil, fmt.Errorf("invalid trailing PEM data")
 			}
