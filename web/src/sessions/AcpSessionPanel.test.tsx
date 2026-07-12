@@ -184,6 +184,31 @@ describe("AcpSessionPanel — gate the socket on session readiness", () => {
     ]);
   });
 
+  it("bounds controls during bind and drops controls produced while disconnected", async () => {
+    let resolveBind!: (frame: Awaited<ReturnType<typeof authMocks.buildBind>>) => void;
+    const pendingBind = new Promise<Awaited<ReturnType<typeof authMocks.buildBind>>>((resolve) => { resolveBind = resolve; });
+    authMocks.buildBind.mockImplementationOnce(() => pendingBind);
+    render(<AcpSessionPanel spawnId="s1" sessionId="2" active ready />);
+    const opened = fakeSocketInstance!.opts.onOpen();
+    act(() => { useSessionStore.getState().applyFrame("2", { kind: "turn", state: "busy", queued: 0 }); });
+    for (let i = 0; i < 400; i++) fireEvent.click(screen.getByTestId("stop-button"));
+    expect(fakeSocketInstance!.sent).toEqual([]);
+    resolveBind({ spawnId: "s1", sessionId: "2", clientId: "client", cursor: 0, token: "cp",
+      nodeAccessToken: "node", signedIntent: "open", authorization: {
+        spawnId: "s1", sessionId: "2", clientId: "client", attachmentSequence: 1,
+        generation: 7n, targetNodeId: "node-1",
+      } });
+    await act(async () => { await opened; });
+    expect(fakeSocketInstance!.sent.slice(1)).toHaveLength(256);
+
+    fakeSocketInstance!.sent.length = 0;
+    fakeSocketInstance!.opts.onDown();
+    for (let i = 0; i < 20; i++) fireEvent.click(screen.getByTestId("stop-button"));
+    expect(fakeSocketInstance!.sent).toEqual([]);
+    await act(async () => { await fakeSocketInstance!.opts.onOpen(); });
+    expect(fakeSocketInstance!.sent.slice(1)).toEqual([]);
+  });
+
   it("closes the current surface when node reauth construction fails", async () => {
     vi.stubEnv("VITE_AUTH_ENABLED", "1");
     const { useSessionStore: useAuthStore } = await import("@/auth/session");

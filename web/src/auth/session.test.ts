@@ -135,6 +135,37 @@ describe("logout", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("serializes overlapping teardown before allowing a replacement login key", async () => {
+    const store = new MemoryKeyStore();
+    const oldPair = await crypto.subtle.generateKey(
+      { name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"],
+    ) as CryptoKeyPair;
+    await store.put({ privateKey: oldPair.privateKey, publicKey: oldPair.publicKey });
+    useSessionStore.setState({ status: "authed", cpAccessToken: "cp", nodeAccessToken: "node", keyStore: store });
+    let finishRemote!: () => void;
+    const remote = new Promise<Response>((resolve) => { finishRemote = () => resolve(new Response("", { status: 200 })); });
+    const fetchMock = vi.fn(() => remote);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = useSessionStore.getState().logout();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(await store.get()).toBeNull();
+    expect(useSessionStore.getState().status).toBe("tearing-down");
+    const second = useSessionStore.getState().recoverKeyLoss();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(() => useSessionStore.getState().setTokens(tokenPair(), "new-rth")).toThrow(/teardown/);
+
+    finishRemote();
+    await Promise.all([first, second]);
+    expect(useSessionStore.getState().status).toBe("key-lost");
+    const replacement = await crypto.subtle.generateKey(
+      { name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"],
+    ) as CryptoKeyPair;
+    await store.put({ privateKey: replacement.privateKey, publicKey: replacement.publicKey });
+    expect((await store.get())?.privateKey).toBe(replacement.privateKey);
+    vi.unstubAllGlobals();
+  });
 });
 
 describe("proactive refresh — timer is wired", () => {

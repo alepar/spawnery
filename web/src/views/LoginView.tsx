@@ -71,7 +71,7 @@ export function LoginView({ errorCode }: LoginViewProps) {
     }
   }
 
-  if (status === "loading") {
+  if (status === "loading" || status === "tearing-down") {
     return (
       <div className="flex items-center justify-center h-screen" data-testid="login-loading">
         <div className="text-muted-foreground text-sm">Loading…</div>

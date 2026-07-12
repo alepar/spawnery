@@ -20,6 +20,7 @@ import {
 } from "./gen/cp/v1/cp_pb.js";
 import type { KeyStore } from "./keystore.js";
 import { WebCryptoSessionSigner } from "./signing/sessionSigner.js";
+import { keyCanSign } from "./keys/crypto.js";
 import {
   pollAndSign,
   registerPendedOp,
@@ -77,6 +78,7 @@ export class SpawnClient {
     if (!this.keyStore) return null;
     const [kp, nodeAccessToken] = await Promise.all([this.keyStore.get(), this.getNodeAccessToken!()]);
     if (!kp) throw new Error("SpawnClient: no session keypair in KeyStore; create one first");
+    if (!await keyCanSign(kp.privateKey)) throw new Error("SpawnClient: session private key cannot sign");
     if (!nodeAccessToken) throw new Error("SpawnClient: missing node access token");
     return {
       signer: new WebCryptoSessionSigner(kp.privateKey, kp.publicKey),

@@ -115,12 +115,26 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     let nodeReauthSequence = 0;
     let authorization: VerifiedSessionAuthorization | null = null;
     let bound = false;
+    let binding = false;
     let pendingPairReauth = false;
     let pendingSends: Array<{ data: string | Uint8Array; key?: string }> = [];
+    let pendingBytes = 0;
+    const clearPendingSends = () => { pendingSends = []; pendingBytes = 0; };
+    const sendSize = (data: string | Uint8Array) => typeof data === "string" ? new TextEncoder().encode(data).byteLength : data.byteLength;
     const sendWhenBound = (data: string | Uint8Array, key?: string) => {
       if (bound) { sock.send(data); return; }
-      if (key) pendingSends = pendingSends.filter((item) => item.key !== key);
+      if (!binding) return;
+      if (key) {
+        const replaced = pendingSends.find((item) => item.key === key);
+        if (replaced) pendingBytes -= sendSize(replaced.data);
+        pendingSends = pendingSends.filter((item) => item.key !== key);
+      }
+      const size = sendSize(data);
+      const countLimit = key ? 256 : 255; // reserve one slot for the required initial resize
+      const byteLimit = key ? 1024 * 1024 : 1024 * 1024 - 64;
+      if (pendingSends.length >= countLimit || pendingBytes + size > byteLimit) return;
       pendingSends.push({ data, key });
+      pendingBytes += size;
     };
     sendRef.current = sendWhenBound;
 
@@ -131,6 +145,8 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
         nodeReauthSequence++;
         authorization = null;
         bound = false;
+        binding = true;
+        clearPendingSends();
         pendingPairReauth = false;
         // Bind frame MUST be the first message (ws.go reads it as the session-open). It carries the
         // session-open SignedIntent the enforced node requires (else MISSING_INTENT NACK -> blank).
@@ -143,8 +159,9 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
           sock.send(JSON.stringify(frame));
           sendWhenBound(encodeResize(term.cols, term.rows), "resize");
           bound = true;
+          binding = false;
           for (const pending of pendingSends) sock.send(pending.data);
-          pendingSends = [];
+          clearPendingSends();
           if (pendingPairReauth) {
             pendingPairReauth = false;
             const latest = useSessionStore.getState();
@@ -156,11 +173,15 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
           safeFit();
           onConnRef.current?.("connected");
         } catch {
+          binding = false;
+          clearPendingSends();
           if (!closing && openSequence === attachmentSequence) sock.close();
         }
       },
       onDown: () => {
         bound = false;
+        binding = false;
+        clearPendingSends();
         if (!closing) onConnRef.current?.("reconnecting");
       },
       onMessage: (data: ArrayBuffer | string) => {
@@ -253,7 +274,8 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     return () => {
       closing = true; // intentional teardown -> suppress the close-driven onDown "reconnecting"
       sendRef.current = () => {};
-      pendingSends = [];
+      binding = false;
+      clearPendingSends();
       attachmentSequence++;
       nodeReauthSequence++;
       if (reauthInterval) clearInterval(reauthInterval);

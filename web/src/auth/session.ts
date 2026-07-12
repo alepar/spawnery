@@ -51,6 +51,7 @@ function _clearRth(): void {
 
 export type AuthStatus =
   | "loading"
+  | "tearing-down"
   | "login-required"
   | "authed"
   | "cnf-mismatch"
@@ -98,6 +99,28 @@ export function authEnabled(): boolean {
 // alive past the 15 min TTL without waiting for a reactive RPC 401.
 
 let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let _teardownPromise: Promise<void> | null = null;
+
+function _teardownSession(store: KeyStore): Promise<void> {
+  if (_teardownPromise) return _teardownPromise;
+  const work = (async () => {
+    await clearSessionKey(store);
+    try {
+      await fetch(asHttpUrl("/logout"), {
+        method: "POST",
+        credentials: "include",
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch {
+      // Best-effort family revocation; local custody was already cleared.
+    }
+  })();
+  const shared = work.finally(() => {
+    if (_teardownPromise === shared) _teardownPromise = null;
+  });
+  _teardownPromise = shared;
+  return shared;
+}
 
 function _clearRefreshTimer(): void {
   if (_refreshTimer !== null) {
@@ -176,6 +199,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   callbackErrorCode: null,
 
   setTokens(pair: AccessTokenPair, rth: string) {
+    if (get().status === "tearing-down") throw new Error("session teardown is still in progress");
     const validated = validateAccessTokenPair(pair);
     // Persist the hash before updating zustand so cold-reload bootstrap() can read it [AM2].
     _saveRth(rth);
@@ -302,36 +326,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     _clearRefreshTimer();
     const store = get().keyStore;
     const epoch = get().authEpoch + 1;
-    set({ authEpoch: epoch, status: "login-required", cpAccessToken: "", nodeAccessToken: "",
+    set({ authEpoch: epoch, status: "tearing-down", cpAccessToken: "", nodeAccessToken: "",
       refreshTokenHash: "", account: null });
     _clearRth();
-    // Best-effort: revoke the server-side family.
-    try {
-      await fetch(asHttpUrl("/logout"), {
-        method: "POST",
-        credentials: "include",
-      });
-    } catch {
-      // Ignore.
-    }
-    await clearSessionKey(store);
+    await _teardownSession(store);
     if (get().authEpoch !== epoch) return;
+    set({ status: "login-required" });
   },
 
   async recoverKeyLoss() {
     _clearRefreshTimer();
     const store = get().keyStore;
     const epoch = get().authEpoch + 1;
-    set({ authEpoch: epoch, status: "key-lost", cpAccessToken: "", nodeAccessToken: "",
+    set({ authEpoch: epoch, status: "tearing-down", cpAccessToken: "", nodeAccessToken: "",
       refreshTokenHash: "", account: null });
-    try {
-      await fetch(asHttpUrl("/logout"), { method: "POST", credentials: "include" });
-    } catch {
-      // Best-effort family revocation; local custody is cleared regardless.
-    }
     _clearRth();
-    await clearSessionKey(store);
+    await _teardownSession(store);
     if (get().authEpoch !== epoch) return;
+    set({ status: "key-lost" });
   },
 }));
 

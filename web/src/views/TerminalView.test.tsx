@@ -319,6 +319,30 @@ describe("TerminalView", () => {
     expect(new TextDecoder().decode(binary.find((frame) => frame[0] === 0x01)!.slice(1))).toBe("100 40");
   });
 
+  it("bounds pending input and never replays input typed while disconnected", async () => {
+    let resolveBind!: (frame: Awaited<ReturnType<typeof authMocks.buildBind>>) => void;
+    const pendingBind = new Promise<Awaited<ReturnType<typeof authMocks.buildBind>>>((resolve) => { resolveBind = resolve; });
+    authMocks.buildBind.mockImplementationOnce(() => pendingBind);
+    renderWithSettings(<TerminalView spawnId="s1" sessionId="2" />);
+    const opened = fakeSocketInstance!.opts.onOpen();
+    for (let i = 0; i < 400; i++) capturedOnData!("x");
+    expect(fakeSocketInstance!.sent).toEqual([]);
+    resolveBind({ spawnId: "s1", sessionId: "2", clientId: "client", cursor: 0, token: "cp",
+      nodeAccessToken: "node", signedIntent: "open", authorization: {
+        spawnId: "s1", sessionId: "2", clientId: "client", attachmentSequence: 1,
+        generation: 7n, targetNodeId: "node-1",
+      } });
+    await opened;
+    expect(fakeSocketInstance!.sent.slice(1).filter((raw) => raw instanceof Uint8Array && raw[0] === 0x00)).toHaveLength(255);
+
+    fakeSocketInstance!.sent.length = 0;
+    fakeSocketInstance!.opts.onDown();
+    for (let i = 0; i < 400; i++) capturedOnData!("stale");
+    expect(fakeSocketInstance!.sent).toEqual([]);
+    await fakeSocketInstance!.opts.onOpen();
+    expect(fakeSocketInstance!.sent.slice(1).filter((raw) => raw instanceof Uint8Array && raw[0] === 0x00)).toHaveLength(0);
+  });
+
   it("closes the current surface when node reauth signing fails", async () => {
     vi.stubEnv("VITE_AUTH_ENABLED", "1");
     const { useSessionStore } = await import("@/auth/session");

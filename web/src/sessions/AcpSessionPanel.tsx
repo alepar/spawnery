@@ -44,11 +44,19 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
     let nodeReauthSequence = 0;
     let authorization: VerifiedSessionAuthorization | null = null;
     let bound = false;
+    let binding = false;
     let pendingPairReauth = false;
     let pendingSends: Array<string | Uint8Array> = [];
+    let pendingBytes = 0;
+    const clearPendingSends = () => { pendingSends = []; pendingBytes = 0; };
+    const sendSize = (data: string | Uint8Array) => typeof data === "string" ? new TextEncoder().encode(data).byteLength : data.byteLength;
     const sendWhenBound = (data: string | Uint8Array) => {
       if (bound) { sock.send(data); return; }
+      if (!binding) return;
+      const size = sendSize(data);
+      if (pendingSends.length >= 256 || pendingBytes + size > 256 * 1024) return;
       pendingSends.push(data);
+      pendingBytes += size;
     };
     sendRef.current = sendWhenBound;
     useSessionStore.getState().setConn(sessionId, "connecting");
@@ -59,6 +67,8 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
         nodeReauthSequence++;
         authorization = null;
         bound = false;
+        binding = true;
+        clearPendingSends();
         pendingPairReauth = false;
         // Fresh frame receiver per (re)connect; wire it BEFORE the bind so replay can't precede onmessage.
         new Conn(sock, (m) => { if (genRef.current === gen) useSessionStore.getState().applyFrame(sessionId, m as Frame); });
@@ -73,8 +83,9 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
           authorization = verified ?? null;
           sock.send(JSON.stringify(frame));
           bound = true;
+          binding = false;
           for (const pending of pendingSends) sock.send(pending);
-          pendingSends = [];
+          clearPendingSends();
           if (pendingPairReauth) {
             pendingPairReauth = false;
             const latest = useAuthStore.getState();
@@ -85,11 +96,15 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
           }
           useSessionStore.getState().setConn(sessionId, "connected");
         } catch {
+          binding = false;
+          clearPendingSends();
           if (genRef.current === gen && openSequence === attachmentSequence) sock.close();
         }
       },
       onDown: () => {
         bound = false;
+        binding = false;
+        clearPendingSends();
         if (genRef.current === gen) useSessionStore.getState().setConn(sessionId, "reconnecting");
       },
     });
@@ -143,7 +158,8 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
       // eslint-disable-next-line react-hooks/exhaustive-deps
       genRef.current++;
       sendRef.current = () => {};
-      pendingSends = [];
+      binding = false;
+      clearPendingSends();
       attachmentSequence++;
       nodeReauthSequence++;
       if (reauthInterval) clearInterval(reauthInterval);

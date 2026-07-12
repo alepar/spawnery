@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { fromBinary } from "@bufbuild/protobuf";
+import { create, fromBinary } from "@bufbuild/protobuf";
 import {
   buildIntentBodyBytes,
   buildSignedIntent,
@@ -18,6 +18,7 @@ import { WebCryptoSessionSigner } from "./sessionSigner.js";
 import { sessionKeyHash } from "../keys/crypto.js";
 import { fromBase64 } from "../keys/encoding.js";
 import { IntentBodySchema, SignedIntentSchema } from "../gen/auth/v1/auth_pb.js";
+import { GetPendingIntentResponseSchema, PendingIntentSchema } from "../gen/cp/v1/cp_pb.js";
 
 const toHex = (u: Uint8Array): string => Buffer.from(u).toString("hex");
 const fromHex = (s: string): Uint8Array => new Uint8Array(Buffer.from(s, "hex"));
@@ -149,7 +150,6 @@ test("pollAndSign rejects target or locally-pended substitutions before signing 
     ["spawn", (_r, p) => { p.spawnId = "sp-2"; }],
     ["generation", (_r, p) => { p.generation = 8n; }],
     ["target", (_r, p) => { p.targetNodeId = "node-2"; }],
-    ["target class", (_r, p) => { p.targetNodeClass = "compromised"; }],
     ["app", (_r, p) => { p.appRef = "other"; }],
     ["image", (_r, p) => { p.image = "other"; }],
     ["model", (_r, p) => { p.model = "other"; }],
@@ -183,6 +183,57 @@ test("pollAndSign rejects target or locally-pended substitutions before signing 
       }));
       assert.equal(signed, false);
       assert.equal(submitted, false);
+    });
+  }
+});
+
+test("pollAndSign validates resolved classes outside the generated PendingIntent wire tuple", async (t) => {
+  for (const op of ["fork-spawn", "migrate-spawn"]) {
+    await t.test(op, async (t) => {
+      const pending = create(PendingIntentSchema, {
+        op,
+        spawnId: op === "fork-spawn" ? "fork-1" : "sp-1",
+        generation: 7n,
+        targetNodeId: "node-1",
+      });
+      const run = async (targetNodeClass: string) => {
+        let submitted = false;
+        const response = create(GetPendingIntentResponseSchema, {
+          ready: true,
+          pending,
+          nodeCertChain: new Uint8Array([9]),
+          generation: 7n,
+          targetNodeId: "node-1",
+          targetNodeClass,
+          targetNodeAccountId: "acct-1",
+        });
+        const result = pollAndSign({
+          client: {
+            getPendingIntent: async () => response,
+            submitIntent: async () => { submitted = true; return {}; },
+          } as never,
+          spawnId: "sp-1",
+          pended: { op, spawnId: "sp-1", targetNodeClass: "cloud" },
+          signer: {
+            publicSPKIDER: async () => new Uint8Array([1]),
+            signP1363: async () => new Uint8Array(64),
+          },
+          nodeAccessToken: "node-token",
+          verifyTarget: async () => {},
+          maxAttempts: 1,
+        });
+        return { result, submitted: () => submitted };
+      };
+      await t.test("accepts matching response class", async () => {
+        const accepted = await run("cloud");
+        await accepted.result;
+        assert.equal(accepted.submitted(), true);
+      });
+      await t.test("rejects substituted response class", async () => {
+        const rejected = await run("compromised");
+        await assert.rejects(rejected.result, /response target class mismatch/);
+        assert.equal(rejected.submitted(), false);
+      });
     });
   }
 });
