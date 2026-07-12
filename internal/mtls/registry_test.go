@@ -2,6 +2,7 @@ package mtls
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"math/big"
 	"net/http"
@@ -128,6 +129,44 @@ func TestConnectionRegistryMiddlewareRevocationBetweenVerifyAndRegister(t *testi
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 	if err := <-handlerReached; !errors.Is(err, context.Canceled) {
 		t.Fatalf("handler context after verify/register gap = %v", err)
+	}
+}
+
+func TestDialTLSContextRevocationBetweenVerifyAndRegisterClosesConnection(t *testing.T) {
+	f := newTLSFixture(t)
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", standardServerConfig(t, f.root.Cert, f.cp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		buffer := make([]byte, 1)
+		_, _ = connection.Read(buffer)
+	}()
+	registry := NewConnectionRegistry()
+	clientConfig := internalClientConfig(t, f, f.selfHosted)
+	dial := dialTLSContext(clientConfig, registry, func() {
+		registry.Revoke(f.serviceCA.Cert.SerialNumber, []*big.Int{f.cp.Cert.SerialNumber})
+	})
+	connection, err := dial(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Write([]byte{1}); err == nil {
+		t.Fatal("outbound connection survived revoke between verify and register")
+	}
+	_ = connection.Close()
+	select {
+	case <-serverDone:
+	case <-t.Context().Done():
+		t.Fatal("server did not observe revoked outbound connection close")
 	}
 }
 

@@ -141,6 +141,10 @@ func SubscribeConnectionRegistry(state *pki.RevocationState, registry *Connectio
 }
 
 func DialTLSContext(config *tls.Config, registry *ConnectionRegistry) func(context.Context, string, string) (net.Conn, error) {
+	return dialTLSContext(config, registry, nil)
+}
+
+func dialTLSContext(config *tls.Config, registry *ConnectionRegistry, afterVerify func()) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		if config == nil || registry == nil {
 			return nil, errors.New("mtls: TLS connection registry is required")
@@ -159,6 +163,9 @@ func DialTLSContext(config *tls.Config, registry *ConnectionRegistry) func(conte
 		if err != nil {
 			_ = connection.Close()
 			return nil, err
+		}
+		if afterVerify != nil {
+			afterVerify()
 		}
 		release := registry.Register(PeerCertificate{IssuerSerial: issuer.SerialNumber, LeafSerial: leaf.SerialNumber}, func() { _ = tlsConnection.Close() })
 		return &registeredTLSConnection{Conn: tlsConnection, release: release}, nil
