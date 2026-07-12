@@ -1,9 +1,9 @@
 package spawnlet
 
-// fakebackend_test.go: the shared seam onto internal/runtime/fakepod. It replaces the hand-forwarded
-// fakePodBackend/noSizeFakeBackend that used to live in manager_sandbox_test.go / manager_quota_test.go
-// (sp-2tx8.1.4) — one maintained fake instead of three copies that silently broke on every interface
-// change.
+// fakebackend_test.go: the shared seam onto internal/runtime/fakepod. It replaces the two
+// hand-forwarded ad-hoc pod-backend fakes that used to live in manager_sandbox_test.go /
+// manager_quota_test.go (sp-2tx8.1.4) — one maintained fake instead of copies that silently broke
+// on every interface change.
 
 import (
 	"strings"
