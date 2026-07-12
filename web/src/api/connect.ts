@@ -62,7 +62,13 @@ export async function tryRefresh(): Promise<boolean> {
   try {
     const session = useSessionStore.getState();
     const store = session.keyStore;
+    const epoch = session.authEpoch;
+    const current = () => {
+      const state = useSessionStore.getState();
+      return state.authEpoch === epoch && state.status === "authed" && state.keyStore === store;
+    };
     const kp = await loadSessionKey(store);
+    if (!current()) return false;
     if (!kp) {
       // Key missing (ITP/storage eviction): route to key-lost rather than minting a fresh keypair.
       await session.recoverKeyLoss();
@@ -81,6 +87,7 @@ export async function tryRefresh(): Promise<boolean> {
       localSpkiHash: spkiHash,
       refreshTokenHash: rth,
     });
+    if (!current()) return false;
 
     if (result.kind === "ok") {
       session.setTokens({

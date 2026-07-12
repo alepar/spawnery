@@ -60,6 +60,7 @@ export type RefreshResult =
  * (refresh.go:111-121) returns the same rotated token to whichever arrives second.
  */
 let _inflight: Promise<RefreshResult> | null = null;
+let _inflightKey: CryptoKey | null = null;
 
 /**
  * refreshAccessToken performs a single /refresh round-trip with PoP.
@@ -76,16 +77,20 @@ export async function refreshAccessToken(deps: RefreshDeps): Promise<RefreshResu
 
   // True single-flight: latecomers reuse the first caller's promise so they receive
   // the same rotated token rather than each re-signing a PoP over a stale hash.
-  if (_inflight) return _inflight;
+  if (_inflight && _inflightKey === deps.privateKey) return _inflight;
 
   // acquireLock is only provided by tests (e.g. a serialising mock that proves _inflight
   // short-circuits before the lock is even invoked).  Production never injects a lock.
   const lockFn = deps.acquireLock ?? null;
 
-  const p = lockFn
-    ? (lockFn(REFRESH_LOCK_NAME, () => _doRefresh(deps)) as Promise<RefreshResult>).finally(() => { _inflight = null; })
-    : _doRefresh(deps).finally(() => { _inflight = null; });
+  const base = lockFn
+    ? lockFn(REFRESH_LOCK_NAME, () => _doRefresh(deps)) as Promise<RefreshResult>
+    : _doRefresh(deps);
+  const p = base.finally(() => {
+    if (_inflight === p) { _inflight = null; _inflightKey = null; }
+  });
   _inflight = p;
+  _inflightKey = deps.privateKey;
   return p;
 }
 

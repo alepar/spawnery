@@ -369,6 +369,7 @@ interface PendingIntentTuple {
   spawnId: string;
   generation?: bigint;
   targetNodeId?: string;
+  targetNodeClass?: string;
   image?: string;
   appRef?: string;
   model?: string;
@@ -395,7 +396,7 @@ function _validateTuple(pending: PendingIntentTuple, pended: PendedOp): void {
   if (pended.op !== "fork-spawn" && pending.spawnId !== pended.spawnId) {
     throw new Error(`intent: spawnId mismatch`);
   }
-  for (const field of ["generation", "targetNodeId", "appRef", "image", "model", "dataRef"] as const) {
+  for (const field of ["generation", "targetNodeId", "targetNodeClass", "appRef", "image", "model", "dataRef"] as const) {
     if (pended[field] !== undefined && pending[field] !== pended[field]) {
       throw new Error(`intent: ${field} mismatch`);
     }

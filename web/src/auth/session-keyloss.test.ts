@@ -47,9 +47,10 @@ vi.mock("./refresh", async (importOriginal) => {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-import { useSessionStore, RTH_STORAGE_KEY } from "./session";
+import { useSessionStore, RTH_STORAGE_KEY, _doProactiveRefresh } from "./session";
 import { MemoryKeyStore } from "./keystore";
 import * as keypairMod from "./keypair";
+import * as refreshMod from "./refresh";
 
 beforeEach(() => {
   vi.mocked(keypairMod.loadSessionKey).mockResolvedValue(null);
@@ -103,5 +104,38 @@ describe("bootstrap — key missing (ITP/storage eviction)", () => {
     await useSessionStore.getState().bootstrap(store);
 
     expect(refreshMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("proactive refresh — auth incarnation fencing", () => {
+  it.each(["logout", "key-loss", "relogin"])("discards a delayed result after %s", async (transition) => {
+    let resolve!: (value: { kind: "ok"; cpAccessToken: string; nodeAccessToken: string;
+      refreshTokenHash: string; expiresAt: bigint }) => void;
+    const result = new Promise<Parameters<typeof resolve>[0]>((r) => { resolve = r; });
+    vi.mocked(keypairMod.loadSessionKey).mockResolvedValue({
+      privateKey: {} as CryptoKey,
+      publicKey: {} as CryptoKey,
+    });
+    vi.mocked(keypairMod.exportSpkiDer).mockResolvedValue(new Uint8Array([1]));
+    vi.mocked(keypairMod.sessionKeyHash).mockResolvedValue(new Uint8Array(32));
+    vi.mocked(refreshMod.refreshAccessToken).mockImplementationOnce(() => result);
+    useSessionStore.setState({
+      authEpoch: 10, status: "authed", cpAccessToken: "cp-old", nodeAccessToken: "node-old",
+      keyStore: new MemoryKeyStore(),
+    });
+    const pending = _doProactiveRefresh();
+    await vi.waitFor(() => expect(refreshMod.refreshAccessToken).toHaveBeenCalled());
+    if (transition === "logout") {
+      useSessionStore.setState({ authEpoch: 11, status: "login-required", cpAccessToken: "", nodeAccessToken: "" });
+    } else if (transition === "key-loss") {
+      useSessionStore.setState({ authEpoch: 11, status: "key-lost", cpAccessToken: "", nodeAccessToken: "" });
+    } else {
+      useSessionStore.setState({ authEpoch: 11, status: "authed", cpAccessToken: "cp-new", nodeAccessToken: "node-new" });
+    }
+    resolve({ kind: "ok", cpAccessToken: "cp-stale", nodeAccessToken: "node-stale",
+      refreshTokenHash: "rth-stale", expiresAt: 99n });
+    await pending;
+    expect(useSessionStore.getState().cpAccessToken).toBe(transition === "relogin" ? "cp-new" : "");
+    expect(useSessionStore.getState().nodeAccessToken).toBe(transition === "relogin" ? "node-new" : "");
   });
 });

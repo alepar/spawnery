@@ -147,6 +147,43 @@ describe("AcpSessionPanel — gate the socket on session readiness", () => {
     }), "node-latest");
   });
 
+  it("queues ACP controls in order until bind is sent first", async () => {
+    let resolveBind!: (frame: Awaited<ReturnType<typeof authMocks.buildBind>>) => void;
+    const pendingBind = new Promise<Awaited<ReturnType<typeof authMocks.buildBind>>>((resolve) => { resolveBind = resolve; });
+    authMocks.buildBind.mockImplementationOnce(() => pendingBind);
+    render(<AcpSessionPanel spawnId="s1" sessionId="2" active ready />);
+    const opened = fakeSocketInstance!.opts.onOpen();
+    act(() => {
+      useSessionStore.getState().applyFrame("2", {
+        kind: "mode", mode: { current: "default", available: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] },
+      });
+      useSessionStore.getState().applyFrame("2", { kind: "turn", state: "busy", queued: 0 });
+      useSessionStore.getState().applyFrame("2", {
+        kind: "perm_request", reqId: "req-1", title: "Run command",
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      });
+    });
+    fireEvent.change(screen.getByLabelText("Session mode"), { target: { value: "plan" } });
+    fireEvent.click(screen.getByTestId("stop-button"));
+    fireEvent.click(screen.getByTestId("perm-option-allow"));
+    fireEvent.change(screen.getByTestId("prompt-input"), { target: { value: "not sent before connected" } });
+    fireEvent.keyDown(screen.getByTestId("prompt-input"), { key: "Enter" });
+    expect(fakeSocketInstance!.sent).toEqual([]);
+    resolveBind({
+      spawnId: "s1", sessionId: "2", clientId: "client", cursor: 0,
+      token: "cp-old", nodeAccessToken: "node-old", signedIntent: "open-intent",
+      authorization: { spawnId: "s1", sessionId: "2", clientId: "client", attachmentSequence: 1,
+        generation: 7n, targetNodeId: "node-1" },
+    });
+    await act(async () => { await opened; });
+    expect(JSON.parse(fakeSocketInstance!.sent[0] as string)).toEqual(expect.objectContaining({ spawnId: "s1" }));
+    expect(fakeSocketInstance!.sent.slice(1).map((raw) => JSON.parse(dec.decode(raw as Uint8Array)))).toEqual([
+      { kind: "set_mode", modeId: "plan" },
+      { kind: "cancel" },
+      { kind: "perm_response", reqId: "req-1", optionId: "allow" },
+    ]);
+  });
+
   it("closes the current surface when node reauth construction fails", async () => {
     vi.stubEnv("VITE_AUTH_ENABLED", "1");
     const { useSessionStore: useAuthStore } = await import("@/auth/session");
@@ -168,23 +205,23 @@ function lastSentFrame(): { kind: string; modeId?: string } {
   return JSON.parse(dec.decode(raw as Uint8Array));
 }
 
-function mountConnected(sessionId: string) {
+async function mountConnected(sessionId: string) {
   const view = render(<AcpSessionPanel spawnId="s1" sessionId={sessionId} active ready={true} />);
-  act(() => { fakeSocketInstance!.opts.onOpen(); });
+  await act(async () => { await fakeSocketInstance!.opts.onOpen(); });
   return view;
 }
 
 describe("AcpSessionPanel — chat controls + enrichment data", () => {
-  it("StopButton click sends a cancel frame over the socket", () => {
-    mountConnected("0");
+  it("StopButton click sends a cancel frame over the socket", async () => {
+    await mountConnected("0");
     // Busy turn -> StopButton renders.
     act(() => { useSessionStore.getState().applyFrame("0", { kind: "turn", state: "busy", queued: 0 }); });
     fireEvent.click(screen.getByTestId("stop-button"));
     expect(lastSentFrame()).toEqual({ kind: "cancel" });
   });
 
-  it("ModeSelector change sends set_mode with the chosen id", () => {
-    mountConnected("0");
+  it("ModeSelector change sends set_mode with the chosen id", async () => {
+    await mountConnected("0");
     act(() => {
       useSessionStore.getState().applyFrame("0", {
         kind: "mode",
@@ -198,8 +235,8 @@ describe("AcpSessionPanel — chat controls + enrichment data", () => {
     expect(lastSentFrame()).toEqual({ kind: "set_mode", modeId: "plan" });
   });
 
-  it("commands from the store reach ChatView (slash menu lists them)", () => {
-    mountConnected("0");
+  it("commands from the store reach ChatView (slash menu lists them)", async () => {
+    await mountConnected("0");
     act(() => {
       useSessionStore.getState().applyFrame("0", {
         kind: "commands",

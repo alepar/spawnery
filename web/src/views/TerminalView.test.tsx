@@ -17,6 +17,7 @@ globalThis.ResizeObserver = class {
 // ─── Fake xterm Terminal ─────────────────────────────────────────────────────
 // Captures onData/onResize callbacks and write calls without a real DOM/canvas.
 let capturedOnData: ((d: string) => void) | null = null;
+let capturedOnResize: ((size: { cols: number; rows: number }) => void) | null = null;
 let writtenData: (string | Uint8Array)[] = [];
 let capturedWriteCallbacks: (() => void)[] = [];
 
@@ -28,7 +29,10 @@ const mockTerminal = {
   options: {} as { theme?: unknown; fontFamily?: string; fontSize?: number },
   write: vi.fn((d: string | Uint8Array, cb?: () => void) => { writtenData.push(d); if (cb) capturedWriteCallbacks.push(cb); }),
   onData: vi.fn((cb: (d: string) => void) => { capturedOnData = cb; return { dispose: vi.fn() }; }),
-  onResize: vi.fn(() => ({ dispose: vi.fn() })),
+  onResize: vi.fn((cb: (size: { cols: number; rows: number }) => void) => {
+    capturedOnResize = cb;
+    return { dispose: vi.fn() };
+  }),
   cols: 80,
   rows: 24,
   dispose: vi.fn(),
@@ -108,6 +112,7 @@ function renderWithSettings(ui: React.ReactElement) {
 
 beforeEach(() => {
   capturedOnData = null;
+  capturedOnResize = null;
   writtenData = [];
   capturedWriteCallbacks = [];
   fakeSocketInstance = null;
@@ -120,6 +125,8 @@ beforeEach(() => {
   mockTerminal.focus.mockClear();
   mockTerminal.refresh.mockClear();
   mockTerminal.options = {};
+  mockTerminal.cols = 80;
+  mockTerminal.rows = 24;
   mockFitAddon.fit.mockClear();
   TerminalMock.mockClear();
   localStorage.clear();
@@ -171,12 +178,12 @@ describe("TerminalView", () => {
     expect(writtenData[0] instanceof Uint8Array).toBe(true);
   });
 
-  it("sends a 0x00-prefixed input frame when terminal onData fires", () => {
+  it("sends a 0x00-prefixed input frame when terminal onData fires", async () => {
     renderWithSettings(<TerminalView spawnId="sp1" />);
     expect(fakeSocketInstance).not.toBeNull();
     expect(capturedOnData).not.toBeNull();
     // Trigger onOpen so the socket is ready
-    fakeSocketInstance!.opts.onOpen();
+    await fakeSocketInstance!.opts.onOpen();
     const sentBefore = fakeSocketInstance!.sent.length;
     // Simulate user typing "x"
     capturedOnData!("x");
@@ -277,6 +284,39 @@ describe("TerminalView", () => {
     expect(authMocks.buildNodeReauth).toHaveBeenCalledWith(expect.objectContaining({
       attachmentSequence: 1,
     }), "node-latest");
+  });
+
+  it("queues input and coalesces resize frames until bind is sent first", async () => {
+    let resolveBind!: (frame: Awaited<ReturnType<typeof authMocks.buildBind>>) => void;
+    const pendingBind = new Promise<Awaited<ReturnType<typeof authMocks.buildBind>>>((resolve) => { resolveBind = resolve; });
+    authMocks.buildBind.mockImplementationOnce(() => pendingBind);
+    let updateSettings = () => {};
+    function Harness() {
+      const { update } = useTermSettings();
+      useEffect(() => { updateSettings = () => update({ fontSize: 18 }); }, [update]);
+      return <TerminalView spawnId="s1" sessionId="2" />;
+    }
+    render(<TermSettingsProvider><Harness /></TermSettingsProvider>);
+    const opened = fakeSocketInstance!.opts.onOpen();
+    capturedOnData!("x");
+    capturedOnResize!({ cols: 90, rows: 30 });
+    mockTerminal.cols = 100;
+    mockTerminal.rows = 40;
+    capturedOnResize!({ cols: 100, rows: 40 });
+    await act(async () => { updateSettings(); await Promise.resolve(); await Promise.resolve(); });
+    expect(fakeSocketInstance!.sent).toEqual([]);
+    resolveBind({
+      spawnId: "s1", sessionId: "2", clientId: "client", cursor: 0,
+      token: "cp-old", nodeAccessToken: "node-old", signedIntent: "open-intent",
+      authorization: { spawnId: "s1", sessionId: "2", clientId: "client", attachmentSequence: 1,
+        generation: 7n, targetNodeId: "node-1" },
+    });
+    await opened;
+    expect(JSON.parse(fakeSocketInstance!.sent[0] as string)).toEqual(expect.objectContaining({ spawnId: "s1" }));
+    const binary = fakeSocketInstance!.sent.slice(1) as Uint8Array[];
+    expect(binary.filter((frame) => frame[0] === 0x00)).toHaveLength(1);
+    expect(binary.filter((frame) => frame[0] === 0x01)).toHaveLength(1);
+    expect(new TextDecoder().decode(binary.find((frame) => frame[0] === 0x01)!.slice(1))).toBe("100 40");
   });
 
   it("closes the current surface when node reauth signing fails", async () => {

@@ -149,6 +149,7 @@ test("pollAndSign rejects target or locally-pended substitutions before signing 
     ["spawn", (_r, p) => { p.spawnId = "sp-2"; }],
     ["generation", (_r, p) => { p.generation = 8n; }],
     ["target", (_r, p) => { p.targetNodeId = "node-2"; }],
+    ["target class", (_r, p) => { p.targetNodeClass = "compromised"; }],
     ["app", (_r, p) => { p.appRef = "other"; }],
     ["image", (_r, p) => { p.image = "other"; }],
     ["model", (_r, p) => { p.model = "other"; }],

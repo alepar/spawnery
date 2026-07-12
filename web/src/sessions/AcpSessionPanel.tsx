@@ -29,6 +29,7 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
   const rt = useSessionStore((s) => s.acp[sessionId]);
   const conn = useSessionStore((s) => s.conn[sessionId] ?? null);
   const sockRef = useRef<ReconnectingSocket | null>(null);
+  const sendRef = useRef<(data: string | Uint8Array) => void>(() => {});
   const genRef = useRef(0);
 
   useEffect(() => {
@@ -44,6 +45,12 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
     let authorization: VerifiedSessionAuthorization | null = null;
     let bound = false;
     let pendingPairReauth = false;
+    let pendingSends: Array<string | Uint8Array> = [];
+    const sendWhenBound = (data: string | Uint8Array) => {
+      if (bound) { sock.send(data); return; }
+      pendingSends.push(data);
+    };
+    sendRef.current = sendWhenBound;
     useSessionStore.getState().setConn(sessionId, "connecting");
     const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
       onOpen: async () => {
@@ -66,6 +73,8 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
           authorization = verified ?? null;
           sock.send(JSON.stringify(frame));
           bound = true;
+          for (const pending of pendingSends) sock.send(pending);
+          pendingSends = [];
           if (pendingPairReauth) {
             pendingPairReauth = false;
             const latest = useAuthStore.getState();
@@ -79,7 +88,10 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
           if (genRef.current === gen && openSequence === attachmentSequence) sock.close();
         }
       },
-      onDown: () => { if (genRef.current === gen) useSessionStore.getState().setConn(sessionId, "reconnecting"); },
+      onDown: () => {
+        bound = false;
+        if (genRef.current === gen) useSessionStore.getState().setConn(sessionId, "reconnecting");
+      },
     });
     sockRef.current = sock;
 
@@ -130,6 +142,8 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
       // want the current ref value at teardown time, not a captured snapshot.
       // eslint-disable-next-line react-hooks/exhaustive-deps
       genRef.current++;
+      sendRef.current = () => {};
+      pendingSends = [];
       attachmentSequence++;
       nodeReauthSequence++;
       if (reauthInterval) clearInterval(reauthInterval);
@@ -142,13 +156,13 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
 
   const turn = rt?.turn ?? { state: "idle" as const, queued: 0 };
   const canSend = conn === "connected" && turn.queued < MAX_QUEUED;
-  const onSend = (text: string) => sockRef.current?.send(encodePrompt(text));
-  const onSetMode = (modeId: string) => sockRef.current?.send(encodeSetMode(modeId));
-  const onCancel = () => sockRef.current?.send(encodeCancel());
+  const onSend = (text: string) => sendRef.current(encodePrompt(text));
+  const onSetMode = (modeId: string) => sendRef.current(encodeSetMode(modeId));
+  const onCancel = () => sendRef.current(encodeCancel());
   // resolve sends the picked optionId (cat H); "" (dismiss) lets the node auto-deny.
   const perm = rt?.perm
     ? { title: rt.perm.title, options: rt.perm.options, resolve: (optionId: string) => {
-        sockRef.current?.send(encodePermResponse(rt.perm!.reqId, optionId));
+        sendRef.current(encodePermResponse(rt.perm!.reqId, optionId));
         useSessionStore.getState().clearPerm(sessionId);
       } }
     : null;

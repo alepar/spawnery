@@ -68,6 +68,7 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const sockRef = useRef<ReconnectingSocket | null>(null);
+  const sendRef = useRef<(data: string | Uint8Array, coalesceKey?: string) => void>(() => {});
   // The live-update effect skips its first run: the spawnId effect already applied the initial
   // settings and handles the initial fit/resize on socket open, so the first [settings,appDark]
   // run would only re-do that (and fire a redundant resize before the socket opens).
@@ -115,6 +116,13 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     let authorization: VerifiedSessionAuthorization | null = null;
     let bound = false;
     let pendingPairReauth = false;
+    let pendingSends: Array<{ data: string | Uint8Array; key?: string }> = [];
+    const sendWhenBound = (data: string | Uint8Array, key?: string) => {
+      if (bound) { sock.send(data); return; }
+      if (key) pendingSends = pendingSends.filter((item) => item.key !== key);
+      pendingSends.push({ data, key });
+    };
+    sendRef.current = sendWhenBound;
 
     onConnRef.current?.("connecting");
     const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
@@ -133,7 +141,10 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
           if (authEnabled() && !verified) throw new Error("session bind: authorization context missing");
           authorization = verified ?? null;
           sock.send(JSON.stringify(frame));
+          sendWhenBound(encodeResize(term.cols, term.rows), "resize");
           bound = true;
+          for (const pending of pendingSends) sock.send(pending.data);
+          pendingSends = [];
           if (pendingPairReauth) {
             pendingPairReauth = false;
             const latest = useSessionStore.getState();
@@ -143,13 +154,15 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
             }
           }
           safeFit();
-          sock.send(encodeResize(term.cols, term.rows));
           onConnRef.current?.("connected");
         } catch {
           if (!closing && openSequence === attachmentSequence) sock.close();
         }
       },
-      onDown: () => { if (!closing) onConnRef.current?.("reconnecting"); },
+      onDown: () => {
+        bound = false;
+        if (!closing) onConnRef.current?.("reconnecting");
+      },
       onMessage: (data: ArrayBuffer | string) => {
         const bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
         const n = bytes.length;
@@ -166,8 +179,8 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     sock.binaryType = "arraybuffer";
     sockRef.current = sock;
 
-    const onData = term.onData((d) => sock.send(encodeInput(d)));
-    const onResize = term.onResize(({ cols, rows }) => sock.send(encodeResize(cols, rows)));
+    const onData = term.onData((d) => sendWhenBound(encodeInput(d)));
+    const onResize = term.onResize(({ cols, rows }) => sendWhenBound(encodeResize(cols, rows), "resize"));
     const ro = new ResizeObserver(() => safeFit());
     ro.observe(host);
 
@@ -239,6 +252,8 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
 
     return () => {
       closing = true; // intentional teardown -> suppress the close-driven onDown "reconnecting"
+      sendRef.current = () => {};
+      pendingSends = [];
       attachmentSequence++;
       nodeReauthSequence++;
       if (reauthInterval) clearInterval(reauthInterval);
@@ -287,7 +302,7 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
       if (cancelled || termRef.current !== term) return; // unmounted / spawn switched mid-await
       fit.fit();
       term.refresh(0, term.rows - 1);
-      sockRef.current?.send(encodeResize(term.cols, term.rows));
+      sendRef.current(encodeResize(term.cols, term.rows), "resize");
     };
 
     const family = primaryFamily(fontById(settings.fontFamily).stack);

@@ -44,6 +44,12 @@ export interface ForkOptions {
   name?: string;
 }
 
+interface AuthorizationPreflight {
+  signer: WebCryptoSessionSigner;
+  nodeAccessToken: string;
+  verifyTarget: ResolvedTargetVerifier;
+}
+
 export class SpawnClient {
   private readonly client: Client<typeof SpawnService>;
   private readonly keyStore?: KeyStore;
@@ -51,6 +57,11 @@ export class SpawnClient {
   private readonly verifyTarget?: ResolvedTargetVerifier;
 
   constructor(opts: SpawnClientOptions) {
+    const authorizationOptions = [opts.keyStore, opts.getNodeAccessToken, opts.verifyTarget];
+    const configured = authorizationOptions.filter(Boolean).length;
+    if (configured !== 0 && configured !== authorizationOptions.length) {
+      throw new Error("SpawnClient: keyStore, getNodeAccessToken, and verifyTarget must be configured together");
+    }
     this.client = createClient(SpawnService, opts.transport);
     this.keyStore = opts.keyStore;
     this.getNodeAccessToken = opts.getNodeAccessToken;
@@ -62,61 +73,61 @@ export class SpawnClient {
    * before issuing the corresponding blocking RPC (see class doc). No-op when no KeyStore was
    * supplied.
    */
-  private signConcurrently(spawnId: string, pended: PendedOp): void {
-    if (!this.keyStore) return;
-    if (!this.getNodeAccessToken || !this.verifyTarget) {
-      console.error("intent sign failed: SpawnClient requires node authorization and target verification");
-      return;
-    }
-    const getNodeAccessToken = this.getNodeAccessToken;
-    const verifyTarget = this.verifyTarget;
-    void Promise.all([this.keyStore.get(), getNodeAccessToken()])
-      .then(([kp, nodeAccessToken]) => {
-        if (!kp) throw new Error("SpawnClient: no session keypair in KeyStore; create one first");
-        if (!nodeAccessToken) throw new Error("SpawnClient: missing node access token");
-        registerPendedOp(pended);
-        return pollAndSign({
-          client: this.client,
-          spawnId,
-          pended,
-          signer: new WebCryptoSessionSigner(kp.privateKey, kp.publicKey),
-          nodeAccessToken,
-          verifyTarget,
-        });
-      })
-      .catch((e: unknown) => console.error("intent sign failed:", e))
+  private async preflightAuthorization(): Promise<AuthorizationPreflight | null> {
+    if (!this.keyStore) return null;
+    const [kp, nodeAccessToken] = await Promise.all([this.keyStore.get(), this.getNodeAccessToken!()]);
+    if (!kp) throw new Error("SpawnClient: no session keypair in KeyStore; create one first");
+    if (!nodeAccessToken) throw new Error("SpawnClient: missing node access token");
+    return {
+      signer: new WebCryptoSessionSigner(kp.privateKey, kp.publicKey),
+      nodeAccessToken,
+      verifyTarget: this.verifyTarget!,
+    };
+  }
+
+  private sign(spawnId: string, pended: PendedOp, auth: AuthorizationPreflight): Promise<void> {
+    registerPendedOp(pended);
+    return pollAndSign({ client: this.client, spawnId, pended, ...auth })
+      .then(() => {})
       .finally(() => clearPendedOp(spawnId));
   }
 
   async createSpawn(input: MessageInitShape<typeof CreateSpawnRequestSchema>): Promise<string> {
+    const auth = await this.preflightAuthorization();
     const { spawnId } = await this.client.createSpawn(input);
     // appRef is intentionally omitted from pended: the caller picks an app *id*, not the immutable
     // app_ref the CP resolves it to, so validating against a ref we never supplied would always
     // mismatch. pollAndSign's tuple validation skips the appRef check when it's undefined.
-    this.signConcurrently(spawnId, {
+    if (auth) await this.sign(spawnId, {
       op: "create-spawn",
       spawnId,
       model: input.model,
       image: input.image,
       mounts: input.mounts,
       attachedSecretIds: input.attachedSecretIds,
-    });
+    }, auth);
     return spawnId;
   }
 
   async resume(spawnId: string, attachedSecretIds: string[] = []): Promise<void> {
-    this.signConcurrently(spawnId, { op: "resume-spawn", spawnId, attachedSecretIds });
-    await this.client.resumeSpawn({ spawnId, attachedSecretIds });
+    const auth = await this.preflightAuthorization();
+    if (!auth) { await this.client.resumeSpawn({ spawnId, attachedSecretIds }); return; }
+    await Promise.all([
+      this.sign(spawnId, { op: "resume-spawn", spawnId, attachedSecretIds }, auth),
+      this.client.resumeSpawn({ spawnId, attachedSecretIds }),
+    ]);
   }
 
   async recreate(spawnId: string): Promise<void> {
-    this.signConcurrently(spawnId, { op: "recreate-spawn", spawnId });
-    await this.client.recreateSpawn({ spawnId });
+    const auth = await this.preflightAuthorization();
+    if (!auth) { await this.client.recreateSpawn({ spawnId }); return; }
+    await Promise.all([this.sign(spawnId, { op: "recreate-spawn", spawnId }, auth), this.client.recreateSpawn({ spawnId })]);
   }
 
   async migrate(spawnId: string): Promise<void> {
-    this.signConcurrently(spawnId, { op: "migrate-spawn", spawnId });
-    await this.client.migrateSpawn({ spawnId });
+    const auth = await this.preflightAuthorization();
+    if (!auth) { await this.client.migrateSpawn({ spawnId }); return; }
+    await Promise.all([this.sign(spawnId, { op: "migrate-spawn", spawnId }, auth), this.client.migrateSpawn({ spawnId })]);
   }
 
   /**
@@ -128,17 +139,20 @@ export class SpawnClient {
     transferSetId: string;
     nodeId: string;
   }> {
-    this.signConcurrently(sourceSpawnId, {
+    const auth = await this.preflightAuthorization();
+    const pended: PendedOp = {
       op: "fork-spawn",
       spawnId: sourceSpawnId,
       targetNodeId: opts.targetNodeId || undefined,
-    });
-    const res = await this.client.forkSpawn({
+      targetNodeClass: opts.targetClass || undefined,
+    };
+    const rpc = () => this.client.forkSpawn({
       spawnId: sourceSpawnId,
       targetNodeId: opts.targetNodeId ?? "",
       targetClass: opts.targetClass ?? "",
       name: opts.name ?? "",
     });
+    const res = auth ? (await Promise.all([rpc(), this.sign(sourceSpawnId, pended, auth)]))[0] : await rpc();
     return { forkSpawnId: res.forkSpawnId, transferSetId: res.transferSetId, nodeId: res.nodeId };
   }
 

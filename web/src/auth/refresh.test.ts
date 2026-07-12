@@ -229,6 +229,39 @@ describe("refreshAccessToken — single-flight", () => {
     // Only one fetch was made — the _inflight guard short-circuits p2 before the lock.
     expect(fetchCount).toBe(1);
   });
+
+  it("does not share an in-flight result across different persistent session keys", async () => {
+    const firstStore = new MemoryKeyStore();
+    const secondStore = new MemoryKeyStore();
+    const first = await getOrCreateSessionKey(firstStore);
+    const second = await getOrCreateSessionKey(secondStore);
+    const firstHash = await sessionKeyHash(await exportSpkiDer(first.publicKey));
+    const secondHash = await sessionKeyHash(await exportSpkiDer(second.publicKey));
+    let resolveFirst!: (response: Response) => void;
+    const firstResponse = new Promise<Response>((resolve) => { resolveFirst = resolve; });
+    const firstFetch = vi.fn(() => firstResponse);
+    const secondFetch = vi.fn().mockResolvedValue(makeResponse(200, {
+      cp_access_token: buildWireToken(secondHash, 1800000000n, "cp"),
+      node_access_token: buildWireToken(secondHash, 1800000000n, "node"),
+      refresh_token_hash: "second",
+    }));
+    const firstPending = refreshAccessToken({
+      privateKey: first.privateKey, publicKey: first.publicKey, localSpkiHash: firstHash,
+      refreshTokenHash: new Uint8Array(32), fetchFn: firstFetch,
+    });
+    const secondResult = await refreshAccessToken({
+      privateKey: second.privateKey, publicKey: second.publicKey, localSpkiHash: secondHash,
+      refreshTokenHash: new Uint8Array(32), fetchFn: secondFetch,
+    });
+    expect(secondResult.kind).toBe("ok");
+    expect(secondFetch).toHaveBeenCalledOnce();
+    resolveFirst(makeResponse(200, {
+      cp_access_token: buildWireToken(firstHash, 1800000000n, "cp"),
+      node_access_token: buildWireToken(firstHash, 1800000000n, "node"),
+      refresh_token_hash: "first",
+    }));
+    await expect(firstPending).resolves.toEqual(expect.objectContaining({ kind: "ok" }));
+  });
 });
 
 describe("refreshAccessToken — atomic pair validation", () => {

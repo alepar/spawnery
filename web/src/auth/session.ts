@@ -62,6 +62,7 @@ export interface AccountInfo {
 }
 
 export interface SessionState {
+  authEpoch: number;
   status: AuthStatus;
   cpAccessToken: string;
   nodeAccessToken: string;
@@ -115,14 +116,20 @@ function _scheduleProactiveRefresh(expiresAt: bigint): void {
   }, delay);
 }
 
-async function _doProactiveRefresh(): Promise<void> {
+export async function _doProactiveRefresh(): Promise<void> {
   if (!authEnabled()) return;
   const session = useSessionStore.getState();
   if (session.status !== "authed") return;
+  const epoch = session.authEpoch;
+  const store = session.keyStore;
+  const current = () => {
+    const state = useSessionStore.getState();
+    return state.authEpoch === epoch && state.status === "authed" && state.keyStore === store;
+  };
 
   try {
-    const store = session.keyStore;
     const kp = await loadSessionKey(store);
+    if (!current()) return;
     if (!kp) {
       await useSessionStore.getState().recoverKeyLoss();
       return;
@@ -140,6 +147,7 @@ async function _doProactiveRefresh(): Promise<void> {
       localSpkiHash: spkiHash,
       refreshTokenHash: rth,
     });
+    if (!current()) return;
 
     if (result.kind === "ok") {
       useSessionStore.getState().setTokens({
@@ -158,6 +166,7 @@ async function _doProactiveRefresh(): Promise<void> {
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
+  authEpoch: 0,
   status: "loading",
   cpAccessToken: "",
   nodeAccessToken: "",
@@ -171,13 +180,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Persist the hash before updating zustand so cold-reload bootstrap() can read it [AM2].
     _saveRth(rth);
     const account = { accountId: validated.cp.accountId, handle: validated.cp.handle };
-    set({ ...pair, refreshTokenHash: rth, account, status: "authed", callbackErrorCode: null });
+    set((state) => ({ ...pair, refreshTokenHash: rth, account, status: "authed", callbackErrorCode: null,
+      authEpoch: state.authEpoch + 1 }));
     // Schedule next proactive refresh so long-lived WS sessions never hit the 15 min expiry.
     _scheduleProactiveRefresh(validated.expiresAt);
   },
 
   setStatus(status: AuthStatus) {
-    set({ status });
+    set((state) => ({ status, authEpoch: state.status === status ? state.authEpoch : state.authEpoch + 1 }));
   },
 
   getAccessToken() {
@@ -291,6 +301,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async logout() {
     _clearRefreshTimer();
     const store = get().keyStore;
+    const epoch = get().authEpoch + 1;
+    set({ authEpoch: epoch, status: "login-required", cpAccessToken: "", nodeAccessToken: "",
+      refreshTokenHash: "", account: null });
     _clearRth();
     // Best-effort: revoke the server-side family.
     try {
@@ -302,12 +315,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Ignore.
     }
     await clearSessionKey(store);
-    set({ status: "login-required", cpAccessToken: "", nodeAccessToken: "", refreshTokenHash: "", account: null });
+    if (get().authEpoch !== epoch) return;
   },
 
   async recoverKeyLoss() {
     _clearRefreshTimer();
     const store = get().keyStore;
+    const epoch = get().authEpoch + 1;
+    set({ authEpoch: epoch, status: "key-lost", cpAccessToken: "", nodeAccessToken: "",
+      refreshTokenHash: "", account: null });
     try {
       await fetch(asHttpUrl("/logout"), { method: "POST", credentials: "include" });
     } catch {
@@ -315,13 +331,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
     _clearRth();
     await clearSessionKey(store);
-    set({
-      status: "key-lost",
-      cpAccessToken: "",
-      nodeAccessToken: "",
-      refreshTokenHash: "",
-      account: null,
-    });
+    if (get().authEpoch !== epoch) return;
   },
 }));
 
