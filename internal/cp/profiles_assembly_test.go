@@ -344,14 +344,16 @@ func TestAssemble_Targets(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := spec.MCPPayload{Stdio: &spec.MCPTransportStdio{Command: "npx"}}
 			content, _ := json.Marshal(cfg)
-			items := []resolvedEntry{{
+			items := []resolvedItem{{
 				entry: store.ProfileEntry{
 					EntryID: "e1",
 					Kind:    store.ProfileEntryMCP,
 					Name:    "test-mcp",
 					Targets: tc.targets,
 				},
-				content: content,
+				artifactID: "e1",
+				name:       "test-mcp",
+				content:    content,
 			}}
 			mani, _, err := buildManifestAndPayloads(items, targetNames)
 			if tc.wantErr {

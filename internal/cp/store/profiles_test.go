@@ -484,3 +484,49 @@ func TestProfiles_EntriesOrderedByEntryID(t *testing.T) {
 		}
 	}
 }
+
+// TestProfileEntryBundleRefRoundTrip proves fact 4 from the sp-mwco.1.5 plan: catalog_id is
+// already NOT NULL DEFAULT ” (sp-mwco.1.3), so a bundle_ref entry that leaves CatalogID empty
+// and sets BundleID/VersionID instead round-trips cleanly with no NOT NULL violation.
+func TestProfileEntryBundleRefRoundTrip(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-br", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	entry := store.ProfileEntry{
+		ProfileID:  "pf-br",
+		EntryID:    "ent-br",
+		Kind:       store.ProfileEntrySkill,
+		Name:       "some-bundle",
+		SourceKind: store.ProfileSourceBundle,
+		BundleID:   "bnd-1",
+		VersionID:  "bndv-1",
+		Targets:    []string{"all"},
+	}
+	if _, err := st.Profiles().AddEntry(ctx, "pf-br", 1, entry, 2000); err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	_, entries, _, err := st.Profiles().Get(ctx, "pf-br")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.SourceKind != store.ProfileSourceBundle {
+		t.Errorf("SourceKind = %q, want %q", e.SourceKind, store.ProfileSourceBundle)
+	}
+	if e.BundleID != "bnd-1" || e.VersionID != "bndv-1" {
+		t.Errorf("BundleID/VersionID = %q/%q, want bnd-1/bndv-1", e.BundleID, e.VersionID)
+	}
+	if e.CatalogID != "" {
+		t.Errorf("CatalogID = %q, want empty for bundle_ref entry", e.CatalogID)
+	}
+}
