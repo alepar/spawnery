@@ -119,8 +119,14 @@ func TestApplyArtifacts_ClaudeTUIWritesConfig(t *testing.T) {
 	}
 }
 
-// TestApplyArtifacts_NoOpRunnable verifies that a no-op runnable (e.g. goose-tui) exits 0
-// and writes nothing, even with a real agentinstall in PATH and a valid manifest.
+// TestApplyArtifacts_NoOpRunnable verifies that a runnable with no agentcaps/emitter mapping
+// (shell — a non-agent runnable, see internal/agentcaps) exits 0 and writes nothing, even with
+// a real agentinstall in PATH and a valid manifest. The no-op decision is made by
+// `agentinstall apply --runnable` in Go now (sp-mwco.2.6), not by a shell `case` here.
+//
+// NOTE: goose-tui is deliberately NOT used as the no-op example anymore — the shell `case`
+// this test used to exercise treated it (wrongly) as a no-op; goose now has a registered
+// emitter and genuinely installs (see TestApplyArtifacts_GooseAcpReachesAgentinstall).
 func TestApplyArtifacts_NoOpRunnable(t *testing.T) {
 	helper := helperScript(t)
 	home := t.TempDir()
@@ -141,20 +147,113 @@ func TestApplyArtifacts_NoOpRunnable(t *testing.T) {
 		"SECRET_WAIT_TIMEOUT=1s",
 	}
 
-	_, code := runHelper(t, helper, "goose-tui", env)
+	_, code := runHelper(t, helper, "shell", env)
 	if code != 0 {
 		t.Fatalf("expected exit 0 for no-op runnable, got %d", code)
 	}
 
-	// No config should have been written (goose-tui maps to no-op).
+	// No config should have been written (shell has no agentinstall emitter).
 	claudeJSON := filepath.Join(home, ".claude.json")
 	if _, err := os.Stat(claudeJSON); !os.IsNotExist(err) {
-		t.Errorf("unexpected write to ~/.claude.json for goose-tui no-op: err=%v", err)
+		t.Errorf("unexpected write to ~/.claude.json for shell no-op: err=%v", err)
 	}
-	// No report either — agentinstall was never invoked.
+	// No report either — agentinstall exits before ever running the apply.
 	report := filepath.Join(artifactsDir, "report", "apply-report.json")
 	if _, err := os.Stat(report); !os.IsNotExist(err) {
 		t.Errorf("unexpected apply-report.json for no-op runnable: err=%v", err)
+	}
+}
+
+// TestApplyArtifacts_GooseAcpReachesAgentinstall verifies goose-acp — a runnable that the OLD
+// shell `case` silently no-op'd — now resolves to the goose emitter and actually applies
+// (asserted via the report file existing, per the bead's regression fix).
+func TestApplyArtifacts_GooseAcpReachesAgentinstall(t *testing.T) {
+	helper := helperScript(t)
+	home := t.TempDir()
+	binDir := t.TempDir()
+	buildAgentinstallToDir(t, binDir)
+
+	// goose's MCP emitter is deferred (sp-mwco skill work only wired InstallSkill); use a
+	// skill artifact, which goose does implement (canonical ~/.agents/skills, no glue).
+	artifactsDir := t.TempDir()
+	skillDir := filepath.Join(artifactsDir, "payloads", "test-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# test-skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"artifacts":[{"kind":"skill","name":"test-skill","targets":["goose"],"skill":{"dir":"payloads/test-skill"}}]}`
+	if err := os.WriteFile(filepath.Join(artifactsDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin",
+		"SPAWNERY_ARTIFACTS_DIR=" + artifactsDir,
+		"SPAWNERY_SECRETS_DIR=" + t.TempDir(),
+		"SECRET_WAIT_TIMEOUT=1s",
+	}
+
+	out, code := runHelper(t, helper, "goose-acp", env)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d\noutput:\n%s", code, out)
+	}
+	report := filepath.Join(artifactsDir, "report", "apply-report.json")
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("apply-report.json not written for goose-acp: %v", err)
+	}
+	if !strings.Contains(string(data), `"outcome":"ok"`) {
+		t.Errorf("expected outcome ok in report, got: %s", data)
+	}
+}
+
+// TestApplyArtifacts_HermesAcpReachesAgentinstall verifies hermes-acp — another runnable the
+// OLD shell `case` silently no-op'd — now resolves to the hermes emitter and actually applies
+// (asserted via the report file existing).
+func TestApplyArtifacts_HermesAcpReachesAgentinstall(t *testing.T) {
+	helper := helperScript(t)
+	home := t.TempDir()
+	binDir := t.TempDir()
+	buildAgentinstallToDir(t, binDir)
+
+	// hermes's MCP/config emitters are deferred to sp-mofj; use a skill artifact, which
+	// hermes does implement (canonical ~/.agents/skills; the external_dirs glue is
+	// sp-mwco.2.5, out of scope here — this test only checks agentinstall was reached).
+	artifactsDir := t.TempDir()
+	skillDir := filepath.Join(artifactsDir, "payloads", "test-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# test-skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"artifacts":[{"kind":"skill","name":"test-skill","targets":["hermes"],"skill":{"dir":"payloads/test-skill"}}]}`
+	if err := os.WriteFile(filepath.Join(artifactsDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin",
+		"SPAWNERY_ARTIFACTS_DIR=" + artifactsDir,
+		"SPAWNERY_SECRETS_DIR=" + t.TempDir(),
+		"SECRET_WAIT_TIMEOUT=1s",
+	}
+
+	out, code := runHelper(t, helper, "hermes-acp", env)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d\noutput:\n%s", code, out)
+	}
+	report := filepath.Join(artifactsDir, "report", "apply-report.json")
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("apply-report.json not written for hermes-acp: %v", err)
+	}
+	if !strings.Contains(string(data), `"outcome":"ok"`) {
+		t.Errorf("expected outcome ok in report, got: %s", data)
 	}
 }
 

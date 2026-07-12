@@ -1,6 +1,9 @@
 #!/bin/sh
-# apply-artifacts.sh — map $RUNNABLE to an agentinstall emitter name and invoke
-# `agentinstall apply --agent <emitter> --report <path> ...`, propagating ITS exit code.
+# apply-artifacts.sh — invoke `agentinstall apply --runnable <id> --report <path> ...`,
+# propagating ITS exit code. The runnable->emitter mapping (and the no-op decision for
+# runnables with no agentinstall emitter) lives in Go now — see
+# internal/agentcaps/emitter.go and cmd/agentinstall/main.go's `apply --runnable` handling
+# (sp-mwco.2.6). This script carries no agent names.
 #
 # Called from launcher AFTER per-runnable base-config gen and BEFORE start_tmux/exec:
 #   apply-artifacts "$RUNNABLE" || true
@@ -26,20 +29,6 @@ SECRETS_DIR="${SPAWNERY_SECRETS_DIR:-/run/spawnery/secrets}"
 SECRET_WAIT_TIMEOUT="${SECRET_WAIT_TIMEOUT:-30s}"
 REPORT_FILE="${ARTIFACTS_DIR}/report/apply-report.json"
 
-# Map runnable → emitter name, or empty for no-op runnables.
-case "$RUNNABLE" in
-  claude-tui)      EMITTER=claude ;;
-  codex-tui)       EMITTER=codex ;;
-  opencode-served|opencode-tui) EMITTER=opencode ;;
-  # All other runnables (goose-*, shell, stub-acp, nori, "") are no-ops.
-  *)               EMITTER="" ;;
-esac
-
-# No-op runnables: nothing to install.
-if [ -z "$EMITTER" ]; then
-  exit 0
-fi
-
 # Old-image guard: if agentinstall is not in PATH, warn and exit 0.
 if ! command -v agentinstall >/dev/null 2>&1; then
   printf 'apply-artifacts: agentinstall not found in PATH (old image?) — skipping artifact application for %s\n' "$RUNNABLE" >&2
@@ -52,7 +41,7 @@ if [ ! -f "${ARTIFACTS_DIR}/manifest.json" ]; then
 fi
 
 agentinstall apply \
-  --agent "$EMITTER" \
+  --runnable "$RUNNABLE" \
   --artifacts "$ARTIFACTS_DIR" \
   --secrets "$SECRETS_DIR" \
   --secret-wait-timeout "$SECRET_WAIT_TIMEOUT" \
