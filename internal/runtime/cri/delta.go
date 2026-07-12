@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 
 	"spawnery/internal/runtime"
 
@@ -94,11 +95,12 @@ func (b *CRIPodBackend) EnsureImage(ctx context.Context, baseRef, deltaRef strin
 	return baseRef, nil
 }
 
-// CaptureDelta stops the agent container, diffs its snapshot via containerd DiffService, assembles
-// a per-spawn image (base layers + delta layer, lease-pinned) — assembly asserts the manifest
-// references the delta descriptor (the moby#47065 reference guard lives in containerd.Capture) —
-// then sanity-checks the diff produced a non-empty layer and removes the container. Returns the
-// assembled image ref ("spawnery/delta:<spawnID>").
+// CaptureDelta diffs the agent container's snapshot via containerd's DiffService — on the container as
+// the Manager left it, which on the suspend path means PAUSED — assembles a per-spawn image (base layers
+// + delta layer, lease-pinned; assembly asserts the manifest references the delta descriptor, the
+// moby#47065 reference guard lives in containerd.Capture), sanity-checks the diff produced a non-empty
+// layer, and only THEN resumes, stops and removes the container. Returns the assembled image ref
+// ("spawnery/delta:<spawnID>").
 func (b *CRIPodBackend) CaptureDelta(ctx context.Context, h *runtime.PodHandle) (string, error) {
 	return b.CaptureDeltaAs(ctx, h, h.SpawnID)
 }
@@ -126,18 +128,13 @@ func (b *CRIPodBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle
 	// artifact of gVisor #12647 corrupting `task pause`; the "no running task found" it produced was
 	// the pause bug, not evidence that a stop is mandatory.
 	//
-	// Self-capture (suspend, target == source) still stops: the pod is torn down next anyway, and the
-	// stop releases the snapshot for teardown.
+	// Self-capture (suspend, target == source): the Manager has PAUSED the agent to quiesce it for the
+	// journal/mount snapshot and (since sp-2tx8.2.1) NEVER unpauses it — the rootfs delta must come from
+	// that same frozen instant or the artifact is torn. So the DIFF RUNS FIRST, on the paused container.
+	// Only afterwards do we resume + stop + remove it, to release its snapshot for the pod teardown.
+	// Do NOT move the resume/stop back above the diff: that reopens the very window the pause exists to
+	// close, and the agent's shutdown writes land in the rootfs but not in the mount snapshot.
 	preserveSource := targetSpawnID != h.SpawnID
-
-	if !preserveSource {
-		// The manager paused the agent to quiesce. StopContainer must deliver a signal, which a frozen
-		// task cannot receive, so resume first (best-effort — a running task is fine).
-		_ = eng.Resume(ctx, h.AgentID)
-		if _, err := b.c.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{ContainerId: h.AgentID}); err != nil {
-			return "", fmt.Errorf("cri capture stop %s: %w", h.AgentID, err)
-		}
-	}
 
 	ref, deltaSize, err := eng.Capture(ctx, h.AgentID, name, h.BaseImageRef, leaseID)
 	if err != nil {
@@ -154,8 +151,17 @@ func (b *CRIPodBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle
 	}
 
 	if !preserveSource {
-		// Suspend only: remove the stopped container and clear the handle's agent id (Stop tolerates
-		// the empty id when it tears the pod down next). A fork leaves the source's container intact.
+		// Suspend only: the diff is taken, so release the container. StopContainer must deliver a signal,
+		// which a frozen task cannot receive, so resume first (best-effort). Failures here are teardown
+		// hygiene, NOT capture failures — the delta image is already assembled and the pod-level Stop
+		// (which resumes + stops + removes the sandbox) retries the cleanup. Only clear h.AgentID once the
+		// container is actually gone, so a caller still holding the handle can target it.
+		_ = eng.Resume(ctx, h.AgentID)
+		if _, serr := b.c.runtime.StopContainer(ctx, &runtimeapi.StopContainerRequest{ContainerId: h.AgentID}); serr != nil {
+			log.Printf("cri capture %s: stop agent %s after the diff: %v (non-fatal; pod Stop will retry)",
+				targetSpawnID, h.AgentID, serr)
+			return ref, nil
+		}
 		_, _ = b.c.runtime.RemoveContainer(ctx, &runtimeapi.RemoveContainerRequest{ContainerId: h.AgentID})
 		h.AgentID = ""
 	}

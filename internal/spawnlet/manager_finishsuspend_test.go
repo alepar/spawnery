@@ -328,23 +328,26 @@ func TestFinishSuspendUnknownID(t *testing.T) {
 	}
 }
 
-// FS7 (regression, scrub-on-paused): the gate (SnapshotForSuspend) pauses the agent for journal
-// quiescence and leaves it paused; FinishSuspend must UNPAUSE it before the rootfs scrub/capture,
-// because the scrub `docker exec` cannot run on a paused container ("container is paused").
-func TestFinishSuspendUnpausesAgentBeforeCapture(t *testing.T) {
+// FS7 (regression, SE2/sp-2tx8.2.1): the gate pauses the agent for journal quiescence and leaves it
+// paused; FinishSuspend must capture the rootfs delta ON THE PAUSED AGENT and never unpause it. The
+// scrub that used to force an unpause here now runs in the gate, before the Pause. An unpause between
+// the mount snapshot and the rootfs capture is exactly what tears a suspend artifact (see R3 in
+// regression_lifecycle_test.go).
+func TestFinishSuspendCapturesOnPausedAgent(t *testing.T) {
 	ctx := context.Background()
 	app := writeJournalApp(t)
 
-	fj := newFakeJournal("manifest-unpause")
+	fj := newFakeJournal("manifest-paused")
 	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
 	})
 	m.SetJournal(fj, t.TempDir())
+	// The gate's scrub is a live exec; stub it so the hermetic test never shells out to Docker.
 	m.scrubFn = func(_ context.Context, _ string, _ []string) error { return nil }
 
-	sp, err := m.Create(ctx, "sp-unpause", app, "model", "", "", 1)
+	sp, err := m.Create(ctx, "sp-paused-capture", app, "model", "", "", 1)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -352,17 +355,25 @@ func TestFinishSuspendUnpausesAgentBeforeCapture(t *testing.T) {
 		t.Fatalf("SnapshotForSuspend: %v", err)
 	}
 	if fb.State(sp.ID, "agent") != fakepod.StatePaused {
-		t.Fatal("gate must leave the agent paused for journal quiescence")
+		t.Fatal("the gate must leave the agent paused for journal quiescence")
 	}
 	if _, err := m.FinishSuspend(ctx, sp.ID, false, nil); err != nil {
 		t.Fatalf("FinishSuspend: %v", err)
 	}
-	if fb.UnpauseCount() == 0 {
-		t.Fatal("FinishSuspend must unpause the agent before the rootfs scrub/capture")
+
+	// The agent must NEVER have been unpaused: the rootfs delta is captured from the frozen container.
+	if fb.UnpauseCount() != 0 {
+		t.Fatalf("FinishSuspend unpaused the agent (unpauseCount=%d) — that reopens the quiescence window "+
+			"between the mount snapshot and the rootfs capture (torn snapshot)", fb.UnpauseCount())
 	}
-	// The agent is removed by capture+stop at this point, not merely unpaused — either way it must
-	// not still be paused (a frozen container would fail the scrub/capture that runs beforehand).
-	if fb.State(sp.ID, "agent") == fakepod.StatePaused {
-		t.Fatal("agent still paused after FinishSuspend — scrub/capture/stop would run on a frozen container")
+	// ...and it must still have captured, before the stop.
+	ops := lifecycleOps(fb)
+	captureIdx := opsIndex(ops, "capture:"+sp.ID)
+	stopIdx := opsIndex(ops, "stop:"+sp.ID)
+	if captureIdx < 0 {
+		t.Fatalf("CaptureDelta must be called on the paused agent; ops=%v", ops)
+	}
+	if stopIdx < 0 || captureIdx >= stopIdx {
+		t.Fatalf("CaptureDelta must happen BEFORE pod.Stop; ops=%v", ops)
 	}
 }

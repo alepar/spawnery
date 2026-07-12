@@ -38,6 +38,7 @@ func contractCases() []contractCase {
 		{name: "capture_artifact_inherits_content", missingHook: needWriteAndReadArtifact, run: caseCaptureArtifactInheritsContent},
 		{name: "ensure_image_launchable_after_capture", missingHook: needWrite, run: caseEnsureImageLaunchableAfterCapture},
 		{name: "capture_layer_count_guard", missingHook: needArmZeroLayer, run: caseCaptureLayerCountGuard},
+		{name: "capture_delta_on_paused_agent", missingHook: needWriteAndReadArtifact, run: caseCaptureDeltaOnPausedAgent},
 	}
 }
 

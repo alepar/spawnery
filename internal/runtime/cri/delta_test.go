@@ -47,9 +47,18 @@ type fakeDeltaEngine struct {
 	pauseErr  error
 	resumeKey string
 	resumeErr error
+
+	// observeAtCapture, when set, is called at the START of Capture — so a test can pin what had NOT
+	// happened yet when the diff was taken (SE2: the container must still be paused, i.e. not resumed
+	// and not stopped).
+	observeAtCapture func()
+	resumeCalls      int
 }
 
 func (f *fakeDeltaEngine) Capture(_ context.Context, snapshotKey, name, baseRef, leaseID string) (string, int64, error) {
+	if f.observeAtCapture != nil {
+		f.observeAtCapture()
+	}
 	f.captureKey = snapshotKey
 	f.captureName = name
 	f.captureBase = baseRef
@@ -101,6 +110,7 @@ func (f *fakeDeltaEngine) Pause(_ context.Context, key string) error {
 }
 
 func (f *fakeDeltaEngine) Resume(_ context.Context, key string) error {
+	f.resumeCalls++
 	f.resumeKey = key
 	return f.resumeErr
 }
@@ -239,7 +249,7 @@ func TestCaptureDeltaHappyPath(t *testing.T) {
 		t.Errorf("ref = %q, want %q", ref, runtime.DeltaTag(spawnID))
 	}
 
-	// Verify stop was called before Capture.
+	// The container is stopped AFTER the diff (see TestCaptureDeltaDiffsThePausedContainer).
 	if len(f.stopped) != 1 || f.stopped[0] != agentID {
 		t.Errorf("StopContainer: got %v, want [%s]", f.stopped, agentID)
 	}
@@ -261,6 +271,64 @@ func TestCaptureDeltaHappyPath(t *testing.T) {
 	// Verify RemoveContainer was called.
 	if len(f.removedContainers) != 1 || f.removedContainers[0] != agentID {
 		t.Errorf("RemoveContainer: got %v, want [%s]", f.removedContainers, agentID)
+	}
+}
+
+// TestCaptureDeltaDiffsThePausedContainer is the SE2 backend pin (sp-2tx8.2.1): the suspend gate leaves
+// the agent PAUSED and no longer unpauses it, so the diff must be taken from the frozen container —
+// BEFORE the resume + stop that releases it. The old order (resume -> stop -> diff) let the agent run
+// again between the mount snapshot and the rootfs diff, which is the torn snapshot this epic fixes.
+// containerd's CreateDiff does not require a stopped container (spike-verified byte-identical across
+// RUNNING/PAUSED/STOPPED), so the stop is teardown hygiene, not a precondition of the diff.
+func TestCaptureDeltaDiffsThePausedContainer(t *testing.T) {
+	spawnID := "s-paused"
+	agentID := "ctr-agent-7"
+
+	c, f := newFakeCRI(t)
+	fakeEng := &fakeDeltaEngine{
+		captureRef:       runtime.DeltaTag(spawnID),
+		captureDeltaSize: 2048,
+	}
+	var resumedAtCapture, stoppedAtCapture int
+	fakeEng.observeAtCapture = func() {
+		resumedAtCapture = fakeEng.resumeCalls
+		f.mu.Lock()
+		stoppedAtCapture = len(f.stopped)
+		f.mu.Unlock()
+	}
+	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
+
+	h := &runtime.PodHandle{AgentID: agentID, SpawnID: spawnID, BaseImageRef: "base:v1"}
+	ref, err := b.CaptureDelta(context.Background(), h)
+	if err != nil {
+		t.Fatalf("CaptureDelta: %v", err)
+	}
+	if ref != runtime.DeltaTag(spawnID) {
+		t.Fatalf("ref = %q, want %q", ref, runtime.DeltaTag(spawnID))
+	}
+
+	if resumedAtCapture != 0 {
+		t.Errorf("the container was RESUMED before the diff (%d resume calls) — the diff must be taken on "+
+			"the paused container, or the agent runs again between the mount snapshot and the rootfs capture",
+			resumedAtCapture)
+	}
+	if stoppedAtCapture != 0 {
+		t.Errorf("the container was STOPPED before the diff (%d stops) — the stop delivers a signal the agent "+
+			"can act on; diff first, then release the container", stoppedAtCapture)
+	}
+	// ...and the container IS released afterwards, so teardown can reclaim its snapshot.
+	if fakeEng.resumeCalls != 1 || fakeEng.resumeKey != agentID {
+		t.Errorf("after the diff the container must be resumed once so StopContainer's signal lands; "+
+			"resumeCalls=%d resumeKey=%q", fakeEng.resumeCalls, fakeEng.resumeKey)
+	}
+	if len(f.stopped) != 1 || f.stopped[0] != agentID {
+		t.Errorf("StopContainer after the diff: got %v, want [%s]", f.stopped, agentID)
+	}
+	if len(f.removedContainers) != 1 || f.removedContainers[0] != agentID {
+		t.Errorf("RemoveContainer after the diff: got %v, want [%s]", f.removedContainers, agentID)
+	}
+	if h.AgentID != "" {
+		t.Errorf("h.AgentID = %q, want cleared after the container was removed", h.AgentID)
 	}
 }
 
@@ -382,26 +450,35 @@ func TestCaptureDeltaEmptyDiffRejected(t *testing.T) {
 	}
 }
 
-// TestCaptureDeltaStopError verifies that when StopContainer fails, Capture is never invoked
-// and the error is propagated.
-func TestCaptureDeltaStopError(t *testing.T) {
+// TestCaptureDeltaStopAfterDiffFails: the stop now happens AFTER the diff, so a StopContainer failure can
+// no longer lose a good capture. The delta is already assembled: return it, leave the container for the
+// pod-level Stop to clean up, and do NOT remove it (removing a still-running container would fail anyway).
+func TestCaptureDeltaStopAfterDiffFails(t *testing.T) {
+	spawnID := "s1"
 	fakeEng := &fakeDeltaEngine{
-		captureRef:       "should-not-be-returned",
+		captureRef:       runtime.DeltaTag(spawnID),
 		captureDeltaSize: 1,
 	}
 	c, f := newFakeCRI(t)
 	f.failStop = true
 	b := NewCRIPodBackend(c, "runsc", WithDeltaEngine(fakeEng))
 
-	_, err := b.CaptureDelta(context.Background(), &runtime.PodHandle{
-		AgentID: "ctr-1", SpawnID: "s1", BaseImageRef: "base:v1",
-	})
-	if err == nil {
-		t.Fatal("expected stop error, got nil")
+	h := &runtime.PodHandle{AgentID: "ctr-1", SpawnID: spawnID, BaseImageRef: "base:v1"}
+	ref, err := b.CaptureDelta(context.Background(), h)
+	if err != nil {
+		t.Fatalf("a post-diff stop failure must not fail the capture: %v", err)
 	}
-	// Capture must not have been called.
-	if fakeEng.captureKey != "" {
-		t.Error("Capture must not be called after StopContainer failure")
+	if ref != runtime.DeltaTag(spawnID) {
+		t.Fatalf("ref = %q, want %q", ref, runtime.DeltaTag(spawnID))
+	}
+	if fakeEng.captureKey != "ctr-1" {
+		t.Errorf("Capture must have run on the agent snapshot; captureKey=%q", fakeEng.captureKey)
+	}
+	if len(f.removedContainers) != 0 {
+		t.Errorf("a container whose stop failed must NOT be removed here; removedContainers=%v", f.removedContainers)
+	}
+	if h.AgentID != "ctr-1" {
+		t.Errorf("h.AgentID = %q, want it preserved so the pod-level Stop can still target the container", h.AgentID)
 	}
 }
 
