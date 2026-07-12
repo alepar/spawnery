@@ -180,6 +180,125 @@ func TestRevocationStateRejectsRollbackAndEquivocationWithoutMutation(t *testing
 	}
 }
 
+func TestRevocationStatePublishesOnlyNewlyRevokedAfterDurableApply(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	state, err := OpenRevocationState(filepath.Join(t.TempDir(), "revocations", "state.json"), []*x509.Certificate{issuer.Cert}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	updates := make(chan RevocationUpdate, 4)
+	unsubscribe := state.SubscribeRevocations(func(update RevocationUpdate) { updates <- update })
+	t.Cleanup(unsubscribe)
+
+	state.beforeRename = func() error { return errors.New("disk unavailable") }
+	accepted := mustCRLPEM(t, issuer, 1, now, big.NewInt(1))
+	if err := state.ApplyPEM(accepted); err == nil {
+		t.Fatal("persistence failure accepted")
+	}
+	select {
+	case update := <-updates:
+		t.Fatalf("published before durable apply: %+v", update)
+	case <-time.After(20 * time.Millisecond):
+	}
+	state.beforeRename = nil
+	if err := state.ApplyPEM(accepted); err != nil {
+		t.Fatal(err)
+	}
+	assertRevocationUpdate(t, updates, issuer.Cert.SerialNumber, big.NewInt(1))
+	if err := state.ApplyPEM(accepted); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case update := <-updates:
+		t.Fatalf("idempotent replay published: %+v", update)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if err := state.ApplyPEM(mustCRLPEM(t, issuer, 2, now, big.NewInt(1), big.NewInt(2))); err != nil {
+		t.Fatal(err)
+	}
+	assertRevocationUpdate(t, updates, issuer.Cert.SerialNumber, big.NewInt(2))
+}
+
+func TestRevocationStateSubscriptionUnsubscribeCloseAndPanic(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	state, err := OpenRevocationState(filepath.Join(t.TempDir(), "revocations", "state.json"), []*x509.Certificate{issuer.Cert}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates := make(chan RevocationUpdate, 2)
+	state.SubscribeRevocations(func(RevocationUpdate) { panic("contained") })
+	unsubscribe := state.SubscribeRevocations(func(update RevocationUpdate) { updates <- update })
+	unsubscribe()
+	unsubscribe()
+	if err := state.ApplyPEM(mustCRLPEM(t, issuer, 1, now, big.NewInt(1))); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case update := <-updates:
+		t.Fatalf("unsubscribed callback published: %+v", update)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ApplyPEM(mustCRLPEM(t, issuer, 2, now, big.NewInt(2))); !errors.Is(err, ErrRevocationStateClosed) {
+		t.Fatalf("apply after close error = %v", err)
+	}
+}
+
+func TestRevocationStateApplyDoesNotWaitForSubscriber(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	state, err := OpenRevocationState(filepath.Join(t.TempDir(), "revocations", "state.json"), []*x509.Certificate{issuer.Cert}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	state.SubscribeRevocations(func(RevocationUpdate) {
+		close(started)
+		<-unblock
+	})
+	crl := mustCRLPEM(t, issuer, 1, now, big.NewInt(1))
+	applyDone := make(chan error, 1)
+	go func() {
+		applyDone <- state.ApplyPEM(crl)
+	}()
+	select {
+	case err := <-applyDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ApplyPEM blocked on subscriber")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("subscriber was not invoked")
+	}
+	close(unblock)
+}
+
+func assertRevocationUpdate(t *testing.T, updates <-chan RevocationUpdate, issuer, serial *big.Int) {
+	t.Helper()
+	select {
+	case update := <-updates:
+		if update.IssuerSerial.Cmp(issuer) != 0 || len(update.NewlyRevoked) != 1 || update.NewlyRevoked[0].Cmp(serial) != 0 {
+			t.Fatalf("update = %+v, want issuer %s serial %s", update, issuer, serial)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for revocation update")
+	}
+}
+
 func TestRevocationStateRejectsUnknownOrWrongSigner(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	root, _ := NewRootCA("root")
