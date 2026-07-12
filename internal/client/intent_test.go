@@ -215,6 +215,27 @@ func TestAM1TargetNodeSubstitutionRejected(t *testing.T) {
 	}
 }
 
+func TestCreateImageAndAttachedSecretSubstitutionRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		params IntentParams
+	}{
+		{name: "image", params: IntentParams{Op: intent.OpCreateSpawn, Image: "requested:1"}},
+		{name: "attached secrets", params: IntentParams{Op: intent.OpCreateSpawn, AttachedSecretIDs: []string{"gh-main"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ic := &fakeIntentClient{pending: &cpv1.PendingIntent{Op: string(intent.OpCreateSpawn), SpawnId: "sp-1", Image: "substituted:9", AttachedSecretIds: []string{"other"}}}
+			err := pollAndSign(context.Background(), ic, nil, TargetTrust{}, "sp-1", tc.params)
+			if err == nil || !strings.Contains(err.Error(), "AM1") {
+				t.Fatalf("error = %v", err)
+			}
+			if ic.submitted {
+				t.Fatal("substituted create tuple was submitted")
+			}
+		})
+	}
+}
+
 // TestAM1CloudTargetSkipsNodeValidation: when TargetNodeID is empty (cloud placement),
 // any target_node_id from the CP is accepted — the CP selects the actual node.
 func TestAM1CloudTargetSkipsNodeValidation(t *testing.T) {

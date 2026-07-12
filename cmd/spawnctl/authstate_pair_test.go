@@ -75,6 +75,18 @@ func TestValidateCredentialPairRequiresAlignedAudiencesAndKey(t *testing.T) {
 	if _, err := validateCredentialPair(cp, cp, key); err == nil {
 		t.Fatal("CP token accepted as node token")
 	}
+	cpBody, err := parseSessionTokenBody(cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeBody, err := parseSessionTokenBody(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpBody.KeyId, nodeBody.KeyId = "", ""
+	if _, err := validateCredentialPair(testSessionWire(t, cpBody), testSessionWire(t, nodeBody), key); err == nil {
+		t.Fatal("empty signing key id accepted")
+	}
 }
 
 func TestNodeCredentialsReturnsNodeTokenAndStoredSigner(t *testing.T) {

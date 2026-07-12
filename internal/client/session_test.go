@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -78,4 +79,30 @@ func TestBuildSessionOpenIntentRejectsStaleGenerationBeforeCredentials(t *testin
 	if called {
 		t.Fatal("credentials loaded before generation validation")
 	}
+}
+
+func TestBuildSessionOpenIntentPropagatesRPCAndSignerErrors(t *testing.T) {
+	t.Run("CP lookup", func(t *testing.T) {
+		rpc := &fakeSessionTargetClient{err: errors.New("lookup failed")}
+		_, err := buildSessionOpenIntent(context.Background(), rpc, nil, TargetTrust{}, "sp-1", 7, "0")
+		if err == nil || !strings.Contains(err.Error(), "lookup failed") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("signer", func(t *testing.T) {
+		fx := issueProdNode(t, "node-1", "alice")
+		rpc := &fakeSessionTargetClient{response: &cpv1.GetSpawnNodeKeyResponse{
+			Generation: 7, TargetNodeId: "node-1", TargetNodeClass: pki.ClassSelfHosted,
+			TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+		}}
+		source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+			return NodeCredentials{AccessToken: "node-token", Signer: failingSessionSigner{}}, nil
+		})
+		trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: "dev.spawnery.internal", AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+		_, err := buildSessionOpenIntent(context.Background(), rpc, source, trust, "sp-1", 7, "0")
+		if err == nil || !strings.Contains(err.Error(), "sign failed") {
+			t.Fatalf("error = %v", err)
+		}
+	})
 }

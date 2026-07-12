@@ -188,7 +188,7 @@ func validateCredentialPair(cpWire, nodeWire string, key *ecdsa.PrivateKey) (int
 	}
 	keyHash := sha256.Sum256(spki)
 	if cpBody.GetAudience() != "cp" || nodeBody.GetAudience() != "node" ||
-		cpBody.GetAccountId() == "" || cpBody.GetFamilyId() == "" ||
+		cpBody.GetAccountId() == "" || cpBody.GetFamilyId() == "" || cpBody.GetKeyId() == "" || cpBody.GetIssuedAt() <= 0 ||
 		cpBody.GetTokenId() == "" || nodeBody.GetTokenId() == "" || cpBody.GetTokenId() == nodeBody.GetTokenId() ||
 		cpBody.GetAccountId() != nodeBody.GetAccountId() || cpBody.GetFamilyId() != nodeBody.GetFamilyId() ||
 		cpBody.GetKeyId() != nodeBody.GetKeyId() || cpBody.GetIssuedAt() != nodeBody.GetIssuedAt() ||

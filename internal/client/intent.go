@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"connectrpc.com/connect"
@@ -21,12 +22,14 @@ type intentClient interface {
 }
 
 type IntentParams struct {
-	Op           intent.Op
-	AppRef       string
-	Model        string
-	TargetNodeID string
-	TargetClass  string
-	Mounts       []*cpv1.MountBinding
+	Op                intent.Op
+	AppRef            string
+	Model             string
+	Image             string
+	TargetNodeID      string
+	TargetClass       string
+	Mounts            []*cpv1.MountBinding
+	AttachedSecretIDs []string
 }
 
 func pollAndSign(ctx context.Context, ic intentClient, credentials NodeCredentialSource, trust TargetTrust, spawnID string, params IntentParams) error {
@@ -110,6 +113,12 @@ func validatePendingIntent(response *cpv1.GetPendingIntentResponse, spawnID stri
 	}
 	if params.Model != "" && pi.GetModel() != params.Model {
 		return nil, "", fmt.Errorf("AM1: model %q does not match requested %q", pi.GetModel(), params.Model)
+	}
+	if params.Image != "" && pi.GetImage() != params.Image {
+		return nil, "", fmt.Errorf("AM1: image %q does not match requested %q", pi.GetImage(), params.Image)
+	}
+	if params.AttachedSecretIDs != nil && !slices.Equal(pi.GetAttachedSecretIds(), params.AttachedSecretIDs) {
+		return nil, "", fmt.Errorf("AM1: attached_secret_ids %v do not match requested %v", pi.GetAttachedSecretIds(), params.AttachedSecretIDs)
 	}
 	if params.TargetNodeID != "" && pi.GetTargetNodeId() != params.TargetNodeID {
 		return nil, "", fmt.Errorf("AM1: target_node_id %q does not match requested %q", pi.GetTargetNodeId(), params.TargetNodeID)

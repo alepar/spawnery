@@ -254,7 +254,7 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 		// apps). The client cannot validate a ref it never specified, so the AM1 app_ref gate is
 		// skipped; the model correspondence check still runs, and the signed intent carries the
 		// CP-resolved app_ref verbatim.
-		signCh <- cli.SignProvision(pollCtx, id, client.IntentParams{Op: intent.OpCreateSpawn, Model: model, Mounts: mounts})
+		signCh <- cli.SignProvision(pollCtx, id, client.IntentParams{Op: intent.OpCreateSpawn, Model: model, Mounts: mounts, AttachedSecretIDs: []string{}})
 	}()
 
 	// CreateSpawn is async: the CP binds the spawn to its node only once the node reports ACTIVE.
