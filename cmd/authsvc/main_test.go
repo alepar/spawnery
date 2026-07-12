@@ -219,6 +219,44 @@ func TestLoadSigningCredentials(t *testing.T) {
 		}
 	})
 
+	t.Run("junk prefix on root", func(t *testing.T) {
+		path := writePrefixedTestFile(t, current.rootPath, []byte("junk before root\n"))
+		cfg := signingConfigFor(current)
+		cfg.RootPEM = path
+		_, err := loadSigningCredentials(cfg, now)
+		if err == nil || !strings.Contains(err.Error(), "signing.root_pem") || !strings.Contains(err.Error(), path) {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("junk prefix on signer chain", func(t *testing.T) {
+		path := writePrefixedTestFile(t, current.chainPath, []byte("junk before chain\n"))
+		cfg := signingConfigFor(current)
+		cfg.CurrentChainPEM = path
+		_, err := loadSigningCredentials(cfg, now)
+		if err == nil || !strings.Contains(err.Error(), "current") || !strings.Contains(err.Error(), path) {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("whitespace prefix on root", func(t *testing.T) {
+		path := writePrefixedTestFile(t, current.rootPath, []byte(" \n"))
+		cfg := signingConfigFor(current)
+		cfg.RootPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("whitespace-prefixed root was accepted")
+		}
+	})
+
+	t.Run("whitespace prefix on signer chain", func(t *testing.T) {
+		path := writePrefixedTestFile(t, current.chainPath, []byte("\n"))
+		cfg := signingConfigFor(current)
+		cfg.CurrentChainPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("whitespace-prefixed signer chain was accepted")
+		}
+	})
+
 	t.Run("wrong intermediate purpose", func(t *testing.T) {
 		wrong := writeWrongPurposeFixture(t, current, now)
 		cfg := signingConfigFor(current)
@@ -337,4 +375,17 @@ func writePEMCerts(t *testing.T, path string, certs ...*x509.Certificate) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+func writePrefixedTestFile(t *testing.T, source string, prefix []byte) string {
+	t.Helper()
+	raw, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), filepath.Base(source))
+	raw = append(append([]byte(nil), prefix...), raw...)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
