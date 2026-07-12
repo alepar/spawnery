@@ -701,21 +701,7 @@ func loadArtifactVerifier(cfg *Spawnlet, now time.Time) (*artifactTrust, error) 
 	trust := &artifactTrust{verifier: verifier, revocations: store, statementPath: cfg.Node.SignerRevocationStatement}
 	trust.closeStore = store.Close
 	trust.reload = func(ctx context.Context, at time.Time) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		err := store.LoadAndApply(trust.statementPath, at)
-		if err != nil {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			return nil
-		}
+		return store.LoadAndApplyContext(ctx, trust.statementPath, at)
 	}
 	return trust, nil
 }
