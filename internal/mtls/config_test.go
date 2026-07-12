@@ -216,11 +216,9 @@ func TestServerTLSRequiredAcceptsEveryValidPrincipal(t *testing.T) {
 	t.Parallel()
 	f := newTLSFixture(t)
 	serverConfig, err := ServerConfig(ServerOptions{
-		Root:        f.root.Cert,
-		TrustDomain: testTrustDomain,
-		Identity:    tlsCertificate(t, f.cp),
-		ClientMode:  RequireClientCertificate,
-		CurrentTime: func() time.Time { return f.now },
+		Verifier:   newPeerVerifier(t, f, nil),
+		Identity:   tlsCertificate(t, f.cp),
+		ClientMode: RequireClientCertificate,
 	})
 	if err != nil {
 		t.Fatalf("ServerConfig: %v", err)
@@ -248,11 +246,9 @@ func TestServerTLSRequiredRejectsMissingCertificate(t *testing.T) {
 	t.Parallel()
 	f := newTLSFixture(t)
 	serverConfig, err := ServerConfig(ServerOptions{
-		Root:        f.root.Cert,
-		TrustDomain: testTrustDomain,
-		Identity:    tlsCertificate(t, f.cp),
-		ClientMode:  RequireClientCertificate,
-		CurrentTime: func() time.Time { return f.now },
+		Verifier:   newPeerVerifier(t, f, nil),
+		Identity:   tlsCertificate(t, f.cp),
+		ClientMode: RequireClientCertificate,
 	})
 	if err != nil {
 		t.Fatalf("ServerConfig: %v", err)
@@ -269,11 +265,9 @@ func TestServerTLSOptionalAcceptsMissingCertificate(t *testing.T) {
 	t.Parallel()
 	f := newTLSFixture(t)
 	serverConfig, err := ServerConfig(ServerOptions{
-		Root:        f.root.Cert,
-		TrustDomain: testTrustDomain,
-		Identity:    tlsCertificate(t, f.authsvc),
-		ClientMode:  VerifyClientCertificateIfGiven,
-		CurrentTime: func() time.Time { return f.now },
+		Verifier:   newPeerVerifier(t, f, nil),
+		Identity:   tlsCertificate(t, f.authsvc),
+		ClientMode: VerifyClientCertificateIfGiven,
 	})
 	if err != nil {
 		t.Fatalf("ServerConfig: %v", err)
@@ -299,11 +293,9 @@ func TestServerTLSOptionalAcceptsEveryValidPrincipal(t *testing.T) {
 	t.Parallel()
 	f := newTLSFixture(t)
 	serverConfig, err := ServerConfig(ServerOptions{
-		Root:        f.root.Cert,
-		TrustDomain: testTrustDomain,
-		Identity:    tlsCertificate(t, f.cp),
-		ClientMode:  VerifyClientCertificateIfGiven,
-		CurrentTime: func() time.Time { return f.now },
+		Verifier:   newPeerVerifier(t, f, nil),
+		Identity:   tlsCertificate(t, f.cp),
+		ClientMode: VerifyClientCertificateIfGiven,
 	})
 	if err != nil {
 		t.Fatalf("ServerConfig: %v", err)
@@ -359,13 +351,22 @@ func TestServerTLSOptionalRejectsInvalidPresentedCertificate(t *testing.T) {
 			t.Parallel()
 			f := newTLSFixture(t)
 			identity, currentTime, isRevoked := tt.configure(t, f)
-			serverConfig, err := ServerConfig(ServerOptions{
+			if isRevoked == nil {
+				isRevoked = func(*big.Int, *big.Int) bool { return false }
+			}
+			verifier, err := NewPeerVerifier(PeerVerifierOptions{
 				Root:        f.root.Cert,
 				TrustDomain: testTrustDomain,
-				Identity:    tlsCertificate(t, f.cp),
-				ClientMode:  VerifyClientCertificateIfGiven,
 				CurrentTime: currentTime,
 				IsRevoked:   isRevoked,
+			})
+			if err != nil {
+				t.Fatalf("NewPeerVerifier: %v", err)
+			}
+			serverConfig, err := ServerConfig(ServerOptions{
+				Verifier:   verifier,
+				Identity:   tlsCertificate(t, f.cp),
+				ClientMode: VerifyClientCertificateIfGiven,
 			})
 			if err != nil {
 				t.Fatalf("ServerConfig: %v", err)
@@ -378,6 +379,67 @@ func TestServerTLSOptionalRejectsInvalidPresentedCertificate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewPeerVerifierRequiresCompleteOptions(t *testing.T) {
+	t.Parallel()
+	f := newTLSFixture(t)
+	valid := PeerVerifierOptions{
+		Root:        f.root.Cert,
+		TrustDomain: testTrustDomain,
+		CurrentTime: func() time.Time { return f.now },
+		IsRevoked:   func(*big.Int, *big.Int) bool { return false },
+	}
+	tests := []struct {
+		name   string
+		mutate func(*PeerVerifierOptions)
+	}{
+		{name: "nil root", mutate: func(opts *PeerVerifierOptions) { opts.Root = nil }},
+		{name: "empty trust domain", mutate: func(opts *PeerVerifierOptions) { opts.TrustDomain = "" }},
+		{name: "nil current time", mutate: func(opts *PeerVerifierOptions) { opts.CurrentTime = nil }},
+		{name: "nil revocation", mutate: func(opts *PeerVerifierOptions) { opts.IsRevoked = nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := valid
+			tt.mutate(&opts)
+			if _, err := NewPeerVerifier(opts); err == nil {
+				t.Fatal("NewPeerVerifier accepted incomplete options")
+			}
+		})
+	}
+}
+
+func TestServerTLSRejectsIdentityWithoutPrivateKey(t *testing.T) {
+	t.Parallel()
+	f := newTLSFixture(t)
+	identity := tlsCertificate(t, f.cp)
+	identity.PrivateKey = nil
+	_, err := ServerConfig(ServerOptions{
+		Verifier:   newPeerVerifier(t, f, nil),
+		Identity:   identity,
+		ClientMode: RequireClientCertificate,
+	})
+	if err == nil || !strings.Contains(err.Error(), "private key") {
+		t.Fatalf("ServerConfig error = %v, want private-key error", err)
+	}
+}
+
+func newPeerVerifier(t *testing.T, f *tlsFixture, isRevoked func(*big.Int, *big.Int) bool) *PeerVerifier {
+	t.Helper()
+	if isRevoked == nil {
+		isRevoked = func(*big.Int, *big.Int) bool { return false }
+	}
+	verifier, err := NewPeerVerifier(PeerVerifierOptions{
+		Root:        f.root.Cert,
+		TrustDomain: testTrustDomain,
+		CurrentTime: func() time.Time { return f.now },
+		IsRevoked:   isRevoked,
+	})
+	if err != nil {
+		t.Fatalf("NewPeerVerifier: %v", err)
+	}
+	return verifier
 }
 
 func internalClientConfig(t *testing.T, f *tlsFixture, identity *pki.Leaf) *tls.Config {
@@ -433,4 +495,20 @@ func handshake(clientConfig, serverConfig *tls.Config) (clientErr, serverErr err
 	serverErr = <-serverDone
 	_ = serverTLS.Close()
 	return clientErr, serverErr
+}
+
+func handshakeServerState(clientConfig, serverConfig *tls.Config) (tls.ConnectionState, error, error) {
+	clientConn, serverConn := net.Pipe()
+	clientTLS := tls.Client(clientConn, clientConfig)
+	serverTLS := tls.Server(serverConn, serverConfig)
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- serverTLS.Handshake()
+	}()
+	clientErr := clientTLS.Handshake()
+	serverErr := <-serverDone
+	state := serverTLS.ConnectionState()
+	_ = clientConn.Close()
+	_ = serverConn.Close()
+	return state, clientErr, serverErr
 }

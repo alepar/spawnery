@@ -3,6 +3,7 @@ package mtls
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -34,7 +35,7 @@ func TestPrincipalMiddlewarePropagatesVerifiedPrincipal(t *testing.T) {
 	req := requestWithPeer("/node", f.selfHosted)
 	rec := httptest.NewRecorder()
 
-	PrincipalMiddleware(f.root.Cert, testTrustDomain, next).ServeHTTP(rec, req)
+	PrincipalMiddleware(newPeerVerifier(t, f, nil), next).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
@@ -50,10 +51,10 @@ func TestPrincipalMiddlewareLeavesAbsentPeerAnonymous(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	req := httptest.NewRequest(http.MethodPost, "/enroll", nil)
-	req.TLS = &tls.ConnectionState{HandshakeComplete: true}
+	req.TLS = &tls.ConnectionState{HandshakeComplete: true, Version: tls.VersionTLS13}
 	rec := httptest.NewRecorder()
 
-	PrincipalMiddleware(f.root.Cert, testTrustDomain, next).ServeHTTP(rec, req)
+	PrincipalMiddleware(newPeerVerifier(t, f, nil), next).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
@@ -94,7 +95,7 @@ func TestPrincipalMiddlewareRejectsUnverifiedOrInvalidTLSState(t *testing.T) {
 			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true })
 			rec := httptest.NewRecorder()
 
-			PrincipalMiddleware(f.root.Cert, testTrustDomain, next).ServeHTTP(rec, tt.req(t, f))
+			PrincipalMiddleware(newPeerVerifier(t, f, nil), next).ServeHTTP(rec, tt.req(t, f))
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 			}
@@ -105,10 +106,71 @@ func TestPrincipalMiddlewareRejectsUnverifiedOrInvalidTLSState(t *testing.T) {
 	}
 }
 
+func TestPrincipalMiddlewareRevalidatesRealServerConnectionState(t *testing.T) {
+	t.Parallel()
+	f := newTLSFixture(t)
+	revoked := false
+	verifier := newPeerVerifier(t, f, func(_, serial *big.Int) bool {
+		return revoked && serial.Cmp(f.selfHosted.Cert.SerialNumber) == 0
+	})
+	serverConfig, err := ServerConfig(ServerOptions{
+		Verifier:   verifier,
+		Identity:   tlsCertificate(t, f.cp),
+		ClientMode: RequireClientCertificate,
+	})
+	if err != nil {
+		t.Fatalf("ServerConfig: %v", err)
+	}
+	state, clientErr, serverErr := handshakeServerState(internalClientConfig(t, f, f.selfHosted), serverConfig)
+	if clientErr != nil || serverErr != nil {
+		t.Fatalf("handshake errors: client=%v server=%v", clientErr, serverErr)
+	}
+
+	reached := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		principal, ok := PrincipalFromContext(r.Context())
+		if !ok || principal.Role != pki.RoleSelfHosted || principal.NodeID != "node-1" {
+			t.Fatalf("principal = %+v, present=%v", principal, ok)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := PrincipalMiddleware(verifier, next)
+	request := httptest.NewRequest(http.MethodPost, "/node", nil)
+	request.TLS = &state
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, request)
+	if rec.Code != http.StatusNoContent || !reached {
+		t.Fatalf("verified state: status=%d reached=%v", rec.Code, reached)
+	}
+
+	revoked = true
+	reached = false
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, request)
+	if rec.Code != http.StatusUnauthorized || reached {
+		t.Fatalf("revoked state: status=%d reached=%v", rec.Code, reached)
+	}
+}
+
+func TestPrincipalMiddlewareRejectsNilVerifier(t *testing.T) {
+	t.Parallel()
+	f := newTLSFixture(t)
+	reached := false
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true })
+	rec := httptest.NewRecorder()
+
+	PrincipalMiddleware(nil, next).ServeHTTP(rec, requestWithPeer("/node", f.selfHosted))
+	if rec.Code != http.StatusUnauthorized || reached {
+		t.Fatalf("status=%d reached=%v", rec.Code, reached)
+	}
+}
+
 func requestWithPeer(path string, identity *pki.Leaf) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, path, nil)
 	req.TLS = &tls.ConnectionState{
 		HandshakeComplete: true,
+		Version:           tls.VersionTLS13,
 		PeerCertificates:  append([]*x509.Certificate{identity.Cert}, identity.Chain...),
 	}
 	return req

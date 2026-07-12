@@ -33,23 +33,23 @@ func TestPolicyEnforcesExactRoleOperationMatrix(t *testing.T) {
 	principals := []struct {
 		name      string
 		principal *pki.Principal
-		roleKey   string
+		want      []bool
 	}{
-		{name: "anonymous", roleKey: "anonymous"},
-		{name: "CP", roleKey: "service:cp", principal: &pki.Principal{TrustDomain: testTrustDomain, Kind: pki.KindService, Role: pki.RoleCP, InstanceID: "cp-1"}},
-		{name: "authsvc", roleKey: "service:authsvc", principal: &pki.Principal{TrustDomain: testTrustDomain, Kind: pki.KindService, Role: pki.RoleAuthService, InstanceID: "as-1"}},
-		{name: "cloud", roleKey: "node:cloud", principal: &pki.Principal{TrustDomain: testTrustDomain, Kind: pki.KindNode, Role: pki.RoleCloud, AccountID: "spawnery-system", NodeID: "cloud-1"}},
-		{name: "self-hosted", roleKey: "node:self-hosted", principal: &pki.Principal{TrustDomain: testTrustDomain, Kind: pki.KindNode, Role: pki.RoleSelfHosted, AccountID: "acct-1", NodeID: "node-1"}},
+		{name: "anonymous", want: []bool{false, false, false, false, true, false}},
+		{name: "CP", principal: &pki.Principal{TrustDomain: testTrustDomain, Kind: pki.KindService, Role: pki.RoleCP, InstanceID: "cp-1"}, want: []bool{false, true, false, false, false, false}},
+		{name: "authsvc", principal: &pki.Principal{TrustDomain: testTrustDomain, Kind: pki.KindService, Role: pki.RoleAuthService, InstanceID: "as-1"}, want: []bool{false, false, false, true, false, false}},
+		{name: "cloud", principal: &pki.Principal{TrustDomain: testTrustDomain, Kind: pki.KindNode, Role: pki.RoleCloud, AccountID: "spawnery-system", NodeID: "cloud-1"}, want: []bool{true, false, true, false, false, false}},
+		{name: "self-hosted", principal: &pki.Principal{TrustDomain: testTrustDomain, Kind: pki.KindNode, Role: pki.RoleSelfHosted, AccountID: "acct-1", NodeID: "node-1"}, want: []bool{true, false, true, false, false, false}},
 	}
 	operations := []string{opNodeCP, opCPAS, opNodeAS, opASCP, opEnroll, opUnknown}
 	policy := testPolicy()
 	for _, caller := range principals {
 		caller := caller
-		for _, operation := range operations {
+		for i, operation := range operations {
 			operation := operation
+			wantAllowed := caller.want[i]
 			t.Run(caller.name+" "+operation, func(t *testing.T) {
 				t.Parallel()
-				_, wantAllowed := policy[caller.roleKey][operation]
 				err := policy.Authorize(operation, caller.principal)
 				if wantAllowed && err != nil {
 					t.Fatalf("Authorize denied registered operation: %v", err)
@@ -84,8 +84,7 @@ func TestPolicyHTTPMiddlewareUsesVerifiedContextAndFailsClosed(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	handler := PrincipalMiddleware(
-		f.root.Cert,
-		testTrustDomain,
+		newPeerVerifier(t, f, nil),
 		testPolicy().HTTPMiddleware(func(r *http.Request) string { return r.URL.Path }, next),
 	)
 
@@ -105,7 +104,7 @@ func TestPolicyHTTPMiddlewareUsesVerifiedContextAndFailsClosed(t *testing.T) {
 	reached = false
 	rec = httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, opEnroll, nil)
-	request.TLS = &tls.ConnectionState{HandshakeComplete: true}
+	request.TLS = &tls.ConnectionState{HandshakeComplete: true, Version: tls.VersionTLS13}
 	handler.ServeHTTP(rec, request)
 	if rec.Code != http.StatusNoContent || !reached {
 		t.Fatalf("anonymous enrollment: status=%d reached=%v", rec.Code, reached)
