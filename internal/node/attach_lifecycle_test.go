@@ -13,6 +13,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/acp"
 	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/spawnlet/firewall"
 )
@@ -95,94 +96,8 @@ type noopApplier struct{}
 func (noopApplier) Apply(context.Context, []firewall.Rule) error  { return nil }
 func (noopApplier) Remove(context.Context, []firewall.Rule) error { return nil }
 
-// scriptedPodBackend is a PodBackend whose Attach wires the agent's stdio to a scripted goose. The
-// script runs in a goroutine; when it returns, the agent's stdout is closed (modelling the agent
-// process exiting), which the pump observes as EOF.
-type scriptedPodBackend struct {
-	script         func(io.Reader, io.Writer)
-	mu             sync.Mutex
-	stopped        bool
-	importBase     string
-	imported       bool
-	ensureImageRef string
-	releasedDelta  string
-}
-
-func (f *scriptedPodBackend) Ping(context.Context) error      { return nil }
-func (f *scriptedPodBackend) Preflight(context.Context) error { return nil }
-func (f *scriptedPodBackend) StartPod(context.Context, runtime.PodSpec) (*runtime.PodHandle, error) {
-	return &runtime.PodHandle{PodIP: "10.0.0.5", NetnsPath: "/proc/7/ns/net", SidecarID: "sc", SandboxID: "sb"}, nil
-}
-func (f *scriptedPodBackend) StartAgent(_ context.Context, h *runtime.PodHandle, _ runtime.AgentSpec) error {
-	h.AgentID = "ag"
-	return nil
-}
-func (f *scriptedPodBackend) Stop(context.Context, *runtime.PodHandle) error {
-	f.mu.Lock()
-	f.stopped = true
-	f.mu.Unlock()
-	return nil
-}
-func (f *scriptedPodBackend) Attach(context.Context, *runtime.PodHandle) (*runtime.AttachedStream, error) {
-	inR, inW := io.Pipe()   // pump writes -> inW; goose reads inR
-	outR, outW := io.Pipe() // goose writes outW; pump reads outR
-	go func() { f.script(inR, outW); _ = outW.Close() }()
-	return &runtime.AttachedStream{Stdin: inW, Stdout: outR, Close: func() error { _ = inW.Close(); _ = outW.Close(); return nil }}, nil
-}
-func (f *scriptedPodBackend) ListManaged(context.Context) ([]runtime.ManagedPod, error) {
-	return nil, nil
-}
-
-// Delta-capture stubs: not exercised in the node lifecycle tests (Docker-lane only, sp-ei4.1.10).
-func (f *scriptedPodBackend) ResolveImageDigest(_ context.Context, _ string) (string, error) {
-	return "sha256:fakedigest", nil
-}
-func (f *scriptedPodBackend) EnsureImage(_ context.Context, baseRef, _ string) (string, error) {
-	if f.ensureImageRef != "" {
-		return f.ensureImageRef, nil
-	}
-	return baseRef, nil
-}
-func (f *scriptedPodBackend) CaptureDelta(_ context.Context, _ *runtime.PodHandle) (string, error) {
-	return "", nil
-}
-func (f *scriptedPodBackend) CaptureDeltaAs(_ context.Context, _ *runtime.PodHandle, _ string) (string, error) {
-	return "", nil
-}
-func (f *scriptedPodBackend) ReleaseDelta(_ context.Context, spawnID string) error {
-	f.mu.Lock()
-	f.releasedDelta = spawnID
-	f.mu.Unlock()
-	return nil
-}
-func (f *scriptedPodBackend) ExportDelta(_ context.Context, spawnID string, w io.Writer) error {
-	_, err := w.Write([]byte(runtime.DeltaTag(spawnID)))
-	return err
-}
-func (f *scriptedPodBackend) ImportDelta(_ context.Context, spawnID, baseRef string, r io.Reader) (string, error) {
-	_, _ = io.Copy(io.Discard, r)
-	f.mu.Lock()
-	f.imported = true
-	f.importBase = baseRef
-	f.mu.Unlock()
-	return runtime.DeltaTag(spawnID), nil
-}
-
-// Pause/Unpause stubs — not exercised in node lifecycle tests (drift fix after sp-ei4.1.15.2).
-func (f *scriptedPodBackend) Pause(context.Context, *runtime.PodHandle) error   { return nil }
-func (f *scriptedPodBackend) Unpause(context.Context, *runtime.PodHandle) error { return nil }
-func (f *scriptedPodBackend) RestoreForkedSource(context.Context, *runtime.PodHandle) error {
-	return nil
-}
-
-func (f *scriptedPodBackend) wasStopped() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.stopped
-}
-
 // attachFailPodBackend creates the pod fine but fails Attach — exercising startSpawn's attach-error path.
-type attachFailPodBackend struct{ scriptedPodBackend }
+type attachFailPodBackend struct{ *fakepod.Backend }
 
 func (f *attachFailPodBackend) Attach(context.Context, *runtime.PodHandle) (*runtime.AttachedStream, error) {
 	return nil, fmt.Errorf("attach boom")
@@ -281,7 +196,7 @@ func TestStartSpawnCreateFailureReportsErrorNoLeak(t *testing.T) {
 // The happy path: Create + Attach + pump handshake succeed, so startSpawn reports ACTIVE, registers
 // the pump, and consumes one capacity slot.
 func TestStartSpawnSuccessReportsActive(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose), fakepod.WithResolveDigest("sha256:fakedigest"))
 	a := newAttacher(newGooseManager(t, be), &fakeCPStream{})
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
 	defer a.stopSpawn(context.Background(), "sp1")
@@ -307,7 +222,7 @@ func TestStartSpawnSuccessReportsActive(t *testing.T) {
 // After a spawn goes active, the agent dying must self-clean: report ERROR, drop the pump, release
 // the capacity slot, and reclaim the container (mgr.Stop). Guards the sp-bjd capacity-leak fix.
 func TestStartSpawnAgentDeathSelfCleans(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGooseDieOnPrompt}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGooseDieOnPrompt))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
@@ -326,7 +241,7 @@ func TestStartSpawnAgentDeathSelfCleans(t *testing.T) {
 	if !hasPhase(fs.phasesFor("sp1"), nodev1.SpawnPhase_ERROR) {
 		t.Fatalf("phases = %v, want an ERROR after agent death", fs.phasesFor("sp1"))
 	}
-	if !be.wasStopped() {
+	if be.LastStopHandle() == nil {
 		t.Fatal("exitFn must mgr.Stop the dead spawn to reclaim the container")
 	}
 }
@@ -334,7 +249,7 @@ func TestStartSpawnAgentDeathSelfCleans(t *testing.T) {
 // A failure in mgr.Attach (after Create succeeded) must report ERROR, leave no pump/capacity, and
 // tear down the just-created pod (mgr.Stop).
 func TestStartSpawnAttachFailureReportsErrorAndStops(t *testing.T) {
-	be := &attachFailPodBackend{}
+	be := &attachFailPodBackend{Backend: fakeBackend(t)}
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
@@ -348,7 +263,7 @@ func TestStartSpawnAttachFailureReportsErrorAndStops(t *testing.T) {
 	if n != 0 || act != 0 {
 		t.Fatalf("pumps=%d active=%d, want 0/0 after attach failure", n, act)
 	}
-	if !be.wasStopped() {
+	if be.LastStopHandle() == nil {
 		t.Fatal("attach failure must mgr.Stop the partially-created spawn")
 	}
 }
@@ -356,7 +271,7 @@ func TestStartSpawnAttachFailureReportsErrorAndStops(t *testing.T) {
 // handle() routes Open/Frame/Close to the spawn's pump: Open attaches a client, a prompt Frame is
 // forwarded to the agent (logged frames appear), and Close detaches the client.
 func TestHandleRoutesOpenFrameClose(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	a := newAttacher(newGooseManager(t, be), &fakeCPStream{})
 	ctx := context.Background()
 	a.startSpawn(ctx, &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
@@ -388,7 +303,7 @@ func TestHandleRoutesOpenFrameClose(t *testing.T) {
 // A started spawn auto-registers a pinned session #0 in its registry and emits a SessionRoster to the
 // CP carrying that one session (sp-npxq.1).
 func TestStartSpawnRegistersSessionZeroAndEmitsRoster(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	ctx := context.Background()

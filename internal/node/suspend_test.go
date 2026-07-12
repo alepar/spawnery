@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/storage/journal"
 )
@@ -78,7 +80,9 @@ func (f *fakeNodeJournal) PutArtifact(_ context.Context, spawnID string, generat
 	return desc, nil
 }
 func (f *fakeNodeJournal) GetArtifact(_ context.Context, spawnID string, generation uint64, artifactID string, w io.Writer) (journal.ArtifactDescriptor, error) {
-	_, _ = w.Write([]byte("artifact-test"))
+	// The payload must be a JSON delta archive fakepod.ImportDelta can decode (base/depth/content),
+	// not an arbitrary byte string — the old ad-hoc node fake discarded whatever it was given.
+	_, _ = w.Write([]byte("{}"))
 	return journal.ArtifactDescriptor{
 		SpawnID: spawnID, Generation: generation, ArtifactID: artifactID,
 		BaseImageDigest: "agent@sha256:base", Format: journal.ArtifactFormatOCILayout,
@@ -127,7 +131,7 @@ func lastSuspendComplete(f *fakeCPStream) *nodev1.SuspendComplete {
 	return nil
 }
 
-func newJournaledManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager {
+func newJournaledManager(t *testing.T, be runtime.PodBackend) *spawnlet.Manager {
 	t.Helper()
 	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
 		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
@@ -139,7 +143,7 @@ func newJournaledManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager
 
 // newGateFailManager creates a manager whose journal FinalSnapshot always returns an error, so
 // SnapshotForSuspend (the suspend gate) fails. This drives the fail-closed ACTIVE-on-gate-failure path.
-func newGateFailManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager {
+func newGateFailManager(t *testing.T, be runtime.PodBackend) *spawnlet.Manager {
 	t.Helper()
 	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
 		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
@@ -152,7 +156,7 @@ func newGateFailManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager 
 // newFinishFailManager creates a manager whose journal gate succeeds but PutArtifact fails,
 // so FinishSuspend (called with captureRootfsArtifact=true) returns an error. This drives the
 // post-gate teardown error path where sessions are already reaped.
-func newFinishFailManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager {
+func newFinishFailManager(t *testing.T, be runtime.PodBackend) *spawnlet.Manager {
 	t.Helper()
 	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
 		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
@@ -169,7 +173,7 @@ func newFinishFailManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manage
 // SuspendComplete echoing the generation + carrying the per-mount markers from the journal final
 // snapshot, ends with a SUSPENDED phase, releases the capacity slot, and tears the pod down.
 func TestSuspendEmitsMarkersAndSuspended(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newJournaledManager(t, be)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -191,7 +195,7 @@ func TestSuspendEmitsMarkersAndSuspended(t *testing.T) {
 		t.Fatalf("markers = %+v, want one {main: manifest-abc}", sc.Markers)
 	}
 	waitFor(t, "SUSPENDED phase", func() bool { return lastPhase(fs.phasesFor("sp1")) == nodev1.SpawnPhase_SUSPENDED })
-	if !be.wasStopped() {
+	if be.LastStopHandle() == nil {
 		t.Fatal("suspend must tear the pod down (mgr.Suspend -> pod.Stop)")
 	}
 	a.mu.Lock()
@@ -206,7 +210,7 @@ func TestSuspendEmitsMarkersAndSuspended(t *testing.T) {
 }
 
 func TestSuspendWithRootfsCaptureEmitsArtifacts(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newJournaledManager(t, be)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -233,7 +237,7 @@ func TestSuspendWithRootfsCaptureEmitsArtifacts(t *testing.T) {
 }
 
 func TestStartSpawnRestoresPinnedRootfsArtifacts(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newJournaledManager(t, be)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -252,9 +256,7 @@ func TestStartSpawnRestoresPinnedRootfsArtifacts(t *testing.T) {
 	if got := lastPhase(fs.phasesFor("sp-target")); got != nodev1.SpawnPhase_ACTIVE {
 		t.Fatalf("phase after start = %v, want ACTIVE", got)
 	}
-	be.mu.Lock()
-	imported, base := be.imported, be.importBase
-	be.mu.Unlock()
+	imported, base := len(be.ImportBaseRefs()) > 0, lastOf(be.ImportBaseRefs())
 	if !imported || base != "agent@sha256:base" {
 		t.Fatalf("rootfs import imported=%v base=%q, want true/agent@sha256:base", imported, base)
 	}
@@ -263,7 +265,7 @@ func TestStartSpawnRestoresPinnedRootfsArtifacts(t *testing.T) {
 // A Suspend carrying a generation BELOW the live pod's is a stale-episode message: the node drops it
 // (no SuspendComplete, pod still running, slot still held) — mirrors the Stop/SetModel fence.
 func TestSuspendStaleGenerationDropped(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newJournaledManager(t, be)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -280,7 +282,7 @@ func TestSuspendStaleGenerationDropped(t *testing.T) {
 	if hasPhase(fs.phasesFor("sp1"), nodev1.SpawnPhase_SUSPENDED) {
 		t.Fatal("stale Suspend must not report SUSPENDED")
 	}
-	if be.wasStopped() {
+	if be.LastStopHandle() != nil {
 		t.Fatal("stale Suspend must not tear the pod down")
 	}
 	if _, live := mgr.SpawnGeneration("sp1"); !live {
@@ -293,7 +295,7 @@ func TestSuspendStaleGenerationDropped(t *testing.T) {
 // and keeps the spawn ACTIVE — sessions are NOT reaped, the pod is NOT stopped, the slot
 // is NOT released.
 func TestSuspendGateFailureStaysActive(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newGateFailManager(t, be)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -345,7 +347,7 @@ func TestSuspendGateFailureStaysActive(t *testing.T) {
 	}
 
 	// Pod must NOT be stopped.
-	if be.wasStopped() {
+	if be.LastStopHandle() != nil {
 		t.Fatal("pod must NOT be stopped on gate failure")
 	}
 
@@ -360,7 +362,7 @@ func TestSuspendGateFailureStaysActive(t *testing.T) {
 // Sessions are reaped before FinishSuspend runs, so the spawn is dead from the attacher's
 // perspective regardless of the finish outcome — keeping the slot would permanently leak capacity.
 func TestSuspendFinishFailureReleasesSlot(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newFinishFailManager(t, be)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)

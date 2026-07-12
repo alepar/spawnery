@@ -11,7 +11,7 @@ package node
 //
 // Tests (a)/(b) verify the gate is actually wired: the verifier runs BEFORE mgr.CreateWithSelection
 // so a.active == 0 proves no container was created.
-// Tests (c)/(d) exercise the full lifecycle using scriptedPodBackend + scriptGoose.
+// Tests (c)/(d) exercise the full lifecycle using fakepod + scriptGoose.
 
 import (
 	"context"
@@ -24,6 +24,7 @@ import (
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/intent"
 	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/spawnlet"
 )
 
@@ -159,7 +160,7 @@ func TestIntentSeam_ValidEnvelopeActive(t *testing.T) {
 	}
 	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", fixedNow, body, intent.OpCreateSpawn)
 
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newEnforcedAttacher(t, newGooseManager(t, be), fs, ks, AuthModeEnforced, fixedNow)
 
@@ -201,7 +202,7 @@ func TestIntentSeam_VerifyLogModeProceedsOnForged(t *testing.T) {
 	}
 	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", fixedNow, body, intent.OpCreateSpawn)
 
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	// AuthModeVerifyLog: failures are logged but not enforced.
 	a := newEnforcedAttacher(t, newGooseManager(t, be), fs, ks, AuthModeVerifyLog, fixedNow)

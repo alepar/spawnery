@@ -17,6 +17,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/pki"
 	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/secrets/seal"
 	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
@@ -116,7 +117,7 @@ func lastForkTransferImported(f *fakeCPStream) *nodev1.ForkTransferImported {
 	return nil
 }
 
-func newForkNodeManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager {
+func newForkNodeManager(t *testing.T, be runtime.PodBackend) *spawnlet.Manager {
 	t.Helper()
 	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
 		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
@@ -126,10 +127,21 @@ func newForkNodeManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager 
 	return mgr
 }
 
-func putForkNodeSource(t *testing.T, mgr *spawnlet.Manager, id string, gen uint64) {
+// putForkNodeSource fabricates a live source spawn: a real pod on the backend (so the fork flow's
+// Pause/CaptureDeltaAs/Unpause calls resolve a real handle, not just a store record) plus the Spawn
+// record the fork flow reads mounts/image metadata from.
+func putForkNodeSource(t *testing.T, mgr *spawnlet.Manager, be runtime.PodBackend, id string, gen uint64) {
 	t.Helper()
+	ctx := context.Background()
+	h, err := be.StartPod(ctx, runtime.PodSpec{ID: id, SidecarImage: "s"})
+	if err != nil {
+		t.Fatalf("StartPod(source): %v", err)
+	}
+	if err := be.StartAgent(ctx, h, runtime.AgentSpec{Image: "agent:base"}); err != nil {
+		t.Fatalf("StartAgent(source): %v", err)
+	}
 	mgr.Store().Put(&spawnlet.Spawn{
-		ID: id, Generation: gen, AgentID: "ag-source", SidecarID: "sc-source",
+		ID: id, Generation: gen, AgentID: h.AgentID, SidecarID: h.SidecarID,
 		BaseImageDigest: "agent@sha256:base", LaunchImageRef: "agent:base",
 		JournalMounts: []journal.Mount{{Name: "main", HostDir: t.TempDir(), Class: journal.NodeLocal}},
 	})
@@ -184,9 +196,9 @@ func setForkNodeControl(t *testing.T, mgr *spawnlet.Manager, id string) {
 }
 
 func TestForkSameNodeStaleGenerationDropped(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 
@@ -200,9 +212,9 @@ func TestForkSameNodeStaleGenerationDropped(t *testing.T) {
 }
 
 func TestForkTransferExportStaleGenerationDropped(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 
@@ -224,9 +236,9 @@ func TestForkTransferExportStaleGenerationDropped(t *testing.T) {
 }
 
 func TestForkTransferExportEmitsSourceRestoredSealedKeyAndPayload(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 
@@ -279,9 +291,9 @@ func TestForkTransferExportEmitsSourceRestoredSealedKeyAndPayload(t *testing.T) 
 }
 
 func TestForkTransferExportFailsClosedWithoutTargetKeyMaterial(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 
@@ -302,7 +314,7 @@ func TestForkTransferExportFailsClosedWithoutTargetKeyMaterial(t *testing.T) {
 }
 
 func TestForkTransferImportOpensSealedKeyAndEmitsForkOwnedPins(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -369,9 +381,9 @@ func TestForkTransferImportOpensSealedKeyAndEmitsForkOwnedPins(t *testing.T) {
 }
 
 func TestForkSameNodeEmitsCompletion(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 
@@ -396,9 +408,9 @@ func TestForkSameNodeEmitsCompletion(t *testing.T) {
 }
 
 func TestSameNodeForkStartCarriesForkRootfsMetadataWithoutRestore(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose, ensureImageRef: runtime.DeltaTag("sp-fork")}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose), fakepod.WithEnsureImageRef(runtime.DeltaTag("sp-fork")))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	source, ok := mgr.Store().Get("sp-source")
 	if !ok {
 		t.Fatal("missing source")
@@ -435,9 +447,7 @@ func TestSameNodeForkStartCarriesForkRootfsMetadataWithoutRestore(t *testing.T) 
 	if got := lastPhase(fs.phasesFor("sp-fork")); got != nodev1.SpawnPhase_ACTIVE {
 		t.Fatalf("phase after fork start = %v, want ACTIVE", got)
 	}
-	be.mu.Lock()
-	imported := be.imported
-	be.mu.Unlock()
+	imported := len(be.ImportBaseRefs()) > 0
 	if imported {
 		t.Fatal("same-node fork start must attach rootfs metadata without importing artifacts")
 	}
@@ -457,7 +467,7 @@ func TestSameNodeForkStartCarriesForkRootfsMetadataWithoutRestore(t *testing.T) 
 }
 
 func TestForkSameNodeFailureCompletionDoesNotMarkForkActive(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -476,7 +486,7 @@ func TestForkSameNodeFailureCompletionDoesNotMarkForkActive(t *testing.T) {
 }
 
 func TestCancelForkSameNodeCancelsRunningFork(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	finalStarted := make(chan struct{})
 	finalBlock := make(chan struct{})
 	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
@@ -488,7 +498,7 @@ func TestCancelForkSameNodeCancelsRunningFork(t *testing.T) {
 		finalStarted: finalStarted,
 		finalBlock:   finalBlock,
 	}, t.TempDir())
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 
@@ -517,9 +527,9 @@ func TestCancelForkSameNodeCancelsRunningFork(t *testing.T) {
 }
 
 func TestUnpauseIfPausedEmitsCompletion(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 
@@ -535,7 +545,7 @@ func TestUnpauseIfPausedEmitsCompletion(t *testing.T) {
 }
 
 func TestFailedForkCleanupReleasesDelta(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -556,16 +566,14 @@ func TestFailedForkCleanupReleasesDelta(t *testing.T) {
 		}
 		return false
 	})
-	be.mu.Lock()
-	released := be.releasedDelta
-	be.mu.Unlock()
+	released := lastOf(be.ReleasedSpawns())
 	if released != "sp-fork" {
 		t.Fatalf("ReleaseDelta called with %q, want sp-fork", released)
 	}
 }
 
 func TestUnpauseIfPausedMissingSourceEmitsErrorCompletion(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -588,9 +596,9 @@ func TestUnpauseIfPausedMissingSourceEmitsErrorCompletion(t *testing.T) {
 }
 
 func TestForkTurnBoundaryWaitsForACPPumpIdle(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	p := newPump(io.Discard, strings.NewReader(""))
@@ -620,9 +628,9 @@ func TestForkTurnBoundaryWaitsForACPPumpIdle(t *testing.T) {
 }
 
 func TestForkTurnBoundaryQueuesPromptWhileWaitingForACPPumpIdle(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	p := newPump(io.Discard, strings.NewReader(""))
@@ -666,9 +674,9 @@ func TestForkTurnBoundaryQueuesPromptWhileWaitingForACPPumpIdle(t *testing.T) {
 }
 
 func TestForkTurnBoundaryWaitsForStartingMoshSession(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	sx := &fakeSessionExec{moshGate: make(chan struct{}), moshReached: make(chan struct{})}
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -706,9 +714,9 @@ func TestForkTurnBoundaryWaitsForStartingMoshSession(t *testing.T) {
 }
 
 func TestForkTurnBoundaryWaitsForStartingACPSession(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	sx := &fakeSessionExec{dialGate: make(chan struct{}), dialReached: make(chan struct{})}
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -749,9 +757,9 @@ func TestForkTurnBoundaryWaitsForStartingACPSession(t *testing.T) {
 }
 
 func TestForkTurnBoundaryBlocksPromptUntilForkSameNodeCompletes(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	p := newPump(io.Discard, strings.NewReader(""))
@@ -788,7 +796,7 @@ func TestForkTurnBoundaryBlocksPromptUntilForkSameNodeCompletes(t *testing.T) {
 }
 
 func TestForkSameNodeFailureReleasesForkTurnBoundaryBarrier(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -818,9 +826,9 @@ func TestForkSameNodeFailureReleasesForkTurnBoundaryBarrier(t *testing.T) {
 }
 
 func TestUnpauseIfPausedReleasesForkTurnBoundaryBarrier(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	p := newPump(io.Discard, strings.NewReader(""))
@@ -854,9 +862,9 @@ func TestUnpauseIfPausedReleasesForkTurnBoundaryBarrier(t *testing.T) {
 }
 
 func TestForkTurnBoundaryReleaseCommandReleasesAcquiredBarrier(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	p := newPump(io.Discard, strings.NewReader(""))
@@ -889,9 +897,9 @@ func TestForkTurnBoundaryReleaseCommandReleasesAcquiredBarrier(t *testing.T) {
 }
 
 func TestForkTurnBoundaryReleaseCommandCancelsPendingAcquire(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	p := newPump(io.Discard, strings.NewReader(""))
@@ -928,9 +936,9 @@ func TestForkTurnBoundaryReleaseCommandCancelsPendingAcquire(t *testing.T) {
 }
 
 func TestForkTurnBoundaryRejectsNewACPSessionDuringBarrier(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	sx := &fakeSessionExec{}
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -971,9 +979,9 @@ func TestForkTurnBoundaryRejectsNewACPSessionDuringBarrier(t *testing.T) {
 }
 
 func TestForkTurnBoundaryCompletesForTmuxRelaySource(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	setForkNodeControl(t, mgr, "sp-source")
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -992,9 +1000,9 @@ func TestForkTurnBoundaryCompletesForTmuxRelaySource(t *testing.T) {
 }
 
 func TestForkTurnBoundaryWaitsForTmuxSidecarInflight(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	setForkNodeControl(t, mgr, "sp-source")
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -1030,9 +1038,9 @@ func TestForkTurnBoundaryWaitsForTmuxSidecarInflight(t *testing.T) {
 }
 
 func TestForkTurnBoundaryWaitsForTmuxOutputDrainBeforeSidecarStatus(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	setForkNodeControl(t, mgr, "sp-source")
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -1084,9 +1092,9 @@ func TestForkTurnBoundaryWaitsForTmuxOutputDrainBeforeSidecarStatus(t *testing.T
 }
 
 func TestForkTurnBoundaryBlocksTmuxInputWhileWaitingForSidecarIdle(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	setForkNodeControl(t, mgr, "sp-source")
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
@@ -1130,9 +1138,9 @@ func TestForkTurnBoundaryBlocksTmuxInputWhileWaitingForSidecarIdle(t *testing.T)
 }
 
 func TestForkTurnBoundaryFailsClosedWithoutObservableSession(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	mgr := newForkNodeManager(t, be)
-	putForkNodeSource(t, mgr, "sp-source", 9)
+	putForkNodeSource(t, mgr, be, "sp-source", 9)
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 

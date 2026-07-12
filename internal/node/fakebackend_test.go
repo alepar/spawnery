@@ -1,7 +1,7 @@
 package node
 
 // fakebackend_test.go: the node package's seam onto internal/runtime/fakepod, replacing the
-// hand-forwarded scriptedPodBackend that used to live in attach_lifecycle_test.go (sp-2tx8.1.4).
+// hand-forwarded ad-hoc pod-backend fake that used to live in attach_lifecycle_test.go (sp-2tx8.1.4).
 
 import (
 	"testing"
@@ -11,7 +11,7 @@ import (
 
 // fakeBackend builds a fakepod.Backend and joins its background writers at test end. Pass
 // fakepod.WithAttachScript(scriptGoose) for the scripted-agent tests; without it Attach returns a
-// loopback pipe (what the old scriptedPodBackend did with a nil script).
+// loopback pipe (what the old ad-hoc fake did with a nil script).
 func fakeBackend(t *testing.T, opts ...fakepod.Option) *fakepod.Backend {
 	t.Helper()
 	b := fakepod.New(opts...)
