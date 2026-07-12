@@ -77,11 +77,17 @@ func requireImage(ctx context.Context, t *testing.T, rt *runtime.Docker, ref str
 // containers this case created (label spawnery.node-id).
 func uniqueNodeID(t *testing.T) string {
 	t.Helper()
+	return "node-ct-" + randomHex(t)
+}
+
+// randomHex returns 12 random hex digits (6 bytes), suitable for a Docker tag component.
+func randomHex(t *testing.T) string {
+	t.Helper()
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
-	return "node-ct-" + hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // mobyClient is the raw daemon client the hooks need: runtime.ContainerRuntime has no exec and no
@@ -233,7 +239,7 @@ func (a *armedBackend) CaptureDeltaAs(ctx context.Context, h *runtime.PodHandle,
 // has exactly one layer more than the base. Returns the ref; registers its removal with t.Cleanup.
 func buildDeepImage(ctx context.Context, t *testing.T, rt *runtime.Docker, cli *dockerclient.Client, base string) string {
 	t.Helper()
-	deep := "spawnery/contract-deep:" + hex.EncodeToString([]byte(uniqueNodeID(t))[:6])
+	deep := "spawnery/contract-deep:" + randomHex(t)
 	created, err := cli.ContainerCreate(ctx, &container.Config{
 		Image:      base,
 		Entrypoint: []string{"/bin/sh", "-c"},
