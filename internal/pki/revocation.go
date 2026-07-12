@@ -399,7 +399,7 @@ func (state *RevocationState) restore(record *persistedRevocationState, now time
 		if serial != persisted.IssuerSerial || matched != issuer {
 			return nil, errors.New("pki: persisted CRL issuer serial mismatch")
 		}
-		if err := VerifyCRL(list, issuer, now); err != nil {
+		if err := verifyCRL(list, issuer, now, true); err != nil {
 			return nil, fmt.Errorf("pki: verify persisted CRL: %w", err)
 		}
 		snapshot.issuers[serial] = snapshotFromCRL(list)

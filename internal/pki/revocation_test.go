@@ -150,6 +150,57 @@ func TestRevocationStateFailsClosedWhenSnapshotExpiresAndRecoversOnRefresh(t *te
 	}
 }
 
+func TestRevocationStateReopensExpiredCheckpointAndPreservesRollbackFloor(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	path := filepath.Join(t.TempDir(), "revocations", "state.json")
+	state, err := OpenRevocationState(path, []*x509.Certificate{issuer.Cert}, func() time.Time { return base })
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiring, err := issuer.CreateCRL(big.NewInt(5), nil, base, base.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ApplyPEM(MarshalCRLPEM(expiring)); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	recoveryTime := base.Add(2 * time.Minute)
+	reopened, err := OpenRevocationState(path, []*x509.Certificate{issuer.Cert}, func() time.Time { return recoveryTime })
+	if err != nil {
+		t.Fatalf("reopen expired checkpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if got, ok := reopened.HighestNumber(issuer.Cert.SerialNumber); !ok || got.Cmp(big.NewInt(5)) != 0 {
+		t.Fatalf("expired checkpoint floor = %v, %v", got, ok)
+	}
+	if !reopened.IsRevoked(issuer.Cert.SerialNumber, big.NewInt(99)) {
+		t.Fatal("expired recovery checkpoint did not fail closed")
+	}
+	rollback, err := issuer.CreateCRL(big.NewInt(4), nil, recoveryTime, recoveryTime.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.ApplyPEM(MarshalCRLPEM(rollback)); !errors.Is(err, ErrCRLRollback) {
+		t.Fatalf("recovery rollback error = %v", err)
+	}
+	fresh, err := issuer.CreateCRL(big.NewInt(6), nil, recoveryTime, recoveryTime.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.ApplyPEM(MarshalCRLPEM(fresh)); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.IsRevoked(issuer.Cert.SerialNumber, big.NewInt(99)) {
+		t.Fatal("higher current CRL did not leave recovery mode")
+	}
+}
+
 func TestRevocationStateRejectsRollbackAndEquivocationWithoutMutation(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	root, _ := NewRootCA("root")

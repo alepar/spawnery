@@ -70,6 +70,10 @@ func (ca *CA) CreateCRL(number *big.Int, revoked []x509.RevocationListEntry, now
 
 // VerifyCRL verifies the signature, issuer identity, profile, number, validity, and entries of list.
 func VerifyCRL(list *x509.RevocationList, issuer *x509.Certificate, now time.Time) error {
+	return verifyCRL(list, issuer, now, false)
+}
+
+func verifyCRL(list *x509.RevocationList, issuer *x509.Certificate, now time.Time, allowExpired bool) error {
 	if list == nil || len(list.Raw) == 0 || issuer == nil || now.IsZero() {
 		return errors.New("pki: invalid CRL verification input")
 	}
@@ -103,7 +107,7 @@ func VerifyCRL(list *x509.RevocationList, issuer *x509.Certificate, now time.Tim
 	if list.ThisUpdate.After(now) {
 		return errors.New("pki: CRL is not yet valid")
 	}
-	if !list.NextUpdate.After(now) {
+	if !allowExpired && !list.NextUpdate.After(now) {
 		return errors.New("pki: CRL is expired")
 	}
 	if err := validateRevocationEntries(list.RevokedCertificateEntries, list.ThisUpdate); err != nil {
