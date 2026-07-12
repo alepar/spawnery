@@ -2,12 +2,67 @@ package router
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	authv1 "spawnery/gen/auth/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/metrics"
 )
+
+type blockedFirstOpenNode struct {
+	firstEntered chan struct{}
+	releaseFirst chan struct{}
+	calls        atomic.Int32
+	mu           sync.Mutex
+	sent         []*nodev1.CPMessage
+}
+
+func (n *blockedFirstOpenNode) Send(msg *nodev1.CPMessage) error {
+	if msg.GetOpen() != nil && n.calls.Add(1) == 1 {
+		close(n.firstEntered)
+		<-n.releaseFirst
+	}
+	n.mu.Lock()
+	n.sent = append(n.sent, msg)
+	n.mu.Unlock()
+	return nil
+}
+
+func TestReplacementOpenCompletesBeforeBlockedOlderPublication(t *testing.T) {
+	r := New()
+	node := &blockedFirstOpenNode{firstEntered: make(chan struct{}), releaseFirst: make(chan struct{})}
+	r.Bind("sp1", "node-1", node)
+	oldResult := make(chan AttachmentLease, 1)
+	go func() {
+		_, lease, _ := r.AttachClient("sp1", "0", "same", "alice", nil, &mcClient{}, 0, 7)
+		oldResult <- lease
+	}()
+	<-node.firstEntered
+
+	_, replacement, err := r.AttachClient("sp1", "0", "same", "alice", nil, &mcClient{}, 0, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(node.releaseFirst)
+	old := <-oldResult
+
+	node.mu.Lock()
+	opens := make([]*nodev1.SessionOpen, 0, 2)
+	for _, msg := range node.sent {
+		if open := msg.GetOpen(); open != nil {
+			opens = append(opens, open)
+		}
+	}
+	node.mu.Unlock()
+	if len(opens) != 2 || opens[0].GetAttachmentId() != replacement.id || opens[1].GetAttachmentId() != old.id ||
+		opens[0].GetAttachmentSequence() <= opens[1].GetAttachmentSequence() {
+		t.Fatalf("published opens = %+v", opens)
+	}
+	if err := r.ReauthenticateClient("sp1", "0", "same", replacement, 7, "alice", &authv1.AuthEnvelope{}); err != nil {
+		t.Fatalf("replacement reauth: %v", err)
+	}
+}
 
 type mcNode struct {
 	mu   sync.Mutex

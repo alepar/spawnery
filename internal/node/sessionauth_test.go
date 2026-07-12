@@ -26,7 +26,7 @@ func TestSessionAuthReauthCannotReplaceExpiredRecordBeforeDelayedTimerRuns(t *te
 	next := record
 	next.tokenID = "new"
 	next.expiresAt = now.Add(time.Minute)
-	if r.replace(key, next, "alice") {
+	if replaced, _ := r.replace(key, next, "alice"); replaced {
 		t.Fatal("replacement resurrected an attachment after its old signed deadline")
 	}
 	if closed.Load() != 1 || r.contains(key) {
@@ -48,7 +48,7 @@ func TestSessionAuthOldTimerCannotCloseSameTokenReplacement(t *testing.T) {
 	r.register(key, record, func(string) { closed.Add(1) })
 	next := record
 	next.expiresAt = now.Add(2 * time.Minute)
-	if !r.replace(key, next, "alice") {
+	if replaced, _ := r.replace(key, next, "alice"); !replaced {
 		t.Fatal("same-token replacement rejected")
 	}
 	timers[0].callback()
@@ -61,12 +61,39 @@ func TestSessionAuthOldTimerCannotCloseSameTokenReplacement(t *testing.T) {
 	}
 }
 
+func TestSessionAuthLateOlderOpenCannotReplaceNewerAttachment(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	var timers []*heldTimer
+	r := newSessionAuthRegistryWithClock(func() time.Time { return now }, func(_ time.Duration, callback func()) sessionAuthTimer {
+		timer := &heldTimer{callback: callback}
+		timers = append(timers, timer)
+		return timer
+	})
+	key := sessionAuthKey{spawnID: "sp", sessionID: "s", clientID: "c"}
+	newer := sessionAuthRecord{accountID: "alice", expiresAt: now.Add(time.Hour), attachmentID: "new", attachmentSequence: 2}
+	if !r.registerIfNewer(key, newer, func(string) {}) {
+		t.Fatal("newer open rejected")
+	}
+	older := newer
+	older.attachmentID = "old"
+	older.attachmentSequence = 1
+	if r.registerIfNewer(key, older, func(string) { t.Fatal("older open installed close callback") }) {
+		t.Fatal("late older open replaced newer attachment")
+	}
+	if len(timers) != 1 {
+		t.Fatalf("timers = %d, stale open created expiry damage", len(timers))
+	}
+	if attachment, ok := r.attachment(key); !ok || attachment != "new" {
+		t.Fatalf("current attachment = %q/%v", attachment, ok)
+	}
+}
+
 func TestSessionAuthReauthCancelsOldDeadline(t *testing.T) {
 	r := newSessionAuthRegistry()
 	key := sessionAuthKey{spawnID: "sp", sessionID: "s", clientID: "c"}
 	var closed atomic.Int32
 	r.register(key, sessionAuthRecord{accountID: "alice", tokenID: "old", expiresAt: time.Now().Add(40 * time.Millisecond), sessionKeyHash: []byte("key"), generation: 1, nodeID: "node"}, func(string) { closed.Add(1) })
-	if !r.replace(key, sessionAuthRecord{accountID: "alice", tokenID: "new", expiresAt: time.Now().Add(time.Second), sessionKeyHash: []byte("key"), generation: 1, nodeID: "node"}, "alice") {
+	if replaced, _ := r.replace(key, sessionAuthRecord{accountID: "alice", tokenID: "new", expiresAt: time.Now().Add(time.Second), sessionKeyHash: []byte("key"), generation: 1, nodeID: "node"}, "alice"); !replaced {
 		t.Fatal("valid replacement rejected")
 	}
 	time.Sleep(80 * time.Millisecond)
@@ -89,7 +116,7 @@ func TestSessionAuthInvalidReauthClosesOnlyAddressedClient(t *testing.T) {
 	r.register(b, rec, func(string) { second.Add(1) })
 	bad := rec
 	bad.accountID = "mallory"
-	if r.replace(a, bad, "alice") {
+	if replaced, _ := r.replace(a, bad, "alice"); replaced {
 		t.Fatal("wrong account replacement accepted")
 	}
 	if first.Load() != 1 || second.Load() != 0 || !r.contains(b) {
@@ -103,7 +130,7 @@ func TestSessionAuthExpiryClosesExactlyOnce(t *testing.T) {
 	var closed atomic.Int32
 	r.register(key, sessionAuthRecord{accountID: "alice", tokenID: "tok", expiresAt: time.Now().Add(20 * time.Millisecond), sessionKeyHash: []byte("key"), generation: 1, nodeID: "node"}, func(string) { closed.Add(1) })
 	time.Sleep(60 * time.Millisecond)
-	if r.replace(key, sessionAuthRecord{accountID: "alice", tokenID: "new", expiresAt: time.Now().Add(time.Second), sessionKeyHash: []byte("key"), generation: 1, nodeID: "node"}, "alice") {
+	if replaced, _ := r.replace(key, sessionAuthRecord{accountID: "alice", tokenID: "new", expiresAt: time.Now().Add(time.Second), sessionKeyHash: []byte("key"), generation: 1, nodeID: "node"}, "alice"); replaced {
 		t.Fatal("late reauthentication resurrected expired attachment")
 	}
 	r.close(key, "again")

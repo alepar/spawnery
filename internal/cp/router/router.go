@@ -30,12 +30,13 @@ type route struct {
 	// browser panels may share a clientID (the web uses a module-level CLIENT_ID per panel type), so
 	// addressing by clientID alone would let a 2nd session's attach clobber the 1st's sender and
 	// misroute agent->client frames (sp-npxq.5). The proto carries session_id on every frame.
-	clients           map[clientKey]ClientSender
-	clientDone        map[clientKey]chan struct{}
-	clientGenerations map[clientKey]uint64
-	clientLeases      map[clientKey]AttachmentLease
-	sessions          []*nodev1.SessionInfo // mirrored roster (node-authoritative)
-	done              chan struct{}         // closed when the route is dropped (stop or node evict)
+	clients                map[clientKey]ClientSender
+	clientDone             map[clientKey]chan struct{}
+	clientGenerations      map[clientKey]uint64
+	clientLeases           map[clientKey]AttachmentLease
+	nextAttachmentSequence uint64
+	sessions               []*nodev1.SessionInfo // mirrored roster (node-authoritative)
+	done                   chan struct{}         // closed when the route is dropped (stop or node evict)
 }
 
 // clientKey identifies one attached client within a spawn: the (session, client) pair.
@@ -136,11 +137,16 @@ func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string
 	rt.clientDone[key] = done
 	rt.clientGenerations[key] = generation
 	rt.clientLeases[key] = lease
+	rt.nextAttachmentSequence++
+	if rt.nextAttachmentSequence == 0 {
+		rt.nextAttachmentSequence++
+	}
+	attachmentSequence := rt.nextAttachmentSequence
 	node := rt.node
 	r.mu.Unlock()
 	return done, lease, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
 		SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Cursor: cursor,
-		Generation: generation, Auth: env, AttachmentId: lease.id,
+		Generation: generation, Auth: env, AttachmentId: lease.id, AttachmentSequence: attachmentSequence,
 		AssertedOwner: assertedOwner,
 	}}})
 }

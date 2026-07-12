@@ -14,6 +14,7 @@ package node
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,18 @@ func (f *fakeCPStream) lastSessionAuthClosed() *nodev1.SessionAuthClosed {
 		}
 	}
 	return nil
+}
+
+func (f *fakeCPStream) sessionAuthClosedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var count int
+	for _, msg := range f.sent {
+		if msg.GetSessionAuthClosed() != nil {
+			count++
+		}
+	}
+	return count
 }
 
 // newEnforcedAttacher builds an attacher with an enforced IntentVerifier (selfHosted=false,
@@ -237,4 +250,91 @@ func TestSessionOpenRejectionEmitsAddressedAuthClosed(t *testing.T) {
 		closed.GetReason() != "MISSING_INTENT: no auth envelope" {
 		t.Fatalf("verification SessionAuthClosed = %+v", closed)
 	}
+}
+
+func TestSessionReauthUnknownAttachmentClosesExactAddress(t *testing.T) {
+	a, fs, signer, verifier, sessionKey, now := newReauthSeam(t)
+	body := &authv1.IntentBody{
+		Jti: "reauth-unknown", IssuedAt: now.Unix(), SpawnId: "sp-reauth", Generation: 1,
+		Op: string(intent.OpSessionReauth), SessionId: "session-1", NewTokenId: "tok-test",
+	}
+	a.reauthenticateClient(&nodev1.SessionReauth{
+		SpawnId: "sp-reauth", Generation: 1, SessionId: "session-1", ClientId: "client-1",
+		AssertedOwner: "alice", AttachmentId: "attachment-unknown",
+		Auth: buildIntentEnvelope(t, signer, verifier, sessionKey, "alice", now, body, intent.OpSessionReauth),
+	})
+	closed := fs.lastSessionAuthClosed()
+	if closed == nil || closed.GetAttachmentId() != "attachment-unknown" || closed.GetClientId() != "client-1" ||
+		closed.GetReason() != "session reauthentication attachment not found" {
+		t.Fatalf("SessionAuthClosed = %+v", closed)
+	}
+}
+
+func TestSessionReauthStaleAttachmentDoesNotCloseReplacement(t *testing.T) {
+	a, fs, signer, verifier, sessionKey, now := newReauthSeam(t)
+	key := sessionAuthKey{spawnID: "sp-reauth", sessionID: "session-1", clientID: "client-1"}
+	a.auths.register(key, sessionAuthRecord{
+		accountID: "alice", tokenID: "current", expiresAt: time.Now().Add(time.Hour), sessionKeyHash: []byte("key"),
+		generation: 1, nodeID: "node-1", attachmentID: "attachment-current",
+	}, func(string) { t.Fatal("stale reauth closed replacement") })
+	body := &authv1.IntentBody{
+		Jti: "reauth-stale", IssuedAt: now.Unix(), SpawnId: "sp-reauth", Generation: 1,
+		Op: string(intent.OpSessionReauth), SessionId: "session-1", NewTokenId: "tok-test",
+	}
+	a.reauthenticateClient(&nodev1.SessionReauth{
+		SpawnId: "sp-reauth", Generation: 1, SessionId: "session-1", ClientId: "client-1",
+		AssertedOwner: "alice", AttachmentId: "attachment-stale",
+		Auth: buildIntentEnvelope(t, signer, verifier, sessionKey, "alice", now, body, intent.OpSessionReauth),
+	})
+	if fs.sessionAuthClosedCount() != 0 {
+		t.Fatal("stale reauth emitted an addressed close")
+	}
+	if attachment, ok := a.auths.attachment(key); !ok || attachment != "attachment-current" {
+		t.Fatalf("replacement attachment = %q/%v", attachment, ok)
+	}
+}
+
+func TestSessionReauthInvalidVerificationStillClosesExactAddress(t *testing.T) {
+	a, fs, _, _, _, _ := newReauthSeam(t)
+	a.reauthenticateClient(&nodev1.SessionReauth{
+		SpawnId: "sp-reauth", Generation: 1, SessionId: "session-1", ClientId: "client-1",
+		AssertedOwner: "alice", AttachmentId: "attachment-invalid",
+	})
+	closed := fs.lastSessionAuthClosed()
+	if closed == nil || closed.GetAttachmentId() != "attachment-invalid" || closed.GetReason() != "MISSING_INTENT: no auth envelope" {
+		t.Fatalf("SessionAuthClosed = %+v", closed)
+	}
+}
+
+func TestLateOlderSessionOpenIsIgnoredBeforeInvalidVerification(t *testing.T) {
+	a, fs, _, _, _, _ := newReauthSeam(t)
+	key := sessionAuthKey{spawnID: "sp-reauth", sessionID: "session-1", clientID: "client-1"}
+	a.auths.register(key, sessionAuthRecord{
+		accountID: "alice", expiresAt: time.Now().Add(time.Hour), attachmentID: "attachment-current", attachmentSequence: 2,
+	}, func(string) { t.Fatal("stale invalid open closed replacement") })
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
+		SpawnId: "sp-reauth", Generation: 1, SessionId: "session-1", ClientId: "client-1",
+		AssertedOwner: "alice", AttachmentId: "attachment-stale", AttachmentSequence: 1,
+	}}})
+	if fs.sessionAuthClosedCount() != 0 {
+		t.Fatal("stale invalid open emitted close")
+	}
+	if attachment, ok := a.auths.attachment(key); !ok || attachment != "attachment-current" {
+		t.Fatalf("replacement attachment = %q/%v", attachment, ok)
+	}
+}
+
+func newReauthSeam(t *testing.T) (*attacher, *fakeCPStream, testArtifactSigner, *token.Verifier, *ecdsa.PrivateKey, time.Time) {
+	t.Helper()
+	now := time.Unix(1_770_000_000, 0)
+	signer, verifier := genASKey(t)
+	sessionKey := genECDSA(t)
+	mgr := newGooseManager(t, &scriptedPodBackend{script: scriptGoose})
+	if _, err := mgr.CreateAuthorizedWithSelection(context.Background(), "sp-reauth", writeNodeApp(t), "m", "", "", 1, "alice", spawnlet.AgentSelection{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mgr.Stop(context.Background(), "sp-reauth") })
+	fs := &fakeCPStream{}
+	a := newEnforcedAttacher(t, mgr, fs, verifier, now)
+	return a, fs, signer, verifier, sessionKey, now
 }

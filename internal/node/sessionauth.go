@@ -13,13 +13,14 @@ type sessionAuthKey struct {
 }
 
 type sessionAuthRecord struct {
-	accountID      string
-	tokenID        string
-	expiresAt      time.Time
-	sessionKeyHash []byte
-	generation     uint64
-	nodeID         string
-	attachmentID   string
+	accountID          string
+	tokenID            string
+	expiresAt          time.Time
+	sessionKeyHash     []byte
+	generation         uint64
+	nodeID             string
+	attachmentID       string
+	attachmentSequence uint64
 }
 
 type liveSessionAuth struct {
@@ -48,19 +49,40 @@ func newSessionAuthRegistryWithClock(now func() time.Time, after func(time.Durat
 }
 
 func (r *sessionAuthRegistry) register(key sessionAuthKey, record sessionAuthRecord, closeFn func(string)) {
+	r.registerRecord(key, record, closeFn, false)
+}
+
+func (r *sessionAuthRegistry) registerIfNewer(key sessionAuthKey, record sessionAuthRecord, closeFn func(string)) bool {
+	return r.registerRecord(key, record, closeFn, true)
+}
+
+func (r *sessionAuthRegistry) acceptsOpen(key sessionAuthKey, attachmentSequence uint64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current := r.records[key]
+	return current == nil || current.record.attachmentSequence < attachmentSequence
+}
+
+func (r *sessionAuthRegistry) registerRecord(key sessionAuthKey, record sessionAuthRecord, closeFn func(string), requireNewer bool) bool {
 	r.mu.Lock()
 	if old := r.records[key]; old != nil {
+		if requireNewer && old.record.attachmentSequence >= record.attachmentSequence {
+			r.mu.Unlock()
+			return false
+		}
 		old.timer.Stop()
 	}
 	live := &liveSessionAuth{record: cloneSessionAuthRecord(record), close: closeFn}
 	r.records[key] = live
 	live.timer = r.after(record.expiresAt.Sub(r.now()), func() { r.expire(key, live) })
 	r.mu.Unlock()
+	return true
 }
 
-func (r *sessionAuthRegistry) replace(key sessionAuthKey, next sessionAuthRecord, liveOwner string) bool {
+func (r *sessionAuthRegistry) replace(key sessionAuthKey, next sessionAuthRecord, liveOwner string) (replaced, found bool) {
 	r.mu.Lock()
 	current := r.records[key]
+	found = current != nil
 	now := r.now()
 	valid := current != nil && now.Before(current.record.expiresAt) && now.Before(next.expiresAt) &&
 		current.record.accountID == next.accountID && next.accountID == liveOwner &&
@@ -73,14 +95,15 @@ func (r *sessionAuthRegistry) replace(key sessionAuthKey, next sessionAuthRecord
 		if closeFn != nil {
 			closeFn("session reauthentication rejected")
 		}
-		return false
+		return false, found
 	}
+	next.attachmentSequence = current.record.attachmentSequence
 	current.timer.Stop()
 	replacement := &liveSessionAuth{record: cloneSessionAuthRecord(next), close: current.close}
 	r.records[key] = replacement
 	replacement.timer = r.after(next.expiresAt.Sub(now), func() { r.expire(key, replacement) })
 	r.mu.Unlock()
-	return true
+	return true, true
 }
 
 func (r *sessionAuthRegistry) close(key sessionAuthKey, reason string) {

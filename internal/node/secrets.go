@@ -394,8 +394,6 @@ func (a *attacher) consumeStartupGitHubSecrets(ctx context.Context, spawnID stri
 		return "", fmt.Errorf("github startup secret unexpectedly routed to generic target %q", target)
 	}
 	if err := a.consumeStartupSecrets(ctx, spawnID, generation, githubSecrets, mounts, nil, inject, "", ""); err != nil {
-		_ = a.mgr.RemoveGitHubNodeCredentials(spawnID)
-		a.mgr.CleanupSpawnTransient(spawnID)
 		return nil, err
 	}
 	for _, sec := range githubSecrets {

@@ -964,27 +964,45 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 }
 
 func (m *Manager) CreateAuthorizedWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, sel AgentSelection) (*Spawn, error) {
-	if ownerID == "" {
-		return nil, fmt.Errorf("authorized spawn owner is empty")
-	}
-	if !m.store.ReserveOwner(id, ownerID, generation) {
-		return nil, fmt.Errorf("spawn %q is already reserved or live", id)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			m.store.ReleaseOwner(id, ownerID, generation)
-		}
-	}()
-	sp, err := m.createWithSelection(ctx, id, appPath, model, name, appID, generation, ownerID, sel)
+	reservation, err := m.ReserveAuthorizedSpawn(id, ownerID, generation)
 	if err != nil {
 		return nil, err
 	}
-	committed = true
-	return sp, nil
+	defer m.ReleaseAuthorizedSpawn(reservation)
+	return m.CreateReservedWithSelection(ctx, reservation, appPath, model, name, appID, sel)
+}
+
+func (m *Manager) ReserveAuthorizedSpawn(id, ownerID string, generation uint64) (*OwnerReservation, error) {
+	if ownerID == "" {
+		return nil, fmt.Errorf("authorized spawn owner is empty")
+	}
+	reservation, ok := m.store.ReserveOwner(id, ownerID, generation)
+	if !ok {
+		return nil, fmt.Errorf("spawn %q is already reserved or live", id)
+	}
+	return reservation, nil
+}
+
+func (m *Manager) ReleaseAuthorizedSpawn(reservation *OwnerReservation) {
+	m.store.ReleaseOwner(reservation)
+}
+
+func (m *Manager) OwnsAuthorizedSpawn(reservation *OwnerReservation) bool {
+	return m.store.OwnsReservation(reservation)
+}
+
+func (m *Manager) CreateReservedWithSelection(ctx context.Context, reservation *OwnerReservation, appPath, model, name, appID string, sel AgentSelection) (*Spawn, error) {
+	if !m.store.OwnsReservation(reservation) {
+		return nil, fmt.Errorf("authorized spawn reservation is not current")
+	}
+	return m.createWithReservation(ctx, reservation.id, appPath, model, name, appID, reservation.generation, reservation.owner, reservation, sel)
 }
 
 func (m *Manager) createWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, sel AgentSelection) (*Spawn, error) {
+	return m.createWithReservation(ctx, id, appPath, model, name, appID, generation, ownerID, nil, sel)
+}
+
+func (m *Manager) createWithReservation(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, reservation *OwnerReservation, sel AgentSelection) (*Spawn, error) {
 	agentImage := m.cfg.AgentImage
 	if sel.Image != "" {
 		agentImage = sel.Image
@@ -1643,7 +1661,7 @@ func (m *Manager) createWithSelection(ctx context.Context, id, appPath, model, n
 		RootfsArtifacts: cloneRootfsArtifacts(rootfsArtifacts),
 	}
 	if ownerID != "" {
-		if !m.store.CommitOwner(sp) {
+		if !m.store.CommitOwner(reservation, sp) {
 			for _, watcher := range watchers {
 				watcher.Stop()
 			}

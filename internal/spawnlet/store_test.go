@@ -30,7 +30,7 @@ func TestStoreOwnerReservationAllowsOneConcurrentCreator(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if s.ReserveOwner("sp-1", owner, 7) {
+			if _, ok := s.ReserveOwner("sp-1", owner, 7); ok {
 				winners.Add(1)
 			}
 		}()
@@ -39,6 +39,23 @@ func TestStoreOwnerReservationAllowsOneConcurrentCreator(t *testing.T) {
 	wg.Wait()
 	if winners.Load() != 1 {
 		t.Fatalf("reservation winners = %d", winners.Load())
+	}
+}
+
+func TestStoreStaleReservationCannotReleaseSuccessor(t *testing.T) {
+	s := NewStore()
+	first, ok := s.ReserveOwner("sp-1", "alice", 7)
+	if !ok {
+		t.Fatal("first reservation rejected")
+	}
+	s.ReleaseOwner(first)
+	second, ok := s.ReserveOwner("sp-1", "alice", 7)
+	if !ok {
+		t.Fatal("second reservation rejected")
+	}
+	s.ReleaseOwner(first)
+	if !s.OwnsReservation(second) {
+		t.Fatal("stale reservation released its successor")
 	}
 }
 

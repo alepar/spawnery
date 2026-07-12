@@ -425,10 +425,14 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		// Run A4 SessionOpen verification before attaching the client. Generation is read from the live spawn so
 		// the verifier can check correspondence even if the CP omits it from the SessionOpen wire message.
 		var verifiedAuth Authorization
+		openKey := sessionAuthKey{spawnID: m.Open.GetSpawnId(), sessionID: sid(m.Open.GetSessionId()), clientID: m.Open.GetClientId()}
 		if a.verifier != nil {
 			spawnID := m.Open.GetSpawnId()
 			if m.Open.GetAttachmentId() == "" {
 				a.rejectSessionOpen(m.Open, "attachment incarnation is required")
+				return
+			}
+			if a.auths != nil && !a.auths.acceptsOpen(openKey, m.Open.GetAttachmentSequence()) {
 				return
 			}
 			owner, gen, ok := a.mgr.SpawnOwnerGeneration(spawnID)
@@ -458,14 +462,15 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			verifiedAuth = auth
 		}
 		if a.auths != nil && verifiedAuth.AccountID != "" {
-			key := sessionAuthKey{spawnID: m.Open.GetSpawnId(), sessionID: sid(m.Open.GetSessionId()), clientID: m.Open.GetClientId()}
-			a.auths.register(key, sessionAuthRecord{
+			if !a.auths.registerIfNewer(openKey, sessionAuthRecord{
 				accountID: verifiedAuth.AccountID, tokenID: verifiedAuth.TokenID, expiresAt: verifiedAuth.ExpiresAt,
 				sessionKeyHash: verifiedAuth.SessionKeyHash, generation: m.Open.GetGeneration(), nodeID: a.cfg.NodeID,
-				attachmentID: m.Open.GetAttachmentId(),
+				attachmentID: m.Open.GetAttachmentId(), attachmentSequence: m.Open.GetAttachmentSequence(),
 			}, func(reason string) {
-				a.closeClientAuthorization(key, m.Open.GetGeneration(), reason, m.Open.GetAttachmentId())
-			})
+				a.closeClientAuthorization(openKey, m.Open.GetGeneration(), reason, m.Open.GetAttachmentId())
+			}) {
+				return
+			}
 		}
 		if !a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor) {
 			if a.auths != nil {
@@ -769,8 +774,8 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 
 	// Verify before any credential mint, secret consumption, mount preparation, or pod allocation.
 	emitStep(spawnlet.MilestoneAuthorize)
-	var verifiedAuth Authorization
 	verified := false
+	var reservation *spawnlet.OwnerReservation
 	if a.verifier != nil {
 		mounts := make([]*authv1.MountRef, 0, len(st.GetMounts()))
 		for _, m := range st.GetMounts() {
@@ -807,7 +812,30 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			emitErr(fmt.Errorf("%s: verified account does not own live spawn", NACKOwnerMismatch))
 			return
 		}
-		verifiedAuth, verified = auth, true
+		verified = true
+		var reserveErr error
+		reservation, reserveErr = a.mgr.ReserveAuthorizedSpawn(st.GetSpawnId(), auth.AccountID, st.GetGeneration())
+		if reserveErr != nil {
+			emitErr(reserveErr)
+			return
+		}
+		defer func() {
+			if reservation == nil {
+				return
+			}
+			if a.mgr.OwnsAuthorizedSpawn(reservation) {
+				if a.githubRefresh != nil {
+					a.githubRefresh.Forget(st.GetSpawnId())
+				}
+				a.mgr.CleanupSpawnTransient(st.GetSpawnId())
+			}
+			a.mgr.ReleaseAuthorizedSpawn(reservation)
+		}()
+	}
+	cleanupUnreserved := func() {
+		if !verified {
+			a.mgr.CleanupSpawnTransient(st.GetSpawnId())
+		}
 	}
 
 	// Emit resume progress at key phase boundaries so the CP stall detector can reset (sp-u53.7.2).
@@ -822,8 +850,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		emitStep(spawnlet.MilestoneMintCredentials)
 	}
 	if err := a.mintGitHubMountsAtProvision(ctx, st.SpawnId, st.Generation, st.GetMounts()); err != nil {
-		_ = a.mgr.RemoveGitHubNodeCredentials(st.SpawnId)
-		a.mgr.CleanupSpawnTransient(st.SpawnId)
+		cleanupUnreserved()
 		logErr("startSpawn "+st.SpawnId+": github mint-at-provision", err)
 		emitErr(err)
 		return
@@ -832,6 +859,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	if len(secrets) > 0 {
 		consumedGitHub, err := a.consumeStartupGitHubSecrets(ctx, st.SpawnId, st.Generation, secrets, st.GetMounts())
 		if err != nil {
+			cleanupUnreserved()
 			logErr("startSpawn "+st.SpawnId+": github startup secrets", err)
 			emitErr(err)
 			return
@@ -863,6 +891,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	if len(secrets) > 0 {
 		routes, err := startupSecretRoutesFromProto(st.GetArtifacts())
 		if err != nil {
+			cleanupUnreserved()
 			logErr("startSpawn "+st.SpawnId+": startup secret routes", err)
 			emitErr(err)
 			return
@@ -874,16 +903,17 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	var sp *spawnlet.Spawn
 	var err error
 	if verified {
-		sp, err = a.mgr.CreateAuthorizedWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation, verifiedAuth.AccountID, sel)
+		sp, err = a.mgr.CreateReservedWithSelection(ctx, reservation, st.AppRef, st.Model, st.Name, st.AppId, sel)
 	} else {
 		sp, err = a.mgr.CreateWithSelection(ctx, st.SpawnId, st.AppRef, st.Model, st.Name, st.AppId, st.Generation, sel)
 	}
 	if err != nil {
-		a.mgr.CleanupSpawnTransient(st.SpawnId)
+		cleanupUnreserved()
 		logErr("startSpawn "+st.SpawnId, err)
 		emitErr(err)
 		return
 	}
+	reservation = nil
 	a.resumeProgress(st.SpawnId, st.Generation, "containers_ready", "containers created")
 	// tmux-mode spawns: register a raw-PTY relay per client (no ACP handshake, no Pump).
 	// Poll `tmux has-session -t spawn` until the session exists before going ACTIVE (sp-m859.4):
@@ -1451,11 +1481,15 @@ func (a *attacher) reauthenticateClient(msg *nodev1.SessionReauth) {
 		a.rejectClientAuthorization(key, generation, fmt.Sprintf("%s: %s", nack, detail), msg.GetAttachmentId())
 		return
 	}
-	if !a.auths.replace(key, sessionAuthRecord{
+	replaced, found := a.auths.replace(key, sessionAuthRecord{
 		accountID: auth.AccountID, tokenID: auth.TokenID, expiresAt: auth.ExpiresAt,
 		sessionKeyHash: auth.SessionKeyHash, generation: generation, nodeID: a.cfg.NodeID,
 		attachmentID: msg.GetAttachmentId(),
-	}, owner) {
+	}, owner)
+	if !replaced {
+		if !found {
+			a.closeClientAuthorization(key, generation, "session reauthentication attachment not found", msg.GetAttachmentId())
+		}
 		return
 	}
 }
