@@ -335,10 +335,13 @@ sudo mkdir -p /etc/spawnery/pki
 sudo bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"   # writes root.pem/ca.crt, session-key/pub, node/cp certs, wildcard.{crt,key}
 sudo chmod 644 /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key   # caddy runs as user 'caddy'
 sudo cp /etc/spawnery/pki/ca.crt /home/build/ca.crt   # build-base.sh pulls this out for host trust
-sudo install -d -m0700 /etc/spawnery/cp /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations
+sudo install -d -m0700 /etc/spawnery/authsvc /etc/spawnery/cp \
+  /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations \
+  /var/lib/spawnlet/certificate-revocations
+sudo cp -rf /etc/spawnery/pki/authsvc/. /etc/spawnery/authsvc/
 sudo cp -rf /etc/spawnery/pki/cp/. /etc/spawnery/cp/
-sudo chmod 0600 /etc/spawnery/cp/*
-sudo rm -rf /etc/spawnery/pki/cp
+sudo chmod 0600 /etc/spawnery/authsvc/* /etc/spawnery/cp/*
+sudo rm -rf /etc/spawnery/pki/authsvc /etc/spawnery/pki/cp
 
 # ---- cp.prod.yaml: patch the ${sops:} store DSN to the throwaway local Postgres (baseline; roll.sh
 #      re-applies this after every config re-copy, since a fresh config/ ships the sops ref again) ----

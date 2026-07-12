@@ -244,7 +244,8 @@ func buildService(cfg *AS, certificateRevocations pki.CertificateRevocationCheck
 		err   error
 	)
 
-	if cfg.Dev {
+	devProvisionedCA := cfg.Dev && cfg.CA.RootPEM != "" && cfg.CA.IntermediateCert != "" && cfg.CA.IntermediateKey != ""
+	if cfg.Dev && !devProvisionedCA {
 		log.Printf("authsvc: DEV MODE — ephemeral in-memory CA (do NOT use in production)")
 		root, err = pki.NewRootCA("Spawnery Dev Root")
 		if err != nil {
@@ -260,6 +261,9 @@ func buildService(cfg *AS, certificateRevocations pki.CertificateRevocationCheck
 			return nil, ie
 		}
 		root, inter = rc.root, rc.inter
+		if devProvisionedCA {
+			log.Printf("authsvc: DEV MODE — using explicitly provisioned development CA")
+		}
 	}
 
 	var credentials *signingCredentials

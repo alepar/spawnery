@@ -11,12 +11,23 @@ func TestProvisioningDeclaresGeneratedInternalMTLSTopology(t *testing.T) {
 	justfile := readRepoFile(t, "../../Justfile")
 	genPKI := readRepoFile(t, "../../scripts/e2e-vm/provision/gen-pki.sh")
 	for _, required := range []string{
+		"AS_INTERNAL_LISTEN=127.0.0.1:8091",
+		"AS_INTERNAL_CERT=/etc/spawnery/authsvc/authsvc-service.pem",
+		"AS_INTERNAL_CHAIN=/etc/spawnery/authsvc/authsvc-service-chain.pem",
+		"AS_INTERNAL_SERVER_NAME=authsvc.internal",
+		"AS_INTERNAL_REVOCATION_STATE=/var/lib/spawnery/authsvc-revocations/state.json",
+		"AS_CP_URL=https://127.0.0.1:8081",
+		"AS_CP_SERVER_NAME=cp.internal",
 		"CP_AUTH_ROOT_CA=/etc/spawnery/cp/root.pem",
 		"CP_INTERNAL_LISTEN=127.0.0.1:8081",
 		"CP_INTERNAL_TLS_CERT=/etc/spawnery/cp/cp-service.pem",
 		"CP_INTERNAL_TLS_CHAIN=/etc/spawnery/cp/cp-service-chain.pem",
 		"CP_INTERNAL_REVOCATION_CRLS=/etc/spawnery/cp/service.crl.pem",
 		"CP_AS_URL=https://127.0.0.1:8091",
+		"NODE_CERTIFICATE_REVOCATION_STATE=/var/lib/spawnlet/certificate-revocations/state.json",
+		"AS_URL=https://127.0.0.1:8091",
+		"AS_SERVER_NAME=authsvc.internal",
+		"CP_SERVER_NAME=cp.internal",
 	} {
 		if !strings.Contains(common, required) {
 			t.Errorf("common.env missing %q", required)
@@ -29,6 +40,8 @@ func TestProvisioningDeclaresGeneratedInternalMTLSTopology(t *testing.T) {
 		"AS_CP_URL=https://{{addr_cp_node}} AS_CP_SERVER_NAME=cp.internal",
 		"CP_INTERNAL_TLS_CERT={{devca}}/cp-service.pem",
 		"CP_AS_URL=https://{{addr_as_internal}}",
+		"AS_URL=https://{{addr_as_internal}}",
+		"NODE_CERTIFICATE_REVOCATION_STATE=",
 	} {
 		if !strings.Contains(justfile, required) {
 			t.Errorf("Justfile missing %q", required)
@@ -43,7 +56,7 @@ func TestProvisioningDeclaresGeneratedInternalMTLSTopology(t *testing.T) {
 			t.Errorf("gen-pki.sh missing %q", required)
 		}
 	}
-	for _, retired := range []string{"AS_CP_RPC_SECRET", "AS_DEV_RELAX_NODE_AUTH", "CP_AS_RPC_SECRET", "CP_NODE_LISTEN", "CP_NODE_TLS_CERT", "CP_NODE_TLS_KEY"} {
+	for _, retired := range []string{"AS_CP_RPC_SECRET", "AS_DEV_RELAX_NODE_AUTH", "CP_AS_RPC_SECRET", "CP_NODE_LISTEN", "CP_NODE_TLS_CERT", "CP_NODE_TLS_KEY", "NODE_GITHUB_MINT_DEV_NODE_ID"} {
 		if strings.Contains(common, retired) || strings.Contains(justfile, retired) {
 			t.Errorf("retired internal authentication variable %s remains", retired)
 		}
