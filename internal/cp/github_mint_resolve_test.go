@@ -48,7 +48,7 @@ func TestCreateSpawnGitHubSlotSeedsLinkAndPreBindsNodeBeforeProvision(t *testing
 
 	sender := &capSender{}
 	s.reg.Add(&registry.Node{ID: "n-intent", Sender: sender, Max: 10, Free: 10})
-	s.nodeKeys.put("n-intent", "cloud", "system", []byte("opaque-subkey"), []byte("leaf-first-pem"))
+	s.nodeKeys.put("n-intent", 0, "cloud", "system", []byte("opaque-subkey"), []byte("leaf-first-pem"))
 
 	// The ACK goroutine intercepts each StartSpawn and, BEFORE acking ACTIVE, verifies that:
 	// (a) the link index is seeded (the mint auth call would pass during the Provision window),

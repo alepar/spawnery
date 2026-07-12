@@ -154,7 +154,7 @@ func seedForkSource(t *testing.T, s *Server, reg *registry.Registry, rt *router.
 		ID: nodeID, Sender: nodeSender, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
 	})
-	s.nodeKeys.put(nodeID, "cloud", "system", []byte("opaque-subkey"), []byte("leaf-first-pem"))
+	s.nodeKeys.put(nodeID, 0, "cloud", "system", []byte("opaque-subkey"), []byte("leaf-first-pem"))
 	rt.Bind(id, nodeID, nodeSender)
 }
 
@@ -606,7 +606,7 @@ func TestForkSpawnCrossNodeDefaultMaterializerGatesTurnBoundaryOnSourceAndStarts
 		ID: "node-2", Sender: targetSender, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
 	})
-	s.nodeKeys.put("node-2", "cloud", "system", []byte("signed-subkey"), []byte("leaf-chain"))
+	s.nodeKeys.put("node-2", 0, "cloud", "system", []byte("signed-subkey"), []byte("leaf-chain"))
 	s.forkFootprintEstimator = staticForkFootprint(100)
 
 	ctx := auth.WithOwner(context.Background(), "alice")

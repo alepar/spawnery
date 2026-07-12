@@ -175,7 +175,7 @@ func TestForkCrossNodeOwnerSealedE2E(t *testing.T) {
 		subKeys: targetIdentity.subKeys,
 		rootPEM: targetIdentity.root,
 	})
-	fx.server.nodeKeys.put(targetID, "cloud", "system", targetIdentity.signedSubKey, targetIdentity.certChain)
+	fx.server.nodeKeys.put(targetID, 0, "cloud", "system", targetIdentity.signedSubKey, targetIdentity.certChain)
 
 	forkPoint := "cross-fork-point:" + spawnID
 	forkWriteFile(t, fx.mountPathOnNode(sourceID, spawnID, "fork-point.txt"), forkPoint)

@@ -148,7 +148,7 @@ func TestGetPendingIntentReturnsTargetNodeSubKey(t *testing.T) {
 	s, _, stopACK := intentTestServer(t)
 	defer stopACK()
 	subkeyJSON := []byte(`{"hpke_pub":"AAAA","node_id":"n-intent","not_after":"2099-01-01T00:00:00Z"}`)
-	s.nodeKeys.put("n-intent", "self-hosted", "alice", subkeyJSON, []byte("cert-chain"))
+	s.nodeKeys.put("n-intent", 0, "self-hosted", "alice", subkeyJSON, []byte("cert-chain"))
 
 	ctx := auth.WithOwner(context.Background(), "alice")
 	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
@@ -199,7 +199,7 @@ func TestGetSpawnNodeKeyReturnsPendingForkTargetSubKey(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	subkeyJSON := []byte(`{"hpke_pub":"BBBB","node_id":"node-2","not_after":"2099-01-01T00:00:00Z"}`)
 	certChain := []byte("node-2-cert-chain")
-	s.nodeKeys.put("node-2", "cloud", "system", subkeyJSON, certChain)
+	s.nodeKeys.put("node-2", 0, "cloud", "system", subkeyJSON, certChain)
 	createPendingFork(t, s, "alice", "sp-source", "sp-fork", "node-1", "node-2", 9, 1)
 
 	ctx := auth.WithOwner(context.Background(), "alice")
@@ -241,7 +241,7 @@ func TestGetSpawnNodeKeyAuthAndPreconditions(t *testing.T) {
 func TestGetSpawnNodeKeyRejectsIncompleteTargetIdentity(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	createActiveSpawn(t, s, "alice", "sp-incomplete", "n-incomplete")
-	s.nodeKeys.put("n-incomplete", "cloud", "", []byte("opaque-subkey"), nil)
+	s.nodeKeys.put("n-incomplete", 0, "cloud", "", []byte("opaque-subkey"), nil)
 
 	ctx := auth.WithOwner(context.Background(), "alice")
 	if _, err := s.GetSpawnNodeKey(ctx, connect.NewRequest(&cpv1.GetSpawnNodeKeyRequest{SpawnId: "sp-incomplete"})); connect.CodeOf(err) != connect.CodeFailedPrecondition {

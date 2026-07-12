@@ -71,10 +71,9 @@ _images agent="agent":
 web:
     cd web && npm run dev -- --host
 
-# web for the github lane: auth ENABLED so the SPA uses the AS session for CP calls AND signs spawn
-# intents (pollAndSign). The github lane's CP runs the intent flow (CP_DEV_INTENT_ENABLED=1) and
-# validates root-anchored AS sessions; the generic `just web` leaves auth off in dev
-# (authEnabled()=false), so it would skip intent signing and every spawn would hang in 'starting'.
+# web for the github lane: auth ENABLED so the SPA uses the AS session for CP calls, relays its
+# AS-issued node token, and signs spawn intents. The CP always requires this flow; the generic
+# `just web` leaves auth off and therefore cannot authorize a spawn on an enforced stack.
 web-github:
     cd web && VITE_AUTH_ENABLED=1 npm run dev -- --host
 
@@ -105,15 +104,11 @@ gen-web-tls:
 dev-plain: garage
     mprocs
 
-# full A4 signing path in dev: CP + node with intent flow enabled (CP_DEV_INTENT_ENABLED=1).
-# Use `spawnctl create` to exercise the two-phase pollAndSign cycle end-to-end.
-# NOT the default for `just dev` because the web SPA does not yet implement GetPendingIntent
-# /SubmitIntent (A5 scope) — web-initiated spawns would hang at the await until TTL.
-# When ready: `just cp-intent` in one pane, `just node` in another, `spawnctl create ...` from CLI.
+# CP lane for exercising the mandatory two-phase authorization flow in development.
+# Use an AS-authenticated client carrying paired CP/node credentials; unsigned clients fail closed.
 cp-intent:
     @make bin/spawnery_cp
     SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
-    CP_DEV_INTENT_ENABLED=1 \
     CP_INSECURE_DEV_NODE_ON_PUBLIC=true \
     {{repo}}/bin/spawnery_cp
 
@@ -226,7 +221,6 @@ cp-github:
     CP_INTERNAL_REVOCATION_ISSUERS={{devca}}/service-intermediate.pem,{{devca}}/cloud-intermediate.pem,{{devca}}/self-hosted-intermediate.pem \
     CP_INTERNAL_REVOCATION_CRLS={{devca}}/service.crl.pem,{{devca}}/cloud-node.crl.pem,{{devca}}/self-hosted-node.crl.pem \
     CP_INTERNAL_REVOCATION_REFRESH=5s \
-    CP_DEV_INTENT_ENABLED=1 \
     CP_AS_URL=https://{{addr_as_internal}} \
     CP_ALLOWED_ORIGINS=${CP_ALLOWED_ORIGINS:-{{dev_web_origin}},http://localhost:5173,https://localhost:5173} \
     {{repo}}/bin/spawnery_cp

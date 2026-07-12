@@ -50,7 +50,7 @@ func intentTestServer(t *testing.T) (*Server, *capSender, func()) {
 
 	sender := &capSender{}
 	s.reg.Add(&registry.Node{ID: "n-intent", Sender: sender, Max: 10, Free: 10})
-	s.nodeKeys.put("n-intent", "cloud", "system", []byte("opaque-subkey"), []byte("leaf-first-pem"))
+	s.nodeKeys.put("n-intent", 0, "cloud", "system", []byte("opaque-subkey"), []byte("leaf-first-pem"))
 
 	// Background ACK loop: for every StartSpawn the node receives, feed ACTIVE back to the scheduler.
 	stopACK := make(chan struct{})
@@ -950,7 +950,7 @@ func TestIntentThreadedMigrateSpawn(t *testing.T) {
 
 	// Add a second node as the migration target.
 	s.reg.Add(&registry.Node{ID: "n-intent2", Sender: sender, Max: 10, Free: 10})
-	s.nodeKeys.put("n-intent2", "cloud", "system", []byte("opaque-subkey-2"), []byte("leaf-first-pem-2"))
+	s.nodeKeys.put("n-intent2", 0, "cloud", "system", []byte("opaque-subkey-2"), []byte("leaf-first-pem-2"))
 
 	seedSuspendedSpawn(t, s, "sp-migrate", "alice")
 

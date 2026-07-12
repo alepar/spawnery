@@ -404,6 +404,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 		if nodeID == "" || !s.reg.RemoveIfCurrent(nodeID, token) {
 			return
 		}
+		s.nodeKeys.removeIfCurrent(nodeID, token)
 		dropped := s.rt.DropNode(nodeID)
 		if len(dropped) > 0 {
 			_, _ = s.st.Spawns().MarkUnreachable(context.Background(), dropped)
@@ -485,13 +486,13 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			// Cache the node's published sub-key + relayed cert chain (sp-2ckv.4). The chain is the
 			// mTLS-verified peer chain (empty in insecure mode); the sub-key is the node's published JSON.
 			certChain, _ := nodeauth.CertChainFromContext(ctx)
-			s.nodeKeys.put(nodeID, nodeClass, nodeOwner, m.Register.SignedSubkey, certChain)
+			s.nodeKeys.put(nodeID, token, nodeClass, nodeOwner, m.Register.SignedSubkey, certChain)
 			s.reconcileInventory(ctx, nodeID, sender, m.Register.Running) // a returning node reports what it still runs
 			s.upsertAgentCatalog(ctx, m.Register.AgentImages, m.Register.Binaries)
 		case *nodev1.NodeMessage_Heartbeat:
 			s.reg.Heartbeat(nodeID, token, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
 			if len(m.Heartbeat.SignedSubkey) > 0 {
-				s.nodeKeys.updateSubkey(nodeID, m.Heartbeat.SignedSubkey)
+				s.nodeKeys.updateSubkey(nodeID, token, m.Heartbeat.SignedSubkey)
 			}
 			s.reconcileInventory(ctx, nodeID, sender, m.Heartbeat.Running)
 		case *nodev1.NodeMessage_Status:
