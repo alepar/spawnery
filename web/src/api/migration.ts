@@ -17,7 +17,7 @@
 
 import { unary } from "./connect";
 import { authEnabled, useSessionStore } from "@/auth/session";
-import { pollAndSign, registerPendedOp, clearPendedOp } from "@/auth/intent";
+import { pollAndSign, registerPendedOp, clearPendedOp, requireSessionSigningKeys } from "@/auth/intent";
 import { openEnvelope, hpkeSeal } from "@/keys/hpke";
 import type { Envelope } from "@/keys/hpke";
 import { verifyNodeForSealing } from "@/keys/subkey";
@@ -452,6 +452,19 @@ export async function runMigrate(
 
   // Step 2: drive MigrateSpawn (suspend source → resume on target).
   onProgress?.({ step: "migrating" });
+  if (authEnabled()) {
+    const kp = await requireSessionSigningKeys();
+    const pended = {
+      op: "migrate-spawn",
+      spawnId,
+      targetNodeId: targetNodeId || undefined,
+      targetNodeClass: targetClass || undefined,
+    };
+    registerPendedOp(pended);
+    pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
+      .catch((e: unknown) => console.error("intent sign failed:", e))
+      .finally(() => clearPendedOp(spawnId));
+  }
   let resolvedNodeId: string;
   let transferSetId = "";
   try {
@@ -471,17 +484,6 @@ export async function runMigrate(
       else leg = "network";
     } catch { /* status check failed — offline */ }
     throw new MigrateError(`Migration failed: ${msg}`, leg);
-  }
-
-  // Intent signing: mirrors spawnlet.migrateSpawn.
-  if (authEnabled()) {
-    const { getOrCreateSessionKey } = await import("@/auth/keypair");
-    const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
-    const pended = { op: "migrate-spawn", spawnId };
-    registerPendedOp(pended);
-    pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
-      .catch((e: unknown) => console.error("intent sign failed:", e))
-      .finally(() => clearPendedOp(spawnId));
   }
 
   if (entries.length === 0) {

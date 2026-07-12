@@ -60,7 +60,7 @@ test("pollAndSign verifies typed target metadata before signing and submits only
     op: "create-spawn", spawnId: "sp-1", generation: 7n, targetNodeId: "node-1",
     appRef: "app@sha256:1", image: "image@sha256:2", model: "m", dataRef: "",
     mounts: [{ name: "work", backendUri: "scratch://", credentialSecretId: "secret-1", createIfMissing: true, repositoryId: "repo-1" }],
-    attachedSecretIds: ["secret-1"],
+    attachedSecretIds: ["secret-1"], targetNodeClass: "self-hosted",
   };
   const client = {
     getPendingIntent: async () => ({
@@ -93,11 +93,12 @@ test("pollAndSign rejects target or locally-pended substitutions before signing 
     op: "create-spawn", spawnId: "sp-1", generation: 7n, targetNodeId: "node-1",
     appRef: "app@sha256:1", image: "image@sha256:2", model: "m", dataRef: "data-1",
     mounts: [{ name: "work", backendUri: "scratch://", credentialSecretId: "secret-1", createIfMissing: true, repositoryId: "repo-1" }],
-    attachedSecretIds: ["secret-1"],
+    attachedSecretIds: ["secret-1"], targetNodeClass: "self-hosted",
   };
   const mutations: Array<[string, (response: Record<string, unknown>, pending: Record<string, unknown>) => void]> = [
     ["response generation", (r) => { r.generation = 8n; }],
     ["response target", (r) => { r.targetNodeId = "node-2"; }],
+    ["response class", (r) => { r.targetNodeClass = "cloud"; }],
     ["operation", (_r, p) => { p.op = "resume-spawn"; }],
     ["spawn", (_r, p) => { p.spawnId = "sp-2"; }],
     ["generation", (_r, p) => { p.generation = 8n; }],

@@ -65,3 +65,18 @@ describe("unary — 401 with missing key", () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe("unary — audience separation", () => {
+  it("puts only the CP token in Authorization", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await unary("ListSpawns", {});
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer cp-token");
+    expect(JSON.stringify(init)).not.toContain("node-token");
+    vi.unstubAllGlobals();
+  });
+});

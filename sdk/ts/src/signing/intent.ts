@@ -172,6 +172,7 @@ export interface PendedOp {
   appRef?: string;
   model?: string;
   targetNodeId?: string;
+  targetNodeClass?: string;
   image?: string;
   dataRef?: string;
   generation?: bigint;
@@ -264,6 +265,9 @@ export async function pollAndSign(deps: PollAndSignDeps): Promise<string> {
   }
   if (!pending.targetNodeId || response.targetNodeId !== pending.targetNodeId) {
     throw new Error("intent: response target node mismatch");
+  }
+  if (pended.targetNodeClass !== undefined && response.targetNodeClass !== pended.targetNodeClass) {
+    throw new Error("intent: response target class mismatch");
   }
   if (response.nodeCertChain.length === 0 || !response.targetNodeClass || !response.targetNodeAccountId) {
     throw new Error("intent: incomplete resolved target metadata");
