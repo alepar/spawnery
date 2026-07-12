@@ -198,3 +198,36 @@ supplies the harness that makes SE2's fix testable). Reducing the e2e/VM lanes.
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the
 assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+### 2026-07-12 — sp-2tx8.1.3: the real-lane arms
+
+`RunContract` now runs against three backends: `fakepod` (hermetic), `DockerPodBackend` (`e2e`), and
+`CRIPodBackend` (`cri_delta_e2e`, via the new `just test-cri-contract` fixture — the pre-existing
+`test-cri-delta` containerd has no CRI plugin and no CNI, so it cannot run a pod sandbox).
+
+Both real lanes passed every one of the 13 contract cases on the first run against real infrastructure
+(a real Docker daemon; a dedicated CRI+CNI containerd, `runc` handler) — no lane bugs surfaced, and no
+contract case had to be fixed in the arm.
+
+Lane divergences the suite records rather than papers over:
+
+- **Cmd vs Command.** Docker maps `AgentSpec.Cmd` to `Config.Cmd` (overrides CMD, keeps ENTRYPOINT); CRI
+  maps it to `Command` (overrides ENTRYPOINT). Both arms drive `Cmd = nil` and fall through to the image
+  entrypoint, so the contract does not exercise the divergence. A contract case that pins argv semantics
+  would need per-lane expectations; none exists, and that is deliberate.
+- **Stop.** Docker stops without removing (stopped pods linger in `ListManaged`); CRI removes the
+  sandbox. The contract only pins idempotence; the Docker arm force-removes its containers in cleanup
+  (matched by the `spawnery.node-id` label), which also confirmed the daemon is left clean after a run.
+- **ListManaged ids.** Docker: sidecar+agent ids. CRI: sandbox id only. The contract asserts "at least
+  one id is set" (sp-2tx8.3.1 tightens this).
+- **The zero-layer guard is not the same guard.** Docker compares committed layer count to the pinned
+  base's (moby#47065); CRI rejects an empty delta layer (`deltaSize <= 0`) and releases the half-made
+  image. `ArmZeroLayerCapture` is implemented per lane against the guard that lane actually has: Docker's
+  arm repoints the handle's pinned base at an image one layer deeper than any commit can produce
+  (`buildDeepImage`, asserted `base+1` layers before use); CRI's arm wraps the `deltaEngine` seam
+  (`armableEngine`) so `Capture` reports a zero-byte diff while armed.
+
+Registered contract exceptions: none — both real lanes satisfy the whole contract.
+
+The CRI arm was run under the default `runc` handler only (`RUNTIME_HANDLER=runsc` is wired in
+`just test-cri-contract` for a future gVisor pass but was not exercised in this task).
