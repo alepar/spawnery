@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,6 +138,25 @@ func TestSpawnletConfig_EnforcedArtifactTrustRequirements(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestSpawnletConfig_RejectsUnknownAuthMode(t *testing.T) {
+	for _, mode := range []string{"enforcd", "", "production"} {
+		t.Run(mode, func(t *testing.T) {
+			_, err := loadSpawnletTest(t, "dev", nil, "node.auth_mode="+mode)
+			if err == nil || !strings.Contains(err.Error(), "node.auth_mode") {
+				t.Fatalf("mode %q error = %v, want closed-enum rejection", mode, err)
+			}
+		})
+	}
+}
+
+func TestBuildIntentVerifierRejectsUnknownAuthMode(t *testing.T) {
+	cfg := &Spawnlet{}
+	cfg.Node.AuthMode = "enforcd"
+	if _, err := buildIntentVerifier(cfg, nil, "node-1", ""); err == nil {
+		t.Fatal("auth mode typo selected verify-log instead of failing closed")
 	}
 }
 
@@ -300,6 +320,49 @@ func TestArtifactTrustLiveReloadIsMonotonicAndCancelled(t *testing.T) {
 	}
 	if _, err := loadArtifactVerifier(cfg, now); err == nil {
 		t.Fatal("startup accepted malformed statement")
+	}
+}
+
+func TestArtifactTrustShutdownIsBoundedWithBlockedLoader(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var closes atomic.Int32
+	trust := &artifactTrust{
+		statementPath: "configured",
+		reload: func(context.Context, time.Time) error {
+			close(started)
+			<-release
+			return nil
+		},
+		closeStore: func() error { closes.Add(1); return nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := trust.watch(ctx, time.Millisecond, time.Now, nil)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("reload did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(50 * time.Millisecond):
+		close(release)
+		t.Fatal("watch shutdown waited for blocked loader")
+	}
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelClose()
+	if err := trust.CloseContext(closeCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked reload close error = %v, want deadline", err)
+	}
+	if got := closes.Load(); got != 0 {
+		t.Fatalf("store close called %d times during active reload", got)
+	}
+	close(release)
+	finalCtx, cancelFinal := context.WithTimeout(context.Background(), time.Second)
+	defer cancelFinal()
+	if err := trust.CloseContext(finalCtx); err != nil {
+		t.Fatalf("close after reload returned: %v", err)
 	}
 }
 

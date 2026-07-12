@@ -102,8 +102,12 @@ func (s Spawnlet) Validate() error {
 	if err := s.Common.Validate(); err != nil {
 		return err
 	}
-	if s.Node.AuthMode != "enforced" {
+	switch s.Node.AuthMode {
+	case "insecure":
 		return nil
+	case "enforced":
+	default:
+		return fmt.Errorf("node.auth_mode must be one of insecure or enforced")
 	}
 	if s.Node.Environment == "" {
 		return fmt.Errorf("node.environment is required in enforced mode")

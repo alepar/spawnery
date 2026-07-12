@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -138,7 +139,6 @@ func main() {
 			log.Printf("node: artifact trust unavailable in insecure mode: %v", err)
 		}
 		if artifactTrust != nil {
-			defer artifactTrust.Close()
 			reloadCtx, cancelReload := context.WithCancel(ctx)
 			reloadDone := artifactTrust.watch(reloadCtx, time.Second, time.Now, func(err error) {
 				log.Printf("node: signer-revocation reload failed: %v", err)
@@ -146,6 +146,11 @@ func main() {
 			defer func() {
 				cancelReload()
 				<-reloadDone
+				closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancelClose()
+				if err := artifactTrust.CloseContext(closeCtx); err != nil {
+					log.Printf("node: artifact trust close: %v", err)
+				}
 			}()
 		}
 		// Owner-sealed secrets (sp-2ckv.4): in enforced mode build the HPKE sub-key holder signed by the
@@ -154,7 +159,10 @@ func main() {
 		if sk := nodeSubKeys(cfg, cfg.Node.ID); sk != nil {
 			nodeCfg.SubKeys = sk
 		}
-		nodeCfg.Verifier = buildIntentVerifier(cfg, artifactTrust, cfg.Node.ID, cfg.Node.Owner)
+		nodeCfg.Verifier, err = buildIntentVerifier(cfg, artifactTrust, cfg.Node.ID, cfg.Node.Owner)
+		if err != nil {
+			log.Fatalf("node: intent verifier setup: %v", err)
+		}
 		nodeCfg.GitHubMint = nodeGitHubMint(cfg)
 		log.Printf("spawnlet attaching to CP at %s as %s", nodeCfg.CPURL, cfg.Node.ID)
 		err = node.Run(ctx, mgr, httpc, nodeCfg) // returns when ctx is cancelled (signal) or on fatal error
@@ -623,11 +631,15 @@ func (i devNodeIDInterceptor) WrapStreamingHandler(next connect.StreamingHandler
 //
 // nodeOwner: if non-empty AND cfg.Node.AuthMode=enforced, enables the self-hosted owner check
 // (the token's account_id must equal nodeOwner).
-func buildIntentVerifier(cfg *Spawnlet, trust *artifactTrust, nodeID, nodeOwner string) *node.IntentVerifier {
-	enforced := cfg.Node.AuthMode == "enforced"
-	authMode := node.AuthModeVerifyLog
-	if enforced {
+func buildIntentVerifier(cfg *Spawnlet, trust *artifactTrust, nodeID, nodeOwner string) (*node.IntentVerifier, error) {
+	var authMode node.AuthMode
+	switch cfg.Node.AuthMode {
+	case "insecure":
+		authMode = node.AuthModeVerifyLog
+	case "enforced":
 		authMode = node.AuthModeEnforced
+	default:
+		return nil, fmt.Errorf("unknown node auth mode %q", cfg.Node.AuthMode)
 	}
 
 	var artifacts *token.Verifier
@@ -635,14 +647,19 @@ func buildIntentVerifier(cfg *Spawnlet, trust *artifactTrust, nodeID, nodeOwner 
 		artifacts = trust.verifier
 	}
 
-	selfHosted := enforced && nodeOwner != ""
-	return node.NewIntentVerifier(artifacts, nodeOwner, nodeID, selfHosted, authMode, nil)
+	selfHosted := authMode == node.AuthModeEnforced && nodeOwner != ""
+	return node.NewIntentVerifier(artifacts, nodeOwner, nodeID, selfHosted, authMode, nil), nil
 }
 
 type artifactTrust struct {
-	verifier      *token.Verifier
-	revocations   *token.SignerRevocationStore
-	statementPath string
+	verifier       *token.Verifier
+	revocations    *token.SignerRevocationStore
+	statementPath  string
+	reload         func(context.Context, time.Time) error
+	closeStore     func() error
+	mu             sync.Mutex
+	reloadActive   bool
+	reloadFinished <-chan struct{}
 }
 
 func loadArtifactVerifier(cfg *Spawnlet, now time.Time) (*artifactTrust, error) {
@@ -681,14 +698,59 @@ func loadArtifactVerifier(cfg *Spawnlet, now time.Time) (*artifactTrust, error) 
 		return nil, fmt.Errorf("create artifact verifier: %w", err)
 	}
 	closeOnError = false
-	return &artifactTrust{verifier: verifier, revocations: store, statementPath: cfg.Node.SignerRevocationStatement}, nil
+	trust := &artifactTrust{verifier: verifier, revocations: store, statementPath: cfg.Node.SignerRevocationStatement}
+	trust.closeStore = store.Close
+	trust.reload = func(ctx context.Context, at time.Time) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		err := store.LoadAndApply(trust.statementPath, at)
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	return trust, nil
 }
 
 func (trust *artifactTrust) Close() error {
 	if trust == nil {
 		return nil
 	}
-	return trust.revocations.Close()
+	trust.mu.Lock()
+	defer trust.mu.Unlock()
+	if trust.reloadActive {
+		return errors.New("signer-revocation reload is still active")
+	}
+	return trust.closeStore()
+}
+
+func (trust *artifactTrust) CloseContext(ctx context.Context) error {
+	if trust == nil {
+		return nil
+	}
+	for {
+		trust.mu.Lock()
+		if !trust.reloadActive {
+			err := trust.closeStore()
+			trust.mu.Unlock()
+			return err
+		}
+		finished := trust.reloadFinished
+		trust.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for signer-revocation reload: %w", ctx.Err())
+		case <-finished:
+		}
+	}
 }
 
 func (trust *artifactTrust) watch(ctx context.Context, interval time.Duration, now func() time.Time, report func(error)) <-chan struct{} {
@@ -701,14 +763,35 @@ func (trust *artifactTrust) watch(ctx context.Context, interval time.Duration, n
 		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		var reloadDone <-chan error
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				if err := trust.revocations.LoadAndApply(trust.statementPath, now()); err != nil && report != nil {
+			case err := <-reloadDone:
+				reloadDone = nil
+				if err != nil && !errors.Is(err, context.Canceled) && report != nil {
 					report(err)
 				}
+			case <-ticker.C:
+				if reloadDone != nil {
+					continue
+				}
+				result := make(chan error, 1)
+				finished := make(chan struct{})
+				trust.mu.Lock()
+				trust.reloadActive = true
+				trust.reloadFinished = finished
+				trust.mu.Unlock()
+				reloadDone = result
+				go func(at time.Time) {
+					err := trust.reload(ctx, at)
+					trust.mu.Lock()
+					trust.reloadActive = false
+					trust.mu.Unlock()
+					close(finished)
+					result <- err
+				}(now())
 			}
 		}
 	}()

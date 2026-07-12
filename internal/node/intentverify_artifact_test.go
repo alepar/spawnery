@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -14,6 +15,8 @@ import (
 	"log"
 	"math/big"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -154,6 +157,90 @@ func TestIntentVerifierRevocationGenerationInvalidatesCachedSigner(t *testing.T)
 	revocations.generation.Store(1)
 	if nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
 		t.Fatalf("after revocation: got %q, want %q", nack, NACKTokenInvalid)
+	}
+}
+
+func TestIntentVerifierRealStoreRevocationPersistsAcrossRestart(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state", "revocations.json")
+	statementPath := filepath.Join(dir, "deployment.statement")
+	store, err := token.OpenSignerRevocationStore(statePath, fixture.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := token.NewVerifier(fixture.root, "prod", store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, fields := certifiedIntent(t, fixture, now, "jti-real-store")
+	v := NewIntentVerifier(artifacts, "alice", "node-1", false, AuthModeEnforced, func() time.Time { return now })
+	if nack, detail := v.VerifyStart(env, fields); nack != "" {
+		t.Fatalf("initial cached verification: %s %s", nack, detail)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(fixture.leaf.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spkiHash := sha256.Sum256(spki)
+	writeRevocationStatement := func(generation uint64, issuedAt time.Time) {
+		t.Helper()
+		payload, err := proto.Marshal(&authv1.SignerRevocationStatement{
+			Environment: "prod", Generation: generation, IssuedAt: issuedAt.Unix(),
+			RevokedSerials: [][]byte{fixture.leaf.SerialNumber.Bytes()}, RevokedSpkiSha256: [][]byte{spkiHash[:]},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire, err := token.SignSignerRevocationStatement(fixture.intermediate, fixture.intermediateKey, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(statementPath, []byte(wire+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRevocationStatement(2, now)
+	if err := store.LoadAndApply(statementPath, now); err != nil {
+		t.Fatal(err)
+	}
+	if nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
+		t.Fatalf("live revoked cached signer: got %q, want %q", nack, NACKTokenInvalid)
+	}
+	writeRevocationStatement(1, now.Add(-time.Second))
+	rollbackErr := store.LoadAndApply(statementPath, now)
+	if rollbackErr == nil || store.Generation() != 2 {
+		t.Fatalf("rollback error=%v generation=%d, want error and generation 2", rollbackErr, store.Generation())
+	}
+	if err := os.WriteFile(statementPath, []byte("malformed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	malformedErr := store.LoadAndApply(statementPath, now)
+	if malformedErr == nil || store.Generation() != 2 {
+		t.Fatalf("malformed error=%v generation=%d, want error and generation 2", malformedErr, store.Generation())
+	}
+	for _, operationalErr := range []error{rollbackErr, malformedErr} {
+		message := operationalErr.Error()
+		if strings.Contains(message, "CERTIFICATE") || strings.Contains(message, env.AccessToken) || strings.Contains(message, base64.RawURLEncoding.EncodeToString(fixture.leaf.Raw)) {
+			t.Fatalf("operational error exposed credential material: %q", message)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := token.OpenSignerRevocationStore(statePath, fixture.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restartedArtifacts, err := token.NewVerifier(fixture.root, "prod", reopened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewIntentVerifier(restartedArtifacts, "alice", "node-1", false, AuthModeEnforced, func() time.Time { return now })
+	if nack, _ := restarted.VerifyStart(env, fields); nack != NACKTokenInvalid {
+		t.Fatalf("persisted revoked signer after restart: got %q, want %q", nack, NACKTokenInvalid)
 	}
 }
 
