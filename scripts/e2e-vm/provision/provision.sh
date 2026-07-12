@@ -367,11 +367,23 @@ sudo update-ca-trust extract
 # ONLY (profile.fake.env); the production sidecar image never sees this file. ----
 log "building sidecar upstream CA trust bundle (system roots + golden CA)…"
 sudo mkdir -p /etc/spawnery/sidecar-ca-bundle
+# The FIRST candidate is the one that matters on Fedora: it is the real file `update-ca-trust extract`
+# writes. The others are distro symlinks INTO it, and a minimal Fedora cloud image does not necessarily
+# ship them — which is exactly how the first golden rebuild died here ("no system CA bundle found") even
+# though update-ca-trust had just run successfully.
 SYS_CA_BUNDLE=""
-for p in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem; do
-  [ -f "$p" ] && SYS_CA_BUNDLE="$p" && break
+for p in /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+         /etc/pki/tls/certs/ca-bundle.crt \
+         /etc/ssl/certs/ca-certificates.crt \
+         /etc/ssl/cert.pem; do
+  [ -r "$p" ] && SYS_CA_BUNDLE="$p" && break
 done
-[ -n "$SYS_CA_BUNDLE" ] || { echo "ERR: no system CA bundle found (tried the usual Fedora/Debian paths) for the sidecar trust merge" >&2; exit 1; }
+if [ -z "$SYS_CA_BUNDLE" ]; then
+  echo "ERR: no system CA bundle found for the sidecar trust merge. Tried:" >&2
+  ls -l /etc/pki/ca-trust/extracted/pem/ /etc/pki/tls/certs/ /etc/ssl/certs/ 2>&1 | head -20 >&2
+  exit 1
+fi
+log "  system roots: $SYS_CA_BUNDLE"
 sudo bash -c "cat '$SYS_CA_BUNDLE' /etc/spawnery/pki/root.pem > /etc/spawnery/sidecar-ca-bundle/ca-bundle.crt"
 sudo chmod 644 /etc/spawnery/sidecar-ca-bundle/ca-bundle.crt
 
