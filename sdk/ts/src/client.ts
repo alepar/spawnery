@@ -19,19 +19,29 @@ import {
   SealedSecretSchema,
 } from "./gen/cp/v1/cp_pb.js";
 import type { KeyStore } from "./keystore.js";
+import { WebCryptoSessionSigner } from "./signing/sessionSigner.js";
 import {
   pollAndSign,
   registerPendedOp,
   clearPendedOp,
   buildSessionOpenSignedIntentB64,
   type PendedOp,
+  type ResolvedTargetVerifier,
 } from "./signing/intent.js";
 
-export interface SpawnClientOptions {
+export type SpawnClientOptions = {
   transport: Transport;
-  /** Omit to skip A4 intent signing entirely (dev/unenforced CP). */
-  keyStore?: KeyStore;
-}
+  keyStore?: undefined;
+  getNodeAccessToken?: undefined;
+  verifyTarget?: undefined;
+} | {
+  transport: Transport;
+  /** Load-only persistent key storage. SpawnClient never creates a replacement key. */
+  keyStore: KeyStore;
+  /** Explicit node-audience credential provider, separate from the CP transport bearer. */
+  getNodeAccessToken: () => Promise<string>;
+  verifyTarget: ResolvedTargetVerifier;
+};
 
 export interface ForkOptions {
   targetNodeId?: string;
@@ -42,10 +52,14 @@ export interface ForkOptions {
 export class SpawnClient {
   private readonly client: Client<typeof SpawnService>;
   private readonly keyStore?: KeyStore;
+  private readonly getNodeAccessToken?: () => Promise<string>;
+  private readonly verifyTarget?: ResolvedTargetVerifier;
 
   constructor(opts: SpawnClientOptions) {
     this.client = createClient(SpawnService, opts.transport);
     this.keyStore = opts.keyStore;
+    this.getNodeAccessToken = opts.getNodeAccessToken;
+    this.verifyTarget = opts.verifyTarget;
   }
 
   /**
@@ -55,17 +69,18 @@ export class SpawnClient {
    */
   private signConcurrently(spawnId: string, pended: PendedOp): void {
     if (!this.keyStore) return;
-    void this.keyStore
-      .get()
-      .then((kp) => {
+    void Promise.all([this.keyStore.get(), this.getNodeAccessToken!()])
+      .then(([kp, nodeAccessToken]) => {
         if (!kp) throw new Error("SpawnClient: no session keypair in KeyStore; create one first");
+        if (!nodeAccessToken) throw new Error("SpawnClient: missing node access token");
         registerPendedOp(pended);
         return pollAndSign({
           client: this.client,
           spawnId,
           pended,
-          privateKey: kp.privateKey,
-          publicKey: kp.publicKey,
+          signer: new WebCryptoSessionSigner(kp.privateKey, kp.publicKey),
+          nodeAccessToken,
+          verifyTarget: this.verifyTarget!,
         });
       })
       .catch((e: unknown) => console.error("intent sign failed:", e))
@@ -81,14 +96,16 @@ export class SpawnClient {
       op: "create-spawn",
       spawnId,
       model: input.model,
+      image: input.image,
       mounts: input.mounts,
+      attachedSecretIds: input.attachedSecretIds,
     });
     return spawnId;
   }
 
-  async resume(spawnId: string): Promise<void> {
-    this.signConcurrently(spawnId, { op: "resume-spawn", spawnId });
-    await this.client.resumeSpawn({ spawnId });
+  async resume(spawnId: string, attachedSecretIds: string[] = []): Promise<void> {
+    this.signConcurrently(spawnId, { op: "resume-spawn", spawnId, attachedSecretIds });
+    await this.client.resumeSpawn({ spawnId, attachedSecretIds });
   }
 
   async recreate(spawnId: string): Promise<void> {
@@ -110,7 +127,11 @@ export class SpawnClient {
     transferSetId: string;
     nodeId: string;
   }> {
-    this.signConcurrently(sourceSpawnId, { op: "fork-spawn", spawnId: sourceSpawnId });
+    this.signConcurrently(sourceSpawnId, {
+      op: "fork-spawn",
+      spawnId: sourceSpawnId,
+      targetNodeId: opts.targetNodeId || undefined,
+    });
     const res = await this.client.forkSpawn({
       spawnId: sourceSpawnId,
       targetNodeId: opts.targetNodeId ?? "",

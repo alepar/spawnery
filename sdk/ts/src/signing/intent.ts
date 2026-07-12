@@ -15,8 +15,8 @@ import { create, toBinary } from "@bufbuild/protobuf";
 import type { Client } from "@connectrpc/connect";
 import { IntentBodySchema, SignedIntentSchema, type SignedIntent } from "../gen/auth/v1/auth_pb.js";
 import type { SpawnService } from "../gen/cp/v1/cp_pb.js";
-import { signP1363, exportSpkiDer } from "../keys/crypto.js";
 import { toBase64 } from "../keys/encoding.js";
+import type { SessionSigner } from "./sessionSigner.js";
 
 // Intent domain constants (must match internal/intent/intent.go).
 export const DOMAIN_CREATE_SPAWN = "spawnery/intent/create-spawn/v1";
@@ -59,6 +59,7 @@ export interface IntentFields {
     createIfMissing?: boolean;
     repositoryId?: string;
   }>; // field 12 repeated MountRef — all 5 fields signed (node correspondence compares all 5)
+  attachedSecretIds?: string[];
 }
 
 /**
@@ -86,6 +87,7 @@ export function buildIntentBodyBytes(f: IntentFields): Uint8Array {
       createIfMissing: m.createIfMissing ?? false,
       repositoryId: m.repositoryId ?? "",
     })),
+    attachedSecretIds: f.attachedSecretIds ?? [],
   });
   return toBinary(IntentBodySchema, body);
 }
@@ -103,16 +105,14 @@ export function buildIntentBodyBytes(f: IntentFields): Uint8Array {
 export async function buildSignedIntent(
   op: string,
   bodyBytes: Uint8Array,
-  privateKey: CryptoKey,
-  spkiDer: Uint8Array,
+  signer: SessionSigner,
 ): Promise<SignedIntent> {
   const domain = domainForOp(op);
-  const domainBytes = new TextEncoder().encode(domain);
-  const msg = new Uint8Array(domainBytes.length + bodyBytes.length);
-  msg.set(domainBytes);
-  msg.set(bodyBytes, domainBytes.length);
-
-  const sig = await signP1363(privateKey, msg);
+  const [sig, spkiDer] = await Promise.all([
+    signer.signP1363(domain, bodyBytes),
+    signer.publicSPKIDER(),
+  ]);
+  if (sig.length !== 64 || spkiDer.length === 0) throw new Error("intent: invalid session signer output");
 
   return create(SignedIntentSchema, {
     domain,
@@ -138,10 +138,9 @@ export async function buildSessionOpenSignedIntentB64(
   spawnId: string,
   sessionId: string,
   generation: bigint,
-  privateKey: CryptoKey,
-  publicKey: CryptoKey,
+  targetNodeId: string,
+  signer: SessionSigner,
 ): Promise<string> {
-  const spki = await exportSpkiDer(publicKey);
   const jtiBytes = crypto.getRandomValues(new Uint8Array(16));
   const jti = Array.from(jtiBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
 
@@ -150,7 +149,7 @@ export async function buildSessionOpenSignedIntentB64(
     issuedAt: Math.floor(Date.now() / 1000),
     spawnId,
     generation,
-    targetNodeId: "",
+    targetNodeId,
     op: "session-open",
     appRef: "",
     image: "",
@@ -160,7 +159,7 @@ export async function buildSessionOpenSignedIntentB64(
     mounts: [],
   });
 
-  const signedIntent = await buildSignedIntent("session-open", bodyBytes, privateKey, spki);
+  const signedIntent = await buildSignedIntent("session-open", bodyBytes, signer);
   const protoBytes = toBinary(SignedIntentSchema, signedIntent);
   return toBase64(protoBytes);
 }
@@ -175,10 +174,18 @@ export interface PendedOp {
   targetNodeId?: string;
   image?: string;
   dataRef?: string;
+  generation?: bigint;
   // credentialSecretId is CP-derived and intentionally NOT pended by the client. Optional name/
   // backendUri (rather than required) so a generated CreateSpawnRequest's MessageInitShape mounts
   // array (whose scalar fields are all optional) can be passed straight through from the client.
-  mounts?: Array<{ name?: string; backendUri?: string; createIfMissing?: boolean }>;
+  mounts?: Array<{
+    name?: string;
+    backendUri?: string;
+    credentialSecretId?: string;
+    createIfMissing?: boolean;
+    repositoryId?: string;
+  }>;
+  attachedSecretIds?: string[];
 }
 
 /** In-memory registry of pending ops (keyed by spawnId). */
@@ -198,11 +205,21 @@ export interface PollAndSignDeps {
   client: Client<typeof SpawnService>;
   spawnId: string;
   pended: PendedOp;
-  privateKey: CryptoKey;
-  publicKey: CryptoKey;
+  signer: SessionSigner;
+  nodeAccessToken: string;
+  verifyTarget: ResolvedTargetVerifier;
   /** Max poll attempts before giving up */
   maxAttempts?: number;
 }
+
+export interface ResolvedTarget {
+  nodeCertChain: Uint8Array;
+  targetNodeId: string;
+  targetNodeClass: string;
+  targetNodeAccountId: string;
+}
+
+export type ResolvedTargetVerifier = (target: ResolvedTarget) => Promise<void>;
 
 /**
  * pollAndSign polls GetPendingIntent until ready, validates the tuple against
@@ -215,18 +232,19 @@ export async function pollAndSign(deps: PollAndSignDeps): Promise<string> {
     client,
     spawnId,
     pended,
-    privateKey,
-    publicKey,
+    signer,
+    nodeAccessToken,
+    verifyTarget,
     maxAttempts = 30,
   } = deps;
 
-  const spki = await exportSpkiDer(publicKey);
-
   // Poll until ready
+  let response: Awaited<ReturnType<typeof client.getPendingIntent>> | undefined;
   let pending: Awaited<ReturnType<typeof client.getPendingIntent>>["pending"] | undefined;
   for (let i = 0; i < maxAttempts; i++) {
     const res = await client.getPendingIntent({ spawnId });
     if (res.ready && res.pending) {
+      response = res;
       pending = res.pending;
       break;
     }
@@ -234,12 +252,28 @@ export async function pollAndSign(deps: PollAndSignDeps): Promise<string> {
     await new Promise<void>((resolve) => setTimeout(resolve, 500));
   }
 
-  if (!pending) {
+  if (!pending || !response) {
     throw new Error(`intent: GetPendingIntent not ready after ${maxAttempts} attempts for ${spawnId}`);
   }
 
   // AM1: validate the CP-returned tuple against the locally-pended record.
   _validateTuple(pending, pended);
+  if (pending.generation === 0n || response.generation === 0n ||
+      response.generation !== pending.generation) {
+    throw new Error("intent: response generation mismatch");
+  }
+  if (!pending.targetNodeId || response.targetNodeId !== pending.targetNodeId) {
+    throw new Error("intent: response target node mismatch");
+  }
+  if (response.nodeCertChain.length === 0 || !response.targetNodeClass || !response.targetNodeAccountId) {
+    throw new Error("intent: incomplete resolved target metadata");
+  }
+  await verifyTarget({
+    nodeCertChain: response.nodeCertChain,
+    targetNodeId: response.targetNodeId,
+    targetNodeClass: response.targetNodeClass,
+    targetNodeAccountId: response.targetNodeAccountId,
+  });
 
   // Generate jti (16 random bytes as hex).
   const jtiBytes = crypto.getRandomValues(new Uint8Array(16));
@@ -267,14 +301,15 @@ export async function pollAndSign(deps: PollAndSignDeps): Promise<string> {
       createIfMissing: m.createIfMissing ?? false,
       repositoryId: m.repositoryId ?? "",
     })),
+    attachedSecretIds: pending.attachedSecretIds,
   });
 
-  const signedIntent = await buildSignedIntent(pending.op, bodyBytes, privateKey, spki);
+  const signedIntent = await buildSignedIntent(pending.op, bodyBytes, signer);
 
   await client.submitIntent({
     spawnId,
     intent: signedIntent,
-    nodeAccessToken: "", // dev CP mints node token from SPKI (R5: prod gap)
+    nodeAccessToken,
   });
 
   return jti;
@@ -299,6 +334,7 @@ interface PendingIntentTuple {
     createIfMissing?: boolean;
     repositoryId?: string;
   }>;
+  attachedSecretIds?: string[];
 }
 
 function _validateTuple(pending: PendingIntentTuple, pended: PendedOp): void {
@@ -313,16 +349,27 @@ function _validateTuple(pending: PendingIntentTuple, pended: PendedOp): void {
   if (pended.op !== "fork-spawn" && pending.spawnId !== pended.spawnId) {
     throw new Error(`intent: spawnId mismatch`);
   }
-  // For create-spawn: appRef, model must match.
-  if (pended.op === "create-spawn") {
-    if (pended.appRef !== undefined && pending.appRef !== pended.appRef) {
-      throw new Error(`intent: appRef mismatch: CP "${pending.appRef}", local "${pended.appRef}"`);
+  for (const field of ["generation", "targetNodeId", "appRef", "image", "model", "dataRef"] as const) {
+    if (pended[field] !== undefined && pending[field] !== pended[field]) {
+      throw new Error(`intent: ${field} mismatch`);
     }
-    if (pended.model !== undefined && pending.model !== pended.model) {
-      throw new Error(`intent: model mismatch: CP "${pending.model}", local "${pended.model}"`);
+  }
+  if (pended.mounts !== undefined) {
+    const resolved = pending.mounts ?? [];
+    if (resolved.length !== pended.mounts.length) throw new Error("intent: mounts mismatch");
+    for (let i = 0; i < pended.mounts.length; i++) {
+      const local = pended.mounts[i];
+      const actual = resolved[i];
+      for (const field of ["name", "backendUri", "credentialSecretId", "createIfMissing", "repositoryId"] as const) {
+        if (local[field] !== undefined && actual[field] !== local[field]) {
+          throw new Error(`intent: mount ${field} mismatch`);
+        }
+      }
     }
-    if (pended.targetNodeId !== undefined && pending.targetNodeId !== pended.targetNodeId) {
-      throw new Error(`intent: targetNodeId mismatch`);
-    }
+  }
+  if (pended.attachedSecretIds !== undefined) {
+    const local = [...pended.attachedSecretIds].sort();
+    const resolved = [...(pending.attachedSecretIds ?? [])].sort();
+    if (JSON.stringify(local) !== JSON.stringify(resolved)) throw new Error("intent: attached secrets mismatch");
   }
 }

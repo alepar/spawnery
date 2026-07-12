@@ -12,6 +12,7 @@ export { ConnectError, Code } from "@connectrpc/connect";
 export { SpawnClient, type SpawnClientOptions, type ForkOptions } from "./client.js";
 export { createTransport, type AuthProvider, type TransportOptions } from "./transport.js";
 export type { KeyStore, SessionKeyPair } from "./keystore.js";
+export { WebCryptoSessionSigner, type SessionSigner } from "./signing/sessionSigner.js";
 
 export {
   domainForOp,
@@ -24,6 +25,8 @@ export {
   type IntentFields,
   type PendedOp,
   type PollAndSignDeps,
+  type ResolvedTarget,
+  type ResolvedTargetVerifier,
   DOMAIN_CREATE_SPAWN,
   DOMAIN_RESUME_SPAWN,
   DOMAIN_RECREATE_SPAWN,
