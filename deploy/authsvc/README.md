@@ -112,19 +112,46 @@ Store a copy of the signer key and certificate chain in offline escrow:
 
 ### Key rotation (routine) [AM4]
 
-1. Issue and deploy the next certified signer key and chain to the AS.
-2. Wait for the overlap window (at least the token TTL; 24h recommended).
-3. Promote the next credential to current and provision a new next credential.
-4. Monitor verification failures, then publish a root-authorized revocation for the retired signer.
-5. Update offline escrow.
+The environment root and auth-signing intermediate remain offline throughout this ceremony. The
+offline auth-signing intermediate issues a purpose-constrained leaf; only that leaf's private key
+and leaf-first certificate chain are transferred to the AS.
+
+1. Issue a distinct next signer key and leaf-first chain with the offline auth-signing intermediate.
+   Before deployment, validate the **private-key/leaf match** by comparing these SPKI hashes; they
+   must be identical:
+   ```sh
+   openssl pkey -in auth-signer-next-key.pem -pubout -outform DER | sha256sum
+   openssl x509 -in auth-signer-next-chain.pem -pubkey -noout \
+     | openssl pkey -pubin -outform DER | sha256sum
+   ```
+2. Configure the validated credential as `AS_AUTH_SIGNING_NEXT_KEY_PEM` and
+   `AS_AUTH_SIGNING_NEXT_CHAIN_PEM` while the current credential continues issuing. Keep current
+   and next deployed for at least the **maximum artifact lifetime plus the verifier's allowed clock
+   skew**, measured from the last artifact issued by the current signer.
+3. Switch issuance by promoting next to current, restart authsvc, and immediately provision a new,
+   distinct next credential. Confirm CP and node verifiers accept newly issued artifacts while old
+   artifacts continue to verify during their drain window.
+4. Once the switch is verified, **delete the retired private key** and every working copy used for
+   the ceremony. **Retain the retired public chain** in the audit/distribution archive until the last
+   old artifact has expired plus allowed clock skew; then it may be removed. Routine retirement does
+   not require a revocation statement.
+5. Update the offline custody inventory with the current and next credential records and the retired
+   public-chain retention deadline.
 
 ### Emergency key rotation (compromise) [AM4]
 
 If the current signer key is compromised:
 1. Promote the already-certified next signer immediately.
-2. Publish a root-authorized revocation statement for the compromised signer certificate.
-3. Revoke all active refresh families (triggers AS→CP revocation events; severs all sessions).
-4. Update offline escrow.
+2. Using the offline issuer, create and sign a root-authorized **higher-generation revocation statement**
+   naming the compromised signer certificate.
+3. Publish the statement atomically to every CP and node. Require **generation convergence** at the
+   new generation on every verifier before declaring the rotation complete; a lagging verifier must
+   fail closed rather than continue with an older generation.
+4. Verify old artifacts now fail with `TOKEN_INVALID`, revoke all active refresh families (triggering
+   AS→CP revocation events), and issue a distinct replacement next credential with the offline
+   auth-signing intermediate.
+5. Delete the compromised private key and every working copy, then update the offline custody
+   inventory and incident record.
 
 ## Re-Binding After DB Restore — Non-Goal [AM13]
 

@@ -36,25 +36,34 @@ cleanup() { local rc=$?; if [ "$KEEP" = 1 ]; then warn "--keep set; not tearing 
   E2E_RUNID="$E2E_RUNID" "$E2E_DIR/down.sh" || true; fi; exit $rc; }
 trap cleanup EXIT INT TERM
 
-dbox() { distrobox enter --root dev-spawnery -- bash -lc "cd '$REPO_ROOT' && $*"; }
+DBOX_BIN="${E2E_DISTROBOX_BIN:-distrobox}"
+DOCKER_BIN="${E2E_DOCKER_BIN:-docker}"
+dbox() { "$DBOX_BIN" enter --root dev-spawnery -- bash -lc "cd '$REPO_ROOT' && $*"; }
 
 # ---- 0. build fresh code (per-run staging so concurrent branches never clobber each other) ----
 if [ "$BUILD" = 1 ]; then
   log "0/3 building fresh binaries + images + web …"
   dbox "make build bin/spawnery_cp && cp -f bin/spawnery_cp bin/authsvc bin/spawnlet bin/spawnctl bin/spawnery-ca '$STAGE/bin/'"
-  # docker runs on the HOST, not the distrobox (socket group 985 unreachable inside) — build+save here.
-  command -v make >/dev/null 2>&1 && make images || warn "no host make — using pre-built spawnery/{sidecar,agent} images"
-  docker save spawnery/sidecar:dev spawnery/agent:dev -o "$STAGE/images.tar" \
-    || warn "docker save failed — sidecar/agent will be STALE (baked) this run"
-  dbox "cd web && npm ci && VITE_CP_ORIGIN='$WEB_ORIGIN' VITE_AS_ORIGIN='$WEB_ORIGIN' npm run build && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'" \
-    || warn "web build failed — SPA will be STALE this run"
-  cp -rf "$REPO_ROOT/config/." "$STAGE/config/" 2>/dev/null || true
-  cp -f "$REPO_ROOT/scripts/e2e-vm/provision/gen-pki.sh" "$STAGE/provision/"
-  cp -f "$REPO_ROOT/scripts/e2e-vm/provision/env/"*.env "$STAGE/provision/env/"
+  for binary in spawnery_cp authsvc spawnlet spawnctl spawnery-ca; do
+    test -x "$STAGE/bin/$binary"
+  done
+  dbox "make -B images DOCKER='distrobox-host-exec docker'"
+  "$DOCKER_BIN" save spawnery/sidecar:dev spawnery/agent:dev -o "$STAGE/images.tar"
+  test -s "$STAGE/images.tar"
+  dbox "cd web && npm ci && VITE_CP_ORIGIN='$WEB_ORIGIN' VITE_AS_ORIGIN='$WEB_ORIGIN' npm run build && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'"
+  test -d "$STAGE/web-dist"
+  test -f "$STAGE/web-dist/index.html"
+  dbox "cd acceptance && npm ci"
+  cp -rf "$REPO_ROOT/config/." "$STAGE/config/"
 else
   log "0/3 --no-build: staging existing $REPO_ROOT/bin"
-  cp -f "$REPO_ROOT"/bin/{spawnery_cp,authsvc,spawnlet,spawnctl} "$STAGE/bin/" 2>/dev/null || die "no prebuilt bin/ — drop --no-build"
+  cp -f "$REPO_ROOT"/bin/{spawnery_cp,authsvc,spawnlet,spawnctl,spawnery-ca} "$STAGE/bin/" 2>/dev/null || die "no prebuilt bin/ — drop --no-build"
 fi
+cp -f "$REPO_ROOT/scripts/e2e-vm/provision/gen-pki.sh" "$STAGE/provision/"
+cp -f "$REPO_ROOT/scripts/e2e-vm/provision/env/"*.env "$STAGE/provision/env/"
+
+# Test-only stop point used by the fail-closed build harness. Normal runs never set this.
+[ "${E2E_RUN_BUILD_ONLY:-0}" = 1 ] && exit 0
 
 # ---- 1. start the VM ----
 log "1/3 starting VM …"
@@ -96,7 +105,7 @@ GREP_ARGS=(); [ -n "$GREP" ] && GREP_ARGS=(-g "$GREP")
 #   otherwise defaults to CPU-count workers, and every worker past the pool size (default 3) dies at
 #   "identity pool has N entries but worker parallelIndex=… needs one". Cap workers to the pool.
 WORKERS="$(awk -F, 'NF{print NF}' <<<"${ACC_IDENTITY_POOL:-x}")"; WORKERS="${WORKERS:-1}"
-( cd "$REPO_ROOT/acceptance" && npm ci >/dev/null 2>&1 || true
+( cd "$REPO_ROOT/acceptance"
   npm run test:accept -- --retries=0 --workers="$WORKERS" "${GREP_ARGS[@]}" )
 rc=$?
 log "acceptance suite exit=$rc  (report: $RD/artifacts/pw-report)"

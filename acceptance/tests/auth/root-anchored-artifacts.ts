@@ -71,6 +71,11 @@ export function chainHashes(wire: string): string[] {
   return decodeSessionArtifact(wire).envelope.signerChain.map((der) => createHash("sha256").update(der).digest("hex"));
 }
 
+export async function runtimeRootFingerprints(cfg: VMAuthConfig): Promise<string[]> {
+  const output = await ssh(cfg, "sudo sha256sum /etc/spawnery/authsvc/root.pem /etc/spawnery/cp/root.pem /etc/spawnery/node/root.pem");
+  return output.split("\n").map((line) => line.trim().split(/\s+/, 1)[0]);
+}
+
 export async function establishCurrentSession(cfg: VMAuthConfig) {
   return establishOAuthSession({
     asOrigin: cfg.asOrigin,

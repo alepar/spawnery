@@ -10,6 +10,7 @@ import {
   loadVMAuthConfig,
   mintVMToken,
   nodeLeafArtifact,
+  runtimeRootFingerprints,
   ssh,
   submitSpawn,
 } from "./root-anchored-artifacts";
@@ -20,6 +21,10 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
   const env = await ssh(cfg, "sudo cat /etc/spawnery/env.d/common.env");
   expect(env).toContain("CP_AUTH_ROOT_CA=/etc/spawnery/cp/root.pem");
   expect(env).toContain("NODE_ROOT_CA=/etc/spawnery/node/root.pem");
+  const roots = await runtimeRootFingerprints(cfg);
+  expect(roots).toHaveLength(3);
+  expect(roots.every((fingerprint) => /^[0-9a-f]{64}$/.test(fingerprint))).toBe(true);
+  expect(new Set(roots).size, "AS, CP, and node must pin identical root certificate bytes").toBe(1);
   expect(env).not.toMatch(/CP_AS_SESSION_PUBKEYS|NODE_AS_PUBKEYS|AS_SESSION_KEY_PEM|auth-signing-intermediate-key/);
   expect(await ssh(cfg, "sudo find /etc/spawnery -type f \\( -name '*session-pub*' -o -name 'auth-signing-intermediate-key.pem' \\)"), "no raw signer pin or offline issuer key in runtime tree").toBe("");
 
