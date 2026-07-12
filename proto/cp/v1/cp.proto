@@ -99,6 +99,25 @@ service SpawnService {
   // Idempotent on (creator, sha256): returns the existing catalog_id on conflict.
   // Requires Garage to be configured; returns FailedPrecondition when not.
   rpc IngestSkillFromURL(IngestSkillFromURLRequest) returns (IngestSkillFromURLResponse);
+  // ReingestBundle re-fetches a bundle's upstream source, conditionally (If-None-Match on the
+  // bundle's stored etag — §4.8) and against a CP-wide refetch budget shared across all owners
+  // (GitHub's ~60/hr rate limit is per source IP, and the CP egresses from one IP). Idempotent on
+  // an unchanged upstream (changed=false, no new version); a 304 short-circuits to "up to date"
+  // (not_modified=true) without a repack/DB write. On a real change it cuts a new version and
+  // mints a diff_token that GetBundleDiff must be called with before a re-pin is permitted
+  // (§4.9 — the diff IS the supply-chain gate on re-pin). Creator-only.
+  rpc ReingestBundle(ReingestBundleRequest) returns (ReingestBundleResponse);
+  // ListBundles lists the caller's own bundles (creator-only; bundles are unlisted by default —
+  // publishing via PublishBundle is the admin door onto the global catalog).
+  rpc ListBundles(ListBundlesRequest) returns (ListBundlesResponse);
+  // GetBundle returns one bundle's provenance, every version (seq ASC), and its latest version's
+  // members. Creator-only.
+  rpc GetBundle(GetBundleRequest) returns (GetBundleResponse);
+  // GetBundleDiff computes a per-member diff between two versions of a bundle, including SKILL.md
+  // body diffs for added/changed members (§4.9 — an un-diffed one-click update channel is the same
+  // outcome as the silent-update channel this design rejects). Marks any matching ReingestBundle
+  // diff_token as viewed. Creator-only.
+  rpc GetBundleDiff(GetBundleDiffRequest) returns (GetBundleDiffResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -830,4 +849,115 @@ message IngestSkillFromURLRequest {
   string name        = 4; // optional; defaults from SKILL.md frontmatter name, sanitized to one path segment
   string description = 5; // optional
 }
-message IngestSkillFromURLResponse { string catalog_id = 1; }
+// IngestSkillFromURLResponse.catalog_id keeps its historical meaning: the first member (the
+// bundle-of-one case, by far the common one, is unchanged). The bundle_id/version_id/
+// member_catalog_ids fields let a caller resolve the full bundle for a multi-skill repo.
+message IngestSkillFromURLResponse {
+  string catalog_id                  = 1; // first member (bundle-of-one: today's behaviour, unchanged)
+  string bundle_id                   = 2;
+  string version_id                  = 3;
+  repeated string member_catalog_ids = 4; // position order
+  repeated string skipped_entries    = 5; // symlinks/devices skipped, never fetched
+  repeated string warnings           = 6; // nested-skill warnings, cap hints
+  bool   changed                     = 7; // false => a re-paste that cut no new version
+}
+
+// BundleMember is one member of one bundle version, as surfaced by GetBundle.
+message BundleMember {
+  string catalog_id     = 1;
+  string source_subdir  = 2;
+  string name           = 3;
+  string description    = 4;
+  string sha256         = 5;
+  int32  position        = 6;
+}
+
+// BundleVersion is one version cut of a bundle, as surfaced by GetBundle.
+message BundleVersion {
+  string version_id    = 1;
+  int64  seq           = 2;
+  string source_commit = 3;
+  int64  created_at    = 4;
+}
+
+// BundleSummary is a bundle's provenance card (§4.7), as surfaced by ListBundles/GetBundle.
+message BundleSummary {
+  string bundle_id         = 1;
+  string name               = 2;
+  string source_url         = 3;
+  string source_ref         = 4;
+  string source_subdir      = 5;
+  int64  created_at         = 6;
+  int64  updated_at         = 7;
+  string latest_version_id  = 8;
+  int64  latest_seq         = 9;
+  int32  member_count       = 10;
+}
+
+// ReingestBundleRequest re-fetches bundle_id's upstream source (§4.8). Creator-only.
+message ReingestBundleRequest { string bundle_id = 1; }
+// ReingestBundleResponse.diff_token is set iff changed=true; GetBundleDiff must be called with it
+// before a re-pin onto version_id is permitted (§4.9). not_modified=true means the upstream
+// returned HTTP 304 — no fetch body was read and no work was done.
+message ReingestBundleResponse {
+  string version_id        = 1; // the new version, or the pinned/latest one when !changed
+  bool   changed            = 2;
+  repeated string added_subdirs   = 3; // member source_subdirs
+  repeated string updated_subdirs = 4;
+  repeated string removed_subdirs = 5;
+  string diff_token         = 6; // set iff changed; GetBundleDiff must be called before re-pin
+  string from_version_id    = 7; // the version compared against (empty on a first cut)
+  bool   not_modified       = 8; // upstream returned 304 — no fetch body, no work
+  repeated string warnings  = 9;
+}
+
+message ListBundlesRequest  {}
+message ListBundlesResponse { repeated BundleSummary bundles = 1; }
+
+message GetBundleRequest { string bundle_id = 1; }
+// GetBundleResponse.members is the latest version's members only; use GetBundleDiff to compare
+// across versions.
+message GetBundleResponse {
+  BundleSummary bundle            = 1;
+  repeated BundleVersion versions = 2;
+  repeated BundleMember members   = 3;
+}
+
+message GetBundleDiffRequest {
+  string bundle_id    = 1;
+  string from_version = 2;
+  string to_version   = 3;
+}
+
+// MemberDiff is one member's diff between two bundle versions (§4.9 — the diff IS the
+// supply-chain gate on re-pin). old_skill_md/new_skill_md are capped at 64 KiB each and fetched
+// ONLY for ADDED/CHANGED members (never for the unchanged majority). body_unavailable=true means
+// the underlying Garage object is gone; the diff is still viewable, just without that body.
+message MemberDiff {
+  string source_subdir = 1;
+  enum Change {
+    CHANGE_UNSPECIFIED = 0;
+    ADDED              = 1;
+    REMOVED            = 2;
+    CHANGED            = 3;
+  }
+  Change change          = 2;
+  string name             = 3;
+  string old_sha256       = 4;
+  string new_sha256       = 5;
+  string old_skill_md     = 6;
+  string new_skill_md     = 7;
+  bool   old_truncated    = 8;
+  bool   new_truncated    = 9;
+  bool   body_unavailable = 10;
+}
+
+// GetBundleDiffResponse.diff_token echoes and marks-viewed the token minted by ReingestBundle for
+// (bundle_id, from_version, to_version), if any — the seam a re-pin RPC checks via
+// assertDiffViewed before honoring a version bump (§4.9).
+message GetBundleDiffResponse {
+  repeated MemberDiff members = 1;
+  string from_commit           = 2;
+  string to_commit             = 3;
+  string diff_token            = 4;
+}

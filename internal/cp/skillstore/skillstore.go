@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"sync"
@@ -54,6 +55,12 @@ type SkillStore interface {
 	// Returns nil if present; an error satisfying errors.Is(err, ErrObjectMissing) if
 	// DEFINITIVELY absent; any other error indicates a transport/auth/config fault.
 	StatObject(ctx context.Context, sha256hex string) error
+	// Get downloads and returns the full compressed bytes stored under skills/<sha256hex>.tar.zst
+	// (a GetBundleDiff SKILL.md body extraction, sp-mwco.1.7 §4.9 — the diff-token gate needs the
+	// member content, not just its presence). Returns an error satisfying
+	// errors.Is(err, ErrObjectMissing) if DEFINITIVELY absent; any other error indicates a
+	// transport/auth/config fault.
+	Get(ctx context.Context, sha256hex string) ([]byte, error)
 }
 
 // Config holds the parameters for constructing a garageSkillStore.
@@ -203,6 +210,29 @@ func (s *garageSkillStore) statKey(ctx context.Context, key string) error {
 	return fmt.Errorf("skillstore: stat object %q: %w", key, err)
 }
 
+// Get downloads and returns the full compressed bytes stored under skills/<sha256hex>.tar.zst.
+// minio-go's GetObject is lazy — a 404 (or any other error) surfaces on the first Read, not on
+// the GetObject call itself — so the ErrObjectMissing classification happens on the Read error,
+// mirroring statKey's NoSuchKey/404 check.
+func (s *garageSkillStore) Get(ctx context.Context, sha256hex string) ([]byte, error) {
+	key := s.objectKey(sha256hex)
+	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("skillstore: get object %q: %w", key, err)
+	}
+	defer obj.Close()
+
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		resp := minio.ToErrorResponse(err)
+		if resp.Code == "NoSuchKey" || resp.StatusCode == 404 {
+			return nil, fmt.Errorf("%w: %q: %v", ErrObjectMissing, key, err)
+		}
+		return nil, fmt.Errorf("skillstore: read object %q: %w", key, err)
+	}
+	return data, nil
+}
+
 // PresignedGet returns a time-limited GET URL for skills/<sha256hex>.tar.zst,
 // signed against the node-reachable endpoint.
 func (s *garageSkillStore) PresignedGet(ctx context.Context, sha256hex string) (string, error) {
@@ -289,6 +319,30 @@ func (f *FakeSkillStore) StatObject(ctx context.Context, sha256hex string) error
 		return fmt.Errorf("%w: %q", ErrObjectMissing, sha256hex)
 	}
 	return nil
+}
+
+// Get returns a copy of the bytes recorded for sha256hex, or ErrObjectMissing (wrapped) if absent.
+func (f *FakeSkillStore) Get(_ context.Context, sha256hex string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "get:"+sha256hex)
+	data, ok := f.objects[sha256hex]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrObjectMissing, sha256hex)
+	}
+	out := make([]byte, len(data))
+	copy(out, data)
+	return out, nil
+}
+
+// Delete removes sha256hex from the fake store, simulating an object having been lost from
+// Garage — used by tests exercising a missing-object code path (e.g. GetBundleDiff's
+// body_unavailable).
+func (f *FakeSkillStore) Delete(sha256hex string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objects, sha256hex)
+	delete(f.tags, sha256hex)
 }
 
 // Has reports whether the fake store contains an object for sha256hex.

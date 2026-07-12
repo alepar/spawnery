@@ -171,6 +171,19 @@ type Server struct {
 	// NEVER be cached. Zero-value sync.Map is ready to use; no constructor wiring needed.
 	skillPresent sync.Map
 
+	// reingestBudget is the CP-wide (NOT per-owner) rolling-window counter on ReingestBundle's
+	// upstream refetch (sp-mwco.1.7 §4.8): GitHub's ~60/hr rate limit is per source IP, and the CP
+	// egresses from one IP shared across every owner's ReingestBundle, so the per-owner
+	// ingestQuota alone does not bound the aggregate. Charged before the fetch, never refunded on
+	// a 304. Held as a field (not a package var) so tests can shrink it.
+	reingestBudget *refetchBudget
+
+	// bundleDiffGate is the in-memory, TTL'd registry of diff tokens minted by ReingestBundle and
+	// consumed by GetBundleDiff / assertDiffViewed (sp-mwco.1.7 §4.9 — the diff IS the
+	// supply-chain gate on re-pin; sp-mwco.1.8's re-pin RPC is assertDiffViewed's caller).
+	// Ephemeral: a CP restart invalidates every token and fails closed (no token, no re-pin).
+	bundleDiffGate *diffGate
+
 	// ForkSpawn seams. NewServer wires the same-node materializer and an interim zero-footprint
 	// estimator (zeroForkFootprint); the estimator is fail-closed when nil because CP cannot yet
 	// infer a source spawn's disk footprint, so the interim estimator disables the headroom guard.
@@ -261,6 +274,8 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
 		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
 		devMode: true}
+	s.reingestBudget = newRefetchBudget(refetchBudgetMax, refetchBudgetWindow)
+	s.bundleDiffGate = newDiffGate()
 	s.forkMaterializer = newSameNodeForkMaterializer(s, defaultForkMaterializeTimeout)
 	// Interim zero-footprint estimator: CP cannot yet measure a source spawn's disk footprint,
 	// so headroom enforcement is disabled (see zeroForkFootprint). Without this, forking fails

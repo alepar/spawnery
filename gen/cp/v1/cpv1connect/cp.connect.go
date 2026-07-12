@@ -194,6 +194,17 @@ const (
 	// SpawnServiceIngestSkillFromURLProcedure is the fully-qualified name of the SpawnService's
 	// IngestSkillFromURL RPC.
 	SpawnServiceIngestSkillFromURLProcedure = "/cp.v1.SpawnService/IngestSkillFromURL"
+	// SpawnServiceReingestBundleProcedure is the fully-qualified name of the SpawnService's
+	// ReingestBundle RPC.
+	SpawnServiceReingestBundleProcedure = "/cp.v1.SpawnService/ReingestBundle"
+	// SpawnServiceListBundlesProcedure is the fully-qualified name of the SpawnService's ListBundles
+	// RPC.
+	SpawnServiceListBundlesProcedure = "/cp.v1.SpawnService/ListBundles"
+	// SpawnServiceGetBundleProcedure is the fully-qualified name of the SpawnService's GetBundle RPC.
+	SpawnServiceGetBundleProcedure = "/cp.v1.SpawnService/GetBundle"
+	// SpawnServiceGetBundleDiffProcedure is the fully-qualified name of the SpawnService's
+	// GetBundleDiff RPC.
+	SpawnServiceGetBundleDiffProcedure = "/cp.v1.SpawnService/GetBundleDiff"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -292,6 +303,25 @@ type SpawnServiceClient interface {
 	// Idempotent on (creator, sha256): returns the existing catalog_id on conflict.
 	// Requires Garage to be configured; returns FailedPrecondition when not.
 	IngestSkillFromURL(context.Context, *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error)
+	// ReingestBundle re-fetches a bundle's upstream source, conditionally (If-None-Match on the
+	// bundle's stored etag — §4.8) and against a CP-wide refetch budget shared across all owners
+	// (GitHub's ~60/hr rate limit is per source IP, and the CP egresses from one IP). Idempotent on
+	// an unchanged upstream (changed=false, no new version); a 304 short-circuits to "up to date"
+	// (not_modified=true) without a repack/DB write. On a real change it cuts a new version and
+	// mints a diff_token that GetBundleDiff must be called with before a re-pin is permitted
+	// (§4.9 — the diff IS the supply-chain gate on re-pin). Creator-only.
+	ReingestBundle(context.Context, *connect.Request[v1.ReingestBundleRequest]) (*connect.Response[v1.ReingestBundleResponse], error)
+	// ListBundles lists the caller's own bundles (creator-only; bundles are unlisted by default —
+	// publishing via PublishBundle is the admin door onto the global catalog).
+	ListBundles(context.Context, *connect.Request[v1.ListBundlesRequest]) (*connect.Response[v1.ListBundlesResponse], error)
+	// GetBundle returns one bundle's provenance, every version (seq ASC), and its latest version's
+	// members. Creator-only.
+	GetBundle(context.Context, *connect.Request[v1.GetBundleRequest]) (*connect.Response[v1.GetBundleResponse], error)
+	// GetBundleDiff computes a per-member diff between two versions of a bundle, including SKILL.md
+	// body diffs for added/changed members (§4.9 — an un-diffed one-click update channel is the same
+	// outcome as the silent-update channel this design rejects). Marks any matching ReingestBundle
+	// diff_token as viewed. Creator-only.
+	GetBundleDiff(context.Context, *connect.Request[v1.GetBundleDiffRequest]) (*connect.Response[v1.GetBundleDiffResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -647,6 +677,30 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("IngestSkillFromURL")),
 			connect.WithClientOptions(opts...),
 		),
+		reingestBundle: connect.NewClient[v1.ReingestBundleRequest, v1.ReingestBundleResponse](
+			httpClient,
+			baseURL+SpawnServiceReingestBundleProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ReingestBundle")),
+			connect.WithClientOptions(opts...),
+		),
+		listBundles: connect.NewClient[v1.ListBundlesRequest, v1.ListBundlesResponse](
+			httpClient,
+			baseURL+SpawnServiceListBundlesProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ListBundles")),
+			connect.WithClientOptions(opts...),
+		),
+		getBundle: connect.NewClient[v1.GetBundleRequest, v1.GetBundleResponse](
+			httpClient,
+			baseURL+SpawnServiceGetBundleProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("GetBundle")),
+			connect.WithClientOptions(opts...),
+		),
+		getBundleDiff: connect.NewClient[v1.GetBundleDiffRequest, v1.GetBundleDiffResponse](
+			httpClient,
+			baseURL+SpawnServiceGetBundleDiffProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("GetBundleDiff")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -709,6 +763,10 @@ type spawnServiceClient struct {
 	deleteBundle             *connect.Client[v1.DeleteBundleRequest, v1.DeleteBundleResponse]
 	deleteBundleVersion      *connect.Client[v1.DeleteBundleVersionRequest, v1.DeleteBundleVersionResponse]
 	ingestSkillFromURL       *connect.Client[v1.IngestSkillFromURLRequest, v1.IngestSkillFromURLResponse]
+	reingestBundle           *connect.Client[v1.ReingestBundleRequest, v1.ReingestBundleResponse]
+	listBundles              *connect.Client[v1.ListBundlesRequest, v1.ListBundlesResponse]
+	getBundle                *connect.Client[v1.GetBundleRequest, v1.GetBundleResponse]
+	getBundleDiff            *connect.Client[v1.GetBundleDiffRequest, v1.GetBundleDiffResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -996,6 +1054,26 @@ func (c *spawnServiceClient) IngestSkillFromURL(ctx context.Context, req *connec
 	return c.ingestSkillFromURL.CallUnary(ctx, req)
 }
 
+// ReingestBundle calls cp.v1.SpawnService.ReingestBundle.
+func (c *spawnServiceClient) ReingestBundle(ctx context.Context, req *connect.Request[v1.ReingestBundleRequest]) (*connect.Response[v1.ReingestBundleResponse], error) {
+	return c.reingestBundle.CallUnary(ctx, req)
+}
+
+// ListBundles calls cp.v1.SpawnService.ListBundles.
+func (c *spawnServiceClient) ListBundles(ctx context.Context, req *connect.Request[v1.ListBundlesRequest]) (*connect.Response[v1.ListBundlesResponse], error) {
+	return c.listBundles.CallUnary(ctx, req)
+}
+
+// GetBundle calls cp.v1.SpawnService.GetBundle.
+func (c *spawnServiceClient) GetBundle(ctx context.Context, req *connect.Request[v1.GetBundleRequest]) (*connect.Response[v1.GetBundleResponse], error) {
+	return c.getBundle.CallUnary(ctx, req)
+}
+
+// GetBundleDiff calls cp.v1.SpawnService.GetBundleDiff.
+func (c *spawnServiceClient) GetBundleDiff(ctx context.Context, req *connect.Request[v1.GetBundleDiffRequest]) (*connect.Response[v1.GetBundleDiffResponse], error) {
+	return c.getBundleDiff.CallUnary(ctx, req)
+}
+
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -1092,6 +1170,25 @@ type SpawnServiceHandler interface {
 	// Idempotent on (creator, sha256): returns the existing catalog_id on conflict.
 	// Requires Garage to be configured; returns FailedPrecondition when not.
 	IngestSkillFromURL(context.Context, *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error)
+	// ReingestBundle re-fetches a bundle's upstream source, conditionally (If-None-Match on the
+	// bundle's stored etag — §4.8) and against a CP-wide refetch budget shared across all owners
+	// (GitHub's ~60/hr rate limit is per source IP, and the CP egresses from one IP). Idempotent on
+	// an unchanged upstream (changed=false, no new version); a 304 short-circuits to "up to date"
+	// (not_modified=true) without a repack/DB write. On a real change it cuts a new version and
+	// mints a diff_token that GetBundleDiff must be called with before a re-pin is permitted
+	// (§4.9 — the diff IS the supply-chain gate on re-pin). Creator-only.
+	ReingestBundle(context.Context, *connect.Request[v1.ReingestBundleRequest]) (*connect.Response[v1.ReingestBundleResponse], error)
+	// ListBundles lists the caller's own bundles (creator-only; bundles are unlisted by default —
+	// publishing via PublishBundle is the admin door onto the global catalog).
+	ListBundles(context.Context, *connect.Request[v1.ListBundlesRequest]) (*connect.Response[v1.ListBundlesResponse], error)
+	// GetBundle returns one bundle's provenance, every version (seq ASC), and its latest version's
+	// members. Creator-only.
+	GetBundle(context.Context, *connect.Request[v1.GetBundleRequest]) (*connect.Response[v1.GetBundleResponse], error)
+	// GetBundleDiff computes a per-member diff between two versions of a bundle, including SKILL.md
+	// body diffs for added/changed members (§4.9 — an un-diffed one-click update channel is the same
+	// outcome as the silent-update channel this design rejects). Marks any matching ReingestBundle
+	// diff_token as viewed. Creator-only.
+	GetBundleDiff(context.Context, *connect.Request[v1.GetBundleDiffRequest]) (*connect.Response[v1.GetBundleDiffResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1443,6 +1540,30 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("IngestSkillFromURL")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceReingestBundleHandler := connect.NewUnaryHandler(
+		SpawnServiceReingestBundleProcedure,
+		svc.ReingestBundle,
+		connect.WithSchema(spawnServiceMethods.ByName("ReingestBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceListBundlesHandler := connect.NewUnaryHandler(
+		SpawnServiceListBundlesProcedure,
+		svc.ListBundles,
+		connect.WithSchema(spawnServiceMethods.ByName("ListBundles")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceGetBundleHandler := connect.NewUnaryHandler(
+		SpawnServiceGetBundleProcedure,
+		svc.GetBundle,
+		connect.WithSchema(spawnServiceMethods.ByName("GetBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceGetBundleDiffHandler := connect.NewUnaryHandler(
+		SpawnServiceGetBundleDiffProcedure,
+		svc.GetBundleDiff,
+		connect.WithSchema(spawnServiceMethods.ByName("GetBundleDiff")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
@@ -1559,6 +1680,14 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceDeleteBundleVersionHandler.ServeHTTP(w, r)
 		case SpawnServiceIngestSkillFromURLProcedure:
 			spawnServiceIngestSkillFromURLHandler.ServeHTTP(w, r)
+		case SpawnServiceReingestBundleProcedure:
+			spawnServiceReingestBundleHandler.ServeHTTP(w, r)
+		case SpawnServiceListBundlesProcedure:
+			spawnServiceListBundlesHandler.ServeHTTP(w, r)
+		case SpawnServiceGetBundleProcedure:
+			spawnServiceGetBundleHandler.ServeHTTP(w, r)
+		case SpawnServiceGetBundleDiffProcedure:
+			spawnServiceGetBundleDiffHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1794,4 +1923,20 @@ func (UnimplementedSpawnServiceHandler) DeleteBundleVersion(context.Context, *co
 
 func (UnimplementedSpawnServiceHandler) IngestSkillFromURL(context.Context, *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.IngestSkillFromURL is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ReingestBundle(context.Context, *connect.Request[v1.ReingestBundleRequest]) (*connect.Response[v1.ReingestBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ReingestBundle is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ListBundles(context.Context, *connect.Request[v1.ListBundlesRequest]) (*connect.Response[v1.ListBundlesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListBundles is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetBundle(context.Context, *connect.Request[v1.GetBundleRequest]) (*connect.Response[v1.GetBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetBundle is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetBundleDiff(context.Context, *connect.Request[v1.GetBundleDiffRequest]) (*connect.Response[v1.GetBundleDiffResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetBundleDiff is not implemented"))
 }

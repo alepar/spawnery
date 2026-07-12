@@ -32,6 +32,10 @@ type BundleResult struct {
 	// Warnings lists non-fatal discovery findings — e.g. a member root that hides nested
 	// SKILL.mds. nil when there is nothing to warn about.
 	Warnings []string
+	// ETag is the response ETag header from the 200 fetch (§4.8 conditional refetch); "" if
+	// GitHub sent none. Zero on a notModified result (FetchBundleConditional never returns a
+	// non-zero BundleResult alongside notModified=true).
+	ETag string
 }
 
 // Member is one skill discovered and repacked from a bundle fetch.
@@ -179,14 +183,42 @@ func joinMemberDir(subdir, dir string) string {
 // Fails loud, before any member is returned, on: zero skills found; duplicate member names;
 // duplicate member content (byte-identical member dirs); a member's plain tar exceeding
 // PlainTarCapBytes.
+//
+// FetchBundle is the unconditional case of FetchBundleConditional (etag=""); a 304 is impossible
+// without an etag, so its notModified result is always discarded here.
 func (f *fetcher) FetchBundle(ctx context.Context, ref RepoRef, gitRef, subdir string) (BundleResult, error) {
+	res, _, err := f.FetchBundleConditional(ctx, ref, gitRef, subdir, "")
+	return res, err
+}
+
+// ConditionalBundleFetcher fetches a bundle with §4.8 conditional-refetch support. Declared
+// separately from BundleFetcher (rather than adding a method to it), mirroring why BundleFetcher
+// itself was split from Fetcher (skillfetch.go): existing BundleFetcher test doubles keep
+// compiling unmodified; *fetcher satisfies both.
+type ConditionalBundleFetcher interface {
+	// FetchBundleConditional sends If-None-Match when etag != "". notModified=true means HTTP
+	// 304: BundleResult is zero and MUST NOT be interpreted as an empty bundle.
+	FetchBundleConditional(ctx context.Context, ref RepoRef, gitRef, subdir, etag string) (res BundleResult, notModified bool, err error)
+}
+
+// FetchBundleConditional is FetchBundle plus §4.8 conditional-refetch support. See
+// ConditionalBundleFetcher.
+func (f *fetcher) FetchBundleConditional(ctx context.Context, ref RepoRef, gitRef, subdir, etag string) (BundleResult, bool, error) {
 	rawURL := tarballURL(ref.Owner, ref.Repo, gitRef)
 
-	unpacked, err := f.client.fetchAndUnpack(ctx, rawURL, f.cfg.GitHubToken, subdir)
+	unpacked, err := f.client.fetchAndUnpackConditional(ctx, rawURL, f.cfg.GitHubToken, subdir, etag)
 	if err != nil {
-		return BundleResult{}, err
+		return BundleResult{}, false, err
 	}
-	return f.assembleBundle(ref, subdir, unpacked)
+	if unpacked.notModified {
+		return BundleResult{}, true, nil
+	}
+	res, err := f.assembleBundle(ref, subdir, unpacked)
+	if err != nil {
+		return BundleResult{}, false, err
+	}
+	res.ETag = unpacked.etag
+	return res, false, nil
 }
 
 // assembleBundle is FetchBundle's discovery/repack/fail-loud logic, split out from the network

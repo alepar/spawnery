@@ -166,6 +166,13 @@ type unpackResult struct {
 	entries      []tarEntry
 	skipped      []skippedEntry
 	sourceCommit string
+	// etag is the response ETag header from a 200 (§4.8 conditional refetch); "" if absent or on
+	// an unconditional fetch. Never set on a notModified result.
+	etag string
+	// notModified is true iff the request carried an If-None-Match etag and the server replied
+	// HTTP 304: entries/skipped/sourceCommit/etag are all zero, no body was read. Callers MUST
+	// check this before interpreting a zero-value unpackResult as an empty tree.
+	notModified bool
 }
 
 // sourceCommitFromWrapper extracts the commit sha from a GitHub tarball wrapper dir name
@@ -217,7 +224,18 @@ func nonRegularKind(typeflag byte) (kind string, ok bool) {
 // (symlink, hardlink, device, fifo) that were skipped rather than unpacked, plus the source commit
 // recovered from the wrapper dir.
 // It enforces streaming bounds before any buffering.
+//
+// This is the unconditional fetch: it never sends If-None-Match and its result never has
+// notModified=true. See fetchAndUnpackConditional for the etag-aware variant (§4.8).
 func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir string) (unpackResult, error) {
+	return s.fetchAndUnpackConditional(ctx, rawURL, token, subdir, "")
+}
+
+// fetchAndUnpackConditional is fetchAndUnpack plus §4.8 conditional-refetch support: when etag is
+// non-empty it is sent as If-None-Match, and a 304 response short-circuits to
+// unpackResult{notModified: true} — no body read, no gzip/tar parse. etag == "" behaves exactly
+// like fetchAndUnpack (no conditional header sent; a 304 is impossible without one).
+func (s *secureClient) fetchAndUnpackConditional(ctx context.Context, rawURL, token, subdir, etag string) (unpackResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return unpackResult{}, fmt.Errorf("build request: %w", err)
@@ -226,6 +244,9 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
 	}
 
 	resp, err := s.client.Do(req)
@@ -239,9 +260,14 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 	}
 	defer resp.Body.Close()
 
+	respETag := ""
 	switch resp.StatusCode {
 	case http.StatusOK:
-		// continue
+		respETag = resp.Header.Get("ETag")
+	case http.StatusNotModified:
+		// §4.8: upstream confirms no change since etag. No body to read (or an empty one — GitHub
+		// sends none on a 304), no repack, no Garage put, no DB write.
+		return unpackResult{notModified: true}, nil
 	case http.StatusTooManyRequests:
 		retryAfter := resp.Header.Get("Retry-After")
 		return unpackResult{}, &ErrRateLimit{RetryAfter: retryAfter}
@@ -392,6 +418,7 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 		entries:      entries,
 		skipped:      skipped,
 		sourceCommit: sourceCommitFromWrapper(wrapperPrefix),
+		etag:         respETag,
 	}, nil
 }
 
