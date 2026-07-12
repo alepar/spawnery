@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/uptrace/bun"
 )
@@ -144,6 +145,77 @@ func (r *skillBundleRepo) SetETag(ctx context.Context, bundleID, etag string, no
 		Set("updated_at = ?", now).
 		Where("bundle_id = ?", bundleID).
 		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// LockBundle acquires an exclusive lock on the bundle row for the remainder of the enclosing tx.
+// MUST be called inside WithTx. ErrNotFound when the row is gone (doubles as the existence
+// check). Same self-assignment-UPDATE idiom as CustomizationCatalogRepo.LockRow (sp-mwco.3.3 §2)
+// — SELECT ... FOR UPDATE is not portable to the hermetic SQLite store.
+func (r *skillBundleRepo) LockBundle(ctx context.Context, bundleID string) error {
+	if _, ok := r.db.(*bun.DB); ok {
+		return fmt.Errorf("store: LockBundle must be called inside WithTx")
+	}
+	res, err := r.db.NewUpdate().Model((*SkillBundle)(nil)).
+		Set("updated_at = updated_at").
+		Where("bundle_id = ?", bundleID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// LockVersion acquires an exclusive lock on the version row for the remainder of the enclosing
+// tx. MUST be called inside WithTx. ErrNotFound when the row is gone. skill_bundle_version has no
+// updated_at column, so the self-assignment target is seq (notnull, non-PK).
+func (r *skillBundleRepo) LockVersion(ctx context.Context, versionID string) error {
+	if _, ok := r.db.(*bun.DB); ok {
+		return fmt.Errorf("store: LockVersion must be called inside WithTx")
+	}
+	res, err := r.db.NewUpdate().Model((*SkillBundleVersion)(nil)).
+		Set("seq = seq").
+		Where("version_id = ?", versionID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteBundle removes a bundle. FK ON DELETE CASCADE removes its versions and their member rows
+// — but NOT the member customization_catalog rows: content-identity dedup means a catalog row can
+// be shared across bundles/versions, so deleting it here could silently break another bundle's
+// membership. Orphaned member rows are left unlisted; revocation is the sha denylist (§4.2), not
+// deletion. ErrNotFound when absent.
+func (r *skillBundleRepo) DeleteBundle(ctx context.Context, bundleID string) error {
+	res, err := r.db.NewDelete().Model((*SkillBundle)(nil)).Where("bundle_id = ?", bundleID).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteBundleVersion removes one version — via FK ON DELETE CASCADE its member rows go with it,
+// but sibling versions of the same bundle are untouched. Member catalog rows survive, same as
+// DeleteBundle. ErrNotFound when absent.
+func (r *skillBundleRepo) DeleteBundleVersion(ctx context.Context, versionID string) error {
+	res, err := r.db.NewDelete().Model((*SkillBundleVersion)(nil)).Where("version_id = ?", versionID).Exec(ctx)
 	if err != nil {
 		return err
 	}

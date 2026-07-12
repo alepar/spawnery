@@ -179,35 +179,11 @@ func (s *Server) AddProfileEntry(ctx context.Context, req *connect.Request[cpv1.
 		if e.CatalogId == "" {
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("catalog_id is required for CATALOG_REF source"))
 		}
-		// Tenant gate (sp-mwco.3.4 §4.6 D6): the referenced entry must exist and be visible to the
-		// profile's owner (listed OR theirs) — NotFound either way, never PermissionDenied (don't
-		// confirm existence). This also closes the "attach a nonexistent catalog_id" dangling-ref
-		// hole on the normal path (a concurrent attach can still race it; assembly fails loud as
-		// defense in depth).
-		ce, err := s.st.CustomizationCatalog().Get(ctx, e.CatalogId)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
-			}
-			return nil, connect.NewError(connect.CodeInternal, err)
-		}
-		if !catalogEntryVisibleTo(ce, p.OwnerID) {
-			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
-		}
 	case cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CUSTOM:
 		// Full validation: name rules, size cap, path confinement (sp-nrzf.3.6).
 		if err := validateCustomContent(protoToEntryKind(e.Kind), strings.TrimSpace(e.Name), e.CustomInline); err != nil {
 			return nil, err
 		}
-	}
-
-	// Enforce per-profile entry count cap before inserting (sp-nrzf.3.6).
-	_, existingEntries, _, err := s.st.Profiles().Get(ctx, req.Msg.ProfileId)
-	if err != nil {
-		return nil, mapProfileErr(err)
-	}
-	if err := enforceProfileEntryCap(len(existingEntries)); err != nil {
-		return nil, err
 	}
 
 	eid, err := uuid.NewV7()
@@ -226,9 +202,56 @@ func (s *Server) AddProfileEntry(ctx context.Context, req *connect.Request[cpv1.
 		Targets:       e.Targets,
 		MCPSecretRefs: e.McpSecretRefs,
 	}
-	newVer, err := s.st.Profiles().AddEntry(ctx, req.Msg.ProfileId, req.Msg.ExpectedVersion, se, time.Now().Unix())
-	if err != nil {
-		return nil, mapProfileErr(err)
+
+	// The catalog-ref existence/visibility check, the entry-count cap check, and the insert all
+	// run inside one WithTx so they serialize against a concurrent DeleteCatalogEntry on the same
+	// catalog_id (sp-mwco.3.3 §2) — LockRow is the mutex both sides take on the referenced row.
+	// Without it, "check the ref exists, then insert" and "check no ref exists, then delete" can
+	// interleave and leave a dangling ref on the normal path even though neither side raced an
+	// error.
+	var newVer uint64
+	txErr := s.st.WithTx(ctx, func(tx store.Store) error {
+		if e.Source == cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF {
+			// Tenant gate (sp-mwco.3.4 §4.6 D6): the referenced entry must exist and be visible to
+			// the profile's owner (listed OR theirs) — NotFound either way, never
+			// PermissionDenied (don't confirm existence). LockRow doubles as the existence check.
+			if err := tx.CustomizationCatalog().LockRow(ctx, e.CatalogId); err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
+				}
+				return err
+			}
+			ce, err := tx.CustomizationCatalog().Get(ctx, e.CatalogId)
+			if err != nil {
+				return err
+			}
+			if !catalogEntryVisibleTo(ce, p.OwnerID) {
+				return connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
+			}
+		}
+
+		// Enforce per-profile entry count cap before inserting (sp-nrzf.3.6).
+		_, existingEntries, _, err := tx.Profiles().Get(ctx, req.Msg.ProfileId)
+		if err != nil {
+			return err
+		}
+		if err := enforceProfileEntryCap(len(existingEntries)); err != nil {
+			return err
+		}
+
+		ver, err := tx.Profiles().AddEntry(ctx, req.Msg.ProfileId, req.Msg.ExpectedVersion, se, time.Now().Unix())
+		if err != nil {
+			return err
+		}
+		newVer = ver
+		return nil
+	})
+	if txErr != nil {
+		var cerr *connect.Error
+		if errors.As(txErr, &cerr) {
+			return nil, cerr
+		}
+		return nil, mapProfileErr(txErr)
 	}
 	return connect.NewResponse(&cpv1.AddProfileEntryResponse{
 		EntryId: entryID,

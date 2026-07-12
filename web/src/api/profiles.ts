@@ -168,6 +168,35 @@ export async function getCatalogEntry(catalogId: string): Promise<CustomizationC
   return r.entry;
 }
 
+/**
+ * Delete a catalog entry. A referenced entry (a profile's catalog_ref, or a bundle-version
+ * membership) is rejected with FailedPrecondition — the message carries counts only, never
+ * profile/owner ids (sp-mwco.3.3 §4.3). Pass `force: true` to delete anyway; force does NOT
+ * override a bundle-version membership (delete the bundle version instead).
+ */
+export async function deleteCatalogEntry(catalogId: string, opts?: { force?: boolean }): Promise<void> {
+  await unary<Record<string, never>>("DeleteCatalogEntry", { catalogId, force: opts?.force ?? false });
+}
+
+/**
+ * Delete a skill bundle (creator-only). Cascades to its versions and their members, but not to
+ * the member catalog rows themselves (content-identity dedup — they may be shared elsewhere).
+ * Rejected with FailedPrecondition (counts-only message) if any profile references the bundle,
+ * unless `force: true`.
+ */
+export async function deleteBundle(bundleId: string, opts?: { force?: boolean }): Promise<void> {
+  await unary<Record<string, never>>("DeleteBundle", { bundleId, force: opts?.force ?? false });
+}
+
+/**
+ * Delete one version of a skill bundle (creator-only). Sibling versions are untouched. Rejected
+ * with FailedPrecondition (counts-only message) if any profile is pinned to this version, unless
+ * `force: true`.
+ */
+export async function deleteBundleVersion(versionId: string, opts?: { force?: boolean }): Promise<void> {
+  await unary<Record<string, never>>("DeleteBundleVersion", { versionId, force: opts?.force ?? false });
+}
+
 // --- Skill URL ingest API -----------------------------------------------------
 
 export interface IngestSkillFromURLInput {

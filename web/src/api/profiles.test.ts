@@ -9,6 +9,10 @@ import {
   removeProfileEntry,
   listCatalogEntries,
   getCatalogEntry,
+  deleteCatalogEntry,
+  deleteBundle,
+  deleteBundleVersion,
+  connectErrorMessage,
   kindToCapKind,
   KIND_LABEL,
   type ProfileEntryKind,
@@ -176,6 +180,55 @@ describe("profiles api", () => {
     const entry = await getCatalogEntry("c1");
     expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ catalogId: "c1" });
     expect(entry.catalogId).toBe("c1");
+  });
+
+  it("deleteCatalogEntry POSTs DeleteCatalogEntry with force defaulting to false", async () => {
+    const f = mockFetch({});
+    vi.stubGlobal("fetch", f);
+    await deleteCatalogEntry("c1");
+    expect(f).toHaveBeenCalledWith("/cp.v1.SpawnService/DeleteCatalogEntry", expect.objectContaining({ method: "POST" }));
+    expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ catalogId: "c1", force: false });
+  });
+
+  it("deleteCatalogEntry sends force:true when requested", async () => {
+    const f = mockFetch({});
+    vi.stubGlobal("fetch", f);
+    await deleteCatalogEntry("c1", { force: true });
+    expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ catalogId: "c1", force: true });
+  });
+
+  it("deleteCatalogEntry surfaces a FailedPrecondition counts-only message verbatim via connectErrorMessage", async () => {
+    const f = mockFetch(
+      { code: "failed_precondition", message: "catalog entry c1 is referenced by 3 profile(s) across 2 owner(s); re-run with force=true to delete anyway" },
+      false,
+    );
+    vi.stubGlobal("fetch", f);
+    let caught: unknown;
+    try {
+      await deleteCatalogEntry("c1");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(connectErrorMessage(caught)).toBe(
+      "catalog entry c1 is referenced by 3 profile(s) across 2 owner(s); re-run with force=true to delete anyway",
+    );
+  });
+
+  it("deleteBundle POSTs DeleteBundle with bundleId and force", async () => {
+    const f = mockFetch({});
+    vi.stubGlobal("fetch", f);
+    await deleteBundle("b1", { force: true });
+    expect(f).toHaveBeenCalledWith("/cp.v1.SpawnService/DeleteBundle", expect.objectContaining({ method: "POST" }));
+    expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ bundleId: "b1", force: true });
+  });
+
+  it("deleteBundleVersion POSTs DeleteBundleVersion with versionId and force defaulting to false", async () => {
+    const f = mockFetch({});
+    vi.stubGlobal("fetch", f);
+    await deleteBundleVersion("v1");
+    expect(f).toHaveBeenCalledWith("/cp.v1.SpawnService/DeleteBundleVersion", expect.objectContaining({ method: "POST" }));
+    expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ versionId: "v1", force: false });
   });
 });
 

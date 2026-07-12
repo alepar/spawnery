@@ -239,6 +239,21 @@ type ProfileRepo interface {
 	// returns (0, 0, nil). Used by the guarded-unlist reference check (sp-mwco.3.4 §4.6 D5) — the
 	// counts (never profile/owner ids) drive the FailedPrecondition warning message.
 	CountRefsByCatalogRef(ctx context.Context, catalogID string) (profiles, owners int, err error)
+	// ListProfileIDsByBundleRef returns distinct profile_ids that contain a bundle_ref entry
+	// pinned to the given bundleID. Empty slice (not an error) when none match. Local bundle-aware
+	// spawn resolution (sp-mwco.3.3, until sp-mwco.1.6's bundle-aware resolveAffectedSpawns lands).
+	ListProfileIDsByBundleRef(ctx context.Context, bundleID string) ([]string, error)
+	// ListProfileIDsByBundleVersionRef returns distinct profile_ids that contain a bundle_ref
+	// entry pinned to the given versionID. Empty slice (not an error) when none match.
+	ListProfileIDsByBundleVersionRef(ctx context.Context, versionID string) ([]string, error)
+	// CountBundleRefs returns the number of distinct profiles, and the number of distinct owners
+	// of those profiles, that contain a bundle_ref entry pinned to bundleID. Zero refs returns
+	// (0, 0, nil). Backs DeleteBundle's counts-only reference-check message (sp-mwco.3.3 §4.3).
+	CountBundleRefs(ctx context.Context, bundleID string) (profiles, owners int, err error)
+	// CountBundleVersionRefs returns the number of distinct profiles, and the number of distinct
+	// owners of those profiles, that contain a bundle_ref entry pinned to versionID. Zero refs
+	// returns (0, 0, nil). Backs DeleteBundleVersion's counts-only reference-check message.
+	CountBundleVersionRefs(ctx context.Context, versionID string) (profiles, owners int, err error)
 }
 
 // CustomizationCatalogRepo manages curated catalog entries.
@@ -261,6 +276,11 @@ type CustomizationCatalogRepo interface {
 	Update(ctx context.Context, catalogID string, name, description string, content []byte, now int64) error
 	// SetListed sets the listing visibility of an entry. ErrNotFound when absent.
 	SetListed(ctx context.Context, catalogID string, listed bool) error
+	// LockRow takes an exclusive lock on the catalog row for the remainder of the enclosing tx.
+	// MUST be called inside WithTx (returns an error otherwise). ErrNotFound when the row is gone
+	// — it doubles as the existence check. The mutex that serializes DeleteCatalogEntry against a
+	// concurrent AddProfileEntry on the same catalog_id (sp-mwco.3.3 §2).
+	LockRow(ctx context.Context, catalogID string) error
 	// Delete removes an entry. ErrNotFound when absent.
 	Delete(ctx context.Context, catalogID string) error
 	// GetByCreatorSHA returns the entry for (creatorID, sha256hex). ErrNotFound when absent.
@@ -303,6 +323,23 @@ type SkillBundleRepo interface {
 	MemberVersionIDs(ctx context.Context, catalogID string) ([]string, error)
 	// SetETag updates the bundle's conditional-refetch etag (§4.8). ErrNotFound when absent.
 	SetETag(ctx context.Context, bundleID, etag string, now int64) error
+	// LockBundle takes an exclusive lock on the bundle row for the remainder of the enclosing tx.
+	// MUST be called inside WithTx (returns an error otherwise). ErrNotFound when the row is gone.
+	// Same self-assignment-UPDATE idiom as CustomizationCatalogRepo.LockRow (sp-mwco.3.3 §2).
+	LockBundle(ctx context.Context, bundleID string) error
+	// LockVersion takes an exclusive lock on the version row for the remainder of the enclosing
+	// tx. MUST be called inside WithTx (returns an error otherwise). ErrNotFound when the row is
+	// gone. skill_bundle_version has no updated_at column, so the self-assignment target is seq.
+	LockVersion(ctx context.Context, versionID string) error
+	// DeleteBundle removes a bundle. FK ON DELETE CASCADE removes its versions and their member
+	// rows, but NOT the member customization_catalog rows (content-identity dedup means a row can
+	// be shared across bundles/versions — deleting it here could break another bundle's
+	// membership). ErrNotFound when absent.
+	DeleteBundle(ctx context.Context, bundleID string) error
+	// DeleteBundleVersion removes one version and, via cascade, its member rows — sibling versions
+	// of the same bundle are untouched. Member catalog rows survive, same as DeleteBundle.
+	// ErrNotFound when absent.
+	DeleteBundleVersion(ctx context.Context, versionID string) error
 }
 
 type Store interface {

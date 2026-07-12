@@ -185,6 +185,12 @@ const (
 	// SpawnServicePublishBundleProcedure is the fully-qualified name of the SpawnService's
 	// PublishBundle RPC.
 	SpawnServicePublishBundleProcedure = "/cp.v1.SpawnService/PublishBundle"
+	// SpawnServiceDeleteBundleProcedure is the fully-qualified name of the SpawnService's DeleteBundle
+	// RPC.
+	SpawnServiceDeleteBundleProcedure = "/cp.v1.SpawnService/DeleteBundle"
+	// SpawnServiceDeleteBundleVersionProcedure is the fully-qualified name of the SpawnService's
+	// DeleteBundleVersion RPC.
+	SpawnServiceDeleteBundleVersionProcedure = "/cp.v1.SpawnService/DeleteBundleVersion"
 	// SpawnServiceIngestSkillFromURLProcedure is the fully-qualified name of the SpawnService's
 	// IngestSkillFromURL RPC.
 	SpawnServiceIngestSkillFromURLProcedure = "/cp.v1.SpawnService/IngestSkillFromURL"
@@ -273,6 +279,13 @@ type SpawnServiceClient interface {
 	// PublishBundle lists every member of every version of a bundle — not just the latest, since a
 	// profile may pin an older version and must still be able to resolve it.
 	PublishBundle(context.Context, *connect.Request[v1.PublishBundleRequest]) (*connect.Response[v1.PublishBundleResponse], error)
+	// DeleteBundle / DeleteBundleVersion (sp-mwco.3.3 §4.3): creator-only, reference-checked delete
+	// for bundles/versions. A version or bundle referenced by a bundle_ref profile entry is
+	// rejected with FailedPrecondition (counts-only message) unless force=true. DeleteBundle
+	// cascades to its versions and their members but does NOT delete the member catalog rows
+	// (content-identity dedup — a row may be shared across bundles/versions).
+	DeleteBundle(context.Context, *connect.Request[v1.DeleteBundleRequest]) (*connect.Response[v1.DeleteBundleResponse], error)
+	DeleteBundleVersion(context.Context, *connect.Request[v1.DeleteBundleVersionRequest]) (*connect.Response[v1.DeleteBundleVersionResponse], error)
 	// IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
 	// SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
 	// content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
@@ -616,6 +629,18 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("PublishBundle")),
 			connect.WithClientOptions(opts...),
 		),
+		deleteBundle: connect.NewClient[v1.DeleteBundleRequest, v1.DeleteBundleResponse](
+			httpClient,
+			baseURL+SpawnServiceDeleteBundleProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("DeleteBundle")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteBundleVersion: connect.NewClient[v1.DeleteBundleVersionRequest, v1.DeleteBundleVersionResponse](
+			httpClient,
+			baseURL+SpawnServiceDeleteBundleVersionProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("DeleteBundleVersion")),
+			connect.WithClientOptions(opts...),
+		),
 		ingestSkillFromURL: connect.NewClient[v1.IngestSkillFromURLRequest, v1.IngestSkillFromURLResponse](
 			httpClient,
 			baseURL+SpawnServiceIngestSkillFromURLProcedure,
@@ -681,6 +706,8 @@ type spawnServiceClient struct {
 	publishCatalogEntry      *connect.Client[v1.PublishCatalogEntryRequest, v1.PublishCatalogEntryResponse]
 	unpublishCatalogEntry    *connect.Client[v1.UnpublishCatalogEntryRequest, v1.UnpublishCatalogEntryResponse]
 	publishBundle            *connect.Client[v1.PublishBundleRequest, v1.PublishBundleResponse]
+	deleteBundle             *connect.Client[v1.DeleteBundleRequest, v1.DeleteBundleResponse]
+	deleteBundleVersion      *connect.Client[v1.DeleteBundleVersionRequest, v1.DeleteBundleVersionResponse]
 	ingestSkillFromURL       *connect.Client[v1.IngestSkillFromURLRequest, v1.IngestSkillFromURLResponse]
 }
 
@@ -954,6 +981,16 @@ func (c *spawnServiceClient) PublishBundle(ctx context.Context, req *connect.Req
 	return c.publishBundle.CallUnary(ctx, req)
 }
 
+// DeleteBundle calls cp.v1.SpawnService.DeleteBundle.
+func (c *spawnServiceClient) DeleteBundle(ctx context.Context, req *connect.Request[v1.DeleteBundleRequest]) (*connect.Response[v1.DeleteBundleResponse], error) {
+	return c.deleteBundle.CallUnary(ctx, req)
+}
+
+// DeleteBundleVersion calls cp.v1.SpawnService.DeleteBundleVersion.
+func (c *spawnServiceClient) DeleteBundleVersion(ctx context.Context, req *connect.Request[v1.DeleteBundleVersionRequest]) (*connect.Response[v1.DeleteBundleVersionResponse], error) {
+	return c.deleteBundleVersion.CallUnary(ctx, req)
+}
+
 // IngestSkillFromURL calls cp.v1.SpawnService.IngestSkillFromURL.
 func (c *spawnServiceClient) IngestSkillFromURL(ctx context.Context, req *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error) {
 	return c.ingestSkillFromURL.CallUnary(ctx, req)
@@ -1042,6 +1079,13 @@ type SpawnServiceHandler interface {
 	// PublishBundle lists every member of every version of a bundle — not just the latest, since a
 	// profile may pin an older version and must still be able to resolve it.
 	PublishBundle(context.Context, *connect.Request[v1.PublishBundleRequest]) (*connect.Response[v1.PublishBundleResponse], error)
+	// DeleteBundle / DeleteBundleVersion (sp-mwco.3.3 §4.3): creator-only, reference-checked delete
+	// for bundles/versions. A version or bundle referenced by a bundle_ref profile entry is
+	// rejected with FailedPrecondition (counts-only message) unless force=true. DeleteBundle
+	// cascades to its versions and their members but does NOT delete the member catalog rows
+	// (content-identity dedup — a row may be shared across bundles/versions).
+	DeleteBundle(context.Context, *connect.Request[v1.DeleteBundleRequest]) (*connect.Response[v1.DeleteBundleResponse], error)
+	DeleteBundleVersion(context.Context, *connect.Request[v1.DeleteBundleVersionRequest]) (*connect.Response[v1.DeleteBundleVersionResponse], error)
 	// IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
 	// SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
 	// content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
@@ -1381,6 +1425,18 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("PublishBundle")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceDeleteBundleHandler := connect.NewUnaryHandler(
+		SpawnServiceDeleteBundleProcedure,
+		svc.DeleteBundle,
+		connect.WithSchema(spawnServiceMethods.ByName("DeleteBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceDeleteBundleVersionHandler := connect.NewUnaryHandler(
+		SpawnServiceDeleteBundleVersionProcedure,
+		svc.DeleteBundleVersion,
+		connect.WithSchema(spawnServiceMethods.ByName("DeleteBundleVersion")),
+		connect.WithHandlerOptions(opts...),
+	)
 	spawnServiceIngestSkillFromURLHandler := connect.NewUnaryHandler(
 		SpawnServiceIngestSkillFromURLProcedure,
 		svc.IngestSkillFromURL,
@@ -1497,6 +1553,10 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceUnpublishCatalogEntryHandler.ServeHTTP(w, r)
 		case SpawnServicePublishBundleProcedure:
 			spawnServicePublishBundleHandler.ServeHTTP(w, r)
+		case SpawnServiceDeleteBundleProcedure:
+			spawnServiceDeleteBundleHandler.ServeHTTP(w, r)
+		case SpawnServiceDeleteBundleVersionProcedure:
+			spawnServiceDeleteBundleVersionHandler.ServeHTTP(w, r)
 		case SpawnServiceIngestSkillFromURLProcedure:
 			spawnServiceIngestSkillFromURLHandler.ServeHTTP(w, r)
 		default:
@@ -1722,6 +1782,14 @@ func (UnimplementedSpawnServiceHandler) UnpublishCatalogEntry(context.Context, *
 
 func (UnimplementedSpawnServiceHandler) PublishBundle(context.Context, *connect.Request[v1.PublishBundleRequest]) (*connect.Response[v1.PublishBundleResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.PublishBundle is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) DeleteBundle(context.Context, *connect.Request[v1.DeleteBundleRequest]) (*connect.Response[v1.DeleteBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DeleteBundle is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) DeleteBundleVersion(context.Context, *connect.Request[v1.DeleteBundleVersionRequest]) (*connect.Response[v1.DeleteBundleVersionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DeleteBundleVersion is not implemented"))
 }
 
 func (UnimplementedSpawnServiceHandler) IngestSkillFromURL(context.Context, *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error) {

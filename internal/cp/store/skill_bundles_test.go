@@ -309,10 +309,11 @@ func TestSkillBundle_MemberVersionIDs(t *testing.T) {
 	}
 }
 
-// TestSkillBundle_VersionDeleteCascadesMembers proves the FK ON DELETE CASCADE from
-// skill_bundle_version -> skill_bundle_member under foreign_keys(1): deleting the owning bundle
-// cascades through versions to members.
-func TestSkillBundle_VersionDeleteCascadesMembers(t *testing.T) {
+// TestSkillBundle_DeleteBundleCascadesMembers proves the FK ON DELETE CASCADE from
+// skill_bundle -> skill_bundle_version -> skill_bundle_member under foreign_keys(1): deleting the
+// bundle cascades through versions to members, but the member customization_catalog row itself
+// (content-identity dedup — sp-mwco.3.3 §3) survives as an unlisted orphan.
+func TestSkillBundle_DeleteBundleCascadesMembers(t *testing.T) {
 	st := store.NewTestStore(t)
 	ctx := context.Background()
 
@@ -327,8 +328,8 @@ func TestSkillBundle_VersionDeleteCascadesMembers(t *testing.T) {
 		t.Fatalf("CreateVersion: %v", err)
 	}
 
-	if err := store.DeleteBundleForTest(ctx, st, "bundle-1"); err != nil {
-		t.Fatalf("DeleteBundleForTest: %v", err)
+	if err := st.SkillBundles().DeleteBundle(ctx, "bundle-1"); err != nil {
+		t.Fatalf("DeleteBundle: %v", err)
 	}
 
 	versions, err := st.SkillBundles().ListVersions(ctx, "bundle-1")
@@ -344,6 +345,126 @@ func TestSkillBundle_VersionDeleteCascadesMembers(t *testing.T) {
 	}
 	if len(members) != 0 {
 		t.Fatalf("members remaining after bundle delete = %d, want 0", len(members))
+	}
+	if _, err := st.CustomizationCatalog().Get(ctx, "cat-a"); err != nil {
+		t.Fatalf("member catalog row cat-a should survive bundle delete, got: %v", err)
+	}
+}
+
+// TestSkillBundle_DeleteBundle_NotFound proves DeleteBundle returns ErrNotFound for an absent id.
+func TestSkillBundle_DeleteBundle_NotFound(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.SkillBundles().DeleteBundle(ctx, "no-such"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got: %v", err)
+	}
+}
+
+// TestSkillBundle_DeleteBundleVersion_SiblingsIntact proves DeleteBundleVersion only removes the
+// targeted version (and its members via cascade), leaving sibling versions of the same bundle —
+// and the member catalog rows — untouched.
+func TestSkillBundle_DeleteBundleVersion_SiblingsIntact(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.SkillBundles().Create(ctx, makeBundle("bundle-1", "alice", "owner/repo", "", "")); err != nil {
+		t.Fatalf("Create bundle: %v", err)
+	}
+	seedCatalogRow(t, st, "cat-a", "alice", true)
+	seedCatalogRow(t, st, "cat-b", "alice", true)
+
+	v1 := store.SkillBundleVersion{VersionID: "v1", BundleID: "bundle-1", Seq: 1, CreatedAt: 1000}
+	if err := st.SkillBundles().CreateVersion(ctx, v1, []store.SkillBundleMember{
+		{SourceSubdir: "skills/a", CatalogID: "cat-a", Position: 0},
+	}); err != nil {
+		t.Fatalf("CreateVersion v1: %v", err)
+	}
+	v2 := store.SkillBundleVersion{VersionID: "v2", BundleID: "bundle-1", Seq: 2, CreatedAt: 1000}
+	if err := st.SkillBundles().CreateVersion(ctx, v2, []store.SkillBundleMember{
+		{SourceSubdir: "skills/b", CatalogID: "cat-b", Position: 0},
+	}); err != nil {
+		t.Fatalf("CreateVersion v2: %v", err)
+	}
+
+	if err := st.SkillBundles().DeleteBundleVersion(ctx, "v1"); err != nil {
+		t.Fatalf("DeleteBundleVersion: %v", err)
+	}
+
+	if _, err := st.SkillBundles().GetVersion(ctx, "v1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected v1 gone, got: %v", err)
+	}
+	if _, err := st.SkillBundles().GetVersion(ctx, "v2"); err != nil {
+		t.Fatalf("expected v2 (sibling) intact, got: %v", err)
+	}
+	members, err := st.SkillBundles().Members(ctx, "v2")
+	if err != nil {
+		t.Fatalf("Members v2: %v", err)
+	}
+	if len(members) != 1 {
+		t.Fatalf("v2 members = %d, want 1 (sibling untouched)", len(members))
+	}
+	if _, err := st.CustomizationCatalog().Get(ctx, "cat-a"); err != nil {
+		t.Fatalf("member catalog row cat-a should survive version delete, got: %v", err)
+	}
+}
+
+// TestSkillBundle_DeleteBundleVersion_NotFound proves DeleteBundleVersion returns ErrNotFound for
+// an absent id.
+func TestSkillBundle_DeleteBundleVersion_NotFound(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.SkillBundles().DeleteBundleVersion(ctx, "no-such"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got: %v", err)
+	}
+}
+
+// TestSkillBundle_LockBundle_OutsideTxRejected proves LockBundle refuses to run outside WithTx.
+func TestSkillBundle_LockBundle_OutsideTxRejected(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.SkillBundles().LockBundle(ctx, "bundle-1"); err == nil {
+		t.Fatal("expected an error locking outside WithTx, got nil")
+	}
+}
+
+// TestSkillBundle_LockBundle_MissingRow_ErrNotFound proves LockBundle doubles as an existence
+// check inside a tx.
+func TestSkillBundle_LockBundle_MissingRow_ErrNotFound(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	err := st.WithTx(ctx, func(tx store.Store) error {
+		return tx.SkillBundles().LockBundle(ctx, "no-such")
+	})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got: %v", err)
+	}
+}
+
+// TestSkillBundle_LockVersion_OutsideTxRejected proves LockVersion refuses to run outside WithTx.
+func TestSkillBundle_LockVersion_OutsideTxRejected(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.SkillBundles().LockVersion(ctx, "v1"); err == nil {
+		t.Fatal("expected an error locking outside WithTx, got nil")
+	}
+}
+
+// TestSkillBundle_LockVersion_MissingRow_ErrNotFound proves LockVersion doubles as an existence
+// check inside a tx.
+func TestSkillBundle_LockVersion_MissingRow_ErrNotFound(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	err := st.WithTx(ctx, func(tx store.Store) error {
+		return tx.SkillBundles().LockVersion(ctx, "no-such")
+	})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got: %v", err)
 	}
 }
 
