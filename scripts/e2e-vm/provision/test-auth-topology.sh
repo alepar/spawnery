@@ -45,12 +45,19 @@ if rg -n '^NODE_(ID_DIR|ROOT_CA|CERTIFICATE_REVOCATION_(ISSUERS|CRLS))=/etc/spaw
   exit 1
 fi
 
-if ! rg -q '^[[:space:]]*@as[[:space:]]+path.*[[:space:]]/enrollment-tokens([[:space:]]|$)' "$HERE/provision.sh"; then
+as_match="$(awk '$1 == "@as" && $2 == "path" { print; exit }' "$HERE/provision.sh")"
+read -r -a as_tokens <<< "$as_match"
+public_enrollment_found=0
+for token in "${as_tokens[@]:2}"; do
+  if [[ "$token" == "/enrollment-tokens" ]]; then
+    public_enrollment_found=1
+  elif [[ "$token" == /enroll* ]]; then
+    echo "Caddy exposes internal enrollment path token: $token" >&2
+    exit 1
+  fi
+done
+if [[ "$public_enrollment_found" != 1 ]]; then
   echo "Caddy does not proxy public enrollment-token issuance" >&2
-  exit 1
-fi
-if rg -n '^[[:space:]]*@as[[:space:]]+path.*[[:space:]]/enroll(\*|[[:space:]]|$)' "$HERE/provision.sh"; then
-  echo "Caddy exposes the internal enrollment credential-delivery route" >&2
   exit 1
 fi
 

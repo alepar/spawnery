@@ -220,18 +220,39 @@ func TestProductionCaddyProxiesPublicEnrollmentTokenIssuanceOnly(t *testing.T) {
 	paths := map[string]bool{}
 	for _, field := range strings.Fields(asMatcher)[2:] {
 		paths[field] = true
+		if forbiddenCaddyEnrollmentPath(field) {
+			t.Errorf("Caddy AS matcher exposes internal enrollment path %s: %s", field, asMatcher)
+		}
 	}
 	if !paths["/enrollment-tokens"] {
 		t.Errorf("Caddy AS matcher does not proxy public /enrollment-tokens: %s", asMatcher)
 	}
-	for _, internal := range []string{"/enroll", "/enroll*"} {
-		if paths[internal] {
-			t.Errorf("Caddy AS matcher exposes internal enrollment route %s: %s", internal, asMatcher)
-		}
-	}
 	if !strings.Contains(provision, "reverse_proxy @as 127.0.0.1:8090") {
 		t.Error("Caddy AS matcher is not proxied to the public authsvc listener")
 	}
+}
+
+func TestForbiddenCaddyEnrollmentPath(t *testing.T) {
+	for _, test := range []struct {
+		path      string
+		forbidden bool
+	}{
+		{path: "/enrollment-tokens"},
+		{path: "/oauth*"},
+		{path: "/enroll", forbidden: true},
+		{path: "/enroll*", forbidden: true},
+		{path: "/enroll/*", forbidden: true},
+		{path: "/enroll/private", forbidden: true},
+		{path: "/enrollment-tokens/private", forbidden: true},
+	} {
+		if got := forbiddenCaddyEnrollmentPath(test.path); got != test.forbidden {
+			t.Errorf("forbiddenCaddyEnrollmentPath(%q) = %v, want %v", test.path, got, test.forbidden)
+		}
+	}
+}
+
+func forbiddenCaddyEnrollmentPath(path string) bool {
+	return strings.HasPrefix(path, "/enroll") && path != "/enrollment-tokens"
 }
 
 func systemdUnitBody(t *testing.T, provision, unit string) string {
