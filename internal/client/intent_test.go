@@ -1,21 +1,16 @@
 package client
 
-// intent_test.go covers the AM1 client-side validation in pollAndSign [AM1], the
-// provisionWithIntent NACK-retry orchestration [AC1], and BuildSessionOpenIntent.
+// intent_test.go covers AM1 client-side validation, the staged node-credential failure,
+// and BuildSessionOpenIntent.
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"connectrpc.com/connect"
 
-	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/internal/intent"
 )
@@ -126,199 +121,19 @@ func TestAM1MatchingParamsAccepted(t *testing.T) {
 	}
 }
 
-func TestPollAndSignThreadsPendingIntentMounts(t *testing.T) {
-	ic := &capturingIntentClient{pending: &cpv1.PendingIntent{
-		Op:      "create-spawn",
-		SpawnId: "sp-mounts",
-		AppRef:  "myapp/ref",
-		Model:   "claude-3",
-		Mounts: []*cpv1.MountBinding{
-			{Name: "main", BackendUri: "github:owner/repo"},
-			{Name: "cache", BackendUri: "scratch"},
-		},
+func TestPollAndSignFailsLocallyWithoutNodeCredential(t *testing.T) {
+	ic := &fakeIntentClient{pending: &cpv1.PendingIntent{
+		Op: "create-spawn", SpawnId: "sp-local-fail", TargetNodeId: "node-1",
 	}}
-	if err := pollAndSign(context.Background(), ic, "sp-mounts", IntentParams{AppRef: "myapp/ref", Model: "claude-3"}); err != nil {
-		t.Fatalf("pollAndSign: %v", err)
+	err := pollAndSign(context.Background(), ic, "sp-local-fail", IntentParams{})
+	if !errors.Is(err, ErrNodeCredentialUnavailable) {
+		t.Fatalf("pollAndSign error = %v, want ErrNodeCredentialUnavailable", err)
 	}
-	body := ic.firstBody()
-	if body == nil {
-		t.Fatal("SubmitIntent carried no parsable IntentBody")
+	if !strings.Contains(err.Error(), "node access credential") {
+		t.Fatalf("pollAndSign error is not actionable: %v", err)
 	}
-	if len(body.Mounts) != 2 {
-		t.Fatalf("IntentBody.Mounts len=%d, want 2", len(body.Mounts))
-	}
-	if body.Mounts[0].GetName() != "main" || body.Mounts[0].GetBackendUri() != "github:owner/repo" {
-		t.Fatalf("IntentBody.Mounts[0]=%+v", body.Mounts[0])
-	}
-	if body.Mounts[1].GetName() != "cache" || body.Mounts[1].GetBackendUri() != "scratch" {
-		t.Fatalf("IntentBody.Mounts[1]=%+v", body.Mounts[1])
-	}
-}
-
-// ---- provisionWithIntent tests [AC1] ------------------------------------------------
-
-// capturingIntentClient records each SubmitIntent call (the SpawnId + the JTI from the
-// signed body) so tests can assert distinct JTIs across retry rounds.
-type capturingIntentClient struct {
-	mu       sync.Mutex
-	jtisSeen []string
-	bodies   []*authv1.IntentBody
-	pending  *cpv1.PendingIntent
-}
-
-func (c *capturingIntentClient) GetPendingIntent(_ context.Context, _ *connect.Request[cpv1.GetPendingIntentRequest]) (*connect.Response[cpv1.GetPendingIntentResponse], error) {
-	return connect.NewResponse(&cpv1.GetPendingIntentResponse{Ready: true, Pending: c.pending}), nil
-}
-
-func (c *capturingIntentClient) SubmitIntent(_ context.Context, req *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
-	jti := ""
-	var parsed *authv1.IntentBody
-	if si := req.Msg.Intent; si != nil {
-		if body, err := intent.ParseBody(si.Body); err == nil {
-			jti = body.Jti
-			parsed = body
-		}
-	}
-	c.mu.Lock()
-	c.jtisSeen = append(c.jtisSeen, jti)
-	c.bodies = append(c.bodies, parsed)
-	c.mu.Unlock()
-	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil
-}
-
-func (c *capturingIntentClient) submitCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.jtisSeen)
-}
-
-func (c *capturingIntentClient) firstBody() *authv1.IntentBody {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.bodies) == 0 {
-		return nil
-	}
-	return c.bodies[0]
-}
-
-// waitSubmit blocks until the capturingIntentClient has received at least n SubmitIntent
-// calls, or until the deadline. Returns the actual count when the condition is met or the
-// deadline expires.
-func waitSubmit(t *testing.T, ic *capturingIntentClient, n int) int {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if got := ic.submitCount(); got >= n {
-			return got
-		}
-		if time.Now().After(deadline) {
-			return ic.submitCount()
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
-// TestProvisionWithIntentHappyPath: doRPC blocks until pollAndSign submits (mimicking the
-// CP blocking on pendingIntents.await), then succeeds. SubmitIntent must be called once.
-func TestProvisionWithIntentHappyPath(t *testing.T) {
-	ic := &capturingIntentClient{pending: &cpv1.PendingIntent{
-		Op:      "create-spawn",
-		SpawnId: "sp-happy",
-	}}
-	var called int32
-	// Mimic real CP behavior: doRPC blocks until pollAndSign calls SubmitIntent, then
-	// returns. This is the invariant that makes provisionWithIntent correct in production.
-	doRPC := func(_ context.Context) error {
-		waitSubmit(t, ic, 1)
-		atomic.AddInt32(&called, 1)
-		return nil
-	}
-	if err := provisionWithIntent(context.Background(), ic, "sp-happy", IntentParams{}, doRPC, nil); err != nil {
-		t.Fatalf("expected success, got: %v", err)
-	}
-	if atomic.LoadInt32(&called) != 1 {
-		t.Fatalf("doRPC called %d times, want 1", called)
-	}
-	if got := ic.submitCount(); got != 1 {
-		t.Fatalf("SubmitIntent called %d times, want 1", got)
-	}
-}
-
-// TestProvisionWithIntentRetryableNACKRetries: doRPC returns a STALE NACK on the first
-// call and succeeds on the second. provisionWithIntent retries exactly once; the two
-// SubmitIntent calls must carry distinct JTIs (fresh key + jti per pollAndSign call).
-func TestProvisionWithIntentRetryableNACKRetries(t *testing.T) {
-	ic := &capturingIntentClient{pending: &cpv1.PendingIntent{
-		Op:      "migrate-spawn",
-		SpawnId: "sp-retry",
-	}}
-	var callCount int32
-	var warnings []string
-	var warnMu sync.Mutex
-	warn := func(err error) {
-		warnMu.Lock()
-		warnings = append(warnings, err.Error())
-		warnMu.Unlock()
-	}
-	doRPC := func(_ context.Context) error {
-		n := atomic.AddInt32(&callCount, 1)
-		// Block until the n-th SubmitIntent arrives (simulates CP blocking on await).
-		waitSubmit(t, ic, int(n))
-		if n == 1 {
-			// First call: return a retryable NACK (STALE).
-			return connect.NewError(connect.CodeFailedPrecondition,
-				fmt.Errorf("%s: intent is 35s old (max 90s+30s); node time: 1770000000", intent.NACKStale))
-		}
-		return nil // second call succeeds
-	}
-	if err := provisionWithIntent(context.Background(), ic, "sp-retry", IntentParams{}, doRPC, warn); err != nil {
-		t.Fatalf("expected success after retry, got: %v", err)
-	}
-	if atomic.LoadInt32(&callCount) != 2 {
-		t.Fatalf("doRPC called %d times, want 2 (first NACK + retry)", callCount)
-	}
-	// Both rounds must have called SubmitIntent with distinct JTIs.
-	if got := ic.submitCount(); got != 2 {
-		t.Fatalf("SubmitIntent called %d times, want 2", got)
-	}
-	ic.mu.Lock()
-	j0, j1 := ic.jtisSeen[0], ic.jtisSeen[1]
-	ic.mu.Unlock()
-	if j0 == "" || j1 == "" || j0 == j1 {
-		t.Fatalf("JTIs must be non-empty and distinct across retry rounds: %q, %q", j0, j1)
-	}
-	warnMu.Lock()
-	gotWarnings := len(warnings)
-	warnMu.Unlock()
-	if gotWarnings == 0 {
-		t.Fatal("expected the retryable-NACK warn callback to fire")
-	}
-}
-
-// TestProvisionWithIntentNonRetryableNACKFails: a CORRESPONDENCE NACK is non-retryable;
-// provisionWithIntent returns the error without a second attempt.
-func TestProvisionWithIntentNonRetryableNACKFails(t *testing.T) {
-	ic := &capturingIntentClient{pending: &cpv1.PendingIntent{
-		Op:      "migrate-spawn",
-		SpawnId: "sp-nonretry",
-	}}
-	var callCount int32
-	doRPC := func(_ context.Context) error {
-		n := atomic.AddInt32(&callCount, 1)
-		waitSubmit(t, ic, int(n))
-		return connect.NewError(connect.CodeFailedPrecondition,
-			fmt.Errorf("%s: image: intent=\"img-a\" exec=\"img-b\"", intent.NACKCorrespondence))
-	}
-	err := provisionWithIntent(context.Background(), ic, "sp-nonretry", IntentParams{}, doRPC, nil)
-	if err == nil {
-		t.Fatal("expected error for non-retryable NACK, got nil")
-	}
-	if atomic.LoadInt32(&callCount) != 1 {
-		t.Fatalf("doRPC called %d times for non-retryable NACK, want 1 (no retry)", callCount)
-	}
-	var connErr *connect.Error
-	if !errors.As(err, &connErr) || connErr.Code() != connect.CodeFailedPrecondition {
-		t.Fatalf("expected CodeFailedPrecondition, got: %v", err)
+	if ic.submitted {
+		t.Fatal("SubmitIntent called without a node access credential")
 	}
 }
 

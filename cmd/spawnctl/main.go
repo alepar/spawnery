@@ -238,7 +238,7 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 		// skipped; the model correspondence check still runs, and the signed intent carries the
 		// CP-resolved app_ref verbatim.
 		if err := cli.SignProvision(pollCtx, id, client.IntentParams{Model: model}); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("pollAndSign: %v (spawn may still become active if CP intent flow is disabled)", err)
+			log.Printf("pollAndSign: %v", err)
 		}
 	}()
 
@@ -270,14 +270,12 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 		return
 	}
 
-	// A4 session-open signing [AC1][AM12]: build a signed intent with the live episode generation
-	// so the node can verify correspondence. A fresh ephemeral key is used; the CP mints the
-	// aud=node token in dev mode when access_token is empty.
+	// A4 session-open signing is staged until paired node-credential custody lands in sp-dvke.3.3.
 	bindFrame := &cpv1.Frame{SpawnId: id}
 	if env, err := client.BuildSessionOpenIntent(id, spawnGen); err == nil {
 		bindFrame.SessionAuth = env
 	} else {
-		log.Printf("bind: session-open intent: %v (proceeding without session auth)", err)
+		log.Printf("bind: session-open intent: %v (session bind will fail closed)", err)
 	}
 
 	stream := cli.Session(ctx)

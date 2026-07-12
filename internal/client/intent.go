@@ -1,16 +1,11 @@
 package client
 
-// intent.go: the A4 two-phase sign-after-resolve loop [AC1][AM12], absorbed from
-// cmd/spawnctl/intent.go. pollAndSign is the client half of the protocol: it generates an
-// ephemeral ECDSA P-256 session key, polls GetPendingIntent until the CP registers the pending
-// intent, builds and signs the IntentBody, then submits via SubmitIntent. It must be called
-// concurrently with the lifecycle RPC (CreateSpawn, MigrateSpawn, etc.) that blocks until the
-// envelope is submitted.
+// intent.go contains the staged A4 two-phase client flow [AC1]. Until paired node-credential
+// custody is wired into this client, it validates pending tuples but refuses to submit an
+// authorization envelope without the required AS-issued node token.
 //
-// provisionWithIntent wraps a blocking lifecycle RPC (e.g. MigrateSpawn) with the pollAndSign
-// goroutine and implements retry-once on retryable NACK codes [AC1]. Non-blocking RPCs (e.g.
-// CreateSpawn which returns before provisioning completes) do not use this helper since the NACK
-// would surface via the spawn's status rather than the RPC error return — see SignProvision.
+// provisionWithIntent retains the existing blocking lifecycle orchestration. Its concurrent
+// pollAndSign reports the staged credential error through warn without making SubmitIntent.
 //
 // Both functions take the narrow intentClient interface (rather than being *Client methods) so
 // they stay unit-testable with narrow fakes exactly as they were in spawnctl.
@@ -31,13 +26,17 @@ import (
 	"spawnery/internal/intent"
 )
 
-// intentClient is the minimal A4 client interface for polling and signing [AC1][AM12].
+// intentClient is the minimal A4 client interface for polling and signing [AC1].
 // cpv1connect.SpawnServiceClient satisfies this interface, enabling both the real implementation
 // and narrow fakes for unit tests that don't exercise the intent path.
 type intentClient interface {
 	GetPendingIntent(context.Context, *connect.Request[cpv1.GetPendingIntentRequest]) (*connect.Response[cpv1.GetPendingIntentResponse], error)
 	SubmitIntent(context.Context, *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error)
 }
+
+// ErrNodeCredentialUnavailable is returned locally until the paired AS-issued node credential is
+// threaded into this client. Callers must not retry the same unsupported request against the CP.
+var ErrNodeCredentialUnavailable = errors.New("node access credential unavailable: paired node credential custody is not wired into this client")
 
 // IntentParams holds the user-initiated parameters the caller knows before pollAndSign — used to
 // validate the CP's PendingIntent against the originating request [AM1]. A zero field is not
@@ -49,10 +48,8 @@ type IntentParams struct {
 }
 
 // pollAndSign polls GetPendingIntent until the CP registers the pending intent for spawnID, then
-// validates the returned tuple against params [AM1], builds and submits a signed AuthEnvelope. An
-// ephemeral ECDSA P-256 session key is generated per call; the caller need not manage key material.
-// In dev mode the CP mints the cnf-bearing aud=node token from the SPKI DER embedded in the
-// SignedIntent (NodeAccessToken left empty here).
+// validates the returned tuple against params [AM1]. It currently fails locally after constructing
+// the intent because paired node-credential custody is implemented by sp-dvke.3.3.
 //
 // pollAndSign MUST be called concurrently with the lifecycle RPC that triggers the two-phase flow —
 // that RPC blocks at the CP until the envelope is submitted. Cancel the context to abort early.
@@ -132,37 +129,15 @@ func pollAndSign(ctx context.Context, ic intentClient, spawnID string, params In
 			})
 		}
 	}
-	si, err := intent.Build(op, body, sessionKey)
+	_, err = intent.Build(op, body, sessionKey)
 	if err != nil {
 		return fmt.Errorf("pollAndSign %s: build intent: %w", spawnID, err)
 	}
-
-	// NodeAccessToken is intentionally empty in dev mode: the CP mints a cnf-bearing aud=node token
-	// from si.SpkiDer in SubmitIntent when its dev AS key is configured [AM12]. In a production
-	// deployment the client would obtain this token from the AS before calling SubmitIntent.
-	_, err = ic.SubmitIntent(ctx, connect.NewRequest(&cpv1.SubmitIntentRequest{
-		SpawnId: spawnID,
-		Intent:  si,
-	}))
-	if err != nil {
-		return fmt.Errorf("pollAndSign %s: SubmitIntent: %w", spawnID, err)
-	}
-	return nil
+	return fmt.Errorf("pollAndSign %s: %w", spawnID, ErrNodeCredentialUnavailable)
 }
 
-// provisionWithIntent orchestrates a blocking lifecycle RPC (doRPC) concurrently with the
-// pollAndSign loop. If doRPC returns a retryable NACK error (e.g. STALE from a node clock
-// skew), it runs the pair exactly once more with a fresh session key and jti. Non-retryable
-// NACKs (CORRESPONDENCE, BAD_SIG, …) fail immediately without retry.
-//
-// doRPC MUST block until the CP provision is complete (or failed). Use this only for
-// synchronous RPCs such as MigrateSpawn/ResumeSpawn; for the async CreateSpawn path the
-// NACK surfaces via spawn status, not the RPC return.
-//
-// On a retryable NACK the caller's context is reused without a fresh cancel; the second
-// pollAndSign gets a fresh cancel so it does not outlive doRPC's second call. warn (nil-safe)
-// receives the pollAndSign goroutine's error when it is non-nil and not context.Canceled — the
-// two log.Printf sites this replaces in spawnctl.
+// provisionWithIntent orchestrates a blocking lifecycle RPC concurrently with pollAndSign. The
+// retry path remains for node NACK handling once credential threading lands in sp-dvke.3.3.
 func provisionWithIntent(ctx context.Context, ic intentClient, spawnID string, params IntentParams, doRPC func(context.Context) error, warn func(error)) error {
 	if warn == nil {
 		warn = func(error) {}
@@ -182,21 +157,16 @@ func provisionWithIntent(ctx context.Context, ic intentClient, spawnID string, p
 	if err == nil {
 		return nil
 	}
-	// Classify: is this a retryable node NACK that a fresh key + fresh jti can resolve?
 	var connErr *connect.Error
-	if errors.As(err, &connErr) && connErr.Code() == connect.CodeFailedPrecondition {
-		if intent.RetryableNACK(connErr.Message()) {
-			warn(fmt.Errorf("provisionWithIntent %s: retryable NACK (%s); retrying once", spawnID, connErr.Message()))
-			return attempt()
-		}
+	if errors.As(err, &connErr) && connErr.Code() == connect.CodeFailedPrecondition && intent.RetryableNACK(connErr.Message()) {
+		warn(fmt.Errorf("provisionWithIntent %s: retryable NACK (%s); retrying once", spawnID, connErr.Message()))
+		return attempt()
 	}
 	return err
 }
 
-// SignProvision is a thin exported wrapper over pollAndSign for the async create/fork path, where
-// the caller runs it in its own goroutine concurrently with a non-blocking lifecycle RPC (e.g.
-// CreateSpawn) and cancels the context once the RPC's result is known. Unlike provisionWithIntent
-// it does not retry — a NACK on the async path surfaces via the spawn's status, not here.
+// SignProvision validates an async create/fork pending tuple, then returns the staged node-credential
+// error without calling SubmitIntent.
 func (c *Client) SignProvision(ctx context.Context, spawnID string, p IntentParams) error {
 	return pollAndSign(ctx, c.rpc, spawnID, p)
 }
