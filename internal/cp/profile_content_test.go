@@ -113,3 +113,21 @@ func TestEnforceProfileEntryCap_Zero(t *testing.T) {
 		t.Errorf("unexpected error for 0 existing: %v", err)
 	}
 }
+
+// TestEnforceProfileArtifactCap_Boundary proves the 63/64 boundary (sp-mwco.1.8 §4.4 cap: the
+// manifest.json takes the 64th slot, so the expanded-artifact budget is 63).
+func TestEnforceProfileArtifactCap_Boundary(t *testing.T) {
+	if err := enforceProfileArtifactCap(62, 1); err != nil { // 63 total: ok
+		t.Errorf("63 total: unexpected error: %v", err)
+	}
+	err := enforceProfileArtifactCap(62, 2) // 64 total: rejected
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("64 total: expected InvalidArgument, got %v", err)
+	}
+}
+
+func TestEnforceProfileArtifactCap_Zero(t *testing.T) {
+	if err := enforceProfileArtifactCap(0, 0); err != nil {
+		t.Errorf("unexpected error for 0/0: %v", err)
+	}
+}

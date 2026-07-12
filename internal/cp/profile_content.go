@@ -75,3 +75,20 @@ func enforceProfileEntryCap(existing int) error {
 	}
 	return nil
 }
+
+// enforceProfileArtifactCap returns a CodeInvalidArgument error when existingExpanded+adding
+// would exceed maxArtifactsPerSpawn-1 (63; the manifest takes the 64th slot — sp-mwco.1.8 §4.4,
+// landing sp-mwco.1.12's attach-time cap). existingExpanded is the profile's current EXPANDED
+// artifact count (1 per catalog_ref/custom entry, member-count-minus-excludes per bundle_ref
+// entry); adding is the new entry's own expanded member count. Assembly (validateAndMergeArtifacts)
+// stays the authoritative enforcement point; this is attach-time UX so a bundle that's already
+// over budget is rejected immediately instead of at CreateSpawn.
+func enforceProfileArtifactCap(existingExpanded, adding int) error {
+	budget := maxArtifactsPerSpawn - 1
+	if existingExpanded+adding > budget {
+		return connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("profile artifact count %d would exceed maximum %d (manifest.json takes the remaining slot)",
+				existingExpanded+adding, budget))
+	}
+	return nil
+}
