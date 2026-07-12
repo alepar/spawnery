@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,7 +91,7 @@ func mustCanonicalTar(data []byte) []byte {
 func TestIngestSkillFromURL_Success(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	result := makeCannedResult("my-skill")
-	s.SetSkillIngest(&fakeFetcher{result: result}, skillstore.NewFakeSkillStore())
+	s.SetSkillIngest(&fakeFetcher{result: result}, skillstore.NewFakeSkillStore(), skillfetch.DefaultPlainTarCapBytes)
 
 	resp, err := s.IngestSkillFromURL(aliceCtx(), connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
 		Url: "testowner/testrepo",
@@ -106,7 +107,7 @@ func TestIngestSkillFromURL_Success(t *testing.T) {
 func TestIngestSkillFromURL_Unauthenticated(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	result := makeCannedResult("my-skill")
-	s.SetSkillIngest(&fakeFetcher{result: result}, skillstore.NewFakeSkillStore())
+	s.SetSkillIngest(&fakeFetcher{result: result}, skillstore.NewFakeSkillStore(), skillfetch.DefaultPlainTarCapBytes)
 
 	_, err := s.IngestSkillFromURL(noAuthCtx(), connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
 		Url: "owner/repo",
@@ -140,7 +141,7 @@ func TestIngestSkillFromURL_Idempotent_SameResult(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	result := makeCannedResult("my-skill")
 	fakeStore := skillstore.NewFakeSkillStore()
-	s.SetSkillIngest(&fakeFetcher{result: result}, fakeStore)
+	s.SetSkillIngest(&fakeFetcher{result: result}, fakeStore, skillfetch.DefaultPlainTarCapBytes)
 
 	// First call
 	resp1, err := s.IngestSkillFromURL(aliceCtx(), connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
@@ -184,7 +185,7 @@ func TestIngestSkillFromURL_Idempotent_SameResult(t *testing.T) {
 func TestIngestSkillFromURL_FetchError_Propagated(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	fakeErr := fmt.Errorf("fetch failed: no SKILL.md found at subdir")
-	s.SetSkillIngest(&fakeFetcher{err: fakeErr}, skillstore.NewFakeSkillStore())
+	s.SetSkillIngest(&fakeFetcher{err: fakeErr}, skillstore.NewFakeSkillStore(), skillfetch.DefaultPlainTarCapBytes)
 
 	_, err := s.IngestSkillFromURL(aliceCtx(), connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
 		Url: "owner/repo",
@@ -198,7 +199,7 @@ func TestIngestSkillFromURL_RateLimit_ResourceExhausted(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	result := makeCannedResult("skill")
 	fakeStore := skillstore.NewFakeSkillStore()
-	s.SetSkillIngest(&fakeFetcher{result: result}, fakeStore)
+	s.SetSkillIngest(&fakeFetcher{result: result}, fakeStore, skillfetch.DefaultPlainTarCapBytes)
 
 	// Use a unique owner to avoid polluting the global quota
 	testOwner := fmt.Sprintf("quota-test-owner-%d", time.Now().UnixNano())
@@ -229,13 +230,42 @@ func TestIngestSkillFromURL_RateLimit_ResourceExhausted(t *testing.T) {
 	if !errors.As(err, &ce) || ce.Code() != connect.CodeResourceExhausted {
 		t.Fatalf("expected CodeResourceExhausted, got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "retry after ~") {
+		t.Fatalf("expected the rejection message to carry a retry-after window, got: %v", err)
+	}
+}
+
+// TestIngestQuota_Allow_ReturnsRetryAfter drives a fresh ingestQuota (not the shared global) to
+// pin §4.7: after ingestQuotaMax allows within the window, the next call is rejected and its
+// returned retry-after is close to the full window (nothing has elapsed in this test).
+func TestIngestQuota_Allow_ReturnsRetryAfter(t *testing.T) {
+	q := &ingestQuota{counts: make(map[string]int), windows: make(map[string]time.Time)}
+	now := time.Now()
+
+	for i := 0; i < ingestQuotaMax; i++ {
+		allowed, _ := q.allow("owner", now)
+		if !allowed {
+			t.Fatalf("call %d: expected allow, got reject", i)
+		}
+	}
+
+	allowed, retryAfter := q.allow("owner", now)
+	if allowed {
+		t.Fatal("expected reject after ingestQuotaMax allows")
+	}
+	if retryAfter <= 0 || retryAfter > ingestQuotaWindow {
+		t.Fatalf("retryAfter = %s, want in (0, %s]", retryAfter, ingestQuotaWindow)
+	}
+	if retryAfter < ingestQuotaWindow-time.Second {
+		t.Fatalf("retryAfter = %s, want ~%s (no time elapsed in this test)", retryAfter, ingestQuotaWindow)
+	}
 }
 
 func TestIngestSkillFromURL_StoresPutAndCatalogRow(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	result := makeCannedResult("stored-skill")
 	fakeStore := skillstore.NewFakeSkillStore()
-	s.SetSkillIngest(&fakeFetcher{result: result}, fakeStore)
+	s.SetSkillIngest(&fakeFetcher{result: result}, fakeStore, skillfetch.DefaultPlainTarCapBytes)
 
 	resp, err := s.IngestSkillFromURL(aliceCtx(), connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
 		Url: "testowner/testrepo",
@@ -274,7 +304,7 @@ func TestIngestSkillFromURL_StoresPutAndCatalogRow(t *testing.T) {
 
 func TestIngestSkillFromURL_InvalidURL_BadArgument(t *testing.T) {
 	s, _, _ := newTestServer(t)
-	s.SetSkillIngest(&fakeFetcher{result: makeCannedResult("x")}, skillstore.NewFakeSkillStore())
+	s.SetSkillIngest(&fakeFetcher{result: makeCannedResult("x")}, skillstore.NewFakeSkillStore(), skillfetch.DefaultPlainTarCapBytes)
 
 	_, err := s.IngestSkillFromURL(aliceCtx(), connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
 		Url: "https://github.com/owner/repo/tree/main/subdir", // rejected deep URL
@@ -291,7 +321,7 @@ func TestIngestSkillFromURL_InvalidURL_BadArgument(t *testing.T) {
 func TestIngestSkillFromURL_GitHubRateLimit_ResourceExhausted(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	rlErr := &skillfetch.ErrRateLimit{RetryAfter: "120"}
-	s.SetSkillIngest(&fakeFetcher{err: rlErr}, skillstore.NewFakeSkillStore())
+	s.SetSkillIngest(&fakeFetcher{err: rlErr}, skillstore.NewFakeSkillStore(), skillfetch.DefaultPlainTarCapBytes)
 
 	_, err := s.IngestSkillFromURL(aliceCtx(), connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
 		Url: "owner/repo",

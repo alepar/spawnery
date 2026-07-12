@@ -607,6 +607,7 @@ func artifactsFromProto(in []*nodev1.ArtifactSpec) []spawnlet.Artifact {
 			art.ObjectKey = ref.GetObjectKey()
 			art.Sha256 = ref.GetSha256()
 			art.PresignedURL = ref.GetPresignedUrl()
+			art.MaxPlainTarBytes = ref.GetMaxPlainTarBytes()
 		}
 		out = append(out, art)
 	}

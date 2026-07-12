@@ -37,20 +37,23 @@ var globalIngestQuota = &ingestQuota{
 	windows: make(map[string]time.Time),
 }
 
-// allow returns true if the owner is within quota.
-func (q *ingestQuota) allow(owner string, now time.Time) bool {
+// allow returns true if the owner is within quota, plus the time remaining until the owner's
+// rolling window resets (so a rejection can tell the caller when to retry — §4.7).
+func (q *ingestQuota) allow(owner string, now time.Time) (bool, time.Duration) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	windowStart, ok := q.windows[owner]
 	if !ok || now.Sub(windowStart) > ingestQuotaWindow {
+		windowStart = now
 		q.windows[owner] = now
 		q.counts[owner] = 0
 	}
+	remaining := ingestQuotaWindow - now.Sub(windowStart)
 	if q.counts[owner] >= ingestQuotaMax {
-		return false
+		return false, remaining
 	}
 	q.counts[owner]++
-	return true
+	return true, remaining
 }
 
 // IngestSkillFromURL fetches a skill from a GitHub URL, validates, repacks, stores in Garage,
@@ -67,8 +70,10 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 	}
 
 	// Per-user ingest quota
-	if !globalIngestQuota.allow(owner, time.Now()) {
-		return nil, connect.NewError(connect.CodeResourceExhausted, fmt.Errorf("ingest rate limit exceeded (max %d per hour); try again later", ingestQuotaMax))
+	if allowed, retryAfter := globalIngestQuota.allow(owner, time.Now()); !allowed {
+		mins := int(retryAfter.Round(time.Minute) / time.Minute)
+		return nil, connect.NewError(connect.CodeResourceExhausted,
+			fmt.Errorf("ingest rate limit exceeded (max %d per hour); retry after ~%dm", ingestQuotaMax, mins))
 	}
 
 	rawURL := req.Msg.Url
@@ -183,9 +188,24 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 	return connect.NewResponse(&cpv1.IngestSkillFromURLResponse{CatalogId: catalogID}), nil
 }
 
-// SetSkillIngest wires the skill fetcher and skill store into the server.
-// Both must be non-nil for IngestSkillFromURL to function; either nil causes a FailedPrecondition.
-func (s *Server) SetSkillIngest(fetcher skillfetch.Fetcher, store skillstore.SkillStore) {
+// SetSkillIngest wires the skill fetcher and skill store into the server, plus the effective
+// plain-tar cap this CP enforces at ingest (sp-mwco.4.6). fetcher and store must be non-nil for
+// IngestSkillFromURL to function; either nil causes a FailedPrecondition. plainTarCap is stamped
+// onto every by-ref ObjectRef.MaxPlainTarBytes at StartSpawn (see effectiveSkillPlainTarCap); 0
+// falls back to skillfetch.DefaultPlainTarCapBytes.
+func (s *Server) SetSkillIngest(fetcher skillfetch.Fetcher, store skillstore.SkillStore, plainTarCap int64) {
 	s.skillFetcher = fetcher
 	s.skillStore = store
+	s.skillPlainTarCap = plainTarCap
+}
+
+// effectiveSkillPlainTarCap returns the cap to stamp on the wire: the configured
+// skillPlainTarCap when set, else skillfetch.DefaultPlainTarCapBytes. Never 0 — a live CP always
+// states its cap explicitly, so an older node (or one reading a zero cap) cannot mistake "CP
+// didn't say" for "no cap".
+func (s *Server) effectiveSkillPlainTarCap() int64 {
+	if s.skillPlainTarCap > 0 {
+		return s.skillPlainTarCap
+	}
+	return skillfetch.DefaultPlainTarCapBytes
 }

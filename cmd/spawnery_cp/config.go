@@ -88,6 +88,18 @@ type CP struct {
 		GitHubToken config.Secret `koanf:"github_token"`
 		// ZstdLevel is the zstd compression level (1–19; 0 = default ~3).
 		ZstdLevel int `koanf:"zstd_level"`
+
+		// The five caps below (sp-mwco.4.6) bound skillfetch's GitHub tarball fetch. They are
+		// plumbed into skillfetch.Config; zero means the skillfetch.Default* constant. The
+		// effective PlainTarCapBytes is ALSO stamped onto every by-ref ObjectRef.MaxPlainTarBytes
+		// at StartSpawn (see internal/cp/artifacts.go effectiveSkillPlainTarCap) — the wire carries
+		// the SAME cap the CP enforces at ingest, so raising it here takes effect on the node
+		// without a redeploy.
+		WireCapBytes         int64         `koanf:"wire_cap_bytes"`
+		DecompressedCapBytes int64         `koanf:"decompressed_cap_bytes"`
+		PlainTarCapBytes     int64         `koanf:"plain_tar_cap_bytes"`
+		FileCountCap         int           `koanf:"file_count_cap"`
+		HTTPTimeout          time.Duration `koanf:"http_timeout"`
 	} `koanf:"skills"`
 }
 
@@ -160,4 +172,10 @@ var cpEnvAliases = map[string]string{
 	"SKILLS_BUCKET":           "skills.bucket",
 	"SKILLS_GITHUB_TOKEN":     "skills.github_token",
 	"SKILLS_ZSTD_LEVEL":       "skills.zstd_level",
+	// Skill fetch caps (sp-mwco.4.6) — on the wire via ObjectRef.MaxPlainTarBytes, not just local.
+	"SKILLS_WIRE_CAP_BYTES":         "skills.wire_cap_bytes",
+	"SKILLS_DECOMPRESSED_CAP_BYTES": "skills.decompressed_cap_bytes",
+	"SKILLS_PLAIN_TAR_CAP_BYTES":    "skills.plain_tar_cap_bytes",
+	"SKILLS_FILE_COUNT_CAP":         "skills.file_count_cap",
+	"SKILLS_HTTP_TIMEOUT":           "skills.http_timeout",
 }

@@ -96,7 +96,9 @@ func TestMaterialize_ProgressEventsPerByRefArtifact(t *testing.T) {
 		fixtures = append(fixtures, fx)
 	}
 
-	st := ArtifactStager{Root: t.TempDir(), fetcher: func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) }}
+	st := ArtifactStager{Root: t.TempDir(), fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+		return defaultFetcher(ctx, url, capBytes)
+	}}
 	sec := SecretInjector{Root: t.TempDir()}
 
 	var arts []Artifact
@@ -137,7 +139,9 @@ func TestMaterialize_HeartbeatWhileFetchInFlight(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	st := ArtifactStager{Root: t.TempDir(), fetcher: func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) }}
+	st := ArtifactStager{Root: t.TempDir(), fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+		return defaultFetcher(ctx, url, capBytes)
+	}}
 	sec := SecretInjector{Root: t.TempDir()}
 	rec := &recordingProgress{t: t}
 
@@ -172,9 +176,11 @@ func TestMaterialize_AggregateDeadlineAppliesOnce(t *testing.T) {
 
 	sec := SecretInjector{Root: t.TempDir()}
 	st := ArtifactStager{
-		Root:    t.TempDir(),
-		fetcher: func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) },
-		budget:  100 * time.Millisecond,
+		Root: t.TempDir(),
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
+		budget: 100 * time.Millisecond,
 	}
 	var arts []Artifact
 	for i := 0; i < 5; i++ {
@@ -212,8 +218,10 @@ func TestMaterialize_ParentDeadlineStillWins(t *testing.T) {
 	// Stager budget left at its generous default; a much shorter PARENT deadline must still win —
 	// no budget inflation from the (larger) stagingBudget default.
 	st := ArtifactStager{
-		Root:    t.TempDir(),
-		fetcher: func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) },
+		Root: t.TempDir(),
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
 	}
 	art := Artifact{ID: "a", ContentType: ArtifactTar, DestPath: "payloads/a", PresignedURL: srv.URL + "/obj", Sha256: "ignored"}
 
@@ -261,7 +269,9 @@ func TestMaterialize_ParallelFetchBounded(t *testing.T) {
 		arts = append(arts, fx.art)
 	}
 
-	st := ArtifactStager{Root: t.TempDir(), fetcher: func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) }}
+	st := ArtifactStager{Root: t.TempDir(), fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+		return defaultFetcher(ctx, url, capBytes)
+	}}
 	sec := SecretInjector{Root: t.TempDir()}
 	if err := st.Materialize(context.Background(), "sp1", arts, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
@@ -297,7 +307,9 @@ func TestMaterialize_TerminalFailureCancelsRest(t *testing.T) {
 	}
 	arts = append(arts, Artifact{ID: "missing", ContentType: ArtifactTar, DestPath: "payloads/missing", PresignedURL: srv.URL + "/missing", Sha256: "ignored"})
 
-	st := ArtifactStager{Root: t.TempDir(), fetcher: func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) }}
+	st := ArtifactStager{Root: t.TempDir(), fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+		return defaultFetcher(ctx, url, capBytes)
+	}}
 	sec := SecretInjector{Root: t.TempDir()}
 
 	start := time.Now()
@@ -341,8 +353,10 @@ func TestFetchWithRetry_SucceedsAfterTransientFailures(t *testing.T) {
 	defer srv.Close()
 
 	st := ArtifactStager{
-		Root:      t.TempDir(),
-		fetcher:   func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) },
+		Root: t.TempDir(),
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
 		retryBase: time.Millisecond,
 	}
 	sec := SecretInjector{Root: t.TempDir()}
@@ -365,8 +379,10 @@ func TestFetchWithRetry_ExhaustsAfterAttempts(t *testing.T) {
 	defer srv.Close()
 
 	st := ArtifactStager{
-		Root:      t.TempDir(),
-		fetcher:   func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) },
+		Root: t.TempDir(),
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
 		retryBase: time.Millisecond,
 	}
 	sec := SecretInjector{Root: t.TempDir()}
@@ -404,8 +420,10 @@ func TestFetchWithRetry_TerminalShortCircuits(t *testing.T) {
 	defer srv.Close()
 
 	st := ArtifactStager{
-		Root:      t.TempDir(),
-		fetcher:   func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) },
+		Root: t.TempDir(),
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
 		retryBase: time.Millisecond,
 	}
 	sec := SecretInjector{Root: t.TempDir()}
@@ -441,7 +459,9 @@ func TestCache_HitSkipsGet(t *testing.T) {
 	st := ArtifactStager{
 		Root:     t.TempDir(),
 		CacheDir: cacheDir,
-		fetcher:  func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) },
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
 	}
 	sec := SecretInjector{Root: t.TempDir()}
 	art := Artifact{ID: "a", ContentType: ArtifactTar, DestPath: "payloads/a", PresignedURL: srv.URL + "/obj", Sha256: hexSum}
@@ -485,7 +505,9 @@ func TestCache_CorruptEntryRefetches(t *testing.T) {
 	st := ArtifactStager{
 		Root:     t.TempDir(),
 		CacheDir: cacheDir,
-		fetcher:  func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) },
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
 	}
 	sec := SecretInjector{Root: t.TempDir()}
 	art := Artifact{ID: "a", ContentType: ArtifactTar, DestPath: "payloads/a", PresignedURL: srv.URL + "/obj", Sha256: hexSum}
@@ -529,7 +551,9 @@ func TestCache_EmptyShaNeverCached(t *testing.T) {
 	st := ArtifactStager{
 		Root:     t.TempDir(),
 		CacheDir: t.TempDir(),
-		fetcher:  func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) },
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
 	}
 	sec := SecretInjector{Root: t.TempDir()}
 	// No Sha256 set: nothing to key the cache on.
@@ -625,7 +649,9 @@ func TestMaterialize_BundleScaleAcceptance(t *testing.T) {
 		arts = append(arts, fx.art)
 	}
 
-	st := ArtifactStager{Root: t.TempDir(), fetcher: func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) }}
+	st := ArtifactStager{Root: t.TempDir(), fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+		return defaultFetcher(ctx, url, capBytes)
+	}}
 	sec := SecretInjector{Root: t.TempDir()}
 	rec := &recordingProgress{t: t}
 

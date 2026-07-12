@@ -172,6 +172,13 @@ message ObjectRef {
   string object_key    = 1; // content-addressed key, e.g. skills/<sha256>.tar.zst
   string sha256        = 2; // hex sha256 of the PLAIN (uncompressed) tar — identity + integrity
   string presigned_url = 3; // CP-minted short-lived GET URL; transient, redact from logs
+  // max_plain_tar_bytes is the effective decoded-tar cap the CP enforced at ingest for this
+  // object (sp-mwco.4.6). The node MUST use it verbatim for both the decoded-tar bound and the
+  // compressed-body bound on its GET — the CP is the single source of truth for this cap, so a
+  // CP-side raise (bounded by the CP's own memory budget + ingest semaphore) takes effect without
+  // redeploying every self-hosted node. 0 means the node applies its own local default (an older
+  // CP that predates this field, or a non-capped object).
+  int64 max_plain_tar_bytes = 4;
 }
 
 // ArtifactSpec is a content-agnostic delivery unit: raw bytes landed into a pod container

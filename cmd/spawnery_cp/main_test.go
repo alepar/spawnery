@@ -7,6 +7,7 @@ import (
 
 	configfiles "spawnery/config"
 	"spawnery/internal/config"
+	"spawnery/internal/cp/skillfetch"
 )
 
 func loadCPTest(t *testing.T, env string, getenv map[string]string, sets ...string) (*CP, error) {
@@ -49,6 +50,54 @@ func TestCPConfig_Defaults(t *testing.T) {
 	}
 	if cfg.Node.AuthMode != "insecure" || cfg.Node.Listen != "127.0.0.1:8081" {
 		t.Errorf("node = %s/%s", cfg.Node.AuthMode, cfg.Node.Listen)
+	}
+	// sp-mwco.4.6: skills.* cap defaults must equal skillfetch's Default* consts, so a CP running
+	// on file defaults enforces (and stamps on the wire) exactly what skillfetch.New(Config{})
+	// would fall back to anyway.
+	if cfg.Skills.WireCapBytes != skillfetch.DefaultWireCapBytes {
+		t.Errorf("Skills.WireCapBytes = %d, want %d", cfg.Skills.WireCapBytes, skillfetch.DefaultWireCapBytes)
+	}
+	if cfg.Skills.DecompressedCapBytes != skillfetch.DefaultDecompressedCapBytes {
+		t.Errorf("Skills.DecompressedCapBytes = %d, want %d", cfg.Skills.DecompressedCapBytes, skillfetch.DefaultDecompressedCapBytes)
+	}
+	if cfg.Skills.PlainTarCapBytes != skillfetch.DefaultPlainTarCapBytes {
+		t.Errorf("Skills.PlainTarCapBytes = %d, want %d", cfg.Skills.PlainTarCapBytes, skillfetch.DefaultPlainTarCapBytes)
+	}
+	if cfg.Skills.FileCountCap != skillfetch.DefaultFileCountCap {
+		t.Errorf("Skills.FileCountCap = %d, want %d", cfg.Skills.FileCountCap, skillfetch.DefaultFileCountCap)
+	}
+	if cfg.Skills.HTTPTimeout != skillfetch.DefaultHTTPTimeout {
+		t.Errorf("Skills.HTTPTimeout = %s, want %s", cfg.Skills.HTTPTimeout, skillfetch.DefaultHTTPTimeout)
+	}
+}
+
+// TestSkillCapEnvAliases pins the SKILLS_* env aliases (sp-mwco.4.6): each maps to its skills.*
+// dotted key and overrides the file default.
+func TestSkillCapEnvAliases(t *testing.T) {
+	cfg, err := loadCPTest(t, "dev", map[string]string{
+		"SKILLS_WIRE_CAP_BYTES":         "1048576",
+		"SKILLS_DECOMPRESSED_CAP_BYTES": "2097152",
+		"SKILLS_PLAIN_TAR_CAP_BYTES":    "3145728",
+		"SKILLS_FILE_COUNT_CAP":         "500",
+		"SKILLS_HTTP_TIMEOUT":           "10s",
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Skills.WireCapBytes != 1048576 {
+		t.Errorf("Skills.WireCapBytes = %d, want 1048576", cfg.Skills.WireCapBytes)
+	}
+	if cfg.Skills.DecompressedCapBytes != 2097152 {
+		t.Errorf("Skills.DecompressedCapBytes = %d, want 2097152", cfg.Skills.DecompressedCapBytes)
+	}
+	if cfg.Skills.PlainTarCapBytes != 3145728 {
+		t.Errorf("Skills.PlainTarCapBytes = %d, want 3145728", cfg.Skills.PlainTarCapBytes)
+	}
+	if cfg.Skills.FileCountCap != 500 {
+		t.Errorf("Skills.FileCountCap = %d, want 500", cfg.Skills.FileCountCap)
+	}
+	if cfg.Skills.HTTPTimeout != 10*time.Second {
+		t.Errorf("Skills.HTTPTimeout = %s, want 10s", cfg.Skills.HTTPTimeout)
 	}
 }
 

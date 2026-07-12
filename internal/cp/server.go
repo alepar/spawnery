@@ -157,6 +157,12 @@ type Server struct {
 	// cmd/spawnery_cp wires these via SetSkillIngest when Garage is configured.
 	skillFetcher skillfetch.Fetcher
 	skillStore   skillstore.SkillStore
+	// skillPlainTarCap is the CP-enforced effective decoded-tar cap for skill artifacts
+	// (sp-mwco.4.6), stamped onto every by-ref ObjectRef's MaxPlainTarBytes at StartSpawn so the
+	// node obeys the SAME cap the CP enforced at ingest. 0 (unset; SetSkillIngest not called, or
+	// called with 0) falls back to skillfetch.DefaultPlainTarCapBytes — a live CP always states
+	// its cap on the wire, never 0.
+	skillPlainTarCap int64
 
 	// ForkSpawn seams. NewServer wires the same-node materializer and an interim zero-footprint
 	// estimator (zeroForkFootprint); the estimator is fail-closed when nil because CP cannot yet

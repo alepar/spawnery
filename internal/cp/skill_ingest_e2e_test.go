@@ -272,7 +272,7 @@ func setupSkillIngestStack(t *testing.T, opts ...func(*spawnlet.ManagerConfig)) 
 
 	// Wire the skill fetcher + store into the CP (the seam at ingest_skill.go:179).
 	// Without this, IngestSkillFromURL returns FailedPrecondition.
-	srv.SetSkillIngest(fetcher, ss)
+	srv.SetSkillIngest(fetcher, ss, skillfetch.DefaultPlainTarCapBytes)
 
 	mux := http.NewServeMux()
 	mux.Handle(nodev1connect.NewNodeServiceHandler(srv))

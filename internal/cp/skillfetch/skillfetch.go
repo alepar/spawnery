@@ -27,17 +27,30 @@ import (
 )
 
 const (
-	// WireCapBytes is the maximum compressed size of the tarball over the wire (~20 MiB).
-	WireCapBytes = 20 * 1024 * 1024
-	// DecompressedCapBytes is the maximum decompressed size before tar parsing (~50 MiB).
-	DecompressedCapBytes = 50 * 1024 * 1024
-	// PlainTarCapBytes is the maximum plain-tar size after repack (~50 MiB).
-	PlainTarCapBytes = 50 * 1024 * 1024
-	// FileCountCap is the maximum number of entries in the tarball.
-	FileCountCap = 10_000
-	// HTTPTimeout is the per-fetch HTTP deadline.
-	HTTPTimeout = 60 * time.Second
+	// DefaultWireCapBytes is the default maximum compressed size of the tarball over the wire
+	// (~20 MiB), used when Config.WireCapBytes is zero.
+	DefaultWireCapBytes = 20 * 1024 * 1024
+	// DefaultDecompressedCapBytes is the default maximum decompressed size before tar parsing
+	// (~50 MiB), used when Config.DecompressedCapBytes is zero.
+	DefaultDecompressedCapBytes = 50 * 1024 * 1024
+	// DefaultPlainTarCapBytes is the default maximum plain-tar size after repack (~50 MiB),
+	// used when Config.PlainTarCapBytes is zero.
+	DefaultPlainTarCapBytes = 50 * 1024 * 1024
+	// DefaultFileCountCap is the default maximum number of entries in the tarball, used when
+	// Config.FileCountCap is zero.
+	DefaultFileCountCap = 10_000
+	// DefaultHTTPTimeout is the default per-fetch HTTP deadline, used when Config.HTTPTimeout
+	// is zero.
+	DefaultHTTPTimeout = 60 * time.Second
 )
+
+// plainTarCapErr returns an error if plainSize exceeds capBytes, else nil.
+func plainTarCapErr(plainSize, capBytes int64) error {
+	if plainSize > capBytes {
+		return fmt.Errorf("skill tar exceeds size cap (%d > %d bytes)", plainSize, capBytes)
+	}
+	return nil
+}
 
 // RepoRef is the parsed, normalized GitHub repo reference.
 type RepoRef struct {
@@ -67,20 +80,56 @@ type Fetcher interface {
 }
 
 // Config holds the runtime parameters for the fetcher.
+//
+// The caps here are enforced CP-side, at ingest. They are deliberately NOT the same knob as the
+// host allowlist in fetch.go: allowedHosts is a code constant (see the comment there) because it
+// only ever widens where a *redirect* may land, never where a fetch may originate — origination
+// is pinned by ParseRepoURL + tarballURL. The caps below have no such origination hazard, so they
+// are config-surfaced (skills.* in cmd/spawnery_cp/config.go).
 type Config struct {
 	// GitHubToken is an optional Bearer token for authenticated GitHub API access.
 	// Raises the shared rate-limit from ~60/hr to 5000/hr per source IP.
 	GitHubToken string
 	// ZstdLevel is the zstd compression level (1–19; default ~3 if 0).
 	ZstdLevel int
+	// WireCapBytes is the maximum compressed size of the tarball over the wire.
+	// Zero means DefaultWireCapBytes.
+	WireCapBytes int64
+	// DecompressedCapBytes is the maximum decompressed size before tar parsing.
+	// Zero means DefaultDecompressedCapBytes.
+	DecompressedCapBytes int64
+	// PlainTarCapBytes is the maximum plain-tar size after canonical repack.
+	// Zero means DefaultPlainTarCapBytes.
+	PlainTarCapBytes int64
+	// FileCountCap is the maximum number of entries in the tarball.
+	// Zero means DefaultFileCountCap.
+	FileCountCap int
+	// HTTPTimeout is the per-fetch HTTP deadline. Zero means DefaultHTTPTimeout.
+	HTTPTimeout time.Duration
 }
 
-// New returns a Fetcher with the given config.
+// New returns a Fetcher with the given config. Zero-valued cap/timeout fields fall back to the
+// package Default* constants.
 func New(cfg Config) Fetcher {
 	if cfg.ZstdLevel == 0 {
 		cfg.ZstdLevel = 3
 	}
-	return &fetcher{cfg: cfg, client: newSecureClient()}
+	if cfg.WireCapBytes == 0 {
+		cfg.WireCapBytes = DefaultWireCapBytes
+	}
+	if cfg.DecompressedCapBytes == 0 {
+		cfg.DecompressedCapBytes = DefaultDecompressedCapBytes
+	}
+	if cfg.PlainTarCapBytes == 0 {
+		cfg.PlainTarCapBytes = DefaultPlainTarCapBytes
+	}
+	if cfg.FileCountCap == 0 {
+		cfg.FileCountCap = DefaultFileCountCap
+	}
+	if cfg.HTTPTimeout == 0 {
+		cfg.HTTPTimeout = DefaultHTTPTimeout
+	}
+	return &fetcher{cfg: cfg, client: newSecureClient(cfg)}
 }
 
 type fetcher struct {
@@ -274,8 +323,8 @@ func (f *fetcher) Fetch(ctx context.Context, ref RepoRef, gitRef, subdir, reques
 	if err != nil {
 		return Result{}, fmt.Errorf("repack: %w", err)
 	}
-	if int64(len(plainTar)) > PlainTarCapBytes {
-		return Result{}, fmt.Errorf("skill tar exceeds size cap (%d > %d bytes)", len(plainTar), PlainTarCapBytes)
+	if err := plainTarCapErr(int64(len(plainTar)), f.cfg.PlainTarCapBytes); err != nil {
+		return Result{}, err
 	}
 
 	// sha256 over the PLAIN tar
