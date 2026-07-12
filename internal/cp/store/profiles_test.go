@@ -574,8 +574,8 @@ func TestProfileEntryBundleOverridesRoundTrip(t *testing.T) {
 	}
 }
 
-// TestProfileEntryBundleOverridesEmptyDecodesNil proves an entry with no overrides ('' column)
-// decodes to nil/empty slices/maps, not zero-length-but-non-nil noise.
+// TestProfileEntryBundleOverridesEmptyDecodesNil proves an entry with no overrides (empty
+// bundle_overrides column) decodes to nil/empty slices/maps, not zero-length-but-non-nil noise.
 func TestProfileEntryBundleOverridesEmptyDecodesNil(t *testing.T) {
 	st := store.NewTestStore(t)
 	ctx := context.Background()
