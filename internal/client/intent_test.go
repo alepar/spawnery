@@ -9,15 +9,21 @@ import (
 	"crypto/rand"
 	"errors"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/protobuf/proto"
 
 	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/internal/intent"
 	"spawnery/internal/pki"
 )
@@ -29,6 +35,75 @@ type fakeIntentClient struct {
 	response  *cpv1.GetPendingIntentResponse
 	submitted bool
 	submit    *cpv1.SubmitIntentRequest
+}
+
+type rotatingCredentialSource struct {
+	mu          sync.Mutex
+	credentials []NodeCredentials
+	calls       int
+}
+
+func (s *rotatingCredentialSource) NodeCredentials(context.Context) (NodeCredentials, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index := s.calls
+	if index >= len(s.credentials) {
+		index = len(s.credentials) - 1
+	}
+	s.calls++
+	return s.credentials[index], nil
+}
+
+func (s *rotatingCredentialSource) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+type authorizationHandler struct {
+	cpv1connect.UnimplementedSpawnServiceHandler
+	response *cpv1.GetPendingIntentResponse
+	mu       sync.Mutex
+	submit   *cpv1.SubmitIntentRequest
+}
+
+func (h *authorizationHandler) CreateSpawn(context.Context, *connect.Request[cpv1.CreateSpawnRequest]) (*connect.Response[cpv1.CreateSpawnResponse], error) {
+	return connect.NewResponse(&cpv1.CreateSpawnResponse{SpawnId: "sp-1"}), nil
+}
+
+func (h *authorizationHandler) GetPendingIntent(context.Context, *connect.Request[cpv1.GetPendingIntentRequest]) (*connect.Response[cpv1.GetPendingIntentResponse], error) {
+	return connect.NewResponse(h.response), nil
+}
+
+func (h *authorizationHandler) SubmitIntent(_ context.Context, req *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.submit = req.Msg
+	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil
+}
+
+func (h *authorizationHandler) submittedToken() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.submit.GetNodeAccessToken()
+}
+
+func newRotatingAuthorizationClient(t *testing.T, source NodeCredentialSource) (*Client, *authorizationHandler) {
+	t.Helper()
+	fx := issueProdNode(t, "node-1", "alice")
+	pending := &cpv1.PendingIntent{Op: string(intent.OpCreateSpawn), SpawnId: "sp-1", Generation: 7, TargetNodeId: "node-1"}
+	handler := &authorizationHandler{response: &cpv1.GetPendingIntentResponse{
+		Ready: true, Pending: pending, Generation: 7, TargetNodeId: "node-1",
+		TargetNodeClass: pki.ClassSelfHosted, TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+	}}
+	path, rpcHandler := cpv1connect.NewSpawnServiceHandler(handler)
+	mux := http.NewServeMux()
+	mux.Handle(path, rpcHandler)
+	server := httptest.NewUnstartedServer(h2c.NewHandler(mux, &http2.Server{}))
+	server.Start()
+	t.Cleanup(server.Close)
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+	return New(server.URL, &fakeTokenSource{tokens: []string{"cp-token"}}, nil, WithNodeAuthorization(source, trust)), handler
 }
 
 func (f *fakeIntentClient) GetPendingIntent(_ context.Context, _ *connect.Request[cpv1.GetPendingIntentRequest]) (*connect.Response[cpv1.GetPendingIntentResponse], error) {
@@ -70,6 +145,89 @@ func TestPollAndSignUsesVerifiedTargetPersistentSignerAndNodeToken(t *testing.T)
 	wantSPKI, _ := signer.PublicSPKIDER()
 	if string(ic.submit.Intent.SpkiDer) != string(wantSPKI) {
 		t.Fatal("intent was not signed with the persistent key")
+	}
+}
+
+func TestPreflightDoesNotCacheRotatingCredentials(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewECDSASessionSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &rotatingCredentialSource{credentials: []NodeCredentials{
+		{AccessToken: "node-token-a", Signer: signer},
+		{AccessToken: "node-token-b", Signer: signer},
+	}}
+	client, handler := newRotatingAuthorizationClient(t, source)
+	if err := client.PreflightNodeAuthorization(context.Background()); err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	if err := client.SignProvision(context.Background(), "sp-1", IntentParams{Op: intent.OpCreateSpawn}); err != nil {
+		t.Fatalf("SignProvision: %v", err)
+	}
+	if got := handler.submittedToken(); got != "node-token-b" {
+		t.Fatalf("submitted token = %q, want rotated node-token-b", got)
+	}
+}
+
+func TestCreateDoesNotCacheRotatingCredentials(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewECDSASessionSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &rotatingCredentialSource{credentials: []NodeCredentials{
+		{AccessToken: "node-token-a", Signer: signer},
+		{AccessToken: "node-token-b", Signer: signer},
+	}}
+	client, handler := newRotatingAuthorizationClient(t, source)
+	if _, err := client.CreateSpawn(context.Background(), &cpv1.CreateSpawnRequest{}); err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	if err := client.SignProvision(context.Background(), "sp-1", IntentParams{Op: intent.OpCreateSpawn}); err != nil {
+		t.Fatalf("SignProvision: %v", err)
+	}
+	if got := handler.submittedToken(); got != "node-token-b" {
+		t.Fatalf("submitted token = %q, want rotated node-token-b", got)
+	}
+}
+
+func TestConcurrentPreflightKeepsConfiguredCredentialSourceImmutable(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewECDSASessionSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &rotatingCredentialSource{credentials: []NodeCredentials{{AccessToken: "node-token", Signer: signer}}}
+	client, _ := newRotatingAuthorizationClient(t, source)
+	const calls = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, calls)
+	for range calls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- client.PreflightNodeAuthorization(context.Background())
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("preflight: %v", err)
+		}
+	}
+	if got := source.callCount(); got != calls {
+		t.Fatalf("dynamic credential source called %d times, want %d", got, calls)
 	}
 }
 

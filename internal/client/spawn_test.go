@@ -220,7 +220,7 @@ func TestResumePreflightFailureMakesNoCPCall(t *testing.T) {
 func TestCreatePreflightFailureMakesNoCPCall(t *testing.T) {
 	f := &fakeSpawnClient{}
 	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) { return NodeCredentials{}, errors.New("login required") })
-	if _, _, err := createSpawnAuthorized(context.Background(), f, source, TargetTrust{}, &cpv1.CreateSpawnRequest{}); err == nil {
+	if _, err := createSpawnAuthorized(context.Background(), f, source, TargetTrust{}, &cpv1.CreateSpawnRequest{}); err == nil {
 		t.Fatal("create accepted missing credentials")
 	}
 	if f.gotCreate != nil {

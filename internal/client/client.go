@@ -49,12 +49,9 @@ func WithNodeAuthorization(source NodeCredentialSource, trust TargetTrust) Optio
 	}
 }
 
-// PreflightNodeAuthorization validates and loads node credentials before a mutating CP call.
+// PreflightNodeAuthorization validates the current node credentials without retaining a snapshot.
 func (c *Client) PreflightNodeAuthorization(ctx context.Context) error {
-	prepared, err := prepareNodeAuthorization(ctx, c.nodeCredentials, c.targetTrust)
-	if err == nil {
-		c.nodeCredentials = prepared
-	}
+	_, err := prepareNodeAuthorization(ctx, c.nodeCredentials, c.targetTrust)
 	return err
 }
 

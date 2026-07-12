@@ -49,20 +49,14 @@ var ErrSpawnNotFound = errors.New("client: spawn not found")
 // spawn returns in 'starting' and provisions on the node — call WaitActive to block until it is
 // ready (and, if the CP requires it, run SignProvision concurrently to sign the create intent).
 func (c *Client) CreateSpawn(ctx context.Context, req *cpv1.CreateSpawnRequest) (string, error) {
-	id, prepared, err := createSpawnAuthorized(ctx, c.rpc, c.nodeCredentials, c.targetTrust, req)
-	if err == nil {
-		c.nodeCredentials = prepared
-	}
-	return id, err
+	return createSpawnAuthorized(ctx, c.rpc, c.nodeCredentials, c.targetTrust, req)
 }
 
-func createSpawnAuthorized(ctx context.Context, rpc spawnClient, credentials NodeCredentialSource, trust TargetTrust, req *cpv1.CreateSpawnRequest) (string, NodeCredentialSource, error) {
-	prepared, err := prepareNodeAuthorization(ctx, credentials, trust)
-	if err != nil {
-		return "", nil, err
+func createSpawnAuthorized(ctx context.Context, rpc spawnClient, credentials NodeCredentialSource, trust TargetTrust, req *cpv1.CreateSpawnRequest) (string, error) {
+	if _, err := prepareNodeAuthorization(ctx, credentials, trust); err != nil {
+		return "", err
 	}
-	id, err := createSpawn(ctx, rpc, req)
-	return id, prepared, err
+	return createSpawn(ctx, rpc, req)
 }
 
 func createSpawn(ctx context.Context, rpc spawnClient, req *cpv1.CreateSpawnRequest) (string, error) {

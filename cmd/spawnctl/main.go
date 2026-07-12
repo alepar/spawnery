@@ -230,9 +230,6 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 	cli := client.New(addr, src, nil, client.WithNodeAuthorization(src, trust), client.WithWarnHandler(func(err error) {
 		log.Printf("%v", err)
 	}))
-	if err := cli.PreflightNodeAuthorization(ctx); err != nil {
-		log.Fatalf("authorize create: %v", err)
-	}
 
 	id, err := cli.CreateSpawn(ctx, &cpv1.CreateSpawnRequest{
 		AppId:     appID,
