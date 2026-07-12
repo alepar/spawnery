@@ -18,7 +18,7 @@ import (
 // SC1: Scrub is called with the configured scrub paths on Suspend.
 func TestScrubCalledWithDefaultPaths(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -31,7 +31,7 @@ func TestScrubCalledWithDefaultPaths(t *testing.T) {
 		scrubCalled = true
 		scrubPaths = paths
 		// At this point CaptureDelta has NOT been called yet (capture happens after scrub).
-		scrubBeforeCapture = fb.capturedRef == ""
+		scrubBeforeCapture = lastOf(fb.CapturedRefs()) == ""
 		return nil
 	}
 
@@ -64,7 +64,7 @@ func TestScrubCalledWithDefaultPaths(t *testing.T) {
 // SC2: scrubFn is NOT called when DeltaCapture=false.
 func TestScrubNotCalledWhenCaptureDisabled(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: false,
@@ -92,7 +92,7 @@ func TestScrubNotCalledWhenCaptureDisabled(t *testing.T) {
 // SC3: scrubFn failure is non-fatal — CaptureDelta must still be called.
 func TestScrubFailureIsNonFatal(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -111,7 +111,7 @@ func TestScrubFailureIsNonFatal(t *testing.T) {
 	}
 
 	// CaptureDelta must still have been called despite scrub failure.
-	if fb.capturedRef == "" {
+	if lastOf(fb.CapturedRefs()) == "" {
 		t.Fatal("CaptureDelta must be called even when scrubFn fails")
 	}
 }
@@ -119,17 +119,17 @@ func TestScrubFailureIsNonFatal(t *testing.T) {
 // SC4: Ordering — scrub happens before capture (injected via ops recording).
 func TestScrubHappensBeforeCapture(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
 	})
 
-	// scrubIdx records the position in fb.ops when the scrubFn fires.
-	// fb.ops grows on CaptureDelta ("capture:id") and Stop ("stop"); scrub fires BEFORE capture.
+	// scrubIdx records the position in fb.Ops() when the scrubFn fires.
+	// fb.Ops() grows on every backend call; scrub fires BEFORE the capture op is appended.
 	var scrubFiredAtOpsLen int = -1
 	m.scrubFn = func(_ context.Context, _ string, _ []string) error {
-		scrubFiredAtOpsLen = len(fb.ops)
+		scrubFiredAtOpsLen = len(fb.Ops())
 		return nil
 	}
 
@@ -146,9 +146,9 @@ func TestScrubHappensBeforeCapture(t *testing.T) {
 	if scrubFiredAtOpsLen < 0 {
 		t.Fatal("scrubFn was not called")
 	}
-	captureIdx := opsIndex(fb.ops, "capture:sp-order")
+	captureIdx := opsIndex(fb.Ops(), "capture:sp-order")
 	if captureIdx < 0 {
-		t.Fatalf("capture not in ops; ops=%v", fb.ops)
+		t.Fatalf("capture not in ops; ops=%v", fb.Ops())
 	}
 	// scrubFn must have fired before the capture op was appended.
 	if scrubFiredAtOpsLen > captureIdx {

@@ -1,8 +1,8 @@
 package spawnlet
 
 // manager_delta_test.go: hermetic tests for the rootfs delta-capture path
-// (spec §2/§4, sp-ei4.1.10). Tests use fakePodBackend (defined in manager_sandbox_test.go)
-// extended with the delta-capture control fields (capturedRef, captureErr, etc.).
+// (spec §2/§4, sp-ei4.1.10). Tests use fakeBackend (fakebackend_test.go), the shared seam onto
+// internal/runtime/fakepod.
 //
 // Test matrix:
 //   E1: Suspend with DeltaCapture=true calls CaptureDelta and sets DeltaImageRef in-mem.
@@ -13,11 +13,13 @@ package spawnlet
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 
 	"spawnery/internal/runtime"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/storage/journal"
 )
 
@@ -25,7 +27,7 @@ import (
 // is set on the in-mem Spawn (before store.Delete removes it, we capture it via closures).
 func TestSuspendCapturesDelta(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -41,14 +43,14 @@ func TestSuspendCapturesDelta(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	// CaptureDelta must have been called (fakePodBackend sets capturedRef on call).
-	if fb.capturedRef == "" {
+	// CaptureDelta must have been called.
+	if lastOf(fb.CapturedRefs()) == "" {
 		t.Fatal("CaptureDelta was not called on Suspend with DeltaCapture=true")
 	}
 	// The captured ref must be the delta tag for the spawn id.
 	wantRef := "spawnery/delta:" + spawnID
-	if fb.capturedRef != wantRef {
-		t.Fatalf("capturedRef = %q, want %q", fb.capturedRef, wantRef)
+	if lastOf(fb.CapturedRefs()) != wantRef {
+		t.Fatalf("capturedRef = %q, want %q", lastOf(fb.CapturedRefs()), wantRef)
 	}
 	// The spawn must be removed from the store (teardown completed).
 	if _, live := m.Store().Get(spawnID); live {
@@ -59,7 +61,7 @@ func TestSuspendCapturesDelta(t *testing.T) {
 // E2: Stop (not Suspend) must NOT call CaptureDelta — only Suspend triggers capture.
 func TestStopDoesNotCapture(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -74,15 +76,15 @@ func TestStopDoesNotCapture(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	if fb.capturedRef != "" {
-		t.Fatalf("CaptureDelta must NOT be called on Stop; got capturedRef=%q", fb.capturedRef)
+	if lastOf(fb.CapturedRefs()) != "" {
+		t.Fatalf("CaptureDelta must NOT be called on Stop; got capturedRef=%q", lastOf(fb.CapturedRefs()))
 	}
 }
 
 // E3: Suspend with DeltaCapture=false must NOT call CaptureDelta (feature gate).
 func TestCaptureGatedByConfig(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: false, // explicitly off
@@ -97,8 +99,8 @@ func TestCaptureGatedByConfig(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	if fb.capturedRef != "" {
-		t.Fatalf("CaptureDelta must NOT be called when DeltaCapture=false; got capturedRef=%q", fb.capturedRef)
+	if lastOf(fb.CapturedRefs()) != "" {
+		t.Fatalf("CaptureDelta must NOT be called when DeltaCapture=false; got capturedRef=%q", lastOf(fb.CapturedRefs()))
 	}
 }
 
@@ -107,7 +109,7 @@ func TestResumeLaunchesFromDelta(t *testing.T) {
 	ctx := context.Background()
 	const deltaRef = "spawnery/delta:sp-resume"
 
-	fb := &fakePodBackend{ensureImageRef: deltaRef}
+	fb := fakeBackend(t, fakepod.WithEnsureImageRef(deltaRef))
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -118,8 +120,8 @@ func TestResumeLaunchesFromDelta(t *testing.T) {
 	}
 
 	// The agent spec captured by StartAgent must use the delta image.
-	if fb.agentSpec.Image != deltaRef {
-		t.Fatalf("agent launched from %q, want delta tag %q", fb.agentSpec.Image, deltaRef)
+	if fb.AgentSpec("sp-resume").Image != deltaRef {
+		t.Fatalf("agent launched from %q, want delta tag %q", fb.AgentSpec("sp-resume").Image, deltaRef)
 	}
 }
 
@@ -128,7 +130,7 @@ func TestFreshCreateLaunchesFromBase(t *testing.T) {
 	ctx := context.Background()
 	const baseRef = "agent:base"
 
-	fb := &fakePodBackend{} // ensureImageRef empty → returns baseRef
+	fb := fakeBackend(t) // ensureImageRef empty → returns baseRef
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: baseRef, SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -138,8 +140,8 @@ func TestFreshCreateLaunchesFromBase(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if fb.agentSpec.Image != baseRef {
-		t.Fatalf("agent launched from %q, want base %q", fb.agentSpec.Image, baseRef)
+	if fb.AgentSpec("sp-fresh").Image != baseRef {
+		t.Fatalf("agent launched from %q, want base %q", fb.AgentSpec("sp-fresh").Image, baseRef)
 	}
 }
 
@@ -148,7 +150,7 @@ func TestCreateRecordsBaseImageDigest(t *testing.T) {
 	ctx := context.Background()
 	const digest = "img@sha256:cafebabe"
 
-	fb := &fakePodBackend{resolveDigest: digest}
+	fb := fakeBackend(t, fakepod.WithResolveDigest(digest))
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -165,7 +167,7 @@ func TestCreateRecordsBaseImageDigest(t *testing.T) {
 
 func TestMigrationSuspendStoresRootfsArtifactForSourceGeneration(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{resolveDigest: "agent@sha256:base"}
+	fb := fakeBackend(t, fakepod.WithResolveDigest("agent@sha256:base"))
 	fj := newFakeJournal("")
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		NodeID: "node-a", AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
@@ -201,13 +203,28 @@ func TestMigrationSuspendStoresRootfsArtifactForSourceGeneration(t *testing.T) {
 	if got.ProducerNodeID != "node-a" || got.ProducerRuntime == "" {
 		t.Fatalf("producer metadata = node %q runtime %q", got.ProducerNodeID, got.ProducerRuntime)
 	}
-	if string(fj.artifactPayloads[got.ArtifactID]) != runtime.DeltaTag(sp.ID) {
-		t.Fatalf("artifact payload = %q, want exported delta tag", fj.artifactPayloads[got.ArtifactID])
+	// The artifact payload is fakepod's exported delta archive (JSON: base/depth/content), not the
+	// bare delta tag the old fake's ExportDelta wrote — assert it decodes to depth 1, the rootfs
+	// capture's expected shape.
+	var arc struct {
+		Depth int `json:"depth"`
 	}
-	if !strings.Contains(strings.Join(fb.ops, ","), "export:"+sp.ID) {
-		t.Fatalf("expected ExportDelta before migration suspend completes, ops=%v", fb.ops)
+	if err := json.Unmarshal(fj.artifactPayloads[got.ArtifactID], &arc); err != nil {
+		t.Fatalf("artifact payload not a decodable delta archive: %v (payload=%q)", err, fj.artifactPayloads[got.ArtifactID])
+	}
+	if arc.Depth != 1 {
+		t.Fatalf("artifact payload depth = %d, want 1", arc.Depth)
+	}
+	if !strings.Contains(strings.Join(lifecycleOps(fb), ","), "export:"+sp.ID) {
+		t.Fatalf("expected ExportDelta before migration suspend completes, ops=%v", lifecycleOps(fb))
 	}
 }
+
+// validDeltaArchive returns a minimal payload fakepod.ImportDelta can decode (its wire format is a
+// JSON-encoded base/depth/content archive, unlike the old fake which discarded the reader entirely).
+// Tests that only care about import bookkeeping (which base ref was passed, launch image afterward)
+// use this rather than an arbitrary byte string.
+func validDeltaArchive() []byte { return []byte("{}") }
 
 func TestMigrationSuspendIncludesInheritedRootfsArtifactChain(t *testing.T) {
 	ctx := context.Background()
@@ -215,7 +232,7 @@ func TestMigrationSuspendIncludesInheritedRootfsArtifactChain(t *testing.T) {
 		spawnID = "sp-migrate-chain"
 		base    = "agent@sha256:base"
 	)
-	fb := &fakePodBackend{resolveDigest: base}
+	fb := fakeBackend(t, fakepod.WithResolveDigest(base))
 	fj := newFakeJournal("")
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		NodeID: "node-a", AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
@@ -255,7 +272,7 @@ func TestMigrationSuspendRekeysInheritedRootfsArtifactChainToCurrentGeneration(t
 		spawnID = "sp-migrate-chain-again"
 		base    = "agent@sha256:base"
 	)
-	fb := &fakePodBackend{resolveDigest: base}
+	fb := fakeBackend(t, fakepod.WithResolveDigest(base))
 	fj := newFakeJournal("")
 	fj.artifactPayloads["inherited-rootfs-gen4-seq1"] = []byte("inherited-layer")
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
@@ -300,7 +317,7 @@ func TestMigrationSuspendRekeysInheritedRootfsArtifactChainToCurrentGeneration(t
 func TestMigrationSuspendFailsClosedWithUnexportedLocalRootfsHistory(t *testing.T) {
 	ctx := context.Background()
 	const spawnID = "sp-unportable-local-chain"
-	fb := &fakePodBackend{resolveDigest: "agent@sha256:base"}
+	fb := fakeBackend(t, fakepod.WithResolveDigest("agent@sha256:base"))
 	fj := newFakeJournal("")
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		NodeID: "node-a", AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
@@ -325,7 +342,7 @@ func TestMigrationSuspendFailsClosedWithUnexportedLocalRootfsHistory(t *testing.
 
 func TestNormalSuspendDoesNotStoreRootfsArtifact(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	fj := newFakeJournal("")
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
@@ -352,9 +369,9 @@ func TestCreateRestoresPinnedRootfsArtifactBeforeLaunch(t *testing.T) {
 		base       = "agent@sha256:base"
 		artifactID = "artifact-rootfs-gen4"
 	)
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	fj := newFakeJournal("")
-	fj.artifactPayloads[artifactID] = []byte(runtime.DeltaTag(spawnID))
+	fj.artifactPayloads[artifactID] = validDeltaArchive() // fakepod.ImportDelta requires a JSON delta archive
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -379,11 +396,11 @@ func TestCreateRestoresPinnedRootfsArtifactBeforeLaunch(t *testing.T) {
 	if got.SpawnID != spawnID || got.Generation != 4 || got.ArtifactID != artifactID {
 		t.Fatalf("GetArtifact key = %+v", got)
 	}
-	if fb.agentSpec.Image != runtime.DeltaTag(spawnID) {
-		t.Fatalf("agent launched from %q, want imported delta tag", fb.agentSpec.Image)
+	if fb.AgentSpec(spawnID).Image != runtime.DeltaTag(spawnID) {
+		t.Fatalf("agent launched from %q, want imported delta tag", fb.AgentSpec(spawnID).Image)
 	}
-	if !strings.Contains(strings.Join(fb.ops, ","), "import:"+spawnID) {
-		t.Fatalf("expected ImportDelta before launch, ops=%v", fb.ops)
+	if !strings.Contains(strings.Join(lifecycleOps(fb), ","), "import:"+spawnID) {
+		t.Fatalf("expected ImportDelta before launch, ops=%v", lifecycleOps(fb))
 	}
 }
 
@@ -393,10 +410,10 @@ func TestCreateRestoresRootfsArtifactChainSequentially(t *testing.T) {
 		spawnID = "sp-chain-target"
 		base    = "agent@sha256:base"
 	)
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	fj := newFakeJournal("")
-	fj.artifactPayloads["artifact-rootfs-seq1"] = []byte("layer-1")
-	fj.artifactPayloads["artifact-rootfs-seq2"] = []byte("layer-2")
+	fj.artifactPayloads["artifact-rootfs-seq1"] = validDeltaArchive()
+	fj.artifactPayloads["artifact-rootfs-seq2"] = validDeltaArchive()
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -415,11 +432,11 @@ func TestCreateRestoresRootfsArtifactChainSequentially(t *testing.T) {
 		t.Fatalf("CreateWithSelection: %v", err)
 	}
 	want := []string{base, runtime.DeltaTag(spawnID)}
-	if !reflect.DeepEqual(fb.importBaseRefs, want) {
-		t.Fatalf("rootfs artifact import bases = %v, want sequential chain %v", fb.importBaseRefs, want)
+	if !reflect.DeepEqual(fb.ImportBaseRefs(), want) {
+		t.Fatalf("rootfs artifact import bases = %v, want sequential chain %v", fb.ImportBaseRefs(), want)
 	}
-	if fb.agentSpec.Image != runtime.DeltaTag(spawnID) {
-		t.Fatalf("agent launched from %q, want imported delta tag", fb.agentSpec.Image)
+	if fb.AgentSpec(spawnID).Image != runtime.DeltaTag(spawnID) {
+		t.Fatalf("agent launched from %q, want imported delta tag", fb.AgentSpec(spawnID).Image)
 	}
 }
 
@@ -429,10 +446,10 @@ func TestCreateRestoresRootfsArtifactsSortedBySequenceAndDepth(t *testing.T) {
 		spawnID = "sp-chain-depth"
 		base    = "agent@sha256:base"
 	)
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	fj := newFakeJournal("")
-	fj.artifactPayloads["artifact-rootfs-seq1"] = []byte("layer-1")
-	fj.artifactPayloads["artifact-rootfs-seq3"] = []byte("layer-3")
+	fj.artifactPayloads["artifact-rootfs-seq1"] = validDeltaArchive()
+	fj.artifactPayloads["artifact-rootfs-seq3"] = validDeltaArchive()
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -486,7 +503,7 @@ func TestCreateRejectsRootfsArtifactSequenceGapsAndDuplicates(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fb := &fakePodBackend{}
+			fb := fakeBackend(t)
 			fj := newFakeJournal("")
 			for _, art := range tc.artifacts {
 				fj.artifactPayloads[art.ArtifactID] = []byte("layer")
@@ -518,9 +535,9 @@ func TestCreateRestoresRootfsArtifactsEvenWhenLocalDeltaTagExists(t *testing.T) 
 		spawnID = "sp-stale-local-delta"
 		base    = "agent@sha256:base"
 	)
-	fb := &fakePodBackend{ensureImageRef: runtime.DeltaTag(spawnID)}
+	fb := fakeBackend(t, fakepod.WithEnsureImageRef(runtime.DeltaTag(spawnID)))
 	fj := newFakeJournal("")
-	fj.artifactPayloads["artifact-rootfs-seq1"] = []byte("restored-layer")
+	fj.artifactPayloads["artifact-rootfs-seq1"] = validDeltaArchive()
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -538,11 +555,11 @@ func TestCreateRestoresRootfsArtifactsEvenWhenLocalDeltaTagExists(t *testing.T) 
 	if err != nil {
 		t.Fatalf("CreateWithSelection: %v", err)
 	}
-	if len(fb.importBaseRefs) != 1 || fb.importBaseRefs[0] != base {
-		t.Fatalf("ImportDelta bases = %v, want [%s]", fb.importBaseRefs, base)
+	if len(fb.ImportBaseRefs()) != 1 || fb.ImportBaseRefs()[0] != base {
+		t.Fatalf("ImportDelta bases = %v, want [%s]", fb.ImportBaseRefs(), base)
 	}
-	if fb.agentSpec.Image != runtime.DeltaTag(spawnID) {
-		t.Fatalf("agent launched from %q, want imported delta tag", fb.agentSpec.Image)
+	if fb.AgentSpec(spawnID).Image != runtime.DeltaTag(spawnID) {
+		t.Fatalf("agent launched from %q, want imported delta tag", fb.AgentSpec(spawnID).Image)
 	}
 }
 
@@ -552,7 +569,7 @@ func TestCreateRootfsLocalOnlyRequiresLocalDeltaTag(t *testing.T) {
 		spawnID = "sp-missing-local-delta"
 		base    = "agent@sha256:base"
 	)
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	fj := newFakeJournal("")
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
@@ -572,14 +589,14 @@ func TestCreateRootfsLocalOnlyRequiresLocalDeltaTag(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "missing local delta image") {
 		t.Fatalf("CreateWithSelection error = %v, want missing local delta image", err)
 	}
-	if len(fb.importBaseRefs) != 0 {
-		t.Fatalf("local-only start must not import rootfs artifacts, import bases=%v", fb.importBaseRefs)
+	if len(fb.ImportBaseRefs()) != 0 {
+		t.Fatalf("local-only start must not import rootfs artifacts, import bases=%v", fb.ImportBaseRefs())
 	}
 }
 
 func TestCreateRejectsRootfsArtifactBaseMismatch(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	fj := newFakeJournal("")
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),
@@ -601,7 +618,7 @@ func TestCreateRejectsRootfsArtifactBaseMismatch(t *testing.T) {
 
 func TestCreateRejectsUnpinnedRootfsArtifact(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	fj := newFakeJournal("")
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "agent:base", SidecarImage: "s", DataRoot: t.TempDir(),

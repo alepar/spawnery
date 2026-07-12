@@ -23,6 +23,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"spawnery/internal/runtime/fakepod"
 )
 
 // FS1: SnapshotForSuspend with a journal error → abort/restore: no pod.Stop, agent
@@ -35,7 +37,7 @@ func TestSnapshotForSuspendFailureAborts(t *testing.T) {
 	fj := newFakeJournal("manifest-abc")
 	fj.finalErr = errors.New("kopia: repo unavailable (injected)")
 
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -52,16 +54,16 @@ func TestSnapshotForSuspendFailureAborts(t *testing.T) {
 	}
 
 	// No pod.Stop must have been called.
-	if fb.stopped != nil {
-		t.Fatalf("pod.Stop must NOT be called on snapshot failure; stopped=%+v", fb.stopped)
+	if fb.LastStopHandle() != nil {
+		t.Fatalf("pod.Stop must NOT be called on snapshot failure; stopped=%+v", fb.LastStopHandle())
 	}
 
 	// Agent must have been paused then unpaused (abort path).
-	if fb.pauseCount != 1 {
-		t.Fatalf("Pause must be called exactly once; got pauseCount=%d", fb.pauseCount)
+	if fb.PauseCount() != 1 {
+		t.Fatalf("Pause must be called exactly once; got pauseCount=%d", fb.PauseCount())
 	}
-	if fb.unpauseCount != 1 {
-		t.Fatalf("Unpause must be called exactly once on abort; got unpauseCount=%d", fb.unpauseCount)
+	if fb.UnpauseCount() != 1 {
+		t.Fatalf("Unpause must be called exactly once on abort; got unpauseCount=%d", fb.UnpauseCount())
 	}
 
 	// Spawn must still be in the store (never claimed).
@@ -92,13 +94,13 @@ func TestSnapshotForSuspendSuccessLeavesPaused(t *testing.T) {
 	stateDir := t.TempDir()
 	app := writeJournalApp(t)
 
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 
 	fj := newFakeJournal("manifest-abc")
 	var pausedDuringSnapshot bool
 	fj.onFinal = func() {
 		// Record whether the agent was paused at the moment FinalSnapshot fires.
-		pausedDuringSnapshot = fb.paused
+		pausedDuringSnapshot = fb.State("sp-pause", "agent") == fakepod.StatePaused
 	}
 
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
@@ -127,8 +129,8 @@ func TestSnapshotForSuspendSuccessLeavesPaused(t *testing.T) {
 	}
 
 	// Agent must NOT have been unpaused (left paused for FinishSuspend to call pod.Stop on).
-	if fb.unpauseCount != 0 {
-		t.Fatalf("agent must NOT be unpaused on success; got unpauseCount=%d", fb.unpauseCount)
+	if fb.UnpauseCount() != 0 {
+		t.Fatalf("agent must NOT be unpaused on success; got unpauseCount=%d", fb.UnpauseCount())
 	}
 
 	// Gate must NOT call journal.Close (Close stays in FinishSuspend's teardown).
@@ -161,7 +163,7 @@ func TestFinishSuspendTearsDown(t *testing.T) {
 	app := writeJournalApp(t)
 
 	fj := newFakeJournal("manifest-xyz")
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -183,7 +185,7 @@ func TestFinishSuspendTearsDown(t *testing.T) {
 	}
 
 	// Pod must have been stopped.
-	if fb.stopped == nil {
+	if fb.LastStopHandle() == nil {
 		t.Fatal("pod.Stop must be called by FinishSuspend")
 	}
 
@@ -211,7 +213,7 @@ func TestFinishSuspendCapturesRootfsDelta(t *testing.T) {
 	app := writeJournalApp(t)
 
 	fj := newFakeJournal("manifest-delta")
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -236,27 +238,28 @@ func TestFinishSuspendCapturesRootfsDelta(t *testing.T) {
 	}
 
 	// CaptureDelta must have been called.
-	if fb.capturedRef == "" {
+	if lastOf(fb.CapturedRefs()) == "" {
 		t.Fatal("CaptureDelta must be called by FinishSuspend when DeltaCapture=true")
 	}
 
 	// pod.Stop must have been called AFTER CaptureDelta.
-	captureIdx := opsIndex(fb.ops, "capture:"+sp.ID)
-	stopIdx := opsIndex(fb.ops, "stop")
+	ops := lifecycleOps(fb)
+	captureIdx := opsIndex(ops, "capture:"+sp.ID)
+	stopIdx := opsIndex(ops, "stop:"+sp.ID)
 	if captureIdx < 0 {
-		t.Fatalf("ops missing capture; ops=%v", fb.ops)
+		t.Fatalf("ops missing capture; ops=%v", ops)
 	}
 	if stopIdx < 0 {
-		t.Fatalf("ops missing stop; ops=%v", fb.ops)
+		t.Fatalf("ops missing stop; ops=%v", ops)
 	}
 	if captureIdx >= stopIdx {
-		t.Fatalf("CaptureDelta must happen BEFORE pod.Stop; ops=%v", fb.ops)
+		t.Fatalf("CaptureDelta must happen BEFORE pod.Stop; ops=%v", ops)
 	}
 }
 
 // FS5: Gate on an unknown spawn ID returns an error without side-effects.
 func TestSnapshotForSuspendUnknownID(t *testing.T) {
-	m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
+	m := NewManagerWithBackend(fakeBackend(t), &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
 	_, err := m.SnapshotForSuspend(context.Background(), "no-such-spawn", nil)
@@ -269,7 +272,7 @@ func TestSnapshotForSuspendUnknownID(t *testing.T) {
 // FinishSuspend tears down cleanly.
 func TestSnapshotForSuspendScratchOnly(t *testing.T) {
 	ctx := context.Background()
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
@@ -289,12 +292,12 @@ func TestSnapshotForSuspendScratchOnly(t *testing.T) {
 	}
 
 	// Agent must have been paused.
-	if fb.pauseCount != 1 {
-		t.Fatalf("Pause must be called; got pauseCount=%d", fb.pauseCount)
+	if fb.PauseCount() != 1 {
+		t.Fatalf("Pause must be called; got pauseCount=%d", fb.PauseCount())
 	}
 	// Not unpaused (success path).
-	if fb.unpauseCount != 0 {
-		t.Fatalf("agent must NOT be unpaused on success; got unpauseCount=%d", fb.unpauseCount)
+	if fb.UnpauseCount() != 0 {
+		t.Fatalf("agent must NOT be unpaused on success; got unpauseCount=%d", fb.UnpauseCount())
 	}
 
 	// Spawn still in store.
@@ -306,7 +309,7 @@ func TestSnapshotForSuspendScratchOnly(t *testing.T) {
 	if _, err := m.FinishSuspend(ctx, sp.ID, false, nil); err != nil {
 		t.Fatalf("FinishSuspend: %v", err)
 	}
-	if fb.stopped == nil {
+	if fb.LastStopHandle() == nil {
 		t.Fatal("pod.Stop must be called by FinishSuspend")
 	}
 	if _, live := m.store.Get(sp.ID); live {
@@ -316,7 +319,7 @@ func TestSnapshotForSuspendScratchOnly(t *testing.T) {
 
 // FS6: FinishSuspend on an unknown spawn ID returns an error.
 func TestFinishSuspendUnknownID(t *testing.T) {
-	m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
+	m := NewManagerWithBackend(fakeBackend(t), &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
 	_, err := m.FinishSuspend(context.Background(), "no-such-spawn", false, nil)
@@ -333,7 +336,7 @@ func TestFinishSuspendUnpausesAgentBeforeCapture(t *testing.T) {
 	app := writeJournalApp(t)
 
 	fj := newFakeJournal("manifest-unpause")
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 		DeltaCapture: true,
@@ -348,16 +351,18 @@ func TestFinishSuspendUnpausesAgentBeforeCapture(t *testing.T) {
 	if _, err := m.SnapshotForSuspend(ctx, sp.ID, nil); err != nil {
 		t.Fatalf("SnapshotForSuspend: %v", err)
 	}
-	if !fb.paused {
+	if fb.State(sp.ID, "agent") != fakepod.StatePaused {
 		t.Fatal("gate must leave the agent paused for journal quiescence")
 	}
 	if _, err := m.FinishSuspend(ctx, sp.ID, false, nil); err != nil {
 		t.Fatalf("FinishSuspend: %v", err)
 	}
-	if fb.unpauseCount == 0 {
+	if fb.UnpauseCount() == 0 {
 		t.Fatal("FinishSuspend must unpause the agent before the rootfs scrub/capture")
 	}
-	if fb.paused {
+	// The agent is removed by capture+stop at this point, not merely unpaused — either way it must
+	// not still be paused (a frozen container would fail the scrub/capture that runs beforehand).
+	if fb.State(sp.ID, "agent") == fakepod.StatePaused {
 		t.Fatal("agent still paused after FinishSuspend — scrub/capture/stop would run on a frozen container")
 	}
 }
