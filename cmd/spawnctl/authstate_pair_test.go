@@ -130,3 +130,15 @@ func TestNodeCredentialsKeyLossClearsStateAndRequiresLogin(t *testing.T) {
 		t.Fatalf("auth state still exists: %v", statErr)
 	}
 }
+
+func TestTokenRefreshKeyLossDoesNotReturnStaleCPToken(t *testing.T) {
+	dir := t.TempDir()
+	if err := saveState(dir, &authState{ASURL: "", CPAccessToken: "stale-cp", NodeAccessToken: "node", AccessExpiresAt: time.Now().Unix(), RefreshToken: "refresh", SessionKeyPKCS8PEM: "corrupt"}); err != nil {
+		t.Fatal(err)
+	}
+	src := &cpTokenSource{dir: dir}
+	token, err := src.Token(context.Background())
+	if err == nil || token != "" || !strings.Contains(err.Error(), "login") {
+		t.Fatalf("Token = %q, %v; want empty login-required error", token, err)
+	}
+}

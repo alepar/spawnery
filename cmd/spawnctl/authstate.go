@@ -44,8 +44,6 @@ const (
 	refreshPoPDomain = "spawnery/refresh-pop/v1" // frozen per AS idp.go:47
 	// refreshWindow: proactive refresh when this close to expiry (plus jitter).
 	refreshWindow = 2 * time.Minute
-	// accessTokenTTL mirrors the AS's 15-min TTL; used to set access_expires_at at mint time.
-	accessTokenTTLClient = 15 * time.Minute
 )
 
 // authState is the JSON-serialised state stored at <configDir>/auth.json.
@@ -356,6 +354,9 @@ func (ts *cpTokenSource) tokenLocked(ctx context.Context) (string, error) {
 		threshold := s.AccessExpiresAt - int64(refreshWindow.Seconds()) - jitterSec
 		if time.Now().Unix() >= threshold {
 			if err := doRefresh(ctx, ts.dir, s, ts.httpClient); err != nil {
+				if _, statErr := os.Stat(authStatePath(ts.dir)); errors.Is(statErr, os.ErrNotExist) {
+					return err
+				}
 				// Refresh failed — still return the (possibly expired) token and let the server
 				// produce a 401 so the caller can decide (transparent retry via OnUnauthenticated).
 				result = s.CPAccessToken

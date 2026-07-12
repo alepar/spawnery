@@ -36,9 +36,7 @@ type Client struct {
 // Option configures a Client at construction time.
 type Option func(*Client)
 
-// WithWarnHandler sets the callback used to surface non-fatal, best-effort errors (e.g. a
-// pollAndSign failure in a fire-and-forget goroutine) that the absorbed spawnctl code used to
-// log.Printf directly. Defaults to a no-op.
+// WithWarnHandler sets the callback used to surface non-fatal retry notices. Defaults to a no-op.
 func WithWarnHandler(fn func(error)) Option {
 	return func(c *Client) { c.warn = fn }
 }

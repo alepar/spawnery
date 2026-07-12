@@ -1,7 +1,6 @@
 package client
 
-// intent_test.go covers AM1 client-side validation, the staged node-credential failure,
-// and BuildSessionOpenIntent.
+// intent_test.go covers local tuple validation, target verification, and lifecycle signing.
 
 import (
 	"context"

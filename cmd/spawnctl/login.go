@@ -232,7 +232,7 @@ func loginLoopback(ctx context.Context, dir, asURL string, noBrowser bool, w io.
 		RefreshToken:       result.refreshToken,
 		SessionKeyPKCS8PEM: keyPEM,
 	}
-	if err := saveState(dir, s); err != nil {
+	if err := withFileLock(dir, func() error { return saveState(dir, s) }); err != nil {
 		return fmt.Errorf("save state: %w", err)
 	}
 	fmt.Fprintln(w, "Login successful. Credentials saved.")
@@ -342,7 +342,7 @@ func loginDevice(ctx context.Context, dir, asURL string, w io.Writer) error {
 				RefreshToken:       tokenOut.RefreshToken,
 				SessionKeyPKCS8PEM: keyPEM,
 			}
-			if err := saveState(dir, s); err != nil {
+			if err := withFileLock(dir, func() error { return saveState(dir, s) }); err != nil {
 				return fmt.Errorf("save state: %w", err)
 			}
 			fmt.Fprintln(w, "Device authorized. Credentials saved.")
