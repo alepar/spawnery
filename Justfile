@@ -247,6 +247,12 @@ test-e2e:
     make images
     go test -tags e2e ./... -count=1 -v
 
+# agent-image version pins (sp-mwco.2.1) — asserts the built image's agent binaries match the
+# Dockerfile's ARG pins. Gates every "supported" capability claim in the skill-install epic.
+test-agent-versions:
+    make images
+    go test -tags e2e -run TestAgentImageVersionsMatchPins -count=1 -v ./internal/agentimage/
+
 # output the Garage S3 env vars for the journaler from .envs/dev/garage-creds.env.
 # Pipe into `export $(just test-garage-env | tr -d " ")` before running e2e tests.
 test-garage-env:
