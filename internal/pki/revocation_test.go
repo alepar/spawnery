@@ -72,6 +72,34 @@ func TestRevocationStatePersistsReloadsAndScopesSerialsByIssuer(t *testing.T) {
 	}
 }
 
+func TestOpenRevocationStateRejectsIssuersOutsideAggregateBound(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := NewRootCA("root")
+	service, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	secondService, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	cloud, _ := root.NewIntermediate(IssuerCloudNode, "prod.spawnery.internal")
+	selfHosted, _ := root.NewIntermediate(IssuerSelfHostedNode, "prod.spawnery.internal")
+	oversizedSerial := *service.Cert
+	oversizedSerial.SerialNumber = new(big.Int).Lsh(big.NewInt(1), 160)
+
+	for _, test := range []struct {
+		name    string
+		issuers []*x509.Certificate
+	}{
+		{name: "fourth issuer", issuers: []*x509.Certificate{service.Cert, cloud.Cert, selfHosted.Cert, secondService.Cert}},
+		{name: "duplicate role", issuers: []*x509.Certificate{service.Cert, secondService.Cert}},
+		{name: "oversized serial", issuers: []*x509.Certificate{&oversizedSerial}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state, err := OpenRevocationState(filepath.Join(t.TempDir(), "revocations", "state.json"), test.issuers, func() time.Time { return now })
+			if err == nil {
+				_ = state.Close()
+				t.Fatal("issuer set outside aggregate bound accepted")
+			}
+		})
+	}
+}
+
 func TestRevocationStateFailsClosedWhenSnapshotExpiresAndRecoversOnRefresh(t *testing.T) {
 	base := time.Now().UTC().Truncate(time.Second)
 	var clock atomic.Int64

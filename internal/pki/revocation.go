@@ -79,15 +79,27 @@ func OpenRevocationState(path string, issuers []*x509.Certificate, now func() ti
 	if path == "" || len(issuers) == 0 || now == nil {
 		return nil, errors.New("pki: invalid revocation state configuration")
 	}
+	if len(issuers) > supportedIssuerRoleCount {
+		return nil, fmt.Errorf("pki: revocation issuer count is %d, want at most %d", len(issuers), supportedIssuerRoleCount)
+	}
 	currentTime := now()
 	if currentTime.IsZero() {
 		return nil, errors.New("pki: revocation state clock returned zero time")
 	}
 	trusted := make(map[string]*x509.Certificate, len(issuers))
+	trustedRoles := make(map[IssuerRole]struct{}, len(issuers))
 	for _, issuer := range issuers {
 		if err := validateCRLIssuer(issuer); err != nil {
 			return nil, fmt.Errorf("pki: reject revocation issuer: %w", err)
 		}
+		role, err := IssuerRoleFromCertificate(issuer)
+		if err != nil {
+			return nil, fmt.Errorf("pki: reject revocation issuer role: %w", err)
+		}
+		if _, duplicate := trustedRoles[role]; duplicate {
+			return nil, fmt.Errorf("pki: duplicate revocation issuer role %s", role)
+		}
+		trustedRoles[role] = struct{}{}
 		if currentTime.Before(issuer.NotBefore) || currentTime.After(issuer.NotAfter) {
 			return nil, errors.New("pki: revocation issuer is not currently valid")
 		}

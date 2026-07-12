@@ -113,6 +113,10 @@ func VerifyCRL(list *x509.RevocationList, issuer *x509.Certificate, now time.Tim
 }
 
 func validCRLNumber(number *big.Int) bool {
+	return validPositive20OctetInteger(number)
+}
+
+func validPositive20OctetInteger(number *big.Int) bool {
 	if number == nil || number.Sign() <= 0 {
 		return false
 	}
@@ -163,7 +167,7 @@ func validateCRLIssuer(issuer *x509.Certificate) error {
 	if issuer.KeyUsage != x509.KeyUsageCertSign|x509.KeyUsageCRLSign {
 		return errors.New("pki: CRL issuer has invalid key usage")
 	}
-	if issuer.SerialNumber == nil || issuer.SerialNumber.Sign() <= 0 || len(issuer.SubjectKeyId) == 0 {
+	if !validPositive20OctetInteger(issuer.SerialNumber) || len(issuer.SerialNumber.Text(16)) > maxIssuerSerialHexSize || len(issuer.SubjectKeyId) == 0 {
 		return errors.New("pki: CRL issuer has invalid identity")
 	}
 	if _, err := IssuerRoleFromCertificate(issuer); err != nil {
