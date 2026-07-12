@@ -47,21 +47,29 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=fetch /usr/local/bin/opencode /usr/local/bin/opencode
 
-# goose CLI (Block) — TUI/ACP agent
+# goose CLI (Block) — TUI/ACP agent. PINNED: the `stable` release tag is a floating pointer (the
+# same release object is re-pointed in place), so an unpinned build silently swaps the binary and
+# invalidates every skills spike / capability claim (sp-mwco.2.1). Bump deliberately.
+# v1.41.0 (2026-07-03) is the Summon-extension era (>= 1.25), not Skills ext (1.16–1.24).
+ARG GOOSE_VERSION=v1.41.0
 RUN set -eux; \
     curl -fsSL -o /tmp/goose.tar.bz2 \
-      "https://github.com/block/goose/releases/download/stable/goose-x86_64-unknown-linux-gnu.tar.bz2"; \
+      "https://github.com/block/goose/releases/download/${GOOSE_VERSION}/goose-x86_64-unknown-linux-gnu.tar.bz2"; \
     tar -xjf /tmp/goose.tar.bz2 -C /usr/local/bin; \
     rm /tmp/goose.tar.bz2; \
     /usr/local/bin/goose --version
 
-# claude-code (Anthropic) — native binary via the Debian apt repo
+# claude-code (Anthropic) — native binary via the Debian apt repo. PINNED to an exact deb version:
+# the `stable` channel is a rolling head and an unpinned build silently upgrades the agent
+# (sp-mwco.2.1). The repo retains ~36 recent versions; when this pin ages out, the build FAILS
+# ("Version '…' for 'claude-code' was not found") — bump the ARG, do not un-pin or --allow-* around it.
+ARG CLAUDE_CODE_VERSION=2.1.197-1
 RUN set -eux; \
     install -d -m 0755 /etc/apt/keyrings; \
     curl -fsSL https://downloads.claude.ai/keys/claude-code.asc -o /etc/apt/keyrings/claude-code.asc; \
     echo "deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/stable stable main" > /etc/apt/sources.list.d/claude-code.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends claude-code; \
+    apt-get install -y --no-install-recommends "claude-code=${CLAUDE_CODE_VERSION}"; \
     rm -rf /var/lib/apt/lists/*; \
     claude --version
 # codex CLI (OpenAI) — Rust TUI/headless agent (codex-tui launcher case)
