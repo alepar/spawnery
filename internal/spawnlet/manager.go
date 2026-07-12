@@ -828,54 +828,6 @@ func (m *Manager) RunningInventory() []runtime.ManagedPod {
 	return out
 }
 
-// ReapOrphans tears down every spawnery-managed pod the runtime still has that this Manager is NOT
-// tracking — leftovers from a previous node process (the in-mem store is empty after a restart). Call
-// it at startup so a crashed/restarted node doesn't leak pods.
-//
-// Scoped by the spawnery.node-id label: pods created by a DIFFERENT node id are left alone — two
-// spawnlets sharing one Docker daemon (dev stack + an e2e run, or multi-node-on-one-host) must not
-// reap each other's live pods. Unlabeled pods (pre-label versions) are still reaped.
-//
-// Crash-survival (spec §4): when DeltaCapture is enabled, a CaptureDelta is attempted on the
-// orphaned agent container BEFORE pod.Stop, so the spawn's work is preserved for a future resume.
-// This is best-effort and non-fatal — a capture failure just means the next resume starts from the
-// last known-good delta (or the base image if none existed).
-//
-// moby#47065 note: the moby layer-count guard in CaptureDelta requires the BaseImageRef of the
-// launch image to compare against.  Orphan reaping does not have the Spawn record (the in-mem store
-// was wiped on restart), so BaseImageRef is empty and the guard degrades to rejecting only truly
-// zero-layer commits.
-func (m *Manager) ReapOrphans(ctx context.Context) error {
-	managed, err := m.pod.ListManaged(ctx)
-	if err != nil {
-		return err
-	}
-	for _, mp := range managed {
-		if mp.NodeID != "" && mp.NodeID != m.cfg.NodeID {
-			continue // another node's pod (shared daemon) — not ours to reap
-		}
-		if _, live := m.store.Get(mp.SpawnID); live {
-			continue // still ours
-		}
-		log.Printf("reaping orphaned pod spawn=%s gen=%d (not in store; node restart)", mp.SpawnID, mp.Generation)
-
-		// Capture-before-reap (spec §4 crash-survival): commit the agent's writable layer to
-		// the delta tag BEFORE stopping so a future same-node resume picks up where it crashed.
-		// Best-effort: non-fatal, logged.
-		if m.cfg.DeltaCapture && mp.AgentID != "" {
-			h := &runtime.PodHandle{SpawnID: mp.SpawnID, AgentID: mp.AgentID}
-			if ref, cerr := m.pod.CaptureDelta(ctx, h); cerr != nil {
-				log.Printf("capture-before-reap spawn=%s: %v (non-fatal; delta may be stale)", mp.SpawnID, cerr)
-			} else {
-				log.Printf("capture-before-reap spawn=%s ref=%s", mp.SpawnID, ref)
-			}
-		}
-
-		_ = m.pod.Stop(ctx, &runtime.PodHandle{SidecarID: mp.SidecarID, AgentID: mp.AgentID, SandboxID: mp.SandboxID})
-	}
-	return nil
-}
-
 // StopAll tears down every spawn this Manager tracks — the DESTRUCTIVE bulk path. It is NOT the
 // process-shutdown path any more: a SIGTERM'd node calls DetachAll and leaves its pods running for
 // the next process to re-adopt (SE3 §4.1). Keep this for an explicit drain/destroy-everything caller.

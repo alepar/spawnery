@@ -8,6 +8,20 @@ import (
 	"testing"
 )
 
+// HostDir must return exactly the dir Prepare returns — adoption (SE3 §4.2) locates a live, already
+// bind-mounted host dir with it and MUST NOT call Prepare, which re-seeds/chowns (and, on the github
+// backend, re-clones) a directory the running agent is actively using.
+func TestScratchHostDirMatchesPrepare(t *testing.T) {
+	s := NewScratch(t.TempDir())
+	got, err := s.Prepare(context.Background(), "sp1", "data", "", -1)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if want := s.HostDir("sp1", "data"); got != want {
+		t.Fatalf("Prepare = %q, HostDir = %q — they must agree", got, want)
+	}
+}
+
 func TestScratchPrepareSeedsAndFinalizeNukes(t *testing.T) {
 	root := t.TempDir()
 	seed := t.TempDir()
