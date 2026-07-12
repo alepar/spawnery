@@ -351,6 +351,15 @@ sudo chmod 644 /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key   #
 sudo chmod 644 /etc/spawnery/pki/github.crt /etc/spawnery/pki/github.key      # caddy runs as user 'caddy'
 sudo cp /etc/spawnery/pki/ca.crt /home/build/ca.crt   # build-base.sh pulls this out for host trust
 
+# ---- golden CA into the VM's OWN trust store (sp-wwtc.1) ----
+# The NODE is a plain host process on this VM (not in a pod), and with sp-wwtc it clones from
+# https://github.com/... — i.e. from Caddy, presenting a golden-CA-signed cert. Without this the node's
+# clone-in fails TLS verification. This is SEPARATE from the sidecar's trust: the sidecar runs in a
+# CONTAINER with its own image trust store, which is why it still needs SIDECAR_CA_BUNDLE_FILE.
+log "installing the golden CA into the VM's system trust (the node clones from https://github.com)…"
+sudo cp -f /etc/spawnery/pki/ca.crt /etc/pki/ca-trust/source/anchors/spawnery-golden-ca.crt
+sudo update-ca-trust extract
+
 # ---- sidecar upstream CA trust bundle (sp-wwtc.3): system roots + the golden CA, MERGED (SSL_CERT_FILE
 # REPLACES rather than appends — see cmd/spawnlet SIDECAR_CA_BUNDLE_FILE doc), in its OWN directory
 # (never /etc/spawnery/pki itself — that dir also holds host PKI private keys, and this bundle is
@@ -523,6 +532,16 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable garage spawnery-garage-bootstrap gitea spawnery-gitea-bootstrap spawnery-render-env spawnery-authsvc spawnery-cp spawnery-node caddy
+
+# ---- github.com -> this VM, for the NODE process (sp-wwtc.1) ----
+# MUST BE LAST. The pod's dnsmasq (above) serves the POD netns only; the node runs as a plain host
+# process on this VM and does its own clone-in, so it needs github.com to resolve here too.
+#
+# THIS IS DELIBERATELY THE FINAL STEP: provisioning itself downloads containerd, runc, the CNI plugins
+# and crictl FROM github.com (see the top of this script). Move this line any earlier and those fetches
+# resolve to 127.0.0.1 and the build dies. Anything added after this point must not fetch from github.com.
+log "pointing github.com/codeload.github.com at this VM for the node process (MUST be the last step)…"
+printf '127.0.0.1 github.com codeload.github.com\n' | sudo tee -a /etc/hosts >/dev/null
 
 # ---- self-check (best-effort) + clean shutdown handled by build-base.sh ----
 log "provision complete. runsc: $(runsc --version | head -1). containerd: $(/usr/local/bin/containerd --version)"
