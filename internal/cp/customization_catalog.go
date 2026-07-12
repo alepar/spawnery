@@ -115,6 +115,13 @@ func (s *Server) UpdateCatalogEntry(ctx context.Context, req *connect.Request[cp
 	if e.CreatorID != owner {
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not the creator of %q", req.Msg.CatalogId))
 	}
+	// URL-ingested rows are immutable: assembly prefers SHA256 over Content, so an edit here
+	// is either rejected by the tar validator or silently ignored at spawn time. Change
+	// upstream and re-ingest instead.
+	if e.SHA256 != nil && *e.SHA256 != "" {
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("catalog entry %q was ingested from a URL and is immutable; change it upstream and re-ingest", req.Msg.CatalogId))
+	}
 	name := strings.TrimSpace(req.Msg.Name)
 	if err := validateCustomContent(store.ProfileEntryKind(e.Kind), name, req.Msg.Content); err != nil {
 		return nil, err
