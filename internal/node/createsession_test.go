@@ -22,6 +22,8 @@ type fakeSessionExec struct {
 		port int
 	}
 	killed        []string // tmux names killed
+	reaped        []string // spawn ids ReapExtraSessions was called for
+	reapErr       error
 	dials         int
 	acpClosed     int // count of AttachedStream.Close calls on acp dials (acp pump teardown / conn release)
 	launchMoshErr error
@@ -116,6 +118,13 @@ func (f *fakeSessionExec) KillTmux(_ context.Context, _, tmuxName string) error 
 	f.killed = append(f.killed, tmuxName)
 	f.mu.Unlock()
 	return nil
+}
+
+func (f *fakeSessionExec) ReapExtraSessions(ctx context.Context, spawnID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reaped = append(f.reaped, spawnID)
+	return f.reapErr
 }
 
 // newSessionAttacher builds an attacher with a fake exec boundary and a registered, ACTIVE pinned

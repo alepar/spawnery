@@ -1,8 +1,12 @@
 package node
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"strconv"
+	"strings"
 
 	"spawnery/internal/runtime"
 	"spawnery/internal/spawnlet"
@@ -26,6 +30,12 @@ type sessionExec interface {
 	DialACP(ctx context.Context, spawnID string, port int) (*runtime.AttachedStream, error)
 	// KillTmux reaps a tmux session by name (`tmux kill-session -t <name>`), best-effort.
 	KillTmux(ctx context.Context, spawnID, tmuxName string) error
+	// ReapExtraSessions kills every tmux session in the spawn's agent container EXCEPT session #0's
+	// ("spawn") — i.e. exactly the additional-session servers a previous node process launched
+	// (spawn-<n> / acp-<n>). Their node-side registry died with that process, so without this they squat
+	// their tmux names and ACP pool ports while the rebuilt registry re-allocates from 1 (design §4.6).
+	// Best-effort: errors are the caller's to log, never to fail an adoption over.
+	ReapExtraSessions(ctx context.Context, spawnID string) error
 }
 
 // realSessionExec is the production sessionExec: every op resolves to a docker/crictl exec or TCP dial
@@ -56,4 +66,23 @@ func (s *realSessionExec) DialACP(ctx context.Context, spawnID string, port int)
 
 func (s *realSessionExec) KillTmux(ctx context.Context, spawnID, tmuxName string) error {
 	return s.mgr.ExecRun(ctx, spawnID, []string{"tmux", "kill-session", "-t", tmuxName})
+}
+
+func (s *realSessionExec) ReapExtraSessions(ctx context.Context, spawnID string) error {
+	var out bytes.Buffer
+	// `tmux list-sessions` exits non-zero when there is no server at all — that is the common, healthy
+	// case (no additional sessions), not an error.
+	if code, err := s.mgr.ExecStream(ctx, spawnID, []string{"tmux", "list-sessions", "-F", "#{session_name}"}, &out, io.Discard); err != nil || code != 0 {
+		return nil
+	}
+	var firstErr error
+	for _, name := range strings.Fields(out.String()) {
+		if name == "" || name == "spawn" { // session #0's tmux; not ours to reap
+			continue
+		}
+		if err := s.KillTmux(ctx, spawnID, name); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("kill tmux session %q: %w", name, err)
+		}
+	}
+	return firstErr
 }
