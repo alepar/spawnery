@@ -31,6 +31,7 @@ func (r *feedSignerRevocations) RejectSigner(*x509.Certificate) error {
 type fakeDoer struct {
 	responses []fakeResponse
 	calls     int32
+	request   *http.Request
 }
 
 type fakeResponse struct {
@@ -39,6 +40,7 @@ type fakeResponse struct {
 }
 
 func (f *fakeDoer) Do(req *http.Request) (*http.Response, error) {
+	f.request = req.Clone(req.Context())
 	idx := int(atomic.AddInt32(&f.calls, 1)) - 1
 	if idx >= len(f.responses) {
 		// No more responses — return empty list.
@@ -69,7 +71,7 @@ func TestFeedPoller_PollOnce_AppliesEntries(t *testing.T) {
 	entry := signedEntry(t, fixture.credential, 1, "acct-live", []string{"tok-live"})
 	doer := &fakeDoer{responses: []fakeResponse{{status: 200, entries: []SignedFeedEntry{entry}}}}
 
-	poller := NewFeedPoller(doer, "http://fake/revocations", "", fixture.verifier, revreg, time.Minute)
+	poller := NewFeedPoller(doer, "http://fake/revocations", fixture.verifier, revreg, time.Minute)
 	poller.now = func() time.Time { return testNow }
 	ctx := t.Context()
 	if err := poller.pollOnce(ctx); err != nil {
@@ -79,6 +81,12 @@ func TestFeedPoller_PollOnce_AppliesEntries(t *testing.T) {
 	// Checkpoint should advance.
 	if poller.checkpoint != 1 {
 		t.Errorf("checkpoint: got %d want 1", poller.checkpoint)
+	}
+	if got := doer.request.Header.Get("Authorization"); got != "" {
+		t.Fatalf("revocation feed sent bearer authorization %q", got)
+	}
+	if got := doer.request.Header.Get("X-Spawnery-AS-" + "Secret"); got != "" {
+		t.Fatalf("revocation feed sent retired service secret %q", got)
 	}
 
 	// Session should be cancelled.
@@ -100,7 +108,7 @@ func TestFeedPoller_PollOnce_AdvancesCheckpoint(t *testing.T) {
 		signedEntry(t, fixture.credential, 20, "a2", []string{"t2"}),
 	}
 	doer := &fakeDoer{responses: []fakeResponse{{status: 200, entries: entries}}}
-	poller := NewFeedPoller(doer, "http://fake/revocations", "", fixture.verifier, revreg, time.Minute)
+	poller := NewFeedPoller(doer, "http://fake/revocations", fixture.verifier, revreg, time.Minute)
 	poller.now = func() time.Time { return testNow }
 	ctx := t.Context()
 	if err := poller.pollOnce(ctx); err != nil {
@@ -120,7 +128,7 @@ func TestFeedPoller_PollOnce_BadEntry_NoCheckpointCorruption(t *testing.T) {
 	badEntry := signedEntry(t, evil.credential, 6, "acct-bad", []string{"tok-bad"})
 
 	doer := &fakeDoer{responses: []fakeResponse{{status: 200, entries: []SignedFeedEntry{goodEntry, badEntry}}}}
-	poller := NewFeedPoller(doer, "http://fake/revocations", "", fixture.verifier, revreg, time.Minute)
+	poller := NewFeedPoller(doer, "http://fake/revocations", fixture.verifier, revreg, time.Minute)
 	poller.now = func() time.Time { return testNow }
 	ctx := t.Context()
 	if err := poller.pollOnce(ctx); err != nil {
@@ -144,7 +152,7 @@ func TestFeedPoller_PollOnce_NonOKStatus(t *testing.T) {
 	revreg := NewRevocationRegistry(nil)
 	fixture := newArtifactFixture(t)
 	doer := &fakeDoer{responses: []fakeResponse{{status: 401, entries: nil}}}
-	poller := NewFeedPoller(doer, "http://fake/revocations", "bad-bearer", fixture.verifier, revreg, time.Minute)
+	poller := NewFeedPoller(doer, "http://fake/revocations", fixture.verifier, revreg, time.Minute)
 	ctx := t.Context()
 	err := poller.pollOnce(ctx)
 	if err == nil {
@@ -162,7 +170,7 @@ func TestFeedPollerObservesSignerRevocationWithoutRestart(t *testing.T) {
 	first := signedEntry(t, fixture.credential, 1, "acct-1", []string{"tok-1"})
 	second := signedEntry(t, fixture.credential, 2, "acct-2", []string{"tok-2"})
 	doer := &fakeDoer{responses: []fakeResponse{{status: 200, entries: []SignedFeedEntry{first}}, {status: 200, entries: []SignedFeedEntry{second}}}}
-	poller := NewFeedPoller(doer, "http://fake/revocations", "", fixture.verifier, registry, time.Minute)
+	poller := NewFeedPoller(doer, "http://fake/revocations", fixture.verifier, registry, time.Minute)
 	poller.now = func() time.Time { return testNow }
 	if err := poller.pollOnce(t.Context()); err != nil {
 		t.Fatal(err)

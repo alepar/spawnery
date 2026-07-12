@@ -23,7 +23,6 @@ type httpDoer interface {
 type FeedPoller struct {
 	doer       httpDoer
 	url        string // base URL of the revocation feed (without ?since=)
-	bearer     string // optional CP-to-AS bearer secret (CP_AS_CP_SECRET)
 	artifacts  *token.Verifier
 	now        func() time.Time
 	revreg     *RevocationRegistry
@@ -32,11 +31,11 @@ type FeedPoller struct {
 }
 
 // NewFeedPoller builds a FeedPoller. interval=0 uses 30s default.
-func NewFeedPoller(doer httpDoer, feedURL, bearer string, artifacts *token.Verifier, revreg *RevocationRegistry, interval time.Duration) *FeedPoller {
+func NewFeedPoller(doer httpDoer, feedURL string, artifacts *token.Verifier, revreg *RevocationRegistry, interval time.Duration) *FeedPoller {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	return &FeedPoller{doer: doer, url: feedURL, bearer: bearer, artifacts: artifacts, revreg: revreg, interval: interval, now: time.Now}
+	return &FeedPoller{doer: doer, url: feedURL, artifacts: artifacts, revreg: revreg, interval: interval, now: time.Now}
 }
 
 // Run polls on interval until ctx is cancelled.
@@ -61,9 +60,6 @@ func (p *FeedPoller) pollOnce(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
-	}
-	if p.bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+p.bearer)
 	}
 	resp, err := p.doer.Do(req)
 	if err != nil {

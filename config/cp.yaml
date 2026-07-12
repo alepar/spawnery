@@ -19,11 +19,23 @@ auth:
   signer_revocation_state: ""  # persisted monotonic state (required in prod)
   dev_intent_enabled: false    # opt into the two-phase intent sign flow in dev
   session_reauth_interval: 0s  # 0 disables periodic session re-auth
-  as_rpc_secret: ""            # AS↔CP GitHub-coordination RPC bearer (enables service-scoped auth)
   as_url: ""                   # AS base URL; when set, wires the CP→AS GitHub link-preflight checker
   as_revocation_url: ""        # AS revocation feed URL (empty disables the poller)
-  as_cp_secret: ""             # bearer for the revocation feed
   revocation_poll_interval: 30s
+
+internal:
+  insecure_dev_node_on_public: false # explicit loopback-only compatibility lane; never production
+  listen: ""
+  trust_domain: ""
+  root_ca: ""
+  cert: ""
+  chain: ""
+  key: ""
+  server_name: ""
+  revocation_state: ""
+  revocation_issuers: []
+  revocation_crls: []
+  revocation_refresh_interval: 30s
 
 telemetry: "telemetry/events.jsonl"   # JSONL sink path; empty disables
 
@@ -35,14 +47,6 @@ evaluator:                     # CP-side metric evaluators (disabled by default)
   idle_enabled: false          # enable idle-only evaluation
   idle_detached: 15m
   idle_attached: 60m
-
-node:
-  auth_mode: insecure          # insecure | enforced (enforced = mTLS on a dedicated listener)
-  listen: "127.0.0.1:8081"
-  trust_domain: "dev.spawnery.internal"
-  root_ca: "/etc/spawnery/cp/node-root-ca.pem"
-  tls_cert: "/etc/spawnery/cp/server.pem"
-  tls_key: "/etc/spawnery/cp/server-key.pem"
 
 # Skills Garage store (sp-nrzf.3.14.4). Empty endpoint disables URL skill ingest (FailedPrecondition).
 # The bucket must be pre-provisioned out-of-band — the CP's S3 key is Forbidden for MakeBucket.

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -877,14 +878,13 @@ func mintDevNodeToken(credential *token.SigningCredential, accountID string, spk
 func (s *Server) SetReauthInterval(d time.Duration) { s.reauthInterval = d }
 
 // SetASLinkChecker installs the CP→AS GitHub link-status checker used by the CreateSpawn preflight.
-// asURL is the AS base URL (e.g. "http://127.0.0.1:8090"); secret is CP_AS_RPC_SECRET. Both must
-// be non-empty — the method is a no-op when either is empty. Call from cmd/spawnery_cp/main.go
+// asURL is the AS internal base URL (e.g. "https://authsvc.internal:8091"). Call from cmd/spawnery_cp/main.go
 // when CP_AS_URL is configured; non-github lanes leave the checker nil (preflight skipped).
-func (s *Server) SetASLinkChecker(asURL, secret string) {
-	if asURL == "" || secret == "" {
+func (s *Server) SetASLinkChecker(asURL string, client *http.Client) {
+	if asURL == "" || client == nil {
 		return
 	}
-	s.linkChecker = newHTTPASLinkChecker(asURL, secret, nil)
+	s.linkChecker = newHTTPASLinkChecker(asURL, client)
 }
 
 // checkSpawnQuota returns ResourceExhausted if the owner is at/over the per-owner spawn cap.

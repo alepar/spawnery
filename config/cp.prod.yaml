@@ -9,6 +9,20 @@ store:
   driver: postgres
   dsn: "${sops:store.dsn}"     # real DSN (with password) lives encrypted in secrets.prod.sops.yaml
 
-node:
-  auth_mode: enforced          # nodes connect over mTLS on the dedicated node listener
+internal:
+  listen: "127.0.0.1:8081"
   trust_domain: "prod.spawnery.internal"
+  root_ca: "/etc/spawnery/cp/root.pem"
+  cert: "/etc/spawnery/cp/cp-service.pem"
+  chain: "/etc/spawnery/cp/cp-service-chain.pem"
+  key: "/etc/spawnery/cp/cp-service-key.pem"
+  server_name: "authsvc.internal"
+  revocation_state: "/var/lib/spawnery/cp-revocations/state.json"
+  revocation_issuers:
+    - "/etc/spawnery/cp/service-intermediate.pem"
+    - "/etc/spawnery/cp/cloud-intermediate.pem"
+    - "/etc/spawnery/cp/self-hosted-intermediate.pem"
+  revocation_crls:
+    - "/etc/spawnery/cp/service.crl.pem"
+    - "/etc/spawnery/cp/cloud-node.crl.pem"
+    - "/etc/spawnery/cp/self-hosted-node.crl.pem"

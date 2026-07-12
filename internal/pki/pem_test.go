@@ -1,7 +1,9 @@
 package pki
 
 import (
+	"crypto/ed25519"
 	"crypto/x509"
+	"encoding/pem"
 	"testing"
 	"time"
 )
@@ -41,6 +43,46 @@ func TestPEMRoundTrip(t *testing.T) {
 	}
 	if _, err := Verify(gotCert, []*x509.Certificate{inter.Cert}, rootCert, DefaultTrustDomain, time.Now(), allowNoCertificateRevocations); err != nil {
 		t.Fatalf("reloaded cert failed verify: %v", err)
+	}
+}
+
+func TestMarshalPKCS8KeyPEMAndCertificateChain(t *testing.T) {
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewAuthSigningIntermediate("prod")
+	signer, _ := issuer.IssueAuthArtifactSigner("prod", "current", time.Now().Add(time.Hour))
+
+	keyPEM, err := MarshalPKCS8KeyPEM(signer.Key)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8KeyPEM: %v", err)
+	}
+	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		t.Fatal("missing private-key PEM block")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatalf("ParsePKCS8PrivateKey: %v", err)
+	}
+	if _, ok := key.(ed25519.PrivateKey); !ok {
+		t.Fatalf("key = %T, want ed25519.PrivateKey", key)
+	}
+
+	chainPEM := MarshalCertChainPEM([]*x509.Certificate{signer.Cert, issuer.Cert})
+	var got []*x509.Certificate
+	for len(chainPEM) > 0 {
+		var certBlock *pem.Block
+		certBlock, chainPEM = pem.Decode(chainPEM)
+		if certBlock == nil || certBlock.Type != "CERTIFICATE" {
+			t.Fatal("invalid certificate chain PEM")
+		}
+		cert, err := x509.ParseCertificate(certBlock.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, cert)
+	}
+	if len(got) != 2 || !got[0].Equal(signer.Cert) || !got[1].Equal(issuer.Cert) {
+		t.Fatalf("chain order = %v", got)
 	}
 }
 
