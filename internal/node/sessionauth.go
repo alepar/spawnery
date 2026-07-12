@@ -84,22 +84,6 @@ func (r *sessionAuthRegistry) remove(key sessionAuthKey) {
 	r.mu.Unlock()
 }
 
-func (r *sessionAuthRegistry) closeSpawn(spawnID, reason string) {
-	var callbacks []func(string)
-	r.mu.Lock()
-	for key := range r.records {
-		if key.spawnID == spawnID {
-			if cb := r.removeLocked(key); cb != nil {
-				callbacks = append(callbacks, cb)
-			}
-		}
-	}
-	r.mu.Unlock()
-	for _, cb := range callbacks {
-		cb(reason)
-	}
-}
-
 func (r *sessionAuthRegistry) removeSpawn(spawnID string) {
 	r.mu.Lock()
 	for key := range r.records {
