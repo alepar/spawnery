@@ -25,6 +25,7 @@ export const DOMAIN_RECREATE_SPAWN = "spawnery/intent/recreate-spawn/v1";
 export const DOMAIN_MIGRATE_SPAWN = "spawnery/intent/migrate-spawn/v1";
 export const DOMAIN_FORK_SPAWN = "spawnery/intent/fork-spawn/v1";
 export const DOMAIN_SESSION_OPEN = "spawnery/intent/session-open/v1";
+export const DOMAIN_SESSION_REAUTH = "spawnery/intent/session-reauth/v1";
 
 export function domainForOp(op: string): string {
   switch (op) {
@@ -34,6 +35,7 @@ export function domainForOp(op: string): string {
     case "migrate-spawn":  return DOMAIN_MIGRATE_SPAWN;
     case "fork-spawn":     return DOMAIN_FORK_SPAWN;
     case "session-open":   return DOMAIN_SESSION_OPEN;
+    case "session-reauth": return DOMAIN_SESSION_REAUTH;
     default:               return `spawnery/intent/${op}/v1`;
   }
 }
@@ -60,6 +62,7 @@ export interface IntentFields {
     repositoryId?: string;
   }>; // field 12 repeated MountRef — all 5 fields signed (node correspondence compares all 5)
   attachedSecretIds?: string[];
+  newTokenId?: string;
 }
 
 /**
@@ -88,6 +91,7 @@ export function buildIntentBodyBytes(f: IntentFields): Uint8Array {
       repositoryId: m.repositoryId ?? "",
     })),
     attachedSecretIds: f.attachedSecretIds ?? [],
+    newTokenId: f.newTokenId ?? "",
   });
   return toBinary(IntentBodySchema, body);
 }
@@ -162,6 +166,44 @@ export async function buildSessionOpenSignedIntentB64(
   const signedIntent = await buildSignedIntent("session-open", bodyBytes, signer);
   const protoBytes = toBinary(SignedIntentSchema, signedIntent);
   return toBase64(protoBytes);
+}
+
+export interface SessionReauthFields {
+  spawnId: string;
+  generation: bigint;
+  targetNodeId: string;
+  sessionId: string;
+  newTokenId: string;
+}
+
+/** Build the protocol-defined session-reauth intent for a refreshed node credential. */
+export async function buildSessionReauthSignedIntentB64(
+  fields: SessionReauthFields,
+  signer: SessionSigner,
+): Promise<string> {
+  if (!fields.spawnId || fields.generation <= 0n || !fields.targetNodeId ||
+      !fields.sessionId || !fields.newTokenId) {
+    throw new Error("session reauth: incomplete verified session tuple");
+  }
+  const jtiBytes = crypto.getRandomValues(new Uint8Array(16));
+  const jti = Array.from(jtiBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const bodyBytes = buildIntentBodyBytes({
+    jti,
+    issuedAt: Math.floor(Date.now() / 1000),
+    spawnId: fields.spawnId,
+    generation: fields.generation,
+    targetNodeId: fields.targetNodeId,
+    op: "session-reauth",
+    appRef: "",
+    image: "",
+    model: "",
+    dataRef: "",
+    sessionId: fields.sessionId,
+    mounts: [],
+    newTokenId: fields.newTokenId,
+  });
+  const signedIntent = await buildSignedIntent("session-reauth", bodyBytes, signer);
+  return toBase64(toBinary(SignedIntentSchema, signedIntent));
 }
 
 // ── Locally-pended intent registry ───────────────────────────────────────────

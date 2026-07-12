@@ -6,6 +6,7 @@ import { writeClipboard } from "@/term/clipboard";
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
 import { getAccessToken, authEnabled, useSessionStore } from "@/auth/session";
 import { buildSessionBindFrame } from "@/auth/sessionBind";
+import { buildNodeReauthControl, type VerifiedSessionAuthorization } from "@/auth/sessionReauth";
 import { cpWsUrl } from "@/config/endpoints";
 import { encodeInput, encodeResize } from "@/term/wire";
 import { BacklogTracker } from "@/term/backlog";
@@ -109,16 +110,31 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     // async "reconnecting" would land AFTER selectSpawn already set the next spawn's dot and clobber
     // it (onConn isn't spawn-scoped). Guard the down callback so an intentional close stays silent.
     let closing = false;
+    let attachmentSequence = 0;
+    let nodeReauthSequence = 0;
+    let authorization: VerifiedSessionAuthorization | null = null;
 
     onConnRef.current?.("connecting");
     const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
       onOpen: async () => {
+        const openSequence = ++attachmentSequence;
+        nodeReauthSequence++;
+        authorization = null;
         // Bind frame MUST be the first message (ws.go reads it as the session-open). It carries the
         // session-open SignedIntent the enforced node requires (else MISSING_INTENT NACK -> blank).
-        sock.send(JSON.stringify(await buildSessionBindFrame(spawnId, sessionId, CLIENT_ID, 0)));
-        safeFit();
-        sock.send(encodeResize(term.cols, term.rows));
-        onConnRef.current?.("connected");
+        try {
+          const built = await buildSessionBindFrame(spawnId, sessionId, CLIENT_ID, 0, openSequence);
+          if (closing || openSequence !== attachmentSequence) return;
+          const { authorization: verified, ...frame } = built;
+          if (authEnabled() && !verified) throw new Error("session bind: authorization context missing");
+          authorization = verified ?? null;
+          sock.send(JSON.stringify(frame));
+          safeFit();
+          sock.send(encodeResize(term.cols, term.rows));
+          onConnRef.current?.("connected");
+        } catch {
+          if (!closing && openSequence === attachmentSequence) sock.close();
+        }
       },
       onDown: () => { if (!closing) onConnRef.current?.("reconnecting"); },
       onMessage: (data: ArrayBuffer | string) => {
@@ -166,10 +182,23 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
 
     // In-band reauth: ~15min interval matches ws.go defaultReauthInterval.
     // Sends a text reauth frame so the CP resets the 15min expiry deadline.
-    // Use a best-effort send (errors ignored — socket reconnects will re-handshake).
+    // Any failed control send closes this attachment so reconnect performs a fresh authorized bind.
     const REAUTH_INTERVAL_MS = 14 * 60 * 1000; // 14 min (slightly under 15)
     const sendReauth = (token: string) => {
-      try { sockRef.current?.send(JSON.stringify({ type: "reauth", token })); } catch { /* socket closing */ }
+      try { sock.send(JSON.stringify({ type: "reauth", token })); } catch { sock.close(); }
+    };
+    const sendNodeReauth = (nodeAccessToken: string) => {
+      const verified = authorization;
+      if (!verified) return;
+      const reauthSequence = ++nodeReauthSequence;
+      void buildNodeReauthControl(verified, nodeAccessToken).then((control) => {
+        if (closing || reauthSequence !== nodeReauthSequence ||
+            verified.attachmentSequence !== attachmentSequence) return;
+        sock.send(JSON.stringify(control));
+      }).catch(() => {
+        if (!closing && reauthSequence === nodeReauthSequence &&
+            verified.attachmentSequence === attachmentSequence) sock.close();
+      });
     };
     const reauthInterval = authEnabled()
       ? setInterval(() => sendReauth(getAccessToken()), REAUTH_INTERVAL_MS)
@@ -181,11 +210,16 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
           if (state.cpAccessToken !== prev.cpAccessToken && state.cpAccessToken) {
             sendReauth(state.cpAccessToken);
           }
+          if (state.nodeAccessToken !== prev.nodeAccessToken && state.nodeAccessToken) {
+            sendNodeReauth(state.nodeAccessToken);
+          }
         })
       : null;
 
     return () => {
       closing = true; // intentional teardown -> suppress the close-driven onDown "reconnecting"
+      attachmentSequence++;
+      nodeReauthSequence++;
       if (reauthInterval) clearInterval(reauthInterval);
       if (unsubSession) unsubSession();
       document.removeEventListener("mouseup", onDocMouseUp);

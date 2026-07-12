@@ -14,6 +14,7 @@ import { getAccessToken, getNodeAccessToken, authEnabled, useSessionStore } from
 import { buildSessionOpenSignedIntentB64, requireSessionSigningKeys } from "@/auth/intent";
 import { verifyResolvedTarget } from "@/auth/target";
 import { unary } from "@/api/connect";
+import type { VerifiedSessionAuthorization } from "./sessionReauth";
 
 export interface SessionBindFrame {
   spawnId: string;
@@ -24,6 +25,8 @@ export interface SessionBindFrame {
   cursor: number;
   /** base64(proto.Marshal(SignedIntent)) — present only when auth is enabled. */
   signedIntent?: string;
+  /** Browser-only verified tuple. Callers remove it before serializing the bind frame. */
+  authorization?: VerifiedSessionAuthorization;
 }
 
 /**
@@ -37,6 +40,7 @@ export async function buildSessionBindFrame(
   sessionId: string,
   clientId: string,
   cursor: number,
+  attachmentSequence = 1,
 ): Promise<SessionBindFrame> {
   const frame: SessionBindFrame = {
     spawnId,
@@ -76,5 +80,13 @@ export async function buildSessionBindFrame(
     target.targetNodeId,
     new WebCryptoSessionSigner(keys.privateKey, keys.publicKey),
   );
+  frame.authorization = {
+    spawnId,
+    generation,
+    targetNodeId: target.targetNodeId,
+    sessionId: sessionId || "0",
+    clientId,
+    attachmentSequence,
+  };
   return frame;
 }

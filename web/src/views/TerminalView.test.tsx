@@ -47,6 +47,25 @@ vi.mock("@xterm/addon-fit", () => ({
 }));
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
+const authMocks = vi.hoisted(() => ({
+  buildBind: vi.fn(async (
+    spawnId: string, sessionId: string, clientId: string, cursor: number, attachmentSequence: number,
+  ) => ({
+    spawnId, sessionId, clientId, cursor, token: "cp-old", nodeAccessToken: "node-old",
+    signedIntent: "open-intent",
+    authorization: {
+      spawnId, sessionId, clientId, attachmentSequence,
+      generation: 7n, targetNodeId: "node-1",
+    },
+  })),
+  buildNodeReauth: vi.fn(async (_authorization: unknown, nodeAccessToken: string) => ({
+    type: "nodeReauth", nodeAccessToken, signedIntent: "reauth-intent",
+  })),
+}));
+
+vi.mock("@/auth/sessionBind", () => ({ buildSessionBindFrame: authMocks.buildBind }));
+vi.mock("@/auth/sessionReauth", () => ({ buildNodeReauthControl: authMocks.buildNodeReauth }));
+
 // ─── Fake ReconnectingSocket ──────────────────────────────────────────────────
 let fakeSocketInstance: {
   sent: (string | Uint8Array)[] ;
@@ -104,6 +123,12 @@ beforeEach(() => {
   mockFitAddon.fit.mockClear();
   TerminalMock.mockClear();
   localStorage.clear();
+  vi.unstubAllEnvs();
+  authMocks.buildBind.mockClear();
+  authMocks.buildNodeReauth.mockReset();
+  authMocks.buildNodeReauth.mockImplementation(async (_authorization: unknown, nodeAccessToken: string) => ({
+    type: "nodeReauth", nodeAccessToken, signedIntent: "reauth-intent",
+  }));
   document.documentElement.classList.remove("dark");
 });
 
@@ -195,6 +220,55 @@ describe("TerminalView", () => {
     const bind = JSON.parse(bindMsg);
     expect(bind.sessionId).toBe("2");
     expect(bind.spawnId).toBe("s1");
+  });
+
+  it("sends separate CP bearer and signed node reauth controls after an atomic pair refresh", async () => {
+    vi.stubEnv("VITE_AUTH_ENABLED", "1");
+    const { useSessionStore } = await import("@/auth/session");
+    useSessionStore.setState({ cpAccessToken: "cp-old", nodeAccessToken: "node-old", status: "authed" });
+    renderWithSettings(<TerminalView spawnId="s1" sessionId="2" />);
+    await fakeSocketInstance!.opts.onOpen();
+    fakeSocketInstance!.sent.length = 0;
+    useSessionStore.setState({ cpAccessToken: "cp-new", nodeAccessToken: "node-new" });
+    await waitFor(() => expect(authMocks.buildNodeReauth).toHaveBeenCalled());
+    const controls = fakeSocketInstance!.sent.map((raw) => JSON.parse(raw as string));
+    expect(controls).toContainEqual({ type: "reauth", token: "cp-new" });
+    expect(controls).toContainEqual({
+      type: "nodeReauth", nodeAccessToken: "node-new", signedIntent: "reauth-intent",
+    });
+    expect(authMocks.buildNodeReauth).toHaveBeenCalledWith(expect.objectContaining({
+      generation: 7n, targetNodeId: "node-1", attachmentSequence: 1,
+    }), "node-new");
+  });
+
+  it("closes the current surface when node reauth signing fails", async () => {
+    vi.stubEnv("VITE_AUTH_ENABLED", "1");
+    const { useSessionStore } = await import("@/auth/session");
+    useSessionStore.setState({ cpAccessToken: "cp-old", nodeAccessToken: "node-old", status: "authed" });
+    authMocks.buildNodeReauth.mockRejectedValueOnce(new Error("sign failed"));
+    renderWithSettings(<TerminalView spawnId="s1" sessionId="2" />);
+    await fakeSocketInstance!.opts.onOpen();
+    useSessionStore.setState({ cpAccessToken: "cp-new", nodeAccessToken: "node-new" });
+    await waitFor(() => expect(fakeSocketInstance!.close).toHaveBeenCalled());
+  });
+
+  it("discards delayed reauth built for a superseded attachment sequence", async () => {
+    vi.stubEnv("VITE_AUTH_ENABLED", "1");
+    const { useSessionStore } = await import("@/auth/session");
+    useSessionStore.setState({ cpAccessToken: "cp-old", nodeAccessToken: "node-old", status: "authed" });
+    let resolveOld!: (control: { type: "nodeReauth"; nodeAccessToken: string; signedIntent: string }) => void;
+    authMocks.buildNodeReauth.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
+    renderWithSettings(<TerminalView spawnId="s1" sessionId="2" />);
+    await fakeSocketInstance!.opts.onOpen();
+    useSessionStore.setState({ cpAccessToken: "cp-new", nodeAccessToken: "node-new" });
+    await waitFor(() => expect(authMocks.buildNodeReauth).toHaveBeenCalled());
+    await fakeSocketInstance!.opts.onOpen(); // reconnect: attachment sequence 2 supersedes sequence 1
+    fakeSocketInstance!.sent.length = 0;
+    resolveOld({ type: "nodeReauth", nodeAccessToken: "node-new", signedIntent: "stale-intent" });
+    await Promise.resolve();
+    expect(fakeSocketInstance!.sent).toEqual([]);
+    expect(fakeSocketInstance!.close).not.toHaveBeenCalled();
+    expect(authMocks.buildBind).toHaveBeenLastCalledWith("s1", "2", expect.any(String), 0, 2);
   });
 
   it("refits when a hidden panel becomes active (and not while hidden)", async () => {

@@ -6,10 +6,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { buildIntentBodyBytes, buildSignedIntent, pollAndSign } from "./intent.js";
+import { fromBinary } from "@bufbuild/protobuf";
+import {
+  buildIntentBodyBytes,
+  buildSignedIntent,
+  buildSessionReauthSignedIntentB64,
+  pollAndSign,
+} from "./intent.js";
 import type { SessionSigner } from "./sessionSigner.js";
 import { WebCryptoSessionSigner } from "./sessionSigner.js";
 import { sessionKeyHash } from "../keys/crypto.js";
+import { fromBase64 } from "../keys/encoding.js";
+import { IntentBodySchema, SignedIntentSchema } from "../gen/auth/v1/auth_pb.js";
 
 const toHex = (u: Uint8Array): string => Buffer.from(u).toString("hex");
 const fromHex = (s: string): Uint8Array => new Uint8Array(Buffer.from(s, "hex"));
@@ -47,6 +55,44 @@ test("buildIntentBodyBytes matches the committed golden vector (no mounts)", () 
     mounts: [],
   });
   assert.equal(toHex(bytes), vectors.body_bytes_hex);
+});
+
+test("buildSessionReauthSignedIntentB64 signs the verified session tuple and replacement token ID", async () => {
+  const pair = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"],
+  ) as CryptoKeyPair;
+  const signer = new WebCryptoSessionSigner(pair.privateKey, pair.publicKey);
+  const encoded = await buildSessionReauthSignedIntentB64({
+    spawnId: "sp-1",
+    generation: 7n,
+    targetNodeId: "node-1",
+    sessionId: "session-2",
+    newTokenId: "node-token-next",
+  }, signer);
+  const signed = fromBinary(SignedIntentSchema, fromBase64(encoded));
+  const body = fromBinary(IntentBodySchema, signed.body);
+  assert.equal(signed.domain, "spawnery/intent/session-reauth/v1");
+  assert.deepEqual({
+    spawnId: body.spawnId,
+    generation: body.generation,
+    targetNodeId: body.targetNodeId,
+    op: body.op,
+    sessionId: body.sessionId,
+    newTokenId: body.newTokenId,
+  }, {
+    spawnId: "sp-1",
+    generation: 7n,
+    targetNodeId: "node-1",
+    op: "session-reauth",
+    sessionId: "session-2",
+    newTokenId: "node-token-next",
+  });
+  const message = new Uint8Array(new TextEncoder().encode(signed.domain).length + signed.body.length);
+  message.set(new TextEncoder().encode(signed.domain));
+  message.set(signed.body, new TextEncoder().encode(signed.domain).length);
+  assert.equal(await crypto.subtle.verify(
+    { name: "ECDSA", hash: "SHA-256" }, pair.publicKey, signed.sig, message,
+  ), true);
 });
 
 test("pollAndSign verifies typed target metadata before signing and submits only the node token", async () => {

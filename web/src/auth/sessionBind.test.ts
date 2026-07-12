@@ -61,6 +61,14 @@ describe("buildSessionBindFrame", () => {
       token: "cp-token",
       nodeAccessToken: "node-token",
       signedIntent: "signed-intent-b64",
+      authorization: {
+        spawnId: "sp1",
+        generation: 3n,
+        targetNodeId: "node-1",
+        sessionId: "2",
+        clientId: "client-1",
+        attachmentSequence: 1,
+      },
     });
     expect(mocks.unary).toHaveBeenCalledWith("GetSpawnNodeKey", { spawnId: "sp1" });
     expect(mocks.verifyTarget).toHaveBeenCalledWith(expect.objectContaining({

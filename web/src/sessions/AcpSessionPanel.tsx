@@ -4,6 +4,7 @@ import { encodePrompt, encodePermResponse, encodeSetMode, encodeCancel, type Fra
 import { ReconnectingSocket } from "@/shell/reconnectingSocket";
 import { getAccessToken, authEnabled, useSessionStore as useAuthStore } from "@/auth/session";
 import { buildSessionBindFrame } from "@/auth/sessionBind";
+import { buildNodeReauthControl, type VerifiedSessionAuthorization } from "@/auth/sessionReauth";
 import { cpWsUrl } from "@/config/endpoints";
 import { ChatView } from "@/views/ChatView";
 import { MAX_QUEUED } from "@/lib/turn";
@@ -38,19 +39,32 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
       return;
     }
     const gen = ++genRef.current;
+    let attachmentSequence = 0;
+    let nodeReauthSequence = 0;
+    let authorization: VerifiedSessionAuthorization | null = null;
     useSessionStore.getState().setConn(sessionId, "connecting");
     const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
       onOpen: async () => {
         if (genRef.current !== gen) return;
+        const openSequence = ++attachmentSequence;
+        nodeReauthSequence++;
+        authorization = null;
         // Fresh frame receiver per (re)connect; wire it BEFORE the bind so replay can't precede onmessage.
         new Conn(sock, (m) => { if (genRef.current === gen) useSessionStore.getState().applyFrame(sessionId, m as Frame); });
         const cursor = useSessionStore.getState().acp[sessionId]?.lastSeq ?? 0;
         // Bind frame carries the session-open SignedIntent the enforced node requires (else
         // MISSING_INTENT NACK -> client never attaches -> blank panel).
-        const frame = await buildSessionBindFrame(spawnId, sessionId, CLIENT_ID, cursor);
-        if (genRef.current !== gen) return;
-        sock.send(JSON.stringify(frame));
-        useSessionStore.getState().setConn(sessionId, "connected");
+        try {
+          const built = await buildSessionBindFrame(spawnId, sessionId, CLIENT_ID, cursor, openSequence);
+          if (genRef.current !== gen || openSequence !== attachmentSequence) return;
+          const { authorization: verified, ...frame } = built;
+          if (authEnabled() && !verified) throw new Error("session bind: authorization context missing");
+          authorization = verified ?? null;
+          sock.send(JSON.stringify(frame));
+          useSessionStore.getState().setConn(sessionId, "connected");
+        } catch {
+          if (genRef.current === gen && openSequence === attachmentSequence) sock.close();
+        }
       },
       onDown: () => { if (genRef.current === gen) useSessionStore.getState().setConn(sessionId, "reconnecting"); },
     });
@@ -59,7 +73,20 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
     // In-band reauth: ~14min interval (under the 15min ws.go deadline).
     const REAUTH_MS = 14 * 60 * 1000;
     const sendReauth = (token: string) => {
-      try { sockRef.current?.send(JSON.stringify({ type: "reauth", token })); } catch { /* socket closing */ }
+      try { sock.send(JSON.stringify({ type: "reauth", token })); } catch { sock.close(); }
+    };
+    const sendNodeReauth = (nodeAccessToken: string) => {
+      const verified = authorization;
+      if (!verified) return;
+      const reauthSequence = ++nodeReauthSequence;
+      void buildNodeReauthControl(verified, nodeAccessToken).then((control) => {
+        if (genRef.current !== gen || reauthSequence !== nodeReauthSequence ||
+            verified.attachmentSequence !== attachmentSequence) return;
+        sock.send(JSON.stringify(control));
+      }).catch(() => {
+        if (genRef.current === gen && reauthSequence === nodeReauthSequence &&
+            verified.attachmentSequence === attachmentSequence) sock.close();
+      });
     };
     const reauthInterval = authEnabled()
       ? setInterval(() => sendReauth(getAccessToken()), REAUTH_MS)
@@ -71,6 +98,9 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
           if (state.cpAccessToken !== prev.cpAccessToken && state.cpAccessToken) {
             sendReauth(state.cpAccessToken);
           }
+          if (state.nodeAccessToken !== prev.nodeAccessToken && state.nodeAccessToken) {
+            sendNodeReauth(state.nodeAccessToken);
+          }
         })
       : null;
 
@@ -79,6 +109,8 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
       // want the current ref value at teardown time, not a captured snapshot.
       // eslint-disable-next-line react-hooks/exhaustive-deps
       genRef.current++;
+      attachmentSequence++;
+      nodeReauthSequence++;
       if (reauthInterval) clearInterval(reauthInterval);
       if (unsubAuth) unsubAuth();
       sock.close();

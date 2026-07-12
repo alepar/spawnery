@@ -1,6 +1,25 @@
 import { render, act, fireEvent, screen } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+const authMocks = vi.hoisted(() => ({
+  buildBind: vi.fn(async (
+    spawnId: string, sessionId: string, clientId: string, cursor: number, attachmentSequence: number,
+  ) => ({
+    spawnId, sessionId, clientId, cursor, token: "cp-old", nodeAccessToken: "node-old",
+    signedIntent: "open-intent",
+    authorization: {
+      spawnId, sessionId, clientId, attachmentSequence,
+      generation: 7n, targetNodeId: "node-1",
+    },
+  })),
+  buildNodeReauth: vi.fn(async (_authorization: unknown, nodeAccessToken: string) => ({
+    type: "nodeReauth", nodeAccessToken, signedIntent: "reauth-intent",
+  })),
+}));
+
+vi.mock("@/auth/sessionBind", () => ({ buildSessionBindFrame: authMocks.buildBind }));
+vi.mock("@/auth/sessionReauth", () => ({ buildNodeReauthControl: authMocks.buildNodeReauth }));
+
 // ─── Fake ReconnectingSocket ──────────────────────────────────────────────────
 // Mirrors the TerminalView test's socket-mock pattern: capture the constructed
 // instance (and its opts) so a test can drive onOpen/onDown and inspect sends.
@@ -34,6 +53,12 @@ beforeEach(() => {
   fakeSocketInstance = null;
   socketCtorCount = 0;
   useSessionStore.getState().bindSpawn("__reset__");
+  vi.unstubAllEnvs();
+  authMocks.buildBind.mockClear();
+  authMocks.buildNodeReauth.mockReset();
+  authMocks.buildNodeReauth.mockImplementation(async (_authorization: unknown, nodeAccessToken: string) => ({
+    type: "nodeReauth", nodeAccessToken, signedIntent: "reauth-intent",
+  }));
 });
 
 describe("AcpSessionPanel — gate the socket on session readiness", () => {
@@ -68,6 +93,33 @@ describe("AcpSessionPanel — gate the socket on session readiness", () => {
     render(<AcpSessionPanel spawnId="s1" sessionId="0" active ready={true} />);
     expect(socketCtorCount).toBe(1);
     expect(fakeSocketInstance).not.toBeNull();
+  });
+
+  it("sends CP and node reauth separately after an atomic pair refresh", async () => {
+    vi.stubEnv("VITE_AUTH_ENABLED", "1");
+    const { useSessionStore: useAuthStore } = await import("@/auth/session");
+    useAuthStore.setState({ cpAccessToken: "cp-old", nodeAccessToken: "node-old", status: "authed" });
+    render(<AcpSessionPanel spawnId="s1" sessionId="2" active ready />);
+    await act(async () => { await fakeSocketInstance!.opts.onOpen(); });
+    fakeSocketInstance!.sent.length = 0;
+    act(() => { useAuthStore.setState({ cpAccessToken: "cp-new", nodeAccessToken: "node-new" }); });
+    await vi.waitFor(() => expect(authMocks.buildNodeReauth).toHaveBeenCalled());
+    const controls = fakeSocketInstance!.sent.map((raw) => JSON.parse(raw as string));
+    expect(controls).toContainEqual({ type: "reauth", token: "cp-new" });
+    expect(controls).toContainEqual({
+      type: "nodeReauth", nodeAccessToken: "node-new", signedIntent: "reauth-intent",
+    });
+  });
+
+  it("closes the current surface when node reauth construction fails", async () => {
+    vi.stubEnv("VITE_AUTH_ENABLED", "1");
+    const { useSessionStore: useAuthStore } = await import("@/auth/session");
+    useAuthStore.setState({ cpAccessToken: "cp-old", nodeAccessToken: "node-old", status: "authed" });
+    authMocks.buildNodeReauth.mockRejectedValueOnce(new Error("key lost"));
+    render(<AcpSessionPanel spawnId="s1" sessionId="2" active ready />);
+    await act(async () => { await fakeSocketInstance!.opts.onOpen(); });
+    act(() => { useAuthStore.setState({ cpAccessToken: "cp-new", nodeAccessToken: "node-new" }); });
+    await vi.waitFor(() => expect(fakeSocketInstance!.close).toHaveBeenCalled());
   });
 });
 

@@ -19,6 +19,7 @@ export {
   buildIntentBodyBytes,
   buildSignedIntent,
   buildSessionOpenSignedIntentB64,
+  buildSessionReauthSignedIntentB64,
   pollAndSign,
   registerPendedOp,
   clearPendedOp,
@@ -27,12 +28,14 @@ export {
   type PollAndSignDeps,
   type ResolvedTarget,
   type ResolvedTargetVerifier,
+  type SessionReauthFields,
   DOMAIN_CREATE_SPAWN,
   DOMAIN_RESUME_SPAWN,
   DOMAIN_RECREATE_SPAWN,
   DOMAIN_MIGRATE_SPAWN,
   DOMAIN_FORK_SPAWN,
   DOMAIN_SESSION_OPEN,
+  DOMAIN_SESSION_REAUTH,
 } from "./signing/intent.js";
 
 export { buildPoP, POP_DOMAIN, type PoPHeaders } from "./signing/pop.js";
