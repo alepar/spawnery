@@ -157,7 +157,7 @@ func TestMaterialize_SensitiveEmptyInlineSkipped(t *testing.T) {
 // spawn has zero artifacts.
 func TestMaterialize_ReportDirCreatedWritable(t *testing.T) {
 	st, sec := newStagerPair(t)
-	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	reportDir := st.ReportDirFor("sp1")
@@ -191,7 +191,7 @@ func TestMaterialize_ReportDirChownedToAgentUID(t *testing.T) {
 	}
 	defer func() { artifactsChown = orig }()
 
-	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	if chownedTo != 100000 {
@@ -212,7 +212,7 @@ func TestMaterialize_ReportDirChownedToAgentUID(t *testing.T) {
 // of the artifact tree.
 func TestMaterialize_ReportDirSurvivesResumeWipe(t *testing.T) {
 	st, sec := newStagerPair(t)
-	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize (create): %v", err)
 	}
 	// Simulate the agent having written a report during the prior episode.
@@ -220,7 +220,7 @@ func TestMaterialize_ReportDirSurvivesResumeWipe(t *testing.T) {
 	if err := os.WriteFile(stale, []byte(`{"schema":1}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize (resume): %v", err)
 	}
 	if _, err := os.Stat(st.ReportDirFor("sp1")); err != nil {
@@ -243,7 +243,7 @@ func TestMaterialize_RejectsDestPathUnderReportPrefix(t *testing.T) {
 		t.Run(destPath, func(t *testing.T) {
 			err := st.Materialize(context.Background(), "sp1", []Artifact{
 				{ID: "evil", Inline: []byte("x"), ContentType: ArtifactBytes, DestPath: destPath},
-			}, sec, nil)
+			}, sec, nil, nil)
 			if err == nil {
 				t.Fatalf("expected rejection for dest_path %q", destPath)
 			}
