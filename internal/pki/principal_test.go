@@ -206,6 +206,8 @@ func TestVerifyPrincipalRejectsInvalidLeaf(t *testing.T) {
 		{name: "CA leaf", leaf: resignLeaf(t, issuer, material.Cert, func(c *x509.Certificate) { c.IsCA = true }), chain: material.Chain, opts: verifyOptions(root.Cert, now)},
 		{name: "wrong key usage", leaf: resignLeaf(t, issuer, material.Cert, func(c *x509.Certificate) { c.KeyUsage = x509.KeyUsageKeyEncipherment }), chain: material.Chain, opts: verifyOptions(root.Cert, now)},
 		{name: "wrong EKU", leaf: resignLeaf(t, issuer, material.Cert, func(c *x509.Certificate) { c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth} }), chain: material.Chain, opts: verifyOptions(root.Cert, now)},
+		{name: "node DNS SAN", leaf: resignLeaf(t, issuer, material.Cert, func(c *x509.Certificate) { c.DNSNames = []string{"node.internal"} }), chain: material.Chain, opts: verifyOptions(root.Cert, now)},
+		{name: "email SAN", leaf: resignLeaf(t, issuer, material.Cert, func(c *x509.Certificate) { c.EmailAddresses = []string{"node@example.com"} }), chain: material.Chain, opts: verifyOptions(root.Cert, now)},
 		{name: "expired", leaf: resignLeaf(t, issuer, material.Cert, func(c *x509.Certificate) { c.NotBefore = now.Add(-2 * time.Hour); c.NotAfter = now.Add(-time.Hour) }), chain: material.Chain, opts: verifyOptions(root.Cert, now)},
 		{name: "malformed path", leaf: resignLeaf(t, issuer, material.Cert, func(c *x509.Certificate) {
 			c.URIs = []*url.URL{{Scheme: "spiffe", Host: "prod.spawnery.internal", Path: "/node/self-hosted/acct"}}

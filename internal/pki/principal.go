@@ -79,6 +79,9 @@ func VerifyPrincipal(leaf *x509.Certificate, intermediates []*x509.Certificate, 
 	if err != nil {
 		return Principal{}, err
 	}
+	if principal.Kind == KindNode && (len(leaf.DNSNames) != 0 || len(leaf.IPAddresses) != 0) {
+		return Principal{}, errors.New("pki: node leaf must not contain DNS or IP SANs")
+	}
 	for _, chain := range chains {
 		if len(chain) != 3 || !chain[len(chain)-1].Equal(opts.Root) {
 			continue
@@ -108,6 +111,9 @@ func validateLeafProfile(leaf *x509.Certificate) error {
 	}
 	if len(leaf.URIs) != 1 {
 		return fmt.Errorf("pki: leaf URI SAN count is %d, want 1", len(leaf.URIs))
+	}
+	if len(leaf.EmailAddresses) != 0 {
+		return errors.New("pki: leaf must not contain email SANs")
 	}
 	return nil
 }
