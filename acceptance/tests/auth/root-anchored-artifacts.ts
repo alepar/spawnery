@@ -186,13 +186,14 @@ export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node
 }
 
 export async function deployCurrentRevocation(cfg: VMAuthConfig, generation: number): Promise<void> {
+  const restartEpoch = Math.floor(Date.now() / 1000) - 1;
   const wire = await ssh(cfg,
     `sudo /usr/local/bin/spawnery-ca signer-revocation /var/lib/spawnery-offline/auth-signing-intermediate.pem /var/lib/spawnery-offline/auth-signing-intermediate-key.pem /etc/spawnery/authsvc/auth-signer-current-chain.pem prod ${generation}`,
   );
   await ssh(cfg, `sudo sh -c 'printf "%s\\n" "${wire}" > /etc/spawnery/signer-revocations.artifact; grep -q ^CP_AUTH_SIGNER_REVOCATION_STATEMENT= /etc/spawnery/env.d/common.env || printf "%s\\n" "CP_AUTH_SIGNER_REVOCATION_STATEMENT=/etc/spawnery/signer-revocations.artifact" >> /etc/spawnery/env.d/common.env; grep -q ^NODE_SIGNER_REVOCATION_STATEMENT= /etc/spawnery/env.d/common.env || printf "%s\\n" "NODE_SIGNER_REVOCATION_STATEMENT=/etc/spawnery/signer-revocations.artifact" >> /etc/spawnery/env.d/common.env; systemctl restart spawnery-cp spawnery-node'`);
   for (let i = 0; i < 60; i++) {
-    const active = await ssh(cfg, "sudo systemctl is-active spawnery-cp spawnery-node").catch(() => "");
-    if (active.split(/\s+/).filter(Boolean).every((state) => state === "active")) return;
+    const ready = await ssh(cfg, `curl -fsS http://127.0.0.1:8080/healthz >/dev/null && sudo journalctl -u spawnery-node --since @${restartEpoch} --no-pager | grep -q 'node: connected to CP' && echo ready`).catch(() => "");
+    if (ready === "ready") return;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   throw new Error("CP/node did not converge after signer revocation rollout");
