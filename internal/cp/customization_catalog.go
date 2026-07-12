@@ -240,10 +240,11 @@ func (s *Server) unlistWithGuard(ctx context.Context, catalogID string, confirm 
 	}
 	counts := listingCounts{profiles: profiles, owners: owners, bundleVersions: len(versionIDs)}
 
-	// Only a profile catalog_ref (not bare bundle-version membership) can put a spawn in the
-	// blast radius — resolving spawns for an unreferenced entry would always come back empty.
+	// A spawn is in the blast radius via a catalog_ref profile OR via bundle-version membership
+	// (sp-mwco.1.6) — resolving spawns when the entry is referenced by neither would always come
+	// back empty, so only skip the query in that case.
 	var affected []store.Spawn
-	if profiles > 0 {
+	if profiles > 0 || counts.bundleVersions > 0 {
 		var killErr error
 		affected, killErr = s.resolveAffectedSpawns(ctx, catalogID)
 		if killErr != nil {
@@ -270,13 +271,39 @@ func (s *Server) unlistWithGuard(ctx context.Context, catalogID string, confirm 
 
 // --- Kill-switch helpers (sp-nrzf.3.9) ----------------------------------------
 
-// resolveAffectedSpawns returns the live (non-deleted) spawns that reference catalogID
-// through a catalog_ref profile entry. Returns (nil, err) on store failure.
+// resolveAffectedSpawns returns the live (non-deleted) spawns that reference catalogID, either
+// directly through a catalog_ref profile entry, or transitively through a bundle_ref profile
+// entry pinned to a bundle version that includes catalogID as a member (sp-mwco.1.6 §4.5 — a
+// skill delivered only via a bundle must be just as revocable as one referenced directly). The
+// two legs are unioned and deduplicated before resolving live spawns. Returns (nil, err) if
+// EITHER leg fails — a partial (best-effort) union would silently under-terminate, which is the
+// exact bug class this resolver exists to close.
 func (s *Server) resolveAffectedSpawns(ctx context.Context, catalogID string) ([]store.Spawn, error) {
-	profileIDs, err := s.st.Profiles().ListProfileIDsByCatalogRef(ctx, catalogID)
+	catalogProfileIDs, err := s.st.Profiles().ListProfileIDsByCatalogRef(ctx, catalogID)
 	if err != nil {
 		return nil, fmt.Errorf("list profile ids: %w", err)
 	}
+	versionIDs, err := s.st.SkillBundles().MemberVersionIDs(ctx, catalogID)
+	if err != nil {
+		return nil, fmt.Errorf("list bundle member versions: %w", err)
+	}
+	bundleProfileIDs, err := s.st.Profiles().ListProfileIDsByBundleVersions(ctx, versionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list profile ids by bundle version: %w", err)
+	}
+
+	seen := make(map[string]struct{}, len(catalogProfileIDs)+len(bundleProfileIDs))
+	profileIDs := make([]string, 0, len(catalogProfileIDs)+len(bundleProfileIDs))
+	for _, ids := range [][]string{catalogProfileIDs, bundleProfileIDs} {
+		for _, id := range ids {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			profileIDs = append(profileIDs, id)
+		}
+	}
+
 	spawns, err := s.st.Spawns().ListLiveByProfileIDs(ctx, profileIDs)
 	if err != nil {
 		return nil, fmt.Errorf("list live spawns: %w", err)

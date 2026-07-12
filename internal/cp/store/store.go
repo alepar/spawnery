@@ -229,6 +229,11 @@ type ProfileRepo interface {
 	// pointing to the given catalogID. Returns an empty slice (not an error) when none match.
 	// Used by the kill-switch (sp-nrzf.3.9) to resolve profiles affected by a catalog revoke.
 	ListProfileIDsByCatalogRef(ctx context.Context, catalogID string) ([]string, error)
+	// ListProfileIDsByBundleVersions returns distinct profile_ids that contain a bundle_ref
+	// entry pinned to one of the given versionIDs. Returns an empty slice (not an error) when
+	// versionIDs is empty or none match. Used by the kill-switch (sp-mwco.1.6) to resolve
+	// profiles affected by a catalog revoke through bundle-version membership.
+	ListProfileIDsByBundleVersions(ctx context.Context, versionIDs []string) ([]string, error)
 	// CountRefsByCatalogRef returns the number of distinct profiles, and the number of distinct
 	// owners of those profiles, that contain a catalog_ref entry pointing to catalogID. Zero refs
 	// returns (0, 0, nil). Used by the guarded-unlist reference check (sp-mwco.3.4 §4.6 D5) — the

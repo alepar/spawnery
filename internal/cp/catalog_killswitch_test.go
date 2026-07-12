@@ -72,6 +72,45 @@ func createProfileForKS(t *testing.T, s *Server, profileID, ownerID string) {
 	}
 }
 
+// makeBundleWithMemberForKS creates a skill_bundle + a single version whose sole member is
+// catalogID, and returns the new versionID.
+func makeBundleWithMemberForKS(t *testing.T, s *Server, bundleID, versionID, catalogID string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.st.SkillBundles().Create(ctx, store.SkillBundle{
+		BundleID: bundleID, CreatorID: "alice", Name: bundleID, CreatedAt: 1, UpdatedAt: 1,
+	}); err != nil {
+		t.Fatalf("makeBundleWithMemberForKS: SkillBundles().Create: %v", err)
+	}
+	if err := s.st.SkillBundles().CreateVersion(ctx,
+		store.SkillBundleVersion{VersionID: versionID, BundleID: bundleID, Seq: 1, CreatedAt: 1},
+		[]store.SkillBundleMember{{SourceSubdir: "skill-a", CatalogID: catalogID, Position: 0}},
+	); err != nil {
+		t.Fatalf("makeBundleWithMemberForKS: CreateVersion: %v", err)
+	}
+}
+
+// addBundleRefEntryForKS adds a bundle_ref ProfileEntry (pinned to bundleID/versionID) to an
+// existing profile via the profile store directly.
+func addBundleRefEntryForKS(t *testing.T, s *Server, profileID, entryID, bundleID, versionID string) {
+	t.Helper()
+	ctx := context.Background()
+	p, _, _, err := s.st.Profiles().Get(ctx, profileID)
+	if err != nil {
+		t.Fatalf("addBundleRefEntryForKS: get profile %s: %v", profileID, err)
+	}
+	if _, err := s.st.Profiles().AddEntry(ctx, profileID, p.Version, store.ProfileEntry{
+		EntryID:    entryID,
+		Kind:       store.ProfileEntrySkill,
+		Name:       "kill-switch-bundle-entry",
+		SourceKind: store.ProfileSourceBundle,
+		BundleID:   bundleID,
+		VersionID:  versionID,
+	}, 2000); err != nil {
+		t.Fatalf("addBundleRefEntryForKS: %v", err)
+	}
+}
+
 // isDeleted returns true if the spawn with the given id is soft-deleted in the store.
 func isDeleted(t *testing.T, s *Server, spawnID string) bool {
 	t.Helper()
@@ -269,6 +308,138 @@ func TestSetCatalogListing_KillSwitch_RelistNoKill(t *testing.T) {
 
 	if isDeleted(t, s, spawnID2) {
 		t.Errorf("spawn %s should NOT be killed by SetCatalogListing(listed=true)", spawnID2)
+	}
+}
+
+// --- Kill-switch tests for bundle_ref membership (sp-mwco.1.6) -------------------
+
+// TestDeleteCatalogEntry_KillSwitch_BundleRef_TerminatesAffectedSpawn verifies that deleting
+// a catalog entry terminates a live spawn whose profile references it only through a
+// bundle_ref entry pinned to a version that has the entry as a member (no catalog_ref at all).
+func TestDeleteCatalogEntry_KillSwitch_BundleRef_TerminatesAffectedSpawn(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "bundled-skill")
+	makeBundleWithMemberForKS(t, s, "bnd-1", "bndv-1", catID)
+
+	pfID := uuid.NewString()
+	createProfileForKS(t, s, pfID, "bob")
+	addBundleRefEntryForKS(t, s, pfID, "entry-1", "bnd-1", "bndv-1")
+
+	spawnID := "sp-ks-bundle-1"
+	makeSpawnForKS(t, s, spawnID, "bob", pfID)
+
+	if _, err := s.DeleteCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.DeleteCatalogEntryRequest{
+		CatalogId: catID,
+	})); err != nil {
+		t.Fatalf("DeleteCatalogEntry: %v", err)
+	}
+
+	if !isDeleted(t, s, spawnID) {
+		t.Errorf("spawn %s should be deleted after revoking a bundle_ref member's catalog entry", spawnID)
+	}
+}
+
+// TestSetCatalogListing_KillSwitch_BundleRef_DelistTerminates verifies that delisting a
+// catalog entry that is a bundle member (with ZERO catalog_ref profiles — the sp-mwco.3.4
+// resolve-gate defect) terminates the affected bundle_ref spawn.
+func TestSetCatalogListing_KillSwitch_BundleRef_DelistTerminates(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "bundled-skill")
+	makeBundleWithMemberForKS(t, s, "bnd-2", "bndv-2", catID)
+
+	pfID := uuid.NewString()
+	createProfileForKS(t, s, pfID, "bob")
+	addBundleRefEntryForKS(t, s, pfID, "entry-1", "bnd-2", "bndv-2")
+
+	spawnID := "sp-ks-bundle-delist"
+	makeSpawnForKS(t, s, spawnID, "bob", pfID)
+
+	// No catalog_ref profiles reference catID (profiles==0), only the bundle membership — the
+	// resolve gate must still fire.
+	if _, err := s.SetCatalogListing(aliceCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
+		CatalogId: catID,
+		Listed:    false,
+		Confirm:   true,
+	})); err != nil {
+		t.Fatalf("SetCatalogListing false: %v", err)
+	}
+
+	if !isDeleted(t, s, spawnID) {
+		t.Errorf("spawn %s should be deleted after delisting a bundle_ref member's catalog entry", spawnID)
+	}
+}
+
+// TestDeleteCatalogEntry_KillSwitch_UnionOfCatalogRefAndBundleRef verifies that a revoke
+// terminates spawns reached through EITHER leg — catalog_ref and bundle_ref together — with no
+// duplication and no leg starving the other.
+func TestDeleteCatalogEntry_KillSwitch_UnionOfCatalogRefAndBundleRef(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "shared-skill")
+	makeBundleWithMemberForKS(t, s, "bnd-3", "bndv-3", catID)
+
+	// Profile referencing catID directly via catalog_ref.
+	pfDirect := uuid.NewString()
+	createProfileForKS(t, s, pfDirect, "bob")
+	addCatalogRefEntryForKS(t, s, pfDirect, "entry-direct", catID)
+	spawnDirect := "sp-ks-union-direct"
+	makeSpawnForKS(t, s, spawnDirect, "bob", pfDirect)
+
+	// Different profile referencing catID only via bundle_ref.
+	pfBundle := uuid.NewString()
+	createProfileForKS(t, s, pfBundle, "carol")
+	addBundleRefEntryForKS(t, s, pfBundle, "entry-bundle", "bnd-3", "bndv-3")
+	spawnBundle := "sp-ks-union-bundle"
+	makeSpawnForKS(t, s, spawnBundle, "carol", pfBundle)
+
+	if _, err := s.DeleteCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.DeleteCatalogEntryRequest{
+		CatalogId: catID,
+	})); err != nil {
+		t.Fatalf("DeleteCatalogEntry: %v", err)
+	}
+
+	if !isDeleted(t, s, spawnDirect) {
+		t.Errorf("catalog_ref spawn %s should be deleted", spawnDirect)
+	}
+	if !isDeleted(t, s, spawnBundle) {
+		t.Errorf("bundle_ref spawn %s should be deleted", spawnBundle)
+	}
+}
+
+// TestDeleteCatalogEntry_KillSwitch_BundleRef_DroppedVersionNotAffected verifies that a
+// profile pinned to a bundle version that does NOT contain the revoked entry (e.g. the member
+// was dropped in a later version) is NOT terminated.
+func TestDeleteCatalogEntry_KillSwitch_BundleRef_DroppedVersionNotAffected(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "dropped-skill")
+	// bndv-old contains catID as a member; bndv-new does not.
+	makeBundleWithMemberForKS(t, s, "bnd-4", "bndv-old", catID)
+	if err := s.st.SkillBundles().CreateVersion(context.Background(),
+		store.SkillBundleVersion{VersionID: "bndv-new", BundleID: "bnd-4", Seq: 2, CreatedAt: 2},
+		[]store.SkillBundleMember{{SourceSubdir: "skill-b", CatalogID: "some-other-catalog-id", Position: 0}},
+	); err != nil {
+		t.Fatalf("CreateVersion bndv-new: %v", err)
+	}
+
+	pfID := uuid.NewString()
+	createProfileForKS(t, s, pfID, "bob")
+	// Profile is pinned to the NEW version, which dropped catID.
+	addBundleRefEntryForKS(t, s, pfID, "entry-1", "bnd-4", "bndv-new")
+
+	spawnID := "sp-ks-dropped"
+	makeSpawnForKS(t, s, spawnID, "bob", pfID)
+
+	if _, err := s.DeleteCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.DeleteCatalogEntryRequest{
+		CatalogId: catID,
+	})); err != nil {
+		t.Fatalf("DeleteCatalogEntry: %v", err)
+	}
+
+	if isDeleted(t, s, spawnID) {
+		t.Errorf("spawn %s pinned to a version that dropped the member must NOT be terminated", spawnID)
 	}
 }
 

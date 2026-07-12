@@ -66,6 +66,28 @@ func addCustomEntry(t *testing.T, st store.Store, profileID, entryID string) {
 	}
 }
 
+// addBundleRefEntry adds a bundle_ref ProfileEntry (pinned to bundleID/versionID) to an
+// existing profile.
+func addBundleRefEntry(t *testing.T, st store.Store, profileID, entryID, bundleID, versionID string) {
+	t.Helper()
+	ctx := context.Background()
+	p, _, _, err := st.Profiles().Get(ctx, profileID)
+	if err != nil {
+		t.Fatalf("addBundleRefEntry: get profile: %v", err)
+	}
+	_, err = st.Profiles().AddEntry(ctx, profileID, p.Version, store.ProfileEntry{
+		EntryID:    entryID,
+		Kind:       store.ProfileEntrySkill,
+		Name:       "test-entry-" + entryID,
+		SourceKind: store.ProfileSourceBundle,
+		BundleID:   bundleID,
+		VersionID:  versionID,
+	}, 1001)
+	if err != nil {
+		t.Fatalf("addBundleRefEntry %s/%s: %v", profileID, entryID, err)
+	}
+}
+
 // makeAppForKillswitch ensures the test app+version exists (re-uses secret-app from seed if DSN
 // matches, but uses a dedicated in-memory store so we must insert ourselves).
 func makeAppForKillswitch(t *testing.T, st store.Store) {
@@ -206,6 +228,102 @@ func TestListProfileIDsByCatalogRef_MultipleProfiles(t *testing.T) {
 		if !byID[want] {
 			t.Errorf("expected %s in results, got %v", want, ids)
 		}
+	}
+}
+
+// ----- ListProfileIDsByBundleVersions tests ------------------------------------
+
+func TestListProfileIDsByBundleVersions_Empty(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	ids, err := st.Profiles().ListProfileIDsByBundleVersions(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListProfileIDsByBundleVersions nil: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected empty for nil input, got %v", ids)
+	}
+
+	ids, err = st.Profiles().ListProfileIDsByBundleVersions(ctx, []string{"no-such-version"})
+	if err != nil {
+		t.Fatalf("ListProfileIDsByBundleVersions unknown version: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected empty for unknown version, got %v", ids)
+	}
+}
+
+func TestListProfileIDsByBundleVersions_MatchesBundleRefOnly(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	makeProfile(t, st, "pf-a", "owner1")
+	addBundleRefEntry(t, st, "pf-a", "entry-1", "bnd-1", "ver-1")
+	// Also a catalog_ref entry — must not be picked up by the bundle-version query.
+	addCatalogRefEntry(t, st, "pf-a", "entry-2", "cat-unrelated")
+
+	makeProfile(t, st, "pf-b", "owner2")
+	addBundleRefEntry(t, st, "pf-b", "entry-3", "bnd-1", "ver-2")
+
+	ids, err := st.Profiles().ListProfileIDsByBundleVersions(ctx, []string{"ver-1"})
+	if err != nil {
+		t.Fatalf("ListProfileIDsByBundleVersions ver-1: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "pf-a" {
+		t.Errorf("expected [pf-a], got %v", ids)
+	}
+
+	ids2, err := st.Profiles().ListProfileIDsByBundleVersions(ctx, []string{"ver-2"})
+	if err != nil {
+		t.Fatalf("ListProfileIDsByBundleVersions ver-2: %v", err)
+	}
+	if len(ids2) != 1 || ids2[0] != "pf-b" {
+		t.Errorf("expected [pf-b], got %v", ids2)
+	}
+}
+
+func TestListProfileIDsByBundleVersions_MultipleVersionIDsUnion(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	makeProfile(t, st, "pf-a", "owner1")
+	addBundleRefEntry(t, st, "pf-a", "entry-1", "bnd-1", "ver-1")
+
+	makeProfile(t, st, "pf-b", "owner2")
+	addBundleRefEntry(t, st, "pf-b", "entry-2", "bnd-1", "ver-2")
+
+	makeProfile(t, st, "pf-c", "owner3")
+	addBundleRefEntry(t, st, "pf-c", "entry-3", "bnd-1", "ver-3") // not in query
+
+	ids, err := st.Profiles().ListProfileIDsByBundleVersions(ctx, []string{"ver-1", "ver-2"})
+	if err != nil {
+		t.Fatalf("ListProfileIDsByBundleVersions: %v", err)
+	}
+	byID := map[string]bool{}
+	for _, id := range ids {
+		byID[id] = true
+	}
+	if len(ids) != 2 || !byID["pf-a"] || !byID["pf-b"] {
+		t.Errorf("expected [pf-a pf-b], got %v", ids)
+	}
+}
+
+func TestListProfileIDsByBundleVersions_Deduplication(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	// Two entries in the SAME profile both pinned to the same version.
+	makeProfile(t, st, "pf-dup", "owner1")
+	addBundleRefEntry(t, st, "pf-dup", "entry-x", "bnd-1", "ver-shared")
+	addBundleRefEntry(t, st, "pf-dup", "entry-y", "bnd-1", "ver-shared")
+
+	ids, err := st.Profiles().ListProfileIDsByBundleVersions(ctx, []string{"ver-shared"})
+	if err != nil {
+		t.Fatalf("ListProfileIDsByBundleVersions: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "pf-dup" {
+		t.Errorf("expected exactly [pf-dup], got %v", ids)
 	}
 }
 
