@@ -229,7 +229,7 @@ func (b *Backend) ListManaged(_ context.Context) ([]runtime.ManagedPod, error) {
 		if !p.live() {
 			continue
 		}
-		mp := runtime.ManagedPod{SpawnID: p.spawnID, Generation: p.generation, NodeID: p.nodeID}
+		mp := runtime.ManagedPod{SpawnID: p.spawnID, Generation: p.generation, NodeID: p.nodeID, PodIP: p.podIP}
 		if p.sandbox != nil && p.sandbox.state != StateRemoved {
 			mp.SandboxID = p.sandbox.id
 		}

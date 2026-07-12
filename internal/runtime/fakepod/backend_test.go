@@ -120,6 +120,9 @@ func TestListManagedRoundTripsLabels(t *testing.T) {
 	if p.AgentID != h.AgentID || p.SidecarID != h.SidecarID || p.SandboxID != h.SandboxID {
 		t.Fatalf("ManagedPod ids = %+v, want %+v", p, h)
 	}
+	if p.PodIP == "" || p.PodIP != h.PodIP {
+		t.Fatalf("ManagedPod PodIP = %q, want %q", p.PodIP, h.PodIP)
+	}
 	if err := b.Stop(ctx, h); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}

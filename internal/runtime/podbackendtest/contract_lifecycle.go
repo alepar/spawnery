@@ -167,18 +167,20 @@ func caseExecOnPausedFails(t *testing.T, e *Env) {
 	}
 }
 
-// caseListManagedRoundTripsLabels: the Manager reaps orphans and fences stale generations from what
-// ListManaged reports. A generation that does not round-trip is a fence that cannot fire.
+// caseListManagedRoundTripsLabels: the Manager reaps orphans, fences stale generations, AND re-adopts
+// surviving pods from what ListManaged reports. A generation that does not round-trip is a fence that
+// cannot fire; a missing container id or pod IP is a pod the node cannot re-adopt after a restart (it
+// cannot name the containers, re-dial ACP, or re-scope the egress floor) — see the SE3 design §4.5.
 //
-// It asserts SpawnID/Generation/NodeID exactly, and that AT LEAST ONE id field is set — the lanes
-// legitimately differ (Docker: sidecar+agent ids; CRI: sandbox id). sp-2tx8.3.1 tightens this.
+// Every lane must report SidecarID, AgentID and PodIP for a fully-started pod. SandboxID stays
+// lane-specific (Docker has no sandbox) and is deliberately not asserted here.
 // It deliberately does NOT assert that a Stopped pod disappears: Docker's Stop stops but does not
 // remove, so its labelled containers linger.
 func caseListManagedRoundTripsLabels(t *testing.T, e *Env) {
 	ctx := t.Context()
 	id := uniqueSpawnID(t)
 	const gen = uint64(7)
-	startPod(ctx, t, e, id, e.BaseImage, gen)
+	h := startPod(ctx, t, e, id, e.BaseImage, gen)
 
 	pods, err := e.Backend.ListManaged(ctx)
 	if err != nil {
@@ -195,9 +197,17 @@ func caseListManagedRoundTripsLabels(t *testing.T, e *Env) {
 	if p.NodeID != e.NodeID {
 		t.Errorf("ListManaged node id = %q, want %q", p.NodeID, e.NodeID)
 	}
-	if p.SidecarID == "" && p.AgentID == "" && p.SandboxID == "" {
-		t.Errorf("ListManaged returned no container/sandbox id for %s: %+v "+
-			"(reaping needs something to address)", id, p)
+	if p.SidecarID != h.SidecarID {
+		t.Errorf("ListManaged sidecar id = %q, want %q (the id StartPod handed back) "+
+			"— re-adoption rebuilds the PodHandle from this", p.SidecarID, h.SidecarID)
+	}
+	if p.AgentID != h.AgentID {
+		t.Errorf("ListManaged agent id = %q, want %q (the id StartAgent handed back) "+
+			"— without it a re-adopted spawn cannot be captured, paused or torn down", p.AgentID, h.AgentID)
+	}
+	if p.PodIP == "" || p.PodIP != h.PodIP {
+		t.Errorf("ListManaged pod IP = %q, want %q (the IP StartPod handed back) "+
+			"— the egress floor is scoped to it and the node re-dials ACP on it", p.PodIP, h.PodIP)
 	}
 }
 
