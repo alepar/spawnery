@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
@@ -148,13 +149,12 @@ func TestForgedSessionTokenRejectedE2E(t *testing.T) {
 
 	// A "compromised CP" tries to mint a token with its own (non-AS) key.
 	_, cpKey, _ := ed25519.GenerateKey(rand.Reader)
-	cpKeyID, _ := token.KeyID(cpKey.Public().(ed25519.PublicKey))
 	forgedBody := &authv1.SessionTokenBody{
 		AccountId: "attacker", TokenId: "t2", Audience: "cp",
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
-		KeyId: cpKeyID, // unknown key_id
+		KeyId: "untrusted",
 	}
-	forgedTok, _ := token.Mint(forgedBody, cpKey)
+	forgedTok := legacySessionWire(t, forgedBody, cpKey)
 	if _, err := verifier.Verify(forgedTok, token.ArtifactTypeSession, now); err == nil {
 		t.Fatal("a token not signed by the AS key must be rejected (unknown key_id)")
 	}
@@ -165,7 +165,7 @@ func TestForgedSessionTokenRejectedE2E(t *testing.T) {
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
 		KeyId: hex.EncodeToString(signer.KeyID[:]), // AS key_id but signed with cpKey
 	}
-	spoofedTok, _ := token.Mint(spoofedBody, cpKey)
+	spoofedTok := legacySessionWire(t, spoofedBody, cpKey)
 	if _, err := verifier.Verify(spoofedTok, token.ArtifactTypeSession, now); err == nil {
 		t.Fatal("a token with spoofed key_id (but wrong sig) must be rejected")
 	}
@@ -179,4 +179,14 @@ func TestForgedSessionTokenRejectedE2E(t *testing.T) {
 	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "bob"}, allowNoCertificateRevocations, time.Now()); err == nil {
 		t.Fatal("a host bound to alice must not satisfy bob")
 	}
+}
+
+func legacySessionWire(t *testing.T, body *authv1.SessionTokenBody, key ed25519.PrivateKey) string {
+	t.Helper()
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := append([]byte(token.DomainPrefix), payload...)
+	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, message))
 }

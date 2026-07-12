@@ -80,7 +80,7 @@ documented here.
 and terminal rendering under the enforced CSP. If a dependency is added that introduces
 `unsafe-eval` or a second injection vector, this CI gate will catch it before production.
 
-## Trust Anchor Population (Root CA PEM + AS Pubkeys)
+## Trust Anchor Population (Root CA PEM)
 
 The bundle includes placeholder trust anchors in `web/src/config/trustAnchors.ts`:
 
@@ -89,14 +89,12 @@ export const PINNED_ROOT_CA_PEM: string = `-----BEGIN CERTIFICATE-----
 PLACEHOLDER-TRUST-ANCHOR-ROOT-CA
 -----END CERTIFICATE-----`;
 
-export const AS_PUBKEYS: string[] = ["PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY"];
 ```
 
 **Before the first production release:**
 1. Obtain the sp-ova Root CA certificate PEM from the node-auth PKI setup.
-2. Obtain the AS session/device-set signing pubkey(s) in base64url raw format.
-3. Replace the PLACEHOLDER values in `web/src/config/trustAnchors.ts`.
-4. The pre-sign forbidden-value scan in `web-release.yml` will FAIL if PLACEHOLDER
+2. Replace the PLACEHOLDER value in `web/src/config/trustAnchors.ts`.
+3. The pre-sign forbidden-value scan in `web-release.yml` will FAIL if PLACEHOLDER
    markers survive into the signed dist/, preventing accidental shipment.
 
 ## Public DNS Flip Sequencing Gate [WM17]
