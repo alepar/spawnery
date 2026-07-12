@@ -1,8 +1,6 @@
 package authsvc_test
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -34,18 +32,22 @@ func TestHandlerOuterCORSPreservesCredentialedPreflight(t *testing.T) {
 	root, _ := pki.NewRootCA("R")
 	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
 	st := store.NewTestStore(t)
-	_, sigKey, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now().UTC()
+	signer, err := authsvc.NewDevelopmentSigningCredential(root, "test", now)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	spaOrigin := "https://app.example.com"
 	idp, err := authsvc.NewIdP(authsvc.IdPConfig{
 		Store:               st,
 		GitHub:              authsvc.NewGitHubProvider(fake.URL(), fake.URL(), fake.ClientID, fake.ClientSecret),
-		SigningKey:           sigKey,
+		Signer:              signer,
 		GitHubRedirectURI:   "https://as.example.com/oauth/callback",
 		SPAOrigin:           spaOrigin,
 		RedirectURIs:        []string{"https://app.example.com/callback"},
 		RegistrationEnabled: true,
-		Now:                 func() time.Time { return time.Unix(1770000000, 0) },
+		Now:                 func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +111,16 @@ func TestHandlerServesHealthAndRootCA(t *testing.T) {
 	srv := httptest.NewServer(authsvc.New(root.Cert, inter).Handler())
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/healthz")
+	resp, err := http.Get(srv.URL + "/session/pubkey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /session/pubkey status = %d, want 404", resp.StatusCode)
+	}
+
+	resp, err = http.Get(srv.URL + "/healthz")
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("/healthz: %v status=%v", err, resp.StatusCode)
 	}

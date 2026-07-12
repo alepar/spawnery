@@ -7,16 +7,86 @@ package authsvc
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"errors"
 	"fmt"
+	"math/big"
+	"net/url"
 	"sync"
 	"time"
 
 	"spawnery/internal/authsvc/store"
+	"spawnery/internal/authsvc/token"
 	"spawnery/internal/pki"
 )
+
+// NewDevelopmentSigningCredential creates the ephemeral auth-signing hierarchy used only by
+// explicit development and hermetic-test bootstraps. Production loads pre-certified leaves and
+// never places the auth-signing intermediate key online.
+func NewDevelopmentSigningCredential(root *pki.CA, environment string, now time.Time) (*token.SigningCredential, error) {
+	if root == nil || root.Cert == nil || root.Key == nil || environment == "" {
+		return nil, errors.New("authsvc: invalid development signing root")
+	}
+	serial := func() (*big.Int, error) {
+		value, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		if err != nil {
+			return nil, err
+		}
+		return value.SetBit(value, 127, 1), nil
+	}
+	issue := func(template, parent *x509.Certificate, publicKey, signer any) (*x509.Certificate, error) {
+		der, err := x509.CreateCertificate(rand.Reader, template, parent, publicKey, signer)
+		if err != nil {
+			return nil, err
+		}
+		return x509.ParseCertificate(der)
+	}
+	intermediateSerial, err := serial()
+	if err != nil {
+		return nil, err
+	}
+	intermediateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	intermediateTemplate := &x509.Certificate{
+		SerialNumber: intermediateSerial, Subject: pkix.Name{CommonName: "Spawnery development auth signing intermediate"},
+		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(180 * 24 * time.Hour),
+		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign, BasicConstraintsValid: true, IsCA: true, MaxPathLen: 0,
+		Policies: []x509.OID{pki.AuthSigningIntermediatePolicyOID},
+	}
+	intermediate, err := issue(intermediateTemplate, root.Cert, &intermediateKey.PublicKey, root.Key)
+	if err != nil {
+		return nil, err
+	}
+	leafSerial, err := serial()
+	if err != nil {
+		return nil, err
+	}
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	identity, err := url.Parse("spiffe://" + environment + ".spawnery.internal/signer/auth-artifact/dev")
+	if err != nil {
+		return nil, err
+	}
+	leafTemplate := &x509.Certificate{
+		SerialNumber: leafSerial, Subject: pkix.Name{CommonName: "Spawnery development auth artifact signer"},
+		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(90 * 24 * time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, Policies: []x509.OID{pki.AuthArtifactSignerPolicyOID}, URIs: []*url.URL{identity},
+	}
+	leaf, err := issue(leafTemplate, intermediate, privateKey.Public(), intermediateKey)
+	if err != nil {
+		return nil, err
+	}
+	return token.NewSigningCredential(privateKey, []*x509.Certificate{leaf, intermediate}, root.Cert, environment, now)
+}
 
 const (
 	defaultEnrollTTL = 10 * time.Minute    // one-time enrollment tokens are short-lived
@@ -33,8 +103,6 @@ type Service struct {
 
 	now       func() time.Time
 	enrollTTL time.Duration
-
-	sessionKey ed25519.PrivateKey // signs AS session tokens (sp-3ca); CP never holds it
 
 	idp *IdP // identity core (A1: OAuth, refresh, device grant); nil until WithIdP is called
 
@@ -144,9 +212,6 @@ func (s *Service) Validate() error {
 	}
 	return nil
 }
-
-// WithSessionKey sets the session-signing key (production loads a persisted key; default generates one).
-func WithSessionKey(k ed25519.PrivateKey) Option { return func(s *Service) { s.sessionKey = k } }
 
 // WithIdP attaches the identity core (OAuth, refresh, device grant) to the Service. Call after
 // constructing a *IdP with NewIdP; the IdP's routes are registered in Handler().
@@ -261,9 +326,6 @@ func New(root *x509.Certificate, selfHostedIntermediate *pki.CA, opts ...Option)
 		if s.githubMintProvider == nil {
 			s.githubMintProvider = s.idp.github
 		}
-	}
-	if s.sessionKey == nil {
-		_, s.sessionKey, _ = ed25519.GenerateKey(rand.Reader)
 	}
 	return s
 }

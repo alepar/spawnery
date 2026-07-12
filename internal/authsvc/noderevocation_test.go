@@ -2,8 +2,6 @@ package authsvc_test
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -28,13 +26,8 @@ func newNodeRevocationSvc(t *testing.T) (*authsvc.Service, store.Store) {
 		t.Fatal(err)
 	}
 	st := store.NewTestStore(t)
-	_, sigKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
 	svc := authsvc.New(root.Cert, inter,
 		authsvc.WithClock(func() time.Time { return time.Unix(1770000000, 0) }),
-		authsvc.WithSessionKey(sigKey),
 		authsvc.WithNodeRevocations(st.NodeRevocations()),
 	)
 	return svc, st

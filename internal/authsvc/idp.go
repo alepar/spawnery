@@ -3,7 +3,6 @@ package authsvc
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/store"
@@ -28,15 +28,15 @@ import (
 
 // Identity-core named constants (auth-identity design §2/§3).
 const (
-	accessTokenTTL     = 15 * time.Minute     // §3 access token TTL
-	refreshSliding     = 30 * 24 * time.Hour  // §3 sliding refresh window
-	familyMaxAge       = 90 * 24 * time.Hour  // [AM6] absolute family max age
-	replayGrace        = 45 * time.Second     // [AM3] idempotent-replay grace window
-	popSkew            = 90 * time.Second     // [AM5] PoP timestamp tolerance
-	oauthStateTTL      = 10 * time.Minute     // [AM8] authorize->callback state lifetime
-	userCodeTTL        = 15 * time.Minute     // [AM7] device-grant user_code lifetime
-	devicePollInterval = 5 * time.Second      // RFC 8628 minimum poll interval
-	defaultMaxFamilies = 20 // §3 concurrent-family cap per account
+	accessTokenTTL     = 15 * time.Minute    // §3 access token TTL
+	refreshSliding     = 30 * 24 * time.Hour // §3 sliding refresh window
+	familyMaxAge       = 90 * 24 * time.Hour // [AM6] absolute family max age
+	replayGrace        = 45 * time.Second    // [AM3] idempotent-replay grace window
+	popSkew            = 90 * time.Second    // [AM5] PoP timestamp tolerance
+	oauthStateTTL      = 10 * time.Minute    // [AM8] authorize->callback state lifetime
+	userCodeTTL        = 15 * time.Minute    // [AM7] device-grant user_code lifetime
+	devicePollInterval = 5 * time.Second     // RFC 8628 minimum poll interval
+	defaultMaxFamilies = 20                  // §3 concurrent-family cap per account
 )
 
 // refreshPoPDomain prefixes the bytes a client session key signs to authorize a /refresh
@@ -64,10 +64,7 @@ type IdPConfig struct {
 	// VerificationURI is what the device grant tells the user to open (the SPA's confirm page).
 	VerificationURI string
 
-	SigningKey ed25519.PrivateKey // session-token + revocation-feed signing key
-	KeyID      string             // derived via token.KeyID
-	// NextPubKeys are pre-published rotation keys, exposed on /session/pubkey [AM4].
-	NextPubKeys []ed25519.PublicKey
+	Signer *token.SigningCredential // certified session-token + revocation-feed signer
 
 	RegistrationEnabled bool // §6 kill switch
 	MaxFamilies         int  // 0 => defaultMaxFamilies
@@ -89,22 +86,15 @@ type IdP struct {
 	store  store.Store
 	github GitHubProvider
 	now    func() time.Time
-	keys   token.KeySet // own key first, then next keys
+	signer *token.SigningCredential
 
 	limits *rateLimiters
 }
 
 // NewIdP validates config and builds the identity core.
 func NewIdP(cfg IdPConfig) (*IdP, error) {
-	if cfg.Store == nil || cfg.GitHub == nil || cfg.SigningKey == nil {
-		return nil, errors.New("authsvc: IdPConfig requires Store, GitHub, SigningKey")
-	}
-	if cfg.KeyID == "" {
-		id, err := token.KeyID(cfg.SigningKey.Public().(ed25519.PublicKey))
-		if err != nil {
-			return nil, err
-		}
-		cfg.KeyID = id
+	if cfg.Store == nil || cfg.GitHub == nil || cfg.Signer == nil {
+		return nil, errors.New("authsvc: IdPConfig requires Store, GitHub, Signer")
 	}
 	if cfg.MaxFamilies <= 0 {
 		cfg.MaxFamilies = defaultMaxFamilies
@@ -112,23 +102,15 @@ func NewIdP(cfg IdPConfig) (*IdP, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	pubs := append([]ed25519.PublicKey{cfg.SigningKey.Public().(ed25519.PublicKey)}, cfg.NextPubKeys...)
-	ks, err := token.NewKeySet(pubs...)
-	if err != nil {
-		return nil, err
-	}
 	return &IdP{
 		cfg:    cfg,
 		store:  cfg.Store,
 		github: cfg.GitHub,
 		now:    cfg.Now,
-		keys:   ks,
+		signer: cfg.Signer,
 		limits: newRateLimiters(cfg.RateLimits),
 	}, nil
 }
-
-// KeySet is the verification key set the AS currently publishes (own + next) [AM4].
-func (i *IdP) KeySet() token.KeySet { return i.keys }
 
 // GitHubUser is what the provider's GET /user yields. Sub is the immutable numeric id — the
 // subject; Login is display-only [AM9].
@@ -157,9 +139,9 @@ type GitHubProvider interface {
 // githubClient is the real provider over GitHub's web + API base URLs (overridable so the fake
 // plugs in via config).
 type githubClient struct {
-	webURL, apiURL           string
-	clientID, clientSecret   string
-	httpClient               *http.Client
+	webURL, apiURL         string
+	clientID, clientSecret string
+	httpClient             *http.Client
 }
 
 // NewGitHubProvider returns the production GitHub client. webURL hosts /login/oauth/*, apiURL
@@ -308,9 +290,13 @@ func (i *IdP) mintAccess(u store.User, spkiDER []byte, now time.Time) (wire, tok
 		IssuedAt:       now.Unix(),
 		ExpiresAt:      now.Add(accessTokenTTL).Unix(),
 		SessionKeyHash: token.SessionKeyHash(spkiDER),
-		KeyId:          i.cfg.KeyID,
+		KeyId:          hex.EncodeToString(i.signer.KeyID[:]),
 	}
-	wire, err = token.Mint(body, i.cfg.SigningKey)
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		return "", "", err
+	}
+	wire, err = i.signer.Sign(token.ArtifactTypeSession, payload)
 	return wire, tokenID, err
 }
 

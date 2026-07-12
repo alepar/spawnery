@@ -6,3 +6,6 @@ ca:
 
 db:
   dsn: "file:authsvc-dev?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+
+signing:
+  environment: "dev"

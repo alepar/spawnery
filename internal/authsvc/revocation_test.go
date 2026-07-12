@@ -4,7 +4,6 @@ package authsvc
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"io"
@@ -130,10 +129,15 @@ func TestRevocationsFeedVerifiable(t *testing.T) {
 	fake := githubfake.New()
 	defer fake.Close()
 	now := time.Unix(1770000000, 0)
-	srv, idp, st := testAS(t, fake, now)
-	asPub := idp.cfg.SigningKey.Public().(ed25519.PublicKey)
+	pki := newTestArtifactPKI(t, now, "prod")
+	signer := pki.signer(t, now, "revocations")
+	srv, _, st := testAS(t, fake, now, func(cfg *IdPConfig) { cfg.Signer = signer })
+	verifier, err := token.NewVerifier(pki.root, "prod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	_, err := st.Revocations().Append(context.Background(), store.RevocationEvent{
+	_, err = st.Revocations().Append(context.Background(), store.RevocationEvent{
 		AccountID: "acct-v", FamilyID: "fam-v", TokenIDs: `["t2"]`, RevokedAt: now.Unix(),
 	})
 	if err != nil {
@@ -149,11 +153,19 @@ func TestRevocationsFeedVerifiable(t *testing.T) {
 		if e.FamilyID != "fam-v" {
 			continue
 		}
-		// e.Sig is the full wire "base64(body).base64(sig)" produced by SignArtifact.
-		// Verify it with VerifyArtifact.
-		_, err := token.VerifyArtifact(token.RevocationDomainPrefix, e.Sig, asPub)
+		payload, err := verifier.Verify(e.Sig, token.ArtifactTypeRevocation, now)
 		if err != nil {
 			t.Fatalf("revocation sig invalid: %v", err)
+		}
+		var verified map[string]any
+		if err := json.Unmarshal(payload, &verified); err != nil || verified["family_id"] != "fam-v" {
+			t.Fatalf("verified payload = %s, err = %v", payload, err)
+		}
+		if _, err := verifier.Verify(e.Sig, token.ArtifactTypeSession, now); err == nil {
+			t.Fatal("revocation envelope verified as session")
+		}
+		if _, err := signer.Sign(token.ArtifactTypeSignerRevocation, payload); err == nil {
+			t.Fatal("online signer produced signer-revocation statement")
 		}
 		return
 	}
