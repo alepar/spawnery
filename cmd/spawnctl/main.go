@@ -242,23 +242,19 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 	}
 	fmt.Println("spawn:", id)
 
-	// A4 two-phase sign-after-resolve [AC1][AM12]: start the poll-and-sign loop concurrently with
-	// WaitActive. The CP blocks the spawn in 'starting' until the client submits a signed intent;
-	// SignProvision polls until the CP registers the pending intent, then builds and submits it.
-	// If the CP does not have the intent flow enabled (old CP or intentEnabled=false), it
-	// polls until its context is cancelled when WaitActive returns — the spawn becomes active
-	// without it and the context.Canceled error is suppressed.
+	// A4 two-phase sign-after-resolve [AC1][AM12]: run authorization concurrently with WaitActive.
+	// A signing or target-verification failure is fatal immediately rather than degrading into a
+	// warning while WaitActive sits behind the CP's pending intent.
 	pollCtx, cancelPoll := context.WithCancel(ctx)
 	defer cancelPoll()
+	signCh := make(chan error, 1)
 	go func() {
 		// AppRef is intentionally left empty: in CP create mode the user supplies an app *id*
 		// (--app-id), not the immutable app_ref the CP resolves it to (id != ref for catalog/seed
 		// apps). The client cannot validate a ref it never specified, so the AM1 app_ref gate is
 		// skipped; the model correspondence check still runs, and the signed intent carries the
 		// CP-resolved app_ref verbatim.
-		if err := cli.SignProvision(pollCtx, id, client.IntentParams{Op: intent.OpCreateSpawn, Model: model, Mounts: mounts}); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("pollAndSign: %v", err)
-		}
+		signCh <- cli.SignProvision(pollCtx, id, client.IntentParams{Op: intent.OpCreateSpawn, Model: model, Mounts: mounts})
 	}()
 
 	// CreateSpawn is async: the CP binds the spawn to its node only once the node reports ACTIVE.
@@ -270,15 +266,39 @@ func runCP(ctx context.Context, addr, appID, model, profileID string, mounts []*
 			lastLine = line
 		}
 	}
-	spawnGen, err := cli.WaitActive(ctx, id, onPoll)
-	cancelPoll()
-	if err != nil {
-		var te *client.TerminalError
-		if errors.As(err, &te) {
-			log.Fatal(provisionFailure(te.Summary))
-		}
-		log.Fatal(err)
+	type waitResult struct {
+		generation uint64
+		err        error
 	}
+	waitCh := make(chan waitResult, 1)
+	go func() {
+		generation, err := cli.WaitActive(pollCtx, id, onPoll)
+		waitCh <- waitResult{generation: generation, err: err}
+	}()
+	var spawnGen uint64
+	provisioned := false
+	for !provisioned {
+		select {
+		case signErr := <-signCh:
+			if signErr != nil && !errors.Is(signErr, context.Canceled) {
+				log.Fatalf("authorize create: %v", signErr)
+			}
+			signCh = nil
+		case result := <-waitCh:
+			if result.err != nil {
+				var te *client.TerminalError
+				if errors.As(result.err, &te) {
+					log.Fatal(provisionFailure(te.Summary))
+				}
+				log.Fatal(result.err)
+			}
+			spawnGen = result.generation
+			provisioned = true
+		case <-ctx.Done():
+			log.Fatal(ctx.Err())
+		}
+	}
+	cancelPoll()
 
 	// -detach: the spawn is ACTIVE and (if the CP runs the intent flow) its create intent is signed.
 	// Return WITHOUT opening an interactive session — so we skip the StopSpawn that a normal detach
