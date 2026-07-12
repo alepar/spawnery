@@ -91,6 +91,12 @@ type Artifact struct {
 	Name    string   `json:"name"`
 	Targets []string `json:"targets"`
 
+	// Bundle is the bundle_ref entry id this artifact belongs to, or "" for a standalone
+	// (non-bundle) artifact. Populated at profile assembly (sp-mwco.1.5); empty until then, in
+	// which case the all-or-nothing bundle verdict (spec.BuildApplyReport) is inert (no bundle
+	// groups to enforce). Members of the same bundle_ref share the same Bundle value.
+	Bundle string `json:"bundle,omitempty"`
+
 	// Exactly one of Skill, MCP, Config, or Plugin is set (matching Kind).
 	Skill  *SkillPayload  `json:"skill,omitempty"`
 	MCP    *MCPPayload    `json:"mcp,omitempty"`

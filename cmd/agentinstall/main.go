@@ -111,15 +111,29 @@ func applyCmd() *cli.Command {
 				Name:  "profile-version",
 				Usage: "Profile version to stamp into managed.json provenance entries",
 			},
+			&cli.StringFlag{
+				Name: "report",
+				Usage: "Write a structured apply-report envelope (schema 1) to this path, atomically, and " +
+					"exit non-zero on a warn/bundle_failed/error verdict (0=ok, 2=warn, 3=bundle_failed, 1=error). " +
+					"Omitted: behavior is unchanged (always exits 0)",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			artifactsDir := cmd.String("artifacts")
 			secretsDir := cmd.String("secrets")
 			agentFilter := cmd.String("agent")
+			reportPath := cmd.String("report")
 
 			m, err := agentinstall.LoadManifest(artifactsDir)
 			if err != nil {
-				return fmt.Errorf("load manifest: %w", err)
+				loadErr := fmt.Errorf("load manifest: %w", err)
+				if reportPath != "" {
+					repEnv := agentinstall.NewErrorApplyReport(agentFilter, loadErr.Error())
+					if werr := agentinstall.WriteApplyReportAtomic(reportPath, repEnv); werr != nil {
+						return fmt.Errorf("%w (additionally failed to write --report %s: %v)", loadErr, reportPath, werr)
+					}
+				}
+				return loadErr
 			}
 
 			env := osEnviron()
@@ -141,7 +155,18 @@ func applyCmd() *cli.Command {
 				return fmt.Errorf("marshal result: %w", err)
 			}
 			fmt.Println(string(data))
-			return nil
+
+			if reportPath == "" {
+				return nil
+			}
+			repEnv, code := agentinstall.BuildApplyReport(m, result, agentFilter)
+			if werr := agentinstall.WriteApplyReportAtomic(reportPath, repEnv); werr != nil {
+				return fmt.Errorf("write --report %s: %w", reportPath, werr)
+			}
+			if code == 0 {
+				return nil
+			}
+			return cli.Exit(fmt.Sprintf("apply outcome=%s (see %s)", repEnv.Outcome, reportPath), code)
 		},
 	}
 }

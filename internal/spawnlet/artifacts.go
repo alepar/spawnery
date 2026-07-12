@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -68,6 +69,16 @@ const retryBaseDelay = 500 * time.Millisecond
 // re-fetch (object keys are immutable content hashes). A package var (not const) so tests can shadow
 // it to observe eviction without writing a 1 GiB fixture.
 var cacheMaxBytes int64 = 1 << 30 // 1 GiB
+
+// reportSubdir is the agent-writable subdir (under a spawn's staging dir) that the agentinstall
+// CLI's `apply --report` flag targets (sp-mwco.2.7). Reserved: destPathFor rejects any artifact
+// whose confined DestPath resolves under this prefix — CP-authored DestPaths are "manifest.json"
+// and "payloads/<entry_id>" today, so this is defence in depth, not a real collision.
+const reportSubdir = "report"
+
+// artifactsChown is a seam for hermetic tests to force the EPERM-degraded (world-writable)
+// fallback path (mirrors internal/storage's osChown / gitenv.go's gitEnvChown seams).
+var artifactsChown = os.Chown
 
 // ArtifactContentType is the spawnlet-side copy of node.v1.ArtifactContentType (spawnlet imports no
 // proto; internal/node converts). It selects how an artifact's inline bytes are materialized.
@@ -200,6 +211,15 @@ type ArtifactStager struct {
 	maxTarBytes int64         // max decoded tar size; 0 => maxPlainTarBytes (50 MiB)
 	budget      time.Duration // aggregate staging deadline; 0 => stagingBudget
 	retryBase   time.Duration // retry backoff base; 0 => retryBaseDelay
+
+	// AgentUID mirrors Manager.agentRootUID(): the userns-remap base uid on Docker, 0 on the
+	// runsc/native lane, or a negative value for unknown/degraded. Used to chown the report/
+	// subdir so the agent-container-writable apply-report.json lands under an owner the agent
+	// can actually write; < 0 falls back to a world-writable report dir (mirrors
+	// storage.Scratch.Prepare's EPERM fallback). Production callers (manager.go) always set this
+	// explicitly; a test that leaves it at the zero value gets uid 0, which — run unprivileged,
+	// as tests are — fails chown with EPERM and degrades to world-writable, same net effect.
+	AgentUID int
 }
 
 // tarCap returns the effective decoded-tar size cap, applying the default when the field is unset.
@@ -239,6 +259,42 @@ func (a ArtifactStager) Remove(spawnID string) error {
 	return nil
 }
 
+// ReportDirFor returns the per-spawn agent-writable report subdir (container path:
+// ArtifactsMountPath/report/) that agentinstall apply --report targets.
+func (a ArtifactStager) ReportDirFor(spawnID string) string {
+	return filepath.Join(a.DirFor(spawnID), reportSubdir)
+}
+
+// prepareReportDir creates stageDir's report/ subdir and makes it writable by the in-container
+// agent-root: chown to AgentUID when known (>= 0), falling back to world-writable on EPERM (the
+// rootless dev node, or a genuinely unprivileged spawnlet) or when AgentUID is unknown (< 0).
+// Mirrors storage.Scratch.Prepare / gitenv.go's Prepare degraded-fallback shape.
+func (a ArtifactStager) prepareReportDir(stageDir string) error {
+	reportDir := filepath.Join(stageDir, reportSubdir)
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		return fmt.Errorf("artifacts: mkdir report dir: %w", err)
+	}
+	degraded := a.AgentUID < 0
+	if !degraded {
+		if err := artifactsChown(reportDir, a.AgentUID, a.AgentUID); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				log.Printf("artifacts: chown %s to uid %d failed (%v); falling back to world-writable", reportDir, a.AgentUID, err)
+				degraded = true
+			} else {
+				return fmt.Errorf("artifacts: chown report dir: %w", err)
+			}
+		}
+	}
+	mode := os.FileMode(0o755)
+	if degraded {
+		mode = 0o777
+	}
+	if err := os.Chmod(reportDir, mode); err != nil { // MkdirAll is umask-masked; chmod explicitly
+		return fmt.Errorf("artifacts: chmod report dir: %w", err)
+	}
+	return nil
+}
+
 // Materialize lands artifacts for spawnID. The per-spawn staging dir is wiped and recreated first so
 // a resume re-thread is idempotent (no stale payloads survive). Non-sensitive inline artifacts are
 // staged here at their confined DestPath (BYTES verbatim, TAR unpacked preserving per-file modes),
@@ -265,6 +321,9 @@ func (a ArtifactStager) Materialize(ctx context.Context, spawnID string, artifac
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("artifacts: mkdir staging dir: %w", err)
+	}
+	if err := a.prepareReportDir(dir); err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, a.effectiveStagingBudget())
@@ -307,11 +366,16 @@ func (a ArtifactStager) Materialize(ctx context.Context, spawnID string, artifac
 	return nil
 }
 
-// destPathFor resolves art's confined destination under stageDir.
+// destPathFor resolves art's confined destination under stageDir. Rejects a DestPath that
+// resolves under the reserved report/ prefix (sp-mwco.2.7): that subdir is spawnlet-provisioned
+// and agent-writable for the apply-report envelope, never a CP-authored artifact target.
 func destPathFor(stageDir string, art Artifact) (string, error) {
 	rel, err := safeRel(art.DestPath)
 	if err != nil {
 		return "", err
+	}
+	if rel == reportSubdir || strings.HasPrefix(rel, reportSubdir+string(filepath.Separator)) {
+		return "", fmt.Errorf("artifacts: dest_path %q collides with the reserved %q prefix", art.DestPath, reportSubdir)
 	}
 	return filepath.Join(stageDir, rel), nil
 }

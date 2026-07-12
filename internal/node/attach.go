@@ -25,6 +25,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/gen/node/v1/nodev1connect"
 	"spawnery/internal/agentcaps"
+	"spawnery/internal/agentinstall/spec"
 	"spawnery/internal/safego"
 	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
@@ -132,6 +133,12 @@ type attacher struct {
 	// mgr.TmuxHasSession in runOnce; tests inject a fake to avoid docker. nil falls back to
 	// mgr.TmuxHasSession so it is safe to leave unset in simple unit-test helpers.
 	tmuxHasSessionFn func(ctx context.Context, agentID, session string) (bool, error)
+
+	// applyReportTimeout bounds startSpawn's wait for the agent container's apply-report envelope
+	// (sp-mwco.2.7). Zero => spawnlet.ApplyReportTimeoutFor's manifest-driven policy (patient when
+	// the manifest has a bundle, short otherwise); tests that exercise the "report never arrives"
+	// path override this directly so they don't block for either production default.
+	applyReportTimeout time.Duration
 }
 
 // pendingClient is a client attach that arrived before its session's pump/relay was registered (the
@@ -606,6 +613,57 @@ func artifactsFromProto(in []*nodev1.ArtifactSpec) []spawnlet.Artifact {
 	return out
 }
 
+// skillInstallReportProto builds the NodeMessage payload from EvaluateApplyReport's outputs.
+// env may be nil (report never arrived / a plain timeout); entries may be empty or nil.
+func skillInstallReportProto(spawnID string, gen uint64, env *spec.ApplyReport, entries []spawnlet.InstallEntry) *nodev1.SkillInstallReport {
+	out := &nodev1.SkillInstallReport{
+		SpawnId:    spawnID,
+		Generation: gen,
+		Outcome:    skillInstallOutcomeProto(env),
+		Entries:    make([]*nodev1.SkillInstallEntry, 0, len(entries)),
+	}
+	for _, e := range entries {
+		out.Entries = append(out.Entries, &nodev1.SkillInstallEntry{
+			Agent: e.Agent, Kind: e.Kind, Name: e.Name,
+			Status: skillInstallStatusProto(e.Status), Reason: e.Reason, Bundle: e.Bundle,
+		})
+	}
+	return out
+}
+
+func skillInstallOutcomeProto(env *spec.ApplyReport) nodev1.SkillInstallOutcome {
+	if env == nil {
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED
+	}
+	switch env.Outcome {
+	case spec.OutcomeOK:
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_OK
+	case spec.OutcomeWarn:
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN
+	case spec.OutcomeBundleFailed:
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_BUNDLE_FAILED
+	case spec.OutcomeError:
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR
+	default:
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED
+	}
+}
+
+// skillInstallStatusProto maps an InstallEntry.Status string (either a spec.Status value or
+// spawnlet.StatusUnknown) to the wire enum; anything unrecognized also maps to UNKNOWN.
+func skillInstallStatusProto(status string) nodev1.SkillInstallStatus {
+	switch spec.Status(status) {
+	case spec.StatusApplied:
+		return nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_APPLIED
+	case spec.StatusSkipped:
+		return nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_SKIPPED
+	case spec.StatusFailed:
+		return nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_FAILED
+	default:
+		return nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_UNKNOWN
+	}
+}
+
 func startupSecretRoutesFromProto(in []*nodev1.ArtifactSpec) (map[string]startupSecretRoute, error) {
 	if len(in) == 0 {
 		return nil, nil
@@ -686,6 +744,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		RestoreSnapshot: len(st.GetRootfsArtifacts()) > 0 || a.mgr.HasJournalPins(st.SpawnId),
 		SetupNetwork:    a.mgr.GitHubControlEnabled() || a.mgr.EgressEnforced(),
 		AwaitReady:      true,
+		InstallSkills:   len(st.GetArtifacts()) > 0,
 	}
 	steps := spawnlet.ApplicableMilestones(flags)
 	current := spawnlet.MilestoneAuthorize
@@ -817,6 +876,54 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		return
 	}
 	a.resumeProgress(st.SpawnId, st.Generation, "containers_ready", "containers created")
+
+	// Skill/artifact install observability + all-or-nothing bundle contract (sp-mwco.2.7): the
+	// agent container's launcher runs apply-artifacts.sh AFTER containers are created, so wait
+	// here (bounded) for its apply-report envelope before the spawn can reach ACTIVE. A
+	// partially-installed bundle_ref group fails the spawn outright (per bundle_ref entry); an
+	// isolated non-bundle failure only warns. The report is sent to the CP either way — in the
+	// fatal case, BEFORE the ERROR status, so the CP has the detail behind the failure. Trust
+	// note: the report is produced inside the agent container, so a compromised agent could
+	// forge "ok" — that is not a regression (a compromised agent already has the skills); the
+	// property this buys is that a MISSING or PARTIAL install can no longer look healthy.
+	if flags.InstallSkills {
+		emitStep(spawnlet.MilestoneInstallSkills)
+		stager := a.mgr.Artifacts()
+		manifest, mErr := spec.LoadManifest(stager.DirFor(st.SpawnId))
+		if mErr != nil {
+			// Defensive only: the gate is InstallSkills=len(artifacts)>0, and profile assembly
+			// always includes manifest.json alongside any skill artifact. Treat as "no bundle
+			// info" rather than failing the spawn over a load error unrelated to the install.
+			manifest = spec.Manifest{}
+		}
+		timeout := a.applyReportTimeout // test override; 0 => spawnlet.ApplyReportTimeoutFor's policy
+		if timeout <= 0 {
+			// A no-bundle manifest gets a short budget: a report that can only ever warn must not
+			// stall spawn start for the full bundle-patient budget (e.g. today's goose/hermes/shell
+			// runnables, whose apply-artifacts.sh never invokes agentinstall at all pending
+			// sp-mwco.2.6's runnable->emitter reconciliation, would otherwise stall every artifact-
+			// carrying spawn by the full 2m just to end up warning).
+			timeout = spawnlet.ApplyReportTimeoutFor(manifest)
+		}
+		env, awaitErr := stager.AwaitApplyReport(ctx, st.SpawnId, timeout)
+		var fatalErr error
+		var entries []spawnlet.InstallEntry
+		if awaitErr != nil {
+			fatalErr = fmt.Errorf("skill install report: %w", awaitErr)
+		} else {
+			fatalErr, entries = spawnlet.EvaluateApplyReport(manifest, env)
+		}
+		_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SkillInstallReport{
+			SkillInstallReport: skillInstallReportProto(st.SpawnId, st.Generation, env, entries),
+		}})
+		if fatalErr != nil {
+			logErr("startSpawn "+st.SpawnId+": skill install", fatalErr)
+			_ = a.mgr.Stop(ctx, st.SpawnId)
+			emitErr(fatalErr)
+			return
+		}
+	}
+
 	// tmux-mode spawns: register a raw-PTY relay per client (no ACP handshake, no Pump).
 	// Poll `tmux has-session -t spawn` until the session exists before going ACTIVE (sp-m859.4):
 	// the launcher creates the tmux session asynchronously in the background, so without this gate
