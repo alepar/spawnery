@@ -113,6 +113,8 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     let attachmentSequence = 0;
     let nodeReauthSequence = 0;
     let authorization: VerifiedSessionAuthorization | null = null;
+    let bound = false;
+    let pendingPairReauth = false;
 
     onConnRef.current?.("connecting");
     const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
@@ -120,6 +122,8 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
         const openSequence = ++attachmentSequence;
         nodeReauthSequence++;
         authorization = null;
+        bound = false;
+        pendingPairReauth = false;
         // Bind frame MUST be the first message (ws.go reads it as the session-open). It carries the
         // session-open SignedIntent the enforced node requires (else MISSING_INTENT NACK -> blank).
         try {
@@ -129,6 +133,15 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
           if (authEnabled() && !verified) throw new Error("session bind: authorization context missing");
           authorization = verified ?? null;
           sock.send(JSON.stringify(frame));
+          bound = true;
+          if (pendingPairReauth) {
+            pendingPairReauth = false;
+            const latest = useSessionStore.getState();
+            if (latest.cpAccessToken && latest.nodeAccessToken) {
+              sendReauth(latest.cpAccessToken);
+              sendNodeReauth(latest.nodeAccessToken);
+            }
+          }
           safeFit();
           sock.send(encodeResize(term.cols, term.rows));
           onConnRef.current?.("connected");
@@ -185,9 +198,11 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     // Any failed control send closes this attachment so reconnect performs a fresh authorized bind.
     const REAUTH_INTERVAL_MS = 14 * 60 * 1000; // 14 min (slightly under 15)
     const sendReauth = (token: string) => {
+      if (!bound) return;
       try { sock.send(JSON.stringify({ type: "reauth", token })); } catch { sock.close(); }
     };
     const sendNodeReauth = (nodeAccessToken: string) => {
+      if (!bound) return;
       const verified = authorization;
       if (!verified) return;
       const reauthSequence = ++nodeReauthSequence;
@@ -207,10 +222,16 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     // Subscribe to token changes (fresh token after a silent refresh) → push reauth immediately.
     const unsubSession = authEnabled()
       ? useSessionStore.subscribe((state, prev) => {
-          if (state.cpAccessToken !== prev.cpAccessToken && state.cpAccessToken) {
+          const cpChanged = state.cpAccessToken !== prev.cpAccessToken && !!state.cpAccessToken;
+          const nodeChanged = state.nodeAccessToken !== prev.nodeAccessToken && !!state.nodeAccessToken;
+          if (!bound && (cpChanged || nodeChanged)) {
+            pendingPairReauth = true;
+            return;
+          }
+          if (cpChanged) {
             sendReauth(state.cpAccessToken);
           }
-          if (state.nodeAccessToken !== prev.nodeAccessToken && state.nodeAccessToken) {
+          if (nodeChanged) {
             sendNodeReauth(state.nodeAccessToken);
           }
         })

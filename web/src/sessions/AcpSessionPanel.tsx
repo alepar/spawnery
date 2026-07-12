@@ -42,6 +42,8 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
     let attachmentSequence = 0;
     let nodeReauthSequence = 0;
     let authorization: VerifiedSessionAuthorization | null = null;
+    let bound = false;
+    let pendingPairReauth = false;
     useSessionStore.getState().setConn(sessionId, "connecting");
     const sock = new ReconnectingSocket(cpWsUrl("/ws/session"), {
       onOpen: async () => {
@@ -49,6 +51,8 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
         const openSequence = ++attachmentSequence;
         nodeReauthSequence++;
         authorization = null;
+        bound = false;
+        pendingPairReauth = false;
         // Fresh frame receiver per (re)connect; wire it BEFORE the bind so replay can't precede onmessage.
         new Conn(sock, (m) => { if (genRef.current === gen) useSessionStore.getState().applyFrame(sessionId, m as Frame); });
         const cursor = useSessionStore.getState().acp[sessionId]?.lastSeq ?? 0;
@@ -61,6 +65,15 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
           if (authEnabled() && !verified) throw new Error("session bind: authorization context missing");
           authorization = verified ?? null;
           sock.send(JSON.stringify(frame));
+          bound = true;
+          if (pendingPairReauth) {
+            pendingPairReauth = false;
+            const latest = useAuthStore.getState();
+            if (latest.cpAccessToken && latest.nodeAccessToken) {
+              sendReauth(latest.cpAccessToken);
+              sendNodeReauth(latest.nodeAccessToken);
+            }
+          }
           useSessionStore.getState().setConn(sessionId, "connected");
         } catch {
           if (genRef.current === gen && openSequence === attachmentSequence) sock.close();
@@ -73,9 +86,11 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
     // In-band reauth: ~14min interval (under the 15min ws.go deadline).
     const REAUTH_MS = 14 * 60 * 1000;
     const sendReauth = (token: string) => {
+      if (!bound) return;
       try { sock.send(JSON.stringify({ type: "reauth", token })); } catch { sock.close(); }
     };
     const sendNodeReauth = (nodeAccessToken: string) => {
+      if (!bound) return;
       const verified = authorization;
       if (!verified) return;
       const reauthSequence = ++nodeReauthSequence;
@@ -95,10 +110,16 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
     // Push a reauth frame immediately when the token refreshes.
     const unsubAuth = authEnabled()
       ? useAuthStore.subscribe((state, prev) => {
-          if (state.cpAccessToken !== prev.cpAccessToken && state.cpAccessToken) {
+          const cpChanged = state.cpAccessToken !== prev.cpAccessToken && !!state.cpAccessToken;
+          const nodeChanged = state.nodeAccessToken !== prev.nodeAccessToken && !!state.nodeAccessToken;
+          if (!bound && (cpChanged || nodeChanged)) {
+            pendingPairReauth = true;
+            return;
+          }
+          if (cpChanged) {
             sendReauth(state.cpAccessToken);
           }
-          if (state.nodeAccessToken !== prev.nodeAccessToken && state.nodeAccessToken) {
+          if (nodeChanged) {
             sendNodeReauth(state.nodeAccessToken);
           }
         })

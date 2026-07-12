@@ -111,6 +111,42 @@ describe("AcpSessionPanel — gate the socket on session readiness", () => {
     });
   });
 
+  it("queues refreshes during bind and reauthenticates with only the latest atomic pair", async () => {
+    vi.stubEnv("VITE_AUTH_ENABLED", "1");
+    const { useSessionStore: useAuthStore } = await import("@/auth/session");
+    useAuthStore.setState({ cpAccessToken: "cp-old", nodeAccessToken: "node-old", status: "authed" });
+    let resolveBind!: (frame: Awaited<ReturnType<typeof authMocks.buildBind>>) => void;
+    authMocks.buildBind.mockImplementationOnce(() => new Promise((resolve) => { resolveBind = resolve; }));
+
+    render(<AcpSessionPanel spawnId="s1" sessionId="2" active ready />);
+    const opened = fakeSocketInstance!.opts.onOpen();
+    act(() => { useAuthStore.setState({ cpAccessToken: "cp-mid", nodeAccessToken: "node-mid" }); });
+    act(() => { useAuthStore.setState({ cpAccessToken: "cp-latest", nodeAccessToken: "node-latest" }); });
+    expect(fakeSocketInstance!.sent).toEqual([]);
+
+    resolveBind({
+      spawnId: "s1", sessionId: "2", clientId: "client", cursor: 0,
+      token: "cp-old", nodeAccessToken: "node-old", signedIntent: "open-intent",
+      authorization: {
+        spawnId: "s1", sessionId: "2", clientId: "client", attachmentSequence: 1,
+        generation: 7n, targetNodeId: "node-1",
+      },
+    });
+    await act(async () => { await opened; });
+    await vi.waitFor(() => expect(authMocks.buildNodeReauth).toHaveBeenCalled());
+
+    const messages = fakeSocketInstance!.sent.map((raw) => JSON.parse(raw as string));
+    expect(messages[0]).toEqual(expect.objectContaining({ spawnId: "s1", token: "cp-old" }));
+    expect(messages.slice(1)).toContainEqual({ type: "reauth", token: "cp-latest" });
+    expect(messages.slice(1)).toContainEqual({
+      type: "nodeReauth", nodeAccessToken: "node-latest", signedIntent: "reauth-intent",
+    });
+    expect(authMocks.buildNodeReauth).toHaveBeenCalledTimes(1);
+    expect(authMocks.buildNodeReauth).toHaveBeenCalledWith(expect.objectContaining({
+      attachmentSequence: 1,
+    }), "node-latest");
+  });
+
   it("closes the current surface when node reauth construction fails", async () => {
     vi.stubEnv("VITE_AUTH_ENABLED", "1");
     const { useSessionStore: useAuthStore } = await import("@/auth/session");
