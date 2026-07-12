@@ -126,7 +126,6 @@ export async function runFork(
       rootPEM,
       now,
       (step) => onProgress?.(step),
-      undefined,
     );
     onProgress?.("done");
     return { forkSpawnId, resolvedNodeId, transferSetId, journalKeysDelivered: delivered.journalKeysDelivered };
@@ -164,7 +163,6 @@ export async function runForkDelivery(
       rootPEM,
       now,
       onProgress,
-      undefined,
     );
   } catch (e: unknown) {
     if (e instanceof ForkError) throw e;

@@ -90,8 +90,8 @@ Production GitHub-token handling is blocked until the generic secret-delivery fl
   delivery-id-once.
 - `sp-7h6.1.9` folds owner-online delivery into the A4 intent round-trip.
 - `sp-7h6.1.4` renders and injects secrets for the node/agent/sidecar consumers described here.
-- `sp-7h6.1.11` requires current, signed issuer CRLs and exact node-leaf serial checks before real
-  user tokens are sealed to nodes in production.
+- `sp-7h6.1.11` requires current, signed issuer CRLs and exact node-leaf serial checks on native
+  clients and the browser's live service path before real user tokens are sealed in production.
 
 Backend mechanics may be built and tested earlier behind local/static-token seams, but no
 production GitHub user-token path ships before these gates. Section 14 records the resolved spike

@@ -206,10 +206,11 @@ secure delivery (.3/.4/.9).
 
 ## 9. Enforce Node Certificate CRLs (sp-7h6.1.11)
 
-`subkey.VerifyNodeForSealing` must receive fail-closed certificate revocation state and verify the
-exact issuer+leaf serial before sealing. The AS issues signed CRLs; clients validate signatures,
-freshness, and monotonic CRL numbers. NodeID is not a revocation key: a revoked old leaf and an
-unrevoked rotated leaf carrying the same NodeID remain independent.
+Native `subkey.VerifyNodeForSealing` callers receive fail-closed certificate revocation state and
+verify the exact issuer+leaf serial before sealing. The browser relies on the live CP/node mTLS
+path's signed-CRL enforcement before key retrieval and delivery, while retaining its own pinned-root,
+SAN, issuer-policy, intent, and sub-key checks. NodeID is never a revocation key: a revoked old leaf
+and an unrevoked rotated leaf carrying the same NodeID remain independent.
 
 ## 10. Surfaces: CLI (strong path) + Web (sp-7h6.1.6, sp-7h6.1.10)
 
