@@ -45,7 +45,7 @@ const defaultReadoptTimeout = 60 * time.Second
 type readoptState struct {
 	mu        sync.Mutex
 	done      bool          // an attempt completed with a CP answer; do not run it again
-	gateOnce  sync.Once     //
+	gateOnce  sync.Once     // guards close(gate) against a double-close
 	gate      chan struct{} // closed when the node may serve StartSpawn
 	waitingID string        // the request id we are waiting on ("" = none)
 	answer    chan *nodev1.ManagedPodsDecisions
