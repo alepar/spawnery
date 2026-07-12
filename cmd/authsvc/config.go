@@ -117,14 +117,18 @@ func (c AS) Validate() error {
 		return err
 	}
 	if !c.Dev {
-		for name, value := range map[string]string{
-			"signing.environment":       c.Signing.Environment,
-			"signing.root_pem":          c.Signing.RootPEM,
-			"signing.current_key_pem":   c.Signing.CurrentKeyPEM,
-			"signing.current_chain_pem": c.Signing.CurrentChainPEM,
-		} {
-			if value == "" {
-				return fmt.Errorf("%s is required in production (set dev=true for development)", name)
+		required := []struct {
+			name  string
+			value string
+		}{
+			{"signing.environment", c.Signing.Environment},
+			{"signing.root_pem", c.Signing.RootPEM},
+			{"signing.current_key_pem", c.Signing.CurrentKeyPEM},
+			{"signing.current_chain_pem", c.Signing.CurrentChainPEM},
+		}
+		for _, field := range required {
+			if field.value == "" {
+				return fmt.Errorf("%s is required in production (set dev=true for development)", field.name)
 			}
 		}
 		if string(c.GitHub.TokenEncKey) == "" && c.GitHub.TokenEncKeyFile == "" {

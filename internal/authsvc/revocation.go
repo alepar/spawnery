@@ -101,7 +101,7 @@ func (i *IdP) signRevocationEntry(ev store.RevocationEvent) (SignedRevocationEnt
 	if err != nil {
 		return SignedRevocationEntry{}, fmt.Errorf("revocation: marshal: %w", err)
 	}
-	wire, err := i.signer.Sign(token.ArtifactTypeRevocation, bodyBytes)
+	wire, err := i.signers.sign(token.ArtifactTypeRevocation, bodyBytes)
 	if err != nil {
 		return SignedRevocationEntry{}, fmt.Errorf("revocation: sign: %w", err)
 	}

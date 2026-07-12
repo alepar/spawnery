@@ -75,6 +75,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
@@ -305,6 +306,7 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 		Store:               idStore,
 		GitHub:              ghProvider,
 		Signer:              credentials.Current,
+		NextSigner:          credentials.Next,
 		GitHubRedirectURI:   cfg.GitHub.RedirectURI,
 		SPAOrigin:           spaOrigin,
 		RedirectURIs:        redirectURIs,
@@ -451,10 +453,12 @@ func loadSigningCredential(label, keyPath, chainPath string, root *x509.Certific
 	if err != nil {
 		return nil, fmt.Errorf("authsvc: read %s signing key (%s): %w", label, keyPath, err)
 	}
-	privateKey, _, err := token.LoadSigningKey(keyRaw)
+	defer clear(keyRaw)
+	privateKey, err := parseSigningPrivateKeyPEM(keyRaw)
 	if err != nil {
 		return nil, fmt.Errorf("authsvc: parse %s signing key (%s): %w", label, keyPath, err)
 	}
+	defer clear(privateKey)
 	chainRaw, err := os.ReadFile(chainPath)
 	if err != nil {
 		return nil, fmt.Errorf("authsvc: read %s signing chain (%s): %w", label, chainPath, err)
@@ -482,28 +486,14 @@ func parseCertificatePEM(raw []byte) (*x509.Certificate, error) {
 }
 
 func parseCertificateChainPEM(raw []byte) ([]*x509.Certificate, error) {
-	const (
-		certificatePEMHeader = "-----BEGIN CERTIFICATE-----\n"
-		certificatePEMFooter = "-----END CERTIFICATE-----\n"
-	)
 	var certificates []*x509.Certificate
 	for len(raw) > 0 {
-		if !bytes.HasPrefix(raw, []byte(certificatePEMHeader)) {
+		block, rest, err := consumeCanonicalPEMBlock(raw, "CERTIFICATE")
+		if err != nil {
 			if len(certificates) > 0 {
-				return nil, fmt.Errorf("invalid trailing PEM data")
+				return nil, fmt.Errorf("invalid trailing PEM data: %w", err)
 			}
-			return nil, fmt.Errorf("invalid leading PEM data")
-		}
-		body := raw[len(certificatePEMHeader):]
-		footerOffset := bytes.Index(body, []byte(certificatePEMFooter))
-		if footerOffset < 0 || (footerOffset > 0 && body[footerOffset-1] != '\n') {
-			return nil, fmt.Errorf("invalid certificate PEM block")
-		}
-		blockEnd := len(certificatePEMHeader) + footerOffset + len(certificatePEMFooter)
-		blockRaw := raw[:blockEnd]
-		block, rest := pem.Decode(blockRaw)
-		if block == nil || len(rest) != 0 || !bytes.Equal(blockRaw, pem.EncodeToMemory(block)) {
-			return nil, fmt.Errorf("invalid certificate PEM block")
+			return nil, err
 		}
 		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
 			return nil, fmt.Errorf("unexpected PEM block %q", block.Type)
@@ -513,12 +503,78 @@ func parseCertificateChainPEM(raw []byte) ([]*x509.Certificate, error) {
 			return nil, fmt.Errorf("parse certificate: %w", err)
 		}
 		certificates = append(certificates, cert)
-		raw = raw[blockEnd:]
+		raw = rest
 	}
 	if len(certificates) == 0 {
 		return nil, fmt.Errorf("no certificates")
 	}
 	return certificates, nil
+}
+
+func parseSigningPrivateKeyPEM(raw []byte) (ed25519.PrivateKey, error) {
+	block, rest, err := consumeCanonicalPEMBlock(raw, "PRIVATE KEY")
+	if err != nil {
+		return nil, err
+	}
+	defer clear(block.Bytes)
+	if block.Type != "PRIVATE KEY" || len(block.Headers) != 0 || len(rest) != 0 {
+		return nil, fmt.Errorf("expected exactly one headerless PRIVATE KEY block")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse PKCS#8 private key: %w", err)
+	}
+	privateKey, ok := parsed.(ed25519.PrivateKey)
+	if !ok || len(privateKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("private key is not Ed25519")
+	}
+	canonical := ed25519.NewKeyFromSeed(privateKey[:ed25519.SeedSize])
+	clear(privateKey)
+	return canonical, nil
+}
+
+// consumeCanonicalPEMBlock decodes exactly one zero-offset PEM block. Both LF and CRLF are
+// canonical inputs; mixed endings, prefixes, skipped malformed blocks, and trailing bytes within
+// the framed block are rejected by byte-for-byte canonical re-encoding.
+func consumeCanonicalPEMBlock(raw []byte, blockType string) (*pem.Block, []byte, error) {
+	headerBase := "-----BEGIN " + blockType + "-----"
+	newline := ""
+	switch {
+	case bytes.HasPrefix(raw, []byte(headerBase+"\n")):
+		newline = "\n"
+	case bytes.HasPrefix(raw, []byte(headerBase+"\r\n")):
+		newline = "\r\n"
+	default:
+		return nil, nil, fmt.Errorf("PEM block does not start with %s", headerBase)
+	}
+	header := headerBase + newline
+	footer := "-----END " + blockType + "-----" + newline
+	body := raw[len(header):]
+	footerOffset := bytes.Index(body, []byte(footer))
+	if footerOffset < 0 || !hasPEMLineBoundary(body, footerOffset, newline) {
+		return nil, nil, fmt.Errorf("invalid %s PEM block", blockType)
+	}
+	blockEnd := len(header) + footerOffset + len(footer)
+	blockRaw := raw[:blockEnd]
+	block, undecoded := pem.Decode(blockRaw)
+	if block == nil || len(undecoded) != 0 {
+		return nil, nil, fmt.Errorf("invalid %s PEM block", blockType)
+	}
+	canonical := pem.EncodeToMemory(block)
+	if newline == "\r\n" {
+		canonical = bytes.ReplaceAll(canonical, []byte("\n"), []byte("\r\n"))
+	}
+	if !bytes.Equal(blockRaw, canonical) {
+		return nil, nil, fmt.Errorf("non-canonical %s PEM block", blockType)
+	}
+	return block, raw[blockEnd:], nil
+}
+
+func hasPEMLineBoundary(body []byte, footerOffset int, newline string) bool {
+	if footerOffset == 0 {
+		return true
+	}
+	return footerOffset >= len(newline) && bytes.Equal(body[footerOffset-len(newline):footerOffset], []byte(newline))
 }
 
 func buildProductionCA(cfg *AS) (*productionCA, error) {

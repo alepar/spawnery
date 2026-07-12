@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -59,6 +60,18 @@ func TestASValidateSigning(t *testing.T) {
 	cfg.Signing.NextChainPEM = "next-chain.pem"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("paired next credential rejected: %v", err)
+	}
+}
+
+func TestASValidateSigningRequiredFieldOrder(t *testing.T) {
+	var cfg AS
+	cfg.FakeGithub = true
+	cfg.GitHub.TokenEncKey = "configured"
+	for attempt := 0; attempt < 100; attempt++ {
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "signing.environment") {
+			t.Fatalf("attempt %d: Validate() error = %v, want signing.environment first", attempt, err)
+		}
 	}
 }
 
@@ -141,6 +154,85 @@ func TestLoadSigningCredentials(t *testing.T) {
 		_, err := loadSigningCredentials(cfg, now)
 		if err == nil || !strings.Contains(err.Error(), "current") || !strings.Contains(err.Error(), next.keyPath) {
 			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("junk prefix on current key", func(t *testing.T) {
+		path := writePrefixedTestFile(t, current.keyPath, []byte("junk before key\n"))
+		cfg := signingConfigFor(current)
+		cfg.CurrentKeyPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("prefixed current key was accepted")
+		}
+	})
+
+	t.Run("wrong current key PEM type", func(t *testing.T) {
+		raw, err := os.ReadFile(current.keyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(raw)
+		block.Type = "EC PRIVATE KEY"
+		path := filepath.Join(t.TempDir(), "wrong-type.pem")
+		if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := signingConfigFor(current)
+		cfg.CurrentKeyPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("wrong-type current key was accepted")
+		}
+	})
+
+	t.Run("multiple current key blocks", func(t *testing.T) {
+		raw, err := os.ReadFile(current.keyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "multiple-keys.pem")
+		if err := os.WriteFile(path, append(append([]byte(nil), raw...), raw...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := signingConfigFor(current)
+		cfg.CurrentKeyPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("multiple current key blocks were accepted")
+		}
+	})
+
+	t.Run("malformed begin prefix on current key", func(t *testing.T) {
+		path := writePrefixedTestFile(t, current.keyPath, []byte("-----BEGIN JUNK\n"))
+		cfg := signingConfigFor(current)
+		cfg.CurrentKeyPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("current key after malformed BEGIN prefix was accepted")
+		}
+	})
+
+	t.Run("invalid first private key block", func(t *testing.T) {
+		path := writePrefixedTestFile(t, current.keyPath, []byte("-----BEGIN PRIVATE KEY-----\nnot-base64\n"))
+		cfg := signingConfigFor(current)
+		cfg.CurrentKeyPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("current key after invalid first PRIVATE KEY block was accepted")
+		}
+	})
+
+	t.Run("current key PEM headers", func(t *testing.T) {
+		raw, err := os.ReadFile(current.keyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(raw)
+		block.Headers = map[string]string{"Proc-Type": "4,ENCRYPTED"}
+		path := filepath.Join(t.TempDir(), "key-headers.pem")
+		if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := signingConfigFor(current)
+		cfg.CurrentKeyPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("current key PEM headers were accepted")
 		}
 	})
 
@@ -302,6 +394,22 @@ func TestLoadSigningCredentials(t *testing.T) {
 			t.Fatalf("error = %v", err)
 		}
 	})
+
+	t.Run("CRLF root", func(t *testing.T) {
+		cfg := signingConfigFor(current)
+		cfg.RootPEM = writeCRLFTestFile(t, current.rootPath)
+		if _, err := loadSigningCredentials(cfg, now); err != nil {
+			t.Fatalf("CRLF root rejected: %v", err)
+		}
+	})
+
+	t.Run("CRLF signer chain", func(t *testing.T) {
+		cfg := signingConfigFor(current)
+		cfg.CurrentChainPEM = writeCRLFTestFile(t, current.chainPath)
+		if _, err := loadSigningCredentials(cfg, now); err != nil {
+			t.Fatalf("CRLF signer chain rejected: %v", err)
+		}
+	})
 }
 
 type signingFixture struct {
@@ -420,6 +528,20 @@ func writePrefixedTestFile(t *testing.T, source string, prefix []byte) string {
 	}
 	path := filepath.Join(t.TempDir(), filepath.Base(source))
 	raw = append(append([]byte(nil), prefix...), raw...)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeCRLFTestFile(t *testing.T, source string) string {
+	t.Helper()
+	raw, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), filepath.Base(source))
+	raw = bytes.ReplaceAll(raw, []byte("\n"), []byte("\r\n"))
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}

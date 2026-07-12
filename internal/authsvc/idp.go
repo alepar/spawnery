@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,7 +65,8 @@ type IdPConfig struct {
 	// VerificationURI is what the device grant tells the user to open (the SPA's confirm page).
 	VerificationURI string
 
-	Signer *token.SigningCredential // certified session-token + revocation-feed signer
+	Signer     *token.SigningCredential // current certified session-token + revocation-feed signer
+	NextSigner *token.SigningCredential // optional validated one-shot rotation target
 
 	RegistrationEnabled bool // §6 kill switch
 	MaxFamilies         int  // 0 => defaultMaxFamilies
@@ -82,11 +84,11 @@ type IdPConfig struct {
 // IdP implements the AS identity surface: OAuth code flow, token minting, refresh families,
 // device grants, and the revocation feed.
 type IdP struct {
-	cfg    IdPConfig
-	store  store.Store
-	github GitHubProvider
-	now    func() time.Time
-	signer *token.SigningCredential
+	cfg     IdPConfig
+	store   store.Store
+	github  GitHubProvider
+	now     func() time.Time
+	signers signerManager
 
 	limits *rateLimiters
 }
@@ -103,13 +105,49 @@ func NewIdP(cfg IdPConfig) (*IdP, error) {
 		cfg.Now = time.Now
 	}
 	return &IdP{
-		cfg:    cfg,
-		store:  cfg.Store,
-		github: cfg.GitHub,
-		now:    cfg.Now,
-		signer: cfg.Signer,
-		limits: newRateLimiters(cfg.RateLimits),
+		cfg:     cfg,
+		store:   cfg.Store,
+		github:  cfg.GitHub,
+		now:     cfg.Now,
+		signers: signerManager{current: cfg.Signer, next: cfg.NextSigner},
+		limits:  newRateLimiters(cfg.RateLimits),
 	}, nil
+}
+
+type signerManager struct {
+	mu        sync.RWMutex
+	current   *token.SigningCredential
+	next      *token.SigningCredential
+	activated bool
+}
+
+func (m *signerManager) withCurrent(sign func(*token.SigningCredential) (string, error)) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return sign(m.current)
+}
+
+func (m *signerManager) sign(artifactType string, payload []byte) (string, error) {
+	return m.withCurrent(func(signer *token.SigningCredential) (string, error) {
+		return signer.Sign(artifactType, payload)
+	})
+}
+
+// ActivateNextSigner atomically switches all session and revocation issuance to the configured
+// next credential. The transition is one-shot and intentionally has no HTTP exposure.
+func (i *IdP) ActivateNextSigner() error {
+	i.signers.mu.Lock()
+	defer i.signers.mu.Unlock()
+	if i.signers.activated {
+		return errors.New("authsvc: next signer already activated")
+	}
+	if i.signers.next == nil {
+		return errors.New("authsvc: no next signer configured")
+	}
+	i.signers.current = i.signers.next
+	i.signers.next = nil
+	i.signers.activated = true
+	return nil
 }
 
 // GitHubUser is what the provider's GET /user yields. Sub is the immutable numeric id — the
@@ -282,21 +320,23 @@ func (g *githubClient) FetchUser(ctx context.Context, accessToken string) (GitHu
 // "cp" only; "node"-audience minting is A4's flow.
 func (i *IdP) mintAccess(u store.User, spkiDER []byte, now time.Time) (wire, tokenID string, err error) {
 	tokenID = uuid.NewString()
-	body := &authv1.SessionTokenBody{
-		AccountId:      u.AccountID,
-		Handle:         u.Handle,
-		TokenId:        tokenID,
-		Audience:       "cp",
-		IssuedAt:       now.Unix(),
-		ExpiresAt:      now.Add(accessTokenTTL).Unix(),
-		SessionKeyHash: token.SessionKeyHash(spkiDER),
-		KeyId:          hex.EncodeToString(i.signer.KeyID[:]),
-	}
-	payload, err := proto.Marshal(body)
-	if err != nil {
-		return "", "", err
-	}
-	wire, err = i.signer.Sign(token.ArtifactTypeSession, payload)
+	wire, err = i.signers.withCurrent(func(signer *token.SigningCredential) (string, error) {
+		body := &authv1.SessionTokenBody{
+			AccountId:      u.AccountID,
+			Handle:         u.Handle,
+			TokenId:        tokenID,
+			Audience:       "cp",
+			IssuedAt:       now.Unix(),
+			ExpiresAt:      now.Add(accessTokenTTL).Unix(),
+			SessionKeyHash: token.SessionKeyHash(spkiDER),
+			KeyId:          hex.EncodeToString(signer.KeyID[:]),
+		}
+		payload, err := proto.Marshal(body)
+		if err != nil {
+			return "", err
+		}
+		return signer.Sign(token.ArtifactTypeSession, payload)
+	})
 	return wire, tokenID, err
 }
 
