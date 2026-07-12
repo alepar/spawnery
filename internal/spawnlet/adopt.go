@@ -69,6 +69,12 @@ func (m *Manager) UntrackedPods(ctx context.Context) ([]runtime.ManagedPod, erro
 //
 // It also removes the pod's egress-floor rules (which the previous process never removed): the pod IP is
 // about to be released back to the bridge, and a stale DROP would later bite whatever recycles it.
+//
+// It also stops the GitHub control server for this spawn, if one is running: an ADOPT whose rebuild fails
+// AFTER Manager.Adopt already re-Served the spawn's control listener (sp-2tx8.3.5) must not leak that
+// listener — ReapPod is the ONLY cleanup the caller runs on that failure path (readopt.go's undo() only
+// detaches the in-memory Spawn; it does not touch ghControl). Stop is idempotent and safe to call even
+// when this process never Served the spawn (a direct REAP verdict, no prior Adopt in this process).
 func (m *Manager) ReapPod(ctx context.Context, mp runtime.ManagedPod) error {
 	log.Printf("reaping pod spawn=%s gen=%d (CP verdict: reap, or rebuild failed)", mp.SpawnID, mp.Generation)
 
@@ -88,6 +94,11 @@ func (m *Manager) ReapPod(ctx context.Context, mp runtime.ManagedPod) error {
 			log.Printf("reap: remove egress floor for %s (ip %s): %v", mp.SpawnID, mp.PodIP, ferr)
 		}
 	}
+
+	if m.ghControl != nil {
+		m.ghControl.Stop(mp.SpawnID)
+	}
+
 	return err
 }
 

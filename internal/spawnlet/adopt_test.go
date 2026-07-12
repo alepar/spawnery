@@ -504,6 +504,93 @@ func TestAdoptFailsClosedOnServeError(t *testing.T) {
 	}
 }
 
+// ReapPod is the ONLY cleanup that runs when an ADOPT rebuild fails AFTER Manager.Adopt already
+// re-Served the spawn's GitHub control listener (readopt.go's undo() only detaches the in-memory
+// Spawn — it never touches ghControl). Without ReapPod also calling ghControl.Stop, that listener
+// (and its cache/CA entries) leaks forever on every such failure.
+func TestReapPodStopsGitHubControlServerAfterSuccessfulAdopt(t *testing.T) {
+	ctx := context.Background()
+	be := fakepod.New()
+	t.Cleanup(be.Close)
+	dataRoot := t.TempDir()
+	overrideSidecarReadyProbe(t, nil)
+
+	mock1 := &mockGitHubControlServer{}
+	m1 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1", UsernsMode: "remap",
+	})
+	m1.SetGitHubControlServer(mock1)
+	if _, err := m1.Create(ctx, "sp1", "../../examples/secret-app", "model", "", "", 1); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	mock2 := &mockGitHubControlServer{}
+	m2 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1", UsernsMode: "remap",
+	})
+	m2.SetGitHubControlServer(mock2)
+	pods, err := m2.UntrackedPods(ctx)
+	if err != nil || len(pods) != 1 {
+		t.Fatalf("UntrackedPods = %+v, %v", pods, err)
+	}
+
+	// Adopt succeeds and re-Serves the control listener (mirrors readopt.go's adoptPod up to the
+	// point some LATER step — tmux check, ACP re-dial — fails and the caller falls back to reap).
+	if _, err := m2.Adopt(ctx, pods[0], AdoptSpec{AppRef: "../../examples/secret-app", Model: "model", Generation: 1}); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	if _, ok := mock2.lastServe(); !ok {
+		t.Fatal("setup: Adopt did not call Serve")
+	}
+	if got := mock2.stopCount(); got != 0 {
+		t.Fatalf("Stop called %d times before any failure/reap", got)
+	}
+
+	if err := m2.ReapPod(ctx, pods[0]); err != nil {
+		t.Fatalf("ReapPod: %v", err)
+	}
+	if got := mock2.stopCount(); got != 1 {
+		t.Fatalf("Stop called %d times after ReapPod, want 1 (the re-Served listener must not leak)", got)
+	}
+}
+
+// ReapPod must also call ghControl.Stop for a pod THIS process never Adopted (a direct CP REAP
+// verdict) — Stop is idempotent (a no-op listener close, a no-op disk removal), so calling it
+// unconditionally is always safe and covers both origins of the REAP verdict with one code path.
+func TestReapPodStopsGitHubControlServerWithoutPriorAdopt(t *testing.T) {
+	ctx := context.Background()
+	be := fakepod.New()
+	t.Cleanup(be.Close)
+	dataRoot := t.TempDir()
+	overrideSidecarReadyProbe(t, nil)
+
+	mock1 := &mockGitHubControlServer{}
+	m1 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1", UsernsMode: "remap",
+	})
+	m1.SetGitHubControlServer(mock1)
+	if _, err := m1.Create(ctx, "sp1", "../../examples/secret-app", "model", "", "", 1); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	mock2 := &mockGitHubControlServer{}
+	m2 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
+		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1", UsernsMode: "remap",
+	})
+	m2.SetGitHubControlServer(mock2)
+	pods, err := m2.UntrackedPods(ctx)
+	if err != nil || len(pods) != 1 {
+		t.Fatalf("UntrackedPods = %+v, %v", pods, err)
+	}
+
+	if err := m2.ReapPod(ctx, pods[0]); err != nil {
+		t.Fatalf("ReapPod: %v", err)
+	}
+	if got := mock2.stopCount(); got != 1 {
+		t.Fatalf("Stop called %d times after a direct ReapPod, want 1", got)
+	}
+}
+
 // ghControl == nil: none of the GitHub control-server logic runs, and Adopt still recovers the
 // control token from the sidecar env.
 func TestAdoptWithoutGitHubControlServer(t *testing.T) {
