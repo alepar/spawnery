@@ -116,7 +116,7 @@ func (c *AS) derive() {
 	if c.VerificationURI == "" {
 		c.VerificationURI = o + "/device/verify"
 	}
-	if c.GitHub.ClientID != "" && c.GitHub.RedirectURI == "" {
+	if (c.GitHub.ClientID != "" || c.FakeGithub) && c.GitHub.RedirectURI == "" {
 		c.GitHub.RedirectURI = o + "/oauth/callback"
 	}
 	// github.link_redirect_uri is intentionally NOT derived: a non-empty value ACTIVATES the

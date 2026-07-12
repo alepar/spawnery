@@ -38,6 +38,14 @@ func TestASDerive(t *testing.T) {
 		t.Errorf("github.link_redirect_uri = %q, want empty (must stay an explicit opt-in)", c2.GitHub.LinkRedirectURI)
 	}
 
+	// The fake provider enforces the same redirect contract and also needs the AS callback.
+	cFake := &AS{FakeGithub: true}
+	cFake.PublicURL = o
+	cFake.derive()
+	if cFake.GitHub.RedirectURI != o+"/oauth/callback" {
+		t.Errorf("fake github.redirect_uri = %q, want %q", cFake.GitHub.RedirectURI, o+"/oauth/callback")
+	}
+
 	// explicit values win over derivation.
 	c3 := &AS{SPAOrigins: "https://explicit.example.com", RedirectURIs: "https://x/cb"}
 	c3.PublicURL = o

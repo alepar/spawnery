@@ -63,7 +63,7 @@ type SignedFeedEntry struct {
 	FamilyID  string `json:"family_id"`
 	TokenIDs  string `json:"token_ids"`
 	RevokedAt int64  `json:"revoked_at"`
-	Sig       string `json:"sig"` // full wire: base64url(bodyBytes)"."base64url(sig)
+	Sig       string `json:"sig"` // full SignedAuthArtifact envelope wire
 }
 
 // Apply verifies the entry's sig against ks and, if valid, marks the revoked identifiers

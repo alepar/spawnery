@@ -104,8 +104,7 @@ export async function scan(distDir: string, srcDir?: string): Promise<ScanResult
 
     // 5. PLACEHOLDER trust anchor markers.
     if (
-      content.includes("PLACEHOLDER-TRUST-ANCHOR-ROOT-CA") ||
-      content.includes("PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY")
+      content.includes("PLACEHOLDER-TRUST-ANCHOR-ROOT-CA")
     ) {
       violations.push(`${rel}: contains PLACEHOLDER trust anchor — replace before release`);
     }
@@ -126,8 +125,7 @@ export async function scan(distDir: string, srcDir?: string): Promise<ScanResult
       }
       const rel = path.relative(srcDir, filePath);
       if (
-        srcContent.includes("PLACEHOLDER-TRUST-ANCHOR-ROOT-CA") ||
-        srcContent.includes("PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY")
+        srcContent.includes("PLACEHOLDER-TRUST-ANCHOR-ROOT-CA")
       ) {
         violations.push(
           `src/${rel}: contains PLACEHOLDER trust anchor — replace before release`,

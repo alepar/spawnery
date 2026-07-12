@@ -10,6 +10,7 @@ spawnlet_addr:     "127.0.0.1:9090"   # standalone-mode listener
 agent_binaries:    []                  # binary names available in the agent image (CSV via env)
 container_runtime: ""                  # "" = Docker (default); "runsc" = CRI/gVisor lane
 userns_mode:       "off"              # off | remap | native
+gettoken_listen_ip: ""                 # host IP reachable from pods for the GitHub control endpoint
 as_url:            ""                  # AuthService URL (enforced mode / GitHub mint)
 as_server_name:    ""                  # expected AuthService internal TLS DNS name
 enroll_token:      ""                  # enrollment token (first-boot only; cleared after enroll)

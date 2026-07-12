@@ -236,6 +236,37 @@ Dev scaffolding: `just gen-dev-ca`, then `just cp-enforced` / `just authsvc-enfo
 `just node-enforced` (or `just dev-enforced` for the lot). See the Justfile recipes for the exact
 wiring. Auth design: [`docs/superpowers/specs/2026-06-11-auth-identity-design.md`](docs/superpowers/specs/2026-06-11-auth-identity-design.md).
 
+### Auth artifact signer rotation
+
+The environment root and auth-signing intermediate are offline issuers. They never belong in an AS,
+CP, or node runtime bundle. For a routine rotation:
+
+1. With the offline auth-signing intermediate, issue a distinct next signer key and purpose-constrained,
+   leaf-first chain. Validate the **private-key/leaf match** before transfer; the SPKI hashes must be
+   identical:
+   ```sh
+   openssl pkey -in auth-signer-next-key.pem -pubout -outform DER | sha256sum
+   openssl x509 -in auth-signer-next-chain.pem -pubkey -noout \
+     | openssl pkey -pubin -outform DER | sha256sum
+   ```
+2. Deploy it through the next-key and next-chain settings while current remains active. Maintain
+   overlap for the **maximum artifact lifetime plus the verifier's allowed clock skew**, measured
+   from the final issuance by current.
+3. Switch issuance by promoting next to current, restart authsvc, provision a distinct new next, and
+   confirm CP and node verifiers accept new artifacts while old artifacts drain.
+4. After verifying the switch, **delete the retired private key** and all ceremony working copies.
+   **Retain the retired public chain** in the audit/distribution archive until every old artifact has
+   expired plus allowed clock skew. Routine retirement does not publish a revocation statement.
+5. Record the new current/next credentials and public-chain retention deadline in the offline custody
+   inventory.
+
+For emergency compromise rotation, promote the pre-certified next signer, then use the offline issuer
+to publish a root-authorized **higher-generation revocation statement** for the compromised signer.
+Publish it atomically to all CP and node verifiers and require **generation convergence** at the new
+generation; lagging verifiers fail closed. Confirm old artifacts return `TOKEN_INVALID`, revoke all
+refresh families, issue a distinct replacement next with the offline auth-signing intermediate,
+delete every compromised private-key copy, and update the custody inventory and incident record.
+
 ---
 
 ## macOS

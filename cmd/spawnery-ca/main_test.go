@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -9,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/node/nodeid"
 	"spawnery/internal/pki"
@@ -51,6 +55,72 @@ func TestGenDevInternalServiceIdentitiesAndCurrentCRLs(t *testing.T) {
 		if err != nil || !list.NextUpdate.After(time.Now()) {
 			t.Fatalf("current %s: list=%v err=%v", name, list, err)
 		}
+	}
+}
+
+func TestMintAuthTokenUsesCertifiedSignerCredential(t *testing.T) {
+	dir := t.TempDir()
+	if err := genDev(dir); err != nil {
+		t.Fatal(err)
+	}
+	spki := []byte("session-key-spki")
+	wire, err := mintAuthToken(
+		filepath.Join(dir, "root.pem"),
+		filepath.Join(dir, "auth-signer-current-key.pem"),
+		filepath.Join(dir, "auth-signer-current-chain.pem"),
+		"dev", "node", "acct-1", spki, time.Now(),
+	)
+	if err != nil {
+		t.Fatalf("mintAuthToken: %v", err)
+	}
+	root := readCertificate(t, filepath.Join(dir, "root.pem"))
+	verifier, err := token.NewVerifier(root, "dev", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := verifier.Verify(wire, token.ArtifactTypeSession, time.Now())
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	var body authv1.SessionTokenBody
+	if err := proto.Unmarshal(payload, &body); err != nil {
+		t.Fatal(err)
+	}
+	wantHash := sha256.Sum256(spki)
+	if body.Audience != "node" || body.AccountId != "acct-1" || string(body.SessionKeyHash) != string(wantHash[:]) {
+		t.Fatalf("body = %+v", &body)
+	}
+}
+
+func TestSignSignerRevocationRevokesCertifiedLeaf(t *testing.T) {
+	dir := t.TempDir()
+	if err := genDev(dir); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	wire, err := signSignerRevocation(
+		filepath.Join(dir, "auth-signing-intermediate.pem"),
+		filepath.Join(dir, "auth-signing-intermediate-key.pem"),
+		filepath.Join(dir, "auth-signer-current-chain.pem"),
+		"dev", 7, now,
+	)
+	if err != nil {
+		t.Fatalf("signSignerRevocation: %v", err)
+	}
+	statement, err := token.ParseSignerRevocationStatement(wire, readCertificate(t, filepath.Join(dir, "root.pem")), "dev", now)
+	if err != nil {
+		t.Fatalf("ParseSignerRevocationStatement: %v", err)
+	}
+	if statement.Generation() != 7 {
+		t.Fatalf("generation = %d", statement.Generation())
+	}
+	leaf := readCertificateChain(t, filepath.Join(dir, "auth-signer-current-chain.pem"))[0]
+	state, _ := token.NewSignerRevocationState(readCertificate(t, filepath.Join(dir, "root.pem")), "dev")
+	if err := state.Apply(statement); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RejectSigner(leaf); err == nil {
+		t.Fatal("revoked leaf remained accepted")
 	}
 }
 

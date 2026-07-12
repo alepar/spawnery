@@ -393,6 +393,16 @@ func TestSpawnletConfig_CSVAgentBinaries(t *testing.T) {
 	}
 }
 
+func TestSpawnletConfig_GetTokenListenIPEnvAlias(t *testing.T) {
+	cfg, err := loadSpawnletTest(t, "dev", map[string]string{"GETTOKEN_LISTEN_IP": "10.234.0.1"})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.GetTokenListenIP != "10.234.0.1" {
+		t.Fatalf("GetTokenListenIP = %q, want CNI gateway", cfg.GetTokenListenIP)
+	}
+}
+
 func TestSpawnletConfig_GitHubOverrideEnvAliases(t *testing.T) {
 	cfg, err := loadSpawnletTest(t, "dev", map[string]string{
 		"GITHUB_API_BASE_URL":        "http://127.0.0.1:3000/api/v1",

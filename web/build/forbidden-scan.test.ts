@@ -136,13 +136,6 @@ describe("placeholder trust anchors", () => {
     expect(result.violations.some(v => v.includes("PLACEHOLDER"))).toBe(true);
   });
 
-  it("fails when PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY is in the bundle", async () => {
-    write("assets/main.js", `const AS_PUBKEYS = ["PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY"];`);
-    write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; connect-src https://cp.example.com`);
-    const result = await scan(tmpDir);
-    expect(result.ok).toBe(false);
-    expect(result.violations.some(v => v.includes("PLACEHOLDER"))).toBe(true);
-  });
 });
 
 // ── Source-tree PLACEHOLDER scan (catches tree-shaken constants) ─────────────
@@ -170,16 +163,6 @@ describe("source-tree placeholder scan", () => {
     write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; connect-src https://cp.example.com`);
     // source file carries the placeholder.
     writeSrc("config/trustAnchors.ts", `export const PINNED_ROOT_CA_PEM = "PLACEHOLDER-TRUST-ANCHOR-ROOT-CA";`);
-
-    const result = await scan(tmpDir, srcDir);
-    expect(result.ok).toBe(false);
-    expect(result.violations.some(v => v.includes("PLACEHOLDER") && v.startsWith("src/"))).toBe(true);
-  });
-
-  it("fails when a source .ts file contains PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY even with a clean dist", async () => {
-    write("assets/main.js", `console.log("hello");`);
-    write("_headers", `/*\n  Content-Security-Policy: default-src 'none'; connect-src https://cp.example.com`);
-    writeSrc("config/trustAnchors.ts", `export const AS_PUBKEYS = ["PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY"];`);
 
     const result = await scan(tmpDir, srcDir);
     expect(result.ok).toBe(false);

@@ -1,16 +1,15 @@
 package node
 
 // intentverify_test.go covers the A4 node-side verification chain [AC1][AM12].
-// All tests are hermetic (in-memory key set, fake clock, no network).
+// All tests are hermetic (in-memory certified signer/root, fake clock, no network).
 
 import (
-	"crypto"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -34,8 +33,6 @@ func genECDSA(t *testing.T) *ecdsa.PrivateKey {
 
 type testArtifactSigner struct{ *token.SigningCredential }
 
-func (s testArtifactSigner) Public() crypto.PublicKey { return s.PrivateKey.Public() }
-
 func genASKey(t *testing.T) (testArtifactSigner, *token.Verifier) {
 	t.Helper()
 	fixture := newArtifactFixture(t, time.Unix(1_770_000_000, 0), "prod")
@@ -49,10 +46,6 @@ func mintNodeToken(t *testing.T, asPriv testArtifactSigner, _ *token.Verifier, s
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyID, err := token.KeyID(asPriv.Public().(ed25519.PublicKey))
-	if err != nil {
-		t.Fatal(err)
-	}
 	body := &authv1.SessionTokenBody{
 		AccountId:      accountID,
 		TokenId:        "tok-test",
@@ -60,7 +53,7 @@ func mintNodeToken(t *testing.T, asPriv testArtifactSigner, _ *token.Verifier, s
 		IssuedAt:       now.Unix(),
 		ExpiresAt:      now.Add(15 * time.Minute).Unix(),
 		SessionKeyHash: token.SessionKeyHash(spki),
-		KeyId:          keyID,
+		KeyId:          hex.EncodeToString(asPriv.KeyID[:]),
 	}
 	return mintSessionBody(t, asPriv, body)
 }
@@ -409,7 +402,6 @@ func TestCNFMismatch(t *testing.T) {
 
 	// Token's cnf is bound to sessionKey, but intent will use differentKey's SPKI.
 	spki, _ := x509.MarshalPKIXPublicKey(&sessionKey.PublicKey)
-	keyID, _ := token.KeyID(asPriv.Public().(ed25519.PublicKey))
 	cnfHash := sha256.Sum256(spki)
 	tokenBody := &authv1.SessionTokenBody{
 		AccountId:      "alice",
@@ -418,7 +410,7 @@ func TestCNFMismatch(t *testing.T) {
 		IssuedAt:       now.Unix(),
 		ExpiresAt:      now.Add(15 * time.Minute).Unix(),
 		SessionKeyHash: cnfHash[:],
-		KeyId:          keyID,
+		KeyId:          hex.EncodeToString(asPriv.KeyID[:]),
 	}
 	nodeTok := mintSessionBody(t, asPriv, tokenBody)
 
@@ -444,7 +436,6 @@ func TestWrongAudienceRefused(t *testing.T) {
 
 	// Mint a token with aud=cp (not aud=node).
 	spki, _ := x509.MarshalPKIXPublicKey(&sessionKey.PublicKey)
-	keyID, _ := token.KeyID(asPriv.Public().(ed25519.PublicKey))
 	tokenBody := &authv1.SessionTokenBody{
 		AccountId:      "alice",
 		TokenId:        "tok-cp",
@@ -452,7 +443,7 @@ func TestWrongAudienceRefused(t *testing.T) {
 		IssuedAt:       now.Unix(),
 		ExpiresAt:      now.Add(15 * time.Minute).Unix(),
 		SessionKeyHash: token.SessionKeyHash(spki),
-		KeyId:          keyID,
+		KeyId:          hex.EncodeToString(asPriv.KeyID[:]),
 	}
 	cpTok := mintSessionBody(t, asPriv, tokenBody)
 
@@ -545,7 +536,6 @@ func TestVerifyOpenHappyPath(t *testing.T) {
 		SessionId:    "sess-a",
 	}
 	spki, _ := x509.MarshalPKIXPublicKey(&sessionKey.PublicKey)
-	keyID, _ := token.KeyID(asPriv.Public().(ed25519.PublicKey))
 	tokenBody := &authv1.SessionTokenBody{
 		AccountId:      "alice",
 		TokenId:        "tok-open",
@@ -553,7 +543,7 @@ func TestVerifyOpenHappyPath(t *testing.T) {
 		IssuedAt:       now.Unix(),
 		ExpiresAt:      now.Add(15 * time.Minute).Unix(),
 		SessionKeyHash: token.SessionKeyHash(spki),
-		KeyId:          keyID,
+		KeyId:          hex.EncodeToString(asPriv.KeyID[:]),
 	}
 	nodeTok := mintSessionBody(t, asPriv, tokenBody)
 	si, _ := intent.Build(intent.OpSessionOpen, body, sessionKey)

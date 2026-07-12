@@ -73,7 +73,7 @@ func moveCmd() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 			if opts.CloseCertificateRevocations != nil {
-				defer opts.CloseCertificateRevocations()
+				defer func() { _ = opts.CloseCertificateRevocations() }()
 			}
 			dev, err := loadDevice(dir)
 			if err != nil {

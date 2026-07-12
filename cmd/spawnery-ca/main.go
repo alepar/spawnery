@@ -5,16 +5,28 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	authv1 "spawnery/gen/auth/v1"
+	"spawnery/internal/authsvc/token"
 	"spawnery/internal/node/nodeid"
 	"spawnery/internal/pki"
 )
@@ -39,9 +51,156 @@ func main() {
 			log.Fatalf("spawnery-ca: %v", err)
 		}
 		log.Printf("spawnery-ca: re-minted node identity %s owned by %q in %s/node", nodeID, owner, dir)
+	case len(os.Args) == 9 && os.Args[1] == "auth-token":
+		spki, err := base64.StdEncoding.DecodeString(os.Args[8])
+		if err != nil {
+			log.Fatalf("spawnery-ca: decode session SPKI: %v", err)
+		}
+		wire, err := mintAuthToken(os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6], os.Args[7], spki, time.Now())
+		if err != nil {
+			log.Fatalf("spawnery-ca: %v", err)
+		}
+		fmt.Println(wire)
+	case len(os.Args) == 7 && os.Args[1] == "signer-revocation":
+		generation, err := strconv.ParseUint(os.Args[6], 10, 64)
+		if err != nil {
+			log.Fatalf("spawnery-ca: parse signer-revocation generation: %v", err)
+		}
+		wire, err := signSignerRevocation(os.Args[2], os.Args[3], os.Args[4], os.Args[5], generation, time.Now())
+		if err != nil {
+			log.Fatalf("spawnery-ca: %v", err)
+		}
+		fmt.Println(wire)
 	default:
-		log.Fatalf("usage:\n  spawnery-ca dev [dir]                  (default dir: .dev-ca)\n  spawnery-ca node <dir> <node-id> <owner>")
+		log.Fatalf("usage:\n  spawnery-ca dev [dir]\n  spawnery-ca node <dir> <node-id> <owner>\n  spawnery-ca auth-token <root> <key> <chain> <environment> <cp|node> <account-id> <spki-base64>\n  spawnery-ca signer-revocation <issuer-cert> <issuer-key> <revoked-leaf-chain> <environment> <generation>")
 	}
+}
+
+func signSignerRevocation(intermediatePath, keyPath, revokedChainPath, environment string, generation uint64, now time.Time) (string, error) {
+	intermediateBytes, err := os.ReadFile(intermediatePath)
+	if err != nil {
+		return "", fmt.Errorf("read auth-signing intermediate: %w", err)
+	}
+	intermediate, err := pki.ParseCertPEM(intermediateBytes)
+	if err != nil {
+		return "", fmt.Errorf("parse auth-signing intermediate: %w", err)
+	}
+	keyBytes, err := os.ReadFile(keyPath)
+	if err != nil {
+		return "", fmt.Errorf("read auth-signing intermediate key: %w", err)
+	}
+	keyBlock, rest := pem.Decode(keyBytes)
+	if keyBlock == nil || len(rest) != 0 {
+		return "", fmt.Errorf("parse auth-signing intermediate key: expected one PEM block")
+	}
+	parsedKey, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("parse auth-signing intermediate key: %w", err)
+	}
+	key, ok := parsedKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return "", fmt.Errorf("parse auth-signing intermediate key: key is %T, want ECDSA", parsedKey)
+	}
+	chainBytes, err := os.ReadFile(revokedChainPath)
+	if err != nil {
+		return "", fmt.Errorf("read revoked signer chain: %w", err)
+	}
+	leafBlock, _ := pem.Decode(chainBytes)
+	if leafBlock == nil || leafBlock.Type != "CERTIFICATE" {
+		return "", fmt.Errorf("parse revoked signer chain: missing leaf certificate")
+	}
+	leaf, err := x509.ParseCertificate(leafBlock.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("parse revoked signer leaf: %w", err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
+	if err != nil {
+		return "", err
+	}
+	fingerprint := sha256.Sum256(spki)
+	payload, err := proto.Marshal(&authv1.SignerRevocationStatement{
+		Environment:       environment,
+		Generation:        generation,
+		IssuedAt:          now.Unix(),
+		RevokedSerials:    [][]byte{leaf.SerialNumber.Bytes()},
+		RevokedSpkiSha256: [][]byte{fingerprint[:]},
+	})
+	if err != nil {
+		return "", err
+	}
+	return token.SignSignerRevocationStatement(intermediate, key, payload)
+}
+
+func mintAuthToken(rootPath, keyPath, chainPath, environment, audience, accountID string, spki []byte, now time.Time) (string, error) {
+	if audience != "cp" && audience != "node" {
+		return "", fmt.Errorf("auth token audience %q must be cp or node", audience)
+	}
+	if accountID == "" || len(spki) == 0 {
+		return "", fmt.Errorf("auth token account and session SPKI are required")
+	}
+	rootBytes, err := os.ReadFile(rootPath)
+	if err != nil {
+		return "", fmt.Errorf("read auth root: %w", err)
+	}
+	root, err := pki.ParseCertPEM(rootBytes)
+	if err != nil {
+		return "", fmt.Errorf("parse auth root: %w", err)
+	}
+	keyBytes, err := os.ReadFile(keyPath)
+	if err != nil {
+		return "", fmt.Errorf("read auth signer key: %w", err)
+	}
+	keyBlock, rest := pem.Decode(keyBytes)
+	if keyBlock == nil || len(rest) != 0 {
+		return "", fmt.Errorf("parse auth signer key: expected one PEM block")
+	}
+	parsedKey, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("parse auth signer key: %w", err)
+	}
+	privateKey, ok := parsedKey.(ed25519.PrivateKey)
+	if !ok {
+		return "", fmt.Errorf("parse auth signer key: key is %T, want Ed25519", parsedKey)
+	}
+	chainBytes, err := os.ReadFile(chainPath)
+	if err != nil {
+		return "", fmt.Errorf("read auth signer chain: %w", err)
+	}
+	var chain []*x509.Certificate
+	for len(chainBytes) > 0 {
+		block, remaining := pem.Decode(chainBytes)
+		if block == nil || block.Type != "CERTIFICATE" {
+			return "", fmt.Errorf("parse auth signer chain: expected certificate PEM")
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return "", fmt.Errorf("parse auth signer chain: %w", err)
+		}
+		chain = append(chain, cert)
+		chainBytes = remaining
+	}
+	credential, err := token.NewSigningCredential(privateKey, chain, root, environment, now)
+	if err != nil {
+		return "", fmt.Errorf("validate auth signer credential: %w", err)
+	}
+	var tokenID [16]byte
+	if _, err := rand.Read(tokenID[:]); err != nil {
+		return "", fmt.Errorf("generate auth token ID: %w", err)
+	}
+	body := &authv1.SessionTokenBody{
+		AccountId:      accountID,
+		TokenId:        hex.EncodeToString(tokenID[:]),
+		Audience:       audience,
+		IssuedAt:       now.Unix(),
+		ExpiresAt:      now.Add(15 * time.Minute).Unix(),
+		SessionKeyHash: token.SessionKeyHash(spki),
+		KeyId:          hex.EncodeToString(credential.KeyID[:]),
+	}
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	return credential.Sign(token.ArtifactTypeSession, payload)
 }
 
 // remintNode loads the existing self-hosted intermediate from <dir> and issues a fresh node

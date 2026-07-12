@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"spawnery/internal/authsvc/token"
 	"spawnery/internal/pki"
 )
 
@@ -474,7 +473,7 @@ func writeSigningFixtureForPKI(t *testing.T, root *x509.Certificate, rootKey *ec
 	}, intermediate, priv.Public(), intermediateKey)
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, id+"-key.pem")
-	keyPEM, err := token.MarshalSigningKeyPEM(priv)
+	keyPEM, err := pki.MarshalPKCS8KeyPEM(priv)
 	if err != nil {
 		t.Fatal(err)
 	}

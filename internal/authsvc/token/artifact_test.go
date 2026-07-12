@@ -325,7 +325,10 @@ func TestVerifierRejectsMalformedArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	unknownFieldRaw = append(unknownFieldRaw, 0x9a, 0x06, 0x00)
-	legacy := SignArtifact(DomainPrefix, []byte("legacy"), pki.leafEd25519Priv)
+	legacyPayload := []byte("legacy")
+	legacyMessage := append([]byte(DomainPrefix), legacyPayload...)
+	legacy := base64.RawURLEncoding.EncodeToString(legacyPayload) + "." +
+		base64.RawURLEncoding.EncodeToString(ed25519.Sign(pki.leafEd25519Priv, legacyMessage))
 	for _, candidate := range []string{
 		"",
 		"!!!",
