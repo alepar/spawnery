@@ -1,9 +1,14 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/pressly/goose/v3"
+	_ "modernc.org/sqlite"
 )
 
 func TestNodeRevocationsRevokeAndListSorted(t *testing.T) {
@@ -42,6 +47,46 @@ func TestNodeRevocationsRevokeAndListSorted(t *testing.T) {
 	}
 	if rows[0].IssuerSerial != "aa" || rows[0].LeafSerial != "cc" {
 		t.Fatalf("certificate identity not stored: %+v", rows[0])
+	}
+}
+
+func TestNodeRevocationMigrationUpgradesLegacyRowsWithoutCertificateAuthority(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authsvc.db")
+	dsn := "file:" + path
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goose.SetBaseFS(migrationsFS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(db, "migrations/sqlite", 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO node_revocations (node_id, reason, revoked_at) VALUES ('legacy-node', 'lost', 100)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(ctxT(), Config{Driver: "sqlite", DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	legacy, err := st.NodeRevocations().Get(ctxT(), "legacy-node")
+	if err != nil || legacy.IssuerSerial != "" || legacy.LeafSerial != "" {
+		t.Fatalf("legacy row = %+v, %v", legacy, err)
+	}
+	rows, err := st.NodeRevocations().ListByIssuer(ctxT(), "aa")
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("legacy row entered certificate authority view: %+v, %v", rows, err)
+	}
+	if _, err := st.NodeRevocations().GetCRL(ctxT(), "aa"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("legacy row synthesized CRL checkpoint: %v", err)
 	}
 }
 
