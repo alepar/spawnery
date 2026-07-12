@@ -76,6 +76,28 @@ message RevocationEntry {
   int64 revoked_at = 5;
 }
 
+// SignedAuthArtifact is the self-describing envelope for every AS authorization artifact.
+// signer_chain is DER encoded, leaf first, with the locally trusted root omitted. key_id is
+// SHA-256 of the leaf SPKI and is a cache selector only; it grants no authority.
+message SignedAuthArtifact {
+  string artifact_type       = 1;
+  bytes payload              = 2;
+  bytes signature            = 3;
+  repeated bytes signer_chain = 4;
+  bytes key_id               = 5;
+}
+
+// SignerRevocationStatement is signed by the offline auth-signing intermediate under
+// spawnery/signer-revocation/v1. Verifiers persist the highest accepted generation.
+message SignerRevocationStatement {
+  string environment                 = 1;
+  uint64 generation                  = 2;
+  int64 issued_at                    = 3;
+  repeated bytes revoked_serials     = 4;
+  repeated bytes revoked_spki_sha256 = 5;
+  int64 minimum_signer_not_before    = 6;
+}
+
 // MountRef is one mount binding inside an IntentBody. Structurally mirrors node.v1.MountBinding but
 // is defined here to keep auth.v1 leaf (no cross-package import).
 message MountRef {
