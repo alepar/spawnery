@@ -24,6 +24,7 @@ auth:
   revocation_poll_interval: 30s
 
 internal:
+  insecure_dev_node_on_public: false # explicit loopback-only compatibility lane; never production
   listen: ""
   trust_domain: ""
   root_ca: ""

@@ -403,6 +403,52 @@ func TestCPConfig_Defaults(t *testing.T) {
 	if cfg.Internal.Listen != "" {
 		t.Errorf("internal.listen = %q, want disabled in base dev config", cfg.Internal.Listen)
 	}
+	if cfg.Internal.InsecureDevNodeOnPublic {
+		t.Fatal("insecure public node route must default off")
+	}
+}
+
+func TestCPConfig_InsecureDevNodeOnPublicRequiresDevLoopback(t *testing.T) {
+	if _, err := loadCPTest(t, "dev", nil, "internal.insecure_dev_node_on_public=true"); err != nil {
+		t.Fatalf("explicit loopback dev lane: %v", err)
+	}
+	for _, listen := range []string{"0.0.0.0:8080", "[::]:8080", "192.168.1.20:8080", "cp.internal:8080"} {
+		_, err := loadCPTest(t, "dev", nil, "internal.insecure_dev_node_on_public=true", "listen="+listen)
+		if err == nil {
+			t.Fatalf("listen %q accepted", listen)
+		}
+	}
+	if _, err := loadCPTest(t, "dev", nil, "internal.insecure_dev_node_on_public=true", "auth.mode=prod"); err == nil || !strings.Contains(err.Error(), "auth.mode=dev") {
+		t.Fatalf("production insecure node route: %v", err)
+	}
+}
+
+func TestMountInsecureDevNodeRouteDefaultsAbsent(t *testing.T) {
+	called := false
+	node := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	for _, test := range []struct {
+		name    string
+		enabled bool
+		want    int
+	}{
+		{name: "default absent", enabled: false, want: http.StatusNotFound},
+		{name: "explicit enabled", enabled: true, want: http.StatusNoContent},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			called = false
+			mux := http.NewServeMux()
+			mountInsecureDevNodeRoute(mux, test.enabled, nodev1connect.NodeServiceAttachProcedure, node)
+			req := httptest.NewRequest(http.MethodPost, nodev1connect.NodeServiceAttachProcedure, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != test.want || called != test.enabled {
+				t.Fatalf("code=%d called=%v", rec.Code, called)
+			}
+		})
+	}
 }
 
 func TestCPConfig_EnvAliasOverride(t *testing.T) {

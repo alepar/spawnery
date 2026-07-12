@@ -323,8 +323,9 @@ func main() {
 			}
 		})
 	} else {
-		// Explicit development compatibility lane only; production validation requires Internal.
-		devNodePath = nodePath
+		if cfg.Internal.InsecureDevNodeOnPublic {
+			devNodePath = nodePath
+		}
 	}
 	publicHandler := buildPublicHandler(srv, verifier, allow, st.Ping, devNodePath, nodeHandler)
 
@@ -533,10 +534,14 @@ func buildPublicHandler(srv *cp.Server, verifier *auth.Verifier, allow weborigin
 	mux.HandleFunc("/ws/session", srv.HandleWS(verifier, allow))
 	mux.Handle("/metrics", metrics.Handler())
 	health.Register(mux, ready)
-	if devNodePath != "" && devNodeHandler != nil {
-		mux.Handle(devNodePath, devNodeHandler)
-	}
+	mountInsecureDevNodeRoute(mux, devNodePath != "", devNodePath, devNodeHandler)
 	return allow.CORS(mux)
+}
+
+func mountInsecureDevNodeRoute(mux *http.ServeMux, enabled bool, nodePath string, nodeHandler http.Handler) {
+	if enabled && nodePath != "" && nodeHandler != nil {
+		mux.Handle(nodePath, nodeHandler)
+	}
 }
 
 func buildInternalHandler(verifier *mtls.PeerVerifier, spawnHandler, nodeHandler http.Handler) http.Handler {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"time"
 
 	"spawnery/internal/config"
@@ -41,6 +42,7 @@ type CP struct {
 	} `koanf:"auth"`
 
 	Internal struct {
+		InsecureDevNodeOnPublic   bool          `koanf:"insecure_dev_node_on_public"`
 		Listen                    string        `koanf:"listen"`
 		TrustDomain               string        `koanf:"trust_domain"`
 		RootCA                    string        `koanf:"root_ca"`
@@ -109,6 +111,18 @@ func (c CP) Validate() error {
 	if err := c.Common.Validate(); err != nil { // explicit: method promotion would shadow it
 		return err
 	}
+	if c.Internal.InsecureDevNodeOnPublic {
+		if c.Auth.Mode != "dev" {
+			return fmt.Errorf("internal.insecure_dev_node_on_public requires auth.mode=dev")
+		}
+		if c.Internal.Listen != "" {
+			return fmt.Errorf("internal.insecure_dev_node_on_public cannot be combined with internal mTLS")
+		}
+		host, _, err := net.SplitHostPort(c.Listen)
+		if err != nil || !loopbackHost(host) {
+			return fmt.Errorf("internal.insecure_dev_node_on_public requires a loopback-only public listen address")
+		}
+	}
 	if c.Auth.Mode == "prod" {
 		for _, required := range []struct{ name, value string }{
 			{"auth.environment", c.Auth.Environment},
@@ -170,6 +184,14 @@ func (c CP) Validate() error {
 	return nil
 }
 
+func loopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // cpEnvAliases maps existing CP environment variable names to dotted config keys, so current
 // deployments keep working unchanged (the env layer sits above the files). New knobs are reached
 // via these names or CLI --set.
@@ -192,6 +214,7 @@ var cpEnvAliases = map[string]string{
 	"CP_AS_REVOCATION_URL":                "auth.as_revocation_url",
 	"CP_SHUTDOWN_GRACE":                   "shutdown_grace",
 	"CP_REVOCATION_POLL_INTERVAL":         "auth.revocation_poll_interval",
+	"CP_INSECURE_DEV_NODE_ON_PUBLIC":      "internal.insecure_dev_node_on_public",
 	"CP_INTERNAL_LISTEN":                  "internal.listen",
 	"CP_INTERNAL_TRUST_DOMAIN":            "internal.trust_domain",
 	"CP_INTERNAL_ROOT_CA":                 "internal.root_ca",
