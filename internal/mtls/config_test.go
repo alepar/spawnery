@@ -145,7 +145,8 @@ func TestClientTLSRejectsInvalidPeer(t *testing.T) {
 		},
 		{
 			name: "wrong service role",
-			configure: func(_ *testing.T, f *tlsFixture, _ *ClientOptions) (*pki.Leaf, *x509.Certificate) {
+			configure: func(_ *testing.T, f *tlsFixture, opts *ClientOptions) (*pki.Leaf, *x509.Certificate) {
+				opts.ServerName = "as.internal"
 				return f.authsvc, f.root.Cert
 			},
 		},
