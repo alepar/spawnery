@@ -336,7 +336,7 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		backendResolver: storage.NewSchemeResolverWithGitHub(cfg.DataRoot, nil),
 		fw:              fw,
 		secrets:         SecretInjector{Root: cfg.SecretsRoot},
-		artifacts:       ArtifactStager{Root: cfg.ArtifactsRoot},
+		artifacts:       ArtifactStager{Root: cfg.ArtifactsRoot, CacheDir: filepath.Join(cfg.DataRoot, "artifact-cache")},
 		gitEnv:          GitEnv{Root: cfg.GitEnvRoot},
 		githubCreds:     GitHubCredentialStore{Root: cfg.GitHubCredentialsRoot},
 		deltaState:      &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
@@ -1245,7 +1245,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	// ArtifactsRoot, bind-mounted at ArtifactsMountPath. Re-applied idempotently on every create/resume
 	// (artifacts are create-time-declared but durable across the spawn's life). Sensitive artifacts are
 	// routed to the secrets tmpfs (0600) by Materialize, never landed here.
-	if err := m.artifacts.Materialize(ctx, id, sel.Artifacts, m.secrets); err != nil {
+	if err := m.artifacts.Materialize(ctx, id, sel.Artifacts, m.secrets, sel.ProgressFunc); err != nil {
 		finalizeAll()
 		cleanupSpawnDirs()
 		return nil, fmt.Errorf("prepare artifacts: %w", err)
