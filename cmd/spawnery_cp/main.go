@@ -437,6 +437,10 @@ func loadInternalRuntime(cfg CP, now func() time.Time) (*internalRuntime, error)
 		}
 		issuers = append(issuers, issuer)
 	}
+	sources, err := mtls.BuildCRLSources(issuers, cfg.Internal.RevocationCRLs, cfg.Internal.RevocationURLs)
+	if err != nil {
+		return nil, err
+	}
 	state, err := pki.OpenRevocationState(cfg.Internal.RevocationState, issuers, now)
 	if err != nil {
 		return nil, fmt.Errorf("open certificate revocation state: %w", err)
@@ -447,10 +451,6 @@ func loadInternalRuntime(cfg CP, now func() time.Time) (*internalRuntime, error)
 			_ = state.Close()
 		}
 	}()
-	sources, err := mtls.BuildCRLSources(issuers, cfg.Internal.RevocationCRLs, cfg.Internal.RevocationURLs)
-	if err != nil {
-		return nil, err
-	}
 	refresher := mtls.NewCRLRefresher(http.DefaultClient, sources, state, cfg.Internal.RevocationRefreshInterval)
 	if err := refresher.Refresh(context.Background()); err != nil {
 		return nil, fmt.Errorf("refresh certificate revocations: %w", err)

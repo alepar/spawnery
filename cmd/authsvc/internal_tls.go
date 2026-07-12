@@ -52,6 +52,10 @@ func loadCertificateRevocations(cfg ASInternalTLS, now func() time.Time) (*pki.R
 		}
 		issuers = append(issuers, issuer)
 	}
+	sources, err := mtls.BuildCRLSources(issuers, crlPaths, crlURLs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("authsvc: %w", err)
+	}
 	state, err := pki.OpenRevocationState(cfg.RevocationState, issuers, now)
 	if err != nil {
 		return nil, nil, fmt.Errorf("authsvc: open certificate revocation state: %w", err)
@@ -62,10 +66,6 @@ func loadCertificateRevocations(cfg ASInternalTLS, now func() time.Time) (*pki.R
 			_ = state.Close()
 		}
 	}()
-	sources, err := mtls.BuildCRLSources(issuers, crlPaths, crlURLs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("authsvc: %w", err)
-	}
 	refresher := mtls.NewCRLRefresher(http.DefaultClient, sources, state, cfg.RevocationRefreshInterval)
 	if err := refresher.Refresh(context.Background()); err != nil {
 		return nil, nil, fmt.Errorf("authsvc: refresh certificate revocations: %w", err)

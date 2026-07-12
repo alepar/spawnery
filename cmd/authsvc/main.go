@@ -176,6 +176,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("authsvc: %v", err)
 	}
+	if certificateRefresher != nil {
+		if err := certificateRefresher.Refresh(context.Background()); err != nil {
+			log.Fatalf("authsvc: refresh certificate revocations after CRL publication recovery: %v", err)
+		}
+	}
 
 	// Browser-origin allowlist, same mechanism as the CP's ([WL6]): every device-set RPC is a
 	// browser->AS call. Empty = dev mode (localhost origins only).

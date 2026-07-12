@@ -602,8 +602,15 @@ func TestRevocationStateRevalidatesPersistedState(t *testing.T) {
 	if _, err := OpenRevocationState(path, []*x509.Certificate{otherIssuer.Cert}, func() time.Time { return now }); err == nil {
 		t.Fatal("persisted CRL accepted under different issuer")
 	}
-	if _, err := OpenRevocationState(path, []*x509.Certificate{issuer.Cert}, func() time.Time { return now.Add(2 * time.Hour) }); err == nil {
-		t.Fatal("expired persisted CRL accepted")
+	recovery, err := OpenRevocationState(path, []*x509.Certificate{issuer.Cert}, func() time.Time { return now.Add(2 * time.Hour) })
+	if err != nil {
+		t.Fatalf("expired persisted CRL did not reopen for recovery: %v", err)
+	}
+	if !recovery.IsRevoked(issuer.Cert.SerialNumber, big.NewInt(999)) {
+		t.Fatal("expired persisted CRL recovery did not fail closed")
+	}
+	if err := recovery.Close(); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)

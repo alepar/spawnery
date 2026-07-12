@@ -62,16 +62,15 @@ func loadNodeCertificateRevocations(cfg *Spawnlet, now func() time.Time) (*nodeC
 		}
 		issuers = append(issuers, issuer)
 	}
+	sources, err := mtls.BuildCRLSources(issuers, crlPaths, crlURLs)
+	if err != nil {
+		return nil, err
+	}
 	state, err := pki.OpenRevocationState(cfg.Node.CertificateRevocationState, issuers, now)
 	if err != nil {
 		return nil, fmt.Errorf("open certificate revocation state: %w", err)
 	}
 	connections := mtls.NewConnectionRegistry()
-	sources, err := mtls.BuildCRLSources(issuers, crlPaths, crlURLs)
-	if err != nil {
-		_ = state.Close()
-		return nil, err
-	}
 	refresher := mtls.NewCRLRefresher(http.DefaultClient, sources, state, cfg.Node.CertificateRevocationRefresh)
 	runtime := &nodeCertificateRevocations{state: state, connections: connections, unsubscribe: mtls.SubscribeConnectionRegistry(state, connections), refresher: refresher}
 	if err := runtime.refresh(); err != nil {
