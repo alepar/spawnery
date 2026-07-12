@@ -181,12 +181,12 @@ func loginLoopback(ctx context.Context, dir, asURL string, noBrowser bool, w io.
 			done <- cbResult{err: errors.New("state mismatch — possible CSRF")}
 			return
 		}
-		at := q.Get("access_token")
+		at := q.Get("cp_access_token")
 		rt := q.Get("refresh_token")
 		if at == "" {
 			rw.WriteHeader(http.StatusBadRequest)
 			fmt.Fprintf(rw, "<html><body><p>No access token in callback. Please try again.</p></body></html>")
-			done <- cbResult{err: errors.New("no access_token in callback")}
+			done <- cbResult{err: errors.New("no cp_access_token in callback")}
 			return
 		}
 		rw.Header().Set("Content-Type", "text/html")
@@ -304,9 +304,9 @@ func loginDevice(ctx context.Context, dir, asURL string, w io.Writer) error {
 		}
 
 		var tokenOut struct {
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
-			Error        string `json:"error"`
+			CPAccessToken string `json:"cp_access_token"`
+			RefreshToken  string `json:"refresh_token"`
+			Error         string `json:"error"`
 		}
 		body, _ := io.ReadAll(tokenResp.Body)
 		tokenResp.Body.Close()
@@ -315,8 +315,8 @@ func loginDevice(ctx context.Context, dir, asURL string, w io.Writer) error {
 		switch tokenOut.Error {
 		case "":
 			// Success.
-			if tokenOut.AccessToken == "" {
-				return fmt.Errorf("device/token: no access_token in response: %s", body)
+			if tokenOut.CPAccessToken == "" {
+				return fmt.Errorf("device/token: no cp_access_token in response: %s", body)
 			}
 			keyPEM, err := marshalSessionKey(sessKey)
 			if err != nil {
@@ -324,7 +324,7 @@ func loginDevice(ctx context.Context, dir, asURL string, w io.Writer) error {
 			}
 			s := &authState{
 				ASURL:              asURL,
-				AccessToken:        tokenOut.AccessToken,
+				AccessToken:        tokenOut.CPAccessToken,
 				AccessExpiresAt:    time.Now().Add(accessTokenTTLClient).Unix(),
 				RefreshToken:       tokenOut.RefreshToken,
 				SessionKeyPKCS8PEM: keyPEM,

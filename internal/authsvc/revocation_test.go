@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -69,10 +70,62 @@ func TestLogoutRevokesFamily(t *testing.T) {
 	for _, ev := range evs {
 		if ev.FamilyID == famID {
 			found = true
+			var ids []string
+			if err := json.Unmarshal([]byte(ev.TokenIDs), &ids); err != nil {
+				t.Fatal(err)
+			}
+			if want := []string{row.CPAccessTokenID, row.NodeAccessTokenID}; !reflect.DeepEqual(ids, want) {
+				t.Fatalf("revocation token ids = %v, want %v", ids, want)
+			}
 		}
 	}
 	if !found {
 		t.Fatalf("revocation event not emitted for family %s: %v", famID, evs)
+	}
+}
+
+func TestLogoutEverywherePropagatesStoreFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*storeFaults)
+	}{
+		{name: "lookup", set: func(f *storeFaults) { f.failOldestFamily = true }},
+		{name: "revoke", set: func(f *storeFaults) { f.failRevoke = true }},
+		{name: "event", set: func(f *storeFaults) { f.failAppend = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := githubfake.New()
+			defer fake.Close()
+			now := time.Unix(1770000000, 0)
+			faults := &storeFaults{}
+			tc.set(faults)
+			srv, _, st := testAS(t, fake, now, func(cfg *IdPConfig) {
+				cfg.Store = &failingStore{Store: cfg.Store, faults: faults}
+			})
+			seedUser(t, st, "acct-everywhere", 75001, now)
+			_, spkiDER := newTestP256(t)
+			rawToken, _ := seedFamily(t, st, "acct-everywhere", spkiDER, now)
+
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/logout?everywhere=1", nil)
+			req.Header.Set("Origin", "http://localhost:3000")
+			req.AddCookie(&http.Cookie{Name: logoutSessionCookieName, Value: rawToken})
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusInternalServerError {
+				t.Fatalf("logout-everywhere status = %d, want 500", resp.StatusCode)
+			}
+			row, err := st.RefreshSessions().Get(context.Background(), sha256Hex(rawToken))
+			if err != nil || row.Revoked {
+				t.Fatalf("family changed after failed logout-everywhere: row=%+v err=%v", row, err)
+			}
+			events, err := st.Revocations().Since(context.Background(), 0)
+			if err != nil || len(events) != 0 {
+				t.Fatalf("events after failed logout-everywhere = %+v, err=%v", events, err)
+			}
+		})
 	}
 }
 

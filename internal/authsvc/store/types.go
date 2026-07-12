@@ -39,7 +39,8 @@ type RefreshSession struct {
 	FamilyID          string `bun:"family_id,notnull"`
 	ClientKind        string `bun:"client_kind,notnull"`
 	SessionPubkeySPKI []byte `bun:"session_pubkey_spki,notnull"` // [AM5] PoP material, raw DER SPKI
-	AccessTokenID     string `bun:"access_token_id,notnull"`     // token_id minted alongside (revocation feed payload)
+	CPAccessTokenID   string `bun:"cp_access_token_id,notnull"`
+	NodeAccessTokenID string `bun:"node_access_token_id,notnull"`
 	CreatedAt         int64  `bun:"created_at,notnull"`
 	LastUsedAt        int64  `bun:"last_used_at,notnull"`
 	ExpiresAt         int64  `bun:"expires_at,notnull"`        // 30d sliding

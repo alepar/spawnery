@@ -76,7 +76,7 @@ func newTestIdP(t *testing.T, fake *githubfake.Fake, now time.Time, opts ...func
 	if err != nil {
 		t.Fatal(err)
 	}
-	return idp, st, signer
+	return idp, cfg.Store, signer
 }
 
 type testArtifactPKI struct {

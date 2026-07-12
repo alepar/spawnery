@@ -14,15 +14,14 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
-
 	"spawnery/internal/authsvc/store"
 )
 
 // successorPair is what gets stored in successor_cache and returned on idempotent replay [AM3].
 type successorPair struct {
-	AccessToken  string `json:"a"` // the minted access wire token
-	RefreshToken string `json:"r"` // the raw refresh token (before next supersede)
+	CPAccessToken   string `json:"cp"`
+	NodeAccessToken string `json:"node"`
+	RefreshToken    string `json:"refresh"`
 }
 
 // ErrFamilyRevoked is returned when a replay attack is detected (reuse outside grace or ≥2 gen).
@@ -32,21 +31,20 @@ var ErrFamilyRevoked = errors.New("refresh: family revoked due to token reuse")
 // window. Returns (accessWire, rawRefresh). Must be called with the tx store so all reads and
 // writes use the same transaction connection [R5].
 func (i *IdP) rotateSession(ctx context.Context, tx store.Store, row store.RefreshSession, now time.Time) (
-	accessWire, rawRefresh string, err error,
+	pair accessPair, rawRefresh string, err error,
 ) {
 	u, err := tx.Users().GetByID(ctx, row.AccountID)
 	if err != nil {
-		return "", "", fmt.Errorf("refresh: load user: %w", err)
+		return accessPair{}, "", fmt.Errorf("refresh: load user: %w", err)
 	}
 
-	accessWire, _, err = i.mintAccess(u, row.SessionPubkeySPKI, now)
+	pair, err = i.mintAccessPair(u, row.FamilyID, row.SessionPubkeySPKI, now)
 	if err != nil {
-		return "", "", fmt.Errorf("refresh: mint access: %w", err)
+		return accessPair{}, "", fmt.Errorf("refresh: mint access: %w", err)
 	}
 
 	rawRefresh = randOpaque()
 	newHash := sha256Hex(rawRefresh)
-	tokenID := uuid.NewString()
 
 	successor := store.RefreshSession{
 		TokenHash:         newHash,
@@ -54,32 +52,34 @@ func (i *IdP) rotateSession(ctx context.Context, tx store.Store, row store.Refre
 		FamilyID:          row.FamilyID,
 		ClientKind:        row.ClientKind,
 		SessionPubkeySPKI: row.SessionPubkeySPKI,
-		AccessTokenID:     tokenID,
+		CPAccessTokenID:   pair.CPTokenID,
+		NodeAccessTokenID: pair.NodeTokenID,
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(refreshSliding).Unix(),
 		FamilyCreatedAt:   row.FamilyCreatedAt,
 	}
 
-	cache, err := json.Marshal(successorPair{AccessToken: accessWire, RefreshToken: rawRefresh})
+	cache, err := json.Marshal(successorPair{CPAccessToken: pair.CPWire, NodeAccessToken: pair.NodeWire, RefreshToken: rawRefresh})
 	if err != nil {
-		return "", "", err
+		return accessPair{}, "", err
 	}
 
 	if err := tx.RefreshSessions().Supersede(ctx, row.TokenHash, successor, string(cache), now.Unix()); err != nil {
-		return "", "", fmt.Errorf("refresh: supersede: %w", err)
+		return accessPair{}, "", fmt.Errorf("refresh: supersede: %w", err)
 	}
-	return accessWire, rawRefresh, nil
+	return pair, rawRefresh, nil
 }
 
 // handleRefresh processes a /refresh request: PoP check, grace, rotation.
 // Returns (accessWire, rawRefresh, error). The caller sets the cookie.
 func (i *IdP) handleRefresh(ctx context.Context, rawToken string, proof PoPProof, now time.Time) (
-	accessWire, rawRefresh string, err error,
+	cpAccessWire, nodeAccessWire, rawRefresh string, err error,
 ) {
 	tokenHash := sha256Hex(rawToken)
 
-	var outAccess, outRefresh string
+	var outCPAccess, outNodeAccess, outRefresh string
+	var reuseRevoked bool
 	err = i.store.WithTx(ctx, func(tx store.Store) error {
 		row, err := tx.RefreshSessions().Get(ctx, tokenHash)
 		if errors.Is(err, store.ErrNotFound) {
@@ -114,7 +114,8 @@ func (i *IdP) handleRefresh(ctx context.Context, rawToken string, proof PoPProof
 			if age <= int64(replayGrace.Seconds()) && row.SuccessorCache != "" {
 				var pair successorPair
 				if err := json.Unmarshal([]byte(row.SuccessorCache), &pair); err == nil {
-					outAccess = pair.AccessToken
+					outCPAccess = pair.CPAccessToken
+					outNodeAccess = pair.NodeAccessToken
 					outRefresh = pair.RefreshToken
 					return nil // idempotent success
 				}
@@ -124,23 +125,30 @@ func (i *IdP) handleRefresh(ctx context.Context, rawToken string, proof PoPProof
 			if rErr != nil {
 				return rErr
 			}
-			_ = appendRevocation(ctx, tx, row.AccountID, row.FamilyID, liveIDs, now)
-			return ErrFamilyRevoked
+			if err := appendRevocation(ctx, tx, row.AccountID, row.FamilyID, liveIDs, now); err != nil {
+				return err
+			}
+			reuseRevoked = true
+			return nil
 		}
 
 		// Fresh token — rotate (pass tx so all ops use the same connection [R5]).
-		a, r, err := i.rotateSession(ctx, tx, row, now)
+		pair, r, err := i.rotateSession(ctx, tx, row, now)
 		if err != nil {
 			return err
 		}
-		outAccess = a
+		outCPAccess = pair.CPWire
+		outNodeAccess = pair.NodeWire
 		outRefresh = r
 		return nil
 	})
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return outAccess, outRefresh, nil
+	if reuseRevoked {
+		return "", "", "", ErrFamilyRevoked
+	}
+	return outCPAccess, outNodeAccess, outRefresh, nil
 }
 
 // sha256sum is SHA-256 over b (returns 32-byte slice).
@@ -150,9 +158,10 @@ func sha256sum(b []byte) []byte {
 }
 
 // popFromRequest parses the X-PoP-* headers sent by a client on /refresh. Three headers:
-//   X-PoP-Timestamp: unix seconds (decimal string)
-//   X-PoP-Nonce: base64url-encoded random bytes (≥16 bytes)
-//   X-PoP-Sig: base64url-encoded P1363 signature (64 bytes)
+//
+//	X-PoP-Timestamp: unix seconds (decimal string)
+//	X-PoP-Nonce: base64url-encoded random bytes (≥16 bytes)
+//	X-PoP-Sig: base64url-encoded P1363 signature (64 bytes)
 func popFromRequest(r *http.Request) (PoPProof, error) {
 	tsStr := r.Header.Get("X-PoP-Timestamp")
 	nonceB64 := r.Header.Get("X-PoP-Nonce")

@@ -41,8 +41,8 @@ type RefreshSessionRepo interface {
 	// successor_cache of every OTHER row in the family (so only the most recently superseded
 	// row can replay), and inserts the successor row. Run inside WithTx.
 	Supersede(ctx context.Context, predecessorHash string, successor RefreshSession, successorCache string, now int64) error
-	// RevokeFamily marks every row of the family revoked and returns the access_token_ids
-	// that were live (non-revoked) — the revocation-event payload.
+	// RevokeFamily marks every row of the family revoked and returns both audience token IDs
+	// for every live (non-revoked) generation, for the revocation-event payload.
 	RevokeFamily(ctx context.Context, familyID string) ([]string, error)
 	// CountFamilies counts distinct non-revoked families for the account.
 	CountFamilies(ctx context.Context, accountID string) (int, error)

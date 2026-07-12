@@ -1,6 +1,7 @@
 package authsvc
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"sync"
@@ -15,14 +16,15 @@ import (
 	"spawnery/internal/authsvc/token"
 )
 
-func TestMintAccessTokenCertifiedEnvelope(t *testing.T) {
+func TestMintAccessPair(t *testing.T) {
 	fake := githubfake.New()
 	defer fake.Close()
 	now := time.Unix(1_800_000_000, 0)
 	pki := newTestArtifactPKI(t, now, "prod")
 	signer := pki.signer(t, now, "current")
 	idp, _, _ := newTestIdP(t, fake, now, func(cfg *IdPConfig) { cfg.Signer = signer })
-	wire, _, err := idp.mintAccess(store.User{AccountID: "acct-1", Handle: "alice"}, []byte("session-spki"), now)
+
+	pair, err := idp.mintAccessPair(store.User{AccountID: "acct-1", Handle: "alice"}, "family-1", []byte("session-spki"), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +32,66 @@ func TestMintAccessTokenCertifiedEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := verifier.Verify(wire, token.ArtifactTypeSession, now)
+	decode := func(wire string) *authv1.SessionTokenBody {
+		t.Helper()
+		payload, err := verifier.Verify(wire, token.ArtifactTypeSession, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body authv1.SessionTokenBody
+		if err := proto.Unmarshal(payload, &body); err != nil {
+			t.Fatal(err)
+		}
+		return &body
+	}
+	cpBody := decode(pair.CPWire)
+	nodeBody := decode(pair.NodeWire)
+
+	if cpBody.GetAudience() != token.AudienceCP || nodeBody.GetAudience() != token.AudienceNode {
+		t.Fatalf("audiences = %q, %q", cpBody.GetAudience(), nodeBody.GetAudience())
+	}
+	if cpBody.GetTokenId() == "" || nodeBody.GetTokenId() == "" || cpBody.GetTokenId() == nodeBody.GetTokenId() {
+		t.Fatalf("token ids = %q, %q", cpBody.GetTokenId(), nodeBody.GetTokenId())
+	}
+	if pair.CPTokenID != cpBody.GetTokenId() || pair.NodeTokenID != nodeBody.GetTokenId() {
+		t.Fatalf("pair ids = %q, %q; bodies = %q, %q", pair.CPTokenID, pair.NodeTokenID, cpBody.GetTokenId(), nodeBody.GetTokenId())
+	}
+	for name, body := range map[string]*authv1.SessionTokenBody{"cp": cpBody, "node": nodeBody} {
+		if body.GetAccountId() != "acct-1" || body.GetHandle() != "alice" || body.GetFamilyId() != "family-1" {
+			t.Fatalf("%s identity claims = %+v", name, body)
+		}
+		if body.GetIssuedAt() != now.Unix() || body.GetExpiresAt() != now.Add(15*time.Minute).Unix() {
+			t.Fatalf("%s timestamps = %d, %d", name, body.GetIssuedAt(), body.GetExpiresAt())
+		}
+		if body.GetKeyId() != hex.EncodeToString(signer.KeyID[:]) {
+			t.Fatalf("%s key id = %q", name, body.GetKeyId())
+		}
+	}
+	if cpBody.GetIssuedAt() != nodeBody.GetIssuedAt() || cpBody.GetExpiresAt() != nodeBody.GetExpiresAt() ||
+		cpBody.GetKeyId() != nodeBody.GetKeyId() || !bytes.Equal(cpBody.GetSessionKeyHash(), nodeBody.GetSessionKeyHash()) {
+		t.Fatalf("pair claims diverged: cp=%+v node=%+v", cpBody, nodeBody)
+	}
+	if pair.IssuedAt != cpBody.GetIssuedAt() || pair.ExpiresAt != cpBody.GetExpiresAt() {
+		t.Fatalf("pair timestamps = %d, %d", pair.IssuedAt, pair.ExpiresAt)
+	}
+}
+
+func TestMintAccessTokenCertifiedEnvelope(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1_800_000_000, 0)
+	pki := newTestArtifactPKI(t, now, "prod")
+	signer := pki.signer(t, now, "current")
+	idp, _, _ := newTestIdP(t, fake, now, func(cfg *IdPConfig) { cfg.Signer = signer })
+	pair, err := idp.mintAccessPair(store.User{AccountID: "acct-1", Handle: "alice"}, "family", []byte("session-spki"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := token.NewVerifier(pki.root, "prod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := verifier.Verify(pair.CPWire, token.ArtifactTypeSession, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +118,7 @@ func TestSignerRotationNeedsNoVerifierBundle(t *testing.T) {
 		cfg.Signer = oldSigner
 		cfg.NextSigner = newSigner
 	})
-	oldWire, _, err := idp.mintAccess(store.User{AccountID: "acct"}, []byte("spki"), now)
+	oldPair, err := idp.mintAccessPair(store.User{AccountID: "acct"}, "family-old", []byte("spki"), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +128,7 @@ func TestSignerRotationNeedsNoVerifierBundle(t *testing.T) {
 	if err := idp.ActivateNextSigner(); err == nil {
 		t.Fatal("second next-signer activation succeeded")
 	}
-	newWire, _, err := idp.mintAccess(store.User{AccountID: "acct"}, []byte("spki"), now)
+	newPair, err := idp.mintAccessPair(store.User{AccountID: "acct"}, "family-new", []byte("spki"), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +136,7 @@ func TestSignerRotationNeedsNoVerifierBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, wire := range []string{oldWire, newWire} {
+	for _, wire := range []string{oldPair.CPWire, oldPair.NodeWire, newPair.CPWire, newPair.NodeWire} {
 		if _, err := verifier.Verify(wire, token.ArtifactTypeSession, now); err != nil {
 			t.Fatalf("artifact failed after rotation: %v", err)
 		}
@@ -141,7 +202,7 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 
 	const workers = 8
 	const iterations = 25
-	sessions := make(chan string, workers*iterations+1)
+	pairs := make(chan accessPair, workers*iterations+1)
 	revocations := make(chan string, workers*iterations+1)
 	errs := make(chan error, workers*iterations*2+3)
 	start := make(chan struct{})
@@ -153,12 +214,12 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 			defer wg.Done()
 			<-start
 			for iteration := 0; iteration < iterations; iteration++ {
-				wire, _, err := idp.mintAccess(store.User{AccountID: "acct"}, []byte("spki"), now)
+				pair, err := idp.mintAccessPair(store.User{AccountID: "acct"}, "family", []byte("spki"), now)
 				if err != nil {
 					errs <- err
 					continue
 				}
-				sessions <- wire
+				pairs <- pair
 				select {
 				case issued <- struct{}{}:
 				default:
@@ -177,11 +238,11 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 	if err := idp.ActivateNextSigner(); err != nil {
 		errs <- err
 	}
-	postRotationSession, _, err := idp.mintAccess(store.User{AccountID: "acct"}, []byte("spki"), now)
+	postRotationPair, err := idp.mintAccessPair(store.User{AccountID: "acct"}, "family-post", []byte("spki"), now)
 	if err != nil {
 		errs <- err
 	} else {
-		sessions <- postRotationSession
+		pairs <- postRotationPair
 	}
 	postRotationRevocation, err := idp.signRevocationEntry(store.RevocationEvent{Seq: workers*iterations + 1, AccountID: "acct"})
 	if err != nil {
@@ -190,7 +251,7 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 		revocations <- postRotationRevocation.Sig
 	}
 	wg.Wait()
-	close(sessions)
+	close(pairs)
 	close(revocations)
 	close(errs)
 	for err := range errs {
@@ -199,7 +260,8 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 		}
 	}
 	seenSessionSigner := make(map[string]bool)
-	for wire := range sessions {
+	keyID := func(wire string) string {
+		t.Helper()
 		payload, err := verifier.Verify(wire, token.ArtifactTypeSession, now)
 		if err != nil {
 			t.Fatal(err)
@@ -219,7 +281,15 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 		if body.GetKeyId() != hex.EncodeToString(envelope.GetKeyId()) {
 			t.Fatalf("payload key_id %q does not match envelope key_id %x", body.GetKeyId(), envelope.GetKeyId())
 		}
-		seenSessionSigner[body.GetKeyId()] = true
+		return body.GetKeyId()
+	}
+	for pair := range pairs {
+		cpKeyID := keyID(pair.CPWire)
+		nodeKeyID := keyID(pair.NodeWire)
+		if cpKeyID != nodeKeyID {
+			t.Fatalf("access pair crossed signer activation: cp=%q node=%q", cpKeyID, nodeKeyID)
+		}
+		seenSessionSigner[cpKeyID] = true
 	}
 	for name, signer := range map[string]*token.SigningCredential{"current": current, "next": next} {
 		if !seenSessionSigner[hex.EncodeToString(signer.KeyID[:])] {

@@ -62,8 +62,8 @@ func expireDeviceSessionCookie(w http.ResponseWriter) {
 }
 
 const (
-	userCodeLen      = 8    // 8 chars, XXXX-XXXX format
-	maxDeviceAttempt = 10   // lock out after 10 bad user_code attempts
+	userCodeLen      = 8                // 8 chars, XXXX-XXXX format
+	maxDeviceAttempt = 10               // lock out after 10 bad user_code attempts
 	deviceCodeTTL    = 15 * time.Minute // device_code + user_code lifetime [AM7]
 )
 
@@ -71,8 +71,9 @@ const (
 const userCodeAlphabet = "BCDFGHJKLMNPQRSTVWXYZ"
 
 // serveDeviceAuthorize handles POST /device/authorize. Body (JSON or form):
-//   session_pubkey  — base64 DER SPKI of the requesting client's P-256 key [AM7]
-//   client_kind     — "cli" (default)
+//
+//	session_pubkey  — base64 DER SPKI of the requesting client's P-256 key [AM7]
+//	client_kind     — "cli" (default)
 func (i *IdP) serveDeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	if !i.limits.device.Allow(clientIP(r)) {
 		tooMany(w)
@@ -242,7 +243,9 @@ func (i *IdP) serveDeviceToken(w http.ResponseWriter, r *http.Request) {
 		rawDeviceCode = r.FormValue("device_code")
 	}
 	if rawDeviceCode == "" {
-		var body struct{ DeviceCode string `json:"device_code"` }
+		var body struct {
+			DeviceCode string `json:"device_code"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
 			rawDeviceCode = body.DeviceCode
 		}
@@ -286,18 +289,7 @@ func (i *IdP) serveDeviceToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Approved — redeem atomically.
-	grant, err = i.store.DeviceGrants().Redeem(r.Context(), codeHash)
-	if errors.Is(err, store.ErrConflict) {
-		writeError(w, http.StatusBadRequest, "invalid_grant", "already redeemed")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
-		return
-	}
-
-	// Load user.
+	// Load the approved account and enforce the independent family cap before redemption.
 	u, err := i.store.Users().GetByID(r.Context(), grant.AccountID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "user not found")
@@ -310,28 +302,39 @@ func (i *IdP) serveDeviceToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mint access + create refresh family bound to the device's session pubkey [AM7].
-	accessWire, _, err := i.mintAccess(u, grant.SessionPubkeySPKI, now)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "server_error", "token mint failed")
+	var pair accessPair
+	var rawRefresh string
+	err = i.store.WithTx(r.Context(), func(tx store.Store) error {
+		redeemed, err := tx.DeviceGrants().Redeem(r.Context(), codeHash)
+		if err != nil {
+			return err
+		}
+		txUser, err := tx.Users().GetByID(r.Context(), redeemed.AccountID)
+		if err != nil {
+			return err
+		}
+		familyID := uuid.NewString()
+		minted, err := i.mintAccessPair(txUser, familyID, redeemed.SessionPubkeySPKI, now)
+		if err != nil {
+			return err
+		}
+		nextRefresh := randOpaque()
+		if err := tx.RefreshSessions().Insert(r.Context(), store.RefreshSession{
+			TokenHash: sha256Hex(nextRefresh), AccountID: txUser.AccountID, FamilyID: familyID,
+			ClientKind: store.ClientCLI, SessionPubkeySPKI: redeemed.SessionPubkeySPKI,
+			CPAccessTokenID: minted.CPTokenID, NodeAccessTokenID: minted.NodeTokenID,
+			CreatedAt: now.Unix(), LastUsedAt: now.Unix(), ExpiresAt: now.Add(refreshSliding).Unix(), FamilyCreatedAt: now.Unix(),
+		}); err != nil {
+			return err
+		}
+		pair, rawRefresh = minted, nextRefresh
+		return nil
+	})
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusBadRequest, "invalid_grant", "already redeemed")
 		return
 	}
-	rawRefresh := randOpaque()
-	famID := uuid.NewString()
-	tokenID := uuid.NewString()
-	refreshRow := store.RefreshSession{
-		TokenHash:         sha256Hex(rawRefresh),
-		AccountID:         u.AccountID,
-		FamilyID:          famID,
-		ClientKind:        store.ClientCLI,
-		SessionPubkeySPKI: grant.SessionPubkeySPKI,
-		AccessTokenID:     tokenID,
-		CreatedAt:         now.Unix(),
-		LastUsedAt:        now.Unix(),
-		ExpiresAt:         now.Add(refreshSliding).Unix(),
-		FamilyCreatedAt:   now.Unix(),
-	}
-	if err := i.store.RefreshSessions().Insert(r.Context(), refreshRow); err != nil {
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "session creation failed")
 		return
 	}
@@ -339,9 +342,10 @@ func (i *IdP) serveDeviceToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"access_token":  accessWire,
-		"refresh_token": rawRefresh,
-		"token_type":    "bearer",
+		"cp_access_token":   pair.CPWire,
+		"node_access_token": pair.NodeWire,
+		"refresh_token":     rawRefresh,
+		"token_type":        "bearer",
 	})
 }
 

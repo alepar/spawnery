@@ -31,6 +31,17 @@ func TestPublicHandlerDoesNotExposeInternalRoutes(t *testing.T) {
 	}
 }
 
+func TestPublicHandlerDoesNotExposeNodeTokenExchange(t *testing.T) {
+	root, _ := pki.NewRootCA("R")
+	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
+	rec := httptest.NewRecorder()
+	authsvc.New(root.Cert, inter).PublicHandler().ServeHTTP(rec,
+		httptest.NewRequest(http.MethodPost, "/node-token", strings.NewReader("{}")))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("POST /node-token status = %d, want 404", rec.Code)
+	}
+}
+
 func TestInternalHandlerAnonymousOnlyReachesEnroll(t *testing.T) {
 	root, _ := pki.NewRootCA("R")
 	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)

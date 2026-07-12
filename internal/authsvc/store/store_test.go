@@ -2,8 +2,15 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"path/filepath"
+	"reflect"
 	"testing"
+
+	"github.com/pressly/goose/v3"
+	_ "modernc.org/sqlite"
 )
 
 func ctxT() context.Context { return context.Background() }
@@ -51,7 +58,7 @@ func TestRefreshSessionsRoundTrip(t *testing.T) {
 	spki := []byte{0x30, 0x59, 0x01, 0x02}
 	row := RefreshSession{
 		TokenHash: "hash-1", AccountID: "acct-1", FamilyID: "fam-1", ClientKind: ClientWeb,
-		SessionPubkeySPKI: spki, AccessTokenID: "tok-1",
+		SessionPubkeySPKI: spki, CPAccessTokenID: "cp-1", NodeAccessTokenID: "node-1",
 		CreatedAt: 10, LastUsedAt: 10, ExpiresAt: 100, FamilyCreatedAt: 10,
 	}
 	if err := st.RefreshSessions().Insert(ctxT(), row); err != nil {
@@ -61,7 +68,7 @@ func TestRefreshSessionsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got.SessionPubkeySPKI) != string(spki) || got.SupersededBy != "" || got.Revoked {
+	if string(got.SessionPubkeySPKI) != string(spki) || got.CPAccessTokenID != "cp-1" || got.NodeAccessTokenID != "node-1" || got.SupersededBy != "" || got.Revoked {
 		t.Fatalf("round trip: %+v", got)
 	}
 }
@@ -70,12 +77,12 @@ func TestSupersedeAndFamilyRevoke(t *testing.T) {
 	st := NewTestStore(t)
 	mkUser(t, st, "acct-1", 1)
 	r1 := RefreshSession{TokenHash: "h1", AccountID: "acct-1", FamilyID: "fam", ClientKind: ClientCLI,
-		SessionPubkeySPKI: []byte{1}, AccessTokenID: "t1", CreatedAt: 1, LastUsedAt: 1, ExpiresAt: 100, FamilyCreatedAt: 1}
+		SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "cp1", NodeAccessTokenID: "node1", CreatedAt: 1, LastUsedAt: 1, ExpiresAt: 100, FamilyCreatedAt: 1}
 	if err := st.RefreshSessions().Insert(ctxT(), r1); err != nil {
 		t.Fatal(err)
 	}
 	r2 := r1
-	r2.TokenHash, r2.AccessTokenID = "h2", "t2"
+	r2.TokenHash, r2.CPAccessTokenID, r2.NodeAccessTokenID = "h2", "cp2", "node2"
 	if err := st.RefreshSessions().Supersede(ctxT(), "h1", r2, `{"pair":1}`, 5); err != nil {
 		t.Fatal(err)
 	}
@@ -85,12 +92,12 @@ func TestSupersedeAndFamilyRevoke(t *testing.T) {
 	}
 	// Superseding again from the same predecessor conflicts (already superseded).
 	r3 := r1
-	r3.TokenHash, r3.AccessTokenID = "h3", "t3"
+	r3.TokenHash, r3.CPAccessTokenID, r3.NodeAccessTokenID = "h3", "cp3", "node3"
 	if err := st.RefreshSessions().Supersede(ctxT(), "h1", r3, "{}", 6); !errors.Is(err, ErrConflict) {
 		t.Fatalf("want ErrConflict, got %v", err)
 	}
 	// Next generation clears the grandparent's cache.
-	r3.TokenHash, r3.AccessTokenID = "h3", "t3"
+	r3.TokenHash, r3.CPAccessTokenID, r3.NodeAccessTokenID = "h3", "cp3", "node3"
 	if err := st.RefreshSessions().Supersede(ctxT(), "h2", r3, `{"pair":2}`, 7); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +110,7 @@ func TestSupersedeAndFamilyRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ids) != 3 { // t1, t2, t3 all live before revoke
+	if want := []string{"cp1", "node1", "cp2", "node2", "cp3", "node3"}; !reflect.DeepEqual(ids, want) {
 		t.Fatalf("live token ids: %v", ids)
 	}
 	got3, _ := st.RefreshSessions().Get(ctxT(), "h3")
@@ -123,7 +130,7 @@ func TestFamilyCounting(t *testing.T) {
 	for i, fam := range []string{"famA", "famB"} {
 		err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
 			TokenHash: fam + "-h", AccountID: "acct-1", FamilyID: fam, ClientKind: ClientWeb,
-			SessionPubkeySPKI: []byte{1}, AccessTokenID: fam + "-t",
+			SessionPubkeySPKI: []byte{1}, CPAccessTokenID: fam + "-cp", NodeAccessTokenID: fam + "-node",
 			CreatedAt: int64(i + 1), LastUsedAt: int64(i + 1), ExpiresAt: 100, FamilyCreatedAt: int64(i + 1),
 		})
 		if err != nil {
@@ -145,6 +152,95 @@ func TestFamilyCounting(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("count after revoke: %d", n)
 	}
+}
+
+func TestPairedAccessTokenMigrationInvalidatesLegacyFamilies(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authsvc.db")
+	dsn := "file:" + path
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goose.SetBaseFS(migrationsFS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(db, "migrations/sqlite", 6); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO users VALUES ('acct', 1, 'alice', 'active', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO refresh_sessions
+		(token_hash, account_id, family_id, client_kind, session_pubkey_spki, access_token_id, created_at, last_used_at, expires_at, family_created_at)
+		VALUES ('legacy', 'acct', 'family', 'cli', x'01', 'cp-only', 1, 1, 100, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(ctxT(), Config{Driver: "sqlite", DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.RefreshSessions().Get(ctxT(), "legacy"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("legacy family survived migration: %v", err)
+	}
+	if err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
+		TokenHash: "paired", AccountID: "acct", FamilyID: "new-family", ClientKind: ClientCLI,
+		SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "cp", NodeAccessTokenID: "node",
+		CreatedAt: 2, LastUsedAt: 2, ExpiresAt: 100, FamilyCreatedAt: 2,
+	}); err != nil {
+		t.Fatalf("insert paired family after migration: %v", err)
+	}
+}
+
+func TestPairedRevocationRollback(t *testing.T) {
+	st := NewTestStore(t)
+	mkUser(t, st, "acct-rollback", 99)
+	row := RefreshSession{
+		TokenHash: "rollback-hash", AccountID: "acct-rollback", FamilyID: "rollback-family", ClientKind: ClientCLI,
+		SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "rollback-cp", NodeAccessTokenID: "rollback-node",
+		CreatedAt: 1, LastUsedAt: 1, ExpiresAt: 100, FamilyCreatedAt: 1,
+	}
+	if err := st.RefreshSessions().Insert(ctxT(), row); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.(*bunStore).db.ExecContext(ctxT(), `CREATE TRIGGER fail_revocation_insert BEFORE INSERT ON revocation_events BEGIN SELECT RAISE(ABORT, 'forced append failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	err := st.WithTx(ctxT(), func(tx Store) error {
+		ids, err := tx.RefreshSessions().RevokeFamily(ctxT(), row.FamilyID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Revocations().Append(ctxT(), RevocationEvent{
+			AccountID: row.AccountID, FamilyID: row.FamilyID, TokenIDs: string(mustJSON(t, ids)), RevokedAt: 2,
+		})
+		return err
+	})
+	if err == nil {
+		t.Fatal("forced revocation append succeeded")
+	}
+	got, err := st.RefreshSessions().Get(ctxT(), row.TokenHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Revoked {
+		t.Fatal("family revocation survived failed event append")
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	b, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func TestOAuthStateSingleUse(t *testing.T) {
