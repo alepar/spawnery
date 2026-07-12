@@ -52,7 +52,7 @@ func ClientConfig(opts ClientOptions) (*tls.Config, error) {
 	if opts.ExpectedServiceRole != pki.RoleCP && opts.ExpectedServiceRole != pki.RoleAuthService {
 		return nil, fmt.Errorf("mtls: unsupported expected service role %q", opts.ExpectedServiceRole)
 	}
-	if _, err := pki.ServiceID(opts.TrustDomain, opts.ExpectedServiceRole, "validation"); err != nil {
+	if err := pki.ValidateTrustDomain(opts.TrustDomain); err != nil {
 		return nil, fmt.Errorf("mtls: invalid trust domain: %w", err)
 	}
 
@@ -89,7 +89,7 @@ func ServerConfig(opts ServerOptions) (*tls.Config, error) {
 	if len(opts.Identity.Certificate) == 0 {
 		return nil, errors.New("mtls: server identity is required")
 	}
-	if _, err := pki.ServiceID(opts.TrustDomain, pki.RoleCP, "validation"); err != nil {
+	if err := pki.ValidateTrustDomain(opts.TrustDomain); err != nil {
 		return nil, fmt.Errorf("mtls: invalid trust domain: %w", err)
 	}
 
