@@ -176,3 +176,26 @@ the node's own in-flight bookkeeping (a suspend mid-gate, say) is not made crash
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the
 assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+### 2026-07-12 — sp-2tx8.3.4 (ReconcileManagedPods)
+
+- §4.2's "re-apply the egress floor (idempotent)" is implemented as **Remove-then-Apply**. Neither applier
+  is idempotent (both insert with `iptables -I`), and the previous process never removed its rules
+  (`DetachAll` deliberately doesn't) — so a bare re-Apply would install a duplicate rule set that teardown's
+  single `-D` pass would leave behind (a stale DROP for whatever pod next recycles the IP). `ReapPod` now
+  also removes the floor for the pod it reaps, which `ReapOrphans` never did (it had no pod IP until 3.1).
+- Adoption **derives** each mount's host dir through a new, pure `storage.Backend.HostDir` rather than
+  re-running `Prepare` — `Prepare` re-seeds (scratch) or re-clones (github) a directory the live agent is
+  actively writing to.
+- An adopted spawn's `ControlToken` is empty and its GitHub control listener is not re-served (both are
+  sp-2tx8.3.5's scope): until that lands, `SetModel` and in-agent GitHub token minting do not work on an
+  adopted spawn. Marked `TODO(sp-2tx8.3.5)` in `internal/spawnlet/adopt.go`.
+- `StartSpawn` is gated behind the reconcile: the CP must not be able to `StartPod` a spawn id whose pod the
+  node is still holding.
+- The planner's file list did not include `internal/spawnlet/manager_reconcile_capture_test.go`, which also
+  referenced `ReapOrphans` (capture-before-reap R1-R4 matrix). Re-expressed it over `UntrackedPods`/`ReapPod`
+  in the same commit as the split — leaving it would have kept `ReapOrphans` alive in the tree and failed
+  the acceptance grep.
+- `startSpawn`'s agent-death `exitFn` was extracted into `attacher.agentDeathReclaim` (behaviour-preserving —
+  `TestStartSpawnAgentDeathSelfCleans` still passes) and is shared with the ACP re-dial in `adoptPod`.
+  `Manager.DetachSpawn` was added as `Adopt`'s undo (store removal + watcher handoff, never `Stop`).

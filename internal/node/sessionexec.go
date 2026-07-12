@@ -73,7 +73,7 @@ func (s *realSessionExec) ReapExtraSessions(ctx context.Context, spawnID string)
 	// `tmux list-sessions` exits non-zero when there is no server at all — that is the common, healthy
 	// case (no additional sessions), not an error.
 	if code, err := s.mgr.ExecStream(ctx, spawnID, []string{"tmux", "list-sessions", "-F", "#{session_name}"}, &out, io.Discard); err != nil || code != 0 {
-		return nil
+		return nil //nolint:nilerr // no tmux server / no sessions is the common healthy case, not an error
 	}
 	var firstErr error
 	for _, name := range strings.Fields(out.String()) {
