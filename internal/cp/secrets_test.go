@@ -238,6 +238,17 @@ func TestGetSpawnNodeKeyAuthAndPreconditions(t *testing.T) {
 	}
 }
 
+func TestGetSpawnNodeKeyRejectsIncompleteTargetIdentity(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	createActiveSpawn(t, s, "alice", "sp-incomplete", "n-incomplete")
+	s.nodeKeys.put("n-incomplete", "cloud", "", []byte("opaque-subkey"), nil)
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	if _, err := s.GetSpawnNodeKey(ctx, connect.NewRequest(&cpv1.GetSpawnNodeKeyRequest{SpawnId: "sp-incomplete"})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("incomplete target identity: want FailedPrecondition, got %v", err)
+	}
+}
+
 func TestStartupSecretIDsFromArtifactsAndValidation(t *testing.T) {
 	arts := []store.Artifact{
 		{Sensitive: true, EnvVarName: "gh-main"},

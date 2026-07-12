@@ -34,6 +34,10 @@ type nodeKeyEntry struct {
 	certChain []byte // node leaf+chain PEM (empty in insecure mode)
 }
 
+func (e nodeKeyEntry) verifiable() bool {
+	return e.nodeID != "" && e.nodeClass != "" && e.accountID != "" && len(e.subkey) > 0 && len(e.certChain) > 0
+}
+
 func newNodeKeyCache() *nodeKeyCache { return &nodeKeyCache{m: map[string]nodeKeyEntry{}} }
 
 // put records nodeID's sub-key + cert chain. A delivery with no sub-key (an insecure/dev node that
@@ -78,7 +82,8 @@ func (s *Server) pendingIntentNodeKey(pi *cpv1.PendingIntent) (nodeKeyEntry, boo
 	if pi == nil || pi.GetTargetNodeId() == "" {
 		return nodeKeyEntry{}, false
 	}
-	return s.nodeKeys.get(pi.GetTargetNodeId())
+	entry, ok := s.nodeKeys.get(pi.GetTargetNodeId())
+	return entry, ok && entry.verifiable()
 }
 
 // liveNode resolves a spawn's live hosting node id + episode generation (the binding GetSpawnNodeKey and
@@ -204,8 +209,8 @@ func (s *Server) GetSpawnNodeKey(ctx context.Context, req *connect.Request[cpv1.
 		return nil, err
 	}
 	entry, ok := s.nodeKeys.get(target.nodeID)
-	if !ok {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("hosting node has not published an HPKE sub-key"))
+	if !ok || !entry.verifiable() {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("hosting node has not published verifiable identity and key material"))
 	}
 	return connect.NewResponse(&cpv1.GetSpawnNodeKeyResponse{
 		NodeCertChain:       append([]byte(nil), entry.certChain...),
