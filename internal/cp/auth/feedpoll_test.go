@@ -1,18 +1,31 @@
 package auth
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"spawnery/internal/authsvc/token"
 )
+
+type feedSignerRevocations struct{ revoked atomic.Bool }
+
+func (r *feedSignerRevocations) Generation() uint64 {
+	if r.revoked.Load() {
+		return 1
+	}
+	return 0
+}
+func (r *feedSignerRevocations) RejectSigner(*x509.Certificate) error {
+	if r.revoked.Load() {
+		return errors.New("signer revoked")
+	}
+	return nil
+}
 
 // fakeDoer simulates the AS revocation HTTP endpoint.
 type fakeDoer struct {
@@ -44,8 +57,7 @@ func (f *fakeDoer) Do(req *http.Request) (*http.Response, error) {
 }
 
 func TestFeedPoller_PollOnce_AppliesEntries(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	ks, _ := token.NewKeySet(priv.Public().(ed25519.PublicKey))
+	fixture := newArtifactFixture(t)
 
 	sessions := NewSessionRegistry()
 	var cancelled int32
@@ -54,10 +66,11 @@ func TestFeedPoller_PollOnce_AppliesEntries(t *testing.T) {
 
 	revreg := NewRevocationRegistry(sessions)
 
-	entry := signedEntry(t, priv, 1, "acct-live", []string{"tok-live"})
+	entry := signedEntry(t, fixture.credential, 1, "acct-live", []string{"tok-live"})
 	doer := &fakeDoer{responses: []fakeResponse{{status: 200, entries: []SignedFeedEntry{entry}}}}
 
-	poller := NewFeedPoller(doer, "http://fake/revocations", "", ks, revreg, time.Minute)
+	poller := NewFeedPoller(doer, "http://fake/revocations", "", fixture.verifier, revreg, time.Minute)
+	poller.now = func() time.Time { return testNow }
 	ctx := t.Context()
 	if err := poller.pollOnce(ctx); err != nil {
 		t.Fatalf("pollOnce: %v", err)
@@ -79,16 +92,16 @@ func TestFeedPoller_PollOnce_AppliesEntries(t *testing.T) {
 }
 
 func TestFeedPoller_PollOnce_AdvancesCheckpoint(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	ks, _ := token.NewKeySet(priv.Public().(ed25519.PublicKey))
+	fixture := newArtifactFixture(t)
 	revreg := NewRevocationRegistry(nil)
 
 	entries := []SignedFeedEntry{
-		signedEntry(t, priv, 10, "a1", []string{"t1"}),
-		signedEntry(t, priv, 20, "a2", []string{"t2"}),
+		signedEntry(t, fixture.credential, 10, "a1", []string{"t1"}),
+		signedEntry(t, fixture.credential, 20, "a2", []string{"t2"}),
 	}
 	doer := &fakeDoer{responses: []fakeResponse{{status: 200, entries: entries}}}
-	poller := NewFeedPoller(doer, "http://fake/revocations", "", ks, revreg, time.Minute)
+	poller := NewFeedPoller(doer, "http://fake/revocations", "", fixture.verifier, revreg, time.Minute)
+	poller.now = func() time.Time { return testNow }
 	ctx := t.Context()
 	if err := poller.pollOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -99,16 +112,16 @@ func TestFeedPoller_PollOnce_AdvancesCheckpoint(t *testing.T) {
 }
 
 func TestFeedPoller_PollOnce_BadEntry_NoCheckpointCorruption(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	_, evil, _ := ed25519.GenerateKey(rand.Reader)
-	ks, _ := token.NewKeySet(priv.Public().(ed25519.PublicKey))
+	fixture := newArtifactFixture(t)
+	evil := newArtifactFixture(t)
 	revreg := NewRevocationRegistry(nil)
 
-	goodEntry := signedEntry(t, priv, 5, "acct-good", []string{"tok-good"})
-	badEntry := signedEntry(t, evil, 6, "acct-bad", []string{"tok-bad"}) // signed by evil key
+	goodEntry := signedEntry(t, fixture.credential, 5, "acct-good", []string{"tok-good"})
+	badEntry := signedEntry(t, evil.credential, 6, "acct-bad", []string{"tok-bad"})
 
 	doer := &fakeDoer{responses: []fakeResponse{{status: 200, entries: []SignedFeedEntry{goodEntry, badEntry}}}}
-	poller := NewFeedPoller(doer, "http://fake/revocations", "", ks, revreg, time.Minute)
+	poller := NewFeedPoller(doer, "http://fake/revocations", "", fixture.verifier, revreg, time.Minute)
+	poller.now = func() time.Time { return testNow }
 	ctx := t.Context()
 	if err := poller.pollOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -129,10 +142,9 @@ func TestFeedPoller_PollOnce_BadEntry_NoCheckpointCorruption(t *testing.T) {
 
 func TestFeedPoller_PollOnce_NonOKStatus(t *testing.T) {
 	revreg := NewRevocationRegistry(nil)
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	ks, _ := token.NewKeySet(priv.Public().(ed25519.PublicKey))
+	fixture := newArtifactFixture(t)
 	doer := &fakeDoer{responses: []fakeResponse{{status: 401, entries: nil}}}
-	poller := NewFeedPoller(doer, "http://fake/revocations", "bad-bearer", ks, revreg, time.Minute)
+	poller := NewFeedPoller(doer, "http://fake/revocations", "bad-bearer", fixture.verifier, revreg, time.Minute)
 	ctx := t.Context()
 	err := poller.pollOnce(ctx)
 	if err == nil {
@@ -140,5 +152,26 @@ func TestFeedPoller_PollOnce_NonOKStatus(t *testing.T) {
 	}
 	if poller.checkpoint != 0 {
 		t.Errorf("checkpoint should not advance on error: %d", poller.checkpoint)
+	}
+}
+
+func TestFeedPollerObservesSignerRevocationWithoutRestart(t *testing.T) {
+	revocations := &feedSignerRevocations{}
+	fixture := newArtifactFixtureWithRevocations(t, revocations)
+	registry := NewRevocationRegistry(nil)
+	first := signedEntry(t, fixture.credential, 1, "acct-1", []string{"tok-1"})
+	second := signedEntry(t, fixture.credential, 2, "acct-2", []string{"tok-2"})
+	doer := &fakeDoer{responses: []fakeResponse{{status: 200, entries: []SignedFeedEntry{first}}, {status: 200, entries: []SignedFeedEntry{second}}}}
+	poller := NewFeedPoller(doer, "http://fake/revocations", "", fixture.verifier, registry, time.Minute)
+	poller.now = func() time.Time { return testNow }
+	if err := poller.pollOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	revocations.revoked.Store(true)
+	if err := poller.pollOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if poller.checkpoint != 1 || registry.IsRevoked("tok-2", "") {
+		t.Fatalf("revoked signer advanced feed: checkpoint=%d token2=%v", poller.checkpoint, registry.IsRevoked("tok-2", ""))
 	}
 }

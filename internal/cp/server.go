@@ -5,7 +5,7 @@ package cp
 
 import (
 	"context"
-	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,6 +17,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
@@ -115,10 +116,7 @@ type Server struct {
 	// SetIntentEnabled(true). Production callers also call SetIntentEnabled(true) after auth mode
 	// is confirmed [AM12].
 	intentEnabled bool
-	// devASKey is the dev-only AS Ed25519 signing key used to mint aud=node tokens in SubmitIntent
-	// when the client does not supply NodeAccessToken. Set via SetDevASKey; nil = no dev minting.
-	devASKey   ed25519.PrivateKey
-	devASKeyID string
+	devASSigner   *token.SigningCredential
 
 	// pendingIntents is the A4 two-phase sign-after-resolve registry [AC1]. Lifecycle handlers
 	// (Create/Resume/Recreate/Migrate) register a pending intent BEFORE calling Provision; the
@@ -860,12 +858,19 @@ func (s *Server) SetDevMode(dev bool) { s.devMode = dev }
 // dev AS key call SetIntentEnabled(true).
 func (s *Server) SetIntentEnabled(v bool) { s.intentEnabled = v }
 
-// SetDevASKey configures the dev-only AS Ed25519 signing key used to mint aud=node tokens in
-// SubmitIntent when the client omits NodeAccessToken. priv must be non-nil; keyID is the derived
-// token.KeyID. In prod mode this MUST NOT be set — prod clients obtain node tokens from the real AS.
-func (s *Server) SetDevASKey(priv ed25519.PrivateKey, keyID string) {
-	s.devASKey = priv
-	s.devASKeyID = keyID
+func (s *Server) SetDevASCredential(credential *token.SigningCredential) { s.devASSigner = credential }
+
+func mintDevNodeToken(credential *token.SigningCredential, accountID string, spkiDER []byte, now time.Time) (string, error) {
+	body := &authv1.SessionTokenBody{
+		AccountId: accountID, TokenId: uuid.NewString(), Audience: "node", IssuedAt: now.Unix(),
+		ExpiresAt: now.Add(15 * time.Minute).Unix(), SessionKeyHash: token.SessionKeyHash(spkiDER),
+		KeyId: hex.EncodeToString(credential.KeyID[:]),
+	}
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	return credential.Sign(token.ArtifactTypeSession, payload)
 }
 
 // SetReauthInterval overrides the in-band reauth deadline (default 15 min).
@@ -1584,7 +1589,7 @@ func (s *Server) GetPendingIntent(ctx context.Context, req *connect.Request[cpv1
 // provision. The node_access_token is the aud=node AS-signed token bound to the client's
 // session key (the cnf claim). Both are threaded verbatim into StartSpawn as an AuthEnvelope.
 //
-// In dev mode (devASKey set), if node_access_token is empty the CP mints a cnf-bearing aud=node
+// In dev mode (a certified dev signer is set), an empty node token is minted and cnf-bound.
 // token from the intent's SPKI DER so the full A4 verification chain can run at the node in
 // verify-and-log mode (NODE_AUTH_MODE=insecure) [AM12].
 func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
@@ -1602,10 +1607,10 @@ func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.Sub
 
 	nodeTok := req.Msg.NodeAccessToken
 	// Dev-mode cnf-bearing node token minting [AM12]: if the client omits the node token and a dev
-	// AS key is configured, mint one bound to the intent's SPKI DER so the node can run the full
+	// certified signer is configured, mint one bound to the intent's SPKI DER so the node can run the full
 	// eight-step verification chain in AuthModeVerifyLog (verify-and-log, not skip).
-	if nodeTok == "" && s.devASKey != nil && req.Msg.Intent != nil && len(req.Msg.Intent.SpkiDer) > 0 {
-		minted, mintErr := token.MintNode(s.devASKey, s.devASKeyID, owner, req.Msg.Intent.SpkiDer, s.now())
+	if nodeTok == "" && s.devASSigner != nil && req.Msg.Intent != nil && len(req.Msg.Intent.SpkiDer) > 0 {
+		minted, mintErr := mintDevNodeToken(s.devASSigner, owner, req.Msg.Intent.SpkiDer, s.now())
 		if mintErr != nil {
 			slog.Warn("SubmitIntent: dev AS mint failed (node token empty)", "spawn", req.Msg.SpawnId, "err", mintErr)
 		} else {
@@ -1628,15 +1633,15 @@ func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.Sub
 }
 
 // mintSessionEnv builds the session-open AuthEnvelope from a client-supplied envelope.
-// In dev mode (devASKey set), if access_token is empty the CP mints a cnf-bearing aud=node
+// In dev mode (a certified dev signer is set), an empty access token is minted and cnf-bound.
 // token from the intent's SPKI DER so the full A4 verification chain runs [AM12].
 func (s *Server) mintSessionEnv(owner string, sa *authv1.AuthEnvelope) *authv1.AuthEnvelope {
 	if sa == nil || sa.Intent == nil {
 		return nil
 	}
 	nodeTok := sa.AccessToken
-	if nodeTok == "" && s.devASKey != nil && len(sa.Intent.SpkiDer) > 0 {
-		minted, err := token.MintNode(s.devASKey, s.devASKeyID, owner, sa.Intent.SpkiDer, s.now())
+	if nodeTok == "" && s.devASSigner != nil && len(sa.Intent.SpkiDer) > 0 {
+		minted, err := mintDevNodeToken(s.devASSigner, owner, sa.Intent.SpkiDer, s.now())
 		if err != nil {
 			slog.Warn("mintSessionEnv: dev AS mint failed", "err", err)
 		} else {

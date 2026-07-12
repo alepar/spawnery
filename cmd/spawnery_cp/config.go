@@ -22,11 +22,13 @@ type CP struct {
 	} `koanf:"store"`
 
 	Auth struct {
-		Mode             string `koanf:"mode" validate:"oneof=dev prod"`
-		DevTokens        string `koanf:"dev_tokens"`
-		ASSessionPubkeys string `koanf:"as_session_pubkeys"`
-		DevASKey         string `koanf:"dev_as_key"`
-		DevIntentEnabled bool   `koanf:"dev_intent_enabled"`
+		Mode                      string `koanf:"mode" validate:"oneof=dev prod"`
+		DevTokens                 string `koanf:"dev_tokens"`
+		Environment               string `koanf:"environment"`
+		RootCA                    string `koanf:"root_ca"`
+		SignerRevocationStatement string `koanf:"signer_revocation_statement"`
+		SignerRevocationState     string `koanf:"signer_revocation_state"`
+		DevIntentEnabled          bool   `koanf:"dev_intent_enabled"`
 		// GitHubLinkPreflightDisabled turns off the CreateSpawn owner-github-link preflight even when
 		// an AS URL is configured. For the static-token git-host dev lane (local Gitea): mounts there
 		// use a single node-static token, not a per-owner AS mint, so an owner "GitHub link" is
@@ -104,8 +106,16 @@ func (c CP) Validate() error {
 	if err := c.Common.Validate(); err != nil { // explicit: method promotion would shadow it
 		return err
 	}
-	if c.Auth.Mode == "prod" && c.Auth.ASSessionPubkeys == "" {
-		return fmt.Errorf("auth.mode=prod requires auth.as_session_pubkeys (no keys configured)")
+	if c.Auth.Mode == "prod" {
+		for _, required := range []struct{ name, value string }{
+			{"auth.environment", c.Auth.Environment},
+			{"auth.root_ca", c.Auth.RootCA},
+			{"auth.signer_revocation_state", c.Auth.SignerRevocationState},
+		} {
+			if required.value == "" {
+				return fmt.Errorf("auth.mode=prod requires %s", required.name)
+			}
+		}
 	}
 	if c.Store.Driver == "postgres" && (c.Store.DSN == "" || string(c.Store.DSN) == sqliteDefaultDSN) {
 		return fmt.Errorf("store.driver=postgres requires store.dsn (a postgres DSN)")
@@ -117,36 +127,38 @@ func (c CP) Validate() error {
 // deployments keep working unchanged (the env layer sits above the files). New knobs are reached
 // via these names or CLI --set.
 var cpEnvAliases = map[string]string{
-	"CP_PUBLIC_URL":                     "public_url",
-	"CP_LISTEN":                         "listen",
-	"CP_ALLOWED_ORIGINS":                "allowed_origins",
-	"CP_STORE_DRIVER":                   "store.driver",
-	"CP_STORE_DSN":                      "store.dsn",
-	"CP_AUTH_MODE":                      "auth.mode",
-	"CP_DEV_TOKENS":                     "auth.dev_tokens",
-	"CP_AS_SESSION_PUBKEYS":             "auth.as_session_pubkeys",
-	"CP_DEV_AS_KEY":                     "auth.dev_as_key",
-	"CP_DEV_INTENT_ENABLED":             "auth.dev_intent_enabled",
-	"CP_GITHUB_LINK_PREFLIGHT_DISABLED": "auth.github_link_preflight_disabled",
-	"CP_SESSION_REAUTH_INTERVAL":        "auth.session_reauth_interval",
-	"CP_AS_RPC_SECRET":                  "auth.as_rpc_secret",
-	"CP_AS_URL":                         "auth.as_url",
-	"CP_AS_REVOCATION_URL":              "auth.as_revocation_url",
-	"CP_SHUTDOWN_GRACE":                 "shutdown_grace",
-	"CP_AS_CP_SECRET":                   "auth.as_cp_secret",
-	"CP_REVOCATION_POLL_INTERVAL":       "auth.revocation_poll_interval",
-	"CP_TELEMETRY":                      "telemetry",
-	"CP_MAX_SPAWNS_PER_OWNER":           "max_spawns_per_owner",
-	"EVALUATOR_QUOTA_SUSPEND_MB":        "evaluator.quota_suspend_mb",
-	"EVALUATOR_IDLE_ENABLED":            "evaluator.idle_enabled",
-	"EVALUATOR_IDLE_DETACHED":           "evaluator.idle_detached",
-	"EVALUATOR_IDLE_ATTACHED":           "evaluator.idle_attached",
-	"NODE_AUTH_MODE":                    "node.auth_mode",
-	"CP_NODE_LISTEN":                    "node.listen",
-	"CP_NODE_TRUST_DOMAIN":              "node.trust_domain",
-	"CP_NODE_ROOT_CA":                   "node.root_ca",
-	"CP_NODE_TLS_CERT":                  "node.tls_cert",
-	"CP_NODE_TLS_KEY":                   "node.tls_key",
+	"CP_PUBLIC_URL":                       "public_url",
+	"CP_LISTEN":                           "listen",
+	"CP_ALLOWED_ORIGINS":                  "allowed_origins",
+	"CP_STORE_DRIVER":                     "store.driver",
+	"CP_STORE_DSN":                        "store.dsn",
+	"CP_AUTH_MODE":                        "auth.mode",
+	"CP_DEV_TOKENS":                       "auth.dev_tokens",
+	"CP_AUTH_ENVIRONMENT":                 "auth.environment",
+	"CP_AUTH_ROOT_CA":                     "auth.root_ca",
+	"CP_AUTH_SIGNER_REVOCATION_STATEMENT": "auth.signer_revocation_statement",
+	"CP_AUTH_SIGNER_REVOCATION_STATE":     "auth.signer_revocation_state",
+	"CP_DEV_INTENT_ENABLED":               "auth.dev_intent_enabled",
+	"CP_GITHUB_LINK_PREFLIGHT_DISABLED":   "auth.github_link_preflight_disabled",
+	"CP_SESSION_REAUTH_INTERVAL":          "auth.session_reauth_interval",
+	"CP_AS_RPC_SECRET":                    "auth.as_rpc_secret",
+	"CP_AS_URL":                           "auth.as_url",
+	"CP_AS_REVOCATION_URL":                "auth.as_revocation_url",
+	"CP_SHUTDOWN_GRACE":                   "shutdown_grace",
+	"CP_AS_CP_SECRET":                     "auth.as_cp_secret",
+	"CP_REVOCATION_POLL_INTERVAL":         "auth.revocation_poll_interval",
+	"CP_TELEMETRY":                        "telemetry",
+	"CP_MAX_SPAWNS_PER_OWNER":             "max_spawns_per_owner",
+	"EVALUATOR_QUOTA_SUSPEND_MB":          "evaluator.quota_suspend_mb",
+	"EVALUATOR_IDLE_ENABLED":              "evaluator.idle_enabled",
+	"EVALUATOR_IDLE_DETACHED":             "evaluator.idle_detached",
+	"EVALUATOR_IDLE_ATTACHED":             "evaluator.idle_attached",
+	"NODE_AUTH_MODE":                      "node.auth_mode",
+	"CP_NODE_LISTEN":                      "node.listen",
+	"CP_NODE_TRUST_DOMAIN":                "node.trust_domain",
+	"CP_NODE_ROOT_CA":                     "node.root_ca",
+	"CP_NODE_TLS_CERT":                    "node.tls_cert",
+	"CP_NODE_TLS_KEY":                     "node.tls_key",
 	// Skills / Garage ingest (sp-nrzf.3.14.4)
 	"SKILLS_S3_ENDPOINT":      "skills.endpoint",
 	"SKILLS_S3_NODE_ENDPOINT": "skills.node_endpoint",

@@ -11,10 +11,12 @@ store:
   dsn: "file:cp.db?_pragma=busy_timeout(5000)"
 
 auth:
-  mode: dev                    # dev | prod  (prod requires auth.as_session_pubkeys)
+  mode: dev                    # dev | prod
   dev_tokens: "dev-token=dev"  # "name=token,..." — honored only in dev mode
-  as_session_pubkeys: ""       # CSV of PEM file paths (required in prod)
-  dev_as_key: ""               # PEM path for a stable dev AS signing key (optional; else ephemeral)
+  environment: ""              # root/signer environment name (required in prod)
+  root_ca: ""                  # environment root certificate PEM (required in prod)
+  signer_revocation_statement: "" # deployed offline statement (optional before generation one)
+  signer_revocation_state: ""  # persisted monotonic state (required in prod)
   dev_intent_enabled: false    # opt into the two-phase intent sign flow in dev
   session_reauth_interval: 0s  # 0 disables periodic session re-auth
   as_rpc_secret: ""            # AS↔CP GitHub-coordination RPC bearer (enables service-scoped auth)

@@ -22,20 +22,21 @@ type httpDoer interface {
 // and advances a checkpoint past the highest processed seq.
 type FeedPoller struct {
 	doer       httpDoer
-	url        string       // base URL of the revocation feed (without ?since=)
-	bearer     string       // optional CP-to-AS bearer secret (CP_AS_CP_SECRET)
-	keys       token.KeySet // same key set as session verification
+	url        string // base URL of the revocation feed (without ?since=)
+	bearer     string // optional CP-to-AS bearer secret (CP_AS_CP_SECRET)
+	artifacts  *token.Verifier
+	now        func() time.Time
 	revreg     *RevocationRegistry
 	interval   time.Duration
 	checkpoint int64 // highest seq applied (0 = initial)
 }
 
 // NewFeedPoller builds a FeedPoller. interval=0 uses 30s default.
-func NewFeedPoller(doer httpDoer, feedURL, bearer string, keys token.KeySet, revreg *RevocationRegistry, interval time.Duration) *FeedPoller {
+func NewFeedPoller(doer httpDoer, feedURL, bearer string, artifacts *token.Verifier, revreg *RevocationRegistry, interval time.Duration) *FeedPoller {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	return &FeedPoller{doer: doer, url: feedURL, bearer: bearer, keys: keys, revreg: revreg, interval: interval}
+	return &FeedPoller{doer: doer, url: feedURL, bearer: bearer, artifacts: artifacts, revreg: revreg, interval: interval, now: time.Now}
 }
 
 // Run polls on interval until ctx is cancelled.
@@ -81,7 +82,7 @@ func (p *FeedPoller) pollOnce(ctx context.Context) error {
 
 	var maxSeq int64 = p.checkpoint
 	for _, e := range entries {
-		if err := p.revreg.Apply(e, p.keys); err != nil {
+		if err := p.revreg.Apply(e, p.artifacts, p.now()); err != nil {
 			// Log bad entries but don't corrupt checkpoint or stop processing.
 			log.Printf("revocation feed: bad entry seq=%d: %v", e.Seq, err)
 			continue

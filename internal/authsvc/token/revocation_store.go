@@ -2,6 +2,7 @@ package token
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -157,13 +158,22 @@ func (store *SignerRevocationStore) Apply(statement *SignerRevocationStatement) 
 // LoadAndApply reads a deployment-provided envelope and applies it to the persisted store. A
 // missing configured statement is permitted only before any generation has been accepted.
 func (store *SignerRevocationStore) LoadAndApply(path string, now time.Time) error {
+	return store.LoadAndApplyContext(context.Background(), path, now)
+}
+
+// LoadAndApplyContext reloads a deployment statement while observing cancellation around file and
+// verification operations. Deployment statements must be regular files; FIFOs and devices are rejected.
+func (store *SignerRevocationStore) LoadAndApplyContext(ctx context.Context, path string, now time.Time) error {
 	if store == nil || path == "" {
 		return errors.New("token: invalid signer-revocation statement path")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := store.mutationError(); err != nil {
 		return err
 	}
-	raw, err := os.ReadFile(path)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		if store.Generation() == 0 {
 			return nil
@@ -173,10 +183,32 @@ func (store *SignerRevocationStore) LoadAndApply(path string, now time.Time) err
 	if err != nil {
 		return fmt.Errorf("token: read configured signer-revocation statement: %w", err)
 	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("token: stat configured signer-revocation statement: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("token: configured signer-revocation statement is not a regular file")
+	}
+	const maxStatementFileSize = 256 << 10
+	raw, err := io.ReadAll(io.LimitReader(file, maxStatementFileSize+1))
+	if err != nil {
+		return fmt.Errorf("token: read configured signer-revocation statement: %w", err)
+	}
+	if len(raw) > maxStatementFileSize {
+		return errors.New("token: configured signer-revocation statement is too large")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	wire := strings.TrimSpace(string(raw))
 	statement, err := ParseSignerRevocationStatement(wire, store.root, store.environment, now)
 	if err != nil {
 		return fmt.Errorf("token: parse configured signer-revocation statement: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return store.Apply(statement)
 }

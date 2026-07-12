@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -21,6 +23,7 @@ import (
 	configfiles "spawnery/config"
 	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/gen/node/v1/nodev1connect"
+	authservice "spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/config"
 	"spawnery/internal/cp"
@@ -77,8 +80,7 @@ func main() {
 	defer stop()
 
 	// --- Auth mode ---
-	// auth.mode: "dev" (default) | "prod". Default is "dev" — a misconfigured prod is permissive.
-	// Prod REQUIRES auth.as_session_pubkeys; dev tokens are ignored in prod.
+	// auth.mode: "dev" (default) | "prod". Production ignores opaque dev tokens.
 	devMode := cfg.DevMode()
 	if !devMode {
 		log.Printf("cp: auth mode=prod (dev tokens ignored)")
@@ -86,16 +88,33 @@ func main() {
 		log.Printf("cp: auth mode=dev (dev tokens active; NOT FOR PRODUCTION)")
 	}
 
-	// --- AS session pubkeys (auth.as_session_pubkeys = comma-separated PEM file paths) ---
-	ks, err := loadKeySet(cfg.Auth.ASSessionPubkeys)
+	artifacts, signerRevocations, err := loadArtifactVerifier(*cfg, time.Now())
 	if err != nil {
-		log.Fatalf("cp: load AS pubkeys: %v", err)
+		log.Fatalf("cp: load artifact verifier: %v", err)
 	}
-	if len(ks) > 0 {
-		log.Printf("cp: loaded %d AS session pubkey(s)", len(ks))
+	var stopRevocationReloader func() bool
+	if signerRevocations != nil && cfg.Auth.SignerRevocationStatement != "" {
+		reloadCtx, cancelReload := context.WithCancel(ctx)
+		reloadDone := make(chan struct{})
+		reloader := newSignerRevocationReloader(signerRevocations, cfg.Auth.SignerRevocationStatement)
+		safego.Go("cp.signer-revocation-reloader", func() {
+			defer close(reloadDone)
+			reloader.Run(reloadCtx)
+		})
+		stopRevocationReloader = func() bool {
+			return stopSignerRevocationReloader(cancelReload, reloadDone, signerRevocationShutdownBound)
+		}
 	}
-	if !devMode && len(ks) == 0 {
-		log.Fatalf("cp: auth.mode=prod requires auth.as_session_pubkeys (no keys loaded)")
+	if signerRevocations != nil {
+		defer func() {
+			if stopRevocationReloader != nil && !stopRevocationReloader() {
+				log.Printf("cp: signer revocation reloader did not stop within %s; leaving store open for process exit", signerRevocationShutdownBound)
+				return
+			}
+			if err := signerRevocations.Close(); err != nil {
+				log.Printf("cp: close signer revocation store: %v", err)
+			}
+		}()
 	}
 
 	// --- Revocation + session registries ---
@@ -110,7 +129,7 @@ func main() {
 
 	// --- Verifier ---
 	verifier := auth.NewVerifier(auth.VerifierConfig{
-		Keys:      ks,
+		Artifacts: artifacts,
 		DevTokens: devTokens,
 		DevMode:   devMode,
 		Revoked:   revreg,
@@ -198,31 +217,16 @@ func main() {
 	if !devMode {
 		srv.SetIntentEnabled(true)
 	} else {
-		var devASPriv ed25519.PrivateKey
-		var devASKeyID string
-		var devASErr error
-		if p := cfg.Auth.DevASKey; p != "" {
-			var pemBytes []byte
-			pemBytes, devASErr = os.ReadFile(p)
-			if devASErr == nil {
-				devASPriv, devASKeyID, devASErr = token.LoadSigningKey(pemBytes)
-			}
-			if devASErr != nil {
-				log.Fatalf("cp: load auth.dev_as_key: %v", devASErr)
-			}
-			log.Printf("cp: loaded dev AS key from %s (id=%s) [AM12]", p, devASKeyID)
-		} else {
-			_, devASPriv, devASErr = ed25519.GenerateKey(rand.Reader)
-			if devASErr != nil {
-				log.Fatalf("cp: generate ephemeral dev AS key: %v", devASErr)
-			}
-			devASKeyID, devASErr = token.KeyID(devASPriv.Public().(ed25519.PublicKey))
-			if devASErr != nil {
-				log.Fatalf("cp: derive dev AS key id: %v", devASErr)
-			}
-			log.Printf("cp: using ephemeral dev AS key (id=%s) [AM12]", devASKeyID)
+		devRoot, devASErr := pki.NewRootCA("Spawnery CP development root")
+		if devASErr != nil {
+			log.Fatalf("cp: generate dev root: %v", devASErr)
 		}
-		srv.SetDevASKey(devASPriv, devASKeyID)
+		devSigner, devASErr := authservice.NewDevelopmentSigningCredential(devRoot, "dev", time.Now())
+		if devASErr != nil {
+			log.Fatalf("cp: generate certified dev signer: %v", devASErr)
+		}
+		srv.SetDevASCredential(devSigner)
+		log.Printf("cp: using ephemeral certified dev AS signer [AM12]")
 		// auth.dev_intent_enabled: opt into the two-phase sign flow in dev mode.
 		if cfg.Auth.DevIntentEnabled {
 			srv.SetIntentEnabled(true)
@@ -280,7 +284,7 @@ func main() {
 	if feedURL := cfg.Auth.ASRevocationURL; feedURL != "" {
 		bearer := string(cfg.Auth.ASCPSecret)
 		interval := cfg.Auth.RevocationPollInterval
-		poller := auth.NewFeedPoller(http.DefaultClient, feedURL, bearer, ks, revreg, interval)
+		poller := auth.NewFeedPoller(http.DefaultClient, feedURL, bearer, artifacts, revreg, interval)
 		safego.Go("cp.revocation-poller", func() { poller.Run(ctx) })
 		log.Printf("cp: revocation feed poller started (url=%s interval=%s)", feedURL, interval)
 	}
@@ -393,25 +397,43 @@ func buildNodeTLSServer(addr, nodePath string, nodeHandler http.Handler, trustDo
 	return server, nil
 }
 
-// loadKeySet parses comma-separated PEM file paths into an ordered token.KeySet.
-// Empty s returns an empty set (valid in dev mode).
-func loadKeySet(s string) (token.KeySet, error) {
-	if s == "" {
-		return token.KeySet{}, nil
+func parseSingleRootCertificate(data []byte) (*x509.Certificate, error) {
+	block, rest := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, errors.New("expected exactly one CERTIFICATE PEM block")
 	}
-	var pubs []ed25519.PublicKey
-	for _, p := range splitTrim(s, ",") {
-		pemBytes, err := os.ReadFile(p)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", p, err)
-		}
-		pub, err := token.ParsePublicKeyPEM(pemBytes)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", p, err)
-		}
-		pubs = append(pubs, pub)
+	return x509.ParseCertificate(block.Bytes)
+}
+
+func loadArtifactVerifier(cpCfg CP, now time.Time) (*token.Verifier, *token.SignerRevocationStore, error) {
+	cfg := cpCfg.Auth
+	if cfg.RootCA == "" && cfg.Environment == "" && cfg.SignerRevocationState == "" {
+		return nil, nil, nil
 	}
-	return token.NewKeySet(pubs...)
+	rootPEM, err := os.ReadFile(cfg.RootCA)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read root %s: %w", cfg.RootCA, err)
+	}
+	root, err := parseSingleRootCertificate(rootPEM)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse root %s: %w", cfg.RootCA, err)
+	}
+	store, err := token.OpenSignerRevocationStore(cfg.SignerRevocationState, root, cfg.Environment, now)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open signer revocation state %s: %w", cfg.SignerRevocationState, err)
+	}
+	if cfg.SignerRevocationStatement != "" {
+		if err := store.LoadAndApply(cfg.SignerRevocationStatement, now); err != nil {
+			_ = store.Close()
+			return nil, nil, fmt.Errorf("apply signer revocation statement %s: %w", cfg.SignerRevocationStatement, err)
+		}
+	}
+	verifier, err := token.NewVerifier(root, cfg.Environment, store)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, err
+	}
+	return verifier, store, nil
 }
 
 func parseTokens(s string) map[string]string {
