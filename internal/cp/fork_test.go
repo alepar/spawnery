@@ -154,6 +154,7 @@ func seedForkSource(t *testing.T, s *Server, reg *registry.Registry, rt *router.
 		ID: nodeID, Sender: nodeSender, Max: 4, Free: 4, Class: "cloud",
 		Images: []string{"img:agent"}, DiskFreeBytes: 1_000_000, DiskTotalBytes: 2_000_000,
 	})
+	s.nodeKeys.put(nodeID, "cloud", "system", []byte("opaque-subkey"), []byte("leaf-first-pem"))
 	rt.Bind(id, nodeID, nodeSender)
 }
 

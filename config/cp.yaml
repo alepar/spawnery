@@ -17,7 +17,6 @@ auth:
   root_ca: ""                  # environment root certificate PEM (required in prod)
   signer_revocation_statement: "" # deployed offline statement (optional before generation one)
   signer_revocation_state: ""  # persisted monotonic state (required in prod)
-  dev_intent_enabled: false    # opt into the two-phase intent sign flow in dev
   session_reauth_interval: 0s  # 0 disables periodic session re-auth
   as_url: ""                   # AS base URL; when set, wires the CP→AS GitHub link-preflight checker
   as_revocation_url: ""        # AS revocation feed URL (empty disables the poller)

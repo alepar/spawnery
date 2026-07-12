@@ -23,7 +23,6 @@ import (
 	configfiles "spawnery/config"
 	"spawnery/gen/cp/v1/cpv1connect"
 	"spawnery/gen/node/v1/nodev1connect"
-	authservice "spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/config"
 	"spawnery/internal/cp"
@@ -48,6 +47,14 @@ import (
 )
 
 const sqliteDefaultDSN = "file:cp.db?_pragma=busy_timeout(5000)"
+
+type intentFlowEnabler interface {
+	SetIntentEnabled(bool)
+}
+
+func enableIntentFlow(server intentFlowEnabler) {
+	server.SetIntentEnabled(true)
+}
 
 func loadConfig() (*CP, error) {
 	configDir, sets := config.StdFlags("spawnery_cp", os.Args[1:])
@@ -208,34 +215,9 @@ func main() {
 		srv.SetReauthInterval(ri)
 	}
 
-	// A4 intent flow setup [AC1][AM12].
-	// Prod mode: intent flow always active; clients obtain node tokens from the real AS.
-	// Dev mode: intent flow is OFF by default — the web SPA does not yet implement
-	// GetPendingIntent/SubmitIntent (A5). The dev AS key is always provisioned so spawnctl's
-	// pollAndSign works when opted in. Set auth.dev_intent_enabled=true to enable the two-phase
-	// flow in dev; without it web-initiated spawns proceed with a nil env and the node runs
-	// in verify-and-log mode.
-	if !devMode {
-		srv.SetIntentEnabled(true)
-	} else {
-		devRoot, devASErr := pki.NewRootCA("Spawnery CP development root")
-		if devASErr != nil {
-			log.Fatalf("cp: generate dev root: %v", devASErr)
-		}
-		devSigner, devASErr := authservice.NewDevelopmentSigningCredential(devRoot, "dev", time.Now())
-		if devASErr != nil {
-			log.Fatalf("cp: generate certified dev signer: %v", devASErr)
-		}
-		srv.SetDevASCredential(devSigner)
-		log.Printf("cp: using ephemeral certified dev AS signer [AM12]")
-		// auth.dev_intent_enabled: opt into the two-phase sign flow in dev mode.
-		if cfg.Auth.DevIntentEnabled {
-			srv.SetIntentEnabled(true)
-			log.Printf("cp: dev intent flow enabled (auth.dev_intent_enabled=true) [AM12]")
-		} else {
-			log.Printf("cp: dev intent flow off (set auth.dev_intent_enabled=true to enable; web spawns proceed without signing) [AM12]")
-		}
-	}
+	// All runtime modes use the same AS-issued node authorization path. SetIntentEnabled remains a
+	// hermetic test seam only; there is no runtime switch that permits unsigned lifecycle operations.
+	enableIntentFlow(srv)
 
 	internalRuntime, err := loadInternalRuntime(*cfg, time.Now)
 	if err != nil {

@@ -76,8 +76,8 @@ func (s *Scheduler) PickNodeID(placement registry.Placement) (string, error) {
 // gen is the live container row's generation: the node labels + heartbeat-reports its pod with it,
 // and the inventory reconciler matches that report against the row — an omitted gen (0) would make
 // the orphan arm Stop the pod the CP itself just started (sp-gzvo).
-// env is the A4 AuthEnvelope (token + SignedIntent) to thread into StartSpawn [AC1]; nil is
-// allowed in dev/insecure mode where the node will verify-and-log-not-enforce.
+// env is the A4 AuthEnvelope (token + SignedIntent) to thread into StartSpawn [AC1]. Low-level
+// hermetic fixtures that disable the public two-phase flow may pass nil.
 // mounts are the persisted per-mount backend bindings to thread into StartSpawn; nil/empty means
 // the spawn has no bound mounts.
 // baseImageDigest is threaded to the node for cross-node resume (sp-ei4.1.10); empty on fresh create.

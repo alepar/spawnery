@@ -108,11 +108,8 @@ type Server struct {
 	devMode        bool
 	reauthInterval time.Duration // reauth deadline; 0 uses defaultReauthInterval
 
-	// intentEnabled gates the A4 two-phase sign-after-resolve flow. Decoupled from devMode so that
-	// dev instances can run the full A4 flow (verify-and-log at the node) when a dev AS key is
-	// available. Default false keeps existing tests passing — tests that need the intent flow call
-	// SetIntentEnabled(true). Production callers also call SetIntentEnabled(true) after auth mode
-	// is confirmed [AM12].
+	// intentEnabled is a hermetic fixture seam for tests that predate the two-phase flow. Runtime
+	// startup always enables it; there is no configuration bypass.
 	intentEnabled bool
 
 	// pendingIntents is the A4 two-phase sign-after-resolve registry [AC1]. Lifecycle handlers
@@ -849,9 +846,8 @@ func (s *Server) SetVerify(v func(string) (auth.Identity, error)) { s.verify = v
 // SetDevMode sets whether the server is in dev mode (reauth enforced in prod only).
 func (s *Server) SetDevMode(dev bool) { s.devMode = dev }
 
-// SetIntentEnabled enables or disables the A4 two-phase sign-after-resolve flow [AC1][AM12].
-// Defaults to false so existing tests are unaffected. Production main and dev instances with a
-// dev AS key call SetIntentEnabled(true).
+// SetIntentEnabled controls the A4 two-phase sign-after-resolve flow in hermetic tests. Runtime
+// startup always calls it with true and exposes no corresponding configuration.
 func (s *Server) SetIntentEnabled(v bool) { s.intentEnabled = v }
 
 // SetReauthInterval overrides the in-band reauth deadline (default 15 min).
