@@ -210,6 +210,28 @@ func (r *profileRepo) ListProfileIDsByCatalogRef(ctx context.Context, catalogID 
 	return ids, nil
 }
 
+// ListProfileIDsByBundleVersions returns the distinct profile_ids of profiles that contain at
+// least one bundle_ref entry pinned to one of the given versionIDs. Empty slice (not error) when
+// versionIDs is empty or none match — mirrors ListProfileIDsByCatalogRef's never-nil contract.
+func (r *profileRepo) ListProfileIDsByBundleVersions(ctx context.Context, versionIDs []string) ([]string, error) {
+	if len(versionIDs) == 0 {
+		return []string{}, nil
+	}
+	var ids []string
+	err := r.db.NewSelect().
+		TableExpr("profile_entries").
+		ColumnExpr("DISTINCT profile_id").
+		Where("source_kind = ? AND version_id IN (?)", string(ProfileSourceBundle), bun.In(versionIDs)).
+		Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
 // CountRefsByCatalogRef returns the number of distinct profiles, and the number of distinct
 // owners of those profiles, that contain a catalog_ref entry pointing to catalogID. Zero refs
 // returns (0, 0, nil) — never an error.
