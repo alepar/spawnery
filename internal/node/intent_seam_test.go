@@ -38,6 +38,17 @@ func (f *fakeCPStream) lastErrorDetail(spawnID string) string {
 	return ""
 }
 
+func (f *fakeCPStream) lastSessionAuthClosed() *nodev1.SessionAuthClosed {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.sent) - 1; i >= 0; i-- {
+		if closed := f.sent[i].GetSessionAuthClosed(); closed != nil {
+			return closed
+		}
+	}
+	return nil
+}
+
 // newEnforcedAttacher builds an attacher with an enforced IntentVerifier (selfHosted=false,
 // nodeOwner="", so only assertedOwner is validated). The verifier uses a fixed clock.
 func newEnforcedAttacher(t *testing.T, mgr *spawnlet.Manager, fs cpStream, ks *token.Verifier, fixedNow time.Time) *attacher {
@@ -182,5 +193,46 @@ func TestIntentSeam_ValidEnvelopeActive(t *testing.T) {
 	owner, generation, ok := a.mgr.SpawnOwnerGeneration("sp-valid-seam")
 	if !ok || owner != "alice" || generation != 0 {
 		t.Fatalf("live owner snapshot = %q/%d/%v", owner, generation, ok)
+	}
+}
+
+func TestSessionOpenRejectionEmitsAddressedAuthClosed(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+	now := time.Unix(1_770_000_000, 0)
+	appDir := writeNodeApp(t)
+	startBody := &authv1.IntentBody{
+		Jti: "start", IssuedAt: now.Unix(), SpawnId: "sp-open-reject", TargetNodeId: "node-1",
+		Op: string(intent.OpCreateSpawn), AppRef: appDir, Model: "m",
+	}
+	startEnv := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, startBody, intent.OpCreateSpawn)
+	fs := &fakeCPStream{}
+	a := newEnforcedAttacher(t, newGooseManager(t, &scriptedPodBackend{script: scriptGoose}), fs, ks, now)
+	a.cfg.NodeID = "node-1"
+	a.startSpawn(context.Background(), &nodev1.StartSpawn{
+		SpawnId: "sp-open-reject", AppRef: appDir, Model: "m", AssertedOwner: "alice",
+		Auth: startEnv, IntentOp: string(intent.OpCreateSpawn),
+	})
+	defer a.stopSpawn(context.Background(), "sp-open-reject")
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
+		SpawnId: "sp-open-reject", Generation: 0, SessionId: "session-7", ClientId: "client-9",
+		AssertedOwner: "mallory",
+	}}})
+	closed := fs.lastSessionAuthClosed()
+	if closed == nil || closed.GetSpawnId() != "sp-open-reject" || closed.GetGeneration() != 0 ||
+		closed.GetSessionId() != "session-7" || closed.GetClientId() != "client-9" ||
+		closed.GetReason() != "live spawn ownership or generation mismatch" {
+		t.Fatalf("SessionAuthClosed = %+v", closed)
+	}
+
+	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
+		SpawnId: "sp-open-reject", Generation: 0, SessionId: "session-8", ClientId: "client-10",
+		AssertedOwner: "alice",
+	}}})
+	closed = fs.lastSessionAuthClosed()
+	if closed == nil || closed.GetSessionId() != "session-8" || closed.GetClientId() != "client-10" ||
+		closed.GetReason() != "MISSING_INTENT: no auth envelope" {
+		t.Fatalf("verification SessionAuthClosed = %+v", closed)
 	}
 }

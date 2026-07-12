@@ -18,11 +18,11 @@ func TestNodeReauthRelayAndAddressedClose(t *testing.T) {
 	r := New()
 	node := &mcNode{}
 	r.Bind("sp1", "node-1", node)
-	aDone, err := r.AttachClient("sp1", "0", "a", "alice", nil, &mcClient{}, 0)
+	aDone, err := r.AttachClient("sp1", "0", "a", "alice", nil, &mcClient{}, 0, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bDone, err := r.AttachClient("sp1", "0", "b", "alice", nil, &mcClient{}, 0)
+	bDone, err := r.AttachClient("sp1", "0", "b", "alice", nil, &mcClient{}, 0, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,13 +34,19 @@ func TestNodeReauthRelayAndAddressedClose(t *testing.T) {
 	if got == nil || got.GetAuth() != env || got.GetGeneration() != 7 || got.GetAssertedOwner() != "alice" {
 		t.Fatalf("reauth relay = %+v", got)
 	}
-	r.SessionAuthClosed("sp1", "0", "a", "foreign-node")
+	r.SessionAuthClosed("sp1", "0", "a", "foreign-node", 7)
 	select {
 	case <-aDone:
 		t.Fatal("foreign node closed attachment")
 	default:
 	}
-	r.SessionAuthClosed("sp1", "0", "a")
+	r.SessionAuthClosed("sp1", "0", "a", "node-1", 6)
+	select {
+	case <-aDone:
+		t.Fatal("old generation closed newer attachment")
+	default:
+	}
+	r.SessionAuthClosed("sp1", "0", "a", "node-1", 7)
 	select {
 	case <-aDone:
 	default:

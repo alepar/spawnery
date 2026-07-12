@@ -23,17 +23,27 @@ type sessionAuthRecord struct {
 
 type liveSessionAuth struct {
 	record sessionAuthRecord
-	timer  *time.Timer
+	timer  sessionAuthTimer
 	close  func(string)
 }
+
+type sessionAuthTimer interface{ Stop() bool }
 
 type sessionAuthRegistry struct {
 	mu      sync.Mutex
 	records map[sessionAuthKey]*liveSessionAuth
+	now     func() time.Time
+	after   func(time.Duration, func()) sessionAuthTimer
 }
 
 func newSessionAuthRegistry() *sessionAuthRegistry {
-	return &sessionAuthRegistry{records: make(map[sessionAuthKey]*liveSessionAuth)}
+	return newSessionAuthRegistryWithClock(time.Now, func(delay time.Duration, callback func()) sessionAuthTimer {
+		return time.AfterFunc(delay, callback)
+	})
+}
+
+func newSessionAuthRegistryWithClock(now func() time.Time, after func(time.Duration, func()) sessionAuthTimer) *sessionAuthRegistry {
+	return &sessionAuthRegistry{records: make(map[sessionAuthKey]*liveSessionAuth), now: now, after: after}
 }
 
 func (r *sessionAuthRegistry) register(key sessionAuthKey, record sessionAuthRecord, closeFn func(string)) {
@@ -43,14 +53,15 @@ func (r *sessionAuthRegistry) register(key sessionAuthKey, record sessionAuthRec
 	}
 	live := &liveSessionAuth{record: cloneSessionAuthRecord(record), close: closeFn}
 	r.records[key] = live
-	live.timer = time.AfterFunc(time.Until(record.expiresAt), func() { r.expire(key, record.tokenID) })
+	live.timer = r.after(record.expiresAt.Sub(r.now()), func() { r.expire(key, record.tokenID) })
 	r.mu.Unlock()
 }
 
 func (r *sessionAuthRegistry) replace(key sessionAuthKey, next sessionAuthRecord, liveOwner string) bool {
 	r.mu.Lock()
 	current := r.records[key]
-	valid := current != nil && time.Now().Before(next.expiresAt) &&
+	now := r.now()
+	valid := current != nil && now.Before(current.record.expiresAt) && now.Before(next.expiresAt) &&
 		current.record.accountID == next.accountID && next.accountID == liveOwner &&
 		bytes.Equal(current.record.sessionKeyHash, next.sessionKeyHash) &&
 		current.record.generation == next.generation && current.record.nodeID == next.nodeID
@@ -64,7 +75,7 @@ func (r *sessionAuthRegistry) replace(key sessionAuthKey, next sessionAuthRecord
 	}
 	current.timer.Stop()
 	current.record = cloneSessionAuthRecord(next)
-	current.timer = time.AfterFunc(time.Until(next.expiresAt), func() { r.expire(key, next.tokenID) })
+	current.timer = r.after(next.expiresAt.Sub(now), func() { r.expire(key, next.tokenID) })
 	r.mu.Unlock()
 	return true
 }

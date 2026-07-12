@@ -430,6 +430,7 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			owner, gen, ok := a.mgr.SpawnOwnerGeneration(spawnID)
 			if !ok || owner == "" || gen != m.Open.GetGeneration() || owner != m.Open.GetAssertedOwner() {
 				slog.Warn("SessionOpen: live ownership mismatch", "spawn", spawnID)
+				a.rejectSessionOpen(m.Open, "live spawn ownership or generation mismatch")
 				return
 			}
 			fields := OpenFields{
@@ -442,10 +443,12 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			if nack != "" {
 				slog.Warn("SessionOpen: intent NACK (client not attached)",
 					"spawn", spawnID, "session", sid(m.Open.GetSessionId()), "nack", nack, "detail", detail)
+				a.rejectSessionOpen(m.Open, fmt.Sprintf("%s: %s", nack, detail))
 				return
 			}
 			if auth.AccountID != owner {
 				slog.Warn("SessionOpen: token owner does not own live spawn", "spawn", spawnID)
+				a.rejectSessionOpen(m.Open, "verified token account does not own live spawn")
 				return
 			}
 			verifiedAuth = auth
@@ -457,8 +460,11 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 				sessionKeyHash: verifiedAuth.SessionKeyHash, generation: m.Open.GetGeneration(), nodeID: a.cfg.NodeID,
 			}, func(reason string) { a.closeClientAuthorization(key, m.Open.GetGeneration(), reason) })
 		}
-		if !a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor) && a.auths != nil {
-			a.auths.remove(sessionAuthKey{spawnID: m.Open.GetSpawnId(), sessionID: sid(m.Open.GetSessionId()), clientID: m.Open.GetClientId()})
+		if !a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor) {
+			if a.auths != nil {
+				a.auths.remove(sessionAuthKey{spawnID: m.Open.GetSpawnId(), sessionID: sid(m.Open.GetSessionId()), clientID: m.Open.GetClientId()})
+			}
+			a.rejectSessionOpen(m.Open, "session attachment unavailable")
 		}
 	case *nodev1.CPMessage_Close:
 		if a.auths != nil {
@@ -562,6 +568,15 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		go a.sealJournalKey(ctx, m.SealJournalKey)
 	default:
 	}
+}
+
+func (a *attacher) rejectSessionOpen(open *nodev1.SessionOpen, reason string) {
+	if open == nil {
+		return
+	}
+	a.closeClientAuthorization(sessionAuthKey{
+		spawnID: open.GetSpawnId(), sessionID: sid(open.GetSessionId()), clientID: open.GetClientId(),
+	}, open.GetGeneration(), reason)
 }
 
 // staleGen reports whether a control message carrying generation gen targets a superseded container

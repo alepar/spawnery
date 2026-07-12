@@ -530,7 +530,10 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 		case *nodev1.NodeMessage_Frame:
 			s.rt.FromNode(m.Frame.SpawnId, m.Frame.SessionId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected
 		case *nodev1.NodeMessage_SessionAuthClosed:
-			s.rt.SessionAuthClosed(m.SessionAuthClosed.GetSpawnId(), m.SessionAuthClosed.GetSessionId(), m.SessionAuthClosed.GetClientId(), nodeID)
+			s.rt.SessionAuthClosed(
+				m.SessionAuthClosed.GetSpawnId(), m.SessionAuthClosed.GetSessionId(), m.SessionAuthClosed.GetClientId(),
+				nodeID, m.SessionAuthClosed.GetGeneration(),
+			)
 		case *nodev1.NodeMessage_Roster:
 			s.rt.UpdateRoster(m.Roster.SpawnId, nodeID, m.Roster.Sessions) // node-authoritative session set; CP mirrors
 		case *nodev1.NodeMessage_SessionStatus:

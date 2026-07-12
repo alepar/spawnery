@@ -24,10 +24,11 @@ type route struct {
 	// browser panels may share a clientID (the web uses a module-level CLIENT_ID per panel type), so
 	// addressing by clientID alone would let a 2nd session's attach clobber the 1st's sender and
 	// misroute agent->client frames (sp-npxq.5). The proto carries session_id on every frame.
-	clients    map[clientKey]ClientSender
-	clientDone map[clientKey]chan struct{}
-	sessions   []*nodev1.SessionInfo // mirrored roster (node-authoritative)
-	done       chan struct{}         // closed when the route is dropped (stop or node evict)
+	clients           map[clientKey]ClientSender
+	clientDone        map[clientKey]chan struct{}
+	clientGenerations map[clientKey]uint64
+	sessions          []*nodev1.SessionInfo // mirrored roster (node-authoritative)
+	done              chan struct{}         // closed when the route is dropped (stop or node evict)
 }
 
 // clientKey identifies one attached client within a spawn: the (session, client) pair.
@@ -64,7 +65,10 @@ func New() *Router {
 // Bind ran is drained into the new route so ListSessions reflects it immediately.
 func (r *Router) Bind(spawnID, nodeID string, node registry.NodeSender) {
 	r.mu.Lock()
-	rt := &route{nodeID: nodeID, node: node, clients: map[clientKey]ClientSender{}, clientDone: map[clientKey]chan struct{}{}, done: make(chan struct{})}
+	rt := &route{
+		nodeID: nodeID, node: node, clients: map[clientKey]ClientSender{},
+		clientDone: map[clientKey]chan struct{}{}, clientGenerations: map[clientKey]uint64{}, done: make(chan struct{}),
+	}
 	if p, ok := r.pending[spawnID]; ok {
 		rt.sessions = p.sessions
 		delete(r.pending, spawnID)
@@ -100,6 +104,10 @@ func (r *Router) Attached(spawnID string) bool {
 // ingress validates its structural presence; low-level router tests may still pass nil.
 // assertedOwner is the CP-asserted spawn owner threaded into the node's owner-binding check.
 func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string, env *authv1.AuthEnvelope, c ClientSender, cursor int64, generations ...uint64) (<-chan struct{}, error) {
+	var generation uint64
+	if len(generations) == 1 {
+		generation = generations[0]
+	}
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	if !ok {
@@ -113,12 +121,9 @@ func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string
 	done := make(chan struct{})
 	rt.clients[key] = c
 	rt.clientDone[key] = done
+	rt.clientGenerations[key] = generation
 	node := rt.node
 	r.mu.Unlock()
-	var generation uint64
-	if len(generations) == 1 {
-		generation = generations[0]
-	}
 	return done, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
 		SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Cursor: cursor,
 		Generation: generation, Auth: env,
@@ -135,6 +140,7 @@ func (r *Router) DetachClient(spawnID, sessionID, clientID string) {
 		_, wasPresent = rt.clients[ck(sessionID, clientID)]
 		delete(rt.clients, ck(sessionID, clientID))
 		delete(rt.clientDone, ck(sessionID, clientID))
+		delete(rt.clientGenerations, ck(sessionID, clientID))
 	}
 	r.mu.Unlock()
 	if wasPresent {
@@ -158,19 +164,20 @@ func (r *Router) ReauthenticateClient(spawnID, sessionID, clientID string, gener
 	}}})
 }
 
-func (r *Router) SessionAuthClosed(spawnID, sessionID, clientID string, nodeIDs ...string) {
+func (r *Router) SessionAuthClosed(spawnID, sessionID, clientID, nodeID string, generation uint64) {
 	r.mu.Lock()
 	if rt := r.m[spawnID]; rt != nil {
-		if len(nodeIDs) == 1 && rt.nodeID != nodeIDs[0] {
+		key := ck(sessionID, clientID)
+		if rt.nodeID != nodeID || rt.clientGenerations[key] != generation {
 			r.mu.Unlock()
 			return
 		}
-		key := ck(sessionID, clientID)
 		if done := rt.clientDone[key]; done != nil {
 			close(done)
 			delete(rt.clientDone, key)
 		}
 		delete(rt.clients, key)
+		delete(rt.clientGenerations, key)
 	}
 	r.mu.Unlock()
 }

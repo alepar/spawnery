@@ -6,6 +6,34 @@ import (
 	"time"
 )
 
+type heldTimer struct{ callback func() }
+
+func (t *heldTimer) Stop() bool { return true }
+
+func TestSessionAuthReauthCannotReplaceExpiredRecordBeforeDelayedTimerRuns(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	var timers []*heldTimer
+	r := newSessionAuthRegistryWithClock(func() time.Time { return now }, func(_ time.Duration, callback func()) sessionAuthTimer {
+		timer := &heldTimer{callback: callback}
+		timers = append(timers, timer)
+		return timer
+	})
+	key := sessionAuthKey{spawnID: "sp", sessionID: "s", clientID: "c"}
+	var closed atomic.Int32
+	record := sessionAuthRecord{accountID: "alice", tokenID: "old", expiresAt: now.Add(time.Second), sessionKeyHash: []byte("key"), generation: 1, nodeID: "node"}
+	r.register(key, record, func(string) { closed.Add(1) })
+	now = record.expiresAt
+	next := record
+	next.tokenID = "new"
+	next.expiresAt = now.Add(time.Minute)
+	if r.replace(key, next, "alice") {
+		t.Fatal("replacement resurrected an attachment after its old signed deadline")
+	}
+	if closed.Load() != 1 || r.contains(key) {
+		t.Fatalf("expired record close=%d present=%v timers=%d", closed.Load(), r.contains(key), len(timers))
+	}
+}
+
 func TestSessionAuthReauthCancelsOldDeadline(t *testing.T) {
 	r := newSessionAuthRegistry()
 	key := sessionAuthKey{spawnID: "sp", sessionID: "s", clientID: "c"}
