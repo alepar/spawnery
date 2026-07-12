@@ -27,7 +27,7 @@ func issue(t *testing.T, nodeID, account, class string) nodeFix {
 	if err != nil {
 		t.Fatalf("NewRootCA: %v", err)
 	}
-	inter, err := r.NewIntermediate(class)
+	inter, err := r.NewIntermediate(pki.IssuerRole(class))
 	if err != nil {
 		t.Fatalf("NewIntermediate: %v", err)
 	}

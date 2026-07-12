@@ -12,7 +12,7 @@ import (
 func host(t *testing.T, interClass, sanClass, account string) (leaf, chain, root []byte) {
 	t.Helper()
 	r, _ := pki.NewRootCA("R")
-	inter, _ := r.NewIntermediate(interClass)
+	inter, _ := r.NewIntermediate(pki.IssuerRole(interClass))
 	node, _ := inter.IssueNode("n", account, sanClass, time.Now().Add(time.Hour))
 	return pki.MarshalCertPEM(node.Cert), pki.MarshalCertPEM(inter.Cert), pki.MarshalCertPEM(r.Cert)
 }
