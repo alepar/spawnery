@@ -39,10 +39,18 @@ func (e codexEmitter) InstallSkill(a Artifact, opts Options) Report {
 	return installSkill(e.layout, a, opts)
 }
 
-// Capabilities returns the full support matrix for codex: all kinds fully supported.
+// Capabilities returns the support matrix for codex: skill=best-effort — codexEmitter
+// really does write both the canonical tree and the $CODEX_HOME/skills compat copy, but
+// whether codex reads either directory at all is unverified: codex cannot complete a
+// single turn via the current OpenRouter routing once it bootstraps its own built-in
+// skills, which it always does on first run (sp-9e6q, P0, sp-mwco.2.2 spike). supported
+// would overclaim a read side nobody has observed; no-op would understate that files are
+// genuinely written. best-effort is the honest middle: written, not proven read. Revisit
+// once sp-9e6q unblocks probing codex's actual skill read behavior. Every other kind is
+// fully supported.
 func (e codexEmitter) Capabilities() map[Kind]CapabilityStatus {
 	return map[Kind]CapabilityStatus{
-		KindSkill:            CapStatusSupported,
+		KindSkill:            CapStatusBestEffort,
 		KindMCP:              CapStatusSupported,
 		KindConfig:           CapStatusSupported,
 		KindPlugin:           CapStatusSupported,

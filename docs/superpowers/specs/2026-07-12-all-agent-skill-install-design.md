@@ -309,3 +309,45 @@ used.*
     `internal/spawnlet/skill_delta_spike_e2e_test.go` — reproducible on a later image bump; see the
     harness file's header comment for the exact rebuild + run commands. The raw per-cell JSON
     (`/tmp/spawnery-skill-spike-report.json`) is a run artifact, not committed.
+
+- **2026-07-12 — per-agent glue emitters landed (`sp-mwco.2.5`).** §4.3's remaining items, per the
+  spike's verified matrix:
+  - **goose glue dropped entirely**, per the spike: `gooseEmitter.InstallSkill` stays
+    canonical-only, no Summon/extension-enable step exists in v1.41.0.
+  - **hermes glue landed** as `upsertHermesExternalDirs` (`internal/agentinstall/hermes.go`): a
+    `map[string]any` YAML round-trip (`gopkg.in/yaml.v3`, already a direct dep — the design's "reuse
+    the YAML config machinery" was false, there was none) that upserts
+    `skills.external_dirs` into `~/.hermes/config.yaml`, merging into the launcher's `model:` block
+    (never clobbering it) and erroring — not coercing — on a wrong-typed `skills`/`external_dirs`
+    key. Cost accepted: the round-trip drops comments and reorders keys alphabetically; the file is
+    container-generated (`cat > … <<EOF`), so only key/value survival matters. A glue-write failure
+    downgrades an otherwise-applied skill install to `StatusFailed` (fail closed: files on disk but
+    unreadable by hermes is a failed install from the user's perspective).
+  - **codex skill capability = `best-effort`**, not `supported` and not `no-op`: codexEmitter really
+    does write both the canonical tree and the `$CODEX_HOME/skills` compat copy, but the read side
+    is unverified pending `sp-9e6q` (P0) — `best-effort` is "written, not proven read," the honest
+    middle between overclaiming and understating. Revisit once `sp-9e6q` unblocks probing codex's
+    actual read behavior.
+  - **opencode skill flipped `no-op` → `supported`** (spike-confirmed native read, file-level and
+    behavioral, zero extra config).
+  - **`pi` registered** (`internal/agentinstall/pi.go`): canonical-only, no glue (spike-confirmed);
+    `SkillPath`/`MCPPath`/`ConfigPath` all stay blank — no vestigial false trails.
+  - **`targets: ["all"]` widening decision, made explicitly (not a silent surprise):** registering
+    `pi` widens every existing profile entry with `targets: []`/`["all"]` to a sixth agent.
+    **Decided: intended, not grandfathered.** `"all"` is stored as `["all"]`, translated to
+    `"all-detected"` at CP assembly time (`internal/cp/profiles_assembly.go:328`), and resolved in
+    the pod against the agents actually detected there (`Detect(env) ∩ registry`,
+    `internal/agentinstall/dispatch.go:63`) — a new registry entry joining is exactly what "every
+    agent this spawn could run" asks for. Blast radius is bounded: a pi spawn gets the same skills
+    the profile already gives claude/goose/opencode; explicit target lists are unaffected; the web
+    "all" checkbox renders from the generated `AGENTS` list, so pi shows up as an uncheckable
+    checkbox, not a silent addition. No migration/backfill needed. Second-order effects, also
+    intended: `Detect` now returns `pi`, and the CP now accepts `pi` as an explicit target name.
+  - **`capabilities.gen.json` regenerated** (`go run ./cmd/agentinstall list-agents --capabilities`)
+    to the full spike-verified 6×5 matrix, and a hermetic drift guard
+    (`internal/agentinstall/capabilities_gen_test.go`) now fails the suite if the Go source of truth
+    and the web export diverge — the epic previously had no such guard, which is exactly how the
+    codex `supported`-on-faith claim went unnoticed.
+  - **The new emitters stay inert until `sp-mwco.2.6`** wires the runnable→emitter table into
+    `apply-artifacts.sh` (today its shell `case` maps goose/hermes/pi to `EMITTER=""` → exit 0); this
+    task registers and verifies the emitters, it does not wire them into the launcher's dispatch.

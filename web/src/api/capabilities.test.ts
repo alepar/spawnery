@@ -6,12 +6,20 @@ describe("capabilities", () => {
     expect(capabilityFor("skill", "claude")).toBe("supported");
   });
 
-  it("opencode skill is no-op", () => {
-    expect(capabilityFor("skill", "opencode")).toBe("no-op");
+  it("opencode skill is supported", () => {
+    expect(capabilityFor("skill", "opencode")).toBe("supported");
   });
 
   it("opencode plugin is best-effort", () => {
     expect(capabilityFor("plugin", "opencode")).toBe("best-effort");
+  });
+
+  it("codex skill is best-effort", () => {
+    expect(capabilityFor("skill", "codex")).toBe("best-effort");
+  });
+
+  it("pi skill is supported", () => {
+    expect(capabilityFor("skill", "pi")).toBe("supported");
   });
 
   it("unknown agent returns no-op", () => {
@@ -29,5 +37,9 @@ describe("capabilities", () => {
 
   it("AGENTS list contains opencode", () => {
     expect(AGENTS).toContain("opencode");
+  });
+
+  it("AGENTS list contains pi", () => {
+    expect(AGENTS).toContain("pi");
   });
 });

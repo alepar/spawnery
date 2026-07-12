@@ -14,7 +14,7 @@ import (
 )
 
 // allAgents is the canonical set of registered emitters exercised by the matrix.
-var allAgents = []string{"claude", "codex", "opencode", "hermes", "goose"}
+var allAgents = []string{"claude", "codex", "opencode", "hermes", "goose", "pi"}
 
 // allKinds is the set of artifact kinds the conformance matrix exercises.
 var allKinds = []agentinstall.Kind{
@@ -32,6 +32,7 @@ var expectApplied = map[string]map[agentinstall.Kind]bool{
 	"opencode": {agentinstall.KindSkill: true, agentinstall.KindMCP: true, agentinstall.KindConfig: true, agentinstall.KindPlugin: true},
 	"hermes":   {agentinstall.KindSkill: true, agentinstall.KindMCP: false, agentinstall.KindConfig: false, agentinstall.KindPlugin: false},
 	"goose":    {agentinstall.KindSkill: true, agentinstall.KindMCP: false, agentinstall.KindConfig: false, agentinstall.KindPlugin: false},
+	"pi":       {agentinstall.KindSkill: true, agentinstall.KindMCP: false, agentinstall.KindConfig: false, agentinstall.KindPlugin: false},
 }
 
 // skillDestDirs returns every directory a skill install is expected to land in for
@@ -344,7 +345,7 @@ func TestConformance_LauncherClobberSurvival(t *testing.T) {
 		{"claude", agentinstall.KindSkill}, {"claude", agentinstall.KindMCP}, {"claude", agentinstall.KindConfig},
 		{"codex", agentinstall.KindSkill}, {"codex", agentinstall.KindMCP}, {"codex", agentinstall.KindConfig},
 		{"opencode", agentinstall.KindSkill}, {"opencode", agentinstall.KindMCP}, {"opencode", agentinstall.KindConfig},
-		{"hermes", agentinstall.KindSkill}, {"goose", agentinstall.KindSkill},
+		{"hermes", agentinstall.KindSkill}, {"goose", agentinstall.KindSkill}, {"pi", agentinstall.KindSkill},
 		{"claude", agentinstall.KindPlugin}, {"codex", agentinstall.KindPlugin}, {"opencode", agentinstall.KindPlugin},
 	}
 	for _, c := range cells {

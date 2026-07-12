@@ -85,7 +85,7 @@ func TestDetectXDGConfigHome(t *testing.T) {
 
 func TestDetectAll(t *testing.T) {
 	home := t.TempDir()
-	for _, d := range []string{".claude", ".codex", ".hermes"} {
+	for _, d := range []string{".claude", ".codex", ".hermes", ".pi"} {
 		if err := os.MkdirAll(filepath.Join(home, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +99,7 @@ func TestDetectAll(t *testing.T) {
 	env := agentinstall.MapEnviron{"HOME": home}
 	got := agentinstall.Detect(env)
 	// Should be in canonical order
-	want := []string{"claude", "codex", "opencode", "hermes", "goose"}
+	want := []string{"claude", "codex", "opencode", "hermes", "goose", "pi"}
 	if len(got) != len(want) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
@@ -107,6 +107,18 @@ func TestDetectAll(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("got[%d]=%q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestDetectPiPresent(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".pi"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := agentinstall.MapEnviron{"HOME": home}
+	got := agentinstall.Detect(env)
+	if len(got) != 1 || got[0] != "pi" {
+		t.Errorf("expected [pi], got %v", got)
 	}
 }
 

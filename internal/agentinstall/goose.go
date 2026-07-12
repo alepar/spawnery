@@ -45,4 +45,16 @@ func (e gooseEmitter) ApplyConfig(a Artifact, _ Options) Report {
 	}
 }
 
+// Capabilities returns the support matrix for goose: skill=supported (native,
+// unconditional read — sp-mwco.2.2 spike), everything else no-op.
+func (e gooseEmitter) Capabilities() map[Kind]CapabilityStatus {
+	return map[Kind]CapabilityStatus{
+		KindSkill:            CapStatusSupported,
+		KindMCP:              CapStatusNoOp,
+		KindConfig:           CapStatusNoOp,
+		KindPlugin:           CapStatusNoOp,
+		Kind("instructions"): CapStatusNoOp,
+	}
+}
+
 // InstallMCP is a base placeholder (sp-cywj fills).

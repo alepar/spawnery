@@ -11,7 +11,7 @@ func TestRegistryNames(t *testing.T) {
 	env := agentinstall.MapEnviron{"HOME": "/home/test"}
 	reg := agentinstall.NewRegistry(env)
 	names := reg.Names()
-	want := []string{"claude", "codex", "opencode", "hermes", "goose"}
+	want := []string{"claude", "codex", "opencode", "hermes", "goose", "pi"}
 	if len(names) != len(want) {
 		t.Fatalf("Names() = %v, want %v", names, want)
 	}
@@ -26,7 +26,7 @@ func TestRegistryLookup(t *testing.T) {
 	env := agentinstall.MapEnviron{"HOME": "/home/test"}
 	reg := agentinstall.NewRegistry(env)
 
-	for _, name := range []string{"claude", "codex", "opencode", "hermes", "goose"} {
+	for _, name := range []string{"claude", "codex", "opencode", "hermes", "goose", "pi"} {
 		e, ok := reg.Lookup(name)
 		if !ok {
 			t.Errorf("Lookup(%q) not found", name)
@@ -49,8 +49,8 @@ func TestRegistryLayouts(t *testing.T) {
 	reg := agentinstall.NewRegistry(env)
 	layouts := reg.Layouts()
 
-	if len(layouts) != 5 {
-		t.Fatalf("expected 5 layouts, got %d", len(layouts))
+	if len(layouts) != 6 {
+		t.Fatalf("expected 6 layouts, got %d", len(layouts))
 	}
 
 	// Build a map for easier lookup.
@@ -114,6 +114,16 @@ func TestRegistryLayouts(t *testing.T) {
 		assertPath(t, "ConfigPath", l.ConfigPath, filepath.Join(home, ".config", "goose", "config.yaml"))
 		assertFormat(t, "ConfigFormat", l.ConfigFormat, agentinstall.FormatYAML)
 	})
+
+	t.Run("pi", func(t *testing.T) {
+		l := lm["pi"]
+		assertPath(t, "ConfigRoot", l.ConfigRoot, filepath.Join(home, ".pi"))
+		// Canonical-only, and vestigial paths stay blank (no false trails, §4.3):
+		// pi reads ~/.agents/skills natively with no glue (sp-mwco.2.2 spike).
+		assertPath(t, "SkillPath", l.SkillPath, "")
+		assertPath(t, "MCPPath", l.MCPPath, "")
+		assertPath(t, "ConfigPath", l.ConfigPath, "")
+	})
 }
 
 // TestRegistrySkillPathCanonicalVsNativeCopy locks D1's semantics: claude/codex keep a
@@ -134,7 +144,7 @@ func TestRegistrySkillPathCanonicalVsNativeCopy(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"opencode", "hermes", "goose"} {
+	for _, name := range []string{"opencode", "hermes", "goose", "pi"} {
 		if lm[name].SkillPath != "" {
 			t.Errorf("%s: SkillPath should be empty (canonical-only), got %q", name, lm[name].SkillPath)
 		}
