@@ -18,12 +18,16 @@ import { authv1 } from "@spawnery/client";
 import { toBase64Url } from "./token";
 
 // Build a minimal wire token with a given session_key_hash
-function buildWireToken(spkiHash: Uint8Array, expiresAt: bigint): string {
+function buildWireToken(spkiHash: Uint8Array, expiresAt: bigint, audience: string, overrides: Record<string, unknown> = {}): string {
   const body = toBinary(authv1.SessionTokenBodySchema, create(authv1.SessionTokenBodySchema, {
     accountId: "account-123",
     handle: "handle",
     expiresAt,
     sessionKeyHash: spkiHash,
+    audience,
+    tokenId: `${audience}-token`,
+    familyId: "family-1",
+    ...overrides,
   }));
   const artifact = create(authv1.SignedAuthArtifactSchema, {
     artifactType: "session-token",
@@ -54,9 +58,10 @@ describe("refreshAccessToken — success", () => {
     const spki = await exportSpkiDer(kp.publicKey);
     const hash = await sessionKeyHash(spki);
 
-    const accessToken = buildWireToken(hash, 1800000000n);
+    const cpAccessToken = buildWireToken(hash, 1800000000n, "cp");
+    const nodeAccessToken = buildWireToken(hash, 1800000000n, "node");
     const fetchMock = vi.fn().mockResolvedValue(
-      makeResponse(200, { access_token: accessToken, refresh_token_hash: "newhash" }),
+      makeResponse(200, { cp_access_token: cpAccessToken, node_access_token: nodeAccessToken, refresh_token_hash: "newhash" }),
     );
 
     const result = await refreshAccessToken({
@@ -70,7 +75,8 @@ describe("refreshAccessToken — success", () => {
 
     expect(result.kind).toBe("ok");
     if (result.kind === "ok") {
-      expect(result.accessToken).toBe(accessToken);
+      expect(result.cpAccessToken).toBe(cpAccessToken);
+      expect(result.nodeAccessToken).toBe(nodeAccessToken);
       expect(result.refreshTokenHash).toBe("newhash");
       expect(result.expiresAt).toBe(1800000000n);
     }
@@ -86,10 +92,11 @@ describe("refreshAccessToken — cnf-mismatch", () => {
 
     // Token has a DIFFERENT hash
     const differentHash = new Uint8Array(32).fill(0xff);
-    const accessToken = buildWireToken(differentHash, 1800000000n);
+    const cpAccessToken = buildWireToken(differentHash, 1800000000n, "cp");
+    const nodeAccessToken = buildWireToken(differentHash, 1800000000n, "node");
 
     const fetchMock = vi.fn().mockResolvedValue(
-      makeResponse(200, { access_token: accessToken }),
+      makeResponse(200, { cp_access_token: cpAccessToken, node_access_token: nodeAccessToken, refresh_token_hash: "rth" }),
     );
 
     const result = await refreshAccessToken({
@@ -170,7 +177,8 @@ describe("refreshAccessToken — single-flight", () => {
     const kp = await getOrCreateSessionKey(store);
     const spki = await exportSpkiDer(kp.publicKey);
     const hash = await sessionKeyHash(spki);
-    const accessToken = buildWireToken(hash, 1800000000n);
+    const cpAccessToken = buildWireToken(hash, 1800000000n, "cp");
+    const nodeAccessToken = buildWireToken(hash, 1800000000n, "node");
 
     let fetchCount = 0;
     let resolveFetch!: (v: Response) => void;
@@ -213,13 +221,55 @@ describe("refreshAccessToken — single-flight", () => {
     const p2 = refreshAccessToken(deps);
 
     // Resolve the fetch
-    resolveFetch(makeResponse(200, { access_token: accessToken, refresh_token_hash: "h" }));
+    resolveFetch(makeResponse(200, { cp_access_token: cpAccessToken, node_access_token: nodeAccessToken, refresh_token_hash: "h" }));
 
     const [r1, r2] = await Promise.all([p1, p2]);
     expect(r1.kind).toBe("ok");
     expect(r2.kind).toBe("ok");
     // Only one fetch was made — the _inflight guard short-circuits p2 before the lock.
     expect(fetchCount).toBe(1);
+  });
+});
+
+describe("refreshAccessToken — atomic pair validation", () => {
+  it.each([
+    { cp_access_token: "cp-only", refresh_token_hash: "rth" },
+    { node_access_token: "node-only", refresh_token_hash: "rth" },
+    { cp_access_token: "cp", node_access_token: "node" },
+  ])("rejects a partial response without returning credentials", async (body) => {
+    const store = new MemoryKeyStore();
+    const kp = await getOrCreateSessionKey(store);
+    const spki = await exportSpkiDer(kp.publicKey);
+    const hash = await sessionKeyHash(spki);
+    const result = await refreshAccessToken({
+      privateKey: kp.privateKey,
+      publicKey: kp.publicKey,
+      localSpkiHash: hash,
+      refreshTokenHash: new Uint8Array(32),
+      fetchFn: vi.fn().mockResolvedValue(makeResponse(200, body)),
+    });
+    expect(result.kind).toBe("error");
+    expect(result).not.toHaveProperty("cpAccessToken");
+    expect(result).not.toHaveProperty("nodeAccessToken");
+  });
+
+  it("rejects pair tuple mismatches", async () => {
+    const store = new MemoryKeyStore();
+    const kp = await getOrCreateSessionKey(store);
+    const spki = await exportSpkiDer(kp.publicKey);
+    const hash = await sessionKeyHash(spki);
+    const result = await refreshAccessToken({
+      privateKey: kp.privateKey,
+      publicKey: kp.publicKey,
+      localSpkiHash: hash,
+      refreshTokenHash: new Uint8Array(32),
+      fetchFn: vi.fn().mockResolvedValue(makeResponse(200, {
+        cp_access_token: buildWireToken(hash, 1800000000n, "cp"),
+        node_access_token: buildWireToken(hash, 1800000000n, "node", { accountId: "other" }),
+        refresh_token_hash: "rth",
+      })),
+    });
+    expect(result.kind).toBe("error");
   });
 });
 

@@ -20,6 +20,7 @@ vi.mock("@/auth/keypair", () => ({
   loadSessionKey: vi.fn().mockResolvedValue(null),
   exportSpkiDer: vi.fn(),
   sessionKeyHash: vi.fn().mockResolvedValue(new Uint8Array(32)),
+  clearSessionKey: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/auth/refresh", () => ({
@@ -38,7 +39,8 @@ beforeEach(() => {
   const store = new MemoryKeyStore();
   useSessionStore.setState({
     status: "authed",
-    accessToken: "tok",
+    cpAccessToken: "cp-token",
+    nodeAccessToken: "node-token",
     refreshTokenHash: "rth",
     account: null,
     callbackErrorCode: null,

@@ -11,7 +11,7 @@
 import { asHttpUrl } from "@/config/endpoints";
 import { buildPoP } from "./pop";
 import { keyCanSign } from "./keypair";
-import { parseAccessToken } from "./token";
+import { validateAccessTokenPair } from "./token";
 import { bytesEqual } from "@/keys/encoding";
 import { CNF_MISMATCH, type NackCode } from "./errors";
 
@@ -39,7 +39,7 @@ export interface RefreshDeps {
 }
 
 export type RefreshResult =
-  | { kind: "ok"; accessToken: string; refreshTokenHash: string; expiresAt: bigint }
+  | { kind: "ok"; cpAccessToken: string; nodeAccessToken: string; refreshTokenHash: string; expiresAt: bigint }
   | { kind: "cnf-mismatch" }
   | { kind: "revoked" }
   | { kind: "key-missing" }
@@ -121,35 +121,39 @@ async function _doRefresh(deps: RefreshDeps): Promise<RefreshResult> {
     return { kind: "error", message: `refresh ${res.status}: ${body}` };
   }
 
-  let json: { access_token?: string; refresh_token_hash?: string };
+  let json: { cp_access_token?: string; node_access_token?: string; refresh_token_hash?: string };
   try {
     json = await res.json() as typeof json;
   } catch {
     return { kind: "error", message: "refresh: invalid JSON response" };
   }
 
-  if (!json.access_token) {
-    return { kind: "error", message: "refresh: missing access_token in response" };
+  if (!json.cp_access_token || !json.node_access_token || !json.refresh_token_hash) {
+    return { kind: "error", message: "refresh: incomplete credential pair in response" };
   }
 
   // Decode the new token and verify cnf claim (session_key_hash must match local SPKI hash).
-  let decoded;
+  let validated;
   try {
-    decoded = parseAccessToken(json.access_token);
+    validated = validateAccessTokenPair({
+      cpAccessToken: json.cp_access_token,
+      nodeAccessToken: json.node_access_token,
+    });
   } catch (e) {
     return { kind: "error", message: `refresh: malformed token: ${e}` };
   }
 
   // cnf check: session_key_hash in the token must equal sha256(localSpki).
-  if (decoded.sessionKeyHash.length > 0 && !bytesEqual(decoded.sessionKeyHash, deps.localSpkiHash)) {
+  if (!bytesEqual(validated.cp.sessionKeyHash, deps.localSpkiHash)) {
     return { kind: "cnf-mismatch" };
   }
 
   return {
     kind: "ok",
-    accessToken: json.access_token,
-    refreshTokenHash: json.refresh_token_hash ?? "",
-    expiresAt: decoded.expiresAt,
+    cpAccessToken: json.cp_access_token,
+    nodeAccessToken: json.node_access_token,
+    refreshTokenHash: json.refresh_token_hash,
+    expiresAt: validated.expiresAt,
   };
 }
 

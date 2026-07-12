@@ -10,7 +10,9 @@ import { authv1 } from "@spawnery/client";
 import { toBase64Url } from "./token";
 
 // Build a fixture SessionTokenBody wire token (no real sig needed — SPA never verifies sig).
-function buildTokenBodyBytes(opts: { accountId: string; handle: string; expiresAt: bigint }): Uint8Array {
+function buildTokenBodyBytes(opts: {
+  accountId: string; handle: string; expiresAt: bigint; audience: string; tokenId: string;
+}): Uint8Array {
   return toBinary(authv1.SessionTokenBodySchema, create(authv1.SessionTokenBodySchema, opts));
 }
 
@@ -24,12 +26,21 @@ function wrapTokenBody(body: Uint8Array): string {
   })));
 }
 
+function tokenPair(accountId = "acc-test", handle = "testuser", expiresAt = 1800000000n) {
+  const common = { accountId, handle, expiresAt, familyId: "family-1", sessionKeyHash: new Uint8Array(32).fill(1) };
+  return {
+    cpAccessToken: wrapTokenBody(buildTokenBodyBytes({ ...common, audience: "cp", tokenId: "cp-token" })),
+    nodeAccessToken: wrapTokenBody(buildTokenBodyBytes({ ...common, audience: "node", tokenId: "node-token" })),
+  };
+}
+
 // Reset zustand state and localStorage between tests
 beforeEach(() => {
   localStorage.removeItem(RTH_STORAGE_KEY);
   useSessionStore.setState({
     status: "loading",
-    accessToken: "",
+    cpAccessToken: "",
+    nodeAccessToken: "",
     refreshTokenHash: "",
     account: null,
   });
@@ -55,7 +66,8 @@ describe("bootstrap — dev mode (auth disabled)", () => {
     await useSessionStore.getState().bootstrap(store);
     const s = useSessionStore.getState();
     expect(s.status).toBe("authed");
-    expect(s.accessToken).toBe(DEV_TOKEN);
+    expect(s.cpAccessToken).toBe(DEV_TOKEN);
+    expect(s.nodeAccessToken).toBe(DEV_TOKEN);
   });
 });
 
@@ -73,7 +85,7 @@ describe("getAccessToken", () => {
 
   it("returns current accessToken in auth-enabled mode", () => {
     if (!authEnabled()) return; // skip in dev mode
-    useSessionStore.setState({ accessToken: "test-token" });
+    useSessionStore.setState({ cpAccessToken: "test-token" });
     expect(useSessionStore.getState().getAccessToken()).toBe("test-token");
   });
 
@@ -90,25 +102,25 @@ describe("getAccessToken", () => {
   });
 });
 
-describe("setToken", () => {
+describe("setTokens", () => {
   it("sets status to authed and parses account info", () => {
     // Build a minimal wire token with known account_id and handle.
-    const body = buildTokenBodyBytes({ accountId: "acc-test", handle: "testuser", expiresAt: 1800000000n });
-    const wire = wrapTokenBody(body);
-
-    useSessionStore.getState().setToken(wire, "rth123");
+    const pair = tokenPair();
+    useSessionStore.getState().setTokens(pair, "rth123");
     const s = useSessionStore.getState();
     expect(s.status).toBe("authed");
     expect(s.account?.accountId).toBe("acc-test");
     expect(s.account?.handle).toBe("testuser");
     expect(s.refreshTokenHash).toBe("rth123");
+    expect(s.cpAccessToken).toBe(pair.cpAccessToken);
+    expect(s.nodeAccessToken).toBe(pair.nodeAccessToken);
   });
 });
 
 describe("logout", () => {
   it("clears token and sets login-required", async () => {
     const store = new MemoryKeyStore();
-    useSessionStore.setState({ status: "authed", accessToken: "tok", keyStore: store });
+    useSessionStore.setState({ status: "authed", cpAccessToken: "cp", nodeAccessToken: "node", keyStore: store });
 
     // Mock fetch to avoid real network
     const fetchMock = vi.fn().mockResolvedValue(new Response("", { status: 200 }));
@@ -118,7 +130,8 @@ describe("logout", () => {
 
     const s = useSessionStore.getState();
     expect(s.status).toBe("login-required");
-    expect(s.accessToken).toBe("");
+    expect(s.cpAccessToken).toBe("");
+    expect(s.nodeAccessToken).toBe("");
 
     vi.unstubAllGlobals();
   });
@@ -132,10 +145,7 @@ describe("proactive refresh — timer is wired", () => {
       // Build a token expiring ~15 min from fake-now so computeRefreshDelay returns > 0.
       const nowSec = Math.floor(Date.now() / 1000);
       const expiresAt = BigInt(nowSec + 15 * 60);
-      const body = buildTokenBodyBytes({ accountId: "acc", handle: "h", expiresAt });
-      const wire = wrapTokenBody(body);
-
-      useSessionStore.getState().setToken(wire, "rth-abc");
+      useSessionStore.getState().setTokens(tokenPair("acc", "h", expiresAt), "rth-abc");
 
       // setToken must have armed a proactive refresh timer.
       expect(vi.getTimerCount()).toBeGreaterThan(0);

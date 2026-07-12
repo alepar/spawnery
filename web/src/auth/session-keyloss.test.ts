@@ -56,7 +56,8 @@ beforeEach(() => {
   localStorage.removeItem(RTH_STORAGE_KEY);
   useSessionStore.setState({
     status: "loading",
-    accessToken: "",
+    cpAccessToken: "",
+    nodeAccessToken: "",
     refreshTokenHash: "",
     account: null,
     callbackErrorCode: null,

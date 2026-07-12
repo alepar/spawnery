@@ -29,7 +29,8 @@ beforeEach(() => {
   const store = new MemoryKeyStore();
   useSessionStore.setState({
     status: "authed",
-    accessToken: "tok",
+    cpAccessToken: "cp-token",
+    nodeAccessToken: "node-token",
     refreshTokenHash: "rth",
     account: null,
     callbackErrorCode: null,

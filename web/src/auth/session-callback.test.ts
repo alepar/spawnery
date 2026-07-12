@@ -9,6 +9,9 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { CallbackResult } from "./oauth";
+import { create, toBinary } from "@bufbuild/protobuf";
+import { authv1 } from "@spawnery/client";
+import { toBase64Url } from "./token";
 
 // ── Module mocks (hoisted) ───────────────────────────────────────────────────
 
@@ -38,9 +41,9 @@ vi.mock("./oauth", () => ({
 // loadSessionKey is used on restore/refresh paths; returning null routes to key-lost (not reached by
 // the callback tests below, which all short-circuit via parseCallback before key loading).
 vi.mock("./keypair", () => ({
-  loadSessionKey: vi.fn().mockResolvedValue(null),
-  exportSpkiDer: vi.fn(),
-  sessionKeyHash: vi.fn(),
+  loadSessionKey: vi.fn().mockResolvedValue({ privateKey: {}, publicKey: {} }),
+  exportSpkiDer: vi.fn().mockResolvedValue(new Uint8Array([1])),
+  sessionKeyHash: vi.fn().mockResolvedValue(new Uint8Array(32).fill(7)),
   clearSessionKey: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -58,10 +61,32 @@ vi.mock("./refresh", async (importOriginal) => {
 import { useSessionStore } from "./session";
 import { MemoryKeyStore } from "./keystore";
 
+function wireToken(audience: "cp" | "node"): string {
+  const body = toBinary(authv1.SessionTokenBodySchema, create(authv1.SessionTokenBodySchema, {
+    accountId: "acct-1",
+    handle: "alice",
+    tokenId: `${audience}-token`,
+    audience,
+    expiresAt: 1800000000n,
+    sessionKeyHash: new Uint8Array(32).fill(7),
+    familyId: "family-1",
+  }));
+  return toBase64Url(toBinary(authv1.SignedAuthArtifactSchema, create(authv1.SignedAuthArtifactSchema, {
+    artifactType: "session-token",
+    payload: body,
+    signature: new Uint8Array(64),
+    signerChain: [new Uint8Array([1])],
+    keyId: new Uint8Array(32),
+  })));
+}
+
+const TOKENS = { cpAccessToken: wireToken("cp"), nodeAccessToken: wireToken("node") };
+
 beforeEach(() => {
   useSessionStore.setState({
     status: "loading",
-    accessToken: "",
+    cpAccessToken: "",
+    nodeAccessToken: "",
     refreshTokenHash: "",
     account: null,
     callbackErrorCode: null,
@@ -121,14 +146,11 @@ describe("bootstrap — AS error callback stored in state", () => {
 });
 
 describe("bootstrap — success callback restores original route", () => {
-  // Build a minimal wire token (valid enough for parseAccessToken to skip gracefully).
-  const FAKE_TOKEN = "AAAA.AAAA"; // invalid but setToken ignores parse errors
-
   it("calls browserHistory.replaceState with cb.route on ok callback", async () => {
     parseCallbackMock.mockReturnValue({
       kind: "ok",
-      accessToken: FAKE_TOKEN,
-      refreshTokenHash: "",
+      ...TOKENS,
+      refreshTokenHash: "rth",
       route: "/spawn/abc123",
     });
 
@@ -142,8 +164,8 @@ describe("bootstrap — success callback restores original route", () => {
   it("does not call replaceState when route is empty", async () => {
     parseCallbackMock.mockReturnValue({
       kind: "ok",
-      accessToken: FAKE_TOKEN,
-      refreshTokenHash: "",
+      ...TOKENS,
+      refreshTokenHash: "rth",
       route: "",
     });
 
@@ -156,13 +178,13 @@ describe("bootstrap — success callback restores original route", () => {
   });
 
   it("clears callbackErrorCode on successful token set", async () => {
-    // Pre-seed an error code to verify setToken clears it.
+    // Pre-seed an error code to verify setTokens clears it.
     useSessionStore.setState({ callbackErrorCode: "access_denied" });
 
     parseCallbackMock.mockReturnValue({
       kind: "ok",
-      accessToken: FAKE_TOKEN,
-      refreshTokenHash: "",
+      ...TOKENS,
+      refreshTokenHash: "rth",
       route: "/templates",
     });
 

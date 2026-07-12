@@ -14,6 +14,7 @@
 
 import { fromBinary } from "@bufbuild/protobuf";
 import { authv1, toBase64Url, fromBase64Url } from "@spawnery/client";
+import { bytesEqual } from "@/keys/encoding";
 
 export { toBase64Url, fromBase64Url };
 
@@ -59,6 +60,9 @@ export function parseTokenWire(wire: string): TokenParts {
 export interface SessionTokenBodyDecoded {
   accountId: string;
   handle: string;
+  tokenId: string;
+  audience: string;
+  familyId: string;
   expiresAt: bigint; // unix seconds as BigInt (WM10: avoid float precision loss)
   sessionKeyHash: Uint8Array; // 32-byte SHA-256 of DER SPKI
 }
@@ -72,6 +76,9 @@ export function decodeSessionTokenBody(bodyBytes: Uint8Array): SessionTokenBodyD
   return {
     accountId: body.accountId,
     handle: body.handle,
+    tokenId: body.tokenId,
+    audience: body.audience,
+    familyId: body.familyId,
     expiresAt: body.expiresAt,
     sessionKeyHash: body.sessionKeyHash,
   };
@@ -81,4 +88,44 @@ export function decodeSessionTokenBody(bodyBytes: Uint8Array): SessionTokenBodyD
 export function parseAccessToken(wire: string): SessionTokenBodyDecoded & { bodyBytes: Uint8Array } {
   const { payloadBytes } = parseTokenWire(wire);
   return { ...decodeSessionTokenBody(payloadBytes), bodyBytes: payloadBytes };
+}
+
+export interface AccessTokenPair {
+  cpAccessToken: string;
+  nodeAccessToken: string;
+}
+
+export interface ValidatedAccessTokenPair {
+  pair: AccessTokenPair;
+  cp: SessionTokenBodyDecoded;
+  node: SessionTokenBodyDecoded;
+  accountId: string;
+  expiresAt: bigint;
+}
+
+/** Validate the paired credentials before either credential enters application state. */
+export function validateAccessTokenPair(
+  pair: AccessTokenPair,
+  localSpkiHash?: Uint8Array,
+): ValidatedAccessTokenPair {
+  if (!pair.cpAccessToken || !pair.nodeAccessToken) throw new Error("token pair: incomplete");
+  const cp = parseAccessToken(pair.cpAccessToken);
+  const node = parseAccessToken(pair.nodeAccessToken);
+  if (cp.audience !== "cp" || node.audience !== "node") {
+    throw new Error("token pair: invalid audiences");
+  }
+  if (!cp.accountId || cp.accountId !== node.accountId) throw new Error("token pair: account mismatch");
+  if (!cp.familyId || cp.familyId !== node.familyId) throw new Error("token pair: family mismatch");
+  if (!cp.tokenId || !node.tokenId || cp.tokenId === node.tokenId) {
+    throw new Error("token pair: invalid token IDs");
+  }
+  if (cp.expiresAt <= 0n || cp.expiresAt !== node.expiresAt) throw new Error("token pair: expiry mismatch");
+  if (cp.sessionKeyHash.length !== 32 || node.sessionKeyHash.length !== 32 ||
+      !bytesEqual(cp.sessionKeyHash, node.sessionKeyHash)) {
+    throw new Error("token pair: session key mismatch");
+  }
+  if (localSpkiHash && (localSpkiHash.length !== 32 || !bytesEqual(cp.sessionKeyHash, localSpkiHash))) {
+    throw new Error("token pair: local session key mismatch");
+  }
+  return { pair, cp, node, accountId: cp.accountId, expiresAt: cp.expiresAt };
 }

@@ -41,7 +41,8 @@ Object.defineProperty(window, "location", {
 beforeEach(() => {
   useSessionStore.setState({
     status: "login-required",
-    accessToken: "",
+    cpAccessToken: "",
+    nodeAccessToken: "",
     refreshTokenHash: "",
     account: null,
     keyStore: new MemoryKeyStore(),

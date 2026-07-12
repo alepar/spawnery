@@ -68,8 +68,8 @@ export function AcpSessionPanel({ spawnId, sessionId, active, ready }: {
     // Push a reauth frame immediately when the token refreshes.
     const unsubAuth = authEnabled()
       ? useAuthStore.subscribe((state, prev) => {
-          if (state.accessToken !== prev.accessToken && state.accessToken) {
-            sendReauth(state.accessToken);
+          if (state.cpAccessToken !== prev.cpAccessToken && state.cpAccessToken) {
+            sendReauth(state.cpAccessToken);
           }
         })
       : null;

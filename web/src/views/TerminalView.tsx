@@ -178,8 +178,8 @@ export function TerminalView({ spawnId, sessionId = "0", active = true, backlogT
     // Subscribe to token changes (fresh token after a silent refresh) → push reauth immediately.
     const unsubSession = authEnabled()
       ? useSessionStore.subscribe((state, prev) => {
-          if (state.accessToken !== prev.accessToken && state.accessToken) {
-            sendReauth(state.accessToken);
+          if (state.cpAccessToken !== prev.cpAccessToken && state.cpAccessToken) {
+            sendReauth(state.cpAccessToken);
           }
         })
       : null;
