@@ -28,17 +28,17 @@ package spawnlet
 //
 //	R1 fork preserves its source  — Manager fork sequence: pause → CaptureDeltaAs → restore, same container.
 //	R2 the fork's artifact carries the source's content as of the capture instant (Manager capture ordering).
+//	R3 a suspend is not TORN — mounts and rootfs are captured from the same frozen instant (SE2 fix).
 //	R4 a captured delta is launchable and EnsureImage returns it (Manager's launch-image selection).
 //	R5 resume replays the delta (Manager's resume path picks the delta, not the base).
 //	R6 failure arms: capture fails → source restored; StartAgent fails → pod rolled back, not leaked.
-//
-// (R3, the torn-suspend regression, is SE2's — it cannot pass until SE2's fix (sp-2tx8.2.1) lands, since
-// teardown still unconditionally unpauses before the rootfs capture. See sp-2tx8.1.5's bead notes.)
 
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"spawnery/internal/runtime"
 	"spawnery/internal/runtime/fakepod"
@@ -305,5 +305,94 @@ func TestRegressionStartAgentFailureRollsBackPod(t *testing.T) {
 	}
 	if _, ok := m.Store().Get("sp-rb"); ok {
 		t.Fatal("spawn sp-rb is in the store after a failed Create")
+	}
+}
+
+// seqOf returns the sequence number the fakepod AgentWriter last wrote into a content view. The
+// writer writes the SAME number to one rootfs path and one mount path inside a single critical
+// section, so two views taken from the same instant carry the same number and a torn pair does not.
+func seqOf(view map[string][]byte) string {
+	for k, v := range view {
+		if strings.HasSuffix(k, "/.agent-seq") {
+			return string(v)
+		}
+	}
+	return ""
+}
+
+// R3 pins the MANAGER's suspend CONSISTENCY (SE2, sp-2tx8.2.1). A suspend artifact has two halves —
+// the journal/mount snapshot (taken by the gate, SnapshotForSuspend) and the rootfs delta (taken by
+// FinishSuspend). They must come from the SAME instant. The Manager freezes the agent with Pause to
+// get that instant; it must not let the agent run again before the rootfs is captured.
+//
+// Pre-fix this test FAILS: teardown called pod.Unpause before the scrub (an `exec`, which cannot enter
+// a paused container) and then captured the rootfs from a LIVE agent — so the artifact's rootfs carried
+// a LATER sequence number than the mount snapshot. That is the torn snapshot, and it is what a
+// background agent process (build, LSP, git, editor autosave) does to a suspend today.
+//
+// This is a MANAGER-layer pin: whether a real backend's diff is faithful to the frozen container is a
+// BACKEND property, pinned by the capture_delta_on_paused_agent contract case on the e2e /
+// cri_delta_e2e arms.
+func TestRegressionSuspendSnapshotIsNotTorn(t *testing.T) {
+	ctx := context.Background()
+	fj := newFakeJournal("manifest-torn")
+	m, b := newRegressionManager(t, fj)
+
+	sp, err := m.Create(ctx, "sp-torn", writeJournalApp(t), "model", "", "", 1)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// The agent's own processes keep writing until the container is paused — the ACP session being
+	// reaped removes the driver, not the agent's background work.
+	w, err := b.StartAgentWriter(sp.ID)
+	if err != nil {
+		t.Fatalf("StartAgentWriter: %v", err)
+	}
+	defer w.Stop()
+
+	// Wait for the writer to land its first tick before pausing — otherwise Pause can (and did, on a
+	// fast run) land before any write, and the test cannot see a tear either way.
+	deadline := time.Now().Add(5 * time.Second)
+	for w.Ticks() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("writer made no progress while the agent was running")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// The mount half: what the journaler persists, captured at the instant FinalSnapshot fires.
+	var mountSeq string
+	fj.onFinal = func() { mountSeq = seqOf(b.MountView(sp.ID)) }
+
+	if _, err := m.SnapshotForSuspend(ctx, sp.ID, nil); err != nil {
+		t.Fatalf("SnapshotForSuspend: %v", err)
+	}
+	if _, err := m.FinishSuspend(ctx, sp.ID, false, nil); err != nil {
+		t.Fatalf("FinishSuspend: %v", err)
+	}
+
+	// The rootfs half: what the captured delta image holds.
+	content, ok := b.ImageContent(runtime.DeltaTag(sp.ID))
+	if !ok {
+		t.Fatalf("no delta image %s: the suspend captured nothing", runtime.DeltaTag(sp.ID))
+	}
+	rootfsSeq := seqOf(content)
+
+	if mountSeq == "" || rootfsSeq == "" {
+		t.Fatalf("the writer landed no write (mountSeq=%q rootfsSeq=%q) — the test cannot see a tear at all",
+			mountSeq, rootfsSeq)
+	}
+	if rootfsSeq != mountSeq {
+		t.Fatalf("TORN SNAPSHOT: the rootfs was captured at seq %s but the mounts were snapshotted at seq %s "+
+			"— the agent kept writing between the two halves of the suspend", rootfsSeq, mountSeq)
+	}
+
+	// And the mechanism, pinned directly: the gate's Pause must never be released before the capture.
+	for _, op := range b.Ops() {
+		if strings.HasPrefix(op, string(fakepod.OpUnpause)+":") {
+			t.Fatalf("the suspend unpaused the agent (ops=%v) — that is precisely what reopens the "+
+				"quiescence window between the mount snapshot and the rootfs capture", b.Ops())
+		}
 	}
 }
