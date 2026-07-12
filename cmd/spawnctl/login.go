@@ -155,9 +155,10 @@ func loginLoopback(ctx context.Context, dir, asURL string, noBrowser bool, w io.
 
 	// 6. Serve the callback; the handler fills in the result or error.
 	type cbResult struct {
-		accessToken  string
-		refreshToken string
-		err          error
+		cpAccessToken   string
+		nodeAccessToken string
+		refreshToken    string
+		err             error
 	}
 	done := make(chan cbResult, 1)
 
@@ -182,17 +183,18 @@ func loginLoopback(ctx context.Context, dir, asURL string, noBrowser bool, w io.
 			return
 		}
 		at := q.Get("cp_access_token")
+		nat := q.Get("node_access_token")
 		rt := q.Get("refresh_token")
-		if at == "" {
+		if at == "" || nat == "" || rt == "" {
 			rw.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(rw, "<html><body><p>No access token in callback. Please try again.</p></body></html>")
-			done <- cbResult{err: errors.New("no cp_access_token in callback")}
+			fmt.Fprintf(rw, "<html><body><p>Incomplete credentials in callback. Please try again.</p></body></html>")
+			done <- cbResult{err: errors.New("incomplete credential pair in callback")}
 			return
 		}
 		rw.Header().Set("Content-Type", "text/html")
 		rw.WriteHeader(http.StatusOK)
 		fmt.Fprintln(rw, "<html><body><h2>Login successful!</h2><p>You may close this tab and return to the terminal.</p></body></html>")
-		done <- cbResult{accessToken: at, refreshToken: rt}
+		done <- cbResult{cpAccessToken: at, nodeAccessToken: nat, refreshToken: rt}
 	})
 
 	srv := &http.Server{Handler: mux}
@@ -218,10 +220,15 @@ func loginLoopback(ctx context.Context, dir, asURL string, noBrowser bool, w io.
 	if err != nil {
 		return fmt.Errorf("marshal session key: %w", err)
 	}
+	expiresAt, err := validateCredentialPair(result.cpAccessToken, result.nodeAccessToken, sessKey)
+	if err != nil {
+		return fmt.Errorf("validate login credentials: %w", err)
+	}
 	s := &authState{
 		ASURL:              asURL,
-		AccessToken:        result.accessToken,
-		AccessExpiresAt:    time.Now().Add(accessTokenTTLClient).Unix(),
+		CPAccessToken:      result.cpAccessToken,
+		NodeAccessToken:    result.nodeAccessToken,
+		AccessExpiresAt:    expiresAt,
 		RefreshToken:       result.refreshToken,
 		SessionKeyPKCS8PEM: keyPEM,
 	}
@@ -304,9 +311,10 @@ func loginDevice(ctx context.Context, dir, asURL string, w io.Writer) error {
 		}
 
 		var tokenOut struct {
-			CPAccessToken string `json:"cp_access_token"`
-			RefreshToken  string `json:"refresh_token"`
-			Error         string `json:"error"`
+			CPAccessToken   string `json:"cp_access_token"`
+			NodeAccessToken string `json:"node_access_token"`
+			RefreshToken    string `json:"refresh_token"`
+			Error           string `json:"error"`
 		}
 		body, _ := io.ReadAll(tokenResp.Body)
 		tokenResp.Body.Close()
@@ -315,17 +323,22 @@ func loginDevice(ctx context.Context, dir, asURL string, w io.Writer) error {
 		switch tokenOut.Error {
 		case "":
 			// Success.
-			if tokenOut.CPAccessToken == "" {
-				return fmt.Errorf("device/token: no cp_access_token in response: %s", body)
+			if tokenOut.CPAccessToken == "" || tokenOut.NodeAccessToken == "" || tokenOut.RefreshToken == "" {
+				return fmt.Errorf("device/token: incomplete credential pair in response: %s", body)
 			}
 			keyPEM, err := marshalSessionKey(sessKey)
 			if err != nil {
 				return fmt.Errorf("marshal session key: %w", err)
 			}
+			expiresAt, err := validateCredentialPair(tokenOut.CPAccessToken, tokenOut.NodeAccessToken, sessKey)
+			if err != nil {
+				return fmt.Errorf("device/token: validate credentials: %w", err)
+			}
 			s := &authState{
 				ASURL:              asURL,
-				AccessToken:        tokenOut.CPAccessToken,
-				AccessExpiresAt:    time.Now().Add(accessTokenTTLClient).Unix(),
+				CPAccessToken:      tokenOut.CPAccessToken,
+				NodeAccessToken:    tokenOut.NodeAccessToken,
+				AccessExpiresAt:    expiresAt,
 				RefreshToken:       tokenOut.RefreshToken,
 				SessionKeyPKCS8PEM: keyPEM,
 			}

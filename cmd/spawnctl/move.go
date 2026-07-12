@@ -193,7 +193,7 @@ func resolveMoveAccountID(dir, tokenFlag string) string {
 	if state.AccountID != "" {
 		return state.AccountID
 	}
-	accountID, _ := accountIDFromAccessToken(state.AccessToken)
+	accountID, _ := accountIDFromAccessToken(state.CPAccessToken)
 	return accountID
 }
 
