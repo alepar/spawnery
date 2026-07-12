@@ -412,7 +412,7 @@ func TestCPConfig_InsecureDevNodeOnPublicRequiresDevLoopback(t *testing.T) {
 	if _, err := loadCPTest(t, "dev", nil, "internal.insecure_dev_node_on_public=true"); err != nil {
 		t.Fatalf("explicit loopback dev lane: %v", err)
 	}
-	for _, listen := range []string{"0.0.0.0:8080", "[::]:8080", "192.168.1.20:8080", "cp.internal:8080"} {
+	for _, listen := range []string{"0.0.0.0:8080", "[::]:8080", "192.168.1.20:8080", "localhost:8080", "cp.internal:8080"} {
 		_, err := loadCPTest(t, "dev", nil, "internal.insecure_dev_node_on_public=true", "listen="+listen)
 		if err == nil {
 			t.Fatalf("listen %q accepted", listen)
