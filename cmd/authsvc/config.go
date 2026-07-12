@@ -32,10 +32,7 @@ type AS struct {
 		IntermediateKey  string `koanf:"intermediate_key"`
 	} `koanf:"ca"`
 
-	Session struct {
-		KeyPEM     string `koanf:"key_pem"`
-		KeyNextPEM string `koanf:"key_next_pem"`
-	} `koanf:"session"`
+	Signing ASAuthSigning `koanf:"signing"`
 
 	DB struct {
 		Driver string `koanf:"driver"`
@@ -69,6 +66,17 @@ type AS struct {
 	} `koanf:"cp"`
 
 	DevRelaxNodeAuth bool `koanf:"dev_relax_node_auth"`
+}
+
+// ASAuthSigning names the purpose-constrained online leaf credentials used for authorization
+// artifacts. The auth-signing intermediate private key is deliberately absent: it stays offline.
+type ASAuthSigning struct {
+	Environment     string `koanf:"environment"`
+	RootPEM         string `koanf:"root_pem"`
+	CurrentKeyPEM   string `koanf:"current_key_pem"`
+	CurrentChainPEM string `koanf:"current_chain_pem"`
+	NextKeyPEM      string `koanf:"next_key_pem"`
+	NextChainPEM    string `koanf:"next_chain_pem"`
 }
 
 // derive fills origin/callback/redirect fields from Common.PublicURL when they are left empty. An
@@ -109,12 +117,26 @@ func (c AS) Validate() error {
 		return err
 	}
 	if !c.Dev {
-		if c.Session.KeyPEM == "" {
-			return fmt.Errorf("session.key_pem is required in production (set dev=true for development)")
+		required := []struct {
+			name  string
+			value string
+		}{
+			{"signing.environment", c.Signing.Environment},
+			{"signing.root_pem", c.Signing.RootPEM},
+			{"signing.current_key_pem", c.Signing.CurrentKeyPEM},
+			{"signing.current_chain_pem", c.Signing.CurrentChainPEM},
+		}
+		for _, field := range required {
+			if field.value == "" {
+				return fmt.Errorf("%s is required in production (set dev=true for development)", field.name)
+			}
 		}
 		if string(c.GitHub.TokenEncKey) == "" && c.GitHub.TokenEncKeyFile == "" {
 			return fmt.Errorf("github.token_enc_key (or github.token_enc_key_file) is required for at-rest github token encryption")
 		}
+	}
+	if (c.Signing.NextKeyPEM == "") != (c.Signing.NextChainPEM == "") {
+		return fmt.Errorf("signing.next_key_pem and signing.next_chain_pem must be configured together")
 	}
 	// Real GitHub requires client credentials unless fake_github=true or dev mode with no client_id
 	// (dev fallback to in-process fake).
@@ -133,39 +155,43 @@ func (c AS) Validate() error {
 // asEnvAliases maps existing AS_* and bare GITHUB_* environment variable names to dotted config
 // keys, so current deployments keep working unchanged (the env layer sits above the files).
 var asEnvAliases = map[string]string{
-	"AS_PUBLIC_URL":                  "public_url",
-	"AS_DEV":                         "dev",
-	"AS_FAKE_GITHUB":                 "fake_github",
-	"AS_FAKE_GITHUB_ADDR":            "fake_github_addr",
-	"AS_FAKE_GITHUB_BASE_URL":        "fake_github_base_url",
-	"AS_FAKE_GITHUB_USERS":           "fake_github_users",
-	"AS_LISTEN":                      "listen",
-	"AS_ALLOWED_ORIGINS":             "allowed_origins",
-	"AS_ROOT_CA_PEM":                 "ca.root_pem",
-	"AS_TRUST_DOMAIN":                "ca.trust_domain",
-	"AS_INTERMEDIATE_CERT_PEM":       "ca.intermediate_cert",
-	"AS_INTERMEDIATE_KEY_PEM":        "ca.intermediate_key",
-	"AS_SESSION_KEY_PEM":             "session.key_pem",
-	"AS_SESSION_KEY_NEXT_PEM":        "session.key_next_pem",
-	"AS_DB_DSN":                      "db.dsn",
-	"AS_DB_DRIVER":                   "db.driver",
-	"AS_GITHUB_TOKEN_ENC_KEY":        "github.token_enc_key",
-	"AS_GITHUB_TOKEN_ENC_KEY_FILE":   "github.token_enc_key_file",
-	"GITHUB_CLIENT_ID":               "github.client_id",
-	"GITHUB_CLIENT_SECRET":           "github.client_secret",
-	"GITHUB_WEB_URL":                 "github.web_url",
-	"GITHUB_API_URL":                 "github.api_url",
-	"AS_GITHUB_REDIRECT_URI":         "github.redirect_uri",
-	"AS_GITHUB_LINK_REDIRECT_URI":    "github.link_redirect_uri",
-	"AS_GITHUB_POST_REDEEM_REDIRECT": "github.post_redeem_redirect",
-	"GITHUB_DEFAULT_HOST":            "github.default_host",
-	"AS_SPA_ORIGINS":                 "spa_origins",
-	"AS_REDIRECT_URIS":               "redirect_uris",
-	"AS_VERIFICATION_URI":            "verification_uri",
-	"REGISTRATION_ENABLED":           "registration_enabled",
-	"AS_MAX_FAMILIES":                "max_families",
-	"AS_CP_URL":                      "cp.url",
-	"AS_CP_RPC_SECRET":               "cp.rpc_secret",
-	"AS_CP_SECRET":                   "cp.secret",
-	"AS_DEV_RELAX_NODE_AUTH":         "dev_relax_node_auth",
+	"AS_PUBLIC_URL":                     "public_url",
+	"AS_DEV":                            "dev",
+	"AS_FAKE_GITHUB":                    "fake_github",
+	"AS_FAKE_GITHUB_ADDR":               "fake_github_addr",
+	"AS_FAKE_GITHUB_BASE_URL":           "fake_github_base_url",
+	"AS_FAKE_GITHUB_USERS":              "fake_github_users",
+	"AS_LISTEN":                         "listen",
+	"AS_ALLOWED_ORIGINS":                "allowed_origins",
+	"AS_ROOT_CA_PEM":                    "ca.root_pem",
+	"AS_TRUST_DOMAIN":                   "ca.trust_domain",
+	"AS_INTERMEDIATE_CERT_PEM":          "ca.intermediate_cert",
+	"AS_INTERMEDIATE_KEY_PEM":           "ca.intermediate_key",
+	"AS_AUTH_SIGNING_ENVIRONMENT":       "signing.environment",
+	"AS_AUTH_SIGNING_ROOT_PEM":          "signing.root_pem",
+	"AS_AUTH_SIGNING_CURRENT_KEY_PEM":   "signing.current_key_pem",
+	"AS_AUTH_SIGNING_CURRENT_CHAIN_PEM": "signing.current_chain_pem",
+	"AS_AUTH_SIGNING_NEXT_KEY_PEM":      "signing.next_key_pem",
+	"AS_AUTH_SIGNING_NEXT_CHAIN_PEM":    "signing.next_chain_pem",
+	"AS_DB_DSN":                         "db.dsn",
+	"AS_DB_DRIVER":                      "db.driver",
+	"AS_GITHUB_TOKEN_ENC_KEY":           "github.token_enc_key",
+	"AS_GITHUB_TOKEN_ENC_KEY_FILE":      "github.token_enc_key_file",
+	"GITHUB_CLIENT_ID":                  "github.client_id",
+	"GITHUB_CLIENT_SECRET":              "github.client_secret",
+	"GITHUB_WEB_URL":                    "github.web_url",
+	"GITHUB_API_URL":                    "github.api_url",
+	"AS_GITHUB_REDIRECT_URI":            "github.redirect_uri",
+	"AS_GITHUB_LINK_REDIRECT_URI":       "github.link_redirect_uri",
+	"AS_GITHUB_POST_REDEEM_REDIRECT":    "github.post_redeem_redirect",
+	"GITHUB_DEFAULT_HOST":               "github.default_host",
+	"AS_SPA_ORIGINS":                    "spa_origins",
+	"AS_REDIRECT_URIS":                  "redirect_uris",
+	"AS_VERIFICATION_URI":               "verification_uri",
+	"REGISTRATION_ENABLED":              "registration_enabled",
+	"AS_MAX_FAMILIES":                   "max_families",
+	"AS_CP_URL":                         "cp.url",
+	"AS_CP_RPC_SECRET":                  "cp.rpc_secret",
+	"AS_CP_SECRET":                      "cp.secret",
+	"AS_DEV_RELAX_NODE_AUTH":            "dev_relax_node_auth",
 }

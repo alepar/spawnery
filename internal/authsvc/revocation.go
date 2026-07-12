@@ -2,17 +2,11 @@ package authsvc
 
 // GET /revocations?since=<seq> — signed revocation feed for the CP (A2) to poll [AM10/(7)].
 //
-// Signing: each entry is signed with the AS session Ed25519 key under domain prefix
-// "spawnery/revocation/v1" (token.RevocationDomainPrefix). A2 verifies against the same
-// key set it uses for session tokens (same role, distinct domain). See token package.
+// Signing: each entry is a certified artifact envelope with type revocation-entry. A2 verifies
+// its embedded leaf-first chain against the environment root before parsing the payload.
 //
-// Response: JSON array of SignedRevocationEntry. A2 pins the AS public key (same key set
-// it receives for session tokens) and verifies the sig field over the entry bytes. The CP
+// Response: JSON array of SignedRevocationEntry. The CP verifies the sig field, then
 // must advance its checkpoint past the highest seq it has processed to avoid re-delivering.
-//
-// R7 note: reusing the AS session-signing key for the revocation feed means the CP pins one
-// key set and consumes both artifacts. This is deliberate; confirm with A2 owner if a
-// dedicated feed key is required (the domain prefix already separates the two namespaces).
 //
 // Access control: if IdPConfig.CPSecret is non-empty (production), the CP MUST supply
 // "Authorization: Bearer <CPSecret>" or the request is rejected 401. This is a
@@ -33,19 +27,17 @@ import (
 // SignedRevocationEntry is one entry in the /revocations feed that A2 consumes.
 //
 // SECURITY CONTRACT (A2 integrators must read this):
-// Sig is the full wire artifact: base64url(bodyBytes) "." base64url(ed25519sig), produced by
-// token.SignArtifact. The outer fields (Seq, AccountID, FamilyID, TokenIDs, RevokedAt) are
-// convenience copies — they are NOT authenticated. A2 MUST call token.VerifyArtifact on Sig
-// and read only the decoded body bytes (WM9 discipline). Never trust the outer fields without
-// first verifying the signature; any consumer that reads the outer fields before verification
-// is vulnerable to tampering.
+// Sig is the full certified revocation-entry envelope. The outer fields (Seq, AccountID,
+// FamilyID, TokenIDs, RevokedAt) are convenience copies — they are NOT authenticated. A2 MUST
+// call token.Verifier.Verify on Sig and read only the verified payload bytes (WM9 discipline).
+// Never trust the outer fields before verification; they are vulnerable to tampering.
 type SignedRevocationEntry struct {
 	Seq       int64  `json:"seq"`
 	AccountID string `json:"account_id"`
 	FamilyID  string `json:"family_id"`
 	TokenIDs  string `json:"token_ids"` // JSON array of access-token token_ids
 	RevokedAt int64  `json:"revoked_at"`
-	Sig       string `json:"sig"` // full wire: base64url(body).base64url(ed25519sig) — verify before trusting outer fields
+	Sig       string `json:"sig"` // certified envelope; verify before trusting outer fields
 }
 
 // serveRevocations handles GET /revocations?since=<seq>.
@@ -90,7 +82,7 @@ func (i *IdP) serveRevocations(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(entries)
 }
 
-// signRevocationEntry signs a revocation event using the token.SignArtifact discipline.
+// signRevocationEntry signs a revocation event using the certified artifact discipline.
 // The entry bytes are the canonical JSON of {seq,account_id,family_id,token_ids,revoked_at}.
 // The sig is over (RevocationDomainPrefix || entry_bytes) — same raw-bytes discipline as tokens.
 func (i *IdP) signRevocationEntry(ev store.RevocationEvent) (SignedRevocationEntry, error) {
@@ -109,8 +101,10 @@ func (i *IdP) signRevocationEntry(ev store.RevocationEvent) (SignedRevocationEnt
 	if err != nil {
 		return SignedRevocationEntry{}, fmt.Errorf("revocation: marshal: %w", err)
 	}
-	wire := token.SignArtifact(token.RevocationDomainPrefix, bodyBytes, i.cfg.SigningKey)
-	// wire = base64url(bodyBytes) "." base64url(sig) — extract just the sig part.
+	wire, err := i.signers.sign(token.ArtifactTypeRevocation, bodyBytes)
+	if err != nil {
+		return SignedRevocationEntry{}, fmt.Errorf("revocation: sign: %w", err)
+	}
 	return SignedRevocationEntry{
 		Seq: ev.Seq, AccountID: ev.AccountID, FamilyID: ev.FamilyID,
 		TokenIDs: ev.TokenIDs, RevokedAt: ev.RevokedAt,

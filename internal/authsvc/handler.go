@@ -1,7 +1,6 @@
 package authsvc
 
 import (
-	"encoding/base64"
 	"net/http"
 
 	"spawnery/gen/auth/v1/authv1connect"
@@ -34,10 +33,6 @@ func (s *Service) Handler() http.Handler {
 		_, _ = w.Write(s.RootCAPEM())
 	})
 	mux.HandleFunc("POST /enroll", s.enrollHandler)
-	mux.HandleFunc("GET /session/pubkey", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		_, _ = w.Write([]byte(base64.RawURLEncoding.EncodeToString(s.SessionPubKey())))
-	})
 	if s.nodeRevocations != nil {
 		mux.HandleFunc("GET /node-revocations", s.serveNodeRevocations)
 	}

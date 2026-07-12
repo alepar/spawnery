@@ -5,7 +5,6 @@ package authsvc_test
 
 import (
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -45,12 +44,15 @@ func TestHandlerFullVertical(t *testing.T) {
 	defer fake.Close()
 	fake.SetUser(88001, "e2euser")
 
-	now := time.Unix(1770000000, 0)
+	now := time.Now().UTC()
 	st := store.NewTestStore(t)
-	_, sigKey, _ := ed25519.GenerateKey(rand.Reader)
 	sessKey, spkiDER := genP256key(t)
 
 	root, err := pki.NewRootCA("Test Root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := authsvc.NewDevelopmentSigningCredential(root, "test", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +70,7 @@ func TestHandlerFullVertical(t *testing.T) {
 	cfg := authsvc.IdPConfig{
 		Store:               st,
 		GitHub:              authsvc.NewGitHubProvider(fake.URL(), fake.URL(), fake.ClientID, fake.ClientSecret),
-		SigningKey:           sigKey,
+		Signer:              signer,
 		GitHubRedirectURI:   callbackURI,
 		SPAOrigin:           "http://localhost:3000",
 		RedirectURIs:        []string{"http://localhost:3000/callback"},
@@ -161,7 +163,9 @@ func TestHandlerFullVertical(t *testing.T) {
 		body, _ := io.ReadAll(refreshResp.Body)
 		t.Fatalf("refresh: want 200, got %d: %s", refreshResp.StatusCode, body)
 	}
-	var refreshOut struct{ AccessToken string `json:"access_token"` }
+	var refreshOut struct {
+		AccessToken string `json:"access_token"`
+	}
 	body2, _ := io.ReadAll(refreshResp.Body)
 	_ = json.Unmarshal(body2, &refreshOut)
 	if refreshOut.AccessToken == "" {

@@ -13,9 +13,13 @@ ca:
   intermediate_cert: "/etc/spawnery/as/self-hosted-intermediate.pem"
   intermediate_key: "/etc/spawnery/as/self-hosted-intermediate-key.pem"
 
-session:
-  key_pem: ""       # required in production; generated ephemerally when dev=true
-  key_next_pem: ""  # next-rotation public key path (optional)
+signing:
+  environment: ""         # required in production, e.g. prod
+  root_pem: ""            # environment Spawnery root certificate
+  current_key_pem: ""     # Ed25519 PKCS#8 leaf key; required in production
+  current_chain_pem: ""   # leaf-first certificate chain, root omitted; required in production
+  next_key_pem: ""        # optional rotation credential; key and chain must appear together
+  next_chain_pem: ""
 
 db:
   driver: sqlite

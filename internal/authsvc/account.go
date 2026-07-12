@@ -5,6 +5,10 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	authv1 "spawnery/gen/auth/v1"
+
 	"spawnery/internal/authsvc/token"
 )
 
@@ -20,20 +24,26 @@ func FixedAccountFromRequest(accountID string) AccountFromRequest {
 }
 
 // SessionBearerAccount extracts the account from a Bearer AS session token, verified against the
-// AS's own published key set (own + next). Used to authenticate the owner-driven GitHub link
+// the AS's root-anchored verifier. Used to authenticate the owner-driven GitHub link
 // endpoints (one link per account; secret_id is account-derived). A missing/expired/forged token
 // or a blank account returns ("", false).
 //
 // Audience checking is intentionally omitted — any validly AS-signed live session identifies the
 // account; the link redeem adds the channel-completer secret (cookie/rc) on top per the
 // owner-link design. If now is nil, time.Now is used.
-func SessionBearerAccount(ks token.KeySet, now func() time.Time) AccountFromRequest {
+func SessionBearerAccount(verifier *token.Verifier, now func() time.Time) AccountFromRequest {
 	if now == nil {
 		now = time.Now
 	}
 	return BearerTokenAccount(func(tok string) (string, bool) {
-		body, err := token.Verify(tok, ks, now())
-		if err != nil || body.GetAccountId() == "" {
+		current := now()
+		payload, err := verifier.Verify(tok, token.ArtifactTypeSession, current)
+		if err != nil {
+			return "", false
+		}
+		var body authv1.SessionTokenBody
+		if err := proto.Unmarshal(payload, &body); err != nil || body.GetAccountId() == "" ||
+			!current.Before(time.Unix(body.GetExpiresAt(), 0)) || time.Unix(body.GetIssuedAt(), 0).After(current.Add(time.Minute)) {
 			return "", false
 		}
 		return body.GetAccountId(), true

@@ -10,7 +10,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -55,7 +54,6 @@ func (l *lazyTestMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func buildTestAS(t *testing.T, fake *githubfake.Fake, nowFn func() time.Time) (*httptest.Server, store.Store, authsvc.IdPConfig) {
 	t.Helper()
 
-	_, sigKey, _ := ed25519.GenerateKey(rand.Reader)
 	st := store.NewTestStore(t)
 
 	root, err := pki.NewRootCA("Test Root")
@@ -74,10 +72,14 @@ func buildTestAS(t *testing.T, fake *githubfake.Fake, nowFn func() time.Time) (*
 	if nowFn == nil {
 		nowFn = time.Now
 	}
+	signer, err := authsvc.NewDevelopmentSigningCredential(root, "test", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := authsvc.IdPConfig{
 		Store:               st,
 		GitHub:              authsvc.NewGitHubProvider(fake.URL(), fake.URL(), fake.ClientID, fake.ClientSecret),
-		SigningKey:          sigKey,
+		Signer:              signer,
 		GitHubRedirectURI:   srv.URL + "/oauth/callback",
 		SPAOrigin:           "http://localhost:3000",
 		RedirectURIs:        []string{"http://localhost:3000/callback", "http://127.0.0.1:8000/cb"},

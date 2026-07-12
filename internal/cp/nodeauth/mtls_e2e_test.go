@@ -4,11 +4,14 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc"
@@ -115,28 +118,31 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 func TestForgedSessionTokenRejectedE2E(t *testing.T) {
 	root, _ := pki.NewRootCA("R")
 	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
-	as := authsvc.New(root.Cert, inter)
-
-	asPub := as.SessionPubKey()
-	ks, err := token.NewKeySet(asPub)
-	if err != nil {
-		t.Fatalf("NewKeySet: %v", err)
-	}
-	keyID, _ := token.KeyID(asPub)
-
-	// Mint a genuine token using the AS's session key.
 	now := time.Now()
-	asPriv := as.SessionPrivKey()
+	signer, err := authsvc.NewDevelopmentSigningCredential(root, "test", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := token.NewVerifier(root.Cert, "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mint a genuine token using the AS's certified signer.
 	body := &authv1.SessionTokenBody{
 		AccountId: "alice", TokenId: "t1", Audience: "cp",
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
-		KeyId: keyID,
+		KeyId: hex.EncodeToString(signer.KeyID[:]),
 	}
-	genuineTok, err := token.Mint(body, asPriv)
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genuineTok, err := signer.Sign(token.ArtifactTypeSession, payload)
 	if err != nil {
 		t.Fatalf("Mint genuine token: %v", err)
 	}
-	if _, err := token.Verify(genuineTok, ks, now); err != nil {
+	if _, err := verifier.Verify(genuineTok, token.ArtifactTypeSession, now); err != nil {
 		t.Fatalf("genuine AS token must verify: %v", err)
 	}
 
@@ -149,7 +155,7 @@ func TestForgedSessionTokenRejectedE2E(t *testing.T) {
 		KeyId: cpKeyID, // unknown key_id
 	}
 	forgedTok, _ := token.Mint(forgedBody, cpKey)
-	if _, err := token.Verify(forgedTok, ks, now); err == nil {
+	if _, err := verifier.Verify(forgedTok, token.ArtifactTypeSession, now); err == nil {
 		t.Fatal("a token not signed by the AS key must be rejected (unknown key_id)")
 	}
 
@@ -157,10 +163,10 @@ func TestForgedSessionTokenRejectedE2E(t *testing.T) {
 	spoofedBody := &authv1.SessionTokenBody{
 		AccountId: "attacker", TokenId: "t3", Audience: "cp",
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
-		KeyId: keyID, // AS key_id but signed with cpKey
+		KeyId: hex.EncodeToString(signer.KeyID[:]), // AS key_id but signed with cpKey
 	}
 	spoofedTok, _ := token.Mint(spoofedBody, cpKey)
-	if _, err := token.Verify(spoofedTok, ks, now); err == nil {
+	if _, err := verifier.Verify(spoofedTok, token.ArtifactTypeSession, now); err == nil {
 		t.Fatal("a token with spoofed key_id (but wrong sig) must be rejected")
 	}
 

@@ -1,6 +1,6 @@
 // Command authsvc runs the Spawnery Auth Service: the identity root of trust, deployed in its own
 // container apart from the CP. It holds the Root CA cert, the self-hosted intermediate (cert + key),
-// and the AS session-signing key. It provides:
+// and a certified auth-artifact signing leaf. It provides:
 //   - Node enrollment (sp-0qc)
 //   - AS-signed session tokens (sp-3ca)
 //   - Identity: GitHub OAuth login, refresh families, device grant (sp-ussy.1)
@@ -25,9 +25,13 @@
 //	  AS_INTERMEDIATE_CERT_PEM       Path to self-hosted intermediate cert PEM
 //	  AS_INTERMEDIATE_KEY_PEM        Path to self-hosted intermediate key PEM
 //
-//	Session signing keys (Ed25519, PKCS#8 PEM):
-//	  AS_SESSION_KEY_PEM             Path to current session signing key (default: generated in AS_DEV)
-//	  AS_SESSION_KEY_NEXT_PEM        Path to next session signing key (published for rotation; optional)
+//	Certified auth-artifact signing credentials:
+//	  AS_AUTH_SIGNING_ENVIRONMENT        Environment trust-domain label (for example, prod)
+//	  AS_AUTH_SIGNING_ROOT_PEM           Path to the environment Spawnery root certificate
+//	  AS_AUTH_SIGNING_CURRENT_KEY_PEM    Path to the current Ed25519 PKCS#8 leaf key
+//	  AS_AUTH_SIGNING_CURRENT_CHAIN_PEM  Path to its leaf-first certificate chain, root omitted
+//	  AS_AUTH_SIGNING_NEXT_KEY_PEM       Optional next leaf key; requires NEXT_CHAIN_PEM
+//	  AS_AUTH_SIGNING_NEXT_CHAIN_PEM     Optional next leaf-first chain; requires NEXT_KEY_PEM
 //
 //	Database (sqlite tier-0; see deploy/authsvc/README.md for litestream replication):
 //	  AS_DB_DSN                      SQLite DSN (default: file:/var/lib/authsvc/identity.db;
@@ -69,9 +73,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"net/http"
@@ -204,14 +211,31 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 		root, inter = rc.root, rc.inter
 	}
 
-	// Session signing key.
-	sigKey, err := loadOrGenerateSigningKey(cfg)
-	if err != nil {
-		return nil, err
+	var credentials *signingCredentials
+	if cfg.Dev && cfg.Signing.CurrentKeyPEM == "" && cfg.Signing.CurrentChainPEM == "" && cfg.Signing.RootPEM == "" {
+		environment := cfg.Signing.Environment
+		if environment == "" {
+			environment = "dev"
+		}
+		signer, err := authsvc.NewDevelopmentSigningCredential(root, environment, time.Now())
+		if err != nil {
+			return nil, fmt.Errorf("authsvc: development signing bootstrap: %w", err)
+		}
+		credentials = &signingCredentials{Root: root.Cert, Current: signer}
+		cfg.Signing.Environment = environment
+		log.Printf("authsvc: DEV — generated ephemeral certified auth-artifact signer")
+	} else {
+		credentials, err = loadSigningCredentials(cfg.Signing, time.Now())
+		if err != nil {
+			return nil, err
+		}
 	}
-	nextPubs, err := loadNextPubs(cfg.Session.KeyNextPEM)
+	if credentials.Root != nil && !bytes.Equal(credentials.Root.Raw, root.Cert.Raw) {
+		return nil, fmt.Errorf("authsvc: signing.root_pem does not match ca.root_pem")
+	}
+	artifactVerifier, err := token.NewVerifier(root.Cert, cfg.Signing.Environment, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("authsvc: artifact verifier: %w", err)
 	}
 
 	// Identity store. Dev mode defaults to an ephemeral in-memory DB, matching the dev CA and
@@ -281,8 +305,8 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 	idp, err := authsvc.NewIdP(authsvc.IdPConfig{
 		Store:               idStore,
 		GitHub:              ghProvider,
-		SigningKey:          sigKey,
-		NextPubKeys:         nextPubs,
+		Signer:              credentials.Current,
+		NextSigner:          credentials.Next,
 		GitHubRedirectURI:   cfg.GitHub.RedirectURI,
 		SPAOrigin:           spaOrigin,
 		RedirectURIs:        redirectURIs,
@@ -297,7 +321,6 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 
 	opts := []authsvc.Option{
 		authsvc.WithTrustDomain(cfg.CA.TrustDomain),
-		authsvc.WithSessionKey(sigKey),
 		authsvc.WithIdP(idp),
 		authsvc.WithNodeRevocations(idStore.NodeRevocations()),
 		authsvc.WithGitHubMinting(idStore, ghProvider),
@@ -347,7 +370,7 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 			RedirectURI:        linkRedirect,
 			PostRedeemRedirect: cfg.GitHub.PostRedeemRedirect,
 			DefaultHost:        cfg.GitHub.DefaultHost,
-			AccountFromReq:     authsvc.SessionBearerAccount(idp.KeySet(), time.Now),
+			AccountFromReq:     authsvc.SessionBearerAccount(artifactVerifier, time.Now),
 			SPAOrigin:          spaOrigin,
 		}))
 		log.Printf("authsvc: GitHub link bootstrap flow ACTIVE (callback %s)", linkRedirect)
@@ -393,6 +416,167 @@ type productionCA struct {
 	inter *pki.CA
 }
 
+type signingCredentials struct {
+	Root    *x509.Certificate
+	Current *token.SigningCredential
+	Next    *token.SigningCredential
+}
+
+func loadSigningCredentials(cfg ASAuthSigning, now time.Time) (*signingCredentials, error) {
+	rootRaw, err := os.ReadFile(cfg.RootPEM)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: read signing.root_pem (%s): %w", cfg.RootPEM, err)
+	}
+	root, err := parseCertificatePEM(rootRaw)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: parse signing.root_pem (%s): %w", cfg.RootPEM, err)
+	}
+	current, err := loadSigningCredential("current", cfg.CurrentKeyPEM, cfg.CurrentChainPEM, root, cfg.Environment, now)
+	if err != nil {
+		return nil, err
+	}
+	credentials := &signingCredentials{Root: root, Current: current}
+	if cfg.NextKeyPEM != "" || cfg.NextChainPEM != "" {
+		if cfg.NextKeyPEM == "" || cfg.NextChainPEM == "" {
+			return nil, fmt.Errorf("authsvc: signing next key and chain must be configured together")
+		}
+		credentials.Next, err = loadSigningCredential("next", cfg.NextKeyPEM, cfg.NextChainPEM, root, cfg.Environment, now)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return credentials, nil
+}
+
+func loadSigningCredential(label, keyPath, chainPath string, root *x509.Certificate, environment string, now time.Time) (*token.SigningCredential, error) {
+	keyRaw, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: read %s signing key (%s): %w", label, keyPath, err)
+	}
+	defer clear(keyRaw)
+	privateKey, err := parseSigningPrivateKeyPEM(keyRaw)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: parse %s signing key (%s): %w", label, keyPath, err)
+	}
+	defer clear(privateKey)
+	chainRaw, err := os.ReadFile(chainPath)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: read %s signing chain (%s): %w", label, chainPath, err)
+	}
+	chain, err := parseCertificateChainPEM(chainRaw)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: parse %s signing chain (%s): %w", label, chainPath, err)
+	}
+	credential, err := token.NewSigningCredential(privateKey, chain, root, environment, now)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: validate %s signing credential (key %s, chain %s): %w", label, keyPath, chainPath, err)
+	}
+	return credential, nil
+}
+
+func parseCertificatePEM(raw []byte) (*x509.Certificate, error) {
+	certificates, err := parseCertificateChainPEM(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(certificates) != 1 {
+		return nil, fmt.Errorf("expected exactly one certificate, got %d", len(certificates))
+	}
+	return certificates[0], nil
+}
+
+func parseCertificateChainPEM(raw []byte) ([]*x509.Certificate, error) {
+	var certificates []*x509.Certificate
+	for len(raw) > 0 {
+		block, rest, err := consumeCanonicalPEMBlock(raw, "CERTIFICATE")
+		if err != nil {
+			if len(certificates) > 0 {
+				return nil, fmt.Errorf("invalid trailing PEM data: %w", err)
+			}
+			return nil, err
+		}
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			return nil, fmt.Errorf("unexpected PEM block %q", block.Type)
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse certificate: %w", err)
+		}
+		certificates = append(certificates, cert)
+		raw = rest
+	}
+	if len(certificates) == 0 {
+		return nil, fmt.Errorf("no certificates")
+	}
+	return certificates, nil
+}
+
+func parseSigningPrivateKeyPEM(raw []byte) (ed25519.PrivateKey, error) {
+	block, rest, err := consumeCanonicalPEMBlock(raw, "PRIVATE KEY")
+	if err != nil {
+		return nil, err
+	}
+	defer clear(block.Bytes)
+	if block.Type != "PRIVATE KEY" || len(block.Headers) != 0 || len(rest) != 0 {
+		return nil, fmt.Errorf("expected exactly one headerless PRIVATE KEY block")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse PKCS#8 private key: %w", err)
+	}
+	privateKey, ok := parsed.(ed25519.PrivateKey)
+	if !ok || len(privateKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("private key is not Ed25519")
+	}
+	canonical := ed25519.NewKeyFromSeed(privateKey[:ed25519.SeedSize])
+	clear(privateKey)
+	return canonical, nil
+}
+
+// consumeCanonicalPEMBlock decodes exactly one zero-offset PEM block. Both LF and CRLF are
+// canonical inputs; mixed endings, prefixes, skipped malformed blocks, and trailing bytes within
+// the framed block are rejected by byte-for-byte canonical re-encoding.
+func consumeCanonicalPEMBlock(raw []byte, blockType string) (*pem.Block, []byte, error) {
+	headerBase := "-----BEGIN " + blockType + "-----"
+	newline := ""
+	switch {
+	case bytes.HasPrefix(raw, []byte(headerBase+"\n")):
+		newline = "\n"
+	case bytes.HasPrefix(raw, []byte(headerBase+"\r\n")):
+		newline = "\r\n"
+	default:
+		return nil, nil, fmt.Errorf("PEM block does not start with %s", headerBase)
+	}
+	header := headerBase + newline
+	footer := "-----END " + blockType + "-----" + newline
+	body := raw[len(header):]
+	footerOffset := bytes.Index(body, []byte(footer))
+	if footerOffset < 0 || !hasPEMLineBoundary(body, footerOffset, newline) {
+		return nil, nil, fmt.Errorf("invalid %s PEM block", blockType)
+	}
+	blockEnd := len(header) + footerOffset + len(footer)
+	blockRaw := raw[:blockEnd]
+	block, undecoded := pem.Decode(blockRaw)
+	if block == nil || len(undecoded) != 0 {
+		return nil, nil, fmt.Errorf("invalid %s PEM block", blockType)
+	}
+	canonical := pem.EncodeToMemory(block)
+	if newline == "\r\n" {
+		canonical = bytes.ReplaceAll(canonical, []byte("\n"), []byte("\r\n"))
+	}
+	if !bytes.Equal(blockRaw, canonical) {
+		return nil, nil, fmt.Errorf("non-canonical %s PEM block", blockType)
+	}
+	return block, raw[blockEnd:], nil
+}
+
+func hasPEMLineBoundary(body []byte, footerOffset int, newline string) bool {
+	if footerOffset == 0 {
+		return true
+	}
+	return footerOffset >= len(newline) && bytes.Equal(body[footerOffset-len(newline):footerOffset], []byte(newline))
+}
+
 func buildProductionCA(cfg *AS) (*productionCA, error) {
 	rootCertBytes, err := os.ReadFile(cfg.CA.RootPEM)
 	if err != nil {
@@ -422,43 +606,6 @@ func buildProductionCA(cfg *AS) (*productionCA, error) {
 		root:  &pki.CA{Cert: rootCert},
 		inter: &pki.CA{Cert: interCert, Key: interKey},
 	}, nil
-}
-
-func loadOrGenerateSigningKey(cfg *AS) (ed25519.PrivateKey, error) {
-	path := cfg.Session.KeyPEM
-	if path == "" {
-		if cfg.Dev {
-			_, k, err := ed25519.GenerateKey(nil)
-			if err != nil {
-				return nil, err
-			}
-			log.Printf("authsvc: DEV — generated ephemeral session signing key")
-			return k, nil
-		}
-		// Validate() ensures this cannot happen in production.
-		return nil, fmt.Errorf("session.key_pem is required in production (set dev=true for development)")
-	}
-	pemBytes, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	k, _, err := token.LoadSigningKey(pemBytes)
-	return k, err
-}
-
-func loadNextPubs(path string) ([]ed25519.PublicKey, error) {
-	if path == "" {
-		return nil, nil
-	}
-	pemBytes, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	pub, err := token.ParsePublicKeyPEM(pemBytes)
-	if err != nil {
-		return nil, err
-	}
-	return []ed25519.PublicKey{pub}, nil
 }
 
 // loadGitHubTokenCipher builds the at-rest cipher for AS-custodial github tokens
