@@ -194,9 +194,10 @@ duration as `slog.Info("artifacts: by-ref staging complete", "count", N, "elapse
 work) over R=5 iterations on a configurable K-member bundle, asserting `max < PresignTTL/3`. **The
 VM-lane run itself has not been executed** — it needs a provisioned e2e VM with real GitHub egress
 (see `docs/e2e-vm-testing.md`) plus a curated set of small public GitHub skill repos
-(`ACC_SKILL_SOURCE_REPOS`), neither of which was available in this implementation session. See the
-dated Post-Implementation note below; running the VM lane and recording the actual measured number
-is tracked as a follow-up, not fabricated here.
+(`ACC_SKILL_SOURCE_REPOS`), neither of which was available in this implementation session. **This
+gap — no measured number in this section — is tracked as bd `sp-mwco.4.6.1`** (run the VM lane, or
+its `just dev` + `just garage` fallback per the plan's Step 8, and record the number here); it is
+not fabricated in its absence.
 
 ### 4.9 Testing
 
@@ -265,4 +266,5 @@ used.*
   NOT executed in this implementation session** (no provisioned e2e VM + real GitHub egress + curated
   skill-repo fixture list available); §4.8's "record the number here" is therefore still open —
   running `GOLDEN_IMAGE=… scripts/e2e-vm/run.sh --profile fake` (or the local dev-stack fallback) and
-  recording the observed max is a follow-up, tracked so this gap isn't silently lost.
+  recording the observed max is filed as **bd `sp-mwco.4.6.1`**, a child of this bead, so it isn't
+  silently lost.
