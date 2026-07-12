@@ -215,11 +215,11 @@ func principalIDForTrustDomain(trustDomain string) (*url.URL, error) {
 }
 
 func validateTrustDomain(trustDomain string) error {
-	if trustDomain == "" || strings.ToLower(trustDomain) != trustDomain || strings.ContainsAny(trustDomain, "/:@%") || strings.HasPrefix(trustDomain, ".") || strings.HasSuffix(trustDomain, ".") {
+	if trustDomain == "" || strings.ToLower(trustDomain) != trustDomain || strings.ContainsAny(trustDomain, "/:@%") {
 		return fmt.Errorf("pki: invalid trust domain %q", trustDomain)
 	}
 	for _, r := range trustDomain {
-		if !isAlphaNumeric(r) && r != '.' && r != '-' {
+		if !isAlphaNumeric(r) && r != '.' && r != '-' && r != '_' {
 			return fmt.Errorf("pki: invalid trust domain %q", trustDomain)
 		}
 	}
@@ -227,11 +227,11 @@ func validateTrustDomain(trustDomain string) error {
 }
 
 func validatePathSegment(segment string) error {
-	if segment == "" {
-		return errors.New("pki: SPIFFE path segments must be non-empty")
+	if segment == "" || segment == "." || segment == ".." {
+		return errors.New("pki: SPIFFE path segments must be non-empty and non-relative")
 	}
 	for _, r := range segment {
-		if !isAlphaNumeric(r) && r != '.' && r != '_' && r != '~' && r != '-' {
+		if !isAlphaNumeric(r) && r != '.' && r != '_' && r != '-' {
 			return fmt.Errorf("pki: invalid SPIFFE path segment %q", segment)
 		}
 	}

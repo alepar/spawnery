@@ -73,7 +73,9 @@ func TestParsePrincipalRejectsNonCanonicalIDs(t *testing.T) {
 		"spiffe://prod.spawnery.internal/service/cp/cp-a/extra",
 		"spiffe://prod.spawnery.internal/service/other/x",
 		"spiffe://prod.spawnery.internal/node/cloud/acct/node/extra",
-		"spiffe://prod.spawnery.internal/node/self-hosted/acct/node:bad",
+		"spiffe://prod.spawnery.internal/node/self-hosted/acct/node~bad",
+		"spiffe://prod.spawnery.internal/service/cp/.",
+		"spiffe://prod.spawnery.internal/service/cp/..",
 		"https://prod.spawnery.internal/service/cp/cp-a",
 	}
 	for _, raw := range tests {
@@ -111,6 +113,9 @@ func TestPrincipalIDConstructors(t *testing.T) {
 	}
 	if _, err := NodeID("prod.spawnery.internal", "cloud", "", "n"); err == nil {
 		t.Fatal("NodeID accepted an empty account")
+	}
+	if _, err := ServiceID("prod_env.spawnery.internal", "cp", "cp_a"); err != nil {
+		t.Fatalf("ServiceID rejected SPIFFE-valid underscores: %v", err)
 	}
 }
 
