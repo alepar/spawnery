@@ -23,6 +23,7 @@ node:
   auth_mode:       "insecure"        # insecure (h2c) | enforced (mTLS)
   id_dir:          "/var/lib/spawnlet/identity"  # enrolled cert + key dir
   root_ca:         ""                 # pinned root CA PEM path (default: <id_dir>/root.pem)
+  trust_domain:    "dev.spawnery.internal" # expected SPIFFE trust domain; override in staging/prod
   as_pubkeys:      ""                 # CSV of AS session public-key PEM paths
   github_mint_dev_id: ""             # DEV-ONLY: relaxed node identity for AS GitHub-mint
 

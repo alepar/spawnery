@@ -34,6 +34,7 @@ type Spawnlet struct {
 		AuthMode        string `koanf:"auth_mode"`
 		IDDir           string `koanf:"id_dir"`
 		RootCA          string `koanf:"root_ca"`
+		TrustDomain     string `koanf:"trust_domain"`
 		ASPubkeys       string `koanf:"as_pubkeys"`
 		GitHubMintDevID string `koanf:"github_mint_dev_id"`
 	} `koanf:"node"`
@@ -120,6 +121,7 @@ var spawnletEnvAliases = map[string]string{
 	"NODE_AUTH_MODE":                "node.auth_mode",
 	"NODE_ID_DIR":                   "node.id_dir",
 	"NODE_ROOT_CA":                  "node.root_ca",
+	"NODE_TRUST_DOMAIN":             "node.trust_domain",
 	"NODE_AS_PUBKEYS":               "node.as_pubkeys",
 	"NODE_GITHUB_MINT_DEV_NODE_ID":  "node.github_mint_dev_id",
 	"CP_ADDR":                       "cp.addr",

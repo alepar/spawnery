@@ -72,6 +72,8 @@ type Config struct {
 	// sealing. Empty in insecure mode; cross-node owner-sealed fork transfer
 	// fails closed when it is missing.
 	NodeRootPEM []byte
+	// NodeTrustDomain is the configured SPIFFE trust domain for target-node verification.
+	NodeTrustDomain string
 
 	// Verifier is the A4 intent verifier for StartSpawn and SessionOpen [AC1][AM12].
 	// nil = skip verification (dev/insecure default until the verifier is explicitly configured).

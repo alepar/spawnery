@@ -45,7 +45,7 @@ func issue(t *testing.T, nodeID, account, class string) nodeFix {
 }
 
 func selfHosted(account string) subkey.Expectation {
-	return clientverify.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: account}
+	return clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: account}
 }
 
 // denyList is a test-double RevocationChecker (the AS list service is out of

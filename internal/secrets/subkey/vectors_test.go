@@ -96,9 +96,9 @@ func generateSubKeyVectors(t *testing.T) {
 		t.Fatalf("marshal sub-key: %v", err)
 	}
 
-	leafPEM  := pki.MarshalCertPEM(n.Cert)
+	leafPEM := pki.MarshalCertPEM(n.Cert)
 	interPEM := pki.MarshalCertPEM(inter.Cert)
-	rootPEM  := pki.MarshalCertPEM(r.Cert)
+	rootPEM := pki.MarshalCertPEM(r.Cert)
 	chainPEM := string(leafPEM) + string(interPEM)
 
 	// Forged-cloud negative vector: SH intermediate signs a cloud-class leaf.
@@ -174,8 +174,8 @@ func verifySubKeyVectors(t *testing.T) {
 		[]byte(v.IntermediatePEM),
 		[]byte(v.RootPEM),
 		sk,
-		subkey.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "alice"},
-		nil, // AllowAll revocation
+		subkey.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"},
+		nil,      // AllowAll revocation
 		verifyAt, // within sub-key validity window
 	)
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"math/big"
+	"net"
 	"net/url"
 	"reflect"
 	"testing"
@@ -234,8 +235,10 @@ func TestVerifyPrincipalRejectsIssuerPathMismatch(t *testing.T) {
 		{name: "service issuer to cloud", issuerRole: IssuerService, leafRole: RoleCloud},
 		{name: "service issuer to self-hosted", issuerRole: IssuerService, leafRole: RoleSelfHosted},
 		{name: "cloud issuer to service", issuerRole: IssuerCloudNode, leafRole: RoleCP, service: true},
+		{name: "cloud issuer to authsvc", issuerRole: IssuerCloudNode, leafRole: RoleAuthService, service: true},
 		{name: "cloud issuer to self-hosted", issuerRole: IssuerCloudNode, leafRole: RoleSelfHosted},
 		{name: "self-hosted issuer to service", issuerRole: IssuerSelfHostedNode, leafRole: RoleAuthService, service: true},
+		{name: "self-hosted issuer to CP", issuerRole: IssuerSelfHostedNode, leafRole: RoleCP, service: true},
 		{name: "self-hosted issuer to cloud", issuerRole: IssuerSelfHostedNode, leafRole: RoleCloud},
 	}
 	for _, tt := range tests {
@@ -249,6 +252,37 @@ func TestVerifyPrincipalRejectsIssuerPathMismatch(t *testing.T) {
 			}
 			if _, err := VerifyPrincipal(leaf.Cert, leaf.Chain, verifyOptions(root.Cert, now)); err == nil {
 				t.Fatal("issuer/path mismatch accepted")
+			}
+		})
+	}
+}
+
+func TestVerifyPrincipalRejectsDuplicateAllowedGeneralNames(t *testing.T) {
+	now := time.Now()
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	material, _ := issuer.IssueService(RoleCP, "cp-a", "prod.spawnery.internal", []string{"cp.internal"}, []net.IP{net.ParseIP("127.0.0.1")}, now.Add(time.Hour))
+	tests := []struct {
+		name  string
+		names []asn1.RawValue
+	}{
+		{name: "DNS", names: []asn1.RawValue{
+			{Class: 2, Tag: 6, Bytes: []byte(material.Cert.URIs[0].String())},
+			{Class: 2, Tag: 2, Bytes: []byte("cp.internal")},
+			{Class: 2, Tag: 2, Bytes: []byte("cp.internal")},
+		}},
+		{name: "IP", names: []asn1.RawValue{
+			{Class: 2, Tag: 6, Bytes: []byte(material.Cert.URIs[0].String())},
+			{Class: 2, Tag: 7, Bytes: []byte{127, 0, 0, 1}},
+			{Class: 2, Tag: 7, Bytes: []byte{127, 0, 0, 1}},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			leaf := *material.Cert
+			leaf.Extensions = replaceSANWithRawNames(tt.names...)(&leaf)
+			if _, err := VerifyPrincipal(&leaf, material.Chain, verifyOptions(root.Cert, now)); err == nil {
+				t.Fatalf("duplicate %s GeneralName accepted", tt.name)
 			}
 		})
 	}

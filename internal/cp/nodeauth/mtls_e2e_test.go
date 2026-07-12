@@ -167,10 +167,10 @@ func TestForgedSessionTokenRejectedE2E(t *testing.T) {
 	// Bonus: clientverify accepts the AS-enrolled host node but rejects a foreign-account one.
 	host, _ := inter.IssueNode("n", "alice", pki.ClassSelfHosted, time.Now().Add(time.Hour))
 	leaf, chain, rootPEM := pki.MarshalCertPEM(host.Cert), pki.MarshalCertPEM(inter.Cert), pki.MarshalCertPEM(root.Cert)
-	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, time.Now()); err != nil {
+	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, time.Now()); err != nil {
 		t.Fatalf("alice's own host must verify: %v", err)
 	}
-	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "bob"}, time.Now()); err == nil {
+	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "bob"}, time.Now()); err == nil {
 		t.Fatal("a host bound to alice must not satisfy bob")
 	}
 }

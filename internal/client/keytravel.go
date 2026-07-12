@@ -74,6 +74,7 @@ var _ forkClient = (cpv1connect.SpawnServiceClient)(nil)
 // spawnctl; Migrate/Fork take a ready MoveOptions.
 type MoveOptions struct {
 	AccountID        string
+	TrustDomain      string
 	RootPEM          []byte
 	RevocationURL    string
 	RevocationClient *http.Client
@@ -174,7 +175,7 @@ func deliverOwnerSealedJournalKeys(ctx context.Context, client ownerSealedDelive
 			return 0, errors.New("production node verification requires an Auth Service URL for node revocation checks")
 		}
 		revoked = subkey.NewASRevocationChecker(opts.RevocationURL, opts.RevocationClient, 0)
-		expect, err = moveExpectation(target, opts.AccountID)
+		expect, err = moveExpectation(target, opts.AccountID, opts.TrustDomain)
 		if err != nil {
 			return 0, err
 		}
@@ -256,14 +257,17 @@ func resealJournalKey(ciphertext []byte, dev *seal.Device, sk subkey.SignedSubKe
 	return json.Marshal(sealed)
 }
 
-func moveExpectation(target, accountID string) (subkey.Expectation, error) {
+func moveExpectation(target, accountID, trustDomain string) (subkey.Expectation, error) {
+	if trustDomain == "" {
+		return clientverify.Expectation{}, errors.New("production node verification requires a trust domain")
+	}
 	if target == targetCloud {
-		return clientverify.Expectation{Tenancy: "cloud"}, nil
+		return clientverify.Expectation{TrustDomain: trustDomain, Tenancy: "cloud"}, nil
 	}
 	if strings.TrimSpace(accountID) == "" {
 		return clientverify.Expectation{}, errors.New("production self-hosted node verification requires a logged-in account")
 	}
-	return clientverify.Expectation{Tenancy: "self-hosted", AccountID: accountID}, nil
+	return clientverify.Expectation{TrustDomain: trustDomain, Tenancy: "self-hosted", AccountID: accountID}, nil
 }
 
 func splitLeafChainPEM(certChain []byte) (leafPEM, chainPEM []byte, err error) {

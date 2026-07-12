@@ -39,6 +39,7 @@ func moveCmd() *cli.Command {
 			&cli.StringFlag{Name: "cp", Value: "http://127.0.0.1:8080", Usage: "control-plane address"},
 			&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token"},
 			&cli.StringFlag{Name: "root-ca", Usage: "path to the pinned Root CA PEM for production node verification"},
+			&cli.StringFlag{Name: "trust-domain", Usage: "expected SPIFFE trust domain for production node verification"},
 			&cli.StringFlag{Name: "as", Usage: "Auth Service origin for node revocation checks; defaults to the stored login AS URL"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
@@ -54,7 +55,7 @@ func moveCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), strings.TrimSpace(c.String("root-ca")))
+			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), strings.TrimSpace(c.String("root-ca")), strings.TrimSpace(c.String("trust-domain")))
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
@@ -76,9 +77,10 @@ func moveCmd() *cli.Command {
 	}
 }
 
-func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath string) (client.MoveOptions, error) {
+func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath, trustDomain string) (client.MoveOptions, error) {
 	opts := client.MoveOptions{
-		AccountID: resolveMoveAccountID(dir, tokenFlag),
+		AccountID:   resolveMoveAccountID(dir, tokenFlag),
+		TrustDomain: trustDomain,
 	}
 	if rootCAPath != "" {
 		rootPEM, err := os.ReadFile(rootCAPath)

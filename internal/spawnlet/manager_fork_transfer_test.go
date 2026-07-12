@@ -127,6 +127,7 @@ func TestForkTransferExportGeneratesKeySealsToVerifiedTargetAndRestoresSource(t 
 		TargetSignedSubKey:  targetSignedSubkey,
 		TargetNodeCertChain: append(append([]byte{}, targetFx.leaf...), targetFx.chain...),
 		NodeRootPEM:         targetFx.root,
+		NodeTrustDomain:     pki.DefaultTrustDomain,
 		SourceRestored: func() error {
 			restored = true
 			return nil

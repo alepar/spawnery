@@ -21,7 +21,7 @@ func host(t *testing.T, interClass, sanClass, account string) (leaf, chain, root
 func TestVerifyHostSelfHostedMine(t *testing.T) {
 	leaf, chain, root := host(t, pki.ClassSelfHosted, pki.ClassSelfHosted, "alice")
 	id, err := clientverify.VerifyHost(leaf, chain, root,
-		clientverify.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, time.Now())
+		clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, time.Now())
 	if err != nil {
 		t.Fatalf("VerifyHost: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestVerifyHostSelfHostedMine(t *testing.T) {
 func TestVerifyHostRejectsForeignSelfHosted(t *testing.T) {
 	leaf, chain, root := host(t, pki.ClassSelfHosted, pki.ClassSelfHosted, "attacker")
 	if _, err := clientverify.VerifyHost(leaf, chain, root,
-		clientverify.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, time.Now()); err == nil {
+		clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, time.Now()); err == nil {
 		t.Fatal("a self-hosted node bound to a different account must be rejected")
 	}
 }
@@ -44,7 +44,7 @@ func TestVerifyHostRejectsForeignSelfHosted(t *testing.T) {
 func TestVerifyHostCloud(t *testing.T) {
 	leaf, chain, root := host(t, pki.ClassCloud, pki.ClassCloud, "spawnery-system")
 	if _, err := clientverify.VerifyHost(leaf, chain, root,
-		clientverify.Expectation{Tenancy: pki.ClassCloud}, time.Now()); err != nil {
+		clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassCloud}, time.Now()); err != nil {
 		t.Fatalf("cloud host should verify: %v", err)
 	}
 }
@@ -53,7 +53,7 @@ func TestVerifyHostCloud(t *testing.T) {
 func TestVerifyHostRejectsForgedCloud(t *testing.T) {
 	leaf, chain, root := host(t, pki.ClassSelfHosted, pki.ClassCloud, "spawnery-system")
 	if _, err := clientverify.VerifyHost(leaf, chain, root,
-		clientverify.Expectation{Tenancy: pki.ClassCloud}, time.Now()); err == nil {
+		clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassCloud}, time.Now()); err == nil {
 		t.Fatal("a forged cloud host must be rejected")
 	}
 }
@@ -62,7 +62,19 @@ func TestVerifyHostRejectsForgedCloud(t *testing.T) {
 func TestVerifyHostRejectsClassMismatch(t *testing.T) {
 	leaf, chain, root := host(t, pki.ClassSelfHosted, pki.ClassSelfHosted, "alice")
 	if _, err := clientverify.VerifyHost(leaf, chain, root,
-		clientverify.Expectation{Tenancy: pki.ClassCloud}, time.Now()); err == nil {
+		clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassCloud}, time.Now()); err == nil {
 		t.Fatal("expecting a cloud host but given a self-hosted one must be rejected")
+	}
+}
+
+func TestVerifyHostRejectsConfiguredTrustDomainMismatch(t *testing.T) {
+	r, _ := pki.NewRootCA("R")
+	issuer, _ := r.NewIntermediate(pki.IssuerSelfHostedNode, "staging.spawnery.internal")
+	node, _ := issuer.IssueNode("n", "alice", pki.RoleSelfHosted, "staging.spawnery.internal", time.Now().Add(time.Hour))
+	if _, err := clientverify.VerifyHost(
+		pki.MarshalCertPEM(node.Cert), pki.MarshalCertPEM(issuer.Cert), pki.MarshalCertPEM(r.Cert),
+		clientverify.Expectation{TrustDomain: "prod.spawnery.internal", Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, time.Now(),
+	); err == nil {
+		t.Fatal("same-root host in the wrong configured trust domain was accepted")
 	}
 }

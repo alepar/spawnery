@@ -120,6 +120,8 @@ func validateRawSubjectAltName(leaf *x509.Certificate, principal Principal) erro
 		return errors.New("pki: malformed subjectAltName extension")
 	}
 	uriCount := 0
+	dnsNames := make(map[string]struct{})
+	ipAddresses := make(map[string]struct{})
 	for names := sequence.Bytes; len(names) > 0; {
 		var name asn1.RawValue
 		names, err = asn1.Unmarshal(names, &name)
@@ -136,10 +138,20 @@ func validateRawSubjectAltName(leaf *x509.Certificate, principal Principal) erro
 			if principal.Kind != KindService || len(name.Bytes) == 0 || !isASCII(name.Bytes) {
 				return errors.New("pki: DNS SAN is permitted only on service leaves")
 			}
+			dnsName := strings.ToLower(string(name.Bytes))
+			if _, duplicate := dnsNames[dnsName]; duplicate {
+				return fmt.Errorf("pki: duplicate DNS GeneralName %q", dnsName)
+			}
+			dnsNames[dnsName] = struct{}{}
 		case 7: // iPAddress
 			if principal.Kind != KindService || len(name.Bytes) != 4 && len(name.Bytes) != 16 {
 				return errors.New("pki: IP SAN is permitted only on service leaves")
 			}
+			ipAddress := string(name.Bytes)
+			if _, duplicate := ipAddresses[ipAddress]; duplicate {
+				return errors.New("pki: duplicate IP GeneralName")
+			}
+			ipAddresses[ipAddress] = struct{}{}
 		default:
 			return fmt.Errorf("pki: unsupported GeneralName tag %d", name.Tag)
 		}
