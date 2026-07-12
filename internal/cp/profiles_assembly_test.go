@@ -621,7 +621,7 @@ func TestAssemble_ByRef_URLSkill(t *testing.T) {
 		CreatedAt:   1,
 		UpdatedAt:   1,
 		Content:     nil, // by-ref: no inline bytes
-		SourceURL:   &sourceURL,
+		SourceURL:   sourceURL,
 		SHA256:      &sha,
 		Size:        &size,
 	}); err != nil {
