@@ -32,6 +32,7 @@ type certTestOptions struct {
 	useNodeIntermediate  bool
 	intermediateLifetime time.Duration
 	leafLifetime         time.Duration
+	rootLifetime         time.Duration
 }
 
 type certTestPKI struct {
@@ -62,13 +63,16 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 	if opts.leafLifetime == 0 {
 		opts.leafLifetime = 90 * 24 * time.Hour
 	}
+	if opts.rootLifetime == 0 {
+		opts.rootLifetime = 365 * 24 * time.Hour
+	}
 
 	rootKey := mustP256Key(t)
 	rootTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "Spawnery test root"},
 		NotBefore:             now.Add(-24 * time.Hour),
-		NotAfter:              now.Add(365 * 24 * time.Hour),
+		NotAfter:              now.Add(opts.rootLifetime),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,

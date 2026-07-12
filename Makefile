@@ -14,7 +14,6 @@ gen: .make/gen
 	buf generate
 	@if [ -x sdk/ts/node_modules/.bin/protoc-gen-es ]; then \
 		echo "[gen] TS (protoc-gen-es) -> sdk/ts/src/gen"; buf generate --template sdk/ts/buf.gen.yaml; \
-		find sdk/ts/src/gen -type f -name '*.ts' -exec sed -i -e '$${/^$$/d;}' {} +; \
 	else echo "[gen] skip TS SDK codegen (run: npm install -w @spawnery/client)"; fi
 	touch $@
 

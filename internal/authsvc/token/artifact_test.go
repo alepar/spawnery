@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,6 +82,8 @@ func TestNewSigningCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherRoot := newCertTestPKI(t, nil).root
+	graftedPriv := append(ed25519.PrivateKey(nil), wrongPriv[:ed25519.SeedSize]...)
+	graftedPriv = append(graftedPriv, valid.leaf.PublicKey.(ed25519.PublicKey)...)
 	tests := []struct {
 		name  string
 		priv  ed25519.PrivateKey
@@ -89,6 +92,7 @@ func TestNewSigningCredential(t *testing.T) {
 		env   string
 	}{
 		{name: "mismatched private key", priv: wrongPriv, chain: valid.chain, root: valid.root, env: "prod"},
+		{name: "grafted private key", priv: graftedPriv, chain: valid.chain, root: valid.root, env: "prod"},
 		{name: "empty chain", priv: valid.leafEd25519Priv, root: valid.root, env: "prod"},
 		{name: "reversed chain", priv: valid.leafEd25519Priv, chain: []*x509.Certificate{valid.intermediate, valid.leaf}, root: valid.root, env: "prod"},
 		{name: "duplicate chain", priv: valid.leafEd25519Priv, chain: []*x509.Certificate{valid.leaf, valid.intermediate, valid.intermediate}, root: valid.root, env: "prod"},
@@ -494,8 +498,14 @@ func TestVerifierChainCacheExpiresWithIntermediate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, _ := credential.Sign(ArtifactTypeSession, []byte("payload"))
-	verifier, _ := NewVerifier(pki.root, "prod", nil)
+	wire, err := credential.Sign(ArtifactTypeSession, []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := NewVerifier(pki.root, "prod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	validations := 0
 	realValidate := verifier.validateChain
 	verifier.validateChain = func(chain []*x509.Certificate, root *x509.Certificate, environment string, at time.Time) (*validatedSigner, error) {
@@ -513,6 +523,74 @@ func TestVerifierChainCacheExpiresWithIntermediate(t *testing.T) {
 	}
 }
 
+func TestVerifierChainCacheExpiresWithRoot(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, func(o *certTestOptions) {
+		o.rootLifetime = time.Hour
+		o.intermediateLifetime = 24 * time.Hour
+		o.leafLifetime = 12 * time.Hour
+	})
+	credential, err := NewSigningCredential(pki.leafEd25519Priv, pki.chain, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := credential.Sign(ArtifactTypeSession, []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := NewVerifier(pki.root, "prod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validations := 0
+	realValidate := verifier.validateChain
+	verifier.validateChain = func(chain []*x509.Certificate, root *x509.Certificate, environment string, at time.Time) (*validatedSigner, error) {
+		validations++
+		return realValidate(chain, root, environment, at)
+	}
+	if _, err := verifier.Verify(wire, ArtifactTypeSession, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(wire, ArtifactTypeSession, pki.root.NotAfter.Add(time.Second)); err == nil {
+		t.Fatal("chain cached beyond trusted root expiry")
+	}
+	if validations != 2 {
+		t.Fatalf("root expiry did not miss cache: validations=%d", validations)
+	}
+}
+
+func TestVerifierChainCacheRejectsClockRollback(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	credential, err := NewSigningCredential(pki.leafEd25519Priv, pki.chain, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := credential.Sign(ArtifactTypeSession, []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := NewVerifier(pki.root, "prod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validations := 0
+	realValidate := verifier.validateChain
+	verifier.validateChain = func(chain []*x509.Certificate, root *x509.Certificate, environment string, at time.Time) (*validatedSigner, error) {
+		validations++
+		return realValidate(chain, root, environment, at)
+	}
+	if _, err := verifier.Verify(wire, ArtifactTypeSession, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(wire, ArtifactTypeSession, pki.leaf.NotBefore.Add(-time.Second)); err == nil {
+		t.Fatal("cached chain survived clock rollback before leaf NotBefore")
+	}
+	if validations != 2 {
+		t.Fatalf("clock rollback did not miss cache: validations=%d", validations)
+	}
+}
+
 func TestVerifierDoesNotCachePayloadTimeValidation(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	pki := newCertTestPKI(t, nil)
@@ -522,7 +600,10 @@ func TestVerifierDoesNotCachePayloadTimeValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	wire, _ := credential.Sign(ArtifactTypeSession, payload)
-	verifier, _ := NewVerifier(pki.root, "prod", nil)
+	verifier, err := NewVerifier(pki.root, "prod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	validations := 0
 	realValidate := verifier.validateChain
 	verifier.validateChain = func(chain []*x509.Certificate, root *x509.Certificate, environment string, at time.Time) (*validatedSigner, error) {
@@ -608,19 +689,72 @@ func TestVerifierDoesNotCacheValidationFailures(t *testing.T) {
 func TestVerifierChainCacheIsBounded(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	pki := newCertTestPKI(t, nil)
-	verifier, _ := NewVerifier(pki.root, "prod", nil)
+	verifier, err := NewVerifier(pki.root, "prod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < maxChainCacheEntries+1; i++ {
 		leaf, priv := newCertTestLeaf(t, pki, int64(i+10), fmt.Sprintf("signer-%d", i))
 		credential, err := NewSigningCredential(priv, []*x509.Certificate{leaf, pki.intermediate}, pki.root, "prod", now)
 		if err != nil {
 			t.Fatal(err)
 		}
-		wire, _ := credential.Sign(ArtifactTypeSession, []byte("payload"))
+		wire, err := credential.Sign(ArtifactTypeSession, []byte("payload"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, err := verifier.Verify(wire, ArtifactTypeSession, now); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if got := verifier.chainCache.lru.Len(); got != maxChainCacheEntries {
 		t.Fatalf("cache size = %d, want %d", got, maxChainCacheEntries)
+	}
+}
+
+func TestVerifierChainCacheConcurrentContention(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	verifier, err := NewVerifier(pki.root, "prod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wires := make([]string, maxChainCacheEntries+8)
+	for i := range wires {
+		leaf, priv := newCertTestLeaf(t, pki, int64(i+1_000), fmt.Sprintf("concurrent-%d", i))
+		credential, err := NewSigningCredential(priv, []*x509.Certificate{leaf, pki.intermediate}, pki.root, "prod", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wires[i], err = credential.Sign(ArtifactTypeSession, []byte("payload"))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var failures atomic.Int64
+	var wg sync.WaitGroup
+	for worker := range 32 {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			for i := range wires {
+				wire := wires[(i+offset)%len(wires)]
+				if _, err := verifier.Verify(wire, ArtifactTypeSession, now); err != nil {
+					failures.Add(1)
+				}
+			}
+		}(worker)
+	}
+	wg.Wait()
+	if failures.Load() != 0 {
+		t.Fatalf("concurrent verifications failed: %d", failures.Load())
+	}
+	verifier.chainCache.mu.Lock()
+	cacheLen := verifier.chainCache.lru.Len()
+	entryLen := len(verifier.chainCache.entries)
+	verifier.chainCache.mu.Unlock()
+	if cacheLen != maxChainCacheEntries || entryLen != maxChainCacheEntries {
+		t.Fatalf("contested cache sizes: lru=%d entries=%d want=%d", cacheLen, entryLen, maxChainCacheEntries)
 	}
 }

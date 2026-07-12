@@ -101,6 +101,7 @@ type validatedSigner struct {
 	leaf      *x509.Certificate
 	publicKey ed25519.PublicKey
 	keyID     [32]byte
+	validFrom time.Time
 	expires   time.Time
 }
 
@@ -110,11 +111,15 @@ func NewSigningCredential(priv ed25519.PrivateKey, chain []*x509.Certificate, ro
 	if err != nil {
 		return nil, err
 	}
-	if len(priv) != ed25519.PrivateKeySize || subtle.ConstantTimeCompare(priv[ed25519.SeedSize:], validated.publicKey) != 1 {
+	if len(priv) != ed25519.PrivateKeySize {
+		return nil, errors.New("token: private key does not match signer certificate")
+	}
+	canonical := ed25519.NewKeyFromSeed(priv[:ed25519.SeedSize])
+	if subtle.ConstantTimeCompare(priv, canonical) != 1 || subtle.ConstantTimeCompare(canonical[ed25519.SeedSize:], validated.publicKey) != 1 {
 		return nil, errors.New("token: private key does not match signer certificate")
 	}
 	return &SigningCredential{
-		PrivateKey: append(ed25519.PrivateKey(nil), priv...),
+		PrivateKey: canonical,
 		Chain:      append([]*x509.Certificate(nil), chain...),
 		KeyID:      validated.keyID,
 	}, nil
@@ -256,7 +261,7 @@ func (cache *chainValidationCache) get(key chainCacheKey, chain []*x509.Certific
 		return nil, false
 	}
 	entry := element.Value.(*chainCacheEntry)
-	if !now.Before(entry.validated.expires) {
+	if now.Before(entry.validated.validFrom) || !now.Before(entry.validated.expires) {
 		cache.lru.Remove(element)
 		delete(cache.entries, key)
 		return nil, false
@@ -376,8 +381,12 @@ func validateSignerChain(chain []*x509.Certificate, root *x509.Certificate, envi
 	if err != nil {
 		return nil, fmt.Errorf("token: marshal signer SPKI: %w", err)
 	}
-	expires := leaf.NotAfter
-	for _, cert := range chain[1:] {
+	validFrom := root.NotBefore
+	expires := root.NotAfter
+	for _, cert := range chain {
+		if cert.NotBefore.After(validFrom) {
+			validFrom = cert.NotBefore
+		}
 		if cert.NotAfter.Before(expires) {
 			expires = cert.NotAfter
 		}
@@ -386,6 +395,7 @@ func validateSignerChain(chain []*x509.Certificate, root *x509.Certificate, envi
 		leaf:      leaf,
 		publicKey: append(ed25519.PublicKey(nil), publicKey...),
 		keyID:     sha256.Sum256(spki),
+		validFrom: validFrom,
 		expires:   expires,
 	}, nil
 }
