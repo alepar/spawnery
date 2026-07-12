@@ -23,6 +23,7 @@ import (
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/githubfake"
 	"spawnery/internal/authsvc/store"
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 )
 
@@ -82,7 +83,15 @@ func TestHandlerFullVertical(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := authsvc.New(root.Cert, inter, authsvc.WithIdP(idp))
-	lazy.real = svc.Handler()
+	public := svc.PublicHandler()
+	internal := svc.InternalHandler(mtls.Policy{"anonymous": {"authsvc.revocations": {}}})
+	lazy.real = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/revocations" {
+			internal.ServeHTTP(w, r)
+			return
+		}
+		public.ServeHTTP(w, r)
+	})
 
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse

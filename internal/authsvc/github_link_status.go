@@ -1,7 +1,6 @@
 package authsvc
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -23,20 +22,13 @@ type linkStatusResponse struct {
 // serveGitHubLinkStatus handles POST /internal/github/link-status.
 // It is a CP→AS server-to-server endpoint; not CORS/SPA-exposed.
 //
-// Auth: X-Spawnery-AS-Secret header must equal s.cpRPCSecret (constant-time compare).
+// Authentication and authorization are enforced by InternalHandler before this handler runs.
 // Request: {"account_id": "<accountID>"}
 // Response: {"status": "active"|"relink_required"|"none"}
 //
 // The link is looked up by secretID = "gh:" + account_id. The handler never returns token
 // material — only the link state.
 func (s *Service) serveGitHubLinkStatus(w http.ResponseWriter, r *http.Request) {
-	// Constant-time secret validation (always compare full lengths to resist timing).
-	got := r.Header.Get("X-Spawnery-AS-Secret")
-	if subtle.ConstantTimeCompare([]byte(got), []byte(s.cpRPCSecret)) != 1 {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
 	var req linkStatusRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AccountID == "" {
 		http.Error(w, "bad request", http.StatusBadRequest)

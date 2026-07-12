@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"spawnery/internal/authsvc"
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 )
 
@@ -18,7 +19,7 @@ import (
 func TestEnrollHTTPRoundTrip(t *testing.T) {
 	s := newAS(t)
 	tok, _ := s.IssueEnrollmentToken("acct-Z")
-	srv := httptest.NewServer(s.Handler())
+	srv := httptest.NewServer(s.InternalHandler(mtls.Policy{"anonymous": {"authsvc.enroll": {}}}))
 	defer srv.Close()
 
 	res, err := authsvc.RunEnroll(context.Background(), srv.URL, tok, "node-q")
@@ -49,7 +50,7 @@ func TestEnrollHTTPRoundTrip(t *testing.T) {
 
 func TestEnrollHTTPRejectsBadToken(t *testing.T) {
 	s := newAS(t)
-	srv := httptest.NewServer(s.Handler())
+	srv := httptest.NewServer(s.InternalHandler(mtls.Policy{"anonymous": {"authsvc.enroll": {}}}))
 	defer srv.Close()
 	if _, err := authsvc.RunEnroll(context.Background(), srv.URL, "bad-token", "n"); err == nil {
 		t.Fatal("a bad token must fail enrollment over HTTP")

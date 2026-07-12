@@ -8,17 +8,13 @@ package authsvc
 // Response: JSON array of SignedRevocationEntry. The CP verifies the sig field, then
 // must advance its checkpoint past the highest seq it has processed to avoid re-delivering.
 //
-// Access control: if IdPConfig.CPSecret is non-empty (production), the CP MUST supply
-// "Authorization: Bearer <CPSecret>" or the request is rejected 401. This is a
-// server-to-server trust boundary; configure the secret via env/deploy config (see deploy/authsvc).
+// Access control is enforced by InternalHandler's typed CP-service policy.
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"spawnery/internal/authsvc/store"
 	"spawnery/internal/authsvc/token"
@@ -43,13 +39,6 @@ type SignedRevocationEntry struct {
 // serveRevocations handles GET /revocations?since=<seq>.
 // Returns all events with seq > since, each signed with the AS session key [AM10].
 func (i *IdP) serveRevocations(w http.ResponseWriter, r *http.Request) {
-	if i.cfg.CPSecret != "" {
-		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(i.cfg.CPSecret)) != 1 {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "CP bearer secret required")
-			return
-		}
-	}
 	sinceStr := r.URL.Query().Get("since")
 	var since int64
 	if sinceStr != "" {

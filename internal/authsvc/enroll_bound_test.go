@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"spawnery/internal/authsvc"
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 )
 
@@ -148,7 +149,7 @@ func TestBoundTokenAccountScoping(t *testing.T) {
 // RunEnrollWithKey, and a DIFFERENT key is rejected over the wire (401 -> error).
 func TestBoundEnrollHTTPRoundTrip(t *testing.T) {
 	s := newAS(t)
-	srv := httptest.NewServer(s.Handler())
+	srv := httptest.NewServer(s.InternalHandler(mtls.Policy{"anonymous": {"authsvc.enroll": {}}}))
 	defer srv.Close()
 
 	key, fp, _ := boundKey(t)

@@ -11,6 +11,7 @@ import (
 
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/store"
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 )
 
@@ -42,7 +43,7 @@ func TestNodeRevocationsEndpointReturnsSortedList(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := httptest.NewServer(svc.Handler())
+	srv := httptest.NewServer(svc.InternalHandler(mtls.Policy{"anonymous": {"authsvc.node-revocations": {}}}))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/node-revocations")
@@ -74,7 +75,7 @@ func TestNodeRevocationsEndpointReturnsSortedList(t *testing.T) {
 
 func TestNodeRevocationsEndpointEmptyList(t *testing.T) {
 	svc, _ := newNodeRevocationSvc(t)
-	srv := httptest.NewServer(svc.Handler())
+	srv := httptest.NewServer(svc.InternalHandler(mtls.Policy{"anonymous": {"authsvc.node-revocations": {}}}))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/node-revocations")
