@@ -167,20 +167,27 @@ dev-enforced:
     @test -f {{devca}}/root.pem || just gen-dev-ca
     mprocs --config {{repo}}/mprocs-enforced.yaml
 
-# --- github-mount dev stack (real GitHub App + journaled mounts + D3 relaxed AS mint) ----------
+# --- github-mount dev stack (real GitHub App + journaled mounts + internal mTLS) -----------------
 
-# AS for the github lane: enforced dev CA + real GitHub App link/mint + AS->CP fanout + D3 relaxed
-# node identity. Requires GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET in .env (the throwaway App). The
-# AS_DEV_RELAX_NODE_AUTH=1 header trust is DEV-ONLY (containment d) and MUST NOT be used in prod.
+# AS for the github lane: provisioned dev CA + real GitHub App link/mint + direct internal mTLS.
 authsvc-github:
     @make bin/authsvc
-    @mkdir -p {{data_root}}
-    SPAWNERY_ENV=dev AS_LISTEN={{addr_as}} \
+    @mkdir -p {{data_root}}; install -d -m700 {{repo}}/.envs/dev/revocations/authsvc-certificates
+    SPAWNERY_ENV=dev AS_DEV=1 AS_LISTEN={{addr_as}} \
     AS_DB_DSN="file:{{data_root}}/authsvc.db?_pragma=foreign_keys(1)" \
     AS_ROOT_CA_PEM={{devca}}/root.pem \
     AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
     AS_INTERMEDIATE_KEY_PEM={{devca}}/self-hosted-intermediate-key.pem \
-    AS_SESSION_KEY_PEM={{devca}}/session-key.pem \
+    AS_INTERNAL_LISTEN={{addr_as_internal}} AS_INTERNAL_TRUST_DOMAIN=dev.spawnery.internal \
+    AS_INTERNAL_ROOT_CA={{devca}}/root.pem \
+    AS_INTERNAL_CERT={{devca}}/authsvc-service.pem AS_INTERNAL_CHAIN={{devca}}/authsvc-service-chain.pem \
+    AS_INTERNAL_KEY={{devca}}/authsvc-service-key.pem AS_INTERNAL_SERVER_NAME=authsvc.internal \
+    AS_INTERNAL_REVOCATION_STATE={{repo}}/.envs/dev/revocations/authsvc-certificates/state.json \
+    AS_INTERNAL_REVOCATION_ISSUERS={{devca}}/service-intermediate.pem,{{devca}}/cloud-intermediate.pem,{{devca}}/self-hosted-intermediate.pem \
+    AS_INTERNAL_REVOCATION_CRLS={{devca}}/service.crl.pem,{{devca}}/cloud-node.crl.pem,{{devca}}/self-hosted-node.crl.pem \
+    AS_AUTH_SIGNING_ENVIRONMENT=dev AS_AUTH_SIGNING_ROOT_PEM={{devca}}/root.pem \
+    AS_AUTH_SIGNING_CURRENT_KEY_PEM={{devca}}/auth-signer-current-key.pem AS_AUTH_SIGNING_CURRENT_CHAIN_PEM={{devca}}/auth-signer-current-chain.pem \
+    AS_AUTH_SIGNING_NEXT_KEY_PEM={{devca}}/auth-signer-next-key.pem AS_AUTH_SIGNING_NEXT_CHAIN_PEM={{devca}}/auth-signer-next-chain.pem \
     AS_GITHUB_TOKEN_ENC_KEY="$(printf %s 'spawnery-dev-github-mount-enck32' | base64)" \
     GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in .env (GitHub App client_id)}" \
     GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in .env}" \
@@ -188,9 +195,7 @@ authsvc-github:
     AS_GITHUB_LINK_REDIRECT_URI=${AS_GITHUB_LINK_REDIRECT_URI:-{{dev_web_origin}}/github/link/callback} \
     AS_GITHUB_POST_REDEEM_REDIRECT=${AS_GITHUB_POST_REDEEM_REDIRECT:-{{dev_web_origin}}/settings} \
     AS_REDIRECT_URIS=http://127.0.0.1/cb,{{dev_web_origin}}/callback,http://localhost:5173/callback \
-    AS_CP_URL=http://{{addr_cp}} \
-    AS_CP_RPC_SECRET=dev-as-cp-secret \
-    AS_DEV_RELAX_NODE_AUTH=1 \
+    AS_CP_URL=https://{{addr_cp_node}} AS_CP_SERVER_NAME=cp.internal \
     {{repo}}/bin/authsvc
 
 # CP for the github lane: enforced node mTLS + mount-intent signing (pollAndSign) + AS->CP RPC auth.

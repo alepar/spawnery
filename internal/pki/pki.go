@@ -3,6 +3,7 @@ package pki
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
@@ -45,11 +46,22 @@ type Leaf struct {
 	Chain []*x509.Certificate
 }
 
+// AuthArtifactSigner is an Ed25519 authorization-artifact leaf and its presented issuer chain.
+type AuthArtifactSigner struct {
+	Cert  *x509.Certificate
+	Key   ed25519.PrivateKey
+	Chain []*x509.Certificate
+}
+
 // Node is retained as a compatibility alias while callers migrate to identity-neutral Leaf.
 type Node = Leaf
 
 func newSerial() (*big.Int, error) {
-	return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, err
+	}
+	return serial.SetBit(serial, 127, 1), nil
 }
 
 // NewRootCA generates a self-signed Root CA.
@@ -118,6 +130,79 @@ func (ca *CA) NewIntermediate(role IssuerRole, trustDomains ...string) (*CA, err
 		Policies:              []x509.OID{policy},
 	}
 	return finishCA(tmpl, ca.Cert, key.Public(), key, ca.Key)
+}
+
+// NewAuthSigningIntermediate issues the dedicated offline authorization-artifact issuer.
+func (ca *CA) NewAuthSigningIntermediate(environment string) (*CA, error) {
+	trustDomain := environment + ".spawnery.internal"
+	if err := validateTrustDomain(trustDomain); err != nil {
+		return nil, fmt.Errorf("pki: invalid auth-signing environment: %w", err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	serial, err := newSerial()
+	if err != nil {
+		return nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "Spawnery " + environment + " Auth Signing Intermediate"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(5 * 365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLen:            0,
+		MaxPathLenZero:        true,
+		Policies:              []x509.OID{AuthSigningIntermediatePolicyOID},
+		PermittedURIDomains:   []string{trustDomain},
+	}
+	return finishCA(tmpl, ca.Cert, key.Public(), key, ca.Key)
+}
+
+// IssueAuthArtifactSigner issues one purpose-constrained online signer leaf.
+func (ca *CA) IssueAuthArtifactSigner(environment, signerID string, notAfter time.Time) (*AuthArtifactSigner, error) {
+	trustDomain := environment + ".spawnery.internal"
+	if err := validateTrustDomain(trustDomain); err != nil {
+		return nil, fmt.Errorf("pki: invalid auth-signing environment: %w", err)
+	}
+	if signerID == "" || url.PathEscape(signerID) != signerID || signerID == "." || signerID == ".." {
+		return nil, errors.New("pki: invalid auth-artifact signer ID")
+	}
+	identity, err := url.Parse("spiffe://" + trustDomain + "/signer/auth-artifact/" + signerID)
+	if err != nil {
+		return nil, err
+	}
+	serial, err := newSerial()
+	if err != nil {
+		return nil, err
+	}
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "Spawnery Auth Artifact Signer " + signerID},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		Policies:              []x509.OID{AuthArtifactSignerPolicyOID},
+		URIs:                  []*url.URL{identity},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, key.Public(), ca.Key)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, err
+	}
+	return &AuthArtifactSigner{Cert: cert, Key: key, Chain: []*x509.Certificate{ca.Cert}}, nil
 }
 
 // IssueNode issues a node X.509-SVID. The fourth argument accepts either trustDomain followed by

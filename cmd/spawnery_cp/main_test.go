@@ -353,6 +353,44 @@ func TestCPInternalClientRedirectPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects host-only change before target", func(t *testing.T) {
+		targetReached := false
+		target := newCPPeerTLSServer(t, cfg, root, serviceIssuer, runtime, pki.RoleAuthService, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			targetReached = true
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		redirectURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+		source := newCPPeerTLSServer(t, cfg, root, serviceIssuer, runtime, pki.RoleAuthService, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+		}))
+		if _, err := runtime.client.Get(source.URL); err == nil {
+			t.Fatal("host-only HTTPS redirect was followed")
+		}
+		if targetReached {
+			t.Fatal("host-only redirect target handler executed")
+		}
+	})
+
+	t.Run("rejects userinfo before target", func(t *testing.T) {
+		targetReached := false
+		var server *httptest.Server
+		server = newCPPeerTLSServer(t, cfg, root, serviceIssuer, runtime, pki.RoleAuthService, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/start" {
+				redirectURL := strings.Replace(server.URL, "https://", "https://user:password@", 1) + "/target"
+				http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+				return
+			}
+			targetReached = true
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		if _, err := runtime.client.Get(server.URL + "/start"); err == nil {
+			t.Fatal("userinfo HTTPS redirect was followed")
+		}
+		if targetReached {
+			t.Fatal("userinfo redirect target handler executed")
+		}
+	})
+
 	t.Run("allows same origin https", func(t *testing.T) {
 		targetReached := false
 		server := newCPPeerTLSServer(t, cfg, root, serviceIssuer, runtime, pki.RoleAuthService, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
