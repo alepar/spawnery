@@ -46,6 +46,7 @@ interface SubKeyVector {
   forged_cloud_chain_pem: string; // cloud-SAN leaf signed by SH intermediate
   legacy_dns_cloud_chain_pem: string; // retired DNS cloud leaf signed by SH intermediate
   non_ca_leaf_chain_pem:  string; // leaf cert used as CA to sign another leaf
+  duplicate_uri_chain_pem: string; // otherwise valid leaf with duplicate URI GeneralNames
 }
 
 function loadVectors(): SubKeyVector | null {
@@ -217,6 +218,12 @@ describe("subkey Go-TS cross-language vectors", () => {
     await expect(
       verifyCertChain(v.non_ca_leaf_chain_pem, v.root_pem, verifyAt, TRUST_DOMAIN),
     ).rejects.toThrow("CA:TRUE");
+  });
+
+  it("verifyCertChain rejects duplicate URI GeneralNames", async () => {
+    await expect(
+      verifyCertChain(v.duplicate_uri_chain_pem, v.root_pem, verifyAt, TRUST_DOMAIN),
+    ).rejects.toThrow("exactly one URI SAN");
   });
 
   // SECURITY: validity — a cert that has expired (notAfter in the past) must be rejected.

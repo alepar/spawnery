@@ -8,9 +8,13 @@ package subkey_test
 // The vitest reader (web/src/keys/subkey-vectors.test.ts) reads the same file.
 
 import (
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
+	"math/big"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -56,6 +60,8 @@ type subKeyVector struct {
 	// NonCALeafChainPEM: a new leaf cert "signed" by the original leaf cert used as a CA —
 	// the chain cert lacks basicConstraints CA:TRUE (both Go and TS must reject it).
 	NonCALeafChainPEM string `json:"non_ca_leaf_chain_pem"`
+	// DuplicateURIChainPEM has an otherwise valid leaf with the same SPIFFE URI twice.
+	DuplicateURIChainPEM string `json:"duplicate_uri_chain_pem"`
 }
 
 const vectorsFile = "testdata/subkey/verify_node.json"
@@ -124,6 +130,19 @@ func generateSubKeyVectors(t *testing.T) {
 	}
 	nonCALeafChainPEM := string(pki.MarshalCertPEM(nonCANode.Cert)) + string(leafPEM)
 
+	duplicateURITemplate := *n.Cert
+	duplicateURITemplate.SerialNumber = new(big.Int).Add(n.Cert.SerialNumber, big.NewInt(1))
+	duplicateURITemplate.URIs = append(append([]*url.URL(nil), n.Cert.URIs...), n.Cert.URIs[0])
+	duplicateURIDER, err := x509.CreateCertificate(rand.Reader, &duplicateURITemplate, inter.Cert, n.Key.Public(), inter.Key)
+	if err != nil {
+		t.Fatalf("CreateCertificate (duplicate URI): %v", err)
+	}
+	duplicateURICert, err := x509.ParseCertificate(duplicateURIDER)
+	if err != nil {
+		t.Fatalf("ParseCertificate (duplicate URI): %v", err)
+	}
+	duplicateURIChainPEM := string(pki.MarshalCertPEM(duplicateURICert)) + string(interPEM)
+
 	v := subKeyVector{
 		RootPEM:                string(rootPEM),
 		LeafPEM:                string(leafPEM),
@@ -140,6 +159,7 @@ func generateSubKeyVectors(t *testing.T) {
 		ForgedCloudChainPEM:    forgedCloudChainPEM,
 		LegacyDNSCloudChainPEM: legacyDNSCloudChainPEM,
 		NonCALeafChainPEM:      nonCALeafChainPEM,
+		DuplicateURIChainPEM:   duplicateURIChainPEM,
 	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

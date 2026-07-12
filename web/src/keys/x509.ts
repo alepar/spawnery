@@ -43,6 +43,8 @@ const KEY_USAGE_OID         = new Uint8Array([0x55, 0x1d, 0x0f]);
 const EXT_KEY_USAGE_OID     = new Uint8Array([0x55, 0x1d, 0x25]);
 /** CertificatePolicies OID 2.5.29.32. */
 const CERT_POLICIES_OID     = new Uint8Array([0x55, 0x1d, 0x20]);
+const SUBJECT_KEY_ID_OID    = new Uint8Array([0x55, 0x1d, 0x0e]);
+const AUTHORITY_KEY_ID_OID  = new Uint8Array([0x55, 0x1d, 0x23]);
 
 const CLIENT_AUTH_OID = "1.3.6.1.5.5.7.3.2";
 const SERVER_AUTH_OID = "1.3.6.1.5.5.7.3.1";
@@ -255,29 +257,29 @@ function _parseDERTime(tlv: TLV): Date {
     throw new Error(`x509: unexpected time tag 0x${tlv.tag.toString(16)} in Validity`);
   }
   const s = new TextDecoder("ascii").decode(tlv.val);
+  const expectedLength = tlv.tag === TAG_UTCTIME ? 13 : 15;
+  if (s.length !== expectedLength || !/^\d+Z$/.test(s)) throw new Error("x509: malformed RFC5280 time");
+  let year: number;
+  let offset: number;
   if (tlv.tag === TAG_UTCTIME) {
-    // YYMMDDHHMMSSZ — RFC 5280 mandates Z and seconds
     const yy = parseInt(s.slice(0, 2), 10);
-    const year = yy >= 50 ? 1900 + yy : 2000 + yy;
-    return new Date(Date.UTC(
-      year,
-      parseInt(s.slice(2, 4), 10) - 1,
-      parseInt(s.slice(4, 6), 10),
-      parseInt(s.slice(6, 8), 10),
-      parseInt(s.slice(8, 10), 10),
-      parseInt(s.slice(10, 12), 10),
-    ));
+    year = yy >= 50 ? 1900 + yy : 2000 + yy;
+    offset = 2;
   } else {
-    // YYYYMMDDHHMMSSZ (GeneralizedTime)
-    return new Date(Date.UTC(
-      parseInt(s.slice(0, 4), 10),
-      parseInt(s.slice(4, 6), 10) - 1,
-      parseInt(s.slice(6, 8), 10),
-      parseInt(s.slice(8, 10), 10),
-      parseInt(s.slice(10, 12), 10),
-      parseInt(s.slice(12, 14), 10),
-    ));
+    year = parseInt(s.slice(0, 4), 10);
+    offset = 4;
   }
+  const month = parseInt(s.slice(offset, offset + 2), 10);
+  const day = parseInt(s.slice(offset + 2, offset + 4), 10);
+  const hour = parseInt(s.slice(offset + 4, offset + 6), 10);
+  const minute = parseInt(s.slice(offset + 6, offset + 8), 10);
+  const second = parseInt(s.slice(offset + 8, offset + 10), 10);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) throw new Error("x509: invalid RFC5280 calendar time");
+  const result = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (!Number.isFinite(result.getTime()) || result.getUTCFullYear() !== year || result.getUTCMonth() !== month - 1 || result.getUTCDate() !== day || result.getUTCHours() !== hour || result.getUTCMinutes() !== minute || result.getUTCSeconds() !== second) {
+    throw new Error("x509: invalid RFC5280 calendar time");
+  }
+  return result;
 }
 
 // ── Extension parsing ─────────────────────────────────────────────────────────
@@ -300,7 +302,7 @@ interface _ParsedExtensions {
  */
 function _parseExtensions(extsBody: Uint8Array): _ParsedExtensions {
   const extsList = readTLV(extsBody, 0);
-  if (extsList.tag !== TAG_SEQUENCE) throw new Error("x509: extensions outer is not a SEQUENCE");
+  if (extsList.tag !== TAG_SEQUENCE || extsList.next !== extsBody.length) throw new Error("x509: extensions outer is not a complete SEQUENCE");
 
   const sanURIs: string[] = [];
   const sanDNS: string[] = [];
@@ -315,18 +317,28 @@ function _parseExtensions(extsBody: Uint8Array): _ParsedExtensions {
   const seenExtensions = new Set<string>();
 
   for (const ext of iterSeq(extsList.val)) {
-    if (ext.tag !== TAG_SEQUENCE) continue;
+    if (ext.tag !== TAG_SEQUENCE) throw new Error("x509: malformed Extension entry");
     const extChildren = [...iterSeq(ext.val)];
-    if (extChildren.length < 2) continue;
-    if (extChildren[0].tag !== TAG_OID) continue;
+    if (extChildren.length !== 2 && extChildren.length !== 3) throw new Error("x509: malformed Extension fields");
+    if (extChildren[0].tag !== TAG_OID) throw new Error("x509: Extension lacks OID");
     const oidBytes = extChildren[0].val;
     const extensionKey = Array.from(oidBytes).join(".");
     if (seenExtensions.has(extensionKey)) throw new Error("x509: duplicate certificate extension");
     seenExtensions.add(extensionKey);
-    // Last element is OCTET STRING containing the extension value.
+    let critical = false;
+    if (extChildren.length === 3) {
+      const criticalField = extChildren[1];
+      // Extension.critical has DEFAULT FALSE, so DER permits the field only for TRUE.
+      if (criticalField.tag !== TAG_BOOLEAN || criticalField.val.length !== 1 || criticalField.val[0] !== 0xff) {
+        throw new Error("x509: malformed Extension critical BOOLEAN");
+      }
+      critical = criticalField.val[0] === 0xff;
+    }
     const valChild = extChildren[extChildren.length - 1];
-    if (valChild.tag !== TAG_OCTET_STR) continue;
+    if (valChild.tag !== TAG_OCTET_STR) throw new Error("x509: Extension value is not an OCTET STRING");
     const octVal = valChild.val;
+    const recognized = bytesEqual(oidBytes, SAN_OID) || bytesEqual(oidBytes, BASIC_CONSTRAINTS_OID) || bytesEqual(oidBytes, KEY_USAGE_OID) || bytesEqual(oidBytes, EXT_KEY_USAGE_OID) || bytesEqual(oidBytes, CERT_POLICIES_OID) || bytesEqual(oidBytes, SUBJECT_KEY_ID_OID) || bytesEqual(oidBytes, AUTHORITY_KEY_ID_OID);
+    if (critical && !recognized) throw new Error(`x509: unrecognized critical extension ${_decodeOID(oidBytes)}`);
 
     if (bytesEqual(oidBytes, SAN_OID)) {
       sanCount++;
@@ -572,16 +584,17 @@ export type SPIFFEPrincipal =
   | { trustDomain: string; kind: "node"; role: "cloud" | "self-hosted"; accountId: string; nodeId: string };
 
 export function parseSPIFFEPrincipal(raw: string, trustDomain: string): SPIFFEPrincipal {
-  if (raw.includes("%")) throw new Error("x509: percent-encoded SPIFFE IDs are forbidden");
-  let uri: URL;
-  try { uri = new URL(raw); } catch { throw new Error("x509: malformed SPIFFE URI SAN"); }
-  if (uri.protocol !== "spiffe:" || uri.host !== trustDomain || uri.username || uri.password || uri.search || uri.hash) {
-    throw new Error("x509: SPIFFE URI SAN does not match configured trust domain");
+  if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(trustDomain) || trustDomain.includes("..")) {
+    throw new Error("x509: configured trust domain is not canonical");
   }
-  const segments = uri.pathname.slice(1).split("/");
+  const prefix = `spiffe://${trustDomain}/`;
+  if (!raw.startsWith(prefix) || raw.includes("%") || raw.includes("?") || raw.includes("#") || raw.includes("@")) throw new Error("x509: non-canonical SPIFFE URI SAN");
+  const path = raw.slice(prefix.length);
+  const segments = path.split("/");
   if (segments.some((s) => !/^[A-Za-z0-9._-]+$/.test(s) || s === "." || s === "..")) {
     throw new Error("x509: invalid SPIFFE path segment");
   }
+  if (raw !== `${prefix}${segments.join("/")}`) throw new Error("x509: non-canonical SPIFFE URI SAN");
   if (segments.length === 3 && segments[0] === "service" && (segments[1] === "cp" || segments[1] === "authsvc")) {
     return { trustDomain, kind: "service", role: segments[1], instanceId: segments[2] };
   }
