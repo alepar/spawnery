@@ -360,7 +360,7 @@ sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 :443 {
   tls /etc/spawnery/caddy/wildcard.crt /etc/spawnery/caddy/wildcard.key
   @cp   path /cp.v1.* /ws*
-  @as   path /oauth* /refresh* /logout* /github* /device* /ca/*
+  @as   path /oauth* /refresh* /logout* /github* /device* /ca/* /enrollment-tokens
   reverse_proxy @cp 127.0.0.1:8080
   reverse_proxy @as 127.0.0.1:8090
   root * /var/www/spawnery

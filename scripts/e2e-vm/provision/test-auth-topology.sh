@@ -45,4 +45,13 @@ if rg -n '^NODE_(ID_DIR|ROOT_CA|CERTIFICATE_REVOCATION_(ISSUERS|CRLS))=/etc/spaw
   exit 1
 fi
 
+if ! rg -q '^[[:space:]]*@as[[:space:]]+path.*[[:space:]]/enrollment-tokens([[:space:]]|$)' "$HERE/provision.sh"; then
+  echo "Caddy does not proxy public enrollment-token issuance" >&2
+  exit 1
+fi
+if rg -n '^[[:space:]]*@as[[:space:]]+path.*[[:space:]]/enroll(\*|[[:space:]]|$)' "$HERE/provision.sh"; then
+  echo "Caddy exposes the internal enrollment credential-delivery route" >&2
+  exit 1
+fi
+
 echo "auth signing runtime topology is root-anchored and leaf-only"

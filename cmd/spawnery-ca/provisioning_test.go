@@ -205,6 +205,35 @@ func TestProductionNodeRuntimeBundleIsAllowListed(t *testing.T) {
 	}
 }
 
+func TestProductionCaddyProxiesPublicEnrollmentTokenIssuanceOnly(t *testing.T) {
+	provision := readRepoFile(t, "../../scripts/e2e-vm/provision/provision.sh")
+	var asMatcher string
+	for _, line := range strings.Split(provision, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "@as ") {
+			asMatcher = line
+			break
+		}
+	}
+	if asMatcher == "" {
+		t.Fatal("Caddy AS matcher not found")
+	}
+	paths := map[string]bool{}
+	for _, field := range strings.Fields(asMatcher)[2:] {
+		paths[field] = true
+	}
+	if !paths["/enrollment-tokens"] {
+		t.Errorf("Caddy AS matcher does not proxy public /enrollment-tokens: %s", asMatcher)
+	}
+	for _, internal := range []string{"/enroll", "/enroll*"} {
+		if paths[internal] {
+			t.Errorf("Caddy AS matcher exposes internal enrollment route %s: %s", internal, asMatcher)
+		}
+	}
+	if !strings.Contains(provision, "reverse_proxy @as 127.0.0.1:8090") {
+		t.Error("Caddy AS matcher is not proxied to the public authsvc listener")
+	}
+}
+
 func systemdUnitBody(t *testing.T, provision, unit string) string {
 	t.Helper()
 	marker := "sudo tee /etc/systemd/system/" + unit
