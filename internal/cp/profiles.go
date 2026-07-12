@@ -155,7 +155,8 @@ func (s *Server) DeleteProfile(ctx context.Context, req *connect.Request[cpv1.De
 // --- AddProfileEntry -------------------------------------------------------
 
 func (s *Server) AddProfileEntry(ctx context.Context, req *connect.Request[cpv1.AddProfileEntryRequest]) (*connect.Response[cpv1.AddProfileEntryResponse], error) {
-	if _, err := s.ownProfile(ctx, req.Msg.ProfileId); err != nil {
+	p, err := s.ownProfile(ctx, req.Msg.ProfileId)
+	if err != nil {
 		return nil, err
 	}
 	e := req.Msg.Entry
@@ -177,6 +178,21 @@ func (s *Server) AddProfileEntry(ctx context.Context, req *connect.Request[cpv1.
 	case cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF:
 		if e.CatalogId == "" {
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("catalog_id is required for CATALOG_REF source"))
+		}
+		// Tenant gate (sp-mwco.3.4 §4.6 D6): the referenced entry must exist and be visible to the
+		// profile's owner (listed OR theirs) — NotFound either way, never PermissionDenied (don't
+		// confirm existence). This also closes the "attach a nonexistent catalog_id" dangling-ref
+		// hole on the normal path (a concurrent attach can still race it; assembly fails loud as
+		// defense in depth).
+		ce, err := s.st.CustomizationCatalog().Get(ctx, e.CatalogId)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
+			}
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+		if !catalogEntryVisibleTo(ce, p.OwnerID) {
+			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
 		}
 	case cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CUSTOM:
 		// Full validation: name rules, size cap, path confinement (sp-nrzf.3.6).

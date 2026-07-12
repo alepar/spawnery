@@ -43,6 +43,10 @@ type CP struct {
 	Telemetry         string        `koanf:"telemetry"`
 	MaxSpawnsPerOwner int           `koanf:"max_spawns_per_owner" validate:"min=0"`
 	ShutdownGrace     time.Duration `koanf:"shutdown_grace"`
+	// AdminOwners is a comma-separated allowlist of account ids permitted to publish catalog
+	// entries to the global catalog (sp-mwco.3.4 §4.6). Empty (the default) means nobody is an
+	// admin — publish is simply unavailable.
+	AdminOwners string `koanf:"admin_owners"`
 
 	Evaluator struct {
 		QuotaSuspendMB int64         `koanf:"quota_suspend_mb"`
@@ -136,6 +140,7 @@ var cpEnvAliases = map[string]string{
 	"CP_REVOCATION_POLL_INTERVAL":       "auth.revocation_poll_interval",
 	"CP_TELEMETRY":                      "telemetry",
 	"CP_MAX_SPAWNS_PER_OWNER":           "max_spawns_per_owner",
+	"CP_ADMIN_OWNERS":                   "admin_owners",
 	"EVALUATOR_QUOTA_SUSPEND_MB":        "evaluator.quota_suspend_mb",
 	"EVALUATOR_IDLE_ENABLED":            "evaluator.idle_enabled",
 	"EVALUATOR_IDLE_DETACHED":           "evaluator.idle_detached",

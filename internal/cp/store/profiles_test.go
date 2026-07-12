@@ -530,3 +530,56 @@ func TestProfileEntryBundleRefRoundTrip(t *testing.T) {
 		t.Errorf("CatalogID = %q, want empty for bundle_ref entry", e.CatalogID)
 	}
 }
+
+func TestProfiles_CountRefsByCatalogRef(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	// bob has two profiles referencing cat-1; carol has one. A fourth (decoy) profile
+	// references a different catalog entry (cat-2) and must not be counted.
+	profiles := []struct {
+		id, owner, catalogRef string
+	}{
+		{"pf-1", "bob", "cat-1"},
+		{"pf-2", "bob", "cat-1"},
+		{"pf-3", "carol", "cat-1"},
+		{"pf-4", "dave", "cat-2"},
+	}
+	for _, p := range profiles {
+		if err := st.Profiles().Create(ctx, store.Profile{
+			ProfileID: p.id, OwnerID: p.owner, Name: "p", Version: 1, UpdatedAt: 1000,
+		}); err != nil {
+			t.Fatalf("Create %s: %v", p.id, err)
+		}
+		if _, err := st.Profiles().AddEntry(ctx, p.id, 1, store.ProfileEntry{
+			EntryID: "e-" + p.id, Kind: store.ProfileEntrySkill, Name: "sk",
+			SourceKind: store.ProfileSourceCatalog, CatalogID: p.catalogRef,
+		}, 2000); err != nil {
+			t.Fatalf("AddEntry %s: %v", p.id, err)
+		}
+	}
+
+	gotProfiles, gotOwners, err := st.Profiles().CountRefsByCatalogRef(ctx, "cat-1")
+	if err != nil {
+		t.Fatalf("CountRefsByCatalogRef: %v", err)
+	}
+	if gotProfiles != 3 {
+		t.Errorf("expected 3 referencing profiles, got %d", gotProfiles)
+	}
+	if gotOwners != 2 {
+		t.Errorf("expected 2 distinct owners, got %d", gotOwners)
+	}
+}
+
+func TestProfiles_CountRefsByCatalogRef_NoRefs(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	gotProfiles, gotOwners, err := st.Profiles().CountRefsByCatalogRef(ctx, "no-such-catalog-id")
+	if err != nil {
+		t.Fatalf("CountRefsByCatalogRef: %v", err)
+	}
+	if gotProfiles != 0 || gotOwners != 0 {
+		t.Errorf("expected (0, 0), got (%d, %d)", gotProfiles, gotOwners)
+	}
+}

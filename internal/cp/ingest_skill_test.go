@@ -266,6 +266,10 @@ func TestIngestSkillFromURL_StoresPutAndCatalogRow(t *testing.T) {
 	if entry.Kind != string(store.ProfileEntrySkill) {
 		t.Fatalf("kind not skill: got %q", entry.Kind)
 	}
+	// Unlisted by default (sp-mwco.3.4 §4.6 D1): a freshly ingested skill is creator-visible only.
+	if entry.Listed {
+		t.Error("expected listed=false for a freshly ingested skill")
+	}
 }
 
 func TestIngestSkillFromURL_InvalidURL_BadArgument(t *testing.T) {

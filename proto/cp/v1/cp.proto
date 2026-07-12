@@ -77,6 +77,15 @@ service SpawnService {
   rpc UpdateCatalogEntry(UpdateCatalogEntryRequest)     returns (UpdateCatalogEntryResponse);
   rpc DeleteCatalogEntry(DeleteCatalogEntryRequest)     returns (DeleteCatalogEntryResponse);
   rpc SetCatalogListing(SetCatalogListingRequest)       returns (SetCatalogListingResponse);
+  // Admin-only catalog publish/unpublish (sp-mwco.3.4 — listing policy §4.6). New rows (both
+  // inline and URL-ingested) are created unlisted (creator-visible only); these RPCs are the
+  // sole door onto the global catalog. Unpublish shares SetCatalogListing(listed=false)'s
+  // guarded-unlist semantics (reference-count confirmation + kill-switch), gated to admins.
+  rpc PublishCatalogEntry(PublishCatalogEntryRequest)     returns (PublishCatalogEntryResponse);
+  rpc UnpublishCatalogEntry(UnpublishCatalogEntryRequest) returns (UnpublishCatalogEntryResponse);
+  // PublishBundle lists every member of every version of a bundle — not just the latest, since a
+  // profile may pin an older version and must still be able to resolve it.
+  rpc PublishBundle(PublishBundleRequest) returns (PublishBundleResponse);
   // IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
   // SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
   // content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
@@ -763,8 +772,35 @@ message UpdateCatalogEntryResponse {}
 message DeleteCatalogEntryRequest  { string catalog_id = 1; }
 message DeleteCatalogEntryResponse {}
 
-message SetCatalogListingRequest  { string catalog_id = 1; bool listed = 2; }
-message SetCatalogListingResponse {}
+// SetCatalogListingRequest.confirm gates listed=false (unlist) when the entry is referenced
+// (sp-mwco.3.4 §4.6 D5): a referenced entry with confirm=false is rejected with
+// FailedPrecondition; confirm=true proceeds and runs the kill-switch. listed=true is
+// unaffected by confirm (no kill, no guard) but requires the caller to be an admin (D4).
+message SetCatalogListingRequest  { string catalog_id = 1; bool listed = 2; bool confirm = 3; }
+// referenced_* / terminated_spawns are populated on a listed=false response (zero on listed=true)
+// so a client can display the blast radius after a confirmed unlist.
+message SetCatalogListingResponse {
+  int32 referenced_profiles        = 1;
+  int32 referenced_owners          = 2;
+  int32 referenced_bundle_versions = 3;
+  int32 terminated_spawns          = 4;
+}
+
+message PublishCatalogEntryRequest  { string catalog_id = 1; }
+message PublishCatalogEntryResponse {}
+
+// UnpublishCatalogEntryRequest.confirm has the same guarded-unlist semantics as
+// SetCatalogListingRequest.confirm; the response carries the same blast-radius counts.
+message UnpublishCatalogEntryRequest  { string catalog_id = 1; bool confirm = 2; }
+message UnpublishCatalogEntryResponse {
+  int32 referenced_profiles        = 1;
+  int32 referenced_owners          = 2;
+  int32 referenced_bundle_versions = 3;
+  int32 terminated_spawns          = 4;
+}
+
+message PublishBundleRequest  { string bundle_id = 1; }
+message PublishBundleResponse {}
 
 // IngestSkillFromURLRequest ingests a skill from a GitHub repo URL.
 message IngestSkillFromURLRequest {

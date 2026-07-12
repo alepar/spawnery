@@ -253,6 +253,10 @@ func TestDeleteProfile_OwnerIsolation(t *testing.T) {
 func TestAddProfileEntry_Happy(t *testing.T) {
 	s, _, _ := newTestServer(t)
 
+	// The referenced catalog entry must exist and be visible to the caller (sp-mwco.3.4 §4.6 D6) —
+	// alice's own (unlisted) entry is visible to her.
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "my-skill")
+
 	cr, _ := s.CreateProfile(aliceCtx(), connect.NewRequest(&cpv1.CreateProfileRequest{Name: "P"}))
 	profileID := cr.Msg.ProfileId
 
@@ -263,7 +267,7 @@ func TestAddProfileEntry_Happy(t *testing.T) {
 			Kind:      cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
 			Name:      "my-skill",
 			Source:    cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF,
-			CatalogId: "alice/myskill",
+			CatalogId: catID,
 		},
 	}))
 	if err != nil {
@@ -367,6 +371,8 @@ func TestAddProfileEntry_Validation(t *testing.T) {
 func TestAddProfileEntry_CAS_Conflict(t *testing.T) {
 	s, _, _ := newTestServer(t)
 
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "sk")
+
 	cr, _ := s.CreateProfile(aliceCtx(), connect.NewRequest(&cpv1.CreateProfileRequest{Name: "P"}))
 	profileID := cr.Msg.ProfileId
 
@@ -385,7 +391,7 @@ func TestAddProfileEntry_CAS_Conflict(t *testing.T) {
 			Kind:      cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
 			Name:      "sk",
 			Source:    cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF,
-			CatalogId: "a/b",
+			CatalogId: catID,
 		},
 	}))
 	if connect.CodeOf(err) != connect.CodeAborted {
@@ -393,10 +399,80 @@ func TestAddProfileEntry_CAS_Conflict(t *testing.T) {
 	}
 }
 
+// TestAddProfileEntry_CatalogRef_TenantGate verifies the sp-mwco.3.4 §4.6 D6 attach gate: a
+// catalog_ref entry may only reference an entry that exists AND is visible to the profile's
+// owner (listed OR theirs).
+func TestAddProfileEntry_CatalogRef_TenantGate(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	aliceCatID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "alice-skill")
+
+	cr, _ := s.CreateProfile(bobCtx(), connect.NewRequest(&cpv1.CreateProfileRequest{Name: "P"}))
+	profileID := cr.Msg.ProfileId
+
+	// Bob cannot attach alice's unlisted entry.
+	_, err := s.AddProfileEntry(bobCtx(), connect.NewRequest(&cpv1.AddProfileEntryRequest{
+		ProfileId: profileID, ExpectedVersion: 1,
+		Entry: &cpv1.ProfileEntry{
+			Kind: cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, Name: "x",
+			Source: cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF, CatalogId: aliceCatID,
+		},
+	}))
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("expected NotFound for a foreign unlisted catalog ref, got %v", err)
+	}
+
+	// An unknown catalog id is also NotFound.
+	_, err = s.AddProfileEntry(bobCtx(), connect.NewRequest(&cpv1.AddProfileEntryRequest{
+		ProfileId: profileID, ExpectedVersion: 1,
+		Entry: &cpv1.ProfileEntry{
+			Kind: cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, Name: "x",
+			Source: cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF, CatalogId: "no-such",
+		},
+	}))
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("expected NotFound for an unknown catalog id, got %v", err)
+	}
+
+	// Bob can attach his own unlisted entry.
+	bobResp, err := s.CreateCatalogEntry(bobCtx(), connect.NewRequest(&cpv1.CreateCatalogEntryRequest{
+		Kind: cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, Name: "bob-skill", Content: skillContent,
+	}))
+	if err != nil {
+		t.Fatalf("CreateCatalogEntry (bob): %v", err)
+	}
+	if _, err := s.AddProfileEntry(bobCtx(), connect.NewRequest(&cpv1.AddProfileEntryRequest{
+		ProfileId: profileID, ExpectedVersion: 1,
+		Entry: &cpv1.ProfileEntry{
+			Kind: cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, Name: "bob-skill",
+			Source: cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF, CatalogId: bobResp.Msg.CatalogId,
+		},
+	})); err != nil {
+		t.Errorf("bob should be able to attach his own unlisted entry, got %v", err)
+	}
+
+	// A published (listed) foreign entry is attachable.
+	s.SetAdminOwners([]string{"admin"})
+	if _, err := s.PublishCatalogEntry(adminCtx(), connect.NewRequest(&cpv1.PublishCatalogEntryRequest{CatalogId: aliceCatID})); err != nil {
+		t.Fatalf("PublishCatalogEntry: %v", err)
+	}
+	if _, err := s.AddProfileEntry(bobCtx(), connect.NewRequest(&cpv1.AddProfileEntryRequest{
+		ProfileId: profileID, ExpectedVersion: 2,
+		Entry: &cpv1.ProfileEntry{
+			Kind: cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, Name: "alice-skill",
+			Source: cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF, CatalogId: aliceCatID,
+		},
+	})); err != nil {
+		t.Errorf("bob should be able to attach a published foreign entry, got %v", err)
+	}
+}
+
 // --- RemoveProfileEntry ----------------------------------------------------
 
 func TestRemoveProfileEntry_Happy(t *testing.T) {
 	s, _, _ := newTestServer(t)
+
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "sk")
 
 	cr, _ := s.CreateProfile(aliceCtx(), connect.NewRequest(&cpv1.CreateProfileRequest{Name: "P"}))
 	profileID := cr.Msg.ProfileId
@@ -408,7 +484,7 @@ func TestRemoveProfileEntry_Happy(t *testing.T) {
 			Kind:      cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
 			Name:      "sk",
 			Source:    cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF,
-			CatalogId: "a/b",
+			CatalogId: catID,
 		},
 	}))
 	entryID := aer.Msg.EntryId

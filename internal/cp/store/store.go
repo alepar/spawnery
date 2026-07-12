@@ -229,6 +229,11 @@ type ProfileRepo interface {
 	// pointing to the given catalogID. Returns an empty slice (not an error) when none match.
 	// Used by the kill-switch (sp-nrzf.3.9) to resolve profiles affected by a catalog revoke.
 	ListProfileIDsByCatalogRef(ctx context.Context, catalogID string) ([]string, error)
+	// CountRefsByCatalogRef returns the number of distinct profiles, and the number of distinct
+	// owners of those profiles, that contain a catalog_ref entry pointing to catalogID. Zero refs
+	// returns (0, 0, nil). Used by the guarded-unlist reference check (sp-mwco.3.4 §4.6 D5) — the
+	// counts (never profile/owner ids) drive the FailedPrecondition warning message.
+	CountRefsByCatalogRef(ctx context.Context, catalogID string) (profiles, owners int, err error)
 }
 
 // CustomizationCatalogRepo manages curated catalog entries.
@@ -242,6 +247,9 @@ type CustomizationCatalogRepo interface {
 	Get(ctx context.Context, catalogID string) (CustomizationCatalogEntry, error)
 	// List returns only listed=true entries, ordered by name ASC.
 	List(ctx context.Context) ([]CustomizationCatalogEntry, error)
+	// ListVisibleTo returns every entry visible to ownerID — listed=true UNION ownerID's own
+	// (including unlisted) — ordered by name ASC (sp-mwco.3.4 §4.6 D2: "listed OR mine").
+	ListVisibleTo(ctx context.Context, ownerID string) ([]CustomizationCatalogEntry, error)
 	// ListByCreator returns all entries for the given creator (including unlisted), ordered by name ASC.
 	ListByCreator(ctx context.Context, creatorID string) ([]CustomizationCatalogEntry, error)
 	// Update replaces name, description, and content for an entry. ErrNotFound when absent.

@@ -423,14 +423,19 @@ func TestAssemble_CatalogRef(t *testing.T) {
 		t.Fatalf("unexpected artifacts: %v", m.Artifacts)
 	}
 
-	// Missing catalog id — add a second entry with a nonexistent catalog ref.
-	// p.Version is already 2 (incremented after the first addEntry), so use it directly.
-	_, _ = addEntry(t, s, profileID, p.Version, &cpv1.ProfileEntry{
-		Kind:      cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_MCP,
-		Name:      "missing",
-		Source:    cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF,
-		CatalogId: "nonexistent-catalog-id",
-	})
+	// Missing catalog id — simulate an already-dangling ref (e.g. a concurrent-attach race that
+	// slipped past AddProfileEntry's existence gate, sp-mwco.3.4 §4.6 D6) by inserting directly
+	// via the store, bypassing the handler's now-enforced existence check. Assembly must still
+	// fail loud as defense in depth. p.Version is already 2 (incremented after the first addEntry).
+	if _, err := s.st.Profiles().AddEntry(context.Background(), profileID, p.Version, store.ProfileEntry{
+		EntryID:    "missing-ref-entry",
+		Kind:       store.ProfileEntryMCP,
+		Name:       "missing",
+		SourceKind: store.ProfileSourceCatalog,
+		CatalogID:  "nonexistent-catalog-id",
+	}, 2000); err != nil {
+		t.Fatalf("AddEntry (dangling ref): %v", err)
+	}
 	p2, entries2 := loadProfile(t, s, profileID)
 	_, err = s.assembleProfileArtifacts(context.Background(), p2, entries2)
 	if connect.CodeOf(err) != connect.CodeInvalidArgument {
