@@ -106,6 +106,8 @@ func (store *SignerRevocationStore) Close() error {
 	return err
 }
 
+// Generation returns the accepted generation for verifier cache selection and diagnostics. It does
+// not report store liveness; authorization callers must always call RejectSigner.
 func (store *SignerRevocationStore) Generation() uint64 {
 	if store == nil {
 		return 0
@@ -115,7 +117,10 @@ func (store *SignerRevocationStore) Generation() uint64 {
 
 func (store *SignerRevocationStore) RejectSigner(leaf *x509.Certificate) error {
 	if store == nil {
-		return nil
+		return ErrSignerRevocationStoreClosed
+	}
+	if err := store.mutationError(); err != nil {
+		return err
 	}
 	return store.state.RejectSigner(leaf)
 }

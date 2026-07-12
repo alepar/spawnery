@@ -270,6 +270,9 @@ func TestSignerRevocationStorePostRenameFailurePoisonsAtAdvancedFloor(t *testing
 	if store.Generation() != 3 {
 		t.Fatalf("live floor after rename = %d, want 3", store.Generation())
 	}
+	if err := store.RejectSigner(pki.leaf); !errors.Is(err, ErrSignerRevocationStorePoisoned) {
+		t.Fatalf("poisoned verifier view = %v, want fail-closed error", err)
+	}
 
 	record, err := readPersistedSignerRevocation(path)
 	if err != nil {
@@ -309,5 +312,52 @@ func TestSignerRevocationStorePostRenameFailurePoisonsAtAdvancedFloor(t *testing
 	}
 	if after.SHA256 != record.SHA256 {
 		t.Fatal("poisoned mutation changed renamed durable state")
+	}
+}
+
+func TestVerifierFailsClosedAfterSignerRevocationStoreOwnershipTransfer(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	path := filepath.Join(t.TempDir(), "revocations", "state.json")
+	oldStore, err := OpenSignerRevocationStore(path, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = oldStore.Close() })
+	verifier, err := NewVerifier(pki.root, "prod", oldStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := NewSigningCredential(pki.leafEd25519Priv, pki.chain, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := credential.Sign(ArtifactTypeSession, []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(wire, ArtifactTypeSession, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := oldStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	newOwner, err := OpenSignerRevocationStore(path, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = newOwner.Close() })
+	statement := mustParseRevocation(t, pki, &authv1.SignerRevocationStatement{
+		Environment: "prod", Generation: 1, IssuedAt: now.Unix(), RevokedSerials: [][]byte{pki.leaf.SerialNumber.Bytes()},
+	})
+	if err := newOwner.Apply(statement); err != nil {
+		t.Fatal(err)
+	}
+	if oldStore.Generation() != 0 || newOwner.Generation() != 1 {
+		t.Fatalf("unexpected diagnostic generations: old=%d new=%d", oldStore.Generation(), newOwner.Generation())
+	}
+	if _, err := verifier.Verify(wire, ArtifactTypeSession, now); !errors.Is(err, ErrSignerRevocationStoreClosed) {
+		t.Fatalf("old verifier after ownership transfer = %v, want closed-store failure", err)
 	}
 }
