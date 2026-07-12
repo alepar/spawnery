@@ -83,6 +83,9 @@ export ACC_SPAWN_ACTIVE_TIMEOUT_MS=240000
 [ -f "${GOLDEN_IMAGE%.qcow2}-ca.crt" ] && export NODE_EXTRA_CA_CERTS="${GOLDEN_IMAGE%.qcow2}-ca.crt"
 export ACC_SPAWNCTL_BIN="$STAGE/bin/spawnctl"     # cliDriver shells out to the fresh spawnctl
 export ACC_E2E_VM_IP="$E2E_VM_IP" ACC_E2E_SSH_KEY="$E2E_SSH_KEY" ACC_E2E_SSH_USER="$E2E_SSH_USER"
+# Some hosts lack libvirt's NSS module. Resolve only this disposable VM hostname inside Node test
+# processes; the URL hostname and golden CA remain unchanged, so TLS hostname validation still runs.
+export NODE_OPTIONS="--require=$E2E_DIR/node-dns-hook.cjs${NODE_OPTIONS:+ $NODE_OPTIONS}"
 export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report"   # per-run output — concurrency-safe
 export PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results"
 GREP_ARGS=(); [ -n "$GREP" ] && GREP_ARGS=(-g "$GREP")
