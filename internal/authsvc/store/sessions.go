@@ -52,8 +52,9 @@ func (r *refreshSessionRepo) Supersede(ctx context.Context, predecessorHash stri
 func (r *refreshSessionRepo) RevokeFamily(ctx context.Context, familyID string) ([]string, error) {
 	var live []RefreshSession
 	if err := r.db.NewSelect().Model(&live).
-		Column("access_token_id").
+		Column("cp_access_token_id", "node_access_token_id").
 		Where("family_id = ? AND revoked = 0", familyID).
+		OrderExpr("created_at ASC, token_hash ASC").
 		Scan(ctx); err != nil {
 		return nil, err
 	}
@@ -64,9 +65,9 @@ func (r *refreshSessionRepo) RevokeFamily(ctx context.Context, familyID string) 
 		Exec(ctx); err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(live))
+	ids := make([]string, 0, len(live)*2)
 	for _, s := range live {
-		ids = append(ids, s.AccessTokenID)
+		ids = append(ids, s.CPAccessTokenID, s.NodeAccessTokenID)
 	}
 	return ids, nil
 }
