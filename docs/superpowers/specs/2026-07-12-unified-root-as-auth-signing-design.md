@@ -40,6 +40,10 @@ trust anchor installed in CPs, spawnlets, and native clients. Multiple purpose-l
 intermediates and leaves derive authority from that root. Development, staging, and production do
 not share roots.
 
+Each environment also has one corresponding SPIFFE trust domain, for example
+`spiffe://prod.spawnery.internal`. Principal roles belong in the SPIFFE path, not in separate URI
+authorities. This preserves the one-root/one-trust-domain model defined by the SPIFFE standard.
+
 GitHub OAuth and public WebPKI remain external bootstrap and transport systems. They do not issue or
 validate Spawnery identities and therefore are not additional Spawnery trust roots.
 
@@ -67,7 +71,7 @@ It contains:
 - `KeyUsageDigitalSignature` only;
 - no TLS client-auth or server-auth EKU;
 - a Spawnery auth-artifact-signing policy OID;
-- an environment-bound identity URI for the AS auth-artifact signer;
+- exactly one URI SAN, `spiffe://<environment>.spawnery.internal/signer/auth-artifact/<signer-id>`;
 - a random 128-bit-or-larger serial number;
 - bounded `NotBefore` and `NotAfter` values.
 
