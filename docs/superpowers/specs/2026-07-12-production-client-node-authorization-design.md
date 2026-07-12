@@ -35,8 +35,8 @@ authority.
 - Requiring proof of possession on every ordinary CP RPC. CP-local calls remain `aud=cp` bearer
   authentication as decided in the existing auth design.
 - Making AS availability part of every spawn operation or session attachment.
-- Defining the transport carrying client-to-node bytes. Iroh and the inner TLS channel are
-  `sp-dvke.4`; this spec defines the authorization carried inside any transport.
+- Defining the transport carrying client-to-node bytes. Iroh connection binding and the encrypted
+  CP fallback are `sp-dvke.4`; this spec defines the authorization carried inside any transport.
 - Replacing GitHub OAuth, refresh-family semantics, or the client session-key algorithms.
 - Granting the CP authority to mint, attenuate, or translate node credentials.
 
@@ -127,8 +127,8 @@ The client rejects the pending operation before signing if any check fails. A co
 substitute an untrusted node, change node class, or route a user's self-hosted workload to another
 account's node.
 
-For direct transport, the same checks run on the certificate presented by the live inner TLS peer.
-The presented identity must equal the target previously authorized in the intent.
+For direct transport, the same checks run on the certificate and proof bound to the live transport.
+The proved identity must equal the target previously authorized in the intent.
 
 ## Lifecycle Authorization Flow
 
