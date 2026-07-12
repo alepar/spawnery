@@ -92,9 +92,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("cp: load artifact verifier: %v", err)
 	}
-	if signerRevocations != nil {
-		defer signerRevocations.Close()
-	}
+	var stopRevocationReloader func() bool
 	if signerRevocations != nil && cfg.Auth.SignerRevocationStatement != "" {
 		reloadCtx, cancelReload := context.WithCancel(ctx)
 		reloadDone := make(chan struct{})
@@ -103,9 +101,19 @@ func main() {
 			defer close(reloadDone)
 			reloader.Run(reloadCtx)
 		})
+		stopRevocationReloader = func() bool {
+			return stopSignerRevocationReloader(cancelReload, reloadDone, signerRevocationShutdownBound)
+		}
+	}
+	if signerRevocations != nil {
 		defer func() {
-			cancelReload()
-			<-reloadDone
+			if stopRevocationReloader != nil && !stopRevocationReloader() {
+				log.Printf("cp: signer revocation reloader did not stop within %s; leaving store open for process exit", signerRevocationShutdownBound)
+				return
+			}
+			if err := signerRevocations.Close(); err != nil {
+				log.Printf("cp: close signer revocation store: %v", err)
+			}
 		}()
 	}
 

@@ -18,8 +18,10 @@ import (
 )
 
 type artifactFixture struct {
-	credential *token.SigningCredential
-	verifier   *token.Verifier
+	credential      *token.SigningCredential
+	verifier        *token.Verifier
+	intermediate    *x509.Certificate
+	intermediateKey *ecdsa.PrivateKey
 }
 
 func newArtifactFixture(t *testing.T) artifactFixture {
@@ -67,7 +69,7 @@ func newArtifactFixtureWithRevocations(t *testing.T, revocations token.SignerRev
 	if err != nil {
 		t.Fatal(err)
 	}
-	return artifactFixture{credential: credential, verifier: verifier}
+	return artifactFixture{credential: credential, verifier: verifier, intermediate: intermediate, intermediateKey: intermediateKey}
 }
 
 func issueCertificate(t *testing.T, template, parent *x509.Certificate, public any, signer crypto.Signer) *x509.Certificate {

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -148,6 +149,40 @@ malformedObserved:
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("reloader did not stop with context")
+	}
+}
+
+func TestSignerRevocationReloaderCancelsBlockedLoad(t *testing.T) {
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	var startedOnce sync.Once
+	reloader := &signerRevocationReloader{interval: time.Millisecond}
+	reloader.load = func(context.Context) error {
+		startedOnce.Do(func() { close(started) })
+		<-unblock
+		return nil
+	}
+	reloader.onError = func(error) {}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); reloader.Run(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("load did not start")
+	}
+	begin := time.Now()
+	if stopSignerRevocationReloader(cancel, done, 20*time.Millisecond) {
+		t.Fatal("blocked loader unexpectedly reported a clean stop")
+	}
+	if elapsed := time.Since(begin); elapsed > 100*time.Millisecond {
+		t.Fatalf("bounded shutdown took %s", elapsed)
+	}
+	close(unblock)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reloader did not exit after load unblocked")
 	}
 }
 

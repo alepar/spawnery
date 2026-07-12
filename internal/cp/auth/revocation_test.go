@@ -52,6 +52,36 @@ func TestRevocationRegistryAcceptsOnlyOrdinaryRevocationArtifacts(t *testing.T) 
 	}
 }
 
+func TestRevocationRegistryRejectsSignerRevocationEnvelope(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	payload, err := proto.Marshal(&authv1.SignerRevocationStatement{Environment: "prod", Generation: 1, IssuedAt: testNow.Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := token.SignSignerRevocationStatement(fixture.intermediate, fixture.intermediateKey, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewRevocationRegistry(nil)
+	if err := r.Apply(SignedFeedEntry{Seq: 1, Sig: wire}, fixture.verifier, testNow); err == nil {
+		t.Fatal("accepted signer-revocation envelope as ordinary user revocation")
+	}
+}
+
+func TestRevocationRegistryAccountOnlyRevocation(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	r := NewRevocationRegistry(nil)
+	if err := r.Apply(signedEntry(t, fixture.credential, 1, "account-only", nil), fixture.verifier, testNow); err != nil {
+		t.Fatal(err)
+	}
+	if !r.IsRevoked("", "account-only") {
+		t.Fatal("account was not revoked")
+	}
+	if r.IsRevoked("unrelated-token", "") {
+		t.Fatal("account-only entry independently revoked a token")
+	}
+}
+
 func TestRevocationRegistryRejectsUnsignedSequenceSubstitution(t *testing.T) {
 	fixture := newArtifactFixture(t)
 	r := NewRevocationRegistry(nil)
