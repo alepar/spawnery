@@ -35,6 +35,7 @@ type certTestOptions struct {
 type certTestPKI struct {
 	root            *x509.Certificate
 	intermediate    *x509.Certificate
+	intermediateKey *ecdsa.PrivateKey
 	leaf            *x509.Certificate
 	leafEd25519Priv ed25519.PrivateKey
 	chain           []*x509.Certificate
@@ -116,10 +117,30 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 	return certTestPKI{
 		root:            root,
 		intermediate:    intermediate,
+		intermediateKey: intermediateKey,
 		leaf:            leaf,
 		leafEd25519Priv: leafEdPriv,
 		chain:           []*x509.Certificate{leaf, intermediate},
 	}
+}
+
+func newCertTestLeaf(t *testing.T, pki certTestPKI, serial int64, signerID string) (*x509.Certificate, ed25519.PrivateKey) {
+	t.Helper()
+	now := time.Unix(1_800_000_000, 0)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 127), big.NewInt(serial)),
+		Subject:      pkix.Name{CommonName: "Spawnery artifact signer"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(90 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		Policies:     mustPolicies(t, []asn1.ObjectIdentifier{testLeafPolicyOID}),
+		URIs:         mustParseURIs(t, []string{"spiffe://prod.spawnery.internal/signer/auth-artifact/" + signerID}),
+	}
+	return mustCreateCertificate(t, template, pki.intermediate, priv.Public(), pki.intermediateKey), priv
 }
 
 func mustP256Key(t *testing.T) *ecdsa.PrivateKey {

@@ -2,6 +2,7 @@ package token
 
 import (
 	"bytes"
+	"container/list"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -11,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -26,6 +28,7 @@ const (
 	maxArtifactPayloadSize     = 64 * 1024
 	maxArtifactCertificateSize = 16 * 1024
 	maxEncodedArtifactSize     = 128 * 1024
+	maxChainCacheEntries       = 256
 )
 
 var (
@@ -61,9 +64,30 @@ type SignerRevocationView interface {
 
 // Verifier validates self-describing artifacts against one environment root.
 type Verifier struct {
-	root        *x509.Certificate
-	environment string
-	revocations SignerRevocationView
+	root          *x509.Certificate
+	rootHash      [32]byte
+	environment   string
+	revocations   SignerRevocationView
+	chainCache    chainValidationCache
+	validateChain func([]*x509.Certificate, *x509.Certificate, string, time.Time) (*validatedSigner, error)
+}
+
+type chainCacheKey struct {
+	root       [32]byte
+	leaf       [32]byte
+	generation uint64
+}
+
+type chainCacheEntry struct {
+	key               chainCacheKey
+	validated         *validatedSigner
+	chainFingerprints [][32]byte
+}
+
+type chainValidationCache struct {
+	mu      sync.Mutex
+	lru     *list.List
+	entries map[chainCacheKey]*list.Element
 }
 
 type validatedSigner struct {
@@ -97,7 +121,14 @@ func NewVerifier(root *x509.Certificate, environment string, revocations SignerR
 	if environment == "" {
 		return nil, errors.New("token: missing environment")
 	}
-	return &Verifier{root: root, environment: environment, revocations: revocations}, nil
+	return &Verifier{
+		root:          root,
+		rootHash:      sha256.Sum256(root.Raw),
+		environment:   environment,
+		revocations:   revocations,
+		chainCache:    chainValidationCache{lru: list.New(), entries: make(map[chainCacheKey]*list.Element)},
+		validateChain: validateSignerChain,
+	}, nil
 }
 
 // Sign signs domain || exact payload bytes and returns one unpadded base64url protobuf envelope.
@@ -174,14 +205,29 @@ func (verifier *Verifier) Verify(wire, expectedType string, now time.Time) ([]by
 		}
 		chain[i] = cert
 	}
-	validated, err := validateSignerChain(chain, verifier.root, verifier.environment, now)
-	if err != nil {
-		return nil, fmt.Errorf("token: reject signer chain: %w", err)
+	generation := uint64(0)
+	if verifier.revocations != nil {
+		generation = verifier.revocations.Generation()
+	}
+	cacheKey := chainCacheKey{
+		root:       verifier.rootHash,
+		leaf:       sha256.Sum256(chain[0].Raw),
+		generation: generation,
+	}
+	validated, cacheHit := verifier.chainCache.get(cacheKey, chain, now)
+	if !cacheHit {
+		validated, err = verifier.validateChain(chain, verifier.root, verifier.environment, now)
+		if err != nil {
+			return nil, fmt.Errorf("token: reject signer chain: %w", err)
+		}
 	}
 	if verifier.revocations != nil {
 		if err := verifier.revocations.RejectSigner(validated.leaf); err != nil {
 			return nil, fmt.Errorf("token: signer revoked: %w", err)
 		}
+	}
+	if !cacheHit {
+		verifier.chainCache.put(cacheKey, chain, validated)
 	}
 	if subtle.ConstantTimeCompare(envelope.KeyId, validated.keyID[:]) != 1 {
 		return nil, ErrUnknownKey
@@ -193,6 +239,53 @@ func (verifier *Verifier) Verify(wire, expectedType string, now time.Time) ([]by
 		return nil, ErrSignature
 	}
 	return append([]byte(nil), envelope.Payload...), nil
+}
+
+func (cache *chainValidationCache) get(key chainCacheKey, chain []*x509.Certificate, now time.Time) (*validatedSigner, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	element, ok := cache.entries[key]
+	if !ok {
+		return nil, false
+	}
+	entry := element.Value.(*chainCacheEntry)
+	if !now.Before(entry.validated.expires) {
+		cache.lru.Remove(element)
+		delete(cache.entries, key)
+		return nil, false
+	}
+	if len(entry.chainFingerprints) != len(chain) {
+		return nil, false
+	}
+	for i, cert := range chain {
+		if sha256.Sum256(cert.Raw) != entry.chainFingerprints[i] {
+			return nil, false
+		}
+	}
+	cache.lru.MoveToFront(element)
+	return entry.validated, true
+}
+
+func (cache *chainValidationCache) put(key chainCacheKey, chain []*x509.Certificate, validated *validatedSigner) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if existing, ok := cache.entries[key]; ok {
+		cache.lru.Remove(existing)
+		delete(cache.entries, key)
+	}
+	fingerprints := make([][32]byte, len(chain))
+	for i, cert := range chain {
+		fingerprints[i] = sha256.Sum256(cert.Raw)
+	}
+	element := cache.lru.PushFront(&chainCacheEntry{key: key, validated: validated, chainFingerprints: fingerprints})
+	cache.entries[key] = element
+	if cache.lru.Len() <= maxChainCacheEntries {
+		return
+	}
+	oldest := cache.lru.Back()
+	entry := oldest.Value.(*chainCacheEntry)
+	delete(cache.entries, entry.key)
+	cache.lru.Remove(oldest)
 }
 
 func validateSignerChain(chain []*x509.Certificate, root *x509.Certificate, environment string, now time.Time) (*validatedSigner, error) {

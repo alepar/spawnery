@@ -8,8 +8,19 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	authv1 "spawnery/gen/auth/v1"
 )
+
+func mustMarshal(t *testing.T, body *authv1.SessionTokenBody) []byte {
+	t.Helper()
+	b, err := proto.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
 
 func testKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()

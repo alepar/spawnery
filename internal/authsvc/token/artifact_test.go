@@ -9,7 +9,9 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -322,4 +324,148 @@ func mustEncodeArtifact(t *testing.T, artifact *authv1.SignedAuthArtifact) strin
 		t.Fatal(err)
 	}
 	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+type fakeSignerRevocations struct {
+	mu         sync.Mutex
+	generation uint64
+	rejections int
+	err        error
+}
+
+func (f *fakeSignerRevocations) Generation() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.generation
+}
+
+func (f *fakeSignerRevocations) RejectSigner(*x509.Certificate) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rejections++
+	return f.err
+}
+
+func (f *fakeSignerRevocations) setGeneration(generation uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.generation = generation
+}
+
+func (f *fakeSignerRevocations) rejectionCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.rejections
+}
+
+func TestVerifierChainValidationCache(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	credential, _ := NewSigningCredential(pki.leafEd25519Priv, pki.chain, pki.root, "prod", now)
+	wire, _ := credential.Sign(ArtifactTypeSession, []byte("payload"))
+	revocations := &fakeSignerRevocations{generation: 7}
+	verifier, _ := NewVerifier(pki.root, "prod", revocations)
+	validations := 0
+	realValidate := verifier.validateChain
+	verifier.validateChain = func(chain []*x509.Certificate, root *x509.Certificate, environment string, at time.Time) (*validatedSigner, error) {
+		validations++
+		return realValidate(chain, root, environment, at)
+	}
+
+	if _, err := verifier.Verify(wire, ArtifactTypeSession, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(wire, ArtifactTypeSession, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if validations != 1 || revocations.rejectionCount() != 2 {
+		t.Fatalf("cache hit counts: validations=%d revocations=%d", validations, revocations.rejectionCount())
+	}
+
+	tampered := mustDecodeArtifact(t, wire)
+	tampered.Signature[0] ^= 1
+	if _, err := verifier.Verify(mustEncodeArtifact(t, tampered), ArtifactTypeSession, now); !errors.Is(err, ErrSignature) {
+		t.Fatalf("tampered signature: %v", err)
+	}
+	if validations != 1 {
+		t.Fatalf("artifact signature result was cached: validations=%d", validations)
+	}
+
+	revocations.setGeneration(8)
+	if _, err := verifier.Verify(wire, ArtifactTypeSession, now); err != nil {
+		t.Fatal(err)
+	}
+	if validations != 2 {
+		t.Fatalf("revocation generation did not miss cache: validations=%d", validations)
+	}
+
+	leaf2, priv2 := newCertTestLeaf(t, pki, 2, "signer-2")
+	credential2, err := NewSigningCredential(priv2, []*x509.Certificate{leaf2, pki.intermediate}, pki.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire2, _ := credential2.Sign(ArtifactTypeSession, []byte("payload"))
+	if _, err := verifier.Verify(wire2, ArtifactTypeSession, now); err != nil {
+		t.Fatal(err)
+	}
+	if validations != 3 {
+		t.Fatalf("different leaf did not miss cache: validations=%d", validations)
+	}
+
+	if _, err := verifier.Verify(wire, ArtifactTypeSession, pki.leaf.NotAfter.Add(time.Second)); err == nil {
+		t.Fatal("expired cached chain verified")
+	}
+	if validations != 4 {
+		t.Fatalf("certificate expiry did not miss cache: validations=%d", validations)
+	}
+
+	rootFingerprint := sha256.Sum256(pki.root.Raw)
+	for key := range verifier.chainCache.entries {
+		if key.root != rootFingerprint {
+			t.Fatalf("cache key omitted root fingerprint: got %x want %x", key.root, rootFingerprint)
+		}
+	}
+}
+
+func TestVerifierDoesNotCacheValidationFailures(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	credential, _ := NewSigningCredential(pki.leafEd25519Priv, pki.chain, pki.root, "prod", now)
+	wire, _ := credential.Sign(ArtifactTypeSession, []byte("payload"))
+	revocations := &fakeSignerRevocations{generation: 1, err: errors.New("revoked")}
+	verifier, _ := NewVerifier(pki.root, "prod", revocations)
+	validations := 0
+	realValidate := verifier.validateChain
+	verifier.validateChain = func(chain []*x509.Certificate, root *x509.Certificate, environment string, at time.Time) (*validatedSigner, error) {
+		validations++
+		return realValidate(chain, root, environment, at)
+	}
+	for range 2 {
+		if _, err := verifier.Verify(wire, ArtifactTypeSession, now); err == nil {
+			t.Fatal("revoked signer verified")
+		}
+	}
+	if validations != 2 || verifier.chainCache.lru.Len() != 0 {
+		t.Fatalf("failed verification cached: validations=%d cache=%d", validations, verifier.chainCache.lru.Len())
+	}
+}
+
+func TestVerifierChainCacheIsBounded(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	pki := newCertTestPKI(t, nil)
+	verifier, _ := NewVerifier(pki.root, "prod", nil)
+	for i := 0; i < maxChainCacheEntries+1; i++ {
+		leaf, priv := newCertTestLeaf(t, pki, int64(i+10), fmt.Sprintf("signer-%d", i))
+		credential, err := NewSigningCredential(priv, []*x509.Certificate{leaf, pki.intermediate}, pki.root, "prod", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire, _ := credential.Sign(ArtifactTypeSession, []byte("payload"))
+		if _, err := verifier.Verify(wire, ArtifactTypeSession, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := verifier.chainCache.lru.Len(); got != maxChainCacheEntries {
+		t.Fatalf("cache size = %d, want %d", got, maxChainCacheEntries)
+	}
 }
