@@ -269,6 +269,64 @@ func TestCPInternalRuntimeRefreshesSignedCRLsAndFailsClosedAtStartup(t *testing.
 	}
 }
 
+func TestCPInternalClientPresentsCPAndRequiresAuthServiceRole(t *testing.T) {
+	cfg, root, serviceIssuer, _ := writeCPInternalFixture(t)
+	runtime, err := loadInternalRuntime(cfg, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.revocations.Close() })
+	serve := func(role string, reached *bool) *httptest.Server {
+		leaf, issueErr := serviceIssuer.IssueService(role, "peer-1", cfg.Internal.TrustDomain, []string{cfg.Internal.ServerName}, nil, time.Now().Add(time.Hour))
+		if issueErr != nil {
+			t.Fatal(issueErr)
+		}
+		identity, _ := leaf.TLSCertificate()
+		peerVerifier, verifyErr := mtls.NewPeerVerifier(mtls.PeerVerifierOptions{Root: root.Cert, TrustDomain: cfg.Internal.TrustDomain, CurrentTime: time.Now, IsRevoked: runtime.revocations.IsRevoked})
+		if verifyErr != nil {
+			t.Fatal(verifyErr)
+		}
+		serverTLS, configErr := mtls.ServerConfig(mtls.ServerOptions{Verifier: peerVerifier, Identity: identity, ClientMode: mtls.RequireClientCertificate})
+		if configErr != nil {
+			t.Fatal(configErr)
+		}
+		ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			*reached = true
+			if len(r.TLS.PeerCertificates) == 0 || len(r.TLS.PeerCertificates[0].URIs) != 1 || r.TLS.PeerCertificates[0].URIs[0].Path != "/service/cp/cp-1" {
+				t.Errorf("CP client identity was not presented: %+v", r.TLS.PeerCertificates)
+			}
+			if r.Header.Get("Authorization") != "" || r.Header.Get("X-Spawnery-AS-"+"Secret") != "" {
+				t.Error("CP internal client sent a retired service credential")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		ts.TLS = serverTLS
+		ts.StartTLS()
+		t.Cleanup(ts.Close)
+		return ts
+	}
+
+	var authsvcReached bool
+	authsvc := serve(pki.RoleAuthService, &authsvcReached)
+	resp, err := runtime.client.Get(authsvc.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || !authsvcReached {
+		t.Fatalf("status=%d reached=%v", resp.StatusCode, authsvcReached)
+	}
+
+	var wrongRoleReached bool
+	wrongRole := serve(pki.RoleCP, &wrongRoleReached)
+	if _, err := runtime.client.Get(wrongRole.URL); err == nil {
+		t.Fatal("CP client accepted a DNS-valid server with the CP role")
+	}
+	if wrongRoleReached {
+		t.Fatal("wrong-role AS server reached its handler")
+	}
+}
+
 func writeCPInternalFixture(t *testing.T) (CP, *pki.CA, *pki.CA, *pki.CA) {
 	t.Helper()
 	const td = "prod.spawnery.internal"
