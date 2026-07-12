@@ -14,6 +14,16 @@ function buildTokenBodyBytes(opts: { accountId: string; handle: string; expiresA
   return toBinary(authv1.SessionTokenBodySchema, create(authv1.SessionTokenBodySchema, opts));
 }
 
+function wrapTokenBody(body: Uint8Array): string {
+  return toBase64Url(toBinary(authv1.SignedAuthArtifactSchema, create(authv1.SignedAuthArtifactSchema, {
+    artifactType: "session-token",
+    payload: body,
+    signature: new Uint8Array(64),
+    signerChain: [new Uint8Array([1])],
+    keyId: new Uint8Array(32),
+  })));
+}
+
 // Reset zustand state and localStorage between tests
 beforeEach(() => {
   localStorage.removeItem(RTH_STORAGE_KEY);
@@ -84,7 +94,7 @@ describe("setToken", () => {
   it("sets status to authed and parses account info", () => {
     // Build a minimal wire token with known account_id and handle.
     const body = buildTokenBodyBytes({ accountId: "acc-test", handle: "testuser", expiresAt: 1800000000n });
-    const wire = toBase64Url(body) + "." + toBase64Url(new Uint8Array(64));
+    const wire = wrapTokenBody(body);
 
     useSessionStore.getState().setToken(wire, "rth123");
     const s = useSessionStore.getState();
@@ -123,7 +133,7 @@ describe("proactive refresh — timer is wired", () => {
       const nowSec = Math.floor(Date.now() / 1000);
       const expiresAt = BigInt(nowSec + 15 * 60);
       const body = buildTokenBodyBytes({ accountId: "acc", handle: "h", expiresAt });
-      const wire = toBase64Url(body) + "." + toBase64Url(new Uint8Array(64));
+      const wire = wrapTokenBody(body);
 
       useSessionStore.getState().setToken(wire, "rth-abc");
 

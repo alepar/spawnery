@@ -25,8 +25,14 @@ function buildWireToken(spkiHash: Uint8Array, expiresAt: bigint): string {
     expiresAt,
     sessionKeyHash: spkiHash,
   }));
-  const fakeSig = new Uint8Array(64);
-  return toBase64Url(body) + "." + toBase64Url(fakeSig);
+  const artifact = create(authv1.SignedAuthArtifactSchema, {
+    artifactType: "session-token",
+    payload: body,
+    signature: new Uint8Array(64),
+    signerChain: [new Uint8Array([1])],
+    keyId: new Uint8Array(32),
+  });
+  return toBase64Url(toBinary(authv1.SignedAuthArtifactSchema, artifact));
 }
 
 function makeResponse(status: number, body: unknown): Response {

@@ -1,10 +1,9 @@
 /**
  * Session access-token wire format (auth-identity design §3 [MC1]).
  *
- * Wire: base64url(body_bytes) "." base64url(sig_bytes) — RawURLEncoding (no padding).
- * Body = proto3 SessionTokenBody, decoded with protobuf-es (via @spawnery/client's generated
- * gen/auth/v1/auth_pb). The SPA only READS the body; the AS signs it (Ed25519).
- * The SPA does NOT verify the Ed25519 sig — the CP verifies on every RPC (MC2).
+ * Wire: one unpadded base64url SignedAuthArtifact protobuf envelope. The SPA decodes envelope
+ * metadata and the exact SessionTokenBody payload. It does not verify certificates or signatures;
+ * the CP performs root-anchored verification on every RPC.
  *
  * Fields read by the SPA:
  *   f1 account_id (string)
@@ -21,20 +20,37 @@ export { toBase64Url, fromBase64Url };
 // ── Wire parsing ──────────────────────────────────────────────────────────────
 
 export interface TokenParts {
-  bodyBytes: Uint8Array;
-  sigBytes: Uint8Array;
+  artifactType: string;
+  payloadBytes: Uint8Array;
+  signatureBytes: Uint8Array;
+  signerChain: Uint8Array[];
+  keyId: Uint8Array;
 }
 
 /**
- * parseTokenWire splits the wire token "base64url(body).base64url(sig)".
- * Does NOT verify the sig — that is the CP's job (MC2).
+ * parseTokenWire decodes the self-describing envelope without treating its metadata as trusted.
  */
 export function parseTokenWire(wire: string): TokenParts {
-  const dot = wire.indexOf(".");
-  if (dot < 0) throw new Error("token: malformed wire (no dot)");
+  if (wire.length === 0 || wire.includes(".")) throw new Error("token: malformed envelope");
+  let artifact;
+  try {
+    artifact = fromBinary(authv1.SignedAuthArtifactSchema, fromBase64Url(wire));
+  } catch {
+    throw new Error("token: malformed envelope");
+  }
+  if (artifact.artifactType !== "session-token") {
+    throw new Error(`token: unexpected artifact type ${JSON.stringify(artifact.artifactType)}`);
+  }
+  if (artifact.payload.length === 0 || artifact.signature.length !== 64 ||
+      artifact.signerChain.length === 0 || artifact.keyId.length !== 32) {
+    throw new Error("token: malformed envelope");
+  }
   return {
-    bodyBytes: fromBase64Url(wire.slice(0, dot)),
-    sigBytes: fromBase64Url(wire.slice(dot + 1)),
+    artifactType: artifact.artifactType,
+    payloadBytes: artifact.payload,
+    signatureBytes: artifact.signature,
+    signerChain: artifact.signerChain,
+    keyId: artifact.keyId,
   };
 }
 
@@ -61,8 +77,8 @@ export function decodeSessionTokenBody(bodyBytes: Uint8Array): SessionTokenBodyD
   };
 }
 
-/** parseAccessToken is a convenience wrapper over parseTokenWire + decodeSessionTokenBody. */
+/** parseAccessToken decodes the session body from the envelope's exact payload bytes. */
 export function parseAccessToken(wire: string): SessionTokenBodyDecoded & { bodyBytes: Uint8Array } {
-  const { bodyBytes } = parseTokenWire(wire);
-  return { ...decodeSessionTokenBody(bodyBytes), bodyBytes };
+  const { payloadBytes } = parseTokenWire(wire);
+  return { ...decodeSessionTokenBody(payloadBytes), bodyBytes: payloadBytes };
 }
