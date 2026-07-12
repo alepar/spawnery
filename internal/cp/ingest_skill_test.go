@@ -44,6 +44,32 @@ func (f *fakeFetcher) Fetch(_ context.Context, _ skillfetch.RepoRef, _, _, name,
 	return r, nil
 }
 
+// FetchBundle makes fakeFetcher also satisfy skillfetch.BundleFetcher: a bundle-of-one derived
+// from its canned Result, so the existing handler tests (Success/Idempotent/StoresPutAndCatalogRow/
+// quota/error-mapping) exercise the same bundle path IngestSkillFromURL now always takes. Name and
+// description overrides are applied by the handler itself for a single-member bundle, not here —
+// FetchBundle carries no requestedName/description parameters.
+func (f *fakeFetcher) FetchBundle(_ context.Context, _ skillfetch.RepoRef, _, _ string) (skillfetch.BundleResult, error) {
+	if f.err != nil {
+		return skillfetch.BundleResult{}, f.err
+	}
+	r := f.result
+	return skillfetch.BundleResult{
+		Owner:        r.Owner,
+		Repo:         r.Repo,
+		SourceCommit: r.SourceCommit,
+		Members: []skillfetch.Member{{
+			Dir:             "",
+			Name:            r.Name,
+			Description:     r.Description,
+			PlainTarSHA256:  r.PlainTarSHA256,
+			CompressedBytes: r.CompressedBytes,
+			PlainSize:       r.PlainSize,
+		}},
+		SkippedEntries: r.SkippedEntries,
+	}, nil
+}
+
 // makeCannedResult builds a deterministic fake fetch result with the given name.
 func makeCannedResult(name string) skillfetch.Result {
 	// Build a small canonical tar with SKILL.md
