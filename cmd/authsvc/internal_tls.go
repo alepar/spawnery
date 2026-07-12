@@ -26,6 +26,14 @@ func loadCertificateRevocations(cfg ASInternalTLS, now func() time.Time) (*pki.R
 	if cfg.RevocationState == "" || len(issuerPaths) == 0 || len(issuerPaths) != len(crlPaths) {
 		return nil, errors.New("authsvc: certificate revocation state, issuers, and one CRL per issuer are required")
 	}
+	rootRaw, err := os.ReadFile(cfg.RootCA)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: read revocation root %s: %w", cfg.RootCA, err)
+	}
+	root, err := pki.ParseCertPEM(rootRaw)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: parse revocation root %s: %w", cfg.RootCA, err)
+	}
 	issuers := make([]*x509.Certificate, 0, len(issuerPaths))
 	for _, path := range issuerPaths {
 		raw, err := os.ReadFile(path)
@@ -35,6 +43,12 @@ func loadCertificateRevocations(cfg ASInternalTLS, now func() time.Time) (*pki.R
 		issuer, err := pki.ParseCertPEM(raw)
 		if err != nil {
 			return nil, fmt.Errorf("authsvc: parse revocation issuer %s: %w", path, err)
+		}
+		if err := issuer.CheckSignatureFrom(root); err != nil {
+			return nil, fmt.Errorf("authsvc: revocation issuer %s is outside the configured root: %w", path, err)
+		}
+		if len(issuer.URIs) != 1 || issuer.URIs[0].Host != cfg.TrustDomain {
+			return nil, fmt.Errorf("authsvc: revocation issuer %s has wrong trust domain", path)
 		}
 		issuers = append(issuers, issuer)
 	}
@@ -117,6 +131,28 @@ func loadInternalTLSConfig(cfg ASInternalTLS, state *pki.RevocationState) (*tls.
 	identity, err := tls.X509KeyPair(append(certRaw, chainRaw...), keyRaw)
 	if err != nil {
 		return nil, nil, nil, tls.Certificate{}, fmt.Errorf("authsvc: load internal identity: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(identity.Certificate[0])
+	if err != nil {
+		return nil, nil, nil, tls.Certificate{}, fmt.Errorf("authsvc: parse internal identity leaf: %w", err)
+	}
+	intermediates := make([]*x509.Certificate, 0, len(identity.Certificate)-1)
+	for _, raw := range identity.Certificate[1:] {
+		cert, parseErr := x509.ParseCertificate(raw)
+		if parseErr != nil {
+			return nil, nil, nil, tls.Certificate{}, fmt.Errorf("authsvc: parse internal identity chain: %w", parseErr)
+		}
+		intermediates = append(intermediates, cert)
+	}
+	principal, err := pki.VerifyPrincipal(leaf, intermediates, pki.VerifyOptions{
+		Root: root, TrustDomain: cfg.TrustDomain, CurrentTime: time.Now(),
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, IsRevoked: state.IsRevoked,
+	})
+	if err != nil {
+		return nil, nil, nil, tls.Certificate{}, fmt.Errorf("authsvc: verify internal identity: %w", err)
+	}
+	if principal.Kind != pki.KindService || principal.Role != pki.RoleAuthService {
+		return nil, nil, nil, tls.Certificate{}, fmt.Errorf("authsvc: internal identity is %s/%s, want service/authsvc", principal.Kind, principal.Role)
 	}
 	verifier, err := mtls.NewPeerVerifier(mtls.PeerVerifierOptions{
 		Root: root, TrustDomain: cfg.TrustDomain, CurrentTime: time.Now, IsRevoked: state.IsRevoked,

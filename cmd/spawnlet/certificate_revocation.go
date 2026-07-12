@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,6 +28,18 @@ func loadNodeCertificateRevocations(cfg *Spawnlet, now func() time.Time) (*nodeC
 	if cfg.Node.CertificateRevocationState == "" || len(issuerPaths) == 0 || len(issuerPaths) != len(crlPaths) {
 		return nil, errors.New("node certificate revocation state, issuers, and one CRL per issuer are required")
 	}
+	rootPath := cfg.Node.RootCA
+	if rootPath == "" {
+		rootPath = filepath.Join(cfg.Node.IDDir, "root.pem")
+	}
+	rootRaw, err := os.ReadFile(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("read certificate revocation root %s: %w", rootPath, err)
+	}
+	root, err := pki.ParseCertPEM(rootRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse certificate revocation root %s: %w", rootPath, err)
+	}
 	issuers := make([]*x509.Certificate, 0, len(issuerPaths))
 	for _, path := range issuerPaths {
 		raw, err := os.ReadFile(path)
@@ -36,6 +49,12 @@ func loadNodeCertificateRevocations(cfg *Spawnlet, now func() time.Time) (*nodeC
 		issuer, err := pki.ParseCertPEM(raw)
 		if err != nil {
 			return nil, fmt.Errorf("parse certificate revocation issuer %s: %w", path, err)
+		}
+		if err := issuer.CheckSignatureFrom(root); err != nil {
+			return nil, fmt.Errorf("certificate revocation issuer %s is outside the pinned root: %w", path, err)
+		}
+		if len(issuer.URIs) != 1 || issuer.URIs[0].Host != cfg.Node.TrustDomain {
+			return nil, fmt.Errorf("certificate revocation issuer %s has wrong trust domain", path)
 		}
 		issuers = append(issuers, issuer)
 	}

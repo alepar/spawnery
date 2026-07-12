@@ -36,8 +36,12 @@ func TestLoadCertificateRevocationsRequiresCurrentConfiguredCRL(t *testing.T) {
 	}
 	dir := t.TempDir()
 	issuerPath := filepath.Join(dir, "issuer.pem")
+	rootPath := filepath.Join(dir, "root.pem")
 	crlPath := filepath.Join(dir, "issuer.crl")
 	if err := os.WriteFile(issuerPath, pki.MarshalCertPEM(issuer.Cert), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rootPath, pki.MarshalCertPEM(root.Cert), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(crlPath, pki.MarshalCRLPEM(crl), 0o600); err != nil {
@@ -45,6 +49,8 @@ func TestLoadCertificateRevocationsRequiresCurrentConfiguredCRL(t *testing.T) {
 	}
 
 	cfg := &AS{}
+	cfg.Internal.RootCA = rootPath
+	cfg.Internal.TrustDomain = "prod.spawnery.internal"
 	cfg.Internal.RevocationState = filepath.Join(dir, "state", "certificates.json")
 	cfg.Internal.RevocationIssuers = issuerPath
 	cfg.Internal.RevocationCRLs = crlPath
