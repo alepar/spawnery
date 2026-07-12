@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/asn1"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -13,9 +14,11 @@ import (
 )
 
 const (
-	crlPEMType = "X509 CRL"
-	maxCRLSize = 4 << 20
+	crlPEMType    = "X509 CRL"
+	maxCRLDERSize = 4 << 20
 )
+
+var maxCRLPEMSize = canonicalCRLPEMSize(maxCRLDERSize)
 
 var ErrCRLTooLarge = errors.New("pki: CRL exceeds size limit")
 
@@ -69,7 +72,7 @@ func VerifyCRL(list *x509.RevocationList, issuer *x509.Certificate, now time.Tim
 	if list == nil || len(list.Raw) == 0 || issuer == nil || now.IsZero() {
 		return errors.New("pki: invalid CRL verification input")
 	}
-	if len(list.Raw) > maxCRLSize {
+	if len(list.Raw) > maxCRLDERSize {
 		return ErrCRLTooLarge
 	}
 	if err := validateCRLIssuer(issuer); err != nil {
@@ -118,7 +121,7 @@ func validCRLNumber(number *big.Int) bool {
 
 // MarshalCRLPEM encodes list as one X509 CRL PEM block.
 func MarshalCRLPEM(list *x509.RevocationList) []byte {
-	if list == nil || len(list.Raw) == 0 {
+	if list == nil || len(list.Raw) == 0 || len(list.Raw) > maxCRLDERSize {
 		return nil
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: crlPEMType, Bytes: list.Raw})
@@ -126,7 +129,7 @@ func MarshalCRLPEM(list *x509.RevocationList) []byte {
 
 // ParseCRLPEM parses exactly one X509 CRL PEM block.
 func ParseCRLPEM(data []byte) (*x509.RevocationList, error) {
-	if len(data) > maxCRLSize {
+	if len(data) > maxCRLPEMSize {
 		return nil, ErrCRLTooLarge
 	}
 	if !bytes.HasPrefix(data, []byte("-----BEGIN "+crlPEMType+"-----")) {
@@ -135,6 +138,9 @@ func ParseCRLPEM(data []byte) (*x509.RevocationList, error) {
 	block, rest := pem.Decode(data)
 	if block == nil || block.Type != crlPEMType || len(block.Headers) != 0 {
 		return nil, errors.New("pki: no canonical X509 CRL PEM block")
+	}
+	if len(block.Bytes) > maxCRLDERSize {
+		return nil, ErrCRLTooLarge
 	}
 	if len(rest) != 0 {
 		return nil, errors.New("pki: trailing data after X509 CRL PEM block")
@@ -147,6 +153,12 @@ func ParseCRLPEM(data []byte) (*x509.RevocationList, error) {
 		return nil, errors.New("pki: non-canonical X509 CRL PEM encoding")
 	}
 	return list, nil
+}
+
+func canonicalCRLPEMSize(derSize int) int {
+	encoded := base64.StdEncoding.EncodedLen(derSize)
+	lines := (encoded + 63) / 64
+	return len("-----BEGIN X509 CRL-----\n") + encoded + lines + len("-----END X509 CRL-----\n")
 }
 
 func validateCRLIssuer(issuer *x509.Certificate) error {

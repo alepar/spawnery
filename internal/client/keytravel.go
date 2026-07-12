@@ -74,12 +74,13 @@ var _ forkClient = (cpv1connect.SpawnServiceClient)(nil)
 // node verification. Loading these from auth.json/env/flags is a CLI concern and stays in
 // spawnctl; Migrate/Fork take a ready MoveOptions.
 type MoveOptions struct {
-	AccountID              string
-	TrustDomain            string
-	RootPEM                []byte
-	RevocationURL          string
-	RevocationClient       *http.Client
-	CertificateRevocations pki.CertificateRevocationChecker
+	AccountID                   string
+	TrustDomain                 string
+	RootPEM                     []byte
+	RevocationURL               string
+	RevocationClient            *http.Client
+	CertificateRevocations      pki.CertificateRevocationChecker
+	CloseCertificateRevocations func() error
 }
 
 // migrateTarget maps a <target> token onto a MigrateSpawnRequest's node/class fields.

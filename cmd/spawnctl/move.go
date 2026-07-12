@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/client"
+	"spawnery/internal/pki"
 )
 
 // `spawnctl move <spawn-id> <target>` drives the data-only local<->cloud migration (sp-u53.5.3). It
@@ -41,6 +43,9 @@ func moveCmd() *cli.Command {
 			&cli.StringFlag{Name: "root-ca", Usage: "path to the pinned Root CA PEM for production node verification"},
 			&cli.StringFlag{Name: "trust-domain", Usage: "expected SPIFFE trust domain for production node verification"},
 			&cli.StringFlag{Name: "as", Usage: "Auth Service origin for node revocation checks; defaults to the stored login AS URL"},
+			&cli.StringFlag{Name: "crl-state", Usage: "persistent certificate revocation checkpoint (required with --root-ca)"},
+			&cli.StringSliceFlag{Name: "crl-issuer", Usage: "trusted issuing-intermediate PEM (repeatable; required with --root-ca)"},
+			&cli.StringSliceFlag{Name: "crl", Usage: "current signed CRL PEM to apply before verification (repeatable)"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if c.Args().Len() != 2 {
@@ -55,9 +60,12 @@ func moveCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), strings.TrimSpace(c.String("root-ca")), strings.TrimSpace(c.String("trust-domain")))
+			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), strings.TrimSpace(c.String("root-ca")), strings.TrimSpace(c.String("trust-domain")), strings.TrimSpace(c.String("crl-state")), c.StringSlice("crl-issuer"), c.StringSlice("crl"), time.Now)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
+			}
+			if opts.CloseCertificateRevocations != nil {
+				defer opts.CloseCertificateRevocations()
 			}
 			dev, err := loadDevice(dir)
 			if err != nil {
@@ -77,7 +85,11 @@ func moveCmd() *cli.Command {
 	}
 }
 
-func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath, trustDomain string) (client.MoveOptions, error) {
+func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath, trustDomain, crlStatePath string, issuerPaths, crlPaths []string, clock func() time.Time) (client.MoveOptions, error) {
+	if clock == nil {
+		return client.MoveOptions{}, errors.New("move options require a clock")
+	}
+	now := clock()
 	opts := client.MoveOptions{
 		AccountID:   resolveMoveAccountID(dir, tokenFlag),
 		TrustDomain: trustDomain,
@@ -88,6 +100,55 @@ func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath, trustDomain string) (cl
 			return client.MoveOptions{}, fmt.Errorf("read root CA PEM: %w", err)
 		}
 		opts.RootPEM = rootPEM
+		if crlStatePath == "" || len(issuerPaths) == 0 {
+			return client.MoveOptions{}, errors.New("production node verification requires --crl-state and at least one --crl-issuer")
+		}
+		root, err := pki.ParseCertPEM(rootPEM)
+		if err != nil {
+			return client.MoveOptions{}, fmt.Errorf("parse root CA PEM: %w", err)
+		}
+		roots := x509.NewCertPool()
+		roots.AddCert(root)
+		issuers := make([]*x509.Certificate, 0, len(issuerPaths))
+		for _, path := range issuerPaths {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return client.MoveOptions{}, fmt.Errorf("read CRL issuer PEM: %w", err)
+			}
+			issuer, err := pki.ParseCertPEM(raw)
+			if err != nil {
+				return client.MoveOptions{}, fmt.Errorf("parse CRL issuer PEM: %w", err)
+			}
+			if _, err := issuer.Verify(x509.VerifyOptions{Roots: roots, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
+				return client.MoveOptions{}, fmt.Errorf("verify CRL issuer: %w", err)
+			}
+			issuers = append(issuers, issuer)
+		}
+		state, err := pki.OpenRevocationState(crlStatePath, issuers, clock)
+		if err != nil {
+			return client.MoveOptions{}, fmt.Errorf("open certificate revocation state: %w", err)
+		}
+		for _, path := range crlPaths {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				_ = state.Close()
+				return client.MoveOptions{}, fmt.Errorf("read CRL PEM: %w", err)
+			}
+			if err := state.ApplyPEM(raw); err != nil {
+				_ = state.Close()
+				return client.MoveOptions{}, fmt.Errorf("apply CRL PEM: %w", err)
+			}
+		}
+		for _, issuer := range issuers {
+			if _, ok := state.HighestNumber(issuer.SerialNumber); !ok {
+				_ = state.Close()
+				return client.MoveOptions{}, fmt.Errorf("certificate revocation state has no current CRL for issuer %s", issuer.SerialNumber.Text(16))
+			}
+		}
+		opts.CertificateRevocations = state.IsRevoked
+		opts.CloseCertificateRevocations = state.Close
+	} else if crlStatePath != "" || len(issuerPaths) != 0 || len(crlPaths) != 0 {
+		return client.MoveOptions{}, errors.New("certificate revocation flags require --root-ca")
 	}
 	asURL := strings.TrimRight(asFlag, "/")
 	if asURL == "" {

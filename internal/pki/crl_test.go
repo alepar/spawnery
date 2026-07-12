@@ -170,11 +170,22 @@ func TestCRLRejectsInvalidEntriesAndPEM(t *testing.T) {
 }
 
 func TestCRLPEMSizeLimitBoundary(t *testing.T) {
-	if _, err := ParseCRLPEM(bytes.Repeat([]byte{'x'}, maxCRLSize)); errors.Is(err, ErrCRLTooLarge) {
+	if _, err := ParseCRLPEM(bytes.Repeat([]byte{'x'}, maxCRLPEMSize)); errors.Is(err, ErrCRLTooLarge) {
 		t.Fatal("CRL at size boundary reported too large")
 	}
-	if _, err := ParseCRLPEM(bytes.Repeat([]byte{'x'}, maxCRLSize+1)); !errors.Is(err, ErrCRLTooLarge) {
+	if _, err := ParseCRLPEM(bytes.Repeat([]byte{'x'}, maxCRLPEMSize+1)); !errors.Is(err, ErrCRLTooLarge) {
 		t.Fatalf("oversized CRL error = %v", err)
+	}
+	exactDER := &x509.RevocationList{Raw: bytes.Repeat([]byte{'x'}, maxCRLDERSize)}
+	encoded := MarshalCRLPEM(exactDER)
+	if len(encoded) != maxCRLPEMSize {
+		t.Fatalf("encoded exact-boundary DER length = %d, DER max %d PEM max %d", len(encoded), maxCRLDERSize, maxCRLPEMSize)
+	}
+	if _, err := ParseCRLPEM(encoded); errors.Is(err, ErrCRLTooLarge) {
+		t.Fatal("PEM encoding of maximum accepted DER was rejected for representation overhead")
+	}
+	if got := MarshalCRLPEM(&x509.RevocationList{Raw: bytes.Repeat([]byte{'x'}, maxCRLDERSize+1)}); got != nil {
+		t.Fatal("oversized DER was marshaled")
 	}
 }
 
@@ -187,7 +198,7 @@ func TestVerifyCRLRejectsOversizedRawObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	oversized := *list
-	oversized.Raw = bytes.Repeat([]byte{'x'}, maxCRLSize+1)
+	oversized.Raw = bytes.Repeat([]byte{'x'}, maxCRLDERSize+1)
 	if err := VerifyCRL(&oversized, issuer.Cert, now); !errors.Is(err, ErrCRLTooLarge) {
 		t.Fatalf("oversized parsed CRL error = %v", err)
 	}
