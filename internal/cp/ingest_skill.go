@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -100,6 +101,16 @@ func (s *Server) IngestSkillFromURL(ctx context.Context, req *connect.Request[cp
 
 	if result.NameWarning != "" {
 		log.Printf("ingest_skill: owner=%s url=%s: %s", owner, repoRef.Owner+"/"+repoRef.Repo, result.NameWarning)
+	}
+	if len(result.SkippedEntries) > 0 {
+		skippedList := result.SkippedEntries
+		truncated := ""
+		if len(skippedList) > 10 {
+			skippedList = skippedList[:10]
+			truncated = ", ..."
+		}
+		log.Printf("ingest_skill: owner=%s repo=%s: %d non-regular entries skipped: %s%s",
+			owner, repoRef.Owner+"/"+repoRef.Repo, len(result.SkippedEntries), strings.Join(skippedList, ", "), truncated)
 	}
 
 	// Idempotency check: return existing catalog_id if same (owner, sha256) already exists

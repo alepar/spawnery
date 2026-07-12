@@ -134,13 +134,42 @@ func isBlockedIP(ip net.IP) bool {
 	return false
 }
 
+// skippedEntry records a non-regular tar entry (symlink, hardlink, device, fifo) that was
+// skipped rather than unpacked. path is wrapper-stripped and subdir-relative, in the same
+// coordinate system as tarEntry.path.
+type skippedEntry struct {
+	path string
+	kind string
+}
+
+// nonRegularKind classifies a tar typeflag that is neither a regular file/dir nor a PAX header.
+// ok is false when the typeflag doesn't match a known kind; callers should render an "unknown"
+// kind (including the raw typeflag) in that case.
+func nonRegularKind(typeflag byte) (kind string, ok bool) {
+	switch typeflag {
+	case tar.TypeSymlink:
+		return "symlink", true
+	case tar.TypeLink:
+		return "hardlink", true
+	case tar.TypeChar:
+		return "chardev", true
+	case tar.TypeBlock:
+		return "blockdev", true
+	case tar.TypeFifo:
+		return "fifo", true
+	default:
+		return "", false
+	}
+}
+
 // fetchAndUnpack downloads the tarball from rawURL, gunzips, strips the GitHub wrapper dir,
-// descends into subdir if given, and returns the in-memory entries.
+// descends into subdir if given, and returns the in-memory entries plus any non-regular entries
+// (symlink, hardlink, device, fifo) that were skipped rather than unpacked.
 // It enforces streaming bounds before any buffering.
-func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir string) ([]tarEntry, error) {
+func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir string) ([]tarEntry, []skippedEntry, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -155,7 +184,7 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 		if ue, ok := err.(*url.Error); ok {
 			inner = ue.Err
 		}
-		return nil, &ErrUpstreamFailed{Cause: fmt.Errorf("fetch %s: %w", redactURL(rawURL), inner)}
+		return nil, nil, &ErrUpstreamFailed{Cause: fmt.Errorf("fetch %s: %w", redactURL(rawURL), inner)}
 	}
 	defer resp.Body.Close()
 
@@ -164,13 +193,13 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 		// continue
 	case http.StatusTooManyRequests:
 		retryAfter := resp.Header.Get("Retry-After")
-		return nil, &ErrRateLimit{RetryAfter: retryAfter}
+		return nil, nil, &ErrRateLimit{RetryAfter: retryAfter}
 	default:
 		if resp.StatusCode >= 500 {
 			// GitHub server-side error — transient upstream failure, not bad client input.
-			return nil, &ErrUpstreamFailed{Cause: fmt.Errorf("GitHub returned HTTP %d for %s", resp.StatusCode, redactURL(rawURL))}
+			return nil, nil, &ErrUpstreamFailed{Cause: fmt.Errorf("GitHub returned HTTP %d for %s", resp.StatusCode, redactURL(rawURL))}
 		}
-		return nil, fmt.Errorf("GitHub returned HTTP %d for %s", resp.StatusCode, redactURL(rawURL))
+		return nil, nil, fmt.Errorf("GitHub returned HTTP %d for %s", resp.StatusCode, redactURL(rawURL))
 	}
 
 	// Wire cap on compressed body
@@ -179,7 +208,7 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 	// gzip decode
 	gz, err := gzip.NewReader(wireReader)
 	if err != nil {
-		return nil, fmt.Errorf("gzip init: %w", err)
+		return nil, nil, fmt.Errorf("gzip init: %w", err)
 	}
 	defer gz.Close()
 
@@ -192,6 +221,7 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 	wrapperPrefix := ""
 	fileCount := 0
 	var entries []tarEntry
+	var skipped []skippedEntry
 
 	for {
 		hdr, err := tr.Next()
@@ -199,30 +229,37 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("tar read: %w", err)
+			return nil, nil, fmt.Errorf("tar read: %w", err)
 		}
 
 		// Check decompressed cap
 		if decompReader.N <= 0 {
-			return nil, fmt.Errorf("decompressed tarball exceeds cap (%d bytes)", DecompressedCapBytes)
+			return nil, nil, fmt.Errorf("decompressed tarball exceeds cap (%d bytes)", DecompressedCapBytes)
 		}
 		// Check wire cap
 		if wireReader.N <= 0 {
-			return nil, fmt.Errorf("compressed tarball exceeds wire cap (%d bytes)", WireCapBytes)
+			return nil, nil, fmt.Errorf("compressed tarball exceeds wire cap (%d bytes)", WireCapBytes)
 		}
 
-		// Reject non-regular entries; silently skip PAX metadata headers.
+		// Classify the entry type. Non-regular entries (symlink, hardlink, device, fifo, and
+		// anything else unrecognized) are NOT rejected here — they are carried through
+		// wrapper-strip, subdir filtering, and safeRelPath below (so an attack path in a
+		// symlink's NAME still hard-rejects the fetch), then recorded as skipped and never
+		// unpacked. hdr.Linkname is never read and no link is ever written.
+		skipKind := ""
 		switch hdr.Typeflag {
 		case tar.TypeReg, tar.TypeRegA, tar.TypeDir:
 			// allowed
 		case tar.TypeXHeader, tar.TypeXGlobalHeader:
-			// PAX extended headers — metadata only, no data; skip silently.
+			// PAX extended headers — metadata only, no data; skip silently (never reported).
 			// GitHub tarballs routinely include a pax_global_header entry.
 			continue
-		case tar.TypeSymlink, tar.TypeLink:
-			return nil, fmt.Errorf("symlink/hardlink entries are not allowed (entry %q)", hdr.Name)
 		default:
-			return nil, fmt.Errorf("non-regular tar entry type %d rejected (entry %q)", hdr.Typeflag, hdr.Name)
+			kind, ok := nonRegularKind(hdr.Typeflag)
+			if !ok {
+				kind = fmt.Sprintf("unknown(%d)", hdr.Typeflag)
+			}
+			skipKind = kind
 		}
 
 		// Strip wrapper prefix (first entry gives us the wrapper dir)
@@ -256,16 +293,22 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 			continue
 		}
 
-		// Validate path safety
+		// Validate path safety. This still applies to skipped entries — an absolute or ".."
+		// path in a symlink/hardlink header is an attack, not repo hygiene, and hard-rejects.
 		cleaned, err := safeRelPath(entryName)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		entryName = cleaned
 
 		fileCount++
 		if fileCount > FileCountCap {
-			return nil, fmt.Errorf("too many files in tarball (max %d)", FileCountCap)
+			return nil, nil, fmt.Errorf("too many files in tarball (max %d)", FileCountCap)
+		}
+
+		if skipKind != "" {
+			skipped = append(skipped, skippedEntry{path: entryName, kind: skipKind})
+			continue
 		}
 
 		if hdr.Typeflag == tar.TypeDir {
@@ -280,7 +323,7 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 		// Read file content with per-file cap (same decompressed budget)
 		content, err := io.ReadAll(io.LimitReader(tr, DecompressedCapBytes))
 		if err != nil {
-			return nil, fmt.Errorf("read entry %q: %w", hdr.Name, err)
+			return nil, nil, fmt.Errorf("read entry %q: %w", hdr.Name, err)
 		}
 
 		entries = append(entries, tarEntry{
@@ -291,7 +334,7 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 		})
 	}
 
-	return entries, nil
+	return entries, skipped, nil
 }
 
 // redactURL strips the path from a URL for safe logging (avoids leaking tokens in query strings).

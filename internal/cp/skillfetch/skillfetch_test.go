@@ -176,7 +176,7 @@ func TestFetch_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	entries, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestFetch_GitHub429(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error for 429")
 	}
@@ -237,21 +237,30 @@ func TestFetch_NonOKStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error for 404")
 	}
 }
 
-func TestFetch_SymlinkRejected(t *testing.T) {
+func TestFetch_SymlinkSkipped(t *testing.T) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
 	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "wrapper/"})
+	skillMD := "---\nname: test-skill\n---\n# Test Skill"
+	_ = tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     "wrapper/SKILL.md",
+		Size:     int64(len(skillMD)),
+		Mode:     0o644,
+	})
+	_, _ = tw.Write([]byte(skillMD))
 	_ = tw.WriteHeader(&tar.Header{
 		Typeflag: tar.TypeSymlink,
-		Name:     "wrapper/evil",
-		Linkname: "/etc/passwd",
+		Name:     "wrapper/AGENTS.md",
+		Linkname: "CLAUDE.md",
+		Mode:     0o777,
 	})
 	_ = tw.Close()
 	_ = gz.Close()
@@ -262,12 +271,142 @@ func TestFetch_SymlinkRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
-	if err == nil {
-		t.Fatal("expected error for symlink entry")
+	entries, skipped, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "symlink") {
-		t.Fatalf("expected symlink error, got: %v", err)
+
+	var foundSkillMD, foundAgentsMD bool
+	for _, e := range entries {
+		if e.path == "SKILL.md" {
+			foundSkillMD = true
+		}
+		if e.path == "AGENTS.md" {
+			foundAgentsMD = true
+		}
+	}
+	if !foundSkillMD {
+		t.Fatal("SKILL.md not found in unpacked entries")
+	}
+	if foundAgentsMD {
+		t.Fatal("AGENTS.md symlink should not appear in unpacked entries")
+	}
+
+	if len(skipped) != 1 || skipped[0].path != "AGENTS.md" || skipped[0].kind != "symlink" {
+		t.Fatalf("expected one skipped symlink entry AGENTS.md, got: %+v", skipped)
+	}
+}
+
+func TestFetch_HardlinkSkipped(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "wrapper/"})
+	_ = tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeLink,
+		Name:     "wrapper/hardlinked",
+		Linkname: "wrapper/SKILL.md",
+	})
+	_ = tw.Close()
+	_ = gz.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer srv.Close()
+
+	entries, skipped, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, e := range entries {
+		if e.path == "hardlinked" {
+			t.Fatal("hardlinked entry should not appear in unpacked entries")
+		}
+	}
+	if len(skipped) != 1 || skipped[0].path != "hardlinked" || skipped[0].kind != "hardlink" {
+		t.Fatalf("expected one skipped hardlink entry, got: %+v", skipped)
+	}
+}
+
+func TestFetch_DeviceAndFifoSkipped(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "wrapper/"})
+	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeChar, Name: "wrapper/dev1"})
+	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeBlock, Name: "wrapper/dev2"})
+	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeFifo, Name: "wrapper/fifo1"})
+	_ = tw.Close()
+	_ = gz.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer srv.Close()
+
+	entries, skipped, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no entries, got: %+v", entries)
+	}
+	if len(skipped) != 3 {
+		t.Fatalf("expected 3 skipped entries, got: %+v", skipped)
+	}
+	wantKinds := map[string]string{"dev1": "chardev", "dev2": "blockdev", "fifo1": "fifo"}
+	for _, s := range skipped {
+		if wantKinds[s.path] != s.kind {
+			t.Fatalf("skipped entry %q: got kind %q, want %q", s.path, s.kind, wantKinds[s.path])
+		}
+	}
+}
+
+func TestFetch_SkippedEntryOutsideSubdirNotReported(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "wrapper/"})
+	_ = tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeSymlink,
+		Name:     "wrapper/AGENTS.md",
+		Linkname: "CLAUDE.md",
+	})
+	skillMD := "---\nname: nested-skill\n---"
+	_ = tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     "wrapper/skills/nested/SKILL.md",
+		Size:     int64(len(skillMD)),
+		Mode:     0o644,
+	})
+	_, _ = tw.Write([]byte(skillMD))
+	_ = tw.Close()
+	_ = gz.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer srv.Close()
+
+	entries, skipped, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "skills/nested")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped entries when the symlink is outside the requested subdir, got: %+v", skipped)
+	}
+	var foundSkillMD bool
+	for _, e := range entries {
+		if e.path == "SKILL.md" {
+			foundSkillMD = true
+		}
+	}
+	if !foundSkillMD {
+		t.Fatal("SKILL.md not found after subdir descent")
 	}
 }
 
@@ -291,7 +430,7 @@ func TestFetch_AbsolutePathRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error for absolute path entry")
 	}
@@ -317,9 +456,34 @@ func TestFetch_DotDotEscapeRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	_, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err == nil {
 		t.Fatal("expected error for path traversal entry")
+	}
+}
+
+func TestFetch_SymlinkWithEscapePathRejected(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "wrapper/"})
+	_ = tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeSymlink,
+		Name:     "wrapper/../evil",
+		Linkname: "CLAUDE.md",
+	})
+	_ = tw.Close()
+	_ = gz.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer srv.Close()
+
+	_, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	if err == nil {
+		t.Fatal("expected error for symlink entry whose name escapes via ..")
 	}
 }
 
@@ -338,7 +502,7 @@ func TestFetch_SubdirDescent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "skills/nested")
+	entries, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "skills/nested")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -354,6 +518,73 @@ func TestFetch_SubdirDescent(t *testing.T) {
 	}
 	if !foundSkillMD {
 		t.Fatal("SKILL.md not found after subdir descent")
+	}
+}
+
+func TestFetch_SkippedEntryDoesNotAffectSHA(t *testing.T) {
+	skillMD := "---\nname: test-skill\n---\n# Test Skill"
+
+	var withSymlinkBuf bytes.Buffer
+	gz := gzip.NewWriter(&withSymlinkBuf)
+	tw := tar.NewWriter(gz)
+	_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "wrapper/"})
+	_ = tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     "wrapper/SKILL.md",
+		Size:     int64(len(skillMD)),
+		Mode:     0o644,
+	})
+	_, _ = tw.Write([]byte(skillMD))
+	_ = tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeSymlink,
+		Name:     "wrapper/AGENTS.md",
+		Linkname: "CLAUDE.md",
+	})
+	_ = tw.Close()
+	_ = gz.Close()
+
+	withoutSymlink := buildGzipTarball(t, "wrapper", map[string]string{"SKILL.md": skillMD})
+
+	srvWith := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(withSymlinkBuf.Bytes())
+	}))
+	defer srvWith.Close()
+
+	srvWithout := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(withoutSymlink)
+	}))
+	defer srvWithout.Close()
+
+	entriesWith, skippedWith, err := plainHTTPClient().fetchAndUnpack(context.Background(), srvWith.URL, "", "")
+	if err != nil {
+		t.Fatalf("fetch with symlink: %v", err)
+	}
+	entriesWithout, skippedWithout, err := plainHTTPClient().fetchAndUnpack(context.Background(), srvWithout.URL, "", "")
+	if err != nil {
+		t.Fatalf("fetch without symlink: %v", err)
+	}
+
+	tarWith, err := canonicalRepack(entriesWith)
+	if err != nil {
+		t.Fatalf("repack with symlink: %v", err)
+	}
+	tarWithout, err := canonicalRepack(entriesWithout)
+	if err != nil {
+		t.Fatalf("repack without symlink: %v", err)
+	}
+
+	shaWith := sha256.Sum256(tarWith)
+	shaWithout := sha256.Sum256(tarWithout)
+	if shaWith != shaWithout {
+		t.Fatalf("skipped symlink entry affected sha256: with=%x without=%x", shaWith, shaWithout)
+	}
+	if len(skippedWith) != 1 {
+		t.Fatalf("expected 1 skipped entry, got %v", skippedWith)
+	}
+	if len(skippedWithout) != 0 {
+		t.Fatalf("expected no skipped entries, got %v", skippedWithout)
 	}
 }
 
@@ -543,7 +774,7 @@ func TestFetch_FrontmatterUsedAsDefaultName(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
+	entries, _, err := plainHTTPClient().fetchAndUnpack(context.Background(), srv.URL, "", "")
 	if err != nil {
 		t.Fatalf("fetchAndUnpack: %v", err)
 	}

@@ -5,7 +5,7 @@
 //   - Per-hop host allowlist (github.com, api.github.com, codeload.github.com)
 //   - Resolved-IP blocking for loopback/RFC1918/link-local/CGNAT/metadata ranges
 //   - Streaming size caps (wire and decompressed) before any buffering
-//   - Tar-entry safety (no symlinks, hardlinks, devices, absolute paths, .. escapes)
+//   - Tar-entry safety (non-regular entries skipped and reported; absolute paths and .. escapes rejected)
 //   - Canonical deterministic repack for stable sha256 content identity
 package skillfetch
 
@@ -55,6 +55,10 @@ type Result struct {
 	PlainTarSHA256  string // hex sha256 of the plain (uncompressed) canonical tar
 	CompressedBytes []byte // zstd-compressed canonical tar
 	PlainSize       int64  // plain tar size in bytes
+	// SkippedEntries lists non-regular tar entries (symlink, hardlink, device, fifo) that were
+	// skipped, not fetched. Each element is formatted "<path> (<kind>)", e.g. "AGENTS.md (symlink)".
+	// nil when nothing was skipped.
+	SkippedEntries []string
 }
 
 // Fetcher fetches a GitHub skill and returns a Result.
@@ -209,9 +213,13 @@ func (f *fetcher) Fetch(ctx context.Context, ref RepoRef, gitRef, subdir, reques
 	rawURL := tarballURL(ref.Owner, ref.Repo, gitRef)
 
 	// Download and unpack into in-memory entries
-	entries, err := f.client.fetchAndUnpack(ctx, rawURL, f.cfg.GitHubToken, subdir)
+	entries, skipped, err := f.client.fetchAndUnpack(ctx, rawURL, f.cfg.GitHubToken, subdir)
 	if err != nil {
 		return Result{}, err
+	}
+	var skippedEntries []string
+	for _, se := range skipped {
+		skippedEntries = append(skippedEntries, fmt.Sprintf("%s (%s)", se.path, se.kind))
 	}
 
 	// Require SKILL.md at the top level (after wrapper strip + subdir descent)
@@ -294,6 +302,7 @@ func (f *fetcher) Fetch(ctx context.Context, ref RepoRef, gitRef, subdir, reques
 		PlainTarSHA256:  sha256hex,
 		CompressedBytes: compressed,
 		PlainSize:       int64(len(plainTar)),
+		SkippedEntries:  skippedEntries,
 	}, nil
 }
 
