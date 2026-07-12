@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"strings"
 	"time"
 )
 
@@ -47,6 +46,9 @@ func (ca *CA) CreateCRL(number *big.Int, revoked []x509.RevocationListEntry, now
 	list, err := x509.ParseRevocationList(der)
 	if err != nil {
 		return nil, fmt.Errorf("pki: parse created CRL: %w", err)
+	}
+	if err := VerifyCRL(list, ca.Cert, now); err != nil {
+		return nil, fmt.Errorf("pki: verify created CRL: %w", err)
 	}
 	return list, nil
 }
@@ -99,11 +101,15 @@ func MarshalCRLPEM(list *x509.RevocationList) []byte {
 
 // ParseCRLPEM parses exactly one X509 CRL PEM block.
 func ParseCRLPEM(data []byte) (*x509.RevocationList, error) {
+	data = bytes.TrimSpace(data)
+	if !bytes.HasPrefix(data, []byte("-----BEGIN "+crlPEMType+"-----")) {
+		return nil, errors.New("pki: no canonical X509 CRL PEM block")
+	}
 	block, rest := pem.Decode(data)
 	if block == nil || block.Type != crlPEMType || len(block.Headers) != 0 {
 		return nil, errors.New("pki: no canonical X509 CRL PEM block")
 	}
-	if strings.TrimSpace(string(rest)) != "" {
+	if len(bytes.TrimSpace(rest)) != 0 {
 		return nil, errors.New("pki: trailing data after X509 CRL PEM block")
 	}
 	list, err := x509.ParseRevocationList(block.Bytes)

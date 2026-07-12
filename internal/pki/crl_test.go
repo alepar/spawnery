@@ -101,6 +101,9 @@ func TestCRLRejectsInvalidAuthorityNumberAndWindow(t *testing.T) {
 	if _, err := issuer.CreateCRL(big.NewInt(1), nil, now, now); err == nil {
 		t.Fatal("invalid CRL update window accepted for creation")
 	}
+	if _, err := (&CA{Cert: issuer.Cert, Key: other.Key}).CreateCRL(big.NewInt(1), nil, now, now.Add(time.Hour)); err == nil {
+		t.Fatal("issuer certificate paired with wrong private key created a CRL")
+	}
 }
 
 func TestCRLRejectsInvalidEntriesAndPEM(t *testing.T) {
@@ -126,6 +129,7 @@ func TestCRLRejectsInvalidEntriesAndPEM(t *testing.T) {
 	for name, data := range map[string][]byte{
 		"garbage":        []byte("not pem"),
 		"wrong type":     pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: list.Raw}),
+		"leading bytes":  append([]byte("junk\n"), good...),
 		"trailing bytes": append(append([]byte(nil), good...), []byte("junk")...),
 		"second block":   append(append([]byte(nil), good...), good...),
 	} {
