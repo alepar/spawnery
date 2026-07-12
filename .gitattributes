@@ -1,2 +1,4 @@
 # protoc-gen-es emits a canonical trailing blank line in this generated binding.
 sdk/ts/src/gen/auth/v1/auth_pb.ts whitespace=-blank-at-eof
+sdk/ts/src/gen/cp/v1/cp_pb.ts whitespace=-blank-at-eof
+sdk/ts/src/gen/node/v1/node_pb.ts whitespace=-blank-at-eof

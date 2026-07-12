@@ -128,7 +128,7 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 		}()
 
 		cs := wsClient{conn: conn, ctx: sessCtx}
-		done, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, owner, sessionEnv, cs, bind.Cursor, generation)
+		done, lease, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, owner, sessionEnv, cs, bind.Cursor, generation)
 		if err != nil {
 			slogctx.FromContext(sessCtx).Error("ws: session attach failed", "err", err)
 			conn.Close(websocket.StatusInternalError, "attach failed")
@@ -136,7 +136,7 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 		}
 		_ = s.tel.Emit(telemetry.Event{Kind: "session_start", Owner: owner, SpawnID: bind.SpawnID, Timestamp: time.Now().UTC()})
 		defer func() {
-			s.rt.DetachClient(bind.SpawnID, sessionID, bind.ClientID)
+			s.rt.DetachClient(bind.SpawnID, sessionID, bind.ClientID, lease)
 			_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: bind.SpawnID, Timestamp: time.Now().UTC()})
 		}()
 

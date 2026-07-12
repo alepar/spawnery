@@ -1795,13 +1795,13 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	cs := &clientStream{stream: stream, spawnID: spawnID}
 	// cursor 0: the cp.v1 Session-RPC transport has no resume cursor (only the WS bind does).
 	// session "0": this transport has no per-session selector yet (web uses the WS bind for that).
-	done, err := s.rt.AttachClient(spawnID, "0", clientID, sp.OwnerID, sessionEnv, cs, 0, generation)
+	done, lease, err := s.rt.AttachClient(spawnID, "0", clientID, sp.OwnerID, sessionEnv, cs, 0, generation)
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_start", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	defer func() {
-		s.rt.DetachClient(spawnID, "0", clientID)
+		s.rt.DetachClient(spawnID, "0", clientID, lease)
 		_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	}()
 

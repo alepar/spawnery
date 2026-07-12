@@ -17,6 +17,10 @@ import (
 
 type ClientSender interface{ Send([]byte) error }
 
+// AttachmentLease uniquely identifies one incarnation of an addressed client attachment.
+// A superseded handler cannot detach its replacement with an older lease.
+type AttachmentLease struct{ id uint64 }
+
 type route struct {
 	nodeID string
 	node   registry.NodeSender
@@ -27,6 +31,7 @@ type route struct {
 	clients           map[clientKey]ClientSender
 	clientDone        map[clientKey]chan struct{}
 	clientGenerations map[clientKey]uint64
+	clientLeases      map[clientKey]AttachmentLease
 	sessions          []*nodev1.SessionInfo // mirrored roster (node-authoritative)
 	done              chan struct{}         // closed when the route is dropped (stop or node evict)
 }
@@ -52,9 +57,10 @@ type pendingRoster struct {
 }
 
 type Router struct {
-	mu      sync.Mutex
-	m       map[string]*route         // spawn_id -> route
-	pending map[string]*pendingRoster // rosters that arrived before Bind (node-emits-then-Bind race)
+	mu        sync.Mutex
+	m         map[string]*route         // spawn_id -> route
+	pending   map[string]*pendingRoster // rosters that arrived before Bind (node-emits-then-Bind race)
+	nextLease uint64
 }
 
 func New() *Router {
@@ -67,7 +73,8 @@ func (r *Router) Bind(spawnID, nodeID string, node registry.NodeSender) {
 	r.mu.Lock()
 	rt := &route{
 		nodeID: nodeID, node: node, clients: map[clientKey]ClientSender{},
-		clientDone: map[clientKey]chan struct{}{}, clientGenerations: map[clientKey]uint64{}, done: make(chan struct{}),
+		clientDone: map[clientKey]chan struct{}{}, clientGenerations: map[clientKey]uint64{},
+		clientLeases: map[clientKey]AttachmentLease{}, done: make(chan struct{}),
 	}
 	if p, ok := r.pending[spawnID]; ok {
 		rt.sessions = p.sessions
@@ -103,7 +110,7 @@ func (r *Router) Attached(spawnID string) bool {
 // env is the A4 AuthEnvelope (token + SignedIntent) to thread into SessionOpen [AC1]. Public CP
 // ingress validates its structural presence; low-level router tests may still pass nil.
 // assertedOwner is the CP-asserted spawn owner threaded into the node's owner-binding check.
-func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string, env *authv1.AuthEnvelope, c ClientSender, cursor int64, generations ...uint64) (<-chan struct{}, error) {
+func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string, env *authv1.AuthEnvelope, c ClientSender, cursor int64, generations ...uint64) (<-chan struct{}, AttachmentLease, error) {
 	var generation uint64
 	if len(generations) == 1 {
 		generation = generations[0]
@@ -112,19 +119,25 @@ func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string
 	rt, ok := r.m[spawnID]
 	if !ok {
 		r.mu.Unlock()
-		return nil, fmt.Errorf("unknown spawn: %s", spawnID)
+		return nil, AttachmentLease{}, fmt.Errorf("unknown spawn: %s", spawnID)
 	}
 	key := ck(sessionID, clientID)
 	if old := rt.clientDone[key]; old != nil {
 		close(old)
 	}
 	done := make(chan struct{})
+	r.nextLease++
+	if r.nextLease == 0 {
+		r.nextLease++
+	}
+	lease := AttachmentLease{id: r.nextLease}
 	rt.clients[key] = c
 	rt.clientDone[key] = done
 	rt.clientGenerations[key] = generation
+	rt.clientLeases[key] = lease
 	node := rt.node
 	r.mu.Unlock()
-	return done, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
+	return done, lease, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
 		SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Cursor: cursor,
 		Generation: generation, Auth: env,
 		AssertedOwner: assertedOwner,
@@ -132,15 +145,19 @@ func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string
 }
 
 // DetachClient removes a client and tells the node to close its relay (pod stays).
-func (r *Router) DetachClient(spawnID, sessionID, clientID string) {
+func (r *Router) DetachClient(spawnID, sessionID, clientID string, lease AttachmentLease) {
 	r.mu.Lock()
 	rt, ok := r.m[spawnID]
 	var wasPresent bool
 	if ok {
-		_, wasPresent = rt.clients[ck(sessionID, clientID)]
-		delete(rt.clients, ck(sessionID, clientID))
-		delete(rt.clientDone, ck(sessionID, clientID))
-		delete(rt.clientGenerations, ck(sessionID, clientID))
+		key := ck(sessionID, clientID)
+		if lease.id != 0 && rt.clientLeases[key] == lease {
+			_, wasPresent = rt.clients[key]
+			delete(rt.clients, key)
+			delete(rt.clientDone, key)
+			delete(rt.clientGenerations, key)
+			delete(rt.clientLeases, key)
+		}
 	}
 	r.mu.Unlock()
 	if wasPresent {
@@ -178,6 +195,7 @@ func (r *Router) SessionAuthClosed(spawnID, sessionID, clientID, nodeID string, 
 		}
 		delete(rt.clients, key)
 		delete(rt.clientGenerations, key)
+		delete(rt.clientLeases, key)
 	}
 	r.mu.Unlock()
 }
