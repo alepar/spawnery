@@ -38,6 +38,9 @@ fi
 # Preserve the golden Caddy certificate in its isolated directory while rotating the internal root
 # and rebuilding every workload-specific runtime bundle from the branch's current ceremony tool.
 vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spawnery-ca \
+  && sudo install -d -m0750 -o root -g caddy /etc/spawnery/caddy \
+  && ( if sudo test -f /etc/spawnery/pki/wildcard.crt && sudo test -f /etc/spawnery/pki/wildcard.key; then sudo install -m0644 -o root -g caddy /etc/spawnery/pki/wildcard.crt /etc/spawnery/caddy/wildcard.crt && sudo install -m0640 -o root -g caddy /etc/spawnery/pki/wildcard.key /etc/spawnery/caddy/wildcard.key; fi ) \
+  && sudo sed -i '\''s#/etc/spawnery/pki/wildcard\.#/etc/spawnery/caddy/wildcard.#g'\'' /etc/caddy/Caddyfile \
   && sudo rm -rf /etc/spawnery/pki /etc/spawnery/authsvc /etc/spawnery/cp /etc/spawnery/node \
   && sudo install -d -m0700 /etc/spawnery/pki /etc/spawnery/authsvc /etc/spawnery/cp /etc/spawnery/node /var/lib/spawnery-offline \
   && sudo env SPAWNERY_OFFLINE_PKI_DIR=/var/lib/spawnery-offline bash ~/incoming/provision/gen-pki.sh /etc/spawnery/pki e2e.test \
