@@ -88,13 +88,14 @@ func main() {
 	if cfg.CP.Addr != "" {
 		// CP-attached mode: dial the CP, no inbound listener.
 		nodeCfg := node.Config{
-			NodeID:        cfg.Node.ID,
-			CPURL:         cfg.CP.Addr,
-			MaxSpawns:     4,
-			AgentImage:    cfg.AgentImage,
-			AgentBinaries: cfg.AgentBinaries,
-			NodeClass:     cfg.Node.Class,
-			NodeOwner:     cfg.Node.Owner,
+			NodeID:          cfg.Node.ID,
+			CPURL:           cfg.CP.Addr,
+			MaxSpawns:       4,
+			AgentImage:      cfg.AgentImage,
+			AgentBinaries:   cfg.AgentBinaries,
+			NodeClass:       cfg.Node.Class,
+			NodeOwner:       cfg.Node.Owner,
+			NodeTrustDomain: cfg.Node.TrustDomain,
 		}
 		// Terminal control plane (around CP for now): a small inbound listener so `spawnctl tmux`
 		// can ask this node to start a mosh-backed terminal session for a spawn. The mosh UDP data

@@ -15,7 +15,7 @@ func TestRegisterPrefersVerifiedIdentity(t *testing.T) {
 	s, reg, _ := newTestServer(t)
 	in := make(chan *nodev1.NodeMessage, 4)
 	ctx := nodeauth.WithIdentity(context.Background(),
-		pki.Identity{NodeID: "realnode", AccountID: "alice", Class: pki.ClassSelfHosted})
+		pki.Principal{Kind: pki.KindNode, Role: pki.ClassSelfHosted, NodeID: "realnode", AccountID: "alice"})
 	go s.runNode(ctx, &capSender{}, recvFromChan(in))
 
 	// The node LIES: claims cloud class, owner bob, a different node id.

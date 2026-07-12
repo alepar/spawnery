@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -31,6 +32,7 @@ type ForkTransferExportRequest struct {
 	TargetSignedSubKey  []byte
 	TargetNodeCertChain []byte
 	NodeRootPEM         []byte
+	NodeTrustDomain     string
 	SourceRestored      func() error
 }
 
@@ -87,7 +89,7 @@ func (m *Manager) ForkTransferExport(ctx context.Context, req ForkTransferExport
 	if err != nil {
 		return ForkTransferExportResult{}, fmt.Errorf("fork transfer export: split target cert chain: %w", err)
 	}
-	expect, err := forkTransferExpectation(req.TargetNodeClass, req.TargetNodeOwner)
+	expect, err := forkTransferExpectation(req.TargetNodeClass, req.TargetNodeOwner, req.NodeTrustDomain)
 	if err != nil {
 		return ForkTransferExportResult{}, err
 	}
@@ -340,12 +342,15 @@ func splitPEMCertificateChain(chain []byte) (leafPEM, intermediatesPEM []byte, e
 	return leafPEM, intermediatesPEM, nil
 }
 
-func forkTransferExpectation(targetClass, targetOwner string) (subkey.Expectation, error) {
+func forkTransferExpectation(targetClass, targetOwner, trustDomain string) (subkey.Expectation, error) {
+	if trustDomain == "" {
+		return subkey.Expectation{}, errors.New("fork transfer export: node trust domain is required")
+	}
 	switch strings.TrimSpace(targetClass) {
 	case "", pki.ClassCloud:
-		return subkey.Expectation{Tenancy: pki.ClassCloud}, nil
+		return subkey.Expectation{TrustDomain: trustDomain, Tenancy: pki.ClassCloud}, nil
 	case pki.ClassSelfHosted:
-		return subkey.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: targetOwner}, nil
+		return subkey.Expectation{TrustDomain: trustDomain, Tenancy: pki.ClassSelfHosted, AccountID: targetOwner}, nil
 	default:
 		return subkey.Expectation{}, fmt.Errorf("fork transfer export: unsupported target node class %q", targetClass)
 	}

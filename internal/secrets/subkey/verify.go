@@ -53,7 +53,7 @@ var ErrRevoked = errors.New("subkey: node is revoked (on the AS deny-list)")
 // error. The chain enforced, in order:
 //
 //  1. node cert chains to the pinned Root CA AND its SAN matches expect
-//     (delegated to clientverify.VerifyHost — pinned roots + name constraints);
+//     (delegated to clientverify.VerifyHost — pinned roots + issuer policy/path correspondence);
 //  2. the node is NOT on the AS revocation list (revoked hook; fail-closed on
 //     any error);
 //  3. the sub-key's nodeID matches the verified cert identity;

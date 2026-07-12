@@ -29,7 +29,7 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 	otherInter, _ := otherRoot.NewIntermediate(pki.ClassSelfHosted)
 
 	var mu sync.Mutex
-	var lastID pki.Identity
+	var lastID pki.Principal
 	var reached bool
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -73,15 +73,15 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 
 	// 1) valid self-hosted -> accepted, identity derived from the cert.
 	good, _ := selfHosted.IssueNode("n1", "alice", pki.ClassSelfHosted, hour)
-	if code := do(good); code != http.StatusOK || !reached || lastID.AccountID != "alice" || lastID.Class != pki.ClassSelfHosted {
+	if code := do(good); code != http.StatusOK || !reached || lastID.AccountID != "alice" || lastID.Role != pki.ClassSelfHosted {
 		t.Fatalf("valid self-hosted: code=%d reached=%v id=%+v", code, reached, lastID)
 	}
 	// 2) valid cloud -> accepted.
 	cnode, _ := cloud.IssueNode("c1", "spawnery-system", pki.ClassCloud, hour)
-	if code := do(cnode); code != http.StatusOK || lastID.Class != pki.ClassCloud {
+	if code := do(cnode); code != http.StatusOK || lastID.Role != pki.ClassCloud {
 		t.Fatalf("valid cloud: code=%d id=%+v", code, lastID)
 	}
-	// 3) forged cloud (self-hosted intermediate, cloud SAN) -> rejected by name constraints.
+	// 3) forged cloud path from a self-hosted intermediate -> rejected by issuer policy.
 	forged, _ := selfHosted.IssueNode("evil", "victim", pki.ClassCloud, hour)
 	if code := do(forged); code != http.StatusUnauthorized || reached {
 		t.Fatalf("forged cloud must be 401 and not reach handler: code=%d reached=%v", code, reached)
@@ -167,10 +167,10 @@ func TestForgedSessionTokenRejectedE2E(t *testing.T) {
 	// Bonus: clientverify accepts the AS-enrolled host node but rejects a foreign-account one.
 	host, _ := inter.IssueNode("n", "alice", pki.ClassSelfHosted, time.Now().Add(time.Hour))
 	leaf, chain, rootPEM := pki.MarshalCertPEM(host.Cert), pki.MarshalCertPEM(inter.Cert), pki.MarshalCertPEM(root.Cert)
-	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, time.Now()); err != nil {
+	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, time.Now()); err != nil {
 		t.Fatalf("alice's own host must verify: %v", err)
 	}
-	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "bob"}, time.Now()); err == nil {
+	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "bob"}, time.Now()); err == nil {
 		t.Fatal("a host bound to alice must not satisfy bob")
 	}
 }

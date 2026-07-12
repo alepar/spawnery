@@ -33,3 +33,22 @@ func TestIssueServer(t *testing.T) {
 		t.Fatal("server cert missing ServerAuth EKU")
 	}
 }
+
+func TestIssueServicePreservesServerNames(t *testing.T) {
+	root, _ := NewRootCA("R")
+	intermediate, err := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := intermediate.IssueService(RoleAuthService, "as-a", "prod.spawnery.internal", []string{"authsvc.internal"}, []net.IP{net.ParseIP("10.0.0.2")}, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("IssueService: %v", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(root.Cert)
+	intermediates := x509.NewCertPool()
+	intermediates.AddCert(intermediate.Cert)
+	if _, err := service.Cert.Verify(x509.VerifyOptions{Roots: pool, Intermediates: intermediates, DNSName: "authsvc.internal"}); err != nil {
+		t.Fatalf("service certificate does not preserve endpoint DNS SAN: %v", err)
+	}
+}

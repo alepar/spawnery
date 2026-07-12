@@ -13,11 +13,11 @@ import (
 type nodeIdentityContextKey struct{}
 
 func nodeIDFromContext(ctx context.Context) (string, bool) {
-	id, ok := ctx.Value(nodeIdentityContextKey{}).(pki.Identity)
+	id, ok := ctx.Value(nodeIdentityContextKey{}).(pki.Principal)
 	return id.NodeID, ok && id.NodeID != ""
 }
 
-func withNodeIdentity(ctx context.Context, id pki.Identity) context.Context {
+func withNodeIdentity(ctx context.Context, id pki.Principal) context.Context {
 	return context.WithValue(ctx, nodeIdentityContextKey{}, id)
 }
 
@@ -28,19 +28,28 @@ func devNodeIdentityMiddleware(header string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := nodeIDFromContext(r.Context()); !ok {
 			if id := strings.TrimSpace(r.Header.Get(header)); id != "" {
-				r = r.WithContext(withNodeIdentity(r.Context(), pki.Identity{NodeID: id}))
+				r = r.WithContext(withNodeIdentity(r.Context(), pki.Principal{Kind: pki.KindNode, NodeID: id}))
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func nodeIdentityMiddleware(root *x509.Certificate, next http.Handler) http.Handler {
+func nodeIdentityMiddleware(root *x509.Certificate, next http.Handler, trustDomains ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if root != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 			leaf := r.TLS.PeerCertificates[0]
 			intermediates := r.TLS.PeerCertificates[1:]
-			if id, err := pki.Verify(leaf, intermediates, root, time.Now()); err == nil {
+			trustDomain := pki.DefaultTrustDomain
+			if len(trustDomains) == 1 {
+				trustDomain = trustDomains[0]
+			}
+			if id, err := pki.VerifyPrincipal(leaf, intermediates, pki.VerifyOptions{
+				Root:        root,
+				TrustDomain: trustDomain,
+				CurrentTime: time.Now(),
+				KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			}); err == nil && id.Kind == pki.KindNode {
 				r = r.WithContext(withNodeIdentity(r.Context(), id))
 			}
 		}

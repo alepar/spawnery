@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
-	"encoding/asn1"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
+	"spawnery/internal/pki"
 )
 
 const (
@@ -29,11 +29,6 @@ const (
 	maxArtifactCertificateSize = 16 * 1024
 	maxEncodedArtifactSize     = 128 * 1024
 	maxChainCacheEntries       = 256
-)
-
-var (
-	AuthSigningIntermediatePolicyOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 1}
-	AuthArtifactSignerPolicyOID      = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 2}
 )
 
 func artifactDomain(artifactType string) (string, error) {
@@ -354,7 +349,7 @@ func validateSignerChain(chain []*x509.Certificate, root *x509.Certificate, envi
 
 	leaf := chain[0]
 	issuer := chain[1]
-	if !issuer.IsCA || !hasPolicy(issuer, AuthSigningIntermediatePolicyOID) {
+	if !issuer.IsCA || !pki.HasPolicy(issuer, pki.AuthSigningIntermediatePolicyOID) {
 		return nil, errors.New("token: signer issuer lacks auth-signing intermediate policy")
 	}
 	publicKey, ok := leaf.PublicKey.(ed25519.PublicKey)
@@ -370,7 +365,7 @@ func validateSignerChain(chain []*x509.Certificate, root *x509.Certificate, envi
 	if len(leaf.ExtKeyUsage) != 0 || len(leaf.UnknownExtKeyUsage) != 0 {
 		return nil, errors.New("token: signer leaf must not have extended key usages")
 	}
-	if !hasPolicy(leaf, AuthArtifactSignerPolicyOID) {
+	if !pki.HasPolicy(leaf, pki.AuthArtifactSignerPolicyOID) {
 		return nil, errors.New("token: signer leaf lacks auth-artifact policy")
 	}
 	if err := validateSignerURI(leaf, environment); err != nil {
@@ -398,15 +393,6 @@ func validateSignerChain(chain []*x509.Certificate, root *x509.Certificate, envi
 		validFrom: validFrom,
 		expires:   expires,
 	}, nil
-}
-
-func hasPolicy(cert *x509.Certificate, want asn1.ObjectIdentifier) bool {
-	for _, policy := range cert.PolicyIdentifiers {
-		if policy.Equal(want) {
-			return true
-		}
-	}
-	return false
 }
 
 func validateSignerURI(leaf *x509.Certificate, environment string) error {

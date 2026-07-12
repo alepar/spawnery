@@ -5,7 +5,6 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -41,10 +40,8 @@ func NewNodeCSR() ([]byte, *ecdsa.PrivateKey, error) {
 	return der, key, nil
 }
 
-// SignCSR verifies a CSR's self-signature (proof of possession) and issues a node leaf binding the
-// CSR's public key to a CA-CHOSEN SAN (<nodeID>.<accountID>.<class>.Domain). Names requested inside the
-// CSR are ignored — the caller (enrollment) supplies the authoritative nodeID/accountID/class.
-func (ca *CA) SignCSR(csrDER []byte, nodeID, accountID, class string, notAfter time.Time) (*x509.Certificate, []*x509.Certificate, error) {
+// SignNodeCSR verifies proof of possession and binds the CSR key to a CA-selected node identity.
+func (ca *CA) SignNodeCSR(csrDER []byte, nodeID, accountID, role, trustDomain string, notAfter time.Time) (*x509.Certificate, []*x509.Certificate, error) {
 	csr, err := x509.ParseCertificateRequest(csrDER)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse csr: %w", err)
@@ -52,27 +49,19 @@ func (ca *CA) SignCSR(csrDER []byte, nodeID, accountID, class string, notAfter t
 	if err := csr.CheckSignature(); err != nil {
 		return nil, nil, fmt.Errorf("csr signature: %w", err)
 	}
-	serial, err := newSerial()
+	id, err := NodeID(trustDomain, role, accountID, nodeID)
 	if err != nil {
 		return nil, nil, err
 	}
-	san := nodeSAN(nodeID, accountID, class)
-	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: san},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     notAfter,
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{san},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, csr.PublicKey, ca.Key)
-	if err != nil {
-		return nil, nil, err
-	}
-	leaf, err := x509.ParseCertificate(der)
+	leaf, err := ca.issueLeaf(csr.PublicKey, id, nil, nil, notAfter)
 	if err != nil {
 		return nil, nil, err
 	}
 	return leaf, []*x509.Certificate{ca.Cert}, nil
+}
+
+// SignCSR is retained for development fixtures that use DefaultTrustDomain.
+// Deprecated: use SignNodeCSR with an explicit configured trust domain.
+func (ca *CA) SignCSR(csrDER []byte, nodeID, accountID, role string, notAfter time.Time) (*x509.Certificate, []*x509.Certificate, error) {
+	return ca.SignNodeCSR(csrDER, nodeID, accountID, role, DefaultTrustDomain, notAfter)
 }

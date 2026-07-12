@@ -34,7 +34,7 @@ func issueNodeTransferFixture(t *testing.T, nodeID, account, class string) nodeT
 	if err != nil {
 		t.Fatalf("NewRootCA: %v", err)
 	}
-	inter, err := r.NewIntermediate(class)
+	inter, err := r.NewIntermediate(pki.IssuerRole(class))
 	if err != nil {
 		t.Fatalf("NewIntermediate: %v", err)
 	}
@@ -241,6 +241,7 @@ func TestForkTransferExportEmitsSourceRestoredSealedKeyAndPayload(t *testing.T) 
 		t.Fatal(err)
 	}
 	a.cfg.NodeRootPEM = targetFx.root
+	a.cfg.NodeTrustDomain = pki.DefaultTrustDomain
 
 	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTransferExport{ForkTransferExport: &nodev1.ForkTransferExport{
 		SourceSpawnId:       "sp-source",
@@ -333,7 +334,7 @@ func TestForkTransferImportOpensSealedKeyAndEmitsForkOwnedPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SealForkTransferPayload: %v", err)
 	}
-	sealedKey, _, err := subkey.SealTransferKeyForNode(key, targetFx.leaf, targetFx.chain, targetFx.root, published, subkey.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, subkey.AllowAll{}, seal.InFlightAAD{
+	sealedKey, _, err := subkey.SealTransferKeyForNode(key, targetFx.leaf, targetFx.chain, targetFx.root, published, subkey.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, subkey.AllowAll{}, seal.InFlightAAD{
 		SpawnID:    "sp-fork",
 		Generation: 1,
 		DeliveryID: "ts-1",

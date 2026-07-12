@@ -36,7 +36,7 @@ func TestGenDevCloudNodeIdentity(t *testing.T) {
 		t.Fatalf("parse root cert: %v", err)
 	}
 
-	identity, err := pki.Verify(leaf, []*x509.Certificate{inter}, root, time.Now())
+	identity, err := pki.Verify(leaf, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now())
 	if err != nil {
 		t.Fatalf("Verify cloud node identity: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestGenDevSelfHostedNodeIdentityStillPresent(t *testing.T) {
 		t.Fatalf("parse root cert: %v", err)
 	}
 
-	identity, err := pki.Verify(leaf, []*x509.Certificate{inter}, root, time.Now())
+	identity, err := pki.Verify(leaf, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now())
 	if err != nil {
 		t.Fatalf("Verify self-hosted node identity: %v", err)
 	}

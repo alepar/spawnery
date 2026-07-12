@@ -254,6 +254,7 @@ func TestMigrateRejectsRevokedNodeBeforeDelivery(t *testing.T) {
 	err = migrateSpawn(context.Background(), client, dev, "sp1", fx.nodeID, &out, now, MoveOptions{
 		AccountID:        "alice",
 		RootPEM:          fx.rootPEM,
+		TrustDomain:      pki.DefaultTrustDomain,
 		RevocationURL:    srv.URL + "/node-revocations",
 		RevocationClient: srv.Client(),
 	}, nil)
@@ -307,6 +308,7 @@ func TestMigrateRejectsMismatchedVerifiedNodeBeforeDelivery(t *testing.T) {
 	err = migrateSpawn(context.Background(), client, dev, "sp1", "node-b", &out, now, MoveOptions{
 		AccountID:        "alice",
 		RootPEM:          fx.rootPEM,
+		TrustDomain:      pki.DefaultTrustDomain,
 		RevocationURL:    srv.URL + "/node-revocations",
 		RevocationClient: srv.Client(),
 	}, nil)
@@ -342,7 +344,7 @@ func TestMigrateRejectsMissingCertChainWhenRootConfigured(t *testing.T) {
 
 	var out bytes.Buffer
 	err = migrateSpawn(context.Background(), client, dev, "sp1", "node-b", &out, time.Now(), MoveOptions{
-		RootPEM: []byte("pinned-root-pem"),
+		RootPEM: []byte("pinned-root-pem"), TrustDomain: pki.DefaultTrustDomain,
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "node cert chain") {
 		t.Fatalf("err = %v", err)
@@ -401,6 +403,7 @@ func TestMigrateRefetchesNodeRevocationsForEachProductionSeal(t *testing.T) {
 	err = migrateSpawn(context.Background(), client, dev, "sp1", fx.nodeID, &out, now, MoveOptions{
 		AccountID:        "alice",
 		RootPEM:          fx.rootPEM,
+		TrustDomain:      pki.DefaultTrustDomain,
 		RevocationURL:    srv.URL + "/node-revocations",
 		RevocationClient: srv.Client(),
 	}, nil)

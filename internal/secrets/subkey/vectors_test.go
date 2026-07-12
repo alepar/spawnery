@@ -8,9 +8,13 @@ package subkey_test
 // The vitest reader (web/src/keys/subkey-vectors.test.ts) reads the same file.
 
 import (
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
+	"math/big"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,11 +54,14 @@ type subKeyVector struct {
 	LeafNotAfter string `json:"leaf_not_after"`
 	// Negative test vectors for the TS x509 verifier.
 	// ForgedCloudChainPEM: a cloud-SAN leaf signed by the self-hosted intermediate —
-	// signatures are valid but name constraints are violated (Go rejects it; TS must too).
-	ForgedCloudChainPEM string `json:"forged_cloud_chain_pem"`
+	// signatures are valid but issuer-role/path correspondence is violated (Go rejects it; TS must too).
+	ForgedCloudChainPEM    string `json:"forged_cloud_chain_pem"`
+	LegacyDNSCloudChainPEM string `json:"legacy_dns_cloud_chain_pem"`
 	// NonCALeafChainPEM: a new leaf cert "signed" by the original leaf cert used as a CA —
 	// the chain cert lacks basicConstraints CA:TRUE (both Go and TS must reject it).
 	NonCALeafChainPEM string `json:"non_ca_leaf_chain_pem"`
+	// DuplicateURIChainPEM has an otherwise valid leaf with the same SPIFFE URI twice.
+	DuplicateURIChainPEM string `json:"duplicate_uri_chain_pem"`
 }
 
 const vectorsFile = "testdata/subkey/verify_node.json"
@@ -74,11 +81,11 @@ func generateSubKeyVectors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRootCA: %v", err)
 	}
-	inter, err := r.NewIntermediate(pki.ClassSelfHosted)
+	inter, err := r.NewIntermediate(pki.ClassSelfHosted, "prod.spawnery.internal")
 	if err != nil {
 		t.Fatalf("NewIntermediate: %v", err)
 	}
-	n, err := inter.IssueNode("node1", "alice", pki.ClassSelfHosted, vectorTime.Add(365*24*time.Hour))
+	n, err := inter.IssueNode("node1", "alice", pki.ClassSelfHosted, "prod.spawnery.internal", vectorTime.Add(365*24*time.Hour))
 	if err != nil {
 		t.Fatalf("IssueNode: %v", err)
 	}
@@ -96,43 +103,63 @@ func generateSubKeyVectors(t *testing.T) {
 		t.Fatalf("marshal sub-key: %v", err)
 	}
 
-	leafPEM  := pki.MarshalCertPEM(n.Cert)
+	leafPEM := pki.MarshalCertPEM(n.Cert)
 	interPEM := pki.MarshalCertPEM(inter.Cert)
-	rootPEM  := pki.MarshalCertPEM(r.Cert)
+	rootPEM := pki.MarshalCertPEM(r.Cert)
 	chainPEM := string(leafPEM) + string(interPEM)
 
 	// Forged-cloud negative vector: SH intermediate signs a cloud-class leaf.
-	// The signature chain is cryptographically valid but violates name constraints.
-	forgedCloudNode, err := inter.IssueNode("forge", "acc", pki.ClassCloud, vectorTime.Add(365*24*time.Hour))
+	// The signature chain is cryptographically valid but violates issuer-role/path correspondence.
+	forgedCloudNode, err := inter.IssueNode("forge", "acc", pki.ClassCloud, "prod.spawnery.internal", vectorTime.Add(365*24*time.Hour))
 	if err != nil {
 		t.Fatalf("IssueNode (forged cloud): %v", err)
 	}
 	forgedCloudChainPEM := string(pki.MarshalCertPEM(forgedCloudNode.Cert)) + string(interPEM)
+	legacyDNSCloud, err := inter.IssueServer("legacy-cloud", []string{"forge.acc.cloud.nodes.spawnery.internal"}, nil, vectorTime.Add(365*24*time.Hour))
+	if err != nil {
+		t.Fatalf("IssueServer (legacy DNS cloud): %v", err)
+	}
+	legacyDNSCloudChainPEM := string(pki.MarshalCertPEM(legacyDNSCloud.Cert)) + string(interPEM)
 
 	// Non-CA-intermediate negative vector: use the leaf cert's key to sign another leaf.
 	// The resulting chain has a non-CA cert at position [1]; both Go and TS must reject it.
 	fakeCA := &pki.CA{Cert: n.Cert, Key: n.Key}
-	nonCANode, err := fakeCA.IssueNode("n2", "alice", pki.ClassSelfHosted, vectorTime.Add(365*24*time.Hour))
+	nonCANode, err := fakeCA.IssueNode("n2", "alice", pki.ClassSelfHosted, "prod.spawnery.internal", vectorTime.Add(365*24*time.Hour))
 	if err != nil {
 		t.Fatalf("IssueNode (non-CA chain): %v", err)
 	}
 	nonCALeafChainPEM := string(pki.MarshalCertPEM(nonCANode.Cert)) + string(leafPEM)
 
+	duplicateURITemplate := *n.Cert
+	duplicateURITemplate.SerialNumber = new(big.Int).Add(n.Cert.SerialNumber, big.NewInt(1))
+	duplicateURITemplate.URIs = append(append([]*url.URL(nil), n.Cert.URIs...), n.Cert.URIs[0])
+	duplicateURIDER, err := x509.CreateCertificate(rand.Reader, &duplicateURITemplate, inter.Cert, n.Key.Public(), inter.Key)
+	if err != nil {
+		t.Fatalf("CreateCertificate (duplicate URI): %v", err)
+	}
+	duplicateURICert, err := x509.ParseCertificate(duplicateURIDER)
+	if err != nil {
+		t.Fatalf("ParseCertificate (duplicate URI): %v", err)
+	}
+	duplicateURIChainPEM := string(pki.MarshalCertPEM(duplicateURICert)) + string(interPEM)
+
 	v := subKeyVector{
-		RootPEM:             string(rootPEM),
-		LeafPEM:             string(leafPEM),
-		IntermediatePEM:     string(interPEM),
-		ChainPEM:            chainPEM,
-		SubKeyJSON:          string(skJSON),
-		ExpectedHPKEPub:     base64.StdEncoding.EncodeToString(sk.HPKEPub),
-		ExpectedNodeID:      "node1",
-		ExpectedAccountID:   "alice",
-		ExpectedClass:       pki.ClassSelfHosted,
-		NotBefore:           sk.NotBefore.UTC().Format(time.RFC3339Nano),
-		NotAfter:            sk.NotAfter.UTC().Format(time.RFC3339Nano),
-		LeafNotAfter:        n.Cert.NotAfter.UTC().Format(time.RFC3339),
-		ForgedCloudChainPEM: forgedCloudChainPEM,
-		NonCALeafChainPEM:   nonCALeafChainPEM,
+		RootPEM:                string(rootPEM),
+		LeafPEM:                string(leafPEM),
+		IntermediatePEM:        string(interPEM),
+		ChainPEM:               chainPEM,
+		SubKeyJSON:             string(skJSON),
+		ExpectedHPKEPub:        base64.StdEncoding.EncodeToString(sk.HPKEPub),
+		ExpectedNodeID:         "node1",
+		ExpectedAccountID:      "alice",
+		ExpectedClass:          pki.ClassSelfHosted,
+		NotBefore:              sk.NotBefore.UTC().Format(time.RFC3339Nano),
+		NotAfter:               sk.NotAfter.UTC().Format(time.RFC3339Nano),
+		LeafNotAfter:           n.Cert.NotAfter.UTC().Format(time.RFC3339),
+		ForgedCloudChainPEM:    forgedCloudChainPEM,
+		LegacyDNSCloudChainPEM: legacyDNSCloudChainPEM,
+		NonCALeafChainPEM:      nonCALeafChainPEM,
+		DuplicateURIChainPEM:   duplicateURIChainPEM,
 	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -174,8 +201,8 @@ func verifySubKeyVectors(t *testing.T) {
 		[]byte(v.IntermediatePEM),
 		[]byte(v.RootPEM),
 		sk,
-		subkey.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "alice"},
-		nil, // AllowAll revocation
+		subkey.Expectation{TrustDomain: "prod.spawnery.internal", Tenancy: pki.ClassSelfHosted, AccountID: "alice"},
+		nil,      // AllowAll revocation
 		verifyAt, // within sub-key validity window
 	)
 	if err != nil {

@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/asn1"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -129,8 +128,8 @@ func TestSignerProfileRejectsInvalidCertificates(t *testing.T) {
 		{name: "empty signer ID", mutate: func(o *certTestOptions) {
 			o.leafURIs = []string{"spiffe://prod.spawnery.internal/signer/auth-artifact/"}
 		}},
-		{name: "wrong leaf policy", mutate: func(o *certTestOptions) { o.leafPolicies = []asn1.ObjectIdentifier{{1, 2, 3}} }},
-		{name: "wrong intermediate policy", mutate: func(o *certTestOptions) { o.intermediatePolicies = []asn1.ObjectIdentifier{{1, 2, 3}} }},
+		{name: "wrong leaf policy", mutate: func(o *certTestOptions) { o.leafPolicies = []x509.OID{mustOID(t, "1.2.3")} }},
+		{name: "wrong intermediate policy", mutate: func(o *certTestOptions) { o.intermediatePolicies = []x509.OID{mustOID(t, "1.2.3")} }},
 		{name: "extra key usage", mutate: func(o *certTestOptions) { o.leafUsage |= x509.KeyUsageKeyEncipherment }},
 		{name: "TLS EKU", mutate: func(o *certTestOptions) { o.leafExtUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth} }},
 		{name: "ECDSA leaf", mutate: func(o *certTestOptions) { o.leafECDSA = true }},

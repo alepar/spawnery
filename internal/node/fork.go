@@ -87,6 +87,7 @@ func (a *attacher) forkTransferExport(ctx context.Context, m *nodev1.ForkTransfe
 		TargetSignedSubKey:  append([]byte(nil), m.GetTargetSignedSubkey()...),
 		TargetNodeCertChain: append([]byte(nil), m.GetTargetNodeCertChain()...),
 		NodeRootPEM:         append([]byte(nil), a.cfg.NodeRootPEM...),
+		NodeTrustDomain:     a.cfg.NodeTrustDomain,
 		SourceRestored: func() error {
 			return a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_ForkSourceRestored{ForkSourceRestored: &nodev1.ForkSourceRestored{
 				SourceSpawnId:    m.GetSourceSpawnId(),

@@ -107,5 +107,5 @@ func (s *Service) Handler() http.Handler {
 		// any enforced/prod recipe — and never overrides a verified mTLS identity (D3 invariant).
 		inner = devNodeIdentityMiddleware(s.devNodeIdentityHeader, inner)
 	}
-	return nodeIdentityMiddleware(s.root, inner)
+	return nodeIdentityMiddleware(s.root, inner, s.trustDomain)
 }

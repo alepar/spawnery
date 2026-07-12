@@ -15,5 +15,8 @@ export const PINNED_ROOT_CA_PEM: string = `-----BEGIN CERTIFICATE-----
 PLACEHOLDER-TRUST-ANCHOR-ROOT-CA
 -----END CERTIFICATE-----`;
 
+/** SPIFFE trust domain paired with PINNED_ROOT_CA_PEM. Stamped per release environment. */
+export const PINNED_TRUST_DOMAIN = "prod.spawnery.internal";
+
 /** AS session/device-set signing pubkeys, base64url raw. PLACEHOLDER — replaced at release build time. */
 export const AS_PUBKEYS: string[] = ["PLACEHOLDER-TRUST-ANCHOR-AS-PUBKEY"];

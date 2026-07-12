@@ -1,12 +1,30 @@
 package authsvc
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"spawnery/internal/pki"
 )
+
+func TestNodeIdentityMiddlewareRejectsConfiguredTrustDomainMismatch(t *testing.T) {
+	root, _ := pki.NewRootCA("root")
+	issuer, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, "staging.spawnery.internal")
+	leaf, _ := issuer.IssueNode("n", "a", pki.RoleSelfHosted, "staging.spawnery.internal", time.Now().Add(time.Hour))
+	var seen string
+	var ok bool
+	h := nodeIdentityMiddleware(root.Cert, nodeIDProbe(&seen, &ok), "prod.spawnery.internal")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf.Cert, issuer.Cert}}
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if ok || seen != "" {
+		t.Fatalf("wrong-trust-domain identity reached handler: ok=%v id=%q", ok, seen)
+	}
+}
 
 // probe handler records whether a node identity was present in context.
 func nodeIDProbe(seen *string, ok *bool) http.Handler {
@@ -45,7 +63,7 @@ func TestDevNodeIdentityMiddleware_DoesNotOverrideExistingIdentity(t *testing.T)
 	// Outer mw pre-seeds a "real" (TLS-equivalent) identity; dev mw (inner) must NOT clobber it.
 	inner := devNodeIdentityMiddleware("X-Spawnery-Dev-Node-Id", nodeIDProbe(&seen, &ok))
 	outer := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r = r.WithContext(withNodeIdentity(r.Context(), pki.Identity{NodeID: "real-node"}))
+		r = r.WithContext(withNodeIdentity(r.Context(), pki.Principal{Kind: pki.KindNode, NodeID: "real-node"}))
 		inner.ServeHTTP(w, r)
 	})
 	req := httptest.NewRequest(http.MethodPost, "/x", nil)

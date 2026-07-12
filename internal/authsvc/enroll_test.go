@@ -43,7 +43,7 @@ func TestEnrollIssuesAccountBoundCert(t *testing.T) {
 		t.Fatalf("parse chain: %v", err)
 	}
 	root, _ := pki.ParseCertPEM(s.RootCAPEM())
-	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, time.Now())
+	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now())
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -52,6 +52,31 @@ func TestEnrollIssuesAccountBoundCert(t *testing.T) {
 	}
 	if !cert.PublicKey.(*ecdsa.PublicKey).Equal(key.Public()) {
 		t.Fatal("cert not bound to the node's key")
+	}
+}
+
+func TestEnrollUsesConfiguredTrustDomain(t *testing.T) {
+	root, _ := pki.NewRootCA("root")
+	intermediate, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, "prod.spawnery.internal")
+	service := authsvc.New(root.Cert, intermediate, authsvc.WithTrustDomain("prod.spawnery.internal"))
+	token, err := service.IssueEnrollmentToken("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, _, err := pki.NewNodeCSR()
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, _, err := service.Enroll(token, csr, "node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := pki.ParseCertPEM(certPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cert.URIs[0].String(); got != "spiffe://prod.spawnery.internal/node/self-hosted/acct/node" {
+		t.Fatalf("URI SAN = %q", got)
 	}
 }
 

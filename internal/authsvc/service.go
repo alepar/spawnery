@@ -10,6 +10,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"fmt"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ const (
 type Service struct {
 	root         *x509.Certificate
 	intermediate *pki.CA // self-hosted intermediate (holds the signing key)
+	trustDomain  string
 
 	now       func() time.Time
 	enrollTTL time.Duration
@@ -57,8 +59,8 @@ type Service struct {
 	githubLinkAccountFromReq AccountFromRequest
 	githubLinkSPAOrigin      string // exact Origin the SPA is served from; "" disables enforcement
 	githubLinkMu             sync.Mutex
-	githubLinkStates         map[string]githubLinkState  // keyed by OAuth state param
-	githubLinkFlows          map[string]*githubLinkFlow  // keyed by flow_id
+	githubLinkStates         map[string]githubLinkState // keyed by OAuth state param
+	githubLinkFlows          map[string]*githubLinkFlow // keyed by flow_id
 
 	// cpRPCSecret is the AS↔CP shared secret for the CP→AS link-status endpoint. When non-empty
 	// the POST /internal/github/link-status route is registered and enforces this secret via
@@ -126,6 +128,22 @@ func WithClock(now func() time.Time) Option { return func(s *Service) { s.now = 
 
 // WithEnrollTokenTTL overrides the enrollment-token lifetime.
 func WithEnrollTokenTTL(d time.Duration) Option { return func(s *Service) { s.enrollTTL = d } }
+
+// WithTrustDomain selects the environment SPIFFE trust domain for issuance and peer verification.
+func WithTrustDomain(trustDomain string) Option {
+	return func(s *Service) { s.trustDomain = trustDomain }
+}
+
+// Validate checks construction-time settings required by production issuance and verification.
+func (s *Service) Validate() error {
+	if s == nil {
+		return fmt.Errorf("authsvc: nil service")
+	}
+	if err := pki.ValidateTrustDomain(s.trustDomain); err != nil {
+		return fmt.Errorf("authsvc: trust domain: %w", err)
+	}
+	return nil
+}
 
 // WithSessionKey sets the session-signing key (production loads a persisted key; default generates one).
 func WithSessionKey(k ed25519.PrivateKey) Option { return func(s *Service) { s.sessionKey = k } }
@@ -226,6 +244,7 @@ func New(root *x509.Certificate, selfHostedIntermediate *pki.CA, opts ...Option)
 	s := &Service{
 		root:                  root,
 		intermediate:          selfHostedIntermediate,
+		trustDomain:           pki.DefaultTrustDomain,
 		now:                   time.Now,
 		enrollTTL:             defaultEnrollTTL,
 		tokens:                map[string]enrollToken{},
@@ -251,7 +270,7 @@ func New(root *x509.Certificate, selfHostedIntermediate *pki.CA, opts ...Option)
 
 // Load builds a Service from PEM material as it would be provisioned in production: the Root CA cert
 // (published), and the self-hosted intermediate cert + private key (held secret).
-func Load(rootPEM, interCertPEM, interKeyPEM []byte) (*Service, error) {
+func Load(rootPEM, interCertPEM, interKeyPEM []byte, trustDomain string) (*Service, error) {
 	root, err := pki.ParseCertPEM(rootPEM)
 	if err != nil {
 		return nil, err
@@ -264,13 +283,17 @@ func Load(rootPEM, interCertPEM, interKeyPEM []byte) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return New(root, &pki.CA{Cert: interCert, Key: interKey}), nil
+	service := New(root, &pki.CA{Cert: interCert, Key: interKey}, WithTrustDomain(trustDomain))
+	if err := service.Validate(); err != nil {
+		return nil, err
+	}
+	return service, nil
 }
 
 // IssueSelfHostedNode issues a self-hosted node certificate bound to accountID. The class is always
 // self-hosted — the AS has no cloud intermediate to sign anything else.
 func (s *Service) IssueSelfHostedNode(nodeID, accountID string, notAfter time.Time) (*pki.Node, error) {
-	return s.intermediate.IssueNode(nodeID, accountID, pki.ClassSelfHosted, notAfter)
+	return s.intermediate.IssueNode(nodeID, accountID, pki.ClassSelfHosted, s.trustDomain, notAfter)
 }
 
 // RootCAPEM returns the Root CA certificate clients/CP/nodes pin as their trust anchor.

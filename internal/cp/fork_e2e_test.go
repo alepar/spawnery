@@ -445,7 +445,7 @@ func (fx *forkE2EStack) startNode(t *testing.T, rt runtime.ContainerRuntime, spe
 	t.Cleanup(stopNode)
 	go node.Run(nodeCtx, mgr, forkH2CClient(), node.Config{
 		NodeID: spec.id, CPURL: fx.cpURL, MaxSpawns: 4, AgentImage: "spawnery/stubagent:dev",
-		NodeClass: spec.class, NodeOwner: spec.owner, SubKeys: spec.subKeys, NodeRootPEM: spec.rootPEM,
+		NodeClass: spec.class, NodeOwner: spec.owner, SubKeys: spec.subKeys, NodeRootPEM: spec.rootPEM, NodeTrustDomain: pki.DefaultTrustDomain,
 	})
 
 	deadline := time.Now().Add(10 * time.Second)

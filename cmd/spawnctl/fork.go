@@ -39,6 +39,9 @@ func forkCmd() *cli.Command {
 			&cli.StringFlag{Name: "node", Usage: "target node id"},
 			&cli.StringFlag{Name: "class", Usage: "target node class"},
 			&cli.StringFlag{Name: "name", Usage: "optional fork display name"},
+			&cli.StringFlag{Name: "root-ca", Usage: "path to the pinned Root CA PEM for production node verification"},
+			&cli.StringFlag{Name: "trust-domain", Usage: "expected SPIFFE trust domain for production node verification"},
+			&cli.StringFlag{Name: "as", Usage: "Auth Service origin for node revocation checks; defaults to the stored login AS URL"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if c.Args().Len() != 1 {
@@ -73,7 +76,11 @@ func forkCmd() *cli.Command {
 				fmt.Fprintln(c.Writer, "  target same node")
 			}
 
-			if _, err := sdk.Fork(ctx, dev, req, c.Writer, time.Now(), client.MoveOptions{}); err != nil {
+			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), strings.TrimSpace(c.String("root-ca")), strings.TrimSpace(c.String("trust-domain")))
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			if _, err := sdk.Fork(ctx, dev, req, c.Writer, time.Now(), opts); err != nil {
 				return cli.Exit("fork failed: "+err.Error(), 1)
 			}
 			fmt.Fprintln(c.Writer, "  done.")

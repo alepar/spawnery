@@ -472,7 +472,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 					slog.Warn("node: self-asserted node_id != verified identity; using verified",
 						"node", id.NodeID, "asserted", m.Register.NodeId)
 				}
-				nodeID, nodeClass, nodeOwner = id.NodeID, id.Class, id.AccountID
+				nodeID, nodeClass, nodeOwner = id.NodeID, id.Role, id.AccountID
 			}
 			if nodeClass == "" {
 				nodeClass = "cloud" // safe default: an unidentified node is assumed restricted

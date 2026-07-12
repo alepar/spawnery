@@ -27,7 +27,7 @@ func issue(t *testing.T, nodeID, account, class string) nodeFix {
 	if err != nil {
 		t.Fatalf("NewRootCA: %v", err)
 	}
-	inter, err := r.NewIntermediate(class)
+	inter, err := r.NewIntermediate(pki.IssuerRole(class))
 	if err != nil {
 		t.Fatalf("NewIntermediate: %v", err)
 	}
@@ -45,7 +45,7 @@ func issue(t *testing.T, nodeID, account, class string) nodeFix {
 }
 
 func selfHosted(account string) subkey.Expectation {
-	return clientverify.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: account}
+	return clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: account}
 }
 
 // denyList is a test-double RevocationChecker (the AS list service is out of

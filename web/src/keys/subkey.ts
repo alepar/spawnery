@@ -9,7 +9,7 @@
  *
  * Design: docs/superpowers/specs/2026-06-10-owner-sealed-secrets-design.md §1 §3
  *
- * Node cert profile: P-256 leaf, SAN = <nodeId>.<accountId>.<class>.nodes.spawnery.internal
+ * Node cert profile: P-256 X.509-SVID with a typed SPIFFE URI SAN.
  *
  * WM10: UnixNano timestamps are int64 — must use BigInt in encodeFields.
  */
@@ -18,7 +18,7 @@ import { derToP1363 } from "./der";
 import {
   verifyCertChain,
   importCertPubKey,
-  parseSANIdentity,
+  parseSPIFFEPrincipal,
   ParsedCert,
 } from "./x509";
 
@@ -137,6 +137,7 @@ export interface NodeIdentity {
  * tenancy = "cloud" | "self-hosted". For self-hosted, accountId is checked.
  */
 export interface SealingExpectation {
+  trustDomain: string;
   tenancy:   "cloud" | "self-hosted";
   accountId?: string;
 }
@@ -206,8 +207,11 @@ export async function verifyNodeForSealing(
 
   // 1. Verify cert chain against pinned root + extract identity from SAN.
   // now is passed through so the cert validity window is checked with the same clock as the sub-key.
-  const leaf = await verifyCertChain(certChainPEM, rootPEM, now);
-  const identity = parseSANIdentity(leaf.sanDNS);
+  if (!expect.trustDomain) throw new Error("subkey: configured trust domain is required");
+  const leaf = await verifyCertChain(certChainPEM, rootPEM, now, expect.trustDomain);
+  const principal = parseSPIFFEPrincipal(leaf.sanURIs[0], expect.trustDomain);
+  if (principal.kind !== "node") throw new Error("subkey: certificate principal is not a node");
+  const identity: NodeIdentity = { nodeId: principal.nodeId, accountId: principal.accountId, nodeClass: principal.role };
 
   // Tenancy check.
   if (identity.nodeClass !== expect.tenancy) {

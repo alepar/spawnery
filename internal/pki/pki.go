@@ -1,8 +1,4 @@
-// Package pki implements Spawnery's node-identity certificate authority: a Root CA, name-constrained
-// per-class intermediates (cloud / self-hosted), node-leaf issuance, and verification that derives a
-// node's identity from its certificate SAN. Class is enforced by RFC 5280 name constraints — a
-// self-hosted intermediate is cryptographically incapable of signing a cloud-subtree leaf that
-// validates (see docs/superpowers/specs/2026-06-05-node-auth-unified-identity-design.md §4).
+// Package pki implements Spawnery's SPIFFE X.509-SVID authority and typed principal verification.
 package pki
 
 import (
@@ -14,13 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"strings"
+	"net"
+	"net/url"
 	"time"
 )
 
-// Domain is the DNS suffix under which every node identity lives. A node's SAN is
-// <nodeId>.<accountId>.<class>.<Domain>; the per-class subtree is <class>.<Domain>.
-const Domain = "nodes.spawnery.internal"
+// DefaultTrustDomain is for explicit development and test fixtures only.
+// Deprecated: production callers must provide their configured environment trust domain.
+const DefaultTrustDomain = "dev.spawnery.internal"
 
 const (
 	ClassCloud      = "cloud"
@@ -41,22 +38,18 @@ type CA struct {
 	Key  *ecdsa.PrivateKey
 }
 
-// Node is an issued node identity: its leaf cert + key, and the intermediate chain to present for
-// verification against the Root.
-type Node struct {
+// Leaf is issued identity material: a leaf certificate and private key plus its presented chain.
+type Leaf struct {
 	Cert  *x509.Certificate
 	Key   *ecdsa.PrivateKey
 	Chain []*x509.Certificate
 }
 
+// Node is retained as a compatibility alias while callers migrate to identity-neutral Leaf.
+type Node = Leaf
+
 func newSerial() (*big.Int, error) {
 	return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-}
-
-func classSubtree(class string) string { return class + "." + Domain }
-
-func nodeSAN(nodeID, accountID, class string) string {
-	return nodeID + "." + accountID + "." + class + "." + Domain
 }
 
 // NewRootCA generates a self-signed Root CA.
@@ -81,9 +74,28 @@ func NewRootCA(commonName string) (*CA, error) {
 	return finishCA(tmpl, tmpl, key.Public(), key, key)
 }
 
-// NewIntermediate issues an intermediate CA signed by this CA, name-constrained to the given class's
-// subtree so it can only sign leaves under <class>.Domain.
-func (ca *CA) NewIntermediate(class string) (*CA, error) {
+// NewIntermediate issues a non-delegating, role-bearing intermediate signed by this CA. Omitting
+// trustDomains selects DefaultTrustDomain for legacy development fixtures only.
+func (ca *CA) NewIntermediate(role IssuerRole, trustDomains ...string) (*CA, error) {
+	role, err := normalizeIssuerRole(role)
+	if err != nil {
+		return nil, err
+	}
+	trustDomain := DefaultTrustDomain
+	if len(trustDomains) > 1 {
+		return nil, errors.New("pki: expected at most one trust domain")
+	}
+	if len(trustDomains) == 1 {
+		trustDomain = trustDomains[0]
+	}
+	rootID, err := principalIDForTrustDomain(trustDomain)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := issuerRolePolicy(role)
+	if err != nil {
+		return nil, err
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -94,7 +106,7 @@ func (ca *CA) NewIntermediate(class string) (*CA, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "Spawnery " + class + " Intermediate"},
+		Subject:               pkix.Name{CommonName: "Spawnery " + string(role) + " Intermediate"},
 		NotBefore:             time.Now().Add(-time.Minute),
 		NotAfter:              time.Now().Add(5 * 365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -102,41 +114,90 @@ func (ca *CA) NewIntermediate(class string) (*CA, error) {
 		IsCA:                  true,
 		MaxPathLen:            0,
 		MaxPathLenZero:        true,
-		PermittedDNSDomains:   []string{classSubtree(class)},
+		URIs:                  []*url.URL{rootID},
+		Policies:              []x509.OID{policy},
 	}
 	return finishCA(tmpl, ca.Cert, key.Public(), key, ca.Key)
 }
 
-// IssueNode issues a node leaf certificate from this (intermediate) CA, with the identity encoded in
-// the SAN. The chain to present is this CA's cert.
-func (ca *CA) IssueNode(nodeID, accountID, class string, notAfter time.Time) (*Node, error) {
+// IssueNode issues a node X.509-SVID. The fourth argument accepts either trustDomain followed by
+// notAfter, or a legacy notAfter value which selects DefaultTrustDomain for test fixtures only.
+func (ca *CA) IssueNode(nodeID, accountID, role string, trustDomainOrNotAfter any, notAfterValues ...time.Time) (*Leaf, error) {
+	trustDomain, notAfter, err := issuanceWindow(trustDomainOrNotAfter, notAfterValues)
+	if err != nil {
+		return nil, err
+	}
+	id, err := NodeID(trustDomain, role, accountID, nodeID)
+	if err != nil {
+		return nil, err
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
+	leaf, err := ca.issueLeaf(key.Public(), id, nil, nil, notAfter)
+	if err != nil {
+		return nil, err
+	}
+	return &Leaf{Cert: leaf, Key: key, Chain: []*x509.Certificate{ca.Cert}}, nil
+}
+
+// IssueService issues a service X.509-SVID with optional endpoint DNS and IP SANs.
+func (ca *CA) IssueService(role, instanceID, trustDomain string, dns []string, ips []net.IP, notAfter time.Time) (*Leaf, error) {
+	id, err := ServiceID(trustDomain, role, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	leaf, err := ca.issueLeaf(key.Public(), id, dns, ips, notAfter)
+	if err != nil {
+		return nil, err
+	}
+	return &Leaf{Cert: leaf, Key: key, Chain: []*x509.Certificate{ca.Cert}}, nil
+}
+
+func (ca *CA) issueLeaf(publicKey any, id *url.URL, dns []string, ips []net.IP, notAfter time.Time) (*x509.Certificate, error) {
 	serial, err := newSerial()
 	if err != nil {
 		return nil, err
 	}
-	san := nodeSAN(nodeID, accountID, class)
 	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: san},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     notAfter,
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{san},
+		SerialNumber:          serial,
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		DNSNames:              dns,
+		IPAddresses:           ips,
+		URIs:                  []*url.URL{id},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, key.Public(), ca.Key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, publicKey, ca.Key)
 	if err != nil {
 		return nil, err
 	}
-	leaf, err := x509.ParseCertificate(der)
-	if err != nil {
-		return nil, err
+	return x509.ParseCertificate(der)
+}
+
+func issuanceWindow(trustDomainOrNotAfter any, notAfterValues []time.Time) (string, time.Time, error) {
+	switch value := trustDomainOrNotAfter.(type) {
+	case string:
+		if len(notAfterValues) != 1 {
+			return "", time.Time{}, errors.New("pki: trust domain requires one notAfter value")
+		}
+		return value, notAfterValues[0], nil
+	case time.Time:
+		if len(notAfterValues) != 0 {
+			return "", time.Time{}, errors.New("pki: unexpected additional notAfter value")
+		}
+		return DefaultTrustDomain, value, nil
+	default:
+		return "", time.Time{}, fmt.Errorf("pki: issuance argument is %T, want trust domain or time.Time", trustDomainOrNotAfter)
 	}
-	return &Node{Cert: leaf, Key: key, Chain: []*x509.Certificate{ca.Cert}}, nil
 }
 
 // finishCA creates a CA cert from tmpl signed by parent (signerKey), parses it, and returns the CA.
@@ -152,38 +213,23 @@ func finishCA(tmpl, parent *x509.Certificate, pub any, ownKey, signerKey *ecdsa.
 	return &CA{Cert: cert, Key: ownKey}, nil
 }
 
-// Verify validates leaf against the pinned root (enforcing name constraints + expiry at now) and
-// returns the identity read from the verified leaf's SAN.
-func Verify(leaf *x509.Certificate, intermediates []*x509.Certificate, root *x509.Certificate, now time.Time) (Identity, error) {
-	roots := x509.NewCertPool()
-	roots.AddCert(root)
-	inter := x509.NewCertPool()
-	for _, c := range intermediates {
-		inter.AddCert(c)
+// Verify is the compatibility node-result verifier. The caller must provide its configured trust
+// domain; identity is never derived from an untrusted leaf before verification.
+func Verify(leaf *x509.Certificate, intermediates []*x509.Certificate, root *x509.Certificate, trustDomain string, now time.Time) (Identity, error) {
+	if leaf == nil || len(leaf.URIs) != 1 {
+		return Identity{}, errors.New("pki: leaf must contain exactly one URI SAN")
 	}
-	if _, err := leaf.Verify(x509.VerifyOptions{
-		Roots:         roots,
-		Intermediates: inter,
-		CurrentTime:   now,
-		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-	}); err != nil {
+	principal, err := VerifyPrincipal(leaf, intermediates, VerifyOptions{
+		Root:        root,
+		TrustDomain: trustDomain,
+		CurrentTime: now,
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	})
+	if err != nil {
 		return Identity{}, err
 	}
-	return identityFromSAN(leaf)
-}
-
-func identityFromSAN(leaf *x509.Certificate) (Identity, error) {
-	if len(leaf.DNSNames) == 0 {
-		return Identity{}, errors.New("certificate has no DNS SAN")
+	if principal.Kind != KindNode {
+		return Identity{}, errors.New("pki: principal is not a node")
 	}
-	san := leaf.DNSNames[0]
-	head, ok := strings.CutSuffix(san, "."+Domain)
-	if !ok {
-		return Identity{}, fmt.Errorf("SAN %q not under %q", san, Domain)
-	}
-	parts := strings.Split(head, ".")
-	if len(parts) != 3 {
-		return Identity{}, fmt.Errorf("SAN %q: want <nodeId>.<accountId>.<class>.%s", san, Domain)
-	}
-	return Identity{NodeID: parts[0], AccountID: parts[1], Class: parts[2]}, nil
+	return Identity{NodeID: principal.NodeID, AccountID: principal.AccountID, Class: principal.Role}, nil
 }

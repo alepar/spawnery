@@ -1,7 +1,7 @@
 // Package nodeauth authenticates nodes connecting to the CP: it derives a node's identity
 // (nodeId/accountId/class) from its verified mTLS client certificate, instead of trusting the
-// self-asserted Register fields. Class is whatever the name-constrained chain proves — a self-hosted
-// authority can't yield a cloud identity (see node-auth design §5; pki enforces it).
+// self-asserted Register fields. Class is whatever the verified SPIFFE path and root-signed issuer
+// policy prove; a self-hosted authority cannot yield a cloud identity.
 package nodeauth
 
 import (
@@ -28,10 +28,10 @@ const (
 // Middleware authenticates node connections before they reach the handler. In enforced mode it derives
 // the identity from the client cert (401 if absent/invalid) and stashes it on the request context; in
 // insecure mode it passes through with no identity.
-func Middleware(mode Mode, root *x509.Certificate, next http.Handler) http.Handler {
+func Middleware(mode Mode, root *x509.Certificate, next http.Handler, trustDomains ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if mode == ModeEnforced {
-			id, err := DeriveIdentity(r.TLS, root, time.Now())
+			id, err := DeriveIdentity(r.TLS, root, time.Now(), trustDomains...)
 			if err != nil {
 				http.Error(w, "node authentication required", http.StatusUnauthorized)
 				return
@@ -48,13 +48,29 @@ func Middleware(mode Mode, root *x509.Certificate, next http.Handler) http.Handl
 
 // DeriveIdentity verifies the TLS peer's client certificate chain against the pinned root and returns
 // the node identity from its SAN. It rejects connections with no client certificate.
-func DeriveIdentity(state *tls.ConnectionState, root *x509.Certificate, now time.Time) (pki.Identity, error) {
+func DeriveIdentity(state *tls.ConnectionState, root *x509.Certificate, now time.Time, trustDomains ...string) (pki.Principal, error) {
 	if state == nil || len(state.PeerCertificates) == 0 {
-		return pki.Identity{}, errors.New("nodeauth: no client certificate")
+		return pki.Principal{}, errors.New("nodeauth: no client certificate")
 	}
 	leaf := state.PeerCertificates[0]
 	intermediates := state.PeerCertificates[1:]
-	return pki.Verify(leaf, intermediates, root, now)
+	trustDomain, err := selectedTrustDomain(trustDomains)
+	if err != nil {
+		return pki.Principal{}, err
+	}
+	principal, err := pki.VerifyPrincipal(leaf, intermediates, pki.VerifyOptions{
+		Root:        root,
+		TrustDomain: trustDomain,
+		CurrentTime: now,
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	})
+	if err != nil {
+		return pki.Principal{}, err
+	}
+	if principal.Kind != pki.KindNode {
+		return pki.Principal{}, errors.New("nodeauth: client principal is not a node")
+	}
+	return principal, nil
 }
 
 type ctxKey struct{}
@@ -62,14 +78,24 @@ type certChainKey struct{}
 
 // WithIdentity stashes a verified node identity on the context (set by the CP's node-auth middleware,
 // read by the Attach handler).
-func WithIdentity(ctx context.Context, id pki.Identity) context.Context {
+func WithIdentity(ctx context.Context, id pki.Principal) context.Context {
 	return context.WithValue(ctx, ctxKey{}, id)
 }
 
 // IdentityFromContext returns the verified node identity, if the connection was authenticated.
-func IdentityFromContext(ctx context.Context) (pki.Identity, bool) {
-	id, ok := ctx.Value(ctxKey{}).(pki.Identity)
+func IdentityFromContext(ctx context.Context) (pki.Principal, bool) {
+	id, ok := ctx.Value(ctxKey{}).(pki.Principal)
 	return id, ok
+}
+
+func selectedTrustDomain(configured []string) (string, error) {
+	if len(configured) > 1 {
+		return "", errors.New("nodeauth: expected at most one trust domain")
+	}
+	if len(configured) == 1 {
+		return configured[0], nil
+	}
+	return pki.DefaultTrustDomain, nil
 }
 
 // WithCertChain stashes the node's verified leaf+chain PEM on the context (enforced mode only).

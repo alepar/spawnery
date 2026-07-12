@@ -8,22 +8,18 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/asn1"
 	"math/big"
 	"net/url"
 	"testing"
 	"time"
-)
 
-var (
-	testIntermediatePolicyOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 1}
-	testLeafPolicyOID         = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 2}
+	"spawnery/internal/pki"
 )
 
 type certTestOptions struct {
 	environment          string
-	intermediatePolicies []asn1.ObjectIdentifier
-	leafPolicies         []asn1.ObjectIdentifier
+	intermediatePolicies []x509.OID
+	leafPolicies         []x509.OID
 	leafURIs             []string
 	leafUsage            x509.KeyUsage
 	leafExtUsage         []x509.ExtKeyUsage
@@ -48,8 +44,8 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 	t.Helper()
 	opts := certTestOptions{
 		environment:          "prod",
-		intermediatePolicies: []asn1.ObjectIdentifier{testIntermediatePolicyOID},
-		leafPolicies:         []asn1.ObjectIdentifier{testLeafPolicyOID},
+		intermediatePolicies: []x509.OID{pki.AuthSigningIntermediatePolicyOID},
+		leafPolicies:         []x509.OID{pki.AuthArtifactSignerPolicyOID},
 		leafURIs:             []string{"spiffe://prod.spawnery.internal/signer/auth-artifact/signer-1"},
 		leafUsage:            x509.KeyUsageDigitalSignature,
 	}
@@ -83,7 +79,7 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 	intermediateKey := mustP256Key(t)
 	intermediatePolicies := opts.intermediatePolicies
 	if opts.useNodeIntermediate {
-		intermediatePolicies = []asn1.ObjectIdentifier{{1, 3, 6, 1, 4, 1, 57264, 9, 9}}
+		intermediatePolicies = []x509.OID{mustOID(t, "1.2.3.4")}
 	}
 	intermediateTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(2),
@@ -94,7 +90,7 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 		MaxPathLen:            0,
-		Policies:              mustPolicies(t, intermediatePolicies),
+		Policies:              intermediatePolicies,
 	}
 	intermediate := mustCreateCertificate(t, intermediateTemplate, root, &intermediateKey.PublicKey, rootKey)
 
@@ -122,7 +118,7 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 		NotAfter:     leafNotAfter,
 		KeyUsage:     opts.leafUsage,
 		ExtKeyUsage:  opts.leafExtUsage,
-		Policies:     mustPolicies(t, opts.leafPolicies),
+		Policies:     opts.leafPolicies,
 		URIs:         mustParseURIs(t, opts.leafURIs),
 	}
 	leaf := mustCreateCertificate(t, leafTemplate, intermediate, leafPublic, intermediateKey)
@@ -136,7 +132,7 @@ func newCertTestPKI(t *testing.T, mutate func(*certTestOptions)) certTestPKI {
 	}
 }
 
-func newCertTestLeaf(t *testing.T, pki certTestPKI, serial int64, signerID string) (*x509.Certificate, ed25519.PrivateKey) {
+func newCertTestLeaf(t *testing.T, fixture certTestPKI, serial int64, signerID string) (*x509.Certificate, ed25519.PrivateKey) {
 	t.Helper()
 	now := time.Unix(1_800_000_000, 0)
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -149,10 +145,10 @@ func newCertTestLeaf(t *testing.T, pki certTestPKI, serial int64, signerID strin
 		NotBefore:    now.Add(-time.Hour),
 		NotAfter:     now.Add(90 * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
-		Policies:     mustPolicies(t, []asn1.ObjectIdentifier{testLeafPolicyOID}),
+		Policies:     []x509.OID{pki.AuthArtifactSignerPolicyOID},
 		URIs:         mustParseURIs(t, []string{"spiffe://prod.spawnery.internal/signer/auth-artifact/" + signerID}),
 	}
-	return mustCreateCertificate(t, template, pki.intermediate, priv.Public(), pki.intermediateKey), priv
+	return mustCreateCertificate(t, template, fixture.intermediate, priv.Public(), fixture.intermediateKey), priv
 }
 
 func mustP256Key(t *testing.T) *ecdsa.PrivateKey {
@@ -190,15 +186,11 @@ func mustParseURIs(t *testing.T, values []string) []*url.URL {
 	return result
 }
 
-func mustPolicies(t *testing.T, values []asn1.ObjectIdentifier) []x509.OID {
+func mustOID(t *testing.T, value string) x509.OID {
 	t.Helper()
-	result := make([]x509.OID, 0, len(values))
-	for _, value := range values {
-		oid, err := x509.OIDFromASN1OID(value)
-		if err != nil {
-			t.Fatal(err)
-		}
-		result = append(result, oid)
+	oid, err := x509.ParseOID(value)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return result
+	return oid
 }
