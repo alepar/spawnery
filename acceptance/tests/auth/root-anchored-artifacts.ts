@@ -61,6 +61,14 @@ export async function ssh(cfg: VMAuthConfig, command: string): Promise<string> {
   return stdout.trim();
 }
 
+export function posixShellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function remoteArgv(...argv: Array<string | number>): string {
+  return argv.map((arg) => posixShellQuote(String(arg))).join(" ");
+}
+
 export function decodeSessionArtifact(wire: string) {
   const envelope = fromBinary(authv1.SignedAuthArtifactSchema, Buffer.from(wire, "base64url"));
   const body = fromBinary(authv1.SessionTokenBodySchema, envelope.payload);
@@ -91,9 +99,11 @@ export async function mintVMToken(
   spki: Uint8Array,
 ): Promise<string> {
   const base = "/etc/spawnery/authsvc";
-  return ssh(cfg,
-    `sudo /usr/local/bin/spawnery-ca auth-token ${base}/root.pem ${base}/auth-signer-${signer}-key.pem ${base}/auth-signer-${signer}-chain.pem prod ${audience} ${cfg.owner} ${Buffer.from(spki).toString("base64")}`,
-  );
+  return ssh(cfg, remoteArgv(
+    "sudo", "/usr/local/bin/spawnery-ca", "auth-token", `${base}/root.pem`,
+    `${base}/auth-signer-${signer}-key.pem`, `${base}/auth-signer-${signer}-chain.pem`,
+    "prod", audience, cfg.owner, Buffer.from(spki).toString("base64"),
+  ));
 }
 
 export function cpClient(cfg: VMAuthConfig, bearer: string) {
@@ -165,10 +175,13 @@ export async function submitSpawn(
 }
 
 export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node", spki: Uint8Array): Promise<string> {
-  const read = async (name: string) => Buffer.from(await ssh(cfg, `sudo base64 -w0 /etc/spawnery/node/${name}`), "base64");
+  const read = async (name: string) => Buffer.from(await ssh(cfg, remoteArgv("sudo", "base64", "-w0", `/etc/spawnery/node/${name}`)), "base64");
   const keyPEM = await read("key.pem");
   const certPEM = await read("cert.pem");
   const chainPEM = await read("chain.pem");
+  const leaf = new X509Certificate(certPEM);
+  const leafSPKI = leaf.publicKey.export({ format: "der", type: "spki" });
+  const keyId = createHash("sha256").update(leafSPKI).digest();
   const payload = toBinary(authv1.SessionTokenBodySchema, create(authv1.SessionTokenBodySchema, {
     accountId: cfg.owner,
     tokenId: "node-leaf-negative",
@@ -176,28 +189,34 @@ export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node
     issuedAt: BigInt(Math.floor(Date.now() / 1000)),
     expiresAt: BigInt(Math.floor(Date.now() / 1000) + 900),
     sessionKeyHash: createHash("sha256").update(spki).digest(),
+    keyId: keyId.toString("hex"),
   }));
   const message = Buffer.concat([Buffer.from("spawnery/session-token/v1"), payload]);
   const signature = nodeSign("sha256", message, { key: createPrivateKey(keyPEM), dsaEncoding: "ieee-p1363" });
-  const certDER = new X509Certificate(certPEM).raw;
+  const certDER = leaf.raw;
   const chainDER = new X509Certificate(chainPEM).raw;
   return toBase64Url(toBinary(authv1.SignedAuthArtifactSchema, create(authv1.SignedAuthArtifactSchema, {
     artifactType: "session-token",
     payload,
     signature,
     signerChain: [certDER, chainDER],
-    keyId: new Uint8Array(32),
+    keyId,
   })));
 }
 
 export async function deployCurrentRevocation(cfg: VMAuthConfig, generation: number): Promise<void> {
   const restartEpoch = Math.floor(Date.now() / 1000) - 1;
-  const wire = await ssh(cfg,
-    `sudo /usr/local/bin/spawnery-ca signer-revocation /var/lib/spawnery-offline/auth-signing-intermediate.pem /var/lib/spawnery-offline/auth-signing-intermediate-key.pem /etc/spawnery/authsvc/auth-signer-current-chain.pem prod ${generation}`,
-  );
-  await ssh(cfg, `sudo sh -c 'printf "%s\\n" "${wire}" > /etc/spawnery/signer-revocations.artifact; grep -q ^CP_AUTH_SIGNER_REVOCATION_STATEMENT= /etc/spawnery/env.d/common.env || printf "%s\\n" "CP_AUTH_SIGNER_REVOCATION_STATEMENT=/etc/spawnery/signer-revocations.artifact" >> /etc/spawnery/env.d/common.env; grep -q ^NODE_SIGNER_REVOCATION_STATEMENT= /etc/spawnery/env.d/common.env || printf "%s\\n" "NODE_SIGNER_REVOCATION_STATEMENT=/etc/spawnery/signer-revocations.artifact" >> /etc/spawnery/env.d/common.env; systemctl restart spawnery-cp spawnery-node'`);
+  const wire = await ssh(cfg, remoteArgv(
+    "sudo", "/usr/local/bin/spawnery-ca", "signer-revocation",
+    "/var/lib/spawnery-offline/auth-signing-intermediate.pem",
+    "/var/lib/spawnery-offline/auth-signing-intermediate-key.pem",
+    "/etc/spawnery/authsvc/auth-signer-current-chain.pem", "prod", generation,
+  ));
+  const install = `printf '%s\\n' ${posixShellQuote(wire)} > /etc/spawnery/signer-revocations.artifact; grep -q ^CP_AUTH_SIGNER_REVOCATION_STATEMENT= /etc/spawnery/env.d/common.env || printf '%s\\n' 'CP_AUTH_SIGNER_REVOCATION_STATEMENT=/etc/spawnery/signer-revocations.artifact' >> /etc/spawnery/env.d/common.env; grep -q ^NODE_SIGNER_REVOCATION_STATEMENT= /etc/spawnery/env.d/common.env || printf '%s\\n' 'NODE_SIGNER_REVOCATION_STATEMENT=/etc/spawnery/signer-revocations.artifact' >> /etc/spawnery/env.d/common.env; systemctl restart spawnery-cp spawnery-node`;
+  await ssh(cfg, remoteArgv("sudo", "sh", "-c", install));
   for (let i = 0; i < 60; i++) {
-    const ready = await ssh(cfg, `curl -fsS http://127.0.0.1:8080/healthz >/dev/null && sudo journalctl -u spawnery-node --since @${restartEpoch} --no-pager | grep -q 'node: connected to CP' && echo ready`).catch(() => "");
+    const journal = remoteArgv("sudo", "journalctl", "-u", "spawnery-node", "--since", `@${restartEpoch}`, "--no-pager");
+    const ready = await ssh(cfg, `curl -fsS http://127.0.0.1:8080/healthz >/dev/null && ${journal} | grep -q 'node: connected to CP' && echo ready`).catch(() => "");
     if (ready === "ready") return;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }

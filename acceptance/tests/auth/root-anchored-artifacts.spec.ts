@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { createHash, X509Certificate } from "node:crypto";
 import { exportSpkiDer } from "@spawnery/client";
 import {
   chainHashes,
@@ -65,11 +66,19 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
     await removeTerminal(legacySpawn.spawnId);
 
     const nodeLeaf = await nodeLeafArtifact(cfg, "node", spki);
+    const nodeLeafDecoded = decodeSessionArtifact(nodeLeaf);
+    const nodeLeafCert = new X509Certificate(nodeLeafDecoded.envelope.signerChain[0]);
+    const nodeLeafSPKI = nodeLeafCert.publicKey.export({ format: "der", type: "spki" });
+    const nodeLeafKeyId = createHash("sha256").update(nodeLeafSPKI).digest();
+    expect(Buffer.from(nodeLeafDecoded.envelope.keyId)).toEqual(nodeLeafKeyId);
+    expect(nodeLeafDecoded.body.keyId).toBe(nodeLeafKeyId.toString("hex"));
     await expectCPRejected(cfg, nodeLeaf);
     const nodeLeafSpawn = await submitSpawn(cfg, nodeLeaf, keyPair, "node-leaf");
     createdSpawnIds.push(nodeLeafSpawn.spawnId);
     expect(nodeLeafSpawn.status).toBe("ERROR");
     expect(nodeLeafSpawn.errorDetail).toContain("TOKEN_INVALID");
+    expect(nodeLeafSpawn.errorDetail).toContain("signer issuer lacks auth-signing intermediate policy");
+    expect(nodeLeafSpawn.errorDetail).not.toContain("unknown key_id");
     await removeTerminal(nodeLeafSpawn.spawnId);
 
     await deployCurrentRevocation(cfg, 1);
