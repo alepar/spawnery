@@ -62,6 +62,7 @@ message SessionTokenBody {
   // x509.MarshalPKIXPublicKey emit [AM11].
   bytes session_key_hash = 7;
   string key_id = 8; // AS signing-key selector [AM4]
+  string family_id = 9; // refresh family shared by the paired cp/node credentials
 }
 
 // RevocationEntry is one signed entry in the AS revocation feed (design §4 [AM10]); the CP

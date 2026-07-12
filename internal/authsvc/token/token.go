@@ -14,8 +14,11 @@ const (
 	RevocationDomainPrefix = "spawnery/revocation/v1"
 )
 
-// AudienceCP identifies session artifacts intended for control-plane authorization.
-const AudienceCP = "cp"
+// Session artifact audiences are intentionally distinct and never interchangeable.
+const (
+	AudienceCP   = "cp"
+	AudienceNode = "node"
+)
 
 // Errors are sentinel so verifiers can map them to machine-readable codes.
 var (

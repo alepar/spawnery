@@ -311,8 +311,55 @@ func (g *githubClient) FetchUser(ctx context.Context, accessToken string) (GitHu
 
 // --- shared helpers ---
 
-// mintAccess mints a 15-minute aud="cp" access token bound to the session key [MC2]. A1 mints
-// "cp" only; "node"-audience minting is A4's flow.
+type accessPair struct {
+	CPWire, NodeWire       string
+	CPTokenID, NodeTokenID string
+	IssuedAt, ExpiresAt    int64
+}
+
+// mintAccessPair mints the inseparable CP/node access pair under one signer read lock.
+func (i *IdP) mintAccessPair(u store.User, familyID string, spkiDER []byte, now time.Time) (accessPair, error) {
+	pair := accessPair{
+		CPTokenID:   uuid.NewString(),
+		NodeTokenID: uuid.NewString(),
+		IssuedAt:    now.Unix(),
+		ExpiresAt:   now.Add(accessTokenTTL).Unix(),
+	}
+	sessionKeyHash := token.SessionKeyHash(spkiDER)
+	i.signers.mu.RLock()
+	defer i.signers.mu.RUnlock()
+	signer := i.signers.current
+	sign := func(tokenID, audience string) (string, error) {
+		body := &authv1.SessionTokenBody{
+			AccountId:      u.AccountID,
+			Handle:         u.Handle,
+			TokenId:        tokenID,
+			Audience:       audience,
+			IssuedAt:       pair.IssuedAt,
+			ExpiresAt:      pair.ExpiresAt,
+			SessionKeyHash: sessionKeyHash,
+			KeyId:          hex.EncodeToString(signer.KeyID[:]),
+			FamilyId:       familyID,
+		}
+		payload, err := proto.Marshal(body)
+		if err != nil {
+			return "", err
+		}
+		return signer.Sign(token.ArtifactTypeSession, payload)
+	}
+	var err error
+	pair.CPWire, err = sign(pair.CPTokenID, token.AudienceCP)
+	if err != nil {
+		return accessPair{}, err
+	}
+	pair.NodeWire, err = sign(pair.NodeTokenID, token.AudienceNode)
+	if err != nil {
+		return accessPair{}, err
+	}
+	return pair, nil
+}
+
+// mintAccess remains for tests and callers that have not yet been converted in this change.
 func (i *IdP) mintAccess(u store.User, spkiDER []byte, now time.Time) (wire, tokenID string, err error) {
 	tokenID = uuid.NewString()
 	wire, err = i.signers.withCurrent(func(signer *token.SigningCredential) (string, error) {

@@ -1,6 +1,7 @@
 package authsvc
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"sync"
@@ -14,6 +15,66 @@ import (
 	"spawnery/internal/authsvc/store"
 	"spawnery/internal/authsvc/token"
 )
+
+func TestMintAccessPair(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1_800_000_000, 0)
+	pki := newTestArtifactPKI(t, now, "prod")
+	signer := pki.signer(t, now, "current")
+	idp, _, _ := newTestIdP(t, fake, now, func(cfg *IdPConfig) { cfg.Signer = signer })
+
+	pair, err := idp.mintAccessPair(store.User{AccountID: "acct-1", Handle: "alice"}, "family-1", []byte("session-spki"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := token.NewVerifier(pki.root, "prod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decode := func(wire string) authv1.SessionTokenBody {
+		t.Helper()
+		payload, err := verifier.Verify(wire, token.ArtifactTypeSession, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body authv1.SessionTokenBody
+		if err := proto.Unmarshal(payload, &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	cpBody := decode(pair.CPWire)
+	nodeBody := decode(pair.NodeWire)
+
+	if cpBody.GetAudience() != token.AudienceCP || nodeBody.GetAudience() != token.AudienceNode {
+		t.Fatalf("audiences = %q, %q", cpBody.GetAudience(), nodeBody.GetAudience())
+	}
+	if cpBody.GetTokenId() == "" || nodeBody.GetTokenId() == "" || cpBody.GetTokenId() == nodeBody.GetTokenId() {
+		t.Fatalf("token ids = %q, %q", cpBody.GetTokenId(), nodeBody.GetTokenId())
+	}
+	if pair.CPTokenID != cpBody.GetTokenId() || pair.NodeTokenID != nodeBody.GetTokenId() {
+		t.Fatalf("pair ids = %q, %q; bodies = %q, %q", pair.CPTokenID, pair.NodeTokenID, cpBody.GetTokenId(), nodeBody.GetTokenId())
+	}
+	for name, body := range map[string]authv1.SessionTokenBody{"cp": cpBody, "node": nodeBody} {
+		if body.GetAccountId() != "acct-1" || body.GetHandle() != "alice" || body.GetFamilyId() != "family-1" {
+			t.Fatalf("%s identity claims = %+v", name, &body)
+		}
+		if body.GetIssuedAt() != now.Unix() || body.GetExpiresAt() != now.Add(15*time.Minute).Unix() {
+			t.Fatalf("%s timestamps = %d, %d", name, body.GetIssuedAt(), body.GetExpiresAt())
+		}
+		if body.GetKeyId() != hex.EncodeToString(signer.KeyID[:]) {
+			t.Fatalf("%s key id = %q", name, body.GetKeyId())
+		}
+	}
+	if cpBody.GetIssuedAt() != nodeBody.GetIssuedAt() || cpBody.GetExpiresAt() != nodeBody.GetExpiresAt() ||
+		cpBody.GetKeyId() != nodeBody.GetKeyId() || !bytes.Equal(cpBody.GetSessionKeyHash(), nodeBody.GetSessionKeyHash()) {
+		t.Fatalf("pair claims diverged: cp=%+v node=%+v", &cpBody, &nodeBody)
+	}
+	if pair.IssuedAt != cpBody.GetIssuedAt() || pair.ExpiresAt != cpBody.GetExpiresAt() {
+		t.Fatalf("pair timestamps = %d, %d", pair.IssuedAt, pair.ExpiresAt)
+	}
+}
 
 func TestMintAccessTokenCertifiedEnvelope(t *testing.T) {
 	fake := githubfake.New()
