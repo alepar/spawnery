@@ -316,10 +316,14 @@ func TestSetCatalogListing_KillSwitch_RelistNoKill(t *testing.T) {
 
 // --- Kill-switch tests for bundle_ref membership (sp-mwco.1.6) -------------------
 
-// TestDeleteCatalogEntry_KillSwitch_BundleRef_TerminatesAffectedSpawn verifies that deleting
-// a catalog entry terminates a live spawn whose profile references it only through a
-// bundle_ref entry pinned to a version that has the entry as a member (no catalog_ref at all).
-func TestDeleteCatalogEntry_KillSwitch_BundleRef_TerminatesAffectedSpawn(t *testing.T) {
+// TestDeleteBundleVersion_KillSwitch_BundleRef_TerminatesAffectedSpawn verifies that deleting
+// the bundle version containing a catalog entry terminates a live spawn whose profile
+// references it only through a bundle_ref entry pinned to that version (no catalog_ref at
+// all). sp-mwco.3.3 makes a bundle-member catalog entry undeletable via DeleteCatalogEntry
+// (force does not override bundle membership — the caller must delete the bundle version
+// instead), so this exercises the kill-switch through DeleteBundleVersion rather than
+// DeleteCatalogEntry.
+func TestDeleteBundleVersion_KillSwitch_BundleRef_TerminatesAffectedSpawn(t *testing.T) {
 	s, _, _ := newTestServer(t)
 
 	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "bundled-skill")
@@ -332,14 +336,15 @@ func TestDeleteCatalogEntry_KillSwitch_BundleRef_TerminatesAffectedSpawn(t *test
 	spawnID := "sp-ks-bundle-1"
 	makeSpawnForKS(t, s, spawnID, "bob", pfID)
 
-	if _, err := s.DeleteCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.DeleteCatalogEntryRequest{
-		CatalogId: catID,
+	// Referenced by pfID's bundle_ref entry, so force=true (sp-mwco.3.3 §4.3).
+	if _, err := s.DeleteBundleVersion(aliceCtx(), connect.NewRequest(&cpv1.DeleteBundleVersionRequest{
+		VersionId: "bndv-1", Force: true,
 	})); err != nil {
-		t.Fatalf("DeleteCatalogEntry: %v", err)
+		t.Fatalf("DeleteBundleVersion: %v", err)
 	}
 
 	if !isDeleted(t, s, spawnID) {
-		t.Errorf("spawn %s should be deleted after revoking a bundle_ref member's catalog entry", spawnID)
+		t.Errorf("spawn %s should be deleted after revoking a bundle_ref member's bundle version", spawnID)
 	}
 }
 
@@ -374,10 +379,16 @@ func TestSetCatalogListing_KillSwitch_BundleRef_DelistTerminates(t *testing.T) {
 	}
 }
 
-// TestDeleteCatalogEntry_KillSwitch_UnionOfCatalogRefAndBundleRef verifies that a revoke
-// terminates spawns reached through EITHER leg — catalog_ref and bundle_ref together — with no
-// duplication and no leg starving the other.
-func TestDeleteCatalogEntry_KillSwitch_UnionOfCatalogRefAndBundleRef(t *testing.T) {
+// TestDeleteBundleVersion_KillSwitch_OnlyAffectsBundleRefLeg verifies that deleting a bundle
+// version terminates the spawn reached through its bundle_ref leg, and leaves a spawn reached
+// through a separate catalog_ref to the very same catalog entry untouched.
+//
+// This supersedes the pre-sp-mwco.3.3 "union" test: that test deleted the shared catalog entry
+// directly and expected BOTH legs to terminate in one call. Under sp-mwco.3.3's safe-delete
+// semantics a catalog entry that is a bundle member can never be deleted via DeleteCatalogEntry
+// (force does not override bundle membership), so the two legs can no longer be revoked by a
+// single call — deleting the bundle version is scoped to that version's bundle_ref profiles only.
+func TestDeleteBundleVersion_KillSwitch_OnlyAffectsBundleRefLeg(t *testing.T) {
 	s, _, _ := newTestServer(t)
 
 	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "shared-skill")
@@ -397,24 +408,26 @@ func TestDeleteCatalogEntry_KillSwitch_UnionOfCatalogRefAndBundleRef(t *testing.
 	spawnBundle := "sp-ks-union-bundle"
 	makeSpawnForKS(t, s, spawnBundle, "carol", pfBundle)
 
-	if _, err := s.DeleteCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.DeleteCatalogEntryRequest{
-		CatalogId: catID,
+	// Referenced by pfBundle's bundle_ref entry, so force=true (sp-mwco.3.3 §4.3).
+	if _, err := s.DeleteBundleVersion(aliceCtx(), connect.NewRequest(&cpv1.DeleteBundleVersionRequest{
+		VersionId: "bndv-3", Force: true,
 	})); err != nil {
-		t.Fatalf("DeleteCatalogEntry: %v", err)
+		t.Fatalf("DeleteBundleVersion: %v", err)
 	}
 
-	if !isDeleted(t, s, spawnDirect) {
-		t.Errorf("catalog_ref spawn %s should be deleted", spawnDirect)
+	if isDeleted(t, s, spawnDirect) {
+		t.Errorf("catalog_ref spawn %s must NOT be deleted by a bundle version delete", spawnDirect)
 	}
 	if !isDeleted(t, s, spawnBundle) {
 		t.Errorf("bundle_ref spawn %s should be deleted", spawnBundle)
 	}
 }
 
-// TestDeleteCatalogEntry_KillSwitch_BundleRef_DroppedVersionNotAffected verifies that a
-// profile pinned to a bundle version that does NOT contain the revoked entry (e.g. the member
-// was dropped in a later version) is NOT terminated.
-func TestDeleteCatalogEntry_KillSwitch_BundleRef_DroppedVersionNotAffected(t *testing.T) {
+// TestDeleteBundleVersion_KillSwitch_DroppedVersionNotAffected verifies that a profile pinned
+// to a bundle version that does NOT contain the revoked entry (e.g. the member was dropped in
+// a later version) is NOT terminated when the OLD version (the one still containing the entry)
+// is deleted.
+func TestDeleteBundleVersion_KillSwitch_DroppedVersionNotAffected(t *testing.T) {
 	s, _, _ := newTestServer(t)
 
 	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "dropped-skill")
@@ -435,10 +448,12 @@ func TestDeleteCatalogEntry_KillSwitch_BundleRef_DroppedVersionNotAffected(t *te
 	spawnID := "sp-ks-dropped"
 	makeSpawnForKS(t, s, spawnID, "bob", pfID)
 
-	if _, err := s.DeleteCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.DeleteCatalogEntryRequest{
-		CatalogId: catID,
+	// bndv-old has no bundle_ref profiles pinned to it (pfID is pinned to bndv-new), so no force
+	// needed.
+	if _, err := s.DeleteBundleVersion(aliceCtx(), connect.NewRequest(&cpv1.DeleteBundleVersionRequest{
+		VersionId: "bndv-old",
 	})); err != nil {
-		t.Fatalf("DeleteCatalogEntry: %v", err)
+		t.Fatalf("DeleteBundleVersion: %v", err)
 	}
 
 	if isDeleted(t, s, spawnID) {
