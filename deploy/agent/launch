@@ -205,6 +205,7 @@ case "$RUNNABLE" in
     export GOOSE_MODEL="${GOOSE_MODEL:-${SPAWN_MODEL:-openai/gpt-4o-mini}}"
     export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-unused-sidecar-injects-real-key}"
     export GOOSE_TELEMETRY_OFF="${GOOSE_TELEMETRY_OFF:-1}"
+    apply-artifacts "$RUNNABLE" || true
     exec /usr/local/bin/acpmux goose acp
     ;;
   hermes-acp)
@@ -239,6 +240,9 @@ EOF
     # download and, lacking Chromium, simply does not advertise browser tools. See sp-055b and
     # the Dockerfile's node install.)
     export HERMES_DISABLE_LAZY_INSTALLS=1
+    # After the config.yaml write above — the skills emitter (sp-mwco.2.5) upserts
+    # skills.external_dirs into that same file, so this must not run before it.
+    apply-artifacts "$RUNNABLE" || true
     exec /usr/local/bin/acpmux hermes acp
     ;;
   opencode-tui)
@@ -267,6 +271,7 @@ EOF
     export GOOSE_MODEL="${GOOSE_MODEL:-${SPAWN_MODEL:-openai/gpt-4o-mini}}"
     export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-unused-sidecar-injects-real-key}"
     export GOOSE_TELEMETRY_OFF="${GOOSE_TELEMETRY_OFF:-1}"
+    apply-artifacts "$RUNNABLE" || true
     # OPENAI_BASE_URL is set by the node to the sidecar endpoint; goose's openai provider reads
     # it directly. Use "goose session" (bare "goose" opens the configure wizard).
     start_tmux TERM GOOSE_PROVIDER GOOSE_MODEL OPENAI_API_KEY GOOSE_TELEMETRY_OFF OPENAI_BASE_URL -- goose session
