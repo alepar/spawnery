@@ -135,6 +135,9 @@ func (s Spawnlet) Validate() error {
 	if s.Node.CertificateRevocationState == "" || s.Node.CertificateRevocationIssuers == "" || s.Node.CertificateRevocationCRLs == "" && s.Node.CertificateRevocationURLs == "" {
 		return fmt.Errorf("node certificate revocation state, issuers, and CRL sources are required in enforced mode")
 	}
+	if s.Node.CertificateRevocationCRLs != "" && s.Node.CertificateRevocationURLs != "" {
+		return fmt.Errorf("configure exactly one node certificate CRL source channel")
+	}
 	return nil
 }
 

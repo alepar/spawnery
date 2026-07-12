@@ -183,6 +183,9 @@ func (c AS) Validate() error {
 	if (c.CP.URL == "") != (c.CP.ServerName == "") {
 		return fmt.Errorf("cp.url and cp.server_name must be configured together")
 	}
+	if c.Internal.RevocationCRLs != "" && c.Internal.RevocationURLs != "" {
+		return fmt.Errorf("configure exactly one of internal.revocation_crls or internal.revocation_urls")
+	}
 	// Real GitHub requires client credentials unless fake_github=true or dev mode with no client_id
 	// (dev fallback to in-process fake).
 	useFakeGitHub := c.FakeGithub || (c.Dev && c.GitHub.ClientID == "")

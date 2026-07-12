@@ -206,6 +206,9 @@ func (c CP) Validate() error {
 	if len(c.Internal.RevocationURLs) != 0 && len(c.Internal.RevocationURLs) != len(c.Internal.RevocationIssuers) {
 		return fmt.Errorf("internal.revocation_urls must match internal.revocation_issuers")
 	}
+	if len(c.Internal.RevocationCRLs) != 0 && len(c.Internal.RevocationURLs) != 0 {
+		return fmt.Errorf("configure exactly one of internal.revocation_crls or internal.revocation_urls")
+	}
 	if c.Store.Driver == "postgres" && (c.Store.DSN == "" || string(c.Store.DSN) == sqliteDefaultDSN) {
 		return fmt.Errorf("store.driver=postgres requires store.dsn (a postgres DSN)")
 	}
