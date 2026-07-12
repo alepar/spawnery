@@ -9,6 +9,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/registry"
 	"spawnery/internal/cp/router"
+	"spawnery/internal/intent"
 	"spawnery/internal/metrics"
 )
 
@@ -51,7 +52,7 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 		}
 	}()
 
-	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", "", "", 3, registry.Placement{}, nil, nil, "", nil, nil, nil)
+	nodeID, err := s.Provision(context.Background(), "sp-test", "examples/secret-app", "m", "", "", "", "", 3, registry.Placement{}, nil, nil, "", nil, nil, nil, intent.OpCreateSpawn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,6 +65,9 @@ func TestProvisionRoutesAndAwaitsActive(t *testing.T) {
 	}
 	if got.GetGeneration() != 3 {
 		t.Fatalf("StartSpawn generation=%d want 3 (the node labels + reports its pod with it)", got.GetGeneration())
+	}
+	if got.GetIntentOp() != string(intent.OpCreateSpawn) {
+		t.Fatalf("StartSpawn intent op = %q", got.GetIntentOp())
 	}
 }
 
