@@ -7,6 +7,18 @@ fake_github: false  # true = in-process fake GitHub provider (dev/CI; implies no
 listen: "127.0.0.1:8090"
 allowed_origins: ""  # browser-origin allowlist for CORS; empty = dev (loopback + private-network only)
 
+internal:
+  listen: ""
+  trust_domain: ""
+  root_ca: ""
+  cert: ""
+  chain: ""
+  key: ""
+  server_name: ""
+  revocation_state: ""
+  revocation_issuers: ""
+  revocation_crls: ""
+
 ca:
   trust_domain: "prod.spawnery.internal"
   root_pem: "/etc/spawnery/as/root-ca.pem"
@@ -45,8 +57,5 @@ registration_enabled: true  # allow new user registration
 max_families: 20            # concurrent refresh-family cap per account
 
 cp:
-  url: ""          # CP base URL for GitHub mint authorization/fanout (empty disables)
-  rpc_secret: ""   # AS->CP scoped bearer secret for GitHub coordination RPCs (Secret)
-  secret: ""       # shared bearer secret for GET /revocations (server-to-server; Secret)
-
-dev_relax_node_auth: false  # DEV-ONLY (D3): trust X-Spawnery-Dev-Node-Id header as node identity
+  url: ""          # CP internal URL for GitHub mint authorization/fanout
+  server_name: ""  # expected CP internal TLS DNS name

@@ -17,6 +17,19 @@ type AS struct {
 	Listen         string `koanf:"listen" validate:"required,hostname_port"`
 	AllowedOrigins string `koanf:"allowed_origins"`
 
+	Internal struct {
+		Listen            string `koanf:"listen"`
+		TrustDomain       string `koanf:"trust_domain"`
+		RootCA            string `koanf:"root_ca"`
+		Cert              string `koanf:"cert"`
+		Chain             string `koanf:"chain"`
+		Key               string `koanf:"key"`
+		ServerName        string `koanf:"server_name"`
+		RevocationState   string `koanf:"revocation_state"`
+		RevocationIssuers string `koanf:"revocation_issuers"`
+		RevocationCRLs    string `koanf:"revocation_crls"`
+	} `koanf:"internal"`
+
 	// Reachable, multi-user fake GitHub (T2, sp-tq0t.13): opt-in fields for a black-box acceptance
 	// suite that needs to reach the fake's browser-facing authorize redirect from another host and
 	// obtain N distinct OAuth owners. All empty (the default) = today's behavior exactly: loopback
@@ -60,12 +73,9 @@ type AS struct {
 	MaxFamilies         int  `koanf:"max_families" validate:"min=1"`
 
 	CP struct {
-		URL       string        `koanf:"url"`
-		RPCSecret config.Secret `koanf:"rpc_secret"`
-		Secret    config.Secret `koanf:"secret"`
+		URL        string `koanf:"url"`
+		ServerName string `koanf:"server_name"`
 	} `koanf:"cp"`
-
-	DevRelaxNodeAuth bool `koanf:"dev_relax_node_auth"`
 }
 
 // ASAuthSigning names the purpose-constrained online leaf credentials used for authorization
@@ -134,6 +144,34 @@ func (c AS) Validate() error {
 		if string(c.GitHub.TokenEncKey) == "" && c.GitHub.TokenEncKeyFile == "" {
 			return fmt.Errorf("github.token_enc_key (or github.token_enc_key_file) is required for at-rest github token encryption")
 		}
+		internalRequired := []struct {
+			name  string
+			value string
+		}{
+			{"internal.listen", c.Internal.Listen},
+			{"internal.trust_domain", c.Internal.TrustDomain},
+			{"internal.root_ca", c.Internal.RootCA},
+			{"internal.cert", c.Internal.Cert},
+			{"internal.chain", c.Internal.Chain},
+			{"internal.key", c.Internal.Key},
+			{"internal.server_name", c.Internal.ServerName},
+			{"internal.revocation_state", c.Internal.RevocationState},
+			{"internal.revocation_issuers", c.Internal.RevocationIssuers},
+			{"internal.revocation_crls", c.Internal.RevocationCRLs},
+			{"cp.url", c.CP.URL},
+			{"cp.server_name", c.CP.ServerName},
+		}
+		for _, field := range internalRequired {
+			if field.value == "" {
+				return fmt.Errorf("%s is required in production (set dev=true for development)", field.name)
+			}
+		}
+	}
+	if c.Internal.TrustDomain != "" && c.CA.TrustDomain != "" && c.Internal.TrustDomain != c.CA.TrustDomain {
+		return fmt.Errorf("internal.trust_domain must match ca.trust_domain")
+	}
+	if (c.CP.URL == "") != (c.CP.ServerName == "") {
+		return fmt.Errorf("cp.url and cp.server_name must be configured together")
 	}
 	if (c.Signing.NextKeyPEM == "") != (c.Signing.NextChainPEM == "") {
 		return fmt.Errorf("signing.next_key_pem and signing.next_chain_pem must be configured together")
@@ -162,6 +200,16 @@ var asEnvAliases = map[string]string{
 	"AS_FAKE_GITHUB_BASE_URL":           "fake_github_base_url",
 	"AS_FAKE_GITHUB_USERS":              "fake_github_users",
 	"AS_LISTEN":                         "listen",
+	"AS_INTERNAL_LISTEN":                "internal.listen",
+	"AS_INTERNAL_TRUST_DOMAIN":          "internal.trust_domain",
+	"AS_INTERNAL_ROOT_CA":               "internal.root_ca",
+	"AS_INTERNAL_CERT":                  "internal.cert",
+	"AS_INTERNAL_CHAIN":                 "internal.chain",
+	"AS_INTERNAL_KEY":                   "internal.key",
+	"AS_INTERNAL_SERVER_NAME":           "internal.server_name",
+	"AS_INTERNAL_REVOCATION_STATE":      "internal.revocation_state",
+	"AS_INTERNAL_REVOCATION_ISSUERS":    "internal.revocation_issuers",
+	"AS_INTERNAL_REVOCATION_CRLS":       "internal.revocation_crls",
 	"AS_ALLOWED_ORIGINS":                "allowed_origins",
 	"AS_ROOT_CA_PEM":                    "ca.root_pem",
 	"AS_TRUST_DOMAIN":                   "ca.trust_domain",
@@ -191,7 +239,5 @@ var asEnvAliases = map[string]string{
 	"REGISTRATION_ENABLED":              "registration_enabled",
 	"AS_MAX_FAMILIES":                   "max_families",
 	"AS_CP_URL":                         "cp.url",
-	"AS_CP_RPC_SECRET":                  "cp.rpc_secret",
-	"AS_CP_SECRET":                      "cp.secret",
-	"AS_DEV_RELAX_NODE_AUTH":            "dev_relax_node_auth",
+	"AS_CP_SERVER_NAME":                 "cp.server_name",
 }

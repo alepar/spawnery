@@ -313,7 +313,6 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 		VerificationURI:     cfg.VerificationURI,
 		RegistrationEnabled: regEnabled,
 		MaxFamilies:         maxFamilies,
-		CPSecret:            string(cfg.CP.Secret),
 	})
 	if err != nil {
 		return nil, err
@@ -326,33 +325,12 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 		authsvc.WithGitHubMinting(idStore, ghProvider),
 	}
 	if cpURL := strings.TrimSpace(cfg.CP.URL); cpURL != "" {
-		// Not internal/client (sp-lan2.5): the Go SDK forces gRPC + Bearer-token auth, but this
-		// server-to-server client speaks Connect protocol with a static X-Spawnery-AS-Secret
-		// header for RPCs (AuthorizeGitHubMint, SignalGitHubTokenRotated) off the SDK's curated
-		// surface. See docs/superpowers/specs/2026-07-06-client-sdk-signing-design.md follow-ups.
-		cpClient := cpv1connect.NewSpawnServiceClient(http.DefaultClient, cpURL,
-			connect.WithInterceptors(staticHeaderInterceptor{
-				name:  "X-Spawnery-AS-Secret",
-				value: string(cfg.CP.RPCSecret),
-			}),
-		)
+		cpClient := cpv1connect.NewSpawnServiceClient(http.DefaultClient, cpURL)
 		opts = append(opts,
 			authsvc.WithGitHubMintAuthorizer(authsvc.NewCPGitHubMintAuthorizer(cpClient)),
 			authsvc.WithGitHubTokenRotatedNotifier(authsvc.NewCPGitHubTokenRotatedNotifier(cpClient)),
 		)
 		log.Printf("authsvc: GitHub mint authorization/fanout wired to CP %s", cpURL)
-	}
-
-	// CP→AS link-status endpoint: enabled when cp.rpc_secret is set. The CP sends this secret
-	// in the X-Spawnery-AS-Secret header to authenticate link-status queries.
-	if secret := strings.TrimSpace(string(cfg.CP.RPCSecret)); secret != "" {
-		opts = append(opts, authsvc.WithCPRPCSecret(secret))
-		log.Printf("authsvc: CP→AS link-status endpoint enabled (POST /internal/github/link-status)")
-	}
-
-	if cfg.DevRelaxNodeAuth {
-		log.Printf("authsvc: WARNING — AS_DEV_RELAX_NODE_AUTH=1: trusting %q header as node identity (DEV-ONLY, NOT for production)", "X-Spawnery-Dev-Node-Id")
-		opts = append(opts, authsvc.WithDevNodeIdentityHeader("X-Spawnery-Dev-Node-Id"))
 	}
 
 	// GitHub link bootstrap flow. Active only when github.link_redirect_uri is set — a distinct
