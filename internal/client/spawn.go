@@ -15,6 +15,7 @@ import (
 
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/gen/cp/v1/cpv1connect"
+	"spawnery/internal/intent"
 )
 
 // spawnClient is the narrow RPC surface spawn.go's free functions need — narrowed to an interface
@@ -105,11 +106,15 @@ func waitActive(ctx context.Context, rpc spawnClient, id string, onPoll func(*cp
 // signed intent (A4 two-phase sign-after-resolve [AC1][AM12]); Resume drives pollAndSign
 // concurrently via provisionWithIntent and retries once on a retryable NACK.
 func (c *Client) Resume(ctx context.Context, id string) error {
-	return resumeSpawn(ctx, c.rpc, id, c.warn)
+	return resumeSpawnAuthorized(ctx, c.rpc, c.nodeCredentials, c.targetTrust, id, c.warn)
 }
 
 func resumeSpawn(ctx context.Context, rpc spawnClient, id string, warn func(error)) error {
-	return provisionWithIntent(ctx, rpc, id, IntentParams{}, func(rpcCtx context.Context) error {
+	return resumeSpawnAuthorized(ctx, rpc, nil, TargetTrust{}, id, warn)
+}
+
+func resumeSpawnAuthorized(ctx context.Context, rpc spawnClient, credentials NodeCredentialSource, trust TargetTrust, id string, warn func(error)) error {
+	return provisionWithIntent(ctx, rpc, credentials, trust, id, IntentParams{Op: intent.OpResumeSpawn}, func(rpcCtx context.Context) error {
 		_, err := rpc.ResumeSpawn(rpcCtx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id}))
 		return err
 	}, warn)

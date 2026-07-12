@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/x509"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -12,12 +11,11 @@ import (
 	"time"
 
 	"github.com/urfave/cli/v3"
-	"google.golang.org/protobuf/proto"
-
-	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/client"
 	"spawnery/internal/pki"
 )
+
+const cloudSystemAccountID = "spawnery-system"
 
 // `spawnctl move <spawn-id> <target>` drives the data-only local<->cloud migration (sp-u53.5.3). It
 // orchestrates the owner-side leg of the journal-key travel that the CP cannot do (the CP holds no
@@ -75,12 +73,16 @@ func moveCmd() *cli.Command {
 			if opts.CloseCertificateRevocations != nil {
 				defer func() { _ = opts.CloseCertificateRevocations() }()
 			}
+			trust, err := targetTrustFromMoveOptions(opts)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
 			dev, err := loadDevice(dir)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
 			src := buildTokenSource(dir, c.String("token"), connectClient())
-			sdk := client.New(c.String("cp"), src, nil, client.WithWarnHandler(func(err error) {
+			sdk := client.New(c.String("cp"), src, nil, client.WithNodeAuthorization(src, trust), client.WithWarnHandler(func(err error) {
 				log.Printf("%v", err)
 			}))
 			fmt.Fprintf(c.Writer, "move %s -> %s\n", spawnID, target)
@@ -91,6 +93,16 @@ func moveCmd() *cli.Command {
 			return nil
 		},
 	}
+}
+
+func targetTrustFromMoveOptions(opts client.MoveOptions) (client.TargetTrust, error) {
+	if len(opts.RootPEM) == 0 || opts.TrustDomain == "" || opts.AccountID == "" || opts.CertificateRevocations == nil {
+		return client.TargetTrust{}, errors.New("node authorization requires a pinned root, trust domain, current CRL state, and logged-in account")
+	}
+	return client.TargetTrust{
+		RootPEM: opts.RootPEM, TrustDomain: opts.TrustDomain, AccountID: opts.AccountID,
+		CloudAccountID: cloudSystemAccountID, CertificateRevocations: opts.CertificateRevocations, Now: time.Now,
+	}, nil
 }
 
 func loadMoveOptions(dir, tokenFlag, rootCAPath, trustDomain, crlStatePath string, issuerPaths, crlPaths []string, clock func() time.Time) (client.MoveOptions, error) {
@@ -198,17 +210,9 @@ func resolveMoveAccountID(dir, tokenFlag string) string {
 }
 
 func accountIDFromAccessToken(wire string) (string, error) {
-	bodyB64, _, ok := strings.Cut(wire, ".")
-	if !ok {
-		return "", errors.New("token is not in session-token wire format")
-	}
-	bodyBytes, err := base64.RawURLEncoding.DecodeString(bodyB64)
+	body, err := parseSessionTokenBody(wire)
 	if err != nil {
 		return "", err
 	}
-	var body authv1.SessionTokenBody
-	if err := proto.Unmarshal(bodyBytes, &body); err != nil {
-		return "", err
-	}
-	return body.AccountId, nil
+	return body.GetAccountId(), nil
 }

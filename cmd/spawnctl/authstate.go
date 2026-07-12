@@ -408,6 +408,15 @@ func (ts *cpTokenSource) NodeCredentials(ctx context.Context) (clientpkg.NodeCre
 		if _, err := validateCredentialPair(s.CPAccessToken, s.NodeAccessToken, key); err != nil {
 			return ts.invalidateLostKey(ctx, s, err)
 		}
+		if time.Now().Unix() >= s.AccessExpiresAt-int64(refreshWindow.Seconds()) {
+			client := ts.httpClient
+			if client == nil {
+				client = http.DefaultClient
+			}
+			if err := doRefresh(ctx, ts.dir, s, client); err != nil {
+				return err
+			}
+		}
 		signer, err := clientpkg.NewECDSASessionSigner(key)
 		if err != nil {
 			return ts.invalidateLostKey(ctx, s, err)
