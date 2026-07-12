@@ -24,6 +24,7 @@ type ClientOptions struct {
 	ServerName          string
 	ExpectedServiceRole string
 	IsRevoked           func(issuer, serial *big.Int) bool
+	ConnectionRegistry  *mtls.ConnectionRegistry
 }
 
 // Identity is a node's on-disk mTLS material (all PEM).
@@ -107,6 +108,9 @@ func (id Identity) MTLSClient(opts ClientOptions) (*http.Client, error) {
 	}
 	tr := &http2.Transport{
 		TLSClientConfig: tlsConfig,
+	}
+	if opts.ConnectionRegistry != nil {
+		tr.DialTLSContext = mtls.DialTLSContextHTTP2(tlsConfig, opts.ConnectionRegistry)
 	}
 	h2keepalive.ConfigureTransport(tr)
 	return &http.Client{Transport: tr}, nil

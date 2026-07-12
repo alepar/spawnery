@@ -78,6 +78,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -129,18 +130,24 @@ func main() {
 
 	certificateRevocations := pki.CertificateRevocationChecker(failClosedCertificateRevocations)
 	var (
-		certificateState *pki.RevocationState
-		internalTLS      *tls.Config
-		internalVerifier *mtls.PeerVerifier
-		cpHTTPClient     *http.Client
+		certificateState     *pki.RevocationState
+		internalTLS          *tls.Config
+		internalVerifier     *mtls.PeerVerifier
+		cpHTTPClient         *http.Client
+		connections          *mtls.ConnectionRegistry
+		unsubscribe          func()
+		certificateRefresher *mtls.CRLRefresher
 	)
 	if cfg.Internal.Listen != "" {
-		certificateState, err = loadCertificateRevocations(cfg.Internal, time.Now)
+		certificateState, certificateRefresher, err = loadCertificateRevocations(cfg.Internal, time.Now)
 		if err != nil {
 			log.Fatalf("authsvc: %v", err)
 		}
 		defer func() { _ = certificateState.Close() }()
 		certificateRevocations = certificateState.IsRevoked
+		connections = mtls.NewConnectionRegistry()
+		unsubscribe = mtls.SubscribeConnectionRegistry(certificateState, connections)
+		defer unsubscribe()
 		var root *x509.Certificate
 		var identity tls.Certificate
 		internalTLS, internalVerifier, root, identity, err = loadInternalTLSConfig(cfg.Internal, certificateState)
@@ -158,7 +165,7 @@ func main() {
 			}
 		}
 		if cfg.CP.URL != "" {
-			cpHTTPClient, err = newInternalClient(root, identity, cfg.Internal.TrustDomain, cfg.CP.ServerName, pki.RoleCP, certificateState)
+			cpHTTPClient, err = newInternalClient(root, identity, cfg.Internal.TrustDomain, cfg.CP.ServerName, pki.RoleCP, certificateState, connections)
 			if err != nil {
 				log.Fatalf("authsvc: CP mTLS client: %v", err)
 			}
@@ -201,7 +208,7 @@ func main() {
 	}
 	var internalServer *http.Server
 	if cfg.Internal.Listen != "" {
-		internalHandler := mtls.PrincipalMiddleware(internalVerifier, svc.InternalHandler(authsvc.DefaultInternalPolicy()))
+		internalHandler := mtls.PrincipalMiddleware(internalVerifier, mtls.ConnectionRegistryMiddleware(connections, svc.InternalHandler(authsvc.DefaultInternalPolicy())))
 		internalServer, err = newInternalHTTPServer(cfg.Internal.Listen, internalHandler, internalTLS)
 		if err != nil {
 			log.Fatalf("authsvc: %v", err)
@@ -220,8 +227,8 @@ func main() {
 		}
 	}()
 
-	if certificateState != nil {
-		go refreshCertificateCRLs(ctx, certificateState, splitCSV(cfg.Internal.RevocationCRLs), cfg.Internal.RevocationRefreshInterval)
+	if certificateRefresher != nil {
+		go certificateRefresher.Run(ctx)
 	}
 	errors := make(chan error, 2)
 	go func() { errors <- publicServer.ListenAndServe() }()
@@ -378,7 +385,7 @@ func buildService(cfg *AS, certificateRevocations pki.CertificateRevocationCheck
 		authsvc.WithCertificateRevocations(certificateRevocations),
 		authsvc.WithIdP(idp),
 		authsvc.WithEnrollmentTokenIssuance(authsvc.EnrollmentSessionAccount(artifactVerifier, time.Now)),
-		authsvc.WithNodeRevocations(idStore.NodeRevocations()),
+		authsvc.WithNodeRevocationStore(idStore, nodeCRLFileSink(cfg.CA.RevocationCRL)),
 		authsvc.WithGitHubMinting(idStore, ghProvider),
 	}
 	if cpURL := strings.TrimSpace(cfg.CP.URL); cpURL != "" {
@@ -419,6 +426,52 @@ func buildService(cfg *AS, certificateRevocations pki.CertificateRevocationCheck
 		return nil, err
 	}
 	return service, nil
+}
+
+func nodeCRLFileSink(path string) func([]byte) error {
+	return func(data []byte) error {
+		if path == "" || len(data) == 0 {
+			return errors.New("authsvc: node CRL sink is not configured")
+		}
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		temporary, err := os.CreateTemp(dir, ".node-crl-*")
+		if err != nil {
+			return err
+		}
+		temporaryPath := temporary.Name()
+		remove := true
+		defer func() {
+			_ = temporary.Close()
+			if remove {
+				_ = os.Remove(temporaryPath)
+			}
+		}()
+		if err := temporary.Chmod(0o644); err != nil {
+			return err
+		}
+		if _, err := temporary.Write(data); err != nil {
+			return err
+		}
+		if err := temporary.Sync(); err != nil {
+			return err
+		}
+		if err := temporary.Close(); err != nil {
+			return err
+		}
+		if err := os.Rename(temporaryPath, path); err != nil {
+			return err
+		}
+		remove = false
+		directory, err := os.Open(dir)
+		if err != nil {
+			return err
+		}
+		defer directory.Close()
+		return directory.Sync()
+	}
 }
 
 type productionCA struct {

@@ -35,6 +35,7 @@ internal:
   revocation_state: ""
   revocation_issuers: []
   revocation_crls: []
+  revocation_urls: []
   revocation_refresh_interval: 30s
 
 telemetry: "telemetry/events.jsonl"   # JSONL sink path; empty disables

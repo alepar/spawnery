@@ -101,7 +101,8 @@ type DeviceSetEntry struct {
 
 type NodeRevocation struct {
 	bun.BaseModel `bun:"table:node_revocations,alias:nr"`
-	NodeID        string `bun:"node_id,pk"`
+	ID            int64  `bun:"id,pk,autoincrement"`
+	NodeID        string `bun:"node_id,notnull"`
 	IssuerSerial  string `bun:"issuer_serial,notnull"`
 	LeafSerial    string `bun:"leaf_serial,notnull"`
 	Reason        string `bun:"reason,notnull"`

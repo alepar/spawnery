@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -131,6 +132,30 @@ func TestCRLRefresherRestartRejectsRollbackFromSource(t *testing.T) {
 	}
 	if got, ok := reopened.HighestNumber(issuer.Cert.SerialNumber); !ok || got.Cmp(big.NewInt(5)) != 0 {
 		t.Fatalf("restart highest number = %v, %v", got, ok)
+	}
+}
+
+func TestCRLRefresherAppliesBoundedFileSource(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := pki.NewRootCA("root")
+	issuer, _ := root.NewIntermediate(pki.IssuerService, "prod.spawnery.internal")
+	state := openRefresherState(t, issuer.Cert, now)
+	path := filepath.Join(t.TempDir(), "issuer.crl")
+	if err := os.WriteFile(path, refresherCRL(t, issuer, 1, now, big.NewInt(9)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refresher := NewCRLRefresher(nil, []CRLSource{{Issuer: issuer.Cert, Path: path}}, state, time.Minute)
+	if err := refresher.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !state.IsRevoked(issuer.Cert.SerialNumber, big.NewInt(9)) {
+		t.Fatal("file source did not apply CRL")
+	}
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", MaxCRLResponseSize+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := refresher.Refresh(t.Context()); !errors.Is(err, ErrCRLResponseTooLarge) {
+		t.Fatalf("oversized file error = %v", err)
 	}
 }
 

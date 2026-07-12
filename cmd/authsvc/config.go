@@ -33,6 +33,7 @@ type AS struct {
 		RootPEM          string `koanf:"root_pem"`
 		IntermediateCert string `koanf:"intermediate_cert"`
 		IntermediateKey  string `koanf:"intermediate_key"`
+		RevocationCRL    string `koanf:"revocation_crl"`
 	} `koanf:"ca"`
 
 	Signing ASAuthSigning `koanf:"signing"`
@@ -79,6 +80,7 @@ type ASInternalTLS struct {
 	RevocationState           string        `koanf:"revocation_state"`
 	RevocationIssuers         string        `koanf:"revocation_issuers"`
 	RevocationCRLs            string        `koanf:"revocation_crls"`
+	RevocationURLs            string        `koanf:"revocation_urls"`
 	RevocationRefreshInterval time.Duration `koanf:"revocation_refresh_interval"`
 }
 
@@ -156,6 +158,7 @@ func (c AS) Validate() error {
 			value string
 		}{
 			{"internal.listen", c.Internal.Listen},
+			{"ca.revocation_crl", c.CA.RevocationCRL},
 			{"internal.trust_domain", c.Internal.TrustDomain},
 			{"internal.root_ca", c.Internal.RootCA},
 			{"internal.cert", c.Internal.Cert},
@@ -164,7 +167,7 @@ func (c AS) Validate() error {
 			{"internal.server_name", c.Internal.ServerName},
 			{"internal.revocation_state", c.Internal.RevocationState},
 			{"internal.revocation_issuers", c.Internal.RevocationIssuers},
-			{"internal.revocation_crls", c.Internal.RevocationCRLs},
+			{"internal.revocation_crls or internal.revocation_urls", c.Internal.RevocationCRLs + c.Internal.RevocationURLs},
 			{"cp.url", c.CP.URL},
 			{"cp.server_name", c.CP.ServerName},
 		}
@@ -214,12 +217,14 @@ var asEnvAliases = map[string]string{
 	"AS_INTERNAL_REVOCATION_STATE":            "internal.revocation_state",
 	"AS_INTERNAL_REVOCATION_ISSUERS":          "internal.revocation_issuers",
 	"AS_INTERNAL_REVOCATION_CRLS":             "internal.revocation_crls",
+	"AS_INTERNAL_REVOCATION_URLS":             "internal.revocation_urls",
 	"AS_INTERNAL_REVOCATION_REFRESH_INTERVAL": "internal.revocation_refresh_interval",
 	"AS_ALLOWED_ORIGINS":                      "allowed_origins",
 	"AS_ROOT_CA_PEM":                          "ca.root_pem",
 	"AS_TRUST_DOMAIN":                         "ca.trust_domain",
 	"AS_INTERMEDIATE_CERT_PEM":                "ca.intermediate_cert",
 	"AS_INTERMEDIATE_KEY_PEM":                 "ca.intermediate_key",
+	"AS_SELF_HOSTED_REVOCATION_CRL":           "ca.revocation_crl",
 	"AS_AUTH_SIGNING_ENVIRONMENT":             "signing.environment",
 	"AS_AUTH_SIGNING_ROOT_PEM":                "signing.root_pem",
 	"AS_AUTH_SIGNING_CURRENT_KEY_PEM":         "signing.current_key_pem",

@@ -31,6 +31,7 @@ func TestASValidateSigning(t *testing.T) {
 		cfg.Signing.CurrentKeyPEM = "current-key.pem"
 		cfg.Signing.CurrentChainPEM = "current-chain.pem"
 		cfg.CA.TrustDomain = "prod.spawnery.internal"
+		cfg.CA.RevocationCRL = "self-hosted.crl"
 		cfg.Internal = ASInternalTLS{
 			Listen: "127.0.0.1:8091", TrustDomain: "prod.spawnery.internal", RootCA: "root.pem",
 			Cert: "authsvc.pem", Chain: "service.pem", Key: "authsvc-key.pem", ServerName: "authsvc.internal",

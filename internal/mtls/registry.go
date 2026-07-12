@@ -2,8 +2,15 @@ package mtls
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"math/big"
+	"net"
+	"net/http"
 	"sync"
+
+	"spawnery/internal/pki"
 )
 
 type PeerCertificate struct {
@@ -86,4 +93,87 @@ func (r *ConnectionRegistry) Revoke(issuerSerial *big.Int, serials []*big.Int) {
 func cancelSafely(cancel context.CancelFunc) {
 	defer func() { _ = recover() }()
 	cancel()
+}
+
+func ConnectionRegistryMiddleware(registry *ConnectionRegistry, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peer, ok := VerifiedPeerFromContext(r.Context())
+		if registry == nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !ok {
+			if _, authenticated := PrincipalFromContext(r.Context()); authenticated {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+		ctx, cancel := context.WithCancel(r.Context())
+		release := registry.Register(peer, cancel)
+		defer release()
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func SubscribeConnectionRegistry(state *pki.RevocationState, registry *ConnectionRegistry) func() {
+	if state == nil || registry == nil {
+		return func() {}
+	}
+	return state.SubscribeRevocations(func(update pki.RevocationUpdate) {
+		registry.Revoke(update.IssuerSerial, update.NewlyRevoked)
+	})
+}
+
+func DialTLSContext(config *tls.Config, registry *ConnectionRegistry) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		if config == nil || registry == nil {
+			return nil, errors.New("mtls: TLS connection registry is required")
+		}
+		connection, err := (&tls.Dialer{Config: config}).DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		tlsConnection, ok := connection.(*tls.Conn)
+		if !ok {
+			_ = connection.Close()
+			return nil, errors.New("mtls: dial did not return a TLS connection")
+		}
+		state := tlsConnection.ConnectionState()
+		leaf, issuer, err := verifiedLeafAndIssuer(state)
+		if err != nil {
+			_ = connection.Close()
+			return nil, err
+		}
+		release := registry.Register(PeerCertificate{IssuerSerial: issuer.SerialNumber, LeafSerial: leaf.SerialNumber}, func() { _ = tlsConnection.Close() })
+		return &registeredTLSConnection{Conn: tlsConnection, release: release}, nil
+	}
+}
+
+func DialTLSContextHTTP2(config *tls.Config, registry *ConnectionRegistry) func(context.Context, string, string, *tls.Config) (net.Conn, error) {
+	dial := DialTLSContext(config, registry)
+	return func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
+		return dial(ctx, network, address)
+	}
+}
+
+func verifiedLeafAndIssuer(state tls.ConnectionState) (*x509.Certificate, *x509.Certificate, error) {
+	if !state.HandshakeComplete || len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) < 3 {
+		return nil, nil, errors.New("mtls: peer has no verified leaf and intermediate")
+	}
+	chain := state.VerifiedChains[0]
+	return chain[0], chain[1], nil
+}
+
+type registeredTLSConnection struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *registeredTLSConnection) Close() error {
+	c.once.Do(c.release)
+	return c.Conn.Close()
 }

@@ -132,3 +132,18 @@ func TestNodeRevocationsPersistIssuerCRLInsideTransaction(t *testing.T) {
 		t.Fatalf("missing CRL error = %v", err)
 	}
 }
+
+func TestNodeRevocationsRetainRotatedLeavesForSameNode(t *testing.T) {
+	st := NewTestStore(t)
+	repo := st.NodeRevocations()
+	for _, leaf := range []string{"bb", "cc"} {
+		inserted, err := repo.Revoke(ctxT(), NodeRevocation{NodeID: "node-a", IssuerSerial: "aa", LeafSerial: leaf, RevokedAt: 100})
+		if err != nil || !inserted {
+			t.Fatalf("revoke %s: inserted=%v err=%v", leaf, inserted, err)
+		}
+	}
+	rows, err := repo.ListByIssuer(ctxT(), "aa")
+	if err != nil || len(rows) != 2 || rows[0].LeafSerial != "bb" || rows[1].LeafSerial != "cc" {
+		t.Fatalf("rotated leaves = %+v, %v", rows, err)
+	}
+}

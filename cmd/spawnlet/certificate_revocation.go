@@ -5,18 +5,21 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 )
 
 type nodeCertificateRevocations struct {
-	state *pki.RevocationState
-	crls  []string
+	state       *pki.RevocationState
+	connections *mtls.ConnectionRegistry
+	unsubscribe func()
+	refresher   *mtls.CRLRefresher
 }
 
 func loadNodeCertificateRevocations(cfg *Spawnlet, now func() time.Time) (*nodeCertificateRevocations, error) {
@@ -25,8 +28,9 @@ func loadNodeCertificateRevocations(cfg *Spawnlet, now func() time.Time) (*nodeC
 	}
 	issuerPaths := splitPathList(cfg.Node.CertificateRevocationIssuers)
 	crlPaths := splitPathList(cfg.Node.CertificateRevocationCRLs)
-	if cfg.Node.CertificateRevocationState == "" || len(issuerPaths) == 0 || len(issuerPaths) != len(crlPaths) {
-		return nil, errors.New("node certificate revocation state, issuers, and one CRL per issuer are required")
+	crlURLs := splitPathList(cfg.Node.CertificateRevocationURLs)
+	if cfg.Node.CertificateRevocationState == "" || len(issuerPaths) == 0 {
+		return nil, errors.New("node certificate revocation state and issuers are required")
 	}
 	rootPath := cfg.Node.RootCA
 	if rootPath == "" {
@@ -62,7 +66,14 @@ func loadNodeCertificateRevocations(cfg *Spawnlet, now func() time.Time) (*nodeC
 	if err != nil {
 		return nil, fmt.Errorf("open certificate revocation state: %w", err)
 	}
-	runtime := &nodeCertificateRevocations{state: state, crls: crlPaths}
+	connections := mtls.NewConnectionRegistry()
+	sources, err := mtls.BuildCRLSources(issuers, crlPaths, crlURLs)
+	if err != nil {
+		_ = state.Close()
+		return nil, err
+	}
+	refresher := mtls.NewCRLRefresher(http.DefaultClient, sources, state, cfg.Node.CertificateRevocationRefresh)
+	runtime := &nodeCertificateRevocations{state: state, connections: connections, unsubscribe: mtls.SubscribeConnectionRegistry(state, connections), refresher: refresher}
 	if err := runtime.refresh(); err != nil {
 		_ = state.Close()
 		return nil, err
@@ -77,34 +88,11 @@ func loadNodeCertificateRevocations(cfg *Spawnlet, now func() time.Time) (*nodeC
 }
 
 func (r *nodeCertificateRevocations) refresh() error {
-	for _, path := range r.crls {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read certificate CRL %s: %w", path, err)
-		}
-		if err := r.state.ApplyPEM(raw); err != nil {
-			return fmt.Errorf("apply certificate CRL %s: %w", path, err)
-		}
-	}
-	return nil
+	return r.refresher.Refresh(context.Background())
 }
 
 func (r *nodeCertificateRevocations) watch(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := r.refresh(); err != nil {
-				log.Printf("node certificate revocation refresh failed: %v", err)
-			}
-		}
-	}
+	r.refresher.RunEvery(ctx, interval)
 }
 
 func splitPathList(value string) []string {

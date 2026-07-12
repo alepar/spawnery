@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"math/big"
 	"net/http"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 )
 
@@ -71,7 +74,7 @@ func TestLoadCertificateRevocationsRequiresCurrentConfiguredCRL(t *testing.T) {
 	cfg.Internal.RevocationState = filepath.Join(dir, "state", "certificates.json")
 	cfg.Internal.RevocationIssuers = issuerPath
 	cfg.Internal.RevocationCRLs = crlPath
-	state, err := loadCertificateRevocations(cfg.Internal, func() time.Time { return now })
+	state, refresher, err := loadCertificateRevocations(cfg.Internal, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("load current CRL state: %v", err)
 	}
@@ -79,10 +82,34 @@ func TestLoadCertificateRevocationsRequiresCurrentConfiguredCRL(t *testing.T) {
 	if state.IsRevoked(issuer.Cert.SerialNumber, big.NewInt(99)) {
 		t.Fatal("current non-revoked serial failed closed")
 	}
+	connections := mtls.NewConnectionRegistry()
+	unsubscribe := mtls.SubscribeConnectionRegistry(state, connections)
+	t.Cleanup(unsubscribe)
+	live, cancelLive := context.WithCancel(t.Context())
+	release := connections.Register(mtls.PeerCertificate{IssuerSerial: issuer.Cert.SerialNumber, LeafSerial: big.NewInt(99)}, cancelLive)
+	t.Cleanup(release)
+	updated, err := issuer.CreateCRL(big.NewInt(2), []x509.RevocationListEntry{{SerialNumber: big.NewInt(99), RevocationTime: now}}, now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(crlPath, pki.MarshalCRLPEM(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := refresher.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !state.IsRevoked(issuer.Cert.SerialNumber, big.NewInt(99)) {
+		t.Fatal("authsvc fresh verification did not reject revoked serial")
+	}
+	select {
+	case <-live.Done():
+	case <-time.After(time.Second):
+		t.Fatal("authsvc accepted CRL did not cancel matching live connection")
+	}
 
 	cfg.Internal.RevocationCRLs = filepath.Join(dir, "missing.crl")
 	cfg.Internal.RevocationState = filepath.Join(dir, "missing-state", "certificates.json")
-	if _, err := loadCertificateRevocations(cfg.Internal, func() time.Time { return now }); err == nil {
+	if _, _, err := loadCertificateRevocations(cfg.Internal, func() time.Time { return now }); err == nil {
 		t.Fatal("missing configured CRL did not fail startup")
 	}
 }

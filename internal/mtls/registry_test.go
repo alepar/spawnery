@@ -3,9 +3,13 @@ package mtls
 import (
 	"context"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"spawnery/internal/pki"
 )
 
 func TestConnectionRegistryRevokesAllMatchingConnectionsOnlyOnce(t *testing.T) {
@@ -31,6 +35,47 @@ func TestConnectionRegistryRevokesAllMatchingConnectionsOnlyOnce(t *testing.T) {
 	}
 	if released.Load() != 0 || siblingCalls.Load() != 0 || otherIssuerCalls.Load() != 0 {
 		t.Fatalf("unrelated callbacks fired: released=%d sibling=%d other=%d", released.Load(), siblingCalls.Load(), otherIssuerCalls.Load())
+	}
+}
+
+func TestConnectionRegistryMiddlewareCancelsRevokedLiveStream(t *testing.T) {
+	registry := NewConnectionRegistry()
+	issuer := big.NewInt(10)
+	leaf := big.NewInt(20)
+	started := make(chan struct{})
+	done := make(chan struct{})
+	handler := ConnectionRegistryMiddleware(registry, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(done)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "https://internal/stream", nil)
+	req = req.WithContext(context.WithValue(req.Context(), verifiedPeerContextKey{}, PeerCertificate{IssuerSerial: issuer, LeafSerial: leaf}))
+	go handler.ServeHTTP(httptest.NewRecorder(), req)
+	<-started
+	registry.Revoke(issuer, []*big.Int{leaf})
+	select {
+	case <-done:
+	case <-t.Context().Done():
+		t.Fatal("revoked live request was not cancelled")
+	}
+}
+
+func TestConnectionRegistryMiddlewareAllowsAnonymousButRejectsUnboundPrincipal(t *testing.T) {
+	registry := NewConnectionRegistry()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := ConnectionRegistryMiddleware(registry, next)
+	anonymous := httptest.NewRequest(http.MethodPost, "https://internal/enroll", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, anonymous)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("anonymous status = %d", recorder.Code)
+	}
+	authenticated := anonymous.WithContext(context.WithValue(anonymous.Context(), principalContextKey{}, pki.Principal{Kind: pki.KindNode, Role: pki.RoleSelfHosted}))
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, authenticated)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("unbound authenticated status = %d", recorder.Code)
 	}
 }
 

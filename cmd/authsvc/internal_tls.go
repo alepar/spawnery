@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 	"net/http"
 	"os"
@@ -20,41 +19,42 @@ import (
 
 func failClosedCertificateRevocations(*big.Int, *big.Int) bool { return true }
 
-func loadCertificateRevocations(cfg ASInternalTLS, now func() time.Time) (*pki.RevocationState, error) {
+func loadCertificateRevocations(cfg ASInternalTLS, now func() time.Time) (*pki.RevocationState, *mtls.CRLRefresher, error) {
 	issuerPaths := splitCSV(cfg.RevocationIssuers)
 	crlPaths := splitCSV(cfg.RevocationCRLs)
-	if cfg.RevocationState == "" || len(issuerPaths) == 0 || len(issuerPaths) != len(crlPaths) {
-		return nil, errors.New("authsvc: certificate revocation state, issuers, and one CRL per issuer are required")
+	crlURLs := splitCSV(cfg.RevocationURLs)
+	if cfg.RevocationState == "" || len(issuerPaths) == 0 {
+		return nil, nil, errors.New("authsvc: certificate revocation state and issuers are required")
 	}
 	rootRaw, err := os.ReadFile(cfg.RootCA)
 	if err != nil {
-		return nil, fmt.Errorf("authsvc: read revocation root %s: %w", cfg.RootCA, err)
+		return nil, nil, fmt.Errorf("authsvc: read revocation root %s: %w", cfg.RootCA, err)
 	}
 	root, err := pki.ParseCertPEM(rootRaw)
 	if err != nil {
-		return nil, fmt.Errorf("authsvc: parse revocation root %s: %w", cfg.RootCA, err)
+		return nil, nil, fmt.Errorf("authsvc: parse revocation root %s: %w", cfg.RootCA, err)
 	}
 	issuers := make([]*x509.Certificate, 0, len(issuerPaths))
 	for _, path := range issuerPaths {
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("authsvc: read revocation issuer %s: %w", path, err)
+			return nil, nil, fmt.Errorf("authsvc: read revocation issuer %s: %w", path, err)
 		}
 		issuer, err := pki.ParseCertPEM(raw)
 		if err != nil {
-			return nil, fmt.Errorf("authsvc: parse revocation issuer %s: %w", path, err)
+			return nil, nil, fmt.Errorf("authsvc: parse revocation issuer %s: %w", path, err)
 		}
 		if err := issuer.CheckSignatureFrom(root); err != nil {
-			return nil, fmt.Errorf("authsvc: revocation issuer %s is outside the configured root: %w", path, err)
+			return nil, nil, fmt.Errorf("authsvc: revocation issuer %s is outside the configured root: %w", path, err)
 		}
 		if len(issuer.URIs) != 1 || issuer.URIs[0].Host != cfg.TrustDomain {
-			return nil, fmt.Errorf("authsvc: revocation issuer %s has wrong trust domain", path)
+			return nil, nil, fmt.Errorf("authsvc: revocation issuer %s has wrong trust domain", path)
 		}
 		issuers = append(issuers, issuer)
 	}
 	state, err := pki.OpenRevocationState(cfg.RevocationState, issuers, now)
 	if err != nil {
-		return nil, fmt.Errorf("authsvc: open certificate revocation state: %w", err)
+		return nil, nil, fmt.Errorf("authsvc: open certificate revocation state: %w", err)
 	}
 	closeOnError := true
 	defer func() {
@@ -62,49 +62,21 @@ func loadCertificateRevocations(cfg ASInternalTLS, now func() time.Time) (*pki.R
 			_ = state.Close()
 		}
 	}()
-	if err := applyCertificateCRLs(state, crlPaths); err != nil {
-		return nil, err
+	sources, err := mtls.BuildCRLSources(issuers, crlPaths, crlURLs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("authsvc: %w", err)
+	}
+	refresher := mtls.NewCRLRefresher(http.DefaultClient, sources, state, cfg.RevocationRefreshInterval)
+	if err := refresher.Refresh(context.Background()); err != nil {
+		return nil, nil, fmt.Errorf("authsvc: refresh certificate revocations: %w", err)
 	}
 	for _, issuer := range issuers {
 		if _, ok := state.HighestNumber(issuer.SerialNumber); !ok {
-			return nil, fmt.Errorf("authsvc: no current CRL for issuer %s", issuer.Subject.String())
+			return nil, nil, fmt.Errorf("authsvc: no current CRL for issuer %s", issuer.Subject.String())
 		}
 	}
 	closeOnError = false
-	return state, nil
-}
-
-func applyCertificateCRLs(state *pki.RevocationState, paths []string) error {
-	for _, path := range paths {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("authsvc: read certificate CRL %s: %w", path, err)
-		}
-		if err := state.ApplyPEM(raw); err != nil {
-			return fmt.Errorf("authsvc: apply certificate CRL %s: %w", path, err)
-		}
-	}
-	return nil
-}
-
-func refreshCertificateCRLs(ctx context.Context, state *pki.RevocationState, paths []string, interval time.Duration) {
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := applyCertificateCRLs(state, paths); err != nil {
-				// IsRevoked remains fail-closed when the last accepted CRL becomes stale.
-				log.Printf("authsvc: certificate revocation refresh failed: %v", err)
-				continue
-			}
-		}
-	}
+	return state, refresher, nil
 }
 
 func loadInternalTLSConfig(cfg ASInternalTLS, state *pki.RevocationState) (*tls.Config, *mtls.PeerVerifier, *x509.Certificate, tls.Certificate, error) {
@@ -189,7 +161,7 @@ func validateInternalServerName(identity tls.Certificate, serverName string) err
 	return nil
 }
 
-func newInternalClient(root *x509.Certificate, identity tls.Certificate, trustDomain, serverName, expectedRole string, state *pki.RevocationState) (*http.Client, error) {
+func newInternalClient(root *x509.Certificate, identity tls.Certificate, trustDomain, serverName, expectedRole string, state *pki.RevocationState, connections *mtls.ConnectionRegistry) (*http.Client, error) {
 	tlsConfig, err := mtls.ClientConfig(mtls.ClientOptions{
 		Root: root, TrustDomain: trustDomain, Identity: identity, ServerName: serverName,
 		ExpectedServiceRole: expectedRole, CurrentTime: time.Now, IsRevoked: state.IsRevoked,
@@ -197,7 +169,11 @@ func newInternalClient(root *x509.Certificate, identity tls.Certificate, trustDo
 	if err != nil {
 		return nil, err
 	}
-	return &http.Client{Transport: &http2.Transport{TLSClientConfig: tlsConfig}}, nil
+	transport := &http2.Transport{TLSClientConfig: tlsConfig}
+	if connections != nil {
+		transport.DialTLSContext = mtls.DialTLSContextHTTP2(tlsConfig, connections)
+	}
+	return &http.Client{Transport: transport}, nil
 }
 
 func newInternalHTTPServer(addr string, handler http.Handler, tlsConfig *tls.Config) (*http.Server, error) {

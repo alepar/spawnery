@@ -133,6 +133,7 @@ func main() {
 		if certificateRevocations != nil {
 			go certificateRevocations.watch(ctx, cfg.Node.CertificateRevocationRefresh)
 			defer func() {
+				certificateRevocations.unsubscribe()
 				if err := certificateRevocations.state.Close(); err != nil {
 					log.Printf("node: certificate revocation close: %v", err)
 				}
@@ -533,6 +534,7 @@ func nodeCPClient(cfg *Spawnlet, insecureURL, nodeID string, revocations *nodeCe
 	client, err := id.MTLSClient(nodeid.ClientOptions{
 		TrustDomain: cfg.Node.TrustDomain, ServerName: cfg.CP.ServerName,
 		ExpectedServiceRole: pki.RoleCP, IsRevoked: revocations.state.IsRevoked,
+		ConnectionRegistry: revocations.connections,
 	})
 	if err != nil {
 		return nil, "", err
@@ -609,6 +611,7 @@ func nodeGitHubMint(cfg *Spawnlet, revocations *nodeCertificateRevocations) node
 	client, err := id.MTLSClient(nodeid.ClientOptions{
 		TrustDomain: cfg.Node.TrustDomain, ServerName: cfg.ASServerName,
 		ExpectedServiceRole: pki.RoleAuthService, IsRevoked: revocations.state.IsRevoked,
+		ConnectionRegistry: revocations.connections,
 	})
 	if err != nil {
 		log.Printf("github refresh disabled: mTLS client: %v", err)

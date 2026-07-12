@@ -15,7 +15,7 @@ func (r *nodeRevocationRepo) Revoke(ctx context.Context, row NodeRevocation) (bo
 	if row.NodeID == "" || row.IssuerSerial == "" || row.LeafSerial == "" || row.RevokedAt <= 0 {
 		return false, errors.New("authsvc/store: invalid node certificate revocation")
 	}
-	result, err := r.db.NewInsert().Model(&row).On("CONFLICT (node_id) DO NOTHING").Exec(ctx)
+	result, err := r.db.NewInsert().Model(&row).On("CONFLICT DO NOTHING").Exec(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -26,23 +26,35 @@ func (r *nodeRevocationRepo) Revoke(ctx context.Context, row NodeRevocation) (bo
 	if inserted == 1 {
 		return true, nil
 	}
-	existing, err := r.Get(ctx, row.NodeID)
+	existing, err := r.getCertificate(ctx, row.IssuerSerial, row.LeafSerial)
 	if err != nil {
 		return false, err
 	}
-	if existing.IssuerSerial != row.IssuerSerial || existing.LeafSerial != row.LeafSerial {
-		return false, fmt.Errorf("authsvc/store: node %s is already revoked with another certificate", row.NodeID)
+	if existing.NodeID != row.NodeID {
+		return false, fmt.Errorf("authsvc/store: certificate is already revoked for node %s", existing.NodeID)
 	}
 	_, err = r.db.NewUpdate().Model((*NodeRevocation)(nil)).
 		Set("reason = ?", row.Reason).
-		Where("node_id = ?", row.NodeID).
+		Where("issuer_serial = ? AND leaf_serial = ?", row.IssuerSerial, row.LeafSerial).
 		Exec(ctx)
 	return false, err
 }
 
 func (r *nodeRevocationRepo) Get(ctx context.Context, nodeID string) (NodeRevocation, error) {
 	var row NodeRevocation
-	err := r.db.NewSelect().Model(&row).Where("node_id = ?", nodeID).Limit(1).Scan(ctx)
+	err := r.db.NewSelect().Model(&row).Where("node_id = ?", nodeID).OrderExpr("revoked_at ASC, id ASC").Limit(1).Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return NodeRevocation{}, ErrNotFound
+	}
+	return row, err
+}
+
+func (r *nodeRevocationRepo) getCertificate(ctx context.Context, issuerSerial, leafSerial string) (NodeRevocation, error) {
+	var row NodeRevocation
+	err := r.db.NewSelect().Model(&row).
+		Where("issuer_serial = ? AND leaf_serial = ?", issuerSerial, leafSerial).
+		Limit(1).
+		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return NodeRevocation{}, ErrNotFound
 	}
