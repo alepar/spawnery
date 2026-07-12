@@ -482,17 +482,28 @@ func parseCertificatePEM(raw []byte) (*x509.Certificate, error) {
 }
 
 func parseCertificateChainPEM(raw []byte) ([]*x509.Certificate, error) {
+	const (
+		certificatePEMHeader = "-----BEGIN CERTIFICATE-----\n"
+		certificatePEMFooter = "-----END CERTIFICATE-----\n"
+	)
 	var certificates []*x509.Certificate
 	for len(raw) > 0 {
-		if !bytes.HasPrefix(raw, []byte("-----BEGIN CERTIFICATE-----")) {
+		if !bytes.HasPrefix(raw, []byte(certificatePEMHeader)) {
 			if len(certificates) > 0 {
 				return nil, fmt.Errorf("invalid trailing PEM data")
 			}
 			return nil, fmt.Errorf("invalid leading PEM data")
 		}
-		block, rest := pem.Decode(raw)
-		if block == nil {
-			return nil, fmt.Errorf("invalid trailing PEM data")
+		body := raw[len(certificatePEMHeader):]
+		footerOffset := bytes.Index(body, []byte(certificatePEMFooter))
+		if footerOffset < 0 || (footerOffset > 0 && body[footerOffset-1] != '\n') {
+			return nil, fmt.Errorf("invalid certificate PEM block")
+		}
+		blockEnd := len(certificatePEMHeader) + footerOffset + len(certificatePEMFooter)
+		blockRaw := raw[:blockEnd]
+		block, rest := pem.Decode(blockRaw)
+		if block == nil || len(rest) != 0 || !bytes.Equal(blockRaw, pem.EncodeToMemory(block)) {
+			return nil, fmt.Errorf("invalid certificate PEM block")
 		}
 		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
 			return nil, fmt.Errorf("unexpected PEM block %q", block.Type)
@@ -502,7 +513,7 @@ func parseCertificateChainPEM(raw []byte) ([]*x509.Certificate, error) {
 			return nil, fmt.Errorf("parse certificate: %w", err)
 		}
 		certificates = append(certificates, cert)
-		raw = rest
+		raw = raw[blockEnd:]
 	}
 	if len(certificates) == 0 {
 		return nil, fmt.Errorf("no certificates")

@@ -275,6 +275,24 @@ func TestLoadSigningCredentials(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid first certificate block before root", func(t *testing.T) {
+		path := writePrefixedTestFile(t, current.rootPath, []byte("-----BEGIN CERTIFICATE-----\nnot-base64\n"))
+		cfg := signingConfigFor(current)
+		cfg.RootPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("root after invalid first CERTIFICATE block was accepted")
+		}
+	})
+
+	t.Run("invalid first certificate block before signer chain", func(t *testing.T) {
+		path := writePrefixedTestFile(t, current.chainPath, []byte("-----BEGIN CERTIFICATE-----\nnot-base64\n"))
+		cfg := signingConfigFor(current)
+		cfg.CurrentChainPEM = path
+		if _, err := loadSigningCredentials(cfg, now); err == nil {
+			t.Fatal("signer chain after invalid first CERTIFICATE block was accepted")
+		}
+	})
+
 	t.Run("wrong intermediate purpose", func(t *testing.T) {
 		wrong := writeWrongPurposeFixture(t, current, now)
 		cfg := signingConfigFor(current)
