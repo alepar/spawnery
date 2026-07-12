@@ -48,6 +48,9 @@ func TestSessionAuthExpiryClosesExactlyOnce(t *testing.T) {
 	var closed atomic.Int32
 	r.register(key, sessionAuthRecord{accountID: "alice", tokenID: "tok", expiresAt: time.Now().Add(20 * time.Millisecond), sessionKeyHash: []byte("key"), generation: 1, nodeID: "node"}, func(string) { closed.Add(1) })
 	time.Sleep(60 * time.Millisecond)
+	if r.replace(key, sessionAuthRecord{accountID: "alice", tokenID: "new", expiresAt: time.Now().Add(time.Second), sessionKeyHash: []byte("key"), generation: 1, nodeID: "node"}, "alice") {
+		t.Fatal("late reauthentication resurrected expired attachment")
+	}
 	r.close(key, "again")
 	if got := closed.Load(); got != 1 {
 		t.Fatalf("close count = %d", got)
