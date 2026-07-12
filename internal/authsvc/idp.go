@@ -359,29 +359,6 @@ func (i *IdP) mintAccessPair(u store.User, familyID string, spkiDER []byte, now 
 	return pair, nil
 }
 
-// mintAccess remains for tests and callers that have not yet been converted in this change.
-func (i *IdP) mintAccess(u store.User, spkiDER []byte, now time.Time) (wire, tokenID string, err error) {
-	tokenID = uuid.NewString()
-	wire, err = i.signers.withCurrent(func(signer *token.SigningCredential) (string, error) {
-		body := &authv1.SessionTokenBody{
-			AccountId:      u.AccountID,
-			Handle:         u.Handle,
-			TokenId:        tokenID,
-			Audience:       "cp",
-			IssuedAt:       now.Unix(),
-			ExpiresAt:      now.Add(accessTokenTTL).Unix(),
-			SessionKeyHash: token.SessionKeyHash(spkiDER),
-			KeyId:          hex.EncodeToString(signer.KeyID[:]),
-		}
-		payload, err := proto.Marshal(body)
-		if err != nil {
-			return "", err
-		}
-		return signer.Sign(token.ArtifactTypeSession, payload)
-	})
-	return wire, tokenID, err
-}
-
 // appendRevocation records a family revocation on the signed feed (logout, theft detection,
 // cap eviction, account disable) [AM10]. Call inside the same tx as the revoke.
 func appendRevocation(ctx context.Context, tx store.Store, accountID, familyID string, tokenIDs []string, now time.Time) error {

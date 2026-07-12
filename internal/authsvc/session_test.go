@@ -83,7 +83,7 @@ func TestMintAccessTokenCertifiedEnvelope(t *testing.T) {
 	pki := newTestArtifactPKI(t, now, "prod")
 	signer := pki.signer(t, now, "current")
 	idp, _, _ := newTestIdP(t, fake, now, func(cfg *IdPConfig) { cfg.Signer = signer })
-	wire, _, err := idp.mintAccess(store.User{AccountID: "acct-1", Handle: "alice"}, []byte("session-spki"), now)
+	pair, err := idp.mintAccessPair(store.User{AccountID: "acct-1", Handle: "alice"}, "family", []byte("session-spki"), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestMintAccessTokenCertifiedEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := verifier.Verify(wire, token.ArtifactTypeSession, now)
+	payload, err := verifier.Verify(pair.CPWire, token.ArtifactTypeSession, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestSignerRotationNeedsNoVerifierBundle(t *testing.T) {
 		cfg.Signer = oldSigner
 		cfg.NextSigner = newSigner
 	})
-	oldWire, _, err := idp.mintAccess(store.User{AccountID: "acct"}, []byte("spki"), now)
+	oldPair, err := idp.mintAccessPair(store.User{AccountID: "acct"}, "family-old", []byte("spki"), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestSignerRotationNeedsNoVerifierBundle(t *testing.T) {
 	if err := idp.ActivateNextSigner(); err == nil {
 		t.Fatal("second next-signer activation succeeded")
 	}
-	newWire, _, err := idp.mintAccess(store.User{AccountID: "acct"}, []byte("spki"), now)
+	newPair, err := idp.mintAccessPair(store.User{AccountID: "acct"}, "family-new", []byte("spki"), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestSignerRotationNeedsNoVerifierBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, wire := range []string{oldWire, newWire} {
+	for _, wire := range []string{oldPair.CPWire, oldPair.NodeWire, newPair.CPWire, newPair.NodeWire} {
 		if _, err := verifier.Verify(wire, token.ArtifactTypeSession, now); err != nil {
 			t.Fatalf("artifact failed after rotation: %v", err)
 		}
@@ -202,7 +202,7 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 
 	const workers = 8
 	const iterations = 25
-	sessions := make(chan string, workers*iterations+1)
+	sessions := make(chan string, workers*iterations*2+2)
 	revocations := make(chan string, workers*iterations+1)
 	errs := make(chan error, workers*iterations*2+3)
 	start := make(chan struct{})
@@ -214,12 +214,13 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 			defer wg.Done()
 			<-start
 			for iteration := 0; iteration < iterations; iteration++ {
-				wire, _, err := idp.mintAccess(store.User{AccountID: "acct"}, []byte("spki"), now)
+				pair, err := idp.mintAccessPair(store.User{AccountID: "acct"}, "family", []byte("spki"), now)
 				if err != nil {
 					errs <- err
 					continue
 				}
-				sessions <- wire
+				sessions <- pair.CPWire
+				sessions <- pair.NodeWire
 				select {
 				case issued <- struct{}{}:
 				default:
@@ -238,11 +239,12 @@ func TestConcurrentSignerActivationAndIssuance(t *testing.T) {
 	if err := idp.ActivateNextSigner(); err != nil {
 		errs <- err
 	}
-	postRotationSession, _, err := idp.mintAccess(store.User{AccountID: "acct"}, []byte("spki"), now)
+	postRotationPair, err := idp.mintAccessPair(store.User{AccountID: "acct"}, "family-post", []byte("spki"), now)
 	if err != nil {
 		errs <- err
 	} else {
-		sessions <- postRotationSession
+		sessions <- postRotationPair.CPWire
+		sessions <- postRotationPair.NodeWire
 	}
 	postRotationRevocation, err := idp.signRevocationEntry(store.RevocationEvent{Seq: workers*iterations + 1, AccountID: "acct"})
 	if err != nil {
