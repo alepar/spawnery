@@ -348,22 +348,49 @@ func replaceSANExtension(extensions []pkix.Extension, replacement pkix.Extension
 func TestVerifyPrincipalRejectsMissingOrUnknownIssuerRole(t *testing.T) {
 	now := time.Now()
 	root, _ := NewRootCA("root")
-	unknown, _ := asn1.Marshal("unknown-issuer")
 	for _, tt := range []struct {
-		name       string
-		extensions []pkix.Extension
+		name     string
+		policies []x509.OID
 	}{
 		{name: "missing"},
-		{name: "unknown", extensions: []pkix.Extension{{Id: issuerRoleOID, Value: unknown}}},
+		{name: "unknown", policies: []x509.OID{mustParseOID(t, "1.2.3")}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			issuer := testIntermediate(t, root, tt.extensions)
+			issuer := testIntermediate(t, root, tt.policies)
 			leaf, err := issuer.IssueNode("n", "a", RoleSelfHosted, "prod.spawnery.internal", now.Add(time.Hour))
 			if err != nil {
 				t.Fatal(err)
 			}
 			if _, err := VerifyPrincipal(leaf.Cert, leaf.Chain, verifyOptions(root.Cert, now)); err == nil {
 				t.Fatal("invalid issuer role accepted")
+			}
+		})
+	}
+}
+
+func TestVerifyPrincipalRejectsInvalidIntermediateSPIFFEID(t *testing.T) {
+	now := time.Now()
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerSelfHostedNode, "prod.spawnery.internal")
+	leaf, _ := issuer.IssueNode("n", "a", RoleSelfHosted, "prod.spawnery.internal", now.Add(time.Hour))
+	wrongDomain, _ := url.Parse("spiffe://staging.spawnery.internal")
+	path, _ := url.Parse("spiffe://prod.spawnery.internal/issuer")
+	valid, _ := url.Parse("spiffe://prod.spawnery.internal")
+	tests := []struct {
+		name string
+		uris []*url.URL
+	}{
+		{name: "missing"},
+		{name: "multiple", uris: []*url.URL{valid, valid}},
+		{name: "path", uris: []*url.URL{path}},
+		{name: "wrong domain", uris: []*url.URL{wrongDomain}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mutated := *issuer.Cert
+			mutated.URIs = tt.uris
+			if _, err := VerifyPrincipal(leaf.Cert, []*x509.Certificate{&mutated}, verifyOptions(root.Cert, now)); err == nil {
+				t.Fatal("invalid intermediate SPIFFE ID accepted")
 			}
 		})
 	}
@@ -410,7 +437,7 @@ func resignLeaf(t *testing.T, issuer *CA, source *x509.Certificate, mutate func(
 	return cert
 }
 
-func testIntermediate(t *testing.T, root *CA, extensions []pkix.Extension) *CA {
+func testIntermediate(t *testing.T, root *CA, policies []x509.OID) *CA {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -427,7 +454,8 @@ func testIntermediate(t *testing.T, root *CA, extensions []pkix.Extension) *CA {
 		IsCA:                  true,
 		MaxPathLen:            0,
 		MaxPathLenZero:        true,
-		ExtraExtensions:       extensions,
+		Policies:              policies,
+		URIs:                  []*url.URL{{Scheme: "spiffe", Host: "prod.spawnery.internal"}},
 	}
 	return mustFinishCA(t, template, root, key)
 }

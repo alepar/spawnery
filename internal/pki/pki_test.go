@@ -78,7 +78,7 @@ func TestVerifySelfHosted(t *testing.T) {
 		t.Fatalf("IssueNode: %v", err)
 	}
 
-	id, err := Verify(node.Cert, node.Chain, root.Cert, time.Now())
+	id, err := Verify(node.Cert, node.Chain, root.Cert, DefaultTrustDomain, time.Now())
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -87,9 +87,8 @@ func TestVerifySelfHosted(t *testing.T) {
 	}
 }
 
-// THE core security property: a self-hosted intermediate may CREATE a cloud-SAN leaf (issuance is not
-// constrained), but that leaf must FAIL verification against the root — name constraints make the
-// self-hosted authority cryptographically incapable of producing a valid cloud identity.
+// THE core security property: a self-hosted intermediate may CREATE a cloud-path leaf, but the
+// root-signed issuer policy and path correspondence must make verification fail.
 func TestSelfHostedIntermediateCannotForgeCloud(t *testing.T) {
 	root, _ := NewRootCA("Spawnery Test Root")
 	selfHosted, _ := root.NewIntermediate(ClassSelfHosted)
@@ -99,7 +98,7 @@ func TestSelfHostedIntermediateCannotForgeCloud(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueNode (forged cloud) unexpectedly failed at mint time: %v", err)
 	}
-	if _, err := Verify(forged.Cert, forged.Chain, root.Cert, time.Now()); err == nil {
+	if _, err := Verify(forged.Cert, forged.Chain, root.Cert, DefaultTrustDomain, time.Now()); err == nil {
 		t.Fatal("SECURITY: a cloud-SAN leaf signed by the self-hosted intermediate MUST fail verification")
 	}
 }
@@ -112,7 +111,7 @@ func TestVerifyCloud(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueNode: %v", err)
 	}
-	id, err := Verify(node.Cert, node.Chain, root.Cert, time.Now())
+	id, err := Verify(node.Cert, node.Chain, root.Cert, DefaultTrustDomain, time.Now())
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -126,7 +125,7 @@ func TestExpiredLeafRejected(t *testing.T) {
 	root, _ := NewRootCA("Spawnery Test Root")
 	inter, _ := root.NewIntermediate(ClassSelfHosted)
 	node, _ := inter.IssueNode("n", "a", ClassSelfHosted, time.Now().Add(time.Hour))
-	if _, err := Verify(node.Cert, node.Chain, root.Cert, time.Now().Add(2*time.Hour)); err == nil {
+	if _, err := Verify(node.Cert, node.Chain, root.Cert, DefaultTrustDomain, time.Now().Add(2*time.Hour)); err == nil {
 		t.Fatal("expired leaf must be rejected")
 	}
 }
@@ -137,7 +136,7 @@ func TestWrongRootRejected(t *testing.T) {
 	other, _ := NewRootCA("Other Root")
 	inter, _ := root.NewIntermediate(ClassSelfHosted)
 	node, _ := inter.IssueNode("n", "a", ClassSelfHosted, time.Now().Add(time.Hour))
-	if _, err := Verify(node.Cert, node.Chain, other.Cert, time.Now()); err == nil {
+	if _, err := Verify(node.Cert, node.Chain, other.Cert, DefaultTrustDomain, time.Now()); err == nil {
 		t.Fatal("leaf must not verify against a foreign root")
 	}
 }

@@ -1,7 +1,7 @@
 // Package nodeauth authenticates nodes connecting to the CP: it derives a node's identity
 // (nodeId/accountId/class) from its verified mTLS client certificate, instead of trusting the
-// self-asserted Register fields. Class is whatever the name-constrained chain proves — a self-hosted
-// authority can't yield a cloud identity (see node-auth design §5; pki enforces it).
+// self-asserted Register fields. Class is whatever the verified SPIFFE path and root-signed issuer
+// policy prove; a self-hosted authority cannot yield a cloud identity.
 package nodeauth
 
 import (

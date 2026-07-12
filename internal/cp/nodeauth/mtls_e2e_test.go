@@ -81,7 +81,7 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 	if code := do(cnode); code != http.StatusOK || lastID.Role != pki.ClassCloud {
 		t.Fatalf("valid cloud: code=%d id=%+v", code, lastID)
 	}
-	// 3) forged cloud (self-hosted intermediate, cloud SAN) -> rejected by name constraints.
+	// 3) forged cloud path from a self-hosted intermediate -> rejected by issuer policy.
 	forged, _ := selfHosted.IssueNode("evil", "victim", pki.ClassCloud, hour)
 	if code := do(forged); code != http.StatusUnauthorized || reached {
 		t.Fatalf("forged cloud must be 401 and not reach handler: code=%d reached=%v", code, reached)

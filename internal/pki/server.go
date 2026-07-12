@@ -10,9 +10,10 @@ import (
 	"time"
 )
 
-// IssueServer mints a TLS server certificate (ServerAuth) with the given DNS/IP SANs, signed by this CA.
+// IssueServer mints a legacy TLS server certificate with the given DNS/IP SANs, signed by this CA.
 // Used for the CP's node mTLS listener so a node verifies the CP against the pinned root. Sign this with
 // the ROOT (unconstrained) rather than a class-constrained intermediate.
+// Deprecated: use IssueService with an explicit trust domain and service identity.
 func (ca *CA) IssueServer(commonName string, dnsNames []string, ips []net.IP, notAfter time.Time) (*Node, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

@@ -60,7 +60,8 @@ func (ca *CA) SignNodeCSR(csrDER []byte, nodeID, accountID, role, trustDomain st
 	return leaf, []*x509.Certificate{ca.Cert}, nil
 }
 
-// SignCSR is the compatibility entry point for enrollment callers not yet carrying a trust domain.
+// SignCSR is retained for development fixtures that use DefaultTrustDomain.
+// Deprecated: use SignNodeCSR with an explicit configured trust domain.
 func (ca *CA) SignCSR(csrDER []byte, nodeID, accountID, role string, notAfter time.Time) (*x509.Certificate, []*x509.Certificate, error) {
 	return ca.SignNodeCSR(csrDER, nodeID, accountID, role, DefaultTrustDomain, notAfter)
 }

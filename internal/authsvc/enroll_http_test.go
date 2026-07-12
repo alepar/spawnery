@@ -31,7 +31,7 @@ func TestEnrollHTTPRoundTrip(t *testing.T) {
 	}
 	inter, _ := pki.ParseCertPEM(res.ChainPEM)
 	root, _ := pki.ParseCertPEM(s.RootCAPEM())
-	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, time.Now())
+	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now())
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}

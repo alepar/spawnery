@@ -50,7 +50,7 @@ type subKeyVector struct {
 	LeafNotAfter string `json:"leaf_not_after"`
 	// Negative test vectors for the TS x509 verifier.
 	// ForgedCloudChainPEM: a cloud-SAN leaf signed by the self-hosted intermediate —
-	// signatures are valid but name constraints are violated (Go rejects it; TS must too).
+	// signatures are valid but issuer-role/path correspondence is violated (Go rejects it; TS must too).
 	ForgedCloudChainPEM string `json:"forged_cloud_chain_pem"`
 	// NonCALeafChainPEM: a new leaf cert "signed" by the original leaf cert used as a CA —
 	// the chain cert lacks basicConstraints CA:TRUE (both Go and TS must reject it).
@@ -102,7 +102,7 @@ func generateSubKeyVectors(t *testing.T) {
 	chainPEM := string(leafPEM) + string(interPEM)
 
 	// Forged-cloud negative vector: SH intermediate signs a cloud-class leaf.
-	// The signature chain is cryptographically valid but violates name constraints.
+	// The signature chain is cryptographically valid but violates issuer-role/path correspondence.
 	forgedCloudNode, err := inter.IssueNode("forge", "acc", pki.ClassCloud, vectorTime.Add(365*24*time.Hour))
 	if err != nil {
 		t.Fatalf("IssueNode (forged cloud): %v", err)

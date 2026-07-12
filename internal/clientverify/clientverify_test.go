@@ -49,7 +49,7 @@ func TestVerifyHostCloud(t *testing.T) {
 	}
 }
 
-// SECURITY: a cloud-SAN leaf forged by a self-hosted intermediate is rejected (name constraints).
+// SECURITY: a cloud-path leaf forged by a self-hosted intermediate is rejected (issuer policy).
 func TestVerifyHostRejectsForgedCloud(t *testing.T) {
 	leaf, chain, root := host(t, pki.ClassSelfHosted, pki.ClassCloud, "spawnery-system")
 	if _, err := clientverify.VerifyHost(leaf, chain, root,

@@ -2,7 +2,6 @@ package pki
 
 import (
 	"crypto/x509"
-	"encoding/asn1"
 	"errors"
 	"fmt"
 )
@@ -14,9 +13,6 @@ const (
 	IssuerCloudNode      IssuerRole = "cloud-node-issuer"
 	IssuerSelfHostedNode IssuerRole = "self-hosted-node-issuer"
 )
-
-// issuerRoleOID identifies Spawnery's root-authorized intermediate role policy.
-var issuerRoleOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 1}
 
 func normalizeIssuerRole(role IssuerRole) (IssuerRole, error) {
 	switch role {
@@ -31,40 +27,40 @@ func normalizeIssuerRole(role IssuerRole) (IssuerRole, error) {
 	}
 }
 
-func marshalIssuerRole(role IssuerRole) ([]byte, error) {
+func issuerRolePolicy(role IssuerRole) (x509.OID, error) {
 	normalized, err := normalizeIssuerRole(role)
 	if err != nil {
-		return nil, err
+		return x509.OID{}, err
 	}
-	return asn1.Marshal(string(normalized))
+	switch normalized {
+	case IssuerService:
+		return ServiceIssuerPolicyOID, nil
+	case IssuerCloudNode:
+		return CloudNodeIssuerPolicyOID, nil
+	case IssuerSelfHostedNode:
+		return SelfHostedNodeIssuerPolicyOID, nil
+	default:
+		return x509.OID{}, fmt.Errorf("pki: unsupported issuer role %q", normalized)
+	}
 }
 
-// IssuerRoleFromCertificate reads the single Spawnery issuer policy extension.
+// IssuerRoleFromCertificate reads the certificate's single Spawnery issuer policy.
 func IssuerRoleFromCertificate(cert *x509.Certificate) (IssuerRole, error) {
 	if cert == nil {
 		return "", errors.New("pki: nil issuer certificate")
 	}
-	var value []byte
-	count := 0
-	for _, extension := range cert.Extensions {
-		if extension.Id.Equal(issuerRoleOID) {
-			count++
-			value = extension.Value
-		}
+	if len(cert.Policies) != 1 {
+		return "", fmt.Errorf("pki: issuer policy count is %d, want 1", len(cert.Policies))
 	}
-	if count != 1 {
-		return "", fmt.Errorf("pki: issuer role extension count is %d, want 1", count)
-	}
-	var encoded string
-	rest, err := asn1.Unmarshal(value, &encoded)
-	if err != nil || len(rest) != 0 {
-		return "", errors.New("pki: malformed issuer role extension")
-	}
-	role := IssuerRole(encoded)
-	switch role {
-	case IssuerService, IssuerCloudNode, IssuerSelfHostedNode:
-		return role, nil
+	policy := cert.Policies[0]
+	switch {
+	case policy.Equal(ServiceIssuerPolicyOID):
+		return IssuerService, nil
+	case policy.Equal(CloudNodeIssuerPolicyOID):
+		return IssuerCloudNode, nil
+	case policy.Equal(SelfHostedNodeIssuerPolicyOID):
+		return IssuerSelfHostedNode, nil
 	default:
-		return "", fmt.Errorf("pki: unsupported encoded issuer role %q", encoded)
+		return "", fmt.Errorf("pki: unsupported issuer policy %q", policy.String())
 	}
 }

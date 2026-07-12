@@ -90,6 +90,9 @@ func VerifyPrincipal(leaf *x509.Certificate, intermediates []*x509.Certificate, 
 			continue
 		}
 		issuer := chain[1]
+		if err := validateIntermediateSPIFFEID(issuer, opts.TrustDomain); err != nil {
+			continue
+		}
 		issuerRole, err := IssuerRoleFromCertificate(issuer)
 		if err != nil || !issuerPermitsPrincipal(issuerRole, principal) {
 			continue
@@ -100,6 +103,17 @@ func VerifyPrincipal(leaf *x509.Certificate, intermediates []*x509.Certificate, 
 		return principal, nil
 	}
 	return Principal{}, errors.New("pki: no verified chain has a permitted issuer role")
+}
+
+func validateIntermediateSPIFFEID(issuer *x509.Certificate, trustDomain string) error {
+	if issuer == nil || len(issuer.URIs) != 1 {
+		return errors.New("pki: signing intermediate must contain exactly one URI SAN")
+	}
+	id := issuer.URIs[0]
+	if id == nil || id.Scheme != "spiffe" || id.Host != trustDomain || id.Path != "" || id.RawPath != "" || id.User != nil || id.RawQuery != "" || id.Fragment != "" || id.ForceQuery || id.Opaque != "" || id.String() != "spiffe://"+trustDomain {
+		return errors.New("pki: signing intermediate URI SAN does not match the configured trust domain")
+	}
+	return nil
 }
 
 func validateRawSubjectAltName(leaf *x509.Certificate, principal Principal) error {
@@ -303,6 +317,9 @@ func validateTrustDomain(trustDomain string) error {
 	}
 	return nil
 }
+
+// ValidateTrustDomain validates a canonical SPIFFE trust-domain authority.
+func ValidateTrustDomain(trustDomain string) error { return validateTrustDomain(trustDomain) }
 
 func validatePathSegment(segment string) error {
 	if segment == "" || segment == "." || segment == ".." {

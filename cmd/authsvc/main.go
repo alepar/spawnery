@@ -353,7 +353,11 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 		log.Printf("authsvc: GitHub link bootstrap flow ACTIVE (callback %s)", linkRedirect)
 	}
 
-	return authsvc.New(root.Cert, inter, opts...), nil
+	service := authsvc.New(root.Cert, inter, opts...)
+	if err := service.Validate(); err != nil {
+		return nil, err
+	}
+	return service, nil
 }
 
 type staticHeaderInterceptor struct {

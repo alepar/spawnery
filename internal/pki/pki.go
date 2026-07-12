@@ -15,8 +15,8 @@ import (
 	"time"
 )
 
-// DefaultTrustDomain is retained for compatibility with callers that have not yet been wired to an
-// environment-specific trust domain.
+// DefaultTrustDomain is for explicit development and test fixtures only.
+// Deprecated: production callers must provide their configured environment trust domain.
 const DefaultTrustDomain = "dev.spawnery.internal"
 
 const (
@@ -74,7 +74,8 @@ func NewRootCA(commonName string) (*CA, error) {
 	return finishCA(tmpl, tmpl, key.Public(), key, key)
 }
 
-// NewIntermediate issues a non-delegating, role-bearing intermediate signed by this CA.
+// NewIntermediate issues a non-delegating, role-bearing intermediate signed by this CA. Omitting
+// trustDomains selects DefaultTrustDomain for legacy development fixtures only.
 func (ca *CA) NewIntermediate(role IssuerRole, trustDomains ...string) (*CA, error) {
 	role, err := normalizeIssuerRole(role)
 	if err != nil {
@@ -91,7 +92,7 @@ func (ca *CA) NewIntermediate(role IssuerRole, trustDomains ...string) (*CA, err
 	if err != nil {
 		return nil, err
 	}
-	policy, err := marshalIssuerRole(role)
+	policy, err := issuerRolePolicy(role)
 	if err != nil {
 		return nil, err
 	}
@@ -114,17 +115,13 @@ func (ca *CA) NewIntermediate(role IssuerRole, trustDomains ...string) (*CA, err
 		MaxPathLen:            0,
 		MaxPathLenZero:        true,
 		URIs:                  []*url.URL{rootID},
-		ExtraExtensions: []pkix.Extension{{
-			Id:       issuerRoleOID,
-			Critical: false,
-			Value:    policy,
-		}},
+		Policies:              []x509.OID{policy},
 	}
 	return finishCA(tmpl, ca.Cert, key.Public(), key, ca.Key)
 }
 
 // IssueNode issues a node X.509-SVID. The fourth argument accepts either trustDomain followed by
-// notAfter, or a legacy notAfter value which selects DefaultTrustDomain.
+// notAfter, or a legacy notAfter value which selects DefaultTrustDomain for test fixtures only.
 func (ca *CA) IssueNode(nodeID, accountID, role string, trustDomainOrNotAfter any, notAfterValues ...time.Time) (*Leaf, error) {
 	trustDomain, notAfter, err := issuanceWindow(trustDomainOrNotAfter, notAfterValues)
 	if err != nil {
@@ -216,15 +213,15 @@ func finishCA(tmpl, parent *x509.Certificate, pub any, ownKey, signerKey *ecdsa.
 	return &CA{Cert: cert, Key: ownKey}, nil
 }
 
-// Verify is the compatibility node verifier. It delegates to VerifyPrincipal and does not parse a
-// second identity format.
-func Verify(leaf *x509.Certificate, intermediates []*x509.Certificate, root *x509.Certificate, now time.Time) (Identity, error) {
+// Verify is the compatibility node-result verifier. The caller must provide its configured trust
+// domain; identity is never derived from an untrusted leaf before verification.
+func Verify(leaf *x509.Certificate, intermediates []*x509.Certificate, root *x509.Certificate, trustDomain string, now time.Time) (Identity, error) {
 	if leaf == nil || len(leaf.URIs) != 1 {
 		return Identity{}, errors.New("pki: leaf must contain exactly one URI SAN")
 	}
 	principal, err := VerifyPrincipal(leaf, intermediates, VerifyOptions{
 		Root:        root,
-		TrustDomain: leaf.URIs[0].Host,
+		TrustDomain: trustDomain,
 		CurrentTime: now,
 		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 	})

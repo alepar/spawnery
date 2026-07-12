@@ -91,7 +91,7 @@ func TestDeriveIdentityNoCert(t *testing.T) {
 	}
 }
 
-// A cloud-SAN leaf forged by a self-hosted intermediate must NOT yield an identity (name constraints).
+// A cloud-path leaf forged by a self-hosted intermediate must NOT yield an identity (issuer policy).
 func TestDeriveIdentityRejectsForgedCloud(t *testing.T) {
 	root, _ := pki.NewRootCA("R")
 	selfHosted, _ := root.NewIntermediate(pki.ClassSelfHosted)

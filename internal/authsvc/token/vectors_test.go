@@ -24,7 +24,7 @@ const (
 	vectorIntermediateHash = "74a5ecad98438a8302afe66781fa05ac8d4287106e1f9df69c42a680e84c7ad6"
 )
 
-func TestGoldenEnvelopeVector(t *testing.T) {
+func TestLegacyGoldenEnvelopeVectorRejected(t *testing.T) {
 	raw, err := base64.RawURLEncoding.DecodeString(vectorWire)
 	if err != nil {
 		t.Fatal(err)
@@ -71,12 +71,8 @@ func TestGoldenEnvelopeVector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := verifier.Verify(vectorWire, ArtifactTypeSession, time.Unix(1_700_000_001, 0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := hex.EncodeToString(payload); got != vectorPayloadHex {
-		t.Fatalf("verified payload = %s, want %s", got, vectorPayloadHex)
+	if _, err := verifier.Verify(vectorWire, ArtifactTypeSession, time.Unix(1_700_000_001, 0)); err == nil {
+		t.Fatal("artifact carrying the retired policy OIDs was accepted")
 	}
 }
 

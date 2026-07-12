@@ -2,8 +2,6 @@ package pki
 
 import (
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/asn1"
 	"testing"
 )
 
@@ -33,14 +31,8 @@ func TestIntermediateIssuerRoles(t *testing.T) {
 			if got != role {
 				t.Fatalf("role = %q, want %q", got, role)
 			}
-			count := 0
-			for _, extension := range intermediate.Cert.Extensions {
-				if extension.Id.Equal(issuerRoleOID) {
-					count++
-				}
-			}
-			if count != 1 {
-				t.Fatalf("issuer role extension count = %d, want 1", count)
+			if len(intermediate.Cert.Policies) != 1 {
+				t.Fatalf("issuer policies = %v, want exactly one", intermediate.Cert.Policies)
 			}
 		})
 	}
@@ -49,41 +41,31 @@ func TestIntermediateIssuerRoles(t *testing.T) {
 func TestIssuerRoleFromCertificateRejectsInvalidPolicies(t *testing.T) {
 	t.Parallel()
 
-	valid, err := asn1.Marshal(string(IssuerService))
-	if err != nil {
-		t.Fatal(err)
-	}
-	unknown, err := asn1.Marshal("unknown-issuer")
-	if err != nil {
-		t.Fatal(err)
-	}
 	tests := []struct {
-		name       string
-		extensions []pkix.Extension
+		name     string
+		policies []x509.OID
 	}{
 		{name: "missing"},
-		{name: "duplicate", extensions: []pkix.Extension{{Id: issuerRoleOID, Value: valid}, {Id: issuerRoleOID, Value: valid}}},
-		{name: "malformed", extensions: []pkix.Extension{{Id: issuerRoleOID, Value: []byte("not DER")}}},
-		{name: "unknown", extensions: []pkix.Extension{{Id: issuerRoleOID, Value: unknown}}},
-		{name: "legacy cloud", extensions: []pkix.Extension{{Id: issuerRoleOID, Value: mustMarshalASN1String(t, ClassCloud)}}},
-		{name: "legacy self-hosted", extensions: []pkix.Extension{{Id: issuerRoleOID, Value: mustMarshalASN1String(t, ClassSelfHosted)}}},
+		{name: "duplicate", policies: []x509.OID{ServiceIssuerPolicyOID, ServiceIssuerPolicyOID}},
+		{name: "unknown", policies: []x509.OID{mustParseOID(t, "1.2.3")}},
+		{name: "multiple roles", policies: []x509.OID{ServiceIssuerPolicyOID, CloudNodeIssuerPolicyOID}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := IssuerRoleFromCertificate(&x509.Certificate{Extensions: tt.extensions}); err == nil {
+			if _, err := IssuerRoleFromCertificate(&x509.Certificate{Policies: tt.policies}); err == nil {
 				t.Fatal("invalid issuer policy accepted")
 			}
 		})
 	}
 }
 
-func mustMarshalASN1String(t *testing.T, value string) []byte {
+func mustParseOID(t *testing.T, value string) x509.OID {
 	t.Helper()
-	encoded, err := asn1.Marshal(value)
+	oid, err := x509.ParseOID(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return encoded
+	return oid
 }
 
 func TestNewIntermediateRejectsUnknownRole(t *testing.T) {

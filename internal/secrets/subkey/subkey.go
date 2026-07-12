@@ -5,7 +5,7 @@
 //
 // It composes the already-merged building blocks rather than reinventing them:
 //   - internal/secrets/seal — the HPKE envelope + ReSealToNode/OpenFromOwner.
-//   - internal/pki          — the name-constrained CA chain + cert helpers.
+//   - internal/pki          — the role-constrained SPIFFE CA chain + cert helpers.
 //   - internal/clientverify — the client-side infra/SAN verification primitive.
 //
 // Design: docs/superpowers/specs/2026-06-10-owner-sealed-secrets-design.md §1

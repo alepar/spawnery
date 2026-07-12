@@ -18,7 +18,7 @@ var ErrBadEnrollToken = errors.New("authsvc: invalid or expired enrollment token
 var ErrTokenFingerprintMismatch = errors.New("authsvc: CSR key does not match the token's bound fingerprint")
 
 // ErrUnsignableClass is returned when a token is requested for a class the AS cannot sign. The AS holds
-// only the name-constrained self-hosted intermediate (node-auth §4); it can never issue a cloud identity,
+// only the self-hosted role intermediate (node-auth §4); it can never issue an accepted cloud identity,
 // so binding a token to class=cloud is rejected at issuance — class scoping prevents escalation.
 var ErrUnsignableClass = errors.New("authsvc: AS cannot issue this class (only self-hosted)")
 
