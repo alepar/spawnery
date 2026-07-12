@@ -48,7 +48,7 @@ func TestBoundTokenBindsFingerprint(t *testing.T) {
 	cert, _ := pki.ParseCertPEM(certPEM)
 	inter, _ := pki.ParseCertPEM(chainPEM)
 	root, _ := pki.ParseCertPEM(s.RootCAPEM())
-	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now())
+	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now(), allowNoCertificateRevocations)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestBoundTokenAccountScoping(t *testing.T) {
 	cert, _ := pki.ParseCertPEM(certPEM)
 	inter, _ := pki.ParseCertPEM(chainPEM)
 	root, _ := pki.ParseCertPEM(s.RootCAPEM())
-	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now())
+	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now(), allowNoCertificateRevocations)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}

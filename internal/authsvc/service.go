@@ -97,9 +97,10 @@ const (
 // it publishes for pinning. By construction it holds ONLY the self-hosted intermediate, so it can issue
 // self-hosted identities only.
 type Service struct {
-	root         *x509.Certificate
-	intermediate *pki.CA // self-hosted intermediate (holds the signing key)
-	trustDomain  string
+	root                   *x509.Certificate
+	intermediate           *pki.CA // self-hosted intermediate (holds the signing key)
+	trustDomain            string
+	certificateRevocations pki.CertificateRevocationChecker
 
 	now       func() time.Time
 	enrollTTL time.Duration
@@ -202,6 +203,11 @@ func WithTrustDomain(trustDomain string) Option {
 	return func(s *Service) { s.trustDomain = trustDomain }
 }
 
+// WithCertificateRevocations installs the mandatory fail-closed certificate revocation view.
+func WithCertificateRevocations(checker pki.CertificateRevocationChecker) Option {
+	return func(s *Service) { s.certificateRevocations = checker }
+}
+
 // Validate checks construction-time settings required by production issuance and verification.
 func (s *Service) Validate() error {
 	if s == nil {
@@ -209,6 +215,9 @@ func (s *Service) Validate() error {
 	}
 	if err := pki.ValidateTrustDomain(s.trustDomain); err != nil {
 		return fmt.Errorf("authsvc: trust domain: %w", err)
+	}
+	if s.certificateRevocations == nil {
+		return errors.New("authsvc: certificate revocation state is required")
 	}
 	return nil
 }
@@ -332,7 +341,7 @@ func New(root *x509.Certificate, selfHostedIntermediate *pki.CA, opts ...Option)
 
 // Load builds a Service from PEM material as it would be provisioned in production: the Root CA cert
 // (published), and the self-hosted intermediate cert + private key (held secret).
-func Load(rootPEM, interCertPEM, interKeyPEM []byte, trustDomain string) (*Service, error) {
+func Load(rootPEM, interCertPEM, interKeyPEM []byte, trustDomain string, revoked pki.CertificateRevocationChecker) (*Service, error) {
 	root, err := pki.ParseCertPEM(rootPEM)
 	if err != nil {
 		return nil, err
@@ -345,7 +354,7 @@ func Load(rootPEM, interCertPEM, interKeyPEM []byte, trustDomain string) (*Servi
 	if err != nil {
 		return nil, err
 	}
-	service := New(root, &pki.CA{Cert: interCert, Key: interKey}, WithTrustDomain(trustDomain))
+	service := New(root, &pki.CA{Cert: interCert, Key: interKey}, WithTrustDomain(trustDomain), WithCertificateRevocations(revoked))
 	if err := service.Validate(); err != nil {
 		return nil, err
 	}

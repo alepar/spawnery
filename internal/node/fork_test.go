@@ -120,7 +120,7 @@ func newForkNodeManager(t *testing.T, be *scriptedPodBackend) *spawnlet.Manager 
 	t.Helper()
 	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
 		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
-		DeltaCapture: true,
+		DeltaCapture: true, CertificateRevocations: allowNoCertificateRevocations,
 	})
 	mgr.SetJournal(&fakeNodeJournal{finalID: "manifest-abc"}, t.TempDir())
 	return mgr
@@ -334,7 +334,7 @@ func TestForkTransferImportOpensSealedKeyAndEmitsForkOwnedPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SealForkTransferPayload: %v", err)
 	}
-	sealedKey, _, err := subkey.SealTransferKeyForNode(key, targetFx.leaf, targetFx.chain, targetFx.root, published, subkey.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, subkey.AllowAll{}, seal.InFlightAAD{
+	sealedKey, _, err := subkey.SealTransferKeyForNode(key, targetFx.leaf, targetFx.chain, targetFx.root, published, subkey.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, allowNoCertificateRevocations, subkey.AllowAll{}, seal.InFlightAAD{
 		SpawnID:    "sp-fork",
 		Generation: 1,
 		DeliveryID: "ts-1",
@@ -482,7 +482,7 @@ func TestCancelForkSameNodeCancelsRunningFork(t *testing.T) {
 	finalBlock := make(chan struct{})
 	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
 		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
-		DeltaCapture: true,
+		DeltaCapture: true, CertificateRevocations: allowNoCertificateRevocations,
 	})
 	mgr.SetJournal(&fakeNodeJournal{
 		finalID:      "manifest-abc",

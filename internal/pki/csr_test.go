@@ -62,7 +62,7 @@ func TestCSRRoundTrip(t *testing.T) {
 	if !cert.PublicKey.(*ecdsa.PublicKey).Equal(nodeKey.Public()) {
 		t.Fatal("issued cert is not bound to the node's keypair")
 	}
-	id, err := Verify(cert, chain, root.Cert, DefaultTrustDomain, time.Now())
+	id, err := Verify(cert, chain, root.Cert, DefaultTrustDomain, time.Now(), allowNoCertificateRevocations)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}

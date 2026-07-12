@@ -18,7 +18,10 @@ import (
 	"time"
 )
 
-const revocationStateVersion = 1
+const (
+	revocationStateVersion = 1
+	maxRevocationStateSize = 16 << 20
+)
 
 var (
 	ErrCRLRollback             = errors.New("pki: CRL rollback")
@@ -26,6 +29,7 @@ var (
 	ErrRevocationStateLocked   = errors.New("pki: revocation state is already open")
 	ErrRevocationStateClosed   = errors.New("pki: revocation state is closed")
 	ErrRevocationStatePoisoned = errors.New("pki: revocation state persistence is ambiguous")
+	ErrRevocationStateTooLarge = errors.New("pki: revocation state exceeds size limit")
 )
 
 type persistedRevocationState struct {
@@ -40,6 +44,7 @@ type persistedIssuerRevocation struct {
 
 type issuerRevocationSnapshot struct {
 	number     *big.Int
+	thisUpdate time.Time
 	nextUpdate time.Time
 	digest     [sha256.Size]byte
 	revoked    map[string]struct{}
@@ -212,7 +217,7 @@ func (state *RevocationState) IsRevoked(issuer, serial *big.Int) bool {
 		return true
 	}
 	now := state.now()
-	if now.IsZero() || !entry.nextUpdate.After(now) {
+	if now.IsZero() || entry.thisUpdate.After(now) || !entry.nextUpdate.After(now) {
 		return true
 	}
 	_, revoked := entry.revoked[serial.Text(16)]
@@ -293,7 +298,7 @@ func snapshotFromCRL(list *x509.RevocationList) issuerRevocationSnapshot {
 		revoked[entry.SerialNumber.Text(16)] = struct{}{}
 	}
 	return issuerRevocationSnapshot{
-		number: new(big.Int).Set(list.Number), nextUpdate: list.NextUpdate, digest: sha256.Sum256(list.Raw), revoked: revoked, pem: string(MarshalCRLPEM(list)),
+		number: new(big.Int).Set(list.Number), thisUpdate: list.ThisUpdate, nextUpdate: list.NextUpdate, digest: sha256.Sum256(list.Raw), revoked: revoked, pem: string(MarshalCRLPEM(list)),
 	}
 }
 
@@ -339,6 +344,9 @@ func (state *RevocationState) persist(snapshot *revocationSnapshot, renamed func
 		return fmt.Errorf("pki: marshal revocation state: %w", err)
 	}
 	encoded = append(encoded, '\n')
+	if len(encoded) > maxRevocationStateSize {
+		return ErrRevocationStateTooLarge
+	}
 	dir := filepath.Dir(state.path)
 	temporary, err := os.CreateTemp(dir, ".revocation-state-*")
 	if err != nil {
@@ -461,12 +469,15 @@ func readPersistedRevocationState(path string) (*persistedRevocationState, error
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 		return nil, errors.New("pki: persisted revocation state must be a regular 0600 file")
 	}
-	if info.Size() > 16<<20 {
-		return nil, errors.New("pki: persisted revocation state is too large")
+	if info.Size() > maxRevocationStateSize {
+		return nil, ErrRevocationStateTooLarge
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("pki: read persisted revocation state: %w", err)
+	}
+	if len(raw) > maxRevocationStateSize {
+		return nil, ErrRevocationStateTooLarge
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()

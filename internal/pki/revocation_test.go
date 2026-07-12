@@ -1,12 +1,16 @@
 package pki
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -106,6 +110,14 @@ func TestRevocationStateFailsClosedWhenSnapshotExpiresAndRecoversOnRefresh(t *te
 	}
 	if state.IsRevoked(issuer.Cert.SerialNumber, unlisted) {
 		t.Fatal("fresh higher CRL did not restore normal lookup")
+	}
+	clock.Store(base.Add(30 * time.Second).Unix())
+	if !state.IsRevoked(issuer.Cert.SerialNumber, unlisted) {
+		t.Fatal("clock rollback before ThisUpdate did not fail closed")
+	}
+	clock.Store(base.Add(time.Minute).Unix())
+	if state.IsRevoked(issuer.Cert.SerialNumber, unlisted) {
+		t.Fatal("restoring a time within the CRL window did not restore lookup")
 	}
 }
 
@@ -234,6 +246,73 @@ func TestRevocationStateExclusiveOwnershipRejectsStaleWriter(t *testing.T) {
 	}
 	if got, _ := next.HighestNumber(issuer.Cert.SerialNumber); got.Cmp(big.NewInt(2)) != 0 {
 		t.Fatalf("active owner floor = %v", got)
+	}
+}
+
+func TestRevocationStateSubprocessLockReleasedAfterCrash(t *testing.T) {
+	const helperEnv = "SPAWNERY_TEST_REVOCATION_LOCK_HELPER"
+	if path := os.Getenv(helperEnv); path != "" {
+		lock, err := acquireRevocationStateLock(path)
+		if err != nil {
+			fmt.Printf("error:%v\n", err)
+			return
+		}
+		_ = lock
+		fmt.Println("locked")
+		select {}
+	}
+
+	path := filepath.Join(t.TempDir(), "state.lock")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRevocationStateSubprocessLockReleasedAfterCrash$")
+	cmd.Env = append(os.Environ(), helperEnv+"="+path)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
+	ready := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		if scanner.Scan() {
+			ready <- scanner.Text()
+			return
+		}
+		ready <- ""
+	}()
+	select {
+	case line := <-ready:
+		if line != "locked" {
+			t.Fatalf("lock helper output = %q, stderr = %q", line, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for lock helper")
+	}
+	if _, err := acquireRevocationStateLock(path); !errors.Is(err, ErrRevocationStateLocked) {
+		t.Fatalf("parent lock contention error = %v", err)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("crashed lock helper exited successfully")
+	}
+	cmd.Process = nil
+	lock, err := acquireRevocationStateLock(path)
+	if err != nil {
+		t.Fatalf("lock not released after helper crash: %v", err)
+	}
+	if err := releaseRevocationStateLock(lock); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -377,6 +456,43 @@ func TestRevocationStateRejectsMalformedPersistenceAndSharedDirectory(t *testing
 	}
 	if info.Mode().Perm() != 0o755 {
 		t.Fatalf("opening store changed shared directory mode to %o", info.Mode().Perm())
+	}
+}
+
+func TestRevocationStateSizeLimitBeforeReadAndRename(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	dir := filepath.Join(t.TempDir(), "revocations")
+	state, err := OpenRevocationState(filepath.Join(dir, "state.json"), []*x509.Certificate{issuer.Cert}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	oversized := &revocationSnapshot{issuers: map[string]issuerRevocationSnapshot{
+		issuer.Cert.SerialNumber.Text(16): {number: big.NewInt(1), pem: strings.Repeat("x", maxRevocationStateSize)},
+	}}
+	renameReached := false
+	state.beforeRename = func() error { renameReached = true; return nil }
+	if err := state.persist(oversized, func() {}); !errors.Is(err, ErrRevocationStateTooLarge) {
+		t.Fatalf("oversized candidate error = %v", err)
+	}
+	if renameReached {
+		t.Fatal("oversized candidate reached rename")
+	}
+
+	path := filepath.Join(dir, "oversized.json")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, maxRevocationStateSize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPersistedRevocationState(path); errors.Is(err, ErrRevocationStateTooLarge) {
+		t.Fatal("persisted state at size boundary reported too large")
+	}
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, maxRevocationStateSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPersistedRevocationState(path); !errors.Is(err, ErrRevocationStateTooLarge) {
+		t.Fatalf("oversized persisted state error = %v", err)
 	}
 }
 

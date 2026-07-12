@@ -78,7 +78,7 @@ func TestVerifySelfHosted(t *testing.T) {
 		t.Fatalf("IssueNode: %v", err)
 	}
 
-	id, err := Verify(node.Cert, node.Chain, root.Cert, DefaultTrustDomain, time.Now())
+	id, err := Verify(node.Cert, node.Chain, root.Cert, DefaultTrustDomain, time.Now(), allowNoCertificateRevocations)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestSelfHostedIntermediateCannotForgeCloud(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueNode (forged cloud) unexpectedly failed at mint time: %v", err)
 	}
-	if _, err := Verify(forged.Cert, forged.Chain, root.Cert, DefaultTrustDomain, time.Now()); err == nil {
+	if _, err := Verify(forged.Cert, forged.Chain, root.Cert, DefaultTrustDomain, time.Now(), allowNoCertificateRevocations); err == nil {
 		t.Fatal("SECURITY: a cloud-SAN leaf signed by the self-hosted intermediate MUST fail verification")
 	}
 }
@@ -111,7 +111,7 @@ func TestVerifyCloud(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueNode: %v", err)
 	}
-	id, err := Verify(node.Cert, node.Chain, root.Cert, DefaultTrustDomain, time.Now())
+	id, err := Verify(node.Cert, node.Chain, root.Cert, DefaultTrustDomain, time.Now(), allowNoCertificateRevocations)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestExpiredLeafRejected(t *testing.T) {
 	root, _ := NewRootCA("Spawnery Test Root")
 	inter, _ := root.NewIntermediate(ClassSelfHosted)
 	node, _ := inter.IssueNode("n", "a", ClassSelfHosted, time.Now().Add(time.Hour))
-	if _, err := Verify(node.Cert, node.Chain, root.Cert, DefaultTrustDomain, time.Now().Add(2*time.Hour)); err == nil {
+	if _, err := Verify(node.Cert, node.Chain, root.Cert, DefaultTrustDomain, time.Now().Add(2*time.Hour), allowNoCertificateRevocations); err == nil {
 		t.Fatal("expired leaf must be rejected")
 	}
 }
@@ -136,7 +136,7 @@ func TestWrongRootRejected(t *testing.T) {
 	other, _ := NewRootCA("Other Root")
 	inter, _ := root.NewIntermediate(ClassSelfHosted)
 	node, _ := inter.IssueNode("n", "a", ClassSelfHosted, time.Now().Add(time.Hour))
-	if _, err := Verify(node.Cert, node.Chain, other.Cert, DefaultTrustDomain, time.Now()); err == nil {
+	if _, err := Verify(node.Cert, node.Chain, other.Cert, DefaultTrustDomain, time.Now(), allowNoCertificateRevocations); err == nil {
 		t.Fatal("leaf must not verify against a foreign root")
 	}
 }

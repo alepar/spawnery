@@ -21,6 +21,7 @@ import (
 	"spawnery/internal/agentcaps"
 	"spawnery/internal/githubcred"
 	"spawnery/internal/manifest"
+	"spawnery/internal/pki"
 	"spawnery/internal/runtime"
 	"spawnery/internal/spawnlet/firewall"
 	"spawnery/internal/storage"
@@ -36,6 +37,7 @@ const journalKeyDeliveryTimeout = 30 * time.Second
 
 type ManagerConfig struct {
 	AgentImage, SidecarImage, OpenRouterKey, DataRoot string
+	CertificateRevocations                            pki.CertificateRevocationChecker
 
 	// SecretsRoot is the per-node root for owner-sealed secret tmpfs dirs (design §6). Each spawn gets
 	// a subdir here, bind-mounted into the agent at SecretsMountPath; the node writes unsealed plaintext

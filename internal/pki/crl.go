@@ -12,7 +12,12 @@ import (
 	"time"
 )
 
-const crlPEMType = "X509 CRL"
+const (
+	crlPEMType = "X509 CRL"
+	maxCRLSize = 4 << 20
+)
+
+var ErrCRLTooLarge = errors.New("pki: CRL exceeds size limit")
 
 var (
 	authorityKeyIdentifierOID = asn1.ObjectIdentifier{2, 5, 29, 35}
@@ -27,7 +32,7 @@ func (ca *CA) CreateCRL(number *big.Int, revoked []x509.RevocationListEntry, now
 	if err := validateCRLIssuer(ca.Cert); err != nil {
 		return nil, err
 	}
-	if number == nil || number.Sign() <= 0 {
+	if !validCRLNumber(number) {
 		return nil, errors.New("pki: CRL number must be positive")
 	}
 	if now.IsZero() || nextUpdate.IsZero() || !nextUpdate.After(now) {
@@ -64,6 +69,9 @@ func VerifyCRL(list *x509.RevocationList, issuer *x509.Certificate, now time.Tim
 	if list == nil || len(list.Raw) == 0 || issuer == nil || now.IsZero() {
 		return errors.New("pki: invalid CRL verification input")
 	}
+	if len(list.Raw) > maxCRLSize {
+		return ErrCRLTooLarge
+	}
 	if err := validateCRLIssuer(issuer); err != nil {
 		return err
 	}
@@ -79,8 +87,8 @@ func VerifyCRL(list *x509.RevocationList, issuer *x509.Certificate, now time.Tim
 	if err := validateCRLExtensions(list); err != nil {
 		return err
 	}
-	if list.Number == nil || list.Number.Sign() <= 0 {
-		return errors.New("pki: CRL number must be positive")
+	if !validCRLNumber(list.Number) {
+		return errors.New("pki: CRL number must be positive and at most 20 DER octets")
 	}
 	if list.ThisUpdate.IsZero() || list.NextUpdate.IsZero() || !list.NextUpdate.After(list.ThisUpdate) {
 		return errors.New("pki: invalid CRL update window")
@@ -100,6 +108,14 @@ func VerifyCRL(list *x509.RevocationList, issuer *x509.Certificate, now time.Tim
 	return nil
 }
 
+func validCRLNumber(number *big.Int) bool {
+	if number == nil || number.Sign() <= 0 {
+		return false
+	}
+	encoded := number.Bytes()
+	return len(encoded) < 20 || len(encoded) == 20 && encoded[0]&0x80 == 0
+}
+
 // MarshalCRLPEM encodes list as one X509 CRL PEM block.
 func MarshalCRLPEM(list *x509.RevocationList) []byte {
 	if list == nil || len(list.Raw) == 0 {
@@ -110,6 +126,9 @@ func MarshalCRLPEM(list *x509.RevocationList) []byte {
 
 // ParseCRLPEM parses exactly one X509 CRL PEM block.
 func ParseCRLPEM(data []byte) (*x509.RevocationList, error) {
+	if len(data) > maxCRLSize {
+		return nil, ErrCRLTooLarge
+	}
 	if !bytes.HasPrefix(data, []byte("-----BEGIN "+crlPEMType+"-----")) {
 		return nil, errors.New("pki: no canonical X509 CRL PEM block")
 	}

@@ -201,7 +201,7 @@ func TestVerifyPrincipalRejectsInvalidLeaf(t *testing.T) {
 		opts  VerifyOptions
 	}{
 		{name: "wrong root", leaf: wrongRootLeaf.Cert, chain: wrongRootLeaf.Chain, opts: verifyOptions(root.Cert, now)},
-		{name: "wrong trust domain", leaf: material.Cert, chain: material.Chain, opts: VerifyOptions{Root: root.Cert, TrustDomain: "staging.spawnery.internal", CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}},
+		{name: "wrong trust domain", leaf: material.Cert, chain: material.Chain, opts: VerifyOptions{Root: root.Cert, TrustDomain: "staging.spawnery.internal", CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, IsRevoked: allowNoCertificateRevocations}},
 		{name: "zero URI SANs", leaf: resignLeaf(t, issuer, material.Cert, func(c *x509.Certificate) { c.URIs = nil }), chain: material.Chain, opts: verifyOptions(root.Cert, now)},
 		{name: "multiple URI SANs", leaf: resignLeaf(t, issuer, material.Cert, func(c *x509.Certificate) { c.URIs = append(c.URIs, c.URIs[0]) }), chain: material.Chain, opts: verifyOptions(root.Cert, now)},
 		{name: "CA leaf", leaf: resignLeaf(t, issuer, material.Cert, func(c *x509.Certificate) { c.IsCA = true }), chain: material.Chain, opts: verifyOptions(root.Cert, now)},
@@ -410,14 +410,29 @@ func TestVerifyPrincipalRejectsRevokedLeaf(t *testing.T) {
 	}
 }
 
+func TestVerifyPrincipalRequiresRevocationChecker(t *testing.T) {
+	now := time.Now()
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerCloudNode, "prod.spawnery.internal")
+	leaf, _ := issuer.IssueNode("n", "spawnery-system", RoleCloud, "prod.spawnery.internal", now.Add(time.Hour))
+	opts := verifyOptions(root.Cert, now)
+	opts.IsRevoked = nil
+	if _, err := VerifyPrincipal(leaf.Cert, leaf.Chain, opts); err == nil {
+		t.Fatal("nil revocation checker accepted")
+	}
+}
+
 func verifyOptions(root *x509.Certificate, now time.Time) VerifyOptions {
 	return VerifyOptions{
 		Root:        root,
 		TrustDomain: "prod.spawnery.internal",
 		CurrentTime: now,
 		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		IsRevoked:   allowNoCertificateRevocations,
 	}
 }
+
+func allowNoCertificateRevocations(*big.Int, *big.Int) bool { return false }
 
 func resignLeaf(t *testing.T, issuer *CA, source *x509.Certificate, mutate func(*x509.Certificate)) *x509.Certificate {
 	t.Helper()

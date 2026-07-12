@@ -8,6 +8,7 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -109,6 +110,26 @@ func TestCRLRejectsInvalidAuthorityNumberAndWindow(t *testing.T) {
 	}
 }
 
+func TestCRLNumberIsLimitedToTwentyOctets(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	max := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 159), big.NewInt(1))
+	if _, err := issuer.CreateCRL(max, nil, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("20-octet CRL number rejected: %v", err)
+	}
+	tooLarge := new(big.Int).Lsh(big.NewInt(1), 159)
+	if _, err := issuer.CreateCRL(tooLarge, nil, now, now.Add(time.Hour)); err == nil {
+		t.Fatal("21-octet CRL number created")
+	}
+	list := mustCreateRawCRL(t, issuer, max, now, now.Add(time.Hour), nil)
+	oversized := *list
+	oversized.Number = tooLarge
+	if err := VerifyCRL(&oversized, issuer.Cert, now); err == nil {
+		t.Fatal("21-octet CRL number verified")
+	}
+}
+
 func TestCRLRejectsInvalidEntriesAndPEM(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	root, _ := NewRootCA("root")
@@ -145,6 +166,30 @@ func TestCRLRejectsInvalidEntriesAndPEM(t *testing.T) {
 				t.Fatal("invalid CRL PEM accepted")
 			}
 		})
+	}
+}
+
+func TestCRLPEMSizeLimitBoundary(t *testing.T) {
+	if _, err := ParseCRLPEM(bytes.Repeat([]byte{'x'}, maxCRLSize)); errors.Is(err, ErrCRLTooLarge) {
+		t.Fatal("CRL at size boundary reported too large")
+	}
+	if _, err := ParseCRLPEM(bytes.Repeat([]byte{'x'}, maxCRLSize+1)); !errors.Is(err, ErrCRLTooLarge) {
+		t.Fatalf("oversized CRL error = %v", err)
+	}
+}
+
+func TestVerifyCRLRejectsOversizedRawObject(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	root, _ := NewRootCA("root")
+	issuer, _ := root.NewIntermediate(IssuerService, "prod.spawnery.internal")
+	list, err := issuer.CreateCRL(big.NewInt(1), nil, now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversized := *list
+	oversized.Raw = bytes.Repeat([]byte{'x'}, maxCRLSize+1)
+	if err := VerifyCRL(&oversized, issuer.Cert, now); !errors.Is(err, ErrCRLTooLarge) {
+		t.Fatalf("oversized parsed CRL error = %v", err)
 	}
 }
 

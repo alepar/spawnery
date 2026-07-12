@@ -26,7 +26,10 @@ type Expectation struct {
 // VerifyHost verifies the host node's cert chain against the pinned root and checks its SAN identity
 // against the expectation. It returns the verified identity, or an error if the chain is invalid or the
 // identity is not the expected host.
-func VerifyHost(leafPEM, chainPEM, rootPEM []byte, want Expectation, now time.Time) (pki.Identity, error) {
+func VerifyHost(leafPEM, chainPEM, rootPEM []byte, want Expectation, revoked pki.CertificateRevocationChecker, now time.Time) (pki.Identity, error) {
+	if revoked == nil {
+		return pki.Identity{}, errors.New("clientverify: certificate revocation checker is required")
+	}
 	if want.TrustDomain == "" {
 		return pki.Identity{}, errors.New("clientverify: expected trust domain is required")
 	}
@@ -51,6 +54,7 @@ func VerifyHost(leafPEM, chainPEM, rootPEM []byte, want Expectation, now time.Ti
 		TrustDomain: want.TrustDomain,
 		CurrentTime: now,
 		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+		IsRevoked:   revoked,
 	})
 	if err != nil {
 		return pki.Identity{}, fmt.Errorf("clientverify: host cert does not chain to the pinned root: %w", err)

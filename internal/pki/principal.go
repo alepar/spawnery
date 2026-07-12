@@ -33,13 +33,17 @@ type Principal struct {
 	NodeID      string
 }
 
+// CertificateRevocationChecker reports whether serial is revoked by issuer. Callers must provide a
+// current fail-closed implementation; certificate verification never silently disables revocation.
+type CertificateRevocationChecker func(issuer, serial *big.Int) bool
+
 // VerifyOptions configures strict Spawnery X.509-SVID verification.
 type VerifyOptions struct {
 	Root        *x509.Certificate
 	TrustDomain string
 	CurrentTime time.Time
 	KeyUsages   []x509.ExtKeyUsage
-	IsRevoked   func(issuer, serial *big.Int) bool
+	IsRevoked   CertificateRevocationChecker
 }
 
 // VerifyPrincipal validates leaf to Root and returns its typed Spawnery principal.
@@ -49,6 +53,9 @@ func VerifyPrincipal(leaf *x509.Certificate, intermediates []*x509.Certificate, 
 	}
 	if opts.Root == nil {
 		return Principal{}, errors.New("pki: nil root certificate")
+	}
+	if opts.IsRevoked == nil {
+		return Principal{}, errors.New("pki: revocation checker is required")
 	}
 	if err := validateTrustDomain(opts.TrustDomain); err != nil {
 		return Principal{}, err
@@ -97,7 +104,7 @@ func VerifyPrincipal(leaf *x509.Certificate, intermediates []*x509.Certificate, 
 		if err != nil || !issuerPermitsPrincipal(issuerRole, principal) {
 			continue
 		}
-		if opts.IsRevoked != nil && opts.IsRevoked(issuer.SerialNumber, leaf.SerialNumber) {
+		if opts.IsRevoked(issuer.SerialNumber, leaf.SerialNumber) {
 			return Principal{}, errors.New("pki: certificate is revoked")
 		}
 		return principal, nil

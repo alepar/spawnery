@@ -215,7 +215,7 @@ func finishCA(tmpl, parent *x509.Certificate, pub any, ownKey, signerKey *ecdsa.
 
 // Verify is the compatibility node-result verifier. The caller must provide its configured trust
 // domain; identity is never derived from an untrusted leaf before verification.
-func Verify(leaf *x509.Certificate, intermediates []*x509.Certificate, root *x509.Certificate, trustDomain string, now time.Time) (Identity, error) {
+func Verify(leaf *x509.Certificate, intermediates []*x509.Certificate, root *x509.Certificate, trustDomain string, now time.Time, isRevoked CertificateRevocationChecker) (Identity, error) {
 	if leaf == nil || len(leaf.URIs) != 1 {
 		return Identity{}, errors.New("pki: leaf must contain exactly one URI SAN")
 	}
@@ -224,6 +224,7 @@ func Verify(leaf *x509.Certificate, intermediates []*x509.Certificate, root *x50
 		TrustDomain: trustDomain,
 		CurrentTime: now,
 		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+		IsRevoked:   isRevoked,
 	})
 	if err != nil {
 		return Identity{}, err
