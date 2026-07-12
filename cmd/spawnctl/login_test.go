@@ -174,7 +174,7 @@ func TestLoopbackLoginEndToEnd(t *testing.T) {
 	fake := githubfake.New()
 	defer fake.Close()
 	fake.SetUser(10002, "looptest2")
-	now := time.Unix(1770000000, 0)
+	now := time.Now().UTC()
 	srv, _, _ := buildTestAS(t, fake, func() time.Time { return now })
 
 	dir := t.TempDir()
@@ -270,7 +270,7 @@ func TestDeviceFlow(t *testing.T) {
 	fake := githubfake.New()
 	defer fake.Close()
 	fake.SetUser(10003, "devtest")
-	now := time.Unix(1770000000, 0)
+	now := time.Now().UTC()
 	srv, st, _ := buildTestAS(t, fake, func() time.Time { return now })
 
 	dir := t.TempDir()
