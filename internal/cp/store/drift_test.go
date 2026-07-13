@@ -47,6 +47,7 @@ func TestSchemaDriftSqlite(t *testing.T) {
 	check("skill_bundle", "bundle_id", "creator_id", "name", "source_url", "source_ref", "source_subdir", "etag", "created_at", "updated_at")
 	check("skill_bundle_version", "version_id", "bundle_id", "seq", "source_commit", "created_at")
 	check("skill_bundle_member", "version_id", "catalog_id", "source_subdir", "position")
+	check("skill_object_denylist", "sha256", "reason", "denied_by", "created_at")
 }
 
 func TestSchemaDriftSqliteTypes(t *testing.T) {

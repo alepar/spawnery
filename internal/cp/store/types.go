@@ -424,3 +424,16 @@ type SkillBundleMember struct {
 	CatalogID     string `bun:"catalog_id,notnull"`
 	Position      int    `bun:"position,notnull"`
 }
+
+// SkillObjectDenial is a real-revocation kill-switch row (sp-mwco.3.2 §4.2): keyed by sha256
+// (content identity), NOT catalog_id, so it outlives a deleted catalog row and covers every
+// catalog row / bundle member / owner that ever pointed at the same object. Consulted by
+// presignNodeArtifacts on every start path; never cached (a memo would reopen the revocation
+// gap this row closes). No FK to customization_catalog by design (see the 0028 migration).
+type SkillObjectDenial struct {
+	bun.BaseModel `bun:"table:skill_object_denylist,alias:sod"`
+	SHA256        string `bun:"sha256,pk"`
+	Reason        string `bun:"reason,notnull"`
+	DeniedBy      string `bun:"denied_by,notnull"`
+	CreatedAt     int64  `bun:"created_at,notnull"`
+}

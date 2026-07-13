@@ -346,6 +346,22 @@ type SkillBundleRepo interface {
 	DeleteBundleVersion(ctx context.Context, versionID string) error
 }
 
+// SkillDenylistRepo manages the sha256 kill-switch for real revocation (sp-mwco.3.2 §4.2):
+// keyed by content sha, not catalog_id — see SkillObjectDenial's doc comment.
+type SkillDenylistRepo interface {
+	// Deny upserts a denial: re-denying an already-denied sha updates reason/denied_by/
+	// created_at and returns no error — the kill switch must be idempotent under a retry.
+	Deny(ctx context.Context, d SkillObjectDenial) error
+	// Allow removes a denial. ErrNotFound when the sha is not currently denied.
+	Allow(ctx context.Context, sha256 string) error
+	// List returns every denial, ordered created_at DESC (newest first).
+	List(ctx context.Context) ([]SkillObjectDenial, error)
+	// Denied looks up which of the given shas are currently denied, keyed by sha256. Shas absent
+	// from the denylist are simply absent from the result map — this is not an error. Denied(nil)
+	// or Denied([]) returns an empty map and issues no query.
+	Denied(ctx context.Context, shas []string) (map[string]SkillObjectDenial, error)
+}
+
 type Store interface {
 	Owners() OwnerRepo
 	Apps() AppRepo
@@ -356,6 +372,7 @@ type Store interface {
 	Profiles() ProfileRepo
 	CustomizationCatalog() CustomizationCatalogRepo
 	SkillBundles() SkillBundleRepo
+	SkillDenylist() SkillDenylistRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error

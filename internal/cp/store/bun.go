@@ -45,4 +45,5 @@ func (s *bunStore) Profiles() ProfileRepo         { return &profileRepo{db: s.db
 func (s *bunStore) CustomizationCatalog() CustomizationCatalogRepo {
 	return &customizationCatalogRepo{db: s.db}
 }
-func (s *bunStore) SkillBundles() SkillBundleRepo { return &skillBundleRepo{db: s.db} }
+func (s *bunStore) SkillBundles() SkillBundleRepo    { return &skillBundleRepo{db: s.db} }
+func (s *bunStore) SkillDenylist() SkillDenylistRepo { return &skillDenylistRepo{db: s.db} }
