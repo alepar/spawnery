@@ -38,6 +38,13 @@ import (
 // in ~5s; 30s is generous headroom for a slow node.
 const readyTimeout = 30 * time.Second
 
+// progressHeartbeatInterval bounds the wall-clock gap between ResumeProgress events emitted while
+// startSpawn blocks on a single long, silent wait (apply-report, tmux/acp readiness). The CP's
+// resume stall detector resets its timer only on NodeMessage_ResumeProgress (cp/server.go) and
+// times a stall out after defaultResumeStallWindow = 30s (cp/lifecycle.go); 10s gives that window a
+// comfortable 3x margin. Matches spawnlet's stagingHeartbeatInterval by design (same failure class).
+const progressHeartbeatInterval = 10 * time.Second
+
 // controlPostTimeout bounds the node's POST to the per-pod sidecar control endpoint. The sidecar is
 // reachable at the pod bridge IP (a short hop), so a few seconds is generous; bounding it keeps a wedged
 // sidecar from stalling the SetModel handler.
@@ -139,6 +146,11 @@ type attacher struct {
 	// the manifest has a bundle, short otherwise); tests that exercise the "report never arrives"
 	// path override this directly so they don't block for either production default.
 	applyReportTimeout time.Duration
+
+	// progressHeartbeat overrides progressHeartbeatInterval for heartbeatProgress (sp-mwco.4.7).
+	// Zero => progressHeartbeatInterval. A field, not a package var, so tests never race each other
+	// by shadowing package state. Tests shrink this to assert on many ticks within a short wait.
+	progressHeartbeat time.Duration
 }
 
 // pendingClient is a client attach that arrived before its session's pump/relay was registered (the
@@ -906,7 +918,9 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			// carrying spawn by the full 2m just to end up warning).
 			timeout = spawnlet.ApplyReportTimeoutFor(manifest)
 		}
+		stop := a.heartbeatProgress(ctx, st.SpawnId, st.Generation, "installing_skills", "awaiting skill install report")
 		env, awaitErr := stager.AwaitApplyReport(ctx, st.SpawnId, timeout)
+		stop()
 		var fatalErr error
 		var entries []spawnlet.InstallEntry
 		if awaitErr != nil {
@@ -932,7 +946,8 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	// terminal dies. Goes ACTIVE only once the session is confirmed present.
 	if st.Mode == string(agentcaps.ModeTmux) {
 		emitStep(spawnlet.MilestoneAwaitReady)
-		a.resumeProgress(st.SpawnId, st.Generation, "attaching", "awaiting tmux session 'spawn'")
+		stop := a.heartbeatProgress(ctx, st.SpawnId, st.Generation, "attaching", "awaiting tmux session 'spawn'")
+		defer stop()
 
 		hasSession := a.tmuxHasSessionFn
 		if hasSession == nil {
@@ -1021,8 +1036,10 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	if flags.AwaitReady {
 		emitStep(spawnlet.MilestoneAwaitReady)
 	}
-	a.resumeProgress(st.SpawnId, st.Generation, "attaching", "awaiting agent ACP readiness")
-	if err := p.start(ctx, readyTimeout); err != nil {
+	stopACPHeartbeat := a.heartbeatProgress(ctx, st.SpawnId, st.Generation, "attaching", "awaiting agent ACP readiness")
+	err = p.start(ctx, readyTimeout)
+	stopACPHeartbeat()
+	if err != nil {
 		logErr("startSpawn "+st.SpawnId+": agent not ready", err)
 		p.stop()
 		a.mu.Lock()
@@ -1131,6 +1148,48 @@ func (a *attacher) resumeProgress(spawnID string, gen uint64, phase, detail stri
 			SpawnId: spawnID, Generation: gen, Phase: phase, Detail: detail,
 		},
 	}})
+}
+
+// heartbeatProgress emits an immediate ResumeProgress and then one every progressHeartbeat until the
+// returned stop func is called (or ctx is done) — closing the CP resume-stall gap for a long, silent
+// wait inside startSpawn (sp-mwco.4.7: the apply-report wait, and the tmux/acp readiness waits that
+// follow it, previously emitted zero progress for up to their full timeout). stop closes the
+// goroutine's done channel and JOINS it before returning: this is load-bearing, since it guarantees
+// no ResumeProgress can be sent after the caller proceeds (e.g. to send a terminal SkillInstallReport
+// or ERROR status), keeping message ordering deterministic. stop is idempotent — safe to call
+// explicitly and again via defer.
+func (a *attacher) heartbeatProgress(ctx context.Context, spawnID string, gen uint64, phase, detail string) (stop func()) {
+	a.resumeProgress(spawnID, gen, phase, detail)
+
+	interval := a.progressHeartbeat
+	if interval <= 0 {
+		interval = progressHeartbeatInterval
+	}
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				a.resumeProgress(spawnID, gen, phase, detail)
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-stopped
+		})
+	}
 }
 
 // suspendSpawn persists the spawn's mounts and tears the pod down, using a fail-closed gate->reap->finish
