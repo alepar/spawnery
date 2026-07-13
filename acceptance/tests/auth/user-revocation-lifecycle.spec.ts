@@ -8,6 +8,10 @@ import {
 import { refreshOAuthSession } from "../../src/auth/oauth-session";
 import { restoreAuthService } from "./auth-service-restoration";
 import {
+  aggregateLifecycleFailures,
+  cleanupSpawnFailures,
+} from "./user-revocation-lifecycle";
+import {
   cpClient,
   decodeSessionArtifact,
   establishCurrentSession,
@@ -233,6 +237,7 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
   let cleanupToken = "";
   let testError: unknown;
   let restorationError: unknown;
+  let cleanupErrors: unknown[] = [];
 
   try {
     let logoutSession = await establishCurrentSession(cfg);
@@ -361,12 +366,12 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
     }
     if (cleanupToken) {
       const cleanup = cpClient(cfg, cleanupToken);
-      await Promise.all(createdSpawnIds.map((spawnId) => cleanup.deleteSpawn({ spawnId }).catch(() => {})));
+      cleanupErrors = await cleanupSpawnFailures(
+        createdSpawnIds,
+        (spawnId) => cleanup.deleteSpawn({ spawnId }),
+      );
     }
   }
-  if (testError && restorationError) {
-    throw new AggregateError([testError, restorationError], "revocation lifecycle and auth service restoration failed");
-  }
-  if (restorationError) throw restorationError;
-  if (testError) throw testError;
+  const failure = aggregateLifecycleFailures(testError, restorationError, cleanupErrors);
+  if (failure) throw failure;
 });
