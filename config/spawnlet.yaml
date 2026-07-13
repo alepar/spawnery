@@ -29,8 +29,10 @@ node:
   environment:     "dev"              # auth-artifact signer environment (root trust domain prefix)
   signer_revocation_statement: ""     # optional deployment-provided monotonic statement
   signer_revocation_state: ""         # required persisted state path in enforced mode
-  user_revocation_state: "/var/lib/spawnlet/user-revocations/state.json"
+  user_revocation_state: "/var/lib/spawnlet/user-revocations/revocations.db"
   user_revocation_poll_interval: 5s
+  user_revocation_request_timeout: 10s
+  user_revocation_max_backoff: 1m
   certificate_revocation_state: ""   # durable monotonic issuer-CRL state
   certificate_revocation_issuers: "" # comma-separated trusted role-bearing issuer certs
   certificate_revocation_crls: ""    # matching deployment-provided current CRLs

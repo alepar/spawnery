@@ -96,7 +96,7 @@ func currentSessionToken(registry *sessionAuthRegistry, key sessionAuthKey) stri
 	return ""
 }
 
-func TestUserRevocationLifecycleClosesCurrentIncarnationsAndRejectsAfterRestart(t *testing.T) {
+func TestUserRevocationLifecycleClosesCurrentIncarnationsAndRecoversAfterRestart(t *testing.T) {
 	now := time.Unix(1_770_000_000, 0)
 	signer, artifacts := genASKey(t)
 	statePath := t.TempDir() + "/user-revocations/revocations.db"
@@ -183,7 +183,11 @@ func TestUserRevocationLifecycleClosesCurrentIncarnationsAndRejectsAfterRestart(
 		t.Fatal("family revocation closed a nonmatching direct incarnation")
 	}
 
-	accountBatch := []VerifiedUserRevocation{{Seq: 5, AccountID: "alice", RevokedAt: now.Unix(), RevokeTokensIssuedBefore: now.Unix() + 1}}
+	cutoff := now.Unix()
+	accountBatch := []VerifiedUserRevocation{{
+		Seq: 5, AccountID: "alice", RevokedAt: cutoff, RevokeTokensIssuedBefore: cutoff,
+		RevokedTokens: []VerifiedRevokedToken{{TokenID: "direct-current", RetainUntil: now.Add(time.Hour).Unix()}},
+	}}
 	if err := store.ApplyPage(accountBatch, now); err != nil {
 		t.Fatal(err)
 	}
@@ -213,32 +217,51 @@ func TestUserRevocationLifecycleClosesCurrentIncarnationsAndRejectsAfterRestart(
 	restartStream := &fakeCPStream{}
 	restartedAttacher := newAttacher(mgr, restartStream)
 	restartedAttacher.cfg.NodeID = "node-1"
-	restartedAttacher.auths = newSessionAuthRegistry(restarted)
+	restartedAttacher.auths = newSessionAuthRegistryWithClock(func() time.Time { return now }, func(delay time.Duration, callback func()) sessionAuthTimer { return time.AfterFunc(delay, callback) }, restarted)
 	restartedAttacher.verifier = NewIntentVerifier(artifacts, "", "node-1", false, func() time.Time { return now }, restarted)
 	restartKey := genECDSA(t)
-	blockedStartBody := &authv1.IntentBody{Jti: "restart-start", IssuedAt: now.Unix(), Op: string(intent.OpCreateSpawn), SpawnId: "sp-blocked", TargetNodeId: "node-1", AppRef: appDir, Model: "m"}
+	blockedStartBody := &authv1.IntentBody{Jti: "restart-blocked", IssuedAt: now.Unix(), Op: string(intent.OpCreateSpawn), SpawnId: "sp-blocked", TargetNodeId: "node-1", AppRef: appDir, Model: "m"}
 	restartedAttacher.startSpawn(t.Context(), &nodev1.StartSpawn{
 		SpawnId: "sp-blocked", AppRef: appDir, Model: "m", AssertedOwner: "alice", IntentOp: string(intent.OpCreateSpawn),
-		Auth: signedNodeEnvelope(t, signer, restartKey, "alice", "fresh-after-account-revoke", now.Add(time.Hour), blockedStartBody, intent.OpCreateSpawn),
+		Auth: signedNodeEnvelope(t, signer, restartKey, "alice", "direct-current", now.Add(time.Hour), blockedStartBody, intent.OpCreateSpawn),
 	})
 	if detail := restartStream.lastErrorDetail("sp-blocked"); !strings.Contains(detail, string(NACKTokenInvalid)) {
-		t.Fatalf("persisted start denial=%q", detail)
+		t.Fatalf("persisted explicit-token denial=%q", detail)
 	}
 
-	restartedAttacher.pumps[sessionKey{spawnID: "sp-live", sessionID: "blocked-open"}] = newPump(io.Discard, strings.NewReader(""))
-	openBlocked := &nodev1.SessionOpen{SpawnId: "sp-live", Generation: 1, SessionId: "blocked-open", ClientId: "blocked-client", AssertedOwner: "alice", AttachmentId: "blocked-open-attachment", AttachmentSequence: 1,
-		Auth: openEnvelope(t, signer, restartKey, now, "alice", "fresh-open-after-restart", "restart-open", "sp-live", "blocked-open", 1)}
-	restartedAttacher.handle(t.Context(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: openBlocked}})
-	if closed := authClosedForAttachment(restartStream, "blocked-open-attachment"); closed == nil || !strings.Contains(closed.GetReason(), string(NACKTokenInvalid)) {
-		t.Fatalf("persisted open denial=%+v", closed)
-	}
-
-	restartedAttacher.reauthenticateClient(&nodev1.SessionReauth{
-		SpawnId: "sp-live", Generation: 1, SessionId: "blocked-open", ClientId: "blocked-client", AssertedOwner: "alice", AttachmentId: "blocked-reauth-attachment",
-		Auth: reauthEnvelope(t, signer, restartKey, now, "alice", "fresh-reauth-after-restart", "restart-reauth", "sp-live", "blocked-open", 1),
+	freshStartBody := &authv1.IntentBody{Jti: "restart-fresh", IssuedAt: cutoff, Op: string(intent.OpCreateSpawn), SpawnId: "sp-fresh", TargetNodeId: "node-1", AppRef: appDir, Model: "m"}
+	restartedAttacher.startSpawn(t.Context(), &nodev1.StartSpawn{
+		SpawnId: "sp-fresh", AppRef: appDir, Model: "m", AssertedOwner: "alice", IntentOp: string(intent.OpCreateSpawn),
+		Auth: signedNodeEnvelope(t, signer, restartKey, "alice", "fresh-after-account-revoke", now.Add(time.Hour), freshStartBody, intent.OpCreateSpawn),
 	})
-	if closed := authClosedForAttachment(restartStream, "blocked-reauth-attachment"); closed == nil || !strings.Contains(closed.GetReason(), string(NACKTokenInvalid)) {
-		t.Fatalf("persisted reauth denial=%+v", closed)
+	if owner, _, ok := mgr.SpawnOwnerGeneration("sp-fresh"); !ok || owner != "alice" {
+		t.Fatalf("cutoff-equal start owner=%q ok=%v error=%q", owner, ok, restartStream.lastErrorDetail("sp-fresh"))
+	}
+	t.Cleanup(func() { _ = mgr.Stop(context.Background(), "sp-fresh") })
+
+	freshPump := newPump(io.Discard, strings.NewReader(""))
+	freshKey := sessionAuthKey{spawnID: "sp-live", sessionID: "fresh-open", clientID: "fresh-client"}
+	restartedAttacher.pumps[sessionKey{spawnID: "sp-live", sessionID: "fresh-open"}] = freshPump
+	freshOpen := &nodev1.SessionOpen{SpawnId: "sp-live", Generation: 1, SessionId: "fresh-open", ClientId: "fresh-client", AssertedOwner: "alice", AttachmentId: "fresh-open-attachment", AttachmentSequence: 1,
+		Auth: openEnvelope(t, signer, restartKey, now, "alice", "fresh-open-after-restart", "restart-open", "sp-live", "fresh-open", 1)}
+	restartedAttacher.handle(t.Context(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: freshOpen}})
+	if !restartedAttacher.auths.contains(freshKey) || !freshPump.attached() || authClosedForAttachment(restartStream, "fresh-open-attachment") != nil {
+		t.Fatalf("cutoff-equal open auth=%v attached=%v closes=%s", restartedAttacher.auths.contains(freshKey), freshPump.attached(), authClosedSummary(restartStream))
+	}
+	restartedAttacher.reauthenticateClient(&nodev1.SessionReauth{
+		SpawnId: "sp-live", Generation: 1, SessionId: "fresh-open", ClientId: "fresh-client", AssertedOwner: "alice", AttachmentId: "fresh-open-attachment",
+		Auth: reauthEnvelope(t, signer, restartKey, now, "alice", "fresh-reauth-after-restart", "restart-reauth", "sp-live", "fresh-open", 1),
+	})
+	if got := currentSessionToken(restartedAttacher.auths, freshKey); got != "fresh-reauth-after-restart" {
+		t.Fatalf("cutoff-equal reauth token=%q closes=%s", got, authClosedSummary(restartStream))
+	}
+
+	now = now.Add(time.Hour)
+	if err := restarted.ApplyPage(nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Checkpoint() != 5 || restarted.IsRevoked("direct-current", "alice", cutoff) {
+		t.Fatalf("pruned state checkpoint=%d revoked=%v", restarted.Checkpoint(), restarted.IsRevoked("direct-current", "alice", cutoff))
 	}
 }
 

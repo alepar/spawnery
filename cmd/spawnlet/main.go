@@ -171,7 +171,7 @@ func main() {
 			nodeCfg.SubKeys = sk
 		}
 		if cfg.Node.AuthMode == "enforced" {
-			userRevocations, openErr := node.OpenUserRevocationStore(cfg.Node.UserRevocationState)
+			userRevocations, openErr := nodeUserRevocationStore(cfg)
 			if openErr != nil {
 				log.Fatalf("node: user revocation state: %v", openErr)
 			}
@@ -650,11 +650,22 @@ type nodeHTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
+func nodeUserRevocationStore(cfg *Spawnlet) (*node.UserRevocationStore, error) {
+	if cfg == nil || cfg.Node.UserRevocationState == "" {
+		return nil, errors.New("user revocation state configuration is required")
+	}
+	return node.OpenUserRevocationStore(cfg.Node.UserRevocationState)
+}
+
 func nodeUserRevocationConsumer(cfg *Spawnlet, client nodeHTTPDoer, artifacts *token.Verifier, store *node.UserRevocationStore) (*node.RevocationConsumer, error) {
 	if cfg == nil {
 		return nil, errors.New("user revocation consumer configuration is required")
 	}
-	return node.NewRevocationConsumer(client, strings.TrimRight(cfg.ASURL, "/")+"/revocations", artifacts, store, cfg.Node.UserRevocationPollInterval)
+	return node.NewRevocationConsumer(
+		client, strings.TrimRight(cfg.ASURL, "/")+"/revocations", artifacts, store, cfg.Node.UserRevocationPollInterval,
+		node.WithRevocationRequestTimeout(cfg.Node.UserRevocationRequestTimeout),
+		node.WithRevocationMaxBackoff(cfg.Node.UserRevocationMaxBackoff),
+	)
 }
 
 // buildIntentVerifier builds the mandatory A4 IntentVerifier. AuthMode selects only the CP transport;

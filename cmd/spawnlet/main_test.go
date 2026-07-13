@@ -128,8 +128,8 @@ func TestSpawnletConfig_Defaults(t *testing.T) {
 	if cfg.Journal.Backend != "" {
 		t.Errorf("Journal.Backend should default to empty (disabled), got %q", cfg.Journal.Backend)
 	}
-	if cfg.Node.UserRevocationState != "/var/lib/spawnlet/user-revocations/state.json" || cfg.Node.UserRevocationPollInterval != 5*time.Second {
-		t.Errorf("user revocation defaults = %q/%s", cfg.Node.UserRevocationState, cfg.Node.UserRevocationPollInterval)
+	if cfg.Node.UserRevocationState != "/var/lib/spawnlet/user-revocations/revocations.db" || cfg.Node.UserRevocationPollInterval != 5*time.Second || cfg.Node.UserRevocationRequestTimeout != 10*time.Second || cfg.Node.UserRevocationMaxBackoff != time.Minute {
+		t.Errorf("user revocation defaults = %q/%s/%s/%s", cfg.Node.UserRevocationState, cfg.Node.UserRevocationPollInterval, cfg.Node.UserRevocationRequestTimeout, cfg.Node.UserRevocationMaxBackoff)
 	}
 	if cfg.Journal.S3.Region != "garage" {
 		t.Errorf("Journal.S3.Region = %q, want garage", cfg.Journal.S3.Region)
@@ -194,7 +194,8 @@ func TestSpawnletConfigEnforcedUserRevocationRequirements(t *testing.T) {
 		"node.certificate_revocation_state=/tmp/cert-state", "node.certificate_revocation_issuers=/tmp/issuer.pem",
 		"node.certificate_revocation_crls=/tmp/issuer.crl", "cp.server_name=cp.internal",
 		"as_url=https://as.internal", "as_server_name=authsvc.internal",
-		"node.user_revocation_state=/tmp/user-revocations/state.json", "node.user_revocation_poll_interval=5s",
+		"node.user_revocation_state=/tmp/user-revocations/revocations.db", "node.user_revocation_poll_interval=5s",
+		"node.user_revocation_request_timeout=10s", "node.user_revocation_max_backoff=1m",
 	}
 	for _, test := range []struct{ name, override, want string }{
 		{name: "missing AS URL", override: "as_url=", want: "as_url"},
@@ -202,6 +203,11 @@ func TestSpawnletConfigEnforcedUserRevocationRequirements(t *testing.T) {
 		{name: "missing state path", override: "node.user_revocation_state=", want: "user revocation state"},
 		{name: "zero interval", override: "node.user_revocation_poll_interval=0s", want: "positive poll interval"},
 		{name: "negative interval", override: "node.user_revocation_poll_interval=-1s", want: "positive poll interval"},
+		{name: "zero request timeout", override: "node.user_revocation_request_timeout=0s", want: "positive request timeout"},
+		{name: "negative request timeout", override: "node.user_revocation_request_timeout=-1s", want: "positive request timeout"},
+		{name: "zero max backoff", override: "node.user_revocation_max_backoff=0s", want: "positive max backoff"},
+		{name: "negative max backoff", override: "node.user_revocation_max_backoff=-1s", want: "positive max backoff"},
+		{name: "max backoff below interval", override: "node.user_revocation_max_backoff=4s", want: "at least the poll interval"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			sets := append(append([]string(nil), base...), test.override)
@@ -209,6 +215,25 @@ func TestSpawnletConfigEnforcedUserRevocationRequirements(t *testing.T) {
 				t.Fatalf("error=%v, want actionable %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestNodeUserRevocationStoreRejectsCorruptSQLiteOnStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "user-revocations", "revocations.db")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"checkpoint":7}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Spawnlet{}
+	cfg.Node.UserRevocationState = path
+	store, err := nodeUserRevocationStore(cfg)
+	if store != nil {
+		_ = store.Close()
+	}
+	if err == nil {
+		t.Fatal("corrupt user revocation database accepted at startup")
 	}
 }
 
@@ -283,11 +308,13 @@ func TestBuildIntentVerifierRequiresTrustInEveryTransportMode(t *testing.T) {
 
 func TestSpawnletConfig_ArtifactTrustAliasesAndRemovedRawKeys(t *testing.T) {
 	cfg, err := loadSpawnletTest(t, "dev", map[string]string{
-		"NODE_AUTH_ENVIRONMENT":              "prod",
-		"NODE_SIGNER_REVOCATION_STATEMENT":   "/deployment/revocations",
-		"NODE_SIGNER_REVOCATION_STATE":       "/state/revocations",
-		"NODE_USER_REVOCATION_STATE":         "/state/users",
-		"NODE_USER_REVOCATION_POLL_INTERVAL": "17s",
+		"NODE_AUTH_ENVIRONMENT":                "prod",
+		"NODE_SIGNER_REVOCATION_STATEMENT":     "/deployment/revocations",
+		"NODE_SIGNER_REVOCATION_STATE":         "/state/revocations",
+		"NODE_USER_REVOCATION_STATE":           "/state/users",
+		"NODE_USER_REVOCATION_POLL_INTERVAL":   "17s",
+		"NODE_USER_REVOCATION_REQUEST_TIMEOUT": "23s",
+		"NODE_USER_REVOCATION_MAX_BACKOFF":     "2m",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -295,7 +322,7 @@ func TestSpawnletConfig_ArtifactTrustAliasesAndRemovedRawKeys(t *testing.T) {
 	if cfg.Node.Environment != "prod" || cfg.Node.SignerRevocationStatement != "/deployment/revocations" || cfg.Node.SignerRevocationState != "/state/revocations" {
 		t.Fatalf("artifact trust aliases not loaded: %+v", cfg.Node)
 	}
-	if cfg.Node.UserRevocationState != "/state/users" || cfg.Node.UserRevocationPollInterval != 17*time.Second {
+	if cfg.Node.UserRevocationState != "/state/users" || cfg.Node.UserRevocationPollInterval != 17*time.Second || cfg.Node.UserRevocationRequestTimeout != 23*time.Second || cfg.Node.UserRevocationMaxBackoff != 2*time.Minute {
 		t.Fatalf("user revocation aliases not loaded: %+v", cfg.Node)
 	}
 	legacyAlias := strings.Join([]string{"NODE", "AS", "PUBKEYS"}, "_")
@@ -852,6 +879,8 @@ func TestNodeASClientAndRevocationConsumerStartupBoundary(t *testing.T) {
 	cfg.Node.IDDir = idDir
 	cfg.Node.TrustDomain = trustDomain
 	cfg.Node.UserRevocationPollInterval = time.Hour
+	cfg.Node.UserRevocationRequestTimeout = 50 * time.Millisecond
+	cfg.Node.UserRevocationMaxBackoff = time.Hour
 	client, err := nodeASClient(cfg, runtime)
 	if err != nil {
 		t.Fatal(err)
@@ -909,18 +938,22 @@ func TestNodeASClientAndRevocationConsumerStartupBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	userStore, err := node.OpenUserRevocationStore(filepath.Join(t.TempDir(), "users", "state.json"))
+	userStore, err := node.OpenUserRevocationStore(filepath.Join(t.TempDir(), "users", "revocations.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = userStore.Close() })
 	exactRequest := make(chan struct{})
 	doer := nodeASRequestDoer(func(request *http.Request) (*http.Response, error) {
-		if request.URL.String() != strings.TrimRight(cfg.ASURL, "/")+"/revocations?since=0" {
+		if request.URL.String() != strings.TrimRight(cfg.ASURL, "/")+"/revocations?limit=256&since=0" {
 			t.Errorf("feed target=%s", request.URL.String())
 		}
+		deadline, ok := request.Context().Deadline()
+		if !ok || time.Until(deadline) > cfg.Node.UserRevocationRequestTimeout || time.Until(deadline) <= 0 {
+			t.Errorf("feed deadline=%v/%v", deadline, ok)
+		}
 		close(exactRequest)
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("[]"))}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"entries":[],"has_more":false}`))}, nil
 	})
 	consumer, err := nodeUserRevocationConsumer(cfg, doer, artifacts, userStore)
 	if err != nil {

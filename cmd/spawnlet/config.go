@@ -44,6 +44,8 @@ type Spawnlet struct {
 		SignerRevocationState        string        `koanf:"signer_revocation_state"`
 		UserRevocationState          string        `koanf:"user_revocation_state"`
 		UserRevocationPollInterval   time.Duration `koanf:"user_revocation_poll_interval"`
+		UserRevocationRequestTimeout time.Duration `koanf:"user_revocation_request_timeout"`
+		UserRevocationMaxBackoff     time.Duration `koanf:"user_revocation_max_backoff"`
 		CertificateRevocationState   string        `koanf:"certificate_revocation_state"`
 		CertificateRevocationIssuers string        `koanf:"certificate_revocation_issuers"`
 		CertificateRevocationCRLs    string        `koanf:"certificate_revocation_crls"`
@@ -135,8 +137,20 @@ func (s Spawnlet) Validate() error {
 	if s.ASURL == "" || s.ASServerName == "" {
 		return fmt.Errorf("as_url and as_server_name are required in enforced mode")
 	}
-	if s.Node.UserRevocationState == "" || s.Node.UserRevocationPollInterval <= 0 {
-		return fmt.Errorf("node user revocation state and positive poll interval are required in enforced mode")
+	if s.Node.UserRevocationState == "" {
+		return fmt.Errorf("node user revocation state is required in enforced mode")
+	}
+	if s.Node.UserRevocationPollInterval <= 0 {
+		return fmt.Errorf("node user revocation positive poll interval is required in enforced mode")
+	}
+	if s.Node.UserRevocationRequestTimeout <= 0 {
+		return fmt.Errorf("node user revocation positive request timeout is required in enforced mode")
+	}
+	if s.Node.UserRevocationMaxBackoff <= 0 {
+		return fmt.Errorf("node user revocation positive max backoff is required in enforced mode")
+	}
+	if s.Node.UserRevocationMaxBackoff < s.Node.UserRevocationPollInterval {
+		return fmt.Errorf("node user revocation max backoff must be at least the poll interval")
 	}
 	if s.CP.ServerName == "" {
 		return fmt.Errorf("cp.server_name is required in enforced mode")
@@ -156,66 +170,68 @@ func (s Spawnlet) Validate() error {
 // spawnletEnvAliases maps legacy environment variable names to dotted config keys so existing
 // deployments keep working unchanged (the env layer sits above the files).
 var spawnletEnvAliases = map[string]string{
-	"AGENT_IMAGE":                         "agent_image",
-	"SIDECAR_IMAGE":                       "sidecar_image",
-	"OPENROUTER_API_KEY":                  "openrouter_api_key",
-	"DATA_ROOT":                           "data_root",
-	"SPAWNLET_ADDR":                       "spawnlet_addr",
-	"AGENT_BINARIES":                      "agent_binaries",
-	"CONTAINER_RUNTIME":                   "container_runtime",
-	"USERNS_MODE":                         "userns_mode",
-	"GETTOKEN_LISTEN_IP":                  "gettoken_listen_ip",
-	"AS_URL":                              "as_url",
-	"AS_SERVER_NAME":                      "as_server_name",
-	"ENROLL_TOKEN":                        "enroll_token",
-	"POD_DNS":                             "pod_dns",
-	"NODE_ID":                             "node.id",
-	"NODE_CLASS":                          "node.class",
-	"NODE_OWNER":                          "node.owner",
-	"NODE_ADVERTISE_IP":                   "node.advertise_ip",
-	"NODE_TERMINAL_ADDR":                  "node.terminal_addr",
-	"NODE_AUTH_MODE":                      "node.auth_mode",
-	"NODE_ID_DIR":                         "node.id_dir",
-	"NODE_ROOT_CA":                        "node.root_ca",
-	"NODE_TRUST_DOMAIN":                   "node.trust_domain",
-	"NODE_AUTH_ENVIRONMENT":               "node.environment",
-	"NODE_SIGNER_REVOCATION_STATEMENT":    "node.signer_revocation_statement",
-	"NODE_SIGNER_REVOCATION_STATE":        "node.signer_revocation_state",
-	"NODE_USER_REVOCATION_STATE":          "node.user_revocation_state",
-	"NODE_USER_REVOCATION_POLL_INTERVAL":  "node.user_revocation_poll_interval",
-	"NODE_CERTIFICATE_REVOCATION_STATE":   "node.certificate_revocation_state",
-	"NODE_CERTIFICATE_REVOCATION_ISSUERS": "node.certificate_revocation_issuers",
-	"NODE_CERTIFICATE_REVOCATION_CRLS":    "node.certificate_revocation_crls",
-	"NODE_CERTIFICATE_REVOCATION_URLS":    "node.certificate_revocation_urls",
+	"AGENT_IMAGE":                                  "agent_image",
+	"SIDECAR_IMAGE":                                "sidecar_image",
+	"OPENROUTER_API_KEY":                           "openrouter_api_key",
+	"DATA_ROOT":                                    "data_root",
+	"SPAWNLET_ADDR":                                "spawnlet_addr",
+	"AGENT_BINARIES":                               "agent_binaries",
+	"CONTAINER_RUNTIME":                            "container_runtime",
+	"USERNS_MODE":                                  "userns_mode",
+	"GETTOKEN_LISTEN_IP":                           "gettoken_listen_ip",
+	"AS_URL":                                       "as_url",
+	"AS_SERVER_NAME":                               "as_server_name",
+	"ENROLL_TOKEN":                                 "enroll_token",
+	"POD_DNS":                                      "pod_dns",
+	"NODE_ID":                                      "node.id",
+	"NODE_CLASS":                                   "node.class",
+	"NODE_OWNER":                                   "node.owner",
+	"NODE_ADVERTISE_IP":                            "node.advertise_ip",
+	"NODE_TERMINAL_ADDR":                           "node.terminal_addr",
+	"NODE_AUTH_MODE":                               "node.auth_mode",
+	"NODE_ID_DIR":                                  "node.id_dir",
+	"NODE_ROOT_CA":                                 "node.root_ca",
+	"NODE_TRUST_DOMAIN":                            "node.trust_domain",
+	"NODE_AUTH_ENVIRONMENT":                        "node.environment",
+	"NODE_SIGNER_REVOCATION_STATEMENT":             "node.signer_revocation_statement",
+	"NODE_SIGNER_REVOCATION_STATE":                 "node.signer_revocation_state",
+	"NODE_USER_REVOCATION_STATE":                   "node.user_revocation_state",
+	"NODE_USER_REVOCATION_POLL_INTERVAL":           "node.user_revocation_poll_interval",
+	"NODE_USER_REVOCATION_REQUEST_TIMEOUT":         "node.user_revocation_request_timeout",
+	"NODE_USER_REVOCATION_MAX_BACKOFF":             "node.user_revocation_max_backoff",
+	"NODE_CERTIFICATE_REVOCATION_STATE":            "node.certificate_revocation_state",
+	"NODE_CERTIFICATE_REVOCATION_ISSUERS":          "node.certificate_revocation_issuers",
+	"NODE_CERTIFICATE_REVOCATION_CRLS":             "node.certificate_revocation_crls",
+	"NODE_CERTIFICATE_REVOCATION_URLS":             "node.certificate_revocation_urls",
 	"NODE_CERTIFICATE_REVOCATION_REFRESH_INTERVAL": "node.certificate_revocation_refresh_interval",
-	"CP_ADDR":                       "cp.addr",
-	"CP_NODE_ADDR":                  "cp.node_addr",
-	"CP_SERVER_NAME":                "cp.server_name",
-	"GITHUB_API_BASE_URL":           "github.api_base_url",
-	"GITHUB_HOST":                   "github.host",
-	"GITHUB_ALLOW_INSECURE_HOST":    "github.allow_insecure_host",
-	"GITHUB_STATIC_TOKEN":           "github.static_token",
-	"GITHUB_STATIC_TOKEN_FILE":      "github.static_token_file",
-	"EGRESS_ENFORCE":                "egress.enforce",
-	"EGRESS_ALLOW_CIDRS":            "egress.allow_cidrs",
-	"EGRESS_FLOOR_FORCE_OFF":        "egress.floor_force_off",
-	"MEM_LIMIT_MB":                  "limits.mem_mb",
-	"CPU_LIMIT":                     "limits.cpu",
-	"PIDS_LIMIT":                    "limits.pids",
-	"DELTA_CAPTURE":                 "delta.capture",
-	"DELTA_SQUASH_DEPTH":            "delta.squash_depth",
-	"DELTA_SCRUB_PATHS":             "delta.scrub_paths",
-	"CRI_ENDPOINT":                  "cri.endpoint",
-	"CRI_RUNTIME_HANDLER":           "cri.runtime_handler",
-	"JOURNAL_BACKEND":               "journal.backend",
-	"JOURNAL_ROOT":                  "journal.root",
-	"JOURNAL_FS_ROOT":               "journal.fs_root",
-	"JOURNAL_NODE_KEY":              "journal.node_key",
-	"JOURNAL_S3_ENDPOINT":           "journal.s3.endpoint",
-	"JOURNAL_GARAGE_ADMIN_ENDPOINT": "journal.s3.garage_admin_endpoint",
-	"JOURNAL_GARAGE_ADMIN_TOKEN":    "journal.s3.garage_admin_token",
-	"JOURNAL_S3_REGION":             "journal.s3.region",
-	"JOURNAL_S3_DISABLE_TLS":        "journal.s3.disable_tls",
+	"CP_ADDR":                                      "cp.addr",
+	"CP_NODE_ADDR":                                 "cp.node_addr",
+	"CP_SERVER_NAME":                               "cp.server_name",
+	"GITHUB_API_BASE_URL":                          "github.api_base_url",
+	"GITHUB_HOST":                                  "github.host",
+	"GITHUB_ALLOW_INSECURE_HOST":                   "github.allow_insecure_host",
+	"GITHUB_STATIC_TOKEN":                          "github.static_token",
+	"GITHUB_STATIC_TOKEN_FILE":                     "github.static_token_file",
+	"EGRESS_ENFORCE":                               "egress.enforce",
+	"EGRESS_ALLOW_CIDRS":                           "egress.allow_cidrs",
+	"EGRESS_FLOOR_FORCE_OFF":                       "egress.floor_force_off",
+	"MEM_LIMIT_MB":                                 "limits.mem_mb",
+	"CPU_LIMIT":                                    "limits.cpu",
+	"PIDS_LIMIT":                                   "limits.pids",
+	"DELTA_CAPTURE":                                "delta.capture",
+	"DELTA_SQUASH_DEPTH":                           "delta.squash_depth",
+	"DELTA_SCRUB_PATHS":                            "delta.scrub_paths",
+	"CRI_ENDPOINT":                                 "cri.endpoint",
+	"CRI_RUNTIME_HANDLER":                          "cri.runtime_handler",
+	"JOURNAL_BACKEND":                              "journal.backend",
+	"JOURNAL_ROOT":                                 "journal.root",
+	"JOURNAL_FS_ROOT":                              "journal.fs_root",
+	"JOURNAL_NODE_KEY":                             "journal.node_key",
+	"JOURNAL_S3_ENDPOINT":                          "journal.s3.endpoint",
+	"JOURNAL_GARAGE_ADMIN_ENDPOINT":                "journal.s3.garage_admin_endpoint",
+	"JOURNAL_GARAGE_ADMIN_TOKEN":                   "journal.s3.garage_admin_token",
+	"JOURNAL_S3_REGION":                            "journal.s3.region",
+	"JOURNAL_S3_DISABLE_TLS":                       "journal.s3.disable_tls",
 }
 
 func loadConfig() (*Spawnlet, error) {

@@ -318,7 +318,7 @@ func TestSessionAuthConcurrentApplyRegisterAndReplaceCannotLeaveRevokedRecord(t 
 
 func TestRevocationFeedOutageNeverExtendsSignedExpiry(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "revocations.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
