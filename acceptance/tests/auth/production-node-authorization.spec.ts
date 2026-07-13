@@ -7,7 +7,7 @@ import {
   WebCryptoSessionSigner,
 } from "@spawnery/client";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -497,12 +497,10 @@ test("production authorization: exact node NACKs and target substitution refusal
     }
   }
 
-  const rootCAPEM = await readFile(target.rootCAPath!, "utf8");
   const trustArgs = productionTrustArgs(target);
   for (const row of substitutions) {
     const proxy = await startCPLoopbackProxy({
       upstreamOrigin: target.cpEndpoint,
-      rootCAPEM,
       substitution: row.substitution,
     });
     let spawnId = "";
@@ -528,7 +526,6 @@ test("production authorization: exact node NACKs and target substitution refusal
   const emptyConfigHome = await mkdtemp(join(tmpdir(), "spawnery-acc-static-token-"));
   const countingProxy = await startCPLoopbackProxy({
     upstreamOrigin: target.cpEndpoint,
-    rootCAPEM,
   });
   let staticSpawnId = "";
   try {

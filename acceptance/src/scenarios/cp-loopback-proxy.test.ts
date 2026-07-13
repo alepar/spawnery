@@ -88,11 +88,24 @@ async function proxyRequest(
 }
 
 describe("startCPLoopbackProxy", () => {
+  it("uses process transport trust when no transport CA is provided", async () => {
+    const upstream = await listenUpstream((_request, response) => response.end("{}"));
+    const proxy = await startCPLoopbackProxy({ upstreamOrigin: upstream.origin });
+    try {
+      const response = await proxyRequest(proxy.origin, "/cp.v1.SpawnService/ListSpawns");
+      expect(response.status).toBe(502);
+      expect(response.body.toString("utf8")).toBe("upstream unavailable");
+    } finally {
+      await proxy.close();
+      await upstream.close();
+    }
+  });
+
   it("accepts the h2c transport used by spawnctl", async () => {
     const upstream = await listenUpstream((_request, response) => response.end("{}"));
     const proxy = await startCPLoopbackProxy({
       upstreamOrigin: upstream.origin,
-      rootCAPEM: rootPEM,
+      transportCAPEM: rootPEM,
       substitution: { field: "targetNodeId", value: "node-substituted" },
     });
     try {
@@ -123,7 +136,7 @@ describe("startCPLoopbackProxy", () => {
     });
     const proxy = await startCPLoopbackProxy({
       upstreamOrigin: upstream.origin,
-      rootCAPEM: rootPEM,
+      transportCAPEM: rootPEM,
       substitution: { field: "targetNodeId", value: "node-substituted" },
     });
     try {
@@ -161,7 +174,7 @@ describe("startCPLoopbackProxy", () => {
     });
     const proxy = await startCPLoopbackProxy({
       upstreamOrigin: upstream.origin,
-      rootCAPEM: rootPEM,
+      transportCAPEM: rootPEM,
       substitution: { field: "targetNodeId", value: "node-substituted" },
     });
     try {
@@ -190,7 +203,7 @@ describe("startCPLoopbackProxy", () => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(original));
     });
-    const proxy = await startCPLoopbackProxy({ upstreamOrigin: upstream.origin, rootCAPEM: rootPEM });
+    const proxy = await startCPLoopbackProxy({ upstreamOrigin: upstream.origin, transportCAPEM: rootPEM });
     try {
       const response = await proxyRequest(proxy.origin, "/cp.v1.SpawnService/GetPendingIntent", {
         headers: { "content-type": "application/json" },
@@ -207,7 +220,7 @@ describe("startCPLoopbackProxy", () => {
   it("returns a bounded gateway error when the TLS upstream is unavailable", async () => {
     const proxy = await startCPLoopbackProxy({
       upstreamOrigin: "https://localhost:1",
-      rootCAPEM: rootPEM,
+      transportCAPEM: rootPEM,
       substitution: { field: "targetNodeId", value: "node-substituted" },
     });
     try {
@@ -230,7 +243,7 @@ describe("startCPLoopbackProxy", () => {
     });
     const proxy = await startCPLoopbackProxy({
       upstreamOrigin: upstream.origin,
-      rootCAPEM: rootPEM,
+      transportCAPEM: rootPEM,
       substitution: { field: "targetNodeId", value: "node-substituted" },
       maxBodyBytes: 8,
     });

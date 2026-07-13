@@ -23,7 +23,7 @@ class BodyTooLargeError extends Error {}
 
 export interface CPLoopbackProxyOptions {
   upstreamOrigin: string;
-  rootCAPEM: string;
+  transportCAPEM?: string;
   substitution?: PendingTargetSubstitution;
   maxBodyBytes?: number;
 }
@@ -94,7 +94,9 @@ export async function startCPLoopbackProxy(
 ): Promise<CPLoopbackProxy> {
   const upstream = new URL(options.upstreamOrigin);
   if (upstream.protocol !== "https:") throw new Error("CP loopback proxy requires an HTTPS upstream");
-  if (!options.rootCAPEM.trim()) throw new Error("CP loopback proxy requires a public root CA");
+  if (options.transportCAPEM !== undefined && !options.transportCAPEM.trim()) {
+    throw new Error("CP loopback proxy transport CA must not be empty");
+  }
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes <= 0) {
     throw new Error("CP loopback proxy maxBodyBytes must be positive");
@@ -137,7 +139,7 @@ export async function startCPLoopbackProxy(
       method: request.method,
       path: `${target.pathname}${target.search}`,
       headers,
-      ca: options.rootCAPEM,
+      ...(options.transportCAPEM === undefined ? {} : { ca: options.transportCAPEM }),
       rejectUnauthorized: true,
       servername: upstream.hostname,
       agent: false,
