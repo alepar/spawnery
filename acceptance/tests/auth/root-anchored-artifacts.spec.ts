@@ -9,7 +9,7 @@ import {
   deployCurrentRevocation,
   establishCurrentSession,
   expectCPRejected,
-  loadVMAuthConfig,
+  loadDestructiveVMAuthConfig,
   mintVMToken,
   nodeLeafArtifact,
   runtimeRootFingerprints,
@@ -20,7 +20,7 @@ import {
 
 test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, and signer revocation", async () => {
   test.setTimeout(8 * 60_000);
-  const cfg = loadVMAuthConfig();
+  const cfg = loadDestructiveVMAuthConfig();
   await assertDisposableVM(cfg);
   const env = await ssh(cfg, "sudo cat /etc/spawnery/env.d/common.env");
   expect(env).toContain("CP_AUTH_ROOT_CA=/etc/spawnery/cp/root.pem");
