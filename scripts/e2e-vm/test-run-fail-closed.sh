@@ -9,9 +9,11 @@ cat > "$TMP/distrobox" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 cmd="${*: -1}"
+echo "mock distrobox: $cmd"
+[[ "$cmd" == *"forbidden-scan"* ]] && echo "forbidden-scan: mock PASS"
 case "$cmd" in
   *"make build bin/spawnery_cp"*)
-    [ "${FAIL_PHASE:-}" = binaries ] && exit 41
+    if [ "${FAIL_PHASE:-}" = binaries ]; then exit 41; fi
     stage="$(printf '%s' "$cmd" | sed -n "s#.*'\([^']*\)/bin/'.*#\1#p")"
     mkdir -p "$stage/bin"
     for name in spawnery_cp authsvc spawnlet spawnctl spawnery-ca; do
@@ -20,17 +22,17 @@ case "$cmd" in
     done
     ;;
   *"make -B images"*)
-    [ "${FAIL_PHASE:-}" = images ] && exit 42
+    if [ "${FAIL_PHASE:-}" = images ]; then exit 42; fi
     ;;
   *"cd web && npm ci"*)
-    [ "${FAIL_PHASE:-}" = web ] && exit 43
-    [ "${FAIL_PHASE:-}" = staging ] && exit 0
+    if [ "${FAIL_PHASE:-}" = web ]; then exit 43; fi
+    if [ "${FAIL_PHASE:-}" = staging ]; then exit 0; fi
     stage="$(printf '%s' "$cmd" | sed -n "s#.*rm -rf '\([^']*\)/web-dist'.*#\1#p")"
     mkdir -p "$stage/web-dist"
     : > "$stage/web-dist/index.html"
     ;;
   *"cd acceptance && npm ci"*)
-    [ "${FAIL_PHASE:-}" = acceptance-npm ] && exit 44
+    if [ "${FAIL_PHASE:-}" = acceptance-npm ]; then exit 44; fi
     ;;
 esac
 EOF
@@ -38,7 +40,8 @@ EOF
 cat > "$TMP/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[ "${FAIL_PHASE:-}" = image-save ] && exit 45
+echo "mock docker: $*"
+if [ "${FAIL_PHASE:-}" = image-save ]; then exit 45; fi
 while [ "$#" -gt 0 ]; do
   if [ "$1" = -o ]; then
     mkdir -p "$(dirname "$2")"
@@ -64,5 +67,19 @@ for phase in binaries images image-save web staging acceptance-npm; do
     exit 1
   fi
 done
+
+if E2E_RUN_BUILD_ONLY=1 E2E_DISTROBOX_BIN="$TMP/distrobox" E2E_DOCKER_BIN="$TMP/docker" \
+    E2E_STATE_ROOT="$TMP/state-pins" GOLDEN_IMAGE=/not-used \
+    "$ROOT/scripts/e2e-vm/run.sh" --keep >"$TMP/pins.out" 2>&1; then
+  :
+else
+  echo "run.sh build-only happy path failed" >&2
+  cat "$TMP/pins.out" >&2
+  exit 1
+fi
+rg -q 'forbidden-scan' "$TMP/pins.out" || {
+  echo "run.sh did not execute the web release forbidden scan" >&2
+  exit 1
+}
 
 echo "e2e-vm fresh build failures are fail-closed"

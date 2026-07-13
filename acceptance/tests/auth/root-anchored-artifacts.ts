@@ -25,7 +25,7 @@ export interface VMAuthConfig {
   webOrigin: string;
   appId: string;
   model: string;
-  devToken: string;
+  destructiveDevToken: string;
   owner: string;
 }
 
@@ -35,7 +35,7 @@ export function loadVMAuthConfig(env: NodeJS.ProcessEnv = process.env): VMAuthCo
     if (!value) throw new Error(`root-anchored-artifacts requires ${name}`);
     return value;
   };
-  const [devToken, owner] = required("ACC_IDENTITY_POOL").split(",", 1)[0].split("=", 2);
+  const [, owner] = required("ACC_IDENTITY_POOL").split(",", 1)[0].split("=", 2);
   return {
     ip: required("ACC_E2E_VM_IP"),
     sshKey: required("ACC_E2E_SSH_KEY"),
@@ -45,7 +45,7 @@ export function loadVMAuthConfig(env: NodeJS.ProcessEnv = process.env): VMAuthCo
     webOrigin: required("ACC_WEB_ORIGIN"),
     appId: required("ACC_TEST_APP_ID"),
     model: required("ACC_TEST_MODEL"),
-    devToken,
+    destructiveDevToken: required("ACC_DESTRUCTIVE_DEV_TOKEN"),
     owner,
   };
 }
@@ -168,7 +168,7 @@ export async function submitSpawn(
   nodeToken: string,
   keyPair: CryptoKeyPair,
   suffix: string,
-  cpToken = cfg.devToken,
+  cpToken: string,
 ): Promise<{ spawnId: string; status: string; errorDetail: string }> {
   const client = cpClient(cfg, cpToken);
   const created = await client.createSpawn({ appId: cfg.appId, model: cfg.model, name: `acc-root-${suffix}` });
@@ -216,6 +216,22 @@ export async function submitSpawn(
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   return { spawnId, status, errorDetail };
+}
+
+export async function setCPAuthMode(cfg: VMAuthConfig, mode: "prod" | "dev"): Promise<void> {
+  if (mode === "dev") {
+    const content = `CP_AUTH_MODE=dev\nCP_DEV_TOKENS=${cfg.destructiveDevToken}=${cfg.owner}\n`;
+    await ssh(cfg, remoteArgv("sudo", "sh", "-c", `printf %s ${posixShellQuote(content)} > /etc/spawnery/env.d/zz-destructive.env`));
+  } else {
+    await ssh(cfg, "sudo rm -f /etc/spawnery/env.d/zz-destructive.env");
+  }
+  await ssh(cfg, "sudo systemctl restart spawnery-cp");
+  for (let i = 0; i < 60; i++) {
+    const active = await ssh(cfg, "sudo systemctl is-active spawnery-cp || true").catch(() => "");
+    if (active === "active") return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`CP did not restart in ${mode} auth mode`);
 }
 
 export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node", spki: Uint8Array): Promise<string> {

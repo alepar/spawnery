@@ -1,10 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
+  buildSessionReauthSignedIntentB64,
   buildSessionOpenSignedIntentB64,
   cpv1,
   exportSpkiDer,
   WebCryptoSessionSigner,
 } from "@spawnery/client";
+import { refreshOAuthSession } from "../../src/auth/oauth-session";
 import {
   cpClient,
   decodeSessionArtifact,
@@ -99,16 +101,52 @@ async function expectSocketsClosed(page: Page, names: string[], timeoutMs: numbe
   );
 }
 
+async function reauthenticateSocket(
+  page: Page,
+  session: Awaited<ReturnType<typeof establishCurrentSession>>,
+  spawnId: string,
+  sessionId: string,
+  generation: bigint,
+  targetNodeId: string,
+  socketName: string,
+): Promise<void> {
+  const tokenId = decodeSessionArtifact(session.nodeAccessToken).body.tokenId;
+  const signedIntent = await buildSessionReauthSignedIntentB64({
+    spawnId,
+    sessionId,
+    generation,
+    targetNodeId,
+    newTokenId: tokenId,
+  }, new WebCryptoSessionSigner(session.privateKey, session.publicKey));
+  await page.evaluate(({ socketsKey, name, control }) => {
+    const holder = window as typeof window & Record<string, Record<string, WebSocket>>;
+    const socket = holder[socketsKey]?.[name];
+    if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error(`socket ${name} is not open for reauth`);
+    socket.send(JSON.stringify(control));
+  }, {
+    socketsKey: SOCKETS_KEY,
+    name: socketName,
+    control: { type: "nodeReauth", nodeAccessToken: session.nodeAccessToken, signedIntent },
+  });
+}
+
+async function expectSocketsOpen(page: Page, names: string[]): Promise<void> {
+  await expect.poll(async () => page.evaluate(({ socketsKey, socketNames }) => {
+    const holder = window as typeof window & Record<string, Record<string, WebSocket>>;
+    return socketNames.map((name) => holder[socketsKey]?.[name]?.readyState);
+  }, { socketsKey: SOCKETS_KEY, socketNames: names })).toEqual(names.map(() => 1));
+}
+
 test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot extend node expiry", async ({ page }) => {
   test.setTimeout(10 * 60_000);
   const cfg = loadVMAuthConfig();
   await page.goto(cfg.webOrigin);
   const createdSpawnIds: string[] = [];
   let authsvcStopped = false;
-  let cleanupToken = cfg.devToken;
+  let cleanupToken = "";
 
   try {
-    const logoutSession = await establishCurrentSession(cfg);
+    let logoutSession = await establishCurrentSession(cfg);
     cleanupToken = logoutSession.accessToken;
     const logoutKeyPair = { privateKey: logoutSession.privateKey, publicKey: logoutSession.publicKey };
     const live = await submitSpawn(
@@ -147,6 +185,19 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
     await bindSession(page, cfg, logoutSession, logoutSession.nodeAccessToken, live.spawnId, moshSessionId,
       target.generation, target.targetNodeId, "logout-mosh");
 
+    const predecessorNodeToken = logoutSession.nodeAccessToken;
+    logoutSession = await refreshOAuthSession({ asOrigin: cfg.asOrigin }, logoutSession);
+    expect(logoutSession.nodeAccessToken).not.toBe(predecessorNodeToken);
+    await reauthenticateSocket(page, logoutSession, live.spawnId, acpSessionId,
+      target.generation, target.targetNodeId, "logout-acp");
+    await reauthenticateSocket(page, logoutSession, live.spawnId, moshSessionId,
+      target.generation, target.targetNodeId, "logout-mosh");
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    await expectSocketsOpen(page, ["logout-acp", "logout-mosh"]);
+    const afterReauth = await cpClient(cfg, logoutSession.accessToken).listSessions({ spawnId: live.spawnId });
+    expect(afterReauth.sessions.filter((item) => item.status === "active").map((item) => item.sessionId))
+      .toEqual(expect.arrayContaining([acpSessionId, moshSessionId]));
+
     const logout = await fetch(`${cfg.asOrigin}/logout`, {
       method: "POST",
       headers: { Cookie: `logout_session=${logoutSession.refreshTokenRaw}` },
@@ -167,12 +218,15 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
     await ssh(cfg, "sudo systemctl stop spawnery-authsvc");
     authsvcStopped = true;
     expect(await ssh(cfg, "sudo systemctl is-active spawnery-authsvc || true")).toBe("inactive");
+    await expect(refreshOAuthSession({ asOrigin: cfg.asOrigin }, expirySession)).rejects.toThrow();
     await expectSocketsClosed(page, ["outage-expiry"], 30_000);
   } finally {
     if (authsvcStopped) {
       await ssh(cfg, "sudo systemctl start spawnery-authsvc").catch(() => {});
     }
-    const cleanup = cpClient(cfg, cleanupToken);
-    await Promise.all(createdSpawnIds.map((spawnId) => cleanup.deleteSpawn({ spawnId }).catch(() => {})));
+    if (cleanupToken) {
+      const cleanup = cpClient(cfg, cleanupToken);
+      await Promise.all(createdSpawnIds.map((spawnId) => cleanup.deleteSpawn({ spawnId }).catch(() => {})));
+    }
   }
 });

@@ -12,6 +12,7 @@ import {
   mintVMToken,
   nodeLeafArtifact,
   runtimeRootFingerprints,
+  setCPAuthMode,
   ssh,
   submitSpawn,
 } from "./root-anchored-artifacts";
@@ -42,16 +43,16 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
   await expectCPRejected(cfg, nodeToken);
 
   const createdSpawnIds: string[] = [];
-  const cleanup = cpClient(cfg, cfg.devToken);
+  let cleanup = cpClient(cfg, session.accessToken);
   const removeTerminal = async (spawnId: string) => {
     await cleanup.deleteSpawn({ spawnId });
     createdSpawnIds.splice(createdSpawnIds.indexOf(spawnId), 1);
   };
   try {
-    const accepted = await submitSpawn(cfg, nodeToken, keyPair, "accepted");
+    const accepted = await submitSpawn(cfg, nodeToken, keyPair, "accepted", session.accessToken);
     createdSpawnIds.push(accepted.spawnId);
     expect(accepted.status).toBe("ACTIVE");
-    const wrongAudience = await submitSpawn(cfg, session.accessToken, keyPair, "wrong-audience");
+    const wrongAudience = await submitSpawn(cfg, session.accessToken, keyPair, "wrong-audience", session.accessToken);
     createdSpawnIds.push(wrongAudience.spawnId);
     expect(wrongAudience.status).toBe("ERROR");
     expect(wrongAudience.errorDetail).toContain("WRONG_AUDIENCE");
@@ -59,7 +60,7 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
 
     const legacy = `${Buffer.from("legacy").toString("base64url")}.${Buffer.alloc(64).toString("base64url")}`;
     await expectCPRejected(cfg, legacy);
-    const legacySpawn = await submitSpawn(cfg, legacy, keyPair, "legacy");
+    const legacySpawn = await submitSpawn(cfg, legacy, keyPair, "legacy", session.accessToken);
     createdSpawnIds.push(legacySpawn.spawnId);
     expect(legacySpawn.status).toBe("ERROR");
     expect(legacySpawn.errorDetail).toContain("TOKEN_INVALID");
@@ -73,7 +74,7 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
     expect(Buffer.from(nodeLeafDecoded.envelope.keyId)).toEqual(nodeLeafKeyId);
     expect(nodeLeafDecoded.body.keyId).toBe(nodeLeafKeyId.toString("hex"));
     await expectCPRejected(cfg, nodeLeaf);
-    const nodeLeafSpawn = await submitSpawn(cfg, nodeLeaf, keyPair, "node-leaf");
+    const nodeLeafSpawn = await submitSpawn(cfg, nodeLeaf, keyPair, "node-leaf", session.accessToken);
     createdSpawnIds.push(nodeLeafSpawn.spawnId);
     expect(nodeLeafSpawn.status).toBe("ERROR");
     expect(nodeLeafSpawn.errorDetail).toContain("TOKEN_INVALID");
@@ -83,16 +84,21 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
 
     await deployCurrentRevocation(cfg, 1);
     await expectCPRejected(cfg, session.accessToken);
-    const revokedSpawn = await submitSpawn(cfg, nodeToken, keyPair, "revoked");
+    await setCPAuthMode(cfg, "dev");
+    cleanup = cpClient(cfg, cfg.destructiveDevToken);
+    const revokedSpawn = await submitSpawn(cfg, nodeToken, keyPair, "revoked", cfg.destructiveDevToken);
     createdSpawnIds.push(revokedSpawn.spawnId);
     expect(revokedSpawn.status).toBe("ERROR");
     expect(revokedSpawn.errorDetail).toContain("TOKEN_INVALID");
     await removeTerminal(revokedSpawn.spawnId);
 
+    await setCPAuthMode(cfg, "prod");
+
     const nextCP = await mintVMToken(cfg, "next", "cp", spki);
+    cleanup = cpClient(cfg, nextCP);
     await expect(cpClient(cfg, nextCP).listSpawns({})).resolves.toBeDefined();
     const nextNode = await mintVMToken(cfg, "next", "node", spki);
-    const replacement = await submitSpawn(cfg, nextNode, keyPair, "replacement");
+    const replacement = await submitSpawn(cfg, nextNode, keyPair, "replacement", nextCP);
     createdSpawnIds.push(replacement.spawnId);
     expect(replacement.status).toBe("ACTIVE");
   } finally {

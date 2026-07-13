@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run.sh — the one command. Concurrency-safe end to end (run it from many branches at once):
-#   0. build fresh binaries + images + web + stage config   (in the dev-spawnery distrobox)
+#   0. build fresh binaries + images + stage config         (in the dev-spawnery distrobox)
 #   1. start a fresh VM off the golden image                (up.sh)
 #   2. copy the fresh code in + restart + wait ready        (roll.sh)
 #   3. run the real e2e acceptance suite against the VM     (acceptance/)
@@ -43,9 +43,17 @@ DOCKER_BIN="${E2E_DOCKER_BIN:-docker}"
 DBOX_GOCACHE="$RD/go-cache"
 dbox() { "$DBOX_BIN" enter --root dev-spawnery -- bash -lc "export GOCACHE='$DBOX_GOCACHE'; cd '$REPO_ROOT' && $*"; }
 
+build_web() {
+  local public_dir="$1" root_b64
+  root_b64="$(base64 -w0 "$public_dir/root.pem")"
+  dbox "cd web && npm ci && VITE_CP_ORIGIN='$WEB_ORIGIN' VITE_AS_ORIGIN='$WEB_ORIGIN' VITE_ROOT_CA_PEM=\"\$(printf '%s' '$root_b64' | base64 -d)\" VITE_TRUST_DOMAIN='prod.spawnery.internal' VITE_CLOUD_ACCOUNT_ID='spawnery-system' npm run build && ../deploy/web/forbidden-scan.sh dist && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'"
+  test -d "$STAGE/web-dist"
+  test -f "$STAGE/web-dist/index.html"
+}
+
 # ---- 0. build fresh code (per-run staging so concurrent branches never clobber each other) ----
 if [ "$BUILD" = 1 ]; then
-  log "0/3 building fresh binaries + images + web …"
+  log "0/3 building fresh binaries + images …"
   dbox "make build bin/spawnery_cp && cp -f bin/spawnery_cp bin/authsvc bin/spawnlet bin/spawnctl bin/spawnery-ca '$STAGE/bin/'"
   for binary in spawnery_cp authsvc spawnlet spawnctl spawnery-ca; do
     test -x "$STAGE/bin/$binary"
@@ -53,9 +61,6 @@ if [ "$BUILD" = 1 ]; then
   dbox "make -B images DOCKER='distrobox-host-exec docker'"
   "$DOCKER_BIN" save spawnery/sidecar:dev spawnery/agent:dev -o "$STAGE/images.tar"
   test -s "$STAGE/images.tar"
-  dbox "cd web && npm ci && VITE_CP_ORIGIN='$WEB_ORIGIN' VITE_AS_ORIGIN='$WEB_ORIGIN' npm run build && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'"
-  test -d "$STAGE/web-dist"
-  test -f "$STAGE/web-dist/index.html"
   dbox "cd acceptance && npm ci"
   cp -rf "$REPO_ROOT/config/." "$STAGE/config/"
 else
@@ -65,26 +70,53 @@ fi
 cp -f "$REPO_ROOT/scripts/e2e-vm/provision/gen-pki.sh" "$STAGE/provision/"
 cp -f "$REPO_ROOT/scripts/e2e-vm/provision/env/"*.env "$STAGE/provision/env/"
 
-# Test-only stop point used by the fail-closed build harness. Normal runs never set this.
-[ "${E2E_RUN_BUILD_ONLY:-0}" = 1 ] && exit 0
+# Test-only stop point used by the fail-closed build harness. It exercises the same pinned web
+# build function with inert public values, without starting a VM. Normal runs never set this.
+if [ "${E2E_RUN_BUILD_ONLY:-0}" = 1 ]; then
+  TEST_PUBLIC="$RD/test-public"; mkdir -p "$TEST_PUBLIC"
+  printf '%s\n' 'test-public-root' > "$TEST_PUBLIC/root.pem"
+  build_web "$TEST_PUBLIC"
+  exit 0
+fi
 
 # ---- 1. start the VM ----
 log "1/3 starting VM …"
 E2E_RUNID="$E2E_RUNID" GOLDEN_IMAGE="$GOLDEN_IMAGE" "$E2E_DIR/up.sh" --profile "$PROFILE"
+# shellcheck disable=SC1091
+source "$RD/acc.env"
 
 # ---- 2. copy fresh code in + wait ready ----
 log "2/3 rolling fresh code + waiting ready …"
 E2E_RUNID="$E2E_RUNID" STAGE="$STAGE" "$E2E_DIR/roll.sh"
+
+# roll.sh has now generated the per-run PKI. Copy only public verification material out, stamp the
+# immutable web bundle with that exact root, then publish it over the stale golden-image bundle.
+PUBLIC="$RD/public-pki"; mkdir -p "$PUBLIC"
+vm_ssh "$E2E_VM_IP" 'rm -rf ~/public-pki && mkdir -m0700 ~/public-pki && sudo install -m0644 /etc/spawnery/node/root.pem /etc/spawnery/node/service-intermediate.pem /etc/spawnery/node/cloud-intermediate.pem /etc/spawnery/node/self-hosted-intermediate.pem /etc/spawnery/node/service.crl.pem /etc/spawnery/node/cloud-node.crl.pem /etc/spawnery/node/self-hosted-node.crl.pem ~/public-pki/'
+scp -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$E2E_SSH_KEY" \
+  "$E2E_SSH_USER@$E2E_VM_IP:public-pki/"'*' "$PUBLIC/"
+vm_ssh "$E2E_VM_IP" 'rm -rf ~/public-pki'
+build_web "$PUBLIC"
+vm_ssh "$E2E_VM_IP" 'rm -rf ~/incoming/web && mkdir -p ~/incoming/web'
+vm_scp "$STAGE/web-dist/." "$E2E_VM_IP" 'incoming/web/'
+vm_ssh "$E2E_VM_IP" 'sudo rsync -a --delete ~/incoming/web/ /var/www/spawnery/'
 
 # ---- 3. run the real e2e suite against the VM ----
 log "3/3 running acceptance suite …"
 # shellcheck disable=SC1091
 source "$RD/acc.env"
 # these mirror the validated live invocation (see provision/RECONCILE-NOTES.md): the acceptance
-# suite needs dev-token auth wired to the fake-GitHub identities, the demo app id, model ids, and a
+# suite needs real OAuth wired to the fake-GitHub identity, the demo app id, model ids, and a
 # longer spawn-active timeout (VM boot is slower than local dev) to actually run against the VM.
-export ACC_AUTH_MODE=dev-token
-export ACC_IDENTITY_POOL="devtoken1=acc-owner-1,devtoken2=acc-owner-2,devtoken3=acc-owner-3"
+export ACC_AUTH_MODE=oauth-pop
+export ACC_IDENTITY_POOL="acc-owner-1=acc-owner-1,acc-owner-2=acc-owner-2"
+export ACC_DESTRUCTIVE_DEV_TOKEN=devtoken1
+export ACC_ROOT_CA_PEM="$PUBLIC/root.pem"
+export ACC_TRUST_DOMAIN=prod.spawnery.internal
+export ACC_CLOUD_ACCOUNT_ID=spawnery-system
+export ACC_CRL_STATE="$PUBLIC/crl-state.json"
+export ACC_CRL_ISSUERS="$PUBLIC/service-intermediate.pem,$PUBLIC/cloud-intermediate.pem,$PUBLIC/self-hosted-intermediate.pem"
+export ACC_CRLS="$PUBLIC/service.crl.pem,$PUBLIC/cloud-node.crl.pem,$PUBLIC/self-hosted-node.crl.pem"
 # version-pin refs (preflight requires them). target==build here (the VM runs the code we just
 # rolled), so pin both to this run id so the check is meaningful and trivially satisfied.
 export ACC_TARGET_REF="$E2E_RUNID" ACC_BUILD_REF="$E2E_RUNID"
@@ -116,9 +148,8 @@ GREP_ARGS=(); [ -n "$GREP" ] && GREP_ARGS=(-g "$GREP")
 # --workers=<pool size>: each worker needs its own identity from ACC_IDENTITY_POOL; Playwright
 #   otherwise defaults to CPU-count workers, and every worker past the pool size (default 3) dies at
 #   "identity pool has N entries but worker parallelIndex=… needs one". Cap workers to the pool.
-WORKERS="$(awk -F, 'NF{print NF}' <<<"${ACC_IDENTITY_POOL:-x}")"; WORKERS="${WORKERS:-1}"
 ( cd "$REPO_ROOT/acceptance"
-  npm run test:accept -- --retries=0 --workers="$WORKERS" "${GREP_ARGS[@]}" )
+  npm run test:accept -- --retries=0 --workers=1 "${GREP_ARGS[@]}" )
 rc=$?
 log "acceptance suite exit=$rc  (report: $RD/artifacts/pw-report)"
 exit $rc

@@ -17,6 +17,31 @@ if rg -n --glob '!test-auth-topology.sh' "$legacy" "${FILES[@]}"; then
   exit 1
 fi
 
+runtime_files=("$HERE/env"/*.env "$REPO/scripts/e2e-vm/run.sh" "$HERE/provision.sh")
+forbidden_client_shortcuts='CP_DEV_AS_KEY|CP_AS_SESSION_PUBKEYS|NODE_AS_PUBKEYS|/node-token|SPAWNERY_INTENT_KEY_PKCS8_B64|SPAWNERY_NODE_ACCESS_TOKEN'
+if rg -n "$forbidden_client_shortcuts" "${runtime_files[@]}"; then
+  echo "production VM wiring contains a forbidden client authorization shortcut" >&2
+  exit 1
+fi
+
+runner="$REPO/scripts/e2e-vm/run.sh"
+for required in \
+  VITE_ROOT_CA_PEM \
+  VITE_TRUST_DOMAIN \
+  VITE_CLOUD_ACCOUNT_ID \
+  ACC_ROOT_CA_PEM \
+  ACC_TRUST_DOMAIN \
+  ACC_CLOUD_ACCOUNT_ID \
+  ACC_CRL_STATE \
+  ACC_CRL_ISSUERS \
+  ACC_CRLS
+do
+  rg -q "$required" "$runner" || {
+    echo "missing public web/CLI trust input ${required} from run.sh" >&2
+    exit 1
+  }
+done
+
 common="$HERE/env/common.env"
 for expected in \
   AS_AUTH_SIGNING_CURRENT_KEY_PEM \

@@ -39,6 +39,13 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
+      testIgnore: "auth/root-anchored-artifacts.spec.ts",
+    },
+    {
+      name: "destructive-root-artifacts",
+      use: { ...devices["Desktop Chrome"] },
+      testMatch: "auth/root-anchored-artifacts.spec.ts",
+      dependencies: ["chromium"],
     },
   ],
 });
