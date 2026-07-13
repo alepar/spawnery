@@ -105,15 +105,16 @@ type attacher struct {
 
 	ctrlHTTP httpDoer // POSTs SetModel to the per-pod sidecar control endpoint (injectable for tests)
 
-	mu           sync.Mutex
-	pumps        map[sessionKey]*Pump
-	tmuxRelays   map[sessionKey]*tmuxRelay
-	sessions     map[string]*sessionRegistry    // spawn_id -> live session set (roster source of truth)
-	pending      map[sessionKey][]pendingClient // attaches that arrived before the pump/relay existed (session STARTING)
-	forkBarriers map[string]forkIngressBarrier
-	forkWaits    map[string]forkBarrierWait
-	activeForks  map[string]activeSameNodeFork
-	active       uint32
+	mu               sync.Mutex
+	pumps            map[sessionKey]*Pump
+	tmuxRelays       map[sessionKey]*tmuxRelay
+	sessions         map[string]*sessionRegistry    // spawn_id -> live session set (roster source of truth)
+	pending          map[sessionKey][]pendingClient // attaches that arrived before the pump/relay existed (session STARTING)
+	forkBarriers     map[string]forkIngressBarrier
+	forkWaits        map[string]forkBarrierWait
+	activeForks      map[string]activeSameNodeFork
+	active           uint32
+	afterTakePending func(sessionKey) // test hook: called after releasing a.mu and before a pending drain
 
 	sendMu sync.Mutex
 	stream cpStream
@@ -141,8 +142,16 @@ type attacher struct {
 // session was still STARTING — an async launchSession is mid-flight). It is queued under attacher.pending
 // and bound when the resource readies (mirrors the CP pending-at-Bind precedent).
 type pendingClient struct {
-	clientID string
-	cursor   int64
+	clientID      string
+	cursor        int64
+	authKey       sessionAuthKey
+	attachmentID  string
+	authenticated bool
+}
+
+type pendingClientAuthorization struct {
+	key          sessionAuthKey
+	attachmentID string
 }
 
 // Run keeps the node connected to the CP: it (re)dials and serves one connection at a time, backing
@@ -482,6 +491,10 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			registeredAuth = true
 		}
 		bind := func() bool {
+			if registeredAuth {
+				return a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor,
+					pendingClientAuthorization{key: openKey, attachmentID: m.Open.GetAttachmentId()})
+			}
 			return a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor)
 		}
 		attached := false
@@ -1369,8 +1382,14 @@ func (a *attacher) frameSenderFor(spawnID, sessionID, clientID string) frameSend
 	}
 }
 
-func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int64) bool {
+func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int64, authorization ...pendingClientAuthorization) bool {
 	k := sessionKey{spawnID, sessionID}
+	pc := pendingClient{clientID: clientID, cursor: cursor}
+	if len(authorization) == 1 {
+		pc.authKey = authorization[0].key
+		pc.attachmentID = authorization[0].attachmentID
+		pc.authenticated = true
+	}
 	a.mu.Lock()
 	relay := a.tmuxRelays[k]
 	p := a.pumps[k]
@@ -1385,7 +1404,7 @@ func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int6
 				if a.pending == nil {
 					a.pending = map[sessionKey][]pendingClient{}
 				}
-				a.pending[k] = append(a.pending[k], pendingClient{clientID: clientID, cursor: cursor})
+				a.pending[k] = append(a.pending[k], pc)
 				a.mu.Unlock()
 				return true
 			}
@@ -1412,6 +1431,16 @@ func (a *attacher) takePending(k sessionKey) []pendingClient {
 	pend := a.pending[k]
 	delete(a.pending, k)
 	return pend
+}
+
+func (a *attacher) bindPendingClient(pc pendingClient, bind func() bool) bool {
+	if !pc.authenticated {
+		return bind()
+	}
+	if a.auths == nil {
+		return false
+	}
+	return a.auths.bindAttachment(pc.authKey, pc.attachmentID, bind)
 }
 
 // removePending drops any queued attach for clientID under key k (a client that disconnected before its
@@ -1619,10 +1648,17 @@ func (a *attacher) launchSession(ctx context.Context, spawnID string, e *session
 		a.tmuxRelays[k] = relay
 		pend := a.takePending(k) // bind attaches that arrived while this session was STARTING (after unlock)
 		a.mu.Unlock()
+		if a.afterTakePending != nil {
+			a.afterTakePending(k)
+		}
 		for _, pc := range pend {
-			if err := relay.attach(context.Background(), pc.clientID); err != nil {
-				slog.Warn("tmux attach failed", "spawn", spawnID, "session", e.id, "client", pc.clientID, "err", err)
-			}
+			a.bindPendingClient(pc, func() bool {
+				if err := relay.attach(context.Background(), pc.clientID); err != nil {
+					slog.Warn("tmux attach failed", "spawn", spawnID, "session", e.id, "client", pc.clientID, "err", err)
+					return false
+				}
+				return true
+			})
 		}
 		reg.setState(e.id, nodev1.SessionState_SESSION_STATE_ACTIVE)
 		a.emitRoster(spawnID)
@@ -1683,8 +1719,14 @@ func (a *attacher) launchACPSession(ctx context.Context, spawnID string, reg *se
 	a.applyForkBarrierLocked(spawnID, p)
 	pend := a.takePending(k) // bind attaches that arrived while this session was STARTING (after unlock)
 	a.mu.Unlock()
+	if a.afterTakePending != nil {
+		a.afterTakePending(k)
+	}
 	for _, pc := range pend {
-		p.attachClient(pc.clientID, pc.cursor, a.frameSenderFor(spawnID, e.id, pc.clientID))
+		a.bindPendingClient(pc, func() bool {
+			p.attachClient(pc.clientID, pc.cursor, a.frameSenderFor(spawnID, e.id, pc.clientID))
+			return true
+		})
 	}
 	reg.setState(e.id, nodev1.SessionState_SESSION_STATE_ACTIVE)
 	a.emitRoster(spawnID)
