@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file auth/v1/auth.proto.
  */
 export const file_auth_v1_auth: GenFile = /*@__PURE__*/
-  fileDesc("ChJhdXRoL3YxL2F1dGgucHJvdG8SB2F1dGgudjEiXQoNR2l0SHViTGlua1JlZhIRCglzZWNyZXRfaWQYASABKAkSDwoHdmVyc2lvbhgCIAEoBBITCgtkZWxpdmVyeV9pZBgDIAEoCUoECAQQBVINcmVmcmVzaF90b2tlbiKZAQocTWludEdpdEh1YkFjY2Vzc1Rva2VuUmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEhAKCHNwYXduX2lkGAIgASgJEhIKCmdlbmVyYXRpb24YAyABKAQSKAoIbGlua19yZWYYBCABKAsyFi5hdXRoLnYxLkdpdEh1YkxpbmtSZWYSFQoNcmVwb3NpdG9yeV9pZBgFIAEoCSL7AQodTWludEdpdEh1YkFjY2Vzc1Rva2VuUmVzcG9uc2USEgoKcmVxdWVzdF9pZBgBIAEoCRIUCgxhY2Nlc3NfdG9rZW4YAiABKAkSHgoWYWNjZXNzX2V4cGlyZXNfYXRfdW5peBgDIAEoAxISCgp0b2tlbl90eXBlGAYgASgJEhUKDXJlcG9zaXRvcnlfaWQYByABKAkSEQoJcmVmcmVzaGVkGAggASgIEg0KBWxvZ2luGAkgASgJEg8KB3VzZXJfaWQYCiABKANKBAgEEAVKBAgFEAZSDXJlZnJlc2hfdG9rZW5SF3JlZnJlc2hfZXhwaXJlc19hdF91bml4Ir4BChBTZXNzaW9uVG9rZW5Cb2R5EhIKCmFjY291bnRfaWQYASABKAkSDgoGaGFuZGxlGAIgASgJEhAKCHRva2VuX2lkGAMgASgJEhAKCGF1ZGllbmNlGAQgASgJEhEKCWlzc3VlZF9hdBgFIAEoAxISCgpleHBpcmVzX2F0GAYgASgDEhgKEHNlc3Npb25fa2V5X2hhc2gYByABKAwSDgoGa2V5X2lkGAggASgJEhEKCWZhbWlseV9pZBgJIAEoCSJsCg9SZXZvY2F0aW9uRW50cnkSCwoDc2VxGAEgASgDEhIKCmFjY291bnRfaWQYAiABKAkSEQoJZmFtaWx5X2lkGAMgASgJEhEKCXRva2VuX2lkcxgEIAMoCRISCgpyZXZva2VkX2F0GAUgASgDInUKElNpZ25lZEF1dGhBcnRpZmFjdBIVCg1hcnRpZmFjdF90eXBlGAEgASgJEg8KB3BheWxvYWQYAiABKAwSEQoJc2lnbmF0dXJlGAMgASgMEhQKDHNpZ25lcl9jaGFpbhgEIAMoDBIOCgZrZXlfaWQYBSABKAwisAEKGVNpZ25lclJldm9jYXRpb25TdGF0ZW1lbnQSEwoLZW52aXJvbm1lbnQYASABKAkSEgoKZ2VuZXJhdGlvbhgCIAEoBBIRCglpc3N1ZWRfYXQYAyABKAMSFwoPcmV2b2tlZF9zZXJpYWxzGAQgAygMEhsKE3Jldm9rZWRfc3BraV9zaGEyNTYYBSADKAwSIQoZbWluaW11bV9zaWduZXJfbm90X2JlZm9yZRgGIAEoAyJ9CghNb3VudFJlZhIMCgRuYW1lGAEgASgJEhMKC2JhY2tlbmRfdXJpGAIgASgJEhwKFGNyZWRlbnRpYWxfc2VjcmV0X2lkGAMgASgJEhkKEWNyZWF0ZV9pZl9taXNzaW5nGAQgASgIEhUKDXJlcG9zaXRvcnlfaWQYBSABKAkioQIKCkludGVudEJvZHkSCwoDanRpGAEgASgJEhEKCWlzc3VlZF9hdBgCIAEoAxIQCghzcGF3bl9pZBgDIAEoCRISCgpnZW5lcmF0aW9uGAQgASgEEhYKDnRhcmdldF9ub2RlX2lkGAUgASgJEgoKAm9wGAYgASgJEg8KB2FwcF9yZWYYByABKAkSDQoFaW1hZ2UYCCABKAkSDQoFbW9kZWwYCSABKAkSEAoIZGF0YV9yZWYYCiABKAkSEgoKc2Vzc2lvbl9pZBgLIAEoCRIhCgZtb3VudHMYDCADKAsyES5hdXRoLnYxLk1vdW50UmVmEhsKE2F0dGFjaGVkX3NlY3JldF9pZHMYDSADKAkSFAoMbmV3X3Rva2VuX2lkGA4gASgJIksKDFNpZ25lZEludGVudBIOCgZkb21haW4YASABKAkSDAoEYm9keRgCIAEoDBILCgNzaWcYAyABKAwSEAoIc3BraV9kZXIYBCABKAwiSwoMQXV0aEVudmVsb3BlEhQKDGFjY2Vzc190b2tlbhgBIAEoCRIlCgZpbnRlbnQYAiABKAsyFS5hdXRoLnYxLlNpZ25lZEludGVudDJ1CgtBdXRoU2VydmljZRJmChVNaW50R2l0SHViQWNjZXNzVG9rZW4SJS5hdXRoLnYxLk1pbnRHaXRIdWJBY2Nlc3NUb2tlblJlcXVlc3QaJi5hdXRoLnYxLk1pbnRHaXRIdWJBY2Nlc3NUb2tlblJlc3BvbnNlQh1aG3NwYXduZXJ5L2dlbi9hdXRoL3YxO2F1dGh2MWIGcHJvdG8z");
+  fileDesc("ChJhdXRoL3YxL2F1dGgucHJvdG8SB2F1dGgudjEiXQoNR2l0SHViTGlua1JlZhIRCglzZWNyZXRfaWQYASABKAkSDwoHdmVyc2lvbhgCIAEoBBITCgtkZWxpdmVyeV9pZBgDIAEoCUoECAQQBVINcmVmcmVzaF90b2tlbiKZAQocTWludEdpdEh1YkFjY2Vzc1Rva2VuUmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEhAKCHNwYXduX2lkGAIgASgJEhIKCmdlbmVyYXRpb24YAyABKAQSKAoIbGlua19yZWYYBCABKAsyFi5hdXRoLnYxLkdpdEh1YkxpbmtSZWYSFQoNcmVwb3NpdG9yeV9pZBgFIAEoCSL7AQodTWludEdpdEh1YkFjY2Vzc1Rva2VuUmVzcG9uc2USEgoKcmVxdWVzdF9pZBgBIAEoCRIUCgxhY2Nlc3NfdG9rZW4YAiABKAkSHgoWYWNjZXNzX2V4cGlyZXNfYXRfdW5peBgDIAEoAxISCgp0b2tlbl90eXBlGAYgASgJEhUKDXJlcG9zaXRvcnlfaWQYByABKAkSEQoJcmVmcmVzaGVkGAggASgIEg0KBWxvZ2luGAkgASgJEg8KB3VzZXJfaWQYCiABKANKBAgEEAVKBAgFEAZSDXJlZnJlc2hfdG9rZW5SF3JlZnJlc2hfZXhwaXJlc19hdF91bml4Ir4BChBTZXNzaW9uVG9rZW5Cb2R5EhIKCmFjY291bnRfaWQYASABKAkSDgoGaGFuZGxlGAIgASgJEhAKCHRva2VuX2lkGAMgASgJEhAKCGF1ZGllbmNlGAQgASgJEhEKCWlzc3VlZF9hdBgFIAEoAxISCgpleHBpcmVzX2F0GAYgASgDEhgKEHNlc3Npb25fa2V5X2hhc2gYByABKAwSDgoGa2V5X2lkGAggASgJEhEKCWZhbWlseV9pZBgJIAEoCSK+AQoPUmV2b2NhdGlvbkVudHJ5EgsKA3NlcRgBIAEoAxISCgphY2NvdW50X2lkGAIgASgJEhEKCWZhbWlseV9pZBgDIAEoCRISCgpyZXZva2VkX2F0GAUgASgDEi0KDnJldm9rZWRfdG9rZW5zGAYgAygLMhUuYXV0aC52MS5SZXZva2VkVG9rZW4SIwobcmV2b2tlX3Rva2Vuc19pc3N1ZWRfYmVmb3JlGAcgASgDSgQIBBAFUgl0b2tlbl9pZHMiNgoMUmV2b2tlZFRva2VuEhAKCHRva2VuX2lkGAEgASgJEhQKDHJldGFpbl91bnRpbBgCIAEoAyJ1ChJTaWduZWRBdXRoQXJ0aWZhY3QSFQoNYXJ0aWZhY3RfdHlwZRgBIAEoCRIPCgdwYXlsb2FkGAIgASgMEhEKCXNpZ25hdHVyZRgDIAEoDBIUCgxzaWduZXJfY2hhaW4YBCADKAwSDgoGa2V5X2lkGAUgASgMIrABChlTaWduZXJSZXZvY2F0aW9uU3RhdGVtZW50EhMKC2Vudmlyb25tZW50GAEgASgJEhIKCmdlbmVyYXRpb24YAiABKAQSEQoJaXNzdWVkX2F0GAMgASgDEhcKD3Jldm9rZWRfc2VyaWFscxgEIAMoDBIbChNyZXZva2VkX3Nwa2lfc2hhMjU2GAUgAygMEiEKGW1pbmltdW1fc2lnbmVyX25vdF9iZWZvcmUYBiABKAMifQoITW91bnRSZWYSDAoEbmFtZRgBIAEoCRITCgtiYWNrZW5kX3VyaRgCIAEoCRIcChRjcmVkZW50aWFsX3NlY3JldF9pZBgDIAEoCRIZChFjcmVhdGVfaWZfbWlzc2luZxgEIAEoCBIVCg1yZXBvc2l0b3J5X2lkGAUgASgJIqECCgpJbnRlbnRCb2R5EgsKA2p0aRgBIAEoCRIRCglpc3N1ZWRfYXQYAiABKAMSEAoIc3Bhd25faWQYAyABKAkSEgoKZ2VuZXJhdGlvbhgEIAEoBBIWCg50YXJnZXRfbm9kZV9pZBgFIAEoCRIKCgJvcBgGIAEoCRIPCgdhcHBfcmVmGAcgASgJEg0KBWltYWdlGAggASgJEg0KBW1vZGVsGAkgASgJEhAKCGRhdGFfcmVmGAogASgJEhIKCnNlc3Npb25faWQYCyABKAkSIQoGbW91bnRzGAwgAygLMhEuYXV0aC52MS5Nb3VudFJlZhIbChNhdHRhY2hlZF9zZWNyZXRfaWRzGA0gAygJEhQKDG5ld190b2tlbl9pZBgOIAEoCSJLCgxTaWduZWRJbnRlbnQSDgoGZG9tYWluGAEgASgJEgwKBGJvZHkYAiABKAwSCwoDc2lnGAMgASgMEhAKCHNwa2lfZGVyGAQgASgMIksKDEF1dGhFbnZlbG9wZRIUCgxhY2Nlc3NfdG9rZW4YASABKAkSJQoGaW50ZW50GAIgASgLMhUuYXV0aC52MS5TaWduZWRJbnRlbnQydQoLQXV0aFNlcnZpY2USZgoVTWludEdpdEh1YkFjY2Vzc1Rva2VuEiUuYXV0aC52MS5NaW50R2l0SHViQWNjZXNzVG9rZW5SZXF1ZXN0GiYuYXV0aC52MS5NaW50R2l0SHViQWNjZXNzVG9rZW5SZXNwb25zZUIdWhtzcGF3bmVyeS9nZW4vYXV0aC92MTthdXRodjFiBnByb3RvMw");
 
 /**
  * @generated from message auth.v1.GitHubLinkRef
@@ -250,16 +250,19 @@ export type RevocationEntry = Message<"auth.v1.RevocationEntry"> & {
   familyId: string;
 
   /**
-   * access-token token_ids the family had live at revocation
-   *
-   * @generated from field: repeated string token_ids = 4;
-   */
-  tokenIds: string[];
-
-  /**
    * @generated from field: int64 revoked_at = 5;
    */
   revokedAt: bigint;
+
+  /**
+   * @generated from field: repeated auth.v1.RevokedToken revoked_tokens = 6;
+   */
+  revokedTokens: RevokedToken[];
+
+  /**
+   * @generated from field: int64 revoke_tokens_issued_before = 7;
+   */
+  revokeTokensIssuedBefore: bigint;
 };
 
 /**
@@ -268,6 +271,28 @@ export type RevocationEntry = Message<"auth.v1.RevocationEntry"> & {
  */
 export const RevocationEntrySchema: GenMessage<RevocationEntry> = /*@__PURE__*/
   messageDesc(file_auth_v1_auth, 4);
+
+/**
+ * @generated from message auth.v1.RevokedToken
+ */
+export type RevokedToken = Message<"auth.v1.RevokedToken"> & {
+  /**
+   * @generated from field: string token_id = 1;
+   */
+  tokenId: string;
+
+  /**
+   * @generated from field: int64 retain_until = 2;
+   */
+  retainUntil: bigint;
+};
+
+/**
+ * Describes the message auth.v1.RevokedToken.
+ * Use `create(RevokedTokenSchema)` to create a new message.
+ */
+export const RevokedTokenSchema: GenMessage<RevokedToken> = /*@__PURE__*/
+  messageDesc(file_auth_v1_auth, 5);
 
 /**
  * SignedAuthArtifact is the self-describing envelope for every AS authorization artifact.
@@ -308,7 +333,7 @@ export type SignedAuthArtifact = Message<"auth.v1.SignedAuthArtifact"> & {
  * Use `create(SignedAuthArtifactSchema)` to create a new message.
  */
 export const SignedAuthArtifactSchema: GenMessage<SignedAuthArtifact> = /*@__PURE__*/
-  messageDesc(file_auth_v1_auth, 5);
+  messageDesc(file_auth_v1_auth, 6);
 
 /**
  * SignerRevocationStatement is signed by the offline auth-signing intermediate under
@@ -353,7 +378,7 @@ export type SignerRevocationStatement = Message<"auth.v1.SignerRevocationStateme
  * Use `create(SignerRevocationStatementSchema)` to create a new message.
  */
 export const SignerRevocationStatementSchema: GenMessage<SignerRevocationStatement> = /*@__PURE__*/
-  messageDesc(file_auth_v1_auth, 6);
+  messageDesc(file_auth_v1_auth, 7);
 
 /**
  * MountRef is one mount binding inside an IntentBody. Structurally mirrors node.v1.MountBinding but
@@ -393,7 +418,7 @@ export type MountRef = Message<"auth.v1.MountRef"> & {
  * Use `create(MountRefSchema)` to create a new message.
  */
 export const MountRefSchema: GenMessage<MountRef> = /*@__PURE__*/
-  messageDesc(file_auth_v1_auth, 7);
+  messageDesc(file_auth_v1_auth, 8);
 
 /**
  * IntentBody is the signed-intent payload (auth-identity design §5 [AC1][AM11]).
@@ -512,7 +537,7 @@ export type IntentBody = Message<"auth.v1.IntentBody"> & {
  * Use `create(IntentBodySchema)` to create a new message.
  */
 export const IntentBodySchema: GenMessage<IntentBody> = /*@__PURE__*/
-  messageDesc(file_auth_v1_auth, 8);
+  messageDesc(file_auth_v1_auth, 9);
 
 /**
  * SignedIntent carries a client-signed per-operation intent [AC1][AM11].
@@ -557,7 +582,7 @@ export type SignedIntent = Message<"auth.v1.SignedIntent"> & {
  * Use `create(SignedIntentSchema)` to create a new message.
  */
 export const SignedIntentSchema: GenMessage<SignedIntent> = /*@__PURE__*/
-  messageDesc(file_auth_v1_auth, 9);
+  messageDesc(file_auth_v1_auth, 10);
 
 /**
  * AuthEnvelope bundles the node-audience access token and the client's SignedIntent for
@@ -584,7 +609,7 @@ export type AuthEnvelope = Message<"auth.v1.AuthEnvelope"> & {
  * Use `create(AuthEnvelopeSchema)` to create a new message.
  */
 export const AuthEnvelopeSchema: GenMessage<AuthEnvelope> = /*@__PURE__*/
-  messageDesc(file_auth_v1_auth, 10);
+  messageDesc(file_auth_v1_auth, 11);
 
 /**
  * @generated from service auth.v1.AuthService

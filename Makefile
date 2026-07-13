@@ -8,14 +8,14 @@ build: bin/spawnlet bin/spawnctl bin/authsvc bin/spawnery-ca   # the host-run bi
 bin/%: $(GO_SRCS) | bin
 	go build -o $@ ./cmd/$*
 
-# Proto codegen — stamp keyed on .proto sources + buf config.
-gen: .make/gen
-.make/gen: $(shell find proto -name '*.proto') buf.gen.yaml sdk/ts/buf.gen.yaml buf.yaml | .make
+# Proto codegen is intentionally unstamped: tracked outputs must be regenerated on every invocation
+# so CI and reviewers can detect toolchain drift rather than trusting a local timestamp.
+gen: | .make
 	buf generate
-	@if [ -x sdk/ts/node_modules/.bin/protoc-gen-es ]; then \
-		echo "[gen] TS (protoc-gen-es) -> sdk/ts/src/gen"; buf generate --template sdk/ts/buf.gen.yaml; \
-	else echo "[gen] skip TS SDK codegen (run: npm install -w @spawnery/client)"; fi
-	touch $@
+	@test -x sdk/ts/node_modules/.bin/protoc-gen-es || \
+		(echo "[gen] missing TS generator (run: npm ci --workspace @spawnery/client)" >&2; exit 1)
+	@echo "[gen] TS (protoc-gen-es) -> sdk/ts/src/gen"
+	buf generate --template sdk/ts/buf.gen.yaml
 
 DOCKER ?= docker
 
