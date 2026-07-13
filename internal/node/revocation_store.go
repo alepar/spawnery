@@ -57,6 +57,7 @@ type UserRevocationStore struct {
 	// Transaction-boundary seams used only by durability tests.
 	beforeRename func() error
 	afterRename  func() error
+	commitTx     func(*sql.Tx) error
 }
 
 func OpenUserRevocationStore(path string, clocks ...func() time.Time) (*UserRevocationStore, error) {
@@ -236,6 +237,7 @@ func (s *UserRevocationStore) ApplyPage(page []VerifiedUserRevocation, now time.
 	if err := validateUserRevocationPage(page, checkpoint); err != nil {
 		return err
 	}
+	candidate := applyUserRevocationPage(s.snapshot.Load(), page, now.Unix())
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return err
@@ -285,24 +287,51 @@ func (s *UserRevocationStore) ApplyPage(page []VerifiedUserRevocation, now time.
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	commit := tx.Commit
+	if s.commitTx != nil {
+		commit = func() error { return s.commitTx(tx) }
+	}
+	if err := commit(); err != nil {
+		s.snapshot.Store(candidate)
 		s.poisoned = fmt.Errorf("%w: %v", ErrUserRevocationStorePoisoned, err)
 		return s.poisoned
 	}
 	committed = true
+	s.snapshot.Store(candidate)
 	if s.afterRename != nil {
 		if err := s.afterRename(); err != nil {
 			s.poisoned = fmt.Errorf("%w: %v", ErrUserRevocationStorePoisoned, err)
 			return s.poisoned
 		}
 	}
-	snapshot, err := s.loadSnapshot(context.Background())
-	if err != nil {
-		s.poisoned = fmt.Errorf("%w: refresh snapshot: %v", ErrUserRevocationStorePoisoned, err)
-		return s.poisoned
-	}
-	s.snapshot.Store(snapshot)
 	return nil
+}
+
+func applyUserRevocationPage(current *userRevocationSnapshot, page []VerifiedUserRevocation, now int64) *userRevocationSnapshot {
+	next := &userRevocationSnapshot{tokens: map[string]int64{}, accounts: map[string]int64{}}
+	if current != nil {
+		next.checkpoint = current.checkpoint
+		for tokenID, retainUntil := range current.tokens {
+			if retainUntil > now {
+				next.tokens[tokenID] = retainUntil
+			}
+		}
+		for accountID, cutoff := range current.accounts {
+			next.accounts[accountID] = cutoff
+		}
+	}
+	for _, entry := range page {
+		for _, token := range entry.RevokedTokens {
+			if token.RetainUntil > now && token.RetainUntil > next.tokens[token.TokenID] {
+				next.tokens[token.TokenID] = token.RetainUntil
+			}
+		}
+		if entry.RevokeTokensIssuedBefore > next.accounts[entry.AccountID] {
+			next.accounts[entry.AccountID] = entry.RevokeTokensIssuedBefore
+		}
+		next.checkpoint = entry.Seq
+	}
+	return next
 }
 
 func validateUserRevocationPage(page []VerifiedUserRevocation, checkpoint int64) error {

@@ -150,6 +150,10 @@ func (c *RevocationConsumer) pollOnce(ctx context.Context, onApplied func([]Veri
 			return errors.New("node: empty revocation page claims more entries")
 		}
 		if err := c.store.ApplyPage(page.entries, page.verifiedAt); err != nil {
+			if errors.Is(err, ErrUserRevocationStorePoisoned) && len(page.entries) > 0 &&
+				c.store.Checkpoint() == page.entries[len(page.entries)-1].Seq && onApplied != nil {
+				onApplied(page.entries)
+			}
 			return err
 		}
 		if len(page.entries) > 0 && onApplied != nil {

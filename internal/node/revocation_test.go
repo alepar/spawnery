@@ -145,6 +145,45 @@ func TestRevocationConsumerInvalidLaterPagePreservesCommittedEarlierPage(t *test
 	}
 }
 
+func TestRevocationConsumerFansOutConservativeAmbiguousCommit(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "revocations.db"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.afterRename = func() error { return errors.New("injected post-commit failure") }
+	entry := signedRevocation(t, fixture, familyRevocation(1, "alice", "family", "token", now.Unix()-1, now.Unix()+60))
+	consumer, err := NewRevocationConsumer(revocationDoer(func(*http.Request) (*http.Response, error) {
+		return revocationResponse(signedUserRevocationPage{Entries: []signedUserRevocationEntry{entry}}), nil
+	}), "https://as/revocations", fixture.verifier, store, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer.now = func() time.Time { return now }
+	registry := newSessionAuthRegistry(store)
+	key := sessionAuthKey{spawnID: "sp", sessionID: "session", clientID: "client"}
+	var closed atomic.Int32
+	registry.register(key, sessionAuthRecord{
+		accountID: "alice", tokenID: "token", issuedAt: now.Unix(), expiresAt: now.Add(time.Hour),
+		attachmentID: "attachment", attachmentSequence: 1,
+	}, func(string) { closed.Add(1) })
+
+	if err := consumer.pollOnce(t.Context(), registry.revoke); !errors.Is(err, ErrUserRevocationStorePoisoned) {
+		t.Fatalf("ambiguous commit: %v", err)
+	}
+	if closed.Load() != 1 || registry.contains(key) {
+		t.Fatalf("current authorization close=%d live=%v", closed.Load(), registry.contains(key))
+	}
+	if registry.registerIfNewer(key, sessionAuthRecord{
+		accountID: "alice", tokenID: "token", issuedAt: now.Unix(), expiresAt: now.Add(time.Hour),
+		attachmentID: "next", attachmentSequence: 2,
+	}, func(string) {}) {
+		t.Fatal("poisoned conservative snapshot admitted revoked authorization")
+	}
+}
+
 func TestRevocationConsumerRejectsWholeInvalidPageWithoutPublication(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	fixture := newArtifactFixture(t, now, "prod")

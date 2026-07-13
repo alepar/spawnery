@@ -1,6 +1,7 @@
 package node
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -124,8 +125,8 @@ func TestUserRevocationStoreSQLitePoisonsAmbiguousCommitUntilRestart(t *testing.
 	if err := store.ApplyPage(page, now); !errors.Is(err, ErrUserRevocationStorePoisoned) {
 		t.Fatalf("ambiguous commit: %v", err)
 	}
-	if store.Checkpoint() != 0 || store.IsRevoked("committed", "alice", 0) {
-		t.Fatal("ambiguous commit was published by the poisoned live store")
+	if store.Checkpoint() != 4 || !store.IsRevoked("committed", "alice", 0) {
+		t.Fatal("known committed page was not conservatively published")
 	}
 	if err := store.ApplyPage(nil, now); !errors.Is(err, ErrUserRevocationStorePoisoned) {
 		t.Fatalf("poison is not sticky: %v", err)
@@ -140,6 +141,39 @@ func TestUserRevocationStoreSQLitePoisonsAmbiguousCommitUntilRestart(t *testing.
 	defer reopened.Close()
 	if reopened.Checkpoint() != 4 || !reopened.IsRevoked("committed", "alice", 0) {
 		t.Fatal("restart did not load the durably committed page")
+	}
+}
+
+func TestUserRevocationStoreSQLitePublishesCommitThatLandsButReportsFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "revocations.db")
+	now := time.Unix(10, 0)
+	store, err := OpenUserRevocationStore(path, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.commitTx = func(tx *sql.Tx) error {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		return errors.New("injected ambiguous commit result")
+	}
+	page := []VerifiedUserRevocation{{Seq: 4, AccountID: "alice", RevokedAt: 1, RevokeTokensIssuedBefore: 10}}
+	if err := store.ApplyPage(page, now); !errors.Is(err, ErrUserRevocationStorePoisoned) {
+		t.Fatalf("ambiguous commit: %v", err)
+	}
+	if store.Checkpoint() != 4 || !store.IsRevoked("fresh", "alice", 9) {
+		t.Fatal("ambiguous commit candidate was not published")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenUserRevocationStore(path, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.Checkpoint() != 4 || !reopened.IsRevoked("fresh", "alice", 9) {
+		t.Fatal("landed ambiguous commit was not durable")
 	}
 }
 
