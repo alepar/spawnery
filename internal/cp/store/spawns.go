@@ -173,6 +173,23 @@ func (r *spawnRepo) SetBaseImageDigest(ctx context.Context, id, digest string) e
 	return nil
 }
 
+// SetGitHubCredentialStatus records the node-reported GitHub credential condition (sp-2tx8.9 §4.1).
+// Like Rename/SetModel/SetBaseImageDigest it refuses deleted spawns and returns ErrNotFound when no
+// row is updated. It touches ONLY this column: the spawn's lifecycle Status stays exactly as it was
+// (a stale-token spawn is still Active).
+func (r *spawnRepo) SetGitHubCredentialStatus(ctx context.Context, id string, st GitHubCredentialStatus) error {
+	res, err := r.db.NewUpdate().Model((*Spawn)(nil)).
+		Set("github_credential_status = ?", st).
+		Where("id = ?", id).Where("status <> ?", Deleted).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetModel writes the new model and marks it unapplied (model_applied=false), clearing any prior
 // failure detail — all in one UPDATE (atomic). The CP SetSpawnModel handler calls this. Like Rename,
 // it refuses deleted spawns and returns ErrNotFound when no row is updated.
