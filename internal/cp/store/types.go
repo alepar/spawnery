@@ -328,6 +328,13 @@ type ProfileEntry struct {
 	// entries — the pin is the version, resolved to N members at assembly time.
 	BundleID  string `bun:"bundle_id,notnull"`
 	VersionID string `bun:"version_id,notnull"`
+	// BundleOverridesJSON holds a bundle_ref entry's per-member exclude/rename overrides
+	// (sp-mwco.1.8 §4.4), keyed by member source_subdir; '' for non-bundle entries or a
+	// bundle_ref entry with no overrides. Decoded into ExcludeSubdirs/RenameSubdirs by
+	// decodeProfileEntry; see store.EncodeBundleOverrides for the encode side.
+	BundleOverridesJSON string            `bun:"bundle_overrides,notnull"`
+	ExcludeSubdirs      []string          `bun:"-"` // decoded in repo
+	RenameSubdirs       map[string]string `bun:"-"` // decoded in repo
 }
 
 // ProfileSecret holds a reference from a Profile to a secret (schema-only;

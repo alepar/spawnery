@@ -115,6 +115,29 @@ func addBundleRefEntry(t *testing.T, s *Server, profileID string, ver uint64, en
 	return newVer
 }
 
+// addBundleRefEntryWithOverrides is addBundleRefEntry plus exclude/rename overrides (sp-mwco.1.8
+// §4.4). No RPC path for these overrides exists until this task's AddProfileEntry wiring lands —
+// this exercises the store + assembly seam directly, same rationale as addBundleRefEntry.
+func addBundleRefEntryWithOverrides(t *testing.T, s *Server, profileID string, ver uint64, entryID, name, bundleID, versionID string, targets []string, exclude []string, rename map[string]string) uint64 {
+	t.Helper()
+	newVer, err := s.st.Profiles().AddEntry(context.Background(), profileID, ver, store.ProfileEntry{
+		ProfileID:      profileID,
+		EntryID:        entryID,
+		Kind:           store.ProfileEntrySkill,
+		Name:           name,
+		SourceKind:     store.ProfileSourceBundle,
+		BundleID:       bundleID,
+		VersionID:      versionID,
+		Targets:        targets,
+		ExcludeSubdirs: exclude,
+		RenameSubdirs:  rename,
+	}, 2000)
+	if err != nil {
+		t.Fatalf("AddEntry (bundle_ref with overrides): %v", err)
+	}
+	return newVer
+}
+
 // findArtifactByName returns the manifest artifact with the given Name, or nil.
 func findArtifactByName(m spec.Manifest, name string) *spec.Artifact {
 	for i := range m.Artifacts {
@@ -517,5 +540,194 @@ func TestBundleExpansionCountsAgainstArtifactCap(t *testing.T) {
 	_, err = validateAndMergeArtifacts(nil, got)
 	if connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("want CodeInvalidArgument (too many artifacts), got %v", err)
+	}
+}
+
+// ---- sp-mwco.1.8: per-member exclude/rename overrides -----------------------------------------
+
+// TestAssembleBundleExcludeSkipsMember: an excluded member emits no artifact and no manifest
+// entry; the other members assemble normally.
+func TestAssembleBundleExcludeSkipsMember(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	bundleID, versionID, catalogIDs, names := seedBundle(t, s, "alice", 3)
+	excludedSubdir := fmt.Sprintf("skills/%s", names[1])
+
+	profileID := createProfile(t, s)
+	addBundleRefEntryWithOverrides(t, s, profileID, 1, "ent-bundle", "my-bundle", bundleID, versionID, nil,
+		[]string{excludedSubdir}, nil)
+
+	p, entries := loadProfile(t, s, profileID)
+	got, err := s.assembleProfileArtifacts(context.Background(), p, entries)
+	if err != nil {
+		t.Fatalf("assembleProfileArtifacts: %v", err)
+	}
+	if len(got) != 3 { // manifest + 2 remaining members
+		t.Fatalf("want 3 specs (manifest + 2 members), got %d", len(got))
+	}
+
+	excludedID := "ent-bundle/" + catalogIDs[1]
+	for _, spec := range got {
+		if spec.Id == excludedID {
+			t.Fatalf("excluded member %q emitted a payload spec", excludedID)
+		}
+	}
+
+	ms := findManifestSpec(got)
+	m := unmarshalManifest(t, ms.Inline)
+	if len(m.Artifacts) != 2 {
+		t.Fatalf("want 2 manifest artifacts, got %d", len(m.Artifacts))
+	}
+	if findArtifactByName(m, names[1]) != nil {
+		t.Fatalf("excluded member %q present in manifest", names[1])
+	}
+	if findArtifactByName(m, names[0]) == nil || findArtifactByName(m, names[2]) == nil {
+		t.Fatalf("non-excluded members missing from manifest: %+v", m.Artifacts)
+	}
+}
+
+// TestAssembleBundleRenameSetsManifestName: a rename override changes the manifest Artifact.Name
+// but leaves the artifactID/DestPath (entry_id/catalog_id) untouched (sp-mwco.1.8 §4.4).
+func TestAssembleBundleRenameSetsManifestName(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	bundleID, versionID, catalogIDs, names := seedBundle(t, s, "alice", 2)
+	renamedSubdir := fmt.Sprintf("skills/%s", names[0])
+	const newName = "renamed-skill"
+
+	profileID := createProfile(t, s)
+	addBundleRefEntryWithOverrides(t, s, profileID, 1, "ent-bundle", "my-bundle", bundleID, versionID, nil,
+		nil, map[string]string{renamedSubdir: newName})
+
+	p, entries := loadProfile(t, s, profileID)
+	got, err := s.assembleProfileArtifacts(context.Background(), p, entries)
+	if err != nil {
+		t.Fatalf("assembleProfileArtifacts: %v", err)
+	}
+
+	wantID := "ent-bundle/" + catalogIDs[0]
+	wantDest := "payloads/" + wantID
+	var payload *cpv1.ArtifactSpec
+	for _, spec := range got {
+		if spec.Id == wantID {
+			payload = spec
+			break
+		}
+	}
+	if payload == nil {
+		t.Fatalf("no payload spec with Id %q (rename must not touch artifactID)", wantID)
+	}
+	if payload.DestPath != wantDest {
+		t.Errorf("DestPath = %q, want %q (rename must not touch DestPath)", payload.DestPath, wantDest)
+	}
+
+	ms := findManifestSpec(got)
+	m := unmarshalManifest(t, ms.Inline)
+	if findArtifactByName(m, names[0]) != nil {
+		t.Fatalf("manifest still has the pre-rename name %q", names[0])
+	}
+	renamed := findArtifactByName(m, newName)
+	if renamed == nil {
+		t.Fatalf("manifest missing renamed artifact %q", newName)
+	}
+	if renamed.Skill == nil || renamed.Skill.Dir != wantDest {
+		t.Errorf("renamed artifact Skill.Dir = %+v, want %q", renamed.Skill, wantDest)
+	}
+}
+
+// TestAssembleBundleRenameResolvesCollisionWithStandaloneEntry is the sp-mwco.1.8 acceptance
+// criterion: a rename override resolves a name collision with a standalone catalog_ref entry
+// without failing the spawn.
+func TestAssembleBundleRenameResolvesCollisionWithStandaloneEntry(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	bundleID, versionID, _, names := seedBundle(t, s, "alice", 1)
+	collidingSubdir := fmt.Sprintf("skills/%s", names[0])
+
+	catResp, err := s.CreateCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.CreateCatalogEntryRequest{
+		Kind:    cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+		Name:    names[0], // same name as the bundle member — would collide without the rename
+		Content: validSkillTar(),
+	}))
+	if err != nil {
+		t.Fatalf("CreateCatalogEntry: %v", err)
+	}
+
+	profileID := createProfile(t, s)
+	ver := addBundleRefEntryWithOverrides(t, s, profileID, 1, "ent-bundle", "my-bundle", bundleID, versionID, nil,
+		nil, map[string]string{collidingSubdir: names[0] + "-2"})
+	_, _ = addEntry(t, s, profileID, ver, &cpv1.ProfileEntry{
+		Kind:      cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+		Name:      names[0],
+		Source:    cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF,
+		CatalogId: catResp.Msg.CatalogId,
+	})
+
+	p, entries := loadProfile(t, s, profileID)
+	got, err := s.assembleProfileArtifacts(context.Background(), p, entries)
+	if err != nil {
+		t.Fatalf("assembleProfileArtifacts: %v (rename override must resolve the collision)", err)
+	}
+	if len(got) != 3 { // manifest + bundle member + standalone entry
+		t.Fatalf("want 3 specs, got %d", len(got))
+	}
+
+	ms := findManifestSpec(got)
+	m := unmarshalManifest(t, ms.Inline)
+	if findArtifactByName(m, names[0]) == nil {
+		t.Fatalf("manifest missing standalone entry %q", names[0])
+	}
+	if findArtifactByName(m, names[0]+"-2") == nil {
+		t.Fatalf("manifest missing renamed bundle member %q", names[0]+"-2")
+	}
+}
+
+// TestAssembleBundleWithoutRenameStillCollides proves the WITHOUT-rename control case for the
+// above: the same profile shape, minus the rename override, still fails with the duplicate
+// skill-dir-name error — the rename override is what resolves it, not some other change.
+func TestAssembleBundleWithoutRenameStillCollides(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	bundleID, versionID, _, names := seedBundle(t, s, "alice", 1)
+
+	catResp, err := s.CreateCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.CreateCatalogEntryRequest{
+		Kind:    cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+		Name:    names[0],
+		Content: validSkillTar(),
+	}))
+	if err != nil {
+		t.Fatalf("CreateCatalogEntry: %v", err)
+	}
+
+	profileID := createProfile(t, s)
+	ver := addBundleRefEntry(t, s, profileID, 1, "ent-bundle", "my-bundle", bundleID, versionID, nil)
+	_, _ = addEntry(t, s, profileID, ver, &cpv1.ProfileEntry{
+		Kind:      cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+		Name:      names[0],
+		Source:    cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF,
+		CatalogId: catResp.Msg.CatalogId,
+	})
+
+	p, entries := loadProfile(t, s, profileID)
+	_, err = s.assembleProfileArtifacts(context.Background(), p, entries)
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("want CodeInvalidArgument for the un-renamed collision, got %v", err)
+	}
+}
+
+// TestAssembleBundleAllMembersExcluded: excluding every member of a bundle_ref entry ->
+// InvalidArgument (attach forbids this too; assembly still fails loud as the last line of defense).
+func TestAssembleBundleAllMembersExcluded(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	bundleID, versionID, _, names := seedBundle(t, s, "alice", 2)
+	exclude := []string{
+		fmt.Sprintf("skills/%s", names[0]),
+		fmt.Sprintf("skills/%s", names[1]),
+	}
+
+	profileID := createProfile(t, s)
+	addBundleRefEntryWithOverrides(t, s, profileID, 1, "ent-bundle", "my-bundle", bundleID, versionID, nil,
+		exclude, nil)
+
+	p, entries := loadProfile(t, s, profileID)
+	_, err := s.assembleProfileArtifacts(context.Background(), p, entries)
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("want CodeInvalidArgument for all-members-excluded, got %v", err)
 	}
 }

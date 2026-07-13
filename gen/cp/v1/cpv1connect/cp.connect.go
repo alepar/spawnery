@@ -205,6 +205,9 @@ const (
 	// SpawnServiceGetBundleDiffProcedure is the fully-qualified name of the SpawnService's
 	// GetBundleDiff RPC.
 	SpawnServiceGetBundleDiffProcedure = "/cp.v1.SpawnService/GetBundleDiff"
+	// SpawnServiceRepinProfileBundleProcedure is the fully-qualified name of the SpawnService's
+	// RepinProfileBundle RPC.
+	SpawnServiceRepinProfileBundleProcedure = "/cp.v1.SpawnService/RepinProfileBundle"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -322,6 +325,14 @@ type SpawnServiceClient interface {
 	// outcome as the silent-update channel this design rejects). Marks any matching ReingestBundle
 	// diff_token as viewed. Creator-only.
 	GetBundleDiff(context.Context, *connect.Request[v1.GetBundleDiffRequest]) (*connect.Response[v1.GetBundleDiffResponse], error)
+	// RepinProfileBundle re-pins a bundle_ref profile entry onto a newer version of its bundle
+	// (sp-mwco.1.8 §4.4/§4.9). Gated on diff_token: the caller must have minted a token via
+	// ReingestBundle and viewed it via GetBundleDiff for the SAME (bundle_id, pinned_version,
+	// version_id) pair — an un-diffed re-pin is rejected with FailedPrecondition. version_id's seq
+	// must be strictly greater than the entry's currently pinned seq (no rollback). Exclude/rename
+	// overrides are rebased onto the new member set (a dropped override for a removed member and an
+	// auto-resolved name collision are both reported as warnings, never a hard failure).
+	RepinProfileBundle(context.Context, *connect.Request[v1.RepinProfileBundleRequest]) (*connect.Response[v1.RepinProfileBundleResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -701,6 +712,12 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("GetBundleDiff")),
 			connect.WithClientOptions(opts...),
 		),
+		repinProfileBundle: connect.NewClient[v1.RepinProfileBundleRequest, v1.RepinProfileBundleResponse](
+			httpClient,
+			baseURL+SpawnServiceRepinProfileBundleProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("RepinProfileBundle")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -767,6 +784,7 @@ type spawnServiceClient struct {
 	listBundles              *connect.Client[v1.ListBundlesRequest, v1.ListBundlesResponse]
 	getBundle                *connect.Client[v1.GetBundleRequest, v1.GetBundleResponse]
 	getBundleDiff            *connect.Client[v1.GetBundleDiffRequest, v1.GetBundleDiffResponse]
+	repinProfileBundle       *connect.Client[v1.RepinProfileBundleRequest, v1.RepinProfileBundleResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -1074,6 +1092,11 @@ func (c *spawnServiceClient) GetBundleDiff(ctx context.Context, req *connect.Req
 	return c.getBundleDiff.CallUnary(ctx, req)
 }
 
+// RepinProfileBundle calls cp.v1.SpawnService.RepinProfileBundle.
+func (c *spawnServiceClient) RepinProfileBundle(ctx context.Context, req *connect.Request[v1.RepinProfileBundleRequest]) (*connect.Response[v1.RepinProfileBundleResponse], error) {
+	return c.repinProfileBundle.CallUnary(ctx, req)
+}
+
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -1189,6 +1212,14 @@ type SpawnServiceHandler interface {
 	// outcome as the silent-update channel this design rejects). Marks any matching ReingestBundle
 	// diff_token as viewed. Creator-only.
 	GetBundleDiff(context.Context, *connect.Request[v1.GetBundleDiffRequest]) (*connect.Response[v1.GetBundleDiffResponse], error)
+	// RepinProfileBundle re-pins a bundle_ref profile entry onto a newer version of its bundle
+	// (sp-mwco.1.8 §4.4/§4.9). Gated on diff_token: the caller must have minted a token via
+	// ReingestBundle and viewed it via GetBundleDiff for the SAME (bundle_id, pinned_version,
+	// version_id) pair — an un-diffed re-pin is rejected with FailedPrecondition. version_id's seq
+	// must be strictly greater than the entry's currently pinned seq (no rollback). Exclude/rename
+	// overrides are rebased onto the new member set (a dropped override for a removed member and an
+	// auto-resolved name collision are both reported as warnings, never a hard failure).
+	RepinProfileBundle(context.Context, *connect.Request[v1.RepinProfileBundleRequest]) (*connect.Response[v1.RepinProfileBundleResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1564,6 +1595,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("GetBundleDiff")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceRepinProfileBundleHandler := connect.NewUnaryHandler(
+		SpawnServiceRepinProfileBundleProcedure,
+		svc.RepinProfileBundle,
+		connect.WithSchema(spawnServiceMethods.ByName("RepinProfileBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
@@ -1688,6 +1725,8 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceGetBundleHandler.ServeHTTP(w, r)
 		case SpawnServiceGetBundleDiffProcedure:
 			spawnServiceGetBundleDiffHandler.ServeHTTP(w, r)
+		case SpawnServiceRepinProfileBundleProcedure:
+			spawnServiceRepinProfileBundleHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1939,4 +1978,8 @@ func (UnimplementedSpawnServiceHandler) GetBundle(context.Context, *connect.Requ
 
 func (UnimplementedSpawnServiceHandler) GetBundleDiff(context.Context, *connect.Request[v1.GetBundleDiffRequest]) (*connect.Response[v1.GetBundleDiffResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetBundleDiff is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) RepinProfileBundle(context.Context, *connect.Request[v1.RepinProfileBundleRequest]) (*connect.Response[v1.RepinProfileBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RepinProfileBundle is not implemented"))
 }

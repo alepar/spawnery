@@ -118,6 +118,14 @@ service SpawnService {
   // outcome as the silent-update channel this design rejects). Marks any matching ReingestBundle
   // diff_token as viewed. Creator-only.
   rpc GetBundleDiff(GetBundleDiffRequest) returns (GetBundleDiffResponse);
+  // RepinProfileBundle re-pins a bundle_ref profile entry onto a newer version of its bundle
+  // (sp-mwco.1.8 §4.4/§4.9). Gated on diff_token: the caller must have minted a token via
+  // ReingestBundle and viewed it via GetBundleDiff for the SAME (bundle_id, pinned_version,
+  // version_id) pair — an un-diffed re-pin is rejected with FailedPrecondition. version_id's seq
+  // must be strictly greater than the entry's currently pinned seq (no rollback). Exclude/rename
+  // overrides are rebased onto the new member set (a dropped override for a removed member and an
+  // auto-resolved name collision are both reported as warnings, never a hard failure).
+  rpc RepinProfileBundle(RepinProfileBundleRequest) returns (RepinProfileBundleResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -632,6 +640,7 @@ enum ProfileEntrySource {
   PROFILE_ENTRY_SOURCE_UNSPECIFIED  = 0;
   PROFILE_ENTRY_SOURCE_CATALOG_REF  = 1;
   PROFILE_ENTRY_SOURCE_CUSTOM       = 2;
+  PROFILE_ENTRY_SOURCE_BUNDLE_REF   = 3;
 }
 
 // ProfileEntry carries one customization item (skill, MCP server, config, or plugin).
@@ -644,6 +653,24 @@ message ProfileEntry {
   bytes             custom_inline   = 6; // set when source=CUSTOM (inline MVP; by-ref deferred)
   repeated string   targets         = 7; // spawn targets; empty → ["all"]
   repeated string   mcp_secret_refs = 8; // env-var names for MCP secret bindings
+  // bundle_ref fields (sp-mwco.1.8 §4.4): set when source=BUNDLE_REF. bundle_id/version_id pin
+  // the entry to a skill_bundle_version resolved to LATEST at attach time — re-ingestion never
+  // touches an existing profile; RepinProfileBundle is the only way to move the pin.
+  string            bundle_id        = 9;
+  string            version_id       = 10;
+  // excluded_subdirs/member_renames are per-member overrides keyed by the bundle member's
+  // source_subdir (the stable member identity across versions — see skill_bundle_member).
+  // Caller-supplied on AddProfileEntry (validated against the pinned version's members);
+  // member_renames may also be server-populated with an implicit warn-and-rename entry chosen to
+  // resolve a directory-name collision with another profile entry.
+  repeated string   excluded_subdirs = 11;
+  map<string, string> member_renames = 12;
+  // pinned_seq/latest_seq/member_count are read-only, server-populated by GetProfile (the "update
+  // available" badge — derivable client-side as latest_seq > pinned_seq; post-exclude member
+  // count). Zero for non-BUNDLE_REF entries.
+  int64             pinned_seq       = 13;
+  int64             latest_seq       = 14;
+  int32             member_count     = 15;
 }
 
 // Profile is the full profile view including its entries and attached secret ids.
@@ -680,9 +707,11 @@ message UpdateProfileResponse { uint64 version = 1; }
 message DeleteProfileRequest  { string profile_id = 1; }
 message DeleteProfileResponse {}
 
-// AddProfileEntry adds an entry to a profile, CAS-fenced by expected_version.
+// AddProfileEntry adds an entry to a profile, CAS-fenced by expected_version. For a BUNDLE_REF
+// entry, warnings reports any implicit collision auto-renames chosen at attach (§4.4) — the entry
+// still attaches successfully; a spawn-creation abort is never the outcome of a name collision.
 message AddProfileEntryRequest  { string profile_id = 1; uint64 expected_version = 2; ProfileEntry entry = 3; }
-message AddProfileEntryResponse { string entry_id = 1; uint64 version = 2; }
+message AddProfileEntryResponse { string entry_id = 1; uint64 version = 2; repeated string warnings = 3; }
 
 // RemoveProfileEntry removes an entry by entry_id, CAS-fenced.
 message RemoveProfileEntryRequest  { string profile_id = 1; uint64 expected_version = 2; string entry_id = 3; }
@@ -978,4 +1007,21 @@ message GetBundleDiffResponse {
   string from_commit           = 2;
   string to_commit             = 3;
   string diff_token            = 4;
+}
+
+// RepinProfileBundleRequest re-pins entry_id (must be a BUNDLE_REF entry of profile_id) onto
+// version_id. diff_token must be a token minted by ReingestBundle for (bundle_id, pinned_version,
+// version_id) and marked viewed by GetBundleDiff for the same pair (§4.9).
+message RepinProfileBundleRequest {
+  string profile_id       = 1;
+  string entry_id         = 2;
+  string version_id       = 3;
+  string diff_token       = 4;
+  uint64 expected_version = 5;
+}
+// RepinProfileBundleResponse.warnings reports overrides dropped for members removed in the new
+// version and any implicit collision auto-renames — the re-pin still succeeds.
+message RepinProfileBundleResponse {
+  uint64 version           = 1;
+  repeated string warnings = 2;
 }

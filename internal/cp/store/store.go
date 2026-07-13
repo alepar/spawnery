@@ -219,6 +219,10 @@ type ProfileRepo interface {
 	Delete(ctx context.Context, profileID string) error
 	// AddEntry CAS-adds an entry to the profile. Returns ErrNotFound or ErrConflict.
 	AddEntry(ctx context.Context, profileID string, expectedVersion uint64, e ProfileEntry, now int64) (newVersion uint64, err error)
+	// UpdateEntryPin CAS-repins a bundle_ref entry onto a new version_id + bundle_overrides JSON
+	// (sp-mwco.1.8 — RepinProfileBundle's store call). Returns ErrNotFound when the entry row is
+	// absent, or ErrConflict when expectedVersion is stale.
+	UpdateEntryPin(ctx context.Context, profileID string, expectedVersion uint64, entryID, versionID, overridesJSON string, now int64) (newVersion uint64, err error)
 	// RemoveEntry CAS-removes an entry. Returns ErrNotFound or ErrConflict.
 	RemoveEntry(ctx context.Context, profileID string, expectedVersion uint64, entryID string, now int64) (newVersion uint64, err error)
 	// AddSecretRef CAS-adds a secret reference. Returns ErrNotFound or ErrConflict.

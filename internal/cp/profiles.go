@@ -93,8 +93,12 @@ func (s *Server) GetProfile(ctx context.Context, req *connect.Request[cpv1.GetPr
 	if p.OwnerID != owner {
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("profile not found"))
 	}
+	profile, err := s.profileToProto(ctx, p, entries, secrets)
+	if err != nil {
+		return nil, err
+	}
 	return connect.NewResponse(&cpv1.GetProfileResponse{
-		Profile: profileToProto(p, entries, secrets),
+		Profile: profile,
 	}), nil
 }
 
@@ -184,6 +188,21 @@ func (s *Server) AddProfileEntry(ctx context.Context, req *connect.Request[cpv1.
 		if err := validateCustomContent(protoToEntryKind(e.Kind), strings.TrimSpace(e.Name), e.CustomInline); err != nil {
 			return nil, err
 		}
+	case cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_BUNDLE_REF:
+		// Shape-only validation here (sp-mwco.1.8 §4.4 design decision 3); bundle existence/
+		// ownership/version pin/overrides validation needs DB reads and runs inside the tx below.
+		if e.Kind != cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("kind must be SKILL for BUNDLE_REF source"))
+		}
+		if e.CatalogId != "" {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("catalog_id must be empty for BUNDLE_REF source"))
+		}
+		if len(e.CustomInline) != 0 {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("custom_inline must be empty for BUNDLE_REF source"))
+		}
+		if e.BundleId == "" {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bundle_id is required for BUNDLE_REF source"))
+		}
 	}
 
 	eid, err := uuid.NewV7()
@@ -203,13 +222,14 @@ func (s *Server) AddProfileEntry(ctx context.Context, req *connect.Request[cpv1.
 		MCPSecretRefs: e.McpSecretRefs,
 	}
 
-	// The catalog-ref existence/visibility check, the entry-count cap check, and the insert all
-	// run inside one WithTx so they serialize against a concurrent DeleteCatalogEntry on the same
-	// catalog_id (sp-mwco.3.3 §2) — LockRow is the mutex both sides take on the referenced row.
-	// Without it, "check the ref exists, then insert" and "check no ref exists, then delete" can
-	// interleave and leave a dangling ref on the normal path even though neither side raced an
-	// error.
+	// The catalog-ref existence/visibility check, the entry-count/artifact cap check, the
+	// bundle_ref pin/override validation + collision resolution, and the insert all run inside
+	// one WithTx so they serialize against a concurrent DeleteCatalogEntry on the same catalog_id
+	// (sp-mwco.3.3 §2) — LockRow is the mutex both sides take on the referenced row. Without it,
+	// "check the ref exists, then insert" and "check no ref exists, then delete" can interleave
+	// and leave a dangling ref on the normal path even though neither side raced an error.
 	var newVer uint64
+	var warnings []string
 	txErr := s.st.WithTx(ctx, func(tx store.Store) error {
 		if e.Source == cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF {
 			// Tenant gate (sp-mwco.3.4 §4.6 D6): the referenced entry must exist and be visible to
@@ -230,13 +250,115 @@ func (s *Server) AddProfileEntry(ctx context.Context, req *connect.Request[cpv1.
 			}
 		}
 
-		// Enforce per-profile entry count cap before inserting (sp-nrzf.3.6).
 		_, existingEntries, _, err := tx.Profiles().Get(ctx, req.Msg.ProfileId)
 		if err != nil {
 			return err
 		}
-		if err := enforceProfileEntryCap(len(existingEntries)); err != nil {
-			return err
+
+		if e.Source == cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_BUNDLE_REF {
+			// Ownership (design decision 3): the bundle must exist and belong to this profile's
+			// owner — NotFound either way, never leak existence to another owner. LockBundle
+			// first (mirrors DeleteBundle's LockBundle-before-CountBundleRefs in
+			// catalog_delete.go) so this "check ref exists, then insert" can't interleave with a
+			// concurrent DeleteBundle's "check no ref exists, then delete": without the lock,
+			// DeleteBundle could observe zero refs and cascade-delete the bundle/version/members
+			// between this read and AddEntry's insert below, leaving a permanently dangling
+			// bundle_ref that GetProfile's badge silently zeroes and CreateSpawn hard-fails on.
+			if err := tx.SkillBundles().LockBundle(ctx, e.BundleId); err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return connect.NewError(connect.CodeNotFound, fmt.Errorf("bundle not found"))
+				}
+				return err
+			}
+			bundle, err := tx.SkillBundles().Get(ctx, e.BundleId)
+			if err != nil {
+				return err
+			}
+			if bundle.CreatorID != p.OwnerID {
+				return connect.NewError(connect.CodeNotFound, fmt.Errorf("bundle not found"))
+			}
+
+			// Pin = latest version at attach (design decision 2). A caller-supplied version_id
+			// that isn't the latest is rejected outright — pinning to an arbitrary historical
+			// version is out of scope (§4.10).
+			latest, err := tx.SkillBundles().LatestVersion(ctx, e.BundleId)
+			if errors.Is(err, store.ErrNotFound) {
+				return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bundle %q has no ingested version", e.BundleId))
+			}
+			if err != nil {
+				return err
+			}
+			if e.VersionId != "" && e.VersionId != latest.VersionID {
+				return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("pinning to a non-latest version is not supported"))
+			}
+
+			members, err := tx.SkillBundles().Members(ctx, latest.VersionID)
+			if err != nil {
+				return err
+			}
+			memberSubdirs := make(map[string]bool, len(members))
+			for _, m := range members {
+				memberSubdirs[m.SourceSubdir] = true
+			}
+
+			// Override validation (design decision 4): every exclude/rename key must name a real
+			// member — a typo that silently does nothing is worse than an error.
+			for _, subdir := range e.ExcludedSubdirs {
+				if !memberSubdirs[subdir] {
+					return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("exclude: unknown bundle member subdir %q", subdir))
+				}
+			}
+			for subdir, name := range e.MemberRenames {
+				if !memberSubdirs[subdir] {
+					return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("rename: unknown bundle member subdir %q", subdir))
+				}
+				if err := validateContentName(name); err != nil {
+					return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("rename %q: %w", subdir, err))
+				}
+				if err := confineDestPath(name); err != nil {
+					return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("rename %q: %w", subdir, err))
+				}
+			}
+
+			excludeSet := toStringSet(e.ExcludedSubdirs)
+			remaining := 0
+			for _, m := range members {
+				if !excludeSet[m.SourceSubdir] {
+					remaining++
+				}
+			}
+			if remaining == 0 {
+				return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bundle_ref entry excludes every member of the pinned version"))
+			}
+
+			se.BundleID = e.BundleId
+			se.VersionID = latest.VersionID
+			se.ExcludeSubdirs = e.ExcludedSubdirs
+
+			// Attach-time cap (design decision 6 — sp-mwco.1.12's gap, landed here per its bead).
+			existingNames, existingCount, err := s.expandedProfileState(ctx, tx, existingEntries, "")
+			if err != nil {
+				return err
+			}
+			if err := enforceProfileArtifactCap(existingCount, remaining); err != nil {
+				return err
+			}
+
+			// Collision = warn-and-rename, never a spawn-creation abort (design decision 5). An
+			// explicit user rename that collides is the user's mistake -> InvalidArgument;
+			// an implicit (natural-name) collision is auto-resolved with a warning.
+			finalRename, w, err := resolveMemberOverrides(members, excludeSet, e.MemberRenames,
+				catalogNameFunc(ctx, tx), existingNames, true /* failOnExplicitCollision */)
+			if err != nil {
+				return err
+			}
+			warnings = w
+			se.RenameSubdirs = finalRename
+		} else {
+			// Enforce per-profile entry count cap before inserting (sp-nrzf.3.6).
+			if err := enforceProfileEntryCap(len(existingEntries)); err != nil {
+				return err
+			}
 		}
 
 		ver, err := tx.Profiles().AddEntry(ctx, req.Msg.ProfileId, req.Msg.ExpectedVersion, se, time.Now().Unix())
@@ -254,8 +376,9 @@ func (s *Server) AddProfileEntry(ctx context.Context, req *connect.Request[cpv1.
 		return nil, mapProfileErr(txErr)
 	}
 	return connect.NewResponse(&cpv1.AddProfileEntryResponse{
-		EntryId: entryID,
-		Version: newVer,
+		EntryId:  entryID,
+		Version:  newVer,
+		Warnings: warnings,
 	}), nil
 }
 
@@ -300,10 +423,14 @@ func (s *Server) RemoveProfileSecretRef(ctx context.Context, req *connect.Reques
 
 // --- Wire <-> store conversions --------------------------------------------
 
-func profileToProto(p store.Profile, entries []store.ProfileEntry, secrets []store.ProfileSecret) *cpv1.Profile {
+// profileToProto builds the full Profile wire message, including the GetProfile-only "update
+// available" badge enrichment (design decision 7): pinned_seq/latest_seq/member_count for each
+// bundle_ref entry, read via MAX(seq) per bundle — never a GitHub call. ListProfiles stays
+// lightweight (ProfileSummary — unenriched) and does not call this.
+func (s *Server) profileToProto(ctx context.Context, p store.Profile, entries []store.ProfileEntry, secrets []store.ProfileSecret) (*cpv1.Profile, error) {
 	wireEntries := make([]*cpv1.ProfileEntry, len(entries))
 	for i, e := range entries {
-		wireEntries[i] = &cpv1.ProfileEntry{
+		pe := &cpv1.ProfileEntry{
 			EntryId:       e.EntryID,
 			Kind:          entryKindToProto(e.Kind),
 			Name:          e.Name,
@@ -313,6 +440,36 @@ func profileToProto(p store.Profile, entries []store.ProfileEntry, secrets []sto
 			Targets:       e.Targets,
 			McpSecretRefs: e.MCPSecretRefs,
 		}
+		if e.SourceKind == store.ProfileSourceBundle {
+			pe.BundleId = e.BundleID
+			pe.VersionId = e.VersionID
+			pe.ExcludedSubdirs = e.ExcludeSubdirs
+			pe.MemberRenames = e.RenameSubdirs
+
+			if v, err := s.st.SkillBundles().GetVersion(ctx, e.VersionID); err == nil {
+				pe.PinnedSeq = v.Seq
+			} else if !errors.Is(err, store.ErrNotFound) {
+				return nil, connect.NewError(connect.CodeInternal, err)
+			}
+			if latest, err := s.st.SkillBundles().LatestVersion(ctx, e.BundleID); err == nil {
+				pe.LatestSeq = latest.Seq
+			} else if !errors.Is(err, store.ErrNotFound) {
+				return nil, connect.NewError(connect.CodeInternal, err)
+			}
+			if members, err := s.st.SkillBundles().Members(ctx, e.VersionID); err == nil {
+				excludeSet := toStringSet(e.ExcludeSubdirs)
+				count := 0
+				for _, m := range members {
+					if !excludeSet[m.SourceSubdir] {
+						count++
+					}
+				}
+				pe.MemberCount = int32(count)
+			} else if !errors.Is(err, store.ErrNotFound) {
+				return nil, connect.NewError(connect.CodeInternal, err)
+			}
+		}
+		wireEntries[i] = pe
 	}
 	secretIDs := make([]string, len(secrets))
 	for i, s := range secrets {
@@ -325,7 +482,7 @@ func profileToProto(p store.Profile, entries []store.ProfileEntry, secrets []sto
 		UpdatedAt: p.UpdatedAt,
 		Entries:   wireEntries,
 		SecretIds: secretIDs,
-	}
+	}, nil
 }
 
 func protoToEntryKind(k cpv1.ProfileEntryKind) store.ProfileEntryKind {
@@ -364,6 +521,8 @@ func protoToSourceKind(s cpv1.ProfileEntrySource) store.ProfileSourceKind {
 		return store.ProfileSourceCatalog
 	case cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CUSTOM:
 		return store.ProfileSourceCustom
+	case cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_BUNDLE_REF:
+		return store.ProfileSourceBundle
 	default:
 		return ""
 	}
@@ -375,6 +534,8 @@ func sourceKindToProto(s store.ProfileSourceKind) cpv1.ProfileEntrySource {
 		return cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CATALOG_REF
 	case store.ProfileSourceCustom:
 		return cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_CUSTOM
+	case store.ProfileSourceBundle:
+		return cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_BUNDLE_REF
 	default:
 		return cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_UNSPECIFIED
 	}
