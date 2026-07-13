@@ -54,7 +54,7 @@ func main() {
 	// override. Started only when both a token and an address are configured.
 	if controlToken != "" && controlAddr != "" {
 		log.Printf("sidecar control listening on %s", controlAddr)
-		controlSrv := &http.Server{Addr: controlAddr, Handler: sidecar.NewControlHandler(ov, controlToken, inflight)}
+		controlSrv := &http.Server{Addr: controlAddr, Handler: sidecar.NewControlHandler(ov, controlToken, nil, inflight)}
 		servers = append(servers, controlSrv)
 	} else {
 		log.Printf("sidecar control endpoint disabled (set SIDECAR_CONTROL_TOKEN and SIDECAR_CONTROL_ADDR to enable)")

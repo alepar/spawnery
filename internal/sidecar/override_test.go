@@ -65,7 +65,7 @@ func TestPatchModelJSON(t *testing.T) {
 
 func TestControlPostSetsOverride(t *testing.T) {
 	ov := &Override{}
-	srv := httptest.NewServer(NewControlHandler(ov, "secret"))
+	srv := httptest.NewServer(NewControlHandler(ov, "secret", nil))
 	defer srv.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/control/model",
@@ -87,7 +87,7 @@ func TestControlPostSetsOverride(t *testing.T) {
 func TestControlGetReturnsOverride(t *testing.T) {
 	ov := &Override{}
 	ov.Set("cur/model")
-	srv := httptest.NewServer(NewControlHandler(ov, "secret"))
+	srv := httptest.NewServer(NewControlHandler(ov, "secret", nil))
 	defer srv.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/control/model", nil)
@@ -115,7 +115,7 @@ func TestControlStatusReportsInflightRequests(t *testing.T) {
 	inflight := NewInflight()
 	inflight.Begin()
 	defer inflight.End()
-	srv := httptest.NewServer(NewControlHandler(ov, "secret", inflight))
+	srv := httptest.NewServer(NewControlHandler(ov, "secret", nil, inflight))
 	defer srv.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/control/status", nil)
@@ -143,7 +143,7 @@ func TestControlStatusReportsInflightRequests(t *testing.T) {
 
 func TestControlRejectsBadToken(t *testing.T) {
 	ov := &Override{}
-	srv := httptest.NewServer(NewControlHandler(ov, "secret"))
+	srv := httptest.NewServer(NewControlHandler(ov, "secret", nil))
 	defer srv.Close()
 
 	cases := []struct {
@@ -177,7 +177,7 @@ func TestControlRejectsBadToken(t *testing.T) {
 
 func TestControlPostSetsCredentialsWithoutEchoingKey(t *testing.T) {
 	ov := &Override{}
-	srv := httptest.NewServer(NewControlHandler(ov, "secret"))
+	srv := httptest.NewServer(NewControlHandler(ov, "secret", nil))
 	defer srv.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/control/credentials",
@@ -217,7 +217,7 @@ func TestControlCredentialsRejectsEmptyKeyAndBadUpstream(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ov := &Override{}
-			srv := httptest.NewServer(NewControlHandler(ov, "secret"))
+			srv := httptest.NewServer(NewControlHandler(ov, "secret", nil))
 			defer srv.Close()
 
 			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/control/credentials", strings.NewReader(c.body))
