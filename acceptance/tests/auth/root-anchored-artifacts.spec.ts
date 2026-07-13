@@ -37,8 +37,10 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
 
   const keyPair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]) as CryptoKeyPair;
   const spki = await exportSpkiDer(keyPair.publicKey);
-  const nodeToken = await mintVMToken(cfg, "current", "node", spki);
-  expect(decodeSessionArtifact(nodeToken).body.audience).toBe("node");
+  const nodeToken = await mintVMToken(cfg, "current", "node", spki, cpArtifact.body.accountId);
+  const nodeArtifact = decodeSessionArtifact(nodeToken);
+  expect(nodeArtifact.body.audience).toBe("node");
+  expect(nodeArtifact.body.accountId).toBe(cpArtifact.body.accountId);
   expect(chainHashes(nodeToken)).toEqual(chainHashes(session.accessToken));
   await expectCPRejected(cfg, nodeToken);
 
@@ -94,10 +96,10 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
 
     await setCPAuthMode(cfg, "prod");
 
-    const nextCP = await mintVMToken(cfg, "next", "cp", spki);
+    const nextCP = await mintVMToken(cfg, "next", "cp", spki, cfg.owner);
     cleanup = cpClient(cfg, nextCP);
     await expect(cpClient(cfg, nextCP).listSpawns({})).resolves.toBeDefined();
-    const nextNode = await mintVMToken(cfg, "next", "node", spki);
+    const nextNode = await mintVMToken(cfg, "next", "node", spki, cfg.owner);
     const replacement = await submitSpawn(cfg, nextNode, keyPair, "replacement", nextCP);
     createdSpawnIds.push(replacement.spawnId);
     expect(replacement.status).toBe("ACTIVE");

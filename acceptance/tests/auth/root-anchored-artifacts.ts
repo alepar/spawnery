@@ -97,12 +97,13 @@ export async function mintVMToken(
   signer: "current" | "next",
   audience: "cp" | "node",
   spki: Uint8Array,
+  accountId: string,
 ): Promise<string> {
   const base = "/etc/spawnery/authsvc";
   return ssh(cfg, remoteArgv(
     "sudo", "/usr/local/bin/spawnery-ca", "auth-token", `${base}/root.pem`,
     `${base}/auth-signer-${signer}-key.pem`, `${base}/auth-signer-${signer}-chain.pem`,
-    "prod", audience, cfg.owner, Buffer.from(spki).toString("base64"),
+    "prod", audience, accountId, Buffer.from(spki).toString("base64"),
   ));
 }
 
