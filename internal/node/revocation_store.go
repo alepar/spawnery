@@ -381,10 +381,6 @@ func (s *UserRevocationStore) pruneAndLoad(ctx context.Context, now int64) (*use
 	return snapshot, nil
 }
 
-func (s *UserRevocationStore) loadSnapshot(ctx context.Context) (*userRevocationSnapshot, error) {
-	return loadUserRevocationSnapshot(ctx, s.db)
-}
-
 type revocationQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
