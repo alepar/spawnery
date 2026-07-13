@@ -22,15 +22,20 @@ import { buildArgs, type CliConfig } from "./cli";
 import type { DriverCtx } from "./types";
 
 /** execFileP: a minimal Promise wrapper around child_process.execFile (easy to mock in tests). */
-function execFileP(bin: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+function execFileP(bin: string, args: string[], configHome?: string): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFileCb(bin, args, (err, stdout, stderr) => {
+    const callback = (err: Error | null, stdout: string | Buffer, stderr: string | Buffer) => {
       if (err) {
         reject(err);
         return;
       }
       resolve({ stdout: stdout.toString(), stderr: stderr.toString() });
-    });
+    };
+    if (configHome) {
+      execFileCb(bin, args, { env: { ...process.env, XDG_CONFIG_HOME: configHome } }, callback);
+    } else {
+      execFileCb(bin, args, callback);
+    }
   });
 }
 
@@ -126,7 +131,11 @@ export class CliMarketDriver implements MarketDriver {
       for (const m of spec.mounts ?? [{ name: "main", path: "data", seed: "seed" }]) {
         if (m.seed) await mkdir(path.join(tmpDir, m.seed), { recursive: true });
       }
-      const { stdout } = await execFileP(this.cfg.spawnctlBin, buildArgs(this.cfg, ctx.identity, "", marketCliArgs(spec, tmpDir)));
+      const { stdout } = await execFileP(
+        this.cfg.spawnctlBin,
+        buildArgs(this.cfg, ctx.identity, "", marketCliArgs(spec, tmpDir)),
+        this.cfg.configHome,
+      );
       const parsed = parseRegisterOutput(stdout);
       if (!parsed) throw new Error(`marketDriver(cli): could not parse register output:\n${stdout}`);
       return parsed;

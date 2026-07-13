@@ -14,13 +14,51 @@ import { AcceptanceClient } from "../../src/drivers/oracle";
 import { CliDriver } from "../../src/drivers/cli";
 import { loadTenancyConfig } from "../../src/scenarios/tenancy";
 import type { DriverCtx } from "../../src/drivers/types";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({ target, ns }) => {
+test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({ target, auth, browser, ns }) => {
   const cfg = loadTenancyConfig();
-
-  const apiA = new AcceptanceClient({ baseUrl: target.cpEndpoint, bearer: cfg.a.token });
-  const apiB = new AcceptanceClient({ baseUrl: target.cpEndpoint, bearer: cfg.b.token });
-  const cli = new CliDriver({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin });
+  const makeApi = async (identity: typeof cfg.a) => new AcceptanceClient({
+    baseUrl: target.cpEndpoint,
+    bearer: () => auth.cpAccessToken(identity),
+    keyStore: await auth.sessionKeyStore(identity),
+    getNodeAccessToken: () => auth.nodeAccessToken(identity),
+    verifyTarget: auth.targetVerifier(identity),
+  });
+  const apiA = await makeApi(cfg.a);
+  const apiB = await makeApi(cfg.b);
+  const configA = await mkdtemp(join(tmpdir(), "spawnery-acc-tenancy-a-"));
+  const configB = await mkdtemp(join(tmpdir(), "spawnery-acc-tenancy-b-"));
+  const contextA = await browser.newContext({ baseURL: target.webOrigin });
+  const contextB = await browser.newContext({ baseURL: target.webOrigin });
+  const pageA = await contextA.newPage();
+  const pageB = await contextB.newPage();
+  await auth.seedWeb(pageA, cfg.a);
+  await auth.seedWeb(pageB, cfg.b);
+  const prepareCli = async (identity: typeof cfg.a, configHome: string, approvalPage: typeof pageA) => {
+    const prepared = await auth.prepareCli(approvalPage, identity, {
+      spawnctlBin: target.spawnctlBin,
+      asOrigin: target.asOrigin,
+      configHome,
+    });
+    return new CliDriver({
+      cpEndpoint: target.cpEndpoint,
+      spawnctlBin: target.spawnctlBin,
+      authArgs: prepared.authArgs,
+      configHome: prepared.configHome,
+      trust: target.rootCAPath ? {
+        rootCAPath: target.rootCAPath,
+        trustDomain: target.trustDomain!,
+        crlStatePath: target.crlStatePath!,
+        crlIssuerPaths: target.crlIssuerPaths ?? [],
+        crlPaths: target.crlPaths ?? [],
+      } : undefined,
+    });
+  };
+  const cliA = await prepareCli(cfg.a, configA, pageA);
+  const cliB = await prepareCli(cfg.b, configB, pageB);
   const ctxA: DriverCtx = { identity: cfg.a, ns, api: apiA };
   const ctxB: DriverCtx = { identity: cfg.b, ns, api: apiB };
 
@@ -34,7 +72,7 @@ test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({
     expect(listB).toContainSpawn(idB);
     expect(listB).not.toContainSpawn(idA);
 
-    const [cliListA, cliListB] = await Promise.all([cli.list(ctxA), cli.list(ctxB)]);
+    const [cliListA, cliListB] = await Promise.all([cliA.list(ctxA), cliB.list(ctxB)]);
     expect(cliListA.some((s) => s.spawnId === idA)).toBe(true);
     expect(cliListA.some((s) => s.spawnId === idB)).toBe(false);
     expect(cliListB.some((s) => s.spawnId === idB)).toBe(true);
@@ -42,5 +80,9 @@ test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({
   } finally {
     await apiA.deleteSpawn(idA).catch(() => {});
     await apiB.deleteSpawn(idB).catch(() => {});
+    await rm(configA, { recursive: true, force: true });
+    await rm(configB, { recursive: true, force: true });
+    await contextA.close();
+    await contextB.close();
   }
 });

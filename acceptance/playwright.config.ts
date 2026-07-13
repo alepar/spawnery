@@ -3,7 +3,6 @@ import { defineConfig, devices } from "@playwright/test";
 const vmHostname = process.env.ACC_WEB_ORIGIN ? new URL(process.env.ACC_WEB_ORIGIN).hostname : "";
 const vmIP = process.env.ACC_E2E_VM_IP ?? "";
 const vmResolverArgs = vmHostname && vmIP ? [`--host-resolver-rules=MAP ${vmHostname} ${vmIP}`] : [];
-const productionAuthMatrix = process.env.ACC_PRODUCTION_AUTH_MATRIX === "1";
 
 // Points at an ALREADY-RUNNING spawnery instance (ACC_WEB_ORIGIN) — this suite provisions
 // nothing. Load your target's .env.<target> before running (see README.md / .env.example).
@@ -41,12 +40,6 @@ export default defineConfig({
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
       testIgnore: "auth/root-anchored-artifacts.spec.ts",
-      ...(productionAuthMatrix ? {
-        testMatch: [
-          "auth/production-node-authorization.spec.ts",
-          "auth/user-revocation-lifecycle.spec.ts",
-        ],
-      } : {}),
     },
     {
       name: "destructive-root-artifacts",

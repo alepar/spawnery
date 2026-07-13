@@ -11,7 +11,7 @@
  */
 
 import { execFile as execFileCb } from "node:child_process";
-import { buildArgs, type CliConfig } from "./cli";
+import { buildArgs, buildExecArgs, type CliConfig } from "./cli";
 import type { Identity } from "../fixtures/identity-pool";
 
 /**
@@ -20,16 +20,21 @@ import type { Identity } from "../fixtures/identity-pool";
  * (rather than added to cli.ts) because cli.ts's own execFileP intentionally always rejects on a
  * non-zero exit — the two call sites want different failure semantics.
  */
-function execFileP2(bin: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+function execFileP2(bin: string, args: string[], configHome?: string): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve) => {
-    execFileCb(bin, args, (err, stdout, stderr) => {
+    const callback = (err: Error | null, stdout: string | Buffer, stderr: string | Buffer) => {
       let code = 0;
       if (err) {
         const c = (err as { code?: number | string }).code;
         code = typeof c === "number" ? c : 1;
       }
       resolve({ stdout: stdout.toString(), stderr: stderr.toString(), code });
-    });
+    };
+    if (configHome) {
+      execFileCb(bin, args, { env: { ...process.env, XDG_CONFIG_HOME: configHome } }, callback);
+    } else {
+      execFileCb(bin, args, callback);
+    }
   });
 }
 
@@ -43,7 +48,7 @@ export class ProfileCli {
 
   private async run(args: string[]): Promise<{ stdout: string; stderr: string }> {
     const argv = buildArgs(this.cfg, this.identity, "profile", args);
-    const { stdout, stderr, code } = await execFileP2(this.cfg.spawnctlBin, argv);
+    const { stdout, stderr, code } = await execFileP2(this.cfg.spawnctlBin, argv, this.cfg.configHome);
     if (code !== 0) {
       throw new Error(`spawnctl profile ${args.join(" ")} exited ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
     }
@@ -114,7 +119,7 @@ export class CatalogCli {
 
   private async run(args: string[]): Promise<{ stdout: string; stderr: string }> {
     const argv = buildArgs(this.cfg, this.identity, "catalog", args);
-    const { stdout, stderr, code } = await execFileP2(this.cfg.spawnctlBin, argv);
+    const { stdout, stderr, code } = await execFileP2(this.cfg.spawnctlBin, argv, this.cfg.configHome);
     if (code !== 0) {
       throw new Error(`spawnctl catalog ${args.join(" ")} exited ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
     }
@@ -169,7 +174,11 @@ export async function execInSpawn(
   spawnId: string,
   cmd: string[],
 ): Promise<{ stdout: string; stderr: string; code: number }> {
-  return execFileP2(cfg.spawnctlBin, ["exec", "-addr", nodeAddr, "-spawn", spawnId, "-token", identity.token, "--", ...cmd]);
+  return execFileP2(
+    cfg.spawnctlBin,
+    buildExecArgs({ ...cfg, nodeAddr }, identity, spawnId, cmd),
+    cfg.configHome,
+  );
 }
 
 function writeTarField(buf: Buffer, s: string, offset: number, len: number): void {

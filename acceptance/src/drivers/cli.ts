@@ -167,6 +167,11 @@ export class CliDriver implements SpawnDriver {
 
   constructor(private readonly cfg: CliConfig) {}
 
+  /** Shares the fixture-prepared stored-login and trust configuration with auxiliary CLI drivers. */
+  configuration(): CliConfig {
+    return this.cfg;
+  }
+
   private async run(identity: Identity, subcmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
     return execFileP(this.cfg.spawnctlBin, buildArgs(this.cfg, identity, subcmd, args), this.cfg.configHome);
   }

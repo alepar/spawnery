@@ -14,8 +14,9 @@ import { ProfileCli, buildSkillTar, dummyAtRestEnvelope } from "../../src/driver
 test(
   "profiles: create -> list -> show -> rename -> entry add/remove -> secret-ref add/remove -> delete",
   { tag: "@mutating" },
-  async ({ target, identity, api, ns }) => {
-    const profileCli = new ProfileCli({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }, identity);
+  async ({ identity, auth, api, cli, ns }) => {
+    const profileCli = new ProfileCli(cli.configuration(), identity);
+    const accountId = await auth.accountId(identity);
     const name = ns("prof-crud");
 
     let profileId: string | undefined;
@@ -87,7 +88,7 @@ test(
         targetContainer: "ARTIFACT_TARGET_AGENT",
         envVarName: "ACC_SECRET_PROFREF",
         devicesetEpoch: 0,
-        envelope: dummyAtRestEnvelope(identity.owner, secretId),
+        envelope: dummyAtRestEnvelope(accountId, secretId),
       });
 
       const versionAfterEntryRemove = oracle.version;

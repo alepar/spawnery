@@ -39,6 +39,10 @@ export class DevTokenAuth implements AuthStrategy {
     return identity.token;
   }
 
+  async accountId(identity: Identity): Promise<string> {
+    return identity.owner;
+  }
+
   async prepareCli(_page: unknown, identity: Identity, _options: CliPreparationOptions): Promise<CliPreparation> {
     return { authArgs: ["-token", identity.token] };
   }

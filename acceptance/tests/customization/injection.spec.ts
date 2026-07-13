@@ -30,7 +30,7 @@ test(
       );
     }
 
-    const profileCli = new ProfileCli({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }, identity);
+    const profileCli = new ProfileCli(cli.configuration(), identity);
     const cliCfg = { cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin };
 
     let profileId: string | undefined;

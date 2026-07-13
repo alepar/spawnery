@@ -38,6 +38,8 @@ export interface AuthStrategy {
   /** Explicit audience-separated accessors. One refresh replaces the pair atomically. */
   cpAccessToken(identity: Identity): Promise<string>;
   nodeAccessToken(identity: Identity): Promise<string>;
+  /** Canonical account id carried by the credential; login hints are not account ids in OAuth. */
+  accountId(identity: Identity): Promise<string>;
   /** Prepare spawnctl custody. OAuth implementations must use login --device, never key export. */
   prepareCli(page: unknown, identity: Identity, options: CliPreparationOptions): Promise<CliPreparation>;
   /** Strict target verifier invoked before any SDK intent signature is emitted. */

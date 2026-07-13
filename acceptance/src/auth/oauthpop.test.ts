@@ -134,12 +134,12 @@ describe("OAuthPoPAuth.seedWeb", () => {
 
     expect(page.goto).toHaveBeenCalledWith("/");
     expect(clickCount).toBe(1);
-    expect(waitForURLMatchers).toHaveLength(1);
+    expect(waitForURLMatchers).toHaveLength(2);
 
-    // Sanity-check the waitForURL matcher's shape: it stops waiting once the callback query/path
-    // has cleared, and keeps waiting while cp_access_token or /callback is still present.
-    expect(waitForURLMatchers[0](new URL("https://web.example/callback?cp_access_token=t"))).toBe(false);
-    expect(waitForURLMatchers[0](new URL("https://web.example/templates"))).toBe(true);
+    expect(waitForURLMatchers[0](new URL("https://web.example/"))).toBe(false);
+    expect(waitForURLMatchers[0](new URL("https://web.example/callback?cp_access_token=t"))).toBe(true);
+    expect(waitForURLMatchers[1](new URL("https://web.example/callback?cp_access_token=t"))).toBe(false);
+    expect(waitForURLMatchers[1](new URL("https://web.example/templates"))).toBe(true);
 
     // Drive the captured route handler the way Playwright would, and assert it injects login_hint
     // without touching anything else about the request.

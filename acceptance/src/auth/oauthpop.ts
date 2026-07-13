@@ -19,6 +19,8 @@
  */
 
 import type { KeyStore, ResolvedTargetVerifier } from "@spawnery/client";
+import { authv1 } from "@spawnery/client";
+import { fromBinary } from "@bufbuild/protobuf";
 import type { Identity } from "../fixtures/identity-pool";
 import type { AuthStrategy, CliPreparation, CliPreparationOptions } from "./types";
 import { establishOAuthSession, refreshOAuthSession, type OAuthSessionState } from "./oauth-session";
@@ -101,12 +103,12 @@ export class OAuthPoPAuth implements AuthStrategy {
     });
 
     await p.goto("/");
-    await p.getByTestId("sign-in-btn").click();
+    const reachedCallback = p.waitForURL((url) =>
+      url.pathname === "/callback" && url.searchParams.has("cp_access_token"), { timeout: 30_000 });
+    await Promise.all([reachedCallback, p.getByTestId("sign-in-btn").click()]);
 
-    // SOFT SPOT (not yet exercised against a live target — mirrors webDriver.ts's two flagged
-    // spots): App.tsx normalizes "/" -> "/templates" once authed (client-side, no reload), so the
-    // eventual URL is /templates; this only waits for the callback's transient query/path to
-    // clear, which is enough for the SPA to have consumed the token and settled into "authed".
+    // Wait for the SPA to consume the callback credentials. This second phase cannot resolve on
+    // the pre-login "/" page, which was the race in the original single-predicate wait.
     await p.waitForURL((url) => !url.searchParams.has("cp_access_token") && url.pathname !== "/callback", {
       timeout: 30_000,
     });
@@ -120,6 +122,12 @@ export class OAuthPoPAuth implements AuthStrategy {
   async nodeAccessToken(identity: Identity): Promise<string> {
     const session = await this.sessionFor(identity);
     return session.nodeAccessToken;
+  }
+
+  async accountId(identity: Identity): Promise<string> {
+    const wire = await this.cpAccessToken(identity);
+    const envelope = fromBinary(authv1.SignedAuthArtifactSchema, Buffer.from(wire, "base64url"));
+    return fromBinary(authv1.SessionTokenBodySchema, envelope.payload).accountId;
   }
 
   prepareCli(page: unknown, identity: Identity, options: CliPreparationOptions): Promise<CliPreparation> {

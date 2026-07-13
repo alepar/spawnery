@@ -196,7 +196,7 @@ describe("CatalogCli", () => {
 });
 
 describe("execInSpawn", () => {
-  it("builds exec -addr <n> -spawn <id> -token <t> -- <cmd> and returns stdout/stderr/code", async () => {
+  it("uses the shared exec argument builder and returns stdout/stderr/code", async () => {
     let seenArgs: string[] = [];
     await mockExecFile((args) => {
       seenArgs = args;
@@ -207,10 +207,12 @@ describe("execInSpawn", () => {
 
     expect(seenArgs).toEqual([
       "exec",
-      "-addr",
-      "http://node.example:9092",
       "-spawn",
       "spawn-1",
+      "-addr",
+      "http://node.example:9092",
+      "-cp",
+      "https://cp.example",
       "-token",
       "tok-123",
       "--",

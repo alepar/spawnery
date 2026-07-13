@@ -14,8 +14,8 @@ import { CatalogCli, ProfileCli, buildSkillTar } from "../../src/drivers/customi
 test(
   "catalog: create -> list -> show -> update -> set-listing -> delete",
   { tag: "@mutating" },
-  async ({ target, identity, api, ns }) => {
-    const catalogCli = new CatalogCli({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }, identity);
+  async ({ identity, api, cli, ns }) => {
+    const catalogCli = new CatalogCli(cli.configuration(), identity);
     const name = ns("cat-crud");
 
     let catalogId: string | undefined;
@@ -79,9 +79,9 @@ test(
 test(
   "catalog: a profile entry can source from a catalog entry (catalog-ref)",
   { tag: "@mutating" },
-  async ({ target, identity, api, ns }) => {
-    const catalogCli = new CatalogCli({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }, identity);
-    const profileCli = new ProfileCli({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }, identity);
+  async ({ identity, api, cli, ns }) => {
+    const catalogCli = new CatalogCli(cli.configuration(), identity);
+    const profileCli = new ProfileCli(cli.configuration(), identity);
 
     let catalogId: string | undefined;
     let profileId: string | undefined;

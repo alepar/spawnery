@@ -1,6 +1,6 @@
 /**
  * market-fixtures.ts: extends the Phase-0 harness `test` (src/harness/test.ts) with a worker-scoped
- * `market` fixture bundling the marketplace drivers ({web,cli,oracle}), plus an auto worker-teardown
+ * `market` fixture bundling the marketplace drivers ({web,cli,oracle}), plus an auto teardown
  * that unlists this identity's `acc-*` apps (best-effort — there is no DeleteApp RPC, see
  * tests/marketplace/README.md).
  *
@@ -21,9 +21,9 @@ export interface MarketFixture {
   oracle: MarketOracle;
 }
 
-interface MarketWorkerFixtures {
+interface MarketFixtures {
   market: MarketFixture;
-  /** marketTeardownSweeper is an auto, worker-scoped fixture: no test consumes it directly. */
+  /** marketTeardownSweeper is an auto fixture: no test consumes it directly. */
   marketTeardownSweeper: void;
 }
 
@@ -51,19 +51,16 @@ export function seedAppId(): string {
   return process.env.ACC_SEED_APP_ID ?? "spawnery/secret-app";
 }
 
-export const test = base.extend<Record<never, never>, MarketWorkerFixtures>({
-  market: [
-    async ({ target, auth, identity }, use) => {
+export const test = base.extend<MarketFixtures>({
+  market: async ({ auth, identity, cli }, use) => {
       await use({
         web: new WebMarketDriver(),
-        cli: new CliMarketDriver({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }),
-        oracle: new MarketOracle(target.cpEndpoint, await auth.cpAccessToken(identity)),
+        cli: new CliMarketDriver(cli.configuration()),
+        oracle: new MarketOracle(cli.configuration().cpEndpoint, await auth.cpAccessToken(identity)),
       });
-    },
-    { scope: "worker" },
-  ],
+  },
 
-  // Worker-scoped teardown: unlists every acc-* app this identity registered, even after a test
+  // Test teardown: unlists every acc-* app this identity registered, even after a test
   // failure. Best-effort (log, never throw) — there is no DeleteApp RPC, so rows persist regardless
   // (see README.md's no-DeleteApp cleanup caveat); this only keeps Browse clean for other users.
   marketTeardownSweeper: [
@@ -85,7 +82,7 @@ export const test = base.extend<Record<never, never>, MarketWorkerFixtures>({
         }
       }
     },
-    { scope: "worker", auto: true },
+    { auto: true },
   ],
 });
 
