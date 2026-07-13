@@ -11,9 +11,13 @@ import (
 type refreshSessionRepo struct{ db bun.IDB }
 
 const (
-	maxLiveAccessGenerationsPerFamily        = 384
-	maxLiveAccessGenerationsPerAccountSecond = 384
-	maxAccessTokenIDBytes                    = 64
+	maxExplicitRevocationTokenIDs                = 1024
+	explicitRevocationTokenIDMargin              = 256
+	accessTokenIDsPerGeneration                  = 2
+	maxRetainedAccessGenerationsPerScope         = (maxExplicitRevocationTokenIDs - explicitRevocationTokenIDMargin) / accessTokenIDsPerGeneration
+	maxRetainedAccessGenerationsPerFamily        = maxRetainedAccessGenerationsPerScope
+	maxRetainedAccessGenerationsPerAccountSecond = maxRetainedAccessGenerationsPerScope
+	maxAccessTokenIDBytes                        = 64
 )
 
 func (r *refreshSessionRepo) Get(ctx context.Context, tokenHash string) (RefreshSession, error) {
@@ -39,22 +43,22 @@ func (r *refreshSessionRepo) insert(ctx context.Context, s RefreshSession) error
 		len(s.CPAccessTokenID) > maxAccessTokenIDBytes || len(s.NodeAccessTokenID) > maxAccessTokenIDBytes {
 		return errors.New("authsvc/store: invalid paired access token")
 	}
-	var liveGenerations int
+	var retainedGenerations int
 	if err := r.db.NewSelect().Model((*RefreshSession)(nil)).ColumnExpr("COUNT(*)").
-		Where("family_id = ? AND revoked = 0 AND access_expires_at > ?", s.FamilyID, s.CreatedAt).
-		Scan(ctx, &liveGenerations); err != nil {
+		Where("family_id = ?", s.FamilyID).
+		Scan(ctx, &retainedGenerations); err != nil {
 		return err
 	}
-	if liveGenerations >= maxLiveAccessGenerationsPerFamily {
-		return errors.New("authsvc/store: refresh family has too many live access generations")
+	if retainedGenerations >= maxRetainedAccessGenerationsPerFamily {
+		return errors.New("authsvc/store: refresh family has too many retained access generations")
 	}
 	var accountSecondGenerations int
 	if err := r.db.NewSelect().Model((*RefreshSession)(nil)).ColumnExpr("COUNT(*)").
-		Where("account_id = ? AND created_at = ? AND revoked = 0 AND access_expires_at > ?", s.AccountID, s.CreatedAt, s.CreatedAt).
+		Where("account_id = ? AND created_at = ?", s.AccountID, s.CreatedAt).
 		Scan(ctx, &accountSecondGenerations); err != nil {
 		return err
 	}
-	if accountSecondGenerations >= maxLiveAccessGenerationsPerAccountSecond {
+	if accountSecondGenerations >= maxRetainedAccessGenerationsPerAccountSecond {
 		return errors.New("authsvc/store: account has too many access generations in one second")
 	}
 	_, err := r.db.NewInsert().Model(&s).Exec(ctx)

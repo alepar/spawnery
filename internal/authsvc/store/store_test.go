@@ -284,7 +284,7 @@ func TestSupersedeAndFamilyRevoke(t *testing.T) {
 func TestRefreshFamilyLiveGenerationLimitBoundsRevocation(t *testing.T) {
 	st := NewTestStore(t)
 	mkUser(t, st, "acct", 1)
-	for i := range maxLiveAccessGenerationsPerFamily {
+	for i := range maxRetainedAccessGenerationsPerFamily {
 		if err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
 			TokenHash: fmt.Sprintf("hash-%04d", i), AccountID: "acct", FamilyID: "family", ClientKind: ClientCLI,
 			SessionPubkeySPKI: []byte{1}, CPAccessTokenID: fmt.Sprintf("cp-%04d", i), NodeAccessTokenID: fmt.Sprintf("node-%04d", i),
@@ -304,7 +304,7 @@ func TestRefreshFamilyLiveGenerationLimitBoundsRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := maxLiveAccessGenerationsPerFamily * 2; len(tokens) != want {
+	if want := maxRetainedAccessGenerationsPerFamily * accessTokenIDsPerGeneration; len(tokens) != want {
 		t.Fatalf("bounded family revocation: want %d tokens, got %d", want, len(tokens))
 	}
 }
@@ -312,7 +312,7 @@ func TestRefreshFamilyLiveGenerationLimitBoundsRevocation(t *testing.T) {
 func TestRefreshAccountPerSecondLimitBoundsCutoffExceptions(t *testing.T) {
 	st := NewTestStore(t)
 	mkUser(t, st, "acct", 1)
-	for i := range maxLiveAccessGenerationsPerAccountSecond {
+	for i := range maxRetainedAccessGenerationsPerAccountSecond {
 		if err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
 			TokenHash: fmt.Sprintf("hash-%04d", i), AccountID: "acct", FamilyID: fmt.Sprintf("family-%04d", i), ClientKind: ClientCLI,
 			SessionPubkeySPKI: []byte{1}, CPAccessTokenID: fmt.Sprintf("cp-%04d", i), NodeAccessTokenID: fmt.Sprintf("node-%04d", i),
@@ -332,8 +332,125 @@ func TestRefreshAccountPerSecondLimitBoundsCutoffExceptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := maxLiveAccessGenerationsPerAccountSecond * 2; len(tokens) != want {
+	if want := maxRetainedAccessGenerationsPerAccountSecond * accessTokenIDsPerGeneration; len(tokens) != want {
 		t.Fatalf("bounded account cutoff exceptions: want %d tokens, got %d", want, len(tokens))
+	}
+}
+
+func TestRefreshFamilyLimitCountsGenerationsRevokedByEarlierLogout(t *testing.T) {
+	st := NewTestStore(t)
+	mkUser(t, st, "acct", 1)
+	insert := func(index int, createdAt int64) error {
+		return st.RefreshSessions().Insert(ctxT(), RefreshSession{
+			TokenHash: fmt.Sprintf("hash-%04d", index), AccountID: "acct", FamilyID: "family", ClientKind: ClientCLI,
+			SessionPubkeySPKI: []byte{1}, CPAccessTokenID: fmt.Sprintf("cp-%04d", index), NodeAccessTokenID: fmt.Sprintf("node-%04d", index),
+			AccessExpiresAt: 1000, CreatedAt: createdAt, LastUsedAt: createdAt, ExpiresAt: 2000, FamilyCreatedAt: 10,
+		})
+	}
+	const batchSize = 257
+	for i := range batchSize {
+		if err := insert(i, 10); err != nil {
+			t.Fatalf("first batch generation %d: %v", i, err)
+		}
+	}
+	first, err := st.RefreshSessions().RevokeFamily(ctxT(), "family", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range batchSize {
+		err := insert(batchSize+i, 11)
+		if i < maxRetainedAccessGenerationsPerFamily-batchSize {
+			if err != nil {
+				t.Fatalf("second batch generation %d rejected early: %v", i, err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Fatalf("second batch generation %d bypassed retained family limit", i)
+		}
+		break
+	}
+	second, err := st.RefreshSessions().RevokeFamily(ctxT(), "family", 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(first)+len(second), maxRetainedAccessGenerationsPerFamily*accessTokenIDsPerGeneration; got != want {
+		t.Fatalf("cumulative family revocation IDs: want %d, got %d", want, got)
+	}
+}
+
+func TestRefreshAccountPerSecondLimitSurvivesRepeatedLogout(t *testing.T) {
+	st := NewTestStore(t)
+	mkUser(t, st, "acct", 1)
+	insert := func(index int, createdAt int64) RefreshSession {
+		return RefreshSession{
+			TokenHash: fmt.Sprintf("hash-%04d", index), AccountID: "acct", FamilyID: fmt.Sprintf("family-%04d", index), ClientKind: ClientCLI,
+			SessionPubkeySPKI: []byte{1}, CPAccessTokenID: fmt.Sprintf("cp-%04d", index), NodeAccessTokenID: fmt.Sprintf("node-%04d", index),
+			AccessExpiresAt: 1000, CreatedAt: createdAt, LastUsedAt: createdAt, ExpiresAt: 2000, FamilyCreatedAt: createdAt,
+		}
+	}
+	appendLogout := func(tokens []RevokedToken, at int64) {
+		t.Helper()
+		if _, err := st.Revocations().Append(ctxT(), RevocationEvent{
+			AccountID: "acct", RevokedAt: at, RevokeTokensIssuedBefore: at, RevokedTokens: tokens,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const batchSize = 257
+	for i := range batchSize {
+		if err := st.RefreshSessions().Insert(ctxT(), insert(i, 10)); err != nil {
+			t.Fatalf("first batch generation %d: %v", i, err)
+		}
+	}
+	first, err := st.RefreshSessions().RevokeAccount(ctxT(), "acct", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendLogout(first, 10)
+
+	var rejected RefreshSession
+	for i := range batchSize {
+		row := insert(batchSize+i, 10)
+		err := st.RefreshSessions().Insert(ctxT(), row)
+		if i < maxRetainedAccessGenerationsPerAccountSecond-batchSize {
+			if err != nil {
+				t.Fatalf("second batch generation %d rejected early: %v", i, err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Fatalf("second batch generation %d bypassed retained account-second limit", i)
+		}
+		rejected = row
+		break
+	}
+	if _, err := st.RefreshSessions().Get(ctxT(), rejected.TokenHash); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rejected issuance persisted credentials: %v", err)
+	}
+	page, more, err := st.Revocations().PageAfter(ctxT(), 0, 10, 10)
+	if err != nil || more || len(page) != 1 {
+		t.Fatalf("rejected issuance mutated revocation state: events=%d more=%v err=%v", len(page), more, err)
+	}
+
+	second, err := st.RefreshSessions().RevokeAccount(ctxT(), "acct", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendLogout(second, 10)
+	page, more, err = st.Revocations().PageAfter(ctxT(), 0, 10, 10)
+	if err != nil || more || len(page) != 1 {
+		t.Fatalf("repeated logout events=%d more=%v err=%v", len(page), more, err)
+	}
+	totalIDs := len(page[0].RevokedTokens)
+	if want := maxRetainedAccessGenerationsPerAccountSecond * accessTokenIDsPerGeneration; totalIDs != want {
+		t.Fatalf("cumulative account revocation IDs: want %d, got %d", want, totalIDs)
+	}
+	if totalIDs > maxExplicitRevocationTokenIDs-explicitRevocationTokenIDMargin {
+		t.Fatalf("cumulative account revocation IDs exceeded reserved payload budget: %d", totalIDs)
+	}
+	if err := st.RefreshSessions().Insert(ctxT(), insert(10_000, 11)); err != nil {
+		t.Fatalf("next-second issuance did not recover: %v", err)
 	}
 }
 
