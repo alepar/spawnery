@@ -451,10 +451,8 @@ func TestCPSkillIngestE2E(t *testing.T) {
 	if out, err := exec.Command("docker", "info").CombinedOutput(); err != nil {
 		t.Fatalf("Docker is required: %v\n%s", err, out)
 	}
-	if out, err := exec.Command("docker", "run", "--rm", "--entrypoint", "which",
-		"spawnery/agent:dev", "agentinstall").CombinedOutput(); err != nil {
-		t.Fatalf("spawnery/agent:dev must include agentinstall (run `make images`): %v\n%s", err, out)
-	}
+	preflightAgentBinaries(t, "claude", "agentinstall")
+	preflightAgentImageFresh(t)
 
 	stk := setupSkillIngestStack(t)
 	cl, ctx, appID := stk.client, stk.ctx, stk.appID

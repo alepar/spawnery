@@ -232,6 +232,7 @@ func TestCPSkillPlacementMatrixE2E(t *testing.T) {
 		t.Fatalf("Docker is required: %v\n%s", err, out)
 	}
 	preflightAgentBinaries(t, "claude", "codex", "opencode", "goose", "hermes", "pi", "agentinstall")
+	preflightAgentImageFresh(t)
 
 	stk := setupSkillIngestStack(t, withMaxSpawns(2), withCtxBudget(45*time.Minute))
 	cl, ctx, appID := stk.client, stk.ctx, stk.appID
@@ -392,6 +393,7 @@ func TestCPSkillBundleAllOrNothingE2E(t *testing.T) {
 		t.Fatalf("Docker is required: %v\n%s", err, out)
 	}
 	preflightAgentBinaries(t, "claude", "agentinstall")
+	preflightAgentImageFresh(t)
 
 	stk := setupSkillIngestStack(t, withAgentBinaries([]string{"claude-code"}), withMaxSpawns(2), withCtxBudget(15*time.Minute))
 	cl, ctx, appID, st := stk.client, stk.ctx, stk.appID, stk.st
