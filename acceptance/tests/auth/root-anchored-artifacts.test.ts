@@ -10,6 +10,7 @@ import {
   cpAuthModeReadinessCommand,
   deployAlternateSPABundle,
   deployCurrentRevocation,
+  expectNoRuntimeObjects,
   loadDestructiveVMAuthConfig,
   loadVMAuthConfig,
   posixShellQuote,
@@ -57,6 +58,37 @@ describe("posixShellQuote", () => {
   ])("round-trips one literal shell argument", (value) => {
     const output = execFileSync("/bin/sh", ["-c", `printf %s ${posixShellQuote(value)}`]);
     expect(output.toString()).toBe(value);
+  });
+});
+
+describe("expectNoRuntimeObjects", () => {
+  const cfg = loadVMAuthConfig({
+    ACC_E2E_VM_IP: "192.0.2.10",
+    ACC_E2E_SSH_KEY: "/tmp/key",
+    ACC_E2E_SSH_USER: "spawnery",
+    ACC_CP_ENDPOINT: "https://vm.example",
+    ACC_WEB_ORIGIN: "https://vm.example",
+    ACC_TEST_APP_ID: "spawnery/secret-app",
+    ACC_TEST_MODEL: "test-model",
+    ACC_IDENTITY_POOL: "sub=owner",
+  });
+
+  it("fails closed when the pod query fails", async () => {
+    const executeSSH = async () => { throw new Error("pods unavailable"); };
+
+    await expect(expectNoRuntimeObjects(cfg, "sp1", executeSSH)).rejects.toThrow("pods unavailable");
+  });
+
+  it("fails closed when the container query fails after an empty pod query", async () => {
+    const commands: string[] = [];
+    const executeSSH = async (_cfg: typeof cfg, command: string) => {
+      commands.push(command);
+      if (command.includes("crictl ps")) throw new Error("containers unavailable");
+      return "";
+    };
+
+    await expect(expectNoRuntimeObjects(cfg, "sp1", executeSSH)).rejects.toThrow("containers unavailable");
+    expect(commands).toHaveLength(2);
   });
 });
 

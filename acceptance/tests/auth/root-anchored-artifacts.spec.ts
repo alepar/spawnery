@@ -40,11 +40,13 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
 
   const trustFixtures = await generateNodeTrustFixtures(cfg);
   const pinnedRoot = new X509Certificate(await ssh(cfg, "sudo cat /etc/spawnery/node/root.pem"));
+  const foreignRoot = new X509Certificate(trustFixtures.foreignRootPEM);
   const foreign = certificateChain(trustFixtures.foreignRootChainPEM);
   const unstamped = certificateChain(trustFixtures.unstampedIssuerChainPEM);
   expect(foreign).toHaveLength(2);
   expect(unstamped).toHaveLength(2);
   expect(foreign[0].verify(foreign[1].publicKey), "foreign-root leaf must be structurally valid").toBe(true);
+  expect(foreign[1].verify(foreignRoot.publicKey), "foreign issuer must chain to its own root").toBe(true);
   expect(foreign[1].verify(pinnedRoot.publicKey), "foreign issuer must not chain to the pinned root").toBe(false);
   expect(unstamped[0].verify(unstamped[1].publicKey), "unstamped leaf must be structurally valid").toBe(true);
   expect(unstamped[1].verify(pinnedRoot.publicKey), "unstamped issuer must chain to the pinned root").toBe(true);

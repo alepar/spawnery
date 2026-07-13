@@ -4,6 +4,7 @@ import { assertDisposableVM, posixShellQuote, ssh } from "./root-anchored-artifa
 type DestructiveSSH = (cfg: DestructiveVMAuthConfig, command: string) => Promise<string>;
 
 export interface NodeTrustFixtures {
+  foreignRootPEM: string;
   foreignRootChainPEM: string;
   unstampedIssuerChainPEM: string;
   expiredCRLPEM: string;
@@ -54,12 +55,14 @@ function parseEpochMillis(value: string | undefined, field: string): number {
 
 export function parseNodeTrustFixtureOutput(output: string): NodeTrustFixtures {
   const fields = parseFields(output, [
+    "foreign_root",
     "foreign_root_chain",
     "unstamped_issuer_chain",
     "expired_crl",
     "expired_crl_next_update_ms",
   ]);
   return {
+    foreignRootPEM: decodePublicPEM(fields.get("foreign_root"), "foreign_root"),
     foreignRootChainPEM: decodePublicPEM(fields.get("foreign_root_chain"), "foreign_root_chain"),
     unstampedIssuerChainPEM: decodePublicPEM(fields.get("unstamped_issuer_chain"), "unstamped_issuer_chain"),
     expiredCRLPEM: decodePublicPEM(fields.get("expired_crl"), "expired_crl"),
@@ -95,6 +98,8 @@ d=$(mktemp -d)
 trap 'rm -rf "$d"' EXIT
 trust_domain=prod.spawnery.internal
 SPAWNERY_TRUST_DOMAIN="$trust_domain" /usr/local/bin/spawnery-ca dev "$d/foreign" >/dev/null 2>&1
+base64 -w0 "$d/foreign/root.pem" | sed 's/^/foreign_root=/'
+printf '\n'
 cat "$d/foreign/node-cloud/cert.pem" "$d/foreign/node-cloud/chain.pem" | base64 -w0 | sed 's/^/foreign_root_chain=/'
 printf '\n'
 openssl ecparam -name prime256v1 -genkey -noout -out "$d/issuer.key"

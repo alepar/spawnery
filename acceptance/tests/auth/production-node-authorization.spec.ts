@@ -26,6 +26,7 @@ import {
   cpClient,
   decodeSessionArtifact,
   deployAlternateSPABundle,
+  expectNoRuntimeObjects,
   loadDestructiveVMAuthConfig,
   loadVMAuthConfig,
   posixShellQuote,
@@ -68,10 +69,7 @@ async function waitForNodeNACK(
 
 async function expectNoRuntime(spawnId: string): Promise<void> {
   const cfg = loadVMAuthConfig();
-  const label = posixShellQuote(`spawnery.spawn-id=${spawnId}`);
-  const objects = await ssh(cfg,
-    `sudo crictl pods --label ${label} -q; sudo crictl ps -a --label ${label} -q`);
-  expect(objects, `node created a runtime pod or container for rejected spawn ${spawnId}`).toBe("");
+  await expectNoRuntimeObjects(cfg, spawnId);
 }
 
 interface IntentMutation {
@@ -526,10 +524,6 @@ test("production authorization: exact node NACKs and target substitution refusal
 
   for (const row of substitutions) {
     let submitIntent = 0;
-    const failures: string[] = [];
-    const onConsole = (message: { type(): string; text(): string }) => {
-      if (message.type() === "error") failures.push(message.text());
-    };
     await page.route("**/cp.v1.SpawnService/GetPendingIntent", async (route) => {
       const upstream = await route.fetch({ maxRedirects: 0 });
       const rewritten = rewriteReadyPendingIntentResponse({
@@ -548,15 +542,14 @@ test("production authorization: exact node NACKs and target substitution refusal
       submitIntent++;
       await route.continue();
     });
-    page.on("console", onConsole);
     let spawnId = "";
     try {
       spawnId = await web.createSpawn(ctx, { appId: cfg.appId });
-      await expect.poll(() => failures.join("\n"), { timeout: 30_000 }).toMatch(row.webError);
+      await expect(page.getByTestId("provisioning-pane")).toHaveAttribute("data-state", "error");
+      await expect(page.getByTestId("provisioning-error-detail")).toHaveText(row.webError);
       expect(submitIntent, `SPA submitted an intent after ${row.name} substitution`).toBe(0);
       await expectNoRuntime(spawnId);
     } finally {
-      page.off("console", onConsole);
       await page.unroute("**/cp.v1.SpawnService/GetPendingIntent");
       await page.unroute("**/cp.v1.SpawnService/SubmitIntent");
       if (spawnId) await cleanupRejectedPending(client, owner, spawnId);
@@ -638,10 +631,6 @@ test("production authorization: real clients reject foreign-root and bad-CRL nod
   }): Promise<void> => {
     let submitIntent = 0;
     let spawnId = "";
-    const failures: string[] = [];
-    const onConsole = (message: { type(): string; text(): string }) => {
-      if (message.type() === "error") failures.push(message.text());
-    };
     const chainPEM = row.chainPEM;
     if (chainPEM !== undefined) {
       await page.route("**/cp.v1.SpawnService/GetPendingIntent", async (route) => {
@@ -663,14 +652,13 @@ test("production authorization: real clients reject foreign-root and bad-CRL nod
       submitIntent++;
       await route.continue();
     });
-    page.on("console", onConsole);
     try {
       spawnId = await web.createSpawn(ctx, { appId: cfg.appId });
-      await expect.poll(() => failures.join("\n"), { timeout: 30_000 }).toMatch(row.error);
+      await expect(page.getByTestId("provisioning-pane")).toHaveAttribute("data-state", "error");
+      await expect(page.getByTestId("provisioning-error-detail")).toHaveText(row.error);
       expect(submitIntent, `SPA submitted an intent after ${row.name} target refusal`).toBe(0);
       await expectNoRuntime(spawnId);
     } finally {
-      page.off("console", onConsole);
       if (row.chainPEM !== undefined) {
         await page.unroute("**/cp.v1.SpawnService/GetPendingIntent");
       }

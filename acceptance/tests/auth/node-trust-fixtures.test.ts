@@ -42,6 +42,7 @@ describe("node trust fixtures", () => {
       commands.push(command);
       if (command === vmRunMarkerVerificationCommand(cfg.vmRunId)) return "verified";
       return [
+        `foreign_root=${encoded("-----BEGIN CERTIFICATE-----\nforeign-root\n-----END CERTIFICATE-----\n")}`,
         `foreign_root_chain=${encoded("-----BEGIN CERTIFICATE-----\nforeign\n-----END CERTIFICATE-----\n")}`,
         `unstamped_issuer_chain=${encoded("-----BEGIN CERTIFICATE-----\nsame-root\n-----END CERTIFICATE-----\n")}`,
         `expired_crl=${encoded("-----BEGIN X509 CRL-----\nexpired\n-----END X509 CRL-----\n")}`,
@@ -50,6 +51,7 @@ describe("node trust fixtures", () => {
     };
 
     await expect(generateNodeTrustFixtures(cfg, executeSSH)).resolves.toEqual({
+      foreignRootPEM: "-----BEGIN CERTIFICATE-----\nforeign-root\n-----END CERTIFICATE-----\n",
       foreignRootChainPEM: "-----BEGIN CERTIFICATE-----\nforeign\n-----END CERTIFICATE-----\n",
       unstampedIssuerChainPEM: "-----BEGIN CERTIFICATE-----\nsame-root\n-----END CERTIFICATE-----\n",
       expiredCRLPEM: "-----BEGIN X509 CRL-----\nexpired\n-----END X509 CRL-----\n",
@@ -63,6 +65,7 @@ describe("node trust fixtures", () => {
 
   it("rejects any unexpected field instead of accepting private material", () => {
     expect(() => parseNodeTrustFixtureOutput([
+      `foreign_root=${encoded("foreign-root")}`,
       `foreign_root_chain=${encoded("foreign")}`,
       `unstamped_issuer_chain=${encoded("same-root")}`,
       `expired_crl=${encoded("expired")}`,

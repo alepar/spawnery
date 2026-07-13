@@ -77,6 +77,16 @@ export interface CreateMountBinding {
   createIfMissing?: boolean;
 }
 
+export class SpawnAuthorizationError extends Error {
+  readonly spawnId: string;
+
+  constructor(spawnId: string, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "SpawnAuthorizationError";
+    this.spawnId = spawnId;
+  }
+}
+
 export async function createSpawn(
   appId: string,
   model: string,
@@ -87,7 +97,8 @@ export async function createSpawn(
 ): Promise<string> {
   const r = await unary<{ spawnId: string }>("CreateSpawn", { appId, model, image, runnableId, profileId, mounts });
   const spawnId = r.spawnId;
-  // In auth-enabled mode, kick off the intent signing concurrently (the CP blocks on it).
+  // CreateSpawn returns before the CP receives its signed intent, but the UI must wait for target
+  // verification so a refusal can be rendered against the newly-created spawn.
   if (authEnabled()) {
     const kp = await requireSessionSigningKeys();
     // appRef is intentionally omitted: the user picks an app *id*, not the immutable app_ref the
@@ -99,9 +110,13 @@ export async function createSpawn(
     const pended = { op: "create-spawn", spawnId, model, image,
       mounts: mounts.length > 0 ? mounts : undefined };
     registerPendedOp(pended);
-    pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
-      .catch((e: unknown) => console.error("intent sign failed:", e))
-      .finally(() => clearPendedOp(spawnId));
+    try {
+      await pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey });
+    } catch (error) {
+      throw new SpawnAuthorizationError(spawnId, error);
+    } finally {
+      clearPendedOp(spawnId);
+    }
   }
   return spawnId;
 }
