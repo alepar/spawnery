@@ -75,6 +75,12 @@ type SpawnRepo interface {
 	// at create time (spec §4 / sp-ei4.1.10). ErrNotFound when the spawn is missing or deleted.
 	SetBaseImageDigest(ctx context.Context, id, digest string) error
 
+	// SetGitHubCredentialStatus records the node-reported GitHub credential condition
+	// (sp-2tx8.9 §4.1). A CONDITION, not a phase — the spawn's Status is untouched. Callers MUST NOT
+	// call this with an unreported (UNSPECIFIED) value: only an explicit report may overwrite, or a
+	// routine status message would clear a RELINK_REQUIRED. ErrNotFound when missing or deleted.
+	SetGitHubCredentialStatus(ctx context.Context, id string, st GitHubCredentialStatus) error
+
 	ClaimStarting(ctx context.Context, id string, from []Status) (newGen int64, err error)
 	SetActive(ctx context.Context, id, nodeID string, gen int64) error
 	SetSuspending(ctx context.Context, id string, gen int64) error

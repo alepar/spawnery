@@ -7,6 +7,11 @@ import { pollAndSign, registerPendedOp, clearPendedOp } from "@/auth/intent";
 export type SpawnStatus =
   | "starting" | "active" | "suspending" | "suspended" | "resuming" | "unreachable" | "error" | "unknown";
 
+// GitHubCredentialStatus is a spawn CONDITION, not a lifecycle status (sp-2tx8.9 §4.1): a spawn
+// whose GitHub token is stale is still "active" and still healthy for everything that is not git.
+// "none" = never reported (the spawn has no GitHub mount).
+export type GitHubCredentialStatus = "none" | "ok" | "stale" | "relink_required";
+
 export interface SpawnView {
   spawnId: string;
   name: string;
@@ -35,6 +40,10 @@ export interface SpawnView {
   // Persisted terminal failure (non-empty only for status==="error"). sp-m859.3.
   errorStep?: string;
   errorDetail?: string;
+  // Persisted GitHub credential condition (sp-2tx8.9.2). Survives a CP restart, unlike the
+  // ephemeral provisioning fields. "relink_required" means the user revoked their GitHub link —
+  // without this the agent just sees an opaque git 401.
+  githubCredentialStatus?: GitHubCredentialStatus;
 }
 
 // statusFromProto maps the Connect-JSON enum NAME (e.g. "SPAWN_STATUS_ACTIVE") to a short status.
@@ -48,6 +57,16 @@ export function statusFromProto(s: string | undefined): SpawnStatus {
     case "SPAWN_STATUS_UNREACHABLE": return "unreachable";
     case "SPAWN_STATUS_ERROR": return "error";
     default: return "unknown";
+  }
+}
+
+// githubCredStatusFromProto maps the Connect-JSON enum NAME to the short condition.
+export function githubCredStatusFromProto(s: string | undefined): GitHubCredentialStatus {
+  switch (s) {
+    case "GITHUB_CREDENTIAL_STATUS_OK": return "ok";
+    case "GITHUB_CREDENTIAL_STATUS_STALE": return "stale";
+    case "GITHUB_CREDENTIAL_STATUS_RELINK_REQUIRED": return "relink_required";
+    default: return "none";
   }
 }
 
@@ -108,7 +127,7 @@ export async function createSpawn(
 }
 
 export async function listSpawns(): Promise<SpawnView[]> {
-  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; generation?: string | number; mode?: string; model?: string; modelApplied?: boolean; journalKeyDeliveryPending?: boolean; transitionPhase?: string; parentSpawnId?: string; forkedAt?: string | number; provisionStep?: number; provisionTotal?: number; provisionStepLabel?: string; errorStep?: string; errorDetail?: string }> }>(
+  const r = await unary<{ spawns?: Array<{ spawnId: string; name?: string; appId?: string; status?: string; generation?: string | number; mode?: string; model?: string; modelApplied?: boolean; journalKeyDeliveryPending?: boolean; transitionPhase?: string; parentSpawnId?: string; forkedAt?: string | number; provisionStep?: number; provisionTotal?: number; provisionStepLabel?: string; errorStep?: string; errorDetail?: string; githubCredentialStatus?: string }> }>(
     "ListSpawns", {},
   );
   return (r.spawns ?? []).map((s) => ({
@@ -129,6 +148,7 @@ export async function listSpawns(): Promise<SpawnView[]> {
     provisionStepLabel: s.provisionStepLabel ?? "",
     errorStep: s.errorStep ?? "",
     errorDetail: s.errorDetail ?? "",
+    githubCredentialStatus: githubCredStatusFromProto(s.githubCredentialStatus),
   }));
 }
 

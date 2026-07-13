@@ -278,6 +278,10 @@ message SpawnSummary {
   // (sp-mwco.2.7). Ephemeral, in-memory (mirrors provision_step*) — empty on CP restart; the
   // fatal all-or-nothing-bundle-failure case survives restart anyway via error_step/error_detail.
   repeated SkillInstall skill_installs = 22;
+  // github_credential_status (field 23): the spawn's GitHub credential condition (sp-2tx8.9 §4.1).
+  // Persisted on the spawn row, so unlike skill_installs/provision_* it survives a CP restart.
+  // UNSPECIFIED = never reported (a spawn with no GitHub mount).
+  GitHubCredentialStatus github_credential_status = 23;
 }
 
 // SkillInstallStatus mirrors node.v1.SkillInstallStatus (this proto does not import node.proto;
@@ -300,6 +304,17 @@ message SkillInstall {
   string reason = 5;
   string bundle = 6; // bundle_ref group id, or "" for a standalone artifact
 }
+
+// GitHubCredentialStatus mirrors node.v1.GitHubCredentialStatus (this proto does not import
+// node.proto; the CP server converts at the boundary). It is a condition, not a lifecycle status:
+// a STALE spawn is still ACTIVE and still healthy for everything that is not git.
+enum GitHubCredentialStatus {
+  GITHUB_CREDENTIAL_STATUS_UNSPECIFIED     = 0;
+  GITHUB_CREDENTIAL_STATUS_OK              = 1;
+  GITHUB_CREDENTIAL_STATUS_STALE           = 2;
+  GITHUB_CREDENTIAL_STATUS_RELINK_REQUIRED = 3;
+}
+
 // Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
 message ListSpawnsRequest  {}
 message ListSpawnsResponse { repeated SpawnSummary spawns = 1; }
