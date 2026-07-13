@@ -69,6 +69,7 @@ else
   cp -f "$REPO_ROOT"/bin/{spawnery_cp,authsvc,spawnlet,spawnctl,spawnery-ca} "$STAGE/bin/" 2>/dev/null || die "no prebuilt bin/ — drop --no-build"
 fi
 cp -f "$REPO_ROOT/scripts/e2e-vm/provision/gen-pki.sh" "$STAGE/provision/"
+cp -f "$REPO_ROOT/scripts/e2e-vm/provision/reconcile-gitea-env.sh" "$STAGE/provision/"
 cp -f "$REPO_ROOT/scripts/e2e-vm/provision/env/"*.env "$STAGE/provision/env/"
 
 # Test-only stop point used by the fail-closed build harness. It exercises the same pinned web

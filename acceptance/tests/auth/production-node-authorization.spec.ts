@@ -216,6 +216,8 @@ test("production authorization: real web and stored-login CLI lifecycle", { tag:
 
   const webId = spawns.track(await web.createSpawn(ctx, { appId: cfg.appId }));
   await web.waitActive(ctx, webId);
+  await page.getByTestId("add-session").click();
+  await page.getByTestId("new-session-goose-acp").click();
   await expectSession(raw, webId, cpv1.SessionTransport.ACP);
   expect(await api.findSpawn(webId)).toMatchObject({ spawnId: webId, status: "ACTIVE" });
 
@@ -286,7 +288,7 @@ test("production authorization: exact node NACKs and target substitution refusal
       ...commonArgs, "--crl-state", join(crlProbe, "missing", "state.json"),
     ], /certificate revocation state has no current CRL/);
 
-    const expiredCRL = await ssh(cfg, `set -eu; d=$(mktemp -d); trap 'rm -rf "$d"' EXIT; touch "$d/index"; printf '02\\n' > "$d/crlnumber"; printf '%s\\n' '[ca]' 'default_ca=issuer' '[issuer]' 'database='"$d"'/index' 'new_certs_dir='"$d" 'certificate=/etc/spawnery/node/service-intermediate.pem' 'private_key=/var/lib/spawnery-offline/service-intermediate-key.pem' 'default_md=sha256' 'default_crl_days=30' 'crlnumber='"$d"'/crlnumber' 'crl_extensions=crl_ext' '[crl_ext]' 'authorityKeyIdentifier=keyid:always' > "$d/openssl.cnf"; sudo openssl ca -gencrl -batch -config "$d/openssl.cnf" -crl_lastupdate 20200101000000Z -crl_nextupdate 20200102000000Z -out "$d/expired.pem" >/dev/null 2>&1; cat "$d/expired.pem"`);
+    const expiredCRL = await ssh(cfg, `set -eu; d=$(mktemp -d); trap 'rm -rf "$d"' EXIT; touch "$d/index"; printf '02\\n' > "$d/crlnumber"; printf '%s\\n' '[ca]' 'default_ca=issuer' '[issuer]' 'database='"$d"'/index' 'new_certs_dir='"$d" 'certificate=/etc/spawnery/node/service-intermediate.pem' 'private_key=/var/lib/spawnery-offline/service-intermediate-key.pem' 'default_md=sha256' 'default_crl_days=30' 'crlnumber='"$d"'/crlnumber' 'crl_extensions=crl_ext' '[crl_ext]' 'authorityKeyIdentifier=keyid:always' > "$d/openssl.cnf"; last=$(date -u -d '15 seconds ago' +%Y%m%d%H%M%SZ); next=$(date -u -d '5 seconds ago' +%Y%m%d%H%M%SZ); sudo openssl ca -gencrl -batch -config "$d/openssl.cnf" -crl_lastupdate "$last" -crl_nextupdate "$next" -out "$d/expired.pem" >/dev/null 2>&1; cat "$d/expired.pem"`);
     const expiredPath = join(crlProbe, "expired.pem");
     await writeFile(expiredPath, `${expiredCRL}\n`, { mode: 0o600 });
     await expectCliCRLFailure(target.spawnctlBin, cliConfigHome, [

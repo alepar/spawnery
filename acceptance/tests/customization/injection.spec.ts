@@ -29,6 +29,9 @@ test(
           "(claude or codex); see acceptance/.env.example.",
       );
     }
+    if (!target.agentModel) {
+      throw new Error("ACC_AGENT_MODEL is unset — injection.spec.ts needs a model for the selected agent runnable");
+    }
 
     const profileCli = new ProfileCli(cli.configuration(), identity);
     const cliCfg = { cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin };
@@ -47,7 +50,15 @@ test(
       writeFileSync(tarPath, buildSkillTar(marker));
       await profileCli.entryAddCustom(profileId, { kind: "skill", name: entryName, customFilePath: tarPath });
 
-      spawnId = await cli.createSpawn(ctx, { appId: target.seedSkillAppId, profileId });
+      // spawnctl create cannot select an image/runnable. Use the production SDK oracle for the
+      // canonical agentinstall lane, then observe the result through spawnctl below.
+      spawnId = await api.createSpawn({
+        appId: target.seedSkillAppId,
+        model: target.agentModel,
+        profileId,
+        image: "spawnery/agent:dev",
+        runnableId: "claude-tui",
+      });
       await cli.waitActive(ctx, spawnId);
 
       // Cross-check: the spawn is ACTIVE via the oracle too.

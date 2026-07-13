@@ -33,7 +33,7 @@ test(
       expect(oracle.name).toBe(name);
       expect(oracle.kind).toBe("PROFILE_ENTRY_KIND_SKILL");
       expect(oracle.description).toBe("acceptance catalog entry");
-      expect(oracle.listed).toBe(false); // not listed until set-listing
+      expect(oracle.listed).toBe(true); // catalog entries are public until explicitly delisted
 
       // --- list ---
       const listOut = await catalogCli.list();

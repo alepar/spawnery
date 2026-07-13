@@ -53,6 +53,7 @@ vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spaw
   && sudo rm -rf /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations /var/lib/spawnlet/user-revocations \
   && sudo install -d -m0700 /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations /var/lib/spawnlet/user-revocations \
   && sudo cp -f /etc/spawnery/authsvc/self-hosted-node.crl.pem /var/lib/spawnery/authsvc-revocations/self-hosted-node.crl.pem \
+  && sudo bash ~/incoming/provision/reconcile-gitea-env.sh /etc/spawnery/env.d/gitea.env \
   && sudo cp -f ~/incoming/provision/env/common.env /etc/spawnery/env.d/common.env.tmpl \
   && sudo cp -f ~/incoming/provision/env/profile.*.env /etc/spawnery/env.d/ \
   && sudo sh -c '\''for f in /etc/spawnery/env.d/profile.*.env; do mv -f "$f" "$f.tmpl"; done'\'' \

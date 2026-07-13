@@ -176,14 +176,7 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	if cfg.RevocationConsumer != nil {
 		safego.Go("node.user-revocations", func() { cfg.RevocationConsumer.Run(ctx, auths.revoke) })
 	}
-	// Create the GitHub credential control server only when a mint client is configured.
-	// It is process-lived (like githubRefresh): per-spawn listeners survive CP reconnects.
-	// When GitHubMint is nil the field stays nil and the Manager omits all control-server logic.
-	var ghControl *githubControlServer
-	if cfg.GitHubMint != nil {
-		ghControl = newGitHubControlServer(githubRefresh)
-		mgr.SetGitHubControlServer(ghControl)
-	}
+	ghControl := configureGitHubControl(mgr, cfg.GitHubMint, githubRefresh)
 	for {
 		start := time.Now()
 		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, githubRefresh, ghControl, auths)
@@ -206,6 +199,18 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 			}
 		}
 	}
+}
+
+// configureGitHubControl installs the JIT proxy/control path only for the dynamic AS-mint lane.
+// A static credential provider replaces AS minting entirely and must not start per-spawn JIT
+// listeners or inject proxy credentials into agents.
+func configureGitHubControl(mgr *spawnlet.Manager, mint GitHubMintClient, refresh *githubRefresher) *githubControlServer {
+	if mint == nil || mgr.GitHubStaticCredentialsEnabled() {
+		return nil
+	}
+	control := newGitHubControlServer(refresh)
+	mgr.SetGitHubControlServer(control)
+	return control
 }
 
 // registerMessage builds the node's Register announcement. Extracted for testability and so the

@@ -42,6 +42,15 @@ do
   }
 done
 
+rg -Fq 'provision/reconcile-gitea-env.sh" "$STAGE/provision/' "$runner" || {
+  echo "run.sh does not stage the versioned Gitea environment reconciler" >&2
+  exit 1
+}
+rg -Fq 'reconcile-gitea-env.sh /etc/spawnery/env.d/gitea.env' "$REPO/scripts/e2e-vm/roll.sh" || {
+  echo "roll.sh does not reconcile generated Gitea state before restarting the node" >&2
+  exit 1
+}
+
 rg -q 'install -d -m0700 "\$CLIENT_STATE"' "$runner" || {
   echo "run.sh does not create a private mutable client-state directory" >&2
   exit 1
@@ -56,6 +65,54 @@ rg -q 'ACC_SEED_SKILL_APP_ID=spawnery/secret-app' "$runner" || {
 }
 
 common="$HERE/env/common.env"
+rg -q '^AGENT_IMAGE=spawnery/agent:dev$' "$common" || {
+  echo "VM node does not run the staged unified agent image" >&2
+  exit 1
+}
+rg -q '^AGENT_BINARIES=opencode,goose,claude-code,codex,hermes,pi$' "$common" || {
+  echo "VM node does not advertise the installed production agent binaries exactly" >&2
+  exit 1
+}
+
+gitea_reconcile="$HERE/reconcile-gitea-env.sh"
+[[ -x "$gitea_reconcile" ]] || {
+  echo "missing executable Gitea environment reconciler" >&2
+  exit 1
+}
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'/api/healthz'*) exit 0 ;;
+  *'/api/v1/user'*) [[ "$*" == *'Authorization: token minted-token'* ]] ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$tmp/bin/curl"
+cat >"$tmp/gitea.env" <<'EOF'
+GITHUB_API_BASE_URL=https://github.com/api/v1
+GITHUB_HOST=github.com
+GITHUB_ALLOW_INSECURE_HOST=0
+GITHUB_STATIC_TOKEN=minted-token
+EOF
+PATH="$tmp/bin:$PATH" "$gitea_reconcile" "$tmp/gitea.env"
+expected_gitea_env="$tmp/expected-gitea.env"
+cat >"$expected_gitea_env" <<'EOF'
+GITHUB_API_BASE_URL=http://127.0.0.1:3000/api/v1
+GITHUB_HOST=127.0.0.1:3000
+GITHUB_ALLOW_INSECURE_HOST=1
+GITHUB_STATIC_TOKEN=minted-token
+EOF
+cmp -s "$expected_gitea_env" "$tmp/gitea.env" || {
+  echo "Gitea environment reconciler did not restore the HEAD-owned local topology" >&2
+  exit 1
+}
+[[ "$(stat -c %a "$tmp/gitea.env")" == 600 ]] || {
+  echo "Gitea environment reconciler did not keep the static token private" >&2
+  exit 1
+}
 for expected in \
   AS_AUTH_SIGNING_CURRENT_KEY_PEM \
   AS_AUTH_SIGNING_CURRENT_CHAIN_PEM \
