@@ -12,13 +12,14 @@ const forkHookMock = vi.hoisted(() => vi.fn());
 // --- Mocks ---------------------------------------------------------------
 // The api is fully mocked so no network happens; listSpawns drives the poll + sidebar.
 const listSpawnsMock = vi.fn(async (): Promise<SpawnView[]> => []);
+const createSpawnMock = vi.fn(async (..._args: unknown[]) => "new-id");
 const recreateSpawnMock = vi.fn(async (_id: string) => {});
 vi.mock("./api/spawnlet", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api/spawnlet")>();
   return {
     ...actual,
     listSpawns: () => listSpawnsMock(),
-    createSpawn: vi.fn(async () => "new-id"),
+    createSpawn: (...args: Parameters<typeof actual.createSpawn>) => createSpawnMock(...args),
     renameSpawn: vi.fn(async () => {}),
     suspendSpawn: vi.fn(async () => {}),
     resumeSpawn: vi.fn(async () => {}),
@@ -53,6 +54,7 @@ vi.mock("./views/fork/useForkSpawn", () => ({
 }));
 
 import { App } from "./App";
+import { SpawnAuthorizationError } from "./api/spawnlet";
 import { useSessionStore } from "./sessions/store";
 
 const ACTIVE_SPAWN: SpawnView = { spawnId: "s1", name: "My Spawn", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 };
@@ -102,6 +104,8 @@ beforeEach(() => {
   termPanels.length = 0;
   useSessionStore.getState().bindSpawn("__reset__");
   recreateSpawnMock.mockClear();
+  createSpawnMock.mockReset();
+  createSpawnMock.mockResolvedValue("new-id");
   listSpawnsMock.mockReset();
   listSpawnsMock.mockResolvedValue([ACTIVE_SPAWN]);
   listSessionsMock.mockReset();
@@ -114,6 +118,20 @@ beforeEach(() => {
 afterEach(() => { vi.clearAllTimers(); });
 
 describe("App URL-authoritative nav", () => {
+  it("renders a target authorization refusal as a provisioning error", async () => {
+    const detail = "target: certificate signature does not verify";
+    createSpawnMock.mockRejectedValueOnce(new SpawnAuthorizationError("rejected-id", new Error(detail)));
+    listSpawnsMock.mockResolvedValue([{ ...ACTIVE_SPAWN, spawnId: "rejected-id", status: "starting" }]);
+    renderAt("/templates/spawnery%2Fwiki");
+
+    await userEvent.click(await screen.findByTestId("spawn-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("provisioning-pane")).toHaveAttribute("data-state", "error"));
+    expect(screen.getByTestId("provisioning-error-detail")).toHaveTextContent(detail);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(screen.getByTestId("provisioning-pane")).toHaveAttribute("data-state", "error");
+  });
+
   it("navigating to /spawn/<id> binds that spawn (mounts its session panel)", async () => {
     renderAt("/spawn/s1");
     // The reconciliation effect runs bindSpawn("s1"); SpawnTabs polls the roster and mounts session 0.

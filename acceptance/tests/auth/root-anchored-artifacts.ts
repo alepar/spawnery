@@ -86,6 +86,19 @@ export async function ssh(cfg: VMAuthConfig, command: string): Promise<string> {
   return stdout.trim();
 }
 
+export async function expectNoRuntimeObjects(
+  cfg: VMAuthConfig,
+  spawnId: string,
+  executeSSH: (cfg: VMAuthConfig, command: string) => Promise<string> = ssh,
+): Promise<void> {
+  const label = posixShellQuote(`spawnery.spawn-id=${spawnId}`);
+  const pods = await executeSSH(cfg, `sudo crictl pods --label ${label} -q`);
+  const containers = await executeSSH(cfg, `sudo crictl ps -a --label ${label} -q`);
+  if (pods || containers) {
+    throw new Error(`node created a runtime pod or container for rejected spawn ${spawnId}`);
+  }
+}
+
 export function posixShellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }

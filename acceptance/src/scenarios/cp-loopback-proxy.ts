@@ -19,6 +19,7 @@ import {
 const GET_PENDING_INTENT = "/cp.v1.SpawnService/GetPendingIntent";
 const SUBMIT_INTENT = "/cp.v1.SpawnService/SubmitIntent";
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
+const MAX_PENDING_RESPONSE_HOLD_MS = 120_000;
 
 class BodyTooLargeError extends Error {}
 
@@ -27,6 +28,7 @@ export interface CPLoopbackProxyOptions {
   transportCAPEM?: string;
   substitution?: PendingTargetSubstitution;
   maxBodyBytes?: number;
+  getPendingResponseNotBeforeMs?: number;
 }
 
 export interface CPRequestCounts {
@@ -105,6 +107,12 @@ export async function startCPLoopbackProxy(
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes <= 0) {
     throw new Error("CP loopback proxy maxBodyBytes must be positive");
   }
+  if (options.getPendingResponseNotBeforeMs !== undefined && (
+    !Number.isSafeInteger(options.getPendingResponseNotBeforeMs)
+    || options.getPendingResponseNotBeforeMs - Date.now() > MAX_PENDING_RESPONSE_HOLD_MS
+  )) {
+    throw new Error(`CP loopback proxy response deadline must be within ${MAX_PENDING_RESPONSE_HOLD_MS}ms`);
+  }
 
   const counts: CPRequestCounts = { total: 0, getPendingIntent: 0, submitIntent: 0 };
   const observedPendingSpawnIds = new Set<string>();
@@ -168,6 +176,10 @@ export async function startCPLoopbackProxy(
               body,
             }, options.substitution!)
             : { status, headers: upstreamResponse.headers, body };
+          if (pathname === GET_PENDING_INTENT && options.getPendingResponseNotBeforeMs !== undefined) {
+            const delayMs = options.getPendingResponseNotBeforeMs - Date.now();
+            if (delayMs > 0) await new Promise((release) => setTimeout(release, delayMs));
+          }
           response.writeHead(wire.status, responseHeaders(wire.headers, shouldMutate));
           response.write(wire.body);
           const trailers = Object.fromEntries(Object.entries(upstreamResponse.trailers)

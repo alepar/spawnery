@@ -111,5 +111,9 @@ for required in 'getent ahosts' 'E2E_HOSTS_MODE=hosts'; do
     exit 1
   }
 done
+rg -Fq 'export ACC_PRODUCTION_SPA_BUNDLE="$STAGE/web-dist"' "$ROOT/scripts/e2e-vm/run.sh" || {
+  echo "run.sh does not expose the exact production SPA bundle for destructive restoration" >&2
+  exit 1
+}
 
 echo "e2e-vm fresh build failures are fail-closed"

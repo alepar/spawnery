@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   unary: vi.fn(),
   pollAndSign: vi.fn(async () => "jti"),
   registerPendedOp: vi.fn(),
+  clearPendedOp: vi.fn(),
 }));
 
 vi.mock("./connect", () => ({
@@ -14,19 +15,20 @@ vi.mock("@/auth/session", () => ({ authEnabled: () => true }));
 vi.mock("@/auth/intent", () => ({
   pollAndSign: mocks.pollAndSign,
   registerPendedOp: mocks.registerPendedOp,
-  clearPendedOp: vi.fn(),
+  clearPendedOp: mocks.clearPendedOp,
   requireSessionSigningKeys: vi.fn(async () => ({
     privateKey: {} as CryptoKey,
     publicKey: {} as CryptoKey,
   })),
 }));
 
-import { createSpawn } from "./spawnlet";
+import { createSpawn, SpawnAuthorizationError } from "./spawnlet";
 
 describe("createSpawn intent correspondence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.unary.mockResolvedValue({ spawnId: "sp1" });
+    mocks.pollAndSign.mockResolvedValue("jti");
   });
 
   it("omits empty UI bindings from the pended tuple so the CP can resolve app defaults", async () => {
@@ -55,5 +57,21 @@ describe("createSpawn intent correspondence", () => {
       image: "image-1",
       mounts,
     });
+  });
+
+  it("rejects with the created spawn id when target authorization fails", async () => {
+    const cause = new Error("target: certificate signature does not verify");
+    mocks.pollAndSign.mockRejectedValueOnce(cause);
+
+    const result = createSpawn("spawnery/secret-app", "model-1");
+    await expect(result).rejects.toEqual(
+      expect.objectContaining({
+        name: "SpawnAuthorizationError",
+        spawnId: "sp1",
+        message: cause.message,
+      }),
+    );
+    await expect(result).rejects.toBeInstanceOf(SpawnAuthorizationError);
+    expect(mocks.clearPendedOp).toHaveBeenCalledWith("sp1");
   });
 });
