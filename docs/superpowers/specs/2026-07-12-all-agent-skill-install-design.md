@@ -313,6 +313,22 @@ upstreaming a spawnery skills catalog; MCP/config/plugin parity (skills only).
 from the assumptions above — append a dated note here, whether or not a formal debugging skill was
 used.*
 
+### Changes vs. original design (2026-07-13, as implemented)
+
+- **The launcher never called `apply-artifacts` for goose/hermes at all** — fixing the emitters alone
+  would have installed nothing. Three missing call sites wired.
+- **claude gets a real COPY, not a symlink.** Upstream claude-code does not read `~/.agents/skills`
+  (issue #31005) and symlinked skill dirs actively break discovery (#38051, #25367). Double-copy cost
+  accepted deliberately.
+- **The runnable→emitter map was NOT merely duplicated** — there was no `--runnable` flag, no `pi` in
+  the registry, and a third registry (`agentcaps`) with a different vocabulary. Reconciled as new work.
+- **Agent binaries were unpinned** (goose = floating `stable` tag, claude-code = unpinned apt), which
+  would have made any spike result perishable. Pinned as a prerequisite.
+- **Install was fail-open and unobservable** (`|| true`, always `exit 0`). Now propagates
+  `apply-report.json` to the CP, with an all-or-nothing contract for a bundle.
+- **Measured install cost: ~25 ms** for a 14-member bundle (48 files, 436 KB, copied twice). The old
+  2-minute budget was 100% timeout, 0% work.
+
 - **2026-07-12 — roasted (BLOCK) and revised.** Blocker: the launcher never calls `apply-artifacts`
   for goose/hermes, so emitter fixes alone install nothing (§4.4). False claims corrected: the
   runnable→emitter map is not merely duplicated — there is no `--runnable` flag, no `pi` in the

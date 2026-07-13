@@ -316,6 +316,28 @@ hosts; a general log-scrubbing middleware (§4.2 fixes the specific leak that re
 from the assumptions above — append a dated note here, whether or not a formal debugging skill was
 used.*
 
+### Changes vs. original design (2026-07-13, as implemented)
+
+- **The retry/timeout budget was wrong by ~60x** (it ignored the 5-min per-attempt HTTP timeout, a
+  serial `Materialize`, and emitted no progress events, so the CP's 30 s stall timer never reset).
+  Shipped with an aggregate deadline, per-artifact progress heartbeats, parallel fetch, and a
+  node-local sha-keyed cache.
+- **Re-presign triggered on HTTP 403, but Garage returns 400/`InvalidRequest` for an expired presign** —
+  the mechanism was dead on the exact failure it existed to fix. Now keyed on the parsed S3 error
+  `Code`; `AccessDenied`/`SignatureDoesNotMatch` are terminal (a config fault, not a transient).
+- **Re-presign was a cross-tenant presign oracle.** The CP now intersects requested `object_keys` with
+  the spawn's own persisted artifact rows; keys are guessable content hashes, so without this any node
+  with one live spawn could mint bearer GETs for arbitrary skill objects.
+- **The CP start deadline is now PROGRESS-DRIVEN**, not a fixed 60 s wall clock (user decision): a
+  spawn is killed when the node goes quiet, not because the work is slow. The old 60 s deadline was
+  *shorter* than the node's own install budget, so even a healthy bundle install could never reach ACTIVE.
+- **Resume-gating (`sp-nrzf.3.14.8`) was KILLED by its spike**, not deferred: naive gating would have
+  broken every resume (the manifest is inline and still delivered; `installSkillTree`'s `RemoveAll`
+  would have deleted the delta-image copy it was meant to reuse).
+- **A missing signal is no longer a valid state** (`sp-mwco.2.12`): `readApplyReport` treated EACCES
+  identically to "not yet written", so an unreadable report looked like a slow one and only surfaced as
+  a timeout. Only `os.IsNotExist` may poll again; every other error is terminal in seconds.
+
 - **2026-07-12 — roasted (BLOCK) and revised.** Blockers: the retry/timeout math was wrong by ~60×
   and emits no progress events, so bundles break the **happy path** (§4.1); re-presign triggered on
   403 while Garage returns **400/`InvalidRequest`** for an expired presign — dead on arrival (§4.2).

@@ -167,6 +167,20 @@ marketplace semantics beyond admin publish; editing URL-ingested content in plac
 from the assumptions above — append a dated note here, whether or not a formal debugging skill was
 used.*
 
+### Changes vs. original design (2026-07-13, as implemented)
+
+- **The derived-lineage update model was DELETED** in favour of bundle-of-one everywhere: it duplicated
+  `sp-mwco.1`'s model and was wrong on an upstream revert (A→B→A returns the *oldest* row under
+  content-addressing, so "newest by created_at" showed a permanent phantom update).
+- **Revocation is a presign-time sha denylist, not delete.** Deleting a row does not stop a spawn that
+  already bound the object — spawns replay from their own persisted artifact rows without re-consulting
+  the catalog.
+- **`listed=false` is now the default for ALL catalog entries (inline included), and publishing is
+  admin-only.** This extends beyond URL ingest — noted as a behavior change for existing callers of
+  `CreateCatalogEntry` (see `sp-mvz4`).
+- The kill-switch had to be taught to resolve through bundle membership; it previously saw only
+  `catalog_ref` entries and would have terminated *zero* spawns for a bundle-delivered skill.
+
 - **2026-07-12 — roasted (BLOCK) and revised.** The derived-lineage update model was **deleted**
   (§2) in favour of bundle-of-one everywhere: it duplicated `sp-mwco.1`'s model and was wrong on an
   upstream revert. False claims corrected: "kill-switch behavior unchanged" (it is blind to bundle

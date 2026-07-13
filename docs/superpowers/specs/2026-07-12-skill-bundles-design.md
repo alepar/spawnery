@@ -303,6 +303,22 @@ missing 3 of 20 skills silently).
 from the assumptions above — append a dated note here, whether or not a formal debugging skill was
 used.*
 
+### Changes vs. original design (2026-07-13, as implemented)
+
+- **Tar policy (§4.1) proved load-bearing on the real repo.** `obra/superpowers` carries a top-level
+  `AGENTS.md` symlink; skip-with-report is what makes the flagship repo ingestable at all. The e2e
+  reports `skipped_entries=[AGENTS.md (symlink)]`.
+- **Caps (§4.2):** the "200 MiB bundle" figure was dead text (the pipeline caps the whole repo tarball
+  at 20 MiB wire / 50 MiB decompressed / 10k entries before any per-skill split). Member cap is **63**,
+  not 100 — a spawn allows 64 artifacts *including* the inline manifest.
+- **Assembly (§4.5):** one `ProfileEntry` cannot emit N `ArtifactSpec`s — `Id`/`DestPath`/`Name` all
+  derive from a single entry, and `unpackTar` does not wipe its destination, so members would have
+  silently merged. Shipped with synthetic per-member identity `<entry_id>/<catalog_id>`.
+- **Description sanitization (§4.9) moved to INSTALL time** (`agentinstall`), not repack. Sanitizing at
+  repack would change the stored tar and break the `sha(bundle member) == sha(subdir ingest)` dedup
+  invariant. The stored tar stays byte-for-byte; the agent-visible description is capped/sanitized.
+- Bundle-of-one adopted family-wide, superseding `sp-mwco.3`'s derived-lineage model.
+
 - **2026-07-12 — roasted (BLOCK, 52 confirmed findings across the family) and revised.** Blockers
   folded: the symlink hard-reject makes the flagship repo unfetchable today (§4.1); one
   `ProfileEntry` cannot emit N artifacts (§4.5); bundle members are invisible to the kill-switch
