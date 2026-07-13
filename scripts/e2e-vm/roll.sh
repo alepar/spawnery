@@ -50,10 +50,15 @@ log "waiting for app-ready …"
 # AS_TLS_KEY), because its node-mTLS identity check reads r.TLS.PeerCertificates and so cannot sit
 # behind a TLS-terminating proxy. This probe presents no client cert, which is fine: AS's ClientAuth is
 # VerifyClientCertIfGiven, so an un-certed caller connects anonymously and /healthz is not identity-gated.
-# --cacert (not -k): the probe must VERIFY AS's cert, or it would mask exactly the misconfiguration it
-# is here to catch.
+# Verify against the VM's SYSTEM TRUST STORE, which provision.sh loads the golden root into. NOT --cacert
+# /etc/spawnery/pki/root.pem: that dir is root-owned (it holds private keys) and this probe runs over ssh as
+# the unprivileged 'spawnery' user, so curl cannot read the file — it aborts mid-handshake and AS logs a
+# bare "TLS handshake error: EOF", which looks like a TLS bug and is really a chmod.
+# And NOT -k: the probe must VERIFY AS's certificate, or it masks exactly the misconfiguration it exists to
+# catch. Verifying via the system store also proves the VM's trust store is correctly set up — which the
+# node's own clone-in and the CP's AS calls both depend on.
 for i in $(seq 1 60); do
-  vm_ssh "$IP" 'curl -fsS --max-time 3 --cacert /etc/spawnery/pki/root.pem https://127.0.0.1:8090/healthz >/dev/null 2>&1' && break
+  vm_ssh "$IP" 'curl -fsS --max-time 3 https://127.0.0.1:8090/healthz >/dev/null 2>&1' && break
   [ "$i" = 60 ] && die "AS /healthz not ready"
   sleep 1
 done
