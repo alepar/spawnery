@@ -151,6 +151,16 @@ type attacher struct {
 	// Zero => progressHeartbeatInterval. A field, not a package var, so tests never race each other
 	// by shadowing package state. Tests shrink this to assert on many ticks within a short wait.
 	progressHeartbeat time.Duration
+
+	// represigns correlates in-flight RepresignArtifactsRequests with their CP response
+	// (sp-mwco.4.3). One per attacher/CP connection; created in runOnce, drained by runOnce's
+	// defer (failAll) on disconnect.
+	represigns *represignPending
+
+	// represignRequestTimeout overrides represignTimeout for represignFunc (sp-mwco.4.3). Zero =>
+	// represignTimeout. A field, not a package var, so tests never race each other (progressHeartbeat
+	// precedent).
+	represignRequestTimeout time.Duration
 }
 
 // pendingClient is a client attach that arrived before its session's pump/relay was registered (the
@@ -238,7 +248,11 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		githubRefresh:    githubRefresh,
 		ghControl:        ghControl,
 		tmuxHasSessionFn: mgr.TmuxHasSession,
+		represigns:       newRepresignPending(),
 	}
+	// A disconnect unblocks every in-flight represignFunc waiter immediately (RECONNECT MID-FETCH,
+	// see represignFunc's doc comment) instead of making it burn the full represignTimeout.
+	defer a.represigns.failAll()
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)
 
@@ -550,6 +564,9 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		}
 		// Async: crypto sealing must not stall the single per-connection Receive loop.
 		go a.sealJournalKey(ctx, m.SealJournalKey)
+	case *nodev1.CPMessage_RepresignArtifactsResponse:
+		// Cheap locked-map routing to the waiting represignFunc call; inline (no goroutine needed).
+		a.represigns.resolve(m.RepresignArtifactsResponse)
 	default:
 	}
 }
@@ -861,6 +878,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		RootfsArtifacts:          rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
 		RootfsArtifactsLocalOnly: st.GetRootfsArtifactsLocalOnly(),
 		Artifacts:                artifactsFromProto(st.GetArtifacts()),
+		RepresignFunc:            a.represignFunc(st.SpawnId, st.Generation),
 		ProgressFunc: func(phase, detail, stepKey string) {
 			a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
 			if stepKey != "" {

@@ -37,6 +37,7 @@ import (
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 	"spawnery/internal/intent"
+	"spawnery/internal/safego"
 )
 
 // reconcileAttempt tracks, for one spawn, when the reconciler first started trying to apply the
@@ -164,6 +165,10 @@ type Server struct {
 	// its cap on the wire, never 0.
 	skillPlainTarCap int64
 
+	// represigns rate-limits RepresignArtifactsRequest per spawn (sp-mwco.4.3): the CP re-presign
+	// choke point for a node whose by-ref artifact GET failed with an expired URL.
+	represigns *represignLimiter
+
 	// skillPresent memoizes shas the HEAD-before-presign gate (sp-mwco.4.4, artifacts.go
 	// statSkillObjects) has confirmed present in the skill store: sha256hex -> struct{}.
 	// POSITIVE ONLY — objects are immutable and content-addressed, so "present" is forever
@@ -259,6 +264,7 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		provisioning:      newProvisioningProgress(),
 		skillInstalls:     newSkillInstalls(),
 		upgradeWaiters:    newUpgradeWaiters(),
+		represigns:        newRepresignLimiter(),
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
 		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
@@ -634,6 +640,14 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			// a report older than the currently-recorded generation for this spawn).
 			s.skillInstalls.set(m.SkillInstallReport.GetSpawnId(), m.SkillInstallReport.GetGeneration(),
 				skillInstallEntriesFromProto(m.SkillInstallReport.GetEntries()))
+		case *nodev1.NodeMessage_RepresignArtifactsRequest:
+			// The FIRST node-initiated request/response pair on Attach (sp-mwco.4.3): dispatched on
+			// its own goroutine so the DB + presign round trip never blocks this receive loop. ctx is
+			// this connection's context (not WithoutCancel) — if the node disconnects mid-fetch there
+			// is no point finishing the DB/presign work, since the response would be sent on a dead
+			// stream and dropped either way (see the reconnect-semantics doc comment on represignFunc).
+			req := m.RepresignArtifactsRequest
+			safego.Go("cp.represign", func() { s.handleRepresign(ctx, nodeID, sender, req) })
 		}
 	}
 }

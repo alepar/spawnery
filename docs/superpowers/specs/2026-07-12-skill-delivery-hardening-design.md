@@ -113,6 +113,58 @@ Details the earlier draft omitted:
 - The node-side seam is a real cross-layer callback + response demux (the package holds no stream
   handle today), not a one-line hook at a comment.
 
+**Implementation status (sp-mwco.4.3):** implemented — `proto/node/v1/node.proto`
+(`RepresignArtifactsRequest`/`Response`, `PresignedObject`), `internal/cp/represign.go`
+(`Server.handleRepresign`, dispatched from `runNode` via `safego.Go` so it never blocks the receive
+loop), `internal/node/represign.go` (`attacher.represignFunc` + `represignPending`), wired into
+`internal/cp/server.go`'s `NodeMessage` switch and `internal/node/attach.go`'s `AgentSelection` /
+`CPMessage` switch.
+
+- **Ownership resolution cannot use the live container row alone (a false assumption in the
+  original plan).** `Spawns().SetActive` — which sets the live container row's `node_id` — only
+  runs *after* `scheduler.Provision` returns ACTIVE, but by-ref artifact staging (the *only* window
+  a re-presign can be requested) happens on the node strictly *before* ACTIVE, inside `startSpawn`.
+  So `LiveContainer(spawnID).NodeID == nodeID` is false exactly when the check needs to succeed. The
+  fix: `Scheduler` now exposes its in-flight placement (`InFlightStart(spawnID) (InFlightStart, bool)`
+  — `{NodeID, Gen}`, written right after `PickFor` in `Provision` and deleted in the same `defer` that
+  clears `pending`, so it is populated for exactly the window between "node picked" and "ACTIVE/error/
+  timeout"). `resolveRepresignOwner` checks `InFlightStart` **first** and falls back to the bound live
+  container (the post-ACTIVE case — a running spawn re-fetching an artifact whose original presign
+  expired). Any other outcome (store error, no row, wrong node, generation mismatch) refuses without
+  distinguishing *why*, so a refusal never leaks whether the spawn exists.
+- **Key-scoping** funnels the matched artifact rows through the *existing* `presignNodeArtifacts`
+  choke point (`internal/cp/artifacts.go`) rather than calling `skillStore.PresignedGet` directly, so
+  the `sp-mwco.3.2` sha denylist gate runs for free and cannot be forgotten on this new start-adjacent
+  path. `statSkillObjects` (the HEAD-before-presign gate) deliberately does **not** run here — it
+  already ran at `StartSpawn`; a since-deleted object surfaces as a node-side 404 Terminal, not a
+  CP-side refusal.
+- **Reconnect mid-fetch** is handled entirely by connection scoping, no explicit reconnect logic on
+  either side: `internal/node/attach.go`'s `represignPending` map lives on one `attacher`, created
+  fresh per CP connection in `runOnce` and drained (`failAll`, unblocking every in-flight waiter
+  immediately instead of burning the full 30s `represignTimeout`) by `runOnce`'s `defer` on
+  disconnect. A `startSpawn` goroutine begun on a since-dropped connection keeps referencing the old,
+  now-dead attacher: a re-presign issued after the drop fails on `send` immediately; one already in
+  flight is unblocked by `failAll`. Either way `spawnlet.RepresignFunc` returns an error, `fetchWithRetry`
+  converts it to Terminal, and `startSpawn` fails that artifact's staging. A `RepresignArtifactsResponse`
+  with an unrecognized `request_id` — including a stale reply arriving on any connection other than the
+  one that sent the request — is dropped (`represignPending.resolve`), never causes a panic, and never
+  resolves an unrelated waiter. The CP side needs no reconnect logic of its own: a `Send` to a dead
+  stream is a no-op there, and the scheduler's in-flight entry is cleaned up by `Provision`'s own
+  `defer` regardless of how `Provision` itself ends.
+- Rate limiting (`represignLimiter`, 8 requests/spawn/minute, fixed window) and a `maxRepresignKeys`
+  bound (64, matching `maxArtifactsPerSpawn`) guard against a compromised/buggy node turning this
+  into a presign-minting oracle.
+
+Tests: `internal/cp/scheduler/inflight_test.go` (in-flight placement lifecycle);
+`internal/cp/represign_test.go` (key-scoping refusal names the offending key and issues zero
+presigns; wrong generation / wrong node / denylisted sha refused; the post-ACTIVE bound-live-
+container path; `>64` keys and the 9th-request-in-window both refused; no refusal ever contains a
+URL or signature); `internal/node/represign_test.go` (request carries spawn/gen/keys; concurrent
+requests resolve out of order; an unknown `request_id` is dropped without disturbing the real
+waiter; CP refusal / spawn_id mismatch surfaces as an error; `failAll` unblocks a waiter immediately
+regardless of the configured timeout; the timeout path itself, using a per-attacher override so
+tests never race package state).
+
 ### 4.4 CP-side HEAD before presign
 
 `StatObject` per **distinct** object key at StartSpawn, failing early with `FailedPrecondition
