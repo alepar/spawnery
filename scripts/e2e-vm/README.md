@@ -85,12 +85,20 @@ authorization. The browser completes the real OAuth flow and keeps its non-extra
 IndexedDB. Each CLI worker runs real `spawnctl login --device` in an isolated config home, then uses
 the stored CP/node credential pair and private key. The runner supplies only the per-run public root,
 trust domain, cloud account, issuing intermediates, signed CRLs, and a fresh CRL checkpoint.
+The SPA bundle receives the issuer CRLs at build time and performs no runtime CRL fetch; rotating or
+expiring a CRL therefore requires rebuilding and republishing the SPA.
 
 The ordinary matrix proves distinct `aud=cp`/`aud=node` credentials, lifecycle intent signing,
-ACP/MOSH session open and successor-token reauthentication, exact node NACKs, logout closure, and
-signed-token expiry during AS outage. This topology has one cloud node: CLI migration to `node-1`
-is a same-node generation replacement; the web must show the explicit no-target state. Cross-node
-web migration belongs to the later multi-node lane.
+ACP/MOSH session open and successor-token reauthentication, real-client target-substitution refusal
+before `SubmitIntent`, exact node NACKs (`WRONG_AUDIENCE`, `CNF_MISMATCH`, `BAD_SIG`,
+`OWNER_MISMATCH`, `CORRESPONDENCE`, `STALE`, `SKEW`, and `REPLAY`), audited logout closure, and
+natural signed-token expiry during AS outage. Omitted intent or node-token fields are CP
+`InvalidArgument` failures before relay, not node `MISSING_INTENT` evidence. Logout and expiry must
+produce correlated node close records with exact reasons `node authorization revoked` and
+`node authorization expired`; the outage leg waits for the real AS-issued 15-minute expiry. This
+topology has one cloud node: CLI migration to `node-1` is a same-node generation replacement; the
+web must show the explicit no-target state. Cross-node web migration belongs to the later multi-node
+lane.
 
 The current-signer revocation test runs last. Only that destructive fixture temporarily restarts CP
 with the fake profile's isolated dev token so it can clean up and prove the next signer. No ordinary

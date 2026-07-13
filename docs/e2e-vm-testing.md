@@ -31,8 +31,10 @@ from several branches at once**). It:
 2. **rolls** the fresh code in and restarts the stack, waiting until it is app-ready — AS health, CP
    up, **node re-registered over enforced mTLS**, Caddy/web serving (`roll.sh`);
 3. copies only the generated public PKI material out, rebuilds/scans the SPA with the exact root,
-   trust-domain, and cloud-account pins, publishes it, then **runs** `acceptance/` with real paired
-   OAuth credentials for the fake-GitHub identities and public CRL verification inputs.
+   trust-domain, cloud-account, issuing-intermediate, and CRL pins, publishes it, then **runs**
+   `acceptance/` with real paired OAuth credentials for the fake-GitHub identities and public CRL
+   verification inputs. CRLs are build-stamped; rotation or expiry requires another SPA build, and
+   there is no runtime CRL URL/fetch fallback.
 
 The VM is **always torn down on exit** (`--keep` leaves it up for debugging). Failure artifacts
 (journald, containerd/runsc, Postgres, the Playwright report) are captured **before** teardown under
@@ -134,8 +136,8 @@ The suite drives the stack through **layered drivers** and asserts the *real* re
 
 - **`webDriver`** — a real browser (Playwright) clicking the SPA; asserts **rendered DOM**.
 - **`cliDriver`** — shells out to `spawnctl`; asserts CLI output + exit codes. Verbs `spawnctl`
-  lacks (`rename`/`suspend`/`stop`/`delete`) are **failing stubs** — the parity gap shows as red by
-  design.
+  lacks are represented by intentional `test.fixme` product-debt rows; executable driver unit tests
+  retain fail-loud stubs for accidental direct use.
 - **the SDK oracle** (`acceptance/src/drivers/oracle.ts`, over `@spawnery/client`) — an independent
   Connect cross-check supplied atomically with its persistent session key, node credential provider,
   and strict VM target verifier.
@@ -144,7 +146,7 @@ Scenario coverage (`acceptance/tests/`):
 
 | Area | Verifies |
 |---|---|
-| `lifecycle/` | create + list, delete, rename, set-model, stop — spawn lifecycle across web + cli (rename/stop/delete are cli parity-gap reds). |
+| `lifecycle/` | create + list, delete, rename, set-model, stop across web + cli; unavailable surface verbs remain intentional fixme product-debt rows. |
 | `sessions/exec-exitcode` | `spawnctl exec` runs a command in the spawn's container and **propagates its exit code + captures stdout** (the runsc/crictl exec path). |
 | `sessions/prompt-transcript.agent` | a **real LLM agent**: prompt → structurally-rendered transcript, survives reload, and its exec side-effect is fresh (structure, never agent prose; cost-capped, model-pinned). |
 | `suspend-fork` | fork inherits a per-run marker (fork = clone a running spawn); suspend is a cli parity gap. |
@@ -152,11 +154,16 @@ Scenario coverage (`acceptance/tests/`):
 | `customization/` | profiles, catalog, and **secrets** CRUD (secrets is the api-only surface), and a profile-attached spawn (injection). |
 | `marketplace/` | app-version register, browse, listing, and **spawn-from-a-market-app**. |
 
-The authorization specs additionally require exact `MISSING_INTENT`, `WRONG_AUDIENCE`,
-`CNF_MISMATCH`, `BAD_SIG`, `OWNER_MISMATCH`, `CORRESPONDENCE`, `STALE`, `SKEW`, and `REPLAY` evidence,
-with no CRI pod for rejected provisioning. Logout closes active ACP/MOSH attachments and AS outage
-cannot extend a session beyond signed node-token expiry. The one-node VM proves same-node CLI move
-by a generation increase; the web proves that the current node is excluded by showing no targets.
+The authorization specs require exact `WRONG_AUDIENCE`, `CNF_MISMATCH`, `BAD_SIG`,
+`OWNER_MISMATCH`, `CORRESPONDENCE`, `STALE`, `SKEW`, and `REPLAY` node evidence, with no CRI pod for
+rejected provisioning. Omitted intent or node-token fields are rejected by CP as `InvalidArgument`
+before relay, so this lane makes no node `MISSING_INTENT` claim. Real SPA and stored-login CLI probes
+also substitute node ID, class/account, and certificate chain and must fail target verification
+before any `SubmitIntent`. Logout closes active ACP/MOSH attachments with correlated structured node
+reason `node authorization revoked`; AS outage cannot refresh or reauthenticate past the real
+AS-issued 15-minute node token's signed expiry and must close with `node authorization expired`.
+The one-node VM proves same-node CLI move by a generation increase; the web proves that the current
+node is excluded by showing no targets.
 
 The destructive signer-revocation project runs last and alone. It may temporarily enable the fake
 profile's exact dev token only after the active signer has been revoked; ordinary tests cannot fall

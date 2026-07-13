@@ -31,6 +31,25 @@ npm run test:accept # Playwright scenarios — needs a live target (ACC_* env ab
 `npm test` is hermetic and safe to run anywhere. `npm run test:accept` talks to a real instance
 and is gated by the prod-safety guardrail below.
 
+## Production authorization evidence
+
+The fake-profile VM lane still uses production client custody. The SPA keeps its non-extractable
+P-256 session key, while each `spawnctl` worker uses a real device login and its isolated stored
+credential pair. Both clients verify the CP-relayed node identity against build/run-stamped public
+roots, trust metadata, issuing intermediates, CRLs, and checkpoint state before signing. The SPA's
+CRL bundle is build-stamped: CRL rotation or expiry requires a fresh web build; runtime CRL fetch is
+deliberately not part of this lane.
+
+Real SPA and stored-login CLI probes substitute the resolved node ID, class/account, or certificate
+chain and require client-side refusal with zero `SubmitIntent` calls. Missing intent or node-token
+fields are instead rejected by CP as `InvalidArgument` before relay; this suite does not claim a
+node `MISSING_INTENT` NACK. Its exact node rejection evidence is `WRONG_AUDIENCE`, `CNF_MISMATCH`,
+`BAD_SIG`, `OWNER_MISMATCH`, `CORRESPONDENCE`, `STALE`, `SKEW`, and `REPLAY`.
+
+Session revocation is audited as well as observed at the socket: logout requires a correlated node
+close record with reason `node authorization revoked`, and auth-service outage waits for the real
+AS-issued 15-minute node token's signed expiry before requiring `node authorization expired`.
+
 ## Prod-safety guardrail
 
 Every test is **mutating by default** unless explicitly tagged `@readonly`. The guardrail derives

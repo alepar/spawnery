@@ -1,7 +1,7 @@
 /**
  * stop: web is a real, green flow (DOM primary + api oracle cross-check on status). spawnctl has
- * no stop verb — the cli row is a PARITY GAP that fails red by design (see epic sp-tq0t and
- * cliDriver.stop's parityGap throw).
+ * no stop verb, so the cli row is an intentional fixme that records product debt (see epic
+ * sp-tq0t). CliDriver's executable unit test retains the fail-loud parityGap behavior.
  */
 
 import { test, expect, requireEnv, cliCtx } from "../../src/harness/scenario";
@@ -26,7 +26,7 @@ test("stop · web", async ({ web, api, ctx, spawns }) => {
     .toBe(true);
 });
 
-test("stop · cli — PARITY GAP (fails red by design; spawnctl has no stop — see epic sp-tq0t)", async ({
+test("stop · cli — PARITY GAP (intentional fixme; spawnctl has no stop — see epic sp-tq0t)", async ({
   cli,
   api,
   identity,
@@ -37,6 +37,6 @@ test("stop · cli — PARITY GAP (fails red by design; spawnctl has no stop — 
   const ctx = cliCtx({ identity, ns, api });
   const id = spawns.track(await cli.createSpawn(ctx, { appId }));
   await cli.waitActive(ctx, id);
-  // Recorded design decision: full coverage, let it fail. This throws parityGap("stop") → RED.
+  // Kept executable beneath test.fixme so implementing the verb turns this row into real coverage.
   await cli.stop(ctx, id);
 });

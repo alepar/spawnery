@@ -259,7 +259,13 @@ func TestProductionCaddyProxiesPublicEnrollmentTokenIssuanceOnly(t *testing.T) {
 	if !paths["/enrollment-tokens"] {
 		t.Errorf("Caddy AS matcher does not proxy public /enrollment-tokens: %s", asMatcher)
 	}
-	if !strings.Contains(provision, "reverse_proxy @as 127.0.0.1:8090") {
+	asHandleStart := strings.Index(provision, "handle @as {")
+	asHandleEnd := -1
+	if asHandleStart >= 0 {
+		asHandleEnd = strings.Index(provision[asHandleStart:], "}")
+	}
+	if asHandleStart < 0 || asHandleEnd < 0 ||
+		!strings.Contains(provision[asHandleStart:asHandleStart+asHandleEnd], "reverse_proxy 127.0.0.1:8090") {
 		t.Error("Caddy AS matcher is not proxied to the public authsvc listener")
 	}
 }
