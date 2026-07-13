@@ -165,3 +165,21 @@ func TestWriteApplyReportAtomic(t *testing.T) {
 		t.Errorf("report dir should contain exactly apply-report.json, got %v", entries)
 	}
 }
+
+// TestWriteApplyReportAtomic_WorldReadable is the sp-rwkk write-side regression: the report is
+// written by container-root but read back by the node on the HOST, a different uid under
+// userns-remap. os.CreateTemp's default 0600 made it unreadable there, so the node timed out
+// waiting for a file that existed. It must land world-readable.
+func TestWriteApplyReportAtomic_WorldReadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report", "apply-report.json")
+	if err := agentinstall.WriteApplyReportAtomic(path, agentinstall.NewErrorApplyReport("claude", "boom")); err != nil {
+		t.Fatalf("WriteApplyReportAtomic: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != agentinstall.ApplyReportMode {
+		t.Fatalf("apply-report.json mode = %#o, want %#o (world-readable across the userns boundary)", got, agentinstall.ApplyReportMode)
+	}
+}
