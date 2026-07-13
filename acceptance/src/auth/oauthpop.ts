@@ -23,7 +23,7 @@ import type { Identity } from "../fixtures/identity-pool";
 import type { AuthStrategy, CliPreparation, CliPreparationOptions } from "./types";
 import { establishOAuthSession, refreshOAuthSession, type OAuthSessionState } from "./oauth-session";
 import { keyPairKeyStore } from "./keystore";
-import { runCliDeviceLogin } from "./cli-device";
+import { initializeCliOwnerDevice, runCliDeviceLogin } from "./cli-device";
 
 // Proactive refresh margin: refresh once within this long of expiry rather than waiting for a 401.
 // Mirrors web/src/auth/refresh.ts's REFRESH_MARGIN_MS and cmd/spawnctl/authstate.go's refreshWindow.
@@ -126,12 +126,16 @@ export class OAuthPoPAuth implements AuthStrategy {
     const key = `${identity.token}\0${options.configHome}`;
     const existing = this.cliPreparations.get(key);
     if (existing) return existing;
-    const preparation = runCliDeviceLogin({
+    const preparation = initializeCliOwnerDevice({
       spawnctlBin: options.spawnctlBin,
-      asOrigin: options.asOrigin,
       configHome: options.configHome,
-      page: page as Parameters<typeof runCliDeviceLogin>[0]["page"],
-    }).then(() => ({ authArgs: [], configHome: options.configHome }));
+    }).then(() => runCliDeviceLogin({
+        spawnctlBin: options.spawnctlBin,
+        asOrigin: options.asOrigin,
+        configHome: options.configHome,
+        page: page as Parameters<typeof runCliDeviceLogin>[0]["page"],
+      }))
+      .then(() => ({ authArgs: [], configHome: options.configHome }));
     this.cliPreparations.set(key, preparation);
     return preparation;
   }

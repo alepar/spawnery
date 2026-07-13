@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { runCliDeviceLogin } from "./cli-device";
+import { initializeCliOwnerDevice, runCliDeviceLogin } from "./cli-device";
 
 function fakeChild() {
   const child = new EventEmitter() as EventEmitter & {
@@ -69,5 +69,42 @@ describe("runCliDeviceLogin", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     child.emit("exit", 0, null);
     await expect(run).rejects.toThrow(/auth\.json mode 0644.*0600/);
+  });
+});
+
+describe("initializeCliOwnerDevice", () => {
+  it("keeps the printed recovery phrase out of the harness and requires owner-only files", async () => {
+    const child = fakeChild();
+    const spawn = vi.fn(() => child);
+    const stat = vi.fn(async () => ({ mode: 0o100600 }));
+    const run = initializeCliOwnerDevice({
+      spawnctlBin: "/fresh/spawnctl",
+      configHome: "/run/worker-0",
+      timeoutMs: 1_000,
+    }, { spawn: spawn as never, stat: stat as never });
+
+    child.emit("exit", 0, null);
+
+    await expect(run).resolves.toBeUndefined();
+    expect(spawn).toHaveBeenCalledWith("/fresh/spawnctl", [
+      "key", "init", "--config-dir", "/run/worker-0",
+    ], expect.objectContaining({
+      env: expect.objectContaining({ XDG_CONFIG_HOME: "/run/worker-0" }),
+      stdio: "ignore",
+    }));
+    expect(stat).toHaveBeenCalledWith("/run/worker-0/device.key");
+    expect(stat).toHaveBeenCalledWith("/run/worker-0/device-set.json");
+  });
+
+  it("fails when the owner device key is not private", async () => {
+    const child = fakeChild();
+    const run = initializeCliOwnerDevice({
+      spawnctlBin: "spawnctl", configHome: "/run/w", timeoutMs: 1_000,
+    }, {
+      spawn: (() => child) as never,
+      stat: (async (path: string) => ({ mode: path.endsWith("device.key") ? 0o100644 : 0o100600 })) as never,
+    });
+    child.emit("exit", 0, null);
+    await expect(run).rejects.toThrow(/device\.key mode 0644.*0600/);
   });
 });

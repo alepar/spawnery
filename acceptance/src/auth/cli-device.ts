@@ -24,12 +24,66 @@ export interface CliDeviceLoginOptions {
   timeoutMs?: number;
 }
 
+export interface CliOwnerDeviceOptions {
+  spawnctlBin: string;
+  configHome: string;
+  timeoutMs?: number;
+}
+
 interface CliDeviceDeps {
   spawn: typeof nodeSpawn;
   stat: typeof nodeStat;
 }
 
 const defaultDeps: CliDeviceDeps = { spawn: nodeSpawn, stat: nodeStat };
+
+function requirePrivateMode(path: string, mode: number): void {
+  const permissions = mode & 0o777;
+  if (permissions !== 0o600) {
+    throw new Error(`${path} mode ${permissions.toString(8).padStart(4, "0")}; want 0600`);
+  }
+}
+
+/** Creates the CLI owner key without exposing the one-time recovery phrase to test output. */
+export async function initializeCliOwnerDevice(
+  options: CliOwnerDeviceOptions,
+  deps: CliDeviceDeps = defaultDeps,
+): Promise<void> {
+  const child = deps.spawn(options.spawnctlBin, [
+    "key", "init", "--config-dir", options.configHome,
+  ], {
+    env: { ...process.env, XDG_CONFIG_HOME: options.configHome },
+    // key init prints the recovery phrase. The harness must never capture or relay it.
+    stdio: "ignore",
+  });
+
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code, signal) => {
+          if (code === 0) resolve();
+          else reject(new Error(`spawnctl key init failed (code=${code}, signal=${signal})`));
+        });
+      }),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          child.kill("SIGTERM");
+          reject(new Error(`spawnctl key init timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+
+  for (const name of ["device.key", "device-set.json"]) {
+    const path = join(options.configHome, name);
+    requirePrivateMode(path, (await deps.stat(path)).mode);
+  }
+}
 
 /** Drives spawnctl's real RFC 8628 flow while leaving its generated private key in auth.json. */
 export async function runCliDeviceLogin(
@@ -102,8 +156,5 @@ export async function runCliDeviceLogin(
 
   const authPath = join(options.configHome, "auth.json");
   const info = await deps.stat(authPath);
-  const mode = info.mode & 0o777;
-  if (mode !== 0o600) {
-    throw new Error(`spawnctl auth.json mode ${mode.toString(8).padStart(4, "0")}; want 0600`);
-  }
+  requirePrivateMode("spawnctl auth.json", info.mode);
 }
