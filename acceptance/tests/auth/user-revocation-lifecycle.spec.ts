@@ -231,6 +231,8 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
   const createdSpawnIds: string[] = [];
   let authsvcStopped = false;
   let cleanupToken = "";
+  let testError: unknown;
+  let restorationError: unknown;
 
   try {
     let logoutSession = await establishCurrentSession(cfg);
@@ -340,8 +342,9 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
     }, 20_000);
     expect(expiryClose.timestampMs).toBeGreaterThanOrEqual(signedExpiresAtMs - 2_000);
     expect(expiryClose.timestampMs).toBeLessThanOrEqual(signedExpiresAtMs + 20_000);
+  } catch (error) {
+    testError = error;
   } finally {
-    let restorationError: unknown;
     if (authsvcStopped) {
       try {
         const refreshedCleanup = await restoreAuthService({
@@ -360,6 +363,10 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
       const cleanup = cpClient(cfg, cleanupToken);
       await Promise.all(createdSpawnIds.map((spawnId) => cleanup.deleteSpawn({ spawnId }).catch(() => {})));
     }
-    if (restorationError) throw restorationError;
   }
+  if (testError && restorationError) {
+    throw new AggregateError([testError, restorationError], "revocation lifecycle and auth service restoration failed");
+  }
+  if (restorationError) throw restorationError;
+  if (testError) throw testError;
 });
