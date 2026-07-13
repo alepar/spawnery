@@ -113,16 +113,6 @@ func goodStartBody(spawnID, nodeID string, gen uint64, now time.Time) *authv1.In
 	}
 }
 
-func execRequestHash(t *testing.T, req *authv1.ExecRequest) []byte {
-	t.Helper()
-	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := sha256.Sum256(b)
-	return h[:]
-}
-
 func TestVerifyExecBindsExactRequestAndSession(t *testing.T) {
 	now := time.Unix(1_770_000_000, 0)
 	asPriv, artifacts := genASKey(t)
@@ -135,7 +125,7 @@ func TestVerifyExecBindsExactRequestAndSession(t *testing.T) {
 		body := &authv1.IntentBody{
 			Jti: jti, IssuedAt: now.Unix(), SpawnId: "sp-exec", Generation: 7,
 			TargetNodeId: "node-1", SessionId: "exec-1", Op: string(intent.OpExecOpen),
-			RequestSha256: execRequestHash(t, baseReq),
+			ExecRequest: proto.Clone(baseReq).(*authv1.ExecRequest),
 		}
 		if mutate != nil {
 			mutate(body)
@@ -161,7 +151,7 @@ func TestVerifyExecBindsExactRequestAndSession(t *testing.T) {
 		want   NACKCode
 	}{
 		{name: "missing request", fields: ExecFields{SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "alice"}, want: NACKCorrespondence},
-		{name: "missing request hash", fields: baseFields, mutate: func(b *authv1.IntentBody) { b.RequestSha256 = nil }, want: NACKCorrespondence},
+		{name: "missing signed request", fields: baseFields, mutate: func(b *authv1.IntentBody) { b.ExecRequest = nil }, want: NACKCorrespondence},
 		{name: "argv substituted", fields: ExecFields{SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "alice", Request: &authv1.ExecRequest{Argv: []string{"sh", "-lc", "printf evil"}}}, want: NACKCorrespondence},
 		{name: "argv reordered", fields: ExecFields{SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "alice", Request: &authv1.ExecRequest{Argv: []string{"-lc", "sh", "printf exact"}}}, want: NACKCorrespondence},
 		{name: "generation mismatch", fields: ExecFields{SpawnID: "sp-exec", Generation: 8, SessionID: "exec-1", AssertedOwner: "alice", Request: baseReq}, want: NACKCorrespondence},

@@ -9,7 +9,6 @@ import { fileURLToPath } from "node:url";
 import { create, fromBinary } from "@bufbuild/protobuf";
 import {
   buildIntentBodyBytes,
-  execRequestSha256,
   buildSignedIntent,
   buildSessionReauthSignedIntentB64,
   pollAndSign,
@@ -18,7 +17,7 @@ import type { SessionSigner } from "./sessionSigner.js";
 import { WebCryptoSessionSigner } from "./sessionSigner.js";
 import { sessionKeyHash } from "../keys/crypto.js";
 import { fromBase64 } from "../keys/encoding.js";
-import { IntentBodySchema, SignedIntentSchema } from "../gen/auth/v1/auth_pb.js";
+import { ExecRequestSchema, IntentBodySchema, SignedIntentSchema } from "../gen/auth/v1/auth_pb.js";
 import { GetPendingIntentResponseSchema, PendingIntentSchema } from "../gen/cp/v1/cp_pb.js";
 
 const toHex = (u: Uint8Array): string => Buffer.from(u).toString("hex");
@@ -59,15 +58,24 @@ test("buildIntentBodyBytes matches the committed golden vector (no mounts)", () 
   assert.equal(toHex(bytes), vectors.body_bytes_hex);
 });
 
-test("execRequestSha256 hashes deterministic protobuf bytes and preserves argv order", async () => {
-  assert.equal(
-    toHex(await execRequestSha256(["echo", "hi"])),
-    "a6fc6bffc6a7e1bb8f0a94b0001045229f5b06d8bac491ed81aaeba05c75934d",
-  );
-  assert.notEqual(
-    toHex(await execRequestSha256(["echo", "hi"])),
-    toHex(await execRequestSha256(["hi", "echo"])),
-  );
+test("buildIntentBodyBytes embeds the exact ordered exec request", () => {
+  const bytes = buildIntentBodyBytes({
+    jti: "exec-jti",
+    issuedAt: 1770000000,
+    spawnId: "sp-1",
+    generation: 7n,
+    targetNodeId: "node-1",
+    op: "exec-open",
+    appRef: "",
+    image: "",
+    model: "",
+    dataRef: "",
+    sessionId: "exec-1",
+    mounts: [],
+    execRequest: create(ExecRequestSchema, { argv: ["sh", "-lc", "printf exact"] }),
+  });
+  const body = fromBinary(IntentBodySchema, bytes);
+  assert.deepEqual(body.execRequest?.argv, ["sh", "-lc", "printf exact"]);
 });
 
 test("buildSessionReauthSignedIntentB64 signs the verified session tuple and replacement token ID", async () => {

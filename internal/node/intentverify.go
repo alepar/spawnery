@@ -15,7 +15,6 @@ package node
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"fmt"
 	"slices"
 	"time"
@@ -159,7 +158,7 @@ func (v *IntentVerifier) VerifyReauth(env *authv1.AuthEnvelope, fields ReauthFie
 	})
 }
 
-// VerifyExec runs the full A4 chain and binds the deterministic hash of the exact relayed argv.
+// VerifyExec runs the full A4 chain and binds the exact signed request to the relayed request.
 func (v *IntentVerifier) VerifyExec(env *authv1.AuthEnvelope, fields ExecFields) (Authorization, NACKCode, string) {
 	return v.verify(env, fields.AssertedOwner, intent.OpExecOpen, func(body *authv1.IntentBody, auth Authorization) (NACKCode, string) {
 		if nack, detail := v.checkOpenCorrespondence(body, OpenFields{
@@ -170,15 +169,11 @@ func (v *IntentVerifier) VerifyExec(env *authv1.AuthEnvelope, fields ExecFields)
 		if fields.Request == nil || len(fields.Request.GetArgv()) == 0 || fields.Request.GetArgv()[0] == "" {
 			return NACKCorrespondence, "exec request requires non-empty argv"
 		}
-		if len(body.GetRequestSha256()) != sha256.Size {
-			return NACKCorrespondence, "exec intent requires request_sha256"
+		if body.GetExecRequest() == nil {
+			return NACKCorrespondence, "exec intent requires exec_request"
 		}
-		got, err := intent.ExecRequestSHA256(fields.Request)
-		if err != nil {
-			return NACKCorrespondence, "hash exec request: " + err.Error()
-		}
-		if !bytes.Equal(body.GetRequestSha256(), got) {
-			return NACKCorrespondence, "exec request hash mismatch"
+		if !proto.Equal(body.GetExecRequest(), fields.Request) {
+			return NACKCorrespondence, "exec request mismatch"
 		}
 		return "", ""
 	})

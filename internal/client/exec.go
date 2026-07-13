@@ -57,10 +57,6 @@ func buildExecOpenIntent(ctx context.Context, rpc sessionTargetClient, source No
 		return nil, nil, 0, "", errors.New("exec open received incomplete node credentials")
 	}
 	req := &authv1.ExecRequest{Argv: append([]string(nil), argv...)}
-	requestHash, err := intent.ExecRequestSHA256(req)
-	if err != nil {
-		return nil, nil, 0, "", fmt.Errorf("exec open %s: hash request: %w", spawnID, err)
-	}
 	sessionID, err := randomExecID("exec-")
 	if err != nil {
 		return nil, nil, 0, "", fmt.Errorf("exec open %s: generate session id: %w", spawnID, err)
@@ -72,7 +68,7 @@ func buildExecOpenIntent(ctx context.Context, rpc sessionTargetClient, source No
 	body := &authv1.IntentBody{
 		Jti: jti, IssuedAt: time.Now().Unix(), Op: string(intent.OpExecOpen), SpawnId: spawnID,
 		Generation: response.Msg.GetGeneration(), TargetNodeId: response.Msg.GetTargetNodeId(),
-		SessionId: sessionID, RequestSha256: requestHash,
+		SessionId: sessionID, ExecRequest: &authv1.ExecRequest{Argv: append([]string(nil), req.GetArgv()...)},
 	}
 	signed, err := buildSignedIntent(intent.OpExecOpen, body, credentials.Signer)
 	if err != nil {

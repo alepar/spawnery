@@ -11,6 +11,15 @@ import (
 )
 
 func TestExecRequestRelayContract(t *testing.T) {
+	fields := (&authv1.IntentBody{}).ProtoReflect().Descriptor().Fields()
+	execField := fields.ByName("exec_request")
+	if execField == nil || execField.Number() != 15 || execField.Message().FullName() != "auth.v1.ExecRequest" {
+		t.Fatalf("IntentBody.exec_request descriptor = %v, want auth.v1.ExecRequest field 15", execField)
+	}
+	if obsolete := fields.ByName("request_sha256"); obsolete != nil {
+		t.Fatalf("obsolete IntentBody.request_sha256 remains at field %d", obsolete.Number())
+	}
+
 	req := &authv1.ExecRequest{Argv: []string{"echo", "hi"}}
 	frame := &cpv1.Frame{
 		SpawnId:     "sp1",

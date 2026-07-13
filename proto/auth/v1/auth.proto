@@ -141,11 +141,11 @@ message IntentBody {
   repeated MountRef mounts = 12; // create/resume: mount bindings
   repeated string attached_secret_ids = 13; // canonical complete startup secret-id set
   string new_token_id = 14; // session-reauth: verified replacement node-token id
-  bytes request_sha256 = 15; // exec-open: SHA-256 of deterministic ExecRequest protobuf bytes
+  ExecRequest exec_request = 15; // exec-open: exact ordered command relayed separately to the node
 }
 
-// ExecRequest is the exact command selected by an exec-open intent. Its deterministic protobuf
-// encoding is hashed into IntentBody.request_sha256; the relay carries this message unchanged.
+// ExecRequest is the exact ordered command selected by an exec-open intent. The relay carries a
+// separate copy unchanged; the node requires exact protobuf equality before execution.
 message ExecRequest {
   repeated string argv = 1;
 }

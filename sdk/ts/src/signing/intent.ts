@@ -13,7 +13,7 @@
 
 import { create, toBinary } from "@bufbuild/protobuf";
 import type { Client } from "@connectrpc/connect";
-import { ExecRequestSchema, IntentBodySchema, SignedIntentSchema, type SignedIntent } from "../gen/auth/v1/auth_pb.js";
+import { IntentBodySchema, SignedIntentSchema, type ExecRequest, type SignedIntent } from "../gen/auth/v1/auth_pb.js";
 import type { SpawnService } from "../gen/cp/v1/cp_pb.js";
 import { toBase64 } from "../keys/encoding.js";
 import type { SessionSigner } from "./sessionSigner.js";
@@ -42,13 +42,6 @@ export function domainForOp(op: string): string {
   }
 }
 
-/** Hashes the deterministic protobuf encoding of the exact ordered exec argv. */
-export async function execRequestSha256(argv: string[]): Promise<Uint8Array> {
-  const request = create(ExecRequestSchema, { argv });
-  const encoded = toBinary(ExecRequestSchema, request);
-  return new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
-}
-
 // ── IntentBody encoding ───────────────────────────────────────────────────────
 
 export interface IntentFields {
@@ -72,6 +65,7 @@ export interface IntentFields {
   }>; // field 12 repeated MountRef — all 5 fields signed (node correspondence compares all 5)
   attachedSecretIds?: string[];
   newTokenId?: string;
+  execRequest?: ExecRequest;
 }
 
 /**
@@ -101,6 +95,7 @@ export function buildIntentBodyBytes(f: IntentFields): Uint8Array {
     })),
     attachedSecretIds: f.attachedSecretIds ?? [],
     newTokenId: f.newTokenId ?? "",
+    execRequest: f.execRequest,
   });
   return toBinary(IntentBodySchema, body);
 }

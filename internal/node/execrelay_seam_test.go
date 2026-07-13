@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	authv1 "spawnery/gen/auth/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/authsvc/token"
@@ -90,7 +92,7 @@ func execOpen(t *testing.T, asPriv testArtifactSigner, artifacts *token.Verifier
 	t.Helper()
 	body := &authv1.IntentBody{
 		Jti: jti, IssuedAt: now.Unix(), SpawnId: "sp-exec-seam", SessionId: sessionID,
-		Op: string(intent.OpExecOpen), RequestSha256: execRequestHash(t, signedReq),
+		Op: string(intent.OpExecOpen), ExecRequest: proto.Clone(signedReq).(*authv1.ExecRequest),
 	}
 	return &nodev1.SessionOpen{
 		SpawnId: "sp-exec-seam", SessionId: sessionID, ClientId: "client-1", AssertedOwner: "alice",

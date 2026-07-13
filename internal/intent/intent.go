@@ -110,19 +110,6 @@ func DomainFor(op Op) string {
 	}
 }
 
-// ExecRequestSHA256 returns the SHA-256 of req's deterministic protobuf encoding.
-func ExecRequestSHA256(req *authv1.ExecRequest) ([]byte, error) {
-	if req == nil {
-		return nil, errors.New("exec request is required")
-	}
-	b, err := (proto.MarshalOptions{Deterministic: true}).Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-	h := sha256.Sum256(b)
-	return h[:], nil
-}
-
 // Build marshals body, signs domain || body_bytes with priv (P-256 P1363), and returns a
 // SignedIntent carrying the full DER SPKI [AM11]. The body must have a unique jti and a
 // current issued_at set by the caller; Build does NOT generate jti/timestamp.

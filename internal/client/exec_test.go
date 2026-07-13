@@ -37,9 +37,8 @@ func TestBuildExecOpenIntentUsesVerifiedTargetAndExactRequest(t *testing.T) {
 	if err := proto.Unmarshal(env.GetIntent().GetBody(), &body); err != nil {
 		t.Fatal(err)
 	}
-	wantHash, _ := intent.ExecRequestSHA256(req)
 	if body.GetOp() != string(intent.OpExecOpen) || body.GetSpawnId() != "sp-1" || body.GetGeneration() != 7 ||
-		body.GetTargetNodeId() != "node-1" || body.GetSessionId() != sessionID || !bytes.Equal(body.GetRequestSha256(), wantHash) {
+		body.GetTargetNodeId() != "node-1" || body.GetSessionId() != sessionID || !proto.Equal(body.GetExecRequest(), req) {
 		t.Fatalf("exec intent body = %+v", &body)
 	}
 	argv[2] = "mutated"

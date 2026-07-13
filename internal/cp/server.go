@@ -1739,6 +1739,9 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	if owner == "" {
 		owner, _ = auth.OwnerFromContext(ctx)
 	}
+	if owner == "" {
+		return connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
 	sp, err := s.st.Spawns().Get(ctx, spawnID)
 	if err != nil {
 		return connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))

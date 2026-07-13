@@ -159,6 +159,53 @@ func TestSessionRequiresAndPreservesNodeAuthorization(t *testing.T) {
 	t.Fatal("SessionOpen not emitted")
 }
 
+func TestSessionRejectsMissingOrForeignCallerBeforeNodeOpen(t *testing.T) {
+	tests := []struct {
+		name     string
+		owner    string
+		wantCode connect.Code
+	}{
+		{name: "missing caller", wantCode: connect.CodeUnauthenticated},
+		{name: "foreign owner", owner: "mallory", wantCode: connect.CodePermissionDenied},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _, rt := newTestServer(t)
+			seedSpawn(t, context.Background(), s, "alice")
+			sender := &capSender{}
+			rt.Bind("sp-ws-alice", "n1", sender)
+			_, handler := cpv1connect.NewSpawnServiceHandler(s)
+			wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.owner != "" {
+					r = r.WithContext(auth.WithOwner(r.Context(), tt.owner))
+				}
+				handler.ServeHTTP(w, r)
+			})
+			ts := httptest.NewServer(h2c.NewHandler(wrapped, &http2.Server{}))
+			defer ts.Close()
+			client := cpv1connect.NewSpawnServiceClient(sessionH2CClient(), ts.URL, connect.WithGRPC())
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			stream := client.Session(ctx)
+			if err := stream.Send(&cpv1.Frame{
+				SpawnId: "sp-ws-alice", SessionId: "exec-rejected",
+				ExecRequest: &authv1.ExecRequest{Argv: []string{"true"}},
+				SessionAuth: &authv1.AuthEnvelope{AccessToken: "node-token", Intent: &authv1.SignedIntent{}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			_ = stream.CloseRequest()
+			_, err := stream.Receive()
+			if connect.CodeOf(err) != tt.wantCode {
+				t.Fatalf("Session error = %v (code %v), want %v", err, connect.CodeOf(err), tt.wantCode)
+			}
+			if opens := sender.sessionOpens(); len(opens) != 0 {
+				t.Fatalf("node SessionOpen emitted for rejected caller: %+v", opens)
+			}
+		})
+	}
+}
+
 func TestSessionRelaysExplicitExecBind(t *testing.T) {
 	s, _, rt := newTestServer(t)
 	seedSpawn(t, context.Background(), s, "alice")
