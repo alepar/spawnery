@@ -247,3 +247,48 @@ func TestControlGitHub_DisabledWhenStateNil(t *testing.T) {
 		t.Errorf("events with nil state: status = %d, want 503", resp2.StatusCode)
 	}
 }
+
+// TestControlGitHub_WireContract pins the exact JSON field names and paths that the NODE's push
+// client (sp-2tx8.9.3) and long-poll (sp-2tx8.9.4) code against. There is no shared type across the
+// two packages, so a rename here silently breaks credential delivery — this test is the only thing
+// standing between that rename and a spawn that cannot talk to GitHub.
+func TestControlGitHub_WireContract(t *testing.T) {
+	certPEM, keyPEM := makeTestCA(t)
+	gh := NewGitHubState()
+	srv := newGitHubControlTestServer(t, gh)
+
+	// The node sends EXACTLY these keys — hand-written, not marshalled from a struct.
+	raw := `{"ca_cert_pem":` + jsonQuote(t, string(certPEM)) +
+		`,"ca_key_pem":` + jsonQuote(t, string(keyPEM)) +
+		`,"token":"ghs_wire","token_expires_at":99}`
+
+	resp := do(t, http.MethodPost, srv.URL+"/control/github", "secret", raw)
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /control/github with the documented field names: status = %d, want 200", resp.StatusCode)
+	}
+	if tok, exp := gh.Token(); tok != "ghs_wire" || exp != 99 {
+		t.Fatalf("state = (%q,%d), want (ghs_wire,99)", tok, exp)
+	}
+
+	gh.RecordRejection("ghs_wire")
+	ev := do(t, http.MethodGet, srv.URL+"/control/github/events", "secret", "")
+	defer ev.Body.Close() //nolint:errcheck
+	body, err := io.ReadAll(ev.Body)
+	if err != nil {
+		t.Fatalf("read events body: %v", err)
+	}
+	// The node matches on this exact shape: {"event":"token_rejected"}.
+	if !strings.Contains(string(body), `"event"`) || !strings.Contains(string(body), `"token_rejected"`) {
+		t.Fatalf("events body = %q, want {\"event\":\"token_rejected\"}", body)
+	}
+}
+
+func jsonQuote(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("jsonQuote: %v", err)
+	}
+	return string(b)
+}

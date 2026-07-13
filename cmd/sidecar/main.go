@@ -36,6 +36,10 @@ func main() {
 	ov := &sidecar.Override{}
 	inflight := sidecar.NewInflight()
 
+	// The node PUSHES the GitHub MITM CA + access token to POST /control/github before the agent
+	// starts; the MITM proxy reads both from this same state. One pointer, shared deliberately.
+	ghState := sidecar.NewGitHubState()
+
 	// /v1/messages is the Anthropic Messages API converter (Claude Code); everything else is
 	// the transparent OpenAI passthrough (opencode/goose).
 	mux := http.NewServeMux()
@@ -51,18 +55,18 @@ func main() {
 	servers := []*http.Server{proxySrv}
 
 	// Control server: a second listener on the pod IP (not loopback) so the node can set the
-	// override. Started only when both a token and an address are configured.
+	// override and push GitHub credentials. Started only when both a token and an address are configured.
 	if controlToken != "" && controlAddr != "" {
 		log.Printf("sidecar control listening on %s", controlAddr)
-		controlSrv := &http.Server{Addr: controlAddr, Handler: sidecar.NewControlHandler(ov, controlToken, nil, inflight)}
+		controlSrv := &http.Server{Addr: controlAddr, Handler: sidecar.NewControlHandler(ov, controlToken, ghState, inflight)}
 		servers = append(servers, controlSrv)
 	} else {
 		log.Printf("sidecar control endpoint disabled (set SIDECAR_CONTROL_TOKEN and SIDECAR_CONTROL_ADDR to enable)")
 	}
 
-	// GitHub MITM forward proxy (sp-n7iy.4): enabled when SIDECAR_GITHUB_PROXY_ADDR is set and a
-	// control transport is configured. Disabled ⇒ log notice and skip (inference proxy unchanged).
-	sidecar.StartGitHubProxy(os.Getenv)
+	// GitHub MITM forward proxy (sp-n7iy.4): enabled when SIDECAR_GITHUB_PROXY_ADDR is set. It comes
+	// up credential-less and fails closed until the node pushes to /control/github (sp-2tx8.9).
+	sidecar.StartGitHubProxy(os.Getenv, ghState)
 
 	lns, err := bindAll(servers...)
 	if err != nil {
