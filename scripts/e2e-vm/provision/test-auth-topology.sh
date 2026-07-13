@@ -42,6 +42,19 @@ do
   }
 done
 
+rg -q 'install -d -m0700 "\$CLIENT_STATE"' "$runner" || {
+  echo "run.sh does not create a private mutable client-state directory" >&2
+  exit 1
+}
+rg -q 'ACC_CRL_STATE="\$CLIENT_STATE/crl-state.json"' "$runner" || {
+  echo "run.sh does not keep mutable CRL state under the private client-state directory" >&2
+  exit 1
+}
+rg -q 'ACC_SEED_SKILL_APP_ID=spawnery/secret-app' "$runner" || {
+  echo "run.sh does not wire the production skill-injection scenario to a seeded app" >&2
+  exit 1
+}
+
 common="$HERE/env/common.env"
 for expected in \
   AS_AUTH_SIGNING_CURRENT_KEY_PEM \

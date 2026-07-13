@@ -21,6 +21,7 @@
 import type { KeyStore, ResolvedTargetVerifier } from "@spawnery/client";
 import { authv1 } from "@spawnery/client";
 import { fromBinary } from "@bufbuild/protobuf";
+import { join } from "node:path";
 import type { Identity } from "../fixtures/identity-pool";
 import type { AuthStrategy, CliPreparation, CliPreparationOptions } from "./types";
 import { establishOAuthSession, refreshOAuthSession, type OAuthSessionState } from "./oauth-session";
@@ -134,13 +135,16 @@ export class OAuthPoPAuth implements AuthStrategy {
     const key = `${identity.token}\0${options.configHome}`;
     const existing = this.cliPreparations.get(key);
     if (existing) return existing;
+    // Normal spawnctl commands use os.UserConfigDir()/spawnctl. Keep the explicit key/login
+    // commands in that same directory while exposing its parent as XDG_CONFIG_HOME to drivers.
+    const custodyDir = join(options.configHome, "spawnctl");
     const preparation = initializeCliOwnerDevice({
       spawnctlBin: options.spawnctlBin,
-      configHome: options.configHome,
+      configHome: custodyDir,
     }).then(() => runCliDeviceLogin({
         spawnctlBin: options.spawnctlBin,
         asOrigin: options.asOrigin,
-        configHome: options.configHome,
+        configHome: custodyDir,
         page: page as Parameters<typeof runCliDeviceLogin>[0]["page"],
       }))
       .then(() => ({ authArgs: [], configHome: options.configHome }));

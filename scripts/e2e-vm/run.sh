@@ -29,6 +29,7 @@ export E2E_RUNID="$(gen_runid)"
 WEB_ORIGIN="https://$(vm_hostname)"    # prod web build pins CSP/connect-src to this origin
 RD="$(run_dir)"; mkdir -p "$RD"
 STAGE="$RD/stage"; mkdir -p "$STAGE/bin" "$STAGE/config" "$STAGE/provision/env"
+CLIENT_STATE="$RD/client-state"; install -d -m0700 "$CLIENT_STATE"
 log "=== e2e-vm run  runid=$E2E_RUNID  profile=$PROFILE ==="
 
 # teardown on ANY exit (success, failure, Ctrl-C) unless --keep
@@ -121,13 +122,14 @@ export ACC_DESTRUCTIVE_DEV_TOKEN=devtoken1
 export ACC_ROOT_CA_PEM="$PUBLIC/root.pem"
 export ACC_TRUST_DOMAIN=prod.spawnery.internal
 export ACC_CLOUD_ACCOUNT_ID=spawnery-system
-export ACC_CRL_STATE="$PUBLIC/crl-state.json"
+export ACC_CRL_STATE="$CLIENT_STATE/crl-state.json"
 export ACC_CRL_ISSUERS="$PUBLIC/service-intermediate.pem,$PUBLIC/cloud-intermediate.pem,$PUBLIC/self-hosted-intermediate.pem"
 export ACC_CRLS="$PUBLIC/service.crl.pem,$PUBLIC/cloud-node.crl.pem,$PUBLIC/self-hosted-node.crl.pem"
 # version-pin refs (preflight requires them). target==build here (the VM runs the code we just
 # rolled), so pin both to this run id so the check is meaningful and trivially satisfied.
 export ACC_TARGET_REF="$E2E_RUNID" ACC_BUILD_REF="$E2E_RUNID"
 export ACC_TEST_APP_ID=spawnery/secret-app ACC_LIFECYCLE_APP=spawnery/secret-app ACC_AGENT_APP_ID=spawnery/secret-app
+export ACC_SEED_SKILL_APP_ID=spawnery/secret-app
 export ACC_APP_ID=spawnery/secret-app   # tenancy specs' generic app id
 export ACC_TEST_MODEL=openai/gpt-4o-mini ACC_AGENT_MODEL=openai/gpt-4o-mini
 export ACC_SPAWN_ACTIVE_TIMEOUT_MS=240000

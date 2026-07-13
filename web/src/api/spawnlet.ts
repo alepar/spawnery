@@ -94,7 +94,10 @@ export async function createSpawn(
     // CP resolves it to (id != ref for catalog/seed apps), so validating against a ref we never
     // supplied would always mismatch and block the spawn. pollAndSign skips the appRef check when
     // it's undefined; the model check still runs and the signed intent uses the CP-resolved appRef.
-    const pended = { op: "create-spawn", spawnId, model, image, mounts };
+    // An empty binding list means "use the app's declared/default mounts"; the CP resolves those
+    // after CreateSpawn. Only pin mounts that the user actually selected locally.
+    const pended = { op: "create-spawn", spawnId, model, image,
+      mounts: mounts.length > 0 ? mounts : undefined };
     registerPendedOp(pended);
     pollAndSign({ spawnId, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
       .catch((e: unknown) => console.error("intent sign failed:", e))

@@ -277,7 +277,7 @@ test("production authorization: exact node NACKs and target substitution refusal
     const commonArgs = [
       "move", "does-not-exist", "node-1",
       "--cp", target.cpEndpoint,
-      "--config-dir", cliConfigHome,
+      "--config-dir", join(cliConfigHome, "spawnctl"),
       "--root-ca", target.rootCAPath!,
       "--trust-domain", target.trustDomain!,
       "--crl-issuer", target.crlIssuerPaths![0],

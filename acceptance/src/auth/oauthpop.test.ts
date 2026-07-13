@@ -2,14 +2,21 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { OAuthPoPAuth, type PageLike, type RouteLike } from "./oauthpop";
 import type { Identity } from "../fixtures/identity-pool";
 import { establishOAuthSession, refreshOAuthSession, type OAuthSessionState } from "./oauth-session";
+import { initializeCliOwnerDevice, runCliDeviceLogin } from "./cli-device";
 
 vi.mock("./oauth-session", () => ({
   establishOAuthSession: vi.fn(),
   refreshOAuthSession: vi.fn(),
 }));
+vi.mock("./cli-device", () => ({
+  initializeCliOwnerDevice: vi.fn(),
+  runCliDeviceLogin: vi.fn(),
+}));
 
 const establishMock = vi.mocked(establishOAuthSession);
 const refreshMock = vi.mocked(refreshOAuthSession);
+const initializeCliMock = vi.mocked(initializeCliOwnerDevice);
+const cliLoginMock = vi.mocked(runCliDeviceLogin);
 
 function fakeState(accessToken: string, expiresAt: number): OAuthSessionState {
   return {
@@ -26,6 +33,8 @@ function fakeState(accessToken: string, expiresAt: number): OAuthSessionState {
 beforeEach(() => {
   establishMock.mockReset();
   refreshMock.mockReset();
+  initializeCliMock.mockReset().mockResolvedValue();
+  cliLoginMock.mockReset().mockResolvedValue();
 });
 
 const cfg = { asOrigin: "https://as.example", webOrigin: "https://web.example" };
@@ -101,6 +110,32 @@ describe("OAuthPoPAuth paired credentials", () => {
     const auth = new OAuthPoPAuth(cfg);
     expect(await auth.cpAccessToken(alice)).toBe("cp-token");
     expect(await auth.nodeAccessToken(alice)).toBe("node-cp-token");
+  });
+});
+
+describe("OAuthPoPAuth.prepareCli", () => {
+  it("stores explicit key/login custody where normal XDG spawnctl commands resolve it", async () => {
+    const auth = new OAuthPoPAuth(cfg);
+    const page = {};
+    const options = {
+      spawnctlBin: "/bin/spawnctl",
+      asOrigin: "https://as.example",
+      configHome: "/tmp/acceptance-config",
+    };
+
+    const prepared = await auth.prepareCli(page, alice, options);
+
+    expect(initializeCliMock).toHaveBeenCalledWith({
+      spawnctlBin: "/bin/spawnctl",
+      configHome: "/tmp/acceptance-config/spawnctl",
+    });
+    expect(cliLoginMock).toHaveBeenCalledWith({
+      spawnctlBin: "/bin/spawnctl",
+      asOrigin: "https://as.example",
+      configHome: "/tmp/acceptance-config/spawnctl",
+      page,
+    });
+    expect(prepared).toEqual({ authArgs: [], configHome: "/tmp/acceptance-config" });
   });
 });
 
