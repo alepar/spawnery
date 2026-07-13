@@ -1,7 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { cpAuthModePlan, cpAuthModeReadinessCommand, posixShellQuote } from "./root-anchored-artifacts";
+import {
+  cpAuthModePlan,
+  cpAuthModeReadinessCommand,
+  loadVMAuthConfig,
+  posixShellQuote,
+  vmRunMarkerVerificationCommand,
+} from "./root-anchored-artifacts";
 
 describe("AS signer custody", () => {
   it("has no acceptance-side short-lived token mint or AS private-key read/sign path", () => {
@@ -48,6 +54,32 @@ describe("cpAuthModePlan", () => {
       configureCommand: "rm -f /etc/spawnery/env.d/zz-destructive.env /etc/systemd/system/spawnery-cp.service.d/zz-destructive.conf",
       expectedLog: "cp: auth mode=prod",
     });
+  });
+});
+
+describe("destructive VM identity", () => {
+  const env = {
+    ACC_E2E_VM_IP: "192.0.2.10",
+    ACC_E2E_SSH_KEY: "/tmp/key",
+    ACC_E2E_SSH_USER: "spawnery",
+    ACC_CP_ENDPOINT: "https://vm.example",
+    ACC_WEB_ORIGIN: "https://vm.example",
+    ACC_TEST_APP_ID: "spawnery/secret-app",
+    ACC_TEST_MODEL: "test-model",
+    ACC_DESTRUCTIVE_DEV_TOKEN: "devtoken1",
+    ACC_IDENTITY_POOL: "acc-owner-1=acc-owner-1",
+  };
+
+  it("requires the runner-provided disposable VM run id", () => {
+    expect(() => loadVMAuthConfig(env)).toThrow("ACC_E2E_VM_RUNID");
+  });
+
+  it("verifies exact marker contents and root-only ownership", () => {
+    expect(vmRunMarkerVerificationCommand("run-'quoted")).toBe(
+      "marker=/run/spawnery-e2e-runid; "
+      + "test \"$(sudo cat \"$marker\")\" = 'run-'\"'\"'quoted' && "
+      + "test \"$(sudo stat -c '%U:%G:%a' \"$marker\")\" = root:root:600 && echo verified",
+    );
   });
 });
 

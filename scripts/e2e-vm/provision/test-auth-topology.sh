@@ -43,6 +43,16 @@ do
   }
 done
 
+for destructive_binding in \
+  'install -o root -g root -m 0600 /dev/stdin /run/spawnery-e2e-runid' \
+  'export ACC_E2E_VM_RUNID="$E2E_RUNID"'
+do
+  rg -Fq "$destructive_binding" "$runner" || {
+    echo "run.sh lacks disposable VM identity binding: ${destructive_binding}" >&2
+    exit 1
+  }
+done
+
 for public_binding in \
   '--rawfile cloud_issuer "$public_dir/cloud-intermediate.pem"' \
   '--rawfile cloud_crl "$public_dir/cloud-node.crl.pem"' \

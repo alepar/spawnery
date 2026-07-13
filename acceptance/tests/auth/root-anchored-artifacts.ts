@@ -27,6 +27,7 @@ export interface VMAuthConfig {
   appId: string;
   model: string;
   destructiveDevToken: string;
+  vmRunId: string;
   owner: string;
 }
 
@@ -47,6 +48,7 @@ export function loadVMAuthConfig(env: NodeJS.ProcessEnv = process.env): VMAuthCo
     appId: required("ACC_TEST_APP_ID"),
     model: required("ACC_TEST_MODEL"),
     destructiveDevToken: required("ACC_DESTRUCTIVE_DEV_TOKEN"),
+    vmRunId: required("ACC_E2E_VM_RUNID"),
     owner,
   };
 }
@@ -210,7 +212,17 @@ export function cpAuthModeReadinessCommand(expectedLog: string): string {
     + `printf %s "$logs" | grep -Fq 'node connected' && echo ready`;
 }
 
+export function vmRunMarkerVerificationCommand(expectedRunId: string): string {
+  return "marker=/run/spawnery-e2e-runid; "
+    + `test "$(sudo cat "$marker")" = ${posixShellQuote(expectedRunId)} && `
+    + "test \"$(sudo stat -c '%U:%G:%a' \"$marker\")\" = root:root:600 && echo verified";
+}
+
 export async function setCPAuthMode(cfg: VMAuthConfig, mode: "prod" | "dev"): Promise<void> {
+  if (mode === "dev") {
+    const verified = await ssh(cfg, vmRunMarkerVerificationCommand(cfg.vmRunId));
+    if (verified !== "verified") throw new Error("disposable VM run marker did not verify");
+  }
   const plan = cpAuthModePlan(cfg, mode);
   await ssh(cfg, remoteArgv("sudo", "sh", "-c", plan.configureCommand));
   await ssh(cfg, "sudo systemctl daemon-reload && sudo systemctl restart spawnery-cp");

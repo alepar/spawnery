@@ -86,15 +86,17 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
 
     await deployCurrentRevocation(cfg, 1);
     await expectCPRejected(cfg, session.accessToken);
-    await setCPAuthMode(cfg, "dev");
-    cleanup = cpClient(cfg, cfg.destructiveDevToken);
-    const revokedSpawn = await submitSpawn(cfg, nodeToken, keyPair, "revoked", cfg.destructiveDevToken);
-    createdSpawnIds.push(revokedSpawn.spawnId);
-    expect(revokedSpawn.status).toBe("ERROR");
-    expect(revokedSpawn.errorDetail).toContain("TOKEN_INVALID");
-    await removeTerminal(revokedSpawn.spawnId);
-
-    await setCPAuthMode(cfg, "prod");
+    try {
+      await setCPAuthMode(cfg, "dev");
+      cleanup = cpClient(cfg, cfg.destructiveDevToken);
+      const revokedSpawn = await submitSpawn(cfg, nodeToken, keyPair, "revoked", cfg.destructiveDevToken);
+      createdSpawnIds.push(revokedSpawn.spawnId);
+      expect(revokedSpawn.status).toBe("ERROR");
+      expect(revokedSpawn.errorDetail).toContain("TOKEN_INVALID");
+      await removeTerminal(revokedSpawn.spawnId);
+    } finally {
+      await setCPAuthMode(cfg, "prod");
+    }
 
     const nextCP = await mintVMToken(cfg, "next", "cp", spki, cfg.owner);
     cleanup = cpClient(cfg, nextCP);
