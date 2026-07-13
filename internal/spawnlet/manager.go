@@ -674,20 +674,29 @@ func (m *Manager) ExecRun(ctx context.Context, spawnID string, inner []string) e
 // ExecStream runs inner non-interactively in spawnID's agent container, streaming its stdout/stderr to
 // the given writers as they arrive, and returns the inner command's exit code. It is the user-facing
 // `spawnctl exec` path (sp-8v39). Unlike ExecRun (buffered, error-on-nonzero), a non-zero command exit
-// is returned as exitCode with a nil error; err is reserved for failures to LAUNCH the exec — an
-// unknown spawn / no agent container, or the runtime CLI (docker/crictl) failing to start. `docker
+// is returned as exitCode with a nil error; err is reserved for setup, transport, and cancellation
+// failures. `docker
 // exec` propagates the inner exit code and demuxes stdout/stderr natively; `crictl exec` (runsc/CRI
-// lane) demuxes but does NOT propagate the code (see runExecStream's parseCrictlExit). NOTE:
-// cancelling ctx kills the docker/crictl client, which may leave the in-container process orphaned
-// until the spawn stops (documented limitation).
+// lane) demuxes but does NOT propagate the code (see runExecStream's parseCrictlExit).
 func (m *Manager) ExecStream(ctx context.Context, spawnID string, inner []string, stdout, stderr io.Writer) (int, error) {
 	sp, ok := m.store.Get(spawnID)
 	if !ok || sp.AgentID == "" {
 		return 1, fmt.Errorf("spawn %s has no agent container", spawnID)
 	}
-	prefix := ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime)
-	argv := execArgv(prefix, sp.AgentID, inner)
-	return runExecStream(ctx, argv, stdout, stderr, len(prefix) > 0 && prefix[0] == "crictl")
+	if err := ctx.Err(); err != nil {
+		return 1, err
+	}
+	process, err := newExecProcess()
+	if err != nil {
+		return 1, err
+	}
+	wrapped, err := process.wrapArgv(inner)
+	if err != nil {
+		return 1, err
+	}
+	prefix := execPrefixWithStdin(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime))
+	argv := execArgv(prefix, sp.AgentID, wrapped)
+	return runExecStreamCancelable(ctx, argv, stdout, stderr, len(prefix) > 0 && prefix[0] == "crictl", process)
 }
 
 // runExecStream runs argv to completion, streaming its stdout/stderr to the given writers, and returns

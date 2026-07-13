@@ -20,6 +20,7 @@ type execSessionStream interface {
 	Send(*cpv1.Frame) error
 	Receive() (*cpv1.Frame, error)
 	CloseRequest() error
+	CloseResponse() error
 }
 
 // Exec runs argv in a spawn through an authenticated, node-verified CP Session attachment.
@@ -92,9 +93,11 @@ func runExecSession(_ context.Context, stream execSessionStream, bind *cpv1.Fram
 	if err := stream.Send(bind); err != nil {
 		return 1, fmt.Errorf("exec session bind: %w", err)
 	}
-	defer stream.CloseRequest() // keep the request leg open until the node sends its terminal exit frame
 	reader, writer := io.Pipe()
+	receiveDone := make(chan struct{})
 	go func() {
+		defer close(receiveDone)
+		defer writer.Close()
 		for {
 			frame, err := stream.Receive()
 			if err != nil {
@@ -110,5 +113,10 @@ func runExecSession(_ context.Context, stream execSessionStream, bind *cpv1.Fram
 			}
 		}
 	}()
-	return execstream.Demux(reader, stdout, stderr)
+	code, err := execstream.Demux(reader, stdout, stderr)
+	_ = reader.Close()
+	_ = stream.CloseRequest()
+	_ = stream.CloseResponse()
+	<-receiveDone
+	return code, err
 }

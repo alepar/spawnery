@@ -3,8 +3,14 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"runtime"
+	"runtime/pprof"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -58,9 +64,11 @@ func TestBuildExecOpenIntentRejectsMissingCredentialsBeforeTargetLookup(t *testi
 }
 
 type fakeExecStream struct {
-	sent   []*cpv1.Frame
-	frames []*cpv1.Frame
-	closed bool
+	sent           []*cpv1.Frame
+	frames         []*cpv1.Frame
+	closed         bool
+	responseClosed chan struct{}
+	closeOnce      sync.Once
 }
 
 func (s *fakeExecStream) Send(frame *cpv1.Frame) error {
@@ -70,6 +78,9 @@ func (s *fakeExecStream) Send(frame *cpv1.Frame) error {
 
 func (s *fakeExecStream) Receive() (*cpv1.Frame, error) {
 	if len(s.frames) == 0 {
+		if s.responseClosed != nil {
+			<-s.responseClosed
+		}
 		return nil, io.EOF
 	}
 	f := s.frames[0]
@@ -78,6 +89,13 @@ func (s *fakeExecStream) Receive() (*cpv1.Frame, error) {
 }
 
 func (s *fakeExecStream) CloseRequest() error { s.closed = true; return nil }
+
+func (s *fakeExecStream) CloseResponse() error {
+	if s.responseClosed != nil {
+		s.closeOnce.Do(func() { close(s.responseClosed) })
+	}
+	return nil
+}
 
 func TestRunExecSessionStreamsAndReturnsExactExitCode(t *testing.T) {
 	var wire bytes.Buffer
@@ -100,5 +118,70 @@ func TestRunExecSessionStreamsAndReturnsExactExitCode(t *testing.T) {
 	}
 	if len(stream.sent) != 1 || !proto.Equal(stream.sent[0], bind) || !stream.closed {
 		t.Fatalf("stream bind/close = sent %+v closed %t", stream.sent, stream.closed)
+	}
+}
+
+func TestRunExecSessionErrorThenExitDoesNotLeakReceiver(t *testing.T) {
+	var wire bytes.Buffer
+	_ = execstream.WriteFrame(&wire, execstream.Error, []byte("container vanished"))
+	_ = execstream.WriteExit(&wire, 1)
+	stream := &fakeExecStream{
+		frames: []*cpv1.Frame{{Data: bytes.Clone(wire.Bytes())}}, responseClosed: make(chan struct{}),
+	}
+	before := runExecSessionGoroutines(t)
+	code, err := runExecSession(context.Background(), stream, validExecBind(), io.Discard, io.Discard)
+	if code == 0 || err == nil || !strings.Contains(err.Error(), "container vanished") {
+		t.Fatalf("runExecSession = code %d err %v, want node error", code, err)
+	}
+	assertRunExecSessionGoroutines(t, before)
+}
+
+func TestRunExecSessionWriterFailureDoesNotLeakReceiver(t *testing.T) {
+	var wire bytes.Buffer
+	_ = execstream.WriteFrame(&wire, execstream.Stdout, []byte("output"))
+	_ = execstream.WriteExit(&wire, 0)
+	stream := &fakeExecStream{
+		frames: []*cpv1.Frame{{Data: bytes.Clone(wire.Bytes())}}, responseClosed: make(chan struct{}),
+	}
+	want := errors.New("stdout failed")
+	before := runExecSessionGoroutines(t)
+	code, err := runExecSession(context.Background(), stream, validExecBind(), errorWriter{err: want}, io.Discard)
+	if code == 0 || !errors.Is(err, want) {
+		t.Fatalf("runExecSession = code %d err %v, want %v", code, err, want)
+	}
+	assertRunExecSessionGoroutines(t, before)
+}
+
+type errorWriter struct{ err error }
+
+func (w errorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func validExecBind() *cpv1.Frame {
+	return &cpv1.Frame{
+		SpawnId: "sp-1", SessionId: "exec-1", ExecRequest: &authv1.ExecRequest{Argv: []string{"true"}},
+		SessionAuth: &authv1.AuthEnvelope{AccessToken: "node-token", Intent: &authv1.SignedIntent{}},
+	}
+}
+
+func runExecSessionGoroutines(t *testing.T) int {
+	t.Helper()
+	var stacks bytes.Buffer
+	if err := pprof.Lookup("goroutine").WriteTo(&stacks, 2); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(stacks.String(), "spawnery/internal/client.runExecSession.func1")
+}
+
+func assertRunExecSessionGoroutines(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for {
+		if got := runExecSessionGoroutines(t); got <= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runExecSession receive goroutines = %d, want <= %d", runExecSessionGoroutines(t), want)
+		}
+		runtime.Gosched()
 	}
 }
