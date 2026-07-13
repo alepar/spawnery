@@ -480,6 +480,55 @@ describe("ProfilesView", () => {
     expect(optionValues).toContain("PROFILE_ENTRY_KIND_PLUGIN");
   });
 
+  it("Clone replays a BUNDLE_REF entry with no versionId and toasts when the source was behind (D7)", async () => {
+    vi.mocked(getProfile).mockResolvedValue({
+      profileId: "p1",
+      name: "My Profile",
+      version: 2,
+      entries: [
+        {
+          entryId: "e-bundle",
+          kind: "PROFILE_ENTRY_KIND_SKILL" as const,
+          name: "superpowers",
+          source: "PROFILE_ENTRY_SOURCE_BUNDLE_REF" as const,
+          bundleId: "b1",
+          versionId: "v1",
+          excludedSubdirs: ["skills/x"],
+          memberRenames: { "skills/y": "y2" },
+          pinnedSeq: 1,
+          latestSeq: 2,
+          memberCount: 3,
+        },
+      ],
+      secretIds: [],
+    });
+    const { toast } = await import("sonner");
+    const successSpy = vi.spyOn(toast, "success");
+
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("bundle-chip-e-bundle"));
+    await userEvent.click(screen.getByTestId("profile-clone-btn"));
+
+    await waitFor(() => {
+      expect(addProfileEntry).toHaveBeenCalledWith(
+        "p3",
+        1,
+        expect.objectContaining({
+          source: "PROFILE_ENTRY_SOURCE_BUNDLE_REF",
+          bundleId: "b1",
+          excludedSubdirs: ["skills/x"],
+          memberRenames: { "skills/y": "y2" },
+        }),
+      );
+    });
+    const call = vi.mocked(addProfileEntry).mock.calls.find((c) => c[0] === "p3")![2] as Record<string, unknown>;
+    expect(call.versionId).toBeUndefined();
+    expect(successSpy).toHaveBeenCalledWith(expect.stringMatching(/pinned to their newer version/i));
+    successSpy.mockRestore();
+  });
+
   // --- Bundles section in the catalog picker (sp-mwco.1.9 D3) ---
 
   it("lists bundles as BundleCards in the catalog picker and Attach opens the attach panel", async () => {
