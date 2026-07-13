@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import { listMigrationTargets, type MigrationTarget } from "@/api/migration";
 import { ForkError, runFork, runForkDelivery, type ForkProgressStep, type ForkResult } from "@/api/fork";
 import { loadDeviceKeys } from "@/keys/device";
-import { PINNED_ROOT_CA_PEM } from "@/config/trustAnchors";
+import { getTrustAnchors } from "@/config/trustAnchors";
 
 export type ForkPhase =
   | "idle"
@@ -111,7 +111,7 @@ export function useForkSpawn(): { state: ForkSpawnState } & ForkSpawnActions {
         sourceSpawnId,
         targetInput(selectedTarget),
         loadDeviceKeys,
-        PINNED_ROOT_CA_PEM,
+        getTrustAnchors().rootCAPEM,
         new Date(),
         name,
         (step) => setState((s) => ({ ...s, progress: step })),
@@ -186,7 +186,7 @@ export function useForkSpawn(): { state: ForkSpawnState } & ForkSpawnActions {
         forkSpawnId,
         current,
         deviceKeys,
-        PINNED_ROOT_CA_PEM,
+        getTrustAnchors().rootCAPEM,
         new Date(),
         (step) => setState((s) => ({ ...s, progress: step })),
       );

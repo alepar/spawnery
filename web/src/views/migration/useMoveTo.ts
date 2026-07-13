@@ -49,7 +49,7 @@ import {
   type MigrateResult,
 } from "@/api/migration";
 import { loadDeviceKeys } from "@/keys/device";
-import { PINNED_ROOT_CA_PEM } from "@/config/trustAnchors";
+import { getTrustAnchors } from "@/config/trustAnchors";
 
 // ── State shape ───────────────────────────────────────────────────────────────
 
@@ -185,7 +185,7 @@ export function useMoveTo(): { state: MoveToState } & MoveToActions {
           spawnId,
           selectedTarget,
           deviceKeys,
-          PINNED_ROOT_CA_PEM,
+          getTrustAnchors().rootCAPEM,
           new Date(),
           (p) => setState((s) => ({ ...s, progress: p })),
         );
@@ -240,7 +240,7 @@ export function useMoveTo(): { state: MoveToState } & MoveToActions {
           spawnId,
           selectedTarget,
           deviceKeys,
-          PINNED_ROOT_CA_PEM,
+          getTrustAnchors().rootCAPEM,
           new Date(),
           (p) => setState((s) => ({ ...s, progress: p })),
         );
@@ -276,7 +276,7 @@ export function useMoveTo(): { state: MoveToState } & MoveToActions {
         spawnId,
         selectedTarget,
         deviceKeys!,           // may be null but runMigrate exits early when entries=[].
-        PINNED_ROOT_CA_PEM,
+        getTrustAnchors().rootCAPEM,
         new Date(),
         (p) => setState((s) => ({ ...s, progress: p })),
       );

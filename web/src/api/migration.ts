@@ -23,7 +23,7 @@ import type { Envelope } from "@/keys/hpke";
 import { verifyNodeForSealing } from "@/keys/subkey";
 import type { DeviceKeys } from "@/keys/device";
 import { fromBase64, toBase64, encodeFields } from "@/keys/encoding";
-import { PINNED_TRUST_DOMAIN } from "@/config/trustAnchors";
+import { getTrustAnchors } from "@/config/trustAnchors";
 
 // ── Typed migration errors ────────────────────────────────────────────────────
 
@@ -356,7 +356,7 @@ export async function deliverOwnerSealedJournalKeys(
       nk.nodeCertChain,
       rootPEM,
       nk.signedSubkey,
-      { trustDomain: PINNED_TRUST_DOMAIN, tenancy, accountId },
+      { trustDomain: getTrustAnchors().trustDomain, tenancy, accountId },
       now,
     );
     if (verified.identity.nodeId !== resolvedNodeId) {

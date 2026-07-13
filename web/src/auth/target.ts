@@ -1,10 +1,6 @@
 import type { ResolvedTarget } from "@spawnery/client";
 import { verifyCertChain, parseSPIFFEPrincipal, type ParsedCert, type SPIFFEPrincipal } from "@/keys/x509";
-import {
-  PINNED_ROOT_CA_PEM,
-  PINNED_TRUST_DOMAIN,
-  PINNED_CLOUD_ACCOUNT_ID,
-} from "@/config/trustAnchors";
+import { getTrustAnchors } from "@/config/trustAnchors";
 
 export interface TargetVerificationPins {
   rootCAPEM: string;
@@ -19,19 +15,13 @@ interface TargetVerifierDeps {
   parseSPIFFEPrincipal: (raw: string, trustDomain: string) => SPIFFEPrincipal;
 }
 
-const defaultPins: TargetVerificationPins = {
-  rootCAPEM: PINNED_ROOT_CA_PEM,
-  trustDomain: PINNED_TRUST_DOMAIN,
-  cloudAccountId: PINNED_CLOUD_ACCOUNT_ID,
-};
-
 const defaultDeps: TargetVerifierDeps = { verifyCertChain, parseSPIFFEPrincipal };
 
 /** Verify CP-carried node identity against build-time pins and the typed response fields. */
 export async function verifyResolvedTarget(
   target: ResolvedTarget,
   loggedInAccountId: string,
-  pins: TargetVerificationPins = defaultPins,
+  pins: TargetVerificationPins = getTrustAnchors(),
   now: Date = new Date(),
   deps: TargetVerifierDeps = defaultDeps,
 ): Promise<void> {

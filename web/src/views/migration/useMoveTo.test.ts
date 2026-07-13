@@ -38,9 +38,12 @@ vi.mock("@/keys/device", () => ({
 }));
 
 vi.mock("@/config/trustAnchors", () => ({
-  PINNED_ROOT_CA_PEM: "",
-  PINNED_TRUST_DOMAIN: "prod.spawnery.internal",
-  PINNED_CLOUD_ACCOUNT_ID: "cloud-system",
+  getTrustAnchors: () => ({
+    rootCAPEM: "",
+    trustDomain: "prod.spawnery.internal",
+    cloudAccountId: "cloud-system",
+    nodeCRLs: [],
+  }),
 }));
 
 import * as migrationMod from "@/api/migration";
