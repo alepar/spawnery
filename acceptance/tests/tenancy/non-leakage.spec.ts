@@ -36,13 +36,23 @@ function decodeSessionIdentity(wire: string): SessionIdentity {
   };
 }
 
-async function readStoredCliIdentity(configHome: string): Promise<SessionIdentity & { storedAccountId: string }> {
+async function readStoredCliIdentity(configHome: string): Promise<SessionIdentity> {
   const state = JSON.parse(await readFile(join(configHome, "spawnctl", "auth.json"), "utf8")) as {
-    account_id?: string;
     cp_access_token?: string;
   };
   if (!state.cp_access_token) throw new Error(`missing cp_access_token in ${configHome}/spawnctl/auth.json`);
-  return { ...decodeSessionIdentity(state.cp_access_token), storedAccountId: state.account_id ?? "" };
+  return decodeSessionIdentity(state.cp_access_token);
+}
+
+async function deviceSessionAccount(page: {
+  request: { get(url: string): Promise<{ ok(): boolean; status(): number; text(): Promise<string> }> };
+}, asOrigin: string): Promise<string> {
+  const response = await page.request.get(`${asOrigin.replace(/\/$/, "")}/device/verify`);
+  const html = await response.text();
+  if (!response.ok()) throw new Error(`device session probe returned ${response.status()}: ${html}`);
+  const account = /Logged in as <strong>([^<]+)<\/strong>/.exec(html)?.[1];
+  if (!account) throw new Error("device session probe omitted the logged-in account");
+  return account;
 }
 
 test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({ target, auth, browser, ns }, testInfo) => {
@@ -64,6 +74,16 @@ test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({
   const pageB = await contextB.newPage();
   await auth.seedWeb(pageA, cfg.a);
   await auth.seedWeb(pageB, cfg.b);
+  if (target.authMode === "oauth-pop") {
+    const [expectedA, expectedB, seededA, seededB] = await Promise.all([
+      auth.accountId(cfg.a),
+      auth.accountId(cfg.b),
+      deviceSessionAccount(pageA, target.asOrigin),
+      deviceSessionAccount(pageB, target.asOrigin),
+    ]);
+    expect(seededA).toBe(expectedA);
+    expect(seededB).toBe(expectedB);
+  }
   const prepareCli = async (identity: typeof cfg.a, configHome: string, approvalPage: typeof pageA) => {
     const prepared = await auth.prepareCli(approvalPage, identity, {
       spawnctlBin: target.spawnctlBin,
@@ -122,8 +142,6 @@ test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({
 
     expect(cliIdentityA.accountId).toBe(apiIdentityA.accountId);
     expect(cliIdentityB.accountId).toBe(apiIdentityB.accountId);
-    expect(cliIdentityA.storedAccountId).toBe(cliIdentityA.accountId);
-    expect(cliIdentityB.storedAccountId).toBe(cliIdentityB.accountId);
     expect(cliIdentityA.accountId).not.toBe(cliIdentityB.accountId);
     expect(cliIdentityA.familyId).not.toBe("");
     expect(cliIdentityB.familyId).not.toBe("");

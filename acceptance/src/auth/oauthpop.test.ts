@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { OAuthPoPAuth, type PageLike, type RouteLike } from "./oauthpop";
+import { OAUTH_AUTHORIZE_ROUTE, OAuthPoPAuth, type PageLike, type RouteLike } from "./oauthpop";
 import type { Identity } from "../fixtures/identity-pool";
 import { establishOAuthSession, refreshOAuthSession, type OAuthSessionState } from "./oauth-session";
 import { initializeCliOwnerDevice, runCliDeviceLogin } from "./cli-device";
@@ -39,6 +39,7 @@ beforeEach(() => {
 
 const cfg = { asOrigin: "https://as.example", webOrigin: "https://web.example" };
 const alice: Identity = { token: "alice", owner: "acc-owner-1" };
+const bob: Identity = { token: "bob", owner: "acc-owner-2" };
 
 describe("OAuthPoPAuth.cpAccessToken", () => {
   it("establishes a session once and reuses it while it has plenty of TTL left", async () => {
@@ -140,7 +141,7 @@ describe("OAuthPoPAuth.prepareCli", () => {
 });
 
 describe("OAuthPoPAuth.seedWeb", () => {
-  it("navigates, clicks sign-in, waits for the post-login bounce, and rewrites the fake IdP's login_hint", async () => {
+  it("routes the actual authorize path and injects a non-default identity into the fake IdP hop", async () => {
     const auth = new OAuthPoPAuth(cfg);
     let routeHandler: ((route: RouteLike) => Promise<void> | void) | undefined;
     let clickCount = 0;
@@ -148,7 +149,11 @@ describe("OAuthPoPAuth.seedWeb", () => {
 
     const page: PageLike = {
       route: vi.fn(async (pattern, handler) => {
-        expect(pattern).toBe("**/login/oauth/authorize*");
+        expect(pattern).toBe(OAUTH_AUTHORIZE_ROUTE);
+        expect(pattern).toBeInstanceOf(RegExp);
+        expect((pattern as RegExp).test("https://as.example/oauth/authorize?state=one")).toBe(true);
+        expect((pattern as RegExp).test("http://fake.example/login/oauth/authorize?state=two")).toBe(true);
+        expect((pattern as RegExp).test("https://as.example/oauth/callback?code=three")).toBe(false);
         routeHandler = handler;
       }),
       goto: vi.fn(async () => undefined),
@@ -165,7 +170,7 @@ describe("OAuthPoPAuth.seedWeb", () => {
       }),
     };
 
-    await auth.seedWeb(page, alice);
+    await auth.seedWeb(page, bob);
 
     expect(page.goto).toHaveBeenCalledWith("/");
     expect(clickCount).toBe(1);
@@ -187,7 +192,7 @@ describe("OAuthPoPAuth.seedWeb", () => {
     };
     await routeHandler!(route);
     const rewritten = new URL(continuedUrl);
-    expect(rewritten.searchParams.get("login_hint")).toBe("alice");
+    expect(rewritten.searchParams.get("login_hint")).toBe("bob");
     expect(rewritten.searchParams.get("client_id")).toBe("x");
     expect(rewritten.origin).toBe("http://fake-idp.example:9099");
   });

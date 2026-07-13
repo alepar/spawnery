@@ -49,11 +49,13 @@ export interface LocatorLike {
 }
 
 export interface PageLike {
-  route(url: string, handler: (route: RouteLike) => Promise<void> | void): Promise<void>;
+  route(url: string | RegExp, handler: (route: RouteLike) => Promise<void> | void): Promise<void>;
   goto(url: string): Promise<unknown>;
   getByTestId(testId: string): LocatorLike;
   waitForURL(matcher: (url: URL) => boolean, options?: { timeout?: number }): Promise<void>;
 }
+
+export const OAUTH_AUTHORIZE_ROUTE = /\/oauth\/authorize(?:\?.*)?$/;
 
 export interface OAuthPoPConfig {
   /** Base URL of the Auth Service (TargetConfig.asOrigin). */
@@ -97,7 +99,9 @@ export class OAuthPoPAuth implements AuthStrategy {
   async seedWeb(page: unknown, identity: Identity): Promise<void> {
     const p = page as PageLike;
 
-    await p.route("**/login/oauth/authorize*", async (route) => {
+    // Match both the SPA -> AS /oauth/authorize request and the redirected fake-IdP
+    // /login/oauth/authorize hop. The AS ignores login_hint; the fake IdP consumes it.
+    await p.route(OAUTH_AUTHORIZE_ROUTE, async (route) => {
       const url = new URL(route.request().url());
       if (identity.token) url.searchParams.set("login_hint", identity.token);
       await route.continue({ url: url.toString() });

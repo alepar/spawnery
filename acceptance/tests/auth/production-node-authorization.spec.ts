@@ -16,6 +16,7 @@ import { establishOAuthSession, type OAuthSessionState } from "../../src/auth/oa
 import { createKnownVMTargetVerifier } from "../../src/drivers/oracle";
 import { expect, test } from "../../src/harness/scenario";
 import { waitForStatus } from "../../src/scenarios/wait";
+import { acquirePendingAfterCapacityConverges } from "../../src/scenarios/pending-capacity";
 import {
   cpClient,
   decodeSessionArtifact,
@@ -301,9 +302,12 @@ test("production authorization: exact node NACKs and target substitution refusal
   }
 
   for (const missing of ["node_access_token", "intent"] as const) {
-    const created = await client.createSpawn({ appId: cfg.appId, model: cfg.model, name: `acc-auth-missing-${missing}` });
+    // The prior lifecycle test confirms its CP deletions before this test begins, but node slot
+    // retirement converges asynchronously. Retry only that exact bounded capacity terminal.
+    const { created, pending } = await acquirePendingAfterCapacityConverges(client, {
+      appId: cfg.appId, model: cfg.model, name: `acc-auth-missing-${missing}`,
+    });
     try {
-      const pending = await pendingFor(client, created.spawnId);
       const intent = await signedPendingIntent(pending, owner);
       let error: unknown;
       try {
