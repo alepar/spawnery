@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	maxFeedPageEntries = 256
-	maxFeedPageBytes   = 4 << 20
+	maxFeedPageEntries        = 256
+	maxFeedPageBytes          = 4 << 20
+	defaultFeedRequestTimeout = 10 * time.Second
+	defaultFeedMaxBackoff     = time.Minute
 )
 
 type httpDoer interface {
@@ -26,35 +28,73 @@ type httpDoer interface {
 }
 
 type FeedPoller struct {
-	doer       httpDoer
-	url        string
-	artifacts  *token.Verifier
-	now        func() time.Time
-	revreg     *RevocationRegistry
-	interval   time.Duration
-	checkpoint int64
+	doer           httpDoer
+	url            string
+	artifacts      *token.Verifier
+	now            func() time.Time
+	revreg         *RevocationRegistry
+	interval       time.Duration
+	checkpoint     int64
+	requestTimeout time.Duration
+	maxBackoff     time.Duration
+	wait           func(context.Context, time.Duration) error
 }
 
 func NewFeedPoller(doer httpDoer, feedURL string, artifacts *token.Verifier, revreg *RevocationRegistry, interval time.Duration) *FeedPoller {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	return &FeedPoller{doer: doer, url: feedURL, artifacts: artifacts, revreg: revreg, interval: interval, now: time.Now}
+	maxBackoff := defaultFeedMaxBackoff
+	if maxBackoff < interval {
+		maxBackoff = interval
+	}
+	return &FeedPoller{
+		doer: doer, url: feedURL, artifacts: artifacts, revreg: revreg, interval: interval, now: time.Now,
+		requestTimeout: defaultFeedRequestTimeout, maxBackoff: maxBackoff, wait: waitForFeedPoll,
+	}
 }
 
 func (p *FeedPoller) Run(ctx context.Context) {
-	ticker := time.NewTicker(p.interval)
-	defer ticker.Stop()
+	backoff := p.interval
 	for {
-		select {
-		case <-ctx.Done():
+		err := p.pollOnce(ctx)
+		if ctx.Err() != nil {
 			return
-		case <-ticker.C:
-			if err := p.pollOnce(ctx); err != nil {
-				log.Printf("revocation feed poll: %v", err)
-			}
+		}
+		delay := p.interval
+		if err != nil {
+			log.Printf("revocation feed poll: %v", err)
+			delay = backoff
+			backoff = doubledFeedDuration(backoff, p.maxBackoff)
+		} else {
+			backoff = p.interval
+		}
+		if p.wait(ctx, delay) != nil {
+			return
 		}
 	}
+}
+
+func waitForFeedPoll(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func doubledFeedDuration(current, maximum time.Duration) time.Duration {
+	if current >= maximum-current {
+		return maximum
+	}
+	current *= 2
+	if current > maximum {
+		return maximum
+	}
+	return current
 }
 
 func (p *FeedPoller) pollOnce(ctx context.Context) error {
@@ -78,6 +118,8 @@ func (p *FeedPoller) pollOnce(ctx context.Context) error {
 }
 
 func (p *FeedPoller) fetchPage(ctx context.Context) (SignedFeedPage, error) {
+	requestContext, cancel := context.WithTimeout(ctx, p.requestTimeout)
+	defer cancel()
 	parsed, err := url.Parse(p.url)
 	if err != nil {
 		return SignedFeedPage{}, fmt.Errorf("revocation feed URL: %w", err)
@@ -86,7 +128,7 @@ func (p *FeedPoller) fetchPage(ctx context.Context) (SignedFeedPage, error) {
 	query.Set("limit", strconv.Itoa(maxFeedPageEntries))
 	query.Set("since", strconv.FormatInt(p.checkpoint, 10))
 	parsed.RawQuery = query.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	req, err := http.NewRequestWithContext(requestContext, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return SignedFeedPage{}, fmt.Errorf("build request: %w", err)
 	}
