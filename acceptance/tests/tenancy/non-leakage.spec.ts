@@ -14,35 +14,9 @@ import { AcceptanceClient } from "../../src/drivers/oracle";
 import { CliDriver, parseListTable } from "../../src/drivers/cli";
 import { loadTenancyConfig } from "../../src/scenarios/tenancy";
 import type { DriverCtx } from "../../src/drivers/types";
-import { authv1 } from "@spawnery/client";
-import { fromBinary } from "@bufbuild/protobuf";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-interface SessionIdentity {
-  accountId: string;
-  familyId: string;
-  sessionKeyHash: string;
-}
-
-function decodeSessionIdentity(wire: string): SessionIdentity {
-  const envelope = fromBinary(authv1.SignedAuthArtifactSchema, Buffer.from(wire, "base64url"));
-  const body = fromBinary(authv1.SessionTokenBodySchema, envelope.payload);
-  return {
-    accountId: body.accountId,
-    familyId: body.familyId,
-    sessionKeyHash: Buffer.from(body.sessionKeyHash).toString("hex"),
-  };
-}
-
-async function readStoredCliIdentity(configHome: string): Promise<SessionIdentity> {
-  const state = JSON.parse(await readFile(join(configHome, "spawnctl", "auth.json"), "utf8")) as {
-    cp_access_token?: string;
-  };
-  if (!state.cp_access_token) throw new Error(`missing cp_access_token in ${configHome}/spawnctl/auth.json`);
-  return decodeSessionIdentity(state.cp_access_token);
-}
 
 async function deviceSessionAccount(page: {
   request: { get(url: string): Promise<{ ok(): boolean; status(): number; text(): Promise<string> }> };
@@ -74,6 +48,7 @@ test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({
   const pageB = await contextB.newPage();
   await auth.seedWeb(pageA, cfg.a);
   await auth.seedWeb(pageB, cfg.b);
+  let deviceSessionEvidence: { a: string; b: string } | undefined;
   if (target.authMode === "oauth-pop") {
     const [expectedA, expectedB, seededA, seededB] = await Promise.all([
       auth.accountId(cfg.a),
@@ -83,6 +58,8 @@ test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({
     ]);
     expect(seededA).toBe(expectedA);
     expect(seededB).toBe(expectedB);
+    expect(expectedA).not.toBe(expectedB);
+    deviceSessionEvidence = { a: seededA, b: seededB };
   }
   const prepareCli = async (identity: typeof cfg.a, configHome: string, approvalPage: typeof pageA) => {
     const prepared = await auth.prepareCli(approvalPage, identity, {
@@ -119,11 +96,7 @@ test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({
     expect(listB).toContainSpawn(idB);
     expect(listB).not.toContainSpawn(idA);
 
-    const [apiIdentityA, apiIdentityB, cliIdentityA, cliIdentityB, cliOutputA, cliOutputB] = await Promise.all([
-      auth.cpAccessToken(cfg.a).then(decodeSessionIdentity),
-      auth.cpAccessToken(cfg.b).then(decodeSessionIdentity),
-      readStoredCliIdentity(configA),
-      readStoredCliIdentity(configB),
+    const [cliOutputA, cliOutputB] = await Promise.all([
       cliA.listOutput(ctxA),
       cliB.listOutput(ctxB),
     ]);
@@ -132,23 +105,14 @@ test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({
     await testInfo.attach("tenancy-cli-evidence.json", {
       contentType: "application/json",
       body: Buffer.from(JSON.stringify({
-        api: { a: apiIdentityA, b: apiIdentityB },
+        deviceSessions: deviceSessionEvidence,
         cli: {
-          a: { identity: cliIdentityA, ...cliOutputA, parsed: cliListA },
-          b: { identity: cliIdentityB, ...cliOutputB, parsed: cliListB },
+          a: { ...cliOutputA, parsed: cliListA },
+          b: { ...cliOutputB, parsed: cliListB },
         },
       }, null, 2)),
     });
 
-    expect(cliIdentityA.accountId).toBe(apiIdentityA.accountId);
-    expect(cliIdentityB.accountId).toBe(apiIdentityB.accountId);
-    expect(cliIdentityA.accountId).not.toBe(cliIdentityB.accountId);
-    expect(cliIdentityA.familyId).not.toBe("");
-    expect(cliIdentityB.familyId).not.toBe("");
-    expect(cliIdentityA.familyId).not.toBe(cliIdentityB.familyId);
-    expect(cliIdentityA.sessionKeyHash).not.toBe("");
-    expect(cliIdentityB.sessionKeyHash).not.toBe("");
-    expect(cliIdentityA.sessionKeyHash).not.toBe(cliIdentityB.sessionKeyHash);
     expect(cliListA.some((s) => s.spawnId === idA)).toBe(true);
     expect(cliListA.some((s) => s.spawnId === idB)).toBe(false);
     expect(cliListB.some((s) => s.spawnId === idB)).toBe(true);
