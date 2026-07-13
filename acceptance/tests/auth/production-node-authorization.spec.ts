@@ -8,13 +8,16 @@ import {
 } from "@spawnery/client";
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { X509Certificate } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { establishOAuthSession, type OAuthSessionState } from "../../src/auth/oauth-session";
-import { createKnownVMTargetVerifier } from "../../src/drivers/oracle";
 import { expect, test } from "../../src/harness/scenario";
+import { startCPLoopbackProxy } from "../../src/scenarios/cp-loopback-proxy";
+import {
+  rewriteReadyPendingIntentResponse,
+  type PendingTargetSubstitution,
+} from "../../src/scenarios/pending-substitution";
 import { waitForStatus } from "../../src/scenarios/wait";
 import { acquirePendingAfterCapacityConverges } from "../../src/scenarios/pending-capacity";
 import { resolveIntentIssuedAt } from "../../src/scenarios/intent-time";
@@ -193,6 +196,63 @@ async function expectCliCRLFailure(
   expect(output).toMatch(message);
 }
 
+async function failedSpawnctl(
+  spawnctlBin: string,
+  configHome: string,
+  args: string[],
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
+  let error: unknown;
+  try {
+    await execFileP(spawnctlBin, args, {
+      env: { ...environment, XDG_CONFIG_HOME: configHome },
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  expect(error).toBeDefined();
+  return `${(error as { stdout?: string }).stdout ?? ""}\n${(error as { stderr?: string }).stderr ?? ""}`;
+}
+
+function productionTrustArgs(target: {
+  rootCAPath?: string;
+  trustDomain?: string;
+  crlStatePath?: string;
+  crlIssuerPaths?: string[];
+  crlPaths?: string[];
+}): string[] {
+  if (!target.rootCAPath || !target.trustDomain || !target.crlStatePath) {
+    throw new Error("production spawnctl substitution test requires complete trust inputs");
+  }
+  return [
+    "--root-ca", target.rootCAPath,
+    "--trust-domain", target.trustDomain,
+    "--crl-state", target.crlStatePath,
+    ...(target.crlIssuerPaths ?? []).flatMap((path) => ["--crl-issuer", path]),
+    ...(target.crlPaths ?? []).flatMap((path) => ["--crl", path]),
+  ];
+}
+
+async function cleanupRejectedPending(
+  client: ReturnType<typeof cpClient>,
+  session: OAuthSessionState,
+  spawnId: string,
+): Promise<void> {
+  try {
+    const pending = await pendingFor(client, spawnId);
+    const cleanupIntent = await signedPendingIntent(pending, session, { corruptSignature: true });
+    await client.submitIntent({
+      spawnId,
+      intent: cleanupIntent,
+      nodeAccessToken: session.nodeAccessToken,
+    });
+    await waitForNodeNACK(client, spawnId, "BAD_SIG");
+  } finally {
+    await client.deleteSpawn({ spawnId }).catch(() => {});
+  }
+}
+
 test("production authorization: real web and stored-login CLI lifecycle", { tag: "@mutating" }, async ({
   page, web, cli, ctx, api, auth, identity, target, ns, spawns,
 }) => {
@@ -258,7 +318,7 @@ test("production authorization: real web and stored-login CLI lifecycle", { tag:
 });
 
 test("production authorization: exact node NACKs and target substitution refusal", { tag: "@mutating" }, async ({
-  cli, cliConfigHome, ctx, identity, target,
+  page, web, cli, cliConfigHome, ctx, auth, identity, target,
 }) => {
   test.setTimeout(12 * 60_000);
   const cfg = loadVMAuthConfig();
@@ -366,49 +426,130 @@ test("production authorization: exact node NACKs and target substitution refusal
   await rejectedCreate(owner, owner, "stale", "STALE", { issuedAtOffsetSeconds: -121 });
   await rejectedCreate(owner, owner, "skew", "SKEW", { issuedAtOffsetSeconds: 61 });
 
-  const accepted = await client.createSpawn({ appId: cfg.appId, model: cfg.model, name: "acc-auth-target-pins" });
-  try {
-    const pending = await pendingFor(client, accepted.spawnId);
-    const response = await client.getPendingIntent({ spawnId: accepted.spawnId });
-    const realTarget = {
-      nodeCertChain: response.nodeCertChain,
-      targetNodeId: response.targetNodeId,
-      targetNodeClass: response.targetNodeClass,
-      targetNodeAccountId: response.targetNodeAccountId,
+  const substitutions: Array<{
+    name: string;
+    substitution: PendingTargetSubstitution;
+    webError: RegExp;
+    cliError: RegExp;
+  }> = [
+    {
+      name: "node-id",
+      substitution: { field: "targetNodeId", value: "node-substituted" },
+      webError: /intent: response target node mismatch/,
+      cliError: /response target node mismatch/,
+    },
+    {
+      name: "node-class",
+      substitution: { field: "targetNodeClass", value: "self-hosted" },
+      webError: /target: typed node identity does not match certificate|response target class mismatch/,
+      cliError: /verify target:|response target class mismatch/,
+    },
+    {
+      name: "node-account",
+      substitution: { field: "targetNodeAccountId", value: "other-system-account" },
+      webError: /target: typed node identity does not match certificate/,
+      cliError: /verify target:.*target account|verify target:.*typed target/,
+    },
+    {
+      name: "certificate-chain",
+      substitution: { field: "nodeCertChain", value: Buffer.from("not-a-certificate").toString("base64") },
+      webError: /target:|certificate|x509/i,
+      cliError: /verify target:/,
+    },
+  ];
+
+  for (const row of substitutions) {
+    let submitIntent = 0;
+    const failures: string[] = [];
+    const onConsole = (message: { type(): string; text(): string }) => {
+      if (message.type() === "error") failures.push(message.text());
     };
-    const rootCAPEM = await readFile(target.rootCAPath!, "utf8");
-    const verifier = createKnownVMTargetVerifier({
-      rootCAPEM,
-      trustDomain: target.trustDomain!,
-      expectedNodeId: "node-1",
-      expectedNodeClass: "cloud",
-      expectedNodeAccountId: target.cloudAccountId!,
+    await page.route("**/cp.v1.SpawnService/GetPendingIntent", async (route) => {
+      const upstream = await route.fetch({ maxRedirects: 0 });
+      const rewritten = rewriteReadyPendingIntentResponse({
+        status: upstream.status(),
+        headers: upstream.headers(),
+        body: await upstream.body(),
+      }, row.substitution);
+      await route.fulfill({
+        response: upstream,
+        status: rewritten.status,
+        headers: rewritten.headers,
+        body: Buffer.from(rewritten.body),
+      });
     });
-    await expect(verifier(realTarget)).resolves.toBeUndefined();
-    for (const altered of [
-      { ...realTarget, targetNodeId: "node-elsewhere" },
-      { ...realTarget, targetNodeClass: "self-hosted" },
-      { ...realTarget, targetNodeAccountId: "other-system-account" },
-      { ...realTarget, nodeCertChain: new Uint8Array() },
-    ]) {
-      await expect(verifier(altered)).rejects.toThrow();
+    await page.route("**/cp.v1.SpawnService/SubmitIntent", async (route) => {
+      submitIntent++;
+      await route.continue();
+    });
+    page.on("console", onConsole);
+    let spawnId = "";
+    try {
+      spawnId = await web.createSpawn(ctx, { appId: cfg.appId });
+      await expect.poll(() => failures.join("\n"), { timeout: 30_000 }).toMatch(row.webError);
+      expect(submitIntent, `SPA submitted an intent after ${row.name} substitution`).toBe(0);
+      await expectNoRuntime(spawnId);
+    } finally {
+      page.off("console", onConsole);
+      await page.unroute("**/cp.v1.SpawnService/GetPendingIntent");
+      await page.unroute("**/cp.v1.SpawnService/SubmitIntent");
+      if (spawnId) await cleanupRejectedPending(client, owner, spawnId);
     }
-    const leafPEM = new TextDecoder().decode(realTarget.nodeCertChain)
-      .match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0];
-    if (!leafPEM) throw new Error("real target did not contain a leaf certificate");
-    expect(() => new X509Certificate(leafPEM)).not.toThrow();
-    const untrusted = createKnownVMTargetVerifier({
-      rootCAPEM: leafPEM,
-      trustDomain: target.trustDomain!,
-      expectedNodeId: "node-1",
-      expectedNodeClass: "cloud",
-      expectedNodeAccountId: target.cloudAccountId!,
+  }
+
+  const rootCAPEM = await readFile(target.rootCAPath!, "utf8");
+  const trustArgs = productionTrustArgs(target);
+  for (const row of substitutions) {
+    const proxy = await startCPLoopbackProxy({
+      upstreamOrigin: target.cpEndpoint,
+      rootCAPEM,
+      substitution: row.substitution,
     });
-    await expect(untrusted(realTarget)).rejects.toThrow(/not rooted/);
-    await expectNoRuntime(accepted.spawnId);
-    expect(pending.spawnId).toBe(accepted.spawnId);
+    let spawnId = "";
+    try {
+      const output = await failedSpawnctl(target.spawnctlBin, cliConfigHome, [
+        "-cp", proxy.origin,
+        ...trustArgs,
+        "-app-id", cfg.appId,
+        "-model", cfg.model,
+        "-detach",
+      ]);
+      expect(output).toMatch(row.cliError);
+      expect(proxy.requestCounts().submitIntent, `spawnctl submitted an intent after ${row.name} substitution`).toBe(0);
+      [spawnId = ""] = proxy.pendingSpawnIds();
+      expect(spawnId, `spawnctl did not poll the pending ${row.name} spawn`).not.toBe("");
+      await expectNoRuntime(spawnId);
+    } finally {
+      await proxy.close();
+      if (spawnId) await cleanupRejectedPending(client, owner, spawnId);
+    }
+  }
+
+  const emptyConfigHome = await mkdtemp(join(tmpdir(), "spawnery-acc-static-token-"));
+  const countingProxy = await startCPLoopbackProxy({
+    upstreamOrigin: target.cpEndpoint,
+    rootCAPEM,
+  });
+  let staticSpawnId = "";
+  try {
+    const staticCPBearer = await auth.cpAccessToken(identity);
+    const output = await failedSpawnctl(target.spawnctlBin, emptyConfigHome, [
+      "-cp", countingProxy.origin,
+      "-token", staticCPBearer,
+      ...trustArgs,
+      "-app-id", cfg.appId,
+      "-model", cfg.model,
+      "-detach",
+    ], { ...process.env, SPAWNERY_TOKEN: "", CP_DEV_TOKEN: "" });
+    expect(output).toMatch(/node authorization requires 'spawnctl login'/);
+    expect(countingProxy.requestCounts().submitIntent).toBe(0);
+    [staticSpawnId = ""] = countingProxy.pendingSpawnIds();
+    expect(staticSpawnId).not.toBe("");
+    await expectNoRuntime(staticSpawnId);
   } finally {
-    await client.deleteSpawn({ spawnId: accepted.spawnId }).catch(() => {});
+    await countingProxy.close();
+    if (staticSpawnId) await cleanupRejectedPending(client, owner, staticSpawnId);
+    await rm(emptyConfigHome, { recursive: true, force: true });
   }
 });
 
