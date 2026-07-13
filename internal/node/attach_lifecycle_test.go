@@ -236,7 +236,18 @@ func newGooseManager(t *testing.T, be runtime.PodBackend) *spawnlet.Manager {
 }
 
 func newAttacher(mgr *spawnlet.Manager, fs cpStream) *attacher {
-	return &attacher{cfg: Config{MaxSpawns: 2}, mgr: mgr, stream: fs, ctrlHTTP: stubDoerOK(), pumps: map[sessionKey]*Pump{}, tmuxRelays: map[sessionKey]*tmuxRelay{}, sessions: map[string]*sessionRegistry{}, secretReplay: newSecretDeliveryReplay()}
+	return &attacher{
+		cfg: Config{MaxSpawns: 2}, mgr: mgr, stream: fs, ctrlHTTP: stubDoerOK(),
+		pumps: map[sessionKey]*Pump{}, tmuxRelays: map[sessionKey]*tmuxRelay{}, sessions: map[string]*sessionRegistry{},
+		secretReplay: newSecretDeliveryReplay(),
+		// Default to "always alive": most tests don't exercise the agent-gone liveness probe and
+		// use fake pod backends with no real container behind them, so leaving this nil would fall
+		// back to mgr.AgentRunning's real docker/crictl exec — non-hermetic (the exec's outcome
+		// depends on the test host's docker access) and irrelevant to what those tests assert.
+		// Tests that DO exercise the agent-gone path (applyreport_test.go) override this field
+		// explicitly, same pattern as tmuxHasSessionFn.
+		agentAliveFn: func(context.Context, string) (bool, error) { return true, nil },
+	}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {

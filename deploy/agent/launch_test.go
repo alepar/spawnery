@@ -291,6 +291,76 @@ func TestLauncherAppliesArtifactsGooseTUI(t *testing.T) {
 	}
 }
 
+// TestLauncherContinuesWhenApplyArtifactsFailsButReportExists verifies the sp-mwco.2.12 rule: a
+// non-zero apply-artifacts exit does NOT abort the launcher when a report was written — the node,
+// not the launcher, owns the install verdict. Uses goose-tui (start_tmux path) so a clean overall
+// exit proves the launcher proceeded past apply_artifacts despite its failure.
+func TestLauncherContinuesWhenApplyArtifactsFailsButReportExists(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifactsDir := filepath.Join(dir, "artifacts")
+	reportDir := filepath.Join(artifactsDir, "report")
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reportDir, "apply-report.json"), []byte(`{"schema":1,"outcome":"error","reports":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubBin(t, binDir, "apply-artifacts", "#!/bin/sh\nexit 3\n")
+	stubBin(t, binDir, "tmux", "#!/bin/sh\nexit 0\n")
+
+	cmd := exec.Command("sh", "./launch", "--runnable", "goose-tui")
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPAWNERY_ARTIFACTS_DIR="+artifactsDir,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("launch should continue past a reported apply-artifacts failure, got: %v\n%s", err, out)
+	}
+}
+
+// TestLauncherAbortsWhenApplyArtifactsFailsWithNoReport verifies the sp-mwco.2.12 rule: a
+// non-zero apply-artifacts exit WITHOUT a report aborts the launcher (the only remaining signal
+// the node can observe is the container dying) with a grep-able stderr marker.
+func TestLauncherAbortsWhenApplyArtifactsFailsWithNoReport(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifactsDir := filepath.Join(dir, "artifacts") // deliberately no report/ subdir created
+	stubBin(t, binDir, "apply-artifacts", "#!/bin/sh\nexit 3\n")
+	stubBin(t, binDir, "tmux", "#!/bin/sh\nexit 0\n")
+
+	cmd := exec.Command("sh", "./launch", "--runnable", "goose-tui")
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SPAWNERY_ARTIFACTS_DIR="+artifactsDir,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected launch to abort on a report-less apply-artifacts failure, got success:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected an ExitError, got %v\n%s", err, out)
+	}
+	if exitErr.ExitCode() != 3 {
+		t.Fatalf("exit code = %d, want 3 (propagated from apply-artifacts)\n%s", exitErr.ExitCode(), out)
+	}
+	if !strings.Contains(string(out), "SPAWNERY-APPLY-FATAL:") {
+		t.Fatalf("expected stderr to contain SPAWNERY-APPLY-FATAL: marker, got:\n%s", out)
+	}
+	// tmux must never have been reached — the launcher aborted before start_tmux.
+	if strings.Contains(string(out), "goose session") {
+		t.Fatalf("launcher should have aborted before reaching start_tmux:\n%s", out)
+	}
+}
+
 // TestLauncherCallsApplyArtifactsInEveryAgentBranch is a regression guard: it parses the case
 // statement in `launch` and asserts every agent runnable branch calls apply-artifacts BEFORE
 // its terminal exec/start_tmux, and that non-agent branches (shell, stub-acp, nori) do not call
@@ -341,7 +411,7 @@ func TestLauncherCallsApplyArtifactsInEveryAgentBranch(t *testing.T) {
 		}
 		seen[label] = true
 		joined := strings.Join(body, "\n")
-		aaIdx := strings.Index(joined, "apply-artifacts")
+		aaIdx := strings.Index(joined, "apply_artifacts")
 		termIdx := -1
 		for _, term := range []string{"exec ", "start_tmux "} {
 			if idx := strings.Index(joined, term); idx != -1 && (termIdx == -1 || idx < termIdx) {
