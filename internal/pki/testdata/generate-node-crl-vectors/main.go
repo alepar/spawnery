@@ -262,7 +262,7 @@ func derTLV(tag byte, content []byte) []byte {
 	return append(out, content...)
 }
 
-func nonCanonicalTimeCRL(label string, canonical []byte, signer *ecdsa.PrivateKey) []byte {
+func crlWithThisUpdate(label string, canonical []byte, signer *ecdsa.PrivateKey, tag byte, thisUpdate string) []byte {
 	parts := rawSignedParts(canonical)
 	var fields [][]byte
 	rest := parts.TBS.Bytes
@@ -278,7 +278,7 @@ func nonCanonicalTimeCRL(label string, canonical []byte, signer *ecdsa.PrivateKe
 	if len(fields) < 5 {
 		panic("canonical CRL has no thisUpdate field")
 	}
-	fields[3] = derTLV(0x17, []byte("300115110000+0000"))
+	fields[3] = derTLV(tag, []byte(thisUpdate))
 	tbsDER := derTLV(0x30, bytes.Join(fields, nil))
 	digest := sha256.Sum256(tbsDER)
 	sig, err := ecdsa.SignASN1(entropy("crl/"+label), signer, digest[:])
@@ -430,6 +430,18 @@ func main() {
 		bad.CRLPEM = pemCRL(der)
 		v.Scenarios[name] = scenario{ChainPEM: chain, Bundles: []bundle{cloudBundle, bad}, Error: want, GoOutcome: outcome}
 	}
+	addAcceptedCRL := func(name string, der []byte) {
+		list, err := x509.ParseRevocationList(der)
+		if err != nil {
+			panic(fmt.Errorf("Go parser rejected positive %s: %w", name, err))
+		}
+		if err := pki.VerifyCRL(list, issuer, now); err != nil {
+			panic(fmt.Errorf("Go verifier rejected positive %s: %w", name, err))
+		}
+		accepted := validBundle
+		accepted.CRLPEM = pemCRL(der)
+		v.Accepted[name] = scenario{ChainPEM: chain, Bundles: []bundle{cloudBundle, accepted}}
+	}
 	addIssuer := func(name, want string, opts issuerOptions) {
 		badIssuer, badKey := makeIssuer(name, now, root, rootKey, opts)
 		badLeaf := makeLeaf(name, now, badIssuer, badKey)
@@ -462,7 +474,18 @@ func main() {
 	}
 	addCRL("outer-indefinite-length", "canonical DER", outerIndefiniteLength(canonicalCustom))
 	addCRL("outer-noncanonical-length", "canonical DER", outerNonCanonicalLength(canonicalCustom))
-	addCRL("noncanonical-time", "canonical DER", nonCanonicalTimeCRL("noncanonical-time", canonicalCustom, issuerKey))
+	addAcceptedCRL("minute-precision-utc-time", crlWithThisUpdate(
+		"minute-precision-utc-time", canonicalCustom, issuerKey, 0x17, "3001151100Z"))
+	addAcceptedCRL("nonzero-offset-utc-time", crlWithThisUpdate(
+		"nonzero-offset-utc-time", canonicalCustom, issuerKey, 0x17, "300115120000+0100"))
+	addAcceptedCRL("minute-precision-nonzero-offset-utc-time", crlWithThisUpdate(
+		"minute-precision-nonzero-offset-utc-time", canonicalCustom, issuerKey, 0x17, "3001151200+0100"))
+	addAcceptedCRL("nonzero-offset-generalized-time", crlWithThisUpdate(
+		"nonzero-offset-generalized-time", canonicalCustom, issuerKey, 0x18, "20300115120000+0100"))
+	addCRL("noncanonical-time", "canonical DER", crlWithThisUpdate(
+		"noncanonical-time", canonicalCustom, issuerKey, 0x17, "300115110000+0000"))
+	addCRL("invalid-calendar-time", "canonical DER", crlWithThisUpdate(
+		"invalid-calendar-time", canonicalCustom, issuerKey, 0x17, "300231110000Z"))
 	addCRL("absent-version", "X.509 v2 CRL", customCRLWithVersionAndAlgorithms(
 		"absent-version", 0, issuer.RawSubject, issuerKey, now.Add(-time.Hour), now.Add(time.Hour), nil, validExts,
 		pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256}, pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256}))

@@ -42,6 +42,7 @@ const GO_OUTCOME_SCENARIOS = [
   "outer-indefinite-length",
   "outer-noncanonical-length",
   "noncanonical-time",
+  "invalid-calendar-time",
   "absent-version",
   "non-v2-version",
   "algorithm-identifier-mismatch",

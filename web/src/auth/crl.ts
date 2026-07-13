@@ -1,4 +1,12 @@
-import { BitString, Integer, OctetString, Sequence, fromBER } from "asn1js";
+import {
+  BitString,
+  GeneralizedTime,
+  Integer,
+  OctetString,
+  Sequence,
+  UTCTime,
+  fromBER,
+} from "asn1js";
 import {
   AltName,
   AuthorityKeyIdentifier,
@@ -65,6 +73,74 @@ function bytesCompare(left: Uint8Array, right: Uint8Array): number {
   return left.length - right.length;
 }
 
+function timeZoneOffset(raw: string): number {
+  if (raw === "Z") return 0;
+  const sign = raw[0] === "+" ? 1 : raw[0] === "-" ? -1 : 0;
+  const hours = Number(raw.slice(1, 3));
+  const minutes = Number(raw.slice(3, 5));
+  if (sign === 0 || hours > 24 || minutes > 59) throw new Error("invalid ASN.1 time zone");
+  const offset = sign * (hours * 60 + minutes);
+  // Go parses numeric zero offsets, then rejects them because Z0700 serializes them as Z.
+  if (offset === 0) throw new Error("non-canonical ASN.1 zero offset");
+  return offset;
+}
+
+function exactDate(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  offsetMinutes: number,
+): Date {
+  const local = new Date(0);
+  local.setUTCFullYear(year, month - 1, day);
+  local.setUTCHours(hour, minute, second, 0);
+  if (!Number.isFinite(local.getTime())
+      || local.getUTCFullYear() !== year
+      || local.getUTCMonth() !== month - 1
+      || local.getUTCDate() !== day
+      || local.getUTCHours() !== hour
+      || local.getUTCMinutes() !== minute
+      || local.getUTCSeconds() !== second) {
+    throw new Error("invalid ASN.1 calendar time");
+  }
+  return new Date(local.getTime() - offsetMinutes * 60_000);
+}
+
+function parseGoTime(tag: number, raw: string): Date {
+  if (tag === 23) {
+    const match = /^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:(\d{2}))?(Z|[+-]\d{4})$/u.exec(raw);
+    if (!match) throw new Error("invalid UTCTime");
+    const shortYear = Number(match[1]);
+    const year = shortYear >= 50 ? 1900 + shortYear : 2000 + shortYear;
+    return exactDate(
+      year,
+      Number(match[2]),
+      Number(match[3]),
+      Number(match[4]),
+      Number(match[5]),
+      match[6] === undefined ? 0 : Number(match[6]),
+      timeZoneOffset(match[7]),
+    );
+  }
+  if (tag === 24) {
+    const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(Z|[+-]\d{4})$/u.exec(raw);
+    if (!match) throw new Error("invalid GeneralizedTime");
+    return exactDate(
+      Number(match[1]),
+      Number(match[2]),
+      Number(match[3]),
+      Number(match[4]),
+      Number(match[5]),
+      Number(match[6]),
+      timeZoneOffset(match[7]),
+    );
+  }
+  throw new Error("unsupported ASN.1 time tag");
+}
+
 function assertCanonicalPrimitive(
   der: Uint8Array,
   tag: number,
@@ -102,8 +178,7 @@ function assertCanonicalPrimitive(
   }
   if (tag === 23 || tag === 24) {
     const value = String.fromCharCode(...der.subarray(contentStart, contentEnd));
-    const canonical = tag === 23 ? /^\d{12}Z$/u : /^\d{14}Z$/u;
-    if (!canonical.test(value)) throw new Error("non-canonical time");
+    parseGoTime(tag, value);
   }
 }
 
@@ -177,12 +252,20 @@ function assertCanonicalDER(der: Uint8Array, label: string): void {
 type ASN1Block = ReturnType<typeof fromBER>["result"];
 
 function childBlocks(block: ASN1Block): ASN1Block[] {
-  const value = (block.valueBlock as unknown as { value?: ASN1Block[] }).value;
-  return value ?? [];
+  const valueBlock = block.valueBlock as unknown as { value?: ASN1Block[] } | undefined;
+  return Array.isArray(valueBlock?.value) ? valueBlock.value : [];
 }
 
 function rawBlock(block: ASN1Block): Uint8Array {
   return byteView(block.valueBeforeDecodeView);
+}
+
+function normalizeParsedTimes(block: ASN1Block): void {
+  if (block instanceof UTCTime || block instanceof GeneralizedTime) {
+    const raw = String.fromCharCode(...byteView(block.valueBlock.valueHexView));
+    block.fromDate(parseGoTime(block.idBlock.tagNumber, raw));
+  }
+  for (const child of childBlocks(block)) normalizeParsedTimes(child);
 }
 
 function parseDER<T>(
@@ -238,6 +321,7 @@ function revocationList(pem: string): CertificateRevocationList {
     throw new Error("node CRL: inner and outer signature algorithms do not match");
   }
   try {
+    normalizeParsedTimes(parsed.result);
     const crl = new CertificateRevocationList({ schema: parsed.result });
     if (crl.version !== 1) throw new Error("invalid CRL version");
     return crl;
