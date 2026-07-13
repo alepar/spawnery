@@ -442,6 +442,23 @@ for p in "$PAYLOAD"/env/profile.*.env; do [ -f "$p" ] && sudo cp -f "$p" "/etc/s
 # is on THIS host (the VM), reachable from every pod via its default route, and is what Caddy's :443
 # already listens on (Caddy binds all interfaces) — so it doubles as "the VM's IP" for in-pod DNS.
 GITHUB_DNS_ADDR="$(printf '%s' "$POD_CIDR" | cut -d/ -f1 | awk -F. '{print $1"."$2"."$3".1"}')"
+
+# ---- GETTOKEN_LISTEN_IP: the same bridge-gateway address, for the node's per-spawn control listener ----
+# The GitHub control server (per-spawn CA + GetToken) has two lanes (internal/spawnlet/manager.go:1348):
+#   - userns-remap  -> a UNIX socket bind-mounted into the sidecar (the Docker dev lane; `just node`)
+#   - everything else (THIS lane: CRI/runsc) -> TCP, and the node MUST be told which IP to bind.
+# Without GETTOKEN_LISTEN_IP the code falls back to binding a PodIP-derived address — which the node
+# cannot bind, because a pod IP lives in the POD's netns, not the host's. That is a hard failure:
+#   "github control server tcp 10.234.0.2:8082: listen: bind: cannot assign requested address"
+# and every spawn dies at setup-network. The manager's own comment says operators must set this for TCP
+# lanes; nothing did, because the control server had never actually RUN on a CRI lane until sp-wwtc
+# switched the mint lane on.
+# The bridge gateway is the right address: bindable by the node (it is on this host) and reachable from
+# every pod via its default route — the same two properties dnsmasq needs, which is why it is the same IP.
+log "wiring GETTOKEN_LISTEN_IP=${GITHUB_DNS_ADDR} (node's per-spawn control listener; TCP lane)…"
+sudo mkdir -p /etc/spawnery/env.d
+printf 'GETTOKEN_LISTEN_IP=%s\n' "$GITHUB_DNS_ADDR" | sudo tee /etc/spawnery/env.d/podnet.env >/dev/null
+
 log "installing dnsmasq (github.com/codeload.github.com -> ${GITHUB_DNS_ADDR}, else forward to ${POD_DNS})…"
 sudo mkdir -p /etc/dnsmasq.d
 sudo tee /etc/dnsmasq.d/spawnery-github.conf >/dev/null <<EOF
@@ -546,6 +563,7 @@ EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
 EnvironmentFile=-/etc/spawnery/env.d/journal.env
 EnvironmentFile=-/etc/spawnery/env.d/gitea.env
+EnvironmentFile=-/etc/spawnery/env.d/podnet.env
 WorkingDirectory=/opt/spawnery
 ExecStart=/usr/local/bin/spawnlet
 Restart=on-failure
