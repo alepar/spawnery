@@ -265,6 +265,37 @@ func TestStopCancelsInFlightPush(t *testing.T) {
 	}
 }
 
+// TestPushAsyncSupersedingLoopSurvivesOlderCleanup: rotation and re-adopt can both call PushAsync for
+// the same spawn close together (e.g. a rotation fires just as the node reconnects and re-adopts). The
+// newer call cancels the older loop, but the older loop's own cleanup must not clobber the newer loop's
+// live entry in s.pushes — otherwise Stop (or a third PushAsync) can no longer find and cancel it, and
+// it keeps retrying/reporting forever.
+func TestPushAsyncSupersedingLoopSurvivesOlderCleanup(t *testing.T) {
+	sc := newFakeSidecar(t)
+	sc.setCode(http.StatusInternalServerError) // keep retrying so the loop stays alive to observe
+	mint := &fakeMintClient{resp: &authv1.MintGitHubAccessTokenResponse{AccessToken: "ghs_live"}}
+	s := newPushTestServer(t, mint)
+	s.pushFallbackWindow = time.Hour // isolate this test from the STALE deadline; we're testing Stop
+	s.refresher.Note(githubRefreshEntry{SpawnID: "s1", SecretID: "sec-1"})
+	s.lookup = func(string) (string, string, bool) { return sc.controlURL(), "tok", true }
+
+	s.PushAsync(context.Background(), "s1") // older loop
+	s.PushAsync(context.Background(), "s1") // supersedes it
+
+	// Give the older loop's goroutine time to observe its cancellation and run its own cleanup.
+	time.Sleep(50 * time.Millisecond)
+
+	// Stop must still reach the surviving (newer) loop and cancel it.
+	s.Stop("s1")
+
+	time.Sleep(50 * time.Millisecond)
+	n1 := len(sc.pushes())
+	time.Sleep(150 * time.Millisecond)
+	if n2 := len(sc.pushes()); n2 != n1 {
+		t.Fatalf("newer push loop kept running after Stop — the older loop's cleanup orphaned it: %d -> %d attempts", n1, n2)
+	}
+}
+
 // TestRotationPushesTheRotatedToken: a successful proactive refresh must deliver the freshly rotated
 // token into the sidecar (spec §3.1, "on rotation": the existing githubRefresher schedule).
 func TestRotationPushesTheRotatedToken(t *testing.T) {

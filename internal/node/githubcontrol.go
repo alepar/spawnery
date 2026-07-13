@@ -1,7 +1,6 @@
 package node
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -57,7 +56,7 @@ type githubControlServer struct {
 	reporter     func(spawnID string, st nodev1.GitHubCredentialStatus) // per-CP-connection; nil until installed
 	lastStatus   map[string]nodev1.GitHubCredentialStatus               // sticky condition per spawn
 	pushedExpiry map[string]int64                                       // expiry of the last SUCCESSFULLY pushed token (unix; 0 = unknown)
-	pushes       map[string]context.CancelFunc                          // in-flight async push loop per spawn
+	pushes       map[string]*pushHandle                                 // in-flight async push loop per spawn
 
 	// Timing knobs (fields, not package vars, so parallel tests never race). Defaults in the constructor.
 	now                func() time.Time
@@ -86,7 +85,7 @@ func newGitHubControlServer(r *githubRefresher, store caStore) *githubControlSer
 		listeners:          make(map[string]net.Listener),
 		lastStatus:         make(map[string]nodev1.GitHubCredentialStatus),
 		pushedExpiry:       make(map[string]int64),
-		pushes:             make(map[string]context.CancelFunc),
+		pushes:             make(map[string]*pushHandle),
 		now:                time.Now,
 		pushBackoffBase:    defaultPushBackoffBase,
 		pushBackoffMax:     defaultPushBackoffMax,
@@ -250,8 +249,8 @@ func (s *githubControlServer) Stop(spawnID string) {
 		delete(s.listeners, spawnID)
 	}
 	delete(s.cache, spawnID)
-	if cancel := s.pushes[spawnID]; cancel != nil {
-		cancel()
+	if h := s.pushes[spawnID]; h != nil {
+		h.cancel()
 		delete(s.pushes, spawnID)
 	}
 	delete(s.lastStatus, spawnID)

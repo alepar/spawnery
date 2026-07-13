@@ -53,6 +53,14 @@ func (s *githubControlServer) PushCredentials(ctx context.Context, spawnID, cont
 //     still HAS its secrets — this only covers a token that rotated while the node was down. Which is
 //     why an adopt/rotation push failure is NOT fatal: the pod is healthy for everything that is not git.
 //
+// pushHandle identifies one PushAsync loop's cancel func by pointer identity, not just presence: a
+// bare map[string]context.CancelFunc can't tell "my entry" from "a newer loop's entry" (func values are
+// only comparable to nil in Go), so an older loop's cleanup could delete a newer loop's live cancel func
+// out of the map. Comparing *pushHandle pointers makes cleanup precise.
+type pushHandle struct {
+	cancel context.CancelFunc
+}
+
 // A previous in-flight loop for the same spawn is cancelled (a fresher token supersedes it). ctx is
 // detached from the caller's cancellation (a CP disconnect must not abort a credential delivery); the
 // loop's own deadline is what bounds it.
@@ -67,19 +75,21 @@ func (s *githubControlServer) PushAsync(ctx context.Context, spawnID string) {
 	}
 
 	pctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	handle := &pushHandle{cancel: cancel}
 	s.mu.Lock()
 	if prev := s.pushes[spawnID]; prev != nil {
-		prev()
+		prev.cancel()
 	}
-	s.pushes[spawnID] = cancel
+	s.pushes[spawnID] = handle
 	s.mu.Unlock()
 
 	safego.Go("node.github-push", func() {
 		defer cancel()
 		s.pushWithRetry(pctx, spawnID, controlURL, controlToken)
 		s.mu.Lock()
-		if s.pushes[spawnID] != nil {
-			// Only clear our own entry; a newer PushAsync may have replaced it.
+		// Only clear our own entry: a newer PushAsync may already have replaced it (pointer identity,
+		// not just non-nil — see pushHandle's doc comment).
+		if s.pushes[spawnID] == handle {
 			delete(s.pushes, spawnID)
 		}
 		s.mu.Unlock()
