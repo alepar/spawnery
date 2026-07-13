@@ -1,7 +1,9 @@
 package node
 
 import (
+	"errors"
 	"io"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -234,5 +236,45 @@ func TestSessionAuthRevocationClosesMatchesAndRejectsLaterRegistration(t *testin
 	}
 	if r.registerIfNewer(sessionAuthKey{spawnID: "sp2", clientID: "late"}, record("alice", "old"), func(string) {}) {
 		t.Fatal("revoked open registered")
+	}
+}
+
+func TestRevocationFeedOutageNeverExtendsSignedExpiry(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fixture := newArtifactFixture(t, now, "prod")
+	consumer, err := NewRevocationConsumer(revocationDoer(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("AS unavailable")
+	}), "https://as.internal/revocations", fixture.verifier, store, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := consumer.pollOnce(t.Context(), nil); err == nil {
+		t.Fatal("outage unexpectedly succeeded")
+	}
+	var timers []*heldTimer
+	r := newSessionAuthRegistryWithClock(func() time.Time { return now }, func(_ time.Duration, callback func()) sessionAuthTimer {
+		timer := &heldTimer{callback: callback}
+		timers = append(timers, timer)
+		return timer
+	}, store)
+	key := sessionAuthKey{spawnID: "sp", clientID: "client"}
+	var closed atomic.Int32
+	record := sessionAuthRecord{accountID: "alice", tokenID: "token", expiresAt: now.Add(time.Minute), attachmentID: "attachment"}
+	r.register(key, record, func(string) { closed.Add(1) })
+	now = record.expiresAt
+	timers[0].callback()
+	if closed.Load() != 1 || r.contains(key) {
+		t.Fatalf("expiry close=%d live=%v", closed.Load(), r.contains(key))
+	}
+	next := record
+	next.tokenID = "replacement"
+	next.expiresAt = now.Add(time.Hour)
+	if replaced, _ := r.replace(key, next, "alice"); replaced {
+		t.Fatal("outage allowed expired authorization replacement")
 	}
 }
