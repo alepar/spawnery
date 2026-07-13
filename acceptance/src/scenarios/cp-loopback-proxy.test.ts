@@ -115,6 +115,13 @@ async function proxyRequest(
 }
 
 describe("startCPLoopbackProxy", () => {
+  it("rejects an unbounded GetPendingIntent response deadline before listening", async () => {
+    await expect(startCPLoopbackProxy({
+      upstreamOrigin: "https://localhost",
+      getPendingResponseNotBeforeMs: Date.now() + 120_500,
+    })).rejects.toThrow(/response deadline must be within 120000ms/);
+  });
+
   it.each(["0", "7"])("preserves upstream gRPC status %s and custom trailers exactly", async (grpcStatus) => {
     const trailers = {
       "grpc-status": grpcStatus,
@@ -348,6 +355,32 @@ describe("startCPLoopbackProxy", () => {
       });
       expect(JSON.parse(response.body.toString("utf8"))).toEqual(original);
       expect(proxy.requestCounts().getPendingIntent).toBe(1);
+    } finally {
+      await proxy.close();
+      await upstream.close();
+    }
+  });
+
+  it("holds GetPendingIntent responses until an exact deadline while still counting requests", async () => {
+    const upstream = await listenUpstream((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ready: true, targetNodeId: "node-1" }));
+    });
+    const releaseAt = Date.now() + 80;
+    const proxy = await startCPLoopbackProxy({
+      upstreamOrigin: upstream.origin,
+      transportCAPEM: rootPEM,
+      getPendingResponseNotBeforeMs: releaseAt,
+    });
+    try {
+      const response = await proxyRequest(proxy.origin, "/cp.v1.SpawnService/GetPendingIntent", {
+        headers: { "content-type": "application/json" },
+        body: '{"spawnId":"spawn-held"}',
+      });
+      expect(Date.now()).toBeGreaterThanOrEqual(releaseAt);
+      expect(JSON.parse(response.body.toString("utf8"))).toEqual({ ready: true, targetNodeId: "node-1" });
+      expect(proxy.requestCounts()).toEqual({ total: 1, getPendingIntent: 1, submitIntent: 0 });
+      expect(proxy.pendingSpawnIds()).toEqual(["spawn-held"]);
     } finally {
       await proxy.close();
       await upstream.close();

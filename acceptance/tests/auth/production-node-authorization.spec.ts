@@ -7,9 +7,10 @@ import {
   WebCryptoSessionSigner,
 } from "@spawnery/client";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { establishOAuthSession, type OAuthSessionState } from "../../src/auth/oauth-session";
 import { expect, test } from "../../src/harness/scenario";
@@ -24,12 +25,18 @@ import { resolveIntentIssuedAt } from "../../src/scenarios/intent-time";
 import {
   cpClient,
   decodeSessionArtifact,
+  deployAlternateSPABundle,
+  loadDestructiveVMAuthConfig,
   loadVMAuthConfig,
   posixShellQuote,
   runtimeRootFingerprints,
   ssh,
   submitSpawn,
 } from "./root-anchored-artifacts";
+import {
+  generateNodeTrustFixtures,
+  generateShortLivedNodeCRL,
+} from "./node-trust-fixtures";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const execFileP = promisify(execFile);
@@ -61,9 +68,10 @@ async function waitForNodeNACK(
 
 async function expectNoRuntime(spawnId: string): Promise<void> {
   const cfg = loadVMAuthConfig();
-  const pods = await ssh(cfg,
-    `sudo crictl pods --label ${posixShellQuote(`spawnery.spawn-id=${spawnId}`)} -q`);
-  expect(pods, `node created a runtime pod for rejected spawn ${spawnId}`).toBe("");
+  const label = posixShellQuote(`spawnery.spawn-id=${spawnId}`);
+  const objects = await ssh(cfg,
+    `sudo crictl pods --label ${label} -q; sudo crictl ps -a --label ${label} -q`);
+  expect(objects, `node created a runtime pod or container for rejected spawn ${spawnId}`).toBe("");
 }
 
 interface IntentMutation {
@@ -232,6 +240,64 @@ function productionTrustArgs(target: {
     ...(target.crlIssuerPaths ?? []).flatMap((path) => ["--crl-issuer", path]),
     ...(target.crlPaths ?? []).flatMap((path) => ["--crl", path]),
   ];
+}
+
+function requiredPath(paths: string[] | undefined, suffix: string): string {
+  const found = paths?.find((path) => path.endsWith(suffix));
+  if (!found) throw new Error(`production authorization requires ${suffix}`);
+  return found;
+}
+
+async function buildExpiredCRLSPABundle(
+  target: {
+    rootCAPath?: string;
+    trustDomain?: string;
+    cloudAccountId?: string;
+    crlIssuerPaths?: string[];
+    crlPaths?: string[];
+  },
+  cfg: ReturnType<typeof loadVMAuthConfig>,
+  expiredCRLPEM: string,
+): Promise<string> {
+  if (!target.rootCAPath || !target.trustDomain || !target.cloudAccountId) {
+    throw new Error("expired-CRL SPA build requires complete production trust inputs");
+  }
+  const bundleDir = await mkdtemp(join(tmpdir(), "spawnery-expired-crl-spa-"));
+  const webDir = fileURLToPath(new URL("../../../web/", import.meta.url));
+  const scan = fileURLToPath(new URL("../../../deploy/web/forbidden-scan.sh", import.meta.url));
+  const nodeCRLs = [
+    {
+      class: "cloud",
+      issuerPEM: await readFile(requiredPath(target.crlIssuerPaths, "cloud-intermediate.pem"), "utf8"),
+      crlPEM: expiredCRLPEM,
+    },
+    {
+      class: "self-hosted",
+      issuerPEM: await readFile(requiredPath(target.crlIssuerPaths, "self-hosted-intermediate.pem"), "utf8"),
+      crlPEM: await readFile(requiredPath(target.crlPaths, "self-hosted-node.crl.pem"), "utf8"),
+    },
+  ];
+  try {
+    await execFileP("npm", ["run", "build", "--", "--outDir", bundleDir], {
+      cwd: webDir,
+      env: {
+        ...process.env,
+        VITE_AUTH_ENABLED: "1",
+        VITE_CP_ORIGIN: cfg.webOrigin,
+        VITE_AS_ORIGIN: cfg.webOrigin,
+        VITE_ROOT_CA_PEM: await readFile(target.rootCAPath, "utf8"),
+        VITE_TRUST_DOMAIN: target.trustDomain,
+        VITE_CLOUD_ACCOUNT_ID: target.cloudAccountId,
+        VITE_NODE_CRL_BUNDLE_JSON: JSON.stringify(nodeCRLs),
+      },
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    await execFileP(scan, [bundleDir], { maxBuffer: 4 * 1024 * 1024 });
+    return bundleDir;
+  } catch (error) {
+    await rm(bundleDir, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 async function cleanupRejectedPending(
@@ -547,6 +613,178 @@ test("production authorization: exact node NACKs and target substitution refusal
   } finally {
     await countingProxy.close();
     await rm(emptyConfigHome, { recursive: true, force: true });
+  }
+});
+
+test("production authorization: real clients reject foreign-root and bad-CRL nodes", { tag: "@mutating" }, async ({
+  page, web, cli, cliConfigHome, ctx, identity, target,
+}) => {
+  test.setTimeout(12 * 60_000);
+  const cfg = loadDestructiveVMAuthConfig();
+  const owner = await establishOAuthSession({
+    asOrigin: cfg.asOrigin,
+    redirectUri: `${cfg.webOrigin}/callback`,
+    loginHint: identity.token,
+  });
+  const client = cpClient(cfg, owner.accessToken);
+  await cli.list(ctx);
+  const fixtures = await generateNodeTrustFixtures(cfg);
+  expect(fixtures.expiredCRLNextUpdateMs).toBeLessThanOrEqual(Date.now());
+
+  const browserCase = async (row: {
+    name: string;
+    chainPEM?: string;
+    error: RegExp;
+  }): Promise<void> => {
+    let submitIntent = 0;
+    let spawnId = "";
+    const failures: string[] = [];
+    const onConsole = (message: { type(): string; text(): string }) => {
+      if (message.type() === "error") failures.push(message.text());
+    };
+    const chainPEM = row.chainPEM;
+    if (chainPEM !== undefined) {
+      await page.route("**/cp.v1.SpawnService/GetPendingIntent", async (route) => {
+        const upstream = await route.fetch({ maxRedirects: 0 });
+        const rewritten = rewriteReadyPendingIntentResponse({
+          status: upstream.status(),
+          headers: upstream.headers(),
+          body: await upstream.body(),
+        }, { field: "nodeCertChain", value: Buffer.from(chainPEM).toString("base64") });
+        await route.fulfill({
+          response: upstream,
+          status: rewritten.status,
+          headers: rewritten.headers,
+          body: Buffer.from(rewritten.body),
+        });
+      });
+    }
+    await page.route("**/cp.v1.SpawnService/SubmitIntent", async (route) => {
+      submitIntent++;
+      await route.continue();
+    });
+    page.on("console", onConsole);
+    try {
+      spawnId = await web.createSpawn(ctx, { appId: cfg.appId });
+      await expect.poll(() => failures.join("\n"), { timeout: 30_000 }).toMatch(row.error);
+      expect(submitIntent, `SPA submitted an intent after ${row.name} target refusal`).toBe(0);
+      await expectNoRuntime(spawnId);
+    } finally {
+      page.off("console", onConsole);
+      if (row.chainPEM !== undefined) {
+        await page.unroute("**/cp.v1.SpawnService/GetPendingIntent");
+      }
+      await page.unroute("**/cp.v1.SpawnService/SubmitIntent");
+      if (spawnId) await cleanupRejectedPending(client, owner, spawnId);
+    }
+  };
+
+  await browserCase({
+    name: "foreign-root",
+    chainPEM: fixtures.foreignRootChainPEM,
+    error: /target:.*certificate signature does not verify|x509:.*certificate signature does not verify/i,
+  });
+  await browserCase({
+    name: "unstamped-issuer",
+    chainPEM: fixtures.unstampedIssuerChainPEM,
+    error: /node CRL: chain must match exactly one stamped issuer/,
+  });
+
+  const originalBundle = process.env.ACC_PRODUCTION_SPA_BUNDLE;
+  if (!originalBundle) throw new Error("production authorization requires ACC_PRODUCTION_SPA_BUNDLE");
+  const expiredBundle = await buildExpiredCRLSPABundle(target, cfg, fixtures.expiredCRLPEM);
+  let attemptedAlternate = false;
+  try {
+    attemptedAlternate = true;
+    await deployAlternateSPABundle(cfg, expiredBundle);
+    const deployedHealth = await page.request.get(cfg.webOrigin);
+    expect(deployedHealth.ok()).toBe(true);
+    await page.reload({ waitUntil: "networkidle" });
+    await browserCase({ name: "stale-crl", error: /node CRL: CRL is expired/ });
+  } finally {
+    try {
+      if (attemptedAlternate) await deployAlternateSPABundle(cfg, originalBundle);
+    } finally {
+      await rm(expiredBundle, { recursive: true, force: true });
+    }
+    const restoredHealth = await page.request.get(cfg.webOrigin);
+    expect(restoredHealth.ok()).toBe(true);
+    await page.reload({ waitUntil: "networkidle" });
+  }
+
+  const trustArgs = productionTrustArgs(target);
+  for (const row of [
+    {
+      name: "foreign-root",
+      chainPEM: fixtures.foreignRootChainPEM,
+      error: /verify target:.*certificate path validation|unknown authority/i,
+    },
+    {
+      name: "unstamped-issuer",
+      chainPEM: fixtures.unstampedIssuerChainPEM,
+      error: /verify target:.*certificate is revoked/,
+    },
+  ]) {
+    const proxy = await startCPLoopbackProxy({
+      upstreamOrigin: target.cpEndpoint,
+      substitution: { field: "nodeCertChain", value: Buffer.from(row.chainPEM).toString("base64") },
+    });
+    let spawnId = "";
+    try {
+      const output = await failedSpawnctl(target.spawnctlBin, cliConfigHome, [
+        "-cp", proxy.origin,
+        ...trustArgs,
+        "-app-id", cfg.appId,
+        "-model", cfg.model,
+        "-detach",
+      ]);
+      expect(output).toMatch(row.error);
+      expect(proxy.requestCounts().submitIntent, `spawnctl submitted after ${row.name} target refusal`).toBe(0);
+      [spawnId = ""] = proxy.pendingSpawnIds();
+      expect(spawnId, `spawnctl did not poll the pending ${row.name} spawn`).not.toBe("");
+      await expectNoRuntime(spawnId);
+    } finally {
+      await proxy.close();
+      if (spawnId) await cleanupRejectedPending(client, owner, spawnId);
+    }
+  }
+
+  const crlDir = await mkdtemp(join(tmpdir(), "spawnery-short-lived-crl-"));
+  let staleSpawnId = "";
+  let staleProxy: Awaited<ReturnType<typeof startCPLoopbackProxy>> | undefined;
+  try {
+    const shortLived = await generateShortLivedNodeCRL(cfg, 20);
+    expect(Date.now(), "short-lived CRL was not fresh before spawnctl startup")
+      .toBeLessThan(shortLived.nextUpdateMs);
+    const shortLivedPath = join(crlDir, "cloud-node.crl.pem");
+    await writeFile(shortLivedPath, shortLived.crlPEM, { mode: 0o600 });
+    staleProxy = await startCPLoopbackProxy({
+      upstreamOrigin: target.cpEndpoint,
+      getPendingResponseNotBeforeMs: shortLived.nextUpdateMs + 1_000,
+    });
+    const staleTrustArgs = productionTrustArgs({
+      ...target,
+      crlStatePath: join(crlDir, "state.json"),
+      crlPaths: target.crlPaths?.map((path) => path.endsWith("cloud-node.crl.pem") ? shortLivedPath : path),
+    });
+    const output = await failedSpawnctl(target.spawnctlBin, cliConfigHome, [
+      "-cp", staleProxy.origin,
+      ...staleTrustArgs,
+      "-app-id", cfg.appId,
+      "-model", cfg.model,
+      "-detach",
+    ]);
+    expect(Date.now(), "spawnctl target verification ran before the CRL became stale")
+      .toBeGreaterThanOrEqual(shortLived.nextUpdateMs);
+    expect(output).toMatch(/verify target:.*certificate is revoked/);
+    expect(staleProxy.requestCounts().submitIntent, "spawnctl submitted after stale-CRL refusal").toBe(0);
+    [staleSpawnId = ""] = staleProxy.pendingSpawnIds();
+    expect(staleSpawnId, "spawnctl did not poll the pending stale-CRL spawn").not.toBe("");
+    await expectNoRuntime(staleSpawnId);
+  } finally {
+    if (staleProxy) await staleProxy.close();
+    if (staleSpawnId) await cleanupRejectedPending(client, owner, staleSpawnId);
+    await rm(crlDir, { recursive: true, force: true });
   }
 });
 

@@ -166,6 +166,7 @@ export ACC_TEST_MODEL=openai/gpt-4o-mini
 export ACC_SPAWN_ACTIVE_TIMEOUT_MS=240000
 [ -f "${GOLDEN_IMAGE%.qcow2}-ca.crt" ] && export NODE_EXTRA_CA_CERTS="${GOLDEN_IMAGE%.qcow2}-ca.crt"
 export ACC_SPAWNCTL_BIN="$STAGE/bin/spawnctl"     # cliDriver shells out to the fresh spawnctl
+export ACC_PRODUCTION_SPA_BUNDLE="$STAGE/web-dist" # destructive SPA tests restore these exact healthy bytes
 export ACC_E2E_VM_IP="$E2E_VM_IP" ACC_E2E_SSH_KEY="$E2E_SSH_KEY" ACC_E2E_SSH_USER="$E2E_SSH_USER"
 export ACC_E2E_VM_RUNID="$E2E_RUNID"
 # Some hosts lack libvirt's NSS module. Resolve only this disposable VM hostname inside Node test

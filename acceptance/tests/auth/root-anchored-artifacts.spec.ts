@@ -17,6 +17,12 @@ import {
   ssh,
   submitSpawn,
 } from "./root-anchored-artifacts";
+import { generateNodeTrustFixtures } from "./node-trust-fixtures";
+
+function certificateChain(pem: string): X509Certificate[] {
+  const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+  return blocks.map((block) => new X509Certificate(block));
+}
 
 test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, and signer revocation", async () => {
   test.setTimeout(8 * 60_000);
@@ -31,6 +37,18 @@ test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, 
   expect(new Set(roots).size, "AS, CP, and node must pin identical root certificate bytes").toBe(1);
   expect(env).not.toMatch(/CP_AS_SESSION_PUBKEYS|NODE_AS_PUBKEYS|AS_SESSION_KEY_PEM|auth-signing-intermediate-key/);
   expect(await ssh(cfg, "sudo find /etc/spawnery -type f \\( -name '*session-pub*' -o -name 'auth-signing-intermediate-key.pem' \\)"), "no raw signer pin or offline issuer key in runtime tree").toBe("");
+
+  const trustFixtures = await generateNodeTrustFixtures(cfg);
+  const pinnedRoot = new X509Certificate(await ssh(cfg, "sudo cat /etc/spawnery/node/root.pem"));
+  const foreign = certificateChain(trustFixtures.foreignRootChainPEM);
+  const unstamped = certificateChain(trustFixtures.unstampedIssuerChainPEM);
+  expect(foreign).toHaveLength(2);
+  expect(unstamped).toHaveLength(2);
+  expect(foreign[0].verify(foreign[1].publicKey), "foreign-root leaf must be structurally valid").toBe(true);
+  expect(foreign[1].verify(pinnedRoot.publicKey), "foreign issuer must not chain to the pinned root").toBe(false);
+  expect(unstamped[0].verify(unstamped[1].publicKey), "unstamped leaf must be structurally valid").toBe(true);
+  expect(unstamped[1].verify(pinnedRoot.publicKey), "unstamped issuer must chain to the pinned root").toBe(true);
+  expect(trustFixtures.expiredCRLNextUpdateMs).toBeLessThanOrEqual(Date.now());
 
   const session = await establishCurrentSession(cfg);
   const cpArtifact = decodeSessionArtifact(session.accessToken);
