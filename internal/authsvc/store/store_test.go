@@ -379,6 +379,37 @@ func TestRefreshFamilyLimitCountsGenerationsRevokedByEarlierLogout(t *testing.T)
 	}
 }
 
+func TestRefreshFamilyLimitReleasesAccessExpiredGenerations(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		createdAt int64
+	}{
+		{name: "at expiry equality", createdAt: 20},
+		{name: "after expiry", createdAt: 21},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := NewTestStore(t)
+			mkUser(t, st, "acct", 1)
+			for i := range maxRetainedAccessGenerationsPerFamily {
+				if err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
+					TokenHash: fmt.Sprintf("expired-hash-%04d", i), AccountID: "acct", FamilyID: "family", ClientKind: ClientCLI,
+					SessionPubkeySPKI: []byte{1}, CPAccessTokenID: fmt.Sprintf("expired-cp-%04d", i), NodeAccessTokenID: fmt.Sprintf("expired-node-%04d", i),
+					AccessExpiresAt: 20, CreatedAt: 10, LastUsedAt: 10, ExpiresAt: 2000, FamilyCreatedAt: 10,
+				}); err != nil {
+					t.Fatalf("insert historical generation %d: %v", i, err)
+				}
+			}
+			if err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
+				TokenHash: "next", AccountID: "acct", FamilyID: "family", ClientKind: ClientCLI,
+				SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "next-cp", NodeAccessTokenID: "next-node",
+				AccessExpiresAt: 100, CreatedAt: tc.createdAt, LastUsedAt: tc.createdAt, ExpiresAt: 2000, FamilyCreatedAt: 10,
+			}); err != nil {
+				t.Fatalf("next issuance at %d rejected after expired family generations: %v", tc.createdAt, err)
+			}
+		})
+	}
+}
+
 func TestRefreshAccountPerSecondLimitSurvivesRepeatedLogout(t *testing.T) {
 	st := NewTestStore(t)
 	mkUser(t, st, "acct", 1)

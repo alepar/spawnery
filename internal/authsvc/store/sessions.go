@@ -43,13 +43,13 @@ func (r *refreshSessionRepo) insert(ctx context.Context, s RefreshSession) error
 		len(s.CPAccessTokenID) > maxAccessTokenIDBytes || len(s.NodeAccessTokenID) > maxAccessTokenIDBytes {
 		return errors.New("authsvc/store: invalid paired access token")
 	}
-	var retainedGenerations int
+	var retainableGenerations int
 	if err := r.db.NewSelect().Model((*RefreshSession)(nil)).ColumnExpr("COUNT(*)").
-		Where("family_id = ?", s.FamilyID).
-		Scan(ctx, &retainedGenerations); err != nil {
+		Where("family_id = ? AND access_expires_at > ?", s.FamilyID, s.CreatedAt).
+		Scan(ctx, &retainableGenerations); err != nil {
 		return err
 	}
-	if retainedGenerations >= maxRetainedAccessGenerationsPerFamily {
+	if retainableGenerations >= maxRetainedAccessGenerationsPerFamily {
 		return errors.New("authsvc/store: refresh family has too many retained access generations")
 	}
 	var accountSecondGenerations int
