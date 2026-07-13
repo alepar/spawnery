@@ -38,6 +38,7 @@ import {
   generateNodeTrustFixtures,
   generateShortLivedNodeCRL,
 } from "./node-trust-fixtures";
+import { runTemporarySPALifecycle } from "./temporary-spa-lifecycle";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const execFileP = promisify(execFile);
@@ -681,24 +682,22 @@ test("production authorization: real clients reject foreign-root and bad-CRL nod
   const originalBundle = process.env.ACC_PRODUCTION_SPA_BUNDLE;
   if (!originalBundle) throw new Error("production authorization requires ACC_PRODUCTION_SPA_BUNDLE");
   const expiredBundle = await buildExpiredCRLSPABundle(target, cfg, fixtures.expiredCRLPEM);
-  let attemptedAlternate = false;
-  try {
-    attemptedAlternate = true;
-    await deployAlternateSPABundle(cfg, expiredBundle);
-    const deployedHealth = await page.request.get(cfg.webOrigin);
-    expect(deployedHealth.ok()).toBe(true);
-    await page.reload({ waitUntil: "networkidle" });
-    await browserCase({ name: "stale-crl", error: /node CRL: CRL is expired/ });
-  } finally {
-    try {
-      if (attemptedAlternate) await deployAlternateSPABundle(cfg, originalBundle);
-    } finally {
-      await rm(expiredBundle, { recursive: true, force: true });
-    }
-    const restoredHealth = await page.request.get(cfg.webOrigin);
-    expect(restoredHealth.ok()).toBe(true);
-    await page.reload({ waitUntil: "networkidle" });
-  }
+  await runTemporarySPALifecycle({
+    publishTemporary: () => deployAlternateSPABundle(cfg, expiredBundle),
+    runWithTemporary: async () => {
+      const deployedHealth = await page.request.get(cfg.webOrigin);
+      expect(deployedHealth.ok()).toBe(true);
+      await page.reload({ waitUntil: "networkidle" });
+      await browserCase({ name: "stale-crl", error: /node CRL: CRL is expired/ });
+    },
+    restoreOriginal: () => deployAlternateSPABundle(cfg, originalBundle),
+    removeTemporary: () => rm(expiredBundle, { recursive: true, force: true }),
+    verifyRestoredHealth: async () => {
+      const restoredHealth = await page.request.get(cfg.webOrigin);
+      expect(restoredHealth.ok()).toBe(true);
+    },
+    reloadRestoredPage: () => page.reload({ waitUntil: "networkidle" }),
+  });
 
   const trustArgs = productionTrustArgs(target);
   for (const row of [
