@@ -2,6 +2,7 @@ package cp
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -95,27 +96,8 @@ func TestValidateCustomContent_UnsupportedKind(t *testing.T) {
 	}
 }
 
-func TestEnforceProfileEntryCap_BelowCap(t *testing.T) {
-	if err := enforceProfileEntryCap(maxArtifactsPerSpawn - 1); err != nil {
-		t.Errorf("unexpected error below cap: %v", err)
-	}
-}
-
-func TestEnforceProfileEntryCap_AtCap(t *testing.T) {
-	err := enforceProfileEntryCap(maxArtifactsPerSpawn)
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("expected InvalidArgument at cap, got %v", err)
-	}
-}
-
-func TestEnforceProfileEntryCap_Zero(t *testing.T) {
-	if err := enforceProfileEntryCap(0); err != nil {
-		t.Errorf("unexpected error for 0 existing: %v", err)
-	}
-}
-
-// TestEnforceProfileArtifactCap_Boundary proves the 63/64 boundary (sp-mwco.1.8 §4.4 cap: the
-// manifest.json takes the 64th slot, so the expanded-artifact budget is 63).
+// TestEnforceProfileArtifactCap_Boundary proves the 63/64 boundary (sp-mwco.1.8/1.12 §4.4 cap:
+// the manifest.json takes the 64th slot, so the expanded-artifact budget is 63).
 func TestEnforceProfileArtifactCap_Boundary(t *testing.T) {
 	if err := enforceProfileArtifactCap(62, 1); err != nil { // 63 total: ok
 		t.Errorf("63 total: unexpected error: %v", err)
@@ -123,6 +105,9 @@ func TestEnforceProfileArtifactCap_Boundary(t *testing.T) {
 	err := enforceProfileArtifactCap(62, 2) // 64 total: rejected
 	if connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Errorf("64 total: expected InvalidArgument, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "adding 2") {
+		t.Errorf("expected error message to name the adding count, got %q", err.Error())
 	}
 }
 
