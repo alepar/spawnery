@@ -79,6 +79,74 @@ func TestCurrentAttachmentCloseStillDetachesTransport(t *testing.T) {
 	}
 }
 
+func TestSessionAuthRevocationWaitsForBlockedTransportBindAndDetachesIt(t *testing.T) {
+	a := newAttacher(nil, &fakeCPStream{})
+	key := sessionAuthKey{spawnID: "sp", sessionID: "s", clientID: "client"}
+	pump := newPump(io.Discard, strings.NewReader(""))
+	a.pumps[sessionKey{spawnID: "sp", sessionID: "s"}] = pump
+	record := sessionAuthRecord{
+		accountID: "alice", tokenID: "token", issuedAt: 10, expiresAt: time.Now().Add(time.Hour),
+		attachmentID: "attachment", attachmentSequence: 1,
+	}
+	a.auths.register(key, record, func(reason string) {
+		a.closeClientAuthorization(key, 1, reason, record.attachmentID)
+	})
+	bindEntered := make(chan struct{})
+	releaseBind := make(chan struct{})
+	bindDone := make(chan bool, 1)
+	go func() {
+		bindDone <- a.auths.bindAttachment(key, record.attachmentID, func() bool {
+			close(bindEntered)
+			<-releaseBind
+			return a.attachClient("sp", "s", "client", 0)
+		})
+	}()
+	<-bindEntered
+	revokeDone := make(chan struct{})
+	go func() {
+		defer close(revokeDone)
+		a.auths.revoke([]VerifiedUserRevocation{{
+			Seq: 1, AccountID: "alice", FamilyID: "family", RevokedAt: 10,
+			RevokedTokens: []VerifiedRevokedToken{{TokenID: "token", RetainUntil: 100}},
+		}})
+	}()
+	select {
+	case <-revokeDone:
+		t.Fatal("revocation completed before blocked transport bind")
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(releaseBind)
+	if !<-bindDone {
+		t.Fatal("current authorization did not bind")
+	}
+	<-revokeDone
+	if a.auths.contains(key) || pump.attached() {
+		t.Fatalf("revocation left auth=%v transport=%v", a.auths.contains(key), pump.attached())
+	}
+}
+
+func TestSessionAuthExpiryBeforeTransportBindPreventsInstall(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	var timer *heldTimer
+	r := newSessionAuthRegistryWithClock(func() time.Time { return now }, func(_ time.Duration, callback func()) sessionAuthTimer {
+		timer = &heldTimer{callback: callback}
+		return timer
+	})
+	key := sessionAuthKey{spawnID: "sp", sessionID: "s", clientID: "client"}
+	r.register(key, sessionAuthRecord{
+		expiresAt: now.Add(time.Second), attachmentID: "attachment", attachmentSequence: 1,
+	}, func(string) {})
+	now = now.Add(time.Second)
+	timer.callback()
+	bound := false
+	if r.bindAttachment(key, "attachment", func() bool { bound = true; return true }) {
+		t.Fatal("expired authorization bound a transport")
+	}
+	if bound {
+		t.Fatal("transport bind callback ran after expiry")
+	}
+}
+
 type heldTimer struct{ callback func() }
 
 func (t *heldTimer) Stop() bool { return true }

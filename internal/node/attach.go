@@ -467,6 +467,7 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			}
 			verifiedAuth = auth
 		}
+		registeredAuth := false
 		if a.auths != nil && verifiedAuth.AccountID != "" {
 			if !a.auths.registerIfNewer(openKey, sessionAuthRecord{
 				accountID: verifiedAuth.AccountID, tokenID: verifiedAuth.TokenID, issuedAt: verifiedAuth.IssuedAt, expiresAt: verifiedAuth.ExpiresAt,
@@ -478,10 +479,20 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 				a.rejectSessionOpen(m.Open, "session authorization was superseded or revoked")
 				return
 			}
+			registeredAuth = true
 		}
-		if !a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor) {
-			if a.auths != nil {
-				a.auths.remove(sessionAuthKey{spawnID: m.Open.GetSpawnId(), sessionID: sid(m.Open.GetSessionId()), clientID: m.Open.GetClientId()})
+		bind := func() bool {
+			return a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor)
+		}
+		attached := false
+		if registeredAuth {
+			attached = a.auths.bindAttachment(openKey, m.Open.GetAttachmentId(), bind)
+		} else {
+			attached = bind()
+		}
+		if !attached {
+			if registeredAuth {
+				a.auths.removeIfAttachment(openKey, m.Open.GetAttachmentId())
 			}
 			a.rejectSessionOpen(m.Open, "session attachment unavailable")
 		}

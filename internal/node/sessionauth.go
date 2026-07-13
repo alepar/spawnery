@@ -69,6 +69,27 @@ func (r *sessionAuthRegistry) acceptsOpen(key sessionAuthKey, attachmentSequence
 	return current == nil || current.record.attachmentSequence < attachmentSequence
 }
 
+// bindAttachment serializes transport installation with revocation, expiry, and replacement of
+// the exact authorization incarnation. Teardown either wins before this method and prevents the
+// bind, or waits for the bind and then detaches the installed transport.
+func (r *sessionAuthRegistry) bindAttachment(key sessionAuthKey, attachmentID string, bind func() bool) bool {
+	if bind == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current := r.records[key]
+	if current == nil || attachmentID == "" || current.record.attachmentID != attachmentID {
+		return false
+	}
+	if !r.now().Before(current.record.expiresAt) ||
+		(r.revocations != nil && r.revocations.IsRevoked(current.record.tokenID, current.record.accountID, current.record.issuedAt)) {
+		_ = r.removeLocked(key)
+		return false
+	}
+	return bind()
+}
+
 func (r *sessionAuthRegistry) registerRecord(key sessionAuthKey, record sessionAuthRecord, closeFn func(string), requireNewer bool) bool {
 	r.mu.Lock()
 	if r.revocations != nil && r.revocations.IsRevoked(record.tokenID, record.accountID, record.issuedAt) {
