@@ -20,6 +20,9 @@ func (r *refreshSessionRepo) Get(ctx context.Context, tokenHash string) (Refresh
 }
 
 func (r *refreshSessionRepo) Insert(ctx context.Context, s RefreshSession) error {
+	if s.AccessExpiresAt <= 0 {
+		return errors.New("authsvc/store: access expiry required")
+	}
 	_, err := r.db.NewInsert().Model(&s).Exec(ctx)
 	return err
 }

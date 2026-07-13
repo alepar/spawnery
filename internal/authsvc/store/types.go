@@ -41,6 +41,7 @@ type RefreshSession struct {
 	SessionPubkeySPKI []byte `bun:"session_pubkey_spki,notnull"` // [AM5] PoP material, raw DER SPKI
 	CPAccessTokenID   string `bun:"cp_access_token_id,notnull"`
 	NodeAccessTokenID string `bun:"node_access_token_id,notnull"`
+	AccessExpiresAt   int64  `bun:"access_expires_at,notnull"`
 	CreatedAt         int64  `bun:"created_at,notnull"`
 	LastUsedAt        int64  `bun:"last_used_at,notnull"`
 	ExpiresAt         int64  `bun:"expires_at,notnull"`        // 30d sliding
@@ -79,12 +80,21 @@ type DeviceGrant struct {
 }
 
 type RevocationEvent struct {
-	bun.BaseModel `bun:"table:revocation_events,alias:re"`
-	Seq           int64  `bun:"seq,pk,autoincrement"`
-	AccountID     string `bun:"account_id,notnull"`
-	FamilyID      string `bun:"family_id,notnull"`
-	TokenIDs      string `bun:"token_ids,notnull"` // JSON array of access-token token_ids
-	RevokedAt     int64  `bun:"revoked_at,notnull"`
+	bun.BaseModel            `bun:"table:revocation_events,alias:re"`
+	Seq                      int64          `bun:"seq,pk,autoincrement"`
+	AccountID                string         `bun:"account_id,notnull"`
+	FamilyID                 string         `bun:"family_id,notnull"`
+	RevokedAt                int64          `bun:"revoked_at,notnull"`
+	RevokeTokensIssuedBefore int64          `bun:"revoke_tokens_issued_before,notnull"`
+	RevokedTokens            []RevokedToken `bun:"-"`
+	TokenIDs                 string         `bun:"-"` // removed schema-7 compatibility; delete after callers migrate
+}
+
+type RevokedToken struct {
+	bun.BaseModel `bun:"table:revocation_event_tokens,alias:ret"`
+	EventSeq      int64  `bun:"event_seq,pk"`
+	TokenID       string `bun:"token_id,pk"`
+	RetainUntil   int64  `bun:"retain_until,notnull"`
 }
 
 // DeviceSetEntry is one append-only device-set log entry as stored in the AS.

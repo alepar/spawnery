@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -12,6 +11,104 @@ import (
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
+
+func TestRevocationRetentionMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authsvc.db")
+	dsn := "file:" + path
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goose.SetBaseFS(migrationsFS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(db, "migrations/sqlite", 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO users VALUES ('acct', 1, 'alice', 'active', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO refresh_sessions
+		(token_hash, account_id, family_id, client_kind, session_pubkey_spki, cp_access_token_id, node_access_token_id,
+		 created_at, last_used_at, expires_at, family_created_at)
+		VALUES ('paired', 'acct', 'family', 'cli', x'01', 'cp-live', 'node-live', 100, 100, 9999, 100)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO revocation_events(seq, account_id, family_id, token_ids, revoked_at) VALUES
+		(9, 'acct', 'family', '["cp-live","missing"]', 200)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(ctxT(), Config{Driver: "sqlite", DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	paired, err := st.RefreshSessions().Get(ctxT(), "paired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paired.AccessExpiresAt != 1000 {
+		t.Fatalf("access expiry: want 1000, got %d", paired.AccessExpiresAt)
+	}
+	type tokenRow struct {
+		TokenID     string `bun:"token_id"`
+		RetainUntil int64  `bun:"retain_until"`
+	}
+	var rows []tokenRow
+	if err := st.(*bunStore).db.NewSelect().Table("revocation_event_tokens").
+		Column("token_id", "retain_until").OrderExpr("token_id ASC").Scan(ctxT(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	wantRows := []tokenRow{{TokenID: "cp-live", RetainUntil: 1000}, {TokenID: "missing", RetainUntil: 1100}}
+	if !reflect.DeepEqual(rows, wantRows) {
+		t.Fatalf("normalized tokens: want %+v, got %+v", wantRows, rows)
+	}
+	seq, err := st.Revocations().Append(ctxT(), RevocationEvent{
+		AccountID: "acct", FamilyID: "family", RevokedAt: 300,
+		RevokedTokens: []RevokedToken{{TokenID: "next", RetainUntil: 1200}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 10 {
+		t.Fatalf("next sequence: want 10, got %d", seq)
+	}
+}
+
+func TestRevocationRetentionMigrationRejectsMalformedLegacyTokens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authsvc.db")
+	dsn := "file:" + path
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goose.SetBaseFS(migrationsFS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(db, "migrations/sqlite", 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO revocation_events(seq, account_id, family_id, token_ids, revoked_at)
+		VALUES (3, 'acct', 'family', 'not-json', 200)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(ctxT(), Config{Driver: "sqlite", DSN: dsn}); err == nil {
+		t.Fatal("malformed legacy revocation tokens migrated")
+	}
+}
 
 func ctxT() context.Context { return context.Background() }
 
@@ -59,7 +156,7 @@ func TestRefreshSessionsRoundTrip(t *testing.T) {
 	row := RefreshSession{
 		TokenHash: "hash-1", AccountID: "acct-1", FamilyID: "fam-1", ClientKind: ClientWeb,
 		SessionPubkeySPKI: spki, CPAccessTokenID: "cp-1", NodeAccessTokenID: "node-1",
-		CreatedAt: 10, LastUsedAt: 10, ExpiresAt: 100, FamilyCreatedAt: 10,
+		AccessExpiresAt: 70, CreatedAt: 10, LastUsedAt: 10, ExpiresAt: 100, FamilyCreatedAt: 10,
 	}
 	if err := st.RefreshSessions().Insert(ctxT(), row); err != nil {
 		t.Fatal(err)
@@ -71,13 +168,19 @@ func TestRefreshSessionsRoundTrip(t *testing.T) {
 	if string(got.SessionPubkeySPKI) != string(spki) || got.CPAccessTokenID != "cp-1" || got.NodeAccessTokenID != "node-1" || got.SupersededBy != "" || got.Revoked {
 		t.Fatalf("round trip: %+v", got)
 	}
+	row.TokenHash = "missing-access-expiry"
+	row.AccessExpiresAt = 0
+	if err := st.RefreshSessions().Insert(ctxT(), row); err == nil {
+		t.Fatal("refresh session without paired access expiry inserted")
+	}
 }
 
 func TestSupersedeAndFamilyRevoke(t *testing.T) {
 	st := NewTestStore(t)
 	mkUser(t, st, "acct-1", 1)
 	r1 := RefreshSession{TokenHash: "h1", AccountID: "acct-1", FamilyID: "fam", ClientKind: ClientCLI,
-		SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "cp1", NodeAccessTokenID: "node1", CreatedAt: 1, LastUsedAt: 1, ExpiresAt: 100, FamilyCreatedAt: 1}
+		SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "cp1", NodeAccessTokenID: "node1", AccessExpiresAt: 90,
+		CreatedAt: 1, LastUsedAt: 1, ExpiresAt: 100, FamilyCreatedAt: 1}
 	if err := st.RefreshSessions().Insert(ctxT(), r1); err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +234,7 @@ func TestFamilyCounting(t *testing.T) {
 		err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
 			TokenHash: fam + "-h", AccountID: "acct-1", FamilyID: fam, ClientKind: ClientWeb,
 			SessionPubkeySPKI: []byte{1}, CPAccessTokenID: fam + "-cp", NodeAccessTokenID: fam + "-node",
-			CreatedAt: int64(i + 1), LastUsedAt: int64(i + 1), ExpiresAt: 100, FamilyCreatedAt: int64(i + 1),
+			AccessExpiresAt: 90, CreatedAt: int64(i + 1), LastUsedAt: int64(i + 1), ExpiresAt: 100, FamilyCreatedAt: int64(i + 1),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -192,7 +295,7 @@ func TestPairedAccessTokenMigrationInvalidatesLegacyFamilies(t *testing.T) {
 	if err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
 		TokenHash: "paired", AccountID: "acct", FamilyID: "new-family", ClientKind: ClientCLI,
 		SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "cp", NodeAccessTokenID: "node",
-		CreatedAt: 2, LastUsedAt: 2, ExpiresAt: 100, FamilyCreatedAt: 2,
+		AccessExpiresAt: 902, CreatedAt: 2, LastUsedAt: 2, ExpiresAt: 100, FamilyCreatedAt: 2,
 	}); err != nil {
 		t.Fatalf("insert paired family after migration: %v", err)
 	}
@@ -204,7 +307,7 @@ func TestPairedRevocationRollback(t *testing.T) {
 	row := RefreshSession{
 		TokenHash: "rollback-hash", AccountID: "acct-rollback", FamilyID: "rollback-family", ClientKind: ClientCLI,
 		SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "rollback-cp", NodeAccessTokenID: "rollback-node",
-		CreatedAt: 1, LastUsedAt: 1, ExpiresAt: 100, FamilyCreatedAt: 1,
+		AccessExpiresAt: 90, CreatedAt: 1, LastUsedAt: 1, ExpiresAt: 100, FamilyCreatedAt: 1,
 	}
 	if err := st.RefreshSessions().Insert(ctxT(), row); err != nil {
 		t.Fatal(err)
@@ -217,8 +320,12 @@ func TestPairedRevocationRollback(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		tokens := make([]RevokedToken, 0, len(ids))
+		for _, id := range ids {
+			tokens = append(tokens, RevokedToken{TokenID: id, RetainUntil: row.AccessExpiresAt})
+		}
 		_, err = tx.Revocations().Append(ctxT(), RevocationEvent{
-			AccountID: row.AccountID, FamilyID: row.FamilyID, TokenIDs: string(mustJSON(t, ids)), RevokedAt: 2,
+			AccountID: row.AccountID, FamilyID: row.FamilyID, RevokedTokens: tokens, RevokedAt: 2,
 		})
 		return err
 	})
@@ -232,15 +339,6 @@ func TestPairedRevocationRollback(t *testing.T) {
 	if got.Revoked {
 		t.Fatal("family revocation survived failed event append")
 	}
-}
-
-func mustJSON(t *testing.T, value any) []byte {
-	t.Helper()
-	b, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
 }
 
 func TestOAuthStateSingleUse(t *testing.T) {
@@ -293,11 +391,11 @@ func TestDeviceGrantLifecycle(t *testing.T) {
 
 func TestRevocationFeed(t *testing.T) {
 	st := NewTestStore(t)
-	s1, err := st.Revocations().Append(ctxT(), RevocationEvent{AccountID: "a", FamilyID: "f1", TokenIDs: `["t1"]`, RevokedAt: 1})
+	s1, err := st.Revocations().Append(ctxT(), RevocationEvent{AccountID: "a", FamilyID: "f1", RevokedTokens: []RevokedToken{{TokenID: "t1", RetainUntil: 10}}, RevokedAt: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s2, err := st.Revocations().Append(ctxT(), RevocationEvent{AccountID: "a", FamilyID: "f2", TokenIDs: `["t2"]`, RevokedAt: 2})
+	s2, err := st.Revocations().Append(ctxT(), RevocationEvent{AccountID: "a", FamilyID: "f2", RevokedTokens: []RevokedToken{{TokenID: "t2", RetainUntil: 10}}, RevokedAt: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
