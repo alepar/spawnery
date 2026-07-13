@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"spawnery/internal/agentinstall"
+	"spawnery/internal/agentinstall/spec"
 )
 
 func TestCanonicalSkillsDir(t *testing.T) {
@@ -350,6 +351,79 @@ func TestSkillProvenanceCanonicalAndNativeRows(t *testing.T) {
 	}
 	if gooseRows != 1 {
 		t.Errorf("expected 1 skill row for goose (canonical only), got %d: %+v", gooseRows, ix.Entries)
+	}
+}
+
+// TestSkillMarkerCarriesSource verifies the ownership marker (.spawnery-skill.json) records the
+// skill's source provenance in BOTH the canonical and native install copies (sp-mwco.2.8 §4.6).
+func TestSkillMarkerCarriesSource(t *testing.T) {
+	home := t.TempDir()
+	artifacts := t.TempDir()
+	stageSkillTree(t, artifacts, "payloads/my-skill")
+
+	src := &spec.SkillSource{
+		URL:    "https://github.com/obra/superpowers",
+		Ref:    "main",
+		Commit: "1111111111111111111111111111111111aaaa",
+		Subdir: "skills/x",
+	}
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+	m := agentinstall.Manifest{
+		Artifacts: []agentinstall.Artifact{
+			{
+				Kind:    agentinstall.KindSkill,
+				Name:    "my-skill",
+				Targets: []string{"claude"},
+				Skill:   &agentinstall.SkillPayload{Dir: "payloads/my-skill", Source: src},
+			},
+		},
+	}
+	opts := agentinstall.Options{HomeDir: home, ArtifactsDir: artifacts}
+	result := agentinstall.Apply(reg, m, opts, env)
+	if len(result.Reports) != 1 || result.Reports[0].Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %+v", result.Reports)
+	}
+
+	canonicalMarker := filepath.Join(agentinstall.CanonicalSkillsDir(home), "my-skill", ".spawnery-skill.json")
+	nativeMarker := filepath.Join(home, ".claude", "skills", "my-skill", ".spawnery-skill.json")
+	for _, path := range []string{canonicalMarker, nativeMarker} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("unmarshal %s: %v", path, err)
+		}
+		if got["sourceUrl"] != src.URL || got["sourceRef"] != src.Ref ||
+			got["sourceCommit"] != src.Commit || got["sourceSubdir"] != src.Subdir {
+			t.Errorf("%s: source fields not recorded, got %+v", path, got)
+		}
+	}
+}
+
+// TestSkillMarkerNoSourceOmitsKeys verifies a no-source install's marker marshals with no
+// source keys at all (omitempty), not empty-string keys.
+func TestSkillMarkerNoSourceOmitsKeys(t *testing.T) {
+	home := t.TempDir()
+	artifacts := t.TempDir()
+	stageSkillTree(t, artifacts, "payloads/my-skill")
+
+	r, _ := applySkill(home, artifacts, "claude", "my-skill", "payloads/my-skill")
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+
+	markerPath := filepath.Join(agentinstall.CanonicalSkillsDir(home), "my-skill", ".spawnery-skill.json")
+	raw, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"sourceUrl", "sourceRef", "sourceCommit", "sourceSubdir"} {
+		if strings.Contains(string(raw), key) {
+			t.Errorf("marker should have no %q key for a no-source install, got %s", key, raw)
+		}
 	}
 }
 

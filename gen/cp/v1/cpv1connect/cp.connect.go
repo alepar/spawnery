@@ -139,6 +139,9 @@ const (
 	// SpawnServiceRemoveProfileEntryProcedure is the fully-qualified name of the SpawnService's
 	// RemoveProfileEntry RPC.
 	SpawnServiceRemoveProfileEntryProcedure = "/cp.v1.SpawnService/RemoveProfileEntry"
+	// SpawnServiceUpdateProfileEntryProcedure is the fully-qualified name of the SpawnService's
+	// UpdateProfileEntry RPC.
+	SpawnServiceUpdateProfileEntryProcedure = "/cp.v1.SpawnService/UpdateProfileEntry"
 	// SpawnServiceAddProfileSecretRefProcedure is the fully-qualified name of the SpawnService's
 	// AddProfileSecretRef RPC.
 	SpawnServiceAddProfileSecretRefProcedure = "/cp.v1.SpawnService/AddProfileSecretRef"
@@ -277,6 +280,10 @@ type SpawnServiceClient interface {
 	DeleteProfile(context.Context, *connect.Request[v1.DeleteProfileRequest]) (*connect.Response[v1.DeleteProfileResponse], error)
 	AddProfileEntry(context.Context, *connect.Request[v1.AddProfileEntryRequest]) (*connect.Response[v1.AddProfileEntryResponse], error)
 	RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error)
+	// UpdateProfileEntry is a scoping-only, CAS-fenced mutation (sp-mwco.2.8 §4.6): targets and the
+	// disabled off-switch, in place, preserving entry_id. kind/name/source/catalog_id/bundle pin
+	// are immutable through it — not even present in the request.
+	UpdateProfileEntry(context.Context, *connect.Request[v1.UpdateProfileEntryRequest]) (*connect.Response[v1.UpdateProfileEntryResponse], error)
 	AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error)
 	RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error)
 	// User secrets catalog CRUD (sp-7h6.1.1): owner-scoped sealed secret metadata + opaque envelope bytes.
@@ -602,6 +609,12 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileEntry")),
 			connect.WithClientOptions(opts...),
 		),
+		updateProfileEntry: connect.NewClient[v1.UpdateProfileEntryRequest, v1.UpdateProfileEntryResponse](
+			httpClient,
+			baseURL+SpawnServiceUpdateProfileEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("UpdateProfileEntry")),
+			connect.WithClientOptions(opts...),
+		),
 		addProfileSecretRef: connect.NewClient[v1.AddProfileSecretRefRequest, v1.AddProfileSecretRefResponse](
 			httpClient,
 			baseURL+SpawnServiceAddProfileSecretRefProcedure,
@@ -807,6 +820,7 @@ type spawnServiceClient struct {
 	deleteProfile            *connect.Client[v1.DeleteProfileRequest, v1.DeleteProfileResponse]
 	addProfileEntry          *connect.Client[v1.AddProfileEntryRequest, v1.AddProfileEntryResponse]
 	removeProfileEntry       *connect.Client[v1.RemoveProfileEntryRequest, v1.RemoveProfileEntryResponse]
+	updateProfileEntry       *connect.Client[v1.UpdateProfileEntryRequest, v1.UpdateProfileEntryResponse]
 	addProfileSecretRef      *connect.Client[v1.AddProfileSecretRefRequest, v1.AddProfileSecretRefResponse]
 	removeProfileSecretRef   *connect.Client[v1.RemoveProfileSecretRefRequest, v1.RemoveProfileSecretRefResponse]
 	createSecret             *connect.Client[v1.CreateSecretRequest, v1.CreateSecretResponse]
@@ -1026,6 +1040,11 @@ func (c *spawnServiceClient) RemoveProfileEntry(ctx context.Context, req *connec
 	return c.removeProfileEntry.CallUnary(ctx, req)
 }
 
+// UpdateProfileEntry calls cp.v1.SpawnService.UpdateProfileEntry.
+func (c *spawnServiceClient) UpdateProfileEntry(ctx context.Context, req *connect.Request[v1.UpdateProfileEntryRequest]) (*connect.Response[v1.UpdateProfileEntryResponse], error) {
+	return c.updateProfileEntry.CallUnary(ctx, req)
+}
+
 // AddProfileSecretRef calls cp.v1.SpawnService.AddProfileSecretRef.
 func (c *spawnServiceClient) AddProfileSecretRef(ctx context.Context, req *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error) {
 	return c.addProfileSecretRef.CallUnary(ctx, req)
@@ -1219,6 +1238,10 @@ type SpawnServiceHandler interface {
 	DeleteProfile(context.Context, *connect.Request[v1.DeleteProfileRequest]) (*connect.Response[v1.DeleteProfileResponse], error)
 	AddProfileEntry(context.Context, *connect.Request[v1.AddProfileEntryRequest]) (*connect.Response[v1.AddProfileEntryResponse], error)
 	RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error)
+	// UpdateProfileEntry is a scoping-only, CAS-fenced mutation (sp-mwco.2.8 §4.6): targets and the
+	// disabled off-switch, in place, preserving entry_id. kind/name/source/catalog_id/bundle pin
+	// are immutable through it — not even present in the request.
+	UpdateProfileEntry(context.Context, *connect.Request[v1.UpdateProfileEntryRequest]) (*connect.Response[v1.UpdateProfileEntryResponse], error)
 	AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error)
 	RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error)
 	// User secrets catalog CRUD (sp-7h6.1.1): owner-scoped sealed secret metadata + opaque envelope bytes.
@@ -1540,6 +1563,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileEntry")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceUpdateProfileEntryHandler := connect.NewUnaryHandler(
+		SpawnServiceUpdateProfileEntryProcedure,
+		svc.UpdateProfileEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("UpdateProfileEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
 	spawnServiceAddProfileSecretRefHandler := connect.NewUnaryHandler(
 		SpawnServiceAddProfileSecretRefProcedure,
 		svc.AddProfileSecretRef,
@@ -1780,6 +1809,8 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceAddProfileEntryHandler.ServeHTTP(w, r)
 		case SpawnServiceRemoveProfileEntryProcedure:
 			spawnServiceRemoveProfileEntryHandler.ServeHTTP(w, r)
+		case SpawnServiceUpdateProfileEntryProcedure:
+			spawnServiceUpdateProfileEntryHandler.ServeHTTP(w, r)
 		case SpawnServiceAddProfileSecretRefProcedure:
 			spawnServiceAddProfileSecretRefHandler.ServeHTTP(w, r)
 		case SpawnServiceRemoveProfileSecretRefProcedure:
@@ -1993,6 +2024,10 @@ func (UnimplementedSpawnServiceHandler) AddProfileEntry(context.Context, *connec
 
 func (UnimplementedSpawnServiceHandler) RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RemoveProfileEntry is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) UpdateProfileEntry(context.Context, *connect.Request[v1.UpdateProfileEntryRequest]) (*connect.Response[v1.UpdateProfileEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.UpdateProfileEntry is not implemented"))
 }
 
 func (UnimplementedSpawnServiceHandler) AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error) {

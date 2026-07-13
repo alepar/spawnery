@@ -19,6 +19,7 @@ import {
   deleteProfile,
   addProfileEntry,
   removeProfileEntry,
+  updateProfileEntry,
   listCatalogEntries,
   ingestSkillFromURL,
   connectErrorMessage,
@@ -58,7 +59,11 @@ function CapabilityPreview({ entry }: { entry: ProfileEntry }) {
   // targets: empty → all AGENTS
   const targets = (entry.targets && entry.targets.length > 0) ? entry.targets : AGENTS;
   return (
-    <div data-testid={`cap-preview-${entry.entryId}`} className="flex flex-wrap gap-1 mt-1">
+    <div
+      data-testid={`cap-preview-${entry.entryId}`}
+      data-disabled={!!entry.disabled}
+      className={`flex flex-wrap gap-1 mt-1 ${entry.disabled ? "opacity-50 grayscale" : ""}`}
+    >
       {targets.map((agent) => {
         const status = capabilityFor(capKind, agent);
         return (
@@ -338,43 +343,24 @@ export function ProfilesView() {
     }
   };
 
-  // handleUpdateTargets is remove+re-add (there is no UpdateProfileEntry RPC yet). It is never
+  // handleUpdateEntryScope is the single CAS-fenced call backing both the per-agent target
+  // toggles and the disable/enable control (sp-mwco.2.8 §4.6) — it mutates the entry in place,
+  // replacing the old remove+re-add dance (which had no restore-on-partial-failure guarantee and
+  // an inversion bug: unchecking every agent sent targets=[], which means "all"). It is never
   // invoked for a BUNDLE_REF entry — those render BundleEntryChip, which has no target toggles
-  // (sp-mwco.1.9 D6): a re-add would silently pin the bundle to LATEST, exactly the un-diffed
-  // update channel §4.9 forbids.
-  const handleUpdateTargets = async (entry: ProfileEntry, targets: string[]) => {
+  // (sp-mwco.1.9 D6): scoping a bundle this way would silently pin it to LATEST, exactly the
+  // un-diffed update channel §4.9 forbids.
+  const handleUpdateEntryScope = async (entry: ProfileEntry, targets: string[], disabled: boolean) => {
     if (!profile) return;
     try {
-      // Remove the old entry and re-add with updated targets.
-      // Two-step CAS: if the add leg fails after remove succeeds, attempt to restore
-      // the original entry to avoid silent data loss.
-      const removeResult = await removeProfileEntry(profile.profileId, profile.version, entry.entryId);
-      const entryInput: Omit<ProfileEntry, "entryId"> = {
-        kind: entry.kind,
-        name: entry.name,
-        source: entry.source,
-        catalogId: entry.catalogId,
-        customInline: entry.customInline,
-        targets,
-        mcpSecretRefs: entry.mcpSecretRefs,
-      };
-      try {
-        await addProfileEntry(profile.profileId, removeResult.version, entryInput);
-      } catch (addErr: any) {
-        // Add failed after remove succeeded — attempt to restore the original entry.
-        const restoreInput: Omit<ProfileEntry, "entryId"> = { ...entryInput, targets: entry.targets };
-        try {
-          await addProfileEntry(profile.profileId, removeResult.version, restoreInput);
-          toast.error("Update targets failed (entry restored): " + addErr.message);
-        } catch {
-          toast.error("Update targets failed and restore failed — entry may be lost: " + addErr.message);
-        }
-        if (selectedId) await refreshProfile(selectedId);
-        return;
-      }
-      if (selectedId) await refreshProfile(selectedId);
+      const r = await updateProfileEntry(profile.profileId, profile.version, entry.entryId, targets, disabled);
+      setProfile((p) => p ? {
+        ...p,
+        version: r.version,
+        entries: p.entries.map((e) => e.entryId === entry.entryId ? { ...e, targets, disabled } : e),
+      } : p);
     } catch (e: any) {
-      toast.error("Update targets failed: " + e.message);
+      toast.error("Update entry failed: " + e.message);
       if (selectedId) refreshProfile(selectedId);
     }
   };
@@ -607,7 +593,7 @@ export function ProfilesView() {
                 <div
                   key={entry.entryId}
                   data-testid={`entry-${entry.entryId}`}
-                  className="rounded border border-border p-3 flex flex-col gap-1"
+                  className={`rounded border border-border p-3 flex flex-col gap-1 ${entry.disabled ? "opacity-60" : ""}`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
@@ -618,21 +604,56 @@ export function ProfilesView() {
                         {KIND_LABEL[entry.kind]}
                       </span>
                       <span className="text-sm font-medium">{entry.name}</span>
+                      {entry.disabled && (
+                        <span
+                          data-testid={`entry-disabled-${entry.entryId}`}
+                          className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+                        >
+                          off
+                        </span>
+                      )}
                     </div>
-                    <Button
-                      data-testid={`entry-remove-${entry.entryId}`}
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => handleRemoveEntry(entry.entryId)}
-                    >
-                      Remove
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      {entry.disabled && (
+                        <Button
+                          data-testid={`entry-enable-${entry.entryId}`}
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleUpdateEntryScope(entry, entry.targets ?? [], false)}
+                        >
+                          Enable
+                        </Button>
+                      )}
+                      <Button
+                        data-testid={`entry-remove-${entry.entryId}`}
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleRemoveEntry(entry.entryId)}
+                      >
+                        Remove
+                      </Button>
+                    </div>
                   </div>
 
-                  {/* Targets multi-select */}
+                  {/* Provenance (sp-mwco.2.8 §4.6): source URL + short commit for a URL-ingested
+                      skill; "custom" for operator-authored content. */}
+                  {entry.kind === "PROFILE_ENTRY_KIND_SKILL" && (
+                    <div
+                      data-testid={`entry-provenance-${entry.entryId}`}
+                      className="text-xs text-muted-foreground"
+                    >
+                      {entry.provenance?.sourceUrl
+                        ? `${entry.provenance.sourceUrl}${entry.provenance.sourceCommit ? ` @ ${entry.provenance.sourceCommit.slice(0, 7)}` : ""}`
+                        : "custom"}
+                    </div>
+                  )}
+
+                  {/* Targets multi-select. Unchecking the LAST remaining agent disables the entry
+                      (targets are left untouched, so Enable restores the prior scope) instead of
+                      sending targets=[] — which means "all" server-side (the old inversion bug). */}
                   <div className="flex flex-wrap gap-1 mt-1">
                     {AGENTS.map((agent) => {
-                      const active = !entry.targets || entry.targets.length === 0 || entry.targets.includes(agent);
+                      const active = !entry.disabled && (!entry.targets || entry.targets.length === 0 || entry.targets.includes(agent));
                       return (
                         <button
                           key={agent}
@@ -644,9 +665,14 @@ export function ProfilesView() {
                             const next = current.includes(agent)
                               ? current.filter((a) => a !== agent)
                               : [...current, agent];
-                            // If all agents selected, use empty (= all)
+                            if (next.length === 0) {
+                              // Last agent unchecked: disable, keep targets as-is for Enable to restore.
+                              handleUpdateEntryScope(entry, entry.targets ?? [], true);
+                              return;
+                            }
+                            // If all agents selected, use empty (= all); checking any agent re-enables.
                             const targets = next.length === AGENTS.length ? [] : next;
-                            handleUpdateTargets(entry, targets);
+                            handleUpdateEntryScope(entry, targets, false);
                           }}
                         >
                           {agent}

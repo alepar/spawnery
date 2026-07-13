@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"spawnery/internal/agentinstall"
+	"spawnery/internal/agentinstall/spec"
 )
 
 // stageSkillTree creates a skill directory at <artifactsDir>/<relPath> with:
@@ -681,5 +682,91 @@ func TestInstallSkill_ReasonMentionsSanitizationOnlyWhenChanged(t *testing.T) {
 	}
 	if strings.Contains(rPlain.Reason, "sanitized SKILL.md frontmatter") {
 		t.Errorf("Reason should not mention sanitization when nothing changed, got %q", rPlain.Reason)
+	}
+}
+
+// TestInstallSkill_ProvenanceBannerBothCopies verifies that a skill artifact with Skill.Source
+// set gets the provenance banner injected into BOTH the canonical (~/.agents/skills) and the
+// native (claude's ~/.claude/skills) installed SKILL.md — the untouched original body is
+// preserved, and the staging source tree is never mutated (sp-mwco.2.8 §4.6).
+func TestInstallSkill_ProvenanceBannerBothCopies(t *testing.T) {
+	home := t.TempDir()
+	artifacts := t.TempDir()
+	stageSkillTree(t, artifacts, "payloads/my-skill")
+
+	src := &spec.SkillSource{
+		URL:    "https://github.com/obra/superpowers",
+		Ref:    "main",
+		Commit: "1111111111111111111111111111111111aaaa",
+		Subdir: "skills/x",
+	}
+
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+	m := agentinstall.Manifest{
+		Artifacts: []agentinstall.Artifact{
+			{
+				Kind:    agentinstall.KindSkill,
+				Name:    "my-skill",
+				Targets: []string{"claude"},
+				Skill:   &agentinstall.SkillPayload{Dir: "payloads/my-skill", Source: src},
+			},
+		},
+	}
+	opts := agentinstall.Options{HomeDir: home, ArtifactsDir: artifacts}
+	result := agentinstall.Apply(reg, m, opts, env)
+	if len(result.Reports) != 1 || result.Reports[0].Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %+v", result.Reports)
+	}
+
+	canonical := filepath.Join(agentinstall.CanonicalSkillsDir(home), "my-skill", "SKILL.md")
+	native := filepath.Join(home, ".claude", "skills", "my-skill", "SKILL.md")
+	for _, dest := range []string{canonical, native} {
+		got, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatalf("read %s: %v", dest, err)
+		}
+		if !strings.Contains(string(got), "Untrusted external content") {
+			t.Errorf("%s: expected provenance banner, got %q", dest, string(got))
+		}
+		if !strings.Contains(string(got), "# skill\n") {
+			t.Errorf("%s: expected original body preserved, got %q", dest, string(got))
+		}
+	}
+
+	// The staging source tree must not be mutated.
+	stagingMD := filepath.Join(artifacts, "payloads", "my-skill", "SKILL.md")
+	stagingGot, err := os.ReadFile(stagingMD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stagingGot) != "# skill\n" {
+		t.Errorf("staging SKILL.md was mutated: got %q", string(stagingGot))
+	}
+}
+
+// TestInstallSkill_NoSourceNoBanner verifies that a skill artifact with Skill.Source == nil
+// gets no provenance banner in either installed copy — custom/inline entries are
+// operator-authored, not untrusted-external (sp-mwco.2.8 §4.6).
+func TestInstallSkill_NoSourceNoBanner(t *testing.T) {
+	home := t.TempDir()
+	artifacts := t.TempDir()
+	stageSkillTree(t, artifacts, "payloads/my-skill")
+
+	r, _ := applySkill(home, artifacts, "claude", "my-skill", "payloads/my-skill")
+	if r.Status != agentinstall.StatusApplied {
+		t.Fatalf("expected applied, got %q (reason: %q)", r.Status, r.Reason)
+	}
+
+	canonical := filepath.Join(agentinstall.CanonicalSkillsDir(home), "my-skill", "SKILL.md")
+	native := filepath.Join(home, ".claude", "skills", "my-skill", "SKILL.md")
+	for _, dest := range []string{canonical, native} {
+		got, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatalf("read %s: %v", dest, err)
+		}
+		if strings.Contains(string(got), "Untrusted external content") {
+			t.Errorf("%s: expected no provenance banner without a Source, got %q", dest, string(got))
+		}
 	}
 }

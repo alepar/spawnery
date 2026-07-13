@@ -38,6 +38,16 @@ export interface ProfileSummary {
   updatedAt?: string;
 }
 
+/** Untrusted-external provenance of an installed skill (sp-mwco.2.8 §4.6). Server-filled
+ * (output-only) from the entry's catalog row; empty/absent for operator-authored (custom/
+ * inline) content or a bundle_ref entry (its members' provenance is the bundle card's job). */
+export interface SkillProvenance {
+  sourceUrl?: string;
+  sourceRef?: string;
+  sourceCommit?: string;
+  sourceSubdir?: string;
+}
+
 export interface ProfileEntry {
   entryId: string;
   kind: ProfileEntryKind;
@@ -59,6 +69,11 @@ export interface ProfileEntry {
   pinnedSeq?: number;
   latestSeq?: number;
   memberCount?: number;
+  // disabled is the per-entry off switch (sp-mwco.2.8 §4.6): skipped entirely at assembly,
+  // installed nowhere for any agent, regardless of targets.
+  disabled?: boolean;
+  // provenance is OUTPUT-ONLY (server-filled by GetProfile); ignored on write.
+  provenance?: SkillProvenance;
 }
 
 export interface Profile {
@@ -195,6 +210,26 @@ export async function removeProfileEntry(
   entryId: string,
 ): Promise<{ version: number }> {
   return unary<{ version: number }>("RemoveProfileEntry", { profileId, expectedVersion, entryId });
+}
+
+/**
+ * Update an entry's targets + disabled off-switch in place, CAS-fenced (sp-mwco.2.8 §4.6).
+ * Scoping-only: kind/name/source/catalog_id/bundle pin are immutable through this call.
+ */
+export async function updateProfileEntry(
+  profileId: string,
+  expectedVersion: number,
+  entryId: string,
+  targets: string[],
+  disabled: boolean,
+): Promise<{ version: number }> {
+  return unary<{ version: number }>("UpdateProfileEntry", {
+    profileId,
+    expectedVersion,
+    entryId,
+    targets,
+    disabled,
+  });
 }
 
 // --- Customization Catalog API -----------------------------------------------

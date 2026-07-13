@@ -159,6 +159,44 @@ func (r *profileRepo) UpdateEntryPin(ctx context.Context, profileID string, expe
 	return newVersion, err
 }
 
+// UpdateEntry CAS-updates an entry's targets + disabled in place atomically, preserving entry_id
+// and every other column (sp-mwco.2.8 §4.6 — UpdateProfileEntry's store call, a scoping-only
+// mutation). Returns ErrNotFound when the profile version matches but the entry row is absent,
+// ErrConflict when expectedVersion is stale.
+func (r *profileRepo) UpdateEntry(ctx context.Context, profileID string, expectedVersion uint64, entryID string, targets []string, disabled bool, now int64) (uint64, error) {
+	if len(targets) == 0 {
+		targets = []string{"all"}
+	}
+	targetsJSON, err := json.Marshal(targets)
+	if err != nil {
+		return 0, fmt.Errorf("store: encode entry targets: %w", err)
+	}
+
+	var newVersion uint64
+	txErr := r.runInTx(ctx, func(db bun.IDB) error {
+		ver, uerr := casUpdateDB(ctx, db, profileID, expectedVersion, now, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+			return q
+		})
+		if uerr != nil {
+			return uerr
+		}
+		newVersion = ver
+		res, uerr := db.NewUpdate().Model((*ProfileEntry)(nil)).
+			Set("targets = ?", string(targetsJSON)).
+			Set("disabled = ?", disabled).
+			Where("profile_id = ? AND entry_id = ?", profileID, entryID).
+			Exec(ctx)
+		if uerr != nil {
+			return uerr
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+	return newVersion, txErr
+}
+
 // RemoveEntry CAS-removes an entry from the profile atomically.
 func (r *profileRepo) RemoveEntry(ctx context.Context, profileID string, expectedVersion uint64, entryID string, now int64) (uint64, error) {
 	var newVersion uint64

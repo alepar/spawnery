@@ -708,6 +708,124 @@ func TestProfiles_UpdateEntryPin_UnknownEntry(t *testing.T) {
 	}
 }
 
+// TestProfiles_UpdateEntry proves UpdateEntry changes targets AND disabled in place (same
+// entry_id), bumps the profile version, and leaves the entry's other columns
+// (kind/name/source/catalog_id) untouched (sp-mwco.2.8 §4.6).
+func TestProfiles_UpdateEntry(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-ue", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ver, err := st.Profiles().AddEntry(ctx, "pf-ue", 1, store.ProfileEntry{
+		ProfileID: "pf-ue", EntryID: "ent-ue", Kind: store.ProfileEntrySkill, Name: "my-skill",
+		SourceKind: store.ProfileSourceCatalog, CatalogID: "alice/myskill", Targets: []string{"claude"},
+	}, 2000)
+	if err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	newVer, err := st.Profiles().UpdateEntry(ctx, "pf-ue", ver, "ent-ue", []string{"claude", "goose"}, true, 3000)
+	if err != nil {
+		t.Fatalf("UpdateEntry: %v", err)
+	}
+	if newVer != ver+1 {
+		t.Errorf("newVer = %d, want %d", newVer, ver+1)
+	}
+
+	_, entries, _, err := st.Profiles().Get(ctx, "pf-ue")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if !e.Disabled {
+		t.Errorf("expected Disabled=true after UpdateEntry")
+	}
+	if len(e.Targets) != 2 || e.Targets[0] != "claude" || e.Targets[1] != "goose" {
+		t.Errorf("Targets = %v, want [claude goose]", e.Targets)
+	}
+	// Other columns untouched.
+	if e.Kind != store.ProfileEntrySkill || e.Name != "my-skill" ||
+		e.SourceKind != store.ProfileSourceCatalog || e.CatalogID != "alice/myskill" {
+		t.Errorf("UpdateEntry mutated a non-scoping column: %+v", e)
+	}
+}
+
+// TestProfiles_UpdateEntry_DefaultDisabledFalse proves AddEntry+Get round-trips Disabled=false
+// by default (a fresh entry is enabled).
+func TestProfiles_UpdateEntry_DefaultDisabledFalse(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-ued", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := st.Profiles().AddEntry(ctx, "pf-ued", 1, store.ProfileEntry{
+		ProfileID: "pf-ued", EntryID: "ent-1", Kind: store.ProfileEntrySkill, Name: "sk",
+		SourceKind: store.ProfileSourceCatalog, CatalogID: "x/y",
+	}, 2000); err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	_, entries, _, err := st.Profiles().Get(ctx, "pf-ued")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Disabled {
+		t.Fatalf("expected Disabled=false by default, got %+v", entries)
+	}
+}
+
+// TestProfiles_UpdateEntry_StaleVersion proves a stale expected_version is rejected with
+// ErrConflict, mirroring UpdateEntryPin's CAS behavior.
+func TestProfiles_UpdateEntry_StaleVersion(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-uestale", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := st.Profiles().AddEntry(ctx, "pf-uestale", 1, store.ProfileEntry{
+		ProfileID: "pf-uestale", EntryID: "ent-1", Kind: store.ProfileEntrySkill, Name: "sk",
+		SourceKind: store.ProfileSourceCatalog, CatalogID: "x/y",
+	}, 2000); err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	_, err := st.Profiles().UpdateEntry(ctx, "pf-uestale", 1 /* stale, now 2 */, "ent-1", nil, true, 3000)
+	if !errors.Is(err, store.ErrConflict) {
+		t.Errorf("expected ErrConflict on stale UpdateEntry, got %v", err)
+	}
+}
+
+// TestProfiles_UpdateEntry_UnknownEntry proves updating an entry that does not exist on an
+// otherwise-valid profile returns ErrNotFound, not a silent no-op.
+func TestProfiles_UpdateEntry_UnknownEntry(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-uenf", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, err := st.Profiles().UpdateEntry(ctx, "pf-uenf", 1, "no-such-entry", nil, false, 2000)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for unknown entry, got %v", err)
+	}
+}
+
 func TestProfiles_CountRefsByCatalogRef(t *testing.T) {
 	st := store.NewTestStore(t)
 	ctx := context.Background()

@@ -125,11 +125,17 @@ func installSkill(layout AgentLayout, a Artifact, opts Options) Report {
 		ProfileVersion: opts.ProfileVersion,
 		InstalledBy:    "spawnery",
 	}
+	if src := a.Skill.Source; src != nil {
+		marker.SourceURL = src.URL
+		marker.SourceRef = src.Ref
+		marker.SourceCommit = src.Commit
+		marker.SourceSubdir = src.Subdir
+	}
 
 	var skipped []string
 	var sanitized bool
 	for _, dir := range dirs {
-		s, changed, err := installTreeAt(dir, a.Name, src, marker)
+		s, changed, err := installTreeAt(dir, a.Name, src, marker, a.Skill.Source)
 		if err != nil {
 			base.Status = StatusFailed
 			base.Reason = fmt.Sprintf("install skill to %s: %v", dir, err)
@@ -156,10 +162,12 @@ func installSkill(layout AgentLayout, a Artifact, opts Options) Report {
 
 // installTreeAt performs the atomic upsert-by-name of src into dir/name: copy into a
 // sibling temp dir, sanitize the staged SKILL.md's frontmatter (never the source — the
-// stored tar upstream must stay byte-identical, sp-mwco.1.11), stamp the ownership marker,
-// then atomically replace dir/name with os.Rename. Returns the relative paths of any
-// symlinks skipped during the copy, and whether SKILL.md's frontmatter was rewritten.
-func installTreeAt(dir, name, src string, marker skillMarker) (skippedSymlinks []string, sanitized bool, err error) {
+// stored tar upstream must stay byte-identical, sp-mwco.1.11), inject the provenance banner
+// for a non-nil source (sp-mwco.2.8 §4.6 — after sanitization, since that rewrites the
+// frontmatter block; before the marker), stamp the ownership marker, then atomically replace
+// dir/name with os.Rename. Returns the relative paths of any symlinks skipped during the copy,
+// and whether SKILL.md's frontmatter was rewritten.
+func installTreeAt(dir, name, src string, marker skillMarker, source *spec.SkillSource) (skippedSymlinks []string, sanitized bool, err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, false, fmt.Errorf("create skills directory: %w", err)
 	}
@@ -185,6 +193,11 @@ func installTreeAt(dir, name, src string, marker skillMarker) (skippedSymlinks [
 	sanitized, err = sanitizeSkillMD(tmp, name)
 	if err != nil {
 		return nil, false, fmt.Errorf("sanitize SKILL.md: %w", err)
+	}
+
+	// Fail closed: an unlabelled untrusted skill is a failed install, not a silent one.
+	if err := writeProvenance(tmp, source); err != nil {
+		return nil, false, fmt.Errorf("write provenance banner: %w", err)
 	}
 
 	if err := writeMarker(tmp, marker); err != nil {
