@@ -11,14 +11,41 @@
 
 import { test, expect } from "../../src/harness/test";
 import { AcceptanceClient } from "../../src/drivers/oracle";
-import { CliDriver } from "../../src/drivers/cli";
+import { CliDriver, parseListTable } from "../../src/drivers/cli";
 import { loadTenancyConfig } from "../../src/scenarios/tenancy";
 import type { DriverCtx } from "../../src/drivers/types";
-import { mkdtemp, rm } from "node:fs/promises";
+import { authv1 } from "@spawnery/client";
+import { fromBinary } from "@bufbuild/protobuf";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({ target, auth, browser, ns }) => {
+interface SessionIdentity {
+  accountId: string;
+  familyId: string;
+  sessionKeyHash: string;
+}
+
+function decodeSessionIdentity(wire: string): SessionIdentity {
+  const envelope = fromBinary(authv1.SignedAuthArtifactSchema, Buffer.from(wire, "base64url"));
+  const body = fromBinary(authv1.SessionTokenBodySchema, envelope.payload);
+  return {
+    accountId: body.accountId,
+    familyId: body.familyId,
+    sessionKeyHash: Buffer.from(body.sessionKeyHash).toString("hex"),
+  };
+}
+
+async function readStoredCliIdentity(configHome: string): Promise<SessionIdentity & { storedAccountId: string }> {
+  const state = JSON.parse(await readFile(join(configHome, "spawnctl", "auth.json"), "utf8")) as {
+    account_id?: string;
+    cp_access_token?: string;
+  };
+  if (!state.cp_access_token) throw new Error(`missing cp_access_token in ${configHome}/spawnctl/auth.json`);
+  return { ...decodeSessionIdentity(state.cp_access_token), storedAccountId: state.account_id ?? "" };
+}
+
+test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({ target, auth, browser, ns }, testInfo) => {
   const cfg = loadTenancyConfig();
   const makeApi = async (identity: typeof cfg.a) => new AcceptanceClient({
     baseUrl: target.cpEndpoint,
@@ -72,7 +99,38 @@ test("owner A sees only A's spawns; owner B sees only B's (api + cli)", async ({
     expect(listB).toContainSpawn(idB);
     expect(listB).not.toContainSpawn(idA);
 
-    const [cliListA, cliListB] = await Promise.all([cliA.list(ctxA), cliB.list(ctxB)]);
+    const [apiIdentityA, apiIdentityB, cliIdentityA, cliIdentityB, cliOutputA, cliOutputB] = await Promise.all([
+      auth.cpAccessToken(cfg.a).then(decodeSessionIdentity),
+      auth.cpAccessToken(cfg.b).then(decodeSessionIdentity),
+      readStoredCliIdentity(configA),
+      readStoredCliIdentity(configB),
+      cliA.listOutput(ctxA),
+      cliB.listOutput(ctxB),
+    ]);
+    const cliListA = parseListTable(cliOutputA.stdout);
+    const cliListB = parseListTable(cliOutputB.stdout);
+    await testInfo.attach("tenancy-cli-evidence.json", {
+      contentType: "application/json",
+      body: Buffer.from(JSON.stringify({
+        api: { a: apiIdentityA, b: apiIdentityB },
+        cli: {
+          a: { identity: cliIdentityA, ...cliOutputA, parsed: cliListA },
+          b: { identity: cliIdentityB, ...cliOutputB, parsed: cliListB },
+        },
+      }, null, 2)),
+    });
+
+    expect(cliIdentityA.accountId).toBe(apiIdentityA.accountId);
+    expect(cliIdentityB.accountId).toBe(apiIdentityB.accountId);
+    expect(cliIdentityA.storedAccountId).toBe(cliIdentityA.accountId);
+    expect(cliIdentityB.storedAccountId).toBe(cliIdentityB.accountId);
+    expect(cliIdentityA.accountId).not.toBe(cliIdentityB.accountId);
+    expect(cliIdentityA.familyId).not.toBe("");
+    expect(cliIdentityB.familyId).not.toBe("");
+    expect(cliIdentityA.familyId).not.toBe(cliIdentityB.familyId);
+    expect(cliIdentityA.sessionKeyHash).not.toBe("");
+    expect(cliIdentityB.sessionKeyHash).not.toBe("");
+    expect(cliIdentityA.sessionKeyHash).not.toBe(cliIdentityB.sessionKeyHash);
     expect(cliListA.some((s) => s.spawnId === idA)).toBe(true);
     expect(cliListA.some((s) => s.spawnId === idB)).toBe(false);
     expect(cliListB.some((s) => s.spawnId === idB)).toBe(true);

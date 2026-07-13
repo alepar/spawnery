@@ -255,8 +255,13 @@ export class CliDriver implements SpawnDriver {
   }
 
   async list(ctx: DriverCtx): Promise<{ spawnId: SpawnId; status: SpawnStatus; name: string }[]> {
-    const { stdout } = await this.run(ctx.identity, "list", []);
+    const { stdout } = await this.listOutput(ctx);
     return parseListTable(stdout);
+  }
+
+  /** Returns spawnctl list's unmodified streams when a caller needs auditable CLI evidence. */
+  async listOutput(ctx: DriverCtx): Promise<{ stdout: string; stderr: string }> {
+    return this.run(ctx.identity, "list", []);
   }
 
   /**

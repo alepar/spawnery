@@ -32,62 +32,86 @@ type IntentParams struct {
 }
 
 func pollAndSign(ctx context.Context, ic intentClient, credentials NodeCredentialSource, trust TargetTrust, spawnID string, params IntentParams) error {
+	_, err := pollAndSignResolved(ctx, ic, credentials, trust, spawnID, params, func(*cpv1.GetPendingIntentResponse) (string, error) {
+		return spawnID, nil
+	})
+	return err
+}
+
+func pollAndSignFork(ctx context.Context, ic intentClient, credentials NodeCredentialSource, trust TargetTrust, sourceSpawnID string, params IntentParams) (string, error) {
+	return pollAndSignResolved(ctx, ic, credentials, trust, sourceSpawnID, params, func(response *cpv1.GetPendingIntentResponse) (string, error) {
+		forkSpawnID := response.GetPending().GetSpawnId()
+		if forkSpawnID == "" {
+			return "", errors.New("pending fork spawn_id is empty")
+		}
+		if forkSpawnID == sourceSpawnID {
+			return "", errors.New("pending fork spawn_id must differ from source")
+		}
+		return forkSpawnID, nil
+	})
+}
+
+func pollAndSignResolved(ctx context.Context, ic intentClient, credentials NodeCredentialSource, trust TargetTrust, lookupSpawnID string, params IntentParams, resolveAuthorizedSpawnID func(*cpv1.GetPendingIntentResponse) (string, error)) (string, error) {
 	const pollInterval = 200 * time.Millisecond
 	const pollDeadline = 120 * time.Second
 	deadline := time.Now().Add(pollDeadline)
 	var response *cpv1.GetPendingIntentResponse
 	for {
-		resp, err := ic.GetPendingIntent(ctx, connect.NewRequest(&cpv1.GetPendingIntentRequest{SpawnId: spawnID}))
+		resp, err := ic.GetPendingIntent(ctx, connect.NewRequest(&cpv1.GetPendingIntentRequest{SpawnId: lookupSpawnID}))
 		if err != nil {
-			return fmt.Errorf("pollAndSign %s: GetPendingIntent: %w", spawnID, err)
+			return "", fmt.Errorf("pollAndSign %s: GetPendingIntent: %w", lookupSpawnID, err)
 		}
 		if resp.Msg.GetReady() {
 			response = resp.Msg
 			break
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("pollAndSign %s: GetPendingIntent did not become ready within %s", spawnID, pollDeadline)
+			return "", fmt.Errorf("pollAndSign %s: GetPendingIntent did not become ready within %s", lookupSpawnID, pollDeadline)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return "", ctx.Err()
 		case <-time.After(pollInterval):
 		}
 	}
 
-	pi, op, err := validatePendingIntent(response, spawnID, params)
+	authorizedSpawnID, err := resolveAuthorizedSpawnID(response)
 	if err != nil {
-		return fmt.Errorf("pollAndSign %s: %w", spawnID, err)
+		return "", fmt.Errorf("pollAndSign %s: %w", lookupSpawnID, err)
+	}
+	pi, op, err := validatePendingIntent(response, authorizedSpawnID, params)
+	if err != nil {
+		return "", fmt.Errorf("pollAndSign %s: %w", lookupSpawnID, err)
 	}
 	if _, err := verifyResolvedTarget(response.GetNodeCertChain(), response.GetTargetNodeId(), response.GetTargetNodeClass(), response.GetTargetNodeAccountId(), trust); err != nil {
-		return fmt.Errorf("pollAndSign %s: verify target: %w", spawnID, err)
+		return "", fmt.Errorf("pollAndSign %s: verify target: %w", lookupSpawnID, err)
 	}
 	if credentials == nil {
-		return fmt.Errorf("pollAndSign %s: node authorization requires login credentials", spawnID)
+		return "", fmt.Errorf("pollAndSign %s: node authorization requires login credentials", lookupSpawnID)
 	}
 	creds, err := credentials.NodeCredentials(ctx)
 	if err != nil {
-		return fmt.Errorf("pollAndSign %s: node credentials: %w", spawnID, err)
+		return "", fmt.Errorf("pollAndSign %s: node credentials: %w", lookupSpawnID, err)
 	}
 	if creds.AccessToken == "" || creds.Signer == nil {
-		return fmt.Errorf("pollAndSign %s: incomplete node credentials", spawnID)
+		return "", fmt.Errorf("pollAndSign %s: incomplete node credentials", lookupSpawnID)
 	}
 
 	body, err := intentBodyFromPending(pi, op)
 	if err != nil {
-		return fmt.Errorf("pollAndSign %s: %w", spawnID, err)
+		return "", fmt.Errorf("pollAndSign %s: %w", lookupSpawnID, err)
 	}
 	signed, err := buildSignedIntent(op, body, creds.Signer)
 	if err != nil {
-		return fmt.Errorf("pollAndSign %s: build intent: %w", spawnID, err)
+		return "", fmt.Errorf("pollAndSign %s: build intent: %w", lookupSpawnID, err)
 	}
 	_, err = ic.SubmitIntent(ctx, connect.NewRequest(&cpv1.SubmitIntentRequest{
-		SpawnId: spawnID, Intent: signed, NodeAccessToken: creds.AccessToken,
+		SpawnId: lookupSpawnID, Intent: signed, NodeAccessToken: creds.AccessToken,
 	}))
 	if err != nil {
-		return fmt.Errorf("pollAndSign %s: SubmitIntent: %w", spawnID, err)
+		return "", fmt.Errorf("pollAndSign %s: SubmitIntent: %w", lookupSpawnID, err)
 	}
-	return nil
+	return authorizedSpawnID, nil
 }
 
 func validatePendingIntent(response *cpv1.GetPendingIntentResponse, spawnID string, params IntentParams) (*cpv1.PendingIntent, intent.Op, error) {

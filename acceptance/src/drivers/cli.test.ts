@@ -194,6 +194,17 @@ describe("CliDriver — subprocess-backed verbs (execFile mocked)", () => {
     expect(seenArgs).toEqual(["suspend", "s1", "-cp", cfg.cpEndpoint, "-token", identity.token]);
   });
 
+  it("listOutput preserves the exact stdout and stderr for tenancy diagnostics", async () => {
+    const cp = await import("node:child_process");
+    const stdout = "SPAWN ID  STATUS  NAME  APP\ns1        ACTIVE  mine  acc/app\n";
+    vi.mocked(cp.execFile).mockImplementation(((_bin: string, _args: string[], cb: (...a: unknown[]) => void) => {
+      cb(null, stdout, "list warning\n");
+    }) as unknown as typeof cp.execFile);
+
+    const driver = new CliDriver(cfg);
+    await expect(driver.listOutput(ctx)).resolves.toEqual({ stdout, stderr: "list warning\n" });
+  });
+
   it("waitActive returns once status polls ACTIVE", async () => {
     const cp = await import("node:child_process");
     vi.mocked(cp.execFile).mockImplementation(((_bin: string, _args: string[], cb: (...a: unknown[]) => void) => {
