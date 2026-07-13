@@ -2,16 +2,20 @@ package node
 
 import (
 	"context"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/token"
@@ -21,261 +25,329 @@ type revocationDoer func(*http.Request) (*http.Response, error)
 
 func (f revocationDoer) Do(r *http.Request) (*http.Response, error) { return f(r) }
 
-func signedRevocation(t *testing.T, fixture artifactFixture, seq int64, account, family string, ids []string) map[string]any {
+func signedRevocation(t *testing.T, fixture artifactFixture, body *authv1.RevocationEntry) signedUserRevocationEntry {
 	t.Helper()
-	idsRaw, err := json.Marshal(ids)
+	payload, err := (proto.MarshalOptions{Deterministic: true}).Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := json.Marshal(struct {
-		Seq       int64  `json:"seq"`
-		AccountID string `json:"account_id"`
-		FamilyID  string `json:"family_id"`
-		TokenIDs  string `json:"token_ids"`
-		RevokedAt int64  `json:"revoked_at"`
-	}{seq, account, family, string(idsRaw), 123})
+	wire, err := fixture.credential.Sign(token.ArtifactTypeRevocation, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig, err := fixture.credential.Sign(token.ArtifactTypeRevocation, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return map[string]any{"seq": seq, "account_id": account, "family_id": family, "token_ids": string(idsRaw), "revoked_at": 123, "sig": sig}
+	return signedUserRevocationEntry{Seq: body.Seq, Sig: wire}
 }
 
-func TestRevocationConsumerVerifiesWholeGappedBatch(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	fixture := newArtifactFixture(t, now, "prod")
-	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
+func signedRawRevocation(t *testing.T, fixture artifactFixture, seq int64, artifactType string, payload []byte) signedUserRevocationEntry {
+	t.Helper()
+	wire, err := fixture.credential.Sign(artifactType, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
-	entries := []map[string]any{signedRevocation(t, fixture, 2, "alice", "f", []string{"one"}), signedRevocation(t, fixture, 7, "bob", "", []string{"two"})}
-	raw, _ := json.Marshal(entries)
+	return signedUserRevocationEntry{Seq: seq, Sig: wire}
+}
+
+func familyRevocation(seq int64, account, family, tokenID string, revokedAt, retainUntil int64) *authv1.RevocationEntry {
+	return &authv1.RevocationEntry{
+		Seq: seq, AccountId: account, FamilyId: family, RevokedAt: revokedAt,
+		RevokedTokens: []*authv1.RevokedToken{{TokenId: tokenID, RetainUntil: retainUntil}},
+	}
+}
+
+func accountRevocation(seq int64, account, tokenID string, revokedAt, retainUntil, cutoff int64) *authv1.RevocationEntry {
+	body := &authv1.RevocationEntry{Seq: seq, AccountId: account, RevokedAt: revokedAt, RevokeTokensIssuedBefore: cutoff}
+	if tokenID != "" {
+		body.RevokedTokens = []*authv1.RevokedToken{{TokenId: tokenID, RetainUntil: retainUntil}}
+	}
+	return body
+}
+
+func revocationResponse(page signedUserRevocationPage) *http.Response {
+	raw, _ := json.Marshal(page)
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(raw)))}
+}
+
+func TestRevocationConsumerDrainsBoundedPagesAndCommitsBeforeFanout(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "revocations.db"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pages := []signedUserRevocationPage{
+		{Entries: []signedUserRevocationEntry{signedRevocation(t, fixture, familyRevocation(2, "alice", "family", "one", now.Unix()-10, now.Unix()+60))}, HasMore: true},
+		{Entries: []signedUserRevocationEntry{signedRevocation(t, fixture, accountRevocation(7, "bob", "two", now.Unix()-5, now.Unix()+70, now.Unix()))}},
+	}
+	var requests atomic.Int32
 	doer := revocationDoer(func(r *http.Request) (*http.Response, error) {
-		if got := r.URL.String(); got != "https://as.internal/revocations?since=0" {
-			t.Fatalf("url=%q", got)
+		index := int(requests.Add(1) - 1)
+		wantURL := fmt.Sprintf("https://as.internal/revocations?limit=256&since=%d", []int64{0, 2}[index])
+		if r.URL.String() != wantURL {
+			t.Fatalf("url: want %q, got %q", wantURL, r.URL.String())
 		}
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(raw)))}, nil
+		if _, ok := r.Context().Deadline(); !ok {
+			t.Fatal("request has no deadline")
+		}
+		return revocationResponse(pages[index]), nil
 	})
-	consumer, err := NewRevocationConsumer(doer, "https://as.internal/revocations", fixture.verifier, store, time.Second)
+	consumer, err := NewRevocationConsumer(doer, "https://as.internal/revocations", fixture.verifier, store, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	consumer.now = func() time.Time { return now }
-	var calls atomic.Int32
-	if err := consumer.pollOnce(context.Background(), func(batch []VerifiedUserRevocation) { calls.Add(1) }); err != nil {
+	var nowCalls atomic.Int32
+	consumer.now = func() time.Time { nowCalls.Add(1); return now }
+	var callbacks atomic.Int32
+	if err := consumer.pollOnce(context.Background(), func(page []VerifiedUserRevocation) {
+		call := callbacks.Add(1)
+		if call == 1 && (store.Checkpoint() != 2 || !store.IsRevokedAt("one", "none", now.Unix()+1)) {
+			t.Fatal("first page callback ran before commit")
+		}
+		if call == 2 && (store.Checkpoint() != 7 || !store.IsRevokedAt("fresh", "bob", now.Unix()-1)) {
+			t.Fatal("second page callback ran before commit")
+		}
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if store.Checkpoint() != 7 || !store.IsRevoked("one", "x") || !store.IsRevoked("fresh", "bob") || calls.Load() != 1 {
-		t.Fatal("verified batch not committed and published")
+	if requests.Load() != 2 || callbacks.Load() != 2 || nowCalls.Load() != 2 {
+		t.Fatalf("requests=%d callbacks=%d verification-times=%d", requests.Load(), callbacks.Load(), nowCalls.Load())
 	}
 }
 
-func TestRevocationConsumerInvalidTailDoesNotAdvance(t *testing.T) {
+func TestRevocationConsumerInvalidLaterPagePreservesCommittedEarlierPage(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	fixture := newArtifactFixture(t, now, "prod")
-	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "revocations.db"), func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
-	entries := []map[string]any{signedRevocation(t, fixture, 2, "alice", "f", []string{"one"}), signedRevocation(t, fixture, 3, "alice", "f", []string{"two"})}
-	entries[1]["seq"] = int64(4)
-	raw, _ := json.Marshal(entries)
+	defer store.Close()
+	first := signedRevocation(t, fixture, familyRevocation(2, "alice", "family", "committed", now.Unix()-1, now.Unix()+60))
+	bad := signedRevocation(t, fixture, familyRevocation(6, "alice", "family", "not-committed", now.Unix()-1, now.Unix()+60))
+	bad.Seq = 5
+	var request atomic.Int32
 	consumer, err := NewRevocationConsumer(revocationDoer(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(raw)))}, nil
-	}), "https://as/revocations", fixture.verifier, store, time.Second)
+		if request.Add(1) == 1 {
+			return revocationResponse(signedUserRevocationPage{Entries: []signedUserRevocationEntry{first}, HasMore: true}), nil
+		}
+		return revocationResponse(signedUserRevocationPage{Entries: []signedUserRevocationEntry{bad}}), nil
+	}), "https://as/revocations", fixture.verifier, store, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	consumer.now = func() time.Time { return now }
-	if err := consumer.pollOnce(context.Background(), nil); err == nil {
-		t.Fatal("tampered outer sequence accepted")
+	var callbacks atomic.Int32
+	if err := consumer.pollOnce(context.Background(), func([]VerifiedUserRevocation) { callbacks.Add(1) }); err == nil {
+		t.Fatal("invalid later page accepted")
 	}
-	if store.Checkpoint() != 0 || store.IsRevoked("one", "alice") {
-		t.Fatal("invalid batch advanced state")
-	}
-}
-
-func TestRevocationConsumerDoesNotFanOutAmbiguousCommit(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	fixture := newArtifactFixture(t, now, "prod")
-	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	store.afterRename = func() error { return errors.New("directory sync failed") }
-	raw, _ := json.Marshal([]map[string]any{signedRevocation(t, fixture, 2, "alice", "family", []string{"old"})})
-	consumer, err := NewRevocationConsumer(revocationDoer(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(raw)))}, nil
-	}), "https://as/revocations", fixture.verifier, store, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	consumer.now = func() time.Time { return now }
-	var calls atomic.Int32
-	err = consumer.pollOnce(t.Context(), func([]VerifiedUserRevocation) { calls.Add(1) })
-	if !errors.Is(err, ErrUserRevocationStorePoisoned) {
-		t.Fatalf("poll err=%v", err)
-	}
-	if store.Checkpoint() != 0 || calls.Load() != 0 {
-		t.Fatalf("checkpoint=%d callbacks=%d", store.Checkpoint(), calls.Load())
+	if store.Checkpoint() != 2 || !store.IsRevokedAt("committed", "none", now.Unix()) || store.IsRevokedAt("not-committed", "none", now.Unix()) || callbacks.Load() != 1 {
+		t.Fatalf("checkpoint=%d committed=%v invalid=%v callbacks=%d", store.Checkpoint(), store.IsRevokedAt("committed", "none", now.Unix()), store.IsRevokedAt("not-committed", "none", now.Unix()), callbacks.Load())
 	}
 }
 
-func TestRevocationConsumerRejectsWholeInvalidBatchWithoutPublication(t *testing.T) {
+func TestRevocationConsumerRejectsWholeInvalidPageWithoutPublication(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	fixture := newArtifactFixture(t, now, "prod")
-	validPrefix := signedRevocation(t, fixture, 12, "prefix-account", "prefix-family", []string{"prefix-token"})
-	validInvalidSlot := signedRevocation(t, fixture, 13, "invalid-account", "invalid-family", []string{"invalid-token"})
-	encode := func(entries ...map[string]any) []byte {
-		raw, err := json.Marshal(entries)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return raw
+	otherRoot := newArtifactFixture(t, now, "prod")
+	valid := signedRevocation(t, fixture, familyRevocation(2, "alice", "family", "prefix", now.Unix()-1, now.Unix()+60))
+	validBody := familyRevocation(3, "alice", "family", "invalid", now.Unix()-1, now.Unix()+60)
+	validPayload, err := (proto.MarshalOptions{Deterministic: true}).Marshal(validBody)
+	if err != nil {
+		t.Fatal(err)
 	}
-	mutateSig := func(entry map[string]any, mutate func(*authv1.SignedAuthArtifact)) map[string]any {
-		clone := make(map[string]any, len(entry))
-		for k, v := range entry {
-			clone[k] = v
-		}
-		clone["sig"] = mutateArtifactWire(t, entry["sig"].(string), mutate)
-		return clone
+	unknownPayload := append(append([]byte(nil), validPayload...), 0xa0, 0x06, 0x01)
+	nonCanonicalPayload := append(append([]byte(nil), validPayload...), 0x08, 0x03)
+	duplicateBody := familyRevocation(3, "alice", "family", "duplicate", now.Unix()-1, now.Unix()+60)
+	duplicateBody.RevokedTokens = append(duplicateBody.RevokedTokens, duplicateBody.RevokedTokens[0])
+	nonIncreasing := familyRevocation(2, "alice", "family", "duplicate-seq", now.Unix()-1, now.Unix()+60)
+	tests := map[string]signedUserRevocationEntry{
+		"wrong artifact type": signedRawRevocation(t, fixture, 3, token.ArtifactTypeSession, validPayload),
+		"wrong root":          signedRevocation(t, otherRoot, validBody),
+		"unknown proto field": signedRawRevocation(t, fixture, 3, token.ArtifactTypeRevocation, unknownPayload),
+		"noncanonical proto":  signedRawRevocation(t, fixture, 3, token.ArtifactTypeRevocation, nonCanonicalPayload),
+		"malformed proto":     signedRawRevocation(t, fixture, 3, token.ArtifactTypeRevocation, []byte{0xff}),
+		"invalid family":      signedRevocation(t, fixture, &authv1.RevocationEntry{Seq: 3, AccountId: "alice", FamilyId: "family", RevokedAt: now.Unix() - 1}),
+		"duplicate token":     signedRevocation(t, fixture, duplicateBody),
+		"non-increasing seq":  signedRevocation(t, fixture, nonIncreasing),
 	}
-	signedPayload := func(payload []byte, seq int64, artifactType string) map[string]any {
-		sig, err := fixture.credential.Sign(artifactType, payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return map[string]any{"seq": seq, "account_id": "outer", "family_id": "outer", "token_ids": "[]", "revoked_at": 1, "sig": sig}
-	}
-	payloadWithTokenIDs := func(seq int64, tokenIDs string) []byte {
-		raw, err := json.Marshal(struct {
-			Seq       int64  `json:"seq"`
-			AccountID string `json:"account_id"`
-			FamilyID  string `json:"family_id"`
-			TokenIDs  string `json:"token_ids"`
-			RevokedAt int64  `json:"revoked_at"`
-		}{seq, "invalid-account", "family", tokenIDs, 1})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return raw
-	}
-	wrongRoot := newArtifactFixture(t, now, "prod")
-	wrongPurposeLeaf := replacementArtifactLeaf(t, fixture, now, fixture.credential.PrivateKey.Public(), func(cert *x509.Certificate) { cert.Policies = nil })
+	corrupt := signedRevocation(t, fixture, validBody)
+	corrupt.Sig = mutateArtifactWire(t, corrupt.Sig, func(artifact *authv1.SignedAuthArtifact) { artifact.Signature[0] ^= 1 })
+	tests["bad signature"] = corrupt
+	outerMismatch := signedRevocation(t, fixture, validBody)
+	outerMismatch.Seq++
+	tests["outer sequence"] = outerMismatch
 
-	tests := []struct {
-		name           string
-		response       func() (*http.Response, error)
-		seedCheckpoint bool
-	}{
-		{name: "wrong root", response: func() (*http.Response, error) {
-			return jsonResponse(encode(validPrefix, signedRevocation(t, wrongRoot, 13, "invalid-account", "family", []string{"invalid-token"}))), nil
-		}},
-		{name: "wrong artifact type", response: func() (*http.Response, error) {
-			return jsonResponse(encode(validPrefix, mutateSig(validInvalidSlot, func(a *authv1.SignedAuthArtifact) { a.ArtifactType = token.ArtifactTypeSession }))), nil
-		}},
-		{name: "wrong signer purpose", response: func() (*http.Response, error) {
-			return jsonResponse(encode(validPrefix, mutateSig(validInvalidSlot, func(a *authv1.SignedAuthArtifact) { a.SignerChain[0] = wrongPurposeLeaf.Raw }))), nil
-		}},
-		{name: "wrong signer key", response: func() (*http.Response, error) {
-			return jsonResponse(encode(validPrefix, mutateSig(validInvalidSlot, func(a *authv1.SignedAuthArtifact) { a.KeyId[0] ^= 1 }))), nil
-		}},
-		{name: "invalid signature", response: func() (*http.Response, error) {
-			return jsonResponse(encode(validPrefix, mutateSig(validInvalidSlot, func(a *authv1.SignedAuthArtifact) { a.Signature[0] ^= 1 }))), nil
-		}},
-		{name: "malformed verified payload", response: func() (*http.Response, error) {
-			return jsonResponse(encode(validPrefix, signedPayload([]byte("{"), 13, token.ArtifactTypeRevocation))), nil
-		}},
-		{name: "null verified token ids", response: func() (*http.Response, error) {
-			return jsonResponse(encode(validPrefix, signedPayload(payloadWithTokenIDs(13, "null"), 13, token.ArtifactTypeRevocation))), nil
-		}},
-		{name: "invalid verified token id", response: func() (*http.Response, error) {
-			return jsonResponse(encode(validPrefix, signedPayload(payloadWithTokenIDs(13, `["","duplicate","duplicate"]`), 13, token.ArtifactTypeRevocation))), nil
-		}},
-		{name: "rollback after prefix", seedCheckpoint: true, response: func() (*http.Response, error) {
-			return jsonResponse(encode(validPrefix, signedRevocation(t, fixture, 9, "invalid-account", "family", []string{"invalid-token"}))), nil
-		}},
-		{name: "non 200", response: func() (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("unavailable"))}, nil
-		}},
-		{name: "oversized response", response: func() (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(strings.Repeat(" ", maxRevocationFeedSize+1)))}, nil
-		}},
-		{name: "network failure", response: func() (*http.Response, error) { return nil, errors.New("network unavailable") }},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
+	for name, invalid := range tests {
+		t.Run(name, func(t *testing.T) {
+			store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "revocations.db"), func() time.Time { return now })
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { _ = store.Close() })
-			if test.seedCheckpoint {
-				if err := store.ApplyBatch([]VerifiedUserRevocation{{Seq: 10, AccountID: "baseline-account", FamilyID: "baseline-family", TokenIDs: []string{"baseline-token"}}}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			wantCheckpoint := store.Checkpoint()
-			consumer, err := NewRevocationConsumer(revocationDoer(func(*http.Request) (*http.Response, error) { return test.response() }), "https://as/revocations", fixture.verifier, store, time.Second)
+			defer store.Close()
+			consumer, err := NewRevocationConsumer(revocationDoer(func(*http.Request) (*http.Response, error) {
+				return revocationResponse(signedUserRevocationPage{Entries: []signedUserRevocationEntry{valid, invalid}}), nil
+			}), "https://as/revocations", fixture.verifier, store, 5*time.Second)
 			if err != nil {
 				t.Fatal(err)
 			}
 			consumer.now = func() time.Time { return now }
 			var callbacks atomic.Int32
-			if err := consumer.pollOnce(t.Context(), func([]VerifiedUserRevocation) { callbacks.Add(1) }); err == nil {
-				t.Fatal("invalid response accepted")
+			if err := consumer.pollOnce(context.Background(), func([]VerifiedUserRevocation) { callbacks.Add(1) }); err == nil {
+				t.Fatal("invalid page accepted")
 			}
-			if store.Checkpoint() != wantCheckpoint || store.IsRevoked("prefix-token", "prefix-account") || store.IsRevoked("invalid-token", "invalid-account") || callbacks.Load() != 0 {
-				t.Fatalf("checkpoint=%d want=%d prefix=%v invalid=%v callbacks=%d", store.Checkpoint(), wantCheckpoint, store.IsRevoked("prefix-token", "prefix-account"), store.IsRevoked("invalid-token", "invalid-account"), callbacks.Load())
-			}
-			if test.seedCheckpoint && !store.IsRevoked("baseline-token", "none") {
-				t.Fatal("baseline deny index changed")
+			if store.Checkpoint() != 0 || store.IsRevokedAt("prefix", "alice", now.Unix()) || callbacks.Load() != 0 {
+				t.Fatalf("checkpoint=%d prefix=%v callbacks=%d", store.Checkpoint(), store.IsRevokedAt("prefix", "alice", now.Unix()), callbacks.Load())
 			}
 		})
 	}
 }
 
-func jsonResponse(raw []byte) *http.Response {
-	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(raw)))}
-}
-
-func TestRevocationConsumerRunPollsImmediatelyAndCancelsBlockedRequest(t *testing.T) {
+func TestRevocationConsumerRejectsMalformedBoundedPages(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	fixture := newArtifactFixture(t, now, "prod")
-	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
+	valid := signedRevocation(t, fixture, familyRevocation(2, "alice", "family", "token", now.Unix()-1, now.Unix()+60))
+	validRaw, _ := json.Marshal(signedUserRevocationPage{Entries: []signedUserRevocationEntry{valid}})
+	tooMany := make([]signedUserRevocationEntry, 257)
+	for index := range tooMany {
+		tooMany[index] = valid
+	}
+	tests := map[string]string{
+		"empty has more":      `{"entries":[],"has_more":true}`,
+		"unknown page field":  `{"entries":[],"has_more":false,"unknown":1}`,
+		"unknown entry field": fmt.Sprintf(`{"entries":[{"seq":2,"sig":%q,"unknown":1}],"has_more":false}`, valid.Sig),
+		"trailing data":       string(validRaw) + `{}`,
+		"too many entries":    string(mustJSONValue(t, signedUserRevocationPage{Entries: tooMany})),
+		"oversized body":      `{"entries":[],"has_more":false,"padding":"` + strings.Repeat("x", maxRevocationPageBytes) + `"}`,
+	}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "revocations.db"), func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			consumer, err := NewRevocationConsumer(revocationDoer(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(raw))}, nil
+			}), "https://as/revocations", fixture.verifier, store, 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := consumer.pollOnce(context.Background(), nil); err == nil {
+				t.Fatal("malformed page accepted")
+			}
+		})
+	}
+}
+
+func mustJSONValue(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
-	called := make(chan struct{})
+	return raw
+}
+
+func TestRevocationConsumerRequestDeadlineRetriesAndConverges(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "revocations.db"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var attempts atomic.Int32
+	entry := signedRevocation(t, fixture, familyRevocation(2, "alice", "family", "after-timeout", now.Unix()-1, now.Unix()+60))
 	doer := revocationDoer(func(r *http.Request) (*http.Response, error) {
-		close(called)
+		if _, ok := r.Context().Deadline(); !ok {
+			t.Fatal("request deadline missing")
+		}
+		if attempts.Add(1) == 1 {
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}
+		return revocationResponse(signedUserRevocationPage{Entries: []signedUserRevocationEntry{entry}}), nil
+	})
+	consumer, err := NewRevocationConsumer(doer, "https://as/revocations", fixture.verifier, store, 5*time.Second,
+		WithRevocationRequestTimeout(10*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer.now = func() time.Time { return now }
+	ctx, cancel := context.WithCancel(context.Background())
+	var delays []time.Duration
+	consumer.wait = func(_ context.Context, delay time.Duration) error {
+		delays = append(delays, delay)
+		return nil
+	}
+	consumer.Run(ctx, func([]VerifiedUserRevocation) { cancel() })
+	if attempts.Load() != 2 || store.Checkpoint() != 2 || !reflect.DeepEqual(delays, []time.Duration{5 * time.Second}) {
+		t.Fatalf("attempts=%d checkpoint=%d delays=%v", attempts.Load(), store.Checkpoint(), delays)
+	}
+}
+
+func TestRevocationConsumerExponentialBackoffCapsAndResets(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "revocations.db"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var attempts atomic.Int32
+	consumer, err := NewRevocationConsumer(revocationDoer(func(*http.Request) (*http.Response, error) {
+		attempt := attempts.Add(1)
+		if attempt == 4 {
+			return revocationResponse(signedUserRevocationPage{Entries: []signedUserRevocationEntry{}}), nil
+		}
+		return nil, errors.New("unavailable")
+	}), "https://as/revocations", fixture.verifier, store, 5*time.Second, WithRevocationMaxBackoff(20*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var delays []time.Duration
+	consumer.wait = func(_ context.Context, delay time.Duration) error {
+		delays = append(delays, delay)
+		if len(delays) == 5 {
+			cancel()
+			return context.Canceled
+		}
+		return nil
+	}
+	consumer.Run(ctx, nil)
+	want := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 5 * time.Second, 5 * time.Second}
+	if !reflect.DeepEqual(delays, want) {
+		t.Fatalf("backoff: want %v, got %v", want, delays)
+	}
+}
+
+func TestRevocationConsumerParentCancellationIsImmediate(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "revocations.db"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	started := make(chan struct{})
+	var once sync.Once
+	consumer, err := NewRevocationConsumer(revocationDoer(func(r *http.Request) (*http.Response, error) {
+		once.Do(func() { close(started) })
 		<-r.Context().Done()
 		return nil, r.Context().Err()
-	})
-	consumer, err := NewRevocationConsumer(doer, "https://as/revocations", fixture.verifier, store, time.Hour)
+	}), "https://as/revocations", fixture.verifier, store, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { consumer.Run(ctx, nil); close(done) }()
-	select {
-	case <-called:
-	case <-time.After(time.Second):
-		t.Fatal("first poll was not immediate")
-	}
+	<-started
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("consumer did not stop after cancellation")
+		t.Fatal("parent cancellation did not stop the consumer")
 	}
 }
