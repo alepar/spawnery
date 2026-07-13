@@ -652,7 +652,8 @@ func TestLogout(t *testing.T) {
 
 	s := &authState{
 		ASURL:              srv.URL,
-		CPAccessToken:      "fake-access",
+		CPAccessToken:      "fake-cp-access",
+		NodeAccessToken:    "fake-node-access",
 		AccessExpiresAt:    time.Now().Add(15 * time.Minute).Unix(),
 		RefreshToken:       rawRefresh,
 		SessionKeyPKCS8PEM: keyPEM,
@@ -882,6 +883,7 @@ func seedLoginTestFamilyWithSPKI(t *testing.T, st store.Store, accountID string,
 		SessionPubkeySPKI: spkiDER,
 		CPAccessTokenID:   "cp-" + accountID,
 		NodeAccessTokenID: "node-" + accountID,
+		AccessExpiresAt:   now.Add(15 * time.Minute).Unix(),
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),
