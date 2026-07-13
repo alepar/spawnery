@@ -1405,6 +1405,9 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 			ProvisionStep: provStep, ProvisionTotal: provTotal, ProvisionStepLabel: provLabel,
 			ErrorStep: sp.ErrorStep, ErrorDetail: sp.ErrorDetail,
 			SkillInstalls: skillInstallsToProto(s.skillInstalls, sp.ID),
+			// Persisted GitHub credential condition (sp-2tx8.9.2). Unlike SkillInstalls/Provision*
+			// this survives a CP restart — RELINK_REQUIRED is a state the user must act on.
+			GithubCredentialStatus: githubCredStatusToProto(sp.GitHubCredentialStatus),
 		}
 		if sp.ParentSpawnID != nil {
 			out[i].ParentSpawnId = *sp.ParentSpawnID
