@@ -95,8 +95,7 @@ Preconditions beyond the base `.env.*` vars (see `.env.example`):
 - `ACC_AGENT_APP_ID` — a real coding-agent app registered on the target.
 - `ACC_AGENT_MODEL` — a pinned, cheap model (attributable cost, never "whatever the app
   defaults to").
-- `ACC_NODE_ADDR` — the node's terminal endpoint reachable from wherever the suite runs. `exec`
-  (like `attach`/`shell`) dials the node **directly**, bypassing the CP entirely.
+- `spawnctl exec` uses the authenticated CP relay and the fixture's isolated stored custody.
 - A target that omits the capability declaration, or declares `1` without
   `ACC_AGENT_APP_ID`/`ACC_AGENT_MODEL`, fails loudly with a precondition error.
 - The non-LLM `exec-exitcode` spec uses `ACC_TEST_APP_ID`, independent of live inference.

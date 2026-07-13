@@ -203,15 +203,13 @@ describe("execInSpawn", () => {
       return { stdout: "hello\n", stderr: "" };
     });
 
-    const result = await execInSpawn(cfg, identity, "http://node.example:9092", "spawn-1", ["sh", "-lc", "echo hi"]);
+		const result = await execInSpawn(cfg, identity, "spawn-1", ["sh", "-lc", "echo hi"]);
 
     expect(seenArgs).toEqual([
       "exec",
       "-spawn",
       "spawn-1",
-      "-addr",
-      "http://node.example:9092",
-      "-cp",
+			"-cp",
       "https://cp.example",
       "-token",
       "tok-123",
@@ -230,7 +228,7 @@ describe("execInSpawn", () => {
       err: Object.assign(new Error("Command failed"), { code: 7 }),
     }));
 
-    const result = await execInSpawn(cfg, identity, "http://node.example:9092", "spawn-1", ["false"]);
+		const result = await execInSpawn(cfg, identity, "spawn-1", ["false"]);
     expect(result).toEqual({ stdout: "partial\n", stderr: "failed\n", code: 7 });
   });
 
@@ -241,7 +239,7 @@ describe("execInSpawn", () => {
       err: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }),
     }));
 
-    const result = await execInSpawn(cfg, identity, "http://node.example:9092", "spawn-1", ["true"]);
+		const result = await execInSpawn(cfg, identity, "spawn-1", ["true"]);
     expect(result.code).toBe(1);
   });
 });

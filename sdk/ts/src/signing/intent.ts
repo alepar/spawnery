@@ -13,7 +13,7 @@
 
 import { create, toBinary } from "@bufbuild/protobuf";
 import type { Client } from "@connectrpc/connect";
-import { IntentBodySchema, SignedIntentSchema, type SignedIntent } from "../gen/auth/v1/auth_pb.js";
+import { IntentBodySchema, SignedIntentSchema, type ExecRequest, type SignedIntent } from "../gen/auth/v1/auth_pb.js";
 import type { SpawnService } from "../gen/cp/v1/cp_pb.js";
 import { toBase64 } from "../keys/encoding.js";
 import type { SessionSigner } from "./sessionSigner.js";
@@ -26,6 +26,7 @@ export const DOMAIN_MIGRATE_SPAWN = "spawnery/intent/migrate-spawn/v1";
 export const DOMAIN_FORK_SPAWN = "spawnery/intent/fork-spawn/v1";
 export const DOMAIN_SESSION_OPEN = "spawnery/intent/session-open/v1";
 export const DOMAIN_SESSION_REAUTH = "spawnery/intent/session-reauth/v1";
+export const DOMAIN_EXEC_OPEN = "spawnery/intent/exec-open/v1";
 
 export function domainForOp(op: string): string {
   switch (op) {
@@ -36,6 +37,7 @@ export function domainForOp(op: string): string {
     case "fork-spawn":     return DOMAIN_FORK_SPAWN;
     case "session-open":   return DOMAIN_SESSION_OPEN;
     case "session-reauth": return DOMAIN_SESSION_REAUTH;
+    case "exec-open":      return DOMAIN_EXEC_OPEN;
     default:               return `spawnery/intent/${op}/v1`;
   }
 }
@@ -63,6 +65,7 @@ export interface IntentFields {
   }>; // field 12 repeated MountRef — all 5 fields signed (node correspondence compares all 5)
   attachedSecretIds?: string[];
   newTokenId?: string;
+  execRequest?: ExecRequest;
 }
 
 /**
@@ -92,6 +95,7 @@ export function buildIntentBodyBytes(f: IntentFields): Uint8Array {
     })),
     attachedSecretIds: f.attachedSecretIds ?? [],
     newTokenId: f.newTokenId ?? "",
+    execRequest: f.execRequest,
   });
   return toBinary(IntentBodySchema, body);
 }

@@ -416,6 +416,7 @@ message SessionOpen  {
   string               asserted_owner = 11;
   string               attachment_id = 12;
   uint64               attachment_sequence = 13;
+  auth.v1.ExecRequest  exec_request = 14;
 }
 message SessionClose { string spawn_id = 1; uint64 generation = 2; string client_id = 3; string session_id = 4; string attachment_id = 5; }
 message SessionReauth {

@@ -455,6 +455,33 @@ func TestPerSessionClientRouting(t *testing.T) {
 	}
 }
 
+func TestAttachExecClientRelaysImmutableRequestOnExplicitSession(t *testing.T) {
+	r := New()
+	node := &mcNode{}
+	r.Bind("sp1", "node-1", node)
+	req := &authv1.ExecRequest{Argv: []string{"printf", "original"}}
+	_, _, err := r.AttachExecClient("sp1", "exec-123", "client-1", "alice", &authv1.AuthEnvelope{}, req, &mcClient{}, 0, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Argv[1] = "mutated"
+	opens := node.opens()
+	if len(opens) != 1 {
+		t.Fatalf("opens = %d, want 1", len(opens))
+	}
+	open := opens[0]
+	if open.GetSessionId() != "exec-123" || open.GetExecRequest().GetArgv()[1] != "original" {
+		t.Fatalf("exec SessionOpen changed: %+v", open)
+	}
+	if err := r.FromClient("sp1", "exec-123", "client-1", []byte("opaque")); err != nil {
+		t.Fatal(err)
+	}
+	last := node.sent[len(node.sent)-1].GetFrame()
+	if last.GetSessionId() != "exec-123" || string(last.GetData()) != "opaque" {
+		t.Fatalf("exec data escaped selected session: %+v", last)
+	}
+}
+
 // gatherCounterValue reads a single labeled counter value from metrics.Registry.
 // Returns 0 if the metric/label is not found (counter was never incremented).
 func gatherCounterValue(t *testing.T, metricName, labelKey, labelVal string) float64 {

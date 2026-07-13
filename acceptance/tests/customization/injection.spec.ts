@@ -1,10 +1,9 @@
 /**
  * Phase 5 — profile-attach injection: attach a profile (custom skill entry) at spawn-create,
- * observe materialization inside the running spawn via `spawnctl exec` (the only Phase-5 surface
- * that needs the NODE directly reachable, not proxied through the CP — see target.nodeAddr).
+ * observe materialization inside the running spawn via authenticated, CP-relayed `spawnctl exec`.
  *
  * Preconditions (fail loud, never skip — design's "every dep-gated scenario fails loud, not a
- * skip"): a reachable node (target.nodeAddr) and a registered seed app whose agent installs skills
+ * skip"): a registered seed app whose agent installs skills
  * (target.seedSkillAppId; claude installs to `.claude/skills`, codex to `.codex/skills` —
  * internal/agentinstall/{claude,codex}.go). Both are documented in .env.example.
  *
@@ -33,7 +32,7 @@ test(
     if (!model) throw new Error("ACC_TEST_MODEL is unset — injection.spec.ts needs a model for the selected agent runnable");
 
     const profileCli = new ProfileCli(cli.configuration(), identity);
-    const cliCfg = { cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin };
+    const cliCfg = cli.configuration();
 
     let profileId: string | undefined;
     let spawnId: string | undefined;
@@ -66,7 +65,7 @@ test(
 
       // Observe materialization: agent-agnostic via the `*skills/*` glob (claude: .claude/skills,
       // codex: .codex/skills — internal/agentinstall/{claude,codex}.go).
-      const result = await execInSpawn(cliCfg, identity, target.nodeAddr, spawnId, [
+      const result = await execInSpawn(cliCfg, identity, spawnId, [
         "sh",
         "-lc",
         `find "$HOME" -path "*skills/${entryName}/SKILL.md" -exec cat {} +`,

@@ -96,12 +96,13 @@ type cpStream interface {
 }
 
 type attacher struct {
-	cfg      Config
-	mgr      *spawnlet.Manager
-	httpc    connect.HTTPClient
-	sx       sessionExec     // container-exec boundary for additional-session launch/reap (sp-npxq.3)
-	verifier *IntentVerifier // mandatory in Run; nil only in low-level unit fixtures
-	auths    *sessionAuthRegistry
+	cfg        Config
+	mgr        *spawnlet.Manager
+	httpc      connect.HTTPClient
+	sx         sessionExec     // container-exec boundary for additional-session launch/reap (sp-npxq.3)
+	execRunner execRunner      // one-shot non-interactive exec boundary
+	verifier   *IntentVerifier // mandatory in Run; nil only in low-level unit fixtures
+	auths      *sessionAuthRegistry
 
 	ctrlHTTP httpDoer // POSTs SetModel to the per-pod sidecar control endpoint (injectable for tests)
 
@@ -110,6 +111,7 @@ type attacher struct {
 	tmuxRelays       map[sessionKey]*tmuxRelay
 	sessions         map[string]*sessionRegistry    // spawn_id -> live session set (roster source of truth)
 	pending          map[sessionKey][]pendingClient // attaches that arrived before the pump/relay existed (session STARTING)
+	execAttachments  map[sessionAuthKey]execAttachment
 	forkBarriers     map[string]forkIngressBarrier
 	forkWaits        map[string]forkBarrierWait
 	activeForks      map[string]activeSameNodeFork
@@ -236,6 +238,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		auths:            auths,
 		ctrlHTTP:         &http.Client{Timeout: controlPostTimeout},
 		sx:               &realSessionExec{mgr: mgr},
+		execRunner:       &realSessionExec{mgr: mgr},
 		pumps:            map[sessionKey]*Pump{},
 		tmuxRelays:       map[sessionKey]*tmuxRelay{},
 		sessions:         map[string]*sessionRegistry{},
@@ -452,6 +455,10 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 				a.rejectSessionOpen(m.Open, "attachment incarnation is required")
 				return
 			}
+			if m.Open.GetExecRequest() != nil && m.Open.GetSessionId() == "" {
+				a.rejectSessionOpen(m.Open, "exec request requires explicit session id")
+				return
+			}
 			if a.auths != nil && !a.auths.acceptsOpen(openKey, m.Open.GetAttachmentSequence()) {
 				return
 			}
@@ -467,7 +474,17 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 				SessionID:     sid(m.Open.GetSessionId()),
 				AssertedOwner: m.Open.GetAssertedOwner(),
 			}
-			auth, nack, detail := a.verifier.VerifyOpen(m.Open.GetAuth(), fields)
+			var auth Authorization
+			var nack NACKCode
+			var detail string
+			if m.Open.GetExecRequest() != nil {
+				auth, nack, detail = a.verifier.VerifyExec(m.Open.GetAuth(), ExecFields{
+					SpawnID: spawnID, Generation: gen, SessionID: fields.SessionID,
+					AssertedOwner: fields.AssertedOwner, Request: m.Open.GetExecRequest(),
+				})
+			} else {
+				auth, nack, detail = a.verifier.VerifyOpen(m.Open.GetAuth(), fields)
+			}
 			if nack != "" {
 				slog.Warn("SessionOpen: intent NACK (client not attached)",
 					"spawn", spawnID, "session", sid(m.Open.GetSessionId()), "nack", nack, "detail", detail)
@@ -496,6 +513,9 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			registeredAuth = true
 		}
 		bind := func() bool {
+			if m.Open.GetExecRequest() != nil {
+				return a.attachExec(ctx, m.Open, openKey)
+			}
 			if registeredAuth {
 				return a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor,
 					pendingClientAuthorization{key: openKey, attachmentID: m.Open.GetAttachmentId()})
@@ -1101,6 +1121,12 @@ func (a *attacher) reapSessions(spawnID string) ([]*Pump, []*tmuxRelay) {
 			delete(a.pending, k) // spawn gone: drop any pended attaches (their WS will error)
 		}
 	}
+	for key, exec := range a.execAttachments {
+		if key.spawnID == spawnID {
+			exec.cancel()
+			delete(a.execAttachments, key)
+		}
+	}
 	delete(a.sessions, spawnID)
 	return ps, relays
 }
@@ -1476,6 +1502,7 @@ func (a *attacher) detachClient(spawnID, sessionID, clientID string) {
 }
 
 func (a *attacher) detachClientTransport(spawnID, sessionID, clientID string) {
+	a.cancelExec(sessionAuthKey{spawnID: spawnID, sessionID: sessionID, clientID: clientID})
 	k := sessionKey{spawnID, sessionID}
 	a.mu.Lock()
 	relay := a.tmuxRelays[k]

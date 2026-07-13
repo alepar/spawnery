@@ -113,6 +113,19 @@ func (r *Router) Attached(spawnID string) bool {
 // ingress validates its structural presence; low-level router tests may still pass nil.
 // assertedOwner is the CP-asserted spawn owner threaded into the node's owner-binding check.
 func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string, env *authv1.AuthEnvelope, c ClientSender, cursor int64, generations ...uint64) (<-chan struct{}, AttachmentLease, error) {
+	return r.attachClient(spawnID, sessionID, clientID, assertedOwner, env, nil, c, cursor, generations...)
+}
+
+// AttachExecClient registers a one-shot exec attachment and relays an immutable copy of its exact
+// request to the node. Exec sessions always use a client-selected, non-default session id.
+func (r *Router) AttachExecClient(spawnID, sessionID, clientID, assertedOwner string, env *authv1.AuthEnvelope, req *authv1.ExecRequest, c ClientSender, cursor int64, generations ...uint64) (<-chan struct{}, AttachmentLease, error) {
+	if sessionID == "" || req == nil {
+		return nil, AttachmentLease{}, fmt.Errorf("exec attachment requires explicit session id and request")
+	}
+	return r.attachClient(spawnID, sessionID, clientID, assertedOwner, env, proto.Clone(req).(*authv1.ExecRequest), c, cursor, generations...)
+}
+
+func (r *Router) attachClient(spawnID, sessionID, clientID, assertedOwner string, env *authv1.AuthEnvelope, req *authv1.ExecRequest, c ClientSender, cursor int64, generations ...uint64) (<-chan struct{}, AttachmentLease, error) {
 	var generation uint64
 	if len(generations) == 1 {
 		generation = generations[0]
@@ -147,7 +160,7 @@ func (r *Router) AttachClient(spawnID, sessionID, clientID, assertedOwner string
 	return done, lease, node.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Open{Open: &nodev1.SessionOpen{
 		SpawnId: spawnID, SessionId: sessionID, ClientId: clientID, Cursor: cursor,
 		Generation: generation, Auth: env, AttachmentId: lease.id, AttachmentSequence: attachmentSequence,
-		AssertedOwner: assertedOwner,
+		AssertedOwner: assertedOwner, ExecRequest: req,
 	}}})
 }
 

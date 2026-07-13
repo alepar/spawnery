@@ -1,7 +1,7 @@
 /**
  * customization.ts: cli-primary drivers for the customization surface (Phase 5, sp-tq0t.8) —
  * `ProfileCli`/`CatalogCli` (spawnctl `profile`/`catalog` subcommand wrappers), `execInSpawn`
- * (observes profile-attached artifacts inside a spawn via the node's `spawnctl exec`), and two
+ * (observes profile-attached artifacts inside a spawn via CP-relayed `spawnctl exec`), and two
  * small builders shared by the scenarios: `buildSkillTar` (a minimal custom-skill payload) and
  * `dummyAtRestEnvelope` (a CRUD-only secret envelope — see the note on secrets below).
  *
@@ -163,20 +163,19 @@ export class CatalogCli {
 }
 
 /**
- * execInSpawn runs `cmd` non-interactively in a spawn's agent container via the NODE's `/exec`
- * endpoint (spawnctl exec, NOT proxied through the CP — needs `nodeAddr` directly reachable). A
+ * execInSpawn runs `cmd` non-interactively in a spawn's agent container via authenticated,
+ * CP-relayed `spawnctl exec`. A
  * non-zero exit code is returned as data (never thrown) so scenarios can assert on it.
  */
 export async function execInSpawn(
   cfg: CliConfig,
   identity: Identity,
-  nodeAddr: string,
   spawnId: string,
   cmd: string[],
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   return execFileP2(
     cfg.spawnctlBin,
-    buildExecArgs({ ...cfg, nodeAddr }, identity, spawnId, cmd),
+    buildExecArgs(cfg, identity, spawnId, cmd),
     cfg.configHome,
   );
 }

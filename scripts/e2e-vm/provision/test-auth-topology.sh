@@ -120,6 +120,14 @@ rg -q 'ACC_TEST_MODEL' "$REPO/acceptance/tests/customization/injection.spec.ts" 
 }
 
 common="$HERE/env/common.env"
+if rg -n '^NODE_TERMINAL_ADDR=' "$common"; then
+  echo "enforced VM node exposes a direct terminal listener" >&2
+  exit 1
+fi
+if rg -n 'ACC_NODE_(ADDR|TERMINAL_ADDR)' "$REPO/scripts/e2e-vm/up.sh" "$REPO/acceptance/.env.example"; then
+  echo "acceptance topology still advertises a direct node endpoint" >&2
+  exit 1
+fi
 rg -q '^AGENT_IMAGE=spawnery/agent:dev$' "$common" || {
   echo "VM node does not run the staged unified agent image" >&2
   exit 1

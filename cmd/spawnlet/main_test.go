@@ -288,6 +288,34 @@ func TestSpawnletConfig_RejectsUnknownAuthMode(t *testing.T) {
 	}
 }
 
+func TestSpawnletConfigRejectsDirectTerminalOnEnforcedAttachedNode(t *testing.T) {
+	cfg := Spawnlet{}
+	cfg.Node.AuthMode = "enforced"
+	cfg.Node.TerminalAddr = "0.0.0.0:9092"
+	cfg.CP.Addr = "https://cp.internal"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "terminal") {
+		t.Fatalf("Validate error = %v, want direct terminal rejection", err)
+	}
+}
+
+func TestDirectTerminalPolicyRetainsDevelopmentHandlers(t *testing.T) {
+	standalone := Spawnlet{}
+	standalone.Node.AuthMode = "insecure"
+	standalone.Node.TerminalAddr = "127.0.0.1:9092"
+	if !directTerminalAllowed(standalone) {
+		t.Fatal("standalone development terminal handlers were disabled")
+	}
+	attachedDev := standalone
+	attachedDev.CP.Addr = "http://127.0.0.1:8080"
+	if !directTerminalAllowed(attachedDev) {
+		t.Fatal("explicit insecure attached development handlers were disabled")
+	}
+	attachedDev.Node.AuthMode = "enforced"
+	if directTerminalAllowed(attachedDev) {
+		t.Fatal("enforced attached node exposes direct terminal handlers")
+	}
+}
+
 func TestBuildIntentVerifierRejectsUnknownAuthMode(t *testing.T) {
 	cfg := &Spawnlet{}
 	cfg.Node.AuthMode = "enforcd"

@@ -243,6 +243,8 @@ message Frame {
   string reauth_token = 3;
   auth.v1.AuthEnvelope session_auth = 4;
   auth.v1.AuthEnvelope session_reauth = 5;
+  string session_id = 6; // bind frame only: explicit session selector; empty means ordinary default session
+  auth.v1.ExecRequest exec_request = 7; // bind frame only: exact exec-open request
 }
 
 // Client-facing transport (mirrors node.v1.SessionTransport ordinals).

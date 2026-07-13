@@ -24,7 +24,7 @@
  */
 
 import { test, expect } from "../../src/harness/test";
-import { execConfigFromTarget, execOrThrow } from "../../src/scenarios/exec";
+import { execOrThrow } from "../../src/scenarios/exec";
 import { waitForStatus, GARAGE_HINT } from "../../src/scenarios/wait";
 
 // The seeded app exposing a github SLOT mount named "repo" at path "repo" (examples/github-app).
@@ -40,12 +40,12 @@ function giteaRepoName(runId: string): string {
   return `acc-gitmount-${runId}-${rand}`.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
 }
 
-test("github mount survives suspend/resume · cli", { tag: "@mutating" }, async ({ ctx, cli, api, runId, target }) => {
+test("github mount survives suspend/resume · cli", { tag: "@mutating" }, async ({ ctx, cli, api, runId }) => {
   // The full flow — create + clone-in from Gitea + commit + a Garage suspend/resume round-trip — is
   // well past Playwright's 30s default on the VM lane (marker-only suspend-fork just fits; the clone
   // pushes this over). Match the slow-lane budget (cf. ACC_SPAWN_ACTIVE_TIMEOUT_MS=240s).
   test.setTimeout(240_000);
-  const cfg = execConfigFromTarget(target);
+  const cfg = cli.configuration();
 
   // 1. Create a spawn on the seeded github-slot app, binding the slot to a fresh Gitea repo
   //    (create_if_missing → clone-in of an empty repo; the CP derives the gh: credential, the node's
@@ -61,13 +61,13 @@ test("github mount survives suspend/resume · cli", { tag: "@mutating" }, async 
   //    in-spawn git workflow. Identity is passed inline so the commit needs no seeded gitconfig.
   const marker = `gitmount-${runId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const gitId = "-c user.name=acc -c user.email=acc@e2e.test";
-  await execOrThrow(cfg, id, [
+  await execOrThrow(cfg, ctx.identity, id, [
     "sh",
     "-c",
     `set -e; cd ${mountPath}; printf %s '${marker}' > acc-git-marker.txt; ` +
       `git ${gitId} add acc-git-marker.txt; git ${gitId} commit -m 'acc marker'`,
   ]);
-  const head = (await execOrThrow(cfg, id, ["sh", "-c", `cd ${mountPath} && git rev-parse HEAD`])).stdout.trim();
+  const head = (await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", `cd ${mountPath} && git rev-parse HEAD`])).stdout.trim();
 
   // 3. Suspend (workspace → journal, pod torn down) then resume (journal → new pod). The Garage
   //    journal is the durability substrate — GARAGE_HINT frames a timeout as that dependency.
@@ -79,8 +79,8 @@ test("github mount survives suspend/resume · cli", { tag: "@mutating" }, async 
 
   // 4. The committed marker file AND the exact commit survived the journal round-trip (restored,
   //    not re-cloned — the unpushed commit only exists in the journal-captured .git).
-  const restored = await execOrThrow(cfg, id, ["cat", `${mountPath}/acc-git-marker.txt`]);
+  const restored = await execOrThrow(cfg, ctx.identity, id, ["cat", `${mountPath}/acc-git-marker.txt`]);
   expect(restored.stdout.trim()).toBe(marker);
-  const restoredHead = (await execOrThrow(cfg, id, ["sh", "-c", `cd ${mountPath} && git rev-parse HEAD`])).stdout.trim();
+  const restoredHead = (await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", `cd ${mountPath} && git rev-parse HEAD`])).stdout.trim();
   expect(restoredHead).toBe(head);
 });
