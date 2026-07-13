@@ -64,8 +64,22 @@ describe("loadTargetConfig", () => {
   });
 
   it("accepts oauth-pop as a valid ACC_AUTH_MODE", () => {
-    const env = { ...baseEnv, ACC_AUTH_MODE: "oauth-pop" };
+    const env = {
+      ...baseEnv,
+      ACC_AUTH_MODE: "oauth-pop",
+      ACC_ROOT_CA_PEM: "/run/root.pem",
+      ACC_TRUST_DOMAIN: "prod.spawnery.internal",
+      ACC_CLOUD_ACCOUNT_ID: "spawnery-system",
+      ACC_CRL_STATE: "/run/crl-state.json",
+      ACC_CRL_ISSUERS: "/run/cloud-intermediate.pem",
+      ACC_CRLS: "/run/cloud.crl.pem",
+    };
     expect(loadTargetConfig(env as unknown as NodeJS.ProcessEnv).authMode).toBe("oauth-pop");
+  });
+
+  it("requires every public trust input in oauth-pop mode", () => {
+    const env = { ...baseEnv, ACC_AUTH_MODE: "oauth-pop" };
+    expect(() => loadTargetConfig(env as unknown as NodeJS.ProcessEnv)).toThrow(/ACC_ROOT_CA_PEM/);
   });
 
   it("defaults asOrigin to webOrigin (same-origin, mirrors the SPA's dev-proxy default)", () => {

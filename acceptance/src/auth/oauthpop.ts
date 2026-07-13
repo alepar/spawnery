@@ -18,11 +18,12 @@
  *   rewrite (sp-tq0t.13 bead notes).
  */
 
-import type { KeyStore } from "@spawnery/client";
+import type { KeyStore, ResolvedTargetVerifier } from "@spawnery/client";
 import type { Identity } from "../fixtures/identity-pool";
-import type { AuthStrategy } from "./types";
+import type { AuthStrategy, CliPreparation, CliPreparationOptions } from "./types";
 import { establishOAuthSession, refreshOAuthSession, type OAuthSessionState } from "./oauth-session";
 import { keyPairKeyStore } from "./keystore";
+import { runCliDeviceLogin } from "./cli-device";
 
 // Proactive refresh margin: refresh once within this long of expiry rather than waiting for a 401.
 // Mirrors web/src/auth/refresh.ts's REFRESH_MARGIN_MS and cmd/spawnctl/authstate.go's refreshWindow.
@@ -58,10 +59,12 @@ export interface OAuthPoPConfig {
    * `${webOrigin}/callback`, matching both the AS's default derivation (cmd/authsvc/config.go's
    * derive()) and the SPA's own default (web/src/views/LoginView.tsx's REDIRECT_URI). */
   webOrigin: string;
+  verifyTarget?: ResolvedTargetVerifier;
 }
 
 export class OAuthPoPAuth implements AuthStrategy {
   private readonly sessions = new Map<string, Promise<OAuthSessionState>>();
+  private readonly cliPreparations = new Map<string, Promise<CliPreparation>>();
 
   constructor(private readonly cfg: OAuthPoPConfig) {}
 
@@ -109,14 +112,35 @@ export class OAuthPoPAuth implements AuthStrategy {
     });
   }
 
-  async cliArgs(identity: Identity): Promise<string[]> {
-    const session = await this.sessionFor(identity);
-    return ["-token", session.accessToken];
-  }
-
-  async oracleToken(identity: Identity): Promise<string> {
+  async cpAccessToken(identity: Identity): Promise<string> {
     const session = await this.sessionFor(identity);
     return session.accessToken;
+  }
+
+  async nodeAccessToken(identity: Identity): Promise<string> {
+    const session = await this.sessionFor(identity);
+    return session.nodeAccessToken;
+  }
+
+  prepareCli(page: unknown, identity: Identity, options: CliPreparationOptions): Promise<CliPreparation> {
+    const key = `${identity.token}\0${options.configHome}`;
+    const existing = this.cliPreparations.get(key);
+    if (existing) return existing;
+    const preparation = runCliDeviceLogin({
+      spawnctlBin: options.spawnctlBin,
+      asOrigin: options.asOrigin,
+      configHome: options.configHome,
+      page: page as Parameters<typeof runCliDeviceLogin>[0]["page"],
+    }).then(() => ({ authArgs: [], configHome: options.configHome }));
+    this.cliPreparations.set(key, preparation);
+    return preparation;
+  }
+
+  targetVerifier(_identity: Identity): ResolvedTargetVerifier {
+    if (!this.cfg.verifyTarget) {
+      return async () => { throw new Error("oauth-pop target verifier is not configured"); };
+    }
+    return this.cfg.verifyTarget;
   }
 
   /** Returns the session's own cnf-bound key (the same keypair that signs PoP refreshes) — the

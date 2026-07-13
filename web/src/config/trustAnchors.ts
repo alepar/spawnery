@@ -10,13 +10,22 @@
 //     deploy/web/README.md). The release forbidden-value scan refuses to ship a bundle
 //     that still carries the PLACEHOLDER markers below.
 
-/** sp-ova Root CA certificate, PEM. PLACEHOLDER — replaced at release build time. */
-export const PINNED_ROOT_CA_PEM: string = `-----BEGIN CERTIFICATE-----
-PLACEHOLDER-TRUST-ANCHOR-ROOT-CA
------END CERTIFICATE-----`;
+function requiredTrustInput(name: string, value: string | undefined): string {
+  const configured = value?.trim() ?? "";
+  if (!configured || configured.toLowerCase().includes("placeholder")) {
+    throw new Error(`${name} is required and must contain release trust material`);
+  }
+  return configured;
+}
 
-/** SPIFFE trust domain paired with PINNED_ROOT_CA_PEM. Stamped per release environment. */
-export const PINNED_TRUST_DOMAIN = "prod.spawnery.internal";
+/** sp-ova Root CA certificate, PEM, stamped into the immutable SPA bundle. */
+export const PINNED_ROOT_CA_PEM = requiredTrustInput("VITE_ROOT_CA_PEM", import.meta.env.VITE_ROOT_CA_PEM);
 
-/** Root-authorized system account used by cloud node SPIFFE identities. Stamped per release. */
-export const PINNED_CLOUD_ACCOUNT_ID = "PLACEHOLDER-CLOUD-SYSTEM-ACCOUNT-ID";
+/** SPIFFE trust domain paired with PINNED_ROOT_CA_PEM. */
+export const PINNED_TRUST_DOMAIN = requiredTrustInput("VITE_TRUST_DOMAIN", import.meta.env.VITE_TRUST_DOMAIN);
+
+/** Root-authorized system account used by cloud node SPIFFE identities. */
+export const PINNED_CLOUD_ACCOUNT_ID = requiredTrustInput(
+  "VITE_CLOUD_ACCOUNT_ID",
+  import.meta.env.VITE_CLOUD_ACCOUNT_ID,
+);

@@ -16,6 +16,29 @@ describe("buildArgs", () => {
     expect(argv).toEqual(["-cp", "https://cp.example", "-token", "tok-123", "-app-id", "acc/app"]);
   });
 
+  it("uses stored login state and full public trust flags without an explicit token", () => {
+    const oauthCfg = {
+      ...cfg,
+      authArgs: [],
+      configHome: "/run/cli-auth",
+      trust: {
+        rootCAPath: "/run/root.pem",
+        trustDomain: "prod.spawnery.internal",
+        crlStatePath: "/run/crl-state.json",
+        crlIssuerPaths: ["/run/cloud-intermediate.pem"],
+        crlPaths: ["/run/cloud.crl.pem"],
+      },
+    };
+    const argv = buildArgs(oauthCfg, identity, "resume", ["s1"]);
+    expect(argv).not.toContain("-token");
+    expect(argv).toEqual([
+      "resume", "s1", "-cp", "https://cp.example",
+      "--root-ca", "/run/root.pem", "--trust-domain", "prod.spawnery.internal",
+      "--crl-state", "/run/crl-state.json", "--crl-issuer", "/run/cloud-intermediate.pem",
+      "--crl", "/run/cloud.crl.pem",
+    ]);
+  });
+
   it("puts -cp/-token AFTER the subcommand name for named subcommands", () => {
     // Verified against the real binary: list/set-model/resume/fork/status each redeclare their
     // OWN local -cp/-token flags; a value set before the subcommand name is silently ignored.
@@ -54,6 +77,11 @@ describe("buildExecArgs", () => {
     expect(dashDash).toBeGreaterThan(argv.indexOf("-spawn"));
     expect(dashDash).toBeGreaterThan(argv.indexOf("-token"));
     expect(argv.slice(dashDash + 1)).toEqual(["sh", "-c", "exit 3"]);
+  });
+
+  it("omits an explicit CP bearer when stored OAuth state is configured", () => {
+    expect(buildExecArgs({ ...cfg, authArgs: [], configHome: "/run/cli-auth" }, identity, "s1", ["true"]))
+      .not.toContain("-token");
   });
 });
 

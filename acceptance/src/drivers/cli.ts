@@ -9,15 +9,20 @@ import type { CreateSpawnOpts, DriverCtx, ForkOpts, SpawnDriver, SpawnId, SpawnS
 import type { Identity } from "../fixtures/identity-pool";
 
 /** execFileP: a minimal Promise wrapper around child_process.execFile (easy to mock in tests). */
-function execFileP(bin: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+function execFileP(bin: string, args: string[], configHome?: string): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFileCb(bin, args, (err, stdout, stderr) => {
+    const callback = (err: Error | null, stdout: string | Buffer, stderr: string | Buffer) => {
       if (err) {
         reject(err);
         return;
       }
       resolve({ stdout: stdout.toString(), stderr: stderr.toString() });
-    });
+    };
+    if (configHome) {
+      execFileCb(bin, args, { env: { ...process.env, XDG_CONFIG_HOME: configHome } }, callback);
+    } else {
+      execFileCb(bin, args, callback);
+    }
   });
 }
 
@@ -28,9 +33,9 @@ function execFileP(bin: string, args: string[]): Promise<{ stdout: string; stder
  * `.code`. Only a transport/spawn failure (no numeric code, e.g. ENOENT — spawnctl itself
  * couldn't run) is a genuine rejection.
  */
-function execFileWithCode(bin: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+function execFileWithCode(bin: string, args: string[], configHome?: string): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFileCb(bin, args, (err, stdout, stderr) => {
+    const callback = (err: Error | null, stdout: string | Buffer, stderr: string | Buffer) => {
       if (err) {
         const code = (err as NodeJS.ErrnoException & { code?: unknown }).code;
         if (typeof code === "number") {
@@ -41,8 +46,21 @@ function execFileWithCode(bin: string, args: string[]): Promise<{ code: number; 
         return;
       }
       resolve({ code: 0, stdout: stdout.toString(), stderr: stderr.toString() });
-    });
+    };
+    if (configHome) {
+      execFileCb(bin, args, { env: { ...process.env, XDG_CONFIG_HOME: configHome } }, callback);
+    } else {
+      execFileCb(bin, args, callback);
+    }
   });
+}
+
+export interface CliTrustConfig {
+  rootCAPath: string;
+  trustDomain: string;
+  crlStatePath: string;
+  crlIssuerPaths: string[];
+  crlPaths: string[];
 }
 
 export interface CliConfig {
@@ -52,6 +70,11 @@ export interface CliConfig {
    * (create/list/set-model/...) dial the CP, not the node; only exec() needs it. Defaults to the
    * co-located node terminal endpoint, mirroring TargetConfig.nodeAddr's default. */
   nodeAddr?: string;
+  /** Undefined preserves the dev-token behavior; [] selects stored spawnctl login state. */
+  authArgs?: string[];
+  /** Isolated XDG_CONFIG_HOME containing spawnctl's real auth.json. */
+  configHome?: string;
+  trust?: CliTrustConfig;
 }
 
 const DEFAULT_NODE_ADDR = "http://127.0.0.1:9092";
@@ -72,10 +95,24 @@ export function buildExecArgs(cfg: CliConfig, identity: Identity, id: SpawnId, c
     cfg.nodeAddr ?? DEFAULT_NODE_ADDR,
     "-cp",
     cfg.cpEndpoint,
-    "-token",
-    identity.token,
+    ...authArgs(cfg, identity),
     "--",
     ...cmd,
+  ];
+}
+
+function authArgs(cfg: CliConfig, identity: Identity): string[] {
+  return cfg.authArgs ?? ["-token", identity.token];
+}
+
+function trustArgs(cfg: CliConfig): string[] {
+  if (!cfg.trust) return [];
+  return [
+    "--root-ca", cfg.trust.rootCAPath,
+    "--trust-domain", cfg.trust.trustDomain,
+    "--crl-state", cfg.trust.crlStatePath,
+    ...cfg.trust.crlIssuerPaths.flatMap((path) => ["--crl-issuer", path]),
+    ...cfg.trust.crlPaths.flatMap((path) => ["--crl", path]),
   ];
 }
 
@@ -94,10 +131,13 @@ export function buildExecArgs(cfg: CliConfig, identity: Identity, id: SpawnId, c
  * fine; urfave/cli v3 accepts flags anywhere following the subcommand token).
  */
 export function buildArgs(cfg: CliConfig, identity: Identity, subcmd: string, args: string[]): string[] {
+  const authorization = subcmd === "" || subcmd === "resume" || subcmd === "fork" || subcmd === "move"
+    ? trustArgs(cfg)
+    : [];
   if (subcmd === "") {
-    return ["-cp", cfg.cpEndpoint, "-token", identity.token, ...args];
+    return ["-cp", cfg.cpEndpoint, ...authArgs(cfg, identity), ...authorization, ...args];
   }
-  return [subcmd, ...args, "-cp", cfg.cpEndpoint, "-token", identity.token];
+  return [subcmd, ...args, "-cp", cfg.cpEndpoint, ...authArgs(cfg, identity), ...authorization];
 }
 
 function parityGap(verb: string): Error {
@@ -128,7 +168,7 @@ export class CliDriver implements SpawnDriver {
   constructor(private readonly cfg: CliConfig) {}
 
   private async run(identity: Identity, subcmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
-    return execFileP(this.cfg.spawnctlBin, buildArgs(this.cfg, identity, subcmd, args));
+    return execFileP(this.cfg.spawnctlBin, buildArgs(this.cfg, identity, subcmd, args), this.cfg.configHome);
   }
 
   async createSpawn(ctx: DriverCtx, opts: CreateSpawnOpts): Promise<SpawnId> {
@@ -144,7 +184,7 @@ export class CliDriver implements SpawnDriver {
       extra.push("-mount", `${m.name}=${m.backendUri}${m.create ? ",create" : ""}`);
     }
     const args = buildArgs(this.cfg, ctx.identity, "", extra);
-    const { stdout } = await execFileP(this.cfg.spawnctlBin, args);
+    const { stdout } = await execFileP(this.cfg.spawnctlBin, args, this.cfg.configHome);
     const m = /^spawn:\s*(\S+)/m.exec(stdout);
     if (!m) throw new Error(`cliDriver: could not parse spawn id from create output:\n${stdout}`);
     return m[1];
@@ -175,6 +215,10 @@ export class CliDriver implements SpawnDriver {
     const m = /fork (\S+) active on node/.exec(stdout);
     if (!m) throw new Error(`cliDriver: could not parse fork spawn id from output:\n${stdout}`);
     return m[1];
+  }
+
+  async move(ctx: DriverCtx, id: SpawnId, targetNodeId: string): Promise<void> {
+    await this.run(ctx.identity, "move", [id, targetNodeId]);
   }
 
   async stop(_ctx: DriverCtx, _id: SpawnId): Promise<void> {
@@ -217,6 +261,6 @@ export class CliDriver implements SpawnDriver {
    * surface, so this is not part of the SpawnDriver interface.
    */
   async exec(ctx: DriverCtx, id: SpawnId, cmd: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-    return execFileWithCode(this.cfg.spawnctlBin, buildExecArgs(this.cfg, ctx.identity, id, cmd));
+    return execFileWithCode(this.cfg.spawnctlBin, buildExecArgs(this.cfg, ctx.identity, id, cmd), this.cfg.configHome);
   }
 }

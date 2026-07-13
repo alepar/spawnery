@@ -17,16 +17,31 @@
  * refreshes) — signing with a different key would mismatch the CP's cnf binding.
  */
 
-import type { KeyStore } from "@spawnery/client";
+import type { KeyStore, ResolvedTargetVerifier } from "@spawnery/client";
 import type { Identity } from "../fixtures/identity-pool";
+
+export interface CliPreparationOptions {
+  spawnctlBin: string;
+  asOrigin: string;
+  configHome: string;
+}
+
+export interface CliPreparation {
+  /** Empty for stored OAuth state; dev-token mode carries its explicit test-only bearer here. */
+  authArgs: string[];
+  configHome?: string;
+}
 
 export interface AuthStrategy {
   /** seedWeb primes a Playwright page/context with credentials BEFORE the SPA boots. */
   seedWeb(page: unknown, identity: Identity): Promise<void>;
-  /** cliArgs returns the spawnctl argv fragment carrying this identity's credential. */
-  cliArgs(identity: Identity): Promise<string[]>;
-  /** oracleToken returns the bearer the apiDriver sends as `Authorization: Bearer <token>`. */
-  oracleToken(identity: Identity): Promise<string>;
+  /** Explicit audience-separated accessors. One refresh replaces the pair atomically. */
+  cpAccessToken(identity: Identity): Promise<string>;
+  nodeAccessToken(identity: Identity): Promise<string>;
+  /** Prepare spawnctl custody. OAuth implementations must use login --device, never key export. */
+  prepareCli(page: unknown, identity: Identity, options: CliPreparationOptions): Promise<CliPreparation>;
+  /** Strict target verifier invoked before any SDK intent signature is emitted. */
+  targetVerifier(identity: Identity): ResolvedTargetVerifier;
   /** sessionKeyStore returns the KeyStore AcceptanceClient should sign intents with for this
    * identity (see the header note above). */
   sessionKeyStore(identity: Identity): Promise<KeyStore>;

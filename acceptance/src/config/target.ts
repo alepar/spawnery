@@ -26,6 +26,12 @@ export interface TargetConfig {
   targetRef: string;
   buildRef: string;
   spawnctlBin: string;
+  rootCAPath?: string;
+  trustDomain?: string;
+  cloudAccountId?: string;
+  crlStatePath?: string;
+  crlIssuerPaths?: string[];
+  crlPaths?: string[];
   /** nodeAddr is the node's terminal/exec endpoint (spawnctl exec -addr / `spawnctl exec`/attach/shell
    * dial this directly, not the CP). Only Phase-5 injection observation and @agent `exec` scenarios
    * need it; co-located/tunneled dev default assumes the CP and node run together. */
@@ -79,6 +85,14 @@ export function loadTargetConfig(env: NodeJS.ProcessEnv = process.env): TargetCo
   if (authMode !== "dev-token" && authMode !== "oauth-pop") {
     throw new Error(`ACC_AUTH_MODE must be "dev-token" or "oauth-pop", got ${JSON.stringify(authMode)}`);
   }
+  if (authMode === "oauth-pop") {
+    for (const name of [
+      "ACC_ROOT_CA_PEM", "ACC_TRUST_DOMAIN", "ACC_CLOUD_ACCOUNT_ID", "ACC_CRL_STATE",
+      "ACC_CRL_ISSUERS", "ACC_CRLS",
+    ]) {
+      if (!env[name]?.trim()) throw new Error(`oauth-pop requires ${name}`);
+    }
+  }
   return {
     webOrigin,
     cpEndpoint,
@@ -91,6 +105,12 @@ export function loadTargetConfig(env: NodeJS.ProcessEnv = process.env): TargetCo
     targetRef: env.ACC_TARGET_REF!,
     buildRef: env.ACC_BUILD_REF!,
     spawnctlBin: env.ACC_SPAWNCTL_BIN ?? "spawnctl",
+    rootCAPath: env.ACC_ROOT_CA_PEM || undefined,
+    trustDomain: env.ACC_TRUST_DOMAIN || undefined,
+    cloudAccountId: env.ACC_CLOUD_ACCOUNT_ID || undefined,
+    crlStatePath: env.ACC_CRL_STATE || undefined,
+    crlIssuerPaths: (env.ACC_CRL_ISSUERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    crlPaths: (env.ACC_CRLS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
     nodeAddr: env.ACC_NODE_ADDR ?? "http://127.0.0.1:9092",
     seedSkillAppId: env.ACC_SEED_SKILL_APP_ID || undefined,
     tokenBudget: Number(env.ACC_TOKEN_BUDGET ?? "200000"),

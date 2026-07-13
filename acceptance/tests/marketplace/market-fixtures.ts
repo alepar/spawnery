@@ -57,7 +57,7 @@ export const test = base.extend<Record<never, never>, MarketWorkerFixtures>({
       await use({
         web: new WebMarketDriver(),
         cli: new CliMarketDriver({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }),
-        oracle: new MarketOracle(target.cpEndpoint, await auth.oracleToken(identity)),
+        oracle: new MarketOracle(target.cpEndpoint, await auth.cpAccessToken(identity)),
       });
     },
     { scope: "worker" },

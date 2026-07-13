@@ -31,13 +31,13 @@ beforeEach(() => {
 const cfg = { asOrigin: "https://as.example", webOrigin: "https://web.example" };
 const alice: Identity = { token: "alice", owner: "acc-owner-1" };
 
-describe("OAuthPoPAuth.oracleToken", () => {
+describe("OAuthPoPAuth.cpAccessToken", () => {
   it("establishes a session once and reuses it while it has plenty of TTL left", async () => {
     establishMock.mockResolvedValue(fakeState("tok-1", Date.now() + 15 * 60 * 1000));
     const auth = new OAuthPoPAuth(cfg);
 
-    expect(await auth.oracleToken(alice)).toBe("tok-1");
-    expect(await auth.oracleToken(alice)).toBe("tok-1");
+    expect(await auth.cpAccessToken(alice)).toBe("tok-1");
+    expect(await auth.cpAccessToken(alice)).toBe("tok-1");
 
     expect(establishMock).toHaveBeenCalledTimes(1);
     expect(establishMock).toHaveBeenCalledWith({
@@ -53,7 +53,7 @@ describe("OAuthPoPAuth.oracleToken", () => {
     refreshMock.mockResolvedValue(fakeState("tok-2", Date.now() + 15 * 60 * 1000));
     const auth = new OAuthPoPAuth(cfg);
 
-    expect(await auth.oracleToken(alice)).toBe("tok-2");
+    expect(await auth.cpAccessToken(alice)).toBe("tok-2");
     expect(refreshMock).toHaveBeenCalledTimes(1);
     expect(establishMock).toHaveBeenCalledTimes(1);
   });
@@ -63,8 +63,8 @@ describe("OAuthPoPAuth.oracleToken", () => {
     refreshMock.mockResolvedValue(fakeState("tok-2", Date.now() + 15 * 60 * 1000));
     const auth = new OAuthPoPAuth(cfg);
 
-    await auth.oracleToken(alice);
-    expect(await auth.oracleToken(alice)).toBe("tok-2");
+    await auth.cpAccessToken(alice);
+    expect(await auth.cpAccessToken(alice)).toBe("tok-2");
     expect(refreshMock).toHaveBeenCalledTimes(1);
   });
 
@@ -72,17 +72,35 @@ describe("OAuthPoPAuth.oracleToken", () => {
     establishMock.mockImplementation(async ({ loginHint }) => fakeState(`tok-${loginHint}`, Date.now() + 15 * 60 * 1000));
     const auth = new OAuthPoPAuth(cfg);
 
-    expect(await auth.oracleToken({ token: "alice", owner: "o1" })).toBe("tok-alice");
-    expect(await auth.oracleToken({ token: "bob", owner: "o2" })).toBe("tok-bob");
+    expect(await auth.cpAccessToken({ token: "alice", owner: "o1" })).toBe("tok-alice");
+    expect(await auth.cpAccessToken({ token: "bob", owner: "o2" })).toBe("tok-bob");
     expect(establishMock).toHaveBeenCalledTimes(2);
   });
 });
 
-describe("OAuthPoPAuth.cliArgs", () => {
-  it("returns -token <accessToken>", async () => {
-    establishMock.mockResolvedValue(fakeState("tok-1", Date.now() + 15 * 60 * 1000));
+describe("OAuthPoPAuth paired credentials", () => {
+  it("returns CP and node tokens from the same serialized session refresh", async () => {
+    establishMock.mockResolvedValue(fakeState("cp-old", Date.now() + 60 * 1000));
+    refreshMock.mockResolvedValue(fakeState("cp-new", Date.now() + 15 * 60 * 1000));
     const auth = new OAuthPoPAuth(cfg);
-    expect(await auth.cliArgs(alice)).toEqual(["-token", "tok-1"]);
+
+    const [cpToken, nodeToken, keyStore] = await Promise.all([
+      auth.cpAccessToken(alice),
+      auth.nodeAccessToken(alice),
+      auth.sessionKeyStore(alice),
+    ]);
+
+    expect(cpToken).toBe("cp-new");
+    expect(nodeToken).toBe("node-cp-new");
+    expect((await keyStore.get())?.privateKey).toBe((await refreshMock.mock.results[0].value).privateKey);
+    expect(refreshMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never substitutes the CP token for the node audience", async () => {
+    establishMock.mockResolvedValue(fakeState("cp-token", Date.now() + 15 * 60 * 1000));
+    const auth = new OAuthPoPAuth(cfg);
+    expect(await auth.cpAccessToken(alice)).toBe("cp-token");
+    expect(await auth.nodeAccessToken(alice)).toBe("node-cp-token");
   });
 });
 

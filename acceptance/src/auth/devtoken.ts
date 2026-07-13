@@ -10,9 +10,9 @@
  */
 
 import { DEV_TOKEN_OVERRIDE_KEY } from "@spawnery/client";
-import type { KeyStore } from "@spawnery/client";
+import type { KeyStore, ResolvedTargetVerifier } from "@spawnery/client";
 import type { Identity } from "../fixtures/identity-pool";
-import type { AuthStrategy } from "./types";
+import type { AuthStrategy, CliPreparation, CliPreparationOptions } from "./types";
 import { NodeMemoryKeyStore } from "./keystore";
 
 export { DEV_TOKEN_OVERRIDE_KEY };
@@ -31,12 +31,20 @@ export class DevTokenAuth implements AuthStrategy {
     );
   }
 
-  async cliArgs(identity: Identity): Promise<string[]> {
-    return ["-token", identity.token];
+  async cpAccessToken(identity: Identity): Promise<string> {
+    return identity.token;
   }
 
-  async oracleToken(identity: Identity): Promise<string> {
+  async nodeAccessToken(identity: Identity): Promise<string> {
     return identity.token;
+  }
+
+  async prepareCli(_page: unknown, identity: Identity, _options: CliPreparationOptions): Promise<CliPreparation> {
+    return { authArgs: ["-token", identity.token] };
+  }
+
+  targetVerifier(_identity: Identity): ResolvedTargetVerifier {
+    return async () => {};
   }
 
   /** A fresh key per identity — the dev CP mints the node token from the intent's own SPKI, so no
