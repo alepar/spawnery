@@ -255,6 +255,7 @@ func (i *IdP) serveCallback(w http.ResponseWriter, r *http.Request) {
 		SessionPubkeySPKI: spkiDER,
 		CPAccessTokenID:   pair.CPTokenID,
 		NodeAccessTokenID: pair.NodeTokenID,
+		AccessExpiresAt:   pair.ExpiresAt,
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(refreshSliding).Unix(),
@@ -524,10 +525,10 @@ func (i *IdP) enforceCapOrEvict(ctx context.Context, accountID string, now time.
 		return err
 	}
 	return i.store.WithTx(ctx, func(tx store.Store) error {
-		liveIDs, err := tx.RefreshSessions().RevokeFamily(ctx, oldest)
+		liveIDs, err := tx.RefreshSessions().RevokeFamily(ctx, oldest, now.Unix())
 		if err != nil {
 			return err
 		}
-		return appendRevocation(ctx, tx, accountID, oldest, liveIDs, now)
+		return appendFamilyRevocation(ctx, tx, accountID, oldest, liveIDs, now)
 	})
 }

@@ -70,12 +70,12 @@ func TestLogoutRevokesFamily(t *testing.T) {
 	for _, ev := range evs {
 		if ev.FamilyID == famID {
 			found = true
-			var ids []string
-			if err := json.Unmarshal([]byte(ev.TokenIDs), &ids); err != nil {
-				t.Fatal(err)
+			want := []store.RevokedToken{
+				{EventSeq: ev.Seq, TokenID: row.CPAccessTokenID, RetainUntil: row.AccessExpiresAt},
+				{EventSeq: ev.Seq, TokenID: row.NodeAccessTokenID, RetainUntil: row.AccessExpiresAt},
 			}
-			if want := []string{row.CPAccessTokenID, row.NodeAccessTokenID}; !reflect.DeepEqual(ids, want) {
-				t.Fatalf("revocation token ids = %v, want %v", ids, want)
+			if !reflect.DeepEqual(ev.RevokedTokens, want) {
+				t.Fatalf("revocation tokens = %v, want %v", ev.RevokedTokens, want)
 			}
 		}
 	}
@@ -89,8 +89,7 @@ func TestLogoutEverywherePropagatesStoreFailures(t *testing.T) {
 		name string
 		set  func(*storeFaults)
 	}{
-		{name: "lookup", set: func(f *storeFaults) { f.failOldestFamily = true }},
-		{name: "revoke", set: func(f *storeFaults) { f.failRevoke = true }},
+		{name: "revoke", set: func(f *storeFaults) { f.failRevokeAccount = true }},
 		{name: "event", set: func(f *storeFaults) { f.failAppend = true }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,6 +128,62 @@ func TestLogoutEverywherePropagatesStoreFailures(t *testing.T) {
 	}
 }
 
+func TestLogoutEverywhereEmitsOneRecoverableAccountEvent(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	srv, _, st := testAS(t, fake, now)
+	seedUser(t, st, "acct-everywhere-one", 75002, now)
+	_, spkiDER := newTestP256(t)
+	rawToken, _ := seedFamily(t, st, "acct-everywhere-one", spkiDER, now)
+	first, err := st.RefreshSessions().Get(context.Background(), sha256Hex(rawToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.TokenHash = "second-family-hash"
+	second.FamilyID = "second-family"
+	second.CPAccessTokenID = "second-cp"
+	second.NodeAccessTokenID = "second-node"
+	second.AccessExpiresAt = now.Add(7 * time.Minute).Unix()
+	if err := st.RefreshSessions().Insert(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/logout?everywhere=1", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	req.AddCookie(&http.Cookie{Name: logoutSessionCookieName, Value: rawToken})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("logout-everywhere status = %d", resp.StatusCode)
+	}
+
+	events, err := st.Revocations().Since(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events: want one account event, got %+v", events)
+	}
+	event := events[0]
+	if event.AccountID != "acct-everywhere-one" || event.FamilyID != "" || event.RevokeTokensIssuedBefore != now.Unix() {
+		t.Fatalf("account event binding: %+v", event)
+	}
+	want := []store.RevokedToken{
+		{EventSeq: event.Seq, TokenID: first.CPAccessTokenID, RetainUntil: first.AccessExpiresAt},
+		{EventSeq: event.Seq, TokenID: first.NodeAccessTokenID, RetainUntil: first.AccessExpiresAt},
+		{EventSeq: event.Seq, TokenID: second.CPAccessTokenID, RetainUntil: second.AccessExpiresAt},
+		{EventSeq: event.Seq, TokenID: second.NodeAccessTokenID, RetainUntil: second.AccessExpiresAt},
+	}
+	if !reflect.DeepEqual(event.RevokedTokens, want) {
+		t.Fatalf("account event tokens: want %+v, got %+v", want, event.RevokedTokens)
+	}
+}
+
 // TestRevocationsFeedSigned: GET /revocations returns signed entries verifiable against the AS key [AM10].
 func TestRevocationsFeedSigned(t *testing.T) {
 	fake := githubfake.New()
@@ -138,7 +193,8 @@ func TestRevocationsFeedSigned(t *testing.T) {
 
 	// Seed a revocation event.
 	seq, err := st.Revocations().Append(context.Background(), store.RevocationEvent{
-		AccountID: "acct-a", FamilyID: "fam-a", TokenIDs: `["t1"]`, RevokedAt: now.Unix(),
+		AccountID: "acct-a", FamilyID: "fam-a", RevokedAt: now.Unix(),
+		RevokedTokens: []store.RevokedToken{{TokenID: "t1", RetainUntil: now.Add(accessTokenTTL).Unix()}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +247,8 @@ func TestRevocationsFeedVerifiable(t *testing.T) {
 	}
 
 	_, err = st.Revocations().Append(context.Background(), store.RevocationEvent{
-		AccountID: "acct-v", FamilyID: "fam-v", TokenIDs: `["t2"]`, RevokedAt: now.Unix(),
+		AccountID: "acct-v", FamilyID: "fam-v", RevokedAt: now.Unix(),
+		RevokedTokens: []store.RevokedToken{{TokenID: "t2", RetainUntil: now.Add(accessTokenTTL).Unix()}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -331,7 +388,8 @@ func TestRevocationsFeedHandlerDoesNotInspectBearerSecrets(t *testing.T) {
 
 	// Seed a revocation event so the feed is non-empty.
 	_, err := st.Revocations().Append(context.Background(), store.RevocationEvent{
-		AccountID: "acct-gated", FamilyID: "fam-gated", TokenIDs: `["t-gated"]`, RevokedAt: now.Unix(),
+		AccountID: "acct-gated", FamilyID: "fam-gated", RevokedAt: now.Unix(),
+		RevokedTokens: []store.RevokedToken{{TokenID: "t-gated", RetainUntil: now.Add(accessTokenTTL).Unix()}},
 	})
 	if err != nil {
 		t.Fatal(err)

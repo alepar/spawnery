@@ -52,11 +52,19 @@ func (r *refreshSessionRepo) Supersede(ctx context.Context, predecessorHash stri
 	return r.Insert(ctx, successor)
 }
 
-func (r *refreshSessionRepo) RevokeFamily(ctx context.Context, familyID string) ([]string, error) {
+func (r *refreshSessionRepo) RevokeFamily(ctx context.Context, familyID string, now int64) ([]RevokedToken, error) {
+	return r.revoke(ctx, "family_id", familyID, now)
+}
+
+func (r *refreshSessionRepo) RevokeAccount(ctx context.Context, accountID string, now int64) ([]RevokedToken, error) {
+	return r.revoke(ctx, "account_id", accountID, now)
+}
+
+func (r *refreshSessionRepo) revoke(ctx context.Context, column, value string, now int64) ([]RevokedToken, error) {
 	var live []RefreshSession
 	if err := r.db.NewSelect().Model(&live).
-		Column("cp_access_token_id", "node_access_token_id").
-		Where("family_id = ? AND revoked = 0", familyID).
+		Column("cp_access_token_id", "node_access_token_id", "access_expires_at").
+		Where(column+" = ? AND revoked = 0 AND access_expires_at > ?", value, now).
 		OrderExpr("created_at ASC, token_hash ASC").
 		Scan(ctx); err != nil {
 		return nil, err
@@ -64,15 +72,18 @@ func (r *refreshSessionRepo) RevokeFamily(ctx context.Context, familyID string) 
 	if _, err := r.db.NewUpdate().Model((*RefreshSession)(nil)).
 		Set("revoked = 1").
 		Set("successor_cache = NULL").
-		Where("family_id = ?", familyID).
+		Where(column+" = ?", value).
 		Exec(ctx); err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(live)*2)
+	tokens := make([]RevokedToken, 0, len(live)*2)
 	for _, s := range live {
-		ids = append(ids, s.CPAccessTokenID, s.NodeAccessTokenID)
+		tokens = append(tokens,
+			RevokedToken{TokenID: s.CPAccessTokenID, RetainUntil: s.AccessExpiresAt},
+			RevokedToken{TokenID: s.NodeAccessTokenID, RetainUntil: s.AccessExpiresAt},
+		)
 	}
-	return ids, nil
+	return tokens, nil
 }
 
 func (r *refreshSessionRepo) CountFamilies(ctx context.Context, accountID string) (int, error) {

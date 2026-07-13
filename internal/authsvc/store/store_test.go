@@ -209,11 +209,15 @@ func TestSupersedeAndFamilyRevoke(t *testing.T) {
 		t.Fatalf("grandparent cache not cleared: %+v", got1)
 	}
 
-	ids, err := st.RefreshSessions().RevokeFamily(ctxT(), "fam")
+	ids, err := st.RefreshSessions().RevokeFamily(ctxT(), "fam", 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"cp1", "node1", "cp2", "node2", "cp3", "node3"}; !reflect.DeepEqual(ids, want) {
+	if want := []RevokedToken{
+		{TokenID: "cp1", RetainUntil: 90}, {TokenID: "node1", RetainUntil: 90},
+		{TokenID: "cp2", RetainUntil: 90}, {TokenID: "node2", RetainUntil: 90},
+		{TokenID: "cp3", RetainUntil: 90}, {TokenID: "node3", RetainUntil: 90},
+	}; !reflect.DeepEqual(ids, want) {
 		t.Fatalf("live token ids: %v", ids)
 	}
 	got3, _ := st.RefreshSessions().Get(ctxT(), "h3")
@@ -221,9 +225,85 @@ func TestSupersedeAndFamilyRevoke(t *testing.T) {
 		t.Fatal("family revoke missed h3")
 	}
 	// Idempotent: second revoke returns no live ids.
-	ids, _ = st.RefreshSessions().RevokeFamily(ctxT(), "fam")
+	ids, _ = st.RefreshSessions().RevokeFamily(ctxT(), "fam", 80)
 	if len(ids) != 0 {
 		t.Fatalf("second revoke: %v", ids)
+	}
+}
+
+func TestFamilyRevocationOmitsAccessExpiredAtTransactionTime(t *testing.T) {
+	st := NewTestStore(t)
+	mkUser(t, st, "acct", 1)
+	for _, row := range []RefreshSession{
+		{TokenHash: "expired", AccountID: "acct", FamilyID: "fam", ClientKind: ClientCLI,
+			SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "expired-cp", NodeAccessTokenID: "expired-node",
+			AccessExpiresAt: 50, CreatedAt: 1, LastUsedAt: 1, ExpiresAt: 100, FamilyCreatedAt: 1},
+		{TokenHash: "live", AccountID: "acct", FamilyID: "fam", ClientKind: ClientCLI,
+			SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "live-cp", NodeAccessTokenID: "live-node",
+			AccessExpiresAt: 51, CreatedAt: 2, LastUsedAt: 2, ExpiresAt: 100, FamilyCreatedAt: 1},
+	} {
+		if err := st.RefreshSessions().Insert(ctxT(), row); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := st.RefreshSessions().RevokeFamily(ctxT(), "fam", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []RevokedToken{{TokenID: "live-cp", RetainUntil: 51}, {TokenID: "live-node", RetainUntil: 51}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("revoked tokens: want %+v, got %+v", want, got)
+	}
+	for _, hash := range []string{"expired", "live"} {
+		row, err := st.RefreshSessions().Get(ctxT(), hash)
+		if err != nil || !row.Revoked {
+			t.Fatalf("row %q not revoked: %+v, %v", hash, row, err)
+		}
+	}
+}
+
+func TestAccountRevocationIsAtomicAndScoped(t *testing.T) {
+	st := NewTestStore(t)
+	mkUser(t, st, "target", 1)
+	mkUser(t, st, "other", 2)
+	rows := []RefreshSession{
+		{TokenHash: "one", AccountID: "target", FamilyID: "fam-1", CPAccessTokenID: "one-cp", NodeAccessTokenID: "one-node", AccessExpiresAt: 70},
+		{TokenHash: "two", AccountID: "target", FamilyID: "fam-2", CPAccessTokenID: "two-cp", NodeAccessTokenID: "two-node", AccessExpiresAt: 80},
+		{TokenHash: "other", AccountID: "other", FamilyID: "fam-other", CPAccessTokenID: "other-cp", NodeAccessTokenID: "other-node", AccessExpiresAt: 90},
+	}
+	for i := range rows {
+		rows[i].ClientKind = ClientCLI
+		rows[i].SessionPubkeySPKI = []byte{1}
+		rows[i].CreatedAt = int64(i + 1)
+		rows[i].LastUsedAt = int64(i + 1)
+		rows[i].ExpiresAt = 100
+		rows[i].FamilyCreatedAt = int64(i + 1)
+		if err := st.RefreshSessions().Insert(ctxT(), rows[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := st.RefreshSessions().RevokeAccount(ctxT(), "target", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []RevokedToken{
+		{TokenID: "one-cp", RetainUntil: 70}, {TokenID: "one-node", RetainUntil: 70},
+		{TokenID: "two-cp", RetainUntil: 80}, {TokenID: "two-node", RetainUntil: 80},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("account tokens: want %+v, got %+v", want, got)
+	}
+	for _, hash := range []string{"one", "two"} {
+		row, _ := st.RefreshSessions().Get(ctxT(), hash)
+		if !row.Revoked {
+			t.Fatalf("target row %q remained live", hash)
+		}
+	}
+	other, _ := st.RefreshSessions().Get(ctxT(), "other")
+	if other.Revoked {
+		t.Fatal("other account was revoked")
 	}
 }
 
@@ -248,7 +328,7 @@ func TestFamilyCounting(t *testing.T) {
 	if err != nil || oldest != "famA" {
 		t.Fatalf("oldest: %s %v", oldest, err)
 	}
-	if _, err := st.RefreshSessions().RevokeFamily(ctxT(), "famA"); err != nil {
+	if _, err := st.RefreshSessions().RevokeFamily(ctxT(), "famA", 50); err != nil {
 		t.Fatal(err)
 	}
 	n, _ = st.RefreshSessions().CountFamilies(ctxT(), "acct-1")
@@ -316,16 +396,12 @@ func TestPairedRevocationRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := st.WithTx(ctxT(), func(tx Store) error {
-		ids, err := tx.RefreshSessions().RevokeFamily(ctxT(), row.FamilyID)
+		ids, err := tx.RefreshSessions().RevokeFamily(ctxT(), row.FamilyID, 2)
 		if err != nil {
 			return err
 		}
-		tokens := make([]RevokedToken, 0, len(ids))
-		for _, id := range ids {
-			tokens = append(tokens, RevokedToken{TokenID: id, RetainUntil: row.AccessExpiresAt})
-		}
 		_, err = tx.Revocations().Append(ctxT(), RevocationEvent{
-			AccountID: row.AccountID, FamilyID: row.FamilyID, RevokedTokens: tokens, RevokedAt: 2,
+			AccountID: row.AccountID, FamilyID: row.FamilyID, RevokedTokens: ids, RevokedAt: 2,
 		})
 		return err
 	})

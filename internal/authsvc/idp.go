@@ -359,18 +359,22 @@ func (i *IdP) mintAccessPair(u store.User, familyID string, spkiDER []byte, now 
 	return pair, nil
 }
 
-// appendRevocation records a family revocation on the signed feed (logout, theft detection,
-// cap eviction, account disable) [AM10]. Call inside the same tx as the revoke.
-func appendRevocation(ctx context.Context, tx store.Store, accountID, familyID string, tokenIDs []string, now time.Time) error {
-	ids, err := json.Marshal(tokenIDs)
-	if err != nil {
-		return err
+// appendFamilyRevocation records a family revocation in the same transaction as the refresh
+// mutation. An already-expired family has no access credential left to deny and emits no event.
+func appendFamilyRevocation(ctx context.Context, tx store.Store, accountID, familyID string, tokens []store.RevokedToken, now time.Time) error {
+	if len(tokens) == 0 {
+		return nil
 	}
-	_, err = tx.Revocations().Append(ctx, store.RevocationEvent{
-		AccountID: accountID,
-		FamilyID:  familyID,
-		TokenIDs:  string(ids),
-		RevokedAt: now.Unix(),
+	_, err := tx.Revocations().Append(ctx, store.RevocationEvent{
+		AccountID: accountID, FamilyID: familyID, RevokedAt: now.Unix(), RevokedTokens: tokens,
+	})
+	return err
+}
+
+func appendAccountRevocation(ctx context.Context, tx store.Store, accountID string, tokens []store.RevokedToken, now time.Time) error {
+	_, err := tx.Revocations().Append(ctx, store.RevocationEvent{
+		AccountID: accountID, RevokedAt: now.Unix(), RevokedTokens: tokens,
+		RevokeTokensIssuedBefore: now.Unix(),
 	})
 	return err
 }

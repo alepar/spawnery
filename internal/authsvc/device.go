@@ -323,7 +323,8 @@ func (i *IdP) serveDeviceToken(w http.ResponseWriter, r *http.Request) {
 			TokenHash: sha256Hex(nextRefresh), AccountID: txUser.AccountID, FamilyID: familyID,
 			ClientKind: store.ClientCLI, SessionPubkeySPKI: redeemed.SessionPubkeySPKI,
 			CPAccessTokenID: minted.CPTokenID, NodeAccessTokenID: minted.NodeTokenID,
-			CreatedAt: now.Unix(), LastUsedAt: now.Unix(), ExpiresAt: now.Add(refreshSliding).Unix(), FamilyCreatedAt: now.Unix(),
+			AccessExpiresAt: minted.ExpiresAt,
+			CreatedAt:       now.Unix(), LastUsedAt: now.Unix(), ExpiresAt: now.Add(refreshSliding).Unix(), FamilyCreatedAt: now.Unix(),
 		}); err != nil {
 			return err
 		}
