@@ -469,7 +469,7 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		}
 		if a.auths != nil && verifiedAuth.AccountID != "" {
 			if !a.auths.registerIfNewer(openKey, sessionAuthRecord{
-				accountID: verifiedAuth.AccountID, tokenID: verifiedAuth.TokenID, expiresAt: verifiedAuth.ExpiresAt,
+				accountID: verifiedAuth.AccountID, tokenID: verifiedAuth.TokenID, issuedAt: verifiedAuth.IssuedAt, expiresAt: verifiedAuth.ExpiresAt,
 				sessionKeyHash: verifiedAuth.SessionKeyHash, generation: m.Open.GetGeneration(), nodeID: a.cfg.NodeID,
 				attachmentID: m.Open.GetAttachmentId(), attachmentSequence: m.Open.GetAttachmentSequence(),
 			}, func(reason string) {
@@ -1499,7 +1499,7 @@ func (a *attacher) reauthenticateClient(msg *nodev1.SessionReauth) {
 		return
 	}
 	replaced, found := a.auths.replace(key, sessionAuthRecord{
-		accountID: auth.AccountID, tokenID: auth.TokenID, expiresAt: auth.ExpiresAt,
+		accountID: auth.AccountID, tokenID: auth.TokenID, issuedAt: auth.IssuedAt, expiresAt: auth.ExpiresAt,
 		sessionKeyHash: auth.SessionKeyHash, generation: generation, nodeID: a.cfg.NodeID,
 		attachmentID: msg.GetAttachmentId(),
 	}, owner)

@@ -213,29 +213,106 @@ func TestSessionAuthExpiryClosesExactlyOnce(t *testing.T) {
 }
 
 func TestSessionAuthRevocationClosesMatchesAndRejectsLaterRegistration(t *testing.T) {
-	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
+	now := time.Unix(1_800_000_000, 0)
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "revocations.db"), func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	r := newSessionAuthRegistry(store)
-	var tokenClosed, accountClosed, siblingClosed atomic.Int32
-	record := func(account, token string) sessionAuthRecord {
-		return sessionAuthRecord{accountID: account, tokenID: token, expiresAt: time.Now().Add(time.Hour), attachmentID: token, attachmentSequence: 1}
+	var tokenClosed, oldClosed, equalClosed, futureClosed, siblingClosed atomic.Int32
+	record := func(account, token string, issuedAt int64) sessionAuthRecord {
+		return sessionAuthRecord{accountID: account, tokenID: token, issuedAt: issuedAt, expiresAt: now.Add(time.Hour), attachmentID: token, attachmentSequence: 1}
 	}
-	r.register(sessionAuthKey{spawnID: "sp", clientID: "token"}, record("alice", "old"), func(string) { tokenClosed.Add(1) })
-	r.register(sessionAuthKey{spawnID: "sp", clientID: "account"}, record("bob", "fresh"), func(string) { accountClosed.Add(1) })
-	r.register(sessionAuthKey{spawnID: "sp", clientID: "sibling"}, record("carol", "other"), func(string) { siblingClosed.Add(1) })
-	batch := []VerifiedUserRevocation{{Seq: 1, AccountID: "alice", FamilyID: "family", TokenIDs: []string{"old"}}, {Seq: 2, AccountID: "bob", TokenIDs: []string{"unused"}}}
-	if err := store.ApplyBatch(batch); err != nil {
+	cutoff := now.Unix()
+	r.register(sessionAuthKey{spawnID: "sp", clientID: "token"}, record("alice", "explicit", cutoff+10), func(string) { tokenClosed.Add(1) })
+	r.register(sessionAuthKey{spawnID: "sp", clientID: "old"}, record("bob", "old", cutoff-1), func(string) { oldClosed.Add(1) })
+	r.register(sessionAuthKey{spawnID: "sp", clientID: "equal"}, record("bob", "equal", cutoff), func(string) { equalClosed.Add(1) })
+	r.register(sessionAuthKey{spawnID: "sp", clientID: "future"}, record("bob", "future", cutoff+1), func(string) { futureClosed.Add(1) })
+	r.register(sessionAuthKey{spawnID: "sp", clientID: "sibling"}, record("carol", "other", cutoff-1), func(string) { siblingClosed.Add(1) })
+	batch := []VerifiedUserRevocation{
+		{Seq: 1, AccountID: "alice", FamilyID: "family", RevokedAt: cutoff - 1, RevokedTokens: []VerifiedRevokedToken{{TokenID: "explicit", RetainUntil: cutoff + 60}}},
+		{Seq: 2, AccountID: "bob", RevokedAt: cutoff - 1, RevokeTokensIssuedBefore: cutoff},
+	}
+	if err := store.ApplyPage(batch, now); err != nil {
 		t.Fatal(err)
 	}
 	r.revoke(batch)
-	if tokenClosed.Load() != 1 || accountClosed.Load() != 1 || siblingClosed.Load() != 0 {
-		t.Fatalf("closes token=%d account=%d sibling=%d", tokenClosed.Load(), accountClosed.Load(), siblingClosed.Load())
+	if tokenClosed.Load() != 1 || oldClosed.Load() != 1 || equalClosed.Load() != 0 || futureClosed.Load() != 0 || siblingClosed.Load() != 0 {
+		t.Fatalf("closes token=%d old=%d equal=%d future=%d sibling=%d", tokenClosed.Load(), oldClosed.Load(), equalClosed.Load(), futureClosed.Load(), siblingClosed.Load())
 	}
-	if r.registerIfNewer(sessionAuthKey{spawnID: "sp2", clientID: "late"}, record("alice", "old"), func(string) {}) {
-		t.Fatal("revoked open registered")
+	if r.registerIfNewer(sessionAuthKey{spawnID: "sp2", clientID: "late-old"}, record("bob", "late-old", cutoff-1), func(string) {}) {
+		t.Fatal("pre-cutoff open registered")
+	}
+	if !r.registerIfNewer(sessionAuthKey{spawnID: "sp2", clientID: "late-equal"}, record("bob", "late-equal", cutoff), func(string) {}) {
+		t.Fatal("cutoff-equal open rejected")
+	}
+}
+
+func TestSessionAuthConcurrentApplyRegisterAndReplaceCannotLeaveRevokedRecord(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "revocations.db"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	r := newSessionAuthRegistry(store)
+	cutoff := now.Unix()
+	page := []VerifiedUserRevocation{{Seq: 1, AccountID: "alice", RevokedAt: cutoff - 1, RevokeTokensIssuedBefore: cutoff}}
+	record := func(token string, issuedAt int64) sessionAuthRecord {
+		return sessionAuthRecord{accountID: "alice", tokenID: token, issuedAt: issuedAt, expiresAt: now.Add(time.Hour), attachmentID: token, attachmentSequence: 1}
+	}
+
+	beforeKey := sessionAuthKey{spawnID: "sp", clientID: "before"}
+	futureKey := sessionAuthKey{spawnID: "sp", clientID: "future"}
+	replaceKey := sessionAuthKey{spawnID: "sp", clientID: "replace"}
+	var beforeClosed, replacementClosed atomic.Int32
+	var callbackSawLive atomic.Bool
+	r.register(beforeKey, record("before", cutoff-1), func(string) {
+		if r.contains(beforeKey) {
+			callbackSawLive.Store(true)
+		}
+		beforeClosed.Add(1)
+	})
+	r.register(futureKey, record("future", cutoff), func(string) { t.Error("cutoff-equal record closed") })
+	r.register(replaceKey, record("current", cutoff), func(string) {
+		if r.contains(replaceKey) {
+			callbackSawLive.Store(true)
+		}
+		replacementClosed.Add(1)
+	})
+
+	applied := make(chan error, 1)
+	releaseFanout := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		applied <- store.ApplyPage(page, now)
+		<-releaseFanout
+		r.revoke(page)
+		close(done)
+	}()
+	if err := <-applied; err != nil {
+		t.Fatal(err)
+	}
+	lateKey := sessionAuthKey{spawnID: "sp", clientID: "late"}
+	if r.registerIfNewer(lateKey, record("late", cutoff-1), func(string) {}) {
+		t.Fatal("registration after committed cutoff succeeded before fanout")
+	}
+	if replaced, found := r.replace(replaceKey, record("replacement", cutoff-1), "alice"); replaced || !found {
+		t.Fatalf("revoked replacement result replaced=%v found=%v", replaced, found)
+	}
+	close(releaseFanout)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("revocation fanout deadlocked")
+	}
+	r.revoke(page)
+	if beforeClosed.Load() != 1 || replacementClosed.Load() != 1 || callbackSawLive.Load() {
+		t.Fatalf("closures before=%d replacement=%d callback_saw_live=%v", beforeClosed.Load(), replacementClosed.Load(), callbackSawLive.Load())
+	}
+	if r.contains(beforeKey) || r.contains(lateKey) || r.contains(replaceKey) || !r.contains(futureKey) {
+		t.Fatalf("records before=%v late=%v replace=%v future=%v", r.contains(beforeKey), r.contains(lateKey), r.contains(replaceKey), r.contains(futureKey))
 	}
 }
 

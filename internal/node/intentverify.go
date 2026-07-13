@@ -59,7 +59,7 @@ type IntentVerifier struct {
 }
 
 type UserRevocationLookup interface {
-	IsRevoked(tokenID, accountID string) bool
+	IsRevoked(tokenID, accountID string, issuedAt int64) bool
 }
 
 // NewIntentVerifier constructs a verifier. artifacts is rooted in the environment CA and validates
@@ -103,6 +103,7 @@ type StartFields struct {
 type Authorization struct {
 	AccountID      string
 	TokenID        string
+	IssuedAt       int64
 	ExpiresAt      time.Time
 	SessionKeyHash []byte
 }
@@ -179,7 +180,7 @@ func (v *IntentVerifier) verify(
 	if body.Audience != "node" {
 		return zero, NACKWrongAudience, fmt.Sprintf("aud=%q want node", body.Audience)
 	}
-	if v.revocations != nil && v.revocations.IsRevoked(body.TokenId, body.AccountId) {
+	if v.revocations != nil && v.revocations.IsRevoked(body.TokenId, body.AccountId, body.IssuedAt) {
 		return zero, NACKTokenInvalid, "node authorization is revoked"
 	}
 
@@ -225,7 +226,7 @@ func (v *IntentVerifier) verify(
 		return zero, NACKCorrespondence, fmt.Sprintf("op: intent=%q expected=%q", intentBody.GetOp(), expectedOp)
 	}
 	auth := Authorization{
-		AccountID: body.GetAccountId(), TokenID: body.GetTokenId(),
+		AccountID: body.GetAccountId(), TokenID: body.GetTokenId(), IssuedAt: body.GetIssuedAt(),
 		ExpiresAt:      time.Unix(body.GetExpiresAt(), 0),
 		SessionKeyHash: bytes.Clone(body.GetSessionKeyHash()),
 	}

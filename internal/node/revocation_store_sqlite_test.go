@@ -26,8 +26,8 @@ func TestUserRevocationStoreSQLitePersistsGapsMaxRetentionAndCutoffs(t *testing.
 	}, now); err != nil {
 		t.Fatal(err)
 	}
-	if store.Checkpoint() != 5 || !store.IsRevokedAt("shared", "nobody", 99) || !store.IsRevokedAt("fresh", "bob", 11) || store.IsRevokedAt("fresh", "bob", 12) || !store.IsRevokedAt("explicit", "bob", 99) {
-		t.Fatalf("checkpoint=%d shared=%v old=%v equal=%v explicit=%v", store.Checkpoint(), store.IsRevokedAt("shared", "nobody", 99), store.IsRevokedAt("fresh", "bob", 11), store.IsRevokedAt("fresh", "bob", 12), store.IsRevokedAt("explicit", "bob", 99))
+	if store.Checkpoint() != 5 || !store.IsRevoked("shared", "nobody", 99) || !store.IsRevoked("fresh", "bob", 11) || store.IsRevoked("fresh", "bob", 12) || !store.IsRevoked("explicit", "bob", 99) {
+		t.Fatalf("checkpoint=%d shared=%v old=%v equal=%v explicit=%v", store.Checkpoint(), store.IsRevoked("shared", "nobody", 99), store.IsRevoked("fresh", "bob", 11), store.IsRevoked("fresh", "bob", 12), store.IsRevoked("explicit", "bob", 99))
 	}
 	if err := store.ApplyPage([]VerifiedUserRevocation{
 		{Seq: 9, AccountID: "alice", FamilyID: "family", RevokedAt: 11,
@@ -46,14 +46,14 @@ func TestUserRevocationStoreSQLitePersistsGapsMaxRetentionAndCutoffs(t *testing.
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if reopened.Checkpoint() != 11 || !reopened.IsRevokedAt("shared", "x", 99) || !reopened.IsRevokedAt("x", "bob", 19) || reopened.IsRevokedAt("x", "bob", 20) {
+	if reopened.Checkpoint() != 11 || !reopened.IsRevoked("shared", "x", 99) || !reopened.IsRevoked("x", "bob", 19) || reopened.IsRevoked("x", "bob", 20) {
 		t.Fatal("persisted sqlite snapshot not restored")
 	}
 	now = time.Unix(40, 0)
 	if err := reopened.ApplyPage(nil, now); err != nil {
 		t.Fatal(err)
 	}
-	if reopened.IsRevokedAt("shared", "x", 99) || !reopened.IsRevokedAt("x", "bob", 11) {
+	if reopened.IsRevoked("shared", "x", 99) || !reopened.IsRevoked("x", "bob", 11) {
 		t.Fatal("expiry pruning removed the wrong binding")
 	}
 }
@@ -73,7 +73,7 @@ func TestUserRevocationStoreSQLiteRejectsPageAtomically(t *testing.T) {
 	if err := store.ApplyPage(bad, now); err == nil {
 		t.Fatal("non-increasing page accepted")
 	}
-	if store.Checkpoint() != 0 || store.IsRevokedAt("valid-prefix", "alice", 0) {
+	if store.Checkpoint() != 0 || store.IsRevoked("valid-prefix", "alice", 0) {
 		t.Fatal("invalid page partially published")
 	}
 }
@@ -124,7 +124,7 @@ func TestUserRevocationStoreSQLitePoisonsAmbiguousCommitUntilRestart(t *testing.
 	if err := store.ApplyPage(page, now); !errors.Is(err, ErrUserRevocationStorePoisoned) {
 		t.Fatalf("ambiguous commit: %v", err)
 	}
-	if store.Checkpoint() != 0 || store.IsRevokedAt("committed", "alice", 0) {
+	if store.Checkpoint() != 0 || store.IsRevoked("committed", "alice", 0) {
 		t.Fatal("ambiguous commit was published by the poisoned live store")
 	}
 	if err := store.ApplyPage(nil, now); !errors.Is(err, ErrUserRevocationStorePoisoned) {
@@ -138,7 +138,7 @@ func TestUserRevocationStoreSQLitePoisonsAmbiguousCommitUntilRestart(t *testing.
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if reopened.Checkpoint() != 4 || !reopened.IsRevokedAt("committed", "alice", 0) {
+	if reopened.Checkpoint() != 4 || !reopened.IsRevoked("committed", "alice", 0) {
 		t.Fatal("restart did not load the durably committed page")
 	}
 }
@@ -171,7 +171,7 @@ func TestUserRevocationStoreSQLiteCompactsStateBeyondLegacyReadLimit(t *testing.
 	if err := store.ApplyPage(nil, now); err != nil {
 		t.Fatal(err)
 	}
-	if store.IsRevokedAt(tokens[0].TokenID, "none", 0) {
+	if store.IsRevoked(tokens[0].TokenID, "none", 0) {
 		t.Fatal("expired stress token remained denied")
 	}
 	if err := store.Close(); err != nil {
@@ -182,7 +182,7 @@ func TestUserRevocationStoreSQLiteCompactsStateBeyondLegacyReadLimit(t *testing.
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if reopened.Checkpoint() != 1 || reopened.IsRevokedAt(tokens[len(tokens)-1].TokenID, "none", 0) {
+	if reopened.Checkpoint() != 1 || reopened.IsRevoked(tokens[len(tokens)-1].TokenID, "none", 0) {
 		t.Fatal("compacted state did not survive restart")
 	}
 }

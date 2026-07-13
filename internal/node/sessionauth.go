@@ -15,6 +15,7 @@ type sessionAuthKey struct {
 type sessionAuthRecord struct {
 	accountID          string
 	tokenID            string
+	issuedAt           int64
 	expiresAt          time.Time
 	sessionKeyHash     []byte
 	generation         uint64
@@ -70,7 +71,7 @@ func (r *sessionAuthRegistry) acceptsOpen(key sessionAuthKey, attachmentSequence
 
 func (r *sessionAuthRegistry) registerRecord(key sessionAuthKey, record sessionAuthRecord, closeFn func(string), requireNewer bool) bool {
 	r.mu.Lock()
-	if r.revocations != nil && r.revocations.IsRevoked(record.tokenID, record.accountID) {
+	if r.revocations != nil && r.revocations.IsRevoked(record.tokenID, record.accountID, record.issuedAt) {
 		r.mu.Unlock()
 		return false
 	}
@@ -94,7 +95,7 @@ func (r *sessionAuthRegistry) replace(key sessionAuthKey, next sessionAuthRecord
 	found = current != nil
 	now := r.now()
 	valid := current != nil && now.Before(current.record.expiresAt) && now.Before(next.expiresAt) &&
-		(r.revocations == nil || !r.revocations.IsRevoked(next.tokenID, next.accountID)) &&
+		(r.revocations == nil || !r.revocations.IsRevoked(next.tokenID, next.accountID, next.issuedAt)) &&
 		current.record.accountID == next.accountID && next.accountID == liveOwner &&
 		bytes.Equal(current.record.sessionKeyHash, next.sessionKeyHash) &&
 		current.record.generation == next.generation && current.record.nodeID == next.nodeID &&
@@ -118,13 +119,13 @@ func (r *sessionAuthRegistry) replace(key sessionAuthKey, next sessionAuthRecord
 
 func (r *sessionAuthRegistry) revoke(batch []VerifiedUserRevocation) {
 	tokens := make(map[string]struct{})
-	accounts := make(map[string]struct{})
+	accountCutoffs := make(map[string]int64)
 	for _, entry := range batch {
-		for _, tokenID := range entry.TokenIDs {
-			tokens[tokenID] = struct{}{}
+		for _, token := range entry.RevokedTokens {
+			tokens[token.TokenID] = struct{}{}
 		}
-		if entry.FamilyID == "" {
-			accounts[entry.AccountID] = struct{}{}
+		if entry.RevokeTokensIssuedBefore > accountCutoffs[entry.AccountID] {
+			accountCutoffs[entry.AccountID] = entry.RevokeTokensIssuedBefore
 		}
 	}
 	type closure struct{ fn func(string) }
@@ -132,7 +133,8 @@ func (r *sessionAuthRegistry) revoke(batch []VerifiedUserRevocation) {
 	r.mu.Lock()
 	for key, current := range r.records {
 		_, tokenMatch := tokens[current.record.tokenID]
-		_, accountMatch := accounts[current.record.accountID]
+		cutoff := accountCutoffs[current.record.accountID]
+		accountMatch := cutoff > 0 && current.record.issuedAt < cutoff
 		if !tokenMatch && !accountMatch {
 			continue
 		}

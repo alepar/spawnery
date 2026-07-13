@@ -99,8 +99,8 @@ func currentSessionToken(registry *sessionAuthRegistry, key sessionAuthKey) stri
 func TestUserRevocationLifecycleClosesCurrentIncarnationsAndRejectsAfterRestart(t *testing.T) {
 	now := time.Unix(1_770_000_000, 0)
 	signer, artifacts := genASKey(t)
-	statePath := t.TempDir() + "/user-revocations/state.json"
-	store, err := OpenUserRevocationStore(statePath)
+	statePath := t.TempDir() + "/user-revocations/revocations.db"
+	store, err := OpenUserRevocationStore(statePath, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,8 +158,15 @@ func TestUserRevocationLifecycleClosesCurrentIncarnationsAndRejectsAfterRestart(
 		t.Fatalf("direct incarnation=%q/%v", attachment, ok)
 	}
 
-	familyBatch := []VerifiedUserRevocation{{Seq: 2, AccountID: "alice", FamilyID: "family-a", TokenIDs: []string{"direct-old", "direct-reauth", "relay-old"}, RevokedAt: now.Unix()}}
-	if err := store.ApplyBatch(familyBatch); err != nil {
+	familyBatch := []VerifiedUserRevocation{{
+		Seq: 2, AccountID: "alice", FamilyID: "family-a", RevokedAt: now.Unix(),
+		RevokedTokens: []VerifiedRevokedToken{
+			{TokenID: "direct-old", RetainUntil: now.Add(time.Hour).Unix()},
+			{TokenID: "direct-reauth", RetainUntil: now.Add(time.Hour).Unix()},
+			{TokenID: "relay-old", RetainUntil: now.Add(time.Hour).Unix()},
+		},
+	}}
+	if err := store.ApplyPage(familyBatch, now); err != nil {
 		t.Fatal(err)
 	}
 	a.auths.revoke(familyBatch)
@@ -176,8 +183,8 @@ func TestUserRevocationLifecycleClosesCurrentIncarnationsAndRejectsAfterRestart(
 		t.Fatal("family revocation closed a nonmatching direct incarnation")
 	}
 
-	accountBatch := []VerifiedUserRevocation{{Seq: 5, AccountID: "alice", FamilyID: "", TokenIDs: []string{"account-marker"}, RevokedAt: now.Unix()}}
-	if err := store.ApplyBatch(accountBatch); err != nil {
+	accountBatch := []VerifiedUserRevocation{{Seq: 5, AccountID: "alice", RevokedAt: now.Unix(), RevokeTokensIssuedBefore: now.Unix() + 1}}
+	if err := store.ApplyPage(accountBatch, now); err != nil {
 		t.Fatal(err)
 	}
 	a.auths.revoke(accountBatch)
@@ -198,7 +205,7 @@ func TestUserRevocationLifecycleClosesCurrentIncarnationsAndRejectsAfterRestart(
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := OpenUserRevocationStore(statePath)
+	restarted, err := OpenUserRevocationStore(statePath, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +247,7 @@ func TestRevocationOutageCannotExtendOrReauthenticateLiveSignedAttachments(t *te
 	issuedAt := now
 	expiresAt := now.Add(time.Minute)
 	signer, artifacts := genASKey(t)
-	store, err := OpenUserRevocationStore(t.TempDir() + "/user-revocations/state.json")
+	store, err := OpenUserRevocationStore(t.TempDir()+"/user-revocations/revocations.db", func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +296,10 @@ func TestRevocationOutageCannotExtendOrReauthenticateLiveSignedAttachments(t *te
 	go func() { consumer.Run(outageCtx, a.auths.revoke); close(outageDone) }()
 	waitFor(t, "repeated revocation feed failures", func() bool { return polls.Load() >= 3 })
 
-	if err := store.ApplyBatch([]VerifiedUserRevocation{{Seq: 1, AccountID: "alice", FamilyID: "family", TokenIDs: []string{"denied-replacement"}, RevokedAt: issuedAt.Unix()}}); err != nil {
+	if err := store.ApplyPage([]VerifiedUserRevocation{{
+		Seq: 1, AccountID: "alice", FamilyID: "family", RevokedAt: issuedAt.Unix(),
+		RevokedTokens: []VerifiedRevokedToken{{TokenID: "denied-replacement", RetainUntil: now.Add(time.Hour).Unix()}},
+	}}, now); err != nil {
 		t.Fatal(err)
 	}
 	deniedBody := &authv1.IntentBody{Jti: "outage-reauth-denied", IssuedAt: issuedAt.Unix(), Op: string(intent.OpSessionReauth), SpawnId: "sp-outage", Generation: 1, SessionId: "denied", TargetNodeId: "node-1", NewTokenId: "denied-replacement"}

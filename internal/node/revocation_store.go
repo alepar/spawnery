@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -37,10 +36,6 @@ type VerifiedUserRevocation struct {
 	RevokedAt                int64
 	RevokedTokens            []VerifiedRevokedToken
 	RevokeTokensIssuedBefore int64
-
-	// Removed feed-v1 compatibility. It is accepted only by ApplyBatch and disappears with the
-	// consumer migration; persisted state is always normalized and expiring.
-	TokenIDs []string
 }
 
 type userRevocationSnapshot struct {
@@ -213,11 +208,7 @@ func (s *UserRevocationStore) Checkpoint() int64 {
 	return s.snapshot.Load().checkpoint
 }
 
-func (s *UserRevocationStore) IsRevoked(tokenID, accountID string) bool {
-	return s.IsRevokedAt(tokenID, accountID, 0)
-}
-
-func (s *UserRevocationStore) IsRevokedAt(tokenID, accountID string, issuedAt int64) bool {
+func (s *UserRevocationStore) IsRevoked(tokenID, accountID string, issuedAt int64) bool {
 	if s == nil || s.snapshot.Load() == nil {
 		return false
 	}
@@ -314,32 +305,10 @@ func (s *UserRevocationStore) ApplyPage(page []VerifiedUserRevocation, now time.
 	return nil
 }
 
-// ApplyBatch is the feed-v1 bridge and is removed with the old consumer. It never writes JSON;
-// old permanent IDs are represented conservatively until that consumer is replaced.
-func (s *UserRevocationStore) ApplyBatch(batch []VerifiedUserRevocation) error {
-	converted := make([]VerifiedUserRevocation, len(batch))
-	for index, entry := range batch {
-		converted[index] = entry
-		if converted[index].RevokedAt <= 0 {
-			converted[index].RevokedAt = 1
-		}
-		if len(entry.RevokedTokens) == 0 {
-			for _, tokenID := range entry.TokenIDs {
-				converted[index].RevokedTokens = append(converted[index].RevokedTokens, VerifiedRevokedToken{TokenID: tokenID, RetainUntil: math.MaxInt64})
-			}
-		}
-		converted[index].TokenIDs = nil
-		if entry.FamilyID == "" && converted[index].RevokeTokensIssuedBefore == 0 {
-			converted[index].RevokeTokensIssuedBefore = converted[index].RevokedAt
-		}
-	}
-	return s.ApplyPage(converted, s.now())
-}
-
 func validateUserRevocationPage(page []VerifiedUserRevocation, checkpoint int64) error {
 	previous := checkpoint
 	for _, entry := range page {
-		if entry.Seq <= previous || entry.AccountID == "" || entry.RevokedAt <= 0 || len(entry.TokenIDs) != 0 {
+		if entry.Seq <= previous || entry.AccountID == "" || entry.RevokedAt <= 0 {
 			return errors.New("node: invalid user revocation sequence or identity")
 		}
 		previous = entry.Seq

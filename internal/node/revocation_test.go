@@ -100,10 +100,10 @@ func TestRevocationConsumerDrainsBoundedPagesAndCommitsBeforeFanout(t *testing.T
 	var callbacks atomic.Int32
 	if err := consumer.pollOnce(context.Background(), func(page []VerifiedUserRevocation) {
 		call := callbacks.Add(1)
-		if call == 1 && (store.Checkpoint() != 2 || !store.IsRevokedAt("one", "none", now.Unix()+1)) {
+		if call == 1 && (store.Checkpoint() != 2 || !store.IsRevoked("one", "none", now.Unix()+1)) {
 			t.Fatal("first page callback ran before commit")
 		}
-		if call == 2 && (store.Checkpoint() != 7 || !store.IsRevokedAt("fresh", "bob", now.Unix()-1)) {
+		if call == 2 && (store.Checkpoint() != 7 || !store.IsRevoked("fresh", "bob", now.Unix()-1)) {
 			t.Fatal("second page callback ran before commit")
 		}
 	}); err != nil {
@@ -140,8 +140,8 @@ func TestRevocationConsumerInvalidLaterPagePreservesCommittedEarlierPage(t *test
 	if err := consumer.pollOnce(context.Background(), func([]VerifiedUserRevocation) { callbacks.Add(1) }); err == nil {
 		t.Fatal("invalid later page accepted")
 	}
-	if store.Checkpoint() != 2 || !store.IsRevokedAt("committed", "none", now.Unix()) || store.IsRevokedAt("not-committed", "none", now.Unix()) || callbacks.Load() != 1 {
-		t.Fatalf("checkpoint=%d committed=%v invalid=%v callbacks=%d", store.Checkpoint(), store.IsRevokedAt("committed", "none", now.Unix()), store.IsRevokedAt("not-committed", "none", now.Unix()), callbacks.Load())
+	if store.Checkpoint() != 2 || !store.IsRevoked("committed", "none", now.Unix()) || store.IsRevoked("not-committed", "none", now.Unix()) || callbacks.Load() != 1 {
+		t.Fatalf("checkpoint=%d committed=%v invalid=%v callbacks=%d", store.Checkpoint(), store.IsRevoked("committed", "none", now.Unix()), store.IsRevoked("not-committed", "none", now.Unix()), callbacks.Load())
 	}
 }
 
@@ -195,8 +195,8 @@ func TestRevocationConsumerRejectsWholeInvalidPageWithoutPublication(t *testing.
 			if err := consumer.pollOnce(context.Background(), func([]VerifiedUserRevocation) { callbacks.Add(1) }); err == nil {
 				t.Fatal("invalid page accepted")
 			}
-			if store.Checkpoint() != 0 || store.IsRevokedAt("prefix", "alice", now.Unix()) || callbacks.Load() != 0 {
-				t.Fatalf("checkpoint=%d prefix=%v callbacks=%d", store.Checkpoint(), store.IsRevokedAt("prefix", "alice", now.Unix()), callbacks.Load())
+			if store.Checkpoint() != 0 || store.IsRevoked("prefix", "alice", now.Unix()) || callbacks.Load() != 0 {
+				t.Fatalf("checkpoint=%d prefix=%v callbacks=%d", store.Checkpoint(), store.IsRevoked("prefix", "alice", now.Unix()), callbacks.Load())
 			}
 		})
 	}
