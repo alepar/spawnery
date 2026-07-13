@@ -355,8 +355,15 @@ func (s *Server) AddProfileEntry(ctx context.Context, req *connect.Request[cpv1.
 			warnings = w
 			se.RenameSubdirs = finalRename
 		} else {
-			// Enforce per-profile entry count cap before inserting (sp-nrzf.3.6).
-			if err := enforceProfileEntryCap(len(existingEntries)); err != nil {
+			// Attach-time cap (sp-mwco.1.12 §4.4): count the profile's EXPANDED artifact set — a
+			// bundle_ref entry contributes its post-exclude member count, not 1 — so a catalog_ref/
+			// custom attach can't push a bundle-bearing profile past the 63-payload budget and make
+			// every CreateSpawn fail. Assembly (validateAndMergeArtifacts) stays authoritative.
+			_, existingCount, err := s.expandedProfileState(ctx, tx, existingEntries, "")
+			if err != nil {
+				return err
+			}
+			if err := enforceProfileArtifactCap(existingCount, 1); err != nil {
 				return err
 			}
 		}
