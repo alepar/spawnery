@@ -2,11 +2,16 @@
 set -euo pipefail
 
 env_file="${1:-/etc/spawnery/env.d/gitea.env}"
-origin="${GITEA_ORIGIN:-http://127.0.0.1:3000}"
+app_ini="${2:-/etc/gitea/app.ini}"
+origin="http://127.0.0.1:3000"
 api_base="$origin/api/v1"
 
 [[ -f "$env_file" ]] || {
   echo "missing generated Gitea environment: $env_file" >&2
+  exit 1
+}
+[[ -f "$app_ini" ]] || {
+  echo "missing Gitea configuration: $app_ini" >&2
   exit 1
 }
 token="$(sed -n 's/^GITHUB_STATIC_TOKEN=//p' "$env_file" | tail -n1)"
@@ -15,9 +20,56 @@ token="$(sed -n 's/^GITHUB_STATIC_TOKEN=//p' "$env_file" | tail -n1)"
   exit 1
 }
 
-# The golden image may predate this branch. Prove its token belongs to the local Gitea before
-# publishing the branch-owned endpoint values to the node environment.
-curl -fsS "$origin/api/healthz" >/dev/null
+# Golden images may predate this branch. Replace only the HEAD-owned server keys, leaving the
+# database and generated security secrets intact, then prove the preserved token against that
+# exact local topology before publishing it to the node environment.
+app_mode="$(stat -c %a "$app_ini")"
+app_uid="$(stat -c %u "$app_ini")"
+app_gid="$(stat -c %g "$app_ini")"
+app_tmp="$(mktemp "${app_ini}.tmp.XXXXXX")"
+trap 'rm -f "$app_tmp"' EXIT
+awk '
+  {
+    section = $0
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", section)
+    if (section == "[server]") {
+      found_server = 1
+      in_server = 1
+      print $0
+      print "PROTOCOL = http"
+      print "HTTP_ADDR = 127.0.0.1"
+      print "HTTP_PORT = 3000"
+      print "DOMAIN = 127.0.0.1"
+      print "ROOT_URL = http://127.0.0.1:3000/"
+      next
+    }
+    if (in_server && section ~ /^\[/) in_server = 0
+    if (in_server && $0 ~ /^[[:space:]]*(PROTOCOL|HTTP_ADDR|HTTP_PORT|DOMAIN|ROOT_URL)[[:space:]]*=/) next
+    print $0
+  }
+  END { if (!found_server) exit 42 }
+' "$app_ini" >"$app_tmp" || {
+  echo "Gitea configuration has no [server] section: $app_ini" >&2
+  exit 1
+}
+chmod "$app_mode" "$app_tmp"
+chown "$app_uid:$app_gid" "$app_tmp"
+mv -f "$app_tmp" "$app_ini"
+trap - EXIT
+
+systemctl restart gitea
+healthy=0
+for _ in $(seq 1 60); do
+  if curl -fsS "$origin/api/healthz" >/dev/null 2>&1; then
+    healthy=1
+    break
+  fi
+  sleep 1
+done
+[[ "$healthy" == 1 ]] || {
+  echo "Gitea did not become healthy at $origin" >&2
+  exit 1
+}
 curl -fsS -H "Authorization: token $token" "$api_base/user" >/dev/null
 
 umask 077

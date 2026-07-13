@@ -956,7 +956,7 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID st
 }
 
 // CreateWithSelection is Create plus an explicit agent selection (image + runnable id + mode).
-// For any selected runnable the container command is set to [sel.RunnableID]; the image's
+// For any selected runnable the image-entrypoint argument vector is set to [sel.RunnableID]; the image's
 // dispatcher entrypoint (entrypoint.sh) resolves the actual launch (serve+adapter, tmux-wrapped
 // TUI, etc.) — the node just names the runnable. No selection leaves Cmd nil (image default).
 func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, sel AgentSelection) (*Spawn, error) {
@@ -1013,7 +1013,8 @@ func (m *Manager) createWithReservation(ctx context.Context, id, appPath, model,
 			return nil, fmt.Errorf("unknown runnable %q", sel.RunnableID)
 		}
 		// The image's dispatcher entrypoint owns the actual launch (serve+adapter / tmux-wrapped TUI);
-		// the node just names the runnable. (Replaces the old spawn-tmux + agentcaps.Launch prepend.)
+		// the node passes only the runnable ID as its argument. (Replaces the old spawn-tmux +
+		// agentcaps.Launch prepend.)
 		agentCmd = []string{sel.RunnableID}
 	}
 

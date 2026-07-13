@@ -46,7 +46,7 @@ async function waitForNodeNACK(
   for (let attempt = 0; attempt < 120; attempt++) {
     const found = (await client.listSpawns({})).spawns.find((spawn) => spawn.spawnId === spawnId);
     if (found?.status === cpv1.SpawnStatus.ERROR) {
-      expect(found.errorDetail).toMatch(new RegExp(`^${nack}:`));
+      expect(found.errorDetail).toMatch(new RegExp(`^failed_precondition: ${nack}:`));
       return;
     }
     await sleep(250);
@@ -319,12 +319,25 @@ test("production authorization: exact node NACKs and target substitution refusal
       expect((error as ConnectError).code).toBe(Code.InvalidArgument);
       expect((error as ConnectError).rawMessage).toBe(`${missing} required`);
       await expectNoRuntime(created.spawnId);
+
+      // Complete the pending create deterministically so deletion does not wait for the 2m5s
+      // SignedIntent TTL. This cleanup NACK is separate from the missing-field assertion above.
+      const cleanupIntent = await signedPendingIntent(pending, owner, { corruptSignature: true });
+      await client.submitIntent({
+        spawnId: created.spawnId,
+        intent: cleanupIntent,
+        nodeAccessToken: owner.nodeAccessToken,
+      });
+      await waitForNodeNACK(client, created.spawnId, "BAD_SIG");
+      await expectNoRuntime(created.spawnId);
     } finally {
       await client.deleteSpawn({ spawnId: created.spawnId }).catch(() => {});
     }
   }
 
+  const wrongAudienceSince = Math.floor(Date.now() / 1000);
   await rejectedCreate(owner, owner, "wrong-audience", "WRONG_AUDIENCE", {}, owner.accessToken);
+  await expectNodeJournalNACK(wrongAudienceSince, "WRONG_AUDIENCE");
   await rejectedCreate(owner, other, "cnf-mismatch", "CNF_MISMATCH", {}, owner.nodeAccessToken);
   await rejectedCreate(owner, owner, "bad-signature", "BAD_SIG", { corruptSignature: true });
   await rejectedCreate(owner, other, "owner-mismatch-web", "OWNER_MISMATCH");

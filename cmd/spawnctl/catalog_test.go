@@ -111,12 +111,54 @@ func TestRunCatalogShow(t *testing.T) {
 func TestRunCatalogUpdate(t *testing.T) {
 	f := &fakeCatalogClient{}
 	var out bytes.Buffer
-	p := catalogUpdateParams{Name: "new-name", Description: "new-desc", Content: []byte("new content")}
+	p := catalogUpdateParams{
+		Name: "new-name", Description: "new-desc", Content: []byte("new content"),
+		NameSet: true, DescriptionSet: true, ContentSet: true,
+	}
 	if err := runCatalogUpdate(context.Background(), f, &out, "cat-7", p); err != nil {
 		t.Fatal(err)
 	}
 	if f.gotUpdate.GetCatalogId() != "cat-7" || f.gotUpdate.GetName() != "new-name" {
 		t.Fatalf("update req = %+v", f.gotUpdate)
+	}
+}
+
+func TestRunCatalogUpdateMergesOmittedFields(t *testing.T) {
+	f := &fakeCatalogClient{getResp: &cpv1.GetCatalogEntryResponse{Entry: &cpv1.CustomizationCatalogEntry{
+		CatalogId: "cat-7", Name: "existing-name", Description: "existing-desc", Content: []byte("existing content"),
+	}}}
+	var out bytes.Buffer
+	p := catalogUpdateParams{Description: "new-desc", DescriptionSet: true}
+	if err := runCatalogUpdate(context.Background(), f, &out, "cat-7", p); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.gotUpdate; got.GetName() != "existing-name" || got.GetDescription() != "new-desc" || string(got.GetContent()) != "existing content" {
+		t.Fatalf("merged update req = %+v", got)
+	}
+}
+
+func TestRunCatalogUpdateAllowsExplicitEmptyOptionalField(t *testing.T) {
+	f := &fakeCatalogClient{getResp: &cpv1.GetCatalogEntryResponse{Entry: &cpv1.CustomizationCatalogEntry{
+		CatalogId: "cat-7", Name: "existing-name", Description: "existing-desc", Content: []byte("existing content"),
+	}}}
+	var out bytes.Buffer
+	p := catalogUpdateParams{Description: "", DescriptionSet: true}
+	if err := runCatalogUpdate(context.Background(), f, &out, "cat-7", p); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.gotUpdate; got.GetDescription() != "" || got.GetName() != "existing-name" || string(got.GetContent()) != "existing content" {
+		t.Fatalf("explicit-empty update req = %+v", got)
+	}
+}
+
+func TestRunCatalogUpdateRejectsNoFields(t *testing.T) {
+	f := &fakeCatalogClient{}
+	err := runCatalogUpdate(context.Background(), f, &bytes.Buffer{}, "cat-7", catalogUpdateParams{})
+	if err == nil || !strings.Contains(err.Error(), "at least one") {
+		t.Fatalf("runCatalogUpdate error = %v, want at-least-one-field error", err)
+	}
+	if f.gotUpdate != nil {
+		t.Fatalf("unexpected update request: %+v", f.gotUpdate)
 	}
 }
 

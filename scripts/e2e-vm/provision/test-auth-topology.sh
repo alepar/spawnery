@@ -82,6 +82,10 @@ gitea_reconcile="$HERE/reconcile-gitea-env.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin"
+cat >"$tmp/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+EOF
 cat >"$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
@@ -91,13 +95,61 @@ case "$*" in
 esac
 EOF
 chmod +x "$tmp/bin/curl"
+chmod +x "$tmp/bin/systemctl"
+cat >"$tmp/app.ini" <<'EOF'
+APP_NAME = Stale Golden Gitea
+[server]
+PROTOCOL = https
+HTTP_ADDR = 0.0.0.0
+HTTP_PORT = 443
+DOMAIN = github.com
+ROOT_URL = https://github.com/
+DISABLE_SSH = true
+[database]
+DB_TYPE = sqlite3
+PATH = /var/lib/gitea/data/gitea.db
+[security]
+SECRET_KEY = preserve-me
+INTERNAL_TOKEN = preserve-me-too
+EOF
+chmod 0640 "$tmp/app.ini"
 cat >"$tmp/gitea.env" <<'EOF'
 GITHUB_API_BASE_URL=https://github.com/api/v1
 GITHUB_HOST=github.com
 GITHUB_ALLOW_INSECURE_HOST=0
 GITHUB_STATIC_TOKEN=minted-token
 EOF
-PATH="$tmp/bin:$PATH" "$gitea_reconcile" "$tmp/gitea.env"
+SYSTEMCTL_LOG="$tmp/systemctl.log" PATH="$tmp/bin:$PATH" "$gitea_reconcile" "$tmp/gitea.env" "$tmp/app.ini"
+expected_app_ini="$tmp/expected-app.ini"
+cat >"$expected_app_ini" <<'EOF'
+APP_NAME = Stale Golden Gitea
+[server]
+PROTOCOL = http
+HTTP_ADDR = 127.0.0.1
+HTTP_PORT = 3000
+DOMAIN = 127.0.0.1
+ROOT_URL = http://127.0.0.1:3000/
+DISABLE_SSH = true
+[database]
+DB_TYPE = sqlite3
+PATH = /var/lib/gitea/data/gitea.db
+[security]
+SECRET_KEY = preserve-me
+INTERNAL_TOKEN = preserve-me-too
+EOF
+cmp -s "$expected_app_ini" "$tmp/app.ini" || {
+  echo "Gitea reconciler did not preserve secrets while restoring the HEAD-owned server topology" >&2
+  exit 1
+}
+[[ "$(stat -c %a "$tmp/app.ini")" == 640 ]] || {
+  echo "Gitea reconciler changed the app.ini access mode" >&2
+  exit 1
+}
+printf '%s\n' 'restart gitea' >"$tmp/expected-systemctl.log"
+cmp -s "$tmp/expected-systemctl.log" "$tmp/systemctl.log" || {
+  echo "Gitea reconciler did not restart the service before probing it" >&2
+  exit 1
+}
 expected_gitea_env="$tmp/expected-gitea.env"
 cat >"$expected_gitea_env" <<'EOF'
 GITHUB_API_BASE_URL=http://127.0.0.1:3000/api/v1
