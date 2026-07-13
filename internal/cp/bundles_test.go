@@ -546,7 +546,7 @@ func TestGetBundleDiff_AddedRemovedChanged_UnchangedAbsent(t *testing.T) {
 	}
 
 	// The diff view satisfies assertDiffViewed for the minted token.
-	if err := s.assertDiffViewed(owner, bundle.BundleID, reResp.Msg.VersionId, reResp.Msg.DiffToken); err != nil {
+	if err := s.assertDiffViewed(owner, bundle.BundleID, v1.VersionID, reResp.Msg.VersionId, reResp.Msg.DiffToken); err != nil {
 		t.Fatalf("assertDiffViewed after GetBundleDiff: %v", err)
 	}
 }
@@ -646,7 +646,7 @@ func TestAssertDiffViewed_UnmintedToken_FailedPrecondition(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	owner := bundleTestOwner(t)
 
-	err := s.assertDiffViewed(owner, "some-bundle", "some-version", "not-a-real-token")
+	err := s.assertDiffViewed(owner, "some-bundle", "some-from-version", "some-version", "not-a-real-token")
 	if err == nil {
 		t.Fatal("expected FailedPrecondition for an unminted token")
 	}
@@ -662,7 +662,7 @@ func TestAssertDiffViewed_MintedButUnviewed_FailedPrecondition(t *testing.T) {
 
 	tok := s.bundleDiffGate.mint(owner, "bundle-x", "v1", "v2", time.Now())
 
-	err := s.assertDiffViewed(owner, "bundle-x", "v2", tok)
+	err := s.assertDiffViewed(owner, "bundle-x", "v1", "v2", tok)
 	if err == nil {
 		t.Fatal("expected FailedPrecondition for a minted-but-unviewed token")
 	}
@@ -677,15 +677,150 @@ func TestAssertDiffViewed_Expired_FailedPrecondition(t *testing.T) {
 	owner := bundleTestOwner(t)
 
 	// Mint far enough in the past that it is already expired.
-	tok := s.bundleDiffGate.mint(owner, "bundle-y", "v1", "v2", time.Now().Add(-2*diffTokenTTL))
-	s.bundleDiffGate.markViewed(owner, "bundle-y", "v1", "v2", time.Now().Add(-2*diffTokenTTL))
+	tok := s.bundleDiffGate.mintViewed(owner, "bundle-y", "v1", "v2", time.Now().Add(-2*diffTokenTTL))
 
-	err := s.assertDiffViewed(owner, "bundle-y", "v2", tok)
+	err := s.assertDiffViewed(owner, "bundle-y", "v1", "v2", tok)
 	if err == nil {
 		t.Fatal("expected FailedPrecondition for an expired token")
 	}
 	var ce *connect.Error
 	if !errors.As(err, &ce) || ce.Code() != connect.CodeFailedPrecondition {
 		t.Fatalf("expected CodeFailedPrecondition, got: %v", err)
+	}
+}
+
+func TestAssertDiffViewed_WrongFromVersion_FailedPrecondition(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	owner := bundleTestOwner(t)
+
+	// A live, viewed token exists for (bundle-z, v2 -> v3) — e.g. a narrower diff than the
+	// caller's actual pinned version.
+	tok := s.bundleDiffGate.mintViewed(owner, "bundle-z", "v2", "v3", time.Now())
+
+	// An entry pinned at v1 (not v2) must not be able to re-pin onto v3 using this token: the
+	// caller never saw the v1->v2 delta.
+	err := s.assertDiffViewed(owner, "bundle-z", "v1", "v3", tok)
+	if err == nil {
+		t.Fatal("expected FailedPrecondition when the token's fromVersion does not match the entry's pinned version")
+	}
+	var ce *connect.Error
+	if !errors.As(err, &ce) || ce.Code() != connect.CodeFailedPrecondition {
+		t.Fatalf("expected CodeFailedPrecondition, got: %v", err)
+	}
+}
+
+// --- diffGate: mintViewed / dedupe / sweep (sp-mwco.1.13) ---------------------------------------
+
+func TestDiffGate_MintViewed_NoPriorMint_YieldsViewedToken(t *testing.T) {
+	g := newDiffGate()
+	now := time.Now()
+
+	tok := g.mintViewed("alice", "bundle-a", "v1", "v2", now)
+	if tok == "" {
+		t.Fatal("expected a non-empty token")
+	}
+	if !g.isViewed("alice", "bundle-a", "v1", "v2", tok, now) {
+		t.Fatal("expected the mint-on-view token to already be viewed")
+	}
+}
+
+func TestDiffGate_MintViewed_ReusesLiveUnviewedToken(t *testing.T) {
+	g := newDiffGate()
+	now := time.Now()
+
+	minted := g.mint("alice", "bundle-a", "v1", "v2", now)
+	viewed := g.mintViewed("alice", "bundle-a", "v1", "v2", now)
+
+	if viewed != minted {
+		t.Fatalf("mintViewed token = %q, want the same token minted by mint (%q) — no duplicate mint for a live tuple", viewed, minted)
+	}
+	if !g.isViewed("alice", "bundle-a", "v1", "v2", minted, now) {
+		t.Fatal("expected the reused token to now be viewed")
+	}
+	if len(g.tokens) != 1 {
+		t.Fatalf("got %d tokens, want 1 (reused, not duplicated)", len(g.tokens))
+	}
+}
+
+func TestDiffGate_MintViewed_SweepsExpired(t *testing.T) {
+	g := newDiffGate()
+	now := time.Now()
+
+	// Seed an already-expired token for a different tuple.
+	g.mint("alice", "bundle-old", "v0", "v1", now.Add(-2*diffTokenTTL))
+
+	g.mintViewed("alice", "bundle-a", "v1", "v2", now)
+
+	if len(g.tokens) != 1 {
+		t.Fatalf("got %d tokens, want 1 (expired tuple swept)", len(g.tokens))
+	}
+}
+
+// --- GetBundleDiff: mint-on-view (sp-mwco.1.13, the bead's acceptance criterion) -----------------
+
+func TestGetBundleDiff_NoPriorReingest_MintsViewedToken(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	owner := bundleTestOwner(t)
+	ctx := makeOwnerCtx(owner)
+
+	bundleID := "bnd-nopriorreingest"
+	mkBundle(t, s, bundleID, owner)
+	mkCatalogSkill(t, s, owner, bundleID+"-cat-a", "member-a", "skills/a", fmt.Sprintf("%064x", 1))
+	v1 := mkBundleVersion(t, s, bundleID, 1, []store.SkillBundleMember{
+		{SourceSubdir: "skills/a", CatalogID: bundleID + "-cat-a", Position: 0},
+	})
+	mkCatalogSkill(t, s, owner, bundleID+"-cat-b", "member-b", "skills/b", fmt.Sprintf("%064x", 2))
+	v2 := mkBundleVersion(t, s, bundleID, 2, []store.SkillBundleMember{
+		{SourceSubdir: "skills/a", CatalogID: bundleID + "-cat-a", Position: 0},
+		{SourceSubdir: "skills/b", CatalogID: bundleID + "-cat-b", Position: 1},
+	})
+
+	// Fresh server, empty gate: simulates a CP restart, an expired token, or a re-pin attempt
+	// with no ReingestBundle ever called in this process — the bead's dead-end case.
+	diffResp, err := s.GetBundleDiff(ctx, connect.NewRequest(&cpv1.GetBundleDiffRequest{
+		BundleId: bundleID, FromVersion: v1, ToVersion: v2,
+	}))
+	if err != nil {
+		t.Fatalf("GetBundleDiff: %v", err)
+	}
+	if diffResp.Msg.DiffToken == "" {
+		t.Fatal("expected a non-empty diff_token from GetBundleDiff even with no prior ReingestBundle")
+	}
+	if err := s.assertDiffViewed(owner, bundleID, v1, v2, diffResp.Msg.DiffToken); err != nil {
+		t.Fatalf("assertDiffViewed after GetBundleDiff with no prior ReingestBundle: %v", err)
+	}
+}
+
+func TestGetBundleDiff_LiveReingestToken_ReturnedAndViewed(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	owner := bundleTestOwner(t)
+	ctx := makeOwnerCtx(owner)
+
+	bundleID := "bnd-livereingesttoken"
+	mkBundle(t, s, bundleID, owner)
+	mkCatalogSkill(t, s, owner, bundleID+"-cat-a", "member-a", "skills/a", fmt.Sprintf("%064x", 1))
+	v1 := mkBundleVersion(t, s, bundleID, 1, []store.SkillBundleMember{
+		{SourceSubdir: "skills/a", CatalogID: bundleID + "-cat-a", Position: 0},
+	})
+	mkCatalogSkill(t, s, owner, bundleID+"-cat-b", "member-b", "skills/b", fmt.Sprintf("%064x", 2))
+	v2 := mkBundleVersion(t, s, bundleID, 2, []store.SkillBundleMember{
+		{SourceSubdir: "skills/a", CatalogID: bundleID + "-cat-a", Position: 0},
+		{SourceSubdir: "skills/b", CatalogID: bundleID + "-cat-b", Position: 1},
+	})
+
+	// Simulate a prior ReingestBundle having minted an (unviewed) token for this exact pair.
+	preMinted := s.bundleDiffGate.mint(owner, bundleID, v1, v2, time.Now())
+
+	diffResp, err := s.GetBundleDiff(ctx, connect.NewRequest(&cpv1.GetBundleDiffRequest{
+		BundleId: bundleID, FromVersion: v1, ToVersion: v2,
+	}))
+	if err != nil {
+		t.Fatalf("GetBundleDiff: %v", err)
+	}
+	if diffResp.Msg.DiffToken != preMinted {
+		t.Fatalf("DiffToken = %q, want the ReingestBundle-minted token %q reused, not a second one", diffResp.Msg.DiffToken, preMinted)
+	}
+	if err := s.assertDiffViewed(owner, bundleID, v1, v2, diffResp.Msg.DiffToken); err != nil {
+		t.Fatalf("assertDiffViewed after GetBundleDiff: %v", err)
 	}
 }

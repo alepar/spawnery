@@ -87,9 +87,11 @@ func (s *Server) RepinProfileBundle(ctx context.Context, req *connect.Request[cp
 				fmt.Errorf("version %q (seq %d) is not newer than the pinned version (seq %d)", req.Msg.VersionId, newVersion.Seq, pinnedVersion.Seq))
 		}
 
-		// The diff IS the supply-chain gate (§4.9): fails closed on an unknown/unviewed/expired
-		// token.
-		if err := s.assertDiffViewed(owner, entry.BundleID, req.Msg.VersionId, req.Msg.DiffToken); err != nil {
+		// The diff IS the supply-chain gate (§4.9): fails closed on an unknown/unviewed/expired/
+		// wrong-pair token. fromVersionID is the entry's CURRENTLY PINNED version (loaded above as
+		// pinnedVersion) — the token must cover the caller having viewed exactly pinned->target,
+		// not some other pair (sp-mwco.1.13).
+		if err := s.assertDiffViewed(owner, entry.BundleID, entry.VersionID, req.Msg.VersionId, req.Msg.DiffToken); err != nil {
 			return err
 		}
 

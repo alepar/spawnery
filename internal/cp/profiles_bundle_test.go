@@ -52,12 +52,12 @@ func mkBundle(t *testing.T, s *Server, bundleID, creator string) {
 	}
 }
 
-// mintAndViewDiffToken mints a diff token via the in-memory gate and immediately marks it
-// viewed, mirroring a ReingestBundle -> GetBundleDiff round trip without needing a real HTTP
-// fetch (sp-mwco.1.7's fetcher stubbing lives in bundles_test.go; this task only needs the gate).
+// mintAndViewDiffToken mints-and-views a diff token via the in-memory gate, mirroring a
+// GetBundleDiff call without needing a real HTTP fetch (sp-mwco.1.7's fetcher stubbing lives in
+// bundles_test.go; this task only needs the gate). Since sp-mwco.1.13, GetBundleDiff mints on
+// view directly — mintViewed is that exact seam.
 func mintAndViewDiffToken(s *Server, owner, bundleID, fromVersionID, toVersionID string) string {
-	s.bundleDiffGate.mint(owner, bundleID, fromVersionID, toVersionID, time.Now())
-	return s.bundleDiffGate.markViewed(owner, bundleID, fromVersionID, toVersionID, time.Now())
+	return s.bundleDiffGate.mintViewed(owner, bundleID, fromVersionID, toVersionID, time.Now())
 }
 
 // ---- AddProfileEntry(BUNDLE_REF): attach/pin ---------------------------------------------------
@@ -640,6 +640,85 @@ func TestRepinProfileBundle_EqualSeq_InvalidArgument(t *testing.T) {
 	}))
 	if connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Errorf("expected InvalidArgument for an equal-seq re-pin, got %v", err)
+	}
+}
+
+// TestRepinProfileBundle_AfterGetBundleDiff_NoPriorReingest_Succeeds is the bead's acceptance
+// criterion (sp-mwco.1.13): an entry pinned to an older bundle version, with NO prior
+// ReingestBundle call in this CP process (fresh server, empty gate — simulating a CP restart, an
+// expired token, or another session having cut the version), can be re-pinned after fetching
+// GetBundleDiff(pinned -> target) directly.
+func TestRepinProfileBundle_AfterGetBundleDiff_NoPriorReingest_Succeeds(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	f := newRepinFixture(t, s)
+
+	diffResp, err := s.GetBundleDiff(aliceCtx(), connect.NewRequest(&cpv1.GetBundleDiffRequest{
+		BundleId: f.bundleID, FromVersion: f.v1, ToVersion: f.v2,
+	}))
+	if err != nil {
+		t.Fatalf("GetBundleDiff: %v", err)
+	}
+	if diffResp.Msg.DiffToken == "" {
+		t.Fatal("expected a non-empty diff_token from GetBundleDiff with no prior ReingestBundle")
+	}
+
+	resp, err := s.RepinProfileBundle(aliceCtx(), connect.NewRequest(&cpv1.RepinProfileBundleRequest{
+		ProfileId: f.profileID, EntryId: f.entryID, VersionId: f.v2, ExpectedVersion: 2,
+		DiffToken: diffResp.Msg.DiffToken,
+	}))
+	if err != nil {
+		t.Fatalf("RepinProfileBundle after a bare GetBundleDiff: %v", err)
+	}
+	if resp.Msg.Version != 3 {
+		t.Errorf("Version = %d, want 3", resp.Msg.Version)
+	}
+
+	_, entries := loadProfile(t, s, f.profileID)
+	if len(entries) != 1 || entries[0].VersionID != f.v2 {
+		t.Fatalf("entries = %+v, want the bundle_ref entry pinned to %q", entries, f.v2)
+	}
+}
+
+// TestRepinProfileBundle_StaleAcrossTwoVersions_RequiresPinnedToTargetDiff covers the latent
+// defect the bead's fix must not reopen: a diff token proves the caller saw a NARROWER pair than
+// their actual pinned->target delta must not satisfy the gate.
+func TestRepinProfileBundle_StaleAcrossTwoVersions_RequiresPinnedToTargetDiff(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	f := newRepinFixture(t, s)
+
+	// A third bundle version exists; the entry is still pinned at v1 — two versions behind.
+	v3 := mkBundleVersion(t, s, f.bundleID, 3, []store.SkillBundleMember{
+		{SourceSubdir: "skills/a", CatalogID: f.bundleID + "-cat-a", Position: 0},
+		{SourceSubdir: "skills/c", CatalogID: f.bundleID + "-cat-c", Position: 1},
+	})
+
+	// A token covering only v2->v3 does not prove the caller saw the v1->v2 delta: repin onto v3
+	// must fail.
+	narrowTok := mintAndViewDiffToken(s, "alice", f.bundleID, f.v2, v3)
+	_, err := s.RepinProfileBundle(aliceCtx(), connect.NewRequest(&cpv1.RepinProfileBundleRequest{
+		ProfileId: f.profileID, EntryId: f.entryID, VersionId: v3, ExpectedVersion: 2,
+		DiffToken: narrowTok,
+	}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("expected FailedPrecondition for a v2->v3 token when the entry is pinned at v1, got %v", err)
+	}
+
+	// A token covering the FULL pinned->target delta (v1->v3) succeeds.
+	fullTok := mintAndViewDiffToken(s, "alice", f.bundleID, f.v1, v3)
+	resp, err := s.RepinProfileBundle(aliceCtx(), connect.NewRequest(&cpv1.RepinProfileBundleRequest{
+		ProfileId: f.profileID, EntryId: f.entryID, VersionId: v3, ExpectedVersion: 2,
+		DiffToken: fullTok,
+	}))
+	if err != nil {
+		t.Fatalf("RepinProfileBundle with a v1->v3 token: %v", err)
+	}
+	if resp.Msg.Version != 3 {
+		t.Errorf("Version = %d, want 3", resp.Msg.Version)
+	}
+
+	_, entries := loadProfile(t, s, f.profileID)
+	if len(entries) != 1 || entries[0].VersionID != v3 {
+		t.Fatalf("entries = %+v, want the bundle_ref entry pinned to %q", entries, v3)
 	}
 }
 

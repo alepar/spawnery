@@ -178,10 +178,12 @@ type Server struct {
 	// a 304. Held as a field (not a package var) so tests can shrink it.
 	reingestBudget *refetchBudget
 
-	// bundleDiffGate is the in-memory, TTL'd registry of diff tokens minted by ReingestBundle and
-	// consumed by GetBundleDiff / assertDiffViewed (sp-mwco.1.7 §4.9 — the diff IS the
-	// supply-chain gate on re-pin; sp-mwco.1.8's re-pin RPC is assertDiffViewed's caller).
-	// Ephemeral: a CP restart invalidates every token and fails closed (no token, no re-pin).
+	// bundleDiffGate is the in-memory, TTL'd registry of diff tokens, minted by ReingestBundle
+	// (unviewed) or by GetBundleDiff (viewed — the view IS the gate, sp-mwco.1.13) and consumed by
+	// assertDiffViewed (sp-mwco.1.7 §4.9 — the diff IS the supply-chain gate on re-pin;
+	// sp-mwco.1.8's re-pin RPC is assertDiffViewed's caller). Ephemeral: a CP restart invalidates
+	// every token and fails closed (no token, no re-pin) — but GetBundleDiff mints a fresh one on
+	// demand, so a stale pin is never stuck.
 	bundleDiffGate *diffGate
 
 	// ForkSpawn seams. NewServer wires the same-node materializer and an interim zero-footprint

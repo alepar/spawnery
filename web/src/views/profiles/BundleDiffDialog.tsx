@@ -27,9 +27,11 @@ const CHANGE_LABEL: Record<string, string> = {
 /**
  * The diff view + gated Re-pin button (sp-mwco.1.9 D5, spec §4.9). Re-pin is impossible without
  * viewing the diff: it stays disabled until GetBundleDiff has loaded, and stays disabled when the
- * response's diffToken is empty — that's the server telling us the gate is unsatisfiable (a
- * missing/expired token; see sp-mwco.1.13 for the server-side fix to the underlying dead-end).
- * The client re-pins ONLY with the token GetBundleDiff returned — never a token it minted itself.
+ * response's diffToken is empty. As of sp-mwco.1.13, GetBundleDiff itself mints-and-marks-viewed
+ * the token for the pair it serves, so a real response should always carry one; an empty token is
+ * defense-in-depth (e.g. the server has no gate configured) rather than the expected "stale pin"
+ * signal it used to be. The client re-pins ONLY with the token GetBundleDiff returned — never a
+ * token it minted itself.
  */
 export function BundleDiffDialog({
   open, onOpenChange, bundleId, fromVersionId, toVersionId, onRepin,

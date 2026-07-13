@@ -74,8 +74,10 @@ func (b *refetchBudget) allow(now time.Time) (bool, time.Duration) {
 // fails closed — the caller re-runs "check for updates" to mint a fresh one.
 const diffTokenTTL = 30 * time.Minute
 
-// diffTokenRecord is one minted-by-ReingestBundle token, pending a GetBundleDiff view before a
-// re-pin onto toVersionID is permitted.
+// diffTokenRecord is one diff-gate token, minted either by ReingestBundle (unviewed, pending a
+// GetBundleDiff view) or by GetBundleDiff itself (viewed on mint — the view IS the gate; see
+// mintViewed). A record satisfies a re-pin only once viewed AND matching both fromVersionID and
+// toVersionID.
 type diffTokenRecord struct {
 	owner                      string
 	bundleID                   string
@@ -85,9 +87,12 @@ type diffTokenRecord struct {
 }
 
 // diffGate is the in-memory, TTL'd registry of diff tokens. mint is called by ReingestBundle on a
-// real change; markViewed by GetBundleDiff; isViewed by assertDiffViewed (the seam sp-mwco.1.8's
-// re-pin RPC checks). Bounded implicitly by diffTokenTTL — an unswept expired entry is harmless
-// noise at CP scale, not an unbounded-growth concern.
+// real change (unviewed — an optimization so a subsequent GetBundleDiff of the same pair doesn't
+// mint a second token, not itself sufficient to satisfy a re-pin); mintViewed by GetBundleDiff
+// (the view IS the gate: minting and marking-viewed happen atomically for the exact pair served);
+// isViewed by assertDiffViewed (the seam sp-mwco.1.8's re-pin RPC checks). Bounded by
+// sweepLocked, called on every mint/mintViewed: at most one live record per distinct
+// (owner, bundleID, fromVersionID, toVersionID) tuple within diffTokenTTL.
 type diffGate struct {
 	mu     sync.Mutex
 	tokens map[string]*diffTokenRecord
@@ -97,12 +102,34 @@ func newDiffGate() *diffGate {
 	return &diffGate{tokens: make(map[string]*diffTokenRecord)}
 }
 
+// sweepLocked deletes every token expired as of now. Callers must hold g.mu.
+func (g *diffGate) sweepLocked(now time.Time) {
+	for tok, rec := range g.tokens {
+		if now.After(rec.expiresAt) {
+			delete(g.tokens, tok)
+		}
+	}
+}
+
+// liveLocked returns the token/record for a live (unexpired) record matching the given tuple, if
+// any. Callers must hold g.mu.
+func (g *diffGate) liveLocked(owner, bundleID, fromVersionID, toVersionID string, now time.Time) (string, *diffTokenRecord) {
+	for tok, rec := range g.tokens {
+		if rec.owner == owner && rec.bundleID == bundleID && rec.fromVersionID == fromVersionID &&
+			rec.toVersionID == toVersionID && now.Before(rec.expiresAt) {
+			return tok, rec
+		}
+	}
+	return "", nil
+}
+
 // mint records a new UNVIEWED token for (owner, bundleID, fromVersionID, toVersionID) and returns
-// it.
+// it. Called by ReingestBundle on a real change.
 func (g *diffGate) mint(owner, bundleID, fromVersionID, toVersionID string, now time.Time) string {
-	tok := uuid.NewString()
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.sweepLocked(now)
+	tok := uuid.NewString()
 	g.tokens[tok] = &diffTokenRecord{
 		owner: owner, bundleID: bundleID, fromVersionID: fromVersionID, toVersionID: toVersionID,
 		expiresAt: now.Add(diffTokenTTL),
@@ -110,30 +137,39 @@ func (g *diffGate) mint(owner, bundleID, fromVersionID, toVersionID string, now 
 	return tok
 }
 
-// markViewed marks any LIVE (unexpired) token matching (owner, bundleID, fromVersionID,
-// toVersionID) as viewed and returns it. Returns "" when no live token matches — e.g.
-// GetBundleDiff called ad hoc without a prior ReingestBundle, which is a legitimate read-only use
-// (the diff can be inspected anytime); it just doesn't itself satisfy the re-pin gate.
-func (g *diffGate) markViewed(owner, bundleID, fromVersionID, toVersionID string, now time.Time) string {
+// mintViewed mints-and-marks-viewed a token for (owner, bundleID, fromVersionID, toVersionID) and
+// returns it — the view IS the gate (§4.9, sp-mwco.1.13): GetBundleDiff calls this for the exact
+// pair it just served, unconditionally, whether or not ReingestBundle minted an (unviewed) token
+// for it first. If a live record already exists for this tuple (typically ReingestBundle's
+// unviewed mint, or a repeat GetBundleDiff view), it is reused and marked viewed in place rather
+// than minting a duplicate — so GetBundleDiff always returns a token that satisfies
+// assertDiffViewed for this pair, and the map never grows past one live record per distinct tuple.
+func (g *diffGate) mintViewed(owner, bundleID, fromVersionID, toVersionID string, now time.Time) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for tok, rec := range g.tokens {
-		if rec.owner == owner && rec.bundleID == bundleID && rec.fromVersionID == fromVersionID &&
-			rec.toVersionID == toVersionID && now.Before(rec.expiresAt) {
-			rec.viewed = true
-			return tok
-		}
+	g.sweepLocked(now)
+	if tok, rec := g.liveLocked(owner, bundleID, fromVersionID, toVersionID, now); rec != nil {
+		rec.viewed = true
+		return tok
 	}
-	return ""
+	tok := uuid.NewString()
+	g.tokens[tok] = &diffTokenRecord{
+		owner: owner, bundleID: bundleID, fromVersionID: fromVersionID, toVersionID: toVersionID,
+		viewed: true, expiresAt: now.Add(diffTokenTTL),
+	}
+	return tok
 }
 
-// isViewed reports whether token is a live, viewed record matching (owner, bundleID) with
-// toVersionID == versionID.
-func (g *diffGate) isViewed(owner, bundleID, versionID, token string, now time.Time) bool {
+// isViewed reports whether token is a live, viewed record matching (owner, bundleID,
+// fromVersionID, toVersionID). Requiring fromVersionID (not just toVersionID) closes a loophole:
+// a token minted for a narrower pair (e.g. v2->v3) must not satisfy a re-pin from an
+// earlier-pinned version (v1) onto v3 — the caller must have seen the FULL pinned->target delta.
+func (g *diffGate) isViewed(owner, bundleID, fromVersionID, toVersionID, token string, now time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	rec, ok := g.tokens[token]
-	if !ok || rec.owner != owner || rec.bundleID != bundleID || rec.toVersionID != versionID {
+	if !ok || rec.owner != owner || rec.bundleID != bundleID ||
+		rec.fromVersionID != fromVersionID || rec.toVersionID != toVersionID {
 		return false
 	}
 	if now.After(rec.expiresAt) {
@@ -142,15 +178,16 @@ func (g *diffGate) isViewed(owner, bundleID, versionID, token string, now time.T
 	return rec.viewed
 }
 
-// assertDiffViewed reports FailedPrecondition unless token is a live diff-gate record minted by
-// ReingestBundle for (owner, bundleID) targeting versionID, AND it has been marked viewed by a
-// GetBundleDiff call. sp-mwco.1.8's re-pin RPC is this method's caller — the seam this task
-// provides but does not itself consume. Fails CLOSED: an unknown/unviewed/expired token is always
-// rejected, never treated as "no gate configured, allow it".
-func (s *Server) assertDiffViewed(owner, bundleID, versionID, token string) error {
-	if s.bundleDiffGate == nil || !s.bundleDiffGate.isViewed(owner, bundleID, versionID, token, time.Now()) {
+// assertDiffViewed reports FailedPrecondition unless token is a live diff-gate record for
+// (owner, bundleID) covering exactly fromVersionID->versionID, AND it has been marked viewed —
+// either by GetBundleDiff's mint-on-view (the ordinary path) or by a GetBundleDiff call following
+// an earlier ReingestBundle mint. sp-mwco.1.8's re-pin RPC is this method's caller, passing the
+// entry's CURRENTLY PINNED version as fromVersionID. Fails CLOSED: an unknown/unviewed/expired/
+// wrong-pair token is always rejected, never treated as "no gate configured, allow it".
+func (s *Server) assertDiffViewed(owner, bundleID, fromVersionID, versionID, token string) error {
+	if s.bundleDiffGate == nil || !s.bundleDiffGate.isViewed(owner, bundleID, fromVersionID, versionID, token, time.Now()) {
 		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf(
-			"re-pin requires viewing the diff first (call GetBundleDiff for this version, then retry)"))
+			"re-pin requires viewing the diff first (call GetBundleDiff for %s -> %s, then retry)", fromVersionID, versionID))
 	}
 	return nil
 }
@@ -404,7 +441,9 @@ func memberSha(entry store.CustomizationCatalogEntry) string {
 
 // GetBundleDiff computes a per-member diff between two versions of a bundle, including SKILL.md
 // body diffs for added/changed members (fetched ONLY for those — never for the unchanged
-// majority). Marks any matching ReingestBundle diff_token as viewed. Creator-only.
+// majority). Mints-and-marks-viewed a diff-gate token for the exact (fromVersion, toVersion) pair
+// served — the view IS the gate (§4.9, sp-mwco.1.13): no prior ReingestBundle in this CP process
+// is required. Creator-only.
 func (s *Server) GetBundleDiff(ctx context.Context, req *connect.Request[cpv1.GetBundleDiffRequest]) (*connect.Response[cpv1.GetBundleDiffResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
@@ -541,7 +580,7 @@ func (s *Server) GetBundleDiff(ctx context.Context, req *connect.Request[cpv1.Ge
 
 	diffToken := ""
 	if s.bundleDiffGate != nil {
-		diffToken = s.bundleDiffGate.markViewed(owner, b.BundleID, fromV.VersionID, toV.VersionID, time.Now())
+		diffToken = s.bundleDiffGate.mintViewed(owner, b.BundleID, fromV.VersionID, toV.VersionID, time.Now())
 	}
 
 	return connect.NewResponse(&cpv1.GetBundleDiffResponse{
